@@ -43,7 +43,7 @@
 - [x] Implement Dory commitment scheme
 
 ### Next Steps (TODO)
-- [ ] Implement MSM point addition and doubling (currently stubs)
+- [x] Implement MSM point addition and doubling
 - [ ] Port more RISC-V instructions (M extension, C extension)
 - [ ] Implement proper ELF parsing (currently stub)
 - [ ] Add pairing operations for HyperKZG verification
@@ -57,10 +57,10 @@
 
 ## Statistics
 - Rust files in jolt-core: 296
-- Zig files created: 23
+- Zig files created: 24
 - Build status: ✅ Passing
 - Test status: ✅ Passing
-- Lines of Zig code: ~5200
+- Lines of Zig code: ~5500
 
 ## Key Features Implemented
 1. **BN254 Scalar Field**: Full Montgomery form arithmetic with CIOS multiplication
@@ -73,12 +73,13 @@
 8. **Spartan**: Working prover/verifier with sumcheck integration
 9. **Sumcheck Protocol**: Full prover with round generation
 10. **Fiat-Shamir Transcripts**: Proper Keccak-f[1600] permutation
+11. **MSM**: Elliptic curve point addition/doubling with scalar multiplication
 
 ## Notes
 - Zig 0.15 uses new ArrayList/HashMap "Unmanaged" pattern
 - Using manual array management instead of ArrayList for Zig 0.15 compatibility
-- MSM operations are stubs (return identity) - need proper curve arithmetic
 - HyperKZG verification uses simplified check (no pairings yet)
+- Pippenger's algorithm not yet implemented (using naive MSM)
 - See PLAN.md for detailed porting strategy
 
 ## Architecture Comparison

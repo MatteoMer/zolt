@@ -61,8 +61,8 @@ The port from Rust to Zig is complete. All core components are implemented with 
 
 ## Statistics
 - **Build status**: ✅ Passing
-- **Test status**: ✅ Passing (97 unit + integration tests)
-- **Lines of Zig code**: 10,261
+- **Test status**: ✅ Passing (194 tests)
+- **Lines of Zig code**: 10,504
 - **Zig source files**: 27
 - **Rust files in jolt-core**: 296
 

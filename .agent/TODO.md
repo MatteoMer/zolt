@@ -60,13 +60,13 @@
 - [x] Add parallel processing for MSM (using std.Thread)
 - [ ] Implement full Miller loop for pairings
 - [ ] Add GPU acceleration hooks
-- [ ] Add comprehensive README.md
+- [x] Add comprehensive README.md
 
 ## Statistics
 - Rust files in jolt-core: 296
 - Build status: ✅ Passing
 - Test status: ✅ Passing
-- Lines of Zig code: ~8500
+- Lines of Zig code: ~9100
 - Zig files created: 27
 
 ## Key Features Implemented
@@ -91,6 +91,7 @@
 19. **Batch Operations**: Montgomery batch inverse, inner products, Horner eval
 20. **Proof Serialization**: Full proof serialization/deserialization with versioning
 21. **Witness Generation**: Trace to R1CS witness conversion with memory checking
+22. **Parallel MSM**: Multi-threaded MSM using std.Thread with automatic fallback
 
 ## Statistics Update
 - Total tests passing: **160+**

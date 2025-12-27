@@ -1,7 +1,8 @@
 # Zolt zkVM Implementation Plan
 
 ## Current Status (December 2024)
-Completed Phase 1 lookup table infrastructure. Starting Phase 2 instruction proving.
+Completed Phase 1 lookup table infrastructure and Phase 2.1 instruction flags.
+Phase 2.2 instruction lookup interfaces also complete.
 
 ## Phase 1: Lookup Arguments ✅ COMPLETED
 
@@ -31,14 +32,16 @@ All tables with materializeEntry() and evaluateMLE() implementations:
 - [x] InstructionFlags enum (7 flags for instruction metadata)
 - [x] CircuitFlagSet and InstructionFlagSet types
 
-### Step 2.2: Instruction Lookup Query (Next)
-- [ ] Define LookupQuery interface
-- [ ] Implement for each instruction type
-- [ ] Connect to lookup table evaluation
+### Step 2.2: Instruction Lookup Interfaces ✅
+- [x] LookupTables(XLEN) enum with materializeEntry()
+- [x] InstructionLookup(XLEN) interface
+- [x] Flags interface
+- [x] LookupQuery(XLEN) interface
 
-### Step 2.3: Constraint Generation
+### Step 2.3: Per-Instruction Implementation (Next)
+- [ ] Implement lookup queries for ADD, SUB, AND, etc.
+- [ ] Connect to lookup table evaluation
 - [ ] Generate R1CS constraints per instruction
-- [ ] Wire up with Spartan prover
 
 ## Phase 3: Memory Checking
 - [ ] RAF checking

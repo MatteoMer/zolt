@@ -5,6 +5,21 @@
 
 const std = @import("std");
 
+// Instruction lookup implementations
+pub const lookups = @import("lookups.zig");
+
+// Re-export lookup types for convenience
+pub const AddLookup = lookups.AddLookup;
+pub const SubLookup = lookups.SubLookup;
+pub const AndLookup = lookups.AndLookup;
+pub const OrLookup = lookups.OrLookup;
+pub const XorLookup = lookups.XorLookup;
+pub const SltLookup = lookups.SltLookup;
+pub const SltuLookup = lookups.SltuLookup;
+pub const BeqLookup = lookups.BeqLookup;
+pub const BneLookup = lookups.BneLookup;
+pub const LookupTraceEntry = lookups.LookupTraceEntry;
+
 // ============================================================================
 // Jolt Instruction Flags
 // ============================================================================

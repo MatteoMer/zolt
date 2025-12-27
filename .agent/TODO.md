@@ -1,6 +1,26 @@
 # Zolt zkVM Implementation TODO
 
-## Completed (This Session - Iteration 11)
+## Completed (This Session - Iteration 12)
+
+### Frobenius Coefficients Fix
+- [x] Added Fp6.frobenius() method with correct coefficients
+- [x] Added Fp12.frobenius() method with correct coefficients
+- [x] Updated frobeniusFp12() helper to use new implementation
+- [x] Computed correct byte arrays from arkworks decimal values:
+  - FROBENIUS_COEFF_FP6_C1[1] = gamma12() = ξ^{(p-1)/3}
+  - FROBENIUS_COEFF_FP6_C2[1] = ξ^{2(p-1)/3}
+  - FROBENIUS_COEFF_FP12_C1[1] = ξ^{(p-1)/6}
+- [x] Verified all 327+ tests still pass
+
+### Pairing Bilinearity (Still Failing)
+The pairing bilinearity test e([2]P, Q) = e(P, Q)^2 still fails.
+The Frobenius coefficients are now correct, but the issue is likely in:
+1. Miller loop line evaluation
+2. ATE_LOOP_COUNT or loop structure
+3. Final exponentiation hard part formula
+4. π(Q) and π²(Q) computation in Miller loop tail
+
+## Completed (Previous Sessions - Iteration 11)
 
 ### Test Interference Investigation
 - [x] Confirmed test interference issue with detailed investigation

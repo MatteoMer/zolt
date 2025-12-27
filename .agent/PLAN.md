@@ -171,7 +171,7 @@ All core phases have been completed. The port includes ~9100 lines of Zig code a
 
 ## Future Improvements (Nice to Have)
 
-- [ ] Full Miller loop for pairings
+- [x] Full Miller loop for pairings (implemented with NAF representation)
 - [x] Parallel MSM using std.Thread
 - [ ] GPU acceleration hooks
 - [ ] SIMD intrinsics for field arithmetic

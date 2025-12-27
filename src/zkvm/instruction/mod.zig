@@ -8,6 +8,11 @@ const std = @import("std");
 // Instruction lookup implementations
 pub const lookups = @import("lookups.zig");
 
+// Lookup trace collector
+pub const lookup_trace = @import("lookup_trace.zig");
+pub const LookupEntry = lookup_trace.LookupEntry;
+pub const LookupTraceCollector = lookup_trace.LookupTraceCollector;
+
 // Re-export lookup types for convenience
 pub const AddLookup = lookups.AddLookup;
 pub const SubLookup = lookups.SubLookup;

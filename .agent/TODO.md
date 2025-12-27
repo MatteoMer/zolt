@@ -10,44 +10,56 @@
 - [x] CircuitFlagSet and InstructionFlagSet types
 - [x] LookupTables(XLEN) enum with materializeEntry()
 - [x] InstructionLookup, Flags, LookupQuery interfaces
+- [x] ExpandingTable for EQ polynomial accumulation
+- [x] SplitEqPolynomial (Gruen's optimization)
+- [x] PrefixSuffixDecomposition infrastructure
+- [x] PrefixPolynomial, SuffixPolynomial, PrefixRegistry
+- [x] LassoProver with two-phase sumcheck
+- [x] LassoVerifier with round verification
 
 ## Next Up
-- [ ] Create Lasso prover infrastructure
-- [ ] Create Lasso verifier
-- [ ] Integrate with sumcheck protocol
+- [ ] Create SumcheckAdapter to integrate Lasso with existing sumcheck
+- [ ] Create an end-to-end test that runs prover + verifier together
+- [ ] Implement lookup queries for ADD, SUB, AND instructions
+- [ ] Connect instruction lookups to table evaluation
 - [ ] Generate R1CS constraints per instruction
 
-## Later
+## Later (Phase 3+)
 - [ ] Memory RAF checking
-- [ ] Multi-stage sumcheck orchestration
+- [ ] Multi-stage sumcheck orchestration (7 stages)
 - [ ] Fix HyperKZG verification
+- [ ] Add real BN254 curve constants
 - [ ] Implement execute(), prove(), verify()
 
-## Session Summary (Iteration 2)
-This iteration focused on implementing the core lookup table infrastructure:
+## Session Summary (Iteration 3)
+This iteration focused on implementing the core Lasso infrastructure:
 
-1. **Lookup Tables (14 total)**
-   - RangeCheck, And, Or, Xor, Equal, NotEqual
-   - UnsignedLessThan, SignedLessThan
-   - UnsignedGreaterThanEqual, UnsignedLessThanEqual
-   - SignedGreaterThanEqual, Movsign, Sub, Andn
+1. **ExpandingTable** (`lasso/expanding_table.zig`)
+   - Incrementally builds EQ polynomial evaluations
+   - Doubles in size each round (O(2^i) for round i)
+   - Used during address binding phase
 
-2. **Bit Interleaving (Jolt-compatible)**
-   - interleaveBits(x, y): y at even positions, x at odd
-   - uninterleaveBits(): Efficient bit extraction
-   - MSB-first ordering for MLE evaluation
+2. **SplitEqPolynomial** (`lasso/split_eq.zig`)
+   - Gruen's optimization for EQ evaluation
+   - Factors eq(w,x) into outer and inner components
+   - Caches prefix tables for efficient inner products
 
-3. **LookupBits Utility**
-   - Efficient u128 bit vector with length tracking
-   - split(), popMsb(), uninterleave() operations
+3. **PrefixSuffixDecomposition** (`lasso/prefix_suffix.zig`)
+   - SuffixType enum with field evaluations (And, Or, Xor, etc.)
+   - PrefixType enum (LowerWord, UpperWord, Eq, etc.)
+   - PrefixPolynomial with binding and caching
+   - PrefixRegistry for sharing prefixes
 
-4. **Instruction Flags**
-   - CircuitFlags: 13 flags for R1CS constraints
-   - InstructionFlags: 7 flags for instruction metadata
-   - Flag set types with set/get/clear operations
+4. **LassoProver** (`lasso/prover.zig`)
+   - LassoParams: gamma batching, log_T/log_K, reduction point
+   - Two-phase protocol:
+     - Address binding (LOG_K rounds)
+     - Cycle binding (log_T rounds)
+   - Computes round polynomials using EQ accumulation
 
-5. **Lookup Interfaces**
-   - LookupTables(XLEN) enum dispatches to tables
-   - InstructionLookup, Flags, LookupQuery interfaces
+5. **LassoVerifier** (`lasso/verifier.zig`)
+   - Verifies g(0) + g(1) = claim for each round
+   - Derives Fiat-Shamir challenges
+   - Checks final evaluation
 
 All 256 tests pass.

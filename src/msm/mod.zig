@@ -540,6 +540,189 @@ pub fn BatchMSM(comptime F: type, comptime G: type) type {
     };
 }
 
+/// Parallel MSM using multiple threads
+///
+/// For large MSMs, we can split the work across multiple threads.
+/// Each thread computes a partial MSM on a subset of the points,
+/// and the results are combined at the end.
+pub fn ParallelMSM(comptime F: type, comptime G: type) type {
+    return struct {
+        const Self = @This();
+        const Affine = AffinePoint(G);
+        const Projective = ProjectivePoint(G);
+        const SingleMSM = MSM(F, G);
+
+        /// Thread context for parallel MSM computation
+        const ThreadContext = struct {
+            bases: []const Affine,
+            scalars: []const F,
+            result: Projective,
+        };
+
+        /// Compute MSM using parallel threads
+        /// Falls back to single-threaded for small inputs
+        pub fn compute(
+            bases: []const Affine,
+            scalars: []const F,
+            num_threads: usize,
+            allocator: Allocator,
+        ) !Affine {
+            std.debug.assert(bases.len == scalars.len);
+
+            if (bases.len == 0) {
+                return Affine.identity();
+            }
+
+            // For small inputs, single-threaded is faster due to thread overhead
+            const min_points_per_thread: usize = 1024;
+            const actual_threads = @min(num_threads, @max(1, bases.len / min_points_per_thread));
+
+            if (actual_threads <= 1) {
+                return SingleMSM.compute(bases, scalars);
+            }
+
+            // Divide work among threads
+            const chunk_size = (bases.len + actual_threads - 1) / actual_threads;
+
+            // Allocate thread handles and contexts
+            const thread_handles = try allocator.alloc(std.Thread, actual_threads);
+            defer allocator.free(thread_handles);
+
+            const contexts = try allocator.alloc(ThreadContext, actual_threads);
+            defer allocator.free(contexts);
+
+            // Spawn threads
+            for (0..actual_threads) |i| {
+                const start = i * chunk_size;
+                const end = @min(start + chunk_size, bases.len);
+
+                if (start >= bases.len) {
+                    // No more work
+                    contexts[i] = .{
+                        .bases = &[_]Affine{},
+                        .scalars = &[_]F{},
+                        .result = Projective.identity(),
+                    };
+                    thread_handles[i] = try std.Thread.spawn(.{}, threadWorkerEmpty, .{&contexts[i]});
+                } else {
+                    contexts[i] = .{
+                        .bases = bases[start..end],
+                        .scalars = scalars[start..end],
+                        .result = Projective.identity(),
+                    };
+                    thread_handles[i] = try std.Thread.spawn(.{}, threadWorker, .{&contexts[i]});
+                }
+            }
+
+            // Wait for all threads to complete
+            for (thread_handles) |handle| {
+                handle.join();
+            }
+
+            // Combine results from all threads
+            var final_result = Projective.identity();
+            for (contexts) |ctx| {
+                final_result = final_result.add(ctx.result);
+            }
+
+            return final_result.toAffine();
+        }
+
+        /// Worker function for each thread
+        fn threadWorker(ctx: *ThreadContext) void {
+            if (ctx.bases.len == 0) {
+                ctx.result = Projective.identity();
+                return;
+            }
+
+            // Use Pippenger for the thread's chunk
+            const affine_result = SingleMSM.compute(ctx.bases, ctx.scalars);
+            ctx.result = Projective.fromAffine(affine_result);
+        }
+
+        /// Empty worker for threads with no work
+        fn threadWorkerEmpty(ctx: *ThreadContext) void {
+            ctx.result = Projective.identity();
+        }
+
+        /// Detect optimal number of threads
+        pub fn detectOptimalThreads() usize {
+            // Try to get CPU count, default to 4
+            const cpu_count = std.Thread.getCpuCount() catch return 4;
+            // Use at most 8 threads to avoid diminishing returns
+            return @min(cpu_count, 8);
+        }
+    };
+}
+
+/// Parallel batch MSM - multiple MSM operations computed in parallel
+pub fn ParallelBatchMSM(comptime F: type, comptime G: type) type {
+    return struct {
+        const Self = @This();
+        const Affine = AffinePoint(G);
+        const SingleMSM = MSM(F, G);
+
+        /// Thread context for batch computation
+        const BatchThreadContext = struct {
+            bases: []const Affine,
+            scalars: []const F,
+            result: Affine,
+        };
+
+        /// Compute multiple MSMs in parallel (one per thread)
+        pub fn compute(
+            bases: []const Affine,
+            scalar_batches: []const []const F,
+            allocator: Allocator,
+        ) ![]Affine {
+            if (scalar_batches.len == 0) {
+                return &[_]Affine{};
+            }
+
+            // Allocate results array
+            const results = try allocator.alloc(Affine, scalar_batches.len);
+            errdefer allocator.free(results);
+
+            // For small batch counts, run sequentially
+            if (scalar_batches.len <= 2) {
+                for (scalar_batches, 0..) |scalars, i| {
+                    results[i] = SingleMSM.compute(bases, scalars);
+                }
+                return results;
+            }
+
+            // Allocate thread infrastructure
+            const contexts = try allocator.alloc(BatchThreadContext, scalar_batches.len);
+            defer allocator.free(contexts);
+
+            const thread_handles = try allocator.alloc(std.Thread, scalar_batches.len);
+            defer allocator.free(thread_handles);
+
+            // Spawn a thread for each MSM
+            for (scalar_batches, 0..) |scalars, i| {
+                contexts[i] = .{
+                    .bases = bases,
+                    .scalars = scalars,
+                    .result = Affine.identity(),
+                };
+                thread_handles[i] = try std.Thread.spawn(.{}, batchThreadWorker, .{&contexts[i]});
+            }
+
+            // Wait for all threads and collect results
+            for (thread_handles, 0..) |handle, i| {
+                handle.join();
+                results[i] = contexts[i].result;
+            }
+
+            return results;
+        }
+
+        fn batchThreadWorker(ctx: *BatchThreadContext) void {
+            ctx.result = SingleMSM.compute(ctx.bases, ctx.scalars);
+        }
+    };
+}
+
 test "msm types compile" {
     const F = @import("../field/mod.zig").BN254Scalar;
 
@@ -680,5 +863,80 @@ test "pippenger handles zero scalars" {
     }
 
     const result = SingleMSM.pippengerMSM(&bases, &scalars);
+    try std.testing.expect(result.isIdentity());
+}
+
+test "parallel msm types compile" {
+    const F = @import("../field/mod.zig").BN254Scalar;
+
+    // Verify parallel MSM types compile
+    _ = ParallelMSM(F, F);
+    _ = ParallelBatchMSM(F, F);
+}
+
+test "parallel msm detect optimal threads" {
+    const F = @import("../field/mod.zig").BN254Scalar;
+    const PMSM = ParallelMSM(F, F);
+
+    // Should return at least 1 thread
+    const threads = PMSM.detectOptimalThreads();
+    try std.testing.expect(threads >= 1);
+    try std.testing.expect(threads <= 8);
+}
+
+test "parallel msm small input falls back to sequential" {
+    const F = @import("../field/mod.zig").BN254Scalar;
+    const Affine = AffinePoint(F);
+    const PMSM = ParallelMSM(F, F);
+    const SingleMSM = MSM(F, F);
+
+    const allocator = std.testing.allocator;
+
+    var bases: [16]Affine = undefined;
+    var scalars: [16]F = undefined;
+
+    for (0..16) |i| {
+        bases[i] = Affine.fromCoords(F.fromU64(i + 1), F.fromU64(i + 100));
+        scalars[i] = F.fromU64(i * 17 + 3);
+    }
+
+    // Sequential result
+    const seq_result = SingleMSM.compute(&bases, &scalars);
+
+    // Parallel result (should fall back to sequential for small input)
+    const par_result = try PMSM.compute(&bases, &scalars, 4, allocator);
+
+    // Results should match
+    try std.testing.expect(seq_result.x.eql(par_result.x));
+    try std.testing.expect(seq_result.y.eql(par_result.y));
+}
+
+test "parallel msm empty input" {
+    const F = @import("../field/mod.zig").BN254Scalar;
+    const Affine = AffinePoint(F);
+    const PMSM = ParallelMSM(F, F);
+
+    const allocator = std.testing.allocator;
+
+    const result = try PMSM.compute(&[_]Affine{}, &[_]F{}, 4, allocator);
+    try std.testing.expect(result.isIdentity());
+}
+
+test "parallel msm zero scalars" {
+    const F = @import("../field/mod.zig").BN254Scalar;
+    const Affine = AffinePoint(F);
+    const PMSM = ParallelMSM(F, F);
+
+    const allocator = std.testing.allocator;
+
+    var bases: [8]Affine = undefined;
+    var scalars: [8]F = undefined;
+
+    for (0..8) |i| {
+        bases[i] = Affine.fromCoords(F.fromU64(i + 1), F.fromU64(i + 2));
+        scalars[i] = F.zero();
+    }
+
+    const result = try PMSM.compute(&bases, &scalars, 4, allocator);
     try std.testing.expect(result.isIdentity());
 }

@@ -20,9 +20,16 @@
 const std = @import("std");
 
 pub const expanding_table = @import("expanding_table.zig");
+pub const prefix_suffix = @import("prefix_suffix.zig");
 pub const split_eq = @import("split_eq.zig");
 
 pub const ExpandingTable = expanding_table.ExpandingTable;
+pub const PrefixSuffixDecomposition = prefix_suffix.PrefixSuffixDecomposition;
+pub const PrefixPolynomial = prefix_suffix.PrefixPolynomial;
+pub const SuffixPolynomial = prefix_suffix.SuffixPolynomial;
+pub const PrefixRegistry = prefix_suffix.PrefixRegistry;
+pub const SuffixType = prefix_suffix.SuffixType;
+pub const PrefixType = prefix_suffix.PrefixType;
 pub const SplitEqPolynomial = split_eq.SplitEqPolynomial;
 
 test {

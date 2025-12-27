@@ -21,7 +21,9 @@ const std = @import("std");
 
 pub const expanding_table = @import("expanding_table.zig");
 pub const prefix_suffix = @import("prefix_suffix.zig");
+pub const prover = @import("prover.zig");
 pub const split_eq = @import("split_eq.zig");
+pub const verifier = @import("verifier.zig");
 
 pub const ExpandingTable = expanding_table.ExpandingTable;
 pub const PrefixSuffixDecomposition = prefix_suffix.PrefixSuffixDecomposition;
@@ -31,6 +33,13 @@ pub const PrefixRegistry = prefix_suffix.PrefixRegistry;
 pub const SuffixType = prefix_suffix.SuffixType;
 pub const PrefixType = prefix_suffix.PrefixType;
 pub const SplitEqPolynomial = split_eq.SplitEqPolynomial;
+pub const LassoProver = prover.LassoProver;
+pub const LassoParams = prover.LassoParams;
+pub const LassoProof = prover.LassoProof;
+pub const runLassoProver = prover.runLassoProver;
+pub const LassoVerifier = verifier.LassoVerifier;
+pub const verifyLassoProof = verifier.verifyLassoProof;
+pub const batchVerifyLassoProofs = verifier.batchVerifyLassoProofs;
 
 test {
     std.testing.refAllDecls(@This());

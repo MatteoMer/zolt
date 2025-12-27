@@ -57,9 +57,10 @@
 
 ### Remaining (Nice to Have)
 - [ ] Performance benchmarks comparison with Rust
-- [ ] Add parallel processing for MSM (using std.Thread)
+- [x] Add parallel processing for MSM (using std.Thread)
 - [ ] Implement full Miller loop for pairings
 - [ ] Add GPU acceleration hooks
+- [ ] Add comprehensive README.md
 
 ## Statistics
 - Rust files in jolt-core: 296

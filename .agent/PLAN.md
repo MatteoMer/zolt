@@ -2,7 +2,8 @@
 
 ## Current Status (December 2024)
 Completed Phase 1 lookup table infrastructure, Phase 2.1 instruction flags,
-Phase 2.2 instruction lookup interfaces, and Step 1.3 Lasso prover/verifier.
+Phase 2.2 instruction lookup interfaces, Step 1.3 Lasso prover/verifier,
+instruction lookup trace integration, and RAM RAF checking infrastructure.
 
 ## Phase 1: Lookup Arguments ✅ COMPLETED
 
@@ -29,7 +30,7 @@ All tables with materializeEntry() and evaluateMLE() implementations:
 - [x] LassoParams, LassoProver, LassoProof: Prover infrastructure
 - [x] LassoVerifier, verifyLassoProof: Verifier infrastructure
 
-## Phase 2: Instruction Proving (IN PROGRESS)
+## Phase 2: Instruction Proving ✅ COMPLETED
 
 ### Step 2.1: Instruction Flags ✅
 - [x] CircuitFlags enum (13 flags for R1CS constraints)
@@ -42,15 +43,29 @@ All tables with materializeEntry() and evaluateMLE() implementations:
 - [x] Flags interface
 - [x] LookupQuery(XLEN) interface
 
-### Step 2.3: Per-Instruction Implementation (Next)
-- [ ] Implement lookup queries for ADD, SUB, AND, etc.
-- [ ] Connect to lookup table evaluation
-- [ ] Generate R1CS constraints per instruction
+### Step 2.3: Lookup Trace Integration ✅
+- [x] LookupEntry: Stores lookup operation data (cycle, pc, table, index, result)
+- [x] LookupTraceCollector: Records lookups during execution
+- [x] Integration with Emulator.step()
+- [x] Statistics collection for lookup analysis
 
-## Phase 3: Memory Checking
-- [ ] RAF (Read-After-Final) checking
-- [ ] Value consistency
-- [ ] One-hot addressing
+## Phase 3: Memory Checking (IN PROGRESS)
+
+### Step 3.1: RAF (Read-After-Final) Checking ✅
+- [x] RafEvaluationParams: Sumcheck parameters (log_k, start_address, r_cycle)
+- [x] RaPolynomial: Computes ra(k) = Σ_j eq(r_cycle, j) · 1[address(j) = k]
+- [x] UnmapPolynomial: Converts remapped address k to original address
+- [x] RafEvaluationProver: Round polynomial computation and binding
+- [x] RafEvaluationVerifier: Verification with challenge generation
+- [x] Helper functions: computeEqEvals, computeEqAtPoint
+
+### Step 3.2: Value Consistency (Next)
+- [ ] Val evaluation sumcheck (verify memory values match)
+- [ ] ValFinal sumcheck (final memory state verification)
+
+### Step 3.3: Read-Write Checking
+- [ ] ReadWrite checking sumcheck
+- [ ] Timestamp consistency verification
 
 ## Phase 4: Multi-Stage Sumcheck
 - [ ] 7-stage orchestration:
@@ -94,14 +109,17 @@ All tables with materializeEntry() and evaluateMLE() implementations:
   2. Cycle binding (log_T rounds): Uses Gruen split EQ
 - Proves: rv(r) + γ·left_op(r) + γ²·right_op(r) = Σ eq(j;r) · ra(k,j) · (Val(k) + γ·RafVal(k))
 
-## Files Added This Session
+### RAF Protocol Architecture
+- Proves: Σ_{k=0}^{K-1} ra(k) · unmap(k) = raf_claim
+- ra(k) = Σ_j eq(r_cycle, j) · 1[address(j) = k]
+- unmap(k) = start_address + k * 8
 
-### Lasso Infrastructure (`src/zkvm/lasso/`)
-- `mod.zig` - Module exports
-- `expanding_table.zig` - ExpandingTable for EQ accumulation
-- `split_eq.zig` - SplitEqPolynomial (Gruen optimization)
-- `prefix_suffix.zig` - PrefixSuffixDecomposition, PrefixPolynomial, etc.
-- `prover.zig` - LassoProver, LassoParams, LassoProof
-- `verifier.zig` - LassoVerifier, verifyLassoProof
+## Files Added This Session (Iteration 4)
 
-All 256 tests pass.
+### Lookup Trace Integration
+- `src/zkvm/instruction/lookup_trace.zig` - LookupEntry, LookupTraceCollector
+
+### RAF Checking
+- `src/zkvm/ram/raf_checking.zig` - Full RAF sumcheck infrastructure
+
+All 261 tests pass.

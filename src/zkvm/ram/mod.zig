@@ -15,6 +15,15 @@ pub const UnmapPolynomial = raf_checking.UnmapPolynomial;
 pub const RafEvaluationProver = raf_checking.RafEvaluationProver;
 pub const RafEvaluationVerifier = raf_checking.RafEvaluationVerifier;
 
+// Value evaluation checking
+pub const val_evaluation = @import("val_evaluation.zig");
+pub const ValEvaluationParams = val_evaluation.ValEvaluationParams;
+pub const IncPolynomial = val_evaluation.IncPolynomial;
+pub const WaPolynomial = val_evaluation.WaPolynomial;
+pub const LtPolynomial = val_evaluation.LtPolynomial;
+pub const ValEvaluationProver = val_evaluation.ValEvaluationProver;
+pub const ValEvaluationVerifier = val_evaluation.ValEvaluationVerifier;
+
 /// Memory operation type
 pub const MemoryOp = enum {
     Read,

@@ -44,9 +44,9 @@
 - [x] Implement MSM point addition and doubling
 - [x] Port RISC-V M extension (multiply/divide)
 - [x] Port RISC-V C extension (compressed instructions)
+- [x] Implement proper ELF parsing
 
 ### Next Steps (TODO)
-- [ ] Implement proper ELF parsing (currently stub)
 - [ ] Add pairing operations for HyperKZG verification
 - [ ] Implement Pippenger's algorithm for MSM
 - [ ] Add more comprehensive integration tests
@@ -58,10 +58,10 @@
 
 ## Statistics
 - Rust files in jolt-core: 296
-- Zig files created: 24
 - Build status: ✅ Passing
 - Test status: ✅ Passing
-- Lines of Zig code: ~6200
+- Lines of Zig code: ~6800
+- Zig files created: 25
 
 ## Key Features Implemented
 1. **BN254 Scalar Field**: Full Montgomery form arithmetic with CIOS multiplication
@@ -77,6 +77,7 @@
 11. **MSM**: Elliptic curve point addition/doubling with scalar multiplication
 12. **M Extension**: Full multiply/divide operations with edge case handling
 13. **C Extension**: Full compressed instruction expansion (16-bit to 32-bit)
+14. **ELF Parser**: Complete ELF32/ELF64 parser with segment extraction
 
 ## Notes
 - Zig 0.15 uses new ArrayList/HashMap "Unmanaged" pattern

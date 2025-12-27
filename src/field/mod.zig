@@ -452,3 +452,15 @@ test "bn254 scalar power" {
     const pow1 = two.pow(1);
     try std.testing.expect(pow1.eql(two));
 }
+
+// Export pairing module
+pub const pairing = @import("pairing.zig");
+pub const Fp2 = pairing.Fp2;
+pub const Fp6 = pairing.Fp6;
+pub const Fp12 = pairing.Fp12;
+pub const G2Point = pairing.G2Point;
+
+test {
+    // Run pairing tests
+    _ = pairing;
+}

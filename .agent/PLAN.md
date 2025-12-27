@@ -1,9 +1,13 @@
 # Zolt zkVM Implementation Plan
 
 ## Current Status (December 2024 - Iteration 7)
-Multi-stage verifier is now COMPLETE. The verifier implements full sumcheck
-verification for all 6 stages with proper Lagrange interpolation for polynomial
-evaluation and opening claim accumulation.
+Major progress on verification infrastructure:
+1. Multi-stage verifier is COMPLETE with full sumcheck verification for all 6 stages
+2. R1CS constraint generation is COMPLETE with 19 uniform constraints
+3. Batch polynomial commitment verification is COMPLETE
+
+The verifier implements proper Lagrange interpolation for polynomial evaluation,
+opening claim accumulation, and batched pairing checks for commitment verification.
 
 ## Phase 1: Lookup Arguments COMPLETED
 
@@ -98,6 +102,12 @@ All tables with materializeEntry() and evaluateMLE() implementations:
 - [x] setupFromSRS() for importing trusted setup data
 - [x] Documentation of security implications
 
+### Step 5.3: Batch Verification (NEW - Iteration 7)
+- [x] BatchOpeningAccumulator for collecting claims
+- [x] OpeningClaim type for individual claims
+- [x] Batched pairing check verification
+- [x] OpeningClaimConverter for stage proof integration
+
 ## Phase 6: Integration COMPLETED
 
 ### Step 6.1: Implement execute()
@@ -153,6 +163,17 @@ All tables with materializeEntry() and evaluateMLE() implementations:
   - Stage-specific verification logic
   - Lagrange interpolation helpers
 
+- `src/zkvm/r1cs/constraints.zig` - R1CS constraint generation
+  - R1CSInputIndex (36 witness variables)
+  - UniformConstraint (19 constraints)
+  - R1CSCycleInputs (per-cycle witness)
+  - R1CSWitnessGenerator
+
+- `src/poly/commitment/batch.zig` - Batch verification
+  - BatchOpeningAccumulator
+  - OpeningClaim
+  - OpeningClaimConverter
+
 ### Updated Files
 - `src/zkvm/mod.zig`:
   - Added verifier module import
@@ -161,12 +182,16 @@ All tables with materializeEntry() and evaluateMLE() implementations:
   - Updated JoltVerifier to call MultiStageVerifier
 - `src/zkvm/prover.zig`:
   - Added proofs_transferred flag for ownership tracking
+- `src/zkvm/r1cs/mod.zig`:
+  - Exported constraint types
+- `src/poly/commitment/mod.zig`:
+  - Exported batch verification types
 
 ## Next Steps for Future Iterations
 
-1. **Complete R1CS Integration**: Generate constraints from execution trace
-2. **Polynomial Commitment Verification**: HyperKZG batch opening verification
-3. **G2 Scalar Multiplication**: For proper [τ]_2 computation
-4. **End-to-End Testing**: With actual RISC-V programs
+1. **Wire R1CS to Spartan**: Connect R1CS witness to Spartan prover in Stage 1
+2. **G2 Scalar Multiplication**: For proper [τ]_2 computation
+3. **End-to-End Testing**: With actual RISC-V programs
+4. **Production SRS**: Import from Ethereum ceremony
 
 All tests pass.

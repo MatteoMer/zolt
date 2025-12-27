@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.1.0] - 2024-12-27
+## [0.1.0] - 2025-12-27
 
 Initial port of Jolt zkVM from Rust to Zig.
 
@@ -15,6 +15,7 @@ Initial port of Jolt zkVM from Rust to Zig.
 - Batch operations: add, multiply, inverse (Montgomery's trick), inner product
 - Horner's method for polynomial evaluation
 - Extension fields: Fp2, Fp6, Fp12 tower for BN254 pairings
+- SIMD-optimized batch operations using Zig vectors (`@Vector`)
 
 #### Polynomial Infrastructure
 - Dense multilinear polynomials with boolean hypercube representation
@@ -89,13 +90,12 @@ Initial port of Jolt zkVM from Rust to Zig.
 
 - Requires Zig 0.15.0 or later
 - Uses `std.ArrayListUnmanaged` pattern for collections
-- All 180 tests passing
+- All 193 tests passing
 
 ### Not Yet Implemented
 
 - GPU acceleration hooks
-- Performance benchmarks vs Rust
-- SIMD intrinsics for field arithmetic (using scalar ops)
+- Performance benchmarks vs Rust (basic benchmarks exist in bench.zig)
 
 ## Comparison with Rust Jolt
 

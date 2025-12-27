@@ -13,10 +13,15 @@
 - [x] Updated HyperKZG SRS to compute proper [τ]_2 = τ * G2
 - [x] Added test for G2 scalar multiplication consistency
 
-### Pairing Issue Discovery
-- [x] Discovered pairing implementation doesn't satisfy bilinearity: e(2P, Q) != e(P, Q)^2
-- [x] This is a pre-existing issue in the pairing code (Miller loop or final exponentiation)
-- [x] Documented the issue with disabled tests showing expected behavior
+### G2 Frobenius Coefficients
+- [x] Added gamma12 = ξ^{(p-1)/3} for G2 x-coordinate
+- [x] Added gamma13 = ξ^{(p-1)/2} for G2 y-coordinate
+- [x] Updated frobeniusG2() to multiply by Frobenius coefficients
+
+### Pairing Issue Analysis
+- [x] Discovered pairing implementation uses placeholder/simplified code
+- [x] Identified root cause: missing Frobenius coefficients and incomplete final exponentiation
+- [x] Documented all issues in .agent/NOTES.md
 
 ## Completed (Previous Sessions - Iterations 1-10)
 
@@ -48,32 +53,33 @@
 ## Summary (Iteration 11)
 
 1. **Test Interference**: Confirmed the issue is a Zig compiler bug, not memory corruption.
-   Evidence: fails deterministically, single-threaded mode doesn't help, no global state.
 
-2. **G2 Scalar Multiplication**: Implemented for proper [τ]_2 computation in HyperKZG SRS.
-   The implementation is correct (verified via add/double consistency tests).
+2. **G2 Scalar Multiplication**: Implemented correctly. Verified via add/double consistency tests.
 
-3. **Pairing Bug Discovery**: Found that the pairing implementation doesn't satisfy
-   bilinearity. This is a fundamental issue that affects:
-   - HyperKZG verification
-   - Any pairing-based proof verification
+3. **HyperKZG SRS**: Now computes proper [τ]_2 = τ * G2.
 
-   The G2 scalar multiplication and SRS generation are correct; only the pairing
-   itself needs to be fixed.
+4. **Frobenius Coefficients**: Added gamma12 and gamma13 for G2 Frobenius endomorphism.
+
+5. **Pairing Analysis**: The pairing still doesn't satisfy bilinearity because:
+   - Fp12 Frobenius is missing coefficients
+   - Hard part of final exponentiation uses simplified formula
+   - Possibly issues in line evaluation
 
 All 327 tests pass.
 
 ## Next Steps (Future Iterations)
 
-### High Priority
-- [ ] Fix pairing bilinearity (Miller loop / final exponentiation bug)
-- [ ] Once pairing is fixed, enable pairing verification tests
-- [ ] Import production SRS from Ethereum ceremony
+### High Priority (Pairing Fix)
+- [ ] Add Fp12 Frobenius coefficients (γ_{1,1} through γ_{1,5})
+- [ ] Implement proper frobeniusFp12() with coefficient multiplication
+- [ ] Fix hard part of final exponentiation
+- [ ] Verify Miller loop line evaluation is correct
+- [ ] Enable and pass pairing bilinearity test
 
 ### Medium Priority
+- [ ] Import production SRS from Ethereum ceremony
 - [ ] Performance optimization with SIMD
 - [ ] Parallel sumcheck round computation
-- [ ] Streaming memory operations for large programs
 
 ### Low Priority
 - [ ] Dory commitment scheme completion

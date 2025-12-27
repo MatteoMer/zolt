@@ -2,6 +2,13 @@
 
 ## Completed (This Session - Iteration 7)
 
+### Batch Polynomial Commitment Verification
+- [x] Created `src/poly/commitment/batch.zig` with batch verification
+- [x] Implemented `BatchOpeningAccumulator` for collecting opening claims
+- [x] Added `OpeningClaim` type for individual claims
+- [x] Implemented batched pairing check verification
+- [x] Added `OpeningClaimConverter` for stage proof integration
+
 ### R1CS Constraint Generation
 - [x] Created `src/zkvm/r1cs/constraints.zig` with uniform constraints
 - [x] Defined 36 witness input variables per execution cycle
@@ -89,11 +96,6 @@ All tests pass.
 - [ ] Connect R1CS witness to Spartan prover in Stage 1
 - [ ] Compute Az, Bz, Cz witness polynomials
 - [ ] Integrate with multi-stage prover
-
-### Polynomial Commitment Verification
-- [ ] Implement HyperKZG batch opening verification
-- [ ] Add pairing checks for commitment verification
-- [ ] Verify polynomial openings at accumulated points
 
 ### Production Readiness
 - [ ] G2 scalar multiplication for proper [τ]_2

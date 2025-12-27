@@ -4,12 +4,19 @@
 //! - KZG (Kate-Zaverucha-Goldberg) commitments
 //! - HyperKZG for multilinear polynomials
 //! - Dory for transparent setup
+//! - Batch verification for multiple opening claims
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const msm = @import("../../msm/mod.zig");
 const field = @import("../../field/mod.zig");
 const pairing = field.pairing;
+
+// Export batch verification
+pub const batch = @import("batch.zig");
+pub const BatchOpeningAccumulator = batch.BatchOpeningAccumulator;
+pub const OpeningClaim = batch.OpeningClaim;
+pub const OpeningClaimConverter = batch.OpeningClaimConverter;
 
 /// Commitment scheme interface
 ///

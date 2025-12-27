@@ -41,10 +41,11 @@
 - [x] Implement Spartan prover/verifier
 - [x] Implement HyperKZG commitment scheme
 - [x] Implement Dory commitment scheme
+- [x] Implement MSM point addition and doubling
+- [x] Port RISC-V M extension (multiply/divide)
 
 ### Next Steps (TODO)
-- [x] Implement MSM point addition and doubling
-- [ ] Port more RISC-V instructions (M extension, C extension)
+- [ ] Port RISC-V C extension (compressed instructions)
 - [ ] Implement proper ELF parsing (currently stub)
 - [ ] Add pairing operations for HyperKZG verification
 - [ ] Implement Pippenger's algorithm for MSM
@@ -60,20 +61,21 @@
 - Zig files created: 24
 - Build status: ✅ Passing
 - Test status: ✅ Passing
-- Lines of Zig code: ~5500
+- Lines of Zig code: ~5700
 
 ## Key Features Implemented
 1. **BN254 Scalar Field**: Full Montgomery form arithmetic with CIOS multiplication
 2. **Polynomial Types**: Dense multilinear, equality, univariate polynomials
 3. **Commitment Schemes**: HyperKZG, Dory, and Mock schemes
-4. **RISC-V Decoder**: Full RV64I instruction decoding
-5. **RISC-V Emulator**: Basic instruction execution with tracing
+4. **RISC-V Decoder**: Full RV64I + M extension instruction decoding
+5. **RISC-V Emulator**: Complete RV64IM instruction execution with tracing
 6. **Memory/Register Checking**: Offline memory checking infrastructure
 7. **R1CS Constraints**: Full constraint system with sparse matrices
 8. **Spartan**: Working prover/verifier with sumcheck integration
 9. **Sumcheck Protocol**: Full prover with round generation
 10. **Fiat-Shamir Transcripts**: Proper Keccak-f[1600] permutation
 11. **MSM**: Elliptic curve point addition/doubling with scalar multiplication
+12. **M Extension**: Full multiply/divide operations with edge case handling
 
 ## Notes
 - Zig 0.15 uses new ArrayList/HashMap "Unmanaged" pattern
@@ -92,3 +94,4 @@
 | Spartan | `R1CSSatisfied` | `SpartanProver(F)` |
 | Sumcheck | `SumcheckProof` | `Sumcheck(F).Proof` |
 | Transcripts | `Keccak256Transcript` | `Transcript(F)` |
+| RISC-V | RV64IMC | RV64IM (C extension TODO) |

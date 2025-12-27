@@ -93,8 +93,9 @@ The port from Rust to Zig is complete. All core components are implemented with 
 24. **Final Exponentiation**: BN254 hard part using curve parameter x
 
 ## Statistics Update
-- Total tests passing: **193** (unit tests + integration tests)
+- Total tests passing: **194** (unit tests + integration tests)
 - Zig files created: **27** (including integration_tests.zig)
+- CLI commands: `help`, `version`, `run`, `decode`, `bench`
 
 ## Notes
 - Zig 0.15 uses new ArrayList/HashMap "Unmanaged" pattern

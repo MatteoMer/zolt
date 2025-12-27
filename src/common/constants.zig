@@ -39,6 +39,12 @@ pub const DEFAULT_STACK_SIZE: u64 = 4096;
 /// Stack canary size (64 bytes - 4 word protection for 32-bit, 2 word for 64-bit)
 pub const STACK_CANARY_SIZE: u64 = 128;
 
+/// Stack start address (end of RAM region, grows downward)
+pub const STACK_START_ADDRESS: u64 = RAM_START_ADDRESS + EMULATOR_MEMORY_CAPACITY - DEFAULT_STACK_SIZE;
+
+/// Stack end address (bottom of stack region)
+pub const STACK_END_ADDRESS: u64 = RAM_START_ADDRESS + EMULATOR_MEMORY_CAPACITY;
+
 /// Maximum size for trusted advice data
 pub const DEFAULT_MAX_TRUSTED_ADVICE_SIZE: u64 = 4096;
 

@@ -1,12 +1,17 @@
 # Zolt zkVM Implementation Plan
 
-## Current Status (December 2024 - Iteration 11)
+## Current Status (December 2024 - Iteration 12)
 
-Major progress on G2 scalar multiplication and pairing investigation:
-1. G2Point.scalarMul() is COMPLETE with double-and-add algorithm
-2. HyperKZG SRS now computes proper [τ]_2 = τ * G2
-3. Discovered pairing bilinearity bug: e(2P, Q) != e(P, Q)^2
-4. Test interference issue confirmed as Zig 0.15.2 compiler bug
+Progress on Frobenius coefficients for pairing:
+1. Added Fp6.frobenius() with correct coefficients
+2. Added Fp12.frobenius() with correct coefficients
+3. Computed byte arrays from arkworks decimal values
+4. Pairing bilinearity still fails - issue is deeper than Frobenius
+
+Previous work (Iteration 11):
+- G2Point.scalarMul() COMPLETE
+- HyperKZG SRS computes proper [τ]_2 = τ * G2
+- Test interference confirmed as Zig 0.15.2 compiler bug
 
 All 327 tests pass.
 

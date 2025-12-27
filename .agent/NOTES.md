@@ -73,44 +73,39 @@ The LassoProver was incorrectly recalculating `log_T` from `lookup_indices.len`
 using `log2_int` which requires power-of-2 inputs. Fixed to use `params.log_T`
 directly, which matches the length of `r_reduction`.
 
-## Pairing Bilinearity Bug Analysis (Iteration 11)
+## Pairing Bilinearity Bug Analysis (Iterations 11-12)
 
-### Root Cause
+### Progress (Iteration 12)
 
-The pairing implementation uses **placeholder/simplified code** that was never completed:
+Added proper Frobenius coefficients:
+1. **Fp6.frobenius()**: Now uses correct coefficients from arkworks
+   - FROBENIUS_COEFF_FP6_C1[1] = gamma12() = ξ^{(p-1)/3}
+   - FROBENIUS_COEFF_FP6_C2[1] = ξ^{2(p-1)/3}
 
-1. **frobeniusG2()** (line ~780): Uses just conjugation without Frobenius coefficients
-   - Comment: "Simplified: just apply conjugate (full version needs twist factors)"
-   - Should multiply by: γ_x = ξ^((p-1)/3) for x, γ_y = ξ^((p-1)/2) for y
+2. **Fp12.frobenius()**: Now uses correct coefficients
+   - FROBENIUS_COEFF_FP12_C1[1] = ξ^{(p-1)/6}
 
-2. **frobeniusFp12()** (line ~910): Same issue for Fp12 tower
-   - Comment: "Full implementation needs the actual Frobenius coefficients"
-   - Needs Frobenius coefficients for each power of v and w in the tower
+3. **frobeniusG2()**: Already had gamma12() and gamma13() for G2 twist
 
-3. **expByX()** (line ~880): Uses simplified formula
-   - Comment: "Simplified placeholder - full implementation requires precomputed constants"
+### Remaining Issues
 
-### Impact
+The pairing bilinearity test still fails. With Frobenius fixed, the issue is likely:
 
-The Miller loop adds π(Q) and π²(Q) at the end, but without correct Frobenius
-coefficients these points are wrong. This breaks the entire pairing computation.
+1. **Miller loop line evaluation**: The doubling and addition step line coefficients
+   may not be correctly computed for the BN254 twist.
 
-### Required Fixes
+2. **ATE_LOOP_COUNT**: The constant defining the optimal ate loop may be wrong or
+   the loop structure may be incorrect.
 
-1. Precompute Frobenius coefficients for BN254:
-   - FROBENIUS_COEFF_FP2_C1: ξ^((p-1)/3) for G2 x-coordinate
-   - FROBENIUS_COEFF_FP2_C2: ξ^((p-1)/2) for G2 y-coordinate
-   - FROBENIUS_COEFF_FP6: For Fp6 tower
-   - FROBENIUS_COEFF_FP12: For Fp12 tower
+3. **Final exponentiation hard part**: The formula for the hard part may have errors.
+   The standard formula involves many Frobenius operations and multiplications.
 
-2. Update frobeniusG2() to multiply by these coefficients after conjugation
-
-3. Update frobeniusFp12() similarly
-
-4. Implement proper final exponentiation using hard/easy parts
+4. **π(Q) and π²(Q) in Miller loop tail**: The additional lines added at the end
+   of the Miller loop may be using incorrect points.
 
 ### References
 
 - gnark-crypto: github.com/ConsenSys/gnark-crypto/blob/master/ecc/bn254/internal/fptower/frobenius.go
 - arkworks: github.com/arkworks-rs/curves/blob/master/bn254/src/curves/g2.rs
 - EIP-197 (Ethereum's BN254 precompile spec)
+- arkworks-rs/curves bn254: github.com/arkworks-rs/curves/tree/master/bn254

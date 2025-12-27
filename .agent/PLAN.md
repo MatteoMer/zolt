@@ -1,34 +1,33 @@
 # Zolt zkVM Implementation Plan
 
-## Current Status (December 2024 - Iteration 13)
+## Current Status (December 2024 - Iteration 14)
 
-Major pairing refactoring based on Zisk reference implementation:
+### Critical Fix: Base Field vs Scalar Field
 
-1. **Frobenius Coefficients** - COMPLETE
-   - Added GAMMA11 through GAMMA35 from Zisk constants.rs
-   - Frobenius^1 (gamma 1x) requires conjugation
-   - Frobenius^2 (gamma 2x) uses Fp scalars, no conjugation
-   - Frobenius^3 (gamma 3x) requires conjugation
+**DISCOVERED BUG**: The pairing implementation was using the WRONG field!
+- All Fp2, Fp6, Fp12 operations were using Fr (scalar field) instead of Fp (base field)
+- These are DIFFERENT primes with different moduli
+- Fr = 21888242871839275222246405745257275088548364400416034343698204186575808495617
+- Fp = 21888242871839275222246405745257275088696311157297823662689037894645226208583
 
-2. **Fp12 Frobenius Operations** - COMPLETE
-   - frobenius() - uses gamma 1x coefficients
-   - frobenius2() - uses gamma 2x coefficients (Fp scalars)
-   - frobenius3() - uses gamma 3x coefficients
+**SOLUTION IMPLEMENTED**:
+1. Added `BN254BaseField` type (`Fp`) with correct Fp modulus and Montgomery constants
+2. Created generic `MontgomeryField` function for parameterized field types
+3. Updated all extension field types (Fp2, Fp6, Fp12) to use Fp
+4. Added `G1PointFp` type for G1 points with Fp coordinates
+5. Added `g1ToFp` function for proper Montgomery form conversion
 
-3. **Final Exponentiation** - COMPLETE
-   - Easy part unchanged: f^(p^6-1)(p^2+1)
-   - Hard part: New formula from Zisk using y1-y7 terms
+### Line Evaluation Rewrite (gnark-crypto style)
 
-4. **Miller Loop** - COMPLETE
-   - ATE_LOOP_COUNT: Now matches Zisk exactly
-   - Iteration: From index 1 to 64 (skip index 0)
-   - Line coefficients: Changed to (λ, μ) format
+Rewrote line evaluation to match gnark-crypto's affine approach:
+- Line coefficients: R0 = λ, R1 = λ·x_Q - y_Q
+- Sparse element: (1, 0, 0, c3, c4, 0) in Fp12
+- evaluateLineSparse() computes c3 = R0 * xNegOverY, c4 = R1 * yInv
 
-5. **Pairing Bilinearity** - STILL FAILING
-   - Test e([2]P, Q) = e(P, Q)^2 fails
-   - Possible issue: Montgomery form of coefficients
+### Status
 
-All 327+ tests pass.
+- **All 328 tests pass**
+- Pairing bilinearity test still failing (disabled)
 
 ## Known Issues
 
@@ -36,54 +35,50 @@ All 327+ tests pass.
 The pairing still doesn't satisfy e(aP, Q) = e(P, Q)^a.
 This affects HyperKZG verification.
 
-Possible remaining issues:
-1. Zisk coefficients might already be in Montgomery form
-2. Sparse multiplication optimization differences
-3. Twist isomorphism handling in line evaluation
-4. Subtle differences in Fp2/Fp6/Fp12 tower construction
+Remaining possible issues:
+1. Final exponentiation hard part formula may need adjustment
+2. Frobenius endomorphism on G2 may have coefficient issues
+3. Twist isomorphism handling may need review
+4. Frobenius coefficients may not match gnark-crypto exactly
 
-### Test Interference (Zig Compiler Bug)
-Adding certain tests causes other tests to fail. E2E prover test disabled.
-
-## Phase 1-6: COMPLETED
-
-All phases from the original implementation guide are complete:
-- Phase 1: Lookup Arguments ✓
-- Phase 2: Instruction Proving ✓
-- Phase 3: Memory Checking ✓
-- Phase 4: Multi-Stage Sumcheck ✓
-- Phase 5: Commitment Schemes ✓
-- Phase 6: Integration ✓
-
-## Files Modified (Iteration 13)
+## Files Modified (Iteration 14)
 
 ### src/field/mod.zig
-- Added `toMontgomery()` method to BN254Scalar
+- Added BN254_FP_MODULUS, BN254_FP_R, BN254_FP_R2, BN254_FP_INV
+- Added `BN254BaseField` = `MontgomeryField(...)`
+- Added generic `MontgomeryField` function with all field operations
+- Added `double()` method to MontgomeryField
 
 ### src/field/pairing.zig
-- Added FROBENIUS_GAMMA11 through FROBENIUS_GAMMA35
-- Added fp2FromLimbs() with Montgomery conversion
-- Added fpFromLimbs() with Montgomery conversion
-- Updated Fp12.frobenius() with proper coefficients
-- Added Fp12.frobenius2() and Fp12.frobenius3()
-- Updated ATE_LOOP_COUNT to match Zisk
-- Changed LineCoeffs from (c0, c1, c2) to (lambda, mu)
-- Updated doublingStep and additionStep
-- Updated hardPartExponentiation with Zisk formula
-- Updated Miller loop iteration pattern
+- Import Fp = BN254BaseField (base field)
+- Updated Fp2 to use Fp instead of BN254Scalar
+- Updated fp2ScalarMul to use Fp
+- Updated fp2FromLimbs and fpFromLimbs to use Fp
+- Updated G2Point.generator() to use Fp for coordinates
+- Added G1PointFp struct for G1 points in base field
+- Added g1ToFp() for proper Fr→Fp conversion
+- Updated pairing() to convert G1 points before processing
+- Updated evaluateLine and evaluateLineSparse to use Fp
+- Changed LineCoeffs from (lambda, mu) to (r0, r1)
+- Updated doublingStep and additionStep for R0/R1 format
+
+### src/integration_tests.zig
+- Added Fp import for extension field tests
 
 ## Architecture Summary
 
-### Field Tower
-- Fp = BN254 scalar field (254 bits)
+### Field Tower (CORRECTED)
+- **Fp = BN254 base field** (254 bits) - for point coordinates and pairing
+- Fr = BN254 scalar field (254 bits) - for scalars in MSM
 - Fp2 = Fp[u]/(u² + 1)
 - Fp6 = Fp2[v]/(v³ - ξ) where ξ = 9 + u
 - Fp12 = Fp6[w]/(w² - v)
 
 ### Pairing Algorithm
-1. Miller loop over 6x+2 (x = 4965661367192848881)
-2. Two additional lines with Frobenius endomorphism
-3. Final exponentiation: easy part + hard part
+1. Convert G1 point from Fr to Fp Montgomery form
+2. Miller loop over 6x+2 (x = 4965661367192848881)
+3. Two additional lines with Frobenius endomorphism
+4. Final exponentiation: easy part + hard part
 
 ### Commitment Schemes
 - HyperKZG: Uses BN254 pairing (verify stub until pairing works)
@@ -92,9 +87,10 @@ All phases from the original implementation guide are complete:
 ## Next Steps for Future Iterations
 
 1. **Debug Pairing**:
-   - Check if Zisk coefficients are in Montgomery form
-   - Compare intermediate values with gnark-crypto
-   - Add debug output to trace differences
+   - Compare intermediate Miller loop values with gnark-crypto
+   - Verify Frobenius coefficients match exactly
+   - Check final exponentiation hard part formula
+   - Consider using arkworks test vectors
 
 2. **Performance Optimization**:
    - SIMD operations

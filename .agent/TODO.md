@@ -1,36 +1,34 @@
 # Zolt zkVM Implementation TODO
 
-## Completed (This Session - Iteration 13)
+## Completed (This Session - Iteration 14)
 
-### Pairing Implementation Improvements
-- [x] Added complete Frobenius coefficients from Zisk (GAMMA11-GAMMA35)
-- [x] Implemented Fp12.frobenius2() for p² power
-- [x] Implemented Fp12.frobenius3() for p³ power
-- [x] Updated final exponentiation hard part with Zisk formula
-- [x] Updated Miller loop to match Zisk iteration order
-- [x] Added BN254Scalar.toMontgomery() for coefficient conversion
-- [x] Updated line coefficients to (λ, μ) format
-- [x] Updated doublingStep and additionStep to return (λ, μ)
-- [x] Added sparse line evaluation structure
+### Critical Architecture Fix: Base Field vs Scalar Field
+- [x] Discovered pairing was using wrong field (Fr instead of Fp)
+- [x] Added `BN254BaseField` (Fp) type with correct modulus
+- [x] Created generic `MontgomeryField` function for parameterized fields
+- [x] Updated all Fp2, Fp6, Fp12 types to use base field Fp
+- [x] Added `G1PointFp` type for G1 points in base field
+- [x] Added `g1ToFp` function for proper Montgomery form conversion
+
+### Line Evaluation Rewrite (gnark-crypto style)
+- [x] Rewrote line coefficients to R0/R1 format
+- [x] R0 = λ (slope), R1 = λ·x_Q - y_Q
+- [x] Sparse element representation: (1, 0, 0, c3, c4, 0) in Fp12
+- [x] Updated doublingStep and additionStep to match gnark-crypto
 
 ### Tests
-- [x] All 327+ tests pass
+- [x] All 328 tests pass
 - [ ] Pairing bilinearity test still failing (disabled)
 
 ## Completed (Previous Sessions)
 
-### Iteration 12: Frobenius Coefficients
-- [x] Added Fp6.frobenius() method with correct coefficients
-- [x] Added Fp12.frobenius() method with correct coefficients
-- [x] Fixed ATE_LOOP_COUNT to correct 65-element signed binary expansion
-- [x] Fixed Miller loop to iterate from MSB to LSB
+### Iteration 13: Frobenius and Line Evaluation
+- [x] Added complete Frobenius coefficients from Zisk
+- [x] Implemented frobenius2() and frobenius3() for Fp12
+- [x] Updated final exponentiation hard part
+- [x] Updated Miller loop iteration order
 
-### Iteration 11: G2 Improvements
-- [x] Implemented G2Point.scalarMul() using double-and-add algorithm
-- [x] Updated HyperKZG SRS to compute proper [τ]_2 = τ * G2
-- [x] Added gamma12 and gamma13 for G2 Frobenius coefficients
-
-### Iterations 1-10: Core Infrastructure
+### Iterations 1-12: Core Infrastructure
 - [x] Lookup table infrastructure (14 tables)
 - [x] Lasso prover/verifier
 - [x] Instruction proving with flags
@@ -38,23 +36,31 @@
 - [x] Multi-stage prover (6 stages)
 - [x] BN254 G1/G2 generators
 - [x] HyperKZG SRS generation
-- [x] host.execute() and JoltProver.prove()
+- [x] G2Point.scalarMul() using double-and-add
+
+## Known Issues
+
+### Pairing Bilinearity Still Failing
+The test `e([2]P, Q) = e(P, Q)^2` fails. Possible causes:
+1. Final exponentiation formula may need adjustment
+2. Frobenius endomorphism on G2 may have coefficient issues
+3. Twist isomorphism handling may need review
+4. The Frobenius coefficients may not match gnark-crypto exactly
 
 ## Next Steps (Future Iterations)
 
 ### High Priority (Pairing Fix)
-- [ ] Investigate if Zisk coefficients are already in Montgomery form
-- [ ] Compare line evaluation with gnark-crypto implementation
-- [ ] Debug sparse Fp12 multiplication
-- [ ] Verify twist isomorphism handling
+- [ ] Compare intermediate Miller loop values against reference
+- [ ] Verify Frobenius coefficients match gnark-crypto exactly
+- [ ] Check final exponentiation hard part formula
 - [ ] Enable and pass pairing bilinearity test
 
-### Medium Priority
-- [ ] Import production SRS from Ethereum ceremony
-- [ ] Performance optimization with SIMD
-- [ ] Parallel sumcheck round computation
+### Medium Priority (Jolt Core)
+- [ ] Lookup Arguments / Lasso (THE core technique)
+- [ ] Instruction proving with R1CS constraints
+- [ ] Memory RAF checking
 
 ### Low Priority
-- [ ] Dory commitment scheme completion
-- [ ] Additional RISC-V instruction support
-- [ ] Benchmarking against Rust implementation
+- [ ] Performance optimization with SIMD
+- [ ] Parallel sumcheck round computation
+- [ ] Import production SRS from Ethereum ceremony

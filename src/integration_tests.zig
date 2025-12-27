@@ -16,6 +16,7 @@ const host = @import("host/mod.zig");
 const transcripts = @import("transcripts/mod.zig");
 
 const BN254Scalar = field.BN254Scalar;
+const Fp = field.BN254BaseField;
 
 // ============================================================================
 // Field Arithmetic Integration Tests
@@ -256,8 +257,9 @@ test "compressed instruction full pipeline" {
 test "fp2 arithmetic chain" {
     const Fp2 = field.pairing.Fp2;
 
-    const a = Fp2.init(BN254Scalar.fromU64(3), BN254Scalar.fromU64(4));
-    const b = Fp2.init(BN254Scalar.fromU64(1), BN254Scalar.fromU64(2));
+    // Use Fp (base field) for Fp2 elements
+    const a = Fp2.init(Fp.fromU64(3), Fp.fromU64(4));
+    const b = Fp2.init(Fp.fromU64(1), Fp.fromU64(2));
 
     // (a * b) * b^(-1) = a
     const product = a.mul(b);

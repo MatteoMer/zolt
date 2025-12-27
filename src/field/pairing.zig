@@ -30,7 +30,9 @@
 //! - ziskos BN254 implementation
 
 const std = @import("std");
-const BN254Scalar = @import("mod.zig").BN254Scalar;
+const field_mod = @import("mod.zig");
+const BN254Scalar = field_mod.BN254Scalar; // Scalar field Fr (for MSM scalars)
+const Fp = field_mod.BN254BaseField; // Base field Fp (for pairing operations)
 const msm = @import("../msm/mod.zig");
 
 // ============================================================================
@@ -49,8 +51,8 @@ const msm = @import("../msm/mod.zig");
 fn fp2FromLimbs(limbs: [8]u64) Fp2 {
     // Each Fp element is 4 limbs, stored in little-endian order
     // These are raw values, need to convert to Montgomery form
-    const c0_raw = BN254Scalar{ .limbs = .{ limbs[0], limbs[1], limbs[2], limbs[3] } };
-    const c1_raw = BN254Scalar{ .limbs = .{ limbs[4], limbs[5], limbs[6], limbs[7] } };
+    const c0_raw = Fp{ .limbs = .{ limbs[0], limbs[1], limbs[2], limbs[3] } };
+    const c1_raw = Fp{ .limbs = .{ limbs[4], limbs[5], limbs[6], limbs[7] } };
     // Convert to Montgomery form by multiplying by R^2 mod p (which gives a*R mod p)
     const c0 = c0_raw.toMontgomery();
     const c1 = c1_raw.toMontgomery();
@@ -59,8 +61,8 @@ fn fp2FromLimbs(limbs: [8]u64) Fp2 {
 
 /// Helper to create Fp from [u64; 4] limbs (raw, non-Montgomery form)
 /// Converts to Montgomery form
-fn fpFromLimbs(limbs: [4]u64) BN254Scalar {
-    const raw = BN254Scalar{ .limbs = limbs };
+fn fpFromLimbs(limbs: [4]u64) Fp {
+    const raw = Fp{ .limbs = limbs };
     return raw.toMontgomery();
 }
 
@@ -168,7 +170,7 @@ fn gamma13() Fp2 {
 // ============================================================================
 
 /// Multiply Fp2 element by Fp scalar (embeds scalar as (s, 0))
-fn fp2ScalarMul(a: Fp2, s: BN254Scalar) Fp2 {
+fn fp2ScalarMul(a: Fp2, s: Fp) Fp2 {
     return Fp2.init(a.c0.mul(s), a.c1.mul(s));
 }
 
@@ -178,19 +180,19 @@ fn fp2ScalarMul(a: Fp2, s: BN254Scalar) Fp2 {
 
 /// Fp2 element: a + b*u where u² = -1
 pub const Fp2 = struct {
-    c0: BN254Scalar, // Real part
-    c1: BN254Scalar, // Imaginary part
+    c0: Fp, // Real part
+    c1: Fp, // Imaginary part
 
-    pub fn init(c0: BN254Scalar, c1: BN254Scalar) Fp2 {
+    pub fn init(c0: Fp, c1: Fp) Fp2 {
         return .{ .c0 = c0, .c1 = c1 };
     }
 
     pub fn zero() Fp2 {
-        return .{ .c0 = BN254Scalar.zero(), .c1 = BN254Scalar.zero() };
+        return .{ .c0 = Fp.zero(), .c1 = Fp.zero() };
     }
 
     pub fn one() Fp2 {
-        return .{ .c0 = BN254Scalar.one(), .c1 = BN254Scalar.zero() };
+        return .{ .c0 = Fp.one(), .c1 = Fp.zero() };
     }
 
     pub fn add(self: Fp2, other: Fp2) Fp2 {
@@ -684,10 +686,10 @@ pub const G2Point = struct {
             0x75, 0xf0, 0x5f, 0x58, 0xd0, 0x89, 0x06, 0x09,
         };
 
-        const x0 = BN254Scalar.fromBytes(&x0_bytes);
-        const x1 = BN254Scalar.fromBytes(&x1_bytes);
-        const y0 = BN254Scalar.fromBytes(&y0_bytes);
-        const y1 = BN254Scalar.fromBytes(&y1_bytes);
+        const x0 = Fp.fromBytes(&x0_bytes);
+        const x1 = Fp.fromBytes(&x1_bytes);
+        const y0 = Fp.fromBytes(&y0_bytes);
+        const y1 = Fp.fromBytes(&y1_bytes);
 
         return G2Point.fromCoords(
             Fp2.init(x0, x1),
@@ -809,8 +811,53 @@ pub const G2Point = struct {
 /// Result of a pairing computation (element of GT = Fp12)
 pub const PairingResult = Fp12;
 
-/// G1 Point alias for clarity
+/// G1 Point for pairing operations (coordinates in Fp, the base field)
+pub const G1PointFp = struct {
+    x: Fp,
+    y: Fp,
+    infinity: bool,
+
+    pub fn identity() G1PointFp {
+        return .{ .x = Fp.zero(), .y = Fp.one(), .infinity = true };
+    }
+
+    pub fn neg(self: G1PointFp) G1PointFp {
+        if (self.infinity) return self;
+        return .{ .x = self.x, .y = self.y.neg(), .infinity = false };
+    }
+};
+
+/// G1 Point from MSM (uses scalar field, for compatibility)
+/// Note: For pairing operations, convert to G1PointFp
 pub const G1Point = @import("../msm/mod.zig").AffinePoint(BN254Scalar);
+
+/// Convert G1Point (scalar field coords) to G1PointFp (base field coords)
+/// G1 point coordinates are conceptually raw integer values that should be
+/// in Montgomery form for either field. Since G1Point uses BN254Scalar (Fr),
+/// we need to:
+/// 1. Convert from Fr Montgomery form to raw value
+/// 2. Convert from raw value to Fp Montgomery form
+fn g1ToFp(p: G1Point) G1PointFp {
+    if (p.infinity) {
+        return G1PointFp.identity();
+    }
+
+    // Convert x from Fr Montgomery to raw, then to Fp Montgomery
+    const x_raw = p.x.fromMontgomery();
+    var x_fp_tmp = Fp{ .limbs = x_raw.limbs };
+    const x_fp = x_fp_tmp.toMontgomery();
+
+    // Convert y from Fr Montgomery to raw, then to Fp Montgomery
+    const y_raw = p.y.fromMontgomery();
+    var y_fp_tmp = Fp{ .limbs = y_raw.limbs };
+    const y_fp = y_fp_tmp.toMontgomery();
+
+    return .{
+        .x = x_fp,
+        .y = y_fp,
+        .infinity = false,
+    };
+}
 
 /// Compute the optimal ate pairing: e(P, Q) where P ∈ G1, Q ∈ G2
 ///
@@ -828,8 +875,11 @@ pub fn pairing(p: G1Point, q: G2Point) PairingResult {
         return Fp12.one();
     }
 
+    // Convert G1 point from Fr to Fp representation
+    const p_fp = g1ToFp(p);
+
     // Miller loop
-    const f = millerLoop(p, q);
+    const f = millerLoop(p_fp, q);
 
     // Final exponentiation
     return finalExponentiation(f);
@@ -847,10 +897,12 @@ const ATE_LOOP_COUNT: [65]i2 = .{
     0,
 };
 
-/// Line coefficients (λ, μ) where the line is y = λx + μ
+/// Line coefficients R0, R1 matching gnark-crypto's affine representation
+/// R0 = λ (the slope)
+/// R1 = λ·x_Q - y_Q (used for efficient evaluation)
 const LineCoeffs = struct {
-    lambda: Fp2, // Slope
-    mu: Fp2, // Intercept (y - λx)
+    r0: Fp2, // λ
+    r1: Fp2, // λ·x_Q - y_Q
 };
 
 /// Result of doubling/addition step: new point and line coefficients
@@ -859,75 +911,55 @@ const MillerStepResult = struct {
     coeffs: LineCoeffs,
 };
 
-/// Sparse line evaluation result: two Fp2 coefficients for sparse Fp12 multiplication
-/// Represents 1 + coeff1·v + coeff2·w in Fp12
+/// Sparse line evaluation result matching gnark-crypto's (1, 0, 0, c3, c4, 0) format
+/// where positions are: 0=1, 1=v, 2=v², 3=w, 4=vw, 5=v²w
+/// This represents 1 + c3·w + c4·vw in Fp12
 const SparseLineEval = struct {
-    coeff1: Fp2, // λ·x coefficient (multiplied by v)
-    coeff2: Fp2, // μ·(-y) coefficient (multiplied by w)
+    c3: Fp2, // Coefficient of w (C1.c0)
+    c4: Fp2, // Coefficient of vw (C1.c1)
 };
 
-/// Evaluate line function at preprocessed point (xp', yp')
-/// where xp' = -xp/yp and yp' = 1/yp
-///
-/// The line l(x,y) = y - λx - μ evaluated at P gives:
-/// l(P) = yp - λ·xp - μ = yp'⁻¹ - λ·(-xp'·yp'⁻¹) - μ
-///      = (1/yp')·(1 + λ·xp' - μ·yp')
-///
-/// Since we only care about ratios (final exponentiation kills the factor),
-/// we use: 1 + (λ·xp')·v + (μ·(-yp'))·w = 1 + coeff1·v + coeff2·w
-fn evaluateLineSparse(coeffs: LineCoeffs, xp_prime: BN254Scalar, yp_prime: BN254Scalar) SparseLineEval {
-    // coeff1 = λ·xp' (Fp2 * Fp -> Fp2)
-    const coeff1 = fp2ScalarMul(coeffs.lambda, xp_prime);
+/// Evaluate line function at point P = (x_P, y_P)
+/// Following gnark-crypto's affine approach:
+/// - Precompute xNegOverY = -x_P/y_P and yInv = 1/y_P
+/// - c3 = R0 * xNegOverY = λ * (-x_P/y_P)
+/// - c4 = R1 * yInv = (λ*x_Q - y_Q) * (1/y_P)
+fn evaluateLineSparse(coeffs: LineCoeffs, x_neg_over_y: Fp, y_inv: Fp) SparseLineEval {
+    // c3 = R0 * xNegOverY (Fp2 * Fp -> Fp2)
+    const c3 = fp2ScalarMul(coeffs.r0, x_neg_over_y);
 
-    // coeff2 = μ·(-yp') (Fp2 * Fp -> Fp2)
-    const neg_yp = yp_prime.neg();
-    const coeff2 = fp2ScalarMul(coeffs.mu, neg_yp);
+    // c4 = R1 * yInv (Fp2 * Fp -> Fp2)
+    const c4 = fp2ScalarMul(coeffs.r1, y_inv);
 
     return SparseLineEval{
-        .coeff1 = coeff1,
-        .coeff2 = coeff2,
+        .c3 = c3,
+        .c4 = c4,
     };
 }
 
-/// Sparse multiplication of Fp12 by a sparse element (1 + b21·v + b22·w)
-/// where b21, b22 are Fp2 elements.
+/// Sparse multiplication of Fp12 by sparse element (1, 0, 0, c3, c4, 0)
+/// This is gnark-crypto's MulBy34 pattern: multiply by 1 + c3·w + c4·vw
 ///
-/// For a = (a1 + a2·w) where a1, a2 ∈ Fp6 and b = 1 + (b21 + b22·v)·w in canonical form:
-/// Note: Our sparse form is 1 + b21·v + b22·w, but in Fp12 tower w² = v,
-/// so we need to convert: 1 + b21·v + b22·w means b1 = 1 and b2 = b22 + 0·v + 0·v²
-/// with the b21·v term being in the c0.c1 slot.
+/// In the Fp12 tower (Fp6[w]/(w² - v)):
+/// The sparse element is:
+/// - c0 = 1 ∈ Fp6 (just the constant 1)
+/// - c1 = c3 + c4·v ∈ Fp6
 ///
-/// From ziskos:
-/// c1 = a1 + a2·(b21·v + b22·v²)  [using w² = v, the b22 from w becomes v² coefficient after squaring]
-/// c2 = a2 + a1·(b21 + b22·v)
-///
-/// Wait, our sparse form is different. Let me reconsider:
-/// Our line gives 1 + coeff1·v + coeff2·w
-/// In Fp12 = Fp6[w]/(w² - v), this is:
-/// c0 = (1 + coeff1·v + 0·v²) ∈ Fp6
-/// c1 = (coeff2 + 0·v + 0·v²) ∈ Fp6
-///
-/// Actually, let's use the standard sparse multiplication formula.
+/// For z = a·b where a ∈ Fp12, b = 1 + c3·w + c4·vw:
+/// Let a = a0 + a1·w, then:
+/// z = a0 + a1·w + (a0 + a1·w)(c3·w + c4·vw)
+///   = a0 + a0·c3·w + a0·c4·vw + a1·w + a1·c3·w² + a1·c4·vw²
+///   = a0 + a0·c3·w + a0·c4·vw + a1·w + a1·c3·v + a1·c4·v²  (using w² = v)
+///   = (a0 + a1·c3·v + a1·c4·v²) + (a1 + a0·c3 + a0·c4·v)·w
 fn sparseMulFp12(a: Fp12, sparse: SparseLineEval) Fp12 {
-    // The sparse element is: b = (1 + coeff1·v) + coeff2·w
-    // where (1 + coeff1·v) is in c0 and coeff2 is in c1.c0
-    //
-    // Sparse b representation:
-    // b.c0 = (1, coeff1, 0) ∈ Fp6
-    // b.c1 = (coeff2, 0, 0) ∈ Fp6
-    //
-    // For efficiency, construct the sparse element and use full multiplication.
-    // Future optimization: implement specialized sparse multiplication.
-
+    // Construct the sparse element in Fp12 form
+    // b.c0 = 1 ∈ Fp6
+    // b.c1 = c3 + c4·v ∈ Fp6
     const b = Fp12{
-        .c0 = Fp6{
-            .c0 = Fp2.one(),
-            .c1 = sparse.coeff1,
-            .c2 = Fp2.zero(),
-        },
+        .c0 = Fp6.one(),
         .c1 = Fp6{
-            .c0 = sparse.coeff2,
-            .c1 = Fp2.zero(),
+            .c0 = sparse.c3,
+            .c1 = sparse.c4,
             .c2 = Fp2.zero(),
         },
     };
@@ -935,40 +967,42 @@ fn sparseMulFp12(a: Fp12, sparse: SparseLineEval) Fp12 {
     return a.mul(b);
 }
 
-/// Legacy evaluate line function (for compatibility during transition)
-fn evaluateLine(coeffs: LineCoeffs, p_x: BN254Scalar, p_y: BN254Scalar) Fp12 {
-    // Precompute xp' = -xp/yp and yp' = 1/yp
-    const yp_inv = p_y.inverse() orelse return Fp12.one();
-    const xp_prime = p_x.neg().mul(yp_inv);
-    const yp_prime = yp_inv;
+/// Evaluate line function at point P = (p_x, p_y)
+/// Returns the Fp12 element representing the line evaluation
+fn evaluateLine(coeffs: LineCoeffs, p_x: Fp, p_y: Fp) Fp12 {
+    // Precompute values following gnark-crypto:
+    // xNegOverY = -x_P / y_P
+    // yInv = 1 / y_P
+    const y_inv = p_y.inverse() orelse return Fp12.one();
+    const x_neg_over_y = p_x.neg().mul(y_inv);
 
-    const sparse = evaluateLineSparse(coeffs, xp_prime, yp_prime);
+    const sparse = evaluateLineSparse(coeffs, x_neg_over_y, y_inv);
 
-    // Convert sparse to full Fp12
+    // Convert sparse (1, 0, 0, c3, c4, 0) to full Fp12
+    // c0 = 1 ∈ Fp6
+    // c1 = c3 + c4·v ∈ Fp6
     return Fp12{
-        .c0 = Fp6{
-            .c0 = Fp2.one(),
-            .c1 = sparse.coeff1,
-            .c2 = Fp2.zero(),
-        },
+        .c0 = Fp6.one(),
         .c1 = Fp6{
-            .c0 = sparse.coeff2,
-            .c1 = Fp2.zero(),
+            .c0 = sparse.c3,
+            .c1 = sparse.c4,
             .c2 = Fp2.zero(),
         },
     };
 }
 
-/// Doubling step in Miller loop
-/// Returns the new point T = 2*T and line coefficients (λ, μ)
-/// where the tangent line is y = λx + μ
+/// Doubling step in Miller loop (affine coordinates)
+/// Returns the new point T = 2*T and line coefficients R0, R1
+/// Matching gnark-crypto's affine doubleStep:
+///   R0 = λ
+///   R1 = λ·x - y
 fn doublingStep(t: G2Point) MillerStepResult {
     if (t.infinity or t.y.isZero()) {
         return .{
             .point = G2Point.identity(),
             .coeffs = .{
-                .lambda = Fp2.zero(),
-                .mu = Fp2.one(),
+                .r0 = Fp2.zero(),
+                .r1 = Fp2.zero(),
             },
         };
     }
@@ -979,37 +1013,41 @@ fn doublingStep(t: G2Point) MillerStepResult {
     const two_y = t.y.add(t.y);
     const lambda = three_x_sq.mul(two_y.inverse() orelse return .{
         .point = G2Point.identity(),
-        .coeffs = .{ .lambda = Fp2.zero(), .mu = Fp2.one() },
+        .coeffs = .{ .r0 = Fp2.zero(), .r1 = Fp2.zero() },
     });
 
-    // New point coordinates: x3 = λ² - 2x, y3 = λ(x - x3) - y
-    const x3 = lambda.square().sub(t.x).sub(t.x);
-    const y3 = lambda.mul(t.x.sub(x3)).sub(t.y);
+    // New point coordinates: x_r = λ² - 2x, y_r = λ(x - x_r) - y
+    const x_r = lambda.square().sub(t.x).sub(t.x);
+    const y_r = lambda.mul(t.x.sub(x_r)).sub(t.y);
 
-    // Line equation: y = λx + μ, where μ = y - λx
-    // For the tangent at T: μ = t.y - λ·t.x
-    const mu = t.y.sub(lambda.mul(t.x));
+    // Line coefficients following gnark-crypto:
+    // R0 = λ
+    // R1 = λ·x - y
+    const r0 = lambda;
+    const r1 = lambda.mul(t.x).sub(t.y);
 
     return .{
-        .point = G2Point{ .x = x3, .y = y3, .infinity = false },
-        .coeffs = .{ .lambda = lambda, .mu = mu },
+        .point = G2Point{ .x = x_r, .y = y_r, .infinity = false },
+        .coeffs = .{ .r0 = r0, .r1 = r1 },
     };
 }
 
-/// Addition step in Miller loop
-/// Returns the new point T = T + Q and line coefficients (λ, μ)
-/// where the secant line is y = λx + μ
+/// Addition step in Miller loop (affine coordinates)
+/// Returns the new point T = T + Q and line coefficients R0, R1
+/// Matching gnark-crypto's affine addStep:
+///   R0 = λ
+///   R1 = λ·x_T - y_T
 fn additionStep(t: G2Point, q: G2Point) MillerStepResult {
     if (t.infinity) {
         return .{
             .point = q,
-            .coeffs = .{ .lambda = Fp2.zero(), .mu = Fp2.one() },
+            .coeffs = .{ .r0 = Fp2.zero(), .r1 = Fp2.zero() },
         };
     }
     if (q.infinity) {
         return .{
             .point = t,
-            .coeffs = .{ .lambda = Fp2.zero(), .mu = Fp2.one() },
+            .coeffs = .{ .r0 = Fp2.zero(), .r1 = Fp2.zero() },
         };
     }
 
@@ -1021,7 +1059,7 @@ fn additionStep(t: G2Point, q: G2Point) MillerStepResult {
         // t + (-t) = O
         return .{
             .point = G2Point.identity(),
-            .coeffs = .{ .lambda = Fp2.zero(), .mu = Fp2.one() },
+            .coeffs = .{ .r0 = Fp2.zero(), .r1 = Fp2.zero() },
         };
     }
 
@@ -1030,26 +1068,28 @@ fn additionStep(t: G2Point, q: G2Point) MillerStepResult {
     const dx = q.x.sub(t.x);
     const lambda = dy.mul(dx.inverse() orelse return .{
         .point = G2Point.identity(),
-        .coeffs = .{ .lambda = Fp2.zero(), .mu = Fp2.one() },
+        .coeffs = .{ .r0 = Fp2.zero(), .r1 = Fp2.zero() },
     });
 
-    // New point coordinates: x3 = λ² - x1 - x2, y3 = λ(x1 - x3) - y1
-    const x3 = lambda.square().sub(t.x).sub(q.x);
-    const y3 = lambda.mul(t.x.sub(x3)).sub(t.y);
+    // New point coordinates: x_r = λ² - x1 - x2, y_r = λ(x1 - x_r) - y1
+    const x_r = lambda.square().sub(t.x).sub(q.x);
+    const y_r = lambda.mul(t.x.sub(x_r)).sub(t.y);
 
-    // Line equation: y = λx + μ, where μ = y - λx
-    // Using point T: μ = t.y - λ·t.x
-    const mu = t.y.sub(lambda.mul(t.x));
+    // Line coefficients following gnark-crypto:
+    // R0 = λ
+    // R1 = λ·x_T - y_T
+    const r0 = lambda;
+    const r1 = lambda.mul(t.x).sub(t.y);
 
     return .{
-        .point = G2Point{ .x = x3, .y = y3, .infinity = false },
-        .coeffs = .{ .lambda = lambda, .mu = mu },
+        .point = G2Point{ .x = x_r, .y = y_r, .infinity = false },
+        .coeffs = .{ .r0 = r0, .r1 = r1 },
     };
 }
 
 /// Miller loop for optimal ate pairing on BN254
 /// Computes f_{6x+2,Q}(P) where x is the BN254 curve parameter
-fn millerLoop(p: G1Point, q: G2Point) Fp12 {
+fn millerLoop(p: G1PointFp, q: G2Point) Fp12 {
     if (p.infinity or q.infinity) {
         return Fp12.one();
     }
@@ -1292,9 +1332,15 @@ pub fn multiPairing(pairs: []const PairingInput) PairingResult {
 /// Useful for verifying KZG proofs
 pub fn pairingCheck(p1: G1Point, q1: G2Point, p2: G1Point, q2: G2Point) bool {
     // Instead of checking e(P1,Q1) == e(P2,Q2), we check e(P1,Q1) * e(-P2,Q2) == 1
+    // Create negated p2
+    const p2_neg = G1Point{
+        .x = p2.x,
+        .y = p2.y.neg(),
+        .infinity = p2.infinity,
+    };
     const pairs = [_]PairingInput{
         .{ .p = p1, .q = q1 },
-        .{ .p = p2.neg(), .q = q2 },
+        .{ .p = p2_neg, .q = q2 },
     };
     const result = multiPairing(&pairs);
     return result.isOne();
@@ -1305,28 +1351,28 @@ pub fn pairingCheck(p1: G1Point, q1: G2Point, p2: G1Point, q2: G2Point) bool {
 // ============================================================================
 
 test "Fp2 arithmetic" {
-    const a = Fp2.init(BN254Scalar.fromU64(3), BN254Scalar.fromU64(4));
-    const b = Fp2.init(BN254Scalar.fromU64(1), BN254Scalar.fromU64(2));
+    const a = Fp2.init(Fp.fromU64(3), Fp.fromU64(4));
+    const b = Fp2.init(Fp.fromU64(1), Fp.fromU64(2));
 
     // Test addition
     const sum = a.add(b);
-    try std.testing.expect(sum.c0.eql(BN254Scalar.fromU64(4)));
-    try std.testing.expect(sum.c1.eql(BN254Scalar.fromU64(6)));
+    try std.testing.expect(sum.c0.eql(Fp.fromU64(4)));
+    try std.testing.expect(sum.c1.eql(Fp.fromU64(6)));
 
     // Test multiplication
     const prod = a.mul(b);
     // (3 + 4i)(1 + 2i) = 3 + 6i + 4i + 8i² = 3 + 10i - 8 = -5 + 10i
-    try std.testing.expect(prod.c0.eql(BN254Scalar.fromU64(3).sub(BN254Scalar.fromU64(8))));
-    try std.testing.expect(prod.c1.eql(BN254Scalar.fromU64(10)));
+    try std.testing.expect(prod.c0.eql(Fp.fromU64(3).sub(Fp.fromU64(8))));
+    try std.testing.expect(prod.c1.eql(Fp.fromU64(10)));
 }
 
 test "Fp2 inverse" {
-    const a = Fp2.init(BN254Scalar.fromU64(3), BN254Scalar.fromU64(4));
+    const a = Fp2.init(Fp.fromU64(3), Fp.fromU64(4));
     const a_inv = a.inverse().?;
     const should_be_one = a.mul(a_inv);
 
-    try std.testing.expect(should_be_one.c0.eql(BN254Scalar.one()));
-    try std.testing.expect(should_be_one.c1.eql(BN254Scalar.zero()));
+    try std.testing.expect(should_be_one.c0.eql(Fp.one()));
+    try std.testing.expect(should_be_one.c1.eql(Fp.zero()));
 }
 
 test "Fp12 basic operations" {
@@ -1389,8 +1435,8 @@ test "Miller loop doubling step" {
     const result = doublingStep(q);
 
     // The resulting point should not be identity (unless generator is special)
-    // Line coefficients (λ, μ) should have at least one non-zero component
-    try std.testing.expect(!result.coeffs.lambda.isZero() or !result.coeffs.mu.isZero());
+    // Line coefficients (R0, R1) should have at least one non-zero component
+    try std.testing.expect(!result.coeffs.r0.isZero() or !result.coeffs.r1.isZero());
 }
 
 test "Miller loop addition step" {
@@ -1402,7 +1448,7 @@ test "Miller loop addition step" {
 
     // Should produce a valid point
     if (!result.point.isIdentity()) {
-        try std.testing.expect(!result.coeffs.lambda.isZero() or !result.coeffs.mu.isZero());
+        try std.testing.expect(!result.coeffs.r0.isZero() or !result.coeffs.r1.isZero());
     }
 }
 
@@ -1410,14 +1456,14 @@ test "Frobenius on Fp12" {
     // Test that Frobenius is well-defined
     const a = Fp12{
         .c0 = Fp6{
-            .c0 = Fp2.init(BN254Scalar.fromU64(1), BN254Scalar.fromU64(2)),
-            .c1 = Fp2.init(BN254Scalar.fromU64(3), BN254Scalar.fromU64(4)),
-            .c2 = Fp2.init(BN254Scalar.fromU64(5), BN254Scalar.fromU64(6)),
+            .c0 = Fp2.init(Fp.fromU64(1), Fp.fromU64(2)),
+            .c1 = Fp2.init(Fp.fromU64(3), Fp.fromU64(4)),
+            .c2 = Fp2.init(Fp.fromU64(5), Fp.fromU64(6)),
         },
         .c1 = Fp6{
-            .c0 = Fp2.init(BN254Scalar.fromU64(7), BN254Scalar.fromU64(8)),
-            .c1 = Fp2.init(BN254Scalar.fromU64(9), BN254Scalar.fromU64(10)),
-            .c2 = Fp2.init(BN254Scalar.fromU64(11), BN254Scalar.fromU64(12)),
+            .c0 = Fp2.init(Fp.fromU64(7), Fp.fromU64(8)),
+            .c1 = Fp2.init(Fp.fromU64(9), Fp.fromU64(10)),
+            .c2 = Fp2.init(Fp.fromU64(11), Fp.fromU64(12)),
         },
     };
 
@@ -1440,6 +1486,8 @@ test "expByX exponentiation" {
 
 test "pairing with identity" {
     // e(O, Q) = 1 and e(P, O) = 1
+    // Note: G1Point uses BN254Scalar (Fr) for MSM compatibility
+    // The pairing function converts to Fp internally
     const g1 = G1Point{ .x = BN254Scalar.one(), .y = BN254Scalar.fromU64(2), .infinity = false };
     const g2 = G2Point.generator();
     const g1_identity = G1Point{ .x = BN254Scalar.zero(), .y = BN254Scalar.one(), .infinity = true };
@@ -1481,34 +1529,35 @@ test "G2 scalar mul internal consistency" {
 }
 
 // Pairing bilinearity test: verifies e([2]P, Q) = e(P, Q)^2
-// TODO: This test is still failing - needs more investigation
-// Progress made in iteration 13:
-// - Added complete Frobenius coefficients from Zisk
-// - Implemented frobenius, frobenius2, frobenius3 for Fp12
-// - Added toMontgomery() for proper coefficient conversion
-// - Updated Miller loop to match Zisk iteration order
-// - Updated hard part of final exponentiation with Zisk formula
-// - Updated line evaluation with (λ, μ) coefficient format
-// Possible remaining issues:
-// - Zisk coefficients may already be in Montgomery form (double conversion?)
-// - Sparse multiplication optimization differences
-// - Twist isomorphism handling in line evaluation
+// Updated iteration 14:
+// - Rewrote line evaluation to match gnark-crypto's affine approach
+// - Use R0/R1 coefficients and (1, 0, 0, c3, c4, 0) sparse representation
+// - Fixed to use Fp (base field) instead of Fr (scalar field)
+// - Added proper Montgomery form conversion for G1 points
+//
+// TODO: This test still fails. Possible remaining issues:
+// - Final exponentiation formula may need adjustment
+// - Frobenius endomorphism on G2 may have coefficient issues
+// - Twist isomorphism handling may need review
 // test "pairing bilinearity in G1" {
+//     // G1 point (1, 2) - valid point on BN254 curve: y^2 = x^3 + 3
 //     const g1 = G1Point{ .x = BN254Scalar.one(), .y = BN254Scalar.fromU64(2), .infinity = false };
 //     const g2 = G2Point.generator();
 //     const e_g1_g2 = pairing(g1, g2);
 //     const e_g1_g2_squared = e_g1_g2.mul(e_g1_g2);
+//     // Use BN254Scalar (Fr) for scalar multiplication
 //     const g1_doubled_proj = msm.MSM(BN254Scalar, BN254Scalar).scalarMul(g1, BN254Scalar.fromU64(2));
 //     const g1_doubled = g1_doubled_proj.toAffine();
 //     const e_2g1_g2 = pairing(g1_doubled, g2);
+//
 //     try std.testing.expect(e_2g1_g2.eql(e_g1_g2_squared));
 // }
 
 test "Fp6 inverse" {
     const a = Fp6{
-        .c0 = Fp2.init(BN254Scalar.fromU64(1), BN254Scalar.fromU64(2)),
-        .c1 = Fp2.init(BN254Scalar.fromU64(3), BN254Scalar.fromU64(4)),
-        .c2 = Fp2.init(BN254Scalar.fromU64(5), BN254Scalar.fromU64(6)),
+        .c0 = Fp2.init(Fp.fromU64(1), Fp.fromU64(2)),
+        .c1 = Fp2.init(Fp.fromU64(3), Fp.fromU64(4)),
+        .c2 = Fp2.init(Fp.fromU64(5), Fp.fromU64(6)),
     };
 
     if (a.inverse()) |a_inv| {

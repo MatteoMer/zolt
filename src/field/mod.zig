@@ -40,6 +40,310 @@ pub const BN254_R2: [4]u64 = .{
 /// Used in Montgomery reduction
 pub const BN254_INV: u64 = 0xc2e1f593efffffff;
 
+// ============================================================================
+// BN254 Base Field (Fp) - for pairing operations
+// ============================================================================
+// The base field Fp is different from the scalar field Fr!
+// Fp is used for G1/G2 point coordinates and the pairing target group GT
+
+/// BN254 base field modulus
+/// q = 21888242871839275222246405745257275088696311157297823662689037894645226208583
+pub const BN254_FP_MODULUS: [4]u64 = .{
+    0x3c208c16d87cfd47,
+    0x97816a916871ca8d,
+    0xb85045b68181585d,
+    0x30644e72e131a029,
+};
+
+/// Montgomery R for Fp (R = 2^256 mod q)
+pub const BN254_FP_R: [4]u64 = .{
+    0xd35d438dc58f0d9d,
+    0x0a78eb28f5c70b3d,
+    0x666ea36f7879462c,
+    0x0e0a77c19a07df2f,
+};
+
+/// Montgomery R^2 for Fp (R^2 = 2^512 mod q)
+pub const BN254_FP_R2: [4]u64 = .{
+    0xf32cfc5b538afa89,
+    0xb5e71911d44501fb,
+    0x47ab1eff0a417ff6,
+    0x06d89f71cab8351f,
+};
+
+/// Montgomery constant: -q^{-1} mod 2^64
+pub const BN254_FP_INV: u64 = 0x87d20782e4866389;
+
+/// BN254 base field element for pairing operations
+/// This is a wrapper around BN254Scalar that uses the base field modulus
+/// Used for Fp, Fp2, Fp6, Fp12 tower and G1/G2 coordinates
+pub const BN254BaseField = MontgomeryField(
+    BN254_FP_MODULUS,
+    BN254_FP_R,
+    BN254_FP_R2,
+    BN254_FP_INV,
+);
+
+/// Generic Montgomery field parameterized by constants
+pub fn MontgomeryField(
+    comptime modulus: [4]u64,
+    comptime montgomery_r: [4]u64,
+    comptime montgomery_r2: [4]u64,
+    comptime montgomery_inv: u64,
+) type {
+    return struct {
+        limbs: [4]u64,
+
+        const Self = @This();
+
+        /// Zero element
+        pub fn zero() Self {
+            return .{ .limbs = .{ 0, 0, 0, 0 } };
+        }
+
+        /// One element (in Montgomery form = R mod p)
+        pub fn one() Self {
+            return .{ .limbs = montgomery_r };
+        }
+
+        /// Check if zero
+        pub fn isZero(self: Self) bool {
+            return self.limbs[0] == 0 and self.limbs[1] == 0 and
+                self.limbs[2] == 0 and self.limbs[3] == 0;
+        }
+
+        /// Check if one (in Montgomery form)
+        pub fn isOne(self: Self) bool {
+            return self.limbs[0] == montgomery_r[0] and self.limbs[1] == montgomery_r[1] and
+                self.limbs[2] == montgomery_r[2] and self.limbs[3] == montgomery_r[3];
+        }
+
+        /// Equality check
+        pub fn eql(self: Self, other: Self) bool {
+            return self.limbs[0] == other.limbs[0] and self.limbs[1] == other.limbs[1] and
+                self.limbs[2] == other.limbs[2] and self.limbs[3] == other.limbs[3];
+        }
+
+        /// Create from u64 (converts to Montgomery form)
+        pub fn fromU64(n: u64) Self {
+            var result = Self{ .limbs = .{ n, 0, 0, 0 } };
+            result = result.montgomeryMul(.{ .limbs = montgomery_r2 });
+            return result;
+        }
+
+        /// Create from bytes (little-endian, converts to Montgomery form)
+        pub fn fromBytes(bytes: []const u8) Self {
+            var limbs: [4]u64 = .{ 0, 0, 0, 0 };
+            const len = @min(bytes.len, 32);
+            var buf: [32]u8 = .{0} ** 32;
+            @memcpy(buf[0..len], bytes[0..len]);
+
+            for (0..4) |i| {
+                limbs[i] = std.mem.readInt(u64, buf[i * 8 ..][0..8], .little);
+            }
+
+            var result = Self{ .limbs = limbs };
+            result = result.montgomeryMul(.{ .limbs = montgomery_r2 });
+            return result;
+        }
+
+        /// Convert from Montgomery form back to standard representation
+        pub fn fromMontgomery(self: Self) Self {
+            return self.montgomeryMul(.{ .limbs = .{ 1, 0, 0, 0 } });
+        }
+
+        /// Convert to Montgomery form from standard representation
+        pub fn toMontgomery(self: Self) Self {
+            return self.montgomeryMul(.{ .limbs = montgomery_r2 });
+        }
+
+        /// 128-bit multiplication helper
+        inline fn mulWide(a: u64, b: u64) u128 {
+            return @as(u128, a) * @as(u128, b);
+        }
+
+        /// Add with carry
+        inline fn addCarry(a: u64, b: u64, carry_in: u64) struct { result: u64, carry: u64 } {
+            const sum = @as(u128, a) + @as(u128, b) + @as(u128, carry_in);
+            return .{
+                .result = @truncate(sum),
+                .carry = @truncate(sum >> 64),
+            };
+        }
+
+        /// Subtract with borrow
+        inline fn subBorrow(a: u64, b: u64, borrow_in: u64) struct { result: u64, borrow: u64 } {
+            const diff = @as(i128, a) - @as(i128, b) - @as(i128, borrow_in);
+            if (diff < 0) {
+                return .{
+                    .result = @truncate(@as(u128, @bitCast(diff + (@as(i128, 1) << 64)))),
+                    .borrow = 1,
+                };
+            }
+            return .{
+                .result = @truncate(@as(u128, @bitCast(diff))),
+                .borrow = 0,
+            };
+        }
+
+        /// Montgomery multiplication: computes a*b*R^{-1} mod p
+        pub fn montgomeryMul(self: Self, other: Self) Self {
+            var t: [5]u64 = .{ 0, 0, 0, 0, 0 };
+
+            inline for (0..4) |i| {
+                var carry: u64 = 0;
+                inline for (0..4) |j| {
+                    const prod = mulWide(self.limbs[i], other.limbs[j]);
+                    const sum = @as(u128, t[j]) + prod + @as(u128, carry);
+                    t[j] = @truncate(sum);
+                    carry = @truncate(sum >> 64);
+                }
+                const sum_t4 = @as(u128, t[4]) + @as(u128, carry);
+                t[4] = @truncate(sum_t4);
+
+                const m = t[0] *% montgomery_inv;
+
+                carry = 0;
+                const prod0 = mulWide(m, modulus[0]);
+                const sum0 = @as(u128, t[0]) + prod0;
+                carry = @truncate(sum0 >> 64);
+
+                inline for (1..4) |j| {
+                    const prod = mulWide(m, modulus[j]);
+                    const sum = @as(u128, t[j]) + prod + @as(u128, carry);
+                    t[j - 1] = @truncate(sum);
+                    carry = @truncate(sum >> 64);
+                }
+                const final_sum = @as(u128, t[4]) + @as(u128, carry);
+                t[3] = @truncate(final_sum);
+                t[4] = @truncate(final_sum >> 64);
+            }
+
+            var result = Self{ .limbs = .{ t[0], t[1], t[2], t[3] } };
+
+            if (t[4] != 0 or !result.lessThanModulus()) {
+                result = result.subtractModulus();
+            }
+
+            return result;
+        }
+
+        /// Field addition
+        pub fn add(self: Self, other: Self) Self {
+            var result: [4]u64 = undefined;
+            var carry: u64 = 0;
+
+            inline for (0..4) |i| {
+                const ac = addCarry(self.limbs[i], other.limbs[i], carry);
+                result[i] = ac.result;
+                carry = ac.carry;
+            }
+
+            var res = Self{ .limbs = result };
+            if (carry != 0 or !res.lessThanModulus()) {
+                res = res.subtractModulus();
+            }
+            return res;
+        }
+
+        /// Field subtraction
+        pub fn sub(self: Self, other: Self) Self {
+            var result: [4]u64 = undefined;
+            var borrow: u64 = 0;
+
+            inline for (0..4) |i| {
+                const sb = subBorrow(self.limbs[i], other.limbs[i], borrow);
+                result[i] = sb.result;
+                borrow = sb.borrow;
+            }
+
+            var res = Self{ .limbs = result };
+            if (borrow != 0) {
+                res = res.addModulus();
+            }
+            return res;
+        }
+
+        /// Field multiplication
+        pub fn mul(self: Self, other: Self) Self {
+            return self.montgomeryMul(other);
+        }
+
+        /// Field squaring
+        pub fn square(self: Self) Self {
+            return self.montgomeryMul(self);
+        }
+
+        /// Doubling (2*self)
+        pub fn double(self: Self) Self {
+            return self.add(self);
+        }
+
+        /// Negation
+        pub fn neg(self: Self) Self {
+            if (self.isZero()) return self;
+            return (Self{ .limbs = modulus }).sub(self);
+        }
+
+        /// Field inverse using Fermat's little theorem: a^{-1} = a^{p-2}
+        pub fn inverse(self: Self) ?Self {
+            if (self.isZero()) return null;
+
+            var result = Self.one();
+            var base = self;
+            var exp: [4]u64 = modulus;
+            exp[0] -= 2;
+
+            for (0..256) |i| {
+                const word_idx = i / 64;
+                const bit_idx: u6 = @truncate(i % 64);
+                if ((exp[word_idx] >> bit_idx) & 1 == 1) {
+                    result = result.mul(base);
+                }
+                base = base.square();
+            }
+
+            return result;
+        }
+
+        fn lessThanModulus(self: Self) bool {
+            var i: usize = 3;
+            while (true) : (i -= 1) {
+                if (self.limbs[i] < modulus[i]) return true;
+                if (self.limbs[i] > modulus[i]) return false;
+                if (i == 0) break;
+            }
+            return false;
+        }
+
+        fn subtractModulus(self: Self) Self {
+            var result: [4]u64 = undefined;
+            var borrow: u64 = 0;
+
+            inline for (0..4) |i| {
+                const sb = subBorrow(self.limbs[i], modulus[i], borrow);
+                result[i] = sb.result;
+                borrow = sb.borrow;
+            }
+
+            return Self{ .limbs = result };
+        }
+
+        fn addModulus(self: Self) Self {
+            var result: [4]u64 = undefined;
+            var carry: u64 = 0;
+
+            inline for (0..4) |i| {
+                const ac = addCarry(self.limbs[i], modulus[i], carry);
+                result[i] = ac.result;
+                carry = ac.carry;
+            }
+
+            return Self{ .limbs = result };
+        }
+    };
+}
+
 /// JoltField interface - the core trait for field elements
 ///
 /// In Zig, we implement this as a comptime interface check pattern.

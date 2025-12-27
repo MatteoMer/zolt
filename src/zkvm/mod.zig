@@ -23,6 +23,7 @@ pub const r1cs = @import("r1cs/mod.zig");
 pub const ram = @import("ram/mod.zig");
 pub const registers = @import("registers/mod.zig");
 pub const spartan = @import("spartan/mod.zig");
+pub const verifier = @import("verifier.zig");
 
 // Re-export multi-stage prover types
 pub const MultiStageProver = prover.MultiStageProver;
@@ -31,6 +32,11 @@ pub const StageProof = prover.StageProof;
 pub const JoltStageProofs = prover.JoltStageProofs;
 pub const OpeningAccumulator = prover.OpeningAccumulator;
 pub const SumcheckInstance = prover.SumcheckInstance;
+
+// Re-export multi-stage verifier types
+pub const MultiStageVerifier = verifier.MultiStageVerifier;
+pub const StageVerificationResult = verifier.StageVerificationResult;
+pub const OpeningClaimAccumulator = verifier.OpeningClaimAccumulator;
 
 /// RISC-V register indices
 pub const Register = enum(u8) {
@@ -129,12 +135,19 @@ pub fn JoltProof(comptime F: type) type {
         register_proof: registers.RegisterProof(F),
         /// R1CS/Spartan proof
         r1cs_proof: spartan.R1CSProof(F),
+        /// Multi-stage sumcheck proofs
+        stage_proofs: ?JoltStageProofs(F),
+        /// Allocator used to create this proof
+        allocator: Allocator,
 
-        pub fn deinit(self: *Self, allocator: Allocator) void {
-            self.bytecode_proof.deinit(allocator);
-            self.memory_proof.deinit(allocator);
-            self.register_proof.deinit(allocator);
+        pub fn deinit(self: *Self) void {
+            self.bytecode_proof.deinit(self.allocator);
+            self.memory_proof.deinit(self.allocator);
+            self.register_proof.deinit(self.allocator);
             self.r1cs_proof.deinit();
+            if (self.stage_proofs) |*sp| {
+                sp.deinit();
+            }
         }
     };
 }
@@ -210,12 +223,9 @@ pub fn JoltProver(comptime F: type) type {
             defer transcript.deinit();
 
             // Run multi-stage proving
-            // Note: This currently only runs the skeleton of each stage
-            // Full implementation would generate real proofs
-            _ = try multi_stage.prove(&transcript);
+            const stage_proofs = try multi_stage.prove(&transcript);
 
-            // For now, return placeholder proof components
-            // A full implementation would generate real commitments and proofs
+            // Return the complete proof with stage proofs
             return JoltProof(F){
                 .bytecode_proof = bytecode.BytecodeProof(F){
                     .commitment = F.zero(),
@@ -233,6 +243,8 @@ pub fn JoltProver(comptime F: type) type {
                     .write_ts_commitment = F.zero(),
                 },
                 .r1cs_proof = try spartan.R1CSProof(F).placeholder(self.allocator),
+                .stage_proofs = stage_proofs,
+                .allocator = self.allocator,
             };
         }
 
@@ -303,8 +315,27 @@ pub fn JoltVerifier(comptime F: type) type {
                 return false;
             }
 
+            // Verify multi-stage sumcheck proofs if present
+            if (proof.stage_proofs) |*stage_proofs| {
+                if (!try self.verifyStageProofs(stage_proofs, &transcript)) {
+                    return false;
+                }
+            }
+
             // All checks passed
             return true;
+        }
+
+        /// Verify multi-stage sumcheck proofs
+        fn verifyStageProofs(
+            self: *Self,
+            stage_proofs: *const JoltStageProofs(F),
+            transcript: *transcripts.Transcript,
+        ) !bool {
+            var multi_verifier = verifier.MultiStageVerifier(F).init(self.allocator);
+            defer multi_verifier.deinit();
+
+            return multi_verifier.verify(stage_proofs, transcript);
         }
 
         /// Verify bytecode proof

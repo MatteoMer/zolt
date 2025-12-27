@@ -208,6 +208,8 @@ pub fn MultiStageProver(comptime F: type) type {
         /// Memory layout
         start_address: u64,
         allocator: Allocator,
+        /// Track if proofs ownership was transferred
+        proofs_transferred: bool,
 
         pub fn init(
             allocator: Allocator,
@@ -231,15 +233,21 @@ pub fn MultiStageProver(comptime F: type) type {
                 .log_t = log_t,
                 .start_address = start_address,
                 .allocator = allocator,
+                .proofs_transferred = false,
             };
         }
 
         pub fn deinit(self: *Self) void {
             self.opening_accumulator.deinit();
-            self.proofs.deinit();
+            // Note: proofs ownership is transferred to caller via prove()
+            // Only deinit if prove() was never called
+            if (!self.proofs_transferred) {
+                self.proofs.deinit();
+            }
         }
 
         /// Prove all stages
+        /// Returns the stage proofs - caller takes ownership and is responsible for cleanup
         pub fn prove(self: *Self, transcript: anytype) !JoltStageProofs(F) {
             try self.proveStage1(transcript);
             try self.proveStage2(transcript);
@@ -248,6 +256,8 @@ pub fn MultiStageProver(comptime F: type) type {
             try self.proveStage5(transcript);
             try self.proveStage6(transcript);
 
+            // Transfer ownership to caller
+            self.proofs_transferred = true;
             return self.proofs;
         }
 

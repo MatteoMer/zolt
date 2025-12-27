@@ -116,8 +116,9 @@ pub fn LassoProver(comptime F: type) type {
             lookup_tables: []const usize,
             params: LassoParams(F),
         ) !Self {
-            const T = lookup_indices.len;
-            const log_T = std.math.log2_int(usize, T);
+            // Use log_T from params (which matches r_reduction.len) not from lookup count
+            // This ensures consistency with the reduction point provided
+            const log_T = params.log_T;
 
             // Initialize EQ polynomial for reduction point
             // Split into outer (first half) and inner (second half) variables

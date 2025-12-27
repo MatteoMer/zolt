@@ -202,12 +202,36 @@ All tables with materializeEntry() and evaluateMLE() implementations:
 - `src/zkvm/mod.zig`:
   - Added R1CS-Spartan integration test
 
+## Files Modified (Iteration 10)
+
+### Fixed Files
+- `src/zkvm/lasso/prover.zig`:
+  - Fixed LassoProver to use params.log_T instead of recalculating from lookup_indices.len
+  - This ensures consistency with r_reduction for SplitEqPolynomial
+
+### Added Files
+- `.agent/NOTES.md`:
+  - Documented test interference issue during e2e prover tests
+  - Documented bit ordering conventions for ExpandingTable and SplitEqPolynomial
+
+### Updated Files
+- `src/zkvm/mod.zig`:
+  - Added (commented out) e2e prover test with documentation of interference issue
+- `.agent/TODO.md`:
+  - Updated with iteration 10 progress
+
+## Known Issues
+
+### Test Interference (Iteration 10)
+Calling JoltProver.prove() in a test causes unrelated tests to fail.
+See .agent/NOTES.md for detailed analysis and possible causes.
+
 ## Next Steps for Future Iterations
 
-1. **G2 Scalar Multiplication**: For proper [τ]_2 computation
-2. **Production SRS**: Import from Ethereum ceremony
-3. **Fix Bytecode Module**: ArrayList API for Zig 0.15
-4. **End-to-End Tests**: Full emulator + prover + verifier pipeline
-5. **Performance Optimization**: Parallelize sumcheck rounds
+1. **Investigate Test Interference**: Debug why prover.prove() affects other tests
+2. **G2 Scalar Multiplication**: For proper [τ]_2 computation
+3. **Production SRS**: Import from Ethereum ceremony
+4. **Performance Optimization**: Parallelize sumcheck rounds
+5. **Full E2E Testing**: Once test interference is resolved
 
-All 312 tests pass.
+All 324 tests pass.

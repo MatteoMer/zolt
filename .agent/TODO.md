@@ -2,6 +2,14 @@
 
 ## Completed (This Session - Iteration 7)
 
+### R1CS Constraint Generation
+- [x] Created `src/zkvm/r1cs/constraints.zig` with uniform constraints
+- [x] Defined 36 witness input variables per execution cycle
+- [x] Implemented 19 uniform R1CS constraints (equality-conditional form)
+- [x] Created `R1CSCycleInputs` for per-cycle witness extraction
+- [x] Created `R1CSWitnessGenerator` for full trace witness generation
+- [x] Added constraint satisfaction verification
+
 ### Multi-Stage Verifier Implementation
 - [x] Created `src/zkvm/verifier.zig` with full sumcheck verification
 - [x] Implemented `MultiStageVerifier` for all 6 stages
@@ -77,10 +85,10 @@ All tests pass.
 
 ## Next Steps (Future Iterations)
 
-### Complete R1CS Integration
-- [ ] Generate R1CS constraints from execution trace
-- [ ] Wire up Spartan prover in Stage 1 with real constraints
+### Wire R1CS to Spartan
+- [ ] Connect R1CS witness to Spartan prover in Stage 1
 - [ ] Compute Az, Bz, Cz witness polynomials
+- [ ] Integrate with multi-stage prover
 
 ### Polynomial Commitment Verification
 - [ ] Implement HyperKZG batch opening verification

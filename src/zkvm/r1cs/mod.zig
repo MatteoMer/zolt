@@ -3,11 +3,26 @@
 //! R1CS (Rank-1 Constraint System) represents constraints of the form:
 //! (a · x) * (b · x) = (c · x)
 //! where a, b, c are vectors of coefficients and x is the witness vector.
+//!
+//! This module includes:
+//! - Basic R1CS data structures (Constraint, R1CSInstance, R1CSWitness)
+//! - Uniform constraint definitions for Jolt (19 constraints per cycle)
+//! - Witness generation from execution traces
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-/// Term in a linear combination
+// Export constraint generation
+pub const constraints = @import("constraints.zig");
+pub const R1CSInputIndex = constraints.R1CSInputIndex;
+pub const UniformTerm = constraints.Term;
+pub const LC = constraints.LC;
+pub const UniformConstraint = constraints.UniformConstraint;
+pub const UNIFORM_CONSTRAINTS = constraints.UNIFORM_CONSTRAINTS;
+pub const R1CSCycleInputs = constraints.R1CSCycleInputs;
+pub const R1CSWitnessGenerator = constraints.R1CSWitnessGenerator;
+
+/// Term in a linear combination (field-specific version)
 pub fn Term(comptime F: type) type {
     return struct {
         index: usize,

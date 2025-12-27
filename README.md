@@ -154,7 +154,7 @@ pub fn main() !void {
 
 ## Testing
 
-The project includes 160+ tests covering:
+The project includes 193 tests covering:
 
 - Field arithmetic (Montgomery operations, batch ops)
 - Polynomial operations (evaluation, summation)

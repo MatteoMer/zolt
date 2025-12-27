@@ -12,13 +12,16 @@
   - FROBENIUS_COEFF_FP12_C1[1] = ξ^{(p-1)/6}
 - [x] Verified all 327+ tests still pass
 
+### ATE Loop Count and Miller Loop Fix
+- [x] Fixed ATE_LOOP_COUNT to correct 65-element signed binary expansion
+- [x] Fixed Miller loop to iterate from MSB to LSB (was wrong direction)
+
 ### Pairing Bilinearity (Still Failing)
 The pairing bilinearity test e([2]P, Q) = e(P, Q)^2 still fails.
-The Frobenius coefficients are now correct, but the issue is likely in:
-1. Miller loop line evaluation
-2. ATE_LOOP_COUNT or loop structure
-3. Final exponentiation hard part formula
-4. π(Q) and π²(Q) computation in Miller loop tail
+With Frobenius coefficients and ATE loop now correct, the remaining issues are likely in:
+1. Line evaluation in doubling/addition step
+2. Final exponentiation hard part formula
+3. π(Q) twist factor computation
 
 ## Completed (Previous Sessions - Iteration 11)
 

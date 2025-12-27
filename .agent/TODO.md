@@ -58,15 +58,15 @@
 ### Remaining (Nice to Have)
 - [ ] Performance benchmarks comparison with Rust
 - [x] Add parallel processing for MSM (using std.Thread)
-- [ ] Implement full Miller loop for pairings
+- [x] Implement full Miller loop for pairings
 - [ ] Add GPU acceleration hooks
 - [x] Add comprehensive README.md
 
 ## Statistics
 - Rust files in jolt-core: 296
 - Build status: ✅ Passing
-- Test status: ✅ Passing
-- Lines of Zig code: ~9100
+- Test status: ✅ Passing (191 tests)
+- Lines of Zig code: ~9500
 - Zig files created: 27
 
 ## Key Features Implemented
@@ -92,9 +92,11 @@
 20. **Proof Serialization**: Full proof serialization/deserialization with versioning
 21. **Witness Generation**: Trace to R1CS witness conversion with memory checking
 22. **Parallel MSM**: Multi-threaded MSM using std.Thread with automatic fallback
+23. **Miller Loop**: Full optimal ate pairing with NAF representation
+24. **Final Exponentiation**: BN254 hard part using curve parameter x
 
 ## Statistics Update
-- Total tests passing: **110+** (98 unit tests + 12 integration tests)
+- Total tests passing: **191** (unit tests + integration tests)
 - Zig files created: **27** (including integration_tests.zig)
 
 ## Notes

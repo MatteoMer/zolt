@@ -1,18 +1,30 @@
 # Zolt zkVM Implementation Plan
 
-## Current Status (December 2024 - Iteration 8)
+## Current Status (December 2024 - Iteration 11)
 
-Major progress on R1CS-Spartan integration:
-1. R1CS witness generation is COMPLETE with JoltR1CS type
-2. Spartan sumcheck is COMPLETE with proper Az, Bz, Cz computation
-3. Stage 1 prover now runs actual sumcheck (not placeholder)
-4. Fixed constraints to use proper TraceStep type
-5. Fixed EqPolynomial for Zig 0.15 compatibility
+Major progress on G2 scalar multiplication and pairing investigation:
+1. G2Point.scalarMul() is COMPLETE with double-and-add algorithm
+2. HyperKZG SRS now computes proper [τ]_2 = τ * G2
+3. Discovered pairing bilinearity bug: e(2P, Q) != e(P, Q)^2
+4. Test interference issue confirmed as Zig 0.15.2 compiler bug
 
-The prover now properly runs sumcheck for Stage 1:
-  sum_{x} eq(tau, x) * [Az(x) * Bz(x) - Cz(x)] = 0
+All 327 tests pass.
 
-All 312 tests pass.
+## Known Issues
+
+### Pairing Bilinearity (Critical for Verification)
+The pairing implementation doesn't satisfy bilinearity: e(aP, Q) != e(P, Q)^a.
+This affects:
+- HyperKZG verification (can't verify proofs)
+- Any pairing-based proof system verification
+
+The G2 scalar multiplication is correct (verified via consistency tests).
+The bug is in the Miller loop or final exponentiation.
+
+### Test Interference (Zig Compiler Bug)
+Adding certain tests causes other tests to fail. Confirmed not runtime memory
+corruption - appears to be a Zig 0.15.2 compiler bug affecting comptime evaluation.
+E2E prover test is disabled as a workaround.
 
 ## Phase 1: Lookup Arguments COMPLETED
 

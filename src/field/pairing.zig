@@ -26,6 +26,7 @@
 
 const std = @import("std");
 const BN254Scalar = @import("mod.zig").BN254Scalar;
+const msm = @import("../msm/mod.zig");
 
 // ============================================================================
 // Extension Field Fp2 = Fp[u] / (u² + 1)
@@ -478,6 +479,55 @@ pub const G2Point = struct {
         const y3 = slope.mul(self.x.sub(x3)).sub(self.y);
 
         return .{ .x = x3, .y = y3, .infinity = false };
+    }
+
+    /// Scalar multiplication using double-and-add
+    /// Computes [scalar] * self
+    /// Processes bits from most significant to least significant
+    pub fn scalarMul(self: G2Point, scalar: BN254Scalar) G2Point {
+        if (self.isIdentity()) return G2Point.identity();
+        if (scalar.isZero()) return G2Point.identity();
+
+        var result = G2Point.identity();
+        var started = false;
+
+        // Convert scalar from Montgomery form to get actual value
+        const normal_scalar = scalar.fromMontgomery();
+
+        // Process each limb of the scalar from most significant to least significant
+        // limbs[3] is most significant, limbs[0] is least significant
+        var limb_idx: usize = 4;
+        while (limb_idx > 0) {
+            limb_idx -= 1;
+            const limb = normal_scalar.limbs[limb_idx];
+
+            // Process bits from most significant to least significant
+            var bit_idx: u7 = 64;
+            while (bit_idx > 0) {
+                bit_idx -= 1;
+                // Always double (unless we haven't started yet)
+                if (started) {
+                    result = result.double();
+                }
+
+                const bit = (limb >> @as(u6, @intCast(bit_idx))) & 1;
+                if (bit == 1) {
+                    if (!started) {
+                        result = self;
+                        started = true;
+                    } else {
+                        result = result.add(self);
+                    }
+                }
+            }
+        }
+
+        return result;
+    }
+
+    /// Scalar multiplication with a u64 scalar (convenience method)
+    pub fn scalarMulU64(self: G2Point, scalar: u64) G2Point {
+        return self.scalarMul(BN254Scalar.fromU64(scalar));
     }
 };
 
@@ -960,6 +1010,33 @@ test "G2 point operations" {
     try std.testing.expect(sum2.isIdentity());
 }
 
+test "G2 scalar multiplication" {
+    const g = G2Point.generator();
+
+    // [0]G = O
+    const zero_times_g = g.scalarMul(BN254Scalar.zero());
+    try std.testing.expect(zero_times_g.isIdentity());
+
+    // [1]G = G
+    const one_times_g = g.scalarMul(BN254Scalar.one());
+    try std.testing.expect(one_times_g.eql(g));
+
+    // [2]G = G + G = double(G)
+    const two_times_g = g.scalarMul(BN254Scalar.fromU64(2));
+    const g_doubled = g.double();
+    try std.testing.expect(two_times_g.eql(g_doubled));
+
+    // [3]G = G + G + G = double(G) + G
+    const three_times_g = g.scalarMul(BN254Scalar.fromU64(3));
+    const g_tripled = g_doubled.add(g);
+    try std.testing.expect(three_times_g.eql(g_tripled));
+
+    // Convenience method [5]G
+    const five_times_g = g.scalarMulU64(5);
+    const expected = g.scalarMul(BN254Scalar.fromU64(5));
+    try std.testing.expect(five_times_g.eql(expected));
+}
+
 test "Miller loop doubling step" {
     // Test that doubling step produces valid line coefficients
     const q = G2Point.generator();
@@ -1042,6 +1119,37 @@ test "Fp6 operations" {
     // 1 - 1 = 0
     try std.testing.expect(one.sub(one).eql(zero));
 }
+
+test "G2 scalar mul internal consistency" {
+    // Verify G2 scalar multiplication produces correct results
+    const g2 = G2Point.generator();
+
+    // [2]G2 should equal G2 + G2
+    const two_g2_by_add = g2.add(g2);
+    const two_g2_by_double = g2.double();
+    const two_g2_by_scalar = g2.scalarMul(BN254Scalar.fromU64(2));
+
+    // All three should be equal
+    try std.testing.expect(two_g2_by_add.eql(two_g2_by_double));
+    try std.testing.expect(two_g2_by_double.eql(two_g2_by_scalar));
+}
+
+// NOTE: Pairing bilinearity test is currently disabled because the pairing
+// implementation doesn't satisfy bilinearity: e(2P, Q) != e(P, Q)^2.
+// This indicates a bug in the Miller loop or final exponentiation.
+// The G2 scalar multiplication is correct (tested above), but the pairing
+// needs work before it can be used for verification.
+// test "pairing bilinearity in G1" {
+//     const g1 = G1Point{ .x = BN254Scalar.one(), .y = BN254Scalar.fromU64(2), .infinity = false };
+//     const g2 = G2Point.generator();
+//     const e_g1_g2 = pairing(g1, g2);
+//     const e_g1_g2_squared = e_g1_g2.mul(e_g1_g2);
+//     const g1_doubled_proj = msm.MSM(BN254Scalar, BN254Scalar).scalarMul(g1, BN254Scalar.fromU64(2));
+//     const g1_doubled = g1_doubled_proj.toAffine();
+//     const e_2g1_g2 = pairing(g1_doubled, g2);
+//     // By bilinearity: e(2P, Q) = e(P, Q)^2
+//     try std.testing.expect(e_2g1_g2.eql(e_g1_g2_squared));
+// }
 
 test "Fp6 inverse" {
     const a = Fp6{

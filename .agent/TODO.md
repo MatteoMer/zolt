@@ -94,7 +94,7 @@
 22. **Parallel MSM**: Multi-threaded MSM using std.Thread with automatic fallback
 
 ## Statistics Update
-- Total tests passing: **160+**
+- Total tests passing: **110+** (98 unit tests + 12 integration tests)
 - Zig files created: **27** (including integration_tests.zig)
 
 ## Notes

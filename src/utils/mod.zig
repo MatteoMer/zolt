@@ -4,6 +4,131 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const lookup_table = @import("../zkvm/lookup_table/mod.zig");
+
+/// A bitvector type used to represent a (substring of a) lookup index.
+/// Optimized representation that stores up to 128 bits with explicit length.
+///
+/// This is the Zig port of Jolt's `LookupBits` type.
+pub const LookupBits = struct {
+    const Self = @This();
+
+    /// The bits stored as a 128-bit value (little-endian semantics)
+    bits: u128,
+    /// Number of valid bits in this LookupBits
+    len: u8,
+
+    /// Create a new LookupBits from a value and length
+    pub fn init(bits_value: u128, bit_len: usize) Self {
+        std.debug.assert(bit_len <= 128);
+
+        // Mask to the specified length
+        const masked = if (bit_len < 128)
+            bits_value % (@as(u128, 1) << @intCast(bit_len))
+        else
+            bits_value;
+
+        return Self{
+            .bits = masked,
+            .len = @intCast(bit_len),
+        };
+    }
+
+    /// Create an empty LookupBits
+    pub fn empty() Self {
+        return Self{
+            .bits = 0,
+            .len = 0,
+        };
+    }
+
+    /// Get the length in bits
+    pub fn length(self: Self) usize {
+        return @as(usize, self.len);
+    }
+
+    /// Convert to u128
+    pub fn toU128(self: Self) u128 {
+        return self.bits;
+    }
+
+    /// Convert to usize
+    pub fn toUsize(self: Self) usize {
+        return @intCast(self.bits);
+    }
+
+    /// Convert to u64
+    pub fn toU64(self: Self) u64 {
+        return @truncate(self.bits);
+    }
+
+    /// Uninterleave bits into (x, y) components
+    pub fn uninterleave(self: Self) struct { x: Self, y: Self } {
+        const result = lookup_table.uninterleaveBits(self.bits);
+        const x_len = self.len / 2;
+        const y_len = self.len - x_len;
+        return .{
+            .x = Self.init(@as(u128, result.x), x_len),
+            .y = Self.init(@as(u128, result.y), y_len),
+        };
+    }
+
+    /// Split into (prefix, suffix) where suffix has the given length
+    pub fn split(self: Self, suffix_len: usize) struct { prefix: Self, suffix: Self } {
+        std.debug.assert(suffix_len <= self.len);
+
+        const suffix_bits = self.bits % (@as(u128, 1) << @intCast(suffix_len));
+        const suffix = Self.init(suffix_bits, suffix_len);
+
+        const prefix_bits = self.bits >> @intCast(suffix_len);
+        const prefix_len = @as(usize, self.len) - suffix_len;
+        const prefix = Self.init(prefix_bits, prefix_len);
+
+        return .{ .prefix = prefix, .suffix = suffix };
+    }
+
+    /// Pop the most significant bit, decrementing length
+    pub fn popMsb(self: *Self) u8 {
+        if (self.len == 0) return 0;
+
+        const shift: u7 = @intCast(self.len - 1);
+        const msb: u8 = @intCast((self.bits >> shift) & 1);
+        self.bits = self.bits % (@as(u128, 1) << shift);
+        self.len -= 1;
+        return msb;
+    }
+
+    /// Get the bit at a specific position (0-indexed from LSB)
+    pub fn getBit(self: Self, pos: usize) u1 {
+        if (pos >= self.len) return 0;
+        return @intCast((self.bits >> @intCast(pos)) & 1);
+    }
+
+    /// Count trailing zeros
+    pub fn trailingZeros(self: Self) u32 {
+        if (self.bits == 0) return @as(u32, self.len);
+        const tz = @ctz(self.bits);
+        return @min(tz, @as(u32, self.len));
+    }
+
+    /// Count leading ones (in the context of the bit length)
+    pub fn leadingOnes(self: Self) u32 {
+        if (self.len == 0) return 0;
+        const shifted = self.bits << @intCast(128 - @as(u8, self.len));
+        // Count leading ones by inverting and counting leading zeros
+        return @clz(~shifted);
+    }
+
+    /// Check equality
+    pub fn eql(self: Self, other: Self) bool {
+        return self.bits == other.bits and self.len == other.len;
+    }
+
+    /// Bitwise AND with a mask
+    pub fn bitAnd(self: Self, mask: u128) u128 {
+        return self.bits & mask;
+    }
+};
 
 /// Error types for Jolt
 pub const JoltError = error{
@@ -508,4 +633,82 @@ test "bit utils" {
     try std.testing.expectEqual(@as(u1, 0), BitUtils.getBit(0b1010, 0));
     try std.testing.expectEqual(@as(usize, 0b1011), BitUtils.setBit(0b1010, 0));
     try std.testing.expectEqual(@as(usize, 0b1000), BitUtils.clearBit(0b1010, 1));
+}
+
+test "LookupBits init" {
+    const bits = LookupBits.init(0b1101, 4);
+    try std.testing.expectEqual(@as(u128, 0b1101), bits.bits);
+    try std.testing.expectEqual(@as(u8, 4), bits.len);
+}
+
+test "LookupBits init masks correctly" {
+    // Value 0xFF with length 4 should be masked to 0x0F
+    const bits = LookupBits.init(0xFF, 4);
+    try std.testing.expectEqual(@as(u128, 0x0F), bits.bits);
+}
+
+test "LookupBits split" {
+    const bits = LookupBits.init(0b11_01_10, 6);
+    const result = bits.split(2);
+
+    // suffix should be last 2 bits: 0b10
+    try std.testing.expectEqual(@as(u128, 0b10), result.suffix.bits);
+    try std.testing.expectEqual(@as(u8, 2), result.suffix.len);
+
+    // prefix should be first 4 bits: 0b1101
+    try std.testing.expectEqual(@as(u128, 0b1101), result.prefix.bits);
+    try std.testing.expectEqual(@as(u8, 4), result.prefix.len);
+}
+
+test "LookupBits popMsb" {
+    var bits = LookupBits.init(0b1101, 4);
+
+    // MSB is 1
+    const msb1 = bits.popMsb();
+    try std.testing.expectEqual(@as(u8, 1), msb1);
+    try std.testing.expectEqual(@as(u128, 0b101), bits.bits);
+    try std.testing.expectEqual(@as(u8, 3), bits.len);
+
+    // Next MSB is 1
+    const msb2 = bits.popMsb();
+    try std.testing.expectEqual(@as(u8, 1), msb2);
+    try std.testing.expectEqual(@as(u128, 0b01), bits.bits);
+    try std.testing.expectEqual(@as(u8, 2), bits.len);
+
+    // Next MSB is 0
+    const msb3 = bits.popMsb();
+    try std.testing.expectEqual(@as(u8, 0), msb3);
+    try std.testing.expectEqual(@as(u128, 0b1), bits.bits);
+    try std.testing.expectEqual(@as(u8, 1), bits.len);
+}
+
+test "LookupBits uninterleave" {
+    // Jolt format: y bits at even positions, x bits at odd positions
+    // interleaved: y[0], x[0], y[1], x[1], ... = 0b11_10_01_00
+    // y = 0b1010 = 10, x = 0b1100 = 12
+    const bits = LookupBits.init(0b11_10_01_00, 8);
+    const result = bits.uninterleave();
+
+    try std.testing.expectEqual(@as(u128, 0b1100), result.x.bits);
+    try std.testing.expectEqual(@as(u128, 0b1010), result.y.bits);
+}
+
+test "LookupBits trailingZeros" {
+    const bits1 = LookupBits.init(0b1000, 4);
+    try std.testing.expectEqual(@as(u32, 3), bits1.trailingZeros());
+
+    const bits2 = LookupBits.init(0b1001, 4);
+    try std.testing.expectEqual(@as(u32, 0), bits2.trailingZeros());
+
+    const bits3 = LookupBits.init(0, 4);
+    try std.testing.expectEqual(@as(u32, 4), bits3.trailingZeros());
+}
+
+test "LookupBits getBit" {
+    const bits = LookupBits.init(0b1010, 4);
+    try std.testing.expectEqual(@as(u1, 0), bits.getBit(0));
+    try std.testing.expectEqual(@as(u1, 1), bits.getBit(1));
+    try std.testing.expectEqual(@as(u1, 0), bits.getBit(2));
+    try std.testing.expectEqual(@as(u1, 1), bits.getBit(3));
+    try std.testing.expectEqual(@as(u1, 0), bits.getBit(4)); // Out of bounds
 }

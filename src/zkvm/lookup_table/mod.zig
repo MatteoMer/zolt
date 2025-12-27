@@ -17,38 +17,59 @@ const field = @import("../../field/mod.zig");
 const BN254Scalar = field.BN254Scalar;
 
 /// Utility function to uninterleave bits from an interleaved index.
-/// For a 2*XLEN bit index where bits are interleaved as x[0], y[0], x[1], y[1], ...,
+/// For a 2*XLEN bit index where bits are interleaved as y[0], x[0], y[1], x[1], ...,
 /// returns (x, y) where each is an XLEN-bit value.
+///
+/// Note: This matches Jolt's convention where y bits are at even positions and x bits at odd.
 pub fn uninterleaveBits(index: u128) struct { x: u64, y: u64 } {
-    var x: u64 = 0;
-    var y: u64 = 0;
-    var idx = index;
+    // Use Jolt's efficient bit manipulation algorithm
+    // x comes from odd bit positions, y from even
+    var x_bits: u128 = (index >> 1) & 0x5555_5555_5555_5555_5555_5555_5555_5555;
+    var y_bits: u128 = index & 0x5555_5555_5555_5555_5555_5555_5555_5555;
 
-    // Extract bits: even positions go to x, odd positions go to y
-    var i: u6 = 0;
-    while (i < 64) : (i += 1) {
-        x |= @as(u64, @intCast((idx >> 0) & 1)) << i;
-        y |= @as(u64, @intCast((idx >> 1) & 1)) << i;
-        idx >>= 2;
-    }
+    // Compact x bits into lower half
+    x_bits = (x_bits | (x_bits >> 1)) & 0x3333_3333_3333_3333_3333_3333_3333_3333;
+    x_bits = (x_bits | (x_bits >> 2)) & 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F;
+    x_bits = (x_bits | (x_bits >> 4)) & 0x00FF_00FF_00FF_00FF_00FF_00FF_00FF_00FF;
+    x_bits = (x_bits | (x_bits >> 8)) & 0x0000_FFFF_0000_FFFF_0000_FFFF_0000_FFFF;
+    x_bits = (x_bits | (x_bits >> 16)) & 0x0000_0000_FFFF_FFFF_0000_0000_FFFF_FFFF;
+    x_bits = (x_bits | (x_bits >> 32)) & 0x0000_0000_0000_0000_FFFF_FFFF_FFFF_FFFF;
 
-    return .{ .x = x, .y = y };
+    // Compact y bits into lower half
+    y_bits = (y_bits | (y_bits >> 1)) & 0x3333_3333_3333_3333_3333_3333_3333_3333;
+    y_bits = (y_bits | (y_bits >> 2)) & 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F;
+    y_bits = (y_bits | (y_bits >> 4)) & 0x00FF_00FF_00FF_00FF_00FF_00FF_00FF_00FF;
+    y_bits = (y_bits | (y_bits >> 8)) & 0x0000_FFFF_0000_FFFF_0000_FFFF_0000_FFFF;
+    y_bits = (y_bits | (y_bits >> 16)) & 0x0000_0000_FFFF_FFFF_0000_0000_FFFF_FFFF;
+    y_bits = (y_bits | (y_bits >> 32)) & 0x0000_0000_0000_0000_FFFF_FFFF_FFFF_FFFF;
+
+    return .{ .x = @truncate(x_bits), .y = @truncate(y_bits) };
 }
 
 /// Interleave bits of x and y into a single index.
-/// Produces x[0], y[0], x[1], y[1], ... where bit positions alternate.
+/// Produces a value where y bits are at even positions and x bits at odd positions.
+/// This matches Jolt's convention: result = (spread(x) << 1) | spread(y)
 pub fn interleaveBits(x: u64, y: u64) u128 {
-    var result: u128 = 0;
+    // Use Jolt's efficient bit spreading algorithm
+    // Spread x_bits to odd positions
+    var x_bits: u128 = @as(u128, x);
+    x_bits = (x_bits | (x_bits << 32)) & 0x0000_0000_FFFF_FFFF_0000_0000_FFFF_FFFF;
+    x_bits = (x_bits | (x_bits << 16)) & 0x0000_FFFF_0000_FFFF_0000_FFFF_0000_FFFF;
+    x_bits = (x_bits | (x_bits << 8)) & 0x00FF_00FF_00FF_00FF_00FF_00FF_00FF_00FF;
+    x_bits = (x_bits | (x_bits << 4)) & 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F;
+    x_bits = (x_bits | (x_bits << 2)) & 0x3333_3333_3333_3333_3333_3333_3333_3333;
+    x_bits = (x_bits | (x_bits << 1)) & 0x5555_5555_5555_5555_5555_5555_5555_5555;
 
-    var i: u7 = 0;
-    while (i < 64) : (i += 1) {
-        const x_bit: u128 = @as(u128, (x >> @as(u6, @intCast(i))) & 1);
-        const y_bit: u128 = @as(u128, (y >> @as(u6, @intCast(i))) & 1);
-        result |= x_bit << (@as(u7, i) * 2);
-        result |= y_bit << (@as(u7, i) * 2 + 1);
-    }
+    // Spread y_bits to even positions
+    var y_bits: u128 = @as(u128, y);
+    y_bits = (y_bits | (y_bits << 32)) & 0x0000_0000_FFFF_FFFF_0000_0000_FFFF_FFFF;
+    y_bits = (y_bits | (y_bits << 16)) & 0x0000_FFFF_0000_FFFF_0000_FFFF_0000_FFFF;
+    y_bits = (y_bits | (y_bits << 8)) & 0x00FF_00FF_00FF_00FF_00FF_00FF_00FF_00FF;
+    y_bits = (y_bits | (y_bits << 4)) & 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F;
+    y_bits = (y_bits | (y_bits << 2)) & 0x3333_3333_3333_3333_3333_3333_3333_3333;
+    y_bits = (y_bits | (y_bits << 1)) & 0x5555_5555_5555_5555_5555_5555_5555_5555;
 
-    return result;
+    return (x_bits << 1) | y_bits;
 }
 
 /// The JoltLookupTable interface for Zig.
@@ -642,13 +663,14 @@ test "uninterleave and interleave bits" {
 
 test "uninterleave bits pattern" {
     // Test specific bit patterns
-    // interleaved: x[0], y[0], x[1], y[1], ...
-    // 0b11_10_01_00 = x=0101, y=1100
+    // Jolt format: y bits at even positions, x bits at odd positions
+    // interleaved: y[0], x[0], y[1], x[1], ...
+    // 0b11_10_01_00 = y=0b1010=10, x=0b1100=12
     const index: u128 = 0b11_10_01_00;
     const result = uninterleaveBits(index);
 
-    try std.testing.expectEqual(@as(u64, 0b0101), result.x);
-    try std.testing.expectEqual(@as(u64, 0b1100), result.y);
+    try std.testing.expectEqual(@as(u64, 0b1100), result.x);
+    try std.testing.expectEqual(@as(u64, 0b1010), result.y);
 }
 
 test "RangeCheck materialize" {
@@ -753,11 +775,14 @@ test "And MLE on boolean hypercube" {
 
     // For a 2-bit table, we have 4 variables (2*XLEN)
     // Test all 16 combinations of boolean inputs
+    // r array uses MSB-first ordering (like Jolt's index_to_field_bitvector)
     var i: u8 = 0;
     while (i < 16) : (i += 1) {
         var r: [4]BN254Scalar = undefined;
+        // MSB-first: r[0] = bit 3, r[1] = bit 2, r[2] = bit 1, r[3] = bit 0
         inline for (0..4) |j| {
-            r[j] = if ((i >> j) & 1 == 1) BN254Scalar.one() else BN254Scalar.zero();
+            const bit_pos = 4 - 1 - j; // MSB first
+            r[j] = if ((i >> bit_pos) & 1 == 1) BN254Scalar.one() else BN254Scalar.zero();
         }
 
         const mle_result = Table.And.evaluateMLE(&r);
@@ -775,7 +800,8 @@ test "Xor MLE on boolean hypercube" {
     while (i < 16) : (i += 1) {
         var r: [4]BN254Scalar = undefined;
         inline for (0..4) |j| {
-            r[j] = if ((i >> j) & 1 == 1) BN254Scalar.one() else BN254Scalar.zero();
+            const bit_pos = 4 - 1 - j;
+            r[j] = if ((i >> bit_pos) & 1 == 1) BN254Scalar.one() else BN254Scalar.zero();
         }
 
         const mle_result = Table.Xor.evaluateMLE(&r);
@@ -793,7 +819,8 @@ test "Or MLE on boolean hypercube" {
     while (i < 16) : (i += 1) {
         var r: [4]BN254Scalar = undefined;
         inline for (0..4) |j| {
-            r[j] = if ((i >> j) & 1 == 1) BN254Scalar.one() else BN254Scalar.zero();
+            const bit_pos = 4 - 1 - j;
+            r[j] = if ((i >> bit_pos) & 1 == 1) BN254Scalar.one() else BN254Scalar.zero();
         }
 
         const mle_result = Table.Or.evaluateMLE(&r);
@@ -811,7 +838,8 @@ test "Equal MLE on boolean hypercube" {
     while (i < 16) : (i += 1) {
         var r: [4]BN254Scalar = undefined;
         inline for (0..4) |j| {
-            r[j] = if ((i >> j) & 1 == 1) BN254Scalar.one() else BN254Scalar.zero();
+            const bit_pos = 4 - 1 - j;
+            r[j] = if ((i >> bit_pos) & 1 == 1) BN254Scalar.one() else BN254Scalar.zero();
         }
 
         const mle_result = Table.Equal.evaluateMLE(&r);
@@ -829,7 +857,8 @@ test "UnsignedLessThan MLE on boolean hypercube" {
     while (i < 16) : (i += 1) {
         var r: [4]BN254Scalar = undefined;
         inline for (0..4) |j| {
-            r[j] = if ((i >> j) & 1 == 1) BN254Scalar.one() else BN254Scalar.zero();
+            const bit_pos = 4 - 1 - j;
+            r[j] = if ((i >> bit_pos) & 1 == 1) BN254Scalar.one() else BN254Scalar.zero();
         }
 
         const mle_result = Table.UnsignedLessThan.evaluateMLE(&r);
@@ -847,7 +876,8 @@ test "RangeCheck MLE on boolean hypercube" {
     while (i < 16) : (i += 1) {
         var r: [4]BN254Scalar = undefined;
         inline for (0..4) |j| {
-            r[j] = if ((i >> j) & 1 == 1) BN254Scalar.one() else BN254Scalar.zero();
+            const bit_pos = 4 - 1 - j;
+            r[j] = if ((i >> bit_pos) & 1 == 1) BN254Scalar.one() else BN254Scalar.zero();
         }
 
         const mle_result = Table.RangeCheck.evaluateMLE(&r);
@@ -865,7 +895,8 @@ test "Andn MLE on boolean hypercube" {
     while (i < 16) : (i += 1) {
         var r: [4]BN254Scalar = undefined;
         inline for (0..4) |j| {
-            r[j] = if ((i >> j) & 1 == 1) BN254Scalar.one() else BN254Scalar.zero();
+            const bit_pos = 4 - 1 - j;
+            r[j] = if ((i >> bit_pos) & 1 == 1) BN254Scalar.one() else BN254Scalar.zero();
         }
 
         const mle_result = Table.Andn.evaluateMLE(&r);
@@ -927,7 +958,8 @@ test "UnsignedLessThanEqual MLE on boolean hypercube" {
     while (i < 16) : (i += 1) {
         var r: [4]BN254Scalar = undefined;
         inline for (0..4) |j| {
-            r[j] = if ((i >> j) & 1 == 1) BN254Scalar.one() else BN254Scalar.zero();
+            const bit_pos = 4 - 1 - j;
+            r[j] = if ((i >> bit_pos) & 1 == 1) BN254Scalar.one() else BN254Scalar.zero();
         }
 
         const mle_result = Table.UnsignedLessThanEqual.evaluateMLE(&r);
@@ -969,15 +1001,16 @@ test "Movsign materialize" {
 }
 
 test "Sub materialize" {
-    const Table = LookupTable(BN254Scalar, 8);
+    const Table = LookupTable(BN254Scalar, 64);
 
     // 10 - 3 = 7
     const index1 = interleaveBits(10, 3);
     try std.testing.expectEqual(@as(u64, 7), Table.Sub.materializeEntry(index1));
 
-    // 3 - 10 = 249 (wrapping, for 8-bit)
+    // 3 - 10 = wrapping subtraction in 64-bit
     const index2 = interleaveBits(3, 10);
-    try std.testing.expectEqual(@as(u64, 249), Table.Sub.materializeEntry(index2));
+    const expected: u64 = @as(u64, 3) -% @as(u64, 10);
+    try std.testing.expectEqual(expected, Table.Sub.materializeEntry(index2));
 
     // 5 - 5 = 0
     const index3 = interleaveBits(5, 5);

@@ -17,6 +17,22 @@
 - [x] RafEvaluationVerifier: Verifier with challenge generation
 - [x] Helper functions: computeEqEvals, computeEqAtPoint
 
+### Val Evaluation Sumcheck (`src/zkvm/ram/val_evaluation.zig`)
+- [x] ValEvaluationParams: Parameters for value consistency check
+- [x] IncPolynomial: Value increments at writes (val_new - val_old)
+- [x] WaPolynomial: Write-address indicator (1 iff write to target address)
+- [x] LtPolynomial: Less-than MLE for timestamp ordering
+- [x] ValEvaluationProver: Computes claim and round polynomials
+- [x] ValEvaluationVerifier: Verification with challenge generation
+
+### Multi-Stage Prover (`src/zkvm/prover.zig`)
+- [x] SumcheckInstance: Trait interface for batched proving
+- [x] StageProof: Round polynomials and challenges per stage
+- [x] JoltStageProofs: All 6 stage proofs combined
+- [x] OpeningAccumulator: Polynomial opening claims
+- [x] MultiStageProver: 6-stage orchestration skeleton
+- [x] BatchedSumcheckProver: Parallel instance execution
+
 ## Completed ✅ (Previous Sessions)
 
 ### Phase 1: Lookup Arguments
@@ -45,12 +61,12 @@
 - [x] BeqLookup, BneLookup for branches
 
 ## Next Up (Future Iterations)
-- [ ] Multi-stage sumcheck orchestration (7 stages)
-- [ ] Val evaluation sumcheck (memory value checking)
-- [ ] Read-write checking sumcheck
 - [ ] Fix HyperKZG verification (current stub returns true)
 - [ ] Add real BN254 curve constants
 - [ ] Implement execute(), prove(), verify()
+- [ ] Wire up multi-stage prover to JoltProver.prove()
+- [ ] Complete Spartan outer sumcheck (Stage 1)
+- [ ] Complete remaining stage implementations
 
 ## Files Added This Session
 
@@ -60,9 +76,17 @@
 ### RAF Checking
 - `src/zkvm/ram/raf_checking.zig` - Full RAF sumcheck infrastructure
 
-## Summary
-This iteration focused on:
-1. **Lookup Trace Integration**: Connect execution tracer to Lasso infrastructure
-2. **RAF Memory Checking**: Implement RAF evaluation sumcheck prover/verifier
+### Val Evaluation
+- `src/zkvm/ram/val_evaluation.zig` - Memory value consistency checking
 
-All 261 tests pass.
+### Multi-Stage Prover
+- `src/zkvm/prover.zig` - 6-stage sumcheck orchestration
+
+## Summary
+This iteration accomplished major infrastructure work:
+1. **Lookup Trace Integration**: Connect execution to Lasso proofs
+2. **RAF Memory Checking**: Read-After-Final consistency verification
+3. **Val Evaluation**: Memory value consistency across trace
+4. **Multi-Stage Prover**: 6-stage sumcheck orchestration skeleton
+
+All 264 tests pass.

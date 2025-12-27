@@ -72,4 +72,52 @@ pub fn build(b: *std.Build) void {
     const run_bench = b.addRunArtifact(bench_exe);
     const bench_step = b.step("bench", "Run benchmarks");
     bench_step.dependOn(&run_bench.step);
+
+    // Example: Field Arithmetic
+    const field_example = b.addExecutable(.{
+        .name = "example-field",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/field_arithmetic.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zolt", .module = lib.root_module },
+            },
+        }),
+    });
+    const run_field_example = b.addRunArtifact(field_example);
+    const field_example_step = b.step("example-field", "Run field arithmetic example");
+    field_example_step.dependOn(&run_field_example.step);
+
+    // Example: Simple Proof
+    const proof_example = b.addExecutable(.{
+        .name = "example-proof",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/simple_proof.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zolt", .module = lib.root_module },
+            },
+        }),
+    });
+    const run_proof_example = b.addRunArtifact(proof_example);
+    const proof_example_step = b.step("example-proof", "Run simple proof example");
+    proof_example_step.dependOn(&run_proof_example.step);
+
+    // Example: RISC-V Emulation
+    const riscv_example = b.addExecutable(.{
+        .name = "example-riscv",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/risc_v_emulation.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zolt", .module = lib.root_module },
+            },
+        }),
+    });
+    const run_riscv_example = b.addRunArtifact(riscv_example);
+    const riscv_example_step = b.step("example-riscv", "Run RISC-V emulation example");
+    riscv_example_step.dependOn(&run_riscv_example.step);
 }

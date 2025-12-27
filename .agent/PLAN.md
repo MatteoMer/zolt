@@ -6,9 +6,13 @@ Major progress on R1CS-Spartan integration:
 1. R1CS witness generation is COMPLETE with JoltR1CS type
 2. Spartan sumcheck is COMPLETE with proper Az, Bz, Cz computation
 3. Stage 1 prover now runs actual sumcheck (not placeholder)
+4. Fixed constraints to use proper TraceStep type
+5. Fixed EqPolynomial for Zig 0.15 compatibility
 
 The prover now properly runs sumcheck for Stage 1:
   sum_{x} eq(tau, x) * [Az(x) * Bz(x) - Cz(x)] = 0
+
+All 312 tests pass.
 
 ## Phase 1: Lookup Arguments COMPLETED
 
@@ -98,6 +102,9 @@ All tables with materializeEntry() and evaluateMLE() implementations:
 - [x] Witness generation from execution trace
 - [x] Az, Bz, Cz computation for Spartan
 - [x] Evaluation claims for Az, Bz, Cz at final point
+- [x] Fixed constraints to use TraceStep type
+- [x] Immediate value derivation from instruction encoding
+- [x] Circuit flag setting from instruction opcode
 
 ## Phase 5: Complete Commitment Schemes COMPLETED
 
@@ -162,6 +169,8 @@ All tables with materializeEntry() and evaluateMLE() implementations:
 - Witness layout: [1, cycle_0_inputs..., cycle_1_inputs..., ...]
 - Equality-conditional form: condition * (left - right) = 0
 - Az = condition evaluations, Bz = (left - right) evaluations, Cz = 0
+- Immediate values derived from instruction encoding
+- Circuit flags set from instruction opcode
 
 ### Lasso Protocol Architecture
 - Two-phase sumcheck: address binding + cycle binding
@@ -184,12 +193,21 @@ All tables with materializeEntry() and evaluateMLE() implementations:
   - Stage 1 now uses JoltSpartanInterface
   - Proper sumcheck with round polynomials
   - Evaluation claims for Az, Bz, Cz
+- `src/zkvm/r1cs/constraints.zig`:
+  - Fixed fromTraceStep to use TraceStep type
+  - Added deriveImmediate() for instruction decoding
+  - Added setFlagsFromInstruction() for circuit flags
+- `src/poly/mod.zig`:
+  - Fixed EqPolynomial.evals shift for Zig 0.15
+- `src/zkvm/mod.zig`:
+  - Added R1CS-Spartan integration test
 
 ## Next Steps for Future Iterations
 
-1. **End-to-End Integration Test**: Test with actual RISC-V programs
-2. **G2 Scalar Multiplication**: For proper [τ]_2 computation
-3. **Production SRS**: Import from Ethereum ceremony
-4. **Performance Optimization**: Parallelize sumcheck rounds
+1. **G2 Scalar Multiplication**: For proper [τ]_2 computation
+2. **Production SRS**: Import from Ethereum ceremony
+3. **Fix Bytecode Module**: ArrayList API for Zig 0.15
+4. **End-to-End Tests**: Full emulator + prover + verifier pipeline
+5. **Performance Optimization**: Parallelize sumcheck rounds
 
-All tests pass.
+All 312 tests pass.

@@ -129,6 +129,13 @@ pub const BN254Scalar = struct {
         return self.montgomeryMul(.{ .limbs = .{ 1, 0, 0, 0 } });
     }
 
+    /// Convert to Montgomery form from standard representation
+    /// Used when we have raw limbs that need to be converted
+    pub fn toMontgomery(self: Self) Self {
+        // Multiply by R^2 to get a * R^2 * R^{-1} = a * R
+        return self.montgomeryMul(.{ .limbs = BN254_R2 });
+    }
+
     /// 128-bit multiplication helper
     inline fn mulWide(a: u64, b: u64) u128 {
         return @as(u128, a) * @as(u128, b);

@@ -23,6 +23,11 @@
 //!   Y = (y0, y1) where:
 //!     y0 = 0x12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa
 //!     y1 = 0x090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b
+//!
+//! Implementation based on:
+//! - https://eprint.iacr.org/2024/640.pdf
+//! - gnark-crypto BN254 implementation
+//! - ziskos BN254 implementation
 
 const std = @import("std");
 const BN254Scalar = @import("mod.zig").BN254Scalar;
@@ -36,143 +41,135 @@ const msm = @import("../msm/mod.zig");
 // For BN254 with ξ = 9 + u (the non-residue), we need:
 //   γ_{1,j} = ξ^{j(p-1)/6} for j = 1..5
 //
-// The Frobenius on G2: π(x,y) = (x^p · γ_{1,2}, y^p · γ_{1,3})
-// where x^p = conjugate(x) and y^p = conjugate(y) in Fp2.
+// From ziskos BN254 implementation (constants.rs)
+// Stored as [u64; 8] for Fp2 (two Fp elements) and [u64; 4] for Fp
+
+/// Helper to create Fp2 from [u64; 8] limbs (raw, non-Montgomery form)
+/// Converts each Fp element to Montgomery form
+fn fp2FromLimbs(limbs: [8]u64) Fp2 {
+    // Each Fp element is 4 limbs, stored in little-endian order
+    // These are raw values, need to convert to Montgomery form
+    const c0_raw = BN254Scalar{ .limbs = .{ limbs[0], limbs[1], limbs[2], limbs[3] } };
+    const c1_raw = BN254Scalar{ .limbs = .{ limbs[4], limbs[5], limbs[6], limbs[7] } };
+    // Convert to Montgomery form by multiplying by R^2 mod p (which gives a*R mod p)
+    const c0 = c0_raw.toMontgomery();
+    const c1 = c1_raw.toMontgomery();
+    return Fp2.init(c0, c1);
+}
+
+/// Helper to create Fp from [u64; 4] limbs (raw, non-Montgomery form)
+/// Converts to Montgomery form
+fn fpFromLimbs(limbs: [4]u64) BN254Scalar {
+    const raw = BN254Scalar{ .limbs = limbs };
+    return raw.toMontgomery();
+}
+
+// ============================================================================
+// Frobenius^1 Coefficients (require conjugation)
+// ============================================================================
+
+/// γ₁₁ = ξ^{(p-1)/6} - Frobenius^1 coefficient for c1 of Fp6 in c1 of Fp12
+const FROBENIUS_GAMMA11: [8]u64 = .{
+    0xD60B35DADCC9E470, 0x5C521E08292F2176, 0xE8B99FDD76E68B60, 0x1284B71C2865A7DF,
+    0xCA5CF05F80F362AC, 0x747992778EEEC7E5, 0xA6327CFE12150B8E, 0x246996F3B4FAE7E6,
+};
+
+/// γ₁₂ = ξ^{2(p-1)/6} - Frobenius^1 coefficient for c1 of Fp6 in c0 of Fp12 (also G2 x-coord)
+const FROBENIUS_GAMMA12: [8]u64 = .{
+    0x99E39557176F553D, 0xB78CC310C2C3330C, 0x4C0BEC3CF559B143, 0x2FB347984F7911F7,
+    0x1665D51C640FCBA2, 0x32AE2A1D0B7C9DCE, 0x4BA4CC8BD75A0794, 0x16C9E55061EBAE20,
+};
+
+/// γ₁₃ = ξ^{3(p-1)/6} - Frobenius^1 coefficient for c2 of Fp6 in c1 of Fp12 (also G2 y-coord)
+const FROBENIUS_GAMMA13: [8]u64 = .{
+    0xDC54014671A0135A, 0xDBAAE0EDA9C95998, 0xDC5EC698B6E2F9B9, 0x063CF305489AF5DC,
+    0x82D37F632623B0E3, 0x21807DC98FA25BD2, 0x0704B5A7EC796F2B, 0x07C03CBCAC41049A,
+};
+
+/// γ₁₄ = ξ^{4(p-1)/6} - Frobenius^1 coefficient for c2 of Fp6 in c0 of Fp12
+const FROBENIUS_GAMMA14: [8]u64 = .{
+    0x848A1F55921EA762, 0xD33365F7BE94EC72, 0x80F3C0B75A181E84, 0x05B54F5E64EEA801,
+    0xC13B4711CD2B8126, 0x3685D2EA1BDEC763, 0x9F3A80B03B0B1C92, 0x2C145EDBE7FD8AEE,
+};
+
+/// γ₁₅ = ξ^{5(p-1)/6} - Frobenius^1 coefficient for c2 of Fp6 in c1 of Fp12
+const FROBENIUS_GAMMA15: [8]u64 = .{
+    0x2EA2C810EAB7692F, 0x425C459B55AA1BD3, 0xE93A3661A4353FF4, 0x0183C1E74F798649,
+    0x24C6B8EE6E0C2C4B, 0xB080CB99678E2AC0, 0xA27FB246C7729F7D, 0x12ACF2CA76FD0675,
+};
+
+// ============================================================================
+// Frobenius^2 Coefficients (no conjugation needed - even power)
+// ============================================================================
+
+/// γ₂₁ = ξ^{(p²-1)/6} - Fp element
+const FROBENIUS_GAMMA21: [4]u64 = .{ 0xE4BD44E5607CFD49, 0xC28F069FBB966E3D, 0x5E6DD9E7E0ACCCB0, 0x30644E72E131A029 };
+
+/// γ₂₂ = ξ^{2(p²-1)/6} - Fp element
+const FROBENIUS_GAMMA22: [4]u64 = .{ 0xE4BD44E5607CFD48, 0xC28F069FBB966E3D, 0x5E6DD9E7E0ACCCB0, 0x30644E72E131A029 };
+
+/// γ₂₃ = ξ^{3(p²-1)/6} - Fp element
+const FROBENIUS_GAMMA23: [4]u64 = .{ 0x3C208C16D87CFD46, 0x97816A916871CA8D, 0xB85045B68181585D, 0x30644E72E131A029 };
+
+/// γ₂₄ = ξ^{4(p²-1)/6} - Fp element
+const FROBENIUS_GAMMA24: [4]u64 = .{ 0x5763473177FFFFFE, 0xD4F263F1ACDB5C4F, 0x59E26BCEA0D48BAC, 0x0000000000000000 };
+
+/// γ₂₅ = ξ^{5(p²-1)/6} - Fp element
+const FROBENIUS_GAMMA25: [4]u64 = .{ 0x5763473177FFFFFF, 0xD4F263F1ACDB5C4F, 0x59E26BCEA0D48BAC, 0x0000000000000000 };
+
+// ============================================================================
+// Frobenius^3 Coefficients (require conjugation - odd power)
+// ============================================================================
+
+/// γ₃₁ = ξ^{(p³-1)/6}
+const FROBENIUS_GAMMA31: [8]u64 = .{
+    0xE86F7D391ED4A67F, 0x894CB38DBE55D24A, 0xEFE9608CD0ACAA90, 0x19DC81CFCC82E4BB,
+    0x7694AA2BF4C0C101, 0x7F03A5E397D439EC, 0x06CBEEE33576139D, 0x00ABF8B60BE77D73,
+};
+
+/// γ₃₂ = ξ^{2(p³-1)/6}
+const FROBENIUS_GAMMA32: [8]u64 = .{
+    0x7B746EE87BDCFB6D, 0x805FFD3D5D6942D3, 0xBAFF1C77959F25AC, 0x0856E078B755EF0A,
+    0x380CAB2BAAA586DE, 0x0FDF31BF98FF2631, 0xA9F30E6DEC26094F, 0x04F1DE41B3D1766F,
+};
+
+/// γ₃₃ = ξ^{3(p³-1)/6}
+const FROBENIUS_GAMMA33: [8]u64 = .{
+    0x5FCC8AD066DCE9ED, 0xBBD689A3BEA870F4, 0xDBF17F1DCA9E5EA3, 0x2A275B6D9896AA4C,
+    0xB94D0CB3B2594C64, 0x7600ECC7D8CF6EBA, 0xB14B900E9507E932, 0x28A411B634F09B8F,
+};
+
+/// γ₃₄ = ξ^{4(p³-1)/6}
+const FROBENIUS_GAMMA34: [8]u64 = .{
+    0x0E1A92BC3CCBF066, 0xE633094575B06BCB, 0x19BEE0F7B5B2444E, 0x0BC58C6611C08DAB,
+    0x5FE3ED9D730C239F, 0xA44A9E08737F96E5, 0xFEB0F6EF0CD21D04, 0x23D5E999E1910A12,
+};
+
+/// γ₃₅ = ξ^{5(p³-1)/6}
+const FROBENIUS_GAMMA35: [8]u64 = .{
+    0xEBDE847076261B43, 0x2ED68098967C84A5, 0x711699FA3B4D3F69, 0x13C49044952C0905,
+    0x1F25041384282499, 0x3E2DDAEA20028021, 0x9FB1B2282A48633D, 0x16DB366A59B1DD0B,
+};
 
 /// GAMMA_12 = ξ^{(p-1)/3} = ξ^{2(p-1)/6}
 /// Used for G2 x-coordinate in Frobenius
 fn gamma12() Fp2 {
-    // γ_{1,2} = (9+u)^{(p-1)/3}
-    // These are the precomputed hexadecimal constants from the BN254 specification
-    const c0_bytes = [_]u8{
-        0x3d, 0x55, 0x6f, 0x17, 0x57, 0x95, 0xe3, 0x99,
-        0x0c, 0x33, 0xc3, 0xc2, 0x10, 0xc3, 0x8c, 0xb7,
-        0x43, 0xb1, 0x59, 0xf5, 0x3c, 0xec, 0x0b, 0x4c,
-        0xf7, 0x11, 0x79, 0x4f, 0x98, 0x47, 0xb3, 0x2f,
-    };
-    const c1_bytes = [_]u8{
-        0xa2, 0xcb, 0x0f, 0x64, 0x1c, 0xd5, 0x65, 0x16,
-        0xce, 0x9d, 0x7c, 0x0b, 0x1d, 0x2a, 0xae, 0x32,
-        0x94, 0x07, 0x5a, 0xd7, 0x8b, 0xcc, 0xa4, 0x0b,
-        0x20, 0xae, 0xeb, 0x61, 0x50, 0xe5, 0xc9, 0x16,
-    };
-    return Fp2.init(
-        BN254Scalar.fromBytes(&c0_bytes),
-        BN254Scalar.fromBytes(&c1_bytes),
-    );
+    return fp2FromLimbs(FROBENIUS_GAMMA12);
 }
 
 /// GAMMA_13 = ξ^{(p-1)/2} = ξ^{3(p-1)/6}
 /// Used for G2 y-coordinate in Frobenius
 fn gamma13() Fp2 {
-    // γ_{1,3} = (9+u)^{(p-1)/2}
-    const c0_bytes = [_]u8{
-        0x5a, 0x13, 0x01, 0x67, 0x14, 0x40, 0xc5, 0xd9,
-        0x98, 0x99, 0x95, 0x9c, 0xda, 0x0e, 0xae, 0xdb,
-        0x9b, 0x2f, 0x6e, 0x8b, 0x69, 0xc6, 0xec, 0xdc,
-        0xdc, 0xf5, 0x9a, 0x48, 0x05, 0xf3, 0x3c, 0x06,
-    };
-    const c1_bytes = [_]u8{
-        0xe3, 0x0b, 0x3b, 0x62, 0x26, 0x7f, 0x37, 0x2d,
-        0x28, 0xf9, 0x5d, 0xa8, 0xfa, 0x98, 0x7c, 0x80,
-        0x21, 0xb2, 0xf2, 0x96, 0x7c, 0x5a, 0x7b, 0x70,
-        0xa0, 0x49, 0x10, 0x41, 0xac, 0xcb, 0x03, 0x7c,
-    };
-    return Fp2.init(
-        BN254Scalar.fromBytes(&c0_bytes),
-        BN254Scalar.fromBytes(&c1_bytes),
-    );
+    return fp2FromLimbs(FROBENIUS_GAMMA13);
 }
 
 // ============================================================================
-// Frobenius Coefficients for Fp6 and Fp12
+// Fp2 scalar multiplication helper
 // ============================================================================
-//
-// For Fp6 = Fp2[v]/(v³ - ξ):
-//   v^p = ξ^{(p-1)/3} · v = γ_{1,1} · v
-//   v^{2p} = ξ^{2(p-1)/3} · v² = γ_{1,2} · v²
-//
-// For Fp12 = Fp6[w]/(w² - v):
-//   w^p = ξ^{(p-1)/6} · w = FROBENIUS_COEFF_FP12_C1[1] · w
-//
-// These values are precomputed from the arkworks BN254 implementation.
-// Values from: https://docs.rs/ark-bn254/latest/src/ark_bn254/fields/fq6.rs.html
-// and: https://docs.rs/ark-bn254/latest/src/ark_bn254/fields/fq12.rs.html
 
-/// FROBENIUS_COEFF_FP6_C1 - coefficients for v under Frobenius
-/// γ_{1,1} = ξ^{(p-1)/3}
-/// Note: Index 1 is the same as gamma12() which is ξ^{(p-1)/3}
-fn frobeniusCoeffFp6C1() [6]Fp2 {
-    return .{
-        // Index 0: q^0 -> (1, 0)
-        Fp2.init(BN254Scalar.one(), BN254Scalar.zero()),
-        // Index 1: γ_{1,1} = ξ^{(p-1)/3}
-        // c0 = 21575463638280843010398324269430826099269044274347216827212613867836435027261
-        // c1 = 10307601595873709700152284273816112264069230130616436755625194854815875713954
-        // This is the same as gamma12()
-        gamma12(),
-        // Index 2: ξ^{2(p-1)/3}
-        // c0 = 21888242871839275220042445260109153167277707414472061641714758635765020556616
-        // c1 = 0
-        Fp2.init(
-            BN254Scalar.fromBytes(&[_]u8{ 0x48, 0xfd, 0x7c, 0x60, 0xe5, 0x44, 0xbd, 0xe4, 0x3d, 0x6e, 0x96, 0xbb, 0x9f, 0x06, 0x8f, 0xc2, 0xb0, 0xcc, 0xac, 0xe0, 0xe7, 0xd9, 0x6d, 0x5e, 0x29, 0xa0, 0x31, 0xe1, 0x72, 0x4e, 0x64, 0x30 }),
-            BN254Scalar.zero(),
-        ),
-        // Index 3: ξ^{(p-1)} - but since we only need index 1 for Frobenius^1, placeholders OK
-        Fp2.init(BN254Scalar.one(), BN254Scalar.zero()),
-        // Index 4: placeholder
-        Fp2.init(BN254Scalar.one(), BN254Scalar.zero()),
-        // Index 5: placeholder
-        Fp2.init(BN254Scalar.one(), BN254Scalar.zero()),
-    };
-}
-
-/// FROBENIUS_COEFF_FP6_C2 - coefficients for v² under Frobenius
-/// γ_{1,2} = ξ^{2(p-1)/3}
-fn frobeniusCoeffFp6C2() [6]Fp2 {
-    return .{
-        // Index 0: q^0 -> (1, 0)
-        Fp2.init(BN254Scalar.one(), BN254Scalar.zero()),
-        // Index 1: ξ^{2(p-1)/3}
-        // c0 = 21888242871839275220042445260109153167277707414472061641714758635765020556616
-        // c1 = 0
-        Fp2.init(
-            BN254Scalar.fromBytes(&[_]u8{ 0x48, 0xfd, 0x7c, 0x60, 0xe5, 0x44, 0xbd, 0xe4, 0x3d, 0x6e, 0x96, 0xbb, 0x9f, 0x06, 0x8f, 0xc2, 0xb0, 0xcc, 0xac, 0xe0, 0xe7, 0xd9, 0x6d, 0x5e, 0x29, 0xa0, 0x31, 0xe1, 0x72, 0x4e, 0x64, 0x30 }),
-            BN254Scalar.zero(),
-        ),
-        // Placeholders for higher indices (only index 1 used for Frobenius^1)
-        Fp2.init(BN254Scalar.one(), BN254Scalar.zero()),
-        Fp2.init(BN254Scalar.one(), BN254Scalar.zero()),
-        Fp2.init(BN254Scalar.one(), BN254Scalar.zero()),
-        Fp2.init(BN254Scalar.one(), BN254Scalar.zero()),
-    };
-}
-
-/// FROBENIUS_COEFF_FP12_C1 - coefficients for w under Frobenius in Fp12
-/// These are ξ^{i(p-1)/6} for i = 0..11
-fn frobeniusCoeffFp12C1() [12]Fp2 {
-    return .{
-        // Index 0: 1
-        Fp2.init(BN254Scalar.one(), BN254Scalar.zero()),
-        // Index 1: ξ^{(p-1)/6}
-        // c0 = 8376118865763821496583973867626364092589906065868298776909617916018768340080
-        // c1 = 16469823323077808223889137241176536799009286646108169935659301613961712198316
-        Fp2.init(
-            BN254Scalar.fromBytes(&[_]u8{ 0x70, 0xe4, 0xc9, 0xdc, 0xda, 0x35, 0x0b, 0xd6, 0x76, 0x21, 0x2f, 0x29, 0x08, 0x1e, 0x52, 0x5c, 0x60, 0x8b, 0xe6, 0x76, 0xdd, 0x9f, 0xb9, 0xe8, 0xdf, 0xa7, 0x65, 0x28, 0x1c, 0xb7, 0x84, 0x12 }),
-            BN254Scalar.fromBytes(&[_]u8{ 0xac, 0x62, 0xf3, 0x80, 0x5f, 0xf0, 0x5c, 0xca, 0xe5, 0xc7, 0xee, 0x8e, 0x77, 0x92, 0x79, 0x74, 0x8e, 0x0b, 0x15, 0x12, 0xfe, 0x7c, 0x32, 0xa6, 0xe6, 0xe7, 0xfa, 0xb4, 0xf3, 0x96, 0x69, 0x24 }),
-        ),
-        // Placeholders for indices 2-11 (only index 1 used for Frobenius^1)
-        Fp2.init(BN254Scalar.one(), BN254Scalar.zero()),
-        Fp2.init(BN254Scalar.one(), BN254Scalar.zero()),
-        Fp2.init(BN254Scalar.one(), BN254Scalar.zero()),
-        Fp2.init(BN254Scalar.one(), BN254Scalar.zero()),
-        Fp2.init(BN254Scalar.one(), BN254Scalar.zero()),
-        Fp2.init(BN254Scalar.one(), BN254Scalar.zero()),
-        Fp2.init(BN254Scalar.one(), BN254Scalar.zero()),
-        Fp2.init(BN254Scalar.one(), BN254Scalar.zero()),
-        Fp2.init(BN254Scalar.one(), BN254Scalar.zero()),
-        Fp2.init(BN254Scalar.one(), BN254Scalar.zero()),
-    };
+/// Multiply Fp2 element by Fp scalar (embeds scalar as (s, 0))
+fn fp2ScalarMul(a: Fp2, s: BN254Scalar) Fp2 {
+    return Fp2.init(a.c0.mul(s), a.c1.mul(s));
 }
 
 // ============================================================================
@@ -384,30 +381,21 @@ pub const Fp6 = struct {
         return self.c0.eql(other.c0) and self.c1.eql(other.c1) and self.c2.eql(other.c2);
     }
 
-    /// Frobenius endomorphism (raising to p-th power)
-    /// For Fp6 = Fp2[v]/(v³ - ξ), we have:
-    /// (c0 + c1*v + c2*v²)^p = c0^p + c1^p * v^p + c2^p * v^{2p}
-    /// where v^p = ξ^{(p-1)/3} * v and v^{2p} = ξ^{2(p-1)/3} * v²
-    pub fn frobenius(self: Fp6) Fp6 {
-        // Apply Frobenius to each Fp2 component (conjugation)
-        const c0_frob = self.c0.conjugate();
-        const c1_frob = self.c1.conjugate();
-        const c2_frob = self.c2.conjugate();
-
-        // Get Frobenius coefficients
-        const coeffs_c1 = frobeniusCoeffFp6C1();
-        const coeffs_c2 = frobeniusCoeffFp6C2();
-
-        // Multiply by the Frobenius coefficients:
-        // c1 * v^p = c1^p * γ_{1,1} * v
-        // c2 * v^{2p} = c2^p * γ_{1,2} * v²
-        return Fp6{
-            .c0 = c0_frob,
-            .c1 = c1_frob.mul(coeffs_c1[1]),
-            .c2 = c2_frob.mul(coeffs_c2[1]),
-        };
-    }
+    // Note: Fp6 frobenius is not needed as a standalone method.
+    // We implement it directly in Fp12 frobenius to properly handle
+    // the coefficient structure across all 6 Fp2 components.
 };
+
+/// Fp6 multiplication by v (shift operation)
+/// For Fp6 = Fp2[v]/(v³ - ξ), multiplying by v shifts coefficients:
+/// (c0 + c1*v + c2*v²) * v = c2*ξ + c0*v + c1*v²
+fn fp6MulByV(f: Fp6) Fp6 {
+    return Fp6{
+        .c0 = Fp6.mulByXi(f.c2),
+        .c1 = f.c0,
+        .c2 = f.c1,
+    };
+}
 
 // ============================================================================
 // Extension Field Fp12 = Fp6[w] / (w² - v)
@@ -481,31 +469,123 @@ pub const Fp12 = struct {
         };
     }
 
-    /// Frobenius endomorphism (raising to p-th power)
-    /// For Fp12 = Fp6[w]/(w² - v), we have:
-    /// (c0 + c1*w)^p = c0^p + c1^p * w^p
-    /// where w^p = w * γ for γ = ξ^{(p-1)/6}
+    /// Frobenius^1 endomorphism (raising to p-th power)
+    /// For Fp12 = Fp6[w]/(w² - v) where Fp6 = Fp2[v]/(v³ - ξ)
+    /// Structure: ((a11 + a12*v + a13*v²) + (a21 + a22*v + a23*v²)*w)^p
+    ///
+    /// From ziskos:
+    /// c0 = a̅11     + a̅12·γ12·v + a̅13·γ14·v²
+    /// c1 = a̅21·γ11 + a̅22·γ13·v + a̅23·γ15·v²
     pub fn frobenius(self: Fp12) Fp12 {
-        // Apply Frobenius to each Fp6 component
-        const c0_frob = self.c0.frobenius();
-        const c1_frob = self.c1.frobenius();
+        // Extract all 6 Fp2 components
+        const a11 = self.c0.c0;
+        const a12 = self.c0.c1;
+        const a13 = self.c0.c2;
+        const a21 = self.c1.c0;
+        const a22 = self.c1.c1;
+        const a23 = self.c1.c2;
 
-        // Multiply c1 by the Frobenius coefficient for w
-        // w^p = ξ^{(p-1)/6} · w = FROBENIUS_COEFF_FP12_C1[1] · w
-        const coeffs = frobeniusCoeffFp12C1();
-        const gamma = coeffs[1];
+        // Get Frobenius^1 coefficients
+        const g11 = fp2FromLimbs(FROBENIUS_GAMMA11);
+        const g12 = fp2FromLimbs(FROBENIUS_GAMMA12);
+        const g13 = fp2FromLimbs(FROBENIUS_GAMMA13);
+        const g14 = fp2FromLimbs(FROBENIUS_GAMMA14);
+        const g15 = fp2FromLimbs(FROBENIUS_GAMMA15);
 
-        // Multiply c1_frob by gamma (which is an Fp2 element)
-        const c1_result = Fp6{
-            .c0 = c1_frob.c0.mul(gamma),
-            .c1 = c1_frob.c1.mul(gamma),
-            .c2 = c1_frob.c2.mul(gamma),
+        // Apply conjugation (Frobenius in Fp2) and multiply by coefficients
+        // c0 = a̅11 + a̅12·γ12·v + a̅13·γ14·v²
+        const c0 = Fp6{
+            .c0 = a11.conjugate(),
+            .c1 = a12.conjugate().mul(g12),
+            .c2 = a13.conjugate().mul(g14),
         };
 
-        return Fp12{
-            .c0 = c0_frob,
-            .c1 = c1_result,
+        // c1 = a̅21·γ11 + a̅22·γ13·v + a̅23·γ15·v²
+        const c1 = Fp6{
+            .c0 = a21.conjugate().mul(g11),
+            .c1 = a22.conjugate().mul(g13),
+            .c2 = a23.conjugate().mul(g15),
         };
+
+        return Fp12{ .c0 = c0, .c1 = c1 };
+    }
+
+    /// Frobenius^2 endomorphism (raising to p² power)
+    /// No conjugation needed (even power of Frobenius)
+    /// Uses scalar (Fp) multiplication since γ₂ᵢ are in Fp
+    ///
+    /// c0 = a11     + a12·γ22·v + a13·γ24·v²
+    /// c1 = a21·γ21 + a22·γ23·v + a23·γ25·v²
+    pub fn frobenius2(self: Fp12) Fp12 {
+        // Extract all 6 Fp2 components
+        const a11 = self.c0.c0;
+        const a12 = self.c0.c1;
+        const a13 = self.c0.c2;
+        const a21 = self.c1.c0;
+        const a22 = self.c1.c1;
+        const a23 = self.c1.c2;
+
+        // Get Frobenius^2 coefficients (Fp elements)
+        const g21 = fpFromLimbs(FROBENIUS_GAMMA21);
+        const g22 = fpFromLimbs(FROBENIUS_GAMMA22);
+        const g23 = fpFromLimbs(FROBENIUS_GAMMA23);
+        const g24 = fpFromLimbs(FROBENIUS_GAMMA24);
+        const g25 = fpFromLimbs(FROBENIUS_GAMMA25);
+
+        // c0 = a11 + a12·γ22·v + a13·γ24·v²
+        const c0 = Fp6{
+            .c0 = a11,
+            .c1 = fp2ScalarMul(a12, g22),
+            .c2 = fp2ScalarMul(a13, g24),
+        };
+
+        // c1 = a21·γ21 + a22·γ23·v + a23·γ25·v²
+        const c1 = Fp6{
+            .c0 = fp2ScalarMul(a21, g21),
+            .c1 = fp2ScalarMul(a22, g23),
+            .c2 = fp2ScalarMul(a23, g25),
+        };
+
+        return Fp12{ .c0 = c0, .c1 = c1 };
+    }
+
+    /// Frobenius^3 endomorphism (raising to p³ power)
+    /// Requires conjugation (odd power of Frobenius)
+    ///
+    /// c0 = a̅11     + a̅12·γ32·v + a̅13·γ34·v²
+    /// c1 = a̅21·γ31 + a̅22·γ33·v + a̅23·γ35·v²
+    pub fn frobenius3(self: Fp12) Fp12 {
+        // Extract all 6 Fp2 components
+        const a11 = self.c0.c0;
+        const a12 = self.c0.c1;
+        const a13 = self.c0.c2;
+        const a21 = self.c1.c0;
+        const a22 = self.c1.c1;
+        const a23 = self.c1.c2;
+
+        // Get Frobenius^3 coefficients
+        const g31 = fp2FromLimbs(FROBENIUS_GAMMA31);
+        const g32 = fp2FromLimbs(FROBENIUS_GAMMA32);
+        const g33 = fp2FromLimbs(FROBENIUS_GAMMA33);
+        const g34 = fp2FromLimbs(FROBENIUS_GAMMA34);
+        const g35 = fp2FromLimbs(FROBENIUS_GAMMA35);
+
+        // Apply conjugation and multiply by coefficients
+        // c0 = a̅11 + a̅12·γ32·v + a̅13·γ34·v²
+        const c0 = Fp6{
+            .c0 = a11.conjugate(),
+            .c1 = a12.conjugate().mul(g32),
+            .c2 = a13.conjugate().mul(g34),
+        };
+
+        // c1 = a̅21·γ31 + a̅22·γ33·v + a̅23·γ35·v²
+        const c1 = Fp6{
+            .c0 = a21.conjugate().mul(g31),
+            .c1 = a22.conjugate().mul(g33),
+            .c2 = a23.conjugate().mul(g35),
+        };
+
+        return Fp12{ .c0 = c0, .c1 = c1 };
     }
 
     pub fn inverse(self: Fp12) ?Fp12 {
@@ -755,26 +835,22 @@ pub fn pairing(p: G1Point, q: G2Point) PairingResult {
     return finalExponentiation(f);
 }
 
-/// BN254 ate loop parameter: 6x + 2 where x = 4965661367192848881
-/// We use the NAF (non-adjacent form) representation for efficiency
-///// The optimal ate loop constant for BN254: 6x + 2 = 29793968203157093288
-/// where x = 4965661367192848881 is the curve parameter.
-/// This is represented in a signed binary expansion using {-1, 0, 1} coefficients.
-/// Array is from LSB to MSB (index 0 is the least significant).
-/// Reference: https://blog.lambdaclass.com/how-we-implemented-the-bn254-ate-pairing-in-lambdaworks/
+/// Pseudobinary representation of the loop length 6·X+2 of the optimal ate pairing over BN254.
+/// From ziskos implementation (miller_loop.rs).
+/// Array is from index 0 to 64, processed from index 1 (skip first).
+/// Index 0 = 1 corresponds to the MSB of the value.
 const ATE_LOOP_COUNT: [65]i2 = .{
-    0, 0, 0, 1, 0, 1, 0, -1, 0, 0, 1, -1, 0, 0, 1, 0,
-    0, 1, 1, 0, -1, 0, 0, 1, 0, -1, 0, 0, 0, 0, 1, 1,
-    1, 0, 0, -1, 0, 0, 1, 0, 0, 0, 0, 0, -1, 0, 0, 1,
-    1, 0, 0, -1, 0, 0, 0, 1, 1, 0, -1, 0, 0, 1, 0, 1,
-    1,
+    1, 1, 0, 1, 0, 0, -1, 0, 1, 1, 0, 0, 0, -1, 0, 0,
+    1, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0,
+    1, 1, 1, 0, 0, 0, 0, -1, 0, 1, 0, 0, -1, 0, 1, 1,
+    0, 0, 1, 0, 0, -1, 1, 0, 0, -1, 0, 1, 0, 1, 0, 0,
+    0,
 };
 
-/// Coefficients for line function evaluation
+/// Line coefficients (λ, μ) where the line is y = λx + μ
 const LineCoeffs = struct {
-    c0: Fp2, // ell_0 coefficient
-    c1: Fp2, // ell_vw coefficient (multiplied by y_p)
-    c2: Fp2, // ell_vv coefficient (multiplied by x_p)
+    lambda: Fp2, // Slope
+    mu: Fp2, // Intercept (y - λx)
 };
 
 /// Result of doubling/addition step: new point and line coefficients
@@ -783,34 +859,100 @@ const MillerStepResult = struct {
     coeffs: LineCoeffs,
 };
 
-/// Evaluate line function at point P
-/// This computes the contribution of a line passing through points on G2
-/// evaluated at a point P in G1, resulting in an element of Fp12
-fn evaluateLine(coeffs: LineCoeffs, p_x: BN254Scalar, p_y: BN254Scalar) Fp12 {
-    // The line evaluation gives a sparse Fp12 element
-    // l(P) = c0 + c1 * y_p * w + c2 * x_p * v
-    // where v and w are tower elements
+/// Sparse line evaluation result: two Fp2 coefficients for sparse Fp12 multiplication
+/// Represents 1 + coeff1·v + coeff2·w in Fp12
+const SparseLineEval = struct {
+    coeff1: Fp2, // λ·x coefficient (multiplied by v)
+    coeff2: Fp2, // μ·(-y) coefficient (multiplied by w)
+};
 
-    // Convert scalars to Fp2 (embedding Fp into Fp2)
-    const x_fp2 = Fp2.init(p_x, BN254Scalar.zero());
-    const y_fp2 = Fp2.init(p_y, BN254Scalar.zero());
+/// Evaluate line function at preprocessed point (xp', yp')
+/// where xp' = -xp/yp and yp' = 1/yp
+///
+/// The line l(x,y) = y - λx - μ evaluated at P gives:
+/// l(P) = yp - λ·xp - μ = yp'⁻¹ - λ·(-xp'·yp'⁻¹) - μ
+///      = (1/yp')·(1 + λ·xp' - μ·yp')
+///
+/// Since we only care about ratios (final exponentiation kills the factor),
+/// we use: 1 + (λ·xp')·v + (μ·(-yp'))·w = 1 + coeff1·v + coeff2·w
+fn evaluateLineSparse(coeffs: LineCoeffs, xp_prime: BN254Scalar, yp_prime: BN254Scalar) SparseLineEval {
+    // coeff1 = λ·xp' (Fp2 * Fp -> Fp2)
+    const coeff1 = fp2ScalarMul(coeffs.lambda, xp_prime);
 
-    // c1 * y_p
-    const c1_yp = coeffs.c1.mul(y_fp2);
-    // c2 * x_p
-    const c2_xp = coeffs.c2.mul(x_fp2);
+    // coeff2 = μ·(-yp') (Fp2 * Fp -> Fp2)
+    const neg_yp = yp_prime.neg();
+    const coeff2 = fp2ScalarMul(coeffs.mu, neg_yp);
 
-    // Construct sparse Fp12 element
-    // The structure depends on how the tower is constructed
-    // For BN254: Fp12 = Fp6[w]/(w² - v), Fp6 = Fp2[v]/(v³ - ξ)
-    return Fp12{
+    return SparseLineEval{
+        .coeff1 = coeff1,
+        .coeff2 = coeff2,
+    };
+}
+
+/// Sparse multiplication of Fp12 by a sparse element (1 + b21·v + b22·w)
+/// where b21, b22 are Fp2 elements.
+///
+/// For a = (a1 + a2·w) where a1, a2 ∈ Fp6 and b = 1 + (b21 + b22·v)·w in canonical form:
+/// Note: Our sparse form is 1 + b21·v + b22·w, but in Fp12 tower w² = v,
+/// so we need to convert: 1 + b21·v + b22·w means b1 = 1 and b2 = b22 + 0·v + 0·v²
+/// with the b21·v term being in the c0.c1 slot.
+///
+/// From ziskos:
+/// c1 = a1 + a2·(b21·v + b22·v²)  [using w² = v, the b22 from w becomes v² coefficient after squaring]
+/// c2 = a2 + a1·(b21 + b22·v)
+///
+/// Wait, our sparse form is different. Let me reconsider:
+/// Our line gives 1 + coeff1·v + coeff2·w
+/// In Fp12 = Fp6[w]/(w² - v), this is:
+/// c0 = (1 + coeff1·v + 0·v²) ∈ Fp6
+/// c1 = (coeff2 + 0·v + 0·v²) ∈ Fp6
+///
+/// Actually, let's use the standard sparse multiplication formula.
+fn sparseMulFp12(a: Fp12, sparse: SparseLineEval) Fp12 {
+    // The sparse element is: b = (1 + coeff1·v) + coeff2·w
+    // where (1 + coeff1·v) is in c0 and coeff2 is in c1.c0
+    //
+    // Sparse b representation:
+    // b.c0 = (1, coeff1, 0) ∈ Fp6
+    // b.c1 = (coeff2, 0, 0) ∈ Fp6
+    //
+    // For efficiency, construct the sparse element and use full multiplication.
+    // Future optimization: implement specialized sparse multiplication.
+
+    const b = Fp12{
         .c0 = Fp6{
-            .c0 = coeffs.c0,
-            .c1 = c2_xp, // coefficient of v
+            .c0 = Fp2.one(),
+            .c1 = sparse.coeff1,
             .c2 = Fp2.zero(),
         },
         .c1 = Fp6{
-            .c0 = c1_yp, // coefficient of w
+            .c0 = sparse.coeff2,
+            .c1 = Fp2.zero(),
+            .c2 = Fp2.zero(),
+        },
+    };
+
+    return a.mul(b);
+}
+
+/// Legacy evaluate line function (for compatibility during transition)
+fn evaluateLine(coeffs: LineCoeffs, p_x: BN254Scalar, p_y: BN254Scalar) Fp12 {
+    // Precompute xp' = -xp/yp and yp' = 1/yp
+    const yp_inv = p_y.inverse() orelse return Fp12.one();
+    const xp_prime = p_x.neg().mul(yp_inv);
+    const yp_prime = yp_inv;
+
+    const sparse = evaluateLineSparse(coeffs, xp_prime, yp_prime);
+
+    // Convert sparse to full Fp12
+    return Fp12{
+        .c0 = Fp6{
+            .c0 = Fp2.one(),
+            .c1 = sparse.coeff1,
+            .c2 = Fp2.zero(),
+        },
+        .c1 = Fp6{
+            .c0 = sparse.coeff2,
             .c1 = Fp2.zero(),
             .c2 = Fp2.zero(),
         },
@@ -818,15 +960,15 @@ fn evaluateLine(coeffs: LineCoeffs, p_x: BN254Scalar, p_y: BN254Scalar) Fp12 {
 }
 
 /// Doubling step in Miller loop
-/// Returns the new point T = 2*T and line coefficients
+/// Returns the new point T = 2*T and line coefficients (λ, μ)
+/// where the tangent line is y = λx + μ
 fn doublingStep(t: G2Point) MillerStepResult {
     if (t.infinity or t.y.isZero()) {
         return .{
             .point = G2Point.identity(),
             .coeffs = .{
-                .c0 = Fp2.one(),
-                .c1 = Fp2.zero(),
-                .c2 = Fp2.zero(),
+                .lambda = Fp2.zero(),
+                .mu = Fp2.one(),
             },
         };
     }
@@ -837,38 +979,37 @@ fn doublingStep(t: G2Point) MillerStepResult {
     const two_y = t.y.add(t.y);
     const lambda = three_x_sq.mul(two_y.inverse() orelse return .{
         .point = G2Point.identity(),
-        .coeffs = .{ .c0 = Fp2.one(), .c1 = Fp2.zero(), .c2 = Fp2.zero() },
+        .coeffs = .{ .lambda = Fp2.zero(), .mu = Fp2.one() },
     });
 
-    // New point coordinates
+    // New point coordinates: x3 = λ² - 2x, y3 = λ(x - x3) - y
     const x3 = lambda.square().sub(t.x).sub(t.x);
     const y3 = lambda.mul(t.x.sub(x3)).sub(t.y);
 
-    // Line coefficients: l(x,y) = y - λx - (t.y - λ*t.x)
-    // Rearranged for evaluation: c0 = λ*t.x - t.y, c1 = 1, c2 = -λ
-    const c0 = lambda.mul(t.x).sub(t.y);
-    const c1 = Fp2.one();
-    const c2 = lambda.neg();
+    // Line equation: y = λx + μ, where μ = y - λx
+    // For the tangent at T: μ = t.y - λ·t.x
+    const mu = t.y.sub(lambda.mul(t.x));
 
     return .{
         .point = G2Point{ .x = x3, .y = y3, .infinity = false },
-        .coeffs = .{ .c0 = c0, .c1 = c1, .c2 = c2 },
+        .coeffs = .{ .lambda = lambda, .mu = mu },
     };
 }
 
 /// Addition step in Miller loop
-/// Returns the new point T = T + Q and line coefficients
+/// Returns the new point T = T + Q and line coefficients (λ, μ)
+/// where the secant line is y = λx + μ
 fn additionStep(t: G2Point, q: G2Point) MillerStepResult {
     if (t.infinity) {
         return .{
             .point = q,
-            .coeffs = .{ .c0 = Fp2.one(), .c1 = Fp2.zero(), .c2 = Fp2.zero() },
+            .coeffs = .{ .lambda = Fp2.zero(), .mu = Fp2.one() },
         };
     }
     if (q.infinity) {
         return .{
             .point = t,
-            .coeffs = .{ .c0 = Fp2.one(), .c1 = Fp2.zero(), .c2 = Fp2.zero() },
+            .coeffs = .{ .lambda = Fp2.zero(), .mu = Fp2.one() },
         };
     }
 
@@ -880,7 +1021,7 @@ fn additionStep(t: G2Point, q: G2Point) MillerStepResult {
         // t + (-t) = O
         return .{
             .point = G2Point.identity(),
-            .coeffs = .{ .c0 = Fp2.one(), .c1 = Fp2.zero(), .c2 = Fp2.zero() },
+            .coeffs = .{ .lambda = Fp2.zero(), .mu = Fp2.one() },
         };
     }
 
@@ -889,21 +1030,20 @@ fn additionStep(t: G2Point, q: G2Point) MillerStepResult {
     const dx = q.x.sub(t.x);
     const lambda = dy.mul(dx.inverse() orelse return .{
         .point = G2Point.identity(),
-        .coeffs = .{ .c0 = Fp2.one(), .c1 = Fp2.zero(), .c2 = Fp2.zero() },
+        .coeffs = .{ .lambda = Fp2.zero(), .mu = Fp2.one() },
     });
 
-    // New point coordinates
+    // New point coordinates: x3 = λ² - x1 - x2, y3 = λ(x1 - x3) - y1
     const x3 = lambda.square().sub(t.x).sub(q.x);
     const y3 = lambda.mul(t.x.sub(x3)).sub(t.y);
 
-    // Line coefficients
-    const c0 = lambda.mul(t.x).sub(t.y);
-    const c1 = Fp2.one();
-    const c2 = lambda.neg();
+    // Line equation: y = λx + μ, where μ = y - λx
+    // Using point T: μ = t.y - λ·t.x
+    const mu = t.y.sub(lambda.mul(t.x));
 
     return .{
         .point = G2Point{ .x = x3, .y = y3, .infinity = false },
-        .coeffs = .{ .c0 = c0, .c1 = c1, .c2 = c2 },
+        .coeffs = .{ .lambda = lambda, .mu = mu },
     };
 }
 
@@ -918,13 +1058,9 @@ fn millerLoop(p: G1Point, q: G2Point) Fp12 {
     var f = Fp12.one();
     var t = q;
 
-    // Main loop: iterate through bits of the ate loop parameter from MSB to LSB
-    // The array is stored LSB-first, so we iterate in reverse order
-    // Start from index 63 (second-to-last MSB, since index 64 is the top bit = 1)
-    var i: usize = ATE_LOOP_COUNT.len - 2;
-    while (true) : (i -= 1) {
-        const bit = ATE_LOOP_COUNT[i];
-
+    // Main loop: iterate through bits of the ate loop parameter
+    // Following ziskos: start from index 1 (skip index 0)
+    for (ATE_LOOP_COUNT[1..]) |bit| {
         // Doubling step: f = f² * l_{T,T}(P), T = 2T
         f = f.square();
         const dbl = doublingStep(t);
@@ -947,8 +1083,6 @@ fn millerLoop(p: G1Point, q: G2Point) Fp12 {
             const line_add = evaluateLine(add.coeffs, p.x, p.y);
             f = f.mul(line_add);
         }
-
-        if (i == 0) break;
     }
 
     // For BN254 optimal ate, we need additional steps at the end:
@@ -1012,73 +1146,102 @@ fn easyPartExponentiation(f: Fp12) Fp12 {
     // f^(p^6-1) = conj(f) * f^(-1) (using the fact that f^(p^6) = conj(f))
     const f_conj = f.conjugate();
     const f_inv = f.inverse() orelse return Fp12.one();
-    const t0 = f_conj.mul(f_inv);
+    const easy1 = f_conj.mul(f_inv);
 
-    // t0^(p^2+1) = t0^(p^2) * t0
-    // Using Frobenius: t0^(p^2) = frobenius(frobenius(t0))
-    const t1 = t0.frobenius().frobenius();
-    return t1.mul(t0);
+    // easy1^(p^2+1) = easy1^(p^2) * easy1
+    // Using Frobenius^2 for efficiency
+    const easy1_p2 = easy1.frobenius2();
+    return easy1_p2.mul(easy1);
 }
 
 /// BN254 curve parameter x = 4965661367192848881
 /// Used in hard part of final exponentiation
 const BN_X: u64 = 4965661367192848881;
 
-fn hardPartExponentiation(f: Fp12) Fp12 {
-    // The hard part is f^((p^4 - p^2 + 1)/r)
-    // For BN curves, this can be computed efficiently using the curve parameter x
-    // The exponent decomposes as a polynomial in x:
-    // (p^4 - p^2 + 1)/r = λ_0 + λ_1*p + λ_2*p^2 + λ_3*p^3
-    // where λ_i are polynomials in x
+fn hardPartExponentiation(m: Fp12) Fp12 {
+    // The hard part is m^((p^4 - p^2 + 1)/r)
+    // Using the optimized formula from ziskos (final_exp.rs)
+    //
+    // Compute:
+    //   y1 = m^p · m^{p²} · m^{p³}
+    //   y2 = m̄ (conjugate)
+    //   y3 = (m^{x²})^{p²}
+    //   y4 = conj((m^x)^p)
+    //   y5 = conj(m^x · (m^{x²})^p)
+    //   y6 = conj(m^{x²})
+    //   y7 = conj(m^{x³} · (m^{x³})^p)
+    //
+    // Then compute y1·y2²·y3⁶·y4¹²·y5¹⁸·y6³⁰·y7³⁶ using an optimized addition chain
 
-    // We use the optimized addition chain from the literature
-    // First compute f^x, f^(x^2), f^(x^3) using square-and-multiply
+    // Compute powers of m by x
+    const mx = expByX(m);
+    const mxx = expByX(mx);
+    const mxxx = expByX(mxx);
 
-    // f^x
-    const f_x = expByX(f);
+    // Compute Frobenius powers
+    const mp = m.frobenius();
+    const mpp = m.frobenius2();
+    const mppp = m.frobenius3();
+    const mxp = mx.frobenius();
+    const mxxp = mxx.frobenius();
+    const mxxxp = mxxx.frobenius();
+    const mxxpp = mxx.frobenius2();
 
-    // f^(x^2) = (f^x)^x
-    const f_x2 = expByX(f_x);
+    // y1 = m^p · m^{p²} · m^{p³}
+    var y1 = mp.mul(mpp);
+    y1 = y1.mul(mppp);
 
-    // f^(x^3) = (f^(x^2))^x
-    const f_x3 = expByX(f_x2);
+    // y2 = m̄ (conjugate)
+    const y2 = m.conjugate();
 
-    // Now compute the final result using Frobenius and multiplications
-    // y0 = f^(x^3) * f^(-x^2) * f^x * f^(-1)
-    // y1 = f^(p*x^2) * f^(-p*x) * f^p
-    // y2 = f^(p^2*x) * f^(-p^2)
-    // y3 = f^(p^3)
-    // result = y0 * y1 * y2 * y3
+    // y3 = (m^{x²})^{p²} (already computed as mxxpp)
 
-    // Simplified version using the key operations
-    const f_inv = f.inverse() orelse return f;
-    const f_x2_inv = f_x2.inverse() orelse return f;
+    // y4 = conj((m^x)^p)
+    const y4 = mxp.conjugate();
 
-    // Compute various Frobenius powers
-    const f_p = frobeniusFp12(f);
-    const f_p2 = frobeniusFp12(f_p);
-    const f_p3 = frobeniusFp12(f_p2);
+    // y5 = conj(m^x · (m^{x²})^p)
+    var y5 = mx.mul(mxxp);
+    y5 = y5.conjugate();
 
-    const f_x_p = frobeniusFp12(f_x);
-    const f_x_p_inv = f_x_p.inverse() orelse return f;
-    const f_x2_p = frobeniusFp12(f_x2);
-    const f_x_p2 = frobeniusFp12(frobeniusFp12(f_x));
-    const f_p2_inv = f_p2.inverse() orelse return f;
+    // y6 = conj(m^{x²})
+    const y6 = mxx.conjugate();
 
-    // Combine all terms
-    // y0 = f^(x^3) * f^(-x^2) * f^x * f^(-1)
-    const y0 = f_x3.mul(f_x2_inv).mul(f_x).mul(f_inv);
+    // y7 = conj(m^{x³} · (m^{x³})^p)
+    var y7 = mxxx.mul(mxxxp);
+    y7 = y7.conjugate();
 
-    // y1 = f^(p*x^2) * f^(-p*x) * f^p
-    const y1 = f_x2_p.mul(f_x_p_inv).mul(f_p);
+    // Compute y1·y2²·y3⁶·y4¹²·y5¹⁸·y6³⁰·y7³⁶ using the optimized addition chain from ziskos:
+    //
+    // T11 = y7² · y5 · y6
+    var t11 = y7.square();
+    t11 = t11.mul(y5);
+    t11 = t11.mul(y6);
 
-    // y2 = f^(p^2*x) * f^(-p^2)
-    const y2 = f_x_p2.mul(f_p2_inv);
+    // T21 = T11 · y4 · y6
+    var t21 = t11.mul(y4);
+    t21 = t21.mul(y6);
 
-    // y3 = f^(p^3)
-    const y3 = f_p3;
+    // T12 = T11 · y3 (y3 = mxxpp)
+    const t12 = t11.mul(mxxpp);
 
-    return y0.mul(y1).mul(y2).mul(y3);
+    // T22 = T21² · T12
+    var t22 = t21.square();
+    t22 = t22.mul(t12);
+
+    // T23 = T22²
+    const t23 = t22.square();
+
+    // T24 = T23 · y1
+    const t24 = t23.mul(y1);
+
+    // T13 = T23 · y2
+    const t13 = t23.mul(y2);
+
+    // T14 = T13² · T24
+    var t14 = t13.square();
+    t14 = t14.mul(t24);
+
+    return t14;
 }
 
 /// Compute f^x where x is the BN254 curve parameter
@@ -1226,8 +1389,8 @@ test "Miller loop doubling step" {
     const result = doublingStep(q);
 
     // The resulting point should not be identity (unless generator is special)
-    // Line coefficients should have at least one non-zero component
-    try std.testing.expect(!result.coeffs.c1.isZero());
+    // Line coefficients (λ, μ) should have at least one non-zero component
+    try std.testing.expect(!result.coeffs.lambda.isZero() or !result.coeffs.mu.isZero());
 }
 
 test "Miller loop addition step" {
@@ -1239,7 +1402,7 @@ test "Miller loop addition step" {
 
     // Should produce a valid point
     if (!result.point.isIdentity()) {
-        try std.testing.expect(!result.coeffs.c1.isZero());
+        try std.testing.expect(!result.coeffs.lambda.isZero() or !result.coeffs.mu.isZero());
     }
 }
 
@@ -1318,10 +1481,18 @@ test "G2 scalar mul internal consistency" {
 }
 
 // Pairing bilinearity test: verifies e([2]P, Q) = e(P, Q)^2
-// Still failing - remaining issues likely in:
-// 1. Line evaluation in doubling/addition step
-// 2. Final exponentiation hard part
-// 3. π(Q) twist factor computation
+// TODO: This test is still failing - needs more investigation
+// Progress made in iteration 13:
+// - Added complete Frobenius coefficients from Zisk
+// - Implemented frobenius, frobenius2, frobenius3 for Fp12
+// - Added toMontgomery() for proper coefficient conversion
+// - Updated Miller loop to match Zisk iteration order
+// - Updated hard part of final exponentiation with Zisk formula
+// - Updated line evaluation with (λ, μ) coefficient format
+// Possible remaining issues:
+// - Zisk coefficients may already be in Montgomery form (double conversion?)
+// - Sparse multiplication optimization differences
+// - Twist isomorphism handling in line evaluation
 // test "pairing bilinearity in G1" {
 //     const g1 = G1Point{ .x = BN254Scalar.one(), .y = BN254Scalar.fromU64(2), .infinity = false };
 //     const g2 = G2Point.generator();

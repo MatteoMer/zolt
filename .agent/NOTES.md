@@ -114,3 +114,54 @@ The pairing bilinearity test still fails. With Frobenius and ATE loop fixed, the
 - arkworks: github.com/arkworks-rs/curves/blob/master/bn254/src/curves/g2.rs
 - EIP-197 (Ethereum's BN254 precompile spec)
 - arkworks-rs/curves bn254: github.com/arkworks-rs/curves/tree/master/bn254
+- ziskos: /Users/matteo/projects/zisk/ziskos/entrypoint/src/zisklib/lib/bn254/
+
+## Pairing Refactoring (Iteration 13)
+
+### Changes Made
+
+Based on the Zisk BN254 implementation, made these significant changes:
+
+1. **Frobenius Coefficients**
+   - Added GAMMA11 through GAMMA35 from Zisk constants.rs
+   - These are the complete set for frobenius^1, frobenius^2, and frobenius^3
+   - Frobenius^1 and Frobenius^3 require conjugation (odd powers)
+   - Frobenius^2 doesn't conjugate (even power)
+   - Gamma 2x coefficients are Fp elements (not Fp2)
+
+2. **Fp12 Frobenius**
+   - Rewrote frobenius() to apply coefficients correctly
+   - Added frobenius2() using gamma 2x (Fp scalars, no conjugate)
+   - Added frobenius3() using gamma 3x (Fp2 elements, conjugate)
+
+3. **Final Exponentiation Hard Part**
+   - Replaced old formula with exact Zisk formula
+   - Uses y1-y7 intermediate values
+   - Optimized addition chain: T11, T21, T12, T22, T23, T24, T13, T14
+
+4. **Miller Loop**
+   - ATE_LOOP_COUNT now matches Zisk exactly
+   - Iteration now goes from index 1 to 64 (skip index 0)
+   - Changed LineCoeffs from (c0, c1, c2) to (lambda, mu)
+
+5. **Montgomery Form**
+   - Added toMontgomery() to BN254Scalar
+   - fp2FromLimbs() now converts raw limbs to Montgomery form
+
+### Still Failing
+
+The bilinearity test e([2]P, Q) = e(P, Q)^2 still fails.
+
+Possible issues:
+1. **Double Montgomery conversion**: If Zisk coefficients are already in Montgomery
+   form, we're converting them twice
+2. **Sparse multiplication**: Our sparseMulFp12 builds a full Fp12 and uses mul()
+   instead of optimized sparse formulas
+3. **Line evaluation formula**: The (λ, μ) -> sparse Fp12 conversion might be wrong
+4. **Twist handling**: The untwist-frobenius-twist endomorphism might have issues
+
+### Next Steps
+
+1. Check if Zisk stores coefficients in Montgomery or raw form
+2. Add debug output to compare intermediate pairing values with reference
+3. Consider using gnark-crypto as additional reference

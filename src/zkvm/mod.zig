@@ -134,7 +134,7 @@ pub fn JoltProof(comptime F: type) type {
             self.bytecode_proof.deinit(allocator);
             self.memory_proof.deinit(allocator);
             self.register_proof.deinit(allocator);
-            self.r1cs_proof.deinit(allocator);
+            self.r1cs_proof.deinit();
         }
     };
 }
@@ -232,10 +232,7 @@ pub fn JoltProver(comptime F: type) type {
                     .read_ts_commitment = F.zero(),
                     .write_ts_commitment = F.zero(),
                 },
-                .r1cs_proof = spartan.R1CSProof(F){
-                    .sumcheck_proof = F.zero(),
-                    .opening_proof = F.zero(),
-                },
+                .r1cs_proof = try spartan.R1CSProof(F).placeholder(self.allocator),
             };
         }
 

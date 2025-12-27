@@ -31,6 +31,32 @@ pub fn R1CSProof(comptime F: type) type {
         eval_point: []F,
         allocator: Allocator,
 
+        /// Create a placeholder proof (for testing/placeholder purposes)
+        pub fn placeholder(allocator: Allocator) !Self {
+            const tau = try allocator.alloc(F, 1);
+            tau[0] = F.zero();
+
+            const eval_point = try allocator.alloc(F, 1);
+            eval_point[0] = F.zero();
+
+            const rounds = try allocator.alloc(subprotocols.Sumcheck(F).Round, 0);
+            const final_point = try allocator.alloc(F, 0);
+
+            return Self{
+                .tau = tau,
+                .sumcheck_proof = .{
+                    .claim = F.zero(),
+                    .rounds = rounds,
+                    .final_point = final_point,
+                    .final_eval = F.zero(),
+                    .allocator = allocator,
+                },
+                .eval_claims = .{ F.zero(), F.zero(), F.zero() },
+                .eval_point = eval_point,
+                .allocator = allocator,
+            };
+        }
+
         pub fn deinit(self: *Self) void {
             self.allocator.free(self.tau);
             self.sumcheck_proof.deinit();

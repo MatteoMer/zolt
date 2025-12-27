@@ -68,8 +68,10 @@ pub fn BytecodeProof(comptime F: type) type {
 
         /// Commitment to bytecode polynomial
         commitment: F,
-        /// Opening proof
-        opening: F,
+        /// Read timestamp polynomial commitment
+        read_ts_commitment: F,
+        /// Write timestamp polynomial commitment
+        write_ts_commitment: F,
 
         pub fn deinit(_: *Self, _: Allocator) void {
             // Nothing to free for now

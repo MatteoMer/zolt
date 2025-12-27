@@ -39,6 +39,25 @@ zig build -Doptimize=ReleaseFast
 zig build run
 ```
 
+## CLI Commands
+
+```bash
+# Show help
+./zig-out/bin/zolt help
+
+# Show version
+./zig-out/bin/zolt version
+
+# Decode a RISC-V instruction from hex
+./zig-out/bin/zolt decode 0x00a00513
+
+# Run performance benchmarks
+./zig-out/bin/zolt bench
+
+# Run a RISC-V ELF binary
+./zig-out/bin/zolt run program.elf
+```
+
 ## Project Structure
 
 ```
@@ -154,7 +173,7 @@ pub fn main() !void {
 
 ## Testing
 
-The project includes 193 tests covering:
+The project includes 194 tests covering:
 
 - Field arithmetic (Montgomery operations, batch ops)
 - Polynomial operations (evaluation, summation)

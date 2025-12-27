@@ -247,11 +247,83 @@ pub const BN254Scalar = struct {
         return self.montgomeryMul(other);
     }
 
-    /// Field squaring (optimized)
+    /// Field squaring (optimized using Karatsuba-like technique)
+    /// Saves ~25% multiplications compared to naive multiplication
     pub fn square(self: Self) Self {
-        // For now, use regular multiplication
-        // TODO: Implement optimized squaring
-        return self.montgomeryMul(self);
+        // Optimized squaring: we can compute a^2 with fewer multiplications
+        // Since (a0 + a1*2^64 + a2*2^128 + a3*2^192)^2 has symmetric terms
+        // For example: 2*a0*a1 instead of a0*a1 + a1*a0
+        //
+        // First, compute the product matrix with reduced operations
+        var t: [8]u64 = .{ 0, 0, 0, 0, 0, 0, 0, 0 };
+        var carry: u64 = 0;
+
+        // Compute diagonal terms a[i]^2
+        inline for (0..4) |i| {
+            const prod = mulWide(self.limbs[i], self.limbs[i]);
+            const idx = i * 2;
+            const sum = @as(u128, t[idx]) + prod;
+            t[idx] = @truncate(sum);
+            const overflow = @as(u64, @truncate(sum >> 64));
+            const sum_next = @as(u128, t[idx + 1]) + @as(u128, overflow);
+            t[idx + 1] = @truncate(sum_next);
+            // Propagate carry to higher limbs
+            if (idx + 2 < 8) {
+                t[idx + 2] +%= @truncate(sum_next >> 64);
+            }
+        }
+
+        // Compute off-diagonal terms 2*a[i]*a[j] for i < j
+        inline for (0..4) |i| {
+            inline for (i + 1..4) |j| {
+                const prod = mulWide(self.limbs[i], self.limbs[j]);
+                const idx = i + j;
+                // Double the product (since we count both a[i]*a[j] and a[j]*a[i])
+                const doubled_lo = @as(u64, @truncate(prod)) << 1;
+                const doubled_hi = (@as(u64, @truncate(prod >> 64)) << 1) | (@as(u64, @truncate(prod)) >> 63);
+                const carry_out: u64 = @as(u64, @truncate(prod >> 64)) >> 63;
+
+                const sum0 = @as(u128, t[idx]) + @as(u128, doubled_lo);
+                t[idx] = @truncate(sum0);
+                const sum1 = @as(u128, t[idx + 1]) + @as(u128, doubled_hi) + (sum0 >> 64);
+                t[idx + 1] = @truncate(sum1);
+                if (idx + 2 < 8) {
+                    const sum2 = @as(u128, t[idx + 2]) + @as(u128, carry_out) + (sum1 >> 64);
+                    t[idx + 2] = @truncate(sum2);
+                    if (idx + 3 < 8) {
+                        t[idx + 3] +%= @truncate(sum2 >> 64);
+                    }
+                }
+            }
+        }
+
+        // Montgomery reduction: reduce t (512 bits) to 256 bits mod p
+        var r: [5]u64 = .{ t[0], t[1], t[2], t[3], 0 };
+
+        inline for (0..4) |i| {
+            const m = r[0] *% BN254_INV;
+            carry = 0;
+            const prod0 = mulWide(m, BN254_MODULUS[0]);
+            const sum0 = @as(u128, r[0]) + prod0;
+            carry = @truncate(sum0 >> 64);
+
+            inline for (1..4) |j| {
+                const prod = mulWide(m, BN254_MODULUS[j]);
+                const sum = @as(u128, r[j]) + prod + @as(u128, carry);
+                r[j - 1] = @truncate(sum);
+                carry = @truncate(sum >> 64);
+            }
+            const t_idx = i + 4;
+            const final_sum = @as(u128, r[4]) + @as(u128, carry) + @as(u128, t[t_idx]);
+            r[3] = @truncate(final_sum);
+            r[4] = @truncate(final_sum >> 64);
+        }
+
+        var result = Self{ .limbs = .{ r[0], r[1], r[2], r[3] } };
+        if (r[4] != 0 or !result.lessThanModulus()) {
+            result = result.subtractModulus();
+        }
+        return result;
     }
 
     /// Field negation: -a mod p
@@ -451,6 +523,170 @@ test "bn254 scalar power" {
     // a^1 = a
     const pow1 = two.pow(1);
     try std.testing.expect(pow1.eql(two));
+}
+
+/// Batch field operations for SIMD-like performance
+/// These functions operate on slices for cache efficiency
+pub const BatchOps = struct {
+    /// Batch addition: results[i] = a[i] + b[i]
+    pub fn batchAdd(results: []BN254Scalar, a: []const BN254Scalar, b: []const BN254Scalar) void {
+        std.debug.assert(results.len == a.len and a.len == b.len);
+        for (0..results.len) |i| {
+            results[i] = a[i].add(b[i]);
+        }
+    }
+
+    /// Batch subtraction: results[i] = a[i] - b[i]
+    pub fn batchSub(results: []BN254Scalar, a: []const BN254Scalar, b: []const BN254Scalar) void {
+        std.debug.assert(results.len == a.len and a.len == b.len);
+        for (0..results.len) |i| {
+            results[i] = a[i].sub(b[i]);
+        }
+    }
+
+    /// Batch multiplication: results[i] = a[i] * b[i]
+    pub fn batchMul(results: []BN254Scalar, a: []const BN254Scalar, b: []const BN254Scalar) void {
+        std.debug.assert(results.len == a.len and a.len == b.len);
+        for (0..results.len) |i| {
+            results[i] = a[i].mul(b[i]);
+        }
+    }
+
+    /// Batch scalar multiplication: results[i] = a[i] * scalar
+    pub fn batchMulScalar(results: []BN254Scalar, a: []const BN254Scalar, scalar: BN254Scalar) void {
+        std.debug.assert(results.len == a.len);
+        for (0..results.len) |i| {
+            results[i] = a[i].mul(scalar);
+        }
+    }
+
+    /// Batch squaring: results[i] = a[i]^2
+    pub fn batchSquare(results: []BN254Scalar, a: []const BN254Scalar) void {
+        std.debug.assert(results.len == a.len);
+        for (0..results.len) |i| {
+            results[i] = a[i].square();
+        }
+    }
+
+    /// Inner product: sum(a[i] * b[i])
+    pub fn innerProduct(a: []const BN254Scalar, b: []const BN254Scalar) BN254Scalar {
+        std.debug.assert(a.len == b.len);
+        var result = BN254Scalar.zero();
+        for (0..a.len) |i| {
+            result = result.add(a[i].mul(b[i]));
+        }
+        return result;
+    }
+
+    /// Sum of products with precomputed terms for Horner's method
+    /// Computes: a[0] + x*(a[1] + x*(a[2] + ... + x*a[n-1])))
+    pub fn hornerEval(coeffs: []const BN254Scalar, x: BN254Scalar) BN254Scalar {
+        if (coeffs.len == 0) return BN254Scalar.zero();
+
+        var result = coeffs[coeffs.len - 1];
+        var i: usize = coeffs.len - 1;
+        while (i > 0) {
+            i -= 1;
+            result = result.mul(x).add(coeffs[i]);
+        }
+        return result;
+    }
+
+    /// Batch inverse using Montgomery's trick
+    /// Computes inverses of all elements using only one field inversion
+    /// Much faster than computing individual inverses: O(3n) muls + 1 inverse vs O(n) inverses
+    pub fn batchInverse(results: []BN254Scalar, a: []const BN254Scalar, allocator: std.mem.Allocator) !void {
+        std.debug.assert(results.len == a.len);
+        if (a.len == 0) return;
+
+        // Step 1: Compute running products
+        // products[i] = a[0] * a[1] * ... * a[i]
+        const products = try allocator.alloc(BN254Scalar, a.len);
+        defer allocator.free(products);
+
+        products[0] = a[0];
+        for (1..a.len) |i| {
+            if (a[i].isZero()) {
+                // Handle zero by using one (will result in zero inverse)
+                products[i] = products[i - 1];
+            } else {
+                products[i] = products[i - 1].mul(a[i]);
+            }
+        }
+
+        // Step 2: Compute inverse of the final product
+        const all_inv = products[a.len - 1].inverse() orelse BN254Scalar.zero();
+
+        // Step 3: Compute individual inverses
+        var running_inv = all_inv;
+        var i: usize = a.len;
+        while (i > 1) {
+            i -= 1;
+            if (a[i].isZero()) {
+                results[i] = BN254Scalar.zero();
+            } else {
+                // a[i]^{-1} = running_inv * products[i-1]
+                results[i] = running_inv.mul(products[i - 1]);
+                running_inv = running_inv.mul(a[i]);
+            }
+        }
+        // Handle a[0]
+        if (a[0].isZero()) {
+            results[0] = BN254Scalar.zero();
+        } else {
+            results[0] = running_inv;
+        }
+    }
+
+    /// Multi-scalar multiplication accumulator
+    /// Computes sum(scalars[i] * bases[i])
+    pub fn multiScalarMulLinear(scalars: []const BN254Scalar, bases: []const BN254Scalar) BN254Scalar {
+        return innerProduct(scalars, bases);
+    }
+};
+
+test "batch operations" {
+    const allocator = std.testing.allocator;
+
+    var a: [4]BN254Scalar = undefined;
+    var b: [4]BN254Scalar = undefined;
+    var results: [4]BN254Scalar = undefined;
+
+    for (0..4) |i| {
+        a[i] = BN254Scalar.fromU64(@as(u64, @intCast(i + 1)));
+        b[i] = BN254Scalar.fromU64(@as(u64, @intCast(i + 5)));
+    }
+
+    // Test batch add
+    BatchOps.batchAdd(&results, &a, &b);
+    for (0..4) |i| {
+        const expected = BN254Scalar.fromU64(@as(u64, @intCast(2 * i + 6)));
+        try std.testing.expect(results[i].eql(expected));
+    }
+
+    // Test inner product: 1*5 + 2*6 + 3*7 + 4*8 = 5 + 12 + 21 + 32 = 70
+    const ip = BatchOps.innerProduct(&a, &b);
+    try std.testing.expect(ip.eql(BN254Scalar.fromU64(70)));
+
+    // Test Horner evaluation: 1 + 2x + 3x^2 + 4x^3 at x=2
+    // = 1 + 2*2 + 3*4 + 4*8 = 1 + 4 + 12 + 32 = 49
+    const horner_result = BatchOps.hornerEval(&a, BN254Scalar.fromU64(2));
+    try std.testing.expect(horner_result.eql(BN254Scalar.fromU64(49)));
+
+    // Test batch inverse
+    var non_zero_a: [3]BN254Scalar = .{
+        BN254Scalar.fromU64(2),
+        BN254Scalar.fromU64(3),
+        BN254Scalar.fromU64(5),
+    };
+    var inverses: [3]BN254Scalar = undefined;
+    try BatchOps.batchInverse(&inverses, &non_zero_a, allocator);
+
+    // Verify: a[i] * inv[i] = 1
+    for (0..3) |i| {
+        const prod = non_zero_a[i].mul(inverses[i]);
+        try std.testing.expect(prod.eql(BN254Scalar.one()));
+    }
 }
 
 // Export pairing module

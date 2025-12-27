@@ -14,6 +14,7 @@ const field = @import("../field/mod.zig");
 
 pub const bytecode = @import("bytecode/mod.zig");
 pub const instruction = @import("instruction/mod.zig");
+pub const lasso = @import("lasso/mod.zig");
 pub const lookup_table = @import("lookup_table/mod.zig");
 pub const r1cs = @import("r1cs/mod.zig");
 pub const ram = @import("ram/mod.zig");

@@ -66,9 +66,9 @@
 ## Statistics
 - Rust files in jolt-core: 296
 - Build status: ✅ Passing
-- Test status: ✅ Passing (96 unit + 84 integration = 180 tests)
-- Lines of Zig code: ~10,200 (including examples)
-- Zig files created: 30 (27 src + 3 examples)
+- Test status: ✅ Passing (96 unit tests)
+- Lines of Zig code: 10,437
+- Zig files created: 31 (28 src + 3 examples)
 
 ## Key Features Implemented
 1. **BN254 Scalar Field**: Full Montgomery form arithmetic with CIOS multiplication

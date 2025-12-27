@@ -308,32 +308,99 @@ pub const Emulator = struct {
                 try self.registers.write(decoded.rd, result.rd_value);
             },
             .OP => {
-                result.rd_value = switch (@as(zkvm.instruction.OpFunct3, @enumFromInt(decoded.funct3))) {
-                    .ADD_SUB => blk: {
-                        if ((decoded.funct7 & 0x20) != 0) {
-                            break :blk rs1 -% rs2; // SUB
-                        } else if ((decoded.funct7 & 0x01) != 0) {
-                            break :blk rs1 *% rs2; // MUL
-                        } else {
-                            break :blk rs1 +% rs2; // ADD
-                        }
-                    },
-                    .SLL => rs1 << @truncate(rs2 & 0x3F),
-                    .SLT => if (@as(i64, @bitCast(rs1)) < @as(i64, @bitCast(rs2))) 1 else 0,
-                    .SLTU => if (rs1 < rs2) 1 else 0,
-                    .XOR => rs1 ^ rs2,
-                    .SRL_SRA => blk: {
-                        const shamt: u6 = @truncate(rs2 & 0x3F);
-                        if ((decoded.funct7 & 0x20) != 0) {
-                            break :blk @bitCast(@as(i64, @bitCast(rs1)) >> shamt);
-                        } else {
-                            break :blk rs1 >> shamt;
-                        }
-                    },
-                    .OR => rs1 | rs2,
-                    .AND => rs1 & rs2,
-                    _ => 0,
-                };
+                // Check for M extension (funct7 = 0b0000001)
+                if (decoded.funct7 == 0b0000001) {
+                    // M Extension: multiply/divide operations
+                    result.rd_value = switch (@as(zkvm.instruction.MulDivFunct3, @enumFromInt(decoded.funct3))) {
+                        .MUL => rs1 *% rs2, // Lower 64 bits of product
+                        .MULH => blk: {
+                            // Signed * Signed -> upper 64 bits
+                            const a: i128 = @as(i64, @bitCast(rs1));
+                            const b: i128 = @as(i64, @bitCast(rs2));
+                            const prod = a * b;
+                            break :blk @bitCast(@as(i64, @truncate(prod >> 64)));
+                        },
+                        .MULHSU => blk: {
+                            // Signed * Unsigned -> upper 64 bits
+                            const a: i128 = @as(i64, @bitCast(rs1));
+                            const b: i128 = @as(i128, rs2);
+                            const prod = a * b;
+                            break :blk @bitCast(@as(i64, @truncate(prod >> 64)));
+                        },
+                        .MULHU => blk: {
+                            // Unsigned * Unsigned -> upper 64 bits
+                            const a: u128 = rs1;
+                            const b: u128 = rs2;
+                            const prod = a * b;
+                            break :blk @truncate(prod >> 64);
+                        },
+                        .DIV => blk: {
+                            // Signed division
+                            if (rs2 == 0) {
+                                break :blk @as(u64, @bitCast(@as(i64, -1)));
+                            }
+                            const a: i64 = @bitCast(rs1);
+                            const b: i64 = @bitCast(rs2);
+                            // Handle overflow case
+                            if (a == std.math.minInt(i64) and b == -1) {
+                                break :blk rs1; // Overflow returns dividend
+                            }
+                            break :blk @bitCast(@divTrunc(a, b));
+                        },
+                        .DIVU => blk: {
+                            // Unsigned division
+                            if (rs2 == 0) {
+                                break :blk std.math.maxInt(u64);
+                            }
+                            break :blk rs1 / rs2;
+                        },
+                        .REM => blk: {
+                            // Signed remainder
+                            if (rs2 == 0) {
+                                break :blk rs1;
+                            }
+                            const a: i64 = @bitCast(rs1);
+                            const b: i64 = @bitCast(rs2);
+                            // Handle overflow case
+                            if (a == std.math.minInt(i64) and b == -1) {
+                                break :blk 0;
+                            }
+                            break :blk @bitCast(@rem(a, b));
+                        },
+                        .REMU => blk: {
+                            // Unsigned remainder
+                            if (rs2 == 0) {
+                                break :blk rs1;
+                            }
+                            break :blk rs1 % rs2;
+                        },
+                    };
+                } else {
+                    result.rd_value = switch (@as(zkvm.instruction.OpFunct3, @enumFromInt(decoded.funct3))) {
+                        .ADD_SUB => blk: {
+                            if ((decoded.funct7 & 0x20) != 0) {
+                                break :blk rs1 -% rs2; // SUB
+                            } else {
+                                break :blk rs1 +% rs2; // ADD
+                            }
+                        },
+                        .SLL => rs1 << @truncate(rs2 & 0x3F),
+                        .SLT => if (@as(i64, @bitCast(rs1)) < @as(i64, @bitCast(rs2))) 1 else 0,
+                        .SLTU => if (rs1 < rs2) 1 else 0,
+                        .XOR => rs1 ^ rs2,
+                        .SRL_SRA => blk: {
+                            const shamt: u6 = @truncate(rs2 & 0x3F);
+                            if ((decoded.funct7 & 0x20) != 0) {
+                                break :blk @bitCast(@as(i64, @bitCast(rs1)) >> shamt);
+                            } else {
+                                break :blk rs1 >> shamt;
+                            }
+                        },
+                        .OR => rs1 | rs2,
+                        .AND => rs1 & rs2,
+                        _ => 0,
+                    };
+                }
                 try self.registers.write(decoded.rd, result.rd_value);
             },
             else => {
@@ -382,4 +449,77 @@ test "simple instruction execution" {
     // Check result
     const x1 = try emu.registers.read(1);
     try std.testing.expectEqual(@as(u64, 42), x1);
+}
+
+test "M extension multiply" {
+    const allocator = std.testing.allocator;
+    const config = common.MemoryConfig{
+        .program_size = 1024,
+    };
+    var emu = Emulator.init(allocator, &config);
+    defer emu.deinit();
+
+    // Set up registers for multiplication
+    try emu.registers.write(1, 7); // x1 = 7
+    try emu.registers.write(2, 6); // x2 = 6
+
+    // mul x3, x1, x2  (0x02208133)
+    // opcode=0x33 (OP), rd=3, rs1=1, rs2=2, funct3=0, funct7=1
+    const mul_instr: u32 = 0x022080b3; // mul x1, x1, x2
+    const program = std.mem.asBytes(&mul_instr);
+    try emu.loadProgram(program);
+
+    _ = try emu.step();
+
+    const x1 = try emu.registers.read(1);
+    try std.testing.expectEqual(@as(u64, 42), x1); // 7 * 6 = 42
+}
+
+test "M extension division" {
+    const allocator = std.testing.allocator;
+    const config = common.MemoryConfig{
+        .program_size = 1024,
+    };
+    var emu = Emulator.init(allocator, &config);
+    defer emu.deinit();
+
+    // Set up registers
+    try emu.registers.write(1, 42); // x1 = 42
+    try emu.registers.write(2, 6); // x2 = 6
+
+    // divu x1, x1, x2 (opcode=0x33, funct3=5, funct7=1)
+    // 0000001 | rs2 | rs1 | 101 | rd | 0110011
+    // 0000001 00010 00001 101 00001 0110011
+    const divu_instr: u32 = 0x0220d0b3;
+    const program = std.mem.asBytes(&divu_instr);
+    try emu.loadProgram(program);
+
+    _ = try emu.step();
+
+    const x1 = try emu.registers.read(1);
+    try std.testing.expectEqual(@as(u64, 7), x1); // 42 / 6 = 7
+}
+
+test "M extension division by zero" {
+    const allocator = std.testing.allocator;
+    const config = common.MemoryConfig{
+        .program_size = 1024,
+    };
+    var emu = Emulator.init(allocator, &config);
+    defer emu.deinit();
+
+    // Set up registers
+    try emu.registers.write(1, 42); // x1 = 42
+    try emu.registers.write(2, 0); // x2 = 0
+
+    // divu x1, x1, x2
+    const divu_instr: u32 = 0x0220d0b3;
+    const program = std.mem.asBytes(&divu_instr);
+    try emu.loadProgram(program);
+
+    _ = try emu.step();
+
+    const x1 = try emu.registers.read(1);
+    // RISC-V spec: unsigned division by zero returns max value
+    try std.testing.expectEqual(std.math.maxInt(u64), x1);
 }

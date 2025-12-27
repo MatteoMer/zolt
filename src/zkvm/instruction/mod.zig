@@ -91,6 +91,29 @@ pub const OpFunct3 = enum(u3) {
     _,
 };
 
+/// M Extension function codes (funct3 for OP with funct7 = 0b0000001)
+/// These are multiplcation and division operations
+pub const MulDivFunct3 = enum(u3) {
+    MUL = 0b000, // Multiply (lower bits)
+    MULH = 0b001, // Multiply High (signed * signed)
+    MULHSU = 0b010, // Multiply High (signed * unsigned)
+    MULHU = 0b011, // Multiply High (unsigned * unsigned)
+    DIV = 0b100, // Divide (signed)
+    DIVU = 0b101, // Divide (unsigned)
+    REM = 0b110, // Remainder (signed)
+    REMU = 0b111, // Remainder (unsigned)
+};
+
+/// M Extension function codes for 32-bit operations (RV64M with OP_32)
+pub const MulDivW_Funct3 = enum(u3) {
+    MULW = 0b000, // Multiply Word (lower 32 bits)
+    DIVW = 0b100, // Divide Word (signed)
+    DIVUW = 0b101, // Divide Word (unsigned)
+    REMW = 0b110, // Remainder Word (signed)
+    REMUW = 0b111, // Remainder Word (unsigned)
+    _,
+};
+
 /// Decoded RISC-V instruction
 pub const DecodedInstruction = struct {
     /// Original 32-bit instruction
@@ -207,6 +230,25 @@ pub const DecodedInstruction = struct {
     /// Check if this is a memory store
     pub fn isStore(self: DecodedInstruction) bool {
         return self.opcode == .STORE;
+    }
+
+    /// Check if this is an M extension instruction (multiply/divide)
+    pub fn isMulDiv(self: DecodedInstruction) bool {
+        return (self.opcode == .OP or self.opcode == .OP_32) and self.funct7 == 0b0000001;
+    }
+
+    /// Check if this is a multiplication instruction
+    pub fn isMul(self: DecodedInstruction) bool {
+        if (!self.isMulDiv()) return false;
+        const funct3: MulDivFunct3 = @enumFromInt(self.funct3);
+        return funct3 == .MUL or funct3 == .MULH or funct3 == .MULHSU or funct3 == .MULHU;
+    }
+
+    /// Check if this is a division instruction
+    pub fn isDiv(self: DecodedInstruction) bool {
+        if (!self.isMulDiv()) return false;
+        const funct3: MulDivFunct3 = @enumFromInt(self.funct3);
+        return funct3 == .DIV or funct3 == .DIVU or funct3 == .REM or funct3 == .REMU;
     }
 };
 

@@ -308,8 +308,8 @@ test "lasso multiple rounds consistent" {
 
     // Track claim consistency
     var prev_claim = lasso_prover.expanding_v.sum();
-    var challenges_used = std.ArrayList(F).init(allocator);
-    defer challenges_used.deinit();
+    var challenges_used: std.ArrayListUnmanaged(F) = .{};
+    defer challenges_used.deinit(allocator);
 
     // Run 3 rounds
     var round: usize = 0;
@@ -325,7 +325,7 @@ test "lasso multiple rounds consistent" {
 
         // Generate challenge (deterministic for testing)
         const challenge = F.fromU64(@as(u64, @intCast(round + 1)) * 7);
-        try challenges_used.append(challenge);
+        try challenges_used.append(allocator, challenge);
 
         // Update claim for next round
         prev_claim = round_poly.evaluate(challenge);

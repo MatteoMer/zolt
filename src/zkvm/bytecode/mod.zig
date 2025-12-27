@@ -26,23 +26,23 @@ pub const BytecodeEntry = struct {
 
 /// Bytecode table for the program
 pub const BytecodeTable = struct {
-    entries: std.ArrayList(BytecodeEntry),
+    entries: std.ArrayListUnmanaged(BytecodeEntry),
     allocator: Allocator,
 
     pub fn init(allocator: Allocator) BytecodeTable {
         return .{
-            .entries = std.ArrayList(BytecodeEntry).init(allocator),
+            .entries = .{},
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *BytecodeTable) void {
-        self.entries.deinit();
+        self.entries.deinit(self.allocator);
     }
 
     /// Add a bytecode entry
     pub fn addEntry(self: *BytecodeTable, entry: BytecodeEntry) !void {
-        try self.entries.append(entry);
+        try self.entries.append(self.allocator, entry);
     }
 
     /// Look up an entry by address

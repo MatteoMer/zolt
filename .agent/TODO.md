@@ -1,8 +1,36 @@
 # Zolt zkVM Implementation TODO
 
-## Completed (This Session - Iteration 8)
+## Completed (This Session - Iteration 9)
 
-### R1CS-Spartan Integration
+### Preprocessing Implementation
+- [x] Implemented `SharedPreprocessing(F)` with bytecode size, padding, memory layout
+- [x] Computed initial memory hash for public verification
+- [x] Implemented `Preprocessing.preprocess()` to generate ProvingKey and VerifyingKey
+- [x] ProvingKey contains full SRS for polynomial commitment
+- [x] VerifyingKey contains G1, G2, tau_G2 for pairing checks
+- [x] Fixed SharedPreprocessing.deinit() const pointer issue
+
+### Zig 0.15 API Compatibility Fixes
+- [x] Fixed bytecode BytecodeTable to use ArrayListUnmanaged
+- [x] Fixed tracer ExecutionTrace to use ArrayListUnmanaged
+- [x] Fixed tracer setInputs to pass allocator to appendSlice
+- [x] Fixed SplitEqPolynomial WPair type to be a named struct
+- [x] Fixed all `transcript.challengeScalar()` calls to use `try`
+- [x] Fixed all `Transcript` type parameters from `*Transcript` to `*Transcript(F)`
+- [x] Fixed all `.inverse()` calls to unwrap optional with `.?`
+- [x] Fixed evaluatePolynomialAtChallenge calls to pass F type
+- [x] Fixed prover to extract rd/rs1/rs2 from instruction encoding
+
+### End-to-End Testing
+- [x] Added `e2e: simple addi program execution trace` test
+- [x] Added `e2e: preprocessing generates usable keys` test
+- [x] Added `e2e: multi-instruction program emulation` test
+- [x] Added `e2e: execute and trace multiple instructions` test
+- [x] All 324 tests pass
+
+## Completed (Previous Sessions - Iterations 1-8)
+
+### R1CS-Spartan Integration (Iteration 8)
 - [x] Created `src/zkvm/r1cs/jolt_r1cs.zig` with JoltR1CS type
 - [x] Implemented witness generation from execution trace
 - [x] Implemented Az, Bz, Cz computation for Spartan
@@ -15,8 +43,6 @@
 - [x] Set circuit flags from instruction opcode
 - [x] Fixed EqPolynomial.evals shift for Zig 0.15 compatibility
 - [x] Added R1CS-Spartan integration test
-
-## Completed (Previous Sessions - Iterations 1-7)
 
 ### Batch Polynomial Commitment Verification
 - [x] Created `src/poly/commitment/batch.zig` with batch verification
@@ -40,11 +66,6 @@
 - [x] Implemented `OpeningClaimAccumulator` for batch verification
 - [x] Connected stage proofs to JoltVerifier
 - [x] Updated JoltProof to include stage proofs
-
-### Proof Structure Updates
-- [x] Added `stage_proofs: ?JoltStageProofs(F)` to JoltProof
-- [x] Fixed ownership transfer of stage proofs from prover
-- [x] Added `proofs_transferred` flag to MultiStageProver
 
 ### Phase 1: Lookup Arguments
 - [x] Lookup table infrastructure (14 tables)
@@ -87,30 +108,33 @@
 
 ## Summary
 
-**Iteration 8 completed R1CS-Spartan integration:**
+**Iteration 9 completed:**
 
-Stage 1 (Outer Spartan) now properly runs sumcheck to prove:
-  sum_{x} eq(tau, x) * [Az(x) * Bz(x) - Cz(x)] = 0
+1. **Preprocessing Implementation**: Full `Preprocessing.preprocess()` that generates
+   ProvingKey (with SRS) and VerifyingKey (with pairing parameters)
 
-The implementation:
-1. Builds JoltR1CS from execution trace (uniform constraints x cycles)
-2. Generates witness vector from trace steps
-3. Computes Az, Bz, Cz evaluations
-4. Runs sumcheck with proper round polynomials
-5. Records evaluation claims for verification
+2. **Zig 0.15 Compatibility**: Fixed numerous API issues including ArrayList patterns,
+   transcript type parameters, optional unwrapping, and register field extraction
 
-Also fixed:
-- Constraint generation to use proper TraceStep type
-- Immediate value derivation from instruction encoding
-- EqPolynomial shift operation for Zig 0.15
+3. **End-to-End Tests**: Added 4 new e2e tests that verify the emulator runs programs
+   correctly and generates execution traces
 
-All 312 tests pass.
+All 324 tests pass.
 
 ## Next Steps (Future Iterations)
+
+### Lasso Integration Bug
+- [ ] Fix SplitEqPolynomial assertion failure when called from LassoProver
+  - The split_eq.init() receives mismatched w.len vs num_vars
+  - Need to trace through LassoProver.init() parameter passing
 
 ### Production Readiness
 - [ ] G2 scalar multiplication for proper [τ]_2
 - [ ] Full pairing verification with real trusted setup
 - [ ] Import production SRS from Ethereum ceremony
-- [ ] End-to-end tests with full emulator execution
-- [ ] Fix bytecode module ArrayList API for Zig 0.15
+- [ ] Performance optimization with SIMD
+
+### Full Prove/Verify Integration
+- [ ] Fix Lasso prover parameter mismatch
+- [ ] Add full prove/verify e2e test
+- [ ] Benchmark against reference Rust implementation

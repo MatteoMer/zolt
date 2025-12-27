@@ -379,7 +379,7 @@ pub fn RafEvaluationVerifier(comptime F: type) type {
             }
 
             // Get challenge from transcript
-            const challenge = transcript.challengeScalar("raf_challenge");
+            const challenge = try transcript.challengeScalar("raf_challenge");
 
             // Update claim: p(challenge) = (1-challenge) * p(0) + challenge * p(1)
             const one_minus_r = F.one().sub(challenge);
@@ -442,7 +442,7 @@ fn computeEqEvals(allocator: Allocator, comptime F: type, r: []const F, n: usize
             // j with bit i = 0
             result[j] = result[j].mul(one_minus_ri);
             // j with bit i = 1
-            result[j + current_size] = result[j].mul(ri).mul(one_minus_ri.inverse());
+            result[j + current_size] = result[j].mul(ri).mul(one_minus_ri.inverse().?);
         }
         current_size *= 2;
     }

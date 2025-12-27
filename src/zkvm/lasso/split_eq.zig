@@ -27,6 +27,12 @@ pub fn SplitEqPolynomial(comptime F: type) type {
     return struct {
         const Self = @This();
 
+        /// Pair type for precomputed (1-w_i, w_i) values
+        pub const WPair = struct {
+            one_minus: F,
+            val: F,
+        };
+
         /// Total number of variables
         num_vars: usize,
         /// Number of outer variables (high-order bits)
@@ -46,7 +52,7 @@ pub fn SplitEqPolynomial(comptime F: type) type {
         E_in: []F,
 
         /// Precomputed (1-w_i, w_i) pairs for efficient binding
-        w_pairs: []struct { one_minus: F, val: F },
+        w_pairs: []WPair,
 
         /// Current round within outer/inner groups
         outer_round: usize,
@@ -68,9 +74,9 @@ pub fn SplitEqPolynomial(comptime F: type) type {
             @memcpy(w_copy, w);
 
             // Precompute (1-w_i, w_i) pairs
-            const w_pairs = try allocator.alloc(struct { one_minus: F, val: F }, num_vars);
+            const w_pairs = try allocator.alloc(WPair, num_vars);
             for (w, 0..) |wi, i| {
-                w_pairs[i] = .{
+                w_pairs[i] = WPair{
                     .one_minus = F.one().sub(wi),
                     .val = wi,
                 };

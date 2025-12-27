@@ -248,37 +248,166 @@ pub fn Jolt(comptime F: type) type {
     };
 }
 
+/// Shared preprocessing data (used by both prover and verifier)
+pub fn SharedPreprocessing(comptime F: type) type {
+    return struct {
+        const Self = @This();
+        const FieldType = F;
+
+        /// Bytecode preprocessing
+        bytecode_size: usize,
+        /// Padded bytecode size (power of 2)
+        padded_bytecode_size: usize,
+        /// Memory layout
+        memory_layout: common.MemoryLayout,
+        /// Initial memory state hash (for public verification)
+        init_memory_hash: F,
+        allocator: Allocator,
+
+        pub fn init(allocator: Allocator, program: *const Program) !Self {
+            // Round bytecode size to power of 2
+            var size = program.bytecode.len;
+            if (size == 0) size = 1;
+            var padded: usize = 1;
+            while (padded < size) padded <<= 1;
+            if (padded < 2) padded = 2;
+
+            // Compute a simple hash of initial bytecode
+            // In full implementation, this would be a polynomial commitment
+            var hash = F.zero();
+            for (program.bytecode, 0..) |byte, i| {
+                const byte_field = F.fromU64(@as(u64, byte));
+                const idx_field = F.fromU64(@as(u64, i + 1));
+                hash = hash.add(byte_field.mul(idx_field));
+            }
+
+            return .{
+                .bytecode_size = program.bytecode.len,
+                .padded_bytecode_size = padded,
+                .memory_layout = program.memory_layout,
+                .init_memory_hash = hash,
+                .allocator = allocator,
+            };
+        }
+
+        pub fn deinit(_: *const Self) void {
+            // Nothing to deallocate for now
+        }
+    };
+}
+
 /// Preprocessing for Jolt (generates proving/verifying keys)
 pub fn Preprocessing(comptime F: type) type {
     return struct {
         const Self = @This();
         const FieldType = F;
+        const poly = @import("../poly/mod.zig");
+        const HyperKZG = poly.commitment.HyperKZG(F);
 
-        /// Proving key
+        /// Proving key - contains prover-specific data
         pub const ProvingKey = struct {
-            _marker: ?*const FieldType = null,
+            /// Shared preprocessing data
+            shared: SharedPreprocessing(F),
+            /// Polynomial commitment SRS (prover side)
+            srs: HyperKZG.SetupParams,
+            /// Maximum trace length supported
+            max_trace_length: usize,
+            allocator: Allocator,
+
+            pub fn deinit(self: *ProvingKey) void {
+                self.shared.deinit();
+                self.srs.deinit();
+            }
         };
 
-        /// Verifying key
+        /// G1 point type (for MSM)
+        const msm = @import("../msm/mod.zig");
+        const G1Point = msm.AffinePoint(F);
+        const G2Point = @import("../field/mod.zig").pairing.G2Point;
+
+        /// Verifying key - contains verifier-specific data
         pub const VerifyingKey = struct {
-            _marker: ?*const FieldType = null,
+            /// Shared preprocessing data
+            shared: SharedPreprocessing(F),
+            /// G1 generator for verification
+            g1: G1Point,
+            /// G2 generator for verification
+            g2: G2Point,
+            /// [tau]_2 for pairing checks
+            tau_g2: G2Point,
+            allocator: Allocator,
+
+            pub fn deinit(self: *VerifyingKey) void {
+                self.shared.deinit();
+            }
         };
 
         allocator: Allocator,
+        /// Maximum trace length to support
+        max_trace_length: usize,
 
         pub fn init(allocator: Allocator) Self {
             return .{
                 .allocator = allocator,
+                .max_trace_length = common.constants.DEFAULT_MAX_TRACE_LENGTH,
             };
         }
 
-        /// Preprocess a program
+        /// Set the maximum trace length to support
+        pub fn setMaxTraceLength(self: *Self, max_trace_length: usize) void {
+            self.max_trace_length = max_trace_length;
+        }
+
+        /// Preprocess a program to generate proving and verifying keys
+        ///
+        /// This performs the following steps:
+        /// 1. Create shared preprocessing data (bytecode, memory layout)
+        /// 2. Generate polynomial commitment SRS
+        /// 3. Create proving key with full SRS
+        /// 4. Create verifying key with verification parameters
         pub fn preprocess(
             self: *Self,
-            _: *const Program,
+            program: *const Program,
         ) !struct { pk: ProvingKey, vk: VerifyingKey } {
-            _ = self;
-            @panic("Preprocessing.preprocess not yet implemented");
+            // Create shared preprocessing for prover
+            const shared_pk = try SharedPreprocessing(F).init(self.allocator, program);
+            errdefer shared_pk.deinit();
+
+            // Create shared preprocessing for verifier (copy)
+            const shared_vk = try SharedPreprocessing(F).init(self.allocator, program);
+            errdefer shared_vk.deinit();
+
+            // Compute SRS size: need enough powers of tau for the trace
+            // log_chunk typically 8, so we need 2^(log_chunk + log_T) powers
+            const padded_trace_length = blk: {
+                var len: usize = 1;
+                while (len < self.max_trace_length) len <<= 1;
+                break :blk len;
+            };
+            const log_chunk: usize = 8;
+            const srs_size = (@as(usize, 1) << log_chunk) + padded_trace_length;
+
+            // Generate SRS
+            const srs = try HyperKZG.setup(self.allocator, srs_size);
+
+            // Create proving key
+            const pk = ProvingKey{
+                .shared = shared_pk,
+                .srs = srs,
+                .max_trace_length = self.max_trace_length,
+                .allocator = self.allocator,
+            };
+
+            // Create verifying key (extract verification parameters from SRS)
+            const vk = VerifyingKey{
+                .shared = shared_vk,
+                .g1 = srs.g1,
+                .g2 = srs.g2,
+                .tau_g2 = srs.tau_g2,
+                .allocator = self.allocator,
+            };
+
+            return .{ .pk = pk, .vk = vk };
         }
     };
 }
@@ -292,4 +421,73 @@ test "host types compile" {
     _ = ExecutionTrace;
     _ = Jolt(F);
     _ = Preprocessing(F);
+}
+
+test "preprocessing generates keys" {
+    const allocator = std.testing.allocator;
+    const F = field.BN254Scalar;
+
+    // Create a simple mock program
+    const bytecode = [_]u8{
+        0x93, 0x00, 0xa0, 0x02, // addi x1, x0, 42
+        0x01, 0x00, // c.nop
+    };
+
+    var config = common.MemoryConfig{
+        .program_size = bytecode.len,
+    };
+
+    const program = Program{
+        .bytecode = &bytecode,
+        .entry_point = common.constants.RAM_START_ADDRESS,
+        .base_address = common.constants.RAM_START_ADDRESS,
+        .memory_layout = common.MemoryLayout.init(&config),
+        .allocator = allocator,
+    };
+
+    // Run preprocessing with a small max trace length for testing
+    var preprocessor = Preprocessing(F).init(allocator);
+    preprocessor.setMaxTraceLength(256);
+
+    var result = try preprocessor.preprocess(&program);
+    defer result.pk.deinit();
+    defer result.vk.deinit();
+
+    // Verify proving key
+    try std.testing.expectEqual(@as(usize, bytecode.len), result.pk.shared.bytecode_size);
+    try std.testing.expect(result.pk.shared.padded_bytecode_size >= bytecode.len);
+    try std.testing.expectEqual(@as(usize, 256), result.pk.max_trace_length);
+    try std.testing.expect(result.pk.srs.max_degree > 0);
+
+    // Verify verifying key
+    try std.testing.expectEqual(@as(usize, bytecode.len), result.vk.shared.bytecode_size);
+    try std.testing.expect(!result.vk.g1.infinity);
+    try std.testing.expect(!result.vk.g2.infinity);
+}
+
+test "shared preprocessing hash consistency" {
+    const allocator = std.testing.allocator;
+    const F = field.BN254Scalar;
+
+    // Same bytecode should produce same hash
+    const bytecode = [_]u8{ 0x13, 0x00, 0x00, 0x00 };
+    var config = common.MemoryConfig{
+        .program_size = bytecode.len,
+    };
+
+    const program = Program{
+        .bytecode = &bytecode,
+        .entry_point = common.constants.RAM_START_ADDRESS,
+        .base_address = common.constants.RAM_START_ADDRESS,
+        .memory_layout = common.MemoryLayout.init(&config),
+        .allocator = allocator,
+    };
+
+    var shared1 = try SharedPreprocessing(F).init(allocator, &program);
+    defer shared1.deinit();
+
+    var shared2 = try SharedPreprocessing(F).init(allocator, &program);
+    defer shared2.deinit();
+
+    try std.testing.expect(shared1.init_memory_hash.eql(shared2.init_memory_hash));
 }

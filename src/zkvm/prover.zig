@@ -293,7 +293,7 @@ pub fn MultiStageProver(comptime F: type) type {
             const tau = try self.allocator.alloc(F, num_rounds);
             defer self.allocator.free(tau);
             for (tau) |*t| {
-                t.* = transcript.challengeScalar("spartan_tau");
+                t.* = try transcript.challengeScalar("spartan_tau");
             }
 
             // Initialize Spartan interface
@@ -322,7 +322,7 @@ pub fn MultiStageProver(comptime F: type) type {
                 try stage_proof.round_polys.append(self.allocator, poly_copy);
 
                 // Get challenge from transcript
-                const challenge = transcript.challengeScalar("spartan_round");
+                const challenge = try transcript.challengeScalar("spartan_round");
                 try stage_proof.addChallenge(challenge);
 
                 // Bind challenge for next round
@@ -372,7 +372,7 @@ pub fn MultiStageProver(comptime F: type) type {
             const r_cycle = try self.allocator.alloc(F, self.log_t);
             defer self.allocator.free(r_cycle);
             for (r_cycle) |*r| {
-                r.* = transcript.challengeScalar("r_cycle");
+                r.* = try transcript.challengeScalar("r_cycle");
             }
 
             // Initialize RAF evaluation parameters
@@ -409,7 +409,7 @@ pub fn MultiStageProver(comptime F: type) type {
                 try stage_proof.round_polys.append(self.allocator, poly_copy);
 
                 // Get challenge from transcript
-                const challenge = transcript.challengeScalar("raf_round");
+                const challenge = try transcript.challengeScalar("raf_round");
                 try stage_proof.addChallenge(challenge);
 
                 // Bind the challenge for next round
@@ -450,7 +450,7 @@ pub fn MultiStageProver(comptime F: type) type {
             const stage_proof = &self.proofs.stage_proofs[2];
 
             // Get batching challenge γ for combining lookup instances
-            const gamma = transcript.challengeScalar("lasso_gamma");
+            const gamma = try transcript.challengeScalar("lasso_gamma");
 
             // Get lookup statistics for proof metadata
             const stats = self.lookup_trace.getStats();
@@ -480,7 +480,7 @@ pub fn MultiStageProver(comptime F: type) type {
             const r_reduction = try self.allocator.alloc(F, self.log_t);
             defer self.allocator.free(r_reduction);
             for (r_reduction) |*r| {
-                r.* = transcript.challengeScalar("r_reduction");
+                r.* = try transcript.challengeScalar("r_reduction");
             }
 
             // Calculate log_K (address space size for tables)
@@ -516,7 +516,7 @@ pub fn MultiStageProver(comptime F: type) type {
                 round_poly.coeffs = &[_]F{};
 
                 // Get challenge from transcript
-                const challenge = transcript.challengeScalar("lasso_round");
+                const challenge = try transcript.challengeScalar("lasso_round");
                 try stage_proof.addChallenge(challenge);
 
                 // Bind the challenge
@@ -563,14 +563,14 @@ pub fn MultiStageProver(comptime F: type) type {
             const r_address = try self.allocator.alloc(F, self.log_k);
             defer self.allocator.free(r_address);
             for (r_address) |*r| {
-                r.* = transcript.challengeScalar("r_address");
+                r.* = try transcript.challengeScalar("r_address");
             }
 
             // Get cycle challenge from previous stage
             const r_cycle = try self.allocator.alloc(F, self.log_t);
             defer self.allocator.free(r_cycle);
             for (r_cycle) |*r| {
-                r.* = transcript.challengeScalar("r_cycle_val");
+                r.* = try transcript.challengeScalar("r_cycle_val");
             }
 
             // Initial value evaluation (for uninitialized memory, this is 0)
@@ -628,7 +628,7 @@ pub fn MultiStageProver(comptime F: type) type {
                 try stage_proof.round_polys.append(self.allocator, poly_copy);
 
                 // Get challenge from transcript
-                const challenge = transcript.challengeScalar("val_eval_round");
+                const challenge = try transcript.challengeScalar("val_eval_round");
                 try stage_proof.addChallenge(challenge);
 
                 // Bind the challenge
@@ -670,14 +670,14 @@ pub fn MultiStageProver(comptime F: type) type {
             const r_register = try self.allocator.alloc(F, log_regs);
             defer self.allocator.free(r_register);
             for (r_register) |*r| {
-                r.* = transcript.challengeScalar("r_register");
+                r.* = try transcript.challengeScalar("r_register");
             }
 
             // Get cycle challenge for register evaluation
             const r_cycle_reg = try self.allocator.alloc(F, self.log_t);
             defer self.allocator.free(r_cycle_reg);
             for (r_cycle_reg) |*r| {
-                r.* = transcript.challengeScalar("r_cycle_reg");
+                r.* = try transcript.challengeScalar("r_cycle_reg");
             }
 
             // Initial register value evaluation (all registers start at 0)
@@ -712,13 +712,16 @@ pub fn MultiStageProver(comptime F: type) type {
                     // Add contribution based on whether this step wrote to a register
                     if (self.trace.steps.items.len > j) {
                         const step = self.trace.steps.items[j];
-                        // Check if destination register matches r_register (simplified)
-                        const eq_val = computeRegEq(F, r_register, step.rd);
+                        // Extract rd from instruction (bits [11:7] for RISC-V)
+                        const rd: u8 = @truncate((step.instruction >> 7) & 0x1F);
+                        const eq_val = computeRegEq(F, r_register, rd);
                         sum_0 = sum_0.add(eq_val);
                     }
                     if (self.trace.steps.items.len > j + half) {
                         const step = self.trace.steps.items[j + half];
-                        const eq_val = computeRegEq(F, r_register, step.rd);
+                        // Extract rd from instruction
+                        const rd: u8 = @truncate((step.instruction >> 7) & 0x1F);
+                        const eq_val = computeRegEq(F, r_register, rd);
                         sum_1 = sum_1.add(eq_val);
                     }
                 }
@@ -728,7 +731,7 @@ pub fn MultiStageProver(comptime F: type) type {
                 try stage_proof.round_polys.append(self.allocator, poly_copy);
 
                 // Get challenge from transcript
-                const challenge = transcript.challengeScalar("reg_eval_round");
+                const challenge = try transcript.challengeScalar("reg_eval_round");
                 try stage_proof.addChallenge(challenge);
                 _ = round;
             }
@@ -779,7 +782,7 @@ pub fn MultiStageProver(comptime F: type) type {
             const stage_proof = &self.proofs.stage_proofs[5];
 
             // Get batching challenge for combining boolean constraints
-            const bool_challenge = transcript.challengeScalar("booleanity");
+            const bool_challenge = try transcript.challengeScalar("booleanity");
 
             // Number of circuit flags to check
             const num_circuit_flags: usize = 13; // From instruction/mod.zig CircuitFlags
@@ -806,16 +809,22 @@ pub fn MultiStageProver(comptime F: type) type {
             var total_violation = F.zero();
 
             for (self.trace.steps.items) |step| {
+                // Extract register indices from instruction
+                // rd: bits [11:7], rs1: bits [19:15], rs2: bits [24:20]
+                const rd: u8 = @truncate((step.instruction >> 7) & 0x1F);
+                const rs1: u8 = @truncate((step.instruction >> 15) & 0x1F);
+                const rs2: u8 = @truncate((step.instruction >> 20) & 0x1F);
+
                 // Check destination register is valid (0-31)
-                const rd_valid = step.rd < 32;
+                const rd_valid = rd < 32;
                 if (!rd_valid) {
                     // Flag violation (in real impl, this would be caught earlier)
                     total_violation = total_violation.add(F.one());
                 }
 
                 // Check source registers are valid
-                const rs1_valid = step.rs1 < 32;
-                const rs2_valid = step.rs2 < 32;
+                const rs1_valid = rs1 < 32;
+                const rs2_valid = rs2 < 32;
                 if (!rs1_valid or !rs2_valid) {
                     total_violation = total_violation.add(F.one());
                 }
@@ -852,7 +861,7 @@ pub fn MultiStageProver(comptime F: type) type {
                 try stage_proof.round_polys.append(self.allocator, poly_copy);
 
                 // Get challenge from transcript
-                const challenge = transcript.challengeScalar("bool_round");
+                const challenge = try transcript.challengeScalar("bool_round");
                 try stage_proof.addChallenge(challenge);
                 _ = round;
             }
@@ -901,7 +910,7 @@ pub fn BatchedSumcheckProver(comptime F: type) type {
             const batch_coeffs = try allocator.alloc(F, instances.len);
             for (batch_coeffs, 0..) |*coeff, i| {
                 _ = i;
-                coeff.* = transcript.challengeScalar("batch_coeff");
+                coeff.* = try transcript.challengeScalar("batch_coeff");
             }
 
             return Self{

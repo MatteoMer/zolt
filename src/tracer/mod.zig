@@ -34,7 +34,7 @@ pub const TraceStep = struct {
 
 /// Full execution trace
 pub const ExecutionTrace = struct {
-    steps: std.ArrayList(TraceStep),
+    steps: std.ArrayListUnmanaged(TraceStep),
     allocator: Allocator,
 
     pub fn init(allocator: Allocator) ExecutionTrace {
@@ -118,7 +118,7 @@ pub const Emulator = struct {
 
     /// Set input data
     pub fn setInputs(self: *Emulator, inputs: []const u8) !void {
-        try self.device.inputs.appendSlice(inputs);
+        try self.device.inputs.appendSlice(self.allocator, inputs);
     }
 
     /// Execute a single instruction

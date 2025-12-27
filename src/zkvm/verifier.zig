@@ -73,7 +73,7 @@ pub fn MultiStageVerifier(comptime F: type) type {
         pub fn verify(
             self: *Self,
             proofs: *const JoltStageProofs(F),
-            transcript: *transcripts.Transcript,
+            transcript: *transcripts.Transcript(F),
         ) !bool {
             // Verify each stage in order
             // Each stage verification updates the transcript for Fiat-Shamir
@@ -112,10 +112,10 @@ pub fn MultiStageVerifier(comptime F: type) type {
         fn verifyStage1(
             self: *Self,
             proof: *const StageProof(F),
-            transcript: *transcripts.Transcript,
+            transcript: *transcripts.Transcript(F),
         ) !bool {
             // Get tau challenge from transcript
-            const tau = transcript.challengeScalar("spartan_tau");
+            const tau = try transcript.challengeScalar("spartan_tau");
             _ = tau;
 
             // For Spartan, the initial claim should be 0 (R1CS satisfied)
@@ -143,12 +143,12 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 }
 
                 // Get challenge from transcript
-                const challenge = transcript.challengeScalar("spartan_round");
+                const challenge = try transcript.challengeScalar("spartan_round");
 
                 // Update claim: evaluate p at challenge point
                 // For degree d polynomial with evals [p(0), p(1), ..., p(d)]
                 // Use Lagrange interpolation or direct evaluation
-                current_claim = evaluatePolynomialAtChallenge(round_poly, challenge);
+                current_claim = evaluatePolynomialAtChallenge(F, round_poly, challenge);
             }
 
             // Record final claim
@@ -180,7 +180,7 @@ pub fn MultiStageVerifier(comptime F: type) type {
         fn verifyStage2(
             self: *Self,
             proof: *const StageProof(F),
-            transcript: *transcripts.Transcript,
+            transcript: *transcripts.Transcript(F),
         ) !bool {
             // Get initial claim from proof (if provided)
             var current_claim = if (proof.final_claims.items.len > 0)
@@ -208,7 +208,7 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 }
 
                 // Get challenge from transcript (must match prover's challenge)
-                const challenge = transcript.challengeScalar("raf_round");
+                const challenge = try transcript.challengeScalar("raf_round");
 
                 // Accumulate challenge for opening claims
                 try self.opening_claims.addChallenge(challenge);
@@ -248,7 +248,7 @@ pub fn MultiStageVerifier(comptime F: type) type {
         fn verifyStage3(
             self: *Self,
             proof: *const StageProof(F),
-            transcript: *transcripts.Transcript,
+            transcript: *transcripts.Transcript(F),
         ) !bool {
             // Skip if no round polynomials (empty lookup trace)
             if (proof.round_polys.items.len == 0) {
@@ -262,7 +262,7 @@ pub fn MultiStageVerifier(comptime F: type) type {
             }
 
             // Get gamma challenge for batching
-            const gamma = transcript.challengeScalar("lasso_gamma");
+            const gamma = try transcript.challengeScalar("lasso_gamma");
             _ = gamma;
 
             // Get initial claim
@@ -296,7 +296,7 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 }
 
                 // Get challenge
-                const challenge = transcript.challengeScalar("lasso_round");
+                const challenge = try transcript.challengeScalar("lasso_round");
                 try self.opening_claims.addChallenge(challenge);
 
                 // Update claim
@@ -333,7 +333,7 @@ pub fn MultiStageVerifier(comptime F: type) type {
         fn verifyStage4(
             self: *Self,
             proof: *const StageProof(F),
-            transcript: *transcripts.Transcript,
+            transcript: *transcripts.Transcript(F),
         ) !bool {
             // Get initial claim
             var current_claim = if (proof.final_claims.items.len > 0)
@@ -367,11 +367,11 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 }
 
                 // Get challenge
-                const challenge = transcript.challengeScalar("val_eval_round");
+                const challenge = try transcript.challengeScalar("val_eval_round");
                 try self.opening_claims.addChallenge(challenge);
 
                 // Update claim using interpolation for degree 3
-                current_claim = evaluatePolynomialAtChallenge(round_poly, challenge);
+                current_claim = evaluatePolynomialAtChallenge(F, round_poly, challenge);
             }
 
             // Verify final claim
@@ -402,7 +402,7 @@ pub fn MultiStageVerifier(comptime F: type) type {
         fn verifyStage5(
             self: *Self,
             proof: *const StageProof(F),
-            transcript: *transcripts.Transcript,
+            transcript: *transcripts.Transcript(F),
         ) !bool {
             // Get initial claim
             var current_claim = if (proof.final_claims.items.len > 0)
@@ -435,7 +435,7 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 }
 
                 // Get challenge
-                const challenge = transcript.challengeScalar("reg_eval_round");
+                const challenge = try transcript.challengeScalar("reg_eval_round");
                 try self.opening_claims.addChallenge(challenge);
 
                 // Update claim
@@ -459,10 +459,10 @@ pub fn MultiStageVerifier(comptime F: type) type {
         fn verifyStage6(
             self: *Self,
             proof: *const StageProof(F),
-            transcript: *transcripts.Transcript,
+            transcript: *transcripts.Transcript(F),
         ) !bool {
             // Get booleanity challenge
-            const bool_challenge = transcript.challengeScalar("booleanity");
+            const bool_challenge = try transcript.challengeScalar("booleanity");
             _ = bool_challenge;
 
             // Get initial claim (should be 0 for valid flags)
@@ -496,7 +496,7 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 }
 
                 // Get challenge
-                const challenge = transcript.challengeScalar("bool_round");
+                const challenge = try transcript.challengeScalar("bool_round");
                 try self.opening_claims.addChallenge(challenge);
 
                 // Update claim
@@ -605,11 +605,11 @@ fn evaluatePolynomialAtChallenge(comptime F: type, evals: []const F, r: F) F {
         const r_minus_2 = r.sub(two);
 
         // L0(r) = (r-1)(r-2)/2
-        const L0 = r_minus_1.mul(r_minus_2).mul(two.inverse());
+        const L0 = r_minus_1.mul(r_minus_2).mul(two.inverse().?);
         // L1(r) = -r(r-2)
         const L1 = r.mul(r_minus_2).neg();
         // L2(r) = r(r-1)/2
-        const L2 = r.mul(r_minus_1).mul(two.inverse());
+        const L2 = r.mul(r_minus_1).mul(two.inverse().?);
 
         return evals[0].mul(L0).add(evals[1].mul(L1)).add(evals[2].mul(L2));
     }
@@ -625,13 +625,13 @@ fn evaluatePolynomialAtChallenge(comptime F: type, evals: []const F, r: F) F {
         const r_minus_3 = r.sub(three);
 
         // L0(r) = (r-1)(r-2)(r-3) / (-6)
-        const L0 = r_minus_1.mul(r_minus_2).mul(r_minus_3).mul(six.neg().inverse());
+        const L0 = r_minus_1.mul(r_minus_2).mul(r_minus_3).mul(six.neg().inverse().?);
         // L1(r) = r(r-2)(r-3) / 2
-        const L1 = r.mul(r_minus_2).mul(r_minus_3).mul(two.inverse());
+        const L1 = r.mul(r_minus_2).mul(r_minus_3).mul(two.inverse().?);
         // L2(r) = r(r-1)(r-3) / (-2)
-        const L2 = r.mul(r_minus_1).mul(r_minus_3).mul(two.neg().inverse());
+        const L2 = r.mul(r_minus_1).mul(r_minus_3).mul(two.neg().inverse().?);
         // L3(r) = r(r-1)(r-2) / 6
-        const L3 = r.mul(r_minus_1).mul(r_minus_2).mul(six.inverse());
+        const L3 = r.mul(r_minus_1).mul(r_minus_2).mul(six.inverse().?);
 
         return evals[0].mul(L0).add(evals[1].mul(L1)).add(evals[2].mul(L2)).add(evals[3].mul(L3));
     }

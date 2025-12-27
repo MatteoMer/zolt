@@ -480,7 +480,7 @@ pub fn ValEvaluationVerifier(comptime F: type) type {
             }
 
             // Get challenge
-            const challenge = transcript.challengeScalar("val_eval_challenge");
+            const challenge = try transcript.challengeScalar("val_eval_challenge");
 
             // Update claim: evaluate p at challenge using Lagrange interpolation
             // p(r) = (1-r)(2-r)/2 * p(0) - r(2-r) * p(1) + r(r-1)/2 * p(2)

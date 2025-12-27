@@ -219,7 +219,7 @@ pub fn JoltProver(comptime F: type) type {
             defer multi_stage.deinit();
 
             // Initialize transcript for Fiat-Shamir
-            var transcript = transcripts.Transcript.init(self.allocator);
+            var transcript = try transcripts.Transcript(F).init(self.allocator, "Jolt");
             defer transcript.deinit();
 
             // Run multi-stage proving
@@ -283,12 +283,12 @@ pub fn JoltVerifier(comptime F: type) type {
             public_inputs: []const u8,
         ) !bool {
             // Initialize transcript for Fiat-Shamir
-            var transcript = transcripts.Transcript.init(self.allocator);
+            var transcript = try transcripts.Transcript(F).init(self.allocator, "Jolt");
             defer transcript.deinit();
 
             // Absorb public inputs into transcript
             if (public_inputs.len > 0) {
-                transcript.appendBytes(public_inputs);
+                try transcript.appendBytes(public_inputs);
             }
 
             // Verify bytecode proof
@@ -330,7 +330,7 @@ pub fn JoltVerifier(comptime F: type) type {
         fn verifyStageProofs(
             self: *Self,
             stage_proofs: *const JoltStageProofs(F),
-            transcript: *transcripts.Transcript,
+            transcript: *transcripts.Transcript(F),
         ) !bool {
             var multi_verifier = verifier.MultiStageVerifier(F).init(self.allocator);
             defer multi_verifier.deinit();
@@ -342,7 +342,7 @@ pub fn JoltVerifier(comptime F: type) type {
         fn verifyBytecodeProof(
             self: *Self,
             proof: *const bytecode.BytecodeProof(F),
-            transcript: *transcripts.Transcript,
+            transcript: *transcripts.Transcript(F),
         ) !bool {
             _ = self;
             _ = transcript;
@@ -364,7 +364,7 @@ pub fn JoltVerifier(comptime F: type) type {
         fn verifyMemoryProof(
             self: *Self,
             proof: *const ram.MemoryProof(F),
-            transcript: *transcripts.Transcript,
+            transcript: *transcripts.Transcript(F),
         ) !bool {
             _ = self;
             _ = transcript;
@@ -383,7 +383,7 @@ pub fn JoltVerifier(comptime F: type) type {
         fn verifyRegisterProof(
             self: *Self,
             proof: *const registers.RegisterProof(F),
-            transcript: *transcripts.Transcript,
+            transcript: *transcripts.Transcript(F),
         ) !bool {
             _ = self;
             _ = transcript;
@@ -402,7 +402,7 @@ pub fn JoltVerifier(comptime F: type) type {
         fn verifyR1CSProof(
             self: *Self,
             proof: *const spartan.R1CSProof(F),
-            transcript: *transcripts.Transcript,
+            transcript: *transcripts.Transcript(F),
         ) !bool {
             _ = self;
             _ = transcript;

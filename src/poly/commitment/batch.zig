@@ -163,7 +163,7 @@ pub fn BatchOpeningAccumulator(comptime F: type) type {
                 }
 
                 // Get next gamma from transcript
-                gamma = transcript.challengeScalar("batch_gamma");
+                gamma = try transcript.challengeScalar("batch_gamma");
             }
 
             // Compute v' * G1

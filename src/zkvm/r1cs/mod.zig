@@ -22,6 +22,11 @@ pub const UNIFORM_CONSTRAINTS = constraints.UNIFORM_CONSTRAINTS;
 pub const R1CSCycleInputs = constraints.R1CSCycleInputs;
 pub const R1CSWitnessGenerator = constraints.R1CSWitnessGenerator;
 
+// Export Jolt R1CS integration
+pub const jolt_r1cs = @import("jolt_r1cs.zig");
+pub const JoltR1CS = jolt_r1cs.JoltR1CS;
+pub const JoltSpartanInterface = jolt_r1cs.JoltSpartanInterface;
+
 /// Term in a linear combination (field-specific version)
 pub fn Term(comptime F: type) type {
     return struct {

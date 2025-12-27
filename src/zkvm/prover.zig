@@ -268,32 +268,85 @@ pub fn MultiStageProver(comptime F: type) type {
         ///   sum_{x} eq(tau, x) * [(Az)(x) * (Bz)(x) - (Cz)(x)] = 0
         ///
         /// Structure:
-        /// - Number of rounds: 1 + log2(trace_length) for uniform R1CS
-        /// - Degree: 3 (multiquadratic after first round)
-        /// - Opening claims: R1CS input evaluations at r_cycle
+        /// - Number of rounds: log2(num_constraints) for uniform R1CS
+        /// - Degree: 2 (quadratic from Az * Bz term)
+        /// - Opening claims: Az, Bz, Cz evaluations at final point
         fn proveStage1(self: *Self, transcript: anytype) !void {
-            // Get tau challenge from transcript for the EQ polynomial
-            const tau = transcript.challengeScalar("spartan_tau");
-
-            // Number of rounds is based on trace length
-            // For uniform Jolt R1CS: 1 + log2(T) rounds
-            const num_rounds = 1 + self.log_t;
-            _ = num_rounds;
-
-            // In a full implementation, we would:
-            // 1. Build R1CS constraints from the execution trace
-            // 2. Materialize the witness vector z
-            // 3. Compute Az, Bz, Cz
-            // 4. Run sumcheck on eq(tau, x) * [Az(x) * Bz(x) - Cz(x)]
-            // 5. Record opening claims for R1CS inputs at final point
-            //
-            // For now, we record a placeholder round polynomial
             const stage_proof = &self.proofs.stage_proofs[0];
 
-            // Record that we've completed this stage
-            // The stage proof structure will be populated by full implementation
-            _ = tau;
-            _ = stage_proof;
+            // Build Jolt R1CS from trace
+            var jolt_r1cs = try r1cs.JoltR1CS(F).fromTrace(self.allocator, self.trace);
+            defer jolt_r1cs.deinit();
+
+            // Skip if no constraints
+            if (jolt_r1cs.num_cycles == 0) {
+                self.current_stage = 1;
+                return;
+            }
+
+            // Build witness vector
+            const witness = try jolt_r1cs.buildWitness();
+            defer self.allocator.free(witness);
+
+            // Get tau challenge from transcript (log_n field elements)
+            const num_rounds = jolt_r1cs.log_num_constraints;
+            const tau = try self.allocator.alloc(F, num_rounds);
+            defer self.allocator.free(tau);
+            for (tau) |*t| {
+                t.* = transcript.challengeScalar("spartan_tau");
+            }
+
+            // Initialize Spartan interface
+            var spartan_iface = try r1cs.JoltSpartanInterface(F).init(
+                self.allocator,
+                &jolt_r1cs,
+                witness,
+                tau,
+            );
+            defer spartan_iface.deinit();
+
+            // Record initial claim (should be 0 for valid witness)
+            const initial_claim = spartan_iface.initialClaim();
+            try stage_proof.final_claims.append(self.allocator, initial_claim);
+
+            // Run sumcheck rounds
+            for (0..num_rounds) |round| {
+                // Compute round polynomial [p(0), p(1), p(2)]
+                const round_poly = try spartan_iface.computeRoundPolynomial();
+
+                // Store polynomial in proof
+                const poly_copy = try self.allocator.alloc(F, 3);
+                poly_copy[0] = round_poly[0];
+                poly_copy[1] = round_poly[1];
+                poly_copy[2] = round_poly[2];
+                try stage_proof.round_polys.append(self.allocator, poly_copy);
+
+                // Get challenge from transcript
+                const challenge = transcript.challengeScalar("spartan_round");
+                try stage_proof.addChallenge(challenge);
+
+                // Bind challenge for next round
+                try spartan_iface.bindChallenge(challenge);
+                _ = round;
+            }
+
+            // Record final evaluation and eval claims
+            const final_eval = spartan_iface.getFinalEval();
+            try stage_proof.final_claims.append(self.allocator, final_eval);
+
+            // Get evaluation claims for Az, Bz, Cz at final point
+            const eval_claims = spartan_iface.getEvalClaims();
+            try stage_proof.final_claims.append(self.allocator, eval_claims[0]); // A(r)
+            try stage_proof.final_claims.append(self.allocator, eval_claims[1]); // B(r)
+            try stage_proof.final_claims.append(self.allocator, eval_claims[2]); // C(r)
+
+            // Accumulate opening claims for commitment verification
+            if (stage_proof.challenges.items.len > 0) {
+                try self.opening_accumulator.accumulate(
+                    stage_proof.challenges.items,
+                    final_eval,
+                );
+            }
 
             self.current_stage = 1;
         }

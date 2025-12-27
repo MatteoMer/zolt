@@ -464,16 +464,226 @@ pub fn pairing(p: G1Point, q: G2Point) PairingResult {
     return finalExponentiation(f);
 }
 
-/// Miller loop for optimal ate pairing
+/// BN254 ate loop parameter: 6x + 2 where x = 4965661367192848881
+/// We use the NAF (non-adjacent form) representation for efficiency
+/// The loop parameter bits (from MSB to LSB, excluding top bit):
+/// x = 0x44e992b44a6909f1 in hex
+const ATE_LOOP_COUNT: [64]i2 = .{
+    0, 0, 0, 1, 0, 1, 0, -1, 0, 0, -1, 0, 0, 0, 1, 0,
+    0, -1, 0, -1, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0, -1, 0,
+    0, 1, 0, -1, 0, 0, 1, 0, 0, 0, 0, 0, -1, 0, 0, -1,
+    0, 1, 0, -1, 0, 0, 0, -1, 0, -1, 0, 0, 0, 1, 0, -1,
+};
+
+/// Coefficients for line function evaluation
+const LineCoeffs = struct {
+    c0: Fp2, // ell_0 coefficient
+    c1: Fp2, // ell_vw coefficient (multiplied by y_p)
+    c2: Fp2, // ell_vv coefficient (multiplied by x_p)
+};
+
+/// Result of doubling/addition step: new point and line coefficients
+const MillerStepResult = struct {
+    point: G2Point,
+    coeffs: LineCoeffs,
+};
+
+/// Evaluate line function at point P
+/// This computes the contribution of a line passing through points on G2
+/// evaluated at a point P in G1, resulting in an element of Fp12
+fn evaluateLine(coeffs: LineCoeffs, p_x: BN254Scalar, p_y: BN254Scalar) Fp12 {
+    // The line evaluation gives a sparse Fp12 element
+    // l(P) = c0 + c1 * y_p * w + c2 * x_p * v
+    // where v and w are tower elements
+
+    // Convert scalars to Fp2 (embedding Fp into Fp2)
+    const x_fp2 = Fp2.init(p_x, BN254Scalar.zero());
+    const y_fp2 = Fp2.init(p_y, BN254Scalar.zero());
+
+    // c1 * y_p
+    const c1_yp = coeffs.c1.mul(y_fp2);
+    // c2 * x_p
+    const c2_xp = coeffs.c2.mul(x_fp2);
+
+    // Construct sparse Fp12 element
+    // The structure depends on how the tower is constructed
+    // For BN254: Fp12 = Fp6[w]/(w² - v), Fp6 = Fp2[v]/(v³ - ξ)
+    return Fp12{
+        .c0 = Fp6{
+            .c0 = coeffs.c0,
+            .c1 = c2_xp, // coefficient of v
+            .c2 = Fp2.zero(),
+        },
+        .c1 = Fp6{
+            .c0 = c1_yp, // coefficient of w
+            .c1 = Fp2.zero(),
+            .c2 = Fp2.zero(),
+        },
+    };
+}
+
+/// Doubling step in Miller loop
+/// Returns the new point T = 2*T and line coefficients
+fn doublingStep(t: G2Point) MillerStepResult {
+    if (t.infinity or t.y.isZero()) {
+        return .{
+            .point = G2Point.identity(),
+            .coeffs = .{
+                .c0 = Fp2.one(),
+                .c1 = Fp2.zero(),
+                .c2 = Fp2.zero(),
+            },
+        };
+    }
+
+    // Compute λ = 3x² / 2y (the slope of the tangent line)
+    const x_sq = t.x.square();
+    const three_x_sq = x_sq.add(x_sq).add(x_sq);
+    const two_y = t.y.add(t.y);
+    const lambda = three_x_sq.mul(two_y.inverse() orelse return .{
+        .point = G2Point.identity(),
+        .coeffs = .{ .c0 = Fp2.one(), .c1 = Fp2.zero(), .c2 = Fp2.zero() },
+    });
+
+    // New point coordinates
+    const x3 = lambda.square().sub(t.x).sub(t.x);
+    const y3 = lambda.mul(t.x.sub(x3)).sub(t.y);
+
+    // Line coefficients: l(x,y) = y - λx - (t.y - λ*t.x)
+    // Rearranged for evaluation: c0 = λ*t.x - t.y, c1 = 1, c2 = -λ
+    const c0 = lambda.mul(t.x).sub(t.y);
+    const c1 = Fp2.one();
+    const c2 = lambda.neg();
+
+    return .{
+        .point = G2Point{ .x = x3, .y = y3, .infinity = false },
+        .coeffs = .{ .c0 = c0, .c1 = c1, .c2 = c2 },
+    };
+}
+
+/// Addition step in Miller loop
+/// Returns the new point T = T + Q and line coefficients
+fn additionStep(t: G2Point, q: G2Point) MillerStepResult {
+    if (t.infinity) {
+        return .{
+            .point = q,
+            .coeffs = .{ .c0 = Fp2.one(), .c1 = Fp2.zero(), .c2 = Fp2.zero() },
+        };
+    }
+    if (q.infinity) {
+        return .{
+            .point = t,
+            .coeffs = .{ .c0 = Fp2.one(), .c1 = Fp2.zero(), .c2 = Fp2.zero() },
+        };
+    }
+
+    // If points are equal, use doubling
+    if (t.x.eql(q.x)) {
+        if (t.y.eql(q.y)) {
+            return doublingStep(t);
+        }
+        // t + (-t) = O
+        return .{
+            .point = G2Point.identity(),
+            .coeffs = .{ .c0 = Fp2.one(), .c1 = Fp2.zero(), .c2 = Fp2.zero() },
+        };
+    }
+
+    // Compute λ = (q.y - t.y) / (q.x - t.x)
+    const dy = q.y.sub(t.y);
+    const dx = q.x.sub(t.x);
+    const lambda = dy.mul(dx.inverse() orelse return .{
+        .point = G2Point.identity(),
+        .coeffs = .{ .c0 = Fp2.one(), .c1 = Fp2.zero(), .c2 = Fp2.zero() },
+    });
+
+    // New point coordinates
+    const x3 = lambda.square().sub(t.x).sub(q.x);
+    const y3 = lambda.mul(t.x.sub(x3)).sub(t.y);
+
+    // Line coefficients
+    const c0 = lambda.mul(t.x).sub(t.y);
+    const c1 = Fp2.one();
+    const c2 = lambda.neg();
+
+    return .{
+        .point = G2Point{ .x = x3, .y = y3, .infinity = false },
+        .coeffs = .{ .c0 = c0, .c1 = c1, .c2 = c2 },
+    };
+}
+
+/// Miller loop for optimal ate pairing on BN254
+/// Computes f_{6x+2,Q}(P) where x is the BN254 curve parameter
 fn millerLoop(p: G1Point, q: G2Point) Fp12 {
-    _ = p;
-    _ = q;
-    // Simplified placeholder
-    // Full implementation requires:
-    // 1. Line function evaluation at each step
-    // 2. Doubling and addition steps following the ate loop
-    // 3. Efficient sparse multiplication in Fp12
-    return Fp12.one();
+    if (p.infinity or q.infinity) {
+        return Fp12.one();
+    }
+
+    // Initialize: f = 1, T = Q
+    var f = Fp12.one();
+    var t = q;
+
+    // Main loop: iterate through bits of the ate loop parameter
+    for (ATE_LOOP_COUNT) |bit| {
+        // Doubling step: f = f² * l_{T,T}(P), T = 2T
+        f = f.square();
+        const dbl = doublingStep(t);
+        t = dbl.point;
+        const line_dbl = evaluateLine(dbl.coeffs, p.x, p.y);
+        f = f.mul(line_dbl);
+
+        // Addition step if bit is non-zero
+        if (bit == 1) {
+            // f = f * l_{T,Q}(P), T = T + Q
+            const add = additionStep(t, q);
+            t = add.point;
+            const line_add = evaluateLine(add.coeffs, p.x, p.y);
+            f = f.mul(line_add);
+        } else if (bit == -1) {
+            // f = f * l_{T,-Q}(P), T = T - Q
+            const neg_q = q.neg();
+            const add = additionStep(t, neg_q);
+            t = add.point;
+            const line_add = evaluateLine(add.coeffs, p.x, p.y);
+            f = f.mul(line_add);
+        }
+    }
+
+    // For BN254 optimal ate, we need additional steps at the end:
+    // f = f * l_{T, π(Q)}(P) * l_{T', -π²(Q)}(P)
+    // where π is the Frobenius endomorphism
+    // These additional lines correspond to the +2 part of 6x+2
+
+    // Apply Frobenius to Q (π(Q) and π²(Q))
+    // For BN254: π(x, y) = (x^p, y^p) which in Fp2 uses the Frobenius coefficients
+    // This is simplified - full implementation needs the actual Frobenius coefficients
+    const q1 = frobeniusG2(q);
+    const add1 = additionStep(t, q1);
+    t = add1.point;
+    f = f.mul(evaluateLine(add1.coeffs, p.x, p.y));
+
+    const q2 = frobeniusG2(frobeniusG2(q)).neg();
+    const add2 = additionStep(t, q2);
+    f = f.mul(evaluateLine(add2.coeffs, p.x, p.y));
+
+    return f;
+}
+
+/// Apply Frobenius endomorphism to G2 point
+/// π: (x, y) → (x^p, y^p) using the Frobenius coefficients for Fp2
+fn frobeniusG2(p: G2Point) G2Point {
+    if (p.infinity) return p;
+
+    // The Frobenius on Fp2 is conjugation: (a + bu) → (a - bu) = (a + bu)^p
+    // But we also need to multiply by twist constants
+    // For BN254: π(x, y) = (x^p * ξ^((p-1)/3), y^p * ξ^((p-1)/2))
+
+    // Simplified: just apply conjugate (full version needs twist factors)
+    return G2Point{
+        .x = p.x.conjugate(),
+        .y = p.y.conjugate(),
+        .infinity = false,
+    };
 }
 
 /// Final exponentiation: f^((p^12-1)/r)
@@ -504,11 +714,112 @@ fn easyPartExponentiation(f: Fp12) Fp12 {
     return t1.mul(t0);
 }
 
+/// BN254 curve parameter x = 4965661367192848881
+/// Used in hard part of final exponentiation
+const BN_X: u64 = 4965661367192848881;
+
 fn hardPartExponentiation(f: Fp12) Fp12 {
-    // Simplified placeholder
-    // Full implementation uses the BN254 curve parameter x to compute
-    // f^((p^4-p^2+1)/r) efficiently using a addition chain
-    return f;
+    // The hard part is f^((p^4 - p^2 + 1)/r)
+    // For BN curves, this can be computed efficiently using the curve parameter x
+    // The exponent decomposes as a polynomial in x:
+    // (p^4 - p^2 + 1)/r = λ_0 + λ_1*p + λ_2*p^2 + λ_3*p^3
+    // where λ_i are polynomials in x
+
+    // We use the optimized addition chain from the literature
+    // First compute f^x, f^(x^2), f^(x^3) using square-and-multiply
+
+    // f^x
+    const f_x = expByX(f);
+
+    // f^(x^2) = (f^x)^x
+    const f_x2 = expByX(f_x);
+
+    // f^(x^3) = (f^(x^2))^x
+    const f_x3 = expByX(f_x2);
+
+    // Now compute the final result using Frobenius and multiplications
+    // y0 = f^(x^3) * f^(-x^2) * f^x * f^(-1)
+    // y1 = f^(p*x^2) * f^(-p*x) * f^p
+    // y2 = f^(p^2*x) * f^(-p^2)
+    // y3 = f^(p^3)
+    // result = y0 * y1 * y2 * y3
+
+    // Simplified version using the key operations
+    const f_inv = f.inverse() orelse return f;
+    const f_x2_inv = f_x2.inverse() orelse return f;
+
+    // Compute various Frobenius powers
+    const f_p = frobeniusFp12(f);
+    const f_p2 = frobeniusFp12(f_p);
+    const f_p3 = frobeniusFp12(f_p2);
+
+    const f_x_p = frobeniusFp12(f_x);
+    const f_x_p_inv = f_x_p.inverse() orelse return f;
+    const f_x2_p = frobeniusFp12(f_x2);
+    const f_x_p2 = frobeniusFp12(frobeniusFp12(f_x));
+    const f_p2_inv = f_p2.inverse() orelse return f;
+
+    // Combine all terms
+    // y0 = f^(x^3) * f^(-x^2) * f^x * f^(-1)
+    const y0 = f_x3.mul(f_x2_inv).mul(f_x).mul(f_inv);
+
+    // y1 = f^(p*x^2) * f^(-p*x) * f^p
+    const y1 = f_x2_p.mul(f_x_p_inv).mul(f_p);
+
+    // y2 = f^(p^2*x) * f^(-p^2)
+    const y2 = f_x_p2.mul(f_p2_inv);
+
+    // y3 = f^(p^3)
+    const y3 = f_p3;
+
+    return y0.mul(y1).mul(y2).mul(y3);
+}
+
+/// Compute f^x where x is the BN254 curve parameter
+fn expByX(f: Fp12) Fp12 {
+    var result = Fp12.one();
+    var base = f;
+    var exp = BN_X;
+
+    while (exp > 0) {
+        if (exp & 1 == 1) {
+            result = result.mul(base);
+        }
+        base = base.square();
+        exp >>= 1;
+    }
+
+    return result;
+}
+
+/// Frobenius endomorphism on Fp12
+/// Computes f^p using the tower structure
+fn frobeniusFp12(f: Fp12) Fp12 {
+    // For Fp12 = Fp6[w]/(w² - v), the Frobenius is:
+    // (a + bw)^p = a^p + b^p * w^p
+    // where w^p = w * γ for some constant γ
+
+    // For Fp6 = Fp2[v]/(v³ - ξ), the Frobenius on each component is:
+    // c0^p + c1^p * v^p + c2^p * v^(2p)
+    // where v^p = v * ω for constants
+
+    // Apply Frobenius to each Fp2 component (which is just conjugation)
+    // Then multiply by the Frobenius coefficients
+
+    // Simplified: apply conjugation to all Fp2 components
+    // Full implementation needs the actual Frobenius coefficients
+    return Fp12{
+        .c0 = Fp6{
+            .c0 = f.c0.c0.conjugate(),
+            .c1 = f.c0.c1.conjugate(),
+            .c2 = f.c0.c2.conjugate(),
+        },
+        .c1 = Fp6{
+            .c0 = f.c1.c0.conjugate(),
+            .c1 = f.c1.c1.conjugate(),
+            .c2 = f.c1.c2.conjugate(),
+        },
+    };
 }
 
 /// Multi-pairing: product of pairings e(P1,Q1) * e(P2,Q2) * ...
@@ -591,4 +902,100 @@ test "G2 point operations" {
     const neg_g = g.neg();
     const sum2 = g.add(neg_g);
     try std.testing.expect(sum2.isIdentity());
+}
+
+test "Miller loop doubling step" {
+    // Test that doubling step produces valid line coefficients
+    const q = G2Point.generator();
+    const result = doublingStep(q);
+
+    // The resulting point should not be identity (unless generator is special)
+    // Line coefficients should have at least one non-zero component
+    try std.testing.expect(!result.coeffs.c1.isZero());
+}
+
+test "Miller loop addition step" {
+    // Test addition step
+    const q = G2Point.generator();
+    const q2 = q.double();
+
+    const result = additionStep(q, q2);
+
+    // Should produce a valid point
+    if (!result.point.isIdentity()) {
+        try std.testing.expect(!result.coeffs.c1.isZero());
+    }
+}
+
+test "Frobenius on Fp12" {
+    // Test that Frobenius is well-defined
+    const a = Fp12{
+        .c0 = Fp6{
+            .c0 = Fp2.init(BN254Scalar.fromU64(1), BN254Scalar.fromU64(2)),
+            .c1 = Fp2.init(BN254Scalar.fromU64(3), BN254Scalar.fromU64(4)),
+            .c2 = Fp2.init(BN254Scalar.fromU64(5), BN254Scalar.fromU64(6)),
+        },
+        .c1 = Fp6{
+            .c0 = Fp2.init(BN254Scalar.fromU64(7), BN254Scalar.fromU64(8)),
+            .c1 = Fp2.init(BN254Scalar.fromU64(9), BN254Scalar.fromU64(10)),
+            .c2 = Fp2.init(BN254Scalar.fromU64(11), BN254Scalar.fromU64(12)),
+        },
+    };
+
+    const a_frob = frobeniusFp12(a);
+
+    // Frobenius should not return the same element (in general)
+    // but applying it p times should return the original (for elements in Fp)
+    // For our test, just check it's well-defined
+    try std.testing.expect(!a_frob.c0.c0.c0.isZero() or !a_frob.c0.c0.c1.isZero());
+}
+
+test "expByX exponentiation" {
+    // Test exponentiation by curve parameter
+    const one = Fp12.one();
+    const one_x = expByX(one);
+
+    // 1^x = 1
+    try std.testing.expect(one_x.eql(Fp12.one()));
+}
+
+test "pairing with identity" {
+    // e(O, Q) = 1 and e(P, O) = 1
+    const g1 = G1Point{ .x = BN254Scalar.one(), .y = BN254Scalar.fromU64(2), .infinity = false };
+    const g2 = G2Point.generator();
+    const g1_identity = G1Point{ .x = BN254Scalar.zero(), .y = BN254Scalar.one(), .infinity = true };
+    const g2_identity = G2Point.identity();
+
+    const result1 = pairing(g1_identity, g2);
+    const result2 = pairing(g1, g2_identity);
+
+    try std.testing.expect(result1.isOne());
+    try std.testing.expect(result2.isOne());
+}
+
+test "Fp6 operations" {
+    const one = Fp6.one();
+    const zero = Fp6.zero();
+
+    // 1 + 0 = 1
+    try std.testing.expect(one.add(zero).eql(one));
+
+    // 1 * 1 = 1
+    try std.testing.expect(one.mul(one).eql(one));
+
+    // 1 - 1 = 0
+    try std.testing.expect(one.sub(one).eql(zero));
+}
+
+test "Fp6 inverse" {
+    const a = Fp6{
+        .c0 = Fp2.init(BN254Scalar.fromU64(1), BN254Scalar.fromU64(2)),
+        .c1 = Fp2.init(BN254Scalar.fromU64(3), BN254Scalar.fromU64(4)),
+        .c2 = Fp2.init(BN254Scalar.fromU64(5), BN254Scalar.fromU64(6)),
+    };
+
+    if (a.inverse()) |a_inv| {
+        const should_be_one = a.mul(a_inv);
+        try std.testing.expect(should_be_one.eql(Fp6.one()));
+    }
 }

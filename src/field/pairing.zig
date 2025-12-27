@@ -822,9 +822,15 @@ fn frobeniusFp12(f: Fp12) Fp12 {
     };
 }
 
+/// Pairing input pair type
+pub const PairingInput = struct {
+    p: G1Point,
+    q: G2Point,
+};
+
 /// Multi-pairing: product of pairings e(P1,Q1) * e(P2,Q2) * ...
 /// More efficient than computing individual pairings
-pub fn multiPairing(pairs: []const struct { p: G1Point, q: G2Point }) PairingResult {
+pub fn multiPairing(pairs: []const PairingInput) PairingResult {
     var result = Fp12.one();
 
     for (pairs) |pair| {
@@ -840,7 +846,7 @@ pub fn multiPairing(pairs: []const struct { p: G1Point, q: G2Point }) PairingRes
 /// Useful for verifying KZG proofs
 pub fn pairingCheck(p1: G1Point, q1: G2Point, p2: G1Point, q2: G2Point) bool {
     // Instead of checking e(P1,Q1) == e(P2,Q2), we check e(P1,Q1) * e(-P2,Q2) == 1
-    const pairs = [_]struct { p: G1Point, q: G2Point }{
+    const pairs = [_]PairingInput{
         .{ .p = p1, .q = q1 },
         .{ .p = p2.neg(), .q = q2 },
     };

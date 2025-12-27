@@ -75,7 +75,6 @@ pub const OpImmFunct3 = enum(u3) {
     ANDI = 0b111, // AND Immediate
     SLLI = 0b001, // Shift Left Logical Immediate
     SRLI_SRAI = 0b101, // Shift Right Logical/Arithmetic Immediate
-    _,
 };
 
 /// Integer register-register function codes (funct3 for OP)
@@ -88,7 +87,6 @@ pub const OpFunct3 = enum(u3) {
     SRL_SRA = 0b101, // Shift Right Logical/Arithmetic
     OR = 0b110, // OR
     AND = 0b111, // AND
-    _,
 };
 
 /// M Extension function codes (funct3 for OP with funct7 = 0b0000001)
@@ -516,7 +514,7 @@ fn uncompressQ1(halfword: u32, funct3: u32, xlen: Xlen) u32 {
 
 /// Uncompress Q1 funct3=4 instructions (ALU operations)
 fn uncompressQ1Funct4(halfword: u32) u32 {
-    const funct2 = (halfword >> 10) & 0x3; // [11:10]
+    const funct2: u2 = @intCast((halfword >> 10) & 0x3); // [11:10]
     switch (funct2) {
         0 => {
             // C.SRLI: srli rs1+8, rs1+8, shamt
@@ -537,8 +535,8 @@ fn uncompressQ1Funct4(halfword: u32) u32 {
             return (imm << 20) | ((r + 8) << 15) | (7 << 12) | ((r + 8) << 7) | 0x13;
         },
         3 => {
-            const funct1 = (halfword >> 12) & 1; // [12]
-            const funct2_2 = (halfword >> 5) & 0x3; // [6:5]
+            const funct1: u1 = @intCast((halfword >> 12) & 1); // [12]
+            const funct2_2: u2 = @intCast((halfword >> 5) & 0x3); // [6:5]
             const rs1 = (halfword >> 7) & 0x7;
             const rs2 = (halfword >> 2) & 0x7;
             switch (funct1) {
@@ -626,7 +624,7 @@ fn uncompressQ2(halfword: u32, funct3: u32) u32 {
             return 0xffffffff; // Reserved
         },
         4 => {
-            const funct1 = (halfword >> 12) & 1; // [12]
+            const funct1: u1 = @intCast((halfword >> 12) & 1); // [12]
             const rs1 = (halfword >> 7) & 0x1f; // [11:7]
             const rs2 = (halfword >> 2) & 0x1f; // [6:2]
             switch (funct1) {

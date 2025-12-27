@@ -19,6 +19,9 @@ pub const host = @import("host/mod.zig");
 pub const transcripts = @import("transcripts/mod.zig");
 pub const guest = @import("guest/mod.zig");
 
+// Tracer module
+pub const tracer = @import("tracer/mod.zig");
+
 // Re-export commonly used types
 pub const JoltField = field.JoltField;
 pub const BN254Scalar = field.BN254Scalar;
@@ -29,4 +32,7 @@ pub const version = "0.1.0";
 test {
     // Run all module tests
     std.testing.refAllDecls(@This());
+
+    // Run integration tests
+    _ = @import("integration_tests.zig");
 }

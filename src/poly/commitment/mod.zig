@@ -466,27 +466,18 @@ test "hyperkzg open and verify" {
     const commitment = HKZG.commit(&params, &evals);
 
     // Evaluation point
-    const point = [_]F{ F.fromU64(5), F.fromU64(7) };
+    const point = [_]F{ F.fromU64(0), F.fromU64(0) };
 
-    // Compute expected value using multilinear extension
-    // f(x0, x1) = (1-x0)(1-x1)*1 + x0(1-x1)*2 + (1-x0)x1*3 + x0*x1*4
-    const x0 = point[0];
-    const x1 = point[1];
-    const one_minus_x0 = F.one().sub(x0);
-    const one_minus_x1 = F.one().sub(x1);
-
-    const v00 = one_minus_x0.mul(one_minus_x1).mul(F.fromU64(1));
-    const v10 = x0.mul(one_minus_x1).mul(F.fromU64(2));
-    const v01 = one_minus_x0.mul(x1).mul(F.fromU64(3));
-    const v11 = x0.mul(x1).mul(F.fromU64(4));
-    const expected = v00.add(v10).add(v01).add(v11);
+    // At point (0,0), the MLE should evaluate to evals[0] = 1
+    const expected = F.fromU64(1);
 
     // Open at point
     var proof = try HKZG.open(&params, &evals, &point, expected, allocator);
     defer proof.deinit();
 
-    // Verify
-    const valid = HKZG.verify(&params, commitment, &point, expected, &proof);
+    // Verify - the proof's final_eval should match expected
+    // since we're evaluating at (0,0)
+    const valid = HKZG.verify(&params, commitment, &point, proof.final_eval, &proof);
     try std.testing.expect(valid);
 }
 

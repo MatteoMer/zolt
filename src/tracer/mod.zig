@@ -39,18 +39,18 @@ pub const ExecutionTrace = struct {
 
     pub fn init(allocator: Allocator) ExecutionTrace {
         return .{
-            .steps = std.ArrayList(TraceStep).init(allocator),
+            .steps = .{},
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *ExecutionTrace) void {
-        self.steps.deinit();
+        self.steps.deinit(self.allocator);
     }
 
     /// Add a step to the trace
     pub fn addStep(self: *ExecutionTrace, step: TraceStep) !void {
-        try self.steps.append(step);
+        try self.steps.append(self.allocator, step);
     }
 
     /// Get the number of steps
@@ -318,9 +318,9 @@ pub const Emulator = struct {
                     .XORI => rs1 ^ imm_u64,
                     .ORI => rs1 | imm_u64,
                     .ANDI => rs1 & imm_u64,
-                    .SLLI => rs1 << @truncate(decoded.imm & 0x3F),
+                    .SLLI => rs1 << @as(u6, @intCast(@as(u32, @bitCast(decoded.imm)) & 0x3F)),
                     .SRLI_SRAI => blk: {
-                        const shamt: u6 = @truncate(decoded.imm & 0x3F);
+                        const shamt: u6 = @intCast(@as(u32, @bitCast(decoded.imm)) & 0x3F);
                         if ((decoded.funct7 & 0x20) != 0) {
                             // SRAI
                             break :blk @bitCast(@as(i64, @bitCast(rs1)) >> shamt);
@@ -329,7 +329,6 @@ pub const Emulator = struct {
                             break :blk rs1 >> shamt;
                         }
                     },
-                    _ => 0,
                 };
                 try self.registers.write(decoded.rd, result.rd_value);
             },
@@ -424,7 +423,6 @@ pub const Emulator = struct {
                         },
                         .OR => rs1 | rs2,
                         .AND => rs1 & rs2,
-                        _ => 0,
                     };
                 }
                 try self.registers.write(decoded.rd, result.rd_value);

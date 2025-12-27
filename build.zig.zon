@@ -1,0 +1,12 @@
+.{
+    .name = .zolt,
+    .version = "0.1.0",
+    .fingerprint = 0xf86d8277555b2d1e,
+    .minimum_zig_version = "0.14.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

@@ -38,6 +38,16 @@ pub fn AffinePoint(comptime F: type) type {
             };
         }
 
+        /// BN254 G1 generator point: (1, 2)
+        /// This is the standard generator point for the BN254/alt_bn128 curve.
+        pub fn generator() Self {
+            return .{
+                .x = F.one(),
+                .y = F.fromU64(2),
+                .infinity = false,
+            };
+        }
+
         /// Check if this is the identity
         pub fn isIdentity(self: Self) bool {
             return self.infinity;

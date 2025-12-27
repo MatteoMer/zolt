@@ -13,6 +13,16 @@
 //! The pairing is computed via the optimal ate pairing:
 //! 1. Miller loop: Compute f_{6x+2,Q}(P)
 //! 2. Final exponentiation: f^((p^12-1)/r)
+//!
+//! Generator Points (Ethereum/EIP-196/EIP-197 convention):
+//! - G1 generator: (1, 2)
+//! - G2 generator (in Fp2):
+//!   X = (x0, x1) where:
+//!     x0 = 0x1800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed
+//!     x1 = 0x198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c2
+//!   Y = (y0, y1) where:
+//!     y0 = 0x12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa
+//!     y1 = 0x090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b
 
 const std = @import("std");
 const BN254Scalar = @import("mod.zig").BN254Scalar;
@@ -363,13 +373,53 @@ pub const G2Point = struct {
         };
     }
 
-    /// Generator point for G2
-    /// Note: These are placeholder values - real implementation needs the actual generator
+    /// Generator point for G2 (Ethereum/EIP-197 convention)
+    ///
+    /// The BN254 G2 generator coordinates in Fp2:
+    /// X = (x0, x1), Y = (y0, y1) where:
+    ///   x0 = 0x1800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed
+    ///   x1 = 0x198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c2
+    ///   y0 = 0x12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa
+    ///   y1 = 0x090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b
     pub fn generator() G2Point {
-        // Placeholder - actual generator coordinates are much more complex
+        // G2 generator coordinates (little-endian byte representation)
+        // x0 = 0x1800deef121f1e76426a00665e5c4479674322d4f75edadd46debd5cd992f6ed
+        const x0_bytes = [_]u8{
+            0xed, 0xf6, 0x92, 0xd9, 0x5c, 0xbd, 0xde, 0x46,
+            0xdd, 0xda, 0x5e, 0xf7, 0xd4, 0x22, 0x43, 0x67,
+            0x79, 0x44, 0x5c, 0x5e, 0x66, 0x00, 0x6a, 0x42,
+            0x76, 0x1e, 0x1f, 0x12, 0xef, 0xde, 0x00, 0x18,
+        };
+        // x1 = 0x198e9393920d483a7260bfb731fb5d25f1aa493335a9e71297e485b7aef312c2
+        const x1_bytes = [_]u8{
+            0xc2, 0x12, 0xf3, 0xae, 0xb7, 0x85, 0xe4, 0x97,
+            0x12, 0xe7, 0xa9, 0x35, 0x33, 0x49, 0xaa, 0xf1,
+            0x25, 0x5d, 0xfb, 0x31, 0xb7, 0xbf, 0x60, 0x72,
+            0x3a, 0x48, 0x0d, 0x92, 0x93, 0x93, 0x8e, 0x19,
+        };
+        // y0 = 0x12c85ea5db8c6deb4aab71808dcb408fe3d1e7690c43d37b4ce6cc0166fa7daa
+        const y0_bytes = [_]u8{
+            0xaa, 0x7d, 0xfa, 0x66, 0x01, 0xcc, 0xe6, 0x4c,
+            0x7b, 0xd3, 0x43, 0x0c, 0x69, 0xe7, 0xd1, 0xe3,
+            0x8f, 0x40, 0xcb, 0x8d, 0x80, 0x71, 0xab, 0x4a,
+            0xeb, 0x6d, 0x8c, 0xdb, 0xa5, 0x5e, 0xc8, 0x12,
+        };
+        // y1 = 0x090689d0585ff075ec9e99ad690c3395bc4b313370b38ef355acdadcd122975b
+        const y1_bytes = [_]u8{
+            0x5b, 0x97, 0x22, 0xd1, 0xdc, 0xda, 0xac, 0x55,
+            0xf3, 0x8e, 0xb3, 0x70, 0x33, 0x31, 0x4b, 0xbc,
+            0x95, 0x33, 0x0c, 0x69, 0xad, 0x99, 0x9e, 0xec,
+            0x75, 0xf0, 0x5f, 0x58, 0xd0, 0x89, 0x06, 0x09,
+        };
+
+        const x0 = BN254Scalar.fromBytes(&x0_bytes);
+        const x1 = BN254Scalar.fromBytes(&x1_bytes);
+        const y0 = BN254Scalar.fromBytes(&y0_bytes);
+        const y1 = BN254Scalar.fromBytes(&y1_bytes);
+
         return G2Point.fromCoords(
-            Fp2.init(BN254Scalar.one(), BN254Scalar.zero()),
-            Fp2.init(BN254Scalar.fromU64(2), BN254Scalar.zero()),
+            Fp2.init(x0, x1),
+            Fp2.init(y0, y1),
         );
     }
 

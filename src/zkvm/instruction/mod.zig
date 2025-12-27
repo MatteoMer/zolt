@@ -113,6 +113,135 @@ pub const InstructionFlagSet = struct {
     }
 };
 
+// ============================================================================
+// Lookup Tables Enum
+// ============================================================================
+
+const lookup_table = @import("../lookup_table/mod.zig");
+
+/// Enum of all lookup tables used by instructions
+pub fn LookupTables(comptime XLEN: comptime_int) type {
+    return enum {
+        RangeCheck,
+        And,
+        Or,
+        Xor,
+        Equal,
+        NotEqual,
+        UnsignedLessThan,
+        SignedLessThan,
+        UnsignedGreaterThanEqual,
+        UnsignedLessThanEqual,
+        SignedGreaterThanEqual,
+        Movsign,
+        Sub,
+        Andn,
+
+        const Self = @This();
+        const Table = lookup_table.LookupTable(@import("../../field/mod.zig").BN254Scalar, XLEN);
+
+        /// Materialize an entry from this lookup table
+        pub fn materializeEntry(self: Self, index: u128) u64 {
+            return switch (self) {
+                .RangeCheck => Table.RangeCheck.materializeEntry(index),
+                .And => Table.And.materializeEntry(index),
+                .Or => Table.Or.materializeEntry(index),
+                .Xor => Table.Xor.materializeEntry(index),
+                .Equal => Table.Equal.materializeEntry(index),
+                .NotEqual => Table.NotEqual.materializeEntry(index),
+                .UnsignedLessThan => Table.UnsignedLessThan.materializeEntry(index),
+                .SignedLessThan => Table.SignedLessThan.materializeEntry(index),
+                .UnsignedGreaterThanEqual => Table.UnsignedGreaterThanEqual.materializeEntry(index),
+                .UnsignedLessThanEqual => Table.UnsignedLessThanEqual.materializeEntry(index),
+                .SignedGreaterThanEqual => Table.SignedGreaterThanEqual.materializeEntry(index),
+                .Movsign => Table.Movsign.materializeEntry(index),
+                .Sub => Table.Sub.materializeEntry(index),
+                .Andn => Table.Andn.materializeEntry(index),
+            };
+        }
+    };
+}
+
+// ============================================================================
+// Instruction Traits/Interfaces
+// ============================================================================
+
+/// Interface for instructions that use lookup tables
+pub fn InstructionLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        /// Returns the lookup table used by this instruction, if any
+        lookupTableFn: *const fn () ?LookupTables(XLEN),
+
+        const Self = @This();
+
+        pub fn lookupTable(self: Self) ?LookupTables(XLEN) {
+            return self.lookupTableFn();
+        }
+    };
+}
+
+/// Interface for instruction flag providers
+pub const Flags = struct {
+    /// Returns the circuit flags for this instruction
+    circuitFlagsFn: *const fn () CircuitFlagSet,
+    /// Returns the instruction flags for this instruction
+    instructionFlagsFn: *const fn () InstructionFlagSet,
+
+    const Self = @This();
+
+    pub fn circuitFlags(self: Self) CircuitFlagSet {
+        return self.circuitFlagsFn();
+    }
+
+    pub fn instructionFlags(self: Self) InstructionFlagSet {
+        return self.instructionFlagsFn();
+    }
+};
+
+/// Interface for lookup query operations
+/// This converts instruction operands into lookup indices and outputs
+pub fn LookupQuery(comptime XLEN: comptime_int) type {
+    _ = XLEN; // Used for type consistency with Jolt patterns
+    return struct {
+        /// Convert to instruction inputs (x, y)
+        toInstructionInputsFn: *const fn () struct { x: u64, y: i128 },
+        /// Convert to lookup operands (may combine inputs)
+        toLookupOperandsFn: ?*const fn () struct { left: u64, right: u128 },
+        /// Convert to lookup index (for table access)
+        toLookupIndexFn: ?*const fn () u128,
+        /// Compute the lookup output
+        toLookupOutputFn: *const fn () u64,
+
+        const Self = @This();
+
+        pub fn toInstructionInputs(self: Self) struct { x: u64, y: i128 } {
+            return self.toInstructionInputsFn();
+        }
+
+        pub fn toLookupOperands(self: Self) struct { left: u64, right: u128 } {
+            if (self.toLookupOperandsFn) |f| {
+                return f();
+            }
+            // Default: use instruction inputs directly
+            const inputs = self.toInstructionInputs();
+            return .{ .left = inputs.x, .right = @as(u128, @intCast(@as(u64, @bitCast(@as(i64, @truncate(inputs.y)))))) };
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            if (self.toLookupIndexFn) |f| {
+                return f();
+            }
+            // Default: interleave the operands
+            const operands = self.toLookupOperands(self);
+            return lookup_table.interleaveBits(operands.left, @truncate(operands.right));
+        }
+
+        pub fn toLookupOutput(self: Self) u64 {
+            return self.toLookupOutputFn();
+        }
+    };
+}
+
 /// RISC-V instruction opcodes (lower 7 bits)
 pub const Opcode = enum(u7) {
     // RV32I Base Integer Instructions

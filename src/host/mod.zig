@@ -11,6 +11,7 @@ const Allocator = std.mem.Allocator;
 const common = @import("../common/mod.zig");
 const zkvm = @import("../zkvm/mod.zig");
 const field = @import("../field/mod.zig");
+const tracer = @import("../tracer/mod.zig");
 pub const elf = @import("elf.zig");
 
 /// ELF program loader
@@ -163,14 +164,51 @@ pub const ExecutionOptions = struct {
 };
 
 /// Execute a program and generate a trace
+///
+/// This function runs the RISC-V program in the emulator and returns
+/// an execution trace that can be used for proof generation.
 pub fn execute(
     allocator: Allocator,
-    _: *const Program,
-    _: []const u8, // inputs
-    _: ExecutionOptions,
+    program: *const Program,
+    inputs: []const u8,
+    options: ExecutionOptions,
 ) !ExecutionTrace {
-    _ = allocator;
-    @panic("execute not yet implemented");
+    // Create memory config for the emulator
+    var config = common.MemoryConfig{
+        .program_size = program.bytecode.len,
+    };
+
+    // Initialize the emulator
+    var emulator = tracer.Emulator.init(allocator, &config);
+    defer emulator.deinit();
+
+    // Set max cycles
+    emulator.max_cycles = options.max_cycles;
+
+    // Load the program into memory
+    try emulator.loadProgram(program.bytecode);
+
+    // Set the entry point
+    emulator.state.pc = program.entry_point;
+
+    // Set input data
+    if (inputs.len > 0) {
+        try emulator.setInputs(inputs);
+    }
+
+    // Run the program
+    try emulator.run();
+
+    // Extract trace data
+    // For now, we return a simplified trace. The full implementation would
+    // convert the emulator's trace to the format needed for proving.
+    return ExecutionTrace{
+        .num_cycles = emulator.state.cycle,
+        .register_trace = try emulator.registers.toTrace(allocator),
+        .memory_trace = try emulator.ram.toTrace(allocator),
+        .final_state = emulator.state,
+        .allocator = allocator,
+    };
 }
 
 /// Jolt instance for proving and verifying

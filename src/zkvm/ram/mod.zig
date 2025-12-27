@@ -138,6 +138,21 @@ pub const RAMState = struct {
         try self.memory.put(self.allocator, word_addr, word);
         try self.trace.recordWrite(word_addr, word, timestamp);
     }
+
+    /// Clone the trace for external use
+    /// The caller owns the returned trace and must call deinit() on it.
+    pub fn toTrace(self: *const RAMState, allocator: Allocator) !MemoryTrace {
+        var new_trace = MemoryTrace.init(allocator);
+        errdefer new_trace.deinit();
+
+        // Copy trace entries
+        try new_trace.accesses.ensureTotalCapacity(new_trace.allocator, self.trace.accesses.items.len);
+        for (self.trace.accesses.items) |entry| {
+            try new_trace.accesses.append(new_trace.allocator, entry);
+        }
+
+        return new_trace;
+    }
 };
 
 /// Memory proof for zkVM

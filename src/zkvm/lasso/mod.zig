@@ -20,6 +20,7 @@
 const std = @import("std");
 
 pub const expanding_table = @import("expanding_table.zig");
+pub const integration_test = @import("integration_test.zig");
 pub const prefix_suffix = @import("prefix_suffix.zig");
 pub const prover = @import("prover.zig");
 pub const split_eq = @import("split_eq.zig");

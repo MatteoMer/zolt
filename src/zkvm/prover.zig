@@ -379,26 +379,105 @@ pub fn MultiStageProver(comptime F: type) type {
         /// - Output value (result from table)
         ///
         /// The Lasso protocol uses two-phase sumcheck:
-        /// 1. Address binding: Bind address variables
-        /// 2. Cycle binding: Bind cycle/time variables
+        /// 1. Address binding: Bind address variables (log_K rounds)
+        /// 2. Cycle binding: Bind cycle/time variables (log_T rounds)
         ///
         /// Opening claims: Lookup polynomial evaluations
         fn proveStage3(self: *Self, transcript: anytype) !void {
-            // Get challenge for batching lookup instances
-            const lookup_batch_challenge = transcript.challengeScalar("lookup_batch");
-            _ = lookup_batch_challenge;
+            const stage_proof = &self.proofs.stage_proofs[2];
 
-            // Get lookup statistics for debugging/verification
-            const stats = self.lookup_trace.getStatistics();
+            // Get batching challenge γ for combining lookup instances
+            const gamma = transcript.challengeScalar("lasso_gamma");
+
+            // Get lookup statistics for proof metadata
+            const stats = self.lookup_trace.getStats();
             _ = stats;
 
-            // In a full implementation:
-            // 1. Batch all lookup instances with random linear combination
-            // 2. Run Lasso prover with prefix-suffix decomposition
-            // 3. Perform two-phase sumcheck (address then cycle binding)
-            // 4. Accumulate opening claims for lookup polynomials
-            //
-            // The lookup trace is already collected during emulation
+            // Extract lookup indices from the trace
+            const trace_entries = self.lookup_trace.getEntries();
+
+            if (trace_entries.len == 0) {
+                // No lookups to prove - stage is trivially complete
+                self.current_stage = 3;
+                return;
+            }
+
+            // Build lookup indices and table arrays
+            const lookup_indices = try self.allocator.alloc(u128, trace_entries.len);
+            defer self.allocator.free(lookup_indices);
+            const lookup_tables = try self.allocator.alloc(usize, trace_entries.len);
+            defer self.allocator.free(lookup_tables);
+
+            for (trace_entries, 0..) |entry, i| {
+                lookup_indices[i] = entry.index;
+                lookup_tables[i] = @intFromEnum(entry.table);
+            }
+
+            // Get reduction point from previous challenges
+            const r_reduction = try self.allocator.alloc(F, self.log_t);
+            defer self.allocator.free(r_reduction);
+            for (r_reduction) |*r| {
+                r.* = transcript.challengeScalar("r_reduction");
+            }
+
+            // Calculate log_K (address space size for tables)
+            // Use 16 bits for table entries by default
+            const log_K: usize = 16;
+
+            // Initialize Lasso parameters
+            const params = lasso.LassoParams(F).init(
+                gamma,
+                self.log_t,
+                log_K,
+                r_reduction,
+            );
+
+            // Initialize and run Lasso prover
+            var lasso_prover = try lasso.LassoProver(F).init(
+                self.allocator,
+                lookup_indices,
+                lookup_tables,
+                params,
+            );
+            defer lasso_prover.deinit();
+
+            // Run Lasso sumcheck rounds
+            const total_rounds = params.log_K + params.log_T;
+            for (0..total_rounds) |round| {
+                // Compute round polynomial
+                var round_poly = try lasso_prover.computeRoundPolynomial();
+
+                // Store polynomial coefficients in stage proof
+                try stage_proof.round_polys.append(self.allocator, round_poly.coeffs);
+                // Prevent double-free since we stored the coefficients
+                round_poly.coeffs = &[_]F{};
+
+                // Get challenge from transcript
+                const challenge = transcript.challengeScalar("lasso_round");
+                try stage_proof.addChallenge(challenge);
+
+                // Bind the challenge
+                try lasso_prover.receiveChallenge(challenge);
+                _ = round;
+            }
+
+            // Record final evaluation
+            if (lasso_prover.isComplete()) {
+                const final_eval = lasso_prover.getFinalEval();
+                try stage_proof.final_claims.append(self.allocator, final_eval);
+            }
+
+            // Accumulate opening claims
+            if (stage_proof.challenges.items.len > 0) {
+                const final_claim = if (stage_proof.final_claims.items.len > 0)
+                    stage_proof.final_claims.items[stage_proof.final_claims.items.len - 1]
+                else
+                    F.zero();
+                try self.opening_accumulator.accumulate(
+                    stage_proof.challenges.items,
+                    final_claim,
+                );
+            }
 
             self.current_stage = 3;
         }

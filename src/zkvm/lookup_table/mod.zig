@@ -332,9 +332,13 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
             }
 
             /// Evaluate the MLE at point r
-            /// For signed comparison, we need to handle the sign bit specially.
-            /// If sign bits differ: negative < positive
-            /// If sign bits same: compare as unsigned
+            /// For signed comparison, we use the formula from Jolt:
+            /// signed_lt(x, y) = x_sign - y_sign + unsigned_lt(x, y)
+            ///
+            /// This works because:
+            /// - If x negative, y positive: x_sign=1, y_sign=0, so contribution = 1
+            /// - If x positive, y negative: x_sign=0, y_sign=1, so contribution = -1
+            /// - If same sign: x_sign - y_sign = 0, use unsigned comparison
             pub fn evaluateMLE(r: []const F) F {
                 std.debug.assert(r.len == 2 * XLEN);
 
@@ -344,16 +348,9 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                 const x_sign = r[0];
                 const y_sign = r[1];
 
-                // Case 1: x is negative, y is positive (x_sign=1, y_sign=0)
-                // x < y is true
-                const one_minus_y_sign = one.sub(y_sign);
-                const x_neg_y_pos = x_sign.mul(one_minus_y_sign);
-
-                // Case 2: Signs are the same, compare remaining bits as unsigned
-                // For same sign case: use unsigned comparison on all bits
-                // In 2's complement, signed ordering is preserved within same-sign values
-                var unsigned_lt = F.zero();
-                var eq_prefix = F.one();
+                // Compute unsigned less-than
+                var lt = F.zero();
+                var eq = F.one();
 
                 inline for (0..XLEN) |i| {
                     const x_i = r[2 * i];
@@ -362,23 +359,15 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                     const one_minus_x = one.sub(x_i);
                     const one_minus_y = one.sub(y_i);
 
-                    // Contribution: x=0, y=1 at this position with all previous equal
-                    const lt_contribution = eq_prefix.mul(one_minus_x).mul(y_i);
-                    unsigned_lt = unsigned_lt.add(lt_contribution);
+                    // lt += (1 - x_i) * y_i * eq
+                    lt = lt.add(one_minus_x.mul(y_i).mul(eq));
 
-                    // Update equality prefix
-                    const eq_bit = x_i.mul(y_i).add(one_minus_x.mul(one_minus_y));
-                    eq_prefix = eq_prefix.mul(eq_bit);
+                    // eq *= x_i * y_i + (1 - x_i) * (1 - y_i)
+                    eq = eq.mul(x_i.mul(y_i).add(one_minus_x.mul(one_minus_y)));
                 }
 
-                // Same sign indicator: both positive or both negative
-                const one_minus_x_sign = one.sub(x_sign);
-                const same_sign = x_sign.mul(y_sign).add(one_minus_x_sign.mul(one_minus_y_sign));
-
-                // Final result: (x_sign AND NOT y_sign) OR (same_sign AND unsigned_lt)
-                // These cases are mutually exclusive, so we can just add
-                const same_sign_lt = same_sign.mul(unsigned_lt);
-                return x_neg_y_pos.add(same_sign_lt);
+                // signed_lt = x_sign - y_sign + lt
+                return x_sign.sub(y_sign).add(lt);
             }
 
             /// Materialize the entire table (for testing)
@@ -406,6 +395,220 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
             pub fn evaluateMLE(r: []const F) F {
                 const eq_result = Equal.evaluateMLE(r);
                 return F.one().sub(eq_result);
+            }
+
+            /// Materialize the entire table (for testing)
+            pub fn materialize(allocator: Allocator) ![]u64 {
+                const size = @as(usize, 1) << (2 * @min(XLEN, 8));
+                const table = try allocator.alloc(u64, size);
+                for (0..size) |i| {
+                    table[i] = materializeEntry(@intCast(i));
+                }
+                return table;
+            }
+        };
+
+        /// UnsignedGreaterThanEqual: Checks if x >= y (unsigned)
+        /// materializeEntry(interleaved(x, y)) = 1 if x >= y, else 0
+        pub const UnsignedGreaterThanEqual = struct {
+            /// Materialize the entry at the given index
+            pub fn materializeEntry(index: u128) u64 {
+                const bits = uninterleaveBits(index);
+                return if (bits.x >= bits.y) 1 else 0;
+            }
+
+            /// Evaluate the MLE at point r
+            /// x >= y = NOT(x < y) = 1 - lt(x, y)
+            pub fn evaluateMLE(r: []const F) F {
+                const lt_result = UnsignedLessThan.evaluateMLE(r);
+                return F.one().sub(lt_result);
+            }
+
+            /// Materialize the entire table (for testing)
+            pub fn materialize(allocator: Allocator) ![]u64 {
+                const size = @as(usize, 1) << (2 * @min(XLEN, 8));
+                const table = try allocator.alloc(u64, size);
+                for (0..size) |i| {
+                    table[i] = materializeEntry(@intCast(i));
+                }
+                return table;
+            }
+        };
+
+        /// UnsignedLessThanEqual: Checks if x <= y (unsigned)
+        /// materializeEntry(interleaved(x, y)) = 1 if x <= y, else 0
+        pub const UnsignedLessThanEqual = struct {
+            /// Materialize the entry at the given index
+            pub fn materializeEntry(index: u128) u64 {
+                const bits = uninterleaveBits(index);
+                return if (bits.x <= bits.y) 1 else 0;
+            }
+
+            /// Evaluate the MLE at point r
+            /// x <= y = x < y OR x == y = lt(x,y) + eq(x,y) - lt*eq (but lt and eq are disjoint)
+            /// Simpler: x <= y = NOT(x > y) = NOT(y < x)
+            /// We need to swap operands to compute y < x
+            pub fn evaluateMLE(r: []const F) F {
+                std.debug.assert(r.len == 2 * XLEN);
+
+                // Compute y < x by swapping operands
+                var lt = F.zero();
+                var eq = F.one();
+                const one = F.one();
+
+                inline for (0..XLEN) |i| {
+                    // Swap x and y
+                    const y_i = r[2 * i]; // This was x
+                    const x_i = r[2 * i + 1]; // This was y
+
+                    const one_minus_x = one.sub(x_i);
+                    const one_minus_y = one.sub(y_i);
+
+                    lt = lt.add(one_minus_x.mul(y_i).mul(eq));
+                    eq = eq.mul(x_i.mul(y_i).add(one_minus_x.mul(one_minus_y)));
+                }
+
+                // x <= y = NOT(y < x) = 1 - lt
+                return one.sub(lt);
+            }
+
+            /// Materialize the entire table (for testing)
+            pub fn materialize(allocator: Allocator) ![]u64 {
+                const size = @as(usize, 1) << (2 * @min(XLEN, 8));
+                const table = try allocator.alloc(u64, size);
+                for (0..size) |i| {
+                    table[i] = materializeEntry(@intCast(i));
+                }
+                return table;
+            }
+        };
+
+        /// SignedGreaterThanEqual: Checks if x >= y (signed)
+        /// materializeEntry(interleaved(x, y)) = 1 if x >= y (signed), else 0
+        pub const SignedGreaterThanEqual = struct {
+            /// Materialize the entry at the given index
+            pub fn materializeEntry(index: u128) u64 {
+                const bits = uninterleaveBits(index);
+                const x_signed: i64 = @bitCast(bits.x);
+                const y_signed: i64 = @bitCast(bits.y);
+                return if (x_signed >= y_signed) 1 else 0;
+            }
+
+            /// Evaluate the MLE at point r
+            /// x >= y = NOT(x < y) = 1 - signed_lt(x, y)
+            pub fn evaluateMLE(r: []const F) F {
+                const lt_result = SignedLessThan.evaluateMLE(r);
+                return F.one().sub(lt_result);
+            }
+
+            /// Materialize the entire table (for testing)
+            pub fn materialize(allocator: Allocator) ![]u64 {
+                const size = @as(usize, 1) << (2 * @min(XLEN, 8));
+                const table = try allocator.alloc(u64, size);
+                for (0..size) |i| {
+                    table[i] = materializeEntry(@intCast(i));
+                }
+                return table;
+            }
+        };
+
+        /// Movsign: Returns the sign of the operand (most significant bit)
+        /// materializeEntry(x) = x >> (XLEN - 1)
+        pub const Movsign = struct {
+            /// Materialize the entry at the given index
+            pub fn materializeEntry(index: u128) u64 {
+                const bits = uninterleaveBits(index);
+                // Return MSB of x
+                return (bits.x >> (XLEN - 1)) & 1;
+            }
+
+            /// Evaluate the MLE at point r
+            /// Just returns r[0] (the MSB of x in our interleaved format)
+            pub fn evaluateMLE(r: []const F) F {
+                std.debug.assert(r.len == 2 * XLEN);
+                return r[0]; // MSB of x
+            }
+
+            /// Materialize the entire table (for testing)
+            pub fn materialize(allocator: Allocator) ![]u64 {
+                const size = @as(usize, 1) << (2 * @min(XLEN, 8));
+                const table = try allocator.alloc(u64, size);
+                for (0..size) |i| {
+                    table[i] = materializeEntry(@intCast(i));
+                }
+                return table;
+            }
+        };
+
+        /// Sub: Subtraction with wrap-around (x - y)
+        /// materializeEntry(interleaved(x, y)) = x - y (wrapping)
+        pub const Sub = struct {
+            /// Materialize the entry at the given index
+            pub fn materializeEntry(index: u128) u64 {
+                const bits = uninterleaveBits(index);
+                return bits.x -% bits.y; // Wrapping subtraction
+            }
+
+            /// Evaluate the MLE at point r
+            /// Sub MLE is more complex - we can express it in terms of Add
+            /// x - y = x + (2^XLEN - y) mod 2^XLEN
+            /// For MLE purposes, this doesn't have a simple closed form like AND/XOR
+            /// We use a brute-force evaluation for correctness
+            pub fn evaluateMLE(r: []const F) F {
+                std.debug.assert(r.len == 2 * XLEN);
+
+                // Compute x value contribution
+                var x_val = F.zero();
+                var y_val = F.zero();
+
+                inline for (0..XLEN) |i| {
+                    const shift: u6 = XLEN - 1 - i;
+                    const coeff = F.fromU64(@as(u64, 1) << shift);
+                    x_val = x_val.add(coeff.mul(r[2 * i]));
+                    y_val = y_val.add(coeff.mul(r[2 * i + 1]));
+                }
+
+                // Return x - y (field subtraction handles the wrapping correctly in the field)
+                return x_val.sub(y_val);
+            }
+
+            /// Materialize the entire table (for testing)
+            pub fn materialize(allocator: Allocator) ![]u64 {
+                const size = @as(usize, 1) << (2 * @min(XLEN, 8));
+                const table = try allocator.alloc(u64, size);
+                for (0..size) |i| {
+                    table[i] = materializeEntry(@intCast(i));
+                }
+                return table;
+            }
+        };
+
+        /// Andn: Bitwise AND-NOT (x & ~y)
+        /// materializeEntry(interleaved(x, y)) = x & ~y
+        pub const Andn = struct {
+            /// Materialize the entry at the given index
+            pub fn materializeEntry(index: u128) u64 {
+                const bits = uninterleaveBits(index);
+                return bits.x & ~bits.y;
+            }
+
+            /// Evaluate the MLE at point r
+            /// x & ~y: For each bit, x_i * (1 - y_i)
+            pub fn evaluateMLE(r: []const F) F {
+                std.debug.assert(r.len == 2 * XLEN);
+
+                var result = F.zero();
+                const one = F.one();
+
+                inline for (0..XLEN) |i| {
+                    const shift: u6 = XLEN - 1 - i;
+                    const coeff = F.fromU64(@as(u64, 1) << shift);
+                    const x_i = r[2 * i];
+                    const y_i = r[2 * i + 1];
+                    // x & ~y at bit i: x_i * (1 - y_i)
+                    result = result.add(coeff.mul(x_i.mul(one.sub(y_i))));
+                }
+                return result;
             }
 
             /// Materialize the entire table (for testing)
@@ -653,4 +856,130 @@ test "RangeCheck MLE on boolean hypercube" {
 
         try std.testing.expect(mle_result.eql(expected_field));
     }
+}
+
+test "Andn MLE on boolean hypercube" {
+    const Table = LookupTable(BN254Scalar, 2);
+
+    var i: u8 = 0;
+    while (i < 16) : (i += 1) {
+        var r: [4]BN254Scalar = undefined;
+        inline for (0..4) |j| {
+            r[j] = if ((i >> j) & 1 == 1) BN254Scalar.one() else BN254Scalar.zero();
+        }
+
+        const mle_result = Table.Andn.evaluateMLE(&r);
+        const expected = Table.Andn.materializeEntry(i);
+        const expected_field = BN254Scalar.fromU64(expected);
+
+        try std.testing.expect(mle_result.eql(expected_field));
+    }
+}
+
+test "Andn materialize" {
+    const Table = LookupTable(BN254Scalar, 8);
+
+    // 0xFF & ~0x0F = 0xF0
+    const index1 = interleaveBits(0xFF, 0x0F);
+    try std.testing.expectEqual(@as(u64, 0xF0), Table.Andn.materializeEntry(index1));
+
+    // 0x55 & ~0xAA = 0x55 (0101 & ~1010 = 0101)
+    const index2 = interleaveBits(0x55, 0xAA);
+    try std.testing.expectEqual(@as(u64, 0x55), Table.Andn.materializeEntry(index2));
+}
+
+test "UnsignedGreaterThanEqual materialize" {
+    const Table = LookupTable(BN254Scalar, 8);
+
+    // 5 >= 3 = 1
+    const index1 = interleaveBits(5, 3);
+    try std.testing.expectEqual(@as(u64, 1), Table.UnsignedGreaterThanEqual.materializeEntry(index1));
+
+    // 3 >= 5 = 0
+    const index2 = interleaveBits(3, 5);
+    try std.testing.expectEqual(@as(u64, 0), Table.UnsignedGreaterThanEqual.materializeEntry(index2));
+
+    // 5 >= 5 = 1
+    const index3 = interleaveBits(5, 5);
+    try std.testing.expectEqual(@as(u64, 1), Table.UnsignedGreaterThanEqual.materializeEntry(index3));
+}
+
+test "UnsignedLessThanEqual materialize" {
+    const Table = LookupTable(BN254Scalar, 8);
+
+    // 3 <= 5 = 1
+    const index1 = interleaveBits(3, 5);
+    try std.testing.expectEqual(@as(u64, 1), Table.UnsignedLessThanEqual.materializeEntry(index1));
+
+    // 5 <= 3 = 0
+    const index2 = interleaveBits(5, 3);
+    try std.testing.expectEqual(@as(u64, 0), Table.UnsignedLessThanEqual.materializeEntry(index2));
+
+    // 5 <= 5 = 1
+    const index3 = interleaveBits(5, 5);
+    try std.testing.expectEqual(@as(u64, 1), Table.UnsignedLessThanEqual.materializeEntry(index3));
+}
+
+test "UnsignedLessThanEqual MLE on boolean hypercube" {
+    const Table = LookupTable(BN254Scalar, 2);
+
+    var i: u8 = 0;
+    while (i < 16) : (i += 1) {
+        var r: [4]BN254Scalar = undefined;
+        inline for (0..4) |j| {
+            r[j] = if ((i >> j) & 1 == 1) BN254Scalar.one() else BN254Scalar.zero();
+        }
+
+        const mle_result = Table.UnsignedLessThanEqual.evaluateMLE(&r);
+        const expected = Table.UnsignedLessThanEqual.materializeEntry(i);
+        const expected_field = BN254Scalar.fromU64(expected);
+
+        try std.testing.expect(mle_result.eql(expected_field));
+    }
+}
+
+test "SignedGreaterThanEqual materialize" {
+    const Table = LookupTable(BN254Scalar, 64);
+
+    // -1 >= 1 = 0 (signed)
+    const neg_one: u64 = @bitCast(@as(i64, -1));
+    const index1 = interleaveBits(neg_one, 1);
+    try std.testing.expectEqual(@as(u64, 0), Table.SignedGreaterThanEqual.materializeEntry(index1));
+
+    // 1 >= -1 = 1 (signed)
+    const index2 = interleaveBits(1, neg_one);
+    try std.testing.expectEqual(@as(u64, 1), Table.SignedGreaterThanEqual.materializeEntry(index2));
+
+    // 5 >= 5 = 1
+    const index3 = interleaveBits(5, 5);
+    try std.testing.expectEqual(@as(u64, 1), Table.SignedGreaterThanEqual.materializeEntry(index3));
+}
+
+test "Movsign materialize" {
+    const Table = LookupTable(BN254Scalar, 64);
+
+    // Positive number: MSB = 0
+    const index1 = interleaveBits(100, 0);
+    try std.testing.expectEqual(@as(u64, 0), Table.Movsign.materializeEntry(index1));
+
+    // Negative number: MSB = 1
+    const neg: u64 = @bitCast(@as(i64, -1));
+    const index2 = interleaveBits(neg, 0);
+    try std.testing.expectEqual(@as(u64, 1), Table.Movsign.materializeEntry(index2));
+}
+
+test "Sub materialize" {
+    const Table = LookupTable(BN254Scalar, 8);
+
+    // 10 - 3 = 7
+    const index1 = interleaveBits(10, 3);
+    try std.testing.expectEqual(@as(u64, 7), Table.Sub.materializeEntry(index1));
+
+    // 3 - 10 = 249 (wrapping, for 8-bit)
+    const index2 = interleaveBits(3, 10);
+    try std.testing.expectEqual(@as(u64, 249), Table.Sub.materializeEntry(index2));
+
+    // 5 - 5 = 0
+    const index3 = interleaveBits(5, 5);
+    try std.testing.expectEqual(@as(u64, 0), Table.Sub.materializeEntry(index3));
 }

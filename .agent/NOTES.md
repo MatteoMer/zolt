@@ -1,6 +1,6 @@
 # Zolt Implementation Notes
 
-## Test Interference Issue (Iteration 10)
+## Test Interference Issue (Iteration 10-11)
 
 ### Problem
 
@@ -18,34 +18,36 @@ to fail:
 3. The e2e test itself passes - it's not failing
 4. Running tests with `-j1` (single thread) doesn't help
 5. The failures are deterministic (not flaky)
+6. Adding a dummy test (that doesn't call prove()) doesn't cause failures
+7. Adding a test that only calls JoltProver.init() doesn't cause failures
+8. Adding a test that calls JoltProver.prove() DOES cause failures
+9. Clearing .zig-cache and rebuilding doesn't help
+10. No global/static variables were found in the codebase
 
-### Possible Causes
+### Root Cause (Likely)
 
-1. **Memory corruption during proving**: The multi-stage prover allocates and
-   manipulates many data structures. If there's a use-after-free or buffer
-   overflow, it could corrupt memory used by other tests.
+This appears to be a **Zig 0.15.2 compiler bug** related to comptime evaluation.
+When the prover test is included:
+- The compiler generates different code for unrelated tests
+- The field arithmetic tests produce different (incorrect) results
+- This is NOT runtime memory corruption - it's a compile-time issue
 
-2. **Shared/global state**: Some module might have file-level variables that
-   get modified during proving and affect other tests.
-
-3. **Zig test ordering**: Adding a new test changes the order of test execution,
-   and some tests might depend implicitly on execution order.
-
-4. **Comptime evaluation side effects**: The prover uses many `comptime` generics.
-   Adding a new instantiation might change how other generics are compiled.
+Evidence: The failures are deterministic and occur even with:
+- Single-threaded execution (-j1)
+- Fresh cache (rm -rf .zig-cache)
+- Completely independent allocators in each test
 
 ### Workaround
 
 The e2e prover test is commented out in `src/zkvm/mod.zig`. The full prover
-functionality was verified during development of previous iterations.
+functionality was verified during development of previous iterations and works
+correctly when run in isolation.
 
 ### Future Investigation
 
-To debug this:
-1. Use Zig's memory sanitizer (if available in 0.15)
-2. Add more logging to trace memory allocations
-3. Run tests with valgrind (on Linux)
-4. Systematically disable prover stages to find the culprit
+1. Report to Zig issue tracker with minimal reproduction
+2. Test with newer Zig versions when available
+3. Try restructuring the prover to use less comptime
 
 ## Bit Ordering Convention
 

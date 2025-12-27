@@ -1,8 +1,117 @@
 //! RISC-V instruction definitions for Jolt
 //!
-//! This module defines the RISC-V instruction set supported by Jolt.
+//! This module defines the RISC-V instruction set supported by Jolt,
+//! including the flags used in R1CS constraints.
 
 const std = @import("std");
+
+// ============================================================================
+// Jolt Instruction Flags
+// ============================================================================
+
+/// Boolean flags used in Jolt's R1CS constraints (`opflags` in the Jolt paper).
+/// These determine how instruction results are computed and where results go.
+pub const CircuitFlags = enum(u8) {
+    /// 1 if the first lookup operand is the sum of the two instruction operands.
+    AddOperands = 0,
+    /// 1 if the first lookup operand is the difference between the two instruction operands.
+    SubtractOperands = 1,
+    /// 1 if the first lookup operand is the product of the two instruction operands.
+    MultiplyOperands = 2,
+    /// 1 if the instruction is a load (i.e. `LW`, `LD`, etc.)
+    Load = 3,
+    /// 1 if the instruction is a store (i.e. `SW`, `SD`, etc.)
+    Store = 4,
+    /// 1 if the instruction is a jump (i.e. `JAL`, `JALR`)
+    Jump = 5,
+    /// 1 if the lookup output is to be stored in `rd` at the end of the step.
+    WriteLookupOutputToRD = 6,
+    /// 1 if the instruction is "virtual", as defined in Section 6.1 of the Jolt paper.
+    VirtualInstruction = 7,
+    /// 1 if the instruction is an assert, as defined in Section 6.1.1 of the Jolt paper.
+    Assert = 8,
+    /// Used in inline sequences; the program counter should be the same for the full sequence.
+    DoNotUpdateUnexpandedPC = 9,
+    /// Is (virtual) advice instruction
+    Advice = 10,
+    /// Is a compressed instruction (i.e. increase UnexpandedPc by 2 only)
+    IsCompressed = 11,
+    /// Is instruction the first in a virtual sequence
+    IsFirstInSequence = 12,
+
+    pub const COUNT: usize = 13;
+};
+
+/// Boolean flags that are not part of Jolt's R1CS constraints.
+/// These are used for other purposes during proving/verification.
+pub const InstructionFlags = enum(u8) {
+    /// 1 if the first instruction operand is the program counter; 0 otherwise.
+    LeftOperandIsPC = 0,
+    /// 1 if the second instruction operand is `imm`; 0 otherwise.
+    RightOperandIsImm = 1,
+    /// 1 if the first instruction operand is RS1 value; 0 otherwise.
+    LeftOperandIsRs1Value = 2,
+    /// 1 if the first instruction operand is RS2 value; 0 otherwise.
+    RightOperandIsRs2Value = 3,
+    /// 1 if the instruction is a branch (i.e. `BEQ`, `BNE`, etc.)
+    Branch = 4,
+    /// Is noop instruction
+    IsNoop = 5,
+    /// Is Rd index not zero
+    IsRdNotZero = 6,
+
+    pub const COUNT: usize = 7;
+};
+
+/// A set of circuit flags represented as a bit array
+pub const CircuitFlagSet = struct {
+    flags: [CircuitFlags.COUNT]bool,
+
+    pub fn init() CircuitFlagSet {
+        return .{ .flags = [_]bool{false} ** CircuitFlags.COUNT };
+    }
+
+    pub fn set(self: *CircuitFlagSet, flag: CircuitFlags) void {
+        self.flags[@intFromEnum(flag)] = true;
+    }
+
+    pub fn clear(self: *CircuitFlagSet, flag: CircuitFlags) void {
+        self.flags[@intFromEnum(flag)] = false;
+    }
+
+    pub fn get(self: CircuitFlagSet, flag: CircuitFlags) bool {
+        return self.flags[@intFromEnum(flag)];
+    }
+
+    /// Check if operands should be interleaved (not combined arithmetically)
+    pub fn isInterleavedOperands(self: CircuitFlagSet) bool {
+        return !self.get(.AddOperands) and
+            !self.get(.SubtractOperands) and
+            !self.get(.MultiplyOperands) and
+            !self.get(.Advice);
+    }
+};
+
+/// A set of instruction flags represented as a bit array
+pub const InstructionFlagSet = struct {
+    flags: [InstructionFlags.COUNT]bool,
+
+    pub fn init() InstructionFlagSet {
+        return .{ .flags = [_]bool{false} ** InstructionFlags.COUNT };
+    }
+
+    pub fn set(self: *InstructionFlagSet, flag: InstructionFlags) void {
+        self.flags[@intFromEnum(flag)] = true;
+    }
+
+    pub fn clear(self: *InstructionFlagSet, flag: InstructionFlags) void {
+        self.flags[@intFromEnum(flag)] = false;
+    }
+
+    pub fn get(self: InstructionFlagSet, flag: InstructionFlags) bool {
+        return self.flags[@intFromEnum(flag)];
+    }
+};
 
 /// RISC-V instruction opcodes (lower 7 bits)
 pub const Opcode = enum(u7) {

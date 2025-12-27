@@ -289,16 +289,30 @@ pub fn MultiStageProver(comptime F: type) type {
         }
 
         /// Stage 2: RAM RAF evaluation and read-write checking
+        ///
+        /// This stage proves memory consistency using RAF (Read-After-Final) checking.
+        /// The sumcheck proves:
+        ///   Σ_k ra(k) ⋅ unmap(k) = raf_claim
+        ///
+        /// Where:
+        /// - ra(k) = access counts per address slot k
+        /// - unmap(k) = original address from remapped slot k
+        ///
+        /// Structure:
+        /// - Number of rounds: log2(K) where K = address space size
+        /// - Degree: 2 (product of two linear polynomials)
+        /// - Opening claims: ra and unmap polynomial evaluations
         fn proveStage2(self: *Self, transcript: anytype) !void {
-            _ = transcript;
+            const stage_proof = &self.proofs.stage_proofs[1];
 
-            // Initialize RAF evaluation sumcheck
+            // Get r_cycle challenges from transcript (binding cycle variables)
             const r_cycle = try self.allocator.alloc(F, self.log_t);
             defer self.allocator.free(r_cycle);
             for (r_cycle) |*r| {
-                r.* = F.fromU64(2); // Placeholder - should come from transcript
+                r.* = transcript.challengeScalar("r_cycle");
             }
 
+            // Initialize RAF evaluation parameters
             var raf_params = try ram.RafEvaluationParams(F).init(
                 self.allocator,
                 self.log_k,
@@ -307,6 +321,7 @@ pub fn MultiStageProver(comptime F: type) type {
             );
             defer raf_params.deinit();
 
+            // Initialize RAF prover with memory trace
             var raf_prover = try ram.RafEvaluationProver(F).init(
                 self.allocator,
                 self.memory_trace,
@@ -314,11 +329,44 @@ pub fn MultiStageProver(comptime F: type) type {
             );
             defer raf_prover.deinit();
 
-            // Record initial claim
-            const raf_claim = raf_prover.computeInitialClaim();
-            _ = raf_claim;
+            // Compute and record initial claim
+            const initial_claim = raf_prover.computeInitialClaim();
+            try stage_proof.final_claims.append(self.allocator, initial_claim);
 
-            // TODO: Run sumcheck rounds and accumulate proofs
+            // Run sumcheck rounds
+            const num_rounds = raf_params.numRounds();
+            for (0..num_rounds) |round| {
+                // Compute round polynomial [p(0), p(1)]
+                const round_poly = raf_prover.computeRoundPolynomial();
+
+                // Store round polynomial in proof
+                const poly_copy = try self.allocator.alloc(F, 2);
+                poly_copy[0] = round_poly[0];
+                poly_copy[1] = round_poly[1];
+                try stage_proof.round_polys.append(self.allocator, poly_copy);
+
+                // Get challenge from transcript
+                const challenge = transcript.challengeScalar("raf_round");
+                try stage_proof.addChallenge(challenge);
+
+                // Bind the challenge for next round
+                try raf_prover.bindChallenge(challenge);
+                _ = round;
+            }
+
+            // Record final claim after all rounds
+            const final_claim = raf_prover.getFinalClaim();
+            try stage_proof.final_claims.append(self.allocator, final_claim);
+
+            // Accumulate opening claims for ra and unmap polynomials
+            // These will be verified in the final opening proof
+            if (stage_proof.challenges.items.len > 0) {
+                try self.opening_accumulator.accumulate(
+                    stage_proof.challenges.items,
+                    final_claim,
+                );
+            }
+
             self.current_stage = 2;
         }
 

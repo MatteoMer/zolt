@@ -50,7 +50,7 @@ zolt/
 
 ## Porting Status: ✅ COMPLETE
 
-All core phases have been completed. The port includes ~9100 lines of Zig code across 27 files.
+All core phases have been completed. The port includes ~10,200 lines of Zig code across 30 files (27 source + 3 examples).
 
 ### Phase 1: Foundation ✅
 1. [x] Create build.zig and project structure

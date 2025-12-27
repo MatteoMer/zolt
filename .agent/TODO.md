@@ -61,13 +61,14 @@
 - [x] Implement full Miller loop for pairings
 - [ ] Add GPU acceleration hooks
 - [x] Add comprehensive README.md
+- [x] Add usage examples (field_arithmetic, simple_proof, risc_v_emulation)
 
 ## Statistics
 - Rust files in jolt-core: 296
 - Build status: ✅ Passing
-- Test status: ✅ Passing (191 tests)
-- Lines of Zig code: ~9500
-- Zig files created: 27
+- Test status: ✅ Passing (96 unit + 84 integration = 180 tests)
+- Lines of Zig code: ~10,200 (including examples)
+- Zig files created: 30 (27 src + 3 examples)
 
 ## Key Features Implemented
 1. **BN254 Scalar Field**: Full Montgomery form arithmetic with CIOS multiplication

@@ -77,6 +77,8 @@ pub const Emulator = struct {
     device: common.JoltDevice,
     /// Execution trace
     trace: ExecutionTrace,
+    /// Lookup trace for Lasso proofs
+    lookup_trace: zkvm.instruction.LookupTraceCollector(64),
     /// Maximum cycles to execute
     max_cycles: u64,
     /// Whether the current instruction is compressed
@@ -90,6 +92,7 @@ pub const Emulator = struct {
             .registers = zkvm.registers.RegisterFile.init(allocator),
             .device = common.JoltDevice.init(allocator, config),
             .trace = ExecutionTrace.init(allocator),
+            .lookup_trace = zkvm.instruction.LookupTraceCollector(64).init(allocator),
             .max_cycles = common.constants.DEFAULT_MAX_TRACE_LENGTH,
             .is_compressed = false,
             .allocator = allocator,
@@ -101,6 +104,7 @@ pub const Emulator = struct {
         self.registers.deinit();
         self.device.deinit();
         self.trace.deinit();
+        self.lookup_trace.deinit();
     }
 
     /// Load a program into memory
@@ -133,6 +137,16 @@ pub const Emulator = struct {
         // Record pre-execution state
         const rs1_value = try self.registers.read(decoded.rs1);
         const rs2_value = try self.registers.read(decoded.rs2);
+
+        // Record lookup trace for Lasso proofs (before execution)
+        try self.lookup_trace.recordInstruction(
+            @intCast(self.state.cycle),
+            self.state.pc,
+            instruction,
+            decoded,
+            rs1_value,
+            rs2_value,
+        );
 
         // Execute
         const result = try self.execute(decoded, rs1_value, rs2_value);
@@ -912,4 +926,49 @@ test "memory witness generation" {
 
     // Verify write tuple
     try std.testing.expect(mem_wit.writes[0].address.eql(F.fromU64(0x1000)));
+}
+
+test "lookup trace integration" {
+    const allocator = std.testing.allocator;
+    const config = common.MemoryConfig{ .program_size = 1024 };
+    var emu = Emulator.init(allocator, &config);
+    defer emu.deinit();
+
+    // Program that exercises different instruction types:
+    // addi x1, x0, 10   ; x1 = 10 (generates ADD lookup)
+    // addi x2, x0, 5    ; x2 = 5  (generates ADD lookup)
+    // add  x3, x1, x2   ; x3 = 15 (generates ADD lookup)
+    // and  x4, x1, x2   ; x4 = 0  (generates AND lookup)
+    // or   x5, x1, x2   ; x5 = 15 (generates OR lookup)
+    const program = [_]u8{
+        0x93, 0x00, 0xa0, 0x00, // addi x1, x0, 10
+        0x13, 0x01, 0x50, 0x00, // addi x2, x0, 5
+        0xb3, 0x81, 0x20, 0x00, // add x3, x1, x2
+        0x33, 0xf2, 0x20, 0x00, // and x4, x1, x2
+        0xb3, 0xe2, 0x20, 0x00, // or x5, x1, x2
+    };
+    try emu.loadProgram(&program);
+
+    // Execute all instructions
+    _ = try emu.step(); // addi x1, x0, 10
+    _ = try emu.step(); // addi x2, x0, 5
+    _ = try emu.step(); // add x3, x1, x2
+    _ = try emu.step(); // and x4, x1, x2
+    _ = try emu.step(); // or x5, x1, x2
+
+    // Check register results
+    try std.testing.expectEqual(@as(u64, 10), try emu.registers.read(1));
+    try std.testing.expectEqual(@as(u64, 5), try emu.registers.read(2));
+    try std.testing.expectEqual(@as(u64, 15), try emu.registers.read(3));
+    try std.testing.expectEqual(@as(u64, 0), try emu.registers.read(4)); // 10 & 5 = 0 (binary: 1010 & 0101 = 0)
+    try std.testing.expectEqual(@as(u64, 15), try emu.registers.read(5)); // 10 | 5 = 15
+
+    // Check lookup trace was recorded
+    const stats = emu.lookup_trace.getStats();
+    try std.testing.expect(stats.total_lookups >= 5);
+
+    // Verify specific lookup types were recorded
+    try std.testing.expect(stats.range_check_lookups >= 3); // 3 ADD operations
+    try std.testing.expect(stats.and_lookups >= 1);
+    try std.testing.expect(stats.or_lookups >= 1);
 }

@@ -55,153 +55,162 @@ pub fn LookupEntry(comptime XLEN: comptime_int) type {
 
         /// Create entry for an ADD instruction
         pub fn fromAdd(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
-            const add = lookups.AddLookup(XLEN).init(rs1, rs2);
+            const AddLookup = lookups.AddLookup(XLEN);
+            const add = AddLookup.init(rs1, rs2);
             return Self{
                 .cycle = cycle,
                 .pc = pc,
-                .table = add.lookupTable(),
+                .table = AddLookup.lookupTable(),
                 .index = add.toLookupIndex(),
                 .result = add.computeResult(),
                 .left_operand = rs1,
                 .right_operand = rs2,
-                .circuit_flags = lookups.AddLookup(XLEN).circuitFlags(),
-                .instruction_flags = lookups.AddLookup(XLEN).instructionFlags(),
+                .circuit_flags = AddLookup.circuitFlags(),
+                .instruction_flags = AddLookup.instructionFlags(),
                 .instruction = instruction,
             };
         }
 
         /// Create entry for a SUB instruction
         pub fn fromSub(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
-            const sub = lookups.SubLookup(XLEN).init(rs1, rs2);
+            const SubLookup = lookups.SubLookup(XLEN);
+            const sub = SubLookup.init(rs1, rs2);
             return Self{
                 .cycle = cycle,
                 .pc = pc,
-                .table = sub.lookupTable(),
+                .table = SubLookup.lookupTable(),
                 .index = sub.toLookupIndex(),
                 .result = sub.computeResult(),
                 .left_operand = rs1,
                 .right_operand = rs2,
-                .circuit_flags = lookups.SubLookup(XLEN).circuitFlags(),
-                .instruction_flags = lookups.SubLookup(XLEN).instructionFlags(),
+                .circuit_flags = SubLookup.circuitFlags(),
+                .instruction_flags = SubLookup.instructionFlags(),
                 .instruction = instruction,
             };
         }
 
         /// Create entry for an AND instruction
         pub fn fromAnd(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
-            const and_op = lookups.AndLookup(XLEN).init(rs1, rs2);
+            const AndLookup = lookups.AndLookup(XLEN);
+            const and_op = AndLookup.init(rs1, rs2);
             return Self{
                 .cycle = cycle,
                 .pc = pc,
-                .table = and_op.lookupTable(),
+                .table = AndLookup.lookupTable(),
                 .index = and_op.toLookupIndex(),
                 .result = and_op.computeResult(),
                 .left_operand = rs1,
                 .right_operand = rs2,
-                .circuit_flags = lookups.AndLookup(XLEN).circuitFlags(),
-                .instruction_flags = lookups.AndLookup(XLEN).instructionFlags(),
+                .circuit_flags = AndLookup.circuitFlags(),
+                .instruction_flags = AndLookup.instructionFlags(),
                 .instruction = instruction,
             };
         }
 
         /// Create entry for an OR instruction
         pub fn fromOr(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
-            const or_op = lookups.OrLookup(XLEN).init(rs1, rs2);
+            const OrLookup = lookups.OrLookup(XLEN);
+            const or_op = OrLookup.init(rs1, rs2);
             return Self{
                 .cycle = cycle,
                 .pc = pc,
-                .table = or_op.lookupTable(),
+                .table = OrLookup.lookupTable(),
                 .index = or_op.toLookupIndex(),
                 .result = or_op.computeResult(),
                 .left_operand = rs1,
                 .right_operand = rs2,
-                .circuit_flags = lookups.OrLookup(XLEN).circuitFlags(),
-                .instruction_flags = lookups.OrLookup(XLEN).instructionFlags(),
+                .circuit_flags = OrLookup.circuitFlags(),
+                .instruction_flags = OrLookup.instructionFlags(),
                 .instruction = instruction,
             };
         }
 
         /// Create entry for a XOR instruction
         pub fn fromXor(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
-            const xor_op = lookups.XorLookup(XLEN).init(rs1, rs2);
+            const XorLookup = lookups.XorLookup(XLEN);
+            const xor_op = XorLookup.init(rs1, rs2);
             return Self{
                 .cycle = cycle,
                 .pc = pc,
-                .table = xor_op.lookupTable(),
+                .table = XorLookup.lookupTable(),
                 .index = xor_op.toLookupIndex(),
                 .result = xor_op.computeResult(),
                 .left_operand = rs1,
                 .right_operand = rs2,
-                .circuit_flags = lookups.XorLookup(XLEN).circuitFlags(),
-                .instruction_flags = lookups.XorLookup(XLEN).instructionFlags(),
+                .circuit_flags = XorLookup.circuitFlags(),
+                .instruction_flags = XorLookup.instructionFlags(),
                 .instruction = instruction,
             };
         }
 
         /// Create entry for SLT (set less than signed)
         pub fn fromSlt(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
-            const slt = lookups.SltLookup(XLEN).init(rs1, rs2);
+            const SltLookup = lookups.SltLookup(XLEN);
+            const slt = SltLookup.init(rs1, rs2);
             return Self{
                 .cycle = cycle,
                 .pc = pc,
-                .table = slt.lookupTable(),
+                .table = SltLookup.lookupTable(),
                 .index = slt.toLookupIndex(),
                 .result = slt.computeResult(),
                 .left_operand = rs1,
                 .right_operand = rs2,
-                .circuit_flags = lookups.SltLookup(XLEN).circuitFlags(),
-                .instruction_flags = lookups.SltLookup(XLEN).instructionFlags(),
+                .circuit_flags = SltLookup.circuitFlags(),
+                .instruction_flags = SltLookup.instructionFlags(),
                 .instruction = instruction,
             };
         }
 
         /// Create entry for SLTU (set less than unsigned)
         pub fn fromSltu(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
-            const sltu = lookups.SltuLookup(XLEN).init(rs1, rs2);
+            const SltuLookup = lookups.SltuLookup(XLEN);
+            const sltu = SltuLookup.init(rs1, rs2);
             return Self{
                 .cycle = cycle,
                 .pc = pc,
-                .table = sltu.lookupTable(),
+                .table = SltuLookup.lookupTable(),
                 .index = sltu.toLookupIndex(),
                 .result = sltu.computeResult(),
                 .left_operand = rs1,
                 .right_operand = rs2,
-                .circuit_flags = lookups.SltuLookup(XLEN).circuitFlags(),
-                .instruction_flags = lookups.SltuLookup(XLEN).instructionFlags(),
+                .circuit_flags = SltuLookup.circuitFlags(),
+                .instruction_flags = SltuLookup.instructionFlags(),
                 .instruction = instruction,
             };
         }
 
         /// Create entry for BEQ (branch if equal)
         pub fn fromBeq(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
-            const beq = lookups.BeqLookup(XLEN).init(rs1, rs2);
+            const BeqLookup = lookups.BeqLookup(XLEN);
+            const beq = BeqLookup.init(rs1, rs2);
             return Self{
                 .cycle = cycle,
                 .pc = pc,
-                .table = beq.lookupTable(),
+                .table = BeqLookup.lookupTable(),
                 .index = beq.toLookupIndex(),
                 .result = beq.computeResult(),
                 .left_operand = rs1,
                 .right_operand = rs2,
-                .circuit_flags = lookups.BeqLookup(XLEN).circuitFlags(),
-                .instruction_flags = lookups.BeqLookup(XLEN).instructionFlags(),
+                .circuit_flags = BeqLookup.circuitFlags(),
+                .instruction_flags = BeqLookup.instructionFlags(),
                 .instruction = instruction,
             };
         }
 
         /// Create entry for BNE (branch if not equal)
         pub fn fromBne(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
-            const bne = lookups.BneLookup(XLEN).init(rs1, rs2);
+            const BneLookup = lookups.BneLookup(XLEN);
+            const bne = BneLookup.init(rs1, rs2);
             return Self{
                 .cycle = cycle,
                 .pc = pc,
-                .table = bne.lookupTable(),
+                .table = BneLookup.lookupTable(),
                 .index = bne.toLookupIndex(),
                 .result = bne.computeResult(),
                 .left_operand = rs1,
                 .right_operand = rs2,
-                .circuit_flags = lookups.BneLookup(XLEN).circuitFlags(),
-                .instruction_flags = lookups.BneLookup(XLEN).instructionFlags(),
+                .circuit_flags = BneLookup.circuitFlags(),
+                .instruction_flags = BneLookup.instructionFlags(),
                 .instruction = instruction,
             };
         }

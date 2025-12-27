@@ -447,35 +447,38 @@ pub fn LookupTraceEntry(comptime XLEN: comptime_int) type {
 
         /// Create a trace entry from an instruction lookup
         pub fn fromAdd(cycle: usize, add: AddLookup(XLEN)) Self {
+            const AddLookupType = AddLookup(XLEN);
             return Self{
                 .cycle = cycle,
-                .table = add.lookupTable(),
+                .table = AddLookupType.lookupTable(),
                 .index = add.toLookupIndex(),
                 .result = add.computeResult(),
-                .circuit_flags = AddLookup(XLEN).circuitFlags(),
-                .instruction_flags = AddLookup(XLEN).instructionFlags(),
+                .circuit_flags = AddLookupType.circuitFlags(),
+                .instruction_flags = AddLookupType.instructionFlags(),
             };
         }
 
         pub fn fromSub(cycle: usize, sub: SubLookup(XLEN)) Self {
+            const SubLookupType = SubLookup(XLEN);
             return Self{
                 .cycle = cycle,
-                .table = sub.lookupTable(),
+                .table = SubLookupType.lookupTable(),
                 .index = sub.toLookupIndex(),
                 .result = sub.computeResult(),
-                .circuit_flags = SubLookup(XLEN).circuitFlags(),
-                .instruction_flags = SubLookup(XLEN).instructionFlags(),
+                .circuit_flags = SubLookupType.circuitFlags(),
+                .instruction_flags = SubLookupType.instructionFlags(),
             };
         }
 
         pub fn fromAnd(cycle: usize, and_op: AndLookup(XLEN)) Self {
+            const AndLookupType = AndLookup(XLEN);
             return Self{
                 .cycle = cycle,
-                .table = and_op.lookupTable(),
+                .table = AndLookupType.lookupTable(),
                 .index = and_op.toLookupIndex(),
                 .result = and_op.computeResult(),
-                .circuit_flags = AndLookup(XLEN).circuitFlags(),
-                .instruction_flags = AndLookup(XLEN).instructionFlags(),
+                .circuit_flags = AndLookupType.circuitFlags(),
+                .instruction_flags = AndLookupType.instructionFlags(),
             };
         }
     };

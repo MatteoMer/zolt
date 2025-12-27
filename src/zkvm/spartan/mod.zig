@@ -239,18 +239,91 @@ pub fn SpartanVerifier(comptime F: type) type {
 /// Uniform Spartan (for R1CS with uniform structure)
 ///
 /// In Jolt, the R1CS has a uniform structure that allows for more efficient
-/// verification using the "spark" optimization.
+/// verification using the "spark" optimization. This exploits the fact that
+/// the constraint matrices have a repeating block structure.
+///
+/// The key optimizations are:
+/// 1. Sparse polynomial evaluation: Instead of dense matrix-vector products,
+///    use the sparse structure to reduce evaluation cost
+/// 2. Commitment compression: Commit to smaller sub-matrices and use homomorphism
+/// 3. Batch opening: Open multiple polynomial evaluations in a single proof
 pub fn UniformSpartan(comptime F: type) type {
     return struct {
         const Self = @This();
-        const FieldType = F;
 
-        _marker: ?*const FieldType = null,
+        /// Number of repetitions in the uniform structure
+        num_repetitions: usize,
+        /// Size of each repeated block
+        block_size: usize,
+        /// Base prover for non-uniform operations
+        base_prover: SpartanProver(F),
+        allocator: Allocator,
 
-        // TODO: Implement uniform Spartan optimizations
+        pub fn init(allocator: Allocator, num_repetitions: usize, block_size: usize) Self {
+            return .{
+                .num_repetitions = num_repetitions,
+                .block_size = block_size,
+                .base_prover = SpartanProver(F).init(allocator),
+                .allocator = allocator,
+            };
+        }
 
-        pub fn init() Self {
-            return .{};
+        /// Generate proof exploiting uniform structure
+        ///
+        /// For uniform R1CS, the matrices have block structure:
+        /// A = [A_block, A_block, ..., A_block]
+        /// where A_block is repeated num_repetitions times.
+        ///
+        /// This allows us to:
+        /// 1. Commit only to A_block instead of full A
+        /// 2. Batch the sumcheck across all repetitions
+        /// 3. Use sparse evaluation for the block matrix
+        pub fn proveUniform(
+            self: *Self,
+            shape: *const R1CSShape(F),
+            witness: []const F,
+            tau: []const F,
+        ) !R1CSProof(F) {
+            // For now, fall back to standard Spartan
+            // A full implementation would exploit the uniform structure
+            // to reduce proof size and verification time
+            return self.base_prover.prove(shape, witness, tau);
+        }
+
+        /// Compute block-based witness vector
+        ///
+        /// Splits the witness into blocks matching the R1CS structure
+        pub fn splitWitness(self: *const Self, witness: []const F) ![][]F {
+            const num_blocks = (witness.len + self.block_size - 1) / self.block_size;
+            const blocks = try self.allocator.alloc([]F, num_blocks);
+
+            for (0..num_blocks) |i| {
+                const start = i * self.block_size;
+                const end = @min(start + self.block_size, witness.len);
+                blocks[i] = witness[start..end];
+            }
+
+            return blocks;
+        }
+
+        /// Verify that a witness satisfies the uniform R1CS
+        pub fn verifyWitness(
+            self: *const Self,
+            shape: *const R1CSShape(F),
+            witness: []const F,
+        ) bool {
+            _ = self;
+            // Check Az * Bz = Cz for each constraint
+            for (0..shape.num_constraints) |i| {
+                const a_val = shape.A.evalRow(i, witness);
+                const b_val = shape.B.evalRow(i, witness);
+                const c_val = shape.C.evalRow(i, witness);
+
+                if (!a_val.mul(b_val).eql(c_val)) {
+                    return false;
+                }
+            }
+            return true;
         }
     };
 }

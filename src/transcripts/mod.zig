@@ -212,16 +212,46 @@ pub fn Transcript(comptime F: type) type {
 }
 
 /// Poseidon transcript (alternative to Keccak)
+///
+/// Poseidon is a ZK-friendly hash function optimized for arithmetic circuits.
+/// This implementation uses a simplified Poseidon-like permutation with:
+/// - State width: 3 field elements
+/// - Full rounds: 8 (with S-boxes on all elements)
+/// - Partial rounds: 56 (with S-box on one element)
+///
+/// Note: For full security, use the proper round constants from the Poseidon paper.
+/// This implementation provides the correct structure but uses simplified constants.
 pub fn PoseidonTranscript(comptime F: type) type {
     return struct {
         const Self = @This();
 
-        state: [3]F,
+        /// Number of full rounds (applied at start and end)
+        const FULL_ROUNDS: usize = 8;
+        /// Number of partial rounds (applied in the middle)
+        const PARTIAL_ROUNDS: usize = 56;
+        /// State width (t parameter)
+        const STATE_WIDTH: usize = 3;
+
+        state: [STATE_WIDTH]F,
+        round_counter: usize,
         allocator: Allocator,
 
-        pub fn init(allocator: Allocator, _: []const u8) Self {
+        pub fn init(allocator: Allocator, domain: []const u8) Self {
+            // Initialize state with domain separator
+            var initial_state: [STATE_WIDTH]F = .{ F.zero(), F.zero(), F.zero() };
+
+            // Mix in domain separator bytes
+            if (domain.len > 0) {
+                var domain_hash: u64 = 0;
+                for (domain) |byte| {
+                    domain_hash = domain_hash *% 31 +% byte;
+                }
+                initial_state[0] = F.fromU64(domain_hash);
+            }
+
             return .{
-                .state = .{ F.zero(), F.zero(), F.zero() },
+                .state = initial_state,
+                .round_counter = 0,
                 .allocator = allocator,
             };
         }
@@ -240,12 +270,98 @@ pub fn PoseidonTranscript(comptime F: type) type {
             return self.state[0];
         }
 
-        /// Poseidon permutation (placeholder)
+        /// Poseidon permutation with full and partial rounds
         fn permute(self: *Self) void {
-            // TODO: Implement proper Poseidon permutation
-            self.state[0] = self.state[0].add(self.state[1]);
-            self.state[1] = self.state[1].add(self.state[2]);
-            self.state[2] = self.state[2].add(self.state[0]);
+            // First half of full rounds
+            for (0..FULL_ROUNDS / 2) |r| {
+                self.fullRound(r);
+            }
+
+            // Partial rounds (S-box only on first element)
+            for (0..PARTIAL_ROUNDS) |r| {
+                self.partialRound(r + FULL_ROUNDS / 2);
+            }
+
+            // Second half of full rounds
+            for (0..FULL_ROUNDS / 2) |r| {
+                self.fullRound(r + FULL_ROUNDS / 2 + PARTIAL_ROUNDS);
+            }
+
+            self.round_counter += 1;
+        }
+
+        /// Full round: S-boxes on all state elements
+        fn fullRound(self: *Self, round: usize) void {
+            // Add round constants
+            self.addRoundConstants(round);
+
+            // Apply S-box (x^5) to all elements
+            for (&self.state) |*s| {
+                s.* = self.sbox(s.*);
+            }
+
+            // Apply MDS matrix
+            self.mdsMatrix();
+        }
+
+        /// Partial round: S-box only on first element
+        fn partialRound(self: *Self, round: usize) void {
+            // Add round constants
+            self.addRoundConstants(round);
+
+            // Apply S-box only to first element
+            self.state[0] = self.sbox(self.state[0]);
+
+            // Apply MDS matrix
+            self.mdsMatrix();
+        }
+
+        /// S-box: x^5 (efficient for BN254)
+        fn sbox(self: *Self, x: F) F {
+            _ = self;
+            const x2 = x.mul(x);
+            const x4 = x2.mul(x2);
+            return x4.mul(x);
+        }
+
+        /// Add round constants (simplified - uses deterministic derivation)
+        fn addRoundConstants(self: *Self, round: usize) void {
+            // Derive round constants deterministically
+            // In production, use precomputed constants from the Poseidon paper
+            for (0..STATE_WIDTH) |i| {
+                const rc = self.deriveRoundConstant(round, i);
+                self.state[i] = self.state[i].add(rc);
+            }
+        }
+
+        /// Derive a round constant deterministically
+        fn deriveRoundConstant(_: *Self, round: usize, index: usize) F {
+            // Simple deterministic derivation using golden ratio-based constants
+            var seed: u64 = 0x9e3779b97f4a7c15;
+            seed ^= @as(u64, @intCast(round)) *% 0xc4ceb9fe1a85ec53;
+            seed ^= @as(u64, @intCast(index)) *% 0xff51afd7ed558ccd;
+            seed ^= seed >> 33;
+            seed *%= 0xff51afd7ed558ccd;
+            seed ^= seed >> 33;
+            return F.fromU64(seed);
+        }
+
+        /// MDS matrix multiplication (Cauchy matrix)
+        /// For t=3, using a simple circulant structure
+        fn mdsMatrix(self: *Self) void {
+            const s0 = self.state[0];
+            const s1 = self.state[1];
+            const s2 = self.state[2];
+
+            // MDS matrix for t=3:
+            // [2, 1, 1]
+            // [1, 2, 1]
+            // [1, 1, 2]
+            const two = F.fromU64(2);
+
+            self.state[0] = two.mul(s0).add(s1).add(s2);
+            self.state[1] = s0.add(two.mul(s1)).add(s2);
+            self.state[2] = s0.add(s1).add(two.mul(s2));
         }
     };
 }

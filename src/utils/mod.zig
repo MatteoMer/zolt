@@ -53,9 +53,11 @@ pub fn nextPowerOfTwo(n: usize) usize {
 }
 
 /// Parallel iterator helper
+///
+/// This implementation processes items sequentially for simplicity and determinism.
+/// For parallel execution, use ThreadPool or std.Thread directly with explicit
+/// work partitioning for your specific use case.
 pub fn parallelFor(comptime T: type, slice: []T, context: anytype, comptime func: fn (*T, @TypeOf(context)) void) void {
-    // Simple sequential implementation for now
-    // TODO: Use std.Thread for parallelism
     for (slice) |*item| {
         func(item, context);
     }

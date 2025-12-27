@@ -71,7 +71,8 @@ pub fn DensePolynomial(comptime F: type) type {
             for (self.evaluations, 0..) |eval, i| {
                 var term = eval;
                 for (0..self.num_vars) |j| {
-                    const bit = (i >> j) & 1;
+                    const shift_amount: u6 = @intCast(j);
+                    const bit = (i >> shift_amount) & 1;
                     if (bit == 1) {
                         term = term.mul(point[j]);
                     } else {

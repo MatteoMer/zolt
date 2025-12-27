@@ -79,6 +79,8 @@ pub const Emulator = struct {
     trace: ExecutionTrace,
     /// Maximum cycles to execute
     max_cycles: u64,
+    /// Whether the current instruction is compressed
+    is_compressed: bool,
     allocator: Allocator,
 
     pub fn init(allocator: Allocator, config: *const common.MemoryConfig) Emulator {
@@ -89,6 +91,7 @@ pub const Emulator = struct {
             .device = common.JoltDevice.init(allocator, config),
             .trace = ExecutionTrace.init(allocator),
             .max_cycles = common.constants.DEFAULT_MAX_TRACE_LENGTH,
+            .is_compressed = false,
             .allocator = allocator,
         };
     }
@@ -161,14 +164,33 @@ pub const Emulator = struct {
         while (try self.step()) {}
     }
 
-    /// Fetch instruction from memory
+    /// Fetch instruction from memory, handling compressed instructions
+    /// Returns the 32-bit instruction (expanded if compressed) and updates PC accordingly
     fn fetchInstruction(self: *Emulator) !u32 {
-        var instruction: u32 = 0;
-        inline for (0..4) |i| {
+        // First fetch the lower 16 bits
+        var halfword: u32 = 0;
+        inline for (0..2) |i| {
             const byte = try self.ram.readByte(self.state.pc + i, self.state.cycle);
-            instruction |= @as(u32, byte) << (@as(u5, @intCast(i)) * 8);
+            halfword |= @as(u32, byte) << (@as(u5, @intCast(i)) * 8);
         }
-        return instruction;
+
+        // Check if this is a compressed instruction
+        if (zkvm.instruction.isCompressed(halfword)) {
+            // 16-bit compressed instruction - expand it
+            const expanded = zkvm.instruction.uncompressInstruction(halfword, .Bit64);
+            // Advance PC by 2 (will be done in step())
+            self.is_compressed = true;
+            return expanded;
+        } else {
+            // 32-bit instruction - fetch the remaining 16 bits
+            var instruction = halfword;
+            inline for (2..4) |i| {
+                const byte = try self.ram.readByte(self.state.pc + i, self.state.cycle);
+                instruction |= @as(u32, byte) << (@as(u5, @intCast(i)) * 8);
+            }
+            self.is_compressed = false;
+            return instruction;
+        }
     }
 
     const ExecutionResult = struct {
@@ -186,12 +208,14 @@ pub const Emulator = struct {
         rs1: u64,
         rs2: u64,
     ) !ExecutionResult {
+        // PC increment: 2 for compressed, 4 for regular instructions
+        const pc_increment: u64 = if (self.is_compressed) 2 else 4;
         var result = ExecutionResult{
             .rd_value = 0,
             .memory_addr = null,
             .memory_value = null,
             .is_memory_write = false,
-            .next_pc = self.state.pc + 4,
+            .next_pc = self.state.pc + pc_increment,
         };
 
         switch (decoded.opcode) {
@@ -204,12 +228,14 @@ pub const Emulator = struct {
                 try self.registers.write(decoded.rd, result.rd_value);
             },
             .JAL => {
-                result.rd_value = self.state.pc + 4;
+                // Return address: PC + 2 for compressed, PC + 4 for regular
+                result.rd_value = self.state.pc + pc_increment;
                 result.next_pc = @bitCast(@as(i64, @as(i32, @intCast(self.state.pc))) + decoded.imm);
                 try self.registers.write(decoded.rd, result.rd_value);
             },
             .JALR => {
-                result.rd_value = self.state.pc + 4;
+                // Return address: PC + 2 for compressed, PC + 4 for regular
+                result.rd_value = self.state.pc + pc_increment;
                 const target = (@as(i64, @bitCast(rs1)) + decoded.imm) & ~@as(i64, 1);
                 result.next_pc = @bitCast(target);
                 try self.registers.write(decoded.rd, result.rd_value);
@@ -522,4 +548,51 @@ test "M extension division by zero" {
     const x1 = try emu.registers.read(1);
     // RISC-V spec: unsigned division by zero returns max value
     try std.testing.expectEqual(std.math.maxInt(u64), x1);
+}
+
+test "compressed instruction C.NOP" {
+    const allocator = std.testing.allocator;
+    const config = common.MemoryConfig{
+        .program_size = 1024,
+    };
+    var emu = Emulator.init(allocator, &config);
+    defer emu.deinit();
+
+    // C.NOP is 0x0001 (2 bytes)
+    // C.NOP expands to addi x0, x0, 0
+    const program = [_]u8{
+        0x01, 0x00, // C.NOP
+        0x01, 0x00, // C.NOP
+    };
+    try emu.loadProgram(&program);
+
+    // Execute first C.NOP
+    const continued = try emu.step();
+    try std.testing.expect(continued);
+
+    // PC should advance by 2 (compressed instruction)
+    try std.testing.expectEqual(common.constants.RAM_START_ADDRESS + 2, emu.state.pc);
+}
+
+test "compressed instruction C.LI" {
+    const allocator = std.testing.allocator;
+    const config = common.MemoryConfig{
+        .program_size = 1024,
+    };
+    var emu = Emulator.init(allocator, &config);
+    defer emu.deinit();
+
+    // C.LI x10, 5 expands to addi x10, x0, 5
+    // Format: funct3=010, imm[5]=0, rd=01010, imm[4:0]=00101, op=01
+    // Binary: 010 0 01010 00101 01 = 0x4505
+    const program = [_]u8{
+        0x15, 0x45, // C.LI x10, 5 (little endian: 0x4515)
+    };
+    try emu.loadProgram(&program);
+
+    _ = try emu.step();
+
+    // Check that x10 = 5
+    const x10 = try emu.registers.read(10);
+    try std.testing.expectEqual(@as(u64, 5), x10);
 }

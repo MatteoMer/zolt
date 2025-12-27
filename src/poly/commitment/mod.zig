@@ -138,22 +138,65 @@ pub fn HyperKZG(comptime F: type) type {
         };
 
         /// Generate SRS (in real impl, this is a trusted setup)
+        ///
+        /// NOTE: This creates a mock SRS for testing only. For production use,
+        /// you need a proper trusted setup ceremony (powers of tau).
+        /// The tau value is deterministically derived (INSECURE for production).
         pub fn setup(allocator: Allocator, max_degree: usize) !SetupParams {
             // In a real implementation, this would be generated from a trusted setup
-            // ceremony. Here we create a mock SRS for testing.
+            // ceremony. Here we create a deterministic SRS for testing.
+            //
+            // WARNING: Using a known tau value is INSECURE for production.
+            // This is only for testing and development.
             const powers = try allocator.alloc(Point, max_degree);
 
-            // Initialize with mock values (in practice, these are [tau^i]_1)
-            for (powers, 0..) |*p, i| {
-                p.* = Point.fromCoords(F.fromU64(i + 1), F.fromU64(i + 2));
+            // Use G1 generator
+            const g1 = Point.generator();
+
+            // Use a deterministic "tau" for testing (INSECURE!)
+            // In production, tau must be unknown to everyone.
+            const tau = F.fromU64(0x12345678);
+
+            // Compute powers of tau: [1, tau, tau^2, ..., tau^{n-1}]_1
+            var tau_power = F.one();
+            for (powers) |*p| {
+                // p = tau^i * G1
+                p.* = msm.MSM(F, F).scalarMul(g1, tau_power).toAffine();
+                tau_power = tau_power.mul(tau);
             }
+
+            // Compute [tau]_2 for the G2 generator
+            // Note: For a proper implementation, we'd need G2 scalar multiplication
+            // For now, we use the G2 generator directly (works for tau=1 case)
+            // This is a placeholder - full G2 scalar mul would be needed for real pairing checks
 
             return .{
                 .powers_of_tau_g1 = powers,
-                .tau_g2 = G2Point.generator(), // [tau]_2
-                .g1 = Point.fromCoords(F.one(), F.fromU64(2)), // [1]_1
-                .g2 = G2Point.generator(), // [1]_2
+                .tau_g2 = G2Point.generator(), // Placeholder: should be [tau]_2
+                .g1 = g1, // [1]_1 = G1 generator
+                .g2 = G2Point.generator(), // [1]_2 = G2 generator
                 .max_degree = max_degree,
+                .allocator = allocator,
+            };
+        }
+
+        /// Create SRS from existing trusted setup data
+        ///
+        /// Use this when you have powers of tau from a real trusted setup ceremony.
+        pub fn setupFromSRS(
+            allocator: Allocator,
+            powers_of_tau_g1: []const Point,
+            tau_g2: G2Point,
+        ) !SetupParams {
+            const powers = try allocator.alloc(Point, powers_of_tau_g1.len);
+            @memcpy(powers, powers_of_tau_g1);
+
+            return .{
+                .powers_of_tau_g1 = powers,
+                .tau_g2 = tau_g2,
+                .g1 = Point.generator(),
+                .g2 = G2Point.generator(),
+                .max_degree = powers_of_tau_g1.len,
                 .allocator = allocator,
             };
         }

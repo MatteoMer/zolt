@@ -487,21 +487,103 @@ pub fn MultiStageProver(comptime F: type) type {
         /// This stage proves that memory values are consistent across
         /// read and write operations. Uses the ValEvaluation sumcheck
         /// to verify:
-        /// - inc(k) polynomial for timestamp increments
-        /// - wa(k) polynomial for write addresses
-        /// - lt(k) polynomial for timestamp ordering
+        ///   Val(r) - Val_init(r_address) = Σ_j inc(j) · wa(r_address, j) · LT(j, r_cycle)
         ///
-        /// Opening claims: Memory value polynomial evaluations
+        /// Structure:
+        /// - Number of rounds: log2(trace_length)
+        /// - Degree: 3 (product of inc, wa, LT polynomials)
+        /// - Opening claims: inc, wa, LT polynomial evaluations
         fn proveStage4(self: *Self, transcript: anytype) !void {
-            // Get challenge for value evaluation
-            const val_challenge = transcript.challengeScalar("val_eval");
-            _ = val_challenge;
+            const stage_proof = &self.proofs.stage_proofs[3];
 
-            // In a full implementation:
-            // 1. Build value consistency polynomials from memory trace
-            // 2. Run ValEvaluation sumcheck
-            // 3. Verify timestamp ordering and value consistency
-            // 4. Accumulate opening claims
+            // Get address challenge from previous stage
+            const r_address = try self.allocator.alloc(F, self.log_k);
+            defer self.allocator.free(r_address);
+            for (r_address) |*r| {
+                r.* = transcript.challengeScalar("r_address");
+            }
+
+            // Get cycle challenge from previous stage
+            const r_cycle = try self.allocator.alloc(F, self.log_t);
+            defer self.allocator.free(r_cycle);
+            for (r_cycle) |*r| {
+                r.* = transcript.challengeScalar("r_cycle_val");
+            }
+
+            // Initial value evaluation (for uninitialized memory, this is 0)
+            const init_eval = F.zero();
+
+            // Initialize value evaluation parameters
+            const trace_len = self.trace.steps.items.len;
+            const k = @as(usize, 1) << @intCast(self.log_k);
+
+            var val_params = try ram.ValEvaluationParams(F).init(
+                self.allocator,
+                init_eval,
+                trace_len,
+                k,
+                r_address,
+                r_cycle,
+            );
+            defer val_params.deinit();
+
+            // Skip if trace is empty
+            if (trace_len == 0) {
+                self.current_stage = 4;
+                return;
+            }
+
+            // Initialize value evaluation prover
+            const initial_state = try self.allocator.alloc(u64, k);
+            defer self.allocator.free(initial_state);
+            @memset(initial_state, 0);
+
+            var val_prover = try ram.ValEvaluationProver(F).init(
+                self.allocator,
+                self.memory_trace,
+                initial_state,
+                val_params,
+                self.start_address,
+            );
+            defer val_prover.deinit();
+
+            // Compute and record initial claim
+            const initial_claim = val_prover.computeInitialClaim();
+            try stage_proof.final_claims.append(self.allocator, initial_claim);
+
+            // Run sumcheck rounds
+            const num_rounds = val_params.numRounds();
+            for (0..num_rounds) |round| {
+                // Compute round polynomial [p(0), p(1), p(2)]
+                const round_poly = val_prover.computeRoundPolynomial();
+
+                // Store polynomial in proof
+                const poly_copy = try self.allocator.alloc(F, 3);
+                poly_copy[0] = round_poly[0];
+                poly_copy[1] = round_poly[1];
+                poly_copy[2] = round_poly[2];
+                try stage_proof.round_polys.append(self.allocator, poly_copy);
+
+                // Get challenge from transcript
+                const challenge = transcript.challengeScalar("val_eval_round");
+                try stage_proof.addChallenge(challenge);
+
+                // Bind the challenge
+                val_prover.bindChallenge(challenge);
+                _ = round;
+            }
+
+            // Record final claim
+            const final_claim = val_prover.getFinalClaim();
+            try stage_proof.final_claims.append(self.allocator, final_claim);
+
+            // Accumulate opening claims
+            if (stage_proof.challenges.items.len > 0) {
+                try self.opening_accumulator.accumulate(
+                    stage_proof.challenges.items,
+                    final_claim,
+                );
+            }
 
             self.current_stage = 4;
         }

@@ -87,21 +87,26 @@ Added proper Frobenius coefficients:
 
 3. **frobeniusG2()**: Already had gamma12() and gamma13() for G2 twist
 
+### Fixed in Iteration 12
+
+4. **ATE_LOOP_COUNT**: Fixed to correct 65-element signed binary expansion
+   of 6x+2 = 29793968203157093288. Was using wrong 64-element array.
+
+5. **Miller loop direction**: Fixed to iterate from MSB to LSB (index 63 down to 0)
+   instead of LSB to MSB. Array is stored LSB-first so needs reverse iteration.
+
 ### Remaining Issues
 
-The pairing bilinearity test still fails. With Frobenius fixed, the issue is likely:
+The pairing bilinearity test still fails. With Frobenius and ATE loop fixed, the issue is likely:
 
-1. **Miller loop line evaluation**: The doubling and addition step line coefficients
-   may not be correctly computed for the BN254 twist.
+1. **Line evaluation**: The doubling and addition step line coefficients
+   may not be correctly computed for the BN254 D-type twist.
 
-2. **ATE_LOOP_COUNT**: The constant defining the optimal ate loop may be wrong or
-   the loop structure may be incorrect.
-
-3. **Final exponentiation hard part**: The formula for the hard part may have errors.
+2. **Final exponentiation hard part**: The formula may have errors.
    The standard formula involves many Frobenius operations and multiplications.
 
-4. **π(Q) and π²(Q) in Miller loop tail**: The additional lines added at the end
-   of the Miller loop may be using incorrect points.
+3. **π(Q) twist factors**: The Frobenius on G2 may need additional corrections
+   for the twist isomorphism.
 
 ### References
 

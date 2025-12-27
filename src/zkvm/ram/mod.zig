@@ -7,6 +7,14 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const common = @import("../../common/mod.zig");
 
+// RAF (Read-After-Final) checking
+pub const raf_checking = @import("raf_checking.zig");
+pub const RafEvaluationParams = raf_checking.RafEvaluationParams;
+pub const RaPolynomial = raf_checking.RaPolynomial;
+pub const UnmapPolynomial = raf_checking.UnmapPolynomial;
+pub const RafEvaluationProver = raf_checking.RafEvaluationProver;
+pub const RafEvaluationVerifier = raf_checking.RafEvaluationVerifier;
+
 /// Memory operation type
 pub const MemoryOp = enum {
     Read,

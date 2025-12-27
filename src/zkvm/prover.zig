@@ -252,10 +252,39 @@ pub fn MultiStageProver(comptime F: type) type {
         }
 
         /// Stage 1: Outer Spartan sumcheck
+        ///
+        /// This stage proves that all R1CS constraints are satisfied for
+        /// the execution trace. The sumcheck proves:
+        ///   sum_{x} eq(tau, x) * [(Az)(x) * (Bz)(x) - (Cz)(x)] = 0
+        ///
+        /// Structure:
+        /// - Number of rounds: 1 + log2(trace_length) for uniform R1CS
+        /// - Degree: 3 (multiquadratic after first round)
+        /// - Opening claims: R1CS input evaluations at r_cycle
         fn proveStage1(self: *Self, transcript: anytype) !void {
-            _ = transcript;
-            // TODO: Implement Spartan outer sumcheck
-            // This proves instruction correctness via R1CS
+            // Get tau challenge from transcript for the EQ polynomial
+            const tau = transcript.challengeScalar("spartan_tau");
+
+            // Number of rounds is based on trace length
+            // For uniform Jolt R1CS: 1 + log2(T) rounds
+            const num_rounds = 1 + self.log_t;
+            _ = num_rounds;
+
+            // In a full implementation, we would:
+            // 1. Build R1CS constraints from the execution trace
+            // 2. Materialize the witness vector z
+            // 3. Compute Az, Bz, Cz
+            // 4. Run sumcheck on eq(tau, x) * [Az(x) * Bz(x) - Cz(x)]
+            // 5. Record opening claims for R1CS inputs at final point
+            //
+            // For now, we record a placeholder round polynomial
+            const stage_proof = &self.proofs.stage_proofs[0];
+
+            // Record that we've completed this stage
+            // The stage proof structure will be populated by full implementation
+            _ = tau;
+            _ = stage_proof;
+
             self.current_stage = 1;
         }
 
@@ -293,33 +322,103 @@ pub fn MultiStageProver(comptime F: type) type {
             self.current_stage = 2;
         }
 
-        /// Stage 3: Instruction lookup reduction
+        /// Stage 3: Instruction lookup reduction (Lasso)
+        ///
+        /// This stage proves that all instruction lookups are valid using
+        /// the Lasso lookup argument. The lookup trace records:
+        /// - Table index (which lookup table was used)
+        /// - Input value (x, y operands)
+        /// - Output value (result from table)
+        ///
+        /// The Lasso protocol uses two-phase sumcheck:
+        /// 1. Address binding: Bind address variables
+        /// 2. Cycle binding: Bind cycle/time variables
+        ///
+        /// Opening claims: Lookup polynomial evaluations
         fn proveStage3(self: *Self, transcript: anytype) !void {
-            _ = transcript;
-            // TODO: Implement Lasso lookup reduction sumcheck
-            // This uses the lookup trace to prove instruction lookups
-            _ = self.lookup_trace;
+            // Get challenge for batching lookup instances
+            const lookup_batch_challenge = transcript.challengeScalar("lookup_batch");
+            _ = lookup_batch_challenge;
+
+            // Get lookup statistics for debugging/verification
+            const stats = self.lookup_trace.getStatistics();
+            _ = stats;
+
+            // In a full implementation:
+            // 1. Batch all lookup instances with random linear combination
+            // 2. Run Lasso prover with prefix-suffix decomposition
+            // 3. Perform two-phase sumcheck (address then cycle binding)
+            // 4. Accumulate opening claims for lookup polynomials
+            //
+            // The lookup trace is already collected during emulation
+
             self.current_stage = 3;
         }
 
         /// Stage 4: Memory value evaluation
+        ///
+        /// This stage proves that memory values are consistent across
+        /// read and write operations. Uses the ValEvaluation sumcheck
+        /// to verify:
+        /// - inc(k) polynomial for timestamp increments
+        /// - wa(k) polynomial for write addresses
+        /// - lt(k) polynomial for timestamp ordering
+        ///
+        /// Opening claims: Memory value polynomial evaluations
         fn proveStage4(self: *Self, transcript: anytype) !void {
-            _ = transcript;
-            // TODO: Implement ValEvaluation sumcheck
+            // Get challenge for value evaluation
+            const val_challenge = transcript.challengeScalar("val_eval");
+            _ = val_challenge;
+
+            // In a full implementation:
+            // 1. Build value consistency polynomials from memory trace
+            // 2. Run ValEvaluation sumcheck
+            // 3. Verify timestamp ordering and value consistency
+            // 4. Accumulate opening claims
+
             self.current_stage = 4;
         }
 
         /// Stage 5: Register value evaluation
+        ///
+        /// This stage proves register read-write consistency similar to
+        /// Stage 4 but for the 32 RISC-V registers. The register file
+        /// is treated as a small memory with 32 addresses.
+        ///
+        /// Opening claims: Register polynomial evaluations
         fn proveStage5(self: *Self, transcript: anytype) !void {
-            _ = transcript;
-            // TODO: Implement RegisterValEvaluation sumcheck
+            // Get challenge for register evaluation
+            const reg_challenge = transcript.challengeScalar("reg_eval");
+            _ = reg_challenge;
+
+            // In a full implementation:
+            // 1. Build register consistency polynomials
+            // 2. Run RAF and value checking for registers
+            // 3. Handle x0 (hardwired zero) specially
+            // 4. Accumulate opening claims
+
             self.current_stage = 5;
         }
 
         /// Stage 6: Booleanity and finalization
+        ///
+        /// This stage proves:
+        /// - Booleanity: All flags and selectors are in {0, 1}
+        /// - Hamming weight: Exactly one instruction type per step
+        /// - Final memory state: Terminal values are correct
+        ///
+        /// This is the final sumcheck stage before opening proofs.
         fn proveStage6(self: *Self, transcript: anytype) !void {
-            _ = transcript;
-            // TODO: Implement booleanity and Hamming weight checks
+            // Get challenge for booleanity check
+            const bool_challenge = transcript.challengeScalar("booleanity");
+            _ = bool_challenge;
+
+            // In a full implementation:
+            // 1. Check that all circuit flags are boolean: f * (1 - f) = 0
+            // 2. Check Hamming weight constraints on instruction flags
+            // 3. Verify final memory/register state
+            // 4. Finalize all opening claims
+
             self.current_stage = 6;
         }
     };

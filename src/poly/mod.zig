@@ -190,7 +190,7 @@ pub fn EqPolynomial(comptime F: type) type {
         /// Compute all evaluations on the boolean hypercube
         pub fn evals(self: *const Self, allocator: Allocator) ![]F {
             const n = self.r.len;
-            const size = @as(usize, 1) << n;
+            const size = @as(usize, 1) << @as(u6, @intCast(n));
             const result = try allocator.alloc(F, size);
 
             // Start with eq evaluated at all zeros
@@ -202,7 +202,7 @@ pub fn EqPolynomial(comptime F: type) type {
 
             // Build up using the recurrence relation
             for (0..n) |i| {
-                const half = @as(usize, 1) << i;
+                const half = @as(usize, 1) << @as(u6, @intCast(i));
                 const factor = self.r[i].mul(F.one().sub(self.r[i]).inverse().?);
 
                 for (0..half) |j| {

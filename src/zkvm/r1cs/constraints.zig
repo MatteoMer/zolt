@@ -394,8 +394,8 @@ pub fn R1CSCycleInputs(comptime F: type) type {
 
         /// Create cycle inputs from an execution trace step
         pub fn fromTraceStep(
-            step: tracer.ExecutionStep,
-            next_step: ?tracer.ExecutionStep,
+            step: tracer.TraceStep,
+            next_step: ?tracer.TraceStep,
         ) Self {
             var inputs = Self{
                 .values = [_]F{F.zero()} ** R1CSInputIndex.NUM_INPUTS,
@@ -418,40 +418,92 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             inputs.values[R1CSInputIndex.Rs2Value.toIndex()] = F.fromU64(step.rs2_value);
             inputs.values[R1CSInputIndex.RdWriteValue.toIndex()] = F.fromU64(step.rd_value);
 
-            // RAM access (simplified)
-            inputs.values[R1CSInputIndex.RamAddress.toIndex()] = F.fromU64(step.rs1_value +% @as(u64, @bitCast(@as(i64, step.imm))));
-            inputs.values[R1CSInputIndex.RamReadValue.toIndex()] = F.zero();
-            inputs.values[R1CSInputIndex.RamWriteValue.toIndex()] = F.zero();
+            // RAM access (simplified) - use memory_addr if present
+            const ram_addr = step.memory_addr orelse step.rs1_value;
+            inputs.values[R1CSInputIndex.RamAddress.toIndex()] = F.fromU64(ram_addr);
+            inputs.values[R1CSInputIndex.RamReadValue.toIndex()] = F.fromU64(step.memory_value orelse 0);
+            inputs.values[R1CSInputIndex.RamWriteValue.toIndex()] = if (step.is_memory_write)
+                F.fromU64(step.memory_value orelse 0)
+            else
+                F.zero();
 
             // PC values
             inputs.values[R1CSInputIndex.PC.toIndex()] = F.fromU64(step.pc);
             inputs.values[R1CSInputIndex.UnexpandedPC.toIndex()] = F.fromU64(step.pc);
+            inputs.values[R1CSInputIndex.NextPC.toIndex()] = F.fromU64(step.next_pc);
+            inputs.values[R1CSInputIndex.NextUnexpandedPC.toIndex()] = F.fromU64(step.next_pc);
 
+            // Use next step's PC if available for verification
             if (next_step) |ns| {
                 inputs.values[R1CSInputIndex.NextPC.toIndex()] = F.fromU64(ns.pc);
-                inputs.values[R1CSInputIndex.NextUnexpandedPC.toIndex()] = F.fromU64(ns.pc);
-            } else {
-                inputs.values[R1CSInputIndex.NextPC.toIndex()] = F.fromU64(step.pc + 4);
-                inputs.values[R1CSInputIndex.NextUnexpandedPC.toIndex()] = F.fromU64(step.pc + 4);
             }
 
-            // Immediate
-            inputs.values[R1CSInputIndex.Imm.toIndex()] = if (step.imm >= 0)
-                F.fromU64(@intCast(step.imm))
-            else
-                F.zero().sub(F.fromU64(@intCast(-step.imm)));
+            // Immediate - derive from instruction
+            const imm = inputs.deriveImmediate(step.instruction);
+            inputs.values[R1CSInputIndex.Imm.toIndex()] = imm;
 
-            // Circuit flags - set based on opcode
-            // These would be derived from the instruction decoder
-            inputs.setFlagsFromOpcode(step.opcode);
+            // Circuit flags - set based on instruction opcode
+            inputs.setFlagsFromInstruction(step.instruction);
 
             return inputs;
         }
 
-        /// Set circuit flags based on opcode
-        fn setFlagsFromOpcode(self: *Self, opcode: u8) void {
+        /// Derive immediate value from instruction
+        fn deriveImmediate(self: *Self, instr: u32) F {
+            _ = self;
+            const opcode = instr & 0x7F;
+            switch (opcode) {
+                0x13, 0x03, 0x67 => { // I-type: ADDI, LOAD, JALR
+                    const imm = instr >> 20;
+                    // Sign extend from 12 bits
+                    if (imm & 0x800 != 0) {
+                        return F.zero().sub(F.fromU64((~imm + 1) & 0xFFF));
+                    }
+                    return F.fromU64(imm);
+                },
+                0x23 => { // S-type: STORE
+                    const imm4_0 = (instr >> 7) & 0x1F;
+                    const imm11_5 = (instr >> 25) & 0x7F;
+                    const imm = (imm11_5 << 5) | imm4_0;
+                    if (imm & 0x800 != 0) {
+                        return F.zero().sub(F.fromU64((~imm + 1) & 0xFFF));
+                    }
+                    return F.fromU64(imm);
+                },
+                0x63 => { // B-type: BRANCH
+                    const imm12 = (instr >> 31) & 0x1;
+                    const imm10_5 = (instr >> 25) & 0x3F;
+                    const imm4_1 = (instr >> 8) & 0xF;
+                    const imm11 = (instr >> 7) & 0x1;
+                    const imm = (imm12 << 12) | (imm11 << 11) | (imm10_5 << 5) | (imm4_1 << 1);
+                    if (imm & 0x1000 != 0) {
+                        return F.zero().sub(F.fromU64((~imm + 1) & 0x1FFF));
+                    }
+                    return F.fromU64(imm);
+                },
+                0x6F => { // J-type: JAL
+                    const imm20 = (instr >> 31) & 0x1;
+                    const imm10_1 = (instr >> 21) & 0x3FF;
+                    const imm11 = (instr >> 20) & 0x1;
+                    const imm19_12 = (instr >> 12) & 0xFF;
+                    const imm = (imm20 << 20) | (imm19_12 << 12) | (imm11 << 11) | (imm10_1 << 1);
+                    if (imm & 0x100000 != 0) {
+                        return F.zero().sub(F.fromU64((~imm + 1) & 0x1FFFFF));
+                    }
+                    return F.fromU64(imm);
+                },
+                0x37, 0x17 => { // U-type: LUI, AUIPC
+                    const imm = instr & 0xFFFFF000;
+                    return F.fromU64(imm);
+                },
+                else => return F.zero(),
+            }
+        }
+
+        /// Set circuit flags based on instruction
+        fn setFlagsFromInstruction(self: *Self, instr: u32) void {
+            const opcode: u8 = @truncate(instr & 0x7F);
             // Map opcode to circuit flags
-            // This is a simplified mapping - real implementation would decode instruction
             switch (opcode) {
                 0x03 => { // LOAD
                     self.values[R1CSInputIndex.FlagLoad.toIndex()] = F.one();

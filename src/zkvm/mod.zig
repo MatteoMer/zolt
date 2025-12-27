@@ -440,3 +440,77 @@ test "register enum" {
     try std.testing.expectEqual(@as(u8, 2), Register.sp.toIndex());
     try std.testing.expectEqual(@as(u8, 10), Register.a0.toIndex());
 }
+
+// ============================================================================
+// R1CS-Spartan Integration Tests
+// ============================================================================
+
+test "r1cs-spartan: witness generation and Az Bz Cz computation" {
+    const F = field.BN254Scalar;
+    const allocator = std.testing.allocator;
+
+    // Create execution trace manually to test R1CS integration
+    var trace = tracer.ExecutionTrace.init(allocator);
+    defer trace.deinit();
+
+    // Add a few execution steps using proper TraceStep structure
+    try trace.steps.append(allocator, .{
+        .cycle = 0,
+        .pc = 0x1000,
+        .instruction = 0x00500093, // ADDI x1, x0, 5
+        .rs1_value = 0,
+        .rs2_value = 0,
+        .rd_value = 5,
+        .memory_addr = null,
+        .memory_value = null,
+        .is_memory_write = false,
+        .next_pc = 0x1004,
+    });
+
+    try trace.steps.append(allocator, .{
+        .cycle = 1,
+        .pc = 0x1004,
+        .instruction = 0x00A00113, // ADDI x2, x0, 10
+        .rs1_value = 0,
+        .rs2_value = 0,
+        .rd_value = 10,
+        .memory_addr = null,
+        .memory_value = null,
+        .is_memory_write = false,
+        .next_pc = 0x1008,
+    });
+
+    // Build JoltR1CS and test witness generation
+    var jolt_r1cs = try r1cs.JoltR1CS(F).fromTrace(allocator, &trace);
+    defer jolt_r1cs.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), jolt_r1cs.num_cycles);
+
+    // Build witness
+    const witness = try jolt_r1cs.buildWitness();
+    defer allocator.free(witness);
+
+    // First element should be 1
+    try std.testing.expect(witness[0].eql(F.one()));
+
+    // Test Az, Bz, Cz computation
+    const Az = try jolt_r1cs.computeAz(witness);
+    defer allocator.free(Az);
+    const Bz = try jolt_r1cs.computeBz(witness);
+    defer allocator.free(Bz);
+    const Cz = try jolt_r1cs.computeCz(witness);
+    defer allocator.free(Cz);
+
+    // Cz should be all zeros (equality-conditional form)
+    for (Cz) |c| {
+        try std.testing.expect(c.eql(F.zero()));
+    }
+
+    // Verify proper array sizes
+    try std.testing.expectEqual(jolt_r1cs.padded_num_constraints, Az.len);
+    try std.testing.expectEqual(jolt_r1cs.padded_num_constraints, Bz.len);
+    try std.testing.expectEqual(jolt_r1cs.padded_num_constraints, Cz.len);
+
+    // Note: Full constraint satisfaction requires proper instruction decoding
+    // and consistent witness values. This test verifies the structure is correct.
+}

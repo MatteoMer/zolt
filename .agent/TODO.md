@@ -1,6 +1,17 @@
 # Zolt zkVM Implementation TODO
 
-## Completed (This Session - Iteration 7)
+## Completed (This Session - Iteration 8)
+
+### R1CS-Spartan Integration
+- [x] Created `src/zkvm/r1cs/jolt_r1cs.zig` with JoltR1CS type
+- [x] Implemented witness generation from execution trace
+- [x] Implemented Az, Bz, Cz computation for Spartan
+- [x] Created JoltSpartanInterface for sumcheck integration
+- [x] Updated Stage 1 prover to use actual sumcheck
+- [x] Proper round polynomial computation and challenge binding
+- [x] Evaluation claims for Az, Bz, Cz at final point
+
+## Completed (Previous Sessions - Iterations 1-7)
 
 ### Batch Polynomial Commitment Verification
 - [x] Created `src/poly/commitment/batch.zig` with batch verification
@@ -29,8 +40,6 @@
 - [x] Added `stage_proofs: ?JoltStageProofs(F)` to JoltProof
 - [x] Fixed ownership transfer of stage proofs from prover
 - [x] Added `proofs_transferred` flag to MultiStageProver
-
-## Completed (Previous Sessions - Iterations 1-6)
 
 ### Phase 1: Lookup Arguments
 - [x] Lookup table infrastructure (14 tables)
@@ -72,30 +81,28 @@
 
 ## Summary
 
-**Iteration 7 completed multi-stage verifier implementation:**
+**Iteration 8 completed R1CS-Spartan integration:**
 
-The verifier now properly verifies all 6 sumcheck stages:
-1. Stage 1: Outer Spartan - R1CS verification
-2. Stage 2: RAM RAF - Memory read-after-final checking
-3. Stage 3: Lasso - Instruction lookup verification
-4. Stage 4: Value Evaluation - Memory consistency
-5. Stage 5: Register Evaluation - Register consistency
-6. Stage 6: Booleanity - Flag constraint verification
+Stage 1 (Outer Spartan) now properly runs sumcheck to prove:
+  sum_{x} eq(tau, x) * [Az(x) * Bz(x) - Cz(x)] = 0
 
-Each stage:
-- Verifies round polynomial sum checks (p(0) + p(1) = claim)
-- Updates claims using Lagrange interpolation
-- Accumulates opening claims for batch verification
-- Uses Fiat-Shamir transcript for challenge derivation
+The implementation:
+1. Builds JoltR1CS from execution trace (uniform constraints x cycles)
+2. Generates witness vector from trace steps
+3. Computes Az, Bz, Cz evaluations
+4. Runs sumcheck with proper round polynomials
+5. Records evaluation claims for verification
 
 All tests pass.
 
-## Next Steps (Future Iterations)
+## In Progress
 
-### Wire R1CS to Spartan
-- [ ] Connect R1CS witness to Spartan prover in Stage 1
-- [ ] Compute Az, Bz, Cz witness polynomials
-- [ ] Integrate with multi-stage prover
+### End-to-End Integration Test
+- [ ] Create integration test module
+- [ ] Test proof generation with simple RISC-V program
+- [ ] Test verification of generated proof
+
+## Next Steps (Future Iterations)
 
 ### Production Readiness
 - [ ] G2 scalar multiplication for proper [τ]_2

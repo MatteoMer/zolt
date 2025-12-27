@@ -1,13 +1,14 @@
 # Zolt zkVM Implementation Plan
 
-## Current Status (December 2024 - Iteration 7)
-Major progress on verification infrastructure:
-1. Multi-stage verifier is COMPLETE with full sumcheck verification for all 6 stages
-2. R1CS constraint generation is COMPLETE with 19 uniform constraints
-3. Batch polynomial commitment verification is COMPLETE
+## Current Status (December 2024 - Iteration 8)
 
-The verifier implements proper Lagrange interpolation for polynomial evaluation,
-opening claim accumulation, and batched pairing checks for commitment verification.
+Major progress on R1CS-Spartan integration:
+1. R1CS witness generation is COMPLETE with JoltR1CS type
+2. Spartan sumcheck is COMPLETE with proper Az, Bz, Cz computation
+3. Stage 1 prover now runs actual sumcheck (not placeholder)
+
+The prover now properly runs sumcheck for Stage 1:
+  sum_{x} eq(tau, x) * [Az(x) * Bz(x) - Cz(x)] = 0
 
 ## Phase 1: Lookup Arguments COMPLETED
 
@@ -77,19 +78,26 @@ All tables with materializeEntry() and evaluateMLE() implementations:
 - [x] BatchedSumcheckProver: Parallel instance execution
 
 ### Step 4.2: Stage Implementations (ALL COMPLETE)
-- [x] **Stage 1: Outer Spartan** - R1CS instruction correctness framework
+- [x] **Stage 1: Outer Spartan** - R1CS instruction correctness (NOW WITH SUMCHECK)
 - [x] **Stage 2: RAM RAF** - Memory read-after-final checking
 - [x] **Stage 3: Lasso Lookup** - Instruction lookup reduction
 - [x] **Stage 4: Value Evaluation** - Memory value consistency
 - [x] **Stage 5: Register Evaluation** - Register value consistency
 - [x] **Stage 6: Booleanity** - Flag constraint verification
 
-### Step 4.3: Verifier Infrastructure (NEW - Iteration 7)
+### Step 4.3: Verifier Infrastructure
 - [x] MultiStageVerifier: Verifies all 6 sumcheck stages
 - [x] Stage-specific verification for degrees 2 and 3
 - [x] Lagrange interpolation for polynomial evaluation
 - [x] OpeningClaimAccumulator for batch verification
 - [x] Integration with JoltVerifier
+
+### Step 4.4: R1CS-Spartan Integration (NEW - Iteration 8)
+- [x] JoltR1CS: Builds full R1CS from uniform constraints
+- [x] JoltSpartanInterface: Provides sumcheck polynomial for Stage 1
+- [x] Witness generation from execution trace
+- [x] Az, Bz, Cz computation for Spartan
+- [x] Evaluation claims for Az, Bz, Cz at final point
 
 ## Phase 5: Complete Commitment Schemes COMPLETED
 
@@ -102,7 +110,7 @@ All tables with materializeEntry() and evaluateMLE() implementations:
 - [x] setupFromSRS() for importing trusted setup data
 - [x] Documentation of security implications
 
-### Step 5.3: Batch Verification (NEW - Iteration 7)
+### Step 5.3: Batch Verification
 - [x] BatchOpeningAccumulator for collecting claims
 - [x] OpeningClaim type for individual claims
 - [x] Batched pairing check verification
@@ -128,7 +136,7 @@ All tables with materializeEntry() and evaluateMLE() implementations:
 - [x] Verifies memory proof
 - [x] Verifies register proof
 - [x] Verifies R1CS proof
-- [x] **NEW: Verifies multi-stage sumcheck proofs**
+- [x] Verifies multi-stage sumcheck proofs
 
 ## Key Architecture Decisions
 
@@ -149,49 +157,39 @@ All tables with materializeEntry() and evaluateMLE() implementations:
 - Fiat-Shamir transcript for challenge generation
 - Lagrange interpolation for polynomial evaluation at arbitrary points
 
+### R1CS-Spartan Integration
+- JoltR1CS expands uniform constraints across cycles
+- Witness layout: [1, cycle_0_inputs..., cycle_1_inputs..., ...]
+- Equality-conditional form: condition * (left - right) = 0
+- Az = condition evaluations, Bz = (left - right) evaluations, Cz = 0
+
 ### Lasso Protocol Architecture
 - Two-phase sumcheck: address binding + cycle binding
 - Prefix-suffix decomposition for efficiency
 - Gruen split EQ optimization
 
-## Files Modified (Iteration 7)
+## Files Modified (Iteration 8)
 
 ### New Files
-- `src/zkvm/verifier.zig` - Multi-stage sumcheck verifier
-  - MultiStageVerifier
-  - OpeningClaimAccumulator
-  - Stage-specific verification logic
-  - Lagrange interpolation helpers
-
-- `src/zkvm/r1cs/constraints.zig` - R1CS constraint generation
-  - R1CSInputIndex (36 witness variables)
-  - UniformConstraint (19 constraints)
-  - R1CSCycleInputs (per-cycle witness)
-  - R1CSWitnessGenerator
-
-- `src/poly/commitment/batch.zig` - Batch verification
-  - BatchOpeningAccumulator
-  - OpeningClaim
-  - OpeningClaimConverter
+- `src/zkvm/r1cs/jolt_r1cs.zig` - R1CS-Spartan integration
+  - JoltR1CS: Full R1CS builder from uniform constraints
+  - JoltSpartanInterface: Sumcheck polynomial provider
+  - Witness generation from trace
+  - Az, Bz, Cz computation
 
 ### Updated Files
-- `src/zkvm/mod.zig`:
-  - Added verifier module import
-  - Exported verifier types
-  - Updated JoltProof to include stage_proofs
-  - Updated JoltVerifier to call MultiStageVerifier
-- `src/zkvm/prover.zig`:
-  - Added proofs_transferred flag for ownership tracking
 - `src/zkvm/r1cs/mod.zig`:
-  - Exported constraint types
-- `src/poly/commitment/mod.zig`:
-  - Exported batch verification types
+  - Export JoltR1CS and JoltSpartanInterface
+- `src/zkvm/prover.zig`:
+  - Stage 1 now uses JoltSpartanInterface
+  - Proper sumcheck with round polynomials
+  - Evaluation claims for Az, Bz, Cz
 
 ## Next Steps for Future Iterations
 
-1. **Wire R1CS to Spartan**: Connect R1CS witness to Spartan prover in Stage 1
+1. **End-to-End Integration Test**: Test with actual RISC-V programs
 2. **G2 Scalar Multiplication**: For proper [τ]_2 computation
-3. **End-to-End Testing**: With actual RISC-V programs
-4. **Production SRS**: Import from Ethereum ceremony
+3. **Production SRS**: Import from Ethereum ceremony
+4. **Performance Optimization**: Parallelize sumcheck rounds
 
 All tests pass.

@@ -71,11 +71,18 @@ pub fn JoltR1CS(comptime F: type) type {
             const witness_size = 1 + num_cycles * INPUTS_PER_CYCLE;
 
             // Generate per-cycle witnesses
-            const cycle_witnesses = if (num_cycles > 0)
-                try allocator.alloc(R1CSCycleInputs(F), num_cycles)
-            else
-                &[_]R1CSCycleInputs(F){};
+            if (num_cycles == 0) {
+                return Self{
+                    .num_cycles = 0,
+                    .log_num_constraints = log_n,
+                    .padded_num_constraints = padded,
+                    .witness_size = witness_size,
+                    .cycle_witnesses = &[_]R1CSCycleInputs(F){},
+                    .allocator = allocator,
+                };
+            }
 
+            const cycle_witnesses = try allocator.alloc(R1CSCycleInputs(F), num_cycles);
             for (0..num_cycles) |i| {
                 const step = trace.steps.items[i];
                 const next_step = if (i + 1 < num_cycles)
@@ -457,21 +464,21 @@ test "jolt r1cs witness generation" {
     const F = field.BN254Scalar;
     const allocator = std.testing.allocator;
 
-    // Create a simple trace with one step
+    // Create a simple trace with one step using proper TraceStep
     var trace = tracer.ExecutionTrace.init(allocator);
     defer trace.deinit();
 
     try trace.steps.append(allocator, .{
+        .cycle = 0,
         .pc = 0x1000,
         .instruction = 0x00000013, // NOP (addi x0, x0, 0)
-        .opcode = 0x13,
-        .rd = 0,
-        .rs1 = 0,
-        .rs2 = 0,
         .rs1_value = 0,
         .rs2_value = 0,
         .rd_value = 0,
-        .imm = 0,
+        .memory_addr = null,
+        .memory_value = null,
+        .is_memory_write = false,
+        .next_pc = 0x1004,
     });
 
     var r1cs = try JoltR1CS(F).fromTrace(allocator, &trace);
@@ -499,16 +506,16 @@ test "jolt r1cs Az Bz Cz computation" {
     defer trace.deinit();
 
     try trace.steps.append(allocator, .{
+        .cycle = 0,
         .pc = 0x1000,
         .instruction = 0x00000013,
-        .opcode = 0x13,
-        .rd = 0,
-        .rs1 = 0,
-        .rs2 = 0,
         .rs1_value = 0,
         .rs2_value = 0,
         .rd_value = 0,
-        .imm = 0,
+        .memory_addr = null,
+        .memory_value = null,
+        .is_memory_write = false,
+        .next_pc = 0x1004,
     });
 
     var r1cs = try JoltR1CS(F).fromTrace(allocator, &trace);
@@ -545,16 +552,16 @@ test "jolt spartan interface" {
     defer trace.deinit();
 
     try trace.steps.append(allocator, .{
+        .cycle = 0,
         .pc = 0x1000,
         .instruction = 0x00000013,
-        .opcode = 0x13,
-        .rd = 0,
-        .rs1 = 0,
-        .rs2 = 0,
         .rs1_value = 0,
         .rs2_value = 0,
         .rd_value = 0,
-        .imm = 0,
+        .memory_addr = null,
+        .memory_value = null,
+        .is_memory_write = false,
+        .next_pc = 0x1004,
     });
 
     var r1cs = try JoltR1CS(F).fromTrace(allocator, &trace);

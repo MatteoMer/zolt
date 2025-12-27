@@ -50,7 +50,7 @@ zolt/
 
 ## Porting Status: ✅ COMPLETE
 
-All core phases have been completed. The port includes ~8900 lines of Zig code across 27 files.
+All core phases have been completed. The port includes ~9100 lines of Zig code across 27 files.
 
 ### Phase 1: Foundation ✅
 1. [x] Create build.zig and project structure
@@ -172,7 +172,7 @@ All core phases have been completed. The port includes ~8900 lines of Zig code a
 ## Future Improvements (Nice to Have)
 
 - [ ] Full Miller loop for pairings
-- [ ] Parallel MSM using std.Thread
+- [x] Parallel MSM using std.Thread
 - [ ] GPU acceleration hooks
 - [ ] SIMD intrinsics for field arithmetic
 - [ ] Performance comparison with Rust

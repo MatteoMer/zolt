@@ -757,13 +757,17 @@ pub fn pairing(p: G1Point, q: G2Point) PairingResult {
 
 /// BN254 ate loop parameter: 6x + 2 where x = 4965661367192848881
 /// We use the NAF (non-adjacent form) representation for efficiency
-/// The loop parameter bits (from MSB to LSB, excluding top bit):
-/// x = 0x44e992b44a6909f1 in hex
-const ATE_LOOP_COUNT: [64]i2 = .{
-    0, 0, 0, 1, 0, 1, 0, -1, 0, 0, -1, 0, 0, 0, 1, 0,
-    0, -1, 0, -1, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0, -1, 0,
-    0, 1, 0, -1, 0, 0, 1, 0, 0, 0, 0, 0, -1, 0, 0, -1,
-    0, 1, 0, -1, 0, 0, 0, -1, 0, -1, 0, 0, 0, 1, 0, -1,
+///// The optimal ate loop constant for BN254: 6x + 2 = 29793968203157093288
+/// where x = 4965661367192848881 is the curve parameter.
+/// This is represented in a signed binary expansion using {-1, 0, 1} coefficients.
+/// Array is from LSB to MSB (index 0 is the least significant).
+/// Reference: https://blog.lambdaclass.com/how-we-implemented-the-bn254-ate-pairing-in-lambdaworks/
+const ATE_LOOP_COUNT: [65]i2 = .{
+    0, 0, 0, 1, 0, 1, 0, -1, 0, 0, 1, -1, 0, 0, 1, 0,
+    0, 1, 1, 0, -1, 0, 0, 1, 0, -1, 0, 0, 0, 0, 1, 1,
+    1, 0, 0, -1, 0, 0, 1, 0, 0, 0, 0, 0, -1, 0, 0, 1,
+    1, 0, 0, -1, 0, 0, 0, 1, 1, 0, -1, 0, 0, 1, 0, 1,
+    1,
 };
 
 /// Coefficients for line function evaluation
@@ -914,8 +918,13 @@ fn millerLoop(p: G1Point, q: G2Point) Fp12 {
     var f = Fp12.one();
     var t = q;
 
-    // Main loop: iterate through bits of the ate loop parameter
-    for (ATE_LOOP_COUNT) |bit| {
+    // Main loop: iterate through bits of the ate loop parameter from MSB to LSB
+    // The array is stored LSB-first, so we iterate in reverse order
+    // Start from index 63 (second-to-last MSB, since index 64 is the top bit = 1)
+    var i: usize = ATE_LOOP_COUNT.len - 2;
+    while (true) : (i -= 1) {
+        const bit = ATE_LOOP_COUNT[i];
+
         // Doubling step: f = f² * l_{T,T}(P), T = 2T
         f = f.square();
         const dbl = doublingStep(t);
@@ -938,6 +947,8 @@ fn millerLoop(p: G1Point, q: G2Point) Fp12 {
             const line_add = evaluateLine(add.coeffs, p.x, p.y);
             f = f.mul(line_add);
         }
+
+        if (i == 0) break;
     }
 
     // For BN254 optimal ate, we need additional steps at the end:
@@ -1306,13 +1317,11 @@ test "G2 scalar mul internal consistency" {
     try std.testing.expect(two_g2_by_double.eql(two_g2_by_scalar));
 }
 
-// NOTE: Pairing bilinearity test is still failing.
-// The Frobenius coefficients for Fp6 and Fp12 have now been correctly computed.
-// The remaining issue is likely in one of:
-// 1. Miller loop implementation (line evaluation or ATE loop count)
-// 2. Final exponentiation hard part formula
-// 3. π(Q) and π²(Q) computation in the Miller loop tail
-// This test verifies e([2]P, Q) = e(P, Q)^2
+// Pairing bilinearity test: verifies e([2]P, Q) = e(P, Q)^2
+// Still failing - remaining issues likely in:
+// 1. Line evaluation in doubling/addition step
+// 2. Final exponentiation hard part
+// 3. π(Q) twist factor computation
 // test "pairing bilinearity in G1" {
 //     const g1 = G1Point{ .x = BN254Scalar.one(), .y = BN254Scalar.fromU64(2), .infinity = false };
 //     const g2 = G2Point.generator();

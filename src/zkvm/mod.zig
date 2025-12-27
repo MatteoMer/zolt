@@ -16,10 +16,19 @@ pub const bytecode = @import("bytecode/mod.zig");
 pub const instruction = @import("instruction/mod.zig");
 pub const lasso = @import("lasso/mod.zig");
 pub const lookup_table = @import("lookup_table/mod.zig");
+pub const prover = @import("prover.zig");
 pub const r1cs = @import("r1cs/mod.zig");
 pub const ram = @import("ram/mod.zig");
 pub const registers = @import("registers/mod.zig");
 pub const spartan = @import("spartan/mod.zig");
+
+// Re-export multi-stage prover types
+pub const MultiStageProver = prover.MultiStageProver;
+pub const BatchedSumcheckProver = prover.BatchedSumcheckProver;
+pub const StageProof = prover.StageProof;
+pub const JoltStageProofs = prover.JoltStageProofs;
+pub const OpeningAccumulator = prover.OpeningAccumulator;
+pub const SumcheckInstance = prover.SumcheckInstance;
 
 /// RISC-V register indices
 pub const Register = enum(u8) {

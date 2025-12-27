@@ -29,6 +29,62 @@ const BN254Scalar = @import("mod.zig").BN254Scalar;
 const msm = @import("../msm/mod.zig");
 
 // ============================================================================
+// Frobenius Coefficients for BN254
+// ============================================================================
+//
+// These constants are needed for the Frobenius endomorphism on G2 and Fp12.
+// For BN254 with ξ = 9 + u (the non-residue), we need:
+//   γ_{1,j} = ξ^{j(p-1)/6} for j = 1..5
+//
+// The Frobenius on G2: π(x,y) = (x^p · γ_{1,2}, y^p · γ_{1,3})
+// where x^p = conjugate(x) and y^p = conjugate(y) in Fp2.
+
+/// GAMMA_12 = ξ^{(p-1)/3} = ξ^{2(p-1)/6}
+/// Used for G2 x-coordinate in Frobenius
+fn gamma12() Fp2 {
+    // γ_{1,2} = (9+u)^{(p-1)/3}
+    // These are the precomputed hexadecimal constants from the BN254 specification
+    const c0_bytes = [_]u8{
+        0x3d, 0x55, 0x6f, 0x17, 0x57, 0x95, 0xe3, 0x99,
+        0x0c, 0x33, 0xc3, 0xc2, 0x10, 0xc3, 0x8c, 0xb7,
+        0x43, 0xb1, 0x59, 0xf5, 0x3c, 0xec, 0x0b, 0x4c,
+        0xf7, 0x11, 0x79, 0x4f, 0x98, 0x47, 0xb3, 0x2f,
+    };
+    const c1_bytes = [_]u8{
+        0xa2, 0xcb, 0x0f, 0x64, 0x1c, 0xd5, 0x65, 0x16,
+        0xce, 0x9d, 0x7c, 0x0b, 0x1d, 0x2a, 0xae, 0x32,
+        0x94, 0x07, 0x5a, 0xd7, 0x8b, 0xcc, 0xa4, 0x0b,
+        0x20, 0xae, 0xeb, 0x61, 0x50, 0xe5, 0xc9, 0x16,
+    };
+    return Fp2.init(
+        BN254Scalar.fromBytes(&c0_bytes),
+        BN254Scalar.fromBytes(&c1_bytes),
+    );
+}
+
+/// GAMMA_13 = ξ^{(p-1)/2} = ξ^{3(p-1)/6}
+/// Used for G2 y-coordinate in Frobenius
+fn gamma13() Fp2 {
+    // γ_{1,3} = (9+u)^{(p-1)/2}
+    const c0_bytes = [_]u8{
+        0x5a, 0x13, 0x01, 0x67, 0x14, 0x40, 0xc5, 0xd9,
+        0x98, 0x99, 0x95, 0x9c, 0xda, 0x0e, 0xae, 0xdb,
+        0x9b, 0x2f, 0x6e, 0x8b, 0x69, 0xc6, 0xec, 0xdc,
+        0xdc, 0xf5, 0x9a, 0x48, 0x05, 0xf3, 0x3c, 0x06,
+    };
+    const c1_bytes = [_]u8{
+        0xe3, 0x0b, 0x3b, 0x62, 0x26, 0x7f, 0x37, 0x2d,
+        0x28, 0xf9, 0x5d, 0xa8, 0xfa, 0x98, 0x7c, 0x80,
+        0x21, 0xb2, 0xf2, 0x96, 0x7c, 0x5a, 0x7b, 0x70,
+        0xa0, 0x49, 0x10, 0x41, 0xac, 0xcb, 0x03, 0x7c,
+    };
+    return Fp2.init(
+        BN254Scalar.fromBytes(&c0_bytes),
+        BN254Scalar.fromBytes(&c1_bytes),
+    );
+}
+
+// ============================================================================
 // Extension Field Fp2 = Fp[u] / (u² + 1)
 // ============================================================================
 
@@ -770,18 +826,22 @@ fn millerLoop(p: G1Point, q: G2Point) Fp12 {
 }
 
 /// Apply Frobenius endomorphism to G2 point
-/// π: (x, y) → (x^p, y^p) using the Frobenius coefficients for Fp2
+/// π: (x, y) → (x^p · γ_{1,2}, y^p · γ_{1,3})
+/// where x^p = conjugate(x), y^p = conjugate(y) in Fp2
+/// and γ_{1,2} = ξ^{(p-1)/3}, γ_{1,3} = ξ^{(p-1)/2}
 fn frobeniusG2(p: G2Point) G2Point {
     if (p.infinity) return p;
 
     // The Frobenius on Fp2 is conjugation: (a + bu) → (a - bu) = (a + bu)^p
-    // But we also need to multiply by twist constants
-    // For BN254: π(x, y) = (x^p * ξ^((p-1)/3), y^p * ξ^((p-1)/2))
+    // Then we multiply by the twist factors (Frobenius coefficients)
+    // For BN254: π(x, y) = (conjugate(x) * γ_{1,2}, conjugate(y) * γ_{1,3})
 
-    // Simplified: just apply conjugate (full version needs twist factors)
+    const x_frob = p.x.conjugate().mul(gamma12());
+    const y_frob = p.y.conjugate().mul(gamma13());
+
     return G2Point{
-        .x = p.x.conjugate(),
-        .y = p.y.conjugate(),
+        .x = x_frob,
+        .y = y_frob,
         .infinity = false,
     };
 }
@@ -1134,11 +1194,12 @@ test "G2 scalar mul internal consistency" {
     try std.testing.expect(two_g2_by_double.eql(two_g2_by_scalar));
 }
 
-// NOTE: Pairing bilinearity test is currently disabled because the pairing
-// implementation doesn't satisfy bilinearity: e(2P, Q) != e(P, Q)^2.
-// This indicates a bug in the Miller loop or final exponentiation.
-// The G2 scalar multiplication is correct (tested above), but the pairing
-// needs work before it can be used for verification.
+// NOTE: Pairing bilinearity test is still failing.
+// The G2 Frobenius coefficients (gamma12, gamma13) have been added, but
+// additional fixes are needed in:
+// 1. Fp12 Frobenius coefficients (frobeniusFp12)
+// 2. Hard part of final exponentiation
+// 3. Possibly the line evaluation or Miller loop itself
 // test "pairing bilinearity in G1" {
 //     const g1 = G1Point{ .x = BN254Scalar.one(), .y = BN254Scalar.fromU64(2), .infinity = false };
 //     const g2 = G2Point.generator();
@@ -1147,7 +1208,6 @@ test "G2 scalar mul internal consistency" {
 //     const g1_doubled_proj = msm.MSM(BN254Scalar, BN254Scalar).scalarMul(g1, BN254Scalar.fromU64(2));
 //     const g1_doubled = g1_doubled_proj.toAffine();
 //     const e_2g1_g2 = pairing(g1_doubled, g2);
-//     // By bilinearity: e(2P, Q) = e(P, Q)^2
 //     try std.testing.expect(e_2g1_g2.eql(e_g1_g2_squared));
 // }
 

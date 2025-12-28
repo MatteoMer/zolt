@@ -2,52 +2,83 @@
 
 ## Current Status (Jolt Compatibility Phase)
 
-**Project Status: TESTING DORY TRANSCRIPT INTEGRATION**
+**Project Status: DORY SRS MISMATCH**
+
+The bundled Dory commitment approach is working (same commitments in transcript and proof),
+but the underlying Dory SRS generation in Zolt differs from Jolt's external `dory` crate.
 
 Key achievements:
-1. **R1CS Input MLE Evaluations** - Opening claims now contain actual computed values
-2. **Correct Round Polynomial Count** - Stage 1 has proper 1 + num_cycle_vars polynomials
-3. **Cross-Deserialization** - Jolt successfully deserializes Zolt proofs
-4. **Non-zero UniSkip Coefficients** - UniSkip polynomial has non-trivial values
-5. **JoltDevice from File** - Can read JoltDevice from Jolt-generated file
-6. **Byte Reversal Fix** - Commitments now reverse bytes before appending to transcript
-7. **Dory Transcript Integration** - Prover now uses GT elements (384 bytes) in transcript
+1. ✅ JoltProofWithDory bundle ensures consistent commitments
+2. ✅ Polynomial evaluations stored with proof
+3. ✅ Serialization uses bundled commitments
+4. ✅ All 608 Zolt tests pass
+5. ✅ Cross-deserialization works (Jolt can read Zolt proofs)
 
-Current issue: **Testing end-to-end verification**
-- Need to generate a new proof with Dory commitments in transcript
-- Verify with Jolt to confirm the fix works
+Remaining issue: **Dory SRS generation mismatch**
+- Zolt's Dory SRS uses custom G1/G2 point generation
+- Jolt's Dory uses external `dory` crate with `ArkworksProverSetup::new_from_urs`
+- Even with same seed "Jolt Dory URS seed", the resulting points differ
+- This causes commitment values to differ, which causes transcript mismatch
 
 ---
 
-## Recent Changes
+## Root Cause Analysis
 
-### Dory Transcript Integration (just completed)
+### The SRS Generation Issue
 
-The prover now computes Dory commitments (GT elements, 384 bytes) for the transcript:
+Both Zolt and Jolt use the same seed:
+```
+SHA3-256("Jolt Dory URS seed") -> ChaCha20Rng seed
+```
 
-1. **Build polynomial evaluations** from bytecode, memory trace, and register trace
-2. **Setup Dory SRS** with appropriate size
-3. **Compute Dory commitments** using `DoryCommitmentScheme.commit()`
-4. **Append GT elements to transcript** using `appendGT()` which reverses bytes
+But:
+- **Jolt**: Uses `dory::backends::arkworks::ArkworksProverSetup::new_from_urs(&mut rng, max_num_vars)`
+- **Zolt**: Uses custom `generateG1Point(seed, index)` and `generateG2Point(seed, index)`
 
-This matches what Jolt does:
-- `append_serializable` serializes the commitment
-- Reverses all bytes for EVM compatibility
-- Appends to transcript
+These produce different curve points, leading to different commitments.
 
-### Files Modified
+### Solutions
 
-- `src/transcripts/blake2b.zig`: Added `appendSerializable`, updated `appendGT` with byte reversal
-- `src/zkvm/mod.zig`: Both `proveJoltCompatible` and `proveJoltCompatibleWithDevice` now use Dory
+1. **Port Jolt's exact SRS generation**
+   - Study `dory` crate's `new_from_urs` implementation
+   - Port the exact point generation algorithm to Zig
+   - This is complex but ensures compatibility
+
+2. **Use Jolt's SRS as data file**
+   - Generate SRS in Jolt, serialize to file
+   - Load SRS from file in Zolt
+   - Works but requires external dependency
+
+3. **Create transcript test without commitments**
+   - Test that transcript produces same challenges after preamble
+   - Isolate the commitment issue from transcript logic
+
+---
+
+## Verification Flow Analysis
+
+When Jolt verifies a proof:
+1. **Create transcript** with label "Jolt"
+2. **Preamble** - append memory layout, I/O, ram_K, trace_length
+3. **Append commitments** - for each commitment: serialize GT (384 bytes), reverse, append
+4. **Derive tau** - call `challenge_vector_optimized` to get tau values
+5. **Verify UniSkip** - check power sum using tau
+
+The failure occurs at step 5 because:
+- Jolt recomputes the transcript from the proof file's commitments
+- These commitments are GT elements computed by Zolt's Dory
+- Since Zolt's Dory uses different SRS, the GT values differ
+- Tau values derived from transcript differ
+- UniSkip check fails
 
 ---
 
 ## Next Steps
 
-1. [ ] Generate a proof using the updated prover
-2. [ ] Test with Jolt verifier to confirm transcript match
-3. [ ] If still failing, add transcript state debugging
-4. [ ] Verify SRS generation matches Jolt's seed
+1. [ ] Study `dory` crate's SRS generation code
+2. [ ] Port exact algorithm to Zig
+3. [ ] Create test vector: generate SRS in Jolt, export points, compare with Zolt
+4. [ ] Alternatively: create hybrid approach where Zolt loads Jolt's SRS
 
 ---
 
@@ -61,12 +92,12 @@ This matches what Jolt does:
 6. ✅ **Univariate Skip Infrastructure** - Degree-27/12 polynomials
 7. ✅ **All 48 Opening Claims** - Including all R1CS inputs + OpFlags
 8. ✅ **19 R1CS Constraints** - Matching Jolt's exact structure
-9. ✅ **Constraint Evaluators** - Az/Bz for first and second groups
-10. ✅ **JoltDevice Type** - Read from Jolt-generated file
-11. ✅ **Fiat-Shamir Preamble** - Function implemented
-12. ✅ **CLI --device option** - Use JoltDevice from file
-13. ✅ **Byte Reversal** - Commitments reversed before transcript append
-14. ✅ **Dory Transcript** - GT elements used in transcript
+9. ✅ **JoltDevice Type** - Read from Jolt-generated file
+10. ✅ **Fiat-Shamir Preamble** - Function implemented
+11. ✅ **Byte Reversal** - Commitments reversed before transcript append
+12. ✅ **Dory Transcript** - GT elements used in transcript
+13. ✅ **JoltProofWithDory Bundle** - Consistent commitment handling
+14. ✅ **Polynomial Evaluations** - Stored with proof for serialization
 
 ---
 
@@ -83,9 +114,9 @@ Build Summary: 5/5 steps succeeded; 608/608 tests passed
 
 | Test | Status | Details |
 |------|--------|---------|
-| `test_deserialize_zolt_proof` | ✅ PASS | 26558 bytes, 48 claims |
+| `test_deserialize_zolt_proof` | ✅ PASS | Proof deserializes correctly |
 | `test_debug_zolt_format` | ✅ PASS | All claims valid |
-| `test_verify_zolt_proof` | 🔄 TESTING | Needs re-test with Dory transcript |
+| `test_verify_zolt_proof` | ❌ FAIL | UniSkip fails (SRS mismatch) |
 
 ---
 
@@ -96,20 +127,20 @@ Build Summary: 5/5 steps succeeded; 608/608 tests passed
 |------|--------|---------|
 | `src/transcripts/blake2b.zig` | ✅ Done | Blake2bTranscript with GT support |
 | `src/zkvm/jolt_device.zig` | ✅ Done | JoltDevice deserialization |
-| `src/zkvm/mod.zig` | ✅ Done | Dory commitments in transcript |
-| `src/zkvm/proof_converter.zig` | ✅ Done | Stage conversion with tau |
-| `src/zkvm/spartan/outer.zig` | ✅ Done | UniSkip computation |
-| `src/poly/commitment/dory.zig` | ✅ Done | GT element support |
+| `src/zkvm/mod.zig` | ✅ Done | JoltProofWithDory bundle |
+| `src/zkvm/jolt_types.zig` | ✅ Done | JoltProofWithDory type |
+| `src/poly/commitment/dory.zig` | 🔄 Needs Work | SRS generation mismatch |
 
 ---
 
 ## Summary
 
 **Serialization Compatibility: COMPLETE**
-**Transcript Integration: COMPLETE (using Dory GT elements)**
-**Verification: READY FOR TESTING**
+**Transcript Integration: COMPLETE (consistent Dory handling)**
+**Verification: BLOCKED ON DORY SRS MATCH**
 
-The prover now uses Dory commitments (GT elements, 384 bytes) in the transcript,
-matching Jolt's format. All bytes are reversed before appending, as Jolt does.
+The proof structure is correct and the commitment handling is consistent.
+The remaining blocker is that Zolt's Dory SRS generation produces different
+points than Jolt's external `dory` crate, causing commitment values to differ.
 
-Next step: Generate a new proof and test with Jolt verifier.
+Next step: Port exact SRS generation algorithm from `dory` crate to Zig.

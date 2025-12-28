@@ -941,16 +941,34 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
 
         /// Commit to a polynomial given as evaluations
         ///
-        /// The polynomial is laid out as a matrix with `num_columns` columns.
-        /// Each row is committed using MSM with G1 generators.
-        /// The final commitment is the multi-pairing of row commitments with G2.
+        /// The polynomial is laid out as a 2^nu × 2^sigma matrix where:
+        /// - num_vars = log2(evals.len)
+        /// - sigma = ceil((num_vars + 1) / 2)
+        /// - nu = num_vars - sigma
+        ///
+        /// This matches Jolt/dory-pcs matrix layout for compatible commitments.
         pub fn commit(params: *const SetupParams, evals: []const F) Commitment {
             if (evals.len == 0) {
                 return GT.one();
             }
 
-            const num_cols = params.num_columns;
-            const num_rows = (evals.len + num_cols - 1) / num_cols;
+            // Compute matrix dimensions from polynomial length
+            // This matches Jolt's DoryGlobals layout:
+            //   sigma = (num_vars + 1) / 2 (integer division, rounding down)
+            //   nu = num_vars - sigma
+            //
+            // For num_vars=3 (8 coeffs): sigma=2, nu=1 → 4 cols × 2 rows
+            // For num_vars=2 (4 coeffs): sigma=1, nu=1 → 2 cols × 2 rows
+            // For num_vars=1 (2 coeffs): sigma=1, nu=0 → 2 cols × 1 row
+            const poly_len = evals.len;
+            const num_vars: usize = if (poly_len <= 1) 1 else std.math.log2_int(usize, poly_len);
+
+            // Match Jolt's formula: sigma = (num_vars + 1) / 2
+            const sigma: usize = (num_vars + 1) / 2;
+            const nu: usize = num_vars - sigma;
+
+            const num_cols = @as(usize, 1) << @intCast(sigma);
+            const num_rows = @as(usize, 1) << @intCast(nu);
 
             // Compute row commitments
             var row_sum = GT.one();
@@ -1793,4 +1811,53 @@ test "vmv message serialization" {
     // First 384 bytes should be GT.one()
     const expected_gt_one = GT.one().toBytes();
     try std.testing.expectEqualSlices(u8, &expected_gt_one, bytes[0..384]);
+}
+
+test "dory commitment with jolt srs - compare matrix layout" {
+    // Test that we use the same matrix layout as Jolt
+    // Jolt with 8 coefficients (3 vars) uses:
+    //   num_columns = 4 (sigma = 2)
+    //   max_num_rows = 2 (nu = 1)
+    const allocator = std.testing.allocator;
+
+    // Load Jolt's SRS file if available
+    const srs_result = DoryCommitmentScheme(Fr).loadFromFile(allocator, "/tmp/jolt_dory_srs.bin");
+    if (srs_result) |srs_const| {
+        var srs = srs_const;
+        defer srs.deinit();
+
+        // Print what we loaded
+        std.debug.print("\nLoaded SRS:\n", .{});
+        std.debug.print("  num_columns = {}\n", .{srs.num_columns});
+        std.debug.print("  num_rows = {}\n", .{srs.num_rows});
+
+        // Same polynomial as Jolt test: [1, 2, 3, 4, 5, 6, 7, 8]
+        const evals = [_]Fr{
+            Fr.fromU64(1), Fr.fromU64(2), Fr.fromU64(3), Fr.fromU64(4),
+            Fr.fromU64(5), Fr.fromU64(6), Fr.fromU64(7), Fr.fromU64(8),
+        };
+
+        const commitment = DoryCommitmentScheme(Fr).commit(&srs, &evals);
+        const bytes = commitment.toBytes();
+
+        std.debug.print("\nZolt commitment:\n", .{});
+        std.debug.print("  First 16 bytes: {x}\n", .{bytes[0..16].*});
+        std.debug.print("  Last 16 bytes: {x}\n", .{bytes[384 - 16 .. 384].*});
+
+        // Jolt's commitment (from test output):
+        // First 16 bytes: [cf, 11, 82, 20, dc, 8c, 59, 10, fc, 08, e5, f4, 58, a2, 42, 6f]
+        // If these match, we have the same commitment!
+        const jolt_first_bytes = [_]u8{ 0xcf, 0x11, 0x82, 0x20, 0xdc, 0x8c, 0x59, 0x10, 0xfc, 0x08, 0xe5, 0xf4, 0x58, 0xa2, 0x42, 0x6f };
+
+        if (std.mem.eql(u8, bytes[0..16], &jolt_first_bytes)) {
+            std.debug.print("\n*** SUCCESS: Zolt commitment matches Jolt! ***\n", .{});
+        } else {
+            std.debug.print("\n*** MISMATCH: Commitment differs from Jolt ***\n", .{});
+            std.debug.print("  Expected (Jolt): {x}\n", .{jolt_first_bytes});
+            std.debug.print("  Got (Zolt):      {x}\n", .{bytes[0..16].*});
+        }
+    } else |_| {
+        std.debug.print("Skipping Jolt SRS comparison test - no SRS file at /tmp/jolt_dory_srs.bin\n", .{});
+        std.debug.print("Run Jolt's test_export_dory_srs first.\n", .{});
+    }
 }

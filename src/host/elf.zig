@@ -561,3 +561,109 @@ test "ELF header parsing helpers" {
     const data64 = [_]u8{ 0xEF, 0xCD, 0xAB, 0x89, 0x67, 0x45, 0x23, 0x01 };
     try std.testing.expectEqual(@as(u64, 0x0123456789ABCDEF), readU64(&data64));
 }
+
+test "minimal 32-bit RISC-V ELF parsing" {
+    const allocator = std.testing.allocator;
+
+    // A minimal valid 32-bit RISC-V ELF header (52 bytes)
+    // with one LOAD program header (32 bytes)
+    var elf_data: [256]u8 = undefined;
+    @memset(&elf_data, 0);
+
+    // ELF header (52 bytes for 32-bit)
+    // Magic: 0x7F "ELF"
+    elf_data[0] = 0x7F;
+    elf_data[1] = 'E';
+    elf_data[2] = 'L';
+    elf_data[3] = 'F';
+    elf_data[4] = 1; // 32-bit
+    elf_data[5] = 1; // Little endian
+    elf_data[6] = 1; // Version
+    elf_data[7] = 0; // OS/ABI
+
+    // e_type: Executable (2)
+    elf_data[16] = 2;
+    elf_data[17] = 0;
+
+    // e_machine: RISC-V (0xF3)
+    elf_data[18] = 0xF3;
+    elf_data[19] = 0;
+
+    // e_version: 1
+    elf_data[20] = 1;
+
+    // e_entry: 0x80000000 (entry point)
+    elf_data[24] = 0x00;
+    elf_data[25] = 0x00;
+    elf_data[26] = 0x00;
+    elf_data[27] = 0x80;
+
+    // e_phoff: 52 (program header offset)
+    elf_data[28] = 52;
+
+    // e_ehsize: 52
+    elf_data[40] = 52;
+
+    // e_phentsize: 32
+    elf_data[42] = 32;
+
+    // e_phnum: 1
+    elf_data[44] = 1;
+
+    // Program header at offset 52 (32 bytes for 32-bit)
+    // p_type: PT_LOAD (1)
+    elf_data[52] = 1;
+
+    // p_offset: 0x60 (code starts after headers)
+    elf_data[56] = 0x60;
+
+    // p_vaddr: 0x80000000
+    elf_data[60] = 0x00;
+    elf_data[61] = 0x00;
+    elf_data[62] = 0x00;
+    elf_data[63] = 0x80;
+
+    // p_paddr: 0x80000000
+    elf_data[64] = 0x00;
+    elf_data[65] = 0x00;
+    elf_data[66] = 0x00;
+    elf_data[67] = 0x80;
+
+    // p_filesz: 8 (some bytes)
+    elf_data[68] = 8;
+
+    // p_memsz: 8
+    elf_data[72] = 8;
+
+    // p_flags: RX (5)
+    elf_data[76] = 5;
+
+    // p_align: 4
+    elf_data[80] = 4;
+
+    // Put some code at offset 0x60
+    // addi x1, x0, 42 (0x02a00093)
+    elf_data[0x60] = 0x93;
+    elf_data[0x61] = 0x00;
+    elf_data[0x62] = 0xa0;
+    elf_data[0x63] = 0x02;
+    // ecall (0x00000073)
+    elf_data[0x64] = 0x73;
+    elf_data[0x65] = 0x00;
+    elf_data[0x66] = 0x00;
+    elf_data[0x67] = 0x00;
+
+    // Parse
+    var parsed = try parse(allocator, &elf_data);
+    defer parsed.deinit();
+
+    // Verify header
+    try std.testing.expect(parsed.isRiscV());
+    try std.testing.expect(!parsed.is64Bit());
+    try std.testing.expectEqual(@as(u64, 0x80000000), parsed.header.entry);
+
+    // Verify segments
+    try std.testing.expectEqual(@as(usize, 1), parsed.segments.len);
+    try std.testing.expectEqual(@as(u64, 0x80000000), parsed.segments[0].vaddr);
+    try std.testing.expectEqual(@as(u64, 8), parsed.segments[0].memsz);
+}

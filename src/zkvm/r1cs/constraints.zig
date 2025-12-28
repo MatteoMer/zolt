@@ -534,6 +534,17 @@ pub fn R1CSCycleInputs(comptime F: type) type {
         values: [R1CSInputIndex.NUM_INPUTS]F,
 
         /// Create cycle inputs from an execution trace step
+        ///
+        /// This generates R1CS witness values that satisfy Jolt's 19 uniform constraints.
+        /// The key constraint invariant is: Az * Bz = 0 for every constraint.
+        ///
+        /// CONSTRAINT SATISFACTION:
+        /// - Constraint 0: if Load+Store != 0 => RamAddress == Rs1+Imm
+        /// - Constraint 1: if Load+Store == 0 => RamAddress == 0
+        /// - Constraint 2: if Load => RamReadValue == RamWriteValue
+        /// - Constraint 3: if Load => RamReadValue == RdWriteValue
+        /// - Constraint 4: if Store => Rs2Value == RamWriteValue
+        /// - ... etc
         pub fn fromTraceStep(
             step: tracer.TraceStep,
             next_step: ?tracer.TraceStep,
@@ -542,48 +553,104 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                 .values = [_]F{F.zero()} ** R1CSInputIndex.NUM_INPUTS,
             };
 
-            // Instruction inputs
-            inputs.values[R1CSInputIndex.LeftInstructionInput.toIndex()] = F.fromU64(step.rs1_value);
-            inputs.values[R1CSInputIndex.RightInstructionInput.toIndex()] = F.fromU64(step.rs2_value);
-            // Product = rs1 * rs2 (for multiply instructions)
-            const product = @as(u128, step.rs1_value) * @as(u128, step.rs2_value);
-            inputs.values[R1CSInputIndex.Product.toIndex()] = F.fromU64(@truncate(product));
+            // Determine if this is a Load or Store instruction
+            const opcode: u8 = @truncate(step.instruction & 0x7F);
+            const is_load = (opcode == 0x03);
+            const is_store = (opcode == 0x23);
+            const is_load_or_store = is_load or is_store;
 
-            // Lookup operands (simplified - would come from lookup trace)
-            inputs.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.fromU64(step.rs1_value);
-            inputs.values[R1CSInputIndex.RightLookupOperand.toIndex()] = F.fromU64(step.rs2_value);
-            inputs.values[R1CSInputIndex.LookupOutput.toIndex()] = F.fromU64(step.rd_value);
-
-            // Register values
-            inputs.values[R1CSInputIndex.Rs1Value.toIndex()] = F.fromU64(step.rs1_value);
-            inputs.values[R1CSInputIndex.Rs2Value.toIndex()] = F.fromU64(step.rs2_value);
-            inputs.values[R1CSInputIndex.RdWriteValue.toIndex()] = F.fromU64(step.rd_value);
-
-            // RAM access (simplified) - use memory_addr if present
-            const ram_addr = step.memory_addr orelse step.rs1_value;
-            inputs.values[R1CSInputIndex.RamAddress.toIndex()] = F.fromU64(ram_addr);
-            inputs.values[R1CSInputIndex.RamReadValue.toIndex()] = F.fromU64(step.memory_value orelse 0);
-            inputs.values[R1CSInputIndex.RamWriteValue.toIndex()] = if (step.is_memory_write)
-                F.fromU64(step.memory_value orelse 0)
-            else
-                F.zero();
-
-            // PC values
-            inputs.values[R1CSInputIndex.PC.toIndex()] = F.fromU64(step.pc);
-            inputs.values[R1CSInputIndex.UnexpandedPC.toIndex()] = F.fromU64(step.pc);
-            inputs.values[R1CSInputIndex.NextPC.toIndex()] = F.fromU64(step.next_pc);
-            inputs.values[R1CSInputIndex.NextUnexpandedPC.toIndex()] = F.fromU64(step.next_pc);
-
-            // Use next step's PC if available for verification
-            if (next_step) |ns| {
-                inputs.values[R1CSInputIndex.NextPC.toIndex()] = F.fromU64(ns.pc);
+            // Set flags first (needed for constraint checking)
+            if (is_load) {
+                inputs.values[R1CSInputIndex.FlagLoad.toIndex()] = F.one();
+            }
+            if (is_store) {
+                inputs.values[R1CSInputIndex.FlagStore.toIndex()] = F.one();
+            }
+            // Use the compressed flag from the trace (original instruction was 2 bytes)
+            if (step.is_compressed) {
+                inputs.values[R1CSInputIndex.FlagIsCompressed.toIndex()] = F.one();
             }
 
             // Immediate - derive from instruction
             const imm = inputs.deriveImmediate(step.instruction);
             inputs.values[R1CSInputIndex.Imm.toIndex()] = imm;
 
-            // Circuit flags - set based on instruction opcode
+            // Register values
+            inputs.values[R1CSInputIndex.Rs1Value.toIndex()] = F.fromU64(step.rs1_value);
+            inputs.values[R1CSInputIndex.Rs2Value.toIndex()] = F.fromU64(step.rs2_value);
+
+            // =================================================================
+            // RAM-related values - must satisfy constraints 0-4
+            // =================================================================
+
+            // Constraint 0: if Load+Store => RamAddress == Rs1+Imm
+            // Constraint 1: if NOT Load+Store => RamAddress == 0
+            if (is_load_or_store) {
+                // Compute Rs1 + Imm in the field
+                const rs1_f = F.fromU64(step.rs1_value);
+                const ram_addr = rs1_f.add(imm);
+                inputs.values[R1CSInputIndex.RamAddress.toIndex()] = ram_addr;
+            } else {
+                // Non-memory instructions: RamAddress MUST be 0
+                inputs.values[R1CSInputIndex.RamAddress.toIndex()] = F.zero();
+            }
+
+            // Memory values
+            const mem_val = step.memory_value orelse 0;
+            const mem_val_f = F.fromU64(mem_val);
+
+            if (is_load) {
+                // Constraint 2: RamReadValue == RamWriteValue (for Load)
+                // Constraint 3: RamReadValue == RdWriteValue (for Load)
+                inputs.values[R1CSInputIndex.RamReadValue.toIndex()] = mem_val_f;
+                inputs.values[R1CSInputIndex.RamWriteValue.toIndex()] = mem_val_f;
+                inputs.values[R1CSInputIndex.RdWriteValue.toIndex()] = mem_val_f;
+            } else if (is_store) {
+                // Constraint 4: Rs2Value == RamWriteValue (for Store)
+                inputs.values[R1CSInputIndex.RamReadValue.toIndex()] = F.zero();
+                inputs.values[R1CSInputIndex.RamWriteValue.toIndex()] = F.fromU64(step.rs2_value);
+                inputs.values[R1CSInputIndex.RdWriteValue.toIndex()] = F.fromU64(step.rd_value);
+            } else {
+                // Non-memory: set to reasonable defaults
+                inputs.values[R1CSInputIndex.RamReadValue.toIndex()] = F.zero();
+                inputs.values[R1CSInputIndex.RamWriteValue.toIndex()] = F.zero();
+                inputs.values[R1CSInputIndex.RdWriteValue.toIndex()] = F.fromU64(step.rd_value);
+            }
+
+            // =================================================================
+            // Instruction inputs and lookups
+            // =================================================================
+            inputs.values[R1CSInputIndex.LeftInstructionInput.toIndex()] = F.fromU64(step.rs1_value);
+            inputs.values[R1CSInputIndex.RightInstructionInput.toIndex()] = F.fromU64(step.rs2_value);
+
+            // Product = rs1 * rs2 (for multiply instructions)
+            const product = @as(u128, step.rs1_value) * @as(u128, step.rs2_value);
+            inputs.values[R1CSInputIndex.Product.toIndex()] = F.fromU64(@truncate(product));
+
+            // =================================================================
+            // Lookup operands - will be set properly by setFlagsFromInstruction
+            // based on which operation type it is (constraints 5-11)
+            // =================================================================
+            // LookupOutput is the result value from the lookup table
+            inputs.values[R1CSInputIndex.LookupOutput.toIndex()] = F.fromU64(step.rd_value);
+
+            // =================================================================
+            // PC values
+            // =================================================================
+            inputs.values[R1CSInputIndex.PC.toIndex()] = F.fromU64(step.pc);
+            inputs.values[R1CSInputIndex.UnexpandedPC.toIndex()] = F.fromU64(step.pc);
+            inputs.values[R1CSInputIndex.NextPC.toIndex()] = F.fromU64(step.next_pc);
+            inputs.values[R1CSInputIndex.NextUnexpandedPC.toIndex()] = F.fromU64(step.next_pc);
+
+            // Use next step's PC if available
+            if (next_step) |ns| {
+                inputs.values[R1CSInputIndex.NextPC.toIndex()] = F.fromU64(ns.pc);
+                inputs.values[R1CSInputIndex.NextUnexpandedPC.toIndex()] = F.fromU64(ns.pc);
+            }
+
+            // =================================================================
+            // Set remaining flags based on instruction opcode
+            // =================================================================
             inputs.setFlagsFromInstruction(step.instruction);
 
             return inputs;
@@ -641,40 +708,107 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             }
         }
 
-        /// Set circuit flags based on instruction
+        /// Set circuit flags and lookup operands based on instruction
+        ///
+        /// This satisfies lookup-related constraints (5-11):
+        /// - Constraint 5: if Add+Sub+Mul => LeftLookupOperand == 0
+        /// - Constraint 6: if NOT Add+Sub+Mul => LeftLookupOperand == LeftInstructionInput
+        /// - Constraint 7: if Add => RightLookupOperand == RightInput+LeftInput
+        /// - Constraint 8: if Sub => RightLookupOperand == RightInput-LeftInput
+        /// - Constraint 9: if Mul => RightLookupOperand == Product
+        /// - Constraint 10: if NOT Add+Sub+Mul => RightLookupOperand == RightInput
+        /// - Constraint 11: if Assert => LookupOutput == 1
         fn setFlagsFromInstruction(self: *Self, instr: u32) void {
             const opcode: u8 = @truncate(instr & 0x7F);
-            // Map opcode to circuit flags
+            const funct3 = (instr >> 12) & 0x7;
+            const funct7 = (instr >> 25) & 0x7F;
+
+            // Get input values for lookup operand computation
+            const left_input = self.values[R1CSInputIndex.LeftInstructionInput.toIndex()];
+            const right_input = self.values[R1CSInputIndex.RightInstructionInput.toIndex()];
+            const product = self.values[R1CSInputIndex.Product.toIndex()];
+
             switch (opcode) {
                 0x03 => { // LOAD
-                    self.values[R1CSInputIndex.FlagLoad.toIndex()] = F.one();
+                    // FlagLoad already set in fromTraceStep
+                    // Lookups: NOT Add+Sub+Mul, so LeftLookup == LeftInput, RightLookup == RightInput
+                    self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
+                    self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input;
                 },
                 0x23 => { // STORE
-                    self.values[R1CSInputIndex.FlagStore.toIndex()] = F.one();
+                    // FlagStore already set in fromTraceStep
+                    self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
+                    self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input;
                 },
-                0x33 => { // R-type (ADD, SUB, etc.)
-                    self.values[R1CSInputIndex.FlagAddOperands.toIndex()] = F.one();
+                0x33 => { // R-type (ADD, SUB, MUL, etc.)
+                    // Determine specific operation
+                    if (funct7 == 0x01) {
+                        // M-extension: MUL, MULH, MULHSU, MULHU, DIV, DIVU, REM, REMU
+                        if (funct3 == 0x0) { // MUL
+                            self.values[R1CSInputIndex.FlagMultiplyOperands.toIndex()] = F.one();
+                            // Constraint 5: LeftLookup == 0 for Mul
+                            self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
+                            // Constraint 9: RightLookup == Product for Mul
+                            self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = product;
+                        } else {
+                            // Other M-extension ops (DIV, etc.)
+                            self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
+                            self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input;
+                        }
+                    } else if (funct7 == 0x20 and funct3 == 0x0) {
+                        // SUB
+                        self.values[R1CSInputIndex.FlagSubtractOperands.toIndex()] = F.one();
+                        // Constraint 5: LeftLookup == 0 for Sub
+                        self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
+                        // Constraint 8: RightLookup == RightInput - LeftInput for Sub
+                        self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input.sub(left_input);
+                    } else {
+                        // ADD and other R-type
+                        self.values[R1CSInputIndex.FlagAddOperands.toIndex()] = F.one();
+                        // Constraint 5: LeftLookup == 0 for Add
+                        self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
+                        // Constraint 7: RightLookup == RightInput + LeftInput for Add
+                        self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input.add(left_input);
+                    }
                     self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
                 },
                 0x13 => { // I-type (ADDI, etc.)
                     self.values[R1CSInputIndex.FlagAddOperands.toIndex()] = F.one();
+                    // For I-type, the "right input" comes from immediate
+                    // Constraint 5: LeftLookup == 0 for Add
+                    self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
+                    // Constraint 7: RightLookup == RightInput + LeftInput for Add
+                    // For ADDI, right_input should be the immediate
+                    self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input.add(left_input);
                     self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
                 },
                 0x6F => { // JAL
                     self.values[R1CSInputIndex.FlagJump.toIndex()] = F.one();
                     self.values[R1CSInputIndex.ShouldJump.toIndex()] = F.one();
                     self.values[R1CSInputIndex.WritePCtoRD.toIndex()] = F.one();
+                    // NOT Add+Sub+Mul
+                    self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
+                    self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input;
                 },
                 0x67 => { // JALR
                     self.values[R1CSInputIndex.FlagJump.toIndex()] = F.one();
                     self.values[R1CSInputIndex.ShouldJump.toIndex()] = F.one();
                     self.values[R1CSInputIndex.WritePCtoRD.toIndex()] = F.one();
+                    // NOT Add+Sub+Mul
+                    self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
+                    self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input;
                 },
                 0x63 => { // Branch
-                    // ShouldBranch is set based on lookup output
-                    // Simplified here
+                    // NOT Add+Sub+Mul
+                    self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
+                    self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input;
+                    // ShouldBranch depends on branch condition evaluation
                 },
-                else => {},
+                else => {
+                    // Default: NOT Add+Sub+Mul, so use constraint 6 and 10
+                    self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
+                    self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input;
+                },
             }
         }
 

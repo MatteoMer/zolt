@@ -18,6 +18,7 @@ Successfully implemented and verified:
 - ✅ fp12MulBy034 sparse multiplication
 - ✅ **Pairing output matching arkworks/Jolt exactly!**
 - ✅ **Dory commitment matching Jolt exactly!**
+- Jolt Verification test does not pass yet
 
 ### Verification Results
 

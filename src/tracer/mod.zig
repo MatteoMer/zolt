@@ -14,7 +14,7 @@ pub const TraceStep = struct {
     cycle: u64,
     /// Program counter before execution
     pc: u64,
-    /// Instruction executed
+    /// Instruction executed (expanded to 32-bit if compressed)
     instruction: u32,
     /// Source register 1 value
     rs1_value: u64,
@@ -30,6 +30,8 @@ pub const TraceStep = struct {
     is_memory_write: bool,
     /// Next PC
     next_pc: u64,
+    /// Whether the original instruction was compressed (RVC - 2 bytes)
+    is_compressed: bool,
 };
 
 /// Full execution trace
@@ -172,6 +174,7 @@ pub const Emulator = struct {
             .memory_value = result.memory_value,
             .is_memory_write = result.is_memory_write,
             .next_pc = result.next_pc,
+            .is_compressed = self.is_compressed,
         });
 
         // Update state

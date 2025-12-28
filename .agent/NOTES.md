@@ -588,3 +588,51 @@ The serialization compatibility work is complete. Full verification compatibilit
 would require Zolt to adopt Jolt's R1CS constraint structure and univariate skip
 optimization, which is a significant architectural change beyond the scope of
 the current serialization alignment effort.
+
+---
+
+## Opening Claims Complete (Iteration 12)
+
+### Problem Fixed: VirtualPolynomial Ordering
+
+The `OpeningId.order` function was comparing `VirtualPolynomial` variants by **tag only**,
+not by payload. This caused all 13 `OpFlags` variants to compare as equal, so only
+one survived in the BTreeMap-like structure.
+
+### Solution
+
+Added `VirtualPolynomial.orderByPayload()` to compare payload values for:
+- `OpFlags(u8)` - Compare the circuit flag index
+- `InstructionFlags(u8)` - Compare the instruction flag index
+- `InstructionRa(usize)` - Compare the instruction index
+- `LookupTableFlag(usize)` - Compare the table flag index
+
+### Result
+
+- Opening claims count: 48 (was 36)
+- All 13 OpFlags variants now preserved (AddOperands through IsFirstInSequence)
+- All R1CS inputs for SpartanOuter now included
+
+### Current Verification Status
+
+```
+Opening claims: 48 total
+  - 36 R1CS inputs for SpartanOuter
+  - UnivariateSkip claims for stages 1-2
+  - Additional stage-specific claims
+
+Stage 1: UniSkip first-round PASSED (sum over domain = 0)
+Stage 1: Sumcheck FAILED (claims don't match expected values)
+```
+
+The verification fails at Stage 1 sumcheck because our "zero proofs" don't satisfy
+the actual sumcheck equation. The verifier computes expected claims from R1CS
+constraint evaluations, which don't match zeros.
+
+### What Would Be Needed
+
+For full verification, we would need to:
+1. Implement Jolt's R1CS constraint structure in Zolt
+2. Compute actual Az(x,y) · Bz(x,y) evaluations
+3. Generate proper univariate skip polynomials
+4. Ensure sumcheck round polynomials satisfy p(0) + p(1) = claim

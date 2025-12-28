@@ -15,6 +15,10 @@ const poly = @import("../../poly/mod.zig");
 const subprotocols = @import("../../subprotocols/mod.zig");
 const r1cs = @import("../r1cs/mod.zig");
 
+// Export outer prover with univariate skip optimization
+pub const outer = @import("outer.zig");
+pub const SpartanOuterProver = outer.SpartanOuterProver;
+
 /// Spartan proof for R1CS
 pub fn R1CSProof(comptime F: type) type {
     return struct {

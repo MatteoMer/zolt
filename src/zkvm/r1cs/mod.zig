@@ -27,6 +27,21 @@ pub const jolt_r1cs = @import("jolt_r1cs.zig");
 pub const JoltR1CS = jolt_r1cs.JoltR1CS;
 pub const JoltSpartanInterface = jolt_r1cs.JoltSpartanInterface;
 
+// Export univariate skip optimization (Jolt compatibility)
+pub const univariate_skip = @import("univariate_skip.zig");
+pub const UniPoly = univariate_skip.UniPoly;
+pub const UniSkipFirstRoundProof = univariate_skip.UniSkipFirstRoundProof;
+pub const LagrangePolynomial = univariate_skip.LagrangePolynomial;
+pub const buildUniskipFirstRoundPoly = univariate_skip.buildUniskipFirstRoundPoly;
+
+// Univariate skip constants
+pub const NUM_R1CS_CONSTRAINTS = univariate_skip.NUM_R1CS_CONSTRAINTS;
+pub const OUTER_UNIVARIATE_SKIP_DEGREE = univariate_skip.OUTER_UNIVARIATE_SKIP_DEGREE;
+pub const OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE = univariate_skip.OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE;
+pub const OUTER_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE = univariate_skip.OUTER_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE;
+pub const OUTER_FIRST_ROUND_POLY_NUM_COEFFS = univariate_skip.OUTER_FIRST_ROUND_POLY_NUM_COEFFS;
+pub const OUTER_FIRST_ROUND_POLY_DEGREE_BOUND = univariate_skip.OUTER_FIRST_ROUND_POLY_DEGREE_BOUND;
+
 /// Term in a linear combination (field-specific version)
 pub fn Term(comptime F: type) type {
     return struct {

@@ -872,3 +872,18 @@ Summary:
 - Serialization format fully compatible (Jolt can deserialize Zolt proofs)
 - Documented blocking issues and path forward in NOTES.md and TODO.md
 
+
+--- Iteration 8 ---
+Started: 2025-12-28T11:23:17.026551
+Ended: 2025-12-28T11:39:10.208709
+Turns: 104
+Cost: $5.1270
+
+
+--- Iteration 9 ---
+Started: 2025-12-28T11:39:12.210323
+Ended: 2025-12-28T11:41:54.500516
+Turns: 0
+Cost: $0.0000
+Error: Failed to decode JSON: JSON message exceeded maximum buffer size of 1048576 bytes...
+

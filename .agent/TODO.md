@@ -3,7 +3,7 @@
 ## Completed (This Session - Iteration 31)
 
 ### Strict Sumcheck Verification Mode
-- [x] Add `VerifierConfig` struct with `strict_sumcheck` option
+- [x] Add `VerifierConfig` struct with `strict_sumcheck` and `debug_output` options
 - [x] Add `initWithConfig()` method to MultiStageVerifier
 - [x] Update all 6 stages to check `p(0) + p(1) = claim` when strict mode enabled
 - [x] Add `setStrictMode()` and `setConfig()` methods to JoltVerifier
@@ -11,23 +11,25 @@
 - [x] Add tests for verifier configuration
 - [x] Update full_pipeline example to use lenient mode (for now)
 
-### Notes on Strict Mode
-The strict verification reveals that the current prover generates proofs that pass
-structural verification but don't fully satisfy `p(0) + p(1) = claim` for all rounds.
+### Sumcheck Prover Improvements (This Session)
+- [x] Add proper Fiat-Shamir binding: absorb round polynomials into transcript
+- [x] Fix Spartan prover to track current_len during folding
+- [x] Fix RAF prover to account for bound variables in unmap evaluation
+- [x] Add debug output for stage failures
 
-**Root Cause Analysis:**
-The issue is in the RAF evaluation prover and similar multi-polynomial sumchecks.
-When proving `Σ_k ra(k) * unmap(k)`, the current implementation:
-1. Folds the `ra` polynomial correctly with challenges
-2. But evaluates `unmap` at original indices instead of accounting for the folding
+### Remaining Issue: Sumcheck Validity
+Strict verification reveals the prover's round polynomials don't perfectly satisfy
+`p(0) + p(1) = claim` after folding. Investigation shows:
+- Round 0 passes (initial sum matches)
+- Round 1 fails: sum of folded values ≠ p(challenge_0)
 
-The fix requires either:
-- Folding both polynomials together (combined polynomial approach)
-- Or tracking bound variables and evaluating unmap at the correct restricted points
+The issue appears to be in how the prover folds vs how the verifier interpolates.
+The prover uses linear folding `(1-r)*p0 + r*p1`, while the verifier uses quadratic
+Lagrange interpolation. Mathematically these should match for linear polynomials,
+but there may be a subtle bug.
 
-For production use, `strict_sumcheck: true` should be the default and the prover
-should be fixed to generate valid proofs. The current implementation uses lenient
-mode for demonstration purposes.
+For production use, `strict_sumcheck: true` should be the default and this needs
+to be fixed. The current implementation uses lenient mode for demonstration.
 
 ## Known Issues (For Future Iterations)
 
@@ -136,6 +138,12 @@ End-to-end verification: PASSED
 
 ## Commits This Session (Iteration 31)
 1. Add configurable strict sumcheck verification mode
+2. Update tracking files for iteration 31
+3. Improve sumcheck prover/verifier for stricter verification
+   - Add Fiat-Shamir binding for round polynomials
+   - Fix Spartan prover current_len tracking
+   - Fix RAF prover bound variable handling
+   - Add debug output option
 
 ## Commits Previous Session (Iteration 30)
 1. Fix prover/verifier transcript synchronization for end-to-end verification

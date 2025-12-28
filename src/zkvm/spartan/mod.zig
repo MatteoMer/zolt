@@ -19,6 +19,10 @@ const r1cs = @import("../r1cs/mod.zig");
 pub const outer = @import("outer.zig");
 pub const SpartanOuterProver = outer.SpartanOuterProver;
 
+// Jolt-compatible outer prover with full sumcheck
+pub const jolt_outer_prover = @import("jolt_outer_prover.zig");
+pub const JoltOuterProver = jolt_outer_prover.JoltOuterProver;
+
 /// Spartan proof for R1CS
 pub fn R1CSProof(comptime F: type) type {
     return struct {

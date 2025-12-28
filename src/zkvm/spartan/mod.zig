@@ -23,6 +23,10 @@ pub const SpartanOuterProver = outer.SpartanOuterProver;
 pub const jolt_outer_prover = @import("jolt_outer_prover.zig");
 pub const JoltOuterProver = jolt_outer_prover.JoltOuterProver;
 
+// Streaming outer prover for Jolt compatibility
+pub const streaming_outer = @import("streaming_outer.zig");
+pub const StreamingOuterProver = streaming_outer.StreamingOuterProver;
+
 /// Spartan proof for R1CS
 pub fn R1CSProof(comptime F: type) type {
     return struct {

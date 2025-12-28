@@ -108,6 +108,14 @@ pub fn LassoProver(comptime F: type) type {
         challenges_len: usize,
         /// Allocator
         allocator: Allocator,
+        /// Current sumcheck claim
+        /// This is the claim that must be satisfied: p(0) + p(1) = current_claim
+        current_claim: F,
+        /// EQ evaluations array - tracks eq(r, j) for each cycle j
+        /// Updated after each round by binding the new challenge
+        eq_evals: []F,
+        /// Effective length of eq_evals (shrinks by half each cycle round)
+        eq_evals_len: usize,
 
         /// Initialize the Lasso prover
         pub fn init(
@@ -148,6 +156,22 @@ pub fn LassoProver(comptime F: type) type {
             const challenges = try allocator.alloc(F, max_rounds);
             @memset(challenges, F.zero());
 
+            // Initialize eq_evals array - we need to track eq(r, j) for each cycle j
+            // The number of cycles is lookup_indices.len
+            const num_cycles = lookup_indices.len;
+            const eq_evals = try allocator.alloc(F, num_cycles);
+
+            // Compute initial eq evaluations using the SplitEq polynomial
+            for (0..num_cycles) |j| {
+                eq_evals[j] = eq_r.getEq(j);
+            }
+
+            // Compute initial claim as sum of all eq evaluations
+            var initial_claim = F.zero();
+            for (eq_evals) |eq_val| {
+                initial_claim = initial_claim.add(eq_val);
+            }
+
             return Self{
                 .lookup_indices = lookup_indices,
                 .lookup_tables = lookup_tables,
@@ -162,6 +186,9 @@ pub fn LassoProver(comptime F: type) type {
                 .challenges = challenges,
                 .challenges_len = 0,
                 .allocator = allocator,
+                .current_claim = initial_claim,
+                .eq_evals = eq_evals,
+                .eq_evals_len = num_cycles,
             };
         }
 
@@ -172,15 +199,12 @@ pub fn LassoProver(comptime F: type) type {
             self.right_operand_ps.deinit();
             self.prefix_registry.deinit();
             self.allocator.free(self.challenges);
+            self.allocator.free(self.eq_evals);
         }
 
         /// Compute the initial claim (sum of all eq evaluations)
         pub fn computeInitialClaim(self: *const Self) F {
-            var sum = F.zero();
-            for (0..self.lookup_indices.len) |j| {
-                sum = sum.add(self.eq_r_reduction.getEq(j));
-            }
-            return sum;
+            return self.current_claim;
         }
 
         /// Check if we're in the address binding phase
@@ -211,21 +235,24 @@ pub fn LassoProver(comptime F: type) type {
             // During address binding, we use prefix-suffix decomposition
             // The round polynomial is computed by summing over table entries
             // while accumulating prefix/suffix evaluations
+            //
+            // For sumcheck round i, we sum over all indices j where:
+            // - sum_0 = Σ eq_evals[j] for j where bit i of index[j] = 0
+            // - sum_1 = Σ eq_evals[j] for j where bit i of index[j] = 1
+            // Then p(0) = sum_0, p(1) = sum_1
+            // And the constraint p(0) + p(1) = current_claim should hold
 
             const coeffs = try self.allocator.alloc(F, 3);
 
-            // For now, compute simple linear polynomial
-            // g(X) = a + b*X where a = sum at X=0, b = slope
             var sum_0 = F.zero();
             var sum_1 = F.zero();
 
-            const half = self.lookup_indices.len / 2;
             const round_bit = self.round;
 
             for (self.lookup_indices, 0..) |idx, j| {
                 // Get the bit at current round position
                 const bit = (idx >> @intCast(round_bit)) & 1;
-                const eq_val = self.eq_r_reduction.getEq(j);
+                const eq_val = self.eq_evals[j];
 
                 if (bit == 0) {
                     sum_0 = sum_0.add(eq_val);
@@ -233,10 +260,13 @@ pub fn LassoProver(comptime F: type) type {
                     sum_1 = sum_1.add(eq_val);
                 }
             }
-            _ = half;
 
-            // Linear polynomial: coeffs = [sum_0, sum_1 - sum_0]
-            // But we need degree 2 for consistency, so add zero coefficient
+            // The round polynomial p(X) should satisfy:
+            // p(0) + p(1) = current_claim
+            // Here sum_0 + sum_1 = current_claim (by invariant)
+            // Represent as coefficient form: p(X) = c0 + c1*X + c2*X^2
+            // where p(0) = c0 = sum_0, p(1) = c0 + c1 + c2 = sum_1
+            // For linear (degree-1) polynomial: c2 = 0, c1 = sum_1 - sum_0
             coeffs[0] = sum_0;
             coeffs[1] = sum_1.sub(sum_0);
             coeffs[2] = F.zero();
@@ -249,27 +279,44 @@ pub fn LassoProver(comptime F: type) type {
 
         /// Compute round polynomial for cycle phase (last log_T rounds)
         fn computeCycleRoundPoly(self: *Self) !poly.UniPoly(F) {
-            // During cycle binding, we use the Gruen split EQ optimization
-            // to efficiently compute the round polynomial
+            // During cycle binding, we sum over the effective eq_evals (first eq_evals_len elements)
+            // Each round, we fold the array in half, so eq_evals_len decreases by half
+            //
+            // sum_0 = Σ eq_evals[j] for j in first half
+            // sum_1 = Σ eq_evals[j] for j in second half
+            // Then p(0) = sum_0, p(1) = sum_1, p(0) + p(1) = current_claim
 
             const coeffs = try self.allocator.alloc(F, 3);
 
-            // Compute sums over cycles where cycle variable = 0 and = 1
+            const num_cycles = self.eq_evals_len;
+
+            if (num_cycles <= 1) {
+                // Only one element, no more rounds needed
+                coeffs[0] = if (num_cycles > 0) self.eq_evals[0] else F.zero();
+                coeffs[1] = F.zero();
+                coeffs[2] = F.zero();
+                return poly.UniPoly(F){
+                    .coeffs = coeffs,
+                    .allocator = self.allocator,
+                };
+            }
+
+            const half = num_cycles / 2;
             var sum_0 = F.zero();
             var sum_1 = F.zero();
 
-            const cycle_round = self.round - self.params.log_K;
-            const half = @as(usize, 1) << @intCast(self.params.log_T - cycle_round - 1);
-
+            // Sum contributions from each half
             for (0..half) |j| {
-                const eq_0 = self.eq_r_reduction.getEq(j);
-                const eq_1 = self.eq_r_reduction.getEq(j + half);
-
-                // Weight by table values (simplified for now)
-                sum_0 = sum_0.add(eq_0);
-                sum_1 = sum_1.add(eq_1);
+                sum_0 = sum_0.add(self.eq_evals[j]);
+            }
+            for (half..num_cycles) |j| {
+                sum_1 = sum_1.add(self.eq_evals[j]);
             }
 
+            // Represent as coefficient form: p(X) = c0 + c1*X + c2*X^2
+            // p(0) = c0 = sum_0
+            // p(1) = c0 + c1 + c2 = sum_1
+            // For linear: c2 = 0, c1 = sum_1 - sum_0
             coeffs[0] = sum_0;
             coeffs[1] = sum_1.sub(sum_0);
             coeffs[2] = F.zero();
@@ -281,16 +328,40 @@ pub fn LassoProver(comptime F: type) type {
         }
 
         /// Receive a challenge and update state
+        ///
+        /// After receiving challenge r, the new claim becomes p(r) where p is the
+        /// round polynomial just sent. The eq_evals are also updated to reflect
+        /// the binding of this variable.
         pub fn receiveChallenge(self: *Self, challenge: F) !void {
             // Record the challenge
             self.challenges[self.challenges_len] = challenge;
             self.challenges_len += 1;
 
             if (self.isAddressPhase()) {
-                // Bind the expanding table
-                try self.expanding_v.bind(challenge);
+                // Address phase: bind the address variable
+                // Update eq_evals: for each index j, multiply by either r or (1-r)
+                // depending on whether bit `round` of lookup_indices[j] is 1 or 0
+                const round_bit = self.round;
+                const one_minus_r = F.one().sub(challenge);
 
-                // Update prefix-suffix decompositions
+                for (self.lookup_indices, 0..) |idx, j| {
+                    const bit = (idx >> @intCast(round_bit)) & 1;
+                    if (bit == 1) {
+                        self.eq_evals[j] = self.eq_evals[j].mul(challenge);
+                    } else {
+                        self.eq_evals[j] = self.eq_evals[j].mul(one_minus_r);
+                    }
+                }
+
+                // Update current_claim to p(r) = sum of all updated eq_evals
+                var new_claim = F.zero();
+                for (self.eq_evals) |eq_val| {
+                    new_claim = new_claim.add(eq_val);
+                }
+                self.current_claim = new_claim;
+
+                // Bind auxiliary structures
+                try self.expanding_v.bind(challenge);
                 try self.left_operand_ps.bind(challenge);
                 try self.right_operand_ps.bind(challenge);
 
@@ -300,7 +371,36 @@ pub fn LassoProver(comptime F: type) type {
                     self.phase += 1;
                 }
             } else {
-                // Bind the cycle EQ polynomial
+                // Cycle phase: bind the cycle variable
+                // Fold the eq_evals array in half
+                const num_cycles = self.eq_evals_len;
+                if (num_cycles <= 1) {
+                    // No more folding possible
+                    self.round += 1;
+                    return;
+                }
+
+                const half = num_cycles / 2;
+                const one_minus_r = F.one().sub(challenge);
+
+                // Fold: new_eq[j] = (1-r) * eq[j] + r * eq[j + half]
+                for (0..half) |j| {
+                    const eq_0 = self.eq_evals[j];
+                    const eq_1 = if (j + half < num_cycles) self.eq_evals[j + half] else F.zero();
+                    self.eq_evals[j] = one_minus_r.mul(eq_0).add(challenge.mul(eq_1));
+                }
+
+                // Update effective length
+                self.eq_evals_len = half;
+
+                // Update current_claim to sum of folded eq_evals
+                var new_claim = F.zero();
+                for (0..half) |j| {
+                    new_claim = new_claim.add(self.eq_evals[j]);
+                }
+                self.current_claim = new_claim;
+
+                // Bind the split EQ polynomial (for cycle tracking)
                 const cycle_round = self.round - self.params.log_K;
                 if (cycle_round < self.eq_r_reduction.num_outer) {
                     self.eq_r_reduction.bindOuter(challenge);

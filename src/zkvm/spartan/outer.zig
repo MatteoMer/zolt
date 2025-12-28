@@ -203,14 +203,15 @@ pub fn SpartanOuterProver(comptime F: type) type {
             // Get tau_high (last element of tau)
             const tau_high = if (self.tau.len > 0) self.tau[self.tau.len - 1] else F.zero();
 
-            // Use precomputed base window evals if available, otherwise compute
+            // Compute base window evaluations: Σ_x eq(τ,x) * Az(x,y) * Bz(x,y)
+            // For satisfied constraints, Az*Bz = 0 so base_evals will be all zeros
             var base_evals: [DOMAIN_SIZE]F = undefined;
 
             if (self.base_window_evals) |precomputed| {
                 // Use the precomputed evaluations from the constraint evaluators
                 base_evals = precomputed;
             } else {
-                // Fallback: compute from stored Az/Bz values
+                // Compute from stored Az/Bz values
                 @memset(&base_evals, F.zero());
                 for (0..self.num_cycles) |cycle| {
                     const eq_val = self.getEqValue(cycle);
@@ -224,14 +225,55 @@ pub fn SpartanOuterProver(comptime F: type) type {
                 }
             }
 
-            // Compute extended evaluations using Lagrange extrapolation from base window
+            // Compute extended evaluations using precomputed Lagrange coefficients.
+            // This is the CORRECT approach: we evaluate Az(y_j) and Bz(y_j) separately
+            // at each extended point using COEFFS_PER_J, then multiply them.
+            // This gives non-zero results even when base_evals are all zeros.
             var extended_evals: [DEGREE]F = undefined;
-            const targets = comptime univariate_skip.uniskipTargets(DOMAIN_SIZE, DEGREE);
+            @memset(&extended_evals, F.zero());
 
-            for (0..DEGREE) |j| {
-                const y_i64 = targets[j];
-                // Use Lagrange interpolation from base window evaluations
-                extended_evals[j] = self.extrapolateFromBaseWindow(&base_evals, y_i64);
+            for (0..self.num_cycles) |cycle| {
+                const eq_val = self.getEqValue(cycle);
+
+                // Get Az and Bz values for this cycle (10 constraints each)
+                var az_vals: [DOMAIN_SIZE]F = undefined;
+                var bz_vals: [DOMAIN_SIZE]F = undefined;
+                for (0..DOMAIN_SIZE) |i| {
+                    const idx = cycle * NUM_CONSTRAINTS + i;
+                    az_vals[i] = if (idx < self.Az.len) self.Az[idx] else F.zero();
+                    bz_vals[i] = if (idx < self.Bz.len) self.Bz[idx] else F.zero();
+                }
+
+                // For each extended target point j
+                for (0..DEGREE) |j| {
+                    // Get the precomputed Lagrange coefficients for target j
+                    const coeffs = univariate_skip.COEFFS_PER_J[j];
+
+                    // Compute Az(y_j) = sum_i coeffs[i] * az_vals[i]
+                    var az_at_yj = F.zero();
+                    for (0..DOMAIN_SIZE) |i| {
+                        const coeff_i = coeffs[i];
+                        if (coeff_i >= 0) {
+                            az_at_yj = az_at_yj.add(az_vals[i].mul(F.fromU64(@intCast(coeff_i))));
+                        } else {
+                            az_at_yj = az_at_yj.sub(az_vals[i].mul(F.fromU64(@intCast(-coeff_i))));
+                        }
+                    }
+
+                    // Compute Bz(y_j) = sum_i coeffs[i] * bz_vals[i]
+                    var bz_at_yj = F.zero();
+                    for (0..DOMAIN_SIZE) |i| {
+                        const coeff_i = coeffs[i];
+                        if (coeff_i >= 0) {
+                            bz_at_yj = bz_at_yj.add(bz_vals[i].mul(F.fromU64(@intCast(coeff_i))));
+                        } else {
+                            bz_at_yj = bz_at_yj.sub(bz_vals[i].mul(F.fromU64(@intCast(-coeff_i))));
+                        }
+                    }
+
+                    // Add eq-weighted Az*Bz product to this extended point
+                    extended_evals[j] = extended_evals[j].add(eq_val.mul(az_at_yj.mul(bz_at_yj)));
+                }
             }
 
             // Build the first-round polynomial

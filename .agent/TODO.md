@@ -4,57 +4,63 @@
 
 **Project Status: DEBUGGING STAGE 1 SUMCHECK - CLAIM MISMATCH**
 
-### Latest Progress (2024-12-28, Iteration 24)
+### Latest Progress (2024-12-28, Iteration 25 - Agent)
 
-1. ✅ **Fixed R1CS Input Evaluation Point** - Corrected `r_cycle` computation:
-   - Skip first challenge (`r_stream`)
-   - Reverse remaining challenges (LITTLE_ENDIAN → BIG_ENDIAN)
-   - Match Jolt's `normalize_opening_point` behavior
+1. ✅ **Found Root Cause of UniSkip All-Zeros Issue**
 
-2. ✅ **Analyzed Jolt's Expected Output Claim** - Understood verification equation:
-   ```
-   expected_output_claim = tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod
-   ```
-   where `inner_sum_prod = (Σ_y A(rx,y)·z(y)) * (Σ_y B(rx,y)·z(y))`
+   The problem is in how we compute the extended domain evaluations:
 
-3. ❌ **Streaming Prover Issues Identified**:
-   - `interpolateFirstRoundPoly` is a placeholder (copies evals as coeffs instead of proper interpolation)
-   - Lagrange basis computed for wrong domain ({0..9} instead of {-4..5})
+   **Jolt's Approach**:
+   - For base domain points y ∈ {-4,...,5}: Az*Bz = 0 for satisfied constraints
+   - For extended domain points y ∈ {-9,...,-5} ∪ {6,...,9}: Uses **precomputed Lagrange coefficients** (`COEFFS_PER_J[j]`) to evaluate the constraint polynomials directly
+   - Even if base evaluations are zero, extended evaluations are NON-ZERO because the constraint polynomial has specific structure
+
+   **Zolt's Bug**:
+   - `evaluators.zig::computeExtendedEvals()` calls `computeBaseWindowEvals()` which returns zeros
+   - Then interpolates from zeros → gets more zeros
+   - This gives an all-zero UniSkip polynomial, which is WRONG
+
+   **Fix Required**:
+   - Implement precomputed Lagrange coefficients for extended domain evaluation
+   - Evaluate Az and Bz at extended points using the polynomial structure, NOT by interpolating from base values
+
+2. ✅ **Understood UniSkip Evaluation Flow**:
+   - UniSkip polynomial s1(Y) = L(τ_high, Y) · t1(Y)
+   - t1(Y) = Σ_x eq(τ, x) · Az(x, Y) · Bz(x, Y)
+   - Even when constraints are satisfied (base window = 0), the polynomial has non-zero evaluations at extended points
+   - The evaluation at r0 (transcript challenge) becomes input_claim for remaining sumcheck rounds
+
+3. ✅ **Previous fixes still apply**:
+   - R1CS input evaluation point correction
+   - Transcript integration
+   - Gruen polynomial implementation
 
 ### Current Issue Analysis
 
-The sumcheck verification fails because:
+The UniSkip polynomial is all zeros because of incorrect extended evaluation computation.
 
-1. **Opening Claims Must Match Sumcheck**: The `r1cs_input_evals` in opening_claims are the MLE evaluations at `r_cycle`. The verifier uses these to compute `expected_output_claim`.
+### Path Forward: Implement Precomputed Lagrange Coefficients
 
-2. **Challenge Ordering**:
-   - Jolt: `sumcheck_challenges = [r_stream, r_1, ..., r_n]`
-   - `r_cycle = challenges[1..]` reversed to BIG_ENDIAN
-   - Our code now does this correctly
+**Required Changes**:
 
-3. **Streaming Prover Bugs**:
-   - The `interpolateFirstRoundPoly` function doesn't actually interpolate
-   - This means first-round polynomial is incorrect
-   - All subsequent challenges derived from it are wrong
+1. **Precompute `COEFFS_PER_J` array**:
+   - For each extended domain point j ∈ {0,...,8} (mapping to {-9,...,-5, 6,...,9})
+   - Compute Lagrange coefficients L_i(y_j) for i ∈ {0,...,9} (base domain indices)
+   - These are the weights for evaluating Az and Bz at extended points
 
-### Path Forward
+2. **Use constraint structure directly**:
+   - For first group (10 constraints): evaluate Az_i and Bz_i for each constraint
+   - Weight by COEFFS_PER_J[j][i] to get evaluation at extended point y_j
+   - Compute Az(y_j) * Bz(y_j)
 
-**Option A: Fix Streaming Prover** (Complex)
-1. Implement proper polynomial interpolation from evaluations to coefficients
-2. Fix Lagrange basis for domain {-4, -3, -2, -1, 0, 1, 2, 3, 4, 5}
-3. Ensure Az*Bz products match Jolt's constraint structure
+3. **Sum over cycles with eq weights**:
+   - extended_evals[j] = Σ_x eq(τ, x) * Az(x, y_j) * Bz(x, y_j)
 
-**Option B: Zero Proof Mode** (Simple)
-1. Use all-zero witnesses
-2. All polynomials become zero
-3. All opening claims are zero
-4. `expected_output_claim = 0` (since inner_sum_prod = 0)
-5. Verification should pass (but proves nothing useful)
-
-**Option C: Port Jolt's Prover** (Most Reliable)
-1. Translate Jolt's `OuterLinearStage` to Zig exactly
-2. Use same round polynomial computation
-3. Ensure byte-for-byte compatibility
+4. **Build UniSkip polynomial**:
+   - Fill t1_vals with base (zeros) and extended (non-zero) evaluations
+   - Interpolate to get t1 coefficients
+   - Multiply by Lagrange kernel L(τ_high, Y)
+   - Result is UniSkip polynomial with non-zero coefficients
 
 ---
 

@@ -14,34 +14,38 @@
 
 ### Current Issue: Stage 1 Sumcheck Verification Fails
 
-UniSkip passes but batched sumcheck fails. See analysis below.
+Error: "Sumcheck verification failed" in Stage 1
+
+### Latest Analysis (December 28, 2024 Iteration 2)
+
+**Test Output Shows**:
+- UniSkip polynomial has all zero coefficients (correct for satisfied constraints)
+- Round polynomials have non-zero values from streaming prover
+- Opening claims have computed MLE evaluations
+
+**Verification Equation**:
+```
+expected_output_claim = tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod
+```
+
+Where:
+- `tau_high_bound_r0 = L(tau_high, r0)` - Lagrange kernel
+- `tau_bound_r_tail_reversed = eq(tau_low, r_cycle_reversed)`
+- `inner_sum_prod = Az(rx)*z(rx) * Bz(rx)*z(rx)` - computed from R1CS input evals
+
+**The Issue**:
+The streaming prover's round polynomials are computed with incorrect/placeholder logic.
+Even though the sum is zero, the intermediate round polynomials must be computed correctly
+using the Gruen optimization (gruen_poly_deg_3).
+
+**What Needs Fixing**:
+1. `streaming_outer.zig::computeRemainingRoundPoly()` - must use Gruen optimization
+2. Challenge derivation - must use transcript consistently
+3. MLE evaluation point - r_cycle must be computed from transcript challenges
 
 ---
 
-## Stage 1 Sumcheck Verification Investigation
-
-### Root Cause Analysis
-
-The issue is in how Jolt's `BatchedSumcheck::verify` works:
-
-1. **Input claim** is retrieved from the opening accumulator:
-   - `input_claim = accumulator.get_virtual_polynomial_opening(UnivariateSkip, SpartanOuter)`
-   - This should be the UniSkip polynomial evaluation at challenge r0
-
-2. **Verification loop**:
-   - claim = 0 (our stored value)
-   - For each round, computes `e = compressed_poly.eval_from_hint(&e, &r_i)`
-   - With all-zero polynomials and hint=0, output_claim = 0
-
-3. **Expected output claim**:
-   - Calls `sumcheck.cache_openings(...)` which modifies the accumulator
-   - Then `sumcheck.expected_output_claim(...)` computes from R1CS input evaluations
-   - Uses `inner_sum_prod = A(rx)*z(rx) * B(rx)*z(rx)`
-   - For satisfied constraints, this should be 0
-
-**The Problem**: The `cache_openings` call modifies the opening accumulator by calling
-`append_virtual` for each R1CS input. This expects the proof to contain the claimed
-evaluations that match what the prover would have computed.
+## Previous Stage 1 Analysis
 
 ### Key Files
 - `/jolt-core/src/subprotocols/sumcheck.rs:200-252` - BatchedSumcheck::verify

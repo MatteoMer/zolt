@@ -7,14 +7,12 @@
 const std = @import("std");
 const zolt = @import("zolt");
 
-const Decoder = zolt.zkvm.instruction.Decoder;
+const DecodedInstruction = zolt.zkvm.instruction.DecodedInstruction;
 const Opcode = zolt.zkvm.instruction.Opcode;
+const isCompressed = zolt.zkvm.instruction.isCompressed;
 
 pub fn main() !void {
     std.debug.print("=== Zolt RISC-V Instruction Decoder Example ===\n\n", .{});
-
-    // Create a decoder
-    var decoder = Decoder{};
 
     // Example instructions to decode
     const instructions = [_]struct { inst: u32, desc: []const u8 }{
@@ -43,7 +41,7 @@ pub fn main() !void {
     std.debug.print("Decoding {d} instructions:\n\n", .{instructions.len});
 
     for (instructions, 0..) |item, i| {
-        const decoded = decoder.decode(item.inst);
+        const decoded = DecodedInstruction.decode(item.inst);
 
         std.debug.print("[{d}] 0x{x:0>8}: {s}\n", .{ i, item.inst, item.desc });
         std.debug.print("    Opcode: {s}\n", .{@tagName(decoded.opcode)});
@@ -71,7 +69,7 @@ pub fn main() !void {
     };
 
     for (compressed) |item| {
-        const is_comp = zolt.zkvm.instruction.isCompressed(@as(u32, item.inst));
+        const is_comp = isCompressed(@as(u32, item.inst));
         std.debug.print("0x{x:0>4}: {s}\n", .{ item.inst, item.desc });
         std.debug.print("    Is compressed: {}\n\n", .{is_comp});
     }

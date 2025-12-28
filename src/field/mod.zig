@@ -498,6 +498,14 @@ pub const BN254Scalar = struct {
         return be_bytes;
     }
 
+    /// Convert to u64 (returns low 64 bits of the value)
+    /// Useful for debugging and displaying small values.
+    /// Note: This loses precision for values >= 2^64.
+    pub fn toU64(self: Self) u64 {
+        const standard = self.fromMontgomery();
+        return standard.limbs[0];
+    }
+
     /// 128-bit multiplication helper
     inline fn mulWide(a: u64, b: u64) u128 {
         return @as(u128, a) * @as(u128, b);

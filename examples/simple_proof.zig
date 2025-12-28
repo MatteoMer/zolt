@@ -4,6 +4,7 @@
 //! 1. Create a polynomial
 //! 2. Evaluate it at a point
 //! 3. Use the Fiat-Shamir transcript
+//! 4. Use mock commitments
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -65,29 +66,28 @@ pub fn main() !void {
     // ========================================
     std.debug.print("\n--- Step 3: Fiat-Shamir Transcript ---\n\n", .{});
 
-    var transcript = Transcript.init(allocator);
+    var transcript = try Transcript.init(allocator, "simple_proof");
     defer transcript.deinit();
 
     // Append domain separator
-    const domain = "example_proof";
-    transcript.appendMessage("domain", domain);
-    std.debug.print("Appended domain separator: \"{s}\"\n", .{domain});
+    try transcript.appendMessage("domain", "example_proof");
+    std.debug.print("Appended domain separator: \"example_proof\"\n", .{});
 
     // Append the evaluation point
-    transcript.appendField("point_0", point[0]);
-    transcript.appendField("point_1", point[1]);
+    try transcript.appendScalar("point_0", point[0]);
+    try transcript.appendScalar("point_1", point[1]);
     std.debug.print("Appended evaluation point\n", .{});
 
     // Append the evaluation
-    transcript.appendField("evaluation", evaluation);
+    try transcript.appendScalar("evaluation", evaluation);
     std.debug.print("Appended evaluation\n", .{});
 
     // Get a challenge
-    const challenge = transcript.challengeField("challenge");
+    const challenge = try transcript.challengeScalar("challenge");
     std.debug.print("\nGenerated challenge: 0x{x}...\n", .{challenge.limbs[0]});
 
     // Get another challenge (demonstrates state accumulation)
-    const challenge2 = transcript.challengeField("challenge2");
+    const challenge2 = try transcript.challengeScalar("challenge2");
     std.debug.print("Generated challenge2: 0x{x}...\n", .{challenge2.limbs[0]});
 
     // Challenges should be different

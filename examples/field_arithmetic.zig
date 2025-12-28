@@ -41,7 +41,7 @@ pub fn main() !void {
     std.debug.print("a * b = {d}\n", .{prod.toU64()});
 
     // Division (multiplication by inverse)
-    const b_inv = b.inverse();
+    const b_inv = b.inverse().?;
     const quot = a.mul(b_inv);
     std.debug.print("a / b = {d}\n\n", .{quot.toU64()});
 
@@ -78,17 +78,23 @@ pub fn main() !void {
     }
     std.debug.print("]\n", .{});
 
-    // Sum all values
-    const total = BatchOps.sum(&values);
+    // Sum all values manually
+    var total = BN254Scalar.zero();
+    for (values) |v| {
+        total = total.add(v);
+    }
     std.debug.print("Sum: {d} (expected: 15)\n", .{total.toU64()});
 
-    // Product of all values
-    const product = BatchOps.product(&values);
+    // Product of all values manually
+    var product = BN254Scalar.one();
+    for (values) |v| {
+        product = product.mul(v);
+    }
     std.debug.print("Product: {d} (expected: 120)\n\n", .{product.toU64()});
 
     // Batch inverse (Montgomery's trick)
     var inverses: [5]BN254Scalar = undefined;
-    BatchOps.batchInverse(&values, &inverses);
+    try BatchOps.batchInverse(&inverses, &values, allocator);
 
     std.debug.print("Batch inverses computed:\n", .{});
     for (values, 0..) |v, i| {
@@ -150,6 +156,7 @@ pub fn main() !void {
     const large = BN254Scalar.fromU64(std.math.maxInt(u64));
     const one = BN254Scalar.one();
     const wrapped = large.add(one).add(one);
+    _ = wrapped; // Value wraps correctly in the field
 
     std.debug.print("Field modulus (approx): ~2^254\n", .{});
     std.debug.print("maxInt(u64) + 2 wraps correctly in the field\n\n", .{});
@@ -163,9 +170,6 @@ pub fn main() !void {
     const neg_five = five.neg();
     const should_be_zero = five.add(neg_five);
     std.debug.print("5 + (-5) = {d} (should be 0)\n\n", .{should_be_zero.toU64()});
-
-    _ = allocator;
-    _ = wrapped;
 
     std.debug.print("=== Example Complete ===\n", .{});
 }

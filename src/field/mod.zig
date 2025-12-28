@@ -916,6 +916,26 @@ test "bn254 scalar power" {
     try std.testing.expect(pow1.eql(two));
 }
 
+test "bn254 scalar toBytes/fromBytes roundtrip" {
+    // Test a small value
+    const a = BN254Scalar.fromU64(12345678901234567890);
+    const bytes = a.toBytes();
+    const b = BN254Scalar.fromBytes(&bytes);
+    try std.testing.expect(a.eql(b));
+
+    // Test one
+    const one = BN254Scalar.one();
+    const one_bytes = one.toBytes();
+    const one_back = BN254Scalar.fromBytes(&one_bytes);
+    try std.testing.expect(one.eql(one_back));
+
+    // Test zero
+    const zero = BN254Scalar.zero();
+    const zero_bytes = zero.toBytes();
+    const zero_back = BN254Scalar.fromBytes(&zero_bytes);
+    try std.testing.expect(zero.eql(zero_back));
+}
+
 /// Batch field operations for SIMD-like performance
 /// These functions operate on slices for cache efficiency
 pub const BatchOps = struct {

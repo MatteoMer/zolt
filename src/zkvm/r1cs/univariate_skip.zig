@@ -584,6 +584,59 @@ test "unipoly evaluation" {
     try std.testing.expect(poly.evaluate(F.fromU64(2)).eql(F.fromU64(17)));
 }
 
+test "interpolation preserves zeros at base window" {
+    const field = @import("../../field/mod.zig");
+    const F = field.BN254Scalar;
+    const allocator = std.testing.allocator;
+
+    // Create evaluation array: zeros at base window, non-zeros at extended
+    // Domain mapping: position i -> Y = -9 + i
+    // Base window: Y = -4 to 5 -> positions 5 to 14
+    // Extended: Y = -9 to -5 -> positions 0 to 4
+    //           Y = 6 to 9 -> positions 15 to 18
+    var t1_vals: [19]F = undefined;
+    @memset(&t1_vals, F.zero());
+
+    // Set non-zero values at extended positions
+    t1_vals[0] = F.fromU64(1); // Y = -9
+    t1_vals[1] = F.fromU64(2); // Y = -8
+    t1_vals[2] = F.fromU64(3); // Y = -7
+    t1_vals[3] = F.fromU64(4); // Y = -6
+    t1_vals[4] = F.fromU64(5); // Y = -5
+    t1_vals[15] = F.fromU64(6); // Y = 6
+    t1_vals[16] = F.fromU64(7); // Y = 7
+    t1_vals[17] = F.fromU64(8); // Y = 8
+    t1_vals[18] = F.fromU64(9); // Y = 9
+
+    // Interpolate to get polynomial coefficients
+    const coeffs = try LagrangePolynomial(F).interpolateCoeffs(19, &t1_vals, allocator);
+    defer allocator.free(coeffs);
+
+    // Create polynomial
+    var poly = try UniPoly(F).init(allocator, coeffs);
+    defer poly.deinit();
+
+    // Evaluate at base window points (Y = -4 to 5) - should all be zero
+    for (0..10) |i| {
+        const y: i64 = -4 + @as(i64, @intCast(i));
+        const y_field = if (y >= 0) F.fromU64(@intCast(y)) else F.zero().sub(F.fromU64(@intCast(-y)));
+        const eval = poly.evaluate(y_field);
+        if (!eval.eql(F.zero())) {
+            std.debug.print("FAIL: t1({d}) = non-zero\n", .{y});
+        }
+        try std.testing.expect(eval.eql(F.zero()));
+    }
+
+    // Evaluate at extended points - should match input
+    // Position 0 -> Y = -9
+    const y_minus9 = F.zero().sub(F.fromU64(9));
+    try std.testing.expect(poly.evaluate(y_minus9).eql(F.fromU64(1)));
+
+    // Position 18 -> Y = 9
+    const y_9 = F.fromU64(9);
+    try std.testing.expect(poly.evaluate(y_9).eql(F.fromU64(9)));
+}
+
 test "constants match Jolt" {
     // Verify our constants match Jolt's for Stage 1
     try std.testing.expectEqual(@as(usize, 19), NUM_R1CS_CONSTRAINTS);

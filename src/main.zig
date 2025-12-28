@@ -32,7 +32,7 @@ fn printHelp() void {
         \\    help              Show this help message
         \\    version           Show version information
         \\    info              Show zkVM capabilities and feature summary
-        \\    run <elf>         Run RISC-V ELF binary in the emulator
+        \\    run [opts] <elf>   Run RISC-V ELF binary in the emulator
         \\    prove <elf>       Generate ZK proof for ELF binary (experimental)
         \\    srs <ptau>        Inspect a Powers of Tau (ptau) file
         \\    decode <hex>      Decode a RISC-V instruction (hex)
@@ -148,7 +148,7 @@ fn parseCommand(arg: []const u8) Command {
     return .unknown;
 }
 
-fn runEmulator(allocator: std.mem.Allocator, elf_path: []const u8) !void {
+fn runEmulator(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles: ?u64, show_regs: bool) !void {
     std.debug.print("Loading ELF: {s}\n", .{elf_path});
 
     // Load the ELF file
@@ -180,21 +180,74 @@ fn runEmulator(allocator: std.mem.Allocator, elf_path: []const u8) !void {
     // Set entry point PC
     emulator.state.pc = program.entry_point;
 
+    const cycle_limit = max_cycles orelse 16 * 1024 * 1024; // Default 16M cycles
+    std.debug.print("Max cycles: {}\n", .{cycle_limit});
     std.debug.print("\nStarting execution...\n", .{});
 
     // Run the emulator step by step
     var running = true;
-    while (running) {
+    while (running and emulator.state.cycle < cycle_limit) {
         running = emulator.step() catch |err| {
             std.debug.print("Execution stopped: {}\n", .{err});
             break;
         };
     }
 
-    std.debug.print("\nExecution complete!\n", .{});
+    if (emulator.state.cycle >= cycle_limit) {
+        std.debug.print("\nCycle limit reached!\n", .{});
+    } else {
+        std.debug.print("\nExecution complete!\n", .{});
+    }
     std.debug.print("Cycles executed: {}\n", .{emulator.state.cycle});
     std.debug.print("Final PC: 0x{x:0>8}\n", .{emulator.state.pc});
     std.debug.print("Trace entries: {}\n", .{emulator.trace.len()});
+
+    // Show final register state if requested
+    if (show_regs) {
+        std.debug.print("\nFinal Register State:\n", .{});
+        var i: u8 = 0;
+        while (i < 32) : (i += 1) {
+            const val = emulator.state.registers[i];
+            if (val != 0) { // Only show non-zero registers
+                const reg_name = switch (i) {
+                    0 => "zero",
+                    1 => "ra  ",
+                    2 => "sp  ",
+                    3 => "gp  ",
+                    4 => "tp  ",
+                    5 => "t0  ",
+                    6 => "t1  ",
+                    7 => "t2  ",
+                    8 => "s0  ",
+                    9 => "s1  ",
+                    10 => "a0  ",
+                    11 => "a1  ",
+                    12 => "a2  ",
+                    13 => "a3  ",
+                    14 => "a4  ",
+                    15 => "a5  ",
+                    16 => "a6  ",
+                    17 => "a7  ",
+                    18 => "s2  ",
+                    19 => "s3  ",
+                    20 => "s4  ",
+                    21 => "s5  ",
+                    22 => "s6  ",
+                    23 => "s7  ",
+                    24 => "s8  ",
+                    25 => "s9  ",
+                    26 => "s10 ",
+                    27 => "s11 ",
+                    28 => "t3  ",
+                    29 => "t4  ",
+                    30 => "t5  ",
+                    31 => "t6  ",
+                    else => "x?? ",
+                };
+                std.debug.print("  x{d:0>2} ({s}): 0x{x:0>16} ({d})\n", .{ i, reg_name, val, val });
+            }
+        }
+    }
 }
 
 fn runProver(allocator: std.mem.Allocator, elf_path: []const u8) !void {
@@ -493,18 +546,59 @@ pub fn main() !void {
         .run => {
             if (args.next()) |arg| {
                 if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-                    std.debug.print("Usage: zolt run <elf_file>\n\n", .{});
+                    std.debug.print("Usage: zolt run [options] <elf_file>\n\n", .{});
                     std.debug.print("Run a RISC-V ELF binary in the emulator.\n", .{});
-                    std.debug.print("The emulator supports RV64IMC instructions.\n", .{});
+                    std.debug.print("The emulator supports RV64IMC instructions.\n\n", .{});
+                    std.debug.print("Options:\n", .{});
+                    std.debug.print("  --max-cycles N   Limit execution to N cycles (default: 16M)\n", .{});
+                    std.debug.print("  --regs           Show final register state\n", .{});
                 } else {
-                    runEmulator(allocator, arg) catch |err| {
-                        std.debug.print("Failed to run program: {s}\n", .{@errorName(err)});
-                        std.process.exit(1);
-                    };
+                    // Parse options
+                    var elf_path: ?[]const u8 = null;
+                    var max_cycles: ?u64 = null;
+                    var show_regs = false;
+
+                    // First arg could be an option or the ELF path
+                    if (std.mem.startsWith(u8, arg, "--")) {
+                        if (std.mem.eql(u8, arg, "--regs")) {
+                            show_regs = true;
+                        } else if (std.mem.eql(u8, arg, "--max-cycles")) {
+                            if (args.next()) |cycles_str| {
+                                max_cycles = std.fmt.parseInt(u64, cycles_str, 10) catch null;
+                            }
+                        }
+                    } else {
+                        elf_path = arg;
+                    }
+
+                    // Parse remaining args
+                    while (args.next()) |next_arg| {
+                        if (std.mem.startsWith(u8, next_arg, "--")) {
+                            if (std.mem.eql(u8, next_arg, "--regs")) {
+                                show_regs = true;
+                            } else if (std.mem.eql(u8, next_arg, "--max-cycles")) {
+                                if (args.next()) |cycles_str| {
+                                    max_cycles = std.fmt.parseInt(u64, cycles_str, 10) catch null;
+                                }
+                            }
+                        } else if (elf_path == null) {
+                            elf_path = next_arg;
+                        }
+                    }
+
+                    if (elf_path) |path| {
+                        runEmulator(allocator, path, max_cycles, show_regs) catch |err| {
+                            std.debug.print("Failed to run program: {s}\n", .{@errorName(err)});
+                            std.process.exit(1);
+                        };
+                    } else {
+                        std.debug.print("Error: run command requires an ELF file path\n", .{});
+                        std.debug.print("Usage: zolt run [options] <elf_file>\n", .{});
+                    }
                 }
             } else {
                 std.debug.print("Error: run command requires an ELF file path\n", .{});
-                std.debug.print("Usage: zolt run <elf_file>\n", .{});
+                std.debug.print("Usage: zolt run [options] <elf_file>\n", .{});
             }
         },
         .prove => {

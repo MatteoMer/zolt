@@ -2,92 +2,92 @@
 
 ## Current Status
 
-**Project Status: SIGNIFICANT PROGRESS - ECALL HANDLING IMPLEMENTED 🔄**
+**Project Status: PREPROCESSING EXPORT COMPLETE 🎉**
 
-### Session 5 Summary
+### Session 6 Summary
 
-#### Completed
-1. **Format Compatibility** ✅ - Proof format fully compatible with Jolt
-2. **I/O Region Support** ✅ - Loads from 0x7fffa000 work correctly
-3. **CLI Input Options** ✅ - `--input-hex` works to provide guest input
-4. **ECALL Handling** ✅ - Jolt SDK ECALLs are now handled properly
+#### Completed ✅
+1. **Preprocessing Module** - `src/zkvm/preprocessing.zig`
+   - JoltInstruction with JSON serialization (matching Jolt's serde format)
+   - BytecodePreprocessing with PC mapper
+   - RAMPreprocessing for initial memory state
+   - JoltSharedPreprocessing combining all components
+   - All tests passing (630/630)
 
-#### In Progress
-5. **Guest Execution Debugging** 🔄 - Program runs but loops indefinitely
+2. **CLI Export** - `--export-preprocessing` flag
+   - Exports bytecode, RAM, and memory layout
+   - Serialized in arkworks-compatible format
+   - Works alongside proof generation
 
-### What Changed
-
-**ECALL Handling (Major Fix)**
-
-Before: Zolt terminated on ALL ECALL instructions
-After: Zolt recognizes Jolt SDK ECALLs and continues execution:
-- `JOLT_CYCLE_TRACK_ECALL_NUM (0xC7C1E)` - Skip and continue
-- `JOLT_PRINT_ECALL_NUM` - Skip and continue
-- Unknown ECALLs - Continue (for SDK internal calls)
-- Termination requests - Terminate as expected
-
-**Result**: fibonacci-guest now runs 100000+ cycles instead of stopping at 21!
-
-### Remaining Issue
-
-The program runs past the first ECALL but then loops indefinitely:
-```
-  [ECALL] a0=0x8000009a, a7=0x0, PC=0x800000b0
-    -> Unknown ECALL, continuing
-
-Cycle limit reached!
-Cycles executed: 100000
-Final PC: 0x800000cc
-```
-
-The loop counter (x14) reaches 49 (= n-1 for n=50) but the loop continues.
-This might be due to:
-1. Input not being parsed correctly as a u32 (only 1 byte provided)
-2. Loop termination condition issue
-3. Some other instruction execution difference
-
-### Test Results
-
-- Zolt tests: 622/622 PASS ✅
+#### Test Results
+- Zolt tests: 630/630 PASS ✅
+- Proof generation: WORKING (27.8 KB)
+- Preprocessing export: WORKING (554 KB)
 - Jolt deserialization: PASS ✅
-- Guest execution: INCOMPLETE (loops)
+
+---
+
+## Cross-Verification Status
+
+### What Works
+- Proof serialization matches Jolt format
+- Preprocessing shared components exported
+- All cryptographic primitives verified compatible
+
+### Remaining Work
+
+The exported preprocessing only contains `JoltSharedPreprocessing`, not the full
+`JoltVerifierPreprocessing` which also requires:
+- `PCS::VerifierSetup` - Dory generators (G1, G2 points from SRS)
+
+**Options to complete:**
+1. Export Dory verifier setup from Zolt alongside preprocessing
+2. Create Jolt test that builds generators from SRS
+3. Use shared SRS files between both implementations
+
+---
+
+## Usage
+
+```bash
+# Generate Jolt-compatible proof with preprocessing
+zig build -Doptimize=ReleaseFast
+./zig-out/bin/zolt prove --jolt-format \
+    -o /tmp/zolt_proof.jolt \
+    --export-preprocessing /tmp/zolt_preprocessing.dat \
+    examples/fibonacci.elf
+
+# Files created:
+#   /tmp/zolt_proof.jolt (27 KB)
+#   /tmp/zolt_preprocessing.dat (554 KB)
+```
+
+---
+
+## Files Modified This Session
+
+- `src/zkvm/preprocessing.zig` - NEW: Preprocessing module
+- `src/zkvm/mod.zig` - Added preprocessing export
+- `src/main.zig` - Added --export-preprocessing CLI option
+- `.agent/NOTES.md` - Updated status
 
 ---
 
 ## Commits This Session
 
-1. `docs: update compatibility status - format fully verified`
-2. `feat(tracer): add I/O region support for Jolt guest programs`
-3. `feat(cli): add --input and --input-hex options for guest programs`
-4. `docs: update TODO with I/O region progress`
-5. `docs: identify ECALL handling as root cause of execution mismatch`
-6. `feat(tracer): add Jolt SDK ECALL handling`
+1. `feat: add Jolt-compatible preprocessing serialization`
+2. `feat: add --export-preprocessing CLI option`
 
 ---
 
-## Next Steps
+## Previous Sessions
 
-1. **Fix input parsing**: The input 50 should be read as a u32 (4 bytes) not just 1 byte
-   - Postcard encodes u32 differently than raw bytes
-   - May need to provide full postcard-encoded input
+### Session 5
+- Format compatibility verified
+- ECALL handling implemented
+- Guest execution debugging (loops indefinitely)
 
-2. **Debug loop termination**: Compare instruction execution with Jolt
-   - Add trace comparison mode
-   - Check branch conditions
-
-3. **Alternative approach**: Test with no-input guest programs first
-   - memory-ops-guest doesn't need input
-   - Simpler to debug
-
----
-
-## Commands
-
-```bash
-# Build and test
-zig build test --summary all
-
-# Run Jolt guest with input
-zig build -Doptimize=ReleaseFast
-./zig-out/bin/zolt run --input-hex 32 --max-cycles 100000 --regs /path/to/guest.elf
-```
+### Session 4
+- UniSkip cross-product algorithm fixed
+- All 618 tests passing
+- Proof deserialization working

@@ -1,6 +1,38 @@
 # Zolt-Jolt Compatibility Notes
 
-## Current Status (December 28, 2024, Session 5)
+## Current Status (December 28, 2024, Session 6)
+
+### Session 6 Progress
+
+**Preprocessing Export Implemented!**
+
+1. Created `src/zkvm/preprocessing.zig`:
+   - `JoltInstruction` with JSON serialization (matches Jolt's serde format)
+   - `BytecodePreprocessing` with PC mapper
+   - `RAMPreprocessing` for initial memory state
+   - `JoltSharedPreprocessing` combining all components
+
+2. Added `--export-preprocessing` CLI option:
+   ```bash
+   ./zolt prove --jolt-format -o proof.jolt --export-preprocessing prep.dat program.elf
+   ```
+
+3. Test output:
+   - Proof: 27.8 KB (`/tmp/zolt_proof.jolt`)
+   - Preprocessing: 554 KB (`/tmp/zolt_preprocessing.dat`)
+
+### Remaining Work
+
+The exported preprocessing only contains `JoltSharedPreprocessing`, not the full
+`JoltVerifierPreprocessing` which also needs `PCS::VerifierSetup` (Dory generators).
+
+To complete cross-verification:
+1. Also export Dory verifier setup (generators) from Zolt
+2. OR: Create Jolt test that builds generators from scratch
+
+---
+
+## Previous Status (December 28, 2024, Session 5)
 
 ### Summary
 

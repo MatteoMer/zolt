@@ -12,27 +12,54 @@
 8. **UnivariateSkip Claim** - Now correctly set to uni_poly.evaluate(r0)
 9. **Montgomery Form Fix** - appendScalar now converts from Montgomery form
 10. **MontU128Challenge Compatibility** - Challenge scalars now match Jolt's format
+11. **Symmetric Lagrange Domain** - Fixed to use {-4,...,5} matching Jolt
+12. **Streaming Round Logic** - Separate handling for constraint group selection
 
 ## MAJOR MILESTONE: Stage 1 UniSkip Claims Match! 🎉🎉
 
-The Stage 1 UniSkip verification now has matching claims:
+The Stage 1 UniSkip verification now has matching claims.
+
+---
+
+## CURRENT ISSUE: Stage 1 Expected Output Claim Mismatch ❌
+
+The sumcheck polynomial equations pass (p(0) + p(1) = claim for all rounds), but:
 ```
-r0 and r0_fr evaluations match: true
-Claims match: true
-✓ Stage 1 UniSkip verification PASSED!
+output_claim != expected_output_claim
 ```
 
-### Key Fix: MontU128Challenge-Compatible Arithmetic
+### The Verification Formula
 
-Jolt uses `MontU128Challenge` for 128-bit challenges, which stores values as `[0, 0, low, high]`
-in a BigInt (NOT in Montgomery form). When used in polynomial evaluation, this raw BigInt
-is multiplied with Montgomery-form coefficients.
+The verifier computes:
+```rust
+expected_output_claim = tau_high_bound_r0 * tau_bound_r_tail * inner_sum_prod
+```
 
-The fix required:
-1. **Challenge Format**: Store challenges as `[0, 0, low, high]` to match Jolt's `from_bigint_unchecked`
-2. **Polynomial Evaluation**: Use raw BigInt multiplication (not Montgomery conversion)
-   so `REDC(raw * mont)` produces correct results
-3. **Byte Interpretation**: Interpret reversed bytes as big-endian u128 (matching Rust's `u128::from_be_bytes`)
+Where:
+- `inner_sum_prod = Az_final * Bz_final` using R1CS input evaluations
+- `tau_high_bound_r0` = Lagrange kernel at r0 with tau_high
+- `tau_bound_r_tail` = eq polynomial at reversed sumcheck challenges
+
+### Key Issues to Investigate
+
+1. **Gruen Method / Split Eq**
+   - The `computeCubicRoundPoly()` method may not integrate correctly
+   - The split eq polynomial tables might not be structured correctly for outer sumcheck
+
+2. **Tau Integration**
+   - The eq polynomial binding needs to include tau values
+   - Current implementation may not correctly combine tau with the sumcheck
+
+3. **Round Polynomial Structure**
+   - The polynomial s(X) should equal eq(τ, x) * Az(x) * Bz(x) summed over x
+   - Current t_zero/t_infinity computation may miss the tau_high factor
+
+### Debug Output
+
+Latest test shows:
+- Stage 1 sumcheck equations all pass
+- R1CS input evaluations are being computed
+- But final claim doesn't match expected
 
 ---
 
@@ -40,12 +67,14 @@ The fix required:
 
 - [x] UniSkip verification passes (domain sum = 0)
 - [x] Transcript states match after UniSkip poly append
-- [x] UnivariateSkip claim formula is correct (uni_poly.evaluate(r0))
+- [x] UnivariateSkip claim formula is correct
 - [x] R1CS input claims correctly computed via MLE
-- [x] n_rounds counter matches between Zolt and Jolt
+- [x] n_rounds counter matches
 - [x] r0 challenge matches
 - [x] Stage 1 UniSkip claims match
-- [ ] Stage 1 remaining rounds verify
+- [x] Symmetric Lagrange domain (fixed)
+- [x] Streaming round logic (added)
+- [ ] Stage 1 expected_output_claim matches
 - [ ] Stages 2-7 verify
 - [ ] Full proof verification passes
 
@@ -69,14 +98,20 @@ cargo test --package jolt-core test_debug_stage1_verification -- --ignored --noc
 
 # Run Jolt full proof test
 cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture
-
 ```
 
 ---
 
 ## Next Steps
 
-1. Verify Stage 1 remaining sumcheck rounds
-2. Implement Stage 2 verification test
-3. Continue through Stages 3-7
-4. Full proof verification
+1. **Investigate tau integration in sumcheck**
+   - How does Jolt integrate tau into the round polynomial computation?
+   - Does `split_eq` already handle this?
+
+2. **Compare Gruen method implementation**
+   - Read Jolt's `gruen_poly_deg_3` carefully
+   - Ensure Zolt's version matches
+
+3. **Trace through a single round**
+   - Print intermediate values in both Zolt and Jolt
+   - Find where divergence occurs

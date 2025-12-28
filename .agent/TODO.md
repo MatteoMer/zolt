@@ -2,7 +2,7 @@
 
 ## Current Status (Jolt Compatibility Phase)
 
-**Project Status: OPENING CLAIMS COMPLETE - SUMCHECK VALUES NEXT**
+**Project Status: R1CS CONSTRAINT EVALUATORS COMPLETE - SUMCHECK PROOF GENERATION NEXT**
 
 ### Major Milestones Achieved
 
@@ -14,42 +14,40 @@
 6. ✅ **Univariate Skip Infrastructure** - Degree-27/12 polynomials for stages 1-2
 7. ✅ **All 48 Opening Claims** - Including all 36 R1CS inputs for SpartanOuter + 13 OpFlags variants
 8. ✅ **VirtualPolynomial Ordering** - Fixed payload comparison for OpFlags, InstructionFlags, etc.
+9. ✅ **19 R1CS Constraints** - Updated to match Jolt's exact constraint structure (Iteration 13)
+10. ✅ **Constraint Evaluators** - AzFirstGroup, BzFirstGroup, AzSecondGroup, BzSecondGroup (Iteration 13)
+11. ✅ **Univariate Skip with Real Evaluations** - `createUniSkipProofStage1FromWitnesses()` (Iteration 13)
 
-### Latest Verification Test Result
+### Latest Changes (Iteration 13)
 
-```
-$ cargo test -p jolt-core test_verify_zolt_proof -- --ignored --nocapture
+#### 1. Updated R1CS Constraints (`src/zkvm/r1cs/constraints.zig`)
+- All 19 constraints now match Jolt's exact layout
+- Added `FIRST_GROUP_INDICES` (10 constraints for univariate skip domain)
+- Added `SECOND_GROUP_INDICES` (9 constraints for separate handling)
+- Constraint form: Az * Bz = 0 (equality-conditional)
 
-Loaded all files, attempting verification...
-  Proof trace length: 8
-  Proof commitments: 5
-  Opening claims count: 48
+#### 2. Created Constraint Evaluators (`src/zkvm/r1cs/evaluators.zig`)
+- `AzFirstGroup` / `BzFirstGroup` - Evaluate 10 first-group constraints
+- `AzSecondGroup` / `BzSecondGroup` - Evaluate 9 second-group constraints
+- `UnivariateSkipEvaluator` - Computes Az*Bz products across cycles
+- Proper domain point mapping (y ∈ {-4, -3, ..., 5})
 
-Opening claims include all 13 OpFlags variants (AddOperands through IsFirstInSequence)
+#### 3. Updated Spartan Outer Prover (`src/zkvm/spartan/outer.zig`)
+- `initFromWitnesses()` - Uses constraint evaluators
+- Precomputes base window evaluations
+- Lagrange extrapolation for extended domain points
 
-Verification failed: Stage 1
-Caused by: Sumcheck verification failed
-```
+#### 4. Proof Converter with Witness Support (`src/zkvm/proof_converter.zig`)
+- `convertWithWitnesses()` - Takes cycle witnesses and tau challenge
+- `createUniSkipProofStage1FromWitnesses()` - Computes real Az*Bz products
+- Uses SpartanOuterProver for proper polynomial computation
 
-### Analysis
+### What's Still Needed for Full Verification
 
-The proof structure is now fully correct:
-- ✅ 48 opening claims including all R1CS inputs and OpFlags variants
-- ✅ UniSkip polynomials have correct degrees (28 and 13 coefficients)
-- ✅ UniSkip first-round check passes (sum over domain = 0)
-- ❌ Stage 1 sumcheck verification fails - claims don't match expected values
-
-### What's Needed for Full Verification
-
-The sumcheck verification fails because our "zero proofs" don't satisfy the actual
-sumcheck equation. The verifier computes expected claims from R1CS constraint
-evaluations, which don't match our zeros.
-
-To fix this, we would need to:
-1. Implement Jolt's exact R1CS constraint structure in Zolt
-2. Compute actual Az(x,y) · Bz(x,y) evaluations during proving
-3. Generate proper univariate skip polynomials from constraint evaluations
-4. Ensure sumcheck round polynomials satisfy p(0) + p(1) = claim for actual claims
+The sumcheck verification fails because:
+1. Only Stage 1 univariate skip uses real evaluations
+2. Remaining sumcheck rounds still use "zero proofs"
+3. Need to generate proper round polynomials satisfying p(0) + p(1) = claim
 
 ---
 
@@ -82,20 +80,21 @@ To fix this, we would need to:
 - [x] **Point Compression** - G1/G2 in arkworks format
 - [x] **Proof Serialization** - Matches ArkDoryProof format
 
-### 5. Opening Claims ✅ COMPLETE
+### 5. R1CS Constraints ✅ COMPLETE (NEW)
 
-- [x] **All 36 R1CS inputs for SpartanOuter** - Including all 13 OpFlags variants
-- [x] **VirtualPolynomial.orderByPayload** - Correct ordering for tagged unions
-- [x] **Additional stage claims** - RamRa, RamVal, RegistersVal, etc.
-- [x] **48 total opening claims** - Verified in Jolt deserialization
+- [x] **19 constraints matching Jolt** (`src/zkvm/r1cs/constraints.zig`)
+- [x] **First group (10 constraints)** - Boolean guards, ~64-bit Bz
+- [x] **Second group (9 constraints)** - Mixed guards, ~128-bit Bz
+- [x] **Constraint evaluators** - Az/Bz per group (`src/zkvm/r1cs/evaluators.zig`)
+- [x] **Univariate skip evaluator** - Computes Az*Bz products
 
-### 6. Cross-Verification 🔄 PARTIAL
+### 6. Cross-Verification 🔄 IN PROGRESS
 
 - [x] **Jolt deserializes Zolt proofs** - VERIFIED WORKING
 - [x] **48 opening claims** - All R1CS inputs + OpFlags + stage claims
-- [x] **UniSkip first-round check** - Passes (sum = 0 for zero polynomial)
-- [ ] **Stage 1 sumcheck** - Fails (claims don't match expected values)
-- [ ] **Full verification** - Blocked on sumcheck
+- [x] **UniSkip first-round with real evaluations** - Stage 1 implemented
+- [ ] **Remaining stage sumcheck proofs** - Still using zeros
+- [ ] **Full verification** - Blocked on proper sumcheck
 
 ---
 
@@ -126,23 +125,26 @@ Build Summary: 5/5 steps succeeded; 608/608 tests passed
 | `src/transcripts/blake2b.zig` | ✅ Done | Blake2bTranscript |
 | `src/zkvm/jolt_types.zig` | ✅ Done | Jolt proof types with VirtualPolynomial ordering |
 | `src/zkvm/jolt_serialization.zig` | ✅ Done | Arkworks serialization |
-| `src/zkvm/proof_converter.zig` | ✅ Done | 6→7 stage converter with all claims |
+| `src/zkvm/proof_converter.zig` | ✅ Done | 6→7 stage converter with witness support |
 | `src/zkvm/mod.zig` | ✅ Done | JoltProver |
 | `src/poly/commitment/dory.zig` | ✅ Done | Dory IPA |
+| `src/zkvm/r1cs/constraints.zig` | ✅ Done | 19 R1CS constraints matching Jolt |
+| `src/zkvm/r1cs/evaluators.zig` | ✅ Done | Az/Bz constraint evaluators |
 | `src/zkvm/r1cs/univariate_skip.zig` | ✅ Done | Univariate skip constants |
-| `src/zkvm/spartan/outer.zig` | 🔄 Needs work | Actual constraint evaluation |
+| `src/zkvm/spartan/outer.zig` | ✅ Done | Spartan outer with real evaluations |
 
 ---
 
 ## Summary
 
-**Serialization Goal: ACHIEVED**
+**Serialization + Constraint Evaluation: COMPLETE**
 - Zolt produces proofs that Jolt can deserialize
 - Byte-perfect arkworks format compatibility
-- Dory commitment scheme with GT serialization
-- All 48 opening claims preserved
+- R1CS constraints match Jolt's 19-constraint structure
+- Constraint evaluators compute real Az*Bz products
+- Stage 1 univariate skip uses actual evaluations
 
 **Next Steps:**
-1. Implement actual R1CS constraint evaluation
-2. Generate sumcheck round polynomials that satisfy verification
-3. Compute proper univariate skip polynomials from constraint values
+1. Generate proper sumcheck round polynomials for all stages
+2. Integrate witness-based evaluation into remaining stages
+3. Test full cross-verification with Jolt

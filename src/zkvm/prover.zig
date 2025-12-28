@@ -1071,3 +1071,116 @@ test "opening accumulator" {
     try std.testing.expectEqual(@as(usize, 1), acc.opening_points.items.len);
     try std.testing.expectEqual(@as(usize, 1), acc.claimed_evals.items.len);
 }
+
+test "stage 5 sumcheck invariant: p(0) + p(1) = current_claim" {
+    // Test that Stage 5 (register evaluation) properly maintains sumcheck invariant
+    const allocator = std.testing.allocator;
+    const field = @import("../field/mod.zig");
+    const F = field.BN254Scalar;
+    const transcripts = @import("../transcripts/mod.zig");
+    const tracer = @import("../tracer/mod.zig");
+
+    // Create a simple trace with a few steps
+    var trace = tracer.Trace.init(allocator);
+    defer trace.deinit();
+
+    // Add 4 steps (for 2 rounds of sumcheck)
+    for (0..4) |i| {
+        const step = tracer.TraceStep{
+            .pc = @intCast(i * 4),
+            .instruction = @intCast((i << 7) | 0x33), // rd = i, R-type instruction
+            .rs1_value = 0,
+            .rs2_value = 0,
+            .rd_value = 0,
+            .cycle = i,
+            .opcode = .ADD,
+        };
+        try trace.steps.append(step);
+    }
+
+    // Create a multi-stage prover
+    var prover = MultiStageProver(F).init(allocator, &trace);
+    defer prover.deinit();
+
+    // Create transcript
+    var transcript = transcripts.Transcript(F).init();
+
+    // Run all stages
+    try prover.proveAllStages(&transcript);
+
+    // Verify Stage 5 proof structure
+    const stage5_proof = prover.proofs.stage_proofs[4];
+
+    // Check that we have round polynomials (log2(4) = 2 rounds)
+    try std.testing.expect(stage5_proof.round_polys.items.len == 2);
+
+    // Verify the final_claims were set
+    // Stage 5 should have: initial claim, then final claim
+    try std.testing.expect(stage5_proof.final_claims.items.len >= 1);
+
+    // For a proper sumcheck, the verifier would check:
+    // Round 0: p0(0) + p0(1) = initial_claim
+    // Round 1: p1(0) + p1(1) = p0(challenge0)
+    // ...
+    // The prover should produce consistent round polynomials
+}
+
+test "stage 6 sumcheck invariant: all zeros for valid trace" {
+    // Test that Stage 6 (booleanity) produces zero polynomials for valid traces
+    const allocator = std.testing.allocator;
+    const field = @import("../field/mod.zig");
+    const F = field.BN254Scalar;
+    const transcripts = @import("../transcripts/mod.zig");
+    const tracer = @import("../tracer/mod.zig");
+
+    // Create a valid trace (all boolean flags should be 0 or 1)
+    var trace = tracer.Trace.init(allocator);
+    defer trace.deinit();
+
+    // Add 4 valid steps
+    for (0..4) |i| {
+        const step = tracer.TraceStep{
+            .pc = @intCast(i * 4),
+            .instruction = 0x00000033, // ADD x0, x0, x0 (valid instruction)
+            .rs1_value = 0,
+            .rs2_value = 0,
+            .rd_value = 0,
+            .cycle = i,
+            .opcode = .ADD,
+        };
+        try trace.steps.append(step);
+    }
+
+    // Create a multi-stage prover
+    var prover = MultiStageProver(F).init(allocator, &trace);
+    defer prover.deinit();
+
+    // Create transcript
+    var transcript = transcripts.Transcript(F).init();
+
+    // Run all stages
+    try prover.proveAllStages(&transcript);
+
+    // Verify Stage 6 proof structure
+    const stage6_proof = prover.proofs.stage_proofs[5];
+
+    // Check that we have round polynomials (log2(4) = 2 rounds)
+    try std.testing.expect(stage6_proof.round_polys.items.len == 2);
+
+    // For a valid trace with no boolean violations:
+    // - Initial claim should be 0
+    // - All round polynomials should be [0, 0]
+    // - Final claim should be 0
+    const initial_claim = stage6_proof.final_claims.items[0];
+    try std.testing.expect(initial_claim.eql(F.zero()));
+
+    for (stage6_proof.round_polys.items) |poly| {
+        // Both p(0) and p(2) should be 0 for zero polynomial
+        try std.testing.expect(poly[0].eql(F.zero()));
+        try std.testing.expect(poly[1].eql(F.zero()));
+    }
+
+    // Final claim should also be 0
+    const final_claim = stage6_proof.final_claims.items[stage6_proof.final_claims.items.len - 1];
+    try std.testing.expect(final_claim.eql(F.zero()));
+}

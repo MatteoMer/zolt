@@ -1,25 +1,33 @@
 # Zolt zkVM Implementation Plan
 
-## Current Status (December 2024 - Iteration 37)
+## Current Status (December 2024 - Iteration 38)
 
-### Session Summary - Val Prover Fix
+### Session Summary - Stage 5 & 6 Prover Fix
 
-This iteration fixed the Val (value evaluation) prover polynomial binding issue.
+This iteration fixed the Stage 5 (register evaluation) and Stage 6 (booleanity)
+provers to properly track the sumcheck invariant.
 
 **Problem:**
-The Val evaluation prover was only binding the `inc` polynomial after each sumcheck
-challenge, but not the `wa` (write-address) and `lt` (less-than) polynomials.
-This caused the sumcheck invariant p(0) + p(1) = current_claim to fail.
+Both Stage 5 and Stage 6 provers had simplified implementations that:
+1. Did not track `current_claim` properly
+2. Did not fold polynomial evaluations after each challenge binding
+3. Used fixed `trace_len/2` instead of dynamically shrinking size
 
 **Solution:**
-1. Materialize all three polynomial evaluations (inc, wa, lt) upfront
-2. Bind all three polynomials together after each challenge using linear interpolation
-3. Track current_claim properly through sumcheck rounds
-4. New claim = sum over folded evaluations after binding
+Both stages now follow the same pattern as the Val prover:
+1. Materialize all polynomial evaluations upfront (eq_evals for Stage 5, violation_evals for Stage 6)
+2. Compute initial claim as sum of all evaluations
+3. For each round:
+   - Compute p(0) and p(1) by summing lower and upper halves
+   - Compute p(2) using linear extrapolation
+   - After receiving challenge r, fold evaluations: f_new[i] = (1-r)*f[i] + r*f[i+half]
+   - Update current_claim = (1-r)*p(0) + r*p(1)
+4. Record final claim as the single remaining evaluation
 
 **Test Results:**
 - All 554 tests pass
-- Val prover sumcheck invariant test: PASS
+- Added Stage 5 sumcheck invariant test
+- Added Stage 6 sumcheck invariant test (verifies all-zero for valid traces)
 
 ## Architecture Summary
 
@@ -85,9 +93,11 @@ After round i:
 - **Host Execute** - Program execution with tracing
 - **Preprocessing** - Proving and verifying keys
 - **Spartan** - Proof generation and verification
-- **Lasso** - Lookup argument (claim tracking fixed in iteration 36!)
+- **Lasso** - Lookup argument (claim tracking fixed!)
 - **RAF Prover** - Memory checking (verified correct)
-- **Val Prover** - Value evaluation (claim tracking fixed in iteration 37!)
+- **Val Prover** - Value evaluation (claim tracking fixed!)
+- **Stage 5 Prover** - Register evaluation (claim tracking fixed in iteration 38!)
+- **Stage 6 Prover** - Booleanity (claim tracking fixed in iteration 38!)
 - **Multi-stage Prover** - 6-stage orchestration
 - **Lookup Tables** - 24+ tables
 - **Instructions** - 60+ instruction types
@@ -114,6 +124,10 @@ After round i:
 - HyperKZG commit (1024): 1.5 ms/op
 
 ## Commit History
+
+### Iteration 38
+1. Fix Stage 5 & 6 provers to properly track sumcheck invariant
+2. Add sumcheck invariant tests for Stages 5 and 6
 
 ### Iteration 37
 1. Fix Val prover polynomial binding for correct sumcheck

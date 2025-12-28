@@ -166,34 +166,33 @@ Possible issues:
 2. Add debug output to compare intermediate pairing values with reference
 3. Consider using gnark-crypto as additional reference
 
-## Stage 5 & 6 Simplified Implementations (Iteration 37)
+## Stage 5 & 6 Prover Fix (Iteration 38) - RESOLVED
 
-Stages 5 (Register evaluation) and 6 (Booleanity) in `prover.zig` are simplified
-implementations that may not fully satisfy the sumcheck invariant p(0) + p(1) = claim.
+Stages 5 (Register evaluation) and 6 (Booleanity) were refactored in iteration 38
+to properly track the sumcheck invariant p(0) + p(1) = claim.
 
-### Issues Observed:
+### Issues Fixed:
 
-1. **No state binding**: The provers compute sums using `trace_len / 2` but don't
-   update `trace_len` after each round. The variable doesn't shrink.
+1. **No state binding** -> Now properly tracks `current_len` that shrinks each round
+2. **No polynomial folding** -> Now folds evaluations: f_new[i] = (1-r)*f[i] + r*f[i+half]
+3. **Missing current_claim tracking** -> Now properly tracks claim through rounds
 
-2. **No polynomial folding**: Unlike the Val prover which folds polynomial evaluations
-   after binding, these stages recompute from scratch each round.
+### Implementation Pattern (same as Val prover):
 
-3. **Missing current_claim tracking**: Neither stage tracks the current claim as
-   it evolves through binding.
+1. Materialize polynomial evaluations upfront into working array
+2. Pad to power of 2 for clean halving
+3. Compute initial claim = sum of all evaluations
+4. For each round:
+   - Compute p(0) = sum of lower half
+   - Compute p(1) = sum of upper half
+   - Compute p(2) = 2*p(1) - p(0) for linear extrapolation
+   - Send [p(0), p(2)] to verifier
+   - Receive challenge r
+   - Fold: working_evals[i] = (1-r)*working_evals[i] + r*working_evals[i+half]
+   - Update current_claim = (1-r)*p(0) + r*p(1)
+5. Final claim = working_evals[0]
 
-### Current Status:
+### Tests Added:
 
-The tests pass because:
-- Stage 5 uses placeholder final_claim = init_eval
-- Stage 6 assumes no violations, so all values are zero
-- The verifier may not be strictly checking these stages
-
-### Recommendation:
-
-These stages should be refactored similar to the Val prover fix (iteration 37):
-1. Materialize polynomial evaluations upfront
-2. Fold all involved polynomials after each binding
-3. Properly track current_claim through rounds
-
-Lower priority than other improvements since tests pass.
+- `test "stage 5 sumcheck invariant: p(0) + p(1) = current_claim"`
+- `test "stage 6 sumcheck invariant: all zeros for valid trace"`

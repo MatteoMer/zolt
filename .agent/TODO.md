@@ -1,6 +1,22 @@
 # Zolt zkVM Implementation TODO
 
-## Completed (This Session - Iteration 25)
+## Completed (This Session - Iteration 26)
+
+### Cleanup and Benchmark Fixes
+- [x] Clean up outdated TODO comments
+- [x] Fix benchmark suite to compile with Zig 0.15.2
+- [x] Use volatile pointer pattern to prevent optimizer interference
+- [x] Fix MSM benchmark to use correct type instantiation
+- [x] Add HyperKZG commitment benchmark
+
+### Benchmark Results (M1 Mac)
+- Field multiplication: 51.5 ns/op
+- Field inversion: 13.3 us/op
+- Batch inverse (1024): 70.7 us/op
+- MSM (256 points): 0.49 ms/op
+- HyperKZG commit (1024): 1.5 ms/op
+
+## Completed (Iteration 25)
 
 ### PTAU File Format Parser
 - [x] Implement snarkjs PTAU file format parser:
@@ -87,9 +103,6 @@
 
 ## Next Steps (Future Iterations)
 
-### High Priority
-- [x] Import production SRS from Ethereum ceremony (ptau format parsing) ✓
-
 ### Medium Priority
 - [ ] Performance optimization with SIMD
 - [ ] Parallel sumcheck round computation
@@ -97,10 +110,11 @@
 
 ### Low Priority
 - [ ] Documentation and examples
-- [ ] Benchmarking suite
+- [ ] More comprehensive benchmarking
 
 ## Test Status
 All tests pass (538 tests).
 
-## Commits This Session (Iteration 25)
-1. Add snarkjs PTAU file format parser for production SRS loading
+## Commits This Session (Iteration 26)
+1. Clean up outdated TODO comments
+2. Fix benchmark to compile with Zig 0.15.2

@@ -1,10 +1,33 @@
 # Zolt zkVM Implementation Plan
 
-## Current Status (December 2024 - Iteration 25)
+## Current Status (December 2024 - Iteration 26)
 
 ### Session Summary
 
-This iteration added snarkjs PTAU file format parsing for loading production SRS data:
+This iteration focused on cleanup and fixing the benchmark suite:
+
+1. **Code Cleanup**
+   - Removed outdated TODO comments that referenced completed work
+   - Updated comments to reflect actual implementation status
+
+2. **Benchmark Fixes**
+   - Fixed benchmark to compile with Zig 0.15.2
+   - Used volatile pointer pattern to prevent optimizer interference
+   - Fixed MSM benchmark to use correct type instantiation
+   - Added HyperKZG commitment benchmark
+
+3. **Performance Baseline (M1 Mac)**
+   - Field multiplication: 51.5 ns/op
+   - Field inversion: 13.3 us/op
+   - Batch inverse (1024): 70.7 us/op
+   - MSM (256 points): 0.49 ms/op
+   - HyperKZG commit (1024): 1.5 ms/op
+
+## Previous Status (Iteration 25)
+
+### Previous Session Summary
+
+Previous iteration added snarkjs PTAU file format parsing for loading production SRS data:
 
 1. **PTAU File Parser**
    - Implemented snarkjs .ptau format parser in `src/poly/commitment/srs.zig`
@@ -235,7 +258,11 @@ SRS Utilities
 
 ### Low Priority
 1. Documentation and examples
-2. Benchmarking suite
+2. ✓ Benchmarking suite (fixed and working)
+
+## Commit History (Iteration 26)
+1. Clean up outdated TODO comments
+2. Fix benchmark to compile with Zig 0.15.2
 
 ## Commit History (Iteration 25)
 1. Add snarkjs PTAU file format parser for production SRS loading

@@ -426,6 +426,179 @@ pub fn BneLookup(comptime XLEN: comptime_int) type {
     };
 }
 
+/// BLT (Branch if Less Than - Signed) instruction lookup
+/// Uses SignedLessThan table
+pub fn BltLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        rs1_val: u64,
+        rs2_val: u64,
+
+        pub fn init(rs1_val: u64, rs2_val: u64) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .rs2_val = rs2_val,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .SignedLessThan;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return lookup_table.interleaveBits(self.rs1_val, self.rs2_val);
+        }
+
+        pub fn computeResult(self: Self) u64 {
+            const rs1_signed: i64 = @bitCast(self.rs1_val);
+            const rs2_signed: i64 = @bitCast(self.rs2_val);
+            return if (rs1_signed < rs2_signed) 1 else 0;
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            // Branch doesn't write to RD
+            return CircuitFlagSet.init();
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsRs2Value);
+            flags.set(.Branch);
+            return flags;
+        }
+    };
+}
+
+/// BGE (Branch if Greater Than or Equal - Signed) instruction lookup
+/// Uses SignedGreaterThanEqual table
+pub fn BgeLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        rs1_val: u64,
+        rs2_val: u64,
+
+        pub fn init(rs1_val: u64, rs2_val: u64) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .rs2_val = rs2_val,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .SignedGreaterThanEqual;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return lookup_table.interleaveBits(self.rs1_val, self.rs2_val);
+        }
+
+        pub fn computeResult(self: Self) u64 {
+            const rs1_signed: i64 = @bitCast(self.rs1_val);
+            const rs2_signed: i64 = @bitCast(self.rs2_val);
+            return if (rs1_signed >= rs2_signed) 1 else 0;
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            return CircuitFlagSet.init();
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsRs2Value);
+            flags.set(.Branch);
+            return flags;
+        }
+    };
+}
+
+/// BLTU (Branch if Less Than Unsigned) instruction lookup
+/// Uses UnsignedLessThan table
+pub fn BltuLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        rs1_val: u64,
+        rs2_val: u64,
+
+        pub fn init(rs1_val: u64, rs2_val: u64) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .rs2_val = rs2_val,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .UnsignedLessThan;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return lookup_table.interleaveBits(self.rs1_val, self.rs2_val);
+        }
+
+        pub fn computeResult(self: Self) u64 {
+            return if (self.rs1_val < self.rs2_val) 1 else 0;
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            return CircuitFlagSet.init();
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsRs2Value);
+            flags.set(.Branch);
+            return flags;
+        }
+    };
+}
+
+/// BGEU (Branch if Greater Than or Equal Unsigned) instruction lookup
+/// Uses UnsignedGreaterThanEqual table
+pub fn BgeuLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        rs1_val: u64,
+        rs2_val: u64,
+
+        pub fn init(rs1_val: u64, rs2_val: u64) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .rs2_val = rs2_val,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .UnsignedGreaterThanEqual;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return lookup_table.interleaveBits(self.rs1_val, self.rs2_val);
+        }
+
+        pub fn computeResult(self: Self) u64 {
+            return if (self.rs1_val >= self.rs2_val) 1 else 0;
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            return CircuitFlagSet.init();
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsRs2Value);
+            flags.set(.Branch);
+            return flags;
+        }
+    };
+}
+
 /// SLL (Shift Left Logical) instruction lookup
 /// Computes rd = rs1 << (rs2 & (XLEN-1))
 pub fn SllLookup(comptime XLEN: comptime_int) type {
@@ -2278,4 +2451,101 @@ test "remw lookup" {
     const remw2 = RemwLookup(64).init(neg7_32, 3);
     const expected: u64 = @bitCast(@as(i64, @as(i32, -1)));
     try std.testing.expectEqual(expected, remw2.computeResult());
+}
+
+test "blt lookup (signed less than branch)" {
+    // Positive: 5 < 10 = true
+    const blt1 = BltLookup(64).init(5, 10);
+    try std.testing.expectEqual(@as(u64, 1), blt1.computeResult());
+
+    // Positive: 10 < 5 = false
+    const blt2 = BltLookup(64).init(10, 5);
+    try std.testing.expectEqual(@as(u64, 0), blt2.computeResult());
+
+    // Negative: -5 < 10 = true
+    const neg5: u64 = @bitCast(@as(i64, -5));
+    const blt3 = BltLookup(64).init(neg5, 10);
+    try std.testing.expectEqual(@as(u64, 1), blt3.computeResult());
+
+    // Negative vs Positive: -1 < 0 = true
+    const neg1: u64 = @bitCast(@as(i64, -1));
+    const blt4 = BltLookup(64).init(neg1, 0);
+    try std.testing.expectEqual(@as(u64, 1), blt4.computeResult());
+
+    // Equal: 5 < 5 = false
+    const blt5 = BltLookup(64).init(5, 5);
+    try std.testing.expectEqual(@as(u64, 0), blt5.computeResult());
+
+    // Check branch flag
+    const flags = BltLookup(64).instructionFlags();
+    try std.testing.expect(flags.get(.Branch));
+}
+
+test "bge lookup (signed greater than or equal branch)" {
+    // Positive: 10 >= 5 = true
+    const bge1 = BgeLookup(64).init(10, 5);
+    try std.testing.expectEqual(@as(u64, 1), bge1.computeResult());
+
+    // Positive: 5 >= 10 = false
+    const bge2 = BgeLookup(64).init(5, 10);
+    try std.testing.expectEqual(@as(u64, 0), bge2.computeResult());
+
+    // Equal: 5 >= 5 = true
+    const bge3 = BgeLookup(64).init(5, 5);
+    try std.testing.expectEqual(@as(u64, 1), bge3.computeResult());
+
+    // Negative: 0 >= -1 = true
+    const neg1: u64 = @bitCast(@as(i64, -1));
+    const bge4 = BgeLookup(64).init(0, neg1);
+    try std.testing.expectEqual(@as(u64, 1), bge4.computeResult());
+
+    // Check branch flag
+    const flags = BgeLookup(64).instructionFlags();
+    try std.testing.expect(flags.get(.Branch));
+}
+
+test "bltu lookup (unsigned less than branch)" {
+    // Simple: 5 < 10 = true
+    const bltu1 = BltuLookup(64).init(5, 10);
+    try std.testing.expectEqual(@as(u64, 1), bltu1.computeResult());
+
+    // Simple: 10 < 5 = false
+    const bltu2 = BltuLookup(64).init(10, 5);
+    try std.testing.expectEqual(@as(u64, 0), bltu2.computeResult());
+
+    // -1 as unsigned is MAX, so MAX < 10 = false
+    const max_u64: u64 = @bitCast(@as(i64, -1));
+    const bltu3 = BltuLookup(64).init(max_u64, 10);
+    try std.testing.expectEqual(@as(u64, 0), bltu3.computeResult());
+
+    // 10 < MAX = true
+    const bltu4 = BltuLookup(64).init(10, max_u64);
+    try std.testing.expectEqual(@as(u64, 1), bltu4.computeResult());
+
+    // Check branch flag
+    const flags = BltuLookup(64).instructionFlags();
+    try std.testing.expect(flags.get(.Branch));
+}
+
+test "bgeu lookup (unsigned greater than or equal branch)" {
+    // Simple: 10 >= 5 = true
+    const bgeu1 = BgeuLookup(64).init(10, 5);
+    try std.testing.expectEqual(@as(u64, 1), bgeu1.computeResult());
+
+    // Simple: 5 >= 10 = false
+    const bgeu2 = BgeuLookup(64).init(5, 10);
+    try std.testing.expectEqual(@as(u64, 0), bgeu2.computeResult());
+
+    // Equal: 5 >= 5 = true
+    const bgeu3 = BgeuLookup(64).init(5, 5);
+    try std.testing.expectEqual(@as(u64, 1), bgeu3.computeResult());
+
+    // -1 as unsigned is MAX >= 10 = true
+    const max_u64: u64 = @bitCast(@as(i64, -1));
+    const bgeu4 = BgeuLookup(64).init(max_u64, 10);
+    try std.testing.expectEqual(@as(u64, 1), bgeu4.computeResult());
+
+    // Check branch flag
+    const flags = BgeuLookup(64).instructionFlags();
+    try std.testing.expect(flags.get(.Branch));
 }

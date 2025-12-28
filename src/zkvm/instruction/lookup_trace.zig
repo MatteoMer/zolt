@@ -215,6 +215,78 @@ pub fn LookupEntry(comptime XLEN: comptime_int) type {
             };
         }
 
+        /// Create entry for BLT (branch if less than signed)
+        pub fn fromBlt(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
+            const BltLookup = lookups.BltLookup(XLEN);
+            const blt = BltLookup.init(rs1, rs2);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = BltLookup.lookupTable(),
+                .index = blt.toLookupIndex(),
+                .result = blt.computeResult(),
+                .left_operand = rs1,
+                .right_operand = rs2,
+                .circuit_flags = BltLookup.circuitFlags(),
+                .instruction_flags = BltLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
+        /// Create entry for BGE (branch if greater than or equal signed)
+        pub fn fromBge(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
+            const BgeLookup = lookups.BgeLookup(XLEN);
+            const bge = BgeLookup.init(rs1, rs2);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = BgeLookup.lookupTable(),
+                .index = bge.toLookupIndex(),
+                .result = bge.computeResult(),
+                .left_operand = rs1,
+                .right_operand = rs2,
+                .circuit_flags = BgeLookup.circuitFlags(),
+                .instruction_flags = BgeLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
+        /// Create entry for BLTU (branch if less than unsigned)
+        pub fn fromBltu(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
+            const BltuLookup = lookups.BltuLookup(XLEN);
+            const bltu = BltuLookup.init(rs1, rs2);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = BltuLookup.lookupTable(),
+                .index = bltu.toLookupIndex(),
+                .result = bltu.computeResult(),
+                .left_operand = rs1,
+                .right_operand = rs2,
+                .circuit_flags = BltuLookup.circuitFlags(),
+                .instruction_flags = BltuLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
+        /// Create entry for BGEU (branch if greater than or equal unsigned)
+        pub fn fromBgeu(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
+            const BgeuLookup = lookups.BgeuLookup(XLEN);
+            const bgeu = BgeuLookup.init(rs1, rs2);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = BgeuLookup.lookupTable(),
+                .index = bgeu.toLookupIndex(),
+                .result = bgeu.computeResult(),
+                .left_operand = rs1,
+                .right_operand = rs2,
+                .circuit_flags = BgeuLookup.circuitFlags(),
+                .instruction_flags = BgeuLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
         /// Create entry for SLL (shift left logical)
         pub fn fromSll(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
             const SllLookup = lookups.SllLookup(XLEN);
@@ -793,21 +865,15 @@ pub fn LookupTraceCollector(comptime XLEN: comptime_int) type {
                     }
                 },
                 .BRANCH => {
-                    // Branch operations
+                    // Branch operations - use dedicated branch lookups
                     const funct3 = @as(BranchFunct3, @enumFromInt(decoded.funct3));
                     const entry: ?Entry = switch (funct3) {
                         .BEQ => Entry.fromBeq(cycle, pc, instruction, rs1_val, rs2_val),
                         .BNE => Entry.fromBne(cycle, pc, instruction, rs1_val, rs2_val),
-                        .BLT => Entry.fromSlt(cycle, pc, instruction, rs1_val, rs2_val),
-                        .BGE => blk: {
-                            // BGE is !(rs1 < rs2), we still record the SLT lookup
-                            break :blk Entry.fromSlt(cycle, pc, instruction, rs1_val, rs2_val);
-                        },
-                        .BLTU => Entry.fromSltu(cycle, pc, instruction, rs1_val, rs2_val),
-                        .BGEU => blk: {
-                            // BGEU is !(rs1 <u rs2)
-                            break :blk Entry.fromSltu(cycle, pc, instruction, rs1_val, rs2_val);
-                        },
+                        .BLT => Entry.fromBlt(cycle, pc, instruction, rs1_val, rs2_val),
+                        .BGE => Entry.fromBge(cycle, pc, instruction, rs1_val, rs2_val),
+                        .BLTU => Entry.fromBltu(cycle, pc, instruction, rs1_val, rs2_val),
+                        .BGEU => Entry.fromBgeu(cycle, pc, instruction, rs1_val, rs2_val),
                         _ => null,
                     };
                     if (entry) |e| {

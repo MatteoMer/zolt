@@ -23,6 +23,10 @@ pub const SltLookup = lookups.SltLookup;
 pub const SltuLookup = lookups.SltuLookup;
 pub const BeqLookup = lookups.BeqLookup;
 pub const BneLookup = lookups.BneLookup;
+pub const BltLookup = lookups.BltLookup;
+pub const BgeLookup = lookups.BgeLookup;
+pub const BltuLookup = lookups.BltuLookup;
+pub const BgeuLookup = lookups.BgeuLookup;
 // Shift lookups
 pub const SllLookup = lookups.SllLookup;
 pub const SrlLookup = lookups.SrlLookup;

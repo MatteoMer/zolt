@@ -1,54 +1,52 @@
 # Zolt zkVM Implementation TODO
 
-## Completed (This Session - Iteration 19)
+## Completed (This Session - Iteration 20)
 
-### Batch Opening Proofs
-- [x] Added batchCommit() to HyperKZG - commit multiple polynomials at once
-- [x] Created BatchProof struct with quotient commitments, evaluations, final_eval
-- [x] Implemented batchOpen() - generate batch opening proof for multiple polys at same point
-- [x] Implemented verifyBatchOpening() - verify batch proofs with combined pairing check
-- [x] Added evaluateMultilinear() helper for multilinear polynomial evaluation
-- [x] Added tests for batch commit, batch open, and multilinear evaluation
-
-### Dory IPA Implementation
-- [x] Full IPA opening proof generation with log(n) rounds
-- [x] L and R commitment computation at each round
-- [x] Vector folding (a' = a_lo + x*a_hi, G' = G_lo + x^{-1}*G_hi)
-- [x] Challenge derivation (deterministic for testing)
-- [x] Multilinear weight computation for evaluation points
-- [x] Enhanced setup with G and H generator vectors
-- [x] Improved verification with challenge recomputation and generator folding
-- [x] Added tests for Dory open and verify
+### Shift Lookup Tables and Instructions
+- [x] Added LeftShift lookup table (x << y)
+- [x] Added RightShift lookup table (x >> y, logical)
+- [x] Added RightShiftArithmetic lookup table (x >> y, sign-extending)
+- [x] Added Pow2 lookup table (2^y)
+- [x] Added SignExtend8 lookup table (8-bit to XLEN)
+- [x] Added SignExtend16 lookup table (16-bit to XLEN)
+- [x] Added SignExtend32 lookup table (32-bit to XLEN)
+- [x] Added SllLookup, SrlLookup, SraLookup for register shifts
+- [x] Added SlliLookup, SrliLookup, SraiLookup for immediate shifts
+- [x] Extended LookupTables enum to include all new tables
+- [x] Updated lookup_trace to record shift instructions
+- [x] Added tests for all new lookup tables and shift operations
 
 ## Completed (Previous Sessions)
 
+### Iteration 19: Batch Opening Proofs + Dory IPA
+- [x] Added batchCommit() to HyperKZG
+- [x] Created BatchProof struct
+- [x] Implemented batchOpen() and verifyBatchOpening()
+- [x] Full IPA opening proof for Dory with log(n) rounds
+- [x] Vector folding, challenge derivation, verification
+
 ### Iteration 18: Commitment Type Infrastructure
-- [x] Created `commitment_types.zig` with PolyCommitment wrapping G1 points
-- [x] Added OpeningProof type for batch verification support
-- [x] Updated BytecodeProof to use PolyCommitment instead of field elements
-- [x] Updated MemoryProof and RegisterProof to use PolyCommitment
+- [x] Created `commitment_types.zig` with PolyCommitment
+- [x] Added OpeningProof type for batch verification
+- [x] Updated proof types to use PolyCommitment
 - [x] Added ProvingKey and VerifyingKey structs
 
-### Iteration 17: HyperKZG Verification + Host Execute
-- [x] Enhanced verifyWithPairing() with proper batching
-- [x] Added verifyAlgebraic() for testing
-- [x] Added host execute tests
-- [x] Fixed batch verification return type
-
-### Iterations 1-16: Core Infrastructure
-- [x] Lookup table infrastructure (14 tables)
-- [x] Lasso prover/verifier
-- [x] Instruction proving with flags
-- [x] Memory checking with RAF and Val Evaluation
-- [x] Multi-stage prover (6 stages) and verifier
-- [x] BN254 G1/G2 generators and pairing
-- [x] HyperKZG SRS generation
+### Iterations 1-17: Core Infrastructure
+- [x] BN254 field and curve arithmetic
+- [x] Extension fields (Fp2, Fp6, Fp12)
+- [x] Pairing with Miller loop and final exponentiation
+- [x] HyperKZG commit, open, verify
+- [x] Dory commit, open, verify
 - [x] Sumcheck protocol
-- [x] RISC-V emulator
+- [x] RISC-V emulator (RV64IMC)
 - [x] ELF loader
-- [x] Fixed Projective point doubling
-- [x] Fixed Fp6 non-residue ξ = 9 + u
+- [x] MSM operations
 - [x] Spartan proof generation and verification
+- [x] Lasso lookup argument prover/verifier
+- [x] 14+ lookup tables (AND, OR, XOR, comparisons, etc.)
+- [x] Multi-stage prover (6 stages)
+- [x] Host execute
+- [x] Preprocessing
 
 ## Working Components
 
@@ -63,20 +61,23 @@
 - **RISC-V Emulator** - Full RV64IMC execution
 - **ELF Loader** - Complete ELF32/ELF64 parsing
 - **MSM** - Multi-scalar multiplication with bucket method
-- **HyperKZG** - commit(), open(), verify(), verifyWithPairing(), batchOpen()
-- **Batch Opening Proofs** - BatchProof, batchCommit(), verifyBatchOpening()
+- **HyperKZG** - commit(), open(), verify(), batchOpen(), batchCommit()
 - **Batch Verification** - BatchOpeningAccumulator for multiple openings
+- **Dory** - commit(), open(), verify() with full IPA
 - **Host Execute** - Program execution with trace generation
 - **PolyCommitment** - G1 point wrapper for proof commitments
 - **ProvingKey** - SRS-based commitment generation
 - **VerifyingKey** - Minimal SRS elements for verification
 - **Spartan** - R1CS proof generation and verification
-- **Dory** - commit(), open(), verify() with full IPA
+- **Lasso** - Lookup argument prover/verifier
+- **Lookup Tables** - 21 tables (bitwise, shifts, comparisons, sign-extend)
+- **Shift Instructions** - Full SLL/SRL/SRA and immediate variants
 
 ## Next Steps (Future Iterations)
 
 ### High Priority
 - [ ] Import production SRS from Ethereum ceremony
+- [ ] M extension lookups (MUL, DIV, REM)
 
 ### Medium Priority
 - [ ] Performance optimization with SIMD
@@ -87,4 +88,4 @@
 - [ ] Benchmarking suite
 
 ## Test Status
-All 384 tests pass.
+All 410 tests pass.

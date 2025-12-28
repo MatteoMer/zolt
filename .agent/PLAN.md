@@ -1,36 +1,34 @@
 # Zolt zkVM Implementation Plan
 
-## Current Status (December 2024 - Iteration 19)
+## Current Status (December 2024 - Iteration 20)
 
 ### Session Summary
 
-This iteration focused on implementing batch opening proofs and Dory IPA:
+This iteration focused on completing shift instruction support:
 
-1. **Batch Opening Proofs for HyperKZG**
-   - Added `batchCommit()` for committing to multiple polynomials at once
-   - Created `BatchProof` struct with quotient commitments and evaluations
-   - Implemented `batchOpen()` for generating batch opening proofs
-   - Implemented `verifyBatchOpening()` for verification with combined pairing
-   - Added `evaluateMultilinear()` helper for polynomial evaluation
+1. **Shift Lookup Tables**
+   - Added `LeftShift` table for logical left shift (x << y)
+   - Added `RightShift` table for logical right shift
+   - Added `RightShiftArithmetic` table for arithmetic right shift (sign-extending)
+   - Added `Pow2` table for power of 2 (useful for shift decomposition)
+   - Added `SignExtend8/16/32` tables for load instruction sign extension
 
-2. **Dory Inner Product Argument**
-   - Implemented full IPA opening proof with log(n) rounds
-   - L and R commitment computation at each round
-   - Vector folding (a' = a_lo + x*a_hi, G' = G_lo + x^{-1}*G_hi)
-   - Challenge derivation (deterministic for testing)
-   - Multilinear weight computation for evaluation points
-   - Enhanced setup with G and H generator vectors
-   - Basic verification with round structure checking
+2. **Shift Instruction Lookups**
+   - `SllLookup`: SLL instruction (register shift)
+   - `SrlLookup`: SRL instruction (register shift)
+   - `SraLookup`: SRA instruction (register shift, arithmetic)
+   - `SlliLookup`: SLLI instruction (immediate shift)
+   - `SrliLookup`: SRLI instruction (immediate shift)
+   - `SraiLookup`: SRAI instruction (immediate shift, arithmetic)
 
-3. **Test Coverage**
-   - Added tests for batch commit
-   - Added tests for batch open with single polynomial
-   - Added tests for multilinear evaluation at corners
-   - Added tests for Dory open and verify
+3. **Tracer Integration**
+   - Updated `lookup_trace.zig` to record shift operations
+   - All SLL, SRL, SRA variants now tracked in lookup trace
+   - Immediate shifts extract shamt from instruction encoding
 
 ### Test Status
 
-All 380+ tests pass:
+All 410 tests pass:
 - Field arithmetic: Fp, Fp2, Fp6, Fp12
 - Curve arithmetic: G1, G2 points (correct projective doubling)
 - Pairing: bilinearity verified, SRS relationship verified
@@ -42,8 +40,9 @@ All 380+ tests pass:
 - ELF loading (ELF32/ELF64)
 - MSM operations
 - Spartan proof generation and verification
-- ProvingKey and VerifyingKey
-- Commitment type operations
+- Lasso lookup argument
+- All 21 lookup tables
+- All shift lookup operations
 
 ### Architecture Summary
 
@@ -55,6 +54,28 @@ Fr  = BN254 scalar field (254 bits) - scalars for multiplication
 Fp2 = Fp[u] / (u² + 1)
 Fp6 = Fp2[v] / (v³ - ξ)  where ξ = 9 + u
 Fp12 = Fp6[w] / (w² - v)
+```
+
+#### Lookup Tables (21 total)
+```
+Bitwise:
+- And, Or, Xor, Andn
+
+Comparison:
+- Equal, NotEqual
+- UnsignedLessThan, SignedLessThan
+- UnsignedGreaterThanEqual, SignedGreaterThanEqual
+- UnsignedLessThanEqual
+
+Arithmetic:
+- RangeCheck, Sub, Movsign
+
+Shifts:
+- LeftShift, RightShift, RightShiftArithmetic
+- Pow2
+
+Sign Extension:
+- SignExtend8, SignExtend16, SignExtend32
 ```
 
 #### Commitment Schemes
@@ -73,16 +94,6 @@ Dory (transparent setup, IPA-based)
   - commit(params, evals) -> Commitment
   - open(params, evals, point, value, allocator) -> Proof (with L, R vectors)
   - verify(params, commitment, point, value, proof) -> bool
-```
-
-#### IPA Protocol
-```
-1. Split coefficient vector a and generator vector G in half
-2. Compute L = <a_lo, G_hi> and R = <a_hi, G_lo>
-3. Get challenge x from Fiat-Shamir transcript
-4. Fold: a' = a_lo + x*a_hi, G' = G_lo + x^{-1}*G_hi
-5. Repeat until vectors have length 1
-6. Proof contains: all L and R values, final a, final G
 ```
 
 ## Components Status
@@ -113,12 +124,13 @@ Dory (transparent setup, IPA-based)
 - **VerifyingKey** - Minimal verification data
 - **Prover Commitments** - Real G1 commitments for bytecode/memory/registers
 - **Verifier Transcript** - Commitment absorption for Fiat-Shamir
+- **Shift Instructions** - Full SLL/SRL/SRA support in lookup trace
 
 ## Future Work
 
 ### High Priority
 1. Import production SRS from Ethereum ceremony
-2. Full Dory verification with Fiat-Shamir challenge recomputation
+2. M extension lookups (MUL, DIV, REM) for integer multiply/divide
 
 ### Medium Priority
 1. Performance optimization with SIMD
@@ -128,6 +140,6 @@ Dory (transparent setup, IPA-based)
 1. Documentation and examples
 2. Benchmarking suite
 
-## Commit History (Iteration 19)
-- Add batch opening proofs to HyperKZG
-- Implement Dory IPA-based opening proof
+## Commit History (Iteration 20)
+- Add shift and sign-extension lookup tables
+- Add shift instruction lookups and connect to tracer

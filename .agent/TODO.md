@@ -34,7 +34,7 @@
 - [x] JoltVerifierPreprocessing (generators + shared)
 - [x] CLI --export-preprocessing includes verifier setup
 
-## Phase 6: Integration Testing ✅ MOSTLY COMPLETE
+## Phase 6: Integration Testing ✅ COMPLETE
 
 ### Proof Deserialization ✅
 - [x] Jolt can deserialize Zolt proof in --jolt-format
@@ -42,18 +42,38 @@
 - [x] Commitments: 5 GT elements, all valid
 - [x] Sumcheck proofs: structure matches
 
-### Preprocessing Deserialization ✅ COMPLETE
+### Preprocessing Deserialization ✅
 - [x] DoryVerifierSetup parses correctly
 - [x] BytecodePreprocessing parses correctly
-  - Fixed NoOp/UNIMPL to serialize as unit variants ("NoOp", "UNIMPL")
-  - Fixed immediate types (u64 for FormatI/U/J, i128 for B, i64 for S)
-  - Fixed FENCE/ECALL to use FormatI operands
 - [x] RAMPreprocessing parses correctly
 - [x] MemoryLayout parses correctly
 - [x] Full JoltVerifierPreprocessing::deserialize_uncompressed works!
 
-### End-to-End Verification 🚧
-- [ ] Run full verification with Zolt proof + Zolt preprocessing
+### End-to-End Verification 🚧 PARTIAL
+- [x] Proof and preprocessing load correctly
+- [ ] Verification fails at "Stage 1 univariate skip first round"
+- [ ] Need to debug Fiat-Shamir transcript alignment
+- [ ] Need to debug sumcheck round polynomial format
+
+---
+
+## Current Status: VERIFICATION FAILS
+
+The end-to-end test runs successfully but verification fails:
+```
+Loaded all files:
+  Preprocessing: 62223 bytes
+  Proof: 30926 bytes
+  Trace length: 1024
+  Commitments: 5
+Verifier created, running verification...
+Verification failed: Stage 1 univariate skip first round
+```
+
+### Root Causes to Investigate
+1. **Fiat-Shamir transcript** - Challenges may differ between Zolt and Jolt
+2. **Sumcheck round polynomials** - Format or values may not match
+3. **UniSkipFirstRoundProof** - Missing or incorrect implementation in Zolt
 
 ---
 
@@ -64,28 +84,37 @@
    - 30.9 KB proof with --jolt-format
    - 48 opening claims all valid Fr
    - 5 Dory commitments (GT elements)
-   - Jolt `test_deserialize_zolt_proof` passes
 
 2. **Preprocessing fully working**
    - DoryVerifierSetup parses correctly
-   - BytecodePreprocessing parses correctly (after JSON format fixes)
+   - BytecodePreprocessing parses correctly
    - RAMPreprocessing parses correctly
    - MemoryLayout parses correctly
-   - Full `JoltVerifierPreprocessing::deserialize_uncompressed` works!
+
+3. **End-to-end test runs**
+   - Both proof and preprocessing deserialize successfully
+   - Verification runs but fails at Stage 1
 
 ### Key Fixes Applied
 1. **NoOp/UNIMPL serialization**: Changed from `{"NoOp":{...}}` to `"NoOp"`
-2. **Immediate types**:
-   - FormatI/U/J: use u64 (sign-extended from i32)
-   - FormatS: use i64
-   - FormatB: use i128
-3. **FENCE/ECALL**: Use FormatI operands instead of None
+2. **Immediate types**: Fixed u64/i64/i128 types for different formats
+3. **FENCE/ECALL**: Use FormatI operands
 
 ### Test Results
 - Zolt tests: 632/632 PASS ✅
 - Proof generation: 30.9 KB in Jolt format ✅
 - Proof deserialization: PASS ✅
-- Preprocessing deserialization: PASS (with deserialize_uncompressed) ✅
+- Preprocessing deserialization: PASS ✅
+- End-to-end verification: RUNS (but fails at Stage 1)
+
+---
+
+## Next Steps
+
+1. Debug the Fiat-Shamir transcript to ensure Zolt produces same challenges as Jolt
+2. Verify sumcheck round polynomial format matches Jolt
+3. Check UniSkipFirstRoundProof implementation
+4. Add more debug output to identify exact mismatch
 
 ---
 
@@ -104,57 +133,11 @@ zig build -Doptimize=ReleaseFast
     --export-preprocessing /tmp/zolt_preprocessing.bin \
     -o /tmp/zolt_proof_dory.bin
 
-# Run Jolt preprocessing test
+# Run Jolt e2e test
 cd /path/to/jolt
-cargo test --package jolt-core test_load_zolt_preprocessing -- --ignored --nocapture
-
-# Run Jolt proof deserialization test
-cargo test --package jolt-core test_deserialize_zolt_proof -- --ignored --nocapture
+cargo test --package jolt-core test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
 
 ## File Sizes
 - Proof (Jolt format): 30.9 KB (30,926 bytes)
 - Preprocessing: 62.2 KB (62,223 bytes)
-
----
-
-## Architecture Notes
-
-### Proof Format (Jolt-compatible)
-```
-[Opening Claims] - BTreeMap<OpeningId, Fr>
-  - Length: u64
-  - For each claim: OpeningId (1-2 bytes) + Fr (32 bytes)
-
-[Commitments] - Vec<GT>
-  - Length: u64
-  - For each: GT (384 bytes = 12 * 32)
-
-[Stage 1] - UniSkipFirstRoundProof + SumcheckInstanceProof
-[Stage 2] - UniSkipFirstRoundProof + SumcheckInstanceProof
-[Stages 3-7] - SumcheckInstanceProof each
-
-[Advice Proofs] - Optional<DoryProof>
-[Config] - trace_length, ram_K, bytecode_K, log_k_chunk, lookups_ra_virtual_log_k_chunk
-```
-
-### Preprocessing Format
-```
-[DoryVerifierSetup]
-  - delta_1l: Vec<GT>
-  - delta_1r: Vec<GT>
-  - delta_2l: Vec<GT>
-  - delta_2r: Vec<GT>
-  - chi: Vec<GT>
-  - g1_0, g2_0, h1, h2, ht, max_log_n
-
-[JoltSharedPreprocessing]
-  - BytecodePreprocessing
-    - code_size: usize
-    - bytecode: Vec<Instruction> (JSON format, length-prefixed)
-    - pc_map: BytecodePCMapper
-  - RAMPreprocessing
-    - min_bytecode_address: u64
-    - bytecode_words: Vec<u64>
-  - MemoryLayout (20 x u64 fields)
-```

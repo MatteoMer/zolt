@@ -1,6 +1,12 @@
 # Zolt zkVM Implementation TODO
 
-## Completed (This Session - Iteration 28)
+## Completed (This Session - Iteration 29)
+
+### CLI Improvements
+- [x] Add --help support for subcommands (run, prove, srs, decode)
+- [x] Each subcommand now shows usage information when passed --help or -h
+
+## Completed (Iteration 28)
 
 ### CLI and API Improvements
 - [x] Upgrade prove command to actually call prover.prove() and verifier.verify()
@@ -141,7 +147,10 @@
 ## Test Status
 All tests pass (538 tests).
 
-## Commits This Session (Iteration 28)
+## Commits This Session (Iteration 29)
+1. Add --help support for subcommands
+
+## Commits (Iteration 28)
 1. Upgrade prove command to actually generate and verify proofs
 2. Add SRS inspection command and preprocessWithSRS method
 3. Update README with srs command documentation

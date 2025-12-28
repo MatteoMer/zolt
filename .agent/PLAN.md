@@ -1,10 +1,20 @@
 # Zolt zkVM Implementation Plan
 
-## Current Status (December 2024 - Iteration 28)
+## Current Status (December 2024 - Iteration 29)
 
 ### Session Summary
 
-This iteration upgraded the CLI prove command to actually generate and verify proofs:
+This iteration made a small CLI improvement:
+
+1. **Subcommand Help Support**
+   - Added --help and -h flags for all subcommands (run, prove, srs, decode)
+   - Each subcommand now shows helpful usage information
+
+## Previous Status (Iteration 28)
+
+### Previous Session Summary
+
+Previous iteration upgraded the CLI prove command to actually generate and verify proofs:
 
 1. **Full Proving Pipeline**
    - Updated `zolt prove <elf>` to call `prover.prove()` and `verifier.verify()`
@@ -314,6 +324,9 @@ SRS Utilities
 ### Low Priority
 1. Documentation and examples
 2. ✓ Benchmarking suite (fixed and working)
+
+## Commit History (Iteration 29)
+1. Add --help support for subcommands
 
 ## Commit History (Iteration 28)
 1. Upgrade prove command to actually generate and verify proofs

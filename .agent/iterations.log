@@ -371,3 +371,17 @@ Turns: 119
 Cost: $6.0919
 
 2025-12-28: Iteration 27 - Added HyperKZG and Sumcheck examples
+
+--- Iteration 26 ---
+Started: 2025-12-28T03:41:02.270867
+Ended: 2025-12-28T03:57:10.144385
+Turns: 110
+Cost: $7.6585
+
+
+--- Iteration 27 ---
+Started: 2025-12-28T03:57:12.150311
+Ended: 2025-12-28T04:10:15.244321
+Turns: 120
+Cost: $5.1370
+

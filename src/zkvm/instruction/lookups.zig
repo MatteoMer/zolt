@@ -725,6 +725,242 @@ pub fn SraiLookup(comptime XLEN: comptime_int) type {
     };
 }
 
+/// MUL (Multiply) instruction lookup
+/// Computes rd = (rs1 * rs2)[XLEN-1:0] (low bits of product)
+pub fn MulLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        rs1_val: u64,
+        rs2_val: u64,
+
+        pub fn init(rs1_val: u64, rs2_val: u64) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .rs2_val = rs2_val,
+            };
+        }
+
+        /// MUL uses RangeCheck to verify the result fits
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .RangeCheck;
+        }
+
+        /// The lookup index is the result (to range check it)
+        pub fn toLookupIndex(self: Self) u128 {
+            return @as(u128, self.computeResult());
+        }
+
+        /// Compute the product (low XLEN bits)
+        pub fn computeResult(self: Self) u64 {
+            // Wrapping multiply to get low bits
+            return self.rs1_val *% self.rs2_val;
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.MultiplyOperands); // This tells the circuit to multiply
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsRs2Value);
+            return flags;
+        }
+    };
+}
+
+/// MULH (Multiply High Signed) instruction lookup
+/// Computes rd = (rs1 * rs2)[2*XLEN-1:XLEN] (high bits of signed product)
+pub fn MulhLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        rs1_val: u64,
+        rs2_val: u64,
+
+        pub fn init(rs1_val: u64, rs2_val: u64) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .rs2_val = rs2_val,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .RangeCheck;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return @as(u128, self.computeResult());
+        }
+
+        /// Compute the high bits of signed multiply
+        pub fn computeResult(self: Self) u64 {
+            if (XLEN == 64) {
+                const a: i64 = @bitCast(self.rs1_val);
+                const b: i64 = @bitCast(self.rs2_val);
+                // Use 128-bit multiply
+                const product: i128 = @as(i128, a) * @as(i128, b);
+                const high_bits: i64 = @truncate(product >> 64);
+                return @bitCast(high_bits);
+            } else {
+                // For 32-bit or smaller XLEN
+                const mask: u64 = (@as(u64, 1) << XLEN) - 1;
+                const a_masked = self.rs1_val & mask;
+                const b_masked = self.rs2_val & mask;
+
+                // Sign-extend to full 64-bit
+                const shift = 64 - XLEN;
+                const a_signed: i64 = @as(i64, @bitCast(a_masked << @truncate(shift))) >> @truncate(shift);
+                const b_signed: i64 = @as(i64, @bitCast(b_masked << @truncate(shift))) >> @truncate(shift);
+
+                // Multiply and get high bits
+                const product: i128 = @as(i128, a_signed) * @as(i128, b_signed);
+                const high_bits: i64 = @truncate(product >> XLEN);
+                return @as(u64, @bitCast(high_bits)) & mask;
+            }
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.MultiplyOperands);
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsRs2Value);
+            return flags;
+        }
+    };
+}
+
+/// MULHU (Multiply High Unsigned) instruction lookup
+/// Computes rd = (rs1 * rs2)[2*XLEN-1:XLEN] (high bits of unsigned product)
+pub fn MulhuLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        rs1_val: u64,
+        rs2_val: u64,
+
+        pub fn init(rs1_val: u64, rs2_val: u64) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .rs2_val = rs2_val,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .RangeCheck;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return @as(u128, self.computeResult());
+        }
+
+        /// Compute the high bits of unsigned multiply
+        pub fn computeResult(self: Self) u64 {
+            if (XLEN == 64) {
+                // Use 128-bit unsigned multiply
+                const product: u128 = @as(u128, self.rs1_val) * @as(u128, self.rs2_val);
+                return @truncate(product >> 64);
+            } else {
+                const mask: u64 = (@as(u64, 1) << XLEN) - 1;
+                const a_masked = self.rs1_val & mask;
+                const b_masked = self.rs2_val & mask;
+
+                const product: u128 = @as(u128, a_masked) * @as(u128, b_masked);
+                return @as(u64, @truncate(product >> XLEN)) & mask;
+            }
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.MultiplyOperands);
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsRs2Value);
+            return flags;
+        }
+    };
+}
+
+/// MULHSU (Multiply High Signed-Unsigned) instruction lookup
+/// Computes rd = (signed(rs1) * unsigned(rs2))[2*XLEN-1:XLEN]
+pub fn MulhsuLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        rs1_val: u64,
+        rs2_val: u64,
+
+        pub fn init(rs1_val: u64, rs2_val: u64) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .rs2_val = rs2_val,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .RangeCheck;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return @as(u128, self.computeResult());
+        }
+
+        /// Compute the high bits of signed*unsigned multiply
+        pub fn computeResult(self: Self) u64 {
+            if (XLEN == 64) {
+                const a: i64 = @bitCast(self.rs1_val);
+                const b: u64 = self.rs2_val;
+                // signed * unsigned -> signed 128-bit result
+                const product: i128 = @as(i128, a) * @as(i128, @as(i64, @bitCast(b)));
+                const high_bits: i64 = @truncate(product >> 64);
+                return @bitCast(high_bits);
+            } else {
+                const mask: u64 = (@as(u64, 1) << XLEN) - 1;
+                const a_masked = self.rs1_val & mask;
+                const b_masked = self.rs2_val & mask;
+
+                // Sign-extend rs1, keep rs2 unsigned
+                const shift = 64 - XLEN;
+                const a_signed: i64 = @as(i64, @bitCast(a_masked << @truncate(shift))) >> @truncate(shift);
+
+                // signed * unsigned
+                const product: i128 = @as(i128, a_signed) * @as(i128, @as(i64, @bitCast(b_masked)));
+                const high_bits: i64 = @truncate(product >> XLEN);
+                return @as(u64, @bitCast(high_bits)) & mask;
+            }
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.MultiplyOperands);
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsRs2Value);
+            return flags;
+        }
+    };
+}
+
 /// Instruction lookup trace entry
 /// Records a single lookup operation for proof generation
 pub fn LookupTraceEntry(comptime XLEN: comptime_int) type {
@@ -939,4 +1175,65 @@ test "srai lookup" {
     const srai_neg = SraiLookup(64).init(neg40, 3);
     const expected: u64 = @bitCast(@as(i64, -5));
     try std.testing.expectEqual(expected, srai_neg.computeResult());
+}
+
+test "mul lookup" {
+    // 6 * 7 = 42
+    const mul1 = MulLookup(64).init(6, 7);
+    try std.testing.expectEqual(@as(u64, 42), mul1.computeResult());
+
+    // Negative: -3 * 4 = -12
+    const neg3: u64 = @bitCast(@as(i64, -3));
+    const mul2 = MulLookup(64).init(neg3, 4);
+    const expected: u64 = @bitCast(@as(i64, -12));
+    try std.testing.expectEqual(expected, mul2.computeResult());
+
+    // Overflow wraps
+    const mul_wrap = MulLookup(64).init(0x8000000000000000, 2);
+    try std.testing.expectEqual(@as(u64, 0), mul_wrap.computeResult()); // Overflow to 0
+
+    // Check flags
+    const flags = MulLookup(64).circuitFlags();
+    try std.testing.expect(flags.get(.MultiplyOperands));
+    try std.testing.expect(flags.get(.WriteLookupOutputToRD));
+}
+
+test "mulh lookup" {
+    // Simple: small numbers, high bits = 0
+    const mulh1 = MulhLookup(64).init(100, 200);
+    try std.testing.expectEqual(@as(u64, 0), mulh1.computeResult());
+
+    // Large positive * positive
+    const mulh2 = MulhLookup(64).init(0x1000000000000000, 0x10);
+    try std.testing.expectEqual(@as(u64, 1), mulh2.computeResult());
+
+    // Negative * positive
+    const neg_max: u64 = @bitCast(@as(i64, -1));
+    const mulh3 = MulhLookup(64).init(neg_max, 2);
+    try std.testing.expectEqual(neg_max, mulh3.computeResult()); // -1 * 2 high bits = -1
+}
+
+test "mulhu lookup" {
+    // Small numbers: high bits = 0
+    const mulhu1 = MulhuLookup(64).init(100, 200);
+    try std.testing.expectEqual(@as(u64, 0), mulhu1.computeResult());
+
+    // Large numbers
+    const mulhu2 = MulhuLookup(64).init(0x1000000000000000, 0x10);
+    try std.testing.expectEqual(@as(u64, 1), mulhu2.computeResult());
+
+    // Max * 2 = overflow
+    const mulhu3 = MulhuLookup(64).init(0xFFFFFFFFFFFFFFFF, 2);
+    try std.testing.expectEqual(@as(u64, 1), mulhu3.computeResult());
+}
+
+test "mulhsu lookup" {
+    // Positive * positive: same as mulhu
+    const mulhsu1 = MulhsuLookup(64).init(100, 200);
+    try std.testing.expectEqual(@as(u64, 0), mulhsu1.computeResult());
+
+    // Negative * positive
+    const neg1: u64 = @bitCast(@as(i64, -1));
+    const mulhsu2 = MulhsuLookup(64).init(neg1, 2);
+    try std.testing.expectEqual(neg1, mulhsu2.computeResult()); // -1 * 2 high = -1
 }

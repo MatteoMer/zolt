@@ -322,6 +322,78 @@ pub fn LookupEntry(comptime XLEN: comptime_int) type {
                 .instruction = instruction,
             };
         }
+
+        /// Create entry for MUL (multiply low)
+        pub fn fromMul(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
+            const MulLookup = lookups.MulLookup(XLEN);
+            const mul = MulLookup.init(rs1, rs2);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = MulLookup.lookupTable(),
+                .index = mul.toLookupIndex(),
+                .result = mul.computeResult(),
+                .left_operand = rs1,
+                .right_operand = rs2,
+                .circuit_flags = MulLookup.circuitFlags(),
+                .instruction_flags = MulLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
+        /// Create entry for MULH (multiply high signed)
+        pub fn fromMulh(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
+            const MulhLookup = lookups.MulhLookup(XLEN);
+            const mulh = MulhLookup.init(rs1, rs2);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = MulhLookup.lookupTable(),
+                .index = mulh.toLookupIndex(),
+                .result = mulh.computeResult(),
+                .left_operand = rs1,
+                .right_operand = rs2,
+                .circuit_flags = MulhLookup.circuitFlags(),
+                .instruction_flags = MulhLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
+        /// Create entry for MULHU (multiply high unsigned)
+        pub fn fromMulhu(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
+            const MulhuLookup = lookups.MulhuLookup(XLEN);
+            const mulhu = MulhuLookup.init(rs1, rs2);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = MulhuLookup.lookupTable(),
+                .index = mulhu.toLookupIndex(),
+                .result = mulhu.computeResult(),
+                .left_operand = rs1,
+                .right_operand = rs2,
+                .circuit_flags = MulhuLookup.circuitFlags(),
+                .instruction_flags = MulhuLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
+        /// Create entry for MULHSU (multiply high signed-unsigned)
+        pub fn fromMulhsu(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
+            const MulhsuLookup = lookups.MulhsuLookup(XLEN);
+            const mulhsu = MulhsuLookup.init(rs1, rs2);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = MulhsuLookup.lookupTable(),
+                .index = mulhsu.toLookupIndex(),
+                .result = mulhsu.computeResult(),
+                .left_operand = rs1,
+                .right_operand = rs2,
+                .circuit_flags = MulhsuLookup.circuitFlags(),
+                .instruction_flags = MulhsuLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
     };
 }
 
@@ -383,8 +455,19 @@ pub fn LookupTraceCollector(comptime XLEN: comptime_int) type {
                 .OP => {
                     // Check for M extension first
                     if (decoded.funct7 == 0b0000001) {
-                        // M extension: MUL, DIV, REM - TODO: implement these lookups
-                        // For now, skip these as they require special handling
+                        // M extension: MUL, MULH, MULHSU, MULHU, DIV, DIVU, REM, REMU
+                        const entry: ?Entry = switch (decoded.funct3) {
+                            0b000 => Entry.fromMul(cycle, pc, instruction, rs1_val, rs2_val), // MUL
+                            0b001 => Entry.fromMulh(cycle, pc, instruction, rs1_val, rs2_val), // MULH
+                            0b010 => Entry.fromMulhsu(cycle, pc, instruction, rs1_val, rs2_val), // MULHSU
+                            0b011 => Entry.fromMulhu(cycle, pc, instruction, rs1_val, rs2_val), // MULHU
+                            // DIV, DIVU, REM, REMU require virtual instruction sequences
+                            // and cannot be tracked as simple lookups
+                            else => null,
+                        };
+                        if (entry) |e| {
+                            try self.entries.append(self.allocator, e);
+                        }
                         return;
                     }
 

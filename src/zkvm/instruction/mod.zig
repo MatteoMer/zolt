@@ -30,6 +30,11 @@ pub const SraLookup = lookups.SraLookup;
 pub const SlliLookup = lookups.SlliLookup;
 pub const SrliLookup = lookups.SrliLookup;
 pub const SraiLookup = lookups.SraiLookup;
+// Multiply lookups
+pub const MulLookup = lookups.MulLookup;
+pub const MulhLookup = lookups.MulhLookup;
+pub const MulhuLookup = lookups.MulhuLookup;
+pub const MulhsuLookup = lookups.MulhsuLookup;
 pub const LookupTraceEntry = lookups.LookupTraceEntry;
 
 // ============================================================================

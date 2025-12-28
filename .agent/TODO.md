@@ -4,10 +4,24 @@
 
 ### Verifier Benchmarks
 - [x] Add benchVerifier() function to measure verification performance
-- [x] Test simple (2 steps) and loop (14 steps) programs
 - [x] Results: Verify is ~130-165x faster than prove
   - Verify (2 steps): ~593 us/op
   - Verify (14 steps): ~753 us/op
+
+### Proof Size Benchmarks
+- [x] Add proofSize() method to JoltStageProofs
+- [x] Add proofSizeBytes() for byte-level calculation
+- [x] Add benchProofSize() to benchmarks
+- [x] Results show excellent compression:
+  - 2 steps: 204 field elements (6.38 KB)
+  - 14 steps: 242 field elements (7.56 KB)
+
+### ELF Examples and Tests
+- [x] Add examples/fibonacci.c and examples/sum.c
+- [x] Add Makefile for compiling RISC-V ELF files
+- [x] Add minimal 32-bit RISC-V ELF parsing test
+- [x] Add ELFLoader parsing test
+- [x] Add ELFLoader execution test
 
 ## Completed (Previous Sessions)
 
@@ -33,8 +47,8 @@
 ## Next Steps (Future Iterations)
 
 ### High Priority
-- [ ] Test with real RISC-V programs compiled from C/Rust
-- [ ] Add proof size benchmarks (measure proof serialization size)
+- [ ] Test with larger RISC-V programs (from compiled C)
+- [ ] Add CLI tool for proving/verifying ELF files
 
 ### Medium Priority
 - [ ] Performance optimization with SIMD
@@ -43,12 +57,13 @@
 ### Low Priority
 - [ ] Complete HyperKZG pairing verification
 - [ ] More comprehensive benchmarking
-- [ ] Add more example programs
+- [ ] Documentation improvements
 
 ## Test Status
-- All tests pass (564+ tests)
+- All tests pass (576 tests)
 - Full pipeline with strict verification: PASSED
 - All 6 stages verify with p(0) + p(1) = claim check
+- ELF parsing and execution tests added
 
 ## Performance Summary (from benchmarks)
 - Field addition: 4.0 ns/op
@@ -61,3 +76,5 @@
 - Prover (14 steps): ~98 ms/op
 - Verifier (2 steps): ~593 us/op
 - Verifier (14 steps): ~753 us/op
+- Proof size (2 steps): 6.38 KB
+- Proof size (14 steps): 7.56 KB

@@ -27,6 +27,9 @@ pub const BltLookup = lookups.BltLookup;
 pub const BgeLookup = lookups.BgeLookup;
 pub const BltuLookup = lookups.BltuLookup;
 pub const BgeuLookup = lookups.BgeuLookup;
+// Upper immediate lookups
+pub const LuiLookup = lookups.LuiLookup;
+pub const AuipcLookup = lookups.AuipcLookup;
 // Shift lookups
 pub const SllLookup = lookups.SllLookup;
 pub const SrlLookup = lookups.SrlLookup;

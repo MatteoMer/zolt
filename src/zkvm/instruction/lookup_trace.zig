@@ -287,6 +287,42 @@ pub fn LookupEntry(comptime XLEN: comptime_int) type {
             };
         }
 
+        /// Create entry for LUI (load upper immediate)
+        pub fn fromLui(cycle: usize, pc: u64, instruction: u32, imm: i32) Self {
+            const LuiLookup = lookups.LuiLookup(XLEN);
+            const lui = LuiLookup.init(imm);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = LuiLookup.lookupTable(),
+                .index = lui.toLookupIndex(),
+                .result = lui.computeResult(),
+                .left_operand = 0, // No rs1 for LUI
+                .right_operand = @as(u64, @bitCast(@as(i64, imm))),
+                .circuit_flags = LuiLookup.circuitFlags(),
+                .instruction_flags = LuiLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
+        /// Create entry for AUIPC (add upper immediate to PC)
+        pub fn fromAuipc(cycle: usize, pc: u64, instruction: u32, imm: i32) Self {
+            const AuipcLookup = lookups.AuipcLookup(XLEN);
+            const auipc = AuipcLookup.init(pc, imm);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = AuipcLookup.lookupTable(),
+                .index = auipc.toLookupIndex(),
+                .result = auipc.computeResult(),
+                .left_operand = pc,
+                .right_operand = @as(u64, @bitCast(@as(i64, imm))),
+                .circuit_flags = AuipcLookup.circuitFlags(),
+                .instruction_flags = AuipcLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
         /// Create entry for SLL (shift left logical)
         pub fn fromSll(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
             const SllLookup = lookups.SllLookup(XLEN);
@@ -918,9 +954,19 @@ pub fn LookupTraceCollector(comptime XLEN: comptime_int) type {
                     };
                     try self.entries.append(self.allocator, entry);
                 },
+                .LUI => {
+                    // Load upper immediate
+                    const entry = Entry.fromLui(cycle, pc, instruction, decoded.imm);
+                    try self.entries.append(self.allocator, entry);
+                },
+                .AUIPC => {
+                    // Add upper immediate to PC
+                    const entry = Entry.fromAuipc(cycle, pc, instruction, decoded.imm);
+                    try self.entries.append(self.allocator, entry);
+                },
                 else => {
-                    // LUI, AUIPC, JAL, JALR, LOAD, STORE - no lookup needed
-                    // These use range checks or are pure address computation
+                    // JAL, JALR, LOAD, STORE - no lookup needed for now
+                    // These are handled separately (JAL/JALR are jumps, LOAD/STORE use memory)
                 },
             }
         }

@@ -599,6 +599,101 @@ pub fn BgeuLookup(comptime XLEN: comptime_int) type {
     };
 }
 
+/// LUI (Load Upper Immediate) instruction lookup
+/// Loads a 20-bit immediate into the upper bits of rd, zeroing lower 12 bits
+/// rd = imm << 12
+pub fn LuiLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        imm: i32, // The immediate value (already shifted by 12 from instruction encoding)
+
+        pub fn init(imm: i32) Self {
+            return Self{
+                .imm = imm,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            // LUI just moves the immediate to rd, no complex lookup needed
+            return .RangeCheck;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            // The result value is the index for range check
+            return @as(u128, self.computeResult());
+        }
+
+        pub fn computeResult(self: Self) u64 {
+            // For RV64, sign-extend the 32-bit result to 64 bits
+            if (XLEN == 64) {
+                return @bitCast(@as(i64, self.imm));
+            } else {
+                return @as(u64, @bitCast(self.imm));
+            }
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.RightOperandIsImm);
+            return flags;
+        }
+    };
+}
+
+/// AUIPC (Add Upper Immediate to PC) instruction lookup
+/// rd = PC + (imm << 12)
+pub fn AuipcLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        pc: u64, // Current program counter
+        imm: i32, // The immediate value (already shifted by 12)
+
+        pub fn init(pc: u64, imm: i32) Self {
+            return Self{
+                .pc = pc,
+                .imm = imm,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            // AUIPC is PC + immediate, similar to ADD
+            return .RangeCheck;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return @as(u128, self.computeResult());
+        }
+
+        pub fn computeResult(self: Self) u64 {
+            // PC + sign-extended immediate
+            const imm_extended: i64 = @as(i64, self.imm);
+            return self.pc +% @as(u64, @bitCast(imm_extended));
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.AddOperands);
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsPC);
+            flags.set(.RightOperandIsImm);
+            return flags;
+        }
+    };
+}
+
 /// SLL (Shift Left Logical) instruction lookup
 /// Computes rd = rs1 << (rs2 & (XLEN-1))
 pub fn SllLookup(comptime XLEN: comptime_int) type {
@@ -2548,4 +2643,41 @@ test "bgeu lookup (unsigned greater than or equal branch)" {
     // Check branch flag
     const flags = BgeuLookup(64).instructionFlags();
     try std.testing.expect(flags.get(.Branch));
+}
+
+test "lui lookup (load upper immediate)" {
+    // lui x5, 0x12345 => rd = 0x12345000
+    const lui1 = LuiLookup(64).init(0x12345000);
+    try std.testing.expectEqual(@as(u64, 0x12345000), lui1.computeResult());
+
+    // lui with negative immediate (upper bit set)
+    const lui2 = LuiLookup(64).init(@as(i32, @bitCast(@as(u32, 0xFFFFF000))));
+    const expected: u64 = @bitCast(@as(i64, @as(i32, @bitCast(@as(u32, 0xFFFFF000)))));
+    try std.testing.expectEqual(expected, lui2.computeResult());
+
+    // Check flags
+    const flags = LuiLookup(64).instructionFlags();
+    try std.testing.expect(flags.get(.RightOperandIsImm));
+
+    const circuit_flags = LuiLookup(64).circuitFlags();
+    try std.testing.expect(circuit_flags.get(.WriteLookupOutputToRD));
+}
+
+test "auipc lookup (add upper immediate to PC)" {
+    // auipc x5, 0x1000 => rd = PC + 0x1000000
+    const auipc1 = AuipcLookup(64).init(0x1000, 0x1000000);
+    try std.testing.expectEqual(@as(u64, 0x1001000), auipc1.computeResult());
+
+    // PC at 0x80000000, with imm 0x1000
+    const auipc2 = AuipcLookup(64).init(0x80000000, 0x1000000);
+    try std.testing.expectEqual(@as(u64, 0x81000000), auipc2.computeResult());
+
+    // Check flags
+    const flags = AuipcLookup(64).instructionFlags();
+    try std.testing.expect(flags.get(.LeftOperandIsPC));
+    try std.testing.expect(flags.get(.RightOperandIsImm));
+
+    const circuit_flags = AuipcLookup(64).circuitFlags();
+    try std.testing.expect(circuit_flags.get(.AddOperands));
+    try std.testing.expect(circuit_flags.get(.WriteLookupOutputToRD));
 }

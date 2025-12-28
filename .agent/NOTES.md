@@ -1,126 +1,77 @@
-# Zolt Implementation Notes
+# Zolt-Jolt Compatibility Notes
 
-## Current Status (2024-12-28)
+## Current Status (December 28, 2024)
 
-### What Works
-- **Proof Serialization**: Byte-perfect Arkworks compatibility
-- **Transcript**: Blake2b matches Jolt exactly
-- **Proof Structure**: All 7 stages, correct round counts
-- **SRS Loading**: arkworks format with flag bit handling
-- **G1/G2 MSM**: Matches Jolt exactly
-- **Dory Commitment**: GT elements match exactly
-- **R1CS Constraints**: All 19 constraints satisfied (Az*Bz = 0)
-- **UniSkip Polynomial**: Correctly all zeros for satisfied constraints
+### Working Components
+- ✅ Blake2b Transcript (matches Jolt)
+- ✅ Dory Commitment Scheme (GT elements verified matching)
+- ✅ Proof Structure (JoltProof with 7 stages)
+- ✅ Serialization Format (opening claims, commitments)
+- ✅ LagrangeHelper with shift_coeffs_i32 (matches Jolt)
+- ✅ COEFFS_PER_J precomputed Lagrange weights
+- ✅ SpartanOuterProver.computeUniskipFirstRoundPoly (fixed to use COEFFS_PER_J)
+- ✅ All 618 unit tests pass
 
-### Current Issue: Stage 1 Sumcheck Verification Fails
+### Stage 1 Sumcheck Debugging
 
-Error: "Sumcheck verification failed" in Stage 1
+**Current Issue**: `Verification failed: Stage 1 - Sumcheck verification failed`
 
-### Latest Analysis (December 28, 2024 Iteration 2)
+**Root Cause Analysis Complete**:
 
-**Test Output Shows**:
-- UniSkip polynomial has all zero coefficients (correct for satisfied constraints)
-- Round polynomials have non-zero values from streaming prover
-- Opening claims have computed MLE evaluations
+The issue was in how we compute extended evaluations for the UniSkip polynomial:
+1. For satisfied R1CS constraints, Az(y) * Bz(y) = 0 at base domain points
+2. Old approach: Interpolate from Az*Bz products → all zeros
+3. New approach (implemented): Evaluate Az(y_j) and Bz(y_j) **separately** using COEFFS_PER_J, then multiply
 
-**Verification Equation**:
+**Fix Implemented**:
+- Added `LagrangeHelper.shiftCoeffsI32()` to compute Lagrange interpolation weights
+- Precomputed `COEFFS_PER_J[9][10]` for extended domain evaluation
+- Fixed `computeUniskipFirstRoundPoly()` to use separate Az/Bz evaluation
+
+**Test Verification**:
+- Unit test confirms non-zero coefficients are produced for non-trivial Az/Bz
+- All 618 tests pass
+
+**Remaining Issue**:
+- Production proof still has all-zero UniSkip coefficients
+- Need to trace why the production path produces different results than the test
+- Possible causes:
+  1. cycle_witnesses array is empty or has zero values
+  2. The constraint evaluators produce zeros for all constraints
+  3. Some early return path is being taken
+
+## Architecture Overview
+
+### UniSkip Extended Evaluation
+
+The key insight from Jolt's implementation:
+
 ```
-expected_output_claim = tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod
+t1(y_j) = Σ_x eq(τ,x) * Az(x, y_j) * Bz(x, y_j)
+
+For base domain points:
+- y ∈ {-4, -3, -2, -1, 0, 1, 2, 3, 4, 5}
+- These directly map to constraint indices 0-9
+- For satisfied constraints, Az * Bz = 0 at these points
+
+For extended domain points:
+- y ∈ {-9, -8, -7, -6, -5} ∪ {6, 7, 8, 9}
+- Use COEFFS_PER_J[j][i] to compute:
+  Az(y_j) = Σ_i coeffs[j][i] * Az[i]
+  Bz(y_j) = Σ_i coeffs[j][i] * Bz[i]
+- Even if Az*Bz = 0 at base points, Az(y_j)*Bz(y_j) ≠ 0 at extended points
 ```
-
-Where:
-- `tau_high_bound_r0 = L(tau_high, r0)` - Lagrange kernel
-- `tau_bound_r_tail_reversed = eq(tau_low, r_cycle_reversed)`
-- `inner_sum_prod = Az(rx)*z(rx) * Bz(rx)*z(rx)` - computed from R1CS input evals
-
-**The Issue**:
-The streaming prover's round polynomials are computed with incorrect/placeholder logic.
-Even though the sum is zero, the intermediate round polynomials must be computed correctly
-using the Gruen optimization (gruen_poly_deg_3).
-
-**What Needs Fixing**:
-1. `streaming_outer.zig::computeRemainingRoundPoly()` - must use Gruen optimization
-2. Challenge derivation - must use transcript consistently
-3. MLE evaluation point - r_cycle must be computed from transcript challenges
-
----
-
-## Previous Stage 1 Analysis
 
 ### Key Files
-- `/jolt-core/src/subprotocols/sumcheck.rs:200-252` - BatchedSumcheck::verify
-- `/jolt-core/src/zkvm/spartan/outer.rs:438-453` - OuterRemainingSumcheckVerifier::cache_openings
-- `/jolt-core/src/zkvm/spartan/outer.rs:407-436` - expected_output_claim
+- `src/zkvm/r1cs/univariate_skip.zig` - LagrangeHelper, COEFFS_PER_J, UniPoly
+- `src/zkvm/spartan/outer.zig` - SpartanOuterProver with fixed computeUniskipFirstRoundPoly
+- `src/zkvm/r1cs/evaluators.zig` - Az/Bz evaluation structures
+- `src/zkvm/proof_converter.zig` - Proof conversion with UniSkip generation
 
-### Next Steps
+## Next Steps
 
-1. **Understand Opening Accumulator Protocol**
-   - How does Jolt's prover populate the opening accumulator?
-   - What values does `append_virtual` expect?
-   - How are claimed evaluations verified?
+1. **Debug production path**: Add runtime logging (not debug.print which is stripped in release) to trace the actual values in the production proof generation
 
-2. **Match Prover Protocol Exactly**
-   - The sumcheck polynomials encode specific evaluations
-   - The opening claims must match what the verifier recomputes
-   - Need to trace through Jolt's prover to understand the relationship
+2. **Verify constraint evaluator output**: Check if the AzFirstGroup/BzFirstGroup structs are populated with expected boolean/integer values
 
----
-
-## R1CS Constraint Fix (Completed)
-
-### Problem
-Constraint 16 (NextUnexpPCUpdateOtherwise) was failing:
-- Az = 1 (condition true: 1 - ShouldBranch - Jump = 1)
-- Bz = 255 (NextUnexpandedPC != UnexpandedPC + 4)
-
-### Root Cause
-Compressed instructions (RVC) advance PC by 2, not 4. The `IsCompressed` flag wasn't
-being set because we were checking the expanded instruction (always has 0x3 in low bits).
-
-### Fix
-1. Added `is_compressed` field to TraceStep
-2. Emulator sets this field when fetching instruction
-3. Witness generator uses trace.is_compressed instead of checking instruction bits
-
-Result: All 19 R1CS constraints now satisfied.
-
----
-
-## Previous Implementation Notes
-
-### Dory Commitment (Complete)
-
-Successfully matching Jolt's Dory:
-- MSM over G1 points matches exactly
-- Pairing to GT element works
-- arkworks-compatible serialization
-
-### Blake2b Transcript (Complete)
-
-- 32-byte state with round counter
-- Messages right-padded to 32 bytes
-- Scalars serialized LE then reversed to BE
-- 128-bit challenges
-
-### Proof Structure (Complete)
-
-7 stages matching Jolt:
-- Stage 1: Outer Spartan (UniSkip + sumcheck)
-- Stage 2: Product virtualization
-- Stages 3-7: Various claim reductions
-
----
-
-## File Locations
-
-### SRS File
-`/tmp/jolt_dory_srs.bin` - arkworks format
-
-### Key Source Files
-
-| File | Purpose |
-|------|---------|
-| `src/poly/commitment/dory.zig` | Dory commitment scheme |
-| `src/zkvm/proof_converter.zig` | Proof format conversion |
-| `src/zkvm/r1cs/constraints.zig` | R1CS constraint definitions |
-| `src/tracer/mod.zig` | Execution trace with is_compressed |
+3. **Test with Jolt-generated witnesses**: Export a witness from Jolt and verify Zolt can process it correctly

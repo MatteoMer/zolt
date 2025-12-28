@@ -270,14 +270,7 @@ pub fn LagrangePolynomial(comptime F: type) type {
                     const neg_x_j = F.zero().sub(x_j);
 
                     // Multiply basis by (X - x_j) = X*basis + (-x_j)*basis
-                    // Work backwards to avoid overwriting
-                    var k: usize = basis_deg + 1;
-                    while (k > 0) {
-                        k -= 1;
-                        const new_val = if (k > 0) basis[k - 1] else F.zero();
-                        basis[k + 1] = basis[k].add(if (k + 1 <= basis_deg + 1) basis[k + 1].add(new_val) else new_val);
-                    }
-                    // Actually, let's do this properly with a temp array
+                    // Use a temp array to avoid in-place corruption
                     var temp = try allocator.alloc(F, SIZE);
                     defer allocator.free(temp);
                     @memset(temp, F.zero());

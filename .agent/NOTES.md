@@ -467,3 +467,67 @@ New tests added:
 - Dory serialization roundtrip
 - Jolt serialization GT
 - Dory commitment serialization roundtrip
+
+---
+
+## Architectural Incompatibility Discovery (Iteration 9)
+
+### Problem: Univariate Skip Optimization Mismatch
+
+Jolt uses a "univariate skip" optimization for the first round of certain sumcheck stages
+that is fundamentally different from Zolt's standard sumcheck.
+
+**Jolt's UniSkipFirstRoundProof**:
+- Uses high-degree polynomials (degree 27 for stage 1)
+- Requires `FIRST_ROUND_POLY_NUM_COEFFS = 3 * OUTER_UNIVARIATE_SKIP_DEGREE + 1 = 28` coefficients
+- `OUTER_UNIVARIATE_SKIP_DEGREE = (NUM_R1CS_CONSTRAINTS - 1) / 2 = (19 - 1) / 2 = 9`
+- This optimization encodes the R1CS constraint structure directly in the first-round polynomial
+
+**Zolt's Standard Sumcheck**:
+- Uses low-degree polynomials (degree 2-3)
+- Only 2-4 coefficients per round
+- No univariate skip optimization
+
+### Why This Matters
+
+When Jolt's verifier runs `check_sum_evals::<N, 28>()`, it expects:
+- `self.degree() + 1 == 28` (polynomial degree 27)
+- But Zolt provides polynomials with degree 2-3
+
+This causes the assertion failure:
+```
+assertion `left == right` failed
+  left: 3   (Zolt polynomial degree + 1)
+ right: 28  (Jolt expected FIRST_ROUND_POLY_NUM_COEFFS)
+```
+
+### What Would Be Required for Full Compatibility
+
+1. **Implement Jolt's R1CS Constraint Structure**
+   - Match the 19 constraints in `R1CSConstraintLabel`
+   - Use the same variable ordering and constraint format
+
+2. **Implement Univariate Skip Optimization**
+   - Port `build_uniskip_first_round_poly()` to Zig
+   - Handle extended domain evaluation
+   - Generate degree-27 first-round polynomials
+
+3. **Match Sumcheck Stage Structure**
+   - Stage 1: SpartanOuter with univariate skip
+   - Stage 2: Product virtualization with univariate skip
+   - Stages 3-7: Standard sumcheck with appropriate degrees
+
+### Current Status
+
+- ✅ Serialization format is byte-compatible (Jolt can deserialize Zolt proofs)
+- ✅ Transcript produces identical challenges
+- ✅ Dory commitment scheme is implemented
+- ❌ Proof structure doesn't match Jolt's verification expectations
+- ❌ Cannot verify without implementing univariate skip
+
+### Recommendation
+
+The serialization compatibility work is complete. Full verification compatibility
+would require Zolt to adopt Jolt's R1CS constraint structure and univariate skip
+optimization, which is a significant architectural change beyond the scope of
+the current serialization alignment effort.

@@ -278,19 +278,49 @@ pub const OpeningId = union(enum) {
 
 /// Compressed univariate polynomial
 /// Matches Jolt's CompressedUniPoly
+///
+/// Compression: For polynomial p(x) = a₀ + a₁x + a₂x² + ... + aₙxⁿ
+/// we store [a₀, a₂, a₃, ..., aₙ] (excluding a₁, the linear term)
+///
+/// The verifier can recover a₁ from the sumcheck claim:
+///   claim = p(0) + p(1) = a₀ + (a₀ + a₁ + a₂ + ... + aₙ) = 2a₀ + a₁ + a₂ + ... + aₙ
+///   => a₁ = claim - 2a₀ - a₂ - a₃ - ... - aₙ
 pub fn CompressedUniPoly(comptime F: type) type {
     return struct {
         const Self = @This();
 
-        /// Coefficients (excluding the first one which is derived)
+        /// Coefficients excluding the linear term (index 1)
+        /// For [a₀, a₁, a₂, ..., aₙ], stores [a₀, a₂, a₃, ..., aₙ]
         coeffs_except_linear_term: []F,
         allocator: Allocator,
 
+        /// Create from full coefficient array, compressing by removing the linear term
         pub fn init(allocator: Allocator, coeffs: []const F) !Self {
-            // Store all coefficients except the linear term (index 1)
-            // In practice, Jolt stores coeffs[2..] and derives coeffs[0] and coeffs[1]
-            const copy = try allocator.alloc(F, coeffs.len);
-            @memcpy(copy, coeffs);
+            // Jolt format: [coeffs[0]] ++ coeffs[2..]
+            // i.e., remove index 1 (linear term)
+            if (coeffs.len <= 1) {
+                // Degree 0 or less: just copy all
+                const copy = try allocator.alloc(F, coeffs.len);
+                @memcpy(copy, coeffs);
+                return Self{
+                    .coeffs_except_linear_term = copy,
+                    .allocator = allocator,
+                };
+            }
+
+            // Remove linear term at index 1
+            // Result length: coeffs.len - 1
+            const compressed_len = coeffs.len - 1;
+            const copy = try allocator.alloc(F, compressed_len);
+
+            // Copy coeffs[0] (constant term)
+            copy[0] = coeffs[0];
+
+            // Copy coeffs[2..] (quadratic and higher)
+            if (coeffs.len > 2) {
+                @memcpy(copy[1..], coeffs[2..]);
+            }
+
             return Self{
                 .coeffs_except_linear_term = copy,
                 .allocator = allocator,

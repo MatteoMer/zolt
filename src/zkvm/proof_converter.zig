@@ -366,13 +366,17 @@ pub fn ProofConverter(comptime F: type) type {
 }
 
 /// Configuration for proof conversion
+///
+/// These values must match Jolt's config.rs:
+/// - log_k_chunk: Must be <= 8 (Jolt uses 4 for small traces, 8 for large)
+/// - lookups_ra_virtual_log_k_chunk: Jolt uses LOG_K/8 (=16) for small traces
 pub const ConversionConfig = struct {
     /// Bytecode address space size (K)
     bytecode_K: usize = 1 << 16,
-    /// Log of chunk size for one-hot encoding
-    log_k_chunk: usize = 10,
-    /// Log of chunk size for lookups RA virtualization
-    lookups_ra_virtual_log_k_chunk: usize = 8,
+    /// Log of chunk size for one-hot encoding (must be <= 8, Jolt uses 4 for small traces)
+    log_k_chunk: usize = 4,
+    /// Log of chunk size for lookups RA virtualization (LOG_K / 8 = 128 / 8 = 16 for small traces)
+    lookups_ra_virtual_log_k_chunk: usize = 16,
 };
 
 // =============================================================================

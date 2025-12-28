@@ -457,8 +457,10 @@ pub fn JoltProver(comptime F: type) type {
                 null, // joint_opening_proof - would come from Dory
                 .{
                     .bytecode_K = 1 << 16,
-                    .log_k_chunk = 10,
-                    .lookups_ra_virtual_log_k_chunk = 8,
+                    // Must match Jolt's config.rs: log_k_chunk <= 8
+                    .log_k_chunk = 4,
+                    // Jolt uses LOG_K / 8 = 128 / 8 = 16 for small traces
+                    .lookups_ra_virtual_log_k_chunk = 16,
                 },
             );
         }

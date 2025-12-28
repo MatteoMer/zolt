@@ -725,8 +725,8 @@ test "e2e: JoltProof serialization matches Jolt format" {
     jolt_proof.trace_length = 16;
     jolt_proof.ram_K = 1024;
     jolt_proof.bytecode_K = 65536;
-    jolt_proof.log_k_chunk = 10;
-    jolt_proof.lookups_ra_virtual_log_k_chunk = 8;
+    jolt_proof.log_k_chunk = 4; // Must be <= 8 to match Jolt
+    jolt_proof.lookups_ra_virtual_log_k_chunk = 16; // LOG_K / 8 = 128 / 8
 
     // Add some commitments
     try jolt_proof.commitments.append(testing.allocator, .{ .value = 123 });

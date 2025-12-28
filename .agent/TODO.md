@@ -26,6 +26,13 @@
   - Full roundtrip test with stage proofs
   - Format detection test
 
+### Bug Fixes
+- [x] Fix commitment field types (use base field Fp, not scalar field)
+- [x] Add `writeBaseFieldElement()` for base field serialization (big-endian)
+- [x] Add `hexToBaseField()` for base field deserialization (big-endian)
+- [x] Fix double-free in JSON proof deserialization (separate allocations)
+- [x] Fix Zig 0.15 API compatibility (bufPrint instead of formatIntBuf)
+
 ## Completed (Previous Session - Iteration 44)
 
 ### JSON Serialization Format

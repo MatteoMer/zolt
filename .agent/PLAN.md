@@ -23,6 +23,12 @@ This iteration added JSON deserialization support for proof loading:
    - Verify command now auto-detects proof format
    - Displays format type (JSON/Binary) in output
 
+4. **Bug Fixes**
+   - Fixed commitment field types (use base field Fp, not scalar field F)
+   - Added big-endian serialization for G1 point coordinates
+   - Fixed double-free in JSON proof deserialization
+   - Fixed Zig 0.15 API compatibility (bufPrint vs formatIntBuf)
+
 ### Previous Session (Iteration 44) - JSON Serialization
 
 Previous iteration added:

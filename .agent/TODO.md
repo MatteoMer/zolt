@@ -15,13 +15,19 @@
 - [x] Added RAF prover claim tracking test
 - [x] Confirmed RAF prover passes claim tracking invariant
 
-## Summary of This Session
+## Potential Issues Identified
 
-Fixed the Lasso prover's claim tracking to properly maintain the sumcheck invariant:
-- Each round polynomial must satisfy: p(0) + p(1) = current_claim
-- After receiving challenge r, new_claim = p(r)
+### Val Prover (Stage 4) Polynomial Binding
+The ValEvaluationProver computes a degree-3 sumcheck for:
+  Σ inc(j) * wa(j) * lt(j)
 
-Verified the RAF prover already correctly implements this invariant.
+**Potential issue:** Only `inc` polynomial is folded via `bind()`, but `wa` and `lt`
+are re-evaluated fresh at each index. For correct sumcheck, all three polynomials
+should be bound together. This may cause verification failures in strict mode.
+
+**Impact:** Stage 4 verification may fail with strict sumcheck enabled.
+
+**Fix needed:** Update `bindChallenge` to fold `wa` and `lt` polynomials as well.
 
 ## Completed (Previous Sessions)
 
@@ -35,26 +41,12 @@ Verified the RAF prover already correctly implements this invariant.
 - [x] Add `evaluateQuadraticAt3Points` helper
 
 ### Iterations 1-33 - Core Implementation
-- [x] BN254 field and curve arithmetic
-- [x] Extension fields (Fp2, Fp6, Fp12)
-- [x] Pairing with Miller loop and final exponentiation
-- [x] HyperKZG commit, open, verify with batch support
-- [x] Dory commit, open, verify with IPA
-- [x] Sumcheck protocol
-- [x] RISC-V emulator (RV64IMC)
-- [x] ELF loader
-- [x] MSM operations
-- [x] Spartan proof generation and verification
-- [x] Lasso lookup argument prover/verifier
-- [x] Multi-stage prover (6 stages)
-- [x] Host execute
-- [x] Preprocessing
-- [x] 50+ lookup tables
-- [x] Complete RV64IM instruction coverage (60+ instructions)
+- [x] Complete zkVM implementation
 
 ## Next Steps (Future Iterations)
 
 ### High Priority
+- [ ] Fix Val prover polynomial binding
 - [ ] Test full pipeline with strict verification mode
 - [ ] Investigate test interference issue
 
@@ -73,6 +65,7 @@ Verified the RAF prover already correctly implements this invariant.
 - Stage 1 strict verification: PASSED ✅
 - Lasso claim tracking: VERIFIED ✅
 - RAF claim tracking: VERIFIED ✅
+- Val prover: MAY NEED FIX (polynomial binding)
 - Full pipeline example: WORKING
 
 ## Performance (from benchmarks)

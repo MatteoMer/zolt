@@ -409,8 +409,53 @@ All 7 test vectors from Jolt verified to match.
 All 608 tests pass:
 ```
 zig build test --summary all
-Build Summary: 5/5 steps succeeded; 596/596 tests passed
+Build Summary: 5/5 steps succeeded; 608/608 tests passed
 ```
+
+### Cross-Verification Status (Iteration 8)
+
+**MAJOR MILESTONE: Jolt successfully deserializes Zolt proofs!**
+
+```
+cargo test --package jolt-core test_deserialize_zolt_proof -- --ignored --nocapture
+
+Successfully deserialized Zolt proof!
+  Trace length: 8
+  RAM K: 65536
+  Bytecode K: 65536
+  Commitments: 5
+```
+
+The Dory proof serialization now matches arkworks format exactly:
+- VMV message: c (GT 384 bytes), d2 (GT 384 bytes), e1 (G1 32 bytes)
+- num_rounds: u32 (4 bytes)
+- First messages: d1_left, d1_right, d2_left, d2_right (GT), e1_beta (G1), e2_beta (G2)
+- Second messages: c_plus, c_minus (GT), e1_plus, e1_minus (G1), e2_plus, e2_minus (G2)
+- Final message: e1 (G1 32 bytes), e2 (G2 64 bytes)
+- nu, sigma: u32, u32 (8 bytes)
+
+### Next Steps for Full Verification
+
+For Jolt to fully verify a Zolt proof, these requirements must be met:
+
+1. **Same Program Binary**: Jolt and Zolt must prove the same ELF binary
+   - Jolt compiles Rust programs via `guest::compile_*`
+   - Zolt uses pre-compiled C programs
+   - Solution: Use Jolt's compiled binary in Zolt, or modify Zolt to compile the same way
+
+2. **Matching Preprocessing**: The verifier preprocessing must match the proof
+   - Jolt generates preprocessing tied to the specific program structure
+   - Zolt would need to use the same parameters (trace length, RAM K, etc.)
+
+3. **Same Execution**: The program must execute with the same inputs/outputs
+   - Jolt's fibonacci computes fib(50)
+   - Zolt's fibonacci may compute different values
+
+For testing purposes, the serialization format compatibility is the main achievement.
+To fully verify:
+1. Run `cargo run --example fibonacci -- --save` in Jolt
+2. Extract the compiled ELF and use it in Zolt
+3. Ensure execution parameters match
 
 New tests added:
 - Fp12 toBytes/fromBytes roundtrip

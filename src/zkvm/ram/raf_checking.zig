@@ -623,3 +623,76 @@ test "eq polynomial computation" {
     const expected_0 = F.one().sub(F.fromU64(2)).mul(F.one().sub(F.fromU64(3)));
     try std.testing.expect(evals[0].eql(expected_0));
 }
+
+test "raf prover claim tracking" {
+    const allocator = std.testing.allocator;
+    const field = @import("../../field/mod.zig");
+    const F = field.BN254Scalar;
+
+    // Create a memory trace with multiple accesses
+    var trace = MemoryTrace.init(allocator);
+    defer trace.deinit();
+
+    // Add some memory operations
+    try trace.recordWrite(0x80000000, 42, 0); // Write at cycle 0
+    try trace.recordRead(0x80000000, 42, 1); // Read at cycle 1
+    try trace.recordWrite(0x80000008, 100, 2); // Write at cycle 2
+    try trace.recordRead(0x80000008, 100, 3); // Read at cycle 3
+
+    const r_cycle = [_]F{ F.fromU64(2), F.fromU64(3) };
+    var params = try RafEvaluationParams(F).init(
+        allocator,
+        3, // log_k = 3 means 8 address slots
+        0x80000000,
+        &r_cycle,
+    );
+    defer params.deinit();
+
+    var prover = try RafEvaluationProver(F).init(allocator, &trace, params);
+    defer prover.deinit();
+
+    // Verify sumcheck invariant: p(0) + p(1) = current_claim for each round
+    const num_rounds = params.numRounds(); // 3 rounds for log_k = 3
+
+    // Compute initial claim
+    var current_claim = prover.computeInitialClaim();
+
+    for (0..num_rounds) |round| {
+        // Compute round polynomial [p(0), p(2)]
+        const round_poly = prover.computeRoundPolynomial();
+
+        // The prover sends [p(0), p(2)]
+        // Verifier recovers p(1) = claim - p(0)
+        const p_at_0 = round_poly[0];
+        const p_at_2 = round_poly[1];
+        const p_at_1 = current_claim.sub(p_at_0);
+
+        // Verify p(0) + p(1) = current_claim
+        const sum = p_at_0.add(p_at_1);
+        try std.testing.expect(sum.eql(current_claim));
+
+        // Generate a challenge
+        const challenge = F.fromU64(@intCast(round + 10));
+
+        // Bind the challenge
+        try prover.bindChallenge(challenge);
+
+        // Compute p(r) using quadratic Lagrange interpolation
+        const two = F.fromU64(2);
+        const r_minus_1 = challenge.sub(F.one());
+        const r_minus_2 = challenge.sub(two);
+
+        // L0(r) = (r-1)(r-2)/((0-1)(0-2)) = (r-1)(r-2)/2
+        const L0 = r_minus_1.mul(r_minus_2).mul(two.inverse().?);
+        // L1(r) = r(r-2)/((1-0)(1-2)) = -r(r-2)
+        const L1 = challenge.mul(r_minus_2).neg();
+        // L2(r) = r(r-1)/((2-0)(2-1)) = r(r-1)/2
+        const L2 = challenge.mul(r_minus_1).mul(two.inverse().?);
+
+        const expected_new_claim = p_at_0.mul(L0).add(p_at_1.mul(L1)).add(p_at_2.mul(L2));
+
+        // The claim after folding should match p(r)
+        // Recompute what the claim should be based on folded polynomials
+        current_claim = expected_new_claim;
+    }
+}

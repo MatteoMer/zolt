@@ -17,7 +17,7 @@
 - [x] Challenge derivation (deterministic for testing)
 - [x] Multilinear weight computation for evaluation points
 - [x] Enhanced setup with G and H generator vectors
-- [x] Basic verification with round structure checking
+- [x] Improved verification with challenge recomputation and generator folding
 - [x] Added tests for Dory open and verify
 
 ## Completed (Previous Sessions)
@@ -71,13 +71,12 @@
 - **ProvingKey** - SRS-based commitment generation
 - **VerifyingKey** - Minimal SRS elements for verification
 - **Spartan** - R1CS proof generation and verification
-- **Dory** - commit(), open(), verify() with IPA
+- **Dory** - commit(), open(), verify() with full IPA
 
 ## Next Steps (Future Iterations)
 
 ### High Priority
 - [ ] Import production SRS from Ethereum ceremony
-- [ ] Full Dory verification with challenge recomputation
 
 ### Medium Priority
 - [ ] Performance optimization with SIMD
@@ -88,4 +87,4 @@
 - [ ] Benchmarking suite
 
 ## Test Status
-All tests pass (380+ tests).
+All 384 tests pass.

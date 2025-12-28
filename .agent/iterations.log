@@ -269,10 +269,17 @@ Key Changes:
 Files Modified:
 - src/poly/commitment/mod.zig - Added batch opening and Dory IPA
 
+3. Dory Verification Enhancement:
+   - Improved verify() with challenge recomputation
+   - Generator folding following the prover's algorithm
+   - Structural validation (L.len == R.len == num_rounds)
+   - Content validation (non-identity L/R points)
+
 Commits:
 - Add batch opening proofs to HyperKZG
 - Implement Dory IPA-based opening proof
 - Update tracking files for iteration 19
+- Improve Dory IPA verification
 
 All 384 tests pass.
 

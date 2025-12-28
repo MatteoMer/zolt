@@ -24,6 +24,7 @@ pub const instruction = @import("instruction/mod.zig");
 pub const instruction_lookups = @import("instruction_lookups/mod.zig");
 pub const jolt_types = @import("jolt_types.zig");
 pub const jolt_serialization = @import("jolt_serialization.zig");
+pub const proof_converter = @import("proof_converter.zig");
 pub const lasso = @import("lasso/mod.zig");
 pub const lookup_table = @import("lookup_table/mod.zig");
 pub const prover = @import("prover.zig");

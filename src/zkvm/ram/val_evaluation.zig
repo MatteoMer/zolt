@@ -321,20 +321,37 @@ pub fn LtPolynomial(comptime F: type) type {
 }
 
 /// Value Evaluation Sumcheck Prover
+///
+/// This prover implements the sumcheck for the value evaluation:
+///   Σ_{j=0}^{T-1} inc(j) · wa(j) · LT(j, r_cycle)
+///
+/// The key insight is that wa(j) and LT(j) depend on the *full* index j,
+/// but after binding variables, the indices are constructed from:
+/// - bound challenges (for already-summed variables)
+/// - the current free variable (0 or 1)
+/// - remaining free variables (summed over)
+///
+/// To correctly implement this, we:
+/// 1. Materialize wa and lt evaluations upfront (same as inc)
+/// 2. Bind all three polynomials together after each challenge
 pub fn ValEvaluationProver(comptime F: type) type {
     return struct {
         const Self = @This();
 
-        /// Increment polynomial
-        inc: IncPolynomial(F),
-        /// Write-address indicator
-        wa: WaPolynomial(F),
-        /// Less-than polynomial
-        lt: LtPolynomial(F),
+        /// Increment polynomial evaluations
+        inc_evals: []F,
+        /// Write-address indicator evaluations: wa(r_address, j) for each j
+        wa_evals: []F,
+        /// Less-than evaluations: LT(j, r_cycle) for each j
+        lt_evals: []F,
+        /// Number of variables (log of trace length)
+        num_vars: usize,
+        /// Current round (bound variables count)
+        round: usize,
+        /// Current claim being sumchecked
+        current_claim: F,
         /// Parameters
         params: ValEvaluationParams(F),
-        /// Current round
-        round: usize,
         allocator: Allocator,
 
         pub fn init(
@@ -346,101 +363,175 @@ pub fn ValEvaluationProver(comptime F: type) type {
         ) !Self {
             _ = initial_state;
 
-            const inc = try IncPolynomial(F).fromTrace(allocator, trace);
-            const wa = try WaPolynomial(F).fromTrace(allocator, trace, params.r_address, start_address);
-            const lt = try LtPolynomial(F).init(allocator, params.r_cycle);
+            // Build inc polynomial
+            var inc_poly = try IncPolynomial(F).fromTrace(allocator, trace);
+            defer inc_poly.deinit();
+
+            // Build wa polynomial helper
+            var wa_poly = try WaPolynomial(F).fromTrace(allocator, trace, params.r_address, start_address);
+            defer wa_poly.deinit();
+
+            // Build lt polynomial helper
+            var lt_poly = try LtPolynomial(F).init(allocator, params.r_cycle);
+            defer lt_poly.deinit();
+
+            const n = inc_poly.evals.len;
+            const num_vars = inc_poly.num_vars;
+
+            // Allocate evaluation arrays
+            const inc_evals = try allocator.alloc(F, n);
+            const wa_evals = try allocator.alloc(F, n);
+            const lt_evals = try allocator.alloc(F, n);
+
+            // Materialize all polynomial evaluations
+            for (0..n) |j| {
+                inc_evals[j] = inc_poly.get(j);
+                wa_evals[j] = wa_poly.evaluateAtCycle(j);
+                lt_evals[j] = lt_poly.evaluateAtIndex(j);
+            }
+
+            // Compute initial claim
+            var initial_claim = F.zero();
+            for (0..n) |j| {
+                initial_claim = initial_claim.add(inc_evals[j].mul(wa_evals[j]).mul(lt_evals[j]));
+            }
 
             return Self{
-                .inc = inc,
-                .wa = wa,
-                .lt = lt,
-                .params = params,
+                .inc_evals = inc_evals,
+                .wa_evals = wa_evals,
+                .lt_evals = lt_evals,
+                .num_vars = num_vars,
                 .round = 0,
+                .current_claim = initial_claim,
+                .params = params,
                 .allocator = allocator,
             };
         }
 
         pub fn deinit(self: *Self) void {
-            self.inc.deinit();
-            self.wa.deinit();
-            self.lt.deinit();
+            self.allocator.free(self.inc_evals);
+            self.allocator.free(self.wa_evals);
+            self.allocator.free(self.lt_evals);
         }
 
-        /// Compute the initial claim:
-        /// Σ_{j=0}^{T-1} inc(j) · wa(r_address, j) · LT(j, r_cycle)
+        /// Get the initial claim for the sumcheck
         pub fn computeInitialClaim(self: *const Self) F {
-            var claim = F.zero();
-
-            for (0..self.inc.evals.len) |j| {
-                const inc_j = self.inc.get(j);
-                const wa_j = self.wa.evaluateAtCycle(j);
-                const lt_j = self.lt.evaluateAtIndex(j);
-
-                claim = claim.add(inc_j.mul(wa_j).mul(lt_j));
-            }
-
-            return claim;
+            return self.current_claim;
         }
 
         /// Compute round polynomial [p(0), p(1), p(2)]
-        /// p(x) = Σ_{j: j[round]=x} inc(j) · wa(j) · LT(j)
+        /// For degree-3 sumcheck, we compute p(0), p(1), p(2) by evaluating:
+        ///   p(x) = Σ_{j} inc(x,j) · wa(x,j) · lt(x,j)
+        /// where the current variable takes value x and we sum over remaining indices.
         pub fn computeRoundPolynomial(self: *Self) [3]F {
             var evals: [3]F = .{ F.zero(), F.zero(), F.zero() };
-            const half = self.inc.evals.len / 2;
+            const n = self.inc_evals.len;
+            const half = n / 2;
+
+            if (half == 0) {
+                // Single element: p(0) = f(0), p(1) = 0, p(2) = 0
+                if (n > 0) {
+                    evals[0] = self.inc_evals[0].mul(self.wa_evals[0]).mul(self.lt_evals[0]);
+                }
+                return evals;
+            }
 
             for (0..half) |i| {
-                // Index with current variable = 0
-                const inc_0 = self.inc.evals[i];
-                // Index with current variable = 1
-                const inc_1 = self.inc.evals[i + half];
+                // Evaluations at x = 0 (lower half)
+                const inc_0 = self.inc_evals[i];
+                const wa_0 = self.wa_evals[i];
+                const lt_0 = self.lt_evals[i];
 
-                // Compute wa and lt for both
-                const wa_0 = self.wa.evaluateAtCycle(i);
-                const wa_1 = self.wa.evaluateAtCycle(i + half);
-                const lt_0 = self.lt.evaluateAtIndex(i);
-                const lt_1 = self.lt.evaluateAtIndex(i + half);
+                // Evaluations at x = 1 (upper half)
+                const inc_1 = self.inc_evals[i + half];
+                const wa_1 = self.wa_evals[i + half];
+                const lt_1 = self.lt_evals[i + half];
 
-                // p(0) = inc_0 * wa_0 * lt_0
+                // p(0): product at x = 0
                 evals[0] = evals[0].add(inc_0.mul(wa_0).mul(lt_0));
-                // p(1) = inc_1 * wa_1 * lt_1
+
+                // p(1): product at x = 1
                 evals[1] = evals[1].add(inc_1.mul(wa_1).mul(lt_1));
 
-                // p(2): Use interpolation
-                // For cubic, we need to extrapolate using Lagrange interpolation
-                // For degree 3 bound, we compute using: inc, wa, lt are all linear
-                // The product is degree 3, so we need 4 points to fully determine
-                // Simplified: just use linear extrapolation here
-                const inc_2 = inc_0.mul(F.fromU64(2).sub(F.one()).neg()).add(inc_1.mul(F.fromU64(2)));
-                const diff_inc = inc_1.sub(inc_0);
-                const inc_at_2 = inc_1.add(diff_inc);
+                // p(2): extrapolate each polynomial linearly, then multiply
+                // For linear polynomial: f(2) = 2*f(1) - f(0)
+                const inc_2 = inc_1.add(inc_1).sub(inc_0);
+                const wa_2 = wa_1.add(wa_1).sub(wa_0);
+                const lt_2 = lt_1.add(lt_1).sub(lt_0);
 
-                // Similar for wa and lt (though these are trickier)
-                // For now, use a simplified bound
-                const wa_2 = wa_1.mul(F.fromU64(2)).sub(wa_0);
-                const lt_2 = lt_1.mul(F.fromU64(2)).sub(lt_0);
-
-                _ = inc_2;
-                evals[2] = evals[2].add(inc_at_2.mul(wa_2).mul(lt_2));
+                evals[2] = evals[2].add(inc_2.mul(wa_2).mul(lt_2));
             }
 
             return evals;
         }
 
         /// Bind the current variable to challenge r
+        /// This folds all three polynomials: f_new[i] = (1-r)*f[i] + r*f[i+half]
         pub fn bindChallenge(self: *Self, r: F) void {
-            self.inc.bind(r);
+            const half = self.inc_evals.len / 2;
+            if (half == 0) {
+                self.round += 1;
+                return;
+            }
+
+            const one_minus_r = F.one().sub(r);
+
+            // Fold all three polynomials
+            for (0..half) |i| {
+                // inc: interpolate between low and high
+                self.inc_evals[i] = one_minus_r.mul(self.inc_evals[i]).add(r.mul(self.inc_evals[i + half]));
+                // wa: interpolate
+                self.wa_evals[i] = one_minus_r.mul(self.wa_evals[i]).add(r.mul(self.wa_evals[i + half]));
+                // lt: interpolate
+                self.lt_evals[i] = one_minus_r.mul(self.lt_evals[i]).add(r.mul(self.lt_evals[i + half]));
+            }
+
+            // Conceptually shrink the arrays (we'll use fewer elements)
+            // In practice we just track via num_vars and use only first half
+            // But we need to actually resize for the next round
+            // For simplicity, set unused portion to zero
+            for (half..self.inc_evals.len) |i| {
+                self.inc_evals[i] = F.zero();
+                self.wa_evals[i] = F.zero();
+                self.lt_evals[i] = F.zero();
+            }
+
+            // Update current claim: should be p(r) computed from round poly
+            // p(r) = inc(r) * wa(r) * lt(r) summed over remaining indices
+            // After binding, this is the sum over the folded evaluations
+            var new_claim = F.zero();
+            for (0..half) |i| {
+                new_claim = new_claim.add(self.inc_evals[i].mul(self.wa_evals[i]).mul(self.lt_evals[i]));
+            }
+            self.current_claim = new_claim;
+
             self.round += 1;
         }
 
-        /// Get final claim
+        /// Get current claim (after binding challenges)
+        pub fn getCurrentClaim(self: *const Self) F {
+            return self.current_claim;
+        }
+
+        /// Get final claim: the product at the fully bound point
         pub fn getFinalClaim(self: *const Self) F {
-            if (self.inc.evals.len == 0) return F.zero();
-            return self.inc.evals[0];
+            if (self.inc_evals.len == 0) return F.zero();
+            return self.inc_evals[0].mul(self.wa_evals[0]).mul(self.lt_evals[0]);
         }
 
         /// Check if complete
         pub fn isComplete(self: *const Self) bool {
-            return self.round >= self.params.numRounds();
+            return self.round >= self.numRounds();
+        }
+
+        /// Number of rounds
+        pub fn numRounds(self: *const Self) usize {
+            return self.num_vars;
+        }
+
+        /// Get effective array length (shrinks after binding)
+        pub fn effectiveLen(self: *const Self) usize {
+            return self.inc_evals.len >> @intCast(self.round);
         }
     };
 }
@@ -644,4 +735,100 @@ test "val evaluation params" {
 
     try std.testing.expectEqual(@as(usize, 3), params.numRounds()); // log2(8) = 3
     try std.testing.expectEqual(@as(usize, 3), ValEvaluationParams(F).degreeBound());
+}
+
+test "val prover sumcheck invariant: p(0) + p(1) = current_claim" {
+    const allocator = std.testing.allocator;
+    const field = @import("../../field/mod.zig");
+    const F = field.BN254Scalar;
+
+    // Create a memory trace with some writes
+    var trace = MemoryTrace.init(allocator);
+    defer trace.deinit();
+
+    // Add 8 memory accesses to get 3 sumcheck rounds (log2(8) = 3)
+    try trace.recordWrite(0x80000000, 100, 0); // Write to slot 0
+    try trace.recordWrite(0x80000008, 200, 1); // Write to slot 1
+    try trace.recordRead(0x80000000, 100, 2); // Read from slot 0
+    try trace.recordWrite(0x80000010, 300, 3); // Write to slot 2
+    try trace.recordWrite(0x80000000, 150, 4); // Write to slot 0 (update)
+    try trace.recordRead(0x80000008, 200, 5); // Read from slot 1
+    try trace.recordWrite(0x80000018, 400, 6); // Write to slot 3
+    try trace.recordRead(0x80000010, 300, 7); // Read from slot 2
+
+    const r_address = [_]F{ F.zero(), F.zero() }; // Pointing to slot 0
+    const r_cycle = [_]F{ F.one(), F.one(), F.one() }; // Pointing to cycle 7
+
+    var params = try ValEvaluationParams(F).init(
+        allocator,
+        F.zero(), // init_eval
+        8, // trace_len
+        16, // k
+        &r_address,
+        &r_cycle,
+    );
+    defer params.deinit();
+
+    var prover = try ValEvaluationProver(F).init(
+        allocator,
+        &trace,
+        &[_]u64{},
+        params,
+        0x80000000,
+    );
+    defer prover.deinit();
+
+    // Verify sumcheck invariant for each round
+    var claim = prover.computeInitialClaim();
+
+    for (0..prover.numRounds()) |round| {
+        const round_poly = prover.computeRoundPolynomial();
+
+        // The sumcheck invariant: p(0) + p(1) should equal current claim
+        const sum = round_poly[0].add(round_poly[1]);
+
+        if (!sum.eql(claim)) {
+            std.debug.print("Val prover round {} failed: p(0)+p(1) != claim\n", .{round});
+            std.debug.print("  p(0) = {any}\n", .{round_poly[0].toBytes()});
+            std.debug.print("  p(1) = {any}\n", .{round_poly[1].toBytes()});
+            std.debug.print("  sum  = {any}\n", .{sum.toBytes()});
+            std.debug.print("  claim= {any}\n", .{claim.toBytes()});
+        }
+        try std.testing.expect(sum.eql(claim));
+
+        // Bind with a random-ish challenge
+        const challenge = F.fromU64(@as(u64, round * 7 + 5));
+        prover.bindChallenge(challenge);
+
+        // New claim should be p(challenge) - evaluate using Lagrange interpolation
+        // For a degree-d polynomial with points at 0, 1, 2:
+        // p(r) = p(0)*L_0(r) + p(1)*L_1(r) + p(2)*L_2(r)
+        // L_0(r) = (r-1)(r-2) / (0-1)(0-2) = (r-1)(r-2)/2
+        // L_1(r) = (r-0)(r-2) / (1-0)(1-2) = r(r-2)/(-1) = r(2-r)
+        // L_2(r) = (r-0)(r-1) / (2-0)(2-1) = r(r-1)/2
+        const one = F.one();
+        const two = F.fromU64(2);
+
+        const r_minus_1 = challenge.sub(one);
+        const r_minus_2 = challenge.sub(two);
+        const two_minus_r = two.sub(challenge);
+
+        // L_0(r) = (r-1)(r-2)/2
+        const L_0 = r_minus_1.mul(r_minus_2).mul(F.fromU64(2).inv());
+        // L_1(r) = r(2-r)
+        const L_1 = challenge.mul(two_minus_r);
+        // L_2(r) = r(r-1)/2
+        const L_2 = challenge.mul(r_minus_1).mul(F.fromU64(2).inv());
+
+        const p_at_r = round_poly[0].mul(L_0).add(round_poly[1].mul(L_1)).add(round_poly[2].mul(L_2));
+
+        // Update claim for next round
+        claim = p_at_r;
+    }
+
+    // Verify final claim matches prover's tracked claim
+    const final_claim = prover.getFinalClaim();
+    try std.testing.expect(final_claim.eql(claim));
+
+    std.debug.print("Val prover sumcheck invariant test passed!\n", .{});
 }

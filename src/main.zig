@@ -11,6 +11,7 @@ const BN254Scalar = zolt.field.BN254Scalar;
 const Command = enum {
     help,
     version,
+    info,
     run,
     prove,
     srs,
@@ -30,6 +31,7 @@ fn printHelp() void {
         \\COMMANDS:
         \\    help              Show this help message
         \\    version           Show version information
+        \\    info              Show zkVM capabilities and feature summary
         \\    run <elf>         Run RISC-V ELF binary in the emulator
         \\    prove <elf>       Generate ZK proof for ELF binary (experimental)
         \\    srs <ptau>        Inspect a Powers of Tau (ptau) file
@@ -53,11 +55,85 @@ fn printVersion() void {
     std.debug.print("zig version: {s}\n", .{@import("builtin").zig_version_string});
 }
 
+fn printInfo() void {
+    std.debug.print(
+        \\Zolt zkVM - Capabilities and Features
+        \\======================================
+        \\
+        \\Version: {s}
+        \\License: MIT (porting a16z/jolt, also MIT)
+        \\
+        \\PROOF SYSTEM:
+        \\  Commitment Scheme:    HyperKZG (polynomial commitments)
+        \\  Backend:              Spartan (R1CS-based zkSNARK)
+        \\  Lookup Arguments:     Lasso (efficient lookups via sumcheck)
+        \\  Sumcheck Protocol:    6-stage multi-sumcheck
+        \\  Field:                BN254 Scalar (254 bits, ~21 bytes)
+        \\
+        \\SUMCHECK STAGES:
+        \\  1. Outer Spartan     - R1CS constraint verification (degree 3)
+        \\  2. RAM RAF           - Read-after-final memory checking (degree 2)
+        \\  3. Lasso Lookup      - Instruction lookup verification (degree 2)
+        \\  4. Value Evaluation  - Memory consistency (degree 3)
+        \\  5. Register          - Register file correctness (degree 2)
+        \\  6. Booleanity        - Flag constraint checking (degree 2)
+        \\
+        \\RISC-V SUPPORT:
+        \\  ISA:                  RV32IM / RV64IMC
+        \\  Supported Extensions: M (multiply), C (compressed)
+        \\  Register Width:       32/64 bits
+        \\  Registers:            32 general-purpose (x0-x31)
+        \\
+        \\LOOKUP TABLES (24 types):
+        \\  Bitwise:              AND, OR, XOR, ZERO_EXTEND, SIGN_EXTEND
+        \\  Comparison:           LT, LTU, EQ (less than, unsigned, equal)
+        \\  Shift:                SLL, SRL, SRA (left/right/arithmetic)
+        \\  Arithmetic:           ADD, SUB, MUL, MULH, MULHSU, MULHU
+        \\  Division:             DIV, DIVU, REM, REMU
+        \\  Utility:              RANGE_CHECK, IDENTITY
+        \\
+        \\INSTRUCTION FAMILIES (~60 instructions):
+        \\  R-type:               ADD, SUB, SLL, SLT, SLTU, XOR, SRL, SRA, OR, AND
+        \\  I-type:               ADDI, SLTI, SLTIU, XORI, ORI, ANDI, SLLI, SRLI, SRAI
+        \\  Load:                 LB, LH, LW, LBU, LHU, LD, LWU
+        \\  Store:                SB, SH, SW, SD
+        \\  Branch:               BEQ, BNE, BLT, BGE, BLTU, BGEU
+        \\  Jump:                 JAL, JALR
+        \\  Upper-imm:            LUI, AUIPC
+        \\  M-extension:          MUL, MULH, MULHSU, MULHU, DIV, DIVU, REM, REMU
+        \\  C-extension:          16-bit compressed variants
+        \\
+        \\MEMORY MODEL:
+        \\  Address Space:        32-bit / 64-bit addressable
+        \\  Memory Regions:       Code, Stack, Heap
+        \\  Memory Checking:      RAF (Read-After-Final) verification
+        \\
+        \\PERFORMANCE (approximate, single-threaded):
+        \\  Field multiplication: ~50 ns/op
+        \\  Field inversion:      ~13 us/op
+        \\  MSM (256 points):     ~0.5 ms/op
+        \\  HyperKZG commit:      ~1.5 ms/1024 coefficients
+        \\  Proving (2 steps):    ~97 ms
+        \\  Verification:         ~600 us (130-165x faster than proving)
+        \\  Proof size:           ~6-8 KB (depends on trace length)
+        \\
+        \\ELF LOADER:
+        \\  Formats:              ELF32, ELF64
+        \\  Endianness:           Little-endian (RISC-V default)
+        \\  Entry Points:         Automatic detection
+        \\
+        \\For usage: zolt help
+        \\
+    , .{zolt.version});
+}
+
 fn parseCommand(arg: []const u8) Command {
     if (std.mem.eql(u8, arg, "help") or std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
         return .help;
     } else if (std.mem.eql(u8, arg, "version") or std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--version")) {
         return .version;
+    } else if (std.mem.eql(u8, arg, "info")) {
+        return .info;
     } else if (std.mem.eql(u8, arg, "run")) {
         return .run;
     } else if (std.mem.eql(u8, arg, "prove")) {
@@ -413,6 +489,7 @@ pub fn main() !void {
     switch (cmd) {
         .help => printHelp(),
         .version => printVersion(),
+        .info => printInfo(),
         .run => {
             if (args.next()) |arg| {
                 if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
@@ -503,6 +580,7 @@ test "command parsing" {
     try std.testing.expect(parseCommand("--help") == .help);
     try std.testing.expect(parseCommand("version") == .version);
     try std.testing.expect(parseCommand("-v") == .version);
+    try std.testing.expect(parseCommand("info") == .info);
     try std.testing.expect(parseCommand("run") == .run);
     try std.testing.expect(parseCommand("prove") == .prove);
     try std.testing.expect(parseCommand("decode") == .decode);

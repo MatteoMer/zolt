@@ -24,68 +24,63 @@
 17. **Factorized Eq Weights** - eq[i] = E_out[i>>5] * E_in[i&0x1F] with bit shifting
 18. **getWindowEqTables** - Fixed to match Jolt's E_out_in_for_window logic
 19. **Window eq tables sizing** - 32*32=1024 factorization verified correct
+20. **ExpandingTable** - Added for incremental eq polynomial computation
+21. **Constraint Group Indices** - Fixed to match Jolt's FIRST_GROUP/SECOND_GROUP
 
 ---
 
-## Current Status: Stage 1 Sumcheck Mismatch ❌
+## Current Status: Stage 1 Sumcheck Output Mismatch ❌
 
-The Jolt cross-verification runs but Stage 1 sumcheck output_claim doesn't match expected.
+### Observations
+
+- UniSkip passes ✅
+- All 11 remaining sumcheck rounds pass (p(0)+p(1)=claim) ✅
+- Final output_claim ≠ expected_output_claim ❌
 
 ```
-output_claim (from sumcheck):      9328088438419821762178329852958014809003674147304165221608390320629231184085
-expected_output_claim (from R1CS): 15770715866241261093869584783304477941139842654876630627419092129570271411009
+output_claim (from sumcheck):    14155882678837957064...
+expected_output_claim (from R1CS): 1206125418311750210...
 ```
 
-### Key Observations
+### Key Insight
 
-1. **UniSkip passes** - Domain sum is zero, polynomial evaluation correct
-2. **All 11 sumcheck rounds pass** - p(0) + p(1) = claim for each round
-3. **Final claim mismatch** - The output doesn't match expected
+The sumcheck rounds are internally consistent (each p(0)+p(1) = claim), but the polynomial evaluations at challenge points produce wrong intermediate claims.
 
-### Root Cause Analysis (In Progress)
+This means the round polynomial COEFFICIENTS are wrong, even though their sums are correct.
 
-The expected_output_claim formula is:
+For a degree-3 polynomial:
+- p(0) = c_0
+- p(1) = c_0 + c_1 + c_2 + c_3
+- p(r) = c_0 + c_1*r + c_2*r^2 + c_3*r^3
+
+The constraint p(0) + p(1) = claim doesn't fully determine the polynomial. We need:
+- t'(0) = correct value for first half sum
+- t'(1) = correct value for second half sum
+- t'(∞) = correct quadratic coefficient
+
+If any of these are wrong, p(r) will be wrong even if p(0)+p(1) is correct.
+
+### Likely Root Cause
+
+The split_eq polynomial's `computeCubicRoundPoly` function may not match Jolt's formula exactly.
+
+Jolt's formula uses:
+```rust
+// l(X) = current_scalar * eq(tau[current_index-1], X)
+// q(X) = quadratic factor from Az*Bz
+// p(X) = l(X) * q(X)
 ```
-expected = L(tau_high, r0) * eq(tau_low, r_reversed) * Az(rx_constr, z) * Bz(rx_constr, z)
-```
 
-Where:
-- `L(tau_high, r0)` = Lagrange kernel from UniSkip ✅
-- `eq(tau_low, r_reversed)` = eq polynomial at reversed challenges
-- `Az`, `Bz` = constraint evaluations using R1CS input MLE evaluations
+The cubic polynomial has the form:
+- c_0 = l(0) * q(0)
+- c_1 + c_2 + c_3 = l(1) * q(1) - l(0) * q(0)
+- c_3 = l_slope * q_quadratic_coeff (the cubic term)
 
-The sumcheck computes:
-```
-output = eq_factor * Σ_c eq(r, c) * Az(c) * Bz(c)
-```
+### Next Steps
 
-**Key finding:** The verifier expects:
-- `Az(z) * Bz(z)` where z = MLE evaluations
-- = `(Σ_c eq(r,c) * Az_c) * (Σ_c eq(r,c) * Bz_c)`
-
-But the sumcheck produces:
-- `Σ_c eq(r,c) * Az_c * Bz_c`
-
-These are mathematically different expressions! However:
-- For satisfied R1CS constraints: `Az_c * Bz_c = 0` for all c
-- This means both expressions should be 0
-
-### Likely Issues
-
-1. **Missing r_grid**: Jolt uses `ExpandingTable` (r_grid) to weight cycles by bound challenges. Zolt doesn't have this.
-
-2. **Constraint evaluation formula**: The Az/Bz computation might differ from Jolt's `R1CSEval`.
-
-3. **MLE evaluation point**: The r_cycle point for MLE evaluations might be computed differently.
-
----
-
-## Next Steps
-
-1. [ ] Add ExpandingTable equivalent to Zolt's streaming prover
-2. [ ] Verify Az/Bz computation matches Jolt's R1CSEval exactly
-3. [ ] Add debug output comparing intermediate values
-4. [ ] Check r_cycle point computation and endianness
+1. [ ] Compare computeCubicRoundPoly output with Jolt's equivalent
+2. [ ] Verify eq weight computations match exactly
+3. [ ] Add detailed logging to trace intermediate values
 
 ---
 
@@ -99,23 +94,5 @@ zig build -Doptimize=ReleaseFast
 
 # Run cross-verification in Jolt
 cd /Users/matteo/projects/jolt
-cargo test --package jolt-core test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
-
-# Run detailed debug test
 cargo test --package jolt-core test_debug_stage1_verification -- --ignored --nocapture
 ```
-
----
-
-## Technical Reference
-
-### Jolt Files
-- `jolt-core/src/zkvm/spartan/outer.rs` - Outer sumcheck prover/verifier
-- `jolt-core/src/utils/expanding_table.rs` - r_grid implementation
-- `jolt-core/src/poly/split_eq_poly.rs` - GruenSplitEqPolynomial
-- `jolt-core/src/zkvm/r1cs/key.rs` - evaluate_inner_sum_product_at_point
-
-### Zolt Files
-- `src/zkvm/spartan/streaming_outer.zig` - Streaming outer prover
-- `src/poly/split_eq.zig` - GruenSplitEqPolynomial
-- `src/zkvm/r1cs/constraints.zig` - Constraint evaluation

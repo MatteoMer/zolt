@@ -1025,15 +1025,15 @@ pub fn pairingFp(p: G1PointFp, q: G2Point) PairingResult {
 }
 
 /// Pseudobinary representation of the loop length 6·X+2 of the optimal ate pairing over BN254.
-/// From ziskos implementation (miller_loop.rs).
-/// Array is from index 0 to 64, processed from index 1 (skip first).
-/// Index 0 = 1 corresponds to the MSB of the value.
+/// From arkworks-rs/curves bn254/src/curves/mod.rs (ATE_LOOP_COUNT).
+/// This is the NAF representation of 6*x+2 where x = 4965661367192848881.
+/// Array has 65 elements, processed from LSB (index 0) to MSB (index 64).
 const ATE_LOOP_COUNT: [65]i2 = .{
-    1, 1, 0, 1, 0, 0, -1, 0, 1, 1, 0, 0, 0, -1, 0, 0,
-    1, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0,
-    1, 1, 1, 0, 0, 0, 0, -1, 0, 1, 0, 0, -1, 0, 1, 1,
-    0, 0, 1, 0, 0, -1, 1, 0, 0, -1, 0, 1, 0, 1, 0, 0,
-    0,
+    0, 0, 0, 1, 0, 1, 0, -1, 0, 0, 1, -1, 0, 0, 1, 0,
+    0, 1, 1, 0, -1, 0, 0, 1, 0, -1, 0, 0, 0, 0, 1, 1,
+    1, 0, 0, -1, 0, 0, 1, 0, 0, 0, 0, 0, -1, 0, 0, 1,
+    1, 0, 0, -1, 0, 0, 0, 1, 1, 0, -1, 0, 0, 1, 0, 1,
+    1,
 };
 
 /// Line coefficients R0, R1 matching gnark-crypto's affine representation
@@ -1238,8 +1238,10 @@ fn millerLoop(p: G1PointFp, q: G2Point) Fp12 {
     var t = q;
 
     // Main loop: iterate through bits of the ate loop parameter
-    // Following ziskos: start from index 1 (skip index 0)
-    for (ATE_LOOP_COUNT[1..]) |bit| {
+    // Following arkworks: iterate from len-1 down to 1, check bit at i-1
+    // This processes the array from MSB to LSB (high to low index in the array)
+    var i: usize = ATE_LOOP_COUNT.len - 1;
+    while (i >= 1) : (i -= 1) {
         // Doubling step: f = f² * l_{T,T}(P), T = 2T
         f = f.square();
         const dbl = doublingStep(t);
@@ -1247,7 +1249,8 @@ fn millerLoop(p: G1PointFp, q: G2Point) Fp12 {
         const line_dbl = evaluateLine(dbl.coeffs, p.x, p.y);
         f = f.mul(line_dbl);
 
-        // Addition step if bit is non-zero
+        // Addition step if bit at [i-1] is non-zero
+        const bit = ATE_LOOP_COUNT[i - 1];
         if (bit == 1) {
             // f = f * l_{T,Q}(P), T = T + Q
             const add = additionStep(t, q);

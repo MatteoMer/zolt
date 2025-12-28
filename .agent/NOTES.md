@@ -746,3 +746,74 @@ To be fully compatible, the prover needs:
 
 This is a significant undertaking requiring ~2000 lines of code to port the full
 streaming sumcheck machinery from Jolt.
+
+---
+
+## Transcript Integration (Iteration 16)
+
+### Summary
+
+Integrated the Blake2b Fiat-Shamir transcript throughout proof generation:
+
+1. **Blake2bTranscript Import** - Added to proof_converter.zig
+2. **generateStreamingOuterSumcheckProofWithTranscript()** - Stage 1 with transcript
+3. **convertWithTranscript()** - Full transcript-integrated conversion
+4. **proveJoltCompatible() Update** - Uses Blake2b transcript
+
+### Key Changes
+
+**proof_converter.zig**:
+- Added `Blake2bTranscript` import
+- Created `generateStreamingOuterSumcheckProofWithTranscript()` that:
+  - Appends UniSkip polynomial coefficients to transcript
+  - Derives r0 challenge from transcript
+  - For each remaining round:
+    - Computes round polynomial
+    - Appends round poly to transcript
+    - Derives round challenge from transcript
+    - Binds challenge and updates claim
+- Created `convertWithTranscript()` for full integration
+
+**mod.zig (JoltProver)**:
+- Updated `proveJoltCompatible()` to:
+  - Initialize Blake2bTranscript with "jolt_v1" label
+  - Generate R1CS cycle witnesses from execution trace
+  - Call `convertWithTranscript()` instead of `convert()`
+  - Pass tau challenge vector (placeholder values for now)
+
+### Current Verification Status
+
+- ✅ Serialization: Byte-perfect format compatibility
+- ✅ Deserialization: Jolt successfully deserializes Zolt proofs
+- ✅ Transcript: Fiat-Shamir challenge derivation integrated
+- ⏳ Verification: Stage 1 sumcheck still fails (expected - need proper tau from commitments)
+
+### What's Missing for Full Verification
+
+1. **Tau from Commitments**: Tau challenge vector should come from hashing
+   all polynomial commitments, not from placeholder values.
+
+2. **Complete Sumcheck Prover**: The streaming outer prover needs proper
+   polynomial evaluation (currently may produce zeros on error paths).
+
+3. **Stages 2-7**: Currently use zero proofs. Full implementation requires
+   porting the complete multi-stage prover logic from Jolt.
+
+### Next Steps
+
+1. Implement proper tau derivation from commitment hashes
+2. Debug Stage 1 sumcheck to understand the claim mismatch
+3. Consider implementing the remaining stages
+
+### Test Results
+
+All 608 Zolt tests pass:
+```
+zig build test --summary all
+Build Summary: 5/5 steps succeeded; 608/608 tests passed
+```
+
+Cross-verification test:
+- `test_deserialize_zolt_proof`: PASS
+- `test_debug_zolt_format`: PASS
+- `test_verify_zolt_proof`: FAIL (Stage 1 sumcheck verification failed)

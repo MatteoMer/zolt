@@ -118,6 +118,8 @@ The next step is end-to-end cross-verification with Jolt.
 - [x] **UniSkip first-round structure** - Correct degree polynomials
 - [x] **Streaming sumcheck proofs** - Using actual evaluations
 - [x] **Fiat-Shamir consistency** - Transcript for challenges
+- [x] **proveJoltCompatible with transcript** - Uses Blake2bTranscript
+- [ ] **Tau from commitments** - Derive tau from commitment hashes
 - [ ] **Full verification** - End-to-end with Jolt verifier
 
 ---

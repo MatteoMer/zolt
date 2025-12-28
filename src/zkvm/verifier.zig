@@ -95,26 +95,44 @@ pub fn MultiStageVerifier(comptime F: type) type {
             // Verify each stage in order
             // Each stage verification updates the transcript for Fiat-Shamir
             if (!try self.verifyStage1(&proofs.stage_proofs[0], transcript)) {
+                if (self.config.debug_output) {
+                    std.debug.print("Stage 1 verification failed\n", .{});
+                }
                 return false;
             }
 
             if (!try self.verifyStage2(&proofs.stage_proofs[1], transcript)) {
+                if (self.config.debug_output) {
+                    std.debug.print("Stage 2 verification failed\n", .{});
+                }
                 return false;
             }
 
             if (!try self.verifyStage3(&proofs.stage_proofs[2], transcript)) {
+                if (self.config.debug_output) {
+                    std.debug.print("Stage 3 verification failed\n", .{});
+                }
                 return false;
             }
 
             if (!try self.verifyStage4(&proofs.stage_proofs[3], transcript)) {
+                if (self.config.debug_output) {
+                    std.debug.print("Stage 4 verification failed\n", .{});
+                }
                 return false;
             }
 
             if (!try self.verifyStage5(&proofs.stage_proofs[4], transcript)) {
+                if (self.config.debug_output) {
+                    std.debug.print("Stage 5 verification failed\n", .{});
+                }
                 return false;
             }
 
             if (!try self.verifyStage6(&proofs.stage_proofs[5], transcript)) {
+                if (self.config.debug_output) {
+                    std.debug.print("Stage 6 verification failed\n", .{});
+                }
                 return false;
             }
 
@@ -175,8 +193,26 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 const sum = round_poly[0].add(round_poly[1]);
                 const sum_check_ok = sum.eql(current_claim);
 
+                // Absorb round polynomial into transcript (Fiat-Shamir binding)
+                try transcript.appendScalar("round_poly_0", round_poly[0]);
+                try transcript.appendScalar("round_poly_1", round_poly[1]);
+                if (round_poly.len > 2) {
+                    try transcript.appendScalar("round_poly_2", round_poly[2]);
+                }
+
                 // Get challenge from transcript (must be called to keep in sync)
                 const challenge = try transcript.challengeScalar("spartan_round");
+
+                if (self.config.debug_output) {
+                    std.debug.print("  Stage 1 round {}: p0={} p1={} sum={} claim={} ok={}\n", .{
+                        round_idx,
+                        round_poly[0].toU64(),
+                        round_poly[1].toU64(),
+                        sum.toU64(),
+                        current_claim.toU64(),
+                        sum_check_ok,
+                    });
+                }
 
                 if (self.config.strict_sumcheck and !sum_check_ok) {
                     // Strict mode: reject the proof if sum check fails
@@ -185,12 +221,14 @@ pub fn MultiStageVerifier(comptime F: type) type {
                         .final_claim = null,
                         .error_msg = "Stage 1: sumcheck failed - p(0) + p(1) != claim",
                     };
-                    _ = round_idx; // suppress unused warning
                     return false;
                 }
 
                 // Update claim: evaluate p at challenge point
                 current_claim = evaluatePolynomialAtChallenge(F, round_poly, challenge);
+                if (self.config.debug_output) {
+                    std.debug.print("    new_claim={} (challenge used)\n", .{current_claim.toU64()});
+                }
             }
 
             // Stage 1 verification passed

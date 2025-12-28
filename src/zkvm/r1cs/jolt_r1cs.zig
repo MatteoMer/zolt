@@ -264,6 +264,8 @@ pub fn JoltSpartanInterface(comptime F: type) type {
         eq_evals: []F,
         /// Combined polynomial: eq(tau,x) * [Az*Bz - Cz]
         combined_poly: []F,
+        /// Current effective length of combined_poly (halves each round)
+        current_len: usize,
         /// Current bound challenge values
         challenges: std.ArrayListUnmanaged(F),
         allocator: Allocator,
@@ -310,6 +312,7 @@ pub fn JoltSpartanInterface(comptime F: type) type {
                 .Cz = Cz,
                 .eq_evals = eq_evals,
                 .combined_poly = combined,
+                .current_len = size,
                 .challenges = .{},
                 .allocator = allocator,
             };
@@ -327,7 +330,7 @@ pub fn JoltSpartanInterface(comptime F: type) type {
         /// Get initial sumcheck claim (should be 0 for valid witness)
         pub fn initialClaim(self: *const Self) F {
             var sum = F.zero();
-            for (self.combined_poly) |v| {
+            for (self.combined_poly[0..self.current_len]) |v| {
                 sum = sum.add(v);
             }
             return sum;
@@ -342,16 +345,15 @@ pub fn JoltSpartanInterface(comptime F: type) type {
         ///
         /// Returns [p(0), p(1), p(2)] for degree-2 sumcheck
         pub fn computeRoundPolynomial(self: *Self) ![3]F {
-            const current_len = self.combined_poly.len;
-            if (current_len <= 1) {
+            if (self.current_len <= 1) {
                 return [3]F{
-                    if (current_len == 1) self.combined_poly[0] else F.zero(),
+                    if (self.current_len == 1) self.combined_poly[0] else F.zero(),
                     F.zero(),
                     F.zero(),
                 };
             }
 
-            const half = current_len / 2;
+            const half = self.current_len / 2;
 
             // p(0) = sum of first half
             // p(1) = sum of second half
@@ -363,8 +365,9 @@ pub fn JoltSpartanInterface(comptime F: type) type {
                 p1 = p1.add(self.combined_poly[i + half]);
             }
 
-            // p(2) = extrapolation: 2*p(1) - p(0)
-            // This is approximate - real implementation would use proper quadratic extension
+            // p(2) = extrapolation for linear polynomial
+            // Since combined_poly is multilinear, after folding it remains linear in each variable
+            // The round polynomial is linear, so p(2) = 2*p(1) - p(0)
             const p2 = p1.add(p1).sub(p0);
 
             return [3]F{ p0, p1, p2 };
@@ -374,10 +377,9 @@ pub fn JoltSpartanInterface(comptime F: type) type {
         pub fn bindChallenge(self: *Self, challenge: F) !void {
             try self.challenges.append(self.allocator, challenge);
 
-            const current_len = self.combined_poly.len;
-            if (current_len <= 1) return;
+            if (self.current_len <= 1) return;
 
-            const half = current_len / 2;
+            const half = self.current_len / 2;
             const one_minus_r = F.one().sub(challenge);
 
             // Fold: new[i] = (1-r) * old[i] + r * old[i + half]
@@ -386,10 +388,8 @@ pub fn JoltSpartanInterface(comptime F: type) type {
                     .add(challenge.mul(self.combined_poly[i + half]));
             }
 
-            // Shrink the polynomial
-            // We just use the first half now
-            // Note: This modifies in place, the second half is now garbage
-            // A proper implementation would reallocate
+            // Update the effective length
+            self.current_len = half;
         }
 
         /// Get the final evaluation after all rounds

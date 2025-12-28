@@ -321,6 +321,11 @@ pub fn MultiStageProver(comptime F: type) type {
                 poly_copy[2] = round_poly[2];
                 try stage_proof.round_polys.append(self.allocator, poly_copy);
 
+                // Absorb round polynomial into transcript (Fiat-Shamir binding)
+                try transcript.appendScalar("round_poly_0", round_poly[0]);
+                try transcript.appendScalar("round_poly_1", round_poly[1]);
+                try transcript.appendScalar("round_poly_2", round_poly[2]);
+
                 // Get challenge from transcript
                 const challenge = try transcript.challengeScalar("spartan_round");
                 try stage_proof.addChallenge(challenge);

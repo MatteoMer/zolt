@@ -130,9 +130,9 @@ pub fn main() !void {
     };
     verifier.setVerifyingKey(zkvm_vk);
 
-    // Note: Set strict_sumcheck to false for demo purposes.
-    // When true, the verifier performs full sumcheck validation.
-    // When false, it performs structural verification only.
+    // Note: Strict sumcheck is disabled for demo. When enabled, it reveals that
+    // the prover's round polynomials don't perfectly satisfy p(0) + p(1) = claim
+    // after folding. This is a known issue requiring further investigation.
     verifier.setStrictMode(false);
 
     std.debug.print("Verifier initialized with verifying key\n", .{});

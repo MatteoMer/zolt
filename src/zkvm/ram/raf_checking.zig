@@ -300,19 +300,60 @@ pub fn RafEvaluationProver(comptime F: type) type {
 
         /// Compute the round polynomial for the current round
         /// Returns [p(0), p(1)] where p(x) = Σ_{k: k[round]=x} ra(k) ⋅ unmap(k)
+        ///
+        /// The key insight: we must compute the unmap values accounting for
+        /// the already-bound variables. The unmap polynomial value at a
+        /// partially-bound point depends on all the challenge values bound so far.
         pub fn computeRoundPolynomial(self: *Self) [2]F {
             const half = self.ra.evals.len / 2;
             var evals: [2]F = .{ F.zero(), F.zero() };
 
+            // Compute the base contribution from already-bound variables
+            // unmap(k) = start_address + 8 * Σ_j bound_values[j] * 2^j + 8 * current_var * 2^round + ...
+            var base_contribution = F.fromU64(self.unmap.start_address);
+            var power: u64 = 8;
+            for (self.bound_values.items) |v| {
+                base_contribution = base_contribution.add(v.mul(F.fromU64(power)));
+                power *= 2;
+            }
+
+            // Power for the current round variable
+            const current_power = power;
+
             for (0..half) |i| {
-                // Index with bit[round] = 0
+                // ra evaluations at x=0 and x=1 for current variable
                 const ra_lo = self.ra.evals[i];
-                // Index with bit[round] = 1
                 const ra_hi = self.ra.evals[i + half];
 
-                // Unmap evaluations
-                const unmap_lo = F.fromU64(self.unmap.evaluateAtIndex(i));
-                const unmap_hi = F.fromU64(self.unmap.evaluateAtIndex(i + half));
+                // For the unmap polynomial, we need to compute its value at the
+                // point where:
+                // - bound variables are fixed to bound_values
+                // - current variable is 0 or 1
+                // - remaining variables sum according to index i
+                //
+                // unmap at (bound_values..., 0, remaining_bits_of_i)
+                // = base_contribution + 0*current_power + 8 * remaining_contribution
+                //
+                // The remaining contribution from bits after current round:
+                var remaining_contrib_lo = F.zero();
+                var remaining_contrib_hi = F.zero();
+                var remaining_power: u64 = current_power * 2;
+                const remaining_vars = self.unmap.num_vars - self.round - 1;
+                var idx = i;
+                for (0..remaining_vars) |_| {
+                    const bit = idx & 1;
+                    if (bit == 1) {
+                        remaining_contrib_lo = remaining_contrib_lo.add(F.fromU64(remaining_power));
+                        remaining_contrib_hi = remaining_contrib_hi.add(F.fromU64(remaining_power));
+                    }
+                    idx >>= 1;
+                    remaining_power *= 2;
+                }
+
+                // unmap_lo = base + 0*current_power + remaining (x=0)
+                const unmap_lo = base_contribution.add(remaining_contrib_lo);
+                // unmap_hi = base + 1*current_power + remaining (x=1)
+                const unmap_hi = base_contribution.add(F.fromU64(current_power)).add(remaining_contrib_hi);
 
                 evals[0] = evals[0].add(ra_lo.mul(unmap_lo));
                 evals[1] = evals[1].add(ra_hi.mul(unmap_hi));

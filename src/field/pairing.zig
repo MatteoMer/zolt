@@ -620,7 +620,126 @@ pub const Fp12 = struct {
     pub fn isOne(self: Fp12) bool {
         return self.eql(Fp12.one());
     }
+
+    /// Serialize Fp12 to arkworks-compatible format (384 bytes, uncompressed)
+    ///
+    /// Arkworks serializes Fp12 = Fp6[w]/(w² - v) as:
+    /// - c0 (Fp6) first, then c1 (Fp6)
+    /// - Each Fp6 = Fp2[v]/(v³ - ξ) is serialized as c0, c1, c2
+    /// - Each Fp2 = Fp[u]/(u² + 1) is serialized as c0, c1
+    /// - Each Fp element is 32 bytes little-endian
+    ///
+    /// Order: c0.c0.c0, c0.c0.c1, c0.c1.c0, c0.c1.c1, c0.c2.c0, c0.c2.c1,
+    ///        c1.c0.c0, c1.c0.c1, c1.c1.c0, c1.c1.c1, c1.c2.c0, c1.c2.c1
+    /// = 12 Fp elements × 32 bytes = 384 bytes
+    pub fn toBytes(self: Fp12) [384]u8 {
+        var result: [384]u8 = undefined;
+        var offset: usize = 0;
+
+        // Helper to serialize Fp element
+        const serializeFp = struct {
+            fn f(buf: []u8, fp_val: Fp) void {
+                // Convert from Montgomery form to standard form
+                const standard = fp_val.fromMontgomery();
+                // Write as 32 bytes little-endian
+                for (0..4) |i| {
+                    std.mem.writeInt(u64, buf[i * 8 ..][0..8], standard.limbs[i], .little);
+                }
+            }
+        }.f;
+
+        // c0 (Fp6)
+        serializeFp(result[offset..][0..32], self.c0.c0.c0);
+        offset += 32;
+        serializeFp(result[offset..][0..32], self.c0.c0.c1);
+        offset += 32;
+        serializeFp(result[offset..][0..32], self.c0.c1.c0);
+        offset += 32;
+        serializeFp(result[offset..][0..32], self.c0.c1.c1);
+        offset += 32;
+        serializeFp(result[offset..][0..32], self.c0.c2.c0);
+        offset += 32;
+        serializeFp(result[offset..][0..32], self.c0.c2.c1);
+        offset += 32;
+
+        // c1 (Fp6)
+        serializeFp(result[offset..][0..32], self.c1.c0.c0);
+        offset += 32;
+        serializeFp(result[offset..][0..32], self.c1.c0.c1);
+        offset += 32;
+        serializeFp(result[offset..][0..32], self.c1.c1.c0);
+        offset += 32;
+        serializeFp(result[offset..][0..32], self.c1.c1.c1);
+        offset += 32;
+        serializeFp(result[offset..][0..32], self.c1.c2.c0);
+        offset += 32;
+        serializeFp(result[offset..][0..32], self.c1.c2.c1);
+
+        return result;
+    }
+
+    /// Deserialize from arkworks-compatible format (384 bytes)
+    pub fn fromBytes(bytes: *const [384]u8) Fp12 {
+        var offset: usize = 0;
+
+        // Helper to deserialize Fp element
+        const deserializeFp = struct {
+            fn f(buf: []const u8) Fp {
+                var limbs: [4]u64 = undefined;
+                for (0..4) |i| {
+                    limbs[i] = std.mem.readInt(u64, buf[i * 8 ..][0..8], .little);
+                }
+                // Convert to Montgomery form
+                const raw = Fp{ .limbs = limbs };
+                return raw.toMontgomery();
+            }
+        }.f;
+
+        // c0 (Fp6)
+        const c0_c0_c0 = deserializeFp(bytes[offset..][0..32]);
+        offset += 32;
+        const c0_c0_c1 = deserializeFp(bytes[offset..][0..32]);
+        offset += 32;
+        const c0_c1_c0 = deserializeFp(bytes[offset..][0..32]);
+        offset += 32;
+        const c0_c1_c1 = deserializeFp(bytes[offset..][0..32]);
+        offset += 32;
+        const c0_c2_c0 = deserializeFp(bytes[offset..][0..32]);
+        offset += 32;
+        const c0_c2_c1 = deserializeFp(bytes[offset..][0..32]);
+        offset += 32;
+
+        // c1 (Fp6)
+        const c1_c0_c0 = deserializeFp(bytes[offset..][0..32]);
+        offset += 32;
+        const c1_c0_c1 = deserializeFp(bytes[offset..][0..32]);
+        offset += 32;
+        const c1_c1_c0 = deserializeFp(bytes[offset..][0..32]);
+        offset += 32;
+        const c1_c1_c1 = deserializeFp(bytes[offset..][0..32]);
+        offset += 32;
+        const c1_c2_c0 = deserializeFp(bytes[offset..][0..32]);
+        offset += 32;
+        const c1_c2_c1 = deserializeFp(bytes[offset..][0..32]);
+
+        return Fp12{
+            .c0 = Fp6{
+                .c0 = Fp2.init(c0_c0_c0, c0_c0_c1),
+                .c1 = Fp2.init(c0_c1_c0, c0_c1_c1),
+                .c2 = Fp2.init(c0_c2_c0, c0_c2_c1),
+            },
+            .c1 = Fp6{
+                .c0 = Fp2.init(c1_c0_c0, c1_c0_c1),
+                .c1 = Fp2.init(c1_c1_c0, c1_c1_c1),
+                .c2 = Fp2.init(c1_c2_c0, c1_c2_c1),
+            },
+        };
+    }
 };
+
+/// GT element (target group of the pairing)
+/// This is an alias for Fp12 used in the pairing target group
+pub const GT = Fp12;
 
 // ============================================================================
 // G2 Points (on the twist curve over Fp2)
@@ -1707,4 +1826,63 @@ test "Fp6 mul by v via mulByXi" {
     try std.testing.expect(result.c0.eql(Fp2.init(Fp.fromU64(27), Fp.fromU64(3))));
     try std.testing.expect(result.c1.eql(Fp2.init(Fp.fromU64(1), Fp.fromU64(0))));
     try std.testing.expect(result.c2.eql(Fp2.init(Fp.fromU64(2), Fp.fromU64(0))));
+}
+
+test "Fp12 toBytes/fromBytes roundtrip" {
+    // Create a non-trivial Fp12 element
+    const fp12 = Fp12{
+        .c0 = Fp6{
+            .c0 = Fp2.init(Fp.fromU64(1), Fp.fromU64(2)),
+            .c1 = Fp2.init(Fp.fromU64(3), Fp.fromU64(4)),
+            .c2 = Fp2.init(Fp.fromU64(5), Fp.fromU64(6)),
+        },
+        .c1 = Fp6{
+            .c0 = Fp2.init(Fp.fromU64(7), Fp.fromU64(8)),
+            .c1 = Fp2.init(Fp.fromU64(9), Fp.fromU64(10)),
+            .c2 = Fp2.init(Fp.fromU64(11), Fp.fromU64(12)),
+        },
+    };
+
+    // Serialize to bytes
+    const bytes = fp12.toBytes();
+
+    // Verify it's 384 bytes
+    try std.testing.expectEqual(@as(usize, 384), bytes.len);
+
+    // Deserialize back
+    const decoded = Fp12.fromBytes(&bytes);
+
+    // Verify equality
+    try std.testing.expect(fp12.eql(decoded));
+}
+
+test "Fp12 toBytes matches expected format" {
+    // Test that Fp12.one() serializes correctly
+    const one = Fp12.one();
+    const bytes = one.toBytes();
+
+    // Fp12.one() = (Fp6.one(), Fp6.zero())
+    // Fp6.one() = (Fp2.one(), Fp2.zero(), Fp2.zero())
+    // Fp2.one() = (Fp.one(), Fp.zero())
+    // So first 32 bytes should be 1 in LE, rest should be 0
+
+    // First Fp element should be 1 (c0.c0.c0 = Fp.one())
+    const first_value = std.mem.readInt(u64, bytes[0..8], .little);
+    try std.testing.expectEqual(@as(u64, 1), first_value);
+
+    // Rest of first 32 bytes should be 0
+    for (8..32) |i| {
+        try std.testing.expectEqual(@as(u8, 0), bytes[i]);
+    }
+
+    // All remaining 352 bytes should be 0
+    for (32..384) |i| {
+        try std.testing.expectEqual(@as(u8, 0), bytes[i]);
+    }
+}
+
+test "GT alias equals Fp12" {
+    const gt_one = GT.one();
+    const fp12_one = Fp12.one();
+    try std.testing.expect(gt_one.eql(fp12_one));
 }

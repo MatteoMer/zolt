@@ -8,7 +8,7 @@
 //! 1. **No Magic Header**: Jolt proofs have no "ZOLT" prefix
 //! 2. **usize as u64**: All lengths are serialized as 8-byte little-endian
 //! 3. **Field Elements**: 32 bytes little-endian (Montgomery form limbs)
-//! 4. **Compressed Points**: Arkworks compressed G1 format
+//! 4. **GT Elements**: 384 bytes (12 Fp elements for Fp12/Dory commitments)
 //! 5. **BTreeMap**: Length prefix + sorted key-value pairs
 //!
 //! Reference: jolt-core/src/zkvm/proof_serialization.rs
@@ -16,6 +16,14 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const jolt_types = @import("jolt_types.zig");
+const commitment_mod = @import("../poly/commitment/mod.zig");
+const pairing = @import("../field/pairing.zig");
+
+/// GT element (Dory commitment) type
+pub const GT = pairing.GT;
+
+/// Dory commitment type
+pub const DoryCommitment = commitment_mod.DoryCommitment;
 
 /// Arkworks-compatible serializer
 pub fn ArkworksSerializer(comptime F: type) type {
@@ -85,6 +93,26 @@ pub fn ArkworksSerializer(comptime F: type) type {
         pub fn writeVecFieldElements(self: *Self, scalars: []const F) !void {
             try self.writeUsize(scalars.len);
             try self.writeFieldElements(scalars);
+        }
+
+        /// Write a GT element (Dory commitment) in arkworks format (384 bytes)
+        /// GT = Fp12, serialized as 12 Fp elements in LE format
+        pub fn writeGT(self: *Self, gt: GT) !void {
+            const gt_bytes = gt.toBytes();
+            try self.buffer.appendSlice(self.allocator, &gt_bytes);
+        }
+
+        /// Write a Dory commitment (alias for writeGT)
+        pub fn writeDoryCommitment(self: *Self, comm: DoryCommitment) !void {
+            try self.writeGT(comm);
+        }
+
+        /// Write a Vec of Dory commitments with length prefix
+        pub fn writeVecDoryCommitments(self: *Self, comms: []const DoryCommitment) !void {
+            try self.writeUsize(comms.len);
+            for (comms) |c| {
+                try self.writeDoryCommitment(c);
+            }
         }
 
         /// Write an optional field
@@ -175,8 +203,8 @@ pub fn ArkworksSerializer(comptime F: type) type {
 
             // 2. Commitments
             try self.writeUsize(proof.commitments.items.len);
-            for (proof.commitments.items) |commitment| {
-                try writeCommitment(self, commitment);
+            for (proof.commitments.items) |comm| {
+                try writeCommitment(self, comm);
             }
 
             // 3. Stage 1
@@ -246,6 +274,29 @@ pub fn ArkworksSerializer(comptime F: type) type {
             try self.writeUsize(proof.log_k_chunk);
             try self.writeUsize(proof.lookups_ra_virtual_log_k_chunk);
         }
+
+        /// Write a JoltProof using Dory commitments (GT elements)
+        /// This is a convenience wrapper for proofs with DoryCommitment type
+        pub fn writeJoltDoryProof(
+            self: *Self,
+            comptime DoryProofT: type,
+            proof: *const jolt_types.JoltProof(F, DoryCommitment, DoryProofT),
+            writeDoryProof: *const fn (*Self, DoryProofT) anyerror!void,
+        ) !void {
+            const writeDoryCommWrapper = struct {
+                fn f(ser: *Self, c: DoryCommitment) !void {
+                    try ser.writeDoryCommitment(c);
+                }
+            }.f;
+
+            try self.writeJoltProof(
+                DoryCommitment,
+                DoryProofT,
+                proof,
+                writeDoryCommWrapper,
+                writeDoryProof,
+            );
+        }
     };
 }
 
@@ -304,6 +355,31 @@ pub fn ArkworksDeserializer(comptime F: type) type {
 
             for (0..len) |i| {
                 result[i] = try self.readFieldElement();
+            }
+            return result;
+        }
+
+        /// Read a GT element (Dory commitment) from arkworks format (384 bytes)
+        pub fn readGT(self: *Self) !GT {
+            if (self.pos + 384 > self.data.len) return error.UnexpectedEof;
+            const bytes = self.data[self.pos..][0..384];
+            self.pos += 384;
+            return GT.fromBytes(bytes);
+        }
+
+        /// Read a Dory commitment (alias for readGT)
+        pub fn readDoryCommitment(self: *Self) !DoryCommitment {
+            return self.readGT();
+        }
+
+        /// Read a Vec of Dory commitments
+        pub fn readVecDoryCommitments(self: *Self, allocator: Allocator) ![]DoryCommitment {
+            const len = try self.readUsize();
+            const result = try allocator.alloc(DoryCommitment, len);
+            errdefer allocator.free(result);
+
+            for (0..len) |i| {
+                result[i] = try self.readDoryCommitment();
             }
             return result;
         }
@@ -716,4 +792,55 @@ test "e2e: empty JoltProof serialization" {
     // First 8 bytes should be 0 (empty opening claims)
     const claims_len = std.mem.readInt(u64, bytes[0..8], .little);
     try testing.expectEqual(@as(u64, 0), claims_len);
+}
+
+test "dory commitment serialization" {
+    // Test GT/Dory commitment serialization
+    var serializer = ArkworksSerializer(BN254Scalar).init(testing.allocator);
+    defer serializer.deinit();
+
+    // Create a simple GT element (one)
+    const gt = GT.one();
+
+    // Serialize
+    try serializer.writeDoryCommitment(gt);
+
+    // Should be 384 bytes
+    try testing.expectEqual(@as(usize, 384), serializer.bytes().len);
+
+    // First 32 bytes should be [1, 0, 0, ...] (c0.c0.c0 = Fp.one())
+    const first_value = std.mem.readInt(u64, serializer.bytes()[0..8], .little);
+    try testing.expectEqual(@as(u64, 1), first_value);
+}
+
+test "dory commitment serialization roundtrip" {
+    // Create a non-trivial GT element
+    const fp = @import("../field/mod.zig").BN254BaseField;
+    const Fp2 = pairing.Fp2;
+    const Fp6 = pairing.Fp6;
+
+    const gt = GT{
+        .c0 = Fp6{
+            .c0 = Fp2.init(fp.fromU64(11), fp.fromU64(22)),
+            .c1 = Fp2.init(fp.fromU64(33), fp.fromU64(44)),
+            .c2 = Fp2.init(fp.fromU64(55), fp.fromU64(66)),
+        },
+        .c1 = Fp6{
+            .c0 = Fp2.init(fp.fromU64(77), fp.fromU64(88)),
+            .c1 = Fp2.init(fp.fromU64(99), fp.fromU64(111)),
+            .c2 = Fp2.init(fp.fromU64(122), fp.fromU64(133)),
+        },
+    };
+
+    // Serialize
+    var serializer = ArkworksSerializer(BN254Scalar).init(testing.allocator);
+    defer serializer.deinit();
+    try serializer.writeDoryCommitment(gt);
+
+    // Deserialize
+    var deserializer = ArkworksDeserializer(BN254Scalar).init(serializer.bytes());
+    const decoded = try deserializer.readDoryCommitment();
+
+    // Verify equality
+    try testing.expect(gt.eql(decoded));
 }

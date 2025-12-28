@@ -744,3 +744,10 @@ Cost: $8.7306
 - Dory commitment alignment (Zolt uses HyperKZG)
 - Jolt-side cross-verification test
 
+
+--- Iteration 2 ---
+Started: 2025-12-28T09:51:49.124813
+Ended: 2025-12-28T10:03:39.549728
+Turns: 62
+Cost: $5.2755
+

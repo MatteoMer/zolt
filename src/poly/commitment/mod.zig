@@ -23,6 +23,15 @@ pub const srs = @import("srs.zig");
 pub const SRSData = srs.SRSData;
 pub const SRSError = srs.SRSError;
 
+// Export Dory commitment scheme (Jolt-compatible)
+pub const dory = @import("dory.zig");
+pub const DoryCommitmentScheme = dory.DoryCommitmentScheme;
+pub const DoryCommitment = dory.DoryCommitment;
+pub const DoryProof = dory.DoryProof;
+pub const DorySRS = dory.DorySRS;
+pub const serializeDoryCommitment = dory.serializeDoryCommitment;
+pub const deserializeDoryCommitment = dory.deserializeDoryCommitment;
+
 /// Commitment scheme interface
 ///
 /// All commitment schemes must implement these methods.
@@ -1470,4 +1479,9 @@ test {
 // Reference SRS module tests
 test {
     std.testing.refAllDecls(srs);
+}
+
+// Reference Dory module tests
+test {
+    std.testing.refAllDecls(dory);
 }

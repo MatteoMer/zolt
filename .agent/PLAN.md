@@ -2,15 +2,21 @@
 
 ## Current Status (December 2024 - Iteration 32)
 
-### Session Summary - Investigation & Stability Testing
+### Session Summary - Investigation, Stability Testing & CLI Improvements
 
-This iteration focused on testing the current implementation and investigating issues:
+This iteration focused on testing, investigating issues, and improving CLI UX:
 
 **Activities:**
 1. Ran full pipeline example - verification passes in lenient mode
 2. Ran benchmarks - confirmed field arithmetic and MSM performance
 3. Verified all 538 tests pass
 4. Attempted to add comprehensive e2e prover/verifier integration tests
+5. Improved CLI error handling - no more stack traces for user errors
+
+**CLI Error Handling Improvements:**
+- Removed duplicate error messages
+- Clean exit with code 1 on failure
+- User-friendly error names instead of internal details
 
 **Key Discovery - Test Interference Issue:**
 When adding new integration tests to `src/integration_tests.zig`, seemingly unrelated tests
@@ -147,6 +153,7 @@ perfectly satisfy `p(0) + p(1) = claim` after folding.
 
 ## Commit History (Iteration 32)
 1. Update tracking files for iteration 32
+2. Improve CLI error handling (no stack traces, clean exit codes)
 
 ## Commit History (Iteration 31)
 1. Add configurable strict sumcheck verification mode

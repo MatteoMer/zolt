@@ -12,6 +12,11 @@
 - [x] Discovered strange test interference issue (documented below)
 - [x] Reverted test additions to maintain test suite stability
 
+### CLI Improvements
+- [x] Improved error handling in CLI to remove stack traces
+- [x] Errors now show clean error name and exit with code 1
+- [x] Removed duplicate error messages in run, prove, and srs commands
+
 ## Known Issues (For Future Iterations)
 
 ### Test Interference Issue (NEW - Iteration 32)

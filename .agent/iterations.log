@@ -958,3 +958,46 @@ Ended: 2025-12-28T12:48:59.198679
 Turns: 74
 Cost: $7.7832
 
+
+--- Iteration 13 ---
+Started: 2025-12-28T12:49:01
+Summary: Deep analysis of sumcheck verification failure
+
+Findings:
+1. Univariate skip first round passes (sum over domain = 0 with zero coefficients)
+2. Remaining sumcheck rounds pass (p(0) + p(1) = 0 with zero coefficients)
+3. Final claim check FAILS (expected_output_claim ≠ 0)
+
+The verifier computes expected_output_claim from R1CS constraints which include
+constant terms that evaluate to non-zero even with all-zero input claims:
+- z vector includes trailing 1 at position 36
+- Constants in A/B matrices multiply against z[36] = 1
+- Result: inner_sum_prod is NON-ZERO
+
+Created JoltOuterProver (src/zkvm/spartan/jolt_outer_prover.zig):
+- initFromWitnesses(): Initialize from per-cycle R1CS witnesses
+- computeRoundPoly(): Compute [p(0), p(2)] for each round
+- computeCubicRoundPoly(): Compute degree-3 polynomials
+- bindChallenge(): Fold evaluations and update claim
+- generateProof(): Full proof generation with compressed polys
+
+HOWEVER: This simplified prover won't produce Jolt-compatible proofs because:
+1. Missing Lagrange kernel factor L(τ_high, r0)
+2. Wrong binding order (needs streaming round first)
+3. r0 binds constraint dimension, not cycle dimension
+
+Full compatibility requires ~2000 lines to port:
+- GruenSplitEqPolynomial (~500 lines)
+- MultiquadraticPolynomial (~400 lines)
+- OuterSharedState/OuterLinearStage (~800 lines)
+- Streaming sumcheck infrastructure (~300 lines)
+
+Current Status:
+- Serialization Compatibility: COMPLETE
+- Verification Compatibility: BLOCKED on streaming sumcheck
+
+Commits:
+- d573106 feat: add JoltOuterProver for real sumcheck proof generation
+- 5791408 docs: update notes with JoltOuterProver analysis
+
+All 608 tests pass.

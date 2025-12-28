@@ -6,6 +6,9 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const lookup_table = @import("../zkvm/lookup_table/mod.zig");
 
+/// ExpandingTable for incremental EQ polynomial computation
+pub const ExpandingTable = @import("expanding_table.zig").ExpandingTable;
+
 /// A bitvector type used to represent a (substring of a) lookup index.
 /// Optimized representation that stores up to 128 bits with explicit length.
 ///

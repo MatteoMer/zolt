@@ -272,7 +272,7 @@ pub const Fp2 = struct {
 };
 
 // ============================================================================
-// Extension Field Fp6 = Fp2[v] / (v³ - ξ) where ξ = u + 1
+// Extension Field Fp6 = Fp2[v] / (v³ - ξ) where ξ = 9 + u
 // ============================================================================
 
 /// Fp6 element: c0 + c1*v + c2*v² where v³ = ξ
@@ -313,12 +313,13 @@ pub const Fp6 = struct {
         };
     }
 
-    /// Multiplication by ξ = u + 1
+    /// Multiplication by ξ = 9 + u (the non-residue for BN254)
     fn mulByXi(x: Fp2) Fp2 {
-        // ξ * (a + bu) = (a + bu)(1 + u) = (a - b) + (a + b)u
+        // ξ * (a + bu) = (a + bu)(9 + u) = (9a - b) + (a + 9b)u
+        const nine = Fp.fromU64(9);
         return Fp2.init(
-            x.c0.sub(x.c1),
-            x.c0.add(x.c1),
+            nine.mul(x.c0).sub(x.c1),
+            x.c0.add(nine.mul(x.c1)),
         );
     }
 
@@ -827,9 +828,14 @@ pub const G1PointFp = struct {
     }
 };
 
-/// G1 Point from MSM (uses scalar field, for compatibility)
+/// G1 Point from MSM (uses scalar field, for scalar multiplication)
 /// Note: For pairing operations, convert to G1PointFp
+/// IMPORTANT: G1 point COORDINATES are in the BASE FIELD Fp, but scalars are in Fr
 pub const G1Point = @import("../msm/mod.zig").AffinePoint(BN254Scalar);
+
+/// G1 Point in base field (proper representation for curve points)
+/// Use this for creating G1 points for pairing operations
+pub const G1PointInFp = @import("../msm/mod.zig").AffinePoint(Fp);
 
 /// Convert G1Point (scalar field coords) to G1PointFp (base field coords)
 /// G1 point coordinates are conceptually raw integer values that should be
@@ -880,6 +886,20 @@ pub fn pairing(p: G1Point, q: G2Point) PairingResult {
 
     // Miller loop
     const f = millerLoop(p_fp, q);
+
+    // Final exponentiation
+    return finalExponentiation(f);
+}
+
+/// Pairing function that takes G1 point directly in base field representation
+/// Use this when you have proper Fp coordinates (not Fr)
+pub fn pairingFp(p: G1PointFp, q: G2Point) PairingResult {
+    if (p.infinity or q.infinity) {
+        return Fp12.one();
+    }
+
+    // Miller loop
+    const f = millerLoop(p, q);
 
     // Final exponentiation
     return finalExponentiation(f);
@@ -1529,29 +1549,65 @@ test "G2 scalar mul internal consistency" {
 }
 
 // Pairing bilinearity test: verifies e([2]P, Q) = e(P, Q)^2
-// Updated iteration 14:
-// - Rewrote line evaluation to match gnark-crypto's affine approach
-// - Use R0/R1 coefficients and (1, 0, 0, c3, c4, 0) sparse representation
-// - Fixed to use Fp (base field) instead of Fr (scalar field)
-// - Added proper Montgomery form conversion for G1 points
-//
-// TODO: This test still fails. Possible remaining issues:
-// - Final exponentiation formula may need adjustment
-// - Frobenius endomorphism on G2 may have coefficient issues
-// - Twist isomorphism handling may need review
-// test "pairing bilinearity in G1" {
-//     // G1 point (1, 2) - valid point on BN254 curve: y^2 = x^3 + 3
-//     const g1 = G1Point{ .x = BN254Scalar.one(), .y = BN254Scalar.fromU64(2), .infinity = false };
-//     const g2 = G2Point.generator();
-//     const e_g1_g2 = pairing(g1, g2);
-//     const e_g1_g2_squared = e_g1_g2.mul(e_g1_g2);
-//     // Use BN254Scalar (Fr) for scalar multiplication
-//     const g1_doubled_proj = msm.MSM(BN254Scalar, BN254Scalar).scalarMul(g1, BN254Scalar.fromU64(2));
-//     const g1_doubled = g1_doubled_proj.toAffine();
-//     const e_2g1_g2 = pairing(g1_doubled, g2);
-//
-//     try std.testing.expect(e_2g1_g2.eql(e_g1_g2_squared));
-// }
+// Fixed iteration 15: Corrected ξ from (1 + u) to (9 + u) and use proper Fp coordinates
+test "pairing bilinearity in G1" {
+    // G1 generator (1, 2) in base field Fp - valid point on BN254 curve: y^2 = x^3 + 3
+    const g1 = G1PointFp{ .x = Fp.one(), .y = Fp.fromU64(2), .infinity = false };
+    const g2 = G2Point.generator();
+
+    // Compute e(G1, G2)
+    const e_g1_g2 = pairingFp(g1, g2);
+    const e_g1_g2_squared = e_g1_g2.mul(e_g1_g2);
+
+    // Compute [2]G1 using point doubling in Fp
+    const g1_doubled = G1PointInFp.generator().double();
+    const e_2g1_g2 = pairingFp(G1PointFp{
+        .x = g1_doubled.x,
+        .y = g1_doubled.y,
+        .infinity = g1_doubled.infinity,
+    }, g2);
+
+    try std.testing.expect(e_2g1_g2.eql(e_g1_g2_squared));
+}
+
+test "pairing bilinearity in G2" {
+    // Test e(P, [2]Q) = e(P, Q)^2
+    const g1 = G1PointFp{ .x = Fp.one(), .y = Fp.fromU64(2), .infinity = false };
+    const g2 = G2Point.generator();
+
+    // Compute e(G1, G2)
+    const e_g1_g2 = pairingFp(g1, g2);
+    const e_g1_g2_squared = e_g1_g2.mul(e_g1_g2);
+
+    // Compute [2]G2 using point doubling
+    const g2_doubled = g2.double();
+    const e_g1_2g2 = pairingFp(g1, g2_doubled);
+
+    try std.testing.expect(e_g1_2g2.eql(e_g1_g2_squared));
+}
+
+test "pairing identity" {
+    // Test e(P, O) = 1 and e(O, Q) = 1
+    const g1 = G1PointFp{ .x = Fp.one(), .y = Fp.fromU64(2), .infinity = false };
+    const g2 = G2Point.generator();
+
+    // e(P, O) = 1
+    const e_g1_o = pairingFp(g1, G2Point.identity());
+    try std.testing.expect(e_g1_o.isOne());
+
+    // e(O, Q) = 1
+    const e_o_g2 = pairingFp(G1PointFp.identity(), g2);
+    try std.testing.expect(e_o_g2.isOne());
+}
+
+test "pairing non-degeneracy" {
+    // Test e(P, Q) != 1 for non-identity P, Q
+    const g1 = G1PointFp{ .x = Fp.one(), .y = Fp.fromU64(2), .infinity = false };
+    const g2 = G2Point.generator();
+
+    const e_g1_g2 = pairingFp(g1, g2);
+    try std.testing.expect(!e_g1_g2.isOne());
+}
 
 test "Fp6 inverse" {
     const a = Fp6{
@@ -1564,4 +1620,35 @@ test "Fp6 inverse" {
         const should_be_one = a.mul(a_inv);
         try std.testing.expect(should_be_one.eql(Fp6.one()));
     }
+}
+
+test "Fp6 mulByXi is correct for ξ = 9 + u" {
+    // Test that mulByXi(a) = a * (9 + u) for a simple Fp2 element
+    const a = Fp2.init(Fp.fromU64(2), Fp.fromU64(3));
+
+    // Compute using mulByXi
+    const result = Fp6.mulByXi(a);
+
+    // Compute manually: (2 + 3u)(9 + u) = 18 + 2u + 27u + 3u² = 18 + 29u - 3 = 15 + 29u
+    // (since u² = -1)
+    const expected = Fp2.init(Fp.fromU64(15), Fp.fromU64(29));
+
+    try std.testing.expect(result.eql(expected));
+}
+
+test "Fp6 mul by v via mulByXi" {
+    // Test that multiplying by v works correctly
+    // v^3 = ξ, so (c0 + c1*v + c2*v²) * v = c2*ξ + c0*v + c1*v²
+    const f = Fp6{
+        .c0 = Fp2.init(Fp.fromU64(1), Fp.fromU64(0)),
+        .c1 = Fp2.init(Fp.fromU64(2), Fp.fromU64(0)),
+        .c2 = Fp2.init(Fp.fromU64(3), Fp.fromU64(0)),
+    };
+
+    // Expected: c0' = 3*(9+u) = 27 + 3u, c1' = 1, c2' = 2
+    const result = fp6MulByV(f);
+
+    try std.testing.expect(result.c0.eql(Fp2.init(Fp.fromU64(27), Fp.fromU64(3))));
+    try std.testing.expect(result.c1.eql(Fp2.init(Fp.fromU64(1), Fp.fromU64(0))));
+    try std.testing.expect(result.c2.eql(Fp2.init(Fp.fromU64(2), Fp.fromU64(0))));
 }

@@ -18,6 +18,11 @@ This iteration added:
    - Options work before or after ELF path
    - Updated README with new command documentation
 
+3. **CLI Prove Options**
+   - Added `--max-cycles N` option to limit proving cycles
+   - Default: 1024 cycles
+   - Smaller values reduce SRS generation time
+
 ### Previous Session (Iteration 40-41) - Complex Tests & Benchmarks
 
 Previous iterations added:

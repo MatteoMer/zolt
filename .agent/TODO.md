@@ -12,6 +12,7 @@
 - [x] Add `--max-cycles N` option to run command (limit execution cycles)
 - [x] Add `--regs` option to run command (show final register state)
 - [x] Update README with new commands and options
+- [x] Add `--max-cycles N` option to prove command (limit proving cycles)
 
 ## Completed (Previous Session - Iteration 41)
 
@@ -60,8 +61,9 @@
 ## Next Steps (Future Iterations)
 
 ### High Priority
-- [ ] Test with larger RISC-V programs (from compiled C)
-- [ ] Add CLI tool for proving/verifying ELF files
+- [x] Test with larger RISC-V programs (from compiled C) - ELF examples added
+- [x] Add CLI tool for proving/verifying ELF files - CLI commands complete
+- [ ] Add proof serialization/deserialization
 
 ### Medium Priority
 - [ ] Performance optimization with SIMD

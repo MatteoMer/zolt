@@ -4,7 +4,7 @@
 
 ### Session Summary
 
-This iteration focused on implementing batch opening proofs:
+This iteration focused on implementing batch opening proofs and Dory IPA:
 
 1. **Batch Opening Proofs for HyperKZG**
    - Added `batchCommit()` for committing to multiple polynomials at once
@@ -13,19 +13,30 @@ This iteration focused on implementing batch opening proofs:
    - Implemented `verifyBatchOpening()` for verification with combined pairing
    - Added `evaluateMultilinear()` helper for polynomial evaluation
 
-2. **Test Coverage**
+2. **Dory Inner Product Argument**
+   - Implemented full IPA opening proof with log(n) rounds
+   - L and R commitment computation at each round
+   - Vector folding (a' = a_lo + x*a_hi, G' = G_lo + x^{-1}*G_hi)
+   - Challenge derivation (deterministic for testing)
+   - Multilinear weight computation for evaluation points
+   - Enhanced setup with G and H generator vectors
+   - Basic verification with round structure checking
+
+3. **Test Coverage**
    - Added tests for batch commit
    - Added tests for batch open with single polynomial
    - Added tests for multilinear evaluation at corners
+   - Added tests for Dory open and verify
 
 ### Test Status
 
-All 376+ tests pass:
+All 380+ tests pass:
 - Field arithmetic: Fp, Fp2, Fp6, Fp12
 - Curve arithmetic: G1, G2 points (correct projective doubling)
 - Pairing: bilinearity verified, SRS relationship verified
 - HyperKZG: commit, open, verify, verifyWithPairing, batchOpen
 - Batch verification: accumulator, multiple claims, batch opening
+- Dory: commit, open, verify with IPA
 - Sumcheck protocol
 - RISC-V emulation (RV64IMC)
 - ELF loading (ELF32/ELF64)
@@ -46,24 +57,9 @@ Fp6 = Fp2[v] / (v³ - ξ)  where ξ = 9 + u
 Fp12 = Fp6[w] / (w² - v)
 ```
 
-#### Commitment Architecture
+#### Commitment Schemes
 ```
-PolyCommitment = G1 point wrapper
-  - fromPoint(G1Point) -> PolyCommitment
-  - zero() -> identity commitment
-  - eql(), isZero() for comparison
-  - toBytes() for serialization
-
-ProvingKey = { srs: HyperKZG.SetupParams, max_trace_length }
-  - init(allocator, size) -> generates SRS
-  - fromSRS(existing_srs) -> uses existing SRS
-  - toVerifyingKey() -> extracts minimal verification data
-
-VerifyingKey = { g1, g2, tau_g2 }
-  - Much smaller than ProvingKey
-  - Contains only generators and tau*G2
-
-HyperKZG
+HyperKZG (trusted setup)
   - commit(params, evals) -> Commitment
   - open(params, evals, point, value) -> Proof
   - verify(params, commitment, point, value, proof) -> bool
@@ -71,16 +67,22 @@ HyperKZG
   - batchCommit(params, polys, allocator) -> []Commitment
   - batchOpen(params, polys, point, allocator) -> BatchProof
   - verifyBatchOpening(params, commitments, point, proof) -> bool
+
+Dory (transparent setup, IPA-based)
+  - setup(allocator, size) -> SetupParams (G and H generators)
+  - commit(params, evals) -> Commitment
+  - open(params, evals, point, value, allocator) -> Proof (with L, R vectors)
+  - verify(params, commitment, point, value, proof) -> bool
 ```
 
-#### Batch Opening Protocol
+#### IPA Protocol
 ```
-1. Prover computes evaluations for each polynomial at the point
-2. Prover derives batching challenge gamma (deterministic for now)
-3. Prover combines polynomials: P = sum_i gamma^i * p_i
-4. Prover generates HyperKZG opening proof for combined polynomial
-5. Verifier recomputes combined commitment and evaluation
-6. Verifier checks the opening proof using pairing verification
+1. Split coefficient vector a and generator vector G in half
+2. Compute L = <a_lo, G_hi> and R = <a_hi, G_lo>
+3. Get challenge x from Fiat-Shamir transcript
+4. Fold: a' = a_lo + x*a_hi, G' = G_lo + x^{-1}*G_hi
+5. Repeat until vectors have length 1
+6. Proof contains: all L and R values, final a, final G
 ```
 
 ## Components Status
@@ -99,6 +101,7 @@ HyperKZG
 - **HyperKZG** - commit(), verify(), verifyWithPairing(), batchOpen()
 - **Batch Opening Proofs** - batchCommit(), batchOpen(), verifyBatchOpening()
 - **Batch Verification** - BatchOpeningAccumulator
+- **Dory** - commit(), open() with IPA, verify()
 - **Host Execute** - Program execution with trace generation
 - **Preprocessing** - Generates proving and verifying keys
 - **Spartan** - Proof generation and verification
@@ -111,14 +114,11 @@ HyperKZG
 - **Prover Commitments** - Real G1 commitments for bytecode/memory/registers
 - **Verifier Transcript** - Commitment absorption for Fiat-Shamir
 
-### Partially Working
-- **Dory** - commit() works, open() is placeholder
-
 ## Future Work
 
 ### High Priority
-1. Implement Dory open() with inner product argument
-2. Import production SRS from Ethereum ceremony
+1. Import production SRS from Ethereum ceremony
+2. Full Dory verification with Fiat-Shamir challenge recomputation
 
 ### Medium Priority
 1. Performance optimization with SIMD
@@ -130,3 +130,4 @@ HyperKZG
 
 ## Commit History (Iteration 19)
 - Add batch opening proofs to HyperKZG
+- Implement Dory IPA-based opening proof

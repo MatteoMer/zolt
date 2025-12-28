@@ -10,6 +10,16 @@
 - [x] Added evaluateMultilinear() helper for multilinear polynomial evaluation
 - [x] Added tests for batch commit, batch open, and multilinear evaluation
 
+### Dory IPA Implementation
+- [x] Full IPA opening proof generation with log(n) rounds
+- [x] L and R commitment computation at each round
+- [x] Vector folding (a' = a_lo + x*a_hi, G' = G_lo + x^{-1}*G_hi)
+- [x] Challenge derivation (deterministic for testing)
+- [x] Multilinear weight computation for evaluation points
+- [x] Enhanced setup with G and H generator vectors
+- [x] Basic verification with round structure checking
+- [x] Added tests for Dory open and verify
+
 ## Completed (Previous Sessions)
 
 ### Iteration 18: Commitment Type Infrastructure
@@ -61,15 +71,13 @@
 - **ProvingKey** - SRS-based commitment generation
 - **VerifyingKey** - Minimal SRS elements for verification
 - **Spartan** - R1CS proof generation and verification
-
-### Partially Working
-- **Dory** - commit() works, open() placeholder
+- **Dory** - commit(), open(), verify() with IPA
 
 ## Next Steps (Future Iterations)
 
 ### High Priority
-- [ ] Dory open() with proper inner product argument
 - [ ] Import production SRS from Ethereum ceremony
+- [ ] Full Dory verification with challenge recomputation
 
 ### Medium Priority
 - [ ] Performance optimization with SIMD
@@ -80,4 +88,4 @@
 - [ ] Benchmarking suite
 
 ## Test Status
-All tests pass (376+ tests).
+All tests pass (380+ tests).

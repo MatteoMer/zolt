@@ -474,3 +474,48 @@ test "spartan outer uniskip first round poly" {
     }
     try std.testing.expect(has_nonzero);
 }
+
+test "uniskip polynomial from witnesses has non-zero coefficients" {
+    const field = @import("../../field/mod.zig");
+    const F = field.BN254Scalar;
+    const allocator = std.testing.allocator;
+
+    // Create a minimal cycle witness with some non-trivial values
+    var cycle_witness = constraints.R1CSCycleInputs(F).init();
+
+    // Set some flags and values to create non-zero constraint evaluations
+    cycle_witness.setInput(constraints.R1CSInputIndex.FlagLoad, F.one());
+    cycle_witness.setInput(constraints.R1CSInputIndex.RamReadValue, F.fromU64(42));
+    cycle_witness.setInput(constraints.R1CSInputIndex.RamWriteValue, F.fromU64(43)); // Different to create non-zero Bz
+    cycle_witness.setInput(constraints.R1CSInputIndex.PC, F.fromU64(0x100));
+    cycle_witness.setInput(constraints.R1CSInputIndex.NextPC, F.fromU64(0x104));
+
+    const witnesses = [_]constraints.R1CSCycleInputs(F){cycle_witness};
+    const tau = [_]F{ F.fromU64(1), F.fromU64(2), F.fromU64(3), F.fromU64(4) };
+    const eq_evals = [_]F{F.one()};
+
+    var prover = try SpartanOuterProver(F).initFromWitnesses(
+        allocator,
+        &witnesses,
+        &eq_evals,
+        &tau,
+    );
+    defer prover.deinit();
+
+    // Compute the univariate skip polynomial
+    var poly = try prover.computeUniskipFirstRoundPoly();
+    defer poly.deinit();
+
+    // Should have 28 coefficients
+    try std.testing.expectEqual(@as(usize, 28), poly.coeffs.len);
+
+    // Check if any coefficients are non-zero
+    var has_nonzero = false;
+    for (poly.coeffs) |c| {
+        if (!c.eql(F.zero())) {
+            has_nonzero = true;
+            break;
+        }
+    }
+    try std.testing.expect(has_nonzero);
+}

@@ -102,6 +102,18 @@ pub fn AffinePoint(comptime F: type) type {
             return fromCoords(x3, y3);
         }
 
+        /// Check if the point is on the curve y² = x³ + b (b = 3 for BN254)
+        pub fn isOnCurve(self: Self) bool {
+            if (self.infinity) return true;
+
+            // y² = x³ + b
+            const y_sq = self.y.square();
+            const x_cubed = self.x.square().mul(self.x);
+            const rhs = x_cubed.add(F.fromU64(BN254_B)); // b = 3
+
+            return y_sq.eql(rhs);
+        }
+
         /// Double an affine point
         pub fn double(self: Self) Self {
             if (self.infinity) return self;

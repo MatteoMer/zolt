@@ -18,6 +18,11 @@ pub const BatchOpeningAccumulator = batch.BatchOpeningAccumulator;
 pub const OpeningClaim = batch.OpeningClaim;
 pub const OpeningClaimConverter = batch.OpeningClaimConverter;
 
+// Export SRS loading utilities
+pub const srs = @import("srs.zig");
+pub const SRSData = srs.SRSData;
+pub const SRSError = srs.SRSError;
+
 /// Commitment scheme interface
 ///
 /// All commitment schemes must implement these methods.
@@ -1461,4 +1466,9 @@ test "hyperkzg evaluate multilinear" {
 // Reference batch module tests
 test {
     std.testing.refAllDecls(batch);
+}
+
+// Reference SRS module tests
+test {
+    std.testing.refAllDecls(srs);
 }

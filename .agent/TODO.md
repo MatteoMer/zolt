@@ -1,6 +1,19 @@
 # Zolt zkVM Implementation TODO
 
-## Completed (This Session - Iteration 42)
+## Completed (This Session - Iteration 43)
+
+### Proof Serialization/Deserialization
+- [x] Create serialization module (`src/zkvm/serialization.zig`)
+  - Binary format with magic header "ZOLT" and version
+  - Serialize JoltProof, StageProof, JoltStageProofs
+  - Field element and commitment serialization
+  - File I/O helpers (writeProofToFile, readProofFromFile)
+- [x] Add `-o/--output` option to `prove` command
+- [x] Add `verify` command to load and verify saved proofs
+- [x] Add comprehensive tests including full proof roundtrip
+- [x] Update README with new CLI commands
+
+## Completed (Previous Session - Iteration 42)
 
 ### CLI Enhancements
 - [x] Add `zolt info` command showing zkVM capabilities
@@ -14,42 +27,18 @@
 - [x] Update README with new commands and options
 - [x] Add `--max-cycles N` option to prove command (limit proving cycles)
 
-## Completed (Previous Session - Iteration 41)
+## Completed (Previous Sessions)
 
-### Verifier Benchmarks
+### Iteration 41 - Verifier Benchmarks
 - [x] Add benchVerifier() function to measure verification performance
 - [x] Results: Verify is ~130-165x faster than prove
-  - Verify (2 steps): ~593 us/op
-  - Verify (14 steps): ~753 us/op
-
-### Proof Size Benchmarks
-- [x] Add proofSize() method to JoltStageProofs
-- [x] Add proofSizeBytes() for byte-level calculation
-- [x] Add benchProofSize() to benchmarks
-- [x] Results show excellent compression:
-  - 2 steps: 204 field elements (6.38 KB)
-  - 14 steps: 242 field elements (7.56 KB)
-
-### ELF Examples and Tests
-- [x] Add examples/fibonacci.c and examples/sum.c
-- [x] Add Makefile for compiling RISC-V ELF files
-- [x] Add minimal 32-bit RISC-V ELF parsing test
-- [x] Add ELFLoader parsing test
-- [x] Add ELFLoader execution test
-
-## Completed (Previous Sessions)
 
 ### Iteration 40 - Complex Program Tests & Benchmarks
 - [x] Fix branch target calculation for high PC addresses (0x80000000+)
-- [x] Add test for arithmetic sequence: sum 1 to 10 using a loop
-- [x] Add test for memory store/load operations (sw, lw)
-- [x] Add test for shift operations (slli, srli, srai)
-- [x] Add test for comparison operations (slt, sltu)
-- [x] Add test for XOR and bit manipulation
-- [x] Add emulator benchmark (sum 1-100 loop)
-- [x] Add prover benchmark (simple and loop programs)
+- [x] Add complex program tests (loops, memory, shifts, comparisons)
+- [x] Add emulator and prover benchmarks
 
-### Iteration 39 - Strict Sumcheck Verification PASSES!
+### Iteration 39 - Strict Sumcheck Verification
 - [x] Fix Lasso prover eq_evals padding for proper cycle phase folding
 - [x] Fix Val prover to use 4-point Lagrange interpolation for degree-3 sumcheck
 - [x] Full pipeline now passes with strict_sumcheck = true!
@@ -61,9 +50,8 @@
 ## Next Steps (Future Iterations)
 
 ### High Priority
-- [x] Test with larger RISC-V programs (from compiled C) - ELF examples added
-- [x] Add CLI tool for proving/verifying ELF files - CLI commands complete
-- [ ] Add proof serialization/deserialization
+- [ ] Add proof compression (optional gzip/zstd)
+- [ ] Add JSON serialization format for human readability
 
 ### Medium Priority
 - [ ] Performance optimization with SIMD
@@ -75,10 +63,10 @@
 - [ ] Documentation improvements
 
 ## Test Status
-- All tests pass (576 tests)
+- All tests pass (576+ tests)
 - Full pipeline with strict verification: PASSED
 - All 6 stages verify with p(0) + p(1) = claim check
-- ELF parsing and execution tests added
+- Serialization roundtrip tests: PASSED
 
 ## Performance Summary (from benchmarks)
 - Field addition: 4.0 ns/op

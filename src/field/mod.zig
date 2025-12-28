@@ -498,6 +498,20 @@ pub const BN254Scalar = struct {
         return be_bytes;
     }
 
+    /// Serialize to little-endian bytes (32 bytes)
+    /// This is the inverse of fromBytes and suitable for serialization.
+    pub fn toBytes(self: Self) [32]u8 {
+        // First convert from Montgomery form
+        const standard = self.fromMontgomery();
+
+        // Convert limbs to bytes (little-endian)
+        var bytes: [32]u8 = undefined;
+        for (0..4) |i| {
+            std.mem.writeInt(u64, bytes[i * 8 ..][0..8], standard.limbs[i], .little);
+        }
+        return bytes;
+    }
+
     /// Convert to u64 (returns low 64 bits of the value)
     /// Useful for debugging and displaying small values.
     /// Note: This loses precision for values >= 2^64.

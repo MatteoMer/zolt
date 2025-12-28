@@ -1,10 +1,29 @@
 # Zolt zkVM Implementation Plan
 
-## Current Status (December 2024 - Iteration 42)
+## Current Status (December 2024 - Iteration 43)
 
-### Session Summary - CLI Info Command Added
+### Session Summary - Proof Serialization Added
 
 This iteration added:
+
+1. **Proof Serialization Module**
+   - Created `src/zkvm/serialization.zig` for binary proof format
+   - Magic header "ZOLT" with version for format identification
+   - Serialize/deserialize JoltProof, StageProof, JoltStageProofs
+   - File I/O helpers for saving and loading proofs
+
+2. **CLI Verify Command**
+   - Added `zolt verify <proof_file>` command
+   - Loads serialized proof and runs verification
+   - Displays proof metadata and verification result
+
+3. **CLI Prove Output Option**
+   - Added `-o/--output` option to save proofs to file
+   - Displays proof size when saving
+
+### Previous Session (Iteration 42) - CLI Info Command
+
+Previous iteration added:
 
 1. **CLI Info Command**
    - Added `zolt info` command to display zkVM capabilities

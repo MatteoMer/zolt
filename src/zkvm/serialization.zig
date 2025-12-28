@@ -72,21 +72,23 @@ pub fn ProofWriter(comptime F: type) type {
     return struct {
         const Self = @This();
 
-        buffer: std.ArrayList(u8),
+        buffer: std.ArrayListUnmanaged(u8),
+        allocator: Allocator,
 
         pub fn init(allocator: Allocator) Self {
             return .{
-                .buffer = std.ArrayList(u8).init(allocator),
+                .buffer = .{},
+                .allocator = allocator,
             };
         }
 
         pub fn deinit(self: *Self) void {
-            self.buffer.deinit();
+            self.buffer.deinit(self.allocator);
         }
 
         /// Get the serialized bytes
         pub fn toOwnedSlice(self: *Self) ![]u8 {
-            return self.buffer.toOwnedSlice();
+            return self.buffer.toOwnedSlice(self.allocator);
         }
 
         /// Get the current buffer as a slice (borrowed)
@@ -96,36 +98,36 @@ pub fn ProofWriter(comptime F: type) type {
 
         /// Write bytes directly
         pub fn writeBytes(self: *Self, data: []const u8) !void {
-            try self.buffer.appendSlice(data);
+            try self.buffer.appendSlice(self.allocator, data);
         }
 
         /// Write a u8
         pub fn writeU8(self: *Self, value: u8) !void {
-            try self.buffer.append(value);
+            try self.buffer.append(self.allocator, value);
         }
 
         /// Write a u32 in little-endian
         pub fn writeU32(self: *Self, value: u32) !void {
             const bytes_arr = std.mem.toBytes(std.mem.nativeToLittle(u32, value));
-            try self.buffer.appendSlice(&bytes_arr);
+            try self.buffer.appendSlice(self.allocator, &bytes_arr);
         }
 
         /// Write a u64 in little-endian
         pub fn writeU64(self: *Self, value: u64) !void {
             const bytes_arr = std.mem.toBytes(std.mem.nativeToLittle(u64, value));
-            try self.buffer.appendSlice(&bytes_arr);
+            try self.buffer.appendSlice(self.allocator, &bytes_arr);
         }
 
         /// Write a field element (32 bytes, little-endian limbs)
         pub fn writeFieldElement(self: *Self, elem: F) !void {
             const bytes_arr = elem.toBytes();
-            try self.buffer.appendSlice(&bytes_arr);
+            try self.buffer.appendSlice(self.allocator, &bytes_arr);
         }
 
         /// Write a polynomial commitment (G1 point)
         pub fn writeCommitment(self: *Self, c: commitment_types.PolyCommitment) !void {
             const bytes_arr = c.toBytes();
-            try self.buffer.appendSlice(&bytes_arr);
+            try self.buffer.appendSlice(self.allocator, &bytes_arr);
         }
 
         /// Write a stage proof
@@ -212,7 +214,7 @@ pub fn ProofReader(comptime F: type) type {
         /// Read a field element (32 bytes)
         pub fn readFieldElement(self: *Self) SerializationError!F {
             const bytes_slice = try self.readBytes(32);
-            return F.fromBytes(bytes_slice[0..32].*);
+            return F.fromBytes(bytes_slice);
         }
 
         /// Read a polynomial commitment
@@ -304,17 +306,28 @@ pub fn serializeProof(comptime F: type, allocator: Allocator, proof: anytype) ![
     try writer.writeCommitment(proof.register_proof.read_ts_commitment);
     try writer.writeCommitment(proof.register_proof.write_ts_commitment);
 
-    // Write R1CS proof (placeholder data)
-    try writer.writeU64(proof.r1cs_proof.a_eval.len);
-    for (proof.r1cs_proof.a_eval) |e| {
+    // Write R1CS proof
+    // tau
+    try writer.writeU64(proof.r1cs_proof.tau.len);
+    for (proof.r1cs_proof.tau) |e| {
         try writer.writeFieldElement(e);
     }
-    try writer.writeU64(proof.r1cs_proof.b_eval.len);
-    for (proof.r1cs_proof.b_eval) |e| {
+    // eval_claims [3]
+    for (proof.r1cs_proof.eval_claims) |e| {
         try writer.writeFieldElement(e);
     }
-    try writer.writeU64(proof.r1cs_proof.c_eval.len);
-    for (proof.r1cs_proof.c_eval) |e| {
+    // eval_point
+    try writer.writeU64(proof.r1cs_proof.eval_point.len);
+    for (proof.r1cs_proof.eval_point) |e| {
+        try writer.writeFieldElement(e);
+    }
+    // sumcheck_proof
+    try writer.writeFieldElement(proof.r1cs_proof.sumcheck_proof.claim);
+    try writer.writeFieldElement(proof.r1cs_proof.sumcheck_proof.final_eval);
+    try writer.writeU64(proof.r1cs_proof.sumcheck_proof.rounds.len);
+    // Note: sumcheck rounds serialization is simplified for now
+    try writer.writeU64(proof.r1cs_proof.sumcheck_proof.final_point.len);
+    for (proof.r1cs_proof.sumcheck_proof.final_point) |e| {
         try writer.writeFieldElement(e);
     }
 
@@ -367,33 +380,51 @@ pub fn deserializeProof(comptime F: type, allocator: Allocator, data: []const u8
     reg_proof.write_ts_commitment = try reader.readCommitment();
 
     // Read R1CS proof
-    const a_len = try reader.readU64();
-    const a_eval = try allocator.alloc(F, a_len);
-    errdefer allocator.free(a_eval);
-    for (a_eval) |*e| {
+    // tau
+    const tau_len = try reader.readU64();
+    const tau = try allocator.alloc(F, tau_len);
+    errdefer allocator.free(tau);
+    for (tau) |*e| {
+        e.* = try reader.readFieldElement();
+    }
+    // eval_claims [3]
+    var eval_claims: [3]F = undefined;
+    for (&eval_claims) |*e| {
+        e.* = try reader.readFieldElement();
+    }
+    // eval_point
+    const eval_point_len = try reader.readU64();
+    const eval_point = try allocator.alloc(F, eval_point_len);
+    errdefer allocator.free(eval_point);
+    for (eval_point) |*e| {
+        e.* = try reader.readFieldElement();
+    }
+    // sumcheck_proof
+    const sc_claim = try reader.readFieldElement();
+    const sc_final_eval = try reader.readFieldElement();
+    const sc_rounds_len = try reader.readU64();
+    _ = sc_rounds_len; // Rounds are empty for now
+    const sc_final_point_len = try reader.readU64();
+    const sc_final_point = try allocator.alloc(F, sc_final_point_len);
+    errdefer allocator.free(sc_final_point);
+    for (sc_final_point) |*e| {
         e.* = try reader.readFieldElement();
     }
 
-    const b_len = try reader.readU64();
-    const b_eval = try allocator.alloc(F, b_len);
-    errdefer allocator.free(b_eval);
-    for (b_eval) |*e| {
-        e.* = try reader.readFieldElement();
-    }
-
-    const c_len = try reader.readU64();
-    const c_eval = try allocator.alloc(F, c_len);
-    errdefer allocator.free(c_eval);
-    for (c_eval) |*e| {
-        e.* = try reader.readFieldElement();
-    }
+    // Create empty rounds array
+    const sc_rounds = try allocator.alloc(@import("../subprotocols/mod.zig").Sumcheck(F).Round, 0);
 
     const r1cs_proof = spartan.R1CSProof(F){
-        .a_eval = a_eval,
-        .b_eval = b_eval,
-        .c_eval = c_eval,
-        .az_bz_cz_proof = null,
-        .sparse_poly_proof = null,
+        .tau = tau,
+        .sumcheck_proof = .{
+            .claim = sc_claim,
+            .rounds = sc_rounds,
+            .final_point = sc_final_point,
+            .final_eval = sc_final_eval,
+            .allocator = allocator,
+        },
+        .eval_claims = eval_claims,
+        .eval_point = eval_point,
         .allocator = allocator,
     };
 

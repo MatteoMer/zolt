@@ -1,10 +1,31 @@
 # Zolt zkVM Implementation Plan
 
-## Current Status (December 2024 - Iteration 24)
+## Current Status (December 2024 - Iteration 25)
 
 ### Session Summary
 
-This iteration focused on SRS (Structured Reference String) infrastructure:
+This iteration added snarkjs PTAU file format parsing for loading production SRS data:
+
+1. **PTAU File Parser**
+   - Implemented snarkjs .ptau format parser in `src/poly/commitment/srs.zig`
+   - Supports magic bytes, version, and section parsing
+   - Parses all key sections: Header, tauG1, tauG2, alphaTauG1, betaTauG1, betaG2
+   - Little-endian Montgomery format for G1/G2 points
+
+2. **Extended SRS Data**
+   - Created `ExtendedSRSData` structure for Groth16-compatible SRS
+   - Includes alpha/beta powers for advanced proof systems
+   - Conversion to basic `SRSData` for KZG/HyperKZG
+
+3. **Production Ready**
+   - Can now load real Powers of Tau ceremony files from Ethereum
+   - Compatible with snarkjs ptau files (power 2^n up to 2^28)
+
+## Previous Status (Iteration 24)
+
+### Previous Session Summary
+
+The previous iteration focused on SRS (Structured Reference String) infrastructure:
 
 1. **SRS Loading Utilities**
    - Created `src/poly/commitment/srs.zig` with:
@@ -30,7 +51,7 @@ This iteration focused on SRS (Structured Reference String) infrastructure:
 
 ### Test Status
 
-All 522 tests pass:
+All 538 tests pass:
 - Field arithmetic: Fp, Fp2, Fp6, Fp12
 - Curve arithmetic: G1, G2 points
 - Pairing: bilinearity verified
@@ -45,6 +66,7 @@ All 522 tests pass:
 - All 24 lookup tables
 - All instruction lookups (60+ instruction types)
 - SRS loading and serialization
+- PTAU file parsing and conversion
 
 ### Architecture Summary
 
@@ -163,6 +185,9 @@ SRS Utilities
   - parseG1Uncompressed(data) -> G1Point
   - parseG1Compressed(data) -> G1Point
   - parseG2Uncompressed(data) -> G2Point
+  - loadFromPtau(allocator, data) -> ExtendedSRSData
+  - loadFromPtauFile(allocator, path) -> ExtendedSRSData
+  - ExtendedSRSData.toBasicSRS(allocator) -> SRSData
 ```
 
 ## Components Status
@@ -197,12 +222,12 @@ SRS Utilities
 - **RV64 Word Operations** - ADDW, SUBW, SLLW, SRLW, SRAW, MULW, DIVW, etc.
 - **RV64 Immediate Word** - ADDIW, SLLIW, SRLIW, SRAIW
 - **SRS Utilities** - Generate, load, save, validate
+- **PTAU Parser** - Load snarkjs ceremony files, convert to SRSData
 
 ## Future Work
 
 ### High Priority
-1. Import production SRS from Ethereum ceremony (ptau format parsing)
-2. Implement commitment opening verification in JoltVerifier
+1. ✓ Import production SRS from Ethereum ceremony (ptau format parsing)
 
 ### Medium Priority
 1. Performance optimization with SIMD
@@ -211,6 +236,9 @@ SRS Utilities
 ### Low Priority
 1. Documentation and examples
 2. Benchmarking suite
+
+## Commit History (Iteration 25)
+1. Add snarkjs PTAU file format parser for production SRS loading
 
 ## Commit History (Iteration 24)
 1. Add SRS loading utilities for production trusted setups

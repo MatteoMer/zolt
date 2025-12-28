@@ -1,6 +1,18 @@
 # Zolt zkVM Implementation TODO
 
-## Completed (This Session - Iteration 24)
+## Completed (This Session - Iteration 25)
+
+### PTAU File Format Parser
+- [x] Implement snarkjs PTAU file format parser:
+  - Magic bytes and version validation
+  - Header section parsing (field size, prime, power, ceremony power)
+  - Section type enumeration (tauG1, tauG2, alphaTauG1, betaTauG1, betaG2)
+- [x] Add little-endian G1/G2 point parsing (snarkjs Montgomery format)
+- [x] Create ExtendedSRSData structure for Groth16 SRS data
+- [x] Add conversion from ExtendedSRSData to basic SRSData
+- [x] Add tests for PTAU parsing and conversion
+
+## Completed (Iteration 24)
 
 ### SRS Loading Utilities
 - [x] Add src/poly/commitment/srs.zig with SRS management:
@@ -76,20 +88,19 @@
 ## Next Steps (Future Iterations)
 
 ### High Priority
-- [ ] Import production SRS from Ethereum ceremony (ptau format parsing)
+- [x] Import production SRS from Ethereum ceremony (ptau format parsing) ✓
 
 ### Medium Priority
 - [ ] Performance optimization with SIMD
 - [ ] Parallel sumcheck round computation
+- [ ] Download and test with real Ethereum ceremony ptau files
 
 ### Low Priority
 - [ ] Documentation and examples
 - [ ] Benchmarking suite
 
 ## Test Status
-All tests pass (526 tests).
+All tests pass (538 tests).
 
-## Commits This Session
-1. Add SRS loading utilities for production trusted setups
-2. Add big-endian serialization to BN254Scalar and integration tests
-3. Add commitment opening verification to JoltVerifier
+## Commits This Session (Iteration 25)
+1. Add snarkjs PTAU file format parser for production SRS loading

@@ -1,28 +1,36 @@
 # Zolt zkVM Implementation Plan
 
-## Current Status (December 2024 - Iteration 23)
+## Current Status (December 2024 - Iteration 24)
 
 ### Session Summary
 
-This iteration added three major improvements:
+This iteration focused on SRS (Structured Reference String) infrastructure:
 
-1. **Load/Store Instruction Lookups**
-   - Address computation lookups for all memory operations
-   - 7 load instruction lookups with proper sign/zero extension
-   - 4 store instruction lookups
+1. **SRS Loading Utilities**
+   - Created `src/poly/commitment/srs.zig` with:
+     - G1/G2 point parsing (uncompressed and compressed formats)
+     - Raw binary SRS serialization/deserialization
+     - Mock SRS generation for testing
+     - Error handling for invalid curve points
 
-2. **Verifier Improvements**
-   - Enhanced all proof verification functions with proper transcript binding
-   - Added documentation for verification requirements
-   - Improved Fiat-Shamir security by absorbing all commitments
+2. **Field Element Serialization**
+   - Added big-endian I/O methods to both field types:
+     - `fromBytesBE()`: Parse 32-byte big-endian field element
+     - `toBytesBE()`: Serialize to 32-byte big-endian format
+   - Essential for interoperability with external SRS data
 
-3. **RV64I Immediate Word Operations**
-   - ADDIW, SLLIW, SRLIW, SRAIW lookups
-   - Complete coverage of RV64I instruction set
+3. **Point Validation**
+   - Added `isOnCurve()` to AffinePoint
+   - Verifies y² = x³ + 3 (BN254 curve equation)
+
+4. **Integration Tests**
+   - SRS generation and commitment e2e test
+   - SRS serialization round-trip test
+   - Field element big-endian round-trip test
 
 ### Test Status
 
-All 502 tests pass:
+All 522 tests pass:
 - Field arithmetic: Fp, Fp2, Fp6, Fp12
 - Curve arithmetic: G1, G2 points
 - Pairing: bilinearity verified
@@ -36,6 +44,7 @@ All 502 tests pass:
 - Lasso lookup argument
 - All 24 lookup tables
 - All instruction lookups (60+ instruction types)
+- SRS loading and serialization
 
 ### Architecture Summary
 
@@ -47,6 +56,15 @@ Fr  = BN254 scalar field (254 bits) - scalars for multiplication
 Fp2 = Fp[u] / (u² + 1)
 Fp6 = Fp2[v] / (v³ - ξ)  where ξ = 9 + u
 Fp12 = Fp6[w] / (w² - v)
+```
+
+#### SRS Format (Raw Binary)
+```
+4 bytes:    Number of G1 points (little-endian u32)
+n * 64 bytes: G1 points (uncompressed: 32 bytes x, 32 bytes y)
+128 bytes:  tau*G2 (uncompressed G2 point)
+64 bytes:   G1 generator
+128 bytes:  G2 generator
 ```
 
 #### Lookup Tables (24 total)
@@ -84,7 +102,9 @@ Base Integer (I):
 
 Immediate (I):
 - SlliLookup, SrliLookup, SraiLookup
-- (ADDI, ANDI, ORI, XORI use Add/And/Or/Xor lookups with imm as operand)
+
+Immediate Word (RV64I):
+- AddiwLookup, SlliwLookup, SrliwLookup, SraiwLookup
 
 Branch:
 - BeqLookup, BneLookup
@@ -117,10 +137,6 @@ RV64 Word Operations:
 - SllwLookup, SrlwLookup, SrawLookup
 - MulwLookup
 - DivwLookup, DivuwLookup, RemwLookup, RemuwLookup
-
-RV64 Immediate Word Operations:
-- AddiwLookup
-- SlliwLookup, SrliwLookup, SraiwLookup
 ```
 
 #### Commitment Schemes
@@ -139,6 +155,14 @@ Dory (transparent setup, IPA-based)
   - commit(params, evals) -> Commitment
   - open(params, evals, point, value, allocator) -> Proof (with L, R vectors)
   - verify(params, commitment, point, value, proof) -> bool
+
+SRS Utilities
+  - generateMockSRS(allocator, max_degree) -> SRSData
+  - loadFromRawBinary(allocator, data) -> SRSData
+  - serializeToRawBinary(allocator, srs) -> []u8
+  - parseG1Uncompressed(data) -> G1Point
+  - parseG1Compressed(data) -> G1Point
+  - parseG2Uncompressed(data) -> G2Point
 ```
 
 ## Components Status
@@ -147,8 +171,10 @@ Dory (transparent setup, IPA-based)
 - **BN254 Pairing** - Full Miller loop, final exponentiation, bilinearity verified
 - **Extension Fields** - Fp2, Fp6, Fp12 with correct ξ = 9 + u
 - **Field Arithmetic** - Montgomery form CIOS multiplication
+- **Field Serialization** - Big-endian and little-endian I/O
 - **G1/G2 Point Arithmetic** - Addition, doubling, scalar multiplication
 - **Projective Points** - Jacobian doubling
+- **Point Validation** - isOnCurve() for G1 points
 - **Frobenius Endomorphism** - Complete coefficients
 - **Sumcheck Protocol** - Complete prover/verifier
 - **RISC-V Emulator** - Full RV64IMC execution with tracing
@@ -170,12 +196,13 @@ Dory (transparent setup, IPA-based)
 - **Load/Store** - LB, LBU, LH, LHU, LW, LWU, LD, SB, SH, SW, SD
 - **RV64 Word Operations** - ADDW, SUBW, SLLW, SRLW, SRAW, MULW, DIVW, etc.
 - **RV64 Immediate Word** - ADDIW, SLLIW, SRLIW, SRAIW
+- **SRS Utilities** - Generate, load, save, validate
 
 ## Future Work
 
 ### High Priority
-1. Import production SRS from Ethereum ceremony
-2. Implement proper verification for bytecode/memory/registers proofs
+1. Import production SRS from Ethereum ceremony (ptau format parsing)
+2. Implement commitment opening verification in JoltVerifier
 
 ### Medium Priority
 1. Performance optimization with SIMD
@@ -185,7 +212,6 @@ Dory (transparent setup, IPA-based)
 1. Documentation and examples
 2. Benchmarking suite
 
-## Commit History (Iteration 23)
-1. Add load/store instruction lookups for full RV64I memory operations
-2. Improve verifier with proper transcript binding and documentation
-3. Add RV64I immediate word operation lookups (ADDIW, SLLIW, SRLIW, SRAIW)
+## Commit History (Iteration 24)
+1. Add SRS loading utilities for production trusted setups
+2. Add big-endian serialization to BN254Scalar and integration tests

@@ -1,44 +1,32 @@
 # Zolt zkVM Implementation TODO
 
-## Completed (This Session - Iteration 23)
+## Completed (This Session - Iteration 24)
 
-### Load/Store Instruction Lookups
-- [x] LoadAddressLookup for effective address computation (base + offset)
-- [x] StoreAddressLookup for store address computation
-- [x] LbLookup, LbuLookup, LhLookup, LhuLookup, LwLookup, LwuLookup, LdLookup
-- [x] SbLookup, ShLookup, SwLookup, SdLookup
-- [x] Comprehensive tests for all load/store lookups
+### SRS Loading Utilities
+- [x] Add src/poly/commitment/srs.zig with SRS management:
+  - Parse G1/G2 points from uncompressed/compressed formats
+  - Load SRS from raw binary format
+  - Serialize SRS to raw binary format
+  - Generate mock SRS for testing
+- [x] Add fromBytesBE()/toBytesBE() to BN254BaseField (MontgomeryField)
+- [x] Add fromBytesBE()/toBytesBE() to BN254Scalar
+- [x] Add isOnCurve() to AffinePoint
 
-### Verifier Improvements
-- [x] Enhanced verifyBytecodeProof with transcript binding
-- [x] Enhanced verifyMemoryProof with proper commitment absorption
-- [x] Enhanced verifyRegisterProof with timestamp commitment binding
-- [x] Enhanced verifyR1CSProof with tau challenge derivation
-- [x] Documented verification requirements for each proof type
-
-### RV64I Immediate Word Operations
-- [x] AddiwLookup (Add Immediate Word)
-- [x] SlliwLookup (Shift Left Logical Immediate Word)
-- [x] SrliwLookup (Shift Right Logical Immediate Word)
-- [x] SraiwLookup (Shift Right Arithmetic Immediate Word)
-- [x] Comprehensive tests with sign extension edge cases
+### Integration Tests
+- [x] e2e: SRS generation and commitment
+- [x] e2e: SRS serialization and deserialization
+- [x] e2e: field element big-endian round-trip
 
 ## Completed (Previous Sessions)
 
-### Iteration 22: Branch and Jump Instruction Lookups
-- [x] BltLookup, BgeLookup for signed comparisons
-- [x] BltuLookup, BgeuLookup for unsigned comparisons
-- [x] LuiLookup, AuipcLookup for upper immediate instructions
-- [x] JalLookup, JalrLookup for jump instructions
+### Iteration 23: Load/Store and Verifier Improvements
+- [x] LoadAddressLookup, StoreAddressLookup for memory operations
+- [x] All load instructions: LbLookup, LbuLookup, LhLookup, LhuLookup, LwLookup, LwuLookup, LdLookup
+- [x] All store instructions: SbLookup, ShLookup, SwLookup, SdLookup
+- [x] RV64I immediate word operations: AddiwLookup, SlliwLookup, SrliwLookup, SraiwLookup
+- [x] Enhanced verifier with proper transcript binding
 
-### Iteration 21: Division/Remainder and RV64 Word Operations
-- [x] ValidDiv0, ValidUnsignedRemainder, ValidSignedRemainder tables
-- [x] DivLookup, DivuLookup, RemLookup, RemuLookup instruction lookups
-- [x] AddwLookup, SubwLookup, SllwLookup, SrlwLookup, SrawLookup
-- [x] MulwLookup, DivwLookup, DivuwLookup, RemwLookup, RemuwLookup
-- [x] All W-suffix operations sign-extend 32-bit results to 64 bits
-
-### Iterations 1-20: Core Infrastructure
+### Iterations 1-22: Core Infrastructure
 - [x] BN254 field and curve arithmetic
 - [x] Extension fields (Fp2, Fp6, Fp12)
 - [x] Pairing with Miller loop and final exponentiation
@@ -53,11 +41,12 @@
 - [x] Multi-stage prover (6 stages)
 - [x] Host execute
 - [x] Preprocessing
-- [x] Shift and sign extension tables
+- [x] Complete RV64IM instruction coverage (60+ instructions)
+- [x] 24 lookup tables
 
 ## Working Components
 
-### Fully Working (24 Lookup Tables)
+### Lookup Tables (24 total)
 - **Bitwise**: And, Or, Xor, Andn
 - **Comparison**: Equal, NotEqual, UnsignedLessThan, SignedLessThan, UnsignedGreaterThanEqual, SignedGreaterThanEqual, UnsignedLessThanEqual
 - **Arithmetic**: RangeCheck, Sub, Movsign
@@ -81,8 +70,8 @@
 ## Next Steps (Future Iterations)
 
 ### High Priority
-- [ ] Import production SRS from Ethereum ceremony
-- [ ] Implement proper verifier for bytecode/memory/registers proofs
+- [ ] Import production SRS from Ethereum ceremony (format conversion)
+- [ ] Implement commitment opening verification in JoltVerifier
 
 ### Medium Priority
 - [ ] Performance optimization with SIMD
@@ -93,9 +82,8 @@
 - [ ] Benchmarking suite
 
 ## Test Status
-All tests pass (502 tests).
+All tests pass (522 tests).
 
 ## Commits This Session
-1. Add load/store instruction lookups for full RV64I memory operations
-2. Improve verifier with proper transcript binding and documentation
-3. Add RV64I immediate word operation lookups (ADDIW, SLLIW, SRLIW, SRAIW)
+1. Add SRS loading utilities for production trusted setups
+2. Add big-endian serialization to BN254Scalar and integration tests

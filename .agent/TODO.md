@@ -7,50 +7,57 @@
 3. **Phase 3: Serialization Alignment** - Arkworks-compatible serialization
 4. **Phase 4: Commitment Scheme** - Dory with Jolt-compatible SRS
 5. **Phase 5: Verifier Preprocessing Export** - DoryVerifierSetup exports correctly
-6. **Polynomial Construction** - Lagrange interpolation and L*t1 multiplication verified
+6. **Fix Lagrange Interpolation Bug** - Dead code was corrupting basis array
+
+## MAJOR MILESTONE: Stage 1 UniSkip PASSES! 🎉
+
+The Stage 1 UniSkip first-round verification now passes:
+```
+Domain sum check:
+  Input claim (expected domain sum): 0
+  Computed domain sum: 0
+  Sum equals input_claim: true
+
+✓ Stage 1 UniSkip verification PASSED!
+```
 
 ## In Progress 🚧
 
-### Issue: R1CS Constraints Not Satisfied
+### Stage 1 Regular Sumcheck Fails
 
-**Root Cause Identified:**
+After UniSkip passes, the regular sumcheck that follows Stage 1 fails.
 
-The polynomial domain sum is non-zero because `base_evals` are non-zero, meaning the R1CS constraints are NOT being satisfied.
+The verifier shows:
+```
+Verification failed: Stage 1
 
-**Test Evidence:**
-- Added test `buildUniskipFirstRoundPoly domain sum is zero when base evals are zero` ✓ PASSES
-- This proves the polynomial construction is CORRECT
-- The issue is in the witness data or constraint evaluation
+Caused by:
+    Sumcheck verification failed
+```
 
-**Analysis:**
+This means the rounds AFTER the first UniSkip round are failing.
 
-For a valid R1CS execution:
-- Each constraint: `Az(x,y) * Bz(x,y) = 0` for all (x, y) in base window
-- Base window evaluations: `t1(y) = Σ_x eq(τ,x) * Az(x,y) * Bz(x,y) = 0`
+### Next Steps
 
-But in the actual proof:
-- `base_evals` are computed as non-zero values
-- This means some constraints are NOT satisfied
-
-**Possible Causes:**
-
-1. **Witness values incorrect**: R1CSCycleInputs populated with wrong values
-2. **Constraint evaluators wrong**: Az/Bz computation doesn't match Jolt
-3. **Constraint definitions wrong**: The constraint conditions/left/right don't match Jolt's
-
-**Next Steps:**
-
-1. Check if R1CSCycleInputs are correctly populated from execution trace
-2. Compare constraint definitions with Jolt's UNIFORM_CONSTRAINTS
-3. Debug a single cycle: print Az and Bz values for all 10 first-group constraints
-4. Verify that for a satisfied constraint, Az=1 implies Bz=0 (or Az=0)
+1. Debug the Stage 1 sumcheck rounds (after UniSkip)
+2. Check if round polynomial degrees match
+3. Verify transcript operations for subsequent rounds
 
 ---
 
-## Commands
+## Git History (Key Commits)
+
+- `0c5f8c6` - fix: remove dead code in Lagrange interpolation
+- `178232d` - test: add buildUniskipFirstRoundPoly domain sum test
+- `62a5675` - test: add interpolation preserves zeros test
+- `cb406ec` - feat: implement proper Lagrange interpolation for UniSkip
+
+---
+
+## Test Commands
 
 ```bash
-# Run tests (632/632 passing)
+# Run all 632 tests
 zig build test --summary all
 
 # Build release
@@ -61,16 +68,10 @@ zig build -Doptimize=ReleaseFast
     --export-preprocessing /tmp/zolt_preprocessing.bin \
     -o /tmp/zolt_proof_dory.bin
 
-# Run Jolt debug test
+# Run Jolt debug test (UniSkip only)
 cd /Users/matteo/projects/jolt
 cargo test --package jolt-core test_debug_stage1_verification -- --ignored --nocapture
+
+# Run Jolt full verification test
+cargo test --package jolt-core test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
-
----
-
-## Recent Commits
-
-- `178232d` - test: add buildUniskipFirstRoundPoly domain sum test
-- `62a5675` - test: add interpolation preserves zeros test
-- `9346ccd` - refactor: simplify extended Az*Bz evaluation
-- `cb406ec` - feat: implement proper Lagrange interpolation for UniSkip

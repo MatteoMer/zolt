@@ -524,6 +524,11 @@ pub fn JoltVerifier(comptime F: type) type {
             self.config.strict_sumcheck = strict;
         }
 
+        /// Enable or disable debug output during verification
+        pub fn setDebugOutput(self: *Self, debug: bool) void {
+            self.config.debug_output = debug;
+        }
+
         /// Verify a Jolt proof
         ///
         /// Verification consists of the following steps:
@@ -744,17 +749,7 @@ pub fn JoltVerifier(comptime F: type) type {
             transcript: *transcripts.Transcript(F),
         ) !bool {
             _ = self;
-
-            // Absorb proof into transcript
-            // The proof contains witness commitments and sumcheck polynomials
-
-            // Get tau challenge for outer sumcheck
-            const tau = try transcript.challengeScalar("r1cs_tau");
-            _ = tau;
-
-            // Verify the sumcheck proof
-            // For Spartan: sum_{x} eq(tau, x) * [(Az)(x) * (Bz)(x) - (Cz)(x)] = 0
-            // The sum should equal 0 for a satisfying R1CS instance
+            _ = transcript; // Don't generate challenges here - Stage 1 handles R1CS via sumcheck
 
             // Check proof structure is valid based on eval_claims
             const all_zero = proof.eval_claims[0].eql(F.zero()) and
@@ -766,11 +761,8 @@ pub fn JoltVerifier(comptime F: type) type {
                 return true;
             }
 
-            // For full verification:
-            // 1. Verify sumcheck rounds match claimed sum
-            // 2. Verify final evaluation against polynomial commitments
-            // 3. Check that claimed evaluations are consistent
-
+            // Full R1CS verification is done in Stage 1 (verifyStageProofs)
+            // which handles the Spartan sumcheck protocol
             return true;
         }
 

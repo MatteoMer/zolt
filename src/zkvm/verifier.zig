@@ -92,6 +92,10 @@ pub fn MultiStageVerifier(comptime F: type) type {
             proofs: *const JoltStageProofs(F),
             transcript: *transcripts.Transcript(F),
         ) !bool {
+            // Extract log_t and log_k from proof for transcript sync
+            const log_t = proofs.log_t;
+            const log_k = proofs.log_k;
+
             // Verify each stage in order
             // Each stage verification updates the transcript for Fiat-Shamir
             if (!try self.verifyStage1(&proofs.stage_proofs[0], transcript)) {
@@ -101,35 +105,35 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 return false;
             }
 
-            if (!try self.verifyStage2(&proofs.stage_proofs[1], transcript)) {
+            if (!try self.verifyStage2(&proofs.stage_proofs[1], transcript, log_t)) {
                 if (self.config.debug_output) {
                     std.debug.print("Stage 2 verification failed\n", .{});
                 }
                 return false;
             }
 
-            if (!try self.verifyStage3(&proofs.stage_proofs[2], transcript)) {
+            if (!try self.verifyStage3(&proofs.stage_proofs[2], transcript, log_t, log_k)) {
                 if (self.config.debug_output) {
                     std.debug.print("Stage 3 verification failed\n", .{});
                 }
                 return false;
             }
 
-            if (!try self.verifyStage4(&proofs.stage_proofs[3], transcript)) {
+            if (!try self.verifyStage4(&proofs.stage_proofs[3], transcript, log_t)) {
                 if (self.config.debug_output) {
                     std.debug.print("Stage 4 verification failed\n", .{});
                 }
                 return false;
             }
 
-            if (!try self.verifyStage5(&proofs.stage_proofs[4], transcript)) {
+            if (!try self.verifyStage5(&proofs.stage_proofs[4], transcript, log_t)) {
                 if (self.config.debug_output) {
                     std.debug.print("Stage 5 verification failed\n", .{});
                 }
                 return false;
             }
 
-            if (!try self.verifyStage6(&proofs.stage_proofs[5], transcript)) {
+            if (!try self.verifyStage6(&proofs.stage_proofs[5], transcript, log_t)) {
                 if (self.config.debug_output) {
                     std.debug.print("Stage 6 verification failed\n", .{});
                 }
@@ -165,6 +169,9 @@ pub fn MultiStageVerifier(comptime F: type) type {
 
             // Get tau challenges from transcript (must match prover)
             // Prover generates log_num_constraints tau challenges before sumcheck rounds
+            if (self.config.debug_output) {
+                std.debug.print("  [Verifier] Stage 1: num_rounds={}, getting {} tau challenges\n", .{ num_rounds, num_rounds });
+            }
             for (0..num_rounds) |_| {
                 _ = try transcript.challengeScalar("spartan_tau");
             }
@@ -204,13 +211,14 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 const challenge = try transcript.challengeScalar("spartan_round");
 
                 if (self.config.debug_output) {
-                    std.debug.print("  Stage 1 round {}: p0={} p1={} sum={} claim={} ok={}\n", .{
+                    std.debug.print("  Stage 1 round {}: p0={} p1={} sum={} claim={} ok={} challenge={}\n", .{
                         round_idx,
                         round_poly[0].toU64(),
                         round_poly[1].toU64(),
                         sum.toU64(),
                         current_claim.toU64(),
                         sum_check_ok,
+                        challenge.toU64(),
                     });
                 }
 
@@ -249,8 +257,13 @@ pub fn MultiStageVerifier(comptime F: type) type {
             self: *Self,
             proof: *const StageProof(F),
             transcript: *transcripts.Transcript(F),
+            log_t: usize,
         ) !bool {
             const num_rounds = proof.round_polys.items.len;
+
+            if (self.config.debug_output) {
+                std.debug.print("  [Verifier] Stage 2: num_rounds={}, log_t={}\n", .{ num_rounds, log_t });
+            }
 
             // Skip if empty
             if (num_rounds == 0) {
@@ -264,8 +277,7 @@ pub fn MultiStageVerifier(comptime F: type) type {
             }
 
             // Prover generates log_t r_cycle challenges before sumcheck rounds
-            // Infer log_t from number of rounds (same as num_rounds for RAF)
-            for (0..num_rounds) |_| {
+            for (0..log_t) |_| {
                 _ = try transcript.challengeScalar("r_cycle");
             }
 
@@ -326,6 +338,8 @@ pub fn MultiStageVerifier(comptime F: type) type {
             self: *Self,
             proof: *const StageProof(F),
             transcript: *transcripts.Transcript(F),
+            log_t: usize,
+            log_k: usize,
         ) !bool {
             // Skip if no round polynomials (empty lookup trace)
             if (proof.round_polys.items.len == 0) {
@@ -338,14 +352,14 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 return true;
             }
 
+            if (self.config.debug_output) {
+                std.debug.print("  [Verifier] Stage 3: num_rounds={}, log_t={}, log_k={}\n", .{ proof.round_polys.items.len, log_t, log_k });
+            }
+
             // Get gamma challenge for batching (prover generates this first)
             _ = try transcript.challengeScalar("lasso_gamma");
 
             // Prover generates log_t r_reduction challenges
-            // Infer log_t: num_rounds = log_K + log_T where log_K = 16
-            const num_rounds = proof.round_polys.items.len;
-            const log_K: usize = 16;
-            const log_t = if (num_rounds > log_K) num_rounds - log_K else 0;
             for (0..log_t) |_| {
                 _ = try transcript.challengeScalar("r_reduction");
             }
@@ -385,13 +399,18 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 // Get challenge
                 const challenge = try transcript.challengeScalar("lasso_round");
 
+                if (self.config.debug_output) {
+                    std.debug.print("  Stage 3 round {}: p0={} p1={} sum={} claim={} ok={}\n", .{
+                        round_idx, p_at_0.toU64(), p_at_1.toU64(), sum.toU64(), current_claim.toU64(), sum_check_ok,
+                    });
+                }
+
                 if (self.config.strict_sumcheck and !sum_check_ok) {
                     self.stage_results[2] = .{
                         .success = false,
                         .final_claim = null,
                         .error_msg = "Stage 3: sumcheck failed - p(0) + p(1) != claim",
                     };
-                    _ = round_idx;
                     return false;
                 }
 
@@ -399,7 +418,6 @@ pub fn MultiStageVerifier(comptime F: type) type {
 
                 // Update claim: evaluate p(challenge) = c0 + c1*r + c2*r^2
                 current_claim = c0.add(c1.mul(challenge)).add(c2.mul(challenge).mul(challenge));
-                _ = round_idx;
             }
 
             // Stage 3 verification passed
@@ -420,6 +438,7 @@ pub fn MultiStageVerifier(comptime F: type) type {
             self: *Self,
             proof: *const StageProof(F),
             transcript: *transcripts.Transcript(F),
+            log_t: usize,
         ) !bool {
             const num_rounds = proof.round_polys.items.len;
 
@@ -441,7 +460,7 @@ pub fn MultiStageVerifier(comptime F: type) type {
             }
 
             // Prover generates log_t r_cycle_val challenges
-            for (0..num_rounds) |_| {
+            for (0..log_t) |_| {
                 _ = try transcript.challengeScalar("r_cycle_val");
             }
 
@@ -503,6 +522,7 @@ pub fn MultiStageVerifier(comptime F: type) type {
             self: *Self,
             proof: *const StageProof(F),
             transcript: *transcripts.Transcript(F),
+            log_t: usize,
         ) !bool {
             const num_rounds = proof.round_polys.items.len;
 
@@ -524,7 +544,7 @@ pub fn MultiStageVerifier(comptime F: type) type {
             }
 
             // Prover generates log_t r_cycle_reg challenges
-            for (0..num_rounds) |_| {
+            for (0..log_t) |_| {
                 _ = try transcript.challengeScalar("r_cycle_reg");
             }
 
@@ -581,7 +601,9 @@ pub fn MultiStageVerifier(comptime F: type) type {
             self: *Self,
             proof: *const StageProof(F),
             transcript: *transcripts.Transcript(F),
+            log_t: usize,
         ) !bool {
+            _ = log_t; // Not used in Stage 6
             // Get booleanity challenge
             _ = try transcript.challengeScalar("booleanity");
 

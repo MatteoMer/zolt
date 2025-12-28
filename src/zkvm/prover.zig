@@ -132,6 +132,10 @@ pub fn JoltStageProofs(comptime F: type) type {
         const Self = @This();
 
         stage_proofs: [6]StageProof(F),
+        /// Log2 of trace length (needed for transcript sync)
+        log_t: usize,
+        /// Log2 of address space (needed for transcript sync)
+        log_k: usize,
         allocator: Allocator,
 
         pub fn init(allocator: Allocator) Self {
@@ -141,6 +145,8 @@ pub fn JoltStageProofs(comptime F: type) type {
             }
             return Self{
                 .stage_proofs = proofs,
+                .log_t = 0,
+                .log_k = 16, // Default
                 .allocator = allocator,
             };
         }
@@ -255,6 +261,10 @@ pub fn MultiStageProver(comptime F: type) type {
             try self.proveStage4(transcript);
             try self.proveStage5(transcript);
             try self.proveStage6(transcript);
+
+            // Store log_t and log_k for verifier transcript sync
+            self.proofs.log_t = self.log_t;
+            self.proofs.log_k = self.log_k;
 
             // Transfer ownership to caller
             self.proofs_transferred = true;
@@ -508,6 +518,10 @@ pub fn MultiStageProver(comptime F: type) type {
                 params,
             );
             defer lasso_prover.deinit();
+
+            // Record initial claim (sum of eq evaluations)
+            const initial_claim = lasso_prover.computeInitialClaim();
+            try stage_proof.final_claims.append(self.allocator, initial_claim);
 
             // Run Lasso sumcheck rounds
             const total_rounds = params.log_K + params.log_T;

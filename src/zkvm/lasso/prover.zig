@@ -174,6 +174,15 @@ pub fn LassoProver(comptime F: type) type {
             self.allocator.free(self.challenges);
         }
 
+        /// Compute the initial claim (sum of all eq evaluations)
+        pub fn computeInitialClaim(self: *const Self) F {
+            var sum = F.zero();
+            for (0..self.lookup_indices.len) |j| {
+                sum = sum.add(self.eq_r_reduction.getEq(j));
+            }
+            return sum;
+        }
+
         /// Check if we're in the address binding phase
         pub fn isAddressPhase(self: *const Self) bool {
             return self.round < self.params.log_K;

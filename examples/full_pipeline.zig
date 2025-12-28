@@ -130,11 +130,13 @@ pub fn main() !void {
     };
     verifier.setVerifyingKey(zkvm_vk);
 
-    // Note: Strict sumcheck mode still fails because the prover's round
-    // polynomials don't satisfy p(0) + p(1) = claim in all stages.
-    // This requires fixing the actual polynomial computation in each stage.
-    // For now, use lenient mode which only checks structural validity.
+    // Note: Strict sumcheck mode currently works for Stage 1 (Spartan) but not
+    // for later stages (Lasso, etc.) due to claim tracking issues in the prover.
+    // Stage 1 verification with strict mode now passes correctly.
+    //
+    // TODO: Fix Lasso prover to properly maintain claim between rounds
     verifier.setStrictMode(false);
+    verifier.setDebugOutput(false);
 
     std.debug.print("Verifier initialized with verifying key\n", .{});
     std.debug.print("Verifying proof...\n", .{});

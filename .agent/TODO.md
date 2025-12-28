@@ -174,8 +174,9 @@ Build Summary: 5/5 steps succeeded; 608/608 tests passed
 ### Needed for Full Verification
 | File | Status | Purpose |
 |------|--------|---------|
-| `src/zkvm/spartan/outer_prover.zig` | ❌ TODO | Full Spartan outer sumcheck prover |
-| `src/poly/multiquadratic.zig` | ❌ TODO | Tertiary grid expansion |
+| `src/zkvm/spartan/jolt_outer_prover.zig` | 🟡 Basic | Simple sumcheck prover (not compatible with Jolt's streaming) |
+| `src/zkvm/spartan/streaming_outer.zig` | ❌ TODO | Full streaming Spartan outer sumcheck prover |
+| `src/poly/multiquadratic.zig` | ❌ TODO | Tertiary grid expansion {0, 1, ∞} |
 | `src/poly/split_eq.zig` | ❌ TODO | Gruen's efficient eq polynomial |
 
 ---

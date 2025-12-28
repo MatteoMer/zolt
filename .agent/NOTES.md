@@ -717,5 +717,32 @@ A faithful port would require ~2000 lines of Zig code for the Spartan outer prov
 - ✅ Transcript: Identical Fiat-Shamir challenges
 - ✅ Univariate Skip Structure: Correct degree-27/12 polynomials
 - ✅ Opening Claims: All 48 claims with proper ordering
+- ✅ JoltOuterProver: Basic sumcheck prover implemented (not yet integrated)
 - ❌ Sumcheck Proofs: Zero proofs don't satisfy verification equation
 - ❌ Final Claim Check: `output_claim != expected_output_claim`
+
+### JoltOuterProver Implementation (Iteration 14)
+
+Created `src/zkvm/spartan/jolt_outer_prover.zig` with a basic sumcheck prover:
+
+1. `initFromWitnesses()`: Initialize from per-cycle R1CS witnesses
+2. `computeRoundPoly()`: Compute [p(0), p(2)] for each round
+3. `computeCubicRoundPoly()`: Compute degree-3 polynomials
+4. `bindChallenge()`: Fold evaluations and update claim
+5. `generateProof()`: Full proof generation with compressed polys
+
+**HOWEVER**: This simplified prover won't produce Jolt-compatible proofs because:
+
+1. **Missing Lagrange kernel factor**: The actual polynomial includes `L(τ_high, r0)`
+2. **Wrong binding order**: The remaining sumcheck has a streaming round first
+3. **r0 is separate**: r0 binds the constraint dimension, not the cycle dimension
+
+To be fully compatible, the prover needs:
+1. Handle univariate skip polynomial (degree ~27)
+2. After receiving r0, evaluate polynomial at r0 for the claim
+3. Run streaming round (blends two constraint groups)
+4. Run linear rounds over cycle bits
+5. Final check uses `rx_constr = [r_stream, r0]` to evaluate Az and Bz
+
+This is a significant undertaking requiring ~2000 lines of code to port the full
+streaming sumcheck machinery from Jolt.

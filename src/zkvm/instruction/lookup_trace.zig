@@ -214,6 +214,114 @@ pub fn LookupEntry(comptime XLEN: comptime_int) type {
                 .instruction = instruction,
             };
         }
+
+        /// Create entry for SLL (shift left logical)
+        pub fn fromSll(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
+            const SllLookup = lookups.SllLookup(XLEN);
+            const sll = SllLookup.init(rs1, rs2);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = SllLookup.lookupTable(),
+                .index = sll.toLookupIndex(),
+                .result = sll.computeResult(),
+                .left_operand = rs1,
+                .right_operand = rs2,
+                .circuit_flags = SllLookup.circuitFlags(),
+                .instruction_flags = SllLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
+        /// Create entry for SRL (shift right logical)
+        pub fn fromSrl(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
+            const SrlLookup = lookups.SrlLookup(XLEN);
+            const srl = SrlLookup.init(rs1, rs2);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = SrlLookup.lookupTable(),
+                .index = srl.toLookupIndex(),
+                .result = srl.computeResult(),
+                .left_operand = rs1,
+                .right_operand = rs2,
+                .circuit_flags = SrlLookup.circuitFlags(),
+                .instruction_flags = SrlLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
+        /// Create entry for SRA (shift right arithmetic)
+        pub fn fromSra(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
+            const SraLookup = lookups.SraLookup(XLEN);
+            const sra = SraLookup.init(rs1, rs2);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = SraLookup.lookupTable(),
+                .index = sra.toLookupIndex(),
+                .result = sra.computeResult(),
+                .left_operand = rs1,
+                .right_operand = rs2,
+                .circuit_flags = SraLookup.circuitFlags(),
+                .instruction_flags = SraLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
+        /// Create entry for SLLI (shift left logical immediate)
+        pub fn fromSlli(cycle: usize, pc: u64, instruction: u32, rs1: u64, imm: u64) Self {
+            const SlliLookup = lookups.SlliLookup(XLEN);
+            const slli = SlliLookup.init(rs1, imm);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = SlliLookup.lookupTable(),
+                .index = slli.toLookupIndex(),
+                .result = slli.computeResult(),
+                .left_operand = rs1,
+                .right_operand = imm,
+                .circuit_flags = SlliLookup.circuitFlags(),
+                .instruction_flags = SlliLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
+        /// Create entry for SRLI (shift right logical immediate)
+        pub fn fromSrli(cycle: usize, pc: u64, instruction: u32, rs1: u64, imm: u64) Self {
+            const SrliLookup = lookups.SrliLookup(XLEN);
+            const srli = SrliLookup.init(rs1, imm);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = SrliLookup.lookupTable(),
+                .index = srli.toLookupIndex(),
+                .result = srli.computeResult(),
+                .left_operand = rs1,
+                .right_operand = imm,
+                .circuit_flags = SrliLookup.circuitFlags(),
+                .instruction_flags = SrliLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
+        /// Create entry for SRAI (shift right arithmetic immediate)
+        pub fn fromSrai(cycle: usize, pc: u64, instruction: u32, rs1: u64, imm: u64) Self {
+            const SraiLookup = lookups.SraiLookup(XLEN);
+            const srai = SraiLookup.init(rs1, imm);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = SraiLookup.lookupTable(),
+                .index = srai.toLookupIndex(),
+                .result = srai.computeResult(),
+                .left_operand = rs1,
+                .right_operand = imm,
+                .circuit_flags = SraiLookup.circuitFlags(),
+                .instruction_flags = SraiLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
     };
 }
 
@@ -297,7 +405,16 @@ pub fn LookupTraceCollector(comptime XLEN: comptime_int) type {
                         .XOR => Entry.fromXor(cycle, pc, instruction, rs1_val, rs2_val),
                         .SLT => Entry.fromSlt(cycle, pc, instruction, rs1_val, rs2_val),
                         .SLTU => Entry.fromSltu(cycle, pc, instruction, rs1_val, rs2_val),
-                        .SLL, .SRL_SRA => null, // Shift ops - need different handling
+                        .SLL => Entry.fromSll(cycle, pc, instruction, rs1_val, rs2_val),
+                        .SRL_SRA => blk: {
+                            if ((decoded.funct7 & 0x20) != 0) {
+                                // SRA (arithmetic)
+                                break :blk Entry.fromSra(cycle, pc, instruction, rs1_val, rs2_val);
+                            } else {
+                                // SRL (logical)
+                                break :blk Entry.fromSrl(cycle, pc, instruction, rs1_val, rs2_val);
+                            }
+                        },
                     };
                     if (entry) |e| {
                         try self.entries.append(self.allocator, e);
@@ -314,7 +431,24 @@ pub fn LookupTraceCollector(comptime XLEN: comptime_int) type {
                         .XORI => Entry.fromXor(cycle, pc, instruction, rs1_val, imm_val),
                         .SLTI => Entry.fromSlt(cycle, pc, instruction, rs1_val, imm_val),
                         .SLTIU => Entry.fromSltu(cycle, pc, instruction, rs1_val, imm_val),
-                        .SLLI, .SRLI_SRAI => null, // Shift ops
+                        .SLLI => blk: {
+                            // Shift amount is in the lower bits of imm
+                            const imm_u32: u32 = @bitCast(@as(i32, @truncate(decoded.imm)));
+                            const shamt: u64 = @as(u64, imm_u32 & 0x3F);
+                            break :blk Entry.fromSlli(cycle, pc, instruction, rs1_val, shamt);
+                        },
+                        .SRLI_SRAI => blk: {
+                            // Shift amount is in the lower bits of imm
+                            const imm_u32: u32 = @bitCast(@as(i32, @truncate(decoded.imm)));
+                            const shamt: u64 = @as(u64, imm_u32 & 0x3F);
+                            if ((decoded.funct7 & 0x20) != 0) {
+                                // SRAI (arithmetic)
+                                break :blk Entry.fromSrai(cycle, pc, instruction, rs1_val, shamt);
+                            } else {
+                                // SRLI (logical)
+                                break :blk Entry.fromSrli(cycle, pc, instruction, rs1_val, shamt);
+                            }
+                        },
                     };
                     if (entry) |e| {
                         try self.entries.append(self.allocator, e);

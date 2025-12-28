@@ -426,6 +426,305 @@ pub fn BneLookup(comptime XLEN: comptime_int) type {
     };
 }
 
+/// SLL (Shift Left Logical) instruction lookup
+/// Computes rd = rs1 << (rs2 & (XLEN-1))
+pub fn SllLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        rs1_val: u64,
+        rs2_val: u64,
+
+        pub fn init(rs1_val: u64, rs2_val: u64) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .rs2_val = rs2_val,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .LeftShift;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return lookup_table.interleaveBits(self.rs1_val, self.rs2_val);
+        }
+
+        pub fn computeResult(self: Self) u64 {
+            const shift_mask: u6 = XLEN - 1;
+            const shift: u6 = @truncate(self.rs2_val & @as(u64, shift_mask));
+            const mask: u64 = if (XLEN == 64) ~@as(u64, 0) else (@as(u64, 1) << XLEN) - 1;
+            return (self.rs1_val << shift) & mask;
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsRs2Value);
+            return flags;
+        }
+    };
+}
+
+/// SRL (Shift Right Logical) instruction lookup
+/// Computes rd = rs1 >> (rs2 & (XLEN-1)) (logical shift)
+pub fn SrlLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        rs1_val: u64,
+        rs2_val: u64,
+
+        pub fn init(rs1_val: u64, rs2_val: u64) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .rs2_val = rs2_val,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .RightShift;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return lookup_table.interleaveBits(self.rs1_val, self.rs2_val);
+        }
+
+        pub fn computeResult(self: Self) u64 {
+            const shift_mask: u6 = XLEN - 1;
+            const shift: u6 = @truncate(self.rs2_val & @as(u64, shift_mask));
+            const mask: u64 = if (XLEN == 64) ~@as(u64, 0) else (@as(u64, 1) << XLEN) - 1;
+            return (self.rs1_val & mask) >> shift;
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsRs2Value);
+            return flags;
+        }
+    };
+}
+
+/// SRA (Shift Right Arithmetic) instruction lookup
+/// Computes rd = rs1 >> (rs2 & (XLEN-1)) (arithmetic shift, sign-extending)
+pub fn SraLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        rs1_val: u64,
+        rs2_val: u64,
+
+        pub fn init(rs1_val: u64, rs2_val: u64) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .rs2_val = rs2_val,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .RightShiftArithmetic;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return lookup_table.interleaveBits(self.rs1_val, self.rs2_val);
+        }
+
+        pub fn computeResult(self: Self) u64 {
+            const shift_mask: u6 = XLEN - 1;
+            const shift: u6 = @truncate(self.rs2_val & @as(u64, shift_mask));
+
+            if (XLEN == 64) {
+                const signed_val: i64 = @bitCast(self.rs1_val);
+                const shifted: i64 = signed_val >> shift;
+                return @bitCast(shifted);
+            } else {
+                const mask: u64 = (@as(u64, 1) << XLEN) - 1;
+                const masked = self.rs1_val & mask;
+                // Sign extend to full 64 bits, then shift
+                const shift_for_sign = 64 - XLEN;
+                const signed_val: i64 = @as(i64, @bitCast(masked << @truncate(shift_for_sign))) >> @truncate(shift_for_sign);
+                const shifted: i64 = signed_val >> shift;
+                return @as(u64, @bitCast(shifted)) & mask;
+            }
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsRs2Value);
+            return flags;
+        }
+    };
+}
+
+/// SLLI (Shift Left Logical Immediate) instruction lookup
+/// Computes rd = rs1 << imm
+pub fn SlliLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        rs1_val: u64,
+        imm: u64,
+
+        pub fn init(rs1_val: u64, imm: u64) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .imm = imm,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .LeftShift;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return lookup_table.interleaveBits(self.rs1_val, self.imm);
+        }
+
+        pub fn computeResult(self: Self) u64 {
+            const shift_mask: u6 = XLEN - 1;
+            const shift: u6 = @truncate(self.imm & @as(u64, shift_mask));
+            const mask: u64 = if (XLEN == 64) ~@as(u64, 0) else (@as(u64, 1) << XLEN) - 1;
+            return (self.rs1_val << shift) & mask;
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsImm);
+            return flags;
+        }
+    };
+}
+
+/// SRLI (Shift Right Logical Immediate) instruction lookup
+/// Computes rd = rs1 >> imm (logical shift)
+pub fn SrliLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        rs1_val: u64,
+        imm: u64,
+
+        pub fn init(rs1_val: u64, imm: u64) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .imm = imm,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .RightShift;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return lookup_table.interleaveBits(self.rs1_val, self.imm);
+        }
+
+        pub fn computeResult(self: Self) u64 {
+            const shift_mask: u6 = XLEN - 1;
+            const shift: u6 = @truncate(self.imm & @as(u64, shift_mask));
+            const mask: u64 = if (XLEN == 64) ~@as(u64, 0) else (@as(u64, 1) << XLEN) - 1;
+            return (self.rs1_val & mask) >> shift;
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsImm);
+            return flags;
+        }
+    };
+}
+
+/// SRAI (Shift Right Arithmetic Immediate) instruction lookup
+/// Computes rd = rs1 >> imm (arithmetic shift, sign-extending)
+pub fn SraiLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        rs1_val: u64,
+        imm: u64,
+
+        pub fn init(rs1_val: u64, imm: u64) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .imm = imm,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .RightShiftArithmetic;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return lookup_table.interleaveBits(self.rs1_val, self.imm);
+        }
+
+        pub fn computeResult(self: Self) u64 {
+            const shift_mask: u6 = XLEN - 1;
+            const shift: u6 = @truncate(self.imm & @as(u64, shift_mask));
+
+            if (XLEN == 64) {
+                const signed_val: i64 = @bitCast(self.rs1_val);
+                const shifted: i64 = signed_val >> shift;
+                return @bitCast(shifted);
+            } else {
+                const mask: u64 = (@as(u64, 1) << XLEN) - 1;
+                const masked = self.rs1_val & mask;
+                const shift_for_sign = 64 - XLEN;
+                const signed_val: i64 = @as(i64, @bitCast(masked << @truncate(shift_for_sign))) >> @truncate(shift_for_sign);
+                const shifted: i64 = signed_val >> shift;
+                return @as(u64, @bitCast(shifted)) & mask;
+            }
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsImm);
+            return flags;
+        }
+    };
+}
+
 /// Instruction lookup trace entry
 /// Records a single lookup operation for proof generation
 pub fn LookupTraceEntry(comptime XLEN: comptime_int) type {
@@ -574,4 +873,70 @@ test "lookup trace entry" {
     try std.testing.expectEqual(@as(usize, 5), entry.cycle);
     try std.testing.expectEqual(LookupTables(64).RangeCheck, entry.table);
     try std.testing.expectEqual(@as(u64, 300), entry.result);
+}
+
+test "sll lookup" {
+    // 1 << 4 = 16
+    const sll1 = SllLookup(64).init(1, 4);
+    try std.testing.expectEqual(@as(u64, 16), sll1.computeResult());
+
+    // 0xFF << 8 = 0xFF00
+    const sll2 = SllLookup(64).init(0xFF, 8);
+    try std.testing.expectEqual(@as(u64, 0xFF00), sll2.computeResult());
+
+    const flags = SllLookup(64).circuitFlags();
+    try std.testing.expect(flags.get(.WriteLookupOutputToRD));
+}
+
+test "srl lookup" {
+    // 256 >> 4 = 16
+    const srl1 = SrlLookup(64).init(256, 4);
+    try std.testing.expectEqual(@as(u64, 16), srl1.computeResult());
+
+    // 0xFF00 >> 8 = 0xFF
+    const srl2 = SrlLookup(64).init(0xFF00, 8);
+    try std.testing.expectEqual(@as(u64, 0xFF), srl2.computeResult());
+}
+
+test "sra lookup" {
+    // Positive number: 256 >> 4 = 16 (same as SRL)
+    const sra_pos = SraLookup(64).init(256, 4);
+    try std.testing.expectEqual(@as(u64, 16), sra_pos.computeResult());
+
+    // Negative number: -256 >> 4 = -16
+    const neg256: u64 = @bitCast(@as(i64, -256));
+    const sra_neg = SraLookup(64).init(neg256, 4);
+    const expected: u64 = @bitCast(@as(i64, -16));
+    try std.testing.expectEqual(expected, sra_neg.computeResult());
+
+    // -1 >> any = -1
+    const neg1: u64 = @bitCast(@as(i64, -1));
+    const sra_all_ones = SraLookup(64).init(neg1, 10);
+    try std.testing.expectEqual(neg1, sra_all_ones.computeResult());
+}
+
+test "slli lookup" {
+    const slli = SlliLookup(64).init(5, 3);
+    try std.testing.expectEqual(@as(u64, 40), slli.computeResult());
+
+    const flags = SlliLookup(64).instructionFlags();
+    try std.testing.expect(flags.get(.LeftOperandIsRs1Value));
+    try std.testing.expect(flags.get(.RightOperandIsImm));
+}
+
+test "srli lookup" {
+    const srli = SrliLookup(64).init(40, 3);
+    try std.testing.expectEqual(@as(u64, 5), srli.computeResult());
+}
+
+test "srai lookup" {
+    // Positive
+    const srai_pos = SraiLookup(64).init(40, 3);
+    try std.testing.expectEqual(@as(u64, 5), srai_pos.computeResult());
+
+    // Negative: -40 >> 3 = -5
+    const neg40: u64 = @bitCast(@as(i64, -40));
+    const srai_neg = SraiLookup(64).init(neg40, 3);
+    const expected: u64 = @bitCast(@as(i64, -5));
+    try std.testing.expectEqual(expected, srai_neg.computeResult());
 }

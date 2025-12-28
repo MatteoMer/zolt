@@ -23,6 +23,13 @@ pub const SltLookup = lookups.SltLookup;
 pub const SltuLookup = lookups.SltuLookup;
 pub const BeqLookup = lookups.BeqLookup;
 pub const BneLookup = lookups.BneLookup;
+// Shift lookups
+pub const SllLookup = lookups.SllLookup;
+pub const SrlLookup = lookups.SrlLookup;
+pub const SraLookup = lookups.SraLookup;
+pub const SlliLookup = lookups.SlliLookup;
+pub const SrliLookup = lookups.SrliLookup;
+pub const SraiLookup = lookups.SraiLookup;
 pub const LookupTraceEntry = lookups.LookupTraceEntry;
 
 // ============================================================================
@@ -156,6 +163,15 @@ pub fn LookupTables(comptime XLEN: comptime_int) type {
         Movsign,
         Sub,
         Andn,
+        // Shift operations
+        LeftShift,
+        RightShift,
+        RightShiftArithmetic,
+        Pow2,
+        // Sign extension
+        SignExtend8,
+        SignExtend16,
+        SignExtend32,
 
         const Self = @This();
         const Table = lookup_table.LookupTable(@import("../../field/mod.zig").BN254Scalar, XLEN);
@@ -177,6 +193,13 @@ pub fn LookupTables(comptime XLEN: comptime_int) type {
                 .Movsign => Table.Movsign.materializeEntry(index),
                 .Sub => Table.Sub.materializeEntry(index),
                 .Andn => Table.Andn.materializeEntry(index),
+                .LeftShift => Table.LeftShift.materializeEntry(index),
+                .RightShift => Table.RightShift.materializeEntry(index),
+                .RightShiftArithmetic => Table.RightShiftArithmetic.materializeEntry(index),
+                .Pow2 => Table.Pow2.materializeEntry(index),
+                .SignExtend8 => Table.SignExtend8.materializeEntry(index),
+                .SignExtend16 => Table.SignExtend16.materializeEntry(index),
+                .SignExtend32 => Table.SignExtend32.materializeEntry(index),
             };
         }
     };

@@ -533,6 +533,18 @@ pub fn R1CSCycleInputs(comptime F: type) type {
         /// Witness values for this cycle (indexed by R1CSInputIndex)
         values: [R1CSInputIndex.NUM_INPUTS]F,
 
+        /// Initialize with all zero values
+        pub fn init() Self {
+            return Self{
+                .values = [_]F{F.zero()} ** R1CSInputIndex.NUM_INPUTS,
+            };
+        }
+
+        /// Set a specific input value
+        pub fn setInput(self: *Self, index: R1CSInputIndex, value: F) void {
+            self.values[index.toIndex()] = value;
+        }
+
         /// Create cycle inputs from an execution trace step
         ///
         /// This generates R1CS witness values that satisfy Jolt's 19 uniform constraints.

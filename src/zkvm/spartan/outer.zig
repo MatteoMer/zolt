@@ -225,10 +225,22 @@ pub fn SpartanOuterProver(comptime F: type) type {
                 }
             }
 
-            // Compute extended evaluations using precomputed Lagrange coefficients.
-            // This is the CORRECT approach: we evaluate Az(y_j) and Bz(y_j) separately
-            // at each extended point using COEFFS_PER_J, then multiply them.
-            // This gives non-zero results even when base_evals are all zeros.
+            // Compute extended evaluations using Jolt's cross-product approach.
+            //
+            // CRITICAL INSIGHT: We do NOT compute Az(y_j) * Bz(y_j) via interpolation!
+            // Instead, we use the constraint structure where Az guards are boolean.
+            //
+            // For satisfied constraints:
+            // - When Az[i] = 1 (guard is true): Bz[i] = 0 (left - right = 0)
+            // - When Az[i] = 0 (guard is false): Bz[i] can be non-zero
+            //
+            // Jolt's algorithm partitions contributions:
+            // - az_eval = Σ_i (where Az[i] is true): coeffs[i]
+            // - bz_eval = Σ_i (where Az[i] is false): coeffs[i] * Bz[i]
+            // - Product = az_eval * bz_eval
+            //
+            // This gives non-zero cross-products at extended points even when
+            // all base Az*Bz products are zero!
             var extended_evals: [DEGREE]F = undefined;
             @memset(&extended_evals, F.zero());
 
@@ -249,30 +261,41 @@ pub fn SpartanOuterProver(comptime F: type) type {
                     // Get the precomputed Lagrange coefficients for target j
                     const coeffs = univariate_skip.COEFFS_PER_J[j];
 
-                    // Compute Az(y_j) = sum_i coeffs[i] * az_vals[i]
-                    var az_at_yj = F.zero();
+                    // Use Jolt's cross-product approach:
+                    // - az_eval: sum of coeffs where guard is true (Az = 1)
+                    // - bz_eval: sum of coeffs * Bz where guard is false (Az = 0)
+                    var az_eval_sum: i64 = 0; // Sum of coefficients (small integers)
+                    var bz_eval = F.zero(); // Sum of coefficient-weighted Bz values
+
                     for (0..DOMAIN_SIZE) |i| {
                         const coeff_i = coeffs[i];
-                        if (coeff_i >= 0) {
-                            az_at_yj = az_at_yj.add(az_vals[i].mul(F.fromU64(@intCast(coeff_i))));
+                        const az_is_one = !az_vals[i].eql(F.zero());
+
+                        if (az_is_one) {
+                            // Guard is active: contribute coefficient to az_eval
+                            az_eval_sum += coeff_i;
                         } else {
-                            az_at_yj = az_at_yj.sub(az_vals[i].mul(F.fromU64(@intCast(-coeff_i))));
+                            // Guard is inactive: contribute coeff * Bz to bz_eval
+                            if (coeff_i >= 0) {
+                                bz_eval = bz_eval.add(bz_vals[i].mul(F.fromU64(@intCast(coeff_i))));
+                            } else {
+                                bz_eval = bz_eval.sub(bz_vals[i].mul(F.fromU64(@intCast(-coeff_i))));
+                            }
                         }
                     }
 
-                    // Compute Bz(y_j) = sum_i coeffs[i] * bz_vals[i]
-                    var bz_at_yj = F.zero();
-                    for (0..DOMAIN_SIZE) |i| {
-                        const coeff_i = coeffs[i];
-                        if (coeff_i >= 0) {
-                            bz_at_yj = bz_at_yj.add(bz_vals[i].mul(F.fromU64(@intCast(coeff_i))));
-                        } else {
-                            bz_at_yj = bz_at_yj.sub(bz_vals[i].mul(F.fromU64(@intCast(-coeff_i))));
-                        }
-                    }
+                    // Convert az_eval_sum to field element
+                    const az_eval = if (az_eval_sum >= 0)
+                        F.fromU64(@intCast(az_eval_sum))
+                    else
+                        F.zero().sub(F.fromU64(@intCast(-az_eval_sum)));
 
-                    // Add eq-weighted Az*Bz product to this extended point
-                    extended_evals[j] = extended_evals[j].add(eq_val.mul(az_at_yj.mul(bz_at_yj)));
+                    // Cross-product: az_eval * bz_eval
+                    // This can be non-zero even when all base Az*Bz = 0
+                    const product = az_eval.mul(bz_eval);
+
+                    // Add eq-weighted product to this extended point
+                    extended_evals[j] = extended_evals[j].add(eq_val.mul(product));
                 }
             }
 
@@ -518,4 +541,78 @@ test "uniskip polynomial from witnesses has non-zero coefficients" {
         }
     }
     try std.testing.expect(has_nonzero);
+}
+
+test "uniskip polynomial with satisfied constraints has non-zero extended evaluations" {
+    // This test verifies the critical Jolt cross-product approach:
+    // Even when all Az*Bz = 0 at base points (constraints are satisfied),
+    // the extended evaluations should be non-zero due to the cross-product structure.
+
+    const field = @import("../../field/mod.zig");
+    const F = field.BN254Scalar;
+    const allocator = std.testing.allocator;
+
+    // Create a cycle witness for a LOAD instruction with SATISFIED constraints
+    // Constraint 2: if Load => RamReadValue == RamWriteValue
+    var cycle_witness = constraints.R1CSCycleInputs(F).init();
+
+    // Set FlagLoad = 1 (guard is active for constraint 2)
+    cycle_witness.setInput(constraints.R1CSInputIndex.FlagLoad, F.one());
+
+    // For SATISFIED constraint: RamReadValue == RamWriteValue
+    // This means Bz[2] = RamReadValue - RamWriteValue = 0
+    cycle_witness.setInput(constraints.R1CSInputIndex.RamReadValue, F.fromU64(42));
+    cycle_witness.setInput(constraints.R1CSInputIndex.RamWriteValue, F.fromU64(42)); // SAME value!
+    cycle_witness.setInput(constraints.R1CSInputIndex.RdWriteValue, F.fromU64(42));
+
+    // Set some other values to ensure other constraints have non-zero Bz
+    // when their guards are inactive
+    cycle_witness.setInput(constraints.R1CSInputIndex.RamAddress, F.fromU64(0)); // Satisfies constraint 1 (non-load/store => addr=0)
+    cycle_witness.setInput(constraints.R1CSInputIndex.LeftLookupOperand, F.fromU64(100));
+    cycle_witness.setInput(constraints.R1CSInputIndex.LeftInstructionInput, F.fromU64(100));
+
+    const witnesses = [_]constraints.R1CSCycleInputs(F){cycle_witness};
+    const tau = [_]F{ F.fromU64(1), F.fromU64(2), F.fromU64(3), F.fromU64(4) };
+    const eq_evals = [_]F{F.one()};
+
+    var prover = try SpartanOuterProver(F).initFromWitnesses(
+        allocator,
+        &witnesses,
+        &eq_evals,
+        &tau,
+    );
+    defer prover.deinit();
+
+    // Verify Az[2] and Bz[2] satisfy: Az[2] = 1 and Bz[2] = 0 (satisfied constraint)
+    const az_idx = 2; // Constraint 2 is at first-group index 2
+    const az_2 = prover.Az[az_idx];
+    const bz_2 = prover.Bz[az_idx];
+
+    // Az[2] should be 1 (FlagLoad is true)
+    try std.testing.expect(az_2.eql(F.one()));
+    // Bz[2] should be 0 (RamReadValue == RamWriteValue)
+    try std.testing.expect(bz_2.eql(F.zero()));
+    // Therefore Az[2] * Bz[2] = 0 at base point
+    try std.testing.expect(az_2.mul(bz_2).eql(F.zero()));
+
+    // Compute the univariate skip polynomial
+    var poly = try prover.computeUniskipFirstRoundPoly();
+    defer poly.deinit();
+
+    // Should have 28 coefficients
+    try std.testing.expectEqual(@as(usize, 28), poly.coeffs.len);
+
+    // CRITICAL CHECK: Even with satisfied constraints (Az*Bz = 0 at base),
+    // the polynomial should have non-zero coefficients due to cross-product
+    // at extended evaluation points!
+    var nonzero_satisfied = false;
+    for (poly.coeffs) |c| {
+        if (!c.eql(F.zero())) {
+            nonzero_satisfied = true;
+            break;
+        }
+    }
+
+    // This MUST pass for Jolt compatibility
+    try std.testing.expect(nonzero_satisfied);
 }

@@ -821,6 +821,36 @@ test "polynomial evaluation at challenge - quadratic" {
     try std.testing.expect(result.eql(F.fromU64(9)));
 }
 
+test "evaluate quadratic at 3 points" {
+    const field = @import("../field/mod.zig");
+    const F = field.BN254Scalar;
+
+    // p(x) = x^2, so p(0) = 0, p(1) = 1, p(2) = 4
+    const p0 = F.fromU64(0);
+    const p1 = F.fromU64(1);
+    const p2 = F.fromU64(4);
+    const r = F.fromU64(3);
+
+    // p(3) = 9
+    const result = evaluateQuadraticAt3Points(F, p0, p1, p2, r);
+    try std.testing.expect(result.eql(F.fromU64(9)));
+}
+
+test "evaluate quadratic at 3 points - linear case" {
+    const field = @import("../field/mod.zig");
+    const F = field.BN254Scalar;
+
+    // p(x) = 2x + 1, so p(0) = 1, p(1) = 3, p(2) = 5
+    const p0 = F.fromU64(1);
+    const p1 = F.fromU64(3);
+    const p2 = F.fromU64(5);
+    const r = F.fromU64(4);
+
+    // p(4) = 9
+    const result = evaluateQuadraticAt3Points(F, p0, p1, p2, r);
+    try std.testing.expect(result.eql(F.fromU64(9)));
+}
+
 test "verifier config defaults" {
     const config = VerifierConfig{};
     try std.testing.expect(config.strict_sumcheck);

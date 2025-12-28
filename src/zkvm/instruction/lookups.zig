@@ -1929,6 +1929,201 @@ pub fn SrawLookup(comptime XLEN: comptime_int) type {
     };
 }
 
+// ============================================================================
+// RV64I Immediate Word Operations
+// ============================================================================
+
+/// ADDIW instruction lookup - add immediate word
+/// Computes rd = sext((rs1[31:0] + sext(imm))[31:0])
+pub fn AddiwLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        rs1_val: u64,
+        imm: i32,
+
+        pub fn init(rs1_val: u64, imm: i32) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .imm = imm,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .RangeCheck;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return @as(u128, self.computeResult() & 0xFFFFFFFF);
+        }
+
+        /// Compute ADDIW result: sext((rs1[31:0] + imm)[31:0])
+        pub fn computeResult(self: Self) u64 {
+            const a32: i32 = @bitCast(@as(u32, @truncate(self.rs1_val)));
+            const result32: i32 = a32 +% self.imm;
+            const extended: i64 = @as(i64, result32);
+            return @bitCast(extended);
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.AddOperands);
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsImm);
+            return flags;
+        }
+    };
+}
+
+/// SLLIW instruction lookup - shift left immediate word
+/// Computes rd = sext((rs1[31:0] << shamt)[31:0])
+pub fn SlliwLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        rs1_val: u64,
+        shamt: u5,
+
+        pub fn init(rs1_val: u64, shamt: u5) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .shamt = shamt,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .LeftShift;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return lookup_table.interleaveBits(self.rs1_val & 0xFFFFFFFF, @as(u64, self.shamt));
+        }
+
+        /// Compute SLLIW result
+        pub fn computeResult(self: Self) u64 {
+            const a32: u32 = @truncate(self.rs1_val);
+            const result32: u32 = a32 << self.shamt;
+            const signed32: i32 = @bitCast(result32);
+            const extended: i64 = @as(i64, signed32);
+            return @bitCast(extended);
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsImm);
+            return flags;
+        }
+    };
+}
+
+/// SRLIW instruction lookup - logical shift right immediate word
+/// Computes rd = sext((rs1[31:0] >> shamt)[31:0])
+pub fn SrliwLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        rs1_val: u64,
+        shamt: u5,
+
+        pub fn init(rs1_val: u64, shamt: u5) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .shamt = shamt,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .RightShift;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return lookup_table.interleaveBits(self.rs1_val & 0xFFFFFFFF, @as(u64, self.shamt));
+        }
+
+        /// Compute SRLIW result
+        pub fn computeResult(self: Self) u64 {
+            const a32: u32 = @truncate(self.rs1_val);
+            const result32: u32 = a32 >> self.shamt;
+            const signed32: i32 = @bitCast(result32);
+            const extended: i64 = @as(i64, signed32);
+            return @bitCast(extended);
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsImm);
+            return flags;
+        }
+    };
+}
+
+/// SRAIW instruction lookup - arithmetic shift right immediate word
+/// Computes rd = sext((rs1[31:0] >>s shamt)[31:0])
+pub fn SraiwLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        rs1_val: u64,
+        shamt: u5,
+
+        pub fn init(rs1_val: u64, shamt: u5) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .shamt = shamt,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .RightShiftArithmetic;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return lookup_table.interleaveBits(self.rs1_val & 0xFFFFFFFF, @as(u64, self.shamt));
+        }
+
+        /// Compute SRAIW result (arithmetic shift preserves sign)
+        pub fn computeResult(self: Self) u64 {
+            const a32: i32 = @bitCast(@as(u32, @truncate(self.rs1_val)));
+            const result32: i32 = a32 >> self.shamt;
+            const extended: i64 = @as(i64, result32);
+            return @bitCast(extended);
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsImm);
+            return flags;
+        }
+    };
+}
+
 /// MULW instruction lookup - multiply 32-bit values, sign-extend to 64-bit
 /// Computes rd = sext((rs1[31:0] * rs2[31:0])[31:0])
 pub fn MulwLookup(comptime XLEN: comptime_int) type {
@@ -3740,4 +3935,91 @@ test "sd lookup (store doubleword)" {
     const sd = SdLookup(64).init(0x1000, 16, 0xDEADBEEF12345678);
     try std.testing.expectEqual(@as(u64, 0xDEADBEEF12345678), sd.computeResult());
     try std.testing.expectEqual(@as(u64, 0x1010), sd.computeAddress());
+}
+
+// ============================================================================
+// RV64I Immediate Word Operation Tests
+// ============================================================================
+
+test "addiw lookup (add immediate word)" {
+    // Positive result
+    const addiw1 = AddiwLookup(64).init(10, 20);
+    try std.testing.expectEqual(@as(u64, 30), addiw1.computeResult());
+
+    // Result with upper bits cleared (only lower 32 bits + sign extend)
+    const addiw2 = AddiwLookup(64).init(0xFFFFFFFF00000005, 10);
+    // Lower 32 bits: 5 + 10 = 15, sign-extended to 64 bits
+    try std.testing.expectEqual(@as(u64, 15), addiw2.computeResult());
+
+    // Negative result (wraparound)
+    const addiw3 = AddiwLookup(64).init(10, -20);
+    // 10 - 20 = -10 sign-extended
+    try std.testing.expectEqual(@as(u64, @bitCast(@as(i64, -10))), addiw3.computeResult());
+
+    // Result causing 32-bit overflow, sign-extended
+    const addiw4 = AddiwLookup(64).init(0x7FFFFFFF, 1);
+    // 0x7FFFFFFF + 1 = 0x80000000 (negative in i32), sign-extended
+    try std.testing.expectEqual(@as(u64, @bitCast(@as(i64, -2147483648))), addiw4.computeResult());
+
+    // Check flags
+    const circuit_flags = AddiwLookup(64).circuitFlags();
+    try std.testing.expect(circuit_flags.get(.AddOperands));
+    try std.testing.expect(circuit_flags.get(.WriteLookupOutputToRD));
+
+    const inst_flags = AddiwLookup(64).instructionFlags();
+    try std.testing.expect(inst_flags.get(.LeftOperandIsRs1Value));
+    try std.testing.expect(inst_flags.get(.RightOperandIsImm));
+}
+
+test "slliw lookup (shift left immediate word)" {
+    // Basic shift
+    const slliw1 = SlliwLookup(64).init(1, 4);
+    try std.testing.expectEqual(@as(u64, 16), slliw1.computeResult());
+
+    // Shift with upper bits ignored
+    const slliw2 = SlliwLookup(64).init(0xFFFFFFFF00000001, 4);
+    // Lower 32 bits: 1 << 4 = 16, sign-extended
+    try std.testing.expectEqual(@as(u64, 16), slliw2.computeResult());
+
+    // Shift causing high bit set (negative sign-extend)
+    const slliw3 = SlliwLookup(64).init(1, 31);
+    // 1 << 31 = 0x80000000 (negative), sign-extended
+    try std.testing.expectEqual(@as(u64, @bitCast(@as(i64, -2147483648))), slliw3.computeResult());
+
+    // Check flags
+    const inst_flags = SlliwLookup(64).instructionFlags();
+    try std.testing.expect(inst_flags.get(.LeftOperandIsRs1Value));
+    try std.testing.expect(inst_flags.get(.RightOperandIsImm));
+}
+
+test "srliw lookup (logical shift right immediate word)" {
+    // Basic shift
+    const srliw1 = SrliwLookup(64).init(32, 2);
+    try std.testing.expectEqual(@as(u64, 8), srliw1.computeResult());
+
+    // Shift with upper bits ignored
+    const srliw2 = SrliwLookup(64).init(0xFFFFFFFF00000020, 2);
+    // Lower 32 bits: 0x20 >> 2 = 8, sign-extended
+    try std.testing.expectEqual(@as(u64, 8), srliw2.computeResult());
+
+    // Logical shift doesn't preserve sign
+    const srliw3 = SrliwLookup(64).init(0x80000000, 1);
+    // 0x80000000 >> 1 = 0x40000000 (positive), sign-extended
+    try std.testing.expectEqual(@as(u64, 0x40000000), srliw3.computeResult());
+}
+
+test "sraiw lookup (arithmetic shift right immediate word)" {
+    // Basic shift with positive value
+    const sraiw1 = SraiwLookup(64).init(32, 2);
+    try std.testing.expectEqual(@as(u64, 8), sraiw1.computeResult());
+
+    // Arithmetic shift preserves sign bit
+    const sraiw2 = SraiwLookup(64).init(0x80000000, 1);
+    // 0x80000000 (i32: MIN_INT) >> 1 = 0xC0000000 (negative), sign-extended
+    try std.testing.expectEqual(@as(u64, @bitCast(@as(i64, -1073741824))), sraiw2.computeResult());
+
+    // Full arithmetic shift of -1
+    const sraiw3 = SraiwLookup(64).init(0xFFFFFFFF, 31);
+    // -1 >> 31 = -1 (all bits stay 1)
+    try std.testing.expectEqual(@as(u64, @bitCast(@as(i64, -1))), sraiw3.computeResult());
 }

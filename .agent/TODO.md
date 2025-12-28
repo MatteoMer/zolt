@@ -5,18 +5,23 @@
 ### Load/Store Instruction Lookups
 - [x] LoadAddressLookup for effective address computation (base + offset)
 - [x] StoreAddressLookup for store address computation
-- [x] LbLookup (Load Byte signed, with sign extension)
-- [x] LbuLookup (Load Byte Unsigned, zero extension)
-- [x] LhLookup (Load Halfword signed, with sign extension)
-- [x] LhuLookup (Load Halfword Unsigned, zero extension)
-- [x] LwLookup (Load Word signed, with sign extension on RV64)
-- [x] LwuLookup (Load Word Unsigned, zero extension on RV64)
-- [x] LdLookup (Load Doubleword for RV64)
-- [x] SbLookup (Store Byte)
-- [x] ShLookup (Store Halfword)
-- [x] SwLookup (Store Word)
-- [x] SdLookup (Store Doubleword for RV64)
+- [x] LbLookup, LbuLookup, LhLookup, LhuLookup, LwLookup, LwuLookup, LdLookup
+- [x] SbLookup, ShLookup, SwLookup, SdLookup
 - [x] Comprehensive tests for all load/store lookups
+
+### Verifier Improvements
+- [x] Enhanced verifyBytecodeProof with transcript binding
+- [x] Enhanced verifyMemoryProof with proper commitment absorption
+- [x] Enhanced verifyRegisterProof with timestamp commitment binding
+- [x] Enhanced verifyR1CSProof with tau challenge derivation
+- [x] Documented verification requirements for each proof type
+
+### RV64I Immediate Word Operations
+- [x] AddiwLookup (Add Immediate Word)
+- [x] SlliwLookup (Shift Left Logical Immediate Word)
+- [x] SrliwLookup (Shift Right Logical Immediate Word)
+- [x] SraiwLookup (Shift Right Arithmetic Immediate Word)
+- [x] Comprehensive tests with sign extension edge cases
 
 ## Completed (Previous Sessions)
 
@@ -33,13 +38,7 @@
 - [x] MulwLookup, DivwLookup, DivuwLookup, RemwLookup, RemuwLookup
 - [x] All W-suffix operations sign-extend 32-bit results to 64 bits
 
-### Iteration 20: Shift Lookup Tables and Instructions
-- [x] LeftShift, RightShift, RightShiftArithmetic tables
-- [x] Pow2 table
-- [x] SignExtend8, SignExtend16, SignExtend32 tables
-- [x] SllLookup, SrlLookup, SraLookup, SlliLookup, SrliLookup, SraiLookup
-
-### Iterations 1-19: Core Infrastructure
+### Iterations 1-20: Core Infrastructure
 - [x] BN254 field and curve arithmetic
 - [x] Extension fields (Fp2, Fp6, Fp12)
 - [x] Pairing with Miller loop and final exponentiation
@@ -54,6 +53,7 @@
 - [x] Multi-stage prover (6 stages)
 - [x] Host execute
 - [x] Preprocessing
+- [x] Shift and sign extension tables
 
 ## Working Components
 
@@ -65,9 +65,10 @@
 - **Sign Extension**: SignExtend8, SignExtend16, SignExtend32
 - **Division**: ValidDiv0, ValidUnsignedRemainder, ValidSignedRemainder
 
-### Full Instruction Coverage (RV64IM + Load/Store)
+### Complete RV64IM Instruction Coverage
 - **Base Integer (I)**: ADD, SUB, AND, OR, XOR, SLL, SRL, SRA, SLT, SLTU
 - **Immediate (I)**: ADDI, ANDI, ORI, XORI, SLTI, SLTIU, SLLI, SRLI, SRAI
+- **Immediate Word (RV64I)**: ADDIW, SLLIW, SRLIW, SRAIW
 - **Branches**: BEQ, BNE, BLT, BGE, BLTU, BGEU
 - **Upper Immediate**: LUI, AUIPC
 - **Jumps**: JAL, JALR
@@ -92,7 +93,9 @@
 - [ ] Benchmarking suite
 
 ## Test Status
-All tests pass (494 tests).
+All tests pass (502 tests).
 
 ## Commits This Session
 1. Add load/store instruction lookups for full RV64I memory operations
+2. Improve verifier with proper transcript binding and documentation
+3. Add RV64I immediate word operation lookups (ADDIW, SLLIW, SRLIW, SRAIW)

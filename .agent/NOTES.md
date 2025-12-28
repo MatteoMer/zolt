@@ -1,5 +1,62 @@
 # Zolt Implementation Notes
 
+## Univariate Skip Implementation (Iteration 11) - SUCCESS
+
+### Summary
+
+Successfully implemented Jolt's univariate skip optimization for stages 1-2:
+
+1. **univariate_skip.zig** - Core module with:
+   - Constants matching Jolt (NUM_R1CS_CONSTRAINTS=19, DEGREE=9, NUM_COEFFS=28)
+   - `buildUniskipFirstRoundPoly()` - Produces degree-27 polynomial from extended evals
+   - `LagrangePolynomial` - Interpolation on extended symmetric domain
+   - `uniskipTargets()` - Compute extended evaluation points
+
+2. **spartan/outer.zig** - Spartan outer prover:
+   - `SpartanOuterProver` with univariate skip support
+   - `computeUniskipFirstRoundPoly()` - Generates proper first-round polynomial
+
+3. **proof_converter.zig** - Updated to generate proper-degree polynomials:
+   - Stage 1: `createUniSkipProofStage1()` - 28 coefficients (degree 27)
+   - Stage 2: `createUniSkipProofStage2()` - 13 coefficients (degree 12)
+
+### Cross-Verification Results
+
+```
+$ cargo test -p jolt-core test_deserialize_zolt_proof -- --ignored --nocapture
+
+Read 25999 bytes from Zolt proof
+Successfully deserialized Zolt proof!
+  Trace length: 8
+  RAM K: 65536
+  Bytecode K: 65536
+  Commitments: 5
+test zolt_compat_test::tests::test_deserialize_zolt_proof ... ok
+```
+
+Debug format test confirms:
+- ✅ 11 opening claims with valid Fr elements
+- ✅ 5 GT (Dory) commitments all valid
+- ✅ 23689 bytes for sumcheck proofs
+
+### Key Insight: Univariate Skip Polynomial Construction
+
+Jolt's univariate skip optimization encodes 19 R1CS constraints into a high-degree
+polynomial to reduce the number of sumcheck rounds:
+
+```
+s1(Y) = L(τ_high, Y) · t1(Y)
+```
+
+Where:
+- `t1(Y)` = Az(x,Y) · Bz(x,Y) evaluated on extended domain (degree ≤ 18)
+- `L(τ_high, Y)` = Lagrange kernel polynomial (degree = DOMAIN_SIZE - 1 = 9)
+- Result: degree ≤ 27, requiring 28 coefficients
+
+The extended domain is {-DEGREE, ..., -1, 0, 1, ..., DEGREE} = {-9, ..., 9} (19 points).
+
+---
+
 ## Jolt Compatibility - Proof Structure Analysis
 
 ### Jolt's JoltProof Structure (from proof_serialization.rs)

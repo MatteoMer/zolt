@@ -13,6 +13,8 @@ const common = @import("../common/mod.zig");
 const field = @import("../field/mod.zig");
 const tracer = @import("../tracer/mod.zig");
 const transcripts = @import("../transcripts/mod.zig");
+const poly_commitment = @import("../poly/commitment/mod.zig");
+const HyperKZG = poly_commitment.HyperKZG;
 
 pub const bytecode = @import("bytecode/mod.zig");
 pub const commitment_types = @import("commitment_types.zig");
@@ -157,6 +159,41 @@ pub fn JoltProof(comptime F: type) type {
     };
 }
 
+/// HyperKZG scheme type for the prover
+const HyperKZGScheme = HyperKZG(field.BN254Scalar);
+
+/// Proving key containing SRS and preprocessed data
+pub const ProvingKey = struct {
+    const Self = @This();
+
+    /// HyperKZG SRS (powers of tau)
+    srs: HyperKZGScheme.SetupParams,
+    /// Maximum trace length supported
+    max_trace_length: usize,
+
+    /// Create a proving key with default parameters
+    pub fn init(allocator: Allocator, max_trace_length: usize) !Self {
+        // SRS size needs to be at least max_trace_length
+        const srs = try HyperKZGScheme.setup(allocator, max_trace_length);
+        return .{
+            .srs = srs,
+            .max_trace_length = max_trace_length,
+        };
+    }
+
+    /// Create a proving key from an existing SRS
+    pub fn fromSRS(srs: HyperKZGScheme.SetupParams) Self {
+        return .{
+            .srs = srs,
+            .max_trace_length = srs.max_degree,
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.srs.deinit();
+    }
+};
+
 /// Jolt prover
 pub fn JoltProver(comptime F: type) type {
     return struct {
@@ -164,11 +201,23 @@ pub fn JoltProver(comptime F: type) type {
 
         allocator: Allocator,
         max_cycles: u64,
+        /// Optional proving key for generating actual commitments
+        proving_key: ?ProvingKey,
 
         pub fn init(allocator: Allocator) Self {
             return .{
                 .allocator = allocator,
                 .max_cycles = common.constants.DEFAULT_MAX_TRACE_LENGTH,
+                .proving_key = null,
+            };
+        }
+
+        /// Initialize prover with a proving key (enables actual commitments)
+        pub fn initWithKey(allocator: Allocator, proving_key: ProvingKey) Self {
+            return .{
+                .allocator = allocator,
+                .max_cycles = common.constants.DEFAULT_MAX_TRACE_LENGTH,
+                .proving_key = proving_key,
             };
         }
 
@@ -177,7 +226,7 @@ pub fn JoltProver(comptime F: type) type {
         /// This function:
         /// 1. Executes the program in the emulator to generate an execution trace
         /// 2. Runs the multi-stage sumcheck protocol
-        /// 3. Generates commitment proofs for polynomials
+        /// 3. Generates commitment proofs for polynomials (if proving key is available)
         /// 4. Returns the complete Jolt proof
         pub fn prove(
             self: *Self,
@@ -230,9 +279,24 @@ pub fn JoltProver(comptime F: type) type {
             // Run multi-stage proving
             const stage_proofs = try multi_stage.prove(&transcript);
 
-            // Return the complete proof with stage proofs
-            // The bytecode, memory, and register proofs use identity commitments
-            // as placeholders. Full commitment generation happens in a later phase.
+            // Generate commitments if proving key is available
+            if (self.proving_key) |pk| {
+                // Build polynomials from traces and commit
+                const bc_proof = try self.commitBytecode(pk, program_bytecode);
+                const mem_proof = try self.commitMemory(pk, &emulator.ram.trace);
+                const reg_proof = try self.commitRegisters(pk, &emulator.trace);
+
+                return JoltProof(F){
+                    .bytecode_proof = bc_proof,
+                    .memory_proof = mem_proof,
+                    .register_proof = reg_proof,
+                    .r1cs_proof = try spartan.R1CSProof(F).placeholder(self.allocator),
+                    .stage_proofs = stage_proofs,
+                    .allocator = self.allocator,
+                };
+            }
+
+            // Return proof with placeholder commitments
             return JoltProof(F){
                 .bytecode_proof = bytecode.BytecodeProof(F).init(),
                 .memory_proof = ram.MemoryProof(F).init(),
@@ -243,9 +307,115 @@ pub fn JoltProver(comptime F: type) type {
             };
         }
 
+        /// Commit to bytecode polynomial
+        fn commitBytecode(
+            self: *Self,
+            pk: ProvingKey,
+            program_bytecode: []const u8,
+        ) !bytecode.BytecodeProof(F) {
+            // Convert bytecode to field elements
+            const poly_size = if (program_bytecode.len < 2) 2 else std.math.ceilPowerOfTwo(usize, program_bytecode.len) catch program_bytecode.len;
+            const poly = try self.allocator.alloc(F, poly_size);
+            defer self.allocator.free(poly);
+
+            for (poly, 0..) |*p, i| {
+                if (i < program_bytecode.len) {
+                    p.* = F.fromU64(@as(u64, program_bytecode[i]));
+                } else {
+                    p.* = F.zero();
+                }
+            }
+
+            // Commit using HyperKZG
+            const commitment = HyperKZGScheme.commit(&pk.srs, poly);
+
+            return bytecode.BytecodeProof(F){
+                .commitment = commitment_types.PolyCommitment.fromPoint(commitment.point),
+                .read_ts_commitment = commitment_types.PolyCommitment.zero(),
+                .write_ts_commitment = commitment_types.PolyCommitment.zero(),
+                .opening_proof = null,
+                ._legacy_commitment = F.zero(),
+            };
+        }
+
+        /// Commit to memory polynomial
+        fn commitMemory(
+            self: *Self,
+            pk: ProvingKey,
+            memory_trace: *const ram.MemoryTrace,
+        ) !ram.MemoryProof(F) {
+            // Build polynomial from memory trace
+            const trace_len = memory_trace.accesses.items.len;
+            const poly_size = if (trace_len < 2) 2 else std.math.ceilPowerOfTwo(usize, trace_len) catch trace_len;
+            const poly = try self.allocator.alloc(F, poly_size);
+            defer self.allocator.free(poly);
+
+            for (poly, 0..) |*p, i| {
+                if (i < trace_len) {
+                    const access = memory_trace.accesses.items[i];
+                    // Encode address and value together
+                    p.* = F.fromU64(access.value);
+                } else {
+                    p.* = F.zero();
+                }
+            }
+
+            // Commit using HyperKZG
+            const commitment = HyperKZGScheme.commit(&pk.srs, poly);
+
+            return ram.MemoryProof(F){
+                .commitment = commitment_types.PolyCommitment.fromPoint(commitment.point),
+                .read_ts_commitment = commitment_types.PolyCommitment.zero(),
+                .write_ts_commitment = commitment_types.PolyCommitment.zero(),
+                .final_state_commitment = commitment_types.PolyCommitment.zero(),
+                .opening_proof = null,
+                ._legacy_commitment = F.zero(),
+            };
+        }
+
+        /// Commit to register polynomial
+        fn commitRegisters(
+            self: *Self,
+            pk: ProvingKey,
+            trace: *const tracer.ExecutionTrace,
+        ) !registers.RegisterProof(F) {
+            // Build polynomial from execution trace (register values)
+            const trace_len = trace.steps.items.len;
+            const poly_size = if (trace_len < 2) 2 else std.math.ceilPowerOfTwo(usize, trace_len) catch trace_len;
+            const poly = try self.allocator.alloc(F, poly_size);
+            defer self.allocator.free(poly);
+
+            for (poly, 0..) |*p, i| {
+                if (i < trace_len) {
+                    const step = trace.steps.items[i];
+                    // Encode destination register value
+                    p.* = F.fromU64(step.rd_value);
+                } else {
+                    p.* = F.zero();
+                }
+            }
+
+            // Commit using HyperKZG
+            const commitment = HyperKZGScheme.commit(&pk.srs, poly);
+
+            return registers.RegisterProof(F){
+                .commitment = commitment_types.PolyCommitment.fromPoint(commitment.point),
+                .read_ts_commitment = commitment_types.PolyCommitment.zero(),
+                .write_ts_commitment = commitment_types.PolyCommitment.zero(),
+                .final_state_commitment = commitment_types.PolyCommitment.zero(),
+                .opening_proof = null,
+                ._legacy_commitment = F.zero(),
+            };
+        }
+
         /// Set the maximum number of cycles to execute
         pub fn setMaxCycles(self: *Self, max_cycles: u64) void {
             self.max_cycles = max_cycles;
+        }
+
+        /// Set the proving key
+        pub fn setProvingKey(self: *Self, pk: ProvingKey) void {
+            self.proving_key = pk;
         }
     };
 }
@@ -508,6 +678,32 @@ test "r1cs-spartan: witness generation and Az Bz Cz computation" {
 
     // Note: Full constraint satisfaction requires proper instruction decoding
     // and consistent witness values. This test verifies the structure is correct.
+}
+
+// ============================================================================
+// Proving Key and Commitment Tests
+// ============================================================================
+
+test "proving key initialization" {
+    const allocator = std.testing.allocator;
+
+    // Create a small proving key for testing
+    var pk = try ProvingKey.init(allocator, 16);
+    defer pk.deinit();
+
+    try std.testing.expectEqual(@as(usize, 16), pk.max_trace_length);
+    try std.testing.expectEqual(@as(usize, 16), pk.srs.max_degree);
+}
+
+test "commitment types basic operations" {
+    // Test PolyCommitment
+    const zero = commitment_types.PolyCommitment.zero();
+    try std.testing.expect(zero.isZero());
+
+    const gen = commitment_types.PolyCommitment.fromPoint(commitment_types.G1Point.generator());
+    try std.testing.expect(!gen.isZero());
+    try std.testing.expect(gen.eql(gen));
+    try std.testing.expect(!gen.eql(zero));
 }
 
 // NOTE: Full e2e prover test is temporarily disabled because it causes

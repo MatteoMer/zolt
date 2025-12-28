@@ -1114,3 +1114,10 @@ Cost: $9.4405
 - Format matches Jolt's VerifierSetup<BN254>: Vec<GT> for deltas/chi, G1/G2 points, GT element, u64 max_log_n
 - 632 tests passing
 
+
+--- Iteration 6 ---
+Started: 2025-12-28T19:44:09.687759
+Ended: 2025-12-28T20:04:25.410761
+Turns: 110
+Cost: $9.3552
+

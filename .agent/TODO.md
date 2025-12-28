@@ -26,7 +26,7 @@
 - [x] MSM with same point format as arkworks
 - [x] Pairing operations matching arkworks
 
-## Phase 5: Verifier Preprocessing Export ✅ COMPLETE (Session 7)
+## Phase 5: Verifier Preprocessing Export ✅ COMPLETE
 - [x] DoryVerifierSetup structure with precomputed pairings
 - [x] delta_1l, delta_1r, delta_2l, delta_2r, chi computation
 - [x] Full GT element serialization (Fp12 -> 12 * 32 bytes)
@@ -36,59 +36,50 @@
 
 ## Phase 6: Integration Testing 🔄 IN PROGRESS
 
-### Unit Tests ✅
-- [x] Transcript: Same inputs -> same challenges
-- [x] Field: Same element -> same bytes
-- [x] Commitment: Same polynomial -> same commitment
-- [x] Pairing: e(G1,G2) matches Jolt output
+### Proof Deserialization ✅
+- [x] Jolt can deserialize Zolt proof in --jolt-format
+- [x] Opening claims: 48 entries, all valid
+- [x] Commitments: 5 GT elements, all valid
+- [x] Sumcheck proofs: structure matches
 
-### Integration Tests 🔄 NEXT
-- [ ] Generate proof in Zolt for fibonacci.elf
-- [ ] Export proof + preprocessing in Jolt-compatible format
-- [ ] Create Rust test harness to verify with Jolt
-- [ ] End-to-end cross-verification test
+### Preprocessing Deserialization 🚧
+- [ ] Verifier setup (DoryVerifierSetup): Parses OK
+- [ ] Bytecode preprocessing: JSON format mismatch
+  - Zolt uses custom JSON: `{"ADD": {"address": ..., "operands": {"rd":1, ...}}}`
+  - Jolt uses serde_json: Same format but field order may differ
+  - Issue: serde expects specific field ordering or struct nesting
+
+### Next Steps
+1. **Short-term**: Use Jolt-generated preprocessing with Zolt proof
+   - Generate preprocessing in Jolt from same ELF
+   - Load Jolt preprocessing + Zolt proof
+   - Verify cross-compatibility
+
+2. **Long-term**: Match preprocessing format exactly
+   - Study serde_json's Deserialize behavior
+   - Match field ordering in JSON
+   - Test instruction-by-instruction
 
 ---
 
-## Session 7 Summary
+## Session 8 Summary
 
 ### Completed ✅
-1. **DoryVerifierSetup** - `src/zkvm/preprocessing.zig`
-   - Precomputed pairing values for verification
-   - delta_1l, delta_1r, delta_2l, delta_2r, chi arrays
-   - Full GT/G1/G2 serialization in arkworks format
-   - fromSRS() creates setup from prover SRS
+1. **Proof serialization working**
+   - 30.9 KB proof with --jolt-format
+   - 48 opening claims all valid Fr
+   - 5 Dory commitments (GT elements)
+   - Jolt `test_deserialize_zolt_proof` passes
 
-2. **Updated CLI Export**
-   - --export-preprocessing now includes verifier setup
-   - Full JoltVerifierPreprocessing format
-
-3. **All 632 tests passing**
+2. **Preprocessing partially working**
+   - DoryVerifierSetup parses correctly
+   - BytecodePreprocessing JSON format mismatch
 
 ### Test Results
 - Zolt tests: 632/632 PASS ✅
-- Proof generation: WORKING (12.3 KB for sum.elf)
-- Preprocessing export: WORKING (304 KB for sum.elf)
-
----
-
-## Current Status
-
-**632 tests passing** - All cryptographic components working correctly.
-
-### What's Working
-1. **Blake2bTranscript** - Exact match with Jolt's transcript
-2. **Field arithmetic** - BN254 scalar/base field matching arkworks
-3. **Dory SRS loading** - Load Jolt-exported SRS files
-4. **Dory commitments** - Same polynomial -> same GT commitment
-5. **Pairings** - Miller loop + final exponentiation matching arkworks
-6. **Preprocessing export** - Full JoltVerifierPreprocessing format
-
-### What's Next
-1. Create Rust test harness in Jolt for verification
-2. Generate test vectors with known inputs/outputs
-3. Debug any byte-level mismatches
-4. Full end-to-end proof verification
+- Proof generation: 30.9 KB in Jolt format
+- Proof deserialization: PASS
+- Preprocessing deserialization: PARTIAL (verifier setup OK, bytecode fails)
 
 ---
 
@@ -101,61 +92,64 @@ zig build test --summary all
 # Build release
 zig build -Doptimize=ReleaseFast
 
-# Generate proof with preprocessing export
-./zig-out/bin/zolt prove examples/fibonacci.elf \
-    --export-preprocessing prep.bin \
-    -o proof.bin
+# Generate proof in Jolt format
+./zig-out/bin/zolt prove examples/sum.elf \
+    --jolt-format \
+    --export-preprocessing /tmp/zolt_preprocessing.bin \
+    -o /tmp/zolt_proof_dory.bin
 
-# With Jolt-exported SRS
-./zig-out/bin/zolt prove examples/fibonacci.elf \
-    --srs jolt_srs.bin \
-    --export-preprocessing prep.bin \
-    -o proof.bin
+# Run Jolt deserialization test
+cd /path/to/jolt
+cargo test --package jolt-core test_deserialize_zolt_proof -- --ignored --nocapture
+
+# Debug Zolt proof format
+cargo test --package jolt-core test_debug_zolt_format -- --ignored --nocapture
 ```
 
-## File Sizes (Example: sum.elf)
-- Proof: 12.3 KB (12,641 bytes)
+## File Sizes
+- Proof (Jolt format): 30.9 KB (30,926 bytes)
+- Proof (ZOLT format): 12.6 KB (12,641 bytes)
 - Preprocessing: 304 KB (311,347 bytes)
-- SRS (20 vars): ~2.6 MB
 
 ---
 
 ## Architecture Notes
 
-### Preprocessing Export Format
+### Proof Format (Jolt-compatible)
+```
+[Opening Claims] - BTreeMap<OpeningId, Fr>
+  - Length: u64
+  - For each claim: OpeningId (1-2 bytes) + Fr (32 bytes)
+
+[Commitments] - Vec<GT>
+  - Length: u64
+  - For each: GT (384 bytes = 12 * 32)
+
+[Stage 1] - UniSkipFirstRoundProof + SumcheckInstanceProof
+[Stage 2] - UniSkipFirstRoundProof + SumcheckInstanceProof
+[Stages 3-7] - SumcheckInstanceProof each
+
+[Advice Proofs] - Optional<DoryProof>
+[Config] - trace_length, ram_K, bytecode_K, log_k_chunk, lookups_ra_virtual_log_k_chunk
+```
+
+### Preprocessing Format
 ```
 [DoryVerifierSetup]
-  - delta_1l: Vec<GT>   (k+1 elements, 384 bytes each)
+  - delta_1l: Vec<GT>
   - delta_1r: Vec<GT>
   - delta_2l: Vec<GT>
   - delta_2r: Vec<GT>
   - chi: Vec<GT>
-  - g1_0: G1            (64 bytes)
-  - g2_0: G2            (128 bytes)
-  - h1: G1
-  - h2: G2
-  - ht: GT              (384 bytes)
-  - max_log_n: u64
+  - g1_0, g2_0, h1, h2, ht, max_log_n
 
-[SharedPreprocessing]
+[JoltSharedPreprocessing]
   - BytecodePreprocessing
+    - code_size: usize
+    - bytecode: Vec<Instruction> (JSON format, length-prefixed)
+    - pc_map: BytecodePCMapper
   - RAMPreprocessing
-  - MemoryLayout
+    - min_bytecode_address: u64
+    - bytecode_words: Vec<u64>
+  - MemoryLayout (20 x u64 fields)
 ```
-
----
-
-## Previous Sessions
-
-### Session 6
-- Preprocessing module complete
-- CLI export working
-- 630/630 tests passing
-
-### Session 5
-- Format compatibility verified
-- ECALL handling implemented
-
-### Session 4
-- UniSkip cross-product algorithm fixed
-- All 618 tests passing

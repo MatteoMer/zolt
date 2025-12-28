@@ -113,30 +113,50 @@ pub const JoltInstruction = struct {
     };
 
     /// Instruction operands - different formats store different fields
+    /// Types match Jolt's Rust struct definitions:
+    /// - FormatR: rd/rs1/rs2 as u8
+    /// - FormatI: imm as u64 (sign-extended from i32)
+    /// - FormatS: imm as i64 (signed)
+    /// - FormatB: imm as i128 (signed)
+    /// - FormatU: imm as u64 (sign-extended from i32)
+    /// - FormatJ: imm as u64 (sign-extended from i32)
     pub const Operands = union(enum) {
         /// R-type: rd, rs1, rs2
         FormatR: struct { rd: u8, rs1: u8, rs2: u8 },
-        /// I-type: rd, rs1, imm
-        FormatI: struct { rd: u8, rs1: u8, imm: i32 },
-        /// S-type: rs1, rs2, imm
-        FormatS: struct { rs1: u8, rs2: u8, imm: i32 },
-        /// B-type: rs1, rs2, imm
-        FormatB: struct { rs1: u8, rs2: u8, imm: i32 },
-        /// U-type: rd, imm
-        FormatU: struct { rd: u8, imm: i32 },
-        /// J-type: rd, imm
-        FormatJ: struct { rd: u8, imm: i32 },
+        /// I-type: rd, rs1, imm (Jolt uses u64)
+        FormatI: struct { rd: u8, rs1: u8, imm: u64 },
+        /// S-type: rs1, rs2, imm (Jolt uses i64)
+        FormatS: struct { rs1: u8, rs2: u8, imm: i64 },
+        /// B-type: rs1, rs2, imm (Jolt uses i128)
+        FormatB: struct { rs1: u8, rs2: u8, imm: i128 },
+        /// U-type: rd, imm (Jolt uses u64)
+        FormatU: struct { rd: u8, imm: u64 },
+        /// J-type: rd, imm (Jolt uses u64)
+        FormatJ: struct { rd: u8, imm: u64 },
         /// No operands (NoOp, FENCE, ECALL)
         None: void,
     };
 
     /// Serialize this instruction to JSON bytes (for arkworks compatibility)
+    /// NoOp and UNIMPL are unit variants in Jolt, so they serialize as just "NoOp" or "UNIMPL"
+    /// Other instructions serialize as {"VARIANT":{...fields...}}
     pub fn toJson(self: JoltInstruction, allocator: Allocator) ![]u8 {
         var list = std.ArrayListUnmanaged(u8){};
         errdefer list.deinit(allocator);
         const writer = list.writer(allocator);
 
-        // Format: {"VARIANT":{"address":123,"operands":{"rd":1,"rs1":2},...}}
+        // NoOp and UNIMPL are unit variants in Jolt's Instruction enum
+        // They serialize as just "NoOp" or "UNIMPL" (a JSON string)
+        if (self.variant == .NoOp) {
+            try writer.writeAll("\"NoOp\"");
+            return list.toOwnedSlice(allocator);
+        }
+        if (self.variant == .UNIMPL) {
+            try writer.writeAll("\"UNIMPL\"");
+            return list.toOwnedSlice(allocator);
+        }
+
+        // Other instructions: {"VARIANT":{"address":123,"operands":{...},...}}
         try writer.writeAll("{\"");
         try writer.writeAll(@tagName(self.variant));
         try writer.writeAll("\":{\"address\":");
@@ -475,12 +495,12 @@ fn decodeToJoltInstruction(instruction: u32, address: u64, is_compressed: bool) 
     switch (opcode) {
         0b0110111 => { // LUI
             variant = .LUI;
-            const imm: i32 = @bitCast(instruction & 0xFFFFF000);
+            const imm = decodeUImmediate(instruction);
             operands = .{ .FormatU = .{ .rd = rd, .imm = imm } };
         },
         0b0010111 => { // AUIPC
             variant = .AUIPC;
-            const imm: i32 = @bitCast(instruction & 0xFFFFF000);
+            const imm = decodeUImmediate(instruction);
             operands = .{ .FormatU = .{ .rd = rd, .imm = imm } };
         },
         0b1101111 => { // JAL
@@ -544,7 +564,7 @@ fn decodeToJoltInstruction(instruction: u32, address: u64, is_compressed: bool) 
                 0b001 => {
                     variant = .SLLI;
                     // Shift amount is in lower 6 bits of imm for RV64
-                    operands = .{ .FormatI = .{ .rd = rd, .rs1 = rs1, .imm = @as(i32, @intCast(rs2)) } };
+                    operands = .{ .FormatI = .{ .rd = rd, .rs1 = rs1, .imm = @as(u64, rs2) } };
                 },
                 0b101 => {
                     if (funct7 & 0x20 != 0) {
@@ -552,7 +572,7 @@ fn decodeToJoltInstruction(instruction: u32, address: u64, is_compressed: bool) 
                     } else {
                         variant = .SRLI;
                     }
-                    operands = .{ .FormatI = .{ .rd = rd, .rs1 = rs1, .imm = @as(i32, @intCast(rs2)) } };
+                    operands = .{ .FormatI = .{ .rd = rd, .rs1 = rs1, .imm = @as(u64, rs2) } };
                 },
             }
         },
@@ -590,7 +610,7 @@ fn decodeToJoltInstruction(instruction: u32, address: u64, is_compressed: bool) 
                 0b000 => variant = .ADDIW,
                 0b001 => {
                     variant = .SLLIW;
-                    operands = .{ .FormatI = .{ .rd = rd, .rs1 = rs1, .imm = @as(i32, @intCast(rs2 & 0x1f)) } };
+                    operands = .{ .FormatI = .{ .rd = rd, .rs1 = rs1, .imm = @as(u64, rs2 & 0x1f) } };
                 },
                 0b101 => {
                     if (funct7 & 0x20 != 0) {
@@ -598,7 +618,7 @@ fn decodeToJoltInstruction(instruction: u32, address: u64, is_compressed: bool) 
                     } else {
                         variant = .SRLIW;
                     }
-                    operands = .{ .FormatI = .{ .rd = rd, .rs1 = rs1, .imm = @as(i32, @intCast(rs2 & 0x1f)) } };
+                    operands = .{ .FormatI = .{ .rd = rd, .rs1 = rs1, .imm = @as(u64, rs2 & 0x1f) } };
                 },
                 else => variant = .UNIMPL,
             }
@@ -624,13 +644,15 @@ fn decodeToJoltInstruction(instruction: u32, address: u64, is_compressed: bool) 
                 };
             }
         },
-        0b0001111 => { // FENCE
+        0b0001111 => { // FENCE - uses FormatI in Jolt
             variant = .FENCE;
-            operands = .{ .None = {} };
+            const imm = decodeIImmediate(instruction);
+            operands = .{ .FormatI = .{ .rd = rd, .rs1 = rs1, .imm = imm } };
         },
-        0b1110011 => { // SYSTEM
+        0b1110011 => { // SYSTEM - ECALL uses FormatI in Jolt
             variant = .ECALL;
-            operands = .{ .None = {} };
+            const imm = decodeIImmediate(instruction);
+            operands = .{ .FormatI = .{ .rd = rd, .rs1 = rs1, .imm = imm } };
         },
         else => {
             variant = .UNIMPL;
@@ -647,50 +669,71 @@ fn decodeToJoltInstruction(instruction: u32, address: u64, is_compressed: bool) 
     };
 }
 
-fn decodeIImmediate(instruction: u32) i32 {
+/// Decode I-format immediate to u64 (sign-extended from 12-bit signed)
+/// Jolt uses u64 for FormatI.imm
+fn decodeIImmediate(instruction: u32) u64 {
     const imm: u32 = instruction >> 20;
-    // Sign extend from 12 bits
-    if (imm & 0x800 != 0) {
-        return @bitCast(imm | 0xFFFFF000);
-    }
-    return @bitCast(imm);
+    // Sign extend from 12 bits to i32, then to i64, then cast to u64
+    const signed: i32 = if (imm & 0x800 != 0)
+        @bitCast(imm | 0xFFFFF000)
+    else
+        @bitCast(imm);
+    return @bitCast(@as(i64, signed));
 }
 
-fn decodeSImmediate(instruction: u32) i32 {
+/// Decode S-format immediate to i64 (signed)
+/// Jolt uses i64 for FormatS.imm
+fn decodeSImmediate(instruction: u32) i64 {
     const imm11_5 = (instruction >> 25) & 0x7F;
     const imm4_0 = (instruction >> 7) & 0x1F;
     const imm = (imm11_5 << 5) | imm4_0;
-    // Sign extend from 12 bits
-    if (imm & 0x800 != 0) {
-        return @bitCast(imm | 0xFFFFF000);
-    }
-    return @bitCast(imm);
+    // Sign extend from 12 bits to i32, then to i64
+    const signed: i32 = if (imm & 0x800 != 0)
+        @bitCast(imm | 0xFFFFF000)
+    else
+        @bitCast(imm);
+    return @as(i64, signed);
 }
 
-fn decodeBImmediate(instruction: u32) i32 {
+/// Decode B-format immediate to i128 (signed)
+/// Jolt uses i128 for FormatB.imm
+fn decodeBImmediate(instruction: u32) i128 {
     const imm12 = (instruction >> 31) & 1;
     const imm10_5 = (instruction >> 25) & 0x3F;
     const imm4_1 = (instruction >> 8) & 0xF;
     const imm11 = (instruction >> 7) & 1;
     const imm = (imm12 << 12) | (imm11 << 11) | (imm10_5 << 5) | (imm4_1 << 1);
-    // Sign extend from 13 bits
-    if (imm & 0x1000 != 0) {
-        return @bitCast(imm | 0xFFFFE000);
-    }
-    return @bitCast(imm);
+    // Sign extend from 13 bits to i32, then to i128
+    const signed: i32 = if (imm & 0x1000 != 0)
+        @bitCast(imm | 0xFFFFE000)
+    else
+        @bitCast(imm);
+    return @as(i128, signed);
 }
 
-fn decodeJImmediate(instruction: u32) i32 {
+/// Decode J-format immediate to u64 (sign-extended from 21-bit signed)
+/// Jolt uses u64 for FormatJ.imm
+fn decodeJImmediate(instruction: u32) u64 {
     const imm20 = (instruction >> 31) & 1;
     const imm10_1 = (instruction >> 21) & 0x3FF;
     const imm11 = (instruction >> 20) & 1;
     const imm19_12 = (instruction >> 12) & 0xFF;
     const imm = (imm20 << 20) | (imm19_12 << 12) | (imm11 << 11) | (imm10_1 << 1);
-    // Sign extend from 21 bits
-    if (imm & 0x100000 != 0) {
-        return @bitCast(imm | 0xFFE00000);
-    }
-    return @bitCast(imm);
+    // Sign extend from 21 bits to i32, then to i64, then cast to u64
+    const signed: i32 = if (imm & 0x100000 != 0)
+        @bitCast(imm | 0xFFE00000)
+    else
+        @bitCast(imm);
+    return @bitCast(@as(i64, signed));
+}
+
+/// Decode U-format immediate to u64 (sign-extended from 32-bit signed)
+/// Jolt uses u64 for FormatU.imm
+fn decodeUImmediate(instruction: u32) u64 {
+    // Upper 20 bits of instruction, in upper 20 bits of result
+    const imm: i32 = @bitCast(instruction & 0xFFFFF000);
+    // Sign extend to 64 bits then cast to u64
+    return @bitCast(@as(i64, imm));
 }
 
 // ============================================================================

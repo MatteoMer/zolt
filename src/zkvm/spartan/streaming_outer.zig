@@ -309,22 +309,33 @@ pub fn StreamingOuterProver(comptime F: type) type {
         }
 
         /// Compute Az * Bz product for a single cycle (summed over all constraints)
+        ///
+        /// Correct computation:
+        /// Az = Σ_i L_i(r0) * condition_i(witness)
+        /// Bz = Σ_i L_i(r0) * (left_i - right_i)(witness)
+        /// Return Az * Bz
         fn computeCycleAzBzProduct(self: *const Self, witness: *const constraints.R1CSCycleInputs(F)) F {
-            var product = F.zero();
+            var az_sum = F.zero();
+            var bz_sum = F.zero();
 
             // Sum over first group constraints weighted by Lagrange basis
             for (0..FIRST_GROUP_SIZE) |i| {
                 const constraint_idx = constraints.FIRST_GROUP_INDICES[i];
                 const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
-                const az = constraint.condition.evaluate(F, witness.asSlice());
-                const bz = constraint.left.evaluate(F, witness.asSlice())
-                    .sub(constraint.right.evaluate(F, witness.asSlice()));
+                const condition = constraint.condition.evaluate(F, witness.asSlice());
+                const left = constraint.left.evaluate(F, witness.asSlice());
+                const right = constraint.right.evaluate(F, witness.asSlice());
+                const magnitude = left.sub(right);
 
-                // Weight by Lagrange basis at r0
-                product = product.add(self.lagrange_evals_r0[i].mul(az.mul(bz)));
+                // Weighted sum for Az (conditions)
+                az_sum = az_sum.add(self.lagrange_evals_r0[i].mul(condition));
+
+                // Weighted sum for Bz (magnitudes)
+                bz_sum = bz_sum.add(self.lagrange_evals_r0[i].mul(magnitude));
             }
 
-            return product;
+            // Return the PRODUCT of the sums, not sum of products
+            return az_sum.mul(bz_sum);
         }
 
         /// Bind a remaining round challenge

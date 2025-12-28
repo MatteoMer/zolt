@@ -355,8 +355,9 @@ pub fn ProofConverter(comptime F: type) type {
                 self.allocator,
                 cycle_witnesses,
                 tau,
-            ) catch {
+            ) catch |err| {
                 // Fallback to zero proofs if initialization fails
+                _ = err;
                 const num_rounds = 1 + std.math.log2_int(usize, @max(1, cycle_witnesses.len));
                 try self.generateZeroSumcheckProof(proof, num_rounds, 3);
                 return Stage1Result{ .challenges = challenges, .r0 = F.zero(), .allocator = self.allocator };

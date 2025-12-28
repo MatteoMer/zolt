@@ -90,12 +90,17 @@ This gives non-zero at extended points even when all base Az*Bz = 0!
 39. Test for satisfied constraints case
 
 ### In Progress 🔄
-- Integration testing with Jolt verifier
+- **Preprocessing export mechanism** - Zolt needs to export preprocessing in Jolt's format
 
 ### Pending ⏳
-- Full proof verification test against Jolt
-- Stages 2-7 verification alignment
+- Full proof verification test against Jolt (requires matching preprocessing)
+- Document the cross-verification workflow
 - Performance optimization
+
+### Blocked ⛔
+- End-to-end verification currently blocked by preprocessing mismatch
+- Need either: (1) Jolt to generate preprocessing for Zolt's execution, OR
+- (2) Zolt to export preprocessing that Jolt can import
 
 ---
 

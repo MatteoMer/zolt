@@ -65,12 +65,12 @@ pub fn ArkworksSerializer(comptime F: type) type {
 
         /// Write a field element in arkworks format (32 bytes LE)
         /// This matches `serialize_uncompressed` for BN254 Fr
+        ///
+        /// IMPORTANT: arkworks serialize_uncompressed converts FROM Montgomery form
+        /// to standard representation. We must do the same using toBytes().
         pub fn writeFieldElement(self: *Self, scalar: F) !void {
-            var buf: [32]u8 = undefined;
-            // Write limbs in little-endian order
-            for (0..4) |i| {
-                std.mem.writeInt(u64, buf[i * 8 ..][0..8], scalar.limbs[i], .little);
-            }
+            // toBytes() converts from Montgomery form to standard form
+            const buf = scalar.toBytes();
             try self.buffer.appendSlice(self.allocator, &buf);
         }
 
@@ -289,13 +289,11 @@ pub fn ArkworksDeserializer(comptime F: type) type {
         }
 
         /// Read a field element from arkworks format (32 bytes LE)
+        /// The bytes are in standard form; we convert to Montgomery form.
         pub fn readFieldElement(self: *Self) !F {
             const bytes = try self.readBytes(32);
-            var limbs: [4]u64 = undefined;
-            for (0..4) |i| {
-                limbs[i] = std.mem.readInt(u64, bytes[i * 8 ..][0..8], .little);
-            }
-            return F{ .limbs = limbs };
+            // fromBytes converts from standard form to Montgomery form
+            return F.fromBytes(bytes);
         }
 
         /// Read a Vec of field elements
@@ -376,11 +374,95 @@ test "arkworks serializer: field element format" {
     // Should be 32 bytes
     try testing.expectEqual(@as(usize, 32), serializer.bytes().len);
 
-    // First 8 bytes should contain 42 in little-endian
-    // (since 42 fits in the first limb)
-    const first_limb = std.mem.readInt(u64, serializer.bytes()[0..8], .little);
-    // The scalar is in Montgomery form, so we need to check the actual value
-    try testing.expectEqual(scalar.limbs[0], first_limb);
+    // Should match Jolt's output: [2a, 00, 00, 00, ...] (42 in LE)
+    try testing.expectEqual(@as(u8, 0x2a), serializer.bytes()[0]);
+    for (1..32) |i| {
+        try testing.expectEqual(@as(u8, 0), serializer.bytes()[i]);
+    }
+}
+
+// =============================================================================
+// Jolt Compatibility Test Vectors
+// =============================================================================
+// These test vectors are generated from Jolt to verify byte-level compatibility
+
+test "jolt serialization: Fr(42) matches Jolt" {
+    var serializer = ArkworksSerializer(BN254Scalar).init(testing.allocator);
+    defer serializer.deinit();
+
+    const scalar = BN254Scalar.fromU64(42);
+    try serializer.writeFieldElement(scalar);
+
+    // Expected from Jolt: [2a, 00, 00, 00, ...]
+    const expected = [_]u8{
+        0x2a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+
+    try testing.expectEqualSlices(u8, &expected, serializer.bytes());
+}
+
+test "jolt serialization: Fr(0) matches Jolt" {
+    var serializer = ArkworksSerializer(BN254Scalar).init(testing.allocator);
+    defer serializer.deinit();
+
+    const scalar = BN254Scalar.zero();
+    try serializer.writeFieldElement(scalar);
+
+    // Expected from Jolt: all zeros
+    const expected = [_]u8{0} ** 32;
+
+    try testing.expectEqualSlices(u8, &expected, serializer.bytes());
+}
+
+test "jolt serialization: Fr(1) matches Jolt" {
+    var serializer = ArkworksSerializer(BN254Scalar).init(testing.allocator);
+    defer serializer.deinit();
+
+    const scalar = BN254Scalar.one();
+    try serializer.writeFieldElement(scalar);
+
+    // Expected from Jolt: [01, 00, 00, 00, ...]
+    const expected = [_]u8{
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+
+    try testing.expectEqualSlices(u8, &expected, serializer.bytes());
+}
+
+test "jolt serialization: Fr(0xDEADBEEF) matches Jolt" {
+    var serializer = ArkworksSerializer(BN254Scalar).init(testing.allocator);
+    defer serializer.deinit();
+
+    const scalar = BN254Scalar.fromU64(0xDEADBEEF);
+    try serializer.writeFieldElement(scalar);
+
+    // Expected from Jolt: [ef, be, ad, de, 00, 00, 00, 00, ...]
+    const expected = [_]u8{
+        0xef, 0xbe, 0xad, 0xde, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+
+    try testing.expectEqualSlices(u8, &expected, serializer.bytes());
+}
+
+test "jolt serialization: usize(1234567890) matches Jolt" {
+    var serializer = ArkworksSerializer(BN254Scalar).init(testing.allocator);
+    defer serializer.deinit();
+
+    try serializer.writeUsize(1234567890);
+
+    // Expected from Jolt: [d2, 02, 96, 49, 00, 00, 00, 00]
+    const expected = [_]u8{ 0xd2, 0x02, 0x96, 0x49, 0x00, 0x00, 0x00, 0x00 };
+
+    try testing.expectEqualSlices(u8, &expected, serializer.bytes());
 }
 
 test "arkworks serializer: usize as u64" {

@@ -1649,19 +1649,35 @@ fn frobeniusG2(p: G2Point) G2Point {
 }
 
 /// Final exponentiation: f^((p^12-1)/r)
-/// Split into easy part and hard part
+/// Using arkworks algorithm from bn/mod.rs
 fn finalExponentiation(f: Fp12) Fp12 {
     if (f.eql(Fp12.zero())) {
         return Fp12.one();
     }
 
     // Easy part: f^((p^6-1)(p^2+1))
-    // This can be computed using conjugation and Frobenius
-    const easy = easyPartExponentiation(f);
+    // f1 = f^(p^6) = conjugate(f) for cyclotomic elements
+    var f1 = f.conjugate();
 
-    // Hard part: f^((p^4-p^2+1)/r)
-    // This requires more complex computation
-    return hardPartExponentiation(easy);
+    // f2 = f^(-1)
+    const f2_opt = f.inverse();
+    if (f2_opt == null) return Fp12.one();
+    var f2 = f2_opt.?;
+
+    // r = f^(p^6 - 1) = f1 * f2 = conj(f) * f^(-1)
+    var r = f1.mul(f2);
+
+    // f2 = f^(p^6 - 1) (save for later)
+    f2 = r;
+
+    // r = f^((p^6 - 1)(p^2)) = r.frobenius_map(2)
+    r = r.frobenius2();
+
+    // r = f^((p^6 - 1)(p^2 + 1))
+    r = r.mul(f2);
+
+    // Hard part using arkworks "Faster hashing to G2" algorithm
+    return hardPartExponentiationArkworks(r);
 }
 
 fn easyPartExponentiation(f: Fp12) Fp12 {
@@ -1781,6 +1797,86 @@ fn expByX(f: Fp12) Fp12 {
     }
 
     return result;
+}
+
+/// Compute f^(-x) for arkworks algorithm
+/// Since x is positive for BN254, this returns conjugate(f^x)
+fn expByNegX(f: Fp12) Fp12 {
+    const fx = expByX(f);
+    // x is positive, so exp_by_neg_x returns conjugate
+    return fx.conjugate();
+}
+
+/// Hard part of final exponentiation using arkworks algorithm
+/// From "Faster hashing to G2" by Laura Fuentes-Castaneda et al.
+fn hardPartExponentiationArkworks(r: Fp12) Fp12 {
+    // y0 = exp_by_neg_x(r)
+    const y0 = expByNegX(r);
+
+    // y1 = y0^2 (cyclotomic square)
+    const y1 = y0.square();
+
+    // y2 = y1^2
+    const y2 = y1.square();
+
+    // y3 = y2 * y1
+    var y3 = y2.mul(y1);
+
+    // y4 = exp_by_neg_x(y3)
+    const y4 = expByNegX(y3);
+
+    // y5 = y4^2
+    const y5 = y4.square();
+
+    // y6 = exp_by_neg_x(y5)
+    var y6 = expByNegX(y5);
+
+    // y3 = conjugate(y3)
+    y3 = y3.conjugate();
+
+    // y6 = conjugate(y6)
+    y6 = y6.conjugate();
+
+    // y7 = y6 * y4
+    const y7 = y6.mul(y4);
+
+    // y8 = y7 * y3
+    var y8 = y7.mul(y3);
+
+    // y9 = y8 * y1
+    const y9 = y8.mul(y1);
+
+    // y10 = y8 * y4
+    const y10 = y8.mul(y4);
+
+    // y11 = y10 * r
+    const y11 = y10.mul(r);
+
+    // y12 = y9.frobenius_map(1)
+    var y12 = y9.frobenius();
+
+    // y13 = y12 * y11
+    const y13 = y12.mul(y11);
+
+    // y8 = y8.frobenius_map(2)
+    y8 = y8.frobenius2();
+
+    // y14 = y8 * y13
+    const y14 = y8.mul(y13);
+
+    // r_inv = conjugate(r) (cyclotomic inverse)
+    var r_inv = r.conjugate();
+
+    // y15 = r_inv * y9
+    var y15 = r_inv.mul(y9);
+
+    // y15 = y15.frobenius_map(3)
+    y15 = y15.frobenius3();
+
+    // y16 = y15 * y14
+    const y16 = y15.mul(y14);
+
+    return y16;
 }
 
 /// Frobenius endomorphism on Fp12

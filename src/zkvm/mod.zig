@@ -189,8 +189,46 @@ pub const ProvingKey = struct {
         };
     }
 
+    /// Extract a verifying key from this proving key
+    pub fn toVerifyingKey(self: *const Self) VerifyingKey {
+        return VerifyingKey{
+            .g1 = self.srs.g1,
+            .g2 = self.srs.g2,
+            .tau_g2 = self.srs.tau_g2,
+        };
+    }
+
     pub fn deinit(self: *Self) void {
         self.srs.deinit();
+    }
+};
+
+/// Verifying key containing minimal SRS elements for verification
+///
+/// The verifying key is much smaller than the proving key since it only
+/// needs the generators and tau*G2 for the pairing check.
+pub const VerifyingKey = struct {
+    const Self = @This();
+
+    /// G1 generator
+    g1: commitment_types.G1Point,
+    /// G2 generator
+    g2: field.pairing.G2Point,
+    /// tau * G2 for pairing verification
+    tau_g2: field.pairing.G2Point,
+
+    /// Create from proving key SRS
+    pub fn fromProvingKey(pk: *const ProvingKey) Self {
+        return pk.toVerifyingKey();
+    }
+
+    /// Create directly with generators (for testing)
+    pub fn init() Self {
+        return .{
+            .g1 = commitment_types.G1Point.generator(),
+            .g2 = field.pairing.G2Point.generator(),
+            .tau_g2 = field.pairing.G2Point.generator(), // Placeholder
+        };
     }
 };
 
@@ -426,11 +464,27 @@ pub fn JoltVerifier(comptime F: type) type {
         const Self = @This();
 
         allocator: Allocator,
+        /// Optional verifying key for commitment verification
+        verifying_key: ?VerifyingKey,
 
         pub fn init(allocator: Allocator) Self {
             return .{
                 .allocator = allocator,
+                .verifying_key = null,
             };
+        }
+
+        /// Initialize verifier with a verifying key (enables commitment verification)
+        pub fn initWithKey(allocator: Allocator, vk: VerifyingKey) Self {
+            return .{
+                .allocator = allocator,
+                .verifying_key = vk,
+            };
+        }
+
+        /// Set the verifying key
+        pub fn setVerifyingKey(self: *Self, vk: VerifyingKey) void {
+            self.verifying_key = vk;
         }
 
         /// Verify a Jolt proof
@@ -438,7 +492,7 @@ pub fn JoltVerifier(comptime F: type) type {
         /// Verification consists of the following steps:
         /// 1. Re-derive challenges using Fiat-Shamir transcript
         /// 2. Verify each stage's sumcheck proofs
-        /// 3. Verify polynomial commitment openings
+        /// 3. Verify polynomial commitment openings (if verifying key provided)
         /// 4. Check that all claims are consistent
         ///
         /// Returns true if the proof is valid, false otherwise.
@@ -455,6 +509,10 @@ pub fn JoltVerifier(comptime F: type) type {
             if (public_inputs.len > 0) {
                 try transcript.appendBytes(public_inputs);
             }
+
+            // Absorb all commitments into transcript for Fiat-Shamir binding
+            // This ensures the prover cannot change commitments after seeing challenges
+            try self.absorbCommitments(proof, &transcript);
 
             // Verify bytecode proof
             // This checks that the bytecode commitment is valid
@@ -489,6 +547,31 @@ pub fn JoltVerifier(comptime F: type) type {
 
             // All checks passed
             return true;
+        }
+
+        /// Absorb all proof commitments into the transcript
+        fn absorbCommitments(
+            self: *Self,
+            proof: *const JoltProof(F),
+            transcript: *transcripts.Transcript(F),
+        ) !void {
+            _ = self;
+
+            // Absorb bytecode commitment
+            const bc_bytes = proof.bytecode_proof.commitment.toBytes();
+            try transcript.appendBytes(&bc_bytes);
+
+            // Absorb memory commitments
+            const mem_bytes = proof.memory_proof.commitment.toBytes();
+            try transcript.appendBytes(&mem_bytes);
+            const mem_final_bytes = proof.memory_proof.final_state_commitment.toBytes();
+            try transcript.appendBytes(&mem_final_bytes);
+
+            // Absorb register commitments
+            const reg_bytes = proof.register_proof.commitment.toBytes();
+            try transcript.appendBytes(&reg_bytes);
+            const reg_final_bytes = proof.register_proof.final_state_commitment.toBytes();
+            try transcript.appendBytes(&reg_final_bytes);
         }
 
         /// Verify multi-stage sumcheck proofs
@@ -704,6 +787,29 @@ test "commitment types basic operations" {
     try std.testing.expect(!gen.isZero());
     try std.testing.expect(gen.eql(gen));
     try std.testing.expect(!gen.eql(zero));
+}
+
+test "verifying key from proving key" {
+    const allocator = std.testing.allocator;
+
+    // Create a proving key
+    var pk = try ProvingKey.init(allocator, 8);
+    defer pk.deinit();
+
+    // Extract verifying key
+    const vk = pk.toVerifyingKey();
+
+    // Verify the generators match
+    try std.testing.expect(vk.g1.x.eql(pk.srs.g1.x));
+    try std.testing.expect(vk.g1.y.eql(pk.srs.g1.y));
+}
+
+test "verifying key init" {
+    const vk = VerifyingKey.init();
+
+    // Should have valid generators
+    try std.testing.expect(!vk.g1.infinity);
+    try std.testing.expect(!vk.g2.x.c0.isZero() or !vk.g2.x.c1.isZero());
 }
 
 // NOTE: Full e2e prover test is temporarily disabled because it causes

@@ -1,6 +1,21 @@
 # Zolt zkVM Implementation TODO
 
-## Completed (This Session - Iteration 48)
+## Completed (This Session - Iteration 49)
+
+### ELF Loading & ECALL Handling
+- [x] Add `loadProgramAt()` to load bytecode at a specific base address
+- [x] Update CLI run/trace commands to use ELF's base_address
+- [x] Update `execute()` function to use base_address
+- [x] Fix register state display to read from RegisterFile
+- [x] Add ECALL (SYSTEM opcode) handling for program termination
+- [x] Update `run()` to treat ECALL as normal termination
+- [x] Fix AUIPC and JAL to use wrapping arithmetic for high PC addresses
+
+### Verified Working C Examples
+- fibonacci.elf: Returns 55 (10th Fibonacci) in 51 cycles
+- sum.elf: Returns 5050 (sum 1-100) in 5 cycles
+
+## Completed (Previous Session - Iteration 48)
 
 ### More C Example Programs
 - [x] Add `collatz.c` - Collatz sequence for n=27 (111 steps)
@@ -77,7 +92,7 @@
 
 ### High Priority
 - [ ] Implement gzip compression when Zig API stabilizes
-- [ ] Add more example programs (from Rust Jolt test suite)
+- [ ] Compile and test more C example programs
 
 ### Medium Priority
 - [ ] Performance optimization with SIMD
@@ -89,11 +104,12 @@
 - [ ] Documentation improvements
 
 ## Test Status
-- All tests pass (580+ tests)
+- All tests pass (578 tests)
 - Full pipeline with strict verification: PASSED
 - Binary serialization roundtrip: PASSED
 - JSON serialization/deserialization: PASSED
 - Format detection: PASSED
+- C example programs: WORKING (fibonacci, sum)
 
 ## CLI Commands
 ```
@@ -129,13 +145,14 @@ zolt bench             # Run benchmarks
 | signed.elf | Signed arithmetic | -39 |
 | primes.elf | Count primes < 100 | 25 |
 
-## Performance Summary (as of Iteration 48)
+## Performance Summary (as of Iteration 49)
 - Field addition: 1.4 ns/op
 - Field multiplication: 21.4 ns/op
 - Field inversion: 7.5 us/op
 - MSM (256 points): 0.51 ms/op
 - HyperKZG commit (1024): 1.5 ms/op
-- Emulator (sum 1-100): 76 us/op
+- Emulator (fibonacci): 51 cycles
+- Emulator (sum 1-100): 5 cycles
 - Prover (2 steps): ~98 ms/op
 - Prover (14 steps): ~100 ms/op
 - Verifier (2 steps): ~608 us/op (163x faster than prover!)

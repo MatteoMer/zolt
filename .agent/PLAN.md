@@ -1,6 +1,32 @@
 # Zolt zkVM Implementation Plan
 
-## Current Status (December 2024 - Iteration 48)
+## Current Status (December 2024 - Iteration 49)
+
+### Session Summary - ELF Loading & ECALL Handling
+
+This iteration fixed critical issues with ELF program loading and program termination:
+
+1. **ELF Loading Fix**
+   - Added `loadProgramAt()` function to load bytecode at a specific base address
+   - Updated CLI run/trace commands to use ELF's base_address instead of fixed RAM_START_ADDRESS
+   - Updated `execute()` function to use base_address
+   - Fixed register state display to read from RegisterFile instead of VMState
+
+2. **ECALL Handling (Program Termination)**
+   - Added SYSTEM opcode handling to recognize ECALL instruction
+   - ECALL now returns `error.Ecall` to signal program exit
+   - Updated `run()` to treat ECALL as normal termination (not an error)
+   - Cycle count is now incremented even when ECALL terminates execution
+
+3. **PC Arithmetic Fix**
+   - Fixed AUIPC and JAL instructions to use wrapping arithmetic for high PC addresses
+   - Previously caused integer overflow panic for addresses >= 0x80000000
+
+4. **Verified C Programs**
+   - `fibonacci.elf`: Returns 55 in 51 cycles (correctly computes Fibonacci(10))
+   - `sum.elf`: Returns 5050 in 5 cycles (correctly computes sum 1-100)
+
+## Previous Status (December 2024 - Iteration 48)
 
 ### Session Summary - More Example Programs
 

@@ -14,7 +14,14 @@
 - [x] Added SlliLookup, SrliLookup, SraiLookup for immediate shifts
 - [x] Extended LookupTables enum to include all new tables
 - [x] Updated lookup_trace to record shift instructions
-- [x] Added tests for all new lookup tables and shift operations
+
+### M Extension Multiply Support
+- [x] Added MulLookup (low bits of product)
+- [x] Added MulhLookup (high bits, signed * signed)
+- [x] Added MulhuLookup (high bits, unsigned * unsigned)
+- [x] Added MulhsuLookup (high bits, signed * unsigned)
+- [x] Updated lookup_trace to record multiply instructions
+- [x] Added tests for all multiply lookups
 
 ## Completed (Previous Sessions)
 
@@ -72,12 +79,13 @@
 - **Lasso** - Lookup argument prover/verifier
 - **Lookup Tables** - 21 tables (bitwise, shifts, comparisons, sign-extend)
 - **Shift Instructions** - Full SLL/SRL/SRA and immediate variants
+- **Multiply Instructions** - MUL, MULH, MULHU, MULHSU
 
 ## Next Steps (Future Iterations)
 
 ### High Priority
 - [ ] Import production SRS from Ethereum ceremony
-- [ ] M extension lookups (MUL, DIV, REM)
+- [ ] Virtual instruction support for DIV/REM
 
 ### Medium Priority
 - [ ] Performance optimization with SIMD
@@ -88,4 +96,4 @@
 - [ ] Benchmarking suite
 
 ## Test Status
-All 410 tests pass.
+All 418 tests pass.

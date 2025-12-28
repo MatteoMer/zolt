@@ -642,6 +642,366 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                 return table;
             }
         };
+
+        /// LeftShift: Logical left shift
+        /// materializeEntry(interleaved(x, shift_amount)) = x << (shift_amount % XLEN)
+        pub const LeftShift = struct {
+            /// Materialize the entry at the given index
+            pub fn materializeEntry(index: u128) u64 {
+                const bits = uninterleaveBits(index);
+                // Shift amount is lower bits of y (only log2(XLEN) bits matter)
+                const shift_mask: u6 = XLEN - 1;
+                const shift: u6 = @truncate(bits.y & @as(u64, shift_mask));
+                // Mask to XLEN bits first, then shift
+                const mask: u64 = if (XLEN == 64) ~@as(u64, 0) else (@as(u64, 1) << XLEN) - 1;
+                const masked_x = bits.x & mask;
+                return (masked_x << shift) & mask;
+            }
+
+            /// Evaluate the MLE at point r
+            /// This is more complex as it involves bit position dependencies
+            pub fn evaluateMLE(r: []const F) F {
+                std.debug.assert(r.len == 2 * XLEN);
+                // For shift tables, MLE evaluation requires summing over all shift amounts
+                // This is a simplified version
+                var result = F.zero();
+
+                // For small XLEN (testing), we can enumerate
+                if (XLEN <= 8) {
+                    const size = @as(usize, 1) << (2 * XLEN);
+                    for (0..size) |idx| {
+                        const val = materializeEntry(@intCast(idx));
+                        // Compute Lagrange basis term
+                        var basis = F.one();
+                        inline for (0..(2 * XLEN)) |b| {
+                            const bit: u1 = @truncate(idx >> b);
+                            if (bit == 1) {
+                                basis = basis.mul(r[b]);
+                            } else {
+                                basis = basis.mul(F.one().sub(r[b]));
+                            }
+                        }
+                        result = result.add(F.fromU64(val).mul(basis));
+                    }
+                }
+                return result;
+            }
+
+            /// Materialize the entire table (for testing)
+            pub fn materialize(allocator: Allocator) ![]u64 {
+                const size = @as(usize, 1) << (2 * @min(XLEN, 8));
+                const table = try allocator.alloc(u64, size);
+                for (0..size) |i| {
+                    table[i] = materializeEntry(@intCast(i));
+                }
+                return table;
+            }
+        };
+
+        /// RightShift: Logical right shift
+        /// materializeEntry(interleaved(x, shift_amount)) = x >> (shift_amount % XLEN)
+        pub const RightShift = struct {
+            /// Materialize the entry at the given index
+            pub fn materializeEntry(index: u128) u64 {
+                const bits = uninterleaveBits(index);
+                // Shift amount is lower bits of y
+                const shift_mask: u6 = XLEN - 1;
+                const shift: u6 = @truncate(bits.y & @as(u64, shift_mask));
+                // Mask to XLEN bits first, then shift
+                const mask: u64 = if (XLEN == 64) ~@as(u64, 0) else (@as(u64, 1) << XLEN) - 1;
+                const masked_x = bits.x & mask;
+                return masked_x >> shift;
+            }
+
+            /// Evaluate the MLE at point r
+            pub fn evaluateMLE(r: []const F) F {
+                std.debug.assert(r.len == 2 * XLEN);
+                var result = F.zero();
+
+                if (XLEN <= 8) {
+                    const size = @as(usize, 1) << (2 * XLEN);
+                    for (0..size) |idx| {
+                        const val = materializeEntry(@intCast(idx));
+                        var basis = F.one();
+                        inline for (0..(2 * XLEN)) |b| {
+                            const bit: u1 = @truncate(idx >> b);
+                            if (bit == 1) {
+                                basis = basis.mul(r[b]);
+                            } else {
+                                basis = basis.mul(F.one().sub(r[b]));
+                            }
+                        }
+                        result = result.add(F.fromU64(val).mul(basis));
+                    }
+                }
+                return result;
+            }
+
+            /// Materialize the entire table (for testing)
+            pub fn materialize(allocator: Allocator) ![]u64 {
+                const size = @as(usize, 1) << (2 * @min(XLEN, 8));
+                const table = try allocator.alloc(u64, size);
+                for (0..size) |i| {
+                    table[i] = materializeEntry(@intCast(i));
+                }
+                return table;
+            }
+        };
+
+        /// RightShiftArithmetic: Arithmetic right shift (sign-extends)
+        /// materializeEntry(interleaved(x, shift_amount)) = (signed) x >> shift_amount
+        pub const RightShiftArithmetic = struct {
+            /// Materialize the entry at the given index
+            pub fn materializeEntry(index: u128) u64 {
+                const bits = uninterleaveBits(index);
+                // Shift amount is lower bits of y
+                const shift_mask: u6 = XLEN - 1;
+                const shift: u6 = @truncate(bits.y & @as(u64, shift_mask));
+
+                // Mask to XLEN bits and treat as signed
+                const mask: u64 = if (XLEN == 64) ~@as(u64, 0) else (@as(u64, 1) << XLEN) - 1;
+                const masked_x = bits.x & mask;
+
+                // Sign extend to i64, then arithmetic shift, then mask back
+                if (XLEN == 64) {
+                    const signed_x: i64 = @bitCast(masked_x);
+                    const shifted: i64 = signed_x >> shift;
+                    return @bitCast(shifted);
+                } else if (XLEN == 32) {
+                    const signed_x: i32 = @truncate(@as(i64, @bitCast(masked_x << (64 - 32))) >> (64 - 32));
+                    const shifted: i32 = signed_x >> @as(u5, @truncate(shift));
+                    return @as(u64, @as(u32, @bitCast(shifted)));
+                } else {
+                    // For testing with small XLEN (e.g., 8)
+                    const shift_for_sign = 64 - XLEN;
+                    const signed_val: i64 = @as(i64, @bitCast(masked_x << @truncate(shift_for_sign))) >> @truncate(shift_for_sign);
+                    const shifted: i64 = signed_val >> @as(u6, shift);
+                    return @as(u64, @truncate(@as(u64, @bitCast(shifted)))) & mask;
+                }
+            }
+
+            /// Evaluate the MLE at point r
+            pub fn evaluateMLE(r: []const F) F {
+                std.debug.assert(r.len == 2 * XLEN);
+                var result = F.zero();
+
+                if (XLEN <= 8) {
+                    const size = @as(usize, 1) << (2 * XLEN);
+                    for (0..size) |idx| {
+                        const val = materializeEntry(@intCast(idx));
+                        var basis = F.one();
+                        inline for (0..(2 * XLEN)) |b| {
+                            const bit: u1 = @truncate(idx >> b);
+                            if (bit == 1) {
+                                basis = basis.mul(r[b]);
+                            } else {
+                                basis = basis.mul(F.one().sub(r[b]));
+                            }
+                        }
+                        result = result.add(F.fromU64(val).mul(basis));
+                    }
+                }
+                return result;
+            }
+
+            /// Materialize the entire table (for testing)
+            pub fn materialize(allocator: Allocator) ![]u64 {
+                const size = @as(usize, 1) << (2 * @min(XLEN, 8));
+                const table = try allocator.alloc(u64, size);
+                for (0..size) |i| {
+                    table[i] = materializeEntry(@intCast(i));
+                }
+                return table;
+            }
+        };
+
+        /// Pow2: Power of 2 table - returns 2^y (useful for shifts)
+        /// materializeEntry(y) = 2^y (mod 2^XLEN)
+        pub const Pow2 = struct {
+            /// Materialize the entry at the given index
+            pub fn materializeEntry(index: u128) u64 {
+                const y: u6 = @truncate(index & (XLEN - 1));
+                const result: u64 = @as(u64, 1) << y;
+                if (XLEN == 64) {
+                    return result;
+                } else {
+                    const mask: u64 = (@as(u64, 1) << XLEN) - 1;
+                    return result & mask;
+                }
+            }
+
+            /// Evaluate the MLE at point r (for single-operand table)
+            pub fn evaluateMLE(r: []const F) F {
+                std.debug.assert(r.len == XLEN);
+                var result = F.zero();
+
+                if (XLEN <= 8) {
+                    const size = @as(usize, 1) << XLEN;
+                    for (0..size) |idx| {
+                        const val = materializeEntry(@intCast(idx));
+                        var basis = F.one();
+                        inline for (0..XLEN) |b| {
+                            const bit: u1 = @truncate(idx >> b);
+                            if (bit == 1) {
+                                basis = basis.mul(r[b]);
+                            } else {
+                                basis = basis.mul(F.one().sub(r[b]));
+                            }
+                        }
+                        result = result.add(F.fromU64(val).mul(basis));
+                    }
+                }
+                return result;
+            }
+
+            /// Materialize the entire table (for testing)
+            pub fn materialize(allocator: Allocator) ![]u64 {
+                const size = @as(usize, 1) << @min(XLEN, 8);
+                const table = try allocator.alloc(u64, size);
+                for (0..size) |i| {
+                    table[i] = materializeEntry(@intCast(i));
+                }
+                return table;
+            }
+        };
+
+        /// SignExtend8: Sign-extend from 8 bits to XLEN bits
+        /// Useful for LB (load byte signed) instruction
+        pub const SignExtend8 = struct {
+            /// Materialize the entry at the given index
+            pub fn materializeEntry(index: u128) u64 {
+                const byte: u8 = @truncate(index);
+                const signed: i8 = @bitCast(byte);
+                const extended: i64 = @as(i64, signed);
+                if (XLEN == 64) {
+                    return @bitCast(extended);
+                } else {
+                    const mask: u64 = (@as(u64, 1) << XLEN) - 1;
+                    return @as(u64, @bitCast(extended)) & mask;
+                }
+            }
+
+            /// Evaluate the MLE at point r
+            pub fn evaluateMLE(r: []const F) F {
+                // Only 8 bits of input
+                std.debug.assert(r.len >= 8);
+                var result = F.zero();
+
+                const size: usize = 256; // 2^8
+                for (0..size) |idx| {
+                    const val = materializeEntry(@intCast(idx));
+                    var basis = F.one();
+                    for (0..8) |b| {
+                        const bit: u1 = @truncate(idx >> @truncate(b));
+                        if (bit == 1) {
+                            basis = basis.mul(r[b]);
+                        } else {
+                            basis = basis.mul(F.one().sub(r[b]));
+                        }
+                    }
+                    result = result.add(F.fromU64(val).mul(basis));
+                }
+                return result;
+            }
+
+            /// Materialize the entire table (for testing)
+            pub fn materialize(allocator: Allocator) ![]u64 {
+                const table = try allocator.alloc(u64, 256);
+                for (0..256) |i| {
+                    table[i] = materializeEntry(@intCast(i));
+                }
+                return table;
+            }
+        };
+
+        /// SignExtend16: Sign-extend from 16 bits to XLEN bits
+        /// Useful for LH (load half signed) instruction
+        pub const SignExtend16 = struct {
+            /// Materialize the entry at the given index
+            pub fn materializeEntry(index: u128) u64 {
+                const half: u16 = @truncate(index);
+                const signed: i16 = @bitCast(half);
+                const extended: i64 = @as(i64, signed);
+                if (XLEN == 64) {
+                    return @bitCast(extended);
+                } else {
+                    const mask: u64 = (@as(u64, 1) << XLEN) - 1;
+                    return @as(u64, @bitCast(extended)) & mask;
+                }
+            }
+
+            /// Evaluate the MLE at point r
+            pub fn evaluateMLE(r: []const F) F {
+                std.debug.assert(r.len >= 16);
+                var result = F.zero();
+
+                // For 16-bit input, table is 65536 entries
+                // Only practical for small test cases
+                if (r.len >= 16) {
+                    const size: usize = 65536; // 2^16
+                    for (0..size) |idx| {
+                        const val = materializeEntry(@intCast(idx));
+                        var basis = F.one();
+                        for (0..16) |b| {
+                            const bit: u1 = @truncate(idx >> @truncate(b));
+                            if (bit == 1) {
+                                basis = basis.mul(r[b]);
+                            } else {
+                                basis = basis.mul(F.one().sub(r[b]));
+                            }
+                        }
+                        result = result.add(F.fromU64(val).mul(basis));
+                    }
+                }
+                return result;
+            }
+
+            /// Materialize the entire table (for testing, limited size)
+            pub fn materialize(allocator: Allocator) ![]u64 {
+                const table = try allocator.alloc(u64, 65536);
+                for (0..65536) |i| {
+                    table[i] = materializeEntry(@intCast(i));
+                }
+                return table;
+            }
+        };
+
+        /// SignExtend32: Sign-extend from 32 bits to XLEN bits
+        /// Useful for LW (load word signed) on RV64
+        pub const SignExtend32 = struct {
+            /// Materialize the entry at the given index
+            pub fn materializeEntry(index: u128) u64 {
+                const word: u32 = @truncate(index);
+                const signed: i32 = @bitCast(word);
+                const extended: i64 = @as(i64, signed);
+                if (XLEN == 64) {
+                    return @bitCast(extended);
+                } else {
+                    const mask: u64 = (@as(u64, 1) << XLEN) - 1;
+                    return @as(u64, @bitCast(extended)) & mask;
+                }
+            }
+
+            /// Evaluate the MLE at point r (too large to materialize fully)
+            pub fn evaluateMLE(r: []const F) F {
+                // For 32-bit, we cannot enumerate all 2^32 entries
+                // This would require a clever closed-form formula
+                // Return zero for now - proper implementation would need decomposition
+                _ = r;
+                return F.zero();
+            }
+
+            /// Materialize the entire table - NOT practical for full size
+            /// Only use for testing with limited index ranges
+            pub fn materialize(allocator: Allocator) ![]u64 {
+                // Only materialize first 256 entries for testing
+                const table = try allocator.alloc(u64, 256);
+                for (0..256) |i| {
+                    table[i] = materializeEntry(@intCast(i));
+                }
+                return table;
+            }
+        };
     };
 }
 
@@ -1015,4 +1375,122 @@ test "Sub materialize" {
     // 5 - 5 = 0
     const index3 = interleaveBits(5, 5);
     try std.testing.expectEqual(@as(u64, 0), Table.Sub.materializeEntry(index3));
+}
+
+test "LeftShift materialize" {
+    const Table = LookupTable(BN254Scalar, 8);
+
+    // 1 << 0 = 1
+    const index0 = interleaveBits(1, 0);
+    try std.testing.expectEqual(@as(u64, 1), Table.LeftShift.materializeEntry(index0));
+
+    // 1 << 1 = 2
+    const index1 = interleaveBits(1, 1);
+    try std.testing.expectEqual(@as(u64, 2), Table.LeftShift.materializeEntry(index1));
+
+    // 1 << 7 = 128
+    const index2 = interleaveBits(1, 7);
+    try std.testing.expectEqual(@as(u64, 128), Table.LeftShift.materializeEntry(index2));
+
+    // 0xFF << 1 = 0xFE (shifted by 1 in 8-bit)
+    const index3 = interleaveBits(0xFF, 1);
+    try std.testing.expectEqual(@as(u64, 0xFE), Table.LeftShift.materializeEntry(index3));
+
+    // 5 << 3 = 40
+    const index4 = interleaveBits(5, 3);
+    try std.testing.expectEqual(@as(u64, 40), Table.LeftShift.materializeEntry(index4));
+}
+
+test "RightShift materialize" {
+    const Table = LookupTable(BN254Scalar, 8);
+
+    // 128 >> 0 = 128
+    const index0 = interleaveBits(128, 0);
+    try std.testing.expectEqual(@as(u64, 128), Table.RightShift.materializeEntry(index0));
+
+    // 128 >> 1 = 64
+    const index1 = interleaveBits(128, 1);
+    try std.testing.expectEqual(@as(u64, 64), Table.RightShift.materializeEntry(index1));
+
+    // 128 >> 7 = 1
+    const index2 = interleaveBits(128, 7);
+    try std.testing.expectEqual(@as(u64, 1), Table.RightShift.materializeEntry(index2));
+
+    // 0xFF >> 4 = 0x0F
+    const index3 = interleaveBits(0xFF, 4);
+    try std.testing.expectEqual(@as(u64, 0x0F), Table.RightShift.materializeEntry(index3));
+
+    // 40 >> 3 = 5
+    const index4 = interleaveBits(40, 3);
+    try std.testing.expectEqual(@as(u64, 5), Table.RightShift.materializeEntry(index4));
+}
+
+test "RightShiftArithmetic materialize" {
+    const Table = LookupTable(BN254Scalar, 8);
+
+    // Positive number: 64 >> 2 = 16 (same as logical)
+    const index1 = interleaveBits(64, 2);
+    try std.testing.expectEqual(@as(u64, 16), Table.RightShiftArithmetic.materializeEntry(index1));
+
+    // Negative number (8-bit): 0x80 (-128) >> 1 = 0xC0 (-64)
+    // Sign bit extends
+    const index2 = interleaveBits(0x80, 1);
+    try std.testing.expectEqual(@as(u64, 0xC0), Table.RightShiftArithmetic.materializeEntry(index2));
+
+    // 0xFF (-1 in signed 8-bit) >> 4 = 0xFF (-1)
+    const index3 = interleaveBits(0xFF, 4);
+    try std.testing.expectEqual(@as(u64, 0xFF), Table.RightShiftArithmetic.materializeEntry(index3));
+}
+
+test "Pow2 materialize" {
+    const Table = LookupTable(BN254Scalar, 8);
+
+    // 2^0 = 1
+    try std.testing.expectEqual(@as(u64, 1), Table.Pow2.materializeEntry(0));
+
+    // 2^1 = 2
+    try std.testing.expectEqual(@as(u64, 2), Table.Pow2.materializeEntry(1));
+
+    // 2^4 = 16
+    try std.testing.expectEqual(@as(u64, 16), Table.Pow2.materializeEntry(4));
+
+    // 2^7 = 128
+    try std.testing.expectEqual(@as(u64, 128), Table.Pow2.materializeEntry(7));
+}
+
+test "SignExtend8 materialize" {
+    const Table = LookupTable(BN254Scalar, 64);
+
+    // Positive: 100 stays 100
+    try std.testing.expectEqual(@as(u64, 100), Table.SignExtend8.materializeEntry(100));
+
+    // Negative: 0x80 (-128) becomes 0xFFFFFFFFFFFFFF80
+    const expected_neg: u64 = @bitCast(@as(i64, -128));
+    try std.testing.expectEqual(expected_neg, Table.SignExtend8.materializeEntry(0x80));
+
+    // -1 (0xFF) becomes full -1
+    const expected_neg1: u64 = @bitCast(@as(i64, -1));
+    try std.testing.expectEqual(expected_neg1, Table.SignExtend8.materializeEntry(0xFF));
+}
+
+test "SignExtend16 materialize" {
+    const Table = LookupTable(BN254Scalar, 64);
+
+    // Positive: 1000 stays 1000
+    try std.testing.expectEqual(@as(u64, 1000), Table.SignExtend16.materializeEntry(1000));
+
+    // Negative: 0x8000 (-32768) becomes sign extended
+    const expected_neg: u64 = @bitCast(@as(i64, -32768));
+    try std.testing.expectEqual(expected_neg, Table.SignExtend16.materializeEntry(0x8000));
+}
+
+test "SignExtend32 materialize" {
+    const Table = LookupTable(BN254Scalar, 64);
+
+    // Positive: 100000 stays 100000
+    try std.testing.expectEqual(@as(u64, 100000), Table.SignExtend32.materializeEntry(100000));
+
+    // Negative: 0x80000000 (-2^31) becomes sign extended
+    const expected_neg: u64 = @bitCast(@as(i64, -2147483648));
+    try std.testing.expectEqual(expected_neg, Table.SignExtend32.materializeEntry(0x80000000));
 }

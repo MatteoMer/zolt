@@ -7,6 +7,8 @@
 - [x] Add sumcheck protocol example (sumcheck_protocol.zig)
 - [x] Update build.zig with example-hyperkzg and example-sumcheck targets
 - [x] Update README with example usage instructions
+- [x] Add BN254Scalar.toU64() helper for debugging
+- [x] Fix all 5 examples to match current API
 
 ## Completed (Iteration 26)
 
@@ -130,6 +132,7 @@ All tests pass (538 tests).
 
 ## Commits This Session (Iteration 27)
 1. Add HyperKZG and Sumcheck protocol examples
+2. Fix examples to match current API and add toU64 helper
 
 ## Commits (Iteration 26)
 1. Clean up outdated TODO comments

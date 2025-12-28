@@ -20,6 +20,11 @@ This iteration focused on adding comprehensive examples for the core cryptograph
    - Added `example-hyperkzg` and `example-sumcheck` build targets
    - Updated README with example usage documentation
 
+4. **Example Fixes**
+   - Fixed all 5 examples to match current API
+   - Added BN254Scalar.toU64() helper for debugging
+   - All examples now compile and run correctly
+
 ## Previous Status (Iteration 26)
 
 ### Previous Session Summary

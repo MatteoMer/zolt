@@ -4,30 +4,25 @@
 
 ### Session Summary
 
-This iteration added load/store instruction lookups for complete RV64I memory operation support:
+This iteration added three major improvements:
 
-1. **Address Computation Lookups**
-   - `LoadAddressLookup`: Computes effective address for load instructions
-   - `StoreAddressLookup`: Computes effective address for store instructions
+1. **Load/Store Instruction Lookups**
+   - Address computation lookups for all memory operations
+   - 7 load instruction lookups with proper sign/zero extension
+   - 4 store instruction lookups
 
-2. **Load Instruction Lookups** (7 types)
-   - `LbLookup`: Load byte with sign extension
-   - `LbuLookup`: Load byte unsigned (zero extension)
-   - `LhLookup`: Load halfword with sign extension
-   - `LhuLookup`: Load halfword unsigned
-   - `LwLookup`: Load word with sign extension (RV64)
-   - `LwuLookup`: Load word unsigned (RV64)
-   - `LdLookup`: Load doubleword (RV64)
+2. **Verifier Improvements**
+   - Enhanced all proof verification functions with proper transcript binding
+   - Added documentation for verification requirements
+   - Improved Fiat-Shamir security by absorbing all commitments
 
-3. **Store Instruction Lookups** (4 types)
-   - `SbLookup`: Store byte (lower 8 bits)
-   - `ShLookup`: Store halfword (lower 16 bits)
-   - `SwLookup`: Store word (lower 32 bits)
-   - `SdLookup`: Store doubleword (RV64)
+3. **RV64I Immediate Word Operations**
+   - ADDIW, SLLIW, SRLIW, SRAIW lookups
+   - Complete coverage of RV64I instruction set
 
 ### Test Status
 
-All 494 tests pass:
+All 502 tests pass:
 - Field arithmetic: Fp, Fp2, Fp6, Fp12
 - Curve arithmetic: G1, G2 points
 - Pairing: bilinearity verified
@@ -40,7 +35,7 @@ All 494 tests pass:
 - Spartan proof generation and verification
 - Lasso lookup argument
 - All 24 lookup tables
-- All instruction lookups including memory operations
+- All instruction lookups (60+ instruction types)
 
 ### Architecture Summary
 
@@ -79,14 +74,17 @@ Division/Remainder:
 - ValidDiv0, ValidUnsignedRemainder, ValidSignedRemainder
 ```
 
-#### Instruction Lookups (Complete RV64IM + Memory Coverage)
+#### Instruction Lookups (Complete RV64IM Coverage)
 ```
-Base Integer:
+Base Integer (I):
 - AddLookup, SubLookup
 - AndLookup, OrLookup, XorLookup, AndnLookup
 - SltLookup, SltuLookup
 - SllLookup, SrlLookup, SraLookup
+
+Immediate (I):
 - SlliLookup, SrliLookup, SraiLookup
+- (ADDI, ANDI, ORI, XORI use Add/And/Or/Xor lookups with imm as operand)
 
 Branch:
 - BeqLookup, BneLookup
@@ -98,13 +96,13 @@ Upper Immediate:
 Jump:
 - JalLookup, JalrLookup
 
-Load (new):
+Load:
 - LoadAddressLookup
 - LbLookup, LbuLookup
 - LhLookup, LhuLookup
 - LwLookup, LwuLookup, LdLookup
 
-Store (new):
+Store:
 - StoreAddressLookup
 - SbLookup, ShLookup, SwLookup, SdLookup
 
@@ -119,6 +117,10 @@ RV64 Word Operations:
 - SllwLookup, SrlwLookup, SrawLookup
 - MulwLookup
 - DivwLookup, DivuwLookup, RemwLookup, RemuwLookup
+
+RV64 Immediate Word Operations:
+- AddiwLookup
+- SlliwLookup, SrliwLookup, SraiwLookup
 ```
 
 #### Commitment Schemes
@@ -166,6 +168,8 @@ Dory (transparent setup, IPA-based)
 - **Upper Immediates** - LUI, AUIPC
 - **Jumps** - JAL, JALR
 - **Load/Store** - LB, LBU, LH, LHU, LW, LWU, LD, SB, SH, SW, SD
+- **RV64 Word Operations** - ADDW, SUBW, SLLW, SRLW, SRAW, MULW, DIVW, etc.
+- **RV64 Immediate Word** - ADDIW, SLLIW, SRLIW, SRAIW
 
 ## Future Work
 
@@ -182,4 +186,6 @@ Dory (transparent setup, IPA-based)
 2. Benchmarking suite
 
 ## Commit History (Iteration 23)
-- Add load/store instruction lookups for full RV64I memory operations
+1. Add load/store instruction lookups for full RV64I memory operations
+2. Improve verifier with proper transcript binding and documentation
+3. Add RV64I immediate word operation lookups (ADDIW, SLLIW, SRLIW, SRAIW)

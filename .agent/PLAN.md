@@ -1,51 +1,35 @@
 # Zolt zkVM Implementation Plan
 
-## Current Status (December 2024 - Iteration 31)
+## Current Status (December 2024 - Iteration 32)
 
-### Session Summary - Strict Verification Mode & Prover Improvements
+### Session Summary - Investigation & Stability Testing
 
-This iteration focused on enabling strict sumcheck verification and improving the prover:
+This iteration focused on testing the current implementation and investigating issues:
 
-**Part 1: Strict Verification Mode**
-1. Added `VerifierConfig` struct with `strict_sumcheck` and `debug_output` options
-2. Added `initWithConfig()` method to `MultiStageVerifier`
-3. Updated all 6 verification stages to check `p(0) + p(1) = claim`
-4. Added `setStrictMode()` and `setConfig()` methods to `JoltVerifier`
+**Activities:**
+1. Ran full pipeline example - verification passes in lenient mode
+2. Ran benchmarks - confirmed field arithmetic and MSM performance
+3. Verified all 538 tests pass
+4. Attempted to add comprehensive e2e prover/verifier integration tests
 
-**Part 2: Prover Fixes**
-1. Fixed Fiat-Shamir binding: round polynomials now absorbed into transcript
-2. Fixed Spartan prover to track `current_len` during polynomial folding
-3. Fixed RAF prover to account for bound variables in unmap evaluation
-4. Added debug output option for diagnosing verification failures
+**Key Discovery - Test Interference Issue:**
+When adding new integration tests to `src/integration_tests.zig`, seemingly unrelated tests
+in the lasso and spartan modules start failing. This is a concerning issue that needs
+investigation. Possible causes:
+1. Hidden global state being mutated
+2. Test execution order dependencies
+3. Memory corruption from certain test combinations
 
-**Key Discovery:**
-Strict mode reveals that after round 0, the prover's sum of folded values doesn't
-equal the verifier's `p(challenge)`. The prover uses linear folding while the
-verifier uses quadratic Lagrange interpolation. These should match for linear
-polynomials but there's still a subtle discrepancy.
+Reverted the test additions to maintain stability.
 
-**Status:**
-- Verifier has working strict mode (default: true)
-- Example uses lenient mode (false) for demo
-- All 538 tests still pass
-- End-to-end verification passes with lenient mode
+### Previous Session (Iteration 31) - Strict Verification Mode
+
+Added `VerifierConfig` with `strict_sumcheck` and `debug_output` options.
+Revealed that prover's round polynomials don't perfectly satisfy sumcheck equation.
 
 ### Previous Session (Iteration 30) - Critical Fix
 
 Fixed prover/verifier transcript synchronization for end-to-end verification.
-
-### Previous Status (Iteration 29)
-
-Previous iteration made CLI and example improvements:
-
-1. **Subcommand Help Support**
-   - Added --help and -h flags for all subcommands (run, prove, srs, decode)
-   - Each subcommand now shows helpful usage information
-
-2. **Full Pipeline Example**
-   - Created comprehensive `examples/full_pipeline.zig`
-   - Demonstrates end-to-end ZK proving workflow
-   - Shows all core components working together
 
 ## Architecture Summary
 
@@ -127,12 +111,23 @@ Division: ValidDiv0, ValidUnsignedRemainder, ValidSignedRemainder
 - **All Lookup Tables** - 24 tables covering all RV64IM operations
 - **Full Instruction Coverage** - 60+ instruction types
 - **SRS Utilities** - PTAU file parsing, serialization
-- **End-to-End Verification** - Now PASSES (fixed this iteration)
+- **End-to-End Verification** - PASSES (lenient mode)
+
+## Known Issues
+
+### Test Interference (NEW - Iteration 32)
+Adding new integration tests causes unrelated lasso/spartan tests to fail.
+Need to investigate root cause before adding more e2e tests.
+
+### Prover Sumcheck Validity
+Strict verification mode reveals that prover's round polynomials don't
+perfectly satisfy `p(0) + p(1) = claim` after folding.
 
 ## Future Work
 
 ### High Priority
-1. Implement strict sumcheck verification (currently structural only)
+1. Investigate test interference issue
+2. Fix prover sumcheck validity issues
 
 ### Medium Priority
 1. Performance optimization with SIMD
@@ -143,14 +138,23 @@ Division: ValidDiv0, ValidUnsignedRemainder, ValidSignedRemainder
 1. More comprehensive benchmarking
 2. Add more example programs
 
+## Performance Metrics (from benchmarks)
+- Field addition: 4.0 ns/op
+- Field multiplication: 55.5 ns/op
+- Field inversion: 11.8 us/op
+- MSM (256 points): 0.50 ms/op
+- HyperKZG commit (1024): 1.5 ms/op
+
+## Commit History (Iteration 32)
+1. Update tracking files for iteration 32
+
+## Commit History (Iteration 31)
+1. Add configurable strict sumcheck verification mode
+2. Improve sumcheck prover/verifier
+
 ## Commit History (Iteration 30)
 1. Fix prover/verifier transcript synchronization for end-to-end verification
 
 ## Commit History (Iteration 29)
 1. Add --help support for subcommands
 2. Add full pipeline example
-
-## Commit History (Iteration 28)
-1. Upgrade prove command to actually generate and verify proofs
-2. Add SRS inspection command and preprocessWithSRS method
-

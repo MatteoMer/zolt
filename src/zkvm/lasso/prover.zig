@@ -583,3 +583,66 @@ test "lasso prover rounds" {
     // Should advance
     try std.testing.expectEqual(@as(usize, 1), prover.round);
 }
+
+test "lasso prover claim tracking" {
+    const F = @import("../../field/mod.zig").BN254Scalar;
+    const allocator = std.testing.allocator;
+
+    // 4 lookups - indices 0, 1, 2, 3
+    const lookup_indices = [_]u128{ 0, 1, 2, 3 };
+    const lookup_tables = [_]usize{ 0, 0, 0, 0 };
+
+    // Reduction point for log_T=2 (4 cycles)
+    const r_reduction = [_]F{
+        F.fromU64(2),
+        F.fromU64(3),
+    };
+
+    const params = LassoParams(F).init(
+        F.fromU64(5), // gamma
+        2, // log_T (4 cycles)
+        3, // log_K (8 table entries)
+        &r_reduction,
+    );
+
+    var prover = try LassoProver(F).init(
+        allocator,
+        &lookup_indices,
+        &lookup_tables,
+        params,
+    );
+    defer prover.deinit();
+
+    // Verify sumcheck invariant: p(0) + p(1) = current_claim for each round
+    const total_rounds = params.log_K + params.log_T; // 3 + 2 = 5 rounds
+
+    for (0..total_rounds) |round| {
+        const current_claim = prover.current_claim;
+
+        // Compute round polynomial
+        var round_poly = try prover.computeRoundPolynomial();
+        defer round_poly.deinit();
+
+        // Verify p(0) + p(1) = current_claim
+        // p(X) = c0 + c1*X + c2*X^2
+        const c0 = round_poly.coeffs[0];
+        const c1 = round_poly.coeffs[1];
+        const c2 = if (round_poly.coeffs.len > 2) round_poly.coeffs[2] else F.zero();
+
+        const p_at_0 = c0;
+        const p_at_1 = c0.add(c1).add(c2);
+        const sum = p_at_0.add(p_at_1);
+
+        try std.testing.expect(sum.eql(current_claim));
+
+        // Generate a challenge
+        const challenge = F.fromU64(@intCast(round + 10));
+
+        // Receive challenge and update state
+        try prover.receiveChallenge(challenge);
+
+        // Verify the new claim equals p(r)
+        const expected_new_claim = c0.add(c1.mul(challenge)).add(c2.mul(challenge).mul(challenge));
+        try std.testing.expect(prover.current_claim.eql(expected_new_claim));
+    }
+}

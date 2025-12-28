@@ -1,44 +1,37 @@
 # Zolt zkVM Implementation Plan
 
-## Current Status (December 2024 - Iteration 18)
+## Current Status (December 2024 - Iteration 19)
 
 ### Session Summary
 
-This iteration focused on wiring proper polynomial commitments into the proof structures and adding verification key support:
+This iteration focused on implementing batch opening proofs:
 
-1. **Commitment Type Infrastructure**
-   - Created `commitment_types.zig` with `PolyCommitment` wrapping G1 points
-   - Added `OpeningProof` type for batch verification support
-   - Updated BytecodeProof, MemoryProof, RegisterProof to use PolyCommitment
-   - Added init() and withCommitments() constructors for clean API
+1. **Batch Opening Proofs for HyperKZG**
+   - Added `batchCommit()` for committing to multiple polynomials at once
+   - Created `BatchProof` struct with quotient commitments and evaluations
+   - Implemented `batchOpen()` for generating batch opening proofs
+   - Implemented `verifyBatchOpening()` for verification with combined pairing
+   - Added `evaluateMultilinear()` helper for polynomial evaluation
 
-2. **Commitment Generation in Prover**
-   - Added `ProvingKey` struct containing HyperKZG SRS
-   - Implemented `commitBytecode()` - converts bytecode to polynomial and commits
-   - Implemented `commitMemory()` - commits memory trace values
-   - Implemented `commitRegisters()` - commits register trace values
-   - Prover generates real G1 point commitments when ProvingKey is provided
-
-3. **Verifier Enhancements**
-   - Added `VerifyingKey` with minimal SRS elements (g1, g2, tau_g2)
-   - Implemented `absorbCommitments()` for Fiat-Shamir transcript binding
-   - All commitments are absorbed into transcript before challenge derivation
+2. **Test Coverage**
+   - Added tests for batch commit
+   - Added tests for batch open with single polynomial
+   - Added tests for multilinear evaluation at corners
 
 ### Test Status
 
-All 376 tests pass:
+All 376+ tests pass:
 - Field arithmetic: Fp, Fp2, Fp6, Fp12
 - Curve arithmetic: G1, G2 points (correct projective doubling)
 - Pairing: bilinearity verified, SRS relationship verified
-- HyperKZG: commit, open, verify, verifyWithPairing
-- Batch verification: accumulator, multiple claims
+- HyperKZG: commit, open, verify, verifyWithPairing, batchOpen
+- Batch verification: accumulator, multiple claims, batch opening
 - Sumcheck protocol
 - RISC-V emulation (RV64IMC)
 - ELF loading (ELF32/ELF64)
 - MSM operations
 - Spartan proof generation and verification
-- ProvingKey initialization
-- VerifyingKey extraction
+- ProvingKey and VerifyingKey
 - Commitment type operations
 
 ### Architecture Summary
@@ -70,14 +63,24 @@ VerifyingKey = { g1, g2, tau_g2 }
   - Much smaller than ProvingKey
   - Contains only generators and tau*G2
 
-JoltProver
-  - Without ProvingKey: uses identity commitments (placeholder)
-  - With ProvingKey: generates real HyperKZG commitments
+HyperKZG
+  - commit(params, evals) -> Commitment
+  - open(params, evals, point, value) -> Proof
+  - verify(params, commitment, point, value, proof) -> bool
+  - verifyWithPairing(params, commitment, point, value, proof) -> bool
+  - batchCommit(params, polys, allocator) -> []Commitment
+  - batchOpen(params, polys, point, allocator) -> BatchProof
+  - verifyBatchOpening(params, commitments, point, proof) -> bool
+```
 
-JoltVerifier
-  - absorbCommitments() binds all commitments to transcript
-  - Without VerifyingKey: placeholder verification
-  - With VerifyingKey: can verify commitment openings
+#### Batch Opening Protocol
+```
+1. Prover computes evaluations for each polynomial at the point
+2. Prover derives batching challenge gamma (deterministic for now)
+3. Prover combines polynomials: P = sum_i gamma^i * p_i
+4. Prover generates HyperKZG opening proof for combined polynomial
+5. Verifier recomputes combined commitment and evaluation
+6. Verifier checks the opening proof using pairing verification
 ```
 
 ## Components Status
@@ -93,7 +96,8 @@ JoltVerifier
 - **RISC-V Emulator** - Full RV64IMC execution with tracing
 - **ELF Loader** - Complete ELF32/ELF64 parsing
 - **MSM** - Multi-scalar multiplication with bucket method
-- **HyperKZG** - commit(), verify(), verifyWithPairing()
+- **HyperKZG** - commit(), verify(), verifyWithPairing(), batchOpen()
+- **Batch Opening Proofs** - batchCommit(), batchOpen(), verifyBatchOpening()
 - **Batch Verification** - BatchOpeningAccumulator
 - **Host Execute** - Program execution with trace generation
 - **Preprocessing** - Generates proving and verifying keys
@@ -109,20 +113,20 @@ JoltVerifier
 
 ### Partially Working
 - **Dory** - commit() works, open() is placeholder
-- **Spartan Verifier** - Structure complete, needs full implementation
 
 ## Future Work
 
 ### High Priority
-1. Implement batch opening proofs
-2. Complete Spartan verifier
-
-### Medium Priority
 1. Implement Dory open() with inner product argument
 2. Import production SRS from Ethereum ceremony
-3. Performance optimization with SIMD
+
+### Medium Priority
+1. Performance optimization with SIMD
+2. Parallel sumcheck round computation
 
 ### Low Priority
-1. Parallel sumcheck round computation
-2. Documentation and examples
-3. Benchmarking suite
+1. Documentation and examples
+2. Benchmarking suite
+
+## Commit History (Iteration 19)
+- Add batch opening proofs to HyperKZG

@@ -1,6 +1,29 @@
 # Zolt-Jolt Compatibility Notes
 
-## Current Status (December 28, 2024, Session 11)
+## Current Status (December 29, 2024)
+
+### Session 12 - Stage 1 Remaining Rounds Debugging
+
+**Status**: UniSkip passes, all sumcheck rounds pass (p(0)+p(1)=claim), but final output_claim ≠ expected.
+
+**Progress Made:**
+1. Fixed constraint group indices to match Jolt's FIRST_GROUP/SECOND_GROUP ordering
+2. Added ExpandingTable (r_grid) for tracking bound challenge weights
+3. Updated computeRemainingRoundPolyMultiquadratic to use r_grid weighting
+
+**Current Issue:**
+The sumcheck final output_claim doesn't match the expected_output_claim computed from R1CS.
+- All round verifications pass internally (p(0)+p(1)=claim)
+- The polynomial evaluations at challenge points produce wrong values
+
+**Analysis:**
+The issue is likely in how cycle indices map to (E_out, E_in, r_grid) weights.
+Jolt uses a complex structure where each (out_idx, in_idx) pair processes multiple
+cycles indexed by (j, k) where j ∈ {0,1} and k ∈ 0..klen.
+
+---
+
+## Previous Session (December 28, 2024, Session 11)
 
 ### Session 11 - MAJOR BREAKTHROUGH! 🎉
 

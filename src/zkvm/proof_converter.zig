@@ -369,52 +369,17 @@ pub fn ProofConverter(comptime F: type) type {
             // The first round was already processed by UniSkip
             // Append the UniSkip polynomial to transcript using UniPoly format:
             // "UncompressedUniPoly_begin", all coefficients, "UncompressedUniPoly_end"
-            // Debug: print first few UniSkip polynomial coefficients
-            std.debug.print("[DEBUG] UniSkip poly has {} coeffs\n", .{uniskip_proof.uni_poly.len});
-            for (0..@min(5, uniskip_proof.uni_poly.len)) |i| {
-                const c_bytes = uniskip_proof.uni_poly[i].toBytes();
-                std.debug.print("[DEBUG] coeff[{}] = ", .{i});
-                for (0..32) |j| {
-                    std.debug.print("{x:0>2}", .{c_bytes[31 - j]});
-                }
-                std.debug.print("\n", .{});
-            }
-
             transcript.appendMessage("UncompressedUniPoly_begin");
             for (uniskip_proof.uni_poly) |coeff| {
                 transcript.appendScalar(coeff);
             }
             transcript.appendMessage("UncompressedUniPoly_end");
 
-            // Debug: print transcript state before r0 derivation
-            std.debug.print("[DEBUG] Transcript state before r0: ", .{});
-            for (0..@min(32, transcript.state.len)) |i| {
-                std.debug.print("{x:0>2}", .{transcript.state[i]});
-            }
-            std.debug.print("\n", .{});
-
             const r0 = transcript.challengeScalar();
-
-            // Debug: print r0 value
-            std.debug.print("[DEBUG] r0 (decimal): ", .{});
-            const r0_bytes = r0.toBytes();
-            // Print as little-endian number (last byte first)
-            for (0..32) |i| {
-                std.debug.print("{x:0>2}", .{r0_bytes[31 - i]});
-            }
-            std.debug.print("\n", .{});
 
             // Compute the UnivariateSkip claim: evaluation of UniSkip polynomial at r0
             // This is the input_claim for the remaining sumcheck rounds
             const uni_skip_claim = evaluatePolyAtPoint(uniskip_proof.uni_poly, r0);
-
-            // Debug: print claim
-            std.debug.print("[DEBUG] uni_skip_claim: ", .{});
-            const claim_bytes = uni_skip_claim.toBytes();
-            for (0..32) |i| {
-                std.debug.print("{x:0>2}", .{claim_bytes[31 - i]});
-            }
-            std.debug.print("\n", .{});
 
             // Bind the first-round challenge from transcript
             outer_prover.bindFirstRoundChallenge(r0) catch {};

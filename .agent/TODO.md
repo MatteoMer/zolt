@@ -10,6 +10,7 @@
 6. **Fix Lagrange Interpolation Bug** - Dead code was corrupting basis array
 7. **Stage 1 UniSkip Verification** - Domain sum check passes
 8. **UnivariateSkip Claim** - Now correctly set to uni_poly.evaluate(r0)
+9. **Montgomery Form Fix** - appendScalar now converts from Montgomery form
 
 ## MAJOR MILESTONE: Stage 1 UniSkip PASSES! 🎉
 
@@ -25,55 +26,47 @@ Domain sum check:
 
 ## In Progress 🚧
 
-### Stage 1 Regular Sumcheck Fails
+### Transcript State Matches, But Challenge Derivation Differs
 
-After UniSkip passes, the remaining sumcheck rounds fail:
+After fixing Montgomery form serialization:
+- Transcript states NOW MATCH after appending UniSkip polynomial
+- Jolt state: `[51, 28, c0, 92, ab, 81, 34, c6, ...]`
+- Zolt state: `5128c092ab8134c6178d3b18...` (same!)
+
+But the r0 challenge values still differ:
+- Jolt r0: `3203159906685754656633863192913202159923849199052541271036524843387280424960`
+- Zolt r0: ~268 trillion (different!)
+
+### Root Cause
+
+The `n_rounds` counter likely differs between Zolt and Jolt. The round counter is mixed into the Blake2b hash during `challengeBytes32`:
 ```
-Verification failed: Stage 1
-Caused by: Sumcheck verification failed
+hasher() = Blake2b256(state || [0u8; 28] || n_rounds.to_be_bytes())
 ```
 
-### Root Cause Analysis
+When deriving r0:
+- Zolt: n_rounds = 55
+- Jolt: n_rounds = ? (likely different)
 
-The `StreamingOuterProver` in Zolt produces round polynomials, but:
-1. These polynomials don't reduce to the correct `expected_output_claim`
-2. The verifier computes `expected_output_claim` from R1CS input evaluations
-3. The prover's round polynomials must be mathematically consistent
+### Next Step
 
-### What Works Now
+Compare how n_rounds is incremented between the two implementations:
+- Jolt increments in `update_state()` called from `challenge_bytes32()`
+- Zolt should match this behavior
 
-- UnivariateSkip claim = `uni_poly.evaluate(r0)` ✅
-- R1CS input evaluations computed via MLE ✅
-- Opening claims have correct non-zero values ✅
-- Round polynomials have non-zero coefficients ✅
-
-### What Needs Fixing
-
-The round polynomials need to satisfy the sumcheck relation:
-1. `p(0) + p(1) = claim` for each round
-2. After all rounds, `output_claim` must equal `expected_output_claim`
-3. The `expected_output_claim` is:
-   ```
-   tau_high_bound_r0 * tau_bound_r_tail * inner_sum_prod
-   ```
-   where `inner_sum_prod = Az(rx) * Bz(rx)`
-
-### Required Changes in streaming_outer.zig
-
-1. Fix `GruenSplitEqPolynomial` binding logic
-2. Fix `computeRemainingRoundPoly` to compute correct t'(0), t'(∞)
-3. Track `current_claim` updates correctly
-4. Ensure Az*Bz products use properly bound Lagrange coefficients
+The difference might be in how many times `update_state` is called during:
+1. Preamble (memory layout, I/O)
+2. Commitment appending
+3. Tau derivation
+4. UniSkip poly appending
 
 ---
 
 ## Git History (Key Commits)
 
-- Latest: fix UnivariateSkip claim to use uni_poly.evaluate(r0)
+- `39991b8` - fix: convert from Montgomery form in Blake2b appendScalar
+- Previous: fix UnivariateSkip claim to use uni_poly.evaluate(r0)
 - `0c5f8c6` - fix: remove dead code in Lagrange interpolation
-- `178232d` - test: add buildUniskipFirstRoundPoly domain sum test
-- `62a5675` - test: add interpolation preserves zeros test
-- `cb406ec` - feat: implement proper Lagrange interpolation for UniSkip
 
 ---
 
@@ -91,23 +84,21 @@ zig build -Doptimize=ReleaseFast
     --export-preprocessing /tmp/zolt_preprocessing.bin \
     -o /tmp/zolt_proof_dory.bin
 
-# Run Jolt debug test (Stage 1 sumcheck structure)
+# Run Jolt debug test
 cd /Users/matteo/projects/jolt
-cargo test --package jolt-core test_debug_stage1_sumcheck -- --ignored --nocapture
-
-# Run Jolt full verification test
-cargo test --package jolt-core test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
+cargo test --package jolt-core test_debug_stage1_verification -- --ignored --nocapture
 ```
 
 ---
 
 ## Progress Indicators
 
-- [x] UniSkip verification passes
-- [x] UnivariateSkip claim correctly set
-- [x] R1CS input claims correctly computed
+- [x] UniSkip verification passes (domain sum = 0)
+- [x] Transcript states match after UniSkip poly append
+- [x] UnivariateSkip claim formula is correct (uni_poly.evaluate(r0))
+- [x] R1CS input claims correctly computed via MLE
+- [ ] n_rounds counter matches between Zolt and Jolt
+- [ ] r0 challenge matches
 - [ ] Stage 1 remaining rounds verify
-- [ ] Stage 2 UniSkip verification
-- [ ] Stage 2 remaining rounds verify
-- [ ] Stages 3-7 verify
+- [ ] Stages 2-7 verify
 - [ ] Full proof verification passes

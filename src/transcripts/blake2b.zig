@@ -303,11 +303,33 @@ pub fn Blake2bTranscript(comptime F: type) type {
             self.appendMessage("end_append_vector");
         }
 
+        /// Append a serializable object to the transcript
+        /// Matches Jolt's `fn append_serializable<F: CanonicalSerialize>(&mut self, scalar: &F)`
+        ///
+        /// This reverses the bytes after serialization for EVM compatibility,
+        /// matching what arkworks + Jolt does.
+        pub fn appendSerializable(self: *Self, comptime T: type, bytes: T) void {
+            // Reverse the bytes to match Jolt's behavior
+            var reversed: T = undefined;
+            for (0..bytes.len) |i| {
+                reversed[i] = bytes[bytes.len - 1 - i];
+            }
+            self.appendBytes(&reversed);
+        }
+
         /// Append a GT (Fp12) element to the transcript
         /// For Dory compatibility - appends the serialized GT element as bytes
+        ///
+        /// IMPORTANT: This matches Jolt's append_serializable which reverses
+        /// all bytes after serialization for EVM compatibility.
         pub fn appendGT(self: *Self, gt: anytype) void {
             const bytes = gt.toBytes();
-            self.appendBytes(&bytes);
+            // Reverse bytes to match Jolt's append_serializable
+            var reversed: [384]u8 = undefined;
+            for (0..384) |i| {
+                reversed[i] = bytes[383 - i];
+            }
+            self.appendBytes(&reversed);
         }
 
         /// Append a G1 point to the transcript (compressed format)

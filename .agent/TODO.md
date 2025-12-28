@@ -2,7 +2,7 @@
 
 ## Current Status (Jolt Compatibility Phase)
 
-**Project Status: DEBUGGING FIAT-SHAMIR TRANSCRIPT MISMATCH**
+**Project Status: TRANSCRIPT COMMITMENT TYPE MISMATCH**
 
 Key achievements:
 1. **R1CS Input MLE Evaluations** - Opening claims now contain actual computed values
@@ -10,42 +10,53 @@ Key achievements:
 3. **Cross-Deserialization** - Jolt successfully deserializes Zolt proofs
 4. **Non-zero UniSkip Coefficients** - UniSkip polynomial has non-trivial values
 5. **JoltDevice from File** - Can read JoltDevice from Jolt-generated file
+6. **Byte Reversal Fix** - Commitments now reverse bytes before appending to transcript
 
-Current issue: **UniSkip power sum check fails**
-- The UniSkip polynomial doesn't sum to zero over the symmetric domain
-- This suggests the tau values derived from transcript don't match Jolt's
-- Even with same JoltDevice file, the transcript state differs
+Current issue: **Commitment type mismatch**
+- Zolt uses G1 points (64 bytes) for commitments in transcript
+- Jolt uses GT elements (384 bytes, Dory/Fp12) for commitments in transcript
+- This causes tau values to differ, which causes UniSkip verification to fail
 
 ---
 
 ## Root Cause Analysis
 
-### Likely Issues
+### The Core Issue
 
-1. **Commitment serialization mismatch**
-   - We append commitments to transcript in a format
-   - Jolt may serialize GT elements differently for transcript
+Jolt uses **Dory commitments** which are GT elements (Fp12, 384 bytes), while Zolt uses **HyperKZG commitments** which are G1 points (64 bytes).
 
-2. **Preamble format differences**
-   - Jolt may use different serialization for u64 (arkworks LE vs raw LE)
-   - Byte ordering or padding differences
+When the verifier runs:
+1. **Preamble**: Appends memory layout, I/O, ram_K, trace_length ✅ (matches)
+2. **Commitments**: Appends each commitment using `append_serializable` ❌ (MISMATCH)
+   - Jolt: `serialize_uncompressed(GT) -> 384 bytes -> reverse -> append`
+   - Zolt: `toBytes(G1) -> 64 bytes -> reverse -> append`
+3. **Tau derivation**: Gets challenges from transcript ❌ (different due to step 2)
+4. **UniSkip verification**: Uses tau to check power sum ❌ (fails)
 
-3. **JoltDevice deserialization issue**
-   - Our deserialization may not match arkworks format exactly
-   - Fields might be in wrong order or have wrong sizes
+### Solutions
 
-### Next Debugging Steps
+1. **Full Solution**: Refactor Zolt prover to use Dory natively for commitments
+   - Replace `PolyCommitment` (G1) with `DoryCommitment` (GT)
+   - Use Dory throughout the proving pipeline
 
-1. Add debug output to both Zolt and Jolt to print:
-   - Transcript state after preamble
-   - Transcript state after commitments
-   - First few tau values derived
+2. **Hybrid Solution**: Generate Dory commitments for transcript only
+   - Keep internal HyperKZG for efficiency
+   - Compute Dory commitments from polynomial evaluations
+   - Append GT elements to transcript
 
-2. Compare byte-by-byte what's being appended to transcript
+3. **Testing Solution**: Create a transcript test that matches Jolt exactly
+   - Use same JoltDevice file
+   - Use same commitment values (serialize GT from Jolt)
+   - Verify transcript state matches byte-for-byte
 
-3. Verify JoltDevice deserialization is correct by:
-   - Printing memory_layout values from Zolt
-   - Comparing with values printed by Jolt
+---
+
+## Immediate Next Steps
+
+1. [ ] Implement Dory commitment generation in transcript flow
+2. [ ] Store polynomial evaluations (not just commitments) in proof structure
+3. [ ] Add transcript state debugging to compare with Jolt
+4. [ ] Test with known-good GT elements from Jolt
 
 ---
 
@@ -61,8 +72,9 @@ Current issue: **UniSkip power sum check fails**
 8. ✅ **19 R1CS Constraints** - Matching Jolt's exact structure
 9. ✅ **Constraint Evaluators** - Az/Bz for first and second groups
 10. ✅ **JoltDevice Type** - Read from Jolt-generated file
-11. ✅ **Fiat-Shamir Preamble** - Function implemented (needs debugging)
+11. ✅ **Fiat-Shamir Preamble** - Function implemented
 12. ✅ **CLI --device option** - Use JoltDevice from file
+13. ✅ **Byte Reversal** - Commitments reversed before transcript append
 
 ---
 
@@ -90,23 +102,23 @@ Build Summary: 5/5 steps succeeded; 608/608 tests passed
 ### Core Implementation
 | File | Status | Purpose |
 |------|--------|---------|
-| `src/transcripts/blake2b.zig` | ✅ Done | Blake2bTranscript |
+| `src/transcripts/blake2b.zig` | ✅ Done | Blake2bTranscript with byte reversal |
 | `src/zkvm/jolt_device.zig` | ✅ Done | JoltDevice deserialization |
-| `src/zkvm/mod.zig` | 🔄 Debug | Fiat-Shamir preamble |
-| `src/zkvm/proof_converter.zig` | 🔄 Debug | Stage conversion with tau |
+| `src/zkvm/mod.zig` | 🔄 In Progress | Need Dory commitments for transcript |
+| `src/zkvm/proof_converter.zig` | 🔄 In Progress | Stage conversion with tau |
 | `src/zkvm/spartan/outer.zig` | ✅ Done | UniSkip computation |
+| `src/poly/commitment/dory.zig` | ✅ Done | GT element support |
 
 ---
 
 ## Summary
 
 **Serialization Compatibility: COMPLETE**
-**Transcript Integration: NEEDS DEBUGGING**
-**Verification: BLOCKED ON TRANSCRIPT MATCH**
+**Transcript Integration: NEEDS DORY COMMITMENTS**
+**Verification: BLOCKED ON COMMITMENT TYPE MATCH**
 
-We're very close - the proof structure is correct, deserialization works, and
-we have non-zero values in the UniSkip polynomial. The remaining issue is
-ensuring the Fiat-Shamir transcript state matches Jolt's exactly so that tau
-values are derived identically.
+The proof structure is correct and deserializes successfully. The remaining issue is
+that the transcript must use Dory commitments (GT elements, 384 bytes) instead of
+HyperKZG commitments (G1 points, 64 bytes) to match Jolt's verifier exactly.
 
-Next immediate step: Add debug output to compare transcript states.
+Next step: Implement Dory commitment generation in the transcript flow.

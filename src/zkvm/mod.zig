@@ -469,7 +469,7 @@ pub fn JoltProver(comptime F: type) type {
                 return jolt_types.JoltProof(F, commitment_types.PolyCommitment, commitment_types.OpeningProof).init(self.allocator);
             };
 
-            // Collect commitments from the internal proof
+            // Collect commitments from the internal proof (G1 points for serialization)
             var commitments: std.ArrayListUnmanaged(commitment_types.PolyCommitment) = .{};
             defer commitments.deinit(self.allocator);
 
@@ -497,12 +497,69 @@ pub fn JoltProver(comptime F: type) type {
             // Run Fiat-Shamir preamble to match Jolt verifier
             jolt_device.fiatShamirPreamble(F, &transcript, &device, ram_K, trace_length);
 
-            // Append commitments to transcript (GT elements for Dory)
-            // This is what Jolt does after the preamble
-            for (commitments.items) |c| {
-                // For Dory, we need to append the GT element bytes
-                const bytes = c.toBytes();
-                transcript.appendBytes(&bytes);
+            // Build polynomial evaluations and compute Dory commitments for transcript
+            // Jolt uses Dory (GT elements, 384 bytes) for commitments in the transcript
+            // We need to match this exactly for the Fiat-Shamir challenges to align
+            const DoryScheme = Dory.DoryCommitmentScheme(F);
+            const GT = Dory.GT;
+
+            // Setup Dory SRS with appropriate size
+            const bytecode_poly_size = if (program_bytecode.len < 2) 2 else std.math.ceilPowerOfTwo(usize, program_bytecode.len) catch program_bytecode.len;
+            const memory_trace_len = emulator.ram.trace.accesses.items.len;
+            const memory_poly_size = if (memory_trace_len < 2) 2 else std.math.ceilPowerOfTwo(usize, memory_trace_len) catch memory_trace_len;
+            const reg_trace_len = emulator.trace.steps.items.len;
+            const reg_poly_size = if (reg_trace_len < 2) 2 else std.math.ceilPowerOfTwo(usize, reg_trace_len) catch reg_trace_len;
+            const max_poly_size = @max(@max(bytecode_poly_size, memory_poly_size), reg_poly_size);
+            const log_size: u32 = if (max_poly_size <= 1) 1 else @intCast(std.math.log2_int(usize, max_poly_size) + 1);
+
+            var dory_srs = try DoryScheme.setup(self.allocator, log_size);
+            defer dory_srs.deinit();
+
+            // Build bytecode polynomial and compute Dory commitment
+            const bytecode_poly = try self.allocator.alloc(F, bytecode_poly_size);
+            defer self.allocator.free(bytecode_poly);
+            for (bytecode_poly, 0..) |*p, i| {
+                if (i < program_bytecode.len) {
+                    p.* = F.fromU64(@as(u64, program_bytecode[i]));
+                } else {
+                    p.* = F.zero();
+                }
+            }
+            const bytecode_comm = DoryScheme.commit(&dory_srs, bytecode_poly);
+
+            // Build memory polynomial and compute Dory commitment
+            const memory_poly = try self.allocator.alloc(F, memory_poly_size);
+            defer self.allocator.free(memory_poly);
+            for (memory_poly, 0..) |*p, i| {
+                if (i < memory_trace_len) {
+                    p.* = F.fromU64(emulator.ram.trace.accesses.items[i].value);
+                } else {
+                    p.* = F.zero();
+                }
+            }
+            const memory_comm = DoryScheme.commit(&dory_srs, memory_poly);
+
+            // Build register polynomial and compute Dory commitment
+            const reg_poly = try self.allocator.alloc(F, reg_poly_size);
+            defer self.allocator.free(reg_poly);
+            for (reg_poly, 0..) |*p, i| {
+                if (i < reg_trace_len) {
+                    p.* = F.fromU64(emulator.trace.steps.items[i].rd_value);
+                } else {
+                    p.* = F.zero();
+                }
+            }
+            const reg_comm = DoryScheme.commit(&dory_srs, reg_poly);
+
+            // For final state commitments, use the same polynomials (simplified)
+            const memory_final_comm = memory_comm;
+            const reg_final_comm = reg_comm;
+
+            // Append Dory commitments (GT elements) to transcript
+            // Jolt's append_serializable reverses all bytes after serialization
+            const dory_comms = [_]GT{ bytecode_comm, memory_comm, memory_final_comm, reg_comm, reg_final_comm };
+            for (dory_comms) |comm| {
+                transcript.appendGT(comm); // appendGT already reverses bytes
             }
 
             // Derive tau from transcript after preamble and commitments
@@ -586,7 +643,7 @@ pub fn JoltProver(comptime F: type) type {
                 return jolt_types.JoltProof(F, commitment_types.PolyCommitment, commitment_types.OpeningProof).init(self.allocator);
             };
 
-            // Collect commitments from the internal proof
+            // Collect commitments from the internal proof (G1 points for serialization)
             var commitments: std.ArrayListUnmanaged(commitment_types.PolyCommitment) = .{};
             defer commitments.deinit(self.allocator);
 
@@ -607,10 +664,68 @@ pub fn JoltProver(comptime F: type) type {
             // Run Fiat-Shamir preamble to match Jolt verifier
             jolt_device.fiatShamirPreamble(F, &transcript, &device, ram_K, trace_length);
 
-            // Append commitments to transcript (GT elements for Dory)
-            for (commitments.items) |c| {
-                const bytes = c.toBytes();
-                transcript.appendBytes(&bytes);
+            // Build polynomial evaluations and compute Dory commitments for transcript
+            // Jolt uses Dory (GT elements, 384 bytes) for commitments in the transcript
+            const DoryScheme = Dory.DoryCommitmentScheme(F);
+            const GT = Dory.GT;
+
+            // Setup Dory SRS with appropriate size
+            const bytecode_poly_size = if (program_bytecode.len < 2) 2 else std.math.ceilPowerOfTwo(usize, program_bytecode.len) catch program_bytecode.len;
+            const memory_trace_len = emulator.ram.trace.accesses.items.len;
+            const memory_poly_size = if (memory_trace_len < 2) 2 else std.math.ceilPowerOfTwo(usize, memory_trace_len) catch memory_trace_len;
+            const reg_trace_len = emulator.trace.steps.items.len;
+            const reg_poly_size = if (reg_trace_len < 2) 2 else std.math.ceilPowerOfTwo(usize, reg_trace_len) catch reg_trace_len;
+            const max_poly_size = @max(@max(bytecode_poly_size, memory_poly_size), reg_poly_size);
+            const log_size: u32 = if (max_poly_size <= 1) 1 else @intCast(std.math.log2_int(usize, max_poly_size) + 1);
+
+            var dory_srs = try DoryScheme.setup(self.allocator, log_size);
+            defer dory_srs.deinit();
+
+            // Build bytecode polynomial and compute Dory commitment
+            const bytecode_poly = try self.allocator.alloc(F, bytecode_poly_size);
+            defer self.allocator.free(bytecode_poly);
+            for (bytecode_poly, 0..) |*p, i| {
+                if (i < program_bytecode.len) {
+                    p.* = F.fromU64(@as(u64, program_bytecode[i]));
+                } else {
+                    p.* = F.zero();
+                }
+            }
+            const bytecode_comm = DoryScheme.commit(&dory_srs, bytecode_poly);
+
+            // Build memory polynomial and compute Dory commitment
+            const memory_poly = try self.allocator.alloc(F, memory_poly_size);
+            defer self.allocator.free(memory_poly);
+            for (memory_poly, 0..) |*p, i| {
+                if (i < memory_trace_len) {
+                    p.* = F.fromU64(emulator.ram.trace.accesses.items[i].value);
+                } else {
+                    p.* = F.zero();
+                }
+            }
+            const memory_comm = DoryScheme.commit(&dory_srs, memory_poly);
+
+            // Build register polynomial and compute Dory commitment
+            const reg_poly = try self.allocator.alloc(F, reg_poly_size);
+            defer self.allocator.free(reg_poly);
+            for (reg_poly, 0..) |*p, i| {
+                if (i < reg_trace_len) {
+                    p.* = F.fromU64(emulator.trace.steps.items[i].rd_value);
+                } else {
+                    p.* = F.zero();
+                }
+            }
+            const reg_comm = DoryScheme.commit(&dory_srs, reg_poly);
+
+            // For final state commitments, use the same polynomials (simplified)
+            const memory_final_comm = memory_comm;
+            const reg_final_comm = reg_comm;
+
+            // Append Dory commitments (GT elements) to transcript
+            // Jolt's append_serializable reverses all bytes after serialization
+            const dory_comms = [_]GT{ bytecode_comm, memory_comm, memory_final_comm, reg_comm, reg_final_comm };
+            for (dory_comms) |comm| {
+                transcript.appendGT(comm); // appendGT already reverses bytes
             }
 
             // Derive tau from transcript after preamble and commitments

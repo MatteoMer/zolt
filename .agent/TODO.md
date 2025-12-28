@@ -129,16 +129,16 @@ zolt bench             # Run benchmarks
 | signed.elf | Signed arithmetic | -39 |
 | primes.elf | Count primes < 100 | 25 |
 
-## Performance Summary
-- Field addition: 4.0 ns/op
-- Field multiplication: 54.4 ns/op
-- Field inversion: 13.8 us/op
-- MSM (256 points): 0.49 ms/op
+## Performance Summary (as of Iteration 48)
+- Field addition: 1.4 ns/op
+- Field multiplication: 21.4 ns/op
+- Field inversion: 7.5 us/op
+- MSM (256 points): 0.51 ms/op
 - HyperKZG commit (1024): 1.5 ms/op
-- Emulator (sum 1-100): 72 us/op
-- Prover (2 steps): ~97 ms/op
-- Prover (14 steps): ~98 ms/op
-- Verifier (2 steps): ~593 us/op
-- Verifier (14 steps): ~753 us/op
+- Emulator (sum 1-100): 76 us/op
+- Prover (2 steps): ~98 ms/op
+- Prover (14 steps): ~100 ms/op
+- Verifier (2 steps): ~608 us/op (163x faster than prover!)
+- Verifier (14 steps): ~784 us/op (127x faster than prover!)
 - Proof size (2 steps): 6.38 KB
 - Proof size (14 steps): 7.56 KB

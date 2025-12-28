@@ -22,6 +22,9 @@ All notable changes to this project will be documented in this file.
 - `bitwise.c` - AND, OR, XOR, and shift operations demo
 - `array.c` - Array store/load operations with sum and max
 - `gcd.c` - GCD using Euclidean algorithm (DIV, REM)
+- `collatz.c` - Collatz sequence length for n=27 (111 steps)
+- `signed.c` - Signed arithmetic operations demo
+- `primes.c` - Count primes < 100 using trial division (25)
 - Updated Makefile with new targets and help message
 
 #### Bug Fixes

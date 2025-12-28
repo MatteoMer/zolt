@@ -4,29 +4,26 @@
 
 **Project Status: DEBUGGING STAGE 1 SUMCHECK - CLAIM MISMATCH**
 
-### Latest Progress (2024-12-28, Iteration 25+ - Agent)
+### Latest Progress (2024-12-28, Agent Iteration)
 
-**✅ Implemented: LagrangeHelper with shift_coeffs_i32**
-- Added `generalizedBinomial` for computing binomial coefficients with negative t
-- Added `shiftCoeffsI32` matching Jolt's `LagrangeHelper::shift_coeffs_i32`
-- Precomputed `COEFFS_PER_J[9][10]` Lagrange weights for extended domain evaluation
-- Added `TARGET_SHIFTS` and `UNISKIP_TARGETS` constants
-- All 618 tests pass
+**✅ Implemented Core Fixes:**
+1. Added `LagrangeHelper.shiftCoeffsI32` - matches Jolt's Lagrange coefficient computation
+2. Precomputed `COEFFS_PER_J[9][10]` for extended domain evaluation
+3. Fixed `SpartanOuterProver.computeUniskipFirstRoundPoly` to use COEFFS_PER_J:
+   - Evaluates Az(y_j) and Bz(y_j) separately at extended points
+   - Multiplies them together for the Az*Bz product
+   - This gives non-zero results even when base Az*Bz products are zero
 
-**Next Step: Add Az/Bz Evaluation Structures**
+**Current Blocker:**
+- UniSkip polynomial is STILL all zeros in the proof file
+- Debug prints in release mode are optimized out (not showing)
+- Need to verify if cycle_witnesses are actually populated with constraint values
+- Possible issue: The Az/Bz arrays might not contain the actual constraint evaluations
 
-Jolt's `extended_azbz_product_first_group(j)` works by:
-1. Getting Az/Bz values from the trace (booleans for Az, small integers for Bz)
-2. Using `COEFFS_PER_J[j]` to weight each constraint's contribution
-3. Computing `Az(y_j) * Bz(y_j)` for extended domain point j
-
-Need to add:
-- `AzFirstGroup` struct with 10 boolean fields
-- `BzFirstGroup` struct with 10 integer/S64 fields
-- `AzSecondGroup` struct with 9 boolean fields
-- `BzSecondGroup` struct with 9 integer/S160 fields
-- `R1CSCycleInputs` struct to populate from trace
-- `extended_azbz_product_*_group(j)` functions
+**Next Steps:**
+1. Add a unit test that directly calls `computeUniskipFirstRoundPoly` with known values
+2. Verify the test produces non-zero extended evaluations
+3. Trace why the production path produces zeros
 
 ---
 

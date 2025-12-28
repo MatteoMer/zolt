@@ -463,4 +463,14 @@ test "spartan outer uniskip first round poly" {
 
     // Should have 28 coefficients (degree 27)
     try std.testing.expectEqual(@as(usize, 28), poly.coeffs.len);
+
+    // Check if any coefficients are non-zero (they should be for non-trivial input)
+    var has_nonzero = false;
+    for (poly.coeffs) |c| {
+        if (!c.eql(F.zero())) {
+            has_nonzero = true;
+            break;
+        }
+    }
+    try std.testing.expect(has_nonzero);
 }

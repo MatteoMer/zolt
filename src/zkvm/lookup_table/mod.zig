@@ -1002,6 +1002,212 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                 return table;
             }
         };
+
+        // ========================================================================
+        // Division/Remainder Validation Tables
+        // ========================================================================
+
+        /// ValidDiv0: Validates division by zero behavior
+        /// Returns 1 if (divisor == 0 && quotient == MAX_VALUE) or (divisor != 0)
+        /// This enforces RISC-V's division by zero semantics: x / 0 = MAX_VALUE
+        pub const ValidDiv0 = struct {
+            /// Materialize the entry at the given index
+            /// Index format: interleaved(divisor, quotient)
+            pub fn materializeEntry(index: u128) u64 {
+                const operands = uninterleaveBits(index);
+                const divisor = operands.x;
+                const quotient = operands.y;
+
+                if (divisor == 0) {
+                    // If divisor is zero, quotient must be MAX_VALUE
+                    const max_value: u64 = if (XLEN == 64)
+                        @as(u64, 0xFFFFFFFFFFFFFFFF)
+                    else if (XLEN == 32)
+                        @as(u64, 0xFFFFFFFF)
+                    else if (XLEN == 8)
+                        @as(u64, 0xFF)
+                    else
+                        (@as(u64, 1) << XLEN) - 1;
+
+                    return if (quotient == max_value) 1 else 0;
+                } else {
+                    // If divisor is non-zero, any quotient is potentially valid
+                    // (actual validity depends on dividend, checked elsewhere)
+                    return 1;
+                }
+            }
+
+            /// Evaluate the MLE at point r
+            /// MLE: 1 - divisor_is_zero + is_valid_div_by_zero
+            /// where divisor_is_zero = prod(1 - divisor_bit_i)
+            ///       is_valid_div_by_zero = prod((1 - divisor_bit_i) * quotient_bit_i)
+            pub fn evaluateMLE(r: []const F) F {
+                std.debug.assert(r.len >= 2 * XLEN);
+
+                var divisor_is_zero = F.one();
+                var is_valid_div_by_zero = F.one();
+
+                // r is interleaved: divisor bits at odd positions, quotient at even
+                for (0..XLEN) |i| {
+                    const x_i = r[2 * i]; // divisor bit
+                    const y_i = r[2 * i + 1]; // quotient bit
+                    divisor_is_zero = divisor_is_zero.mul(F.one().sub(x_i));
+                    is_valid_div_by_zero = is_valid_div_by_zero.mul(F.one().sub(x_i).mul(y_i));
+                }
+
+                // Return: 1 - divisor_is_zero + is_valid_div_by_zero
+                return F.one().sub(divisor_is_zero).add(is_valid_div_by_zero);
+            }
+        };
+
+        /// ValidUnsignedRemainder: Validates that remainder < divisor (or divisor == 0)
+        /// Returns 1 if divisor == 0 OR remainder < divisor
+        pub const ValidUnsignedRemainder = struct {
+            /// Materialize the entry at the given index
+            /// Index format: interleaved(remainder, divisor)
+            pub fn materializeEntry(index: u128) u64 {
+                const operands = uninterleaveBits(index);
+                const remainder = operands.x;
+                const divisor = operands.y;
+
+                // Valid if divisor == 0 (any remainder allowed) or remainder < divisor
+                return if (divisor == 0 or remainder < divisor) 1 else 0;
+            }
+
+            /// Evaluate the MLE at point r
+            /// MLE: divisor_is_zero + lt (where lt uses lexicographic comparison)
+            pub fn evaluateMLE(r: []const F) F {
+                std.debug.assert(r.len >= 2 * XLEN);
+
+                var divisor_is_zero = F.one();
+                var lt = F.zero();
+                var eq = F.one();
+
+                for (0..XLEN) |i| {
+                    const x_i = r[2 * i]; // remainder bit
+                    const y_i = r[2 * i + 1]; // divisor bit
+
+                    // divisor_is_zero = prod(1 - y_i)
+                    divisor_is_zero = divisor_is_zero.mul(F.one().sub(y_i));
+
+                    // lt accumulates when we first find remainder_bit < divisor_bit
+                    // while previous bits were equal
+                    lt = lt.add(F.one().sub(x_i).mul(y_i).mul(eq));
+
+                    // eq = prod(x_i == y_i) = prod(x_i * y_i + (1-x_i)*(1-y_i))
+                    eq = eq.mul(x_i.mul(y_i).add(F.one().sub(x_i).mul(F.one().sub(y_i))));
+                }
+
+                return lt.add(divisor_is_zero);
+            }
+        };
+
+        /// ValidSignedRemainder: Validates signed remainder semantics
+        /// Returns 1 if: divisor == 0 OR remainder == 0 OR
+        ///              (|remainder| < |divisor| AND sign(remainder) == sign(divisor))
+        pub const ValidSignedRemainder = struct {
+            /// Materialize the entry at the given index
+            /// Index format: interleaved(remainder, divisor)
+            pub fn materializeEntry(index: u128) u64 {
+                const operands = uninterleaveBits(index);
+                const x = operands.x; // remainder
+                const y = operands.y; // divisor
+
+                if (XLEN == 64) {
+                    const remainder: i64 = @bitCast(x);
+                    const divisor: i64 = @bitCast(y);
+
+                    if (remainder == 0 or divisor == 0) {
+                        return 1;
+                    }
+
+                    // Check: |remainder| < |divisor| and same sign
+                    const rem_abs = if (remainder < 0) @as(u64, @bitCast(-remainder)) else @as(u64, @bitCast(remainder));
+                    const div_abs = if (divisor < 0) @as(u64, @bitCast(-divisor)) else @as(u64, @bitCast(divisor));
+                    const rem_sign = remainder >> 63;
+                    const div_sign = divisor >> 63;
+
+                    return if (rem_abs < div_abs and rem_sign == div_sign) 1 else 0;
+                } else if (XLEN == 32) {
+                    const remainder: i32 = @truncate(@as(i64, @bitCast(x)));
+                    const divisor: i32 = @truncate(@as(i64, @bitCast(y)));
+
+                    if (remainder == 0 or divisor == 0) {
+                        return 1;
+                    }
+
+                    const rem_abs = if (remainder < 0) @as(u32, @bitCast(-remainder)) else @as(u32, @bitCast(remainder));
+                    const div_abs = if (divisor < 0) @as(u32, @bitCast(-divisor)) else @as(u32, @bitCast(divisor));
+                    const rem_sign = remainder >> 31;
+                    const div_sign = divisor >> 31;
+
+                    return if (rem_abs < div_abs and rem_sign == div_sign) 1 else 0;
+                } else if (XLEN == 8) {
+                    const remainder: i8 = @truncate(@as(i64, @bitCast(x)));
+                    const divisor: i8 = @truncate(@as(i64, @bitCast(y)));
+
+                    if (remainder == 0 or divisor == 0) {
+                        return 1;
+                    }
+
+                    const rem_abs = if (remainder < 0) @as(u8, @bitCast(-remainder)) else @as(u8, @bitCast(remainder));
+                    const div_abs = if (divisor < 0) @as(u8, @bitCast(-divisor)) else @as(u8, @bitCast(divisor));
+                    const rem_sign = remainder >> 7;
+                    const div_sign = divisor >> 7;
+
+                    return if (rem_abs < div_abs and rem_sign == div_sign) 1 else 0;
+                } else {
+                    // Generic fallback
+                    return 0;
+                }
+            }
+
+            /// Evaluate the MLE at point r
+            pub fn evaluateMLE(r: []const F) F {
+                std.debug.assert(r.len >= 2 * XLEN);
+
+                const x_sign = r[0]; // remainder sign bit
+                const y_sign = r[1]; // divisor sign bit
+
+                var remainder_is_zero = F.one().sub(r[0]);
+                var divisor_is_zero = F.one().sub(r[1]);
+                var positive_remainder_equals_divisor = F.one().sub(x_sign).mul(F.one().sub(y_sign));
+                var positive_remainder_less_than_divisor = F.one().sub(x_sign).mul(F.one().sub(y_sign));
+                var negative_divisor_equals_remainder = x_sign.mul(y_sign);
+                var negative_divisor_greater_than_remainder = x_sign.mul(y_sign);
+
+                for (1..XLEN) |i| {
+                    const x_i = r[2 * i];
+                    const y_i = r[2 * i + 1];
+
+                    if (i == 1) {
+                        positive_remainder_less_than_divisor = positive_remainder_less_than_divisor.mul(F.one().sub(x_i).mul(y_i));
+                        negative_divisor_greater_than_remainder = negative_divisor_greater_than_remainder.mul(x_i.mul(F.one().sub(y_i)));
+                    } else {
+                        positive_remainder_less_than_divisor = positive_remainder_less_than_divisor.add(
+                            positive_remainder_equals_divisor.mul(F.one().sub(x_i).mul(y_i))
+                        );
+                        negative_divisor_greater_than_remainder = negative_divisor_greater_than_remainder.add(
+                            negative_divisor_equals_remainder.mul(x_i.mul(F.one().sub(y_i)))
+                        );
+                    }
+
+                    positive_remainder_equals_divisor = positive_remainder_equals_divisor.mul(
+                        x_i.mul(y_i).add(F.one().sub(x_i).mul(F.one().sub(y_i)))
+                    );
+                    negative_divisor_equals_remainder = negative_divisor_equals_remainder.mul(
+                        x_i.mul(y_i).add(F.one().sub(x_i).mul(F.one().sub(y_i)))
+                    );
+                    remainder_is_zero = remainder_is_zero.mul(F.one().sub(x_i));
+                    divisor_is_zero = divisor_is_zero.mul(F.one().sub(y_i));
+                }
+
+                return positive_remainder_less_than_divisor
+                    .add(negative_divisor_greater_than_remainder)
+                    .add(y_sign.mul(remainder_is_zero))
+                    .add(divisor_is_zero);
+            }
+        };
     };
 }
 
@@ -1493,4 +1699,106 @@ test "SignExtend32 materialize" {
     // Negative: 0x80000000 (-2^31) becomes sign extended
     const expected_neg: u64 = @bitCast(@as(i64, -2147483648));
     try std.testing.expectEqual(expected_neg, Table.SignExtend32.materializeEntry(0x80000000));
+}
+
+test "ValidDiv0 materialize" {
+    const Table = LookupTable(BN254Scalar, 8);
+
+    // divisor != 0: always valid
+    const idx1 = interleaveBits(5, 2); // divisor=5, quotient=2
+    try std.testing.expectEqual(@as(u64, 1), Table.ValidDiv0.materializeEntry(idx1));
+
+    // divisor = 0, quotient = MAX (255 for 8-bit): valid
+    const idx2 = interleaveBits(0, 255); // divisor=0, quotient=255
+    try std.testing.expectEqual(@as(u64, 1), Table.ValidDiv0.materializeEntry(idx2));
+
+    // divisor = 0, quotient != MAX: invalid
+    const idx3 = interleaveBits(0, 100); // divisor=0, quotient=100
+    try std.testing.expectEqual(@as(u64, 0), Table.ValidDiv0.materializeEntry(idx3));
+}
+
+test "ValidDiv0 MLE on boolean hypercube" {
+    const Table = LookupTable(BN254Scalar, 2);
+
+    // Test all combinations for 2-bit inputs (16 total)
+    var i: u8 = 0;
+    while (i < 16) : (i += 1) {
+        var r: [4]BN254Scalar = undefined;
+        inline for (0..4) |j| {
+            const bit_pos = 4 - 1 - j;
+            r[j] = if ((i >> bit_pos) & 1 == 1) BN254Scalar.one() else BN254Scalar.zero();
+        }
+
+        const mle_result = Table.ValidDiv0.evaluateMLE(&r);
+        const expected = Table.ValidDiv0.materializeEntry(i);
+        const expected_field = BN254Scalar.fromU64(expected);
+
+        try std.testing.expect(mle_result.eql(expected_field));
+    }
+}
+
+test "ValidUnsignedRemainder materialize" {
+    const Table = LookupTable(BN254Scalar, 8);
+
+    // divisor = 0: always valid
+    const idx1 = interleaveBits(42, 0); // remainder=42, divisor=0
+    try std.testing.expectEqual(@as(u64, 1), Table.ValidUnsignedRemainder.materializeEntry(idx1));
+
+    // remainder < divisor: valid
+    const idx2 = interleaveBits(3, 10); // remainder=3, divisor=10
+    try std.testing.expectEqual(@as(u64, 1), Table.ValidUnsignedRemainder.materializeEntry(idx2));
+
+    // remainder >= divisor: invalid
+    const idx3 = interleaveBits(10, 5); // remainder=10, divisor=5
+    try std.testing.expectEqual(@as(u64, 0), Table.ValidUnsignedRemainder.materializeEntry(idx3));
+
+    // remainder == divisor: invalid
+    const idx4 = interleaveBits(7, 7); // remainder=7, divisor=7
+    try std.testing.expectEqual(@as(u64, 0), Table.ValidUnsignedRemainder.materializeEntry(idx4));
+}
+
+test "ValidUnsignedRemainder MLE on boolean hypercube" {
+    const Table = LookupTable(BN254Scalar, 2);
+
+    var i: u8 = 0;
+    while (i < 16) : (i += 1) {
+        var r: [4]BN254Scalar = undefined;
+        inline for (0..4) |j| {
+            const bit_pos = 4 - 1 - j;
+            r[j] = if ((i >> bit_pos) & 1 == 1) BN254Scalar.one() else BN254Scalar.zero();
+        }
+
+        const mle_result = Table.ValidUnsignedRemainder.evaluateMLE(&r);
+        const expected = Table.ValidUnsignedRemainder.materializeEntry(i);
+        const expected_field = BN254Scalar.fromU64(expected);
+
+        try std.testing.expect(mle_result.eql(expected_field));
+    }
+}
+
+test "ValidSignedRemainder materialize" {
+    const Table = LookupTable(BN254Scalar, 8);
+
+    // divisor = 0: always valid
+    const idx1 = interleaveBits(42, 0);
+    try std.testing.expectEqual(@as(u64, 1), Table.ValidSignedRemainder.materializeEntry(idx1));
+
+    // remainder = 0: always valid
+    const idx2 = interleaveBits(0, 10);
+    try std.testing.expectEqual(@as(u64, 1), Table.ValidSignedRemainder.materializeEntry(idx2));
+
+    // Both positive, |remainder| < |divisor|: valid
+    const idx3 = interleaveBits(3, 10);
+    try std.testing.expectEqual(@as(u64, 1), Table.ValidSignedRemainder.materializeEntry(idx3));
+
+    // Both negative, |remainder| < |divisor|: valid
+    // -3 (0xFD) and -10 (0xF6) as 8-bit signed
+    const neg3: u64 = @as(u8, @bitCast(@as(i8, -3)));
+    const neg10: u64 = @as(u8, @bitCast(@as(i8, -10)));
+    const idx4 = interleaveBits(neg3, neg10);
+    try std.testing.expectEqual(@as(u64, 1), Table.ValidSignedRemainder.materializeEntry(idx4));
+
+    // Different signs: invalid
+    const idx5 = interleaveBits(3, neg10);
+    try std.testing.expectEqual(@as(u64, 0), Table.ValidSignedRemainder.materializeEntry(idx5));
 }

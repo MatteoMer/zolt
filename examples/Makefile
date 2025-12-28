@@ -17,7 +17,7 @@ CFLAGS = -march=rv32im -mabi=ilp32 -nostdlib -O2
 LDFLAGS = -Wl,-Ttext=0x80000000
 
 # All targets
-TARGETS = fibonacci.elf sum.elf factorial.elf bitwise.elf array.elf gcd.elf
+TARGETS = fibonacci.elf sum.elf factorial.elf bitwise.elf array.elf gcd.elf collatz.elf signed.elf primes.elf
 
 .PHONY: all clean help
 
@@ -43,6 +43,15 @@ array.elf: array.c
 gcd.elf: gcd.c
 	$(RISCV_CC) $(CFLAGS) $(LDFLAGS) -o $@ $<
 
+collatz.elf: collatz.c
+	$(RISCV_CC) $(CFLAGS) $(LDFLAGS) -o $@ $<
+
+signed.elf: signed.c
+	$(RISCV_CC) $(CFLAGS) $(LDFLAGS) -o $@ $<
+
+primes.elf: primes.c
+	$(RISCV_CC) $(CFLAGS) $(LDFLAGS) -o $@ $<
+
 clean:
 	rm -f $(TARGETS)
 
@@ -62,6 +71,9 @@ help:
 	@echo "  bitwise.elf   - Bitwise AND, OR, XOR, shift ops"
 	@echo "  array.elf     - Array load/store operations"
 	@echo "  gcd.elf       - GCD using M extension (div, rem)"
+	@echo "  collatz.elf   - Collatz sequence length for n=27 = 111"
+	@echo "  signed.elf    - Signed arithmetic operations"
+	@echo "  primes.elf    - Count primes < 100 = 25"
 	@echo ""
 	@echo "Targets:"
 	@echo "  make all       - Build all examples"

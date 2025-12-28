@@ -103,6 +103,9 @@ The `examples/` directory includes several C programs that can be compiled with 
 | `bitwise.elf` | AND, OR, XOR, shifts | - |
 | `array.elf` | Array load/store ops | 1465 |
 | `gcd.elf` | GCD using div/rem | 63 |
+| `collatz.elf` | Collatz sequence for n=27 | 111 steps |
+| `signed.elf` | Signed arithmetic ops | -39 |
+| `primes.elf` | Count primes < 100 | 25 |
 
 ### Building Examples
 

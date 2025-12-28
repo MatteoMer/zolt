@@ -14,77 +14,58 @@
 10. **MontU128Challenge Compatibility** - Challenge scalars now match Jolt's format
 11. **Symmetric Lagrange Domain** - Fixed to use {-4,...,5} matching Jolt
 12. **Streaming Round Logic** - Separate handling for constraint group selection
+13. **MultiquadraticPolynomial** - Already implemented in src/poly/multiquadratic.zig
 
 ---
 
 ## ROOT CAUSE IDENTIFIED ❌
 
-### The Problem: Multiquadratic Polynomial Representation
+### Problem: Az*Bz Product Computation
 
-Jolt's streaming outer sumcheck uses a **MultiquadraticPolynomial** representation:
-- Stores evaluations at `{0, 1, INFINITY}` for each variable
-- Uses `project_to_first_variable(E_active, 0)` for t'(0)
-- Uses `project_to_first_variable(E_active, INFINITY)` for t'(∞)
+The streaming outer sumcheck needs to compute `t'(0)` and `t'(∞)` where:
+- `t'(0)` = sum over boolean points with current var = 0
+- `t'(∞)` = the **quadratic coefficient** (not linear slope!)
 
-Zolt's current implementation:
-- Sums over cycles with binary 0/1 partitioning
-- Computes `t_zero` (first half) and `t_one` (second half)
-- `t_infinity = t_one - t_zero` (LINEAR slope, NOT quadratic coefficient!)
+Jolt computes this correctly by:
+1. Computing `grid_a` = Az evaluations separately
+2. Computing `grid_b` = Bz evaluations separately
+3. Expanding each to multiquadratic (`expand_linear_grid_to_multiquadratic`)
+4. Multiplying pointwise: `buff_a[i] * buff_b[i]`
+5. Summing with eq weights to get `t'(0)` and `t'(∞)`
 
-### Key Insight
+Zolt's current approach:
+- Computes `az_bz = Az * Bz` directly as a single product
+- This loses the structure needed for multiquadratic expansion
+- Results in `t_infinity = t_one - t_zero` (wrong - this is linear slope!)
 
-The Gruen method's `gruen_poly_deg_3(q_constant, q_quadratic_coeff, ...)` expects:
-- `q_constant = q(0)` - the constant term
-- `q_quadratic_coeff = e` - the coefficient of X² in q(X) = c + dX + eX²
+### Required Changes
 
-But I was passing:
-- `q_constant = t_zero` ✓ (correct)
-- `q_quadratic_coeff = t_one - t_zero` ✗ (this is the linear slope, not quadratic coeff!)
+To fix `StreamingOuterProver::computeRemainingRoundPoly()`:
 
-### What Jolt Does
+```zig
+// Current (WRONG):
+const az_bz = self.computeCycleAzBzProduct(...);
+t_zero += eq_val * az_bz;
+// ...
+t_infinity = t_one - t_zero;  // LINEAR slope, not quadratic coeff!
 
-Jolt uses a `MultiquadraticPolynomial` that:
-1. Expands each variable from binary {0,1} to ternary {0,1,∞}
-2. The ∞ (INFINITY=2) index stores the quadratic coefficient
-3. `project_to_first_variable` sums over the prefix eq table scaled by the polynomial evaluations
-
-This is implemented in:
-- `jolt-core/src/poly/multiquadratic_poly.rs`
-- Used by `OuterSharedState::compute_evaluation_grid_from_trace()`
-
-### Required Fix
-
-To make Zolt produce compatible proofs, I need to:
-
-1. **Implement MultiquadraticPolynomial in Zolt**
-   - Store evaluations at {0, 1, ∞} for each variable
-   - Implement `expand_linear_grid_to_multiquadratic()`
-   - Implement `project_to_first_variable()`
-
-2. **Update StreamingOuterProver**
-   - Use multiquadratic representation for Az*Bz products
-   - Compute proper t'(∞) as quadratic coefficient extraction
-
-### Complexity
-
-This is a significant algorithmic change. The multiquadratic expansion involves:
-- Converting binary evaluations to ternary
-- Polynomial interpolation at {0, 1, ∞}
-- Efficient folding during binding
-
----
-
-## Current Values (for debugging)
-
-From latest test run:
+// Should be:
+// 1. Compute grid_az and grid_bz separately
+// 2. Expand each to multiquadratic
+// 3. Multiply pointwise
+// 4. Project to get (t_zero, t_infinity)
 ```
-output_claim (from sumcheck):    11612374852220731197013232400393975162132149637091984341606359412226379830051
-expected_output_claim (from R1CS): 18745955558119577451624936825732812500259023178565119442902704003954906526404
 
-expected = tau_high_bound_r0 * tau_bound_r_tail * inner_sum_prod
-         = 5082598541187396806031046967159366823594641154848460582581091712291471884094
-         * 16153740132551411969570181916217515401545621836647993763662759575768152882318
-         * 8911191101246844644469009006381839599717758671761069483099516096600528609494
+This is a significant refactoring because:
+- Need to store Az and Bz grids separately (2 * 3^window_size elements)
+- Need to implement the window-based streaming approach
+- The `extrapolate_from_binary_grid_to_tertiary_grid` logic is complex
+
+### Current Values
+
+```
+output_claim (from sumcheck):     11612374852220731197013232400393975162132149637091984341606359412226379830051
+expected_output_claim (from R1CS): 18745955558119577451624936825732812500259023178565119442902704003954906526404
 ```
 
 ---
@@ -94,33 +75,34 @@ expected = tau_high_bound_r0 * tau_bound_r_tail * inner_sum_prod
 - [x] UniSkip verification passes
 - [x] Stage 1 sumcheck equations pass (p(0)+p(1)=claim)
 - [x] R1CS input evaluations computed
-- [ ] **MultiquadraticPolynomial implementation** ← BLOCKING
+- [x] MultiquadraticPolynomial implemented
+- [ ] **Az/Bz grid separation** ← BLOCKING
+- [ ] **Multiquadratic product computation** ← BLOCKING
 - [ ] Stage 1 expected_output_claim matches
 - [ ] Stages 2-7 verify
 - [ ] Full proof verification passes
 
 ---
 
-## Test Commands
+## Files to Modify
 
-```bash
-# Zolt tests
-zig build test --summary all
+1. `src/zkvm/spartan/streaming_outer.zig`
+   - Add `computeCycleAzGrid()` and `computeCycleBzGrid()`
+   - Use `MultiquadraticPolynomial` for expansion
+   - Compute product pointwise
+   - Use `projectToFirstVariable()` for correct t'(∞)
 
-# Generate proof
-./zig-out/bin/zolt prove examples/sum.elf --jolt-format -o /tmp/zolt_proof_dory.bin
-
-# Jolt verification
-cd /Users/matteo/projects/jolt
-cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture
-cargo test --package jolt-core test_debug_stage1_verification -- --ignored --nocapture
-```
+2. `src/poly/multiquadratic.zig`
+   - May need additional helper functions
 
 ---
 
-## Next Steps
+## Test Commands
 
-1. Study Jolt's `MultiquadraticPolynomial` implementation
-2. Port `expand_linear_grid_to_multiquadratic()` to Zig
-3. Update `StreamingOuterProver::computeRemainingRoundPoly()` to use multiquadratic
-4. Re-test verification
+```bash
+zig build test --summary all
+./zig-out/bin/zolt prove examples/sum.elf --jolt-format -o /tmp/zolt_proof_dory.bin
+cd /Users/matteo/projects/jolt
+cargo test --package jolt-core test_debug_stage1_verification -- --ignored --nocapture
+cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture
+```

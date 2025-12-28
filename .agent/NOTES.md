@@ -636,3 +636,86 @@ For full verification, we would need to:
 2. Compute actual Az(x,y) · Bz(x,y) evaluations
 3. Generate proper univariate skip polynomials
 4. Ensure sumcheck round polynomials satisfy p(0) + p(1) = claim
+
+---
+
+## Stage 1 Sumcheck Verification Analysis (Iteration 14)
+
+### The Verification Flow
+
+1. **Univariate Skip First Round** (`verify_stage1_uni_skip`)
+   - Checks `check_sum_evals<N, 28>(claim=0)`: sum of poly over base window = 0
+   - With all-zero coefficients, this trivially passes ✓
+   - Returns challenge `r0` from transcript
+   - Caches `UnivariateSkip` claim = `poly.evaluate(r0)` = 0 for zero poly
+
+2. **Remaining Sumcheck** (`OuterRemainingSumcheckVerifier`)
+   - Input claim = `UnivariateSkip` claim = 0
+   - Verifies each round polynomial: `p(0) + p(1) = current_claim`
+   - With all-zero coefficients and claim 0, all rounds pass ✓
+   - Returns `output_claim` = 0
+
+3. **Final Claim Check** (where it FAILS)
+   - Verifier computes `expected_output_claim`:
+     ```rust
+     let r1cs_input_evals = ALL_R1CS_INPUTS.map(|input| {
+         accumulator.get_virtual_polynomial_opening(input, SumcheckId::SpartanOuter).1
+     });
+     let inner_sum_prod = key.evaluate_inner_sum_product_at_point(rx_constr, r1cs_input_evals);
+     tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod
+     ```
+   - This is NON-ZERO even with zero input claims because:
+     - The R1CS matrices have constant terms
+     - The z vector includes a trailing `1` at position 36
+     - Constants multiply against z[36] = 1
+
+### Why Zero Proofs Fail
+
+The `expected_output_claim` formula includes:
+```
+z = [r1cs_input_evals..., 1]   // 37 elements
+Az = Σ_i A[rx, i] * z[i]       // Includes A[rx, 36] * z[36] = A[rx, 36] * 1
+Bz = Σ_i B[rx, i] * z[i]       // Includes B[rx, 36] * z[36] = B[rx, 36] * 1
+inner_sum_prod = Az * Bz       // NON-ZERO from constant terms
+```
+
+The R1CS constraints have constants like `1`, `4`, `-1`, `-2`, etc. that contribute
+to Az and Bz even when all input claims are zero.
+
+### Solution Requirements
+
+To generate valid proofs, we need:
+
+1. **Full Sumcheck Prover**: Generate round polynomials from actual polynomial evaluations
+   - Materialize Az(x) and Bz(x) over the cycle hypercube
+   - Compute `Σ_x eq(τ, x) * Az(x) * Bz(x)` using streaming sumcheck
+
+2. **Correct R1CS Witness Computation**: Evaluate R1CS inputs at the challenge point
+   - `r1cs_input_evals[i] = MLE_i(r_cycle)` where MLE_i is the multilinear extension
+
+3. **Consistent Transcript**: Challenges derived from actual polynomial commitments
+
+### Implementation Complexity
+
+The Jolt prover uses complex machinery:
+- `GruenSplitEqPolynomial` for efficient eq polynomial binding
+- `MultiquadraticPolynomial` for tertiary grid expansion {0, 1, ∞}
+- Streaming sumcheck with windowed evaluation
+- Parallel computation with rayon
+
+A faithful port would require ~2000 lines of Zig code for the Spartan outer prover alone.
+
+### Alternative Approaches
+
+1. **Native Sumcheck Only**: Use Zolt's existing sumcheck prover for a simpler VM
+2. **Transcript Alignment Only**: Accept that verification won't pass, focus on format compatibility
+3. **Partial Implementation**: Implement univariate skip but use placeholder for remaining rounds
+
+### Current Status
+
+- ✅ Serialization: Byte-perfect format compatibility with Jolt
+- ✅ Transcript: Identical Fiat-Shamir challenges
+- ✅ Univariate Skip Structure: Correct degree-27/12 polynomials
+- ✅ Opening Claims: All 48 claims with proper ordering
+- ❌ Sumcheck Proofs: Zero proofs don't satisfy verification equation
+- ❌ Final Claim Check: `output_claim != expected_output_claim`

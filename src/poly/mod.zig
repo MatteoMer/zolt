@@ -264,7 +264,110 @@ pub fn UniPoly(comptime F: type) type {
             if (self.coeffs.len == 0) return 0;
             return self.coeffs.len - 1;
         }
+
+        /// Interpolate a degree-3 polynomial from evaluations at 0, 1, 2, 3
+        ///
+        /// Given p(0), p(1), p(2), p(3), returns coefficients [c0, c1, c2, c3]
+        /// where p(X) = c0 + c1*X + c2*X² + c3*X³
+        ///
+        /// Uses the explicit inverse of the Vandermonde matrix.
+        pub fn interpolateDegree3(evals: [4]F) [4]F {
+            const p0 = evals[0];
+            const p1 = evals[1];
+            const p2 = evals[2];
+            const p3 = evals[3];
+
+            // c0 = p(0)
+            const c0 = p0;
+
+            // For the other coefficients, we solve the Vandermonde system
+            // The inverse of the 4x4 Vandermonde matrix at points 0,1,2,3 gives:
+            //
+            // c1 = (-11*p0 + 18*p1 - 9*p2 + 2*p3) / 6
+            // c2 = (2*p0 - 5*p1 + 4*p2 - p3) / 2
+            // c3 = (-p0 + 3*p1 - 3*p2 + p3) / 6
+            //
+            // We compute these using field arithmetic
+
+            // Compute 1/6 and 1/2 as field inverses
+            const inv6 = F.fromU64(6).inverse().?;
+            const inv2 = F.fromU64(2).inverse().?;
+
+            // c1 = (-11*p0 + 18*p1 - 9*p2 + 2*p3) / 6
+            const c1_num = F.zero()
+                .sub(F.fromU64(11).mul(p0))
+                .add(F.fromU64(18).mul(p1))
+                .sub(F.fromU64(9).mul(p2))
+                .add(F.fromU64(2).mul(p3));
+            const c1 = c1_num.mul(inv6);
+
+            // c2 = (2*p0 - 5*p1 + 4*p2 - p3) / 2
+            const c2_num = F.fromU64(2).mul(p0)
+                .sub(F.fromU64(5).mul(p1))
+                .add(F.fromU64(4).mul(p2))
+                .sub(p3);
+            const c2 = c2_num.mul(inv2);
+
+            // c3 = (-p0 + 3*p1 - 3*p2 + p3) / 6
+            const c3_num = F.zero().sub(p0)
+                .add(F.fromU64(3).mul(p1))
+                .sub(F.fromU64(3).mul(p2))
+                .add(p3);
+            const c3 = c3_num.mul(inv6);
+
+            return [4]F{ c0, c1, c2, c3 };
+        }
+
+        /// Convert evaluations at 0,1,2,3 to Jolt's compressed format [c0, c2, c3]
+        ///
+        /// Jolt stores coefficients except the linear term, which is recovered from the hint.
+        pub fn evalsToCompressed(evals: [4]F) [3]F {
+            const coeffs = interpolateDegree3(evals);
+            return [3]F{ coeffs[0], coeffs[2], coeffs[3] };
+        }
     };
+}
+
+test "unipoly interpolate degree 3" {
+    const F = field.BN254Scalar;
+
+    // Test: p(X) = 1 + 2X + 3X² + 4X³
+    // p(0) = 1
+    // p(1) = 1 + 2 + 3 + 4 = 10
+    // p(2) = 1 + 4 + 12 + 32 = 49
+    // p(3) = 1 + 6 + 27 + 108 = 142
+    const evals = [4]F{
+        F.fromU64(1),
+        F.fromU64(10),
+        F.fromU64(49),
+        F.fromU64(142),
+    };
+
+    const coeffs = UniPoly(F).interpolateDegree3(evals);
+
+    try std.testing.expect(coeffs[0].eql(F.fromU64(1)));
+    try std.testing.expect(coeffs[1].eql(F.fromU64(2)));
+    try std.testing.expect(coeffs[2].eql(F.fromU64(3)));
+    try std.testing.expect(coeffs[3].eql(F.fromU64(4)));
+}
+
+test "unipoly compressed format" {
+    const F = field.BN254Scalar;
+
+    // Same polynomial: p(X) = 1 + 2X + 3X² + 4X³
+    const evals = [4]F{
+        F.fromU64(1),
+        F.fromU64(10),
+        F.fromU64(49),
+        F.fromU64(142),
+    };
+
+    const compressed = UniPoly(F).evalsToCompressed(evals);
+
+    // Should be [c0, c2, c3] = [1, 3, 4]
+    try std.testing.expect(compressed[0].eql(F.fromU64(1)));
+    try std.testing.expect(compressed[1].eql(F.fromU64(3)));
+    try std.testing.expect(compressed[2].eql(F.fromU64(4)));
 }
 
 test "dense polynomial basic" {

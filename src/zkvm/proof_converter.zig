@@ -36,6 +36,7 @@ const spartan_outer = @import("spartan/outer.zig");
 const streaming_outer = @import("spartan/streaming_outer.zig");
 const transcripts = @import("../transcripts/mod.zig");
 const Blake2bTranscript = transcripts.Blake2bTranscript;
+const poly_mod = @import("../poly/mod.zig");
 
 /// Convert Zolt's internal proof to Jolt-compatible format
 pub fn ProofConverter(comptime F: type) type {
@@ -285,7 +286,7 @@ pub fn ProofConverter(comptime F: type) type {
 
             // Generate remaining round polynomials
             for (1..num_rounds) |_| {
-                const round_poly = outer_prover.computeRemainingRoundPoly() catch {
+                const round_evals = outer_prover.computeRemainingRoundPoly() catch {
                     // Fallback to zero polynomial
                     const coeffs = try self.allocator.alloc(F, 3);
                     @memset(coeffs, F.zero());
@@ -296,12 +297,13 @@ pub fn ProofConverter(comptime F: type) type {
                     continue;
                 };
 
-                // Create compressed polynomial: [p(0), p(2), p(3)]
-                // The linear term p(1) is recovered from the hint
+                // Convert evaluations [s(0), s(1), s(2), s(3)] to compressed coefficients [c0, c2, c3]
+                // The linear term c1 is recovered from the hint during verification
+                const compressed = poly_mod.UniPoly(F).evalsToCompressed(round_evals);
                 const coeffs = try self.allocator.alloc(F, 3);
-                coeffs[0] = round_poly[0]; // p(0)
-                coeffs[1] = round_poly[2]; // p(2)
-                coeffs[2] = round_poly[3]; // p(3)
+                coeffs[0] = compressed[0]; // c0 (constant)
+                coeffs[1] = compressed[1]; // c2 (quadratic)
+                coeffs[2] = compressed[2]; // c3 (cubic)
 
                 try proof.compressed_polys.append(self.allocator, .{
                     .coeffs_except_linear_term = coeffs,
@@ -312,7 +314,7 @@ pub fn ProofConverter(comptime F: type) type {
                 // In real implementation, challenge comes from transcript
                 const challenge = F.fromU64(0xc4ceb9fe1a85ec53);
                 outer_prover.bindRemainingRoundChallenge(challenge) catch {};
-                outer_prover.updateClaim(round_poly, challenge);
+                outer_prover.updateClaim(round_evals, challenge);
             }
         }
 
@@ -380,7 +382,7 @@ pub fn ProofConverter(comptime F: type) type {
 
             // Generate all remaining round polynomials with transcript integration
             for (0..num_remaining_rounds) |_| {
-                const round_poly = outer_prover.computeRemainingRoundPoly() catch {
+                const round_evals = outer_prover.computeRemainingRoundPoly() catch {
                     // Fallback to zero polynomial
                     const coeffs = try self.allocator.alloc(F, 3);
                     @memset(coeffs, F.zero());
@@ -392,23 +394,26 @@ pub fn ProofConverter(comptime F: type) type {
                     continue;
                 };
 
-                // Create compressed polynomial: [p(0), p(2), p(3)]
-                // The linear term p(1) is recovered from the hint
+                // Convert evaluations [s(0), s(1), s(2), s(3)] to compressed coefficients [c0, c2, c3]
+                // The linear term c1 is recovered from the hint during verification
+                const compressed = poly_mod.UniPoly(F).evalsToCompressed(round_evals);
                 const coeffs = try self.allocator.alloc(F, 3);
-                coeffs[0] = round_poly[0]; // p(0)
-                coeffs[1] = round_poly[2]; // p(2)
-                coeffs[2] = round_poly[3]; // p(3)
+                coeffs[0] = compressed[0]; // c0 (constant)
+                coeffs[1] = compressed[1]; // c2 (quadratic)
+                coeffs[2] = compressed[2]; // c3 (cubic)
 
                 try proof.compressed_polys.append(self.allocator, .{
                     .coeffs_except_linear_term = coeffs,
                     .allocator = self.allocator,
                 });
 
-                // Append round polynomial to transcript
-                transcript.appendScalar(round_poly[0]);
-                transcript.appendScalar(round_poly[1]);
-                transcript.appendScalar(round_poly[2]);
-                transcript.appendScalar(round_poly[3]);
+                // Append round polynomial coefficients to transcript
+                // Note: Jolt appends the FULL polynomial (all 4 coefficients)
+                const full_coeffs = poly_mod.UniPoly(F).interpolateDegree3(round_evals);
+                transcript.appendScalar(full_coeffs[0]);
+                transcript.appendScalar(full_coeffs[1]);
+                transcript.appendScalar(full_coeffs[2]);
+                transcript.appendScalar(full_coeffs[3]);
 
                 // Get challenge from transcript
                 const challenge = transcript.challengeScalar();
@@ -416,7 +421,7 @@ pub fn ProofConverter(comptime F: type) type {
 
                 // Bind challenge and update claim
                 outer_prover.bindRemainingRoundChallenge(challenge) catch {};
-                outer_prover.updateClaim(round_poly, challenge);
+                outer_prover.updateClaim(round_evals, challenge);
             }
 
             return Stage1Result{ .challenges = challenges, .r0 = r0, .allocator = self.allocator };
@@ -605,7 +610,6 @@ pub fn ProofConverter(comptime F: type) type {
                 return self.createUniSkipProofStage1();
             }
 
-            const poly_mod = @import("../poly/mod.zig");
             const NUM_COEFFS = r1cs.OUTER_FIRST_ROUND_POLY_NUM_COEFFS;
 
             // Compute eq polynomial evaluations at tau

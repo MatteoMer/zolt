@@ -418,32 +418,61 @@ pub fn main() !void {
         .help => printHelp(),
         .version => printVersion(),
         .run => {
-            if (args.next()) |elf_path| {
-                try runEmulator(allocator, elf_path);
+            if (args.next()) |arg| {
+                if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+                    std.debug.print("Usage: zolt run <elf_file>\n\n", .{});
+                    std.debug.print("Run a RISC-V ELF binary in the emulator.\n", .{});
+                    std.debug.print("The emulator supports RV64IMC instructions.\n", .{});
+                } else {
+                    try runEmulator(allocator, arg);
+                }
             } else {
                 std.debug.print("Error: run command requires an ELF file path\n", .{});
                 std.debug.print("Usage: zolt run <elf_file>\n", .{});
             }
         },
         .prove => {
-            if (args.next()) |elf_path| {
-                try runProver(allocator, elf_path);
+            if (args.next()) |arg| {
+                if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+                    std.debug.print("Usage: zolt prove <elf_file>\n\n", .{});
+                    std.debug.print("Generate a ZK proof for a RISC-V ELF binary.\n", .{});
+                    std.debug.print("This experimental command runs the full proving pipeline:\n", .{});
+                    std.debug.print("  1. Preprocess (generate SRS and keys)\n", .{});
+                    std.debug.print("  2. Initialize prover\n", .{});
+                    std.debug.print("  3. Generate proof using multi-stage sumcheck\n", .{});
+                    std.debug.print("  4. Verify the proof\n", .{});
+                } else {
+                    try runProver(allocator, arg);
+                }
             } else {
                 std.debug.print("Error: prove command requires an ELF file path\n", .{});
                 std.debug.print("Usage: zolt prove <elf_file>\n", .{});
             }
         },
         .srs => {
-            if (args.next()) |ptau_path| {
-                try inspectSRS(allocator, ptau_path);
+            if (args.next()) |arg| {
+                if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+                    std.debug.print("Usage: zolt srs <ptau_file>\n\n", .{});
+                    std.debug.print("Inspect a Powers of Tau (PTAU) ceremony file.\n", .{});
+                    std.debug.print("PTAU files are used to provide the trusted setup (SRS)\n", .{});
+                    std.debug.print("for polynomial commitment schemes like KZG and HyperKZG.\n", .{});
+                } else {
+                    try inspectSRS(allocator, arg);
+                }
             } else {
                 std.debug.print("Error: srs command requires a PTAU file path\n", .{});
                 std.debug.print("Usage: zolt srs <ptau_file>\n", .{});
             }
         },
         .decode => {
-            if (args.next()) |hex_str| {
-                decodeInstruction(hex_str);
+            if (args.next()) |arg| {
+                if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+                    std.debug.print("Usage: zolt decode <hex>\n\n", .{});
+                    std.debug.print("Decode a RISC-V instruction from its hex encoding.\n", .{});
+                    std.debug.print("Example: zolt decode 0x00a00513  (decodes: li a0, 10)\n", .{});
+                } else {
+                    decodeInstruction(arg);
+                }
             } else {
                 std.debug.print("Error: decode command requires a hex instruction\n", .{});
                 std.debug.print("Usage: zolt decode <hex>\n", .{});

@@ -276,7 +276,7 @@ fn runEmulator(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles: ?
     }
 }
 
-fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt: ?u64, output_path: ?[]const u8, json_format: bool, jolt_format: bool, srs_path: ?[]const u8) !void {
+fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt: ?u64, output_path: ?[]const u8, json_format: bool, jolt_format: bool, srs_path: ?[]const u8, preprocessing_path: ?[]const u8) !void {
     // srs_path: Optional path to a Jolt-exported Dory SRS file.
     // When provided, uses the same SRS as Jolt for exact commitment compatibility.
     std.debug.print("Zolt zkVM Prover\n", .{});
@@ -446,6 +446,77 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt:
             std.debug.print("  Proof size: {} bytes ({d:.2} KB)\n", .{ proof_bytes.len, @as(f64, @floatFromInt(proof_bytes.len)) / 1024.0 });
         }
         std.debug.print("  Proof saved successfully!\n", .{});
+    }
+
+    // Export preprocessing if requested
+    if (preprocessing_path) |pp_path| {
+        std.debug.print("\nExporting preprocessing to: {s}\n", .{pp_path});
+
+        // Generate preprocessing using the same bytecode
+        const preprocessing = zolt.zkvm.preprocessing;
+        var bytecode_prep = preprocessing.BytecodePreprocessing.preprocess(allocator, program.bytecode, program.entry_point) catch |err| {
+            std.debug.print("  Error generating bytecode preprocessing: {s}\n", .{@errorName(err)});
+            return err;
+        };
+        defer bytecode_prep.deinit();
+
+        // Create memory init from bytecode
+        const mem_init_entries = try allocator.alloc(struct { u64, u8 }, program.bytecode.len);
+        defer allocator.free(mem_init_entries);
+        for (program.bytecode, 0..) |byte, i| {
+            mem_init_entries[i] = .{ program.entry_point + i, byte };
+        }
+
+        var ram_prep = preprocessing.RAMPreprocessing.preprocess(allocator, mem_init_entries) catch |err| {
+            std.debug.print("  Error generating RAM preprocessing: {s}\n", .{@errorName(err)});
+            return err;
+        };
+        defer ram_prep.deinit();
+
+        // Create memory layout
+        const jolt_device = zolt.zkvm.jolt_device;
+        const device = jolt_device.JoltDevice.fromEmulator(
+            allocator,
+            &[_]u8{},
+            &[_]u8{},
+            false,
+            @intCast(program.bytecode.len),
+        ) catch |err| {
+            std.debug.print("  Error creating memory layout: {s}\n", .{@errorName(err)});
+            return err;
+        };
+        var device_mut = device;
+        defer device_mut.deinit();
+
+        // Create shared preprocessing
+        var shared_prep = preprocessing.JoltSharedPreprocessing{
+            .bytecode = bytecode_prep,
+            .ram = ram_prep,
+            .memory_layout = device.memory_layout,
+        };
+
+        // Serialize to ArrayList first, then write to file
+        var buffer = std.ArrayListUnmanaged(u8){};
+        defer buffer.deinit(allocator);
+
+        shared_prep.serialize(allocator, buffer.writer(allocator)) catch |err| {
+            std.debug.print("  Error serializing preprocessing: {s}\n", .{@errorName(err)});
+            return err;
+        };
+
+        const pp_file = std.fs.cwd().createFile(pp_path, .{}) catch |err| {
+            std.debug.print("  Error creating preprocessing file: {s}\n", .{@errorName(err)});
+            return err;
+        };
+        defer pp_file.close();
+
+        pp_file.writeAll(buffer.items) catch |err| {
+            std.debug.print("  Error writing preprocessing: {s}\n", .{@errorName(err)});
+            return err;
+        };
+
+        std.debug.print("  Preprocessing exported successfully!\n", .{});
+        std.debug.print("  This file can be loaded by Jolt for cross-verification.\n", .{});
     }
 
     const total_time = preprocess_time + init_time + prove_time + verify_time;
@@ -1137,11 +1208,12 @@ pub fn main() !void {
                     std.debug.print("  3. Generate proof using multi-stage sumcheck\n", .{});
                     std.debug.print("  4. Verify the proof\n\n", .{});
                     std.debug.print("Options:\n", .{});
-                    std.debug.print("  --max-cycles N   Limit execution to N cycles (default: 1024)\n", .{});
-                    std.debug.print("  -o, --output F   Save proof to file F\n", .{});
-                    std.debug.print("  --json           Output proof in JSON format (human readable)\n", .{});
-                    std.debug.print("  --jolt-format    Output proof in Jolt-compatible format for cross-verification\n", .{});
-                    std.debug.print("  --srs PATH       Use Dory SRS from PATH (exported by Jolt for exact compatibility)\n", .{});
+                    std.debug.print("  --max-cycles N           Limit execution to N cycles (default: 1024)\n", .{});
+                    std.debug.print("  -o, --output F           Save proof to file F\n", .{});
+                    std.debug.print("  --json                   Output proof in JSON format (human readable)\n", .{});
+                    std.debug.print("  --jolt-format            Output proof in Jolt-compatible format for cross-verification\n", .{});
+                    std.debug.print("  --srs PATH               Use Dory SRS from PATH (exported by Jolt)\n", .{});
+                    std.debug.print("  --export-preprocessing P Export Jolt-compatible preprocessing to file P\n", .{});
                 } else {
                     // Parse options
                     var elf_path: ?[]const u8 = null;
@@ -1150,6 +1222,7 @@ pub fn main() !void {
                     var json_format = false;
                     var jolt_format = false;
                     var srs_path: ?[]const u8 = null;
+                    var preprocessing_path: ?[]const u8 = null;
 
                     // First arg could be an option or the ELF path
                     if (std.mem.startsWith(u8, arg, "-")) {
@@ -1165,6 +1238,8 @@ pub fn main() !void {
                             jolt_format = true;
                         } else if (std.mem.eql(u8, arg, "--srs")) {
                             srs_path = args.next();
+                        } else if (std.mem.eql(u8, arg, "--export-preprocessing")) {
+                            preprocessing_path = args.next();
                         }
                     } else {
                         elf_path = arg;
@@ -1185,6 +1260,8 @@ pub fn main() !void {
                                 jolt_format = true;
                             } else if (std.mem.eql(u8, next_arg, "--srs")) {
                                 srs_path = args.next();
+                            } else if (std.mem.eql(u8, next_arg, "--export-preprocessing")) {
+                                preprocessing_path = args.next();
                             }
                         } else if (elf_path == null) {
                             elf_path = next_arg;
@@ -1192,7 +1269,7 @@ pub fn main() !void {
                     }
 
                     if (elf_path) |path| {
-                        runProver(allocator, path, max_cycles, output_path, json_format, jolt_format, srs_path) catch |err| {
+                        runProver(allocator, path, max_cycles, output_path, json_format, jolt_format, srs_path, preprocessing_path) catch |err| {
                             std.debug.print("Failed to generate proof: {s}\n", .{@errorName(err)});
                             std.process.exit(1);
                         };

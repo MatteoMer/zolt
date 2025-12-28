@@ -12,11 +12,13 @@ Zolt implements a zkVM (zero-knowledge virtual machine) that can prove correct e
 
 ### Key Features
 
+- **End-to-End Proving**: Complete proof generation and verification pipeline
 - **BN254 Scalar Field**: Full Montgomery form arithmetic with CIOS multiplication
 - **Polynomial Commitments**: HyperKZG and Dory commitment schemes
 - **RISC-V Support**: Full RV64IMC instruction set (I, M, and C extensions)
 - **Sumcheck Protocol**: Complete prover with efficient round generation
 - **Spartan**: R1CS satisfiability prover/verifier
+- **Lasso Lookups**: Efficient lookup argument for instruction validation
 - **Fiat-Shamir**: Keccak-f[1600] based transcript for non-interactive proofs
 - **Multi-Scalar Multiplication**: Pippenger's algorithm with parallel execution
 - **ELF Loading**: Complete ELF32/ELF64 parser for loading RISC-V binaries

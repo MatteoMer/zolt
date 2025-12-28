@@ -355,9 +355,8 @@ pub fn ProofConverter(comptime F: type) type {
                 self.allocator,
                 cycle_witnesses,
                 tau,
-            ) catch |err| {
+            ) catch {
                 // Fallback to zero proofs if initialization fails
-                _ = err;
                 const num_rounds = 1 + std.math.log2_int(usize, @max(1, cycle_witnesses.len));
                 try self.generateZeroSumcheckProof(proof, num_rounds, 3);
                 return Stage1Result{ .challenges = challenges, .r0 = F.zero(), .allocator = self.allocator };
@@ -365,8 +364,13 @@ pub fn ProofConverter(comptime F: type) type {
             defer outer_prover.deinit();
 
             // The first round was already processed by UniSkip
-            // Append the UniSkip polynomial to transcript and get challenge
-            transcript.appendScalars(uniskip_proof.uni_poly);
+            // Append the UniSkip polynomial to transcript using UniPoly format:
+            // "UncompressedUniPoly_begin", all coefficients, "UncompressedUniPoly_end"
+            transcript.appendMessage("UncompressedUniPoly_begin");
+            for (uniskip_proof.uni_poly) |coeff| {
+                transcript.appendScalar(coeff);
+            }
+            transcript.appendMessage("UncompressedUniPoly_end");
             const r0 = transcript.challengeScalar();
 
             // Bind the first-round challenge from transcript
@@ -408,13 +412,15 @@ pub fn ProofConverter(comptime F: type) type {
                     .allocator = self.allocator,
                 });
 
-                // Append round polynomial coefficients to transcript
-                // Note: Jolt appends the FULL polynomial (all 4 coefficients)
-                const full_coeffs = poly_mod.UniPoly(F).interpolateDegree3(round_evals);
-                transcript.appendScalar(full_coeffs[0]);
-                transcript.appendScalar(full_coeffs[1]);
-                transcript.appendScalar(full_coeffs[2]);
-                transcript.appendScalar(full_coeffs[3]);
+                // Append round polynomial to transcript using Jolt's CompressedUniPoly format:
+                // 1. "UniPoly_begin" message
+                // 2. coeffs_except_linear_term [c0, c2, c3]
+                // 3. "UniPoly_end" message
+                transcript.appendMessage("UniPoly_begin");
+                transcript.appendScalar(compressed[0]); // c0
+                transcript.appendScalar(compressed[1]); // c2
+                transcript.appendScalar(compressed[2]); // c3
+                transcript.appendMessage("UniPoly_end");
 
                 // Get challenge from transcript
                 const challenge = transcript.challengeScalar();

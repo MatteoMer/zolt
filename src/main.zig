@@ -78,8 +78,7 @@ fn runEmulator(allocator: std.mem.Allocator, elf_path: []const u8) !void {
     // Load the ELF file
     var loader = zolt.host.ELFLoader.init(allocator);
     const program = loader.loadFile(elf_path) catch |err| {
-        std.debug.print("Error loading ELF file: {}\n", .{err});
-        return err;
+        return err; // Error will be handled by caller
     };
     defer {
         var prog = program;
@@ -130,8 +129,7 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8) !void {
     std.debug.print("Loading ELF: {s}\n", .{elf_path});
     var loader = zolt.host.ELFLoader.init(allocator);
     const program = loader.loadFile(elf_path) catch |err| {
-        std.debug.print("Error loading ELF file: {}\n", .{err});
-        return err;
+        return err; // Error will be handled by caller
     };
     defer {
         var prog = program;
@@ -258,8 +256,7 @@ fn inspectSRS(allocator: std.mem.Allocator, ptau_path: []const u8) !void {
 
     // Load the PTAU file
     const file = std.fs.cwd().openFile(ptau_path, .{}) catch |err| {
-        std.debug.print("Error opening file: {}\n", .{err});
-        return err;
+        return err; // Error will be handled by caller
     };
     defer file.close();
 
@@ -278,8 +275,7 @@ fn inspectSRS(allocator: std.mem.Allocator, ptau_path: []const u8) !void {
     // Parse the PTAU file
     std.debug.print("\nParsing PTAU format...\n", .{});
     var srs = zolt.poly.commitment.srs.loadFromPtau(allocator, data) catch |err| {
-        std.debug.print("Error parsing PTAU file: {}\n", .{err});
-        return err;
+        return err; // Error will be handled by caller
     };
     defer srs.deinit();
 
@@ -424,7 +420,10 @@ pub fn main() !void {
                     std.debug.print("Run a RISC-V ELF binary in the emulator.\n", .{});
                     std.debug.print("The emulator supports RV64IMC instructions.\n", .{});
                 } else {
-                    try runEmulator(allocator, arg);
+                    runEmulator(allocator, arg) catch |err| {
+                        std.debug.print("Failed to run program: {s}\n", .{@errorName(err)});
+                        std.process.exit(1);
+                    };
                 }
             } else {
                 std.debug.print("Error: run command requires an ELF file path\n", .{});
@@ -442,7 +441,10 @@ pub fn main() !void {
                     std.debug.print("  3. Generate proof using multi-stage sumcheck\n", .{});
                     std.debug.print("  4. Verify the proof\n", .{});
                 } else {
-                    try runProver(allocator, arg);
+                    runProver(allocator, arg) catch |err| {
+                        std.debug.print("Failed to generate proof: {s}\n", .{@errorName(err)});
+                        std.process.exit(1);
+                    };
                 }
             } else {
                 std.debug.print("Error: prove command requires an ELF file path\n", .{});
@@ -457,7 +459,10 @@ pub fn main() !void {
                     std.debug.print("PTAU files are used to provide the trusted setup (SRS)\n", .{});
                     std.debug.print("for polynomial commitment schemes like KZG and HyperKZG.\n", .{});
                 } else {
-                    try inspectSRS(allocator, arg);
+                    inspectSRS(allocator, arg) catch |err| {
+                        std.debug.print("Failed to inspect SRS: {s}\n", .{@errorName(err)});
+                        std.process.exit(1);
+                    };
                 }
             } else {
                 std.debug.print("Error: srs command requires a PTAU file path\n", .{});

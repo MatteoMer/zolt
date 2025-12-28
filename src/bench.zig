@@ -20,6 +20,8 @@ pub fn main() !void {
     try benchPolynomialOperations();
     try benchMSM();
     try benchCommitment();
+    try benchEmulator();
+    try benchProver();
 
     std.debug.print("\nBenchmarks complete.\n", .{});
 }
@@ -320,6 +322,152 @@ fn benchCommitment() !void {
 
             std.debug.print("  Commit (n={d:>4}):   {d:>8.1} us/op\n", .{ size, us_per_op });
         }
+    }
+
+    std.debug.print("\n", .{});
+}
+
+fn benchEmulator() !void {
+    std.debug.print("Emulator Execution:\n", .{});
+
+    const allocator = std.heap.page_allocator;
+    const common = zolt.common;
+    const tracer = zolt.tracer;
+
+    // Program that sums 1 to 100 (more cycles for realistic benchmark)
+    const program = [_]u8{
+        0x93, 0x00, 0x40, 0x06, // addi x1, x0, 100
+        0x13, 0x01, 0x00, 0x00, // addi x2, x0, 0
+        // loop:
+        0x33, 0x01, 0x11, 0x00, // add x2, x2, x1
+        0x93, 0x80, 0xf0, 0xff, // addi x1, x1, -1
+        0xe3, 0x9c, 0x00, 0xfe, // bne x1, x0, -8
+        0x73, 0x00, 0x00, 0x00, // ecall
+    };
+
+    const iterations: usize = 100;
+    const config = common.MemoryConfig{ .program_size = 256 };
+
+    // Benchmark emulation
+    {
+        const start = std.time.nanoTimestamp();
+        for (0..iterations) |_| {
+            var emu = tracer.Emulator.init(allocator, &config);
+            defer emu.deinit();
+            emu.max_cycles = 512;
+            emu.loadProgram(&program) catch continue;
+            emu.run() catch continue;
+        }
+        const end = std.time.nanoTimestamp();
+
+        const elapsed_ns: f64 = @floatFromInt(end - start);
+        const ns_per_op = elapsed_ns / @as(f64, @floatFromInt(iterations));
+        const us_per_op = ns_per_op / 1000.0;
+
+        std.debug.print("  Sum 1-100 loop:     {d:>8.1} us/op\n", .{us_per_op});
+    }
+
+    std.debug.print("\n", .{});
+}
+
+fn benchProver() !void {
+    std.debug.print("zkVM Prover (WARNING: This is slow!):\n", .{});
+
+    const F = zolt.field.BN254Scalar;
+    const allocator = std.heap.page_allocator;
+    const common = zolt.common;
+    const tracer = zolt.tracer;
+    const prover = zolt.zkvm.prover;
+    const transcripts = zolt.transcripts;
+
+    // Simple program: addi x1, x0, 10; ecall
+    const program = [_]u8{
+        0x93, 0x00, 0xa0, 0x00, // addi x1, x0, 10
+        0x73, 0x00, 0x00, 0x00, // ecall
+    };
+
+    const config = common.MemoryConfig{ .program_size = 64 };
+
+    // Run emulation once to get trace
+    var emu = tracer.Emulator.init(allocator, &config);
+    defer emu.deinit();
+    emu.max_cycles = 8;
+    try emu.loadProgram(&program);
+    try emu.run();
+
+    const log_k: usize = 16;
+    const iterations: usize = 3;
+
+    // Benchmark proving
+    {
+        const start = std.time.nanoTimestamp();
+        for (0..iterations) |_| {
+            var multi_stage = prover.MultiStageProver(F).init(
+                allocator,
+                &emu.trace,
+                &emu.ram.trace,
+                &emu.lookup_trace,
+                log_k,
+                common.constants.RAM_START_ADDRESS,
+            );
+            defer multi_stage.deinit();
+
+            var transcript = try transcripts.Transcript(F).init(allocator, "bench");
+            defer transcript.deinit();
+
+            _ = multi_stage.prove(&transcript) catch continue;
+        }
+        const end = std.time.nanoTimestamp();
+
+        const elapsed_ns: f64 = @floatFromInt(end - start);
+        const ns_per_op = elapsed_ns / @as(f64, @floatFromInt(iterations));
+        const ms_per_op = ns_per_op / 1_000_000.0;
+
+        std.debug.print("  Simple (2 steps):   {d:>8.1} ms/op\n", .{ms_per_op});
+    }
+
+    // Benchmark with more steps
+    var emu2 = tracer.Emulator.init(allocator, &config);
+    defer emu2.deinit();
+    emu2.max_cycles = 32;
+
+    // Program with a small loop (4 iterations)
+    const loop_program = [_]u8{
+        0x93, 0x00, 0x40, 0x00, // addi x1, x0, 4
+        0x13, 0x01, 0x00, 0x00, // addi x2, x0, 0
+        0x33, 0x01, 0x11, 0x00, // add x2, x2, x1
+        0x93, 0x80, 0xf0, 0xff, // addi x1, x1, -1
+        0xe3, 0x9c, 0x00, 0xfe, // bne x1, x0, -8
+        0x73, 0x00, 0x00, 0x00, // ecall
+    };
+    try emu2.loadProgram(&loop_program);
+    try emu2.run();
+
+    {
+        const start = std.time.nanoTimestamp();
+        for (0..iterations) |_| {
+            var multi_stage = prover.MultiStageProver(F).init(
+                allocator,
+                &emu2.trace,
+                &emu2.ram.trace,
+                &emu2.lookup_trace,
+                log_k,
+                common.constants.RAM_START_ADDRESS,
+            );
+            defer multi_stage.deinit();
+
+            var transcript = try transcripts.Transcript(F).init(allocator, "bench");
+            defer transcript.deinit();
+
+            _ = multi_stage.prove(&transcript) catch continue;
+        }
+        const end = std.time.nanoTimestamp();
+
+        const elapsed_ns: f64 = @floatFromInt(end - start);
+        const ns_per_op = elapsed_ns / @as(f64, @floatFromInt(iterations));
+        const ms_per_op = ns_per_op / 1_000_000.0;
+
+        std.debug.print("  Loop (14 steps):    {d:>8.1} ms/op\n", .{ms_per_op});
     }
 
     std.debug.print("\n", .{});

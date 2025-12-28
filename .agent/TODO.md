@@ -17,6 +17,12 @@
 - [x] e2e: SRS serialization and deserialization
 - [x] e2e: field element big-endian round-trip
 
+### Commitment Verification
+- [x] Add verifyCommitmentOpening() to JoltVerifier
+- [x] Implement HyperKZG pairing-based verification
+- [x] Handle edge cases (no key, empty commitment, constant polynomial)
+- [x] Add tests for commitment verification
+
 ## Completed (Previous Sessions)
 
 ### Iteration 23: Load/Store and Verifier Improvements
@@ -70,8 +76,7 @@
 ## Next Steps (Future Iterations)
 
 ### High Priority
-- [ ] Import production SRS from Ethereum ceremony (format conversion)
-- [ ] Implement commitment opening verification in JoltVerifier
+- [ ] Import production SRS from Ethereum ceremony (ptau format parsing)
 
 ### Medium Priority
 - [ ] Performance optimization with SIMD
@@ -82,8 +87,9 @@
 - [ ] Benchmarking suite
 
 ## Test Status
-All tests pass (522 tests).
+All tests pass (526 tests).
 
 ## Commits This Session
 1. Add SRS loading utilities for production trusted setups
 2. Add big-endian serialization to BN254Scalar and integration tests
+3. Add commitment opening verification to JoltVerifier

@@ -215,3 +215,4 @@ SRS Utilities
 ## Commit History (Iteration 24)
 1. Add SRS loading utilities for production trusted setups
 2. Add big-endian serialization to BN254Scalar and integration tests
+3. Add commitment opening verification to JoltVerifier

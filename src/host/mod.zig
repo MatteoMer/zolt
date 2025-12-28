@@ -600,3 +600,156 @@ test "execute with longer program" {
     // Should have executed at least 3 cycles for the 3 instructions
     try std.testing.expect(trace.num_cycles >= 3);
 }
+
+test "ELFLoader parses minimal ELF" {
+    const allocator = std.testing.allocator;
+
+    // Create a minimal 32-bit RISC-V ELF
+    var elf_data: [256]u8 = undefined;
+    @memset(&elf_data, 0);
+
+    // ELF header (52 bytes for 32-bit)
+    elf_data[0] = 0x7F;
+    elf_data[1] = 'E';
+    elf_data[2] = 'L';
+    elf_data[3] = 'F';
+    elf_data[4] = 1; // 32-bit
+    elf_data[5] = 1; // Little endian
+    elf_data[6] = 1; // Version
+    elf_data[16] = 2; // Executable
+    elf_data[18] = 0xF3; // RISC-V
+    elf_data[20] = 1; // Version
+
+    // Entry point: 0x80000000
+    elf_data[24] = 0x00;
+    elf_data[25] = 0x00;
+    elf_data[26] = 0x00;
+    elf_data[27] = 0x80;
+
+    // Program header offset: 52
+    elf_data[28] = 52;
+    elf_data[40] = 52; // ELF header size
+    elf_data[42] = 32; // Program header entry size
+    elf_data[44] = 1; // Number of program headers
+
+    // Program header at offset 52
+    elf_data[52] = 1; // PT_LOAD
+    elf_data[56] = 0x60; // File offset
+
+    // vaddr: 0x80000000
+    elf_data[60] = 0x00;
+    elf_data[61] = 0x00;
+    elf_data[62] = 0x00;
+    elf_data[63] = 0x80;
+
+    // paddr: 0x80000000
+    elf_data[64] = 0x00;
+    elf_data[65] = 0x00;
+    elf_data[66] = 0x00;
+    elf_data[67] = 0x80;
+
+    // filesz: 8
+    elf_data[68] = 8;
+    // memsz: 8
+    elf_data[72] = 8;
+    // flags: RX
+    elf_data[76] = 5;
+    // align: 4
+    elf_data[80] = 4;
+
+    // Code at offset 0x60
+    // addi x1, x0, 42 (0x02a00093)
+    elf_data[0x60] = 0x93;
+    elf_data[0x61] = 0x00;
+    elf_data[0x62] = 0xa0;
+    elf_data[0x63] = 0x02;
+    // ecall (0x00000073)
+    elf_data[0x64] = 0x73;
+    elf_data[0x65] = 0x00;
+    elf_data[0x66] = 0x00;
+    elf_data[0x67] = 0x00;
+
+    // Load via ELFLoader
+    var loader = ELFLoader.init(allocator);
+    var program = try loader.load(&elf_data);
+    defer program.deinit();
+
+    // Verify program
+    try std.testing.expectEqual(@as(u64, 0x80000000), program.entry_point);
+    try std.testing.expectEqual(@as(u64, 0x80000000), program.base_address);
+    try std.testing.expectEqual(@as(usize, 8), program.bytecode.len);
+
+    // Verify code was loaded correctly
+    try std.testing.expectEqual(@as(u8, 0x93), program.bytecode[0]);
+    try std.testing.expectEqual(@as(u8, 0x00), program.bytecode[1]);
+    try std.testing.expectEqual(@as(u8, 0xa0), program.bytecode[2]);
+    try std.testing.expectEqual(@as(u8, 0x02), program.bytecode[3]);
+}
+
+test "ELFLoader execute minimal program" {
+    const allocator = std.testing.allocator;
+
+    // Create a minimal RISC-V ELF with: addi x10, x0, 42; ecall
+    var elf_data: [256]u8 = undefined;
+    @memset(&elf_data, 0);
+
+    // ELF header
+    elf_data[0] = 0x7F;
+    elf_data[1] = 'E';
+    elf_data[2] = 'L';
+    elf_data[3] = 'F';
+    elf_data[4] = 1;
+    elf_data[5] = 1;
+    elf_data[6] = 1;
+    elf_data[16] = 2;
+    elf_data[18] = 0xF3;
+    elf_data[20] = 1;
+    elf_data[24] = 0x00;
+    elf_data[25] = 0x00;
+    elf_data[26] = 0x00;
+    elf_data[27] = 0x80;
+    elf_data[28] = 52;
+    elf_data[40] = 52;
+    elf_data[42] = 32;
+    elf_data[44] = 1;
+
+    // Program header
+    elf_data[52] = 1;
+    elf_data[56] = 0x60;
+    elf_data[60] = 0x00;
+    elf_data[61] = 0x00;
+    elf_data[62] = 0x00;
+    elf_data[63] = 0x80;
+    elf_data[64] = 0x00;
+    elf_data[65] = 0x00;
+    elf_data[66] = 0x00;
+    elf_data[67] = 0x80;
+    elf_data[68] = 8;
+    elf_data[72] = 8;
+    elf_data[76] = 5;
+    elf_data[80] = 4;
+
+    // Code: addi x10, x0, 42 (return value 42)
+    elf_data[0x60] = 0x13;
+    elf_data[0x61] = 0x05;
+    elf_data[0x62] = 0xa0;
+    elf_data[0x63] = 0x02;
+    // ecall
+    elf_data[0x64] = 0x73;
+    elf_data[0x65] = 0x00;
+    elf_data[0x66] = 0x00;
+    elf_data[0x67] = 0x00;
+
+    // Load and execute
+    var loader = ELFLoader.init(allocator);
+    var program = try loader.load(&elf_data);
+    defer program.deinit();
+
+    var trace = try execute(allocator, &program, &[_]u8{}, .{
+        .max_cycles = 10,
+    });
+    defer trace.deinit();
+
+    // Should complete (ecall triggers halt)
+    try std.testing.expect(trace.num_cycles >= 2);
+}

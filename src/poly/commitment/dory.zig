@@ -29,9 +29,9 @@ const msm = @import("../../msm/mod.zig");
 const Fp = field.BN254BaseField;
 const Fr = field.BN254Scalar;
 const Fp2 = pairing.Fp2;
-const GT = pairing.GT;
-const G1Point = msm.AffinePoint(Fp);
-const G2Point = pairing.G2Point;
+pub const GT = pairing.GT;
+pub const G1Point = msm.AffinePoint(Fp);
+pub const G2Point = pairing.G2Point;
 const G1PointFp = pairing.G1PointFp;
 
 // =============================================================================

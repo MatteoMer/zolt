@@ -18,12 +18,16 @@ const Allocator = std.mem.Allocator;
 const jolt_types = @import("jolt_types.zig");
 const commitment_mod = @import("../poly/commitment/mod.zig");
 const pairing = @import("../field/pairing.zig");
+const dory_mod = @import("../poly/commitment/dory.zig");
 
 /// GT element (Dory commitment) type
 pub const GT = pairing.GT;
 
 /// Dory commitment type
 pub const DoryCommitment = commitment_mod.DoryCommitment;
+
+/// Dory proof type
+pub const DoryProof = dory_mod.DoryProof;
 
 /// Arkworks-compatible serializer
 pub fn ArkworksSerializer(comptime F: type) type {
@@ -118,6 +122,66 @@ pub fn ArkworksSerializer(comptime F: type) type {
             for (comms) |c| {
                 try self.writeDoryCommitment(c);
             }
+        }
+
+        /// Write a G1 point in arkworks compressed format (32 bytes)
+        pub fn writeG1Compressed(self: *Self, point: dory_mod.G1Point) !void {
+            const compressed = dory_mod.compressG1(point);
+            try self.buffer.appendSlice(self.allocator, &compressed);
+        }
+
+        /// Write a G2 point in arkworks compressed format (64 bytes)
+        pub fn writeG2Compressed(self: *Self, point: dory_mod.G2Point) !void {
+            const compressed = dory_mod.compressG2(point);
+            try self.buffer.appendSlice(self.allocator, &compressed);
+        }
+
+        /// Write a u32 in little-endian format
+        pub fn writeU32(self: *Self, value: u32) !void {
+            var buf: [4]u8 = undefined;
+            std.mem.writeInt(u32, &buf, value, .little);
+            try self.buffer.appendSlice(self.allocator, &buf);
+        }
+
+        /// Write a DoryProof in arkworks format
+        /// Format matches dory-pcs ark_serde.rs CanonicalSerialize
+        pub fn writeDoryProof(self: *Self, proof: *const DoryProof) !void {
+            // 1. VMV message: c (GT), d2 (GT), e1 (G1)
+            try self.writeGT(proof.vmv_message.c);
+            try self.writeGT(proof.vmv_message.d2);
+            try self.writeG1Compressed(proof.vmv_message.e1);
+
+            // 2. Number of rounds (u32)
+            const num_rounds: u32 = @intCast(proof.first_messages.len);
+            try self.writeU32(num_rounds);
+
+            // 3. First messages
+            for (proof.first_messages) |msg| {
+                try self.writeGT(msg.d1_left);
+                try self.writeGT(msg.d1_right);
+                try self.writeGT(msg.d2_left);
+                try self.writeGT(msg.d2_right);
+                try self.writeG1Compressed(msg.e1_beta);
+                try self.writeG2Compressed(msg.e2_beta);
+            }
+
+            // 4. Second messages
+            for (proof.second_messages) |msg| {
+                try self.writeGT(msg.c_plus);
+                try self.writeGT(msg.c_minus);
+                try self.writeG1Compressed(msg.e1_plus);
+                try self.writeG1Compressed(msg.e1_minus);
+                try self.writeG2Compressed(msg.e2_plus);
+                try self.writeG2Compressed(msg.e2_minus);
+            }
+
+            // 5. Final message: e1 (G1), e2 (G2)
+            try self.writeG1Compressed(proof.final_message.e1);
+            try self.writeG2Compressed(proof.final_message.e2);
+
+            // 6. nu and sigma (u32 each)
+            try self.writeU32(proof.nu);
+            try self.writeU32(proof.sigma);
         }
 
         /// Write an optional field
@@ -286,7 +350,7 @@ pub fn ArkworksSerializer(comptime F: type) type {
             self: *Self,
             comptime DoryProofT: type,
             proof: *const jolt_types.JoltProof(F, DoryCommitment, DoryProofT),
-            writeDoryProof: *const fn (*Self, DoryProofT) anyerror!void,
+            writeDoryProofFn: *const fn (*Self, DoryProofT) anyerror!void,
         ) !void {
             const writeDoryCommWrapper = struct {
                 fn f(ser: *Self, c: DoryCommitment) !void {
@@ -299,7 +363,7 @@ pub fn ArkworksSerializer(comptime F: type) type {
                 DoryProofT,
                 proof,
                 writeDoryCommWrapper,
-                writeDoryProof,
+                writeDoryProofFn,
             );
         }
     };

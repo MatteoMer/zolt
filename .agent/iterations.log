@@ -827,3 +827,27 @@ Ended: 2025-12-28T10:51:56.282648
 Turns: 98
 Cost: $8.3842
 
+
+--- Iteration 7 ---
+Started: 2025-12-28T10:11:04.189815
+Summary:
+- CLI --jolt-format flag now uses Dory commitments (GT/Fp12, 384 bytes)
+- serializeJoltProofDory() generates proper GT elements
+- Fixed UniSkipFirstRoundProof serialization (required, not optional)
+- All 5 GT commitments verified to deserialize correctly in Jolt
+- 11 opening claims verified to parse correctly in Jolt
+
+Progress:
+- Opening claims: ✅ All valid
+- Commitments: ✅ All valid GT elements
+- Joint opening proof: ⚠️ Needs Dory IPA integration
+
+All 608 tests passing.
+
+
+--- Iteration 6 ---
+Started: 2025-12-28T10:51:58.284352
+Ended: 2025-12-28T11:11:16.783843
+Turns: 133
+Cost: $9.4774
+

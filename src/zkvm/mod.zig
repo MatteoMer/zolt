@@ -578,8 +578,17 @@ pub fn JoltProver(comptime F: type) type {
             try serializer.writeSumcheckInstanceProof(&jolt_proof_ptr.stage6_sumcheck_proof);
             try serializer.writeSumcheckInstanceProof(&jolt_proof_ptr.stage7_sumcheck_proof);
 
-            // Write joint opening proof (placeholder - would need actual Dory proof)
-            try serializer.writeUsize(0); // Empty proof for now
+            // Write joint opening proof
+            // Generate a Dory opening proof for the bytecode polynomial
+            // In a full implementation, this would be a batched opening of all commitments
+            var dory_proof = try Dory.DoryCommitmentScheme(F).open(
+                &dory_srs,
+                bytecode_evals,
+                &[_]F{}, // Empty evaluation point (would be derived from transcript)
+                self.allocator,
+            );
+            defer dory_proof.deinit();
+            try serializer.writeDoryProof(&dory_proof);
 
             // Write advice proofs (all None)
             try serializer.writeU8(0); // trusted_advice_val_evaluation_proof: None

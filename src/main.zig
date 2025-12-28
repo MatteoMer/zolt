@@ -266,11 +266,9 @@ fn runEmulator(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles: ?
     }
 }
 
-fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt: ?u64, output_path: ?[]const u8, json_format: bool, jolt_format: bool, _: ?[]const u8) !void {
-    // Note: device_path is currently unused since proveJoltCompatibleWithDory
-    // generates its own JoltDevice from the execution trace.
-    // A future enhancement could use proveJoltCompatibleWithDeviceAndDory
-    // for exact transcript matching with an external JoltDevice.
+fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt: ?u64, output_path: ?[]const u8, json_format: bool, jolt_format: bool, srs_path: ?[]const u8) !void {
+    // srs_path: Optional path to a Jolt-exported Dory SRS file.
+    // When provided, uses the same SRS as Jolt for exact commitment compatibility.
     std.debug.print("Zolt zkVM Prover\n", .{});
     std.debug.print("================\n\n", .{});
 
@@ -382,7 +380,11 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt:
             // between the transcript and the serialized proof
             std.debug.print("  Generating Jolt-compatible proof with Dory commitments...\n", .{});
 
-            var jolt_bundle = prover_inst.proveJoltCompatibleWithDory(program.bytecode, &[_]u8{}) catch |err| {
+            if (srs_path) |sp| {
+                std.debug.print("  Using Jolt SRS from: {s}\n", .{sp});
+            }
+
+            var jolt_bundle = prover_inst.proveJoltCompatibleWithDoryAndSrs(program.bytecode, &[_]u8{}, srs_path) catch |err| {
                 std.debug.print("  Error generating Jolt-compatible proof: {s}\n", .{@errorName(err)});
                 return err;
             };
@@ -1077,7 +1079,7 @@ pub fn main() !void {
                     std.debug.print("  -o, --output F   Save proof to file F\n", .{});
                     std.debug.print("  --json           Output proof in JSON format (human readable)\n", .{});
                     std.debug.print("  --jolt-format    Output proof in Jolt-compatible format for cross-verification\n", .{});
-                    std.debug.print("  --device PATH    Use JoltDevice from PATH (for exact Fiat-Shamir matching)\n", .{});
+                    std.debug.print("  --srs PATH       Use Dory SRS from PATH (exported by Jolt for exact compatibility)\n", .{});
                 } else {
                     // Parse options
                     var elf_path: ?[]const u8 = null;
@@ -1085,7 +1087,7 @@ pub fn main() !void {
                     var output_path: ?[]const u8 = null;
                     var json_format = false;
                     var jolt_format = false;
-                    var device_path: ?[]const u8 = null;
+                    var srs_path: ?[]const u8 = null;
 
                     // First arg could be an option or the ELF path
                     if (std.mem.startsWith(u8, arg, "-")) {
@@ -1099,8 +1101,8 @@ pub fn main() !void {
                             json_format = true;
                         } else if (std.mem.eql(u8, arg, "--jolt-format")) {
                             jolt_format = true;
-                        } else if (std.mem.eql(u8, arg, "--device")) {
-                            device_path = args.next();
+                        } else if (std.mem.eql(u8, arg, "--srs")) {
+                            srs_path = args.next();
                         }
                     } else {
                         elf_path = arg;
@@ -1119,8 +1121,8 @@ pub fn main() !void {
                                 json_format = true;
                             } else if (std.mem.eql(u8, next_arg, "--jolt-format")) {
                                 jolt_format = true;
-                            } else if (std.mem.eql(u8, next_arg, "--device")) {
-                                device_path = args.next();
+                            } else if (std.mem.eql(u8, next_arg, "--srs")) {
+                                srs_path = args.next();
                             }
                         } else if (elf_path == null) {
                             elf_path = next_arg;
@@ -1128,7 +1130,7 @@ pub fn main() !void {
                     }
 
                     if (elf_path) |path| {
-                        runProver(allocator, path, max_cycles, output_path, json_format, jolt_format, device_path) catch |err| {
+                        runProver(allocator, path, max_cycles, output_path, json_format, jolt_format, srs_path) catch |err| {
                             std.debug.print("Failed to generate proof: {s}\n", .{@errorName(err)});
                             std.process.exit(1);
                         };

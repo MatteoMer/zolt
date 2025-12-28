@@ -596,10 +596,26 @@ pub fn JoltProver(comptime F: type) type {
         ///
         /// This returns both the proof and the Dory commitments used in the transcript,
         /// so the same commitments can be used for serialization.
+        ///
+        /// If srs_path is provided, loads the Dory SRS from that file (exported by Jolt).
+        /// This ensures the commitments match Jolt's exactly.
         pub fn proveJoltCompatibleWithDory(
             self: *Self,
             program_bytecode: []const u8,
             inputs: []const u8,
+        ) !jolt_types.JoltProofWithDory(F, commitment_types.PolyCommitment, commitment_types.OpeningProof) {
+            return self.proveJoltCompatibleWithDoryAndSrs(program_bytecode, inputs, null);
+        }
+
+        /// Generate a Jolt-compatible proof with Dory commitments bundled
+        ///
+        /// If srs_path is provided, loads the Dory SRS from that file (exported by Jolt).
+        /// This ensures the commitments match Jolt's exactly for transcript compatibility.
+        pub fn proveJoltCompatibleWithDoryAndSrs(
+            self: *Self,
+            program_bytecode: []const u8,
+            inputs: []const u8,
+            srs_path: ?[]const u8,
         ) !jolt_types.JoltProofWithDory(F, commitment_types.PolyCommitment, commitment_types.OpeningProof) {
             const JoltProofWithDory = jolt_types.JoltProofWithDory(F, commitment_types.PolyCommitment, commitment_types.OpeningProof);
             const DoryScheme = Dory.DoryCommitmentScheme(F);
@@ -681,7 +697,12 @@ pub fn JoltProver(comptime F: type) type {
             const max_poly_size = @max(@max(bytecode_poly_size, memory_poly_size), reg_poly_size);
             const log_size: u32 = if (max_poly_size <= 1) 1 else @intCast(std.math.log2_int(usize, max_poly_size) + 1);
 
-            var dory_srs = try DoryScheme.setup(self.allocator, log_size);
+            // Load SRS from file if path provided (for Jolt compatibility)
+            // Otherwise generate SRS deterministically (may not match Jolt exactly)
+            var dory_srs = if (srs_path) |path|
+                try DoryScheme.loadFromFile(self.allocator, path)
+            else
+                try DoryScheme.setup(self.allocator, log_size);
             defer dory_srs.deinit();
 
             // Build and store polynomial evaluations

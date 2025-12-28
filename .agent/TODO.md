@@ -144,6 +144,7 @@ All tests pass (538 tests).
 ## Commits This Session (Iteration 28)
 1. Upgrade prove command to actually generate and verify proofs
 2. Add SRS inspection command and preprocessWithSRS method
+3. Update README with srs command documentation
 
 ## Commits (Iteration 27)
 1. Add HyperKZG and Sumcheck protocol examples

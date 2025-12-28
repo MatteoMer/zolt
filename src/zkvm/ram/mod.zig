@@ -176,8 +176,7 @@ pub fn MemoryProof(comptime F: type) type {
         /// Opening proof for batch verification (optional)
         opening_proof: ?*commitment_types.OpeningProof,
 
-        /// Legacy field element (for backward compatibility during transition)
-        /// TODO: Remove after full migration to PolyCommitment
+        /// Legacy field element (for backward compatibility)
         _legacy_commitment: F,
 
         /// Create a default proof with identity commitments

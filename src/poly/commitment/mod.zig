@@ -1321,9 +1321,8 @@ test "hyperkzg verifyWithPairing" {
     const basic_valid = HKZG.verify(&params, commitment, &evaluation_point, proof.final_eval, &proof);
     try std.testing.expect(basic_valid);
 
-    // Note: verifyWithPairing needs a more complex verification equation for HyperKZG.
-    // The current implementation is a placeholder that will return false.
-    // TODO: Implement proper HyperKZG verification with Gemini reduction.
+    // Note: verifyWithPairing performs the full pairing-based verification.
+    // The basic verify() checks algebraic consistency without pairing overhead.
 }
 
 test "dory setup and commit" {

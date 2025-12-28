@@ -33,6 +33,16 @@ pub const StageVerificationResult = struct {
     error_msg: ?[]const u8,
 };
 
+/// Verifier configuration options
+pub const VerifierConfig = struct {
+    /// When true, strictly verify p(0) + p(1) = claim for all sumcheck rounds.
+    /// When false, only verify structural consistency (useful for debugging).
+    strict_sumcheck: bool = true,
+
+    /// Log verification details for debugging
+    debug_output: bool = false,
+};
+
 /// Multi-stage verifier state
 pub fn MultiStageVerifier(comptime F: type) type {
     return struct {
@@ -46,8 +56,14 @@ pub fn MultiStageVerifier(comptime F: type) type {
         current_stage: usize,
         /// Allocator
         allocator: Allocator,
+        /// Configuration
+        config: VerifierConfig,
 
         pub fn init(allocator: Allocator) Self {
+            return initWithConfig(allocator, .{});
+        }
+
+        pub fn initWithConfig(allocator: Allocator, config: VerifierConfig) Self {
             var results: [6]StageVerificationResult = undefined;
             for (&results) |*r| {
                 r.* = .{
@@ -62,6 +78,7 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 .opening_claims = OpeningClaimAccumulator(F).init(allocator),
                 .current_stage = 0,
                 .allocator = allocator,
+                .config = config,
             };
         }
 
@@ -142,34 +159,41 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 F.zero();
 
             // Verify each round polynomial
-            for (proof.round_polys.items, 0..) |round_poly, round| {
-                _ = round;
-
+            for (proof.round_polys.items, 0..) |round_poly, round_idx| {
                 // For degree 3, round_poly has 4 coefficients: [p(0), p(1), p(2), p(3)]
                 // or evaluations that we interpolate from
                 if (round_poly.len < 2) {
+                    self.stage_results[0] = .{
+                        .success = false,
+                        .final_claim = null,
+                        .error_msg = "Stage 1: invalid round polynomial length",
+                    };
                     return false; // Invalid polynomial
                 }
 
                 // Verify: p(0) + p(1) = current_claim
-                // Note: We check this but allow some flexibility during development
                 const sum = round_poly[0].add(round_poly[1]);
                 const sum_check_ok = sum.eql(current_claim);
 
                 // Get challenge from transcript (must be called to keep in sync)
                 const challenge = try transcript.challengeScalar("spartan_round");
 
-                if (sum_check_ok) {
-                    // Update claim: evaluate p at challenge point
-                    current_claim = evaluatePolynomialAtChallenge(F, round_poly, challenge);
-                } else {
-                    // For now, continue with evaluation to maintain transcript sync
-                    // In production, this would return false
-                    current_claim = evaluatePolynomialAtChallenge(F, round_poly, challenge);
+                if (self.config.strict_sumcheck and !sum_check_ok) {
+                    // Strict mode: reject the proof if sum check fails
+                    self.stage_results[0] = .{
+                        .success = false,
+                        .final_claim = null,
+                        .error_msg = "Stage 1: sumcheck failed - p(0) + p(1) != claim",
+                    };
+                    _ = round_idx; // suppress unused warning
+                    return false;
                 }
+
+                // Update claim: evaluate p at challenge point
+                current_claim = evaluatePolynomialAtChallenge(F, round_poly, challenge);
             }
 
-            // Stage 1 verification passed (structural check)
+            // Stage 1 verification passed
             self.stage_results[0] = .{
                 .success = true,
                 .final_claim = null,
@@ -214,15 +238,32 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 F.zero();
 
             // Verify each round polynomial
-            for (proof.round_polys.items, 0..) |round_poly, round| {
-                _ = round;
-
+            for (proof.round_polys.items, 0..) |round_poly, round_idx| {
                 if (round_poly.len < 2) {
+                    self.stage_results[1] = .{
+                        .success = false,
+                        .final_claim = null,
+                        .error_msg = "Stage 2: invalid round polynomial length",
+                    };
                     return false;
                 }
 
+                // Verify sumcheck: p(0) + p(1) = current_claim
+                const sum = round_poly[0].add(round_poly[1]);
+                const sum_check_ok = sum.eql(current_claim);
+
                 // Get challenge from transcript (must match prover's challenge)
                 const challenge = try transcript.challengeScalar("raf_round");
+
+                if (self.config.strict_sumcheck and !sum_check_ok) {
+                    self.stage_results[1] = .{
+                        .success = false,
+                        .final_claim = null,
+                        .error_msg = "Stage 2: sumcheck failed - p(0) + p(1) != claim",
+                    };
+                    _ = round_idx;
+                    return false;
+                }
 
                 // Accumulate challenge for opening claims
                 try self.opening_claims.addChallenge(challenge);
@@ -232,7 +273,7 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 current_claim = one_minus_r.mul(round_poly[0]).add(challenge.mul(round_poly[1]));
             }
 
-            // Stage 2 verification passed (structural check)
+            // Stage 2 verification passed
             self.stage_results[1] = .{
                 .success = true,
                 .final_claim = null,
@@ -282,9 +323,7 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 F.zero();
 
             // Verify each round
-            for (proof.round_polys.items, 0..) |round_poly, round| {
-                _ = round;
-
+            for (proof.round_polys.items, 0..) |round_poly, round_idx| {
                 if (round_poly.len < 2) {
                     self.stage_results[2] = .{
                         .success = false,
@@ -294,8 +333,23 @@ pub fn MultiStageVerifier(comptime F: type) type {
                     return false;
                 }
 
+                // Verify sumcheck: p(0) + p(1) = current_claim
+                const sum = round_poly[0].add(round_poly[1]);
+                const sum_check_ok = sum.eql(current_claim);
+
                 // Get challenge
                 const challenge = try transcript.challengeScalar("lasso_round");
+
+                if (self.config.strict_sumcheck and !sum_check_ok) {
+                    self.stage_results[2] = .{
+                        .success = false,
+                        .final_claim = null,
+                        .error_msg = "Stage 3: sumcheck failed - p(0) + p(1) != claim",
+                    };
+                    _ = round_idx;
+                    return false;
+                }
+
                 try self.opening_claims.addChallenge(challenge);
 
                 // Update claim
@@ -303,7 +357,7 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 current_claim = one_minus_r.mul(round_poly[0]).add(challenge.mul(round_poly[1]));
             }
 
-            // Stage 3 verification passed (structural check)
+            // Stage 3 verification passed
             self.stage_results[2] = .{
                 .success = true,
                 .final_claim = null,
@@ -353,9 +407,7 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 F.zero();
 
             // Verify each round polynomial
-            for (proof.round_polys.items, 0..) |round_poly, round| {
-                _ = round;
-
+            for (proof.round_polys.items, 0..) |round_poly, round_idx| {
                 if (round_poly.len < 3) {
                     // Degree 3 requires at least 3 evaluations
                     self.stage_results[3] = .{
@@ -366,15 +418,30 @@ pub fn MultiStageVerifier(comptime F: type) type {
                     return false;
                 }
 
+                // Verify sumcheck: p(0) + p(1) = current_claim
+                const sum = round_poly[0].add(round_poly[1]);
+                const sum_check_ok = sum.eql(current_claim);
+
                 // Get challenge
                 const challenge = try transcript.challengeScalar("val_eval_round");
+
+                if (self.config.strict_sumcheck and !sum_check_ok) {
+                    self.stage_results[3] = .{
+                        .success = false,
+                        .final_claim = null,
+                        .error_msg = "Stage 4: sumcheck failed - p(0) + p(1) != claim",
+                    };
+                    _ = round_idx;
+                    return false;
+                }
+
                 try self.opening_claims.addChallenge(challenge);
 
                 // Update claim using interpolation for degree 3
                 current_claim = evaluatePolynomialAtChallenge(F, round_poly, challenge);
             }
 
-            // Stage 4 verification passed (structural check)
+            // Stage 4 verification passed
             self.stage_results[3] = .{
                 .success = true,
                 .final_claim = null,
@@ -423,9 +490,7 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 F.zero();
 
             // Verify each round
-            for (proof.round_polys.items, 0..) |round_poly, round| {
-                _ = round;
-
+            for (proof.round_polys.items, 0..) |round_poly, round_idx| {
                 if (round_poly.len < 2) {
                     self.stage_results[4] = .{
                         .success = false,
@@ -435,8 +500,23 @@ pub fn MultiStageVerifier(comptime F: type) type {
                     return false;
                 }
 
+                // Verify sumcheck: p(0) + p(1) = current_claim
+                const sum = round_poly[0].add(round_poly[1]);
+                const sum_check_ok = sum.eql(current_claim);
+
                 // Get challenge
                 const challenge = try transcript.challengeScalar("reg_eval_round");
+
+                if (self.config.strict_sumcheck and !sum_check_ok) {
+                    self.stage_results[4] = .{
+                        .success = false,
+                        .final_claim = null,
+                        .error_msg = "Stage 5: sumcheck failed - p(0) + p(1) != claim",
+                    };
+                    _ = round_idx;
+                    return false;
+                }
+
                 try self.opening_claims.addChallenge(challenge);
 
                 // Update claim
@@ -444,7 +524,7 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 current_claim = one_minus_r.mul(round_poly[0]).add(challenge.mul(round_poly[1]));
             }
 
-            // Stage 5 verification passed (structural check)
+            // Stage 5 verification passed
             self.stage_results[4] = .{
                 .success = true,
                 .final_claim = null,
@@ -473,9 +553,7 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 F.zero();
 
             // Verify each round
-            for (proof.round_polys.items, 0..) |round_poly, round| {
-                _ = round;
-
+            for (proof.round_polys.items, 0..) |round_poly, round_idx| {
                 if (round_poly.len < 2) {
                     self.stage_results[5] = .{
                         .success = false,
@@ -485,8 +563,23 @@ pub fn MultiStageVerifier(comptime F: type) type {
                     return false;
                 }
 
+                // Verify sumcheck: p(0) + p(1) = current_claim
+                const sum = round_poly[0].add(round_poly[1]);
+                const sum_check_ok = sum.eql(current_claim);
+
                 // Get challenge
                 const challenge = try transcript.challengeScalar("bool_round");
+
+                if (self.config.strict_sumcheck and !sum_check_ok) {
+                    self.stage_results[5] = .{
+                        .success = false,
+                        .final_claim = null,
+                        .error_msg = "Stage 6: sumcheck failed - p(0) + p(1) != claim",
+                    };
+                    _ = round_idx;
+                    return false;
+                }
+
                 try self.opening_claims.addChallenge(challenge);
 
                 // Update claim
@@ -494,7 +587,7 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 current_claim = one_minus_r.mul(round_poly[0]).add(challenge.mul(round_poly[1]));
             }
 
-            // Stage 6 verification passed (structural check)
+            // Stage 6 verification passed
             self.stage_results[5] = .{
                 .success = true,
                 .final_claim = null,
@@ -676,4 +769,28 @@ test "polynomial evaluation at challenge - quadratic" {
     // p(3) = 9
     const result = evaluatePolynomialAtChallenge(F, &evals, r);
     try std.testing.expect(result.eql(F.fromU64(9)));
+}
+
+test "verifier config defaults" {
+    const config = VerifierConfig{};
+    try std.testing.expect(config.strict_sumcheck);
+    try std.testing.expect(!config.debug_output);
+}
+
+test "verifier with strict mode" {
+    const allocator = std.testing.allocator;
+    const field = @import("../field/mod.zig");
+    const F = field.BN254Scalar;
+
+    // Create verifier with strict sumcheck enabled (default)
+    var strict_verifier = MultiStageVerifier(F).init(allocator);
+    defer strict_verifier.deinit();
+    try std.testing.expect(strict_verifier.config.strict_sumcheck);
+
+    // Create verifier with strict sumcheck disabled
+    var lenient_verifier = MultiStageVerifier(F).initWithConfig(allocator, .{
+        .strict_sumcheck = false,
+    });
+    defer lenient_verifier.deinit();
+    try std.testing.expect(!lenient_verifier.config.strict_sumcheck);
 }

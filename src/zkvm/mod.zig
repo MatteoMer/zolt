@@ -45,6 +45,7 @@ pub const SumcheckInstance = prover.SumcheckInstance;
 pub const MultiStageVerifier = verifier.MultiStageVerifier;
 pub const StageVerificationResult = verifier.StageVerificationResult;
 pub const OpeningClaimAccumulator = verifier.OpeningClaimAccumulator;
+pub const VerifierConfig = verifier.VerifierConfig;
 
 /// RISC-V register indices
 pub const Register = enum(u8) {
@@ -486,11 +487,14 @@ pub fn JoltVerifier(comptime F: type) type {
         allocator: Allocator,
         /// Optional verifying key for commitment verification
         verifying_key: ?VerifyingKey,
+        /// Verifier configuration
+        config: verifier.VerifierConfig,
 
         pub fn init(allocator: Allocator) Self {
             return .{
                 .allocator = allocator,
                 .verifying_key = null,
+                .config = .{},
             };
         }
 
@@ -499,12 +503,23 @@ pub fn JoltVerifier(comptime F: type) type {
             return .{
                 .allocator = allocator,
                 .verifying_key = vk,
+                .config = .{},
             };
         }
 
         /// Set the verifying key
         pub fn setVerifyingKey(self: *Self, vk: VerifyingKey) void {
             self.verifying_key = vk;
+        }
+
+        /// Set the verifier configuration
+        pub fn setConfig(self: *Self, config: verifier.VerifierConfig) void {
+            self.config = config;
+        }
+
+        /// Enable or disable strict sumcheck verification
+        pub fn setStrictMode(self: *Self, strict: bool) void {
+            self.config.strict_sumcheck = strict;
         }
 
         /// Verify a Jolt proof
@@ -600,7 +615,10 @@ pub fn JoltVerifier(comptime F: type) type {
             stage_proofs: *const JoltStageProofs(F),
             transcript: *transcripts.Transcript(F),
         ) !bool {
-            var multi_verifier = verifier.MultiStageVerifier(F).init(self.allocator);
+            var multi_verifier = verifier.MultiStageVerifier(F).initWithConfig(
+                self.allocator,
+                self.config,
+            );
             defer multi_verifier.deinit();
 
             return multi_verifier.verify(stage_proofs, transcript);

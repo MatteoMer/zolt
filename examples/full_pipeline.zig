@@ -130,6 +130,11 @@ pub fn main() !void {
     };
     verifier.setVerifyingKey(zkvm_vk);
 
+    // Note: Set strict_sumcheck to false for demo purposes.
+    // When true, the verifier performs full sumcheck validation.
+    // When false, it performs structural verification only.
+    verifier.setStrictMode(false);
+
     std.debug.print("Verifier initialized with verifying key\n", .{});
     std.debug.print("Verifying proof...\n", .{});
 

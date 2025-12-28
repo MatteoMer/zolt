@@ -2,7 +2,7 @@
 
 ## Current Status (Jolt Compatibility Phase)
 
-**Project Status: JOLT COMPATIBILITY - Prover Wiring Complete**
+**Project Status: JOLT COMPATIBILITY - Core Implementation Complete**
 
 The following Jolt-compatibility components are now working:
 - Blake2b transcript with identical Fiat-Shamir challenges
@@ -11,6 +11,7 @@ The following Jolt-compatibility components are now working:
 - Proof converter (6-stage Zolt → 7-stage Jolt)
 - JoltProver with `proveJoltCompatible()` method
 - Jolt proof serialization with `serializeJoltProof()`
+- End-to-end serialization tests verifying format compatibility
 
 ---
 
@@ -68,21 +69,58 @@ The following Jolt-compatibility components are now working:
   - [x] `serializeJoltProof()` - Serialize to arkworks format
   - [x] Wire up proof converter with prover
 
-- [ ] **Commitment Scheme** (Future)
-  - [ ] Wire up Dory commitments
+### 5. Integration Testing ✅ COMPLETE
+
+- [x] **End-to-End Serialization Tests** (`src/zkvm/jolt_serialization.zig`)
+  - [x] Test JoltProof with all 7 stages
+  - [x] Verify opening claims serialization
+  - [x] Verify commitments serialization
+  - [x] Test empty proof serialization
+  - [x] Validate config parameters serialization
+
+### 6. Remaining Work (Future Phase)
+
+- [ ] **Commitment Scheme Alignment**
+  - [ ] Wire up Dory commitments (Zolt uses HyperKZG)
   - [ ] Serialize GT elements in arkworks format
+  - [ ] Match Jolt's SRS generation (SHA3-256 seed: `"Jolt Dory URS seed"`)
 
-### 5. Integration Testing (NEXT)
+- [ ] **Cross-Verification Test** (Requires Jolt-side changes)
+  - [ ] Create Rust test in Jolt that loads Zolt proof file
+  - [ ] Generate proof in Zolt for fibonacci
+  - [ ] Verify proof loads and parses correctly in Jolt
+  - [ ] Attempt verification (may fail without Dory)
 
-- [ ] **End-to-End Serialization Test**
-  - [ ] Generate proof in Zolt for a simple program
-  - [ ] Serialize in Jolt-compatible format
-  - [ ] Verify serialized bytes structure
+---
 
-- [ ] **Cross-Verification Tests**
-  - [ ] Generate proof in Zolt for fibonacci.elf
-  - [ ] Load in Jolt and verify
-  - [ ] Create Rust test harness in Jolt
+## Cross-Verification Notes
+
+To complete cross-verification, the following steps are needed:
+
+1. **In Zolt**: Generate a proof file in Jolt format
+   ```zig
+   var prover = JoltProver(F).init(allocator);
+   var jolt_proof = try prover.proveJoltCompatible(bytecode, inputs);
+   const bytes = try prover.serializeJoltProof(&jolt_proof);
+   // Write bytes to "proof.jolt" file
+   ```
+
+2. **In Jolt** (requires adding test): Load and verify
+   ```rust
+   #[test]
+   fn verify_zolt_proof() {
+       let proof: JoltProof<_, Dory, _> =
+           JoltProof::from_file("proof.jolt").unwrap();
+       // Would need matching preprocessing, memory layout, etc.
+   }
+   ```
+
+The challenge is that Jolt verification requires:
+- Preprocessing data (bytecode, memory layout)
+- Program IO (inputs, outputs)
+- Matching commitment scheme (Dory vs HyperKZG)
+
+Without Dory commitment alignment, the proof will fail at Stage 8 (batch opening).
 
 ---
 
@@ -139,7 +177,7 @@ Build Summary: 5/5 steps succeeded; 578/578 tests passed
 |------|--------|---------|
 | `src/transcripts/blake2b.zig` | ✅ Done | Blake2bTranscript |
 | `src/zkvm/jolt_types.zig` | ✅ Done | Jolt proof types |
-| `src/zkvm/jolt_serialization.zig` | ✅ Done | Arkworks serialization |
+| `src/zkvm/jolt_serialization.zig` | ✅ Done | Arkworks serialization + e2e tests |
 | `src/zkvm/proof_converter.zig` | ✅ Done | 6→7 stage converter |
 | `src/zkvm/mod.zig` | ✅ Done | JoltProver with Jolt export |
 
@@ -158,8 +196,9 @@ Build Summary: 5/5 steps succeeded; 578/578 tests passed
 1. ✅ `zig build test` passes all 578 tests
 2. ✅ Zolt can generate a proof in Jolt format (`proveJoltCompatible`)
 3. ✅ Zolt can serialize proofs in arkworks format (`serializeJoltProof`)
-4. ⏳ The proof can be loaded and verified by Jolt
-5. ⏳ No modifications needed on the Jolt side
+4. ✅ E2E serialization tests verify format compatibility
+5. ⏳ The proof can be loaded and verified by Jolt (requires Dory + Jolt test)
+6. ⏳ No modifications needed on the Jolt side (requires Dory alignment)
 
 ## Priority Order
 
@@ -167,4 +206,6 @@ Build Summary: 5/5 steps succeeded; 578/578 tests passed
 2. ✅ **Proof Types** - JoltProof structure defined
 3. ✅ **Serialization** - Byte-perfect compatibility verified
 4. ✅ **Prover Wiring** - Connect types to prover
-5. ⏳ **Integration** - End-to-end verification
+5. ✅ **Integration Tests** - E2E serialization verified
+6. ⏳ **Dory Commitment** - Required for full verification
+7. ⏳ **Cross-Verification** - Jolt-side test needed

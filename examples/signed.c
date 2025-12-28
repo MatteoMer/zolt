@@ -1,34 +1,35 @@
 // Signed arithmetic example for Zolt zkVM
 // Demonstrates signed integer operations and comparisons
 
-// Declarations for libzolt runtime
-void zolt_io_write_u64(unsigned long value);
-unsigned long zolt_io_read_u64(void);
+// Minimal startup code
+void _start(void) __attribute__((naked));
 
-// Cast to unsigned for output
-static inline unsigned long to_unsigned(long x) {
-    return (unsigned long)x;
+void _start(void) {
+    __asm__ volatile(
+        // Set up stack pointer
+        "li sp, 0x80010000\n"
+        // Call main and store result in a0
+        "call main\n"
+        // Exit via ecall
+        "ecall\n"
+    );
 }
 
 int main(void) {
     // Signed addition with negative numbers
-    long a = -10;
-    long b = 25;
-    long sum = a + b;  // Should be 15
-
-    // Signed subtraction resulting in negative
-    long diff = a - b;  // Should be -35
+    int a = -10;
+    int b = 25;
+    int sum = a + b;  // Should be 15
 
     // Signed multiplication
-    long c = -7;
-    long d = 6;
-    long product = c * d;  // Should be -42
+    int c = -7;
+    int d = 6;
+    int product = c * d;  // Should be -42
 
     // Signed division
-    long e = -100;
-    long f = 7;
-    long quotient = e / f;  // Should be -14 (truncated toward zero)
-    long remainder = e % f;  // Should be -2
+    int e = -100;
+    int f = 7;
+    int quotient = e / f;  // Should be -14 (truncated toward zero)
 
     // Signed comparisons using SLT instruction
     int cmp1 = (a < b) ? 1 : 0;  // -10 < 25 => 1
@@ -38,14 +39,11 @@ int main(void) {
     // Compute a result combining all operations
     // sum=15, product=-42, quotient=-14
     // 15 + (-42) + (-14) = -41
-    long result = sum + product + quotient;
+    int result = sum + product + quotient;
 
     // Add comparison results: 1 + 1 + 0 = 2
     result = result + cmp1 + cmp2 + cmp3;  // -41 + 2 = -39
 
-    // For zkVM output, we cast to unsigned
-    // -39 in two's complement (64-bit): 0xFFFFFFFFFFFFFFD9
-    zolt_io_write_u64(to_unsigned(result));
-
-    return 0;
+    // Return the result (-39 in two's complement)
+    return result;
 }

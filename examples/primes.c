@@ -1,19 +1,29 @@
-// Prime number sieve example for Zolt zkVM
+// Prime number counting example for Zolt zkVM
 // Counts the number of primes less than 100 using trial division
 
-// Declarations for libzolt runtime
-void zolt_io_write_u64(unsigned long value);
-unsigned long zolt_io_read_u64(void);
+// Minimal startup code
+void _start(void) __attribute__((naked));
+
+void _start(void) {
+    __asm__ volatile(
+        // Set up stack pointer
+        "li sp, 0x80010000\n"
+        // Call main and store result in a0
+        "call main\n"
+        // Exit via ecall
+        "ecall\n"
+    );
+}
 
 // Check if n is prime using trial division
-int is_prime(unsigned long n) {
+int is_prime(unsigned int n) {
     if (n < 2) return 0;
     if (n == 2) return 1;
     if (n % 2 == 0) return 0;
 
     // Check odd divisors up to sqrt(n)
     // Since we don't have sqrt, we check until i*i > n
-    unsigned long i = 3;
+    unsigned int i = 3;
     while (i * i <= n) {
         if (n % i == 0) return 0;
         i += 2;
@@ -22,11 +32,11 @@ int is_prime(unsigned long n) {
 }
 
 int main(void) {
-    unsigned long count = 0;
-    unsigned long limit = 100;
+    unsigned int count = 0;
+    unsigned int limit = 100;
 
     // Count primes less than limit
-    for (unsigned long n = 2; n < limit; n++) {
+    for (unsigned int n = 2; n < limit; n++) {
         if (is_prime(n)) {
             count++;
         }
@@ -35,7 +45,5 @@ int main(void) {
     // There are 25 primes less than 100:
     // 2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47,
     // 53, 59, 61, 67, 71, 73, 79, 83, 89, 97
-    zolt_io_write_u64(count);
-
-    return 0;
+    return (int)count;
 }

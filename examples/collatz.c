@@ -7,15 +7,24 @@
 // - If n is odd: n = 3*n + 1
 // Eventually reaches 1
 
-// Declarations for libzolt runtime
-void zolt_io_write_u64(unsigned long value);
-unsigned long zolt_io_read_u64(void);
+// Minimal startup code
+void _start(void) __attribute__((naked));
+
+void _start(void) {
+    __asm__ volatile(
+        // Set up stack pointer
+        "li sp, 0x80010000\n"
+        // Call main and store result in a0
+        "call main\n"
+        // Exit via ecall
+        "ecall\n"
+    );
+}
 
 int main(void) {
     // Start with n = 27, which has a sequence of 111 steps
-    unsigned long n = 27;
-    unsigned long steps = 0;
-    unsigned long max_value = n;  // Track the highest value reached
+    unsigned int n = 27;
+    unsigned int steps = 0;
 
     // Count steps until we reach 1
     while (n > 1) {
@@ -26,18 +35,9 @@ int main(void) {
             // Odd: 3n + 1
             n = 3 * n + 1;
         }
-
         steps++;
-
-        // Track maximum value
-        if (n > max_value) {
-            max_value = n;
-        }
     }
 
-    // Output the number of steps
-    // For n=27, this should be 111
-    zolt_io_write_u64(steps);
-
-    return 0;
+    // Return the number of steps (should be 111)
+    return (int)steps;
 }

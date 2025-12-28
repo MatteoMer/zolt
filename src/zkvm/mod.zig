@@ -71,6 +71,20 @@ pub const readProofAutoDetect = serialization.readProofAutoDetect;
 pub const isJsonProof = serialization.isJsonProof;
 pub const JsonDeserializationError = serialization.JsonDeserializationError;
 
+// Re-export compression functions
+pub const compressGzip = serialization.compressGzip;
+pub const decompressGzip = serialization.decompressGzip;
+pub const isGzipCompressed = serialization.isGzipCompressed;
+pub const serializeProofCompressed = serialization.serializeProofCompressed;
+pub const deserializeProofCompressed = serialization.deserializeProofCompressed;
+pub const writeProofToFileCompressed = serialization.writeProofToFileCompressed;
+pub const readProofFromFileCompressed = serialization.readProofFromFileCompressed;
+pub const readProofAutoDetectFull = serialization.readProofAutoDetectFull;
+pub const detectProofFormat = serialization.detectProofFormat;
+pub const ProofFormat = serialization.ProofFormat;
+pub const GZIP_MAGIC = serialization.GZIP_MAGIC;
+pub const CompressionError = serialization.CompressionError;
+
 /// RISC-V register indices
 pub const Register = enum(u8) {
     // Standard RISC-V registers

@@ -1571,3 +1571,118 @@ test "isJsonProof detection" {
     try std.testing.expect(!isJsonProof("not json"));
     try std.testing.expect(!isJsonProof("{}"));
 }
+
+// ============================================================================
+// Format Detection Support
+// ============================================================================
+
+/// Magic bytes for gzip format
+pub const GZIP_MAGIC: [2]u8 = .{ 0x1f, 0x8b };
+
+/// Compression error types (for future implementation)
+pub const CompressionError = error{
+    CompressionFailed,
+    DecompressionFailed,
+    InvalidGzipHeader,
+    NotImplemented,
+    OutOfMemory,
+};
+
+/// Check if data is gzip compressed (starts with 0x1f 0x8b)
+pub fn isGzipCompressed(data: []const u8) bool {
+    return data.len >= 2 and data[0] == GZIP_MAGIC[0] and data[1] == GZIP_MAGIC[1];
+}
+
+/// Compress data using gzip (placeholder - not yet implemented)
+/// Note: Zig 0.15 has a streaming compression API that requires complex setup.
+/// A future version will implement compression when the API stabilizes.
+pub fn compressGzip(_: Allocator, _: []const u8) CompressionError![]u8 {
+    return CompressionError.NotImplemented;
+}
+
+/// Decompress gzip data (placeholder - not yet implemented)
+pub fn decompressGzip(_: Allocator, _: []const u8) CompressionError![]u8 {
+    return CompressionError.NotImplemented;
+}
+
+/// Serialize proof with compression (placeholder - not yet implemented)
+pub fn serializeProofCompressed(comptime F: type, _: Allocator, _: anytype) CompressionError![]u8 {
+    _ = F;
+    return CompressionError.NotImplemented;
+}
+
+/// Deserialize compressed proof (placeholder - not yet implemented)
+pub fn deserializeProofCompressed(comptime F: type, _: Allocator, _: []const u8) CompressionError!@import("mod.zig").JoltProof(F) {
+    return CompressionError.NotImplemented;
+}
+
+/// Write compressed proof to file (placeholder - not yet implemented)
+pub fn writeProofToFileCompressed(comptime F: type, _: Allocator, _: anytype, _: []const u8) CompressionError!void {
+    _ = F;
+    return CompressionError.NotImplemented;
+}
+
+/// Read compressed proof from file (placeholder - not yet implemented)
+pub fn readProofFromFileCompressed(comptime F: type, _: Allocator, _: []const u8) CompressionError!@import("mod.zig").JoltProof(F) {
+    return CompressionError.NotImplemented;
+}
+
+/// Auto-detect format and read proof (supports binary and JSON)
+/// Note: Gzip compressed proofs are detected but not yet supported
+pub fn readProofAutoDetectFull(comptime F: type, allocator: Allocator, data: []const u8) !@import("mod.zig").JoltProof(F) {
+    // Gzip detection - not yet implemented
+    if (isGzipCompressed(data)) {
+        return SerializationError.InvalidData; // Gzip not supported yet
+    }
+
+    // JSON format
+    if (isJsonProof(data)) {
+        return deserializeProofFromJson(F, allocator, data);
+    }
+
+    // Binary format
+    return deserializeProof(F, allocator, data);
+}
+
+/// Proof format types
+pub const ProofFormat = enum {
+    binary,
+    json,
+    gzip,
+    unknown,
+
+    pub fn toString(self: ProofFormat) []const u8 {
+        return switch (self) {
+            .binary => "Binary",
+            .json => "JSON",
+            .gzip => "Gzip (not yet supported)",
+            .unknown => "Unknown",
+        };
+    }
+};
+
+/// Detect the format of proof data
+pub fn detectProofFormat(data: []const u8) ProofFormat {
+    if (isGzipCompressed(data)) return .gzip;
+    if (isJsonProof(data)) return .json;
+    if (data.len >= 4 and std.mem.eql(u8, data[0..4], &MAGIC)) return .binary;
+    return .unknown;
+}
+
+// ============================================================================
+// Format Detection Tests
+// ============================================================================
+
+test "isGzipCompressed detection" {
+    try std.testing.expect(isGzipCompressed(&[_]u8{ 0x1f, 0x8b, 0x08, 0x00 }));
+    try std.testing.expect(!isGzipCompressed(&[_]u8{ 'Z', 'O', 'L', 'T' }));
+    try std.testing.expect(!isGzipCompressed(&[_]u8{'{'}));
+    try std.testing.expect(!isGzipCompressed(&[_]u8{}));
+}
+
+test "detectProofFormat" {
+    try std.testing.expectEqual(ProofFormat.gzip, detectProofFormat(&[_]u8{ 0x1f, 0x8b, 0x08, 0x00 }));
+    try std.testing.expectEqual(ProofFormat.binary, detectProofFormat(&[_]u8{ 'Z', 'O', 'L', 'T', 0x01, 0x00 }));
+    try std.testing.expectEqual(ProofFormat.json, detectProofFormat("{\"format\": \"ZOLT-JSON\"}"));
+    try std.testing.expectEqual(ProofFormat.unknown, detectProofFormat("random data"));
+}

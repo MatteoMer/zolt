@@ -424,10 +424,21 @@ fn runVerifier(allocator: std.mem.Allocator, proof_path: []const u8) !void {
     };
     file.close();
 
-    const is_json = zolt.zkvm.isJsonProof(header_buf[0..bytes_read]);
-    std.debug.print("  Format: {s}\n", .{if (is_json) "JSON" else "Binary"});
+    const format = zolt.zkvm.detectProofFormat(header_buf[0..bytes_read]);
+    std.debug.print("  Format: {s}\n", .{format.toString()});
 
-    var proof = zolt.zkvm.readProofAutoDetect(BN254Scalar, allocator, proof_path) catch |err| {
+    // Load the full file for auto-detection
+    const proof_file = std.fs.cwd().openFile(proof_path, .{}) catch |err| {
+        std.debug.print("  Error opening proof file: {}\n", .{err});
+        return err;
+    };
+    defer proof_file.close();
+    const stat = try proof_file.stat();
+    const data = try allocator.alloc(u8, stat.size);
+    defer allocator.free(data);
+    _ = try proof_file.readAll(data);
+
+    var proof = zolt.zkvm.readProofAutoDetectFull(BN254Scalar, allocator, data) catch |err| {
         std.debug.print("  Error loading proof: {}\n", .{err});
         return err;
     };
@@ -720,17 +731,26 @@ fn showProofStats(allocator: std.mem.Allocator, proof_path: []const u8) !void {
     const bytes_read = try file.readAll(&header_buf);
     file.close();
 
-    const is_json = zolt.zkvm.isJsonProof(header_buf[0..bytes_read]);
+    const format = zolt.zkvm.detectProofFormat(header_buf[0..bytes_read]);
 
     std.debug.print("File: {s}\n", .{proof_path});
-    std.debug.print("Format: {s}\n", .{if (is_json) "JSON" else "Binary"});
+    std.debug.print("Format: {s}\n", .{format.toString()});
     std.debug.print("File size: {} bytes ({d:.2} KB)\n", .{ file_stat.size, @as(f64, @floatFromInt(file_stat.size)) / 1024.0 });
 
-    // Load proof
+    // Load proof (with full file data for gzip support)
     std.debug.print("\nLoading proof...\n", .{});
     var timer = std.time.Timer.start() catch return;
 
-    var proof = zolt.zkvm.readProofAutoDetect(BN254Scalar, allocator, proof_path) catch |err| {
+    const proof_file = std.fs.cwd().openFile(proof_path, .{}) catch |err| {
+        std.debug.print("Error opening proof file: {}\n", .{err});
+        return err;
+    };
+    defer proof_file.close();
+    const data = try allocator.alloc(u8, file_stat.size);
+    defer allocator.free(data);
+    _ = try proof_file.readAll(data);
+
+    var proof = zolt.zkvm.readProofAutoDetectFull(BN254Scalar, allocator, data) catch |err| {
         std.debug.print("Error loading proof: {}\n", .{err});
         return err;
     };

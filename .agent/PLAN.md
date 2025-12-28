@@ -1,6 +1,34 @@
 # Zolt zkVM Implementation Plan
 
-## Current Status (December 2024 - Iteration 46)
+## Current Status (December 2024 - Iteration 47)
+
+### Session Summary - Example Programs & Format Detection
+
+This iteration focused on adding more example programs and improving format detection:
+
+1. **New C Example Programs**
+   - `factorial.c` - Compute 10! = 3628800 (uses MUL instruction)
+   - `bitwise.c` - AND, OR, XOR, and shift operations demo
+   - `array.c` - Array store/load operations with sum and max
+   - `gcd.c` - GCD using Euclidean algorithm (DIV, REM)
+   - Updated Makefile with new targets and help message
+
+2. **Format Detection**
+   - Added `ProofFormat` enum (binary, json, gzip, unknown)
+   - Added `detectProofFormat()` function
+   - Added `readProofAutoDetectFull()` for full format auto-detection
+   - Updated verify and stats commands to use new detection
+
+3. **Compression Preparation**
+   - Added placeholder functions for gzip compression
+   - Detection works, but actual compression not yet implemented
+   - Zig 0.15's compression API requires streaming setup
+
+4. **Documentation**
+   - Updated CHANGELOG with v0.1.1 features
+   - Updated README with C examples documentation
+
+## Previous Status (December 2024 - Iteration 46)
 
 ### Session Summary - Stats & Trace Commands Added
 

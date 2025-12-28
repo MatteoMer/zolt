@@ -1,87 +1,58 @@
 # Zolt-Jolt Compatibility Notes
 
-## Current Status (December 28, 2024, Session 7)
+## Current Status (December 28, 2024, Session 10)
 
-### Session 7 Progress
+### Session 10 Progress
 
-**DoryVerifierSetup Complete and VERIFIED!**
+**Major Progress on Transcript Compatibility!**
 
-1. Implemented `DoryVerifierSetup` in `src/zkvm/preprocessing.zig`:
-   - Precomputed pairing values: delta_1l, delta_1r, delta_2l, delta_2r, chi
-   - Full GT/G1/G2 serialization in arkworks format
-   - `fromSRS()` creates verifier setup from prover SRS
+1. **Fixed Montgomery Form Issue**: `appendScalar` was serializing Montgomery form
+   limbs directly instead of converting to canonical form first. Fixed by adding
+   `fromMontgomery()` call before serialization.
 
-2. Updated `--export-preprocessing` to export full JoltVerifierPreprocessing:
-   - DoryVerifierSetup (generators)
-   - JoltSharedPreprocessing (bytecode, RAM, memory layout)
+2. **Transcript States Now Match**: After the Montgomery form fix, the transcript
+   states match exactly at the point of r0 derivation:
+   - Jolt state: `[51, 28, c0, 92, ab, 81, 34, c6, ...]`
+   - Zolt state: `5128c092ab8134c6178d3b18...`
 
-3. All 632 tests passing
+3. **Remaining Issue**: Despite matching states, the r0 challenge values differ:
+   - Jolt r0: `3203159906685754656633863192913202159923849199052541271036524843387280424960`
+   - Zolt raw bytes: `c9e8fb5d94a6ff9206ac6f469cec1467`
+   - Expected (from Jolt): `c9e8fb5d94a6ff9206ac6f469cec1407`
+   - Difference: Last byte is `67` vs `07`
 
-### Jolt Verification Test Results
+### Analysis of Challenge Mismatch
 
-**DoryVerifierSetup loads successfully in Jolt!**
-
+The Blake2b hasher includes `n_rounds` in the hash input:
 ```
-Read 576205 bytes from Zolt preprocessing
-Verifier setup parsed OK!
-  max_log_n: 20
-  delta_1l len: 11
-  chi len: 11
-```
-
-The generators portion is byte-compatible with Jolt. The shared preprocessing
-portion still needs format alignment for `BytecodePreprocessing` and `RAMPreprocessing`.
-
-### Test Output
-```
-Exporting preprocessing to: /tmp/zolt_preprocessing.bin
-  Preprocessing exported successfully! (576205 bytes)
+hasher() = Blake2b256(state || [0u8; 28] || n_rounds.to_be_bytes())
 ```
 
-The exported file now contains the complete verifier preprocessing with correct generator format.
+If `n_rounds` differs between Zolt and Jolt at the same state, the hash outputs
+will differ. This is the likely cause.
 
-### Architecture of DoryVerifierSetup
+When deriving r0:
+- Zolt: n_rounds = 55
+- Jolt: n_rounds = ? (needs verification)
 
-```zig
-pub const DoryVerifierSetup = struct {
-    delta_1l: std.ArrayListUnmanaged(GT),  // Δ₁L[k] = e(Γ₁[..2^(k-1)], Γ₂[..2^(k-1)])
-    delta_1r: std.ArrayListUnmanaged(GT),  // Δ₁R[k] = e(Γ₁[2^(k-1)..2^k], Γ₂[..2^(k-1)])
-    delta_2l: std.ArrayListUnmanaged(GT),  // Same as Δ₁L
-    delta_2r: std.ArrayListUnmanaged(GT),  // Δ₂R[k] = e(Γ₁[..2^(k-1)], Γ₂[2^(k-1)..2^k])
-    chi: std.ArrayListUnmanaged(GT),       // χ[k] = e(Γ₁[..2^k], Γ₂[..2^k])
-    g1_0: G1Point,                         // First G1 generator
-    g2_0: G2Point,                         // First G2 generator
-    h1: G1Point,                           // Blinding generator in G1
-    h2: G2Point,                           // Blinding generator in G2
-    ht: GT,                                // h_t = e(h₁, h₂)
-    max_log_n: usize,                      // Maximum log₂ of polynomial size
-};
-```
+### Root Cause Hypothesis
 
-### Serialization Format
-- GT elements: 384 bytes (12 × 32 byte Fp elements)
-- G1 points: 64 bytes (2 × 32 byte Fp elements, uncompressed)
-- G2 points: 128 bytes (4 × 32 byte Fp elements, uncompressed)
-- All in arkworks little-endian format
+The state can match even if n_rounds differs if:
+- Different sequences of operations led to the same final state
+- But the number of operations (and thus n_rounds) differs
 
----
+For example:
+- Path A: 55 operations → state X
+- Path B: 50 operations → state X (via different intermediate states)
 
-## Previous Status (December 28, 2024, Session 6)
+This shouldn't happen if both follow the same protocol... unless there's a subtle
+difference in how operations are counted or performed.
 
-### Session 6 Progress
+### Next Steps
 
-**Preprocessing Export Implemented!**
-
-1. Created `src/zkvm/preprocessing.zig`:
-   - `JoltInstruction` with JSON serialization (matches Jolt's serde format)
-   - `BytecodePreprocessing` with PC mapper
-   - `RAMPreprocessing` for initial memory state
-   - `JoltSharedPreprocessing` combining all components
-
-2. Added `--export-preprocessing` CLI option:
-   ```bash
-   ./zolt prove --jolt-format -o proof.jolt --export-preprocessing prep.dat program.elf
-   ```
+1. Add n_rounds logging to track counter at each major step
+2. Create minimal reproducible test case
+3. Compare operation counts between Zolt prover and Jolt verifier
 
 ---
 
@@ -89,30 +60,43 @@ pub const DoryVerifierSetup = struct {
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Blake2b Transcript | ✅ Working | All test vectors match |
+| Blake2b Transcript | ⚠️ Almost | State matches, n_rounds may differ |
 | Dory Commitment | ✅ Working | GT elements match, MSM correct |
 | Proof Structure | ✅ Working | 7 stages, claims, all parse |
 | Serialization | ✅ Working | Byte-level compatible |
-| UniSkip Algorithm | ✅ Working | Cross-product approach |
+| UniSkip Algorithm | ✅ Working | Domain sum = 0 verified |
 | Preprocessing Export | ✅ Working | Full JoltVerifierPreprocessing |
 | DoryVerifierSetup | ✅ Working | Precomputed pairings |
+
+---
+
+## Session History
+
+### Session 10
+- Fixed Montgomery form serialization in `appendScalar`
+- Transcript states now match at r0 derivation
+- Identified n_rounds counter mismatch as likely cause
+
+### Session 9
+- Stage 1 UniSkip verification passes
+- Fixed Lagrange interpolation bug
+
+### Session 7-8
+- DoryVerifierSetup implementation
+- Full preprocessing export
 
 ---
 
 ## Key Files
 
 ### Zolt
-- `src/transcripts/blake2b.zig` - Blake2b transcript (matches Jolt)
-- `src/zkvm/serialization.zig` - Arkworks-compatible serialization
-- `src/zkvm/preprocessing.zig` - Full preprocessing export
-- `src/zkvm/prover.zig` - 7-stage proof generation
-- `src/poly/commitment/dory.zig` - Dory commitment scheme
-- `src/zkvm/spartan/outer.zig` - UniSkip cross-product algorithm
+- `src/transcripts/blake2b.zig` - Blake2b transcript
+- `src/zkvm/proof_converter.zig` - Proof conversion with transcript
+- `src/field/mod.zig` - Field element serialization
 
 ### Jolt (Reference)
 - `jolt-core/src/transcripts/blake2b.rs` - Reference transcript
-- `jolt-core/src/zkvm/proof_serialization.rs` - Proof format spec
-- `jolt-core/src/zkvm/verifier.rs` - Verifier and preprocessing
+- `jolt-core/src/zolt_compat_test.rs` - Compatibility tests
 
 ---
 
@@ -120,40 +104,15 @@ pub const DoryVerifierSetup = struct {
 
 ```bash
 # Test Zolt (all 632 tests)
-cd /Users/matteo/projects/zolt
 zig build test --summary all
 
-# Generate proof with full preprocessing export
+# Generate proof
 zig build -Doptimize=ReleaseFast
-./zig-out/bin/zolt prove examples/fibonacci.elf \
-    --export-preprocessing prep.bin \
-    -o proof.bin
+./zig-out/bin/zolt prove examples/sum.elf --jolt-format \
+    --export-preprocessing /tmp/zolt_preprocessing.bin \
+    -o /tmp/zolt_proof_dory.bin
 
-# With custom SRS
-./zig-out/bin/zolt prove examples/fibonacci.elf \
-    --srs jolt_srs.bin \
-    --export-preprocessing prep.bin \
-    -o proof.bin
+# Run Jolt debug test
+cd /Users/matteo/projects/jolt
+cargo test --package jolt-core test_debug_stage1_verification -- --ignored --nocapture
 ```
-
----
-
-## Session History
-
-### Session 7
-- Implemented DoryVerifierSetup
-- Full JoltVerifierPreprocessing export
-- All 632 tests passing
-
-### Session 6
-- Preprocessing module complete
-- CLI export working
-- 630/630 tests passing
-
-### Session 5
-- Format compatibility verified
-- ECALL handling implemented
-
-### Session 4
-- UniSkip cross-product algorithm fixed
-- All 618 tests passing

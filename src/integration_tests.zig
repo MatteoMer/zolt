@@ -392,3 +392,77 @@ test "e2e: execute and trace multiple instructions" {
     // Verify we got multiple trace steps
     try testing.expect(emu.trace.len() >= 3);
 }
+
+// ============================================================================
+// SRS and Commitment Integration Tests
+// ============================================================================
+
+test "e2e: SRS generation and commitment" {
+    const allocator = testing.allocator;
+    const HyperKZG = poly.commitment.HyperKZG(BN254Scalar);
+
+    // Generate SRS
+    var srs = try HyperKZG.setup(allocator, 16);
+    defer srs.deinit();
+
+    // Create a simple polynomial (field elements)
+    const evals = [_]BN254Scalar{
+        BN254Scalar.fromU64(1),
+        BN254Scalar.fromU64(2),
+        BN254Scalar.fromU64(3),
+        BN254Scalar.fromU64(4),
+    };
+
+    // Commit to the polynomial
+    const commitment = HyperKZG.commit(&srs, &evals);
+
+    // Verify the commitment is not at infinity (valid commitment)
+    try testing.expect(!commitment.point.infinity);
+}
+
+test "e2e: SRS serialization and deserialization" {
+    const allocator = testing.allocator;
+    const srs_module = poly.commitment.srs;
+
+    // Generate a mock SRS
+    var srs = try srs_module.generateMockSRS(allocator, 8);
+    defer srs.deinit();
+
+    // Verify the SRS is valid
+    try testing.expectEqual(@as(usize, 8), srs.max_degree);
+    try testing.expect(!srs.g1.infinity);
+
+    // Verify powers of tau are on the curve
+    for (srs.powers_of_tau_g1) |p| {
+        try testing.expect(p.isOnCurve());
+    }
+
+    // Serialize and deserialize
+    const serialized = try srs_module.serializeToRawBinary(allocator, &srs);
+    defer allocator.free(serialized);
+
+    var loaded = try srs_module.loadFromRawBinary(allocator, serialized);
+    defer loaded.deinit();
+
+    // Verify loaded SRS matches original
+    try testing.expectEqual(srs.max_degree, loaded.max_degree);
+    for (srs.powers_of_tau_g1, loaded.powers_of_tau_g1) |orig, load| {
+        try testing.expect(orig.eql(load));
+    }
+}
+
+test "e2e: field element big-endian round-trip" {
+    // Test big-endian serialization round-trip
+    const a = BN254Scalar.fromU64(0x123456789ABCDEF0);
+    const bytes = a.toBytesBE();
+    const b = BN254Scalar.fromBytesBE(&bytes);
+
+    try testing.expect(a.eql(b));
+
+    // Test with generator field element
+    const g = Fp.fromU64(1); // x-coordinate of BN254 generator
+    const g_bytes = g.toBytesBE();
+    const g_back = Fp.fromBytesBE(&g_bytes);
+
+    try testing.expect(g.eql(g_back));
+}

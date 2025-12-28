@@ -469,6 +469,35 @@ pub const BN254Scalar = struct {
         return self.montgomeryMul(.{ .limbs = BN254_R2 });
     }
 
+    /// Create from big-endian bytes (converts to Montgomery form)
+    pub fn fromBytesBE(bytes: *const [32]u8) Self {
+        // Reverse byte order for big-endian
+        var le_bytes: [32]u8 = undefined;
+        for (0..32) |i| {
+            le_bytes[i] = bytes[31 - i];
+        }
+        return fromBytes(&le_bytes);
+    }
+
+    /// Serialize to big-endian bytes (32 bytes)
+    pub fn toBytesBE(self: Self) [32]u8 {
+        // First convert from Montgomery form
+        const standard = self.fromMontgomery();
+
+        // Convert limbs to bytes (little-endian)
+        var le_bytes: [32]u8 = undefined;
+        for (0..4) |i| {
+            std.mem.writeInt(u64, le_bytes[i * 8 ..][0..8], standard.limbs[i], .little);
+        }
+
+        // Reverse for big-endian output
+        var be_bytes: [32]u8 = undefined;
+        for (0..32) |i| {
+            be_bytes[i] = le_bytes[31 - i];
+        }
+        return be_bytes;
+    }
+
     /// 128-bit multiplication helper
     inline fn mulWide(a: u64, b: u64) u128 {
         return @as(u128, a) * @as(u128, b);

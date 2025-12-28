@@ -592,6 +592,178 @@ pub fn JoltProver(comptime F: type) type {
             );
         }
 
+        /// Generate a Jolt-compatible proof with Dory commitments bundled
+        ///
+        /// This returns both the proof and the Dory commitments used in the transcript,
+        /// so the same commitments can be used for serialization.
+        pub fn proveJoltCompatibleWithDory(
+            self: *Self,
+            program_bytecode: []const u8,
+            inputs: []const u8,
+        ) !jolt_types.JoltProofWithDory(F, commitment_types.PolyCommitment, commitment_types.OpeningProof) {
+            const JoltProofWithDory = jolt_types.JoltProofWithDory(F, commitment_types.PolyCommitment, commitment_types.OpeningProof);
+            const DoryScheme = Dory.DoryCommitmentScheme(F);
+
+            // Initialize memory config
+            var config = common.MemoryConfig{
+                .program_size = program_bytecode.len,
+            };
+
+            // Initialize the emulator
+            var emulator = tracer.Emulator.init(self.allocator, &config);
+            defer emulator.deinit();
+
+            emulator.max_cycles = self.max_cycles;
+
+            // Load and execute the program
+            try emulator.loadProgram(program_bytecode);
+            if (inputs.len > 0) {
+                try emulator.setInputs(inputs);
+            }
+            try emulator.run();
+
+            // Initialize Blake2b transcript for Jolt compatibility
+            const Blake2bTranscript = transcripts.Blake2bTranscript(F);
+            var transcript = Blake2bTranscript.init("Jolt");
+
+            // Generate R1CS cycle witnesses from execution trace
+            var constraint_gen = r1cs.R1CSConstraintGenerator(F).init(self.allocator);
+            defer constraint_gen.deinit();
+
+            const cycle_witnesses = try constraint_gen.generateWitness(&emulator.trace);
+            defer self.allocator.free(cycle_witnesses);
+
+            // Generate Zolt internal proof first
+            var zolt_proof = try self.prove(program_bytecode, inputs);
+            defer zolt_proof.deinit();
+
+            // Convert to Jolt format using the proof converter with transcript
+            var converter = proof_converter.ProofConverter(F).init(self.allocator);
+
+            // If we don't have stage proofs, return an empty bundle
+            const stage_proofs = zolt_proof.stage_proofs orelse {
+                return JoltProofWithDory.init(self.allocator);
+            };
+
+            // Collect commitments from the internal proof (G1 points for serialization)
+            var commitments: std.ArrayListUnmanaged(commitment_types.PolyCommitment) = .{};
+            defer commitments.deinit(self.allocator);
+
+            try commitments.append(self.allocator, zolt_proof.bytecode_proof.commitment);
+            try commitments.append(self.allocator, zolt_proof.memory_proof.commitment);
+            try commitments.append(self.allocator, zolt_proof.memory_proof.final_state_commitment);
+            try commitments.append(self.allocator, zolt_proof.register_proof.commitment);
+            try commitments.append(self.allocator, zolt_proof.register_proof.final_state_commitment);
+
+            // Create JoltDevice for Fiat-Shamir preamble
+            var device = try jolt_device.JoltDevice.fromEmulator(
+                self.allocator,
+                inputs,
+                &[_]u8{}, // outputs
+                false, // panic
+                @intCast(program_bytecode.len),
+            );
+            defer device.deinit();
+
+            // Get trace length and RAM parameters
+            const trace_length: usize = @as(usize, 1) << @intCast(stage_proofs.log_t);
+            const ram_K: usize = @as(usize, 1) << @intCast(stage_proofs.log_k);
+
+            // Run Fiat-Shamir preamble to match Jolt verifier
+            jolt_device.fiatShamirPreamble(F, &transcript, &device, ram_K, trace_length);
+
+            // Build polynomial evaluations and compute Dory commitments
+            const bytecode_poly_size = if (program_bytecode.len < 2) 2 else std.math.ceilPowerOfTwo(usize, program_bytecode.len) catch program_bytecode.len;
+            const memory_trace_len = emulator.ram.trace.accesses.items.len;
+            const memory_poly_size = if (memory_trace_len < 2) 2 else std.math.ceilPowerOfTwo(usize, memory_trace_len) catch memory_trace_len;
+            const reg_trace_len = emulator.trace.steps.items.len;
+            const reg_poly_size = if (reg_trace_len < 2) 2 else std.math.ceilPowerOfTwo(usize, reg_trace_len) catch reg_trace_len;
+            const max_poly_size = @max(@max(bytecode_poly_size, memory_poly_size), reg_poly_size);
+            const log_size: u32 = if (max_poly_size <= 1) 1 else @intCast(std.math.log2_int(usize, max_poly_size) + 1);
+
+            var dory_srs = try DoryScheme.setup(self.allocator, log_size);
+            defer dory_srs.deinit();
+
+            // Build and store polynomial evaluations
+            var result = JoltProofWithDory.init(self.allocator);
+
+            // Bytecode polynomial
+            result.bytecode_evals = try self.allocator.alloc(F, bytecode_poly_size);
+            for (result.bytecode_evals, 0..) |*p, i| {
+                if (i < program_bytecode.len) {
+                    p.* = F.fromU64(@as(u64, program_bytecode[i]));
+                } else {
+                    p.* = F.zero();
+                }
+            }
+            result.dory_commitments[0] = DoryScheme.commit(&dory_srs, result.bytecode_evals);
+
+            // Memory polynomial
+            result.memory_evals = try self.allocator.alloc(F, memory_poly_size);
+            for (result.memory_evals, 0..) |*p, i| {
+                if (i < memory_trace_len) {
+                    p.* = F.fromU64(emulator.ram.trace.accesses.items[i].value);
+                } else {
+                    p.* = F.zero();
+                }
+            }
+            result.dory_commitments[1] = DoryScheme.commit(&dory_srs, result.memory_evals);
+
+            // Memory final (same as memory for now)
+            result.memory_final_evals = try self.allocator.alloc(F, memory_poly_size);
+            @memcpy(result.memory_final_evals, result.memory_evals);
+            result.dory_commitments[2] = result.dory_commitments[1];
+
+            // Register polynomial
+            result.register_evals = try self.allocator.alloc(F, reg_poly_size);
+            for (result.register_evals, 0..) |*p, i| {
+                if (i < reg_trace_len) {
+                    p.* = F.fromU64(emulator.trace.steps.items[i].rd_value);
+                } else {
+                    p.* = F.zero();
+                }
+            }
+            result.dory_commitments[3] = DoryScheme.commit(&dory_srs, result.register_evals);
+
+            // Register final (same as register for now)
+            result.register_final_evals = try self.allocator.alloc(F, reg_poly_size);
+            @memcpy(result.register_final_evals, result.register_evals);
+            result.dory_commitments[4] = result.dory_commitments[3];
+
+            // Append Dory commitments (GT elements) to transcript
+            for (result.dory_commitments) |comm| {
+                transcript.appendGT(comm);
+            }
+
+            // Derive tau from transcript after preamble and commitments
+            const num_cycle_vars = std.math.log2_int(usize, @max(1, cycle_witnesses.len));
+            const num_rows_bits = num_cycle_vars + 2;
+            var tau = try self.allocator.alloc(F, num_rows_bits);
+            defer self.allocator.free(tau);
+            for (0..num_rows_bits) |i| {
+                tau[num_rows_bits - 1 - i] = transcript.challengeScalar();
+            }
+
+            // Convert to Jolt-compatible format with transcript integration
+            result.proof = try converter.convertWithTranscript(
+                commitment_types.PolyCommitment,
+                commitment_types.OpeningProof,
+                &stage_proofs,
+                commitments.items,
+                null,
+                .{
+                    .bytecode_K = 1 << 16,
+                    .log_k_chunk = 4,
+                    .lookups_ra_virtual_log_k_chunk = 16,
+                },
+                cycle_witnesses,
+                tau,
+                &transcript,
+            );
+
+            return result;
+        }
+
         /// Generate a Jolt-compatible proof using a JoltDevice from file
         ///
         /// This variant reads the JoltDevice from a file (generated by Jolt)
@@ -895,6 +1067,83 @@ pub fn JoltProver(comptime F: type) type {
             try serializer.writeUsize(jolt_proof_ptr.bytecode_K);
             try serializer.writeUsize(jolt_proof_ptr.log_k_chunk);
             try serializer.writeUsize(jolt_proof_ptr.lookups_ra_virtual_log_k_chunk);
+
+            return serializer.toOwnedSlice();
+        }
+
+        /// Serialize a JoltProofWithDory bundle to bytes
+        ///
+        /// This uses the Dory commitments that were computed during proving,
+        /// ensuring the commitments in the serialized proof match those used
+        /// in the transcript.
+        pub fn serializeJoltProofWithDory(
+            self: *Self,
+            bundle: *const jolt_types.JoltProofWithDory(F, commitment_types.PolyCommitment, commitment_types.OpeningProof),
+        ) ![]u8 {
+            var serializer = jolt_serialization.ArkworksSerializer(F).init(self.allocator);
+            errdefer serializer.deinit();
+
+            // Write opening claims
+            try serializer.writeOpeningClaims(&bundle.proof.opening_claims);
+
+            // Write the pre-computed Dory commitments (GT elements, 384 bytes each)
+            try serializer.writeUsize(5);
+            for (bundle.dory_commitments) |comm| {
+                try serializer.writeGT(comm);
+            }
+
+            // Write stage 1 (UniSkip + sumcheck)
+            if (bundle.proof.stage1_uni_skip_first_round_proof) |*p| {
+                try serializer.writeUniSkipFirstRoundProof(p);
+            } else {
+                try serializer.writeUsize(0);
+            }
+            try serializer.writeSumcheckInstanceProof(&bundle.proof.stage1_sumcheck_proof);
+
+            // Write stage 2 (UniSkip + sumcheck)
+            if (bundle.proof.stage2_uni_skip_first_round_proof) |*p| {
+                try serializer.writeUniSkipFirstRoundProof(p);
+            } else {
+                try serializer.writeUsize(0);
+            }
+            try serializer.writeSumcheckInstanceProof(&bundle.proof.stage2_sumcheck_proof);
+
+            // Write stages 3-7 (sumcheck only)
+            try serializer.writeSumcheckInstanceProof(&bundle.proof.stage3_sumcheck_proof);
+            try serializer.writeSumcheckInstanceProof(&bundle.proof.stage4_sumcheck_proof);
+            try serializer.writeSumcheckInstanceProof(&bundle.proof.stage5_sumcheck_proof);
+            try serializer.writeSumcheckInstanceProof(&bundle.proof.stage6_sumcheck_proof);
+            try serializer.writeSumcheckInstanceProof(&bundle.proof.stage7_sumcheck_proof);
+
+            // Write joint opening proof
+            // Generate a Dory opening proof from the bundled polynomial evaluations
+            const max_size = @max(@max(bundle.bytecode_evals.len, bundle.memory_evals.len), bundle.register_evals.len);
+            const log_size: u32 = if (max_size <= 1) 1 else @intCast(std.math.log2_int(usize, max_size) + 1);
+            var dory_srs = try Dory.DoryCommitmentScheme(F).setup(self.allocator, log_size);
+            defer dory_srs.deinit();
+
+            var dory_proof = try Dory.DoryCommitmentScheme(F).open(
+                &dory_srs,
+                bundle.bytecode_evals,
+                &[_]F{}, // Empty evaluation point
+                self.allocator,
+            );
+            defer dory_proof.deinit();
+            try serializer.writeDoryProof(&dory_proof);
+
+            // Write advice proofs (all None)
+            try serializer.writeU8(0);
+            try serializer.writeU8(0);
+            try serializer.writeU8(0);
+            try serializer.writeU8(0);
+            try serializer.writeU8(0);
+
+            // Write configuration
+            try serializer.writeUsize(bundle.proof.trace_length);
+            try serializer.writeUsize(bundle.proof.ram_K);
+            try serializer.writeUsize(bundle.proof.bytecode_K);
+            try serializer.writeUsize(bundle.proof.log_k_chunk);
+            try serializer.writeUsize(bundle.proof.lookups_ra_virtual_log_k_chunk);
 
             return serializer.toOwnedSlice();
         }

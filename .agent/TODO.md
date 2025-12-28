@@ -2,7 +2,7 @@
 
 ## Current Status (Jolt Compatibility Phase)
 
-**Project Status: TRANSCRIPT COMMITMENT TYPE MISMATCH**
+**Project Status: TESTING DORY TRANSCRIPT INTEGRATION**
 
 Key achievements:
 1. **R1CS Input MLE Evaluations** - Opening claims now contain actual computed values
@@ -11,52 +11,43 @@ Key achievements:
 4. **Non-zero UniSkip Coefficients** - UniSkip polynomial has non-trivial values
 5. **JoltDevice from File** - Can read JoltDevice from Jolt-generated file
 6. **Byte Reversal Fix** - Commitments now reverse bytes before appending to transcript
+7. **Dory Transcript Integration** - Prover now uses GT elements (384 bytes) in transcript
 
-Current issue: **Commitment type mismatch**
-- Zolt uses G1 points (64 bytes) for commitments in transcript
-- Jolt uses GT elements (384 bytes, Dory/Fp12) for commitments in transcript
-- This causes tau values to differ, which causes UniSkip verification to fail
-
----
-
-## Root Cause Analysis
-
-### The Core Issue
-
-Jolt uses **Dory commitments** which are GT elements (Fp12, 384 bytes), while Zolt uses **HyperKZG commitments** which are G1 points (64 bytes).
-
-When the verifier runs:
-1. **Preamble**: Appends memory layout, I/O, ram_K, trace_length ✅ (matches)
-2. **Commitments**: Appends each commitment using `append_serializable` ❌ (MISMATCH)
-   - Jolt: `serialize_uncompressed(GT) -> 384 bytes -> reverse -> append`
-   - Zolt: `toBytes(G1) -> 64 bytes -> reverse -> append`
-3. **Tau derivation**: Gets challenges from transcript ❌ (different due to step 2)
-4. **UniSkip verification**: Uses tau to check power sum ❌ (fails)
-
-### Solutions
-
-1. **Full Solution**: Refactor Zolt prover to use Dory natively for commitments
-   - Replace `PolyCommitment` (G1) with `DoryCommitment` (GT)
-   - Use Dory throughout the proving pipeline
-
-2. **Hybrid Solution**: Generate Dory commitments for transcript only
-   - Keep internal HyperKZG for efficiency
-   - Compute Dory commitments from polynomial evaluations
-   - Append GT elements to transcript
-
-3. **Testing Solution**: Create a transcript test that matches Jolt exactly
-   - Use same JoltDevice file
-   - Use same commitment values (serialize GT from Jolt)
-   - Verify transcript state matches byte-for-byte
+Current issue: **Testing end-to-end verification**
+- Need to generate a new proof with Dory commitments in transcript
+- Verify with Jolt to confirm the fix works
 
 ---
 
-## Immediate Next Steps
+## Recent Changes
 
-1. [ ] Implement Dory commitment generation in transcript flow
-2. [ ] Store polynomial evaluations (not just commitments) in proof structure
-3. [ ] Add transcript state debugging to compare with Jolt
-4. [ ] Test with known-good GT elements from Jolt
+### Dory Transcript Integration (just completed)
+
+The prover now computes Dory commitments (GT elements, 384 bytes) for the transcript:
+
+1. **Build polynomial evaluations** from bytecode, memory trace, and register trace
+2. **Setup Dory SRS** with appropriate size
+3. **Compute Dory commitments** using `DoryCommitmentScheme.commit()`
+4. **Append GT elements to transcript** using `appendGT()` which reverses bytes
+
+This matches what Jolt does:
+- `append_serializable` serializes the commitment
+- Reverses all bytes for EVM compatibility
+- Appends to transcript
+
+### Files Modified
+
+- `src/transcripts/blake2b.zig`: Added `appendSerializable`, updated `appendGT` with byte reversal
+- `src/zkvm/mod.zig`: Both `proveJoltCompatible` and `proveJoltCompatibleWithDevice` now use Dory
+
+---
+
+## Next Steps
+
+1. [ ] Generate a proof using the updated prover
+2. [ ] Test with Jolt verifier to confirm transcript match
+3. [ ] If still failing, add transcript state debugging
+4. [ ] Verify SRS generation matches Jolt's seed
 
 ---
 
@@ -75,6 +66,7 @@ When the verifier runs:
 11. ✅ **Fiat-Shamir Preamble** - Function implemented
 12. ✅ **CLI --device option** - Use JoltDevice from file
 13. ✅ **Byte Reversal** - Commitments reversed before transcript append
+14. ✅ **Dory Transcript** - GT elements used in transcript
 
 ---
 
@@ -93,7 +85,7 @@ Build Summary: 5/5 steps succeeded; 608/608 tests passed
 |------|--------|---------|
 | `test_deserialize_zolt_proof` | ✅ PASS | 26558 bytes, 48 claims |
 | `test_debug_zolt_format` | ✅ PASS | All claims valid |
-| `test_verify_zolt_proof` | ❌ FAIL | UniSkip power sum check fails |
+| `test_verify_zolt_proof` | 🔄 TESTING | Needs re-test with Dory transcript |
 
 ---
 
@@ -102,10 +94,10 @@ Build Summary: 5/5 steps succeeded; 608/608 tests passed
 ### Core Implementation
 | File | Status | Purpose |
 |------|--------|---------|
-| `src/transcripts/blake2b.zig` | ✅ Done | Blake2bTranscript with byte reversal |
+| `src/transcripts/blake2b.zig` | ✅ Done | Blake2bTranscript with GT support |
 | `src/zkvm/jolt_device.zig` | ✅ Done | JoltDevice deserialization |
-| `src/zkvm/mod.zig` | 🔄 In Progress | Need Dory commitments for transcript |
-| `src/zkvm/proof_converter.zig` | 🔄 In Progress | Stage conversion with tau |
+| `src/zkvm/mod.zig` | ✅ Done | Dory commitments in transcript |
+| `src/zkvm/proof_converter.zig` | ✅ Done | Stage conversion with tau |
 | `src/zkvm/spartan/outer.zig` | ✅ Done | UniSkip computation |
 | `src/poly/commitment/dory.zig` | ✅ Done | GT element support |
 
@@ -114,11 +106,10 @@ Build Summary: 5/5 steps succeeded; 608/608 tests passed
 ## Summary
 
 **Serialization Compatibility: COMPLETE**
-**Transcript Integration: NEEDS DORY COMMITMENTS**
-**Verification: BLOCKED ON COMMITMENT TYPE MATCH**
+**Transcript Integration: COMPLETE (using Dory GT elements)**
+**Verification: READY FOR TESTING**
 
-The proof structure is correct and deserializes successfully. The remaining issue is
-that the transcript must use Dory commitments (GT elements, 384 bytes) instead of
-HyperKZG commitments (G1 points, 64 bytes) to match Jolt's verifier exactly.
+The prover now uses Dory commitments (GT elements, 384 bytes) in the transcript,
+matching Jolt's format. All bytes are reversed before appending, as Jolt does.
 
-Next step: Implement Dory commitment generation in the transcript flow.
+Next step: Generate a new proof and test with Jolt verifier.

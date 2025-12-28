@@ -643,6 +643,62 @@ pub fn JoltProof(comptime F: type, comptime Commitment: type, comptime Proof: ty
 }
 
 // =============================================================================
+// JoltProofWithDory - JoltProof bundled with Dory commitments for serialization
+// =============================================================================
+
+/// Bundle of JoltProof with Dory commitments (GT elements)
+///
+/// This structure carries the proof along with the GT element commitments
+/// that were computed during proving. This ensures the same commitments
+/// are used for both the transcript and the serialized proof.
+pub fn JoltProofWithDory(comptime F: type, comptime Commitment: type, comptime Proof: type) type {
+    const Dory = @import("../poly/commitment/dory.zig");
+    const GT = Dory.GT;
+
+    return struct {
+        const Self = @This();
+
+        proof: JoltProof(F, Commitment, Proof),
+
+        /// Dory commitments (GT elements) computed during proving
+        /// Order: bytecode, memory, memory_final, registers, registers_final
+        dory_commitments: [5]GT,
+
+        /// Polynomial evaluations used to compute the Dory commitments
+        /// These are stored so they can be used for generating the opening proof
+        bytecode_evals: []F,
+        memory_evals: []F,
+        memory_final_evals: []F,
+        register_evals: []F,
+        register_final_evals: []F,
+
+        allocator: Allocator,
+
+        pub fn init(allocator: Allocator) Self {
+            return Self{
+                .proof = JoltProof(F, Commitment, Proof).init(allocator),
+                .dory_commitments = [_]GT{GT.one()} ** 5, // one() is the multiplicative identity for GT
+                .bytecode_evals = &[_]F{},
+                .memory_evals = &[_]F{},
+                .memory_final_evals = &[_]F{},
+                .register_evals = &[_]F{},
+                .register_final_evals = &[_]F{},
+                .allocator = allocator,
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.proof.deinit();
+            if (self.bytecode_evals.len > 0) self.allocator.free(self.bytecode_evals);
+            if (self.memory_evals.len > 0) self.allocator.free(self.memory_evals);
+            if (self.memory_final_evals.len > 0) self.allocator.free(self.memory_final_evals);
+            if (self.register_evals.len > 0) self.allocator.free(self.register_evals);
+            if (self.register_final_evals.len > 0) self.allocator.free(self.register_final_evals);
+        }
+    };
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 

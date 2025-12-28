@@ -266,7 +266,11 @@ fn runEmulator(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles: ?
     }
 }
 
-fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt: ?u64, output_path: ?[]const u8, json_format: bool, jolt_format: bool, device_path: ?[]const u8) !void {
+fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt: ?u64, output_path: ?[]const u8, json_format: bool, jolt_format: bool, _: ?[]const u8) !void {
+    // Note: device_path is currently unused since proveJoltCompatibleWithDory
+    // generates its own JoltDevice from the execution trace.
+    // A future enhancement could use proveJoltCompatibleWithDeviceAndDory
+    // for exact transcript matching with an external JoltDevice.
     std.debug.print("Zolt zkVM Prover\n", .{});
     std.debug.print("================\n\n", .{});
 
@@ -373,58 +377,20 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt:
         std.debug.print("\nSaving proof to: {s}\n", .{path});
 
         if (jolt_format) {
-            // Save in Jolt-compatible format for cross-verification (uses Dory commitments)
+            // Save in Jolt-compatible format for cross-verification
+            // Uses proveJoltCompatibleWithDory to ensure Dory commitments match
+            // between the transcript and the serialized proof
             std.debug.print("  Generating Jolt-compatible proof with Dory commitments...\n", .{});
-            var jolt_proof = if (device_path) |dp| blk: {
-                std.debug.print("  Using JoltDevice from: {s}\n", .{dp});
-                break :blk prover_inst.proveJoltCompatibleWithDevice(program.bytecode, &[_]u8{}, dp) catch |err| {
-                    std.debug.print("  Error generating Jolt-compatible proof with device: {s}\n", .{@errorName(err)});
-                    return err;
-                };
-            } else blk: {
-                break :blk prover_inst.proveJoltCompatible(program.bytecode, &[_]u8{}) catch |err| {
-                    std.debug.print("  Error generating Jolt-compatible proof: {s}\n", .{@errorName(err)});
-                    return err;
-                };
+
+            var jolt_bundle = prover_inst.proveJoltCompatibleWithDory(program.bytecode, &[_]u8{}) catch |err| {
+                std.debug.print("  Error generating Jolt-compatible proof: {s}\n", .{@errorName(err)});
+                return err;
             };
-            defer jolt_proof.deinit();
+            defer jolt_bundle.deinit();
 
-            // Prepare polynomial evaluations for Dory commitments
-            // In a full implementation, these would come from the actual proof
-            const poly_size: usize = @max(64, std.math.ceilPowerOfTwo(usize, program.bytecode.len) catch program.bytecode.len);
-            const bytecode_evals = try allocator.alloc(BN254Scalar, poly_size);
-            defer allocator.free(bytecode_evals);
-            const memory_evals = try allocator.alloc(BN254Scalar, poly_size);
-            defer allocator.free(memory_evals);
-            const memory_final_evals = try allocator.alloc(BN254Scalar, poly_size);
-            defer allocator.free(memory_final_evals);
-            const register_evals = try allocator.alloc(BN254Scalar, poly_size);
-            defer allocator.free(register_evals);
-            const register_final_evals = try allocator.alloc(BN254Scalar, poly_size);
-            defer allocator.free(register_final_evals);
-
-            // Initialize with bytecode data
-            for (bytecode_evals, 0..) |*e, i| {
-                if (i < program.bytecode.len) {
-                    e.* = BN254Scalar.fromU64(@as(u64, program.bytecode[i]));
-                } else {
-                    e.* = BN254Scalar.zero();
-                }
-            }
-            // Initialize other polynomials to zeros for now
-            for (memory_evals) |*e| e.* = BN254Scalar.zero();
-            for (memory_final_evals) |*e| e.* = BN254Scalar.zero();
-            for (register_evals) |*e| e.* = BN254Scalar.zero();
-            for (register_final_evals) |*e| e.* = BN254Scalar.zero();
-
-            const jolt_bytes = prover_inst.serializeJoltProofDory(
-                &jolt_proof,
-                bytecode_evals,
-                memory_evals,
-                memory_final_evals,
-                register_evals,
-                register_final_evals,
-            ) catch |err| {
+            // Serialize using the bundled Dory commitments
+            // This ensures the commitments in the proof match those used in the transcript
+            const jolt_bytes = prover_inst.serializeJoltProofWithDory(&jolt_bundle) catch |err| {
                 std.debug.print("  Error serializing Jolt proof with Dory: {}\n", .{err});
                 return err;
             };

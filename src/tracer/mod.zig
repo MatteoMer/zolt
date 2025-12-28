@@ -558,10 +558,26 @@ pub const Emulator = struct {
                 // funct12 field: ECALL = 0, EBREAK = 1
                 const funct12: u12 = @truncate((@as(u32, @bitCast(decoded.imm)) >> 0) & 0xFFF);
                 if (funct12 == 0) {
-                    // ECALL - system call / program exit
-                    // In bare metal context, this is typically used to exit the program
-                    // The return value is typically in a0 (x10)
-                    return error.Ecall;
+                    // ECALL - check if it's a Jolt SDK call or termination
+                    const a0 = try self.registers.read(10); // syscall number in a0
+                    const a7 = try self.registers.read(17); // Also check a7 (standard syscall convention)
+
+                    // Jolt SDK ECALL numbers
+                    const JOLT_CYCLE_TRACK_ECALL_NUM: u64 = 0xC7C1E; // "C Y C L E"
+                    const JOLT_PRINT_ECALL_NUM: u64 = 0x5072696E; // "P r i n"
+
+                    if (a0 == JOLT_CYCLE_TRACK_ECALL_NUM or a7 == JOLT_CYCLE_TRACK_ECALL_NUM) {
+                        // Cycle tracking - ignore and continue execution
+                        // In Jolt this is used for profiling, we can skip it
+                    } else if (a0 == JOLT_PRINT_ECALL_NUM or a7 == JOLT_PRINT_ECALL_NUM) {
+                        // Print/output - we could implement this but for now just continue
+                    } else if (self.device.isTermination(@truncate(a0))) {
+                        // Check if it's a termination request via device address
+                        return error.Ecall;
+                    } else {
+                        // Unknown ECALL - for Jolt guests, continue execution
+                        // This handles Jolt SDK's internal ECALLs that we don't recognize
+                    }
                 }
                 // EBREAK and other system instructions - treat as NOP
             },

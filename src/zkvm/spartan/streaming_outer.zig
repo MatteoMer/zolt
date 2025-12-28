@@ -158,7 +158,20 @@ pub fn StreamingOuterProver(comptime F: type) type {
             return self.interpolateFirstRoundPoly(&extended_evals);
         }
 
-        /// Evaluate Az * Bz for a single cycle at a specific domain point
+        /// Evaluate Az * Bz for a single cycle at a specific domain point Y
+        ///
+        /// The domain points are in the extended symmetric window:
+        /// - Index 0: Y = -DEGREE (= -9)
+        /// - Index 9: Y = 0
+        /// - Index 18: Y = DEGREE (= 9)
+        ///
+        /// For Y in the base window {-4, -3, ..., 4, 5}, we can directly evaluate
+        /// the constraint at that index.
+        ///
+        /// For Y outside the base window, we use Lagrange extrapolation:
+        /// - Evaluate Az and Bz at base window points
+        /// - Extrapolate to Y using precomputed Lagrange coefficients
+        /// - Multiply extrapolated values
         fn evaluateAzBzAtDomainPoint(
             self: *const Self,
             witness: *const constraints.R1CSCycleInputs(F),
@@ -166,31 +179,93 @@ pub fn StreamingOuterProver(comptime F: type) type {
         ) F {
             _ = self;
 
-            // Domain indices map to constraints:
-            // - First group: indices 0..9 (first 10 constraints)
-            // - Second group: needs extended domain evaluation
+            // Convert domain_idx to the actual Y coordinate
+            // domain_idx 0 -> Y = -DEGREE = -9
+            // domain_idx DEGREE -> Y = 0
+            // domain_idx 2*DEGREE -> Y = DEGREE = 9
+            const DEGREE = univariate_skip.OUTER_UNIVARIATE_SKIP_DEGREE;
+            const y_coord: i64 = @as(i64, @intCast(domain_idx)) - @as(i64, DEGREE);
 
-            if (domain_idx < FIRST_GROUP_SIZE) {
-                // First group constraint
-                const constraint_idx = constraints.FIRST_GROUP_INDICES[domain_idx];
+            // Base window is {-4, -3, -2, -1, 0, 1, 2, 3, 4, 5}
+            // which corresponds to base_left = -4, base_right = 5
+            const base_left: i64 = -@as(i64, (FIRST_GROUP_SIZE - 1) / 2);
+            const base_right: i64 = base_left + @as(i64, FIRST_GROUP_SIZE) - 1;
+
+            // Check if Y is in the base window
+            if (y_coord >= base_left and y_coord <= base_right) {
+                // Y is in the base window - evaluate constraint directly
+                // Map Y to constraint index: Y = base_left + i => i = Y - base_left
+                const constraint_pos: usize = @intCast(y_coord - base_left);
+
+                // For a valid R1CS, Az*Bz should be ZERO at base window points
+                // because the constraints are satisfied
+                const constraint_idx = constraints.FIRST_GROUP_INDICES[constraint_pos];
                 const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
                 const az = constraint.condition.evaluate(F, witness.asSlice());
                 const bz = constraint.left.evaluate(F, witness.asSlice())
                     .sub(constraint.right.evaluate(F, witness.asSlice()));
                 return az.mul(bz);
-            } else {
-                // Second group constraint (if within range)
-                const second_idx = domain_idx - FIRST_GROUP_SIZE;
-                if (second_idx < SECOND_GROUP_SIZE) {
-                    const constraint_idx = constraints.SECOND_GROUP_INDICES[second_idx];
-                    const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
-                    const az = constraint.condition.evaluate(F, witness.asSlice());
-                    const bz = constraint.left.evaluate(F, witness.asSlice())
-                        .sub(constraint.right.evaluate(F, witness.asSlice()));
-                    return az.mul(bz);
-                }
-                return F.zero();
             }
+
+            // Y is outside the base window - use Lagrange extrapolation
+            // Compute Az and Bz at all base window points
+            var az_base: [FIRST_GROUP_SIZE]F = undefined;
+            var bz_base: [FIRST_GROUP_SIZE]F = undefined;
+
+            for (0..FIRST_GROUP_SIZE) |i| {
+                const constraint_idx = constraints.FIRST_GROUP_INDICES[i];
+                const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
+                az_base[i] = constraint.condition.evaluate(F, witness.asSlice());
+                bz_base[i] = constraint.left.evaluate(F, witness.asSlice())
+                    .sub(constraint.right.evaluate(F, witness.asSlice()));
+            }
+
+            // Use precomputed Lagrange coefficients to extrapolate to Y
+            // Find the target index j corresponding to Y
+            const targets = univariate_skip.UNISKIP_TARGETS;
+            var target_j: ?usize = null;
+            for (targets, 0..) |t, j| {
+                if (t == y_coord) {
+                    target_j = j;
+                    break;
+                }
+            }
+
+            if (target_j) |j| {
+                // Use COEFFS_PER_J[j] for extrapolation
+                const coeffs = univariate_skip.COEFFS_PER_J[j];
+
+                // Extrapolate Az(Y) = Σ_i coeffs[i] * az_base[i]
+                var az_y = F.zero();
+                for (0..FIRST_GROUP_SIZE) |i| {
+                    const c = coeffs[i];
+                    if (c != 0) {
+                        const c_field = if (c > 0)
+                            F.fromU64(@intCast(c))
+                        else
+                            F.zero().sub(F.fromU64(@intCast(-c)));
+                        az_y = az_y.add(az_base[i].mul(c_field));
+                    }
+                }
+
+                // Extrapolate Bz(Y) = Σ_i coeffs[i] * bz_base[i]
+                var bz_y = F.zero();
+                for (0..FIRST_GROUP_SIZE) |i| {
+                    const c = coeffs[i];
+                    if (c != 0) {
+                        const c_field = if (c > 0)
+                            F.fromU64(@intCast(c))
+                        else
+                            F.zero().sub(F.fromU64(@intCast(-c)));
+                        bz_y = bz_y.add(bz_base[i].mul(c_field));
+                    }
+                }
+
+                return az_y.mul(bz_y);
+            }
+
+            // Should not reach here for valid domain indices
+            return F.zero();
         }
 
         /// Interpolate extended evaluations to polynomial coefficients

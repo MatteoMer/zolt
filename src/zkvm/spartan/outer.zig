@@ -225,22 +225,16 @@ pub fn SpartanOuterProver(comptime F: type) type {
                 }
             }
 
-            // Compute extended evaluations using Jolt's cross-product approach.
+            // Compute extended evaluations using standard Lagrange extrapolation.
             //
-            // CRITICAL INSIGHT: We do NOT compute Az(y_j) * Bz(y_j) via interpolation!
-            // Instead, we use the constraint structure where Az guards are boolean.
+            // For each extended target point y_j (outside base window):
+            // - Compute Az(y_j) = Σ_i COEFFS_PER_J[j][i] * Az[i]
+            // - Compute Bz(y_j) = Σ_i COEFFS_PER_J[j][i] * Bz[i]
+            // - Compute product: Az(y_j) * Bz(y_j)
+            // - Weight by eq(τ, x) and sum over all cycles x
             //
-            // For satisfied constraints:
-            // - When Az[i] = 1 (guard is true): Bz[i] = 0 (left - right = 0)
-            // - When Az[i] = 0 (guard is false): Bz[i] can be non-zero
-            //
-            // Jolt's algorithm partitions contributions:
-            // - az_eval = Σ_i (where Az[i] is true): coeffs[i]
-            // - bz_eval = Σ_i (where Az[i] is false): coeffs[i] * Bz[i]
-            // - Product = az_eval * bz_eval
-            //
-            // This gives non-zero cross-products at extended points even when
-            // all base Az*Bz products are zero!
+            // This matches Jolt's extended_azbz_product_first_group which extrapolates
+            // Az and Bz polynomials to extended points and then multiplies.
             var extended_evals: [DEGREE]F = undefined;
             @memset(&extended_evals, F.zero());
 
@@ -261,22 +255,25 @@ pub fn SpartanOuterProver(comptime F: type) type {
                     // Get the precomputed Lagrange coefficients for target j
                     const coeffs = univariate_skip.COEFFS_PER_J[j];
 
-                    // Use Jolt's cross-product approach:
-                    // - az_eval: sum of coeffs where guard is true (Az = 1)
-                    // - bz_eval: sum of coeffs * Bz where guard is false (Az = 0)
-                    var az_eval_sum: i64 = 0; // Sum of coefficients (small integers)
-                    var bz_eval = F.zero(); // Sum of coefficient-weighted Bz values
-
+                    // Extrapolate Az(y_j) = Σ_i coeffs[i] * Az[i]
+                    var az_eval = F.zero();
                     for (0..DOMAIN_SIZE) |i| {
                         const coeff_i = coeffs[i];
-                        const az_is_one = !az_vals[i].eql(F.zero());
+                        if (coeff_i != 0) {
+                            if (coeff_i > 0) {
+                                az_eval = az_eval.add(az_vals[i].mul(F.fromU64(@intCast(coeff_i))));
+                            } else {
+                                az_eval = az_eval.sub(az_vals[i].mul(F.fromU64(@intCast(-coeff_i))));
+                            }
+                        }
+                    }
 
-                        if (az_is_one) {
-                            // Guard is active: contribute coefficient to az_eval
-                            az_eval_sum += coeff_i;
-                        } else {
-                            // Guard is inactive: contribute coeff * Bz to bz_eval
-                            if (coeff_i >= 0) {
+                    // Extrapolate Bz(y_j) = Σ_i coeffs[i] * Bz[i]
+                    var bz_eval = F.zero();
+                    for (0..DOMAIN_SIZE) |i| {
+                        const coeff_i = coeffs[i];
+                        if (coeff_i != 0) {
+                            if (coeff_i > 0) {
                                 bz_eval = bz_eval.add(bz_vals[i].mul(F.fromU64(@intCast(coeff_i))));
                             } else {
                                 bz_eval = bz_eval.sub(bz_vals[i].mul(F.fromU64(@intCast(-coeff_i))));
@@ -284,14 +281,7 @@ pub fn SpartanOuterProver(comptime F: type) type {
                         }
                     }
 
-                    // Convert az_eval_sum to field element
-                    const az_eval = if (az_eval_sum >= 0)
-                        F.fromU64(@intCast(az_eval_sum))
-                    else
-                        F.zero().sub(F.fromU64(@intCast(-az_eval_sum)));
-
-                    // Cross-product: az_eval * bz_eval
-                    // This can be non-zero even when all base Az*Bz = 0
+                    // Product at extended point: Az(y_j) * Bz(y_j)
                     const product = az_eval.mul(bz_eval);
 
                     // Add eq-weighted product to this extended point

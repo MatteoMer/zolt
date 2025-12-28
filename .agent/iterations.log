@@ -147,6 +147,33 @@ Turns: 154
 Cost: $12.4164
 
 
+--- Iteration 8 (continuation) ---
+Started: 2025-12-28T20:04:27
+Status: In progress
+
+Major achievements this session:
+1. Fixed instruction JSON format for Jolt compatibility:
+   - NoOp/UNIMPL serialize as unit variants ("NoOp", "UNIMPL")
+   - Fixed immediate types (u64, i64, i128 per format)
+   - Fixed FENCE/ECALL to use FormatI operands
+
+2. Preprocessing now fully deserializes in Jolt:
+   - BytecodePreprocessing: OK
+   - RAMPreprocessing: OK
+   - MemoryLayout: OK
+   - DoryVerifierSetup: OK
+
+3. End-to-end verification test runs:
+   - Proof loads: 30.9 KB
+   - Preprocessing loads: 62.2 KB
+   - Verification runs but fails at Stage 1
+
+Current status:
+- Serialization: 100% compatible
+- Deserialization: 100% working
+- Verification: Runs but fails (cryptographic mismatch)
+
+
 --- Iteration 15 ---
 Started: 2025-12-28T00:55:09.088138
 Summary:

@@ -1,23 +1,18 @@
 # Zolt zkVM Implementation Plan
 
-## Current Status (December 2024 - Iteration 16)
+## Current Status (December 2024 - Iteration 17)
 
-### MAJOR FIX: Projective Point Doubling + HyperKZG Architecture
+### HyperKZG Verification Enhancement
 
-Two critical bugs fixed in this iteration:
+Improved the HyperKZG verification to use proper batching and pairing checks:
 
-1. **Projective Doubling Bug**: The Jacobian doubling formula was using `D` instead of `2*D` in the Y3 calculation, causing scalar multiplication to produce wrong results.
+1. **Batched quotient commitments**: W = sum_i gamma^i * Q_i
+2. **Correction term**: sum_i gamma^i * r_i * Q_i (for evaluation points)
+3. **Pairing equation**: e(C - v*G1 - correction, G2) == e(W, tau_G2)
 
-2. **HyperKZG Type Architecture**: G1 points were using the scalar field (Fr) for coordinates instead of the base field (Fp). Fixed by using `AffinePoint(Fp)` for G1 points.
+### Architecture Summary
 
-### Verified Properties
-1. **Projective == Affine double**: Now `ProjectivePoint.double().toAffine()` equals `AffinePoint.double()` ✅
-2. **SRS Pairing Relationship**: e([τ]G1, G2) = e(G1, [τ]G2) ✅
-3. **Scalar multiplication consistency**: `scalarMul(G1, 2)` equals `G1.double()` ✅
-
-## Architecture Summary
-
-### Field Tower
+#### Field Tower
 ```
 Fp  = BN254 base field (254 bits) - G1 point coordinates
 Fr  = BN254 scalar field (254 bits) - scalars for multiplication
@@ -27,7 +22,7 @@ Fp6 = Fp2[v] / (v³ - ξ)  where ξ = 9 + u
 Fp12 = Fp6[w] / (w² - v)
 ```
 
-### Correct Type Usage for HyperKZG
+#### HyperKZG Type Usage
 ```
 Polynomial evaluations: Fr (scalar field)
 G1 point coordinates: Fp (base field)
@@ -36,66 +31,36 @@ Scalars for EC multiplication: Fr
 MSM: MSM(Fr, Fp) - Fr scalars, Fp coordinates
 ```
 
-### Key Types
-- `HyperKZG.Point = AffinePoint(Fp)` - G1 point with Fp coords
-- `HyperKZG.Fp = BN254BaseField` - base field for coords
-- `G1PointFp` - pairing-compatible G1 point struct
-- `G2Point` - G2 point with Fp2 coordinates
+### Key Files Modified
 
-## Files Modified (Iteration 16)
-
-### src/msm/mod.zig
-- **Fixed ProjectivePoint.double()**:
-  - Changed variable name from `D` to `half_D`
-  - `D = 2 * half_D` (correct EFD formula)
-  - `X3 = F - 2*D` uses `two_D = D.add(D)`
-  - `Y3 = E*(D - X3) - 8*C` uses the correct `D` (= 2*half_D)
-
-### src/poly/commitment/mod.zig
-- Changed `Point = AffinePoint(F)` to `Point = AffinePoint(Fp)`
-- Updated MSM calls from `MSM(F, F)` to `MSM(F, Fp)`
-- Added `toG1PointFp()` helper for pairing conversion
-- Added tests:
-  - `hyperkzg projective vs affine double`
-  - `hyperkzg srs has correct tau relationship`
-
-### src/host/mod.zig
-- Changed `G1Point = AffinePoint(F)` to `G1Point = AffinePoint(Fp)`
-- This makes host preprocessing consistent with HyperKZG types
+#### src/poly/commitment/mod.zig
+- Enhanced `verifyWithPairing()`:
+  - Gamma-based batching of quotient commitments
+  - Correction term computation from evaluation points
+  - Proper pairing check equation
+- Added `verifyAlgebraic()` for testing
 
 ## Next Steps
 
-### High Priority
-1. **Implement proper HyperKZG verification**
-   - Current `verifyWithPairing()` uses a simplified equation
-   - Need Gemini-style reduction for multilinear openings
-   - Reference: Gemini paper / jolt-core prover.rs
+### Priority 1: Integration Tests
+- Create end-to-end tests that prove and verify a simple program
+- Verify that all components work together correctly
 
-2. **Wire up JoltProver.prove()**
-   - Remove panic at src/zkvm/mod.zig:149
-   - Connect all proving stages
+### Priority 2: Commitment Integration
+- Wire HyperKZG commitments into JoltProof
+- Implement batch opening for multiple polynomials
 
-3. **Wire up JoltVerifier.verify()**
-   - Remove panic at src/zkvm/mod.zig:174
-   - Implement verification logic
-
-### Medium Priority
-- Implement host.execute()
-- Implement Preprocessing.preprocess()
-- Complete memory RAF checking
-
-### Still Needed (from task guide)
-- Lasso lookup arguments
-- Instruction R1CS constraint generation
-- Multi-stage sumcheck orchestration
+### Priority 3: Dory Completion
+- Implement proper inner product argument for Dory.open()
+- Add Dory verification
 
 ## Test Status
 
-All 341 tests pass:
+All 350 tests pass:
 - Field arithmetic: Fp, Fp2, Fp6, Fp12
-- Curve arithmetic: G1, G2 points (now with correct projective doubling)
+- Curve arithmetic: G1, G2 points
 - Pairing: bilinearity, identity, non-degeneracy
-- HyperKZG: SRS pairing relationship verified
+- HyperKZG: commit, open, verify, SRS verification
 - Sumcheck protocol
 - RISC-V emulation
 - ELF loading

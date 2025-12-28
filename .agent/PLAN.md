@@ -2,39 +2,25 @@
 
 ## Current Status (December 2024 - Iteration 36)
 
-### Session Summary - Lasso Claim Tracking Fix
+### Session Summary - Lasso & RAF Claim Tracking
 
-This iteration focused on fixing the Lasso prover's claim tracking to enable strict sumcheck verification for Stage 3.
+This iteration focused on fixing and verifying sumcheck claim tracking across provers.
 
-**Problem Identified:**
-The Lasso prover was not maintaining the sumcheck invariant:
-- Each round polynomial p(X) must satisfy: p(0) + p(1) = current_claim
-- After receiving challenge r, the new claim becomes p(r)
-- The prover was computing sums but not tracking the claim through rounds
+**Lasso Prover Fix:**
+The Lasso prover was not maintaining the sumcheck invariant. Fixed by:
+1. Adding `current_claim` field to track running claim
+2. Adding `eq_evals` array to store eq(r, j) evaluations for each cycle
+3. Adding `eq_evals_len` to track effective array size (shrinks during folding)
+4. Updating `receiveChallenge` to properly bind and fold eq_evals
 
-**Changes Made:**
-1. Added `current_claim` field to LassoProver to track running claim
-2. Added `eq_evals` array to store eq(r, j) evaluations for each cycle
-3. Added `eq_evals_len` to track effective array size (shrinks during folding)
-4. Updated `computeAddressRoundPoly` to use eq_evals for computing sums
-5. Updated `computeCycleRoundPoly` to use eq_evals_len for folded array
-6. Updated `receiveChallenge` to:
-   - During address phase: multiply eq_evals[j] by r or (1-r) based on bit
-   - During cycle phase: fold eq_evals in half using (1-r)*eq[j] + r*eq[j+half]
-   - Recompute current_claim as sum of (folded) eq_evals
-7. Added test verifying the sumcheck invariant for all rounds
+**RAF Prover Verification:**
+Added test to verify RAF prover correctly maintains sumcheck invariant.
+The RAF prover was already correctly implemented.
 
 **Test Results:**
 - All 554 tests pass
-- New claim tracking test verifies invariant holds for all rounds
-
-### Previous Session (Iteration 35) - Transcript Synchronization Fix
-
-Fixed transcript desync between prover and verifier for Stage 1.
-
-### Previous Session (Iteration 34) - Sumcheck Degree Mismatch Fix
-
-Fixed polynomial format mismatch for degree-2 sumchecks.
+- Lasso claim tracking test: PASS ✅
+- RAF claim tracking test: PASS ✅
 
 ## Architecture Summary
 
@@ -64,16 +50,17 @@ JoltProof:
         └── Stage 6: Booleanity (flag constraints)
 ```
 
-### Lasso Sumcheck Structure
-```
-Lasso prover:
-  ├── current_claim: Running sumcheck claim
-  ├── eq_evals: Array of eq(r, j) for each cycle j
-  ├── eq_evals_len: Effective length (shrinks during cycle phase)
-  └── Two phases:
-        ├── Address phase (log_K rounds): Bind address variables
-        └── Cycle phase (log_T rounds): Fold eq_evals in half
-```
+### Sumcheck Prover Requirements
+Each sumcheck prover must maintain:
+- `current_claim`: The claim that p(0) + p(1) must equal
+- Internal state that gets bound/folded after each challenge
+
+After round i:
+1. Compute polynomial p_i(X) where p_i(0) + p_i(1) = current_claim
+2. Send p_i to verifier (in various formats: coefficients, evaluations, compressed)
+3. Receive challenge r from verifier
+4. Update internal state: bind variable i to r
+5. Update current_claim = p_i(r)
 
 ### Polynomial Format Summary
 - Stage 1 (Spartan): Degree 3, sends [p(0), p(1), p(2)]
@@ -86,43 +73,40 @@ Lasso prover:
 ## Components Status
 
 ### Fully Working
-- **BN254 Pairing** - Full Miller loop, final exponentiation, bilinearity verified
-- **Extension Fields** - Fp2, Fp6, Fp12 with correct ξ = 9 + u
+- **BN254 Pairing** - Full Miller loop, final exponentiation
+- **Extension Fields** - Fp2, Fp6, Fp12
 - **Field Arithmetic** - Montgomery form CIOS multiplication
-- **Field Serialization** - Big-endian and little-endian I/O
-- **G1/G2 Point Arithmetic** - Addition, doubling, scalar multiplication
+- **G1/G2 Point Arithmetic** - All operations
 - **Sumcheck Protocol** - Complete prover/verifier
-- **RISC-V Emulator** - Full RV64IMC execution with tracing
-- **ELF Loader** - Complete ELF32/ELF64 parsing
-- **MSM** - Multi-scalar multiplication with bucket method
-- **HyperKZG** - All operations including batch
-- **Dory** - Full IPA-based commitment scheme
-- **Host Execute** - Program execution with trace generation
-- **Preprocessing** - Generates proving and verifying keys
+- **RISC-V Emulator** - Full RV64IMC execution
+- **ELF Loader** - ELF32/ELF64 parsing
+- **MSM** - Multi-scalar multiplication
+- **HyperKZG** - All operations
+- **Dory** - IPA-based commitment
+- **Host Execute** - Program execution with tracing
+- **Preprocessing** - Proving and verifying keys
 - **Spartan** - Proof generation and verification
-- **Lasso** - Lookup argument prover/verifier (claim tracking fixed!)
-- **Multi-stage Prover** - 6-stage sumcheck orchestration
-- **All Lookup Tables** - 24 tables covering all RV64IM operations
-- **Full Instruction Coverage** - 60+ instruction types
-- **SRS Utilities** - PTAU file parsing, serialization
-- **Stage 1 Strict Verification** - PASSES
+- **Lasso** - Lookup argument (claim tracking fixed!)
+- **RAF Prover** - Memory checking (verified correct)
+- **Multi-stage Prover** - 6-stage orchestration
+- **Lookup Tables** - 24+ tables
+- **Instructions** - 60+ instruction types
 
 ## Future Work
 
 ### High Priority
-1. Test Stage 3+ with strict verification mode
+1. Test full pipeline with strict verification mode
 2. Investigate test interference issue
 
 ### Medium Priority
 1. Performance optimization with SIMD
 2. Parallel sumcheck round computation
-3. Test with real Ethereum ceremony ptau files
 
 ### Low Priority
 1. More comprehensive benchmarking
 2. Add more example programs
 
-## Performance Metrics (from benchmarks)
+## Performance Metrics
 - Field addition: 4.0 ns/op
 - Field multiplication: 55.5 ns/op
 - Field inversion: 11.8 us/op
@@ -132,9 +116,5 @@ Lasso prover:
 ## Commit History (Iteration 36)
 1. Fix Lasso prover claim tracking for strict sumcheck verification
 2. Add test for Lasso prover claim tracking invariant
-
-## Commit History (Iteration 35)
-1. Fix transcript synchronization for Stage 1 strict verification
-
-## Commit History (Iteration 34)
-1. Fix sumcheck polynomial format mismatch between prover and verifier
+3. Update tracking files for iteration 36
+4. Add RAF prover claim tracking test

@@ -3,30 +3,25 @@
 ## Completed (This Session - Iteration 36)
 
 ### Lasso Prover Claim Tracking Fix ✅
-- [x] Identify Lasso prover wasn't maintaining sumcheck invariant
 - [x] Add `current_claim` field to track running claim
 - [x] Add `eq_evals` array to track eq(r, j) evaluations per cycle
-- [x] Add `eq_evals_len` to track effective array size (shrinks during folding)
-- [x] Update `computeAddressRoundPoly` to use eq_evals for sums
-- [x] Update `computeCycleRoundPoly` to use eq_evals_len
-- [x] Update `receiveChallenge` to:
-  - Bind eq_evals with (1-r) or r factors during address phase
-  - Fold eq_evals in half during cycle phase
-  - Recompute current_claim as sum of (folded) eq_evals
+- [x] Add `eq_evals_len` to track effective array size
+- [x] Update `receiveChallenge` to properly bind and fold eq_evals
 - [x] Add test verifying sumcheck invariant: p(0) + p(1) = current_claim
-- [x] All 554 tests pass
+- [x] All tests pass
 
-## Key Insight from This Session
+### RAF Prover Verification ✅
+- [x] Verified RAF prover correctly implements sumcheck
+- [x] Added RAF prover claim tracking test
+- [x] Confirmed RAF prover passes claim tracking invariant
 
-The Lasso prover wasn't maintaining the sumcheck claim invariant:
-- For each round: p(0) + p(1) = current_claim
-- After receiving challenge r: new_claim = p(r)
+## Summary of This Session
 
-The fix required:
-- Tracking current_claim explicitly
-- Maintaining eq_evals array with cycle eq evaluations
-- Properly binding/folding eq_evals when receiving challenges
-- Recomputing current_claim after each challenge
+Fixed the Lasso prover's claim tracking to properly maintain the sumcheck invariant:
+- Each round polynomial must satisfy: p(0) + p(1) = current_claim
+- After receiving challenge r, new_claim = p(r)
+
+Verified the RAF prover already correctly implements this invariant.
 
 ## Completed (Previous Sessions)
 
@@ -60,7 +55,7 @@ The fix required:
 ## Next Steps (Future Iterations)
 
 ### High Priority
-- [ ] Test Stage 3+ with strict verification mode
+- [ ] Test full pipeline with strict verification mode
 - [ ] Investigate test interference issue
 
 ### Medium Priority
@@ -77,6 +72,7 @@ The fix required:
 - All tests pass (554+ tests)
 - Stage 1 strict verification: PASSED ✅
 - Lasso claim tracking: VERIFIED ✅
+- RAF claim tracking: VERIFIED ✅
 - Full pipeline example: WORKING
 
 ## Performance (from benchmarks)

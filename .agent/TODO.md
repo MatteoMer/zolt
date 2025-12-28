@@ -15,65 +15,86 @@
 11. **Symmetric Lagrange Domain** - Fixed to use {-4,...,5} matching Jolt
 12. **Streaming Round Logic** - Separate handling for constraint group selection
 
-## MAJOR MILESTONE: Stage 1 UniSkip Claims Match! 🎉🎉
+---
 
-The Stage 1 UniSkip verification now has matching claims.
+## ROOT CAUSE IDENTIFIED ❌
+
+### The Problem: Multiquadratic Polynomial Representation
+
+Jolt's streaming outer sumcheck uses a **MultiquadraticPolynomial** representation:
+- Stores evaluations at `{0, 1, INFINITY}` for each variable
+- Uses `project_to_first_variable(E_active, 0)` for t'(0)
+- Uses `project_to_first_variable(E_active, INFINITY)` for t'(∞)
+
+Zolt's current implementation:
+- Sums over cycles with binary 0/1 partitioning
+- Computes `t_zero` (first half) and `t_one` (second half)
+- `t_infinity = t_one - t_zero` (LINEAR slope, NOT quadratic coefficient!)
+
+### Key Insight
+
+The Gruen method's `gruen_poly_deg_3(q_constant, q_quadratic_coeff, ...)` expects:
+- `q_constant = q(0)` - the constant term
+- `q_quadratic_coeff = e` - the coefficient of X² in q(X) = c + dX + eX²
+
+But I was passing:
+- `q_constant = t_zero` ✓ (correct)
+- `q_quadratic_coeff = t_one - t_zero` ✗ (this is the linear slope, not quadratic coeff!)
+
+### What Jolt Does
+
+Jolt uses a `MultiquadraticPolynomial` that:
+1. Expands each variable from binary {0,1} to ternary {0,1,∞}
+2. The ∞ (INFINITY=2) index stores the quadratic coefficient
+3. `project_to_first_variable` sums over the prefix eq table scaled by the polynomial evaluations
+
+This is implemented in:
+- `jolt-core/src/poly/multiquadratic_poly.rs`
+- Used by `OuterSharedState::compute_evaluation_grid_from_trace()`
+
+### Required Fix
+
+To make Zolt produce compatible proofs, I need to:
+
+1. **Implement MultiquadraticPolynomial in Zolt**
+   - Store evaluations at {0, 1, ∞} for each variable
+   - Implement `expand_linear_grid_to_multiquadratic()`
+   - Implement `project_to_first_variable()`
+
+2. **Update StreamingOuterProver**
+   - Use multiquadratic representation for Az*Bz products
+   - Compute proper t'(∞) as quadratic coefficient extraction
+
+### Complexity
+
+This is a significant algorithmic change. The multiquadratic expansion involves:
+- Converting binary evaluations to ternary
+- Polynomial interpolation at {0, 1, ∞}
+- Efficient folding during binding
 
 ---
 
-## CURRENT ISSUE: Stage 1 Expected Output Claim Mismatch ❌
+## Current Values (for debugging)
 
-The sumcheck polynomial equations pass (p(0) + p(1) = claim for all rounds), but:
+From latest test run:
 ```
-output_claim != expected_output_claim
+output_claim (from sumcheck):    11612374852220731197013232400393975162132149637091984341606359412226379830051
+expected_output_claim (from R1CS): 18745955558119577451624936825732812500259023178565119442902704003954906526404
+
+expected = tau_high_bound_r0 * tau_bound_r_tail * inner_sum_prod
+         = 5082598541187396806031046967159366823594641154848460582581091712291471884094
+         * 16153740132551411969570181916217515401545621836647993763662759575768152882318
+         * 8911191101246844644469009006381839599717758671761069483099516096600528609494
 ```
-
-### The Verification Formula
-
-The verifier computes:
-```rust
-expected_output_claim = tau_high_bound_r0 * tau_bound_r_tail * inner_sum_prod
-```
-
-Where:
-- `inner_sum_prod = Az_final * Bz_final` using R1CS input evaluations
-- `tau_high_bound_r0` = Lagrange kernel at r0 with tau_high
-- `tau_bound_r_tail` = eq polynomial at reversed sumcheck challenges
-
-### Key Issues to Investigate
-
-1. **Gruen Method / Split Eq**
-   - The `computeCubicRoundPoly()` method may not integrate correctly
-   - The split eq polynomial tables might not be structured correctly for outer sumcheck
-
-2. **Tau Integration**
-   - The eq polynomial binding needs to include tau values
-   - Current implementation may not correctly combine tau with the sumcheck
-
-3. **Round Polynomial Structure**
-   - The polynomial s(X) should equal eq(τ, x) * Az(x) * Bz(x) summed over x
-   - Current t_zero/t_infinity computation may miss the tau_high factor
-
-### Debug Output
-
-Latest test shows:
-- Stage 1 sumcheck equations all pass
-- R1CS input evaluations are being computed
-- But final claim doesn't match expected
 
 ---
 
 ## Progress Indicators
 
-- [x] UniSkip verification passes (domain sum = 0)
-- [x] Transcript states match after UniSkip poly append
-- [x] UnivariateSkip claim formula is correct
-- [x] R1CS input claims correctly computed via MLE
-- [x] n_rounds counter matches
-- [x] r0 challenge matches
-- [x] Stage 1 UniSkip claims match
-- [x] Symmetric Lagrange domain (fixed)
-- [x] Streaming round logic (added)
+- [x] UniSkip verification passes
+- [x] Stage 1 sumcheck equations pass (p(0)+p(1)=claim)
+- [x] R1CS input evaluations computed
+- [ ] **MultiquadraticPolynomial implementation** ← BLOCKING
 - [ ] Stage 1 expected_output_claim matches
 - [ ] Stages 2-7 verify
 - [ ] Full proof verification passes
@@ -83,35 +104,23 @@ Latest test shows:
 ## Test Commands
 
 ```bash
-# Run all 632 tests
+# Zolt tests
 zig build test --summary all
-
-# Build release
-zig build -Doptimize=ReleaseFast
 
 # Generate proof
 ./zig-out/bin/zolt prove examples/sum.elf --jolt-format -o /tmp/zolt_proof_dory.bin
 
-# Run Jolt debug test
+# Jolt verification
 cd /Users/matteo/projects/jolt
-cargo test --package jolt-core test_debug_stage1_verification -- --ignored --nocapture
-
-# Run Jolt full proof test
 cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture
+cargo test --package jolt-core test_debug_stage1_verification -- --ignored --nocapture
 ```
 
 ---
 
 ## Next Steps
 
-1. **Investigate tau integration in sumcheck**
-   - How does Jolt integrate tau into the round polynomial computation?
-   - Does `split_eq` already handle this?
-
-2. **Compare Gruen method implementation**
-   - Read Jolt's `gruen_poly_deg_3` carefully
-   - Ensure Zolt's version matches
-
-3. **Trace through a single round**
-   - Print intermediate values in both Zolt and Jolt
-   - Find where divergence occurs
+1. Study Jolt's `MultiquadraticPolynomial` implementation
+2. Port `expand_linear_grid_to_multiquadratic()` to Zig
+3. Update `StreamingOuterProver::computeRemainingRoundPoly()` to use multiquadratic
+4. Re-test verification

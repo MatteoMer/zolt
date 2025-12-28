@@ -427,3 +427,25 @@ Ended: 2025-12-28T05:29:28.164419
 Turns: 85
 Cost: $5.7723
 
+
+
+## Iteration 35 - Transcript Synchronization Fix
+
+### Problem
+Stage 1 (Spartan) verification was failing in strict sumcheck mode. The prover and verifier transcripts were out of sync, causing different challenges to be generated.
+
+### Root Cause
+1. `verifyR1CSProof` was generating a spurious "r1cs_tau" challenge before the multi-stage verification began
+2. Stage verifiers were using `num_rounds` (number of round polynomials) instead of `log_t` for cycle challenges
+
+### Solution
+1. Removed the spurious challenge from verifyR1CSProof
+2. Added log_t and log_k fields to JoltStageProofs
+3. Updated all stage verifiers to use correct challenge counts
+4. Added computeInitialClaim() to Lasso prover
+
+### Result
+Stage 1 (Spartan) now verifies correctly with strict sumcheck enabled! All 11 rounds pass the p(0) + p(1) = claim check.
+
+Stages 2-6 still require lenient mode due to claim tracking issues in the Lasso prover that need further investigation.
+

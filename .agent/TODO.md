@@ -1,39 +1,44 @@
 # Zolt zkVM Implementation TODO
 
-## Completed (This Session - Iteration 34)
+## Completed (This Session - Iteration 35)
 
-### Sumcheck Degree Mismatch Fix
-- [x] Investigate sumcheck degree mismatch between prover and verifier
-- [x] Fix RAF prover to compute [p(0), p(2)] for degree-2 compressed format
-- [x] Add `evaluateQuadraticAt3Points` helper for Lagrange interpolation
-- [x] Update Stage 2 verifier to use quadratic interpolation with recovered p(1)
-- [x] Update Stage 3 verifier to handle Lasso's coefficient form polynomials
-- [x] Update Stage 5 verifier to use degree-2 compressed format
-- [x] Update Stage 6 verifier to use degree-2 compressed format
-- [x] Update Stage 5 prover to send [p(0), p(2)]
-- [x] Update Stage 6 prover to send [p(0), p(2)]
-- [x] Verify all tests pass
-- [x] Verify full pipeline example still works
-- [x] Add tests for evaluateQuadraticAt3Points helper (4 new tests)
+### Transcript Synchronization Fix ✅
+- [x] Investigate why Stage 1 sumcheck was failing in strict mode
+- [x] Discover `verifyR1CSProof` was generating spurious "r1cs_tau" challenge
+- [x] Fix by removing the transcript challenge from verifyR1CSProof
+- [x] Add log_t and log_k fields to JoltStageProofs for proper transcript sync
+- [x] Update all stage verifiers to use correct challenge counts:
+  - Stage 2: Uses log_t r_cycle challenges instead of num_rounds
+  - Stage 3: Uses log_t r_reduction challenges from proof
+  - Stages 4-6: Use log_t for cycle challenges
+- [x] Add `computeInitialClaim()` to Lasso prover
+- [x] Prover now stores initial claim for Stage 3 (Lasso)
+- [x] **Stage 1 (Spartan) now verifies with strict sumcheck! 🎉**
+- [x] All 554+ tests pass
+- [x] Full pipeline example works
 
 ## Key Insight from This Session
 
-The Jolt protocol uses a **compressed polynomial format** for degree-2 sumchecks:
-- Prover sends `[p(0), p(2)]` (evaluations at 0 and 2)
-- Verifier uses sumcheck constraint `p(0) + p(1) = claim` to recover p(1)
-- Verifier then uses quadratic Lagrange interpolation to evaluate at challenge
+The transcript was desynchronized between prover and verifier due to:
+1. An extra challenge "r1cs_tau" being generated in verifyR1CSProof
+2. Stage verifiers using `num_rounds` instead of `log_t` for cycle challenges
 
-This saves 1 field element per round compared to sending all 3 evaluations.
+The fix required:
+- Removing the spurious challenge generation
+- Storing log_t and log_k in JoltStageProofs
+- Passing these values to stage verifiers for correct challenge counts
 
-Different stages use different formats:
-- **Stage 1 (Spartan)**: Degree 3, sends 4 coefficients
-- **Stage 2 (RAF)**: Degree 2, sends [p(0), p(2)]
-- **Stage 3 (Lasso)**: Degree 2, sends polynomial coefficients [c0, c1, c2]
-- **Stage 4 (Val)**: Degree 3, sends [p(0), p(1), p(2)]
-- **Stage 5 (Register)**: Degree 2, sends [p(0), p(2)]
-- **Stage 6 (Booleanity)**: Degree 2, sends [p(0), p(2)]
+## Known Issues
 
-## Known Issues (For Future Iterations)
+### Lasso Claim Tracking (Stages 2-6)
+Stage 3+ verification still requires lenient mode because the Lasso prover doesn't maintain the claim correctly between rounds:
+- After receiving challenge r, the new claim should be p(r)
+- The next round's polynomial should satisfy p(0) + p(1) = new_claim
+- Currently, the round polynomials don't track this correctly
+
+**Location**: `src/zkvm/lasso/prover.zig`
+- `computeRoundPolynomial` needs to track the current claim
+- `receiveChallenge` needs to update claim to p(r)
 
 ### Test Interference Issue (Iteration 32)
 When adding new integration tests to `src/integration_tests.zig`, seemingly unrelated tests start failing.
@@ -41,20 +46,12 @@ When adding new integration tests to `src/integration_tests.zig`, seemingly unre
 
 ## Completed (Previous Sessions)
 
-### Iteration 33 - Module Structure Improvements
-- [x] Add claim_reductions module with placeholder types
-- [x] Add instruction_lookups module with placeholder types
-- [x] Update zkvm/mod.zig to export new modules
-- [x] Update README.md with current project structure
+### Iteration 34 - Sumcheck Degree Mismatch Fix
+- [x] Fix RAF prover to compute [p(0), p(2)] for degree-2 compressed format
+- [x] Add `evaluateQuadraticAt3Points` helper for Lagrange interpolation
+- [x] Update all stage verifiers to use correct polynomial formats
 
-### Iteration 32 - Investigation & CLI Improvements
-- [x] Improved error handling in CLI to remove stack traces
-- [x] Errors now show clean error name and exit with code 1
-
-### Iteration 31 - Strict Verification Mode
-- [x] Add `VerifierConfig` struct with `strict_sumcheck` and `debug_output` options
-
-### Iterations 1-30 - Core Implementation
+### Iterations 1-33 - Core Implementation
 - [x] BN254 field and curve arithmetic
 - [x] Extension fields (Fp2, Fp6, Fp12)
 - [x] Pairing with Miller loop and final exponentiation
@@ -69,53 +66,31 @@ When adding new integration tests to `src/integration_tests.zig`, seemingly unre
 - [x] Multi-stage prover (6 stages)
 - [x] Host execute
 - [x] Preprocessing
+- [x] 50+ lookup tables
 - [x] Complete RV64IM instruction coverage (60+ instructions)
-- [x] 24 lookup tables
-- [x] SRS utilities and PTAU file parsing
-- [x] Benchmarking suite
-
-## Working Components
-
-### Lookup Tables (24 total)
-- **Bitwise**: And, Or, Xor, Andn
-- **Comparison**: Equal, NotEqual, UnsignedLessThan, SignedLessThan, UnsignedGreaterThanEqual, SignedGreaterThanEqual, UnsignedLessThanEqual
-- **Arithmetic**: RangeCheck, Sub, Movsign
-- **Shifts**: LeftShift, RightShift, RightShiftArithmetic, Pow2
-- **Sign Extension**: SignExtend8, SignExtend16, SignExtend32
-- **Division**: ValidDiv0, ValidUnsignedRemainder, ValidSignedRemainder
-
-### Complete RV64IM Instruction Coverage
-- **Base Integer (I)**: ADD, SUB, AND, OR, XOR, SLL, SRL, SRA, SLT, SLTU
-- **Immediate (I)**: ADDI, ANDI, ORI, XORI, SLTI, SLTIU, SLLI, SRLI, SRAI
-- **Immediate Word (RV64I)**: ADDIW, SLLIW, SRLIW, SRAIW
-- **Branches**: BEQ, BNE, BLT, BGE, BLTU, BGEU
-- **Upper Immediate**: LUI, AUIPC
-- **Jumps**: JAL, JALR
-- **Loads**: LB, LBU, LH, LHU, LW, LWU, LD
-- **Stores**: SB, SH, SW, SD
-- **Multiply (M)**: MUL, MULH, MULHU, MULHSU
-- **Division (M)**: DIV, DIVU, REM, REMU
-- **Word-sized (RV64)**: ADDW, SUBW, SLLW, SRLW, SRAW, MULW, DIVW, DIVUW, REMW, REMUW
 
 ## Next Steps (Future Iterations)
 
 ### High Priority
-- [ ] Investigate test interference issue (see Known Issues)
-- [ ] Enable strict_sumcheck mode by default once prover fixes are complete
+- [ ] Fix Lasso claim tracking for strict Stage 3+ verification
+- [ ] Investigate test interference issue
 
 ### Medium Priority
+- [ ] Add real BN254 pairing constants
 - [ ] Performance optimization with SIMD
 - [ ] Parallel sumcheck round computation
-- [ ] Download and test with real Ethereum ceremony ptau files
 
 ### Low Priority
+- [ ] Complete HyperKZG pairing verification
 - [ ] More comprehensive benchmarking
 - [ ] Add more example programs
 
 ## Test Status
-All tests pass (554 tests).
-End-to-end verification: PASSED (lenient mode)
-Full pipeline example: WORKING
+- All tests pass (554+ tests)
+- End-to-end verification: PASSED (lenient mode)
+- Stage 1 strict verification: PASSED ✅
+- Stage 3+ strict verification: Needs Lasso fixes
+- Full pipeline example: WORKING
 
 ## Performance (from benchmarks)
 - Field addition: 4.0 ns/op

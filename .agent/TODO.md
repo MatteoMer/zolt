@@ -1,34 +1,35 @@
 # Zolt zkVM Implementation TODO
 
-## Completed (This Session - Iteration 14)
+## Completed (This Session - Iteration 15)
 
-### Critical Architecture Fix: Base Field vs Scalar Field
-- [x] Discovered pairing was using wrong field (Fr instead of Fp)
-- [x] Added `BN254BaseField` (Fp) type with correct modulus
-- [x] Created generic `MontgomeryField` function for parameterized fields
-- [x] Updated all Fp2, Fp6, Fp12 types to use base field Fp
-- [x] Added `G1PointFp` type for G1 points in base field
-- [x] Added `g1ToFp` function for proper Montgomery form conversion
+### Critical Fix: BN254 Non-Residue (ξ)
+- [x] **FIXED BUG**: ξ was (1 + u), should be (9 + u)
+- [x] Updated `mulByXi()` formula: (9a - b) + (a + 9b)u
+- [x] Pairing bilinearity test now passes!
 
-### Line Evaluation Rewrite (gnark-crypto style)
-- [x] Rewrote line coefficients to R0/R1 format
-- [x] R0 = λ (slope), R1 = λ·x_Q - y_Q
-- [x] Sparse element representation: (1, 0, 0, c3, c4, 0) in Fp12
-- [x] Updated doublingStep and additionStep to match gnark-crypto
+### Pairing Improvements
+- [x] Added `G1PointInFp` type for proper base field coordinates
+- [x] Added `pairingFp()` function for direct Fp pairing
+- [x] Added comprehensive pairing tests:
+  - [x] Bilinearity in G1: e([2]P, Q) = e(P, Q)²
+  - [x] Bilinearity in G2: e(P, [2]Q) = e(P, Q)²
+  - [x] Identity property: e(P, O) = e(O, Q) = 1
+  - [x] Non-degeneracy: e(P, Q) ≠ 1
 
-### Tests
-- [x] All 328 tests pass
-- [ ] Pairing bilinearity test still failing (disabled)
+### Test Status
+- [x] All 339 tests pass
+- [x] Pairing bilinearity verified
 
 ## Completed (Previous Sessions)
 
-### Iteration 13: Frobenius and Line Evaluation
-- [x] Added complete Frobenius coefficients from Zisk
-- [x] Implemented frobenius2() and frobenius3() for Fp12
-- [x] Updated final exponentiation hard part
-- [x] Updated Miller loop iteration order
+### Iteration 14: Base Field vs Scalar Field
+- [x] Added `BN254BaseField` (Fp) type
+- [x] Created generic `MontgomeryField` function
+- [x] Updated Fp2, Fp6, Fp12 to use Fp
+- [x] Added G1PointFp for G1 in base field
+- [x] Rewrote line evaluation (gnark-crypto style)
 
-### Iterations 1-12: Core Infrastructure
+### Iterations 1-13: Core Infrastructure
 - [x] Lookup table infrastructure (14 tables)
 - [x] Lasso prover/verifier
 - [x] Instruction proving with flags
@@ -36,29 +37,38 @@
 - [x] Multi-stage prover (6 stages)
 - [x] BN254 G1/G2 generators
 - [x] HyperKZG SRS generation
-- [x] G2Point.scalarMul() using double-and-add
+- [x] G2Point.scalarMul()
 
-## Known Issues
+## Working Components
 
-### Pairing Bilinearity Still Failing
-The test `e([2]P, Q) = e(P, Q)^2` fails. Possible causes:
-1. Final exponentiation formula may need adjustment
-2. Frobenius endomorphism on G2 may have coefficient issues
-3. Twist isomorphism handling may need review
-4. The Frobenius coefficients may not match gnark-crypto exactly
+### Fully Working
+- **BN254 Pairing** - Bilinearity verified ✅
+- **Extension Fields** - Fp2, Fp6, Fp12 with correct ξ = 9 + u
+- **Field Arithmetic** - Montgomery form, all ops
+- **G1/G2 Point Arithmetic** - Addition, doubling, scalar mul
+- **Frobenius Endomorphism** - All coefficients from ziskos
+- **Sumcheck Protocol** - Complete prover/verifier
+- **RISC-V Emulator** - Full RV64IMC execution
+- **ELF Loader** - Complete ELF32/ELF64 parsing
+- **Basic MSM** - Affine/projective arithmetic
+
+### Partially Working
+- **HyperKZG** - commit() works, verify() needs pairing (now ready!)
+- **Dory** - commit() works, open() placeholder
+- **Spartan** - Matrix ops work, verifier incomplete
 
 ## Next Steps (Future Iterations)
 
-### High Priority (Pairing Fix)
-- [ ] Compare intermediate Miller loop values against reference
-- [ ] Verify Frobenius coefficients match gnark-crypto exactly
-- [ ] Check final exponentiation hard part formula
-- [ ] Enable and pass pairing bilinearity test
+### High Priority (Ready Now That Pairing Works)
+- [ ] Implement HyperKZG.verify() using pairingFp
+- [ ] Add real verification in commitment schemes
+- [ ] Wire up JoltProver.prove() (currently panics)
+- [ ] Wire up JoltVerifier.verify() (currently panics)
 
-### Medium Priority (Jolt Core)
-- [ ] Lookup Arguments / Lasso (THE core technique)
-- [ ] Instruction proving with R1CS constraints
-- [ ] Memory RAF checking
+### Medium Priority
+- [ ] Implement host.execute() (currently panics)
+- [ ] Implement Preprocessing.preprocess() (currently panics)
+- [ ] Complete memory RAF checking
 
 ### Low Priority
 - [ ] Performance optimization with SIMD

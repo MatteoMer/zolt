@@ -1350,6 +1350,7 @@ pub fn multiPairing(pairs: []const PairingInput) PairingResult {
 
 /// Check if e(P1, Q1) == e(P2, Q2)
 /// Useful for verifying KZG proofs
+/// Note: Uses G1Point with Fr coordinates, converts internally
 pub fn pairingCheck(p1: G1Point, q1: G2Point, p2: G1Point, q2: G2Point) bool {
     // Instead of checking e(P1,Q1) == e(P2,Q2), we check e(P1,Q1) * e(-P2,Q2) == 1
     // Create negated p2
@@ -1363,6 +1364,35 @@ pub fn pairingCheck(p1: G1Point, q1: G2Point, p2: G1Point, q2: G2Point) bool {
         .{ .p = p2_neg, .q = q2 },
     };
     const result = multiPairing(&pairs);
+    return result.isOne();
+}
+
+/// Pairing input pair type with proper Fp coordinates
+pub const PairingInputFp = struct {
+    p: G1PointFp,
+    q: G2Point,
+};
+
+/// Multi-pairing with Fp coordinates: product of pairings e(P1,Q1) * e(P2,Q2) * ...
+pub fn multiPairingFp(pairs: []const PairingInputFp) PairingResult {
+    var result = Fp12.one();
+    for (pairs) |pair| {
+        const single = pairingFp(pair.p, pair.q);
+        result = result.mul(single);
+    }
+    return result;
+}
+
+/// Check if e(P1, Q1) == e(P2, Q2) with proper Fp coordinates
+/// Useful for verifying KZG proofs
+pub fn pairingCheckFp(p1: G1PointFp, q1: G2Point, p2: G1PointFp, q2: G2Point) bool {
+    // Instead of checking e(P1,Q1) == e(P2,Q2), we check e(P1,Q1) * e(-P2,Q2) == 1
+    const p2_neg = p2.neg();
+    const pairs = [_]PairingInputFp{
+        .{ .p = p1, .q = q1 },
+        .{ .p = p2_neg, .q = q2 },
+    };
+    const result = multiPairingFp(&pairs);
     return result.isOne();
 }
 
@@ -1607,6 +1637,32 @@ test "pairing non-degeneracy" {
 
     const e_g1_g2 = pairingFp(g1, g2);
     try std.testing.expect(!e_g1_g2.isOne());
+}
+
+test "pairingCheckFp basic" {
+    // Test that e(P, Q) == e(P, Q) returns true
+    const g1 = G1PointFp{ .x = Fp.one(), .y = Fp.fromU64(2), .infinity = false };
+    const g2 = G2Point.generator();
+
+    // e(P, Q) == e(P, Q) should be true
+    try std.testing.expect(pairingCheckFp(g1, g2, g1, g2));
+}
+
+test "pairingCheckFp bilinearity" {
+    // Test that e([2]P, Q) == e(P, [2]Q)
+    // This is a consequence of bilinearity
+    const g1 = G1PointFp{ .x = Fp.one(), .y = Fp.fromU64(2), .infinity = false };
+    const g2 = G2Point.generator();
+
+    // [2]G1
+    const g1_doubled = G1PointInFp.generator().double();
+    const g1_2 = G1PointFp{ .x = g1_doubled.x, .y = g1_doubled.y, .infinity = g1_doubled.infinity };
+
+    // [2]G2
+    const g2_2 = g2.double();
+
+    // e([2]P, Q) == e(P, [2]Q)
+    try std.testing.expect(pairingCheckFp(g1_2, g2, g1, g2_2));
 }
 
 test "Fp6 inverse" {

@@ -1,103 +1,90 @@
 # Zolt zkVM Implementation Plan
 
-## Current Status (December 2024 - Iteration 14)
+## Current Status (December 2024 - Iteration 15)
 
-### Critical Fix: Base Field vs Scalar Field
+### MAJOR MILESTONE: BN254 Pairing Working! 🎉
 
-**DISCOVERED BUG**: The pairing implementation was using the WRONG field!
-- All Fp2, Fp6, Fp12 operations were using Fr (scalar field) instead of Fp (base field)
-- These are DIFFERENT primes with different moduli
-- Fr = 21888242871839275222246405745257275088548364400416034343698204186575808495617
-- Fp = 21888242871839275222246405745257275088696311157297823662689037894645226208583
+The pairing is now fully functional with bilinearity verified.
 
-**SOLUTION IMPLEMENTED**:
-1. Added `BN254BaseField` type (`Fp`) with correct Fp modulus and Montgomery constants
-2. Created generic `MontgomeryField` function for parameterized field types
-3. Updated all extension field types (Fp2, Fp6, Fp12) to use Fp
-4. Added `G1PointFp` type for G1 points with Fp coordinates
-5. Added `g1ToFp` function for proper Montgomery form conversion
+**Critical Fix**: The Fp6 extension field was using the wrong non-residue!
+- BUG: ξ was (1 + u) - WRONG
+- FIX: ξ is (9 + u) - CORRECT
 
-### Line Evaluation Rewrite (gnark-crypto style)
+This single bug was causing the entire pairing to fail.
 
-Rewrote line evaluation to match gnark-crypto's affine approach:
-- Line coefficients: R0 = λ, R1 = λ·x_Q - y_Q
-- Sparse element: (1, 0, 0, c3, c4, 0) in Fp12
-- evaluateLineSparse() computes c3 = R0 * xNegOverY, c4 = R1 * yInv
-
-### Status
-
-- **All 328 tests pass**
-- Pairing bilinearity test still failing (disabled)
-
-## Known Issues
-
-### Pairing Bilinearity (Critical for Verification)
-The pairing still doesn't satisfy e(aP, Q) = e(P, Q)^a.
-This affects HyperKZG verification.
-
-Remaining possible issues:
-1. Final exponentiation hard part formula may need adjustment
-2. Frobenius endomorphism on G2 may have coefficient issues
-3. Twist isomorphism handling may need review
-4. Frobenius coefficients may not match gnark-crypto exactly
-
-## Files Modified (Iteration 14)
-
-### src/field/mod.zig
-- Added BN254_FP_MODULUS, BN254_FP_R, BN254_FP_R2, BN254_FP_INV
-- Added `BN254BaseField` = `MontgomeryField(...)`
-- Added generic `MontgomeryField` function with all field operations
-- Added `double()` method to MontgomeryField
-
-### src/field/pairing.zig
-- Import Fp = BN254BaseField (base field)
-- Updated Fp2 to use Fp instead of BN254Scalar
-- Updated fp2ScalarMul to use Fp
-- Updated fp2FromLimbs and fpFromLimbs to use Fp
-- Updated G2Point.generator() to use Fp for coordinates
-- Added G1PointFp struct for G1 points in base field
-- Added g1ToFp() for proper Fr→Fp conversion
-- Updated pairing() to convert G1 points before processing
-- Updated evaluateLine and evaluateLineSparse to use Fp
-- Changed LineCoeffs from (lambda, mu) to (r0, r1)
-- Updated doublingStep and additionStep for R0/R1 format
-
-### src/integration_tests.zig
-- Added Fp import for extension field tests
+### Verified Pairing Properties
+1. **Bilinearity in G1**: e([2]P, Q) = e(P, Q)²  ✅
+2. **Bilinearity in G2**: e(P, [2]Q) = e(P, Q)²  ✅
+3. **Identity**: e(P, O) = e(O, Q) = 1  ✅
+4. **Non-degeneracy**: e(P, Q) ≠ 1 for non-identity P, Q  ✅
 
 ## Architecture Summary
 
-### Field Tower (CORRECTED)
-- **Fp = BN254 base field** (254 bits) - for point coordinates and pairing
-- Fr = BN254 scalar field (254 bits) - for scalars in MSM
-- Fp2 = Fp[u]/(u² + 1)
-- Fp6 = Fp2[v]/(v³ - ξ) where ξ = 9 + u
-- Fp12 = Fp6[w]/(w² - v)
+### Field Tower (Correct)
+```
+Fp  = BN254 base field (254 bits) - point coordinates
+Fr  = BN254 scalar field (254 bits) - scalar multiplication
 
-### Pairing Algorithm
-1. Convert G1 point from Fr to Fp Montgomery form
-2. Miller loop over 6x+2 (x = 4965661367192848881)
-3. Two additional lines with Frobenius endomorphism
-4. Final exponentiation: easy part + hard part
+Fp2 = Fp[u] / (u² + 1)
+Fp6 = Fp2[v] / (v³ - ξ)  where ξ = 9 + u  ← CRITICAL
+Fp12 = Fp6[w] / (w² - v)
+```
 
-### Commitment Schemes
-- HyperKZG: Uses BN254 pairing (verify stub until pairing works)
-- Dory: Streaming implementation (commit works, open placeholder)
+### Types for Pairing
+- `Fp = BN254BaseField` - base field element
+- `G1PointFp` - G1 point with Fp coordinates (for pairing)
+- `G1PointInFp` - G1 point via AffinePoint(Fp) (for EC ops)
+- `G2Point` - G2 point with Fp2 coordinates
+- `Fp12` - pairing target group element
 
-## Next Steps for Future Iterations
+### Key Functions
+- `pairingFp(G1PointFp, G2Point) -> Fp12` - pairing with Fp coords
+- `pairing(G1Point, G2Point) -> Fp12` - pairing with Fr->Fp conversion
+- `millerLoop(G1PointFp, G2Point) -> Fp12` - ate loop
+- `finalExponentiation(Fp12) -> Fp12` - (p^12-1)/r exponentiation
 
-1. **Debug Pairing**:
-   - Compare intermediate Miller loop values with gnark-crypto
-   - Verify Frobenius coefficients match exactly
-   - Check final exponentiation hard part formula
-   - Consider using arkworks test vectors
+## Files Modified (Iteration 15)
 
-2. **Performance Optimization**:
-   - SIMD operations
-   - Parallel sumcheck rounds
-   - Batch inversions
+### src/field/pairing.zig
+1. **Fixed mulByXi()**:
+   - Old: `(a-b) + (a+b)u` for ξ = 1 + u
+   - New: `(9a-b) + (a+9b)u` for ξ = 9 + u
 
-3. **Production Readiness**:
-   - Import Ethereum SRS
-   - Full E2E testing
-   - Benchmarking
+2. **Added G1PointInFp type** for proper EC ops in base field
+
+3. **Added pairingFp()** function for direct Fp pairing
+
+4. **Added pairing tests**:
+   - Bilinearity in G1 and G2
+   - Identity property
+   - Non-degeneracy
+
+## Next Steps
+
+### Now Ready (Pairing Enables)
+1. **Implement real HyperKZG verification**
+   - Use pairingFp() for the pairing check
+   - e(L, [1]₂) = e(R, [τ]₂)
+
+2. **Complete Dory verification**
+   - Pairing-based polynomial commitment verification
+
+3. **Wire up JoltProver/JoltVerifier**
+   - The core Jolt SNARK flow
+
+### Still Needed
+- Lasso lookup arguments (THE core technique)
+- Instruction R1CS constraint generation
+- Memory RAF checking
+- Multi-stage sumcheck orchestration
+
+## Test Status
+
+All 339 tests pass:
+- Field arithmetic: Fp, Fp2, Fp6, Fp12
+- Curve arithmetic: G1, G2 points
+- Pairing: bilinearity, identity, non-degeneracy
+- Sumcheck protocol
+- RISC-V emulation
+- ELF loading
+- MSM operations

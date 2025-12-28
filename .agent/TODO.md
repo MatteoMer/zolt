@@ -2,13 +2,16 @@
 
 ## Completed ✅
 
-1. **Phase 1: Transcript Compatibility** - Blake2b transcript matches Jolt
-2. **Phase 2: Proof Structure Refactoring** - 7-stage proof with UniSkip
-3. **Phase 3: Serialization Alignment** - Arkworks-compatible serialization
-4. **Phase 4: Commitment Scheme** - Dory with Jolt-compatible SRS
-5. **Phase 5: Verifier Preprocessing Export** - DoryVerifierSetup exports correctly
-6. **Fix Lagrange Interpolation Bug** - Dead code was corrupting basis array
-7. **Stage 1 UniSkip Verification** - Domain sum check passes
+### Phase 1-5: Core Infrastructure
+1. **Transcript Compatibility** - Blake2b transcript matches Jolt
+2. **Proof Structure Refactoring** - 7-stage proof with UniSkip
+3. **Serialization Alignment** - Arkworks-compatible serialization
+4. **Commitment Scheme** - Dory with Jolt-compatible SRS
+5. **Verifier Preprocessing Export** - DoryVerifierSetup exports correctly
+
+### Stage 1 Fixes
+6. **Lagrange Interpolation Bug** - Dead code was corrupting basis array
+7. **UniSkip Verification** - Domain sum check passes
 8. **UnivariateSkip Claim** - Now correctly set to uni_poly.evaluate(r0)
 9. **Montgomery Form Fix** - appendScalar now converts from Montgomery form
 10. **MontU128Challenge Compatibility** - Challenge scalars now match Jolt's format
@@ -28,8 +31,6 @@
 
 The Jolt cross-verification runs but Stage 1 sumcheck output_claim doesn't match expected.
 
-### Latest Debug Output
-
 ```
 output_claim (from sumcheck):      9328088438419821762178329852958014809003674147304165221608390320629231184085
 expected_output_claim (from R1CS): 15770715866241261093869584783304477941139842654876630627419092129570271411009
@@ -40,16 +41,33 @@ expected_output_claim (from R1CS): 157707158662412610938695847833044779411398426
 - ✅ Factorized eq tables: E_out.len=32, E_in.len=32, head_in_bits=5
 - ✅ Coverage: 32*32=1024 cycles
 - ✅ Bit shifting for indexing: i >> 5, i & 0x1F
+- ✅ Gruen polynomial sumcheck constraint: s(0) + s(1) = previous_claim
+- ✅ UniSkip polynomial serialization to transcript
+- ✅ Lagrange kernel L(tau_high, r0) initialization
+- ✅ current_scalar used correctly in computeCubicRoundPoly
 
 ### Remaining Issues to Investigate
 
-1. **current_scalar application** - The Lagrange kernel L(tau_high, r0) is stored in current_scalar. Need to verify it's used correctly in computeCubicRoundPoly.
+1. **Az/Bz computation per cycle** - The constraint evaluations (Az and Bz) need verification against Jolt's `R1CSEval::from_cycle_inputs`.
 
-2. **Gruen polynomial construction** - The l(X) * q(X) multiplication may have subtle issues.
+2. **Constraint group separation** - Jolt uses a selector bit (`full_idx & 1`) to separate 19 constraints into two groups. Zolt might be computing groups differently.
 
-3. **Az/Bz computation** - The constraint evaluations might differ from Jolt's formula.
+3. **r_grid pattern** - Jolt uses an expanding r_grid for bound challenge accumulation, though for the streaming round it's just [1]. This may affect later rounds.
 
-4. **Round indexing** - tau[current_index-1] is used, but need to verify this matches Jolt's w[current_index-1].
+4. **Tau ordering in eq evaluation** - The pairing between tau elements and challenges during binding may be subtly different.
+
+---
+
+## Next Steps
+
+1. Add debug output to compare specific values:
+   - t'(0) and t'(1) for streaming round
+   - Az and Bz for individual cycles
+   - eq weights for specific cycle indices
+
+2. Compare first round polynomial coefficients between Zolt and Jolt
+
+3. Verify constraint evaluation formulas match exactly
 
 ---
 

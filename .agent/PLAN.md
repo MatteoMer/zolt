@@ -2,9 +2,9 @@
 
 ## Current Status (December 2024 - Iteration 46)
 
-### Session Summary - Stats Command Added
+### Session Summary - Stats & Trace Commands Added
 
-This iteration added a new CLI command for proof statistics:
+This iteration added two new CLI commands for debugging and analysis:
 
 1. **Stats Command**
    - `zolt stats <proof>` - Show detailed proof statistics
@@ -14,8 +14,15 @@ This iteration added a new CLI command for proof statistics:
    - Per-stage sumcheck breakdown (rounds, coefficients, claims)
    - Size breakdown estimates
 
-2. **Documentation Updates**
-   - Updated README with new command
+2. **Trace Command**
+   - `zolt trace <elf>` - Show execution trace for debugging
+   - Displays cycle, PC, instruction, RD value, disassembly
+   - Memory access annotations
+   - `--max N` option to limit display (default: 100 steps)
+   - Handles unknown opcodes gracefully
+
+3. **Documentation Updates**
+   - Updated README with new commands
    - Updated help messages
 
 ## Previous Status (December 2024 - Iteration 45)

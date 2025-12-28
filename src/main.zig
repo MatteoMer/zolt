@@ -13,6 +13,7 @@ const Command = enum {
     version,
     info,
     run,
+    trace,
     prove,
     verify,
     stats,
@@ -35,6 +36,7 @@ fn printHelp() void {
         \\    version           Show version information
         \\    info              Show zkVM capabilities and feature summary
         \\    run [opts] <elf>   Run RISC-V ELF binary in the emulator
+        \\    trace <elf>       Show execution trace (for debugging)
         \\    prove [opts] <elf> Generate ZK proof for ELF binary
         \\    verify <proof>    Verify a proof file
         \\    stats <proof>     Show detailed proof statistics
@@ -44,6 +46,7 @@ fn printHelp() void {
         \\
         \\EXAMPLES:
         \\    zolt run program.elf                    # Execute a RISC-V binary
+        \\    zolt trace program.elf                  # Show execution trace
         \\    zolt prove -o proof.bin program.elf     # Generate and save a proof
         \\    zolt verify proof.bin                   # Verify a saved proof
         \\    zolt stats proof.bin                    # Show proof statistics
@@ -142,6 +145,8 @@ fn parseCommand(arg: []const u8) Command {
         return .info;
     } else if (std.mem.eql(u8, arg, "run")) {
         return .run;
+    } else if (std.mem.eql(u8, arg, "trace")) {
+        return .trace;
     } else if (std.mem.eql(u8, arg, "prove")) {
         return .prove;
     } else if (std.mem.eql(u8, arg, "verify")) {
@@ -568,6 +573,139 @@ fn inspectSRS(allocator: std.mem.Allocator, ptau_path: []const u8) !void {
     std.debug.print("\nSRS inspection complete.\n", .{});
 }
 
+fn showTrace(allocator: std.mem.Allocator, elf_path: []const u8, max_steps_opt: ?usize) !void {
+    std.debug.print("Zolt Execution Trace\n", .{});
+    std.debug.print("====================\n\n", .{});
+
+    const max_steps = max_steps_opt orelse 100;
+
+    // Load the ELF file
+    std.debug.print("Loading ELF: {s}\n", .{elf_path});
+    var loader = zolt.host.ELFLoader.init(allocator);
+    const program = loader.loadFile(elf_path) catch |err| {
+        std.debug.print("Error loading ELF: {}\n", .{err});
+        return err;
+    };
+    defer {
+        var prog = program;
+        prog.deinit();
+    }
+
+    std.debug.print("Entry point: 0x{x:0>8}\n", .{program.entry_point});
+    std.debug.print("Code size: {} bytes\n\n", .{program.bytecode.len});
+
+    // Create memory config
+    var config = zolt.common.MemoryConfig{
+        .program_size = program.bytecode.len,
+    };
+
+    // Create emulator
+    var emulator = zolt.tracer.Emulator.init(allocator, &config);
+    defer emulator.deinit();
+
+    // Load program into memory
+    try emulator.loadProgram(program.bytecode);
+
+    // Set entry point PC
+    emulator.state.pc = program.entry_point;
+    emulator.max_cycles = 16 * 1024 * 1024;
+
+    // Run and collect trace
+    var running = true;
+    while (running) {
+        running = emulator.step() catch break;
+    }
+
+    const total_steps = emulator.trace.len();
+    const display_steps = @min(total_steps, max_steps);
+
+    std.debug.print("=== Execution Trace ({} of {} steps) ===\n\n", .{ display_steps, total_steps });
+    std.debug.print("{s:>6} | {s:>10} | {s:>10} | {s:>12} | {s}\n", .{ "Cycle", "PC", "Instr", "RD Value", "Disasm" });
+    std.debug.print("{s:-<6}-+-{s:-<10}-+-{s:-<10}-+-{s:-<12}-+-{s:-<30}\n", .{ "", "", "", "", "" });
+
+    for (0..display_steps) |i| {
+        if (emulator.trace.get(i)) |step| {
+            // Decode instruction for disassembly
+            const decoded = zolt.zkvm.instruction.DecodedInstruction.decode(step.instruction);
+            const mnemonic = blk: {
+                switch (decoded.opcode) {
+                    .LUI => break :blk "LUI",
+                    .AUIPC => break :blk "AUIPC",
+                    .JAL => break :blk "JAL",
+                    .JALR => break :blk "JALR",
+                    .BRANCH => break :blk "BRANCH",
+                    .LOAD => break :blk "LOAD",
+                    .STORE => break :blk "STORE",
+                    .OP_IMM => break :blk "OP_IMM",
+                    .OP => break :blk "OP",
+                    .FENCE => break :blk "FENCE",
+                    .SYSTEM => break :blk "SYSTEM",
+                    .OP_IMM_32 => break :blk "OP_IMM_32",
+                    .OP_32 => break :blk "OP_32",
+                    _ => break :blk "???",
+                }
+            };
+
+            // Format RD value (only show if not zero)
+            var rd_buf: [16]u8 = undefined;
+            const rd_str = if (step.rd_value != 0)
+                std.fmt.bufPrint(&rd_buf, "0x{x:0>8}", .{step.rd_value}) catch "?"
+            else
+                std.fmt.bufPrint(&rd_buf, "-", .{}) catch "?";
+
+            // Format memory access if present
+            var mem_buf: [40]u8 = undefined;
+            const mem_str = if (step.memory_addr) |addr| blk: {
+                const mem_val = step.memory_value orelse 0;
+                if (step.is_memory_write) {
+                    break :blk std.fmt.bufPrint(&mem_buf, "[0x{x}] <- 0x{x}", .{ addr, mem_val }) catch "";
+                } else {
+                    break :blk std.fmt.bufPrint(&mem_buf, "[0x{x}] -> 0x{x}", .{ addr, mem_val }) catch "";
+                }
+            } else "";
+
+            // Print the trace line
+            std.debug.print("{:>6} | 0x{x:0>8} | 0x{x:0>8} | {s:>12} | {s}", .{
+                step.cycle,
+                step.pc,
+                step.instruction,
+                rd_str,
+                mnemonic,
+            });
+
+            // Add operand info based on format
+            switch (decoded.format) {
+                .R => std.debug.print(" x{}, x{}, x{}", .{ decoded.rd, decoded.rs1, decoded.rs2 }),
+                .I => {
+                    if (decoded.opcode == .LOAD or decoded.opcode == .JALR) {
+                        std.debug.print(" x{}, {}(x{})", .{ decoded.rd, decoded.imm, decoded.rs1 });
+                    } else {
+                        std.debug.print(" x{}, x{}, {}", .{ decoded.rd, decoded.rs1, decoded.imm });
+                    }
+                },
+                .S => std.debug.print(" x{}, {}(x{})", .{ decoded.rs2, decoded.imm, decoded.rs1 }),
+                .B => std.debug.print(" x{}, x{}, {}", .{ decoded.rs1, decoded.rs2, decoded.imm }),
+                .U, .J => std.debug.print(" x{}, 0x{x}", .{ decoded.rd, @as(u32, @bitCast(decoded.imm)) }),
+            }
+
+            // Add memory access info
+            if (mem_str.len > 0) {
+                std.debug.print("  ; {s}", .{mem_str});
+            }
+
+            std.debug.print("\n", .{});
+        }
+    }
+
+    if (total_steps > max_steps) {
+        std.debug.print("\n... {} more steps (use --max N to show more)\n", .{total_steps - max_steps});
+    }
+
+    std.debug.print("\n====================\n", .{});
+    std.debug.print("Total cycles: {}\n", .{emulator.state.cycle});
+    std.debug.print("Final PC: 0x{x:0>8}\n", .{emulator.state.pc});
+}
+
 fn showProofStats(allocator: std.mem.Allocator, proof_path: []const u8) !void {
     std.debug.print("Zolt Proof Statistics\n", .{});
     std.debug.print("=====================\n\n", .{});
@@ -816,6 +954,57 @@ pub fn main() !void {
                 std.debug.print("Usage: zolt run [options] <elf_file>\n", .{});
             }
         },
+        .trace => {
+            if (args.next()) |arg| {
+                if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+                    std.debug.print("Usage: zolt trace [options] <elf_file>\n\n", .{});
+                    std.debug.print("Show the execution trace of a RISC-V ELF binary.\n", .{});
+                    std.debug.print("Displays each instruction with PC, opcode, and results.\n\n", .{});
+                    std.debug.print("Options:\n", .{});
+                    std.debug.print("  --max N   Show at most N trace entries (default: 100)\n", .{});
+                } else {
+                    var elf_path: ?[]const u8 = null;
+                    var max_steps: ?usize = null;
+
+                    // First arg could be an option or the ELF path
+                    if (std.mem.startsWith(u8, arg, "--")) {
+                        if (std.mem.eql(u8, arg, "--max")) {
+                            if (args.next()) |n_str| {
+                                max_steps = std.fmt.parseInt(usize, n_str, 10) catch null;
+                            }
+                        }
+                    } else {
+                        elf_path = arg;
+                    }
+
+                    // Parse remaining args
+                    while (args.next()) |next_arg| {
+                        if (std.mem.startsWith(u8, next_arg, "--")) {
+                            if (std.mem.eql(u8, next_arg, "--max")) {
+                                if (args.next()) |n_str| {
+                                    max_steps = std.fmt.parseInt(usize, n_str, 10) catch null;
+                                }
+                            }
+                        } else if (elf_path == null) {
+                            elf_path = next_arg;
+                        }
+                    }
+
+                    if (elf_path) |path| {
+                        showTrace(allocator, path, max_steps) catch |err| {
+                            std.debug.print("Failed to show trace: {s}\n", .{@errorName(err)});
+                            std.process.exit(1);
+                        };
+                    } else {
+                        std.debug.print("Error: trace command requires an ELF file path\n", .{});
+                        std.debug.print("Usage: zolt trace [options] <elf_file>\n", .{});
+                    }
+                }
+            } else {
+                std.debug.print("Error: trace command requires an ELF file path\n", .{});
+                std.debug.print("Usage: zolt trace [options] <elf_file>\n", .{});
+            }
+        },
         .prove => {
             if (args.next()) |arg| {
                 if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
@@ -979,6 +1168,7 @@ test "command parsing" {
     try std.testing.expect(parseCommand("-v") == .version);
     try std.testing.expect(parseCommand("info") == .info);
     try std.testing.expect(parseCommand("run") == .run);
+    try std.testing.expect(parseCommand("trace") == .trace);
     try std.testing.expect(parseCommand("prove") == .prove);
     try std.testing.expect(parseCommand("verify") == .verify);
     try std.testing.expect(parseCommand("stats") == .stats);

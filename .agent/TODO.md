@@ -14,6 +14,15 @@
 - [x] Add test for stats command parsing
 - [x] Update README with stats command documentation
 
+### CLI Trace Command
+- [x] Add `zolt trace <elf>` command for execution trace display
+  - Shows cycle, PC, instruction, RD value, disassembly
+  - Includes memory access annotations
+  - Supports `--max N` option to limit display
+  - Handles unknown opcodes gracefully
+- [x] Add test for trace command parsing
+- [x] Update README with trace command documentation
+
 ## Completed (Previous Session - Iteration 45)
 
 ### JSON Deserialization for Proof Loading
@@ -123,6 +132,8 @@ zolt info              # Show zkVM capabilities
 zolt run [opts] <elf>  # Run RISC-V ELF binary
   --max-cycles N       # Limit execution cycles
   --regs               # Show final register state
+zolt trace [opts] <elf> # Show execution trace (debugging)
+  --max N              # Show at most N steps
 zolt prove [opts] <elf> # Generate ZK proof
   --max-cycles N       # Limit proving cycles
   -o, --output F       # Save proof to file

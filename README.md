@@ -63,6 +63,10 @@ zolt bench
 zolt run program.elf
 zolt run --max-cycles 1000 --regs program.elf  # Limit cycles, show registers
 
+# Show execution trace (for debugging)
+zolt trace program.elf                           # Show first 100 steps
+zolt trace --max 500 program.elf                 # Show more steps
+
 # Generate ZK proof for a RISC-V ELF binary
 zolt prove program.elf
 zolt prove -o proof.bin program.elf            # Save proof to file (binary)

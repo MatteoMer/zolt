@@ -1,25 +1,17 @@
 # Zolt zkVM Implementation TODO
 
-## Completed (This Session - Iteration 32)
+## Completed (This Session - Iteration 33)
 
-### Investigation & Testing
-- [x] Ran full pipeline example - verification passes in lenient mode
-- [x] Ran benchmarks - confirmed field arithmetic and MSM performance
-- [x] Verified all 538 tests pass
-
-### Test Interference Investigation
-- [x] Attempted to add comprehensive e2e prover/verifier tests
-- [x] Discovered strange test interference issue (documented below)
-- [x] Reverted test additions to maintain test suite stability
-
-### CLI Improvements
-- [x] Improved error handling in CLI to remove stack traces
-- [x] Errors now show clean error name and exit with code 1
-- [x] Removed duplicate error messages in run, prove, and srs commands
+### Module Structure Improvements
+- [x] Add claim_reductions module with placeholder types
+- [x] Add instruction_lookups module with placeholder types
+- [x] Update zkvm/mod.zig to export new modules
+- [x] Update README.md with current project structure
+- [x] Update test count to 550+
 
 ## Known Issues (For Future Iterations)
 
-### Test Interference Issue (NEW - Iteration 32)
+### Test Interference Issue (Iteration 32)
 When adding new integration tests to `src/integration_tests.zig`, seemingly unrelated tests in:
 - `zkvm/lasso/split_eq.zig`
 - `zkvm/lasso/expanding_table.zig`
@@ -43,6 +35,18 @@ The issue: After round 0, the prover's sum of folded values doesn't equal the
 verifier's `p(challenge)`. The prover uses linear folding `(1-r)*p0 + r*p1`,
 while the verifier uses quadratic Lagrange interpolation.
 
+## Completed (Previous Sessions - Iteration 32)
+
+### Investigation & Testing
+- [x] Ran full pipeline example - verification passes in lenient mode
+- [x] Ran benchmarks - confirmed field arithmetic and MSM performance
+- [x] Verified all tests pass
+
+### CLI Improvements
+- [x] Improved error handling in CLI to remove stack traces
+- [x] Errors now show clean error name and exit with code 1
+- [x] Removed duplicate error messages in run, prove, and srs commands
+
 ## Completed (Previous Sessions - Iteration 31)
 
 ### Strict Sumcheck Verification Mode
@@ -54,35 +58,7 @@ while the verifier uses quadratic Lagrange interpolation.
 - [x] Add tests for verifier configuration
 - [x] Update full_pipeline example to use lenient mode (for now)
 
-### Sumcheck Prover Improvements (Iteration 31)
-- [x] Add proper Fiat-Shamir binding: absorb round polynomials into transcript
-- [x] Fix Spartan prover to track current_len during folding
-- [x] Fix RAF prover to account for bound variables in unmap evaluation
-- [x] Add debug output for stage failures
-
-## Completed (Previous Sessions - Iteration 30)
-
-### Critical Bug Fix: Prover/Verifier Transcript Synchronization
-- [x] Fix prover to generate commitments BEFORE sumcheck proving
-- [x] Prover now absorbs commitments into transcript to bind challenges
-- [x] Verifier stages now generate matching pre-challenges
-- [x] End-to-end verification now PASSES
-
-## Completed (Previous Sessions - Iterations 27-29)
-
-### CLI Improvements
-- [x] Add --help support for subcommands (run, prove, srs, decode)
-- [x] Each subcommand now shows usage information when passed --help or -h
-- [x] Add full pipeline example (end-to-end ZK proving workflow)
-- [x] Upgrade prove command to actually call prover.prove() and verifier.verify()
-- [x] Add 'srs' command to inspect PTAU ceremony files
-
-### Examples and Documentation
-- [x] Add HyperKZG commitment example
-- [x] Add sumcheck protocol example
-- [x] Update README with example usage instructions
-
-## Completed (Iterations 1-26)
+## Completed (Iterations 1-30)
 
 ### Core Infrastructure
 - [x] BN254 field and curve arithmetic
@@ -143,7 +119,7 @@ while the verifier uses quadratic Lagrange interpolation.
 - [ ] Add more example programs
 
 ## Test Status
-All tests pass (538 tests).
+All tests pass (550 tests).
 End-to-end verification: PASSED (lenient mode)
 Full pipeline example: WORKING
 

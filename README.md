@@ -99,7 +99,11 @@ zolt/
 │   │   ├── r1cs/          # R1CS constraint system
 │   │   ├── ram/           # Memory checking
 │   │   ├── registers/     # Register file
-│   │   └── spartan/       # Spartan prover/verifier
+│   │   ├── spartan/       # Spartan prover/verifier
+│   │   ├── lasso/         # Lasso lookup argument
+│   │   ├── lookup_table/  # Lookup tables (24 types)
+│   │   ├── claim_reductions/ # Claim reduction protocols
+│   │   └── instruction_lookups/ # Instruction lookup handling
 │   ├── msm/               # Multi-scalar multiplication
 │   ├── host/              # ELF loader, program interface
 │   ├── guest/             # Guest program I/O
@@ -159,6 +163,16 @@ zolt/
    - Pippenger's bucket method
    - Parallel execution with `std.Thread`
 
+8. **Lasso Lookup Argument** (`src/zkvm/lasso/mod.zig`)
+   - Efficient lookup argument for instruction validation
+   - 24 lookup tables for bitwise, arithmetic, and comparison ops
+   - Prover and verifier with sumcheck integration
+
+9. **Multi-Stage Prover** (`src/zkvm/prover.zig`, `src/zkvm/verifier.zig`)
+   - 6-stage sumcheck orchestration (Spartan, RAF, Lasso, Val, Register, Booleanity)
+   - Opening claim accumulation for batch verification
+   - Configurable strict/lenient verification modes
+
 ## Usage Example
 
 ```zig
@@ -189,7 +203,7 @@ pub fn main() !void {
 
 ## Testing
 
-The project includes 538 tests covering:
+The project includes 550+ tests covering:
 
 - Field arithmetic (Montgomery operations, batch ops, extension fields)
 - Polynomial operations (evaluation, summation, binding)

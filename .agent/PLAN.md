@@ -1,10 +1,21 @@
 # Zolt zkVM Implementation Plan
 
-## Current Status (December 2024 - Iteration 32)
+## Current Status (December 2024 - Iteration 33)
 
-### Session Summary - Investigation, Stability Testing & CLI Improvements
+### Session Summary - Module Structure Improvements
 
-This iteration focused on testing, investigating issues, and improving CLI UX:
+This iteration focused on improving the project structure:
+
+**Activities (Iteration 33):**
+1. Added claim_reductions module with placeholder types
+2. Added instruction_lookups module with placeholder types
+3. Updated zkvm/mod.zig to export new modules
+4. Updated README.md with current project structure
+5. Updated test count to 550+
+
+### Previous Session (Iteration 32) - Investigation & CLI Improvements
+
+The previous iteration focused on testing, investigating issues, and improving CLI UX:
 
 **Activities:**
 1. Ran full pipeline example - verification passes in lenient mode

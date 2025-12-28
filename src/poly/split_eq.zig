@@ -30,10 +30,10 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
         tau: []F,
         /// Prefix eq tables for outer variables (cycle index)
         /// E_out_vec[k] has 2^k entries for eq(τ_out[0..k], ·)
-        E_out_vec: std.ArrayList([]F),
+        E_out_vec: std.ArrayListUnmanaged([]F),
         /// Prefix eq tables for inner variables (constraint group)
         /// E_in_vec[k] has 2^k entries for eq(τ_in[0..k], ·)
-        E_in_vec: std.ArrayList([]F),
+        E_in_vec: std.ArrayListUnmanaged([]F),
         /// Number of outer variables (cycle bits)
         num_x_out: usize,
         /// Number of inner variables (group bits + constraint bits)
@@ -54,12 +54,12 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
             @memcpy(tau_copy, tau);
 
             // Build prefix eq tables
-            var E_in_vec = std.ArrayList([]F).init(allocator);
-            var E_out_vec = std.ArrayList([]F).init(allocator);
+            var E_in_vec: std.ArrayListUnmanaged([]F) = .{};
+            var E_out_vec: std.ArrayListUnmanaged([]F) = .{};
 
             // Build inner prefix tables (E_in_vec)
             // E_in_vec[0] = [1] (empty eq is always 1)
-            try E_in_vec.append(try allocator.alloc(F, 1));
+            try E_in_vec.append(allocator, try allocator.alloc(F, 1));
             E_in_vec.items[0][0] = F.one();
 
             for (0..num_x_in) |k| {
@@ -78,12 +78,12 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
                     next[i + prev_size] = prev[i].mul(tau_k);
                 }
 
-                try E_in_vec.append(next);
+                try E_in_vec.append(allocator, next);
             }
 
             // Build outer prefix tables (E_out_vec)
             // E_out_vec[0] = [1]
-            try E_out_vec.append(try allocator.alloc(F, 1));
+            try E_out_vec.append(allocator, try allocator.alloc(F, 1));
             E_out_vec.items[0][0] = F.one();
 
             for (0..num_x_out) |k| {
@@ -100,7 +100,7 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
                     next[i + prev_size] = prev[i].mul(tau_k);
                 }
 
-                try E_out_vec.append(next);
+                try E_out_vec.append(allocator, next);
             }
 
             return Self{
@@ -121,12 +121,12 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
             for (self.E_in_vec.items) |table| {
                 self.allocator.free(table);
             }
-            self.E_in_vec.deinit();
+            self.E_in_vec.deinit(self.allocator);
 
             for (self.E_out_vec.items) |table| {
                 self.allocator.free(table);
             }
-            self.E_out_vec.deinit();
+            self.E_out_vec.deinit(self.allocator);
         }
 
         /// Bind the current variable to challenge r

@@ -220,7 +220,7 @@ pub fn LagrangePolynomial(comptime F: type) type {
                     den = den.mul(x_i.sub(x_j));
                 }
 
-                result[i] = num.mul(den.inv());
+                result[i] = num.mul(den.inverse().?);
             }
 
             return result;
@@ -254,7 +254,7 @@ pub fn LagrangePolynomial(comptime F: type) type {
                     const x_j = Self.fieldFromI64(base_left_i + @as(i64, @intCast(j)));
                     den = den.mul(x_i.sub(x_j));
                 }
-                const scale = y_i.mul(den.inv());
+                const scale = y_i.mul(den.inverse().?);
 
                 // Build the numerator polynomial prod_{j != i} (X - x_j)
                 // Start with 1, then multiply by (X - x_j) for each j != i

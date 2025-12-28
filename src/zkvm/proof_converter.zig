@@ -316,10 +316,27 @@ pub fn ProofConverter(comptime F: type) type {
             }
         }
 
+        /// Result of Stage 1 sumcheck proof generation
+        const Stage1Result = struct {
+            /// Accumulated sumcheck challenges (r_stream, r_cycle_bits...)
+            /// The full r_cycle point is [r_stream, r1, r2, ..., r_n] reversed
+            challenges: std.ArrayListUnmanaged(F),
+            /// The first-round challenge r0 from UniSkip
+            r0: F,
+            /// Allocator for cleanup
+            allocator: Allocator,
+
+            pub fn deinit(self: *Stage1Result) void {
+                self.challenges.deinit(self.allocator);
+            }
+        };
+
         /// Generate sumcheck proof using the streaming outer prover with Fiat-Shamir transcript
         ///
         /// This produces actual polynomial evaluations by computing Az*Bz products
         /// from the R1CS constraints, using the provided transcript for challenges.
+        ///
+        /// Returns the accumulated challenges for computing r_cycle.
         fn generateStreamingOuterSumcheckProofWithTranscript(
             self: *Self,
             proof: *SumcheckInstanceProof(F),
@@ -327,8 +344,9 @@ pub fn ProofConverter(comptime F: type) type {
             cycle_witnesses: []const r1cs.R1CSCycleInputs(F),
             tau: []const F,
             transcript: *Blake2bTranscript(F),
-        ) !void {
+        ) !Stage1Result {
             const StreamingOuterProver = streaming_outer.StreamingOuterProver(F);
+            var challenges: std.ArrayListUnmanaged(F) = .{};
 
             // Initialize the streaming prover
             var outer_prover = StreamingOuterProver.init(
@@ -338,28 +356,30 @@ pub fn ProofConverter(comptime F: type) type {
             ) catch {
                 // Fallback to zero proofs if initialization fails
                 const num_rounds = 1 + std.math.log2_int(usize, @max(1, cycle_witnesses.len));
-                return self.generateZeroSumcheckProof(proof, num_rounds, 3);
+                try self.generateZeroSumcheckProof(proof, num_rounds, 3);
+                return Stage1Result{ .challenges = challenges, .r0 = F.zero(), .allocator = self.allocator };
             };
             defer outer_prover.deinit();
 
             // The first round was already processed by UniSkip
             // Append the UniSkip polynomial to transcript and get challenge
-            if (uniskip_proof.uni_poly) |uni_poly| {
-                transcript.appendScalars(uni_poly);
-            }
+            transcript.appendScalars(uniskip_proof.uni_poly);
             const r0 = transcript.challengeScalar();
 
             // Bind the first-round challenge from transcript
             outer_prover.bindFirstRoundChallenge(r0) catch {};
 
             // Generate remaining rounds
-            const num_rounds = outer_prover.numRounds();
-            if (num_rounds <= 1) {
-                return;
+            // In Jolt, stage1_sumcheck_proof contains num_rounds polynomials
+            // where num_rounds = 1 + num_cycle_vars (1 streaming + cycle vars)
+            // The UniSkip is separate and doesn't count here
+            const num_remaining_rounds = outer_prover.numRounds(); // 1 + num_cycle_vars
+            if (num_remaining_rounds == 0) {
+                return Stage1Result{ .challenges = challenges, .r0 = r0, .allocator = self.allocator };
             }
 
-            // Generate remaining round polynomials with transcript integration
-            for (1..num_rounds) |_| {
+            // Generate all remaining round polynomials with transcript integration
+            for (0..num_remaining_rounds) |_| {
                 const round_poly = outer_prover.computeRemainingRoundPoly() catch {
                     // Fallback to zero polynomial
                     const coeffs = try self.allocator.alloc(F, 3);
@@ -368,6 +388,7 @@ pub fn ProofConverter(comptime F: type) type {
                         .coeffs_except_linear_term = coeffs,
                         .allocator = self.allocator,
                     });
+                    try challenges.append(self.allocator, F.zero());
                     continue;
                 };
 
@@ -391,14 +412,99 @@ pub fn ProofConverter(comptime F: type) type {
 
                 // Get challenge from transcript
                 const challenge = transcript.challengeScalar();
+                try challenges.append(self.allocator, challenge);
 
                 // Bind challenge and update claim
                 outer_prover.bindRemainingRoundChallenge(challenge) catch {};
                 outer_prover.updateClaim(round_poly, challenge);
             }
+
+            return Stage1Result{ .challenges = challenges, .r0 = r0, .allocator = self.allocator };
         }
 
-        /// Add all 36 R1CS input opening claims for SpartanOuter
+        /// R1CS input indices in Jolt's ALL_R1CS_INPUTS order
+        /// Maps from Jolt's ordering (index in this array) to Zolt's R1CSInputIndex
+        const JOLT_TO_ZOLT_R1CS_INDICES = [36]r1cs.R1CSInputIndex{
+            .LeftInstructionInput, // 0
+            .RightInstructionInput, // 1
+            .Product, // 2
+            .WriteLookupOutputToRD, // 3
+            .WritePCtoRD, // 4
+            .ShouldBranch, // 5
+            .PC, // 6
+            .UnexpandedPC, // 7
+            .Imm, // 8
+            .RamAddress, // 9
+            .Rs1Value, // 10
+            .Rs2Value, // 11
+            .RdWriteValue, // 12
+            .RamReadValue, // 13
+            .RamWriteValue, // 14
+            .LeftLookupOperand, // 15
+            .RightLookupOperand, // 16
+            .NextUnexpandedPC, // 17
+            .NextPC, // 18
+            .NextIsVirtual, // 19
+            .NextIsFirstInSequence, // 20
+            .LookupOutput, // 21
+            .ShouldJump, // 22
+            .FlagAddOperands, // 23
+            .FlagSubtractOperands, // 24
+            .FlagMultiplyOperands, // 25
+            .FlagLoad, // 26
+            .FlagStore, // 27
+            .FlagJump, // 28
+            .FlagWriteLookupOutputToRD, // 29
+            .FlagVirtualInstruction, // 30
+            .FlagAssert, // 31
+            .FlagDoNotUpdateUnexpandedPC, // 32
+            .FlagAdvice, // 33
+            .FlagIsCompressed, // 34
+            .FlagIsFirstInSequence, // 35
+        };
+
+        /// VirtualPolynomial identifiers in Jolt's order
+        const R1CS_VIRTUAL_POLYS = [36]VirtualPolynomial{
+            .LeftInstructionInput, // 0
+            .RightInstructionInput, // 1
+            .Product, // 2
+            .WriteLookupOutputToRD, // 3
+            .WritePCtoRD, // 4
+            .ShouldBranch, // 5
+            .PC, // 6
+            .UnexpandedPC, // 7
+            .Imm, // 8
+            .RamAddress, // 9
+            .Rs1Value, // 10
+            .Rs2Value, // 11
+            .RdWriteValue, // 12
+            .RamReadValue, // 13
+            .RamWriteValue, // 14
+            .LeftLookupOperand, // 15
+            .RightLookupOperand, // 16
+            .NextUnexpandedPC, // 17
+            .NextPC, // 18
+            .NextIsVirtual, // 19
+            .NextIsFirstInSequence, // 20
+            .LookupOutput, // 21
+            .ShouldJump, // 22
+            // OpFlags variants (13 of them) - CircuitFlags indices
+            .{ .OpFlags = 0 }, // 23: AddOperands
+            .{ .OpFlags = 1 }, // 24: SubtractOperands
+            .{ .OpFlags = 2 }, // 25: MultiplyOperands
+            .{ .OpFlags = 3 }, // 26: Load
+            .{ .OpFlags = 4 }, // 27: Store
+            .{ .OpFlags = 5 }, // 28: Jump
+            .{ .OpFlags = 6 }, // 29: WriteLookupOutputToRD
+            .{ .OpFlags = 7 }, // 30: VirtualInstruction
+            .{ .OpFlags = 8 }, // 31: Assert
+            .{ .OpFlags = 9 }, // 32: DoNotUpdateUnexpandedPC
+            .{ .OpFlags = 10 }, // 33: Advice
+            .{ .OpFlags = 11 }, // 34: IsCompressed
+            .{ .OpFlags = 12 }, // 35: IsFirstInSequence
+        };
+
+        /// Add all 36 R1CS input opening claims for SpartanOuter with zero claims
         ///
         /// This exactly matches the ALL_R1CS_INPUTS array in Jolt's r1cs/inputs.rs:
         /// - 23 simple virtual polynomials
@@ -409,49 +515,8 @@ pub fn ProofConverter(comptime F: type) type {
         ) !void {
             _ = self;
 
-            // All 36 R1CS inputs in exact order (from Jolt's ALL_R1CS_INPUTS in r1cs/inputs.rs)
-            const r1cs_inputs = [_]VirtualPolynomial{
-                .LeftInstructionInput, // 0
-                .RightInstructionInput, // 1
-                .Product, // 2
-                .WriteLookupOutputToRD, // 3
-                .WritePCtoRD, // 4
-                .ShouldBranch, // 5
-                .PC, // 6
-                .UnexpandedPC, // 7
-                .Imm, // 8
-                .RamAddress, // 9
-                .Rs1Value, // 10
-                .Rs2Value, // 11
-                .RdWriteValue, // 12
-                .RamReadValue, // 13
-                .RamWriteValue, // 14
-                .LeftLookupOperand, // 15
-                .RightLookupOperand, // 16
-                .NextUnexpandedPC, // 17
-                .NextPC, // 18
-                .NextIsVirtual, // 19
-                .NextIsFirstInSequence, // 20
-                .LookupOutput, // 21
-                .ShouldJump, // 22
-                // OpFlags variants (13 of them) - CircuitFlags indices
-                .{ .OpFlags = 0 }, // 23: AddOperands
-                .{ .OpFlags = 1 }, // 24: SubtractOperands
-                .{ .OpFlags = 2 }, // 25: MultiplyOperands
-                .{ .OpFlags = 3 }, // 26: Load
-                .{ .OpFlags = 4 }, // 27: Store
-                .{ .OpFlags = 5 }, // 28: Jump
-                .{ .OpFlags = 6 }, // 29: WriteLookupOutputToRD
-                .{ .OpFlags = 7 }, // 30: VirtualInstruction
-                .{ .OpFlags = 8 }, // 31: Assert
-                .{ .OpFlags = 9 }, // 32: DoNotUpdateUnexpandedPC
-                .{ .OpFlags = 10 }, // 33: Advice
-                .{ .OpFlags = 11 }, // 34: IsCompressed
-                .{ .OpFlags = 12 }, // 35: IsFirstInSequence
-            };
-
             // Add all R1CS inputs for SpartanOuter with zero claims
-            for (r1cs_inputs) |poly| {
+            for (R1CS_VIRTUAL_POLYS) |poly| {
                 try claims.insert(
                     .{ .Virtual = .{ .poly = poly, .sumcheck_id = .SpartanOuter } },
                     F.zero(),
@@ -459,6 +524,43 @@ pub fn ProofConverter(comptime F: type) type {
             }
 
             // Add the UnivariateSkip claim for SpartanOuter
+            try claims.insert(
+                .{ .Virtual = .{ .poly = .UnivariateSkip, .sumcheck_id = .SpartanOuter } },
+                F.zero(),
+            );
+        }
+
+        /// Add all 36 R1CS input opening claims for SpartanOuter with actual evaluations
+        ///
+        /// This computes the MLE evaluations at r_cycle and uses those as the claims.
+        fn addSpartanOuterOpeningClaimsWithEvaluations(
+            self: *Self,
+            claims: *OpeningClaims(F),
+            cycle_witnesses: []const r1cs.R1CSCycleInputs(F),
+            r_cycle: []const F,
+        ) !void {
+            // Compute MLE evaluations at r_cycle
+            const R1CSInputEvaluator = r1cs.R1CSInputEvaluator(F);
+            const input_evals = try R1CSInputEvaluator.computeClaimedInputs(
+                self.allocator,
+                cycle_witnesses,
+                r_cycle,
+            );
+
+            // Add R1CS inputs for SpartanOuter with computed evaluations
+            for (R1CS_VIRTUAL_POLYS, 0..) |poly, jolt_idx| {
+                // Map Jolt's index to Zolt's R1CSInputIndex
+                const zolt_idx = JOLT_TO_ZOLT_R1CS_INDICES[jolt_idx].toIndex();
+                const claim = input_evals[zolt_idx];
+
+                try claims.insert(
+                    .{ .Virtual = .{ .poly = poly, .sumcheck_id = .SpartanOuter } },
+                    claim,
+                );
+            }
+
+            // Add the UnivariateSkip claim for SpartanOuter (computed from sumcheck output)
+            // For now, use zero - the actual value should come from the sumcheck
             try claims.insert(
                 .{ .Virtual = .{ .poly = .UnivariateSkip, .sumcheck_id = .SpartanOuter } },
                 F.zero(),
@@ -677,8 +779,9 @@ pub fn ProofConverter(comptime F: type) type {
             );
 
             // Stage 1: Outer Spartan Remaining - use streaming prover with transcript
+            var stage1_result: ?Stage1Result = null;
             if (jolt_proof.stage1_uni_skip_first_round_proof) |*uniskip| {
-                try self.generateStreamingOuterSumcheckProofWithTranscript(
+                stage1_result = try self.generateStreamingOuterSumcheckProofWithTranscript(
                     &jolt_proof.stage1_sumcheck_proof,
                     uniskip,
                     cycle_witnesses,
@@ -693,9 +796,21 @@ pub fn ProofConverter(comptime F: type) type {
                     3,
                 );
             }
+            defer if (stage1_result) |*r| r.deinit();
 
-            // Add Stage 1 opening claims
-            try self.addSpartanOuterOpeningClaims(&jolt_proof.opening_claims);
+            // Add Stage 1 opening claims with computed MLE evaluations
+            if (stage1_result) |result| {
+                // The r_cycle point for R1CS input evaluation
+                // In Jolt, this is the reversed sumcheck challenges
+                try self.addSpartanOuterOpeningClaimsWithEvaluations(
+                    &jolt_proof.opening_claims,
+                    cycle_witnesses,
+                    result.challenges.items,
+                );
+            } else {
+                // Fallback to zero claims
+                try self.addSpartanOuterOpeningClaims(&jolt_proof.opening_claims);
+            }
 
             // Create UniSkip proof for Stage 2
             jolt_proof.stage2_uni_skip_first_round_proof = try self.createUniSkipProofStage2();

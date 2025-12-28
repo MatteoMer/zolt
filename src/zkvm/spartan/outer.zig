@@ -256,22 +256,22 @@ pub fn SpartanOuterProver(comptime F: type) type {
             // Lagrange interpolation: sum_i L_i(y) * base_evals[i]
             // L_i(y) = prod_{j != i} (y - x_j) / (x_i - x_j)
             var result = F.zero();
-            const y = fieldFromI64(F, y_i64);
+            const y = fieldFromI64(y_i64);
 
             for (0..DOMAIN_SIZE) |i| {
-                const x_i = fieldFromI64(F, BASE_LEFT + @as(i64, @intCast(i)));
+                const x_i = fieldFromI64(BASE_LEFT + @as(i64, @intCast(i)));
 
                 var numerator = F.one();
                 var denominator = F.one();
 
                 for (0..DOMAIN_SIZE) |j| {
                     if (i == j) continue;
-                    const x_j = fieldFromI64(F, BASE_LEFT + @as(i64, @intCast(j)));
+                    const x_j = fieldFromI64(BASE_LEFT + @as(i64, @intCast(j)));
                     numerator = numerator.mul(y.sub(x_j));
                     denominator = denominator.mul(x_i.sub(x_j));
                 }
 
-                const lagrange_coeff = numerator.mul(denominator.inv());
+                const lagrange_coeff = numerator.mul(denominator.inverse().?);
                 result = result.add(lagrange_coeff.mul(base_evals[i]));
             }
 

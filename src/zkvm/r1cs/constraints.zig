@@ -701,6 +701,11 @@ pub fn R1CSWitnessGenerator(comptime F: type) type {
             return .{ .allocator = allocator };
         }
 
+        pub fn deinit(self: *Self) void {
+            _ = self;
+            // No resources to free - this is just a wrapper
+        }
+
         /// Generate witness for all cycles in trace
         pub fn generateWitness(
             self: *Self,

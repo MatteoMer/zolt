@@ -32,6 +32,12 @@ pub const AzSecondGroup = evaluators.AzSecondGroup;
 pub const BzSecondGroup = evaluators.BzSecondGroup;
 pub const UnivariateSkipEvaluator = evaluators.UnivariateSkipEvaluator;
 
+// Export MLE evaluation (for opening claims)
+pub const evaluation = @import("evaluation.zig");
+pub const R1CSInputEvaluator = evaluation.R1CSInputEvaluator;
+pub const R1CSConstraintGenerator = evaluation.R1CSConstraintGenerator;
+pub const NUM_R1CS_INPUTS = evaluation.NUM_R1CS_INPUTS;
+
 // Export Jolt R1CS integration
 pub const jolt_r1cs = @import("jolt_r1cs.zig");
 pub const JoltR1CS = jolt_r1cs.JoltR1CS;

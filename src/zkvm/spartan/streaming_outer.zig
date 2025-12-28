@@ -59,7 +59,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
         /// Current sumcheck claim
         current_claim: F,
         /// Collected challenges
-        challenges: std.ArrayList(F),
+        challenges: std.ArrayListUnmanaged(F),
         /// Current round number
         current_round: usize,
 
@@ -100,7 +100,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 .padded_trace_len = padded_len,
                 .split_eq = split_eq,
                 .current_claim = F.zero(),
-                .challenges = std.ArrayList(F).init(allocator),
+                .challenges = .{},
                 .current_round = 0,
                 .lagrange_evals_r0 = [_]F{F.zero()} ** FIRST_GROUP_SIZE,
                 .allocator = allocator,
@@ -109,7 +109,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
         pub fn deinit(self: *Self) void {
             self.split_eq.deinit();
-            self.challenges.deinit();
+            self.challenges.deinit(self.allocator);
         }
 
         /// Total number of rounds
@@ -215,7 +215,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
         /// Bind the first-round challenge and set up for remaining rounds
         pub fn bindFirstRoundChallenge(self: *Self, r0: F) !void {
-            try self.challenges.append(r0);
+            try self.challenges.append(self.allocator, r0);
             self.current_round = 1;
 
             // Compute Lagrange basis evaluations at r0 for use in remaining rounds
@@ -329,7 +329,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
         /// Bind a remaining round challenge
         pub fn bindRemainingRoundChallenge(self: *Self, r: F) !void {
-            try self.challenges.append(r);
+            try self.challenges.append(self.allocator, r);
             self.split_eq.bind(r);
             self.current_round += 1;
 

@@ -34,7 +34,7 @@
 - [x] JoltVerifierPreprocessing (generators + shared)
 - [x] CLI --export-preprocessing includes verifier setup
 
-## Phase 6: Integration Testing 🔄 IN PROGRESS
+## Phase 6: Integration Testing ✅ MOSTLY COMPLETE
 
 ### Proof Deserialization ✅
 - [x] Jolt can deserialize Zolt proof in --jolt-format
@@ -42,23 +42,18 @@
 - [x] Commitments: 5 GT elements, all valid
 - [x] Sumcheck proofs: structure matches
 
-### Preprocessing Deserialization 🚧
-- [ ] Verifier setup (DoryVerifierSetup): Parses OK
-- [ ] Bytecode preprocessing: JSON format mismatch
-  - Zolt uses custom JSON: `{"ADD": {"address": ..., "operands": {"rd":1, ...}}}`
-  - Jolt uses serde_json: Same format but field order may differ
-  - Issue: serde expects specific field ordering or struct nesting
+### Preprocessing Deserialization ✅ COMPLETE
+- [x] DoryVerifierSetup parses correctly
+- [x] BytecodePreprocessing parses correctly
+  - Fixed NoOp/UNIMPL to serialize as unit variants ("NoOp", "UNIMPL")
+  - Fixed immediate types (u64 for FormatI/U/J, i128 for B, i64 for S)
+  - Fixed FENCE/ECALL to use FormatI operands
+- [x] RAMPreprocessing parses correctly
+- [x] MemoryLayout parses correctly
+- [x] Full JoltVerifierPreprocessing::deserialize_uncompressed works!
 
-### Next Steps
-1. **Short-term**: Use Jolt-generated preprocessing with Zolt proof
-   - Generate preprocessing in Jolt from same ELF
-   - Load Jolt preprocessing + Zolt proof
-   - Verify cross-compatibility
-
-2. **Long-term**: Match preprocessing format exactly
-   - Study serde_json's Deserialize behavior
-   - Match field ordering in JSON
-   - Test instruction-by-instruction
+### End-to-End Verification 🚧
+- [ ] Run full verification with Zolt proof + Zolt preprocessing
 
 ---
 
@@ -71,15 +66,26 @@
    - 5 Dory commitments (GT elements)
    - Jolt `test_deserialize_zolt_proof` passes
 
-2. **Preprocessing partially working**
+2. **Preprocessing fully working**
    - DoryVerifierSetup parses correctly
-   - BytecodePreprocessing JSON format mismatch
+   - BytecodePreprocessing parses correctly (after JSON format fixes)
+   - RAMPreprocessing parses correctly
+   - MemoryLayout parses correctly
+   - Full `JoltVerifierPreprocessing::deserialize_uncompressed` works!
+
+### Key Fixes Applied
+1. **NoOp/UNIMPL serialization**: Changed from `{"NoOp":{...}}` to `"NoOp"`
+2. **Immediate types**:
+   - FormatI/U/J: use u64 (sign-extended from i32)
+   - FormatS: use i64
+   - FormatB: use i128
+3. **FENCE/ECALL**: Use FormatI operands instead of None
 
 ### Test Results
 - Zolt tests: 632/632 PASS ✅
-- Proof generation: 30.9 KB in Jolt format
-- Proof deserialization: PASS
-- Preprocessing deserialization: PARTIAL (verifier setup OK, bytecode fails)
+- Proof generation: 30.9 KB in Jolt format ✅
+- Proof deserialization: PASS ✅
+- Preprocessing deserialization: PASS (with deserialize_uncompressed) ✅
 
 ---
 
@@ -98,18 +104,17 @@ zig build -Doptimize=ReleaseFast
     --export-preprocessing /tmp/zolt_preprocessing.bin \
     -o /tmp/zolt_proof_dory.bin
 
-# Run Jolt deserialization test
+# Run Jolt preprocessing test
 cd /path/to/jolt
-cargo test --package jolt-core test_deserialize_zolt_proof -- --ignored --nocapture
+cargo test --package jolt-core test_load_zolt_preprocessing -- --ignored --nocapture
 
-# Debug Zolt proof format
-cargo test --package jolt-core test_debug_zolt_format -- --ignored --nocapture
+# Run Jolt proof deserialization test
+cargo test --package jolt-core test_deserialize_zolt_proof -- --ignored --nocapture
 ```
 
 ## File Sizes
 - Proof (Jolt format): 30.9 KB (30,926 bytes)
-- Proof (ZOLT format): 12.6 KB (12,641 bytes)
-- Preprocessing: 304 KB (311,347 bytes)
+- Preprocessing: 62.2 KB (62,223 bytes)
 
 ---
 

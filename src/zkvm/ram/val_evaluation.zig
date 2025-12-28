@@ -787,13 +787,6 @@ test "val prover sumcheck invariant: p(0) + p(1) = current_claim" {
         // The sumcheck invariant: p(0) + p(1) should equal current claim
         const sum = round_poly[0].add(round_poly[1]);
 
-        if (!sum.eql(claim)) {
-            std.debug.print("Val prover round {} failed: p(0)+p(1) != claim\n", .{round});
-            std.debug.print("  p(0) = {any}\n", .{round_poly[0].toBytes()});
-            std.debug.print("  p(1) = {any}\n", .{round_poly[1].toBytes()});
-            std.debug.print("  sum  = {any}\n", .{sum.toBytes()});
-            std.debug.print("  claim= {any}\n", .{claim.toBytes()});
-        }
         try std.testing.expect(sum.eql(claim));
 
         // Bind with a random-ish challenge

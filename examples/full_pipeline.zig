@@ -130,9 +130,10 @@ pub fn main() !void {
     };
     verifier.setVerifyingKey(zkvm_vk);
 
-    // Note: Strict sumcheck is disabled for demo. When enabled, it reveals that
-    // the prover's round polynomials don't perfectly satisfy p(0) + p(1) = claim
-    // after folding. This is a known issue requiring further investigation.
+    // Note: Strict sumcheck mode still fails because the prover's round
+    // polynomials don't satisfy p(0) + p(1) = claim in all stages.
+    // This requires fixing the actual polynomial computation in each stage.
+    // For now, use lenient mode which only checks structural validity.
     verifier.setStrictMode(false);
 
     std.debug.print("Verifier initialized with verifying key\n", .{});

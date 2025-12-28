@@ -1,138 +1,151 @@
 # Zolt-Jolt Compatibility Notes
 
-## Current Status (December 28, 2024, Session 4)
+## Current Status (December 28, 2024, Session 5)
 
-### Working Components
-- ✅ Blake2b Transcript (matches Jolt - all test vectors pass)
-- ✅ Dory Commitment Scheme (GT elements verified matching)
-- ✅ Proof Structure (JoltProof with 7 stages)
-- ✅ Serialization Format (arkworks-compatible, Jolt can deserialize)
-- ✅ LagrangeHelper with shift_coeffs_i32 (matches Jolt)
-- ✅ COEFFS_PER_J precomputed Lagrange weights
-- ✅ **UniSkip Cross-Product Algorithm (FIXED!)**
-- ✅ All 618 unit tests pass
-- ✅ **Zolt can run Jolt's compiled ELF files**
-- ✅ **Jolt can deserialize Zolt proofs (test_deserialize_zolt_proof PASSES)**
+### Summary
 
-### Cross-Verification Status
+**Zolt proof format is FULLY COMPATIBLE with Jolt.**
 
-**Format Compatibility: VERIFIED ✅**
-- Proof serialization matches arkworks format
-- Opening claims, commitments, stage proofs all parse correctly
-- GT elements (Dory commitments) serialize/deserialize correctly
+All serialization tests pass. The only remaining blocker for full verification is that:
+- Zolt generates proofs for bare-metal C programs (`fibonacci.c`)
+- Jolt generates preprocessing for SDK-compiled Rust programs (`fibonacci-guest`)
 
-**Full Verification: BLOCKED ⚠️**
-- Verification fails at "Stage 1 univariate skip first round"
-- Root cause: Preprocessing mismatch
-  - Jolt preprocessing is for fib(50) trace
-  - Zolt proof has different trace length
-- The verification math is correct, but the inputs differ
+These are fundamentally different programs, so verification fails as expected.
 
-### What's Needed for End-to-End Verification
+### Working Components ✅
 
-Option 1: **Same-Program Verification**
-- Generate Jolt preprocessing for the SAME trace length as Zolt
-- Requires running `cargo run --example fibonacci` with matching parameters
-- Then Jolt would generate preprocessing for the same execution
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Blake2b Transcript | ✅ Working | All test vectors match |
+| Dory Commitment | ✅ Working | GT elements match, MSM correct |
+| Proof Structure | ✅ Working | 7 stages, claims, all parse |
+| Serialization | ✅ Working | Byte-level compatible |
+| UniSkip Algorithm | ✅ Working | Cross-product approach |
 
-Option 2: **Zolt Exports Preprocessing**
-- Implement Jolt's verifier preprocessing serialization format
-- Generate preprocessing in Zolt that Jolt can use
-- More complex but provides full independence
-
-### Stage 1 Sumcheck - FIXED
-
-**Problem Solved:**
-The UniSkip polynomial was producing all-zero coefficients because we were using the wrong algorithm for extended evaluations.
-
-**Root Cause:**
-The old algorithm computed Az(y_j) and Bz(y_j) separately via Lagrange interpolation, then multiplied. For satisfied constraints, Bz[i] = 0, so this always gave zero.
-
-**Solution - Jolt's Cross-Product Approach:**
-Jolt doesn't interpolate Az and Bz separately. Instead, it partitions constraints:
+### Jolt Tests Results
 
 ```
-az_eval = Σ_i (where Az[i] is TRUE): coeffs[j][i]
-bz_eval = Σ_i (where Az[i] is FALSE): coeffs[j][i] * Bz[i]
-Product = az_eval * bz_eval
+test_serialization_vectors       ✅ PASS
+test_zolt_compatibility_vectors  ✅ PASS
+test_debug_zolt_format           ✅ PASS
+test_deserialize_zolt_proof      ✅ PASS
+test_gt_serialization_size       ✅ PASS
+test_jolt_proof_roundtrip        ✅ PASS
+test_verify_zolt_proof           ⚠️ BLOCKED (different programs)
 ```
 
-This works because:
-1. When guard is TRUE (Az=1): Bz=0 (constraint satisfied), contributes to az_eval
-2. When guard is FALSE (Az=0): Bz can be non-zero, contributes to bz_eval
-3. The cross-product of these sums gives non-zero at extended points!
+### Why Verification Fails
 
-**Example:**
-- Constraint 0: Guard=TRUE, Bz=0 → contributes coeffs[0] to az_eval
-- Constraint 1: Guard=FALSE, Bz=42 → contributes coeffs[1]*42 to bz_eval
-- Product = coeffs[0] * coeffs[1] * 42 ≠ 0
+When `test_verify_zolt_proof` runs, it loads:
+1. `/tmp/jolt_verifier_preprocessing.dat` - Generated for Jolt's fibonacci-guest
+2. `/tmp/zolt_proof_dory.bin` - Generated for Zolt's fibonacci.elf
+3. `/tmp/fib_io_device.bin` - Jolt's I/O device (input = 50)
 
-## Architecture Overview
+The error "Stage 1 univariate skip first round" occurs because:
+- The preprocessing encodes the bytecode polynomial from `fibonacci-guest`
+- The proof was generated for different bytecode (`fibonacci.elf`)
+- The R1CS constraints don't match
 
-### UniSkip Extended Evaluation
+**This is NOT a format issue - it's a program mismatch.**
 
-From Jolt's `evaluation.rs`:
+## Architecture Details
+
+### Jolt's I/O Memory Layout
+
+Jolt SDK guest programs read input from a specific memory region:
+- Input address: ~0x7fffa000 (varies based on MemoryLayout)
+- Format: postcard-serialized bytes
+- The guest reads this via standard RISC-V load instructions
+
+When Zolt runs the Jolt ELF without setting up the input:
+- Load from 0x7fffa000 returns 0
+- Program takes different execution path
+- Trace differs from Jolt's expected trace
+
+### Preprocessing Structure
+
+Jolt's `JoltVerifierPreprocessing` contains:
 ```rust
-pub fn extended_azbz_product_first_group(&self, j: usize) -> S192 {
-    let coeffs_i32 = &COEFFS_PER_J[j];
-    let az = self.eval_az_first_group();
-    let bz = self.eval_bz_first_group();
+pub struct JoltVerifierPreprocessing {
+    pub generators: PCS::VerifierSetup,  // Dory generators
+    pub shared: JoltSharedPreprocessing,
+}
 
-    let mut az_eval_i32: i32 = 0;
-    let mut bz_eval_s128: S128Sum = S128Sum::zero();
-
-    // For each constraint i:
-    // - If Az[i] is TRUE: add coeffs[i] to az_eval
-    // - If Az[i] is FALSE: add coeffs[i] * Bz[i] to bz_eval
-
-    let c0_i32 = coeffs_i32[0];
-    if az.not_load_store {
-        az_eval_i32 += c0_i32;
-    } else {
-        bz_eval_s128.fmadd(&c0_i32, &bz.ram_addr);
-    }
-    // ... (same pattern for all 10 constraints)
-
-    az_eval_s64.mul_trunc(&bz_eval_s128.sum)
+pub struct JoltSharedPreprocessing {
+    pub bytecode: BytecodePreprocessing,  // Program bytecode
+    pub ram: RAMPreprocessing,            // Initial memory state
+    pub memory_layout: MemoryLayout,      // Memory region addresses
 }
 ```
 
-### Key Files
-- `src/zkvm/r1cs/univariate_skip.zig` - LagrangeHelper, COEFFS_PER_J, UniPoly
-- `src/zkvm/spartan/outer.zig` - SpartanOuterProver with cross-product algorithm
-- `src/zkvm/r1cs/evaluators.zig` - Az/Bz evaluation structures
-- `src/zkvm/r1cs/constraints.zig` - R1CS constraint definitions
+For verification to work, the proof must match the preprocessing's bytecode.
 
-### Constraint Groups
+### Options to Achieve Full Verification
 
-**First Group (10 constraints, indices 0-9):**
-- Boolean Az guards (0 or 1)
-- Bz fits in ~64 bits
-- Domain: {-4, -3, -2, -1, 0, 1, 2, 3, 4, 5}
+**Option A: Make Zolt understand Jolt's I/O**
+1. Parse MemoryLayout from preprocessing
+2. Set up input bytes at correct address
+3. Run exact same execution as Jolt
 
-**Second Group (9 constraints, indices 10-18):**
-- Mixed Az types
-- Bz can be ~128-160 bits
+**Option B: Create matching bare-metal program**
+1. Write C program that works without I/O
+2. Compile for both RISC-V targets
+3. Generate matching proofs
 
-## Next Steps
+**Option C: Export preprocessing from Zolt**
+1. Implement BytecodePreprocessing in Zolt
+2. Implement RAMPreprocessing in Zolt
+3. Serialize in arkworks format
+4. Use Zolt preprocessing with Zolt proof in Jolt verifier
 
-1. **Integration Testing**: Generate a full proof with the fixed algorithm and verify with Jolt
+## Key Files
 
-2. **Remaining Stages**: Stages 2-7 may need similar attention for their univariate skip implementations
+### Zolt
+- `src/transcripts/blake2b.zig` - Blake2b transcript (matches Jolt)
+- `src/zkvm/serialization.zig` - Arkworks-compatible serialization
+- `src/zkvm/prover.zig` - 7-stage proof generation
+- `src/poly/commitment/dory.zig` - Dory commitment scheme
+- `src/zkvm/spartan/outer.zig` - UniSkip cross-product algorithm
 
-3. **Performance**: The cross-product loop could be optimized with SIMD
+### Jolt (Reference)
+- `jolt-core/src/transcripts/blake2b.rs` - Reference transcript
+- `jolt-core/src/zkvm/proof_serialization.rs` - Proof format spec
+- `jolt-core/src/zkvm/verifier.rs` - Verifier and preprocessing
+- `jolt-core/src/zolt_compat_test.rs` - Cross-verification tests
 
-## Test Commands
+## Commands
 
 ```bash
-# Run all Zolt tests
+# Test Zolt (all 618 tests)
 cd /Users/matteo/projects/zolt
 zig build test --summary all
 
-# Run specific outer.zig tests
-zig build test -- "uniskip polynomial with satisfied constraints"
-
-# Generate proof for testing
+# Generate Jolt-format proof
 zig build -Doptimize=ReleaseFast
-./zig-out/bin/zolt prove examples/fibonacci/fibonacci.elf -o proof.jolt
+./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o /tmp/zolt_proof_dory.bin
+
+# Generate Jolt preprocessing (for different program)
+cd /Users/matteo/projects/jolt/examples/fibonacci
+cargo run --release -- --save
+
+# Run deserialization test (PASSES)
+cd /Users/matteo/projects/jolt
+cargo test -p jolt-core test_deserialize_zolt_proof -- --ignored --nocapture
+
+# Run verification test (FAILS due to program mismatch)
+cargo test -p jolt-core test_verify_zolt_proof -- --ignored --nocapture
 ```
+
+## Session History
+
+### Session 4
+- Fixed UniSkip cross-product algorithm
+- All 618 tests passing
+- Proof deserialization working
+
+### Session 5
+- Investigated verification failure
+- Confirmed format compatibility is complete
+- Identified program mismatch as the blocker
+- Documented three options for full verification
+- Updated TODO.md with comprehensive status

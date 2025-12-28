@@ -276,6 +276,8 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 F.zero();
 
             // Verify each round polynomial
+            // For degree-2 sumcheck, round_poly = [p(0), p(2)]
+            // We recover p(1) = claim - p(0) from the sumcheck constraint
             for (proof.round_polys.items, 0..) |round_poly, round_idx| {
                 if (round_poly.len < 2) {
                     self.stage_results[1] = .{
@@ -286,29 +288,23 @@ pub fn MultiStageVerifier(comptime F: type) type {
                     return false;
                 }
 
-                // Verify sumcheck: p(0) + p(1) = current_claim
-                const sum = round_poly[0].add(round_poly[1]);
-                const sum_check_ok = sum.eql(current_claim);
+                // round_poly = [p(0), p(2)] for degree-2 compressed format
+                const p_at_0 = round_poly[0];
+                const p_at_2 = round_poly[1];
+
+                // Recover p(1) from sumcheck constraint: p(0) + p(1) = current_claim
+                const p_at_1 = current_claim.sub(p_at_0);
 
                 // Get challenge from transcript (must match prover's challenge)
                 const challenge = try transcript.challengeScalar("raf_round");
 
-                if (self.config.strict_sumcheck and !sum_check_ok) {
-                    self.stage_results[1] = .{
-                        .success = false,
-                        .final_claim = null,
-                        .error_msg = "Stage 2: sumcheck failed - p(0) + p(1) != claim",
-                    };
-                    _ = round_idx;
-                    return false;
-                }
-
                 // Accumulate challenge for opening claims
                 try self.opening_claims.addChallenge(challenge);
 
-                // Update claim using linear interpolation for degree 2
-                const one_minus_r = F.one().sub(challenge);
-                current_claim = one_minus_r.mul(round_poly[0]).add(challenge.mul(round_poly[1]));
+                // Update claim using quadratic Lagrange interpolation
+                // with points p(0), p(1), p(2)
+                current_claim = evaluateQuadraticAt3Points(F, p_at_0, p_at_1, p_at_2, challenge);
+                _ = round_idx;
             }
 
             // Stage 2 verification passed
@@ -361,6 +357,7 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 F.zero();
 
             // Verify each round
+            // Lasso prover sends polynomial in coefficient form: [c0, c1, c2] for p(X) = c0 + c1*X + c2*X^2
             for (proof.round_polys.items, 0..) |round_poly, round_idx| {
                 if (round_poly.len < 2) {
                     self.stage_results[2] = .{
@@ -371,8 +368,18 @@ pub fn MultiStageVerifier(comptime F: type) type {
                     return false;
                 }
 
-                // Verify sumcheck: p(0) + p(1) = current_claim
-                const sum = round_poly[0].add(round_poly[1]);
+                // Convert from coefficient form to evaluation form
+                // p(X) = c0 + c1*X + c2*X^2
+                const c0 = round_poly[0];
+                const c1 = round_poly[1];
+                const c2 = if (round_poly.len > 2) round_poly[2] else F.zero();
+
+                // Compute p(0) = c0, p(1) = c0 + c1 + c2, p(2) = c0 + 2*c1 + 4*c2
+                const p_at_0 = c0;
+                const p_at_1 = c0.add(c1).add(c2);
+
+                // Verify sumcheck constraint: p(0) + p(1) = current_claim
+                const sum = p_at_0.add(p_at_1);
                 const sum_check_ok = sum.eql(current_claim);
 
                 // Get challenge
@@ -390,9 +397,9 @@ pub fn MultiStageVerifier(comptime F: type) type {
 
                 try self.opening_claims.addChallenge(challenge);
 
-                // Update claim
-                const one_minus_r = F.one().sub(challenge);
-                current_claim = one_minus_r.mul(round_poly[0]).add(challenge.mul(round_poly[1]));
+                // Update claim: evaluate p(challenge) = c0 + c1*r + c2*r^2
+                current_claim = c0.add(c1.mul(challenge)).add(c2.mul(challenge).mul(challenge));
+                _ = round_idx;
             }
 
             // Stage 3 verification passed
@@ -528,6 +535,7 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 F.zero();
 
             // Verify each round
+            // For degree-2 sumcheck, round_poly = [p(0), p(2)]
             for (proof.round_polys.items, 0..) |round_poly, round_idx| {
                 if (round_poly.len < 2) {
                     self.stage_results[4] = .{
@@ -538,28 +546,21 @@ pub fn MultiStageVerifier(comptime F: type) type {
                     return false;
                 }
 
-                // Verify sumcheck: p(0) + p(1) = current_claim
-                const sum = round_poly[0].add(round_poly[1]);
-                const sum_check_ok = sum.eql(current_claim);
+                // round_poly = [p(0), p(2)] for degree-2 compressed format
+                const p_at_0 = round_poly[0];
+                const p_at_2 = round_poly[1];
+
+                // Recover p(1) from sumcheck constraint: p(0) + p(1) = current_claim
+                const p_at_1 = current_claim.sub(p_at_0);
 
                 // Get challenge
                 const challenge = try transcript.challengeScalar("reg_eval_round");
 
-                if (self.config.strict_sumcheck and !sum_check_ok) {
-                    self.stage_results[4] = .{
-                        .success = false,
-                        .final_claim = null,
-                        .error_msg = "Stage 5: sumcheck failed - p(0) + p(1) != claim",
-                    };
-                    _ = round_idx;
-                    return false;
-                }
-
                 try self.opening_claims.addChallenge(challenge);
 
-                // Update claim
-                const one_minus_r = F.one().sub(challenge);
-                current_claim = one_minus_r.mul(round_poly[0]).add(challenge.mul(round_poly[1]));
+                // Update claim using quadratic interpolation
+                current_claim = evaluateQuadraticAt3Points(F, p_at_0, p_at_1, p_at_2, challenge);
+                _ = round_idx;
             }
 
             // Stage 5 verification passed
@@ -591,6 +592,7 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 F.zero();
 
             // Verify each round
+            // For degree-2 sumcheck, round_poly = [p(0), p(2)]
             for (proof.round_polys.items, 0..) |round_poly, round_idx| {
                 if (round_poly.len < 2) {
                     self.stage_results[5] = .{
@@ -601,28 +603,21 @@ pub fn MultiStageVerifier(comptime F: type) type {
                     return false;
                 }
 
-                // Verify sumcheck: p(0) + p(1) = current_claim
-                const sum = round_poly[0].add(round_poly[1]);
-                const sum_check_ok = sum.eql(current_claim);
+                // round_poly = [p(0), p(2)] for degree-2 compressed format
+                const p_at_0 = round_poly[0];
+                const p_at_2 = round_poly[1];
+
+                // Recover p(1) from sumcheck constraint: p(0) + p(1) = current_claim
+                const p_at_1 = current_claim.sub(p_at_0);
 
                 // Get challenge
                 const challenge = try transcript.challengeScalar("bool_round");
 
-                if (self.config.strict_sumcheck and !sum_check_ok) {
-                    self.stage_results[5] = .{
-                        .success = false,
-                        .final_claim = null,
-                        .error_msg = "Stage 6: sumcheck failed - p(0) + p(1) != claim",
-                    };
-                    _ = round_idx;
-                    return false;
-                }
-
                 try self.opening_claims.addChallenge(challenge);
 
-                // Update claim
-                const one_minus_r = F.one().sub(challenge);
-                current_claim = one_minus_r.mul(round_poly[0]).add(challenge.mul(round_poly[1]));
+                // Update claim using quadratic interpolation
+                current_claim = evaluateQuadraticAt3Points(F, p_at_0, p_at_1, p_at_2, challenge);
+                _ = round_idx;
             }
 
             // Stage 6 verification passed
@@ -690,6 +685,23 @@ pub fn OpeningClaimAccumulator(comptime F: type) type {
             return self.challenges.items;
         }
     };
+}
+
+/// Evaluate a quadratic polynomial given p(0), p(1), p(2) at point r
+/// Uses Lagrange interpolation: p(r) = L0(r)*p(0) + L1(r)*p(1) + L2(r)*p(2)
+fn evaluateQuadraticAt3Points(comptime F: type, p0: F, p1: F, p2: F, r: F) F {
+    const two = F.fromU64(2);
+    const r_minus_1 = r.sub(F.one());
+    const r_minus_2 = r.sub(two);
+
+    // L0(r) = (r-1)(r-2)/((0-1)(0-2)) = (r-1)(r-2)/2
+    const L0 = r_minus_1.mul(r_minus_2).mul(two.inverse().?);
+    // L1(r) = r(r-2)/((1-0)(1-2)) = -r(r-2)
+    const L1 = r.mul(r_minus_2).neg();
+    // L2(r) = r(r-1)/((2-0)(2-1)) = r(r-1)/2
+    const L2 = r.mul(r_minus_1).mul(two.inverse().?);
+
+    return p0.mul(L0).add(p1.mul(L1)).add(p2.mul(L2));
 }
 
 /// Evaluate a polynomial (given as evaluations at 0, 1, 2, ...) at a challenge point

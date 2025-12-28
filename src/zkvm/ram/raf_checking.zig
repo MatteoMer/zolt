@@ -299,11 +299,13 @@ pub fn RafEvaluationProver(comptime F: type) type {
         }
 
         /// Compute the round polynomial for the current round
-        /// Returns [p(0), p(1)] where p(x) = Σ_{k: k[round]=x} ra(k) ⋅ unmap(k)
+        /// Returns [p(0), p(2)] for degree-2 sumcheck (product of two multilinear polynomials)
         ///
-        /// The key insight: we must compute the unmap values accounting for
-        /// the already-bound variables. The unmap polynomial value at a
-        /// partially-bound point depends on all the challenge values bound so far.
+        /// For a product of two multilinear polynomials, the sumcheck polynomial has degree 2.
+        /// We send evaluations at x=0 and x=2, and the verifier uses the constraint
+        /// p(0) + p(1) = previous_claim to recover p(1).
+        ///
+        /// This matches the Jolt optimization that sends 2 field elements instead of 3.
         pub fn computeRoundPolynomial(self: *Self) [2]F {
             const half = self.ra.evals.len / 2;
             var evals: [2]F = .{ F.zero(), F.zero() };
@@ -321,42 +323,40 @@ pub fn RafEvaluationProver(comptime F: type) type {
             const current_power = power;
 
             for (0..half) |i| {
-                // ra evaluations at x=0 and x=1 for current variable
+                // For sumcheck evals at x = 0, 1, 2:
+                // ra(x) = (1-x)*ra_lo + x*ra_hi (linear interpolation)
+                // ra(0) = ra_lo
+                // ra(1) = ra_hi
+                // ra(2) = 2*ra_hi - ra_lo
                 const ra_lo = self.ra.evals[i];
                 const ra_hi = self.ra.evals[i + half];
+                const ra_at_2 = ra_hi.add(ra_hi).sub(ra_lo); // 2*ra_hi - ra_lo
 
-                // For the unmap polynomial, we need to compute its value at the
-                // point where:
-                // - bound variables are fixed to bound_values
-                // - current variable is 0 or 1
-                // - remaining variables sum according to index i
-                //
-                // unmap at (bound_values..., 0, remaining_bits_of_i)
-                // = base_contribution + 0*current_power + 8 * remaining_contribution
-                //
-                // The remaining contribution from bits after current round:
-                var remaining_contrib_lo = F.zero();
-                var remaining_contrib_hi = F.zero();
+                // Compute remaining contribution for the index i
+                var remaining_contrib = F.zero();
                 var remaining_power: u64 = current_power * 2;
                 const remaining_vars = self.unmap.num_vars - self.round - 1;
                 var idx = i;
                 for (0..remaining_vars) |_| {
                     const bit = idx & 1;
                     if (bit == 1) {
-                        remaining_contrib_lo = remaining_contrib_lo.add(F.fromU64(remaining_power));
-                        remaining_contrib_hi = remaining_contrib_hi.add(F.fromU64(remaining_power));
+                        remaining_contrib = remaining_contrib.add(F.fromU64(remaining_power));
                     }
                     idx >>= 1;
                     remaining_power *= 2;
                 }
 
-                // unmap_lo = base + 0*current_power + remaining (x=0)
-                const unmap_lo = base_contribution.add(remaining_contrib_lo);
-                // unmap_hi = base + 1*current_power + remaining (x=1)
-                const unmap_hi = base_contribution.add(F.fromU64(current_power)).add(remaining_contrib_hi);
+                // unmap at x = 0, 1, 2:
+                // unmap(x) = base + x*current_power + remaining
+                // unmap(0) = base + remaining
+                // unmap(1) = base + current_power + remaining
+                // unmap(2) = base + 2*current_power + remaining
+                const unmap_at_0 = base_contribution.add(remaining_contrib);
+                const unmap_at_2 = base_contribution.add(F.fromU64(current_power * 2)).add(remaining_contrib);
 
-                evals[0] = evals[0].add(ra_lo.mul(unmap_lo));
-                evals[1] = evals[1].add(ra_hi.mul(unmap_hi));
+                // Accumulate p(0) = Σ ra(0) * unmap(0) and p(2) = Σ ra(2) * unmap(2)
+                evals[0] = evals[0].add(ra_lo.mul(unmap_at_0));
+                evals[1] = evals[1].add(ra_at_2.mul(unmap_at_2));
             }
 
             return evals;

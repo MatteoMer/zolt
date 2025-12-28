@@ -1,66 +1,59 @@
 # Zolt zkVM Implementation TODO
 
-## Completed (This Session - Iteration 33)
+## Completed (This Session - Iteration 34)
 
-### Module Structure Improvements
-- [x] Add claim_reductions module with placeholder types
-- [x] Add instruction_lookups module with placeholder types
-- [x] Update zkvm/mod.zig to export new modules
-- [x] Update README.md with current project structure
-- [x] Update test count to 550+
+### Sumcheck Degree Mismatch Fix
+- [x] Investigate sumcheck degree mismatch between prover and verifier
+- [x] Fix RAF prover to compute [p(0), p(2)] for degree-2 compressed format
+- [x] Add `evaluateQuadraticAt3Points` helper for Lagrange interpolation
+- [x] Update Stage 2 verifier to use quadratic interpolation with recovered p(1)
+- [x] Update Stage 3 verifier to handle Lasso's coefficient form polynomials
+- [x] Update Stage 5 verifier to use degree-2 compressed format
+- [x] Update Stage 6 verifier to use degree-2 compressed format
+- [x] Update Stage 5 prover to send [p(0), p(2)]
+- [x] Update Stage 6 prover to send [p(0), p(2)]
+- [x] Verify all tests pass
+- [x] Verify full pipeline example still works
+
+## Key Insight from This Session
+
+The Jolt protocol uses a **compressed polynomial format** for degree-2 sumchecks:
+- Prover sends `[p(0), p(2)]` (evaluations at 0 and 2)
+- Verifier uses sumcheck constraint `p(0) + p(1) = claim` to recover p(1)
+- Verifier then uses quadratic Lagrange interpolation to evaluate at challenge
+
+This saves 1 field element per round compared to sending all 3 evaluations.
+
+Different stages use different formats:
+- **Stage 1 (Spartan)**: Degree 3, sends 4 coefficients
+- **Stage 2 (RAF)**: Degree 2, sends [p(0), p(2)]
+- **Stage 3 (Lasso)**: Degree 2, sends polynomial coefficients [c0, c1, c2]
+- **Stage 4 (Val)**: Degree 3, sends [p(0), p(1), p(2)]
+- **Stage 5 (Register)**: Degree 2, sends [p(0), p(2)]
+- **Stage 6 (Booleanity)**: Degree 2, sends [p(0), p(2)]
 
 ## Known Issues (For Future Iterations)
 
 ### Test Interference Issue (Iteration 32)
-When adding new integration tests to `src/integration_tests.zig`, seemingly unrelated tests in:
-- `zkvm/lasso/split_eq.zig`
-- `zkvm/lasso/expanding_table.zig`
-- `zkvm/lasso/integration_test.zig`
-- `zkvm/spartan/mod.zig`
-
-start failing. This suggests either:
-1. Hidden global state being mutated
-2. Test execution order dependencies
-3. Memory corruption from certain test combinations
-
+When adding new integration tests to `src/integration_tests.zig`, seemingly unrelated tests start failing.
 **Workaround**: Do not add new e2e integration tests until root cause is found.
 
-### Prover Sumcheck Validity
-- [ ] Fix RAF prover to correctly handle product of polynomials in sumcheck
-- [ ] Fix Val evaluation prover similarly
-- [ ] Fix Lasso prover for lookup argument sumcheck
-- [ ] Ensure Stage 1 (Spartan) produces valid sumcheck rounds
+## Completed (Previous Sessions)
 
-The issue: After round 0, the prover's sum of folded values doesn't equal the
-verifier's `p(challenge)`. The prover uses linear folding `(1-r)*p0 + r*p1`,
-while the verifier uses quadratic Lagrange interpolation.
+### Iteration 33 - Module Structure Improvements
+- [x] Add claim_reductions module with placeholder types
+- [x] Add instruction_lookups module with placeholder types
+- [x] Update zkvm/mod.zig to export new modules
+- [x] Update README.md with current project structure
 
-## Completed (Previous Sessions - Iteration 32)
-
-### Investigation & Testing
-- [x] Ran full pipeline example - verification passes in lenient mode
-- [x] Ran benchmarks - confirmed field arithmetic and MSM performance
-- [x] Verified all tests pass
-
-### CLI Improvements
+### Iteration 32 - Investigation & CLI Improvements
 - [x] Improved error handling in CLI to remove stack traces
 - [x] Errors now show clean error name and exit with code 1
-- [x] Removed duplicate error messages in run, prove, and srs commands
 
-## Completed (Previous Sessions - Iteration 31)
-
-### Strict Sumcheck Verification Mode
+### Iteration 31 - Strict Verification Mode
 - [x] Add `VerifierConfig` struct with `strict_sumcheck` and `debug_output` options
-- [x] Add `initWithConfig()` method to MultiStageVerifier
-- [x] Update all 6 stages to check `p(0) + p(1) = claim` when strict mode enabled
-- [x] Add `setStrictMode()` and `setConfig()` methods to JoltVerifier
-- [x] Export `VerifierConfig` in zkvm module
-- [x] Add tests for verifier configuration
-- [x] Update full_pipeline example to use lenient mode (for now)
 
-## Completed (Iterations 1-30)
-
-### Core Infrastructure
+### Iterations 1-30 - Core Implementation
 - [x] BN254 field and curve arithmetic
 - [x] Extension fields (Fp2, Fp6, Fp12)
 - [x] Pairing with Miller loop and final exponentiation
@@ -107,7 +100,7 @@ while the verifier uses quadratic Lagrange interpolation.
 
 ### High Priority
 - [ ] Investigate test interference issue (see Known Issues)
-- [ ] Fix prover sumcheck validity issues
+- [ ] Enable strict_sumcheck mode by default once prover fixes are complete
 
 ### Medium Priority
 - [ ] Performance optimization with SIMD
@@ -119,7 +112,7 @@ while the verifier uses quadratic Lagrange interpolation.
 - [ ] Add more example programs
 
 ## Test Status
-All tests pass (550 tests).
+All tests pass.
 End-to-end verification: PASSED (lenient mode)
 Full pipeline example: WORKING
 

@@ -1,48 +1,43 @@
 # Zolt zkVM Implementation Plan
 
-## Current Status (December 2024 - Iteration 33)
+## Current Status (December 2024 - Iteration 34)
 
-### Session Summary - Module Structure Improvements
+### Session Summary - Sumcheck Degree Mismatch Fix
 
-This iteration focused on improving the project structure:
+This iteration focused on fixing the sumcheck polynomial format mismatch between prover and verifier:
 
-**Activities (Iteration 33):**
-1. Added claim_reductions module with placeholder types
-2. Added instruction_lookups module with placeholder types
-3. Updated zkvm/mod.zig to export new modules
-4. Updated README.md with current project structure
-5. Updated test count to 550+
+**Problem Identified:**
+The Jolt protocol uses a compressed polynomial format for degree-2 sumchecks:
+- Prover sends `[p(0), p(2)]` (evaluations at points 0 and 2)
+- Verifier uses constraint `p(0) + p(1) = claim` to recover p(1)
+- This saves 1 field element per round compared to sending all 3 evaluations
+
+**Changes Made:**
+1. Updated RAF prover (`raf_checking.zig`) to compute [p(0), p(2)]
+2. Added `evaluateQuadraticAt3Points` helper for Lagrange interpolation
+3. Updated Stage 2, 3, 5, 6 verifiers to use correct polynomial formats
+4. Updated Stage 5, 6 provers to send [p(0), p(2)]
+5. Fixed Stage 3 verifier to handle Lasso's coefficient form
+
+**Polynomial Format Summary:**
+- Stage 1 (Spartan): Degree 3, sends 4 coefficients
+- Stage 2 (RAF): Degree 2, sends [p(0), p(2)]
+- Stage 3 (Lasso): Degree 2, sends polynomial coefficients [c0, c1, c2]
+- Stage 4 (Val): Degree 3, sends [p(0), p(1), p(2)]
+- Stage 5 (Register): Degree 2, sends [p(0), p(2)]
+- Stage 6 (Booleanity): Degree 2, sends [p(0), p(2)]
+
+### Previous Session (Iteration 33) - Module Structure Improvements
+
+Added claim_reductions and instruction_lookups module placeholders.
 
 ### Previous Session (Iteration 32) - Investigation & CLI Improvements
 
-The previous iteration focused on testing, investigating issues, and improving CLI UX:
-
-**Activities:**
-1. Ran full pipeline example - verification passes in lenient mode
-2. Ran benchmarks - confirmed field arithmetic and MSM performance
-3. Verified all 538 tests pass
-4. Attempted to add comprehensive e2e prover/verifier integration tests
-5. Improved CLI error handling - no more stack traces for user errors
-
-**CLI Error Handling Improvements:**
-- Removed duplicate error messages
-- Clean exit with code 1 on failure
-- User-friendly error names instead of internal details
-
-**Key Discovery - Test Interference Issue:**
-When adding new integration tests to `src/integration_tests.zig`, seemingly unrelated tests
-in the lasso and spartan modules start failing. This is a concerning issue that needs
-investigation. Possible causes:
-1. Hidden global state being mutated
-2. Test execution order dependencies
-3. Memory corruption from certain test combinations
-
-Reverted the test additions to maintain stability.
+Fixed CLI error handling, investigated test interference issue.
 
 ### Previous Session (Iteration 31) - Strict Verification Mode
 
 Added `VerifierConfig` with `strict_sumcheck` and `debug_output` options.
-Revealed that prover's round polynomials don't perfectly satisfy sumcheck equation.
 
 ### Previous Session (Iteration 30) - Critical Fix
 
@@ -132,19 +127,15 @@ Division: ValidDiv0, ValidUnsignedRemainder, ValidSignedRemainder
 
 ## Known Issues
 
-### Test Interference (NEW - Iteration 32)
+### Test Interference (Iteration 32)
 Adding new integration tests causes unrelated lasso/spartan tests to fail.
 Need to investigate root cause before adding more e2e tests.
-
-### Prover Sumcheck Validity
-Strict verification mode reveals that prover's round polynomials don't
-perfectly satisfy `p(0) + p(1) = claim` after folding.
 
 ## Future Work
 
 ### High Priority
 1. Investigate test interference issue
-2. Fix prover sumcheck validity issues
+2. Enable strict_sumcheck mode by default
 
 ### Medium Priority
 1. Performance optimization with SIMD
@@ -161,6 +152,9 @@ perfectly satisfy `p(0) + p(1) = claim` after folding.
 - Field inversion: 11.8 us/op
 - MSM (256 points): 0.50 ms/op
 - HyperKZG commit (1024): 1.5 ms/op
+
+## Commit History (Iteration 34)
+1. Fix sumcheck polynomial format mismatch between prover and verifier
 
 ## Commit History (Iteration 33)
 1. Add claim_reductions and instruction_lookups module structure

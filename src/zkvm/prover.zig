@@ -702,15 +702,16 @@ pub fn MultiStageProver(comptime F: type) type {
             // Number of rounds = log2(trace_len)
             const num_rounds = if (trace_len <= 1) 0 else std.math.log2_int_ceil(usize, trace_len);
 
-            // Run sumcheck rounds (using simplified linear polynomials)
+            // Run sumcheck rounds (using degree-2 polynomials for product checks)
             for (0..num_rounds) |round| {
-                // Compute round polynomial [p(0), p(1)]
-                // For registers, we use degree 2 since it's simpler than full memory
+                // Compute round polynomial [p(0), p(2)] for degree-2 compressed format
+                // Verifier recovers p(1) from constraint p(0) + p(1) = claim
                 const poly_copy = try self.allocator.alloc(F, 2);
 
-                // Simplified: sum over trace entries based on register writes
-                var sum_0 = F.zero();
-                var sum_1 = F.zero();
+                // For registers, the sumcheck is over a product of polynomials
+                // We compute evaluations at x=0 and x=2
+                var sum_at_0 = F.zero();
+                var sum_at_1 = F.zero();
                 const half = trace_len / 2;
 
                 for (0..half) |j| {
@@ -720,19 +721,23 @@ pub fn MultiStageProver(comptime F: type) type {
                         // Extract rd from instruction (bits [11:7] for RISC-V)
                         const rd: u8 = @truncate((step.instruction >> 7) & 0x1F);
                         const eq_val = computeRegEq(F, r_register, rd);
-                        sum_0 = sum_0.add(eq_val);
+                        sum_at_0 = sum_at_0.add(eq_val);
                     }
                     if (self.trace.steps.items.len > j + half) {
                         const step = self.trace.steps.items[j + half];
                         // Extract rd from instruction
                         const rd: u8 = @truncate((step.instruction >> 7) & 0x1F);
                         const eq_val = computeRegEq(F, r_register, rd);
-                        sum_1 = sum_1.add(eq_val);
+                        sum_at_1 = sum_at_1.add(eq_val);
                     }
                 }
 
-                poly_copy[0] = sum_0;
-                poly_copy[1] = sum_1;
+                // Compute p(2) = 2*sum_at_1 - sum_at_0 for degree-2 polynomial
+                // This follows from linear extrapolation of the multilinear part
+                const sum_at_2 = sum_at_1.add(sum_at_1).sub(sum_at_0);
+
+                poly_copy[0] = sum_at_0;
+                poly_copy[1] = sum_at_2; // Store p(2), not p(1)
                 try stage_proof.round_polys.append(self.allocator, poly_copy);
 
                 // Get challenge from transcript
@@ -842,27 +847,31 @@ pub fn MultiStageProver(comptime F: type) type {
 
             // Run sumcheck rounds
             for (0..num_rounds) |round| {
-                // Compute round polynomial [p(0), p(1)]
+                // Compute round polynomial [p(0), p(2)] for degree-2 compressed format
                 const poly_copy = try self.allocator.alloc(F, 2);
 
                 // For booleanity, sumcheck verifies: Σ eq(r,j) * violation(j) = 0
-                var sum_0 = F.zero();
-                var sum_1 = F.zero();
+                // Since we assume no violations, p(x) = 0 for all x
+                var sum_at_0 = F.zero();
+                var sum_at_1 = F.zero();
                 const half = trace_len / 2;
 
                 for (0..half) |j| {
                     // Contribution from first half (x = 0)
                     if (j < self.trace.steps.items.len) {
-                        sum_0 = sum_0.add(F.zero()); // No violation assumed
+                        sum_at_0 = sum_at_0.add(F.zero()); // No violation assumed
                     }
                     // Contribution from second half (x = 1)
                     if (j + half < self.trace.steps.items.len) {
-                        sum_1 = sum_1.add(F.zero()); // No violation assumed
+                        sum_at_1 = sum_at_1.add(F.zero()); // No violation assumed
                     }
                 }
 
-                poly_copy[0] = sum_0;
-                poly_copy[1] = sum_1;
+                // Compute p(2) = 2*p(1) - p(0) for degree-2
+                const sum_at_2 = sum_at_1.add(sum_at_1).sub(sum_at_0);
+
+                poly_copy[0] = sum_at_0;
+                poly_copy[1] = sum_at_2; // Store p(2), not p(1)
                 try stage_proof.round_polys.append(self.allocator, poly_copy);
 
                 // Get challenge from transcript

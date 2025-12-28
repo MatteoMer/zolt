@@ -191,3 +191,41 @@ Ended: 2025-12-28T01:28:57.082314
 Turns: 108
 Cost: $6.4454
 
+
+--- Iteration 17 ---
+Started: 2025-12-28T01:28:59
+Summary:
+Improved HyperKZG verification and batch verification fixes.
+
+Key Changes:
+1. Enhanced verifyWithPairing() with proper batching:
+   - Gamma-based batching: W = sum_i gamma^i * Q_i
+   - Correction term: sum_i gamma^i * r_i * Q_i
+   - Pairing equation: e(C - v*G1 - correction, G2) == e(W, tau_G2)
+
+2. Added verifyAlgebraic() for testing without pairing overhead
+
+3. Fixed batch.zig verifyBatch() return type to !bool (error union)
+
+4. Added host execute integration tests:
+   - "execute runs simple program"
+   - "execute with longer program"
+
+5. Added batch verification tests:
+   - "batch opening accumulator multiple claims"
+   - "opening claim initialization"
+
+Files Modified:
+- src/poly/commitment/mod.zig - Enhanced HyperKZG verification
+- src/poly/commitment/batch.zig - Fixed verifyBatch, added tests
+- src/host/mod.zig - Added execute tests
+
+Commits:
+- feat(hyperkzg): enhance verification with proper batching and pairing check
+- test(host): add execute function integration tests
+- fix(batch): fix verifyBatch return type and add tests
+- docs: update TODO.md with iteration 17 progress
+- docs: update PLAN.md with comprehensive status summary
+
+All 364 tests pass.
+

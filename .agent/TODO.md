@@ -1,55 +1,43 @@
 # Zolt zkVM Implementation TODO
 
-## Completed (This Session - Iteration 35)
+## Completed (This Session - Iteration 36)
 
-### Transcript Synchronization Fix ✅
-- [x] Investigate why Stage 1 sumcheck was failing in strict mode
-- [x] Discover `verifyR1CSProof` was generating spurious "r1cs_tau" challenge
-- [x] Fix by removing the transcript challenge from verifyR1CSProof
-- [x] Add log_t and log_k fields to JoltStageProofs for proper transcript sync
-- [x] Update all stage verifiers to use correct challenge counts:
-  - Stage 2: Uses log_t r_cycle challenges instead of num_rounds
-  - Stage 3: Uses log_t r_reduction challenges from proof
-  - Stages 4-6: Use log_t for cycle challenges
-- [x] Add `computeInitialClaim()` to Lasso prover
-- [x] Prover now stores initial claim for Stage 3 (Lasso)
-- [x] **Stage 1 (Spartan) now verifies with strict sumcheck! 🎉**
-- [x] All 554+ tests pass
-- [x] Full pipeline example works
+### Lasso Prover Claim Tracking Fix ✅
+- [x] Identify Lasso prover wasn't maintaining sumcheck invariant
+- [x] Add `current_claim` field to track running claim
+- [x] Add `eq_evals` array to track eq(r, j) evaluations per cycle
+- [x] Add `eq_evals_len` to track effective array size (shrinks during folding)
+- [x] Update `computeAddressRoundPoly` to use eq_evals for sums
+- [x] Update `computeCycleRoundPoly` to use eq_evals_len
+- [x] Update `receiveChallenge` to:
+  - Bind eq_evals with (1-r) or r factors during address phase
+  - Fold eq_evals in half during cycle phase
+  - Recompute current_claim as sum of (folded) eq_evals
+- [x] Add test verifying sumcheck invariant: p(0) + p(1) = current_claim
+- [x] All 554 tests pass
 
 ## Key Insight from This Session
 
-The transcript was desynchronized between prover and verifier due to:
-1. An extra challenge "r1cs_tau" being generated in verifyR1CSProof
-2. Stage verifiers using `num_rounds` instead of `log_t` for cycle challenges
+The Lasso prover wasn't maintaining the sumcheck claim invariant:
+- For each round: p(0) + p(1) = current_claim
+- After receiving challenge r: new_claim = p(r)
 
 The fix required:
-- Removing the spurious challenge generation
-- Storing log_t and log_k in JoltStageProofs
-- Passing these values to stage verifiers for correct challenge counts
-
-## Known Issues
-
-### Lasso Claim Tracking (Stages 2-6)
-Stage 3+ verification still requires lenient mode because the Lasso prover doesn't maintain the claim correctly between rounds:
-- After receiving challenge r, the new claim should be p(r)
-- The next round's polynomial should satisfy p(0) + p(1) = new_claim
-- Currently, the round polynomials don't track this correctly
-
-**Location**: `src/zkvm/lasso/prover.zig`
-- `computeRoundPolynomial` needs to track the current claim
-- `receiveChallenge` needs to update claim to p(r)
-
-### Test Interference Issue (Iteration 32)
-When adding new integration tests to `src/integration_tests.zig`, seemingly unrelated tests start failing.
-**Workaround**: Do not add new e2e integration tests until root cause is found.
+- Tracking current_claim explicitly
+- Maintaining eq_evals array with cycle eq evaluations
+- Properly binding/folding eq_evals when receiving challenges
+- Recomputing current_claim after each challenge
 
 ## Completed (Previous Sessions)
 
+### Iteration 35 - Transcript Synchronization Fix
+- [x] Fix spurious "r1cs_tau" challenge in verifyR1CSProof
+- [x] Add log_t and log_k fields to JoltStageProofs
+- [x] Stage 1 (Spartan) now verifies with strict sumcheck
+
 ### Iteration 34 - Sumcheck Degree Mismatch Fix
-- [x] Fix RAF prover to compute [p(0), p(2)] for degree-2 compressed format
-- [x] Add `evaluateQuadraticAt3Points` helper for Lagrange interpolation
-- [x] Update all stage verifiers to use correct polynomial formats
+- [x] Fix RAF prover to compute [p(0), p(2)] for degree-2 format
+- [x] Add `evaluateQuadraticAt3Points` helper
 
 ### Iterations 1-33 - Core Implementation
 - [x] BN254 field and curve arithmetic
@@ -72,7 +60,7 @@ When adding new integration tests to `src/integration_tests.zig`, seemingly unre
 ## Next Steps (Future Iterations)
 
 ### High Priority
-- [ ] Fix Lasso claim tracking for strict Stage 3+ verification
+- [ ] Test Stage 3+ with strict verification mode
 - [ ] Investigate test interference issue
 
 ### Medium Priority
@@ -87,9 +75,8 @@ When adding new integration tests to `src/integration_tests.zig`, seemingly unre
 
 ## Test Status
 - All tests pass (554+ tests)
-- End-to-end verification: PASSED (lenient mode)
 - Stage 1 strict verification: PASSED ✅
-- Stage 3+ strict verification: Needs Lasso fixes
+- Lasso claim tracking: VERIFIED ✅
 - Full pipeline example: WORKING
 
 ## Performance (from benchmarks)

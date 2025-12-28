@@ -2,16 +2,15 @@
 
 ## Current Status (Jolt Compatibility Phase)
 
-**Project Status: SUMCHECK VERIFICATION ANALYSIS COMPLETE**
+**Project Status: STREAMING SUMCHECK INFRASTRUCTURE IN PROGRESS**
 
-The investigation revealed why zero proofs don't work for cross-verification:
+We have implemented the core polynomial types and streaming sumcheck framework:
 
-1. **Univariate skip first round passes** (sum over domain = 0 with zero coefficients)
-2. **Remaining sumcheck rounds pass** (p(0) + p(1) = 0 with zero coefficients)
-3. **Final claim check FAILS** (expected_output_claim ≠ 0)
+1. **GruenSplitEqPolynomial** - Efficient eq polynomial with prefix tables for factored evaluation
+2. **MultiquadraticPolynomial** - Ternary grid {0, 1, ∞}^d representation for streaming optimization
+3. **StreamingOuterProver** - Framework for generating non-zero sumcheck proofs
 
-The verifier computes `expected_output_claim` from R1CS constraints, which include
-constant terms that evaluate to non-zero even with zero input claims.
+The next step is to connect these components and generate actual valid proofs.
 
 ---
 
@@ -28,68 +27,49 @@ constant terms that evaluate to non-zero even with zero input claims.
 9. ✅ **19 R1CS Constraints** - Matching Jolt's exact constraint structure
 10. ✅ **Constraint Evaluators** - Az/Bz for first and second groups
 11. ✅ **Verification Analysis** - Understood why zero proofs fail
+12. ✅ **GruenSplitEqPolynomial** - Prefix eq tables for efficient factored evaluation
+13. ✅ **MultiquadraticPolynomial** - Ternary grid expansion for streaming sumcheck
+14. ✅ **StreamingOuterProver** - Framework with degree-27 and degree-3 round polys
 
 ---
 
-## What's Needed for Full Verification
+## Current Work: Full Sumcheck Prover
 
-### The Core Problem
+### Implemented Components
 
-The sumcheck protocol requires:
-- Round polynomials that satisfy `p(0) + p(1) = previous_claim`
-- Final claim that equals `expected_output_claim` (computed from witnesses)
+1. **GruenSplitEqPolynomial** (`src/poly/split_eq.zig`)
+   - Prefix eq tables E_out_vec and E_in_vec
+   - Variable binding with scalar accumulation
+   - Cubic round polynomial computation using Gruen's method
+   - Window-based eq table access
 
-Zero proofs satisfy the first but not the second requirement.
+2. **MultiquadraticPolynomial** (`src/poly/multiquadratic.zig`)
+   - Base-3 grid encoding with z_0 fastest-varying
+   - Expansion from linear {0,1}^d to ternary {0,1,∞}^d
+   - f(∞) = f(1) - f(0) (slope extrapolation)
+   - Projection to first variable with eq weights
 
-### Implementation Requirements
+3. **StreamingOuterProver** (`src/zkvm/spartan/streaming_outer.zig`)
+   - First-round univariate skip polynomial (degree 27)
+   - Remaining rounds with degree-3 polynomials
+   - Lagrange basis precomputation at r0
+   - Integration with GruenSplitEqPolynomial
 
-To generate valid proofs, we need:
+### Remaining Work
 
-1. **Full Sumcheck Prover** (Spartan Outer)
-   - Materialize Az(x) and Bz(x) over the cycle hypercube
-   - Compute `Σ_x eq(τ, x) * Az(x) * Bz(x)` using streaming sumcheck
-   - Handle multiquadratic expansion for efficient streaming
-   - File: `src/zkvm/spartan/outer_prover.zig` (to create)
+1. **Connect StreamingOuterProver to proof converter**
+   - Replace JoltOuterProver with StreamingOuterProver
+   - Ensure transcript matches Jolt's exactly
+   - Generate actual polynomial evaluations
 
-2. **MLE Evaluation at Challenge Point**
-   - Compute r1cs_input_evals[i] = MLE_i(r_cycle)
-   - These are the evaluations of R1CS input polynomials at the random point
-   - Used by verifier to compute expected_output_claim
+2. **Validate sumcheck correctness**
+   - Verify round polynomials satisfy sumcheck equation
+   - Verify final claim matches expected output
 
-3. **Consistent Prover/Verifier Transcript**
-   - Challenges derived from actual round polynomials
-   - Must match Jolt's transcript exactly
-
-### Complexity Estimate
-
-The Jolt prover uses:
-- `GruenSplitEqPolynomial` (~500 lines Rust)
-- `MultiquadraticPolynomial` (~400 lines Rust)
-- `OuterSharedState` and `OuterLinearStage` (~800 lines Rust)
-- Streaming sumcheck infrastructure (~300 lines Rust)
-
-Total: ~2000 lines of complex parallel code
-
-A faithful port to Zig would be a significant undertaking.
-
----
-
-## Alternative Approaches
-
-### Option 1: Native Sumcheck Only
-- Use Zolt's existing sumcheck prover for Zolt's own verification
-- Accept that cross-verification with Jolt won't work
-- Simplest, but defeats the purpose of compatibility
-
-### Option 2: Format Compatibility Only
-- Focus on serialization/deserialization compatibility
-- Document that proofs are format-compatible but not verifiable
-- Useful for tooling and debugging
-
-### Option 3: Incremental Implementation
-- Start with a simplified sumcheck that works for trivial traces
-- Gradually add streaming/windowed optimizations
-- Most realistic path forward
+3. **End-to-end testing**
+   - Generate proof for trivial trace (all NOPs)
+   - Verify with Jolt's verifier
+   - Debug any discrepancies
 
 ---
 
@@ -129,13 +109,21 @@ A faithful port to Zig would be a significant undertaking.
 - [x] **Second group (9 constraints)** - Mixed guards, ~128-bit Bz
 - [x] **Constraint evaluators** - Az/Bz per group
 
-### 6. Cross-Verification 🔄 PARTIALLY COMPLETE
+### 6. Streaming Sumcheck 🔄 IN PROGRESS
+
+- [x] **GruenSplitEqPolynomial** - Prefix tables for factored eq evaluation
+- [x] **MultiquadraticPolynomial** - Ternary grid for streaming
+- [x] **StreamingOuterProver** - Framework for degree-27 and degree-3 rounds
+- [ ] **Integration with proof converter** - Connect to JoltProof generation
+- [ ] **End-to-end verification** - Generate and verify non-zero proofs
+
+### 7. Cross-Verification 🔄 PARTIALLY COMPLETE
 
 - [x] **Jolt deserializes Zolt proofs** - VERIFIED WORKING
 - [x] **48 opening claims** - All R1CS inputs + OpFlags + stage claims
 - [x] **UniSkip first-round structure** - Correct degree polynomials
-- [ ] **Sumcheck proofs with correct claims** - BLOCKED on full prover
-- [ ] **Full verification** - BLOCKED on correct sumcheck
+- [ ] **Sumcheck proofs with correct claims** - In progress with StreamingOuterProver
+- [ ] **Full verification** - Waiting on correct sumcheck implementation
 
 ---
 
@@ -154,7 +142,7 @@ Build Summary: 5/5 steps succeeded; 608/608 tests passed
 |------|--------|---------|
 | `test_deserialize_zolt_proof` | ✅ PASS | 27910 bytes, 48 claims |
 | `test_debug_zolt_format` | ✅ PASS | All claims and commitments valid |
-| `test_verify_zolt_proof` | ❌ FAIL | Stage 1 final claim check |
+| `test_verify_zolt_proof` | ❌ FAIL | Stage 1 final claim check (expected with zero proofs) |
 
 ---
 
@@ -170,14 +158,17 @@ Build Summary: 5/5 steps succeeded; 608/608 tests passed
 | `src/poly/commitment/dory.zig` | ✅ Done | Dory IPA |
 | `src/zkvm/r1cs/constraints.zig` | ✅ Done | 19 R1CS constraints |
 | `src/zkvm/r1cs/evaluators.zig` | ✅ Done | Az/Bz constraint evaluators |
+| `src/poly/split_eq.zig` | ✅ Done | Gruen's efficient eq polynomial |
+| `src/poly/multiquadratic.zig` | ✅ Done | Ternary grid expansion {0, 1, ∞} |
+| `src/zkvm/spartan/streaming_outer.zig` | ✅ Done | Streaming outer sumcheck prover framework |
 
-### Needed for Full Verification
-| File | Status | Purpose |
-|------|--------|---------|
-| `src/zkvm/spartan/jolt_outer_prover.zig` | 🟡 Basic | Simple sumcheck prover (not compatible with Jolt's streaming) |
-| `src/zkvm/spartan/streaming_outer.zig` | ❌ TODO | Full streaming Spartan outer sumcheck prover |
-| `src/poly/multiquadratic.zig` | ❌ TODO | Tertiary grid expansion {0, 1, ∞} |
-| `src/poly/split_eq.zig` | ❌ TODO | Gruen's efficient eq polynomial |
+### Next Steps
+| Task | Priority | Complexity |
+|------|----------|------------|
+| Connect StreamingOuterProver to proof converter | High | Medium |
+| Validate sumcheck with trivial trace | High | Medium |
+| Debug against Jolt verifier | High | High |
+| Optimize for larger traces | Low | High |
 
 ---
 
@@ -188,12 +179,14 @@ Build Summary: 5/5 steps succeeded; 608/608 tests passed
 - Byte-perfect arkworks format compatibility
 - All structural components in place
 
-**Verification Compatibility: BLOCKED**
-- Zero proofs don't satisfy the final claim check
-- Need to implement full sumcheck prover with actual polynomial evaluations
-- This requires ~2000 lines of complex parallel computation code
+**Verification Compatibility: IN PROGRESS**
+- Core polynomial types implemented (GruenSplitEqPolynomial, MultiquadraticPolynomial)
+- StreamingOuterProver framework implemented
+- Need to connect components and validate with Jolt verifier
+- Expected timeline: 1-2 more iterations
 
-**Recommended Next Steps:**
-1. Document the current compatibility level
-2. Consider if full verification is required for the use case
-3. If needed, plan incremental implementation of streaming sumcheck
+**Next Session Goals:**
+1. Connect StreamingOuterProver to proof converter
+2. Generate proof with actual polynomial evaluations
+3. Test against Jolt verifier
+4. Debug any discrepancies

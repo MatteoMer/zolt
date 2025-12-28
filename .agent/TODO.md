@@ -2,57 +2,47 @@
 
 ## Current Status (Jolt Compatibility Phase)
 
-**Project Status: DORY COMMITMENT ALGORITHM MISMATCH**
+**Project Status: DORY COMMITMENT COMPARISON IN PROGRESS**
 
-The SRS is now loadable from Jolt-exported files, but the commitment computation
-algorithm itself differs between Zolt and Jolt's dory-pcs crate.
+Created test infrastructure to compare Dory commitments between Zolt and Jolt.
+Currently investigating why commitments differ even with same SRS points.
 
 Key achievements:
-1. ✅ JoltProofWithDory bundle ensures consistent commitments
-2. ✅ SRS loading from Jolt-exported file
-3. ✅ --srs CLI option added
-4. ✅ All 608 Zolt tests pass
-5. ✅ Cross-deserialization works
+1. ✅ SRS loading from Jolt-exported file
+2. ✅ Polynomial-based matrix dimensions (sigma/nu calculation)
+3. ✅ Comparison test infrastructure with Jolt
+4. ✅ All 610 Zolt tests pass
 
-Remaining issue: **Dory commitment algorithm differs**
-- Jolt uses `Polynomial::commit` from dory-pcs with specific nu/sigma params
-- Jolt uses `DoryGlobals` to track current matrix dimensions
-- Zolt's simple MSM + pairing approach produces different GT values
-- Even with same SRS points, the commitments differ
+Remaining issue: **Commitment values differ**
+- Jolt commitment for [1,2,3,4,5,6,7,8]: first bytes `cf 11 82 20 dc 8c 59 10...`
+- Zolt commitment for same polynomial: first bytes `88 12 50 7a 66 2c 7d 16...`
+- Need to investigate MSM/pairing algorithm differences
 
 ---
 
-## Understanding Jolt's Dory Commit
+## Debugging Plan
 
-Jolt's commit in `commitment_scheme.rs`:
-```rust
-fn commit(poly, setup) {
-    let num_cols = DoryGlobals::get_num_columns();
-    let num_rows = DoryGlobals::get_max_num_rows();
-    let sigma = num_cols.log_2();
-    let nu = num_rows.log_2();
+1. Compare G1 generator points between Jolt and Zolt
+2. Compare row MSM results for same inputs
+3. Compare individual pairing results
+4. Check if polynomial layout differs (row-major vs column-major)
 
-    let (tier_2, row_commitments) = Polynomial::commit::<BN254, JoltG1Routines>(
-        poly, nu, sigma, setup
-    );
-    (tier_2, row_commitments)
-}
+---
+
+## Recent Progress
+
+### Matrix Dimension Fix
+Now computing sigma/nu from polynomial length instead of SRS size:
+```
+For num_vars=3 (8 coeffs): sigma=2, nu=1 → 4 cols × 2 rows
+For num_vars=2 (4 coeffs): sigma=1, nu=1 → 2 cols × 2 rows
+For num_vars=1 (2 coeffs): sigma=1, nu=0 → 2 cols × 1 row
 ```
 
-Key differences from Zolt:
-1. **DoryGlobals**: Global state tracks current matrix dimensions
-2. **nu/sigma parameters**: Log2 of rows/columns, used in the algorithm
-3. **JoltG1Routines**: Custom G1 routines for the commitment
-4. **tier_2 commitment**: Uses a specific multi-tier commitment structure
-
----
-
-## Next Steps
-
-1. [ ] Study dory-pcs `Polynomial::commit` implementation
-2. [ ] Port exact algorithm including tier structure
-3. [ ] Match DoryGlobals matrix dimension management
-4. [ ] Consider alternative: generate proof in Jolt, convert to Zolt
+### Test Infrastructure
+- Added `test_export_dory_commitment` in Jolt to export reference commitment
+- Added `dory commitment with jolt srs - compare matrix layout` test in Zolt
+- Can now directly compare commitment bytes between implementations
 
 ---
 
@@ -73,12 +63,14 @@ Key differences from Zolt:
 13. ✅ JoltProofWithDory bundle
 14. ✅ SRS loading from file
 15. ✅ --srs CLI option
+16. ✅ Polynomial-based matrix dimensions
+17. ✅ Commitment comparison test
 
 ---
 
 ## Test Status
 
-### Zolt: 608/608 tests passing
+### Zolt: 610/610 tests passing
 
 ### Jolt Cross-Verification
 
@@ -86,21 +78,18 @@ Key differences from Zolt:
 |------|--------|---------|
 | `test_deserialize_zolt_proof` | ✅ PASS | Deserializes correctly |
 | `test_debug_zolt_format` | ✅ PASS | All claims valid |
-| `test_verify_zolt_proof` | ❌ FAIL | UniSkip fails (commitment algorithm mismatch) |
+| `test_export_dory_srs` | ✅ PASS | SRS exported |
+| `test_export_dory_commitment` | ✅ PASS | Reference commitment exported |
+| `test_verify_zolt_proof` | ❌ FAIL | UniSkip fails (commitment mismatch) |
 
 ---
 
 ## Summary
 
 **Serialization: COMPLETE**
-**Transcript: COMPLETE (using GT elements with reversal)**
-**SRS: COMPLETE (can load from Jolt-exported file)**
-**Commitment Algorithm: NEEDS PORTING**
+**Transcript: COMPLETE**
+**SRS Loading: COMPLETE**
+**Matrix Dimensions: FIXED**
+**Commitment Algorithm: INVESTIGATING**
 
-The remaining blocker is porting the exact Dory commitment algorithm from
-the dory-pcs crate to Zig. This includes:
-- The tier structure (tier_2 commitment)
-- Matrix dimension management (nu/sigma)
-- JoltG1Routines integration
-
-This is a complex port requiring deep understanding of the dory-pcs algorithm.
+Next step: Debug MSM/pairing algorithm to match Jolt's commitment output.

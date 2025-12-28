@@ -57,15 +57,18 @@ zig build run
 # Run a RISC-V ELF binary
 ./zig-out/bin/zolt run program.elf
 
+# Generate ZK proof for a RISC-V ELF binary
+./zig-out/bin/zolt prove program.elf
+
+# Inspect a Powers of Tau (PTAU) ceremony file
+./zig-out/bin/zolt srs ceremony.ptau
+
 # Run examples
 zig build example-field        # Field arithmetic
 zig build example-proof        # Simple polynomial commitment
 zig build example-riscv        # RISC-V instruction decoding
 zig build example-hyperkzg     # HyperKZG commitment scheme
 zig build example-sumcheck     # Sumcheck protocol
-
-# Generate ZK proof for a RISC-V ELF binary (experimental)
-./zig-out/bin/zolt prove program.elf
 ```
 
 ## Project Structure

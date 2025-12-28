@@ -17,6 +17,13 @@
 //! Note: Zolt's stages are more consolidated, so conversion involves
 //! splitting some proofs and creating empty placeholders where Zolt
 //! handles things differently.
+//!
+//! ## Constraint Evaluation
+//!
+//! When `convertWithWitnesses` is called with actual per-cycle witnesses,
+//! the converter will compute real Az*Bz products from the R1CS constraints
+//! using the evaluators from `r1cs/evaluators.zig`. This enables proper
+//! verification of the univariate skip first-round polynomial.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -24,6 +31,8 @@ const Allocator = std.mem.Allocator;
 const jolt_types = @import("jolt_types.zig");
 const prover = @import("prover.zig");
 const field_mod = @import("../field/mod.zig");
+const r1cs = @import("r1cs/mod.zig");
+const spartan_outer = @import("spartan/outer.zig");
 
 /// Convert Zolt's internal proof to Jolt-compatible format
 pub fn ProofConverter(comptime F: type) type {
@@ -314,10 +323,8 @@ pub fn ProofConverter(comptime F: type) type {
         ///
         /// The simplest valid polynomial is all zeros (trivially sums to 0).
         fn createUniSkipProofStage1(self: *Self) !?UniSkipFirstRoundProof(F) {
-            const r1cs_mod = @import("r1cs/mod.zig");
-
             // For stage 1, we need 28 coefficients (degree 27)
-            const NUM_COEFFS = r1cs_mod.OUTER_FIRST_ROUND_POLY_NUM_COEFFS;
+            const NUM_COEFFS = r1cs.OUTER_FIRST_ROUND_POLY_NUM_COEFFS;
 
             // Create an all-zero polynomial that trivially satisfies the sum constraint.
             const coeffs = try self.allocator.alloc(F, NUM_COEFFS);
@@ -327,6 +334,141 @@ pub fn ProofConverter(comptime F: type) type {
                 .uni_poly = coeffs,
                 .allocator = self.allocator,
             };
+        }
+
+        /// Create a UniSkipFirstRoundProof for Stage 1 from actual witnesses
+        ///
+        /// This computes real Az*Bz products using the constraint evaluators,
+        /// producing a polynomial that satisfies the univariate skip verification.
+        fn createUniSkipProofStage1FromWitnesses(
+            self: *Self,
+            cycle_witnesses: []const r1cs.R1CSCycleInputs(F),
+            tau: []const F,
+        ) !?UniSkipFirstRoundProof(F) {
+            if (cycle_witnesses.len == 0) {
+                return self.createUniSkipProofStage1();
+            }
+
+            const poly_mod = @import("../poly/mod.zig");
+            const NUM_COEFFS = r1cs.OUTER_FIRST_ROUND_POLY_NUM_COEFFS;
+
+            // Compute eq polynomial evaluations at tau
+            var eq_poly = try poly_mod.EqPolynomial(F).init(self.allocator, tau);
+            defer eq_poly.deinit();
+            const eq_evals = try eq_poly.evals(self.allocator);
+            defer self.allocator.free(eq_evals);
+
+            // Use the Spartan outer prover to compute the first-round polynomial
+            var outer_prover = try spartan_outer.SpartanOuterProver(F).initFromWitnesses(
+                self.allocator,
+                cycle_witnesses,
+                eq_evals,
+                tau,
+            );
+            defer outer_prover.deinit();
+
+            // Compute the univariate skip polynomial
+            var uni_poly = try outer_prover.computeUniskipFirstRoundPoly();
+            defer uni_poly.deinit();
+
+            // Copy coefficients to our proof structure
+            const coeffs = try self.allocator.alloc(F, NUM_COEFFS);
+            @memset(coeffs, F.zero());
+
+            // Copy available coefficients (may be fewer than NUM_COEFFS)
+            const copy_len = @min(uni_poly.coeffs.len, NUM_COEFFS);
+            @memcpy(coeffs[0..copy_len], uni_poly.coeffs[0..copy_len]);
+
+            return UniSkipFirstRoundProof(F){
+                .uni_poly = coeffs,
+                .allocator = self.allocator,
+            };
+        }
+
+        /// Convert with actual per-cycle witnesses for real constraint evaluation
+        ///
+        /// This method produces proofs with proper Az*Bz evaluations instead of zeros.
+        /// Use this for cross-verification with Jolt.
+        pub fn convertWithWitnesses(
+            self: *Self,
+            comptime Commitment: type,
+            comptime Proof: type,
+            zolt_stage_proofs: *const prover.JoltStageProofs(F),
+            commitments: []const Commitment,
+            joint_opening_proof: ?Proof,
+            config: ConversionConfig,
+            cycle_witnesses: []const r1cs.R1CSCycleInputs(F),
+            tau: []const F,
+        ) !JoltProofType(F, Commitment, Proof) {
+            var jolt_proof = JoltProofType(F, Commitment, Proof).init(self.allocator);
+
+            // Copy configuration parameters
+            const trace_length: usize = @as(usize, 1) << @intCast(zolt_stage_proofs.log_t);
+            const ram_K: usize = @as(usize, 1) << @intCast(zolt_stage_proofs.log_k);
+
+            jolt_proof.trace_length = trace_length;
+            jolt_proof.ram_K = ram_K;
+            jolt_proof.bytecode_K = config.bytecode_K;
+            jolt_proof.log_k_chunk = config.log_k_chunk;
+            jolt_proof.lookups_ra_virtual_log_k_chunk = config.lookups_ra_virtual_log_k_chunk;
+
+            // Compute derived parameters
+            const n_cycle_vars = std.math.log2_int(usize, trace_length);
+            const log_ram_k = std.math.log2_int(usize, ram_K);
+            _ = log_ram_k;
+
+            // Copy commitments
+            for (commitments) |c| {
+                try jolt_proof.commitments.append(self.allocator, c);
+            }
+
+            // Set joint opening proof
+            jolt_proof.joint_opening_proof = joint_opening_proof;
+
+            // Create UniSkip proof for Stage 1 with actual constraint evaluations
+            jolt_proof.stage1_uni_skip_first_round_proof = try self.createUniSkipProofStage1FromWitnesses(
+                cycle_witnesses,
+                tau,
+            );
+
+            // Stage 1: Outer Spartan Remaining
+            try self.generateZeroSumcheckProof(
+                &jolt_proof.stage1_sumcheck_proof,
+                1 + n_cycle_vars,
+                3, // degree 3
+            );
+
+            // Add Stage 1 opening claims
+            try self.addSpartanOuterOpeningClaims(&jolt_proof.opening_claims);
+
+            // Create UniSkip proof for Stage 2 (still using placeholder for now)
+            jolt_proof.stage2_uni_skip_first_round_proof = try self.createUniSkipProofStage2();
+
+            // Stage 2 and onwards use placeholder zero proofs
+            try self.generateZeroSumcheckProof(
+                &jolt_proof.stage2_sumcheck_proof,
+                n_cycle_vars + 1,
+                3,
+            );
+
+            // Add remaining opening claims (same as standard convert)
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamRafEvaluation } },
+                F.zero(),
+            );
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .RamVal, .sumcheck_id = .RamReadWriteChecking } },
+                F.zero(),
+            );
+
+            // Stages 3-7 (placeholder)
+            try self.generateZeroSumcheckProof(&jolt_proof.stage3_sumcheck_proof, n_cycle_vars, 3);
+            try self.generateZeroSumcheckProof(&jolt_proof.stage4_sumcheck_proof, n_cycle_vars, 3);
+            try self.generateZeroSumcheckProof(&jolt_proof.stage5_sumcheck_proof, n_cycle_vars, 3);
+            try self.generateZeroSumcheckProof(&jolt_proof.stage6_sumcheck_proof, n_cycle_vars, 3);
+            try self.generateZeroSumcheckProof(&jolt_proof.stage7_sumcheck_proof, n_cycle_vars, 3);
+
+            return jolt_proof;
         }
 
         /// Create a UniSkipFirstRoundProof for Stage 2 (degree-12 polynomial)
@@ -339,8 +481,7 @@ pub fn ProofConverter(comptime F: type) type {
         ///
         /// where power_sums[j] = Σ_{t in domain} t^j for domain {-2, -1, 0, 1, 2}.
         fn createUniSkipProofStage2(self: *Self) !?UniSkipFirstRoundProof(F) {
-            const r1cs_mod = @import("r1cs/mod.zig");
-            const univariate_skip = r1cs_mod.univariate_skip;
+            const univariate_skip = r1cs.univariate_skip;
 
             // For stage 2, we need 13 coefficients (degree 12)
             const NUM_COEFFS = univariate_skip.PRODUCT_VIRTUAL_FIRST_ROUND_POLY_NUM_COEFFS;

@@ -858,3 +858,17 @@ Ended: 2025-12-28T11:23:15.022607
 Turns: 68
 Cost: $5.1346
 
+
+
+--- Iteration 9 ---
+Started: 2025-12-28T11:23:17
+Summary:
+- Fixed CompressedUniPoly compression (remove linear term at index 1)
+- Fixed Jolt config compatibility (log_k_chunk <= 8, lookups_ra_virtual_log_k_chunk = 16)
+- Discovered univariate skip architectural mismatch
+- Jolt uses degree-27 first-round polynomials (28 coefficients)
+- Zolt uses standard degree-2/3 sumcheck (3-4 coefficients)
+- Full verification blocked by this architectural difference
+- Serialization format fully compatible (Jolt can deserialize Zolt proofs)
+- Documented blocking issues and path forward in NOTES.md and TODO.md
+

@@ -694,6 +694,120 @@ pub fn AuipcLookup(comptime XLEN: comptime_int) type {
     };
 }
 
+/// JAL (Jump and Link) instruction lookup
+/// rd = PC + 4 (or PC + 2 for compressed), PC = PC + imm
+pub fn JalLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        pc: u64, // Current program counter
+        imm: i32, // Jump offset (already decoded from J-type)
+        is_compressed: bool, // Whether this is a compressed instruction
+
+        pub fn init(pc: u64, imm: i32, is_compressed: bool) Self {
+            return Self{
+                .pc = pc,
+                .imm = imm,
+                .is_compressed = is_compressed,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            // JAL is PC + 4 (link address), no complex lookup needed
+            return .RangeCheck;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return @as(u128, self.computeResult());
+        }
+
+        /// Compute the return address (what gets written to rd)
+        pub fn computeResult(self: Self) u64 {
+            // Return address is PC + instruction size
+            const inc: u64 = if (self.is_compressed) 2 else 4;
+            return self.pc +% inc;
+        }
+
+        /// Compute the jump target address
+        pub fn computeTarget(self: Self) u64 {
+            const imm_extended: i64 = @as(i64, self.imm);
+            return self.pc +% @as(u64, @bitCast(imm_extended));
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.Jump);
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsPC);
+            flags.set(.RightOperandIsImm);
+            return flags;
+        }
+    };
+}
+
+/// JALR (Jump and Link Register) instruction lookup
+/// rd = PC + 4 (or PC + 2 for compressed), PC = (rs1 + imm) & ~1
+pub fn JalrLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        pc: u64, // Current program counter
+        rs1_val: u64, // Base address from register
+        imm: i32, // Offset (12-bit sign-extended)
+        is_compressed: bool, // Whether this is a compressed instruction
+
+        pub fn init(pc: u64, rs1_val: u64, imm: i32, is_compressed: bool) Self {
+            return Self{
+                .pc = pc,
+                .rs1_val = rs1_val,
+                .imm = imm,
+                .is_compressed = is_compressed,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .RangeCheck;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return @as(u128, self.computeResult());
+        }
+
+        /// Compute the return address (what gets written to rd)
+        pub fn computeResult(self: Self) u64 {
+            const inc: u64 = if (self.is_compressed) 2 else 4;
+            return self.pc +% inc;
+        }
+
+        /// Compute the jump target address
+        pub fn computeTarget(self: Self) u64 {
+            const imm_extended: i64 = @as(i64, self.imm);
+            const target = self.rs1_val +% @as(u64, @bitCast(imm_extended));
+            // Clear the least significant bit
+            return target & ~@as(u64, 1);
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.Jump);
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsImm);
+            return flags;
+        }
+    };
+}
+
 /// SLL (Shift Left Logical) instruction lookup
 /// Computes rd = rs1 << (rs2 & (XLEN-1))
 pub fn SllLookup(comptime XLEN: comptime_int) type {
@@ -2680,4 +2794,59 @@ test "auipc lookup (add upper immediate to PC)" {
     const circuit_flags = AuipcLookup(64).circuitFlags();
     try std.testing.expect(circuit_flags.get(.AddOperands));
     try std.testing.expect(circuit_flags.get(.WriteLookupOutputToRD));
+}
+
+test "jal lookup (jump and link)" {
+    // jal x1, 100 at PC=0x1000 => rd = 0x1004, target = 0x1064
+    const jal1 = JalLookup(64).init(0x1000, 100, false);
+    try std.testing.expectEqual(@as(u64, 0x1004), jal1.computeResult()); // link address
+    try std.testing.expectEqual(@as(u64, 0x1064), jal1.computeTarget()); // jump target
+
+    // Negative offset: jal x1, -20 at PC=0x2000
+    const jal2 = JalLookup(64).init(0x2000, -20, false);
+    try std.testing.expectEqual(@as(u64, 0x2004), jal2.computeResult());
+    try std.testing.expectEqual(@as(u64, 0x1FEC), jal2.computeTarget()); // 0x2000 - 20
+
+    // Compressed instruction
+    const jal_c = JalLookup(64).init(0x1000, 100, true);
+    try std.testing.expectEqual(@as(u64, 0x1002), jal_c.computeResult()); // PC + 2 for compressed
+
+    // Check flags
+    const circuit_flags = JalLookup(64).circuitFlags();
+    try std.testing.expect(circuit_flags.get(.Jump));
+    try std.testing.expect(circuit_flags.get(.WriteLookupOutputToRD));
+
+    const inst_flags = JalLookup(64).instructionFlags();
+    try std.testing.expect(inst_flags.get(.LeftOperandIsPC));
+    try std.testing.expect(inst_flags.get(.RightOperandIsImm));
+}
+
+test "jalr lookup (jump and link register)" {
+    // jalr x1, 100(x5) with x5=0x1000, PC=0x2000
+    // rd = 0x2004, target = (0x1000 + 100) & ~1 = 0x1064
+    const jalr1 = JalrLookup(64).init(0x2000, 0x1000, 100, false);
+    try std.testing.expectEqual(@as(u64, 0x2004), jalr1.computeResult()); // link address
+    try std.testing.expectEqual(@as(u64, 0x1064), jalr1.computeTarget()); // jump target
+
+    // Test clearing of LSB
+    // jalr x1, 1(x5) with x5=0x1000 => target = 0x1000 (LSB cleared)
+    const jalr2 = JalrLookup(64).init(0x2000, 0x1000, 1, false);
+    try std.testing.expectEqual(@as(u64, 0x1000), jalr2.computeTarget()); // (0x1001) & ~1 = 0x1000
+
+    // Negative offset
+    const jalr3 = JalrLookup(64).init(0x2000, 0x1000, -100, false);
+    try std.testing.expectEqual(@as(u64, 0x0F9C), jalr3.computeTarget()); // 0x1000 - 100 = 0xF9C
+
+    // Compressed instruction
+    const jalr_c = JalrLookup(64).init(0x2000, 0x1000, 0, true);
+    try std.testing.expectEqual(@as(u64, 0x2002), jalr_c.computeResult()); // PC + 2 for compressed
+
+    // Check flags
+    const circuit_flags = JalrLookup(64).circuitFlags();
+    try std.testing.expect(circuit_flags.get(.Jump));
+    try std.testing.expect(circuit_flags.get(.WriteLookupOutputToRD));
+
+    const inst_flags = JalrLookup(64).instructionFlags();
+    try std.testing.expect(inst_flags.get(.LeftOperandIsRs1Value));
+    try std.testing.expect(inst_flags.get(.RightOperandIsImm));
 }

@@ -30,6 +30,9 @@ pub const BgeuLookup = lookups.BgeuLookup;
 // Upper immediate lookups
 pub const LuiLookup = lookups.LuiLookup;
 pub const AuipcLookup = lookups.AuipcLookup;
+// Jump lookups
+pub const JalLookup = lookups.JalLookup;
+pub const JalrLookup = lookups.JalrLookup;
 // Shift lookups
 pub const SllLookup = lookups.SllLookup;
 pub const SrlLookup = lookups.SrlLookup;

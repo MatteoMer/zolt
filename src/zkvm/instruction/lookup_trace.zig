@@ -323,6 +323,42 @@ pub fn LookupEntry(comptime XLEN: comptime_int) type {
             };
         }
 
+        /// Create entry for JAL (jump and link)
+        pub fn fromJal(cycle: usize, pc: u64, instruction: u32, imm: i32, is_compressed: bool) Self {
+            const JalLookup = lookups.JalLookup(XLEN);
+            const jal = JalLookup.init(pc, imm, is_compressed);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = JalLookup.lookupTable(),
+                .index = jal.toLookupIndex(),
+                .result = jal.computeResult(),
+                .left_operand = pc,
+                .right_operand = @as(u64, @bitCast(@as(i64, imm))),
+                .circuit_flags = JalLookup.circuitFlags(),
+                .instruction_flags = JalLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
+        /// Create entry for JALR (jump and link register)
+        pub fn fromJalr(cycle: usize, pc: u64, instruction: u32, rs1: u64, imm: i32, is_compressed: bool) Self {
+            const JalrLookup = lookups.JalrLookup(XLEN);
+            const jalr = JalrLookup.init(pc, rs1, imm, is_compressed);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = JalrLookup.lookupTable(),
+                .index = jalr.toLookupIndex(),
+                .result = jalr.computeResult(),
+                .left_operand = rs1,
+                .right_operand = @as(u64, @bitCast(@as(i64, imm))),
+                .circuit_flags = JalrLookup.circuitFlags(),
+                .instruction_flags = JalrLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
         /// Create entry for SLL (shift left logical)
         pub fn fromSll(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
             const SllLookup = lookups.SllLookup(XLEN);
@@ -964,9 +1000,20 @@ pub fn LookupTraceCollector(comptime XLEN: comptime_int) type {
                     const entry = Entry.fromAuipc(cycle, pc, instruction, decoded.imm);
                     try self.entries.append(self.allocator, entry);
                 },
+                .JAL => {
+                    // Jump and link
+                    const is_compressed = false; // Standard instructions are not compressed
+                    const entry = Entry.fromJal(cycle, pc, instruction, decoded.imm, is_compressed);
+                    try self.entries.append(self.allocator, entry);
+                },
+                .JALR => {
+                    // Jump and link register
+                    const is_compressed = false;
+                    const entry = Entry.fromJalr(cycle, pc, instruction, rs1_val, decoded.imm, is_compressed);
+                    try self.entries.append(self.allocator, entry);
+                },
                 else => {
-                    // JAL, JALR, LOAD, STORE - no lookup needed for now
-                    // These are handled separately (JAL/JALR are jumps, LOAD/STORE use memory)
+                    // LOAD, STORE - memory operations handled separately
                 },
             }
         }

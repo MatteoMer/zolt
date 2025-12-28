@@ -13,6 +13,7 @@ const Command = enum {
     version,
     run,
     prove,
+    srs,
     bench,
     decode,
     unknown,
@@ -31,12 +32,14 @@ fn printHelp() void {
         \\    version           Show version information
         \\    run <elf>         Run RISC-V ELF binary in the emulator
         \\    prove <elf>       Generate ZK proof for ELF binary (experimental)
+        \\    srs <ptau>        Inspect a Powers of Tau (ptau) file
         \\    decode <hex>      Decode a RISC-V instruction (hex)
         \\    bench             Run performance benchmarks
         \\
         \\EXAMPLES:
         \\    zolt run program.elf        # Execute a RISC-V binary
         \\    zolt prove program.elf      # Generate a ZK proof
+        \\    zolt srs file.ptau          # Inspect a PTAU file
         \\    zolt decode 0x00a00513      # Decode: li a0, 10
         \\    zolt bench                  # Run benchmarks
         \\
@@ -59,6 +62,8 @@ fn parseCommand(arg: []const u8) Command {
         return .run;
     } else if (std.mem.eql(u8, arg, "prove")) {
         return .prove;
+    } else if (std.mem.eql(u8, arg, "srs")) {
+        return .srs;
     } else if (std.mem.eql(u8, arg, "decode")) {
         return .decode;
     } else if (std.mem.eql(u8, arg, "bench")) {
@@ -245,6 +250,83 @@ fn decodeInstruction(hex_str: []const u8) void {
     std.debug.print("  immediate:  {d} (0x{x})\n", .{ decoded.imm, @as(u32, @bitCast(decoded.imm)) });
 }
 
+fn inspectSRS(allocator: std.mem.Allocator, ptau_path: []const u8) !void {
+    std.debug.print("SRS File Inspector\n", .{});
+    std.debug.print("==================\n\n", .{});
+
+    std.debug.print("Loading PTAU file: {s}\n", .{ptau_path});
+
+    // Load the PTAU file
+    const file = std.fs.cwd().openFile(ptau_path, .{}) catch |err| {
+        std.debug.print("Error opening file: {}\n", .{err});
+        return err;
+    };
+    defer file.close();
+
+    const stat = try file.stat();
+    std.debug.print("  File size: {} bytes ({d:.2} MB)\n", .{ stat.size, @as(f64, @floatFromInt(stat.size)) / (1024.0 * 1024.0) });
+
+    // Read file contents
+    const data = try allocator.alloc(u8, stat.size);
+    defer allocator.free(data);
+
+    const bytes_read = try file.readAll(data);
+    if (bytes_read != stat.size) {
+        std.debug.print("Warning: Only read {} of {} bytes\n", .{ bytes_read, stat.size });
+    }
+
+    // Parse the PTAU file
+    std.debug.print("\nParsing PTAU format...\n", .{});
+    var srs = zolt.poly.commitment.srs.loadFromPtau(allocator, data) catch |err| {
+        std.debug.print("Error parsing PTAU file: {}\n", .{err});
+        return err;
+    };
+    defer srs.deinit();
+
+    // Display SRS information
+    std.debug.print("\n==================\n", .{});
+    std.debug.print("SRS Information\n", .{});
+    std.debug.print("==================\n", .{});
+    std.debug.print("  Power: 2^{d} = {} points\n", .{ srs.power, @as(u64, 1) << @intCast(srs.power) });
+    std.debug.print("  Ceremony power: 2^{d}\n", .{srs.ceremony_power});
+    std.debug.print("  G1 points: {}\n", .{srs.powers_of_tau_g1.len});
+    std.debug.print("  G2 points: {}\n", .{srs.powers_of_tau_g2.len});
+    std.debug.print("  Alpha*tau G1 points: {}\n", .{if (srs.alpha_tau_g1) |alpha| alpha.len else 0});
+    std.debug.print("  Beta*tau G1 points: {}\n", .{if (srs.beta_tau_g1) |beta| beta.len else 0});
+
+    // Check if we have a valid SRS
+    if (srs.powers_of_tau_g1.len > 0) {
+        const g1 = srs.powers_of_tau_g1[0];
+        std.debug.print("\nFirst G1 point (should be generator):\n", .{});
+        std.debug.print("  x: 0x", .{});
+        const x_bytes = g1.x.toBytesBE();
+        for (x_bytes) |byte| {
+            std.debug.print("{x:0>2}", .{byte});
+        }
+        std.debug.print("\n  y: 0x", .{});
+        const y_bytes = g1.y.toBytesBE();
+        for (y_bytes) |byte| {
+            std.debug.print("{x:0>2}", .{byte});
+        }
+        std.debug.print("\n", .{});
+
+        // Verify it's on the curve
+        if (g1.isOnCurve()) {
+            std.debug.print("  Status: On curve (valid)\n", .{});
+        } else {
+            std.debug.print("  Status: NOT on curve (invalid!)\n", .{});
+        }
+    }
+
+    // Calculate usable max degree
+    const max_degree = srs.powers_of_tau_g1.len;
+    std.debug.print("\nUsage:\n", .{});
+    std.debug.print("  Max polynomial degree: {}\n", .{max_degree});
+    std.debug.print("  Suitable for trace length up to: {} cycles\n", .{max_degree / 2});
+
+    std.debug.print("\nSRS inspection complete.\n", .{});
+}
+
 fn runBenchmarks() void {
     std.debug.print("Running benchmarks...\n\n", .{});
 
@@ -349,6 +431,14 @@ pub fn main() !void {
             } else {
                 std.debug.print("Error: prove command requires an ELF file path\n", .{});
                 std.debug.print("Usage: zolt prove <elf_file>\n", .{});
+            }
+        },
+        .srs => {
+            if (args.next()) |ptau_path| {
+                try inspectSRS(allocator, ptau_path);
+            } else {
+                std.debug.print("Error: srs command requires a PTAU file path\n", .{});
+                std.debug.print("Usage: zolt srs <ptau_file>\n", .{});
             }
         },
         .decode => {

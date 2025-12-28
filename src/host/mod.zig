@@ -410,6 +410,56 @@ pub fn Preprocessing(comptime F: type) type {
 
             return .{ .pk = pk, .vk = vk };
         }
+
+        /// Preprocess with an external SRS (e.g., loaded from a PTAU file)
+        ///
+        /// This is useful when you want to use a production SRS from a ceremony
+        /// instead of a mock SRS generated for testing.
+        pub fn preprocessWithSRS(
+            self: *Self,
+            program: *const Program,
+            srs: HyperKZG.SetupParams,
+        ) !struct { pk: ProvingKey, vk: VerifyingKey } {
+            // Create shared preprocessing for prover
+            const shared_pk = try SharedPreprocessing(F).init(self.allocator, program);
+            errdefer shared_pk.deinit();
+
+            // Create shared preprocessing for verifier (copy)
+            const shared_vk = try SharedPreprocessing(F).init(self.allocator, program);
+            errdefer shared_vk.deinit();
+
+            // Validate SRS is large enough for the trace
+            const padded_trace_length = blk: {
+                var len: usize = 1;
+                while (len < self.max_trace_length) len <<= 1;
+                break :blk len;
+            };
+            const log_chunk: usize = 8;
+            const required_size = (@as(usize, 1) << log_chunk) + padded_trace_length;
+
+            if (srs.max_degree < required_size) {
+                return error.SRSTooSmall;
+            }
+
+            // Create proving key with the provided SRS
+            const pk = ProvingKey{
+                .shared = shared_pk,
+                .srs = srs,
+                .max_trace_length = self.max_trace_length,
+                .allocator = self.allocator,
+            };
+
+            // Create verifying key (extract verification parameters from SRS)
+            const vk = VerifyingKey{
+                .shared = shared_vk,
+                .g1 = srs.g1,
+                .g2 = srs.g2,
+                .tau_g2 = srs.tau_g2,
+                .allocator = self.allocator,
+            };
+
+            return .{ .pk = pk, .vk = vk };
+        }
     };
 }
 

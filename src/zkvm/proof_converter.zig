@@ -396,22 +396,39 @@ pub fn ProofConverter(comptime F: type) type {
             }
 
             // Generate all remaining round polynomials with transcript integration
-            for (0..num_remaining_rounds) |_| {
-                const round_evals = outer_prover.computeRemainingRoundPoly() catch {
-                    // Fallback to zero polynomial
-                    const coeffs = try self.allocator.alloc(F, 3);
-                    @memset(coeffs, F.zero());
-                    try proof.compressed_polys.append(self.allocator, .{
-                        .coeffs_except_linear_term = coeffs,
-                        .allocator = self.allocator,
-                    });
-                    try challenges.append(self.allocator, F.zero());
-                    continue;
+            for (0..num_remaining_rounds) |round_num| {
+                // Use multiquadratic method for cycle rounds (not streaming round)
+                const evals: [4]F = blk: {
+                    if (round_num == 0) {
+                        break :blk outer_prover.computeRemainingRoundPoly() catch {
+                            // Fallback to zero polynomial
+                            const coeffs = try self.allocator.alloc(F, 3);
+                            @memset(coeffs, F.zero());
+                            try proof.compressed_polys.append(self.allocator, .{
+                                .coeffs_except_linear_term = coeffs,
+                                .allocator = self.allocator,
+                            });
+                            try challenges.append(self.allocator, F.zero());
+                            continue;
+                        };
+                    } else {
+                        break :blk outer_prover.computeRemainingRoundPolyMultiquadratic() catch {
+                            // Fallback to zero polynomial
+                            const coeffs = try self.allocator.alloc(F, 3);
+                            @memset(coeffs, F.zero());
+                            try proof.compressed_polys.append(self.allocator, .{
+                                .coeffs_except_linear_term = coeffs,
+                                .allocator = self.allocator,
+                            });
+                            try challenges.append(self.allocator, F.zero());
+                            continue;
+                        };
+                    }
                 };
 
                 // Convert evaluations [s(0), s(1), s(2), s(3)] to compressed coefficients [c0, c2, c3]
                 // The linear term c1 is recovered from the hint during verification
-                const compressed = poly_mod.UniPoly(F).evalsToCompressed(round_evals);
+                const compressed = poly_mod.UniPoly(F).evalsToCompressed(evals);
                 const coeffs = try self.allocator.alloc(F, 3);
                 coeffs[0] = compressed[0]; // c0 (constant)
                 coeffs[1] = compressed[1]; // c2 (quadratic)
@@ -438,7 +455,7 @@ pub fn ProofConverter(comptime F: type) type {
 
                 // Bind challenge and update claim
                 outer_prover.bindRemainingRoundChallenge(challenge) catch {};
-                outer_prover.updateClaim(round_evals, challenge);
+                outer_prover.updateClaim(evals, challenge);
             }
 
             return Stage1Result{ .challenges = challenges, .r0 = r0, .uni_skip_claim = uni_skip_claim, .allocator = self.allocator };

@@ -662,6 +662,153 @@ pub fn StreamingOuterProver(comptime F: type) type {
             return self.computeCycleAzBzProductForGroup(witness, 0);
         }
 
+        /// Compute Az and Bz separately for a single cycle (combined groups)
+        ///
+        /// Returns (Az_final, Bz_final) where:
+        /// Az_final = (1 - r_stream) * Az_g0 + r_stream * Az_g1
+        /// Bz_final = (1 - r_stream) * Bz_g0 + r_stream * Bz_g1
+        fn computeCycleAzBzSeparate(
+            self: *const Self,
+            witness: *const constraints.R1CSCycleInputs(F),
+            r_stream: F,
+        ) struct { az: F, bz: F } {
+            // Compute Az and Bz for both groups
+            var az_g0 = F.zero();
+            var bz_g0 = F.zero();
+            var az_g1 = F.zero();
+            var bz_g1 = F.zero();
+
+            // Group 0
+            for (0..FIRST_GROUP_SIZE) |i| {
+                const constraint_idx = constraints.FIRST_GROUP_INDICES[i];
+                const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
+                const condition = constraint.condition.evaluate(F, witness.asSlice());
+                const left = constraint.left.evaluate(F, witness.asSlice());
+                const right = constraint.right.evaluate(F, witness.asSlice());
+                const magnitude = left.sub(right);
+                az_g0 = az_g0.add(self.lagrange_evals_r0[i].mul(condition));
+                bz_g0 = bz_g0.add(self.lagrange_evals_r0[i].mul(magnitude));
+            }
+
+            // Group 1
+            const g2_size = @min(SECOND_GROUP_SIZE, FIRST_GROUP_SIZE);
+            for (0..g2_size) |i| {
+                const constraint_idx = constraints.SECOND_GROUP_INDICES[i];
+                const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
+                const condition = constraint.condition.evaluate(F, witness.asSlice());
+                const left = constraint.left.evaluate(F, witness.asSlice());
+                const right = constraint.right.evaluate(F, witness.asSlice());
+                const magnitude = left.sub(right);
+                az_g1 = az_g1.add(self.lagrange_evals_r0[i].mul(condition));
+                bz_g1 = bz_g1.add(self.lagrange_evals_r0[i].mul(magnitude));
+            }
+
+            // Combine using r_stream: final = g0 + r_stream * (g1 - g0)
+            const az_final = az_g0.add(r_stream.mul(az_g1.sub(az_g0)));
+            const bz_final = bz_g0.add(r_stream.mul(bz_g1.sub(bz_g0)));
+
+            return .{ .az = az_final, .bz = bz_final };
+        }
+
+        /// Compute remaining round polynomial using multiquadratic expansion
+        ///
+        /// This is the correct approach:
+        /// 1. Compute Az and Bz grids separately for each cycle
+        /// 2. Expand each to multiquadratic (f(∞) = f(1) - f(0))
+        /// 3. Multiply pointwise to get Az*Bz on multiquadratic grid
+        /// 4. Sum with eq weights to get t'(0) and t'(∞)
+        pub fn computeRemainingRoundPolyMultiquadratic(self: *Self) ![4]F {
+            const r_stream = self.r_stream orelse F.zero();
+
+            // Get eq tables for current window (just 1 variable at a time)
+            const eq_tables = self.split_eq.getWindowEqTables(
+                self.num_cycle_vars - self.current_round + 1,
+                1,
+            );
+
+            // We're summing over cycles: the current variable selects first/second half
+            const half: usize = self.padded_trace_len >> @intCast(self.current_round);
+
+            // Compute t'(0), t'(1), and t'(∞) where:
+            // t'(0) = Σ_{first half} eq * Az * Bz
+            // t'(1) = Σ_{second half} eq * Az * Bz
+            // t'(∞) = t'(1) - t'(0) for LINEAR part
+            //
+            // BUT for quadratic Az*Bz product, we need:
+            // t'(∞) = Σ (eq_weight * (Az_1 - Az_0) * (Bz_1 - Bz_0))
+            //       = Σ eq * Az' * Bz'
+            // where Az' and Bz' are the slopes
+
+            // Sum Az(0)*Bz(0), Az(1)*Bz(1), and the quadratic term
+            var t_00 = F.zero(); // Sum for first half (current var = 0)
+            var t_01 = F.zero(); // Sum for second half (current var = 1)
+
+            // Also track the slopes for quadratic coefficient
+            var t_slopes = F.zero(); // Sum of eq * Az_slope * Bz_slope
+
+            // First half (current variable = 0)
+            for (0..@min(half, self.cycle_witnesses.len)) |i| {
+                const eq_val = if (i < eq_tables.E_out.len) eq_tables.E_out[i] else F.zero();
+                const az_bz = self.computeCycleAzBzSeparate(&self.cycle_witnesses[i], r_stream);
+                t_00 = t_00.add(eq_val.mul(az_bz.az.mul(az_bz.bz)));
+            }
+
+            // Second half (current variable = 1)
+            for (0..@min(half, self.cycle_witnesses.len -| half)) |i| {
+                const cycle_idx = half + i;
+                if (cycle_idx >= self.cycle_witnesses.len) continue;
+
+                const eq_idx = i; // Index in eq table for second half
+                const eq_val = if (eq_idx < eq_tables.E_out.len) eq_tables.E_out[eq_idx] else F.zero();
+                const az_bz = self.computeCycleAzBzSeparate(&self.cycle_witnesses[cycle_idx], r_stream);
+                t_01 = t_01.add(eq_val.mul(az_bz.az.mul(az_bz.bz)));
+            }
+
+            // Compute the quadratic coefficient (slope * slope)
+            // For the product Az*Bz to be correct:
+            // (Az_0 + Az_slope * X)(Bz_0 + Bz_slope * X) =
+            //   Az_0*Bz_0 + (Az_0*Bz_slope + Az_slope*Bz_0)*X + Az_slope*Bz_slope*X^2
+            //
+            // The quadratic coefficient is Az_slope * Bz_slope
+            // We need to sum this weighted by eq
+            for (0..@min(half, self.cycle_witnesses.len)) |i| {
+                const eq_val = if (i < eq_tables.E_out.len) eq_tables.E_out[i] else F.zero();
+
+                // Get Az and Bz at positions 0 and 1 (in terms of the current variable)
+                const az_bz_0 = self.computeCycleAzBzSeparate(&self.cycle_witnesses[i], r_stream);
+
+                // For position 1, we need the same cycle but different evaluation
+                // But wait - each cycle is a different evaluation point, not different variable assignments!
+                // The "position 1" in the current variable means cycle index (half + i)
+                const cycle_idx_1 = half + i;
+                if (cycle_idx_1 < self.cycle_witnesses.len) {
+                    const az_bz_1 = self.computeCycleAzBzSeparate(&self.cycle_witnesses[cycle_idx_1], r_stream);
+
+                    // Slopes
+                    const az_slope = az_bz_1.az.sub(az_bz_0.az);
+                    const bz_slope = az_bz_1.bz.sub(az_bz_0.bz);
+
+                    // Quadratic coefficient contribution
+                    t_slopes = t_slopes.add(eq_val.mul(az_slope.mul(bz_slope)));
+                }
+            }
+
+            // The polynomial is quadratic: t(X) = t_00 + linear*X + t_slopes*X^2
+            // t(0) = t_00
+            // t(1) = t_01
+            // t(∞) = t_slopes (the quadratic coefficient)
+
+            // Use Gruen's method with correct quadratic coefficient
+            const previous_claim = self.current_claim;
+            const round_poly = self.split_eq.computeCubicRoundPoly(
+                t_00, // q_constant = t'(0)
+                t_slopes, // q_quadratic_coeff = the quadratic coefficient!
+                previous_claim,
+            );
+
+            return round_poly;
+        }
+
         /// Bind a remaining round challenge
         pub fn bindRemainingRoundChallenge(self: *Self, r: F) !void {
             // If this is the streaming round (current_round == 1), save r_stream

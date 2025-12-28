@@ -26,6 +26,7 @@ pub const instruction_lookups = @import("instruction_lookups/mod.zig");
 pub const jolt_device = @import("jolt_device.zig");
 pub const jolt_types = @import("jolt_types.zig");
 pub const jolt_serialization = @import("jolt_serialization.zig");
+pub const preprocessing = @import("preprocessing.zig");
 pub const proof_converter = @import("proof_converter.zig");
 pub const lasso = @import("lasso/mod.zig");
 pub const lookup_table = @import("lookup_table/mod.zig");
@@ -1884,3 +1885,9 @@ test "jolt verifier commitment opening - empty commitment" {
 //     defer proof.deinit();
 //     try std.testing.expect(proof.stage_proofs != null);
 // }
+
+// Include tests from submodules
+test {
+    // Force preprocessing tests to be included
+    _ = preprocessing;
+}

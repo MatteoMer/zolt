@@ -107,13 +107,18 @@ pub const Emulator = struct {
         self.lookup_trace.deinit();
     }
 
-    /// Load a program into memory
-    pub fn loadProgram(self: *Emulator, bytecode: []const u8) !void {
-        var addr: u64 = common.constants.RAM_START_ADDRESS;
+    /// Load a program into memory at a specific base address
+    pub fn loadProgramAt(self: *Emulator, bytecode: []const u8, base_address: u64) !void {
+        var addr: u64 = base_address;
         for (bytecode) |byte| {
             try self.ram.writeByte(addr, byte, 0);
             addr += 1;
         }
+    }
+
+    /// Load a program into memory at default RAM_START_ADDRESS
+    pub fn loadProgram(self: *Emulator, bytecode: []const u8) !void {
+        return self.loadProgramAt(bytecode, common.constants.RAM_START_ADDRESS);
     }
 
     /// Set input data
@@ -148,8 +153,12 @@ pub const Emulator = struct {
             rs2_value,
         );
 
-        // Execute
-        const result = try self.execute(decoded, rs1_value, rs2_value);
+        // Execute (may return error for ECALL)
+        const result = self.execute(decoded, rs1_value, rs2_value) catch |err| {
+            // Still count this cycle even if we're stopping on ECALL
+            self.state.cycle += 1;
+            return err;
+        };
 
         // Record trace step
         try self.trace.addStep(.{
@@ -174,8 +183,15 @@ pub const Emulator = struct {
     }
 
     /// Run until completion or max cycles
+    /// Stops on ECALL (normal program termination) or max cycles
     pub fn run(self: *Emulator) !void {
-        while (try self.step()) {}
+        while (true) {
+            const running = self.step() catch |err| switch (err) {
+                error.Ecall => return, // Normal termination
+                else => return err,
+            };
+            if (!running) return;
+        }
     }
 
     /// Fetch instruction from memory, handling compressed instructions
@@ -238,13 +254,17 @@ pub const Emulator = struct {
                 try self.registers.write(decoded.rd, result.rd_value);
             },
             .AUIPC => {
-                result.rd_value = @bitCast(@as(i64, @as(i32, @intCast(self.state.pc))) + decoded.imm);
+                // PC + sign-extended immediate - use wrapping arithmetic for high addresses
+                const pc_as_signed: i64 = @bitCast(self.state.pc);
+                result.rd_value = @bitCast(pc_as_signed +% decoded.imm);
                 try self.registers.write(decoded.rd, result.rd_value);
             },
             .JAL => {
                 // Return address: PC + 2 for compressed, PC + 4 for regular
                 result.rd_value = self.state.pc + pc_increment;
-                result.next_pc = @bitCast(@as(i64, @as(i32, @intCast(self.state.pc))) + decoded.imm);
+                // PC + sign-extended immediate - use wrapping arithmetic for high addresses
+                const pc_as_signed: i64 = @bitCast(self.state.pc);
+                result.next_pc = @bitCast(pc_as_signed +% decoded.imm);
                 try self.registers.write(decoded.rd, result.rd_value);
             },
             .JALR => {
@@ -441,6 +461,18 @@ pub const Emulator = struct {
                     };
                 }
                 try self.registers.write(decoded.rd, result.rd_value);
+            },
+            .SYSTEM => {
+                // ECALL and EBREAK
+                // funct12 field: ECALL = 0, EBREAK = 1
+                const funct12: u12 = @truncate((@as(u32, @bitCast(decoded.imm)) >> 0) & 0xFFF);
+                if (funct12 == 0) {
+                    // ECALL - system call / program exit
+                    // In bare metal context, this is typically used to exit the program
+                    // The return value is typically in a0 (x10)
+                    return error.Ecall;
+                }
+                // EBREAK and other system instructions - treat as NOP
             },
             else => {
                 // Unsupported instruction - treat as NOP

@@ -185,8 +185,8 @@ pub fn execute(
     // Set max cycles
     emulator.max_cycles = options.max_cycles;
 
-    // Load the program into memory
-    try emulator.loadProgram(program.bytecode);
+    // Load the program into memory at the correct base address
+    try emulator.loadProgramAt(program.bytecode, program.base_address);
 
     // Set the entry point
     emulator.state.pc = program.entry_point;

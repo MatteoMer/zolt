@@ -189,8 +189,8 @@ fn runEmulator(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles: ?
     var emulator = zolt.tracer.Emulator.init(allocator, &config);
     defer emulator.deinit();
 
-    // Load program into memory
-    try emulator.loadProgram(program.bytecode);
+    // Load program into memory at the correct base address
+    try emulator.loadProgramAt(program.bytecode, program.base_address);
 
     // Set entry point PC
     emulator.state.pc = program.entry_point;
@@ -222,7 +222,8 @@ fn runEmulator(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles: ?
         std.debug.print("\nFinal Register State:\n", .{});
         var i: u8 = 0;
         while (i < 32) : (i += 1) {
-            const val = emulator.state.registers[i];
+            // Read from the RegisterFile, not the VMState
+            const val = emulator.registers.read(i) catch 0;
             if (val != 0) { // Only show non-zero registers
                 const reg_name = switch (i) {
                     0 => "zero",
@@ -614,8 +615,8 @@ fn showTrace(allocator: std.mem.Allocator, elf_path: []const u8, max_steps_opt: 
     var emulator = zolt.tracer.Emulator.init(allocator, &config);
     defer emulator.deinit();
 
-    // Load program into memory
-    try emulator.loadProgram(program.bytecode);
+    // Load program into memory at the correct base address
+    try emulator.loadProgramAt(program.bytecode, program.base_address);
 
     // Set entry point PC
     emulator.state.pc = program.entry_point;

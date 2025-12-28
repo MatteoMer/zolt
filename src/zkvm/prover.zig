@@ -1081,7 +1081,7 @@ test "stage 5 sumcheck invariant: p(0) + p(1) = current_claim" {
     const tracer = @import("../tracer/mod.zig");
 
     // Create a simple trace with a few steps
-    var trace = tracer.Trace.init(allocator);
+    var trace = tracer.ExecutionTrace.init(allocator);
     defer trace.deinit();
 
     // Add 4 steps (for 2 rounds of sumcheck)
@@ -1093,9 +1093,12 @@ test "stage 5 sumcheck invariant: p(0) + p(1) = current_claim" {
             .rs2_value = 0,
             .rd_value = 0,
             .cycle = i,
-            .opcode = .ADD,
+            .memory_addr = null,
+            .memory_value = null,
+            .is_memory_write = false,
+            .next_pc = @intCast((i + 1) * 4),
         };
-        try trace.steps.append(step);
+        try trace.steps.append(allocator, step);
     }
 
     // Create a multi-stage prover
@@ -1134,7 +1137,7 @@ test "stage 6 sumcheck invariant: all zeros for valid trace" {
     const tracer = @import("../tracer/mod.zig");
 
     // Create a valid trace (all boolean flags should be 0 or 1)
-    var trace = tracer.Trace.init(allocator);
+    var trace = tracer.ExecutionTrace.init(allocator);
     defer trace.deinit();
 
     // Add 4 valid steps
@@ -1146,9 +1149,12 @@ test "stage 6 sumcheck invariant: all zeros for valid trace" {
             .rs2_value = 0,
             .rd_value = 0,
             .cycle = i,
-            .opcode = .ADD,
+            .memory_addr = null,
+            .memory_value = null,
+            .is_memory_write = false,
+            .next_pc = @intCast((i + 1) * 4),
         };
-        try trace.steps.append(step);
+        try trace.steps.append(allocator, step);
     }
 
     // Create a multi-stage prover

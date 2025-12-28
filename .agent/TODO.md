@@ -2,19 +2,21 @@
 
 ## Current Status (Jolt Compatibility Phase)
 
-**Project Status: WORKING ON STAGE 1 SUMCHECK VERIFICATION**
+**Project Status: STAGE 1 SUMCHECK - NON-ZERO POLYNOMIALS**
 
 ### Latest Progress (2024-12-28)
 
-1. ✅ **R1CS Constraints Satisfied** - All 19 constraints now pass (Az*Bz = 0)
-   - Fixed IsCompressed flag detection from trace
-   - Added `is_compressed` field to TraceStep
+1. ✅ **Fixed Az*Bz Computation** - Now computes (Σ L_i * az_i) * (Σ L_i * bz_i)
+   - Was incorrectly computing Σ L_i * (az_i * bz_i)
+   - Now produces non-zero products for valid traces
 
-2. ✅ **UniSkip Polynomial Correct** - All-zero polynomial (correct for satisfied constraints)
+2. ✅ **Fixed Evals-to-Coeffs Conversion** - Proper interpolation for compressed polys
+   - Added interpolateDegree3() and evalsToCompressed() functions
+   - Converts [s(0), s(1), s(2), s(3)] evaluations to [c0, c2, c3] coefficients
 
-3. ❌ **Stage 1 Sumcheck Verification** - Fails at BatchedSumcheck::verify
-   - Issue: Opening accumulator protocol mismatch
-   - The verifier's `cache_openings` expects specific evaluation relationships
+3. ❌ **Stage 1 Sumcheck Verification** - Still fails with non-zero polynomials
+   - Issue: Likely transcript challenge mismatch
+   - The streaming prover generates polynomials, but verification fails
 
 ---
 
@@ -49,11 +51,13 @@
 26. **Dory commitment matching Jolt**
 27. **IsCompressed detection from trace**
 28. **R1CS constraint satisfaction (Az*Bz = 0)**
+29. **Polynomial interpolation (evals → coeffs)**
+30. **Correct Az*Bz computation (product of sums, not sum of products)**
 
 ### In Progress 🔄
 - **Stage 1 Sumcheck Verification**
-  - Understanding opening accumulator protocol
-  - Matching prover-verifier relationship for opening claims
+  - Non-zero polynomial coefficients being generated
+  - Need to debug challenge derivation mismatch
 
 ### Pending ⏳
 - Stages 2-7 verification
@@ -63,35 +67,39 @@
 
 ## Current Issue: Stage 1 Sumcheck
 
-The verification passes UniSkip but fails during the batched sumcheck verification.
+The streaming outer prover now generates non-zero polynomial coefficients, but verification still fails.
 
-### Root Cause Analysis
+### Current Output
 
-Looking at Jolt's `BatchedSumcheck::verify`:
+Proof shows:
+- `round 0 coeffs: [10048208656370426965890505746999157938..., 3429443408412640508..., 10951947682441407657...]`
+- Non-zero Az*Bz values (e.g., 13877885662807731494)
+- PC = 2147483648 (0x80000000) - valid entry point
 
-1. **Input claim** = `accumulator.get_virtual_polynomial_opening(UnivariateSkip, SpartanOuter)`
-2. **Verification loop** computes `e = compressed_poly.eval_from_hint(&e, &r_i)`
-3. **After rounds**, calls `cache_openings(...)` then `expected_output_claim(...)`
+### Hypothesis
 
-The `cache_openings` function modifies the accumulator using sumcheck challenges.
-The `expected_output_claim` uses R1CS input evaluations from the accumulator.
+The transcript challenge derivation differs between Zolt's prover and Jolt's verifier:
+1. Zolt computes round polynomials using challenges from its transcript
+2. Jolt verifies using challenges from its transcript
+3. If these transcripts diverge, the final claim won't match
 
-For satisfied constraints (Az*Bz = 0):
-- `inner_sum_prod = 0` → `expected_output_claim = 0`
-- With all-zero polynomials and hint=0 → `output_claim = 0`
+### Possible Causes
 
-These should match, but something in the protocol is misaligned.
+1. **UniSkip polynomial transcription** - How coefficients are appended
+2. **Round polynomial format** - What gets appended to transcript each round
+3. **Byte ordering** - LE vs BE in transcript operations
+4. **Input claim value** - What the initial sumcheck claim should be
 
 ### Key Files
-- `/jolt-core/src/subprotocols/sumcheck.rs:200-252` - BatchedSumcheck::verify
-- `/jolt-core/src/zkvm/spartan/outer.rs:438-453` - cache_openings
-- `/jolt-core/src/zkvm/spartan/outer.rs:407-436` - expected_output_claim
+- `src/zkvm/proof_converter.zig` - generateStreamingOuterSumcheckProofWithTranscript
+- `src/zkvm/spartan/streaming_outer.zig` - computeRemainingRoundPoly
+- `/jolt-core/src/subprotocols/sumcheck.rs` - SumcheckInstanceProof::verify
 
 ---
 
 ## Test Status
 
-### Zolt: All 614 tests passing ✅
+### Zolt: All 618 tests passing ✅
 
 ### Jolt Cross-Verification
 
@@ -105,6 +113,22 @@ These should match, but something in the protocol is misaligned.
 
 ---
 
+## Next Steps
+
+1. **Debug transcript synchronization**
+   - Add logging to compare transcript state between prover and verifier
+   - Verify what gets appended to transcript and in what order
+
+2. **Verify initial claim**
+   - Should Stage 1 sumcheck start with claim = 0?
+   - Or should it use the UnivariateSkip output claim?
+
+3. **Check expected_output_claim computation**
+   - Ensure R1CS input evaluations match
+   - Verify Lagrange/eq polynomial evaluations
+
+---
+
 ## Summary
 
 **Serialization: COMPLETE** ✅
@@ -112,4 +136,5 @@ These should match, but something in the protocol is misaligned.
 **Dory Commitment: MATCHING** ✅
 **R1CS Constraints: SATISFIED** ✅
 **UniSkip Polynomial: CORRECT** ✅
-**Stage 1 Sumcheck: IN PROGRESS** 🔄
+**Streaming Outer Prover: GENERATES NON-ZERO POLYS** ✅
+**Stage 1 Sumcheck: VERIFICATION FAILING** 🔄

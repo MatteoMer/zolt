@@ -15,6 +15,12 @@
 //! - t1(Y) = Σ_{x} eq(tau, x) * Az(x,Y) * Bz(x,Y)
 //! - L(tau_high, Y) is the Lagrange kernel polynomial
 //!
+//! ## Integration with Evaluators
+//!
+//! The Az and Bz values are computed using the constraint evaluators from
+//! `r1cs/evaluators.zig`, which match Jolt's first-group and second-group
+//! constraint structure exactly.
+//!
 //! Reference: jolt-core/src/zkvm/spartan/outer.rs
 
 const std = @import("std");
@@ -22,7 +28,8 @@ const Allocator = std.mem.Allocator;
 
 const r1cs_mod = @import("../r1cs/mod.zig");
 const univariate_skip = r1cs_mod.univariate_skip;
-const constraints = @import("../r1cs/constraints.zig");
+const constraints = r1cs_mod.constraints;
+const evaluators = r1cs_mod.evaluators;
 const jolt_types = @import("../jolt_types.zig");
 
 /// Spartan outer prover with univariate skip optimization
@@ -58,6 +65,10 @@ pub fn SpartanOuterProver(comptime F: type) type {
         /// Round challenges collected
         challenges: std.ArrayListUnmanaged(F),
         allocator: Allocator,
+        /// Base window evaluations (computed from constraint evaluators)
+        base_window_evals: ?[DOMAIN_SIZE]F,
+        /// Whether we own the Az/Bz arrays (and need to free them)
+        owns_az_bz: bool,
 
         /// Initialize the prover from R1CS witness data
         pub fn init(
@@ -89,18 +100,99 @@ pub fn SpartanOuterProver(comptime F: type) type {
                 .current_len = size,
                 .challenges = .{},
                 .allocator = allocator,
+                .base_window_evals = null,
+                .owns_az_bz = false,
             };
         }
 
         pub fn deinit(self: *Self) void {
             self.allocator.free(self.working_vals);
             self.challenges.deinit(self.allocator);
+            // Free Az/Bz if we own them
+            if (self.owns_az_bz) {
+                self.allocator.free(self.Az);
+                self.allocator.free(self.Bz);
+                self.allocator.free(self.eq_evals);
+            }
+        }
+
+        /// Initialize from per-cycle witness data using the constraint evaluators
+        ///
+        /// This is the recommended initialization method as it uses the exact
+        /// constraint structure that matches Jolt's first-group evaluation.
+        pub fn initFromWitnesses(
+            allocator: Allocator,
+            cycle_witnesses: []const constraints.R1CSCycleInputs(F),
+            eq_evals: []const F,
+            tau: []const F,
+        ) !Self {
+            const num_cycles = cycle_witnesses.len;
+
+            // Create the univariate skip evaluator which computes Az*Bz products
+            // using the proper constraint structure
+            var skip_eval = try evaluators.UnivariateSkipEvaluator(F).init(allocator, cycle_witnesses);
+            defer skip_eval.deinit();
+
+            // Compute base window evaluations using the evaluator
+            const base_evals = skip_eval.computeBaseWindowEvals(eq_evals);
+
+            // Convert to full Az and Bz arrays for the standard prover interface
+            // Size = num_cycles * NUM_CONSTRAINTS (padded)
+            const size = num_cycles * NUM_CONSTRAINTS;
+            const Az = try allocator.alloc(F, size);
+            errdefer allocator.free(Az);
+            const Bz = try allocator.alloc(F, size);
+            errdefer allocator.free(Bz);
+
+            // Fill in Az and Bz from the per-cycle witnesses
+            for (0..num_cycles) |cycle| {
+                const witness = cycle_witnesses[cycle].asSlice();
+                const az_first = evaluators.AzFirstGroup(F).fromWitness(witness);
+                const bz_first = evaluators.BzFirstGroup(F).fromWitness(witness);
+
+                // Store the 10 first-group values
+                for (0..DOMAIN_SIZE) |i| {
+                    const idx = cycle * NUM_CONSTRAINTS + i;
+                    if (idx < size) {
+                        Az[idx] = az_first.values[i];
+                        Bz[idx] = bz_first.values[i];
+                    }
+                }
+
+                // Store the 9 second-group values
+                const az_second = evaluators.AzSecondGroup(F).fromWitness(witness);
+                const bz_second = evaluators.BzSecondGroup(F).fromWitness(witness);
+
+                for (0..evaluators.SECOND_GROUP_SIZE) |i| {
+                    const idx = cycle * NUM_CONSTRAINTS + DOMAIN_SIZE + i;
+                    if (idx < size) {
+                        Az[idx] = az_second.values[i];
+                        Bz[idx] = bz_second.values[i];
+                    }
+                }
+            }
+
+            // Copy eq_evals
+            const eq_copy = try allocator.alloc(F, eq_evals.len);
+            @memcpy(eq_copy, eq_evals);
+
+            // Initialize using the standard constructor
+            var self = try Self.init(allocator, Az, Bz, eq_copy, tau, num_cycles);
+
+            // Store the base window evals for use in univariate skip
+            self.base_window_evals = base_evals;
+            self.owns_az_bz = true;
+
+            return self;
         }
 
         /// Compute the univariate skip first-round polynomial
         ///
         /// This produces a degree-27 polynomial that encodes the sumcheck for
         /// the first variable, spanning all 19 R1CS constraints.
+        ///
+        /// If initialized via `initFromWitnesses`, uses the pre-computed base window
+        /// evaluations from the constraint evaluators.
         pub fn computeUniskipFirstRoundPoly(self: *Self) !univariate_skip.UniPoly(F) {
             // For univariate skip, we need to compute t1(y) at the extended evaluation points
             // t1(y) = Σ_{x} eq(tau, x) * Az(x, y) * Bz(x, y)
@@ -111,53 +203,35 @@ pub fn SpartanOuterProver(comptime F: type) type {
             // Get tau_high (last element of tau)
             const tau_high = if (self.tau.len > 0) self.tau[self.tau.len - 1] else F.zero();
 
-            // Compute extended evaluations
-            // For each extended point, we need to evaluate the constraint polynomial
-            var extended_evals: [DEGREE]F = undefined;
-            @memset(&extended_evals, F.zero());
+            // Use precomputed base window evals if available, otherwise compute
+            var base_evals: [DOMAIN_SIZE]F = undefined;
 
-            // Get the target points for extended evaluations
-            const targets = comptime univariate_skip.uniskipTargets(DOMAIN_SIZE, DEGREE);
-
-            // For each extended evaluation point
-            for (0..DEGREE) |j| {
-                const y_i64 = targets[j];
-                const y = if (y_i64 >= 0)
-                    F.fromU64(@intCast(y_i64))
-                else
-                    F.zero().sub(F.fromU64(@intCast(-y_i64)));
-
-                // Sum over all execution cycles
-                var sum = F.zero();
+            if (self.base_window_evals) |precomputed| {
+                // Use the precomputed evaluations from the constraint evaluators
+                base_evals = precomputed;
+            } else {
+                // Fallback: compute from stored Az/Bz values
+                @memset(&base_evals, F.zero());
                 for (0..self.num_cycles) |cycle| {
-                    // Evaluate constraint at (cycle, y)
-                    // This is a simplified version - for full compatibility,
-                    // we'd need to compute Az(x, y) * Bz(x, y) at the extended point
                     const eq_val = self.getEqValue(cycle);
-                    const az_bz = self.evaluateConstraintAtY(cycle, y);
-                    sum = sum.add(eq_val.mul(az_bz));
+                    for (0..DOMAIN_SIZE) |constraint_idx| {
+                        const idx = cycle * NUM_CONSTRAINTS + constraint_idx;
+                        if (idx < self.Az.len and idx < self.Bz.len) {
+                            const az_bz = self.Az[idx].mul(self.Bz[idx]);
+                            base_evals[constraint_idx] = base_evals[constraint_idx].add(eq_val.mul(az_bz));
+                        }
+                    }
                 }
-                extended_evals[j] = sum;
             }
 
-            // Compute base window evaluations (optional, can be null if all zeros)
-            var base_evals: [DOMAIN_SIZE]F = undefined;
-            @memset(&base_evals, F.zero());
+            // Compute extended evaluations using Lagrange extrapolation from base window
+            var extended_evals: [DEGREE]F = undefined;
+            const targets = comptime univariate_skip.uniskipTargets(DOMAIN_SIZE, DEGREE);
 
-            for (0..self.num_cycles) |cycle| {
-                const eq_val = self.getEqValue(cycle);
-                // For each constraint in the first group (10 constraints)
-                for (0..DOMAIN_SIZE) |constraint_idx| {
-                    const base_left: i64 = -@as(i64, @intCast((DOMAIN_SIZE - 1) / 2));
-                    const y_i64 = base_left + @as(i64, @intCast(constraint_idx));
-                    const y = if (y_i64 >= 0)
-                        F.fromU64(@intCast(y_i64))
-                    else
-                        F.zero().sub(F.fromU64(@intCast(-y_i64)));
-
-                    const az_bz = self.evaluateConstraintAtY(cycle, y);
-                    base_evals[constraint_idx] = base_evals[constraint_idx].add(eq_val.mul(az_bz));
-                }
+            for (0..DEGREE) |j| {
+                const y_i64 = targets[j];
+                // Use Lagrange interpolation from base window evaluations
+                extended_evals[j] = self.extrapolateFromBaseWindow(&base_evals, y_i64);
             }
 
             // Build the first-round polynomial
@@ -174,40 +248,51 @@ pub fn SpartanOuterProver(comptime F: type) type {
             );
         }
 
-        /// Get eq polynomial value for a given cycle
-        fn getEqValue(self: *const Self, cycle: usize) F {
-            const idx = cycle * NUM_CONSTRAINTS;
-            if (idx < self.eq_evals.len) {
-                return self.eq_evals[idx];
+        /// Extrapolate from base window evaluations to an extended point using Lagrange interpolation
+        fn extrapolateFromBaseWindow(self: *const Self, base_evals: *const [DOMAIN_SIZE]F, y_i64: i64) F {
+            _ = self;
+            const BASE_LEFT: i64 = -4; // -((DOMAIN_SIZE - 1) / 2)
+
+            // Lagrange interpolation: sum_i L_i(y) * base_evals[i]
+            // L_i(y) = prod_{j != i} (y - x_j) / (x_i - x_j)
+            var result = F.zero();
+            const y = fieldFromI64(F, y_i64);
+
+            for (0..DOMAIN_SIZE) |i| {
+                const x_i = fieldFromI64(F, BASE_LEFT + @as(i64, @intCast(i)));
+
+                var numerator = F.one();
+                var denominator = F.one();
+
+                for (0..DOMAIN_SIZE) |j| {
+                    if (i == j) continue;
+                    const x_j = fieldFromI64(F, BASE_LEFT + @as(i64, @intCast(j)));
+                    numerator = numerator.mul(y.sub(x_j));
+                    denominator = denominator.mul(x_i.sub(x_j));
+                }
+
+                const lagrange_coeff = numerator.mul(denominator.inv());
+                result = result.add(lagrange_coeff.mul(base_evals[i]));
             }
-            return F.zero();
+
+            return result;
         }
 
-        /// Evaluate Az * Bz at a given cycle and Y value
-        fn evaluateConstraintAtY(self: *const Self, cycle: usize, y: F) F {
-            // This is a simplified evaluation that should match Jolt's constraint structure
-            // In the full implementation, this would use the R1CS constraint definitions
-            // to compute Az(cycle, y) * Bz(cycle, y) for all 19 constraints
-
-            // For now, use a polynomial extrapolation from the stored Az/Bz values
-            const base_idx = cycle * NUM_CONSTRAINTS;
-
-            // Simple evaluation: sum contributions from nearby constraints
-            var sum = F.zero();
-            for (0..NUM_CONSTRAINTS) |i| {
-                const idx = base_idx + i;
-                if (idx < self.Az.len and idx < self.Bz.len) {
-                    // Weight by Lagrange basis polynomial
-                    const az = self.Az[idx];
-                    const bz = self.Bz[idx];
-                    sum = sum.add(az.mul(bz));
-                }
+        /// Convert i64 to field element (handling negatives)
+        fn fieldFromI64(val: i64) F {
+            if (val >= 0) {
+                return F.fromU64(@intCast(val));
+            } else {
+                return F.zero().sub(F.fromU64(@intCast(-val)));
             }
+        }
 
-            // Scale by y to create polynomial behavior
-            // This is simplified - real implementation needs proper Lagrange interpolation
-            _ = y; // Would use y for proper interpolation
-            return sum;
+        /// Get eq polynomial value for a given cycle
+        fn getEqValue(self: *const Self, cycle: usize) F {
+            if (cycle < self.eq_evals.len) {
+                return self.eq_evals[cycle];
+            }
+            return F.zero();
         }
 
         /// Create UniSkipFirstRoundProof from the computed polynomial

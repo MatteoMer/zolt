@@ -19,8 +19,18 @@ pub const UniformTerm = constraints.Term;
 pub const LC = constraints.LC;
 pub const UniformConstraint = constraints.UniformConstraint;
 pub const UNIFORM_CONSTRAINTS = constraints.UNIFORM_CONSTRAINTS;
+pub const FIRST_GROUP_INDICES = constraints.FIRST_GROUP_INDICES;
+pub const SECOND_GROUP_INDICES = constraints.SECOND_GROUP_INDICES;
 pub const R1CSCycleInputs = constraints.R1CSCycleInputs;
 pub const R1CSWitnessGenerator = constraints.R1CSWitnessGenerator;
+
+// Export constraint evaluators (for univariate skip)
+pub const evaluators = @import("evaluators.zig");
+pub const AzFirstGroup = evaluators.AzFirstGroup;
+pub const BzFirstGroup = evaluators.BzFirstGroup;
+pub const AzSecondGroup = evaluators.AzSecondGroup;
+pub const BzSecondGroup = evaluators.BzSecondGroup;
+pub const UnivariateSkipEvaluator = evaluators.UnivariateSkipEvaluator;
 
 // Export Jolt R1CS integration
 pub const jolt_r1cs = @import("jolt_r1cs.zig");

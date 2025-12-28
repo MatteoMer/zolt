@@ -243,3 +243,36 @@ Ended: 2025-12-28T01:52:40.297863
 Turns: 80
 Cost: $4.1164
 
+
+--- Iteration 19 ---
+Started: 2025-12-28T01:52:42
+Summary:
+Implemented batch opening proofs and Dory IPA.
+
+Key Changes:
+1. Batch Opening Proofs for HyperKZG:
+   - batchCommit() - commit to multiple polynomials at once
+   - BatchProof struct with quotient commitments and evaluations
+   - batchOpen() - generate batch opening proof for multiple polys at same point
+   - verifyBatchOpening() - verify with combined pairing check
+   - evaluateMultilinear() helper for polynomial evaluation
+
+2. Dory IPA Implementation:
+   - Full IPA opening proof with log(n) rounds
+   - L and R commitment computation at each round
+   - Vector folding (a' = a_lo + x*a_hi, G' = G_lo + x^{-1}*G_hi)
+   - Challenge derivation (deterministic for testing)
+   - Multilinear weight computation
+   - Enhanced setup with G and H generator vectors
+   - Basic verification with round structure checking
+
+Files Modified:
+- src/poly/commitment/mod.zig - Added batch opening and Dory IPA
+
+Commits:
+- Add batch opening proofs to HyperKZG
+- Implement Dory IPA-based opening proof
+- Update tracking files for iteration 19
+
+All 384 tests pass.
+

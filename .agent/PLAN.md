@@ -4,19 +4,24 @@
 
 ### Session Summary
 
-This iteration focused on cleanup and fixing the benchmark suite:
+This iteration focused on cleanup, fixing the benchmark suite, and adding a prove command to the CLI:
 
-1. **Code Cleanup**
+1. **CLI Improvements**
+   - Added `zolt prove <elf>` command (experimental)
+   - Demonstrates full proving pipeline: ELF load → preprocess → execute → prover init
+   - Shows all proof system components in action
+
+2. **Code Cleanup**
    - Removed outdated TODO comments that referenced completed work
    - Updated comments to reflect actual implementation status
 
-2. **Benchmark Fixes**
+3. **Benchmark Fixes**
    - Fixed benchmark to compile with Zig 0.15.2
    - Used volatile pointer pattern to prevent optimizer interference
    - Fixed MSM benchmark to use correct type instantiation
    - Added HyperKZG commitment benchmark
 
-3. **Performance Baseline (M1 Mac)**
+4. **Performance Baseline (M1 Mac)**
    - Field multiplication: 51.5 ns/op
    - Field inversion: 13.3 us/op
    - Batch inverse (1024): 70.7 us/op
@@ -263,6 +268,8 @@ SRS Utilities
 ## Commit History (Iteration 26)
 1. Clean up outdated TODO comments
 2. Fix benchmark to compile with Zig 0.15.2
+3. Update tracking files for iteration 26
+4. Add 'prove' command to CLI (experimental)
 
 ## Commit History (Iteration 25)
 1. Add snarkjs PTAU file format parser for production SRS loading

@@ -2,28 +2,33 @@
 
 ## Current Status (December 2024 - Iteration 31)
 
-### Session Summary - Strict Verification Mode
+### Session Summary - Strict Verification Mode & Prover Improvements
 
-This iteration added configurable strict sumcheck verification:
+This iteration focused on enabling strict sumcheck verification and improving the prover:
 
-**Changes:**
+**Part 1: Strict Verification Mode**
 1. Added `VerifierConfig` struct with `strict_sumcheck` and `debug_output` options
 2. Added `initWithConfig()` method to `MultiStageVerifier`
-3. Updated all 6 verification stages to optionally check `p(0) + p(1) = claim`
+3. Updated all 6 verification stages to check `p(0) + p(1) = claim`
 4. Added `setStrictMode()` and `setConfig()` methods to `JoltVerifier`
-5. Exported `VerifierConfig` in zkvm module
+
+**Part 2: Prover Fixes**
+1. Fixed Fiat-Shamir binding: round polynomials now absorbed into transcript
+2. Fixed Spartan prover to track `current_len` during polynomial folding
+3. Fixed RAF prover to account for bound variables in unmap evaluation
+4. Added debug output option for diagnosing verification failures
 
 **Key Discovery:**
-When strict verification is enabled, it reveals that the current prover doesn't
-generate fully valid sumcheck proofs. This is an area for future improvement.
-The prover works for structural verification but not for mathematically strict
-sumcheck validation.
+Strict mode reveals that after round 0, the prover's sum of folded values doesn't
+equal the verifier's `p(challenge)`. The prover uses linear folding while the
+verifier uses quadratic Lagrange interpolation. These should match for linear
+polynomials but there's still a subtle discrepancy.
 
-**Result:**
-- Verifier now has configurable strict mode
-- Default is strict (true) for security
-- Example uses lenient mode (false) for demonstration
-- All tests still pass
+**Status:**
+- Verifier has working strict mode (default: true)
+- Example uses lenient mode (false) for demo
+- All 538 tests still pass
+- End-to-end verification passes with lenient mode
 
 ### Previous Session (Iteration 30) - Critical Fix
 

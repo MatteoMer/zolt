@@ -569,7 +569,7 @@ pub fn JoltProver(comptime F: type) type {
             var tau = try self.allocator.alloc(F, num_rows_bits);
             defer self.allocator.free(tau);
             for (0..num_rows_bits) |i| {
-                tau[num_rows_bits - 1 - i] = transcript.challengeScalar();
+                tau[i] = transcript.challengeScalar();
             }
 
             // Convert to Jolt-compatible format with transcript integration
@@ -762,7 +762,7 @@ pub fn JoltProver(comptime F: type) type {
             var tau = try self.allocator.alloc(F, num_rows_bits);
             defer self.allocator.free(tau);
             for (0..num_rows_bits) |i| {
-                tau[num_rows_bits - 1 - i] = transcript.challengeScalar();
+                tau[i] = transcript.challengeScalar();
             }
 
             // Convert to Jolt-compatible format with transcript integration
@@ -927,7 +927,7 @@ pub fn JoltProver(comptime F: type) type {
             var tau = try self.allocator.alloc(F, num_rows_bits);
             defer self.allocator.free(tau);
             for (0..num_rows_bits) |i| {
-                tau[num_rows_bits - 1 - i] = transcript.challengeScalar();
+                tau[i] = transcript.challengeScalar();
             }
 
             // Convert to Jolt-compatible format with transcript integration

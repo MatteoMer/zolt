@@ -548,3 +548,172 @@ test "arkworks serializer: uni skip first round proof" {
     // Expected: 8 (len) + 4 * 32 (coeffs) = 136
     try testing.expectEqual(@as(usize, 136), serializer.bytes().len);
 }
+
+// =============================================================================
+// End-to-End JoltProof Serialization Test
+// =============================================================================
+
+test "e2e: JoltProof serialization matches Jolt format" {
+    // This test creates a complete JoltProof and serializes it,
+    // verifying the output structure matches Jolt's expectations.
+
+    const F = BN254Scalar;
+
+    // Use simple dummy types for commitment and proof
+    const DummyCommitment = struct {
+        value: u64,
+        fn toBytes(self: @This()) [32]u8 {
+            var buf: [32]u8 = [_]u8{0} ** 32;
+            std.mem.writeInt(u64, buf[0..8], self.value, .little);
+            return buf;
+        }
+    };
+    const DummyProof = struct {
+        data: [32]u8,
+    };
+
+    // Create a JoltProof with some test data
+    var jolt_proof = jolt_types.JoltProof(F, DummyCommitment, DummyProof).init(testing.allocator);
+    defer jolt_proof.deinit();
+
+    // Set configuration
+    jolt_proof.trace_length = 16;
+    jolt_proof.ram_K = 1024;
+    jolt_proof.bytecode_K = 65536;
+    jolt_proof.log_k_chunk = 10;
+    jolt_proof.lookups_ra_virtual_log_k_chunk = 8;
+
+    // Add some commitments
+    try jolt_proof.commitments.append(testing.allocator, .{ .value = 123 });
+    try jolt_proof.commitments.append(testing.allocator, .{ .value = 456 });
+
+    // Add some opening claims
+    try jolt_proof.opening_claims.insert(
+        .{ .UntrustedAdvice = .SpartanOuter },
+        F.fromU64(100),
+    );
+    try jolt_proof.opening_claims.insert(
+        .{ .Virtual = .{ .poly = .Product, .sumcheck_id = .SpartanOuter } },
+        F.fromU64(200),
+    );
+
+    // Add round polynomials to stage 1
+    const coeffs1 = [_]F{ F.fromU64(1), F.fromU64(2), F.fromU64(3) };
+    try jolt_proof.stage1_sumcheck_proof.addRoundPoly(&coeffs1);
+
+    // Create UniSkip for stage 1
+    jolt_proof.stage1_uni_skip_first_round_proof = try jolt_types.UniSkipFirstRoundProof(F).init(
+        testing.allocator,
+        &coeffs1,
+    );
+
+    // Add round polynomials to other stages
+    const coeffs2 = [_]F{ F.fromU64(10), F.fromU64(20) };
+    try jolt_proof.stage2_sumcheck_proof.addRoundPoly(&coeffs2);
+    try jolt_proof.stage3_sumcheck_proof.addRoundPoly(&coeffs2);
+    try jolt_proof.stage4_sumcheck_proof.addRoundPoly(&coeffs2);
+    try jolt_proof.stage5_sumcheck_proof.addRoundPoly(&coeffs2);
+    try jolt_proof.stage6_sumcheck_proof.addRoundPoly(&coeffs2);
+    try jolt_proof.stage7_sumcheck_proof.addRoundPoly(&coeffs2);
+
+    // Create UniSkip for stage 2
+    jolt_proof.stage2_uni_skip_first_round_proof = try jolt_types.UniSkipFirstRoundProof(F).init(
+        testing.allocator,
+        &coeffs2,
+    );
+
+    // Serialize the proof
+    var serializer = ArkworksSerializer(F).init(testing.allocator);
+    defer serializer.deinit();
+
+    // Define serialization functions for dummy types
+    const writeCommitment = struct {
+        fn f(ser: *ArkworksSerializer(F), c: DummyCommitment) !void {
+            try ser.writeBytes(&c.toBytes());
+        }
+    }.f;
+
+    const writeProof = struct {
+        fn f(ser: *ArkworksSerializer(F), p: DummyProof) !void {
+            try ser.writeBytes(&p.data);
+        }
+    }.f;
+
+    try serializer.writeJoltProof(
+        DummyCommitment,
+        DummyProof,
+        &jolt_proof,
+        writeCommitment,
+        writeProof,
+    );
+
+    const bytes = serializer.bytes();
+
+    // Verify the serialized output has reasonable size
+    // Minimum expected:
+    // - Opening claims: 8 (len) + 2 * (1 + 32) = 74
+    // - Commitments: 8 (len) + 2 * 32 = 72
+    // - UniSkip proofs: 2 * (8 + n*32)
+    // - 7 sumcheck proofs: each has length prefix + polynomials
+    // - Config: 5 * 8 = 40
+    try testing.expect(bytes.len > 200);
+
+    // Verify the first 8 bytes are the opening claims length (2)
+    const claims_len = std.mem.readInt(u64, bytes[0..8], .little);
+    try testing.expectEqual(@as(u64, 2), claims_len);
+
+    // Skip past the opening claims and verify commitments length
+    // Claims: 2 entries * (1 + 32) = 66 bytes, plus 8 byte length prefix
+    const commitments_offset: usize = 8 + 66;
+    const commitments_len = std.mem.readInt(u64, bytes[commitments_offset..][0..8], .little);
+    try testing.expectEqual(@as(u64, 2), commitments_len);
+}
+
+test "e2e: empty JoltProof serialization" {
+    // Test that an empty proof serializes correctly
+    const F = BN254Scalar;
+    const DummyCommitment = struct { value: u64 };
+    const DummyProof = struct { data: [32]u8 };
+
+    var jolt_proof = jolt_types.JoltProof(F, DummyCommitment, DummyProof).init(testing.allocator);
+    defer jolt_proof.deinit();
+
+    // Set minimum configuration
+    jolt_proof.trace_length = 0;
+    jolt_proof.ram_K = 0;
+    jolt_proof.bytecode_K = 0;
+    jolt_proof.log_k_chunk = 0;
+    jolt_proof.lookups_ra_virtual_log_k_chunk = 0;
+
+    var serializer = ArkworksSerializer(F).init(testing.allocator);
+    defer serializer.deinit();
+
+    const writeCommitment = struct {
+        fn f(_: *ArkworksSerializer(F), _: DummyCommitment) !void {}
+    }.f;
+    const writeProof = struct {
+        fn f(_: *ArkworksSerializer(F), _: DummyProof) !void {}
+    }.f;
+
+    try serializer.writeJoltProof(
+        DummyCommitment,
+        DummyProof,
+        &jolt_proof,
+        writeCommitment,
+        writeProof,
+    );
+
+    const bytes = serializer.bytes();
+
+    // Empty proof should still have:
+    // - Opening claims length (8 bytes, value 0)
+    // - Commitments length (8 bytes, value 0)
+    // - 7 sumcheck proofs with 0 polynomials each (7 * 8 = 56 bytes)
+    // - Optional proofs (5 bytes for None markers)
+    // - Config (5 * 8 = 40 bytes)
+    try testing.expect(bytes.len >= 8 + 8 + 56 + 5 + 40);
+
+    // First 8 bytes should be 0 (empty opening claims)
+    const claims_len = std.mem.readInt(u64, bytes[0..8], .little);
+    try testing.expectEqual(@as(u64, 0), claims_len);
+}

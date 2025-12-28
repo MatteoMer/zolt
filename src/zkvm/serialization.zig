@@ -1381,9 +1381,17 @@ pub fn deserializeProofFromJson(comptime F: type, allocator: Allocator, data: []
     const sc_final_eval = try Reader.parseFieldElement(sc_final_eval_hex);
 
     const eval_point_len = try Reader.getInt(r1cs_obj, "eval_point_len");
+
+    // Allocate separate arrays for eval_point and final_point to avoid double-free
     const eval_point = try allocator.alloc(F, eval_point_len);
     errdefer allocator.free(eval_point);
     for (eval_point) |*e| {
+        e.* = F.zero();
+    }
+
+    const final_point = try allocator.alloc(F, eval_point_len);
+    errdefer allocator.free(final_point);
+    for (final_point) |*e| {
         e.* = F.zero();
     }
 
@@ -1396,7 +1404,7 @@ pub fn deserializeProofFromJson(comptime F: type, allocator: Allocator, data: []
         .sumcheck_proof = .{
             .claim = sc_claim,
             .rounds = sc_rounds,
-            .final_point = eval_point,
+            .final_point = final_point,
             .final_eval = sc_final_eval,
             .allocator = allocator,
         },

@@ -22,6 +22,7 @@ pub fn main() !void {
     try benchCommitment();
     try benchEmulator();
     try benchProver();
+    try benchProofSize();
     try benchVerifier();
 
     std.debug.print("\nBenchmarks complete.\n", .{});
@@ -470,6 +471,111 @@ fn benchProver() !void {
 
         std.debug.print("  Loop (14 steps):    {d:>8.1} ms/op\n", .{ms_per_op});
     }
+
+    std.debug.print("\n", .{});
+}
+
+fn benchProofSize() !void {
+    std.debug.print("Proof Size:\n", .{});
+
+    const F = zolt.field.BN254Scalar;
+    const allocator = std.heap.page_allocator;
+    const common = zolt.common;
+    const tracer = zolt.tracer;
+    const prover = zolt.zkvm.prover;
+    const transcripts = zolt.transcripts;
+
+    // Simple program: addi x1, x0, 10; ecall
+    const simple_program = [_]u8{
+        0x93, 0x00, 0xa0, 0x00, // addi x1, x0, 10
+        0x73, 0x00, 0x00, 0x00, // ecall
+    };
+
+    const config = common.MemoryConfig{ .program_size = 64 };
+
+    // Run emulation to get trace
+    var emu = tracer.Emulator.init(allocator, &config);
+    defer emu.deinit();
+    emu.max_cycles = 8;
+    try emu.loadProgram(&simple_program);
+    try emu.run();
+
+    const log_k: usize = 16;
+
+    // Generate proof
+    var multi_stage = prover.MultiStageProver(F).init(
+        allocator,
+        &emu.trace,
+        &emu.ram.trace,
+        &emu.lookup_trace,
+        log_k,
+        common.constants.RAM_START_ADDRESS,
+    );
+    defer multi_stage.deinit();
+
+    var prover_transcript = try transcripts.Transcript(F).init(allocator, "bench");
+    defer prover_transcript.deinit();
+
+    const proof = multi_stage.prove(&prover_transcript) catch {
+        std.debug.print("  Proof generation failed\n", .{});
+        return;
+    };
+
+    const size = proof.proofSize();
+    const size_bytes = proof.proofSizeBytes();
+    const size_kb = @as(f64, @floatFromInt(size_bytes)) / 1024.0;
+
+    std.debug.print("  Simple (2 steps):\n", .{});
+    std.debug.print("    Field elements: {d}\n", .{size.total_elements});
+    std.debug.print("    Round polys:    {d} (coeffs: {d})\n", .{ size.round_polys, size.poly_coeffs });
+    std.debug.print("    Challenges:     {d}\n", .{size.challenges});
+    std.debug.print("    Claims:         {d}\n", .{size.claims});
+    std.debug.print("    Size:           {d:.2} KB\n", .{size_kb});
+
+    // Now with a loop program
+    var emu2 = tracer.Emulator.init(allocator, &config);
+    defer emu2.deinit();
+    emu2.max_cycles = 32;
+
+    const loop_program = [_]u8{
+        0x93, 0x00, 0x40, 0x00, // addi x1, x0, 4
+        0x13, 0x01, 0x00, 0x00, // addi x2, x0, 0
+        0x33, 0x01, 0x11, 0x00, // add x2, x2, x1
+        0x93, 0x80, 0xf0, 0xff, // addi x1, x1, -1
+        0xe3, 0x9c, 0x00, 0xfe, // bne x1, x0, -8
+        0x73, 0x00, 0x00, 0x00, // ecall
+    };
+    try emu2.loadProgram(&loop_program);
+    try emu2.run();
+
+    var multi_stage2 = prover.MultiStageProver(F).init(
+        allocator,
+        &emu2.trace,
+        &emu2.ram.trace,
+        &emu2.lookup_trace,
+        log_k,
+        common.constants.RAM_START_ADDRESS,
+    );
+    defer multi_stage2.deinit();
+
+    var prover_transcript2 = try transcripts.Transcript(F).init(allocator, "bench");
+    defer prover_transcript2.deinit();
+
+    const proof2 = multi_stage2.prove(&prover_transcript2) catch {
+        std.debug.print("  Loop proof generation failed\n", .{});
+        return;
+    };
+
+    const size2 = proof2.proofSize();
+    const size_bytes2 = proof2.proofSizeBytes();
+    const size_kb2 = @as(f64, @floatFromInt(size_bytes2)) / 1024.0;
+
+    std.debug.print("  Loop (14 steps):\n", .{});
+    std.debug.print("    Field elements: {d}\n", .{size2.total_elements});
+    std.debug.print("    Round polys:    {d} (coeffs: {d})\n", .{ size2.round_polys, size2.poly_coeffs });
+    std.debug.print("    Challenges:     {d}\n", .{size2.challenges});
+    std.debug.print("    Claims:         {d}\n", .{size2.claims});
+    std.debug.print("    Size:           {d:.2} KB\n", .{size_kb2});
 
     std.debug.print("\n", .{});
 }

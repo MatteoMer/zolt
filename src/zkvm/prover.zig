@@ -156,6 +156,47 @@ pub fn JoltStageProofs(comptime F: type) type {
                 p.deinit();
             }
         }
+
+        /// Calculate total proof size in field elements
+        /// Returns: { total_field_elements, round_polys_count, total_poly_coeffs }
+        pub fn proofSize(self: *const Self) struct { total_elements: usize, round_polys: usize, poly_coeffs: usize, challenges: usize, claims: usize } {
+            var total_elements: usize = 0;
+            var round_polys: usize = 0;
+            var poly_coeffs: usize = 0;
+            var challenges: usize = 0;
+            var claims: usize = 0;
+
+            for (self.stage_proofs) |stage| {
+                // Count round polynomial coefficients
+                for (stage.round_polys.items) |poly| {
+                    poly_coeffs += poly.len;
+                    total_elements += poly.len;
+                }
+                round_polys += stage.round_polys.items.len;
+
+                // Count challenges (these are typically derived, but included for completeness)
+                challenges += stage.challenges.items.len;
+                total_elements += stage.challenges.items.len;
+
+                // Count final claims
+                claims += stage.final_claims.items.len;
+                total_elements += stage.final_claims.items.len;
+            }
+
+            return .{
+                .total_elements = total_elements,
+                .round_polys = round_polys,
+                .poly_coeffs = poly_coeffs,
+                .challenges = challenges,
+                .claims = claims,
+            };
+        }
+
+        /// Calculate proof size in bytes (assuming 32-byte field elements)
+        pub fn proofSizeBytes(self: *const Self) usize {
+            const size = self.proofSize();
+            return size.total_elements * 32; // BN254 scalar is 254 bits, fits in 32 bytes
+        }
     };
 }
 

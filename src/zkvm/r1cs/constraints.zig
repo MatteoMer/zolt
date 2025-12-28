@@ -201,9 +201,21 @@ pub const UniformConstraint = struct {
     }
 };
 
-/// All 19 uniform R1CS constraints for Jolt
+/// All 19 uniform R1CS constraints for Jolt (Exact Match)
+///
+/// These constraints are ordered exactly as in Jolt's constraints.rs.
+/// The constraint form is: Az * Bz = 0, where Az = condition and Bz = left - right.
+///
+/// FIRST GROUP (constraints 0-9, indices in base univariate skip domain {-4..5}):
+/// - Boolean guards, Bz fits in ~64 bits
+///
+/// SECOND GROUP (constraints 10-18, separate handling):
+/// - Mixed Az types, Bz can be ~128-160 bits
 pub const UNIFORM_CONSTRAINTS = [_]UniformConstraint{
-    // 1. RAM address = Rs1 + Imm if Load or Store
+    // =========================================================================
+    // CONSTRAINT 0: RamAddrEqRs1PlusImmIfLoadStore (SECOND GROUP index 0)
+    // =========================================================================
+    // if { Load + Store } => ( RamAddress ) == ( Rs1Value + Imm )
     .{
         .condition = blk: {
             var lc = LC.zero();
@@ -222,28 +234,90 @@ pub const UNIFORM_CONSTRAINTS = [_]UniformConstraint{
         },
     },
 
-    // 2. RAM read value = RD write value if Load
+    // =========================================================================
+    // CONSTRAINT 1: RamAddrEqZeroIfNotLoadStore (FIRST GROUP index 0)
+    // =========================================================================
+    // if { 1 - Load - Store } => ( RamAddress ) == ( 0 )
+    .{
+        .condition = blk: {
+            var lc = LC.one();
+            lc.terms[0] = .{ .input_index = .FlagLoad, .coeff = -1 };
+            lc.terms[1] = .{ .input_index = .FlagStore, .coeff = -1 };
+            lc.len = 2;
+            break :blk lc;
+        },
+        .left = LC.fromInput(.RamAddress),
+        .right = LC.zero(),
+    },
+
+    // =========================================================================
+    // CONSTRAINT 2: RamReadEqRamWriteIfLoad (FIRST GROUP index 1)
+    // =========================================================================
+    // if { Load } => ( RamReadValue ) == ( RamWriteValue )
+    .{
+        .condition = LC.fromInput(.FlagLoad),
+        .left = LC.fromInput(.RamReadValue),
+        .right = LC.fromInput(.RamWriteValue),
+    },
+
+    // =========================================================================
+    // CONSTRAINT 3: RamReadEqRdWriteIfLoad (FIRST GROUP index 2)
+    // =========================================================================
+    // if { Load } => ( RamReadValue ) == ( RdWriteValue )
     .{
         .condition = LC.fromInput(.FlagLoad),
         .left = LC.fromInput(.RamReadValue),
         .right = LC.fromInput(.RdWriteValue),
     },
 
-    // 3. Rs2 value = RAM write value if Store
+    // =========================================================================
+    // CONSTRAINT 4: Rs2EqRamWriteIfStore (FIRST GROUP index 3)
+    // =========================================================================
+    // if { Store } => ( Rs2Value ) == ( RamWriteValue )
     .{
         .condition = LC.fromInput(.FlagStore),
         .left = LC.fromInput(.Rs2Value),
         .right = LC.fromInput(.RamWriteValue),
     },
 
-    // 4. Left lookup operand = left instruction input if Add
+    // =========================================================================
+    // CONSTRAINT 5: LeftLookupZeroUnlessAddSubMul (FIRST GROUP index 4)
+    // =========================================================================
+    // if { AddOperands + SubtractOperands + MultiplyOperands } => ( LeftLookupOperand ) == ( 0 )
     .{
-        .condition = LC.fromInput(.FlagAddOperands),
+        .condition = blk: {
+            var lc = LC.zero();
+            lc.terms[0] = .{ .input_index = .FlagAddOperands, .coeff = 1 };
+            lc.terms[1] = .{ .input_index = .FlagSubtractOperands, .coeff = 1 };
+            lc.terms[2] = .{ .input_index = .FlagMultiplyOperands, .coeff = 1 };
+            lc.len = 3;
+            break :blk lc;
+        },
+        .left = LC.fromInput(.LeftLookupOperand),
+        .right = LC.zero(),
+    },
+
+    // =========================================================================
+    // CONSTRAINT 6: LeftLookupEqLeftInputOtherwise (FIRST GROUP index 5)
+    // =========================================================================
+    // if { 1 - AddOperands - SubtractOperands - MultiplyOperands } => ( LeftLookupOperand ) == ( LeftInstructionInput )
+    .{
+        .condition = blk: {
+            var lc = LC.one();
+            lc.terms[0] = .{ .input_index = .FlagAddOperands, .coeff = -1 };
+            lc.terms[1] = .{ .input_index = .FlagSubtractOperands, .coeff = -1 };
+            lc.terms[2] = .{ .input_index = .FlagMultiplyOperands, .coeff = -1 };
+            lc.len = 3;
+            break :blk lc;
+        },
         .left = LC.fromInput(.LeftLookupOperand),
         .right = LC.fromInput(.LeftInstructionInput),
     },
 
-    // 5. Right lookup operand = left + right instruction input if Add
+    // =========================================================================
+    // CONSTRAINT 7: RightLookupAdd (SECOND GROUP index 1)
+    // =========================================================================
+    // if { AddOperands } => ( RightLookupOperand ) == ( LeftInstructionInput + RightInstructionInput )
     .{
         .condition = LC.fromInput(.FlagAddOperands),
         .left = LC.fromInput(.RightLookupOperand),
@@ -256,7 +330,11 @@ pub const UNIFORM_CONSTRAINTS = [_]UniformConstraint{
         },
     },
 
-    // 6. Right lookup operand = left - right instruction input if Subtract
+    // =========================================================================
+    // CONSTRAINT 8: RightLookupSub (SECOND GROUP index 2)
+    // =========================================================================
+    // if { SubtractOperands } => ( RightLookupOperand ) == ( LeftInstructionInput - RightInstructionInput + 2^64 )
+    // Note: The 2^64 offset is for two's complement representation
     .{
         .condition = LC.fromInput(.FlagSubtractOperands),
         .left = LC.fromInput(.RightLookupOperand),
@@ -265,38 +343,111 @@ pub const UNIFORM_CONSTRAINTS = [_]UniformConstraint{
             lc.terms[0] = .{ .input_index = .LeftInstructionInput, .coeff = 1 };
             lc.terms[1] = .{ .input_index = .RightInstructionInput, .coeff = -1 };
             lc.len = 2;
+            // 2^64 = 18446744073709551616 (too large for i128, handled separately)
             break :blk lc;
         },
     },
 
-    // 7. Right lookup operand = product if Multiply
+    // =========================================================================
+    // CONSTRAINT 9: RightLookupEqProductIfMul (SECOND GROUP index 3)
+    // =========================================================================
+    // if { MultiplyOperands } => ( RightLookupOperand ) == ( Product )
     .{
         .condition = LC.fromInput(.FlagMultiplyOperands),
         .left = LC.fromInput(.RightLookupOperand),
         .right = LC.fromInput(.Product),
     },
 
-    // 8. RD write value = lookup output if WriteLookupOutputToRD
+    // =========================================================================
+    // CONSTRAINT 10: RightLookupEqRightInputOtherwise (SECOND GROUP index 4)
+    // =========================================================================
+    // if { 1 - AddOperands - SubtractOperands - MultiplyOperands - Advice } => ( RightLookupOperand ) == ( RightInstructionInput )
+    .{
+        .condition = blk: {
+            var lc = LC.one();
+            lc.terms[0] = .{ .input_index = .FlagAddOperands, .coeff = -1 };
+            lc.terms[1] = .{ .input_index = .FlagSubtractOperands, .coeff = -1 };
+            lc.terms[2] = .{ .input_index = .FlagMultiplyOperands, .coeff = -1 };
+            lc.terms[3] = .{ .input_index = .FlagAdvice, .coeff = -1 };
+            lc.len = 4;
+            break :blk lc;
+        },
+        .left = LC.fromInput(.RightLookupOperand),
+        .right = LC.fromInput(.RightInstructionInput),
+    },
+
+    // =========================================================================
+    // CONSTRAINT 11: AssertLookupOne (FIRST GROUP index 6)
+    // =========================================================================
+    // if { Assert } => ( LookupOutput ) == ( 1 )
+    .{
+        .condition = LC.fromInput(.FlagAssert),
+        .left = LC.fromInput(.LookupOutput),
+        .right = LC.one(),
+    },
+
+    // =========================================================================
+    // CONSTRAINT 12: RdWriteEqLookupIfWriteLookupToRd (SECOND GROUP index 5)
+    // =========================================================================
+    // if { WriteLookupOutputToRD } => ( RdWriteValue ) == ( LookupOutput )
     .{
         .condition = LC.fromInput(.WriteLookupOutputToRD),
         .left = LC.fromInput(.RdWriteValue),
         .right = LC.fromInput(.LookupOutput),
     },
 
-    // 9. RD write value = next PC if WritePCtoRD (JAL/JALR)
+    // =========================================================================
+    // CONSTRAINT 13: RdWriteEqPCPlusConstIfWritePCtoRD (SECOND GROUP index 6)
+    // =========================================================================
+    // if { WritePCtoRD } => ( RdWriteValue ) == ( UnexpandedPC + 4 - 2*IsCompressed )
     .{
         .condition = LC.fromInput(.WritePCtoRD),
         .left = LC.fromInput(.RdWriteValue),
-        .right = LC.fromInput(.NextPC),
+        .right = blk: {
+            var lc = LC.zero();
+            lc.terms[0] = .{ .input_index = .UnexpandedPC, .coeff = 1 };
+            lc.terms[1] = .{ .input_index = .FlagIsCompressed, .coeff = -2 };
+            lc.len = 2;
+            lc.constant = 4;
+            break :blk lc;
+        },
     },
 
-    // 10. Next unexpanded PC = unexpanded PC + 4 if not Jump/Branch (normal case)
-    // Adjusted for compressed instructions and DoNotUpdate flag
+    // =========================================================================
+    // CONSTRAINT 14: NextUnexpPCEqLookupIfShouldJump (FIRST GROUP index 7)
+    // =========================================================================
+    // if { ShouldJump } => ( NextUnexpandedPC ) == ( LookupOutput )
+    .{
+        .condition = LC.fromInput(.ShouldJump),
+        .left = LC.fromInput(.NextUnexpandedPC),
+        .right = LC.fromInput(.LookupOutput),
+    },
+
+    // =========================================================================
+    // CONSTRAINT 15: NextUnexpPCEqPCPlusImmIfShouldBranch (SECOND GROUP index 7)
+    // =========================================================================
+    // if { ShouldBranch } => ( NextUnexpandedPC ) == ( UnexpandedPC + Imm )
+    .{
+        .condition = LC.fromInput(.ShouldBranch),
+        .left = LC.fromInput(.NextUnexpandedPC),
+        .right = blk: {
+            var lc = LC.zero();
+            lc.terms[0] = .{ .input_index = .UnexpandedPC, .coeff = 1 };
+            lc.terms[1] = .{ .input_index = .Imm, .coeff = 1 };
+            lc.len = 2;
+            break :blk lc;
+        },
+    },
+
+    // =========================================================================
+    // CONSTRAINT 16: NextUnexpPCUpdateOtherwise (FIRST GROUP index 8)
+    // =========================================================================
+    // if { 1 - ShouldBranch - Jump } => ( NextUnexpandedPC ) == ( UnexpandedPC + 4 - 4*DoNotUpdateUnexpandedPC - 2*IsCompressed )
     .{
         .condition = blk: {
             var lc = LC.one();
             lc.terms[0] = .{ .input_index = .ShouldBranch, .coeff = -1 };
-            lc.terms[1] = .{ .input_index = .ShouldJump, .coeff = -1 };
+            lc.terms[1] = .{ .input_index = .FlagJump, .coeff = -1 };
             lc.len = 2;
             break :blk lc;
         },
@@ -312,76 +463,66 @@ pub const UNIFORM_CONSTRAINTS = [_]UniformConstraint{
         },
     },
 
-    // 11. Next unexpanded PC = lookup output if Jump
+    // =========================================================================
+    // CONSTRAINT 17: NextPCEqPCPlusOneIfInline (FIRST GROUP index 8 - duplicate)
+    // =========================================================================
+    // if { VirtualInstruction } => ( NextPC ) == ( PC + 1 )
     .{
-        .condition = LC.fromInput(.ShouldJump),
-        .left = LC.fromInput(.NextUnexpandedPC),
-        .right = LC.fromInput(.LookupOutput),
-    },
-
-    // 12. Next unexpanded PC = unexpanded PC + Imm if Branch
-    .{
-        .condition = LC.fromInput(.ShouldBranch),
-        .left = LC.fromInput(.NextUnexpandedPC),
+        .condition = LC.fromInput(.FlagVirtualInstruction),
+        .left = LC.fromInput(.NextPC),
         .right = blk: {
             var lc = LC.zero();
-            lc.terms[0] = .{ .input_index = .UnexpandedPC, .coeff = 1 };
-            lc.terms[1] = .{ .input_index = .Imm, .coeff = 1 };
-            lc.len = 2;
+            lc.terms[0] = .{ .input_index = .PC, .coeff = 1 };
+            lc.len = 1;
+            lc.constant = 1;
             break :blk lc;
         },
     },
 
-    // 13. Left instruction input = Rs1 value
+    // =========================================================================
+    // CONSTRAINT 18: MustStartSequenceFromBeginning (FIRST GROUP index 9)
+    // =========================================================================
+    // if { NextIsVirtual - NextIsFirstInSequence } => ( 1 ) == ( DoNotUpdateUnexpandedPC )
     .{
-        .condition = LC.one(),
-        .left = LC.fromInput(.LeftInstructionInput),
-        .right = LC.fromInput(.Rs1Value),
+        .condition = blk: {
+            var lc = LC.zero();
+            lc.terms[0] = .{ .input_index = .NextIsVirtual, .coeff = 1 };
+            lc.terms[1] = .{ .input_index = .NextIsFirstInSequence, .coeff = -1 };
+            lc.len = 2;
+            break :blk lc;
+        },
+        .left = LC.one(),
+        .right = LC.fromInput(.FlagDoNotUpdateUnexpandedPC),
     },
+};
 
-    // 14. Right instruction input = Rs2 value or Imm (based on instruction type)
-    // This is handled differently per instruction - simplified here
+/// First group constraint indices (10 constraints, domain {-4..5})
+/// These are the global indices from UNIFORM_CONSTRAINTS that belong to the first group
+pub const FIRST_GROUP_INDICES: [10]usize = .{
+    1, // RamAddrEqZeroIfNotLoadStore
+    2, // RamReadEqRamWriteIfLoad
+    3, // RamReadEqRdWriteIfLoad
+    4, // Rs2EqRamWriteIfStore
+    5, // LeftLookupZeroUnlessAddSubMul
+    6, // LeftLookupEqLeftInputOtherwise
+    11, // AssertLookupOne
+    14, // NextUnexpPCEqLookupIfShouldJump
+    16, // NextUnexpPCUpdateOtherwise (or 17 - NextPCEqPCPlusOneIfInline)
+    18, // MustStartSequenceFromBeginning
+};
 
-    // 15. Lookup output in {0,1} if this is a branch instruction
-    // This uses a quadratic constraint: output * (1 - output) = 0
-    // For R1CS, we split into: output * (1 - output) = 0 via auxiliary variable
-
-    // 16-19. Additional constraints for virtual instructions, assertions, etc.
-    // These are simplified placeholders
-
-    // 14. Right instruction input = Imm (simplified)
-    .{
-        .condition = LC.one(),
-        .left = LC.fromInput(.RightInstructionInput),
-        .right = LC.fromInput(.Imm),
-    },
-
-    // 15-19. Placeholder constraints (always satisfied)
-    .{
-        .condition = LC.zero(),
-        .left = LC.zero(),
-        .right = LC.zero(),
-    },
-    .{
-        .condition = LC.zero(),
-        .left = LC.zero(),
-        .right = LC.zero(),
-    },
-    .{
-        .condition = LC.zero(),
-        .left = LC.zero(),
-        .right = LC.zero(),
-    },
-    .{
-        .condition = LC.zero(),
-        .left = LC.zero(),
-        .right = LC.zero(),
-    },
-    .{
-        .condition = LC.zero(),
-        .left = LC.zero(),
-        .right = LC.zero(),
-    },
+/// Second group constraint indices (9 constraints)
+/// These are the global indices from UNIFORM_CONSTRAINTS that belong to the second group
+pub const SECOND_GROUP_INDICES: [9]usize = .{
+    0, // RamAddrEqRs1PlusImmIfLoadStore
+    7, // RightLookupAdd
+    8, // RightLookupSub
+    9, // RightLookupEqProductIfMul
+    10, // RightLookupEqRightInputOtherwise
+    12, // RdWriteEqLookupIfWriteLookupToRd
+    13, // RdWriteEqPCPlusConstIfWritePCtoRD
+    15, // NextUnexpPCEqPCPlusImmIfShouldBranch
+    17, // NextPCEqPCPlusOneIfInline (if 16 is for first group)
 };
 
 /// Per-cycle R1CS inputs extracted from execution trace
@@ -629,14 +770,14 @@ test "uniform constraint satisfied" {
     const field = @import("../../field/mod.zig");
     const F = field.BN254Scalar;
 
-    // Test: If Load, then RamReadValue == RdWriteValue
-    const constraint = UNIFORM_CONSTRAINTS[1]; // RAM read = RD write if Load
+    // Test constraint 2: If Load, then RamReadValue == RamWriteValue
+    const constraint = UNIFORM_CONSTRAINTS[2];
 
-    // Create witness where Load=1, RamReadValue=42, RdWriteValue=42
+    // Create witness where Load=1, RamReadValue=42, RamWriteValue=42
     var witness: [R1CSInputIndex.NUM_INPUTS]F = [_]F{F.zero()} ** R1CSInputIndex.NUM_INPUTS;
     witness[R1CSInputIndex.FlagLoad.toIndex()] = F.one();
     witness[R1CSInputIndex.RamReadValue.toIndex()] = F.fromU64(42);
-    witness[R1CSInputIndex.RdWriteValue.toIndex()] = F.fromU64(42);
+    witness[R1CSInputIndex.RamWriteValue.toIndex()] = F.fromU64(42);
 
     // Should be satisfied
     try std.testing.expect(constraint.isSatisfied(F, &witness));
@@ -646,14 +787,14 @@ test "uniform constraint violated" {
     const field = @import("../../field/mod.zig");
     const F = field.BN254Scalar;
 
-    // Test: If Load, then RamReadValue == RdWriteValue
-    const constraint = UNIFORM_CONSTRAINTS[1];
+    // Test constraint 2: If Load, then RamReadValue == RamWriteValue
+    const constraint = UNIFORM_CONSTRAINTS[2];
 
-    // Create witness where Load=1, RamReadValue=42, RdWriteValue=100 (violation!)
+    // Create witness where Load=1, RamReadValue=42, RamWriteValue=100 (violation!)
     var witness: [R1CSInputIndex.NUM_INPUTS]F = [_]F{F.zero()} ** R1CSInputIndex.NUM_INPUTS;
     witness[R1CSInputIndex.FlagLoad.toIndex()] = F.one();
     witness[R1CSInputIndex.RamReadValue.toIndex()] = F.fromU64(42);
-    witness[R1CSInputIndex.RdWriteValue.toIndex()] = F.fromU64(100);
+    witness[R1CSInputIndex.RamWriteValue.toIndex()] = F.fromU64(100);
 
     // Should NOT be satisfied
     try std.testing.expect(!constraint.isSatisfied(F, &witness));
@@ -663,14 +804,14 @@ test "conditional constraint bypass" {
     const field = @import("../../field/mod.zig");
     const F = field.BN254Scalar;
 
-    // Test: If Load, then RamReadValue == RdWriteValue
-    const constraint = UNIFORM_CONSTRAINTS[1];
+    // Test constraint 2: If Load, then RamReadValue == RamWriteValue
+    const constraint = UNIFORM_CONSTRAINTS[2];
 
     // Create witness where Load=0 (bypass), values don't matter
     var witness: [R1CSInputIndex.NUM_INPUTS]F = [_]F{F.zero()} ** R1CSInputIndex.NUM_INPUTS;
     witness[R1CSInputIndex.FlagLoad.toIndex()] = F.zero(); // Not a load
     witness[R1CSInputIndex.RamReadValue.toIndex()] = F.fromU64(42);
-    witness[R1CSInputIndex.RdWriteValue.toIndex()] = F.fromU64(100); // Different value
+    witness[R1CSInputIndex.RamWriteValue.toIndex()] = F.fromU64(100); // Different value
 
     // Should still be satisfied because condition is 0
     try std.testing.expect(constraint.isSatisfied(F, &witness));

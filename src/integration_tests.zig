@@ -466,3 +466,201 @@ test "e2e: field element big-endian round-trip" {
 
     try testing.expect(g.eql(g_back));
 }
+
+// ============================================================================
+// Complex Program Tests
+// ============================================================================
+
+test "emulator: arithmetic sequence (sum 1 to 10)" {
+    // Test a program that computes 1 + 2 + ... + 10 = 55
+    // Uses a loop with counter in x1, accumulator in x2
+    const allocator = testing.allocator;
+    const config = common.MemoryConfig{ .program_size = 256 };
+
+    var emu = tracer.Emulator.init(allocator, &config);
+    defer emu.deinit();
+    emu.max_cycles = 128;
+
+    // Program:
+    //   addi x1, x0, 10   ; counter = 10
+    //   addi x2, x0, 0    ; sum = 0
+    // loop:
+    //   add  x2, x2, x1   ; sum += counter
+    //   addi x1, x1, -1   ; counter--
+    //   bne  x1, x0, loop ; if counter != 0, goto loop
+    //   ecall             ; halt
+    const program = [_]u8{
+        0x93, 0x00, 0xa0, 0x00, // addi x1, x0, 10
+        0x13, 0x01, 0x00, 0x00, // addi x2, x0, 0
+        // loop (offset 8):
+        0x33, 0x01, 0x11, 0x00, // add x2, x2, x1
+        0x93, 0x80, 0xf0, 0xff, // addi x1, x1, -1
+        0xe3, 0x9c, 0x00, 0xfe, // bne x1, x0, -8 (back to loop)
+        0x73, 0x00, 0x00, 0x00, // ecall
+    };
+
+    try emu.loadProgram(&program);
+    try emu.run();
+
+    // Check result: 1+2+...+10 = 55
+    const sum = try emu.registers.read(2);
+    try testing.expectEqual(@as(u64, 55), sum);
+    try testing.expect(emu.trace.len() > 10); // Should have many trace steps
+}
+
+test "emulator: memory store and load" {
+    // Test storing and loading values from memory
+    const allocator = testing.allocator;
+    const config = common.MemoryConfig{ .program_size = 256 };
+
+    var emu = tracer.Emulator.init(allocator, &config);
+    defer emu.deinit();
+    emu.max_cycles = 32;
+
+    // Program:
+    //   addi x1, x0, 42      ; x1 = 42
+    //   lui  x2, 0x80000     ; x2 = 0x80000000 (memory base)
+    //   sw   x1, 0(x2)       ; store x1 to memory[x2]
+    //   lw   x3, 0(x2)       ; load from memory[x2] to x3
+    //   addi x1, x0, 100     ; x1 = 100
+    //   sw   x1, 4(x2)       ; store x1 to memory[x2+4]
+    //   lw   x4, 4(x2)       ; load from memory[x2+4] to x4
+    //   ecall                ; halt
+    const program = [_]u8{
+        0x93, 0x00, 0xa0, 0x02, // addi x1, x0, 42
+        0x37, 0x01, 0x00, 0x80, // lui x2, 0x80000
+        0x23, 0x20, 0x11, 0x00, // sw x1, 0(x2)
+        0x83, 0x21, 0x01, 0x00, // lw x3, 0(x2)
+        0x93, 0x00, 0x40, 0x06, // addi x1, x0, 100
+        0x23, 0x22, 0x11, 0x00, // sw x1, 4(x2)
+        0x03, 0x22, 0x41, 0x00, // lw x4, 4(x2)
+        0x73, 0x00, 0x00, 0x00, // ecall
+    };
+
+    try emu.loadProgram(&program);
+    try emu.run();
+
+    // Check results
+    const x3 = try emu.registers.read(3);
+    const x4 = try emu.registers.read(4);
+    try testing.expectEqual(@as(u64, 42), x3);
+    try testing.expectEqual(@as(u64, 100), x4);
+
+    // Check memory trace was recorded
+    try testing.expect(emu.ram.trace.accesses.items.len >= 4); // At least 2 stores, 2 loads
+}
+
+test "emulator: shift operations" {
+    // Test shift left, shift right logical, shift right arithmetic
+    const allocator = testing.allocator;
+    const config = common.MemoryConfig{ .program_size = 256 };
+
+    var emu = tracer.Emulator.init(allocator, &config);
+    defer emu.deinit();
+    emu.max_cycles = 32;
+
+    // Program:
+    //   addi x1, x0, 1      ; x1 = 1
+    //   slli x2, x1, 5      ; x2 = x1 << 5 = 32
+    //   addi x3, x0, 64     ; x3 = 64
+    //   srli x4, x3, 3      ; x4 = x3 >> 3 = 8
+    //   addi x5, x0, -16    ; x5 = -16 (0xfffffff0)
+    //   srai x6, x5, 2      ; x6 = x5 >> 2 (arithmetic) = -4
+    //   ecall               ; halt
+    const program = [_]u8{
+        0x93, 0x00, 0x10, 0x00, // addi x1, x0, 1
+        0x13, 0x91, 0x50, 0x00, // slli x2, x1, 5
+        0x93, 0x01, 0x00, 0x04, // addi x3, x0, 64
+        0x13, 0xd2, 0x31, 0x00, // srli x4, x3, 3
+        0x93, 0x02, 0x00, 0xff, // addi x5, x0, -16
+        0x13, 0xd3, 0x22, 0x40, // srai x6, x5, 2
+        0x73, 0x00, 0x00, 0x00, // ecall
+    };
+
+    try emu.loadProgram(&program);
+    try emu.run();
+
+    // Check results
+    try testing.expectEqual(@as(u64, 1), try emu.registers.read(1));
+    try testing.expectEqual(@as(u64, 32), try emu.registers.read(2));
+    try testing.expectEqual(@as(u64, 64), try emu.registers.read(3));
+    try testing.expectEqual(@as(u64, 8), try emu.registers.read(4));
+    // For x6, -16 >> 2 arithmetic = -4
+    const x6 = try emu.registers.read(6);
+    const signed_x6: i64 = @bitCast(x6);
+    try testing.expectEqual(@as(i64, -4), signed_x6);
+}
+
+test "emulator: comparison operations" {
+    // Test SLT (set less than) and SLTU (unsigned)
+    const allocator = testing.allocator;
+    const config = common.MemoryConfig{ .program_size = 256 };
+
+    var emu = tracer.Emulator.init(allocator, &config);
+    defer emu.deinit();
+    emu.max_cycles = 32;
+
+    // Program:
+    //   addi x1, x0, 5       ; x1 = 5
+    //   addi x2, x0, 10      ; x2 = 10
+    //   slt  x3, x1, x2      ; x3 = (x1 < x2) = 1
+    //   slt  x4, x2, x1      ; x4 = (x2 < x1) = 0
+    //   addi x5, x0, -1      ; x5 = -1 (0xffffffff)
+    //   slt  x6, x5, x1      ; x6 = (-1 < 5) = 1 (signed)
+    //   sltu x7, x5, x1      ; x7 = (big unsigned < 5) = 0 (unsigned)
+    //   ecall                ; halt
+    const program = [_]u8{
+        0x93, 0x00, 0x50, 0x00, // addi x1, x0, 5
+        0x13, 0x01, 0xa0, 0x00, // addi x2, x0, 10
+        0xb3, 0xa1, 0x20, 0x00, // slt x3, x1, x2
+        0x33, 0x22, 0x11, 0x00, // slt x4, x2, x1
+        0x93, 0x02, 0xf0, 0xff, // addi x5, x0, -1
+        0x33, 0xa3, 0x12, 0x00, // slt x6, x5, x1
+        0xb3, 0xb3, 0x12, 0x00, // sltu x7, x5, x1
+        0x73, 0x00, 0x00, 0x00, // ecall
+    };
+
+    try emu.loadProgram(&program);
+    try emu.run();
+
+    // Check results
+    try testing.expectEqual(@as(u64, 1), try emu.registers.read(3)); // 5 < 10
+    try testing.expectEqual(@as(u64, 0), try emu.registers.read(4)); // 10 < 5 is false
+    try testing.expectEqual(@as(u64, 1), try emu.registers.read(6)); // -1 < 5 (signed)
+    try testing.expectEqual(@as(u64, 0), try emu.registers.read(7)); // big unsigned < 5 is false
+}
+
+test "emulator: XOR and bit manipulation" {
+    // Test XOR operations
+    const allocator = testing.allocator;
+    const config = common.MemoryConfig{ .program_size = 256 };
+
+    var emu = tracer.Emulator.init(allocator, &config);
+    defer emu.deinit();
+    emu.max_cycles = 32;
+
+    // Program:
+    //   addi x1, x0, 0x55    ; x1 = 0b01010101
+    //   addi x2, x0, 0x33    ; x2 = 0b00110011
+    //   xor  x3, x1, x2      ; x3 = x1 ^ x2 = 0b01100110 = 0x66
+    //   xori x4, x1, -1      ; x4 = x1 ^ -1 = ~x1 (NOT)
+    //   ecall                ; halt
+    const program = [_]u8{
+        0x93, 0x00, 0x50, 0x05, // addi x1, x0, 0x55
+        0x13, 0x01, 0x30, 0x03, // addi x2, x0, 0x33
+        0xb3, 0xc1, 0x20, 0x00, // xor x3, x1, x2
+        0x13, 0xc2, 0xf0, 0xff, // xori x4, x1, -1
+        0x73, 0x00, 0x00, 0x00, // ecall
+    };
+
+    try emu.loadProgram(&program);
+    try emu.run();
+
+    // Check results
+    try testing.expectEqual(@as(u64, 0x55), try emu.registers.read(1));
+    try testing.expectEqual(@as(u64, 0x33), try emu.registers.read(2));
+    try testing.expectEqual(@as(u64, 0x66), try emu.registers.read(3)); // 0x55 ^ 0x33 = 0x66
+    // x4 = ~0x55 = 0xFFFFFFFFFFFFFFAA for 64-bit
+    const x4 = try emu.registers.read(4);
+    try testing.expectEqual(@as(u64, 0xFFFFFFFFFFFFFFAA), x4);
+}

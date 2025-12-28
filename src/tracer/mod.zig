@@ -265,7 +265,8 @@ pub const Emulator = struct {
                     _ => false,
                 };
                 if (taken) {
-                    result.next_pc = @bitCast(@as(i64, @as(i32, @intCast(self.state.pc))) + decoded.imm);
+                    // PC is u64, immediate is i32 - add correctly handling sign extension
+                    result.next_pc = @bitCast(@as(i64, @bitCast(self.state.pc)) +% decoded.imm);
                 }
             },
             .LOAD => {

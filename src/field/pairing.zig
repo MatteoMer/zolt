@@ -1758,6 +1758,71 @@ test "pairing non-degeneracy" {
     try std.testing.expect(!e_g1_g2.isOne());
 }
 
+test "pairing generator comparison with jolt" {
+    // Compare e(G1_gen, G2_gen) with Jolt's result
+    // Jolt: e(G1_gen, G2_gen) first 16 bytes: 95 0e 87 9d 73 63 1f 5e b5 78 85 89 eb 5f 7e f8
+    const g1 = G1PointFp{ .x = Fp.one(), .y = Fp.fromU64(2), .infinity = false };
+    const g2 = G2Point.generator();
+
+    // Print G2 generator for comparison
+    std.debug.print("\n=== Generator Comparison ===\n", .{});
+
+    const g2_x_c0_std = g2.x.c0.fromMontgomery();
+    const g2_x_c1_std = g2.x.c1.fromMontgomery();
+    const g2_y_c0_std = g2.y.c0.fromMontgomery();
+    const g2_y_c1_std = g2.y.c1.fromMontgomery();
+
+    var g2_x_c0_bytes: [32]u8 = undefined;
+    var g2_x_c1_bytes: [32]u8 = undefined;
+    var g2_y_c0_bytes: [32]u8 = undefined;
+    var g2_y_c1_bytes: [32]u8 = undefined;
+    for (0..4) |i| {
+        std.mem.writeInt(u64, g2_x_c0_bytes[i * 8 ..][0..8], g2_x_c0_std.limbs[i], .little);
+        std.mem.writeInt(u64, g2_x_c1_bytes[i * 8 ..][0..8], g2_x_c1_std.limbs[i], .little);
+        std.mem.writeInt(u64, g2_y_c0_bytes[i * 8 ..][0..8], g2_y_c0_std.limbs[i], .little);
+        std.mem.writeInt(u64, g2_y_c1_bytes[i * 8 ..][0..8], g2_y_c1_std.limbs[i], .little);
+    }
+    std.debug.print("Zolt G2 generator:\n", .{});
+    std.debug.print("  x.c0 first 16: {x}\n", .{g2_x_c0_bytes[0..16].*});
+    std.debug.print("  x.c1 first 16: {x}\n", .{g2_x_c1_bytes[0..16].*});
+    std.debug.print("  y.c0 first 16: {x}\n", .{g2_y_c0_bytes[0..16].*});
+    std.debug.print("  y.c1 first 16: {x}\n", .{g2_y_c1_bytes[0..16].*});
+
+    // Jolt G2 generator:
+    // x.c0: ed f6 92 d9 5c bd de 46 dd da 5e f7 d4 22 43 67
+    // x.c1: c2 12 f3 ae b7 85 e4 97 12 e7 a9 35 33 49 aa f1
+    // y.c0: aa 7d fa 66 01 cc e6 4c 7b d3 43 0c 69 e7 d1 e3
+    // y.c1: 5b 97 22 d1 dc da ac 55 f3 8e b3 70 33 31 4b bc
+    const jolt_x_c0 = [_]u8{ 0xed, 0xf6, 0x92, 0xd9, 0x5c, 0xbd, 0xde, 0x46, 0xdd, 0xda, 0x5e, 0xf7, 0xd4, 0x22, 0x43, 0x67 };
+    const jolt_x_c1 = [_]u8{ 0xc2, 0x12, 0xf3, 0xae, 0xb7, 0x85, 0xe4, 0x97, 0x12, 0xe7, 0xa9, 0x35, 0x33, 0x49, 0xaa, 0xf1 };
+    const jolt_y_c0 = [_]u8{ 0xaa, 0x7d, 0xfa, 0x66, 0x01, 0xcc, 0xe6, 0x4c, 0x7b, 0xd3, 0x43, 0x0c, 0x69, 0xe7, 0xd1, 0xe3 };
+    const jolt_y_c1 = [_]u8{ 0x5b, 0x97, 0x22, 0xd1, 0xdc, 0xda, 0xac, 0x55, 0xf3, 0x8e, 0xb3, 0x70, 0x33, 0x31, 0x4b, 0xbc };
+
+    var g2_match = std.mem.eql(u8, g2_x_c0_bytes[0..16], &jolt_x_c0);
+    g2_match = g2_match and std.mem.eql(u8, g2_x_c1_bytes[0..16], &jolt_x_c1);
+    g2_match = g2_match and std.mem.eql(u8, g2_y_c0_bytes[0..16], &jolt_y_c0);
+    g2_match = g2_match and std.mem.eql(u8, g2_y_c1_bytes[0..16], &jolt_y_c1);
+
+    if (g2_match) {
+        std.debug.print("*** G2 generator MATCHES Jolt! ***\n", .{});
+    } else {
+        std.debug.print("*** G2 generator MISMATCH ***\n", .{});
+    }
+
+    const e_g1_g2 = pairingFp(g1, g2);
+    const bytes = e_g1_g2.toBytes();
+
+    std.debug.print("\nZolt e(G1_gen, G2_gen) first 16 bytes: {x}\n", .{bytes[0..16].*});
+
+    const jolt_bytes = [_]u8{ 0x95, 0x0e, 0x87, 0x9d, 0x73, 0x63, 0x1f, 0x5e, 0xb5, 0x78, 0x85, 0x89, 0xeb, 0x5f, 0x7e, 0xf8 };
+    if (std.mem.eql(u8, bytes[0..16], &jolt_bytes)) {
+        std.debug.print("*** Generator pairing MATCHES Jolt! ***\n", .{});
+    } else {
+        std.debug.print("*** Generator pairing MISMATCH ***\n", .{});
+        std.debug.print("Expected (Jolt): {x}\n", .{jolt_bytes});
+    }
+}
+
 test "pairingCheckFp basic" {
     // Test that e(P, Q) == e(P, Q) returns true
     const g1 = G1PointFp{ .x = Fp.one(), .y = Fp.fromU64(2), .infinity = false };

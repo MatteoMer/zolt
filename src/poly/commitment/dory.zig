@@ -2139,6 +2139,23 @@ test "dory commitment debug - compare intermediate values with jolt" {
             std.debug.print("  Expected: {x}\n", .{jolt_g2_0_bytes});
         }
 
+        // Print all G2[0] coordinates to verify loading
+        const g2_0_x_c1_std = g2_0.x.c1.fromMontgomery();
+        const g2_0_y_c0_std = g2_0.y.c0.fromMontgomery();
+        const g2_0_y_c1_std = g2_0.y.c1.fromMontgomery();
+
+        var g2_x_c1_bytes: [32]u8 = undefined;
+        var g2_y_c0_bytes: [32]u8 = undefined;
+        var g2_y_c1_bytes: [32]u8 = undefined;
+        for (0..4) |i| {
+            std.mem.writeInt(u64, g2_x_c1_bytes[i * 8 ..][0..8], g2_0_x_c1_std.limbs[i], .little);
+            std.mem.writeInt(u64, g2_y_c0_bytes[i * 8 ..][0..8], g2_0_y_c0_std.limbs[i], .little);
+            std.mem.writeInt(u64, g2_y_c1_bytes[i * 8 ..][0..8], g2_0_y_c1_std.limbs[i], .little);
+        }
+        std.debug.print("G2[0] x.c1 first 16: {x}\n", .{g2_x_c1_bytes[0..16].*});
+        std.debug.print("G2[0] y.c0 first 16: {x}\n", .{g2_y_c0_bytes[0..16].*});
+        std.debug.print("G2[0] y.c1 first 16: {x}\n", .{g2_y_c1_bytes[0..16].*});
+
         // Compute pairing e(row0, G2[0])
         const row0_g1 = G1PointFp{
             .x = row0_affine.x,

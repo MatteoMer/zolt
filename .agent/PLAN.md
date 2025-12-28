@@ -1,29 +1,33 @@
 # Zolt zkVM Implementation Plan
 
-## Current Status (December 2024 - Iteration 22)
+## Current Status (December 2024 - Iteration 23)
 
 ### Session Summary
 
-This iteration focused on completing the remaining instruction lookup implementations:
+This iteration added load/store instruction lookups for complete RV64I memory operation support:
 
-1. **Complete Branch Instruction Lookups**
-   - `BltLookup`: Branch if less than (signed comparison)
-   - `BgeLookup`: Branch if greater than or equal (signed)
-   - `BltuLookup`: Branch if less than (unsigned)
-   - `BgeuLookup`: Branch if greater than or equal (unsigned)
+1. **Address Computation Lookups**
+   - `LoadAddressLookup`: Computes effective address for load instructions
+   - `StoreAddressLookup`: Computes effective address for store instructions
 
-2. **Upper Immediate Instructions**
-   - `LuiLookup`: Load upper immediate (rd = imm << 12)
-   - `AuipcLookup`: Add upper immediate to PC (rd = PC + imm)
+2. **Load Instruction Lookups** (7 types)
+   - `LbLookup`: Load byte with sign extension
+   - `LbuLookup`: Load byte unsigned (zero extension)
+   - `LhLookup`: Load halfword with sign extension
+   - `LhuLookup`: Load halfword unsigned
+   - `LwLookup`: Load word with sign extension (RV64)
+   - `LwuLookup`: Load word unsigned (RV64)
+   - `LdLookup`: Load doubleword (RV64)
 
-3. **Jump Instructions**
-   - `JalLookup`: Jump and link (rd = PC+4, PC = PC+imm)
-   - `JalrLookup`: Jump and link register (rd = PC+4, PC = rs1+imm)
-   - Both support compressed instruction mode (PC+2 vs PC+4 for return address)
+3. **Store Instruction Lookups** (4 types)
+   - `SbLookup`: Store byte (lower 8 bits)
+   - `ShLookup`: Store halfword (lower 16 bits)
+   - `SwLookup`: Store word (lower 32 bits)
+   - `SdLookup`: Store doubleword (RV64)
 
 ### Test Status
 
-All 450+ tests pass:
+All 494 tests pass:
 - Field arithmetic: Fp, Fp2, Fp6, Fp12
 - Curve arithmetic: G1, G2 points
 - Pairing: bilinearity verified
@@ -36,7 +40,7 @@ All 450+ tests pass:
 - Spartan proof generation and verification
 - Lasso lookup argument
 - All 24 lookup tables
-- All instruction lookups including jumps and branches
+- All instruction lookups including memory operations
 
 ### Architecture Summary
 
@@ -75,7 +79,7 @@ Division/Remainder:
 - ValidDiv0, ValidUnsignedRemainder, ValidSignedRemainder
 ```
 
-#### Instruction Lookups (Complete RV64IM Coverage)
+#### Instruction Lookups (Complete RV64IM + Memory Coverage)
 ```
 Base Integer:
 - AddLookup, SubLookup
@@ -93,6 +97,16 @@ Upper Immediate:
 
 Jump:
 - JalLookup, JalrLookup
+
+Load (new):
+- LoadAddressLookup
+- LbLookup, LbuLookup
+- LhLookup, LhuLookup
+- LwLookup, LwuLookup, LdLookup
+
+Store (new):
+- StoreAddressLookup
+- SbLookup, ShLookup, SwLookup, SdLookup
 
 Multiply (M):
 - MulLookup, MulhLookup, MulhuLookup, MulhsuLookup
@@ -151,6 +165,7 @@ Dory (transparent setup, IPA-based)
 - **All Branch Instructions** - BEQ, BNE, BLT, BGE, BLTU, BGEU
 - **Upper Immediates** - LUI, AUIPC
 - **Jumps** - JAL, JALR
+- **Load/Store** - LB, LBU, LH, LHU, LW, LWU, LD, SB, SH, SW, SD
 
 ## Future Work
 
@@ -166,7 +181,5 @@ Dory (transparent setup, IPA-based)
 1. Documentation and examples
 2. Benchmarking suite
 
-## Commit History (Iteration 22)
-- Add missing branch instruction lookups (BLT, BGE, BLTU, BGEU)
-- Add LUI and AUIPC instruction lookups
-- Add JAL and JALR jump instruction lookups
+## Commit History (Iteration 23)
+- Add load/store instruction lookups for full RV64I memory operations

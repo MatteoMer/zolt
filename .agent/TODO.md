@@ -1,27 +1,30 @@
 # Zolt zkVM Implementation TODO
 
-## Completed (This Session - Iteration 22)
+## Completed (This Session - Iteration 23)
 
-### Complete Branch Instruction Lookups
-- [x] Added BltLookup, BgeLookup for signed comparisons
-- [x] Added BltuLookup, BgeuLookup for unsigned comparisons
-- [x] Connected BLT/BGE/BLTU/BGEU to trace collector
-- [x] Comprehensive tests for all branch comparison lookups
-
-### Upper Immediate Instructions
-- [x] Added LuiLookup for LUI (Load Upper Immediate)
-- [x] Added AuipcLookup for AUIPC (Add Upper Immediate to PC)
-- [x] Connected LUI/AUIPC to trace collector
-- [x] Tests for upper immediate operations
-
-### Jump Instructions
-- [x] Added JalLookup for JAL (Jump and Link)
-- [x] Added JalrLookup for JALR (Jump and Link Register)
-- [x] Both support compressed instruction mode (PC+2 vs PC+4)
-- [x] Connected JAL/JALR to trace collector
-- [x] Tests for jump target computation and link address
+### Load/Store Instruction Lookups
+- [x] LoadAddressLookup for effective address computation (base + offset)
+- [x] StoreAddressLookup for store address computation
+- [x] LbLookup (Load Byte signed, with sign extension)
+- [x] LbuLookup (Load Byte Unsigned, zero extension)
+- [x] LhLookup (Load Halfword signed, with sign extension)
+- [x] LhuLookup (Load Halfword Unsigned, zero extension)
+- [x] LwLookup (Load Word signed, with sign extension on RV64)
+- [x] LwuLookup (Load Word Unsigned, zero extension on RV64)
+- [x] LdLookup (Load Doubleword for RV64)
+- [x] SbLookup (Store Byte)
+- [x] ShLookup (Store Halfword)
+- [x] SwLookup (Store Word)
+- [x] SdLookup (Store Doubleword for RV64)
+- [x] Comprehensive tests for all load/store lookups
 
 ## Completed (Previous Sessions)
+
+### Iteration 22: Branch and Jump Instruction Lookups
+- [x] BltLookup, BgeLookup for signed comparisons
+- [x] BltuLookup, BgeuLookup for unsigned comparisons
+- [x] LuiLookup, AuipcLookup for upper immediate instructions
+- [x] JalLookup, JalrLookup for jump instructions
 
 ### Iteration 21: Division/Remainder and RV64 Word Operations
 - [x] ValidDiv0, ValidUnsignedRemainder, ValidSignedRemainder tables
@@ -62,12 +65,14 @@
 - **Sign Extension**: SignExtend8, SignExtend16, SignExtend32
 - **Division**: ValidDiv0, ValidUnsignedRemainder, ValidSignedRemainder
 
-### Full Instruction Coverage (RV64IM)
+### Full Instruction Coverage (RV64IM + Load/Store)
 - **Base Integer (I)**: ADD, SUB, AND, OR, XOR, SLL, SRL, SRA, SLT, SLTU
 - **Immediate (I)**: ADDI, ANDI, ORI, XORI, SLTI, SLTIU, SLLI, SRLI, SRAI
 - **Branches**: BEQ, BNE, BLT, BGE, BLTU, BGEU
 - **Upper Immediate**: LUI, AUIPC
 - **Jumps**: JAL, JALR
+- **Loads**: LB, LBU, LH, LHU, LW, LWU, LD
+- **Stores**: SB, SH, SW, SD
 - **Multiply (M)**: MUL, MULH, MULHU, MULHSU
 - **Division (M)**: DIV, DIVU, REM, REMU
 - **Word-sized (RV64)**: ADDW, SUBW, SLLW, SRLW, SRAW, MULW, DIVW, DIVUW, REMW, REMUW
@@ -87,9 +92,7 @@
 - [ ] Benchmarking suite
 
 ## Test Status
-All tests pass (450+ tests).
+All tests pass (494 tests).
 
 ## Commits This Session
-1. Add missing branch instruction lookups (BLT, BGE, BLTU, BGEU)
-2. Add LUI and AUIPC instruction lookups
-3. Add JAL and JALR jump instruction lookups
+1. Add load/store instruction lookups for full RV64I memory operations

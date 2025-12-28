@@ -2850,3 +2850,894 @@ test "jalr lookup (jump and link register)" {
     try std.testing.expect(inst_flags.get(.LeftOperandIsRs1Value));
     try std.testing.expect(inst_flags.get(.RightOperandIsImm));
 }
+
+// ============================================================================
+// Load/Store Address Computation Lookups
+// ============================================================================
+
+/// Load address computation lookup
+/// Computes effective address = rs1 + sign_extended_offset for load instructions
+/// (LB, LH, LW, LD, LBU, LHU, LWU)
+pub fn LoadAddressLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        /// Base register value
+        rs1_val: u64,
+        /// Sign-extended immediate offset
+        offset: i32,
+
+        /// Create a new load address lookup
+        pub fn init(rs1_val: u64, offset: i32) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .offset = offset,
+            };
+        }
+
+        /// Load address uses range check to verify valid address
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .RangeCheck;
+        }
+
+        /// Compute the lookup index
+        pub fn toLookupIndex(self: Self) u128 {
+            // Use the effective address as the lookup index
+            return @as(u128, self.computeResult());
+        }
+
+        /// Compute effective address = rs1 + sext(offset)
+        pub fn computeResult(self: Self) u64 {
+            const signed_offset: i64 = @as(i64, self.offset);
+            const signed_base: i64 = @bitCast(self.rs1_val);
+            const result: i64 = signed_base +% signed_offset;
+            return @bitCast(result);
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.Load);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsImm);
+            return flags;
+        }
+    };
+}
+
+/// Store address computation lookup
+/// Computes effective address = rs1 + sign_extended_offset for store instructions
+/// (SB, SH, SW, SD)
+pub fn StoreAddressLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        /// Base register value
+        rs1_val: u64,
+        /// Sign-extended immediate offset
+        offset: i32,
+
+        /// Create a new store address lookup
+        pub fn init(rs1_val: u64, offset: i32) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .offset = offset,
+            };
+        }
+
+        /// Store address uses range check to verify valid address
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .RangeCheck;
+        }
+
+        /// Compute the lookup index
+        pub fn toLookupIndex(self: Self) u128 {
+            // Use the effective address as the lookup index
+            return @as(u128, self.computeResult());
+        }
+
+        /// Compute effective address = rs1 + sext(offset)
+        pub fn computeResult(self: Self) u64 {
+            const signed_offset: i64 = @as(i64, self.offset);
+            const signed_base: i64 = @bitCast(self.rs1_val);
+            const result: i64 = signed_base +% signed_offset;
+            return @bitCast(result);
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.Store);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsImm);
+            return flags;
+        }
+    };
+}
+
+/// LB (Load Byte) instruction lookup
+/// Loads a byte from memory and sign-extends to XLEN bits
+pub fn LbLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        /// Base register value
+        rs1_val: u64,
+        /// Sign-extended immediate offset
+        offset: i32,
+        /// Value loaded from memory (for sign extension verification)
+        memory_value: u8,
+
+        /// Create a new LB lookup
+        pub fn init(rs1_val: u64, offset: i32, memory_value: u8) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .offset = offset,
+                .memory_value = memory_value,
+            };
+        }
+
+        /// LB uses sign extension table
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .SignExtend8;
+        }
+
+        /// Compute the lookup index (the byte value to sign-extend)
+        pub fn toLookupIndex(self: Self) u128 {
+            return @as(u128, self.memory_value);
+        }
+
+        /// Compute effective address
+        pub fn computeAddress(self: Self) u64 {
+            const signed_offset: i64 = @as(i64, self.offset);
+            const signed_base: i64 = @bitCast(self.rs1_val);
+            const result: i64 = signed_base +% signed_offset;
+            return @bitCast(result);
+        }
+
+        /// Compute the sign-extended result
+        pub fn computeResult(self: Self) u64 {
+            const signed_byte: i8 = @bitCast(self.memory_value);
+            const extended: i64 = @as(i64, signed_byte);
+            return @bitCast(extended);
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.Load);
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsImm);
+            return flags;
+        }
+    };
+}
+
+/// LBU (Load Byte Unsigned) instruction lookup
+/// Loads a byte from memory and zero-extends to XLEN bits
+pub fn LbuLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        /// Base register value
+        rs1_val: u64,
+        /// Sign-extended immediate offset
+        offset: i32,
+        /// Value loaded from memory
+        memory_value: u8,
+
+        /// Create a new LBU lookup
+        pub fn init(rs1_val: u64, offset: i32, memory_value: u8) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .offset = offset,
+                .memory_value = memory_value,
+            };
+        }
+
+        /// LBU uses range check (no sign extension needed)
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .RangeCheck;
+        }
+
+        /// Compute the lookup index
+        pub fn toLookupIndex(self: Self) u128 {
+            return @as(u128, self.memory_value);
+        }
+
+        /// Compute effective address
+        pub fn computeAddress(self: Self) u64 {
+            const signed_offset: i64 = @as(i64, self.offset);
+            const signed_base: i64 = @bitCast(self.rs1_val);
+            const result: i64 = signed_base +% signed_offset;
+            return @bitCast(result);
+        }
+
+        /// Compute the zero-extended result
+        pub fn computeResult(self: Self) u64 {
+            return @as(u64, self.memory_value);
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.Load);
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsImm);
+            return flags;
+        }
+    };
+}
+
+/// LH (Load Halfword) instruction lookup
+/// Loads a 16-bit value from memory and sign-extends to XLEN bits
+pub fn LhLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        /// Base register value
+        rs1_val: u64,
+        /// Sign-extended immediate offset
+        offset: i32,
+        /// Value loaded from memory
+        memory_value: u16,
+
+        /// Create a new LH lookup
+        pub fn init(rs1_val: u64, offset: i32, memory_value: u16) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .offset = offset,
+                .memory_value = memory_value,
+            };
+        }
+
+        /// LH uses sign extension table for 16-bit values
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .SignExtend16;
+        }
+
+        /// Compute the lookup index (the halfword value to sign-extend)
+        pub fn toLookupIndex(self: Self) u128 {
+            return @as(u128, self.memory_value);
+        }
+
+        /// Compute effective address
+        pub fn computeAddress(self: Self) u64 {
+            const signed_offset: i64 = @as(i64, self.offset);
+            const signed_base: i64 = @bitCast(self.rs1_val);
+            const result: i64 = signed_base +% signed_offset;
+            return @bitCast(result);
+        }
+
+        /// Compute the sign-extended result
+        pub fn computeResult(self: Self) u64 {
+            const signed_half: i16 = @bitCast(self.memory_value);
+            const extended: i64 = @as(i64, signed_half);
+            return @bitCast(extended);
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.Load);
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsImm);
+            return flags;
+        }
+    };
+}
+
+/// LHU (Load Halfword Unsigned) instruction lookup
+/// Loads a 16-bit value from memory and zero-extends to XLEN bits
+pub fn LhuLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        /// Base register value
+        rs1_val: u64,
+        /// Sign-extended immediate offset
+        offset: i32,
+        /// Value loaded from memory
+        memory_value: u16,
+
+        /// Create a new LHU lookup
+        pub fn init(rs1_val: u64, offset: i32, memory_value: u16) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .offset = offset,
+                .memory_value = memory_value,
+            };
+        }
+
+        /// LHU uses range check (no sign extension)
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .RangeCheck;
+        }
+
+        /// Compute the lookup index
+        pub fn toLookupIndex(self: Self) u128 {
+            return @as(u128, self.memory_value);
+        }
+
+        /// Compute effective address
+        pub fn computeAddress(self: Self) u64 {
+            const signed_offset: i64 = @as(i64, self.offset);
+            const signed_base: i64 = @bitCast(self.rs1_val);
+            const result: i64 = signed_base +% signed_offset;
+            return @bitCast(result);
+        }
+
+        /// Compute the zero-extended result
+        pub fn computeResult(self: Self) u64 {
+            return @as(u64, self.memory_value);
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.Load);
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsImm);
+            return flags;
+        }
+    };
+}
+
+/// LW (Load Word) instruction lookup
+/// Loads a 32-bit value from memory and sign-extends to 64 bits (on RV64)
+pub fn LwLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        /// Base register value
+        rs1_val: u64,
+        /// Sign-extended immediate offset
+        offset: i32,
+        /// Value loaded from memory
+        memory_value: u32,
+
+        /// Create a new LW lookup
+        pub fn init(rs1_val: u64, offset: i32, memory_value: u32) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .offset = offset,
+                .memory_value = memory_value,
+            };
+        }
+
+        /// LW uses sign extension table for 32-bit values
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .SignExtend32;
+        }
+
+        /// Compute the lookup index
+        pub fn toLookupIndex(self: Self) u128 {
+            return @as(u128, self.memory_value);
+        }
+
+        /// Compute effective address
+        pub fn computeAddress(self: Self) u64 {
+            const signed_offset: i64 = @as(i64, self.offset);
+            const signed_base: i64 = @bitCast(self.rs1_val);
+            const result: i64 = signed_base +% signed_offset;
+            return @bitCast(result);
+        }
+
+        /// Compute the sign-extended result
+        pub fn computeResult(self: Self) u64 {
+            const signed_word: i32 = @bitCast(self.memory_value);
+            const extended: i64 = @as(i64, signed_word);
+            return @bitCast(extended);
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.Load);
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsImm);
+            return flags;
+        }
+    };
+}
+
+/// LWU (Load Word Unsigned) instruction lookup - RV64 only
+/// Loads a 32-bit value from memory and zero-extends to 64 bits
+pub fn LwuLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        /// Base register value
+        rs1_val: u64,
+        /// Sign-extended immediate offset
+        offset: i32,
+        /// Value loaded from memory
+        memory_value: u32,
+
+        /// Create a new LWU lookup
+        pub fn init(rs1_val: u64, offset: i32, memory_value: u32) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .offset = offset,
+                .memory_value = memory_value,
+            };
+        }
+
+        /// LWU uses range check (no sign extension)
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .RangeCheck;
+        }
+
+        /// Compute the lookup index
+        pub fn toLookupIndex(self: Self) u128 {
+            return @as(u128, self.memory_value);
+        }
+
+        /// Compute effective address
+        pub fn computeAddress(self: Self) u64 {
+            const signed_offset: i64 = @as(i64, self.offset);
+            const signed_base: i64 = @bitCast(self.rs1_val);
+            const result: i64 = signed_base +% signed_offset;
+            return @bitCast(result);
+        }
+
+        /// Compute the zero-extended result
+        pub fn computeResult(self: Self) u64 {
+            return @as(u64, self.memory_value);
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.Load);
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsImm);
+            return flags;
+        }
+    };
+}
+
+/// LD (Load Doubleword) instruction lookup - RV64 only
+/// Loads a 64-bit value from memory
+pub fn LdLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        /// Base register value
+        rs1_val: u64,
+        /// Sign-extended immediate offset
+        offset: i32,
+        /// Value loaded from memory
+        memory_value: u64,
+
+        /// Create a new LD lookup
+        pub fn init(rs1_val: u64, offset: i32, memory_value: u64) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .offset = offset,
+                .memory_value = memory_value,
+            };
+        }
+
+        /// LD uses range check
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .RangeCheck;
+        }
+
+        /// Compute the lookup index
+        pub fn toLookupIndex(self: Self) u128 {
+            return @as(u128, self.memory_value);
+        }
+
+        /// Compute effective address
+        pub fn computeAddress(self: Self) u64 {
+            const signed_offset: i64 = @as(i64, self.offset);
+            const signed_base: i64 = @bitCast(self.rs1_val);
+            const result: i64 = signed_base +% signed_offset;
+            return @bitCast(result);
+        }
+
+        /// Compute the result (no extension needed for 64-bit)
+        pub fn computeResult(self: Self) u64 {
+            return self.memory_value;
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.Load);
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsImm);
+            return flags;
+        }
+    };
+}
+
+/// SB (Store Byte) instruction lookup
+/// Stores the lower 8 bits of rs2 to memory
+pub fn SbLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        /// Base register value
+        rs1_val: u64,
+        /// Sign-extended immediate offset
+        offset: i32,
+        /// Value to store
+        rs2_val: u64,
+
+        /// Create a new SB lookup
+        pub fn init(rs1_val: u64, offset: i32, rs2_val: u64) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .offset = offset,
+                .rs2_val = rs2_val,
+            };
+        }
+
+        /// SB uses range check
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .RangeCheck;
+        }
+
+        /// Compute the lookup index (the byte to store)
+        pub fn toLookupIndex(self: Self) u128 {
+            return @as(u128, self.computeResult());
+        }
+
+        /// Compute effective address
+        pub fn computeAddress(self: Self) u64 {
+            const signed_offset: i64 = @as(i64, self.offset);
+            const signed_base: i64 = @bitCast(self.rs1_val);
+            const result: i64 = signed_base +% signed_offset;
+            return @bitCast(result);
+        }
+
+        /// Compute the byte value to store
+        pub fn computeResult(self: Self) u64 {
+            return self.rs2_val & 0xFF;
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.Store);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsRs2Value);
+            return flags;
+        }
+    };
+}
+
+/// SH (Store Halfword) instruction lookup
+/// Stores the lower 16 bits of rs2 to memory
+pub fn ShLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        /// Base register value
+        rs1_val: u64,
+        /// Sign-extended immediate offset
+        offset: i32,
+        /// Value to store
+        rs2_val: u64,
+
+        /// Create a new SH lookup
+        pub fn init(rs1_val: u64, offset: i32, rs2_val: u64) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .offset = offset,
+                .rs2_val = rs2_val,
+            };
+        }
+
+        /// SH uses range check
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .RangeCheck;
+        }
+
+        /// Compute the lookup index
+        pub fn toLookupIndex(self: Self) u128 {
+            return @as(u128, self.computeResult());
+        }
+
+        /// Compute effective address
+        pub fn computeAddress(self: Self) u64 {
+            const signed_offset: i64 = @as(i64, self.offset);
+            const signed_base: i64 = @bitCast(self.rs1_val);
+            const result: i64 = signed_base +% signed_offset;
+            return @bitCast(result);
+        }
+
+        /// Compute the halfword value to store
+        pub fn computeResult(self: Self) u64 {
+            return self.rs2_val & 0xFFFF;
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.Store);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsRs2Value);
+            return flags;
+        }
+    };
+}
+
+/// SW (Store Word) instruction lookup
+/// Stores the lower 32 bits of rs2 to memory
+pub fn SwLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        /// Base register value
+        rs1_val: u64,
+        /// Sign-extended immediate offset
+        offset: i32,
+        /// Value to store
+        rs2_val: u64,
+
+        /// Create a new SW lookup
+        pub fn init(rs1_val: u64, offset: i32, rs2_val: u64) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .offset = offset,
+                .rs2_val = rs2_val,
+            };
+        }
+
+        /// SW uses range check
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .RangeCheck;
+        }
+
+        /// Compute the lookup index
+        pub fn toLookupIndex(self: Self) u128 {
+            return @as(u128, self.computeResult());
+        }
+
+        /// Compute effective address
+        pub fn computeAddress(self: Self) u64 {
+            const signed_offset: i64 = @as(i64, self.offset);
+            const signed_base: i64 = @bitCast(self.rs1_val);
+            const result: i64 = signed_base +% signed_offset;
+            return @bitCast(result);
+        }
+
+        /// Compute the word value to store
+        pub fn computeResult(self: Self) u64 {
+            return self.rs2_val & 0xFFFFFFFF;
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.Store);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsRs2Value);
+            return flags;
+        }
+    };
+}
+
+/// SD (Store Doubleword) instruction lookup - RV64 only
+/// Stores 64 bits of rs2 to memory
+pub fn SdLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        /// Base register value
+        rs1_val: u64,
+        /// Sign-extended immediate offset
+        offset: i32,
+        /// Value to store
+        rs2_val: u64,
+
+        /// Create a new SD lookup
+        pub fn init(rs1_val: u64, offset: i32, rs2_val: u64) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .offset = offset,
+                .rs2_val = rs2_val,
+            };
+        }
+
+        /// SD uses range check
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .RangeCheck;
+        }
+
+        /// Compute the lookup index
+        pub fn toLookupIndex(self: Self) u128 {
+            return @as(u128, self.rs2_val);
+        }
+
+        /// Compute effective address
+        pub fn computeAddress(self: Self) u64 {
+            const signed_offset: i64 = @as(i64, self.offset);
+            const signed_base: i64 = @bitCast(self.rs1_val);
+            const result: i64 = signed_base +% signed_offset;
+            return @bitCast(result);
+        }
+
+        /// Compute the value to store
+        pub fn computeResult(self: Self) u64 {
+            return self.rs2_val;
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.Store);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsRs2Value);
+            return flags;
+        }
+    };
+}
+
+// ============================================================================
+// Load/Store Lookup Tests
+// ============================================================================
+
+test "load address computation" {
+    const load = LoadAddressLookup(64).init(0x1000, 100);
+    try std.testing.expectEqual(@as(u64, 0x1064), load.computeResult());
+
+    // Negative offset
+    const load_neg = LoadAddressLookup(64).init(0x1000, -100);
+    try std.testing.expectEqual(@as(u64, 0x0F9C), load_neg.computeResult());
+
+    // Check flags
+    const circuit_flags = LoadAddressLookup(64).circuitFlags();
+    try std.testing.expect(circuit_flags.get(.Load));
+}
+
+test "store address computation" {
+    const store = StoreAddressLookup(64).init(0x2000, 256);
+    try std.testing.expectEqual(@as(u64, 0x2100), store.computeResult());
+
+    // Check flags
+    const circuit_flags = StoreAddressLookup(64).circuitFlags();
+    try std.testing.expect(circuit_flags.get(.Store));
+}
+
+test "lb lookup (load byte signed)" {
+    // LB with positive byte
+    const lb1 = LbLookup(64).init(0x1000, 0, 0x7F);
+    try std.testing.expectEqual(@as(u64, 0x007F), lb1.computeResult());
+    try std.testing.expectEqual(@as(u64, 0x1000), lb1.computeAddress());
+
+    // LB with negative byte (sign extension)
+    const lb2 = LbLookup(64).init(0x1000, 0, 0x80);
+    try std.testing.expectEqual(@as(u64, @bitCast(@as(i64, -128))), lb2.computeResult());
+
+    // LB with offset
+    const lb3 = LbLookup(64).init(0x1000, 100, 0x42);
+    try std.testing.expectEqual(@as(u64, 0x1064), lb3.computeAddress());
+}
+
+test "lbu lookup (load byte unsigned)" {
+    // LBU with high bit set - should NOT sign extend
+    const lbu = LbuLookup(64).init(0x1000, 0, 0x80);
+    try std.testing.expectEqual(@as(u64, 0x0080), lbu.computeResult());
+    try std.testing.expectEqual(@as(u64, 0x1000), lbu.computeAddress());
+}
+
+test "lh lookup (load halfword signed)" {
+    // LH with positive halfword
+    const lh1 = LhLookup(64).init(0x1000, 0, 0x7FFF);
+    try std.testing.expectEqual(@as(u64, 0x7FFF), lh1.computeResult());
+
+    // LH with negative halfword (sign extension)
+    const lh2 = LhLookup(64).init(0x1000, 0, 0x8000);
+    try std.testing.expectEqual(@as(u64, @bitCast(@as(i64, -32768))), lh2.computeResult());
+}
+
+test "lhu lookup (load halfword unsigned)" {
+    const lhu = LhuLookup(64).init(0x1000, 0, 0x8000);
+    try std.testing.expectEqual(@as(u64, 0x8000), lhu.computeResult());
+}
+
+test "lw lookup (load word signed)" {
+    // LW with positive word
+    const lw1 = LwLookup(64).init(0x1000, 0, 0x7FFFFFFF);
+    try std.testing.expectEqual(@as(u64, 0x7FFFFFFF), lw1.computeResult());
+
+    // LW with negative word (sign extension to 64 bits)
+    const lw2 = LwLookup(64).init(0x1000, 0, 0x80000000);
+    try std.testing.expectEqual(@as(u64, @bitCast(@as(i64, -2147483648))), lw2.computeResult());
+}
+
+test "lwu lookup (load word unsigned)" {
+    const lwu = LwuLookup(64).init(0x1000, 0, 0x80000000);
+    try std.testing.expectEqual(@as(u64, 0x80000000), lwu.computeResult());
+}
+
+test "ld lookup (load doubleword)" {
+    const ld = LdLookup(64).init(0x1000, 8, 0xDEADBEEF12345678);
+    try std.testing.expectEqual(@as(u64, 0xDEADBEEF12345678), ld.computeResult());
+    try std.testing.expectEqual(@as(u64, 0x1008), ld.computeAddress());
+}
+
+test "sb lookup (store byte)" {
+    const sb = SbLookup(64).init(0x1000, 0, 0x12345678);
+    try std.testing.expectEqual(@as(u64, 0x78), sb.computeResult());
+    try std.testing.expectEqual(@as(u64, 0x1000), sb.computeAddress());
+}
+
+test "sh lookup (store halfword)" {
+    const sh = ShLookup(64).init(0x1000, 0, 0x12345678);
+    try std.testing.expectEqual(@as(u64, 0x5678), sh.computeResult());
+}
+
+test "sw lookup (store word)" {
+    const sw = SwLookup(64).init(0x1000, 0, 0x123456789ABCDEF0);
+    try std.testing.expectEqual(@as(u64, 0x9ABCDEF0), sw.computeResult());
+}
+
+test "sd lookup (store doubleword)" {
+    const sd = SdLookup(64).init(0x1000, 16, 0xDEADBEEF12345678);
+    try std.testing.expectEqual(@as(u64, 0xDEADBEEF12345678), sd.computeResult());
+    try std.testing.expectEqual(@as(u64, 0x1010), sd.computeAddress());
+}

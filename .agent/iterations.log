@@ -304,3 +304,20 @@ Ended: 2025-12-28T02:38:53.858262
 Turns: 109
 Cost: $8.0171
 
+
+--- Iteration 21 ---
+Started: 2025-12-28T02:38:55.861869
+Ended: 2025-12-28T02:50:42.156687
+Turns: 86
+Cost: $4.3233
+
+=== Iteration 23 ===
+Date: Sun Dec 28 03:01:58 CET 2025
+
+Improvements:
+1. Added load/store instruction lookups (13 new lookups)
+2. Improved verifier with proper transcript binding
+3. Added RV64I immediate word operations (ADDIW, SLLIW, SRLIW, SRAIW)
+
+Tests: 502 passing
+

@@ -302,6 +302,29 @@ pub fn Blake2bTranscript(comptime F: type) type {
             }
             self.appendMessage("end_append_vector");
         }
+
+        /// Append a GT (Fp12) element to the transcript
+        /// For Dory compatibility - appends the serialized GT element as bytes
+        pub fn appendGT(self: *Self, gt: anytype) void {
+            const bytes = gt.toBytes();
+            self.appendBytes(&bytes);
+        }
+
+        /// Append a G1 point to the transcript (compressed format)
+        /// For Dory compatibility - appends the compressed serialized point
+        pub fn appendG1Compressed(self: *Self, point: anytype) void {
+            const dory = @import("../poly/commitment/dory.zig");
+            const bytes = dory.compressG1(point);
+            self.appendBytes(&bytes);
+        }
+
+        /// Append a G2 point to the transcript (compressed format)
+        /// For Dory compatibility - appends the compressed serialized point
+        pub fn appendG2Compressed(self: *Self, point: anytype) void {
+            const dory = @import("../poly/commitment/dory.zig");
+            const bytes = dory.compressG2(point);
+            self.appendBytes(&bytes);
+        }
     };
 }
 

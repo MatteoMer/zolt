@@ -1157,6 +1157,261 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             // Placeholder: verification not yet fully implemented
             return true;
         }
+
+        /// Create an opening proof using a transcript for Fiat-Shamir challenges.
+        ///
+        /// This is the transcript-integrated version that produces challenges
+        /// compatible with Jolt's verifier.
+        ///
+        /// The transcript should be the Blake2bTranscript for Jolt compatibility.
+        pub fn openWithTranscript(
+            params: *const SetupParams,
+            evals: []const F,
+            point: []const F,
+            row_commitments_opt: ?[]const G1Point,
+            transcript: anytype,
+            allocator: Allocator,
+        ) !Proof {
+            const nu = params.nu;
+            const sigma = params.sigma;
+            const num_rounds = @max(nu, sigma);
+
+            // Step 1: Get or compute row commitments
+            const row_commitments = if (row_commitments_opt) |rc| blk: {
+                const owned = try allocator.alloc(G1Point, rc.len);
+                @memcpy(owned, rc);
+                break :blk owned;
+            } else blk: {
+                break :blk try computeRowCommitments(F, params, evals, allocator);
+            };
+            defer allocator.free(row_commitments);
+
+            // Step 2: Compute evaluation vectors
+            const left_vec = try allocator.alloc(F, @as(usize, 1) << @intCast(nu));
+            defer allocator.free(left_vec);
+            const right_vec = try allocator.alloc(F, @as(usize, 1) << @intCast(sigma));
+            defer allocator.free(right_vec);
+
+            computeEvaluationVectors(F, point, nu, sigma, left_vec, right_vec);
+
+            // Step 3: Compute v_vec
+            const v_vec = try computeVectorMatrixProduct(F, evals, left_vec, nu, sigma, allocator);
+            defer allocator.free(v_vec);
+
+            // Pad row_commitments
+            const padded_row_commitments = if (nu < sigma) blk: {
+                const padded_len = @as(usize, 1) << @intCast(sigma);
+                const padded = try allocator.alloc(G1Point, padded_len);
+                @memcpy(padded[0..row_commitments.len], row_commitments);
+                for (row_commitments.len..padded_len) |i| {
+                    padded[i] = G1Point.identity();
+                }
+                break :blk padded;
+            } else blk: {
+                const padded = try allocator.alloc(G1Point, row_commitments.len);
+                @memcpy(padded, row_commitments);
+                break :blk padded;
+            };
+            defer allocator.free(padded_row_commitments);
+
+            // Step 4: Compute VMV message
+            const t_vec_v = msm.MSM(F, Fp).compute(padded_row_commitments, v_vec);
+            const t_vec_v_fp = G1PointFp{
+                .x = t_vec_v.x,
+                .y = t_vec_v.y,
+                .infinity = t_vec_v.infinity,
+            };
+            const c = pairing.pairingFp(t_vec_v_fp, params.g2_vec[0]);
+
+            const gamma1_v = msm.MSM(F, Fp).compute(params.g1_vec[0..v_vec.len], v_vec);
+            const gamma1_v_fp = G1PointFp{
+                .x = gamma1_v.x,
+                .y = gamma1_v.y,
+                .infinity = gamma1_v.infinity,
+            };
+            const d2 = pairing.pairingFp(gamma1_v_fp, params.g2_vec[0]);
+
+            const e1 = msm.MSM(F, Fp).compute(row_commitments, left_vec);
+
+            const vmv_message = VMVMessage{
+                .c = c,
+                .d2 = d2,
+                .e1 = e1,
+            };
+
+            // Append VMV message to transcript
+            transcript.appendGT(vmv_message.c);
+            transcript.appendGT(vmv_message.d2);
+            transcript.appendG1Compressed(vmv_message.e1);
+
+            // Initialize working arrays
+            const vec_len = @as(usize, 1) << @intCast(sigma);
+            const v1_work = try allocator.alloc(G1Point, vec_len);
+            defer allocator.free(v1_work);
+            @memcpy(v1_work[0..padded_row_commitments.len], padded_row_commitments);
+            for (padded_row_commitments.len..vec_len) |i| {
+                v1_work[i] = G1Point.identity();
+            }
+
+            const v2_work = try allocator.alloc(G2Point, vec_len);
+            defer allocator.free(v2_work);
+            for (0..vec_len) |i| {
+                if (i < v_vec.len) {
+                    v2_work[i] = params.g2_vec[0].scalarMul(v_vec[i]);
+                } else {
+                    v2_work[i] = G2Point.identity();
+                }
+            }
+
+            const s1_work = try allocator.alloc(F, vec_len);
+            defer allocator.free(s1_work);
+            @memcpy(s1_work[0..right_vec.len], right_vec);
+            for (right_vec.len..vec_len) |i| {
+                s1_work[i] = F.zero();
+            }
+
+            const s2_work = try allocator.alloc(F, vec_len);
+            defer allocator.free(s2_work);
+            @memcpy(s2_work[0..left_vec.len], left_vec);
+            for (left_vec.len..vec_len) |i| {
+                s2_work[i] = F.zero();
+            }
+
+            // Allocate message arrays
+            const first_messages = try allocator.alloc(FirstReduceMessage, num_rounds);
+            errdefer allocator.free(first_messages);
+            const second_messages = try allocator.alloc(SecondReduceMessage, num_rounds);
+            errdefer allocator.free(second_messages);
+
+            // Run reduce-and-fold rounds with transcript challenges
+            var current_len = vec_len;
+            var round: usize = 0;
+
+            while (round < num_rounds) : (round += 1) {
+                const n2 = current_len / 2;
+
+                // Compute first reduce message
+                const d1_left = multiPairG1G2(v1_work[0..n2], params.g2_vec[0..n2]);
+                const d1_right = multiPairG1G2(v1_work[n2..current_len], params.g2_vec[0..n2]);
+                const d2_left = multiPairG1G2(params.g1_vec[0..n2], v2_work[0..n2]);
+                const d2_right = multiPairG1G2(params.g1_vec[0..n2], v2_work[n2..current_len]);
+                const e1_beta = msm.MSM(F, Fp).compute(params.g1_vec[0..current_len], s2_work[0..current_len]);
+                const e2_beta = msmG2(F, params.g2_vec[0..current_len], s1_work[0..current_len]);
+
+                first_messages[round] = FirstReduceMessage{
+                    .d1_left = d1_left,
+                    .d1_right = d1_right,
+                    .d2_left = d2_left,
+                    .d2_right = d2_right,
+                    .e1_beta = e1_beta,
+                    .e2_beta = e2_beta,
+                };
+
+                // Append first message to transcript
+                transcript.appendGT(d1_left);
+                transcript.appendGT(d1_right);
+                transcript.appendGT(d2_left);
+                transcript.appendGT(d2_right);
+                transcript.appendG1Compressed(e1_beta);
+                transcript.appendG2Compressed(e2_beta);
+
+                // Get beta challenge from transcript
+                const beta = transcript.challengeScalar();
+                const beta_inv = beta.inverse() orelse F.one();
+
+                // Apply first challenge
+                for (0..current_len) |i| {
+                    const scaled_g1 = msm.MSM(F, Fp).scalarMul(params.g1_vec[i], beta).toAffine();
+                    v1_work[i] = v1_work[i].add(scaled_g1);
+
+                    const scaled_g2 = params.g2_vec[i].scalarMul(beta_inv);
+                    v2_work[i] = v2_work[i].add(scaled_g2);
+                }
+
+                // Compute second reduce message
+                const c_plus = multiPairG1G2(v1_work[0..n2], v2_work[n2..current_len]);
+                const c_minus = multiPairG1G2(v1_work[n2..current_len], v2_work[0..n2]);
+                const e1_plus = msm.MSM(F, Fp).compute(v1_work[0..n2], s2_work[n2..current_len]);
+                const e1_minus = msm.MSM(F, Fp).compute(v1_work[n2..current_len], s2_work[0..n2]);
+                const e2_plus = msmG2(F, v2_work[n2..current_len], s1_work[0..n2]);
+                const e2_minus = msmG2(F, v2_work[0..n2], s1_work[n2..current_len]);
+
+                second_messages[round] = SecondReduceMessage{
+                    .c_plus = c_plus,
+                    .c_minus = c_minus,
+                    .e1_plus = e1_plus,
+                    .e1_minus = e1_minus,
+                    .e2_plus = e2_plus,
+                    .e2_minus = e2_minus,
+                };
+
+                // Append second message to transcript
+                transcript.appendGT(c_plus);
+                transcript.appendGT(c_minus);
+                transcript.appendG1Compressed(e1_plus);
+                transcript.appendG1Compressed(e1_minus);
+                transcript.appendG2Compressed(e2_plus);
+                transcript.appendG2Compressed(e2_minus);
+
+                // Get alpha challenge from transcript
+                const alpha = transcript.challengeScalar();
+                const alpha_inv = alpha.inverse() orelse F.one();
+
+                // Fold vectors
+                for (0..n2) |i| {
+                    const scaled_l = msm.MSM(F, Fp).scalarMul(v1_work[i], alpha).toAffine();
+                    v1_work[i] = scaled_l.add(v1_work[i + n2]);
+                }
+
+                for (0..n2) |i| {
+                    const scaled_l = v2_work[i].scalarMul(alpha_inv);
+                    v2_work[i] = scaled_l.add(v2_work[i + n2]);
+                }
+
+                for (0..n2) |i| {
+                    s1_work[i] = alpha.mul(s1_work[i]).add(s1_work[i + n2]);
+                }
+
+                for (0..n2) |i| {
+                    s2_work[i] = alpha_inv.mul(s2_work[i]).add(s2_work[i + n2]);
+                }
+
+                current_len = n2;
+            }
+
+            // Get gamma challenge
+            const gamma = transcript.challengeScalar();
+            const gamma_inv = gamma.inverse() orelse F.one();
+
+            // Compute final message
+            const gamma_s1 = gamma.mul(s1_work[0]);
+            const h1 = G1Point.generator();
+            const scaled_h1 = msm.MSM(F, Fp).scalarMul(h1, gamma_s1).toAffine();
+            const final_e1 = v1_work[0].add(scaled_h1);
+
+            const gamma_inv_s2 = gamma_inv.mul(s2_work[0]);
+            const h2 = G2Point.generator();
+            const scaled_h2 = h2.scalarMul(gamma_inv_s2);
+            const final_e2 = v2_work[0].add(scaled_h2);
+
+            const final_message = ScalarProductMessage{
+                .e1 = final_e1,
+                .e2 = final_e2,
+            };
+
+            // Get final d challenge to keep transcript in sync
+            _ = transcript.challengeScalar();
+
+            return Proof{
+                .vmv_message = vmv_message,
+                .first_messages = first_messages,
+                .second_messages = second_messages,
+                .final_message = final_message,
+                .nu = nu,
+                .sigma = sigma,
+                .allocator = allocator,
+            };
+        }
     };
 }
 

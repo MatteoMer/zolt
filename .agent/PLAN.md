@@ -1,10 +1,35 @@
 # Zolt zkVM Implementation Plan
 
-## Current Status (December 2024 - Iteration 27)
+## Current Status (December 2024 - Iteration 28)
 
 ### Session Summary
 
-This iteration focused on adding comprehensive examples for the core cryptographic primitives:
+This iteration upgraded the CLI prove command to actually generate and verify proofs:
+
+1. **Full Proving Pipeline**
+   - Updated `zolt prove <elf>` to call `prover.prove()` and `verifier.verify()`
+   - Added timing measurements for each step (preprocess, init, prove, verify)
+   - Shows proof summary with commitment status at the end
+
+2. **SRS Inspection Command**
+   - Added `zolt srs <ptau>` to inspect Powers of Tau ceremony files
+   - Displays power, point counts, first G1 point, and usability info
+   - Validates curve points
+
+3. **External SRS Loading**
+   - Added `preprocessWithSRS()` method to Preprocessing
+   - Allows loading production SRS from PTAU ceremony files
+   - Validates SRS is large enough for configured trace length
+
+4. **Bug Fixes**
+   - Fixed `toBytes`/`fromBytes` to use `toBytesBE`/`fromBytesBE` for consistency
+   - Fixed R1CS proof verification to check `eval_claims` instead of non-existent fields
+
+## Previous Status (Iteration 27)
+
+### Previous Session Summary
+
+Previous iteration focused on adding comprehensive examples for the core cryptographic primitives:
 
 1. **HyperKZG Commitment Example**
    - Created `examples/hyperkzg_commitment.zig`
@@ -289,6 +314,14 @@ SRS Utilities
 ### Low Priority
 1. Documentation and examples
 2. ✓ Benchmarking suite (fixed and working)
+
+## Commit History (Iteration 28)
+1. Upgrade prove command to actually generate and verify proofs
+2. Add SRS inspection command and preprocessWithSRS method
+
+## Commit History (Iteration 27)
+1. Add HyperKZG and Sumcheck protocol examples
+2. Fix examples to match current API and add toU64 helper
 
 ## Commit History (Iteration 26)
 1. Clean up outdated TODO comments

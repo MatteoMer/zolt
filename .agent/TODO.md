@@ -1,6 +1,17 @@
 # Zolt zkVM Implementation TODO
 
-## Completed (This Session - Iteration 27)
+## Completed (This Session - Iteration 28)
+
+### CLI and API Improvements
+- [x] Upgrade prove command to actually call prover.prove() and verifier.verify()
+- [x] Add timing for each proving step (preprocess, init, prove, verify)
+- [x] Show proof summary with commitment status
+- [x] Fix toBytes/fromBytes to use toBytesBE/fromBytesBE for consistency
+- [x] Fix R1CS proof verification to use eval_claims instead of missing fields
+- [x] Add 'srs' command to inspect PTAU ceremony files
+- [x] Add preprocessWithSRS() for loading external SRS data
+
+## Completed (Iteration 27)
 
 ### Examples and Documentation
 - [x] Add HyperKZG commitment example (hyperkzg_commitment.zig)
@@ -130,7 +141,11 @@
 ## Test Status
 All tests pass (538 tests).
 
-## Commits This Session (Iteration 27)
+## Commits This Session (Iteration 28)
+1. Upgrade prove command to actually generate and verify proofs
+2. Add SRS inspection command and preprocessWithSRS method
+
+## Commits (Iteration 27)
 1. Add HyperKZG and Sumcheck protocol examples
 2. Fix examples to match current API and add toU64 helper
 

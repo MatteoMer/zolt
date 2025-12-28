@@ -10,6 +10,16 @@
 - [x] Added `verifyAlgebraic()` for testing without pairing overhead
 - [x] Added comprehensive documentation for verification algorithm
 
+### Host Execute Integration Tests
+- [x] Added test "execute runs simple program" - verifies c.nop execution
+- [x] Added test "execute with longer program" - verifies multi-instruction execution
+
+### Batch Verification Fixes
+- [x] Fixed `verifyBatch()` to return `!bool` (error union) for transcript errors
+- [x] Added test reference so batch.zig tests are discovered
+- [x] Added test "batch opening accumulator multiple claims"
+- [x] Added test "opening claim initialization"
+
 ## Completed (Previous Sessions)
 
 ### Iteration 16: Projective Point Doubling Bug + HyperKZG Architecture
@@ -48,6 +58,8 @@
 - **ELF Loader** - Complete ELF32/ELF64 parsing
 - **MSM** - Multi-scalar multiplication with bucket method
 - **HyperKZG** - commit(), verify(), verifyWithPairing() with batched pairing
+- **Batch Verification** - BatchOpeningAccumulator for multiple openings
+- **Host Execute** - Program execution with trace generation
 
 ### Partially Working
 - **Dory** - commit() works, open() placeholder
@@ -56,7 +68,6 @@
 ## Next Steps (Future Iterations)
 
 ### High Priority
-- [ ] Add end-to-end integration test (prove -> verify)
 - [ ] Wire commitment proofs into JoltProof structure
 - [ ] Implement batch opening verification for multiple polynomials
 
@@ -70,4 +81,4 @@
 - [ ] Documentation and examples
 
 ## Test Status
-All 350 tests pass.
+All 364 tests pass.

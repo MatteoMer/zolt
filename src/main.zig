@@ -15,6 +15,7 @@ const Command = enum {
     run,
     prove,
     verify,
+    stats,
     srs,
     bench,
     decode,
@@ -36,6 +37,7 @@ fn printHelp() void {
         \\    run [opts] <elf>   Run RISC-V ELF binary in the emulator
         \\    prove [opts] <elf> Generate ZK proof for ELF binary
         \\    verify <proof>    Verify a proof file
+        \\    stats <proof>     Show detailed proof statistics
         \\    srs <ptau>        Inspect a Powers of Tau (ptau) file
         \\    decode <hex>      Decode a RISC-V instruction (hex)
         \\    bench             Run performance benchmarks
@@ -44,6 +46,7 @@ fn printHelp() void {
         \\    zolt run program.elf                    # Execute a RISC-V binary
         \\    zolt prove -o proof.bin program.elf     # Generate and save a proof
         \\    zolt verify proof.bin                   # Verify a saved proof
+        \\    zolt stats proof.bin                    # Show proof statistics
         \\    zolt srs file.ptau                      # Inspect a PTAU file
         \\    zolt decode 0x00a00513                  # Decode: li a0, 10
         \\    zolt bench                              # Run benchmarks
@@ -143,6 +146,8 @@ fn parseCommand(arg: []const u8) Command {
         return .prove;
     } else if (std.mem.eql(u8, arg, "verify")) {
         return .verify;
+    } else if (std.mem.eql(u8, arg, "stats")) {
+        return .stats;
     } else if (std.mem.eql(u8, arg, "srs")) {
         return .srs;
     } else if (std.mem.eql(u8, arg, "decode")) {
@@ -563,6 +568,105 @@ fn inspectSRS(allocator: std.mem.Allocator, ptau_path: []const u8) !void {
     std.debug.print("\nSRS inspection complete.\n", .{});
 }
 
+fn showProofStats(allocator: std.mem.Allocator, proof_path: []const u8) !void {
+    std.debug.print("Zolt Proof Statistics\n", .{});
+    std.debug.print("=====================\n\n", .{});
+
+    // Get file info
+    const file = std.fs.cwd().openFile(proof_path, .{}) catch |err| {
+        std.debug.print("Error opening proof file: {}\n", .{err});
+        return err;
+    };
+    const file_stat = try file.stat();
+    var header_buf: [64]u8 = undefined;
+    const bytes_read = try file.readAll(&header_buf);
+    file.close();
+
+    const is_json = zolt.zkvm.isJsonProof(header_buf[0..bytes_read]);
+
+    std.debug.print("File: {s}\n", .{proof_path});
+    std.debug.print("Format: {s}\n", .{if (is_json) "JSON" else "Binary"});
+    std.debug.print("File size: {} bytes ({d:.2} KB)\n", .{ file_stat.size, @as(f64, @floatFromInt(file_stat.size)) / 1024.0 });
+
+    // Load proof
+    std.debug.print("\nLoading proof...\n", .{});
+    var timer = std.time.Timer.start() catch return;
+
+    var proof = zolt.zkvm.readProofAutoDetect(BN254Scalar, allocator, proof_path) catch |err| {
+        std.debug.print("Error loading proof: {}\n", .{err});
+        return err;
+    };
+    defer proof.deinit();
+
+    const load_time = timer.read();
+    std.debug.print("Load time: {d:.2} ms\n", .{@as(f64, @floatFromInt(load_time)) / 1_000_000.0});
+
+    // Section 1: Commitments
+    std.debug.print("\n--- COMMITMENTS ---\n", .{});
+    std.debug.print("Bytecode commitment:  {s}\n", .{if (!proof.bytecode_proof.commitment.isZero()) "present" else "none"});
+    std.debug.print("Memory commitment:    {s}\n", .{if (!proof.memory_proof.commitment.isZero()) "present" else "none"});
+    std.debug.print("Register commitment:  {s}\n", .{if (!proof.register_proof.commitment.isZero()) "present" else "none"});
+
+    // Section 2: R1CS Proof
+    std.debug.print("\n--- R1CS PROOF ---\n", .{});
+    std.debug.print("Tau point size: {}\n", .{proof.r1cs_proof.tau.len});
+    std.debug.print("Eval point size: {}\n", .{proof.r1cs_proof.eval_point.len});
+
+    // Section 3: Stage Proofs
+    if (proof.stage_proofs) |stage_proofs| {
+        std.debug.print("\n--- STAGE PROOFS (Sumcheck) ---\n", .{});
+        std.debug.print("log_t (trace length): 2^{} = {} steps\n", .{ stage_proofs.log_t, @as(u64, 1) << @intCast(stage_proofs.log_t) });
+        std.debug.print("log_k (address space): 2^{} = {} addresses\n", .{ stage_proofs.log_k, @as(u64, 1) << @intCast(stage_proofs.log_k) });
+
+        const size = stage_proofs.proofSize();
+        std.debug.print("\nOverall statistics:\n", .{});
+        std.debug.print("  Total field elements: {}\n", .{size.total_elements});
+        std.debug.print("  Round polynomials: {}\n", .{size.round_polys});
+        std.debug.print("  Polynomial coefficients: {}\n", .{size.poly_coeffs});
+        std.debug.print("  Challenges: {}\n", .{size.challenges});
+        std.debug.print("  Final claims: {}\n", .{size.claims});
+
+        const stage_names = [_][]const u8{
+            "Stage 1 (Spartan)",
+            "Stage 2 (RAF)",
+            "Stage 3 (Lasso)",
+            "Stage 4 (Value)",
+            "Stage 5 (Register)",
+            "Stage 6 (Booleanity)",
+        };
+
+        std.debug.print("\nPer-stage breakdown:\n", .{});
+        for (stage_proofs.stage_proofs, 0..) |stage, i| {
+            var stage_coeffs: usize = 0;
+            for (stage.round_polys.items) |poly| {
+                stage_coeffs += poly.len;
+            }
+            std.debug.print("  {s:20}: {} rounds, {} coeffs, {} claims\n", .{
+                stage_names[i],
+                stage.round_polys.items.len,
+                stage_coeffs,
+                stage.final_claims.items.len,
+            });
+        }
+
+        // Calculate estimated size breakdown
+        const field_element_bytes = 32; // 256-bit field elements
+        const estimated_stage_bytes = size.total_elements * field_element_bytes;
+        const commitment_bytes: usize = 3 * 64; // 3 commitments, 64 bytes each (G1 point)
+
+        std.debug.print("\n--- SIZE BREAKDOWN (estimated) ---\n", .{});
+        std.debug.print("Commitments: ~{} bytes\n", .{commitment_bytes});
+        std.debug.print("Stage proofs: ~{} bytes ({} field elements)\n", .{ estimated_stage_bytes, size.total_elements });
+        std.debug.print("Overhead (headers, metadata): ~{} bytes\n", .{file_stat.size -| (estimated_stage_bytes + commitment_bytes)});
+    } else {
+        std.debug.print("\n--- STAGE PROOFS ---\n", .{});
+        std.debug.print("No stage proofs present (lightweight proof)\n", .{});
+    }
+
+    std.debug.print("\n=====================\n", .{});
+    std.debug.print("Statistics complete.\n", .{});
+}
+
 fn runBenchmarks() void {
     std.debug.print("Running benchmarks...\n\n", .{});
 
@@ -800,6 +904,27 @@ pub fn main() !void {
                 std.debug.print("Usage: zolt verify <proof_file>\n", .{});
             }
         },
+        .stats => {
+            if (args.next()) |arg| {
+                if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+                    std.debug.print("Usage: zolt stats <proof_file>\n\n", .{});
+                    std.debug.print("Show detailed statistics about a Zolt proof file.\n", .{});
+                    std.debug.print("Includes information about commitments, sumcheck stages,\n", .{});
+                    std.debug.print("proof size breakdown, and more.\n\n", .{});
+                    std.debug.print("Example:\n", .{});
+                    std.debug.print("  zolt stats proof.bin\n", .{});
+                    std.debug.print("  zolt stats proof.json\n", .{});
+                } else {
+                    showProofStats(allocator, arg) catch |err| {
+                        std.debug.print("Failed to read proof: {s}\n", .{@errorName(err)});
+                        std.process.exit(1);
+                    };
+                }
+            } else {
+                std.debug.print("Error: stats command requires a proof file path\n", .{});
+                std.debug.print("Usage: zolt stats <proof_file>\n", .{});
+            }
+        },
         .srs => {
             if (args.next()) |arg| {
                 if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
@@ -856,6 +981,7 @@ test "command parsing" {
     try std.testing.expect(parseCommand("run") == .run);
     try std.testing.expect(parseCommand("prove") == .prove);
     try std.testing.expect(parseCommand("verify") == .verify);
+    try std.testing.expect(parseCommand("stats") == .stats);
     try std.testing.expect(parseCommand("decode") == .decode);
     try std.testing.expect(parseCommand("bench") == .bench);
     try std.testing.expect(parseCommand("unknown_cmd") == .unknown);

@@ -72,6 +72,9 @@ zolt prove --json -o proof.json program.elf    # Save proof to file (JSON)
 zolt verify proof.bin                            # Binary format
 zolt verify proof.json                           # JSON format
 
+# Show detailed proof statistics
+zolt stats proof.bin                             # Size breakdown, stages, etc.
+
 # Inspect a Powers of Tau (PTAU) ceremony file
 zolt srs ceremony.ptau
 

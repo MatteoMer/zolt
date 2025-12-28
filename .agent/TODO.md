@@ -1,6 +1,20 @@
 # Zolt zkVM Implementation TODO
 
-## Completed (This Session - Iteration 45)
+## Completed (This Session - Iteration 46)
+
+### CLI Stats Command
+- [x] Add `zolt stats <proof>` command for detailed proof analysis
+  - Shows file format (JSON/Binary) and size
+  - Displays commitment status (bytecode, memory, register)
+  - Shows R1CS proof information
+  - Displays sumcheck stage breakdown (all 6 stages)
+  - Shows per-stage statistics (rounds, coefficients, claims)
+  - Estimates size breakdown (commitments, stages, overhead)
+- [x] Update help message with new command
+- [x] Add test for stats command parsing
+- [x] Update README with stats command documentation
+
+## Completed (Previous Session - Iteration 45)
 
 ### JSON Deserialization for Proof Loading
 - [x] Add `JsonProofReader(F)` type for parsing JSON proofs
@@ -114,6 +128,7 @@ zolt prove [opts] <elf> # Generate ZK proof
   -o, --output F       # Save proof to file
   --json               # Output in JSON format
 zolt verify <proof>    # Verify a saved proof (auto-detects format)
+zolt stats <proof>     # Show detailed proof statistics
 zolt decode <hex>      # Decode RISC-V instruction
 zolt srs <ptau>        # Inspect PTAU file
 zolt bench             # Run benchmarks

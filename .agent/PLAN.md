@@ -1,6 +1,24 @@
 # Zolt zkVM Implementation Plan
 
-## Current Status (December 2024 - Iteration 45)
+## Current Status (December 2024 - Iteration 46)
+
+### Session Summary - Stats Command Added
+
+This iteration added a new CLI command for proof statistics:
+
+1. **Stats Command**
+   - `zolt stats <proof>` - Show detailed proof statistics
+   - Displays file format (JSON/Binary) and size
+   - Shows commitment status
+   - Shows R1CS proof information
+   - Per-stage sumcheck breakdown (rounds, coefficients, claims)
+   - Size breakdown estimates
+
+2. **Documentation Updates**
+   - Updated README with new command
+   - Updated help messages
+
+## Previous Status (December 2024 - Iteration 45)
 
 ### Session Summary - JSON Deserialization Added
 

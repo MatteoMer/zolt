@@ -128,6 +128,60 @@ pub const Emulator = struct {
         try self.device.inputs.appendSlice(self.allocator, inputs);
     }
 
+    /// Check if address is in the I/O region (input, output, advice, etc.)
+    fn isIOAddress(self: *const Emulator, address: u64) bool {
+        return self.device.isInput(address) or
+            self.device.isOutput(address) or
+            self.device.isTrustedAdvice(address) or
+            self.device.isUntrustedAdvice(address) or
+            self.device.isPanic(address) or
+            self.device.isTermination(address);
+    }
+
+    /// Read a byte, checking I/O region first
+    fn readByteWithIO(self: *Emulator, address: u64) !u8 {
+        if (self.isIOAddress(address)) {
+            return self.device.load(address);
+        }
+        return self.ram.readByte(address, self.state.cycle);
+    }
+
+    /// Read a 64-bit word, checking I/O region first
+    fn readWordWithIO(self: *Emulator, address: u64) !u64 {
+        const aligned_addr = address & ~@as(u64, 7);
+        if (self.isIOAddress(aligned_addr)) {
+            // Read 8 bytes from I/O
+            var result: u64 = 0;
+            for (0..8) |i| {
+                const byte = self.device.load(aligned_addr + i);
+                result |= @as(u64, byte) << (@as(u6, @intCast(i)) * 8);
+            }
+            return result;
+        }
+        return self.ram.read(aligned_addr, self.state.cycle);
+    }
+
+    /// Write a byte, checking I/O region first
+    fn writeByteWithIO(self: *Emulator, address: u64, value: u8) !void {
+        if (self.isIOAddress(address)) {
+            return self.device.store(address, value);
+        }
+        return self.ram.writeByte(address, value, self.state.cycle);
+    }
+
+    /// Write a 64-bit word, checking I/O region first
+    fn writeWordWithIO(self: *Emulator, address: u64, value: u64) !void {
+        const aligned_addr = address & ~@as(u64, 7);
+        if (self.isIOAddress(aligned_addr)) {
+            // Write 8 bytes to I/O
+            for (0..8) |i| {
+                try self.device.store(aligned_addr + i, @truncate(value >> (@as(u6, @intCast(i)) * 8)));
+            }
+            return;
+        }
+        return self.ram.write(aligned_addr, value, self.state.cycle);
+    }
+
     /// Execute a single instruction
     pub fn step(self: *Emulator) !bool {
         if (self.state.cycle >= self.max_cycles) {
@@ -298,23 +352,51 @@ pub const Emulator = struct {
 
                 const value = switch (@as(zkvm.instruction.LoadFunct3, @enumFromInt(decoded.funct3))) {
                     .LB => blk: {
-                        const byte = try self.ram.readByte(addr, self.state.cycle);
+                        const byte = try self.readByteWithIO(addr);
                         break :blk @as(u64, @bitCast(@as(i64, @as(i8, @bitCast(byte)))));
                     },
-                    .LBU => try self.ram.readByte(addr, self.state.cycle),
+                    .LBU => try self.readByteWithIO(addr),
                     .LH => blk: {
-                        const low = try self.ram.readByte(addr, self.state.cycle);
-                        const high = try self.ram.readByte(addr + 1, self.state.cycle);
+                        const low = try self.readByteWithIO(addr);
+                        const high = try self.readByteWithIO(addr + 1);
                         const halfword: i16 = @bitCast((@as(u16, high) << 8) | low);
                         break :blk @as(u64, @bitCast(@as(i64, halfword)));
                     },
                     .LW => blk: {
-                        const word = try self.ram.read(addr & ~@as(u64, 3), self.state.cycle);
-                        const signed: i32 = @truncate(@as(i64, @bitCast(word)));
+                        // Read 4 bytes
+                        var word: u32 = 0;
+                        for (0..4) |i| {
+                            const byte = try self.readByteWithIO(addr + i);
+                            word |= @as(u32, byte) << (@as(u5, @intCast(i)) * 8);
+                        }
+                        const signed: i32 = @bitCast(word);
                         break :blk @as(u64, @bitCast(@as(i64, signed)));
                     },
-                    .LD => try self.ram.read(addr & ~@as(u64, 7), self.state.cycle),
-                    else => 0,
+                    .LWU => blk: {
+                        // Load word unsigned (RV64)
+                        var word: u32 = 0;
+                        for (0..4) |i| {
+                            const byte = try self.readByteWithIO(addr + i);
+                            word |= @as(u32, byte) << (@as(u5, @intCast(i)) * 8);
+                        }
+                        break :blk @as(u64, word);
+                    },
+                    .LD => blk: {
+                        // Read 8 bytes
+                        var dword: u64 = 0;
+                        for (0..8) |i| {
+                            const byte = try self.readByteWithIO(addr + i);
+                            dword |= @as(u64, byte) << (@as(u6, @intCast(i)) * 8);
+                        }
+                        break :blk dword;
+                    },
+                    .LHU => blk: {
+                        // Load halfword unsigned
+                        const low = try self.readByteWithIO(addr);
+                        const high = try self.readByteWithIO(addr + 1);
+                        break :blk @as(u64, (@as(u16, high) << 8) | low);
+                    },
+                    _ => 0,
                 };
 
                 result.rd_value = value;
@@ -328,20 +410,26 @@ pub const Emulator = struct {
 
                 switch (@as(zkvm.instruction.StoreFunct3, @enumFromInt(decoded.funct3))) {
                     .SB => {
-                        try self.ram.writeByte(addr, @truncate(rs2), self.state.cycle);
+                        try self.writeByteWithIO(addr, @truncate(rs2));
                         result.memory_value = rs2 & 0xFF;
                     },
                     .SH => {
-                        try self.ram.writeByte(addr, @truncate(rs2), self.state.cycle);
-                        try self.ram.writeByte(addr + 1, @truncate(rs2 >> 8), self.state.cycle);
+                        try self.writeByteWithIO(addr, @truncate(rs2));
+                        try self.writeByteWithIO(addr + 1, @truncate(rs2 >> 8));
                         result.memory_value = rs2 & 0xFFFF;
                     },
                     .SW => {
-                        try self.ram.write(addr & ~@as(u64, 3), rs2 & 0xFFFFFFFF, self.state.cycle);
+                        // Write 4 bytes
+                        for (0..4) |i| {
+                            try self.writeByteWithIO(addr + i, @truncate(rs2 >> (@as(u6, @intCast(i)) * 8)));
+                        }
                         result.memory_value = rs2 & 0xFFFFFFFF;
                     },
                     .SD => {
-                        try self.ram.write(addr & ~@as(u64, 7), rs2, self.state.cycle);
+                        // Write 8 bytes
+                        for (0..8) |i| {
+                            try self.writeByteWithIO(addr + i, @truncate(rs2 >> (@as(u6, @intCast(i)) * 8)));
+                        }
                         result.memory_value = rs2;
                     },
                     _ => {},
@@ -1007,4 +1095,46 @@ test "lookup trace integration" {
     try std.testing.expect(stats.range_check_lookups >= 3); // 3 ADD operations
     try std.testing.expect(stats.and_lookups >= 1);
     try std.testing.expect(stats.or_lookups >= 1);
+}
+
+test "I/O region read from inputs" {
+    const allocator = std.testing.allocator;
+    const config = common.MemoryConfig{
+        .program_size = 1024,
+    };
+    var emu = Emulator.init(allocator, &config);
+    defer emu.deinit();
+
+    // Set up input data - simulating postcard-serialized u32 value 50
+    // postcard serializes small u32 as a single varint byte
+    try emu.setInputs(&[_]u8{ 50 });
+
+    // Get the input address
+    const input_addr = emu.device.memory_layout.input_start;
+
+    // Verify we can read the input via the I/O region helpers
+    try std.testing.expect(emu.isIOAddress(input_addr));
+
+    const byte = try emu.readByteWithIO(input_addr);
+    try std.testing.expectEqual(@as(u8, 50), byte);
+}
+
+test "I/O region write to outputs" {
+    const allocator = std.testing.allocator;
+    const config = common.MemoryConfig{
+        .program_size = 1024,
+    };
+    var emu = Emulator.init(allocator, &config);
+    defer emu.deinit();
+
+    // Get the output address
+    const output_addr = emu.device.memory_layout.output_start;
+
+    // Write to output region
+    try emu.writeByteWithIO(output_addr, 42);
+    try emu.writeByteWithIO(output_addr + 1, 43);
+
+    // Verify outputs were recorded
+    try std.testing.expectEqual(@as(u8, 42), emu.device.outputs.items[0]);
+    try std.testing.expectEqual(@as(u8, 43), emu.device.outputs.items[1]);
 }

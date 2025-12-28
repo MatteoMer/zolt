@@ -529,3 +529,212 @@ test "blake2b transcript: challenge scalar powers" {
     try testing.expect(powers[2].eql(q.mul(q)));
     try testing.expect(powers[3].eql(q.mul(q).mul(q)));
 }
+
+// =============================================================================
+// Jolt Compatibility Test Vectors
+// =============================================================================
+// These tests verify that Zolt's Blake2bTranscript produces identical outputs
+// to Jolt's Blake2bTranscript (Rust). Any failure here means proof verification
+// will fail when a Zolt proof is verified by Jolt.
+
+test "jolt compatibility: test vector 1 - simple label and message" {
+    const Transcript = Blake2bTranscript(BN254Scalar);
+
+    var t = Transcript.init("zolt_test");
+    t.appendMessage("hello");
+
+    // Expected state after append_message (from Jolt):
+    // [04, 5d, b7, 95, b0, 5d, 42, b5, c7, 9d, 6d, bb, f2, 0c, be, 09,
+    //  26, 36, df, 45, bb, 1c, 80, f2, a4, be, 9b, 66, 4b, ad, 5e, 0d]
+    const expected_state = [_]u8{
+        0x04, 0x5d, 0xb7, 0x95, 0xb0, 0x5d, 0x42, 0xb5,
+        0xc7, 0x9d, 0x6d, 0xbb, 0xf2, 0x0c, 0xbe, 0x09,
+        0x26, 0x36, 0xdf, 0x45, 0xbb, 0x1c, 0x80, 0xf2,
+        0xa4, 0xbe, 0x9b, 0x66, 0x4b, 0xad, 0x5e, 0x0d,
+    };
+
+    try testing.expectEqualSlices(u8, &expected_state, &t.state);
+    try testing.expectEqual(@as(u32, 1), t.n_rounds);
+
+    const challenge = t.challengeScalar();
+    try testing.expectEqual(@as(u32, 2), t.n_rounds);
+
+    // Expected challenge (LE bytes from Jolt):
+    // [09, be, 0c, f2, bb, 6d, 9d, c7, b5, 42, 5d, b0, 95, b7, 5d, 04, 0, 0, ...]
+    // This is a 128-bit value padded to 32 bytes
+    const expected_challenge_bytes = [_]u8{
+        0x09, 0xbe, 0x0c, 0xf2, 0xbb, 0x6d, 0x9d, 0xc7,
+        0xb5, 0x42, 0x5d, 0xb0, 0x95, 0xb7, 0x5d, 0x04,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+    const expected_challenge = BN254Scalar.fromBytes(&expected_challenge_bytes);
+
+    try testing.expect(challenge.eql(expected_challenge));
+}
+
+test "jolt compatibility: test vector 5 - initial state" {
+    const Transcript = Blake2bTranscript(BN254Scalar);
+
+    const t = Transcript.init("init_test");
+
+    // Expected initial state from Jolt:
+    const expected_state = [_]u8{
+        0x40, 0xf6, 0xe6, 0x1c, 0xb8, 0x28, 0xbc, 0xfb,
+        0xd5, 0x14, 0x3a, 0x3d, 0xf3, 0x02, 0x02, 0x1d,
+        0x6a, 0xb7, 0xf8, 0x5d, 0xad, 0x9d, 0x08, 0x3b,
+        0x27, 0x45, 0x37, 0xba, 0x1e, 0x73, 0x91, 0xcd,
+    };
+
+    try testing.expectEqualSlices(u8, &expected_state, &t.state);
+    try testing.expectEqual(@as(u32, 0), t.n_rounds);
+}
+
+test "jolt compatibility: test vector 6 - empty label" {
+    const Transcript = Blake2bTranscript(BN254Scalar);
+
+    var t = Transcript.init("");
+
+    // Expected initial state from Jolt for empty label:
+    const expected_init_state = [_]u8{
+        0x89, 0xeb, 0x0d, 0x6a, 0x8a, 0x69, 0x1d, 0xae,
+        0x2c, 0xd1, 0x5e, 0xd0, 0x36, 0x99, 0x31, 0xce,
+        0x0a, 0x94, 0x9e, 0xca, 0xfa, 0x5c, 0x3f, 0x93,
+        0xf8, 0x12, 0x18, 0x33, 0x64, 0x6e, 0x15, 0xc3,
+    };
+
+    try testing.expectEqualSlices(u8, &expected_init_state, &t.state);
+    try testing.expectEqual(@as(u32, 0), t.n_rounds);
+
+    t.appendBytes(&[_]u8{ 0x01, 0x02, 0x03 });
+
+    // Expected state after append_bytes from Jolt:
+    const expected_after_bytes = [_]u8{
+        0xc4, 0x21, 0x29, 0xc2, 0x59, 0x57, 0x65, 0x9c,
+        0xf7, 0x63, 0x38, 0xf5, 0xd2, 0xcb, 0xad, 0xd9,
+        0x5d, 0x1b, 0xf5, 0xd3, 0x57, 0xfc, 0xf9, 0xa1,
+        0xe9, 0x62, 0xc3, 0xc6, 0xb5, 0xed, 0x37, 0x27,
+    };
+
+    try testing.expectEqualSlices(u8, &expected_after_bytes, &t.state);
+    try testing.expectEqual(@as(u32, 1), t.n_rounds);
+}
+
+test "jolt compatibility: test vector 7 - u128 challenge" {
+    const Transcript = Blake2bTranscript(BN254Scalar);
+
+    var t = Transcript.init("u128_test");
+    t.appendMessage("data");
+
+    const challenge_u128 = t.challengeU128();
+
+    // Expected from Jolt: 112132316132180403369405744574678933239
+    // Hex: 545be6068976bba7550dd1c80c4b9ef7
+    const expected: u128 = 112132316132180403369405744574678933239;
+
+    try testing.expectEqual(expected, challenge_u128);
+}
+
+test "jolt compatibility: test vector 2 - multiple appends" {
+    const Transcript = Blake2bTranscript(BN254Scalar);
+
+    var t = Transcript.init("zolt_test_2");
+    t.appendMessage("first");
+    t.appendMessage("second");
+    t.appendU64(12345);
+
+    // Expected state from Jolt:
+    const expected_state = [_]u8{
+        0x14, 0x1b, 0xf2, 0x3f, 0x43, 0x6f, 0x74, 0x1b,
+        0x0f, 0x9d, 0x78, 0x0f, 0xac, 0x3e, 0x62, 0x93,
+        0x62, 0x74, 0x78, 0x7c, 0xde, 0x4f, 0x59, 0x55,
+        0x73, 0xa5, 0x32, 0x6c, 0x5a, 0x75, 0x5d, 0x85,
+    };
+
+    try testing.expectEqualSlices(u8, &expected_state, &t.state);
+    try testing.expectEqual(@as(u32, 3), t.n_rounds);
+
+    const challenge = t.challengeScalar();
+    try testing.expectEqual(@as(u32, 4), t.n_rounds);
+
+    // Expected challenge from Jolt (LE bytes):
+    const expected_challenge_bytes = [_]u8{
+        0x93, 0x62, 0x3e, 0xac, 0x0f, 0x78, 0x9d, 0x0f,
+        0x1b, 0x74, 0x6f, 0x43, 0x3f, 0xf2, 0x1b, 0x14,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+    const expected_challenge = BN254Scalar.fromBytes(&expected_challenge_bytes);
+
+    try testing.expect(challenge.eql(expected_challenge));
+}
+
+test "jolt compatibility: test vector 3 - scalar append" {
+    const Transcript = Blake2bTranscript(BN254Scalar);
+
+    var t = Transcript.init("scalar_test");
+    const scalar = BN254Scalar.fromU64(42);
+    t.appendScalar(scalar);
+
+    // Expected state from Jolt:
+    const expected_state = [_]u8{
+        0x0d, 0x8c, 0x5a, 0x29, 0x4a, 0x38, 0x74, 0x89,
+        0x89, 0xe3, 0x60, 0x61, 0x7d, 0x26, 0x1a, 0x04,
+        0x73, 0x5a, 0x30, 0x54, 0xff, 0xf0, 0xf2, 0x9c,
+        0xa3, 0x6c, 0x9d, 0x32, 0x28, 0x4e, 0x3a, 0x7c,
+    };
+
+    try testing.expectEqualSlices(u8, &expected_state, &t.state);
+    try testing.expectEqual(@as(u32, 1), t.n_rounds);
+
+    const challenge = t.challengeScalar();
+    try testing.expectEqual(@as(u32, 2), t.n_rounds);
+
+    // Expected challenge from Jolt (LE bytes):
+    const expected_challenge_bytes = [_]u8{
+        0x04, 0x1a, 0x26, 0x7d, 0x61, 0x60, 0xe3, 0x89,
+        0x89, 0x74, 0x38, 0x4a, 0x29, 0x5a, 0x8c, 0x0d,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+    const expected_challenge = BN254Scalar.fromBytes(&expected_challenge_bytes);
+
+    try testing.expect(challenge.eql(expected_challenge));
+}
+
+test "jolt compatibility: test vector 4 - vector append" {
+    const Transcript = Blake2bTranscript(BN254Scalar);
+
+    var t = Transcript.init("vector_test");
+    const scalars = [_]BN254Scalar{
+        BN254Scalar.fromU64(1),
+        BN254Scalar.fromU64(2),
+        BN254Scalar.fromU64(3),
+    };
+    t.appendScalars(&scalars);
+
+    // Expected state from Jolt:
+    const expected_state = [_]u8{
+        0xa1, 0xbe, 0xdf, 0x0b, 0x1f, 0x6f, 0x93, 0xfb,
+        0xab, 0xc9, 0xb7, 0x81, 0x2c, 0x9a, 0x22, 0xd0,
+        0x7f, 0x89, 0x7b, 0x4e, 0xb8, 0x7a, 0xff, 0x86,
+        0x6c, 0x96, 0x19, 0xec, 0x20, 0xf1, 0x6c, 0x4f,
+    };
+
+    try testing.expectEqualSlices(u8, &expected_state, &t.state);
+    try testing.expectEqual(@as(u32, 5), t.n_rounds);
+
+    const challenge = t.challengeScalar();
+    try testing.expectEqual(@as(u32, 6), t.n_rounds);
+
+    // Expected challenge from Jolt (LE bytes):
+    const expected_challenge_bytes = [_]u8{
+        0xd0, 0x22, 0x9a, 0x2c, 0x81, 0xb7, 0xc9, 0xab,
+        0xfb, 0x93, 0x6f, 0x1f, 0x0b, 0xdf, 0xbe, 0xa1,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+    const expected_challenge = BN254Scalar.fromBytes(&expected_challenge_bytes);
+
+    try testing.expect(challenge.eql(expected_challenge));
+}

@@ -4,7 +4,7 @@
 
 ### Commitment Type Infrastructure
 - [x] Created `commitment_types.zig` with PolyCommitment wrapping G1 points
-- [x] Added OpeningProof type for batch verification
+- [x] Added OpeningProof type for batch verification support
 - [x] Updated BytecodeProof to use PolyCommitment instead of field elements
 - [x] Updated MemoryProof to use PolyCommitment with final_state_commitment
 - [x] Updated RegisterProof to use PolyCommitment with final_state_commitment
@@ -17,6 +17,12 @@
 - [x] Implemented commitMemory() - commits memory trace polynomial
 - [x] Implemented commitRegisters() - commits register trace polynomial
 - [x] Prover generates real G1 commitments when ProvingKey is provided
+
+### Verifier Enhancements
+- [x] Added VerifyingKey struct with minimal SRS elements (g1, g2, tau_g2)
+- [x] Added toVerifyingKey() to ProvingKey
+- [x] Added initWithKey() and setVerifyingKey() to JoltVerifier
+- [x] Implemented absorbCommitments() for Fiat-Shamir transcript binding
 
 ## Completed (Previous Sessions)
 
@@ -58,7 +64,9 @@
 - **Host Execute** - Program execution with trace generation
 - **PolyCommitment** - G1 point wrapper for proof commitments
 - **ProvingKey** - SRS-based commitment generation
+- **VerifyingKey** - Minimal SRS elements for verification
 - **Prover Commitments** - Bytecode, memory, register polynomials committed
+- **Verifier Transcript** - Absorbs commitments for Fiat-Shamir
 
 ### Partially Working
 - **Dory** - commit() works, open() placeholder
@@ -68,8 +76,7 @@
 
 ### High Priority
 - [ ] Implement batch opening proofs (prove multiple polynomial openings)
-- [ ] Wire commitment verification into JoltVerifier
-- [ ] Add VerifyingKey with SRS subset for verification
+- [ ] Complete Spartan verifier
 
 ### Medium Priority
 - [ ] Dory open() with proper inner product argument
@@ -81,4 +88,4 @@
 - [ ] Documentation and examples
 
 ## Test Status
-All 366 tests pass.
+All 376 tests pass.

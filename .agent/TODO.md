@@ -6,6 +6,10 @@
 - [x] Add --help support for subcommands (run, prove, srs, decode)
 - [x] Each subcommand now shows usage information when passed --help or -h
 
+### Examples
+- [x] Add full pipeline example (end-to-end ZK proving workflow)
+- [x] Demonstrates preprocessing, proving, and verification
+
 ## Completed (Iteration 28)
 
 ### CLI and API Improvements
@@ -149,6 +153,7 @@ All tests pass (538 tests).
 
 ## Commits This Session (Iteration 29)
 1. Add --help support for subcommands
+2. Add full pipeline example
 
 ## Commits (Iteration 28)
 1. Upgrade prove command to actually generate and verify proofs

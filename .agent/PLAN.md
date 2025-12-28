@@ -4,11 +4,16 @@
 
 ### Session Summary
 
-This iteration made a small CLI improvement:
+This iteration made CLI and example improvements:
 
 1. **Subcommand Help Support**
    - Added --help and -h flags for all subcommands (run, prove, srs, decode)
    - Each subcommand now shows helpful usage information
+
+2. **Full Pipeline Example**
+   - Created comprehensive `examples/full_pipeline.zig`
+   - Demonstrates end-to-end ZK proving workflow
+   - Shows all core components working together: preprocessing, proving, verification
 
 ## Previous Status (Iteration 28)
 
@@ -327,6 +332,7 @@ SRS Utilities
 
 ## Commit History (Iteration 29)
 1. Add --help support for subcommands
+2. Add full pipeline example
 
 ## Commit History (Iteration 28)
 1. Upgrade prove command to actually generate and verify proofs

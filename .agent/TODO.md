@@ -2,108 +2,59 @@
 
 ## Current Status (Jolt Compatibility Phase)
 
-**Project Status: SERIALIZATION FULLY COMPATIBLE ✅**
+**Project Status: FORMAT COMPATIBLE ✅, EXECUTION INTEGRATION IN PROGRESS 🔄**
 
-### Latest Progress (2024-12-28, Agent Session 5)
+### Latest Progress (2024-12-28, Agent Session 5 Continued)
 
-**✅ VERIFIED: Complete Format Compatibility with Jolt**
+#### Completed This Session
 
-The Zolt proof serialization is now fully compatible with Jolt's arkworks-based format. All deserialization tests pass in Jolt:
+1. **Format Compatibility Verified** ✅
+   - All Jolt deserialization tests pass
+   - Field/GT element serialization matches arkworks
+   - Blake2b transcript produces identical challenges
 
-1. **Proof Deserialization**: `test_deserialize_zolt_proof` PASSES
-   - 48 opening claims parsed correctly
-   - 5 Dory commitments (GT elements) parsed correctly
-   - All 7 stage proofs (UniSkip + Sumcheck) parsed correctly
+2. **I/O Region Support** ✅
+   - Added `isIOAddress()`, `readByteWithIO()`, `writeByteWithIO()` functions
+   - Modified LOAD instructions (LB, LBU, LH, LHU, LW, LWU, LD) to read from I/O region
+   - Modified STORE instructions (SB, SH, SW, SD) to write to I/O region
+   - Tests pass: 622/622 (4 new I/O tests added)
 
-2. **Field/GT Serialization**: `test_serialization_vectors` PASSES
-   - BN254 field elements serialize identically
-   - Fq12 (GT) elements serialize identically
-   - All bytes match expected arkworks format
+3. **CLI Input Support** ✅
+   - Added `--input FILE` option to load input from file
+   - Added `--input-hex HEX` option for hex-encoded input
+   - Example: `zolt run --input-hex 32 program.elf` (input = 50)
 
-3. **Blake2b Transcript**: `test_zolt_compatibility_vectors` PASSES
-   - Challenge generation matches Jolt exactly
-   - State/round counter implementation correct
+4. **I/O Read Works** ✅
+   - Confirmed I/O reads happen correctly
+   - Address 0x7fffa000 returns the correct input byte
+   - Debug output: `[IO READ] addr=0x000000007fffa000 -> 0x32`
 
-### Verification Status
+#### In Progress
 
-**Full Verification: Requires Same-Program Execution**
+**Jolt Guest Execution Investigation** 🔄
 
-The `test_verify_zolt_proof` test fails at Stage 1 univariate skip because:
-- Jolt's preprocessing is for `fib(50)` using Jolt SDK guest program
-- Zolt's proof is for a different program (bare-metal fibonacci.c)
+The fibonacci-guest still exits early (21 cycles) even with correct I/O:
+- The LB instruction reads `0x32` (50) from input region ✅
+- But program branches to early exit path
+- May be a postcard encoding issue (Jolt uses varint encoding)
 
-**This is expected behavior** - the format is correct, but verification requires:
-1. Same bytecode (ELF file)
-2. Same execution trace
-3. Same R1CS constraints
+### Next Steps
 
-### Next Steps for Full Cross-Verification
+1. **Investigate postcard encoding**: Jolt SDK uses postcard crate for serialization
+   - Small numbers like 50 are encoded as single varint byte
+   - But Jolt might read a length prefix first
 
-**Option A: Make Zolt run Jolt guest programs**
-- Implement Jolt's I/O memory layout in Zolt emulator
-- Set up input at correct memory address (0x7fffa000 region)
-- Parse and apply postcard-serialized inputs
-- Run same execution as Jolt
+2. **Try memory-ops-guest**: This Jolt guest has no inputs
+   - Should execute the same way in both Jolt and Zolt
+   - Can test execution compatibility without I/O complexity
 
-**Option B: Create no-I/O test program**
-- Write a Jolt guest that requires no input
-- Compile and run in both systems
-- Generate matching proofs
-
-**Option C: Export preprocessing from Zolt**
-- Implement Jolt's preprocessing format in Zolt
-- Export BytecodePreprocessing, RAMPreprocessing, MemoryLayout
-- Allow Jolt verifier to use Zolt-generated preprocessing
-
----
-
-## Completed Items ✅
-
-### Phase 1: Blake2b Transcript
-1. ✅ Implement Blake2b-256 hash function
-2. ✅ 32-byte state with round counter
-3. ✅ EVM-compatible scalar serialization (LE serialize → reverse to BE)
-4. ✅ Label padding (right-pad to 32 bytes)
-5. ✅ Vector append format matching Jolt
-
-### Phase 2: Proof Structure
-6. ✅ Restructure JoltProof to 7-stage layout
-7. ✅ Add UniSkipFirstRoundProof for stages 1-2
-8. ✅ Implement opening_claims BTreeMap-like structure
-9. ✅ Add configuration parameters (trace_length, ram_K, etc.)
-
-### Phase 3: Serialization
-10. ✅ Arkworks-compatible field element serialization
-11. ✅ Arkworks-compatible GT (Fq12) element serialization
-12. ✅ OpeningId encoding (Virtual/Committed/Advice)
-13. ✅ VirtualPoly type encoding
-14. ✅ Compressed polynomial format for sumcheck rounds
-
-### Phase 4: Dory Commitment Scheme
-15. ✅ BN254 elliptic curve implementation
-16. ✅ G1/G2 point serialization matching arkworks
-17. ✅ GT (Fq12) element serialization
-18. ✅ MSM (multi-scalar multiplication)
-19. ✅ Pairing operation (miller loop + final exp)
-20. ✅ SRS generation from "Jolt Dory URS seed"
-21. ✅ Row commitments via MSM
-22. ✅ Final commitment via multi-pairing
-
-### Phase 5: R1CS/Spartan
-23. ✅ COEFFS_PER_J precomputed Lagrange weights
-24. ✅ LagrangeHelper with shift_coeffs_i32
-25. ✅ Cross-product algorithm for UniSkip extended evaluation
-26. ✅ Stage proofs matching Jolt structure
+3. **Debug execution divergence**: Add more trace output to understand why branches differ
 
 ---
 
 ## Test Results Summary
 
-### Zolt: All tests passing ✅ (618/618)
-```bash
-zig build test --summary all
-# 618/618 tests passed
-```
+### Zolt: 622/622 tests PASS ✅
 
 ### Jolt Cross-Verification Tests
 
@@ -114,50 +65,27 @@ zig build test --summary all
 | `test_debug_zolt_format` | ✅ PASS | Proof structure parseable |
 | `test_deserialize_zolt_proof` | ✅ PASS | Full proof deserializes correctly |
 | `test_gt_serialization_size` | ✅ PASS | GT element size (384 bytes) correct |
-| `test_jolt_proof_roundtrip` | ✅ PASS | Field element roundtrip works |
-| `test_verify_zolt_proof` | ⚠️ BLOCKED | Different programs (preprocessing mismatch) |
+| `test_verify_zolt_proof` | ⚠️ BLOCKED | Different programs |
 
 ---
 
-## Key Technical Achievements
+## Session 5 File Changes
 
-### 1. Blake2b Transcript Match
-- Implemented `Blake2bTranscript` in `src/transcripts/blake2b.zig`
-- Matches Jolt's `jolt-core/src/transcripts/blake2b.rs` exactly
-- Same challenge derivation for same inputs
+### Modified Files
+1. **src/tracer/mod.zig**
+   - Added I/O-aware memory access (readByteWithIO, writeByteWithIO, etc.)
+   - Updated all LOAD/STORE variants to use I/O-aware functions
+   - Added I/O region unit tests
 
-### 2. UniSkip Cross-Product Algorithm
-Fixed the univariate skip polynomial computation to match Jolt:
-```
-az_eval = Σ_i (where Az[i] is TRUE): coeffs[j][i]
-bz_eval = Σ_i (where Az[i] is FALSE): coeffs[j][i] * Bz[i]
-Product = az_eval * bz_eval
-```
+2. **src/main.zig**
+   - Added `--input FILE` option
+   - Added `--input-hex HEX` option
+   - Updated runEmulator to pass input bytes to emulator
 
-### 3. Dory Commitment Implementation
-- Full BN254 pairing implementation
-- MSM for row commitments
-- Multi-pairing for final commitment
-- GT element matches Jolt's arkworks serialization
-
-### 4. Proof Serialization
-- Exact byte-level compatibility with arkworks CanonicalSerialize
-- OpeningId encoding matches Jolt's scheme
-- VirtualPoly enum encoding correct
-
----
-
-## What "Format Compatible" Means
-
-When we say format compatible, this means:
-1. **Byte-level**: Zolt proofs deserialize correctly in Jolt
-2. **Structure**: All fields (claims, commitments, stages) parse correctly
-3. **Cryptographic**: Field elements and GT elements are valid
-4. **Protocol**: Transcript, sumcheck, and opening structures match
-
-The only missing piece for full verification is **same-program execution**, which requires either:
-- Running Jolt SDK guest programs in Zolt, or
-- Creating a minimal test program that works in both
+### Commits
+- `docs: update compatibility status - format fully verified`
+- `feat(tracer): add I/O region support for Jolt guest programs`
+- `feat(cli): add --input and --input-hex options for guest programs`
 
 ---
 
@@ -172,13 +100,40 @@ zig build test --summary all
 zig build -Doptimize=ReleaseFast
 ./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o /tmp/zolt_proof_dory.bin
 
-# Generate Jolt preprocessing
-cd /Users/matteo/projects/jolt/examples/fibonacci
-cargo run --release -- --save
-# Creates: /tmp/jolt_verifier_preprocessing.dat, /tmp/fib_proof.bin, /tmp/fib_io_device.bin
+# Run with input
+./zig-out/bin/zolt run --input-hex 32 /path/to/guest.elf
 
-# Run Jolt cross-verification tests
+# Run Jolt tests
 cd /Users/matteo/projects/jolt
 cargo test -p jolt-core test_deserialize_zolt_proof -- --ignored --nocapture
-cargo test -p jolt-core test_verify_zolt_proof -- --ignored --nocapture
 ```
+
+---
+
+## Architecture Summary
+
+### What Works
+1. **Proof Format**: Zolt proofs deserialize correctly in Jolt
+2. **Transcript**: Blake2b challenges match exactly
+3. **Dory Commitments**: GT elements serialize correctly
+4. **I/O Memory**: Reads from 0x7fffa000 region work
+
+### What Needs Work
+1. **Guest Program Execution**: Programs don't run identically yet
+2. **Postcard Encoding**: May need to match Jolt's input serialization
+3. **Full Verification**: Blocked by execution mismatch
+
+### Verification Equation
+
+For verification to pass:
+```
+Zolt_Proof(ELF, Input) verified_by Jolt_Verifier(Preprocessing(ELF))
+```
+
+Currently we have:
+- Zolt_Proof(fibonacci.c) ≠ Jolt_Preprocessing(fibonacci-guest)
+
+Need:
+- Same ELF in both
+- Same input in both
+- Same execution trace

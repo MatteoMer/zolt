@@ -16,6 +16,10 @@
 12. **Streaming Round Logic** - Separate handling for constraint group selection
 13. **MultiquadraticPolynomial** - Already implemented in src/poly/multiquadratic.zig
 14. **Multiquadratic Round Polynomial** - Added computeRemainingRoundPolyMultiquadratic()
+15. **r0 Not Bound in split_eq** - Jolt uses Lagrange scaling, not binding
+16. **Claim Update** - Now converts evaluations to coefficients properly
+17. **Factorized Eq Weights** - eq[i] = E_out[i/E_in.len] * E_in[i%E_in.len]
+18. **getWindowEqTables** - Fixed to match Jolt's E_out_in_for_window logic
 
 ---
 
@@ -26,28 +30,20 @@ The Jolt cross-verification test runs without crashing, but **Stage 1 sumcheck v
 ### Latest Test Output (2024-12-28)
 
 ```
-Verification failed: Stage 1
-
-Caused by:
-    Sumcheck verification failed
-```
-
-Debug test shows:
-```
-output_claim (from sumcheck):      15494770952016151805100679853636026761384296060550815442753024133495164390908
-expected_output_claim (from R1CS): 1634089052370213054875543818155028295629058109509108648770993566620247586716
+output_claim (from sumcheck):    18276273718881795230055698751155029867368575945533636768878307520109710274366
+expected_output_claim (from R1CS): 12713752026862396773059828773864138237897786023884325663325072498443735660914
 Match: false
 ```
 
-### Next Priority: Debug Stage 1 Sumcheck Mismatch
+### Remaining Issues to Investigate
 
-The round polynomials are being generated but the final claim doesn't match what the verifier expects from R1CS evaluation.
+1. **Eq polynomial indexing** - The factorized eq approach is implemented, but there may be an off-by-one or ordering issue
 
-Likely areas to investigate:
-1. **Eq weight indexing** - How E_out is indexed for first/second half cycles
-2. **Streaming round (round 0)** - Uses `computeRemainingRoundPoly()`, cycle rounds use multiquadratic
-3. **Gruen split eq factorization** - May have subtle differences from Jolt's implementation
-4. **tau_low vs tau ordering** - Verify tau vector is constructed identically to Jolt
+2. **Binding order mismatch** - The tau elements may be indexed differently than the sumcheck challenges
+
+3. **current_index tracking** - The split_eq.current_index tracks how many variables are unbound, but this may not be updated correctly
+
+4. **Az/Bz computation** - The constraint evaluations may differ from Jolt's expectations
 
 ---
 

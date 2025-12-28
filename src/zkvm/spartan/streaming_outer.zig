@@ -541,18 +541,17 @@ pub fn StreamingOuterProver(comptime F: type) type {
         /// 2. Cycle rounds (current_round > 1): Sums over cycle halves using combined Az*Bz
         ///
         /// IMPORTANT: The eq weights for cycles use a FACTORIZED representation:
-        ///   eq_val[i] = E_out[i / E_in.len] * E_in[i % E_in.len]
+        ///   eq_val[i] = E_out[i >> head_in_bits] * E_in[i & ((1 << head_in_bits) - 1)]
         /// This allows us to handle 1024 cycles with only 32+32=64 precomputed values.
         pub fn computeRemainingRoundPoly(self: *Self) ![4]F {
             // Get eq tables for this window - uses Jolt's factorized split eq approach
-            const eq_tables = self.split_eq.getWindowEqTables(
-                self.num_cycle_vars - self.current_round + 1,
-                1,
-            );
+            // The first parameter is ignored - split_eq uses current_index directly
+            const eq_tables = self.split_eq.getWindowEqTables(0, 1);
 
             const E_out = eq_tables.E_out;
             const E_in = eq_tables.E_in;
-            const e_in_len = E_in.len;
+            const head_in_bits = eq_tables.head_in_bits;
+            const e_in_mask = (@as(usize, 1) << @intCast(head_in_bits)) - 1;
 
             var t_zero = F.zero();
             var t_one = F.zero();
@@ -562,11 +561,11 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 // t'(0) = Σ_cycles eq(τ, x) * Az_g0(x) * Bz_g0(x)
                 // t'(1) = Σ_cycles eq(τ, x) * Az_g1(x) * Bz_g1(x)
                 //
-                // The eq weights are factorized: eq[i] = E_out[i / e_in_len] * E_in[i % e_in_len]
+                // The eq weights are factorized: eq[i] = E_out[i >> head_in_bits] * E_in[i & mask]
                 for (0..@min(self.padded_trace_len, self.cycle_witnesses.len)) |i| {
-                    // Factorized eq weight
-                    const out_idx = i / e_in_len;
-                    const in_idx = i % e_in_len;
+                    // Factorized eq weight using proper bit shifting
+                    const out_idx = i >> @intCast(head_in_bits);
+                    const in_idx = i & e_in_mask;
                     const e_out_val = if (out_idx < E_out.len) E_out[out_idx] else F.zero();
                     const e_in_val = if (in_idx < E_in.len) E_in[in_idx] else F.zero();
                     const eq_val = e_out_val.mul(e_in_val);
@@ -585,9 +584,9 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
                 // t'(0) = sum over first half (current cycle variable = 0)
                 for (0..@min(half, self.cycle_witnesses.len)) |i| {
-                    // Factorized eq weight
-                    const out_idx = i / e_in_len;
-                    const in_idx = i % e_in_len;
+                    // Factorized eq weight using proper bit shifting
+                    const out_idx = i >> @intCast(head_in_bits);
+                    const in_idx = i & e_in_mask;
                     const e_out_val = if (out_idx < E_out.len) E_out[out_idx] else F.zero();
                     const e_in_val = if (in_idx < E_in.len) E_in[in_idx] else F.zero();
                     const eq_val = e_out_val.mul(e_in_val);
@@ -600,9 +599,9 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 for (0..@min(half, self.cycle_witnesses.len -| half)) |i| {
                     const cycle_idx = half + i;
                     if (cycle_idx < self.cycle_witnesses.len) {
-                        // Factorized eq weight - use position i within half
-                        const out_idx = i / e_in_len;
-                        const in_idx = i % e_in_len;
+                        // Factorized eq weight using proper bit shifting - use position i within half
+                        const out_idx = i >> @intCast(head_in_bits);
+                        const in_idx = i & e_in_mask;
                         const e_out_val = if (out_idx < E_out.len) E_out[out_idx] else F.zero();
                         const e_in_val = if (in_idx < E_in.len) E_in[in_idx] else F.zero();
                         const eq_val = e_out_val.mul(e_in_val);
@@ -790,14 +789,13 @@ pub fn StreamingOuterProver(comptime F: type) type {
             const r_stream = self.r_stream orelse F.zero();
 
             // Get eq tables for current window (just 1 variable at a time)
-            const eq_tables = self.split_eq.getWindowEqTables(
-                self.num_cycle_vars - self.current_round + 1,
-                1,
-            );
+            // The first parameter is ignored - split_eq uses current_index directly
+            const eq_tables = self.split_eq.getWindowEqTables(0, 1);
 
             const E_out = eq_tables.E_out;
             const E_in = eq_tables.E_in;
-            const e_in_len = E_in.len;
+            const head_in_bits = eq_tables.head_in_bits;
+            const e_in_mask = (@as(usize, 1) << @intCast(head_in_bits)) - 1;
 
             // We're summing over cycles: the current variable selects first/second half
             const half: usize = self.padded_trace_len >> @intCast(self.current_round);
@@ -821,9 +819,9 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
             // First half (current variable = 0)
             for (0..@min(half, self.cycle_witnesses.len)) |i| {
-                // Factorized eq weight
-                const out_idx = i / e_in_len;
-                const in_idx = i % e_in_len;
+                // Factorized eq weight using proper bit shifting
+                const out_idx = i >> @intCast(head_in_bits);
+                const in_idx = i & e_in_mask;
                 const e_out_val = if (out_idx < E_out.len) E_out[out_idx] else F.zero();
                 const e_in_val = if (in_idx < E_in.len) E_in[in_idx] else F.zero();
                 const eq_val = e_out_val.mul(e_in_val);
@@ -837,9 +835,9 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 const cycle_idx = half + i;
                 if (cycle_idx >= self.cycle_witnesses.len) continue;
 
-                // Factorized eq weight - use position i within half
-                const out_idx = i / e_in_len;
-                const in_idx = i % e_in_len;
+                // Factorized eq weight using proper bit shifting - use position i within half
+                const out_idx = i >> @intCast(head_in_bits);
+                const in_idx = i & e_in_mask;
                 const e_out_val = if (out_idx < E_out.len) E_out[out_idx] else F.zero();
                 const e_in_val = if (in_idx < E_in.len) E_in[in_idx] else F.zero();
                 const eq_val = e_out_val.mul(e_in_val);
@@ -856,9 +854,9 @@ pub fn StreamingOuterProver(comptime F: type) type {
             // The quadratic coefficient is Az_slope * Bz_slope
             // We need to sum this weighted by eq
             for (0..@min(half, self.cycle_witnesses.len)) |i| {
-                // Factorized eq weight
-                const out_idx = i / e_in_len;
-                const in_idx = i % e_in_len;
+                // Factorized eq weight using proper bit shifting
+                const out_idx = i >> @intCast(head_in_bits);
+                const in_idx = i & e_in_mask;
                 const e_out_val = if (out_idx < E_out.len) E_out[out_idx] else F.zero();
                 const e_in_val = if (in_idx < E_in.len) E_in[in_idx] else F.zero();
                 const eq_val = e_out_val.mul(e_in_val);

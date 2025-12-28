@@ -235,21 +235,25 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
         ///   eq[i] = E_out[i >> head_in_bits] * E_in[i & ((1 << head_in_bits) - 1)]
         ///
         /// For the streaming round with 1024 cycles (10 vars) and window_size=1:
+        /// - num_unbound = current_index = 11 (tau_low length)
         /// - head_len = 11 - 1 = 10
+        /// - m = 11 / 2 = 5
         /// - head_out_bits = min(10, 5) = 5  → E_out has 32 entries
         /// - head_in_bits = 10 - 5 = 5       → E_in has 32 entries
         pub fn getWindowEqTables(
             self: *const Self,
-            num_unbound_vars: usize,
+            _: usize, // num_unbound_vars - ignored, use current_index like Jolt
             window_size: usize,
-        ) struct { E_out: []const F, E_in: []const F } {
-            // Following Jolt's E_out_in_for_window logic
-            const num_unbound = @min(self.current_index, num_unbound_vars);
+        ) struct { E_out: []const F, E_in: []const F, head_in_bits: usize } {
+            // Following Jolt's E_out_in_for_window logic exactly
+            // Use current_index as num_unbound, NOT capped by any external parameter
+            const num_unbound = self.current_index;
             const actual_window = @min(window_size, num_unbound);
             const head_len = num_unbound -| actual_window;
 
             // Split into out and in parts
-            const m = self.tau.len / 2;
+            const n = self.tau.len;
+            const m = n / 2;
             const head_out_bits = @min(head_len, m);
             const head_in_bits = head_len -| head_out_bits;
 
@@ -264,7 +268,7 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
             else
                 self.E_in_vec.items[self.num_x_in];
 
-            return .{ .E_out = E_out, .E_in = E_in };
+            return .{ .E_out = E_out, .E_in = E_in, .head_in_bits = head_in_bits };
         }
 
         /// Compute Gruen's degree-3 round polynomial from multiquadratic evaluations

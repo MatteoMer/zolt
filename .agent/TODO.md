@@ -1,37 +1,35 @@
 # Zolt zkVM Implementation TODO
 
-## Current Status (Iteration 55+)
+## Current Status (Jolt Compatibility Phase)
 
-**Project Status: JOLT COMPATIBILITY PHASE**
+**Project Status: JOLT COMPATIBILITY - Transcript Complete**
 
-Core zkVM is complete. New goal: Make Zolt proofs verifiable by Jolt (Rust).
-
-See `PROMPT-2.md` for the full compatibility implementation guide.
+The Blake2b transcript is now byte-compatible with Jolt. Next: Proof structure alignment.
 
 ---
 
 ## Phase 2: Jolt Compatibility
 
-### 1. Transcript Alignment (CRITICAL - Do First)
+### 1. Transcript Alignment ✅ COMPLETE
 
-- [ ] **Create Blake2bTranscript** (`src/transcripts/blake2b.zig`)
-  - [ ] Port Blake2b-256 hash function
-  - [ ] Implement 32-byte state with round counter
-  - [ ] Match Jolt's hasher(): `Blake2b256::new().chain_update(state).chain_update(packed_round)`
-  - [ ] Implement `append_message()` with 32-byte right-padding
-  - [ ] Implement `append_scalar()` with LE serialize, then reverse to BE
-  - [ ] Implement `append_scalars()` with begin/end vector markers
-  - [ ] Implement `challenge_scalar()` returning 128-bit challenges
-  - [ ] Add round counter increment on each state update
+- [x] **Create Blake2bTranscript** (`src/transcripts/blake2b.zig`)
+  - [x] Port Blake2b-256 hash function (use std.crypto.hash.blake2.Blake2b256)
+  - [x] Implement 32-byte state with round counter
+  - [x] Match Jolt's hasher(): state || [0u8; 28] || round.to_be_bytes()
+  - [x] Implement `append_message()` with 32-byte right-padding
+  - [x] Implement `append_scalar()` with LE serialize, then reverse to BE
+  - [x] Implement `append_scalars()` with begin/end vector markers
+  - [x] Implement `challenge_scalar()` returning 128-bit challenges
+  - [x] Add round counter increment on each state update
 
-- [ ] **Test Vector Validation**
-  - [ ] Create test in Jolt that outputs challenge for known inputs
-  - [ ] Verify Zolt produces identical challenges
-  - [ ] Test: same transcript state after identical operations
+- [x] **Test Vector Validation**
+  - [x] Create test in Jolt that outputs challenge for known inputs
+  - [x] Verify Zolt produces identical challenges (7 test vectors)
+  - [x] Test: same transcript state after identical operations
 
 **Reference**: `jolt-core/src/transcripts/blake2b.rs`
 
-### 2. Proof Structure Refactoring (HIGH)
+### 2. Proof Structure Refactoring (HIGH - NEXT)
 
 - [ ] **Restructure JoltProof** (`src/zkvm/mod.zig`)
   - [ ] Add `opening_claims: OpeningClaims(F)` (BTreeMap-like)
@@ -45,8 +43,11 @@ See `PROMPT-2.md` for the full compatibility implementation guide.
   - [ ] Add config: `trace_length`, `ram_K`, `bytecode_K`, `log_k_chunk`
 
 - [ ] **Add UniSkipFirstRoundProof** (`src/subprotocols/mod.zig`)
-  - [ ] Create struct with `claim: F` field
+  - [ ] Create struct with `uni_poly: UniPoly(F)` field
   - [ ] Implement for stages 1 and 2
+
+- [ ] **Add SumcheckInstanceProof** structure
+  - [ ] Match Jolt's `compressed_polys: Vec<CompressedUniPoly<F>>`
 
 - [ ] **Refactor Prover** (`src/zkvm/prover.zig`)
   - [ ] Generate 7 explicit stage proofs instead of 6 grouped
@@ -73,7 +74,7 @@ See `PROMPT-2.md` for the full compatibility implementation guide.
   - [ ] `Virtual(poly, id)` -> compact encoding
 
 - [ ] **Implement SumcheckInstanceProof Serialization**
-  - [ ] `round_polys: Vec<(Vec<F>, Challenge)>` format
+  - [ ] `compressed_polys: Vec<CompressedUniPoly>` format
 
 **Reference**: `jolt-core/src/zkvm/proof_serialization.rs`
 
@@ -126,6 +127,7 @@ See `PROMPT-2.md` for the full compatibility implementation guide.
 | Multi-stage Prover | Working | Pass |
 | Multi-stage Verifier | Working | Pass |
 | Serialization | Working | Pass |
+| **Blake2b Transcript** | **Working** | **Pass** |
 
 ### Verified C Examples (All 9 Working)
 
@@ -164,7 +166,7 @@ zolt bench             # Run benchmarks
 ### Zolt (Modify)
 | File | Purpose |
 |------|---------|
-| `src/transcripts/mod.zig` | Add Blake2bTranscript |
+| `src/transcripts/blake2b.zig` | ✅ Blake2bTranscript (complete) |
 | `src/zkvm/mod.zig` | Restructure JoltProof |
 | `src/zkvm/prover.zig` | 7-stage prover |
 | `src/zkvm/serialization.zig` | Arkworks format |
@@ -174,7 +176,7 @@ zolt bench             # Run benchmarks
 ### Jolt (Reference Only)
 | File | Purpose |
 |------|---------|
-| `jolt-core/src/transcripts/blake2b.rs` | Transcript impl |
+| `jolt-core/src/transcripts/blake2b.rs` | ✅ Transcript impl (verified) |
 | `jolt-core/src/zkvm/proof_serialization.rs` | Proof structure |
 | `jolt-core/src/zkvm/verifier.rs` | 8-stage verification |
 | `jolt-core/src/subprotocols/sumcheck.rs` | Sumcheck format |
@@ -185,15 +187,15 @@ zolt bench             # Run benchmarks
 ## Success Criteria
 
 The implementation is complete when:
-1. `zig build test` passes all tests
+1. `zig build test` passes all tests ✅ (578/578 pass)
 2. Zolt can generate a proof for any example program
 3. The proof can be loaded and verified by Jolt's verifier
 4. No modifications needed on the Jolt side
 
 ## Priority Order
 
-1. **Transcript** - Without matching Fiat-Shamir, nothing works
-2. **Proof Structure** - Must match Jolt's 7-stage expectations
+1. **Transcript** ✅ - Matching Fiat-Shamir complete
+2. **Proof Structure** - Must match Jolt's 7-stage expectations (NEXT)
 3. **Serialization** - Byte-perfect compatibility required
 4. **Dory Commitment** - Complete with same SRS seed
 5. **Integration Tests** - Validate end-to-end flow

@@ -1,5 +1,102 @@
 # Zolt Implementation Notes
 
+## Jolt Compatibility - Proof Structure Analysis
+
+### Jolt's JoltProof Structure (from proof_serialization.rs)
+
+```rust
+pub struct JoltProof<F: JoltField, PCS: CommitmentScheme<Field = F>, FS: Transcript> {
+    pub opening_claims: Claims<F>,                                    // BTreeMap<OpeningId, (OpeningPoint, F)>
+    pub commitments: Vec<PCS::Commitment>,                            // Polynomial commitments
+    pub stage1_uni_skip_first_round_proof: UniSkipFirstRoundProof<F, FS>,
+    pub stage1_sumcheck_proof: SumcheckInstanceProof<F, FS>,
+    pub stage2_uni_skip_first_round_proof: UniSkipFirstRoundProof<F, FS>,
+    pub stage2_sumcheck_proof: SumcheckInstanceProof<F, FS>,
+    pub stage3_sumcheck_proof: SumcheckInstanceProof<F, FS>,
+    pub stage4_sumcheck_proof: SumcheckInstanceProof<F, FS>,
+    pub stage5_sumcheck_proof: SumcheckInstanceProof<F, FS>,
+    pub stage6_sumcheck_proof: SumcheckInstanceProof<F, FS>,
+    pub stage7_sumcheck_proof: SumcheckInstanceProof<F, FS>,
+    pub joint_opening_proof: PCS::Proof,
+    // Advice proofs (optional)
+    pub trusted_advice_val_evaluation_proof: Option<PCS::Proof>,
+    pub trusted_advice_val_final_proof: Option<PCS::Proof>,
+    pub untrusted_advice_val_evaluation_proof: Option<PCS::Proof>,
+    pub untrusted_advice_val_final_proof: Option<PCS::Proof>,
+    pub untrusted_advice_commitment: Option<PCS::Commitment>,
+    // Configuration
+    pub trace_length: usize,
+    pub ram_K: usize,
+    pub bytecode_K: usize,
+    pub log_k_chunk: usize,
+    pub lookups_ra_virtual_log_k_chunk: usize,
+}
+```
+
+### Key Differences Between Jolt and Zolt
+
+| Component | Jolt (Rust) | Zolt (Zig) Current |
+|-----------|-------------|---------------------|
+| Stages | 7 explicit sumcheck proofs | 6 stages in array |
+| UniSkip | Stages 1-2 have UniSkipFirstRoundProof | Not implemented |
+| Claims | BTreeMap<OpeningId, claim> | Not structured this way |
+| Commitments | Vec of PCS::Commitment | Separate bytecode/memory/register proofs |
+| Config | trace_length, ram_K, bytecode_K, etc. | log_t, log_k only |
+
+### SumcheckInstanceProof Structure (Jolt)
+
+```rust
+pub struct SumcheckInstanceProof<F, FS> {
+    pub compressed_polys: Vec<CompressedUniPoly<F>>,
+    _marker: PhantomData<FS>,
+}
+```
+
+### UniSkipFirstRoundProof Structure (Jolt)
+
+```rust
+pub struct UniSkipFirstRoundProof<F, T> {
+    pub uni_poly: UniPoly<F>,
+    _marker: PhantomData<T>,
+}
+```
+
+### OpeningId Encoding (Compact)
+
+```
+NUM_SUMCHECKS = 11 (from SumcheckId::COUNT)
+BASE = 0
+
+[0, 11)       = UntrustedAdvice(sumcheck_id)        - 1 byte
+[11, 22)      = TrustedAdvice(sumcheck_id)          - 1 byte
+[22, 33)      = Committed(poly, sumcheck_id)        - 1 byte + poly_index
+[33+)         = Virtual(poly, sumcheck_id)          - 1 byte + poly_index
+```
+
+### SumcheckId Variants (11 total)
+
+1. RAFstep
+2. BooleanStep
+3. InstructionLookup
+4. RAFinalEvaluation
+5. RamValEvaluation
+6. RamValFinalEvaluation
+7. RamHammingWeight
+8. RegisterEvaluation
+9. RegisterRdInc
+10. RamRwFinalClean
+11. R1CS
+
+### Next Steps for Proof Structure
+
+1. **Add UniSkipFirstRoundProof struct** in Zig
+2. **Restructure JoltStageProofs** to have 7 explicit stages instead of 6
+3. **Add opening_claims BTreeMap-like structure**
+4. **Add configuration parameters** (trace_length, ram_K, etc.)
+5. **Implement OpeningId encoding** for serialization
+
+---
+
 ## Test Interference Issue (Iteration 10-11)
 
 ### Problem
@@ -196,3 +293,16 @@ to properly track the sumcheck invariant p(0) + p(1) = claim.
 
 - `test "stage 5 sumcheck invariant: p(0) + p(1) = current_claim"`
 - `test "stage 6 sumcheck invariant: all zeros for valid trace"`
+
+---
+
+## Blake2b Transcript Compatibility (Current)
+
+Successfully implemented Blake2b transcript matching Jolt's implementation:
+- 32-byte state with round counter
+- Messages right-padded to 32 bytes
+- Scalars serialized LE then reversed to BE (EVM format)
+- 128-bit challenges
+- Vector operations with begin/end markers
+
+All 7 test vectors from Jolt verified to match.

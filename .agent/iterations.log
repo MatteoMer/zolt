@@ -335,3 +335,24 @@ Ended: 2025-12-28T03:15:38.785100
 Turns: 94
 Cost: $5.4285
 
+
+=== Iteration 25 ===
+Date: Sat Dec 28 2025
+
+Improvements:
+1. Implemented snarkjs PTAU file format parser for production SRS loading
+   - Magic bytes and version validation
+   - Header section parsing (field size, prime, power, ceremony power)
+   - Section type enumeration (tauG1, tauG2, alphaTauG1, betaTauG1, betaG2)
+   - Little-endian G1/G2 point parsing (snarkjs Montgomery format)
+2. Created ExtendedSRSData structure for Groth16-compatible SRS
+3. Added conversion from ExtendedSRSData to basic SRSData
+
+This enables loading production SRS from Ethereum Powers of Tau ceremony files.
+
+Tests: 538 passing
+
+Commits:
+- Add snarkjs PTAU file format parser for production SRS loading
+- Update TODO.md and PLAN.md for iteration 25 progress
+

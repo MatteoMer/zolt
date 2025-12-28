@@ -177,6 +177,10 @@ pub fn LookupTables(comptime XLEN: comptime_int) type {
         SignExtend8,
         SignExtend16,
         SignExtend32,
+        // Division/remainder validation
+        ValidDiv0,
+        ValidUnsignedRemainder,
+        ValidSignedRemainder,
 
         const Self = @This();
         const Table = lookup_table.LookupTable(@import("../../field/mod.zig").BN254Scalar, XLEN);
@@ -205,6 +209,9 @@ pub fn LookupTables(comptime XLEN: comptime_int) type {
                 .SignExtend8 => Table.SignExtend8.materializeEntry(index),
                 .SignExtend16 => Table.SignExtend16.materializeEntry(index),
                 .SignExtend32 => Table.SignExtend32.materializeEntry(index),
+                .ValidDiv0 => Table.ValidDiv0.materializeEntry(index),
+                .ValidUnsignedRemainder => Table.ValidUnsignedRemainder.materializeEntry(index),
+                .ValidSignedRemainder => Table.ValidSignedRemainder.materializeEntry(index),
             };
         }
     };

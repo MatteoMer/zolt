@@ -961,6 +961,342 @@ pub fn MulhsuLookup(comptime XLEN: comptime_int) type {
     };
 }
 
+// ============================================================================
+// Division and Remainder Lookups (M Extension)
+// ============================================================================
+
+/// DIV instruction lookup - signed integer division
+/// Computes rd = rs1 / rs2 (signed)
+/// Special cases:
+/// - Division by zero: returns -1 (all bits set)
+/// - Overflow (MIN_INT / -1): returns MIN_INT
+pub fn DivLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        rs1_val: u64,
+        rs2_val: u64,
+
+        pub fn init(rs1_val: u64, rs2_val: u64) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .rs2_val = rs2_val,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .ValidDiv0;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            // For validation, interleave divisor and quotient
+            return lookup_table.interleaveBits(self.rs2_val, self.computeResult());
+        }
+
+        /// Compute the signed division result
+        pub fn computeResult(self: Self) u64 {
+            if (XLEN == 64) {
+                const dividend: i64 = @bitCast(self.rs1_val);
+                const divisor: i64 = @bitCast(self.rs2_val);
+
+                // Division by zero: return -1
+                if (divisor == 0) {
+                    return @as(u64, @bitCast(@as(i64, -1)));
+                }
+
+                // Overflow case: MIN_INT / -1 = MIN_INT
+                const min_int: i64 = @bitCast(@as(u64, 0x8000000000000000));
+                if (dividend == min_int and divisor == -1) {
+                    return self.rs1_val; // Return MIN_INT
+                }
+
+                // Normal division
+                const quotient: i64 = @divTrunc(dividend, divisor);
+                return @bitCast(quotient);
+            } else if (XLEN == 32) {
+                const mask: u64 = 0xFFFFFFFF;
+                const dividend: i32 = @bitCast(@as(u32, @truncate(self.rs1_val & mask)));
+                const divisor: i32 = @bitCast(@as(u32, @truncate(self.rs2_val & mask)));
+
+                if (divisor == 0) {
+                    return 0xFFFFFFFF; // -1 for 32-bit
+                }
+
+                const min_int: i32 = @bitCast(@as(u32, 0x80000000));
+                if (dividend == min_int and divisor == -1) {
+                    return @as(u64, @bitCast(@as(u32, @bitCast(dividend))));
+                }
+
+                const quotient: i32 = @divTrunc(dividend, divisor);
+                return @as(u64, @as(u32, @bitCast(quotient)));
+            } else {
+                // 8-bit for testing
+                const mask: u64 = 0xFF;
+                const dividend: i8 = @bitCast(@as(u8, @truncate(self.rs1_val & mask)));
+                const divisor: i8 = @bitCast(@as(u8, @truncate(self.rs2_val & mask)));
+
+                if (divisor == 0) {
+                    return 0xFF;
+                }
+
+                const min_int: i8 = @bitCast(@as(u8, 0x80));
+                if (dividend == min_int and divisor == -1) {
+                    return @as(u64, @bitCast(@as(u8, @bitCast(dividend))));
+                }
+
+                const quotient: i8 = @divTrunc(dividend, divisor);
+                return @as(u64, @as(u8, @bitCast(quotient)));
+            }
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsRs2Value);
+            return flags;
+        }
+    };
+}
+
+/// DIVU instruction lookup - unsigned integer division
+/// Computes rd = rs1 / rs2 (unsigned)
+/// Division by zero returns MAX_VALUE (all bits set)
+pub fn DivuLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        rs1_val: u64,
+        rs2_val: u64,
+
+        pub fn init(rs1_val: u64, rs2_val: u64) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .rs2_val = rs2_val,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .ValidDiv0;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return lookup_table.interleaveBits(self.rs2_val, self.computeResult());
+        }
+
+        /// Compute the unsigned division result
+        pub fn computeResult(self: Self) u64 {
+            if (XLEN == 64) {
+                if (self.rs2_val == 0) {
+                    return 0xFFFFFFFFFFFFFFFF; // MAX for 64-bit
+                }
+                return self.rs1_val / self.rs2_val;
+            } else if (XLEN == 32) {
+                const mask: u64 = 0xFFFFFFFF;
+                const dividend: u32 = @truncate(self.rs1_val & mask);
+                const divisor: u32 = @truncate(self.rs2_val & mask);
+
+                if (divisor == 0) {
+                    return 0xFFFFFFFF;
+                }
+                return @as(u64, dividend / divisor);
+            } else {
+                const mask: u64 = 0xFF;
+                const dividend: u8 = @truncate(self.rs1_val & mask);
+                const divisor: u8 = @truncate(self.rs2_val & mask);
+
+                if (divisor == 0) {
+                    return 0xFF;
+                }
+                return @as(u64, dividend / divisor);
+            }
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsRs2Value);
+            return flags;
+        }
+    };
+}
+
+/// REM instruction lookup - signed integer remainder
+/// Computes rd = rs1 % rs2 (signed)
+/// Division by zero returns the dividend
+/// Overflow (MIN_INT % -1) returns 0
+pub fn RemLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        rs1_val: u64,
+        rs2_val: u64,
+
+        pub fn init(rs1_val: u64, rs2_val: u64) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .rs2_val = rs2_val,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .ValidSignedRemainder;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            // Interleave remainder and divisor for validation
+            return lookup_table.interleaveBits(self.computeResult(), self.rs2_val);
+        }
+
+        /// Compute the signed remainder result
+        pub fn computeResult(self: Self) u64 {
+            if (XLEN == 64) {
+                const dividend: i64 = @bitCast(self.rs1_val);
+                const divisor: i64 = @bitCast(self.rs2_val);
+
+                // Division by zero: return dividend
+                if (divisor == 0) {
+                    return self.rs1_val;
+                }
+
+                // Overflow case: MIN_INT % -1 = 0
+                const min_int: i64 = @bitCast(@as(u64, 0x8000000000000000));
+                if (dividend == min_int and divisor == -1) {
+                    return 0;
+                }
+
+                // Normal remainder
+                const remainder: i64 = @rem(dividend, divisor);
+                return @bitCast(remainder);
+            } else if (XLEN == 32) {
+                const mask: u64 = 0xFFFFFFFF;
+                const dividend: i32 = @bitCast(@as(u32, @truncate(self.rs1_val & mask)));
+                const divisor: i32 = @bitCast(@as(u32, @truncate(self.rs2_val & mask)));
+
+                if (divisor == 0) {
+                    return self.rs1_val & mask;
+                }
+
+                const min_int: i32 = @bitCast(@as(u32, 0x80000000));
+                if (dividend == min_int and divisor == -1) {
+                    return 0;
+                }
+
+                const remainder: i32 = @rem(dividend, divisor);
+                return @as(u64, @as(u32, @bitCast(remainder)));
+            } else {
+                const mask: u64 = 0xFF;
+                const dividend: i8 = @bitCast(@as(u8, @truncate(self.rs1_val & mask)));
+                const divisor: i8 = @bitCast(@as(u8, @truncate(self.rs2_val & mask)));
+
+                if (divisor == 0) {
+                    return self.rs1_val & mask;
+                }
+
+                const min_int: i8 = @bitCast(@as(u8, 0x80));
+                if (dividend == min_int and divisor == -1) {
+                    return 0;
+                }
+
+                const remainder: i8 = @rem(dividend, divisor);
+                return @as(u64, @as(u8, @bitCast(remainder)));
+            }
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsRs2Value);
+            return flags;
+        }
+    };
+}
+
+/// REMU instruction lookup - unsigned integer remainder
+/// Computes rd = rs1 % rs2 (unsigned)
+/// Division by zero returns the dividend
+pub fn RemuLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        rs1_val: u64,
+        rs2_val: u64,
+
+        pub fn init(rs1_val: u64, rs2_val: u64) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .rs2_val = rs2_val,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .ValidUnsignedRemainder;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return lookup_table.interleaveBits(self.computeResult(), self.rs2_val);
+        }
+
+        /// Compute the unsigned remainder result
+        pub fn computeResult(self: Self) u64 {
+            if (XLEN == 64) {
+                if (self.rs2_val == 0) {
+                    return self.rs1_val;
+                }
+                return self.rs1_val % self.rs2_val;
+            } else if (XLEN == 32) {
+                const mask: u64 = 0xFFFFFFFF;
+                const dividend: u32 = @truncate(self.rs1_val & mask);
+                const divisor: u32 = @truncate(self.rs2_val & mask);
+
+                if (divisor == 0) {
+                    return self.rs1_val & mask;
+                }
+                return @as(u64, dividend % divisor);
+            } else {
+                const mask: u64 = 0xFF;
+                const dividend: u8 = @truncate(self.rs1_val & mask);
+                const divisor: u8 = @truncate(self.rs2_val & mask);
+
+                if (divisor == 0) {
+                    return self.rs1_val & mask;
+                }
+                return @as(u64, dividend % divisor);
+            }
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsRs2Value);
+            return flags;
+        }
+    };
+}
+
 /// Instruction lookup trace entry
 /// Records a single lookup operation for proof generation
 pub fn LookupTraceEntry(comptime XLEN: comptime_int) type {
@@ -1236,4 +1572,75 @@ test "mulhsu lookup" {
     const neg1: u64 = @bitCast(@as(i64, -1));
     const mulhsu2 = MulhsuLookup(64).init(neg1, 2);
     try std.testing.expectEqual(neg1, mulhsu2.computeResult()); // -1 * 2 high = -1
+}
+
+test "div lookup" {
+    // Normal division: 42 / 6 = 7
+    const div1 = DivLookup(64).init(42, 6);
+    try std.testing.expectEqual(@as(u64, 7), div1.computeResult());
+
+    // Negative dividend: -42 / 6 = -7
+    const neg42: u64 = @bitCast(@as(i64, -42));
+    const div2 = DivLookup(64).init(neg42, 6);
+    const neg7: u64 = @bitCast(@as(i64, -7));
+    try std.testing.expectEqual(neg7, div2.computeResult());
+
+    // Division by zero: x / 0 = -1 (all bits set)
+    const div3 = DivLookup(64).init(42, 0);
+    try std.testing.expectEqual(@as(u64, 0xFFFFFFFFFFFFFFFF), div3.computeResult());
+
+    // Overflow: MIN_INT / -1 = MIN_INT
+    const min_int: u64 = 0x8000000000000000;
+    const neg1: u64 = @bitCast(@as(i64, -1));
+    const div4 = DivLookup(64).init(min_int, neg1);
+    try std.testing.expectEqual(min_int, div4.computeResult());
+}
+
+test "divu lookup" {
+    // Normal division: 42 / 6 = 7
+    const divu1 = DivuLookup(64).init(42, 6);
+    try std.testing.expectEqual(@as(u64, 7), divu1.computeResult());
+
+    // Large unsigned: 0xFFFFFFFFFFFFFFFF / 2 = 0x7FFFFFFFFFFFFFFF
+    const divu2 = DivuLookup(64).init(0xFFFFFFFFFFFFFFFF, 2);
+    try std.testing.expectEqual(@as(u64, 0x7FFFFFFFFFFFFFFF), divu2.computeResult());
+
+    // Division by zero: x / 0 = MAX
+    const divu3 = DivuLookup(64).init(42, 0);
+    try std.testing.expectEqual(@as(u64, 0xFFFFFFFFFFFFFFFF), divu3.computeResult());
+}
+
+test "rem lookup" {
+    // Normal remainder: 42 % 5 = 2
+    const rem1 = RemLookup(64).init(42, 5);
+    try std.testing.expectEqual(@as(u64, 2), rem1.computeResult());
+
+    // Negative dividend: -7 % 3 = -1
+    const neg7: u64 = @bitCast(@as(i64, -7));
+    const rem2 = RemLookup(64).init(neg7, 3);
+    const neg1: u64 = @bitCast(@as(i64, -1));
+    try std.testing.expectEqual(neg1, rem2.computeResult());
+
+    // Division by zero: x % 0 = x
+    const rem3 = RemLookup(64).init(42, 0);
+    try std.testing.expectEqual(@as(u64, 42), rem3.computeResult());
+
+    // Overflow: MIN_INT % -1 = 0
+    const min_int: u64 = 0x8000000000000000;
+    const rem4 = RemLookup(64).init(min_int, neg1);
+    try std.testing.expectEqual(@as(u64, 0), rem4.computeResult());
+}
+
+test "remu lookup" {
+    // Normal remainder: 42 % 5 = 2
+    const remu1 = RemuLookup(64).init(42, 5);
+    try std.testing.expectEqual(@as(u64, 2), remu1.computeResult());
+
+    // Large unsigned
+    const remu2 = RemuLookup(64).init(0xFFFFFFFFFFFFFFFF, 10);
+    try std.testing.expectEqual(@as(u64, 5), remu2.computeResult());
+
+    // Division by zero: x % 0 = x
+    const remu3 = RemuLookup(64).init(42, 0);
+    try std.testing.expectEqual(@as(u64, 42), remu3.computeResult());
 }

@@ -394,6 +394,78 @@ pub fn LookupEntry(comptime XLEN: comptime_int) type {
                 .instruction = instruction,
             };
         }
+
+        /// Create entry for DIV (signed division)
+        pub fn fromDiv(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
+            const DivLookup = lookups.DivLookup(XLEN);
+            const div = DivLookup.init(rs1, rs2);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = DivLookup.lookupTable(),
+                .index = div.toLookupIndex(),
+                .result = div.computeResult(),
+                .left_operand = rs1,
+                .right_operand = rs2,
+                .circuit_flags = DivLookup.circuitFlags(),
+                .instruction_flags = DivLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
+        /// Create entry for DIVU (unsigned division)
+        pub fn fromDivu(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
+            const DivuLookup = lookups.DivuLookup(XLEN);
+            const divu = DivuLookup.init(rs1, rs2);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = DivuLookup.lookupTable(),
+                .index = divu.toLookupIndex(),
+                .result = divu.computeResult(),
+                .left_operand = rs1,
+                .right_operand = rs2,
+                .circuit_flags = DivuLookup.circuitFlags(),
+                .instruction_flags = DivuLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
+        /// Create entry for REM (signed remainder)
+        pub fn fromRem(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
+            const RemLookup = lookups.RemLookup(XLEN);
+            const rem = RemLookup.init(rs1, rs2);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = RemLookup.lookupTable(),
+                .index = rem.toLookupIndex(),
+                .result = rem.computeResult(),
+                .left_operand = rs1,
+                .right_operand = rs2,
+                .circuit_flags = RemLookup.circuitFlags(),
+                .instruction_flags = RemLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
+        /// Create entry for REMU (unsigned remainder)
+        pub fn fromRemu(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
+            const RemuLookup = lookups.RemuLookup(XLEN);
+            const remu = RemuLookup.init(rs1, rs2);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = RemuLookup.lookupTable(),
+                .index = remu.toLookupIndex(),
+                .result = remu.computeResult(),
+                .left_operand = rs1,
+                .right_operand = rs2,
+                .circuit_flags = RemuLookup.circuitFlags(),
+                .instruction_flags = RemuLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
     };
 }
 
@@ -456,18 +528,17 @@ pub fn LookupTraceCollector(comptime XLEN: comptime_int) type {
                     // Check for M extension first
                     if (decoded.funct7 == 0b0000001) {
                         // M extension: MUL, MULH, MULHSU, MULHU, DIV, DIVU, REM, REMU
-                        const entry: ?Entry = switch (decoded.funct3) {
+                        const entry: Entry = switch (decoded.funct3) {
                             0b000 => Entry.fromMul(cycle, pc, instruction, rs1_val, rs2_val), // MUL
                             0b001 => Entry.fromMulh(cycle, pc, instruction, rs1_val, rs2_val), // MULH
                             0b010 => Entry.fromMulhsu(cycle, pc, instruction, rs1_val, rs2_val), // MULHSU
                             0b011 => Entry.fromMulhu(cycle, pc, instruction, rs1_val, rs2_val), // MULHU
-                            // DIV, DIVU, REM, REMU require virtual instruction sequences
-                            // and cannot be tracked as simple lookups
-                            else => null,
+                            0b100 => Entry.fromDiv(cycle, pc, instruction, rs1_val, rs2_val), // DIV
+                            0b101 => Entry.fromDivu(cycle, pc, instruction, rs1_val, rs2_val), // DIVU
+                            0b110 => Entry.fromRem(cycle, pc, instruction, rs1_val, rs2_val), // REM
+                            0b111 => Entry.fromRemu(cycle, pc, instruction, rs1_val, rs2_val), // REMU
                         };
-                        if (entry) |e| {
-                            try self.entries.append(self.allocator, e);
-                        }
+                        try self.entries.append(self.allocator, entry);
                         return;
                     }
 

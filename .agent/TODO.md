@@ -2,7 +2,7 @@
 
 ## Current Status (Jolt Compatibility Phase)
 
-**Project Status: JOLT COMPATIBILITY - Dory Commitment Complete**
+**Project Status: JOLT COMPATIBILITY - Dory IPA Proof Structure Complete**
 
 The following Jolt-compatibility components are now working:
 - Blake2b transcript with identical Fiat-Shamir challenges
@@ -11,8 +11,11 @@ The following Jolt-compatibility components are now working:
 - Proof converter (6-stage Zolt → 7-stage Jolt)
 - JoltProver with `proveJoltCompatible()` method
 - Jolt proof serialization with `serializeJoltProof()`
-- **NEW: Dory commitment scheme with GT (Fp12) serialization**
-- **NEW: 384-byte GT element serialization matching arkworks format**
+- Dory commitment scheme with GT (Fp12) serialization
+- 384-byte GT element serialization matching arkworks format
+- **NEW: Full Dory IPA proof structure (VMVMessage, FirstReduceMessage, SecondReduceMessage, ScalarProductMessage)**
+- **NEW: G1/G2 point compression in arkworks format (32/64 bytes)**
+- **NEW: Tonelli-Shanks sqrt for Fp and Fp2**
 - End-to-end serialization tests verifying format compatibility
 
 ---
@@ -50,8 +53,8 @@ The following Jolt-compatibility components are now working:
   - [x] usize as u64 little-endian
   - [x] OpeningId compact encoding
   - [x] Roundtrip deserialization
-  - [x] **NEW: GT elements as 384 bytes (12 Fp elements)**
-  - [x] **NEW: Dory commitment serialization**
+  - [x] GT elements as 384 bytes (12 Fp elements)
+  - [x] Dory commitment serialization
 
 - [x] **Test Vectors Verified**
   - [x] Fr(42) → `[2a, 00, ...]`
@@ -67,13 +70,21 @@ The following Jolt-compatibility components are now working:
   - [x] DoryCommitmentScheme with setup/commit
   - [x] SRS generation using "Jolt Dory URS seed"
   - [x] GT (Fp12) commitment type
-  - [x] DoryProof structure
   - [x] Commitment serialization (384 bytes)
 
-- [x] **GT Serialization** (`src/field/pairing.zig`)
-  - [x] Fp12.toBytes() - 384 bytes arkworks format
-  - [x] Fp12.fromBytes() - deserialization
-  - [x] GT alias for Fp12
+- [x] **Dory IPA Proof Structure** (`src/poly/commitment/dory.zig`)
+  - [x] VMVMessage (c: GT, d2: GT, e1: G1)
+  - [x] FirstReduceMessage (d1_left, d1_right, d2_left, d2_right: GT, e1_beta: G1, e2_beta: G2)
+  - [x] SecondReduceMessage (c_plus, c_minus: GT, e1_plus, e1_minus: G1, e2_plus, e2_minus: G2)
+  - [x] ScalarProductMessage (e1: G1, e2: G2)
+  - [x] DoryProof with all messages + nu/sigma
+  - [x] Serialization matching dory-pcs ark_serde.rs format
+
+- [x] **Point Compression** (`src/poly/commitment/dory.zig`)
+  - [x] G1 compression to 32 bytes (arkworks format)
+  - [x] G1 decompression with Tonelli-Shanks sqrt
+  - [x] G2 compression to 64 bytes (arkworks format)
+  - [x] Fp2 sqrt for G2 decompression
 
 ### 5. Prover Wiring ✅ COMPLETE
 
@@ -96,14 +107,25 @@ The following Jolt-compatibility components are now working:
   - [x] Verify commitments serialization
   - [x] Test empty proof serialization
   - [x] Validate config parameters serialization
-  - [x] **NEW: Dory commitment serialization tests**
-  - [x] **NEW: GT roundtrip tests**
+  - [x] Dory commitment serialization tests
+  - [x] GT roundtrip tests
+
+- [x] **Dory Proof Serialization Tests** (`src/poly/commitment/dory.zig`)
+  - [x] G1 compression/decompression roundtrip
+  - [x] G1 identity compression
+  - [x] G2 compression format verification
+  - [x] G2 identity compression/decompression
+  - [x] VMV message serialization
+  - [x] Full proof serialization size check
 
 ### 7. Remaining Work (Future Phase)
 
-- [ ] **Full Dory Opening Proof**
-  - [ ] Implement inner product argument (IPA)
-  - [ ] Match Jolt's ArkDoryProof structure exactly
+- [ ] **Full Dory IPA Proving Algorithm**
+  - [ ] Implement reduce-and-fold rounds
+  - [ ] Compute proper VMV message values
+  - [ ] Compute FirstReduceMessage values per round
+  - [ ] Compute SecondReduceMessage values per round
+  - [ ] Compute ScalarProductMessage final values
 
 - [ ] **Cross-Verification Test** (Requires Jolt-side changes)
   - [ ] Create Rust test in Jolt that loads Zolt proof file
@@ -115,26 +137,23 @@ The following Jolt-compatibility components are now working:
 
 ## Test Status
 
-### All 596 Tests Passing
+### All 608 Tests Passing
 
 ```
 zig build test --summary all
-Build Summary: 5/5 steps succeeded; 596/596 tests passed
+Build Summary: 5/5 steps succeeded; 608/608 tests passed
 ```
 
-### New Tests Added
+### New Tests Added (This Iteration)
 
 | Component | Tests |
 |-----------|-------|
-| Fp12 toBytes/fromBytes | Pass |
-| Fp12 format verification | Pass |
-| GT alias | Pass |
-| Dory setup | Pass |
-| Dory commit | Pass |
-| Dory deterministic | Pass |
-| Dory serialization | Pass |
-| Dory roundtrip | Pass |
-| Jolt serialization GT | Pass |
+| G1 compression roundtrip | Pass |
+| G1 identity compression | Pass |
+| G2 compression format | Pass |
+| G2 identity compression | Pass |
+| Dory proof serialization | Pass |
+| VMV message serialization | Pass |
 
 ---
 
@@ -148,8 +167,8 @@ Build Summary: 5/5 steps succeeded; 596/596 tests passed
 | `src/zkvm/jolt_serialization.zig` | ✅ Done | Arkworks serialization + Dory |
 | `src/zkvm/proof_converter.zig` | ✅ Done | 6→7 stage converter |
 | `src/zkvm/mod.zig` | ✅ Done | JoltProver with Jolt export |
-| `src/poly/commitment/dory.zig` | ✅ **NEW** | Dory commitment scheme |
-| `src/field/pairing.zig` | ✅ Updated | GT (Fp12) serialization |
+| `src/poly/commitment/dory.zig` | ✅ **Updated** | Full Dory IPA structure + G1/G2 compression |
+| `src/field/pairing.zig` | ✅ Done | GT (Fp12) serialization |
 
 ### Jolt (Reference Only)
 | File | Purpose |
@@ -157,20 +176,22 @@ Build Summary: 5/5 steps succeeded; 596/596 tests passed
 | `jolt-core/src/transcripts/blake2b.rs` | ✅ Verified |
 | `jolt-core/src/zkvm/proof_serialization.rs` | ✅ Analyzed |
 | `jolt-core/src/poly/commitment/dory/` | ✅ Analyzed |
-| `jolt-core/src/subprotocols/sumcheck.rs` | Reference |
-| `jolt-core/src/poly/opening_proof.rs` | Reference |
+| `dory-pcs/src/proof.rs` | ✅ Analyzed - DoryProof structure |
+| `dory-pcs/src/messages.rs` | ✅ Analyzed - Message types |
+| `dory-pcs/src/backends/arkworks/ark_serde.rs` | ✅ Analyzed - Serialization |
 
 ---
 
 ## Success Criteria
 
-1. ✅ `zig build test` passes all 596 tests
+1. ✅ `zig build test` passes all 608 tests
 2. ✅ Zolt can generate a proof in Jolt format (`proveJoltCompatible`)
 3. ✅ Zolt can serialize proofs in arkworks format (`serializeJoltProof`)
 4. ✅ E2E serialization tests verify format compatibility
 5. ✅ Dory commitment scheme with GT serialization
-6. ⏳ The proof can be loaded and verified by Jolt (requires full IPA + Jolt test)
-7. ⏳ No modifications needed on the Jolt side (requires Dory alignment)
+6. ✅ Dory IPA proof structure with G1/G2 compression
+7. ⏳ The proof can be loaded and verified by Jolt (requires full IPA + Jolt test)
+8. ⏳ No modifications needed on the Jolt side (requires Dory alignment)
 
 ## Priority Order
 
@@ -178,7 +199,9 @@ Build Summary: 5/5 steps succeeded; 596/596 tests passed
 2. ✅ **Proof Types** - JoltProof structure defined
 3. ✅ **Serialization** - Byte-perfect compatibility verified
 4. ✅ **Dory Commitment** - GT serialization complete
-5. ✅ **Prover Wiring** - Connect types to prover
-6. ✅ **Integration Tests** - E2E serialization verified
-7. ⏳ **Full Dory IPA** - Required for verification
-8. ⏳ **Cross-Verification** - Jolt-side test needed
+5. ✅ **Dory IPA Structure** - Proof structure matching Jolt
+6. ✅ **G1/G2 Compression** - arkworks format
+7. ✅ **Prover Wiring** - Connect types to prover
+8. ✅ **Integration Tests** - E2E serialization verified
+9. ⏳ **Full Dory IPA** - Required for verification
+10. ⏳ **Cross-Verification** - Jolt-side test needed

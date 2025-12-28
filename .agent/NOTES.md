@@ -4,7 +4,7 @@
 
 ### Session 7 Progress
 
-**DoryVerifierSetup Complete!**
+**DoryVerifierSetup Complete and VERIFIED!**
 
 1. Implemented `DoryVerifierSetup` in `src/zkvm/preprocessing.zig`:
    - Precomputed pairing values: delta_1l, delta_1r, delta_2l, delta_2r, chi
@@ -17,13 +17,28 @@
 
 3. All 632 tests passing
 
-### Test Output
+### Jolt Verification Test Results
+
+**DoryVerifierSetup loads successfully in Jolt!**
+
 ```
-Exporting preprocessing to: test_preprocessing.bin
-  Preprocessing exported successfully! (311347 bytes)
+Read 576205 bytes from Zolt preprocessing
+Verifier setup parsed OK!
+  max_log_n: 20
+  delta_1l len: 11
+  chi len: 11
 ```
 
-The exported file now contains the complete verifier preprocessing needed by Jolt.
+The generators portion is byte-compatible with Jolt. The shared preprocessing
+portion still needs format alignment for `BytecodePreprocessing` and `RAMPreprocessing`.
+
+### Test Output
+```
+Exporting preprocessing to: /tmp/zolt_preprocessing.bin
+  Preprocessing exported successfully! (576205 bytes)
+```
+
+The exported file now contains the complete verifier preprocessing with correct generator format.
 
 ### Architecture of DoryVerifierSetup
 

@@ -2,9 +2,45 @@
 
 ## Current Status (Jolt Compatibility Phase)
 
-**Project Status: CROSS-PRODUCT FIX IMPLEMENTED ✅**
+**Project Status: SERIALIZATION VERIFIED ✅**
 
-### Latest Progress (2024-12-28, Agent Iteration)
+### Latest Progress (2024-12-28, Agent Session 4)
+
+**✅ VERIFIED: Jolt Can Deserialize Zolt Proofs**
+
+The Zolt proof serialization format is now fully compatible with Jolt's arkworks-based format:
+
+1. **Proof Generation**: `zolt prove --jolt-format` generates Jolt-compatible proofs
+2. **Proof Deserialization**: `test_deserialize_zolt_proof` PASSES in Jolt
+3. **Format Details**:
+   - 48 opening claims (all valid field elements)
+   - 5 Dory commitments (all valid GT elements)
+   - Stage proofs (UniSkip + Sumcheck for stages 1-7)
+
+**Current Status: Cross-Verification Blocked by Program Mismatch**
+
+The verification test (`test_verify_zolt_proof`) fails at "Stage 1 univariate skip first round" because:
+- Jolt's preprocessing is for Jolt's fibonacci program (using Jolt SDK, input=50)
+- Zolt's proof is for Zolt's fibonacci program (bare RISC-V ELF, fib(10))
+
+These are **completely different programs** with different:
+- Bytecode
+- R1CS constraints
+- Memory layout
+- Trace structure
+
+**What Works**:
+- ✅ Serialization format is byte-compatible
+- ✅ Opening claims, commitments, stage proofs all parse correctly
+- ✅ All 618 Zolt unit tests pass
+
+**What's Needed for Full Cross-Verification**:
+- Either: Zolt generates preprocessing that Jolt can use
+- Or: Run both on the exact same program (requires Jolt SDK integration)
+
+---
+
+### Previous Progress (2024-12-28, Cross-Product Fix)
 
 **✅ FIXED: UniSkip Extended Evaluation Algorithm**
 
@@ -73,8 +109,9 @@ This gives non-zero at extended points even when all base Az*Bz = 0!
 |------|--------|---------|
 | `test_serialization_vectors` | ✅ PASS | Field/GT serialization matches |
 | `test_zolt_compatibility_vectors` | ✅ PASS | Blake2b transcript compatible |
-| `test_deserialize_zolt_proof` | ⏳ | Requires proof file |
-| `test_verify_zolt_proof` | ⏳ | Requires preprocessing |
+| `test_debug_zolt_format` | ✅ PASS | Proof structure parseable |
+| `test_deserialize_zolt_proof` | ✅ PASS | Full proof deserializes |
+| `test_verify_zolt_proof` | ⚠️ BLOCKED | Different programs - preprocessing mismatch |
 
 ---
 

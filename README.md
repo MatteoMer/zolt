@@ -56,6 +56,9 @@ zig build run
 
 # Run a RISC-V ELF binary
 ./zig-out/bin/zolt run program.elf
+
+# Generate ZK proof for a RISC-V ELF binary (experimental)
+./zig-out/bin/zolt prove program.elf
 ```
 
 ## Project Structure
@@ -173,17 +176,21 @@ pub fn main() !void {
 
 ## Testing
 
-The project includes 194 tests covering:
+The project includes 538 tests covering:
 
-- Field arithmetic (Montgomery operations, batch ops)
-- Polynomial operations (evaluation, summation)
-- Commitment schemes
+- Field arithmetic (Montgomery operations, batch ops, extension fields)
+- Polynomial operations (evaluation, summation, binding)
+- Commitment schemes (HyperKZG, Dory, SRS loading)
 - RISC-V instruction decoding and execution
 - Sumcheck protocol
 - Spartan prover/verifier
+- Lasso lookup argument
+- All 24 lookup tables
+- 60+ instruction lookups
 - MSM algorithms
-- ELF parsing
-- Integration tests
+- ELF parsing (ELF32/ELF64)
+- Transcript (Fiat-Shamir)
+- Integration tests (e2e proving pipeline)
 
 Run all tests:
 ```bash

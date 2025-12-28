@@ -18,8 +18,10 @@ const poly_commitment = @import("../poly/commitment/mod.zig");
 const HyperKZG = poly_commitment.HyperKZG;
 
 pub const bytecode = @import("bytecode/mod.zig");
+pub const claim_reductions = @import("claim_reductions/mod.zig");
 pub const commitment_types = @import("commitment_types.zig");
 pub const instruction = @import("instruction/mod.zig");
+pub const instruction_lookups = @import("instruction_lookups/mod.zig");
 pub const lasso = @import("lasso/mod.zig");
 pub const lookup_table = @import("lookup_table/mod.zig");
 pub const prover = @import("prover.zig");

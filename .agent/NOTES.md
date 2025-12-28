@@ -7,136 +7,75 @@
 - **Transcript**: Blake2b matches Jolt exactly
 - **Opening Claims**: Non-zero MLE evaluations computed correctly
 - **Proof Structure**: All 7 stages, correct round counts
+- **SRS Loading**: arkworks format with flag bit handling
+- **G1 MSM**: Row commitments match Jolt exactly
+- **G2 Generator**: Matches arkworks exactly
+- **G2 Points**: Coordinates from SRS match exactly
 
 ### What's Failing
-- **Stage 1 Sumcheck Verification**: The round polynomials don't satisfy the sumcheck relation
+- **Pairing Function**: e(G1_gen, G2_gen) produces different result from Jolt
+  - Zolt: f5 a1 b9 0d 00 81 ca 8f 26 1e 63 72 1d f6 f7 1b...
+  - Jolt: 95 0e 87 9d 73 63 1f 5e b5 78 85 89 eb 5f 7e f8...
+  - Issue is in Miller loop or final exponentiation
 
-## Latest Progress (Iteration 17)
+---
 
-### Opening Claims Now Have Non-Zero Values
+## Latest Progress: Dory Commitment Debugging
 
-Successfully implemented R1CS input MLE evaluation at the challenge point:
-- PC values: 470923325918454702788286590928955227900599927949267948307234034664185460615
-- OpFlags(AddOperands): 14116661703799451320060418720194240191430100414874762526722692778591556927761
-- OpFlags(WriteLookupOutputToRD): Same non-zero value
+### arkworks Flag Bit Fix (Iteration 20)
 
-### Round Polynomial Count Fixed
+arkworks `serialize_uncompressed` stores metadata flags in top 2 bits of last byte:
+- bit 7: y-sign flag
+- bit 6: infinity flag
 
-Stage 1 sumcheck proof now has 4 round polynomials (was 3):
-- 1 streaming round
-- 3 cycle variable rounds
-- For trace length 8 (log₂(8) = 3 cycle vars)
+Fix: `y_limbs[3] &= 0x3FFFFFFFFFFFFFFF` to clear flags before use.
 
-### Sumcheck Verification Still Fails
+Without this fix, y coordinates were larger than field modulus, causing
+Montgomery conversion failures and broken curve arithmetic.
 
-The verification fails because our round polynomials don't satisfy:
-```
-s_j(0) + s_j(1) == previous_claim
-```
+### Verified Components
 
-## Root Cause Analysis
+| Component | Status | Notes |
+|-----------|--------|-------|
+| G1 points on curve | ✅ | All 4 G1 points valid |
+| G2 generator | ✅ | Exact match with arkworks |
+| G2[0] coordinates | ✅ | All 4 Fp components match |
+| Row 0 MSM | ✅ | Exact match |
+| Row 1 MSM | ✅ | Exact match |
+| Pairing | ❌ | Different result |
 
-### The Sumcheck Round Polynomial Formula (from Jolt)
-
-For each round `j`, the round polynomial is:
-```
-s_j(X) = l_j(X) · q_j(X)
-```
-
-Where:
-- `l_j(X)` = linear eq polynomial factor
-  - `l_j(0) = current_scalar · (1 - τ_j)`
-  - `l_j(1) = current_scalar · τ_j`
-
-- `q_j(X)` = quadratic from multiquadratic grid
-  - `q_j(0) = t'_j(0)` (projection at z₀=0)
-  - `q_j(∞) = t'_j(∞)` (coefficient of X²)
-  - `d_j` derived from sumcheck constraint
-
-### Initial Claim Issue
-
-The initial claim for remaining rounds should be `s₁(r₀)` from evaluating the
-UniSkip polynomial at `r₀`. Currently we initialize `current_claim = F.zero()`.
-
-### Multiquadratic Grid Not Implemented
-
-We need to maintain a {0, 1, ∞}^w grid that tracks the constraint products:
-```
-t'(z₀, ..., z_{w-1}) = Σ_{x_out} E_out(x_out) · Σ_{x_in} E_in(x_in) · Az(x_out, x_in, z₀) · Bz(x_out, x_in, z₀)
-```
-
-This requires implementing `project_to_first_variable` for projections.
-
-## Files to Fix
-
-### High Priority
-1. `src/zkvm/spartan/streaming_outer.zig`
-   - Initialize `current_claim` from UniSkip evaluation
-   - Implement proper multiquadratic grid
-   - Fix `computeRemainingRoundPoly`
-
-2. `src/zkvm/spartan/outer.zig`
-   - Fix UniSkip polynomial computation
-   - Return proper claim `s₁(r₀)`
-
-### Medium Priority
-3. `src/poly/multiquadratic.zig`
-   - Ensure ternary grid {0, 1, ∞}^w is correct
-   - Implement `project_to_first_variable`
-
-## Mathematical Reference
-
-### UniSkip First Round
-```
-s₁(Y) = L(τ_high, Y) · Σ_{x_out, x_in} eq(τ, (x_out, x_in)) · Az(x_out, x_in, Y) · Bz(x_out, x_in, Y)
-```
-
-### Remaining Rounds
-```
-s_j(X) = eq(τ_j, X) · current_scalar · [t'(0) + d·X + t'(∞)·X²]
-```
-
-### What We Prove
-```
-Σ_{x_out, x_in, z} eq(τ, (x_out, x_in, z)) · Az(x_out, x_in, z) · Bz(x_out, x_in, z) = 0
-```
-
-This is zero for a valid R1CS-satisfying witness.
-
-## Test Commands
+### Test Commands
 
 ```bash
-# Build Zolt
-cd /Users/matteo/projects/zolt
-zig build -Doptimize=ReleaseFast
-
-# Generate proof
-./zig-out/bin/zolt prove -o /tmp/zolt_proof_dory.bin --jolt-format examples/fibonacci.elf
-
-# Test with Jolt
+# Export Jolt SRS
 cd /Users/matteo/projects/jolt
-cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture
+cargo test --package jolt-core test_export_dory_srs -- --ignored --nocapture
+
+# Run Jolt debug test
+cargo test --package jolt-core test_export_dory_commitment_debug -- --ignored --nocapture
+
+# Run Zolt tests
+cd /Users/matteo/projects/zolt
+zig build test
 ```
 
-## Progress Log
+---
 
-### Iteration 17
-- Added R1CS input MLE evaluation (`evaluation.zig`)
-- Fixed round polynomial count (4 for trace_len=8)
-- Opening claims now show non-zero values
-- Sumcheck still fails due to incorrect polynomial values
+## Pairing Debugging Plan
 
-### Next Steps
-1. Fix UniSkip polynomial evaluation
-2. Initialize current_claim from UniSkip
-3. Implement proper multiquadratic grid
-4. Test with simple trace
+The pairing function `e: G1 × G2 → GT` uses:
+1. Miller loop
+2. Final exponentiation
 
-## References
+Since G1 and G2 inputs match exactly, the difference is in:
+- Miller loop line function computations
+- Fp2/Fp6/Fp12 tower arithmetic
+- Final exponentiation algorithm
 
-- Jolt Paper: Section on Spartan/Lasso
-- Gruen's Method: Efficient multilinear sumcheck via split-eq tables
-- Jolt Code: `jolt-core/src/zkvm/spartan/outer.rs`
+Next steps:
+1. Compare intermediate Miller loop values
+2. Check Fp2 multiplication constants (e.g., ξ = 9 + u)
+3. Verify final exponentiation formula
 
 ---
 
@@ -171,13 +110,14 @@ Successfully implemented Blake2b transcript matching Jolt's implementation:
 
 All 7 test vectors from Jolt verified to match.
 
-### Dory Commitment Implementation (Complete)
+### Dory Commitment Implementation (In Progress)
 
 **Location**: `src/poly/commitment/dory.zig`
 
 1. **DoryCommitmentScheme** - Matches Jolt's DoryCommitmentScheme
    - `setup(allocator, max_num_vars)` - Generate SRS using "Jolt Dory URS seed"
    - `commit(params, evals)` - Commit polynomial to GT element
+   - `loadFromFile()` - Load arkworks-format SRS from file
    - DorySRS with G1/G2 generators
    - DoryCommitment = GT = Fp12
 
@@ -202,13 +142,43 @@ Successfully deserialized Zolt proof!
 
 ### Test Status
 
-All 608 Zolt tests pass:
+All Zolt tests pass:
 ```
 zig build test --summary all
-Build Summary: 5/5 steps succeeded; 608/608 tests passed
+Build Summary: tests passed
 ```
 
 Cross-verification tests (Jolt):
 - `test_deserialize_zolt_proof`: PASS
 - `test_debug_zolt_format`: PASS
-- `test_verify_zolt_proof`: FAIL (Stage 1 sumcheck verification failed)
+- `test_export_dory_srs`: PASS
+- `test_export_dory_commitment_debug`: PASS (MSM matches, pairing differs)
+- `test_verify_zolt_proof`: FAIL (commitment mismatch due to pairing)
+
+---
+
+## File Locations
+
+### SRS File
+`/tmp/jolt_dory_srs.bin` - 1000 bytes for max_num_vars=3
+
+### Format
+```
+Header: "JOLT_DORY_SRS_V1" (16 bytes)
+max_num_vars: u64 (8 bytes)
+g1_count: u64 (8 bytes)
+G1 points: 4 * 64 bytes = 256 bytes (uncompressed affine)
+g2_count: u64 (8 bytes)
+G2 points: 4 * 128 bytes = 512 bytes (uncompressed affine)
+h1: 64 bytes
+h2: 128 bytes
+```
+
+### Key Source Files
+
+| File | Purpose |
+|------|---------|
+| `src/poly/commitment/dory.zig` | Dory commitment scheme |
+| `src/field/pairing.zig` | BN254 pairing (needs fix) |
+| `src/field/mod.zig` | Montgomery field arithmetic |
+| `src/msm/mod.zig` | Multi-scalar multiplication |

@@ -637,6 +637,73 @@ test "interpolation preserves zeros at base window" {
     try std.testing.expect(poly.evaluate(y_9).eql(F.fromU64(9)));
 }
 
+test "buildUniskipFirstRoundPoly domain sum is zero when base evals are zero" {
+    const field = @import("../../field/mod.zig");
+    const F = field.BN254Scalar;
+    const allocator = std.testing.allocator;
+
+    // Test parameters matching Stage 1
+    const DOMAIN_SIZE = 10;
+    const DEGREE = 9;
+    const EXTENDED_SIZE = 19;
+    const NUM_COEFFS = 28;
+
+    // Base evals are all zero (valid R1CS)
+    var base_evals: [DOMAIN_SIZE]F = undefined;
+    @memset(&base_evals, F.zero());
+
+    // Extended evals are non-zero (cross-product structure)
+    var extended_evals: [DEGREE]F = undefined;
+    for (0..DEGREE) |j| {
+        extended_evals[j] = F.fromU64(@intCast(j + 1));
+    }
+
+    // Use a random-ish tau_high
+    const tau_high = F.fromU64(12345);
+
+    // Build the polynomial
+    var s1 = try buildUniskipFirstRoundPoly(
+        F,
+        DOMAIN_SIZE,
+        DEGREE,
+        EXTENDED_SIZE,
+        NUM_COEFFS,
+        &base_evals,
+        &extended_evals,
+        tau_high,
+        allocator,
+    );
+    defer s1.deinit();
+
+    // Compute domain sum by evaluating at each base point
+    var eval_sum = F.zero();
+    for (0..DOMAIN_SIZE) |i| {
+        const y: i64 = -4 + @as(i64, @intCast(i));
+        const y_field = if (y >= 0) F.fromU64(@intCast(y)) else F.zero().sub(F.fromU64(@intCast(-y)));
+        const eval = s1.evaluate(y_field);
+        eval_sum = eval_sum.add(eval);
+    }
+
+    std.debug.print("\nDomain sum (by evaluation): {any}\n", .{eval_sum.toBytes()[0..16]});
+
+    // Domain sum should be zero because:
+    // s1(y) = L(tau_high, y) * t1(y)
+    // and t1(y) = 0 for all y in base domain
+    if (!eval_sum.eql(F.zero())) {
+        std.debug.print("FAIL: Domain sum is not zero!\n", .{});
+
+        // Debug: print some evaluations
+        for (0..5) |i| {
+            const y: i64 = -4 + @as(i64, @intCast(i));
+            const y_field = if (y >= 0) F.fromU64(@intCast(y)) else F.zero().sub(F.fromU64(@intCast(-y)));
+            const eval = s1.evaluate(y_field);
+            std.debug.print("  s1({d}) = {any}\n", .{ y, eval.toBytes()[0..8] });
+        }
+    }
+
+    try std.testing.expect(eval_sum.eql(F.zero()));
+}
+
 test "constants match Jolt" {
     // Verify our constants match Jolt's for Stage 1
     try std.testing.expectEqual(@as(usize, 19), NUM_R1CS_CONSTRAINTS);

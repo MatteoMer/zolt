@@ -128,10 +128,16 @@ The following Jolt-compatibility components are now working:
   - [x] VMV message serialization
   - [x] Full proof serialization size check
 
-### 7. Remaining Work (Future Phase)
+### 7. Cross-Verification Test Infrastructure ✅ COMPLETE
 
-- [ ] **Cross-Verification Test** (Requires Jolt-side integration)
-  - [ ] Create Rust test in Jolt that loads Zolt proof file
+- [x] **Test Infrastructure in Jolt** (`jolt-core/src/zolt_compat_test.rs`)
+  - [x] `test_deserialize_zolt_proof` - Test proof deserialization
+  - [x] `test_verify_zolt_proof` - Full verification test
+  - [x] `test_jolt_proof_roundtrip` - Basic serialization roundtrip
+
+### 8. Remaining Work (Future Phase)
+
+- [ ] **Full Proof Generation**
   - [ ] Generate proof in Zolt for fibonacci
   - [ ] Verify proof loads and parses correctly in Jolt
   - [ ] Attempt verification
@@ -196,8 +202,9 @@ Build Summary: 5/5 steps succeeded; 608/608 tests passed
 6. ✅ Dory IPA proof structure with G1/G2 compression
 7. ✅ Full Dory IPA reduce-and-fold algorithm
 8. ✅ Transcript-integrated Dory prover
-9. ⏳ The proof can be loaded and verified by Jolt (requires Jolt test)
-10. ⏳ No modifications needed on the Jolt side (requires verification)
+9. ✅ Cross-verification test infrastructure in Jolt created
+10. ⏳ The proof can be loaded and verified by Jolt (requires full proof gen)
+11. ⏳ No modifications needed on the Jolt side (requires verification)
 
 ## Priority Order
 
@@ -211,4 +218,5 @@ Build Summary: 5/5 steps succeeded; 608/608 tests passed
 8. ✅ **Integration Tests** - E2E serialization verified
 9. ✅ **Full Dory IPA** - Reduce-and-fold algorithm complete
 10. ✅ **Transcript Integration** - Fiat-Shamir challenges from transcript
-11. ⏳ **Cross-Verification** - Jolt-side test needed
+11. ✅ **Cross-Verification Infrastructure** - Jolt test files created
+12. ⏳ **Full Proof Generation** - Generate valid proof for cross-verification

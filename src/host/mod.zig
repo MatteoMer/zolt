@@ -492,3 +492,61 @@ test "shared preprocessing hash consistency" {
 
     try std.testing.expect(shared1.init_memory_hash.eql(shared2.init_memory_hash));
 }
+
+test "execute runs simple program" {
+    const allocator = std.testing.allocator;
+
+    // Simple program: c.nop (compressed NOP instruction)
+    const bytecode = [_]u8{ 0x01, 0x00 };
+    var config = common.MemoryConfig{
+        .program_size = bytecode.len,
+    };
+
+    const program = Program{
+        .bytecode = &bytecode,
+        .entry_point = common.constants.RAM_START_ADDRESS,
+        .base_address = common.constants.RAM_START_ADDRESS,
+        .memory_layout = common.MemoryLayout.init(&config),
+        .allocator = allocator,
+    };
+
+    // Execute with small cycle limit
+    var trace = try execute(allocator, &program, &[_]u8{}, .{
+        .max_cycles = 10,
+    });
+    defer trace.deinit();
+
+    // Should have executed at least 1 cycle
+    try std.testing.expect(trace.num_cycles >= 1);
+}
+
+test "execute with longer program" {
+    const allocator = std.testing.allocator;
+
+    // Program: addi x1, x0, 42; addi x2, x1, 1; c.nop
+    const bytecode = [_]u8{
+        0x93, 0x00, 0xa0, 0x02, // addi x1, x0, 42
+        0x13, 0x01, 0x10, 0x00, // addi x2, x1, 1
+        0x01, 0x00, // c.nop
+    };
+    var config = common.MemoryConfig{
+        .program_size = bytecode.len,
+    };
+
+    const program = Program{
+        .bytecode = &bytecode,
+        .entry_point = common.constants.RAM_START_ADDRESS,
+        .base_address = common.constants.RAM_START_ADDRESS,
+        .memory_layout = common.MemoryLayout.init(&config),
+        .allocator = allocator,
+    };
+
+    // Execute
+    var trace = try execute(allocator, &program, &[_]u8{}, .{
+        .max_cycles = 50,
+    });
+    defer trace.deinit();
+
+    // Should have executed at least 3 cycles for the 3 instructions
+    try std.testing.expect(trace.num_cycles >= 3);
+}

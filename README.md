@@ -68,8 +68,9 @@ zolt prove program.elf
 zolt prove -o proof.bin program.elf            # Save proof to file (binary)
 zolt prove --json -o proof.json program.elf    # Save proof to file (JSON)
 
-# Verify a saved proof
-zolt verify proof.bin
+# Verify a saved proof (auto-detects format)
+zolt verify proof.bin                            # Binary format
+zolt verify proof.json                           # JSON format
 
 # Inspect a Powers of Tau (PTAU) ceremony file
 zolt srs ceremony.ptau

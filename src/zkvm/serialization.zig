@@ -732,7 +732,7 @@ pub fn hexToField(comptime F: type, hex: []const u8) SerializationError!F {
     for (0..32) |i| {
         const hi = hexCharToNibble(hex[i * 2]) orelse return SerializationError.InvalidData;
         const lo = hexCharToNibble(hex[i * 2 + 1]) orelse return SerializationError.InvalidData;
-        bytes[i] = (hi << 4) | lo;
+        bytes[i] = (@as(u8, hi) << 4) | lo;
     }
     return F.fromBytes(&bytes);
 }
@@ -744,6 +744,30 @@ fn hexCharToNibble(c: u8) ?u4 {
         'A'...'F' => @intCast(c - 'A' + 10),
         else => null,
     };
+}
+
+/// Generic hex to field converter (for any field type, little-endian)
+pub fn hexToFieldGeneric(comptime FieldType: type, hex: []const u8) SerializationError!FieldType {
+    if (hex.len != 64) return SerializationError.InvalidData;
+    var bytes: [32]u8 = undefined;
+    for (0..32) |i| {
+        const hi = hexCharToNibble(hex[i * 2]) orelse return SerializationError.InvalidData;
+        const lo = hexCharToNibble(hex[i * 2 + 1]) orelse return SerializationError.InvalidData;
+        bytes[i] = (@as(u8, hi) << 4) | lo;
+    }
+    return FieldType.fromBytes(&bytes);
+}
+
+/// Hex to base field converter (big-endian, for commitments)
+pub fn hexToBaseField(hex: []const u8) SerializationError!commitment_types.Fp {
+    if (hex.len != 64) return SerializationError.InvalidData;
+    var bytes: [32]u8 = undefined;
+    for (0..32) |i| {
+        const hi = hexCharToNibble(hex[i * 2]) orelse return SerializationError.InvalidData;
+        const lo = hexCharToNibble(hex[i * 2 + 1]) orelse return SerializationError.InvalidData;
+        bytes[i] = (@as(u8, hi) << 4) | lo;
+    }
+    return commitment_types.Fp.fromBytesBE(&bytes);
 }
 
 /// JSON writer for proofs
@@ -802,12 +826,24 @@ pub fn JsonProofWriter(comptime F: type) type {
             try self.write(key);
             try self.write("\": ");
             var buf: [20]u8 = undefined;
-            const len = std.fmt.formatIntBuf(&buf, value, 10, .lower, .{});
-            try self.write(buf[0..len]);
+            const formatted = std.fmt.bufPrint(&buf, "{d}", .{value}) catch unreachable;
+            try self.write(formatted);
         }
 
         fn writeFieldElement(self: *Self, key: []const u8, elem: F) !void {
             const hex = fieldToHex(F, elem);
+            try self.writeString(key, &hex);
+        }
+
+        /// Write a base field element (for commitments)
+        fn writeBaseFieldElement(self: *Self, key: []const u8, elem: commitment_types.Fp) !void {
+            const bytes = elem.toBytesBE();
+            var hex: [64]u8 = undefined;
+            const hex_chars = "0123456789abcdef";
+            for (bytes, 0..) |byte, i| {
+                hex[i * 2] = hex_chars[byte >> 4];
+                hex[i * 2 + 1] = hex_chars[byte & 0xf];
+            }
             try self.writeString(key, &hex);
         }
 
@@ -925,9 +961,9 @@ pub fn serializeProofToJson(comptime F: type, allocator: Allocator, proof: anyty
     // Bytecode proof
     try writer.writeLine("\"bytecode_proof\": {");
     writer.indent += 1;
-    try writer.writeFieldElement("commitment_x", proof.bytecode_proof.commitment.x);
+    try writer.writeBaseFieldElement("commitment_x", proof.bytecode_proof.commitment.point.x);
     try writer.write(",\n");
-    try writer.writeFieldElement("commitment_y", proof.bytecode_proof.commitment.y);
+    try writer.writeBaseFieldElement("commitment_y", proof.bytecode_proof.commitment.point.y);
     try writer.write("\n");
     writer.indent -= 1;
     try writer.writeLine("},");
@@ -935,9 +971,9 @@ pub fn serializeProofToJson(comptime F: type, allocator: Allocator, proof: anyty
     // Memory proof
     try writer.writeLine("\"memory_proof\": {");
     writer.indent += 1;
-    try writer.writeFieldElement("commitment_x", proof.memory_proof.commitment.x);
+    try writer.writeBaseFieldElement("commitment_x", proof.memory_proof.commitment.point.x);
     try writer.write(",\n");
-    try writer.writeFieldElement("commitment_y", proof.memory_proof.commitment.y);
+    try writer.writeBaseFieldElement("commitment_y", proof.memory_proof.commitment.point.y);
     try writer.write("\n");
     writer.indent -= 1;
     try writer.writeLine("},");
@@ -945,9 +981,9 @@ pub fn serializeProofToJson(comptime F: type, allocator: Allocator, proof: anyty
     // Register proof
     try writer.writeLine("\"register_proof\": {");
     writer.indent += 1;
-    try writer.writeFieldElement("commitment_x", proof.register_proof.commitment.x);
+    try writer.writeBaseFieldElement("commitment_x", proof.register_proof.commitment.point.x);
     try writer.write(",\n");
-    try writer.writeFieldElement("commitment_y", proof.register_proof.commitment.y);
+    try writer.writeBaseFieldElement("commitment_y", proof.register_proof.commitment.point.y);
     try writer.write("\n");
     writer.indent -= 1;
     try writer.writeLine("},");
@@ -1170,12 +1206,16 @@ pub fn JsonProofReader(comptime F: type) type {
             const x_hex = try getString(obj, "commitment_x");
             const y_hex = try getString(obj, "commitment_y");
 
-            const x = try parseFieldElement(x_hex);
-            const y = try parseFieldElement(y_hex);
+            // Commitment uses base field (Fp), serialized as big-endian
+            const x = hexToBaseField(x_hex) catch return JsonDeserializationError.InvalidFieldValue;
+            const y = hexToBaseField(y_hex) catch return JsonDeserializationError.InvalidFieldValue;
 
             return commitment_types.PolyCommitment{
-                .x = x,
-                .y = y,
+                .point = .{
+                    .x = x,
+                    .y = y,
+                    .infinity = false,
+                },
             };
         }
 

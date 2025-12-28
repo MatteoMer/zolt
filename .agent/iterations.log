@@ -587,6 +587,60 @@ Cost: $5.4184
 Iteration 50 - 2025-12-28 08:37
 Summary: Fixed all C example programs and added compiled ELF binaries
 
+
+## Iteration 6 (Task) - 2025-12-28 10:28
+
+### Summary: Dory IPA Proving Algorithm Complete
+
+Implemented the full Dory reduce-and-fold inner product argument prover matching Jolt's dory-pcs crate.
+
+### Key Achievements
+
+1. **Full Dory IPA Algorithm**
+   - Multilinear Lagrange basis computation
+   - Evaluation vector computation (left_vec, right_vec)
+   - Vector-matrix product for v_vec
+   - VMV message computation (C, D2, E1)
+   - Reduce-and-fold rounds with beta/alpha challenges
+   - Final scalar product message (E1, E2)
+
+2. **Transcript Integration**
+   - Added `openWithTranscript()` - produces Fiat-Shamir challenges from Blake2b transcript
+   - Added transcript helper methods: `appendGT()`, `appendG1Compressed()`, `appendG2Compressed()`
+   - Proper challenge derivation matching Jolt's prover
+
+3. **Cross-Verification Infrastructure in Jolt**
+   - Created `jolt-core/src/zolt_compat_test.rs`
+   - `test_deserialize_zolt_proof` - Test proof deserialization
+   - `test_verify_zolt_proof` - Full verification test
+   - `test_jolt_proof_roundtrip` - Basic serialization roundtrip
+
+### Files Modified
+
+**Zolt:**
+- `src/poly/commitment/dory.zig` - Full IPA prover implementation
+- `src/transcripts/blake2b.zig` - Added Dory-specific append methods
+- `.agent/TODO.md` - Updated with progress
+
+**Jolt:**
+- `jolt-core/src/lib.rs` - Added zolt_compat_test module
+- `jolt-core/src/zolt_compat_test.rs` - Cross-verification test file
+
+### Test Results
+All 608 Zolt tests pass.
+Jolt cross-verification tests compile (marked ignore until proof files generated).
+
+### Commits
+1. feat: implement full Dory IPA proving algorithm
+2. feat: add transcript integration to Dory IPA prover
+3. docs: update TODO.md with cross-verification infrastructure progress
+4. (In Jolt) feat: add Zolt cross-verification test infrastructure
+
+### Next Steps
+1. Generate actual proof in Zolt for fibonacci.elf
+2. Export proof in Jolt-compatible format
+3. Run cross-verification test
+
 Key Changes:
 1. Fixed collatz.c, primes.c, signed.c to use proper _start with ECALL
 2. Removed zolt_io_write_u64/read_u64 dependencies (not yet implemented)

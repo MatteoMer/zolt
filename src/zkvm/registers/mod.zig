@@ -6,6 +6,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const common = @import("../../common/mod.zig");
+const commitment_types = @import("../commitment_types.zig");
+const PolyCommitment = commitment_types.PolyCommitment;
 
 /// Register operation type
 pub const RegisterOp = enum {
@@ -129,19 +131,63 @@ pub const RegisterFile = struct {
 };
 
 /// Register proof for zkVM
+///
+/// Contains polynomial commitments for register verification.
+/// Uses offline memory checking for the 32 RISC-V registers.
 pub fn RegisterProof(comptime F: type) type {
     return struct {
         const Self = @This();
 
-        /// Commitment to register polynomial
-        commitment: F,
+        /// Commitment to register value polynomial
+        commitment: PolyCommitment,
         /// Read timestamp polynomial commitment
-        read_ts_commitment: F,
+        read_ts_commitment: PolyCommitment,
         /// Write timestamp polynomial commitment
-        write_ts_commitment: F,
+        write_ts_commitment: PolyCommitment,
+        /// Commitment to final register state (for RAF checking)
+        final_state_commitment: PolyCommitment,
+        /// Opening proof for batch verification (optional)
+        opening_proof: ?*commitment_types.OpeningProof,
 
-        pub fn deinit(_: *Self, _: Allocator) void {
-            // Nothing to free for now
+        /// Legacy field element (for backward compatibility during transition)
+        /// TODO: Remove after full migration to PolyCommitment
+        _legacy_commitment: F,
+
+        /// Create a default proof with identity commitments
+        pub fn init() Self {
+            return .{
+                .commitment = PolyCommitment.zero(),
+                .read_ts_commitment = PolyCommitment.zero(),
+                .write_ts_commitment = PolyCommitment.zero(),
+                .final_state_commitment = PolyCommitment.zero(),
+                .opening_proof = null,
+                ._legacy_commitment = F.zero(),
+            };
+        }
+
+        /// Create proof with specific commitments
+        pub fn withCommitments(
+            commitment: PolyCommitment,
+            read_ts: PolyCommitment,
+            write_ts: PolyCommitment,
+            final_state: PolyCommitment,
+        ) Self {
+            return .{
+                .commitment = commitment,
+                .read_ts_commitment = read_ts,
+                .write_ts_commitment = write_ts,
+                .final_state_commitment = final_state,
+                .opening_proof = null,
+                ._legacy_commitment = F.zero(),
+            };
+        }
+
+        pub fn deinit(self: *Self, allocator: Allocator) void {
+            if (self.opening_proof) |proof| {
+                proof.deinit();
+                allocator.destroy(proof);
+                self.opening_proof = null;
+            }
         }
     };
 }

@@ -15,6 +15,7 @@ const tracer = @import("../tracer/mod.zig");
 const transcripts = @import("../transcripts/mod.zig");
 
 pub const bytecode = @import("bytecode/mod.zig");
+pub const commitment_types = @import("commitment_types.zig");
 pub const instruction = @import("instruction/mod.zig");
 pub const lasso = @import("lasso/mod.zig");
 pub const lookup_table = @import("lookup_table/mod.zig");
@@ -24,6 +25,10 @@ pub const ram = @import("ram/mod.zig");
 pub const registers = @import("registers/mod.zig");
 pub const spartan = @import("spartan/mod.zig");
 pub const verifier = @import("verifier.zig");
+
+// Re-export commitment types
+pub const PolyCommitment = commitment_types.PolyCommitment;
+pub const OpeningProof = commitment_types.OpeningProof;
 
 // Re-export multi-stage prover types
 pub const MultiStageProver = prover.MultiStageProver;
@@ -226,22 +231,12 @@ pub fn JoltProver(comptime F: type) type {
             const stage_proofs = try multi_stage.prove(&transcript);
 
             // Return the complete proof with stage proofs
+            // The bytecode, memory, and register proofs use identity commitments
+            // as placeholders. Full commitment generation happens in a later phase.
             return JoltProof(F){
-                .bytecode_proof = bytecode.BytecodeProof(F){
-                    .commitment = F.zero(),
-                    .read_ts_commitment = F.zero(),
-                    .write_ts_commitment = F.zero(),
-                },
-                .memory_proof = ram.MemoryProof(F){
-                    .commitment = F.zero(),
-                    .read_ts_commitment = F.zero(),
-                    .write_ts_commitment = F.zero(),
-                },
-                .register_proof = registers.RegisterProof(F){
-                    .commitment = F.zero(),
-                    .read_ts_commitment = F.zero(),
-                    .write_ts_commitment = F.zero(),
-                },
+                .bytecode_proof = bytecode.BytecodeProof(F).init(),
+                .memory_proof = ram.MemoryProof(F).init(),
+                .register_proof = registers.RegisterProof(F).init(),
                 .r1cs_proof = try spartan.R1CSProof(F).placeholder(self.allocator),
                 .stage_proofs = stage_proofs,
                 .allocator = self.allocator,

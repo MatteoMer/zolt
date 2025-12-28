@@ -137,6 +137,31 @@ pub const VirtualPolynomial = union(enum) {
     InstructionFlags: u8,
     LookupTableFlag: usize,
 
+    /// Compare payloads of two VirtualPolynomials with the same tag
+    /// Returns .eq if they're completely equal, otherwise .lt or .gt
+    pub fn orderByPayload(a: VirtualPolynomial, b: VirtualPolynomial) std.math.Order {
+        switch (a) {
+            .OpFlags => |val_a| {
+                const val_b = b.OpFlags;
+                return std.math.order(val_a, val_b);
+            },
+            .InstructionFlags => |val_a| {
+                const val_b = b.InstructionFlags;
+                return std.math.order(val_a, val_b);
+            },
+            .InstructionRa => |val_a| {
+                const val_b = b.InstructionRa;
+                return std.math.order(val_a, val_b);
+            },
+            .LookupTableFlag => |val_a| {
+                const val_b = b.LookupTableFlag;
+                return std.math.order(val_a, val_b);
+            },
+            // All other variants have no payload, so they're equal if tags match
+            else => return .eq,
+        }
+    }
+
     /// Serialize in Jolt's compact format
     pub fn serialize(self: VirtualPolynomial, writer: anytype) !void {
         switch (self) {
@@ -266,7 +291,14 @@ pub const OpeningId = union(enum) {
                 const v_b = b.Virtual;
                 const cmp = std.math.order(@intFromEnum(v_a.sumcheck_id), @intFromEnum(v_b.sumcheck_id));
                 if (cmp != .eq) return cmp;
-                return std.math.order(@intFromEnum(std.meta.activeTag(v_a.poly)), @intFromEnum(std.meta.activeTag(v_b.poly)));
+                // Compare polynomial by tag first
+                const tag_a = @intFromEnum(std.meta.activeTag(v_a.poly));
+                const tag_b = @intFromEnum(std.meta.activeTag(v_b.poly));
+                if (tag_a != tag_b) {
+                    return std.math.order(tag_a, tag_b);
+                }
+                // Same tag - compare payload if applicable
+                return VirtualPolynomial.orderByPayload(v_a.poly, v_b.poly);
             },
         }
     }

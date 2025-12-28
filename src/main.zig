@@ -458,7 +458,6 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt:
             std.debug.print("  Error generating bytecode preprocessing: {s}\n", .{@errorName(err)});
             return err;
         };
-        defer bytecode_prep.deinit();
 
         // Create memory init from bytecode
         const mem_init_entries = try allocator.alloc(struct { u64, u8 }, program.bytecode.len);
@@ -469,9 +468,9 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt:
 
         var ram_prep = preprocessing.RAMPreprocessing.preprocess(allocator, mem_init_entries) catch |err| {
             std.debug.print("  Error generating RAM preprocessing: {s}\n", .{@errorName(err)});
+            bytecode_prep.deinit();
             return err;
         };
-        defer ram_prep.deinit();
 
         // Create memory layout
         const jolt_device = zolt.zkvm.jolt_device;
@@ -483,24 +482,66 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt:
             @intCast(program.bytecode.len),
         ) catch |err| {
             std.debug.print("  Error creating memory layout: {s}\n", .{@errorName(err)});
+            bytecode_prep.deinit();
+            ram_prep.deinit();
             return err;
         };
         var device_mut = device;
         defer device_mut.deinit();
 
-        // Create shared preprocessing
-        var shared_prep = preprocessing.JoltSharedPreprocessing{
+        // Create shared preprocessing (transfer ownership)
+        const shared_prep = preprocessing.JoltSharedPreprocessing{
             .bytecode = bytecode_prep,
             .ram = ram_prep,
             .memory_layout = device.memory_layout,
         };
 
+        // Create verifier setup from SRS if available
+        const dory = zolt.poly.commitment.dory;
+        const DoryCommitmentScheme = dory.DoryCommitmentScheme(zolt.field.BN254Scalar);
+
+        // Generate or load SRS for verifier setup
+        var srs = blk: {
+            if (srs_path) |srs_file| {
+                if (DoryCommitmentScheme.loadFromFile(allocator, srs_file)) |loaded| {
+                    break :blk loaded;
+                } else |_| {
+                    std.debug.print("  Warning: Could not load SRS for verifier setup\n", .{});
+                    std.debug.print("  Generating default SRS (may not match Jolt exactly)...\n", .{});
+                }
+            }
+            // Generate default SRS
+            break :blk DoryCommitmentScheme.setup(allocator, 20) catch |err| {
+                std.debug.print("  Error generating SRS: {s}\n", .{@errorName(err)});
+                return err;
+            };
+        };
+        defer srs.deinit();
+
+        // Create verifier setup from SRS
+        var verifier_setup = preprocessing.DoryVerifierSetup.fromSRS(allocator, &srs) catch |err| {
+            std.debug.print("  Error creating verifier setup: {s}\n", .{@errorName(err)});
+            return err;
+        };
+        defer verifier_setup.deinit();
+
+        // Create full verifier preprocessing (don't own shared - just reference)
+        // Note: We need to serialize generators first, then shared preprocessing
+        // to match Jolt's JoltVerifierPreprocessing format
+
         // Serialize to ArrayList first, then write to file
         var buffer = std.ArrayListUnmanaged(u8){};
         defer buffer.deinit(allocator);
 
+        // Serialize generators (DoryVerifierSetup)
+        verifier_setup.serialize(buffer.writer(allocator)) catch |err| {
+            std.debug.print("  Error serializing verifier setup: {s}\n", .{@errorName(err)});
+            return err;
+        };
+
+        // Serialize shared preprocessing
         shared_prep.serialize(allocator, buffer.writer(allocator)) catch |err| {
-            std.debug.print("  Error serializing preprocessing: {s}\n", .{@errorName(err)});
+            std.debug.print("  Error serializing shared preprocessing: {s}\n", .{@errorName(err)});
             return err;
         };
 
@@ -515,7 +556,7 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt:
             return err;
         };
 
-        std.debug.print("  Preprocessing exported successfully!\n", .{});
+        std.debug.print("  Preprocessing exported successfully! ({} bytes)\n", .{buffer.items.len});
         std.debug.print("  This file can be loaded by Jolt for cross-verification.\n", .{});
     }
 

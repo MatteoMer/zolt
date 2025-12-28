@@ -780,9 +780,13 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             const g1_vec = try allocator.alloc(G1Point, @intCast(g1_count));
             errdefer allocator.free(g1_vec);
 
-            for (g1_vec) |*g1| {
+            for (g1_vec, 0..) |*g1, idx| {
                 var buf: [64]u8 = undefined;
                 _ = try file.readAll(&buf);
+                // Debug: print raw bytes for first few points
+                if (idx < 4) {
+                    std.debug.print("G1[{}] raw y bytes from file: {x}\n", .{ idx, buf[32..48].* });
+                }
                 // Parse arkworks uncompressed G1 format (64 bytes: x, y in LE)
                 g1.* = parseG1Uncompressed(&buf);
             }
@@ -818,6 +822,9 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
         }
 
         /// Parse arkworks uncompressed G1 point (64 bytes: x[32] || y[32] in LE)
+        /// arkworks stores flag bits in the MSB of the last byte:
+        /// - bit 7: y-sign flag (for compressed points, but still present in uncompressed)
+        /// - bit 6: infinity flag
         fn parseG1Uncompressed(buf: *const [64]u8) G1Point {
             // Read x coordinate (32 bytes LE as 4 u64 limbs)
             var x_limbs: [4]u64 = undefined;
@@ -830,6 +837,11 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             for (0..4) |i| {
                 y_limbs[i] = std.mem.readInt(u64, buf[32 + i * 8 ..][0..8], .little);
             }
+
+            // Clear arkworks flag bits from the most significant byte of y coordinate
+            // Flags are in the top 2 bits of the last byte (byte 63)
+            // limbs[3] is the most significant, and its top byte contains flags
+            y_limbs[3] &= 0x3FFFFFFFFFFFFFFF; // Clear top 2 bits
 
             // Convert from standard to Montgomery form
             const x_raw = Fp{ .limbs = x_limbs };
@@ -846,9 +858,32 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 return G1Point.identity();
             }
 
+            const x_mont = x_raw.toMontgomery();
+            const y_mont = y_raw.toMontgomery();
+
+            // Verify round-trip: converting to Montgomery and back should give original
+            const y_back = y_mont.fromMontgomery();
+            if (y_limbs[1] != 0 and !std.meta.eql(y_back.limbs, y_limbs)) {
+                std.debug.print("\nMontgomery round-trip FAILED!\n", .{});
+                std.debug.print("  Original y limbs: {x:0>16} {x:0>16} {x:0>16} {x:0>16}\n", .{
+                    y_limbs[0], y_limbs[1], y_limbs[2], y_limbs[3],
+                });
+                std.debug.print("  y_mont limbs: {x:0>16} {x:0>16} {x:0>16} {x:0>16}\n", .{
+                    y_mont.limbs[0], y_mont.limbs[1], y_mont.limbs[2], y_mont.limbs[3],
+                });
+                std.debug.print("  After round-trip: {x:0>16} {x:0>16} {x:0>16} {x:0>16}\n", .{
+                    y_back.limbs[0], y_back.limbs[1], y_back.limbs[2], y_back.limbs[3],
+                });
+                // Also compare what manual computation gives
+                const y_mont_manual = field.testMontgomeryMulFp(y_limbs, field.BN254_FP_R2);
+                std.debug.print("  y_mont_manual limbs: {x:0>16} {x:0>16} {x:0>16} {x:0>16}\n", .{
+                    y_mont_manual[0], y_mont_manual[1], y_mont_manual[2], y_mont_manual[3],
+                });
+            }
+
             return G1Point{
-                .x = x_raw.toMontgomery(),
-                .y = y_raw.toMontgomery(),
+                .x = x_mont,
+                .y = y_mont,
                 .infinity = false,
             };
         }
@@ -867,6 +902,10 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 y_c0_limbs[i] = std.mem.readInt(u64, buf[64 + i * 8 ..][0..8], .little);
                 y_c1_limbs[i] = std.mem.readInt(u64, buf[96 + i * 8 ..][0..8], .little);
             }
+
+            // Clear arkworks flag bits from y.c1 (last 32 bytes of the 128-byte point)
+            // Flags are in the top 2 bits of the last byte
+            y_c1_limbs[3] &= 0x3FFFFFFFFFFFFFFF;
 
             const x_c0_raw = Fp{ .limbs = x_c0_limbs };
             const x_c1_raw = Fp{ .limbs = x_c1_limbs };
@@ -1858,6 +1897,229 @@ test "dory commitment with jolt srs - compare matrix layout" {
         }
     } else |_| {
         std.debug.print("Skipping Jolt SRS comparison test - no SRS file at /tmp/jolt_dory_srs.bin\n", .{});
+        std.debug.print("Run Jolt's test_export_dory_srs first.\n", .{});
+    }
+}
+
+test "dory commitment debug - compare intermediate values with jolt" {
+    // Detailed debug test to compare intermediate MSM and pairing results
+    // Run after Jolt's test_export_dory_commitment_debug to compare
+    //
+    // Jolt reference values:
+    // Row 0 MSM: 03 81 87 9a 0a d6 7c 0f 6c 84 5b ed 4e f6 73 80...
+    // Row 1 MSM: 7c 95 83 60 cf bf 11 41 fa 6a 27 f6 84 1c d1 68...
+    // Final commitment: cf 11 82 20 dc 8c 59 10 fc 08 e5 f4 58 a2 42 6f...
+
+    const allocator = std.testing.allocator;
+    const DoryScheme = DoryCommitmentScheme(Fr);
+
+    // Load Jolt's SRS file if available
+    const srs_result = DoryScheme.loadFromFile(allocator, "/tmp/jolt_dory_srs.bin");
+    if (srs_result) |srs_const| {
+        var srs = srs_const;
+        defer srs.deinit();
+
+        std.debug.print("\n=== Dory Commitment Debug ===\n", .{});
+        std.debug.print("SRS loaded: {} G1 points, {} G2 points\n", .{ srs.g1_vec.len, srs.g2_vec.len });
+
+        // Print first G1 point bytes (in arkworks format for comparison)
+        const g1_0 = srs.g1_vec[0];
+        const g1_0_x_std = g1_0.x.fromMontgomery();
+        const g1_0_y_std = g1_0.y.fromMontgomery();
+
+        // Check if G1 points are on the curve and print coordinates
+        for (0..4) |i| {
+            const g1_i = srs.g1_vec[i];
+            const on_curve = g1_i.isOnCurve();
+
+            // Print raw limbs (Montgomery form) for debugging
+            std.debug.print("\nG1[{}] on curve: {}\n", .{ i, on_curve });
+            std.debug.print("  x (Montgomery) limbs: {x:0>16} {x:0>16} {x:0>16} {x:0>16}\n", .{
+                g1_i.x.limbs[0],
+                g1_i.x.limbs[1],
+                g1_i.x.limbs[2],
+                g1_i.x.limbs[3],
+            });
+            std.debug.print("  y (Montgomery) limbs: {x:0>16} {x:0>16} {x:0>16} {x:0>16}\n", .{
+                g1_i.y.limbs[0],
+                g1_i.y.limbs[1],
+                g1_i.y.limbs[2],
+                g1_i.y.limbs[3],
+            });
+
+            // Print x and y coordinates in standard form for comparison with Jolt
+            const x_std = g1_i.x.fromMontgomery();
+            const y_std = g1_i.y.fromMontgomery();
+            var x_bytes: [32]u8 = undefined;
+            var y_bytes: [32]u8 = undefined;
+            for (0..4) |j| {
+                std.mem.writeInt(u64, x_bytes[j * 8 ..][0..8], x_std.limbs[j], .little);
+                std.mem.writeInt(u64, y_bytes[j * 8 ..][0..8], y_std.limbs[j], .little);
+            }
+
+            std.debug.print("  x first 16 (std): {x}\n", .{x_bytes[0..16].*});
+            std.debug.print("  y first 16 (std): {x}\n", .{y_bytes[0..16].*});
+        }
+
+        var g1_0_bytes: [64]u8 = undefined;
+        for (0..4) |i| {
+            std.mem.writeInt(u64, g1_0_bytes[i * 8 ..][0..8], g1_0_x_std.limbs[i], .little);
+            std.mem.writeInt(u64, g1_0_bytes[32 + i * 8 ..][0..8], g1_0_y_std.limbs[i], .little);
+        }
+        std.debug.print("\nG1[0] first 16 bytes: {x}\n", .{g1_0_bytes[0..16].*});
+        // Jolt: 10 f1 51 c2 83 fa c8 e8 ae 44 83 39 77 82 ca db
+
+        // Test simple scalar multiplication: G1[0] * 1 should equal G1[0]
+        const scalar_one = Fr.fromU64(1);
+        const g1_times_1 = msm.MSM(Fr, Fp).compute(srs.g1_vec[0..1], &[_]Fr{scalar_one});
+
+        const g1_times_1_x_std = g1_times_1.x.fromMontgomery();
+        const g1_times_1_y_std = g1_times_1.y.fromMontgomery();
+
+        var g1_times_1_bytes: [64]u8 = undefined;
+        for (0..4) |i| {
+            std.mem.writeInt(u64, g1_times_1_bytes[i * 8 ..][0..8], g1_times_1_x_std.limbs[i], .little);
+            std.mem.writeInt(u64, g1_times_1_bytes[32 + i * 8 ..][0..8], g1_times_1_y_std.limbs[i], .little);
+        }
+        std.debug.print("G1[0]*1 first 16 bytes: {x}\n", .{g1_times_1_bytes[0..16].*});
+
+        if (std.mem.eql(u8, &g1_0_bytes, &g1_times_1_bytes)) {
+            std.debug.print("  *** G1[0]*1 == G1[0]: PASS ***\n", .{});
+        } else {
+            std.debug.print("  *** G1[0]*1 != G1[0]: FAIL - MSM broken ***\n", .{});
+        }
+
+        // Test: Print first 4 G1 points
+        std.debug.print("\nG1 points in SRS:\n", .{});
+        for (0..4) |i| {
+            const g1_i = srs.g1_vec[i];
+            const g1_i_x_std = g1_i.x.fromMontgomery();
+            var g1_i_bytes: [32]u8 = undefined;
+            for (0..4) |j| {
+                std.mem.writeInt(u64, g1_i_bytes[j * 8 ..][0..8], g1_i_x_std.limbs[j], .little);
+            }
+            std.debug.print("  G1[{}] x: {x}\n", .{ i, g1_i_bytes[0..16].* });
+        }
+
+        // Test: G1[0] * 2 (scalar multiplication)
+        const scalar_two = Fr.fromU64(2);
+        std.debug.print("\nScalar 2 (Montgomery form): {x:0>16} {x:0>16} {x:0>16} {x:0>16}\n", .{
+            scalar_two.limbs[0],
+            scalar_two.limbs[1],
+            scalar_two.limbs[2],
+            scalar_two.limbs[3],
+        });
+        const scalar_two_std = scalar_two.fromMontgomery();
+        std.debug.print("Scalar 2 (standard form): {x:0>16} {x:0>16} {x:0>16} {x:0>16}\n", .{
+            scalar_two_std.limbs[0],
+            scalar_two_std.limbs[1],
+            scalar_two_std.limbs[2],
+            scalar_two_std.limbs[3],
+        });
+
+        const g1_times_2 = msm.MSM(Fr, Fp).compute(srs.g1_vec[0..1], &[_]Fr{scalar_two});
+        const g1_times_2_x_std = g1_times_2.x.fromMontgomery();
+        var g1_times_2_bytes: [32]u8 = undefined;
+        for (0..4) |i| {
+            std.mem.writeInt(u64, g1_times_2_bytes[i * 8 ..][0..8], g1_times_2_x_std.limbs[i], .little);
+        }
+        std.debug.print("G1[0]*2 x: {x}\n", .{g1_times_2_bytes[0..16].*});
+
+        // Test: G1[0]*1 + G1[1]*1 (adding two points)
+        const g1_sum = msm.MSM(Fr, Fp).compute(srs.g1_vec[0..2], &[_]Fr{ Fr.fromU64(1), Fr.fromU64(1) });
+        const g1_sum_x_std = g1_sum.x.fromMontgomery();
+        var g1_sum_bytes: [32]u8 = undefined;
+        for (0..4) |i| {
+            std.mem.writeInt(u64, g1_sum_bytes[i * 8 ..][0..8], g1_sum_x_std.limbs[i], .little);
+        }
+        std.debug.print("G1[0]+G1[1] x (via MSM): {x}\n", .{g1_sum_bytes[0..16].*});
+
+        // Also test direct affine addition
+        const g1_sum_affine = srs.g1_vec[0].add(srs.g1_vec[1]);
+        const g1_sum_affine_x_std = g1_sum_affine.x.fromMontgomery();
+        var g1_sum_affine_bytes: [32]u8 = undefined;
+        for (0..4) |i| {
+            std.mem.writeInt(u64, g1_sum_affine_bytes[i * 8 ..][0..8], g1_sum_affine_x_std.limbs[i], .little);
+        }
+        std.debug.print("G1[0]+G1[1] x (affine add): {x}\n", .{g1_sum_affine_bytes[0..16].*});
+
+        // Polynomial [1, 2, 3, 4, 5, 6, 7, 8]
+        const num_cols: usize = 4;
+        // const num_rows: usize = 2;
+
+        // Row 0: [1, 2, 3, 4]
+        const row0_evals = [_]Fr{
+            Fr.fromU64(1), Fr.fromU64(2), Fr.fromU64(3), Fr.fromU64(4),
+        };
+
+        // Compute row 0 MSM (returns affine point directly)
+        const row0_affine = msm.MSM(Fr, Fp).compute(
+            srs.g1_vec[0..num_cols],
+            &row0_evals,
+        );
+
+        // Serialize to arkworks format (standard form, not Montgomery)
+        const row0_x_std = row0_affine.x.fromMontgomery();
+        const row0_y_std = row0_affine.y.fromMontgomery();
+
+        std.debug.print("\nRow 0 MSM result:\n", .{});
+        std.debug.print("  x limbs (standard): {x:0>16} {x:0>16} {x:0>16} {x:0>16}\n", .{
+            row0_x_std.limbs[0],
+            row0_x_std.limbs[1],
+            row0_x_std.limbs[2],
+            row0_x_std.limbs[3],
+        });
+
+        // Get as bytes (arkworks format: LE limbs)
+        var row0_bytes: [64]u8 = undefined;
+        for (0..4) |i| {
+            std.mem.writeInt(u64, row0_bytes[i * 8 ..][0..8], row0_x_std.limbs[i], .little);
+            std.mem.writeInt(u64, row0_bytes[32 + i * 8 ..][0..8], row0_y_std.limbs[i], .little);
+        }
+        std.debug.print("  First 16 bytes: {x}\n", .{row0_bytes[0..16].*});
+
+        // Jolt reference: 03 81 87 9a 0a d6 7c 0f 6c 84 5b ed 4e f6 73 80
+        const jolt_row0_bytes = [_]u8{ 0x03, 0x81, 0x87, 0x9a, 0x0a, 0xd6, 0x7c, 0x0f, 0x6c, 0x84, 0x5b, 0xed, 0x4e, 0xf6, 0x73, 0x80 };
+
+        if (std.mem.eql(u8, row0_bytes[0..16], &jolt_row0_bytes)) {
+            std.debug.print("  *** Row 0 MSM MATCHES Jolt! ***\n", .{});
+        } else {
+            std.debug.print("  *** Row 0 MSM MISMATCH ***\n", .{});
+            std.debug.print("  Expected: {x}\n", .{jolt_row0_bytes});
+        }
+
+        // Row 1: [5, 6, 7, 8]
+        const row1_evals = [_]Fr{
+            Fr.fromU64(5), Fr.fromU64(6), Fr.fromU64(7), Fr.fromU64(8),
+        };
+
+        const row1_affine = msm.MSM(Fr, Fp).compute(
+            srs.g1_vec[0..num_cols],
+            &row1_evals,
+        );
+
+        const row1_x_std = row1_affine.x.fromMontgomery();
+        const row1_y_std = row1_affine.y.fromMontgomery();
+
+        var row1_bytes: [64]u8 = undefined;
+        for (0..4) |i| {
+            std.mem.writeInt(u64, row1_bytes[i * 8 ..][0..8], row1_x_std.limbs[i], .little);
+            std.mem.writeInt(u64, row1_bytes[32 + i * 8 ..][0..8], row1_y_std.limbs[i], .little);
+        }
+        std.debug.print("\nRow 1 MSM result:\n", .{});
+        std.debug.print("  First 16 bytes: {x}\n", .{row1_bytes[0..16].*});
+
+        // Jolt reference: 7c 95 83 60 cf bf 11 41 fa 6a 27 f6 84 1c d1 68
+        const jolt_row1_bytes = [_]u8{ 0x7c, 0x95, 0x83, 0x60, 0xcf, 0xbf, 0x11, 0x41, 0xfa, 0x6a, 0x27, 0xf6, 0x84, 0x1c, 0xd1, 0x68 };
+
+        if (std.mem.eql(u8, row1_bytes[0..16], &jolt_row1_bytes)) {
+            std.debug.print("  *** Row 1 MSM MATCHES Jolt! ***\n", .{});
+        } else {
+            std.debug.print("  *** Row 1 MSM MISMATCH ***\n", .{});
+            std.debug.print("  Expected: {x}\n", .{jolt_row1_bytes});
+        }
+    } else |_| {
+        std.debug.print("Skipping debug test - no SRS file at /tmp/jolt_dory_srs.bin\n", .{});
         std.debug.print("Run Jolt's test_export_dory_srs first.\n", .{});
     }
 }

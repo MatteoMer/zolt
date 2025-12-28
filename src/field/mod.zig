@@ -84,6 +84,42 @@ pub const BN254BaseField = MontgomeryField(
     BN254_FP_INV,
 );
 
+/// Debug helper for testing Montgomery multiplication with Fp constants
+pub fn testMontgomeryMulFp(a: [4]u64, b: [4]u64) [4]u64 {
+    var t: [5]u64 = .{ 0, 0, 0, 0, 0 };
+
+    inline for (0..4) |i| {
+        var carry: u64 = 0;
+        inline for (0..4) |j| {
+            const prod = @as(u128, a[i]) * @as(u128, b[j]);
+            const sum = @as(u128, t[j]) + prod + @as(u128, carry);
+            t[j] = @truncate(sum);
+            carry = @truncate(sum >> 64);
+        }
+        const sum_t4 = @as(u128, t[4]) + @as(u128, carry);
+        t[4] = @truncate(sum_t4);
+
+        const m = t[0] *% BN254_FP_INV;
+
+        carry = 0;
+        const prod0 = @as(u128, m) * @as(u128, BN254_FP_MODULUS[0]);
+        const sum0 = @as(u128, t[0]) + prod0;
+        carry = @truncate(sum0 >> 64);
+
+        inline for (1..4) |j| {
+            const prod = @as(u128, m) * @as(u128, BN254_FP_MODULUS[j]);
+            const sum = @as(u128, t[j]) + prod + @as(u128, carry);
+            t[j - 1] = @truncate(sum);
+            carry = @truncate(sum >> 64);
+        }
+        const final_sum = @as(u128, t[4]) + @as(u128, carry);
+        t[3] = @truncate(final_sum);
+        t[4] = @truncate(final_sum >> 64);
+    }
+
+    return .{ t[0], t[1], t[2], t[3] };
+}
+
 /// Generic Montgomery field parameterized by constants
 pub fn MontgomeryField(
     comptime modulus: [4]u64,
@@ -154,6 +190,12 @@ pub fn MontgomeryField(
 
         /// Convert to Montgomery form from standard representation
         pub fn toMontgomery(self: Self) Self {
+            // Debug: verify constants
+            if (false) {
+                @compileLog("modulus[0]:", modulus[0]);
+                @compileLog("montgomery_r2[0]:", montgomery_r2[0]);
+                @compileLog("montgomery_inv:", montgomery_inv);
+            }
             return self.montgomeryMul(.{ .limbs = montgomery_r2 });
         }
 

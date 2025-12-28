@@ -45,20 +45,20 @@ pub const PolyCommitment = struct {
         return self.point.infinity;
     }
 
-    /// Convert to bytes for serialization
+    /// Convert to bytes for serialization (big-endian)
     pub fn toBytes(self: Self) [64]u8 {
         var result: [64]u8 = undefined;
-        result[0..32].* = self.point.x.toBytes();
-        result[32..64].* = self.point.y.toBytes();
+        result[0..32].* = self.point.x.toBytesBE();
+        result[32..64].* = self.point.y.toBytesBE();
         return result;
     }
 
-    /// Create from bytes
+    /// Create from bytes (big-endian)
     pub fn fromBytes(bytes: [64]u8) Self {
         return .{
             .point = .{
-                .x = Fp.fromBytes(bytes[0..32].*),
-                .y = Fp.fromBytes(bytes[32..64].*),
+                .x = Fp.fromBytesBE(bytes[0..32]),
+                .y = Fp.fromBytesBE(bytes[32..64]),
                 .infinity = false,
             },
         };

@@ -118,9 +118,11 @@ fn runEmulator(allocator: std.mem.Allocator, elf_path: []const u8) !void {
 }
 
 fn runProver(allocator: std.mem.Allocator, elf_path: []const u8) !void {
-    std.debug.print("Loading ELF for proving: {s}\n", .{elf_path});
+    std.debug.print("Zolt zkVM Prover\n", .{});
+    std.debug.print("================\n\n", .{});
 
     // Load the ELF file
+    std.debug.print("Loading ELF: {s}\n", .{elf_path});
     var loader = zolt.host.ELFLoader.init(allocator);
     const program = loader.loadFile(elf_path) catch |err| {
         std.debug.print("Error loading ELF file: {}\n", .{err});
@@ -131,11 +133,13 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8) !void {
         prog.deinit();
     }
 
-    std.debug.print("Entry point: 0x{x:0>8}\n", .{program.entry_point});
-    std.debug.print("Code size: {} bytes\n", .{program.bytecode.len});
+    std.debug.print("  Entry point: 0x{x:0>8}\n", .{program.entry_point});
+    std.debug.print("  Code size: {} bytes\n", .{program.bytecode.len});
 
     // Step 1: Preprocess to get proving/verifying keys
-    std.debug.print("\nStep 1: Preprocessing...\n", .{});
+    std.debug.print("\n[1/4] Preprocessing...\n", .{});
+    var timer = std.time.Timer.start() catch return;
+
     var preprocessor = zolt.host.Preprocessing(BN254Scalar).init(allocator);
     preprocessor.setMaxTraceLength(1024);
 
@@ -143,57 +147,78 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8) !void {
     defer keys.pk.deinit();
     defer keys.vk.deinit();
 
+    const preprocess_time = timer.read();
     std.debug.print("  SRS degree: {}\n", .{keys.pk.srs.max_degree});
     std.debug.print("  Max trace length: {}\n", .{keys.pk.max_trace_length});
+    std.debug.print("  Time: {d:.2} ms\n", .{@as(f64, @floatFromInt(preprocess_time)) / 1_000_000.0});
 
-    // Step 2: Execute and collect trace
-    std.debug.print("\nStep 2: Executing program...\n", .{});
+    // Step 2: Create prover with proving key
+    std.debug.print("\n[2/4] Initializing prover...\n", .{});
+    timer.reset();
 
-    var config = zolt.common.MemoryConfig{
-        .program_size = program.bytecode.len,
+    var prover_inst = zolt.zkvm.JoltProver(BN254Scalar).init(allocator);
+    prover_inst.setMaxCycles(1024);
+    // Convert host ProvingKey to zkvm ProvingKey
+    const zkvm_pk = zolt.zkvm.ProvingKey.fromSRS(keys.pk.srs);
+    prover_inst.setProvingKey(zkvm_pk);
+
+    const init_time = timer.read();
+    std.debug.print("  Prover initialized with proving key\n", .{});
+    std.debug.print("  Time: {d:.2} ms\n", .{@as(f64, @floatFromInt(init_time)) / 1_000_000.0});
+
+    // Step 3: Generate proof
+    std.debug.print("\n[3/4] Generating proof...\n", .{});
+    std.debug.print("  Running 6-stage multi-sumcheck protocol\n", .{});
+    std.debug.print("  Components: HyperKZG, Lasso lookups, 24 tables\n", .{});
+    timer.reset();
+
+    var proof = prover_inst.prove(program.bytecode, &[_]u8{}) catch |err| {
+        std.debug.print("  Error generating proof: {}\n", .{err});
+        return err;
+    };
+    defer proof.deinit();
+
+    const prove_time = timer.read();
+    std.debug.print("  Proof generated successfully!\n", .{});
+    std.debug.print("  Time: {d:.2} ms\n", .{@as(f64, @floatFromInt(prove_time)) / 1_000_000.0});
+
+    // Step 4: Verify proof
+    std.debug.print("\n[4/4] Verifying proof...\n", .{});
+    timer.reset();
+
+    var verifier = zolt.zkvm.JoltVerifier(BN254Scalar).init(allocator);
+    // Convert host VerifyingKey to zkvm VerifyingKey
+    const zkvm_vk = zolt.zkvm.VerifyingKey{
+        .g1 = keys.vk.g1,
+        .g2 = keys.vk.g2,
+        .tau_g2 = keys.vk.tau_g2,
+    };
+    verifier.setVerifyingKey(zkvm_vk);
+
+    const verify_result = verifier.verify(&proof, &[_]u8{}) catch |err| {
+        std.debug.print("  Error during verification: {}\n", .{err});
+        return err;
     };
 
-    var emulator = zolt.tracer.Emulator.init(allocator, &config);
-    defer emulator.deinit();
-
-    try emulator.loadProgram(program.bytecode);
-    emulator.state.pc = program.entry_point;
-    emulator.max_cycles = 1024;
-
-    var running = true;
-    while (running) {
-        running = emulator.step() catch break;
+    const verify_time = timer.read();
+    if (verify_result) {
+        std.debug.print("  Verification: PASSED\n", .{});
+    } else {
+        std.debug.print("  Verification: FAILED\n", .{});
     }
+    std.debug.print("  Time: {d:.2} ms\n", .{@as(f64, @floatFromInt(verify_time)) / 1_000_000.0});
 
-    std.debug.print("  Cycles executed: {}\n", .{emulator.state.cycle});
-    std.debug.print("  Trace entries: {}\n", .{emulator.trace.len()});
+    // Summary
+    std.debug.print("\n================\n", .{});
+    std.debug.print("Proof Summary\n", .{});
+    std.debug.print("================\n", .{});
+    std.debug.print("  Bytecode commitment: {s}\n", .{if (!proof.bytecode_proof.commitment.isZero()) "present" else "none"});
+    std.debug.print("  Memory commitment: {s}\n", .{if (!proof.memory_proof.commitment.isZero()) "present" else "none"});
+    std.debug.print("  Register commitment: {s}\n", .{if (!proof.register_proof.commitment.isZero()) "present" else "none"});
+    std.debug.print("  Stage proofs: {s}\n", .{if (proof.stage_proofs != null) "present" else "none"});
 
-    // Step 3: Generate proof (experimental - shows the structure)
-    std.debug.print("\nStep 3: Generating proof (experimental)...\n", .{});
-
-    // Create the Jolt prover
-    const prover = zolt.zkvm.JoltProver(BN254Scalar).init(allocator);
-
-    // In a full implementation, we would:
-    // 1. Convert emulator trace to JoltTrace
-    // 2. Call prover.prove()
-    // 3. Output the proof
-    //
-    // For now, we demonstrate the preprocessing and trace collection work.
-    std.debug.print("  Prover initialized\n", .{});
-    std.debug.print("  Note: Full proof generation is experimental\n", .{});
-
-    // Demonstrate that we can access the commitment scheme
-    std.debug.print("\nProof system components:\n", .{});
-    std.debug.print("  - HyperKZG polynomial commitment\n", .{});
-    std.debug.print("  - 6-stage multi-sumcheck prover\n", .{});
-    std.debug.print("  - Lasso lookup argument\n", .{});
-    std.debug.print("  - 24 lookup tables\n", .{});
-    std.debug.print("  - 60+ instruction lookups\n", .{});
-
-    _ = prover;
-
-    std.debug.print("\nProving pipeline structure demonstrated successfully!\n", .{});
+    const total_time = preprocess_time + init_time + prove_time + verify_time;
+    std.debug.print("\nTotal time: {d:.2} ms\n", .{@as(f64, @floatFromInt(total_time)) / 1_000_000.0});
 }
 
 fn decodeInstruction(hex_str: []const u8) void {

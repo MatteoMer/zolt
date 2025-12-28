@@ -14,12 +14,28 @@
 ### Notes on Strict Mode
 The strict verification reveals that the current prover generates proofs that pass
 structural verification but don't fully satisfy `p(0) + p(1) = claim` for all rounds.
-This is a known area for improvement - the prover needs work to produce fully valid
-sumcheck proofs.
+
+**Root Cause Analysis:**
+The issue is in the RAF evaluation prover and similar multi-polynomial sumchecks.
+When proving `Σ_k ra(k) * unmap(k)`, the current implementation:
+1. Folds the `ra` polynomial correctly with challenges
+2. But evaluates `unmap` at original indices instead of accounting for the folding
+
+The fix requires either:
+- Folding both polynomials together (combined polynomial approach)
+- Or tracking bound variables and evaluating unmap at the correct restricted points
 
 For production use, `strict_sumcheck: true` should be the default and the prover
 should be fixed to generate valid proofs. The current implementation uses lenient
 mode for demonstration purposes.
+
+## Known Issues (For Future Iterations)
+
+### Prover Sumcheck Validity
+- [ ] Fix RAF prover to correctly handle product of polynomials in sumcheck
+- [ ] Fix Val evaluation prover similarly
+- [ ] Fix Lasso prover for lookup argument sumcheck
+- [ ] Ensure Stage 1 (Spartan) produces valid sumcheck rounds
 
 ## Completed (Previous Sessions - Iteration 30)
 
@@ -101,8 +117,11 @@ mode for demonstration purposes.
 
 ## Next Steps (Future Iterations)
 
+### High Priority
+- [ ] Fix prover sumcheck validity issues (see Known Issues above)
+
 ### Medium Priority
-- [ ] Implement strict sumcheck verification (currently structural only)
+- [x] Implement strict sumcheck verification mode ✅ (done in iteration 31)
 - [ ] Performance optimization with SIMD
 - [ ] Parallel sumcheck round computation
 - [ ] Download and test with real Ethereum ceremony ptau files
@@ -115,6 +134,9 @@ mode for demonstration purposes.
 All tests pass (538 tests).
 End-to-end verification: PASSED
 
-## Commits This Session (Iteration 30)
+## Commits This Session (Iteration 31)
+1. Add configurable strict sumcheck verification mode
+
+## Commits Previous Session (Iteration 30)
 1. Fix prover/verifier transcript synchronization for end-to-end verification
 

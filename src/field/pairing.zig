@@ -1103,33 +1103,33 @@ fn mulByChar(p_pt: G2Point) G2Point {
 // Fp6 sparse multiplication for pairing
 // ============================================================================
 
-/// Multiply Fp6 by sparse element (c0, c1, 0)
+/// Multiply Fp6 by sparse element (c0, c1, 0) - matches arkworks mul_by_01
 fn fp6MulBy01(f: Fp6, c0: Fp2, c1: Fp2) Fp6 {
-    // Karatsuba-style multiplication for sparse element
+    // Following arkworks fp6_3over2.rs mul_by_01 exactly
     const a_a = f.c0.mul(c0);
     const b_b = f.c1.mul(c1);
 
-    // new_c0 = a_a + ξ * (c1 * f.c2)
-    const t1 = f.c2.mul(c1);
-    const new_c0 = a_a.add(Fp6.mulByXi(t1));
+    // t1 = c1 * (f.c1 + f.c2) - b_b, then *= ξ, then += a_a
+    var tmp = f.c1.add(f.c2);
+    var t1 = c1.mul(tmp);
+    t1 = t1.sub(b_b);
+    t1 = Fp6.mulByXi(t1);
+    t1 = t1.add(a_a);
 
-    // new_c1 = (c0 + c1)(f.c0 + f.c1) - a_a - b_b + ξ * f.c2 * c0
-    // Actually simpler: (f.c0 + f.c1)(c0 + c1) - a_a - b_b + ξ*f.c2*c0
-    // But c0 is just multiplied, so: ξ*c0*f.c2 is not right
-    // Let me follow arkworks more carefully:
-    // new_c1 = (f.c0 + f.c1)(c0 + c1) - a_a - b_b  (standard Karatsuba)
-    // But there's no c2 contribution from the sparse element...
-    // Actually looking at arkworks mul_by_01:
-    const t2 = c0.add(c1);
-    const t3 = f.c0.add(f.c1);
-    const t4 = t2.mul(t3);
-    const new_c1 = t4.sub(a_a).sub(b_b);
+    // t3 = c0 * (f.c0 + f.c2) - a_a + b_b
+    tmp = f.c0.add(f.c2);
+    var t3 = c0.mul(tmp);
+    t3 = t3.sub(a_a);
+    t3 = t3.add(b_b);
 
-    // new_c2 = f.c2 * c0 + b_b  (from f.c2 * c0 + f.c1 * c1 terms)
-    const t5 = f.c2.mul(c0);
-    const new_c2 = t5.add(b_b);
+    // t2 = (c0 + c1) * (f.c0 + f.c1) - a_a - b_b
+    var t2 = c0.add(c1);
+    tmp = f.c0.add(f.c1);
+    t2 = t2.mul(tmp);
+    t2 = t2.sub(a_a);
+    t2 = t2.sub(b_b);
 
-    return Fp6{ .c0 = new_c0, .c1 = new_c1, .c2 = new_c2 };
+    return Fp6{ .c0 = t1, .c1 = t2, .c2 = t3 };
 }
 
 /// Multiply Fp6 by c1 only (element at position 1)

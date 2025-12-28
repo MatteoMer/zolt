@@ -925,6 +925,270 @@ pub const G2Point = struct {
 };
 
 // ============================================================================
+// G2 Homogeneous Projective (for Miller loop)
+// ============================================================================
+
+/// G2 point in homogeneous projective coordinates (x, y, z) where x/z, y/z are affine
+/// Used in Miller loop to avoid expensive field inversions
+const G2HomProjective = struct {
+    x: Fp2,
+    y: Fp2,
+    z: Fp2,
+
+    /// Convert from affine to projective (z = 1)
+    fn fromAffine(p: G2Point) G2HomProjective {
+        if (p.infinity) {
+            return .{ .x = Fp2.zero(), .y = Fp2.one(), .z = Fp2.zero() };
+        }
+        return .{ .x = p.x, .y = p.y, .z = Fp2.one() };
+    }
+
+    /// Doubling step in projective coordinates
+    /// Returns new point R = 2T and line coefficients for D-type twist
+    fn double_in_place(self: *G2HomProjective, two_inv: Fp) EllCoeff {
+        // Formula from arkworks bn254 g2.rs
+        // a = x * y / 2
+        var a = self.x.mul(self.y);
+        a = fp2ScalarMul(a, two_inv);
+
+        const b = self.y.square(); // b = y²
+        const c = self.z.square(); // c = z²
+
+        // e = COEFF_B * (c + c + c) = 3*B*c where B = 3/(9+u)
+        // For BN254 D-type twist: COEFF_B = 3/(ξ) where ξ = 9+u
+        // We compute e = 3 * COEFF_B * c = 3 * 3/(9+u) * c = 9*c/(9+u)
+        // Actually: e = COEFF_B * (c.double() + c) = COEFF_B * 3c
+        const three_c = c.add(c).add(c);
+        const e = mulByTwistB(three_c);
+
+        // f = e + e + e = 3e
+        const f = e.add(e).add(e);
+
+        // g = (b + f) / 2
+        var g = b.add(f);
+        g = fp2ScalarMul(g, two_inv);
+
+        // h = (y + z)² - (b + c)
+        const h = self.y.add(self.z).square().sub(b.add(c));
+
+        // i = e - b
+        const i = e.sub(b);
+
+        // j = x²
+        const j = self.x.square();
+
+        // e_square = e²
+        const e_square = e.square();
+
+        // New point:
+        // x' = a * (b - f)
+        self.x = a.mul(b.sub(f));
+        // y' = g² - 3*e²
+        self.y = g.square().sub(e_square.add(e_square).add(e_square));
+        // z' = b * h
+        self.z = b.mul(h);
+
+        // Line coefficients for D-type twist: (-h, 3j, i)
+        return EllCoeff{
+            .c0 = h.neg(),
+            .c1 = j.add(j).add(j), // 3j
+            .c2 = i,
+        };
+    }
+
+    /// Addition step in projective coordinates
+    /// Returns new point R = T + Q and line coefficients for D-type twist
+    fn add_in_place(self: *G2HomProjective, q: G2Point) EllCoeff {
+        // Formula from arkworks bn254 g2.rs
+        // theta = y - q.y * z
+        const theta = self.y.sub(q.y.mul(self.z));
+        // lambda = x - q.x * z
+        const lambda = self.x.sub(q.x.mul(self.z));
+
+        const c = theta.square();
+        const d = lambda.square();
+        const e = lambda.mul(d);
+        const f = self.z.mul(c);
+        const g = self.x.mul(d);
+        const h = e.add(f).sub(g.add(g));
+
+        // New point:
+        // x' = lambda * h
+        self.x = lambda.mul(h);
+        // y' = theta * (g - h) - e * y
+        self.y = theta.mul(g.sub(h)).sub(e.mul(self.y));
+        // z' = z * e
+        self.z = self.z.mul(e);
+
+        // j = theta * q.x - lambda * q.y
+        const jay = theta.mul(q.x).sub(lambda.mul(q.y));
+
+        // Line coefficients for D-type twist: (lambda, -theta, j)
+        return EllCoeff{
+            .c0 = lambda,
+            .c1 = theta.neg(),
+            .c2 = jay,
+        };
+    }
+};
+
+/// Line coefficients for pairing computation (arkworks format)
+/// For D-type twist: (c0, c1, c2) evaluated at P gives sparse Fp12 element
+const EllCoeff = struct {
+    c0: Fp2,
+    c1: Fp2,
+    c2: Fp2,
+};
+
+/// COEFF_B for BN254 G2 twist curve: y² = x³ + B where B = 3/(9+u)
+/// This is stored as: (b0, b1) where B = b0 + b1*u
+/// From arkworks: B = (19485874751759354771024239261021720505790618469301721065564631296452457478373,
+///                     266929791119991161246907387137283842545076965332900288569378510910307636690)
+fn twistB() Fp2 {
+    // These are raw standard form values, convert to Montgomery form
+    const b0_limbs: [4]u64 = .{ 0x3267e6dc24a138e5, 0xb5b4c5e559dbefa3, 0x81be18991be06ac3, 0x2b149d40ceb8aaae };
+    const b1_limbs: [4]u64 = .{ 0xe4a2bd0685c315d2, 0xa74fa084e52d1852, 0xcd2cafadeed8fdf4, 0x009713b03af0fed4 };
+    const b0_raw = Fp{ .limbs = b0_limbs };
+    const b1_raw = Fp{ .limbs = b1_limbs };
+    // Convert from standard form to Montgomery form
+    return Fp2.init(b0_raw.toMontgomery(), b1_raw.toMontgomery());
+}
+
+/// Multiply Fp2 element by twist curve coefficient B
+fn mulByTwistB(a: Fp2) Fp2 {
+    return a.mul(twistB());
+}
+
+/// TWIST_MUL_BY_Q_X = (u+9)^((p-1)/3) for Frobenius on G2
+fn twistMulByQX() Fp2 {
+    // From arkworks bn254:
+    // c0 = 21575463638280843010398324269430826099269044274347216827212613867836435027261
+    // c1 = 10307601595873709700152284273816112264069230130616436755625194854815875713954
+    const c0_limbs: [4]u64 = .{ 0x99e39557176f553d, 0xb78cc310c2c3330c, 0x4c0bec3cf559b143, 0x2fb347984f7911f7 };
+    const c1_limbs: [4]u64 = .{ 0x1665d51c640fcba2, 0x32ae2a1d0b7c9dce, 0x4ba4cc8bd75a0794, 0x16c9e55061ebae20 };
+    const c0 = (Fp{ .limbs = c0_limbs }).toMontgomery();
+    const c1 = (Fp{ .limbs = c1_limbs }).toMontgomery();
+    return Fp2.init(c0, c1);
+}
+
+/// TWIST_MUL_BY_Q_Y = (u+9)^((p-1)/2) for Frobenius on G2
+fn twistMulByQY() Fp2 {
+    // From arkworks bn254:
+    // c0 = 2821565182194536844548159561693502659359617185244120367078079554186484126554
+    // c1 = 3505843767911556378687030309984248845540243509899259641013678093033130930403
+    const c0_limbs: [4]u64 = .{ 0xdc54014671a0135a, 0xdbaae0eda9c95998, 0xdc5ec698b6e2f9b9, 0x063cf305489af5dc };
+    const c1_limbs: [4]u64 = .{ 0x82d37f632623b0e3, 0x21807dc98fa25bd2, 0x0704b5a7ec796f2b, 0x07c03cbcac41049a };
+    const c0 = (Fp{ .limbs = c0_limbs }).toMontgomery();
+    const c1 = (Fp{ .limbs = c1_limbs }).toMontgomery();
+    return Fp2.init(c0, c1);
+}
+
+/// Frobenius endomorphism on G2 (multiply by char)
+/// π: (x, y) → (x^p * TWIST_MUL_BY_Q_X, y^p * TWIST_MUL_BY_Q_Y)
+fn mulByChar(p_pt: G2Point) G2Point {
+    if (p_pt.infinity) return p_pt;
+
+    // x^p = conjugate(x) for Fp2, then multiply by coefficient
+    var x_new = p_pt.x.conjugate();
+    x_new = x_new.mul(twistMulByQX());
+
+    // y^p = conjugate(y) for Fp2, then multiply by coefficient
+    var y_new = p_pt.y.conjugate();
+    y_new = y_new.mul(twistMulByQY());
+
+    return G2Point{ .x = x_new, .y = y_new, .infinity = false };
+}
+
+// ============================================================================
+// Fp6 sparse multiplication for pairing
+// ============================================================================
+
+/// Multiply Fp6 by sparse element (c0, c1, 0)
+fn fp6MulBy01(f: Fp6, c0: Fp2, c1: Fp2) Fp6 {
+    // Karatsuba-style multiplication for sparse element
+    const a_a = f.c0.mul(c0);
+    const b_b = f.c1.mul(c1);
+
+    // new_c0 = a_a + ξ * (c1 * f.c2)
+    const t1 = f.c2.mul(c1);
+    const new_c0 = a_a.add(Fp6.mulByXi(t1));
+
+    // new_c1 = (c0 + c1)(f.c0 + f.c1) - a_a - b_b + ξ * f.c2 * c0
+    // Actually simpler: (f.c0 + f.c1)(c0 + c1) - a_a - b_b + ξ*f.c2*c0
+    // But c0 is just multiplied, so: ξ*c0*f.c2 is not right
+    // Let me follow arkworks more carefully:
+    // new_c1 = (f.c0 + f.c1)(c0 + c1) - a_a - b_b  (standard Karatsuba)
+    // But there's no c2 contribution from the sparse element...
+    // Actually looking at arkworks mul_by_01:
+    const t2 = c0.add(c1);
+    const t3 = f.c0.add(f.c1);
+    const t4 = t2.mul(t3);
+    const new_c1 = t4.sub(a_a).sub(b_b);
+
+    // new_c2 = f.c2 * c0 + b_b  (from f.c2 * c0 + f.c1 * c1 terms)
+    const t5 = f.c2.mul(c0);
+    const new_c2 = t5.add(b_b);
+
+    return Fp6{ .c0 = new_c0, .c1 = new_c1, .c2 = new_c2 };
+}
+
+/// Multiply Fp6 by c1 only (element at position 1)
+fn fp6MulBy1(f: Fp6, c1: Fp2) Fp6 {
+    // Sparse multiplication where only c1 is non-zero
+    // (f.c0 + f.c1*v + f.c2*v²) * (c1*v) = f.c0*c1*v + f.c1*c1*v² + f.c2*c1*v³
+    //                                    = f.c0*c1*v + f.c1*c1*v² + f.c2*c1*ξ
+    const b_b = f.c1.mul(c1);
+
+    return Fp6{
+        .c0 = Fp6.mulByXi(f.c2.mul(c1)),
+        .c1 = f.c0.mul(c1),
+        .c2 = b_b,
+    };
+}
+
+// ============================================================================
+// Fp12 sparse multiplication for pairing
+// ============================================================================
+
+/// Multiply Fp12 by sparse element with components at positions 0, 3, 4
+/// This is for D-type twist line evaluation
+/// The sparse element is: c0 + c3*w + c4*v*w where w²=v
+fn fp12MulBy034(f: Fp12, c0: Fp2, c3: Fp2, c4: Fp2) Fp12 {
+    // Following arkworks mul_by_034 exactly
+    // a = f.c0 * c0 (multiply each component of c0 Fp6 by c0 Fp2)
+    const a0 = f.c0.c0.mul(c0);
+    const a1 = f.c0.c1.mul(c0);
+    const a2 = f.c0.c2.mul(c0);
+    const a = Fp6{ .c0 = a0, .c1 = a1, .c2 = a2 };
+
+    // b = f.c1.mul_by_01(c3, c4)
+    const b = fp6MulBy01(f.c1, c3, c4);
+
+    // Karatsuba trick
+    const c0_plus_c3 = c0.add(c3);
+    // e = (f.c0 + f.c1).mul_by_01(c0 + c3, c4)
+    const f_sum = Fp6{ .c0 = f.c0.c0.add(f.c1.c0), .c1 = f.c0.c1.add(f.c1.c1), .c2 = f.c0.c2.add(f.c1.c2) };
+    const e = fp6MulBy01(f_sum, c0_plus_c3, c4);
+
+    // result.c1 = e - a - b
+    const c1_new = Fp6{
+        .c0 = e.c0.sub(a.c0).sub(b.c0),
+        .c1 = e.c1.sub(a.c1).sub(b.c1),
+        .c2 = e.c2.sub(a.c2).sub(b.c2),
+    };
+
+    // result.c0 = a + b * v (multiply by non-residue and add)
+    const b_times_v = fp6MulByV(b);
+    const c0_new = Fp6{
+        .c0 = a.c0.add(b_times_v.c0),
+        .c1 = a.c1.add(b_times_v.c1),
+        .c2 = a.c2.add(b_times_v.c2),
+    };
+
+    return Fp12{ .c0 = c0_new, .c1 = c1_new };
+}
+
+// ============================================================================
 // Pairing Operations
 // ============================================================================
 
@@ -990,11 +1254,7 @@ fn g1ToFp(p: G1Point) G1PointFp {
 /// 1. Miller loop: Compute f_{6x+2,Q}(P)
 /// 2. Final exponentiation: f^((p^12-1)/r)
 ///
-/// NOTE: This is a simplified implementation. A production implementation
-/// would need:
-/// - Proper line function evaluation
-/// - Efficient final exponentiation using Frobenius
-/// - Optimal ate loop parameter
+/// Uses arkworks-compatible projective Miller loop for Jolt compatibility
 pub fn pairing(p: G1Point, q: G2Point) PairingResult {
     if (p.infinity or q.infinity) {
         return Fp12.one();
@@ -1003,8 +1263,8 @@ pub fn pairing(p: G1Point, q: G2Point) PairingResult {
     // Convert G1 point from Fr to Fp representation
     const p_fp = g1ToFp(p);
 
-    // Miller loop
-    const f = millerLoop(p_fp, q);
+    // Miller loop using arkworks-style projective coordinates
+    const f = millerLoopArkworks(p_fp, q);
 
     // Final exponentiation
     return finalExponentiation(f);
@@ -1012,13 +1272,14 @@ pub fn pairing(p: G1Point, q: G2Point) PairingResult {
 
 /// Pairing function that takes G1 point directly in base field representation
 /// Use this when you have proper Fp coordinates (not Fr)
+/// Uses arkworks-compatible projective Miller loop for Jolt compatibility
 pub fn pairingFp(p: G1PointFp, q: G2Point) PairingResult {
     if (p.infinity or q.infinity) {
         return Fp12.one();
     }
 
-    // Miller loop
-    const f = millerLoop(p, q);
+    // Miller loop using arkworks-style projective coordinates
+    const f = millerLoopArkworks(p, q);
 
     // Final exponentiation
     return finalExponentiation(f);
@@ -1029,10 +1290,10 @@ pub fn pairingFp(p: G1PointFp, q: G2Point) PairingResult {
 /// This is the NAF representation of 6*x+2 where x = 4965661367192848881.
 /// Array has 65 elements, processed from LSB (index 0) to MSB (index 64).
 const ATE_LOOP_COUNT: [65]i2 = .{
-    0, 0, 0, 1, 0, 1, 0, -1, 0, 0, 1, -1, 0, 0, 1, 0,
-    0, 1, 1, 0, -1, 0, 0, 1, 0, -1, 0, 0, 0, 0, 1, 1,
-    1, 0, 0, -1, 0, 0, 1, 0, 0, 0, 0, 0, -1, 0, 0, 1,
-    1, 0, 0, -1, 0, 0, 0, 1, 1, 0, -1, 0, 0, 1, 0, 1,
+    0, 0, 0, 1, 0, 1, 0, -1, 0, 0, -1, 0, 0, 0, 1, 0,
+    0, -1, 0, -1, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0, -1, 0,
+    0, 1, 0, -1, 0, 0, 1, 0, 0, 0, 0, 0, -1, 0, 0, -1,
+    0, 1, 0, -1, 0, 0, 0, -1, 0, -1, 0, 0, 0, 1, 0, 1,
     1,
 };
 
@@ -1240,10 +1501,15 @@ fn millerLoop(p: G1PointFp, q: G2Point) Fp12 {
     // Main loop: iterate through bits of the ate loop parameter
     // Following arkworks: iterate from len-1 down to 1, check bit at i-1
     // This processes the array from MSB to LSB (high to low index in the array)
+    // CRITICAL: Skip first squaring (arkworks skips when i == len-1)
     var i: usize = ATE_LOOP_COUNT.len - 1;
     while (i >= 1) : (i -= 1) {
-        // Doubling step: f = f² * l_{T,T}(P), T = 2T
-        f = f.square();
+        // Skip squaring on first iteration (matches arkworks behavior)
+        if (i != ATE_LOOP_COUNT.len - 1) {
+            f = f.square();
+        }
+
+        // Doubling step: T = 2T, multiply by line l_{T,T}(P)
         const dbl = doublingStep(t);
         t = dbl.point;
         const line_dbl = evaluateLine(dbl.coeffs, p.x, p.y);
@@ -1283,6 +1549,80 @@ fn millerLoop(p: G1PointFp, q: G2Point) Fp12 {
     const q2 = frobeniusG2(frobeniusG2(q)).neg();
     const add2 = additionStep(t, q2);
     f = f.mul(evaluateLine(add2.coeffs, p.x, p.y));
+
+    return f;
+}
+
+/// X_IS_NEGATIVE flag for BN254 - the curve parameter x is positive
+const X_IS_NEGATIVE: bool = false;
+
+/// Miller loop using arkworks-style projective coordinates
+/// This is the correct implementation matching arkworks exactly
+fn millerLoopArkworks(p: G1PointFp, q: G2Point) Fp12 {
+    if (p.infinity or q.infinity) {
+        return Fp12.one();
+    }
+
+    // Precompute two_inv = 1/2
+    const two_inv = Fp.fromU64(2).inverse() orelse return Fp12.one();
+
+    // Initialize projective point R = Q
+    var r = G2HomProjective.fromAffine(q);
+    const neg_q = q.neg();
+
+    var f = Fp12.one();
+
+    // Main loop: iterate from MSB-1 down to 0
+    // arkworks iterates from (len-1) down to 1, checking bit at (i-1)
+    var idx: usize = ATE_LOOP_COUNT.len - 1;
+    while (idx >= 1) : (idx -= 1) {
+        // Square f unless it's the first iteration
+        if (idx != ATE_LOOP_COUNT.len - 1) {
+            f = f.square();
+        }
+
+        // Doubling step: R = 2R, get line coefficients
+        const coeffs_dbl = r.double_in_place(two_inv);
+        // Evaluate line: c0 *= y_P, c1 *= x_P for D-type twist
+        const c0_eval = fp2ScalarMul(coeffs_dbl.c0, p.y);
+        const c1_eval = fp2ScalarMul(coeffs_dbl.c1, p.x);
+        f = fp12MulBy034(f, c0_eval, c1_eval, coeffs_dbl.c2);
+
+        // Addition step if bit is non-zero
+        const bit = ATE_LOOP_COUNT[idx - 1];
+        if (bit == 1) {
+            const coeffs_add = r.add_in_place(q);
+            const c0_add = fp2ScalarMul(coeffs_add.c0, p.y);
+            const c1_add = fp2ScalarMul(coeffs_add.c1, p.x);
+            f = fp12MulBy034(f, c0_add, c1_add, coeffs_add.c2);
+        } else if (bit == -1) {
+            const coeffs_add = r.add_in_place(neg_q);
+            const c0_add = fp2ScalarMul(coeffs_add.c0, p.y);
+            const c1_add = fp2ScalarMul(coeffs_add.c1, p.x);
+            f = fp12MulBy034(f, c0_add, c1_add, coeffs_add.c2);
+        }
+    }
+
+    // If X is negative, conjugate the result (cyclotomic inverse)
+    if (X_IS_NEGATIVE) {
+        f = f.conjugate();
+    }
+
+    // Final Frobenius steps: add π(Q) and -π²(Q)
+    // First: R + π(Q)
+    const q1 = mulByChar(q);
+    const coeffs_q1 = r.add_in_place(q1);
+    const c0_q1 = fp2ScalarMul(coeffs_q1.c0, p.y);
+    const c1_q1 = fp2ScalarMul(coeffs_q1.c1, p.x);
+    f = fp12MulBy034(f, c0_q1, c1_q1, coeffs_q1.c2);
+
+    // Second: R + (-π²(Q))
+    var q2 = mulByChar(q1);
+    q2.y = q2.y.neg(); // Negate y coordinate
+    const coeffs_q2 = r.add_in_place(q2);
+    const c0_q2 = fp2ScalarMul(coeffs_q2.c0, p.y);
+    const c1_q2 = fp2ScalarMul(coeffs_q2.c1, p.x);
+    f = fp12MulBy034(f, c0_q2, c1_q2, coeffs_q2.c2);
 
     return f;
 }

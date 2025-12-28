@@ -2118,6 +2118,45 @@ test "dory commitment debug - compare intermediate values with jolt" {
             std.debug.print("  *** Row 1 MSM MISMATCH ***\n", .{});
             std.debug.print("  Expected: {x}\n", .{jolt_row1_bytes});
         }
+
+        // Now test pairing: e(row0, G2[0])
+        std.debug.print("\n=== Pairing Test ===\n", .{});
+
+        // First check G2[0] bytes
+        const g2_0 = srs.g2_vec[0];
+        const g2_0_x_c0_std = g2_0.x.c0.fromMontgomery();
+        var g2_0_bytes: [32]u8 = undefined;
+        for (0..4) |i| {
+            std.mem.writeInt(u64, g2_0_bytes[i * 8 ..][0..8], g2_0_x_c0_std.limbs[i], .little);
+        }
+        std.debug.print("G2[0] x.c0 first 16 bytes: {x}\n", .{g2_0_bytes[0..16].*});
+        // Jolt G2[0] first 16: 6f f9 ca 75 a1 71 4f c8 fa 12 b1 80 e1 a9 c6 95
+        const jolt_g2_0_bytes = [_]u8{ 0x6f, 0xf9, 0xca, 0x75, 0xa1, 0x71, 0x4f, 0xc8, 0xfa, 0x12, 0xb1, 0x80, 0xe1, 0xa9, 0xc6, 0x95 };
+        if (std.mem.eql(u8, g2_0_bytes[0..16], &jolt_g2_0_bytes)) {
+            std.debug.print("  *** G2[0] MATCHES Jolt! ***\n", .{});
+        } else {
+            std.debug.print("  *** G2[0] MISMATCH ***\n", .{});
+            std.debug.print("  Expected: {x}\n", .{jolt_g2_0_bytes});
+        }
+
+        // Compute pairing e(row0, G2[0])
+        const row0_g1 = G1PointFp{
+            .x = row0_affine.x,
+            .y = row0_affine.y,
+            .infinity = row0_affine.infinity,
+        };
+        const pairing_result = pairing.pairingFp(row0_g1, g2_0);
+        const pairing_bytes = pairing_result.toBytes();
+        std.debug.print("\nPairing e(row0, G2[0]) first 16 bytes: {x}\n", .{pairing_bytes[0..16].*});
+
+        // Jolt Pairing(0, 0) first 16 bytes: be c8 5a 17 0f 50 62 ad 4a 93 ce a6 33 10 15 f4
+        const jolt_pairing_bytes = [_]u8{ 0xbe, 0xc8, 0x5a, 0x17, 0x0f, 0x50, 0x62, 0xad, 0x4a, 0x93, 0xce, 0xa6, 0x33, 0x10, 0x15, 0xf4 };
+        if (std.mem.eql(u8, pairing_bytes[0..16], &jolt_pairing_bytes)) {
+            std.debug.print("  *** Pairing MATCHES Jolt! ***\n", .{});
+        } else {
+            std.debug.print("  *** Pairing MISMATCH ***\n", .{});
+            std.debug.print("  Expected: {x}\n", .{jolt_pairing_bytes});
+        }
     } else |_| {
         std.debug.print("Skipping debug test - no SRS file at /tmp/jolt_dory_srs.bin\n", .{});
         std.debug.print("Run Jolt's test_export_dory_srs first.\n", .{});

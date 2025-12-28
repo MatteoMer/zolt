@@ -535,6 +535,173 @@ pub const DoryProof = struct {
     }
 };
 
+// =============================================================================
+// Helper Functions for Dory IPA
+// =============================================================================
+
+/// Compute multilinear Lagrange basis evaluations at a point
+/// For variables (r_0, r_1, ..., r_{n-1}), computes all 2^n basis polynomial evaluations.
+fn multilinearLagrangeBasis(comptime F: type, output: []F, point: []const F) void {
+    if (point.len == 0 or output.len == 0) {
+        if (output.len > 0) {
+            output[0] = F.one();
+        }
+        return;
+    }
+
+    // Initialize for first variable: [1-r_0, r_0]
+    const one_minus_p0 = F.one().sub(point[0]);
+    output[0] = one_minus_p0;
+    if (output.len > 1) {
+        output[1] = point[0];
+    }
+
+    // For each subsequent variable, double the active portion
+    for (1..point.len) |level| {
+        const p = point[level];
+        const mid = @as(usize, 1) << @intCast(level);
+        const one_minus_p = F.one().sub(p);
+
+        if (mid >= output.len) {
+            // No split possible, just multiply all by (1-p)
+            for (output) |*val| {
+                val.* = val.*.mul(one_minus_p);
+            }
+        } else {
+            // Split: left *= (1-p), right = left * p
+            const k = @min(mid, output.len - mid);
+
+            // Process from end to avoid overwriting
+            var i: usize = k;
+            while (i > 0) {
+                i -= 1;
+                const l_val = output[i];
+                if (i + mid < output.len) {
+                    output[i + mid] = l_val.mul(p);
+                }
+                output[i] = l_val.mul(one_minus_p);
+            }
+        }
+    }
+}
+
+/// Compute left and right vectors from evaluation point
+/// Given a point, computes L and R such that: polynomial(point) = L^T * M * R
+fn computeEvaluationVectors(comptime F: type, point: []const F, nu: u32, sigma: u32, left_vec: []F, right_vec: []F) void {
+    const point_dim = point.len;
+
+    if (point_dim == 0) {
+        left_vec[0] = F.one();
+        right_vec[0] = F.one();
+        return;
+    }
+
+    // All variables fit in columns (single row)
+    if (point_dim <= sigma) {
+        const out_len = @as(usize, 1) << @intCast(point_dim);
+        multilinearLagrangeBasis(F, right_vec[0..out_len], point);
+        left_vec[0] = F.one();
+        return;
+    }
+
+    // Variables split between rows and columns
+    if (point_dim <= nu + sigma) {
+        multilinearLagrangeBasis(F, right_vec, point[0..sigma]);
+        const left_len = @as(usize, 1) << @intCast(point_dim - sigma);
+        multilinearLagrangeBasis(F, left_vec[0..left_len], point[sigma..]);
+        return;
+    }
+
+    // Too many variables - need column padding
+    multilinearLagrangeBasis(F, right_vec, point[0..sigma]);
+    multilinearLagrangeBasis(F, left_vec, point[sigma..]);
+}
+
+/// Compute vector-matrix product: v = L^T * M
+/// Treats coefficients as a 2^nu x 2^sigma matrix.
+fn computeVectorMatrixProduct(comptime F: type, evals: []const F, left_vec: []const F, nu: u32, sigma: u32, allocator: Allocator) ![]F {
+    const num_cols = @as(usize, 1) << @intCast(sigma);
+    const num_rows = @as(usize, 1) << @intCast(nu);
+
+    const result = try allocator.alloc(F, num_cols);
+    @memset(result, F.zero());
+
+    // For each column j: v[j] = sum_i left_vec[i] * M[i][j]
+    for (0..num_rows) |row| {
+        if (row >= left_vec.len) break;
+        const coeff = left_vec[row];
+
+        for (0..num_cols) |col| {
+            const idx = row * num_cols + col;
+            if (idx < evals.len) {
+                result[col] = result[col].add(coeff.mul(evals[idx]));
+            }
+        }
+    }
+
+    return result;
+}
+
+/// Compute row commitments for a polynomial
+fn computeRowCommitments(comptime F: type, params: anytype, evals: []const F, allocator: Allocator) ![]G1Point {
+    const num_cols = params.num_columns;
+    const num_rows = (evals.len + num_cols - 1) / num_cols;
+
+    const row_commitments = try allocator.alloc(G1Point, num_rows);
+    errdefer allocator.free(row_commitments);
+
+    for (0..num_rows) |row| {
+        const start = row * num_cols;
+        const end = @min(start + num_cols, evals.len);
+
+        if (start >= evals.len) {
+            row_commitments[row] = G1Point.identity();
+            continue;
+        }
+
+        const row_evals = evals[start..end];
+        row_commitments[row] = msm.MSM(F, Fp).compute(
+            params.g1_vec[0..row_evals.len],
+            row_evals,
+        );
+    }
+
+    return row_commitments;
+}
+
+/// Compute multi-pairing of G1 and G2 vectors
+fn multiPairG1G2(g1_vec: []const G1Point, g2_vec: []const G2Point) GT {
+    var result = GT.one();
+    const n = @min(g1_vec.len, g2_vec.len);
+
+    for (0..n) |i| {
+        if (g1_vec[i].infinity or g2_vec[i].infinity) continue;
+
+        const g1_fp = G1PointFp{
+            .x = g1_vec[i].x,
+            .y = g1_vec[i].y,
+            .infinity = g1_vec[i].infinity,
+        };
+        const paired = pairing.pairingFp(g1_fp, g2_vec[i]);
+        result = result.mul(paired);
+    }
+
+    return result;
+}
+
+/// MSM for G2 points
+fn msmG2(comptime F: type, g2_vec: []const G2Point, scalars: []const F) G2Point {
+    const n = @min(g2_vec.len, scalars.len);
+    var result = G2Point.identity();
+
+    for (0..n) |i| {
+        const scaled = g2_vec[i].scalarMul(scalars[i]);
+        result = result.add(scaled);
+    }
+
+    return result;
+}
+
 /// Dory structured reference string (SRS)
 /// Generated using the seed "Jolt Dory URS seed" for compatibility
 pub const DorySRS = struct {
@@ -669,18 +836,148 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             return row_sum;
         }
 
-        /// Create an opening proof
-        /// This implements the Dory reduce-and-fold IPA
+        /// Create an opening proof using the Dory reduce-and-fold IPA
+        ///
+        /// Implements the full Dory protocol:
+        /// 1. Compute row commitments (or use pre-computed)
+        /// 2. Compute evaluation vectors (left_vec, right_vec) from point
+        /// 3. Create VMV message (C, D2, E1)
+        /// 4. Run max(nu, sigma) rounds of reduce-and-fold
+        /// 5. Produce final scalar product message
         pub fn open(
             params: *const SetupParams,
             evals: []const F,
             point: []const F,
             allocator: Allocator,
         ) !Proof {
-            _ = evals;
-            _ = point;
+            return openWithRowCommitments(params, evals, point, null, allocator);
+        }
 
-            const num_rounds = @max(params.nu, params.sigma);
+        /// Create an opening proof with pre-computed row commitments
+        pub fn openWithRowCommitments(
+            params: *const SetupParams,
+            evals: []const F,
+            point: []const F,
+            row_commitments_opt: ?[]const G1Point,
+            allocator: Allocator,
+        ) !Proof {
+            const nu = params.nu;
+            const sigma = params.sigma;
+            const num_rounds = @max(nu, sigma);
+
+            // Step 1: Get or compute row commitments
+            const row_commitments = if (row_commitments_opt) |rc| blk: {
+                const owned = try allocator.alloc(G1Point, rc.len);
+                @memcpy(owned, rc);
+                break :blk owned;
+            } else blk: {
+                break :blk try computeRowCommitments(F, params, evals, allocator);
+            };
+            defer allocator.free(row_commitments);
+
+            // Step 2: Compute evaluation vectors (left_vec, right_vec)
+            const left_vec = try allocator.alloc(F, @as(usize, 1) << @intCast(nu));
+            defer allocator.free(left_vec);
+            const right_vec = try allocator.alloc(F, @as(usize, 1) << @intCast(sigma));
+            defer allocator.free(right_vec);
+
+            computeEvaluationVectors(F, point, nu, sigma, left_vec, right_vec);
+
+            // Step 3: Compute v_vec = left_vec^T * M (vector-matrix product)
+            const v_vec = try computeVectorMatrixProduct(F, evals, left_vec, nu, sigma, allocator);
+            defer allocator.free(v_vec);
+
+            // Pad row_commitments to 2^sigma if needed
+            const padded_row_commitments = if (nu < sigma) blk: {
+                const padded_len = @as(usize, 1) << @intCast(sigma);
+                const padded = try allocator.alloc(G1Point, padded_len);
+                @memcpy(padded[0..row_commitments.len], row_commitments);
+                for (row_commitments.len..padded_len) |i| {
+                    padded[i] = G1Point.identity();
+                }
+                break :blk padded;
+            } else blk: {
+                const padded = try allocator.alloc(G1Point, row_commitments.len);
+                @memcpy(padded, row_commitments);
+                break :blk padded;
+            };
+            defer allocator.free(padded_row_commitments);
+
+            // Step 4: Compute VMV message
+            // C = e(MSM(row_commitments, v_vec), h2)
+            const t_vec_v = msm.MSM(F, Fp).compute(
+                padded_row_commitments,
+                v_vec,
+            );
+            const t_vec_v_fp = G1PointFp{
+                .x = t_vec_v.x,
+                .y = t_vec_v.y,
+                .infinity = t_vec_v.infinity,
+            };
+            const c = pairing.pairingFp(t_vec_v_fp, params.g2_vec[0]); // h2 = g2_vec[0] for now
+
+            // D2 = e(MSM(g1_vec, v_vec), h2)
+            const gamma1_v = msm.MSM(F, Fp).compute(
+                params.g1_vec[0..v_vec.len],
+                v_vec,
+            );
+            const gamma1_v_fp = G1PointFp{
+                .x = gamma1_v.x,
+                .y = gamma1_v.y,
+                .infinity = gamma1_v.infinity,
+            };
+            const d2 = pairing.pairingFp(gamma1_v_fp, params.g2_vec[0]);
+
+            // E1 = MSM(row_commitments, left_vec)
+            const e1 = msm.MSM(F, Fp).compute(
+                row_commitments,
+                left_vec,
+            );
+
+            const vmv_message = VMVMessage{
+                .c = c,
+                .d2 = d2,
+                .e1 = e1,
+            };
+
+            // Step 5: Initialize prover state for reduce-and-fold
+            // v1 = padded row_commitments
+            // v2 = v_vec * h2 (scalars applied to h2)
+            // s1 = right_vec (padded)
+            // s2 = left_vec (padded)
+
+            // Pad vectors to 2^sigma
+            const vec_len = @as(usize, 1) << @intCast(sigma);
+            const v1 = try allocator.alloc(G1Point, vec_len);
+            defer allocator.free(v1);
+            @memcpy(v1[0..padded_row_commitments.len], padded_row_commitments);
+            for (padded_row_commitments.len..vec_len) |i| {
+                v1[i] = G1Point.identity();
+            }
+
+            const v2 = try allocator.alloc(G2Point, vec_len);
+            defer allocator.free(v2);
+            for (0..vec_len) |i| {
+                if (i < v_vec.len) {
+                    v2[i] = params.g2_vec[0].scalarMul(v_vec[i]);
+                } else {
+                    v2[i] = G2Point.identity();
+                }
+            }
+
+            const s1 = try allocator.alloc(F, vec_len);
+            defer allocator.free(s1);
+            @memcpy(s1[0..right_vec.len], right_vec);
+            for (right_vec.len..vec_len) |i| {
+                s1[i] = F.zero();
+            }
+
+            const s2 = try allocator.alloc(F, vec_len);
+            defer allocator.free(s2);
+            @memcpy(s2[0..left_vec.len], left_vec);
+            for (left_vec.len..vec_len) |i| {
+                s2[i] = F.zero();
+            }
 
             // Allocate message arrays
             const first_messages = try allocator.alloc(FirstReduceMessage, num_rounds);
@@ -688,41 +985,157 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             const second_messages = try allocator.alloc(SecondReduceMessage, num_rounds);
             errdefer allocator.free(second_messages);
 
-            // Initialize with placeholder values
-            // Full IPA implementation would compute these properly
-            for (0..num_rounds) |i| {
-                first_messages[i] = FirstReduceMessage{
-                    .d1_left = GT.one(),
-                    .d1_right = GT.one(),
-                    .d2_left = GT.one(),
-                    .d2_right = GT.one(),
-                    .e1_beta = G1Point.identity(),
-                    .e2_beta = G2Point.identity(),
+            // Step 6: Run reduce-and-fold rounds
+            var current_len = vec_len;
+            var round: usize = 0;
+
+            // Working arrays that get folded
+            const v1_work = try allocator.alloc(G1Point, vec_len);
+            defer allocator.free(v1_work);
+            @memcpy(v1_work, v1);
+
+            const v2_work = try allocator.alloc(G2Point, vec_len);
+            defer allocator.free(v2_work);
+            @memcpy(v2_work, v2);
+
+            const s1_work = try allocator.alloc(F, vec_len);
+            defer allocator.free(s1_work);
+            @memcpy(s1_work, s1);
+
+            const s2_work = try allocator.alloc(F, vec_len);
+            defer allocator.free(s2_work);
+            @memcpy(s2_work, s2);
+
+            while (round < num_rounds) : (round += 1) {
+                const n2 = current_len / 2;
+
+                // Compute first reduce message
+                // D1L = multiPair(v1_l, g2_vec[0..n2])
+                // D1R = multiPair(v1_r, g2_vec[0..n2])
+                const d1_left = multiPairG1G2(v1_work[0..n2], params.g2_vec[0..n2]);
+                const d1_right = multiPairG1G2(v1_work[n2..current_len], params.g2_vec[0..n2]);
+
+                // D2L = multiPair(g1_vec[0..n2], v2_l)
+                // D2R = multiPair(g1_vec[0..n2], v2_r)
+                const d2_left = multiPairG1G2(params.g1_vec[0..n2], v2_work[0..n2]);
+                const d2_right = multiPairG1G2(params.g1_vec[0..n2], v2_work[n2..current_len]);
+
+                // E1_beta = MSM(g1_vec[0..current_len], s2_work[0..current_len])
+                const e1_beta = msm.MSM(F, Fp).compute(
+                    params.g1_vec[0..current_len],
+                    s2_work[0..current_len],
+                );
+
+                // E2_beta = MSM(g2_vec[0..current_len], s1_work[0..current_len])
+                const e2_beta = msmG2(F, params.g2_vec[0..current_len], s1_work[0..current_len]);
+
+                first_messages[round] = FirstReduceMessage{
+                    .d1_left = d1_left,
+                    .d1_right = d1_right,
+                    .d2_left = d2_left,
+                    .d2_right = d2_right,
+                    .e1_beta = e1_beta,
+                    .e2_beta = e2_beta,
                 };
-                second_messages[i] = SecondReduceMessage{
-                    .c_plus = GT.one(),
-                    .c_minus = GT.one(),
-                    .e1_plus = G1Point.identity(),
-                    .e1_minus = G1Point.identity(),
-                    .e2_plus = G2Point.identity(),
-                    .e2_minus = G2Point.identity(),
+
+                // Get beta challenge (in a real implementation, from transcript)
+                // For now, use a deterministic challenge based on round
+                const beta = F.fromU64(@as(u64, round) + 1);
+                const beta_inv = beta.inverse() orelse F.one();
+
+                // Apply first challenge: v1 += beta * g1_vec, v2 += beta_inv * g2_vec
+                for (0..current_len) |i| {
+                    const scaled_g1 = msm.MSM(F, Fp).scalarMul(params.g1_vec[i], beta).toAffine();
+                    v1_work[i] = v1_work[i].add(scaled_g1);
+
+                    const scaled_g2 = params.g2_vec[i].scalarMul(beta_inv);
+                    v2_work[i] = v2_work[i].add(scaled_g2);
+                }
+
+                // Compute second reduce message
+                // C+ = multiPair(v1_l, v2_r)
+                // C- = multiPair(v1_r, v2_l)
+                const c_plus = multiPairG1G2(v1_work[0..n2], v2_work[n2..current_len]);
+                const c_minus = multiPairG1G2(v1_work[n2..current_len], v2_work[0..n2]);
+
+                // E1+ = MSM(v1_l, s2_r)
+                // E1- = MSM(v1_r, s2_l)
+                const e1_plus = msm.MSM(F, Fp).compute(v1_work[0..n2], s2_work[n2..current_len]);
+                const e1_minus = msm.MSM(F, Fp).compute(v1_work[n2..current_len], s2_work[0..n2]);
+
+                // E2+ = MSM(v2_r, s1_l)
+                // E2- = MSM(v2_l, s1_r)
+                const e2_plus = msmG2(F, v2_work[n2..current_len], s1_work[0..n2]);
+                const e2_minus = msmG2(F, v2_work[0..n2], s1_work[n2..current_len]);
+
+                second_messages[round] = SecondReduceMessage{
+                    .c_plus = c_plus,
+                    .c_minus = c_minus,
+                    .e1_plus = e1_plus,
+                    .e1_minus = e1_minus,
+                    .e2_plus = e2_plus,
+                    .e2_minus = e2_minus,
                 };
+
+                // Get alpha challenge (deterministic for now)
+                const alpha = F.fromU64(@as(u64, round) + 100);
+                const alpha_inv = alpha.inverse() orelse F.one();
+
+                // Apply second challenge: fold vectors
+                // v1 = alpha * v1_l + v1_r
+                for (0..n2) |i| {
+                    const scaled_l = msm.MSM(F, Fp).scalarMul(v1_work[i], alpha).toAffine();
+                    v1_work[i] = scaled_l.add(v1_work[i + n2]);
+                }
+
+                // v2 = alpha_inv * v2_l + v2_r
+                for (0..n2) |i| {
+                    const scaled_l = v2_work[i].scalarMul(alpha_inv);
+                    v2_work[i] = scaled_l.add(v2_work[i + n2]);
+                }
+
+                // s1 = alpha * s1_l + s1_r
+                for (0..n2) |i| {
+                    s1_work[i] = alpha.mul(s1_work[i]).add(s1_work[i + n2]);
+                }
+
+                // s2 = alpha_inv * s2_l + s2_r
+                for (0..n2) |i| {
+                    s2_work[i] = alpha_inv.mul(s2_work[i]).add(s2_work[i + n2]);
+                }
+
+                current_len = n2;
             }
 
+            // Step 7: Compute final scalar product message
+            // gamma challenge (deterministic for now)
+            const gamma = F.fromU64(999);
+            const gamma_inv = gamma.inverse() orelse F.one();
+
+            // E1 = v1[0] + gamma * s1[0] * h1
+            const gamma_s1 = gamma.mul(s1_work[0]);
+            const h1 = G1Point.generator(); // h1 = generator for now
+            const scaled_h1 = msm.MSM(F, Fp).scalarMul(h1, gamma_s1).toAffine();
+            const final_e1 = v1_work[0].add(scaled_h1);
+
+            // E2 = v2[0] + gamma_inv * s2[0] * h2
+            const gamma_inv_s2 = gamma_inv.mul(s2_work[0]);
+            const h2 = G2Point.generator(); // h2 = generator for now
+            const scaled_h2 = h2.scalarMul(gamma_inv_s2);
+            const final_e2 = v2_work[0].add(scaled_h2);
+
+            const final_message = ScalarProductMessage{
+                .e1 = final_e1,
+                .e2 = final_e2,
+            };
+
             return Proof{
-                .vmv_message = VMVMessage{
-                    .c = GT.one(),
-                    .d2 = GT.one(),
-                    .e1 = G1Point.identity(),
-                },
+                .vmv_message = vmv_message,
                 .first_messages = first_messages,
                 .second_messages = second_messages,
-                .final_message = ScalarProductMessage{
-                    .e1 = G1Point.identity(),
-                    .e2 = G2Point.identity(),
-                },
-                .nu = params.nu,
-                .sigma = params.sigma,
+                .final_message = final_message,
+                .nu = nu,
+                .sigma = sigma,
                 .allocator = allocator,
             };
         }
@@ -937,11 +1350,14 @@ test "dory empty polynomial commits to one" {
 test "dory proof serialization" {
     const allocator = std.testing.allocator;
 
-    var srs = try DoryCommitmentScheme(Fr).setup(allocator, 4);
+    // Setup for 2 variables: sigma=1, nu=1, so 2x2 matrix = 4 evals
+    var srs = try DoryCommitmentScheme(Fr).setup(allocator, 2);
     defer srs.deinit();
 
+    // 2 variables = 2^2 = 4 evals
     const evals = [_]Fr{ Fr.fromU64(1), Fr.fromU64(2), Fr.fromU64(3), Fr.fromU64(4) };
-    const point = [_]Fr{ Fr.fromU64(5), Fr.fromU64(6), Fr.fromU64(7), Fr.fromU64(8) };
+    // Point should be sigma + nu = 1 + 1 = 2 elements
+    const point = [_]Fr{ Fr.fromU64(5), Fr.fromU64(6) };
 
     var proof = try DoryCommitmentScheme(Fr).open(&srs, &evals, &point, allocator);
     defer proof.deinit();

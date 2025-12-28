@@ -23,6 +23,7 @@ pub const claim_reductions = @import("claim_reductions/mod.zig");
 pub const commitment_types = @import("commitment_types.zig");
 pub const instruction = @import("instruction/mod.zig");
 pub const instruction_lookups = @import("instruction_lookups/mod.zig");
+pub const jolt_device = @import("jolt_device.zig");
 pub const jolt_types = @import("jolt_types.zig");
 pub const jolt_serialization = @import("jolt_serialization.zig");
 pub const proof_converter = @import("proof_converter.zig");
@@ -445,8 +446,9 @@ pub fn JoltProver(comptime F: type) type {
             try emulator.run();
 
             // Initialize Blake2b transcript for Jolt compatibility
+            // MUST use "Jolt" label to match Jolt verifier exactly
             const Blake2bTranscript = transcripts.Blake2bTranscript(F);
-            var transcript = Blake2bTranscript.init("jolt_v1");
+            var transcript = Blake2bTranscript.init("Jolt");
 
             // Generate R1CS cycle witnesses from execution trace
             var constraint_gen = r1cs.R1CSConstraintGenerator(F).init(self.allocator);
@@ -477,13 +479,40 @@ pub fn JoltProver(comptime F: type) type {
             try commitments.append(self.allocator, zolt_proof.register_proof.commitment);
             try commitments.append(self.allocator, zolt_proof.register_proof.final_state_commitment);
 
-            // Generate tau challenge vector from transcript
-            // (In full implementation, tau comes from committed polynomials)
+            // Create JoltDevice for Fiat-Shamir preamble
+            // This needs to match the device used by Jolt's verifier
+            var device = try jolt_device.JoltDevice.fromEmulator(
+                self.allocator,
+                inputs,
+                &[_]u8{}, // outputs - would come from emulator output
+                false, // panic
+                @intCast(program_bytecode.len),
+            );
+            defer device.deinit();
+
+            // Get trace length and RAM parameters
+            const trace_length: usize = @as(usize, 1) << @intCast(stage_proofs.log_t);
+            const ram_K: usize = @as(usize, 1) << @intCast(stage_proofs.log_k);
+
+            // Run Fiat-Shamir preamble to match Jolt verifier
+            jolt_device.fiatShamirPreamble(F, &transcript, &device, ram_K, trace_length);
+
+            // Append commitments to transcript (GT elements for Dory)
+            // This is what Jolt does after the preamble
+            for (commitments.items) |c| {
+                // For Dory, we need to append the GT element bytes
+                const bytes = c.toBytes();
+                transcript.appendBytes(&bytes);
+            }
+
+            // Derive tau from transcript after preamble and commitments
+            // num_rows_bits = num_cycle_vars + 2 (for univariate skip: 1 for constraint dim, 1 for streaming)
             const num_cycle_vars = std.math.log2_int(usize, @max(1, cycle_witnesses.len));
-            var tau = try self.allocator.alloc(F, num_cycle_vars + 1);
+            const num_rows_bits = num_cycle_vars + 2;
+            var tau = try self.allocator.alloc(F, num_rows_bits);
             defer self.allocator.free(tau);
-            for (0..tau.len) |i| {
-                tau[i] = F.fromU64(i + 1); // Placeholder tau values
+            for (0..num_rows_bits) |i| {
+                tau[num_rows_bits - 1 - i] = transcript.challengeScalar();
             }
 
             // Convert to Jolt-compatible format with transcript integration

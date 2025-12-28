@@ -766,6 +766,21 @@ pub fn JoltProver(comptime F: type) type {
                 tau[i] = transcript.challengeScalar();
             }
 
+            // Debug: print transcript state after tau
+            std.debug.print("[DEBUG] After tau, transcript state: ", .{});
+            for (0..@min(32, transcript.state.len)) |i| {
+                std.debug.print("{x:0>2}", .{transcript.state[i]});
+            }
+            std.debug.print("\n", .{});
+
+            // Debug: print first tau value
+            std.debug.print("[DEBUG] tau[0] = ", .{});
+            const tau0_bytes = tau[0].toBytes();
+            for (0..32) |i| {
+                std.debug.print("{x:0>2}", .{tau0_bytes[31 - i]});
+            }
+            std.debug.print("\n", .{});
+
             // Convert to Jolt-compatible format with transcript integration
             result.proof = try converter.convertWithTranscript(
                 commitment_types.PolyCommitment,

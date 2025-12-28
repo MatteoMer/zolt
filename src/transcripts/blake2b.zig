@@ -134,10 +134,13 @@ pub fn Blake2bTranscript(comptime F: type) type {
         ///
         /// Serializes LE, then reverses to BE for EVM compatibility.
         pub fn appendScalar(self: *Self, scalar: F) void {
+            // First convert from Montgomery form to canonical form (matching arkworks)
+            const standard = scalar.fromMontgomery();
+
             // Serialize to LE bytes
             var buf: [32]u8 = undefined;
             for (0..4) |i| {
-                mem.writeInt(u64, buf[i * 8 ..][0..8], scalar.limbs[i], .little);
+                mem.writeInt(u64, buf[i * 8 ..][0..8], standard.limbs[i], .little);
             }
 
             // Reverse to BE for EVM compatibility

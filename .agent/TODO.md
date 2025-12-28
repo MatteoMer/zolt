@@ -14,6 +14,7 @@
 - [x] Update Stage 6 prover to send [p(0), p(2)]
 - [x] Verify all tests pass
 - [x] Verify full pipeline example still works
+- [x] Add tests for evaluateQuadraticAt3Points helper (4 new tests)
 
 ## Key Insight from This Session
 
@@ -112,7 +113,7 @@ When adding new integration tests to `src/integration_tests.zig`, seemingly unre
 - [ ] Add more example programs
 
 ## Test Status
-All tests pass.
+All tests pass (554 tests).
 End-to-end verification: PASSED (lenient mode)
 Full pipeline example: WORKING
 

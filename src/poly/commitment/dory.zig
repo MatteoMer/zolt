@@ -737,10 +737,158 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
         pub const Proof = DoryProof;
         pub const FieldType = F;
 
+        /// Load SRS from a file exported by Jolt
+        ///
+        /// This loads a Dory SRS that was exported using Jolt's test_export_dory_srs.
+        /// The file format is:
+        /// - 16 bytes: "JOLT_DORY_SRS_V1"
+        /// - 8 bytes: max_num_vars (u64 LE)
+        /// - 8 bytes: g1_count (u64 LE)
+        /// - g1_count * 64 bytes: G1 points (arkworks uncompressed format)
+        /// - 8 bytes: g2_count (u64 LE)
+        /// - g2_count * 128 bytes: G2 points (arkworks uncompressed format)
+        /// - 64 bytes: h1 (blinding G1 generator)
+        /// - 128 bytes: h2 (blinding G2 generator)
+        pub fn loadFromFile(allocator: Allocator, path: []const u8) !SetupParams {
+            const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+                std.debug.print("Failed to open SRS file: {s}\n", .{path});
+                return err;
+            };
+            defer file.close();
+
+            // Read and verify header
+            var header: [16]u8 = undefined;
+            _ = try file.readAll(&header);
+            if (!std.mem.eql(u8, &header, "JOLT_DORY_SRS_V1")) {
+                return error.InvalidSrsFormat;
+            }
+
+            // Read max_num_vars
+            var num_vars_bytes: [8]u8 = undefined;
+            _ = try file.readAll(&num_vars_bytes);
+            const max_num_vars = std.mem.readInt(u64, &num_vars_bytes, .little);
+
+            // Calculate matrix dimensions
+            const sigma: u32 = @intCast((max_num_vars + 1) / 2);
+            const nu: u32 = @intCast(max_num_vars - sigma);
+
+            // Read G1 count and points
+            var g1_count_bytes: [8]u8 = undefined;
+            _ = try file.readAll(&g1_count_bytes);
+            const g1_count = std.mem.readInt(u64, &g1_count_bytes, .little);
+
+            const g1_vec = try allocator.alloc(G1Point, @intCast(g1_count));
+            errdefer allocator.free(g1_vec);
+
+            for (g1_vec) |*g1| {
+                var buf: [64]u8 = undefined;
+                _ = try file.readAll(&buf);
+                // Parse arkworks uncompressed G1 format (64 bytes: x, y in LE)
+                g1.* = parseG1Uncompressed(&buf);
+            }
+
+            // Read G2 count and points
+            var g2_count_bytes: [8]u8 = undefined;
+            _ = try file.readAll(&g2_count_bytes);
+            const g2_count = std.mem.readInt(u64, &g2_count_bytes, .little);
+
+            const g2_vec = try allocator.alloc(G2Point, @intCast(g2_count));
+            errdefer allocator.free(g2_vec);
+
+            for (g2_vec) |*g2| {
+                var buf: [128]u8 = undefined;
+                _ = try file.readAll(&buf);
+                // Parse arkworks uncompressed G2 format (128 bytes: x, y as Fp2 in LE)
+                g2.* = parseG2Uncompressed(&buf);
+            }
+
+            // Skip blinding generators (h1, h2) for now
+            var skip_buf: [64 + 128]u8 = undefined;
+            _ = try file.readAll(&skip_buf);
+
+            return SetupParams{
+                .g1_vec = g1_vec,
+                .g2_vec = g2_vec,
+                .num_columns = @intCast(g1_count),
+                .num_rows = @intCast(g2_count),
+                .sigma = sigma,
+                .nu = nu,
+                .allocator = allocator,
+            };
+        }
+
+        /// Parse arkworks uncompressed G1 point (64 bytes: x[32] || y[32] in LE)
+        fn parseG1Uncompressed(buf: *const [64]u8) G1Point {
+            // Read x coordinate (32 bytes LE as 4 u64 limbs)
+            var x_limbs: [4]u64 = undefined;
+            for (0..4) |i| {
+                x_limbs[i] = std.mem.readInt(u64, buf[i * 8 ..][0..8], .little);
+            }
+
+            // Read y coordinate
+            var y_limbs: [4]u64 = undefined;
+            for (0..4) |i| {
+                y_limbs[i] = std.mem.readInt(u64, buf[32 + i * 8 ..][0..8], .little);
+            }
+
+            // Convert from standard to Montgomery form
+            const x_raw = Fp{ .limbs = x_limbs };
+            const y_raw = Fp{ .limbs = y_limbs };
+
+            // Check for identity point (all zeros)
+            const is_zero = blk: {
+                for (x_limbs) |l| if (l != 0) break :blk false;
+                for (y_limbs) |l| if (l != 0) break :blk false;
+                break :blk true;
+            };
+
+            if (is_zero) {
+                return G1Point.identity();
+            }
+
+            return G1Point{
+                .x = x_raw.toMontgomery(),
+                .y = y_raw.toMontgomery(),
+                .infinity = false,
+            };
+        }
+
+        /// Parse arkworks uncompressed G2 point (128 bytes: x.c0[32] || x.c1[32] || y.c0[32] || y.c1[32])
+        fn parseG2Uncompressed(buf: *const [128]u8) G2Point {
+            // Read x.c0, x.c1, y.c0, y.c1 (each 32 bytes)
+            var x_c0_limbs: [4]u64 = undefined;
+            var x_c1_limbs: [4]u64 = undefined;
+            var y_c0_limbs: [4]u64 = undefined;
+            var y_c1_limbs: [4]u64 = undefined;
+
+            for (0..4) |i| {
+                x_c0_limbs[i] = std.mem.readInt(u64, buf[i * 8 ..][0..8], .little);
+                x_c1_limbs[i] = std.mem.readInt(u64, buf[32 + i * 8 ..][0..8], .little);
+                y_c0_limbs[i] = std.mem.readInt(u64, buf[64 + i * 8 ..][0..8], .little);
+                y_c1_limbs[i] = std.mem.readInt(u64, buf[96 + i * 8 ..][0..8], .little);
+            }
+
+            const x_c0_raw = Fp{ .limbs = x_c0_limbs };
+            const x_c1_raw = Fp{ .limbs = x_c1_limbs };
+            const y_c0_raw = Fp{ .limbs = y_c0_limbs };
+            const y_c1_raw = Fp{ .limbs = y_c1_limbs };
+            const x_c0 = x_c0_raw.toMontgomery();
+            const x_c1 = x_c1_raw.toMontgomery();
+            const y_c0 = y_c0_raw.toMontgomery();
+            const y_c1 = y_c1_raw.toMontgomery();
+
+            return G2Point{
+                .x = Fp2{ .c0 = x_c0, .c1 = x_c1 },
+                .y = Fp2{ .c0 = y_c0, .c1 = y_c1 },
+                .infinity = false,
+            };
+        }
+
         /// Setup the SRS using Jolt's seed
         ///
         /// Uses SHA3-256 with seed "Jolt Dory URS seed" for deterministic generation.
-        /// This matches Jolt's DoryCommitmentScheme::setup_prover.
+        /// Note: This generates points differently from Jolt's arkworks-based generation.
+        /// For exact compatibility, use loadFromFile with a Jolt-exported SRS.
         pub fn setup(allocator: Allocator, max_num_vars: usize) !SetupParams {
             // Calculate matrix dimensions
             // For n variables, we need 2^n coefficients

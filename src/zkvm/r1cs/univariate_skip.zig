@@ -354,6 +354,7 @@ pub const LagrangeHelper = struct {
     ///
     /// This matches Jolt's LagrangeHelper::shift_coeffs_i32
     pub fn shiftCoeffsI32(comptime N: usize, shift: i64) [N]i32 {
+        @setEvalBranchQuota(10000);
         var out: [N]i32 = undefined;
         const n_minus_1: i64 = @as(i64, @intCast(N - 1));
 

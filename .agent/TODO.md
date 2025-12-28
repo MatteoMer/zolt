@@ -20,6 +20,7 @@
 - [x] Added RemwLookup, RemuwLookup for 32-bit remainder
 - [x] All W-suffix operations sign-extend 32-bit results to 64 bits
 - [x] Tests covering overflow and sign-extension
+- [x] Connected *W lookups to tracer via OP_32 opcode handling
 
 ## Completed (Previous Sessions)
 
@@ -59,6 +60,7 @@
 
 ### Full Instruction Coverage (RV64IM)
 - **Base Integer (I)**: ADD, SUB, AND, OR, XOR, SLL, SRL, SRA, SLT, SLTU
+- **Immediate (I)**: ADDI, ANDI, ORI, XORI, SLTI, SLTIU, SLLI, SRLI, SRAI
 - **Branches**: BEQ, BNE, BLT, BGE, BLTU, BGEU
 - **Multiply (M)**: MUL, MULH, MULHU, MULHSU
 - **Division (M)**: DIV, DIVU, REM, REMU
@@ -69,7 +71,6 @@
 ### High Priority
 - [ ] Import production SRS from Ethereum ceremony
 - [ ] Implement proper verifier for bytecode/memory/registers proofs
-- [ ] Connect *W lookups to tracer for OP_32 opcode
 
 ### Medium Priority
 - [ ] Performance optimization with SIMD
@@ -80,4 +81,10 @@
 - [ ] Benchmarking suite
 
 ## Test Status
-All tests pass (450+ tests).
+All 452 tests pass.
+
+## Commits This Session
+1. Add division/remainder validation lookup tables
+2. Add DIV/REM instruction lookups for M extension
+3. Add RV64 word-sized (*W) instruction lookups
+4. Connect word-sized (*W) lookups to trace collector

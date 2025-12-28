@@ -466,6 +466,190 @@ pub fn LookupEntry(comptime XLEN: comptime_int) type {
                 .instruction = instruction,
             };
         }
+
+        // ========================================================================
+        // Word-Sized Operations (*W instructions for RV64)
+        // ========================================================================
+
+        /// Create entry for ADDW (32-bit add, sign-extend)
+        pub fn fromAddw(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
+            const AddwLookup = lookups.AddwLookup(XLEN);
+            const addw = AddwLookup.init(rs1, rs2);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = AddwLookup.lookupTable(),
+                .index = addw.toLookupIndex(),
+                .result = addw.computeResult(),
+                .left_operand = rs1,
+                .right_operand = rs2,
+                .circuit_flags = AddwLookup.circuitFlags(),
+                .instruction_flags = AddwLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
+        /// Create entry for SUBW (32-bit subtract, sign-extend)
+        pub fn fromSubw(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
+            const SubwLookup = lookups.SubwLookup(XLEN);
+            const subw = SubwLookup.init(rs1, rs2);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = SubwLookup.lookupTable(),
+                .index = subw.toLookupIndex(),
+                .result = subw.computeResult(),
+                .left_operand = rs1,
+                .right_operand = rs2,
+                .circuit_flags = SubwLookup.circuitFlags(),
+                .instruction_flags = SubwLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
+        /// Create entry for SLLW (32-bit shift left, sign-extend)
+        pub fn fromSllw(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
+            const SllwLookup = lookups.SllwLookup(XLEN);
+            const sllw = SllwLookup.init(rs1, rs2);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = SllwLookup.lookupTable(),
+                .index = sllw.toLookupIndex(),
+                .result = sllw.computeResult(),
+                .left_operand = rs1,
+                .right_operand = rs2,
+                .circuit_flags = SllwLookup.circuitFlags(),
+                .instruction_flags = SllwLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
+        /// Create entry for SRLW (32-bit logical shift right, sign-extend)
+        pub fn fromSrlw(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
+            const SrlwLookup = lookups.SrlwLookup(XLEN);
+            const srlw = SrlwLookup.init(rs1, rs2);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = SrlwLookup.lookupTable(),
+                .index = srlw.toLookupIndex(),
+                .result = srlw.computeResult(),
+                .left_operand = rs1,
+                .right_operand = rs2,
+                .circuit_flags = SrlwLookup.circuitFlags(),
+                .instruction_flags = SrlwLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
+        /// Create entry for SRAW (32-bit arithmetic shift right, sign-extend)
+        pub fn fromSraw(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
+            const SrawLookup = lookups.SrawLookup(XLEN);
+            const sraw = SrawLookup.init(rs1, rs2);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = SrawLookup.lookupTable(),
+                .index = sraw.toLookupIndex(),
+                .result = sraw.computeResult(),
+                .left_operand = rs1,
+                .right_operand = rs2,
+                .circuit_flags = SrawLookup.circuitFlags(),
+                .instruction_flags = SrawLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
+        /// Create entry for MULW (32-bit multiply, sign-extend)
+        pub fn fromMulw(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
+            const MulwLookup = lookups.MulwLookup(XLEN);
+            const mulw = MulwLookup.init(rs1, rs2);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = MulwLookup.lookupTable(),
+                .index = mulw.toLookupIndex(),
+                .result = mulw.computeResult(),
+                .left_operand = rs1,
+                .right_operand = rs2,
+                .circuit_flags = MulwLookup.circuitFlags(),
+                .instruction_flags = MulwLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
+        /// Create entry for DIVW (32-bit signed division, sign-extend)
+        pub fn fromDivw(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
+            const DivwLookup = lookups.DivwLookup(XLEN);
+            const divw = DivwLookup.init(rs1, rs2);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = DivwLookup.lookupTable(),
+                .index = divw.toLookupIndex(),
+                .result = divw.computeResult(),
+                .left_operand = rs1,
+                .right_operand = rs2,
+                .circuit_flags = DivwLookup.circuitFlags(),
+                .instruction_flags = DivwLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
+        /// Create entry for DIVUW (32-bit unsigned division, sign-extend)
+        pub fn fromDivuw(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
+            const DivuwLookup = lookups.DivuwLookup(XLEN);
+            const divuw = DivuwLookup.init(rs1, rs2);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = DivuwLookup.lookupTable(),
+                .index = divuw.toLookupIndex(),
+                .result = divuw.computeResult(),
+                .left_operand = rs1,
+                .right_operand = rs2,
+                .circuit_flags = DivuwLookup.circuitFlags(),
+                .instruction_flags = DivuwLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
+        /// Create entry for REMW (32-bit signed remainder, sign-extend)
+        pub fn fromRemw(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
+            const RemwLookup = lookups.RemwLookup(XLEN);
+            const remw = RemwLookup.init(rs1, rs2);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = RemwLookup.lookupTable(),
+                .index = remw.toLookupIndex(),
+                .result = remw.computeResult(),
+                .left_operand = rs1,
+                .right_operand = rs2,
+                .circuit_flags = RemwLookup.circuitFlags(),
+                .instruction_flags = RemwLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
+        /// Create entry for REMUW (32-bit unsigned remainder, sign-extend)
+        pub fn fromRemuw(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
+            const RemuwLookup = lookups.RemuwLookup(XLEN);
+            const remuw = RemuwLookup.init(rs1, rs2);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = RemuwLookup.lookupTable(),
+                .index = remuw.toLookupIndex(),
+                .result = remuw.computeResult(),
+                .left_operand = rs1,
+                .right_operand = rs2,
+                .circuit_flags = RemuwLookup.circuitFlags(),
+                .instruction_flags = RemuwLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
     };
 }
 
@@ -629,6 +813,44 @@ pub fn LookupTraceCollector(comptime XLEN: comptime_int) type {
                     if (entry) |e| {
                         try self.entries.append(self.allocator, e);
                     }
+                },
+                .OP_32 => {
+                    // 32-bit integer register-register operations (RV64 only)
+                    // Check for M extension first
+                    if (decoded.funct7 == 0b0000001) {
+                        // RV64M word operations: MULW, DIVW, DIVUW, REMW, REMUW
+                        const entry: Entry = switch (decoded.funct3) {
+                            0b000 => Entry.fromMulw(cycle, pc, instruction, rs1_val, rs2_val), // MULW
+                            0b100 => Entry.fromDivw(cycle, pc, instruction, rs1_val, rs2_val), // DIVW
+                            0b101 => Entry.fromDivuw(cycle, pc, instruction, rs1_val, rs2_val), // DIVUW
+                            0b110 => Entry.fromRemw(cycle, pc, instruction, rs1_val, rs2_val), // REMW
+                            0b111 => Entry.fromRemuw(cycle, pc, instruction, rs1_val, rs2_val), // REMUW
+                            else => Entry.fromAddw(cycle, pc, instruction, rs1_val, rs2_val), // fallback
+                        };
+                        try self.entries.append(self.allocator, entry);
+                        return;
+                    }
+
+                    // Standard RV64I word operations: ADDW, SUBW, SLLW, SRLW, SRAW
+                    const entry: Entry = switch (decoded.funct3) {
+                        0b000 => blk: {
+                            if ((decoded.funct7 & 0x20) != 0) {
+                                break :blk Entry.fromSubw(cycle, pc, instruction, rs1_val, rs2_val); // SUBW
+                            } else {
+                                break :blk Entry.fromAddw(cycle, pc, instruction, rs1_val, rs2_val); // ADDW
+                            }
+                        },
+                        0b001 => Entry.fromSllw(cycle, pc, instruction, rs1_val, rs2_val), // SLLW
+                        0b101 => blk: {
+                            if ((decoded.funct7 & 0x20) != 0) {
+                                break :blk Entry.fromSraw(cycle, pc, instruction, rs1_val, rs2_val); // SRAW
+                            } else {
+                                break :blk Entry.fromSrlw(cycle, pc, instruction, rs1_val, rs2_val); // SRLW
+                            }
+                        },
+                        else => Entry.fromAddw(cycle, pc, instruction, rs1_val, rs2_val), // fallback
+                    };
+                    try self.entries.append(self.allocator, entry);
                 },
                 else => {
                     // LUI, AUIPC, JAL, JALR, LOAD, STORE - no lookup needed

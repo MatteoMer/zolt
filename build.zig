@@ -152,4 +152,20 @@ pub fn build(b: *std.Build) void {
     const run_sumcheck_example = b.addRunArtifact(sumcheck_example);
     const sumcheck_example_step = b.step("example-sumcheck", "Run sumcheck protocol example");
     sumcheck_example_step.dependOn(&run_sumcheck_example.step);
+
+    // Example: Full Pipeline
+    const pipeline_example = b.addExecutable(.{
+        .name = "example-pipeline",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/full_pipeline.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zolt", .module = lib.root_module },
+            },
+        }),
+    });
+    const run_pipeline_example = b.addRunArtifact(pipeline_example);
+    const pipeline_example_step = b.step("example-pipeline", "Run full proving pipeline example");
+    pipeline_example_step.dependOn(&run_pipeline_example.step);
 }

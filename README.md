@@ -69,6 +69,7 @@ zig build example-proof        # Simple polynomial commitment
 zig build example-riscv        # RISC-V instruction decoding
 zig build example-hyperkzg     # HyperKZG commitment scheme
 zig build example-sumcheck     # Sumcheck protocol
+zig build example-pipeline     # Full proving pipeline (end-to-end)
 ```
 
 ## Project Structure

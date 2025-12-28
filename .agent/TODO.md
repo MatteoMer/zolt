@@ -1,6 +1,20 @@
 # Zolt zkVM Implementation TODO
 
-## Completed (This Session - Iteration 47)
+## Completed (This Session - Iteration 48)
+
+### More C Example Programs
+- [x] Add `collatz.c` - Collatz sequence for n=27 (111 steps)
+- [x] Add `signed.c` - Signed arithmetic operations demo
+- [x] Add `primes.c` - Count primes < 100 using trial division (25)
+- [x] Update Makefile with new targets
+- [x] Update README with new example documentation
+
+### Notes on Compression
+- Investigated Zig 0.15 std.compress.flate API
+- The compression module has unfinished implementation (`@panic("TODO")`)
+- Will revisit when Zig stdlib stabilizes
+
+## Completed (Previous Session - Iteration 47)
 
 ### New C Example Programs
 - [x] Add `factorial.c` - Compute 10! using MUL instruction
@@ -111,6 +125,9 @@ zolt bench             # Run benchmarks
 | bitwise.elf | AND, OR, XOR, shifts | - |
 | array.elf | Array load/store ops | 1465 |
 | gcd.elf | GCD using div/rem | 63 |
+| collatz.elf | Collatz sequence n=27 | 111 |
+| signed.elf | Signed arithmetic | -39 |
+| primes.elf | Count primes < 100 | 25 |
 
 ## Performance Summary
 - Field addition: 4.0 ns/op

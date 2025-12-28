@@ -255,7 +255,66 @@ pub fn UnivariateSkipEvaluator(comptime F: type) type {
             return result;
         }
 
+        /// Compute extended evaluations using precomputed Lagrange coefficients.
+        ///
+        /// This is the correct approach: we evaluate Az(y_j) and Bz(y_j) separately
+        /// using the COEFFS_PER_J weights, then multiply them. This gives non-zero
+        /// results even when base evaluations of Az*Bz are all zero.
+        pub fn computeExtendedEvalsWithCoeffs(
+            self: *const Self,
+            eq_evals: []const F,
+            comptime NUM_EXTENDED: usize,
+        ) [NUM_EXTENDED]F {
+            const univariate_skip = @import("univariate_skip.zig");
+
+            var result: [NUM_EXTENDED]F = undefined;
+            @memset(&result, F.zero());
+
+            // For each cycle, compute the contribution to extended evaluations
+            for (0..self.num_cycles) |cycle| {
+                if (cycle >= eq_evals.len) break;
+
+                const eq_val = eq_evals[cycle];
+                const az_vals = self.az_first_group[cycle].values;
+                const bz_vals = self.bz_first_group[cycle].values;
+
+                // For each extended target point j
+                for (0..NUM_EXTENDED) |j| {
+                    // Get the precomputed Lagrange coefficients for target j
+                    const coeffs = univariate_skip.COEFFS_PER_J[j];
+
+                    // Compute Az(y_j) = sum_i coeffs[i] * az_vals[i]
+                    var az_at_yj = F.zero();
+                    for (0..FIRST_GROUP_SIZE) |i| {
+                        const coeff_i = coeffs[i];
+                        if (coeff_i >= 0) {
+                            az_at_yj = az_at_yj.add(az_vals[i].mul(F.fromU64(@intCast(coeff_i))));
+                        } else {
+                            az_at_yj = az_at_yj.sub(az_vals[i].mul(F.fromU64(@intCast(-coeff_i))));
+                        }
+                    }
+
+                    // Compute Bz(y_j) = sum_i coeffs[i] * bz_vals[i]
+                    var bz_at_yj = F.zero();
+                    for (0..FIRST_GROUP_SIZE) |i| {
+                        const coeff_i = coeffs[i];
+                        if (coeff_i >= 0) {
+                            bz_at_yj = bz_at_yj.add(bz_vals[i].mul(F.fromU64(@intCast(coeff_i))));
+                        } else {
+                            bz_at_yj = bz_at_yj.sub(bz_vals[i].mul(F.fromU64(@intCast(-coeff_i))));
+                        }
+                    }
+
+                    // Add eq-weighted Az*Bz product to this extended point
+                    result[j] = result[j].add(eq_val.mul(az_at_yj.mul(bz_at_yj)));
+                }
+            }
+
+            return result;
+        }
+
         /// Evaluate Az*Bz at an extended domain point using Lagrange extrapolation
+        /// DEPRECATED: This doesn't work for satisfied constraints (base evals are zero)
         fn evaluateExtendedPoint(self: *const Self, y_i64: i64, eq_evals: []const F) F {
             // For points outside the base domain, we use Lagrange extrapolation
             // from the 10 base domain evaluations.

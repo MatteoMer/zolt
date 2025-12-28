@@ -4,7 +4,33 @@
 
 **Project Status: DEBUGGING STAGE 1 SUMCHECK - CLAIM MISMATCH**
 
-### Latest Progress (2024-12-28, Iteration 25 - Agent)
+### Latest Progress (2024-12-28, Iteration 25+ - Agent)
+
+**✅ Implemented: LagrangeHelper with shift_coeffs_i32**
+- Added `generalizedBinomial` for computing binomial coefficients with negative t
+- Added `shiftCoeffsI32` matching Jolt's `LagrangeHelper::shift_coeffs_i32`
+- Precomputed `COEFFS_PER_J[9][10]` Lagrange weights for extended domain evaluation
+- Added `TARGET_SHIFTS` and `UNISKIP_TARGETS` constants
+- All 618 tests pass
+
+**Next Step: Add Az/Bz Evaluation Structures**
+
+Jolt's `extended_azbz_product_first_group(j)` works by:
+1. Getting Az/Bz values from the trace (booleans for Az, small integers for Bz)
+2. Using `COEFFS_PER_J[j]` to weight each constraint's contribution
+3. Computing `Az(y_j) * Bz(y_j)` for extended domain point j
+
+Need to add:
+- `AzFirstGroup` struct with 10 boolean fields
+- `BzFirstGroup` struct with 10 integer/S64 fields
+- `AzSecondGroup` struct with 9 boolean fields
+- `BzSecondGroup` struct with 9 integer/S160 fields
+- `R1CSCycleInputs` struct to populate from trace
+- `extended_azbz_product_*_group(j)` functions
+
+---
+
+### Previous Progress (2024-12-28, Iteration 25 - Agent)
 
 1. ✅ **Found Root Cause of UniSkip All-Zeros Issue**
 

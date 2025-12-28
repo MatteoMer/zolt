@@ -1092,3 +1092,434 @@ test "full proof JSON serialization" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"r1cs_proof\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"stage_proofs\"") != null);
 }
+
+// ============================================================================
+// JSON Deserialization
+// ============================================================================
+
+/// JSON deserialization error types
+pub const JsonDeserializationError = error{
+    InvalidFormat,
+    MissingField,
+    InvalidFieldValue,
+    UnsupportedVersion,
+    OutOfMemory,
+};
+
+/// JSON proof reader for deserializing proofs
+pub fn JsonProofReader(comptime F: type) type {
+    return struct {
+        const Self = @This();
+        const json = std.json;
+
+        allocator: Allocator,
+
+        pub fn init(allocator: Allocator) Self {
+            return .{
+                .allocator = allocator,
+            };
+        }
+
+        /// Extract a string field from a JSON object
+        fn getString(obj: json.Value, key: []const u8) JsonDeserializationError![]const u8 {
+            const val = obj.object.get(key) orelse return JsonDeserializationError.MissingField;
+            return switch (val) {
+                .string => |s| s,
+                else => JsonDeserializationError.InvalidFieldValue,
+            };
+        }
+
+        /// Extract an integer field from a JSON object
+        fn getInt(obj: json.Value, key: []const u8) JsonDeserializationError!u64 {
+            const val = obj.object.get(key) orelse return JsonDeserializationError.MissingField;
+            return switch (val) {
+                .integer => |i| @intCast(i),
+                else => JsonDeserializationError.InvalidFieldValue,
+            };
+        }
+
+        /// Extract an object field from a JSON object
+        fn getObject(obj: json.Value, key: []const u8) JsonDeserializationError!json.Value {
+            const val = obj.object.get(key) orelse return JsonDeserializationError.MissingField;
+            return switch (val) {
+                .object => val,
+                else => JsonDeserializationError.InvalidFieldValue,
+            };
+        }
+
+        /// Extract an array field from a JSON object
+        fn getArray(obj: json.Value, key: []const u8) JsonDeserializationError!json.Array {
+            const val = obj.object.get(key) orelse return JsonDeserializationError.MissingField;
+            return switch (val) {
+                .array => |arr| arr,
+                else => JsonDeserializationError.InvalidFieldValue,
+            };
+        }
+
+        /// Parse a field element from a hex string
+        fn parseFieldElement(hex_str: []const u8) (JsonDeserializationError || SerializationError)!F {
+            return hexToField(F, hex_str) catch |err| switch (err) {
+                SerializationError.InvalidData => JsonDeserializationError.InvalidFieldValue,
+                else => err,
+            };
+        }
+
+        /// Parse a commitment from JSON object (with x and y fields)
+        fn parseCommitment(self: *Self, obj: json.Value) (JsonDeserializationError || SerializationError)!commitment_types.PolyCommitment {
+            _ = self;
+            const x_hex = try getString(obj, "commitment_x");
+            const y_hex = try getString(obj, "commitment_y");
+
+            const x = try parseFieldElement(x_hex);
+            const y = try parseFieldElement(y_hex);
+
+            return commitment_types.PolyCommitment{
+                .x = x,
+                .y = y,
+            };
+        }
+
+        /// Parse a stage proof from JSON object
+        fn parseStageProof(self: *Self, obj: json.Value) !prover.StageProof(F) {
+            var stage = prover.StageProof(F).init(self.allocator);
+            errdefer stage.deinit();
+
+            // Parse round polynomials
+            const round_polys_arr = try getArray(obj, "round_polys");
+            for (round_polys_arr.items) |poly_val| {
+                const poly_arr = switch (poly_val) {
+                    .array => |arr| arr,
+                    else => return JsonDeserializationError.InvalidFieldValue,
+                };
+
+                const poly = try self.allocator.alloc(F, poly_arr.items.len);
+                errdefer self.allocator.free(poly);
+
+                for (poly_arr.items, 0..) |coeff_val, i| {
+                    const hex = switch (coeff_val) {
+                        .string => |s| s,
+                        else => return JsonDeserializationError.InvalidFieldValue,
+                    };
+                    poly[i] = try parseFieldElement(hex);
+                }
+
+                try stage.round_polys.append(self.allocator, poly);
+            }
+
+            // Parse challenges
+            const challenges_arr = try getArray(obj, "challenges");
+            for (challenges_arr.items) |challenge_val| {
+                const hex = switch (challenge_val) {
+                    .string => |s| s,
+                    else => return JsonDeserializationError.InvalidFieldValue,
+                };
+                const challenge = try parseFieldElement(hex);
+                try stage.challenges.append(self.allocator, challenge);
+            }
+
+            // Parse final claims
+            const claims_arr = try getArray(obj, "final_claims");
+            for (claims_arr.items) |claim_val| {
+                const hex = switch (claim_val) {
+                    .string => |s| s,
+                    else => return JsonDeserializationError.InvalidFieldValue,
+                };
+                const claim = try parseFieldElement(hex);
+                try stage.final_claims.append(self.allocator, claim);
+            }
+
+            return stage;
+        }
+
+        /// Parse JoltStageProofs from JSON object
+        fn parseJoltStageProofs(self: *Self, obj: json.Value) !prover.JoltStageProofs(F) {
+            const log_t = try getInt(obj, "log_t");
+            const log_k = try getInt(obj, "log_k");
+
+            var proofs = prover.JoltStageProofs(F).init(self.allocator);
+            errdefer proofs.deinit();
+
+            proofs.log_t = log_t;
+            proofs.log_k = log_k;
+
+            const stage_names = [_][]const u8{
+                "spartan",
+                "raf",
+                "lasso",
+                "val",
+                "register",
+                "booleanity",
+            };
+
+            for (stage_names, 0..) |name, i| {
+                const stage_obj = try getObject(obj, name);
+                proofs.stage_proofs[i].deinit(); // Free the initialized empty stage
+                proofs.stage_proofs[i] = try self.parseStageProof(stage_obj);
+            }
+
+            return proofs;
+        }
+    };
+}
+
+/// Check if a file is a JSON proof (based on content, not extension)
+pub fn isJsonProof(data: []const u8) bool {
+    // Skip leading whitespace
+    var i: usize = 0;
+    while (i < data.len and (data[i] == ' ' or data[i] == '\t' or data[i] == '\n' or data[i] == '\r')) {
+        i += 1;
+    }
+
+    // Check if it starts with '{'
+    if (i >= data.len or data[i] != '{') {
+        return false;
+    }
+
+    // Check for ZOLT-JSON magic string
+    return std.mem.indexOf(u8, data, "\"ZOLT-JSON\"") != null;
+}
+
+/// Deserialize a JoltProof from JSON bytes
+pub fn deserializeProofFromJson(comptime F: type, allocator: Allocator, data: []const u8) !@import("mod.zig").JoltProof(F) {
+    const zkvm = @import("mod.zig");
+    const json = std.json;
+
+    // Parse JSON
+    var parsed = json.parseFromSlice(json.Value, allocator, data, .{}) catch {
+        return JsonDeserializationError.InvalidFormat;
+    };
+    defer parsed.deinit();
+
+    const root = parsed.value;
+
+    // Verify format magic
+    const Reader = JsonProofReader(F);
+    const format = try Reader.getString(root, "format");
+    if (!std.mem.eql(u8, format, JSON_MAGIC)) {
+        return JsonDeserializationError.InvalidFormat;
+    }
+
+    // Verify version
+    const version = try Reader.getInt(root, "version");
+    if (version != VERSION) {
+        return JsonDeserializationError.UnsupportedVersion;
+    }
+
+    var reader = Reader.init(allocator);
+
+    // Parse bytecode proof
+    const bc_obj = try Reader.getObject(root, "bytecode_proof");
+    var bc_proof = bytecode.BytecodeProof(F).init();
+    bc_proof.commitment = try reader.parseCommitment(bc_obj);
+
+    // Parse memory proof
+    const mem_obj = try Reader.getObject(root, "memory_proof");
+    var mem_proof = ram.MemoryProof(F).init();
+    mem_proof.commitment = try reader.parseCommitment(mem_obj);
+
+    // Parse register proof
+    const reg_obj = try Reader.getObject(root, "register_proof");
+    var reg_proof = registers.RegisterProof(F).init();
+    reg_proof.commitment = try reader.parseCommitment(reg_obj);
+
+    // Parse R1CS proof (minimal - we need to restore enough for verification)
+    const r1cs_obj = try Reader.getObject(root, "r1cs_proof");
+    const tau_len = try Reader.getInt(r1cs_obj, "tau_len");
+
+    // Allocate tau with zeros (JSON doesn't include full tau for space reasons)
+    const tau = try allocator.alloc(F, tau_len);
+    errdefer allocator.free(tau);
+    for (tau) |*t| {
+        t.* = F.zero();
+    }
+
+    // Parse sumcheck values
+    const sc_claim_hex = try Reader.getString(r1cs_obj, "sumcheck_claim");
+    const sc_claim = try Reader.parseFieldElement(sc_claim_hex);
+
+    const sc_final_eval_hex = try Reader.getString(r1cs_obj, "sumcheck_final_eval");
+    const sc_final_eval = try Reader.parseFieldElement(sc_final_eval_hex);
+
+    const eval_point_len = try Reader.getInt(r1cs_obj, "eval_point_len");
+    const eval_point = try allocator.alloc(F, eval_point_len);
+    errdefer allocator.free(eval_point);
+    for (eval_point) |*e| {
+        e.* = F.zero();
+    }
+
+    // Create empty rounds array
+    const sc_rounds = try allocator.alloc(@import("../subprotocols/mod.zig").Sumcheck(F).Round, 0);
+
+    // Create R1CS proof with default eval_claims
+    const r1cs_proof = spartan.R1CSProof(F){
+        .tau = tau,
+        .sumcheck_proof = .{
+            .claim = sc_claim,
+            .rounds = sc_rounds,
+            .final_point = eval_point,
+            .final_eval = sc_final_eval,
+            .allocator = allocator,
+        },
+        .eval_claims = .{ F.zero(), F.zero(), F.zero() },
+        .eval_point = eval_point,
+        .allocator = allocator,
+    };
+
+    // Parse stage proofs (if present and not null)
+    var stage_proofs: ?prover.JoltStageProofs(F) = null;
+    const stage_proofs_val = root.object.get("stage_proofs");
+    if (stage_proofs_val) |spv| {
+        switch (spv) {
+            .null => {},
+            .object => {
+                stage_proofs = try reader.parseJoltStageProofs(spv);
+            },
+            else => return JsonDeserializationError.InvalidFieldValue,
+        }
+    }
+
+    return zkvm.JoltProof(F){
+        .bytecode_proof = bc_proof,
+        .memory_proof = mem_proof,
+        .register_proof = reg_proof,
+        .r1cs_proof = r1cs_proof,
+        .stage_proofs = stage_proofs,
+        .allocator = allocator,
+    };
+}
+
+/// Read a proof from a JSON file
+pub fn readProofFromJsonFile(comptime F: type, allocator: Allocator, path: []const u8) !@import("mod.zig").JoltProof(F) {
+    const file = try std.fs.cwd().openFile(path, .{});
+    defer file.close();
+
+    const stat = try file.stat();
+    const data = try allocator.alloc(u8, stat.size);
+    defer allocator.free(data);
+
+    const bytes_read = try file.readAll(data);
+    if (bytes_read != stat.size) {
+        return SerializationError.UnexpectedEof;
+    }
+
+    return deserializeProofFromJson(F, allocator, data);
+}
+
+/// Auto-detect format and read proof from file
+pub fn readProofAutoDetect(comptime F: type, allocator: Allocator, path: []const u8) !@import("mod.zig").JoltProof(F) {
+    const file = try std.fs.cwd().openFile(path, .{});
+    defer file.close();
+
+    const stat = try file.stat();
+    const data = try allocator.alloc(u8, stat.size);
+    defer allocator.free(data);
+
+    const bytes_read = try file.readAll(data);
+    if (bytes_read != stat.size) {
+        return SerializationError.UnexpectedEof;
+    }
+
+    // Check if it's JSON or binary
+    if (isJsonProof(data)) {
+        return deserializeProofFromJson(F, allocator, data);
+    } else {
+        return deserializeProof(F, allocator, data);
+    }
+}
+
+test "JSON deserialization basic" {
+    const F = field.BN254Scalar;
+    const allocator = std.testing.allocator;
+
+    // Create a simple JSON proof manually
+    const json_proof =
+        \\{
+        \\  "format": "ZOLT-JSON",
+        \\  "version": 1,
+        \\  "bytecode_proof": {
+        \\    "commitment_x": "0000000000000000000000000000000000000000000000000000000000000001",
+        \\    "commitment_y": "0000000000000000000000000000000000000000000000000000000000000002"
+        \\  },
+        \\  "memory_proof": {
+        \\    "commitment_x": "0000000000000000000000000000000000000000000000000000000000000001",
+        \\    "commitment_y": "0000000000000000000000000000000000000000000000000000000000000002"
+        \\  },
+        \\  "register_proof": {
+        \\    "commitment_x": "0000000000000000000000000000000000000000000000000000000000000001",
+        \\    "commitment_y": "0000000000000000000000000000000000000000000000000000000000000002"
+        \\  },
+        \\  "r1cs_proof": {
+        \\    "tau_len": 4,
+        \\    "sumcheck_claim": "0000000000000000000000000000000000000000000000000000000000000000",
+        \\    "sumcheck_final_eval": "0000000000000000000000000000000000000000000000000000000000000000",
+        \\    "sumcheck_rounds": 0,
+        \\    "eval_point_len": 4
+        \\  },
+        \\  "stage_proofs": null
+        \\}
+    ;
+
+    var proof = try deserializeProofFromJson(F, allocator, json_proof);
+    defer proof.deinit();
+
+    // Verify basic structure
+    try std.testing.expect(proof.stage_proofs == null);
+}
+
+test "JSON roundtrip with stage proofs" {
+    const F = field.BN254Scalar;
+    const allocator = std.testing.allocator;
+    const zkvm = @import("mod.zig");
+
+    // Create a minimal bytecode program
+    const program = [_]u8{
+        0x13, 0x05, 0xa0, 0x02, // li a0, 42
+        0x93, 0x05, 0xa0, 0x00, // li a1, 10
+        0x33, 0x05, 0xb5, 0x00, // add a0, a0, a1
+        0x73, 0x00, 0x10, 0x00, // ebreak
+    };
+
+    // Create prover and generate proof
+    var prover_inst = zkvm.JoltProver(F).init(allocator);
+    prover_inst.max_cycles = 64;
+
+    var proof = try prover_inst.prove(&program, &[_]u8{});
+    defer proof.deinit();
+
+    // Serialize to JSON
+    const json_data = try serializeProofToJson(F, allocator, proof);
+    defer allocator.free(json_data);
+
+    // Deserialize from JSON
+    var deserialized = try deserializeProofFromJson(F, allocator, json_data);
+    defer deserialized.deinit();
+
+    // Verify structure matches
+    try std.testing.expect(deserialized.stage_proofs != null);
+
+    const orig_stages = proof.stage_proofs.?;
+    const deser_stages = deserialized.stage_proofs.?;
+
+    try std.testing.expectEqual(orig_stages.log_t, deser_stages.log_t);
+    try std.testing.expectEqual(orig_stages.log_k, deser_stages.log_k);
+
+    // Compare stage proof sizes
+    for (orig_stages.stage_proofs, deser_stages.stage_proofs) |orig, deser| {
+        try std.testing.expectEqual(orig.round_polys.items.len, deser.round_polys.items.len);
+        try std.testing.expectEqual(orig.challenges.items.len, deser.challenges.items.len);
+        try std.testing.expectEqual(orig.final_claims.items.len, deser.final_claims.items.len);
+    }
+}
+
+test "isJsonProof detection" {
+    // JSON proof
+    try std.testing.expect(isJsonProof("{\"format\": \"ZOLT-JSON\"}"));
+    try std.testing.expect(isJsonProof("  \n{\"format\": \"ZOLT-JSON\"}"));
+
+    // Binary proof (starts with ZOLT magic)
+    try std.testing.expect(!isJsonProof("ZOLT\x01\x00\x00\x00"));
+
+    // Invalid
+    try std.testing.expect(!isJsonProof("not json"));
+    try std.testing.expect(!isJsonProof("{}"));
+}

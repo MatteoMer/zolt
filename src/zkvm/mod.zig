@@ -64,6 +64,13 @@ pub const serializeProofToJson = serialization.serializeProofToJson;
 pub const writeProofToJsonFile = serialization.writeProofToJsonFile;
 pub const JSON_MAGIC = serialization.JSON_MAGIC;
 
+// Re-export JSON deserialization functions
+pub const deserializeProofFromJson = serialization.deserializeProofFromJson;
+pub const readProofFromJsonFile = serialization.readProofFromJsonFile;
+pub const readProofAutoDetect = serialization.readProofAutoDetect;
+pub const isJsonProof = serialization.isJsonProof;
+pub const JsonDeserializationError = serialization.JsonDeserializationError;
+
 /// RISC-V register indices
 pub const Register = enum(u8) {
     // Standard RISC-V registers

@@ -401,7 +401,23 @@ fn runVerifier(allocator: std.mem.Allocator, proof_path: []const u8) !void {
     std.debug.print("Loading proof: {s}\n", .{proof_path});
     var timer = std.time.Timer.start() catch return;
 
-    var proof = zolt.zkvm.readProofFromFile(BN254Scalar, allocator, proof_path) catch |err| {
+    // Detect format first
+    const file = std.fs.cwd().openFile(proof_path, .{}) catch |err| {
+        std.debug.print("  Error opening proof file: {}\n", .{err});
+        return err;
+    };
+    var header_buf: [64]u8 = undefined;
+    const bytes_read = file.readAll(&header_buf) catch |err| {
+        std.debug.print("  Error reading proof file: {}\n", .{err});
+        file.close();
+        return err;
+    };
+    file.close();
+
+    const is_json = zolt.zkvm.isJsonProof(header_buf[0..bytes_read]);
+    std.debug.print("  Format: {s}\n", .{if (is_json) "JSON" else "Binary"});
+
+    var proof = zolt.zkvm.readProofAutoDetect(BN254Scalar, allocator, proof_path) catch |err| {
         std.debug.print("  Error loading proof: {}\n", .{err});
         return err;
     };

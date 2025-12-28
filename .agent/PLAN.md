@@ -1,10 +1,31 @@
 # Zolt zkVM Implementation Plan
 
-## Current Status (December 2024 - Iteration 44)
+## Current Status (December 2024 - Iteration 45)
 
-### Session Summary - JSON Serialization Added
+### Session Summary - JSON Deserialization Added
 
-This iteration added:
+This iteration added JSON deserialization support for proof loading:
+
+1. **JSON Proof Reader**
+   - `JsonProofReader(F)` type for parsing JSON proofs
+   - Helper functions: getString, getInt, getObject, getArray
+   - Field element parsing from hex strings
+   - Commitment parsing (G1 points)
+   - Stage proof parsing
+
+2. **Deserialization Functions**
+   - `deserializeProofFromJson()` - main deserialization function
+   - `readProofFromJsonFile()` - file I/O wrapper
+   - `readProofAutoDetect()` - auto-detects binary vs JSON format
+   - `isJsonProof()` - checks for ZOLT-JSON magic
+
+3. **CLI Updates**
+   - Verify command now auto-detects proof format
+   - Displays format type (JSON/Binary) in output
+
+### Previous Session (Iteration 44) - JSON Serialization
+
+Previous iteration added:
 
 1. **JSON Serialization Format**
    - Added human-readable JSON output format for proofs

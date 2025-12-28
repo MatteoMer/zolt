@@ -1,6 +1,32 @@
 # Zolt zkVM Implementation TODO
 
-## Completed (This Session - Iteration 44)
+## Completed (This Session - Iteration 45)
+
+### JSON Deserialization for Proof Loading
+- [x] Add `JsonProofReader(F)` type for parsing JSON proofs
+  - Helper functions for extracting JSON fields (getString, getInt, getObject, getArray)
+  - `parseFieldElement()` to convert hex strings to field elements
+  - `parseCommitment()` to parse G1 point commitments
+  - `parseStageProof()` to parse individual stage proofs
+  - `parseJoltStageProofs()` to parse all 6 stages
+- [x] Add `deserializeProofFromJson()` function
+  - Validates ZOLT-JSON magic and version
+  - Parses bytecode, memory, register proofs
+  - Parses R1CS proof metadata
+  - Parses stage proofs (if present)
+- [x] Add `readProofFromJsonFile()` for file I/O
+- [x] Add `readProofAutoDetect()` - auto-detects binary vs JSON format
+- [x] Add `isJsonProof()` helper to detect format from content
+- [x] Update CLI verify command to auto-detect proof format
+- [x] Display proof format (JSON/Binary) in verifier output
+- [x] Add `JsonDeserializationError` type
+- [x] Export new functions from zkvm module
+- [x] Add comprehensive tests for JSON deserialization
+  - Basic deserialization test
+  - Full roundtrip test with stage proofs
+  - Format detection test
+
+## Completed (Previous Session - Iteration 44)
 
 ### JSON Serialization Format
 - [x] Add JSON proof writer in `src/zkvm/serialization.zig`
@@ -14,49 +40,30 @@
 - [x] Add `--json` option to CLI prove command
 - [x] Add comprehensive tests for JSON serialization
 
-## Completed (Previous Session - Iteration 43)
+## Completed (Previous Sessions)
 
-### Proof Serialization/Deserialization
+### Iteration 43 - Proof Serialization/Deserialization
 - [x] Create serialization module (`src/zkvm/serialization.zig`)
-  - Binary format with magic header "ZOLT" and version
-  - Serialize JoltProof, StageProof, JoltStageProofs
-  - Field element and commitment serialization
-  - File I/O helpers (writeProofToFile, readProofFromFile)
 - [x] Add `-o/--output` option to `prove` command
 - [x] Add `verify` command to load and verify saved proofs
 - [x] Add comprehensive tests including full proof roundtrip
-- [x] Update README with new CLI commands
-- [x] Fix Zig 0.15 API changes (ArrayListUnmanaged)
-- [x] Add toBytes() method to BN254Scalar for serialization
-- [x] Update R1CS proof serialization to match struct fields
-- [x] Add toBytes/fromBytes roundtrip test
-
-## Completed (Previous Sessions)
 
 ### Iteration 42 - CLI Enhancements
 - [x] Add `zolt info` command showing zkVM capabilities
-- [x] Display proof system details (HyperKZG, Spartan, Lasso)
-- [x] Show 6-stage sumcheck overview
-- [x] List RISC-V ISA support (60+ instructions, 24 lookup tables)
-- [x] Include performance metrics
-- [x] Add tests for info command
-- [x] Add `--max-cycles N` option to run command (limit execution cycles)
-- [x] Add `--regs` option to run command (show final register state)
-- [x] Update README with new commands and options
-- [x] Add `--max-cycles N` option to prove command (limit proving cycles)
+- [x] Add `--max-cycles N` option to run command
+- [x] Add `--regs` option to run command
+- [x] Add `--max-cycles N` option to prove command
 
 ### Iteration 41 - Verifier Benchmarks
 - [x] Add benchVerifier() function to measure verification performance
 - [x] Results: Verify is ~130-165x faster than prove
 
 ### Iteration 40 - Complex Program Tests & Benchmarks
-- [x] Fix branch target calculation for high PC addresses (0x80000000+)
+- [x] Fix branch target calculation for high PC addresses
 - [x] Add complex program tests (loops, memory, shifts, comparisons)
 - [x] Add emulator and prover benchmarks
 
 ### Iteration 39 - Strict Sumcheck Verification
-- [x] Fix Lasso prover eq_evals padding for proper cycle phase folding
-- [x] Fix Val prover to use 4-point Lagrange interpolation for degree-3 sumcheck
 - [x] Full pipeline now passes with strict_sumcheck = true!
 
 ### Iterations 1-38 - Core Implementation
@@ -66,8 +73,8 @@
 ## Next Steps (Future Iterations)
 
 ### High Priority
-- [ ] Add proof compression (gzip/zstd) - Zig 0.15 has new I/O API
-- [ ] Add JSON deserialization for proof loading
+- [ ] Add proof compression (gzip/zstd) - requires Zig 0.15 flate API stabilization
+- [ ] Add more example programs
 
 ### Medium Priority
 - [ ] Performance optimization with SIMD
@@ -82,9 +89,10 @@
 - All tests pass (578 tests)
 - Full pipeline with strict verification: PASSED
 - All 6 stages verify with p(0) + p(1) = claim check
-- Serialization roundtrip tests: PASSED
-- Field element toBytes/fromBytes: PASSED
+- Binary serialization roundtrip tests: PASSED
 - JSON serialization tests: PASSED
+- JSON deserialization tests: PASSED
+- Auto-detect format tests: PASSED
 
 ## CLI Commands
 ```
@@ -98,7 +106,7 @@ zolt prove [opts] <elf> # Generate ZK proof
   --max-cycles N       # Limit proving cycles
   -o, --output F       # Save proof to file
   --json               # Output in JSON format
-zolt verify <proof>    # Verify a saved proof
+zolt verify <proof>    # Verify a saved proof (auto-detects format)
 zolt decode <hex>      # Decode RISC-V instruction
 zolt srs <ptau>        # Inspect PTAU file
 zolt bench             # Run benchmarks

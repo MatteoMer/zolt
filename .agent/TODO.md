@@ -2,7 +2,7 @@
 
 ## Current Status (Jolt Compatibility Phase)
 
-**Project Status: CROSS-DESERIALIZATION VERIFIED - FULL VERIFICATION NEXT**
+**Project Status: STRUCTURE VERIFIED - POLYNOMIAL VALUES NEXT**
 
 ### Major Milestones Achieved
 
@@ -12,25 +12,46 @@
 4. ✅ **Dory Commitment** - GT (Fp12) serialization, IPA proof structure
 5. ✅ **Cross-Deserialization** - Jolt successfully deserializes Zolt proofs!
 6. ✅ **Univariate Skip Infrastructure** - Degree-27/12 polynomials for stages 1-2
+7. ✅ **UnivariateSkip Opening Claims** - Required claims now included
 
-### Latest Cross-Verification Test Results
+### Latest Verification Test Result
 
 ```
-$ cargo test -p jolt-core test_deserialize_zolt_proof -- --ignored --nocapture
+$ cargo test -p jolt-core test_verify_zolt_proof -- --ignored --nocapture
 
-Read 25999 bytes from Zolt proof
-Successfully deserialized Zolt proof!
-  Trace length: 8
-  RAM K: 65536
-  Bytecode K: 65536
-  Commitments: 5
-test zolt_compat_test::tests::test_deserialize_zolt_proof ... ok
+Loaded all files, attempting verification...
+  Proof trace length: 8
+  Proof commitments: 5
+Verifier created successfully, running verification...
+
+Verification failed: Stage 1 univariate skip first round
+Caused by: UniSkip first-round verification failed
 ```
 
-And debug format test:
-- ✅ 11 opening claims parsed with valid Fr elements
-- ✅ 5 GT (Dory) commitments valid
-- ✅ 23689 remaining bytes for sumcheck proofs
+### Analysis
+
+The proof structure is now fully correct:
+- ✅ Opening claims include UnivariateSkip for SpartanOuter and SpartanProductVirtualization
+- ✅ Polynomials have correct degrees (28 and 13 coefficients)
+- ❌ Polynomial *values* are placeholders (padded zeros), not actual constraint evaluations
+
+### What's Needed for Full Verification
+
+The univariate skip first-round polynomial requires computing:
+
+```
+s1(Y) = L(τ_high, Y) · t1(Y)
+```
+
+Where `t1(Y)` is computed by evaluating Az(x,y) · Bz(x,y) at extended domain points.
+
+Currently, Zolt's proof converter pads the original sumcheck polynomial coefficients to
+the required length, but doesn't compute the actual constraint values at extended points.
+
+To fix this:
+1. Port Jolt's constraint evaluation logic (Az, Bz for all 19 constraints)
+2. Evaluate constraints at extended domain points {-9, ..., 9}
+3. Use `buildUniskipFirstRoundPoly()` with actual evaluations
 
 ---
 
@@ -61,7 +82,7 @@ And debug format test:
 - [x] **Point Compression** - G1/G2 in arkworks format
 - [x] **Proof Serialization** - Matches ArkDoryProof format
 
-### 5. Univariate Skip Optimization ✅ COMPLETE
+### 5. Univariate Skip Optimization ✅ STRUCTURE COMPLETE
 
 - [x] **Constants** - Match Jolt's R1CS constraint structure
 - [x] **buildUniskipFirstRoundPoly()** - Polynomial construction
@@ -69,35 +90,17 @@ And debug format test:
 - [x] **Proof converter integration** - Generates proper-degree polynomials
 - [x] **Stage 1** - Degree-27 polynomial (28 coefficients)
 - [x] **Stage 2** - Degree-12 polynomial (13 coefficients)
+- [x] **Opening claims** - UnivariateSkip claims for both stages
+- [ ] **Extended evaluation** - Need actual Az·Bz evaluations at extended points
 
-### 6. Cross-Verification ✅ DESERIALIZATION VERIFIED
+### 6. Cross-Verification 🔄 PARTIAL
 
 - [x] **Jolt deserializes Zolt proofs** - VERIFIED WORKING
 - [x] **Config parameters correct** - trace=8, RAM_K=65536, Bytecode_K=65536
 - [x] **5 Dory commitments** - All valid GT elements
-- [x] **11 opening claims** - All valid Fr elements
+- [x] **13 opening claims** - All valid Fr elements (including UnivariateSkip)
 - [x] **UniSkip polynomial degrees** - 28/13 coefficients
-- [ ] **Full verification** - Next step: run full Jolt verifier
-
----
-
-## What's Required for Full Verification
-
-The serialization is complete and working. For full verification:
-
-1. **Generate Jolt preprocessing** (verifier preprocessing data)
-   ```bash
-   cd /path/to/jolt
-   cargo run --example fibonacci -- --save
-   ```
-
-2. **Generate IO device** (program I/O)
-   - Need matching I/O between Zolt and Jolt execution
-
-3. **Run full verification test**
-   ```bash
-   cargo test -p jolt-core test_verify_zolt_proof -- --ignored --nocapture
-   ```
+- [ ] **Full verification** - Fails at univariate skip polynomial check
 
 ---
 
@@ -112,11 +115,11 @@ Build Summary: 5/5 steps succeeded; 608/608 tests passed
 
 ### Cross-Verification Tests (Jolt)
 
-| Test | Status |
-|------|--------|
-| `test_deserialize_zolt_proof` | ✅ PASS |
-| `test_debug_zolt_format` | ✅ PASS |
-| `test_verify_zolt_proof` | 🔄 Needs preprocessing files |
+| Test | Status | Details |
+|------|--------|---------|
+| `test_deserialize_zolt_proof` | ✅ PASS | 26067 bytes, all fields valid |
+| `test_debug_zolt_format` | ✅ PASS | All claims and commitments valid |
+| `test_verify_zolt_proof` | ❌ FAIL | UniSkip first-round verification |
 
 ---
 
@@ -128,11 +131,11 @@ Build Summary: 5/5 steps succeeded; 608/608 tests passed
 | `src/transcripts/blake2b.zig` | ✅ Done | Blake2bTranscript |
 | `src/zkvm/jolt_types.zig` | ✅ Done | Jolt proof types |
 | `src/zkvm/jolt_serialization.zig` | ✅ Done | Arkworks serialization |
-| `src/zkvm/proof_converter.zig` | ✅ Done | 6→7 stage converter with UniSkip |
+| `src/zkvm/proof_converter.zig` | ✅ Done | 6→7 stage converter with UniSkip claims |
 | `src/zkvm/mod.zig` | ✅ Done | JoltProver |
 | `src/poly/commitment/dory.zig` | ✅ Done | Dory IPA |
 | `src/zkvm/r1cs/univariate_skip.zig` | ✅ Done | Univariate skip optimization |
-| `src/zkvm/spartan/outer.zig` | ✅ Done | Spartan outer prover |
+| `src/zkvm/spartan/outer.zig` | 🔄 In Progress | Needs extended evaluation |
 
 ---
 
@@ -144,12 +147,12 @@ Build Summary: 5/5 steps succeeded; 608/608 tests passed
 - Dory commitment scheme with GT serialization
 - All opening claims and commitments valid
 
-**Univariate Skip Goal: COMPLETE**
+**Univariate Skip Goal: STRUCTURE COMPLETE, VALUES PENDING**
 - Proper polynomial degrees (27 for stage 1, 12 for stage 2)
-- Infrastructure for extended domain evaluation
-- Integrated into proof converter
+- Opening claims correctly included
+- Need to compute actual constraint evaluations at extended points
 
 **Next Steps:**
-1. Generate Jolt preprocessing for verification
-2. Run full verification test
-3. Debug any sumcheck polynomial value mismatches
+1. Implement extended domain constraint evaluation (Az·Bz at {-9,...,9})
+2. Use actual evaluations in `buildUniskipFirstRoundPoly()`
+3. Re-run verification test

@@ -812,11 +812,29 @@ pub fn ProofConverter(comptime F: type) type {
             // Add Stage 1 opening claims with computed MLE evaluations
             if (stage1_result) |result| {
                 // The r_cycle point for R1CS input evaluation
-                // In Jolt, this is the reversed sumcheck challenges
+                // In Jolt, sumcheck_challenges = [r_stream, r_1, r_2, ..., r_n]
+                // For opening claims, r_cycle = challenges[1..] converted to BIG_ENDIAN
+                // This means: take [r_1, ..., r_n] and reverse to [r_n, ..., r_1]
+                const all_challenges = result.challenges.items;
+
+                // Skip the first challenge (r_stream) to get the cycle challenges
+                const cycle_challenges = if (all_challenges.len > 1)
+                    all_challenges[1..]
+                else
+                    all_challenges;
+
+                // Convert from LITTLE_ENDIAN (sumcheck order) to BIG_ENDIAN (MLE eval order)
+                // by reversing the challenges
+                const r_cycle_big_endian = try self.allocator.alloc(F, cycle_challenges.len);
+                defer self.allocator.free(r_cycle_big_endian);
+                for (0..cycle_challenges.len) |i| {
+                    r_cycle_big_endian[i] = cycle_challenges[cycle_challenges.len - 1 - i];
+                }
+
                 try self.addSpartanOuterOpeningClaimsWithEvaluations(
                     &jolt_proof.opening_claims,
                     cycle_witnesses,
-                    result.challenges.items,
+                    r_cycle_big_endian,
                 );
             } else {
                 // Fallback to zero claims

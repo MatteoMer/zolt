@@ -312,6 +312,91 @@ pub fn LagrangePolynomial(comptime F: type) type {
     };
 }
 
+/// Lagrange shift coefficients helper for integer domains
+/// Computes coefficients for evaluating a polynomial at shifted points
+/// using Lagrange interpolation.
+pub const LagrangeHelper = struct {
+    /// Generalized binomial coefficient for integer t and k >= 0.
+    /// Supports negative t via identity: C(t, k) = (-1)^k C(-t + k - 1, k).
+    pub fn generalizedBinomial(t: i64, k: usize) i128 {
+        if (k == 0) return 1;
+
+        if (t >= 0) {
+            const tt: i128 = @intCast(t);
+            if (@as(i128, @intCast(k)) > tt) return 0;
+
+            var num: i128 = 1;
+            var den: i128 = 1;
+            var j: usize = 0;
+            while (j < k) : (j += 1) {
+                num *= tt - @as(i128, @intCast(j));
+                den *= @as(i128, @intCast(j)) + 1;
+            }
+            return @divExact(num, den);
+        } else {
+            const sign: i128 = if ((k & 1) == 1) -1 else 1;
+            const tt: i128 = @as(i128, @intCast(-t)) + @as(i128, @intCast(k)) - 1;
+
+            var num: i128 = 1;
+            var den: i128 = 1;
+            var j: usize = 0;
+            while (j < k) : (j += 1) {
+                num *= tt - @as(i128, @intCast(j));
+                den *= @as(i128, @intCast(j)) + 1;
+            }
+            return sign * @divExact(num, den);
+        }
+    }
+
+    /// Lagrange shift coefficients for evaluating at integer `shift` from a window of length N.
+    /// Given base values p(0), p(1), ..., p(N-1), returns alphas such that:
+    /// p(shift) = sum_{i=0}^{N-1} alpha[i] * p(i)
+    ///
+    /// This matches Jolt's LagrangeHelper::shift_coeffs_i32
+    pub fn shiftCoeffsI32(comptime N: usize, shift: i64) [N]i32 {
+        var out: [N]i32 = undefined;
+        const n_minus_1: i64 = @as(i64, @intCast(N - 1));
+
+        for (0..N) |i| {
+            const s1 = generalizedBinomial(shift, i);
+            const s2 = generalizedBinomial(shift - @as(i64, @intCast(i)) - 1, (N - 1) - i);
+            const sign: i128 = if (((@as(usize, @intCast(n_minus_1)) - i) & 1) == 1) -1 else 1;
+            const val = sign * s1 * s2;
+            out[i] = @intCast(val);
+        }
+        return out;
+    }
+};
+
+// Precomputed constants for outer sumcheck univariate skip
+// These match Jolt's COEFFS_PER_J in evaluation.rs
+
+/// Uniskip targets for outer sumcheck
+pub const UNISKIP_TARGETS = uniskipTargets(OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE, OUTER_UNIVARIATE_SKIP_DEGREE);
+
+/// Base left index for outer univariate skip domain
+pub const BASE_LEFT: i64 = -@as(i64, @intCast((OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE - 1) / 2));
+
+/// Target shifts: UNISKIP_TARGETS[j] - BASE_LEFT
+pub const TARGET_SHIFTS: [OUTER_UNIVARIATE_SKIP_DEGREE]i64 = blk: {
+    var out: [OUTER_UNIVARIATE_SKIP_DEGREE]i64 = undefined;
+    for (0..OUTER_UNIVARIATE_SKIP_DEGREE) |j| {
+        out[j] = UNISKIP_TARGETS[j] - BASE_LEFT;
+    }
+    break :blk out;
+};
+
+/// Precomputed Lagrange coefficients for each extended target point j.
+/// COEFFS_PER_J[j] gives the weights for evaluating a polynomial at target point j
+/// from its evaluations at the base window indices {0, 1, ..., DOMAIN_SIZE-1}.
+pub const COEFFS_PER_J: [OUTER_UNIVARIATE_SKIP_DEGREE][OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE]i32 = blk: {
+    var out: [OUTER_UNIVARIATE_SKIP_DEGREE][OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE]i32 = undefined;
+    for (0..OUTER_UNIVARIATE_SKIP_DEGREE) |j| {
+        out[j] = LagrangeHelper.shiftCoeffsI32(OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE, TARGET_SHIFTS[j]);
+    }
+    break :blk out;
+};
+
 /// Build the uni-skip first-round polynomial s1 from base and extended evaluations.
 ///
 /// s1(Y) = L(tau_high, Y) * t1(Y)
@@ -515,4 +600,73 @@ test "constants match Jolt" {
     try std.testing.expectEqual(@as(usize, 9), PRODUCT_VIRTUAL_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE);
     try std.testing.expectEqual(@as(usize, 13), PRODUCT_VIRTUAL_FIRST_ROUND_POLY_NUM_COEFFS);
     try std.testing.expectEqual(@as(usize, 12), PRODUCT_VIRTUAL_FIRST_ROUND_POLY_DEGREE_BOUND);
+
+    // Verify BASE_LEFT
+    try std.testing.expectEqual(@as(i64, -4), BASE_LEFT);
+
+    // Verify UNISKIP_TARGETS
+    try std.testing.expectEqual(@as(i64, -5), UNISKIP_TARGETS[0]);
+    try std.testing.expectEqual(@as(i64, 6), UNISKIP_TARGETS[1]);
+
+    // Verify TARGET_SHIFTS (shift = target - BASE_LEFT = target + 4)
+    try std.testing.expectEqual(@as(i64, -1), TARGET_SHIFTS[0]); // -5 - (-4) = -1
+    try std.testing.expectEqual(@as(i64, 10), TARGET_SHIFTS[1]); // 6 - (-4) = 10
+}
+
+test "generalized binomial" {
+    // Standard binomial coefficients
+    try std.testing.expectEqual(@as(i128, 1), LagrangeHelper.generalizedBinomial(5, 0));
+    try std.testing.expectEqual(@as(i128, 5), LagrangeHelper.generalizedBinomial(5, 1));
+    try std.testing.expectEqual(@as(i128, 10), LagrangeHelper.generalizedBinomial(5, 2));
+    try std.testing.expectEqual(@as(i128, 10), LagrangeHelper.generalizedBinomial(5, 3));
+    try std.testing.expectEqual(@as(i128, 5), LagrangeHelper.generalizedBinomial(5, 4));
+    try std.testing.expectEqual(@as(i128, 1), LagrangeHelper.generalizedBinomial(5, 5));
+    try std.testing.expectEqual(@as(i128, 0), LagrangeHelper.generalizedBinomial(5, 6));
+
+    // Negative t: C(-1, k) = (-1)^k
+    try std.testing.expectEqual(@as(i128, 1), LagrangeHelper.generalizedBinomial(-1, 0));
+    try std.testing.expectEqual(@as(i128, -1), LagrangeHelper.generalizedBinomial(-1, 1));
+    try std.testing.expectEqual(@as(i128, 1), LagrangeHelper.generalizedBinomial(-1, 2));
+    try std.testing.expectEqual(@as(i128, -1), LagrangeHelper.generalizedBinomial(-1, 3));
+}
+
+test "shift_coeffs matches polynomial evaluation" {
+    const field = @import("../../field/mod.zig");
+    const F = field.BN254Scalar;
+
+    // p(x) = 2 - 3x + x^3
+    // Base values at {0, 1, 2, 3, 4, 5, 6}
+    const coeffs_poly = [_]i64{ 2, -3, 0, 1, 0, 0, 0 };
+
+    // Compute base values p(i) for i=0..6
+    var base_values: [7]F = undefined;
+    for (0..7) |i| {
+        var val: i64 = 0;
+        var xi: i64 = 1;
+        for (coeffs_poly) |c| {
+            val += c * xi;
+            xi *= @as(i64, @intCast(i));
+        }
+        if (val >= 0) {
+            base_values[i] = F.fromU64(@intCast(val));
+        } else {
+            base_values[i] = F.zero().sub(F.fromU64(@intCast(-val)));
+        }
+    }
+
+    // Test that shift coefficients give correct evaluation
+    // p(10) should equal sum of base_values[i] * shift_coeffs[i]
+    const shift_coeffs = LagrangeHelper.shiftCoeffsI32(7, 10);
+    var acc = F.zero();
+    for (0..7) |i| {
+        if (shift_coeffs[i] >= 0) {
+            acc = acc.add(base_values[i].mul(F.fromU64(@intCast(shift_coeffs[i]))));
+        } else {
+            acc = acc.sub(base_values[i].mul(F.fromU64(@intCast(-shift_coeffs[i]))));
+        }
+    }
+
+    // Compute p(10) directly: 2 - 30 + 1000 = 972
+    const expected = F.fromU64(972);
+    try std.testing.expect(acc.eql(expected));
 }

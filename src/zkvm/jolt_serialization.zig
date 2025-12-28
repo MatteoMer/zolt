@@ -1,0 +1,468 @@
+//! Jolt-Compatible Proof Serialization
+//!
+//! This module provides serialization that is byte-compatible with Jolt's
+//! arkworks-based serialization format.
+//!
+//! ## Key Differences from Zolt Native Format
+//!
+//! 1. **No Magic Header**: Jolt proofs have no "ZOLT" prefix
+//! 2. **usize as u64**: All lengths are serialized as 8-byte little-endian
+//! 3. **Field Elements**: 32 bytes little-endian (Montgomery form limbs)
+//! 4. **Compressed Points**: Arkworks compressed G1 format
+//! 5. **BTreeMap**: Length prefix + sorted key-value pairs
+//!
+//! Reference: jolt-core/src/zkvm/proof_serialization.rs
+
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+const jolt_types = @import("jolt_types.zig");
+
+/// Arkworks-compatible serializer
+pub fn ArkworksSerializer(comptime F: type) type {
+    return struct {
+        const Self = @This();
+
+        buffer: std.ArrayListUnmanaged(u8),
+        allocator: Allocator,
+
+        pub fn init(allocator: Allocator) Self {
+            return Self{
+                .buffer = .{},
+                .allocator = allocator,
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.buffer.deinit(self.allocator);
+        }
+
+        /// Get the serialized bytes (borrowed)
+        pub fn bytes(self: *const Self) []const u8 {
+            return self.buffer.items;
+        }
+
+        /// Get the serialized bytes (owned)
+        pub fn toOwnedSlice(self: *Self) ![]u8 {
+            return self.buffer.toOwnedSlice(self.allocator);
+        }
+
+        /// Write a usize as u64 little-endian (arkworks format)
+        pub fn writeUsize(self: *Self, value: usize) !void {
+            var buf: [8]u8 = undefined;
+            std.mem.writeInt(u64, &buf, @intCast(value), .little);
+            try self.buffer.appendSlice(self.allocator, &buf);
+        }
+
+        /// Write a u8
+        pub fn writeU8(self: *Self, value: u8) !void {
+            try self.buffer.append(self.allocator, value);
+        }
+
+        /// Write bytes directly
+        pub fn writeBytes(self: *Self, data: []const u8) !void {
+            try self.buffer.appendSlice(self.allocator, data);
+        }
+
+        /// Write a field element in arkworks format (32 bytes LE)
+        /// This matches `serialize_uncompressed` for BN254 Fr
+        pub fn writeFieldElement(self: *Self, scalar: F) !void {
+            var buf: [32]u8 = undefined;
+            // Write limbs in little-endian order
+            for (0..4) |i| {
+                std.mem.writeInt(u64, buf[i * 8 ..][0..8], scalar.limbs[i], .little);
+            }
+            try self.buffer.appendSlice(self.allocator, &buf);
+        }
+
+        /// Write a slice of field elements
+        pub fn writeFieldElements(self: *Self, scalars: []const F) !void {
+            for (scalars) |scalar| {
+                try self.writeFieldElement(scalar);
+            }
+        }
+
+        /// Write a Vec of field elements with length prefix
+        pub fn writeVecFieldElements(self: *Self, scalars: []const F) !void {
+            try self.writeUsize(scalars.len);
+            try self.writeFieldElements(scalars);
+        }
+
+        /// Write an optional field
+        pub fn writeOption(self: *Self, comptime T: type, opt: ?T, writeFn: *const fn (*Self, T) anyerror!void) !void {
+            if (opt) |value| {
+                try self.writeU8(1); // Some
+                try writeFn(self, value);
+            } else {
+                try self.writeU8(0); // None
+            }
+        }
+
+        /// Write a CompressedUniPoly
+        pub fn writeCompressedUniPoly(self: *Self, poly: *const jolt_types.CompressedUniPoly(F)) !void {
+            try self.writeUsize(poly.coeffs_except_linear_term.len);
+            try self.writeFieldElements(poly.coeffs_except_linear_term);
+        }
+
+        /// Write a SumcheckInstanceProof
+        pub fn writeSumcheckInstanceProof(self: *Self, proof: *const jolt_types.SumcheckInstanceProof(F)) !void {
+            try self.writeUsize(proof.compressed_polys.items.len);
+            for (proof.compressed_polys.items) |*poly| {
+                try self.writeCompressedUniPoly(poly);
+            }
+        }
+
+        /// Write a UniSkipFirstRoundProof
+        pub fn writeUniSkipFirstRoundProof(self: *Self, proof: *const jolt_types.UniSkipFirstRoundProof(F)) !void {
+            try self.writeUsize(proof.uni_poly.len);
+            try self.writeFieldElements(proof.uni_poly);
+        }
+
+        /// Write an OpeningId
+        pub fn writeOpeningId(self: *Self, id: jolt_types.OpeningId) !void {
+            switch (id) {
+                .UntrustedAdvice => |sumcheck_id| {
+                    try self.writeU8(jolt_types.OpeningId.UNTRUSTED_ADVICE_BASE + @intFromEnum(sumcheck_id));
+                },
+                .TrustedAdvice => |sumcheck_id| {
+                    try self.writeU8(jolt_types.OpeningId.TRUSTED_ADVICE_BASE + @intFromEnum(sumcheck_id));
+                },
+                .Committed => |c| {
+                    try self.writeU8(jolt_types.OpeningId.COMMITTED_BASE + @intFromEnum(c.sumcheck_id));
+                    switch (c.poly) {
+                        .RdInc => try self.writeU8(0),
+                        .RamInc => try self.writeU8(1),
+                        .InstructionRa => |i| {
+                            try self.writeU8(2);
+                            try self.writeU8(@truncate(i));
+                        },
+                        .BytecodeRa => |i| {
+                            try self.writeU8(3);
+                            try self.writeU8(@truncate(i));
+                        },
+                        .RamRa => |i| {
+                            try self.writeU8(4);
+                            try self.writeU8(@truncate(i));
+                        },
+                    }
+                },
+                .Virtual => |v| {
+                    try self.writeU8(jolt_types.OpeningId.VIRTUAL_BASE + @intFromEnum(v.sumcheck_id));
+                    try v.poly.serialize(self);
+                },
+            }
+        }
+
+        /// Write OpeningClaims (BTreeMap format)
+        pub fn writeOpeningClaims(self: *Self, claims: *const jolt_types.OpeningClaims(F)) !void {
+            try self.writeUsize(claims.entries.items.len);
+            for (claims.entries.items) |entry| {
+                try self.writeOpeningId(entry.id);
+                try self.writeFieldElement(entry.claim);
+            }
+        }
+
+        /// Write a complete JoltProof
+        pub fn writeJoltProof(
+            self: *Self,
+            comptime Commitment: type,
+            comptime Proof: type,
+            proof: *const jolt_types.JoltProof(F, Commitment, Proof),
+            writeCommitment: *const fn (*Self, Commitment) anyerror!void,
+            writeProof: *const fn (*Self, Proof) anyerror!void,
+        ) !void {
+            // 1. Opening claims
+            try self.writeOpeningClaims(&proof.opening_claims);
+
+            // 2. Commitments
+            try self.writeUsize(proof.commitments.items.len);
+            for (proof.commitments.items) |commitment| {
+                try writeCommitment(self, commitment);
+            }
+
+            // 3. Stage 1
+            if (proof.stage1_uni_skip_first_round_proof) |*p| {
+                try self.writeUniSkipFirstRoundProof(p);
+            }
+            try self.writeSumcheckInstanceProof(&proof.stage1_sumcheck_proof);
+
+            // 4. Stage 2
+            if (proof.stage2_uni_skip_first_round_proof) |*p| {
+                try self.writeUniSkipFirstRoundProof(p);
+            }
+            try self.writeSumcheckInstanceProof(&proof.stage2_sumcheck_proof);
+
+            // 5. Stages 3-7
+            try self.writeSumcheckInstanceProof(&proof.stage3_sumcheck_proof);
+            try self.writeSumcheckInstanceProof(&proof.stage4_sumcheck_proof);
+            try self.writeSumcheckInstanceProof(&proof.stage5_sumcheck_proof);
+            try self.writeSumcheckInstanceProof(&proof.stage6_sumcheck_proof);
+            try self.writeSumcheckInstanceProof(&proof.stage7_sumcheck_proof);
+
+            // 6. Joint opening proof
+            if (proof.joint_opening_proof) |p| {
+                try writeProof(self, p);
+            }
+
+            // 7. Advice proofs (all optional)
+            if (proof.trusted_advice_val_evaluation_proof) |p| {
+                try self.writeU8(1);
+                try writeProof(self, p);
+            } else {
+                try self.writeU8(0);
+            }
+
+            if (proof.trusted_advice_val_final_proof) |p| {
+                try self.writeU8(1);
+                try writeProof(self, p);
+            } else {
+                try self.writeU8(0);
+            }
+
+            if (proof.untrusted_advice_val_evaluation_proof) |p| {
+                try self.writeU8(1);
+                try writeProof(self, p);
+            } else {
+                try self.writeU8(0);
+            }
+
+            if (proof.untrusted_advice_val_final_proof) |p| {
+                try self.writeU8(1);
+                try writeProof(self, p);
+            } else {
+                try self.writeU8(0);
+            }
+
+            if (proof.untrusted_advice_commitment) |c| {
+                try self.writeU8(1);
+                try writeCommitment(self, c);
+            } else {
+                try self.writeU8(0);
+            }
+
+            // 8. Configuration
+            try self.writeUsize(proof.trace_length);
+            try self.writeUsize(proof.ram_K);
+            try self.writeUsize(proof.bytecode_K);
+            try self.writeUsize(proof.log_k_chunk);
+            try self.writeUsize(proof.lookups_ra_virtual_log_k_chunk);
+        }
+    };
+}
+
+/// Arkworks-compatible deserializer
+pub fn ArkworksDeserializer(comptime F: type) type {
+    return struct {
+        const Self = @This();
+
+        data: []const u8,
+        pos: usize,
+
+        pub fn init(data: []const u8) Self {
+            return Self{
+                .data = data,
+                .pos = 0,
+            };
+        }
+
+        /// Read a usize from u64 little-endian
+        pub fn readUsize(self: *Self) !usize {
+            if (self.pos + 8 > self.data.len) return error.UnexpectedEof;
+            const value = std.mem.readInt(u64, self.data[self.pos..][0..8], .little);
+            self.pos += 8;
+            return @intCast(value);
+        }
+
+        /// Read a u8
+        pub fn readU8(self: *Self) !u8 {
+            if (self.pos >= self.data.len) return error.UnexpectedEof;
+            const value = self.data[self.pos];
+            self.pos += 1;
+            return value;
+        }
+
+        /// Read bytes
+        pub fn readBytes(self: *Self, len: usize) ![]const u8 {
+            if (self.pos + len > self.data.len) return error.UnexpectedEof;
+            const result = self.data[self.pos..][0..len];
+            self.pos += len;
+            return result;
+        }
+
+        /// Read a field element from arkworks format (32 bytes LE)
+        pub fn readFieldElement(self: *Self) !F {
+            const bytes = try self.readBytes(32);
+            var limbs: [4]u64 = undefined;
+            for (0..4) |i| {
+                limbs[i] = std.mem.readInt(u64, bytes[i * 8 ..][0..8], .little);
+            }
+            return F{ .limbs = limbs };
+        }
+
+        /// Read a Vec of field elements
+        pub fn readVecFieldElements(self: *Self, allocator: Allocator) ![]F {
+            const len = try self.readUsize();
+            const result = try allocator.alloc(F, len);
+            errdefer allocator.free(result);
+
+            for (0..len) |i| {
+                result[i] = try self.readFieldElement();
+            }
+            return result;
+        }
+
+        /// Read a SumcheckInstanceProof
+        pub fn readSumcheckInstanceProof(self: *Self, allocator: Allocator) !jolt_types.SumcheckInstanceProof(F) {
+            var proof = jolt_types.SumcheckInstanceProof(F).init(allocator);
+            errdefer proof.deinit();
+
+            const num_polys = try self.readUsize();
+            for (0..num_polys) |_| {
+                const coeffs = try self.readVecFieldElements(allocator);
+                defer allocator.free(coeffs);
+                try proof.addRoundPoly(coeffs);
+            }
+
+            return proof;
+        }
+
+        /// Read a UniSkipFirstRoundProof
+        pub fn readUniSkipFirstRoundProof(self: *Self, allocator: Allocator) !jolt_types.UniSkipFirstRoundProof(F) {
+            const coeffs = try self.readVecFieldElements(allocator);
+            return jolt_types.UniSkipFirstRoundProof(F){
+                .uni_poly = coeffs,
+                .allocator = allocator,
+            };
+        }
+    };
+}
+
+/// Write a proof to a file in Jolt-compatible format
+pub fn writeJoltProofToFile(
+    comptime F: type,
+    comptime Commitment: type,
+    comptime Proof: type,
+    proof: *const jolt_types.JoltProof(F, Commitment, Proof),
+    path: []const u8,
+    allocator: Allocator,
+    writeCommitment: *const fn (*ArkworksSerializer(F), Commitment) anyerror!void,
+    writeProof: *const fn (*ArkworksSerializer(F), Proof) anyerror!void,
+) !void {
+    var serializer = ArkworksSerializer(F).init(allocator);
+    defer serializer.deinit();
+
+    try serializer.writeJoltProof(Commitment, Proof, proof, writeCommitment, writeProof);
+
+    const file = try std.fs.cwd().createFile(path, .{});
+    defer file.close();
+
+    try file.writeAll(serializer.bytes());
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+const testing = std.testing;
+const BN254Scalar = @import("../field/mod.zig").BN254Scalar;
+
+test "arkworks serializer: field element format" {
+    var serializer = ArkworksSerializer(BN254Scalar).init(testing.allocator);
+    defer serializer.deinit();
+
+    // Test with value 42
+    const scalar = BN254Scalar.fromU64(42);
+    try serializer.writeFieldElement(scalar);
+
+    // Should be 32 bytes
+    try testing.expectEqual(@as(usize, 32), serializer.bytes().len);
+
+    // First 8 bytes should contain 42 in little-endian
+    // (since 42 fits in the first limb)
+    const first_limb = std.mem.readInt(u64, serializer.bytes()[0..8], .little);
+    // The scalar is in Montgomery form, so we need to check the actual value
+    try testing.expectEqual(scalar.limbs[0], first_limb);
+}
+
+test "arkworks serializer: usize as u64" {
+    var serializer = ArkworksSerializer(BN254Scalar).init(testing.allocator);
+    defer serializer.deinit();
+
+    try serializer.writeUsize(1234567890);
+
+    try testing.expectEqual(@as(usize, 8), serializer.bytes().len);
+
+    const value = std.mem.readInt(u64, serializer.bytes()[0..8], .little);
+    try testing.expectEqual(@as(u64, 1234567890), value);
+}
+
+test "arkworks deserializer: roundtrip" {
+    var serializer = ArkworksSerializer(BN254Scalar).init(testing.allocator);
+    defer serializer.deinit();
+
+    const original = BN254Scalar.fromU64(0xDEADBEEF);
+    try serializer.writeFieldElement(original);
+
+    var deserializer = ArkworksDeserializer(BN254Scalar).init(serializer.bytes());
+    const decoded = try deserializer.readFieldElement();
+
+    try testing.expect(original.eql(decoded));
+}
+
+test "arkworks serializer: sumcheck instance proof" {
+    const Proof = jolt_types.SumcheckInstanceProof(BN254Scalar);
+    var proof = Proof.init(testing.allocator);
+    defer proof.deinit();
+
+    const coeffs = [_]BN254Scalar{
+        BN254Scalar.fromU64(1),
+        BN254Scalar.fromU64(2),
+        BN254Scalar.fromU64(3),
+    };
+    try proof.addRoundPoly(&coeffs);
+    try proof.addRoundPoly(&coeffs);
+
+    var serializer = ArkworksSerializer(BN254Scalar).init(testing.allocator);
+    defer serializer.deinit();
+
+    try serializer.writeSumcheckInstanceProof(&proof);
+
+    // Expected: 8 (num_polys) + 2 * (8 (len) + 3 * 32 (coeffs)) = 8 + 2 * 104 = 216
+    try testing.expectEqual(@as(usize, 216), serializer.bytes().len);
+}
+
+test "arkworks serializer: opening claims" {
+    const Claims = jolt_types.OpeningClaims(BN254Scalar);
+    var claims = Claims.init(testing.allocator);
+    defer claims.deinit();
+
+    try claims.insert(.{ .UntrustedAdvice = .SpartanOuter }, BN254Scalar.fromU64(100));
+    try claims.insert(.{ .TrustedAdvice = .RamValEvaluation }, BN254Scalar.fromU64(200));
+
+    var serializer = ArkworksSerializer(BN254Scalar).init(testing.allocator);
+    defer serializer.deinit();
+
+    try serializer.writeOpeningClaims(&claims);
+
+    // Expected: 8 (len) + 2 * (1 (id) + 32 (claim)) = 8 + 66 = 74
+    try testing.expectEqual(@as(usize, 74), serializer.bytes().len);
+}
+
+test "arkworks serializer: uni skip first round proof" {
+    const coeffs = [_]BN254Scalar{
+        BN254Scalar.fromU64(1),
+        BN254Scalar.fromU64(2),
+        BN254Scalar.fromU64(3),
+        BN254Scalar.fromU64(4),
+    };
+
+    var proof = try jolt_types.UniSkipFirstRoundProof(BN254Scalar).init(testing.allocator, &coeffs);
+    defer proof.deinit();
+
+    var serializer = ArkworksSerializer(BN254Scalar).init(testing.allocator);
+    defer serializer.deinit();
+
+    try serializer.writeUniSkipFirstRoundProof(&proof);
+
+    // Expected: 8 (len) + 4 * 32 (coeffs) = 136
+    try testing.expectEqual(@as(usize, 136), serializer.bytes().len);
+}

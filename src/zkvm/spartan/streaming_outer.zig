@@ -74,15 +74,40 @@ pub fn StreamingOuterProver(comptime F: type) type {
         /// Allocator
         allocator: Allocator,
 
-        /// Initialize the streaming outer prover
+        /// Initialize the streaming outer prover (without scaling)
         ///
-        /// tau: Challenge vector of length (num_cycle_vars + 1)
-        ///      - tau[0]: high bit challenge (constraint group selector)
-        ///      - tau[1..]: cycle variable challenges
+        /// tau_low: Challenge vector of length (num_cycle_vars + 1)
+        ///          - tau_low[0..num_cycle_vars]: cycle variable challenges
+        ///          - tau_low[num_cycle_vars]: streaming round challenge
+        ///
+        /// Note: This is tau_low = tau[..tau.len()-1], excluding tau_high.
+        /// tau_high is handled by the UniSkip Lagrange kernel.
         pub fn init(
             allocator: Allocator,
             cycle_witnesses: []const constraints.R1CSCycleInputs(F),
-            tau: []const F,
+            tau_low: []const F,
+        ) !Self {
+            return initWithScaling(allocator, cycle_witnesses, tau_low, null);
+        }
+
+        /// Initialize the streaming outer prover with Lagrange kernel scaling
+        ///
+        /// tau_low: Challenge vector of length (num_cycle_vars + 1)
+        ///          - tau_low[0..num_cycle_vars]: cycle variable challenges
+        ///          - tau_low[num_cycle_vars]: streaming round challenge
+        ///
+        /// lagrange_tau_r0: The Lagrange kernel L(r0, tau_high) from UniSkip
+        ///                  This is multiplied into all eq evaluations.
+        ///
+        /// In Jolt, the full eq factorization is:
+        ///   eq(tau, r) = L(tau_high, r0) * eq(tau_low, r_tail)
+        ///
+        /// where r = (r0, r_tail) and tau = (tau_low, tau_high).
+        pub fn initWithScaling(
+            allocator: Allocator,
+            cycle_witnesses: []const constraints.R1CSCycleInputs(F),
+            tau_low: []const F,
+            lagrange_tau_r0: ?F,
         ) !Self {
             const num_cycles = cycle_witnesses.len;
             if (num_cycles == 0) {
@@ -93,10 +118,11 @@ pub fn StreamingOuterProver(comptime F: type) type {
             const padded_len = nextPowerOfTwo(num_cycles);
             const num_cycle_vars = std.math.log2_int(usize, padded_len);
 
-            // tau should have length = 1 (uniskip) + num_cycle_vars
-            // For now, we'll use a simplified model with just cycle vars
-            const num_x_in = 1; // One bit for constraint group selector
-            const split_eq = try GruenSplitEqPolynomial(F).init(allocator, tau, num_x_in);
+            // tau_low should have length = num_cycle_vars + 1
+            // - First num_cycle_vars elements are cycle variable challenges
+            // - Last element is the streaming round challenge
+            const num_x_in = 1; // One bit for constraint group selector (streaming round)
+            const split_eq = try GruenSplitEqPolynomial(F).initWithScaling(allocator, tau_low, num_x_in, lagrange_tau_r0);
 
             return Self{
                 .cycle_witnesses = cycle_witnesses,
@@ -444,7 +470,13 @@ pub fn StreamingOuterProver(comptime F: type) type {
         ///
         /// The uni_skip_claim parameter is uni_poly(r0), the evaluation of the
         /// univariate skip polynomial at the first-round challenge.
+        ///
+        /// IMPORTANT: r0 is NOT bound in split_eq! In Jolt, r0's contribution is:
+        /// 1. Pre-multiplied into current_scalar via L(tau_high, r0) at initialization
+        /// 2. Used to compute Lagrange weights for Az/Bz evaluation
+        /// The split_eq only binds the streaming round and cycle round challenges.
         pub fn bindFirstRoundChallenge(self: *Self, r0: F, uni_skip_claim: F) !void {
+            // Note: r0 is added to challenges for transcript consistency, but NOT bound in split_eq
             try self.challenges.append(self.allocator, r0);
             self.current_round = 1;
             self.current_claim = uni_skip_claim;
@@ -452,8 +484,9 @@ pub fn StreamingOuterProver(comptime F: type) type {
             // Compute Lagrange basis evaluations at r0 for use in remaining rounds
             self.computeLagrangeEvalsAtR0(r0);
 
-            // Bind in split eq
-            self.split_eq.bind(r0);
+            // DO NOT bind r0 in split_eq! The Lagrange kernel scaling was already
+            // applied during initialization. The streaming round will bind the first
+            // actual sumcheck challenge.
         }
 
         /// Compute Lagrange basis evaluations at r0
@@ -506,12 +539,20 @@ pub fn StreamingOuterProver(comptime F: type) type {
         /// There are two types of rounds:
         /// 1. Streaming round (current_round == 1): Sums over constraint groups
         /// 2. Cycle rounds (current_round > 1): Sums over cycle halves using combined Az*Bz
+        ///
+        /// IMPORTANT: The eq weights for cycles use a FACTORIZED representation:
+        ///   eq_val[i] = E_out[i / E_in.len] * E_in[i % E_in.len]
+        /// This allows us to handle 1024 cycles with only 32+32=64 precomputed values.
         pub fn computeRemainingRoundPoly(self: *Self) ![4]F {
-            // Get eq tables for this window
+            // Get eq tables for this window - uses Jolt's factorized split eq approach
             const eq_tables = self.split_eq.getWindowEqTables(
                 self.num_cycle_vars - self.current_round + 1,
                 1,
             );
+
+            const E_out = eq_tables.E_out;
+            const E_in = eq_tables.E_in;
+            const e_in_len = E_in.len;
 
             var t_zero = F.zero();
             var t_one = F.zero();
@@ -520,8 +561,16 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 // STREAMING ROUND: Sum over constraint groups
                 // t'(0) = Σ_cycles eq(τ, x) * Az_g0(x) * Bz_g0(x)
                 // t'(1) = Σ_cycles eq(τ, x) * Az_g1(x) * Bz_g1(x)
+                //
+                // The eq weights are factorized: eq[i] = E_out[i / e_in_len] * E_in[i % e_in_len]
                 for (0..@min(self.padded_trace_len, self.cycle_witnesses.len)) |i| {
-                    const eq_val = if (i < eq_tables.E_out.len) eq_tables.E_out[i] else F.zero();
+                    // Factorized eq weight
+                    const out_idx = i / e_in_len;
+                    const in_idx = i % e_in_len;
+                    const e_out_val = if (out_idx < E_out.len) E_out[out_idx] else F.zero();
+                    const e_in_val = if (in_idx < E_in.len) E_in[in_idx] else F.zero();
+                    const eq_val = e_out_val.mul(e_in_val);
+
                     const az_bz_g0 = self.computeCycleAzBzProductForGroup(&self.cycle_witnesses[i], 0);
                     const az_bz_g1 = self.computeCycleAzBzProductForGroup(&self.cycle_witnesses[i], 1);
                     t_zero = t_zero.add(eq_val.mul(az_bz_g0));
@@ -536,7 +585,13 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
                 // t'(0) = sum over first half (current cycle variable = 0)
                 for (0..@min(half, self.cycle_witnesses.len)) |i| {
-                    const eq_val = if (i < eq_tables.E_out.len) eq_tables.E_out[i] else F.zero();
+                    // Factorized eq weight
+                    const out_idx = i / e_in_len;
+                    const in_idx = i % e_in_len;
+                    const e_out_val = if (out_idx < E_out.len) E_out[out_idx] else F.zero();
+                    const e_in_val = if (in_idx < E_in.len) E_in[in_idx] else F.zero();
+                    const eq_val = e_out_val.mul(e_in_val);
+
                     const az_bz = self.computeCycleAzBzProductCombined(&self.cycle_witnesses[i], r_stream);
                     t_zero = t_zero.add(eq_val.mul(az_bz));
                 }
@@ -545,16 +600,27 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 for (0..@min(half, self.cycle_witnesses.len -| half)) |i| {
                     const cycle_idx = half + i;
                     if (cycle_idx < self.cycle_witnesses.len) {
-                        const eq_idx = if (cycle_idx < self.padded_trace_len) cycle_idx else 0;
-                        const eq_val = if (eq_idx < eq_tables.E_out.len) eq_tables.E_out[eq_idx] else F.zero();
+                        // Factorized eq weight - use position i within half
+                        const out_idx = i / e_in_len;
+                        const in_idx = i % e_in_len;
+                        const e_out_val = if (out_idx < E_out.len) E_out[out_idx] else F.zero();
+                        const e_in_val = if (in_idx < E_in.len) E_in[in_idx] else F.zero();
+                        const eq_val = e_out_val.mul(e_in_val);
+
                         const az_bz = self.computeCycleAzBzProductCombined(&self.cycle_witnesses[cycle_idx], r_stream);
                         t_one = t_one.add(eq_val.mul(az_bz));
                     }
                 }
             }
 
-            // t'(∞) = t'(1) - t'(0) (slope)
-            const t_infinity = t_one.sub(t_zero);
+            // For the streaming round, q(X) is LINEAR (selecting between 2 groups)
+            // so the quadratic coefficient is 0.
+            // For cycle rounds, we need the multiquadratic method to compute the
+            // correct quadratic coefficient from the product of slopes.
+            //
+            // The streaming round has t'(∞) = 0 because there's no quadratic term
+            // in the constraint group selection.
+            const t_infinity = if (self.current_round == 1) F.zero() else t_one.sub(t_zero);
 
             // Use Gruen's method to compute the cubic round polynomial
             const previous_claim = self.current_claim;
@@ -717,6 +783,9 @@ pub fn StreamingOuterProver(comptime F: type) type {
         /// 2. Expand each to multiquadratic (f(∞) = f(1) - f(0))
         /// 3. Multiply pointwise to get Az*Bz on multiquadratic grid
         /// 4. Sum with eq weights to get t'(0) and t'(∞)
+        ///
+        /// IMPORTANT: The eq weights for cycles use a FACTORIZED representation:
+        ///   eq_val[i] = E_out[i / E_in.len] * E_in[i % E_in.len]
         pub fn computeRemainingRoundPolyMultiquadratic(self: *Self) ![4]F {
             const r_stream = self.r_stream orelse F.zero();
 
@@ -725,6 +794,10 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 self.num_cycle_vars - self.current_round + 1,
                 1,
             );
+
+            const E_out = eq_tables.E_out;
+            const E_in = eq_tables.E_in;
+            const e_in_len = E_in.len;
 
             // We're summing over cycles: the current variable selects first/second half
             const half: usize = self.padded_trace_len >> @intCast(self.current_round);
@@ -748,7 +821,13 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
             // First half (current variable = 0)
             for (0..@min(half, self.cycle_witnesses.len)) |i| {
-                const eq_val = if (i < eq_tables.E_out.len) eq_tables.E_out[i] else F.zero();
+                // Factorized eq weight
+                const out_idx = i / e_in_len;
+                const in_idx = i % e_in_len;
+                const e_out_val = if (out_idx < E_out.len) E_out[out_idx] else F.zero();
+                const e_in_val = if (in_idx < E_in.len) E_in[in_idx] else F.zero();
+                const eq_val = e_out_val.mul(e_in_val);
+
                 const az_bz = self.computeCycleAzBzSeparate(&self.cycle_witnesses[i], r_stream);
                 t_00 = t_00.add(eq_val.mul(az_bz.az.mul(az_bz.bz)));
             }
@@ -758,8 +837,13 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 const cycle_idx = half + i;
                 if (cycle_idx >= self.cycle_witnesses.len) continue;
 
-                const eq_idx = i; // Index in eq table for second half
-                const eq_val = if (eq_idx < eq_tables.E_out.len) eq_tables.E_out[eq_idx] else F.zero();
+                // Factorized eq weight - use position i within half
+                const out_idx = i / e_in_len;
+                const in_idx = i % e_in_len;
+                const e_out_val = if (out_idx < E_out.len) E_out[out_idx] else F.zero();
+                const e_in_val = if (in_idx < E_in.len) E_in[in_idx] else F.zero();
+                const eq_val = e_out_val.mul(e_in_val);
+
                 const az_bz = self.computeCycleAzBzSeparate(&self.cycle_witnesses[cycle_idx], r_stream);
                 t_01 = t_01.add(eq_val.mul(az_bz.az.mul(az_bz.bz)));
             }
@@ -772,7 +856,12 @@ pub fn StreamingOuterProver(comptime F: type) type {
             // The quadratic coefficient is Az_slope * Bz_slope
             // We need to sum this weighted by eq
             for (0..@min(half, self.cycle_witnesses.len)) |i| {
-                const eq_val = if (i < eq_tables.E_out.len) eq_tables.E_out[i] else F.zero();
+                // Factorized eq weight
+                const out_idx = i / e_in_len;
+                const in_idx = i % e_in_len;
+                const e_out_val = if (out_idx < E_out.len) E_out[out_idx] else F.zero();
+                const e_in_val = if (in_idx < E_in.len) E_in[in_idx] else F.zero();
+                const eq_val = e_out_val.mul(e_in_val);
 
                 // Get Az and Bz at positions 0 and 1 (in terms of the current variable)
                 const az_bz_0 = self.computeCycleAzBzSeparate(&self.cycle_witnesses[i], r_stream);
@@ -822,15 +911,21 @@ pub fn StreamingOuterProver(comptime F: type) type {
         }
 
         /// Update the current claim after a round
+        ///
+        /// round_poly contains evaluations [s(0), s(1), s(2), s(3)], NOT coefficients.
+        /// We need to first convert to coefficients, then evaluate at challenge.
         pub fn updateClaim(self: *Self, round_poly: [4]F, challenge: F) void {
-            // Evaluate round polynomial at challenge using Horner's method
-            // s(r) = coeffs[0] + r * (coeffs[1] + r * (coeffs[2] + r * coeffs[3]))
-            self.current_claim = round_poly[0]
+            // Convert evaluations to coefficients via Lagrange interpolation
+            const coeffs = poly_mod.UniPoly(F).interpolateDegree3(round_poly);
+
+            // Now evaluate the polynomial at challenge using Horner's method
+            // s(r) = c0 + r * (c1 + r * (c2 + r * c3))
+            self.current_claim = coeffs[0]
                 .add(challenge.mul(
-                round_poly[1]
+                coeffs[1]
                     .add(challenge.mul(
-                    round_poly[2]
-                        .add(challenge.mul(round_poly[3])),
+                    coeffs[2]
+                        .add(challenge.mul(coeffs[3])),
                 )),
             ));
         }

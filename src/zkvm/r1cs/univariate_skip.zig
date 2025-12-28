@@ -226,6 +226,31 @@ pub fn LagrangePolynomial(comptime F: type) type {
             return result;
         }
 
+        /// Compute the Lagrange kernel K(x, y) = Σ_i L_i(x) · L_i(y)
+        ///
+        /// This is the univariate analogue of the eq polynomial for multilinear.
+        /// At grid nodes, K(node_i, node_j) = δ_{i,j} (Kronecker delta).
+        /// For off-grid points, it provides the barycentric kernel value.
+        ///
+        /// This matches Jolt's LagrangePolynomial::lagrange_kernel.
+        pub fn lagrangeKernel(comptime DOMAIN_SIZE: usize, x: F, y: F, allocator: Allocator) !F {
+            // Compute L_i(x) for all i
+            const evals_x = try evals(DOMAIN_SIZE, x, allocator);
+            defer allocator.free(evals_x);
+
+            // Compute L_i(y) for all i
+            const evals_y = try evals(DOMAIN_SIZE, y, allocator);
+            defer allocator.free(evals_y);
+
+            // Dot product: K(x,y) = Σ_i L_i(x) · L_i(y)
+            var result = F.zero();
+            for (0..DOMAIN_SIZE) |i| {
+                result = result.add(evals_x[i].mul(evals_y[i]));
+            }
+
+            return result;
+        }
+
         /// Interpolate polynomial coefficients from evaluations on symmetric domain
         /// Uses Lagrange interpolation
         pub fn interpolateCoeffs(comptime SIZE: usize, vals: []const F, allocator: Allocator) ![]F {

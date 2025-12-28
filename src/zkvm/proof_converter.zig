@@ -352,20 +352,20 @@ pub fn ProofConverter(comptime F: type) type {
             transcript: *Blake2bTranscript(F),
         ) !Stage1Result {
             const StreamingOuterProver = streaming_outer.StreamingOuterProver(F);
+            const LagrangePoly = r1cs.univariate_skip.LagrangePolynomial(F);
             var challenges: std.ArrayListUnmanaged(F) = .{};
 
-            // Initialize the streaming prover
-            var outer_prover = StreamingOuterProver.init(
-                self.allocator,
-                cycle_witnesses,
-                tau,
-            ) catch {
-                // Fallback to zero proofs if initialization fails
+            // Extract tau_low and tau_high
+            // tau has length num_rows_bits = num_cycle_vars + 2
+            // tau_high is the last element (for UniSkip Lagrange kernel)
+            // tau_low is everything else (for the streaming sumcheck)
+            if (tau.len < 2) {
                 const num_rounds = 1 + std.math.log2_int(usize, @max(1, cycle_witnesses.len));
                 try self.generateZeroSumcheckProof(proof, num_rounds, 3);
                 return Stage1Result{ .challenges = challenges, .r0 = F.zero(), .uni_skip_claim = F.zero(), .allocator = self.allocator };
-            };
-            defer outer_prover.deinit();
+            }
+            const tau_high = tau[tau.len - 1];
+            const tau_low = tau[0 .. tau.len - 1];
 
             // The first round was already processed by UniSkip
             // Append the UniSkip polynomial to transcript using UniPoly format:
@@ -378,6 +378,29 @@ pub fn ProofConverter(comptime F: type) type {
 
             // Get the challenge for the first round (r0)
             const r0 = transcript.challengeScalar();
+
+            // Compute the Lagrange kernel L(r0, tau_high) to use as initial scaling
+            // This matches Jolt's: lagrange_tau_r0 = LagrangePolynomial::lagrange_kernel(&r0, &tau_high)
+            const lagrange_tau_r0 = try LagrangePoly.lagrangeKernel(
+                r1cs.univariate_skip.OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE,
+                r0,
+                tau_high,
+                self.allocator,
+            );
+
+            // Initialize the streaming prover with tau_low and Lagrange kernel scaling
+            var outer_prover = StreamingOuterProver.initWithScaling(
+                self.allocator,
+                cycle_witnesses,
+                tau_low,
+                lagrange_tau_r0,
+            ) catch {
+                // Fallback to zero proofs if initialization fails
+                const num_rounds = 1 + std.math.log2_int(usize, @max(1, cycle_witnesses.len));
+                try self.generateZeroSumcheckProof(proof, num_rounds, 3);
+                return Stage1Result{ .challenges = challenges, .r0 = r0, .uni_skip_claim = F.zero(), .allocator = self.allocator };
+            };
+            defer outer_prover.deinit();
 
             // Compute the UnivariateSkip claim: evaluation of UniSkip polynomial at r0
             // Use evaluatePolyAtChallenge which handles the Jolt-format challenge [0, 0, low, high]

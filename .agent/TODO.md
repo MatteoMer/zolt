@@ -19,41 +19,50 @@
 
 ---
 
-## Current Status: Still Failing ❌
+## Current Status: Test Runs But Verification Fails ❌
 
-### Latest Values
+The Jolt cross-verification test runs without crashing, but **Stage 1 sumcheck verification fails**.
+
+### Latest Test Output (2024-12-28)
 
 ```
-output_claim (from sumcheck):    7413306969080172833518326335080771468018799697078015495953466550648276143147
-expected_output_claim (from R1CS): 12608356760442883687804722211164748832204938436522852816835407207687023899913
+Verification failed: Stage 1
+
+Caused by:
+    Sumcheck verification failed
+```
+
+Debug test shows:
+```
+output_claim (from sumcheck):      15494770952016151805100679853636026761384296060550815442753024133495164390908
+expected_output_claim (from R1CS): 1634089052370213054875543818155028295629058109509108648770993566620247586716
 Match: false
 ```
 
-The output_claim changed (was 11612...), indicating the multiquadratic computation is having an effect, but still not matching.
+### Next Priority: Debug Stage 1 Sumcheck Mismatch
 
-### Likely Issues
+The round polynomials are being generated but the final claim doesn't match what the verifier expects from R1CS evaluation.
 
-1. **Eq Weight Indexing**
-   - Currently indexing eq_tables.E_out by cycle index
-   - May need different indexing for first/second half
-
-2. **Streaming Round Handling**
-   - Round 0 uses old method (constraint group selection)
-   - May need special handling
-
-3. **Window Size**
-   - Jolt uses window-based streaming
-   - Current implementation processes one cycle at a time
+Likely areas to investigate:
+1. **Eq weight indexing** - How E_out is indexed for first/second half cycles
+2. **Streaming round (round 0)** - Uses `computeRemainingRoundPoly()`, cycle rounds use multiquadratic
+3. **Gruen split eq factorization** - May have subtle differences from Jolt's implementation
+4. **tau_low vs tau ordering** - Verify tau vector is constructed identically to Jolt
 
 ---
 
 ## Test Commands
 
 ```bash
-zig build test --summary all
+# Generate proof in Zolt
+cd /Users/matteo/projects/zolt
 zig build -Doptimize=ReleaseFast
-./zig-out/bin/zolt prove examples/sum.elf --jolt-format -o /tmp/zolt_proof_dory.bin
+./zig-out/bin/zolt prove examples/sum.elf --jolt-format --export-preprocessing /tmp/zolt_preprocessing.bin -o /tmp/zolt_proof_dory.bin
 
+# Run cross-verification in Jolt
 cd /Users/matteo/projects/jolt
+cargo test --package jolt-core test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
+
+# Run detailed debug test
 cargo test --package jolt-core test_debug_stage1_verification -- --ignored --nocapture
 ```

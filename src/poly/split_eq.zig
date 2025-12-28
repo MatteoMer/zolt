@@ -47,7 +47,43 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
         /// - τ_in: first num_x_in variables (constraint group)
         /// - τ_out: remaining variables (cycle index)
         pub fn init(allocator: Allocator, tau: []const F, num_x_in: usize) !Self {
-            const num_x_out = tau.len - num_x_in;
+            return initWithScaling(allocator, tau, num_x_in, null);
+        }
+
+        /// Initialize with challenge vector τ and an optional initial scaling factor
+        ///
+        /// Following Jolt's LowToHigh binding order:
+        /// - Skip the last element of τ (w_last)
+        /// - Split the rest into two halves: w_out (first half) and w_in (second half)
+        /// - E_out_vec contains eq tables for w_out
+        /// - E_in_vec contains eq tables for w_in
+        ///
+        /// The scaling_factor (e.g., Lagrange kernel from UniSkip) becomes the
+        /// initial current_scalar and is multiplied into all eq evaluations.
+        pub fn initWithScaling(allocator: Allocator, tau: []const F, num_x_in: usize, scaling_factor: ?F) !Self {
+            // Match Jolt's LowToHigh structure:
+            // tau = [w_out, w_in, w_last]
+            // w_out = first half of tau[0..tau.len-1]
+            // w_in = second half of tau[0..tau.len-1]
+            _ = num_x_in; // Ignored - we use Jolt's split
+
+            if (tau.len == 0) {
+                return Self{
+                    .current_index = 0,
+                    .current_scalar = scaling_factor orelse F.one(),
+                    .tau = &[_]F{},
+                    .E_out_vec = .{},
+                    .E_in_vec = .{},
+                    .num_x_out = 0,
+                    .num_x_in = 0,
+                    .allocator = allocator,
+                };
+            }
+
+            // Split like Jolt: m = len/2, skip last, split rest
+            const m = tau.len / 2;
+            const num_x_out = m; // First half
+            const num_x_in_actual = if (tau.len > 1) tau.len - 1 - m else 0; // Second half
 
             // Copy tau
             const tau_copy = try allocator.alloc(F, tau.len);
@@ -57,32 +93,8 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
             var E_in_vec: std.ArrayListUnmanaged([]F) = .{};
             var E_out_vec: std.ArrayListUnmanaged([]F) = .{};
 
-            // Build inner prefix tables (E_in_vec)
-            // E_in_vec[0] = [1] (empty eq is always 1)
-            try E_in_vec.append(allocator, try allocator.alloc(F, 1));
-            E_in_vec.items[0][0] = F.one();
-
-            for (0..num_x_in) |k| {
-                const prev_size: usize = @as(usize, 1) << @intCast(k);
-                const new_size: usize = prev_size * 2;
-                const prev = E_in_vec.items[k];
-                const next = try allocator.alloc(F, new_size);
-
-                const tau_k = tau_copy[k];
-                const one_minus_tau_k = F.one().sub(tau_k);
-
-                // eq(τ[0..k+1], (x, 0)) = eq(τ[0..k], x) * (1 - τ[k])
-                // eq(τ[0..k+1], (x, 1)) = eq(τ[0..k], x) * τ[k]
-                for (0..prev_size) |i| {
-                    next[i] = prev[i].mul(one_minus_tau_k);
-                    next[i + prev_size] = prev[i].mul(tau_k);
-                }
-
-                try E_in_vec.append(allocator, next);
-            }
-
-            // Build outer prefix tables (E_out_vec)
-            // E_out_vec[0] = [1]
+            // Build outer prefix tables (E_out_vec) for tau[0..m]
+            // E_out_vec[0] = [1] (empty eq is always 1)
             try E_out_vec.append(allocator, try allocator.alloc(F, 1));
             E_out_vec.items[0][0] = F.one();
 
@@ -92,9 +104,11 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
                 const prev = E_out_vec.items[k];
                 const next = try allocator.alloc(F, new_size);
 
-                const tau_k = tau_copy[num_x_in + k];
+                const tau_k = tau_copy[k]; // w_out uses tau[0..m]
                 const one_minus_tau_k = F.one().sub(tau_k);
 
+                // eq(τ[0..k+1], (x, 0)) = eq(τ[0..k], x) * (1 - τ[k])
+                // eq(τ[0..k+1], (x, 1)) = eq(τ[0..k], x) * τ[k]
                 for (0..prev_size) |i| {
                     next[i] = prev[i].mul(one_minus_tau_k);
                     next[i + prev_size] = prev[i].mul(tau_k);
@@ -103,14 +117,36 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
                 try E_out_vec.append(allocator, next);
             }
 
+            // Build inner prefix tables (E_in_vec) for tau[m..tau.len-1]
+            // E_in_vec[0] = [1]
+            try E_in_vec.append(allocator, try allocator.alloc(F, 1));
+            E_in_vec.items[0][0] = F.one();
+
+            for (0..num_x_in_actual) |k| {
+                const prev_size: usize = @as(usize, 1) << @intCast(k);
+                const new_size: usize = prev_size * 2;
+                const prev = E_in_vec.items[k];
+                const next = try allocator.alloc(F, new_size);
+
+                const tau_k = tau_copy[m + k]; // w_in uses tau[m..tau.len-1]
+                const one_minus_tau_k = F.one().sub(tau_k);
+
+                for (0..prev_size) |i| {
+                    next[i] = prev[i].mul(one_minus_tau_k);
+                    next[i + prev_size] = prev[i].mul(tau_k);
+                }
+
+                try E_in_vec.append(allocator, next);
+            }
+
             return Self{
                 .current_index = tau.len,
-                .current_scalar = F.one(),
+                .current_scalar = scaling_factor orelse F.one(),
                 .tau = tau_copy,
                 .E_out_vec = E_out_vec,
                 .E_in_vec = E_in_vec,
                 .num_x_out = num_x_out,
-                .num_x_in = num_x_in,
+                .num_x_in = num_x_in_actual,
                 .allocator = allocator,
             };
         }
@@ -191,27 +227,42 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
 
         /// Get eq tables for a window of variables
         ///
-        /// Returns (E_out, E_in) where:
-        /// - E_out = eq(τ_out[0..num_out_vars], ·) over {0,1}^num_out_vars
-        /// - E_in = eq(τ_in, ·) over {0,1}^num_in_vars
+        /// This matches Jolt's E_out_in_for_window function:
+        /// - window_size: number of variables being processed (typically 1 for sumcheck)
+        /// - Returns (E_out, E_in) for the factorized eq evaluation
         ///
-        /// The window covers the first `window_size` unbound variables
+        /// The factorization computes eq weights as:
+        ///   eq[i] = E_out[i >> head_in_bits] * E_in[i & ((1 << head_in_bits) - 1)]
+        ///
+        /// For the streaming round with 1024 cycles (10 vars) and window_size=1:
+        /// - head_len = 11 - 1 = 10
+        /// - head_out_bits = min(10, 5) = 5  → E_out has 32 entries
+        /// - head_in_bits = 10 - 5 = 5       → E_in has 32 entries
         pub fn getWindowEqTables(
             self: *const Self,
-            num_out_vars: usize,
-            num_in_vars: usize,
+            num_unbound_vars: usize,
+            window_size: usize,
         ) struct { E_out: []const F, E_in: []const F } {
-            // E_in is the full inner eq table
-            const E_in = if (num_in_vars <= self.num_x_in)
-                self.E_in_vec.items[num_in_vars]
-            else
-                self.E_in_vec.items[self.num_x_in];
+            // Following Jolt's E_out_in_for_window logic
+            const num_unbound = @min(self.current_index, num_unbound_vars);
+            const actual_window = @min(window_size, num_unbound);
+            const head_len = num_unbound -| actual_window;
 
-            // E_out uses prefix table
-            const E_out = if (num_out_vars <= self.num_x_out)
-                self.E_out_vec.items[num_out_vars]
+            // Split into out and in parts
+            const m = self.tau.len / 2;
+            const head_out_bits = @min(head_len, m);
+            const head_in_bits = head_len -| head_out_bits;
+
+            // Get tables of appropriate sizes
+            const E_out = if (head_out_bits <= self.num_x_out)
+                self.E_out_vec.items[head_out_bits]
             else
                 self.E_out_vec.items[self.num_x_out];
+
+            const E_in = if (head_in_bits <= self.num_x_in)
+                self.E_in_vec.items[head_in_bits]
+            else
+                self.E_in_vec.items[self.num_x_in];
 
             return .{ .E_out = E_out, .E_in = E_in };
         }

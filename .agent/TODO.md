@@ -1,6 +1,14 @@
 # Zolt zkVM Implementation TODO
 
-## Completed (This Session - Iteration 26)
+## Completed (This Session - Iteration 27)
+
+### Examples and Documentation
+- [x] Add HyperKZG commitment example (hyperkzg_commitment.zig)
+- [x] Add sumcheck protocol example (sumcheck_protocol.zig)
+- [x] Update build.zig with example-hyperkzg and example-sumcheck targets
+- [x] Update README with example usage instructions
+
+## Completed (Iteration 26)
 
 ### CLI Improvements
 - [x] Add 'prove' command to CLI (experimental)
@@ -114,13 +122,16 @@
 - [ ] Download and test with real Ethereum ceremony ptau files
 
 ### Low Priority
-- [ ] Documentation and examples
+- [x] Documentation and examples (added HyperKZG and Sumcheck examples)
 - [ ] More comprehensive benchmarking
 
 ## Test Status
 All tests pass (538 tests).
 
-## Commits This Session (Iteration 26)
+## Commits This Session (Iteration 27)
+1. Add HyperKZG and Sumcheck protocol examples
+
+## Commits (Iteration 26)
 1. Clean up outdated TODO comments
 2. Fix benchmark to compile with Zig 0.15.2
 3. Update tracking files for iteration 26

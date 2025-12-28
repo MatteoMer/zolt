@@ -1,10 +1,30 @@
 # Zolt zkVM Implementation Plan
 
-## Current Status (December 2024 - Iteration 26)
+## Current Status (December 2024 - Iteration 27)
 
 ### Session Summary
 
-This iteration focused on cleanup, fixing the benchmark suite, and adding a prove command to the CLI:
+This iteration focused on adding comprehensive examples for the core cryptographic primitives:
+
+1. **HyperKZG Commitment Example**
+   - Created `examples/hyperkzg_commitment.zig`
+   - Demonstrates SRS setup, polynomial commitment, opening, and verification
+   - Shows the complete HyperKZG workflow
+
+2. **Sumcheck Protocol Example**
+   - Created `examples/sumcheck_protocol.zig`
+   - Interactive demonstration of the sumcheck protocol
+   - Shows prover-verifier interaction with proper verification
+
+3. **Build System Updates**
+   - Added `example-hyperkzg` and `example-sumcheck` build targets
+   - Updated README with example usage documentation
+
+## Previous Status (Iteration 26)
+
+### Previous Session Summary
+
+Previous iteration focused on cleanup, fixing the benchmark suite, and adding a prove command to the CLI:
 
 1. **CLI Improvements**
    - Added `zolt prove <elf>` command (experimental)

@@ -1,26 +1,25 @@
 # Zolt zkVM Implementation Plan
 
-## Current Status (December 2024 - Iteration 36)
+## Current Status (December 2024 - Iteration 37)
 
-### Session Summary - Lasso & RAF Claim Tracking
+### Session Summary - Val Prover Fix
 
-This iteration focused on fixing and verifying sumcheck claim tracking across provers.
+This iteration fixed the Val (value evaluation) prover polynomial binding issue.
 
-**Lasso Prover Fix:**
-The Lasso prover was not maintaining the sumcheck invariant. Fixed by:
-1. Adding `current_claim` field to track running claim
-2. Adding `eq_evals` array to store eq(r, j) evaluations for each cycle
-3. Adding `eq_evals_len` to track effective array size (shrinks during folding)
-4. Updating `receiveChallenge` to properly bind and fold eq_evals
+**Problem:**
+The Val evaluation prover was only binding the `inc` polynomial after each sumcheck
+challenge, but not the `wa` (write-address) and `lt` (less-than) polynomials.
+This caused the sumcheck invariant p(0) + p(1) = current_claim to fail.
 
-**RAF Prover Verification:**
-Added test to verify RAF prover correctly maintains sumcheck invariant.
-The RAF prover was already correctly implemented.
+**Solution:**
+1. Materialize all three polynomial evaluations (inc, wa, lt) upfront
+2. Bind all three polynomials together after each challenge using linear interpolation
+3. Track current_claim properly through sumcheck rounds
+4. New claim = sum over folded evaluations after binding
 
 **Test Results:**
 - All 554 tests pass
-- Lasso claim tracking test: PASS ✅
-- RAF claim tracking test: PASS ✅
+- Val prover sumcheck invariant test: PASS
 
 ## Architecture Summary
 
@@ -29,25 +28,25 @@ The RAF prover was already correctly implemented.
 Fp  = BN254 base field (254 bits) - G1 point coordinates
 Fr  = BN254 scalar field (254 bits) - scalars for multiplication
 
-Fp2 = Fp[u] / (u² + 1)
-Fp6 = Fp2[v] / (v³ - ξ)  where ξ = 9 + u
-Fp12 = Fp6[w] / (w² - v)
+Fp2 = Fp[u] / (u^2 + 1)
+Fp6 = Fp2[v] / (v^3 - xi)  where xi = 9 + u
+Fp12 = Fp6[w] / (w^2 - v)
 ```
 
 ### Proof Structure
 ```
 JoltProof:
-  ├── bytecode_proof: Commitment to program bytecode
-  ├── memory_proof: Memory access commitments
-  ├── register_proof: Register file commitments
-  ├── r1cs_proof: R1CS/Spartan proof
-  └── stage_proofs: 6-stage sumcheck proofs
-        ├── Stage 1: Outer Spartan (R1CS correctness)
-        ├── Stage 2: RAM RAF evaluation
-        ├── Stage 3: Lasso lookup (instruction lookups)
-        ├── Stage 4: Value evaluation (memory consistency)
-        ├── Stage 5: Register evaluation
-        └── Stage 6: Booleanity (flag constraints)
+  |-- bytecode_proof: Commitment to program bytecode
+  |-- memory_proof: Memory access commitments
+  |-- register_proof: Register file commitments
+  |-- r1cs_proof: R1CS/Spartan proof
+  +-- stage_proofs: 6-stage sumcheck proofs
+        |-- Stage 1: Outer Spartan (R1CS correctness)
+        |-- Stage 2: RAM RAF evaluation
+        |-- Stage 3: Lasso lookup (instruction lookups)
+        |-- Stage 4: Value evaluation (memory consistency)
+        |-- Stage 5: Register evaluation
+        +-- Stage 6: Booleanity (flag constraints)
 ```
 
 ### Sumcheck Prover Requirements
@@ -86,8 +85,9 @@ After round i:
 - **Host Execute** - Program execution with tracing
 - **Preprocessing** - Proving and verifying keys
 - **Spartan** - Proof generation and verification
-- **Lasso** - Lookup argument (claim tracking fixed!)
+- **Lasso** - Lookup argument (claim tracking fixed in iteration 36!)
 - **RAF Prover** - Memory checking (verified correct)
+- **Val Prover** - Value evaluation (claim tracking fixed in iteration 37!)
 - **Multi-stage Prover** - 6-stage orchestration
 - **Lookup Tables** - 24+ tables
 - **Instructions** - 60+ instruction types
@@ -95,8 +95,8 @@ After round i:
 ## Future Work
 
 ### High Priority
-1. Test full pipeline with strict verification mode
-2. Investigate test interference issue
+1. Test full pipeline with strict verification mode (all stages)
+2. Investigate test interference issue (e2e test causes other tests to fail)
 
 ### Medium Priority
 1. Performance optimization with SIMD
@@ -113,8 +113,13 @@ After round i:
 - MSM (256 points): 0.50 ms/op
 - HyperKZG commit (1024): 1.5 ms/op
 
-## Commit History (Iteration 36)
+## Commit History
+
+### Iteration 37
+1. Fix Val prover polynomial binding for correct sumcheck
+2. Add comprehensive sumcheck invariant test for Val prover
+
+### Iteration 36
 1. Fix Lasso prover claim tracking for strict sumcheck verification
 2. Add test for Lasso prover claim tracking invariant
-3. Update tracking files for iteration 36
-4. Add RAF prover claim tracking test
+3. Add RAF prover claim tracking test

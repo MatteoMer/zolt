@@ -91,6 +91,44 @@ zig build example-sumcheck     # Sumcheck protocol
 zig build example-pipeline     # Full proving pipeline (end-to-end)
 ```
 
+## C Example Programs
+
+The `examples/` directory includes several C programs that can be compiled with a RISC-V toolchain and proven with Zolt:
+
+| Program | Description | Expected Result |
+|---------|-------------|-----------------|
+| `fibonacci.elf` | Compute Fibonacci(10) | 55 |
+| `sum.elf` | Sum of 1..100 | 5050 |
+| `factorial.elf` | Compute 10! | 3628800 |
+| `bitwise.elf` | AND, OR, XOR, shifts | - |
+| `array.elf` | Array load/store ops | 1465 |
+| `gcd.elf` | GCD using div/rem | 63 |
+
+### Building Examples
+
+Requires a RISC-V toolchain (e.g., riscv32-unknown-elf-gcc):
+
+```bash
+cd examples
+make all        # Build all examples
+make help       # Show available targets
+make disasm-gcd # Show disassembly of gcd.elf
+```
+
+### Running Examples
+
+```bash
+# Run and see result
+zolt run examples/fibonacci.elf
+
+# Generate and verify proof
+zolt prove examples/sum.elf -o proof.bin
+zolt verify proof.bin
+
+# Show execution trace
+zolt trace examples/gcd.elf
+```
+
 ## Project Structure
 
 ```

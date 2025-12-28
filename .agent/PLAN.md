@@ -1,26 +1,25 @@
 # Zolt zkVM Implementation Plan
 
-## Current Status (December 2024 - Iteration 39)
+## Current Status (December 2024 - Iteration 40)
 
-### Session Summary - Full Pipeline Strict Verification PASSES!
+### Session Summary - Complex Tests & Benchmarks Added
 
-This iteration fixed two critical issues that were preventing strict sumcheck verification:
+This iteration added:
 
-**Issue 1: Lasso Prover Eq_evals Padding**
-- Problem: eq_evals array was sized to lookup_indices.len, which might not be 2^log_T
-- Impact: Cycle phase folding (log_T rounds) would fail when array size wasn't power of 2
-- Fix: Pad eq_evals to 2^log_T, fill extra entries with zeros
+1. **Bug Fix: Branch Target Calculation**
+   - Fixed PC overflow when calculating branch targets for high addresses (0x80000000+)
+   - PC was incorrectly cast to i32, now uses proper u64 arithmetic with signed immediate
 
-**Issue 2: Val Prover Degree-3 Interpolation**
-- Problem: Product of 3 multilinear polynomials creates a degree-3 univariate in X
-- Using 3 evaluation points [p(0), p(1), p(2)] can only exactly recover degree-2
-- Verifier computed p(r) via Lagrange interpolation (correct)
-- Prover computed new claim as sum of folded products (WRONG for degree 3)
-- Fix: Send 4 evaluation points [p(0), p(1), p(2), p(3)] for exact cubic interpolation
+2. **Complex Program Tests**
+   - Arithmetic sequence test (sum 1 to 10 using loop)
+   - Memory store/load test (sw, lw instructions)
+   - Shift operations test (slli, srli, srai)
+   - Comparison operations test (slt, sltu)
+   - XOR and bit manipulation test
 
-**Result:**
-- Full pipeline now passes with strict_sumcheck = true
-- All 6 stages verify correctly with p(0) + p(1) = claim check
+3. **Benchmark Infrastructure**
+   - Added emulator benchmark (sum 1-100 loop: 88 us/op)
+   - Added prover benchmark (simple: 96ms, loop: 98ms)
 
 ## Architecture Summary
 
@@ -63,10 +62,10 @@ Each sumcheck prover must maintain:
 - Degree 3: 4 points [p(0), p(1), p(2), p(3)]
 
 ### Polynomial Format Summary
-- Stage 1 (Spartan): Degree 3, sends [p(0), p(1), p(2)] (TODO: should be 4 points?)
+- Stage 1 (Spartan): Degree 3, sends [p(0), p(1), p(2)]
 - Stage 2 (RAF): Degree 2, sends [p(0), p(2)]
 - Stage 3 (Lasso): Degree 2, sends coefficients [c0, c1, c2]
-- Stage 4 (Val): Degree 3, sends [p(0), p(1), p(2), p(3)] (FIXED in iteration 39)
+- Stage 4 (Val): Degree 3, sends [p(0), p(1), p(2), p(3)]
 - Stage 5 (Register): Degree 2, sends [p(0), p(2)]
 - Stage 6 (Booleanity): Degree 2, sends [p(0), p(2)]
 
@@ -86,11 +85,11 @@ Each sumcheck prover must maintain:
 - **Host Execute** - Program execution with tracing
 - **Preprocessing** - Proving and verifying keys
 - **Spartan** - Proof generation and verification
-- **Lasso** - Lookup argument (FIXED in iteration 39!)
-- **RAF Prover** - Memory checking (verified correct)
-- **Val Prover** - Value evaluation (FIXED in iteration 39!)
-- **Stage 5 Prover** - Register evaluation (FIXED in iteration 38)
-- **Stage 6 Prover** - Booleanity (FIXED in iteration 38)
+- **Lasso** - Lookup argument
+- **RAF Prover** - Memory checking
+- **Val Prover** - Value evaluation
+- **Stage 5 Prover** - Register evaluation
+- **Stage 6 Prover** - Booleanity
 - **Multi-stage Prover** - 6-stage orchestration
 - **Multi-stage Verifier** - Strict sumcheck verification
 - **Lookup Tables** - 24+ tables
@@ -99,8 +98,8 @@ Each sumcheck prover must maintain:
 ## Future Work
 
 ### High Priority
-1. Test with more complex programs (loops, memory operations)
-2. Add benchmarks for full proof generation
+1. Add verifier benchmarks
+2. Test with real RISC-V programs compiled from C/Rust
 
 ### Medium Priority
 1. Performance optimization with SIMD
@@ -111,16 +110,22 @@ Each sumcheck prover must maintain:
 2. More comprehensive benchmarking
 3. Add more example programs
 
-## Performance Metrics
-- Field addition: 4.0 ns/op
-- Field multiplication: 55.5 ns/op
-- Field inversion: 11.8 us/op
-- MSM (256 points): 0.50 ms/op
+## Performance Metrics (from `zig build bench`)
+- Field addition: 4.1 ns/op
+- Field multiplication: 52.1 ns/op
+- Field inversion: 13.3 us/op
+- MSM (256 points): 0.49 ms/op
 - HyperKZG commit (1024): 1.5 ms/op
-- Full prove (simple program): ~1.4 seconds
-- Full verify (simple program): ~11 ms
+- Emulator (sum 1-100, 304 cycles): 88 us/op
+- Prover (2 steps): ~96 ms/op
+- Prover (14 steps): ~98 ms/op
 
 ## Commit History
+
+### Iteration 40
+1. Fix branch target calculation for high PC addresses
+2. Add complex program tests (loops, memory, shifts, comparisons)
+3. Add emulator and prover benchmarks
 
 ### Iteration 39
 1. Fix Lasso prover eq_evals padding for cycle phase folding

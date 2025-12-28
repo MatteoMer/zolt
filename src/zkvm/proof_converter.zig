@@ -325,6 +325,9 @@ pub fn ProofConverter(comptime F: type) type {
             challenges: std.ArrayListUnmanaged(F),
             /// The first-round challenge r0 from UniSkip
             r0: F,
+            /// The UnivariateSkip claim: evaluation of UniSkip polynomial at r0
+            /// This is the input_claim for the remaining sumcheck rounds
+            uni_skip_claim: F,
             /// Allocator for cleanup
             allocator: Allocator,
 
@@ -359,7 +362,7 @@ pub fn ProofConverter(comptime F: type) type {
                 // Fallback to zero proofs if initialization fails
                 const num_rounds = 1 + std.math.log2_int(usize, @max(1, cycle_witnesses.len));
                 try self.generateZeroSumcheckProof(proof, num_rounds, 3);
-                return Stage1Result{ .challenges = challenges, .r0 = F.zero(), .allocator = self.allocator };
+                return Stage1Result{ .challenges = challenges, .r0 = F.zero(), .uni_skip_claim = F.zero(), .allocator = self.allocator };
             };
             defer outer_prover.deinit();
 
@@ -373,6 +376,10 @@ pub fn ProofConverter(comptime F: type) type {
             transcript.appendMessage("UncompressedUniPoly_end");
             const r0 = transcript.challengeScalar();
 
+            // Compute the UnivariateSkip claim: evaluation of UniSkip polynomial at r0
+            // This is the input_claim for the remaining sumcheck rounds
+            const uni_skip_claim = evaluatePolyAtPoint(uniskip_proof.uni_poly, r0);
+
             // Bind the first-round challenge from transcript
             outer_prover.bindFirstRoundChallenge(r0) catch {};
 
@@ -382,7 +389,7 @@ pub fn ProofConverter(comptime F: type) type {
             // The UniSkip is separate and doesn't count here
             const num_remaining_rounds = outer_prover.numRounds(); // 1 + num_cycle_vars
             if (num_remaining_rounds == 0) {
-                return Stage1Result{ .challenges = challenges, .r0 = r0, .allocator = self.allocator };
+                return Stage1Result{ .challenges = challenges, .r0 = r0, .uni_skip_claim = uni_skip_claim, .allocator = self.allocator };
             }
 
             // Generate all remaining round polynomials with transcript integration
@@ -431,7 +438,20 @@ pub fn ProofConverter(comptime F: type) type {
                 outer_prover.updateClaim(round_evals, challenge);
             }
 
-            return Stage1Result{ .challenges = challenges, .r0 = r0, .allocator = self.allocator };
+            return Stage1Result{ .challenges = challenges, .r0 = r0, .uni_skip_claim = uni_skip_claim, .allocator = self.allocator };
+        }
+
+        /// Evaluate a polynomial given as coefficients at a point using Horner's method
+        fn evaluatePolyAtPoint(coeffs: []const F, x: F) F {
+            if (coeffs.len == 0) return F.zero();
+
+            var result = coeffs[coeffs.len - 1];
+            var i = coeffs.len - 1;
+            while (i > 0) {
+                i -= 1;
+                result = result.mul(x).add(coeffs[i]);
+            }
+            return result;
         }
 
         /// R1CS input indices in Jolt's ALL_R1CS_INPUTS order
@@ -550,6 +570,7 @@ pub fn ProofConverter(comptime F: type) type {
             claims: *OpeningClaims(F),
             cycle_witnesses: []const r1cs.R1CSCycleInputs(F),
             r_cycle: []const F,
+            uni_skip_claim: F,
         ) !void {
             // Compute MLE evaluations at r_cycle
             const R1CSInputEvaluator = r1cs.R1CSInputEvaluator(F);
@@ -571,11 +592,11 @@ pub fn ProofConverter(comptime F: type) type {
                 );
             }
 
-            // Add the UnivariateSkip claim for SpartanOuter (computed from sumcheck output)
-            // For now, use zero - the actual value should come from the sumcheck
+            // Add the UnivariateSkip claim for SpartanOuter
+            // This is uni_poly.evaluate(r0), the input_claim for the remaining sumcheck
             try claims.insert(
                 .{ .Virtual = .{ .poly = .UnivariateSkip, .sumcheck_id = .SpartanOuter } },
-                F.zero(),
+                uni_skip_claim,
             );
         }
 
@@ -835,6 +856,7 @@ pub fn ProofConverter(comptime F: type) type {
                     &jolt_proof.opening_claims,
                     cycle_witnesses,
                     r_cycle_big_endian,
+                    result.uni_skip_claim,
                 );
             } else {
                 // Fallback to zero claims

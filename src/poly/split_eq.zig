@@ -180,6 +180,15 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
             return result;
         }
 
+        /// Get the high bit challenge τ_high
+        ///
+        /// In Jolt's univariate skip, τ_high is the last element of the tau vector,
+        /// which corresponds to the constraint group selector bit.
+        pub fn getTauHigh(self: *const Self) F {
+            if (self.tau.len == 0) return F.zero();
+            return self.tau[self.tau.len - 1];
+        }
+
         /// Get eq tables for a window of variables
         ///
         /// Returns (E_out, E_in) where:

@@ -194,23 +194,170 @@ pub fn StreamingOuterProver(comptime F: type) type {
         }
 
         /// Interpolate extended evaluations to polynomial coefficients
+        ///
+        /// This implements Jolt's `build_uniskip_first_round_poly`:
+        /// 1. Rebuild t1 on the full extended symmetric window
+        /// 2. Interpolate t1 to get coefficients
+        /// 3. Compute Lagrange kernel L(τ_high, Y) coefficients
+        /// 4. Multiply polynomials to get s1(Y) = L(τ_high, Y) * t1(Y)
         fn interpolateFirstRoundPoly(
             self: *const Self,
             extended_evals: *const [univariate_skip.OUTER_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE]F,
         ) [FIRST_ROUND_NUM_COEFFS]F {
-            _ = self;
+            const DOMAIN_SIZE = FIRST_GROUP_SIZE;
+            const DEGREE = univariate_skip.OUTER_UNIVARIATE_SKIP_DEGREE;
+            const EXTENDED_SIZE = univariate_skip.OUTER_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE;
 
-            // Simple interpolation using Newton's method or Lagrange
-            // For now, use a simplified approach: copy evaluations as coefficients
-            // (This is a placeholder - full implementation needs proper interpolation)
-            var coeffs: [FIRST_ROUND_NUM_COEFFS]F = [_]F{F.zero()} ** FIRST_ROUND_NUM_COEFFS;
+            // The extended_evals are evaluations of t1(Y) on the extended symmetric window
+            // {-DEGREE, ..., DEGREE} = {-9, -8, ..., 8, 9}
+            // These 19 values are provided in order from extended_evals[0] = t1(-9) to extended_evals[18] = t1(9)
 
-            // Copy available evaluations
-            for (0..@min(extended_evals.len, FIRST_ROUND_NUM_COEFFS)) |i| {
-                coeffs[i] = extended_evals[i];
+            // Step 1: Interpolate t1(Y) from extended evaluations
+            // Domain points: {-DEGREE, -DEGREE+1, ..., DEGREE-1, DEGREE}
+            var t1_coeffs: [EXTENDED_SIZE]F = [_]F{F.zero()} ** EXTENDED_SIZE;
+
+            // Use Lagrange interpolation: p(Y) = Σ_i y_i * L_i(Y)
+            // where L_i(Y) = Π_{j≠i} (Y - x_j) / (x_i - x_j)
+            for (0..EXTENDED_SIZE) |i| {
+                // Evaluation y_i at domain point x_i = -DEGREE + i
+                const y_i = extended_evals[i];
+
+                if (y_i.eql(F.zero())) continue;
+
+                // Compute denominator (scalar) Π_{j≠i} (x_i - x_j)
+                // Since x_i = -DEGREE + i and x_j = -DEGREE + j, we have x_i - x_j = i - j
+                var den = F.one();
+                for (0..EXTENDED_SIZE) |j| {
+                    if (i == j) continue;
+                    // x_i - x_j = (i - j)
+                    const diff: i64 = @as(i64, @intCast(i)) - @as(i64, @intCast(j));
+                    const diff_field = if (diff >= 0)
+                        F.fromU64(@intCast(diff))
+                    else
+                        F.zero().sub(F.fromU64(@intCast(-diff)));
+                    den = den.mul(diff_field);
+                }
+
+                const scale = y_i.mul(den.inverse().?);
+
+                // Build numerator polynomial Π_{j≠i} (Y - x_j)
+                // Start with constant 1, multiply by (Y - x_j) for each j ≠ i
+                var basis: [EXTENDED_SIZE]F = [_]F{F.zero()} ** EXTENDED_SIZE;
+                basis[0] = F.one();
+                var deg: usize = 0;
+
+                for (0..EXTENDED_SIZE) |j| {
+                    if (i == j) continue;
+                    const x_j: i64 = -@as(i64, DEGREE) + @as(i64, @intCast(j));
+                    const neg_x_j = if (x_j >= 0)
+                        F.zero().sub(F.fromU64(@intCast(x_j)))
+                    else
+                        F.fromU64(@intCast(-x_j));
+
+                    // Multiply basis by (Y - x_j)
+                    // New polynomial: basis[k+1] += basis[k] and basis[k] *= neg_x_j
+                    var k: usize = deg + 1;
+                    while (k > 0) {
+                        k -= 1;
+                        const old = basis[k];
+                        if (k + 1 <= EXTENDED_SIZE - 1) {
+                            basis[k + 1] = basis[k + 1].add(old);
+                        }
+                        basis[k] = old.mul(neg_x_j);
+                    }
+                    deg += 1;
+                }
+
+                // Add scaled basis to t1_coeffs
+                for (0..EXTENDED_SIZE) |k| {
+                    t1_coeffs[k] = t1_coeffs[k].add(basis[k].mul(scale));
+                }
             }
 
-            return coeffs;
+            // Step 2: Compute Lagrange kernel L(τ_high, Y) coefficients
+            // τ_high is the last element of tau, which is the high bit challenge
+            const tau_high = self.split_eq.getTauHigh();
+
+            // L(τ_high, Y) evaluations at base domain {-4, -3, ..., 4, 5}
+            var lagrange_evals: [DOMAIN_SIZE]F = undefined;
+            const base_left: i64 = -@as(i64, (DOMAIN_SIZE - 1) / 2);
+
+            for (0..DOMAIN_SIZE) |i| {
+                const x_i: i64 = base_left + @as(i64, @intCast(i));
+                var num = F.one();
+                var den = F.one();
+
+                for (0..DOMAIN_SIZE) |j| {
+                    if (i == j) continue;
+                    const x_j: i64 = base_left + @as(i64, @intCast(j));
+                    const x_j_field = if (x_j >= 0) F.fromU64(@intCast(x_j)) else F.zero().sub(F.fromU64(@intCast(-x_j)));
+                    num = num.mul(tau_high.sub(x_j_field));
+
+                    const diff: i64 = x_i - x_j;
+                    const diff_field = if (diff >= 0) F.fromU64(@intCast(diff)) else F.zero().sub(F.fromU64(@intCast(-diff)));
+                    den = den.mul(diff_field);
+                }
+
+                lagrange_evals[i] = num.mul(den.inverse().?);
+            }
+
+            // Interpolate Lagrange kernel to coefficients (degree DOMAIN_SIZE-1 = 9)
+            var lagrange_coeffs: [DOMAIN_SIZE]F = [_]F{F.zero()} ** DOMAIN_SIZE;
+
+            for (0..DOMAIN_SIZE) |i| {
+                const y_i = lagrange_evals[i];
+                if (y_i.eql(F.zero())) continue;
+
+                var den = F.one();
+                for (0..DOMAIN_SIZE) |j| {
+                    if (i == j) continue;
+                    const diff: i64 = @as(i64, @intCast(i)) - @as(i64, @intCast(j));
+                    const diff_field = if (diff >= 0) F.fromU64(@intCast(diff)) else F.zero().sub(F.fromU64(@intCast(-diff)));
+                    den = den.mul(diff_field);
+                }
+                const scale = y_i.mul(den.inverse().?);
+
+                var basis: [DOMAIN_SIZE]F = [_]F{F.zero()} ** DOMAIN_SIZE;
+                basis[0] = F.one();
+                var deg: usize = 0;
+
+                for (0..DOMAIN_SIZE) |j| {
+                    if (i == j) continue;
+                    const x_j: i64 = base_left + @as(i64, @intCast(j));
+                    const neg_x_j = if (x_j >= 0) F.zero().sub(F.fromU64(@intCast(x_j))) else F.fromU64(@intCast(-x_j));
+
+                    var k: usize = deg + 1;
+                    while (k > 0) {
+                        k -= 1;
+                        const old = basis[k];
+                        if (k + 1 < DOMAIN_SIZE) {
+                            basis[k + 1] = basis[k + 1].add(old);
+                        }
+                        basis[k] = old.mul(neg_x_j);
+                    }
+                    deg += 1;
+                }
+
+                for (0..DOMAIN_SIZE) |k| {
+                    lagrange_coeffs[k] = lagrange_coeffs[k].add(basis[k].mul(scale));
+                }
+            }
+
+            // Step 3: Multiply polynomials s1 = L * t1
+            // deg(L) = DOMAIN_SIZE - 1 = 9
+            // deg(t1) = EXTENDED_SIZE - 1 = 18
+            // deg(s1) = 9 + 18 = 27
+            var s1_coeffs: [FIRST_ROUND_NUM_COEFFS]F = [_]F{F.zero()} ** FIRST_ROUND_NUM_COEFFS;
+
+            for (0..DOMAIN_SIZE) |i| {
+                for (0..EXTENDED_SIZE) |j| {
+                    if (i + j < FIRST_ROUND_NUM_COEFFS) {
+                        s1_coeffs[i + j] = s1_coeffs[i + j].add(lagrange_coeffs[i].mul(t1_coeffs[j]));
+                    }
+                }
+            }
+
+            return s1_coeffs;
         }
 
         /// Bind the first-round challenge and set up for remaining rounds

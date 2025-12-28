@@ -210,10 +210,10 @@ pub const OpeningId = union(enum) {
     TrustedAdvice: SumcheckId,
 
     // Encoding bases for compact serialization
-    const UNTRUSTED_ADVICE_BASE: u8 = 0;
-    const TRUSTED_ADVICE_BASE: u8 = UNTRUSTED_ADVICE_BASE + SumcheckId.COUNT;
-    const COMMITTED_BASE: u8 = TRUSTED_ADVICE_BASE + SumcheckId.COUNT;
-    const VIRTUAL_BASE: u8 = COMMITTED_BASE + SumcheckId.COUNT;
+    pub const UNTRUSTED_ADVICE_BASE: u8 = 0;
+    pub const TRUSTED_ADVICE_BASE: u8 = UNTRUSTED_ADVICE_BASE + SumcheckId.COUNT;
+    pub const COMMITTED_BASE: u8 = TRUSTED_ADVICE_BASE + SumcheckId.COUNT;
+    pub const VIRTUAL_BASE: u8 = COMMITTED_BASE + SumcheckId.COUNT;
 
     /// Serialize in Jolt's compact format
     pub fn serialize(self: OpeningId, writer: anytype) !void {

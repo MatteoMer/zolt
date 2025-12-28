@@ -266,7 +266,7 @@ fn runEmulator(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles: ?
     }
 }
 
-fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt: ?u64, output_path: ?[]const u8, json_format: bool) !void {
+fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt: ?u64, output_path: ?[]const u8, json_format: bool, jolt_format: bool) !void {
     std.debug.print("Zolt zkVM Prover\n", .{});
     std.debug.print("================\n\n", .{});
 
@@ -372,7 +372,34 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt:
     if (output_path) |path| {
         std.debug.print("\nSaving proof to: {s}\n", .{path});
 
-        if (json_format) {
+        if (jolt_format) {
+            // Save in Jolt-compatible format for cross-verification
+            std.debug.print("  Generating Jolt-compatible proof...\n", .{});
+            var jolt_proof = prover_inst.proveJoltCompatible(program.bytecode, &[_]u8{}) catch |err| {
+                std.debug.print("  Error generating Jolt-compatible proof: {}\n", .{err});
+                return err;
+            };
+            defer jolt_proof.deinit();
+
+            const jolt_bytes = prover_inst.serializeJoltProof(&jolt_proof) catch |err| {
+                std.debug.print("  Error serializing Jolt proof: {}\n", .{err});
+                return err;
+            };
+            defer allocator.free(jolt_bytes);
+
+            const file = std.fs.cwd().createFile(path, .{}) catch |err| {
+                std.debug.print("  Error creating output file: {}\n", .{err});
+                return err;
+            };
+            defer file.close();
+            file.writeAll(jolt_bytes) catch |err| {
+                std.debug.print("  Error writing Jolt proof: {}\n", .{err});
+                return err;
+            };
+
+            std.debug.print("  Format: Jolt (arkworks-compatible)\n", .{});
+            std.debug.print("  Proof size: {} bytes ({d:.2} KB)\n", .{ jolt_bytes.len, @as(f64, @floatFromInt(jolt_bytes.len)) / 1024.0 });
+        } else if (json_format) {
             // Save as JSON
             zolt.zkvm.writeProofToJsonFile(BN254Scalar, allocator, proof, path) catch |err| {
                 std.debug.print("  Error saving proof: {}\n", .{err});
@@ -1040,12 +1067,14 @@ pub fn main() !void {
                     std.debug.print("  --max-cycles N   Limit execution to N cycles (default: 1024)\n", .{});
                     std.debug.print("  -o, --output F   Save proof to file F\n", .{});
                     std.debug.print("  --json           Output proof in JSON format (human readable)\n", .{});
+                    std.debug.print("  --jolt-format    Output proof in Jolt-compatible format for cross-verification\n", .{});
                 } else {
                     // Parse options
                     var elf_path: ?[]const u8 = null;
                     var max_cycles: ?u64 = null;
                     var output_path: ?[]const u8 = null;
                     var json_format = false;
+                    var jolt_format = false;
 
                     // First arg could be an option or the ELF path
                     if (std.mem.startsWith(u8, arg, "-")) {
@@ -1057,6 +1086,8 @@ pub fn main() !void {
                             output_path = args.next();
                         } else if (std.mem.eql(u8, arg, "--json")) {
                             json_format = true;
+                        } else if (std.mem.eql(u8, arg, "--jolt-format")) {
+                            jolt_format = true;
                         }
                     } else {
                         elf_path = arg;
@@ -1073,6 +1104,8 @@ pub fn main() !void {
                                 output_path = args.next();
                             } else if (std.mem.eql(u8, next_arg, "--json")) {
                                 json_format = true;
+                            } else if (std.mem.eql(u8, next_arg, "--jolt-format")) {
+                                jolt_format = true;
                             }
                         } else if (elf_path == null) {
                             elf_path = next_arg;
@@ -1080,7 +1113,7 @@ pub fn main() !void {
                     }
 
                     if (elf_path) |path| {
-                        runProver(allocator, path, max_cycles, output_path, json_format) catch |err| {
+                        runProver(allocator, path, max_cycles, output_path, json_format, jolt_format) catch |err| {
                             std.debug.print("Failed to generate proof: {s}\n", .{@errorName(err)});
                             std.process.exit(1);
                         };

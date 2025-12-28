@@ -490,8 +490,8 @@ pub fn ProofSerializer(comptime F: type) type {
 
         /// Convenience function to serialize a proof to a byte buffer
         pub fn toBytes(allocator: Allocator, proof: anytype) ![]u8 {
-            var list = std.ArrayList(u8).init(allocator);
-            errdefer list.deinit();
+            var list: std.ArrayListUnmanaged(u8) = .{};
+            errdefer list.deinit(allocator);
 
             const writer = list.writer();
 

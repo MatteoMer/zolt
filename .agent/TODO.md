@@ -2,7 +2,7 @@
 
 ## Current Status (Jolt Compatibility Phase)
 
-**Project Status: DORY IPA COMPLETE - Full Reduce-and-Fold Algorithm Implemented**
+**Project Status: CLI INTEGRATION COMPLETE - Commitment Scheme Mismatch Identified**
 
 The following Jolt-compatibility components are now working:
 - Blake2b transcript with identical Fiat-Shamir challenges
@@ -135,12 +135,50 @@ The following Jolt-compatibility components are now working:
   - [x] `test_verify_zolt_proof` - Full verification test
   - [x] `test_jolt_proof_roundtrip` - Basic serialization roundtrip
 
-### 8. Remaining Work (Future Phase)
+### 8. CLI Integration ✅ COMPLETE
 
-- [ ] **Full Proof Generation**
-  - [ ] Generate proof in Zolt for fibonacci
-  - [ ] Verify proof loads and parses correctly in Jolt
-  - [ ] Attempt verification
+- [x] **CLI --jolt-format flag** (`src/main.zig`)
+  - [x] Add `--jolt-format` option to `prove` command
+  - [x] Generate Jolt-compatible proof with `proveJoltCompatible()`
+  - [x] Serialize to file using arkworks format
+  - [x] Test proof generation for fibonacci.elf
+
+### 9. Remaining Work (Blocking Issue)
+
+**Critical Issue: Commitment Scheme Mismatch**
+
+The Jolt verifier (`RV64IMACProof`) expects **Dory commitments** (GT = Fp12, 384 bytes each),
+but Zolt is currently generating **HyperKZG commitments** (G1 points, 32 bytes each).
+
+The proof format analysis shows:
+- OpeningClaims: ✅ Correct format, all 11 claims parse correctly
+- VirtualPolynomial serialization: ✅ Matches Jolt exactly
+- Commitments: ❌ Wrong type (G1 vs GT)
+- Opening proofs: ❌ Wrong type (HyperKZG vs Dory)
+
+**Resolution Options:**
+
+1. **Switch Zolt to use Dory** (recommended):
+   - Replace HyperKZG commitment scheme with Dory throughout the prover
+   - Use `DoryCommitmentScheme` instead of `HyperKZGScheme`
+   - Generate GT commitments (384 bytes) instead of G1 points
+   - This requires significant refactoring of the prover
+
+2. **Create HyperKZG proof type in Jolt**:
+   - Add `RV64IMACProofHyperKZG` type to Jolt
+   - Create verifier that accepts HyperKZG commitments
+   - Less work on Zolt side, but requires Jolt modifications
+
+3. **Dual-mode prover**:
+   - Keep HyperKZG for fast internal verification
+   - Add Dory commitment generation as a separate step
+   - More complex but maintains both capabilities
+
+- [ ] **Resolve Commitment Scheme Mismatch**
+  - [ ] Choose resolution option
+  - [ ] Implement chosen solution
+  - [ ] Generate proof with correct commitment type
+  - [ ] Verify proof parses in Jolt
 
 ---
 
@@ -203,8 +241,11 @@ Build Summary: 5/5 steps succeeded; 608/608 tests passed
 7. ✅ Full Dory IPA reduce-and-fold algorithm
 8. ✅ Transcript-integrated Dory prover
 9. ✅ Cross-verification test infrastructure in Jolt created
-10. ⏳ The proof can be loaded and verified by Jolt (requires full proof gen)
-11. ⏳ No modifications needed on the Jolt side (requires verification)
+10. ✅ CLI `--jolt-format` flag added to prove command
+11. ✅ Opening claims format matches Jolt (verified with debug parsing)
+12. ⚠️ Commitment scheme mismatch: HyperKZG vs Dory (blocking issue)
+13. ⏳ The proof can be loaded and verified by Jolt (blocked by #12)
+14. ⏳ No modifications needed on the Jolt side (blocked by #12)
 
 ## Priority Order
 

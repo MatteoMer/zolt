@@ -66,6 +66,11 @@ pub fn ArkworksSerializer(comptime F: type) type {
             try self.buffer.append(self.allocator, value);
         }
 
+        /// Alias for writeU8, compatible with writer interface
+        pub fn writeByte(self: *Self, value: u8) !void {
+            try self.buffer.append(self.allocator, value);
+        }
+
         /// Write bytes directly
         pub fn writeBytes(self: *Self, data: []const u8) !void {
             try self.buffer.appendSlice(self.allocator, data);

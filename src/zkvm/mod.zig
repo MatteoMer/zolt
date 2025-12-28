@@ -438,14 +438,14 @@ pub fn JoltProver(comptime F: type) type {
             };
 
             // Collect commitments from the internal proof
-            var commitments = std.ArrayList(commitment_types.PolyCommitment).init(self.allocator);
-            defer commitments.deinit();
+            var commitments: std.ArrayListUnmanaged(commitment_types.PolyCommitment) = .{};
+            defer commitments.deinit(self.allocator);
 
-            try commitments.append(zolt_proof.bytecode_proof.commitment);
-            try commitments.append(zolt_proof.memory_proof.commitment);
-            try commitments.append(zolt_proof.memory_proof.final_state_commitment);
-            try commitments.append(zolt_proof.register_proof.commitment);
-            try commitments.append(zolt_proof.register_proof.final_state_commitment);
+            try commitments.append(self.allocator, zolt_proof.bytecode_proof.commitment);
+            try commitments.append(self.allocator, zolt_proof.memory_proof.commitment);
+            try commitments.append(self.allocator, zolt_proof.memory_proof.final_state_commitment);
+            try commitments.append(self.allocator, zolt_proof.register_proof.commitment);
+            try commitments.append(self.allocator, zolt_proof.register_proof.final_state_commitment);
 
             // Convert to Jolt-compatible format
             return converter.convert(

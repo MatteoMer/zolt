@@ -85,8 +85,8 @@ pub fn ProofConverter(comptime F: type) type {
                 &jolt_proof.opening_claims,
             );
 
-            // Create UniSkip proof for Stage 1 (Jolt expects this)
-            jolt_proof.stage1_uni_skip_first_round_proof = try self.createUniSkipProof(
+            // Create UniSkip proof for Stage 1 (degree-27 polynomial, Jolt expects this)
+            jolt_proof.stage1_uni_skip_first_round_proof = try self.createUniSkipProofStage1(
                 &zolt_stage_proofs.stage_proofs[0],
             );
 
@@ -98,8 +98,8 @@ pub fn ProofConverter(comptime F: type) type {
                 &jolt_proof.opening_claims,
             );
 
-            // Create UniSkip proof for Stage 2
-            jolt_proof.stage2_uni_skip_first_round_proof = try self.createUniSkipProof(
+            // Create UniSkip proof for Stage 2 (degree-12 polynomial)
+            jolt_proof.stage2_uni_skip_first_round_proof = try self.createUniSkipProofStage2(
                 &zolt_stage_proofs.stage_proofs[1],
             );
 
@@ -349,18 +349,84 @@ pub fn ProofConverter(comptime F: type) type {
             }
         }
 
-        /// Create a UniSkipFirstRoundProof from a Zolt stage proof
-        fn createUniSkipProof(
+        /// Create a UniSkipFirstRoundProof for Stage 1 (degree-27 polynomial)
+        ///
+        /// Jolt's Stage 1 (Spartan outer) uses a degree-27 first-round polynomial
+        /// that encodes all 19 R1CS constraints via the univariate skip optimization.
+        fn createUniSkipProofStage1(
             self: *Self,
             zolt_stage: *const prover.StageProof(F),
         ) !?UniSkipFirstRoundProof(F) {
-            // If the stage has round polynomials, use the first one as the uni poly
+            const r1cs_mod = @import("r1cs/mod.zig");
+
+            // For stage 1, we need 28 coefficients (degree 27)
+            const NUM_COEFFS = r1cs_mod.OUTER_FIRST_ROUND_POLY_NUM_COEFFS;
+
+            // If we have round polynomials, pad to the required size
             if (zolt_stage.round_polys.items.len > 0) {
                 const first_poly = zolt_stage.round_polys.items[0];
-                return try UniSkipFirstRoundProof(F).init(self.allocator, first_poly);
+
+                // Create a degree-27 polynomial (28 coefficients)
+                const coeffs = try self.allocator.alloc(F, NUM_COEFFS);
+                @memset(coeffs, F.zero());
+
+                // Copy existing coefficients
+                const copy_len = @min(first_poly.len, NUM_COEFFS);
+                @memcpy(coeffs[0..copy_len], first_poly[0..copy_len]);
+
+                return UniSkipFirstRoundProof(F){
+                    .uni_poly = coeffs,
+                    .allocator = self.allocator,
+                };
             }
 
-            return null;
+            // Create a zero polynomial if no data
+            const coeffs = try self.allocator.alloc(F, NUM_COEFFS);
+            @memset(coeffs, F.zero());
+            return UniSkipFirstRoundProof(F){
+                .uni_poly = coeffs,
+                .allocator = self.allocator,
+            };
+        }
+
+        /// Create a UniSkipFirstRoundProof for Stage 2 (degree-12 polynomial)
+        ///
+        /// Jolt's Stage 2 (product virtualization) uses a degree-12 first-round
+        /// polynomial for the 5 product constraints.
+        fn createUniSkipProofStage2(
+            self: *Self,
+            zolt_stage: *const prover.StageProof(F),
+        ) !?UniSkipFirstRoundProof(F) {
+            const r1cs_mod = @import("r1cs/mod.zig");
+            const univariate_skip = r1cs_mod.univariate_skip;
+
+            // For stage 2, we need 13 coefficients (degree 12)
+            const NUM_COEFFS = univariate_skip.PRODUCT_VIRTUAL_FIRST_ROUND_POLY_NUM_COEFFS;
+
+            // If we have round polynomials, pad to the required size
+            if (zolt_stage.round_polys.items.len > 0) {
+                const first_poly = zolt_stage.round_polys.items[0];
+
+                const coeffs = try self.allocator.alloc(F, NUM_COEFFS);
+                @memset(coeffs, F.zero());
+
+                // Copy existing coefficients
+                const copy_len = @min(first_poly.len, NUM_COEFFS);
+                @memcpy(coeffs[0..copy_len], first_poly[0..copy_len]);
+
+                return UniSkipFirstRoundProof(F){
+                    .uni_poly = coeffs,
+                    .allocator = self.allocator,
+                };
+            }
+
+            // Create a zero polynomial if no data
+            const coeffs = try self.allocator.alloc(F, NUM_COEFFS);
+            @memset(coeffs, F.zero());
+            return UniSkipFirstRoundProof(F){
+                .uni_poly = coeffs,
+                .allocator = self.allocator,
+            };
         }
     };
 }

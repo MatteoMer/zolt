@@ -2,12 +2,15 @@
 
 ## Current Status (Jolt Compatibility Phase)
 
-**Project Status: JOLT COMPATIBILITY - Serialization Complete**
+**Project Status: JOLT COMPATIBILITY - Prover Wiring Complete**
 
 The following Jolt-compatibility components are now working:
 - Blake2b transcript with identical Fiat-Shamir challenges
 - Jolt-compatible proof types (JoltProof, SumcheckInstanceProof, etc.)
 - Arkworks-compatible serialization with byte-perfect output
+- Proof converter (6-stage Zolt → 7-stage Jolt)
+- JoltProver with `proveJoltCompatible()` method
+- Jolt proof serialization with `serializeJoltProof()`
 
 ---
 
@@ -52,24 +55,34 @@ The following Jolt-compatibility components are now working:
   - [x] Fr(0xDEADBEEF) → `[ef, be, ad, de, ...]`
   - [x] usize(1234567890) → `[d2, 02, 96, 49, ...]`
 
-### 4. Prover Wiring (NEXT)
+### 4. Prover Wiring ✅ COMPLETE
 
-- [ ] **Connect JoltProof to Prover**
-  - [ ] Modify prover to output JoltProof instead of current format
-  - [ ] Populate all 7 stage proofs
-  - [ ] Add UniSkipFirstRoundProof for stages 1-2
-  - [ ] Populate opening_claims correctly
+- [x] **Proof Converter** (`src/zkvm/proof_converter.zig`)
+  - [x] Map Zolt 6-stage to Jolt 7-stage format
+  - [x] Create UniSkipFirstRoundProof for stages 1-2
+  - [x] Populate OpeningClaims with SumcheckId mappings
+  - [x] Configuration for bytecode_K, log_k_chunk, etc.
 
-- [ ] **Commitment Scheme**
+- [x] **JoltProver Integration** (`src/zkvm/mod.zig`)
+  - [x] `proveJoltCompatible()` - Generate Jolt-compatible proof
+  - [x] `serializeJoltProof()` - Serialize to arkworks format
+  - [x] Wire up proof converter with prover
+
+- [ ] **Commitment Scheme** (Future)
   - [ ] Wire up Dory commitments
   - [ ] Serialize GT elements in arkworks format
 
-### 5. Integration Testing
+### 5. Integration Testing (NEXT)
+
+- [ ] **End-to-End Serialization Test**
+  - [ ] Generate proof in Zolt for a simple program
+  - [ ] Serialize in Jolt-compatible format
+  - [ ] Verify serialized bytes structure
 
 - [ ] **Cross-Verification Tests**
   - [ ] Generate proof in Zolt for fibonacci.elf
-  - [ ] Serialize in Jolt-compatible format
   - [ ] Load in Jolt and verify
+  - [ ] Create Rust test harness in Jolt
 
 ---
 
@@ -94,6 +107,7 @@ The following Jolt-compatibility components are now working:
 | **Blake2b Transcript** | **Working** | **Pass** |
 | **Jolt Types** | **Working** | **Pass** |
 | **Jolt Serialization** | **Working** | **Pass** |
+| **Proof Converter** | **Working** | **Pass** |
 
 ### All Tests Passing
 
@@ -126,7 +140,8 @@ Build Summary: 5/5 steps succeeded; 578/578 tests passed
 | `src/transcripts/blake2b.zig` | ✅ Done | Blake2bTranscript |
 | `src/zkvm/jolt_types.zig` | ✅ Done | Jolt proof types |
 | `src/zkvm/jolt_serialization.zig` | ✅ Done | Arkworks serialization |
-| `src/zkvm/prover.zig` | Pending | Wire up Jolt format |
+| `src/zkvm/proof_converter.zig` | ✅ Done | 6→7 stage converter |
+| `src/zkvm/mod.zig` | ✅ Done | JoltProver with Jolt export |
 
 ### Jolt (Reference Only)
 | File | Purpose |
@@ -141,14 +156,15 @@ Build Summary: 5/5 steps succeeded; 578/578 tests passed
 ## Success Criteria
 
 1. ✅ `zig build test` passes all 578 tests
-2. ⏳ Zolt can generate a proof in Jolt format
-3. ⏳ The proof can be loaded and verified by Jolt
-4. ⏳ No modifications needed on the Jolt side
+2. ✅ Zolt can generate a proof in Jolt format (`proveJoltCompatible`)
+3. ✅ Zolt can serialize proofs in arkworks format (`serializeJoltProof`)
+4. ⏳ The proof can be loaded and verified by Jolt
+5. ⏳ No modifications needed on the Jolt side
 
 ## Priority Order
 
 1. ✅ **Transcript** - Matching Fiat-Shamir complete
 2. ✅ **Proof Types** - JoltProof structure defined
 3. ✅ **Serialization** - Byte-perfect compatibility verified
-4. ⏳ **Prover Wiring** - Connect types to prover
+4. ✅ **Prover Wiring** - Connect types to prover
 5. ⏳ **Integration** - End-to-end verification

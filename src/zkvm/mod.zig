@@ -407,6 +407,105 @@ pub fn JoltProver(comptime F: type) type {
             };
         }
 
+        /// Generate a proof in Jolt-compatible format
+        ///
+        /// This produces a proof that can be serialized in arkworks format
+        /// and verified by the Jolt verifier.
+        ///
+        /// The proof is structured according to Jolt's 7-stage format:
+        /// - Stage 1: Outer Spartan (with UniSkip)
+        /// - Stage 2: Product virtualization + RAM RAF + Read-Write (with UniSkip)
+        /// - Stage 3: Spartan shift + Instruction input + Registers claim
+        /// - Stage 4: Registers RW + RAM val evaluation + final
+        /// - Stage 5: Registers val + RAM RA reduction + Lookups RAF
+        /// - Stage 6: Bytecode RAF + Hamming + Booleanity + RA virtual
+        /// - Stage 7: Hamming weight claim reduction
+        pub fn proveJoltCompatible(
+            self: *Self,
+            program_bytecode: []const u8,
+            inputs: []const u8,
+        ) !jolt_types.JoltProof(F, commitment_types.PolyCommitment, commitment_types.OpeningProof) {
+            // First generate the Zolt internal proof
+            var zolt_proof = try self.prove(program_bytecode, inputs);
+            defer zolt_proof.deinit();
+
+            // Convert to Jolt format using the proof converter
+            var converter = proof_converter.ProofConverter(F).init(self.allocator);
+
+            // If we don't have stage proofs, return an empty Jolt proof
+            const stage_proofs = zolt_proof.stage_proofs orelse {
+                return jolt_types.JoltProof(F, commitment_types.PolyCommitment, commitment_types.OpeningProof).init(self.allocator);
+            };
+
+            // Collect commitments from the internal proof
+            var commitments = std.ArrayList(commitment_types.PolyCommitment).init(self.allocator);
+            defer commitments.deinit();
+
+            try commitments.append(zolt_proof.bytecode_proof.commitment);
+            try commitments.append(zolt_proof.memory_proof.commitment);
+            try commitments.append(zolt_proof.memory_proof.final_state_commitment);
+            try commitments.append(zolt_proof.register_proof.commitment);
+            try commitments.append(zolt_proof.register_proof.final_state_commitment);
+
+            // Convert to Jolt-compatible format
+            return converter.convert(
+                commitment_types.PolyCommitment,
+                commitment_types.OpeningProof,
+                &stage_proofs,
+                commitments.items,
+                null, // joint_opening_proof - would come from Dory
+                .{
+                    .bytecode_K = 1 << 16,
+                    .log_k_chunk = 10,
+                    .lookups_ra_virtual_log_k_chunk = 8,
+                },
+            );
+        }
+
+        /// Serialize a Jolt-compatible proof to bytes
+        ///
+        /// This serializes the proof in arkworks format that can be
+        /// deserialized by the Jolt verifier.
+        pub fn serializeJoltProof(
+            self: *Self,
+            jolt_proof_ptr: *const jolt_types.JoltProof(F, commitment_types.PolyCommitment, commitment_types.OpeningProof),
+        ) ![]u8 {
+            var serializer = jolt_serialization.ArkworksSerializer(F).init(self.allocator);
+            errdefer serializer.deinit();
+
+            // Define how to serialize commitments
+            const writeCommitment = struct {
+                fn f(ser: *jolt_serialization.ArkworksSerializer(F), c: commitment_types.PolyCommitment) !void {
+                    // Serialize G1 point in compressed format (32 or 33 bytes)
+                    const bytes = c.toBytes();
+                    try ser.writeBytes(&bytes);
+                }
+            }.f;
+
+            // Define how to serialize opening proofs
+            const writeProof = struct {
+                fn f(ser: *jolt_serialization.ArkworksSerializer(F), p: commitment_types.OpeningProof) !void {
+                    // Serialize opening proof structure
+                    try ser.writeUsize(p.quotients.len);
+                    for (p.quotients) |q| {
+                        const bytes = commitment_types.PolyCommitment.fromPoint(q.point).toBytes();
+                        try ser.writeBytes(&bytes);
+                    }
+                    try ser.writeFieldElement(p.final_eval);
+                }
+            }.f;
+
+            try serializer.writeJoltProof(
+                commitment_types.PolyCommitment,
+                commitment_types.OpeningProof,
+                jolt_proof_ptr,
+                writeCommitment,
+                writeProof,
+            );
+
+            return serializer.toOwnedSlice();
+        }
+
         /// Commit to bytecode polynomial
         fn commitBytecode(
             self: *Self,

@@ -33,7 +33,7 @@ fn printHelp() void {
         \\    version           Show version information
         \\    info              Show zkVM capabilities and feature summary
         \\    run [opts] <elf>   Run RISC-V ELF binary in the emulator
-        \\    prove <elf>       Generate ZK proof for ELF binary (experimental)
+        \\    prove [opts] <elf> Generate ZK proof for ELF binary (experimental)
         \\    srs <ptau>        Inspect a Powers of Tau (ptau) file
         \\    decode <hex>      Decode a RISC-V instruction (hex)
         \\    bench             Run performance benchmarks
@@ -250,9 +250,11 @@ fn runEmulator(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles: ?
     }
 }
 
-fn runProver(allocator: std.mem.Allocator, elf_path: []const u8) !void {
+fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt: ?u64) !void {
     std.debug.print("Zolt zkVM Prover\n", .{});
     std.debug.print("================\n\n", .{});
+
+    const max_cycles = max_cycles_opt orelse 1024;
 
     // Load the ELF file
     std.debug.print("Loading ELF: {s}\n", .{elf_path});
@@ -267,13 +269,14 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8) !void {
 
     std.debug.print("  Entry point: 0x{x:0>8}\n", .{program.entry_point});
     std.debug.print("  Code size: {} bytes\n", .{program.bytecode.len});
+    std.debug.print("  Max cycles: {}\n", .{max_cycles});
 
     // Step 1: Preprocess to get proving/verifying keys
     std.debug.print("\n[1/4] Preprocessing...\n", .{});
     var timer = std.time.Timer.start() catch return;
 
     var preprocessor = zolt.host.Preprocessing(BN254Scalar).init(allocator);
-    preprocessor.setMaxTraceLength(1024);
+    preprocessor.setMaxTraceLength(max_cycles);
 
     var keys = try preprocessor.preprocess(&program);
     defer keys.pk.deinit();
@@ -289,7 +292,7 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8) !void {
     timer.reset();
 
     var prover_inst = zolt.zkvm.JoltProver(BN254Scalar).init(allocator);
-    prover_inst.setMaxCycles(1024);
+    prover_inst.setMaxCycles(max_cycles);
     // Convert host ProvingKey to zkvm ProvingKey
     const zkvm_pk = zolt.zkvm.ProvingKey.fromSRS(keys.pk.srs);
     prover_inst.setProvingKey(zkvm_pk);
@@ -604,22 +607,57 @@ pub fn main() !void {
         .prove => {
             if (args.next()) |arg| {
                 if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-                    std.debug.print("Usage: zolt prove <elf_file>\n\n", .{});
+                    std.debug.print("Usage: zolt prove [options] <elf_file>\n\n", .{});
                     std.debug.print("Generate a ZK proof for a RISC-V ELF binary.\n", .{});
                     std.debug.print("This experimental command runs the full proving pipeline:\n", .{});
                     std.debug.print("  1. Preprocess (generate SRS and keys)\n", .{});
                     std.debug.print("  2. Initialize prover\n", .{});
                     std.debug.print("  3. Generate proof using multi-stage sumcheck\n", .{});
-                    std.debug.print("  4. Verify the proof\n", .{});
+                    std.debug.print("  4. Verify the proof\n\n", .{});
+                    std.debug.print("Options:\n", .{});
+                    std.debug.print("  --max-cycles N   Limit execution to N cycles (default: 1024)\n", .{});
                 } else {
-                    runProver(allocator, arg) catch |err| {
-                        std.debug.print("Failed to generate proof: {s}\n", .{@errorName(err)});
-                        std.process.exit(1);
-                    };
+                    // Parse options
+                    var elf_path: ?[]const u8 = null;
+                    var max_cycles: ?u64 = null;
+
+                    // First arg could be an option or the ELF path
+                    if (std.mem.startsWith(u8, arg, "--")) {
+                        if (std.mem.eql(u8, arg, "--max-cycles")) {
+                            if (args.next()) |cycles_str| {
+                                max_cycles = std.fmt.parseInt(u64, cycles_str, 10) catch null;
+                            }
+                        }
+                    } else {
+                        elf_path = arg;
+                    }
+
+                    // Parse remaining args
+                    while (args.next()) |next_arg| {
+                        if (std.mem.startsWith(u8, next_arg, "--")) {
+                            if (std.mem.eql(u8, next_arg, "--max-cycles")) {
+                                if (args.next()) |cycles_str| {
+                                    max_cycles = std.fmt.parseInt(u64, cycles_str, 10) catch null;
+                                }
+                            }
+                        } else if (elf_path == null) {
+                            elf_path = next_arg;
+                        }
+                    }
+
+                    if (elf_path) |path| {
+                        runProver(allocator, path, max_cycles) catch |err| {
+                            std.debug.print("Failed to generate proof: {s}\n", .{@errorName(err)});
+                            std.process.exit(1);
+                        };
+                    } else {
+                        std.debug.print("Error: prove command requires an ELF file path\n", .{});
+                        std.debug.print("Usage: zolt prove [options] <elf_file>\n", .{});
+                    }
                 }
             } else {
                 std.debug.print("Error: prove command requires an ELF file path\n", .{});
-                std.debug.print("Usage: zolt prove <elf_file>\n", .{});
+                std.debug.print("Usage: zolt prove [options] <elf_file>\n", .{});
             }
         },
         .srs => {

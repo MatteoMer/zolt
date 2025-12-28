@@ -1,30 +1,27 @@
 # Zolt zkVM Implementation Plan
 
-## Current Status (December 2024 - Iteration 17)
+## Current Status (December 2024 - Iteration 18)
 
 ### Session Summary
 
-This iteration focused on improving the HyperKZG verification and fixing batch verification issues:
+This iteration focused on wiring proper polynomial commitments into the proof structures:
 
-1. **HyperKZG Verification Enhancement**
-   - Improved `verifyWithPairing()` with proper batching
-   - Added gamma-based batching: W = sum_i gamma^i * Q_i
-   - Compute correction term: sum_i gamma^i * r_i * Q_i
-   - Pairing equation: e(C - v*G1 - correction, G2) == e(W, tau_G2)
-   - Added `verifyAlgebraic()` for testing without pairing overhead
+1. **Commitment Type Infrastructure**
+   - Created `commitment_types.zig` with `PolyCommitment` wrapping G1 points
+   - Added `OpeningProof` type for batch verification support
+   - Updated BytecodeProof, MemoryProof, RegisterProof to use PolyCommitment
+   - Added init() and withCommitments() constructors for clean API
 
-2. **Host Execute Tests**
-   - Added tests for host.execute() with simple and multi-instruction programs
-   - Verified program execution trace generation
-
-3. **Batch Verification Fixes**
-   - Fixed `verifyBatch()` return type to `!bool` (error union)
-   - Added test reference so batch.zig tests are discovered by Zig test runner
-   - Added tests for multiple claims and claim initialization
+2. **Commitment Generation in Prover**
+   - Added `ProvingKey` struct containing HyperKZG SRS
+   - Implemented `commitBytecode()` - converts bytecode to polynomial and commits
+   - Implemented `commitMemory()` - commits memory trace values
+   - Implemented `commitRegisters()` - commits register trace values
+   - Prover generates real G1 point commitments when ProvingKey is provided
 
 ### Test Status
 
-All 364 tests pass:
+All 366 tests pass:
 - Field arithmetic: Fp, Fp2, Fp6, Fp12
 - Curve arithmetic: G1, G2 points (correct projective doubling)
 - Pairing: bilinearity verified, SRS relationship verified
@@ -35,6 +32,8 @@ All 364 tests pass:
 - ELF loading (ELF32/ELF64)
 - MSM operations
 - Spartan proof generation and verification
+- ProvingKey initialization
+- Commitment type operations
 
 ### Architecture Summary
 
@@ -48,13 +47,20 @@ Fp6 = Fp2[v] / (v³ - ξ)  where ξ = 9 + u
 Fp12 = Fp6[w] / (w² - v)
 ```
 
-#### HyperKZG Type Usage
+#### Commitment Architecture
 ```
-Polynomial evaluations: Fr (scalar field)
-G1 point coordinates: Fp (base field)
-G2 point coordinates: Fp2 (extension field)
-Scalars for EC multiplication: Fr
-MSM: MSM(Fr, Fp) - Fr scalars, Fp coordinates
+PolyCommitment = G1 point wrapper
+  - fromPoint(G1Point) -> PolyCommitment
+  - zero() -> identity commitment
+  - eql(), isZero() for comparison
+
+ProvingKey = { srs: HyperKZG.SetupParams, max_trace_length }
+  - init(allocator, size) -> generates SRS
+  - fromSRS(existing_srs) -> uses existing SRS
+
+JoltProver
+  - Without ProvingKey: uses identity commitments (placeholder)
+  - With ProvingKey: generates real HyperKZG commitments
 ```
 
 ## Components Status
@@ -78,16 +84,20 @@ MSM: MSM(Fr, Fp) - Fr scalars, Fp coordinates
 - **Lasso** - Lookup argument prover/verifier
 - **Multi-stage Prover** - 6-stage sumcheck orchestration
 - **Transcripts** - Keccak and Poseidon-based Fiat-Shamir
+- **PolyCommitment** - G1 point wrapper for proofs
+- **ProvingKey** - SRS-based commitment infrastructure
+- **Prover Commitments** - Real G1 commitments for bytecode/memory/registers
 
 ### Partially Working
 - **Dory** - commit() works, open() is placeholder
-- **JoltProof Commitments** - Uses field elements instead of G1 points
+- **JoltVerifier** - Placeholder commitment verification (needs SRS)
 
 ## Future Work
 
 ### High Priority
-1. Wire proper HyperKZG commitments into JoltProof structure
-2. Implement batch opening verification
+1. Implement batch opening proofs
+2. Wire commitment verification into JoltVerifier
+3. Add VerifyingKey with SRS subset
 
 ### Medium Priority
 1. Implement Dory open() with inner product argument

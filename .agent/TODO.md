@@ -1,48 +1,44 @@
 # Zolt zkVM Implementation TODO
 
-## Completed (This Session - Iteration 17)
+## Completed (This Session - Iteration 18)
 
-### HyperKZG Verification Improvements
-- [x] Enhanced `verifyWithPairing()` with proper batching and pairing check
-  - Added gamma-based batching for quotient commitments
-  - Compute correction term from evaluation points
-  - Proper pairing equation: e(L, G2) == e(W, tau_G2)
-- [x] Added `verifyAlgebraic()` for testing without pairing overhead
-- [x] Added comprehensive documentation for verification algorithm
+### Commitment Type Infrastructure
+- [x] Created `commitment_types.zig` with PolyCommitment wrapping G1 points
+- [x] Added OpeningProof type for batch verification
+- [x] Updated BytecodeProof to use PolyCommitment instead of field elements
+- [x] Updated MemoryProof to use PolyCommitment with final_state_commitment
+- [x] Updated RegisterProof to use PolyCommitment with final_state_commitment
+- [x] Added init() and withCommitments() constructors for proofs
 
-### Host Execute Integration Tests
-- [x] Added test "execute runs simple program" - verifies c.nop execution
-- [x] Added test "execute with longer program" - verifies multi-instruction execution
-
-### Batch Verification Fixes
-- [x] Fixed `verifyBatch()` to return `!bool` (error union) for transcript errors
-- [x] Added test reference so batch.zig tests are discovered
-- [x] Added test "batch opening accumulator multiple claims"
-- [x] Added test "opening claim initialization"
+### Commitment Generation in Prover
+- [x] Added ProvingKey struct with HyperKZG SRS
+- [x] Added initWithKey() to JoltProver for commitment-enabled proving
+- [x] Implemented commitBytecode() - commits bytecode polynomial
+- [x] Implemented commitMemory() - commits memory trace polynomial
+- [x] Implemented commitRegisters() - commits register trace polynomial
+- [x] Prover generates real G1 commitments when ProvingKey is provided
 
 ## Completed (Previous Sessions)
 
-### Iteration 16: Projective Point Doubling Bug + HyperKZG Architecture
-- [x] Fixed ProjectivePoint.double() - was using D instead of 2*D
-- [x] Changed HyperKZG to use Fp (base field) for G1 point coordinates
-- [x] Verified SRS pairing relationship: e([τ]G1, G2) = e(G1, [τ]G2)
+### Iteration 17: HyperKZG Verification + Host Execute
+- [x] Enhanced verifyWithPairing() with proper batching
+- [x] Added verifyAlgebraic() for testing
+- [x] Added host execute tests
+- [x] Fixed batch verification return type
 
-### Iteration 15: BN254 Pairing
-- [x] Fixed Fp6 non-residue ξ = 9 + u
-- [x] Added pairingFp() and pairingCheckFp() functions
-- [x] Verified pairing bilinearity
-
-### Iterations 1-14: Core Infrastructure
+### Iterations 1-16: Core Infrastructure
 - [x] Lookup table infrastructure (14 tables)
 - [x] Lasso prover/verifier
 - [x] Instruction proving with flags
 - [x] Memory checking with RAF and Val Evaluation
 - [x] Multi-stage prover (6 stages) and verifier
-- [x] BN254 G1/G2 generators
+- [x] BN254 G1/G2 generators and pairing
 - [x] HyperKZG SRS generation
 - [x] Sumcheck protocol
 - [x] RISC-V emulator
 - [x] ELF loader
+- [x] Fixed Projective point doubling
+- [x] Fixed Fp6 non-residue ξ = 9 + u
 
 ## Working Components
 
@@ -60,6 +56,9 @@
 - **HyperKZG** - commit(), verify(), verifyWithPairing() with batched pairing
 - **Batch Verification** - BatchOpeningAccumulator for multiple openings
 - **Host Execute** - Program execution with trace generation
+- **PolyCommitment** - G1 point wrapper for proof commitments
+- **ProvingKey** - SRS-based commitment generation
+- **Prover Commitments** - Bytecode, memory, register polynomials committed
 
 ### Partially Working
 - **Dory** - commit() works, open() placeholder
@@ -68,8 +67,9 @@
 ## Next Steps (Future Iterations)
 
 ### High Priority
-- [ ] Wire commitment proofs into JoltProof structure
-- [ ] Implement batch opening verification for multiple polynomials
+- [ ] Implement batch opening proofs (prove multiple polynomial openings)
+- [ ] Wire commitment verification into JoltVerifier
+- [ ] Add VerifyingKey with SRS subset for verification
 
 ### Medium Priority
 - [ ] Dory open() with proper inner product argument
@@ -81,4 +81,4 @@
 - [ ] Documentation and examples
 
 ## Test Status
-All 364 tests pass.
+All 366 tests pass.

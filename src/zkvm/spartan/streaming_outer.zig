@@ -67,6 +67,10 @@ pub fn StreamingOuterProver(comptime F: type) type {
         /// Used for remaining rounds
         lagrange_evals_r0: [FIRST_GROUP_SIZE]F,
 
+        /// Bound r_stream value (set after streaming round)
+        /// Used to combine constraint groups in subsequent rounds
+        r_stream: ?F,
+
         /// Allocator
         allocator: Allocator,
 
@@ -103,6 +107,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 .challenges = .{},
                 .current_round = 0,
                 .lagrange_evals_r0 = [_]F{F.zero()} ** FIRST_GROUP_SIZE,
+                .r_stream = null,
                 .allocator = allocator,
             };
         }
@@ -436,9 +441,13 @@ pub fn StreamingOuterProver(comptime F: type) type {
         }
 
         /// Bind the first-round challenge and set up for remaining rounds
-        pub fn bindFirstRoundChallenge(self: *Self, r0: F) !void {
+        ///
+        /// The uni_skip_claim parameter is uni_poly(r0), the evaluation of the
+        /// univariate skip polynomial at the first-round challenge.
+        pub fn bindFirstRoundChallenge(self: *Self, r0: F, uni_skip_claim: F) !void {
             try self.challenges.append(self.allocator, r0);
             self.current_round = 1;
+            self.current_claim = uni_skip_claim;
 
             // Compute Lagrange basis evaluations at r0 for use in remaining rounds
             self.computeLagrangeEvalsAtR0(r0);
@@ -448,23 +457,38 @@ pub fn StreamingOuterProver(comptime F: type) type {
         }
 
         /// Compute Lagrange basis evaluations at r0
+        ///
+        /// IMPORTANT: The domain is the symmetric window {-4, -3, -2, -1, 0, 1, 2, 3, 4, 5}
+        /// matching Jolt's LagrangePolynomial::start_i64 which computes -(N-1)/2 = -4 for N=10.
         fn computeLagrangeEvalsAtR0(self: *Self, r0: F) void {
             // L_i(r0) for i in 0..FIRST_GROUP_SIZE
-            // Uses the Lagrange interpolation formula
+            // Domain is {start, start+1, ..., start+FIRST_GROUP_SIZE-1}
+            // where start = -((FIRST_GROUP_SIZE - 1) / 2) = -4
+
+            const start: i64 = -@as(i64, (FIRST_GROUP_SIZE - 1) / 2); // = -4
 
             for (0..FIRST_GROUP_SIZE) |i| {
+                _ = start + @as(i64, @intCast(i)); // actual domain point (unused but shows semantics)
                 var numer = F.one();
                 var denom = F.one();
 
                 for (0..FIRST_GROUP_SIZE) |j| {
                     if (i != j) {
-                        // numer *= (r0 - j)
-                        numer = numer.mul(r0.sub(F.fromU64(j)));
-                        // denom *= (i - j)
-                        if (i > j) {
-                            denom = denom.mul(F.fromU64(i - j));
+                        const x_j: i64 = start + @as(i64, @intCast(j));
+
+                        // numer *= (r0 - x_j)
+                        const x_j_field = if (x_j >= 0)
+                            F.fromU64(@intCast(x_j))
+                        else
+                            F.zero().sub(F.fromU64(@intCast(-x_j)));
+                        numer = numer.mul(r0.sub(x_j_field));
+
+                        // denom *= (x_i - x_j) = (i - j) since x_k = start + k
+                        const diff: i64 = @as(i64, @intCast(i)) - @as(i64, @intCast(j));
+                        if (diff > 0) {
+                            denom = denom.mul(F.fromU64(@intCast(diff)));
                         } else {
-                            denom = denom.mul(F.zero().sub(F.fromU64(j - i)));
+                            denom = denom.mul(F.zero().sub(F.fromU64(@intCast(-diff))));
                         }
                     }
                 }
@@ -479,45 +503,58 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
         /// Compute a remaining round polynomial (degree 3)
         ///
-        /// Uses Gruen's optimization with multiquadratic expansion
+        /// There are two types of rounds:
+        /// 1. Streaming round (current_round == 1): Sums over constraint groups
+        /// 2. Cycle rounds (current_round > 1): Sums over cycle halves using combined Az*Bz
         pub fn computeRemainingRoundPoly(self: *Self) ![4]F {
-            // Build multiquadratic grid over window
-            // (window_size would be used for more sophisticated streaming)
-
             // Get eq tables for this window
             const eq_tables = self.split_eq.getWindowEqTables(
                 self.num_cycle_vars - self.current_round + 1,
                 1,
             );
 
-            // Compute t'(0) and t'(∞) by summing over the grid
             var t_zero = F.zero();
-            var t_infinity = F.zero();
-
-            // Sum over all cycles with the current eq weights
-            const half = self.padded_trace_len >> @intCast(self.current_round);
-
-            // t'(0) = sum over first half (current variable = 0)
-            for (0..@min(half, self.cycle_witnesses.len)) |i| {
-                const eq_val = if (i < eq_tables.E_out.len) eq_tables.E_out[i] else F.zero();
-                const az_bz = self.computeCycleAzBzProduct(&self.cycle_witnesses[i]);
-                t_zero = t_zero.add(eq_val.mul(az_bz));
-            }
-
-            // t'(1) = sum over second half (current variable = 1)
             var t_one = F.zero();
-            for (0..@min(half, self.cycle_witnesses.len -| half)) |i| {
-                const cycle_idx = half + i;
-                if (cycle_idx < self.cycle_witnesses.len) {
-                    const eq_idx = if (cycle_idx < self.padded_trace_len) cycle_idx else 0;
-                    const eq_val = if (eq_idx < eq_tables.E_out.len) eq_tables.E_out[eq_idx] else F.zero();
-                    const az_bz = self.computeCycleAzBzProduct(&self.cycle_witnesses[cycle_idx]);
-                    t_one = t_one.add(eq_val.mul(az_bz));
+
+            if (self.current_round == 1) {
+                // STREAMING ROUND: Sum over constraint groups
+                // t'(0) = Σ_cycles eq(τ, x) * Az_g0(x) * Bz_g0(x)
+                // t'(1) = Σ_cycles eq(τ, x) * Az_g1(x) * Bz_g1(x)
+                for (0..@min(self.padded_trace_len, self.cycle_witnesses.len)) |i| {
+                    const eq_val = if (i < eq_tables.E_out.len) eq_tables.E_out[i] else F.zero();
+                    const az_bz_g0 = self.computeCycleAzBzProductForGroup(&self.cycle_witnesses[i], 0);
+                    const az_bz_g1 = self.computeCycleAzBzProductForGroup(&self.cycle_witnesses[i], 1);
+                    t_zero = t_zero.add(eq_val.mul(az_bz_g0));
+                    t_one = t_one.add(eq_val.mul(az_bz_g1));
+                }
+            } else {
+                // CYCLE ROUND: Sum over cycle halves using combined Az*Bz
+                // Need r_stream to combine constraint groups
+                const r_stream = self.r_stream orelse F.zero();
+
+                const half = self.padded_trace_len >> @intCast(self.current_round);
+
+                // t'(0) = sum over first half (current cycle variable = 0)
+                for (0..@min(half, self.cycle_witnesses.len)) |i| {
+                    const eq_val = if (i < eq_tables.E_out.len) eq_tables.E_out[i] else F.zero();
+                    const az_bz = self.computeCycleAzBzProductCombined(&self.cycle_witnesses[i], r_stream);
+                    t_zero = t_zero.add(eq_val.mul(az_bz));
+                }
+
+                // t'(1) = sum over second half (current cycle variable = 1)
+                for (0..@min(half, self.cycle_witnesses.len -| half)) |i| {
+                    const cycle_idx = half + i;
+                    if (cycle_idx < self.cycle_witnesses.len) {
+                        const eq_idx = if (cycle_idx < self.padded_trace_len) cycle_idx else 0;
+                        const eq_val = if (eq_idx < eq_tables.E_out.len) eq_tables.E_out[eq_idx] else F.zero();
+                        const az_bz = self.computeCycleAzBzProductCombined(&self.cycle_witnesses[cycle_idx], r_stream);
+                        t_one = t_one.add(eq_val.mul(az_bz));
+                    }
                 }
             }
 
             // t'(∞) = t'(1) - t'(0) (slope)
-            t_infinity = t_one.sub(t_zero);
+            const t_infinity = t_one.sub(t_zero);
 
             // Use Gruen's method to compute the cubic round polynomial
             const previous_claim = self.current_claim;
@@ -530,19 +567,29 @@ pub fn StreamingOuterProver(comptime F: type) type {
             return round_poly;
         }
 
-        /// Compute Az * Bz product for a single cycle (summed over all constraints)
+        /// Compute Az * Bz product for a single cycle (for given constraint group)
         ///
-        /// Correct computation:
+        /// Computation:
         /// Az = Σ_i L_i(r0) * condition_i(witness)
         /// Bz = Σ_i L_i(r0) * (left_i - right_i)(witness)
         /// Return Az * Bz
-        fn computeCycleAzBzProduct(self: *const Self, witness: *const constraints.R1CSCycleInputs(F)) F {
+        ///
+        /// This computes Az*Bz for a single constraint group. The streaming round
+        /// uses both groups combined with r_stream.
+        fn computeCycleAzBzProductForGroup(
+            self: *const Self,
+            witness: *const constraints.R1CSCycleInputs(F),
+            group: usize, // 0 = first group, 1 = second group
+        ) F {
             var az_sum = F.zero();
             var bz_sum = F.zero();
 
-            // Sum over first group constraints weighted by Lagrange basis
-            for (0..FIRST_GROUP_SIZE) |i| {
-                const constraint_idx = constraints.FIRST_GROUP_INDICES[i];
+            const group_size = if (group == 0) FIRST_GROUP_SIZE else @min(SECOND_GROUP_SIZE, FIRST_GROUP_SIZE);
+            const group_indices = if (group == 0) &constraints.FIRST_GROUP_INDICES else &constraints.SECOND_GROUP_INDICES;
+
+            // Sum over group constraints weighted by Lagrange basis
+            for (0..group_size) |i| {
+                const constraint_idx = group_indices[i];
                 const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
                 const condition = constraint.condition.evaluate(F, witness.asSlice());
                 const left = constraint.left.evaluate(F, witness.asSlice());
@@ -556,19 +603,75 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 bz_sum = bz_sum.add(self.lagrange_evals_r0[i].mul(magnitude));
             }
 
-            // Return the PRODUCT of the sums, not sum of products
+            // Return the PRODUCT of the sums
             return az_sum.mul(bz_sum);
+        }
+
+        /// Compute combined Az * Bz for a single cycle using bound r_stream value
+        ///
+        /// The formula is:
+        /// Az_final = (1 - r_stream) * Az_g0 + r_stream * Az_g1
+        /// Bz_final = (1 - r_stream) * Bz_g0 + r_stream * Bz_g1
+        /// Return Az_final * Bz_final
+        fn computeCycleAzBzProductCombined(
+            self: *const Self,
+            witness: *const constraints.R1CSCycleInputs(F),
+            r_stream: F,
+        ) F {
+            // Compute Az and Bz for both groups
+            var az_g0 = F.zero();
+            var bz_g0 = F.zero();
+            var az_g1 = F.zero();
+            var bz_g1 = F.zero();
+
+            // Group 0
+            for (0..FIRST_GROUP_SIZE) |i| {
+                const constraint_idx = constraints.FIRST_GROUP_INDICES[i];
+                const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
+                const condition = constraint.condition.evaluate(F, witness.asSlice());
+                const left = constraint.left.evaluate(F, witness.asSlice());
+                const right = constraint.right.evaluate(F, witness.asSlice());
+                const magnitude = left.sub(right);
+                az_g0 = az_g0.add(self.lagrange_evals_r0[i].mul(condition));
+                bz_g0 = bz_g0.add(self.lagrange_evals_r0[i].mul(magnitude));
+            }
+
+            // Group 1
+            const g2_size = @min(SECOND_GROUP_SIZE, FIRST_GROUP_SIZE);
+            for (0..g2_size) |i| {
+                const constraint_idx = constraints.SECOND_GROUP_INDICES[i];
+                const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
+                const condition = constraint.condition.evaluate(F, witness.asSlice());
+                const left = constraint.left.evaluate(F, witness.asSlice());
+                const right = constraint.right.evaluate(F, witness.asSlice());
+                const magnitude = left.sub(right);
+                az_g1 = az_g1.add(self.lagrange_evals_r0[i].mul(condition));
+                bz_g1 = bz_g1.add(self.lagrange_evals_r0[i].mul(magnitude));
+            }
+
+            // Combine using r_stream: final = g0 + r_stream * (g1 - g0)
+            const az_final = az_g0.add(r_stream.mul(az_g1.sub(az_g0)));
+            const bz_final = bz_g0.add(r_stream.mul(bz_g1.sub(bz_g0)));
+
+            return az_final.mul(bz_final);
+        }
+
+        /// Compute Az * Bz product for a single cycle (legacy, uses only group 0)
+        /// This is kept for compatibility but should not be used for correct proofs.
+        fn computeCycleAzBzProduct(self: *const Self, witness: *const constraints.R1CSCycleInputs(F)) F {
+            return self.computeCycleAzBzProductForGroup(witness, 0);
         }
 
         /// Bind a remaining round challenge
         pub fn bindRemainingRoundChallenge(self: *Self, r: F) !void {
+            // If this is the streaming round (current_round == 1), save r_stream
+            if (self.current_round == 1) {
+                self.r_stream = r;
+            }
+
             try self.challenges.append(self.allocator, r);
             self.split_eq.bind(r);
             self.current_round += 1;
-
-            // Update current claim
-            // claim = (1 - r) * s(0) + r * s(1)
-            // This is computed from the round polynomial
         }
 
         /// Update the current claim after a round
@@ -606,10 +709,9 @@ pub fn StreamingOuterProver(comptime F: type) type {
             transcript.appendSlice(&first_round_coeffs);
             const r0 = transcript.challengeScalar();
 
-            try self.bindFirstRoundChallenge(r0);
-
-            // Initialize current claim from first round
-            self.current_claim = self.evaluatePolyAtChallenge(&first_round_coeffs, r0);
+            // Compute the claim from first round polynomial
+            const uni_skip_claim = self.evaluatePolyAtChallenge(&first_round_coeffs, r0);
+            try self.bindFirstRoundChallenge(r0, uni_skip_claim);
 
             // Create proofs
             const uniskip_proof = try jolt_types.UniSkipFirstRoundProof(F).init(
@@ -733,8 +835,10 @@ test "StreamingOuterProver: Lagrange basis at r0" {
     var prover = try StreamingOuterProver(F).init(testing.allocator, &witnesses, &tau);
     defer prover.deinit();
 
-    // Bind first round with r0 = 0 (should give L_0(0) = 1, L_i(0) = 0 for i > 0)
-    try prover.bindFirstRoundChallenge(F.zero());
+    // Bind first round with r0 = 0
+    // Domain is {-4, -3, -2, -1, 0, 1, 2, 3, 4, 5}
+    // So domain point 0 is at index 4, meaning L_4(0) = 1
+    try prover.bindFirstRoundChallenge(F.zero(), F.zero());
 
-    try testing.expect(prover.lagrange_evals_r0[0].eql(F.one()));
+    try testing.expect(prover.lagrange_evals_r0[4].eql(F.one()));
 }

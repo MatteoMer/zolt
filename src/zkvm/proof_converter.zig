@@ -280,9 +280,10 @@ pub fn ProofConverter(comptime F: type) type {
             }
 
             // Bind the first-round challenge (would come from transcript)
-            // For now, use a deterministic challenge
+            // For now, use a deterministic challenge and placeholder claim
             const r0 = F.fromU64(0x9e3779b97f4a7c15);
-            outer_prover.bindFirstRoundChallenge(r0) catch {};
+            const uni_skip_claim = F.zero(); // Placeholder - non-transcript version
+            outer_prover.bindFirstRoundChallenge(r0, uni_skip_claim) catch {};
 
             // Generate remaining round polynomials
             for (1..num_rounds) |_| {
@@ -382,8 +383,8 @@ pub fn ProofConverter(comptime F: type) type {
             // Use evaluatePolyAtChallenge which handles the Jolt-format challenge [0, 0, low, high]
             const uni_skip_claim = evaluatePolyAtChallenge(uniskip_proof.uni_poly, r0);
 
-            // Bind the first-round challenge from transcript
-            outer_prover.bindFirstRoundChallenge(r0) catch {};
+            // Bind the first-round challenge from transcript with the uni_skip_claim
+            outer_prover.bindFirstRoundChallenge(r0, uni_skip_claim) catch {};
 
             // Generate remaining rounds
             // In Jolt, stage1_sumcheck_proof contains num_rounds polynomials

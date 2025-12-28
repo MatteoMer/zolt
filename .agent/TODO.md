@@ -66,6 +66,10 @@ zig build -Doptimize=ReleaseFast
 # Run Jolt debug test
 cd /Users/matteo/projects/jolt
 cargo test --package jolt-core test_debug_stage1_verification -- --ignored --nocapture
+
+# Run Jolt full proof test
+cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture
+
 ```
 
 ---

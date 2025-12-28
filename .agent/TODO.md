@@ -12,6 +12,15 @@
 - [x] Connected DIV/DIVU/REM/REMU to lookup trace collector
 - [x] Comprehensive tests for all division edge cases
 
+### RV64 Word-Sized (*W) Instructions
+- [x] Added AddwLookup, SubwLookup for 32-bit arithmetic
+- [x] Added SllwLookup, SrlwLookup, SrawLookup for 32-bit shifts
+- [x] Added MulwLookup for 32-bit multiply
+- [x] Added DivwLookup, DivuwLookup for 32-bit division
+- [x] Added RemwLookup, RemuwLookup for 32-bit remainder
+- [x] All W-suffix operations sign-extend 32-bit results to 64 bits
+- [x] Tests covering overflow and sign-extension
+
 ## Completed (Previous Sessions)
 
 ### Iteration 20: Shift Lookup Tables and Instructions
@@ -22,18 +31,12 @@
 - [x] Added SlliLookup, SrliLookup, SraiLookup for immediate shifts
 - [x] Updated lookup_trace to record shift instructions
 
-### Iteration 19: Batch Opening Proofs + Dory IPA
-- [x] Added batchCommit() to HyperKZG
-- [x] Created BatchProof struct
-- [x] Implemented batchOpen() and verifyBatchOpening()
-- [x] Full IPA opening proof for Dory with log(n) rounds
-
-### Iterations 1-18: Core Infrastructure
+### Iterations 1-19: Core Infrastructure
 - [x] BN254 field and curve arithmetic
 - [x] Extension fields (Fp2, Fp6, Fp12)
 - [x] Pairing with Miller loop and final exponentiation
-- [x] HyperKZG commit, open, verify
-- [x] Dory commit, open, verify
+- [x] HyperKZG commit, open, verify with batch support
+- [x] Dory commit, open, verify with IPA
 - [x] Sumcheck protocol
 - [x] RISC-V emulator (RV64IMC)
 - [x] ELF loader
@@ -54,17 +57,19 @@
 - **Sign Extension**: SignExtend8, SignExtend16, SignExtend32
 - **Division**: ValidDiv0, ValidUnsignedRemainder, ValidSignedRemainder
 
-### Full Instruction Coverage
+### Full Instruction Coverage (RV64IM)
 - **Base Integer (I)**: ADD, SUB, AND, OR, XOR, SLL, SRL, SRA, SLT, SLTU
 - **Branches**: BEQ, BNE, BLT, BGE, BLTU, BGEU
 - **Multiply (M)**: MUL, MULH, MULHU, MULHSU
 - **Division (M)**: DIV, DIVU, REM, REMU
+- **Word-sized (RV64)**: ADDW, SUBW, SLLW, SRLW, SRAW, MULW, DIVW, DIVUW, REMW, REMUW
 
 ## Next Steps (Future Iterations)
 
 ### High Priority
 - [ ] Import production SRS from Ethereum ceremony
 - [ ] Implement proper verifier for bytecode/memory/registers proofs
+- [ ] Connect *W lookups to tracer for OP_32 opcode
 
 ### Medium Priority
 - [ ] Performance optimization with SIMD
@@ -75,4 +80,4 @@
 - [ ] Benchmarking suite
 
 ## Test Status
-All tests pass (420+ tests).
+All tests pass (450+ tests).

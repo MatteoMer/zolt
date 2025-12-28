@@ -8,6 +8,13 @@ const Allocator = std.mem.Allocator;
 const field = @import("../field/mod.zig");
 
 pub const commitment = @import("commitment/mod.zig");
+pub const split_eq = @import("split_eq.zig");
+pub const multiquadratic = @import("multiquadratic.zig");
+
+// Re-export commonly used types
+pub const GruenSplitEqPolynomial = split_eq.GruenSplitEqPolynomial;
+pub const MultiquadraticPolynomial = multiquadratic.MultiquadraticPolynomial;
+pub const GridValue = multiquadratic.GridValue;
 
 /// Dense multilinear polynomial representation
 ///

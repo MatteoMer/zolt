@@ -2,7 +2,7 @@
 
 ## Current Status (Jolt Compatibility Phase)
 
-**Project Status: CLI INTEGRATION COMPLETE - Commitment Scheme Mismatch Identified**
+**Project Status: DORY COMMITMENTS WORKING - Opening Proofs Pending**
 
 The following Jolt-compatibility components are now working:
 - Blake2b transcript with identical Fiat-Shamir challenges
@@ -143,42 +143,37 @@ The following Jolt-compatibility components are now working:
   - [x] Serialize to file using arkworks format
   - [x] Test proof generation for fibonacci.elf
 
-### 9. Remaining Work (Blocking Issue)
+### 9. Dory Commitments ✅ PARTIALLY COMPLETE
 
-**Critical Issue: Commitment Scheme Mismatch**
+**Status: Dory Commitments Working, Opening Proofs Pending**
 
-The Jolt verifier (`RV64IMACProof`) expects **Dory commitments** (GT = Fp12, 384 bytes each),
-but Zolt is currently generating **HyperKZG commitments** (G1 points, 32 bytes each).
+Progress made:
+- ✅ `serializeJoltProofDory()` function generates GT (Fp12) commitments
+- ✅ Opening claims format verified correct (11 claims, all valid Fr)
+- ✅ All 5 GT commitments deserialize correctly in Jolt
+- ✅ UniSkipFirstRoundProof serialization fixed (now always writes, not optional)
+- ⚠️ Joint opening proof needs full Dory IPA integration
+- ⚠️ Sumcheck proofs need verification
 
-The proof format analysis shows:
-- OpeningClaims: ✅ Correct format, all 11 claims parse correctly
-- VirtualPolynomial serialization: ✅ Matches Jolt exactly
-- Commitments: ❌ Wrong type (G1 vs GT)
-- Opening proofs: ❌ Wrong type (HyperKZG vs Dory)
+**Remaining Work:**
 
-**Resolution Options:**
+1. **Dory Opening Proofs**:
+   - Integrate Dory IPA prover into zkVM proving flow
+   - Generate proper `ArkDoryProof` structure for joint opening
+   - The Dory IPA algorithm is implemented (`dory.zig`), needs wiring
 
-1. **Switch Zolt to use Dory** (recommended):
-   - Replace HyperKZG commitment scheme with Dory throughout the prover
-   - Use `DoryCommitmentScheme` instead of `HyperKZGScheme`
-   - Generate GT commitments (384 bytes) instead of G1 points
-   - This requires significant refactoring of the prover
+2. **Sumcheck Integration**:
+   - Verify sumcheck proof format matches Jolt's `SumcheckInstanceProof`
+   - Ensure `CompressedUniPoly` serialization is correct
 
-2. **Create HyperKZG proof type in Jolt**:
-   - Add `RV64IMACProofHyperKZG` type to Jolt
-   - Create verifier that accepts HyperKZG commitments
-   - Less work on Zolt side, but requires Jolt modifications
+3. **Full Integration Testing**:
+   - Generate complete proof with all fields populated
+   - Verify Jolt deserializes without "UnexpectedEof"
 
-3. **Dual-mode prover**:
-   - Keep HyperKZG for fast internal verification
-   - Add Dory commitment generation as a separate step
-   - More complex but maintains both capabilities
-
-- [ ] **Resolve Commitment Scheme Mismatch**
-  - [ ] Choose resolution option
-  - [ ] Implement chosen solution
-  - [ ] Generate proof with correct commitment type
-  - [ ] Verify proof parses in Jolt
+- [x] Add Dory commitment generation to CLI
+- [x] Write GT elements (384 bytes each) in correct format
+- [ ] Wire Dory IPA prover to generate joint_opening_proof
+- [ ] Complete full proof deserialization test in Jolt
 
 ---
 

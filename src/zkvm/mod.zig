@@ -16,6 +16,7 @@ const tracer = @import("../tracer/mod.zig");
 const transcripts = @import("../transcripts/mod.zig");
 const poly_commitment = @import("../poly/commitment/mod.zig");
 const HyperKZG = poly_commitment.HyperKZG;
+const Dory = poly_commitment.dory;
 
 pub const bytecode = @import("bytecode/mod.zig");
 pub const claim_reductions = @import("claim_reductions/mod.zig");
@@ -502,6 +503,97 @@ pub fn JoltProver(comptime F: type) type {
                 writeCommitment,
                 writeProof,
             );
+
+            return serializer.toOwnedSlice();
+        }
+
+        /// Serialize a Jolt-compatible proof to bytes using Dory commitments
+        ///
+        /// This version uses Dory commitments (GT elements, 384 bytes each)
+        /// which is the format expected by Jolt's RV64IMACProof type.
+        ///
+        /// Note: This regenerates commitments using Dory. For a fully correct
+        /// proof, the entire proving process should use Dory from the start.
+        /// This is a compatibility layer for testing serialization format.
+        pub fn serializeJoltProofDory(
+            self: *Self,
+            jolt_proof_ptr: *const jolt_types.JoltProof(F, commitment_types.PolyCommitment, commitment_types.OpeningProof),
+            bytecode_evals: []const F,
+            memory_evals: []const F,
+            memory_final_evals: []const F,
+            register_evals: []const F,
+            register_final_evals: []const F,
+        ) ![]u8 {
+            var serializer = jolt_serialization.ArkworksSerializer(F).init(self.allocator);
+            errdefer serializer.deinit();
+
+            // Setup Dory SRS
+            // Use log2 of max polynomial size
+            const max_size = @max(@max(bytecode_evals.len, memory_evals.len), register_evals.len);
+            const log_size: u32 = if (max_size <= 1) 1 else std.math.log2_int(usize, max_size) + 1;
+            var dory_srs = try Dory.DoryCommitmentScheme(F).setup(self.allocator, log_size);
+            defer dory_srs.deinit();
+
+            // Compute Dory commitments
+            const bytecode_comm = Dory.DoryCommitmentScheme(F).commit(&dory_srs, bytecode_evals);
+            const memory_comm = Dory.DoryCommitmentScheme(F).commit(&dory_srs, memory_evals);
+            const memory_final_comm = Dory.DoryCommitmentScheme(F).commit(&dory_srs, memory_final_evals);
+            const register_comm = Dory.DoryCommitmentScheme(F).commit(&dory_srs, register_evals);
+            const register_final_comm = Dory.DoryCommitmentScheme(F).commit(&dory_srs, register_final_evals);
+
+            // Write opening claims
+            try serializer.writeOpeningClaims(&jolt_proof_ptr.opening_claims);
+
+            // Write Dory commitments (GT elements, 384 bytes each)
+            try serializer.writeUsize(5); // 5 commitments
+            try serializer.writeGT(bytecode_comm);
+            try serializer.writeGT(memory_comm);
+            try serializer.writeGT(memory_final_comm);
+            try serializer.writeGT(register_comm);
+            try serializer.writeGT(register_final_comm);
+
+            // Write stage 1
+            // UniSkipFirstRoundProof is required in Jolt (not optional)
+            if (jolt_proof_ptr.stage1_uni_skip_first_round_proof) |*p| {
+                try serializer.writeUniSkipFirstRoundProof(p);
+            } else {
+                // Write empty UniPoly (length = 0)
+                try serializer.writeUsize(0);
+            }
+            try serializer.writeSumcheckInstanceProof(&jolt_proof_ptr.stage1_sumcheck_proof);
+
+            // Write stage 2
+            if (jolt_proof_ptr.stage2_uni_skip_first_round_proof) |*p| {
+                try serializer.writeUniSkipFirstRoundProof(p);
+            } else {
+                // Write empty UniPoly (length = 0)
+                try serializer.writeUsize(0);
+            }
+            try serializer.writeSumcheckInstanceProof(&jolt_proof_ptr.stage2_sumcheck_proof);
+
+            // Write stages 3-7
+            try serializer.writeSumcheckInstanceProof(&jolt_proof_ptr.stage3_sumcheck_proof);
+            try serializer.writeSumcheckInstanceProof(&jolt_proof_ptr.stage4_sumcheck_proof);
+            try serializer.writeSumcheckInstanceProof(&jolt_proof_ptr.stage5_sumcheck_proof);
+            try serializer.writeSumcheckInstanceProof(&jolt_proof_ptr.stage6_sumcheck_proof);
+            try serializer.writeSumcheckInstanceProof(&jolt_proof_ptr.stage7_sumcheck_proof);
+
+            // Write joint opening proof (placeholder - would need actual Dory proof)
+            try serializer.writeUsize(0); // Empty proof for now
+
+            // Write advice proofs (all None)
+            try serializer.writeU8(0); // trusted_advice_val_evaluation_proof: None
+            try serializer.writeU8(0); // trusted_advice_val_final_proof: None
+            try serializer.writeU8(0); // untrusted_advice_val_evaluation_proof: None
+            try serializer.writeU8(0); // untrusted_advice_val_final_proof: None
+            try serializer.writeU8(0); // untrusted_advice_commitment: None
+
+            // Write configuration
+            try serializer.writeUsize(jolt_proof_ptr.trace_length);
+            try serializer.writeUsize(jolt_proof_ptr.ram_K);
+            try serializer.writeUsize(jolt_proof_ptr.bytecode_K);
+            try serializer.writeUsize(jolt_proof_ptr.log_k_chunk);
+            try serializer.writeUsize(jolt_proof_ptr.lookups_ra_virtual_log_k_chunk);
 
             return serializer.toOwnedSlice();
         }

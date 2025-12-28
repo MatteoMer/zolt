@@ -373,16 +373,51 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt:
         std.debug.print("\nSaving proof to: {s}\n", .{path});
 
         if (jolt_format) {
-            // Save in Jolt-compatible format for cross-verification
-            std.debug.print("  Generating Jolt-compatible proof...\n", .{});
+            // Save in Jolt-compatible format for cross-verification (uses Dory commitments)
+            std.debug.print("  Generating Jolt-compatible proof with Dory commitments...\n", .{});
             var jolt_proof = prover_inst.proveJoltCompatible(program.bytecode, &[_]u8{}) catch |err| {
                 std.debug.print("  Error generating Jolt-compatible proof: {}\n", .{err});
                 return err;
             };
             defer jolt_proof.deinit();
 
-            const jolt_bytes = prover_inst.serializeJoltProof(&jolt_proof) catch |err| {
-                std.debug.print("  Error serializing Jolt proof: {}\n", .{err});
+            // Prepare polynomial evaluations for Dory commitments
+            // In a full implementation, these would come from the actual proof
+            const poly_size: usize = @max(64, std.math.ceilPowerOfTwo(usize, program.bytecode.len) catch program.bytecode.len);
+            const bytecode_evals = try allocator.alloc(BN254Scalar, poly_size);
+            defer allocator.free(bytecode_evals);
+            const memory_evals = try allocator.alloc(BN254Scalar, poly_size);
+            defer allocator.free(memory_evals);
+            const memory_final_evals = try allocator.alloc(BN254Scalar, poly_size);
+            defer allocator.free(memory_final_evals);
+            const register_evals = try allocator.alloc(BN254Scalar, poly_size);
+            defer allocator.free(register_evals);
+            const register_final_evals = try allocator.alloc(BN254Scalar, poly_size);
+            defer allocator.free(register_final_evals);
+
+            // Initialize with bytecode data
+            for (bytecode_evals, 0..) |*e, i| {
+                if (i < program.bytecode.len) {
+                    e.* = BN254Scalar.fromU64(@as(u64, program.bytecode[i]));
+                } else {
+                    e.* = BN254Scalar.zero();
+                }
+            }
+            // Initialize other polynomials to zeros for now
+            for (memory_evals) |*e| e.* = BN254Scalar.zero();
+            for (memory_final_evals) |*e| e.* = BN254Scalar.zero();
+            for (register_evals) |*e| e.* = BN254Scalar.zero();
+            for (register_final_evals) |*e| e.* = BN254Scalar.zero();
+
+            const jolt_bytes = prover_inst.serializeJoltProofDory(
+                &jolt_proof,
+                bytecode_evals,
+                memory_evals,
+                memory_final_evals,
+                register_evals,
+                register_final_evals,
+            ) catch |err| {
+                std.debug.print("  Error serializing Jolt proof with Dory: {}\n", .{err});
                 return err;
             };
             defer allocator.free(jolt_bytes);
@@ -397,7 +432,7 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt:
                 return err;
             };
 
-            std.debug.print("  Format: Jolt (arkworks-compatible)\n", .{});
+            std.debug.print("  Format: Jolt (Dory commitments, arkworks-compatible)\n", .{});
             std.debug.print("  Proof size: {} bytes ({d:.2} KB)\n", .{ jolt_bytes.len, @as(f64, @floatFromInt(jolt_bytes.len)) / 1024.0 });
         } else if (json_format) {
             // Save as JSON

@@ -163,7 +163,7 @@ fn parseCommand(arg: []const u8) Command {
     return .unknown;
 }
 
-fn runEmulator(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles: ?u64, show_regs: bool) !void {
+fn runEmulator(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles: ?u64, show_regs: bool, input_bytes: ?[]const u8) !void {
     std.debug.print("Loading ELF: {s}\n", .{elf_path});
 
     // Load the ELF file
@@ -191,6 +191,16 @@ fn runEmulator(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles: ?
 
     // Load program into memory at the correct base address
     try emulator.loadProgramAt(program.bytecode, program.base_address);
+
+    // Set up inputs if provided
+    if (input_bytes) |inputs| {
+        try emulator.setInputs(inputs);
+        std.debug.print("Input bytes: {} bytes\n", .{inputs.len});
+        std.debug.print("Input region: 0x{x:0>16} - 0x{x:0>16}\n", .{
+            emulator.device.memory_layout.input_start,
+            emulator.device.memory_layout.input_end,
+        });
+    }
 
     // Set entry point PC
     emulator.state.pc = program.entry_point;
@@ -964,11 +974,15 @@ pub fn main() !void {
                     std.debug.print("Options:\n", .{});
                     std.debug.print("  --max-cycles N   Limit execution to N cycles (default: 16M)\n", .{});
                     std.debug.print("  --regs           Show final register state\n", .{});
+                    std.debug.print("  --input FILE     Load input bytes from FILE\n", .{});
+                    std.debug.print("  --input-hex HEX  Set input as hex bytes (e.g., 0x32 for input 50)\n", .{});
                 } else {
                     // Parse options
                     var elf_path: ?[]const u8 = null;
                     var max_cycles: ?u64 = null;
                     var show_regs = false;
+                    var input_file: ?[]const u8 = null;
+                    var input_hex: ?[]const u8 = null;
 
                     // First arg could be an option or the ELF path
                     if (std.mem.startsWith(u8, arg, "--")) {
@@ -978,6 +992,10 @@ pub fn main() !void {
                             if (args.next()) |cycles_str| {
                                 max_cycles = std.fmt.parseInt(u64, cycles_str, 10) catch null;
                             }
+                        } else if (std.mem.eql(u8, arg, "--input")) {
+                            input_file = args.next();
+                        } else if (std.mem.eql(u8, arg, "--input-hex")) {
+                            input_hex = args.next();
                         }
                     } else {
                         elf_path = arg;
@@ -992,14 +1010,58 @@ pub fn main() !void {
                                 if (args.next()) |cycles_str| {
                                     max_cycles = std.fmt.parseInt(u64, cycles_str, 10) catch null;
                                 }
+                            } else if (std.mem.eql(u8, next_arg, "--input")) {
+                                input_file = args.next();
+                            } else if (std.mem.eql(u8, next_arg, "--input-hex")) {
+                                input_hex = args.next();
                             }
                         } else if (elf_path == null) {
                             elf_path = next_arg;
                         }
                     }
 
+                    // Load input bytes if specified
+                    var input_bytes_owned: ?[]u8 = null;
+                    defer if (input_bytes_owned) |b| allocator.free(b);
+
+                    if (input_file) |path| {
+                        const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+                            std.debug.print("Failed to open input file: {s}\n", .{@errorName(err)});
+                            std.process.exit(1);
+                        };
+                        defer file.close();
+                        const stat = file.stat() catch |err| {
+                            std.debug.print("Failed to stat input file: {s}\n", .{@errorName(err)});
+                            std.process.exit(1);
+                        };
+                        input_bytes_owned = allocator.alloc(u8, stat.size) catch null;
+                        if (input_bytes_owned) |buf| {
+                            _ = file.readAll(buf) catch {
+                                std.debug.print("Failed to read input file\n", .{});
+                                std.process.exit(1);
+                            };
+                        }
+                    } else if (input_hex) |hex| {
+                        // Parse hex input (e.g., "32" for byte 50, or "00320000" for multiple bytes)
+                        var clean_hex = hex;
+                        if (std.mem.startsWith(u8, hex, "0x") or std.mem.startsWith(u8, hex, "0X")) {
+                            clean_hex = hex[2..];
+                        }
+                        const buf_len = (clean_hex.len + 1) / 2;
+                        input_bytes_owned = allocator.alloc(u8, buf_len) catch null;
+                        if (input_bytes_owned) |buf| {
+                            // Parse hex bytes
+                            var i: usize = 0;
+                            while (i < buf_len) : (i += 1) {
+                                const start = i * 2;
+                                const end = @min(start + 2, clean_hex.len);
+                                buf[i] = std.fmt.parseInt(u8, clean_hex[start..end], 16) catch 0;
+                            }
+                        }
+                    }
+
                     if (elf_path) |path| {
-                        runEmulator(allocator, path, max_cycles, show_regs) catch |err| {
+                        runEmulator(allocator, path, max_cycles, show_regs, input_bytes_owned) catch |err| {
                             std.debug.print("Failed to run program: {s}\n", .{@errorName(err)});
                             std.process.exit(1);
                         };

@@ -1,16 +1,44 @@
 # Zolt-Jolt Compatibility Notes
 
-## Current Status (December 28, 2024)
+## Current Status (December 28, 2024, Session 4)
 
 ### Working Components
-- ✅ Blake2b Transcript (matches Jolt)
+- ✅ Blake2b Transcript (matches Jolt - all test vectors pass)
 - ✅ Dory Commitment Scheme (GT elements verified matching)
 - ✅ Proof Structure (JoltProof with 7 stages)
-- ✅ Serialization Format (opening claims, commitments)
+- ✅ Serialization Format (arkworks-compatible, Jolt can deserialize)
 - ✅ LagrangeHelper with shift_coeffs_i32 (matches Jolt)
 - ✅ COEFFS_PER_J precomputed Lagrange weights
 - ✅ **UniSkip Cross-Product Algorithm (FIXED!)**
 - ✅ All 618 unit tests pass
+- ✅ **Zolt can run Jolt's compiled ELF files**
+- ✅ **Jolt can deserialize Zolt proofs (test_deserialize_zolt_proof PASSES)**
+
+### Cross-Verification Status
+
+**Format Compatibility: VERIFIED ✅**
+- Proof serialization matches arkworks format
+- Opening claims, commitments, stage proofs all parse correctly
+- GT elements (Dory commitments) serialize/deserialize correctly
+
+**Full Verification: BLOCKED ⚠️**
+- Verification fails at "Stage 1 univariate skip first round"
+- Root cause: Preprocessing mismatch
+  - Jolt preprocessing is for fib(50) trace
+  - Zolt proof has different trace length
+- The verification math is correct, but the inputs differ
+
+### What's Needed for End-to-End Verification
+
+Option 1: **Same-Program Verification**
+- Generate Jolt preprocessing for the SAME trace length as Zolt
+- Requires running `cargo run --example fibonacci` with matching parameters
+- Then Jolt would generate preprocessing for the same execution
+
+Option 2: **Zolt Exports Preprocessing**
+- Implement Jolt's verifier preprocessing serialization format
+- Generate preprocessing in Zolt that Jolt can use
+- More complex but provides full independence
 
 ### Stage 1 Sumcheck - FIXED
 

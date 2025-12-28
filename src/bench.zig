@@ -5,6 +5,12 @@
 const std = @import("std");
 const zolt = @import("root.zig");
 
+/// Prevent the compiler from optimizing away the computation
+fn doNotOptimize(value: anytype) void {
+    const ptr: *const volatile @TypeOf(value) = &value;
+    _ = ptr.*;
+}
+
 pub fn main() !void {
     std.debug.print("Zolt Benchmarks v{s}\n", .{zolt.version});
     std.debug.print("================================\n\n", .{});
@@ -13,7 +19,7 @@ pub fn main() !void {
     try benchBatchOperations();
     try benchPolynomialOperations();
     try benchMSM();
-    try benchSumcheck();
+    try benchCommitment();
 
     std.debug.print("\nBenchmarks complete.\n", .{});
 }
@@ -34,11 +40,11 @@ fn benchFieldArithmetic() !void {
             a = a.add(b);
         }
         const end = std.time.nanoTimestamp();
+        doNotOptimize(a);
 
         const elapsed_ns: f64 = @floatFromInt(end - start);
         const ns_per_op = elapsed_ns / @as(f64, @floatFromInt(iterations));
         std.debug.print("  Addition:       {d:>7.1} ns/op\n", .{ns_per_op});
-        _ = a; // prevent optimization
     }
 
     // Subtraction
@@ -51,11 +57,11 @@ fn benchFieldArithmetic() !void {
             a = a.sub(b);
         }
         const end = std.time.nanoTimestamp();
+        doNotOptimize(a);
 
         const elapsed_ns: f64 = @floatFromInt(end - start);
         const ns_per_op = elapsed_ns / @as(f64, @floatFromInt(iterations));
         std.debug.print("  Subtraction:    {d:>7.1} ns/op\n", .{ns_per_op});
-        _ = a;
     }
 
     // Multiplication
@@ -68,11 +74,11 @@ fn benchFieldArithmetic() !void {
             a = a.mul(b);
         }
         const end = std.time.nanoTimestamp();
+        doNotOptimize(a);
 
         const elapsed_ns: f64 = @floatFromInt(end - start);
         const ns_per_op = elapsed_ns / @as(f64, @floatFromInt(iterations));
         std.debug.print("  Multiplication: {d:>7.1} ns/op\n", .{ns_per_op});
-        _ = a;
     }
 
     // Squaring
@@ -84,11 +90,11 @@ fn benchFieldArithmetic() !void {
             a = a.square();
         }
         const end = std.time.nanoTimestamp();
+        doNotOptimize(a);
 
         const elapsed_ns: f64 = @floatFromInt(end - start);
         const ns_per_op = elapsed_ns / @as(f64, @floatFromInt(iterations));
         std.debug.print("  Squaring:       {d:>7.1} ns/op\n", .{ns_per_op});
-        _ = a;
     }
 
     // Inversion
@@ -101,11 +107,11 @@ fn benchFieldArithmetic() !void {
             a = a.inverse() orelse a;
         }
         const end = std.time.nanoTimestamp();
+        doNotOptimize(a);
 
         const elapsed_ns: f64 = @floatFromInt(end - start);
         const ns_per_op = elapsed_ns / @as(f64, @floatFromInt(inv_iterations));
         std.debug.print("  Inversion:      {d:>7.1} ns/op\n", .{ns_per_op});
-        _ = a;
     }
 
     std.debug.print("\n", .{});
@@ -141,6 +147,7 @@ fn benchBatchOperations() !void {
                 BatchOps.batchAdd(results, a, b);
             }
             const end = std.time.nanoTimestamp();
+            doNotOptimize(results[0]);
 
             const elapsed_ns: f64 = @floatFromInt(end - start);
             const ns_per_op = elapsed_ns / @as(f64, @floatFromInt(iterations));
@@ -149,17 +156,17 @@ fn benchBatchOperations() !void {
 
         // Inner product
         {
-            const start = std.time.nanoTimestamp();
             var result: F = F.zero();
+            const start = std.time.nanoTimestamp();
             for (0..iterations) |_| {
                 result = BatchOps.innerProduct(a, b);
             }
             const end = std.time.nanoTimestamp();
+            doNotOptimize(result);
 
             const elapsed_ns: f64 = @floatFromInt(end - start);
             const ns_per_op = elapsed_ns / @as(f64, @floatFromInt(iterations));
             std.debug.print("  Inner prod (n={d:>4}):   {d:>8.1} ns/op\n", .{ size, ns_per_op });
-            _ = result;
         }
 
         // Batch inverse
@@ -170,6 +177,7 @@ fn benchBatchOperations() !void {
                 try BatchOps.batchInverse(results, a, allocator);
             }
             const end = std.time.nanoTimestamp();
+            doNotOptimize(results[0]);
 
             const elapsed_ns: f64 = @floatFromInt(end - start);
             const ns_per_op = elapsed_ns / @as(f64, @floatFromInt(inv_iterations));
@@ -210,19 +218,19 @@ fn benchPolynomialOperations() !void {
             point[i] = F.fromU64(@intCast(i + 1));
         }
 
-        const start = std.time.nanoTimestamp();
         var result: F = F.zero();
+        const start = std.time.nanoTimestamp();
         for (0..iterations) |_| {
             result = poly.evaluate(point);
         }
         const end = std.time.nanoTimestamp();
+        doNotOptimize(result);
 
         const elapsed_ns: f64 = @floatFromInt(end - start);
         const ns_per_op = elapsed_ns / @as(f64, @floatFromInt(iterations));
         const us_per_op = ns_per_op / 1000.0;
 
         std.debug.print("  Poly eval (n={d:>4}): {d:>8.1} us/op\n", .{ size, us_per_op });
-        _ = result;
     }
 
     std.debug.print("\n", .{});
@@ -232,7 +240,9 @@ fn benchMSM() !void {
     std.debug.print("Multi-Scalar Multiplication:\n", .{});
 
     const F = zolt.field.BN254Scalar;
-    const AffinePoint = zolt.msm.AffinePoint;
+    const Fp = zolt.field.BN254BaseField;
+    const Point = zolt.msm.AffinePoint(Fp);
+    const MsmOps = zolt.msm.MSM(F, Fp);
     const allocator = std.heap.page_allocator;
 
     const sizes = [_]usize{ 16, 64, 256 };
@@ -240,7 +250,7 @@ fn benchMSM() !void {
     for (sizes) |size| {
         const scalars = try allocator.alloc(F, size);
         defer allocator.free(scalars);
-        const points = try allocator.alloc(AffinePoint, size);
+        const points = try allocator.alloc(Point, size);
         defer allocator.free(points);
 
         // Generate random-ish scalars and points
@@ -248,17 +258,19 @@ fn benchMSM() !void {
             scalars[i] = F.fromU64(@intCast(i * 7 + 13));
             // Use generator times i as point
             const scalar_for_point = F.fromU64(@intCast(i + 1));
-            const gen = zolt.msm.ProjectivePoint.generator();
-            const scaled = gen.scalarMul(scalar_for_point);
+            const gen = Point.generator();
+            const scaled = MsmOps.scalarMul(gen, scalar_for_point);
             points[i] = scaled.toAffine();
         }
 
         const iterations: usize = 10;
+        var result: Point = Point.identity();
         const start = std.time.nanoTimestamp();
         for (0..iterations) |_| {
-            _ = zolt.msm.pippenger(scalars, points, allocator) catch continue;
+            result = MsmOps.compute(points, scalars);
         }
         const end = std.time.nanoTimestamp();
+        doNotOptimize(result);
 
         const elapsed_ns: f64 = @floatFromInt(end - start);
         const ns_per_op = elapsed_ns / @as(f64, @floatFromInt(iterations));
@@ -270,16 +282,17 @@ fn benchMSM() !void {
     std.debug.print("\n", .{});
 }
 
-fn benchSumcheck() !void {
-    std.debug.print("Sumcheck Protocol:\n", .{});
+fn benchCommitment() !void {
+    std.debug.print("HyperKZG Commitment:\n", .{});
 
     const F = zolt.field.BN254Scalar;
+    const HyperKZG = zolt.poly.commitment.HyperKZG(F);
     const allocator = std.heap.page_allocator;
 
     const sizes = [_]usize{ 64, 256, 1024 };
 
     for (sizes) |size| {
-        // Create polynomial coefficients
+        // Create evaluations
         const evals = try allocator.alloc(F, size);
         defer allocator.free(evals);
 
@@ -287,34 +300,26 @@ fn benchSumcheck() !void {
             evals[i] = F.fromU64(@intCast(i + 1));
         }
 
-        var poly = try zolt.poly.DensePolynomial(F).init(allocator, evals);
-        defer poly.deinit();
+        var params = try HyperKZG.setup(allocator, size);
+        defer params.deinit();
 
-        // Create sumcheck prover
-        const iterations: usize = 10;
-        const start = std.time.nanoTimestamp();
-
-        for (0..iterations) |_| {
-            var prover = zolt.subprotocols.Sumcheck(F).Prover.init(allocator);
-            defer prover.deinit();
-
-            // Generate proof
-            for (0..poly.num_vars) |round| {
-                const univariate = prover.generateRoundPolynomial(poly.evals, poly.num_vars, round);
-                // In real use, verifier would send challenge; here we use deterministic
-                const challenge = F.fromU64(@intCast(round + 1));
-                _ = challenge;
-                _ = univariate;
+        // Benchmark commit
+        const iterations: usize = 100;
+        {
+            var commitment: HyperKZG.Commitment = undefined;
+            const start = std.time.nanoTimestamp();
+            for (0..iterations) |_| {
+                commitment = HyperKZG.commit(&params, evals);
             }
+            const end = std.time.nanoTimestamp();
+            doNotOptimize(commitment);
+
+            const elapsed_ns: f64 = @floatFromInt(end - start);
+            const ns_per_op = elapsed_ns / @as(f64, @floatFromInt(iterations));
+            const us_per_op = ns_per_op / 1000.0;
+
+            std.debug.print("  Commit (n={d:>4}):   {d:>8.1} us/op\n", .{ size, us_per_op });
         }
-
-        const end = std.time.nanoTimestamp();
-
-        const elapsed_ns: f64 = @floatFromInt(end - start);
-        const ns_per_op = elapsed_ns / @as(f64, @floatFromInt(iterations));
-        const us_per_op = ns_per_op / 1000.0;
-
-        std.debug.print("  Sumcheck prove (n={d:>4}): {d:>8.1} us/op\n", .{ size, us_per_op });
     }
 
     std.debug.print("\n", .{});

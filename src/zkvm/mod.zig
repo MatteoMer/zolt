@@ -264,8 +264,8 @@ pub fn JoltProver(comptime F: type) type {
         ///
         /// This function:
         /// 1. Executes the program in the emulator to generate an execution trace
-        /// 2. Runs the multi-stage sumcheck protocol
-        /// 3. Generates commitment proofs for polynomials (if proving key is available)
+        /// 2. Generates polynomial commitments (bound to Fiat-Shamir)
+        /// 3. Runs the multi-stage sumcheck protocol
         /// 4. Returns the complete Jolt proof
         pub fn prove(
             self: *Self,
@@ -295,6 +295,47 @@ pub fn JoltProver(comptime F: type) type {
             // Execute the program
             try emulator.run();
 
+            // Initialize transcript for Fiat-Shamir
+            var transcript = try transcripts.Transcript(F).init(self.allocator, "Jolt");
+            defer transcript.deinit();
+
+            // Absorb public inputs into transcript (must match verifier order)
+            if (inputs.len > 0) {
+                try transcript.appendBytes(inputs);
+            }
+
+            // Generate commitments FIRST and absorb into transcript
+            // This binds the prover's commitments to the challenges
+            var bc_proof: bytecode.BytecodeProof(F) = undefined;
+            var mem_proof: ram.MemoryProof(F) = undefined;
+            var reg_proof: registers.RegisterProof(F) = undefined;
+
+            if (self.proving_key) |pk| {
+                // Build polynomials from traces and commit
+                bc_proof = try self.commitBytecode(pk, program_bytecode);
+                mem_proof = try self.commitMemory(pk, &emulator.ram.trace);
+                reg_proof = try self.commitRegisters(pk, &emulator.trace);
+            } else {
+                // Placeholder commitments for testing
+                bc_proof = bytecode.BytecodeProof(F).init();
+                mem_proof = ram.MemoryProof(F).init();
+                reg_proof = registers.RegisterProof(F).init();
+            }
+
+            // Absorb all commitments into transcript (must match verifier's absorbCommitments)
+            const bc_bytes = bc_proof.commitment.toBytes();
+            try transcript.appendBytes(&bc_bytes);
+
+            const mem_bytes = mem_proof.commitment.toBytes();
+            try transcript.appendBytes(&mem_bytes);
+            const mem_final_bytes = mem_proof.final_state_commitment.toBytes();
+            try transcript.appendBytes(&mem_final_bytes);
+
+            const reg_bytes = reg_proof.commitment.toBytes();
+            try transcript.appendBytes(&reg_bytes);
+            const reg_final_bytes = reg_proof.final_state_commitment.toBytes();
+            try transcript.appendBytes(&reg_final_bytes);
+
             // Calculate parameters for multi-stage prover
             // log_k: log2 of address space size (2^16 addresses)
             // log_t: log2 of trace length (calculated internally by MultiStageProver)
@@ -311,35 +352,13 @@ pub fn JoltProver(comptime F: type) type {
             );
             defer multi_stage.deinit();
 
-            // Initialize transcript for Fiat-Shamir
-            var transcript = try transcripts.Transcript(F).init(self.allocator, "Jolt");
-            defer transcript.deinit();
-
-            // Run multi-stage proving
+            // Run multi-stage proving (challenges now derived from committed data)
             const stage_proofs = try multi_stage.prove(&transcript);
 
-            // Generate commitments if proving key is available
-            if (self.proving_key) |pk| {
-                // Build polynomials from traces and commit
-                const bc_proof = try self.commitBytecode(pk, program_bytecode);
-                const mem_proof = try self.commitMemory(pk, &emulator.ram.trace);
-                const reg_proof = try self.commitRegisters(pk, &emulator.trace);
-
-                return JoltProof(F){
-                    .bytecode_proof = bc_proof,
-                    .memory_proof = mem_proof,
-                    .register_proof = reg_proof,
-                    .r1cs_proof = try spartan.R1CSProof(F).placeholder(self.allocator),
-                    .stage_proofs = stage_proofs,
-                    .allocator = self.allocator,
-                };
-            }
-
-            // Return proof with placeholder commitments
             return JoltProof(F){
-                .bytecode_proof = bytecode.BytecodeProof(F).init(),
-                .memory_proof = ram.MemoryProof(F).init(),
-                .register_proof = registers.RegisterProof(F).init(),
+                .bytecode_proof = bc_proof,
+                .memory_proof = mem_proof,
+                .register_proof = reg_proof,
                 .r1cs_proof = try spartan.R1CSProof(F).placeholder(self.allocator),
                 .stage_proofs = stage_proofs,
                 .allocator = self.allocator,
@@ -593,14 +612,14 @@ pub fn JoltVerifier(comptime F: type) type {
         /// 1. The bytecode commitment is well-formed (not at infinity)
         /// 2. Read timestamps are monotonically increasing
         /// 3. Write timestamp is always 0 (bytecode is read-only)
+        ///
+        /// Note: Commitments are already absorbed into transcript by absorbCommitments()
         fn verifyBytecodeProof(
             self: *Self,
             proof: *const bytecode.BytecodeProof(F),
             transcript: *transcripts.Transcript(F),
         ) !bool {
-            // Absorb bytecode commitment into transcript for binding
-            const bc_bytes = proof.commitment.toBytes();
-            try transcript.appendBytes(&bc_bytes);
+            _ = transcript; // Transcript already has commitments absorbed
 
             // Check 1: Bytecode commitment should not be at infinity
             // A valid commitment to any bytecode should produce a non-trivial point
@@ -638,30 +657,16 @@ pub fn JoltVerifier(comptime F: type) type {
         /// 1. Memory commitment is well-formed
         /// 2. Read-after-final (RAF) consistency
         /// 3. Value consistency across read/write operations
+        ///
+        /// Note: Commitments are already absorbed into transcript by absorbCommitments()
         fn verifyMemoryProof(
             self: *Self,
             proof: *const ram.MemoryProof(F),
             transcript: *transcripts.Transcript(F),
         ) !bool {
-            // Absorb memory commitment into transcript
-            const mem_bytes = proof.commitment.toBytes();
-            try transcript.appendBytes(&mem_bytes);
+            _ = transcript; // Transcript already has commitments absorbed
 
-            // Absorb final state commitment
-            const final_bytes = proof.final_state_commitment.toBytes();
-            try transcript.appendBytes(&final_bytes);
-
-            // Check 1: Read timestamps must be valid
-            // Read timestamp commitment encodes when each address was last read
-            const read_ts_bytes = proof.read_ts_commitment.toBytes();
-            try transcript.appendBytes(&read_ts_bytes);
-
-            // Check 2: Write timestamps must be valid
-            // Write timestamp commitment encodes when each address was written
-            const write_ts_bytes = proof.write_ts_commitment.toBytes();
-            try transcript.appendBytes(&write_ts_bytes);
-
-            // Check 3: If opening proof exists, verify it
+            // Check 1: If opening proof exists, verify it
             if (proof.opening_proof) |opening| {
                 if (self.verifying_key) |_| {
                     // Verify the polynomial opening
@@ -683,25 +688,14 @@ pub fn JoltVerifier(comptime F: type) type {
         /// 1. Register file commitment is well-formed
         /// 2. RAF consistency for 32 registers
         /// 3. Values are consistent with instruction execution
+        ///
+        /// Note: Commitments are already absorbed into transcript by absorbCommitments()
         fn verifyRegisterProof(
             self: *Self,
             proof: *const registers.RegisterProof(F),
             transcript: *transcripts.Transcript(F),
         ) !bool {
-            // Absorb register commitment into transcript
-            const reg_bytes = proof.commitment.toBytes();
-            try transcript.appendBytes(&reg_bytes);
-
-            // Absorb final state commitment
-            const final_bytes = proof.final_state_commitment.toBytes();
-            try transcript.appendBytes(&final_bytes);
-
-            // Absorb timestamp commitments
-            const read_ts_bytes = proof.read_ts_commitment.toBytes();
-            try transcript.appendBytes(&read_ts_bytes);
-
-            const write_ts_bytes = proof.write_ts_commitment.toBytes();
-            try transcript.appendBytes(&write_ts_bytes);
+            _ = transcript; // Transcript already has commitments absorbed
 
             // Verify opening proof if present
             if (proof.opening_proof) |opening| {

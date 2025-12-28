@@ -1297,6 +1297,539 @@ pub fn RemuLookup(comptime XLEN: comptime_int) type {
     };
 }
 
+// ============================================================================
+// Word-Sized Operations (RV64 *W instructions)
+// ============================================================================
+
+/// ADDW instruction lookup - add 32-bit values, sign-extend to 64-bit
+/// Computes rd = sext((rs1[31:0] + rs2[31:0])[31:0])
+pub fn AddwLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        rs1_val: u64,
+        rs2_val: u64,
+
+        pub fn init(rs1_val: u64, rs2_val: u64) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .rs2_val = rs2_val,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .RangeCheck;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return @as(u128, self.computeResult());
+        }
+
+        /// Compute ADDW result: add lower 32 bits, sign-extend to 64
+        pub fn computeResult(self: Self) u64 {
+            const a32: u32 = @truncate(self.rs1_val);
+            const b32: u32 = @truncate(self.rs2_val);
+            const sum32: u32 = a32 +% b32;
+            const signed32: i32 = @bitCast(sum32);
+            const extended: i64 = @as(i64, signed32);
+            return @bitCast(extended);
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.AddOperands);
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsRs2Value);
+            return flags;
+        }
+    };
+}
+
+/// SUBW instruction lookup - subtract 32-bit values, sign-extend to 64-bit
+/// Computes rd = sext((rs1[31:0] - rs2[31:0])[31:0])
+pub fn SubwLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        rs1_val: u64,
+        rs2_val: u64,
+
+        pub fn init(rs1_val: u64, rs2_val: u64) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .rs2_val = rs2_val,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .Sub;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return lookup_table.interleaveBits(self.rs1_val & 0xFFFFFFFF, self.rs2_val & 0xFFFFFFFF);
+        }
+
+        /// Compute SUBW result: subtract lower 32 bits, sign-extend to 64
+        pub fn computeResult(self: Self) u64 {
+            const a32: u32 = @truncate(self.rs1_val);
+            const b32: u32 = @truncate(self.rs2_val);
+            const diff32: u32 = a32 -% b32;
+            const signed32: i32 = @bitCast(diff32);
+            const extended: i64 = @as(i64, signed32);
+            return @bitCast(extended);
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.SubtractOperands);
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsRs2Value);
+            return flags;
+        }
+    };
+}
+
+/// SLLW instruction lookup - shift left 32-bit, sign-extend to 64-bit
+/// Computes rd = sext((rs1[31:0] << (rs2[4:0]))[31:0])
+pub fn SllwLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        rs1_val: u64,
+        rs2_val: u64,
+
+        pub fn init(rs1_val: u64, rs2_val: u64) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .rs2_val = rs2_val,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .LeftShift;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return lookup_table.interleaveBits(self.rs1_val & 0xFFFFFFFF, self.rs2_val & 0x1F);
+        }
+
+        /// Compute SLLW result
+        pub fn computeResult(self: Self) u64 {
+            const a32: u32 = @truncate(self.rs1_val);
+            const shift: u5 = @truncate(self.rs2_val);
+            const result32: u32 = a32 << shift;
+            const signed32: i32 = @bitCast(result32);
+            const extended: i64 = @as(i64, signed32);
+            return @bitCast(extended);
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsRs2Value);
+            return flags;
+        }
+    };
+}
+
+/// SRLW instruction lookup - logical shift right 32-bit, sign-extend to 64-bit
+/// Computes rd = sext((rs1[31:0] >> (rs2[4:0]))[31:0])
+pub fn SrlwLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        rs1_val: u64,
+        rs2_val: u64,
+
+        pub fn init(rs1_val: u64, rs2_val: u64) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .rs2_val = rs2_val,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .RightShift;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return lookup_table.interleaveBits(self.rs1_val & 0xFFFFFFFF, self.rs2_val & 0x1F);
+        }
+
+        /// Compute SRLW result
+        pub fn computeResult(self: Self) u64 {
+            const a32: u32 = @truncate(self.rs1_val);
+            const shift: u5 = @truncate(self.rs2_val);
+            const result32: u32 = a32 >> shift;
+            const signed32: i32 = @bitCast(result32);
+            const extended: i64 = @as(i64, signed32);
+            return @bitCast(extended);
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsRs2Value);
+            return flags;
+        }
+    };
+}
+
+/// SRAW instruction lookup - arithmetic shift right 32-bit, sign-extend to 64-bit
+/// Computes rd = sext((rs1[31:0] >>s (rs2[4:0]))[31:0])
+pub fn SrawLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        rs1_val: u64,
+        rs2_val: u64,
+
+        pub fn init(rs1_val: u64, rs2_val: u64) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .rs2_val = rs2_val,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .RightShiftArithmetic;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return lookup_table.interleaveBits(self.rs1_val & 0xFFFFFFFF, self.rs2_val & 0x1F);
+        }
+
+        /// Compute SRAW result
+        pub fn computeResult(self: Self) u64 {
+            const a32: i32 = @bitCast(@as(u32, @truncate(self.rs1_val)));
+            const shift: u5 = @truncate(self.rs2_val);
+            const result32: i32 = a32 >> shift;
+            const extended: i64 = @as(i64, result32);
+            return @bitCast(extended);
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsRs2Value);
+            return flags;
+        }
+    };
+}
+
+/// MULW instruction lookup - multiply 32-bit values, sign-extend to 64-bit
+/// Computes rd = sext((rs1[31:0] * rs2[31:0])[31:0])
+pub fn MulwLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        rs1_val: u64,
+        rs2_val: u64,
+
+        pub fn init(rs1_val: u64, rs2_val: u64) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .rs2_val = rs2_val,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .RangeCheck;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return @as(u128, self.computeResult());
+        }
+
+        /// Compute MULW result
+        pub fn computeResult(self: Self) u64 {
+            const a32: u32 = @truncate(self.rs1_val);
+            const b32: u32 = @truncate(self.rs2_val);
+            const product32: u32 = a32 *% b32;
+            const signed32: i32 = @bitCast(product32);
+            const extended: i64 = @as(i64, signed32);
+            return @bitCast(extended);
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.MultiplyOperands);
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsRs2Value);
+            return flags;
+        }
+    };
+}
+
+/// DIVW instruction lookup - signed division 32-bit, sign-extend to 64-bit
+/// Computes rd = sext((rs1[31:0] /s rs2[31:0])[31:0])
+pub fn DivwLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        rs1_val: u64,
+        rs2_val: u64,
+
+        pub fn init(rs1_val: u64, rs2_val: u64) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .rs2_val = rs2_val,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .ValidDiv0;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return lookup_table.interleaveBits(self.rs2_val & 0xFFFFFFFF, self.computeResult() & 0xFFFFFFFF);
+        }
+
+        /// Compute DIVW result
+        pub fn computeResult(self: Self) u64 {
+            const dividend: i32 = @bitCast(@as(u32, @truncate(self.rs1_val)));
+            const divisor: i32 = @bitCast(@as(u32, @truncate(self.rs2_val)));
+
+            if (divisor == 0) {
+                // Division by zero: return -1
+                return @as(u64, @bitCast(@as(i64, -1)));
+            }
+
+            const min_int: i32 = @bitCast(@as(u32, 0x80000000));
+            if (dividend == min_int and divisor == -1) {
+                // Overflow: return MIN_INT sign-extended
+                return @as(u64, @bitCast(@as(i64, @as(i32, min_int))));
+            }
+
+            const quotient: i32 = @divTrunc(dividend, divisor);
+            const extended: i64 = @as(i64, quotient);
+            return @bitCast(extended);
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsRs2Value);
+            return flags;
+        }
+    };
+}
+
+/// DIVUW instruction lookup - unsigned division 32-bit, sign-extend to 64-bit
+/// Computes rd = sext((rs1[31:0] /u rs2[31:0])[31:0])
+pub fn DivuwLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        rs1_val: u64,
+        rs2_val: u64,
+
+        pub fn init(rs1_val: u64, rs2_val: u64) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .rs2_val = rs2_val,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .ValidDiv0;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return lookup_table.interleaveBits(self.rs2_val & 0xFFFFFFFF, self.computeResult() & 0xFFFFFFFF);
+        }
+
+        /// Compute DIVUW result
+        pub fn computeResult(self: Self) u64 {
+            const dividend: u32 = @truncate(self.rs1_val);
+            const divisor: u32 = @truncate(self.rs2_val);
+
+            if (divisor == 0) {
+                // Division by zero: return -1 sign-extended (MAX for 32-bit)
+                return @as(u64, @bitCast(@as(i64, -1)));
+            }
+
+            const quotient: u32 = dividend / divisor;
+            const signed32: i32 = @bitCast(quotient);
+            const extended: i64 = @as(i64, signed32);
+            return @bitCast(extended);
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsRs2Value);
+            return flags;
+        }
+    };
+}
+
+/// REMW instruction lookup - signed remainder 32-bit, sign-extend to 64-bit
+/// Computes rd = sext((rs1[31:0] %s rs2[31:0])[31:0])
+pub fn RemwLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        rs1_val: u64,
+        rs2_val: u64,
+
+        pub fn init(rs1_val: u64, rs2_val: u64) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .rs2_val = rs2_val,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .ValidSignedRemainder;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return lookup_table.interleaveBits(self.computeResult() & 0xFFFFFFFF, self.rs2_val & 0xFFFFFFFF);
+        }
+
+        /// Compute REMW result
+        pub fn computeResult(self: Self) u64 {
+            const dividend: i32 = @bitCast(@as(u32, @truncate(self.rs1_val)));
+            const divisor: i32 = @bitCast(@as(u32, @truncate(self.rs2_val)));
+
+            if (divisor == 0) {
+                // Division by zero: return dividend sign-extended
+                const extended: i64 = @as(i64, dividend);
+                return @bitCast(extended);
+            }
+
+            const min_int: i32 = @bitCast(@as(u32, 0x80000000));
+            if (dividend == min_int and divisor == -1) {
+                // Overflow: return 0
+                return 0;
+            }
+
+            const remainder: i32 = @rem(dividend, divisor);
+            const extended: i64 = @as(i64, remainder);
+            return @bitCast(extended);
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsRs2Value);
+            return flags;
+        }
+    };
+}
+
+/// REMUW instruction lookup - unsigned remainder 32-bit, sign-extend to 64-bit
+/// Computes rd = sext((rs1[31:0] %u rs2[31:0])[31:0])
+pub fn RemuwLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        rs1_val: u64,
+        rs2_val: u64,
+
+        pub fn init(rs1_val: u64, rs2_val: u64) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .rs2_val = rs2_val,
+            };
+        }
+
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .ValidUnsignedRemainder;
+        }
+
+        pub fn toLookupIndex(self: Self) u128 {
+            return lookup_table.interleaveBits(self.computeResult() & 0xFFFFFFFF, self.rs2_val & 0xFFFFFFFF);
+        }
+
+        /// Compute REMUW result
+        pub fn computeResult(self: Self) u64 {
+            const dividend: u32 = @truncate(self.rs1_val);
+            const divisor: u32 = @truncate(self.rs2_val);
+
+            if (divisor == 0) {
+                // Division by zero: return dividend sign-extended
+                const signed32: i32 = @bitCast(dividend);
+                const extended: i64 = @as(i64, signed32);
+                return @bitCast(extended);
+            }
+
+            const remainder: u32 = dividend % divisor;
+            const signed32: i32 = @bitCast(remainder);
+            const extended: i64 = @as(i64, signed32);
+            return @bitCast(extended);
+        }
+
+        pub fn circuitFlags() CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.WriteLookupOutputToRD);
+            return flags;
+        }
+
+        pub fn instructionFlags() InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsRs2Value);
+            return flags;
+        }
+    };
+}
+
 /// Instruction lookup trace entry
 /// Records a single lookup operation for proof generation
 pub fn LookupTraceEntry(comptime XLEN: comptime_int) type {
@@ -1643,4 +2176,106 @@ test "remu lookup" {
     // Division by zero: x % 0 = x
     const remu3 = RemuLookup(64).init(42, 0);
     try std.testing.expectEqual(@as(u64, 42), remu3.computeResult());
+}
+
+// ============================================================================
+// Word-Sized Instruction Tests (*W instructions for RV64)
+// ============================================================================
+
+test "addw lookup" {
+    // Simple: 10 + 20 = 30, sign-extended to 64 bits
+    const addw1 = AddwLookup(64).init(10, 20);
+    try std.testing.expectEqual(@as(u64, 30), addw1.computeResult());
+
+    // Upper bits should be ignored
+    const addw2 = AddwLookup(64).init(0xFFFFFFFF00000010, 0xFFFFFFFF00000020);
+    try std.testing.expectEqual(@as(u64, 0x30), addw2.computeResult());
+
+    // Result with sign bit: 0x80000000 sign-extended
+    const addw3 = AddwLookup(64).init(0x7FFFFFFF, 1);
+    const expected3: u64 = @bitCast(@as(i64, @as(i32, @bitCast(@as(u32, 0x80000000)))));
+    try std.testing.expectEqual(expected3, addw3.computeResult());
+}
+
+test "subw lookup" {
+    // Simple: 30 - 10 = 20
+    const subw1 = SubwLookup(64).init(30, 10);
+    try std.testing.expectEqual(@as(u64, 20), subw1.computeResult());
+
+    // Wraparound: 10 - 20 = -10, sign-extended
+    const subw2 = SubwLookup(64).init(10, 20);
+    const expected: u64 = @bitCast(@as(i64, -10));
+    try std.testing.expectEqual(expected, subw2.computeResult());
+}
+
+test "sllw lookup" {
+    // Simple: 1 << 4 = 16
+    const sllw1 = SllwLookup(64).init(1, 4);
+    try std.testing.expectEqual(@as(u64, 16), sllw1.computeResult());
+
+    // Shift into sign bit: 0x40000000 << 1 = 0x80000000 (negative)
+    const sllw2 = SllwLookup(64).init(0x40000000, 1);
+    const expected: u64 = @bitCast(@as(i64, @as(i32, @bitCast(@as(u32, 0x80000000)))));
+    try std.testing.expectEqual(expected, sllw2.computeResult());
+}
+
+test "srlw lookup" {
+    // Simple: 256 >> 4 = 16
+    const srlw1 = SrlwLookup(64).init(256, 4);
+    try std.testing.expectEqual(@as(u64, 16), srlw1.computeResult());
+
+    // 0x80000000 >> 1 = 0x40000000 (positive after shift)
+    const srlw2 = SrlwLookup(64).init(0x80000000, 1);
+    try std.testing.expectEqual(@as(u64, 0x40000000), srlw2.computeResult());
+}
+
+test "sraw lookup" {
+    // Positive: 256 >> 4 = 16
+    const sraw_pos = SrawLookup(64).init(256, 4);
+    try std.testing.expectEqual(@as(u64, 16), sraw_pos.computeResult());
+
+    // Negative: 0x80000000 >> 1 = 0xC0000000 (sign-extended)
+    const sraw_neg = SrawLookup(64).init(0x80000000, 1);
+    const expected: u64 = @bitCast(@as(i64, @as(i32, @bitCast(@as(u32, 0xC0000000)))));
+    try std.testing.expectEqual(expected, sraw_neg.computeResult());
+}
+
+test "mulw lookup" {
+    // Simple: 6 * 7 = 42
+    const mulw1 = MulwLookup(64).init(6, 7);
+    try std.testing.expectEqual(@as(u64, 42), mulw1.computeResult());
+
+    // Overflow wraps: 0x40000000 * 2 = 0x80000000 (negative result)
+    const mulw2 = MulwLookup(64).init(0x40000000, 2);
+    const expected: u64 = @bitCast(@as(i64, @as(i32, @bitCast(@as(u32, 0x80000000)))));
+    try std.testing.expectEqual(expected, mulw2.computeResult());
+}
+
+test "divw lookup" {
+    // Normal: 42 / 6 = 7
+    const divw1 = DivwLookup(64).init(42, 6);
+    try std.testing.expectEqual(@as(u64, 7), divw1.computeResult());
+
+    // Division by zero: returns -1
+    const divw2 = DivwLookup(64).init(42, 0);
+    try std.testing.expectEqual(@as(u64, @bitCast(@as(i64, -1))), divw2.computeResult());
+
+    // Overflow: MIN_INT / -1 = MIN_INT
+    const min32: u64 = 0x80000000;
+    const neg1: u64 = @as(u64, @as(u32, @bitCast(@as(i32, -1))));
+    const divw3 = DivwLookup(64).init(min32, neg1);
+    const expected: u64 = @bitCast(@as(i64, @as(i32, @bitCast(@as(u32, 0x80000000)))));
+    try std.testing.expectEqual(expected, divw3.computeResult());
+}
+
+test "remw lookup" {
+    // Normal: 42 % 5 = 2
+    const remw1 = RemwLookup(64).init(42, 5);
+    try std.testing.expectEqual(@as(u64, 2), remw1.computeResult());
+
+    // Negative dividend: -7 % 3 = -1
+    const neg7_32: u64 = @as(u64, @as(u32, @bitCast(@as(i32, -7))));
+    const remw2 = RemwLookup(64).init(neg7_32, 3);
+    const expected: u64 = @bitCast(@as(i64, @as(i32, -1)));
+    try std.testing.expectEqual(expected, remw2.computeResult());
 }

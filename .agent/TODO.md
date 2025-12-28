@@ -125,3 +125,5 @@ All tests pass (538 tests).
 2. Fix benchmark to compile with Zig 0.15.2
 3. Update tracking files for iteration 26
 4. Add 'prove' command to CLI (experimental)
+5. Update tracking files with prove command addition
+6. Update README with current test count and prove command

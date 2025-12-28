@@ -1,10 +1,14 @@
 # Zolt zkVM Implementation Plan
 
-## Current Status (December 2024 - Iteration 51)
+## Current Status (December 2024 - Iteration 55+)
 
-**PROJECT STATUS: COMPLETE AND STABLE**
+**PROJECT STATUS: JOLT COMPATIBILITY PHASE**
 
-The Zolt zkVM is now feature-complete:
+The Zolt zkVM core is complete. New goal: **Make Zolt proofs verifiable by Jolt (Rust)**.
+
+See `PROMPT-2.md` for the full compatibility implementation guide.
+
+### Phase 1 Complete: Core zkVM
 - All 578 tests pass
 - All 9 C example programs compile, run, and prove correctly
 - Full CLI interface operational
@@ -12,11 +16,33 @@ The Zolt zkVM is now feature-complete:
 - Performance benchmarks showing competitive results
 - End-to-end verification working with strict sumcheck checking
 
-### What's Working
+### Phase 2: Jolt Compatibility (IN PROGRESS)
+
+**Goal**: `zolt prove program.elf -o proof.bin` produces a proof that Jolt's Rust verifier accepts.
+
+#### Key Gaps to Address
+
+| Component | Zolt Current | Jolt Expected | Priority |
+|-----------|-------------|---------------|----------|
+| Transcript | Keccak-f[1600], 200-byte state | Blake2b-256, 32-byte state | CRITICAL |
+| Proof Structure | 6 stages grouped | 7 explicit stages + UniSkip | HIGH |
+| Serialization | "ZOLT" magic + custom | Arkworks CanonicalSerialize | HIGH |
+| Commitment | HyperKZG (test tau) | Dory (production SRS) | HIGH |
+| Field Encoding | Mixed endianness | LE serialize, reverse to BE | HIGH |
+
+#### Implementation Phases
+
+1. **Transcript Alignment** - Implement Blake2bTranscript matching Jolt exactly
+2. **Proof Structure** - Restructure to 7 stages with UniSkipFirstRoundProof
+3. **Serialization** - Remove ZOLT header, match arkworks format
+4. **Dory Completion** - Full streaming Dory with same SRS seed
+5. **Integration Testing** - Cross-verify Zolt proofs in Jolt
+
+### What's Working (Core zkVM)
 - BN254 field arithmetic (Montgomery form CIOS)
 - Extension fields (Fp2, Fp6, Fp12 tower)
 - HyperKZG polynomial commitments
-- Dory commitments
+- Dory commitments (partial)
 - Spartan R1CS prover/verifier
 - Lasso lookup arguments with 24 table types
 - 6-stage sumcheck orchestration

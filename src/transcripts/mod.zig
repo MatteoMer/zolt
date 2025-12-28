@@ -1,11 +1,20 @@
 //! Fiat-Shamir transcript for Jolt
 //!
 //! This module implements the Fiat-Shamir transformation for making
-//! interactive proofs non-interactive. It uses Keccak-f[1600] (SHA-3 core)
-//! to derive challenges from the transcript.
+//! interactive proofs non-interactive.
+//!
+//! Two transcript implementations are provided:
+//! - `Transcript`: Keccak-based (original Zolt implementation)
+//! - `Blake2bTranscript`: Blake2b-based (Jolt-compatible)
+//!
+//! For Jolt compatibility, use `Blake2bTranscript`.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+
+// Re-export Blake2b transcript for Jolt compatibility
+pub const blake2b = @import("blake2b.zig");
+pub const Blake2bTranscript = blake2b.Blake2bTranscript;
 
 /// Keccak256 state size in bytes (1600 bits = 200 bytes)
 const KECCAK_STATE_SIZE = 200;

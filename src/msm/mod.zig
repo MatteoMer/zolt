@@ -179,6 +179,7 @@ pub fn ProjectivePoint(comptime F: type) type {
         /// Point doubling in Jacobian coordinates
         /// For y^2 = x^3 + b (a = 0)
         /// Using the efficient formulas from https://hyperelliptic.org/EFD/g1p/auto-shortw-jacobian-0.html
+        /// Specifically using dbl-2009-l formulas.
         pub fn double(self: Self) Self {
             if (self.z.isZero()) return self;
 
@@ -188,17 +189,18 @@ pub fn ProjectivePoint(comptime F: type) type {
             const B = self.y.square();
             // C = B^2
             const C = B.square();
-            // D = 2*((X+B)^2 - A - C)
+            // D = 2*((X+B)^2 - A - C)  -- note: D already includes the factor of 2
             const xpb = self.x.add(B);
-            const D = xpb.square().sub(A).sub(C);
-            const two_D = D.add(D);
+            const half_D = xpb.square().sub(A).sub(C);
+            const D = half_D.add(half_D); // D = 2 * half_D
             // E = 3*A
             const E = A.add(A).add(A);
             // F = E^2
             const FF = E.square();
             // X3 = F - 2*D
+            const two_D = D.add(D);
             const X3 = FF.sub(two_D);
-            // Y3 = E*(D - X3) - 8*C
+            // Y3 = E*(D - X3) - 8*C  -- using D (which is 2*half_D)
             const eight_C = C.add(C).add(C).add(C).add(C).add(C).add(C).add(C);
             const Y3 = E.mul(D.sub(X3)).sub(eight_C);
             // Z3 = 2*Y*Z

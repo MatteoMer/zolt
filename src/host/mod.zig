@@ -320,9 +320,10 @@ pub fn Preprocessing(comptime F: type) type {
             }
         };
 
-        /// G1 point type (for MSM)
+        /// G1 point type (for MSM) - uses base field Fp for coordinates
         const msm = @import("../msm/mod.zig");
-        const G1Point = msm.AffinePoint(F);
+        const Fp = @import("../field/mod.zig").BN254BaseField;
+        const G1Point = msm.AffinePoint(Fp);
         const G2Point = @import("../field/mod.zig").pairing.G2Point;
 
         /// Verifying key - contains verifier-specific data

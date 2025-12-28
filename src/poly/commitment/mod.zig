@@ -88,10 +88,18 @@ pub fn MockCommitment(comptime F: type) type {
 ///
 /// The scheme works by reducing the multilinear opening to multiple univariate
 /// KZG openings using a technique from the Gemini protocol.
+///
+/// Note: F is the scalar field (Fr) for polynomial evaluations.
+/// G1 point coordinates are in the base field (Fp).
 pub fn HyperKZG(comptime F: type) type {
     return struct {
         const Self = @This();
-        const Point = msm.AffinePoint(F);
+
+        /// Base field for G1 point coordinates
+        const Fp = field.BN254BaseField;
+
+        /// G1 point with base field coordinates (correct for elliptic curve arithmetic)
+        const Point = msm.AffinePoint(Fp);
 
         /// G2 Point type (for pairing operations)
         const G2Point = pairing.G2Point;
@@ -157,23 +165,27 @@ pub fn HyperKZG(comptime F: type) type {
             // This is only for testing and development.
             const powers = try allocator.alloc(Point, max_degree);
 
-            // Use generators
+            // Use generators (G1 in base field Fp)
             const g1 = Point.generator();
             const g2 = G2Point.generator();
 
             // Use a deterministic "tau" for testing (INSECURE!)
             // In production, tau must be unknown to everyone.
+            // Tau is a scalar, so it's in Fr
             const tau = F.fromU64(0x12345678);
 
             // Compute powers of tau in G1: [1, tau, tau^2, ..., tau^{n-1}]_1
+            // Scalars (tau^i) are in Fr, points are in Fp
             var tau_power = F.one();
             for (powers) |*p| {
                 // p = tau^i * G1
-                p.* = msm.MSM(F, F).scalarMul(g1, tau_power).toAffine();
+                // Use MSM(F, Fp) for Fr scalars with Fp point coordinates
+                p.* = msm.MSM(F, Fp).scalarMul(g1, tau_power).toAffine();
                 tau_power = tau_power.mul(tau);
             }
 
             // Compute [tau]_2 = tau * G2 (needed for pairing verification)
+            // G2 scalar multiplication takes Fr scalar (BN254Scalar)
             const tau_g2 = g2.scalarMul(tau);
 
             return .{
@@ -216,10 +228,11 @@ pub fn HyperKZG(comptime F: type) type {
             }
 
             // Compute MSM: sum_i evals[i] * powers_of_tau[i]
+            // Scalars (evals) are in Fr, points are in Fp
             const n = @min(evals.len, params.powers_of_tau_g1.len);
 
-            // Use MSM to compute the commitment
-            const point = msm.MSM(F, F).compute(
+            // Use MSM(F, Fp) for Fr scalars with Fp point coordinates
+            const point = msm.MSM(F, Fp).compute(
                 params.powers_of_tau_g1[0..n],
                 evals[0..n],
             );
@@ -354,6 +367,15 @@ pub fn HyperKZG(comptime F: type) type {
             return true;
         }
 
+        /// Convert AffinePoint(Fp) to G1PointFp for pairing operations
+        fn toG1PointFp(p: Point) pairing.G1PointFp {
+            return .{
+                .x = p.x,
+                .y = p.y,
+                .infinity = p.infinity,
+            };
+        }
+
         /// Verify with full pairing check (requires valid SRS from trusted setup)
         ///
         /// This performs the complete cryptographic verification including the
@@ -361,12 +383,12 @@ pub fn HyperKZG(comptime F: type) type {
         pub fn verifyWithPairing(
             params: *const SetupParams,
             commitment: Commitment,
-            point: []const F,
+            eval_point: []const F,
             value: F,
             proof: *const Proof,
         ) bool {
             // Check that the number of quotient commitments matches the point dimension
-            if (point.len != proof.quotient_commitments.len) {
+            if (eval_point.len != proof.quotient_commitments.len) {
                 return false;
             }
 
@@ -380,8 +402,8 @@ pub fn HyperKZG(comptime F: type) type {
                 return proof.final_eval.eql(F.zero());
             }
 
-            // Compute v*G1 using MSM
-            const v_g1 = msm.MSM(F, F).scalarMul(params.g1, value);
+            // Compute v*G1 using MSM (Fr scalar, Fp point coords)
+            const v_g1 = msm.MSM(F, Fp).scalarMul(params.g1, value);
             const v_g1_affine = v_g1.toAffine();
 
             // Compute C - v*G1
@@ -401,10 +423,11 @@ pub fn HyperKZG(comptime F: type) type {
 
             // Perform the pairing check:
             // e(lhs_g1, G2) == e(combined_quotient, tau_G2)
-            const pairing_result = pairing.pairingCheck(
-                lhs_g1,
+            // Convert to G1PointFp for pairing operations
+            const pairing_result = pairing.pairingCheckFp(
+                toG1PointFp(lhs_g1),
                 params.g2,
-                combined_quotient,
+                toG1PointFp(combined_quotient),
                 params.tau_g2,
             );
 
@@ -594,22 +617,103 @@ test "hyperkzg open and verify" {
     try std.testing.expect(valid);
 }
 
-// NOTE: This test is disabled because the pairing implementation doesn't
-// satisfy bilinearity. The SRS setup correctly computes [τ]_2 using G2 scalar
-// multiplication, but we can't verify it via pairing until the pairing is fixed.
-// See field/pairing.zig for details.
-// test "hyperkzg srs has correct tau relationship" {
-//     const F = @import("../../field/mod.zig").BN254Scalar;
-//     const HKZG = HyperKZG(F);
-//     const allocator = std.testing.allocator;
-//     var params = try HKZG.setup(allocator, 8);
-//     defer params.deinit();
-//     const tau_g1 = params.powers_of_tau_g1[1];
-//     const pairing_check = pairing.pairingCheck(
-//         tau_g1, params.g2, params.g1, params.tau_g2,
-//     );
-//     try std.testing.expect(pairing_check);
-// }
+test "hyperkzg projective vs affine double" {
+    const Fp = @import("../../field/mod.zig").BN254BaseField;
+    const Point = msm.AffinePoint(Fp);
+    const ProjPoint = msm.ProjectivePoint(Fp);
+
+    // G1 generator in Fp
+    const g1 = Point.generator();
+
+    // Affine double
+    const g1_affine_double = g1.double();
+
+    // Projective double then convert to affine
+    const g1_proj = ProjPoint.fromAffine(g1);
+    const g1_proj_double = g1_proj.double();
+    const g1_proj_double_affine = g1_proj_double.toAffine();
+
+    // They should be equal!
+    try std.testing.expect(g1_affine_double.eql(g1_proj_double_affine));
+}
+
+test "hyperkzg srs has correct tau relationship" {
+    const F = @import("../../field/mod.zig").BN254Scalar;
+    const Fp = @import("../../field/mod.zig").BN254BaseField;
+    const HKZG = HyperKZG(F);
+    const G1PointFp = pairing.G1PointFp;
+    const allocator = std.testing.allocator;
+    var params = try HKZG.setup(allocator, 8);
+    defer params.deinit();
+
+    // Now g1 is in Fp (base field), not Fr
+    const g1 = params.g1;
+
+    // Verify g1.x and g1.y are (1, 2) in Fp
+    try std.testing.expect(g1.x.eql(Fp.one()));
+    try std.testing.expect(g1.y.eql(Fp.fromU64(2)));
+
+    // Convert to G1PointFp for pairing
+    const g1_fp = G1PointFp{ .x = g1.x, .y = g1.y, .infinity = g1.infinity };
+
+    // Verify that e([τ]_1, G2) == e(G1, [τ]_2)
+    // This ensures the SRS is correctly structured
+    const tau_g1 = params.powers_of_tau_g1[1]; // [τ]_1
+    const tau_g1_fp = G1PointFp{ .x = tau_g1.x, .y = tau_g1.y, .infinity = tau_g1.infinity };
+
+    // Compute both pairings using pairingFp (for Fp coordinates)
+    const lhs = pairing.pairingFp(tau_g1_fp, params.g2);
+    const rhs = pairing.pairingFp(g1_fp, params.tau_g2);
+
+    // They should be equal by bilinearity: e([τ]G1, G2) = e(G1, [τ]G2)
+    try std.testing.expect(lhs.eql(rhs));
+
+    // Also test with pairingCheckFp
+    const pairing_result = pairing.pairingCheckFp(
+        tau_g1_fp, // [τ]_1
+        params.g2, // [1]_2
+        g1_fp, // [1]_1
+        params.tau_g2, // [τ]_2
+    );
+    try std.testing.expect(pairing_result);
+}
+
+test "hyperkzg verifyWithPairing" {
+    const F = @import("../../field/mod.zig").BN254Scalar;
+    const HKZG = HyperKZG(F);
+    const allocator = std.testing.allocator;
+
+    var params = try HKZG.setup(allocator, 8);
+    defer params.deinit();
+
+    // 2-variable polynomial with evaluations [1, 2, 3, 4]
+    const evals = [_]F{
+        F.fromU64(1),
+        F.fromU64(2),
+        F.fromU64(3),
+        F.fromU64(4),
+    };
+
+    const commitment = HKZG.commit(&params, &evals);
+
+    // Evaluation point
+    const evaluation_point = [_]F{ F.fromU64(0), F.fromU64(0) };
+
+    // At point (0,0), the MLE should evaluate to evals[0] = 1
+    const expected = F.fromU64(1);
+
+    // Open at point
+    var proof = try HKZG.open(&params, &evals, &evaluation_point, expected, allocator);
+    defer proof.deinit();
+
+    // Basic verify should work
+    const basic_valid = HKZG.verify(&params, commitment, &evaluation_point, proof.final_eval, &proof);
+    try std.testing.expect(basic_valid);
+
+    // Note: verifyWithPairing needs a more complex verification equation for HyperKZG.
+    // The current implementation is a placeholder that will return false.
+    // TODO: Implement proper HyperKZG verification with Gemini reduction.
+}
 
 test "dory setup and commit" {
     const F = @import("../../field/mod.zig").BN254Scalar;

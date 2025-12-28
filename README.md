@@ -65,6 +65,10 @@ zolt run --max-cycles 1000 --regs program.elf  # Limit cycles, show registers
 
 # Generate ZK proof for a RISC-V ELF binary
 zolt prove program.elf
+zolt prove -o proof.bin program.elf            # Save proof to file
+
+# Verify a saved proof
+zolt verify proof.bin
 
 # Inspect a Powers of Tau (PTAU) ceremony file
 zolt srs ceremony.ptau

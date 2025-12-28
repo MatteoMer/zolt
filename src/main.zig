@@ -14,6 +14,7 @@ const Command = enum {
     info,
     run,
     prove,
+    verify,
     srs,
     bench,
     decode,
@@ -33,17 +34,19 @@ fn printHelp() void {
         \\    version           Show version information
         \\    info              Show zkVM capabilities and feature summary
         \\    run [opts] <elf>   Run RISC-V ELF binary in the emulator
-        \\    prove [opts] <elf> Generate ZK proof for ELF binary (experimental)
+        \\    prove [opts] <elf> Generate ZK proof for ELF binary
+        \\    verify <proof>    Verify a proof file
         \\    srs <ptau>        Inspect a Powers of Tau (ptau) file
         \\    decode <hex>      Decode a RISC-V instruction (hex)
         \\    bench             Run performance benchmarks
         \\
         \\EXAMPLES:
-        \\    zolt run program.elf        # Execute a RISC-V binary
-        \\    zolt prove program.elf      # Generate a ZK proof
-        \\    zolt srs file.ptau          # Inspect a PTAU file
-        \\    zolt decode 0x00a00513      # Decode: li a0, 10
-        \\    zolt bench                  # Run benchmarks
+        \\    zolt run program.elf                    # Execute a RISC-V binary
+        \\    zolt prove -o proof.bin program.elf     # Generate and save a proof
+        \\    zolt verify proof.bin                   # Verify a saved proof
+        \\    zolt srs file.ptau                      # Inspect a PTAU file
+        \\    zolt decode 0x00a00513                  # Decode: li a0, 10
+        \\    zolt bench                              # Run benchmarks
         \\
         \\For more information, visit: https://github.com/MatteoMer/zolt
         \\
@@ -138,6 +141,8 @@ fn parseCommand(arg: []const u8) Command {
         return .run;
     } else if (std.mem.eql(u8, arg, "prove")) {
         return .prove;
+    } else if (std.mem.eql(u8, arg, "verify")) {
+        return .verify;
     } else if (std.mem.eql(u8, arg, "srs")) {
         return .srs;
     } else if (std.mem.eql(u8, arg, "decode")) {
@@ -250,7 +255,7 @@ fn runEmulator(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles: ?
     }
 }
 
-fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt: ?u64) !void {
+fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt: ?u64, output_path: ?[]const u8) !void {
     std.debug.print("Zolt zkVM Prover\n", .{});
     std.debug.print("================\n\n", .{});
 
@@ -352,8 +357,78 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt:
     std.debug.print("  Register commitment: {s}\n", .{if (!proof.register_proof.commitment.isZero()) "present" else "none"});
     std.debug.print("  Stage proofs: {s}\n", .{if (proof.stage_proofs != null) "present" else "none"});
 
+    // Save proof to file if output path specified
+    if (output_path) |path| {
+        std.debug.print("\nSaving proof to: {s}\n", .{path});
+        zolt.zkvm.writeProofToFile(BN254Scalar, allocator, proof, path) catch |err| {
+            std.debug.print("  Error saving proof: {}\n", .{err});
+            return err;
+        };
+
+        // Calculate proof size
+        const proof_bytes = try zolt.zkvm.serializeProof(BN254Scalar, allocator, proof);
+        defer allocator.free(proof_bytes);
+        std.debug.print("  Proof size: {} bytes ({d:.2} KB)\n", .{ proof_bytes.len, @as(f64, @floatFromInt(proof_bytes.len)) / 1024.0 });
+        std.debug.print("  Proof saved successfully!\n", .{});
+    }
+
     const total_time = preprocess_time + init_time + prove_time + verify_time;
     std.debug.print("\nTotal time: {d:.2} ms\n", .{@as(f64, @floatFromInt(total_time)) / 1_000_000.0});
+}
+
+fn runVerifier(allocator: std.mem.Allocator, proof_path: []const u8) !void {
+    std.debug.print("Zolt zkVM Verifier\n", .{});
+    std.debug.print("==================\n\n", .{});
+
+    // Load the proof file
+    std.debug.print("Loading proof: {s}\n", .{proof_path});
+    var timer = std.time.Timer.start() catch return;
+
+    var proof = zolt.zkvm.readProofFromFile(BN254Scalar, allocator, proof_path) catch |err| {
+        std.debug.print("  Error loading proof: {}\n", .{err});
+        return err;
+    };
+    defer proof.deinit();
+
+    const load_time = timer.read();
+    std.debug.print("  Proof loaded successfully!\n", .{});
+    std.debug.print("  Load time: {d:.2} ms\n", .{@as(f64, @floatFromInt(load_time)) / 1_000_000.0});
+
+    // Display proof info
+    std.debug.print("\nProof Information:\n", .{});
+    std.debug.print("  Bytecode commitment: {s}\n", .{if (!proof.bytecode_proof.commitment.isZero()) "present" else "none"});
+    std.debug.print("  Memory commitment: {s}\n", .{if (!proof.memory_proof.commitment.isZero()) "present" else "none"});
+    std.debug.print("  Register commitment: {s}\n", .{if (!proof.register_proof.commitment.isZero()) "present" else "none"});
+    std.debug.print("  Stage proofs: {s}\n", .{if (proof.stage_proofs != null) "present" else "none"});
+
+    if (proof.stage_proofs) |stage_proofs| {
+        const size = stage_proofs.proofSize();
+        std.debug.print("  Total field elements: {}\n", .{size.total_elements});
+        std.debug.print("  Round polynomials: {}\n", .{size.round_polys});
+        std.debug.print("  log_t: {}, log_k: {}\n", .{ stage_proofs.log_t, stage_proofs.log_k });
+    }
+
+    // Verify the proof
+    std.debug.print("\nVerifying proof...\n", .{});
+    timer.reset();
+
+    var verifier = zolt.zkvm.JoltVerifier(BN254Scalar).init(allocator);
+    // Use default verifying key
+    verifier.setVerifyingKey(zolt.zkvm.VerifyingKey.init());
+
+    const verify_result = verifier.verify(&proof, &[_]u8{}) catch |err| {
+        std.debug.print("  Error during verification: {}\n", .{err});
+        return err;
+    };
+
+    const verify_time = timer.read();
+    std.debug.print("\n==================\n", .{});
+    if (verify_result) {
+        std.debug.print("Result: PASSED\n", .{});
+    } else {
+        std.debug.print("Result: FAILED\n", .{});
+    }
+    std.debug.print("Verification time: {d:.2} ms\n", .{@as(f64, @floatFromInt(verify_time)) / 1_000_000.0});
 }
 
 fn decodeInstruction(hex_str: []const u8) void {
@@ -609,24 +684,28 @@ pub fn main() !void {
                 if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
                     std.debug.print("Usage: zolt prove [options] <elf_file>\n\n", .{});
                     std.debug.print("Generate a ZK proof for a RISC-V ELF binary.\n", .{});
-                    std.debug.print("This experimental command runs the full proving pipeline:\n", .{});
+                    std.debug.print("This command runs the full proving pipeline:\n", .{});
                     std.debug.print("  1. Preprocess (generate SRS and keys)\n", .{});
                     std.debug.print("  2. Initialize prover\n", .{});
                     std.debug.print("  3. Generate proof using multi-stage sumcheck\n", .{});
                     std.debug.print("  4. Verify the proof\n\n", .{});
                     std.debug.print("Options:\n", .{});
                     std.debug.print("  --max-cycles N   Limit execution to N cycles (default: 1024)\n", .{});
+                    std.debug.print("  -o, --output F   Save proof to file F\n", .{});
                 } else {
                     // Parse options
                     var elf_path: ?[]const u8 = null;
                     var max_cycles: ?u64 = null;
+                    var output_path: ?[]const u8 = null;
 
                     // First arg could be an option or the ELF path
-                    if (std.mem.startsWith(u8, arg, "--")) {
+                    if (std.mem.startsWith(u8, arg, "-")) {
                         if (std.mem.eql(u8, arg, "--max-cycles")) {
                             if (args.next()) |cycles_str| {
                                 max_cycles = std.fmt.parseInt(u64, cycles_str, 10) catch null;
                             }
+                        } else if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
+                            output_path = args.next();
                         }
                     } else {
                         elf_path = arg;
@@ -634,11 +713,13 @@ pub fn main() !void {
 
                     // Parse remaining args
                     while (args.next()) |next_arg| {
-                        if (std.mem.startsWith(u8, next_arg, "--")) {
+                        if (std.mem.startsWith(u8, next_arg, "-")) {
                             if (std.mem.eql(u8, next_arg, "--max-cycles")) {
                                 if (args.next()) |cycles_str| {
                                     max_cycles = std.fmt.parseInt(u64, cycles_str, 10) catch null;
                                 }
+                            } else if (std.mem.eql(u8, next_arg, "-o") or std.mem.eql(u8, next_arg, "--output")) {
+                                output_path = args.next();
                             }
                         } else if (elf_path == null) {
                             elf_path = next_arg;
@@ -646,7 +727,7 @@ pub fn main() !void {
                     }
 
                     if (elf_path) |path| {
-                        runProver(allocator, path, max_cycles) catch |err| {
+                        runProver(allocator, path, max_cycles, output_path) catch |err| {
                             std.debug.print("Failed to generate proof: {s}\n", .{@errorName(err)});
                             std.process.exit(1);
                         };
@@ -658,6 +739,26 @@ pub fn main() !void {
             } else {
                 std.debug.print("Error: prove command requires an ELF file path\n", .{});
                 std.debug.print("Usage: zolt prove [options] <elf_file>\n", .{});
+            }
+        },
+        .verify => {
+            if (args.next()) |arg| {
+                if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+                    std.debug.print("Usage: zolt verify <proof_file>\n\n", .{});
+                    std.debug.print("Verify a Zolt proof file.\n", .{});
+                    std.debug.print("The proof file should be created with 'zolt prove -o <file>'.\n\n", .{});
+                    std.debug.print("Example:\n", .{});
+                    std.debug.print("  zolt prove -o proof.bin program.elf\n", .{});
+                    std.debug.print("  zolt verify proof.bin\n", .{});
+                } else {
+                    runVerifier(allocator, arg) catch |err| {
+                        std.debug.print("Failed to verify proof: {s}\n", .{@errorName(err)});
+                        std.process.exit(1);
+                    };
+                }
+            } else {
+                std.debug.print("Error: verify command requires a proof file path\n", .{});
+                std.debug.print("Usage: zolt verify <proof_file>\n", .{});
             }
         },
         .srs => {
@@ -715,6 +816,7 @@ test "command parsing" {
     try std.testing.expect(parseCommand("info") == .info);
     try std.testing.expect(parseCommand("run") == .run);
     try std.testing.expect(parseCommand("prove") == .prove);
+    try std.testing.expect(parseCommand("verify") == .verify);
     try std.testing.expect(parseCommand("decode") == .decode);
     try std.testing.expect(parseCommand("bench") == .bench);
     try std.testing.expect(parseCommand("unknown_cmd") == .unknown);

@@ -28,6 +28,7 @@ pub const prover = @import("prover.zig");
 pub const r1cs = @import("r1cs/mod.zig");
 pub const ram = @import("ram/mod.zig");
 pub const registers = @import("registers/mod.zig");
+pub const serialization = @import("serialization.zig");
 pub const spartan = @import("spartan/mod.zig");
 pub const verifier = @import("verifier.zig");
 
@@ -48,6 +49,15 @@ pub const MultiStageVerifier = verifier.MultiStageVerifier;
 pub const StageVerificationResult = verifier.StageVerificationResult;
 pub const OpeningClaimAccumulator = verifier.OpeningClaimAccumulator;
 pub const VerifierConfig = verifier.VerifierConfig;
+
+// Re-export serialization functions
+pub const serializeProof = serialization.serializeProof;
+pub const deserializeProof = serialization.deserializeProof;
+pub const writeProofToFile = serialization.writeProofToFile;
+pub const readProofFromFile = serialization.readProofFromFile;
+pub const SerializationError = serialization.SerializationError;
+pub const PROOF_MAGIC = serialization.MAGIC;
+pub const PROOF_VERSION = serialization.VERSION;
 
 /// RISC-V register indices
 pub const Register = enum(u8) {

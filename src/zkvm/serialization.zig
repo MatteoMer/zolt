@@ -1,0 +1,676 @@
+//! Proof Serialization and Deserialization
+//!
+//! This module provides binary serialization for Jolt proofs, enabling:
+//! - Saving proofs to disk for later verification
+//! - Transmitting proofs over the network
+//! - Compact binary representation
+//!
+//! ## Format
+//!
+//! The serialization format is designed to be:
+//! - Deterministic: Same proof always produces same bytes
+//! - Compact: No redundant information
+//! - Self-describing: Includes length prefixes for variable-length data
+//!
+//! ## Binary Layout
+//!
+//! ```
+//! JoltProof:
+//!   [4 bytes] magic: "ZOLT"
+//!   [4 bytes] version: u32 (currently 1)
+//!   [BytecodeProof] bytecode_proof
+//!   [MemoryProof] memory_proof
+//!   [RegisterProof] register_proof
+//!   [R1CSProof] r1cs_proof
+//!   [1 byte] has_stage_proofs: bool
+//!   [JoltStageProofs?] stage_proofs (if has_stage_proofs)
+//!
+//! JoltStageProofs:
+//!   [8 bytes] log_t: u64
+//!   [8 bytes] log_k: u64
+//!   [6 x StageProof] stage_proofs
+//!
+//! StageProof:
+//!   [8 bytes] num_round_polys: u64
+//!   For each round poly:
+//!     [8 bytes] poly_len: u64
+//!     [poly_len x 32 bytes] coefficients
+//!   [8 bytes] num_challenges: u64
+//!   [num_challenges x 32 bytes] challenges
+//!   [8 bytes] num_claims: u64
+//!   [num_claims x 32 bytes] claims
+//! ```
+
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+
+const prover = @import("prover.zig");
+const bytecode = @import("bytecode/mod.zig");
+const ram = @import("ram/mod.zig");
+const registers = @import("registers/mod.zig");
+const spartan = @import("spartan/mod.zig");
+const commitment_types = @import("commitment_types.zig");
+const field = @import("../field/mod.zig");
+
+/// Magic bytes for Zolt proof files
+pub const MAGIC: [4]u8 = .{ 'Z', 'O', 'L', 'T' };
+
+/// Current serialization format version
+pub const VERSION: u32 = 1;
+
+/// Serialization errors
+pub const SerializationError = error{
+    InvalidMagic,
+    UnsupportedVersion,
+    UnexpectedEof,
+    InvalidData,
+    OutOfMemory,
+};
+
+/// Writer for serializing proofs
+pub fn ProofWriter(comptime F: type) type {
+    return struct {
+        const Self = @This();
+
+        buffer: std.ArrayList(u8),
+
+        pub fn init(allocator: Allocator) Self {
+            return .{
+                .buffer = std.ArrayList(u8).init(allocator),
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.buffer.deinit();
+        }
+
+        /// Get the serialized bytes
+        pub fn toOwnedSlice(self: *Self) ![]u8 {
+            return self.buffer.toOwnedSlice();
+        }
+
+        /// Get the current buffer as a slice (borrowed)
+        pub fn bytes(self: *const Self) []const u8 {
+            return self.buffer.items;
+        }
+
+        /// Write bytes directly
+        pub fn writeBytes(self: *Self, data: []const u8) !void {
+            try self.buffer.appendSlice(data);
+        }
+
+        /// Write a u8
+        pub fn writeU8(self: *Self, value: u8) !void {
+            try self.buffer.append(value);
+        }
+
+        /// Write a u32 in little-endian
+        pub fn writeU32(self: *Self, value: u32) !void {
+            const bytes_arr = std.mem.toBytes(std.mem.nativeToLittle(u32, value));
+            try self.buffer.appendSlice(&bytes_arr);
+        }
+
+        /// Write a u64 in little-endian
+        pub fn writeU64(self: *Self, value: u64) !void {
+            const bytes_arr = std.mem.toBytes(std.mem.nativeToLittle(u64, value));
+            try self.buffer.appendSlice(&bytes_arr);
+        }
+
+        /// Write a field element (32 bytes, little-endian limbs)
+        pub fn writeFieldElement(self: *Self, elem: F) !void {
+            const bytes_arr = elem.toBytes();
+            try self.buffer.appendSlice(&bytes_arr);
+        }
+
+        /// Write a polynomial commitment (G1 point)
+        pub fn writeCommitment(self: *Self, c: commitment_types.PolyCommitment) !void {
+            const bytes_arr = c.toBytes();
+            try self.buffer.appendSlice(&bytes_arr);
+        }
+
+        /// Write a stage proof
+        pub fn writeStageProof(self: *Self, stage: *const prover.StageProof(F)) !void {
+            // Write round polynomials
+            try self.writeU64(stage.round_polys.items.len);
+            for (stage.round_polys.items) |poly| {
+                try self.writeU64(poly.len);
+                for (poly) |coeff| {
+                    try self.writeFieldElement(coeff);
+                }
+            }
+
+            // Write challenges
+            try self.writeU64(stage.challenges.items.len);
+            for (stage.challenges.items) |challenge| {
+                try self.writeFieldElement(challenge);
+            }
+
+            // Write final claims
+            try self.writeU64(stage.final_claims.items.len);
+            for (stage.final_claims.items) |claim| {
+                try self.writeFieldElement(claim);
+            }
+        }
+
+        /// Write JoltStageProofs
+        pub fn writeJoltStageProofs(self: *Self, proofs: *const prover.JoltStageProofs(F)) !void {
+            try self.writeU64(proofs.log_t);
+            try self.writeU64(proofs.log_k);
+
+            for (&proofs.stage_proofs) |*stage| {
+                try self.writeStageProof(stage);
+            }
+        }
+    };
+}
+
+/// Reader for deserializing proofs
+pub fn ProofReader(comptime F: type) type {
+    return struct {
+        const Self = @This();
+
+        data: []const u8,
+        pos: usize,
+        allocator: Allocator,
+
+        pub fn init(allocator: Allocator, data: []const u8) Self {
+            return .{
+                .data = data,
+                .pos = 0,
+                .allocator = allocator,
+            };
+        }
+
+        /// Read exactly n bytes
+        pub fn readBytes(self: *Self, n: usize) SerializationError![]const u8 {
+            if (self.pos + n > self.data.len) {
+                return SerializationError.UnexpectedEof;
+            }
+            const result = self.data[self.pos .. self.pos + n];
+            self.pos += n;
+            return result;
+        }
+
+        /// Read a u8
+        pub fn readU8(self: *Self) SerializationError!u8 {
+            const bytes_slice = try self.readBytes(1);
+            return bytes_slice[0];
+        }
+
+        /// Read a u32 in little-endian
+        pub fn readU32(self: *Self) SerializationError!u32 {
+            const bytes_slice = try self.readBytes(4);
+            return std.mem.littleToNative(u32, std.mem.bytesToValue(u32, bytes_slice[0..4]));
+        }
+
+        /// Read a u64 in little-endian
+        pub fn readU64(self: *Self) SerializationError!u64 {
+            const bytes_slice = try self.readBytes(8);
+            return std.mem.littleToNative(u64, std.mem.bytesToValue(u64, bytes_slice[0..8]));
+        }
+
+        /// Read a field element (32 bytes)
+        pub fn readFieldElement(self: *Self) SerializationError!F {
+            const bytes_slice = try self.readBytes(32);
+            return F.fromBytes(bytes_slice[0..32].*);
+        }
+
+        /// Read a polynomial commitment
+        pub fn readCommitment(self: *Self) SerializationError!commitment_types.PolyCommitment {
+            const bytes_slice = try self.readBytes(64);
+            return commitment_types.PolyCommitment.fromBytes(bytes_slice[0..64].*);
+        }
+
+        /// Read a stage proof
+        pub fn readStageProof(self: *Self) (SerializationError || Allocator.Error)!prover.StageProof(F) {
+            var stage = prover.StageProof(F).init(self.allocator);
+            errdefer stage.deinit();
+
+            // Read round polynomials
+            const num_polys = try self.readU64();
+            for (0..num_polys) |_| {
+                const poly_len = try self.readU64();
+                const poly = try self.allocator.alloc(F, poly_len);
+                errdefer self.allocator.free(poly);
+
+                for (poly) |*coeff| {
+                    coeff.* = try self.readFieldElement();
+                }
+                try stage.round_polys.append(self.allocator, poly);
+            }
+
+            // Read challenges
+            const num_challenges = try self.readU64();
+            for (0..num_challenges) |_| {
+                const challenge = try self.readFieldElement();
+                try stage.challenges.append(self.allocator, challenge);
+            }
+
+            // Read final claims
+            const num_claims = try self.readU64();
+            for (0..num_claims) |_| {
+                const claim = try self.readFieldElement();
+                try stage.final_claims.append(self.allocator, claim);
+            }
+
+            return stage;
+        }
+
+        /// Read JoltStageProofs
+        pub fn readJoltStageProofs(self: *Self) (SerializationError || Allocator.Error)!prover.JoltStageProofs(F) {
+            const log_t = try self.readU64();
+            const log_k = try self.readU64();
+
+            var proofs = prover.JoltStageProofs(F).init(self.allocator);
+            errdefer proofs.deinit();
+
+            proofs.log_t = log_t;
+            proofs.log_k = log_k;
+
+            for (&proofs.stage_proofs) |*stage| {
+                stage.deinit(); // Free the initialized empty stage
+                stage.* = try self.readStageProof();
+            }
+
+            return proofs;
+        }
+    };
+}
+
+/// Serialize a complete JoltProof to bytes
+pub fn serializeProof(comptime F: type, allocator: Allocator, proof: anytype) ![]u8 {
+    var writer = ProofWriter(F).init(allocator);
+    defer writer.deinit();
+
+    // Write header
+    try writer.writeBytes(&MAGIC);
+    try writer.writeU32(VERSION);
+
+    // Write bytecode proof
+    try writer.writeCommitment(proof.bytecode_proof.commitment);
+    try writer.writeCommitment(proof.bytecode_proof.read_ts_commitment);
+    try writer.writeCommitment(proof.bytecode_proof.write_ts_commitment);
+    try writer.writeFieldElement(proof.bytecode_proof._legacy_commitment);
+
+    // Write memory proof
+    try writer.writeCommitment(proof.memory_proof.commitment);
+    try writer.writeCommitment(proof.memory_proof.final_state_commitment);
+    try writer.writeCommitment(proof.memory_proof.read_ts_commitment);
+    try writer.writeCommitment(proof.memory_proof.write_ts_commitment);
+
+    // Write register proof
+    try writer.writeCommitment(proof.register_proof.commitment);
+    try writer.writeCommitment(proof.register_proof.final_state_commitment);
+    try writer.writeCommitment(proof.register_proof.read_ts_commitment);
+    try writer.writeCommitment(proof.register_proof.write_ts_commitment);
+
+    // Write R1CS proof (placeholder data)
+    try writer.writeU64(proof.r1cs_proof.a_eval.len);
+    for (proof.r1cs_proof.a_eval) |e| {
+        try writer.writeFieldElement(e);
+    }
+    try writer.writeU64(proof.r1cs_proof.b_eval.len);
+    for (proof.r1cs_proof.b_eval) |e| {
+        try writer.writeFieldElement(e);
+    }
+    try writer.writeU64(proof.r1cs_proof.c_eval.len);
+    for (proof.r1cs_proof.c_eval) |e| {
+        try writer.writeFieldElement(e);
+    }
+
+    // Write stage proofs (optional)
+    if (proof.stage_proofs) |stage_proofs| {
+        try writer.writeU8(1); // has_stage_proofs = true
+        try writer.writeJoltStageProofs(&stage_proofs);
+    } else {
+        try writer.writeU8(0); // has_stage_proofs = false
+    }
+
+    return writer.toOwnedSlice();
+}
+
+/// Deserialize a JoltProof from bytes
+pub fn deserializeProof(comptime F: type, allocator: Allocator, data: []const u8) !@import("mod.zig").JoltProof(F) {
+    const zkvm = @import("mod.zig");
+    var reader = ProofReader(F).init(allocator, data);
+
+    // Read and verify header
+    const magic = try reader.readBytes(4);
+    if (!std.mem.eql(u8, magic, &MAGIC)) {
+        return SerializationError.InvalidMagic;
+    }
+
+    const version = try reader.readU32();
+    if (version != VERSION) {
+        return SerializationError.UnsupportedVersion;
+    }
+
+    // Read bytecode proof
+    var bc_proof = bytecode.BytecodeProof(F).init();
+    bc_proof.commitment = try reader.readCommitment();
+    bc_proof.read_ts_commitment = try reader.readCommitment();
+    bc_proof.write_ts_commitment = try reader.readCommitment();
+    bc_proof._legacy_commitment = try reader.readFieldElement();
+
+    // Read memory proof
+    var mem_proof = ram.MemoryProof(F).init();
+    mem_proof.commitment = try reader.readCommitment();
+    mem_proof.final_state_commitment = try reader.readCommitment();
+    mem_proof.read_ts_commitment = try reader.readCommitment();
+    mem_proof.write_ts_commitment = try reader.readCommitment();
+
+    // Read register proof
+    var reg_proof = registers.RegisterProof(F).init();
+    reg_proof.commitment = try reader.readCommitment();
+    reg_proof.final_state_commitment = try reader.readCommitment();
+    reg_proof.read_ts_commitment = try reader.readCommitment();
+    reg_proof.write_ts_commitment = try reader.readCommitment();
+
+    // Read R1CS proof
+    const a_len = try reader.readU64();
+    const a_eval = try allocator.alloc(F, a_len);
+    errdefer allocator.free(a_eval);
+    for (a_eval) |*e| {
+        e.* = try reader.readFieldElement();
+    }
+
+    const b_len = try reader.readU64();
+    const b_eval = try allocator.alloc(F, b_len);
+    errdefer allocator.free(b_eval);
+    for (b_eval) |*e| {
+        e.* = try reader.readFieldElement();
+    }
+
+    const c_len = try reader.readU64();
+    const c_eval = try allocator.alloc(F, c_len);
+    errdefer allocator.free(c_eval);
+    for (c_eval) |*e| {
+        e.* = try reader.readFieldElement();
+    }
+
+    const r1cs_proof = spartan.R1CSProof(F){
+        .a_eval = a_eval,
+        .b_eval = b_eval,
+        .c_eval = c_eval,
+        .az_bz_cz_proof = null,
+        .sparse_poly_proof = null,
+        .allocator = allocator,
+    };
+
+    // Read stage proofs
+    const has_stage_proofs = try reader.readU8();
+    var stage_proofs: ?prover.JoltStageProofs(F) = null;
+    if (has_stage_proofs != 0) {
+        stage_proofs = try reader.readJoltStageProofs();
+    }
+
+    return zkvm.JoltProof(F){
+        .bytecode_proof = bc_proof,
+        .memory_proof = mem_proof,
+        .register_proof = reg_proof,
+        .r1cs_proof = r1cs_proof,
+        .stage_proofs = stage_proofs,
+        .allocator = allocator,
+    };
+}
+
+/// Write a proof to a file
+pub fn writeProofToFile(comptime F: type, allocator: Allocator, proof: anytype, path: []const u8) !void {
+    const bytes = try serializeProof(F, allocator, proof);
+    defer allocator.free(bytes);
+
+    const file = try std.fs.cwd().createFile(path, .{});
+    defer file.close();
+
+    try file.writeAll(bytes);
+}
+
+/// Read a proof from a file
+pub fn readProofFromFile(comptime F: type, allocator: Allocator, path: []const u8) !@import("mod.zig").JoltProof(F) {
+    const file = try std.fs.cwd().openFile(path, .{});
+    defer file.close();
+
+    const stat = try file.stat();
+    const data = try allocator.alloc(u8, stat.size);
+    defer allocator.free(data);
+
+    const bytes_read = try file.readAll(data);
+    if (bytes_read != stat.size) {
+        return SerializationError.UnexpectedEof;
+    }
+
+    return deserializeProof(F, allocator, data);
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test "serialize and deserialize empty stage proof" {
+    const F = field.BN254Scalar;
+    const allocator = std.testing.allocator;
+
+    // Create an empty stage proof
+    var stage = prover.StageProof(F).init(allocator);
+    defer stage.deinit();
+
+    // Serialize
+    var writer = ProofWriter(F).init(allocator);
+    defer writer.deinit();
+    try writer.writeStageProof(&stage);
+
+    // Deserialize
+    var reader = ProofReader(F).init(allocator, writer.bytes());
+    var deserialized = try reader.readStageProof();
+    defer deserialized.deinit();
+
+    // Verify
+    try std.testing.expectEqual(@as(usize, 0), deserialized.round_polys.items.len);
+    try std.testing.expectEqual(@as(usize, 0), deserialized.challenges.items.len);
+    try std.testing.expectEqual(@as(usize, 0), deserialized.final_claims.items.len);
+}
+
+test "serialize and deserialize stage proof with data" {
+    const F = field.BN254Scalar;
+    const allocator = std.testing.allocator;
+
+    // Create a stage proof with data
+    var stage = prover.StageProof(F).init(allocator);
+    defer stage.deinit();
+
+    // Add round polynomials
+    const poly1 = try allocator.alloc(F, 3);
+    poly1[0] = F.fromU64(1);
+    poly1[1] = F.fromU64(2);
+    poly1[2] = F.fromU64(3);
+    try stage.round_polys.append(allocator, poly1);
+
+    const poly2 = try allocator.alloc(F, 2);
+    poly2[0] = F.fromU64(10);
+    poly2[1] = F.fromU64(20);
+    try stage.round_polys.append(allocator, poly2);
+
+    // Add challenges
+    try stage.challenges.append(allocator, F.fromU64(100));
+    try stage.challenges.append(allocator, F.fromU64(200));
+
+    // Add claims
+    try stage.final_claims.append(allocator, F.fromU64(999));
+
+    // Serialize
+    var writer = ProofWriter(F).init(allocator);
+    defer writer.deinit();
+    try writer.writeStageProof(&stage);
+
+    // Deserialize
+    var reader = ProofReader(F).init(allocator, writer.bytes());
+    var deserialized = try reader.readStageProof();
+    defer deserialized.deinit();
+
+    // Verify round polynomials
+    try std.testing.expectEqual(@as(usize, 2), deserialized.round_polys.items.len);
+    try std.testing.expectEqual(@as(usize, 3), deserialized.round_polys.items[0].len);
+    try std.testing.expect(deserialized.round_polys.items[0][0].eql(F.fromU64(1)));
+    try std.testing.expect(deserialized.round_polys.items[0][1].eql(F.fromU64(2)));
+    try std.testing.expect(deserialized.round_polys.items[0][2].eql(F.fromU64(3)));
+    try std.testing.expectEqual(@as(usize, 2), deserialized.round_polys.items[1].len);
+    try std.testing.expect(deserialized.round_polys.items[1][0].eql(F.fromU64(10)));
+
+    // Verify challenges
+    try std.testing.expectEqual(@as(usize, 2), deserialized.challenges.items.len);
+    try std.testing.expect(deserialized.challenges.items[0].eql(F.fromU64(100)));
+    try std.testing.expect(deserialized.challenges.items[1].eql(F.fromU64(200)));
+
+    // Verify claims
+    try std.testing.expectEqual(@as(usize, 1), deserialized.final_claims.items.len);
+    try std.testing.expect(deserialized.final_claims.items[0].eql(F.fromU64(999)));
+}
+
+test "serialize and deserialize JoltStageProofs" {
+    const F = field.BN254Scalar;
+    const allocator = std.testing.allocator;
+
+    // Create stage proofs
+    var proofs = prover.JoltStageProofs(F).init(allocator);
+    defer proofs.deinit();
+
+    proofs.log_t = 10;
+    proofs.log_k = 16;
+
+    // Add some data to stage 0
+    const poly = try allocator.alloc(F, 2);
+    poly[0] = F.fromU64(42);
+    poly[1] = F.fromU64(43);
+    try proofs.stage_proofs[0].round_polys.append(allocator, poly);
+    try proofs.stage_proofs[0].challenges.append(allocator, F.fromU64(123));
+
+    // Serialize
+    var writer = ProofWriter(F).init(allocator);
+    defer writer.deinit();
+    try writer.writeJoltStageProofs(&proofs);
+
+    // Deserialize
+    var reader = ProofReader(F).init(allocator, writer.bytes());
+    var deserialized = try reader.readJoltStageProofs();
+    defer deserialized.deinit();
+
+    // Verify
+    try std.testing.expectEqual(@as(usize, 10), deserialized.log_t);
+    try std.testing.expectEqual(@as(usize, 16), deserialized.log_k);
+    try std.testing.expectEqual(@as(usize, 1), deserialized.stage_proofs[0].round_polys.items.len);
+    try std.testing.expect(deserialized.stage_proofs[0].round_polys.items[0][0].eql(F.fromU64(42)));
+    try std.testing.expect(deserialized.stage_proofs[0].challenges.items[0].eql(F.fromU64(123)));
+}
+
+test "magic and version validation" {
+    const F = field.BN254Scalar;
+    const allocator = std.testing.allocator;
+
+    // Invalid magic
+    {
+        const bad_data = [_]u8{ 'B', 'A', 'D', '!' } ++ [_]u8{0} ** 100;
+        const result = deserializeProof(F, allocator, &bad_data);
+        try std.testing.expectError(SerializationError.InvalidMagic, result);
+    }
+
+    // Invalid version
+    {
+        var bad_data: [108]u8 = undefined;
+        @memcpy(bad_data[0..4], &MAGIC);
+        const version_bytes = std.mem.toBytes(std.mem.nativeToLittle(u32, 99));
+        @memcpy(bad_data[4..8], &version_bytes);
+        const result = deserializeProof(F, allocator, &bad_data);
+        try std.testing.expectError(SerializationError.UnsupportedVersion, result);
+    }
+}
+
+test "field element roundtrip" {
+    const F = field.BN254Scalar;
+    const allocator = std.testing.allocator;
+
+    var writer = ProofWriter(F).init(allocator);
+    defer writer.deinit();
+
+    // Write some field elements
+    const elem1 = F.fromU64(12345678901234567890);
+    const elem2 = F.one();
+    const elem3 = F.zero();
+
+    try writer.writeFieldElement(elem1);
+    try writer.writeFieldElement(elem2);
+    try writer.writeFieldElement(elem3);
+
+    // Read them back
+    var reader = ProofReader(F).init(allocator, writer.bytes());
+
+    const read1 = try reader.readFieldElement();
+    const read2 = try reader.readFieldElement();
+    const read3 = try reader.readFieldElement();
+
+    try std.testing.expect(read1.eql(elem1));
+    try std.testing.expect(read2.eql(elem2));
+    try std.testing.expect(read3.eql(elem3));
+}
+
+test "serialize and deserialize full JoltProof" {
+    const F = field.BN254Scalar;
+    const allocator = std.testing.allocator;
+    const zkvm = @import("mod.zig");
+
+    // Create a minimal bytecode program (li a0, 42; li a1, 10; add a0, a0, a1; ebreak)
+    const program = [_]u8{
+        0x13, 0x05, 0xa0, 0x02, // li a0, 42
+        0x93, 0x05, 0xa0, 0x00, // li a1, 10
+        0x33, 0x05, 0xb5, 0x00, // add a0, a0, a1
+        0x73, 0x00, 0x10, 0x00, // ebreak
+    };
+
+    // Create a prover
+    var prover_inst = zkvm.JoltProver(F).init(allocator);
+    prover_inst.max_cycles = 64;
+
+    // Generate a proof
+    var proof = try prover_inst.prove(&program, &[_]u8{});
+    defer proof.deinit();
+
+    // Verify the proof was generated
+    try std.testing.expect(proof.stage_proofs != null);
+
+    // Serialize the proof
+    const serialized = try serializeProof(F, allocator, proof);
+    defer allocator.free(serialized);
+
+    // Check the serialized data starts with magic
+    try std.testing.expect(std.mem.eql(u8, serialized[0..4], &MAGIC));
+
+    // Deserialize the proof
+    var deserialized = try deserializeProof(F, allocator, serialized);
+    defer deserialized.deinit();
+
+    // Verify the deserialized proof matches the original
+    try std.testing.expect(deserialized.stage_proofs != null);
+
+    // Compare stage proofs
+    const orig_stages = proof.stage_proofs.?;
+    const deser_stages = deserialized.stage_proofs.?;
+
+    try std.testing.expectEqual(orig_stages.log_t, deser_stages.log_t);
+    try std.testing.expectEqual(orig_stages.log_k, deser_stages.log_k);
+
+    // Compare each stage's round polys
+    for (orig_stages.stage_proofs, deser_stages.stage_proofs) |orig, deser| {
+        try std.testing.expectEqual(orig.round_polys.items.len, deser.round_polys.items.len);
+        for (orig.round_polys.items, deser.round_polys.items) |orig_poly, deser_poly| {
+            try std.testing.expectEqual(orig_poly.len, deser_poly.len);
+            for (orig_poly, deser_poly) |orig_coeff, deser_coeff| {
+                try std.testing.expect(orig_coeff.eql(deser_coeff));
+            }
+        }
+    }
+
+    // Verify the deserialized proof works
+    var verifier = zkvm.JoltVerifier(F).init(allocator);
+    verifier.setVerifyingKey(zkvm.VerifyingKey.init());
+    const result = try verifier.verify(&deserialized, &[_]u8{});
+    try std.testing.expect(result);
+}

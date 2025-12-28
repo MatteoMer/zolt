@@ -2,6 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.1] - 2025-12-28
+
+### Added
+
+#### CLI Commands
+- **`zolt stats <proof>`** - Show detailed proof statistics including size breakdown, sumcheck stages, and per-stage metrics
+- **`zolt trace <elf>`** - Display execution trace for debugging with cycle, PC, instruction, and disassembly
+  - `--max N` option to limit trace length
+
+#### JSON Proof Format
+- Added `--json` option to `prove` command for human-readable proof output
+- Added JSON deserialization support for loading JSON proofs
+- Auto-detection of binary vs JSON proof format in `verify` command
+- `JsonProofWriter(F)` and `JsonProofReader(F)` types for serialization
+
+#### Example Programs
+- `factorial.c` - Compute 10! using MUL instruction
+- `bitwise.c` - AND, OR, XOR, and shift operations demo
+- `array.c` - Array store/load operations with sum and max
+- `gcd.c` - GCD using Euclidean algorithm (DIV, REM)
+- Updated Makefile with new targets and help message
+
+#### Bug Fixes
+- Fixed commitment field types (use base field Fp, not scalar field)
+- Added big-endian serialization for G1 point coordinates
+- Fixed double-free in JSON proof deserialization
+- Fixed Zig 0.15 API compatibility (bufPrint vs formatIntBuf)
+
+### Changed
+- CLI now shows format type (JSON/Binary) when saving/loading proofs
+- Improved README with C examples documentation
+
 ## [0.1.0] - 2025-12-27
 
 Initial port of Jolt zkVM from Rust to Zig.

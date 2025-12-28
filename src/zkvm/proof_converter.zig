@@ -158,13 +158,20 @@ pub fn ProofConverter(comptime F: type) type {
                 try jolt_proof.addRoundPoly(poly);
             }
 
-            // Add opening claims for SpartanOuter
+            // Add opening claims for SpartanOuter Product virtual polynomial
             if (zolt_stage.final_claims.items.len > 0) {
                 try claims.insert(
                     .{ .Virtual = .{ .poly = .Product, .sumcheck_id = .SpartanOuter } },
                     zolt_stage.final_claims.items[0],
                 );
             }
+
+            // Add UnivariateSkip opening claim (required for univariate skip verification)
+            // This is the claim for the first-round univariate polynomial evaluation
+            try claims.insert(
+                .{ .Virtual = .{ .poly = .UnivariateSkip, .sumcheck_id = .SpartanOuter } },
+                if (zolt_stage.final_claims.items.len > 0) zolt_stage.final_claims.items[0] else F.zero(),
+            );
 
             _ = self;
         }
@@ -196,6 +203,13 @@ pub fn ProofConverter(comptime F: type) type {
                     zolt_stage.final_claims.items[1],
                 );
             }
+
+            // Add UnivariateSkip opening claim for product virtualization
+            // This is the claim for Stage 2's first-round univariate polynomial
+            try claims.insert(
+                .{ .Virtual = .{ .poly = .UnivariateSkip, .sumcheck_id = .SpartanProductVirtualization } },
+                if (zolt_stage.final_claims.items.len > 0) zolt_stage.final_claims.items[0] else F.zero(),
+            );
 
             _ = self;
         }

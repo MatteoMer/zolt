@@ -45,25 +45,29 @@ zig build run
 
 ```bash
 # Show help
-./zig-out/bin/zolt help
+zolt help
 
 # Show version
-./zig-out/bin/zolt version
+zolt version
+
+# Show zkVM capabilities and features
+zolt info
 
 # Decode a RISC-V instruction from hex
-./zig-out/bin/zolt decode 0x00a00513
+zolt decode 0x00a00513
 
 # Run performance benchmarks
-./zig-out/bin/zolt bench
+zolt bench
 
 # Run a RISC-V ELF binary
-./zig-out/bin/zolt run program.elf
+zolt run program.elf
+zolt run --max-cycles 1000 --regs program.elf  # Limit cycles, show registers
 
 # Generate ZK proof for a RISC-V ELF binary
-./zig-out/bin/zolt prove program.elf
+zolt prove program.elf
 
 # Inspect a Powers of Tau (PTAU) ceremony file
-./zig-out/bin/zolt srs ceremony.ptau
+zolt srs ceremony.ptau
 
 # Run examples
 zig build example-field        # Field arithmetic
@@ -203,7 +207,7 @@ pub fn main() !void {
 
 ## Testing
 
-The project includes 554 tests covering:
+The project includes 576+ tests covering:
 
 - Field arithmetic (Montgomery operations, batch ops, extension fields)
 - Polynomial operations (evaluation, summation, binding)

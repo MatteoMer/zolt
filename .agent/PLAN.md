@@ -1,10 +1,26 @@
 # Zolt zkVM Implementation Plan
 
-## Current Status (December 2024 - Iteration 40)
+## Current Status (December 2024 - Iteration 42)
 
-### Session Summary - Complex Tests & Benchmarks Added
+### Session Summary - CLI Info Command Added
 
 This iteration added:
+
+1. **CLI Info Command**
+   - Added `zolt info` command to display zkVM capabilities
+   - Shows proof system (HyperKZG, Spartan, Lasso, 6-stage sumcheck)
+   - Lists RISC-V support (60+ instructions, 24 lookup tables)
+   - Includes performance metrics and ELF loader info
+
+2. **CLI Run Options**
+   - Added `--max-cycles N` option to limit emulator cycles
+   - Added `--regs` option to display final register state
+   - Options work before or after ELF path
+   - Updated README with new command documentation
+
+### Previous Session (Iteration 40-41) - Complex Tests & Benchmarks
+
+Previous iterations added:
 
 1. **Bug Fix: Branch Target Calculation**
    - Fixed PC overflow when calculating branch targets for high addresses (0x80000000+)

@@ -1,6 +1,19 @@
 # Zolt zkVM Implementation TODO
 
-## Completed (This Session - Iteration 41)
+## Completed (This Session - Iteration 42)
+
+### CLI Enhancements
+- [x] Add `zolt info` command showing zkVM capabilities
+- [x] Display proof system details (HyperKZG, Spartan, Lasso)
+- [x] Show 6-stage sumcheck overview
+- [x] List RISC-V ISA support (60+ instructions, 24 lookup tables)
+- [x] Include performance metrics
+- [x] Add tests for info command
+- [x] Add `--max-cycles N` option to run command (limit execution cycles)
+- [x] Add `--regs` option to run command (show final register state)
+- [x] Update README with new commands and options
+
+## Completed (Previous Session - Iteration 41)
 
 ### Verifier Benchmarks
 - [x] Add benchVerifier() function to measure verification performance

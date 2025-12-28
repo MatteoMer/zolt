@@ -400,8 +400,8 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 const challenge = try transcript.challengeScalar("lasso_round");
 
                 if (self.config.debug_output) {
-                    std.debug.print("  Stage 3 round {}: p0={} p1={} sum={} claim={} ok={}\n", .{
-                        round_idx, p_at_0.toU64(), p_at_1.toU64(), sum.toU64(), current_claim.toU64(), sum_check_ok,
+                    std.debug.print("  Stage 3 round {}: p0={} p1={} sum={} claim={} ok={} c1={}\n", .{
+                        round_idx, p_at_0.toU64(), p_at_1.toU64(), sum.toU64(), current_claim.toU64(), sum_check_ok, c1.toU64(),
                     });
                 }
 
@@ -417,7 +417,11 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 try self.opening_claims.addChallenge(challenge);
 
                 // Update claim: evaluate p(challenge) = c0 + c1*r + c2*r^2
-                current_claim = c0.add(c1.mul(challenge)).add(c2.mul(challenge).mul(challenge));
+                const new_claim = c0.add(c1.mul(challenge)).add(c2.mul(challenge).mul(challenge));
+                if (self.config.debug_output) {
+                    std.debug.print("    p(r) = {} (r={})\n", .{ new_claim.toU64(), challenge.toU64() });
+                }
+                current_claim = new_claim;
             }
 
             // Stage 3 verification passed
@@ -472,12 +476,12 @@ pub fn MultiStageVerifier(comptime F: type) type {
 
             // Verify each round polynomial
             for (proof.round_polys.items, 0..) |round_poly, round_idx| {
-                if (round_poly.len < 3) {
-                    // Degree 3 requires at least 3 evaluations
+                if (round_poly.len < 4) {
+                    // Degree 3 sumcheck (product of 3 multilinear) requires 4 evaluations
                     self.stage_results[3] = .{
                         .success = false,
                         .final_claim = null,
-                        .error_msg = "Stage 4: invalid round polynomial (need degree 3)",
+                        .error_msg = "Stage 4: invalid round polynomial (need 4 evals for degree 3)",
                     };
                     return false;
                 }
@@ -489,13 +493,18 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 // Get challenge
                 const challenge = try transcript.challengeScalar("val_eval_round");
 
+                if (self.config.debug_output) {
+                    std.debug.print("  Stage 4 round {}: p0={} p1={} sum={} claim={} ok={}\n", .{
+                        round_idx, round_poly[0].toU64(), round_poly[1].toU64(), sum.toU64(), current_claim.toU64(), sum_check_ok,
+                    });
+                }
+
                 if (self.config.strict_sumcheck and !sum_check_ok) {
                     self.stage_results[3] = .{
                         .success = false,
                         .final_claim = null,
                         .error_msg = "Stage 4: sumcheck failed - p(0) + p(1) != claim",
                     };
-                    _ = round_idx;
                     return false;
                 }
 

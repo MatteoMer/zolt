@@ -635,24 +635,24 @@ pub fn MultiStageProver(comptime F: type) type {
 
             // Run sumcheck rounds
             const num_rounds = val_params.numRounds();
-            for (0..num_rounds) |round| {
-                // Compute round polynomial [p(0), p(1), p(2)]
+            for (0..num_rounds) |_| {
+                // Compute round polynomial [p(0), p(1), p(2), p(3)] for degree-3 sumcheck
                 const round_poly = val_prover.computeRoundPolynomial();
 
-                // Store polynomial in proof
-                const poly_copy = try self.allocator.alloc(F, 3);
+                // Store polynomial in proof (4 evaluations for degree-3)
+                const poly_copy = try self.allocator.alloc(F, 4);
                 poly_copy[0] = round_poly[0];
                 poly_copy[1] = round_poly[1];
                 poly_copy[2] = round_poly[2];
+                poly_copy[3] = round_poly[3];
                 try stage_proof.round_polys.append(self.allocator, poly_copy);
 
                 // Get challenge from transcript
                 const challenge = try transcript.challengeScalar("val_eval_round");
                 try stage_proof.addChallenge(challenge);
 
-                // Bind the challenge
-                val_prover.bindChallenge(challenge);
-                _ = round;
+                // Bind the challenge with the round polynomial for proper claim update
+                val_prover.bindChallengeWithPoly(challenge, round_poly);
             }
 
             // Record final claim

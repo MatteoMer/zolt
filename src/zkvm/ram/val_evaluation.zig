@@ -419,17 +419,17 @@ pub fn ValEvaluationProver(comptime F: type) type {
             return self.current_claim;
         }
 
-        /// Compute round polynomial [p(0), p(1), p(2)]
-        /// For degree-3 sumcheck, we compute p(0), p(1), p(2) by evaluating:
+        /// Compute round polynomial [p(0), p(1), p(2), p(3)]
+        /// For degree-3 sumcheck (product of 3 multilinear), we need 4 evaluations:
         ///   p(x) = Σ_{j} inc(x,j) · wa(x,j) · lt(x,j)
         /// where the current variable takes value x and we sum over remaining indices.
-        pub fn computeRoundPolynomial(self: *Self) [3]F {
-            var evals: [3]F = .{ F.zero(), F.zero(), F.zero() };
-            const n = self.inc_evals.len;
+        pub fn computeRoundPolynomial(self: *Self) [4]F {
+            var evals: [4]F = .{ F.zero(), F.zero(), F.zero(), F.zero() };
+            const n = self.effectiveLen();
             const half = n / 2;
 
             if (half == 0) {
-                // Single element: p(0) = f(0), p(1) = 0, p(2) = 0
+                // Single element: p(0) = f(0), others are 0
                 if (n > 0) {
                     evals[0] = self.inc_evals[0].mul(self.wa_evals[0]).mul(self.lt_evals[0]);
                 }
@@ -453,22 +453,34 @@ pub fn ValEvaluationProver(comptime F: type) type {
                 // p(1): product at x = 1
                 evals[1] = evals[1].add(inc_1.mul(wa_1).mul(lt_1));
 
-                // p(2): extrapolate each polynomial linearly, then multiply
-                // For linear polynomial: f(2) = 2*f(1) - f(0)
-                const inc_2 = inc_1.add(inc_1).sub(inc_0);
-                const wa_2 = wa_1.add(wa_1).sub(wa_0);
-                const lt_2 = lt_1.add(lt_1).sub(lt_0);
+                // For multilinear polynomial: f(x) = (1-x)*f(0) + x*f(1)
+                // f(2) = -f(0) + 2*f(1) = 2*f(1) - f(0)
+                // f(3) = -2*f(0) + 3*f(1) = 3*f(1) - 2*f(0)
+                const two = F.fromU64(2);
+                const three = F.fromU64(3);
 
+                // p(2): extrapolate each polynomial, then multiply
+                const inc_2 = two.mul(inc_1).sub(inc_0);
+                const wa_2 = two.mul(wa_1).sub(wa_0);
+                const lt_2 = two.mul(lt_1).sub(lt_0);
                 evals[2] = evals[2].add(inc_2.mul(wa_2).mul(lt_2));
+
+                // p(3): extrapolate to x=3
+                const inc_3 = three.mul(inc_1).sub(two.mul(inc_0));
+                const wa_3 = three.mul(wa_1).sub(two.mul(wa_0));
+                const lt_3 = three.mul(lt_1).sub(two.mul(lt_0));
+                evals[3] = evals[3].add(inc_3.mul(wa_3).mul(lt_3));
             }
 
             return evals;
         }
 
-        /// Bind the current variable to challenge r
+        /// Bind the current variable to challenge r, and provide round polynomial values
         /// This folds all three polynomials: f_new[i] = (1-r)*f[i] + r*f[i+half]
-        pub fn bindChallenge(self: *Self, r: F) void {
-            const half = self.inc_evals.len / 2;
+        /// The round polynomial values [p(0), p(1), p(2), p(3)] are used to compute the new claim
+        pub fn bindChallengeWithPoly(self: *Self, r: F, round_poly: [4]F) void {
+            const n = self.effectiveLen();
+            const half = n / 2;
             if (half == 0) {
                 self.round += 1;
                 return;
@@ -487,25 +499,44 @@ pub fn ValEvaluationProver(comptime F: type) type {
             }
 
             // Conceptually shrink the arrays (we'll use fewer elements)
-            // In practice we just track via num_vars and use only first half
-            // But we need to actually resize for the next round
-            // For simplicity, set unused portion to zero
-            for (half..self.inc_evals.len) |i| {
+            // In practice we just track via round and use effectiveLen
+            // Zero out the upper half that we just folded from
+            for (half..n) |i| {
                 self.inc_evals[i] = F.zero();
                 self.wa_evals[i] = F.zero();
                 self.lt_evals[i] = F.zero();
             }
 
-            // Update current claim: should be p(r) computed from round poly
-            // p(r) = inc(r) * wa(r) * lt(r) summed over remaining indices
-            // After binding, this is the sum over the folded evaluations
-            var new_claim = F.zero();
-            for (0..half) |i| {
-                new_claim = new_claim.add(self.inc_evals[i].mul(self.wa_evals[i]).mul(self.lt_evals[i]));
-            }
-            self.current_claim = new_claim;
+            // Update current claim using cubic Lagrange interpolation from 4 points
+            // For degree-3 polynomial, we need p(0), p(1), p(2), p(3) to exactly recover p(r)
+            const two = F.fromU64(2);
+            const three = F.fromU64(3);
+            const six = F.fromU64(6);
+
+            const r_minus_1 = r.sub(F.one());
+            const r_minus_2 = r.sub(two);
+            const r_minus_3 = r.sub(three);
+
+            // L0(r) = (r-1)(r-2)(r-3) / (-6)
+            const L0 = r_minus_1.mul(r_minus_2).mul(r_minus_3).mul(six.neg().inverse().?);
+            // L1(r) = r(r-2)(r-3) / 2
+            const L1 = r.mul(r_minus_2).mul(r_minus_3).mul(two.inverse().?);
+            // L2(r) = r(r-1)(r-3) / (-2)
+            const L2 = r.mul(r_minus_1).mul(r_minus_3).mul(two.neg().inverse().?);
+            // L3(r) = r(r-1)(r-2) / 6
+            const L3 = r.mul(r_minus_1).mul(r_minus_2).mul(six.inverse().?);
+
+            self.current_claim = round_poly[0].mul(L0).add(round_poly[1].mul(L1)).add(round_poly[2].mul(L2)).add(round_poly[3].mul(L3));
 
             self.round += 1;
+        }
+
+        /// Bind the current variable to challenge r (DEPRECATED - use bindChallengeWithPoly)
+        /// This computes the sum of folded products, which is incorrect for degree-3 sumcheck
+        pub fn bindChallenge(self: *Self, r: F) void {
+            // Compute round poly first, then bind with it
+            const round_poly = self.computeRoundPolynomial();
+            self.bindChallengeWithPoly(r, round_poly);
         }
 
         /// Get current claim (after binding challenges)

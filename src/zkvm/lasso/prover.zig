@@ -157,13 +157,20 @@ pub fn LassoProver(comptime F: type) type {
             @memset(challenges, F.zero());
 
             // Initialize eq_evals array - we need to track eq(r, j) for each cycle j
-            // The number of cycles is lookup_indices.len
+            // The number of cycles is lookup_indices.len, but for cycle phase folding
+            // we need the array to be padded to 2^log_T
             const num_cycles = lookup_indices.len;
-            const eq_evals = try allocator.alloc(F, num_cycles);
+            const padded_size = @as(usize, 1) << @intCast(params.log_T);
+            const eq_evals = try allocator.alloc(F, padded_size);
 
             // Compute initial eq evaluations using the SplitEq polynomial
-            for (0..num_cycles) |j| {
-                eq_evals[j] = eq_r.getEq(j);
+            for (0..padded_size) |j| {
+                if (j < num_cycles) {
+                    eq_evals[j] = eq_r.getEq(j);
+                } else {
+                    // Pad with zeros - these cycles have no lookups
+                    eq_evals[j] = F.zero();
+                }
             }
 
             // Compute initial claim as sum of all eq evaluations
@@ -188,7 +195,7 @@ pub fn LassoProver(comptime F: type) type {
                 .allocator = allocator,
                 .current_claim = initial_claim,
                 .eq_evals = eq_evals,
-                .eq_evals_len = num_cycles,
+                .eq_evals_len = padded_size,
             };
         }
 

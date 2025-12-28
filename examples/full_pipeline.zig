@@ -130,12 +130,9 @@ pub fn main() !void {
     };
     verifier.setVerifyingKey(zkvm_vk);
 
-    // Note: Strict sumcheck mode currently works for Stage 1 (Spartan) but not
-    // for later stages (Lasso, etc.) due to claim tracking issues in the prover.
-    // Stage 1 verification with strict mode now passes correctly.
-    //
-    // TODO: Fix Lasso prover to properly maintain claim between rounds
-    verifier.setStrictMode(false);
+    // Strict sumcheck mode validates that p(0) + p(1) = claim for every round.
+    // All 6 stages now pass strict verification after fixes in iterations 36-39.
+    verifier.setStrictMode(true);
     verifier.setDebugOutput(false);
 
     std.debug.print("Verifier initialized with verifying key\n", .{});

@@ -2,16 +2,16 @@
 
 ## Current Status (Jolt Compatibility Phase)
 
-**Project Status: TRANSCRIPT INTEGRATION COMPLETE**
+**Project Status: OPENING CLAIMS COMPUTED, SUMCHECK VERIFICATION FAILING**
 
-We have integrated the Blake2b Fiat-Shamir transcript throughout the proof generation:
+Key achievements:
+1. **R1CS Input MLE Evaluations** - Opening claims now contain actual computed values
+2. **Correct Round Polynomial Count** - Stage 1 has proper 1 + num_cycle_vars polynomials
+3. **Cross-Deserialization** - Jolt successfully deserializes Zolt proofs
 
-1. **Blake2bTranscript** - Identical Fiat-Shamir challenges as Jolt (7 test vectors verified)
-2. **convertWithTranscript()** - New method for full transcript integration
-3. **generateStreamingOuterSumcheckProofWithTranscript()** - Stage 1 uses transcript challenges
-4. **Proof Converter Integration** - Stage 1 remaining rounds use transcript-derived challenges
-
-The next step is end-to-end cross-verification with Jolt.
+Current issue: Sumcheck verification fails because round polynomials are not correctly
+computed from Az*Bz products. The opening claims are correct (non-zero PC values, OpFlags)
+but the sumcheck polynomials themselves are placeholder values.
 
 ---
 
@@ -32,95 +32,59 @@ The next step is end-to-end cross-verification with Jolt.
 13. ✅ **StreamingOuterProver** - Framework with degree-27 and degree-3 round polys
 14. ✅ **Proof Converter Integration** - Stage 1 uses StreamingOuterProver
 15. ✅ **Transcript Integration** - Blake2bTranscript in proof generation
+16. ✅ **R1CS Input MLE Evaluation** - Compute actual evaluations at challenge point
+17. ✅ **Correct Round Count** - Stage 1 has 1 + num_cycle_vars round polynomials
 
 ---
 
-## Current Work: End-to-End Cross-Verification
+## Current Work: Sumcheck Verification
 
-### Implemented Components
+### Verified Working
 
-1. **Blake2bTranscript** (`src/transcripts/blake2b.zig`)
-   - 32-byte state with round counter
-   - Blake2b-256 hash operations
-   - EVM-compatible scalar serialization
+1. **Opening Claims** - Non-zero values for PC, OpFlags(AddOperands), OpFlags(WriteLookupOutputToRD)
+2. **Round Polynomial Count** - 4 polynomials for trace length 8 (3 cycle vars)
+3. **Proof Deserialization** - Jolt correctly parses all proof components
 
-2. **convertWithTranscript()** (`src/zkvm/proof_converter.zig`)
-   - Full transcript integration for Stage 1
-   - Challenges derived from Blake2b hash
-   - Deterministic proof generation
+### Failing: Sumcheck Polynomial Values
 
-3. **generateStreamingOuterSumcheckProofWithTranscript()**
-   - Appends UniSkip polynomial to transcript
-   - Derives r0 from transcript
-   - Appends round polynomials to transcript
-   - Derives round challenges from transcript
+The sumcheck verification fails because:
+- Round polynomials are generated from computeRemainingRoundPoly() but values are incorrect
+- The formula: s(X) = Σ eq(τ, i) × Az(i, X) × Bz(i, X) needs proper implementation
+- Current streaming prover uses simplified evaluations
 
-### Remaining Work
+### Root Cause Analysis
 
-1. **End-to-end Cross-Verification**
-   - Generate proof with transcript for trivial trace
-   - Serialize in Jolt format
-   - Verify with Jolt's verifier
-   - Debug any discrepancies
+Looking at Jolt verification output:
+```
+Virtual(PC, SpartanOuter) => 470923325918454702788286590928955227900599927949267948307234034664185460615
+Virtual(OpFlags(AddOperands), SpartanOuter) => 14116661703799451320060418720194240191430100414874762526722692778591556927761
+```
 
-2. **Stages 2-7 Transcript Integration** (if needed)
-   - Currently using zero proofs
-   - Would need full prover implementations
+These claims are non-zero (good!) but the sumcheck relation:
+```
+output_claim == expected_output_claim(r_cycle)
+```
+is not satisfied because our round polynomials don't correspond to the correct Az*Bz sums.
 
 ---
 
-## Phase 2: Jolt Compatibility
+## Remaining Work
 
-### 1. Transcript Alignment ✅ COMPLETE
+### High Priority
 
-- [x] **Create Blake2bTranscript** (`src/transcripts/blake2b.zig`)
-- [x] **Test Vector Validation** - 7 test vectors verified
-- [x] **Proof Generation Integration** - convertWithTranscript()
+1. **Fix StreamingOuterProver.computeRemainingRoundPoly()**
+   - Compute actual Az*Bz products per cycle
+   - Use constraint evaluators for first/second groups
+   - Generate correct degree-3 polynomials
 
-### 2. Proof Types ✅ COMPLETE
+2. **Fix UniSkip First Round Polynomial**
+   - The degree-27 polynomial needs proper constraint evaluation
+   - Currently using placeholder values
 
-- [x] **JoltProof Structure** (`src/zkvm/jolt_types.zig`)
-- [x] **CompressedUniPoly** - Proper compression (remove linear term)
-- [x] **UniSkipFirstRoundProof** - High-degree first-round polynomials
-- [x] **OpeningClaims** - With proper VirtualPolynomial ordering
+### Medium Priority
 
-### 3. Serialization ✅ COMPLETE
-
-- [x] **Arkworks-Compatible Format** (`src/zkvm/jolt_serialization.zig`)
-- [x] **writeDoryProof method** - Matches ark_serde.rs format exactly
-- [x] **writeG1Compressed/writeG2Compressed** - Arkworks point compression
-
-### 4. Dory Commitment Scheme ✅ COMPLETE
-
-- [x] **Dory Implementation** (`src/poly/commitment/dory.zig`)
-- [x] **Full Dory IPA Prover** - reduce-and-fold algorithm
-- [x] **Point Compression** - G1/G2 in arkworks format
-
-### 5. R1CS Constraints ✅ COMPLETE
-
-- [x] **19 constraints matching Jolt** (`src/zkvm/r1cs/constraints.zig`)
-- [x] **First group (10 constraints)** - Boolean guards, ~64-bit Bz
-- [x] **Second group (9 constraints)** - Mixed guards, ~128-bit Bz
-- [x] **Constraint evaluators** - Az/Bz per group
-
-### 6. Streaming Sumcheck ✅ COMPLETE
-
-- [x] **GruenSplitEqPolynomial** - Prefix tables for factored eq evaluation
-- [x] **MultiquadraticPolynomial** - Ternary grid for streaming
-- [x] **StreamingOuterProver** - Framework for degree-27 and degree-3 rounds
-- [x] **Integration with proof converter** - Stage 1 remaining rounds
-- [x] **Transcript integration** - Blake2bTranscript for challenges
-
-### 7. Cross-Verification 🔄 IN PROGRESS
-
-- [x] **Jolt deserializes Zolt proofs** - VERIFIED WORKING
-- [x] **48 opening claims** - All R1CS inputs + OpFlags + stage claims
-- [x] **UniSkip first-round structure** - Correct degree polynomials
-- [x] **Streaming sumcheck proofs** - Using actual evaluations
-- [x] **Fiat-Shamir consistency** - Transcript for challenges
-- [x] **proveJoltCompatible with transcript** - Uses Blake2bTranscript
-- [ ] **Tau from commitments** - Derive tau from commitment hashes
-- [ ] **Full verification** - End-to-end with Jolt verifier
+3. **Stages 2-7** - Currently all zeros (placeholder)
+4. **Joint Opening Proof** - Dory batch opening proof
 
 ---
 
@@ -137,15 +101,15 @@ Build Summary: 5/5 steps succeeded; 608/608 tests passed
 
 | Test | Status | Details |
 |------|--------|---------|
-| `test_deserialize_zolt_proof` | ✅ PASS | 27910 bytes, 48 claims |
+| `test_deserialize_zolt_proof` | ✅ PASS | 26558 bytes, 48 claims |
 | `test_debug_zolt_format` | ✅ PASS | All claims and commitments valid |
-| `test_verify_zolt_proof` | 🔄 TO TEST | With transcript integration |
+| `test_verify_zolt_proof` | ❌ FAIL | Sumcheck verification failed |
 
 ---
 
 ## Key Files
 
-### Zolt (Implemented)
+### Core Implementation
 | File | Status | Purpose |
 |------|--------|---------|
 | `src/transcripts/blake2b.zig` | ✅ Done | Blake2bTranscript |
@@ -155,17 +119,19 @@ Build Summary: 5/5 steps succeeded; 608/608 tests passed
 | `src/poly/commitment/dory.zig` | ✅ Done | Dory IPA |
 | `src/zkvm/r1cs/constraints.zig` | ✅ Done | 19 R1CS constraints |
 | `src/zkvm/r1cs/evaluators.zig` | ✅ Done | Az/Bz constraint evaluators |
+| `src/zkvm/r1cs/evaluation.zig` | ✅ Done | MLE evaluation at r_cycle |
 | `src/poly/split_eq.zig` | ✅ Done | Gruen's efficient eq polynomial |
 | `src/poly/multiquadratic.zig` | ✅ Done | Ternary grid expansion {0, 1, ∞} |
-| `src/zkvm/spartan/streaming_outer.zig` | ✅ Done | Streaming outer sumcheck prover |
-| `src/zkvm/spartan/outer.zig` | ✅ Done | UniSkip first-round prover |
+| `src/zkvm/spartan/streaming_outer.zig` | 🔄 WIP | Streaming outer sumcheck prover |
+| `src/zkvm/spartan/outer.zig` | 🔄 WIP | UniSkip first-round prover |
 
 ### Next Steps
 | Task | Priority | Complexity |
 |------|----------|------------|
-| Test with Jolt verifier | High | Medium |
-| Debug any verification failures | High | High |
-| Document cross-verification setup | Medium | Low |
+| Fix Az*Bz computation in streaming prover | High | High |
+| Fix UniSkip polynomial computation | High | High |
+| Implement Stages 2-7 | Medium | High |
+| Debug verification with trace | Low | Medium |
 
 ---
 
@@ -181,10 +147,14 @@ Build Summary: 5/5 steps succeeded; 608/608 tests passed
 - Stage 1 uses transcript-derived challenges
 - convertWithTranscript() method for full integration
 
-**Verification Compatibility: CLOSE**
-- All infrastructure in place
-- Need to test with Jolt verifier
-- Expected timeline: 1 more iteration for testing
+**Opening Claims: WORKING**
+- Non-zero values computed from MLE evaluation
+- Proper mapping from Zolt's R1CSInputIndex to Jolt's VirtualPolynomial
+
+**Verification Compatibility: CLOSE BUT FAILING**
+- Sumcheck polynomial values are incorrect
+- Need proper Az*Bz computation in streaming prover
+- Expected timeline: 1-2 more iterations
 
 **Architecture Notes:**
 - The streaming sumcheck uses Gruen's method with multiquadratic expansion
@@ -192,3 +162,4 @@ Build Summary: 5/5 steps succeeded; 608/608 tests passed
 - First round uses degree-27 univariate skip polynomial
 - Remaining rounds use degree-3 polynomials
 - All challenges derived from Blake2b Fiat-Shamir transcript
+- Opening claims computed using eq polynomial MLE evaluation

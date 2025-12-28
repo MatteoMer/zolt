@@ -540,3 +540,39 @@ Ended: 2025-12-28T08:02:06.579008
 Turns: 98
 Cost: $5.3312
 
+
+--- Iteration 46 ---
+Started: 2025-12-28T08:02:08.582271
+Ended: 2025-12-28T08:14:53.445931
+Turns: 88
+Cost: $4.6976
+
+
+--- Iteration 47 ---
+Started: 2025-12-28T08:14:55.449256
+Ended: 2025-12-28T08:23:51.647298
+Turns: 85
+Cost: $3.4682
+
+Iteration 49 - 2025-12-28 08:24
+Summary: Fixed ELF loading and ECALL handling for C program support
+
+Key Changes:
+1. Added loadProgramAt() to load bytecode at ELF's base address
+2. Fixed CLI run/trace commands to use correct base_address
+3. Added ECALL (SYSTEM opcode) handling for program termination
+4. Fixed run() to treat ECALL as normal termination
+5. Fixed AUIPC and JAL for high PC addresses (wrapping arithmetic)
+6. Fixed register state display to read from RegisterFile
+
+Verified C Programs:
+- fibonacci.elf: Returns 55 (Fibonacci(10)) in 51 cycles - WORKING
+- sum.elf: Returns 5050 (sum 1-100) in 5 cycles - WORKING
+- Full proof pipeline working for both programs
+
+Commits:
+- Fix ELF loading and add ECALL handling for program termination
+- Update documentation for iteration 49
+
+All 578 tests pass.
+

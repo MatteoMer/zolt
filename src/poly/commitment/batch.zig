@@ -123,7 +123,7 @@ pub fn BatchOpeningAccumulator(comptime F: type) type {
             g2: G2Point,
             tau_g2: G2Point,
             transcript: anytype,
-        ) bool {
+        ) !bool {
             if (self.claims.items.len == 0) {
                 return true;
             }
@@ -279,4 +279,41 @@ test "batch opening accumulator add claim" {
     try acc.addClaim(comm, &point, value, null);
 
     try std.testing.expectEqual(@as(usize, 1), acc.numClaims());
+}
+
+test "batch opening accumulator multiple claims" {
+    const allocator = std.testing.allocator;
+    const F = field.BN254Scalar;
+    const Point = msm.AffinePoint(F);
+
+    var acc = BatchOpeningAccumulator(F).init(allocator);
+    defer acc.deinit();
+
+    // Add multiple claims
+    const g1 = Point.generator();
+    const point1 = [_]F{F.one()};
+    const point2 = [_]F{ F.fromU64(2), F.fromU64(3) };
+    const point3 = [_]F{F.fromU64(5)};
+
+    try acc.addClaim(g1, &point1, F.fromU64(10), null);
+    try acc.addClaim(g1, &point2, F.fromU64(20), null);
+    try acc.addClaim(g1, &point3, F.fromU64(30), null);
+
+    try std.testing.expectEqual(@as(usize, 3), acc.numClaims());
+}
+
+test "opening claim initialization" {
+    const F = field.BN254Scalar;
+    const Point = msm.AffinePoint(F);
+    const Claim = OpeningClaim(F);
+
+    const comm = Point.generator();
+    const point = [_]F{ F.one(), F.fromU64(2) };
+    const value = F.fromU64(42);
+
+    const claim = Claim.init(comm, &point, value, null);
+
+    try std.testing.expect(claim.commitment.eql(comm));
+    try std.testing.expect(claim.value.eql(value));
+    try std.testing.expectEqual(@as(usize, 2), claim.point.len);
 }

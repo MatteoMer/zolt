@@ -836,3 +836,8 @@ test "dory setup and commit" {
     const commitment = D.commit(&params, &polynomial);
     _ = commitment;
 }
+
+// Reference batch module tests
+test {
+    std.testing.refAllDecls(batch);
+}

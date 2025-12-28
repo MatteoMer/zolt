@@ -343,15 +343,33 @@ All 7 test vectors from Jolt verified to match.
    - `proveJoltCompatible()` method
    - `serializeJoltProof()` method
 
+### Dory Commitment Implementation (Complete)
+
+**Location**: `src/poly/commitment/dory.zig`
+
+1. **DoryCommitmentScheme** - Matches Jolt's DoryCommitmentScheme
+   - `setup(allocator, max_num_vars)` - Generate SRS using "Jolt Dory URS seed"
+   - `commit(params, evals)` - Commit polynomial to GT element
+   - DorySRS with G1/G2 generators
+   - DoryCommitment = GT = Fp12
+
+2. **GT (Fp12) Serialization** - Added to `src/field/pairing.zig`
+   - `Fp12.toBytes()` - 384 bytes arkworks format (12 × 32 bytes)
+   - `Fp12.fromBytes()` - Deserialize from arkworks format
+   - Serialization order: c0.c0.c0, c0.c0.c1, ..., c1.c2.c1
+
+3. **Jolt Serialization Integration** - Updated `src/zkvm/jolt_serialization.zig`
+   - `writeGT(gt)` - Write GT element
+   - `readGT()` - Read GT element
+   - `writeDoryCommitment(comm)` - Alias for writeGT
+   - `writeJoltDoryProof()` - Convenience wrapper
+
 ### Remaining for Full Cross-Verification
 
-To complete full Jolt-to-Zolt verification:
-
-1. **Dory Commitment Alignment**
-   - Zolt uses HyperKZG, Jolt uses Dory
-   - Need to implement Dory or add Dory support
-   - Match SRS generation (SHA3-256 seed: "Jolt Dory URS seed")
-   - Serialize GT elements in arkworks format
+1. **Full Dory Opening Proof (IPA)**
+   - Currently only commitment is implemented
+   - Need inner product argument for opening proofs
+   - Match Jolt's ArkDoryProof structure
 
 2. **Jolt-side Test**
    - Need Rust test in Jolt codebase
@@ -360,8 +378,19 @@ To complete full Jolt-to-Zolt verification:
 
 ### Test Status
 
-All 578 tests pass:
+All 596 tests pass:
 ```
 zig build test --summary all
-Build Summary: 5/5 steps succeeded; 578/578 tests passed
+Build Summary: 5/5 steps succeeded; 596/596 tests passed
 ```
+
+New tests added:
+- Fp12 toBytes/fromBytes roundtrip
+- Fp12 format verification (one() serializes to [1, 0, ...])
+- GT alias equals Fp12
+- Dory setup
+- Dory commit (non-trivial result)
+- Dory deterministic (same SRS + poly = same commitment)
+- Dory serialization roundtrip
+- Jolt serialization GT
+- Dory commitment serialization roundtrip

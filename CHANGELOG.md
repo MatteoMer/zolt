@@ -26,12 +26,15 @@ All notable changes to this project will be documented in this file.
 - `signed.c` - Signed arithmetic operations demo
 - `primes.c` - Count primes < 100 using trial division (25)
 - Updated Makefile with new targets and help message
+- All 9 examples now include precompiled ELF binaries
 
 #### Bug Fixes
 - Fixed commitment field types (use base field Fp, not scalar field)
 - Added big-endian serialization for G1 point coordinates
 - Fixed double-free in JSON proof deserialization
 - Fixed Zig 0.15 API compatibility (bufPrint vs formatIntBuf)
+- Fixed C example programs to use proper `_start` with ECALL termination
+- Removed unused zolt_io_write_u64/read_u64 dependencies from C examples
 
 ### Changed
 - CLI now shows format type (JSON/Binary) when saving/loading proofs

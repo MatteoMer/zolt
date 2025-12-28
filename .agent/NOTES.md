@@ -1,58 +1,51 @@
 # Zolt-Jolt Compatibility Notes
 
-## Current Status (December 28, 2024, Session 10)
+## Current Status (December 28, 2024, Session 11)
 
-### Session 10 Progress
+### Session 11 - MAJOR BREAKTHROUGH! 🎉
 
-**Major Progress on Transcript Compatibility!**
+**Stage 1 UniSkip Claims Now Match!**
 
-1. **Fixed Montgomery Form Issue**: `appendScalar` was serializing Montgomery form
-   limbs directly instead of converting to canonical form first. Fixed by adding
-   `fromMontgomery()` call before serialization.
+After extensive debugging, we identified and fixed the challenge derivation to be
+compatible with Jolt's `MontU128Challenge` system.
 
-2. **Transcript States Now Match**: After the Montgomery form fix, the transcript
-   states match exactly at the point of r0 derivation:
-   - Jolt state: `[51, 28, c0, 92, ab, 81, 34, c6, ...]`
-   - Zolt state: `5128c092ab8134c6178d3b18...`
+#### Root Cause Analysis
 
-3. **Remaining Issue**: Despite matching states, the r0 challenge values differ:
-   - Jolt r0: `3203159906685754656633863192913202159923849199052541271036524843387280424960`
-   - Zolt raw bytes: `c9e8fb5d94a6ff9206ac6f469cec1467`
-   - Expected (from Jolt): `c9e8fb5d94a6ff9206ac6f469cec1407`
-   - Difference: Last byte is `67` vs `07`
+Jolt uses a special `MontU128Challenge` type for 128-bit challenges:
+1. `MontU128Challenge::new(value)` stores `[0, 0, low, high]` where `low = value & 0xFFFFFFFFFFFFFFFF` and `high = value >> 64`
+2. When converted to `Fr` via `.into()`, it uses `from_bigint_unchecked([0, 0, low, high])` which stores the raw BigInt without Montgomery conversion
+3. In polynomial evaluation, `power * coeff` does Montgomery multiplication where `power` is raw and `coeff` is Montgomery form:
+   - `REDC(raw * mont) = REDC(raw * val * R) = raw * val mod p`
 
-### Analysis of Challenge Mismatch
+The key insight: When multiplying a raw BigInt `[0, 0, low, high]` with a Montgomery-form Fr, the result is correct because:
+- The raw value interpreted from `[0, 0, low, high]` is `low * 2^128 + high * 2^192`
+- After Montgomery reduction, this gives the correct mathematical result
 
-The Blake2b hasher includes `n_rounds` in the hash input:
+#### The Fix
+
+1. **Challenge Format**: Store challenges as `[0, 0, low, high]` (raw BigInt format)
+   ```zig
+   return F{ .limbs = .{ 0, 0, low, high } };
+   ```
+
+2. **Byte Interpretation**: Parse reversed 16-byte array as big-endian u128 (matching Rust's `u128::from_be_bytes`)
+   ```zig
+   const val: u128 = mem.readInt(u128, &reversed, .big);
+   ```
+
+3. **Polynomial Evaluation**: Use raw multiplication for challenge evaluation
+   ```zig
+   // result (Montgomery) * x (raw) = correct result
+   result = result.montgomeryMul(x).add(coeffs[i]);
+   ```
+
+#### Verification
+
 ```
-hasher() = Blake2b256(state || [0u8; 28] || n_rounds.to_be_bytes())
+r0 and r0_fr evaluations match: true
+Claims match: true
+✓ Stage 1 UniSkip verification PASSED!
 ```
-
-If `n_rounds` differs between Zolt and Jolt at the same state, the hash outputs
-will differ. This is the likely cause.
-
-When deriving r0:
-- Zolt: n_rounds = 55
-- Jolt: n_rounds = ? (needs verification)
-
-### Root Cause Hypothesis
-
-The state can match even if n_rounds differs if:
-- Different sequences of operations led to the same final state
-- But the number of operations (and thus n_rounds) differs
-
-For example:
-- Path A: 55 operations → state X
-- Path B: 50 operations → state X (via different intermediate states)
-
-This shouldn't happen if both follow the same protocol... unless there's a subtle
-difference in how operations are counted or performed.
-
-### Next Steps
-
-1. Add n_rounds logging to track counter at each major step
-2. Create minimal reproducible test case
-3. Compare operation counts between Zolt prover and Jolt verifier
 
 ---
 
@@ -60,11 +53,12 @@ difference in how operations are counted or performed.
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Blake2b Transcript | ⚠️ Almost | State matches, n_rounds may differ |
+| Blake2b Transcript | ✅ Working | State and n_rounds match |
+| Challenge Derivation | ✅ Working | MontU128Challenge-compatible |
 | Dory Commitment | ✅ Working | GT elements match, MSM correct |
 | Proof Structure | ✅ Working | 7 stages, claims, all parse |
 | Serialization | ✅ Working | Byte-level compatible |
-| UniSkip Algorithm | ✅ Working | Domain sum = 0 verified |
+| UniSkip Algorithm | ✅ Working | Domain sum = 0, claims match |
 | Preprocessing Export | ✅ Working | Full JoltVerifierPreprocessing |
 | DoryVerifierSetup | ✅ Working | Precomputed pairings |
 
@@ -72,13 +66,19 @@ difference in how operations are counted or performed.
 
 ## Session History
 
+### Session 11
+- Fixed MontU128Challenge-compatible challenge derivation
+- Challenge format: `[0, 0, low, high]` for 128-bit challenges
+- Byte interpretation: big-endian u128
+- Stage 1 UniSkip claims now match!
+
 ### Session 10
 - Fixed Montgomery form serialization in `appendScalar`
 - Transcript states now match at r0 derivation
-- Identified n_rounds counter mismatch as likely cause
+- Identified challenge format mismatch
 
 ### Session 9
-- Stage 1 UniSkip verification passes
+- Stage 1 UniSkip verification passes (domain sum)
 - Fixed Lagrange interpolation bug
 
 ### Session 7-8
@@ -87,16 +87,48 @@ difference in how operations are counted or performed.
 
 ---
 
-## Key Files
+## Key Technical Details
 
-### Zolt
-- `src/transcripts/blake2b.zig` - Blake2b transcript
-- `src/zkvm/proof_converter.zig` - Proof conversion with transcript
-- `src/field/mod.zig` - Field element serialization
+### MontU128Challenge Representation
 
-### Jolt (Reference)
-- `jolt-core/src/transcripts/blake2b.rs` - Reference transcript
-- `jolt-core/src/zolt_compat_test.rs` - Compatibility tests
+```
+Mathematical value: v = low + high * 2^64 (128-bit integer)
+BigInt storage:     [0, 0, low, high] (NOT Montgomery form)
+BigInt value:       low * 2^128 + high * 2^192 (as a BigInt)
+
+When used in multiplication:
+- coeff is in Montgomery form: coeff_mont = coeff_val * R mod p
+- REDC([0,0,l,h] * coeff_mont) = REDC(bigint_val * coeff_val * R)
+                                = bigint_val * coeff_val mod p
+
+This works because Montgomery reduction cancels the R factor,
+and the multiplication by the bigint value is correct.
+```
+
+### Challenge Derivation
+
+```zig
+// 1. Get 16 bytes from transcript
+var buf: [16]u8 = undefined;
+self.challengeBytes(&buf);
+
+// 2. Reverse bytes
+var reversed: [16]u8 = undefined;
+for (0..16) |i| {
+    reversed[i] = buf[15 - i];
+}
+
+// 3. Interpret as big-endian u128
+const val: u128 = mem.readInt(u128, &reversed, .big);
+
+// 4. Mask to 125 bits (matching MontU128Challenge::new)
+const val_masked = val & ((std.math.maxInt(u128)) >> 3);
+
+// 5. Store in Jolt-compatible format
+const low: u64 = @truncate(val_masked);
+const high: u64 = @truncate(val_masked >> 64);
+return F{ .limbs = .{ 0, 0, low, high } };
+```
 
 ---
 
@@ -108,11 +140,18 @@ zig build test --summary all
 
 # Generate proof
 zig build -Doptimize=ReleaseFast
-./zig-out/bin/zolt prove examples/sum.elf --jolt-format \
-    --export-preprocessing /tmp/zolt_preprocessing.bin \
-    -o /tmp/zolt_proof_dory.bin
+./zig-out/bin/zolt prove examples/sum.elf --jolt-format -o /tmp/zolt_proof_dory.bin
 
 # Run Jolt debug test
 cd /Users/matteo/projects/jolt
 cargo test --package jolt-core test_debug_stage1_verification -- --ignored --nocapture
 ```
+
+---
+
+## Next Steps
+
+1. Verify Stage 1 remaining sumcheck rounds (after UniSkip)
+2. Implement Stage 2-7 verification tests
+3. Full end-to-end proof verification
+4. Performance optimization

@@ -11,62 +11,43 @@
 7. **Stage 1 UniSkip Verification** - Domain sum check passes
 8. **UnivariateSkip Claim** - Now correctly set to uni_poly.evaluate(r0)
 9. **Montgomery Form Fix** - appendScalar now converts from Montgomery form
+10. **MontU128Challenge Compatibility** - Challenge scalars now match Jolt's format
 
-## MAJOR MILESTONE: Stage 1 UniSkip PASSES! 🎉
+## MAJOR MILESTONE: Stage 1 UniSkip Claims Match! 🎉🎉
 
-The Stage 1 UniSkip first-round verification passes:
+The Stage 1 UniSkip verification now has matching claims:
 ```
-Domain sum check:
-  Input claim (expected domain sum): 0
-  Computed domain sum: 0
-  Sum equals input_claim: true
-
+r0 and r0_fr evaluations match: true
+Claims match: true
 ✓ Stage 1 UniSkip verification PASSED!
 ```
 
-## In Progress 🚧
+### Key Fix: MontU128Challenge-Compatible Arithmetic
 
-### Transcript State Matches, But Challenge Derivation Differs
+Jolt uses `MontU128Challenge` for 128-bit challenges, which stores values as `[0, 0, low, high]`
+in a BigInt (NOT in Montgomery form). When used in polynomial evaluation, this raw BigInt
+is multiplied with Montgomery-form coefficients.
 
-After fixing Montgomery form serialization:
-- Transcript states NOW MATCH after appending UniSkip polynomial
-- Jolt state: `[51, 28, c0, 92, ab, 81, 34, c6, ...]`
-- Zolt state: `5128c092ab8134c6178d3b18...` (same!)
-
-But the r0 challenge values still differ:
-- Jolt r0: `3203159906685754656633863192913202159923849199052541271036524843387280424960`
-- Zolt r0: ~268 trillion (different!)
-
-### Root Cause
-
-The `n_rounds` counter likely differs between Zolt and Jolt. The round counter is mixed into the Blake2b hash during `challengeBytes32`:
-```
-hasher() = Blake2b256(state || [0u8; 28] || n_rounds.to_be_bytes())
-```
-
-When deriving r0:
-- Zolt: n_rounds = 55
-- Jolt: n_rounds = ? (likely different)
-
-### Next Step
-
-Compare how n_rounds is incremented between the two implementations:
-- Jolt increments in `update_state()` called from `challenge_bytes32()`
-- Zolt should match this behavior
-
-The difference might be in how many times `update_state` is called during:
-1. Preamble (memory layout, I/O)
-2. Commitment appending
-3. Tau derivation
-4. UniSkip poly appending
+The fix required:
+1. **Challenge Format**: Store challenges as `[0, 0, low, high]` to match Jolt's `from_bigint_unchecked`
+2. **Polynomial Evaluation**: Use raw BigInt multiplication (not Montgomery conversion)
+   so `REDC(raw * mont)` produces correct results
+3. **Byte Interpretation**: Interpret reversed bytes as big-endian u128 (matching Rust's `u128::from_be_bytes`)
 
 ---
 
-## Git History (Key Commits)
+## Progress Indicators
 
-- `39991b8` - fix: convert from Montgomery form in Blake2b appendScalar
-- Previous: fix UnivariateSkip claim to use uni_poly.evaluate(r0)
-- `0c5f8c6` - fix: remove dead code in Lagrange interpolation
+- [x] UniSkip verification passes (domain sum = 0)
+- [x] Transcript states match after UniSkip poly append
+- [x] UnivariateSkip claim formula is correct (uni_poly.evaluate(r0))
+- [x] R1CS input claims correctly computed via MLE
+- [x] n_rounds counter matches between Zolt and Jolt
+- [x] r0 challenge matches
+- [x] Stage 1 UniSkip claims match
+- [ ] Stage 1 remaining rounds verify
+- [ ] Stages 2-7 verify
+- [ ] Full proof verification passes
 
 ---
 
@@ -80,9 +61,7 @@ zig build test --summary all
 zig build -Doptimize=ReleaseFast
 
 # Generate proof
-./zig-out/bin/zolt prove examples/sum.elf --jolt-format \
-    --export-preprocessing /tmp/zolt_preprocessing.bin \
-    -o /tmp/zolt_proof_dory.bin
+./zig-out/bin/zolt prove examples/sum.elf --jolt-format -o /tmp/zolt_proof_dory.bin
 
 # Run Jolt debug test
 cd /Users/matteo/projects/jolt
@@ -91,14 +70,9 @@ cargo test --package jolt-core test_debug_stage1_verification -- --ignored --noc
 
 ---
 
-## Progress Indicators
+## Next Steps
 
-- [x] UniSkip verification passes (domain sum = 0)
-- [x] Transcript states match after UniSkip poly append
-- [x] UnivariateSkip claim formula is correct (uni_poly.evaluate(r0))
-- [x] R1CS input claims correctly computed via MLE
-- [ ] n_rounds counter matches between Zolt and Jolt
-- [ ] r0 challenge matches
-- [ ] Stage 1 remaining rounds verify
-- [ ] Stages 2-7 verify
-- [ ] Full proof verification passes
+1. Verify Stage 1 remaining sumcheck rounds
+2. Implement Stage 2 verification test
+3. Continue through Stages 3-7
+4. Full proof verification

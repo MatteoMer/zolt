@@ -299,6 +299,97 @@ pub fn MontgomeryField(
             return result;
         }
 
+        /// Optimized multiplication by a 128-bit value stored in high limbs
+        /// Matches arkworks' mul_hi_bigint_u128 behavior
+        ///
+        /// This is equivalent to: self * (limb2 + limb3 * 2^64) mod p
+        /// where the 128-bit value is stored in positions [2] and [3] of a 4-limb BigInt.
+        ///
+        /// The algorithm is 2 iterations of CIOS Montgomery multiplication,
+        /// specialized for when only the top 2 limbs of the RHS are non-zero.
+        pub fn mulHiBigIntU128(self: Self, hi_limbs: [4]u64) Self {
+            const limb_n2 = hi_limbs[2];
+            const limb_n1 = hi_limbs[3];
+
+            var r: [4]u64 = .{ 0, 0, 0, 0 };
+
+            // i = 2 (N-2): Process limb_n2
+            {
+                var carry1: u64 = 0;
+
+                // r[0] = r[0] + self[0] * limb_n2
+                const prod0 = mulWide(self.limbs[0], limb_n2);
+                const sum0 = @as(u128, r[0]) + prod0 + @as(u128, carry1);
+                r[0] = @truncate(sum0);
+                carry1 = @truncate(sum0 >> 64);
+
+                // Montgomery reduction step
+                const k = r[0] *% montgomery_inv;
+                var carry2: u64 = 0;
+                const red0 = mulWide(k, modulus[0]);
+                const red_sum0 = @as(u128, r[0]) + red0;
+                carry2 = @truncate(red_sum0 >> 64);
+
+                // Process remaining limbs
+                inline for (1..4) |j| {
+                    const prod_j = mulWide(self.limbs[j], limb_n2);
+                    const new_rj = @as(u128, r[j]) + prod_j + @as(u128, carry1);
+                    const new_rj_trunc: u64 = @truncate(new_rj);
+                    carry1 = @truncate(new_rj >> 64);
+
+                    const red_j = mulWide(k, modulus[j]);
+                    const red_sum_j = @as(u128, new_rj_trunc) + red_j + @as(u128, carry2);
+                    r[j - 1] = @truncate(red_sum_j);
+                    carry2 = @truncate(red_sum_j >> 64);
+
+                    // Update r[j] for next iteration
+                    r[j] = new_rj_trunc;
+                }
+                r[3] = carry1 +% carry2;
+            }
+
+            // i = 3 (N-1): Process limb_n1
+            {
+                var carry1: u64 = 0;
+
+                // r[0] = r[0] + self[0] * limb_n1
+                const prod0 = mulWide(self.limbs[0], limb_n1);
+                const sum0 = @as(u128, r[0]) + prod0 + @as(u128, carry1);
+                r[0] = @truncate(sum0);
+                carry1 = @truncate(sum0 >> 64);
+
+                // Montgomery reduction step
+                const k = r[0] *% montgomery_inv;
+                var carry2: u64 = 0;
+                const red0 = mulWide(k, modulus[0]);
+                const red_sum0 = @as(u128, r[0]) + red0;
+                carry2 = @truncate(red_sum0 >> 64);
+
+                // Process remaining limbs
+                inline for (1..4) |j| {
+                    const prod_j = mulWide(self.limbs[j], limb_n1);
+                    const new_rj = @as(u128, r[j]) + prod_j + @as(u128, carry1);
+                    const new_rj_trunc: u64 = @truncate(new_rj);
+                    carry1 = @truncate(new_rj >> 64);
+
+                    const red_j = mulWide(k, modulus[j]);
+                    const red_sum_j = @as(u128, new_rj_trunc) + red_j + @as(u128, carry2);
+                    r[j - 1] = @truncate(red_sum_j);
+                    carry2 = @truncate(red_sum_j >> 64);
+
+                    r[j] = new_rj_trunc;
+                }
+                r[3] = carry1 +% carry2;
+            }
+
+            var result = Self{ .limbs = r };
+            if (!result.lessThanModulus()) {
+                result = result.subtractModulus();
+            }
+
+            return result;
+        }
+
         /// Field addition
         pub fn add(self: Self, other: Self) Self {
             var result: [4]u64 = undefined;

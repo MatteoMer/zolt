@@ -215,6 +215,13 @@ pub fn Blake2bTranscript(comptime F: type) type {
 
         /// Get a 128-bit challenge scalar
         /// Matches Jolt's `fn challenge_scalar_128_bits<F: JoltField>(&mut self) -> F`
+        ///
+        /// IMPORTANT: This must match Jolt's behavior exactly:
+        /// 1. Get 16 bytes from transcript
+        /// 2. Reverse them
+        /// 3. Interpret as big-endian u128
+        /// 4. Mask to 125 bits (for MontU128Challenge compatibility)
+        /// 5. Convert to field element
         pub fn challengeScalar128Bits(self: *Self) F {
             var buf: [16]u8 = undefined;
             self.challengeBytes(&buf);
@@ -225,12 +232,24 @@ pub fn Blake2bTranscript(comptime F: type) type {
                 reversed[i] = buf[15 - i];
             }
 
-            // Create field element from the 16 bytes
-            // Pad to 32 bytes (16 bytes of challenge + 16 bytes of zeros)
-            var padded: [32]u8 = [_]u8{0} ** 32;
-            @memcpy(padded[0..16], &reversed);
+            // Interpret as BIG-ENDIAN u128 (this is what Jolt does!)
+            // u128::from_be_bytes in Rust
+            const val: u128 = mem.readInt(u128, &reversed, .big);
 
-            return F.fromBytes(&padded);
+            // Mask to 125 bits (matching MontU128Challenge::new)
+            const val_masked = val & ((std.math.maxInt(u128)) >> 3);
+
+            // Extract low and high parts
+            const low: u64 = @truncate(val_masked);
+            const high: u64 = @truncate(val_masked >> 64);
+
+            // Store in Jolt-compatible format: [0, 0, low, high]
+            // This matches Jolt's MontU128Challenge internal representation.
+            //
+            // When used with mulHiBigIntU128, this represents the value (low + high * 2^64).
+            // The special multiplication function extracts limbs[2] and limbs[3]
+            // and performs optimized Montgomery multiplication.
+            return F{ .limbs = .{ 0, 0, low, high } };
         }
 
         /// Get multiple challenge scalars

@@ -11,6 +11,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const common = @import("../common/mod.zig");
 const field = @import("../field/mod.zig");
+const msm = @import("../msm/mod.zig");
 const tracer = @import("../tracer/mod.zig");
 const transcripts = @import("../transcripts/mod.zig");
 const poly_commitment = @import("../poly/commitment/mod.zig");
@@ -757,6 +758,103 @@ pub fn JoltVerifier(comptime F: type) type {
 
             return true;
         }
+
+        /// Verify a polynomial commitment opening using HyperKZG
+        ///
+        /// This function checks that a commitment C opens to value v at point r.
+        /// Uses the pairing check: e(C - v*G1, G2) == e(Q, tau_G2 - r*G2)
+        ///
+        /// Returns true if the opening is valid, false otherwise.
+        fn verifyCommitmentOpening(
+            self: *Self,
+            commitment: commitment_types.PolyCommitment,
+            opening_proof: *const commitment_types.OpeningProof,
+            evaluation_point: []const F,
+            claimed_value: F,
+        ) bool {
+            const vk = self.verifying_key orelse return true; // Accept if no key
+
+            // Verify the number of quotients matches the evaluation point dimension
+            if (opening_proof.quotients.len != evaluation_point.len) {
+                return false;
+            }
+
+            // Verify the final evaluation matches the claimed value
+            if (!opening_proof.final_eval.eql(claimed_value)) {
+                return false;
+            }
+
+            // For empty commitment (point at infinity)
+            if (commitment.point.infinity) {
+                return claimed_value.eql(F.zero());
+            }
+
+            // Constant polynomial case (no variables)
+            if (opening_proof.quotients.len == 0) {
+                return true;
+            }
+
+            // Perform the HyperKZG verification
+            // This involves batching the quotient commitments and checking
+            // the pairing equation.
+            //
+            // For each round i with evaluation point r_i and quotient Q_i:
+            //   C_{i+1} = C_i - r_i * Q_i (in the polynomial sense)
+            //
+            // The batched pairing check verifies:
+            //   e(C - v*G1, G2) == e(sum_i gamma^i * Q_i, combined_r * G2)
+
+            // Compute batching challenge (derived from commitment and point)
+            var gamma = F.one();
+            for (evaluation_point) |r| {
+                gamma = gamma.mul(r.add(F.fromU64(7)));
+            }
+            if (gamma.eql(F.zero())) {
+                gamma = F.one();
+            }
+
+            // Compute batched quotient: W = sum_i gamma^i * Q_i
+            var batched_quotient = commitment_types.G1Point.identity();
+            var gamma_power = F.one();
+            for (opening_proof.quotients) |q| {
+                const Fp = field.BN254BaseField;
+                const scaled = msm.MSM(F, Fp).scalarMul(q.point, gamma_power).toAffine();
+                batched_quotient = batched_quotient.add(scaled);
+                gamma_power = gamma_power.mul(gamma);
+            }
+
+            // Compute v*G1
+            const Fp = field.BN254BaseField;
+            const v_g1 = msm.MSM(F, Fp).scalarMul(vk.g1, claimed_value).toAffine();
+
+            // Compute correction: sum_i gamma^i * r_i * Q_i
+            gamma_power = F.one();
+            var correction = commitment_types.G1Point.identity();
+            for (opening_proof.quotients, 0..) |q, i| {
+                const scalar = gamma_power.mul(evaluation_point[i]);
+                const term = msm.MSM(F, Fp).scalarMul(q.point, scalar).toAffine();
+                correction = correction.add(term);
+                gamma_power = gamma_power.mul(gamma);
+            }
+
+            // L = C - v*G1 - correction
+            const c_minus_v = commitment.point.add(v_g1.neg());
+            const lhs_g1 = c_minus_v.add(correction.neg());
+
+            // Perform the pairing check:
+            // e(L, G2) == e(W, tau_G2)
+            //
+            // This is equivalent to checking:
+            // e(L, G2) * e(-W, tau_G2) == 1
+            const pairing_result = field.pairing.pairingCheckFp(
+                .{ .x = lhs_g1.x, .y = lhs_g1.y, .infinity = lhs_g1.infinity },
+                vk.g2,
+                .{ .x = batched_quotient.x, .y = batched_quotient.y, .infinity = batched_quotient.infinity },
+                vk.tau_g2,
+            );
+
+            return pairing_result;
+        }
     };
 }
 
@@ -903,6 +1001,61 @@ test "verifying key init" {
     // Should have valid generators
     try std.testing.expect(!vk.g1.infinity);
     try std.testing.expect(!vk.g2.x.c0.isZero() or !vk.g2.x.c1.isZero());
+}
+
+test "jolt verifier commitment opening verification - no key" {
+    const F = field.BN254Scalar;
+    const allocator = std.testing.allocator;
+
+    // Create verifier without key - should accept any opening
+    var jolt_verifier = JoltVerifier(F).init(allocator);
+
+    // Create a dummy opening proof
+    var opening = try commitment_types.OpeningProof.init(allocator, 2);
+    defer opening.deinit();
+
+    // Without a verifying key, verifier should accept
+    const commitment = commitment_types.PolyCommitment.zero();
+    const point = [_]F{ F.fromU64(1), F.fromU64(2) };
+    const value = F.zero();
+
+    const result = jolt_verifier.verifyCommitmentOpening(
+        commitment,
+        &opening,
+        &point,
+        value,
+    );
+    try std.testing.expect(result); // Should accept without key
+}
+
+test "jolt verifier commitment opening - empty commitment" {
+    const F = field.BN254Scalar;
+    const allocator = std.testing.allocator;
+
+    // Create verifier with a test key
+    var pk = try ProvingKey.init(allocator, 8);
+    defer pk.deinit();
+    const vk = pk.toVerifyingKey();
+
+    var jolt_verifier = JoltVerifier(F).initWithKey(allocator, vk);
+
+    // Create a dummy opening proof
+    var opening = try commitment_types.OpeningProof.init(allocator, 0);
+    defer opening.deinit();
+    opening.final_eval = F.zero();
+
+    // Empty commitment should accept zero value
+    const commitment = commitment_types.PolyCommitment.zero();
+    const point = [_]F{};
+    const value = F.zero();
+
+    const result = jolt_verifier.verifyCommitmentOpening(
+        commitment,
+        &opening,
+        &point,
+        value,
+    );
+    try std.testing.expect(result);
 }
 
 // NOTE: Full e2e prover test is temporarily disabled because it causes

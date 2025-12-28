@@ -120,4 +120,36 @@ pub fn build(b: *std.Build) void {
     const run_riscv_example = b.addRunArtifact(riscv_example);
     const riscv_example_step = b.step("example-riscv", "Run RISC-V emulation example");
     riscv_example_step.dependOn(&run_riscv_example.step);
+
+    // Example: HyperKZG Commitment
+    const hyperkzg_example = b.addExecutable(.{
+        .name = "example-hyperkzg",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/hyperkzg_commitment.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zolt", .module = lib.root_module },
+            },
+        }),
+    });
+    const run_hyperkzg_example = b.addRunArtifact(hyperkzg_example);
+    const hyperkzg_example_step = b.step("example-hyperkzg", "Run HyperKZG commitment example");
+    hyperkzg_example_step.dependOn(&run_hyperkzg_example.step);
+
+    // Example: Sumcheck Protocol
+    const sumcheck_example = b.addExecutable(.{
+        .name = "example-sumcheck",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/sumcheck_protocol.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zolt", .module = lib.root_module },
+            },
+        }),
+    });
+    const run_sumcheck_example = b.addRunArtifact(sumcheck_example);
+    const sumcheck_example_step = b.step("example-sumcheck", "Run sumcheck protocol example");
+    sumcheck_example_step.dependOn(&run_sumcheck_example.step);
 }

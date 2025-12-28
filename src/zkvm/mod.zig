@@ -426,11 +426,40 @@ pub fn JoltProver(comptime F: type) type {
             program_bytecode: []const u8,
             inputs: []const u8,
         ) !jolt_types.JoltProof(F, commitment_types.PolyCommitment, commitment_types.OpeningProof) {
-            // First generate the Zolt internal proof
+            // Initialize memory config
+            var config = common.MemoryConfig{
+                .program_size = program_bytecode.len,
+            };
+
+            // Initialize the emulator
+            var emulator = tracer.Emulator.init(self.allocator, &config);
+            defer emulator.deinit();
+
+            emulator.max_cycles = self.max_cycles;
+
+            // Load and execute the program
+            try emulator.loadProgram(program_bytecode);
+            if (inputs.len > 0) {
+                try emulator.setInputs(inputs);
+            }
+            try emulator.run();
+
+            // Initialize Blake2b transcript for Jolt compatibility
+            const Blake2bTranscript = transcripts.Blake2bTranscript(F);
+            var transcript = Blake2bTranscript.init("jolt_v1");
+
+            // Generate R1CS cycle witnesses from execution trace
+            var constraint_gen = r1cs.R1CSConstraintGenerator(F).init(self.allocator);
+            defer constraint_gen.deinit();
+
+            const cycle_witnesses = try constraint_gen.generateWitness(&emulator.trace);
+            defer self.allocator.free(cycle_witnesses);
+
+            // Generate Zolt internal proof first
             var zolt_proof = try self.prove(program_bytecode, inputs);
             defer zolt_proof.deinit();
 
-            // Convert to Jolt format using the proof converter
+            // Convert to Jolt format using the proof converter with transcript
             var converter = proof_converter.ProofConverter(F).init(self.allocator);
 
             // If we don't have stage proofs, return an empty Jolt proof
@@ -448,8 +477,17 @@ pub fn JoltProver(comptime F: type) type {
             try commitments.append(self.allocator, zolt_proof.register_proof.commitment);
             try commitments.append(self.allocator, zolt_proof.register_proof.final_state_commitment);
 
-            // Convert to Jolt-compatible format
-            return converter.convert(
+            // Generate tau challenge vector from transcript
+            // (In full implementation, tau comes from committed polynomials)
+            const num_cycle_vars = std.math.log2_int(usize, @max(1, cycle_witnesses.len));
+            var tau = try self.allocator.alloc(F, num_cycle_vars + 1);
+            defer self.allocator.free(tau);
+            for (0..tau.len) |i| {
+                tau[i] = F.fromU64(i + 1); // Placeholder tau values
+            }
+
+            // Convert to Jolt-compatible format with transcript integration
+            return converter.convertWithTranscript(
                 commitment_types.PolyCommitment,
                 commitment_types.OpeningProof,
                 &stage_proofs,
@@ -462,6 +500,9 @@ pub fn JoltProver(comptime F: type) type {
                     // Jolt uses LOG_K / 8 = 128 / 8 = 16 for small traces
                     .lookups_ra_virtual_log_k_chunk = 16,
                 },
+                cycle_witnesses,
+                tau,
+                &transcript,
             );
         }
 

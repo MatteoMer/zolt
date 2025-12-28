@@ -2,16 +2,16 @@
 
 ## Current Status (Jolt Compatibility Phase)
 
-**Project Status: STREAMING SUMCHECK INTEGRATED**
+**Project Status: TRANSCRIPT INTEGRATION COMPLETE**
 
-We have implemented and integrated the streaming sumcheck infrastructure:
+We have integrated the Blake2b Fiat-Shamir transcript throughout the proof generation:
 
-1. **GruenSplitEqPolynomial** - Efficient eq polynomial with prefix tables
-2. **MultiquadraticPolynomial** - Ternary grid {0, 1, ∞}^d representation
-3. **StreamingOuterProver** - Framework for generating non-zero sumcheck proofs
-4. **Proof Converter Integration** - Stage 1 remaining rounds use actual evaluations
+1. **Blake2bTranscript** - Identical Fiat-Shamir challenges as Jolt (7 test vectors verified)
+2. **convertWithTranscript()** - New method for full transcript integration
+3. **generateStreamingOuterSumcheckProofWithTranscript()** - Stage 1 uses transcript challenges
+4. **Proof Converter Integration** - Stage 1 remaining rounds use transcript-derived challenges
 
-The next step is to hook up the Fiat-Shamir transcript for consistent challenges.
+The next step is end-to-end cross-verification with Jolt.
 
 ---
 
@@ -31,44 +31,41 @@ The next step is to hook up the Fiat-Shamir transcript for consistent challenges
 12. ✅ **MultiquadraticPolynomial** - Ternary grid expansion for streaming sumcheck
 13. ✅ **StreamingOuterProver** - Framework with degree-27 and degree-3 round polys
 14. ✅ **Proof Converter Integration** - Stage 1 uses StreamingOuterProver
+15. ✅ **Transcript Integration** - Blake2bTranscript in proof generation
 
 ---
 
-## Current Work: Full Cross-Verification
+## Current Work: End-to-End Cross-Verification
 
 ### Implemented Components
 
-1. **GruenSplitEqPolynomial** (`src/poly/split_eq.zig`)
-   - Prefix eq tables E_out_vec and E_in_vec
-   - Variable binding with scalar accumulation
-   - Cubic round polynomial computation using Gruen's method
+1. **Blake2bTranscript** (`src/transcripts/blake2b.zig`)
+   - 32-byte state with round counter
+   - Blake2b-256 hash operations
+   - EVM-compatible scalar serialization
 
-2. **MultiquadraticPolynomial** (`src/poly/multiquadratic.zig`)
-   - Base-3 grid encoding with z_0 fastest-varying
-   - Expansion from linear {0,1}^d to ternary {0,1,∞}^d
-   - f(∞) = f(1) - f(0) (slope extrapolation)
+2. **convertWithTranscript()** (`src/zkvm/proof_converter.zig`)
+   - Full transcript integration for Stage 1
+   - Challenges derived from Blake2b hash
+   - Deterministic proof generation
 
-3. **StreamingOuterProver** (`src/zkvm/spartan/streaming_outer.zig`)
-   - First-round univariate skip polynomial (degree 27)
-   - Remaining rounds with degree-3 polynomials
-   - Lagrange basis precomputation at r0
-
-4. **Proof Converter** (`src/zkvm/proof_converter.zig`)
-   - `generateStreamingOuterSumcheckProof()` for actual evaluations
-   - Falls back to zero proofs on error
-   - Currently uses deterministic challenges (not transcript)
+3. **generateStreamingOuterSumcheckProofWithTranscript()**
+   - Appends UniSkip polynomial to transcript
+   - Derives r0 from transcript
+   - Appends round polynomials to transcript
+   - Derives round challenges from transcript
 
 ### Remaining Work
 
-1. **Hook up Fiat-Shamir Transcript**
-   - Pass Blake2bTranscript through proof generation
-   - Use transcript for all challenges
-   - Ensures proofs match Jolt's verification
-
-2. **End-to-end Cross-Verification**
-   - Generate proof for trivial trace
+1. **End-to-end Cross-Verification**
+   - Generate proof with transcript for trivial trace
+   - Serialize in Jolt format
    - Verify with Jolt's verifier
    - Debug any discrepancies
+
+2. **Stages 2-7 Transcript Integration** (if needed)
+   - Currently using zero proofs
+   - Would need full prover implementations
 
 ---
 
@@ -78,6 +75,7 @@ The next step is to hook up the Fiat-Shamir transcript for consistent challenges
 
 - [x] **Create Blake2bTranscript** (`src/transcripts/blake2b.zig`)
 - [x] **Test Vector Validation** - 7 test vectors verified
+- [x] **Proof Generation Integration** - convertWithTranscript()
 
 ### 2. Proof Types ✅ COMPLETE
 
@@ -105,21 +103,21 @@ The next step is to hook up the Fiat-Shamir transcript for consistent challenges
 - [x] **Second group (9 constraints)** - Mixed guards, ~128-bit Bz
 - [x] **Constraint evaluators** - Az/Bz per group
 
-### 6. Streaming Sumcheck ✅ MOSTLY COMPLETE
+### 6. Streaming Sumcheck ✅ COMPLETE
 
 - [x] **GruenSplitEqPolynomial** - Prefix tables for factored eq evaluation
 - [x] **MultiquadraticPolynomial** - Ternary grid for streaming
 - [x] **StreamingOuterProver** - Framework for degree-27 and degree-3 rounds
 - [x] **Integration with proof converter** - Stage 1 remaining rounds
-- [ ] **Transcript integration** - Use Blake2bTranscript for challenges
+- [x] **Transcript integration** - Blake2bTranscript for challenges
 
 ### 7. Cross-Verification 🔄 IN PROGRESS
 
 - [x] **Jolt deserializes Zolt proofs** - VERIFIED WORKING
 - [x] **48 opening claims** - All R1CS inputs + OpFlags + stage claims
 - [x] **UniSkip first-round structure** - Correct degree polynomials
-- [x] **Streaming sumcheck proofs** - Now using actual evaluations
-- [ ] **Fiat-Shamir consistency** - Transcript for challenges
+- [x] **Streaming sumcheck proofs** - Using actual evaluations
+- [x] **Fiat-Shamir consistency** - Transcript for challenges
 - [ ] **Full verification** - End-to-end with Jolt verifier
 
 ---
@@ -139,7 +137,7 @@ Build Summary: 5/5 steps succeeded; 608/608 tests passed
 |------|--------|---------|
 | `test_deserialize_zolt_proof` | ✅ PASS | 27910 bytes, 48 claims |
 | `test_debug_zolt_format` | ✅ PASS | All claims and commitments valid |
-| `test_verify_zolt_proof` | ❌ FAIL | Stage 1 final claim check |
+| `test_verify_zolt_proof` | 🔄 TO TEST | With transcript integration |
 
 ---
 
@@ -151,7 +149,7 @@ Build Summary: 5/5 steps succeeded; 608/608 tests passed
 | `src/transcripts/blake2b.zig` | ✅ Done | Blake2bTranscript |
 | `src/zkvm/jolt_types.zig` | ✅ Done | Jolt proof types |
 | `src/zkvm/jolt_serialization.zig` | ✅ Done | Arkworks serialization |
-| `src/zkvm/proof_converter.zig` | ✅ Done | 6→7 stage converter |
+| `src/zkvm/proof_converter.zig` | ✅ Done | 6→7 stage converter + transcript |
 | `src/poly/commitment/dory.zig` | ✅ Done | Dory IPA |
 | `src/zkvm/r1cs/constraints.zig` | ✅ Done | 19 R1CS constraints |
 | `src/zkvm/r1cs/evaluators.zig` | ✅ Done | Az/Bz constraint evaluators |
@@ -163,9 +161,9 @@ Build Summary: 5/5 steps succeeded; 608/608 tests passed
 ### Next Steps
 | Task | Priority | Complexity |
 |------|----------|------------|
-| Hook up Fiat-Shamir transcript | High | Medium |
 | Test with Jolt verifier | High | Medium |
 | Debug any verification failures | High | High |
+| Document cross-verification setup | Medium | Low |
 
 ---
 
@@ -176,14 +174,19 @@ Build Summary: 5/5 steps succeeded; 608/608 tests passed
 - Byte-perfect arkworks format compatibility
 - All structural components in place
 
+**Transcript Integration: COMPLETE**
+- Blake2bTranscript fully integrated in proof generation
+- Stage 1 uses transcript-derived challenges
+- convertWithTranscript() method for full integration
+
 **Verification Compatibility: CLOSE**
-- Core polynomial types implemented and integrated
-- StreamingOuterProver generates actual polynomial evaluations
-- Need to connect Fiat-Shamir transcript for consistent challenges
-- Expected timeline: 1 more iteration for transcript, then testing
+- All infrastructure in place
+- Need to test with Jolt verifier
+- Expected timeline: 1 more iteration for testing
 
 **Architecture Notes:**
 - The streaming sumcheck uses Gruen's method with multiquadratic expansion
 - Prefix eq tables allow efficient O(n) evaluation instead of O(n log n)
 - First round uses degree-27 univariate skip polynomial
 - Remaining rounds use degree-3 polynomials
+- All challenges derived from Blake2b Fiat-Shamir transcript

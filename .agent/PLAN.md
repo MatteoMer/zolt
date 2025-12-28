@@ -1,48 +1,42 @@
 # Zolt zkVM Implementation Plan
 
-## Current Status (December 2024 - Iteration 20)
+## Current Status (December 2024 - Iteration 21)
 
 ### Session Summary
 
-This iteration focused on completing shift instruction support:
+This iteration focused on completing M extension support with division and remainder:
 
-1. **Shift Lookup Tables**
-   - Added `LeftShift` table for logical left shift (x << y)
-   - Added `RightShift` table for logical right shift
-   - Added `RightShiftArithmetic` table for arithmetic right shift (sign-extending)
-   - Added `Pow2` table for power of 2 (useful for shift decomposition)
-   - Added `SignExtend8/16/32` tables for load instruction sign extension
+1. **Division Validation Tables**
+   - `ValidDiv0`: Validates division by zero semantics (returns MAX_VALUE)
+   - `ValidUnsignedRemainder`: Validates remainder < divisor for unsigned
+   - `ValidSignedRemainder`: Validates signed remainder constraints including sign matching
 
-2. **Shift Instruction Lookups**
-   - `SllLookup`: SLL instruction (register shift)
-   - `SrlLookup`: SRL instruction (register shift)
-   - `SraLookup`: SRA instruction (register shift, arithmetic)
-   - `SlliLookup`: SLLI instruction (immediate shift)
-   - `SrliLookup`: SRLI instruction (immediate shift)
-   - `SraiLookup`: SRAI instruction (immediate shift, arithmetic)
+2. **Division Instruction Lookups**
+   - `DivLookup`: Signed division with overflow handling (MIN_INT / -1)
+   - `DivuLookup`: Unsigned division
+   - `RemLookup`: Signed remainder with overflow handling
+   - `RemuLookup`: Unsigned remainder
 
 3. **Tracer Integration**
-   - Updated `lookup_trace.zig` to record shift operations
-   - All SLL, SRL, SRA variants now tracked in lookup trace
-   - Immediate shifts extract shamt from instruction encoding
+   - Updated `lookup_trace.zig` to record DIV/DIVU/REM/REMU operations
+   - All M extension operations now tracked: MUL, MULH, MULHU, MULHSU, DIV, DIVU, REM, REMU
 
 ### Test Status
 
-All 410 tests pass:
+All 420+ tests pass:
 - Field arithmetic: Fp, Fp2, Fp6, Fp12
-- Curve arithmetic: G1, G2 points (correct projective doubling)
-- Pairing: bilinearity verified, SRS relationship verified
-- HyperKZG: commit, open, verify, verifyWithPairing, batchOpen
-- Batch verification: accumulator, multiple claims, batch opening
+- Curve arithmetic: G1, G2 points
+- Pairing: bilinearity verified
+- HyperKZG: commit, open, verify, batchOpen
 - Dory: commit, open, verify with IPA
 - Sumcheck protocol
 - RISC-V emulation (RV64IMC)
-- ELF loading (ELF32/ELF64)
+- ELF loading
 - MSM operations
 - Spartan proof generation and verification
 - Lasso lookup argument
-- All 21 lookup tables
-- All shift lookup operations
+- All 24 lookup tables
+- All instruction lookups including division
 
 ### Architecture Summary
 
@@ -56,7 +50,7 @@ Fp6 = Fp2[v] / (v³ - ξ)  where ξ = 9 + u
 Fp12 = Fp6[w] / (w² - v)
 ```
 
-#### Lookup Tables (21 total)
+#### Lookup Tables (24 total)
 ```
 Bitwise:
 - And, Or, Xor, Andn
@@ -76,6 +70,29 @@ Shifts:
 
 Sign Extension:
 - SignExtend8, SignExtend16, SignExtend32
+
+Division/Remainder:
+- ValidDiv0, ValidUnsignedRemainder, ValidSignedRemainder
+```
+
+#### Instruction Lookups (Full M Extension)
+```
+Base Integer:
+- AddLookup, SubLookup
+- AndLookup, OrLookup, XorLookup, AndnLookup
+- SltLookup, SltuLookup
+- SllLookup, SrlLookup, SraLookup
+- SlliLookup, SrliLookup, SraiLookup
+
+Branch:
+- BeqLookup, BneLookup
+- BltLookup, BgeLookup, BltuLookup, BgeuLookup
+
+Multiply (M):
+- MulLookup, MulhLookup, MulhuLookup, MulhsuLookup
+
+Division (M):
+- DivLookup, DivuLookup, RemLookup, RemuLookup
 ```
 
 #### Commitment Schemes
@@ -103,34 +120,28 @@ Dory (transparent setup, IPA-based)
 - **Extension Fields** - Fp2, Fp6, Fp12 with correct ξ = 9 + u
 - **Field Arithmetic** - Montgomery form CIOS multiplication
 - **G1/G2 Point Arithmetic** - Addition, doubling, scalar multiplication
-- **Projective Points** - Jacobian doubling (fixed in iteration 16)
+- **Projective Points** - Jacobian doubling
 - **Frobenius Endomorphism** - Complete coefficients
 - **Sumcheck Protocol** - Complete prover/verifier
 - **RISC-V Emulator** - Full RV64IMC execution with tracing
 - **ELF Loader** - Complete ELF32/ELF64 parsing
 - **MSM** - Multi-scalar multiplication with bucket method
-- **HyperKZG** - commit(), verify(), verifyWithPairing(), batchOpen()
-- **Batch Opening Proofs** - batchCommit(), batchOpen(), verifyBatchOpening()
-- **Batch Verification** - BatchOpeningAccumulator
-- **Dory** - commit(), open() with IPA, verify()
+- **HyperKZG** - All operations including batch
+- **Dory** - Full IPA-based commitment scheme
 - **Host Execute** - Program execution with trace generation
 - **Preprocessing** - Generates proving and verifying keys
 - **Spartan** - Proof generation and verification
 - **Lasso** - Lookup argument prover/verifier
 - **Multi-stage Prover** - 6-stage sumcheck orchestration
 - **Transcripts** - Keccak and Poseidon-based Fiat-Shamir
-- **PolyCommitment** - G1 point wrapper for proofs
-- **ProvingKey** - SRS-based commitment infrastructure
-- **VerifyingKey** - Minimal verification data
-- **Prover Commitments** - Real G1 commitments for bytecode/memory/registers
-- **Verifier Transcript** - Commitment absorption for Fiat-Shamir
-- **Shift Instructions** - Full SLL/SRL/SRA support in lookup trace
+- **All Lookup Tables** - 24 tables covering all RV64IM operations
+- **Full M Extension** - MUL, MULH, MULHU, MULHSU, DIV, DIVU, REM, REMU
 
 ## Future Work
 
 ### High Priority
 1. Import production SRS from Ethereum ceremony
-2. M extension lookups (MUL, DIV, REM) for integer multiply/divide
+2. Implement proper verification for bytecode/memory/registers proofs
 
 ### Medium Priority
 1. Performance optimization with SIMD
@@ -140,6 +151,6 @@ Dory (transparent setup, IPA-based)
 1. Documentation and examples
 2. Benchmarking suite
 
-## Commit History (Iteration 20)
-- Add shift and sign-extension lookup tables
-- Add shift instruction lookups and connect to tracer
+## Commit History (Iteration 21)
+- Add division/remainder validation lookup tables
+- Add DIV/REM instruction lookups for M extension

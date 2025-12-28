@@ -5,180 +5,118 @@
 ### What Works
 - **Proof Serialization**: Byte-perfect Arkworks compatibility
 - **Transcript**: Blake2b matches Jolt exactly
-- **Opening Claims**: Non-zero MLE evaluations computed correctly
 - **Proof Structure**: All 7 stages, correct round counts
 - **SRS Loading**: arkworks format with flag bit handling
-- **G1 MSM**: Row commitments match Jolt exactly
-- **G2 Generator**: Matches arkworks exactly
-- **G2 Points**: Coordinates from SRS match exactly
+- **G1/G2 MSM**: Matches Jolt exactly
+- **Dory Commitment**: GT elements match exactly
+- **R1CS Constraints**: All 19 constraints satisfied (Az*Bz = 0)
+- **UniSkip Polynomial**: Correctly all zeros for satisfied constraints
 
-### What's Failing
-- **Pairing Function**: e(G1_gen, G2_gen) produces different result from Jolt
-  - Zolt: f5 a1 b9 0d 00 81 ca 8f 26 1e 63 72 1d f6 f7 1b...
-  - Jolt: 95 0e 87 9d 73 63 1f 5e b5 78 85 89 eb 5f 7e f8...
-  - Issue is in Miller loop or final exponentiation
+### Current Issue: Stage 1 Sumcheck Verification Fails
 
----
-
-## Latest Progress: Dory Commitment Debugging
-
-### arkworks Flag Bit Fix (Iteration 20)
-
-arkworks `serialize_uncompressed` stores metadata flags in top 2 bits of last byte:
-- bit 7: y-sign flag
-- bit 6: infinity flag
-
-Fix: `y_limbs[3] &= 0x3FFFFFFFFFFFFFFF` to clear flags before use.
-
-Without this fix, y coordinates were larger than field modulus, causing
-Montgomery conversion failures and broken curve arithmetic.
-
-### Verified Components
-
-| Component | Status | Notes |
-|-----------|--------|-------|
-| G1 points on curve | ✅ | All 4 G1 points valid |
-| G2 generator | ✅ | Exact match with arkworks |
-| G2[0] coordinates | ✅ | All 4 Fp components match |
-| Row 0 MSM | ✅ | Exact match |
-| Row 1 MSM | ✅ | Exact match |
-| Pairing | ❌ | Different result |
-
-### Test Commands
-
-```bash
-# Export Jolt SRS
-cd /Users/matteo/projects/jolt
-cargo test --package jolt-core test_export_dory_srs -- --ignored --nocapture
-
-# Run Jolt debug test
-cargo test --package jolt-core test_export_dory_commitment_debug -- --ignored --nocapture
-
-# Run Zolt tests
-cd /Users/matteo/projects/zolt
-zig build test
-```
+UniSkip passes but batched sumcheck fails. See analysis below.
 
 ---
 
-## Pairing Debugging Plan
+## Stage 1 Sumcheck Verification Investigation
 
-The pairing function `e: G1 × G2 → GT` uses:
-1. Miller loop
-2. Final exponentiation
+### Root Cause Analysis
 
-Since G1 and G2 inputs match exactly, the difference is in:
-- Miller loop line function computations
-- Fp2/Fp6/Fp12 tower arithmetic
-- Final exponentiation algorithm
+The issue is in how Jolt's `BatchedSumcheck::verify` works:
 
-Next steps:
-1. Compare intermediate Miller loop values
-2. Check Fp2 multiplication constants (e.g., ξ = 9 + u)
-3. Verify final exponentiation formula
+1. **Input claim** is retrieved from the opening accumulator:
+   - `input_claim = accumulator.get_virtual_polynomial_opening(UnivariateSkip, SpartanOuter)`
+   - This should be the UniSkip polynomial evaluation at challenge r0
+
+2. **Verification loop**:
+   - claim = 0 (our stored value)
+   - For each round, computes `e = compressed_poly.eval_from_hint(&e, &r_i)`
+   - With all-zero polynomials and hint=0, output_claim = 0
+
+3. **Expected output claim**:
+   - Calls `sumcheck.cache_openings(...)` which modifies the accumulator
+   - Then `sumcheck.expected_output_claim(...)` computes from R1CS input evaluations
+   - Uses `inner_sum_prod = A(rx)*z(rx) * B(rx)*z(rx)`
+   - For satisfied constraints, this should be 0
+
+**The Problem**: The `cache_openings` call modifies the opening accumulator by calling
+`append_virtual` for each R1CS input. This expects the proof to contain the claimed
+evaluations that match what the prover would have computed.
+
+### Key Files
+- `/jolt-core/src/subprotocols/sumcheck.rs:200-252` - BatchedSumcheck::verify
+- `/jolt-core/src/zkvm/spartan/outer.rs:438-453` - OuterRemainingSumcheckVerifier::cache_openings
+- `/jolt-core/src/zkvm/spartan/outer.rs:407-436` - expected_output_claim
+
+### Next Steps
+
+1. **Understand Opening Accumulator Protocol**
+   - How does Jolt's prover populate the opening accumulator?
+   - What values does `append_virtual` expect?
+   - How are claimed evaluations verified?
+
+2. **Match Prover Protocol Exactly**
+   - The sumcheck polynomials encode specific evaluations
+   - The opening claims must match what the verifier recomputes
+   - Need to trace through Jolt's prover to understand the relationship
+
+---
+
+## R1CS Constraint Fix (Completed)
+
+### Problem
+Constraint 16 (NextUnexpPCUpdateOtherwise) was failing:
+- Az = 1 (condition true: 1 - ShouldBranch - Jump = 1)
+- Bz = 255 (NextUnexpandedPC != UnexpandedPC + 4)
+
+### Root Cause
+Compressed instructions (RVC) advance PC by 2, not 4. The `IsCompressed` flag wasn't
+being set because we were checking the expanded instruction (always has 0x3 in low bits).
+
+### Fix
+1. Added `is_compressed` field to TraceStep
+2. Emulator sets this field when fetching instruction
+3. Witness generator uses trace.is_compressed instead of checking instruction bits
+
+Result: All 19 R1CS constraints now satisfied.
 
 ---
 
 ## Previous Implementation Notes
 
-### Univariate Skip Implementation (Iteration 11) - SUCCESS
+### Dory Commitment (Complete)
 
-Successfully implemented Jolt's univariate skip optimization for stages 1-2:
+Successfully matching Jolt's Dory:
+- MSM over G1 points matches exactly
+- Pairing to GT element works
+- arkworks-compatible serialization
 
-1. **univariate_skip.zig** - Core module with:
-   - Constants matching Jolt (NUM_R1CS_CONSTRAINTS=19, DEGREE=9, NUM_COEFFS=28)
-   - `buildUniskipFirstRoundPoly()` - Produces degree-27 polynomial from extended evals
-   - `LagrangePolynomial` - Interpolation on extended symmetric domain
-   - `uniskipTargets()` - Compute extended evaluation points
+### Blake2b Transcript (Complete)
 
-2. **spartan/outer.zig** - Spartan outer prover:
-   - `SpartanOuterProver` with univariate skip support
-   - `computeUniskipFirstRoundPoly()` - Generates proper first-round polynomial
-
-3. **proof_converter.zig** - Updated to generate proper-degree polynomials:
-   - Stage 1: `createUniSkipProofStage1()` - 28 coefficients (degree 27)
-   - Stage 2: `createUniSkipProofStage2()` - 13 coefficients (degree 12)
-
-### Blake2b Transcript Compatibility (Complete)
-
-Successfully implemented Blake2b transcript matching Jolt's implementation:
 - 32-byte state with round counter
 - Messages right-padded to 32 bytes
-- Scalars serialized LE then reversed to BE (EVM format)
+- Scalars serialized LE then reversed to BE
 - 128-bit challenges
-- Vector operations with begin/end markers
 
-All 7 test vectors from Jolt verified to match.
+### Proof Structure (Complete)
 
-### Dory Commitment Implementation (In Progress)
-
-**Location**: `src/poly/commitment/dory.zig`
-
-1. **DoryCommitmentScheme** - Matches Jolt's DoryCommitmentScheme
-   - `setup(allocator, max_num_vars)` - Generate SRS using "Jolt Dory URS seed"
-   - `commit(params, evals)` - Commit polynomial to GT element
-   - `loadFromFile()` - Load arkworks-format SRS from file
-   - DorySRS with G1/G2 generators
-   - DoryCommitment = GT = Fp12
-
-2. **GT (Fp12) Serialization** - Added to `src/field/pairing.zig`
-   - `Fp12.toBytes()` - 384 bytes arkworks format (12 × 32 bytes)
-   - `Fp12.fromBytes()` - Deserialize from arkworks format
-   - Serialization order: c0.c0.c0, c0.c0.c1, ..., c1.c2.c1
-
-### Cross-Verification Status
-
-**Jolt successfully deserializes Zolt proofs!**
-
-```
-cargo test --package jolt-core test_deserialize_zolt_proof -- --ignored --nocapture
-
-Successfully deserialized Zolt proof!
-  Trace length: 8
-  RAM K: 65536
-  Bytecode K: 65536
-  Commitments: 5
-```
-
-### Test Status
-
-All Zolt tests pass:
-```
-zig build test --summary all
-Build Summary: tests passed
-```
-
-Cross-verification tests (Jolt):
-- `test_deserialize_zolt_proof`: PASS
-- `test_debug_zolt_format`: PASS
-- `test_export_dory_srs`: PASS
-- `test_export_dory_commitment_debug`: PASS (MSM matches, pairing differs)
-- `test_verify_zolt_proof`: FAIL (commitment mismatch due to pairing)
+7 stages matching Jolt:
+- Stage 1: Outer Spartan (UniSkip + sumcheck)
+- Stage 2: Product virtualization
+- Stages 3-7: Various claim reductions
 
 ---
 
 ## File Locations
 
 ### SRS File
-`/tmp/jolt_dory_srs.bin` - 1000 bytes for max_num_vars=3
-
-### Format
-```
-Header: "JOLT_DORY_SRS_V1" (16 bytes)
-max_num_vars: u64 (8 bytes)
-g1_count: u64 (8 bytes)
-G1 points: 4 * 64 bytes = 256 bytes (uncompressed affine)
-g2_count: u64 (8 bytes)
-G2 points: 4 * 128 bytes = 512 bytes (uncompressed affine)
-h1: 64 bytes
-h2: 128 bytes
-```
+`/tmp/jolt_dory_srs.bin` - arkworks format
 
 ### Key Source Files
 
 | File | Purpose |
 |------|---------|
 | `src/poly/commitment/dory.zig` | Dory commitment scheme |
-| `src/field/pairing.zig` | BN254 pairing (needs fix) |
-| `src/field/mod.zig` | Montgomery field arithmetic |
-| `src/msm/mod.zig` | Multi-scalar multiplication |
+| `src/zkvm/proof_converter.zig` | Proof format conversion |
+| `src/zkvm/r1cs/constraints.zig` | R1CS constraint definitions |
+| `src/tracer/mod.zig` | Execution trace with is_compressed |

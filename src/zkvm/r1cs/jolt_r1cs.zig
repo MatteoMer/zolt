@@ -479,6 +479,7 @@ test "jolt r1cs witness generation" {
         .memory_value = null,
         .is_memory_write = false,
         .next_pc = 0x1004,
+        .is_compressed = false,
     });
 
     var r1cs = try JoltR1CS(F).fromTrace(allocator, &trace);
@@ -516,6 +517,7 @@ test "jolt r1cs Az Bz Cz computation" {
         .memory_value = null,
         .is_memory_write = false,
         .next_pc = 0x1004,
+        .is_compressed = false,
     });
 
     var r1cs = try JoltR1CS(F).fromTrace(allocator, &trace);
@@ -562,6 +564,7 @@ test "jolt spartan interface" {
         .memory_value = null,
         .is_memory_write = false,
         .next_pc = 0x1004,
+        .is_compressed = false,
     });
 
     var r1cs = try JoltR1CS(F).fromTrace(allocator, &trace);

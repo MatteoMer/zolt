@@ -1138,6 +1138,7 @@ test "stage 5 sumcheck invariant: p(0) + p(1) = current_claim" {
             .memory_value = null,
             .is_memory_write = false,
             .next_pc = @intCast((i + 1) * 4),
+            .is_compressed = false,
         };
         try trace.steps.append(allocator, step);
     }
@@ -1194,6 +1195,7 @@ test "stage 6 sumcheck invariant: all zeros for valid trace" {
             .memory_value = null,
             .is_memory_write = false,
             .next_pc = @intCast((i + 1) * 4),
+            .is_compressed = false,
         };
         try trace.steps.append(allocator, step);
     }

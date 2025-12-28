@@ -649,51 +649,6 @@ pub fn JoltProver(comptime F: type) type {
             const cycle_witnesses = try constraint_gen.generateWitness(&emulator.trace);
             defer self.allocator.free(cycle_witnesses);
 
-            // DEBUG: Check if constraints are satisfied
-            var constraint_gen2 = r1cs.R1CSWitnessGenerator(F).init(self.allocator);
-            const satisfied = constraint_gen2.verifyConstraints(cycle_witnesses);
-            std.debug.print("DEBUG: R1CS constraints satisfied: {}, num_cycles: {}\n", .{ satisfied, cycle_witnesses.len });
-
-            // Check which constraint fails
-            if (!satisfied) {
-                for (cycle_witnesses, 0..) |witness, cycle_idx| {
-                    for (r1cs.UNIFORM_CONSTRAINTS, 0..) |constraint, constraint_idx| {
-                        if (!constraint.isSatisfied(F, witness.asSlice())) {
-                            std.debug.print("  Constraint {} FAILS at cycle {}\n", .{ constraint_idx, cycle_idx });
-                            const az = constraint.condition.evaluate(F, witness.asSlice());
-                            const bz_left = constraint.left.evaluate(F, witness.asSlice());
-                            const bz_right = constraint.right.evaluate(F, witness.asSlice());
-                            const bz = bz_left.sub(bz_right);
-                            std.debug.print("    Az = {}\n", .{az.toBytes()[0]});
-                            std.debug.print("    Bz = (left - right) = {}\n", .{bz.toBytes()[0]});
-                            // Print constraint-specific values for constraint 16
-                            if (constraint_idx == 16 and cycle_idx <= 3) {
-                                const pc = witness.get(.UnexpandedPC);
-                                const next_pc = witness.get(.NextUnexpandedPC);
-                                const should_branch = witness.get(.ShouldBranch);
-                                const jump = witness.get(.FlagJump);
-                                const is_compressed = witness.get(.FlagIsCompressed);
-                                const do_not_update = witness.get(.FlagDoNotUpdateUnexpandedPC);
-                                std.debug.print("    UnexpandedPC bytes: {any}\n", .{pc.toBytes()[0..8]});
-                                std.debug.print("    NextUnexpandedPC bytes: {any}\n", .{next_pc.toBytes()[0..8]});
-                                std.debug.print("    ShouldBranch = {}, Jump = {}, IsCompressed = {}, DoNotUpdate = {}\n", .{
-                                    should_branch.toBytes()[0],
-                                    jump.toBytes()[0],
-                                    is_compressed.toBytes()[0],
-                                    do_not_update.toBytes()[0],
-                                });
-                                // Print actual instruction from trace
-                                const step = emulator.trace.steps.items[cycle_idx];
-                                std.debug.print("    Instruction: 0x{x:0>8}, trace.pc = 0x{x}, trace.next_pc = 0x{x}\n", .{
-                                    step.instruction, step.pc, step.next_pc,
-                                });
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-
             // Generate Zolt internal proof first
             var zolt_proof = try self.prove(program_bytecode, inputs);
             defer zolt_proof.deinit();
@@ -1757,6 +1712,7 @@ test "r1cs-spartan: witness generation and Az Bz Cz computation" {
         .memory_value = null,
         .is_memory_write = false,
         .next_pc = 0x1004,
+        .is_compressed = false,
     });
 
     try trace.steps.append(allocator, .{
@@ -1770,6 +1726,7 @@ test "r1cs-spartan: witness generation and Az Bz Cz computation" {
         .memory_value = null,
         .is_memory_write = false,
         .next_pc = 0x1008,
+        .is_compressed = false,
     });
 
     // Build JoltR1CS and test witness generation

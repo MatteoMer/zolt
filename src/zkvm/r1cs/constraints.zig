@@ -498,6 +498,7 @@ pub const UNIFORM_CONSTRAINTS = [_]UniformConstraint{
 
 /// First group constraint indices (10 constraints, domain {-4..5})
 /// These are the global indices from UNIFORM_CONSTRAINTS that belong to the first group
+/// Matches Jolt's R1CS_CONSTRAINTS_FIRST_GROUP_LABELS
 pub const FIRST_GROUP_INDICES: [10]usize = .{
     1, // RamAddrEqZeroIfNotLoadStore
     2, // RamReadEqRamWriteIfLoad
@@ -507,12 +508,13 @@ pub const FIRST_GROUP_INDICES: [10]usize = .{
     6, // LeftLookupEqLeftInputOtherwise
     11, // AssertLookupOne
     14, // NextUnexpPCEqLookupIfShouldJump
-    16, // NextUnexpPCUpdateOtherwise (or 17 - NextPCEqPCPlusOneIfInline)
+    17, // NextPCEqPCPlusOneIfInline (Jolt uses this in first group)
     18, // MustStartSequenceFromBeginning
 };
 
 /// Second group constraint indices (9 constraints)
 /// These are the global indices from UNIFORM_CONSTRAINTS that belong to the second group
+/// Matches Jolt's R1CS_CONSTRAINTS_SECOND_GROUP_LABELS
 pub const SECOND_GROUP_INDICES: [9]usize = .{
     0, // RamAddrEqRs1PlusImmIfLoadStore
     7, // RightLookupAdd
@@ -522,7 +524,7 @@ pub const SECOND_GROUP_INDICES: [9]usize = .{
     12, // RdWriteEqLookupIfWriteLookupToRd
     13, // RdWriteEqPCPlusConstIfWritePCtoRD
     15, // NextUnexpPCEqPCPlusImmIfShouldBranch
-    17, // NextPCEqPCPlusOneIfInline (if 16 is for first group)
+    16, // NextUnexpPCUpdateOtherwise (moved from first group)
 };
 
 /// Per-cycle R1CS inputs extracted from execution trace

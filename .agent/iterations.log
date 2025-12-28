@@ -1108,3 +1108,9 @@ Ended: 2025-12-28T19:44:07.685601
 Turns: 137
 Cost: $9.4405
 
+[Session 7] 2025-12-28 19:59:31
+- Implemented DoryVerifierSetup serialization
+- Updated --export-preprocessing to include verifier setup
+- Format matches Jolt's VerifierSetup<BN254>: Vec<GT> for deltas/chi, G1/G2 points, GT element, u64 max_log_n
+- 632 tests passing
+

@@ -1,29 +1,29 @@
 # Zolt zkVM Implementation Plan
 
-## Current Status (December 2024 - Iteration 21)
+## Current Status (December 2024 - Iteration 22)
 
 ### Session Summary
 
-This iteration focused on completing M extension support with division and remainder:
+This iteration focused on completing the remaining instruction lookup implementations:
 
-1. **Division Validation Tables**
-   - `ValidDiv0`: Validates division by zero semantics (returns MAX_VALUE)
-   - `ValidUnsignedRemainder`: Validates remainder < divisor for unsigned
-   - `ValidSignedRemainder`: Validates signed remainder constraints including sign matching
+1. **Complete Branch Instruction Lookups**
+   - `BltLookup`: Branch if less than (signed comparison)
+   - `BgeLookup`: Branch if greater than or equal (signed)
+   - `BltuLookup`: Branch if less than (unsigned)
+   - `BgeuLookup`: Branch if greater than or equal (unsigned)
 
-2. **Division Instruction Lookups**
-   - `DivLookup`: Signed division with overflow handling (MIN_INT / -1)
-   - `DivuLookup`: Unsigned division
-   - `RemLookup`: Signed remainder with overflow handling
-   - `RemuLookup`: Unsigned remainder
+2. **Upper Immediate Instructions**
+   - `LuiLookup`: Load upper immediate (rd = imm << 12)
+   - `AuipcLookup`: Add upper immediate to PC (rd = PC + imm)
 
-3. **Tracer Integration**
-   - Updated `lookup_trace.zig` to record DIV/DIVU/REM/REMU operations
-   - All M extension operations now tracked: MUL, MULH, MULHU, MULHSU, DIV, DIVU, REM, REMU
+3. **Jump Instructions**
+   - `JalLookup`: Jump and link (rd = PC+4, PC = PC+imm)
+   - `JalrLookup`: Jump and link register (rd = PC+4, PC = rs1+imm)
+   - Both support compressed instruction mode (PC+2 vs PC+4 for return address)
 
 ### Test Status
 
-All 420+ tests pass:
+All 450+ tests pass:
 - Field arithmetic: Fp, Fp2, Fp6, Fp12
 - Curve arithmetic: G1, G2 points
 - Pairing: bilinearity verified
@@ -36,7 +36,7 @@ All 420+ tests pass:
 - Spartan proof generation and verification
 - Lasso lookup argument
 - All 24 lookup tables
-- All instruction lookups including division
+- All instruction lookups including jumps and branches
 
 ### Architecture Summary
 
@@ -75,7 +75,7 @@ Division/Remainder:
 - ValidDiv0, ValidUnsignedRemainder, ValidSignedRemainder
 ```
 
-#### Instruction Lookups (Full M Extension)
+#### Instruction Lookups (Complete RV64IM Coverage)
 ```
 Base Integer:
 - AddLookup, SubLookup
@@ -88,11 +88,23 @@ Branch:
 - BeqLookup, BneLookup
 - BltLookup, BgeLookup, BltuLookup, BgeuLookup
 
+Upper Immediate:
+- LuiLookup, AuipcLookup
+
+Jump:
+- JalLookup, JalrLookup
+
 Multiply (M):
 - MulLookup, MulhLookup, MulhuLookup, MulhsuLookup
 
 Division (M):
 - DivLookup, DivuLookup, RemLookup, RemuLookup
+
+RV64 Word Operations:
+- AddwLookup, SubwLookup
+- SllwLookup, SrlwLookup, SrawLookup
+- MulwLookup
+- DivwLookup, DivuwLookup, RemwLookup, RemuwLookup
 ```
 
 #### Commitment Schemes
@@ -136,6 +148,9 @@ Dory (transparent setup, IPA-based)
 - **Transcripts** - Keccak and Poseidon-based Fiat-Shamir
 - **All Lookup Tables** - 24 tables covering all RV64IM operations
 - **Full M Extension** - MUL, MULH, MULHU, MULHSU, DIV, DIVU, REM, REMU
+- **All Branch Instructions** - BEQ, BNE, BLT, BGE, BLTU, BGEU
+- **Upper Immediates** - LUI, AUIPC
+- **Jumps** - JAL, JALR
 
 ## Future Work
 
@@ -151,6 +166,7 @@ Dory (transparent setup, IPA-based)
 1. Documentation and examples
 2. Benchmarking suite
 
-## Commit History (Iteration 21)
-- Add division/remainder validation lookup tables
-- Add DIV/REM instruction lookups for M extension
+## Commit History (Iteration 22)
+- Add missing branch instruction lookups (BLT, BGE, BLTU, BGEU)
+- Add LUI and AUIPC instruction lookups
+- Add JAL and JALR jump instruction lookups

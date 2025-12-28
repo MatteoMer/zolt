@@ -1,36 +1,40 @@
 # Zolt zkVM Implementation TODO
 
-## Completed (This Session - Iteration 21)
+## Completed (This Session - Iteration 22)
 
-### Division/Remainder Support (M Extension)
-- [x] Added ValidDiv0 lookup table (validates div-by-zero returns MAX)
-- [x] Added ValidUnsignedRemainder lookup table
-- [x] Added ValidSignedRemainder lookup table
-- [x] Added DivLookup, DivuLookup instruction lookups
-- [x] Added RemLookup, RemuLookup instruction lookups
-- [x] Updated LookupTables enum with new division tables
-- [x] Connected DIV/DIVU/REM/REMU to lookup trace collector
-- [x] Comprehensive tests for all division edge cases
+### Complete Branch Instruction Lookups
+- [x] Added BltLookup, BgeLookup for signed comparisons
+- [x] Added BltuLookup, BgeuLookup for unsigned comparisons
+- [x] Connected BLT/BGE/BLTU/BGEU to trace collector
+- [x] Comprehensive tests for all branch comparison lookups
 
-### RV64 Word-Sized (*W) Instructions
-- [x] Added AddwLookup, SubwLookup for 32-bit arithmetic
-- [x] Added SllwLookup, SrlwLookup, SrawLookup for 32-bit shifts
-- [x] Added MulwLookup for 32-bit multiply
-- [x] Added DivwLookup, DivuwLookup for 32-bit division
-- [x] Added RemwLookup, RemuwLookup for 32-bit remainder
-- [x] All W-suffix operations sign-extend 32-bit results to 64 bits
-- [x] Tests covering overflow and sign-extension
-- [x] Connected *W lookups to tracer via OP_32 opcode handling
+### Upper Immediate Instructions
+- [x] Added LuiLookup for LUI (Load Upper Immediate)
+- [x] Added AuipcLookup for AUIPC (Add Upper Immediate to PC)
+- [x] Connected LUI/AUIPC to trace collector
+- [x] Tests for upper immediate operations
+
+### Jump Instructions
+- [x] Added JalLookup for JAL (Jump and Link)
+- [x] Added JalrLookup for JALR (Jump and Link Register)
+- [x] Both support compressed instruction mode (PC+2 vs PC+4)
+- [x] Connected JAL/JALR to trace collector
+- [x] Tests for jump target computation and link address
 
 ## Completed (Previous Sessions)
 
+### Iteration 21: Division/Remainder and RV64 Word Operations
+- [x] ValidDiv0, ValidUnsignedRemainder, ValidSignedRemainder tables
+- [x] DivLookup, DivuLookup, RemLookup, RemuLookup instruction lookups
+- [x] AddwLookup, SubwLookup, SllwLookup, SrlwLookup, SrawLookup
+- [x] MulwLookup, DivwLookup, DivuwLookup, RemwLookup, RemuwLookup
+- [x] All W-suffix operations sign-extend 32-bit results to 64 bits
+
 ### Iteration 20: Shift Lookup Tables and Instructions
-- [x] Added LeftShift, RightShift, RightShiftArithmetic tables
-- [x] Added Pow2 table
-- [x] Added SignExtend8, SignExtend16, SignExtend32 tables
-- [x] Added SllLookup, SrlLookup, SraLookup for register shifts
-- [x] Added SlliLookup, SrliLookup, SraiLookup for immediate shifts
-- [x] Updated lookup_trace to record shift instructions
+- [x] LeftShift, RightShift, RightShiftArithmetic tables
+- [x] Pow2 table
+- [x] SignExtend8, SignExtend16, SignExtend32 tables
+- [x] SllLookup, SrlLookup, SraLookup, SlliLookup, SrliLookup, SraiLookup
 
 ### Iterations 1-19: Core Infrastructure
 - [x] BN254 field and curve arithmetic
@@ -62,6 +66,8 @@
 - **Base Integer (I)**: ADD, SUB, AND, OR, XOR, SLL, SRL, SRA, SLT, SLTU
 - **Immediate (I)**: ADDI, ANDI, ORI, XORI, SLTI, SLTIU, SLLI, SRLI, SRAI
 - **Branches**: BEQ, BNE, BLT, BGE, BLTU, BGEU
+- **Upper Immediate**: LUI, AUIPC
+- **Jumps**: JAL, JALR
 - **Multiply (M)**: MUL, MULH, MULHU, MULHSU
 - **Division (M)**: DIV, DIVU, REM, REMU
 - **Word-sized (RV64)**: ADDW, SUBW, SLLW, SRLW, SRAW, MULW, DIVW, DIVUW, REMW, REMUW
@@ -81,10 +87,9 @@
 - [ ] Benchmarking suite
 
 ## Test Status
-All 452 tests pass.
+All tests pass (450+ tests).
 
 ## Commits This Session
-1. Add division/remainder validation lookup tables
-2. Add DIV/REM instruction lookups for M extension
-3. Add RV64 word-sized (*W) instruction lookups
-4. Connect word-sized (*W) lookups to trace collector
+1. Add missing branch instruction lookups (BLT, BGE, BLTU, BGEU)
+2. Add LUI and AUIPC instruction lookups
+3. Add JAL and JALR jump instruction lookups

@@ -65,7 +65,8 @@ zolt run --max-cycles 1000 --regs program.elf  # Limit cycles, show registers
 
 # Generate ZK proof for a RISC-V ELF binary
 zolt prove program.elf
-zolt prove -o proof.bin program.elf            # Save proof to file
+zolt prove -o proof.bin program.elf            # Save proof to file (binary)
+zolt prove --json -o proof.json program.elf    # Save proof to file (JSON)
 
 # Verify a saved proof
 zolt verify proof.bin

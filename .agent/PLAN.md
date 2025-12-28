@@ -1,10 +1,32 @@
 # Zolt zkVM Implementation Plan
 
-## Current Status (December 2024 - Iteration 43)
+## Current Status (December 2024 - Iteration 44)
 
-### Session Summary - Proof Serialization Added
+### Session Summary - JSON Serialization Added
 
 This iteration added:
+
+1. **JSON Serialization Format**
+   - Added human-readable JSON output format for proofs
+   - Uses "ZOLT-JSON" magic identifier
+   - Field elements serialized as 64-character hex strings
+   - Pretty-printed with proper indentation
+   - Full proof structure: bytecode, memory, register, R1CS, stages
+
+2. **JSON Writer Module**
+   - `JsonProofWriter(F)` type for building JSON output
+   - `fieldToHex()` and `hexToField()` conversion functions
+   - `serializeProofToJson()` for in-memory serialization
+   - `writeProofToJsonFile()` for file output
+
+3. **CLI JSON Option**
+   - Added `--json` option to prove command
+   - Example: `zolt prove --json -o proof.json program.elf`
+   - Shows format type and size when saving
+
+### Previous Session (Iteration 43) - Binary Serialization
+
+Previous iteration added:
 
 1. **Proof Serialization Module**
    - Created `src/zkvm/serialization.zig` for binary proof format

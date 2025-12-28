@@ -705,3 +705,390 @@ test "serialize and deserialize full JoltProof" {
     const result = try verifier.verify(&deserialized, &[_]u8{});
     try std.testing.expect(result);
 }
+
+// ============================================================================
+// JSON Serialization
+// ============================================================================
+
+/// JSON serialization magic identifier
+pub const JSON_MAGIC: []const u8 = "ZOLT-JSON";
+
+/// Convert a field element to a hex string
+pub fn fieldToHex(comptime F: type, elem: F) [64]u8 {
+    const bytes = elem.toBytes();
+    var hex: [64]u8 = undefined;
+    const hex_chars = "0123456789abcdef";
+    for (bytes, 0..) |byte, i| {
+        hex[i * 2] = hex_chars[byte >> 4];
+        hex[i * 2 + 1] = hex_chars[byte & 0xf];
+    }
+    return hex;
+}
+
+/// Convert a hex string to a field element
+pub fn hexToField(comptime F: type, hex: []const u8) SerializationError!F {
+    if (hex.len != 64) return SerializationError.InvalidData;
+    var bytes: [32]u8 = undefined;
+    for (0..32) |i| {
+        const hi = hexCharToNibble(hex[i * 2]) orelse return SerializationError.InvalidData;
+        const lo = hexCharToNibble(hex[i * 2 + 1]) orelse return SerializationError.InvalidData;
+        bytes[i] = (hi << 4) | lo;
+    }
+    return F.fromBytes(&bytes);
+}
+
+fn hexCharToNibble(c: u8) ?u4 {
+    return switch (c) {
+        '0'...'9' => @intCast(c - '0'),
+        'a'...'f' => @intCast(c - 'a' + 10),
+        'A'...'F' => @intCast(c - 'A' + 10),
+        else => null,
+    };
+}
+
+/// JSON writer for proofs
+pub fn JsonProofWriter(comptime F: type) type {
+    return struct {
+        const Self = @This();
+
+        buffer: std.ArrayListUnmanaged(u8),
+        allocator: Allocator,
+        indent: usize,
+
+        pub fn init(allocator: Allocator) Self {
+            return .{
+                .buffer = .{},
+                .allocator = allocator,
+                .indent = 0,
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.buffer.deinit(self.allocator);
+        }
+
+        pub fn toOwnedSlice(self: *Self) ![]u8 {
+            return self.buffer.toOwnedSlice(self.allocator);
+        }
+
+        fn writeIndent(self: *Self) !void {
+            for (0..self.indent * 2) |_| {
+                try self.buffer.append(self.allocator, ' ');
+            }
+        }
+
+        fn write(self: *Self, data: []const u8) !void {
+            try self.buffer.appendSlice(self.allocator, data);
+        }
+
+        fn writeLine(self: *Self, data: []const u8) !void {
+            try self.writeIndent();
+            try self.write(data);
+            try self.write("\n");
+        }
+
+        fn writeString(self: *Self, key: []const u8, value: []const u8) !void {
+            try self.writeIndent();
+            try self.write("\"");
+            try self.write(key);
+            try self.write("\": \"");
+            try self.write(value);
+            try self.write("\"");
+        }
+
+        fn writeNumber(self: *Self, key: []const u8, value: u64) !void {
+            try self.writeIndent();
+            try self.write("\"");
+            try self.write(key);
+            try self.write("\": ");
+            var buf: [20]u8 = undefined;
+            const len = std.fmt.formatIntBuf(&buf, value, 10, .lower, .{});
+            try self.write(buf[0..len]);
+        }
+
+        fn writeFieldElement(self: *Self, key: []const u8, elem: F) !void {
+            const hex = fieldToHex(F, elem);
+            try self.writeString(key, &hex);
+        }
+
+        /// Write a stage proof to JSON
+        pub fn writeStageProof(self: *Self, name: []const u8, stage: *const prover.StageProof(F)) !void {
+            try self.writeIndent();
+            try self.write("\"");
+            try self.write(name);
+            try self.write("\": {\n");
+            self.indent += 1;
+
+            // Round polynomials
+            try self.writeNumber("num_rounds", stage.round_polys.items.len);
+            try self.write(",\n");
+
+            try self.writeLine("\"round_polys\": [");
+            self.indent += 1;
+            for (stage.round_polys.items, 0..) |poly, i| {
+                try self.writeIndent();
+                try self.write("[");
+                for (poly, 0..) |coeff, j| {
+                    const hex = fieldToHex(F, coeff);
+                    try self.write("\"");
+                    try self.write(&hex);
+                    try self.write("\"");
+                    if (j < poly.len - 1) try self.write(", ");
+                }
+                try self.write("]");
+                if (i < stage.round_polys.items.len - 1) try self.write(",");
+                try self.write("\n");
+            }
+            self.indent -= 1;
+            try self.writeLine("],");
+
+            // Challenges
+            try self.writeLine("\"challenges\": [");
+            self.indent += 1;
+            for (stage.challenges.items, 0..) |challenge, i| {
+                try self.writeIndent();
+                const hex = fieldToHex(F, challenge);
+                try self.write("\"");
+                try self.write(&hex);
+                try self.write("\"");
+                if (i < stage.challenges.items.len - 1) try self.write(",");
+                try self.write("\n");
+            }
+            self.indent -= 1;
+            try self.writeLine("],");
+
+            // Final claims
+            try self.writeLine("\"final_claims\": [");
+            self.indent += 1;
+            for (stage.final_claims.items, 0..) |claim, i| {
+                try self.writeIndent();
+                const hex = fieldToHex(F, claim);
+                try self.write("\"");
+                try self.write(&hex);
+                try self.write("\"");
+                if (i < stage.final_claims.items.len - 1) try self.write(",");
+                try self.write("\n");
+            }
+            self.indent -= 1;
+            try self.writeLine("]");
+
+            self.indent -= 1;
+            try self.writeIndent();
+            try self.write("}");
+        }
+
+        /// Write JoltStageProofs to JSON
+        pub fn writeJoltStageProofs(self: *Self, proofs: *const prover.JoltStageProofs(F)) !void {
+            try self.writeLine("\"stage_proofs\": {");
+            self.indent += 1;
+
+            try self.writeNumber("log_t", proofs.log_t);
+            try self.write(",\n");
+            try self.writeNumber("log_k", proofs.log_k);
+            try self.write(",\n");
+
+            const stage_names = [_][]const u8{
+                "spartan",
+                "raf",
+                "lasso",
+                "val",
+                "register",
+                "booleanity",
+            };
+
+            for (&proofs.stage_proofs, stage_names, 0..) |*stage, name, i| {
+                try self.writeStageProof(name, stage);
+                if (i < 5) try self.write(",");
+                try self.write("\n");
+            }
+
+            self.indent -= 1;
+            try self.writeLine("}");
+        }
+    };
+}
+
+/// Serialize a JoltProof to JSON format
+pub fn serializeProofToJson(comptime F: type, allocator: Allocator, proof: anytype) ![]u8 {
+    var writer = JsonProofWriter(F).init(allocator);
+    defer writer.deinit();
+
+    try writer.writeLine("{");
+    writer.indent += 1;
+
+    // Header
+    try writer.writeString("format", JSON_MAGIC);
+    try writer.write(",\n");
+    try writer.writeNumber("version", VERSION);
+    try writer.write(",\n");
+
+    // Bytecode proof
+    try writer.writeLine("\"bytecode_proof\": {");
+    writer.indent += 1;
+    try writer.writeFieldElement("commitment_x", proof.bytecode_proof.commitment.x);
+    try writer.write(",\n");
+    try writer.writeFieldElement("commitment_y", proof.bytecode_proof.commitment.y);
+    try writer.write("\n");
+    writer.indent -= 1;
+    try writer.writeLine("},");
+
+    // Memory proof
+    try writer.writeLine("\"memory_proof\": {");
+    writer.indent += 1;
+    try writer.writeFieldElement("commitment_x", proof.memory_proof.commitment.x);
+    try writer.write(",\n");
+    try writer.writeFieldElement("commitment_y", proof.memory_proof.commitment.y);
+    try writer.write("\n");
+    writer.indent -= 1;
+    try writer.writeLine("},");
+
+    // Register proof
+    try writer.writeLine("\"register_proof\": {");
+    writer.indent += 1;
+    try writer.writeFieldElement("commitment_x", proof.register_proof.commitment.x);
+    try writer.write(",\n");
+    try writer.writeFieldElement("commitment_y", proof.register_proof.commitment.y);
+    try writer.write("\n");
+    writer.indent -= 1;
+    try writer.writeLine("},");
+
+    // R1CS proof summary
+    try writer.writeLine("\"r1cs_proof\": {");
+    writer.indent += 1;
+    try writer.writeNumber("tau_len", proof.r1cs_proof.tau.len);
+    try writer.write(",\n");
+    try writer.writeFieldElement("sumcheck_claim", proof.r1cs_proof.sumcheck_proof.claim);
+    try writer.write(",\n");
+    try writer.writeFieldElement("sumcheck_final_eval", proof.r1cs_proof.sumcheck_proof.final_eval);
+    try writer.write(",\n");
+    try writer.writeNumber("sumcheck_rounds", proof.r1cs_proof.sumcheck_proof.rounds.len);
+    try writer.write(",\n");
+    try writer.writeNumber("eval_point_len", proof.r1cs_proof.eval_point.len);
+    try writer.write("\n");
+    writer.indent -= 1;
+    try writer.writeLine("},");
+
+    // Stage proofs
+    if (proof.stage_proofs) |stage_proofs| {
+        try writer.writeJoltStageProofs(&stage_proofs);
+    } else {
+        try writer.writeLine("\"stage_proofs\": null");
+    }
+
+    writer.indent -= 1;
+    try writer.writeLine("}");
+
+    return writer.toOwnedSlice();
+}
+
+/// Write proof to JSON file
+pub fn writeProofToJsonFile(comptime F: type, allocator: Allocator, proof: anytype, path: []const u8) !void {
+    const json = try serializeProofToJson(F, allocator, proof);
+    defer allocator.free(json);
+
+    const file = try std.fs.cwd().createFile(path, .{});
+    defer file.close();
+
+    try file.writeAll(json);
+}
+
+test "field to hex roundtrip" {
+    const F = field.BN254Scalar;
+
+    const test_values = [_]F{
+        F.zero(),
+        F.one(),
+        F.fromU64(12345678901234567890),
+        F.fromU64(0xdeadbeefcafebabe),
+    };
+
+    for (test_values) |val| {
+        const hex = fieldToHex(F, val);
+        const restored = try hexToField(F, &hex);
+        try std.testing.expect(val.eql(restored));
+    }
+}
+
+test "json stage proof serialization" {
+    const F = field.BN254Scalar;
+    const allocator = std.testing.allocator;
+
+    // Create a stage proof with data
+    var stage = prover.StageProof(F).init(allocator);
+    defer stage.deinit();
+
+    // Add round polynomial
+    const poly = try allocator.alloc(F, 2);
+    poly[0] = F.fromU64(42);
+    poly[1] = F.fromU64(43);
+    try stage.round_polys.append(allocator, poly);
+
+    // Add challenge
+    try stage.challenges.append(allocator, F.fromU64(100));
+
+    // Add claim
+    try stage.final_claims.append(allocator, F.fromU64(999));
+
+    // Serialize to JSON
+    var writer = JsonProofWriter(F).init(allocator);
+    defer writer.deinit();
+
+    try writer.writeLine("{");
+    writer.indent += 1;
+    try writer.writeStageProof("test_stage", &stage);
+    try writer.write("\n");
+    writer.indent -= 1;
+    try writer.writeLine("}");
+
+    const json = try writer.toOwnedSlice();
+    defer allocator.free(json);
+
+    // Verify it's valid JSON structure (basic check)
+    try std.testing.expect(json.len > 0);
+    try std.testing.expect(json[0] == '{');
+    try std.testing.expect(json[json.len - 2] == '}'); // -2 because of trailing newline
+
+    // Check it contains expected keys
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"test_stage\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"round_polys\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"challenges\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"final_claims\"") != null);
+}
+
+test "full proof JSON serialization" {
+    const F = field.BN254Scalar;
+    const allocator = std.testing.allocator;
+    const zkvm = @import("mod.zig");
+
+    // Create a minimal bytecode program
+    const program = [_]u8{
+        0x13, 0x05, 0xa0, 0x02, // li a0, 42
+        0x93, 0x05, 0xa0, 0x00, // li a1, 10
+        0x33, 0x05, 0xb5, 0x00, // add a0, a0, a1
+        0x73, 0x00, 0x10, 0x00, // ebreak
+    };
+
+    // Create prover and generate proof
+    var prover_inst = zkvm.JoltProver(F).init(allocator);
+    prover_inst.max_cycles = 64;
+
+    var proof = try prover_inst.prove(&program, &[_]u8{});
+    defer proof.deinit();
+
+    // Serialize to JSON
+    const json = try serializeProofToJson(F, allocator, proof);
+    defer allocator.free(json);
+
+    // Verify it's valid JSON structure
+    try std.testing.expect(json.len > 0);
+    try std.testing.expect(json[0] == '{');
+
+    // Check it contains expected sections
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"format\": \"ZOLT-JSON\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"version\": 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"bytecode_proof\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"memory_proof\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"register_proof\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"r1cs_proof\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"stage_proofs\"") != null);
+}

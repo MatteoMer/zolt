@@ -255,7 +255,7 @@ fn runEmulator(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles: ?
     }
 }
 
-fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt: ?u64, output_path: ?[]const u8) !void {
+fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt: ?u64, output_path: ?[]const u8, json_format: bool) !void {
     std.debug.print("Zolt zkVM Prover\n", .{});
     std.debug.print("================\n\n", .{});
 
@@ -360,15 +360,32 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt:
     // Save proof to file if output path specified
     if (output_path) |path| {
         std.debug.print("\nSaving proof to: {s}\n", .{path});
-        zolt.zkvm.writeProofToFile(BN254Scalar, allocator, proof, path) catch |err| {
-            std.debug.print("  Error saving proof: {}\n", .{err});
-            return err;
-        };
 
-        // Calculate proof size
-        const proof_bytes = try zolt.zkvm.serializeProof(BN254Scalar, allocator, proof);
-        defer allocator.free(proof_bytes);
-        std.debug.print("  Proof size: {} bytes ({d:.2} KB)\n", .{ proof_bytes.len, @as(f64, @floatFromInt(proof_bytes.len)) / 1024.0 });
+        if (json_format) {
+            // Save as JSON
+            zolt.zkvm.writeProofToJsonFile(BN254Scalar, allocator, proof, path) catch |err| {
+                std.debug.print("  Error saving proof: {}\n", .{err});
+                return err;
+            };
+
+            // Calculate proof size
+            const json_bytes = try zolt.zkvm.serializeProofToJson(BN254Scalar, allocator, proof);
+            defer allocator.free(json_bytes);
+            std.debug.print("  Format: JSON\n", .{});
+            std.debug.print("  Proof size: {} bytes ({d:.2} KB)\n", .{ json_bytes.len, @as(f64, @floatFromInt(json_bytes.len)) / 1024.0 });
+        } else {
+            // Save as binary
+            zolt.zkvm.writeProofToFile(BN254Scalar, allocator, proof, path) catch |err| {
+                std.debug.print("  Error saving proof: {}\n", .{err});
+                return err;
+            };
+
+            // Calculate proof size
+            const proof_bytes = try zolt.zkvm.serializeProof(BN254Scalar, allocator, proof);
+            defer allocator.free(proof_bytes);
+            std.debug.print("  Format: Binary\n", .{});
+            std.debug.print("  Proof size: {} bytes ({d:.2} KB)\n", .{ proof_bytes.len, @as(f64, @floatFromInt(proof_bytes.len)) / 1024.0 });
+        }
         std.debug.print("  Proof saved successfully!\n", .{});
     }
 
@@ -692,11 +709,13 @@ pub fn main() !void {
                     std.debug.print("Options:\n", .{});
                     std.debug.print("  --max-cycles N   Limit execution to N cycles (default: 1024)\n", .{});
                     std.debug.print("  -o, --output F   Save proof to file F\n", .{});
+                    std.debug.print("  --json           Output proof in JSON format (human readable)\n", .{});
                 } else {
                     // Parse options
                     var elf_path: ?[]const u8 = null;
                     var max_cycles: ?u64 = null;
                     var output_path: ?[]const u8 = null;
+                    var json_format = false;
 
                     // First arg could be an option or the ELF path
                     if (std.mem.startsWith(u8, arg, "-")) {
@@ -706,6 +725,8 @@ pub fn main() !void {
                             }
                         } else if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
                             output_path = args.next();
+                        } else if (std.mem.eql(u8, arg, "--json")) {
+                            json_format = true;
                         }
                     } else {
                         elf_path = arg;
@@ -720,6 +741,8 @@ pub fn main() !void {
                                 }
                             } else if (std.mem.eql(u8, next_arg, "-o") or std.mem.eql(u8, next_arg, "--output")) {
                                 output_path = args.next();
+                            } else if (std.mem.eql(u8, next_arg, "--json")) {
+                                json_format = true;
                             }
                         } else if (elf_path == null) {
                             elf_path = next_arg;
@@ -727,7 +750,7 @@ pub fn main() !void {
                     }
 
                     if (elf_path) |path| {
-                        runProver(allocator, path, max_cycles, output_path) catch |err| {
+                        runProver(allocator, path, max_cycles, output_path, json_format) catch |err| {
                             std.debug.print("Failed to generate proof: {s}\n", .{@errorName(err)});
                             std.process.exit(1);
                         };

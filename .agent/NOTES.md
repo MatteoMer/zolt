@@ -1,6 +1,37 @@
 # Zolt-Jolt Compatibility Notes
 
-## Current Status (Session 22 - December 29, 2024)
+## Current Status (Session 23 - December 29, 2024)
+
+### Stage 1 Verification - BREAKTHROUGH Analysis
+
+**Key Debug Findings:**
+
+1. ✅ UniSkip claim matches exactly: `13591663202569515315998923849316641932864363074482154783767228068389782823624`
+2. ✅ Round 0 s(0) matches: `6005620868732342382966507416812433762093958861677420752505123876486085602547`
+3. ✅ Round 0 s(1) matches: `7586042333837172933032416432504208170770404212804734031262104191903697221077`
+4. ✅ Final claim matches: `7120341815860535077792666425421583012196152296139946730075156877231654137396`
+
+**The sumcheck prover is CORRECT!** The issue is NOT in the polynomial computation.
+
+**Root Cause:**
+The mismatch is between `output_claim` (from sumcheck) and `expected_output_claim` (from R1CS evaluation).
+
+The sumcheck proves: `Σ_x eq(tau, x) * Az(x) * Bz(x) = 0`
+
+After binding to point r, the final claim is: `eq(tau, r) * Az(r) * Bz(r)`
+
+The verifier computes expected as: `L(tau_high, r0) * eq(tau_low, r_rev) * Az_MLE(r) * Bz_MLE(r)`
+
+For these to match:
+- `eq(tau, r)` should factor as `L(tau_high, r0) * eq(tau_low, r_rev)` ✓
+- `Az(r)` should equal `Az_MLE(r)` - this is where the issue might be
+
+**Hypothesis:**
+The sumcheck polynomial includes the eq factor differently than the verifier expects. The prover accumulates eq in `current_scalar` while computing t_zero/t_infinity, but the verifier's formula uses a different decomposition.
+
+---
+
+## Session 22 - December 29, 2024
 
 ### Stage 1 Index Structure Analysis
 

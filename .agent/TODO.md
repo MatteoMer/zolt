@@ -84,10 +84,13 @@
 - d is derived from s(0)+s(1)=claim constraint ✓
 
 **Next Investigation Areas:**
-1. Compare t_zero/t_infinity with what Jolt would compute
-2. Check Az/Bz per-cycle evaluations match Jolt's
-3. Verify eq_cycle weights match Jolt's factorized E_out × E_in
-4. Add per-cycle debugging to find first divergent cycle
+1. Compare t_zero/t_infinity values with Jolt's expected values
+2. The 13/16 ratio might relate to:
+   - 10 constraints in first group, 9 in second (but 10+9=19, not related to 16)
+   - Lagrange domain size 10 vs something of size 16
+   - Missing cycles (1024 = 64×16, so 13×64 = 832 out of 1024?)
+3. Add per-cycle debugging to find if some cycles are being skipped
+4. Check if constraint evaluation order matches Jolt
 
 ---
 

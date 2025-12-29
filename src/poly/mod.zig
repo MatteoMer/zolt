@@ -195,25 +195,43 @@ pub fn EqPolynomial(comptime F: type) type {
         }
 
         /// Compute all evaluations on the boolean hypercube
+        ///
+        /// Uses BIG-ENDIAN indexing to match Jolt's EqPolynomial::evals():
+        /// - result[i] = eq(r, x) where x is the binary representation of i
+        /// - bit 0 (MSB of i) corresponds to r[0]
+        /// - bit n-1 (LSB of i) corresponds to r[n-1]
+        ///
+        /// This matches Jolt's convention where for r = [r0, r1, ..., r_{n-1}]:
+        /// - index 0 → eq(r, [0, 0, ..., 0])
+        /// - index 1 → eq(r, [0, 0, ..., 1])  (LSB = 1, so last var x_{n-1} = 1)
+        /// - etc.
         pub fn evals(self: *const Self, allocator: Allocator) ![]F {
             const n = self.r.len;
             const size = @as(usize, 1) << @as(u6, @intCast(n));
             const result = try allocator.alloc(F, size);
 
-            // Start with eq evaluated at all zeros
-            result[0] = F.one();
-            for (0..n) |i| {
-                const one_minus_ri = F.one().sub(self.r[i]);
-                result[0] = result[0].mul(one_minus_ri);
-            }
+            // Initialize with scaling factor (1 for no scaling)
+            @memset(result, F.one());
 
-            // Build up using the recurrence relation
-            for (0..n) |i| {
-                const half = @as(usize, 1) << @as(u6, @intCast(i));
-                const factor = self.r[i].mul(F.one().sub(self.r[i]).inverse().?);
+            // Build evaluations using Jolt's algorithm (big-endian indexing)
+            // Process variables in order: r[0], r[1], ..., r[n-1]
+            // After processing r[j], we have 2^(j+1) entries where:
+            // - bit 0 (MSB after j iterations) corresponds to r[0]
+            // - bit j (LSB after j iterations) corresponds to r[j]
+            var current_size: usize = 1;
+            for (0..n) |j| {
+                // Double the size for this variable
+                current_size *= 2;
 
-                for (0..half) |j| {
-                    result[j + half] = result[j].mul(factor);
+                // Process indices from high to low
+                var i = current_size;
+                while (i >= 2) {
+                    i -= 2;
+                    // result[i] will have r[j] = 0, result[i+1] will have r[j] = 1
+                    const scalar = result[i / 2];
+                    const r_j = self.r[j];
+                    result[i + 1] = scalar.mul(r_j);
+                    result[i] = scalar.sub(result[i + 1]); // scalar * (1 - r[j])
                 }
             }
 

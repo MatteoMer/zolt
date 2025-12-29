@@ -4,23 +4,25 @@
 
 ### Session 13 - Stage 1 Remaining Rounds Deep Dive
 
-**Status**: UniSkip passes, all sumcheck rounds pass (p(0)+p(1)=claim), but final output_claim ≠ expected.
+**Status**: UniSkip passes, output_claim now ~10% off from expected (was 2x off).
 
-**Key Finding - Multiquadratic Product of Slopes:**
-The Gruen method requires:
-- `t'(0)` = Σ eq * Az(0) * Bz(0) = sum of products at position 0
-- `t'(∞)` = Σ eq * (Az(1) - Az(0)) * (Bz(1) - Bz(0)) = product of SLOPES
+**Key Fixes Made:**
+1. **Product of slopes** - t'(∞) = (Az_g1-Az_g0)*(Bz_g1-Bz_g0), NOT t'(1)-t'(0)
+2. **Half calculation** - Use `half = padded_trace_len >> (current_round - 1)`
+3. **current_scalar multiplication** - Include split_eq.current_scalar in eq weights
+4. **r_grid indexing** - Use proper bit masking for r_grid weights
+5. **num_cycle_bound calculation** - Use `current_round - 2` for cycle rounds
 
-This is NOT `t'(1) - t'(0)` (slope of product), but the PRODUCT OF SLOPES!
+**Current Values:**
+- output_claim = 18140769771358918670484532067209660626696556827626823582670709166321366879107
+- expected = 16412818811915158821926814277636231913718869858140421597380195568348027564398
+- Ratio ~1.1 (was ~2x before)
 
-**Previous Bug:** Was computing `t_infinity = t_one - t_zero` (slope of product).
-**Fix:** Now computing `slope_az * slope_bz` (product of slopes).
-
-**Remaining Issue - Cycle Round Implementation:**
-Current cycle round implementation has fundamental bugs:
-1. Computing `(Σ eq * Az) * (Σ eq * Bz)` instead of `Σ (eq * Az * Bz)`
-2. Not properly using r_grid weights for bound challenges
-3. Splitting cycles into halves physically instead of via eq weights
+**Remaining Issue:**
+Still ~10% off. Likely causes:
+1. E_out/E_in table sizes for cycle rounds may be wrong
+2. remaining_idx calculation may be off
+3. The slope computation in multiquadratic may have subtle bugs
 
 **Jolt's Approach:**
 - Streaming window: Computes grid[j] for j ∈ {0, 1} (window positions)

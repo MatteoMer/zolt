@@ -937,19 +937,23 @@ pub fn StreamingOuterProver(comptime F: type) type {
             // Current scalar from split_eq (accumulated eq for bound variables)
             const current_scalar = self.split_eq.current_scalar;
 
-            var t_00 = F.zero(); // Sum for first half
-            var t_01 = F.zero(); // Sum for second half
-            var t_slopes = F.zero(); // Quadratic coefficient
+            // Compute sums of Az and Bz separately for each half
+            // This is needed for the multiquadratic method:
+            // t'(0) = Σ_0 eq * Az * Bz (sum over first half)
+            // t'(∞) = (Σ_1 eq * Az - Σ_0 eq * Az) * (Σ_1 eq * Bz - Σ_0 eq * Bz)
+            //       = (sum_az_1 - sum_az_0) * (sum_bz_1 - sum_bz_0)
+            //
+            // This is DIFFERENT from Σ eq * (Az_1 - Az_0) * (Bz_1 - Bz_0) !!
+
+            var t_00 = F.zero(); // Sum of products for first half
+            var sum_az_0 = F.zero(); // Sum of Az for first half
+            var sum_bz_0 = F.zero(); // Sum of Bz for first half
+            var t_01 = F.zero(); // Sum of products for second half
+            var sum_az_1 = F.zero(); // Sum of Az for second half
+            var sum_bz_1 = F.zero(); // Sum of Bz for second half
 
             // For each cycle in the first half (current_bit = 0)
             for (0..@min(half, self.cycle_witnesses.len)) |i| {
-                // The eq weight structure for cycle rounds:
-                // 1. E_out * E_in for the remaining unbound cycle variables
-                // 2. r_grid weight for the bound cycle variables
-                // 3. current_scalar for the accumulated binding
-
-                // E_out and E_in are indexed by the remaining cycle bits
-                // For cycle i in first half, remaining_idx = i >> num_unprocessed_rounds
                 const remaining_bits = if (num_cycle_bound + 1 < 32) num_cycle_bound + 1 else 31;
                 const remaining_idx = i >> @intCast(remaining_bits);
                 const out_idx = remaining_idx >> @intCast(head_in_bits);
@@ -958,14 +962,14 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 const e_in_val = if (in_idx < E_in.len) E_in[in_idx] else F.zero();
                 const eq_base = e_out_val.mul(e_in_val);
 
-                // r_grid weight: eq(r_bound, cycle_bits) for bound bits
-                // The k index is the low `num_cycle_bound` bits of cycle index
                 const k = i & k_mask;
                 const r_weight = if (k < klen) self.r_grid.get(k) else F.zero();
                 const eq_val = eq_base.mul(r_weight).mul(current_scalar);
 
                 const az_bz = self.computeCycleAzBzSeparate(&self.cycle_witnesses[i], r_stream);
                 t_00 = t_00.add(eq_val.mul(az_bz.az.mul(az_bz.bz)));
+                sum_az_0 = sum_az_0.add(eq_val.mul(az_bz.az));
+                sum_bz_0 = sum_bz_0.add(eq_val.mul(az_bz.bz));
             }
 
             // For each cycle in the second half (current_bit = 1)
@@ -981,40 +985,21 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 const e_in_val = if (in_idx < E_in.len) E_in[in_idx] else F.zero();
                 const eq_base = e_out_val.mul(e_in_val);
 
-                // r_grid weight for the second half cycle
                 const k = i & k_mask;
                 const r_weight = if (k < klen) self.r_grid.get(k) else F.zero();
                 const eq_val = eq_base.mul(r_weight).mul(current_scalar);
 
                 const az_bz = self.computeCycleAzBzSeparate(&self.cycle_witnesses[cycle_idx], r_stream);
                 t_01 = t_01.add(eq_val.mul(az_bz.az.mul(az_bz.bz)));
+                sum_az_1 = sum_az_1.add(eq_val.mul(az_bz.az));
+                sum_bz_1 = sum_bz_1.add(eq_val.mul(az_bz.bz));
             }
 
-            // Compute quadratic coefficient (slope * slope)
-            // This is Σ eq * (Az_h1 - Az_h0) * (Bz_h1 - Bz_h0) where h0 and h1 are paired cycles
-            for (0..@min(half, self.cycle_witnesses.len)) |i| {
-                const cycle_idx_1 = half + i;
-                if (cycle_idx_1 >= self.cycle_witnesses.len) continue;
-
-                const remaining_bits = if (num_cycle_bound + 1 < 32) num_cycle_bound + 1 else 31;
-                const remaining_idx = i >> @intCast(remaining_bits);
-                const out_idx = remaining_idx >> @intCast(head_in_bits);
-                const in_idx = remaining_idx & e_in_mask;
-                const e_out_val = if (out_idx < E_out.len) E_out[out_idx] else F.zero();
-                const e_in_val = if (in_idx < E_in.len) E_in[in_idx] else F.zero();
-                const eq_base = e_out_val.mul(e_in_val);
-
-                const k = i & k_mask;
-                const r_weight = if (k < klen) self.r_grid.get(k) else F.zero();
-                const eq_val = eq_base.mul(r_weight).mul(current_scalar);
-
-                const az_bz_0 = self.computeCycleAzBzSeparate(&self.cycle_witnesses[i], r_stream);
-                const az_bz_1 = self.computeCycleAzBzSeparate(&self.cycle_witnesses[cycle_idx_1], r_stream);
-
-                const az_slope = az_bz_1.az.sub(az_bz_0.az);
-                const bz_slope = az_bz_1.bz.sub(az_bz_0.bz);
-                t_slopes = t_slopes.add(eq_val.mul(az_slope.mul(bz_slope)));
-            }
+            // Compute quadratic coefficient as product of slope sums
+            // t'(∞) = (Σ_1 Az - Σ_0 Az) * (Σ_1 Bz - Σ_0 Bz)
+            const slope_az = sum_az_1.sub(sum_az_0);
+            const slope_bz = sum_bz_1.sub(sum_bz_0);
+            const t_slopes = slope_az.mul(slope_bz);
 
             // Use Gruen's method
             const previous_claim = self.current_claim;

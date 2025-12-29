@@ -1,67 +1,53 @@
 # Zolt-Jolt Compatibility TODO
 
-## Current Status: Az*Bz Mismatch (Session 20-23)
+## Current Status: Az*Bz Mismatch (Session 20-24)
 
 ### Summary
-All Stage 1 sumcheck rounds pass (p(0)+p(1) = claim). The sumcheck prover produces IDENTICAL values to Jolt:
-- ✅ UniSkip claim matches
-- ✅ Round 0 s(0), s(1) match
-- ✅ Final output_claim matches Jolt's sumcheck walk
+All Stage 1 sumcheck rounds pass (p(0)+p(1) = claim). The core issue is that the prover's `output_claim` doesn't match the verifier's `expected_output_claim`.
 
-**ROOT CAUSE**: The mismatch is between `output_claim` and `expected_output_claim`.
-
-The prover's Az*Bz at the final point is `6845670145302814045138444113000749599157896909649021689277739372381215505241`.
-The verifier's inner_sum_prod is `12743996023445103930025687297173833157935883282725550257061179867498976368827`.
-
-**Next Step**: Investigate how the MultiquadraticPolynomial projection in Jolt differs from Zolt's t_zero/t_infinity computation, and how the eq factor is being handled during the accumulation.
-
-### Session 22 Findings
-
-**Key Index Structure Issue**: Jolt uses a complex index structure in `fused_materialise_polynomials_round_zero`:
-```rust
-for (i, ...) in az.par_chunks_exact_mut(grid_size)... {
-    // grid_size = 1 << window_size
-    while j < grid_size {
-        let full_idx = grid_size * i + j;
-        let time_step_idx = full_idx >> 1;  // Cycle index
-        let selector = full_idx & 1;  // Constraint group
-    }
-    // Weight by E_out[i]
-}
-```
-
-Zolt's streaming round iterates directly over cycles, not using this index structure. This may be causing the mismatch.
-
-### Latest Test Results
-- **output_claim**: 7120341815860535077792666425421583012196152296139946730075156877231654137396
-- **expected_output_claim**: 2000541294615117218219795634222435854478303422072963760833200542270573423153
+**Key Values:**
+- `output_claim` (from sumcheck): 7120341815860535077792666425421583012196152296139946730075156877231654137396
+- `expected_output_claim` (from R1CS): 2000541294615117218219795634222435854478303422072963760833200542270573423153
 - **Ratio**: ~3.56
 
-### Verified Components (Session 21-22)
-1. ✅ Lagrange kernel computation order matches Jolt (symmetric: K(x,y) = K(y,x))
-2. ✅ split_eq initialization with tau_low is correct
-3. ✅ bind() function updates current_scalar correctly
-4. ✅ Round polynomial uses current_scalar for eq factor
-5. ✅ R1CS input claims are non-zero and reasonable
-6. ✅ Challenge ordering and reversal logic matches
-7. ✅ Prover: `lagrangeKernel(r0, tau_high)` matches Jolt's `lagrange_kernel(&r0, &tau_high)`
-8. ✅ Verifier: `lagrange_kernel(tau_high, r0)` (symmetric, so equivalent)
-9. ✅ R1CS input evaluations at r_cycle_big_endian
+### Session 24 Analysis
 
-### Suspected Root Causes
+Traced through Jolt's outer.rs vs Zolt's streaming_outer.zig in detail:
 
-1. **Az/Bz computation point mismatch**
-   - Prover evaluates constraints at each cycle with Lagrange weights at r0
-   - Verifier uses R1CS input claims + rx_constr = [r_stream, r0]
-   - The full evaluation should be at (r_stream, r0, r_cycle_big_endian)
+1. **Index Structure**: Both use the same index structure for streaming round:
+   - `full_idx = (out_idx * e_in_len + in_idx) * jlen + j`
+   - `step_idx = full_idx >> 1` (cycle index)
+   - `selector = full_idx & 1` (constraint group)
 
-2. **Split eq table factorization issue**
-   - E_out and E_in tables may not be combining correctly
-   - The head_in_bits/head_out_bits split needs verification
+2. **Multiquadratic Values**: Both compute:
+   - `t_prime[0] = Σ eq * Az_g0 * Bz_g0`
+   - `t_prime[∞] = Σ eq * (Az_g1 - Az_g0) * (Bz_g1 - Bz_g0)`
 
-3. **R1CS input evaluation endianness**
-   - Zolt reverses challenges to get r_cycle_big_endian
-   - This should match Jolt's match_endianness() conversion
+3. **Lagrange Weighting**: Both use the same `lagrange_evals_r0[i]` for constraint `i`.
+
+4. **Split Eq Tables**: Both use the same head_out_bits/head_in_bits split calculation.
+
+5. **Verified Components**:
+   - ✅ Constraint group indices match (FIRST_GROUP_INDICES, SECOND_GROUP_INDICES)
+   - ✅ E_out/E_in factorization formula matches
+   - ✅ computeCubicRoundPoly formula matches gruen_poly_deg_3
+   - ✅ bind() function updates current_scalar correctly
+   - ✅ Lagrange kernel is symmetric
+
+### Suspected Root Cause
+
+The verifier's `inner_sum_prod` is computed from:
+```rust
+let z = r1cs_input_evals.to_vec();  // From opening claims
+z.push(F::one());
+az_g0 += w[i] * lc_a.dot_product(&z, z_const_col);
+```
+
+This uses the **R1CS INPUT EVALUATIONS** from the proof's opening claims, NOT the trace data directly.
+
+The prover's output_claim comes from the sumcheck over the trace, which should evaluate to the same thing at the binding point.
+
+**Theory**: The issue might be in how the opening claims are being generated. The R1CS input evaluations in the proof might not match the actual polynomial evaluations at the sumcheck point.
 
 ### Key Test Output Values
 ```
@@ -78,29 +64,42 @@ az_g1 = 216426549906097512884870143141246318749188466765897065041578903949501232
 bz_g1 = 3918541254077008785088751528944340709929299267734721029349343619431186429976
 ```
 
-### Next Debugging Steps
+### Next Steps
 
-1. **Add debug output in Zolt prover**
-   - Print eq_val for each cycle during streaming round
-   - Print t_zero and t_infinity before cubic poly construction
+1. **Verify Opening Claims Generation**
+   - Check how Zolt computes the R1CS input evaluations
+   - Ensure they're evaluated at the correct point (r_cycle_big_endian)
+
+2. **Add Debug Output in Zolt**
    - Print current_scalar at each round
+   - Print t_zero, t_infinity before computeCubicRoundPoly
+   - Print final Az, Bz values at the bound point
 
-2. **Compare Lagrange weights**
-   - Print Zolt's lagrange_evals_r0[i] for i=0..9
-   - Compare with Jolt's w[i] values from test output
+3. **Compare eq Factor Accumulation**
+   - Verify current_scalar after all bindings equals L(tau_high, r0) * eq(tau_low, r_all)
 
-3. **Trace Az/Bz computation**
-   - Verify constraint evaluation matches Jolt's dot_product
-   - Check if Lagrange weights are applied correctly
+### Formula Reference
 
-### Expected Output Claim Formula
+**Expected Output Claim** (from verifier):
 ```
-expected = tau_high_bound_r0 * tau_bound_r_tail * inner_sum_prod
-         = L(τ_high, r0) * eq(τ_low, r_tail_reversed) * Az_final * Bz_final
+expected = L(tau_high, r0) * eq(tau_low, r_tail_reversed) * Az_final * Bz_final
 
-Az_final = az_g0 + r_stream * (az_g1 - az_g0)
-Bz_final = bz_g0 + r_stream * (bz_g1 - bz_g0)
-inner_sum_prod = Az_final * Bz_final
+Where:
+- r_tail_reversed = [r_n, ..., r_1, r_stream]
+- rx_constr = [r_stream, r0]
+- Az_final = az_g0 + r_stream * (az_g1 - az_g0)
+- Bz_final = bz_g0 + r_stream * (bz_g1 - bz_g0)
+- az_gX = Σ_i L_i(r0) * lc_a[i].dot_product(z)
+- z = [r1cs_input_evals..., 1]
+```
+
+**Prover Output Claim** (from sumcheck):
+```
+output_claim = current_scalar * eq(tau_curr, r_final) * q(r_final)
+
+Where current_scalar accumulates:
+- Initially: L(tau_high, r0)
+- After bind(r_i): current_scalar *= eq(tau[i], r_i)
 ```
 
 ## Test Commands

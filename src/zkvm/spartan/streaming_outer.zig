@@ -1258,3 +1258,62 @@ test "StreamingOuterProver: Lagrange basis at r0" {
 
     try testing.expect(prover.lagrange_evals_r0[4].eql(F.one()));
 }
+
+test "StreamingOuterProver: debug streaming round values" {
+    const F = BN254Scalar;
+
+    // Create witnesses with some non-trivial values to test
+    // We'll create 4 cycles (2 variables) with random-looking values
+    var witnesses: [4]constraints.R1CSCycleInputs(F) = undefined;
+    for (0..4) |t| {
+        for (0..36) |i| {
+            // Use a simple pattern that creates non-zero values
+            witnesses[t].values[i] = F.fromU64(@intCast((t + 1) * (i + 1) % 100));
+        }
+    }
+
+    // tau must have length num_cycle_vars + 2 = 4 for tau_low to have 3 elements
+    const tau = [_]F{
+        F.fromU64(1234),
+        F.fromU64(5678),
+        F.fromU64(9012),
+        F.fromU64(3456), // tau_high
+    };
+
+    var prover = try StreamingOuterProver(F).init(testing.allocator, &witnesses, &tau);
+    defer prover.deinit();
+
+    // Generate a dummy r0 and bind it
+    const r0 = F.fromU64(7777);
+    try prover.bindFirstRoundChallenge(r0, F.zero());
+
+    // Compute the remaining round poly (streaming round)
+    const poly_evals = try prover.computeRemainingRoundPoly();
+
+    // Print the evaluations for debugging
+    std.debug.print("\n=== Zolt Streaming Round Debug ===\n", .{});
+    std.debug.print("s(0) = {x}\n", .{@as([4]u64, @bitCast(poly_evals[0].limbs()))});
+    std.debug.print("s(1) = {x}\n", .{@as([4]u64, @bitCast(poly_evals[1].limbs()))});
+    std.debug.print("s(2) = {x}\n", .{@as([4]u64, @bitCast(poly_evals[2].limbs()))});
+    std.debug.print("s(3) = {x}\n", .{@as([4]u64, @bitCast(poly_evals[3].limbs()))});
+
+    // Also print the current_scalar and tau values
+    const current_scalar = prover.split_eq.current_scalar;
+    std.debug.print("current_scalar = {x}\n", .{@as([4]u64, @bitCast(current_scalar.limbs()))});
+    std.debug.print("tau[last] = {x}\n", .{@as([4]u64, @bitCast(prover.split_eq.tau[prover.split_eq.current_index - 1].limbs()))});
+
+    // Verify claim = s(0) + s(1)
+    const claim = poly_evals[0].add(poly_evals[1]);
+    std.debug.print("claim = s(0) + s(1) = {x}\n", .{@as([4]u64, @bitCast(claim.limbs()))});
+
+    // Basic sanity: poly_evals should be non-trivial with these inputs
+    // (Just verify something was computed, not that it's all zeros)
+    var any_nonzero = false;
+    for (poly_evals) |v| {
+        if (!v.eql(F.zero())) {
+            any_nonzero = true;
+            break;
+        }
+    }
+    try testing.expect(any_nonzero);
+}

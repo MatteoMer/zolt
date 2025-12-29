@@ -244,11 +244,16 @@ pub fn Blake2bTranscript(comptime F: type) type {
             const high: u64 = @truncate(val_masked >> 64);
 
             // Store in Jolt-compatible format: [0, 0, low, high]
-            // This matches Jolt's MontU128Challenge internal representation.
             //
-            // When used with mulHiBigIntU128, this represents the value (low + high * 2^64).
-            // The special multiplication function extracts limbs[2] and limbs[3]
-            // and performs optimized Montgomery multiplication.
+            // This matches Jolt's MontU128Challenge internal representation.
+            // The value represented is (low * 2^128 + high * 2^192) in the BigInt.
+            //
+            // IMPORTANT: This is NOT Montgomery form. When used in Montgomery
+            // multiplication with a Montgomery-form operand, the result is:
+            // REDC(raw * mont) = raw_value * mont_value mod p
+            //
+            // This means the result is in standard form, not Montgomery form.
+            // Jolt handles this with special trait implementations.
             return F{ .limbs = .{ 0, 0, low, high } };
         }
 

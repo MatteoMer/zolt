@@ -83,37 +83,37 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
         /// Initialize the streaming outer prover (without scaling)
         ///
-        /// tau_low: Challenge vector of length (num_cycle_vars + 1)
-        ///          - tau_low[0..num_cycle_vars]: cycle variable challenges
-        ///          - tau_low[num_cycle_vars]: streaming round challenge
+        /// tau: Full challenge vector of length (num_cycle_vars + 2)
+        ///      - tau[0..m]: w_out (for E_out tables), where m = tau.len / 2
+        ///      - tau[m..tau.len-1]: w_in (for E_in tables)
+        ///      - tau[tau.len-1]: w_last (skipped, handled by UniSkip Lagrange kernel)
         ///
-        /// Note: This is tau_low = tau[..tau.len()-1], excluding tau_high.
-        /// tau_high is handled by the UniSkip Lagrange kernel.
+        /// IMPORTANT: Pass FULL tau, not tau_low! The split uses m = tau.len / 2
+        /// which differs between length 11 and 12. Jolt uses full tau.
         pub fn init(
             allocator: Allocator,
             cycle_witnesses: []const constraints.R1CSCycleInputs(F),
-            tau_low: []const F,
+            tau: []const F,
         ) !Self {
-            return initWithScaling(allocator, cycle_witnesses, tau_low, null);
+            return initWithScaling(allocator, cycle_witnesses, tau, null);
         }
 
         /// Initialize the streaming outer prover with Lagrange kernel scaling
         ///
-        /// tau_low: Challenge vector of length (num_cycle_vars + 1)
-        ///          - tau_low[0..num_cycle_vars]: cycle variable challenges
-        ///          - tau_low[num_cycle_vars]: streaming round challenge
+        /// tau: Full challenge vector of length (num_cycle_vars + 2)
+        ///      - tau[0..m]: w_out (for E_out tables), where m = tau.len / 2
+        ///      - tau[m..tau.len-1]: w_in (for E_in tables)
+        ///      - tau[tau.len-1]: w_last (skipped, handled separately)
         ///
         /// lagrange_tau_r0: The Lagrange kernel L(r0, tau_high) from UniSkip
         ///                  This is multiplied into all eq evaluations.
         ///
-        /// In Jolt, the full eq factorization is:
-        ///   eq(tau, r) = L(tau_high, r0) * eq(tau_low, r_tail)
-        ///
-        /// where r = (r0, r_tail) and tau = (tau_low, tau_high).
+        /// IMPORTANT: Pass FULL tau, not tau_low! The split uses m = tau.len / 2
+        /// which differs between length 11 and 12. Jolt uses full tau.
         pub fn initWithScaling(
             allocator: Allocator,
             cycle_witnesses: []const constraints.R1CSCycleInputs(F),
-            tau_low: []const F,
+            tau: []const F,
             lagrange_tau_r0: ?F,
         ) !Self {
             const num_cycles = cycle_witnesses.len;
@@ -125,10 +125,12 @@ pub fn StreamingOuterProver(comptime F: type) type {
             const padded_len = nextPowerOfTwo(num_cycles);
             const num_cycle_vars = std.math.log2_int(usize, padded_len);
 
-            // tau_low should have length = num_cycle_vars + 1
-            // - First num_cycle_vars elements are cycle variable challenges
-            // - Last element is the streaming round challenge
-            const split_eq = try GruenSplitEqPolynomial(F).initWithScaling(allocator, tau_low, lagrange_tau_r0);
+            // Pass full tau to split_eq - it internally handles the split:
+            // m = tau.len / 2
+            // w_out = tau[0..m]
+            // w_in = tau[m..tau.len-1]
+            // w_last = tau[tau.len-1] (skipped)
+            const split_eq = try GruenSplitEqPolynomial(F).initWithScaling(allocator, tau, lagrange_tau_r0);
 
             // Initialize r_grid for tracking bound challenge weights
             // Capacity = padded_len (maximum number of cycles)
@@ -1327,12 +1329,13 @@ test "StreamingOuterProver: debug streaming round values" {
         }
     }
 
-    // tau must have length num_cycle_vars + 2 = 4 for tau_low to have 3 elements
+    // tau must have length num_cycle_vars + 2 = 4 for 4 cycles (num_cycle_vars=2)
+    // m = 4/2 = 2, so w_out = tau[0..2], w_in = tau[2..3], w_last = tau[3]
     const tau = [_]F{
         F.fromU64(1234),
         F.fromU64(5678),
         F.fromU64(9012),
-        F.fromU64(3456), // tau_high
+        F.fromU64(3456), // tau_high (w_last, skipped in split_eq)
     };
 
     var prover = try StreamingOuterProver(F).init(testing.allocator, &witnesses, &tau);

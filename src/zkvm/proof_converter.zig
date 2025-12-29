@@ -355,17 +355,16 @@ pub fn ProofConverter(comptime F: type) type {
             const LagrangePoly = r1cs.univariate_skip.LagrangePolynomial(F);
             var challenges: std.ArrayListUnmanaged(F) = .{};
 
-            // Extract tau_low and tau_high
+            // Extract tau_high for the UniSkip Lagrange kernel
             // tau has length num_rows_bits = num_cycle_vars + 2
-            // tau_high is the last element (for UniSkip Lagrange kernel)
-            // tau_low is everything else (for the streaming sumcheck)
+            // tau_high is the last element (used for Lagrange kernel)
+            // Full tau is passed to split_eq (it handles the split internally)
             if (tau.len < 2) {
                 const num_rounds = 1 + std.math.log2_int(usize, @max(1, cycle_witnesses.len));
                 try self.generateZeroSumcheckProof(proof, num_rounds, 3);
                 return Stage1Result{ .challenges = challenges, .r0 = F.zero(), .uni_skip_claim = F.zero(), .allocator = self.allocator };
             }
             const tau_high = tau[tau.len - 1];
-            const tau_low = tau[0 .. tau.len - 1];
 
             // The first round was already processed by UniSkip
             // Append the UniSkip polynomial to transcript using UniPoly format:
@@ -388,11 +387,14 @@ pub fn ProofConverter(comptime F: type) type {
                 self.allocator,
             );
 
-            // Initialize the streaming prover with tau_low and Lagrange kernel scaling
+            // Initialize the streaming prover with full tau and Lagrange kernel scaling
+            // IMPORTANT: Pass full tau, NOT tau_low! The split_eq internally handles the split
+            // using m = tau.len / 2, which differs for length 11 vs 12.
+            // Jolt passes full tau to GruenSplitEqPolynomial::new_with_scaling.
             var outer_prover = StreamingOuterProver.initWithScaling(
                 self.allocator,
                 cycle_witnesses,
-                tau_low,
+                tau,  // Full tau, not tau_low
                 lagrange_tau_r0,
             ) catch {
                 // Fallback to zero proofs if initialization fails

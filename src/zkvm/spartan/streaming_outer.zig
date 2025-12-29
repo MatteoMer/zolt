@@ -128,11 +128,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
             // tau_low should have length = num_cycle_vars + 1
             // - First num_cycle_vars elements are cycle variable challenges
             // - Last element is the streaming round challenge
-            //
-            // We pass original_tau_len = tau_low.len + 1 because the full tau includes tau_high.
-            // This is used to compute the split point m = original_tau_len / 2 for E_out/E_in tables.
-            const original_tau_len = tau_low.len + 1;
-            const split_eq = try GruenSplitEqPolynomial(F).initWithScaling(allocator, tau_low, original_tau_len, lagrange_tau_r0);
+            const split_eq = try GruenSplitEqPolynomial(F).initWithScaling(allocator, tau_low, lagrange_tau_r0);
 
             // Initialize r_grid for tracking bound challenge weights
             // Capacity = padded_len (maximum number of cycles)

@@ -38,8 +38,6 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
         num_x_out: usize,
         /// Number of inner variables (group bits + constraint bits)
         num_x_in: usize,
-        /// Split point m = original_tau_len / 2 (for use in getWindowEqTables)
-        split_point_m: usize,
         /// Allocator
         allocator: Allocator,
 
@@ -48,8 +46,8 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
         /// τ is split into:
         /// - τ_in: first num_x_in variables (constraint group)
         /// - τ_out: remaining variables (cycle index)
-        pub fn init(allocator: Allocator, tau: []const F, original_tau_len: usize) !Self {
-            return initWithScaling(allocator, tau, original_tau_len, null);
+        pub fn init(allocator: Allocator, tau: []const F) !Self {
+            return initWithScaling(allocator, tau, null);
         }
 
         /// Initialize with challenge vector τ and an optional initial scaling factor
@@ -60,23 +58,19 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
         /// - E_out_vec contains eq tables for w_out
         /// - E_in_vec contains eq tables for w_in
         ///
-        /// IMPORTANT: tau should be tau_low (excluding tau_high).
-        /// The original_tau_len parameter specifies the full tau length (tau_low.len + 1)
-        /// to correctly compute the split point m = original_tau_len / 2.
-        ///
         /// The scaling_factor (e.g., Lagrange kernel from UniSkip) becomes the
         /// initial current_scalar and is multiplied into all eq evaluations.
-        pub fn initWithScaling(allocator: Allocator, tau: []const F, original_tau_len: usize, scaling_factor: ?F) !Self {
-            // Match Jolt's LowToHigh structure:
-            // In Jolt, w is the full tau (length N), and the split is:
-            //   m = w.len() / 2 = N / 2
-            //   w_out = w[0..m]
-            //   w_in = w[m..N-1] (excludes w_last)
+        pub fn initWithScaling(allocator: Allocator, tau: []const F, scaling_factor: ?F) !Self {
+            // Match Jolt's LowToHigh structure exactly:
+            //   let m = w.len() / 2;
+            //   let (_w_last, wprime) = w.split_last().unwrap();
+            //   let (w_out, w_in) = wprime.split_at(m);
             //
-            // Here, tau is tau_low (length N-1), and we're given original_tau_len = N.
-            // So m = original_tau_len / 2, and we build:
-            //   E_out from tau[0..m]
-            //   E_in from tau[m..tau.len] = tau[m..N-1]
+            // So:
+            //   m = tau.len / 2
+            //   w_last = tau[tau.len - 1] (skipped from E tables)
+            //   w_out = tau[0..m]
+            //   w_in = tau[m..tau.len - 1]
 
             if (tau.len == 0) {
                 return Self{
@@ -87,15 +81,16 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
                     .E_in_vec = .{},
                     .num_x_out = 0,
                     .num_x_in = 0,
-                    .split_point_m = 0,
                     .allocator = allocator,
                 };
             }
 
-            // Split like Jolt: m = original_tau_len/2 (NOT tau.len/2!)
-            const m = original_tau_len / 2;
+            // Split like Jolt: m = tau.len / 2
+            // Jolt does: let m = w.len() / 2; let (_w_last, wprime) = w.split_last(); let (w_out, w_in) = wprime.split_at(m);
+            // So w_out = tau[0..m], w_in = tau[m..tau.len-1], w_last = tau[tau.len-1] is skipped
+            const m = tau.len / 2;
             const num_x_out = m; // First half: tau[0..m]
-            const num_x_in_actual = if (tau.len > m) tau.len - m else 0; // Second half: tau[m..tau.len]
+            const num_x_in_actual = if (tau.len > 1) @min(tau.len - 1 - m, tau.len - 1) else 0; // Second half: tau[m..tau.len-1]
 
             // Copy tau
             const tau_copy = try allocator.alloc(F, tau.len);
@@ -183,7 +178,6 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
                 .E_in_vec = E_in_vec,
                 .num_x_out = num_x_out,
                 .num_x_in = num_x_in_actual,
-                .split_point_m = m,
                 .allocator = allocator,
             };
         }
@@ -277,9 +271,9 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
         /// For the streaming round with 1024 cycles (10 vars) and window_size=1:
         /// - num_unbound = current_index = 11 (tau_low length)
         /// - head_len = 11 - 1 = 10
-        /// - m = original_tau_len / 2 = 12 / 2 = 6 (stored in split_point_m)
-        /// - head_out_bits = min(10, 6) = 6  → E_out has 64 entries
-        /// - head_in_bits = 10 - 6 = 4       → E_in has 16 entries
+        /// - m = tau.len / 2 = 11 / 2 = 5
+        /// - head_out_bits = min(10, 5) = 5  → E_out has 32 entries
+        /// - head_in_bits = 10 - 5 = 5       → E_in has 32 entries
         pub fn getWindowEqTables(
             self: *const Self,
             _: usize, // num_unbound_vars - ignored, use current_index like Jolt
@@ -291,9 +285,9 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
             const actual_window = @min(window_size, num_unbound);
             const head_len = num_unbound -| actual_window;
 
-            // Split into out and in parts using the stored split point m
-            // m = original_tau_len / 2, which matches Jolt's calculation
-            const m = self.split_point_m;
+            // Split into out and in parts using m = tau.len / 2
+            // This matches Jolt's calculation: m = w.len() / 2
+            const m = self.tau.len / 2;
             const head_out_bits = @min(head_len, m);
             const head_in_bits = head_len -| head_out_bits;
 
@@ -416,39 +410,39 @@ const BN254Scalar = @import("../field/mod.zig").BN254Scalar;
 test "GruenSplitEqPolynomial: initialization" {
     const F = BN254Scalar;
 
-    // tau_low = [τ_0, τ_1, τ_2] (length 3, tau_high removed)
-    // original_tau_len = 4 (full tau had 4 elements)
-    // Split: m = 4/2 = 2, w_out = tau[0..2], w_in = tau[2..3]
+    // tau = [τ_0, τ_1, τ_2] (length 3)
+    // Split: m = 3/2 = 1
+    // w_last = tau[2] (skipped)
+    // w_out = tau[0..1] = [τ_0]
+    // w_in = tau[1..2] = [τ_1]
     const tau = [_]F{ F.fromU64(2), F.fromU64(3), F.fromU64(5) };
-    const original_tau_len: usize = 4;
 
-    var split_eq = try GruenSplitEqPolynomial(F).init(testing.allocator, &tau, original_tau_len);
+    var split_eq = try GruenSplitEqPolynomial(F).init(testing.allocator, &tau);
     defer split_eq.deinit();
 
     try testing.expectEqual(@as(usize, 3), split_eq.current_index);
     try testing.expect(split_eq.current_scalar.eql(F.one()));
 
-    // m = 4/2 = 2
-    // num_x_out = 2 (tau[0..2])
-    // num_x_in = 3 - 2 = 1 (tau[2..3])
+    // m = 3/2 = 1
+    // num_x_out = 1 (tau[0..1])
+    // num_x_in = 3 - 1 - 1 = 1 (tau[1..2])
     try testing.expectEqual(@as(usize, 1), split_eq.num_x_in);
-    try testing.expectEqual(@as(usize, 2), split_eq.num_x_out);
+    try testing.expectEqual(@as(usize, 1), split_eq.num_x_out);
 
     // Check prefix table sizes
     // E_in_vec: [0] = [1], [1] = [2] -> 2 tables
-    // E_out_vec: [0] = [1], [1] = [2], [2] = [4] -> 3 tables
+    // E_out_vec: [0] = [1], [1] = [2] -> 2 tables
     try testing.expectEqual(@as(usize, 2), split_eq.E_in_vec.items.len);
-    try testing.expectEqual(@as(usize, 3), split_eq.E_out_vec.items.len);
+    try testing.expectEqual(@as(usize, 2), split_eq.E_out_vec.items.len);
 }
 
 test "GruenSplitEqPolynomial: bind updates scalar" {
     const F = BN254Scalar;
 
-    // tau_low with length 2, original_tau_len = 3
+    // tau with length 2
     const tau = [_]F{ F.fromU64(2), F.fromU64(3) };
-    const original_tau_len: usize = 3;
 
-    var split_eq = try GruenSplitEqPolynomial(F).init(testing.allocator, &tau, original_tau_len);
+    var split_eq = try GruenSplitEqPolynomial(F).init(testing.allocator, &tau);
     defer split_eq.deinit();
 
     // Bind with challenge r = 5
@@ -466,14 +460,14 @@ test "GruenSplitEqPolynomial: bind updates scalar" {
 test "GruenSplitEqPolynomial: prefix tables correctness" {
     const F = BN254Scalar;
 
-    // Use tau_low = [2, 3, 5] with original_tau_len = 4
-    // m = 4/2 = 2
-    // w_out = tau[0..2] = [2, 3]
-    // w_in = tau[2..3] = [5]
+    // tau = [2, 3, 5] with length 3
+    // m = 3/2 = 1
+    // w_last = tau[2] = 5 (skipped)
+    // w_out = tau[0..1] = [2]
+    // w_in = tau[1..2] = [3]
     const tau = [_]F{ F.fromU64(2), F.fromU64(3), F.fromU64(5) };
-    const original_tau_len: usize = 4;
 
-    var split_eq = try GruenSplitEqPolynomial(F).init(testing.allocator, &tau, original_tau_len);
+    var split_eq = try GruenSplitEqPolynomial(F).init(testing.allocator, &tau);
     defer split_eq.deinit();
 
     // E_out_vec[1] should have 2 entries for tau[0] = 2
@@ -486,12 +480,12 @@ test "GruenSplitEqPolynomial: prefix tables correctness" {
     try testing.expect(E_out_1[0].eql(expected_e_out_0));
     try testing.expect(E_out_1[1].eql(expected_e_out_1));
 
-    // E_in_vec[1] should have 2 entries for tau[2] = 5 (since m=2, w_in starts at tau[2])
+    // E_in_vec[1] should have 2 entries for tau[1] = 3 (since m=1, w_in starts at tau[1])
     const E_in_1 = split_eq.E_in_vec.items[1];
     try testing.expectEqual(@as(usize, 2), E_in_1.len);
 
-    const expected_e_in_0 = F.one().sub(F.fromU64(5)); // 1 - 5 = -4
-    const expected_e_in_1 = F.fromU64(5);
+    const expected_e_in_0 = F.one().sub(F.fromU64(3)); // 1 - 3 = -2
+    const expected_e_in_1 = F.fromU64(3);
     try testing.expect(E_in_1[0].eql(expected_e_in_0));
     try testing.expect(E_in_1[1].eql(expected_e_in_1));
 }
@@ -499,11 +493,10 @@ test "GruenSplitEqPolynomial: prefix tables correctness" {
 test "GruenSplitEqPolynomial: cubic round poly basic" {
     const F = BN254Scalar;
 
-    // tau_low with length 2, original_tau_len = 3
+    // tau with length 2
     const tau = [_]F{ F.fromU64(1), F.fromU64(2) };
-    const original_tau_len: usize = 3;
 
-    var split_eq = try GruenSplitEqPolynomial(F).init(testing.allocator, &tau, original_tau_len);
+    var split_eq = try GruenSplitEqPolynomial(F).init(testing.allocator, &tau);
     defer split_eq.deinit();
 
     // Compute a cubic round poly with some test values
@@ -521,13 +514,14 @@ test "GruenSplitEqPolynomial: cubic round poly basic" {
 test "GruenSplitEqPolynomial: big-endian eq table correctness" {
     const F = BN254Scalar;
 
-    // tau_low = [τ_0, τ_1, τ_2, τ_3] with original_tau_len = 5
-    // m = 5/2 = 2, so E_out uses tau[0..2] and E_in uses tau[2..4]
+    // tau = [τ_0, τ_1, τ_2, τ_3] with length 4
+    // m = 4/2 = 2
+    // w_last = tau[3] = 11 (skipped)
+    // E_out uses tau[0..2] = [3, 5] and E_in uses tau[2..3] = [7]
     // getFullEqTable combines all unbound variables
     const tau = [_]F{ F.fromU64(3), F.fromU64(5), F.fromU64(7), F.fromU64(11) };
-    const original_tau_len: usize = 5;
 
-    var split_eq = try GruenSplitEqPolynomial(F).init(testing.allocator, &tau, original_tau_len);
+    var split_eq = try GruenSplitEqPolynomial(F).init(testing.allocator, &tau);
     defer split_eq.deinit();
 
     // Get the full eq table (should have 16 entries since current_index = 4)

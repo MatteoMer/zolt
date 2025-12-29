@@ -9,7 +9,7 @@
 4. **Commitment Scheme** - Dory with Jolt-compatible SRS
 5. **Verifier Preprocessing Export** - DoryVerifierSetup exports correctly
 
-### Stage 1 Fixes (Sessions 11-14+)
+### Stage 1 Fixes (Sessions 11-15+)
 6. **Lagrange Interpolation Bug** - Fixed dead code corrupting basis array
 7. **UniSkip Verification** - Domain sum check passes
 8. **UnivariateSkip Claim** - Correctly set to uni_poly.evaluate(r0)
@@ -33,50 +33,52 @@
 26. **r_grid HalfSplitSchedule** - Fixed streaming/linear phase split
 27. **Dory MSM length fixes** - Proper padding for row_commitments
 28. **Jolt Index Structure** - Use full_idx = x_out|x_in|x_val|r_idx, step_idx = full_idx >> 1
+29. **Selector from full_idx** - Use selector = full_idx & 1 for constraint group in all cycle rounds
 
 ---
 
 ## Current Status: ~1.23x Discrepancy in Stage 1
 
-### Session 7 Progress (December 29, 2024)
+### Session 15 Progress (December 29, 2024)
 
-**Major Improvement:**
-- Fixed cycle round index structure to match Jolt's linear phase
-- Reduced discrepancy from ~28x to ~1.23x
+**Values:**
 - output_claim: 15155108253109715956971809974428807981154511443156768969051245367813784134214
 - expected:     18643585735450861043207165215350408775243828862234148101070816349947522058550
-- Ratio: 0.81 (or 1.23x difference)
+- Ratio: 0.813 (output / expected)
 
-**Key Insight Applied:**
-In Jolt's linear phase, the full index structure is:
-```
-full_idx = x_out << (in_bits + window + r_bits) | x_in << (window + r_bits) | x_val << r_bits | r_idx
-step_idx = full_idx >> 1
-selector = full_idx & 1
-```
+**Session 15 Fixes:**
+1. Fixed selector usage - now uses `full_idx & 1` instead of r_stream in cycle rounds
+2. Added `computeCycleAzBzForGroup` for selector-based constraint group evaluation
+3. Fixed switch_over calculation to use `num_rounds / 2` matching Jolt's halfway
 
-The constraint group selector is ALWAYS the LSB of full_idx, even in cycle rounds.
+**Verified Working:**
+- ExpandingTable update logic matches Jolt exactly
+- GruenSplitEqPolynomial bind() formula matches Jolt
+- eq table factorization (E_out, E_in) split matches Jolt
+- Challenge derivation matches Jolt
 
-**Remaining Issues:**
-1. The ~1.23x ratio suggests there's still a weighting or binding issue
-2. Possible causes:
-   - Wrong r_grid initialization or update sequence
-   - Incorrect binding order in split_eq
-   - Streaming round (round 1) might need the same index structure
+**Remaining Hypotheses:**
+1. Streaming round (round 1) computation may have a bug
+2. Something in the multiquadratic t_zero/t_infinity calculation
+3. Issue in computeCubicRoundPoly's quadratic reconstruction
+4. Window sizing or index calculation off by one somewhere
 
-### Next Steps
+### Next Investigation Steps
 
-1. Check if streaming round should also use full_idx structure
-2. Verify r_grid update timing matches Jolt's HalfSplitSchedule
-3. Compare individual round claims to pinpoint where divergence starts
+1. Add debug logging to compare per-round claims between Zolt and Jolt
+2. Compare t_zero and t_infinity values at each round
+3. Verify the streaming round uses correct index structure
+4. Check if there's an issue with how challenges are ordered
 
 ---
 
 ## Test Commands
 
 ```bash
+# Run Zolt tests (all 632)
+zig build test --summary all
+
 # Generate Jolt-format proof
-cd /Users/matteo/projects/zolt
 zig build -Doptimize=ReleaseFast
 ./zig-out/bin/zolt prove examples/sum.elf --jolt-format -o /tmp/zolt_proof_dory.bin
 

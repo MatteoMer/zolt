@@ -243,18 +243,17 @@ pub fn Blake2bTranscript(comptime F: type) type {
             const low: u64 = @truncate(val_masked);
             const high: u64 = @truncate(val_masked >> 64);
 
-            // Store in Jolt-compatible format: [0, 0, low, high]
+            // Convert the 128-bit challenge to Montgomery form.
             //
-            // This matches Jolt's MontU128Challenge internal representation.
-            // The value represented is (low * 2^128 + high * 2^192) in the BigInt.
+            // The challenge value is (low + high * 2^64) as a 128-bit integer.
+            // We convert to Montgomery form for correct field arithmetic.
             //
-            // IMPORTANT: This is NOT Montgomery form. When used in Montgomery
-            // multiplication with a Montgomery-form operand, the result is:
-            // REDC(raw * mont) = raw_value * mont_value mod p
-            //
-            // This means the result is in standard form, not Montgomery form.
-            // Jolt handles this with special trait implementations.
-            return F{ .limbs = .{ 0, 0, low, high } };
+            // Note: Jolt stores challenges as MontU128Challenge with [0, 0, low, high]
+            // in raw form and uses special Mul<MontU128Challenge> implementations.
+            // Since Zolt uses standard Montgomery multiplication everywhere,
+            // we convert to Montgomery form immediately.
+            const raw = F{ .limbs = .{ low, high, 0, 0 } };
+            return raw.toMontgomery();
         }
 
         /// Get multiple challenge scalars

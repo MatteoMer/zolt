@@ -498,42 +498,22 @@ pub fn ProofConverter(comptime F: type) type {
             return result;
         }
 
-        /// Evaluate a polynomial at a 128-bit challenge point
+        /// Evaluate a polynomial at a challenge point using Horner's method.
         ///
-        /// IMPORTANT: Jolt's polynomial evaluation with MontU128Challenge works as follows:
-        /// 1. MontU128Challenge stores [0, 0, low, high] where the 128-bit value is (low + high*2^64)
-        /// 2. When converted to Fr via .into() -> from_bigint_unchecked, it stores [0, 0, low, high]
-        ///    as a RAW BigInt (NOT Montgomery form)
-        /// 3. When this raw Fr is used in multiplication: Fr_raw * Fr_mont = REDC(raw * mont)
-        ///    This correctly computes raw_value * mont_value mod p
-        /// 4. BUT the raw value interpreted from [0, 0, low, high] is NOT (low + high*2^64)!
-        ///    It's (low * 2^128 + high * 2^192) because that's how BigInt limbs work!
-        ///
-        /// So Jolt is actually evaluating poly at (low * 2^128 + high * 2^192), not (low + high*2^64).
-        ///
-        /// For Zolt to match, we need to:
-        /// 1. Store the challenge as [0, 0, low, high] (raw, not Montgomery)
-        /// 2. Use it in evaluation where Montgomery multiply with coefficients gives correct result
+        /// Both the coefficients and the challenge point should be in Montgomery form.
         fn evaluatePolyAtChallenge(coeffs: []const F, x: F) F {
             if (coeffs.len == 0) return F.zero();
 
-            // x is in Jolt format: [0, 0, low, high] representing raw BigInt value
-            // low * 2^128 + high * 2^192
-            //
-            // When we do standard Zolt Montgomery multiply: x * coeff
-            // where coeff is in Montgomery form (coeff_val * R mod p)
-            // we get: REDC(x_raw * coeff_mont) = REDC(x_raw * coeff_val * R) = x_raw * coeff_val mod p
-            //
-            // This is correct! The x is NOT in Montgomery form, but the result is.
+            // Both coeffs and x are in Montgomery form (challenges are now
+            // converted to Montgomery form in the transcript).
+            // Standard field multiplication works correctly.
 
-            // Use Horner's method with the raw x value
-            // Result will be in Montgomery form (matching Jolt's output)
+            // Use Horner's method
             var result = coeffs[coeffs.len - 1];
             var i = coeffs.len - 1;
             while (i > 0) {
                 i -= 1;
-                // result (Montgomery) * x (raw) = result_val * x_raw mod p (in Montgomery)
-                result = result.montgomeryMul(x).add(coeffs[i]);
+                result = result.mul(x).add(coeffs[i]);
             }
             return result;
         }

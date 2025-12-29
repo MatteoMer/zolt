@@ -213,49 +213,13 @@ pub fn EqPolynomial(comptime F: type) type {
             // Initialize with scaling factor (1 for no scaling)
             @memset(result, F.one());
 
-            // Ensure challenges are in Montgomery form for correct field arithmetic.
-            // Challenges from transcript may be in raw format [0, 0, low, high],
-            // which doesn't work correctly with standard Montgomery multiplication.
-            //
-            // We check if a challenge looks like a raw 128-bit value (first two limbs are 0)
-            // and convert it to proper Montgomery form if so.
-            var r_mont = try allocator.alloc(F, n);
-            defer allocator.free(r_mont);
-            for (0..n) |j| {
-                const r_j = self.r[j];
-                // Check if this looks like a raw 128-bit challenge (first two limbs are 0)
-                if (r_j.limbs[0] == 0 and r_j.limbs[1] == 0 and
-                    (r_j.limbs[2] != 0 or r_j.limbs[3] != 0))
-                {
-                    // This is likely a raw 128-bit challenge in format [0, 0, low, high]
-                    // The actual value is low * 2^128 + high * 2^192, which we need to
-                    // convert to Montgomery form by multiplying by R.
-                    //
-                    // But actually, we need to interpret it differently. The 128-bit value
-                    // is (low + high * 2^64), stored in a way that when multiplied by a
-                    // Montgomery form value gives the correct result.
-                    //
-                    // Since Jolt uses special Mul<MontU128Challenge>, we should convert
-                    // to Montgomery form. The raw value is in [0, 0, low, high] representing
-                    // value = low * 2^128 + high * 2^192 (as a BigInt).
-                    // To convert to Montgomery: multiply by R^2 (via toMontgomery).
-                    // But this gives (value * R) mod p, which is Montgomery form.
-                    //
-                    // Actually, we want the challenge VALUE (low + high * 2^64) in Montgomery form.
-                    // So we need to create [low, high, 0, 0] (the actual value) and convert.
-                    const raw_val = F{ .limbs = .{ r_j.limbs[2], r_j.limbs[3], 0, 0 } };
-                    r_mont[j] = raw_val.toMontgomery();
-                } else {
-                    // Already in Montgomery form or a regular value
-                    r_mont[j] = r_j;
-                }
-            }
-
             // Build evaluations using Jolt's algorithm (big-endian indexing)
             // Process variables in order: r[0], r[1], ..., r[n-1]
             // After processing r[j], we have 2^(j+1) entries where:
             // - bit 0 (MSB after j iterations) corresponds to r[0]
             // - bit j (LSB after j iterations) corresponds to r[j]
+            //
+            // All challenges are expected to be in Montgomery form.
             var current_size: usize = 1;
             for (0..n) |j| {
                 // Double the size for this variable
@@ -267,7 +231,7 @@ pub fn EqPolynomial(comptime F: type) type {
                     i -= 2;
                     // result[i] will have r[j] = 0, result[i+1] will have r[j] = 1
                     const scalar = result[i / 2];
-                    const r_j = r_mont[j]; // Use Montgomery form challenge
+                    const r_j = self.r[j];
                     result[i + 1] = scalar.mul(r_j);
                     result[i] = scalar.sub(result[i + 1]); // scalar * (1 - r[j])
                 }

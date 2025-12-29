@@ -2,7 +2,7 @@
 
 ## Current Status (December 29, 2024)
 
-### Session 15 - Investigating 1.23x Discrepancy
+### Session 15 - Investigating 1.23x Discrepancy (Continued)
 
 **Status**: UniSkip passes. Stage 1 output_claim is ~1.23x off from expected.
 
@@ -10,55 +10,47 @@
 - output_claim = 15155108253109715956971809974428807981154511443156768969051245367813784134214
 - expected = 18643585735450861043207165215350408775243828862234148101070816349947522058550
 - Ratio: 0.813 (about 1.23x)
+- Missing fraction: ~18.7% ≈ 3/16
 
-**Analysis:**
-The expected output claim formula is:
-```
-expected = tau_high_bound_r0 * tau_bound_r_tail * inner_sum_prod
-```
+**Deep Analysis Performed:**
 
-Where:
-- `tau_high_bound_r0 = L(tau_high, r0)` - Lagrange kernel from UniSkip
-- `tau_bound_r_tail = eq(tau_low, r_tail_reversed)` - eq polynomial at bound point
-- `inner_sum_prod = az_final * bz_final` - R1CS product at evaluation point
+1. **ExpandingTable**: Verified update logic matches Jolt exactly
+   - LowToHigh: `values[i] = (1-r)*old`, `values[i+len] = r*old`
 
-**Key Insights from Investigation:**
+2. **GruenSplitEqPolynomial**:
+   - initWithScaling matches Jolt's split: m=len/2, E_out for first half, E_in for second
+   - bind() formula matches: `eq(τ, r) = 1 - τ - r + 2*τ*r`
 
-1. **Round Count**: `numRounds() = 1 + num_cycle_vars = 11` for 1024 cycles
-   - The proof_converter loop runs 11 iterations, which is correct
-   - HalfSplitSchedule switch-over at round 5 (streaming: 0-4, linear: 5-10)
+3. **Index Structure in Streaming Round**:
+   - Jolt: `full_idx = offset + j*klen + k`, `step_idx = full_idx >> 1`, `selector = full_idx & 1`
+   - For first streaming window: `klen=1`, `jlen=2`, so `step_idx = i`, `selector = j`
+   - Our iteration: directly over cycles `i`, computing both groups
 
-2. **r_grid Updates**: Only during streaming phase (first 5 rounds)
-   - Streaming rounds update r_grid via `r_grid.update(r_j)`
-   - Linear rounds do NOT update r_grid
+4. **E_active_for_window**: For window_size=1, returns [1] (no-op)
 
-3. **Eq Polynomial Binding**: Matches Jolt's LowToHigh order
-   - `current_scalar *= eq(tau[current_index-1], r)` for each challenge
-   - Final value equals `EqPolynomial::mle(tau_low, r_tail_reversed)`
+5. **Eq Table Factorization**:
+   - For tau_low.len=11: E_out has 32 entries (5 bits), E_in has 32 entries (5 bits)
+   - Total: 32*32 = 1024 = padded_trace_len ✓
 
-4. **The 0.813 ratio** doesn't correspond to a simple missing factor
-   - Not tau_high_bound_r0, tau_bound_r_tail, or inner_sum_prod alone
-   - Suggests the error is in how the sumcheck accumulates values
+6. **project_to_first_variable**: For window_size=1, just returns evals[0] or evals[2]
 
-**Hypothesis:**
-The issue might be in how we compute `t_zero` and `t_infinity` during cycle rounds.
-Specifically, the index structure `full_idx >> 1` for step_idx might be off.
+**What's Been Ruled Out:**
+- ExpandingTable update formula
+- eq table construction (E_out, E_in split)
+- bind() formula for current_scalar
+- Iteration ranges (0..1023 for 1024 cycles)
+- Index mapping (out_idx = i/32, in_idx = i%32)
+- switch_over calculation
 
-**Next Steps:**
-1. Add debug output to compare per-round claims between Zolt and Jolt
-2. Verify the r_grid values match at each round
-3. Check if the streaming round computation is correct
+**Remaining Mystery:**
+The ratio 0.813 ≈ 13/16 suggests we're computing 13/16 of the expected sum.
+Could indicate:
+- Some cycles being skipped?
+- Some terms being computed with wrong weights?
+- Off-by-one in a subtle place?
 
----
-
-### Session 14 - Stage 1 Remaining Rounds - Current_scalar Fix
-
-**Status**: UniSkip passes. Stage 1 output_claim still ~10x off from expected.
-
-**Key Fixes Made This Session:**
-1. **Multiquadratic t'(infinity) fix**: Changed from `(sum slope_Az) * (sum slope_Bz)` to `sum (slope_Az * slope_Bz)` (sum of slope PRODUCTS, not product of slope sums)
-2. **current_scalar fix**: Removed `current_scalar` multiplication from t' computation. It should ONLY be applied in `computeCubicRoundPoly` when computing the linear l(X) polynomial. This matches Jolt's approach where `E_active_for_window` excludes `current_scalar`.
-3. **r_grid scope**: Investigated whether r_grid should be updated for streaming round. Currently updating for all rounds.
+**Next Investigation:**
+Add debug output to compare per-round values between Zolt and Jolt.
 
 ---
 

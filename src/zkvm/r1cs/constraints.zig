@@ -32,45 +32,37 @@ const tracer = @import("../../tracer/mod.zig");
 const CircuitFlags = instruction.CircuitFlags;
 
 /// Index into the witness vector for R1CS inputs
+///
+/// IMPORTANT: This order MUST match Jolt's ALL_R1CS_INPUTS array in inputs.rs
+/// The order is critical for correct R1CS evaluation and claim matching.
+///
+/// Reference: jolt-core/src/zkvm/r1cs/inputs.rs
 pub const R1CSInputIndex = enum(u8) {
-    // Instruction inputs (0-2)
+    // Matches Jolt's ALL_R1CS_INPUTS order exactly:
     LeftInstructionInput = 0,
     RightInstructionInput = 1,
     Product = 2,
-
-    // Lookup operands (3-5)
-    LeftLookupOperand = 3,
-    RightLookupOperand = 4,
-    LookupOutput = 5,
-
-    // Register values (6-8)
-    Rs1Value = 6,
-    Rs2Value = 7,
-    RdWriteValue = 8,
-
-    // RAM access (9-11)
+    WriteLookupOutputToRD = 3,
+    WritePCtoRD = 4,
+    ShouldBranch = 5,
+    PC = 6,
+    UnexpandedPC = 7,
+    Imm = 8,
     RamAddress = 9,
-    RamReadValue = 10,
-    RamWriteValue = 11,
-
-    // PC values (12-15)
-    PC = 12,
-    NextPC = 13,
-    UnexpandedPC = 14,
-    NextUnexpandedPC = 15,
-
-    // Immediate (16)
-    Imm = 16,
-
-    // Derived flags (17-22)
-    WriteLookupOutputToRD = 17,
-    WritePCtoRD = 18,
-    ShouldBranch = 19,
-    ShouldJump = 20,
-    NextIsVirtual = 21,
-    NextIsFirstInSequence = 22,
-
-    // Circuit flags (23-35)
+    Rs1Value = 10,
+    Rs2Value = 11,
+    RdWriteValue = 12,
+    RamReadValue = 13,
+    RamWriteValue = 14,
+    LeftLookupOperand = 15,
+    RightLookupOperand = 16,
+    NextUnexpandedPC = 17,
+    NextPC = 18,
+    NextIsVirtual = 19,
+    NextIsFirstInSequence = 20,
+    LookupOutput = 21,
+    ShouldJump = 22,
+    // OpFlags in order matching CircuitFlags enum
     FlagAddOperands = 23,
     FlagSubtractOperands = 24,
     FlagMultiplyOperands = 25,

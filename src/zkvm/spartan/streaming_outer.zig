@@ -630,22 +630,26 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 // But we also need to consider that cycle_idx relates to r_grid_idx
                 // via the bound challenges.
 
-                // For cycle round j (j >= 2), we've bound (j-1) challenges
-                // r_grid has 2^(j-1) entries
-                // Each cycle's weight in the sum depends on its lower (j-1) bits
+                // For cycle round j (j >= 2), we've bound (j-2) cycle challenges
+                // Round 1 = streaming (constraint group)
+                // Round 2 = cycle bit 0 (first cycle challenge)
+                // Round k (k >= 2) = cycle bit (k-2)
+                //
+                // At round k, r_grid has 2^(k-2) entries (for k >= 2)
+                // At round 2, r_grid has 1 entry (no cycle challenges bound yet)
 
-                const num_bound = self.current_round - 1; // Number of bound cycle challenges
-                const r_grid_mask = (@as(usize, 1) << @intCast(num_bound)) - 1;
+                const num_cycle_bound = if (self.current_round >= 2) self.current_round - 2 else 0;
+                const r_grid_mask = if (num_cycle_bound > 0) (@as(usize, 1) << @intCast(num_cycle_bound)) - 1 else 0;
 
-                // Current bit position we're summing over
-                const current_bit_pos = num_bound; // The next unbound bit
+                // Current cycle bit position we're summing over
+                const current_bit_pos = num_cycle_bound;
 
                 var sum_prod_0 = F.zero();
                 var sum_prod_1 = F.zero();
 
                 for (0..@min(self.padded_trace_len, self.cycle_witnesses.len)) |cycle_idx| {
                     // Get eq weight from split_eq (based on cycle position in remaining vars)
-                    const remaining_idx = cycle_idx >> @intCast(num_bound + 1);
+                    const remaining_idx = cycle_idx >> @intCast(num_cycle_bound + 1);
                     const out_idx = remaining_idx >> @intCast(head_in_bits);
                     const in_idx = remaining_idx & e_in_mask;
                     const e_out_val = if (out_idx < E_out.len) E_out[out_idx] else F.zero();

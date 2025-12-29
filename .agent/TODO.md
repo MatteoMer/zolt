@@ -27,6 +27,7 @@
 20. **ExpandingTable** - Added for incremental eq polynomial computation
 21. **Constraint Group Indices** - Fixed to match Jolt's ordering
 22. **r_grid Integration** - Added to streaming prover for bound challenge weights
+23. **Product of Slopes Fix** - t'(∞) = (Az_g1-Az_g0)*(Bz_g1-Bz_g0), NOT t'(1)-t'(0)
 
 ---
 
@@ -36,31 +37,43 @@
 - UniSkip verification passes
 - All 11 remaining sumcheck rounds pass (p(0)+p(1)=claim)
 - Challenge derivation matches between Zolt and Jolt
+- Streaming round (round 1) uses product of slopes
 
 ### What Doesn't Work ❌
 - Final output_claim ≠ expected_output_claim
 
-### Key Values
+### Latest Values (After Session 13 Fixes)
 ```
-output_claim (from sumcheck):    1974116927555899330558670899680846593837010021404266128199797046376479596381
-expected_output_claim (from R1CS): 15883159918150614947002691188000461030180166032167382519626147847666314949749
+output_claim (from sumcheck):     6342589437459870311969131907974809364188732687625165290542906571219779431047
+expected_output_claim (from R1CS): 10815232497405550102099453343964744311420855254768592892790152336464556005907
 ```
 
 ### Root Cause Analysis
 
-The sumcheck rounds are internally consistent, but polynomial evaluations at challenge points produce incorrect intermediate claims.
+The issue is likely in the **cycle rounds** (rounds 2-11). Possible causes:
 
-The issue is likely in one of:
-1. Cycle index to eq weight mapping (E_out, E_in, r_grid)
-2. How the multiquadratic t'(0) and t'(∞) values are computed
-3. Subtle difference in how Jolt structures the prover vs how Zolt implements it
+1. **r_grid weighting** - The weight computation might not match Jolt's
+2. **Cycle bit indexing** - The way cycles are split by current_bit might be wrong
+3. **eq weight factorization** - E_out/E_in tables might not be computed correctly for cycle rounds
+4. **current_scalar accumulation** - split_eq.current_scalar might not be updated properly
 
 ### Next Steps
 
-1. [ ] Add detailed debug output comparing Zolt and Jolt values at each round
-2. [ ] Trace exact cycle-to-weight mappings in both implementations
-3. [ ] Consider implementing a minimal test case with known values
-4. [ ] Verify r_grid update timing matches Jolt's r_grid.update(r_j) placement
+1. [ ] Compare r_grid values at each round between Zolt and Jolt
+2. [ ] Verify E_out/E_in table sizes match at each round
+3. [ ] Check if cycle rounds should use multiquadratic (product of slopes) like streaming round
+4. [ ] Consider implementing Jolt's LinearStage approach (materialize Az/Bz polynomials)
+
+---
+
+## Later Stages
+
+### Stage 2: Outer Product
+- Product virtualization sumcheck
+- Uses similar multiquadratic method
+
+### Stage 3-7: Various Sumchecks
+- Will need verification after Stage 1 passes
 
 ---
 

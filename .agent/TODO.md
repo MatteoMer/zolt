@@ -37,7 +37,7 @@
 30. **r0 not in challenges** - r0 should NOT be added to the challenges list
 31. **Debug test for streaming round** - Added test to inspect intermediate values
 32. **Big-Endian Eq Tables** - E_out/E_in tables now use big-endian indexing
-33. **Split Point M Fix** - Use original_tau_len/2 for split point, stored in split_point_m
+33. **Split Logic** - Simplified to match Jolt's exact split (m = tau.len/2, skip last element)
 
 ---
 
@@ -48,44 +48,43 @@
 **Current Values:**
 - output_claim: 17544243885955816008056628262847401707989885215135853123958675606975515887014
 - expected:     14636075186748817511857284373650752059613754347411376791236690874143105070933
-- Ratio: ~1.1987 (NOT exactly 6/5 in the finite field - computed as arbitrary field element)
+- Ratio: ~1.1987 (consistent across multiple runs)
 
-**Verified Matching Components (all correct):**
-1. E_out/E_in tables use big-endian (tau[0] controls MSB) ✓
-2. split_point_m = original_tau_len / 2 = 6 (for tau.len=12) ✓
-3. gruen_poly_deg_3 / computeCubicRoundPoly formula matches Jolt exactly ✓
-4. eq_eval_0, eq_eval_1 computation matches ✓
-5. q_2 and q_3 formulas match ✓
-6. inner_sum_prod = az_final * bz_final ✓
-7. tau_high_bound_r0 and tau_bound_r_tail match Jolt's formulas ✓
+**Verified Matching Components:**
+1. gruen_poly_deg_3 / computeCubicRoundPoly formula ✓
+2. eq_eval_0, eq_eval_1 computation ✓
+3. q_2 and q_3 formulas ✓
+4. inner_sum_prod = az_final * bz_final ✓
+5. tau_high_bound_r0 and tau_bound_r_tail match Jolt's formulas ✓
+6. Split logic: m = tau.len/2, w_last skipped ✓
+7. current_index = tau.len ✓
 
-**Key Jolt Formulas (verified against source):**
+**Key Insight from Jolt Code:**
 
-Expected output claim:
-```
-expected = tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod
-```
+In Jolt, for streaming round with window_size=1:
+- `num_unbound = current_index = 11` (tau_low.len)
+- `head_len = 11 - 1 = 10`
+- `m = 11 / 2 = 5`
+- `head_out_bits = min(10, 5) = 5` → E_out has 32 entries
+- `head_in_bits = 10 - 5 = 5` → E_in has 32 entries
+- Total: 32 * 32 = 1024 cycles ✓
 
-Where:
-- tau_high_bound_r0 = LagrangePolynomial::lagrange_kernel(tau_high, r0)
-- tau_bound_r_tail_reversed = EqPolynomial::mle(tau_low, sumcheck_challenges.reverse())
-- inner_sum_prod = (az_g0 + r_stream*(az_g1-az_g0)) * (bz_g0 + r_stream*(bz_g1-bz_g0))
+**Next Investigation Steps:**
 
-**Remaining Investigation Areas:**
+1. **Add debug output to streaming round**
+   - Print t_zero and t_infinity before computeCubicRoundPoly
+   - Print round polynomial coefficients
+   - Compare with Jolt's values
 
-1. **Streaming round polynomial t'(0) and t'(∞) computation**
-   - Zolt computes these directly by summing over cycles
-   - Need to verify eq weight factorization matches Jolt's iteration
+2. **Trace through claim propagation**
+   - Initial claim = uni_skip_claim
+   - Each round: new_claim = poly.evaluate(challenge)
+   - Final claim should match expected
 
-2. **Cycle-to-eq-index mapping for streaming round**
-   - For 1024 cycles with head_len=10, m=6:
-     - head_out_bits = 6, E_out has 64 entries
-     - head_in_bits = 4, E_in has 16 entries
-   - Verify: out_idx = i >> 4, in_idx = i & 0xF
-
-3. **UniSkip claim initialization**
-   - Initial claim for remaining sumcheck = uni_skip_claim = uni_poly.evaluate(r0)
-   - This should match what Jolt uses as input_claim
+3. **Check if there's an off-by-one in cycle iteration**
+   - Zolt: iterate 0..padded_trace_len
+   - Jolt: i = out_idx * e_in_len + in_idx
+   - These should be equivalent
 
 ---
 

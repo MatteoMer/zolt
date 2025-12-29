@@ -1,38 +1,34 @@
 # Zolt-Jolt Compatibility TODO
 
-## Current Status: Stage 1 Sumcheck Verification (Session 30)
+## Current Status: Stage 1 Sumcheck Verification (Session 30 continued)
 
-### Latest Findings
-Fixed tau_low extraction - now passing tau_low (not full tau) to split_eq:
-- tau_high = tau[tau.len - 1] (stored separately for Lagrange kernel)
-- tau_low = tau[0..tau.len - 1] (passed to split_eq)
-- m = tau_low.len / 2 = 5 (for tau_low.len = 11)
-- E_out has 32 entries (2^5), E_in has 32 entries (2^5)
+### Issue Summary
+The Stage 1 sumcheck output_claim is approximately 1.52x the expected_output_claim.
 
-Output claim ratio changed from ~3.14 to ~1.52:
 ```
 output_claim:          9012353217108547355521203237420571194773588078319073875630688947404723196510
 expected_output_claim: 13679333034475978057044998736602529104372847349794408879776350094438916822983
-ratio: ~1.52x
+ratio: ~1.52 (close to 3/2)
 ```
 
-### What Was Fixed This Session
-- [x] Pass tau_low to split_eq (not full tau)
-- [x] Store tau_high separately for first-round Lagrange kernel
-- [x] Update proof_converter comment to reflect internal extraction
+### Verified Correct
+- [x] tau_low extraction: tau_low = tau[0..tau.len-1]
+- [x] tau_high storage: stored separately for first-round Lagrange kernel
+- [x] Split eq initialization with m = tau_low.len / 2 = 5
+- [x] E_out and E_in both have 32 entries (2^5)
+- [x] Opening claims correctly read (LeftInstructionInput, RightInstructionInput, etc.)
+- [x] Gruen polynomial construction formula matches Jolt
+- [x] Constraint group combination: az_final = az_g0 + r_stream * (az_g1 - az_g0)
+- [x] Lagrange kernel is symmetric: lagrange_kernel(x, y) = lagrange_kernel(y, x)
+- [x] interpolateDegree3 and evalsToCompressed are correct
 
-### Verified Components
-- Opening claims are read correctly (LeftInstructionInput, RightInstructionInput, etc.)
-- Challenge derivation using Blake2b transcript matches Jolt
-- Gruen polynomial construction formula matches Jolt
+### Possible Issues (Need Investigation)
+1. **Eq polynomial accumulation** - current_scalar may accumulate differently
+2. **Variable binding order** - may be LSB-first vs MSB-first mismatch
+3. **E_in/E_out table indexing** - bit ordering in tables
+4. **r_grid weights** - may affect streaming round computation
 
-### Possible Remaining Issues
-1. **Eq polynomial evaluation ordering** - current_index decrements from 11 to 0, binding tau_low[10] first
-2. **Streaming round accumulation** - group selector and cycle index mapping
-3. **r_grid integration** - weights for streaming phase
-4. **Split eq table indexing** - big-endian vs little-endian
-
-### Debug Data Analysis
+### Debug Data
 ```
 tau_high_bound_r0:          10811398959691251178446374398729567517345474364208367822721217673367518413943
 tau_bound_r_tail_reversed:  14125962160514979480084655056025740513842614775637540494241851278366681977590
@@ -42,11 +38,11 @@ rx_constr[0] (r_stream):    2116934244015962401899708433894043262098824377802461
 sumcheck_challenges.len:    11
 ```
 
-### Next Investigation Steps
-1. Add debug to print t_zero/t_infinity at each round
-2. Compare current_scalar progression with Jolt
-3. Verify r_grid values during streaming phase
-4. Check if eq polynomial tables have same indexing as Jolt
+### Next Steps
+1. Add debug output to print t_zero/t_infinity at each round
+2. Compare current_scalar value at each round with Jolt
+3. Verify eq table values match Jolt's
+4. Check if r_grid is being updated correctly
 
 ## Test Commands
 ```bash
@@ -72,3 +68,4 @@ cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture
 - [x] Opening claims with MLE evaluation
 - [x] Challenge Montgomery form conversion
 - [x] Store tau_high separately
+- [x] Constraint group combination matches Jolt

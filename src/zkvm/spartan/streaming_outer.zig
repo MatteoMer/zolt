@@ -925,8 +925,10 @@ pub fn StreamingOuterProver(comptime F: type) type {
             const num_cycle_bound = if (self.current_round >= 2) self.current_round - 2 else 0;
 
             // Number of cycles in each half (based on current round)
-            // At round k, we're summing over bit (k-1), so half = 2^(num_total_bits - k)
-            const half: usize = self.padded_trace_len >> @intCast(self.current_round);
+            // At cycle round k (current_round = k+1), we're summing over cycle bit (k-1)
+            // half = 2^(num_total_bits - k) = padded_trace_len >> k
+            //      = padded_trace_len >> (current_round - 1)
+            const half: usize = self.padded_trace_len >> @intCast(self.current_round - 1);
 
             // r_grid length (number of bound challenge combinations)
             const klen = self.r_grid.length();

@@ -1,6 +1,50 @@
 # Zolt-Jolt Compatibility Notes
 
-## Current Status (Session 26 - December 29, 2024)
+## Current Status (Session 27 - December 29, 2024)
+
+### Verification Progress
+
+**Major Progress:**
+1. ✅ Proof deserialization works - all 48 opening claims parsed correctly
+2. ✅ Jolt's preprocessing can be loaded (from /tmp/jolt_verifier_preprocessing.dat)
+3. ✅ Verifier instance created successfully
+4. ❌ Stage 1 sumcheck verification fails
+
+**Error Location:**
+`sumcheck.rs:248` - `output_claim != expected_output_claim`
+
+**Root Cause Analysis:**
+The sumcheck round polynomials pass all internal checks (p(0) + p(1) = claim), but the final output claim doesn't match what the verifier computes from the opening claims.
+
+The key formula is:
+```
+expected_output_claim = eq_factor * inner_sum_prod
+inner_sum_prod = key.evaluate_inner_sum_product_at_point(rx_constr, r1cs_input_evals)
+```
+
+Where:
+- `rx_constr = [r_stream, r0]` - constraint row evaluation point
+- `r1cs_input_evals` - the 36 R1CS input evaluations from opening claims
+
+**Verified:**
+- ✅ r_cycle computation matches Jolt (challenges[1..] reversed)
+- ✅ Opening claims are being populated correctly in proof
+- ✅ Claims are retrieved correctly by verifier
+
+**Next Investigation:**
+The issue is likely in the R1CS witness generation or the MLE evaluation of those witnesses. The cycle witness values may not match what Jolt expects.
+
+### Preprocessing Issue
+
+Zolt-generated preprocessing fails to deserialize because:
+1. Zolt adds UNIMPL instructions that Jolt's bytecode doesn't have
+2. The programs may be different due to different ELF decoding
+
+**Workaround:** Use Jolt's preprocessing file for cross-verification.
+
+---
+
+## Previous Session (Session 26 - December 29, 2024)
 
 ### Implicit Az*Bz Analysis
 

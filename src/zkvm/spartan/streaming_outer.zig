@@ -575,7 +575,6 @@ pub fn StreamingOuterProver(comptime F: type) type {
             const E_out = eq_tables.E_out;
             const E_in = eq_tables.E_in;
             const head_in_bits = eq_tables.head_in_bits;
-            const e_in_mask = (@as(usize, 1) << @intCast(head_in_bits)) - 1;
 
             // Gruen's multiquadratic method computes:
             // - t'(0) = Σ eq * Az(0) * Bz(0)
@@ -590,49 +589,70 @@ pub fn StreamingOuterProver(comptime F: type) type {
             if (self.current_round == 1) {
                 // STREAMING ROUND: The streaming variable selects constraint group (0 or 1)
                 //
-                // The polynomial in x_stream is:
-                //   p(x_stream) = Σ_{cycles} eq(τ_cycle, cycle) * Az(x_stream, cycle) * Bz(x_stream, cycle)
+                // In Jolt, the index space is organized as:
+                //   full_idx = (x_out || x_in) where x_in's LSB is the group selector
+                //   cycle_idx = full_idx >> 1
+                //   group_selector = full_idx & 1
                 //
-                // Jolt's approach for window_size=1:
-                // - For each cycle, build grids [Az_g0, Az_g1] and [Bz_g0, Bz_g1]
-                // - Expand to multiquadratic: [val_0, val_1, val_1 - val_0]
-                // - Multiply pointwise: prod[k] = buff_a[k] * buff_b[k]
-                // - Accumulate: result[k] += eq * prod[k]
+                // For the streaming round (window_size=1), we iterate over (x_out, x_in) pairs
+                // where the E_in table's LSB represents the group selector (0 or 1).
                 //
-                // This is SUM-OF-PRODUCTS (Σ Az*Bz), NOT product-of-sums!
+                // The multiquadratic grid has:
+                //   - Az grid[0] = accumulate Az for x_stream=0 (first group only)
+                //   - Az grid[1] = accumulate Az for x_stream=1 (second group only)
+                //   - Same for Bz
+                //
+                // Then prod_0 = grid_az[0] * grid_bz[0]
+                //      prod_inf = (grid_az[1] - grid_az[0]) * (grid_bz[1] - grid_bz[0])
 
-                // Accumulate sum of products for position 0 and slope (∞)
-                var sum_prod_0 = F.zero(); // Σ eq * Az_g0 * Bz_g0
-                var sum_prod_inf = F.zero(); // Σ eq * slope_az * slope_bz
+                // Build grids accumulating over (x_out, x_in) pairs
+                // The x_in LSB determines whether this contributes to position 0 or 1
+                var grid_az = [2]F{ F.zero(), F.zero() };
+                var grid_bz = [2]F{ F.zero(), F.zero() };
 
-                for (0..@min(self.padded_trace_len, self.cycle_witnesses.len)) |i| {
-                    // Factorized eq weight using proper bit shifting
-                    const out_idx = i >> @intCast(head_in_bits);
-                    const in_idx = i & e_in_mask;
-                    const e_out_val = if (out_idx < E_out.len) E_out[out_idx] else F.zero();
-                    const e_in_val = if (in_idx < E_in.len) E_in[in_idx] else F.zero();
-                    const eq_val = e_out_val.mul(e_in_val);
+                // Iterate over all (x_out, x_in) pairs
+                var out_idx: usize = 0;
+                while (out_idx < E_out.len) : (out_idx += 1) {
+                    const e_out_val = E_out[out_idx];
 
-                    // Get Az and Bz for both groups
-                    const az_bz = self.computeCycleAzBzValues(&self.cycle_witnesses[i]);
+                    var in_idx: usize = 0;
+                    while (in_idx < E_in.len) : (in_idx += 1) {
+                        const e_in_val = E_in[in_idx];
+                        const eq_val = e_out_val.mul(e_in_val);
 
-                    // Products at position 0 (constraint group 0)
-                    const prod_0 = az_bz.az_g0.mul(az_bz.bz_g0);
+                        // The LSB of in_idx determines the group selector
+                        // group = in_idx & 1
+                        // in_idx_prime = in_idx >> 1 (the inner cycle bits)
+                        const group: usize = in_idx & 1;
+                        const in_idx_prime = in_idx >> 1;
 
-                    // Slopes (for position ∞)
-                    const slope_az = az_bz.az_g1.sub(az_bz.az_g0);
-                    const slope_bz = az_bz.bz_g1.sub(az_bz.bz_g0);
-                    const prod_inf = slope_az.mul(slope_bz);
+                        // Compute the cycle index from (x_out, in_idx_prime)
+                        // cycle = (out_idx << num_in_prime_bits) | in_idx_prime
+                        // where num_in_prime_bits = head_in_bits - 1 (since we removed the group bit)
+                        const num_in_prime_bits = if (head_in_bits > 0) head_in_bits - 1 else 0;
+                        const cycle_idx = (out_idx << @intCast(num_in_prime_bits)) | in_idx_prime;
 
-                    // Accumulate weighted by eq
-                    sum_prod_0 = sum_prod_0.add(eq_val.mul(prod_0));
-                    sum_prod_inf = sum_prod_inf.add(eq_val.mul(prod_inf));
+                        if (cycle_idx < self.cycle_witnesses.len) {
+                            // Get Az/Bz for the selected constraint group
+                            const result = self.computeCycleAzBzForGroup(&self.cycle_witnesses[cycle_idx], group);
+
+                            // Accumulate into the grid position matching the group
+                            grid_az[group] = grid_az[group].add(eq_val.mul(result.az));
+                            grid_bz[group] = grid_bz[group].add(eq_val.mul(result.bz));
+                        }
+                    }
                 }
 
-                // t'(0) = Σ eq * Az_g0 * Bz_g0
-                // t'(∞) = Σ eq * (Az_g1-Az_g0) * (Bz_g1-Bz_g0)
-                t_zero = sum_prod_0;
-                t_infinity = sum_prod_inf;
+                // Compute multiquadratic evaluations
+                // t'(0) = grid_az[0] * grid_bz[0]
+                // t'(∞) = (grid_az[1] - grid_az[0]) * (grid_bz[1] - grid_bz[0])
+                const prod_0 = grid_az[0].mul(grid_bz[0]);
+                const slope_az = grid_az[1].sub(grid_az[0]);
+                const slope_bz = grid_bz[1].sub(grid_bz[0]);
+                const prod_inf = slope_az.mul(slope_bz);
+
+                t_zero = prod_0;
+                t_infinity = prod_inf;
             } else {
                 // CYCLE ROUND: Compute Σ (Az * Bz) for sum-of-products
                 //

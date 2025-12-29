@@ -1,16 +1,21 @@
 # Zolt-Jolt Compatibility TODO
 
-## Current Status: Stage 1 Sumcheck Verification (Session 27)
+## Current Status: Stage 1 Sumcheck Verification (Session 28)
 
 ### Latest Findings
-- 128-bit challenges are now converted to Montgomery form
-- Output claim and expected claim still don't match (ratio ~0.91)
-- Issue is NOT in challenge format or eq polynomial evaluation
+- Fixed tau split issue: now passing full tau (len 12) instead of tau_low (len 11)
+- This caused output_claim to change: old ~11.3e75, new ~13.3e75
+- But verification still fails (output_claim ≠ expected_output_claim)
+- Ratio is now ~0.75 instead of ~0.91
 
 ```
-output_claim:          11331697095435039208873616544229270298263565208265409364435501006937104790550
-expected_output_claim: 12484965348201065871489189011985428966546791723664683385883331440930509110658
+output_claim:          13253494829145889902934155105755742414822642232978678139117322728009984608729
+expected_output_claim: 17615172925949730609183894067324551214200634089653146239852636572846820428381
 ```
+
+### What Was Fixed
+- [x] Pass full tau to split_eq (m = tau.len/2 = 6 for len=12)
+- [x] E_out now has 64 entries (2^6), E_in has 32 entries (2^5) - matches Jolt
 
 ### Verified Working
 - [x] All 656 Zolt tests pass
@@ -22,27 +27,32 @@ expected_output_claim: 124849653482010658714891890119854289665467917236646833858
 - [x] r_cycle computation (challenges[1..] reversed)
 - [x] UniSkip verification passes
 - [x] Individual round equations (p(0)+p(1)=claim)
+- [x] Tau split now matches Jolt (m = tau.len/2)
 
-### Likely Issues
-The mismatch is likely in one of:
-1. **R1CS witness values** - Zolt generates witnesses from its OWN trace (emulator), which may differ from what Jolt's tracer produces
-2. **Trace differences** - Zolt's emulator execution may differ from Jolt's tracer in subtle ways
-3. **Streaming sumcheck computation** - The sumcheck is internally consistent but computes different values than expected
+### Remaining Issues
+The sumcheck output_claim doesn't match expected_output_claim.
 
-### Root Cause Hypothesis (NEW)
-The fundamental issue is that:
-- Zolt uses its OWN emulator to execute the program
-- Zolt generates R1CS witnesses from its OWN trace
-- But Jolt's verifier expects witnesses consistent with Jolt's tracer
+Expected formula (Jolt outer.rs lines 421-452):
+```
+expected = tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod
 
-If the two tracers produce different execution traces (different register values, different PC sequences, etc.), the witnesses will differ and verification will fail.
+where:
+- tau_high_bound_r0 = L(tau_high, r0) - Lagrange kernel
+- tau_bound_r_tail_reversed = eq(tau_low, reversed(sumcheck_challenges))
+- inner_sum_prod = Az(rx_constr) * Bz(rx_constr)
+- rx_constr = [r_stream, r0]
+```
 
-### Next Steps
-1. Export Jolt's execution trace for a simple program
-2. Compare trace values (PC, register values, etc.) between Zolt and Jolt
-3. If traces differ, either:
-   - Fix Zolt's emulator to match Jolt's semantics exactly
-   - Or export trace from Jolt and use it in Zolt for proof generation
+Possible remaining issues:
+1. **R1CS witness values** - Zolt generates witnesses from its emulator, may differ from Jolt
+2. **Inner sum product computation** - The evaluate_inner_sum_product_at_point formula
+3. **Constraint group handling** - The interleaved group structure (full_idx >> 1, & 1)
+4. **Binding order** - How challenges are bound in the streaming prover
+
+### Next Investigation Steps
+1. Compare Zolt's Az/Bz values at a specific cycle with Jolt's
+2. Debug the inner_sum_prod computation
+3. Check if the constraint evaluation matches Jolt's R1CSEval
 
 ## Test Commands
 ```bash
@@ -67,3 +77,4 @@ cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture
 - [x] Lagrange kernel computation
 - [x] Opening claims with MLE evaluation
 - [x] Challenge Montgomery form conversion
+- [x] Tau split fix (pass full tau, not tau_low)

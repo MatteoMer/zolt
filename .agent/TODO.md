@@ -3,65 +3,73 @@
 ## Current Status: Stage 1 Output Claim Mismatch (Session 20)
 
 ### Summary
-All Stage 1 sumcheck rounds pass (p(0)+p(1) = claim), but the **expected output claim** doesn't match. The ratio is ~1.338 consistently.
+All Stage 1 sumcheck rounds pass (p(0)+p(1) = claim), but the **expected output claim** doesn't match the **output claim from sumcheck walk**.
 
-### Key Discovery (Session 20)
-- Fixed R1CSInputIndex order to match Jolt's ALL_R1CS_INPUTS exactly
-- Jolt's Lagrange kernel includes `L(τ_high, r0)` as scaling factor in round polynomials
-- Zolt's `StreamingOuterProver` uses `initWithScaling` with lagrange_tau_r0
-- The issue is likely in how the two provers (SpartanOuterProver and StreamingOuterProver) coordinate
+### Key Fixes Applied
+1. R1CSInputIndex order matches Jolt's ALL_R1CS_INPUTS ✓
+2. UniSkip polynomial uses tau_low for eq (not full tau) ✓
 
-### Key Values (Latest Run)
-- output_claim (sumcheck): 21176670064311113248327121399637823341669491654917035040693110982193526510099
-- expected (R1CS): 15830891598945306629010829910964994017594280764528826029442912827815044293203
-- Ratio: ~1.338
+### Latest Test Results
+After tau_low fix:
+- **output_claim**: 7120341815860535077792666425421583012196152296139946730075156877231654137396
+- **expected_output_claim**: 2000541294615117218219795634222435854478303422072963760833200542270573423153
+- **Ratio**: ~3.56 (was ~1.338 before fix)
 
-### Root Cause Hypothesis
-Two separate provers create the proof:
-1. `SpartanOuterProver` - creates UniSkip polynomial from witnesses + full tau
-2. `StreamingOuterProver` - creates remaining rounds from witnesses + tau_low + lagrange_tau_r0
+### Analysis of Jolt's Structure
 
-These may be computing inconsistent values because:
-- Different eq polynomial factorizations
-- The UniSkip polynomial evaluation at r0 may not match what StreamingOuter expects
+The Lagrange kernel L(τ_high, r0) appears in **BOTH**:
+1. UniSkip polynomial: `s1(Y) = L(τ_high, Y) * t1(Y)` → `s1(r0) = L(τ_high, r0) * t1(r0)`
+2. Remaining rounds: `current_scalar = L(r0, τ_high)` (same value, symmetric kernel)
 
-### Next Steps
-1. Add debug output comparing lagrange_tau_r0 with Jolt's tau_high_bound_r0
-2. Verify split_eq.current_scalar includes Lagrange kernel
-3. Compare t_zero and t_infinity values per round
-4. Ensure the two provers produce a consistent sumcheck
+This is correct because:
+- The UniSkip claim `s1(r0)` already includes the Lagrange factor
+- The remaining rounds include it in `current_scalar`
+- The expected output also includes `tau_high_bound_r0`
 
-### Expected Output Claim Formula (Jolt Verifier)
-```rust
-expected = tau_high_bound_r0 * tau_bound_r_tail * inner_sum_prod
+### Remaining Investigation Areas
 
-inner_sum_prod = az_final * bz_final
-az_final = az_g0 + r_stream * (az_g1 - az_g0)
-bz_final = bz_g0 + r_stream * (bz_g1 - bz_g0)
+1. **Streaming Round (current_round == 1)**
+   - Uses multiquadratic: `t(0) = Az_g0*Bz_g0`, `t(∞) = dAz*dBz`
+   - This should be correct for the quadratic Az*Bz polynomial
 
-az_g0 = Σ w[i] * lc_a[i].dot_product(z)
-bz_g0 = Σ w[i] * lc_b[i].dot_product(z)
+2. **Cycle Rounds (current_round > 1)**
+   - Uses r_grid for bound streaming challenges
+   - Complex index structure with constraint group selection
+   - May have issues with how selector interacts with r_grid
 
-z = [r1cs_input_evals..., 1]  // 37 elements
+3. **Az/Bz Computation**
+   - Prover computes via constraint evaluators + Lagrange weights
+   - Verifier computes via opening claims (R1CS input MLEs) + linear combinations
+   - These should produce the same values at the challenge point
+
+4. **EQ Polynomial Binding**
+   - Prover: binds tau[n-1-i] with r_i (LowToHigh order)
+   - Verifier: computes eq(tau_low, r_tail_reversed)
+   - These should be equivalent (same products, different order)
+
+### Expected Output Claim Formula
 ```
+expected = tau_high_bound_r0 * tau_bound_r_tail * inner_sum_prod
+         = L(τ_high, r0) * eq(τ_low, r_tail_reversed) * Az_final * Bz_final
 
-Where:
-- `L(τ_high, r0)` = Lagrange kernel (scaling factor for round polys)
-- `r_tail_reversed = sumcheck_challenges.reversed()` (includes r_stream)
-- R1CS inputs evaluated at `challenges[1..]` (excludes r_stream)
+Az_final = az_g0 + r_stream * (az_g1 - az_g0)
+Bz_final = bz_g0 + r_stream * (bz_g1 - bz_g0)
+inner_sum_prod = Az_final * Bz_final
+```
 
 ## Completed
 
-### Phase 1-5: Core Infrastructure
+### Phase 1-5: Core Infrastructure ✓
 1. Transcript Compatibility - Blake2b
 2. Proof Structure - 7-stage
 3. Serialization - Arkworks format
 4. Commitment - Dory with Jolt SRS
 5. Verifier Preprocessing Export
 
-### Stage 1 Fixes (Sessions 11-20)
+### Stage 1 Fixes ✓
 - Big-endian EqPolynomial.evals()
 - R1CSInputIndex order matches Jolt
+- UniSkip uses tau_low for eq polynomial
 - All 656 Zolt tests pass
 
 ## Test Commands

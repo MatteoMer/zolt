@@ -1061,10 +1061,10 @@ pub fn StreamingOuterProver(comptime F: type) type {
             }
 
             // Jolt's HalfSplitSchedule: streaming phase is first half of rounds
-            // For num_rounds = 1 + num_cycle_vars, switch-over is at (num_rounds + 1) / 2
-            // This matches the outer remaining sumcheck structure in Jolt
-            const num_remaining_rounds = self.numRounds() - 1; // Exclude UniSkip round 0
-            const switch_over = (num_remaining_rounds + 1) / 2;
+            // For num_rounds = 1 + num_cycle_vars, switch-over is at num_rounds / 2
+            // This matches Jolt's halfway = num_rounds / 2 calculation
+            const num_remaining = self.numRounds(); // 1 + num_cycle_vars
+            const switch_over = num_remaining / 2;
 
             // Streaming phase: rounds 1 to switch_over (inclusive) - update r_grid
             // Linear phase: rounds > switch_over - don't update r_grid

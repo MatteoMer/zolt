@@ -9,7 +9,7 @@
 4. **Commitment Scheme** - Dory with Jolt-compatible SRS
 5. **Verifier Preprocessing Export** - DoryVerifierSetup exports correctly
 
-### Stage 1 Fixes (Session 11-14+)
+### Stage 1 Fixes (Sessions 11-14+)
 6. **Lagrange Interpolation Bug** - Fixed dead code corrupting basis array
 7. **UniSkip Verification** - Domain sum check passes
 8. **UnivariateSkip Claim** - Correctly set to uni_poly.evaluate(r0)
@@ -32,49 +32,43 @@
 25. **current_scalar double-counting fix** - Only applied in l(X), not t'
 26. **r_grid HalfSplitSchedule** - Fixed streaming/linear phase split
 27. **Dory MSM length fixes** - Proper padding for row_commitments
+28. **Jolt Index Structure** - Use full_idx = x_out|x_in|x_val|r_idx, step_idx = full_idx >> 1
 
 ---
 
-## Current Status: ~28x Discrepancy in Stage 1
+## Current Status: ~1.23x Discrepancy in Stage 1
 
-### Session 7 Analysis (December 29, 2024)
+### Session 7 Progress (December 29, 2024)
 
-**Key Finding**: The ratio is ~28.25, which is very close to 1024/36 ≈ 28.44
+**Major Improvement:**
+- Fixed cycle round index structure to match Jolt's linear phase
+- Reduced discrepancy from ~28x to ~1.23x
+- output_claim: 15155108253109715956971809974428807981154511443156768969051245367813784134214
+- expected:     18643585735450861043207165215350408775243828862234148101070816349947522058550
+- Ratio: 0.81 (or 1.23x difference)
 
-This suggests a scaling issue related to trace_length (1024) and R1CS inputs (36).
+**Key Insight Applied:**
+In Jolt's linear phase, the full index structure is:
+```
+full_idx = x_out << (in_bits + window + r_bits) | x_in << (window + r_bits) | x_val << r_bits | r_idx
+step_idx = full_idx >> 1
+selector = full_idx & 1
+```
 
-**Verified Correct:**
-- E_out/E_in factorization: indexes match Jolt's structure
-- Lagrange weighting in Az/Bz computation
-- split_eq initialization with tau_low and scaling factor
-- streaming vs linear phase r_grid updates
+The constraint group selector is ALWAYS the LSB of full_idx, even in cycle rounds.
 
-**Potential Issues to Investigate:**
+**Remaining Issues:**
+1. The ~1.23x ratio suggests there's still a weighting or binding issue
+2. Possible causes:
+   - Wrong r_grid initialization or update sequence
+   - Incorrect binding order in split_eq
+   - Streaming round (round 1) might need the same index structure
 
-1. **Index bit ordering during cycle rounds**
-   - Zolt iterates over base_idx and reconstructs cycle_idx_0, cycle_idx_1
-   - Need to verify the bit insertion matches Jolt's index structure
+### Next Steps
 
-2. **remaining_idx calculation in cycle rounds**
-   - `remaining_idx = high_bits` (bits above current_bit_pos)
-   - May not match Jolt's E_out/E_in indexing after streaming phase
-
-3. **r_grid mask calculation**
-   - Zolt uses `cycle_idx_0 & r_grid_mask`
-   - Need to verify this matches Jolt's k indexing
-
-4. **Window variable handling**
-   - In streaming round, window variable = constraint group selector
-   - In cycle rounds, window variable = current cycle bit
-   - The transition between these may be incorrect
-
-### Debug Plan
-
-Add debug output to compare:
-1. t_zero and t_infinity values each round
-2. E_out and E_in table contents
-3. r_grid contents after each round
-4. current_scalar value after each bind
+1. Check if streaming round should also use full_idx structure
+2. Verify r_grid update timing matches Jolt's HalfSplitSchedule
+3. Compare individual round claims to pinpoint where divergence starts
 
 ---
 
@@ -83,7 +77,7 @@ Add debug output to compare:
 ```bash
 # Generate Jolt-format proof
 cd /Users/matteo/projects/zolt
-zig build
+zig build -Doptimize=ReleaseFast
 ./zig-out/bin/zolt prove examples/sum.elf --jolt-format -o /tmp/zolt_proof_dory.bin
 
 # Run Jolt verification test

@@ -412,6 +412,18 @@ pub fn ProofConverter(comptime F: type) type {
             // Bind the first-round challenge from transcript with the uni_skip_claim
             outer_prover.bindFirstRoundChallenge(r0, uni_skip_claim) catch {};
 
+            // IMPORTANT: Match Jolt's BatchedSumcheck::verify transcript flow exactly:
+            //   1. Append input_claim to transcript
+            //   2. Get batching_coeffs via challenge_vector(1) - this modifies transcript state!
+            //   3. Then process round polynomials
+            //
+            // The input_claim for Stage 1 remaining sumcheck is uni_skip_claim.
+            transcript.appendScalar(uni_skip_claim);
+
+            // Get batching coefficient (for single instance, we just need to consume one challenge)
+            // This advances the transcript state to match what the verifier expects.
+            _ = transcript.challengeScalar();
+
             // Generate remaining rounds
             // In Jolt, stage1_sumcheck_proof contains num_rounds polynomials
             // where num_rounds = 1 + num_cycle_vars (1 streaming + cycle vars)

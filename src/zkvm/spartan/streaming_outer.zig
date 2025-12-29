@@ -587,13 +587,17 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 // t'(∞) = Σ_cycles eq * (Az_g1 - Az_g0) * (Bz_g1 - Bz_g0)  [product of slopes]
                 //
                 // The eq weights are factorized: eq[i] = E_out[i >> head_in_bits] * E_in[i & mask]
+                // Current scalar from split_eq includes Lagrange kernel scaling
+                const current_scalar = self.split_eq.current_scalar;
+
                 for (0..@min(self.padded_trace_len, self.cycle_witnesses.len)) |i| {
                     // Factorized eq weight using proper bit shifting
                     const out_idx = i >> @intCast(head_in_bits);
                     const in_idx = i & e_in_mask;
                     const e_out_val = if (out_idx < E_out.len) E_out[out_idx] else F.zero();
                     const e_in_val = if (in_idx < E_in.len) E_in[in_idx] else F.zero();
-                    const eq_val = e_out_val.mul(e_in_val);
+                    // Include current_scalar (Lagrange kernel scaling)
+                    const eq_val = e_out_val.mul(e_in_val).mul(current_scalar);
 
                     // Compute Az and Bz separately for both groups to get slopes
                     const az_bz = self.computeCycleAzBzForMultiquadratic(&self.cycle_witnesses[i]);

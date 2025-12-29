@@ -78,6 +78,11 @@ pub fn StreamingOuterProver(comptime F: type) type {
         /// Matches Jolt's r_grid in OuterSharedState
         r_grid: ExpandingTable(F),
 
+        /// tau_high - the last element of the full tau vector
+        /// Used for the Lagrange kernel L(tau_high, Y) in the first-round polynomial
+        /// This is stored separately because split_eq only receives tau_low
+        tau_high: F,
+
         /// Allocator
         allocator: Allocator,
 
@@ -101,15 +106,15 @@ pub fn StreamingOuterProver(comptime F: type) type {
         /// Initialize the streaming outer prover with Lagrange kernel scaling
         ///
         /// tau: Full challenge vector of length (num_cycle_vars + 2)
-        ///      - tau[0..m]: w_out (for E_out tables), where m = tau.len / 2
-        ///      - tau[m..tau.len-1]: w_in (for E_in tables)
-        ///      - tau[tau.len-1]: w_last (skipped, handled separately)
+        ///      We extract tau_low = tau[0..tau.len-1] for the split_eq.
+        ///      tau_high = tau[tau.len-1] should already be incorporated into lagrange_tau_r0.
         ///
         /// lagrange_tau_r0: The Lagrange kernel L(r0, tau_high) from UniSkip
         ///                  This is multiplied into all eq evaluations.
         ///
-        /// IMPORTANT: Pass FULL tau, not tau_low! The split uses m = tau.len / 2
-        /// which differs between length 11 and 12. Jolt uses full tau.
+        /// IMPORTANT: Jolt passes tau_low (not full tau) to GruenSplitEqPolynomial.
+        /// tau_low is tau[0..tau.len-1], which has length num_cycle_vars + 1.
+        /// The split uses m = tau_low.len / 2.
         pub fn initWithScaling(
             allocator: Allocator,
             cycle_witnesses: []const constraints.R1CSCycleInputs(F),
@@ -125,12 +130,17 @@ pub fn StreamingOuterProver(comptime F: type) type {
             const padded_len = nextPowerOfTwo(num_cycles);
             const num_cycle_vars = std.math.log2_int(usize, padded_len);
 
-            // Pass full tau to split_eq - it internally handles the split:
-            // m = tau.len / 2
-            // w_out = tau[0..m]
-            // w_in = tau[m..tau.len-1]
-            // w_last = tau[tau.len-1] (skipped)
-            const split_eq = try GruenSplitEqPolynomial(F).initWithScaling(allocator, tau, lagrange_tau_r0);
+            // Extract tau_low and tau_high, matching Jolt's split.
+            // In Jolt:
+            //   let tau_high = uni_skip_params.tau[uni_skip_params.tau.len() - 1];
+            //   let tau_low = &uni_skip_params.tau[..uni_skip_params.tau.len() - 1];
+            //   GruenSplitEqPolynomial::new_with_scaling(tau_low, ...)
+            //
+            // tau_high is used for the Lagrange kernel in the first-round polynomial.
+            // tau_low is passed to split_eq for the remaining rounds.
+            const tau_high = if (tau.len > 0) tau[tau.len - 1] else F.zero();
+            const tau_low = if (tau.len > 0) tau[0 .. tau.len - 1] else tau;
+            const split_eq = try GruenSplitEqPolynomial(F).initWithScaling(allocator, tau_low, lagrange_tau_r0);
 
             // Initialize r_grid for tracking bound challenge weights
             // Capacity = padded_len (maximum number of cycles)
@@ -148,6 +158,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 .lagrange_evals_r0 = [_]F{F.zero()} ** FIRST_GROUP_SIZE,
                 .r_stream = null,
                 .r_grid = r_grid,
+                .tau_high = tau_high,
                 .allocator = allocator,
             };
         }
@@ -401,8 +412,8 @@ pub fn StreamingOuterProver(comptime F: type) type {
             }
 
             // Step 2: Compute Lagrange kernel L(τ_high, Y) coefficients
-            // τ_high is the last element of tau, which is the high bit challenge
-            const tau_high = self.split_eq.getTauHigh();
+            // τ_high is the last element of the full tau vector, stored separately
+            const tau_high = self.tau_high;
 
             // L(τ_high, Y) evaluations at base domain {-4, -3, ..., 4, 5}
             var lagrange_evals: [DOMAIN_SIZE]F = undefined;

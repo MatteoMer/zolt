@@ -1,16 +1,33 @@
 # Zolt-Jolt Compatibility TODO
 
-## Current Status: Stage 1 Output Claim Mismatch (Session 20-21)
+## Current Status: Stage 1 Output Claim Mismatch (Session 20-22)
 
 ### Summary
 All Stage 1 sumcheck rounds pass (p(0)+p(1) = claim), but the **expected output claim** doesn't match the **output claim from sumcheck walk**.
+
+### Session 22 Findings
+
+**Key Index Structure Issue**: Jolt uses a complex index structure in `fused_materialise_polynomials_round_zero`:
+```rust
+for (i, ...) in az.par_chunks_exact_mut(grid_size)... {
+    // grid_size = 1 << window_size
+    while j < grid_size {
+        let full_idx = grid_size * i + j;
+        let time_step_idx = full_idx >> 1;  // Cycle index
+        let selector = full_idx & 1;  // Constraint group
+    }
+    // Weight by E_out[i]
+}
+```
+
+Zolt's streaming round iterates directly over cycles, not using this index structure. This may be causing the mismatch.
 
 ### Latest Test Results
 - **output_claim**: 7120341815860535077792666425421583012196152296139946730075156877231654137396
 - **expected_output_claim**: 2000541294615117218219795634222435854478303422072963760833200542270573423153
 - **Ratio**: ~3.56
 
-### Verified Components (Session 21)
+### Verified Components (Session 21-22)
 1. ✅ Lagrange kernel computation order matches Jolt (symmetric: K(x,y) = K(y,x))
 2. ✅ split_eq initialization with tau_low is correct
 3. ✅ bind() function updates current_scalar correctly
@@ -19,6 +36,7 @@ All Stage 1 sumcheck rounds pass (p(0)+p(1) = claim), but the **expected output 
 6. ✅ Challenge ordering and reversal logic matches
 7. ✅ Prover: `lagrangeKernel(r0, tau_high)` matches Jolt's `lagrange_kernel(&r0, &tau_high)`
 8. ✅ Verifier: `lagrange_kernel(tau_high, r0)` (symmetric, so equivalent)
+9. ✅ R1CS input evaluations at r_cycle_big_endian
 
 ### Suspected Root Causes
 

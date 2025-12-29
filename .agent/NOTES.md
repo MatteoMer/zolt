@@ -1,6 +1,51 @@
 # Zolt-Jolt Compatibility Notes
 
-## Current Status (Session 21 - December 29, 2024)
+## Current Status (Session 22 - December 29, 2024)
+
+### Stage 1 Index Structure Analysis
+
+**Key Finding**: Jolt's streaming sumcheck uses a complex index structure that Zolt may not be matching exactly.
+
+In Jolt's `fused_materialise_polynomials_round_zero`:
+```rust
+for (i, (az_chunk, bz_chunk)) in az.par_chunks_exact_mut(grid_size).zip(...).enumerate() {
+    // grid_size = 1 << window_size
+    while j < grid_size {
+        let full_idx = grid_size * i + j;
+        let time_step_idx = full_idx >> 1;  // Cycle index
+        let selector = full_idx & 1;  // Constraint group
+        // ...
+    }
+    // Final weight by E_out[i]
+}
+```
+
+The key insight is that:
+1. `i` is the combined (x_out, x_in) index
+2. `j` is within the window (handling the streaming variable)
+3. `time_step_idx = full_idx >> 1` means cycle indices are shared across constraint groups
+4. `selector = full_idx & 1` selects the constraint group (0 or 1)
+
+In Zolt's streaming round, we iterate directly over cycles, which may not match this structure.
+
+### Verified in Session 22
+
+1. ✅ Lagrange kernel L(tau_high, r0) - symmetric, matches Jolt
+2. ✅ tau_low extraction matches Jolt
+3. ✅ split_eq initialization with tau_low and lagrange_tau_r0 scaling
+4. ✅ bind() function matches Jolt's eq formula
+5. ✅ r_cycle_big_endian computation matches Jolt's normalize_opening_point
+6. ✅ R1CS input evaluations use correct eq polynomial
+
+### Still Investigating
+
+- Index structure in computeRemainingRoundPoly for streaming round
+- How E_out/E_in indices map to cycle indices
+- Whether Zolt's factorized eq is correct for the streaming round
+
+---
+
+## Session 21 - December 29, 2024
 
 ### Stage 1 Verification Issue
 

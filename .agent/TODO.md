@@ -1,53 +1,50 @@
 # Zolt-Jolt Compatibility TODO
 
-## Current Status: Stage 1 Sumcheck - Implicit Az*Bz Mismatch (Session 26)
+## Current Status: Stage 1 Sumcheck Verification (Session 27)
 
-### Key Finding
-The implicit Az*Bz (computed as output_claim / eq_factor) does NOT match the expected inner_sum_prod:
+### Latest Findings
+- 128-bit challenges are now converted to Montgomery form
+- Output claim and expected claim still don't match (ratio ~0.91)
+- Issue is NOT in challenge format or eq polynomial evaluation
 
 ```
-inner_sum_prod (expected Az*Bz) = 12743996023445103930025687297173833157935883282725550257061179867498976368827
-implicit Az*Bz (output/eq_factor) = 6845670145302814045138444113000749599157896909649021689277739372381215505241
+output_claim:          11331697095435039208873616544229270298263565208265409364435501006937104790550
+expected_output_claim: 12484965348201065871489189011985428966546791723664683385883331440930509110658
 ```
 
-The ratio is NOT a simple integer, suggesting a non-trivial computational difference.
-
-### Verified Correct
+### Verified Working
 - [x] All 656 Zolt tests pass
+- [x] Proof deserialization (all 48 opening claims parsed)
+- [x] Jolt preprocessing loads correctly
+- [x] Verifier instance creation succeeds
+- [x] 128-bit challenges in Montgomery form
+- [x] EqPolynomial evaluation
+- [x] r_cycle computation (challenges[1..] reversed)
 - [x] UniSkip verification passes
-- [x] All individual round equations pass (p(0)+p(1)=claim)
-- [x] Lagrange kernel computation and domain matches Jolt's {-4..5}
-- [x] Split eq polynomial structure matches Jolt's GruenSplitEqPolynomial
-- [x] Sum-of-products computation (not product-of-sums)
-- [x] ExpandingTable (r_grid) logic matches Jolt
-- [x] Constraint group indexing
-- [x] Eq factor accumulation (tau * challenges ordering)
-- [x] r_cycle endianness for opening claims
+- [x] Individual round equations (p(0)+p(1)=claim)
 
-### Root Cause Hypothesis
-The Az*Bz values computed during the sumcheck differ from what the opening claims produce.
-This could be due to:
-1. Witness access ordering in the sumcheck
-2. Constraint evaluation differences
-3. Some subtle accumulation issue in the cycle rounds
+### Likely Issues
+The mismatch is likely in one of:
+1. **R1CS witness values** - Do Zolt's witnesses match what Jolt expects for the same program?
+2. **Streaming sumcheck computation** - Is Az*Bz being accumulated correctly?
+3. **Trace organization** - Are cycles/constraints ordered the same way?
 
 ### Next Steps
-1. Add debug output to Zolt's streaming round to print first few Az/Bz values
-2. Add debug output to Jolt test to print per-cycle Az/Bz at the opening point
-3. Compare these intermediate values to find the divergence
+1. Debug R1CS witnesses - compare values between Zolt and Jolt
+2. Add intermediate value logging to streaming sumcheck
+3. Verify trace structure matches Jolt's expectations
 
-### Test Commands
+## Test Commands
 ```bash
 # Zolt tests
 zig build test --summary all
 
 # Generate proof
-zig build -Doptimize=ReleaseFast
-./zig-out/bin/zolt prove examples/sum.elf --jolt-format -o /tmp/zolt_proof_dory.bin --max-cycles 1024
+zig build && ./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o /tmp/zolt_proof_dory.bin
 
 # Jolt verification test
 cd /Users/matteo/projects/jolt
-cargo test --package jolt-core test_debug_stage1_verification -- --ignored --nocapture
+cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture
 ```
 
 ## Completed Milestones
@@ -59,4 +56,4 @@ cargo test --package jolt-core test_debug_stage1_verification -- --ignored --noc
 - [x] Split eq polynomial factorization
 - [x] Lagrange kernel computation
 - [x] Opening claims with MLE evaluation
-- [x] Sum-of-products computation
+- [x] Challenge Montgomery form conversion

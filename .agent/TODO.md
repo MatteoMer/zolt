@@ -46,31 +46,35 @@
 - expected:     18643585735450861043207165215350408775243828862234148101070816349947522058550
 - Ratio: 0.813 (output/expected ≈ 13/16)
 
+**Fixed This Session:**
+30. **r0 not in challenges** - r0 should NOT be added to the challenges list
+   - challenges = [r_stream, r_1, ..., r_10] (11 elements)
+   - cycle_challenges = challenges[1..] = [r_1, ..., r_10] (10 elements)
+
+**Still Failing:**
+- Even after fix, output_claim != expected_claim
+- The sumcheck polynomials produce different final claim than R1CS expects
+
 **Verified Components (All Match Jolt):**
 - ExpandingTable update: `values[i] = (1-r)*old`, `values[i+len] = r*old`
 - eq table factorization: E_out 5 bits (32 entries), E_in 5 bits (32 entries)
-- bind() formula: `eq(τ, r) = 1 - τ - r + 2*τ*r`
-- switch_over: `num_rounds / 2` = 5 for 11 rounds
-- gruen_poly_deg_3: Equivalent formulas verified
+- Lagrange domain: {-4, -3, -2, -1, 0, 1, 2, 3, 4, 5} for 10 constraints
+- Multiquadratic expansion: [f(0), f(1), f(∞)=slope]
+- Compressed poly format: [c0, c2, c3] (linear term omitted)
 - Index mapping: out_idx = i >> 5, in_idx = i & 31
-- Streaming round: Processes both constraint groups for same cycle
+- Streaming round: Both constraint groups for same cycle
 
-**Key Differences Checked:**
-1. Lagrange polynomial evaluation at tau_curr
-   - Jolt: `eq_eval_1 = current_scalar * w[current_index - 1]`
-   - Zolt: `eq_1 = current_scalar * tau_curr`
-   - These are equivalent since tau is stored differently
-
-2. cubic_eval_1 computation:
-   - Jolt: `cubic_eval_1 = s_0_plus_s_1 - cubic_eval_0`
-   - Zolt: `s_1 = l_1 * q_1` where `q_1 = (claim - l_0*q_0) / l_1`
-   - These are algebraically equivalent
+**Key Insights:**
+- Jolt expected_output_claim formula:
+  expected = tau_high_bound_r0 * tau_bound_r_tail * inner_sum_prod
+  where inner_sum_prod = (az_g0 + r_stream*(az_g1-az_g0)) * (bz_g0 + r_stream*(bz_g1-bz_g0))
+- r_tail = sumcheck_challenges.reversed()
 
 **Next Investigation Areas:**
-1. Lagrange weights in streaming round (scaled_w)
-2. r_grid vs r_stream usage differences
-3. Per-round claim divergence point
-4. Cycle witness evaluation order
+1. Per-round polynomial values - compare actual s(0), s(1) with expected
+2. Transcript consistency - are challenges the same as Jolt computes?
+3. Input claim (uni_skip_claim) value
+4. Add debugging to first few rounds to find divergence point
 
 ---
 

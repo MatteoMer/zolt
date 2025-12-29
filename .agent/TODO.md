@@ -25,14 +25,24 @@ expected_output_claim: 124849653482010658714891890119854289665467917236646833858
 
 ### Likely Issues
 The mismatch is likely in one of:
-1. **R1CS witness values** - Do Zolt's witnesses match what Jolt expects for the same program?
-2. **Streaming sumcheck computation** - Is Az*Bz being accumulated correctly?
-3. **Trace organization** - Are cycles/constraints ordered the same way?
+1. **R1CS witness values** - Zolt generates witnesses from its OWN trace (emulator), which may differ from what Jolt's tracer produces
+2. **Trace differences** - Zolt's emulator execution may differ from Jolt's tracer in subtle ways
+3. **Streaming sumcheck computation** - The sumcheck is internally consistent but computes different values than expected
+
+### Root Cause Hypothesis (NEW)
+The fundamental issue is that:
+- Zolt uses its OWN emulator to execute the program
+- Zolt generates R1CS witnesses from its OWN trace
+- But Jolt's verifier expects witnesses consistent with Jolt's tracer
+
+If the two tracers produce different execution traces (different register values, different PC sequences, etc.), the witnesses will differ and verification will fail.
 
 ### Next Steps
-1. Debug R1CS witnesses - compare values between Zolt and Jolt
-2. Add intermediate value logging to streaming sumcheck
-3. Verify trace structure matches Jolt's expectations
+1. Export Jolt's execution trace for a simple program
+2. Compare trace values (PC, register values, etc.) between Zolt and Jolt
+3. If traces differ, either:
+   - Fix Zolt's emulator to match Jolt's semantics exactly
+   - Or export trace from Jolt and use it in Zolt for proof generation
 
 ## Test Commands
 ```bash

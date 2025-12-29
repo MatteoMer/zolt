@@ -597,22 +597,6 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 // The eq weights are factorized: eq[i] = E_out[i >> head_in_bits] * E_in[i & mask]
                 // NOTE: Do NOT include current_scalar here - it will be applied in computeCubicRoundPoly.
 
-                // DEBUG: Print streaming round info
-                std.debug.print("\n=== Zolt Streaming Round Debug ===\n", .{});
-                std.debug.print("E_out.len = {}, E_in.len = {}, head_in_bits = {}\n", .{ E_out.len, E_in.len, head_in_bits });
-                std.debug.print("current_scalar = [{x:0>16}, {x:0>16}, {x:0>16}, {x:0>16}]\n", .{
-                    self.split_eq.current_scalar.limbs[0],
-                    self.split_eq.current_scalar.limbs[1],
-                    self.split_eq.current_scalar.limbs[2],
-                    self.split_eq.current_scalar.limbs[3],
-                });
-                std.debug.print("tau[last] = [{x:0>16}, {x:0>16}, {x:0>16}, {x:0>16}]\n", .{
-                    self.split_eq.tau[self.split_eq.current_index - 1].limbs[0],
-                    self.split_eq.tau[self.split_eq.current_index - 1].limbs[1],
-                    self.split_eq.tau[self.split_eq.current_index - 1].limbs[2],
-                    self.split_eq.tau[self.split_eq.current_index - 1].limbs[3],
-                });
-
                 for (0..@min(self.padded_trace_len, self.cycle_witnesses.len)) |i| {
                     // Factorized eq weight using proper bit shifting
                     const out_idx = i >> @intCast(head_in_bits);
@@ -626,25 +610,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                     const az_bz = self.computeCycleAzBzForMultiquadratic(&self.cycle_witnesses[i]);
                     t_zero = t_zero.add(eq_val.mul(az_bz.prod_0)); // Az_g0 * Bz_g0
                     t_infinity = t_infinity.add(eq_val.mul(az_bz.prod_inf)); // slope_a * slope_b
-
-                    // DEBUG: Print first few cycles
-                    if (i < 3) {
-                        std.debug.print("cycle[{}]: eq=[{x:0>16},{x:0>16},{x:0>16},{x:0>16}]\n", .{
-                            i,
-                            eq_val.limbs[0],
-                            eq_val.limbs[1],
-                            eq_val.limbs[2],
-                            eq_val.limbs[3],
-                        });
-                    }
                 }
-
-                std.debug.print("t_zero = [{x:0>16}, {x:0>16}, {x:0>16}, {x:0>16}]\n", .{
-                    t_zero.limbs[0], t_zero.limbs[1], t_zero.limbs[2], t_zero.limbs[3],
-                });
-                std.debug.print("t_infinity = [{x:0>16}, {x:0>16}, {x:0>16}, {x:0>16}]\n", .{
-                    t_infinity.limbs[0], t_infinity.limbs[1], t_infinity.limbs[2], t_infinity.limbs[3],
-                });
             } else {
                 // CYCLE ROUND: Match Jolt's linear phase structure exactly
                 //

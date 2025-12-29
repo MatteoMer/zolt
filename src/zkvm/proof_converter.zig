@@ -406,14 +406,6 @@ pub fn ProofConverter(comptime F: type) type {
             // Use evaluatePolyAtChallenge which handles the Jolt-format challenge [0, 0, low, high]
             const uni_skip_claim = evaluatePolyAtChallenge(uniskip_proof.uni_poly, r0);
 
-            // DEBUG: Print UniSkip claim
-            std.debug.print("UniSkip claim = [{x:0>16}, {x:0>16}, {x:0>16}, {x:0>16}]\n", .{
-                uni_skip_claim.limbs[0],
-                uni_skip_claim.limbs[1],
-                uni_skip_claim.limbs[2],
-                uni_skip_claim.limbs[3],
-            });
-
             // Bind the first-round challenge from transcript with the uni_skip_claim
             outer_prover.bindFirstRoundChallenge(r0, uni_skip_claim) catch {};
 
@@ -457,21 +449,6 @@ pub fn ProofConverter(comptime F: type) type {
                     }
                 };
 
-                // DEBUG: Print round polynomial evaluations
-                if (round_num == 0) {
-                    std.debug.print("Round 0 polynomial evals:\n", .{});
-                    std.debug.print("  s(0) = [{x:0>16}, {x:0>16}, {x:0>16}, {x:0>16}]\n", .{
-                        evals[0].limbs[0], evals[0].limbs[1], evals[0].limbs[2], evals[0].limbs[3],
-                    });
-                    std.debug.print("  s(1) = [{x:0>16}, {x:0>16}, {x:0>16}, {x:0>16}]\n", .{
-                        evals[1].limbs[0], evals[1].limbs[1], evals[1].limbs[2], evals[1].limbs[3],
-                    });
-                    const sum = evals[0].add(evals[1]);
-                    std.debug.print("  s(0)+s(1) = [{x:0>16}, {x:0>16}, {x:0>16}, {x:0>16}]\n", .{
-                        sum.limbs[0], sum.limbs[1], sum.limbs[2], sum.limbs[3],
-                    });
-                }
-
                 // Convert evaluations [s(0), s(1), s(2), s(3)] to compressed coefficients [c0, c2, c3]
                 // The linear term c1 is recovered from the hint during verification
                 const compressed = poly_mod.UniPoly(F).evalsToCompressed(evals);
@@ -503,12 +480,6 @@ pub fn ProofConverter(comptime F: type) type {
                 outer_prover.bindRemainingRoundChallenge(challenge) catch {};
                 outer_prover.updateClaim(evals, challenge);
             }
-
-            // DEBUG: Print final claim
-            const final_claim = outer_prover.getFinalEval();
-            std.debug.print("Final claim (after all rounds) = [{x:0>16}, {x:0>16}, {x:0>16}, {x:0>16}]\n", .{
-                final_claim.limbs[0], final_claim.limbs[1], final_claim.limbs[2], final_claim.limbs[3],
-            });
 
             return Stage1Result{ .challenges = challenges, .r0 = r0, .uni_skip_claim = uni_skip_claim, .allocator = self.allocator };
         }

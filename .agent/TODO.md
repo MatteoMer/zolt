@@ -9,7 +9,7 @@
 4. **Commitment Scheme** - Dory with Jolt-compatible SRS
 5. **Verifier Preprocessing Export** - DoryVerifierSetup exports correctly
 
-### Stage 1 Fixes
+### Stage 1 Fixes (Session 11-13)
 6. **Lagrange Interpolation Bug** - Fixed dead code corrupting basis array
 7. **UniSkip Verification** - Domain sum check passes
 8. **UnivariateSkip Claim** - Correctly set to uni_poly.evaluate(r0)
@@ -28,52 +28,45 @@
 21. **Constraint Group Indices** - Fixed to match Jolt's ordering
 22. **r_grid Integration** - Added to streaming prover for bound challenge weights
 23. **Product of Slopes Fix** - t'(∞) = (Az_g1-Az_g0)*(Bz_g1-Bz_g0), NOT t'(1)-t'(0)
+24. **current_scalar in streaming round** - Added missing Lagrange kernel scaling
+25. **Cycle iteration fix** - Use current_bit check instead of half-based split
+26. **Slope as sum difference** - t'(∞) = (Σ_1 Az - Σ_0 Az) * (Σ_1 Bz - Σ_0 Bz)
 
 ---
 
-## Current Status: Stage 1 Sumcheck Final Claim Mismatch
+## Current Status: ~5% Discrepancy in Stage 1
 
 ### What Works ✅
 - UniSkip verification passes
 - All 11 remaining sumcheck rounds pass (p(0)+p(1)=claim)
-- Challenge derivation matches between Zolt and Jolt
-- Streaming round (round 1) uses product of slopes
+- Challenge derivation matches
+- Streaming round uses multiquadratic with product of slopes
 
-### What Doesn't Work ❌
-- Final output_claim ≠ expected_output_claim
+### Remaining Issue
+- output_claim ≈ 1.05 * expected_output_claim
+- The computeCubicRoundPoly logic matches Jolt's gruen_poly_deg_3
+- Likely cause: subtle difference in split_eq table construction or binding
 
-### Latest Values (After Session 13 Fixes)
-```
-output_claim (from sumcheck):     6342589437459870311969131907974809364188732687625165290542906571219779431047
-expected_output_claim (from R1CS): 10815232497405550102099453343964744311420855254768592892790152336464556005907
-```
-
-### Root Cause Analysis
-
-The issue is likely in the **cycle rounds** (rounds 2-11). Possible causes:
-
-1. **r_grid weighting** - The weight computation might not match Jolt's
-2. **Cycle bit indexing** - The way cycles are split by current_bit might be wrong
-3. **eq weight factorization** - E_out/E_in tables might not be computed correctly for cycle rounds
-4. **current_scalar accumulation** - split_eq.current_scalar might not be updated properly
-
-### Next Steps
-
-1. [ ] Compare r_grid values at each round between Zolt and Jolt
-2. [ ] Verify E_out/E_in table sizes match at each round
-3. [ ] Check if cycle rounds should use multiquadratic (product of slopes) like streaming round
-4. [ ] Consider implementing Jolt's LinearStage approach (materialize Az/Bz polynomials)
+### Next Steps for ~5% fix
+1. [ ] Compare split_eq E_out/E_in tables between Zolt and Jolt
+2. [ ] Debug first cycle round specifically
+3. [ ] Check if tau values are being used with correct indices
 
 ---
 
-## Later Stages
+## Later Tasks
 
-### Stage 2: Outer Product
-- Product virtualization sumcheck
-- Uses similar multiquadratic method
+### Stage 2-7 Verification
+After Stage 1 exact match, verify:
+- Stage 2: Outer Product
+- Stage 3: Inner Sumcheck
+- Stage 4: RAM R/W Checking
+- Stage 5: Lookup
+- Stage 6: Register
+- Stage 7: Dory Batched Opening
 
-### Stage 3-7: Various Sumchecks
-- Will need verification after Stage 1 passes
+### End-to-End Verification
+Complete Jolt proof verification of Zolt-generated proofs.
 
 ---
 

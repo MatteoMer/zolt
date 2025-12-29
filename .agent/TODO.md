@@ -1,58 +1,43 @@
 # Zolt-Jolt Compatibility TODO
 
-## Current Status: Stage 1 Sumcheck Verification (Session 28)
+## Current Status: Stage 1 Sumcheck Verification (Session 29)
 
 ### Latest Findings
-- Fixed tau split issue: now passing full tau (len 12) instead of tau_low (len 11)
-- This caused output_claim to change: old ~11.3e75, new ~13.3e75
-- But verification still fails (output_claim ≠ expected_output_claim)
-- Ratio is now ~0.75 instead of ~0.91
+The streaming round computation now iterates over (x_out, x_in) pairs correctly:
+- group = in_idx & 1 (LSB of E_in index is group selector)
+- cycle = (out_idx << num_in_prime_bits) | (in_idx >> 1)
+
+After this fix, output claim changed significantly - now ~3x the expected claim.
 
 ```
-output_claim:          13253494829145889902934155105755742414822642232978678139117322728009984608729
-expected_output_claim: 17615172925949730609183894067324551214200634089653146239852636572846820428381
+output_claim:          21666336742712548502319747532501161924289540611986917453312419397056388736753
+expected_output_claim: 6886947417280328868350115979630985812677709302801764445050583343275239326794
+ratio: ~3.15x
 ```
 
-### What Was Fixed
+### What Was Fixed This Session
 - [x] Pass full tau to split_eq (m = tau.len/2 = 6 for len=12)
-- [x] E_out now has 64 entries (2^6), E_in has 32 entries (2^5) - matches Jolt
+- [x] E_out now has 64 entries (2^6), E_in has 32 entries (2^5)
+- [x] Streaming round index mapping: group from in_idx & 1, cycle from combining out_idx and in_idx >> 1
 
-### Verified Working
-- [x] All 656 Zolt tests pass
-- [x] Proof deserialization (all 48 opening claims parsed)
-- [x] Jolt preprocessing loads correctly
-- [x] Verifier instance creation succeeds
-- [x] 128-bit challenges in Montgomery form
-- [x] EqPolynomial evaluation
-- [x] r_cycle computation (challenges[1..] reversed)
-- [x] UniSkip verification passes
-- [x] Individual round equations (p(0)+p(1)=claim)
-- [x] Tau split now matches Jolt (m = tau.len/2)
+### Verified Formula Match
+The Gruen poly construction matches Jolt:
+- q_constant = t'(0) = grid_az[0] * grid_bz[0]
+- q_quadratic_coeff = t'(∞) = slope_az * slope_bz
+- Previous claim = s(0) + s(1) from sumcheck
+- The cubic polynomial s(X) = l(X) * q(X) is computed correctly
 
-### Remaining Issues
-The sumcheck output_claim doesn't match expected_output_claim.
-
-Expected formula (Jolt outer.rs lines 421-452):
-```
-expected = tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod
-
-where:
-- tau_high_bound_r0 = L(tau_high, r0) - Lagrange kernel
-- tau_bound_r_tail_reversed = eq(tau_low, reversed(sumcheck_challenges))
-- inner_sum_prod = Az(rx_constr) * Bz(rx_constr)
-- rx_constr = [r_stream, r0]
-```
-
-Possible remaining issues:
-1. **R1CS witness values** - Zolt generates witnesses from its emulator, may differ from Jolt
-2. **Inner sum product computation** - The evaluate_inner_sum_product_at_point formula
-3. **Constraint group handling** - The interleaved group structure (full_idx >> 1, & 1)
-4. **Binding order** - How challenges are bound in the streaming prover
+### Possible Remaining Issues
+1. **E_in bit ordering** - LSB is group selector, but need to verify MSB-first vs LSB-first table build
+2. **Split eq table build** - may have big-endian vs little-endian issue in tau variable ordering
+3. **current_scalar in split_eq** - after UniSkip binding, does it include the Lagrange kernel properly?
+4. **r_grid weights** - may need to be integrated into the eq weight computation
 
 ### Next Investigation Steps
-1. Compare Zolt's Az/Bz values at a specific cycle with Jolt's
-2. Debug the inner_sum_prod computation
-3. Check if the constraint evaluation matches Jolt's R1CSEval
+1. Add debug output to print E_out/E_in lengths and first few values
+2. Print grid_az/grid_bz values to compare with Jolt
+3. Check if current_scalar matches Jolt's after UniSkip binding
+4. Verify the r_grid is being used correctly (for klen > 1 cases)
 
 ## Test Commands
 ```bash
@@ -78,3 +63,4 @@ cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture
 - [x] Opening claims with MLE evaluation
 - [x] Challenge Montgomery form conversion
 - [x] Tau split fix (pass full tau, not tau_low)
+- [x] Streaming round index structure (group in LSB of in_idx)

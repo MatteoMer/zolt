@@ -8,31 +8,37 @@
 1. ✅ Proof deserialization works - all 48 opening claims parsed correctly
 2. ✅ Jolt's preprocessing can be loaded (from /tmp/jolt_verifier_preprocessing.dat)
 3. ✅ Verifier instance created successfully
-4. ❌ Stage 1 sumcheck verification fails
+4. ✅ 128-bit challenges now converted to Montgomery form
+5. ❌ Stage 1 sumcheck verification still fails (output_claim ≠ expected_output_claim)
+
+**Current Values:**
+```
+output_claim:          11331697095435039208873616544229270298263565208265409364435501006937104790550
+expected_output_claim: 12484965348201065871489189011985428966546791723664683385883331440930509110658
+Ratio: ~0.91
+```
 
 **Error Location:**
 `sumcheck.rs:248` - `output_claim != expected_output_claim`
 
+**Key Insight:**
+- The sumcheck rounds pass (p(0) + p(1) = claim for each round)
+- But the final claim doesn't match the expected value from R1CS evaluations
+
 **Root Cause Analysis:**
-The sumcheck round polynomials pass all internal checks (p(0) + p(1) = claim), but the final output claim doesn't match what the verifier computes from the opening claims.
+The issue is NOT in:
+- ✅ Challenge format (now Montgomery form)
+- ✅ EqPolynomial evaluation
+- ✅ r_cycle computation
 
-The key formula is:
-```
-expected_output_claim = eq_factor * inner_sum_prod
-inner_sum_prod = key.evaluate_inner_sum_product_at_point(rx_constr, r1cs_input_evals)
-```
+The issue might be in:
+- The R1CS witness values themselves (do they match what Jolt expects?)
+- The streaming sumcheck's computation of Az*Bz
+- Some ordering or structure difference in how the trace is organized
 
-Where:
-- `rx_constr = [r_stream, r0]` - constraint row evaluation point
-- `r1cs_input_evals` - the 36 R1CS input evaluations from opening claims
-
-**Verified:**
-- ✅ r_cycle computation matches Jolt (challenges[1..] reversed)
-- ✅ Opening claims are being populated correctly in proof
-- ✅ Claims are retrieved correctly by verifier
-
-**Next Investigation:**
-The issue is likely in the R1CS witness generation or the MLE evaluation of those witnesses. The cycle witness values may not match what Jolt expects.
+**Next Steps:**
+1. Compare R1CS witness values between Zolt and Jolt for a simple program
+2. Debug the sumcheck prover's intermediate values vs expected
 
 ### Preprocessing Issue
 

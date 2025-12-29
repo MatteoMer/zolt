@@ -9,7 +9,7 @@
 4. **Commitment Scheme** - Dory with Jolt-compatible SRS
 5. **Verifier Preprocessing Export** - DoryVerifierSetup exports correctly
 
-### Stage 1 Fixes (Sessions 11-16)
+### Stage 1 Fixes (Sessions 11-17)
 6. **Lagrange Interpolation Bug** - Fixed dead code corrupting basis array
 7. **UniSkip Verification** - Domain sum check passes
 8. **UnivariateSkip Claim** - Correctly set to uni_poly.evaluate(r0)
@@ -36,41 +36,43 @@
 29. **Selector from full_idx** - Use selector = full_idx & 1 for constraint group in cycle rounds
 30. **r0 not in challenges** - r0 should NOT be added to the challenges list
 31. **Debug test for streaming round** - Added test to inspect intermediate values
+32. **Big-Endian Eq Tables** - E_out/E_in tables now use big-endian indexing
 
 ---
 
-## Current Status: ~0.8129 Ratio Discrepancy (Close to 13/16)
+## Current Status: ~1.2 Ratio Discrepancy (Close to 6/5)
 
-### Session 16 (December 29, 2024) - Comprehensive Investigation
+### Session 17 (December 29, 2024) - Big-Endian Fix
 
-**Values:**
+**Previous Values (Little-Endian):**
 - output_claim: 15155108253109715956971809974428807981154511443156768969051245367813784134214
 - expected:     18643585735450861043207165215350408775243828862234148101070816349947522058550
-- Ratio: 0.8129 (close to 13/16 = 0.8125)
+- Ratio: 0.8129 (close to 13/16)
+
+**Current Values (Big-Endian):**
+- output_claim: 17544243885955816008056628262847401707989885215135853123958675606975515887014
+- expected:     14636075186748817511857284373650752059613754347411376791236690874143105070933
+- Ratio: ~1.2 (close to 6/5)
+
+The fix changed the ratio direction, confirming the eq table indexing was wrong.
 
 **Verified Matching Components:**
-- Constraint group ordering (first: 10 constraints, second: 9 constraints)
-- Lagrange weight array usage (both groups use w[0..N])
-- Eq table factorization (E_out 5 bits, E_in 5 bits = 32×32 = 1024)
-- tau_low/tau_high split (tau_high = last element, tau_low = rest)
-- Lagrange kernel formula: K(x,y) = Σ L_i(x)·L_i(y)
-- Index mapping: out_idx = i >> head_in_bits, in_idx = i & mask
-- r_cycle construction: skip r_stream, reverse for BIG_ENDIAN
-- Gruen polynomial: l(X) = eq_0 + (eq_1 - eq_0) * X
+- E_out/E_in tables use big-endian (tau[0] controls MSB)
+- Jolt's inner_sum_prod = az_final * bz_final ✓
+- tau_high_bound_r0 and tau_bound_r_tail match Jolt's formulas
 
 **Remaining Investigation:**
-The systematic ratio suggests a missing/extra factor somewhere in t'(0) and t'(∞):
-
-1. **Az/Bz evaluation at single cycle** - Compare exact values per constraint
-2. **Lagrange weight order** - Verify w[i] maps to correct constraint
-3. **Product computation** - Ensure t'(0) = Σ eq * Az_g0 * Bz_g0 exactly
+The ~1.2 ratio suggests some factor is still wrong:
+1. Check if streaming round t'(0) and t'(∞) are computed correctly
+2. Verify the Gruen polynomial q(X) construction
+3. Check if current_scalar is being applied correctly
 
 ---
 
 ## Test Commands
 
 ```bash
-# Run Zolt tests (all 632)
+# Run Zolt tests (all 656)
 zig build test --summary all
 
 # Generate Jolt-format proof

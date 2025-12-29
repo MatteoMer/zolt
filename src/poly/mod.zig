@@ -388,3 +388,9 @@ test "dense polynomial basic" {
     try std.testing.expectEqual(@as(usize, 2), poly.num_vars);
     try std.testing.expectEqual(@as(usize, 4), poly.len());
 }
+
+// Reference tests from submodules to ensure they run
+test {
+    std.testing.refAllDecls(split_eq);
+    std.testing.refAllDecls(multiquadratic);
+}

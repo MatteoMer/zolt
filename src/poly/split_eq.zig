@@ -95,6 +95,23 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
 
             // Build outer prefix tables (E_out_vec) for tau[0..m]
             // E_out_vec[0] = [1] (empty eq is always 1)
+            //
+            // IMPORTANT: Use BIG-ENDIAN indexing to match Jolt's EqPolynomial::evals.
+            // For index i with bit-decomposition i = Σ b_j * 2^{n-1-j}:
+            //   evals[i] = eq(τ, b₀...b_{n-1}) where b₀ is MSB
+            //
+            // This means τ[0] controls the MSB (high bit) of the index.
+            // When adding τ[k], the existing table (size 2^k) is doubled:
+            //   - indices 0..size-1: multiply by (1 - τ[k])
+            //   - indices size..2*size-1: multiply by τ[k]
+            //
+            // But we iterate in reverse to maintain the correct ordering:
+            // For each existing entry at index i (which represents some bit pattern),
+            // we create two entries:
+            //   - index 2*i (append 0 as new LSB): multiplied by (1 - τ[k])
+            //   - index 2*i+1 (append 1 as new LSB): multiplied by τ[k]
+            //
+            // This builds the table such that the MSB corresponds to τ[0].
             try E_out_vec.append(allocator, try allocator.alloc(F, 1));
             E_out_vec.items[0][0] = F.one();
 
@@ -107,18 +124,24 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
                 const tau_k = tau_copy[k]; // w_out uses tau[0..m]
                 const one_minus_tau_k = F.one().sub(tau_k);
 
-                // eq(τ[0..k+1], (x, 0)) = eq(τ[0..k], x) * (1 - τ[k])
-                // eq(τ[0..k+1], (x, 1)) = eq(τ[0..k], x) * τ[k]
+                // Jolt's big-endian ordering: iterate backwards, doubling indices
+                // For each prev[i/2], we set:
+                //   next[i] = prev[i/2] * τ[k]       (odd index, bit = 1)
+                //   next[i-1] = prev[i/2] * (1-τ[k]) (even index, bit = 0)
+                //
+                // Equivalently in forward iteration:
+                //   next[2*i] = prev[i] * (1-τ[k])   (even index, appended 0)
+                //   next[2*i+1] = prev[i] * τ[k]    (odd index, appended 1)
                 for (0..prev_size) |i| {
-                    next[i] = prev[i].mul(one_minus_tau_k);
-                    next[i + prev_size] = prev[i].mul(tau_k);
+                    next[2 * i] = prev[i].mul(one_minus_tau_k);
+                    next[2 * i + 1] = prev[i].mul(tau_k);
                 }
 
                 try E_out_vec.append(allocator, next);
             }
 
             // Build inner prefix tables (E_in_vec) for tau[m..tau.len-1]
-            // E_in_vec[0] = [1]
+            // Same big-endian ordering as E_out_vec
             try E_in_vec.append(allocator, try allocator.alloc(F, 1));
             E_in_vec.items[0][0] = F.one();
 
@@ -131,9 +154,10 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
                 const tau_k = tau_copy[m + k]; // w_in uses tau[m..tau.len-1]
                 const one_minus_tau_k = F.one().sub(tau_k);
 
+                // Big-endian: append new bit as LSB
                 for (0..prev_size) |i| {
-                    next[i] = prev[i].mul(one_minus_tau_k);
-                    next[i + prev_size] = prev[i].mul(tau_k);
+                    next[2 * i] = prev[i].mul(one_minus_tau_k);
+                    next[2 * i + 1] = prev[i].mul(tau_k);
                 }
 
                 try E_in_vec.append(allocator, next);
@@ -184,33 +208,36 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
 
         /// Get the full eq table for the remaining unbound variables
         ///
-        /// Returns eq(τ_unbound, ·) scaled by current_scalar
+        /// Returns eq(τ_unbound, ·) scaled by current_scalar.
+        /// Uses BIG-ENDIAN indexing: τ[0] controls MSB of index.
         pub fn getFullEqTable(self: *const Self, allocator: Allocator) ![]F {
             const size = @as(usize, 1) << @intCast(self.current_index);
             const result = try allocator.alloc(F, size);
 
-            // Start with the product of all (1 - τ_i) for unbound variables
-            var base = self.current_scalar;
-            for (0..self.current_index) |i| {
-                base = base.mul(F.one().sub(self.tau[i]));
-            }
-            result[0] = base;
+            // Use big-endian construction matching Jolt's EqPolynomial::evals_serial
+            // Start with just the scaling factor
+            result[0] = self.current_scalar;
+            var current_size: usize = 1;
 
-            // Build up using the factor ratios
-            for (0..self.current_index) |i| {
-                const half = @as(usize, 1) << @intCast(i);
-                const tau_i = self.tau[i];
-                const one_minus_tau_i = F.one().sub(tau_i);
+            // For each variable, double the table size
+            // τ[0] is first (controls MSB), τ[n-1] is last (controls LSB)
+            for (0..self.current_index) |k| {
+                const tau_k = self.tau[k];
+                const one_minus_tau_k = F.one().sub(tau_k);
 
-                // factor = τ_i / (1 - τ_i)
-                const factor = if (one_minus_tau_i.eql(F.zero()))
-                    F.zero()
-                else
-                    tau_i.mul(one_minus_tau_i.inverse().?);
-
-                for (0..half) |j| {
-                    result[j + half] = result[j].mul(factor);
+                // Iterate in reverse to avoid overwriting needed values
+                // For big-endian: even indices get (1-τ), odd indices get τ
+                var i: usize = current_size;
+                while (i > 0) {
+                    i -= 1;
+                    const scalar = result[i];
+                    // Big-endian: new bit is appended as LSB
+                    // Index 2*i (even, bit=0) gets (1-τ)
+                    // Index 2*i+1 (odd, bit=1) gets τ
+                    result[2 * i + 1] = scalar.mul(tau_k);
+                    result[2 * i] = scalar.mul(one_minus_tau_k);
                 }
+                current_size *= 2;
             }
 
             return result;
@@ -376,7 +403,8 @@ const BN254Scalar = @import("../field/mod.zig").BN254Scalar;
 test "GruenSplitEqPolynomial: initialization" {
     const F = BN254Scalar;
 
-    // tau = [τ_0, τ_1, τ_2] with 1 inner variable and 2 outer
+    // tau = [τ_0, τ_1, τ_2]
+    // Split: m = 3/2 = 1, w_out = tau[0..1], w_in = tau[1..2] (excluding tau[2])
     const tau = [_]F{ F.fromU64(2), F.fromU64(3), F.fromU64(5) };
 
     var split_eq = try GruenSplitEqPolynomial(F).init(testing.allocator, &tau, 1);
@@ -384,12 +412,18 @@ test "GruenSplitEqPolynomial: initialization" {
 
     try testing.expectEqual(@as(usize, 3), split_eq.current_index);
     try testing.expect(split_eq.current_scalar.eql(F.one()));
+
+    // m = 3/2 = 1
+    // num_x_out = 1 (tau[0..1])
+    // num_x_in = 3 - 1 - 1 = 1 (tau[1..2])
     try testing.expectEqual(@as(usize, 1), split_eq.num_x_in);
-    try testing.expectEqual(@as(usize, 2), split_eq.num_x_out);
+    try testing.expectEqual(@as(usize, 1), split_eq.num_x_out);
 
     // Check prefix table sizes
-    try testing.expectEqual(@as(usize, 2), split_eq.E_in_vec.items.len); // [1], [2]
-    try testing.expectEqual(@as(usize, 3), split_eq.E_out_vec.items.len); // [1], [2], [4]
+    // E_in_vec: [0] = [1], [1] = [2] -> 2 tables
+    // E_out_vec: [0] = [1], [1] = [2] -> 2 tables
+    try testing.expectEqual(@as(usize, 2), split_eq.E_in_vec.items.len);
+    try testing.expectEqual(@as(usize, 2), split_eq.E_out_vec.items.len);
 }
 
 test "GruenSplitEqPolynomial: bind updates scalar" {
@@ -415,18 +449,32 @@ test "GruenSplitEqPolynomial: bind updates scalar" {
 test "GruenSplitEqPolynomial: prefix tables correctness" {
     const F = BN254Scalar;
 
-    // Simple case: tau = [2, 3]
-    const tau = [_]F{ F.fromU64(2), F.fromU64(3) };
+    // Use tau = [2, 3, 5] to have non-empty E_in
+    // m = 3/2 = 1
+    // w_out = tau[0..1] = [2]
+    // w_in = tau[1..2] = [3] (tau.len - 1 - m = 3-1-1 = 1)
+    // w_last = tau[2] = 5
+    const tau = [_]F{ F.fromU64(2), F.fromU64(3), F.fromU64(5) };
 
     var split_eq = try GruenSplitEqPolynomial(F).init(testing.allocator, &tau, 1);
     defer split_eq.deinit();
 
-    // E_in_vec[1] should be [1-τ_0, τ_0] = [1-2, 2] = [-1, 2]
+    // E_out_vec[1] should have 2 entries for tau[0] = 2
+    // In big-endian: E_out[0] = (1-τ_0), E_out[1] = τ_0
+    const E_out_1 = split_eq.E_out_vec.items[1];
+    try testing.expectEqual(@as(usize, 2), E_out_1.len);
+
+    const expected_e_out_0 = F.one().sub(F.fromU64(2)); // 1 - 2 = -1
+    const expected_e_out_1 = F.fromU64(2);
+    try testing.expect(E_out_1[0].eql(expected_e_out_0));
+    try testing.expect(E_out_1[1].eql(expected_e_out_1));
+
+    // E_in_vec[1] should have 2 entries for tau[1] = 3
     const E_in_1 = split_eq.E_in_vec.items[1];
     try testing.expectEqual(@as(usize, 2), E_in_1.len);
 
-    const expected_e_in_0 = F.one().sub(F.fromU64(2)); // 1 - 2 = -1
-    const expected_e_in_1 = F.fromU64(2);
+    const expected_e_in_0 = F.one().sub(F.fromU64(3)); // 1 - 3 = -2
+    const expected_e_in_1 = F.fromU64(3);
     try testing.expect(E_in_1[0].eql(expected_e_in_0));
     try testing.expect(E_in_1[1].eql(expected_e_in_1));
 }
@@ -449,4 +497,51 @@ test "GruenSplitEqPolynomial: cubic round poly basic" {
     // s(0) + s(1) should equal previous_claim
     const sum = round_poly[0].add(round_poly[1]);
     try testing.expect(sum.eql(previous_claim));
+}
+
+test "GruenSplitEqPolynomial: big-endian eq table correctness" {
+    const F = BN254Scalar;
+
+    // tau = [τ_0, τ_1, τ_2, τ_3] where we can verify the table structure
+    // For 4 elements: m = 4/2 = 2, so E_out uses tau[0..2] and E_in uses tau[2..3]
+    // getFullEqTable combines all unbound variables
+    const tau = [_]F{ F.fromU64(3), F.fromU64(5), F.fromU64(7), F.fromU64(11) };
+
+    var split_eq = try GruenSplitEqPolynomial(F).init(testing.allocator, &tau, 1);
+    defer split_eq.deinit();
+
+    // Get the full eq table (should have 16 entries since current_index = 4)
+    const eq_table = try split_eq.getFullEqTable(testing.allocator);
+    defer testing.allocator.free(eq_table);
+
+    try testing.expectEqual(@as(usize, 16), eq_table.len);
+
+    // In big-endian ordering, index i encodes bits (b_0, b_1, b_2, b_3) where b_0 is MSB
+    // eq(τ, x) = Π_j (τ_j * b_j + (1-τ_j) * (1-b_j))
+
+    const tau0 = F.fromU64(3);
+    const tau1 = F.fromU64(5);
+    const tau2 = F.fromU64(7);
+    const tau3 = F.fromU64(11);
+    const one_minus_tau0 = F.one().sub(tau0);
+    const one_minus_tau1 = F.one().sub(tau1);
+    const one_minus_tau2 = F.one().sub(tau2);
+    const one_minus_tau3 = F.one().sub(tau3);
+
+    // Index 0 (0000): all bits 0 → (1-τ_0)*(1-τ_1)*(1-τ_2)*(1-τ_3)
+    const expected_0 = one_minus_tau0.mul(one_minus_tau1).mul(one_minus_tau2).mul(one_minus_tau3);
+
+    // Index 15 (1111): all bits 1 → τ_0*τ_1*τ_2*τ_3
+    const expected_15 = tau0.mul(tau1).mul(tau2).mul(tau3);
+
+    // Index 5 (0101): bits = (0,1,0,1) → (1-τ_0)*τ_1*(1-τ_2)*τ_3
+    const expected_5 = one_minus_tau0.mul(tau1).mul(one_minus_tau2).mul(tau3);
+
+    // Index 10 (1010): bits = (1,0,1,0) → τ_0*(1-τ_1)*τ_2*(1-τ_3)
+    const expected_10 = tau0.mul(one_minus_tau1).mul(tau2).mul(one_minus_tau3);
+
+    try testing.expect(eq_table[0].eql(expected_0));
+    try testing.expect(eq_table[5].eql(expected_5));
+    try testing.expect(eq_table[10].eql(expected_10));
+    try testing.expect(eq_table[15].eql(expected_15));
 }

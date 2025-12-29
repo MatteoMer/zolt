@@ -42,43 +42,57 @@
 
 ## Current Status: ~1.2 Ratio Discrepancy (Close to 6/5)
 
-### Session 17 (December 29, 2024) - Big-Endian Fix
+### Session 18 (December 29, 2024) - Investigation Continues
 
-**Previous Values (Little-Endian):**
-- output_claim: 15155108253109715956971809974428807981154511443156768969051245367813784134214
-- expected:     18643585735450861043207165215350408775243828862234148101070816349947522058550
-- Ratio: 0.8129 (close to 13/16)
-
-**Current Values (Big-Endian):**
+**Current Values:**
 - output_claim: 17544243885955816008056628262847401707989885215135853123958675606975515887014
 - expected:     14636075186748817511857284373650752059613754347411376791236690874143105070933
-- Ratio: ~1.2 (close to 6/5)
+- Ratio: ~1.1987 (close to 6/5 = 1.2)
 
-The fix changed the ratio direction, confirming the eq table indexing was wrong.
+**Verified Matching Components (all correct):**
+1. E_out/E_in tables use big-endian (tau[0] controls MSB) ✓
+2. Jolt's inner_sum_prod = az_final * bz_final ✓
+3. tau_high_bound_r0 and tau_bound_r_tail match Jolt's formulas ✓
+4. Cycle index to eq table mapping: out_idx = i >> head_in_bits, in_idx = i & mask ✓
+5. LC.evaluate handles constants correctly ✓
+6. Both groups use same Lagrange weights w[0..N] ✓
+7. gruen_poly_deg_3 formula: l(X) = eq_0 + (eq_1 - eq_0) * X ✓
+8. t'(∞) = slope_Az * slope_Bz (product of slopes, NOT slope of product) ✓
+9. current_scalar accumulates eq(tau[i], r_i) products ✓
+10. Binding order: LowToHigh, tau[n-1] bound first ✓
 
-**Verified Matching Components:**
-- E_out/E_in tables use big-endian (tau[0] controls MSB)
-- Jolt's inner_sum_prod = az_final * bz_final ✓
-- tau_high_bound_r0 and tau_bound_r_tail match Jolt's formulas
-- Cycle index to eq table mapping: out_idx = i >> head_in_bits, in_idx = i & mask ✓
-- LC.evaluate handles constants correctly (separate field, not trailing 1)
-- Both groups use same Lagrange weights w[0..N] ✓
+**Key Jolt Formulas (verified against source):**
 
-**Remaining Investigation (Next Session):**
+Expected output claim:
+```
+expected = tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod
+```
 
-1. **R1CS Input Evaluations**
-   - The expected value uses `r1cs_input_evals` from `proof.opening_claims`
-   - Need to verify these match what Zolt computes
-   - Check if opening claim order matches `ALL_R1CS_INPUTS`
+Where:
+- tau_high_bound_r0 = LagrangePolynomial::lagrange_kernel(tau_high, r0)
+- tau_bound_r_tail_reversed = EqPolynomial::mle(tau_low, sumcheck_challenges.reverse())
+- inner_sum_prod = (az_g0 + r_stream*(az_g1-az_g0)) * (bz_g0 + r_stream*(bz_g1-bz_g0))
 
-2. **Gruen Polynomial q(X)**
-   - Verify q(0) = t'(0), q(∞) = t'(∞) interpretation
-   - Check if q(1) derivation is correct
+**Remaining Investigation Areas:**
 
-3. **The 6/5 Ratio**
-   - Could be related to m = 5 (tau split)
-   - Or related to constraint group sizes (10/9)
-   - Or a missing/extra factor somewhere
+1. **Eq table scaling** - Does E_out/E_in need to include current_scalar?
+   - In Jolt, E_out_in_for_window returns unscaled tables
+   - current_scalar is applied only in l(X) via computeCubicRoundPoly
+
+2. **Window size handling** - For window_size=1:
+   - E_active = [1] (single element)
+   - t'(0) = evals[0], t'(∞) = evals[2]
+   - But in Zolt we compute t'(0) and t'(∞) directly
+
+3. **Factorization in cycle rounds** - The r_grid is used differently:
+   - Streaming phase: update r_grid
+   - Linear phase: don't update r_grid
+   - Check if phase transition is correct
+
+4. **The 6/5 Ratio**
+   - Could be related to m = 5 (tau split at halfway)
+   - Or related to window_size mismatch
+   - Or a missing/extra factor in the eq polynomial computation
 
 ---
 

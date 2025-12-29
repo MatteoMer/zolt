@@ -2,9 +2,43 @@
 
 ## Current Status (December 29, 2024)
 
+### Session 14 - Stage 1 Remaining Rounds - Current_scalar Fix
+
+**Status**: UniSkip passes. Stage 1 output_claim still ~10x off from expected.
+
+**Key Fixes Made This Session:**
+1. **Multiquadratic t'(∞) fix**: Changed from `(Σ slope_Az) * (Σ slope_Bz)` to `Σ (slope_Az * slope_Bz)` (sum of slope PRODUCTS, not product of slope sums)
+2. **current_scalar fix**: Removed `current_scalar` multiplication from t' computation. It should ONLY be applied in `computeCubicRoundPoly` when computing the linear l(X) polynomial. This matches Jolt's approach where `E_active_for_window` excludes `current_scalar`.
+3. **r_grid scope**: Investigated whether r_grid should be updated for streaming round. Currently updating for all rounds.
+
+**Current Values (Latest):**
+- output_claim = 19554470937579541780510262269217038952069616711418990461176806350001139400315
+- expected = 2031852899707373710416144018283998775120867638466566680547789923893277743810
+- Ratio ~9.6x (still significant discrepancy)
+
+**Key Insight from Jolt:**
+In Jolt's `compute_t_evals`:
+- `t_prime_0` and `t_prime_inf` are computed using `E_active_for_window` which does NOT include `current_scalar`
+- The `current_scalar` is only used in `gruen_poly_deg_3` when computing the linear eq polynomial l(X)
+
+**Remaining Issues:**
+1. The 10x discrepancy suggests something fundamental is still wrong
+2. Possible causes:
+   - Eq table indexing (E_out, E_in) might be wrong
+   - r_grid weighting in cycle rounds might differ from Jolt
+   - Constraint group handling in streaming round
+   - Cycle index bit manipulation
+
+**Jolt's StreamingWindow vs LinearStage:**
+- `OuterStreamingWindow::ingest_challenge` updates r_grid
+- `OuterLinearStage::ingest_challenge` does NOT update r_grid
+- This suggests r_grid captures eq weights from streaming phase only
+
+---
+
 ### Session 13 - Stage 1 Remaining Rounds Deep Dive
 
-**Status**: UniSkip passes, output_claim now ~10% off from expected (was 2x off).
+**Status**: UniSkip passes, output_claim was ~5% off from expected.
 
 **Key Fixes Made:**
 1. **Product of slopes** - t'(∞) = (Az_g1-Az_g0)*(Bz_g1-Bz_g0), NOT t'(1)-t'(0)
@@ -12,35 +46,6 @@
 3. **current_scalar multiplication** - Include split_eq.current_scalar in eq weights
 4. **r_grid indexing** - Use proper bit masking for r_grid weights
 5. **num_cycle_bound calculation** - Use `current_round - 2` for cycle rounds
-
-**Current Values (Latest):**
-- output_claim = 20476596735539743973289222952622492655978032670028909243579217210968836662359
-- expected = 19451987387422399828613541021089071219906664144654553574917984095719306626522
-- Ratio ~1.05 (5% off, was ~2x initially)
-
-**Latest Fixes:**
-1. Added current_scalar to streaming round eq weight
-2. Changed cycle iteration to use current_bit check instead of half-based split
-3. Fixed slope computation to use sum of values then difference (not per-cycle slope)
-
-**Remaining Issue (~5% discrepancy):**
-The computeCubicRoundPoly implementation matches Jolt's gruen_poly_deg_3 logic.
-Possible remaining causes:
-1. Split_eq table construction differences
-2. Binding order nuances
-3. Something in the streaming round or first cycle round specifically
-
-**Jolt's Approach:**
-- Streaming window: Computes grid[j] for j ∈ {0, 1} (window positions)
-- Each grid position sums over k ∈ 0..klen where klen = 2^(num_bound_challenges)
-- scaled_w[k] = Lagrange(r0) * r_grid[k] combines constraint weighting with bound challenges
-- After multiquadratic expansion, products are computed at each grid position
-
-**Two Possible Approaches:**
-1. **Streaming approach**: Properly implement Jolt's streaming sumcheck with r_grid weighting
-2. **Materialization approach**: After streaming round, materialize Az/Bz as dense polynomials
-
-The materialization approach (like Jolt's LinearStage) may be simpler to get correct.
 
 ---
 

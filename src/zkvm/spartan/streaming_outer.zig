@@ -587,8 +587,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 // t'(∞) = Σ_cycles eq * (Az_g1 - Az_g0) * (Bz_g1 - Bz_g0)  [product of slopes]
                 //
                 // The eq weights are factorized: eq[i] = E_out[i >> head_in_bits] * E_in[i & mask]
-                // Current scalar from split_eq includes Lagrange kernel scaling
-                const current_scalar = self.split_eq.current_scalar;
+                // NOTE: Do NOT include current_scalar here - it will be applied in computeCubicRoundPoly.
 
                 for (0..@min(self.padded_trace_len, self.cycle_witnesses.len)) |i| {
                     // Factorized eq weight using proper bit shifting
@@ -596,8 +595,8 @@ pub fn StreamingOuterProver(comptime F: type) type {
                     const in_idx = i & e_in_mask;
                     const e_out_val = if (out_idx < E_out.len) E_out[out_idx] else F.zero();
                     const e_in_val = if (in_idx < E_in.len) E_in[in_idx] else F.zero();
-                    // Include current_scalar (Lagrange kernel scaling)
-                    const eq_val = e_out_val.mul(e_in_val).mul(current_scalar);
+                    // No current_scalar - it will be applied when computing l(X) in computeCubicRoundPoly
+                    const eq_val = e_out_val.mul(e_in_val);
 
                     // Compute Az and Bz separately for both groups to get slopes
                     const az_bz = self.computeCycleAzBzForMultiquadratic(&self.cycle_witnesses[i]);
@@ -605,19 +604,12 @@ pub fn StreamingOuterProver(comptime F: type) type {
                     t_infinity = t_infinity.add(eq_val.mul(az_bz.prod_inf)); // slope_a * slope_b
                 }
             } else {
-                // CYCLE ROUND: Sum over all cycles weighted by eq and r_grid
+                // CYCLE ROUND: Use true multiquadratic method
                 //
-                // The key insight is that we need to compute:
-                // - t'(0) = Σ_{cycles where current_bit=0} eq_weight * Az * Bz
-                // - t'(1) = Σ_{cycles where current_bit=1} eq_weight * Az * Bz
-                // - t'(∞) = (LATER: product of slopes for true multiquadratic)
+                // t'(0) = Σ eq_i * Az(i,0) * Bz(i,0)  (sum over cycles with current_bit=0)
+                // t'(∞) = Σ eq_i * slope_Az_i * slope_Bz_i  (sum of slope PRODUCTS)
                 //
-                // For now, use the simpler approach:
-                // - Compute sum of Az*Bz products for each half
-                // - t'(∞) = slope of product = t'(1) - t'(0)
-                //
-                // This matches standard sumcheck, not Gruen's multiquadratic method.
-                // TODO: Implement true multiquadratic for efficiency.
+                // This matches Jolt's multiquadratic polynomial representation.
 
                 const r_stream = self.r_stream orelse F.zero();
 
@@ -625,64 +617,66 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 const r_grid = &self.r_grid;
                 const r_grid_len = r_grid.length();
 
-                // The split determines which cycles have current_bit = 0 vs 1
-                // For LowToHigh binding:
-                // - Round 1: bit 0 = cycle_idx & 1
-                // - Round 2: bit 1 = (cycle_idx >> 1) & 1
-                // - Round k: bit k-1 = (cycle_idx >> (k-1)) & 1
-                //
-                // But we also need to consider that cycle_idx relates to r_grid_idx
-                // via the bound challenges.
-
-                // For cycle round j (j >= 2), we've bound (j-2) cycle challenges
-                // Round 1 = streaming (constraint group)
-                // Round 2 = cycle bit 0 (first cycle challenge)
-                // Round k (k >= 2) = cycle bit (k-2)
-                //
-                // At round k, r_grid has 2^(k-2) entries (for k >= 2)
-                // At round 2, r_grid has 1 entry (no cycle challenges bound yet)
-
                 const num_cycle_bound = if (self.current_round >= 2) self.current_round - 2 else 0;
                 const r_grid_mask = if (num_cycle_bound > 0) (@as(usize, 1) << @intCast(num_cycle_bound)) - 1 else 0;
 
                 // Current cycle bit position we're summing over
                 const current_bit_pos = num_cycle_bound;
 
-                var sum_prod_0 = F.zero();
-                var sum_prod_1 = F.zero();
+                // Number of base cycles (with current_bit masked out)
+                const num_base = self.padded_trace_len >> 1;
+                const actual_len = @min(num_base, (self.cycle_witnesses.len + 1) / 2);
 
-                for (0..@min(self.padded_trace_len, self.cycle_witnesses.len)) |cycle_idx| {
-                    // Get eq weight from split_eq (based on cycle position in remaining vars)
-                    const remaining_idx = cycle_idx >> @intCast(num_cycle_bound + 1);
+                // Iterate over base cycle indices (pairs of cycles that differ only in current_bit)
+                for (0..actual_len) |base_idx| {
+                    // Construct cycle indices for 0 and 1 positions
+                    const low_mask = (@as(usize, 1) << @intCast(current_bit_pos)) - 1;
+                    const high_bits = base_idx >> @intCast(current_bit_pos);
+                    const low_bits = base_idx & low_mask;
+                    const cycle_idx_0 = (high_bits << @intCast(current_bit_pos + 1)) | low_bits;
+                    const cycle_idx_1 = cycle_idx_0 | (@as(usize, 1) << @intCast(current_bit_pos));
+
+                    // Compute eq weight using the remaining bits
+                    const remaining_idx = high_bits;
                     const out_idx = remaining_idx >> @intCast(head_in_bits);
                     const in_idx = remaining_idx & e_in_mask;
                     const e_out_val = if (out_idx < E_out.len) E_out[out_idx] else F.zero();
                     const e_in_val = if (in_idx < E_in.len) E_in[in_idx] else F.zero();
-                    const eq_val = e_out_val.mul(e_in_val);
+                    const eq_base = e_out_val.mul(e_in_val);
 
-                    // Get r_grid weight based on bound challenges
-                    const r_grid_idx = cycle_idx & r_grid_mask;
-                    const r_weight = if (r_grid_idx < r_grid_len) r_grid.get(r_grid_idx) else F.zero();
+                    // r_grid weight
+                    const k = cycle_idx_0 & r_grid_mask;
+                    const r_weight = if (k < r_grid_len) r_grid.get(k) else F.zero();
+                    // NOTE: Do NOT multiply by current_scalar here - it will be applied
+                    // in computeCubicRoundPoly when computing the linear eq polynomial l(X).
+                    const weight = eq_base.mul(r_weight);
 
-                    // Combined weight
-                    const weight = eq_val.mul(r_weight).mul(self.split_eq.current_scalar);
+                    // Get Az*Bz for both positions (using separate function to get Az, Bz individually)
+                    var az_0 = F.zero();
+                    var bz_0 = F.zero();
+                    var az_1 = F.zero();
+                    var bz_1 = F.zero();
 
-                    // Compute Az * Bz for this cycle
-                    const az_bz = self.computeCycleAzBzProductCombined(&self.cycle_witnesses[cycle_idx], r_stream);
-
-                    // Add to appropriate sum based on current bit
-                    const current_bit = (cycle_idx >> @intCast(current_bit_pos)) & 1;
-                    if (current_bit == 0) {
-                        sum_prod_0 = sum_prod_0.add(weight.mul(az_bz));
-                    } else {
-                        sum_prod_1 = sum_prod_1.add(weight.mul(az_bz));
+                    if (cycle_idx_0 < self.cycle_witnesses.len) {
+                        const result = self.computeCycleAzBzSeparate(&self.cycle_witnesses[cycle_idx_0], r_stream);
+                        az_0 = result.az;
+                        bz_0 = result.bz;
                     }
-                }
 
-                // For standard sumcheck (not multiquadratic):
-                t_zero = sum_prod_0;
-                // t'(∞) for standard sumcheck is just the slope of f
-                t_infinity = sum_prod_1.sub(sum_prod_0);
+                    if (cycle_idx_1 < self.cycle_witnesses.len) {
+                        const result = self.computeCycleAzBzSeparate(&self.cycle_witnesses[cycle_idx_1], r_stream);
+                        az_1 = result.az;
+                        bz_1 = result.bz;
+                    }
+
+                    // Accumulate t'(0): eq * Az_0 * Bz_0
+                    t_zero = t_zero.add(weight.mul(az_0.mul(bz_0)));
+
+                    // Compute slopes and accumulate t'(∞): eq * slope_Az * slope_Bz
+                    const slope_az = az_1.sub(az_0);
+                    const slope_bz = bz_1.sub(bz_0);
+                    t_infinity = t_infinity.add(weight.mul(slope_az.mul(slope_bz)));
+                }
             }
 
             // Use Gruen's method to compute the cubic round polynomial
@@ -932,72 +926,90 @@ pub fn StreamingOuterProver(comptime F: type) type {
             const klen = self.r_grid.length();
             const k_mask = if (klen > 0) klen - 1 else 0;
 
-            // Current scalar from split_eq (accumulated eq for bound variables)
-            const current_scalar = self.split_eq.current_scalar;
-
-            // Compute sums of Az and Bz separately for each half
-            // This is needed for the multiquadratic method:
-            // t'(0) = Σ_0 eq * Az * Bz (sum over first half)
-            // t'(∞) = (Σ_1 eq * Az - Σ_0 eq * Az) * (Σ_1 eq * Bz - Σ_0 eq * Bz)
-            //       = (sum_az_1 - sum_az_0) * (sum_bz_1 - sum_bz_0)
+            // Compute t'(0) and t'(∞) using true multiquadratic method:
             //
-            // This is DIFFERENT from Σ eq * (Az_1 - Az_0) * (Bz_1 - Bz_0) !!
+            // t'(0) = Σ eq_i * Az(i,0) * Bz(i,0)  (sum over cycles with current_bit=0)
+            // t'(∞) = Σ eq_i * (Az(i,1) - Az(i,0)) * (Bz(i,1) - Bz(i,0))
+            //       = Σ eq_i * slope_Az_i * slope_Bz_i
+            //
+            // CRITICAL: t'(∞) is the sum of (slope products), NOT the product of (slope sums)!
+            // This matches Jolt's multiquadratic polynomial representation.
 
             // The current bit position we're summing over
             // For cycle round k (current_round = k+1), we sum over bit (k-1)
             const current_bit_pos = num_cycle_bound;
 
             var t_00 = F.zero(); // Sum of products for current_bit = 0
-            var sum_az_0 = F.zero(); // Sum of Az for current_bit = 0
-            var sum_bz_0 = F.zero(); // Sum of Bz for current_bit = 0
-            var t_01 = F.zero(); // Sum of products for current_bit = 1
-            var sum_az_1 = F.zero(); // Sum of Az for current_bit = 1
-            var sum_bz_1 = F.zero(); // Sum of Bz for current_bit = 1
+            var t_inf = F.zero(); // Sum of (slope_Az * slope_Bz) weighted by eq
 
-            // Iterate over ALL cycles and split by current bit value
-            for (0..@min(self.padded_trace_len, self.cycle_witnesses.len)) |cycle_idx| {
-                // Compute eq weight
-                // remaining_idx extracts the bits ABOVE the current bit being summed
-                // These are the bits that index into E_out and E_in
-                const remaining_bits = current_bit_pos + 1;
-                const remaining_idx = cycle_idx >> @intCast(remaining_bits);
+            // Number of base cycles (with current_bit masked out)
+            // base_idx ranges from 0 to (padded_trace_len / 2) - 1
+            const num_base = self.padded_trace_len >> 1;
+            const actual_len = @min(num_base, (self.cycle_witnesses.len + 1) / 2);
+
+            // Iterate over base cycle indices (pairs of cycles that differ only in current_bit)
+            for (0..actual_len) |base_idx| {
+                // cycle_idx_0 has current_bit = 0
+                // cycle_idx_1 has current_bit = 1
+                // We construct these by inserting 0/1 at current_bit_pos
+                const low_mask = (@as(usize, 1) << @intCast(current_bit_pos)) - 1;
+                const high_bits = base_idx >> @intCast(current_bit_pos);
+                const low_bits = base_idx & low_mask;
+                const cycle_idx_0 = (high_bits << @intCast(current_bit_pos + 1)) | low_bits;
+                const cycle_idx_1 = cycle_idx_0 | (@as(usize, 1) << @intCast(current_bit_pos));
+
+                // Compute eq weight using the REMAINING bits (above current_bit_pos)
+                // The remaining_idx is the same for both cycle_idx_0 and cycle_idx_1
+                const remaining_idx = high_bits;
                 const out_idx = remaining_idx >> @intCast(head_in_bits);
                 const in_idx = remaining_idx & e_in_mask;
                 const e_out_val = if (out_idx < E_out.len) E_out[out_idx] else F.zero();
                 const e_in_val = if (in_idx < E_in.len) E_in[in_idx] else F.zero();
                 const eq_base = e_out_val.mul(e_in_val);
 
-                // r_grid weight: the low `num_cycle_bound` bits of cycle_idx
-                const k = cycle_idx & k_mask;
+                // r_grid weight: the low `num_cycle_bound` bits of cycle_idx_0
+                // (same as cycle_idx_1 since they only differ at current_bit_pos which is > num_cycle_bound-1)
+                const k = cycle_idx_0 & k_mask;
                 const r_weight = if (k < klen) self.r_grid.get(k) else F.zero();
-                const eq_val = eq_base.mul(r_weight).mul(current_scalar);
+                // NOTE: Do NOT multiply by current_scalar here - it will be applied
+                // in computeCubicRoundPoly when computing the linear eq polynomial l(X).
+                // This matches Jolt's E_active_for_window which excludes current_scalar.
+                const eq_val = eq_base.mul(r_weight);
 
-                const az_bz = self.computeCycleAzBzSeparate(&self.cycle_witnesses[cycle_idx], r_stream);
+                // Get Az, Bz for both 0 and 1 positions
+                var az_0 = F.zero();
+                var bz_0 = F.zero();
+                var az_1 = F.zero();
+                var bz_1 = F.zero();
 
-                // Split by current bit value
-                const current_bit = (cycle_idx >> @intCast(current_bit_pos)) & 1;
-                if (current_bit == 0) {
-                    t_00 = t_00.add(eq_val.mul(az_bz.az.mul(az_bz.bz)));
-                    sum_az_0 = sum_az_0.add(eq_val.mul(az_bz.az));
-                    sum_bz_0 = sum_bz_0.add(eq_val.mul(az_bz.bz));
-                } else {
-                    t_01 = t_01.add(eq_val.mul(az_bz.az.mul(az_bz.bz)));
-                    sum_az_1 = sum_az_1.add(eq_val.mul(az_bz.az));
-                    sum_bz_1 = sum_bz_1.add(eq_val.mul(az_bz.bz));
+                if (cycle_idx_0 < self.cycle_witnesses.len) {
+                    const result = self.computeCycleAzBzSeparate(&self.cycle_witnesses[cycle_idx_0], r_stream);
+                    az_0 = result.az;
+                    bz_0 = result.bz;
                 }
-            }
 
-            // Compute quadratic coefficient as product of slope sums
-            // t'(∞) = (Σ_1 Az - Σ_0 Az) * (Σ_1 Bz - Σ_0 Bz)
-            const slope_az = sum_az_1.sub(sum_az_0);
-            const slope_bz = sum_bz_1.sub(sum_bz_0);
-            const t_slopes = slope_az.mul(slope_bz);
+                if (cycle_idx_1 < self.cycle_witnesses.len) {
+                    const result = self.computeCycleAzBzSeparate(&self.cycle_witnesses[cycle_idx_1], r_stream);
+                    az_1 = result.az;
+                    bz_1 = result.bz;
+                }
+
+                // Accumulate t'(0): eq * Az_0 * Bz_0
+                t_00 = t_00.add(eq_val.mul(az_0.mul(bz_0)));
+
+                // Compute slopes for this base cycle
+                const slope_az = az_1.sub(az_0);
+                const slope_bz = bz_1.sub(bz_0);
+
+                // Accumulate t'(∞): eq * slope_Az * slope_Bz (sum of slope PRODUCTS)
+                t_inf = t_inf.add(eq_val.mul(slope_az.mul(slope_bz)));
+            }
 
             // Use Gruen's method
             const previous_claim = self.current_claim;
             const round_poly = self.split_eq.computeCubicRoundPoly(
                 t_00,
-                t_slopes,
+                t_inf,
                 previous_claim,
             );
 
@@ -1009,14 +1021,15 @@ pub fn StreamingOuterProver(comptime F: type) type {
             // If this is the streaming round (current_round == 1), save r_stream
             if (self.current_round == 1) {
                 self.r_stream = r;
+                // Don't update r_grid for streaming round - it's only for cycle challenges
+            } else {
+                // For cycle rounds, update r_grid with the cycle challenge
+                // This expands the table to account for the bound variable
+                self.r_grid.update(r);
             }
 
             try self.challenges.append(self.allocator, r);
             self.split_eq.bind(r);
-
-            // Update r_grid with the new challenge
-            // This expands the table to account for the bound variable
-            self.r_grid.update(r);
 
             self.current_round += 1;
         }

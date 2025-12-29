@@ -2,55 +2,75 @@
 
 ## Current Status (December 29, 2024)
 
-### Session 15 - Investigating 1.23x Discrepancy (Continued)
+### Session 16 - Deep Investigation of 0.8129 Ratio
 
-**Status**: UniSkip passes. Stage 1 output_claim is ~1.23x off from expected.
+**Status**: UniSkip passes. Stage 1 output_claim is ~0.8129 of expected (close to 13/16 = 0.8125).
 
 **Current Values:**
 - output_claim = 15155108253109715956971809974428807981154511443156768969051245367813784134214
 - expected = 18643585735450861043207165215350408775243828862234148101070816349947522058550
-- Ratio: 0.813 (about 1.23x)
-- Missing fraction: ~18.7% ≈ 3/16
+- Ratio: 0.8129 (close to 13/16 = 0.8125)
 
-**Deep Analysis Performed:**
+**Verified Components (All Match Jolt):**
 
-1. **ExpandingTable**: Verified update logic matches Jolt exactly
-   - LowToHigh: `values[i] = (1-r)*old`, `values[i+len] = r*old`
+1. **Constraint Group Ordering**
+   - First group: indices {1,2,3,4,5,6,11,14,17,18} (10 constraints)
+   - Second group: indices {0,7,8,9,10,12,13,15,16} (9 constraints)
+   - Both use same Lagrange weight array `w[0..N]`
 
-2. **GruenSplitEqPolynomial**:
-   - initWithScaling matches Jolt's split: m=len/2, E_out for first half, E_in for second
-   - bind() formula matches: `eq(τ, r) = 1 - τ - r + 2*τ*r`
+2. **Streaming Round Index Structure**
+   - Jolt: for each (out_idx, in_idx), for j in 0..2:
+     - full_idx = i * 2 + j
+     - step_idx = full_idx >> 1 = i (cycle index)
+     - selector = full_idx & 1 = j (group selector)
+   - Zolt: same logic in streaming iteration
 
-3. **Index Structure in Streaming Round**:
-   - Jolt: `full_idx = offset + j*klen + k`, `step_idx = full_idx >> 1`, `selector = full_idx & 1`
-   - For first streaming window: `klen=1`, `jlen=2`, so `step_idx = i`, `selector = j`
-   - Our iteration: directly over cycles `i`, computing both groups
+3. **Eq Table Factorization**
+   - E_out: 5 bits (32 entries)
+   - E_in: 5 bits (32 entries)
+   - Total: 32 × 32 = 1024 for 1024 cycles
 
-4. **E_active_for_window**: For window_size=1, returns [1] (no-op)
+4. **r_cycle Computation**
+   - Skip challenges[0] (r_stream)
+   - Take challenges[1..]
+   - Reverse for BIG_ENDIAN
 
-5. **Eq Table Factorization**:
-   - For tau_low.len=11: E_out has 32 entries (5 bits), E_in has 32 entries (5 bits)
-   - Total: 32*32 = 1024 = padded_trace_len ✓
+5. **Gruen Polynomial Construction**
+   - l(X) = eq(0) + (eq(1) - eq(0)) * X
+   - q(0) = t'(0), q(∞) = t'(∞)
+   - q(1) = (claim - l(0)*q(0)) / l(1)
+   - s(X) = l(X) * q(X)
 
-6. **project_to_first_variable**: For window_size=1, just returns evals[0] or evals[2]
+6. **ExpandingTable Update**
+   - `values[i] = (1-r)*old`, `values[i+len] = r*old`
 
-**What's Been Ruled Out:**
-- ExpandingTable update formula
-- eq table construction (E_out, E_in split)
-- bind() formula for current_scalar
-- Iteration ranges (0..1023 for 1024 cycles)
-- Index mapping (out_idx = i/32, in_idx = i%32)
-- switch_over calculation
+**Remaining Investigation Areas:**
 
-**Remaining Mystery:**
-The ratio 0.813 ≈ 13/16 suggests we're computing 13/16 of the expected sum.
-Could indicate:
-- Some cycles being skipped?
-- Some terms being computed with wrong weights?
-- Off-by-one in a subtle place?
+The discrepancy must be in t'(0) and t'(∞) computation:
 
-**Next Investigation:**
-Add debug output to compare per-round values between Zolt and Jolt.
+1. **Az/Bz Evaluation**
+   - Verify `condition` and `magnitude` match Jolt's `a·z` and `b·z`
+
+2. **Lagrange Weight Application**
+   - Verify `lagrange_evals_r0[i]` matches Jolt's `w[i]`
+
+3. **Product of Slopes**
+   - t'(∞) = Σ eq * (Az_g1 - Az_g0) * (Bz_g1 - Bz_g0)
+
+4. **current_scalar Handling**
+   - Ensure not double-applied in streaming round
+
+**Key Files:**
+
+Jolt:
+- `outer.rs::extrapolate_from_binary_grid_to_tertiary_grid` (563-635)
+- `outer.rs::compute_evaluation_grid_from_trace` (641-751)
+- `evaluation.rs::fmadd_*_group_at_r`
+
+Zolt:
+- `streaming_outer.zig::computeRemainingRoundPoly`
+- `streaming_outer.zig::computeCycleAzBzForMultiquadratic`
+- `split_eq.zig::computeCubicRoundPoly`
 
 ---
 

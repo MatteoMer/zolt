@@ -624,7 +624,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 //   - r_idx ∈ {0, ..., r_grid.len-1} expands the index space
                 //   - The LSB of full_idx selects the constraint group
 
-                const r_stream = self.r_stream orelse F.zero();
+                // Note: r_stream is NOT used here - the selector comes from full_idx & 1
                 const r_grid = &self.r_grid;
                 const r_grid_len = r_grid.length();
                 const num_r_bits: u6 = if (r_grid_len > 1) @intCast(std.math.log2_int(usize, r_grid_len)) else 0;
@@ -659,13 +659,15 @@ pub fn StreamingOuterProver(comptime F: type) type {
                             while (r_idx < r_grid_len) : (r_idx += 1) {
                                 const r_weight = r_grid.get(r_idx);
 
-                                // Compute full_idx and derive step_idx
+                                // Compute full_idx and derive step_idx and selector
+                                // In Jolt, the LSB of full_idx determines the constraint group!
                                 const full_idx = base_idx | x_val_shifted | r_idx;
                                 const step_idx = full_idx >> 1;
+                                const selector: usize = full_idx & 1; // 0 = first group, 1 = second group
 
-                                // Get Az/Bz for this cycle (using r_stream-combined values)
+                                // Get Az/Bz for this cycle using the selected constraint group
                                 if (step_idx < self.cycle_witnesses.len) {
-                                    const result = self.computeCycleAzBzSeparate(&self.cycle_witnesses[step_idx], r_stream);
+                                    const result = self.computeCycleAzBzForGroup(&self.cycle_witnesses[step_idx], selector);
                                     // Weight by r_grid and accumulate to appropriate x_val slot
                                     az_grid[x_val] = az_grid[x_val].add(r_weight.mul(result.az));
                                     bz_grid[x_val] = bz_grid[x_val].add(r_weight.mul(result.bz));
@@ -734,6 +736,40 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
             // Return the PRODUCT of the sums
             return az_sum.mul(bz_sum);
+        }
+
+        /// Compute separate Az and Bz for a single cycle for a given constraint group
+        ///
+        /// Returns both Az and Bz separately (used in cycle rounds where we need
+        /// to accumulate them before multiplying)
+        fn computeCycleAzBzForGroup(
+            self: *const Self,
+            witness: *const constraints.R1CSCycleInputs(F),
+            group: usize, // 0 = first group, 1 = second group
+        ) struct { az: F, bz: F } {
+            var az_sum = F.zero();
+            var bz_sum = F.zero();
+
+            const group_size = if (group == 0) FIRST_GROUP_SIZE else @min(SECOND_GROUP_SIZE, FIRST_GROUP_SIZE);
+            const group_indices = if (group == 0) &constraints.FIRST_GROUP_INDICES else &constraints.SECOND_GROUP_INDICES;
+
+            // Sum over group constraints weighted by Lagrange basis
+            for (0..group_size) |i| {
+                const constraint_idx = group_indices[i];
+                const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
+                const condition = constraint.condition.evaluate(F, witness.asSlice());
+                const left = constraint.left.evaluate(F, witness.asSlice());
+                const right = constraint.right.evaluate(F, witness.asSlice());
+                const magnitude = left.sub(right);
+
+                // Weighted sum for Az (conditions)
+                az_sum = az_sum.add(self.lagrange_evals_r0[i].mul(condition));
+
+                // Weighted sum for Bz (magnitudes)
+                bz_sum = bz_sum.add(self.lagrange_evals_r0[i].mul(magnitude));
+            }
+
+            return .{ .az = az_sum, .bz = bz_sum };
         }
 
         /// Compute combined Az * Bz for a single cycle using bound r_stream value
@@ -923,8 +959,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
             // The constraint group selector is always the LSB.
             // For cycle rounds, x_val ∈ {0, 1} is the current cycle bit.
             // r_idx indexes into r_grid for the bound streaming challenges.
-
-            const r_stream = self.r_stream orelse F.zero();
+            // Note: r_stream is NOT used here - the selector comes from full_idx & 1.
 
             // Get eq tables for current window
             const eq_tables = self.split_eq.getWindowEqTables(0, 1);
@@ -971,13 +1006,15 @@ pub fn StreamingOuterProver(comptime F: type) type {
                         while (r_idx < r_grid_len) : (r_idx += 1) {
                             const r_weight = r_grid.get(r_idx);
 
-                            // Compute full_idx and derive step_idx
+                            // Compute full_idx, step_idx and selector
+                            // The LSB (selector) determines the constraint group!
                             const full_idx = base_idx | x_val_shifted | r_idx;
                             const step_idx = full_idx >> 1;
+                            const selector: usize = full_idx & 1;
 
-                            // Get Az/Bz for this cycle
+                            // Get Az/Bz for this cycle using the selected constraint group
                             if (step_idx < self.cycle_witnesses.len) {
-                                const result = self.computeCycleAzBzSeparate(&self.cycle_witnesses[step_idx], r_stream);
+                                const result = self.computeCycleAzBzForGroup(&self.cycle_witnesses[step_idx], selector);
                                 // Weight by r_grid and accumulate
                                 az_grid[x_val] = az_grid[x_val].add(r_weight.mul(result.az));
                                 bz_grid[x_val] = bz_grid[x_val].add(r_weight.mul(result.bz));

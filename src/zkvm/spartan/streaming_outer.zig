@@ -587,15 +587,22 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
             if (self.current_round == 1) {
                 // STREAMING ROUND: The streaming variable selects constraint group (0 or 1)
-                // - Position 0: first constraint group (Az_g0, Bz_g0)
-                // - Position 1: second constraint group (Az_g1, Bz_g1)
-                // - Position ∞: slope = (value at 1) - (value at 0)
                 //
-                // t'(0) = Σ_cycles eq * Az_g0 * Bz_g0
-                // t'(∞) = Σ_cycles eq * (Az_g1 - Az_g0) * (Bz_g1 - Bz_g0)  [product of slopes]
+                // CRITICAL: We must compute (Σ Az) * (Σ Bz), NOT Σ (Az * Bz)!
+                // These are different due to non-linearity of multiplication.
                 //
-                // The eq weights are factorized: eq[i] = E_out[i >> head_in_bits] * E_in[i & mask]
-                // NOTE: Do NOT include current_scalar here - it will be applied in computeCubicRoundPoly.
+                // Jolt's approach:
+                // 1. Accumulate separate sums: az_g0_sum = Σ eq * Az_g0, etc.
+                // 2. Expand to {0, 1, ∞} grid (∞ = slope = g1 - g0)
+                // 3. Multiply AFTER expansion: t_0 = az_0 * bz_0, t_inf = az_inf * bz_inf
+                //
+                // The ∞ products capture the cross-terms: (ΣAz)(ΣBz) ≠ Σ(Az*Bz)
+
+                // Step 1: Accumulate separate sums for Az and Bz
+                var az_g0_sum = F.zero();
+                var az_g1_sum = F.zero();
+                var bz_g0_sum = F.zero();
+                var bz_g1_sum = F.zero();
 
                 for (0..@min(self.padded_trace_len, self.cycle_witnesses.len)) |i| {
                     // Factorized eq weight using proper bit shifting
@@ -603,39 +610,50 @@ pub fn StreamingOuterProver(comptime F: type) type {
                     const in_idx = i & e_in_mask;
                     const e_out_val = if (out_idx < E_out.len) E_out[out_idx] else F.zero();
                     const e_in_val = if (in_idx < E_in.len) E_in[in_idx] else F.zero();
-                    // No current_scalar - it will be applied when computing l(X) in computeCubicRoundPoly
                     const eq_val = e_out_val.mul(e_in_val);
 
-                    // Compute Az and Bz separately for both groups to get slopes
-                    const az_bz = self.computeCycleAzBzForMultiquadratic(&self.cycle_witnesses[i]);
-                    t_zero = t_zero.add(eq_val.mul(az_bz.prod_0)); // Az_g0 * Bz_g0
-                    t_infinity = t_infinity.add(eq_val.mul(az_bz.prod_inf)); // slope_a * slope_b
+                    // Get Az and Bz for both groups (NOT products!)
+                    const az_bz = self.computeCycleAzBzValues(&self.cycle_witnesses[i]);
+                    az_g0_sum = az_g0_sum.add(eq_val.mul(az_bz.az_g0));
+                    az_g1_sum = az_g1_sum.add(eq_val.mul(az_bz.az_g1));
+                    bz_g0_sum = bz_g0_sum.add(eq_val.mul(az_bz.bz_g0));
+                    bz_g1_sum = bz_g1_sum.add(eq_val.mul(az_bz.bz_g1));
                 }
-            } else {
-                // CYCLE ROUND: Match Jolt's linear phase structure exactly
-                //
-                // In Jolt, the full index space is:
-                //   full_idx = x_out << (x_in_bits + window + r_bits) | x_in << (window + r_bits) | x_val << r_bits | r_idx
-                //   step_idx = full_idx >> 1
-                //   selector = full_idx & 1
-                //
-                // The key insight is that r_idx contributes to step_idx via (r_idx >> 1),
-                // so different r_idx values map to the same or adjacent cycles.
-                //
-                // For window_size = 1:
-                //   - x_val ∈ {0, 1} is the current cycle bit
-                //   - r_idx ∈ {0, ..., r_grid.len-1} expands the index space
-                //   - The LSB of full_idx selects the constraint group
 
-                // Note: r_stream is NOT used here - the selector comes from full_idx & 1
+                // Step 2: Expand to {0, 1, ∞} grid
+                // Position 0: value at constraint group 0
+                // Position 1: value at constraint group 1
+                // Position ∞: slope = (value at 1) - (value at 0)
+                const az_at_0 = az_g0_sum;
+                const az_at_inf = az_g1_sum.sub(az_g0_sum); // slope
+                const bz_at_0 = bz_g0_sum;
+                const bz_at_inf = bz_g1_sum.sub(bz_g0_sum); // slope
+
+                // Step 3: Multiply on expanded grid to get (Σ Az) * (Σ Bz)
+                // t'(0) = az_at_0 * bz_at_0 = (Σ Az_g0) * (Σ Bz_g0)
+                // t'(∞) = az_at_inf * bz_at_inf = (slope Az) * (slope Bz)
+                t_zero = az_at_0.mul(bz_at_0);
+                t_infinity = az_at_inf.mul(bz_at_inf);
+            } else {
+                // CYCLE ROUND: Compute (Σ Az) * (Σ Bz) for product-of-sums
+                //
+                // CRITICAL: Same as streaming round - we must compute product of sums!
+                // (Σ Az) * (Σ Bz) ≠ Σ (Az * Bz)
+                //
+                // For cycle rounds, we accumulate over the full (x_out, x_in, x_val, r_idx) space,
+                // then expand to multiquadratic and multiply.
+
                 const r_grid = &self.r_grid;
                 const r_grid_len = r_grid.length();
                 const num_r_bits: u6 = if (r_grid_len > 1) @intCast(std.math.log2_int(usize, r_grid_len)) else 0;
-
-                // window_size is always 1 for cycle rounds in linear phase
                 const window_bits: u6 = 1;
 
-                // Iterate over the factorized index space
+                // Step 1: Accumulate separate sums for Az and Bz across all grid cells
+                // az_at_xval[0] = Σ eq * Az when x_val=0
+                // az_at_xval[1] = Σ eq * Az when x_val=1
+                var az_at_xval = [2]F{ F.zero(), F.zero() };
+                var bz_at_xval = [2]F{ F.zero(), F.zero() };
+
                 var x_out_idx: usize = 0;
                 while (x_out_idx < E_out.len) : (x_out_idx += 1) {
                     const e_out_val = E_out[x_out_idx];
@@ -645,15 +663,9 @@ pub fn StreamingOuterProver(comptime F: type) type {
                         const e_in_val = E_in[x_in_idx];
                         const eq_base = e_out_val.mul(e_in_val);
 
-                        // Accumulate Az/Bz for the multiquadratic grid
-                        var az_grid = [2]F{ F.zero(), F.zero() };
-                        var bz_grid = [2]F{ F.zero(), F.zero() };
-
-                        // Compute base_idx following Jolt's structure
                         const base_idx: usize = (x_out_idx << @intCast(head_in_bits + window_bits + num_r_bits)) |
                             (x_in_idx << @intCast(window_bits + num_r_bits));
 
-                        // Iterate over x_val (current window variable) and r_idx
                         var x_val: usize = 0;
                         while (x_val < 2) : (x_val += 1) {
                             const x_val_shifted = x_val << num_r_bits;
@@ -661,33 +673,32 @@ pub fn StreamingOuterProver(comptime F: type) type {
                             var r_idx: usize = 0;
                             while (r_idx < r_grid_len) : (r_idx += 1) {
                                 const r_weight = r_grid.get(r_idx);
+                                const eq_val = eq_base.mul(r_weight);
 
-                                // Compute full_idx and derive step_idx and selector
-                                // In Jolt, the LSB of full_idx determines the constraint group!
                                 const full_idx = base_idx | x_val_shifted | r_idx;
                                 const step_idx = full_idx >> 1;
-                                const selector: usize = full_idx & 1; // 0 = first group, 1 = second group
+                                const selector: usize = full_idx & 1;
 
-                                // Get Az/Bz for this cycle using the selected constraint group
                                 if (step_idx < self.cycle_witnesses.len) {
                                     const result = self.computeCycleAzBzForGroup(&self.cycle_witnesses[step_idx], selector);
-                                    // Weight by r_grid and accumulate to appropriate x_val slot
-                                    az_grid[x_val] = az_grid[x_val].add(r_weight.mul(result.az));
-                                    bz_grid[x_val] = bz_grid[x_val].add(r_weight.mul(result.bz));
+                                    // Accumulate to global sums (NOT local products!)
+                                    az_at_xval[x_val] = az_at_xval[x_val].add(eq_val.mul(result.az));
+                                    bz_at_xval[x_val] = bz_at_xval[x_val].add(eq_val.mul(result.bz));
                                 }
                             }
                         }
-
-                        // Multiquadratic expansion: t'(0) and t'(∞)
-                        const prod_0 = az_grid[0].mul(bz_grid[0]);
-                        const slope_az = az_grid[1].sub(az_grid[0]);
-                        const slope_bz = bz_grid[1].sub(bz_grid[0]);
-                        const prod_inf = slope_az.mul(slope_bz);
-
-                        t_zero = t_zero.add(eq_base.mul(prod_0));
-                        t_infinity = t_infinity.add(eq_base.mul(prod_inf));
                     }
                 }
+
+                // Step 2: Expand to {0, 1, ∞} grid
+                const az_at_0 = az_at_xval[0];
+                const az_at_inf = az_at_xval[1].sub(az_at_xval[0]); // slope
+                const bz_at_0 = bz_at_xval[0];
+                const bz_at_inf = bz_at_xval[1].sub(bz_at_xval[0]); // slope
+
+                // Step 3: Multiply on expanded grid to get (Σ Az) * (Σ Bz)
+                t_zero = az_at_0.mul(bz_at_0);
+                t_infinity = az_at_inf.mul(bz_at_inf);
             }
 
             // Use Gruen's method to compute the cubic round polynomial
@@ -883,6 +894,48 @@ pub fn StreamingOuterProver(comptime F: type) type {
             const prod_inf = slope_az.mul(slope_bz);
 
             return .{ .prod_0 = prod_0, .prod_inf = prod_inf };
+        }
+
+        /// Compute Az and Bz values for both groups (without products)
+        ///
+        /// Returns (az_g0, az_g1, bz_g0, bz_g1) for use in product-of-sums computation.
+        /// This is needed because (Σ Az) * (Σ Bz) ≠ Σ (Az * Bz).
+        fn computeCycleAzBzValues(
+            self: *const Self,
+            witness: *const constraints.R1CSCycleInputs(F),
+        ) struct { az_g0: F, az_g1: F, bz_g0: F, bz_g1: F } {
+            // Compute Az and Bz for both groups
+            var az_g0 = F.zero();
+            var bz_g0 = F.zero();
+            var az_g1 = F.zero();
+            var bz_g1 = F.zero();
+
+            // Group 0
+            for (0..FIRST_GROUP_SIZE) |i| {
+                const constraint_idx = constraints.FIRST_GROUP_INDICES[i];
+                const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
+                const condition = constraint.condition.evaluate(F, witness.asSlice());
+                const left = constraint.left.evaluate(F, witness.asSlice());
+                const right = constraint.right.evaluate(F, witness.asSlice());
+                const magnitude = left.sub(right);
+                az_g0 = az_g0.add(self.lagrange_evals_r0[i].mul(condition));
+                bz_g0 = bz_g0.add(self.lagrange_evals_r0[i].mul(magnitude));
+            }
+
+            // Group 1
+            const g2_size = @min(SECOND_GROUP_SIZE, FIRST_GROUP_SIZE);
+            for (0..g2_size) |i| {
+                const constraint_idx = constraints.SECOND_GROUP_INDICES[i];
+                const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
+                const condition = constraint.condition.evaluate(F, witness.asSlice());
+                const left = constraint.left.evaluate(F, witness.asSlice());
+                const right = constraint.right.evaluate(F, witness.asSlice());
+                const magnitude = left.sub(right);
+                az_g1 = az_g1.add(self.lagrange_evals_r0[i].mul(condition));
+                bz_g1 = bz_g1.add(self.lagrange_evals_r0[i].mul(magnitude));
+            }
+
+            return .{ .az_g0 = az_g0, .az_g1 = az_g1, .bz_g0 = bz_g0, .bz_g1 = bz_g1 };
         }
 
         /// Compute Az and Bz separately for a single cycle (combined groups)

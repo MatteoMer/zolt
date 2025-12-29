@@ -30,38 +30,43 @@
 23. **Product of Slopes Fix** - t'(∞) = (Az_g1-Az_g0)*(Bz_g1-Bz_g0)
 24. **Multiquadratic Sum of Products** - t'(∞) = Σ (slope_Az * slope_Bz), NOT (Σ slope_Az) * (Σ slope_Bz)
 25. **current_scalar double-counting fix** - Removed from t' computation, only applied in l(X)
+26. **r_grid HalfSplitSchedule** - Fixed to match Jolt's streaming/linear phase split
 
 ---
 
-## Current Status: ~10x Discrepancy in Stage 1
+## Current Status: Testing r_grid fix
 
-### What Works ✅
-- UniSkip verification passes
-- All 11 remaining sumcheck rounds pass (p(0)+p(1)=claim)
-- Challenge derivation matches
-- Streaming round uses multiquadratic with product of slopes
+### What's Fixed (Session 6)
+- **r_grid update schedule** matches Jolt's HalfSplitSchedule:
+  - Streaming phase (rounds 1 to switch_over): r_grid is updated
+  - Linear phase (after switch_over): r_grid stays frozen
+  - For 11 remaining rounds: switch_over = 5, so r_grid has 32 entries (2^5)
 
-### Remaining Issue
-- output_claim ≈ 10x expected_output_claim
-- The computeCubicRoundPoly logic matches Jolt's gruen_poly_deg_3
+### Blocking Issue: Dory Open Crash
+- The `--jolt-format` proof generation crashes in Dory.open()
+- The MSM function hits an unreachable
+- Need to fix before testing with Jolt
 
-### Possible Causes
-1. Eq table indexing (E_out, E_in) might be wrong
-2. r_grid weighting in cycle rounds differs from Jolt
-3. Streaming vs cycle round r_grid update timing
-4. Cycle index bit manipulation for pairs
+### Next Steps
+1. [ ] Fix Dory open crash (MSM issue with evaluation point)
+2. [ ] Generate proof with `--jolt-format` flag
+3. [ ] Export preprocessing to /tmp/zolt_preprocessing.bin
+4. [ ] Run Jolt test to verify Stage 1 output claim matches
 
-### Key Insight from Jolt
-In Jolt's streaming sumcheck:
-- `OuterStreamingWindow::ingest_challenge` updates r_grid
-- `OuterLinearStage::ingest_challenge` does NOT update r_grid
-- This suggests r_grid captures eq weights from streaming phase only
+---
 
-### Next Steps for fix
-1. [ ] Add detailed debug output comparing intermediate values
-2. [ ] Trace E_out, E_in table access patterns
-3. [ ] Compare r_grid values between Zolt and Jolt at each round
-4. [ ] Consider implementing Jolt's LinearStage approach (materialize Az/Bz)
+## Test Commands
+
+```bash
+# Generate Jolt-format proof in Zolt
+cd /Users/matteo/projects/zolt
+zig build -Doptimize=ReleaseFast
+./zig-out/bin/zolt prove examples/sum.elf --jolt-format --export-preprocessing /tmp/zolt_preprocessing.bin -o /tmp/zolt_proof_dory.bin
+
+# Run cross-verification in Jolt
+cd /Users/matteo/projects/jolt
+cargo test --package jolt-core test_debug_stage1_verification -- --ignored --nocapture
+```
 
 ---
 
@@ -78,18 +83,3 @@ After Stage 1 exact match, verify:
 
 ### End-to-End Verification
 Complete Jolt proof verification of Zolt-generated proofs.
-
----
-
-## Test Commands
-
-```bash
-# Generate proof in Zolt
-cd /Users/matteo/projects/zolt
-zig build -Doptimize=ReleaseFast
-./zig-out/bin/zolt prove examples/sum.elf --jolt-format --export-preprocessing /tmp/zolt_preprocessing.bin -o /tmp/zolt_proof_dory.bin
-
-# Run cross-verification in Jolt
-cd /Users/matteo/projects/jolt
-cargo test --package jolt-core test_debug_stage1_verification -- --ignored --nocapture
-```

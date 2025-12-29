@@ -1092,19 +1092,24 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             const v_vec = try computeVectorMatrixProduct(F, evals, left_vec, nu, sigma, allocator);
             defer allocator.free(v_vec);
 
-            // Pad row_commitments to 2^sigma if needed
-            const padded_row_commitments = if (nu < sigma) blk: {
-                const padded_len = @as(usize, 1) << @intCast(sigma);
-                const padded = try allocator.alloc(G1Point, padded_len);
-                @memcpy(padded[0..row_commitments.len], row_commitments);
-                for (row_commitments.len..padded_len) |i| {
-                    padded[i] = G1Point.identity();
+            // Pad row_commitments to match v_vec length (2^sigma)
+            // v_vec always has length 2^sigma from computeVectorMatrixProduct
+            const v_vec_len = @as(usize, 1) << @intCast(sigma);
+            const padded_row_commitments = blk: {
+                if (row_commitments.len >= v_vec_len) {
+                    // Truncate or exact match
+                    const padded = try allocator.alloc(G1Point, v_vec_len);
+                    @memcpy(padded, row_commitments[0..v_vec_len]);
+                    break :blk padded;
+                } else {
+                    // Pad with identity
+                    const padded = try allocator.alloc(G1Point, v_vec_len);
+                    @memcpy(padded[0..row_commitments.len], row_commitments);
+                    for (row_commitments.len..v_vec_len) |i| {
+                        padded[i] = G1Point.identity();
+                    }
+                    break :blk padded;
                 }
-                break :blk padded;
-            } else blk: {
-                const padded = try allocator.alloc(G1Point, row_commitments.len);
-                @memcpy(padded, row_commitments);
-                break :blk padded;
             };
             defer allocator.free(padded_row_commitments);
 
@@ -1134,10 +1139,21 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             const d2 = pairing.pairingFp(gamma1_v_fp, params.g2_vec[0]);
 
             // E1 = MSM(row_commitments, left_vec)
-            const e1 = msm.MSM(F, Fp).compute(
-                row_commitments,
-                left_vec,
-            );
+            // Ensure length match
+            const left_vec_len = @as(usize, 1) << @intCast(nu);
+            const e1: G1Point = blk: {
+                if (row_commitments.len >= left_vec_len) {
+                    break :blk msm.MSM(F, Fp).compute(row_commitments[0..left_vec_len], left_vec);
+                } else {
+                    const padded = try allocator.alloc(G1Point, left_vec_len);
+                    defer allocator.free(padded);
+                    @memcpy(padded[0..row_commitments.len], row_commitments);
+                    for (row_commitments.len..left_vec_len) |i| {
+                        padded[i] = G1Point.identity();
+                    }
+                    break :blk msm.MSM(F, Fp).compute(padded, left_vec);
+                }
+            };
 
             const vmv_message = VMVMessage{
                 .c = c,
@@ -1403,19 +1419,21 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             const v_vec = try computeVectorMatrixProduct(F, evals, left_vec, nu, sigma, allocator);
             defer allocator.free(v_vec);
 
-            // Pad row_commitments
-            const padded_row_commitments = if (nu < sigma) blk: {
-                const padded_len = @as(usize, 1) << @intCast(sigma);
-                const padded = try allocator.alloc(G1Point, padded_len);
-                @memcpy(padded[0..row_commitments.len], row_commitments);
-                for (row_commitments.len..padded_len) |i| {
-                    padded[i] = G1Point.identity();
+            // Pad row_commitments to match v_vec length (2^sigma)
+            const v_vec_len = @as(usize, 1) << @intCast(sigma);
+            const padded_row_commitments = blk: {
+                if (row_commitments.len >= v_vec_len) {
+                    const padded = try allocator.alloc(G1Point, v_vec_len);
+                    @memcpy(padded, row_commitments[0..v_vec_len]);
+                    break :blk padded;
+                } else {
+                    const padded = try allocator.alloc(G1Point, v_vec_len);
+                    @memcpy(padded[0..row_commitments.len], row_commitments);
+                    for (row_commitments.len..v_vec_len) |i| {
+                        padded[i] = G1Point.identity();
+                    }
+                    break :blk padded;
                 }
-                break :blk padded;
-            } else blk: {
-                const padded = try allocator.alloc(G1Point, row_commitments.len);
-                @memcpy(padded, row_commitments);
-                break :blk padded;
             };
             defer allocator.free(padded_row_commitments);
 
@@ -1436,7 +1454,23 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             };
             const d2 = pairing.pairingFp(gamma1_v_fp, params.g2_vec[0]);
 
-            const e1 = msm.MSM(F, Fp).compute(row_commitments, left_vec);
+            // e1 = MSM(row_commitments, left_vec)
+            // row_commitments may have different length than left_vec (2^nu)
+            // Pad or truncate to match
+            const left_vec_len = @as(usize, 1) << @intCast(nu);
+            const e1: G1Point = blk: {
+                if (row_commitments.len >= left_vec_len) {
+                    break :blk msm.MSM(F, Fp).compute(row_commitments[0..left_vec_len], left_vec);
+                } else {
+                    const padded = try allocator.alloc(G1Point, left_vec_len);
+                    defer allocator.free(padded);
+                    @memcpy(padded[0..row_commitments.len], row_commitments);
+                    for (row_commitments.len..left_vec_len) |i| {
+                        padded[i] = G1Point.identity();
+                    }
+                    break :blk msm.MSM(F, Fp).compute(padded, left_vec);
+                }
+            };
 
             const vmv_message = VMVMessage{
                 .c = c,

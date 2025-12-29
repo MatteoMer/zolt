@@ -33,42 +33,39 @@
 26. **r_grid HalfSplitSchedule** - Fixed streaming/linear phase split
 27. **Dory MSM length fixes** - Proper padding for row_commitments
 28. **Jolt Index Structure** - Use full_idx = x_out|x_in|x_val|r_idx, step_idx = full_idx >> 1
-29. **Selector from full_idx** - Use selector = full_idx & 1 for constraint group in all cycle rounds
+29. **Selector from full_idx** - Use selector = full_idx & 1 for constraint group in cycle rounds
 
 ---
 
 ## Current Status: ~1.23x Discrepancy in Stage 1
 
-### Session 15 Progress (December 29, 2024)
+### Session 15 (December 29, 2024)
 
 **Values:**
 - output_claim: 15155108253109715956971809974428807981154511443156768969051245367813784134214
 - expected:     18643585735450861043207165215350408775243828862234148101070816349947522058550
-- Ratio: 0.813 (output / expected)
+- Ratio: 0.813 (output/expected ≈ 13/16)
+- Missing fraction: ~18.7% (close to 3/16)
 
-**Session 15 Fixes:**
-1. Fixed selector usage - now uses `full_idx & 1` instead of r_stream in cycle rounds
-2. Added `computeCycleAzBzForGroup` for selector-based constraint group evaluation
-3. Fixed switch_over calculation to use `num_rounds / 2` matching Jolt's halfway
+**Deeply Verified Components (All Match Jolt):**
+- ExpandingTable update: `values[i] = (1-r)*old`, `values[i+len] = r*old`
+- eq table factorization: E_out 5 bits (32 entries), E_in 5 bits (32 entries)
+- bind() formula: `eq(τ, r) = 1 - τ - r + 2*τ*r`
+- switch_over: `num_rounds / 2` = 5 for 11 rounds
+- Iteration ranges: 0..1023 for 1024 cycles
+- Index mapping: out_idx = i/32, in_idx = i%32
+- Constraint groups: Group 0 has 10 constraints, Group 1 has 9
 
-**Verified Working:**
-- ExpandingTable update logic matches Jolt exactly
-- GruenSplitEqPolynomial bind() formula matches Jolt
-- eq table factorization (E_out, E_in) split matches Jolt
-- Challenge derivation matches Jolt
+**Mystery:**
+The 0.813 ratio suggests we're computing 13/16 of the expected sum.
+- Could be missing some terms
+- Could be computing wrong weights
+- Could be subtle off-by-one somewhere
 
-**Remaining Hypotheses:**
-1. Streaming round (round 1) computation may have a bug
-2. Something in the multiquadratic t_zero/t_infinity calculation
-3. Issue in computeCubicRoundPoly's quadratic reconstruction
-4. Window sizing or index calculation off by one somewhere
-
-### Next Investigation Steps
-
-1. Add debug logging to compare per-round claims between Zolt and Jolt
-2. Compare t_zero and t_infinity values at each round
-3. Verify the streaming round uses correct index structure
-4. Check if there's an issue with how challenges are ordered
+**Next Steps:**
+1. Add per-round claim debugging to narrow down where divergence starts
+2. Compare actual t_zero and t_infinity values
+3. May need to trace through a simple example by hand
 
 ---
 

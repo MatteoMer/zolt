@@ -924,12 +924,6 @@ pub fn StreamingOuterProver(comptime F: type) type {
             // Round 1 = streaming, Round 2 = first cycle variable, etc.
             const num_cycle_bound = if (self.current_round >= 2) self.current_round - 2 else 0;
 
-            // Number of cycles in each half (based on current round)
-            // At cycle round k (current_round = k+1), we're summing over cycle bit (k-1)
-            // half = 2^(num_total_bits - k) = padded_trace_len >> k
-            //      = padded_trace_len >> (current_round - 1)
-            const half: usize = self.padded_trace_len >> @intCast(self.current_round - 1);
-
             // r_grid length (number of bound challenge combinations)
             const klen = self.r_grid.length();
             const k_mask = if (klen > 0) klen - 1 else 0;
@@ -945,54 +939,48 @@ pub fn StreamingOuterProver(comptime F: type) type {
             //
             // This is DIFFERENT from Σ eq * (Az_1 - Az_0) * (Bz_1 - Bz_0) !!
 
-            var t_00 = F.zero(); // Sum of products for first half
-            var sum_az_0 = F.zero(); // Sum of Az for first half
-            var sum_bz_0 = F.zero(); // Sum of Bz for first half
-            var t_01 = F.zero(); // Sum of products for second half
-            var sum_az_1 = F.zero(); // Sum of Az for second half
-            var sum_bz_1 = F.zero(); // Sum of Bz for second half
+            // The current bit position we're summing over
+            // For cycle round k (current_round = k+1), we sum over bit (k-1)
+            const current_bit_pos = num_cycle_bound;
 
-            // For each cycle in the first half (current_bit = 0)
-            for (0..@min(half, self.cycle_witnesses.len)) |i| {
-                const remaining_bits = if (num_cycle_bound + 1 < 32) num_cycle_bound + 1 else 31;
-                const remaining_idx = i >> @intCast(remaining_bits);
+            var t_00 = F.zero(); // Sum of products for current_bit = 0
+            var sum_az_0 = F.zero(); // Sum of Az for current_bit = 0
+            var sum_bz_0 = F.zero(); // Sum of Bz for current_bit = 0
+            var t_01 = F.zero(); // Sum of products for current_bit = 1
+            var sum_az_1 = F.zero(); // Sum of Az for current_bit = 1
+            var sum_bz_1 = F.zero(); // Sum of Bz for current_bit = 1
+
+            // Iterate over ALL cycles and split by current bit value
+            for (0..@min(self.padded_trace_len, self.cycle_witnesses.len)) |cycle_idx| {
+                // Compute eq weight
+                // remaining_idx extracts the bits ABOVE the current bit being summed
+                // These are the bits that index into E_out and E_in
+                const remaining_bits = current_bit_pos + 1;
+                const remaining_idx = cycle_idx >> @intCast(remaining_bits);
                 const out_idx = remaining_idx >> @intCast(head_in_bits);
                 const in_idx = remaining_idx & e_in_mask;
                 const e_out_val = if (out_idx < E_out.len) E_out[out_idx] else F.zero();
                 const e_in_val = if (in_idx < E_in.len) E_in[in_idx] else F.zero();
                 const eq_base = e_out_val.mul(e_in_val);
 
-                const k = i & k_mask;
-                const r_weight = if (k < klen) self.r_grid.get(k) else F.zero();
-                const eq_val = eq_base.mul(r_weight).mul(current_scalar);
-
-                const az_bz = self.computeCycleAzBzSeparate(&self.cycle_witnesses[i], r_stream);
-                t_00 = t_00.add(eq_val.mul(az_bz.az.mul(az_bz.bz)));
-                sum_az_0 = sum_az_0.add(eq_val.mul(az_bz.az));
-                sum_bz_0 = sum_bz_0.add(eq_val.mul(az_bz.bz));
-            }
-
-            // For each cycle in the second half (current_bit = 1)
-            for (0..@min(half, self.cycle_witnesses.len -| half)) |i| {
-                const cycle_idx = half + i;
-                if (cycle_idx >= self.cycle_witnesses.len) continue;
-
-                const remaining_bits = if (num_cycle_bound + 1 < 32) num_cycle_bound + 1 else 31;
-                const remaining_idx = i >> @intCast(remaining_bits);
-                const out_idx = remaining_idx >> @intCast(head_in_bits);
-                const in_idx = remaining_idx & e_in_mask;
-                const e_out_val = if (out_idx < E_out.len) E_out[out_idx] else F.zero();
-                const e_in_val = if (in_idx < E_in.len) E_in[in_idx] else F.zero();
-                const eq_base = e_out_val.mul(e_in_val);
-
-                const k = i & k_mask;
+                // r_grid weight: the low `num_cycle_bound` bits of cycle_idx
+                const k = cycle_idx & k_mask;
                 const r_weight = if (k < klen) self.r_grid.get(k) else F.zero();
                 const eq_val = eq_base.mul(r_weight).mul(current_scalar);
 
                 const az_bz = self.computeCycleAzBzSeparate(&self.cycle_witnesses[cycle_idx], r_stream);
-                t_01 = t_01.add(eq_val.mul(az_bz.az.mul(az_bz.bz)));
-                sum_az_1 = sum_az_1.add(eq_val.mul(az_bz.az));
-                sum_bz_1 = sum_bz_1.add(eq_val.mul(az_bz.bz));
+
+                // Split by current bit value
+                const current_bit = (cycle_idx >> @intCast(current_bit_pos)) & 1;
+                if (current_bit == 0) {
+                    t_00 = t_00.add(eq_val.mul(az_bz.az.mul(az_bz.bz)));
+                    sum_az_0 = sum_az_0.add(eq_val.mul(az_bz.az));
+                    sum_bz_0 = sum_bz_0.add(eq_val.mul(az_bz.bz));
+                } else {
+                    t_01 = t_01.add(eq_val.mul(az_bz.az.mul(az_bz.bz)));
+                    sum_az_1 = sum_az_1.add(eq_val.mul(az_bz.az));
+                    sum_bz_1 = sum_bz_1.add(eq_val.mul(az_bz.bz));
+                }
             }
 
             // Compute quadratic coefficient as product of slope sums

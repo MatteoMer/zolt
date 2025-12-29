@@ -70,11 +70,22 @@
   where inner_sum_prod = (az_g0 + r_stream*(az_g1-az_g0)) * (bz_g0 + r_stream*(bz_g1-bz_g0))
 - r_tail = sumcheck_challenges.reversed()
 
+**Key Finding:**
+- All 11 sumcheck rounds pass the internal check: p(0)+p(1) = claim
+- The issue is that the t_zero and t_infinity values computed in the streaming round
+  are different from what the R1CS evaluation expects
+
+**Verified Gruen Formula Components:**
+- l(X) = current_scalar * (1 - tau_curr + tau_curr * X) ✓
+- q(X) = t_zero + d*X + t_infinity*X² ✓
+- s(X) = l(X) * q(X) is degree 3 ✓
+- d is derived from s(0)+s(1)=claim constraint ✓
+
 **Next Investigation Areas:**
-1. Per-round polynomial values - compare actual s(0), s(1) with expected
-2. Transcript consistency - are challenges the same as Jolt computes?
-3. Input claim (uni_skip_claim) value
-4. Add debugging to first few rounds to find divergence point
+1. Compare t_zero/t_infinity with what Jolt would compute
+2. Check Az/Bz per-cycle evaluations match Jolt's
+3. Verify eq_cycle weights match Jolt's factorized E_out × E_in
+4. Add per-cycle debugging to find first divergent cycle
 
 ---
 

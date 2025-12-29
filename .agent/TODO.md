@@ -1,9 +1,19 @@
 # Zolt-Jolt Compatibility TODO
 
-## Current Status: Stage 1 Output Claim Mismatch (Session 20-22)
+## Current Status: Az*Bz Mismatch (Session 20-23)
 
 ### Summary
-All Stage 1 sumcheck rounds pass (p(0)+p(1) = claim), but the **expected output claim** doesn't match the **output claim from sumcheck walk**.
+All Stage 1 sumcheck rounds pass (p(0)+p(1) = claim). The sumcheck prover produces IDENTICAL values to Jolt:
+- ✅ UniSkip claim matches
+- ✅ Round 0 s(0), s(1) match
+- ✅ Final output_claim matches Jolt's sumcheck walk
+
+**ROOT CAUSE**: The mismatch is between `output_claim` and `expected_output_claim`.
+
+The prover's Az*Bz at the final point is `6845670145302814045138444113000749599157896909649021689277739372381215505241`.
+The verifier's inner_sum_prod is `12743996023445103930025687297173833157935883282725550257061179867498976368827`.
+
+**Next Step**: Investigate how the MultiquadraticPolynomial projection in Jolt differs from Zolt's t_zero/t_infinity computation, and how the eq factor is being handled during the accumulation.
 
 ### Session 22 Findings
 

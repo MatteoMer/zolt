@@ -13,16 +13,22 @@
 4. **r_grid indexing** - Use proper bit masking for r_grid weights
 5. **num_cycle_bound calculation** - Use `current_round - 2` for cycle rounds
 
-**Current Values:**
-- output_claim = 18140769771358918670484532067209660626696556827626823582670709166321366879107
-- expected = 16412818811915158821926814277636231913718869858140421597380195568348027564398
-- Ratio ~1.1 (was ~2x before)
+**Current Values (Latest):**
+- output_claim = 20476596735539743973289222952622492655978032670028909243579217210968836662359
+- expected = 19451987387422399828613541021089071219906664144654553574917984095719306626522
+- Ratio ~1.05 (5% off, was ~2x initially)
 
-**Remaining Issue:**
-Still ~10% off. Likely causes:
-1. E_out/E_in table sizes for cycle rounds may be wrong
-2. remaining_idx calculation may be off
-3. The slope computation in multiquadratic may have subtle bugs
+**Latest Fixes:**
+1. Added current_scalar to streaming round eq weight
+2. Changed cycle iteration to use current_bit check instead of half-based split
+3. Fixed slope computation to use sum of values then difference (not per-cycle slope)
+
+**Remaining Issue (~5% discrepancy):**
+The computeCubicRoundPoly implementation matches Jolt's gruen_poly_deg_3 logic.
+Possible remaining causes:
+1. Split_eq table construction differences
+2. Binding order nuances
+3. Something in the streaming round or first cycle round specifically
 
 **Jolt's Approach:**
 - Streaming window: Computes grid[j] for j ∈ {0, 1} (window positions)

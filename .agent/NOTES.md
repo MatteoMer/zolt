@@ -1,6 +1,42 @@
 # Zolt-Jolt Compatibility Notes
 
-## Current Status (Session 23 - December 29, 2024)
+## Current Status (Session 26 - December 29, 2024)
+
+### Implicit Az*Bz Analysis
+
+Computed the implicit Az*Bz from the sumcheck output:
+
+```
+eq_factor = tau_high_bound_r0 * tau_bound_r_tail
+          = 9902220838585485861756225046178150348087355488875882769596587993516429520170
+
+inner_sum_prod (expected) = 12743996023445103930025687297173833157935883282725550257061179867498976368827
+implicit Az*Bz (output/eq) = 6845670145302814045138444113000749599157896909649021689277739372381215505241
+```
+
+The ratio is NOT a simple integer factor, ruling out simple scaling bugs.
+
+### Key Insight
+
+The sumcheck IS computing a valid proof (all rounds pass). But the Az*Bz it computes differs from what the opening claims produce.
+
+This suggests the issue is in HOW the sumcheck accumulates Az*Bz across cycles, not in the eq polynomial handling.
+
+### Possible Causes
+
+1. **Cycle ordering** - The sumcheck might access cycles in a different order than the MLE evaluation
+2. **Constraint evaluation** - The condition/magnitude values might differ
+3. **Accumulation structure** - The grid building might have subtle bugs
+
+### Next Steps
+
+1. Add debug output to print first 5 cycles' Az/Bz values
+2. Compare with equivalent computation in Jolt
+3. Find the divergence point
+
+---
+
+## Session 23 - December 29, 2024
 
 ### Stage 1 Verification - BREAKTHROUGH Analysis
 

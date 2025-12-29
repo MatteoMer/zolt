@@ -1,94 +1,62 @@
 # Zolt-Jolt Compatibility TODO
 
-## Current Status: Investigating Jolt's Index Structure (Session 24)
+## Current Status: Investigating Outer Sumcheck Output Claim Mismatch (Session 26)
 
-### Root Cause Identified
+### Current Issue
 
-The fundamental issue is that:
-- **Prover computes**: `Σ (Az * Bz)` - sum of products
-- **Verifier expects**: `(Σ Az) * (Σ Bz)` - product of sums
+All 11 sumcheck rounds pass individually (p(0) + p(1) = claim), but the final output_claim doesn't match the expected_output_claim computed from R1CS evaluation.
 
-These are mathematically different due to non-linearity of multiplication.
-
-### Initial Fix Attempt
-
-Modified streaming_outer.zig to:
-1. Accumulate separate Az and Bz sums
-2. Expand to {0, 1, ∞} grid
-3. Multiply after expansion
-
-**Result**: Output_claim changed but still doesn't match expected.
-
-### Current Test Values
-
+Test output:
 ```
-output_claim:    5514162482559916804432512270777756912898528478061111678566043859523325463688
-expected_claim: 11278176879827447390261533528479013530892542028574834464976023912397580784757
+output_claim (from sumcheck):    7120341815860535077792666425421583012196152296139946730075156877231654137396
+expected_output_claim (from R1CS): 2000541294615117218219795634222435854478303422072963760833200542270573423153
 Match: false
 ```
 
-### Understanding Jolt's Structure
+Ratio is ~3.56, not a simple power-of-2 discrepancy.
 
-Jolt's streaming prover in `extrapolate_from_binary_grid_to_tertiary_grid`:
+### Analysis
 
-1. **Per (out_idx, in_idx) pair**:
-   - Iterates over `j` (window position) and `k` (r_grid index)
-   - Computes `full_idx = offset + j * klen + k`
-   - Derives `step_idx = full_idx >> 1` and `selector = full_idx & 1`
-   - Accumulates `grid_a[j]` and `grid_b[j]` weighted by `scaled_w[k]`
+#### What Should Match:
+```
+output_claim = L(tau_high, r0) * eq(tau_low, r_challenges) * Az_final * Bz_final
+expected     = L(tau_high, r0) * eq(tau_low, r_tail_reversed) * inner_sum_prod
+```
 
-2. **Key insight**: The k-loop mixes:
-   - Cycle index (`step_idx`)
-   - Constraint group (`selector`)
-   - Bound challenge weights (`r_grid[k]`)
+#### Eq Factors Analysis:
+Zolt accumulates via split_eq:
+- `current_scalar = L(tau_high, r0) * eq(tau[10], r_stream) * eq(tau[9], r_1) * ... * eq(tau[0], r_10)`
 
-3. **Multiquadratic expansion**:
-   - `grid_a` and `grid_b` are expanded to {0, 1, ∞}
-   - Products computed: `buff_a[i] * buff_b[i]`
+Jolt computes:
+- `tau_high_bound_r0 * eq(tau[0..11], [r_10, ..., r_1, r_stream])`
 
-4. **Accumulation**:
-   - Weighted by `e_in * e_out` and summed
+These should be identical (same factors, same values).
 
-### What's Different in Zolt
+#### Likely Issue: Az * Bz Mismatch
 
-Zolt's approach:
-- Iterates directly over cycles
-- Computes Az/Bz per-cycle with Lagrange weights
-- Doesn't handle the mixed (step, selector, k) index space
+Since eq factors match, the issue is probably:
+1. **Witness data mismatch** - Zolt's cycle_witnesses may have different values than expected
+2. **Constraint evaluation** - Az/Bz calculation may differ from Jolt's expectations
+3. **Cycle indexing** - There may be an endianness issue in how cycles are indexed
+4. **Opening claims** - The R1CS input evaluations may be computed at wrong point
 
-### Key Insight
+### Debugging Plan
 
-The `scaled_w[k] = lagrange_evals[constraint] * r_grid[k]` weighting means:
-- Each k value corresponds to a different (step, selector) pair
-- The sum over k is already a "local product-of-sums" over the bound challenges
-- This structure is crucial for the math to work out
+1. Add debug output to Zolt prover to print:
+   - First few cycle's Az/Bz values for both groups
+   - The sum over all cycles
+   - The computed vs expected inner_sum_prod
 
-### Next Steps
+2. Add debug output to Jolt test to print:
+   - The z vector values
+   - Az/Bz computations at the opening point
 
-1. **Study the index mapping more carefully**:
-   - How does Jolt's `full_idx = offset + j * klen + k` work?
-   - What's the relationship between k, step_idx, and selector?
+3. Compare these intermediate values to find the discrepancy
 
-2. **Replicate Jolt's exact structure**:
-   - Build per-(out,in) grids with correct k-loop
-   - Use scaled_w weighting
-   - Expand and multiply on multiquadratic grid
-
-3. **Key functions to port**:
-   - `extrapolate_from_binary_grid_to_tertiary_grid` (outer.rs:593-635)
-   - The index decomposition logic
-
-### Reference Files
-
-Jolt:
-- `outer.rs:593-635` - grid building with k-loop
-- `outer.rs:704-725` - multiquadratic expansion and product
-- `multiquadratic_poly.rs` - {0,1,∞} expansion
-
-## Test Commands
+### Test Commands
 
 ```bash
-# Zolt tests
+# Zolt tests (all 656+ should pass)
 zig build test --summary all
 
 # Generate proof
@@ -99,3 +67,15 @@ zig build -Doptimize=ReleaseFast
 cd /Users/matteo/projects/jolt
 cargo test --package jolt-core test_debug_stage1_verification -- --ignored --nocapture
 ```
+
+## Completed
+
+- [x] Blake2b transcript implementation
+- [x] Field serialization (Arkworks format)
+- [x] UniSkip polynomial generation
+- [x] Stage 1 remaining rounds sumcheck
+- [x] R1CS constraint definitions
+- [x] Split eq polynomial factorization
+- [x] Lagrange kernel computation
+- [x] Opening claims with MLE evaluation
+- [x] Sum-of-products computation (not product-of-sums)

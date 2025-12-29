@@ -1,108 +1,111 @@
 # Zolt-Jolt Compatibility Notes
 
-## Current Status (Session 19 - December 29, 2024)
+## Current Status (Session 21 - December 29, 2024)
 
-### Session 19 - EqPolynomial Big-Endian Fix
+### Stage 1 Verification Issue
 
-**Status**: Fixed EqPolynomial.evals() to use big-endian indexing. Ratio changed from ~1.2 to ~1.34.
+**Problem**: All sumcheck rounds pass (p(0) + p(1) = claim), but final output_claim ≠ expected_output_claim
 
-**Current Values:**
-- output_claim = 21176670064311113248327121399637823341669491654917035040693110982193526510099
-- expected = 15830891598945306629010829910964994017594280764528826029442912827815044293203
-- Ratio: ~1.338
+**Latest Values:**
+- output_claim = 7120341815860535077792666425421583012196152296139946730075156877231654137396
+- expected = 2000541294615117218219795634222435854478303422072963760833200542270573423153
+- Ratio (integer): ~3.56
+- Ratio (field mod p): 8358532945086661905360953846561390757679463074586057649783072130911153544533
 
-**Key Finding:**
-The EqPolynomial.evals() was using little-endian indexing (first variable controls LSB of index), but Jolt uses big-endian (first variable controls MSB of index).
+### Verified Components (Session 21)
 
-The fix in `src/poly/mod.zig` changed the table construction to match Jolt's algorithm.
+1. ✅ Lagrange kernel L(tau_high, r0) - symmetric, order doesn't matter
+2. ✅ split_eq initialization with tau_low
+3. ✅ bind() updates current_scalar correctly
+4. ✅ computeCubicRoundPoly uses current_scalar for linear eq factor
+5. ✅ R1CS constraint group indices match Jolt exactly
+6. ✅ t'(∞) formula: product of slopes (Az(1)-Az(0)) * (Bz(1)-Bz(0))
+7. ✅ Individual sumcheck rounds pass verification
+8. ✅ Jolt uses LinearOnlySchedule (switch_over = 0)
 
-**Remaining Issue:**
-Despite fixing EqPolynomial, the expected output claim still doesn't match. The ratio changed, indicating progress, but there's still a mismatch.
+### Key Insight from Session 21
 
-### Verified Components
-
-1. **EqPolynomial.evals()** - NOW matches Jolt's big-endian convention ✓
-2. **split_eq E tables** - Big-endian indexing ✓
-3. **computeCubicRoundPoly** - Matches Jolt's gruen_poly_deg_3 ✓
-4. **Constraint definitions** - Match Jolt exactly ✓
-5. **First/Second group indices** - Correct ✓
-6. **Lagrange domain** - {-4,...,5} matching Jolt ✓
-7. **r_cycle computation** - challenges[1..] reversed ✓
-8. **tau_bound_r_tail** - Uses all 11 challenges reversed ✓
-
-### R1CS Input Evaluations from Debug Test
-
-The Jolt verifier reads these from Zolt's proof:
-```
-[0] LeftInstructionInput => 1891106565568279723...
-[1] RightInstructionInput => 7815611673650657012...
-...
-[26] OpFlags(Load) => 3011325360017154853...
-[27] OpFlags(Store) => 236388320696034965...
-...
-```
-
-These are the MLE evaluations at r_cycle, computed by Zolt's `R1CSInputEvaluator.computeClaimedInputs`.
+Jolt uses `LinearOnlySchedule::new()` which sets `switch_over_point() = 0`, meaning ALL rounds use linear mode. However, Zolt's implementation has special "streaming round" logic for round 1. This distinction may not matter for correctness, but worth noting.
 
 ### Expected Output Claim Formula
 
 ```
-expected = tau_high_bound_r0 * tau_bound_r_tail * inner_sum_prod
+expected = tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod
 
-tau_high_bound_r0 = 12826223823521221946558236994983949818417555624042883646429867758366229902653
-tau_bound_r_tail = 8603170193156393692230406904477425345246858118990710025063879121918491155552
-inner_sum_prod = 18034351451926217603377778125390129356175428155321402285998220639456984589925
+tau_high_bound_r0 = L(τ_high, r0) = 18796872752198882468706643523486633226658657759867260826380105601287106614970
+tau_bound_r_tail = eq(τ_low, r_tail_reversed) = 13330793061469069248256603124694999981346909330093035829032594788030901377683
+inner_sum_prod = Az_final * Bz_final = 12743996023445103930025687297173833157935883282725550257061179867498976368827
 
-inner_sum_prod = az_final * bz_final
-az_final = az_g0 + r_stream * (az_g1 - az_g0)
-bz_final = bz_g0 + r_stream * (bz_g1 - bz_g0)
+Az_final = az_g0 + r_stream * (az_g1 - az_g0)
+Bz_final = bz_g0 + r_stream * (bz_g1 - bz_g0)
 
-az_g0 = 11307336203138615556774249738056012003110982357404568850780192491166454123623
-bz_g0 = 15871205286623107670421364844665791558158034368595592735643934424121987926930
+az_g0 = 7543887623553796639022762555706702067884745212652401071075907851931007375221
+bz_g0 = 7385987366068817964405961970983403310894645058260096091751841775851519432644
+az_g1 = 21642654990609751288487014314124631874918846676589706504157890394950123239009
+bz_g1 = 3918541254077008785088751528944340709929299267734721029349343619431186429976
 ```
-
-### Potential Remaining Issues
-
-1. **Witness extraction mismatch**
-   - Zolt's `R1CSCycleInputs.fromTraceStep` may produce different values than Jolt's `R1CSCycleInputs::from_trace`
-   - The witness values are summed with eq weights to produce the sumcheck output
-
-2. **MLE evaluation mismatch**
-   - The `computeClaimedInputs` function may have a subtle indexing issue
-   - Check if cycle index t is mapped correctly to eq_evals[t]
-
-3. **Constraint evaluation during sumcheck**
-   - The streaming round computes az_g0, bz_g0, etc. for each cycle
-   - If these differ from what the verifier expects, the output claim will mismatch
 
 ### Next Steps
 
-1. Add debug output to Zolt's streaming round to print az_g0, bz_g0 for first few cycles
-2. Compare with what the Jolt verifier computes from the opening claims
-3. Track down which component differs
+1. Add debug output to Zolt's streaming round:
+   - Print t_zero and t_infinity
+   - Print E_out and E_in table values for first few entries
+   - Print current_scalar at each round
+
+2. Compare Lagrange weights L_i(r0) between Zolt and Jolt
+
+3. Create minimal test with known correct values
+
+### Test Commands
+
+```bash
+# Jolt verification test
+cd /Users/matteo/projects/jolt
+cargo test --package jolt-core test_debug_stage1_verification -- --ignored --nocapture
+
+# Zolt tests
+cd /Users/matteo/projects/zolt
+zig build test --summary all
+```
 
 ---
 
 ## Previous Sessions
 
-### Session 17-18 - Big-Endian Eq Table Fix
+### Session 20 - tau_low fix
 
-Fixed E_out/E_in tables to use big-endian indexing. Changed ratio from 0.8129 to 1.1987.
+Fixed UniSkip to use tau_low instead of full tau, avoiding double-counting τ_high.
 
-### Session 16 - Initial Investigation
+### Session 19 - EqPolynomial big-endian fix
 
-Investigated 0.8129 ratio (close to 13/16).
+Fixed EqPolynomial.evals() to use big-endian indexing.
+
+### Session 17-18 - E_out/E_in tables
+
+Fixed split_eq E tables to use big-endian indexing.
 
 ---
 
-## Big-Endian Convention
+## Architecture Notes
 
-From jolt-core/src/poly/eq_poly.rs:
+### Sumcheck Structure
+
+Stage 1 has:
+- 1 UniSkip round (produces r0)
+- 1 + num_cycle_vars remaining rounds
+
+For trace_length = 1024:
+- num_cycle_vars = 10
+- num_rows_bits = 12
+- tau.len = 12
+- tau_low.len = 11
+- Remaining rounds = 11
+- r_tail_reversed = [r_10, r_9, ..., r_1, r_stream]
+
+### Big-Endian Convention
+
+From Jolt's eq_poly.rs:
 ```
 evals(r)[i] = eq(r, b₀…b_{n-1})
 where i has MSB b₀ and LSB b_{n-1}
 ```
-
-Index i's bit pattern in BIG-ENDIAN corresponds to variable values:
-- MSB of i → r[0] (first variable)
-- LSB of i → r[n-1] (last variable)

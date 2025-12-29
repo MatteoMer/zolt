@@ -31,27 +31,39 @@
 24. **Multiquadratic Sum of Products** - t'(∞) = Σ (slope_Az * slope_Bz), NOT (Σ slope_Az) * (Σ slope_Bz)
 25. **current_scalar double-counting fix** - Removed from t' computation, only applied in l(X)
 26. **r_grid HalfSplitSchedule** - Fixed to match Jolt's streaming/linear phase split
+27. **Dory MSM length fixes** - Fixed row_commitments vs v_vec/left_vec length mismatches
 
 ---
 
-## Current Status: Testing r_grid fix
+## Current Status: ~28x Discrepancy in Stage 1
 
-### What's Fixed (Session 6)
-- **r_grid update schedule** matches Jolt's HalfSplitSchedule:
-  - Streaming phase (rounds 1 to switch_over): r_grid is updated
-  - Linear phase (after switch_over): r_grid stays frozen
-  - For 11 remaining rounds: switch_over = 5, so r_grid has 32 entries (2^5)
+### Session 6 Progress
+- Fixed r_grid to use Jolt's HalfSplitSchedule (streaming/linear phase split)
+- Fixed Dory open crashes (MSM length mismatches)
+- Successfully generating Jolt-format proofs with `--jolt-format`
+- Proof values changed after r_grid fix (confirming fix is applied)
 
-### Blocking Issue: Dory Open Crash
-- The `--jolt-format` proof generation crashes in Dory.open()
-- The MSM function hits an unreachable
-- Need to fix before testing with Jolt
+### Remaining Issue
+- `output_claim = 10802353943536118619191613488565009513754763340520674309069454666556780486960`
+- `expected_claim = 382352852595393953063479719277902514423598561439194590455879357973322296027`
+- Ratio: ~28x (was ~10x before r_grid fix)
+
+### Key Observations from Jolt Test
+- `inner_sum_prod` = sum over cycles of Az*Bz weighted by eq
+- `tau_high_bound_r0` = eq(tau[11], r0) for constraint group selection
+- `tau_bound_r_tail` = product of eq values for bound cycle challenges
+- Expected = tau_high_bound_r0 * tau_bound_r_tail * inner_sum_prod
+
+### Possible Causes
+1. The `inner_sum_prod` computation in Zolt may have different cycle indexing
+2. The eq polynomial weights (E_out, E_in, r_grid) may be applied differently
+3. The tau/r_tail values may be used in wrong order
 
 ### Next Steps
-1. [ ] Fix Dory open crash (MSM issue with evaluation point)
-2. [ ] Generate proof with `--jolt-format` flag
-3. [ ] Export preprocessing to /tmp/zolt_preprocessing.bin
-4. [ ] Run Jolt test to verify Stage 1 output claim matches
+1. [ ] Compare intermediate values: E_out, E_in, r_grid at each round
+2. [ ] Verify tau is used correctly in split_eq initialization
+3. [ ] Check if cycle indexing matches between Zolt and Jolt
+4. [ ] Consider adding detailed debug output to trace eq weights per cycle
 
 ---
 
@@ -60,7 +72,7 @@
 ```bash
 # Generate Jolt-format proof in Zolt
 cd /Users/matteo/projects/zolt
-zig build -Doptimize=ReleaseFast
+zig build
 ./zig-out/bin/zolt prove examples/sum.elf --jolt-format --export-preprocessing /tmp/zolt_preprocessing.bin -o /tmp/zolt_proof_dory.bin
 
 # Run cross-verification in Jolt

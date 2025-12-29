@@ -43,48 +43,43 @@
 
 ## Current Status: ~1.2 Ratio Discrepancy
 
-### Session 18 (December 29, 2024) - Investigation Continues
+### Session 18 (December 29, 2024) - Investigation Summary
 
 **Current Values:**
 - output_claim: 17544243885955816008056628262847401707989885215135853123958675606975515887014
 - expected:     14636075186748817511857284373650752059613754347411376791236690874143105070933
 - Ratio: ~1.1987 (consistent across multiple runs)
 
+**Key Observations:**
+1. Zolt's internal verification PASSES - proof is self-consistent
+2. The ratio is ~1.2 which is NOT a simple fraction like 6/5 in the finite field
+3. Challenges are derived from Zolt's proof, so both output and expected use same challenges
+4. The discrepancy must be in either:
+   - t_zero/t_infinity computation for streaming round
+   - How eq weights factor into the sum
+   - Something in the constraint evaluation
+
 **Verified Matching Components:**
-1. gruen_poly_deg_3 / computeCubicRoundPoly formula ✓
-2. eq_eval_0, eq_eval_1 computation ✓
-3. q_2 and q_3 formulas ✓
-4. inner_sum_prod = az_final * bz_final ✓
-5. tau_high_bound_r0 and tau_bound_r_tail match Jolt's formulas ✓
-6. Split logic: m = tau.len/2, w_last skipped ✓
-7. current_index = tau.len ✓
+- gruen_poly_deg_3 / computeCubicRoundPoly formula ✓
+- eq_eval_0, eq_eval_1 computation ✓
+- Split logic: m = tau.len/2, w_last skipped ✓
+- Lagrange kernel is symmetric ✓
+- Claim propagation: s(0)+s(1) = previous_claim ✓
 
-**Key Insight from Jolt Code:**
+**Remaining Investigation Areas:**
 
-In Jolt, for streaming round with window_size=1:
-- `num_unbound = current_index = 11` (tau_low.len)
-- `head_len = 11 - 1 = 10`
-- `m = 11 / 2 = 5`
-- `head_out_bits = min(10, 5) = 5` → E_out has 32 entries
-- `head_in_bits = 10 - 5 = 5` → E_in has 32 entries
-- Total: 32 * 32 = 1024 cycles ✓
+1. **Compare t_zero and t_infinity values**
+   - Add debug output to print exact values before computeCubicRoundPoly
+   - Compare with what Jolt's prover would produce
 
-**Next Investigation Steps:**
+2. **Check constraint evaluation differences**
+   - Zolt: sum L_i(r0) * condition_i / magnitude_i
+   - Jolt: uses optimized accumulators (Acc5U, Acc6S)
+   - Verify they produce the same Az/Bz values
 
-1. **Add debug output to streaming round**
-   - Print t_zero and t_infinity before computeCubicRoundPoly
-   - Print round polynomial coefficients
-   - Compare with Jolt's values
-
-2. **Trace through claim propagation**
-   - Initial claim = uni_skip_claim
-   - Each round: new_claim = poly.evaluate(challenge)
-   - Final claim should match expected
-
-3. **Check if there's an off-by-one in cycle iteration**
-   - Zolt: iterate 0..padded_trace_len
-   - Jolt: i = out_idx * e_in_len + in_idx
-   - These should be equivalent
+3. **Verify cycle-to-eq-weight mapping**
+   - Print eq weights for first few cycles
+   - Compare with Jolt's E_out/E_in factorization
 
 ---
 

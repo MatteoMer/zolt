@@ -1,86 +1,89 @@
 # Zolt-Jolt Compatibility TODO
 
-## Current Status: FUNDAMENTAL BUG FOUND (Session 24)
+## Current Status: Investigating Jolt's Index Structure (Session 24)
 
-### ROOT CAUSE IDENTIFIED
+### Root Cause Identified
 
-**The Problem**: Zolt computes `Σ (Az * Bz)` (sum of products) but Jolt expects `(Σ Az) * (Σ Bz)` (product of sums).
+The fundamental issue is that:
+- **Prover computes**: `Σ (Az * Bz)` - sum of products
+- **Verifier expects**: `(Σ Az) * (Σ Bz)` - product of sums
 
-These are mathematically DIFFERENT due to the non-linearity of multiplication!
+These are mathematically different due to non-linearity of multiplication.
 
-**Example**:
-- Prover (Zolt): `Σ_cycle eq * Az(cycle) * Bz(cycle)` = sum of diagonal products
-- Verifier (Jolt): `(Σ_cycle eq * Az(cycle)) * (Σ_cycle eq * Bz(cycle))` = cross-product
+### Initial Fix Attempt
 
-### The Fix Required
+Modified streaming_outer.zig to:
+1. Accumulate separate Az and Bz sums
+2. Expand to {0, 1, ∞} grid
+3. Multiply after expansion
 
-Zolt must change from computing:
-```zig
-// WRONG (current Zolt approach):
-const prod_0 = az_g0.mul(bz_g0);  // Product BEFORE summing
-t_zero = t_zero.add(eq_val.mul(prod_0));
+**Result**: Output_claim changed but still doesn't match expected.
+
+### Current Test Values
+
+```
+output_claim:    5514162482559916804432512270777756912898528478061111678566043859523325463688
+expected_claim: 11278176879827447390261533528479013530892542028574834464976023912397580784757
+Match: false
 ```
 
-To computing:
-```zig
-// CORRECT (Jolt approach):
-// 1. Keep Az and Bz separate throughout sumcheck
-// 2. Build separate Az_expanded and Bz_expanded grids on {0,1,∞}^d
-// 3. Multiply AFTER expansion: t_prime[idx] = Az_expanded[idx] * Bz_expanded[idx]
-// 4. Project t_prime to get round polynomial
-```
+### Understanding Jolt's Structure
 
-### How Jolt Solves This
+Jolt's streaming prover in `extrapolate_from_binary_grid_to_tertiary_grid`:
 
-1. **Maintain separate polynomials**: `OuterLinearStage` has separate `az: DensePolynomial` and `bz: DensePolynomial`
+1. **Per (out_idx, in_idx) pair**:
+   - Iterates over `j` (window position) and `k` (r_grid index)
+   - Computes `full_idx = offset + j * klen + k`
+   - Derives `step_idx = full_idx >> 1` and `selector = full_idx & 1`
+   - Accumulates `grid_a[j]` and `grid_b[j]` weighted by `scaled_w[k]`
 
-2. **Expand to multiquadratic grid**: Each polynomial is expanded to {0, 1, ∞}^d grid where ∞ stores the slope
+2. **Key insight**: The k-loop mixes:
+   - Cycle index (`step_idx`)
+   - Constraint group (`selector`)
+   - Bound challenge weights (`r_grid[k]`)
 
-3. **Multiply on expanded grid**: `t'[idx] = Az_expanded[idx] * Bz_expanded[idx]`
+3. **Multiquadratic expansion**:
+   - `grid_a` and `grid_b` are expanded to {0, 1, ∞}
+   - Products computed: `buff_a[i] * buff_b[i]`
 
-4. **Project for round poly**: Use `t'(0)` and `t'(∞)` with Gruen interpolation
+4. **Accumulation**:
+   - Weighted by `e_in * e_out` and summed
 
-The ∞ encodings capture all cross-terms that arise from `(Σ Az) * (Σ Bz)`.
+### What's Different in Zolt
 
-### Implementation Plan
+Zolt's approach:
+- Iterates directly over cycles
+- Computes Az/Bz per-cycle with Lagrange weights
+- Doesn't handle the mixed (step, selector, k) index space
 
-1. **Modify `computeCycleAzBzForMultiquadratic`**:
-   - Return separate (Az_g0, Az_g1, Bz_g0, Bz_g1) instead of products
-   - Or return the multiquadratic expanded values
+### Key Insight
 
-2. **Modify streaming round computation**:
-   - Accumulate separate Az_sum and Bz_sum grids over cycles
-   - Expand each to {0, 1, ∞} grid
-   - THEN compute product
+The `scaled_w[k] = lagrange_evals[constraint] * r_grid[k]` weighting means:
+- Each k value corresponds to a different (step, selector) pair
+- The sum over k is already a "local product-of-sums" over the bound challenges
+- This structure is crucial for the math to work out
 
-3. **Update `computeCubicRoundPoly`**:
-   - Accept multiquadratic t' values (after Az*Bz expansion)
-   - Project to get q_constant and q_quadratic_coeff
+### Next Steps
 
-### Key Files to Modify
+1. **Study the index mapping more carefully**:
+   - How does Jolt's `full_idx = offset + j * klen + k` work?
+   - What's the relationship between k, step_idx, and selector?
 
-1. `src/zkvm/spartan/streaming_outer.zig`:
-   - `computeRemainingRoundPoly()` - streaming round
-   - `computeCycleAzBzForMultiquadratic()` - cycle values
+2. **Replicate Jolt's exact structure**:
+   - Build per-(out,in) grids with correct k-loop
+   - Use scaled_w weighting
+   - Expand and multiply on multiquadratic grid
 
-2. May need new `MultiquadraticPolynomial` module to handle {0,1,∞} expansion
+3. **Key functions to port**:
+   - `extrapolate_from_binary_grid_to_tertiary_grid` (outer.rs:593-635)
+   - The index decomposition logic
 
-### Reference Implementation
+### Reference Files
 
-See Jolt's:
+Jolt:
+- `outer.rs:593-635` - grid building with k-loop
 - `outer.rs:704-725` - multiquadratic expansion and product
-- `multiquadratic_poly.rs:40-142` - {0,1,∞} grid expansion
-- `multiquadratic_poly.rs:326-351` - projection to first variable
-
-### Verification
-
-After fix:
-- `output_claim` should equal `expected_output_claim`
-- `inner_sum_prod_prover` should equal `inner_sum_prod_verifier`
-
-Current values:
-- Prover Az*Bz: `6845670145302814045138444113000749599157896909649021689277739372381215505241`
-- Verifier Az*Bz: `12743996023445103930025687297173833157935883282725550257061179867498976368827`
+- `multiquadratic_poly.rs` - {0,1,∞} expansion
 
 ## Test Commands
 

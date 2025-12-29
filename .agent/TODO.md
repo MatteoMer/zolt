@@ -37,54 +37,44 @@
 
 ## Current Status: ~28x Discrepancy in Stage 1
 
-### Session 6 Progress
-- ✅ Fixed r_grid to match Jolt's HalfSplitSchedule
-  - Streaming phase (rounds 1-5): r_grid updated, total 32 entries
-  - Linear phase (rounds 6-11): r_grid frozen
-- ✅ Fixed Dory open crashes (MSM length mismatches)
-- ✅ Successfully generating Jolt-format proofs with `--jolt-format`
-- ✅ All 632 Zolt tests pass
+### Session 7 Analysis (December 29, 2024)
 
-### Remaining Issue
-```
-output_claim (from sumcheck):    10802353943536118619191613488565009513754763340520674309069454666556780486960
-expected_output_claim (from R1CS): 382352852595393953063479719277902514423598561439194590455879357973322296027
-Ratio: ~28x
-```
+**Key Finding**: The ratio is ~28.25, which is very close to 1024/36 ≈ 28.44
 
-### Analysis
-The expected output claim is computed as:
-```
-expected = tau_high_bound_r0 * tau_bound_r_tail * inner_sum_prod
-```
+This suggests a scaling issue related to trace_length (1024) and R1CS inputs (36).
 
-Where:
-- `tau_high_bound_r0` = Lagrange kernel L(r0, tau[11]) ✅ verified correct
-- `tau_bound_r_tail` = Π eq(tau[i], r[i]) for bound challenges
-- `inner_sum_prod` = Σ_cycle Az*Bz without eq weighting
+**Verified Correct:**
+- E_out/E_in factorization: indexes match Jolt's structure
+- Lagrange weighting in Az/Bz computation
+- split_eq initialization with tau_low and scaling factor
+- streaming vs linear phase r_grid updates
 
-In Zolt:
-- `lagrange_tau_r0` is passed as initial scaling to split_eq ✅
-- `current_scalar` accumulates bound eq values via `bind()` ✅
-- t_zero/t_infinity include E_out * E_in * r_grid weighting
+**Potential Issues to Investigate:**
 
-### Possible Causes
-1. **E_out/E_in indexing** - May not match Jolt's bit ordering
-2. **r_grid vs r_tail** - Streaming phase weighting might be off
-3. **Cycle iteration** - current_bit_pos calculation might differ
-4. **Window size mismatch** - Linear mode uses window size 1
+1. **Index bit ordering during cycle rounds**
+   - Zolt iterates over base_idx and reconstructs cycle_idx_0, cycle_idx_1
+   - Need to verify the bit insertion matches Jolt's index structure
 
-### Verified Correct
-- tau vector matches Jolt
-- tau_high = tau[11]
-- r0 challenge derivation
-- Lagrange kernel computation
+2. **remaining_idx calculation in cycle rounds**
+   - `remaining_idx = high_bits` (bits above current_bit_pos)
+   - May not match Jolt's E_out/E_in indexing after streaming phase
 
-### Next Steps
-1. [ ] Add debug output to print E_out, E_in, r_grid values
-2. [ ] Compare per-cycle eq weights between Zolt and Jolt
-3. [ ] Verify bit ordering in cycle iteration
-4. [ ] Check if linear mode computes eq differently
+3. **r_grid mask calculation**
+   - Zolt uses `cycle_idx_0 & r_grid_mask`
+   - Need to verify this matches Jolt's k indexing
+
+4. **Window variable handling**
+   - In streaming round, window variable = constraint group selector
+   - In cycle rounds, window variable = current cycle bit
+   - The transition between these may be incorrect
+
+### Debug Plan
+
+Add debug output to compare:
+1. t_zero and t_infinity values each round
+2. E_out and E_in table contents
+3. r_grid contents after each round
+4. current_scalar value after each bind
 
 ---
 

@@ -157,7 +157,12 @@ pub fn StreamingOuterProver(comptime F: type) type {
             self.r_grid.deinit();
         }
 
-        /// Total number of rounds
+        /// Total number of rounds for the remaining sumcheck (after UniSkip)
+        /// = 1 (streaming/constraint group) + num_cycle_vars (cycle bits)
+        ///
+        /// Note: This does NOT include the UniSkip round, which is handled separately.
+        /// The streaming round binds the constraint group selector variable.
+        /// The cycle rounds bind the cycle index bits.
         pub fn numRounds(self: *const Self) usize {
             return 1 + self.num_cycle_vars;
         }
@@ -1195,7 +1200,7 @@ test "StreamingOuterProver: initialization" {
 
     try testing.expectEqual(@as(usize, 2), prover.num_cycle_vars); // log2(4) = 2
     try testing.expectEqual(@as(usize, 4), prover.padded_trace_len);
-    try testing.expectEqual(@as(usize, 3), prover.numRounds()); // 1 + 2
+    try testing.expectEqual(@as(usize, 3), prover.numRounds()); // 1 + 2 (streaming + 2 cycle vars)
 }
 
 test "StreamingOuterProver: first round poly" {

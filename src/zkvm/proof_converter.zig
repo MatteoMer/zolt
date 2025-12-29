@@ -713,6 +713,13 @@ pub fn ProofConverter(comptime F: type) type {
         ///
         /// This computes real Az*Bz products using the constraint evaluators,
         /// producing a polynomial that satisfies the univariate skip verification.
+        ///
+        /// IMPORTANT: The eq polynomial must be computed from tau_low (excluding tau_high)
+        /// because the UniSkip polynomial formula is:
+        ///   s1(Y) = L(τ_high, Y) · t1(Y)
+        /// where t1(Y) = Σ_x eq(τ_low, x) · Az(x,Y) · Bz(x,Y)
+        ///
+        /// If we used the full tau, τ_high would be counted twice!
         fn createUniSkipProofStage1FromWitnesses(
             self: *Self,
             cycle_witnesses: []const r1cs.R1CSCycleInputs(F),
@@ -724,13 +731,23 @@ pub fn ProofConverter(comptime F: type) type {
 
             const NUM_COEFFS = r1cs.OUTER_FIRST_ROUND_POLY_NUM_COEFFS;
 
-            // Compute eq polynomial evaluations at tau
-            var eq_poly = try poly_mod.EqPolynomial(F).init(self.allocator, tau);
+            // Extract tau_low (all but the last element) and tau_high
+            // tau_high is used for the Lagrange kernel L(τ_high, Y)
+            // tau_low is used for the eq polynomial in t1(Y)
+            if (tau.len < 2) {
+                return self.createUniSkipProofStage1();
+            }
+            const tau_low = tau[0 .. tau.len - 1];
+
+            // Compute eq polynomial evaluations at tau_low (NOT full tau!)
+            // This ensures τ_high is only counted once via L(τ_high, Y)
+            var eq_poly = try poly_mod.EqPolynomial(F).init(self.allocator, tau_low);
             defer eq_poly.deinit();
             const eq_evals = try eq_poly.evals(self.allocator);
             defer self.allocator.free(eq_evals);
 
             // Use the Spartan outer prover to compute the first-round polynomial
+            // Pass full tau so it can extract tau_high for L(τ_high, Y)
             var outer_prover = try spartan_outer.SpartanOuterProver(F).initFromWitnesses(
                 self.allocator,
                 cycle_witnesses,

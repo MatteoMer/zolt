@@ -9,7 +9,7 @@
 4. **Commitment Scheme** - Dory with Jolt-compatible SRS
 5. **Verifier Preprocessing Export** - DoryVerifierSetup exports correctly
 
-### Stage 1 Fixes (Sessions 11-29)
+### Stage 1 Fixes (Sessions 11-16)
 6. **Lagrange Interpolation Bug** - Fixed dead code corrupting basis array
 7. **UniSkip Verification** - Domain sum check passes
 8. **UnivariateSkip Claim** - Correctly set to uni_poly.evaluate(r0)
@@ -35,52 +35,35 @@
 28. **Jolt Index Structure** - Use full_idx = x_out|x_in|x_val|r_idx, step_idx = full_idx >> 1
 29. **Selector from full_idx** - Use selector = full_idx & 1 for constraint group in cycle rounds
 30. **r0 not in challenges** - r0 should NOT be added to the challenges list
+31. **Debug test for streaming round** - Added test to inspect intermediate values
 
 ---
 
-## Current Status: ~1.23x Discrepancy in Stage 1
+## Current Status: ~0.8129 Ratio Discrepancy (Close to 13/16)
 
-### Session 16 (December 29, 2024) - Deep Investigation
+### Session 16 (December 29, 2024) - Comprehensive Investigation
 
 **Values:**
 - output_claim: 15155108253109715956971809974428807981154511443156768969051245367813784134214
 - expected:     18643585735450861043207165215350408775243828862234148101070816349947522058550
-- Ratio: 0.8129 (very close to 13/16 = 0.8125)
+- Ratio: 0.8129 (close to 13/16 = 0.8125)
 
-**Verified Components (All Match Jolt):**
-- ExpandingTable update: `values[i] = (1-r)*old`, `values[i+len] = r*old`
-- eq table factorization: E_out 5 bits (32 entries), E_in 5 bits (32 entries)
-- Lagrange domain: {-4, -3, -2, -1, 0, 1, 2, 3, 4, 5} for 10 constraints
-- Multiquadratic expansion: [f(0), f(1), f(∞)=slope]
-- Compressed poly format: [c0, c2, c3] (linear term omitted)
-- Index mapping: out_idx = i >> 5, in_idx = i & 31
-- Streaming round: Both constraint groups for same cycle
-- Gruen polynomial formula: matches Jolt's gruen_poly_deg_3
-- Constraint group indices: first group {1,2,3,4,5,6,11,14,17,18}, second group {0,7,8,9,10,12,13,15,16}
+**Verified Matching Components:**
+- Constraint group ordering (first: 10 constraints, second: 9 constraints)
+- Lagrange weight array usage (both groups use w[0..N])
+- Eq table factorization (E_out 5 bits, E_in 5 bits = 32×32 = 1024)
+- tau_low/tau_high split (tau_high = last element, tau_low = rest)
+- Lagrange kernel formula: K(x,y) = Σ L_i(x)·L_i(y)
+- Index mapping: out_idx = i >> head_in_bits, in_idx = i & mask
+- r_cycle construction: skip r_stream, reverse for BIG_ENDIAN
+- Gruen polynomial: l(X) = eq_0 + (eq_1 - eq_0) * X
 
-**Streaming Round Iteration (Verified):**
-Jolt iterates:
-- For each (out_idx, in_idx) pair
-- For j in 0..jlen (0..2 for window_size=1)
-- full_idx = offset + j * klen + k where offset = i * jlen * klen
-- step_idx = full_idx >> 1 = i (always the cycle)
-- selector = full_idx & 1 = j (constraint group)
+**Remaining Investigation:**
+The systematic ratio suggests a missing/extra factor somewhere in t'(0) and t'(∞):
 
-So grid_a[0] = Az_g0 and grid_a[1] = Az_g1 for cycle i.
-
-Zolt iterates:
-- For each cycle i in 0..padded_trace_len
-- Computes Az_g0, Bz_g0, Az_g1, Bz_g1 for cycle i
-- Accumulates t_zero = Σ eq * Az_g0 * Bz_g0
-- Accumulates t_infinity = Σ eq * slope_Az * slope_Bz
-
-Both should produce identical results!
-
-**Investigation Areas:**
-1. Scale factor issue - is there a multiplicative constant we're missing?
-2. Montgomery form issue in intermediate values?
-3. Off-by-one in eq table lookup?
-4. Wrong tau variable for streaming round l(X)?
+1. **Az/Bz evaluation at single cycle** - Compare exact values per constraint
+2. **Lagrange weight order** - Verify w[i] maps to correct constraint
+3. **Product computation** - Ensure t'(0) = Σ eq * Az_g0 * Bz_g0 exactly
 
 ---
 

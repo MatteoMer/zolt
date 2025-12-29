@@ -567,13 +567,24 @@ pub fn StreamingOuterProver(comptime F: type) type {
             const head_in_bits = eq_tables.head_in_bits;
             const e_in_mask = (@as(usize, 1) << @intCast(head_in_bits)) - 1;
 
+            // Gruen's multiquadratic method computes:
+            // - t'(0) = Σ eq * Az(0) * Bz(0)
+            // - t'(∞) = Σ eq * Az(∞) * Bz(∞) = Σ eq * (Az(1) - Az(0)) * (Bz(1) - Bz(0))
+            //
+            // Note: t'(∞) is the product of SLOPES, NOT the slope of the product!
+            // This is crucial for the cubic polynomial construction.
+
             var t_zero = F.zero();
-            var t_one = F.zero();
+            var t_infinity = F.zero();
 
             if (self.current_round == 1) {
-                // STREAMING ROUND: Sum over constraint groups
-                // t'(0) = Σ_cycles eq(τ, x) * Az_g0(x) * Bz_g0(x)
-                // t'(1) = Σ_cycles eq(τ, x) * Az_g1(x) * Bz_g1(x)
+                // STREAMING ROUND: The streaming variable selects constraint group (0 or 1)
+                // - Position 0: first constraint group (Az_g0, Bz_g0)
+                // - Position 1: second constraint group (Az_g1, Bz_g1)
+                // - Position ∞: slope = (value at 1) - (value at 0)
+                //
+                // t'(0) = Σ_cycles eq * Az_g0 * Bz_g0
+                // t'(∞) = Σ_cycles eq * (Az_g1 - Az_g0) * (Bz_g1 - Bz_g0)  [product of slopes]
                 //
                 // The eq weights are factorized: eq[i] = E_out[i >> head_in_bits] * E_in[i & mask]
                 for (0..@min(self.padded_trace_len, self.cycle_witnesses.len)) |i| {
@@ -584,56 +595,87 @@ pub fn StreamingOuterProver(comptime F: type) type {
                     const e_in_val = if (in_idx < E_in.len) E_in[in_idx] else F.zero();
                     const eq_val = e_out_val.mul(e_in_val);
 
-                    const az_bz_g0 = self.computeCycleAzBzProductForGroup(&self.cycle_witnesses[i], 0);
-                    const az_bz_g1 = self.computeCycleAzBzProductForGroup(&self.cycle_witnesses[i], 1);
-                    t_zero = t_zero.add(eq_val.mul(az_bz_g0));
-                    t_one = t_one.add(eq_val.mul(az_bz_g1));
+                    // Compute Az and Bz separately for both groups to get slopes
+                    const az_bz = self.computeCycleAzBzForMultiquadratic(&self.cycle_witnesses[i]);
+                    t_zero = t_zero.add(eq_val.mul(az_bz.prod_0)); // Az_g0 * Bz_g0
+                    t_infinity = t_infinity.add(eq_val.mul(az_bz.prod_inf)); // slope_a * slope_b
                 }
             } else {
-                // CYCLE ROUND: Sum over cycle halves using combined Az*Bz
-                // Need r_stream to combine constraint groups
+                // CYCLE ROUND: Sum over all cycles weighted by eq and r_grid
+                //
+                // The key insight is that we need to compute:
+                // - t'(0) = Σ_{cycles where current_bit=0} eq_weight * Az * Bz
+                // - t'(1) = Σ_{cycles where current_bit=1} eq_weight * Az * Bz
+                // - t'(∞) = (LATER: product of slopes for true multiquadratic)
+                //
+                // For now, use the simpler approach:
+                // - Compute sum of Az*Bz products for each half
+                // - t'(∞) = slope of product = t'(1) - t'(0)
+                //
+                // This matches standard sumcheck, not Gruen's multiquadratic method.
+                // TODO: Implement true multiquadratic for efficiency.
+
                 const r_stream = self.r_stream orelse F.zero();
 
-                const half = self.padded_trace_len >> @intCast(self.current_round);
+                // Get r_grid values for weighting cycles
+                const r_grid = &self.r_grid;
+                const r_grid_len = r_grid.length();
 
-                // t'(0) = sum over first half (current cycle variable = 0)
-                for (0..@min(half, self.cycle_witnesses.len)) |i| {
-                    // Factorized eq weight using proper bit shifting
-                    const out_idx = i >> @intCast(head_in_bits);
-                    const in_idx = i & e_in_mask;
+                // The split determines which cycles have current_bit = 0 vs 1
+                // For LowToHigh binding:
+                // - Round 1: bit 0 = cycle_idx & 1
+                // - Round 2: bit 1 = (cycle_idx >> 1) & 1
+                // - Round k: bit k-1 = (cycle_idx >> (k-1)) & 1
+                //
+                // But we also need to consider that cycle_idx relates to r_grid_idx
+                // via the bound challenges.
+
+                // For cycle round j (j >= 2), we've bound (j-1) challenges
+                // r_grid has 2^(j-1) entries
+                // Each cycle's weight in the sum depends on its lower (j-1) bits
+
+                const num_bound = self.current_round - 1; // Number of bound cycle challenges
+                const r_grid_mask = (@as(usize, 1) << @intCast(num_bound)) - 1;
+
+                // Current bit position we're summing over
+                const current_bit_pos = num_bound; // The next unbound bit
+
+                var sum_prod_0 = F.zero();
+                var sum_prod_1 = F.zero();
+
+                for (0..@min(self.padded_trace_len, self.cycle_witnesses.len)) |cycle_idx| {
+                    // Get eq weight from split_eq (based on cycle position in remaining vars)
+                    const remaining_idx = cycle_idx >> @intCast(num_bound + 1);
+                    const out_idx = remaining_idx >> @intCast(head_in_bits);
+                    const in_idx = remaining_idx & e_in_mask;
                     const e_out_val = if (out_idx < E_out.len) E_out[out_idx] else F.zero();
                     const e_in_val = if (in_idx < E_in.len) E_in[in_idx] else F.zero();
                     const eq_val = e_out_val.mul(e_in_val);
 
-                    const az_bz = self.computeCycleAzBzProductCombined(&self.cycle_witnesses[i], r_stream);
-                    t_zero = t_zero.add(eq_val.mul(az_bz));
-                }
+                    // Get r_grid weight based on bound challenges
+                    const r_grid_idx = cycle_idx & r_grid_mask;
+                    const r_weight = if (r_grid_idx < r_grid_len) r_grid.get(r_grid_idx) else F.zero();
 
-                // t'(1) = sum over second half (current cycle variable = 1)
-                for (0..@min(half, self.cycle_witnesses.len -| half)) |i| {
-                    const cycle_idx = half + i;
-                    if (cycle_idx < self.cycle_witnesses.len) {
-                        // Factorized eq weight using proper bit shifting - use position i within half
-                        const out_idx = i >> @intCast(head_in_bits);
-                        const in_idx = i & e_in_mask;
-                        const e_out_val = if (out_idx < E_out.len) E_out[out_idx] else F.zero();
-                        const e_in_val = if (in_idx < E_in.len) E_in[in_idx] else F.zero();
-                        const eq_val = e_out_val.mul(e_in_val);
+                    // Combined weight
+                    const weight = eq_val.mul(r_weight).mul(self.split_eq.current_scalar);
 
-                        const az_bz = self.computeCycleAzBzProductCombined(&self.cycle_witnesses[cycle_idx], r_stream);
-                        t_one = t_one.add(eq_val.mul(az_bz));
+                    // Compute Az * Bz for this cycle
+                    const az_bz = self.computeCycleAzBzProductCombined(&self.cycle_witnesses[cycle_idx], r_stream);
+
+                    // Add to appropriate sum based on current bit
+                    const current_bit = (cycle_idx >> @intCast(current_bit_pos)) & 1;
+                    if (current_bit == 0) {
+                        sum_prod_0 = sum_prod_0.add(weight.mul(az_bz));
+                    } else {
+                        sum_prod_1 = sum_prod_1.add(weight.mul(az_bz));
                     }
                 }
-            }
 
-            // For the streaming round, q(X) is LINEAR (selecting between 2 groups)
-            // so the quadratic coefficient is 0.
-            // For cycle rounds, we need the multiquadratic method to compute the
-            // correct quadratic coefficient from the product of slopes.
-            //
-            // The streaming round has t'(∞) = 0 because there's no quadratic term
-            // in the constraint group selection.
-            const t_infinity = if (self.current_round == 1) F.zero() else t_one.sub(t_zero);
+                // For standard sumcheck (not multiquadratic):
+                t_zero = sum_prod_0;
+                // t'(∞) for standard sumcheck is just the slope of f
+                t_infinity = sum_prod_1.sub(sum_prod_0);
+            }
 
             // Use Gruen's method to compute the cubic round polynomial
             const previous_claim = self.current_claim;
@@ -739,6 +781,61 @@ pub fn StreamingOuterProver(comptime F: type) type {
         /// This is kept for compatibility but should not be used for correct proofs.
         fn computeCycleAzBzProduct(self: *const Self, witness: *const constraints.R1CSCycleInputs(F)) F {
             return self.computeCycleAzBzProductForGroup(witness, 0);
+        }
+
+        /// Compute Az*Bz for multiquadratic expansion (streaming round)
+        ///
+        /// Returns values for the multiquadratic grid:
+        /// - prod_0 = Az_g0 * Bz_g0 (product at position 0)
+        /// - prod_inf = (Az_g1 - Az_g0) * (Bz_g1 - Bz_g0) (product of slopes)
+        ///
+        /// This is used in the streaming round where we select between constraint groups.
+        fn computeCycleAzBzForMultiquadratic(
+            self: *const Self,
+            witness: *const constraints.R1CSCycleInputs(F),
+        ) struct { prod_0: F, prod_inf: F } {
+            // Compute Az and Bz for both groups
+            var az_g0 = F.zero();
+            var bz_g0 = F.zero();
+            var az_g1 = F.zero();
+            var bz_g1 = F.zero();
+
+            // Group 0
+            for (0..FIRST_GROUP_SIZE) |i| {
+                const constraint_idx = constraints.FIRST_GROUP_INDICES[i];
+                const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
+                const condition = constraint.condition.evaluate(F, witness.asSlice());
+                const left = constraint.left.evaluate(F, witness.asSlice());
+                const right = constraint.right.evaluate(F, witness.asSlice());
+                const magnitude = left.sub(right);
+                az_g0 = az_g0.add(self.lagrange_evals_r0[i].mul(condition));
+                bz_g0 = bz_g0.add(self.lagrange_evals_r0[i].mul(magnitude));
+            }
+
+            // Group 1
+            const g2_size = @min(SECOND_GROUP_SIZE, FIRST_GROUP_SIZE);
+            for (0..g2_size) |i| {
+                const constraint_idx = constraints.SECOND_GROUP_INDICES[i];
+                const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
+                const condition = constraint.condition.evaluate(F, witness.asSlice());
+                const left = constraint.left.evaluate(F, witness.asSlice());
+                const right = constraint.right.evaluate(F, witness.asSlice());
+                const magnitude = left.sub(right);
+                az_g1 = az_g1.add(self.lagrange_evals_r0[i].mul(condition));
+                bz_g1 = bz_g1.add(self.lagrange_evals_r0[i].mul(magnitude));
+            }
+
+            // Multiquadratic values:
+            // prod_0 = Az_g0 * Bz_g0 (at position 0)
+            // slope_az = Az_g1 - Az_g0
+            // slope_bz = Bz_g1 - Bz_g0
+            // prod_inf = slope_az * slope_bz (product of slopes)
+            const prod_0 = az_g0.mul(bz_g0);
+            const slope_az = az_g1.sub(az_g0);
+            const slope_bz = bz_g1.sub(bz_g0);
+            const prod_inf = slope_az.mul(slope_bz);
+
+            return .{ .prod_0 = prod_0, .prod_inf = prod_inf };
         }
 
         /// Compute Az and Bz separately for a single cycle (combined groups)

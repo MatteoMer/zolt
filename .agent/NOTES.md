@@ -2,24 +2,46 @@
 
 ## Current Status (December 29, 2024)
 
-### Session 12 - Stage 1 Remaining Rounds Debugging
+### Session 13 - Stage 1 Remaining Rounds Deep Dive
 
 **Status**: UniSkip passes, all sumcheck rounds pass (p(0)+p(1)=claim), but final output_claim ≠ expected.
+
+**Key Finding - Multiquadratic Product of Slopes:**
+The Gruen method requires:
+- `t'(0)` = Σ eq * Az(0) * Bz(0) = sum of products at position 0
+- `t'(∞)` = Σ eq * (Az(1) - Az(0)) * (Bz(1) - Bz(0)) = product of SLOPES
+
+This is NOT `t'(1) - t'(0)` (slope of product), but the PRODUCT OF SLOPES!
+
+**Previous Bug:** Was computing `t_infinity = t_one - t_zero` (slope of product).
+**Fix:** Now computing `slope_az * slope_bz` (product of slopes).
+
+**Remaining Issue - Cycle Round Implementation:**
+Current cycle round implementation has fundamental bugs:
+1. Computing `(Σ eq * Az) * (Σ eq * Bz)` instead of `Σ (eq * Az * Bz)`
+2. Not properly using r_grid weights for bound challenges
+3. Splitting cycles into halves physically instead of via eq weights
+
+**Jolt's Approach:**
+- Streaming window: Computes grid[j] for j ∈ {0, 1} (window positions)
+- Each grid position sums over k ∈ 0..klen where klen = 2^(num_bound_challenges)
+- scaled_w[k] = Lagrange(r0) * r_grid[k] combines constraint weighting with bound challenges
+- After multiquadratic expansion, products are computed at each grid position
+
+**Two Possible Approaches:**
+1. **Streaming approach**: Properly implement Jolt's streaming sumcheck with r_grid weighting
+2. **Materialization approach**: After streaming round, materialize Az/Bz as dense polynomials
+
+The materialization approach (like Jolt's LinearStage) may be simpler to get correct.
+
+---
+
+### Session 12 - Stage 1 Remaining Rounds Debugging
 
 **Progress Made:**
 1. Fixed constraint group indices to match Jolt's FIRST_GROUP/SECOND_GROUP ordering
 2. Added ExpandingTable (r_grid) for tracking bound challenge weights
-3. Updated computeRemainingRoundPolyMultiquadratic to use r_grid weighting
-
-**Current Issue:**
-The sumcheck final output_claim doesn't match the expected_output_claim computed from R1CS.
-- All round verifications pass internally (p(0)+p(1)=claim)
-- The polynomial evaluations at challenge points produce wrong values
-
-**Analysis:**
-The issue is likely in how cycle indices map to (E_out, E_in, r_grid) weights.
-Jolt uses a complex structure where each (out_idx, in_idx) pair processes multiple
-cycles indexed by (j, k) where j ∈ {0,1} and k ∈ 0..klen.
+3. Identified multiquadratic slope computation bug
 
 ---
 

@@ -39,33 +39,38 @@
 
 ## Current Status: ~1.23x Discrepancy in Stage 1
 
-### Session 15 (December 29, 2024)
+### Session 16 (December 29, 2024)
 
 **Values:**
 - output_claim: 15155108253109715956971809974428807981154511443156768969051245367813784134214
 - expected:     18643585735450861043207165215350408775243828862234148101070816349947522058550
 - Ratio: 0.813 (output/expected ≈ 13/16)
-- Missing fraction: ~18.7% (close to 3/16)
 
-**Deeply Verified Components (All Match Jolt):**
+**Verified Components (All Match Jolt):**
 - ExpandingTable update: `values[i] = (1-r)*old`, `values[i+len] = r*old`
 - eq table factorization: E_out 5 bits (32 entries), E_in 5 bits (32 entries)
 - bind() formula: `eq(τ, r) = 1 - τ - r + 2*τ*r`
 - switch_over: `num_rounds / 2` = 5 for 11 rounds
-- Iteration ranges: 0..1023 for 1024 cycles
-- Index mapping: out_idx = i/32, in_idx = i%32
-- Constraint groups: Group 0 has 10 constraints, Group 1 has 9
+- gruen_poly_deg_3: Equivalent formulas verified
+- Index mapping: out_idx = i >> 5, in_idx = i & 31
+- Streaming round: Processes both constraint groups for same cycle
 
-**Mystery:**
-The 0.813 ratio suggests we're computing 13/16 of the expected sum.
-- Could be missing some terms
-- Could be computing wrong weights
-- Could be subtle off-by-one somewhere
+**Key Differences Checked:**
+1. Lagrange polynomial evaluation at tau_curr
+   - Jolt: `eq_eval_1 = current_scalar * w[current_index - 1]`
+   - Zolt: `eq_1 = current_scalar * tau_curr`
+   - These are equivalent since tau is stored differently
 
-**Next Steps:**
-1. Add per-round claim debugging to narrow down where divergence starts
-2. Compare actual t_zero and t_infinity values
-3. May need to trace through a simple example by hand
+2. cubic_eval_1 computation:
+   - Jolt: `cubic_eval_1 = s_0_plus_s_1 - cubic_eval_0`
+   - Zolt: `s_1 = l_1 * q_1` where `q_1 = (claim - l_0*q_0) / l_1`
+   - These are algebraically equivalent
+
+**Next Investigation Areas:**
+1. Lagrange weights in streaming round (scaled_w)
+2. r_grid vs r_stream usage differences
+3. Per-round claim divergence point
+4. Cycle witness evaluation order
 
 ---
 

@@ -588,21 +588,20 @@ pub fn StreamingOuterProver(comptime F: type) type {
             if (self.current_round == 1) {
                 // STREAMING ROUND: The streaming variable selects constraint group (0 or 1)
                 //
-                // CRITICAL: We must compute (Σ Az) * (Σ Bz), NOT Σ (Az * Bz)!
-                // These are different due to non-linearity of multiplication.
+                // The polynomial in x_stream is:
+                //   p(x_stream) = Σ_{cycles} eq(τ_cycle, cycle) * Az(x_stream, cycle) * Bz(x_stream, cycle)
                 //
-                // Jolt's approach:
-                // 1. Accumulate separate sums: az_g0_sum = Σ eq * Az_g0, etc.
-                // 2. Expand to {0, 1, ∞} grid (∞ = slope = g1 - g0)
-                // 3. Multiply AFTER expansion: t_0 = az_0 * bz_0, t_inf = az_inf * bz_inf
+                // Jolt's approach for window_size=1:
+                // - For each cycle, build grids [Az_g0, Az_g1] and [Bz_g0, Bz_g1]
+                // - Expand to multiquadratic: [val_0, val_1, val_1 - val_0]
+                // - Multiply pointwise: prod[k] = buff_a[k] * buff_b[k]
+                // - Accumulate: result[k] += eq * prod[k]
                 //
-                // The ∞ products capture the cross-terms: (ΣAz)(ΣBz) ≠ Σ(Az*Bz)
+                // This is SUM-OF-PRODUCTS (Σ Az*Bz), NOT product-of-sums!
 
-                // Step 1: Accumulate separate sums for Az and Bz
-                var az_g0_sum = F.zero();
-                var az_g1_sum = F.zero();
-                var bz_g0_sum = F.zero();
-                var bz_g1_sum = F.zero();
+                // Accumulate sum of products for position 0 and slope (∞)
+                var sum_prod_0 = F.zero(); // Σ eq * Az_g0 * Bz_g0
+                var sum_prod_inf = F.zero(); // Σ eq * slope_az * slope_bz
 
                 for (0..@min(self.padded_trace_len, self.cycle_witnesses.len)) |i| {
                     // Factorized eq weight using proper bit shifting
@@ -612,47 +611,41 @@ pub fn StreamingOuterProver(comptime F: type) type {
                     const e_in_val = if (in_idx < E_in.len) E_in[in_idx] else F.zero();
                     const eq_val = e_out_val.mul(e_in_val);
 
-                    // Get Az and Bz for both groups (NOT products!)
+                    // Get Az and Bz for both groups
                     const az_bz = self.computeCycleAzBzValues(&self.cycle_witnesses[i]);
-                    az_g0_sum = az_g0_sum.add(eq_val.mul(az_bz.az_g0));
-                    az_g1_sum = az_g1_sum.add(eq_val.mul(az_bz.az_g1));
-                    bz_g0_sum = bz_g0_sum.add(eq_val.mul(az_bz.bz_g0));
-                    bz_g1_sum = bz_g1_sum.add(eq_val.mul(az_bz.bz_g1));
+
+                    // Products at position 0 (constraint group 0)
+                    const prod_0 = az_bz.az_g0.mul(az_bz.bz_g0);
+
+                    // Slopes (for position ∞)
+                    const slope_az = az_bz.az_g1.sub(az_bz.az_g0);
+                    const slope_bz = az_bz.bz_g1.sub(az_bz.bz_g0);
+                    const prod_inf = slope_az.mul(slope_bz);
+
+                    // Accumulate weighted by eq
+                    sum_prod_0 = sum_prod_0.add(eq_val.mul(prod_0));
+                    sum_prod_inf = sum_prod_inf.add(eq_val.mul(prod_inf));
                 }
 
-                // Step 2: Expand to {0, 1, ∞} grid
-                // Position 0: value at constraint group 0
-                // Position 1: value at constraint group 1
-                // Position ∞: slope = (value at 1) - (value at 0)
-                const az_at_0 = az_g0_sum;
-                const az_at_inf = az_g1_sum.sub(az_g0_sum); // slope
-                const bz_at_0 = bz_g0_sum;
-                const bz_at_inf = bz_g1_sum.sub(bz_g0_sum); // slope
-
-                // Step 3: Multiply on expanded grid to get (Σ Az) * (Σ Bz)
-                // t'(0) = az_at_0 * bz_at_0 = (Σ Az_g0) * (Σ Bz_g0)
-                // t'(∞) = az_at_inf * bz_at_inf = (slope Az) * (slope Bz)
-                t_zero = az_at_0.mul(bz_at_0);
-                t_infinity = az_at_inf.mul(bz_at_inf);
+                // t'(0) = Σ eq * Az_g0 * Bz_g0
+                // t'(∞) = Σ eq * (Az_g1-Az_g0) * (Bz_g1-Bz_g0)
+                t_zero = sum_prod_0;
+                t_infinity = sum_prod_inf;
             } else {
-                // CYCLE ROUND: Compute (Σ Az) * (Σ Bz) for product-of-sums
+                // CYCLE ROUND: Compute Σ (Az * Bz) for sum-of-products
                 //
-                // CRITICAL: Same as streaming round - we must compute product of sums!
-                // (Σ Az) * (Σ Bz) ≠ Σ (Az * Bz)
-                //
-                // For cycle rounds, we accumulate over the full (x_out, x_in, x_val, r_idx) space,
-                // then expand to multiquadratic and multiply.
+                // Like the streaming round, we need SUM-OF-PRODUCTS, not product-of-sums!
+                // For each (out, in) pair, we build grids, expand to multiquadratic,
+                // multiply pointwise, then accumulate.
 
                 const r_grid = &self.r_grid;
                 const r_grid_len = r_grid.length();
                 const num_r_bits: u6 = if (r_grid_len > 1) @intCast(std.math.log2_int(usize, r_grid_len)) else 0;
                 const window_bits: u6 = 1;
 
-                // Step 1: Accumulate separate sums for Az and Bz across all grid cells
-                // az_at_xval[0] = Σ eq * Az when x_val=0
-                // az_at_xval[1] = Σ eq * Az when x_val=1
-                var az_at_xval = [2]F{ F.zero(), F.zero() };
-                var bz_at_xval = [2]F{ F.zero(), F.zero() };
+                // Accumulate sum of products
+                var sum_prod_0 = F.zero(); // Σ eq * (Az_0 * Bz_0)
+                var sum_prod_inf = F.zero(); // Σ eq * (slope_Az * slope_Bz)
 
                 var x_out_idx: usize = 0;
                 while (x_out_idx < E_out.len) : (x_out_idx += 1) {
@@ -666,6 +659,10 @@ pub fn StreamingOuterProver(comptime F: type) type {
                         const base_idx: usize = (x_out_idx << @intCast(head_in_bits + window_bits + num_r_bits)) |
                             (x_in_idx << @intCast(window_bits + num_r_bits));
 
+                        // Build grids for this (out, in) pair
+                        var grid_az = [2]F{ F.zero(), F.zero() };
+                        var grid_bz = [2]F{ F.zero(), F.zero() };
+
                         var x_val: usize = 0;
                         while (x_val < 2) : (x_val += 1) {
                             const x_val_shifted = x_val << num_r_bits;
@@ -673,7 +670,6 @@ pub fn StreamingOuterProver(comptime F: type) type {
                             var r_idx: usize = 0;
                             while (r_idx < r_grid_len) : (r_idx += 1) {
                                 const r_weight = r_grid.get(r_idx);
-                                const eq_val = eq_base.mul(r_weight);
 
                                 const full_idx = base_idx | x_val_shifted | r_idx;
                                 const step_idx = full_idx >> 1;
@@ -681,24 +677,31 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
                                 if (step_idx < self.cycle_witnesses.len) {
                                     const result = self.computeCycleAzBzForGroup(&self.cycle_witnesses[step_idx], selector);
-                                    // Accumulate to global sums (NOT local products!)
-                                    az_at_xval[x_val] = az_at_xval[x_val].add(eq_val.mul(result.az));
-                                    bz_at_xval[x_val] = bz_at_xval[x_val].add(eq_val.mul(result.bz));
+                                    // Accumulate into this pair's grid (weighted by r_grid)
+                                    grid_az[x_val] = grid_az[x_val].add(r_weight.mul(result.az));
+                                    grid_bz[x_val] = grid_bz[x_val].add(r_weight.mul(result.bz));
                                 }
                             }
                         }
+
+                        // Expand to multiquadratic (0, 1, ∞)
+                        const buff_a_0 = grid_az[0];
+                        const buff_a_inf = grid_az[1].sub(grid_az[0]); // slope
+                        const buff_b_0 = grid_bz[0];
+                        const buff_b_inf = grid_bz[1].sub(grid_bz[0]); // slope
+
+                        // Multiply pointwise
+                        const prod_0 = buff_a_0.mul(buff_b_0);
+                        const prod_inf = buff_a_inf.mul(buff_b_inf);
+
+                        // Accumulate weighted by eq
+                        sum_prod_0 = sum_prod_0.add(eq_base.mul(prod_0));
+                        sum_prod_inf = sum_prod_inf.add(eq_base.mul(prod_inf));
                     }
                 }
 
-                // Step 2: Expand to {0, 1, ∞} grid
-                const az_at_0 = az_at_xval[0];
-                const az_at_inf = az_at_xval[1].sub(az_at_xval[0]); // slope
-                const bz_at_0 = bz_at_xval[0];
-                const bz_at_inf = bz_at_xval[1].sub(bz_at_xval[0]); // slope
-
-                // Step 3: Multiply on expanded grid to get (Σ Az) * (Σ Bz)
-                t_zero = az_at_0.mul(bz_at_0);
-                t_infinity = az_at_inf.mul(bz_at_inf);
+                t_zero = sum_prod_0;
+                t_infinity = sum_prod_inf;
             }
 
             // Use Gruen's method to compute the cubic round polynomial

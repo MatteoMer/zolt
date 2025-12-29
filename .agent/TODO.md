@@ -60,12 +60,25 @@ The fix changed the ratio direction, confirming the eq table indexing was wrong.
 - E_out/E_in tables use big-endian (tau[0] controls MSB)
 - Jolt's inner_sum_prod = az_final * bz_final ✓
 - tau_high_bound_r0 and tau_bound_r_tail match Jolt's formulas
+- Cycle index to eq table mapping: out_idx = i >> head_in_bits, in_idx = i & mask ✓
+- LC.evaluate handles constants correctly (separate field, not trailing 1)
+- Both groups use same Lagrange weights w[0..N] ✓
 
-**Remaining Investigation:**
-The ~1.2 ratio suggests some factor is still wrong:
-1. Check if streaming round t'(0) and t'(∞) are computed correctly
-2. Verify the Gruen polynomial q(X) construction
-3. Check if current_scalar is being applied correctly
+**Remaining Investigation (Next Session):**
+
+1. **R1CS Input Evaluations**
+   - The expected value uses `r1cs_input_evals` from `proof.opening_claims`
+   - Need to verify these match what Zolt computes
+   - Check if opening claim order matches `ALL_R1CS_INPUTS`
+
+2. **Gruen Polynomial q(X)**
+   - Verify q(0) = t'(0), q(∞) = t'(∞) interpretation
+   - Check if q(1) derivation is correct
+
+3. **The 6/5 Ratio**
+   - Could be related to m = 5 (tau split)
+   - Or related to constraint group sizes (10/9)
+   - Or a missing/extra factor somewhere
 
 ---
 

@@ -1,6 +1,6 @@
 # Zolt-Jolt Compatibility TODO
 
-## Completed ✅
+## Completed
 
 ### Phase 1-5: Core Infrastructure
 1. **Transcript Compatibility** - Blake2b transcript matches Jolt
@@ -9,7 +9,7 @@
 4. **Commitment Scheme** - Dory with Jolt-compatible SRS
 5. **Verifier Preprocessing Export** - DoryVerifierSetup exports correctly
 
-### Stage 1 Fixes (Sessions 11-15+)
+### Stage 1 Fixes (Sessions 11-29)
 6. **Lagrange Interpolation Bug** - Fixed dead code corrupting basis array
 7. **UniSkip Verification** - Domain sum check passes
 8. **UnivariateSkip Claim** - Correctly set to uni_poly.evaluate(r0)
@@ -34,26 +34,18 @@
 27. **Dory MSM length fixes** - Proper padding for row_commitments
 28. **Jolt Index Structure** - Use full_idx = x_out|x_in|x_val|r_idx, step_idx = full_idx >> 1
 29. **Selector from full_idx** - Use selector = full_idx & 1 for constraint group in cycle rounds
+30. **r0 not in challenges** - r0 should NOT be added to the challenges list
 
 ---
 
 ## Current Status: ~1.23x Discrepancy in Stage 1
 
-### Session 16 (December 29, 2024)
+### Session 16 (December 29, 2024) - Deep Investigation
 
 **Values:**
 - output_claim: 15155108253109715956971809974428807981154511443156768969051245367813784134214
 - expected:     18643585735450861043207165215350408775243828862234148101070816349947522058550
-- Ratio: 0.813 (output/expected ≈ 13/16)
-
-**Fixed This Session:**
-30. **r0 not in challenges** - r0 should NOT be added to the challenges list
-   - challenges = [r_stream, r_1, ..., r_10] (11 elements)
-   - cycle_challenges = challenges[1..] = [r_1, ..., r_10] (10 elements)
-
-**Still Failing:**
-- Even after fix, output_claim != expected_claim
-- The sumcheck polynomials produce different final claim than R1CS expects
+- Ratio: 0.8129 (very close to 13/16 = 0.8125)
 
 **Verified Components (All Match Jolt):**
 - ExpandingTable update: `values[i] = (1-r)*old`, `values[i+len] = r*old`
@@ -63,34 +55,32 @@
 - Compressed poly format: [c0, c2, c3] (linear term omitted)
 - Index mapping: out_idx = i >> 5, in_idx = i & 31
 - Streaming round: Both constraint groups for same cycle
+- Gruen polynomial formula: matches Jolt's gruen_poly_deg_3
+- Constraint group indices: first group {1,2,3,4,5,6,11,14,17,18}, second group {0,7,8,9,10,12,13,15,16}
 
-**Key Insights:**
-- Jolt expected_output_claim formula:
-  expected = tau_high_bound_r0 * tau_bound_r_tail * inner_sum_prod
-  where inner_sum_prod = (az_g0 + r_stream*(az_g1-az_g0)) * (bz_g0 + r_stream*(bz_g1-bz_g0))
-- r_tail = sumcheck_challenges.reversed()
+**Streaming Round Iteration (Verified):**
+Jolt iterates:
+- For each (out_idx, in_idx) pair
+- For j in 0..jlen (0..2 for window_size=1)
+- full_idx = offset + j * klen + k where offset = i * jlen * klen
+- step_idx = full_idx >> 1 = i (always the cycle)
+- selector = full_idx & 1 = j (constraint group)
 
-**Key Finding:**
-- All 11 sumcheck rounds pass the internal check: p(0)+p(1) = claim
-- The ratio output_claim/expected_claim ≈ 0.8129, EXACTLY 13/16 = 0.8125!
-- This suggests we're missing 3/16 of the total, indicating a systematic scaling issue
-- The issue is that the t_zero and t_infinity values computed in the streaming round
-  are different from what the R1CS evaluation expects
+So grid_a[0] = Az_g0 and grid_a[1] = Az_g1 for cycle i.
 
-**Verified Gruen Formula Components:**
-- l(X) = current_scalar * (1 - tau_curr + tau_curr * X) ✓
-- q(X) = t_zero + d*X + t_infinity*X² ✓
-- s(X) = l(X) * q(X) is degree 3 ✓
-- d is derived from s(0)+s(1)=claim constraint ✓
+Zolt iterates:
+- For each cycle i in 0..padded_trace_len
+- Computes Az_g0, Bz_g0, Az_g1, Bz_g1 for cycle i
+- Accumulates t_zero = Σ eq * Az_g0 * Bz_g0
+- Accumulates t_infinity = Σ eq * slope_Az * slope_Bz
 
-**Next Investigation Areas:**
-1. Compare t_zero/t_infinity values with Jolt's expected values
-2. The 13/16 ratio might relate to:
-   - 10 constraints in first group, 9 in second (but 10+9=19, not related to 16)
-   - Lagrange domain size 10 vs something of size 16
-   - Missing cycles (1024 = 64×16, so 13×64 = 832 out of 1024?)
-3. Add per-cycle debugging to find if some cycles are being skipped
-4. Check if constraint evaluation order matches Jolt
+Both should produce identical results!
+
+**Investigation Areas:**
+1. Scale factor issue - is there a multiplicative constant we're missing?
+2. Montgomery form issue in intermediate values?
+3. Off-by-one in eq table lookup?
+4. Wrong tau variable for streaming round l(X)?
 
 ---
 

@@ -9,7 +9,7 @@
 4. **Commitment Scheme** - Dory with Jolt-compatible SRS
 5. **Verifier Preprocessing Export** - DoryVerifierSetup exports correctly
 
-### Stage 1 Fixes (Sessions 11-17)
+### Stage 1 Fixes (Sessions 11-18)
 6. **Lagrange Interpolation Bug** - Fixed dead code corrupting basis array
 7. **UniSkip Verification** - Domain sum check passes
 8. **UnivariateSkip Claim** - Correctly set to uni_poly.evaluate(r0)
@@ -37,29 +37,27 @@
 30. **r0 not in challenges** - r0 should NOT be added to the challenges list
 31. **Debug test for streaming round** - Added test to inspect intermediate values
 32. **Big-Endian Eq Tables** - E_out/E_in tables now use big-endian indexing
+33. **Split Point M Fix** - Use original_tau_len/2 for split point, stored in split_point_m
 
 ---
 
-## Current Status: ~1.2 Ratio Discrepancy (Close to 6/5)
+## Current Status: ~1.2 Ratio Discrepancy
 
 ### Session 18 (December 29, 2024) - Investigation Continues
 
 **Current Values:**
 - output_claim: 17544243885955816008056628262847401707989885215135853123958675606975515887014
 - expected:     14636075186748817511857284373650752059613754347411376791236690874143105070933
-- Ratio: ~1.1987 (close to 6/5 = 1.2)
+- Ratio: ~1.1987 (NOT exactly 6/5 in the finite field - computed as arbitrary field element)
 
 **Verified Matching Components (all correct):**
 1. E_out/E_in tables use big-endian (tau[0] controls MSB) ✓
-2. Jolt's inner_sum_prod = az_final * bz_final ✓
-3. tau_high_bound_r0 and tau_bound_r_tail match Jolt's formulas ✓
-4. Cycle index to eq table mapping: out_idx = i >> head_in_bits, in_idx = i & mask ✓
-5. LC.evaluate handles constants correctly ✓
-6. Both groups use same Lagrange weights w[0..N] ✓
-7. gruen_poly_deg_3 formula: l(X) = eq_0 + (eq_1 - eq_0) * X ✓
-8. t'(∞) = slope_Az * slope_Bz (product of slopes, NOT slope of product) ✓
-9. current_scalar accumulates eq(tau[i], r_i) products ✓
-10. Binding order: LowToHigh, tau[n-1] bound first ✓
+2. split_point_m = original_tau_len / 2 = 6 (for tau.len=12) ✓
+3. gruen_poly_deg_3 / computeCubicRoundPoly formula matches Jolt exactly ✓
+4. eq_eval_0, eq_eval_1 computation matches ✓
+5. q_2 and q_3 formulas match ✓
+6. inner_sum_prod = az_final * bz_final ✓
+7. tau_high_bound_r0 and tau_bound_r_tail match Jolt's formulas ✓
 
 **Key Jolt Formulas (verified against source):**
 
@@ -75,24 +73,19 @@ Where:
 
 **Remaining Investigation Areas:**
 
-1. **Eq table scaling** - Does E_out/E_in need to include current_scalar?
-   - In Jolt, E_out_in_for_window returns unscaled tables
-   - current_scalar is applied only in l(X) via computeCubicRoundPoly
+1. **Streaming round polynomial t'(0) and t'(∞) computation**
+   - Zolt computes these directly by summing over cycles
+   - Need to verify eq weight factorization matches Jolt's iteration
 
-2. **Window size handling** - For window_size=1:
-   - E_active = [1] (single element)
-   - t'(0) = evals[0], t'(∞) = evals[2]
-   - But in Zolt we compute t'(0) and t'(∞) directly
+2. **Cycle-to-eq-index mapping for streaming round**
+   - For 1024 cycles with head_len=10, m=6:
+     - head_out_bits = 6, E_out has 64 entries
+     - head_in_bits = 4, E_in has 16 entries
+   - Verify: out_idx = i >> 4, in_idx = i & 0xF
 
-3. **Factorization in cycle rounds** - The r_grid is used differently:
-   - Streaming phase: update r_grid
-   - Linear phase: don't update r_grid
-   - Check if phase transition is correct
-
-4. **The 6/5 Ratio**
-   - Could be related to m = 5 (tau split at halfway)
-   - Or related to window_size mismatch
-   - Or a missing/extra factor in the eq polynomial computation
+3. **UniSkip claim initialization**
+   - Initial claim for remaining sumcheck = uni_skip_claim = uni_poly.evaluate(r0)
+   - This should match what Jolt uses as input_claim
 
 ---
 

@@ -1,48 +1,40 @@
 # Zolt-Jolt Compatibility TODO
 
-## Current Status: Stage 1 Sumcheck Output Claim Mismatch (Session 26)
+## Current Status: Stage 1 Sumcheck - Implicit Az*Bz Mismatch (Session 26)
 
-### The Problem
-All 11 sumcheck round equations pass (p(0) + p(1) = claim), but the final output_claim doesn't match the expected_output_claim from R1CS evaluation.
+### Key Finding
+The implicit Az*Bz (computed as output_claim / eq_factor) does NOT match the expected inner_sum_prod:
 
-**Values from test:**
 ```
-output_claim = 7120341815860535077792666425421583012196152296139946730075156877231654137396
-expected     = 2000541294615117218219795634222435854478303422072963760833200542270573423153
-Ratio ≈ 3.56 (not a simple power-of-2 discrepancy)
+inner_sum_prod (expected Az*Bz) = 12743996023445103930025687297173833157935883282725550257061179867498976368827
+implicit Az*Bz (output/eq_factor) = 6845670145302814045138444113000749599157896909649021689277739372381215505241
 ```
+
+The ratio is NOT a simple integer, suggesting a non-trivial computational difference.
 
 ### Verified Correct
 - [x] All 656 Zolt tests pass
 - [x] UniSkip verification passes
 - [x] All individual round equations pass (p(0)+p(1)=claim)
-- [x] Lagrange kernel computation matches Jolt
+- [x] Lagrange kernel computation and domain matches Jolt's {-4..5}
 - [x] Split eq polynomial structure matches Jolt's GruenSplitEqPolynomial
-- [x] Sum-of-products (not product-of-sums) computation
+- [x] Sum-of-products computation (not product-of-sums)
 - [x] ExpandingTable (r_grid) logic matches Jolt
-- [x] Constraint group indexing (FIRST_GROUP_INDICES, SECOND_GROUP_INDICES)
+- [x] Constraint group indexing
+- [x] Eq factor accumulation (tau * challenges ordering)
+- [x] r_cycle endianness for opening claims
 
-### Remaining Investigation Areas
-1. **Eq factor accumulation** - Though structure seems correct, actual values may differ
-2. **Cycle witness ordering** - Endianness of cycle indices in witness access
-3. **MLE evaluation point** - The r_cycle used for opening claims vs sumcheck point
+### Root Cause Hypothesis
+The Az*Bz values computed during the sumcheck differ from what the opening claims produce.
+This could be due to:
+1. Witness access ordering in the sumcheck
+2. Constraint evaluation differences
+3. Some subtle accumulation issue in the cycle rounds
 
-### Key Formulas
-Expected claim formula:
-```
-expected = tau_high_bound_r0 * tau_bound_r_tail * inner_sum_prod
-         = L(tau_high, r0) * eq(tau_low, r_challenges) * az_final * bz_final
-```
-
-Sumcheck output:
-```
-output_claim = f(r0, r_stream, r_cycle)
-             = eq(tau, r) * Az(r) * Bz(r)
-```
-
-These SHOULD be equal since:
-- eq(tau, r) = L(tau_high, r0) * eq(tau_low, r_challenges)
-- Az(r) * Bz(r) = az_final * bz_final (MLE evaluations at the random point)
+### Next Steps
+1. Add debug output to Zolt's streaming round to print first few Az/Bz values
+2. Add debug output to Jolt test to print per-cycle Az/Bz at the opening point
+3. Compare these intermediate values to find the divergence
 
 ### Test Commands
 ```bash
@@ -68,9 +60,3 @@ cargo test --package jolt-core test_debug_stage1_verification -- --ignored --noc
 - [x] Lagrange kernel computation
 - [x] Opening claims with MLE evaluation
 - [x] Sum-of-products computation
-
-## Next Session
-Need to add diagnostic output to pinpoint the exact point of divergence:
-1. Print Zolt's final eq factor (`current_scalar` after all binds)
-2. Print Zolt's implicit Az*Bz (output_claim / eq_factor)
-3. Compare with Jolt's `inner_sum_prod`

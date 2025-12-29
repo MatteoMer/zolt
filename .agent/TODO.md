@@ -72,6 +72,8 @@
 
 **Key Finding:**
 - All 11 sumcheck rounds pass the internal check: p(0)+p(1) = claim
+- The ratio output_claim/expected_claim ≈ 0.8129, EXACTLY 13/16 = 0.8125!
+- This suggests we're missing 3/16 of the total, indicating a systematic scaling issue
 - The issue is that the t_zero and t_infinity values computed in the streaming round
   are different from what the R1CS evaluation expects
 

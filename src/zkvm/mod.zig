@@ -1139,19 +1139,35 @@ pub fn JoltProver(comptime F: type) type {
 
             // Write joint opening proof
             // Generate a Dory opening proof from the bundled polynomial evaluations
-            const max_size = @max(@max(bundle.bytecode_evals.len, bundle.memory_evals.len), bundle.register_evals.len);
-            const log_size: u32 = if (max_size <= 1) 1 else @intCast(std.math.log2_int(usize, max_size) + 1);
-            var dory_srs = try Dory.DoryCommitmentScheme(F).setup(self.allocator, log_size);
-            defer dory_srs.deinit();
+            // Skip if no evaluations are available
+            if (bundle.bytecode_evals.len == 0) {
+                // Write empty Dory proof structure
+                try serializer.writeUsize(0); // empty proof marker
+            } else {
+                // The evaluation point should be the r_cycle challenges from the proof
+                const max_size = @max(@max(bundle.bytecode_evals.len, bundle.memory_evals.len), bundle.register_evals.len);
+                const log_size: u32 = if (max_size <= 1) 1 else @intCast(std.math.log2_int(usize, max_size) + 1);
+                var dory_srs = try Dory.DoryCommitmentScheme(F).setup(self.allocator, log_size);
+                defer dory_srs.deinit();
 
-            var dory_proof = try Dory.DoryCommitmentScheme(F).open(
-                &dory_srs,
-                bundle.bytecode_evals,
-                &[_]F{}, // Empty evaluation point
-                self.allocator,
-            );
-            defer dory_proof.deinit();
-            try serializer.writeDoryProof(&dory_proof);
+                // Build the evaluation point from log_size random challenges
+                // In a real implementation, these would come from the sumcheck challenges
+                const point = try self.allocator.alloc(F, log_size);
+                defer self.allocator.free(point);
+                for (0..log_size) |i| {
+                    // Use deterministic point based on position for reproducibility
+                    point[i] = F.fromU64(@as(u64, i + 1)).mul(F.fromU64(12345));
+                }
+
+                var dory_proof = try Dory.DoryCommitmentScheme(F).open(
+                    &dory_srs,
+                    bundle.bytecode_evals,
+                    point,
+                    self.allocator,
+                );
+                defer dory_proof.deinit();
+                try serializer.writeDoryProof(&dory_proof);
+            }
 
             // Write advice proofs (all None)
             try serializer.writeU8(0);

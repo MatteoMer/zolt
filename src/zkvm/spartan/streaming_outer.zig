@@ -614,14 +614,25 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 const r_stream = self.r_stream orelse F.zero();
 
                 // Get r_grid values for weighting cycles
+                // r_grid contains eq weights for challenges bound during streaming phase
                 const r_grid = &self.r_grid;
                 const r_grid_len = r_grid.length();
 
-                const num_cycle_bound = if (self.current_round >= 2) self.current_round - 2 else 0;
-                const r_grid_mask = if (num_cycle_bound > 0) (@as(usize, 1) << @intCast(num_cycle_bound)) - 1 else 0;
+                // num_r_grid_bits = log2(r_grid_len) = number of streaming phase challenges
+                // This includes the constraint group selector (round 1) and some cycle bits
+                const num_r_grid_bits = if (r_grid_len > 1) std.math.log2_int(usize, r_grid_len) else 0;
+                const r_grid_mask = if (num_r_grid_bits > 0) (@as(usize, 1) << @intCast(num_r_grid_bits)) - 1 else 0;
+
+                // Number of challenges bound so far (excluding current round)
+                // Round 1 = constraint group, round 2+ = cycle bits
+                // current_round - 1 = total remaining rounds completed
+                const num_bound = self.current_round - 1;
 
                 // Current cycle bit position we're summing over
-                const current_bit_pos = num_cycle_bound;
+                // Since round 1 binds constraint group, cycle bits start at round 2
+                // At round R (R >= 2), we've bound (R-1) challenges, of which (R-2) are cycle bits
+                // The current variable is the (R-1)th remaining variable, which is the (R-2)th cycle bit
+                const current_bit_pos = if (num_bound >= 1) num_bound - 1 else 0;
 
                 // Number of base cycles (with current_bit masked out)
                 const num_base = self.padded_trace_len >> 1;
@@ -644,7 +655,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                     const e_in_val = if (in_idx < E_in.len) E_in[in_idx] else F.zero();
                     const eq_base = e_out_val.mul(e_in_val);
 
-                    // r_grid weight
+                    // r_grid weight: index by the low bits that were bound during streaming
                     const k = cycle_idx_0 & r_grid_mask;
                     const r_weight = if (k < r_grid_len) r_grid.get(k) else F.zero();
                     // NOTE: Do NOT multiply by current_scalar here - it will be applied
@@ -918,13 +929,19 @@ pub fn StreamingOuterProver(comptime F: type) type {
             const head_in_bits = eq_tables.head_in_bits;
             const e_in_mask = (@as(usize, 1) << @intCast(head_in_bits)) - 1;
 
-            // Number of bound cycle challenges (current_round >= 2 for cycle rounds)
-            // Round 1 = streaming, Round 2 = first cycle variable, etc.
-            const num_cycle_bound = if (self.current_round >= 2) self.current_round - 2 else 0;
-
-            // r_grid length (number of bound challenge combinations)
+            // r_grid length (number of bound challenge combinations from streaming phase)
             const klen = self.r_grid.length();
-            const k_mask = if (klen > 0) klen - 1 else 0;
+
+            // num_r_grid_bits = log2(klen) = number of streaming phase challenges
+            const num_r_grid_bits = if (klen > 1) std.math.log2_int(usize, klen) else 0;
+            const k_mask = if (num_r_grid_bits > 0) (@as(usize, 1) << @intCast(num_r_grid_bits)) - 1 else 0;
+
+            // Number of challenges bound so far (excluding current round)
+            const num_bound = self.current_round - 1;
+
+            // Current cycle bit position we're summing over
+            // Since round 1 binds constraint group, cycle bits start at round 2
+            const current_bit_pos = if (num_bound >= 1) num_bound - 1 else 0;
 
             // Compute t'(0) and t'(∞) using true multiquadratic method:
             //
@@ -934,10 +951,6 @@ pub fn StreamingOuterProver(comptime F: type) type {
             //
             // CRITICAL: t'(∞) is the sum of (slope products), NOT the product of (slope sums)!
             // This matches Jolt's multiquadratic polynomial representation.
-
-            // The current bit position we're summing over
-            // For cycle round k (current_round = k+1), we sum over bit (k-1)
-            const current_bit_pos = num_cycle_bound;
 
             var t_00 = F.zero(); // Sum of products for current_bit = 0
             var t_inf = F.zero(); // Sum of (slope_Az * slope_Bz) weighted by eq
@@ -967,8 +980,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 const e_in_val = if (in_idx < E_in.len) E_in[in_idx] else F.zero();
                 const eq_base = e_out_val.mul(e_in_val);
 
-                // r_grid weight: the low `num_cycle_bound` bits of cycle_idx_0
-                // (same as cycle_idx_1 since they only differ at current_bit_pos which is > num_cycle_bound-1)
+                // r_grid weight: index by the low bits that were bound during streaming
                 const k = cycle_idx_0 & k_mask;
                 const r_weight = if (k < klen) self.r_grid.get(k) else F.zero();
                 // NOTE: Do NOT multiply by current_scalar here - it will be applied
@@ -1017,16 +1029,34 @@ pub fn StreamingOuterProver(comptime F: type) type {
         }
 
         /// Bind a remaining round challenge
+        ///
+        /// Matches Jolt's HalfSplitSchedule:
+        /// - Streaming phase (first half): update r_grid with each challenge
+        /// - Linear phase (second half): don't update r_grid, just bind split_eq
+        ///
+        /// For the remaining sumcheck with num_rounds = 1 + num_cycle_vars:
+        /// - Switch-over is at round (num_rounds + 1) / 2
+        /// - Streaming rounds: 1 to switch_over (inclusive)
+        /// - Linear rounds: switch_over+1 to num_rounds (exclusive)
         pub fn bindRemainingRoundChallenge(self: *Self, r: F) !void {
             // If this is the streaming round (current_round == 1), save r_stream
             if (self.current_round == 1) {
                 self.r_stream = r;
-                // Don't update r_grid for streaming round - it's only for cycle challenges
-            } else {
-                // For cycle rounds, update r_grid with the cycle challenge
-                // This expands the table to account for the bound variable
+            }
+
+            // Jolt's HalfSplitSchedule: streaming phase is first half of rounds
+            // For num_rounds = 1 + num_cycle_vars, switch-over is at (num_rounds + 1) / 2
+            // This matches the outer remaining sumcheck structure in Jolt
+            const num_remaining_rounds = self.numRounds() - 1; // Exclude UniSkip round 0
+            const switch_over = (num_remaining_rounds + 1) / 2;
+
+            // Streaming phase: rounds 1 to switch_over (inclusive) - update r_grid
+            // Linear phase: rounds > switch_over - don't update r_grid
+            if (self.current_round <= switch_over) {
+                // Streaming window phase: update r_grid
                 self.r_grid.update(r);
             }
+            // Linear phase: don't update r_grid
 
             try self.challenges.append(self.allocator, r);
             self.split_eq.bind(r);

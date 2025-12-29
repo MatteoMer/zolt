@@ -609,89 +609,94 @@ pub fn StreamingOuterProver(comptime F: type) type {
                     t_infinity = t_infinity.add(eq_val.mul(az_bz.prod_inf)); // slope_a * slope_b
                 }
             } else {
-                // CYCLE ROUND: Use true multiquadratic method
+                // CYCLE ROUND: Match Jolt's linear phase structure
                 //
-                // t'(0) = Σ eq_i * Az(i,0) * Bz(i,0)  (sum over cycles with current_bit=0)
-                // t'(∞) = Σ eq_i * slope_Az_i * slope_Bz_i  (sum of slope PRODUCTS)
+                // After the streaming round, r_stream has been bound and we use the combined
+                // Az/Bz (weighted by r_stream) for the cycle bit rounds.
                 //
-                // This matches Jolt's multiquadratic polynomial representation.
+                // The index structure:
+                //   - (x_out, x_in) pairs provide E_out * E_in weighting
+                //   - r_grid provides eq weights for bound streaming phase challenges
+                //   - x_val ∈ {0, 1} for the current cycle bit being sumchecked
+                //
+                // t'(0) = Σ E_out * E_in * r_grid_sum * Az(cycle_0) * Bz(cycle_0)
+                // t'(∞) = Σ E_out * E_in * r_grid_sum * slope_Az * slope_Bz
 
                 const r_stream = self.r_stream orelse F.zero();
-
-                // Get r_grid values for weighting cycles
-                // r_grid contains eq weights for challenges bound during streaming phase
                 const r_grid = &self.r_grid;
                 const r_grid_len = r_grid.length();
 
-                // num_r_grid_bits = log2(r_grid_len) = number of streaming phase challenges
-                // This includes the constraint group selector (round 1) and some cycle bits
-                const num_r_grid_bits = if (r_grid_len > 1) std.math.log2_int(usize, r_grid_len) else 0;
-                const r_grid_mask = if (num_r_grid_bits > 0) (@as(usize, 1) << @intCast(num_r_grid_bits)) - 1 else 0;
+                // Current cycle bit position being sumchecked
+                // Round 1 = streaming (constraint group selector)
+                // Round 2 = first cycle bit (bit 0)
+                // Round 3 = second cycle bit (bit 1)
+                // etc.
+                const num_bound = self.current_round - 1; // How many remaining rounds completed
+                const current_bit_pos: u6 = if (num_bound >= 1) @intCast(num_bound - 1) else 0;
 
-                // Number of challenges bound so far (excluding current round)
-                // Round 1 = constraint group, round 2+ = cycle bits
-                // current_round - 1 = total remaining rounds completed
-                const num_bound = self.current_round - 1;
+                // Iterate over (x_out, x_in) pairs
+                var x_out_idx: usize = 0;
+                while (x_out_idx < E_out.len) : (x_out_idx += 1) {
+                    const e_out_val = E_out[x_out_idx];
 
-                // Current cycle bit position we're summing over
-                // Since round 1 binds constraint group, cycle bits start at round 2
-                // At round R (R >= 2), we've bound (R-1) challenges, of which (R-2) are cycle bits
-                // The current variable is the (R-1)th remaining variable, which is the (R-2)th cycle bit
-                const current_bit_pos = if (num_bound >= 1) num_bound - 1 else 0;
+                    var x_in_idx: usize = 0;
+                    while (x_in_idx < E_in.len) : (x_in_idx += 1) {
+                        const e_in_val = E_in[x_in_idx];
+                        const eq_base = e_out_val.mul(e_in_val);
 
-                // Number of base cycles (with current_bit masked out)
-                const num_base = self.padded_trace_len >> 1;
-                const actual_len = @min(num_base, (self.cycle_witnesses.len + 1) / 2);
+                        // For this (x_out, x_in) pair, compute the weighted Az/Bz
+                        // for both x_val = 0 and x_val = 1
+                        const base_idx = x_out_idx * E_in.len + x_in_idx;
 
-                // Iterate over base cycle indices (pairs of cycles that differ only in current_bit)
-                for (0..actual_len) |base_idx| {
-                    // Construct cycle indices for 0 and 1 positions
-                    const low_mask = (@as(usize, 1) << @intCast(current_bit_pos)) - 1;
-                    const high_bits = base_idx >> @intCast(current_bit_pos);
-                    const low_bits = base_idx & low_mask;
-                    const cycle_idx_0 = (high_bits << @intCast(current_bit_pos + 1)) | low_bits;
-                    const cycle_idx_1 = cycle_idx_0 | (@as(usize, 1) << @intCast(current_bit_pos));
+                        // Insert current bit at position current_bit_pos
+                        const low_mask: usize = (@as(usize, 1) << current_bit_pos) - 1;
+                        const high_bits = base_idx >> current_bit_pos;
+                        const low_bits = base_idx & low_mask;
+                        const cycle_idx_0 = (high_bits << @intCast(current_bit_pos + 1)) | low_bits;
+                        const cycle_idx_1 = cycle_idx_0 | (@as(usize, 1) << current_bit_pos);
 
-                    // Compute eq weight using the remaining bits
-                    const remaining_idx = high_bits;
-                    const out_idx = remaining_idx >> @intCast(head_in_bits);
-                    const in_idx = remaining_idx & e_in_mask;
-                    const e_out_val = if (out_idx < E_out.len) E_out[out_idx] else F.zero();
-                    const e_in_val = if (in_idx < E_in.len) E_in[in_idx] else F.zero();
-                    const eq_base = e_out_val.mul(e_in_val);
+                        // Compute r_grid weighted sum
+                        // In Jolt, each r_idx accesses a different step_idx, but for Zolt's
+                        // simpler structure, we just sum the r_grid weights
+                        var r_grid_sum = F.zero();
+                        var r_idx: usize = 0;
+                        while (r_idx < r_grid_len) : (r_idx += 1) {
+                            r_grid_sum = r_grid_sum.add(r_grid.get(r_idx));
+                        }
 
-                    // r_grid weight: index by the low bits that were bound during streaming
-                    const k = cycle_idx_0 & r_grid_mask;
-                    const r_weight = if (k < r_grid_len) r_grid.get(k) else F.zero();
-                    // NOTE: Do NOT multiply by current_scalar here - it will be applied
-                    // in computeCubicRoundPoly when computing the linear eq polynomial l(X).
-                    const weight = eq_base.mul(r_weight);
+                        // Compute Az/Bz for both cycle positions
+                        var az_0 = F.zero();
+                        var bz_0 = F.zero();
+                        var az_1 = F.zero();
+                        var bz_1 = F.zero();
 
-                    // Get Az*Bz for both positions (using separate function to get Az, Bz individually)
-                    var az_0 = F.zero();
-                    var bz_0 = F.zero();
-                    var az_1 = F.zero();
-                    var bz_1 = F.zero();
+                        if (cycle_idx_0 < self.cycle_witnesses.len) {
+                            const result = self.computeCycleAzBzSeparate(&self.cycle_witnesses[cycle_idx_0], r_stream);
+                            az_0 = result.az;
+                            bz_0 = result.bz;
+                        }
 
-                    if (cycle_idx_0 < self.cycle_witnesses.len) {
-                        const result = self.computeCycleAzBzSeparate(&self.cycle_witnesses[cycle_idx_0], r_stream);
-                        az_0 = result.az;
-                        bz_0 = result.bz;
+                        if (cycle_idx_1 < self.cycle_witnesses.len) {
+                            const result = self.computeCycleAzBzSeparate(&self.cycle_witnesses[cycle_idx_1], r_stream);
+                            az_1 = result.az;
+                            bz_1 = result.bz;
+                        }
+
+                        // Apply r_grid weight
+                        az_0 = az_0.mul(r_grid_sum);
+                        bz_0 = bz_0.mul(r_grid_sum);
+                        az_1 = az_1.mul(r_grid_sum);
+                        bz_1 = bz_1.mul(r_grid_sum);
+
+                        // Multiquadratic expansion and accumulation
+                        const prod_0 = az_0.mul(bz_0);
+                        const slope_az = az_1.sub(az_0);
+                        const slope_bz = bz_1.sub(bz_0);
+                        const prod_inf = slope_az.mul(slope_bz);
+
+                        t_zero = t_zero.add(eq_base.mul(prod_0));
+                        t_infinity = t_infinity.add(eq_base.mul(prod_inf));
                     }
-
-                    if (cycle_idx_1 < self.cycle_witnesses.len) {
-                        const result = self.computeCycleAzBzSeparate(&self.cycle_witnesses[cycle_idx_1], r_stream);
-                        az_1 = result.az;
-                        bz_1 = result.bz;
-                    }
-
-                    // Accumulate t'(0): eq * Az_0 * Bz_0
-                    t_zero = t_zero.add(weight.mul(az_0.mul(bz_0)));
-
-                    // Compute slopes and accumulate t'(∞): eq * slope_Az * slope_Bz
-                    const slope_az = az_1.sub(az_0);
-                    const slope_bz = bz_1.sub(bz_0);
-                    t_infinity = t_infinity.add(weight.mul(slope_az.mul(slope_bz)));
                 }
             }
 

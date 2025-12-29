@@ -495,8 +495,12 @@ pub fn StreamingOuterProver(comptime F: type) type {
         /// 2. Used to compute Lagrange weights for Az/Bz evaluation
         /// The split_eq only binds the streaming round and cycle round challenges.
         pub fn bindFirstRoundChallenge(self: *Self, r0: F, uni_skip_claim: F) !void {
-            // Note: r0 is added to challenges for transcript consistency, but NOT bound in split_eq
-            try self.challenges.append(self.allocator, r0);
+            // IMPORTANT: r0 is NOT added to challenges!
+            // challenges should only contain sumcheck challenges [r_stream, r_1, ..., r_n]
+            // r0 is the UniSkip challenge which is used differently:
+            // 1. Pre-multiplied into current_scalar via L(tau_high, r0) at initialization
+            // 2. Used to compute Lagrange weights for Az/Bz evaluation
+            // The split_eq only binds the streaming round and cycle round challenges.
             self.current_round = 1;
             self.current_claim = uni_skip_claim;
 

@@ -388,13 +388,14 @@ pub fn ProofConverter(comptime F: type) type {
             );
 
             // Initialize the streaming prover with full tau and Lagrange kernel scaling
-            // IMPORTANT: Pass full tau, NOT tau_low! The split_eq internally handles the split
-            // using m = tau.len / 2, which differs for length 11 vs 12.
-            // Jolt passes full tau to GruenSplitEqPolynomial::new_with_scaling.
+            // The prover internally extracts:
+            //   tau_high = tau[tau.len - 1] (stored separately for first-round polynomial)
+            //   tau_low = tau[0..tau.len - 1] (passed to split_eq)
+            // This matches Jolt's behavior in OuterSharedState::new().
             var outer_prover = StreamingOuterProver.initWithScaling(
                 self.allocator,
                 cycle_witnesses,
-                tau,  // Full tau, not tau_low
+                tau, // Full tau - prover extracts tau_low and tau_high internally
                 lagrange_tau_r0,
             ) catch {
                 // Fallback to zero proofs if initialization fails

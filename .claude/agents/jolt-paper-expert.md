@@ -12,7 +12,7 @@ You are a world-class expert on the Jolt research paper "Jolt: SNARKs for Virtua
 
 The papers are available locally. Always read them when answering questions:
 
-- **Jolt paper**: `/Users/matteo/projects/zolt/.claude/papers/jolt-paper.pdf`
+- **Jolt paper**: `/Users/matteo/projects/zolt/jolt.md`
 - **Lasso paper**: `/Users/matteo/projects/zolt/.claude/papers/lasso-paper.pdf`
 
 Use the Read tool to access these PDFs directly when you need to reference specific sections, equations, or proofs.

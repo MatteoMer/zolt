@@ -1,6 +1,50 @@
 # Zolt-Jolt Compatibility Notes
 
-## Current Status (Session 28 - December 31, 2024)
+## Current Status (Session 29 - December 31, 2024)
+
+### Investigation Summary
+
+**Current Issue:**
+- `output_claim: 18149181199645709635565994144274301613989920934825717026812937381996718340431`
+- `expected_output_claim: 9784440804643023978376654613918487285551699375196948804144755605390806131527`
+- Ratio ≈ 1.85 (not a simple integer factor)
+
+**Verified Components:**
+1. ✅ eq polynomial factor: `prover_eq_factor == verifier_eq_factor` (cross-verification test passes)
+2. ✅ R1CS constraint ordering matches Jolt's `R1CS_CONSTRAINTS_FIRST_GROUP` exactly
+3. ✅ R1CS input index ordering matches Jolt's `ALL_R1CS_INPUTS` exactly
+4. ✅ Lagrange weights `L_i(r0)` computed at symmetric domain {-4, ..., 5}
+5. ✅ 656 tests pass (including cross-verification for eq factors)
+
+**Key Formula Analysis:**
+```
+expected = tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod
+
+Where:
+- inner_sum_prod = Az_final * Bz_final (computed from opening claims)
+- Az_final = Σᵢ w[i] * lc_a[i].dot_product(z(r_cycle)) + r_stream * (Az_g1 - Az_g0)
+- z(r_cycle) = MLE evaluations of R1CS inputs at challenge point
+```
+
+**Key Insight:**
+The issue is in how the prover accumulates `Az * Bz` during the sumcheck vs what the verifier computes from opening claims.
+
+- Prover: Σ_cycle eq(tau, cycle) * Az(cycle) * Bz(cycle)
+- Verifier: eq(tau, r) * (Σᵢ w[i] * lc_a[i] · z(r)) * (Σᵢ w[i] * lc_b[i] · z(r))
+
+These should be equivalent by MLE properties, but something is off.
+
+**Potential Bug Areas to Investigate:**
+1. The `selector` logic in cycle rounds - using `full_idx & 1` to select constraint group after r_stream is bound
+2. Possibly need to use combined Az/Bz (with r_stream blending) in cycle rounds instead of selecting by group
+
+**Files to Check:**
+- `src/zkvm/spartan/streaming_outer.zig:659-730` - cycle round logic uses selector-based group selection
+- Compare with Jolt's approach after streaming round binding
+
+---
+
+## Previous Status (Session 28 - December 31, 2024)
 
 ### Analysis Summary
 

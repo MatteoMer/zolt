@@ -9,7 +9,9 @@
 2. ✅ eq polynomial: `∏ᵢ (τ[i] * r[i] + (1-τ[i]) * (1-r[i]))` (multiplication order doesn't matter)
 3. ✅ Az/Bz blending: `final = g0 + r_stream * (g1 - g0)` (matches Jolt)
 4. ✅ Lagrange kernel: `L(tau_high, r0)` passed as initial scaling to split_eq
-5. ✅ All 656 tests pass
+5. ✅ All 657 tests pass (including new cross-verification test)
+6. ✅ Cross-verification test passes: `prover_eq_factor == verifier_eq_factor`
+7. ✅ R1CS input ordering matches Jolt's ALL_R1CS_INPUTS exactly
 
 **Key Formula from Jolt's `expected_output_claim`:**
 ```
@@ -27,10 +29,15 @@ Where:
 2. `r_cycle` for R1CS inputs excludes r_stream (it's `challenges[1..]` reversed)
 3. The eq polynomial in expected_output_claim uses the full `[r_n, ..., r_1, r_stream]` to match the tau_low binding order
 
-**Next Steps:**
-1. Create a cross-verification test that computes expected_output_claim from Zolt's proof
-2. Compare with the sumcheck's output_claim
-3. If they match, the Stage 1 sumcheck is correct; otherwise, investigate the specific divergence
+**Session 28 Results:**
+1. ✅ Created cross-verification test for eq polynomial factor
+2. ✅ Test passes: `prover_eq_factor == verifier_eq_factor`
+3. ✅ Verified R1CS input ordering matches Jolt's ALL_R1CS_INPUTS
+
+**Remaining Work:**
+If the Stage 1 sumcheck still fails with Jolt's verifier:
+1. Debug inner_sum_prod (Az*Bz) computation
+2. Compare prover's Az*Bz accumulation with verifier's opening claim computation
 
 ---
 

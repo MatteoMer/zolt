@@ -68,6 +68,61 @@ These SHOULD match by MLE linearity. The issue remains unclear.
 1. Compare actual R1CS input MLE evaluations between Zolt and what verifier uses
 2. Verify Az/Bz computation with MLE values matches sumcheck output
 
+## Session 29 Discovery (Late Evening)
+
+**Key Finding from Diagnostic Test:**
+
+The test shows that:
+- `MLE(witness[*][0], r_cycle) == z[0]` ✅ (MLE computation is correct)
+- `Σ eq(r_cycle, cycle) ≠ 1` (but this is expected in the eq polynomial formulation)
+
+**Critical Insight:**
+
+The formula `Σ_cycle eq(r, cycle) * (Az(cycle) * Bz(cycle))` gives the MLE of the product (Az*Bz),
+NOT the product of the MLEs!
+
+```
+MLE(f * g, r) = Σ_x eq(r, x) * f(x) * g(x)
+              ≠ MLE(f, r) * MLE(g, r)
+              = (Σ_x eq(r, x) * f(x)) * (Σ_x eq(r, x) * g(x))
+```
+
+**What Jolt's Verifier Actually Computes:**
+
+Looking more carefully at `evaluate_inner_sum_product_at_point`:
+- It computes `Az_final * Bz_final` where Az and Bz are evaluated ONCE using MLE values
+- This is: `(Σᵢ w[i] * lc_a[i](z)) * (Σᵢ w[i] * lc_b[i](z))`
+
+**Wait - this IS Az_MLE * Bz_MLE, not MLE(Az*Bz)!**
+
+So the verifier's expectation should be different from the sumcheck output...
+Unless the sumcheck is structured differently.
+
+**Re-reading the Spartan paper:**
+The outer sumcheck proves: `Σ_x eq(tau, x) * ẽ(Az, Bz, Cz)(x)`
+where ẽ is the virtual polynomial combining Az, Bz, Cz.
+
+For R1CS: ẽ = Az * Bz - Cz = Az * Bz (when Cz = 0 for satisfied constraints).
+
+After binding to r, the claim becomes: `eq(tau, r) * ẽ(r)`
+
+The verifier needs to compute ẽ(r) = Az(r) * Bz(r) where:
+- Az(r) = Σ_y A(r, y) * z(y) (summing over witness indices)
+- Since A is structured (Lagrange basis), Az(r) = Σᵢ L_i(r0) * lc_a[i](z(r_cycle))
+
+**The key is that r is 2D: (r0, r_cycle)**
+- r0 is the univariate skip challenge (constraint axis)
+- r_cycle is the cycle axis
+
+The sumcheck binds both axes, so the final Az(r) is:
+```
+Az(r0, r_cycle) = Σᵢ L_i(r0) * lc_a[i](z_MLE(r_cycle))
+```
+
+This IS what the verifier computes! So they should match.
+
+**Next step: Check if my test is using the wrong formula in the prover computation.**
+
 ---
 
 ## Previous Status (Session 28 - December 31, 2024)

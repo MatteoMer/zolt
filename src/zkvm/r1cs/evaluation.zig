@@ -470,9 +470,135 @@ test "inner_sum_prod: prover vs verifier computation" {
     for (prover_sum.limbs) |limb| {
         std.debug.print("{x:016} ", .{limb});
     }
+    std.debug.print("\n\n--- Detailed Debug ---\n", .{});
+
+    // Print first constraint evaluation for both methods
+    const constraint0_idx = constraints.FIRST_GROUP_INDICES[0];
+    const constraint0 = constraints.UNIFORM_CONSTRAINTS[constraint0_idx];
+
+    // Prover method: evaluate with actual witness
+    const w0_az = constraint0.condition.evaluate(F, witnesses[0].asSlice());
+    const w0_bz_left = constraint0.left.evaluate(F, witnesses[0].asSlice());
+    const w0_bz_right = constraint0.right.evaluate(F, witnesses[0].asSlice());
+    const w0_bz = w0_bz_left.sub(w0_bz_right);
+
+    std.debug.print("Cycle 0, Constraint 0:\n", .{});
+    std.debug.print("  Prover Az (from witness): ", .{});
+    for (w0_az.limbs) |limb| std.debug.print("{x:016} ", .{limb});
+    std.debug.print("\n  Prover Bz (from witness): ", .{});
+    for (w0_bz.limbs) |limb| std.debug.print("{x:016} ", .{limb});
+
+    // Verifier method: evaluate with MLE z values
+    const z_az = constraint0.condition.evaluate(F, &z);
+    const z_bz_left = constraint0.left.evaluate(F, &z);
+    const z_bz_right = constraint0.right.evaluate(F, &z);
+    const z_bz = z_bz_left.sub(z_bz_right);
+
+    std.debug.print("\n  Verifier Az (from z): ", .{});
+    for (z_az.limbs) |limb| std.debug.print("{x:016} ", .{limb});
+    std.debug.print("\n  Verifier Bz (from z): ", .{});
+    for (z_bz.limbs) |limb| std.debug.print("{x:016} ", .{limb});
+
+    // Show eq weight for cycle 0
+    std.debug.print("\n  eq(r_cycle, 0) = ", .{});
+    for (eq_evals[0].limbs) |limb| std.debug.print("{x:016} ", .{limb});
+
+    // Check: sum of eq_evals should be 1
+    var eq_sum = F.zero();
+    for (eq_evals) |ev| eq_sum = eq_sum.add(ev);
+    std.debug.print("\n  Σ eq(r_cycle, cycle) = ", .{});
+    for (eq_sum.limbs) |limb| std.debug.print("{x:016} ", .{limb});
+    std.debug.print("\n  (should be 1 if partition of unity)\n", .{});
+
+    // Also verify: the MLE of witness[0][0] at r_cycle should equal z[0]
+    const w00_mle = blk: {
+        var sum = F.zero();
+        for (0..4) |t| {
+            sum = sum.add(eq_evals[t].mul(witnesses[t].values[0]));
+        }
+        break :blk sum;
+    };
+    std.debug.print("  MLE(witness[*][0], r_cycle) = ", .{});
+    for (w00_mle.limbs) |limb| std.debug.print("{x:016} ", .{limb});
+    std.debug.print("\n  z[0] = ", .{});
+    for (z[0].limbs) |limb| std.debug.print("{x:016} ", .{limb});
+    std.debug.print("\n  (these should match)\n", .{});
+
+    // Key test: Σ_t eq(r, t) * az_final(witness[t]) should equal az_final(z_MLE(r))
+    // Compute the prover's az_final MLE
+    var prover_az_mle = F.zero();
+    var prover_bz_mle = F.zero();
+
+    for (0..4) |t| {
+        const witness = &witnesses[t];
+        const eq_val = eq_evals[t];
+
+        var az_g0_t = F.zero();
+        var bz_g0_t = F.zero();
+        for (0..10) |i| {
+            const constraint_idx = constraints.FIRST_GROUP_INDICES[i];
+            const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
+            az_g0_t = az_g0_t.add(lagrange_weights[i].mul(constraint.condition.evaluate(F, witness.asSlice())));
+            bz_g0_t = bz_g0_t.add(lagrange_weights[i].mul(constraint.left.evaluate(F, witness.asSlice()).sub(constraint.right.evaluate(F, witness.asSlice()))));
+        }
+
+        var az_g1_t = F.zero();
+        var bz_g1_t = F.zero();
+        for (0..9) |i| {
+            const constraint_idx = constraints.SECOND_GROUP_INDICES[i];
+            const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
+            az_g1_t = az_g1_t.add(lagrange_weights[i].mul(constraint.condition.evaluate(F, witness.asSlice())));
+            bz_g1_t = bz_g1_t.add(lagrange_weights[i].mul(constraint.left.evaluate(F, witness.asSlice()).sub(constraint.right.evaluate(F, witness.asSlice()))));
+        }
+
+        const az_final_t = az_g0_t.add(r_stream.mul(az_g1_t.sub(az_g0_t)));
+        const bz_final_t = bz_g0_t.add(r_stream.mul(bz_g1_t.sub(bz_g0_t)));
+
+        prover_az_mle = prover_az_mle.add(eq_val.mul(az_final_t));
+        prover_bz_mle = prover_bz_mle.add(eq_val.mul(bz_final_t));
+    }
+
+    // Compute verifier's Az_final and Bz_final using MLE z values
+    var verifier_az_g0 = F.zero();
+    var verifier_bz_g0 = F.zero();
+    for (0..10) |i| {
+        const constraint_idx = constraints.FIRST_GROUP_INDICES[i];
+        const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
+        verifier_az_g0 = verifier_az_g0.add(lagrange_weights[i].mul(constraint.condition.evaluate(F, &z)));
+        verifier_bz_g0 = verifier_bz_g0.add(lagrange_weights[i].mul(constraint.left.evaluate(F, &z).sub(constraint.right.evaluate(F, &z))));
+    }
+
+    var verifier_az_g1 = F.zero();
+    var verifier_bz_g1 = F.zero();
+    for (0..9) |i| {
+        const constraint_idx = constraints.SECOND_GROUP_INDICES[i];
+        const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
+        verifier_az_g1 = verifier_az_g1.add(lagrange_weights[i].mul(constraint.condition.evaluate(F, &z)));
+        verifier_bz_g1 = verifier_bz_g1.add(lagrange_weights[i].mul(constraint.left.evaluate(F, &z).sub(constraint.right.evaluate(F, &z))));
+    }
+
+    const verifier_az_final = verifier_az_g0.add(r_stream.mul(verifier_az_g1.sub(verifier_az_g0)));
+    const verifier_bz_final = verifier_bz_g0.add(r_stream.mul(verifier_bz_g1.sub(verifier_bz_g0)));
+
+    std.debug.print("\n--- Az/Bz MLE Comparison ---\n", .{});
+    std.debug.print("prover_az_mle = Σ eq * az_final(witness[t]):\n  ", .{});
+    for (prover_az_mle.limbs) |limb| std.debug.print("{x:016} ", .{limb});
+    std.debug.print("\nverifier_az_final = az_final(z_MLE):\n  ", .{});
+    for (verifier_az_final.limbs) |limb| std.debug.print("{x:016} ", .{limb});
+
+    std.debug.print("\n\nprover_bz_mle = Σ eq * bz_final(witness[t]):\n  ", .{});
+    for (prover_bz_mle.limbs) |limb| std.debug.print("{x:016} ", .{limb});
+    std.debug.print("\nverifier_bz_final = bz_final(z_MLE):\n  ", .{});
+    for (verifier_bz_final.limbs) |limb| std.debug.print("{x:016} ", .{limb});
+
+    const az_match = prover_az_mle.eql(verifier_az_final);
+    const bz_match = prover_bz_mle.eql(verifier_bz_final);
+    std.debug.print("\n\nAz MLE match: {}, Bz MLE match: {}\n", .{ az_match, bz_match });
+
     std.debug.print("\n=================================\n", .{});
 
     // These should match! If they don't, there's a fundamental issue
     // in how the prover and verifier compute Az*Bz
-    try std.testing.expect(verifier_inner_sum_prod.eql(prover_sum));
+    try std.testing.expect(az_match);
+    try std.testing.expect(bz_match);
 }

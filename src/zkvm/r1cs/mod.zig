@@ -360,6 +360,11 @@ pub fn SparseMatrix(comptime F: type) type {
     };
 }
 
+test {
+    // Include tests from all sub-modules
+    std.testing.refAllDecls(@This());
+}
+
 test "r1cs constraint" {
     const F = @import("../../field/mod.zig").BN254Scalar;
     const allocator = std.testing.allocator;

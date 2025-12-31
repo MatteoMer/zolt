@@ -129,6 +129,73 @@ pub fn R1CSInputEvaluator(comptime F: type) type {
             defer eq_poly.deinit();
             return eq_poly.evals(allocator);
         }
+
+        /// Compute inner_sum_prod using Jolt's verifier formula
+        ///
+        /// This computes Az_final * Bz_final where:
+        /// - z = R1CS input MLE evaluations at r_cycle
+        /// - w = Lagrange weights at r0
+        /// - Az_g0 = Σᵢ w[i] * lc_a[i](z) for first group constraints
+        /// - Az_g1 = Σᵢ w[i] * lc_a[i](z) for second group constraints
+        /// - Az_final = Az_g0 + r_stream * (Az_g1 - Az_g0)
+        /// - Same for Bz
+        ///
+        /// This should match what the sumcheck computes (divided by eq_factor).
+        pub fn computeInnerSumProd(
+            allocator: Allocator,
+            z: []const F, // R1CS input MLE evaluations (36 values)
+            lagrange_weights: []const F, // Lagrange basis at r0 (10 values)
+            r_stream: F, // Streaming challenge
+        ) F {
+            _ = allocator;
+
+            const FIRST_GROUP_SIZE = 10;
+            const SECOND_GROUP_SIZE = 9;
+
+            // Compute Az_g0, Bz_g0 from first group constraints
+            var az_g0 = F.zero();
+            var bz_g0 = F.zero();
+
+            for (0..FIRST_GROUP_SIZE) |i| {
+                const constraint_idx = constraints.FIRST_GROUP_INDICES[i];
+                const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
+
+                // Evaluate constraint linear combinations with z values
+                const az_contrib = constraint.condition.evaluateWithConstant(F, z);
+                const bz_left = constraint.left.evaluateWithConstant(F, z);
+                const bz_right = constraint.right.evaluateWithConstant(F, z);
+                const bz_contrib = bz_left.sub(bz_right);
+
+                // Weight by Lagrange basis
+                az_g0 = az_g0.add(lagrange_weights[i].mul(az_contrib));
+                bz_g0 = bz_g0.add(lagrange_weights[i].mul(bz_contrib));
+            }
+
+            // Compute Az_g1, Bz_g1 from second group constraints
+            var az_g1 = F.zero();
+            var bz_g1 = F.zero();
+
+            const g1_len = @min(SECOND_GROUP_SIZE, FIRST_GROUP_SIZE);
+            for (0..g1_len) |i| {
+                const constraint_idx = constraints.SECOND_GROUP_INDICES[i];
+                const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
+
+                const az_contrib = constraint.condition.evaluateWithConstant(F, z);
+                const bz_left = constraint.left.evaluateWithConstant(F, z);
+                const bz_right = constraint.right.evaluateWithConstant(F, z);
+                const bz_contrib = bz_left.sub(bz_right);
+
+                // Use same Lagrange weights as first group
+                az_g1 = az_g1.add(lagrange_weights[i].mul(az_contrib));
+                bz_g1 = bz_g1.add(lagrange_weights[i].mul(bz_contrib));
+            }
+
+            // Blend with r_stream
+            const az_final = az_g0.add(r_stream.mul(az_g1.sub(az_g0)));
+            const bz_final = bz_g0.add(r_stream.mul(bz_g1.sub(bz_g0)));
+
+            return az_final.mul(bz_final);
+        }
     };
 }
 
@@ -287,4 +354,125 @@ test "R1CS input evaluation: all inputs populated" {
             .mul(F.fromU64(2).inverse().?);
         try std.testing.expect(result[i].eql(expected));
     }
+}
+
+test "inner_sum_prod: prover vs verifier computation" {
+    // This test verifies that the sumcheck prover's output_claim / eq_factor
+    // matches the verifier's inner_sum_prod computation from MLE evaluations.
+    //
+    // This is the key consistency check for Stage 1 verification.
+
+    const field = @import("../../field/mod.zig");
+    const F = field.BN254Scalar;
+    const univariate_skip = @import("univariate_skip.zig");
+    const LagrangePoly = univariate_skip.LagrangePolynomial(F);
+
+    // Create 4 cycles with simple but non-trivial values
+    var witnesses: [4]R1CSCycleInputs(F) = undefined;
+    for (0..4) |t| {
+        for (0..36) |i| {
+            // Create a predictable pattern
+            witnesses[t].values[i] = F.fromU64(@intCast((t + 1) * (i + 1) % 100));
+        }
+    }
+
+    // Simulated challenge values
+    const r0 = F.fromU64(7777);
+    const r_stream = F.fromU64(1234);
+    const r_cycle = [_]F{ F.fromU64(5555), F.fromU64(6666) };
+
+    // Compute Lagrange weights at r0
+    const lagrange_weights = try LagrangePoly.evals(
+        10, // FIRST_GROUP_SIZE
+        r0,
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(lagrange_weights);
+
+    // Compute R1CS input MLE evaluations at r_cycle
+    const z = try R1CSInputEvaluator(F).computeClaimedInputs(
+        std.testing.allocator,
+        &witnesses,
+        &r_cycle,
+    );
+
+    // Compute inner_sum_prod using verifier formula
+    const verifier_inner_sum_prod = R1CSInputEvaluator(F).computeInnerSumProd(
+        std.testing.allocator,
+        &z,
+        lagrange_weights,
+        r_stream,
+    );
+
+    // Now compute the same using the prover's per-cycle approach
+    // For each cycle, compute Az*Bz and accumulate with eq polynomial
+
+    var eq_poly = try EqPolynomial(F).init(std.testing.allocator, &r_cycle);
+    defer eq_poly.deinit();
+    const eq_evals = try eq_poly.evals(std.testing.allocator);
+    defer std.testing.allocator.free(eq_evals);
+
+    var prover_sum = F.zero();
+
+    for (0..4) |t| {
+        const witness = &witnesses[t];
+        const eq_val = eq_evals[t];
+
+        // Compute Az_g0, Bz_g0 from first group
+        var az_g0 = F.zero();
+        var bz_g0 = F.zero();
+
+        for (0..10) |i| {
+            const constraint_idx = constraints.FIRST_GROUP_INDICES[i];
+            const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
+
+            const az_contrib = constraint.condition.evaluate(F, witness.asSlice());
+            const bz_left = constraint.left.evaluate(F, witness.asSlice());
+            const bz_right = constraint.right.evaluate(F, witness.asSlice());
+            const bz_contrib = bz_left.sub(bz_right);
+
+            az_g0 = az_g0.add(lagrange_weights[i].mul(az_contrib));
+            bz_g0 = bz_g0.add(lagrange_weights[i].mul(bz_contrib));
+        }
+
+        // Compute Az_g1, Bz_g1 from second group
+        var az_g1 = F.zero();
+        var bz_g1 = F.zero();
+
+        for (0..9) |i| {
+            const constraint_idx = constraints.SECOND_GROUP_INDICES[i];
+            const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
+
+            const az_contrib = constraint.condition.evaluate(F, witness.asSlice());
+            const bz_left = constraint.left.evaluate(F, witness.asSlice());
+            const bz_right = constraint.right.evaluate(F, witness.asSlice());
+            const bz_contrib = bz_left.sub(bz_right);
+
+            // Use same Lagrange weights (up to min of both group sizes)
+            az_g1 = az_g1.add(lagrange_weights[i].mul(az_contrib));
+            bz_g1 = bz_g1.add(lagrange_weights[i].mul(bz_contrib));
+        }
+
+        // Blend with r_stream
+        const az_final = az_g0.add(r_stream.mul(az_g1.sub(az_g0)));
+        const bz_final = bz_g0.add(r_stream.mul(bz_g1.sub(bz_g0)));
+
+        // Accumulate with eq weight
+        prover_sum = prover_sum.add(eq_val.mul(az_final.mul(bz_final)));
+    }
+
+    std.debug.print("\n=== inner_sum_prod Comparison ===\n", .{});
+    std.debug.print("verifier_inner_sum_prod limbs: ", .{});
+    for (verifier_inner_sum_prod.limbs) |limb| {
+        std.debug.print("{x:016} ", .{limb});
+    }
+    std.debug.print("\nprover_sum limbs: ", .{});
+    for (prover_sum.limbs) |limb| {
+        std.debug.print("{x:016} ", .{limb});
+    }
+    std.debug.print("\n=================================\n", .{});
+
+    // These should match! If they don't, there's a fundamental issue
+    // in how the prover and verifier compute Az*Bz
+    try std.testing.expect(verifier_inner_sum_prod.eql(prover_sum));
 }

@@ -161,6 +161,13 @@ pub fn LinearCombination(comptime max_terms: usize) type {
 
             return result;
         }
+
+        /// Evaluate the linear combination given z values (MLE evaluations)
+        /// This is the same as evaluate() but clarifies the intent when used
+        /// with MLE evaluations instead of actual witness values.
+        pub fn evaluateWithConstant(self: Self, comptime F: type, z: []const F) F {
+            return self.evaluate(F, z);
+        }
     };
 }
 

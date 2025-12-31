@@ -56,6 +56,10 @@ git push
 ### Notes Location
 Store implementation notes in `.agent/NOTES.md` and track progress in `.agent/TODO.md`.
 
+### Cryptography Reference
+You have access to jolt.md where you can find the paper Jolt in markdown
+Always use it when not understanding the Cryptography
+
 ---
 
 ## Success Criteria

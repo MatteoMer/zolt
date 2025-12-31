@@ -1,6 +1,40 @@
 # Zolt-Jolt Compatibility Notes
 
-## Current Status (Session 27 - December 29, 2024)
+## Current Status (Session 28 - December 31, 2024)
+
+### Analysis Summary
+
+**Verified Components:**
+1. ✅ r_cycle computation: `challenges[1..]` reversed to big-endian (matches Jolt's `normalize_opening_point`)
+2. ✅ eq polynomial: `∏ᵢ (τ[i] * r[i] + (1-τ[i]) * (1-r[i]))` (multiplication order doesn't matter)
+3. ✅ Az/Bz blending: `final = g0 + r_stream * (g1 - g0)` (matches Jolt)
+4. ✅ Lagrange kernel: `L(tau_high, r0)` passed as initial scaling to split_eq
+5. ✅ All 656 tests pass
+
+**Key Formula from Jolt's `expected_output_claim`:**
+```
+expected = tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod
+
+Where:
+- tau_high_bound_r0 = L(tau_high, r0) = Lagrange kernel at UniSkip challenge
+- tau_bound_r_tail_reversed = eq(tau_low, [r_n, ..., r_1, r_stream]) = eq polynomial with ALL sumcheck challenges reversed
+- inner_sum_prod = Az(r_stream, r0, z(r_cycle)) * Bz(r_stream, r0, z(r_cycle))
+- r_cycle = challenges[1..] reversed to big-endian (used for R1CS input MLE evaluations)
+```
+
+**Important Distinctions:**
+1. `r_tail_reversed` includes ALL sumcheck challenges (including r_stream)
+2. `r_cycle` for R1CS inputs excludes r_stream (it's `challenges[1..]` reversed)
+3. The eq polynomial in expected_output_claim uses the full `[r_n, ..., r_1, r_stream]` to match the tau_low binding order
+
+**Next Steps:**
+1. Create a cross-verification test that computes expected_output_claim from Zolt's proof
+2. Compare with the sumcheck's output_claim
+3. If they match, the Stage 1 sumcheck is correct; otherwise, investigate the specific divergence
+
+---
+
+## Previous Status (Session 27 - December 29, 2024)
 
 ### Verification Progress
 

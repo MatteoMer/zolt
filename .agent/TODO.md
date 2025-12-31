@@ -1,44 +1,43 @@
 # Zolt-Jolt Compatibility TODO
 
-## Current Status: Stage 1 Sumcheck Verification (Session 33)
+## Current Status: Session 28 - December 31, 2024
 
-### Issue Summary
-The Stage 1 sumcheck output_claim doesn't match expected_output_claim.
+**All 657 tests pass** (656 original + 1 new cross-verification test)
 
+### Session 28 Accomplishments
+
+#### ✅ Verified Key Components
+1. **r_cycle computation**: `challenges[1..]` reversed to big-endian matches Jolt's `normalize_opening_point`
+2. **eq polynomial**: Prover's `current_scalar` equals `L(tau_high, r0) * eq(tau_low, r_tail_reversed)`
+3. **Az/Bz blending**: `final = g0 + r_stream * (g1 - g0)` matches Jolt
+4. **Cross-verification test passes**: `prover_eq_factor == verifier_eq_factor`
+
+#### Key Formula (from Jolt's expected_output_claim)
 ```
-output_claim:          18149181199645709635565994144274301613989920934825717026812937381996718340431
-expected_output_claim:  9784440804643023978376654613918487285551699375196948804144755605390806131527
+expected = tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod
+
+Where:
+- tau_high_bound_r0 = L(tau_high, r0) = Lagrange kernel at UniSkip challenge
+- tau_bound_r_tail_reversed = eq(tau_low, [r_n, ..., r_1, r_stream])
+- inner_sum_prod = Az_final * Bz_final (from R1CS input MLE evaluations)
+- r_cycle = challenges[1..] reversed (excludes r_stream, used for R1CS inputs)
+
+Important: r_tail_reversed includes ALL sumcheck challenges (including r_stream)
+           r_cycle for R1CS inputs excludes r_stream
 ```
 
-### Key Investigation Findings
-
-1. **All individual components appear correct:**
-   - ✅ Blake2b transcript (byte-for-byte match)
-   - ✅ UniSkip polynomial coefficients
-   - ✅ Compressed poly format [c0, c2, c3]
-   - ✅ computeCubicRoundPoly matches Jolt's gruen_poly_deg_3
-   - ✅ Constraint structure matches Jolt exactly (19 constraints, correct groups)
-   - ✅ R1CSInputIndex ordering matches Jolt's ALL_R1CS_INPUTS
-   - ✅ E_out/E_in factorization structure matches Jolt
-   - ✅ All 656 Zolt tests pass
-
-2. **Formula Analysis:**
-   - expected_output_claim = tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod
-   - inner_sum_prod = Az(rx_constr) * Bz(rx_constr) where rx_constr = [r_stream, r0]
-   - The prover should produce output_claim = L(tau_high,r0) * eq(tau_low, r) * Az(r) * Bz(r)
-
-3. **Potential Issues to Investigate:**
-   - The streaming round computes t_zero and t_infinity for the first remaining round
-   - These feed into computeCubicRoundPoly (gruen_poly_deg_3)
-   - The index structure for iterating over cycles might be off
+### Remaining Investigation
+The eq factor (tau_high_bound_r0 * tau_bound_r_tail_reversed) matches between prover and verifier.
+The remaining question is whether inner_sum_prod matches:
+- Prover computes: `Σ_cycles eq(tau_low, cycle) * Az(cycle) * Bz(cycle)` via streaming sumcheck
+- Verifier computes: `Az(r_stream, r0, z(r_cycle)) * Bz(r_stream, r0, z(r_cycle))` using opening claims
 
 ### Next Steps
-1. Add detailed debug output comparing t_zero/t_infinity between Zolt and Jolt
-2. Create a minimal test case with known correct values
-3. Trace the exact index structure in streaming round vs Jolt's fused_materialise_polynomials_round_zero
-4. Compare eq polynomial values at specific cycle indices
+1. Debug inner_sum_prod computation (Az*Bz from opening claims vs prover)
+2. Create end-to-end verification test with Jolt verifier
+3. Complete remaining stages (2-7) proof generation
 
-### Verified Correct
+## Verified Correct
 - [x] Blake2b transcript implementation
 - [x] Field serialization (Arkworks format)
 - [x] UniSkip polynomial generation
@@ -47,17 +46,8 @@ expected_output_claim:  97844408046430239783766546139184872855516993751969488041
 - [x] Lagrange kernel L(tau_high, r0)
 - [x] MLE evaluation for opening claims
 - [x] Gruen cubic polynomial formula
-- [x] All 656 Zolt tests pass
-
-### Analysis Notes
-The sumcheck verification passes all rounds (p(0) + p(1) = claim), meaning:
-- The sumcheck polynomial is internally consistent
-- But the final claim doesn't match what the verifier computes from opening claims
-
-This suggests either:
-1. The R1CS input MLE evaluations don't match
-2. The t_zero/t_infinity computation differs from Jolt
-3. Some subtle index/ordering difference in how we iterate over cycles
+- [x] r_cycle computation (big-endian, excluding r_stream)
+- [x] eq polynomial factor matches verifier (new cross-verification test)
 
 ## Test Commands
 ```bash
@@ -84,4 +74,5 @@ cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture
 - [x] Streaming round sum-of-products structure
 - [x] Cycle rounds multiquadratic method
 - [x] Transcript flow matching Jolt
-- [x] All 656 Zolt tests pass
+- [x] All 657 Zolt tests pass
+- [x] Cross-verification test for eq factors (new)

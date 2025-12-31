@@ -34,13 +34,39 @@ The issue is in how the prover accumulates `Az * Bz` during the sumcheck vs what
 
 These should be equivalent by MLE properties, but something is off.
 
-**Potential Bug Areas to Investigate:**
-1. The `selector` logic in cycle rounds - using `full_idx & 1` to select constraint group after r_stream is bound
-2. Possibly need to use combined Az/Bz (with r_stream blending) in cycle rounds instead of selecting by group
+**Analysis of Cycle Round Az/Bz:**
 
-**Files to Check:**
-- `src/zkvm/spartan/streaming_outer.zig:659-730` - cycle round logic uses selector-based group selection
-- Compare with Jolt's approach after streaming round binding
+After investigation, the `selector = full_idx & 1` logic in cycle rounds IS CORRECT:
+- When `r_grid_len = 2` (after r_stream is bound), `selector = r_idx`
+- `r_idx = 0`: selector = 0, weight = (1-r_stream), uses group 0
+- `r_idx = 1`: selector = 1, weight = r_stream, uses group 1
+- Result: `az_grid[x_val] = (1-r_stream) * Az_g0 + r_stream * Az_g1` - correct blending!
+
+The code IS implementing the blending correctly via the r_grid weights.
+
+**Key Formula (from Jolt's verifier):**
+
+The verifier computes `inner_sum_prod` as:
+```
+z[i] = MLE(R1CS_input_i, r_cycle)  // from opening claims
+Az_g0 = Σᵢ w[i] * lc_a[i].dot_product(z)  // w = Lagrange weights at r0
+Az_g1 = Σᵢ w[i] * lc_a[i].dot_product(z)  // for second group constraints
+Az_final = Az_g0 + r_stream * (Az_g1 - Az_g0)
+Bz_final = Bz_g0 + r_stream * (Bz_g1 - Bz_g0)
+inner_sum_prod = Az_final * Bz_final
+```
+
+The prover computes (via sumcheck):
+```
+output_claim = eq_factor * Σ_cycle eq(r, cycle) * Az(cycle) * Bz(cycle)
+            = eq_factor * Az_MLE(r) * Bz_MLE(r)
+```
+
+These SHOULD match by MLE linearity. The issue remains unclear.
+
+**Remaining Investigation:**
+1. Compare actual R1CS input MLE evaluations between Zolt and what verifier uses
+2. Verify Az/Bz computation with MLE values matches sumcheck output
 
 ---
 

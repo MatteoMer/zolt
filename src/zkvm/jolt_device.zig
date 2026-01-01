@@ -80,11 +80,11 @@ pub const JoltDevice = struct {
         panic: bool,
         program_size: u64,
     ) !Self {
-        // Use Jolt's default constants
+        // Use Jolt's default constants (from common/src/constants.rs)
         const DEFAULT_MAX_INPUT_SIZE: u64 = 4096;
         const DEFAULT_MAX_OUTPUT_SIZE: u64 = 4096;
-        const DEFAULT_MEMORY_SIZE: u64 = 1 << 22; // 4MB
-        const DEFAULT_STACK_SIZE: u64 = 1 << 20; // 1MB
+        const DEFAULT_MEMORY_SIZE: u64 = 1024 * 1024 * 128; // 128 MB (matches Jolt's EMULATOR_MEMORY_CAPACITY)
+        const DEFAULT_STACK_SIZE: u64 = 4096; // 4 KB (matches Jolt's DEFAULT_STACK_SIZE)
         const RAM_START_ADDRESS: u64 = 0x80000000;
 
         // Copy inputs/outputs

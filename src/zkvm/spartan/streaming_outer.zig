@@ -1221,9 +1221,10 @@ pub fn StreamingOuterProver(comptime F: type) type {
             while (self.current_round < self.numRounds()) {
                 const round_poly = try self.computeRemainingRoundPoly();
 
-                // Add to proof (compressed format - omit linear term)
-                const coeffs = [_]F{ round_poly[0], round_poly[2], round_poly[3] };
-                try sumcheck_proof.addRoundPoly(&coeffs);
+                // Add to proof: convert evaluations [s(0), s(1), s(2), s(3)] to
+                // compressed coefficient format [c0, c2, c3] as expected by Jolt
+                const compressed = poly_mod.UniPoly(F).evalsToCompressed(round_poly);
+                try sumcheck_proof.addRoundPoly(&compressed);
 
                 // Get challenge
                 transcript.appendSlice(&round_poly);

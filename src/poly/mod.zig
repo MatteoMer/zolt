@@ -122,8 +122,9 @@ pub fn DensePolynomial(comptime F: type) type {
             };
         }
 
-        /// Bind the first variable to a value
+        /// Bind the first (highest index) variable to a value
         /// This reduces the polynomial from n to n-1 variables
+        /// Uses HighToLow binding order (top variable bound first)
         pub fn bindFirst(self: *const Self, value: F) !Self {
             std.debug.assert(self.num_vars > 0);
 
@@ -133,8 +134,8 @@ pub fn DensePolynomial(comptime F: type) type {
             const one_minus_value = F.one().sub(value);
 
             for (0..new_size) |i| {
-                // f(x_1, ..., x_n) evaluated at x_1 = value
-                // = (1 - value) * f(0, x_2, ..., x_n) + value * f(1, x_2, ..., x_n)
+                // f(x_1, ..., x_n) evaluated at x_n = value (top variable)
+                // = (1 - value) * f(x_1, ..., 0) + value * f(x_1, ..., 1)
                 const low = self.evaluations[i].mul(one_minus_value);
                 const high = self.evaluations[i + new_size].mul(value);
                 evals[i] = low.add(high);
@@ -145,6 +146,37 @@ pub fn DensePolynomial(comptime F: type) type {
                 .num_vars = self.num_vars - 1,
                 .allocator = self.allocator,
             };
+        }
+
+        /// Bind the last (lowest index) variable to a value - in-place
+        /// This reduces the polynomial from n to n-1 variables
+        /// Uses LowToHigh binding order (bottom variable bound first)
+        ///
+        /// Matches Jolt's bound_poly_var_bot:
+        ///   Z[i] = Z[2*i] + r * (Z[2*i+1] - Z[2*i])
+        ///
+        /// This is the correct binding order for the outer streaming sumcheck
+        /// linear phase where we bind cycle variables from low to high.
+        pub fn bindLow(self: *Self, value: F) void {
+            std.debug.assert(self.num_vars > 0);
+
+            const new_size = self.evaluations.len / 2;
+
+            for (0..new_size) |i| {
+                // f(x_0, x_1, ..., x_{n-1}) evaluated at x_0 = value (bottom variable)
+                // new[i] = old[2*i] + r * (old[2*i+1] - old[2*i])
+                // = (1 - r) * old[2*i] + r * old[2*i+1]
+                const low = self.evaluations[2 * i];
+                const high = self.evaluations[2 * i + 1];
+                self.evaluations[i] = low.add(value.mul(high.sub(low)));
+            }
+
+            self.num_vars -= 1;
+        }
+
+        /// Get the length (number of evaluations after binding)
+        pub fn boundLen(self: *const Self) usize {
+            return @as(usize, 1) << @intCast(self.num_vars);
         }
     };
 }
@@ -407,6 +439,80 @@ test "dense polynomial basic" {
 
     try std.testing.expectEqual(@as(usize, 2), poly.num_vars);
     try std.testing.expectEqual(@as(usize, 4), poly.len());
+}
+
+test "dense polynomial bindLow" {
+    const F = field.BN254Scalar;
+    const allocator = std.testing.allocator;
+
+    // Create a polynomial with 2 variables (4 evaluations)
+    // Layout with x_0 as LSB: evals[i] = f(b_0, b_1) where i = b_0 + 2*b_1
+    // So:
+    //   evals[0] = f(0,0) = 1
+    //   evals[1] = f(1,0) = 2
+    //   evals[2] = f(0,1) = 3
+    //   evals[3] = f(1,1) = 4
+    const evals = [_]F{
+        F.fromU64(1), // f(0,0)
+        F.fromU64(2), // f(1,0)
+        F.fromU64(3), // f(0,1)
+        F.fromU64(4), // f(1,1)
+    };
+
+    var poly = try DensePolynomial(F).init(allocator, &evals);
+    defer poly.deinit();
+
+    // Bind x_0 (the low variable) to r = 3
+    const r = F.fromU64(3);
+    poly.bindLow(r);
+
+    // After binding x_0 = r:
+    //   new[0] = f(r, 0) = (1-r)*f(0,0) + r*f(1,0) = (1-3)*1 + 3*2 = -2 + 6 = 4
+    //   new[1] = f(r, 1) = (1-r)*f(0,1) + r*f(1,1) = (1-3)*3 + 3*4 = -6 + 12 = 6
+    // But using Jolt's formula: new[i] = old[2i] + r*(old[2i+1] - old[2i])
+    //   new[0] = 1 + 3*(2 - 1) = 1 + 3 = 4 ✓
+    //   new[1] = 3 + 3*(4 - 3) = 3 + 3 = 6 ✓
+
+    try std.testing.expectEqual(@as(usize, 1), poly.num_vars);
+    try std.testing.expectEqual(@as(usize, 2), poly.boundLen());
+    try std.testing.expect(poly.evaluations[0].eql(F.fromU64(4)));
+    try std.testing.expect(poly.evaluations[1].eql(F.fromU64(6)));
+}
+
+test "dense polynomial bindLow matches Jolt's bound_poly_var_bot" {
+    const F = field.BN254Scalar;
+    const allocator = std.testing.allocator;
+
+    // 3 variables: 8 evaluations
+    const evals = [_]F{
+        F.fromU64(10), // f(0,0,0)
+        F.fromU64(20), // f(1,0,0)
+        F.fromU64(30), // f(0,1,0)
+        F.fromU64(40), // f(1,1,0)
+        F.fromU64(50), // f(0,0,1)
+        F.fromU64(60), // f(1,0,1)
+        F.fromU64(70), // f(0,1,1)
+        F.fromU64(80), // f(1,1,1)
+    };
+
+    var poly = try DensePolynomial(F).init(allocator, &evals);
+    defer poly.deinit();
+
+    // Bind x_0 to r = 5
+    const r = F.fromU64(5);
+    poly.bindLow(r);
+
+    // Expected: new[i] = old[2i] + r*(old[2i+1] - old[2i])
+    // new[0] = 10 + 5*(20-10) = 10 + 50 = 60
+    // new[1] = 30 + 5*(40-30) = 30 + 50 = 80
+    // new[2] = 50 + 5*(60-50) = 50 + 50 = 100
+    // new[3] = 70 + 5*(80-70) = 70 + 50 = 120
+
+    try std.testing.expectEqual(@as(usize, 2), poly.num_vars);
+    try std.testing.expect(poly.evaluations[0].eql(F.fromU64(60)));
+    try std.testing.expect(poly.evaluations[1].eql(F.fromU64(80)));
+    try std.testing.expect(poly.evaluations[2].eql(F.fromU64(100)));
+    try std.testing.expect(poly.evaluations[3].eql(F.fromU64(120)));
 }
 
 // Reference tests from submodules to ensure they run

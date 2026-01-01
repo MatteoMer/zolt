@@ -1,20 +1,98 @@
 # Zolt-Jolt Compatibility Notes
 
-## Current Status (Session 29 - December 31, 2024)
+## Current Status (Session 30 - January 1, 2026)
 
-### Investigation Summary
+### ROOT CAUSE IDENTIFIED: Linear Phase Architecture Mismatch
 
 **Current Issue:**
 - `output_claim: 18149181199645709635565994144274301613989920934825717026812937381996718340431`
 - `expected_output_claim: 9784440804643023978376654613918487285551699375196948804144755605390806131527`
-- Ratio ≈ 1.85 (not a simple integer factor)
+
+### The Problem
+
+Zolt's outer sumcheck has a **fundamental architectural difference** from Jolt in the **linear phase**.
+
+#### Jolt's Approach (Correct)
+Jolt's outer sumcheck has two distinct phases:
+
+1. **Streaming Phase** (first half of rounds):
+   - Uses `ExpandingTable` (r_grid) to weight contributions from the trace
+   - Iterates over cycles, selecting groups based on r_grid indices
+   - After each round, updates r_grid with the new challenge
+
+2. **Linear Phase** (second half of rounds):
+   - **Materializes Az/Bz polynomials** once at phase start
+   - **Binds** the polynomials each round with `az.bound_poly_var_bot(&r_j)`
+   - Uses the **bound polynomials** (not raw trace) for round computation
+   - Does NOT update r_grid
+
+Key code from Jolt's `OuterLinearStage`:
+```rust
+fn ingest_challenge(&mut self, shared: &mut Self::Shared, r_j: F::Challenge, _round: usize) {
+    shared.split_eq_poly.bind(r_j);
+    if let Some(t_prime_poly) = shared.t_prime_poly.as_mut() {
+        t_prime_poly.bind(r_j, BindingOrder::LowToHigh);
+    }
+    // CRITICAL: Bind the Az and Bz polynomials
+    self.az.bound_poly_var_bot(&r_j);
+    self.bz.bound_poly_var_bot(&r_j);
+}
+```
+
+#### Zolt's Approach (Incorrect)
+Zolt tries to use r_grid for ALL rounds:
+```zig
+// In cycle round, still iterating over r_grid
+const r_weight = r_grid.get(r_idx);
+const result = self.computeCycleAzBzForGroup(&self.cycle_witnesses[step_idx], selector);
+```
+
+The problem is that:
+1. After the streaming phase, r_grid encodes ALL bound challenges (r_stream + early cycle challenges)
+2. The indexing `step_idx = full_idx >> 1` and `selector = full_idx & 1` worked for streaming phase
+3. But in linear phase, this produces mathematically incorrect sums
+4. Zolt never "binds" Az/Bz polynomials - it recomputes from scratch each round
+
+### The Fix Required
+
+Zolt needs to match Jolt's architecture by:
+
+1. **Adding Az/Bz polynomial storage**:
+```zig
+az_poly: ?DensePolynomial(F),
+bz_poly: ?DensePolynomial(F),
+```
+
+2. **Materializing at linear phase start**:
+At the switchover point, compute Az/Bz for all cycles with current bound state
+
+3. **Binding each linear round**:
+```zig
+az_poly.bindLow(challenge);
+bz_poly.bindLow(challenge);
+```
+
+4. **Using bound polynomials for round computation**:
+Instead of recomputing from trace, use `az_poly[idx]` and `bz_poly[idx]`
+
+### Next Steps
+
+1. Implement DensePolynomial with bindLow() method
+2. Add polynomial storage to StreamingOuterProver
+3. Implement materializePolynomials() for linear phase start
+4. Modify linear round to use bound polynomials
+5. Test with Jolt's verifier
+
+---
+
+## Previous Status (Session 29 - December 31, 2024)
 
 **Verified Components:**
 1. ✅ eq polynomial factor: `prover_eq_factor == verifier_eq_factor` (cross-verification test passes)
 2. ✅ R1CS constraint ordering matches Jolt's `R1CS_CONSTRAINTS_FIRST_GROUP` exactly
 3. ✅ R1CS input index ordering matches Jolt's `ALL_R1CS_INPUTS` exactly
 4. ✅ Lagrange weights `L_i(r0)` computed at symmetric domain {-4, ..., 5}
-5. ✅ 656 tests pass (including cross-verification for eq factors)
+5. ✅ 698 tests pass
 
 **Key Formula Analysis:**
 ```
@@ -25,14 +103,6 @@ Where:
 - Az_final = Σᵢ w[i] * lc_a[i].dot_product(z(r_cycle)) + r_stream * (Az_g1 - Az_g0)
 - z(r_cycle) = MLE evaluations of R1CS inputs at challenge point
 ```
-
-**Key Insight:**
-The issue is in how the prover accumulates `Az * Bz` during the sumcheck vs what the verifier computes from opening claims.
-
-- Prover: Σ_cycle eq(tau, cycle) * Az(cycle) * Bz(cycle)
-- Verifier: eq(tau, r) * (Σᵢ w[i] * lc_a[i] · z(r)) * (Σᵢ w[i] * lc_b[i] · z(r))
-
-These should be equivalent by MLE properties, but something is off.
 
 **Analysis of Cycle Round Az/Bz:**
 

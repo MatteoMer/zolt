@@ -1,14 +1,34 @@
 # Zolt-Jolt Compatibility TODO
 
-## Current Status: Session 29 - December 31, 2024
+## Current Status: Session 30 - January 1, 2026
 
-**All 656 tests pass**
+**All 698 tests pass**
 
-### Active Investigation
+### ROOT CAUSE IDENTIFIED
 
 **Issue:** Stage 1 sumcheck output_claim ≠ expected_output_claim
 
-**Debug Values (Latest Run):**
+The core problem is that Zolt's linear phase implementation doesn't match Jolt's architecture.
+
+**Jolt's Approach:**
+1. Streaming phase: Uses r_grid to weight trace contributions
+2. Linear phase: Materializes Az/Bz polynomials, then BINDS them each round
+
+**Zolt's Approach (Incorrect):**
+1. All rounds: Tries to use r_grid, recomputes from trace each round
+2. Never binds Az/Bz polynomials
+
+### Active Work
+
+**Fix Required:** Implement Jolt-style linear phase
+
+1. [ ] **Add DensePolynomial with bindLow()** - Polynomial binding for linear sumcheck
+2. [ ] **Add Az/Bz storage to StreamingOuterProver**
+3. [ ] **Materialize polynomials at linear phase start** - Compute Az/Bz for all cycles
+4. [ ] **Modify linear round computation** - Use bound polynomials instead of trace
+5. [ ] **Test with Jolt verifier**
+
+### Debug Values (Latest Run)
 ```
 output_claim:          18149181199645709635565994144274301613989920934825717026812937381996718340431
 expected_output_claim: 9784440804643023978376654613918487285551699375196948804144755605390806131527
@@ -17,22 +37,16 @@ tau_bound_r_tail:      194410682947018064816506332783455740002684695464281536383
 inner_sum_prod:        18008138052294660670516952860372938358542359888052020571951954839855384564920
 ```
 
-**Verified:**
-- ✅ eq factor: `prover_eq_factor == verifier_eq_factor` (cross-verification test passes)
-- ✅ Individual sumcheck rounds pass
+### Verified Components
+- ✅ eq factor: `prover_eq_factor == verifier_eq_factor`
+- ✅ Individual sumcheck rounds pass (p(0) + p(1) = claim)
 - ✅ R1CS constraint and input ordering matches Jolt
-
-**Suspected Issue:**
-The Az*Bz computation in cycle rounds may be using the wrong approach:
-- After streaming round binds r_stream, should cycle rounds use combined Az/Bz?
-- Current code uses `selector = full_idx & 1` to pick constraint group
-
-### Next Steps
-1. Compare cycle round Az/Bz computation with Jolt's approach
-2. Check if `computeCycleAzBzForGroup` should be `computeCycleAzBzProductCombined` in cycle rounds
+- ✅ Az and Bz MLE computations match
+- ✅ Streaming round logic is correct
+- ✅ r_grid ExpandingTable matches Jolt
 
 ## Pending Tasks
-- [ ] Debug inner_sum_prod (Az*Bz) computation
+- [ ] Implement linear phase with bound polynomials (BLOCKING)
 - [ ] Complete remaining stages (2-7) proof generation
 - [ ] Create end-to-end verification test with Jolt verifier
 
@@ -49,7 +63,8 @@ The Az*Bz computation in cycle rounds may be using the wrong approach:
 - [x] eq polynomial factor matches verifier
 - [x] Streaming round sum-of-products structure
 - [x] Transcript flow matching Jolt
-- [x] All 656 Zolt tests pass
+- [x] ExpandingTable (r_grid) matches Jolt
+- [x] All 698 Zolt tests pass
 
 ## Test Commands
 ```bash

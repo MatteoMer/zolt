@@ -6,6 +6,7 @@ You are an AI agent tasked with making the Zolt zkVM (Zig) produce proofs that c
 
 - **Zolt** (Zig): `/Users/matteo/projects/zolt`
 - **Jolt** (Rust): `/Users/matteo/projects/jolt`
+- **Jolt reference paper** `/Users/matteo/projects/zolt/jolt.md` - consult when unsure about the cryptography
 - **Zig Reference** (0.15.2): `/Users/matteo/projects/zolt/zig` - consult when Zig behavior is unclear
 
 ## Goal

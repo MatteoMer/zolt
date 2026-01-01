@@ -4,37 +4,36 @@
 
 **All 702 tests pass**
 
-### Issue: Transcript state diverges between Zolt and Jolt
+### Issue: Sumcheck round polynomial values don't match verifier expectations
 
-The debug output shows completely different challenges:
-- Zolt's r0 challenge: `5140254016165682325926826379386165292`
-- Jolt's r0 challenge: `6919882260122427158724897727024710502508333642996197054262116261168391078818`
+**Root cause identified**: The round polynomial evaluation at each challenge doesn't match what the verifier computes as `expected_output_claim`.
 
-This means the transcript state BEFORE the stage 1 sumcheck is different.
+After fixing memory layout constants, the transcript now matches between Zolt and Jolt (same challenges). However, the sumcheck verification fails because:
+- Prover output_claim: `18149181199645709635565994144274301613989920934825717026812937381996718340431`
+- Expected output_claim: `9784440804643023978376654613918487285551699375196948804144755605390806131527`
 
-### Root Cause Analysis
+### Analysis
 
-The r0 challenge is derived from the transcript after:
-1. Initial label ("Jolt")
-2. All polynomial commitments (GT elements for Dory)
-3. UniSkip first-round polynomial coefficients
+The verification shows:
+1. ✅ Round 0 polynomial s(0)+s(1) = hint (constraint satisfied)
+2. ❌ Round 1 evaluation at r_1: computed `7662922...` vs expected `8918774...`
+3. This indicates the polynomial coefficients being generated are incorrect
 
-Since the challenges differ, one of these must be serialized differently:
-- GT element serialization (384 bytes, reversed)
-- UniSkip polynomial coefficients
-- Missing or extra data in transcript
+The issue is in **how Zolt's prover computes the round polynomial evaluations** s(0), s(1), s(2), s(3). The computation structure differs from what the verifier expects.
 
 ### Completed Work (This Session)
 
-1. [x] Added detailed debug output to compare Zolt and Jolt values
-2. [x] Verified round polynomial coefficient computation
-3. [x] Confirmed interpolation formula is correct
+1. [x] Fixed memory layout constants to match Jolt (128MB memory, 4KB stack)
+2. [x] Verified transcript now produces same challenges as Jolt
+3. [x] Verified polynomial evaluation formula matches Jolt's `eval_from_hint`
+4. [x] Identified that round polynomial VALUES are wrong, not the evaluation formula
 
-### Investigation Needed
+### Next Steps
 
-1. **Compare GT element bytes** - Verify toBytes() matches arkworks CanonicalSerialize
-2. **Trace full transcript sequence** - Log every append before stage 1
-3. **Compare UniSkip coefficients** - Verify these match between Zolt and Jolt
+1. [ ] Debug the streaming outer prover's `computeRemainingRoundPoly()` function
+2. [ ] Compare t_prime_0 and t_prime_inf values with what Jolt would compute
+3. [ ] Verify the Az/Bz polynomial binding produces correct values
+4. [ ] Check the split_eq current_scalar and eq factor computation
 
 ### Blocking Issues
 
@@ -42,36 +41,28 @@ Since the challenges differ, one of these must be serialized differently:
    - `params.g2_vec` has length 64 but `current_len` is 128
    - Need to fix SRS loading or verify polynomial degree bounds
 
-## Pending Tasks
-- [ ] Fix transcript divergence (root cause of verification failure)
-- [ ] Fix Dory proof generation (SRS size issue)
-- [ ] Complete remaining stages (2-7) proof generation
-- [ ] Create end-to-end verification test with Jolt verifier
-
 ## Verified Correct
 - [x] Blake2b transcript implementation format
 - [x] Field serialization (Arkworks format)
+- [x] Memory layout constants now match Jolt
+- [x] Transcript produces same challenges as Jolt
 - [x] UniSkip polynomial generation logic
 - [x] R1CS constraint definitions (19 constraints, 2 groups)
 - [x] Split eq polynomial factorization (E_out/E_in tables)
 - [x] Lagrange kernel L(tau_high, r0)
 - [x] MLE evaluation for opening claims
-- [x] Gruen cubic polynomial formula
+- [x] Gruen cubic polynomial formula (verified mathematically)
 - [x] r_cycle computation (big-endian, excluding r_stream)
 - [x] eq polynomial factor matches verifier
-- [x] Streaming round sum-of-products structure
 - [x] ExpandingTable (r_grid) matches Jolt
 - [x] DensePolynomial.bindLow() implementation
-- [x] Linear phase infrastructure (az_poly, bz_poly, binding)
+- [x] Polynomial evaluation formula (Horner's method)
 - [x] All 702 Zolt tests pass
 
 ## Test Commands
 ```bash
 # Zolt tests
 zig build test --summary all
-
-# Generate proof
-zig build -Doptimize=ReleaseFast && ./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o /tmp/zolt_proof_dory.bin
 
 # Jolt verification test
 cd /Users/matteo/projects/jolt

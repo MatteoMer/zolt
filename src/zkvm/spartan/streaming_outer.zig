@@ -83,6 +83,16 @@ pub fn StreamingOuterProver(comptime F: type) type {
         /// This is stored separately because split_eq only receives tau_low
         tau_high: F,
 
+        /// Linear phase: Bound Az polynomial
+        /// Materialized at linear phase start, bound each round with bindLow()
+        /// Matches Jolt's OuterLinearStage.az
+        az_poly: ?poly_mod.DensePolynomial(F),
+
+        /// Linear phase: Bound Bz polynomial
+        /// Materialized at linear phase start, bound each round with bindLow()
+        /// Matches Jolt's OuterLinearStage.bz
+        bz_poly: ?poly_mod.DensePolynomial(F),
+
         /// Allocator
         allocator: Allocator,
 
@@ -159,6 +169,8 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 .r_stream = null,
                 .r_grid = r_grid,
                 .tau_high = tau_high,
+                .az_poly = null,
+                .bz_poly = null,
                 .allocator = allocator,
             };
         }
@@ -167,6 +179,12 @@ pub fn StreamingOuterProver(comptime F: type) type {
             self.split_eq.deinit();
             self.challenges.deinit(self.allocator);
             self.r_grid.deinit();
+            if (self.az_poly) |*az| {
+                az.deinit();
+            }
+            if (self.bz_poly) |*bz| {
+                bz.deinit();
+            }
         }
 
         /// Total number of rounds for the remaining sumcheck (after UniSkip)
@@ -177,6 +195,78 @@ pub fn StreamingOuterProver(comptime F: type) type {
         /// The cycle rounds bind the cycle index bits.
         pub fn numRounds(self: *const Self) usize {
             return 1 + self.num_cycle_vars;
+        }
+
+        /// Materialize Az and Bz polynomials for the linear phase
+        ///
+        /// This matches Jolt's fused_materialise_polynomials_general_with_multiquadratic.
+        /// Called at the switchover point (start of linear phase).
+        ///
+        /// Creates dense polynomials Az(cycle) and Bz(cycle) that incorporate:
+        /// - The r_stream blending: Az = (1-r_stream)*Az_g0 + r_stream*Az_g1
+        /// - The Lagrange weights from r0
+        /// - The r_grid weights from already-bound cycle variables
+        ///
+        /// After materialization, each linear round:
+        /// 1. Uses the bound polynomial values for round computation
+        /// 2. Binds with bindLow() to prepare for the next round
+        pub fn materializeLinearPhasePolynomials(self: *Self) !void {
+            // r_stream must be bound before materializing linear phase polynomials
+            if (self.r_stream == null) return error.RStreamNotBound;
+
+            // The polynomial needs to have enough variables for all LINEAR phase rounds.
+            // At switchover, we've completed switch_over streaming rounds.
+            // Remaining linear rounds = numRounds() - switch_over.
+            //
+            // The polynomial size is 2^linear_rounds to allow binding each round.
+            const num_remaining = self.numRounds();
+            const switch_over = num_remaining / 2;
+            const linear_rounds = num_remaining - switch_over;
+            const poly_size: usize = @as(usize, 1) << @intCast(linear_rounds);
+
+            var az_evals = try self.allocator.alloc(F, poly_size);
+            errdefer self.allocator.free(az_evals);
+            var bz_evals = try self.allocator.alloc(F, poly_size);
+            errdefer self.allocator.free(bz_evals);
+
+            // The r_grid weights encode the streaming phase bound challenges.
+            // For each position in the new polynomial, we need to compute the
+            // weighted sum over r_grid entries.
+            const r_grid = &self.r_grid;
+            const r_grid_len = r_grid.length();
+
+            for (0..poly_size) |out_idx| {
+                // For each position in the output polynomial, sum over r_grid
+                var az_sum = F.zero();
+                var bz_sum = F.zero();
+
+                for (0..r_grid_len) |r_idx| {
+                    const r_weight = r_grid.get(r_idx);
+
+                    // The combined index encodes both r_grid position and output position
+                    // full_idx = (out_idx << num_streaming_bound_bits) | r_idx
+                    const full_idx = (out_idx << @intCast(std.math.log2_int(usize, r_grid_len))) | r_idx;
+                    const step_idx = full_idx >> 1;
+                    const selector: usize = full_idx & 1;
+
+                    if (step_idx < self.cycle_witnesses.len) {
+                        const result = self.computeCycleAzBzForGroup(&self.cycle_witnesses[step_idx], selector);
+                        az_sum = az_sum.add(r_weight.mul(result.az));
+                        bz_sum = bz_sum.add(r_weight.mul(result.bz));
+                    }
+                }
+
+                az_evals[out_idx] = az_sum;
+                bz_evals[out_idx] = bz_sum;
+            }
+
+            // Create DensePolynomials with linear_rounds variables
+            self.az_poly = try poly_mod.DensePolynomial(F).init(self.allocator, az_evals);
+            self.bz_poly = try poly_mod.DensePolynomial(F).init(self.allocator, bz_evals);
+
+            // Free the temporary arrays since DensePolynomial.init copies them
+            self.allocator.free(az_evals);
+            self.allocator.free(bz_evals);
         }
 
         /// Compute the first-round univariate skip polynomial
@@ -657,76 +747,139 @@ pub fn StreamingOuterProver(comptime F: type) type {
                     }
                 }
             } else {
-                // CYCLE ROUND: Compute Σ (Az * Bz) for sum-of-products
-                //
-                // Like the streaming round, we need SUM-OF-PRODUCTS, not product-of-sums!
-                // For each (out, in) pair, we build grids, expand to multiquadratic,
-                // multiply pointwise, then accumulate.
+                // CYCLE ROUND: Determine if we're in streaming or linear phase
+                const num_remaining = self.numRounds();
+                const switch_over = num_remaining / 2;
+                const is_linear_phase = self.current_round > switch_over;
 
-                const r_grid = &self.r_grid;
-                const r_grid_len = r_grid.length();
-                const num_r_bits: u6 = if (r_grid_len > 1) @intCast(std.math.log2_int(usize, r_grid_len)) else 0;
-                const window_bits: u6 = 1;
+                if (is_linear_phase and self.az_poly != null and self.bz_poly != null) {
+                    // LINEAR PHASE: Use bound Az/Bz polynomials
+                    //
+                    // The bound polynomials have already been materialized and bound
+                    // up to this point. Each entry az_poly[i] is the value at position i.
+                    //
+                    // For each (out, in) pair, we read from the bound polynomials
+                    // instead of recomputing from trace.
+                    const az_poly = &self.az_poly.?;
+                    const bz_poly = &self.bz_poly.?;
+                    const poly_len = az_poly.boundLen();
 
-                // Accumulate sum of products
-                var sum_prod_0 = F.zero(); // Σ eq * (Az_0 * Bz_0)
-                var sum_prod_inf = F.zero(); // Σ eq * (slope_Az * slope_Bz)
+                    var sum_prod_0 = F.zero();
+                    var sum_prod_inf = F.zero();
 
-                var x_out_idx: usize = 0;
-                while (x_out_idx < E_out.len) : (x_out_idx += 1) {
-                    const e_out_val = E_out[x_out_idx];
+                    var x_out_idx: usize = 0;
+                    while (x_out_idx < E_out.len) : (x_out_idx += 1) {
+                        const e_out_val = E_out[x_out_idx];
 
-                    var x_in_idx: usize = 0;
-                    while (x_in_idx < E_in.len) : (x_in_idx += 1) {
-                        const e_in_val = E_in[x_in_idx];
-                        const eq_base = e_out_val.mul(e_in_val);
+                        var x_in_idx: usize = 0;
+                        while (x_in_idx < E_in.len) : (x_in_idx += 1) {
+                            const e_in_val = E_in[x_in_idx];
+                            const eq_base = e_out_val.mul(e_in_val);
 
-                        const base_idx: usize = (x_out_idx << @intCast(head_in_bits + window_bits + num_r_bits)) |
-                            (x_in_idx << @intCast(window_bits + num_r_bits));
+                            // Build grids from bound polynomials
+                            var grid_az = [2]F{ F.zero(), F.zero() };
+                            var grid_bz = [2]F{ F.zero(), F.zero() };
 
-                        // Build grids for this (out, in) pair
-                        var grid_az = [2]F{ F.zero(), F.zero() };
-                        var grid_bz = [2]F{ F.zero(), F.zero() };
+                            // For x_val = 0 and 1, read from bound polynomial
+                            // The index into the bound polynomial depends on (x_out, x_in, x_val)
+                            for (0..2) |x_val| {
+                                // Compute index into bound polynomial
+                                // The structure is: (x_out, x_in) identifies the "outer" variables
+                                // x_val is the current variable being bound
+                                const base_idx = (x_out_idx * E_in.len + x_in_idx) * 2 + x_val;
 
-                        var x_val: usize = 0;
-                        while (x_val < 2) : (x_val += 1) {
-                            const x_val_shifted = x_val << num_r_bits;
-
-                            var r_idx: usize = 0;
-                            while (r_idx < r_grid_len) : (r_idx += 1) {
-                                const r_weight = r_grid.get(r_idx);
-
-                                const full_idx = base_idx | x_val_shifted | r_idx;
-                                const step_idx = full_idx >> 1;
-                                const selector: usize = full_idx & 1;
-
-                                if (step_idx < self.cycle_witnesses.len) {
-                                    const result = self.computeCycleAzBzForGroup(&self.cycle_witnesses[step_idx], selector);
-                                    // Accumulate into this pair's grid (weighted by r_grid)
-                                    grid_az[x_val] = grid_az[x_val].add(r_weight.mul(result.az));
-                                    grid_bz[x_val] = grid_bz[x_val].add(r_weight.mul(result.bz));
+                                if (base_idx < poly_len) {
+                                    grid_az[x_val] = az_poly.evaluations[base_idx];
+                                    grid_bz[x_val] = bz_poly.evaluations[base_idx];
                                 }
                             }
+
+                            // Expand to multiquadratic
+                            const buff_a_0 = grid_az[0];
+                            const buff_a_inf = grid_az[1].sub(grid_az[0]);
+                            const buff_b_0 = grid_bz[0];
+                            const buff_b_inf = grid_bz[1].sub(grid_bz[0]);
+
+                            // Multiply pointwise
+                            const prod_0 = buff_a_0.mul(buff_b_0);
+                            const prod_inf = buff_a_inf.mul(buff_b_inf);
+
+                            // Accumulate
+                            sum_prod_0 = sum_prod_0.add(eq_base.mul(prod_0));
+                            sum_prod_inf = sum_prod_inf.add(eq_base.mul(prod_inf));
                         }
-
-                        // Expand to multiquadratic (0, 1, ∞)
-                        const buff_a_0 = grid_az[0];
-                        const buff_a_inf = grid_az[1].sub(grid_az[0]); // slope
-                        const buff_b_0 = grid_bz[0];
-                        const buff_b_inf = grid_bz[1].sub(grid_bz[0]); // slope
-
-                        // Multiply pointwise
-                        const prod_0 = buff_a_0.mul(buff_b_0);
-                        const prod_inf = buff_a_inf.mul(buff_b_inf);
-
-                        // Accumulate weighted by eq
-                        sum_prod_0 = sum_prod_0.add(eq_base.mul(prod_0));
-                        sum_prod_inf = sum_prod_inf.add(eq_base.mul(prod_inf));
                     }
-                }
 
-                t_zero = sum_prod_0;
-                t_infinity = sum_prod_inf;
+                    t_zero = sum_prod_0;
+                    t_infinity = sum_prod_inf;
+                } else {
+                    // STREAMING PHASE (cycle rounds before switchover):
+                    // Use r_grid to weight contributions from trace
+                    const r_grid = &self.r_grid;
+                    const r_grid_len = r_grid.length();
+                    const num_r_bits: u6 = if (r_grid_len > 1) @intCast(std.math.log2_int(usize, r_grid_len)) else 0;
+                    const window_bits: u6 = 1;
+
+                    // Accumulate sum of products
+                    var sum_prod_0 = F.zero(); // Σ eq * (Az_0 * Bz_0)
+                    var sum_prod_inf = F.zero(); // Σ eq * (slope_Az * slope_Bz)
+
+                    var x_out_idx: usize = 0;
+                    while (x_out_idx < E_out.len) : (x_out_idx += 1) {
+                        const e_out_val = E_out[x_out_idx];
+
+                        var x_in_idx: usize = 0;
+                        while (x_in_idx < E_in.len) : (x_in_idx += 1) {
+                            const e_in_val = E_in[x_in_idx];
+                            const eq_base = e_out_val.mul(e_in_val);
+
+                            const base_idx: usize = (x_out_idx << @intCast(head_in_bits + window_bits + num_r_bits)) |
+                                (x_in_idx << @intCast(window_bits + num_r_bits));
+
+                            // Build grids for this (out, in) pair
+                            var grid_az = [2]F{ F.zero(), F.zero() };
+                            var grid_bz = [2]F{ F.zero(), F.zero() };
+
+                            var x_val: usize = 0;
+                            while (x_val < 2) : (x_val += 1) {
+                                const x_val_shifted = x_val << num_r_bits;
+
+                                var r_idx: usize = 0;
+                                while (r_idx < r_grid_len) : (r_idx += 1) {
+                                    const r_weight = r_grid.get(r_idx);
+
+                                    const full_idx = base_idx | x_val_shifted | r_idx;
+                                    const step_idx = full_idx >> 1;
+                                    const selector: usize = full_idx & 1;
+
+                                    if (step_idx < self.cycle_witnesses.len) {
+                                        const result = self.computeCycleAzBzForGroup(&self.cycle_witnesses[step_idx], selector);
+                                        // Accumulate into this pair's grid (weighted by r_grid)
+                                        grid_az[x_val] = grid_az[x_val].add(r_weight.mul(result.az));
+                                        grid_bz[x_val] = grid_bz[x_val].add(r_weight.mul(result.bz));
+                                    }
+                                }
+                            }
+
+                            // Expand to multiquadratic (0, 1, ∞)
+                            const buff_a_0 = grid_az[0];
+                            const buff_a_inf = grid_az[1].sub(grid_az[0]); // slope
+                            const buff_b_0 = grid_bz[0];
+                            const buff_b_inf = grid_bz[1].sub(grid_bz[0]); // slope
+
+                            // Multiply pointwise
+                            const prod_0 = buff_a_0.mul(buff_b_0);
+                            const prod_inf = buff_a_inf.mul(buff_b_inf);
+
+                            // Accumulate weighted by eq
+                            sum_prod_0 = sum_prod_0.add(eq_base.mul(prod_0));
+                            sum_prod_inf = sum_prod_inf.add(eq_base.mul(prod_inf));
+                        }
+                    }
+
+                    t_zero = sum_prod_0;
+                    t_infinity = sum_prod_inf;
+                }
             }
 
             // Use Gruen's method to compute the cubic round polynomial
@@ -1151,12 +1304,25 @@ pub fn StreamingOuterProver(comptime F: type) type {
             const switch_over = num_remaining / 2;
 
             // Streaming phase: rounds 1 to switch_over (inclusive) - update r_grid
-            // Linear phase: rounds > switch_over - don't update r_grid
+            // Linear phase: rounds > switch_over - bind Az/Bz polynomials
             if (self.current_round <= switch_over) {
                 // Streaming window phase: update r_grid
                 self.r_grid.update(r);
+
+                // At the end of streaming phase (entering linear phase),
+                // materialize the Az/Bz polynomials
+                if (self.current_round == switch_over) {
+                    try self.materializeLinearPhasePolynomials();
+                }
+            } else {
+                // Linear phase: bind Az/Bz polynomials with bindLow
+                if (self.az_poly) |*az| {
+                    az.bindLow(r);
+                }
+                if (self.bz_poly) |*bz| {
+                    bz.bindLow(r);
+                }
             }
-            // Linear phase: don't update r_grid
 
             try self.challenges.append(self.allocator, r);
             self.split_eq.bind(r);

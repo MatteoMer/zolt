@@ -232,16 +232,20 @@ pub fn Blake2bTranscript(comptime F: type) type {
                 reversed[i] = buf[15 - i];
             }
 
-            // Interpret as BIG-ENDIAN u128 (this is what Jolt does!)
-            // u128::from_be_bytes in Rust
-            const val: u128 = mem.readInt(u128, &reversed, .big);
+            // Jolt's from_le_bytes_mod_order interprets reversed bytes as little-endian
+            // Since we reversed the bytes, interpreting as LE is equivalent to
+            // the original bytes being interpreted as big-endian.
+            //
+            // For a 128-bit value that fits in the field (since BN254 p > 2^128),
+            // the result is just the 128-bit value directly.
+            //
+            // NOTE: No masking is done in Jolt's challenge_scalar_128_bits!
+            // The MontU128Challenge masking (125 bits) is only for the optimized
+            // version (challenge_scalar_optimized), not the regular version.
 
-            // Mask to 125 bits (matching MontU128Challenge::new)
-            const val_masked = val & ((std.math.maxInt(u128)) >> 3);
-
-            // Extract low and high parts
-            const low: u64 = @truncate(val_masked);
-            const high: u64 = @truncate(val_masked >> 64);
+            // Read as little-endian from reversed bytes (matching Jolt's from_le_bytes_mod_order)
+            const low: u64 = mem.readInt(u64, reversed[0..8], .little);
+            const high: u64 = mem.readInt(u64, reversed[8..16], .little);
 
             // Convert the 128-bit challenge to Montgomery form.
             //

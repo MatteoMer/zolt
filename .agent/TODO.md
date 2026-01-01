@@ -4,72 +4,50 @@
 
 **All 702 tests pass**
 
-### ROOT CAUSE IDENTIFIED
+### Issue: Stage 1 sumcheck output_claim ≠ expected_output_claim
 
-**Issue:** Stage 1 sumcheck output_claim ≠ expected_output_claim
+The infrastructure for the linear phase is now in place, but the indexing needs work.
 
-The core problem is that Zolt's linear phase implementation doesn't match Jolt's architecture.
+### Completed Work (This Session)
 
-**Jolt's Approach:**
-1. Streaming phase: Uses r_grid to weight trace contributions
-2. Linear phase: Materializes Az/Bz polynomials, then BINDS them each round with `bound_poly_var_bot()`
+1. [x] **DensePolynomial.bindLow()** - Matches Jolt's bound_poly_var_bot()
+2. [x] **Az/Bz polynomial storage** - Added to StreamingOuterProver
+3. [x] **Materialization at switchover** - Creates polynomials with correct size (2^linear_rounds)
+4. [x] **Binding infrastructure** - Calls bindLow() each linear round
+5. [x] **Linear phase code path** - Separate from streaming phase
 
-**Zolt's Approach (Incorrect):**
-1. All rounds: Tries to use r_grid, recomputes from trace each round
-2. Never binds Az/Bz polynomials
+### Remaining Issue
 
-### Active Work
+The linear phase computation still produces wrong values. The indexing into the bound polynomials doesn't match Jolt's approach.
 
-**Fix Required:** Implement Jolt-style linear phase
+**Current behavior:**
+- Materialization creates polynomial of size 2^6 = 64 for 6 linear rounds
+- Each linear round binds one variable
+- But the VALUES being read from the polynomial don't match what the verifier expects
 
-1. [x] **Add DensePolynomial.bindLow()** - Polynomial binding for linear sumcheck ✅ DONE
-2. [ ] **Add Az/Bz storage to StreamingOuterProver** - Store bound polynomials
-3. [ ] **Materialize polynomials at linear phase start** - Compute Az/Bz for all cycles at switchover
-4. [ ] **Modify linear round computation** - Use bound polynomials instead of trace
-5. [ ] **Bind Az/Bz each linear round** - Call bindLow() on each challenge
-6. [ ] **Test with Jolt verifier**
-
-### Implementation Notes
-
-**Linear Phase Flow (from Jolt):**
+**Jolt's approach (from compute_evaluation_grid_from_polynomials_parallel):**
 ```rust
-// At linear phase start (switchover):
-let (az, bz) = fused_materialise_polynomials_general_with_multiquadratic(shared, window_size);
-
-// Each linear round:
-fn ingest_challenge(&mut self, shared: &mut Self::Shared, r_j: F::Challenge, _round: usize) {
-    shared.split_eq_poly.bind(r_j);
-    // CRITICAL: Bind Az and Bz polynomials
-    self.az.bind_parallel(r_j, BindingOrder::LowToHigh);
-    self.bz.bind_parallel(r_j, BindingOrder::LowToHigh);
+// Jolt uses pre-bound Az/Bz directly indexed by position
+for j in 0..grid_size {
+    let full_idx = grid_size * i + j;
+    local_ans[idx] += az.Z[full_idx] * bz.Z[full_idx] * E_out[i];
 }
-
-// For computing round poly, use bound az/bz values, NOT trace:
-let az_value = self.az.Z[idx];  // Use bound polynomial
-let bz_value = self.bz.Z[idx];  // Not trace lookup!
 ```
+
+**What needs fixing:**
+1. The materialization should create Az/Bz with the same structure as Jolt
+2. The linear phase indexing should directly read from az_poly[idx], bz_poly[idx]
+3. The E_out/E_in multiplication should happen during computation, not materialization
 
 ### Debug Values (Latest Run)
 ```
 output_claim:          18149181199645709635565994144274301613989920934825717026812937381996718340431
 expected_output_claim: 9784440804643023978376654613918487285551699375196948804144755605390806131527
-
-Implicit prover inner_sum = output / eq_factor = 4998170542285690794587036959401462214732012225407648253956536381087950469724
-Expected inner_sum_prod = 18008138052294660670516952860372938358542359888052020571951954839855384564920
-Ratio = ~3.6x (not a simple factor - confirms structural mismatch)
+(Still unchanged after linear phase changes - indexing issue)
 ```
 
-### Verified Components
-- ✅ DensePolynomial.bindLow() matches Jolt's bound_poly_var_bot()
-- ✅ eq factor: `prover_eq_factor == verifier_eq_factor`
-- ✅ Individual sumcheck rounds pass (p(0) + p(1) = claim)
-- ✅ R1CS constraint and input ordering matches Jolt
-- ✅ Az and Bz MLE computations match
-- ✅ Streaming round logic is correct
-- ✅ r_grid ExpandingTable matches Jolt
-
 ## Pending Tasks
-- [ ] Implement linear phase with bound polynomials (BLOCKING)
+- [ ] Fix linear phase indexing to match Jolt's compute_evaluation_grid_from_polynomials_parallel
 - [ ] Complete remaining stages (2-7) proof generation
 - [ ] Create end-to-end verification test with Jolt verifier
 
@@ -88,6 +66,7 @@ Ratio = ~3.6x (not a simple factor - confirms structural mismatch)
 - [x] Transcript flow matching Jolt
 - [x] ExpandingTable (r_grid) matches Jolt
 - [x] DensePolynomial.bindLow() implementation
+- [x] Linear phase infrastructure (az_poly, bz_poly, binding)
 - [x] All 702 Zolt tests pass
 
 ## Test Commands

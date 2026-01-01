@@ -202,65 +202,120 @@ pub fn StreamingOuterProver(comptime F: type) type {
         /// This matches Jolt's fused_materialise_polynomials_general_with_multiquadratic.
         /// Called at the switchover point (start of linear phase).
         ///
-        /// Creates dense polynomials Az(cycle) and Bz(cycle) that incorporate:
-        /// - The r_stream blending: Az = (1-r_stream)*Az_g0 + r_stream*Az_g1
+        /// Creates dense polynomials of size E_out.len * E_in.len * grid_size that incorporate:
         /// - The Lagrange weights from r0
-        /// - The r_grid weights from already-bound cycle variables
+        /// - The r_grid weights from already-bound streaming variables
+        ///
+        /// The index structure is:
+        ///   full_idx = base_idx | x_val_shifted | r_idx
+        ///   where base_idx = (x_out << (x_in_bits + window + r_bits)) | (x_in << (window + r_bits))
+        ///   step_idx = full_idx >> 1 (cycle index)
+        ///   selector = full_idx & 1 (constraint group)
         ///
         /// After materialization, each linear round:
-        /// 1. Uses the bound polynomial values for round computation
-        /// 2. Binds with bindLow() to prepare for the next round
+        /// 1. Reads from az[grid_size * i + j] and bz[grid_size * i + j]
+        /// 2. Binds with bindLow() to halve the polynomial size
         pub fn materializeLinearPhasePolynomials(self: *Self) !void {
             // r_stream must be bound before materializing linear phase polynomials
             if (self.r_stream == null) return error.RStreamNotBound;
 
-            // The polynomial needs to have enough variables for all LINEAR phase rounds.
-            // At switchover, we've completed switch_over streaming rounds.
-            // Remaining linear rounds = numRounds() - switch_over.
-            //
-            // The polynomial size is 2^linear_rounds to allow binding each round.
-            const num_remaining = self.numRounds();
-            const switch_over = num_remaining / 2;
-            const linear_rounds = num_remaining - switch_over;
-            const poly_size: usize = @as(usize, 1) << @intCast(linear_rounds);
+            // Get E_out and E_in tables for the current state
+            // window_size = 1 for linear phase
+            const window_size: usize = 1;
+            const eq_tables = self.split_eq.getWindowEqTables(0, window_size);
+            const E_out = eq_tables.E_out;
+            const E_in = eq_tables.E_in;
+            const head_in_bits: u6 = @intCast(eq_tables.head_in_bits);
+
+            const num_x_out_vals = E_out.len;
+            const num_x_in_vals = E_in.len;
+
+            // r_grid parameters
+            const r_grid = &self.r_grid;
+            const num_r_vals = r_grid.length();
+            const num_r_bits: u6 = if (num_r_vals > 1) @intCast(std.math.log2_int(usize, num_r_vals)) else 0;
+
+            // Grid size for linear phase is 2^window_size = 2
+            const grid_size: usize = @as(usize, 1) << @intCast(window_size);
+
+            // Polynomial size = E_out.len * E_in.len * grid_size
+            const poly_size = num_x_out_vals * num_x_in_vals * grid_size;
 
             var az_evals = try self.allocator.alloc(F, poly_size);
             errdefer self.allocator.free(az_evals);
             var bz_evals = try self.allocator.alloc(F, poly_size);
             errdefer self.allocator.free(bz_evals);
 
-            // The r_grid weights encode the streaming phase bound challenges.
-            // For each position in the new polynomial, we need to compute the
-            // weighted sum over r_grid entries.
-            const r_grid = &self.r_grid;
-            const r_grid_len = r_grid.length();
+            // Initialize to zero
+            @memset(az_evals, F.zero());
+            @memset(bz_evals, F.zero());
 
-            for (0..poly_size) |out_idx| {
-                // For each position in the output polynomial, sum over r_grid
-                var az_sum = F.zero();
-                var bz_sum = F.zero();
+            // Precompute scaled weights: scaled_w[r_idx][i] = lagrange_evals_r0[i] * r_grid[r_idx]
+            // This matches Jolt's scaled_w computation
+            var scaled_w = try self.allocator.alloc([FIRST_GROUP_SIZE]F, num_r_vals);
+            defer self.allocator.free(scaled_w);
 
-                for (0..r_grid_len) |r_idx| {
-                    const r_weight = r_grid.get(r_idx);
-
-                    // The combined index encodes both r_grid position and output position
-                    // full_idx = (out_idx << num_streaming_bound_bits) | r_idx
-                    const full_idx = (out_idx << @intCast(std.math.log2_int(usize, r_grid_len))) | r_idx;
-                    const step_idx = full_idx >> 1;
-                    const selector: usize = full_idx & 1;
-
-                    if (step_idx < self.cycle_witnesses.len) {
-                        const result = self.computeCycleAzBzForGroup(&self.cycle_witnesses[step_idx], selector);
-                        az_sum = az_sum.add(r_weight.mul(result.az));
-                        bz_sum = bz_sum.add(r_weight.mul(result.bz));
-                    }
+            for (0..num_r_vals) |r_idx| {
+                const r_weight = r_grid.get(r_idx);
+                for (0..FIRST_GROUP_SIZE) |t| {
+                    scaled_w[r_idx][t] = self.lagrange_evals_r0[t].mul(r_weight);
                 }
-
-                az_evals[out_idx] = az_sum;
-                bz_evals[out_idx] = bz_sum;
             }
 
-            // Create DensePolynomials with linear_rounds variables
+            // Iterate over (x_out, x_in) pairs
+            for (0..num_x_out_vals) |x_out_val| {
+                for (0..num_x_in_vals) |x_in_val| {
+                    const pair_idx = x_out_val * num_x_in_vals + x_in_val;
+
+                    // Compute base_idx for this (x_out, x_in) pair
+                    // base_idx = (x_out << (x_in_bits + window + r_bits)) | (x_in << (window + r_bits))
+                    const base_idx: usize = (x_out_val << @intCast(head_in_bits + window_size + num_r_bits)) |
+                        (x_in_val << @intCast(window_size + num_r_bits));
+
+                    // Accumulate for each x_val (window position) in 0..grid_size
+                    for (0..grid_size) |x_val| {
+                        var acc_az = F.zero();
+                        var acc_bz = F.zero();
+
+                        const x_val_shifted = x_val << num_r_bits;
+
+                        // Sum over r_grid
+                        for (0..num_r_vals) |r_idx| {
+                            const full_idx = base_idx | x_val_shifted | r_idx;
+                            const step_idx = full_idx >> 1;
+                            const selector: usize = full_idx & 1;
+
+                            if (step_idx < self.cycle_witnesses.len) {
+                                // Compute Az and Bz for this cycle/group using scaled weights
+                                const witness = &self.cycle_witnesses[step_idx];
+                                const group_indices = if (selector == 0) &constraints.FIRST_GROUP_INDICES else &constraints.SECOND_GROUP_INDICES;
+                                const group_size = if (selector == 0) FIRST_GROUP_SIZE else @min(SECOND_GROUP_SIZE, FIRST_GROUP_SIZE);
+
+                                for (0..group_size) |i| {
+                                    const constraint_idx = group_indices[i];
+                                    const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
+                                    const condition = constraint.condition.evaluate(F, witness.asSlice());
+                                    const left = constraint.left.evaluate(F, witness.asSlice());
+                                    const right = constraint.right.evaluate(F, witness.asSlice());
+                                    const magnitude = left.sub(right);
+
+                                    // Use scaled weight (lagrange * r_grid)
+                                    const w = scaled_w[r_idx][i];
+                                    acc_az = acc_az.add(w.mul(condition));
+                                    acc_bz = acc_bz.add(w.mul(magnitude));
+                                }
+                            }
+                        }
+
+                        // Store in polynomial array using Jolt's indexing: az[grid_size * pair_idx + x_val]
+                        const array_idx = grid_size * pair_idx + x_val;
+                        az_evals[array_idx] = acc_az;
+                        bz_evals[array_idx] = acc_bz;
+                    }
+                }
+            }
+
+            // Create DensePolynomials
             self.az_poly = try poly_mod.DensePolynomial(F).init(self.allocator, az_evals);
             self.bz_poly = try poly_mod.DensePolynomial(F).init(self.allocator, bz_evals);
 
@@ -756,13 +811,22 @@ pub fn StreamingOuterProver(comptime F: type) type {
                     // LINEAR PHASE: Use bound Az/Bz polynomials
                     //
                     // The bound polynomials have already been materialized and bound
-                    // up to this point. Each entry az_poly[i] is the value at position i.
+                    // up to this point. We read using Jolt's indexing:
+                    //   az[grid_size * i + j] where i = (x_out << num_xin_bits) | x_in
                     //
-                    // For each (out, in) pair, we read from the bound polynomials
-                    // instead of recomputing from trace.
+                    // grid_size = 2 for window_size = 1
                     const az_poly = &self.az_poly.?;
                     const bz_poly = &self.bz_poly.?;
                     const poly_len = az_poly.boundLen();
+
+                    // Debug: verify we're in linear phase
+                    std.debug.print("LINEAR PHASE: round={}, poly_len={}, E_out={}, E_in={}\n", .{
+                        self.current_round, poly_len, E_out.len, E_in.len,
+                    });
+
+                    // grid_size for window_size = 1 is 2
+                    const grid_size: usize = 2;
+                    const num_xin_bits: u6 = if (E_in.len > 1) @intCast(std.math.log2_int(usize, E_in.len)) else 0;
 
                     var sum_prod_0 = F.zero();
                     var sum_prod_inf = F.zero();
@@ -776,25 +840,24 @@ pub fn StreamingOuterProver(comptime F: type) type {
                             const e_in_val = E_in[x_in_idx];
                             const eq_base = e_out_val.mul(e_in_val);
 
+                            // Compute combined index: i = (x_out << num_xin_bits) | x_in
+                            const i = (x_out_idx << num_xin_bits) | x_in_idx;
+
                             // Build grids from bound polynomials
                             var grid_az = [2]F{ F.zero(), F.zero() };
                             var grid_bz = [2]F{ F.zero(), F.zero() };
 
-                            // For x_val = 0 and 1, read from bound polynomial
-                            // The index into the bound polynomial depends on (x_out, x_in, x_val)
-                            for (0..2) |x_val| {
-                                // Compute index into bound polynomial
-                                // The structure is: (x_out, x_in) identifies the "outer" variables
-                                // x_val is the current variable being bound
-                                const base_idx = (x_out_idx * E_in.len + x_in_idx) * 2 + x_val;
-
-                                if (base_idx < poly_len) {
-                                    grid_az[x_val] = az_poly.evaluations[base_idx];
-                                    grid_bz[x_val] = bz_poly.evaluations[base_idx];
+                            // For j = 0 and 1, read from bound polynomial at index grid_size * i + j
+                            for (0..grid_size) |j| {
+                                const index = grid_size * i + j;
+                                if (index < poly_len) {
+                                    grid_az[j] = az_poly.evaluations[index];
+                                    grid_bz[j] = bz_poly.evaluations[index];
                                 }
                             }
 
-                            // Expand to multiquadratic
+                            // Expand to multiquadratic (for window_size = 1)
+                            // buff_a[0] = grid_az[0], buff_a[∞] = grid_az[1] - grid_az[0]
                             const buff_a_0 = grid_az[0];
                             const buff_a_inf = grid_az[1].sub(grid_az[0]);
                             const buff_b_0 = grid_bz[0];

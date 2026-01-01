@@ -2362,3 +2362,10 @@ Cost: $0.0000
 Error: Command failed with exit code 1 (exit code: 1)
 Error output: Check stderr output for details
 
+
+--- Iteration 1 ---
+Started: 2026-01-01T15:29:29.720494
+Ended: 2026-01-01T16:21:19.323747
+Turns: 155
+Cost: $17.5525
+

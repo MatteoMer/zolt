@@ -4,49 +4,39 @@
 
 **All 702 tests pass**
 
-### Issue: Transcript still diverges - r0 challenge is WRONG
+### Issue: Commitment/Preprocessing Mismatch
 
-Despite fixing memory layout constants, the r0 challenge from the transcript is different:
-- Zolt r0: `7193532858613009548167626689752378790` (very small, ~128 bits)
-- Jolt r0: `6919882260122427158724897727024710502508333642996197054262116261168391078818` (full 254 bits)
+The r0 challenge differs between Zolt and Jolt because:
+1. Zolt generates its own Dory commitments for the polynomials
+2. Jolt's verifier preprocessing contains Jolt's expected commitments
+3. The transcript includes these commitments
+4. Different commitments → different transcript state → different challenges
 
-This means something appended to the transcript BEFORE the r0 challenge differs:
-1. Fiat-Shamir preamble (memory layout, inputs, outputs, panic, ram_K, trace_length)
-2. Polynomial commitments (Dory GT elements)
-3. UniSkip polynomial coefficients
+**Solution Options:**
+1. **Zolt generates both proof AND preprocessing** - The preprocessing contains the commitments that were appended to transcript. If Zolt exports both, they'll match.
+2. **Use Jolt's SRS and matching commitment algorithm** - Ensure byte-for-byte identical commitments
 
-### Root Cause Analysis
+### Progress This Session
 
-The transcript divergence causes:
-1. Wrong r0 challenge
-2. Wrong uni_skip_claim = UniSkip(r0)
-3. Wrong current_claim for remaining sumcheck
-4. Wrong polynomial evaluations in all subsequent rounds
-5. Verification failure
+1. [x] Fixed 125-bit mask in challenge scalar (was incorrect)
+2. [x] Fixed memory layout constants (128MB memory, 4KB stack)
+3. [x] Identified that Dory commitments differ between Zolt and Jolt
+4. [x] Understood that proof+preprocessing must come from same source
+5. [x] All polynomial evaluation formulas verified correct
 
-### Items to Investigate
+### Key Finding
 
-1. **Dory commitment serialization** - GT element toBytes() might differ from arkworks
-2. **Commitment order** - Different order of commitments appended to transcript
-3. **Missing data** - Jolt might append additional data before stage 1
-4. **Coefficient format** - UniSkip polynomial coefficients might be serialized differently
-
-### Completed Work (This Session)
-
-1. [x] Fixed memory layout constants (128MB memory, 4KB stack)
-2. [x] Added debug tracing for round polynomial computation
-3. [x] Identified that r0 challenge differs (transcript divergence)
-4. [x] Confirmed uni_skip_claim is wrong because r0 is wrong
-5. [x] Verified Gruen's cubic polynomial formula is correct
-6. [x] Verified bind() operation is correct
-7. [x] Verified interpolation and evaluation formulas are correct
+The transcript divergence is NOT a bug in Zolt's transcript implementation. It's because:
+- Jolt preprocessing was generated with Jolt's Dory commitments
+- Zolt proof was generated with Zolt's Dory commitments
+- These commitments are appended to transcript before challenges
+- Different commitments → different challenges
 
 ### Next Steps
 
-1. [ ] Add transcript state debugging to compare bytes appended
-2. [ ] Verify GT element serialization (384 bytes, reversed)
-3. [ ] Compare UniSkip polynomial coefficients with Jolt
-4. [ ] Check if any preprocessing data is missing from transcript
+1. [ ] Test with Zolt-generated preprocessing AND proof together
+2. [ ] Ensure Zolt's Dory commitment output matches arkworks format exactly
+3. [ ] Verify GT element serialization byte-by-byte with Jolt
 
 ### Blocking Issues
 
@@ -58,6 +48,7 @@ The transcript divergence causes:
 - [x] Blake2b transcript implementation format
 - [x] Field serialization (Arkworks format)
 - [x] Memory layout constants match Jolt
+- [x] Challenge scalar computation (no 125-bit mask)
 - [x] UniSkip polynomial generation logic
 - [x] R1CS constraint definitions (19 constraints, 2 groups)
 - [x] Split eq polynomial factorization (E_out/E_in tables)
@@ -75,10 +66,13 @@ The transcript divergence causes:
 # Zolt tests
 zig build test --summary all
 
-# Generate proof with debug output
-zig build -Doptimize=Debug && ./zig-out/bin/zolt prove path/to/elf --jolt-format -o /tmp/proof.bin
+# Generate proof AND preprocessing from Zolt
+zig build -Doptimize=Debug && ./zig-out/bin/zolt prove path/to/elf \
+  --jolt-format \
+  --export-preprocessing /tmp/zolt_preprocessing.bin \
+  -o /tmp/zolt_proof_dory.bin
 
-# Jolt verification test
+# Jolt verification with Zolt preprocessing
 cd /Users/matteo/projects/jolt
-cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture
+cargo test --package jolt-core test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```

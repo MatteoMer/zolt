@@ -2,11 +2,57 @@
 
 ## Current Status (Session 30 - January 1, 2026)
 
-### ROOT CAUSE IDENTIFIED: Linear Phase Architecture Mismatch
+### Progress Made
+1. Added DensePolynomial.bindLow() matching Jolt's bound_poly_var_bot()
+2. Added az_poly/bz_poly storage to StreamingOuterProver
+3. Added materializeLinearPhasePolynomials() function
+4. Modified bindRemainingRoundChallenge() to:
+   - Materialize at switchover
+   - Bind polynomials in linear phase
+5. Modified computeRemainingRoundPoly() with separate linear phase path
+
+### Remaining Issue: Linear Phase Materialization Structure
 
 **Current Issue:**
 - `output_claim: 18149181199645709635565994144274301613989920934825717026812937381996718340431`
 - `expected_output_claim: 9784440804643023978376654613918487285551699375196948804144755605390806131527`
+- The values are unchanged from before - the linear phase isn't producing correct values
+
+### Root Cause Analysis
+
+The materialization structure doesn't match Jolt's `fused_materialise_polynomials_general_with_multiquadratic`.
+
+**Jolt's Materialization Structure:**
+```rust
+// Az/Bz arrays have size: E_out.len * E_in.len * grid_size
+for pair_idx in 0..E_out.len * E_in.len {
+    for x_val in 0..grid_size {
+        // Accumulate over r_grid (bound streaming variables)
+        for r_idx in 0..num_r_vals {
+            let full_idx = base | x_val_shifted | r_idx;
+            let step_idx = full_idx >> 1;
+            let selector = full_idx & 1;
+            // weight = scaled_w[r_idx] (Lagrange weights * r_grid weights)
+            acc_az[x_val] += weight * Az_group(step_idx, selector);
+            acc_bz[x_val] += weight * Bz_group(step_idx, selector);
+        }
+        // Store in polynomial array
+        az_chunk[grid_size * pair_idx + x_val] = acc_az[x_val];
+        bz_chunk[grid_size * pair_idx + x_val] = acc_bz[x_val];
+    }
+}
+```
+
+**Key Insight:**
+- The az/bz arrays are indexed by `(pair_idx, x_val)` pairs
+- After binding, the array halves in size but maintains this structure
+- `compute_evaluation_grid_from_polynomials_parallel` just reads `az[grid_size * i + j]`
+
+**What Zolt's Materialization Should Do:**
+1. Use the same indexing: `az[grid_size * pair_idx + x_val]`
+2. For each position, accumulate over r_grid with proper weights
+3. The polynomial size = `E_out.len * E_in.len * grid_size` (at materialization)
+4. After each linear round binding, size halves
 
 ### The Problem
 

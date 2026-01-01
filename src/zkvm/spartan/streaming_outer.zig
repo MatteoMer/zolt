@@ -945,6 +945,18 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 }
             }
 
+            // Debug: print t_prime values before computing round polynomial
+            std.debug.print("Round {}: t_zero={x}, t_infinity={x}, prev_claim={x}\n", .{
+                self.current_round,
+                t_zero.toBytes(),
+                t_infinity.toBytes(),
+                self.current_claim.toBytes(),
+            });
+            std.debug.print("  current_scalar={x}, current_index={}\n", .{
+                self.split_eq.current_scalar.toBytes(),
+                self.split_eq.current_index,
+            });
+
             // Use Gruen's method to compute the cubic round polynomial
             const previous_claim = self.current_claim;
             const round_poly = self.split_eq.computeCubicRoundPoly(
@@ -952,6 +964,13 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 t_infinity,
                 previous_claim,
             );
+
+            std.debug.print("  s(0)={x}, s(1)={x}, s(2)={x}, s(3)={x}\n", .{
+                round_poly[0].toBytes(),
+                round_poly[1].toBytes(),
+                round_poly[2].toBytes(),
+                round_poly[3].toBytes(),
+            });
 
             return round_poly;
         }
@@ -1333,6 +1352,18 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 }
             }
 
+            // Debug: print t_prime values
+            std.debug.print("MQ Round {}: t_00={x}, t_inf={x}, prev_claim={x}\n", .{
+                self.current_round,
+                t_00.toBytes(),
+                t_inf.toBytes(),
+                self.current_claim.toBytes(),
+            });
+            std.debug.print("  current_scalar={x}, current_index={}\n", .{
+                self.split_eq.current_scalar.toBytes(),
+                self.split_eq.current_index,
+            });
+
             // Use Gruen's method
             const previous_claim = self.current_claim;
             const round_poly = self.split_eq.computeCubicRoundPoly(
@@ -1340,6 +1371,13 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 t_inf,
                 previous_claim,
             );
+
+            std.debug.print("  s(0)={x}, s(1)={x}, s(2)={x}, s(3)={x}\n", .{
+                round_poly[0].toBytes(),
+                round_poly[1].toBytes(),
+                round_poly[2].toBytes(),
+                round_poly[3].toBytes(),
+            });
 
             return round_poly;
         }

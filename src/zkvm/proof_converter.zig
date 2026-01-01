@@ -409,6 +409,11 @@ pub fn ProofConverter(comptime F: type) type {
             // Use evaluatePolyAtChallenge which handles the Jolt-format challenge [0, 0, low, high]
             const uni_skip_claim = evaluatePolyAtChallenge(uniskip_proof.uni_poly, r0);
 
+            std.debug.print("\n=== Stage 1 Sumcheck Initialization ===\n", .{});
+            std.debug.print("r0 = {x}\n", .{r0.toBytes()});
+            std.debug.print("uni_skip_claim = {x}\n", .{uni_skip_claim.toBytes()});
+            std.debug.print("Expected (Jolt's input_claim): 585574110173656593356271532076098832321367018369719528264685444251591489519\n", .{});
+
             // Bind the first-round challenge from transcript with the uni_skip_claim
             outer_prover.bindFirstRoundChallenge(r0, uni_skip_claim) catch {};
 

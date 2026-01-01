@@ -4,36 +4,48 @@
 
 **All 702 tests pass**
 
-### Issue: Sumcheck round polynomial values don't match verifier expectations
+### Issue: Sumcheck round polynomial VALUES are incorrect
 
-**Root cause identified**: The round polynomial evaluation at each challenge doesn't match what the verifier computes as `expected_output_claim`.
+**Root cause confirmed**: Zolt's `computeRemainingRoundPoly()` computes polynomial evaluations s(0), s(1), s(2), s(3) that:
+1. ✅ Satisfy the sumcheck constraint s(0)+s(1) = previous_claim
+2. ❌ Produce wrong values when evaluated at the challenge
 
-After fixing memory layout constants, the transcript now matches between Zolt and Jolt (same challenges). However, the sumcheck verification fails because:
-- Prover output_claim: `18149181199645709635565994144274301613989920934825717026812937381996718340431`
-- Expected output_claim: `9784440804643023978376654613918487285551699375196948804144755605390806131527`
+This means the underlying computation of t_prime_0 and t_prime_inf (from Az/Bz products with eq factors) is incorrect.
 
-### Analysis
+### Specific Failure Point
 
-The verification shows:
-1. ✅ Round 0 polynomial s(0)+s(1) = hint (constraint satisfied)
-2. ❌ Round 1 evaluation at r_1: computed `7662922...` vs expected `8918774...`
-3. This indicates the polynomial coefficients being generated are incorrect
+Round 1 verification:
+- Polynomial coefficients: [c0, c2, c3] are correctly serialized
+- Hint (previous claim): correctly used to recover c1
+- Evaluation at r_1:
+  - Zolt polynomial evaluates to: `7662922099089815801980439289975920297313075874875519371417932080660811269506`
+  - Jolt expects: `8918774265116757036790564405901994162252945042425107189638772988632815931918`
+  - These differ because Zolt's s(0), s(1), s(2), s(3) are wrong from the start
 
-The issue is in **how Zolt's prover computes the round polynomial evaluations** s(0), s(1), s(2), s(3). The computation structure differs from what the verifier expects.
+### What Needs Fixing
+
+The `computeRemainingRoundPoly()` function in `streaming_outer.zig` computes:
+1. t_prime_0 = Σ (E_out * E_in * Az[i] * Bz[i]) evaluated at current variable = 0
+2. t_prime_inf = Σ (E_out * E_in * Az[i] * Bz[i]) evaluated at current variable = ∞
+
+Then `computeCubicRoundPoly()` in `split_eq.zig` combines these with the eq factor to get s(0), s(1), s(2), s(3).
+
+Something in this computation chain doesn't match Jolt's prover.
 
 ### Completed Work (This Session)
 
 1. [x] Fixed memory layout constants to match Jolt (128MB memory, 4KB stack)
-2. [x] Verified transcript now produces same challenges as Jolt
-3. [x] Verified polynomial evaluation formula matches Jolt's `eval_from_hint`
-4. [x] Identified that round polynomial VALUES are wrong, not the evaluation formula
+2. [x] Verified transcript produces same challenges as Jolt
+3. [x] Verified polynomial evaluation formula (Horner's method) is correct
+4. [x] Verified interpolation formula is correct
+5. [x] Confirmed the POLYNOMIAL VALUES are wrong, not the evaluation/interpolation
 
 ### Next Steps
 
-1. [ ] Debug the streaming outer prover's `computeRemainingRoundPoly()` function
-2. [ ] Compare t_prime_0 and t_prime_inf values with what Jolt would compute
-3. [ ] Verify the Az/Bz polynomial binding produces correct values
-4. [ ] Check the split_eq current_scalar and eq factor computation
+1. [ ] Add debug output to `computeRemainingRoundPoly()` showing t_prime_0 and t_prime_inf
+2. [ ] Compare these values with what Jolt's prover would compute
+3. [ ] Check if Az/Bz polynomial binding is correct (linear phase vs streaming phase)
+4. [ ] Verify E_out and E_in computation matches Jolt
 
 ### Blocking Issues
 
@@ -44,7 +56,7 @@ The issue is in **how Zolt's prover computes the round polynomial evaluations** 
 ## Verified Correct
 - [x] Blake2b transcript implementation format
 - [x] Field serialization (Arkworks format)
-- [x] Memory layout constants now match Jolt
+- [x] Memory layout constants match Jolt
 - [x] Transcript produces same challenges as Jolt
 - [x] UniSkip polynomial generation logic
 - [x] R1CS constraint definitions (19 constraints, 2 groups)
@@ -57,6 +69,8 @@ The issue is in **how Zolt's prover computes the round polynomial evaluations** 
 - [x] ExpandingTable (r_grid) matches Jolt
 - [x] DensePolynomial.bindLow() implementation
 - [x] Polynomial evaluation formula (Horner's method)
+- [x] Interpolation formula (Vandermonde inverse)
+- [x] evalsToCompressed produces correct compressed coefficients
 - [x] All 702 Zolt tests pass
 
 ## Test Commands

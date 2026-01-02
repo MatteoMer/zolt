@@ -198,19 +198,53 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
 
         /// Bind the current variable to challenge r
         ///
-        /// Updates current_scalar with eq(τ[current_index-1], r)
-        /// and decrements current_index
+        /// Updates current_scalar with eq(τ[current_index-1], r),
+        /// decrements current_index, and pops from E_in_vec or E_out_vec.
+        ///
+        /// The pop logic matches Jolt's LowToHigh binding:
+        /// - First we bind variables from the "in" half (tau[m..])
+        /// - Then we bind variables from the "out" half (tau[0..m])
+        /// - Where m = tau.len / 2
+        ///
+        /// For LowToHigh:
+        ///   - current_index starts at tau.len and decrements
+        ///   - When current_index > m, we're binding "in" variables → pop from E_in_vec
+        ///   - When current_index <= m, we're binding "out" variables → pop from E_out_vec
         pub fn bind(self: *Self, r: F) void {
             if (self.current_index == 0) return;
 
-            self.current_index -= 1;
-            const tau_i = self.tau[self.current_index];
-
-            // eq(τ_i, r) = τ_i * r + (1 - τ_i) * (1 - r)
-            //            = τ_i * r + 1 - τ_i - r + τ_i * r
-            //            = 2 * τ_i * r - τ_i - r + 1
+            // Compute eq(τ_i, r) = τ_i * r + (1 - τ_i) * (1 - r)
+            const tau_i = self.tau[self.current_index - 1];
             const eq_val = tau_i.mul(r).add(F.one().sub(tau_i).mul(F.one().sub(r)));
             self.current_scalar = self.current_scalar.mul(eq_val);
+
+            // Decrement current_index
+            self.current_index -= 1;
+
+            // Pop from E_in_vec or E_out_vec (matching Jolt's logic)
+            // The condition is: if (w.len() / 2 < current_index) pop E_in, else pop E_out
+            // But we must never pop the [1] at index 0
+            const m = self.tau.len / 2;
+
+            if (m < self.current_index) {
+                // We're in the "in" half, pop from E_in_vec
+                if (self.E_in_vec.items.len > 1) {
+                    // Pop: remove the last (largest) table
+                    const popped = self.E_in_vec.pop();
+                    if (popped) |table| {
+                        self.allocator.free(table);
+                    }
+                }
+            } else if (self.current_index > 0) {
+                // We're in the "out" half, pop from E_out_vec
+                if (self.E_out_vec.items.len > 1) {
+                    // Pop: remove the last (largest) table
+                    const popped = self.E_out_vec.pop();
+                    if (popped) |table| {
+                        self.allocator.free(table);
+                    }
+                }
+            }
         }
 
         /// Get the full eq table for the remaining unbound variables
@@ -292,15 +326,18 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
             const head_in_bits = head_len -| head_out_bits;
 
             // Get tables of appropriate sizes
-            const E_out = if (head_out_bits <= self.num_x_out)
+            // After binding (and popping), the vectors may be shorter, but
+            // head_out_bits/head_in_bits also decrease, so the indices are always valid.
+            // Use the vector lengths to ensure safety.
+            const E_out = if (head_out_bits < self.E_out_vec.items.len)
                 self.E_out_vec.items[head_out_bits]
             else
-                self.E_out_vec.items[self.num_x_out];
+                self.E_out_vec.items[self.E_out_vec.items.len - 1];
 
-            const E_in = if (head_in_bits <= self.num_x_in)
+            const E_in = if (head_in_bits < self.E_in_vec.items.len)
                 self.E_in_vec.items[head_in_bits]
             else
-                self.E_in_vec.items[self.num_x_in];
+                self.E_in_vec.items[self.E_in_vec.items.len - 1];
 
             return .{ .E_out = E_out, .E_in = E_in, .head_in_bits = head_in_bits };
         }

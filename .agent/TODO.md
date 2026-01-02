@@ -1,8 +1,8 @@
 # Zolt-Jolt Compatibility TODO
 
-## Current Status: Session 36 - January 2, 2026
+## Current Status: Session 36 Continued - January 2, 2026
 
-**Progress: Fixed Az/Bz binding, sumcheck output_claim mismatch persists**
+**Progress: Binding order fixed (split_eq first), sumcheck output_claim mismatch persists**
 
 ---
 
@@ -16,7 +16,11 @@
 ### 2. Fixed Proof Converter to Use computeRemainingRoundPoly for ALL Rounds (DONE)
 - Previously used `computeRemainingRoundPolyMultiquadratic()` for rounds 1+
 - Now uses `computeRemainingRoundPoly()` for all rounds
-- This ensures proper Az/Bz materialization, binding, and t_prime rebuilding
+
+### 3. Fixed Binding Order to Match Jolt Exactly (DONE)
+- Changed order in `bindRemainingRoundChallenge()`:
+  - OLD: az/bz → split_eq → t_prime
+  - NEW: split_eq → t_prime → az/bz (matches Jolt's ingest_challenge)
 
 ---
 
@@ -27,59 +31,67 @@ output_claim:          216563298693827158933728314610770867174826642938276278652
 expected_output_claim: 4977070801800327014657227951104439579081780871540314422928627443513195286072
 ```
 
-### Extensive Analysis Performed
-1. ✅ `projectToFirstVariable` index mapping - MATCHES Jolt
-2. ✅ `expandGrid` ternary expansion - MATCHES Jolt
-3. ✅ `ternaryToBinaryIndex` and `isBooleanTernaryIndex` - CORRECT
-4. ✅ Binding order (LowToHigh) - MATCHES Jolt
-5. ✅ E_out/E_in table sizes after binding - CORRECT
-6. ✅ `computeCubicRoundPoly` Gruen formula - MATCHES Jolt
-7. ✅ `lagrangeKernel` computation - MATCHES Jolt
-8. ✅ split_eq `bind` formula for eq factor - MATCHES Jolt
+### Analysis This Session
 
-### Key Finding
-- Round 0 polynomial is UNCHANGED (correct, uses initial t_prime)
-- Round 1+ polynomials DIFFER (use rebuilt t_prime from bound az/bz)
-- All individual formulas checked match Jolt
-- Issue must be in how values flow through the system
+1. **Eq Factor Accumulation**: VERIFIED CORRECT
+   - Prover computes `Π_{i=0}^{10} eq(tau[10-i], r_i)` via bind()
+   - Verifier computes `eq(tau_low, r_tail_reversed) = Π eq(tau[i], r_{10-i})`
+   - Both are mathematically equivalent products
 
----
+2. **Az/Bz MLE Evaluation**: VERIFIED MATCHING
+   - Test shows `Az MLE match: true, Bz MLE match: true`
+   - Individual Az/Bz values at the final point are correct
 
-## Remaining Suspects
+3. **Constraint Mapping**: VERIFIED CORRECT
+   - Jolt's `a` = Zolt's `condition`
+   - Jolt's `b` = Zolt's `left - right`
+   - `FIRST_GROUP_INDICES` and `SECOND_GROUP_INDICES` match Jolt
 
-### 1. E_out/E_in Index Ordering in buildTPrimePoly
-The iteration order over `(x_out, x_in)` pairs might differ from Jolt's parallel iteration order.
-
-### 2. Polynomial Binding Order Effects
-While individual bindings match, there might be a cumulative effect from different ordering:
-- Jolt: split_eq, t_prime, THEN az/bz
-- Zolt: az/bz, THEN split_eq, t_prime
-
-### 3. Window Eq Tables After Binding
-The `getWindowEqTables` might return different values after binding because it uses `current_index` which is updated during bind.
-
-### 4. Current Scalar Accumulation
-The `current_scalar` multiplies eq factors for bound variables. If the binding sequence differs, this could accumulate differently.
+4. **Polynomial Indexing**: VERIFIED CORRECT
+   - `az[grid_size * i + j]` = Az for cycle i, group j
+   - Matches Jolt's `fused_materialise_polynomials_round_zero`
 
 ---
 
-## Next Steps (For Next Session)
+## The Puzzle
 
-### Debug Strategy
-1. Add Jolt-side debug output showing t_prime_poly values at each round
-2. Print (t_zero, t_infinity) from BOTH Zolt and Jolt side-by-side
-3. Trace through binding order effects on current_scalar
+Individual components all match between Zolt and Jolt:
+- ✅ Eq factor accumulation formula
+- ✅ Az/Bz MLE final values
+- ✅ Constraint definitions
+- ✅ Polynomial indexing
 
-### Specific Checks Needed
-1. After round 1 bind, compare:
-   - az_poly.evaluations[0..boundLen]
-   - bz_poly.evaluations[0..boundLen]
-   - split_eq.current_scalar
-   - E_out and E_in table contents
+Yet the sumcheck output_claim doesn't match expected_output_claim. This suggests the issue is in how these components are **combined** during the sumcheck rounds.
 
-2. For round 2 rebuild, compare:
-   - Input to buildTPrimePoly (E_out, E_in, az, bz)
-   - Output t_prime_poly.evaluations
+### Most Likely Culprit: t_prime_poly Accumulation
+
+The `buildTPrimePoly` function builds:
+```
+t_prime[idx] = Σ_{x_out, x_in} E_out[x_out] * E_in[x_in] * Az[i][j] * Bz[i][j]
+```
+
+After binding all variables:
+- E_out = [1], E_in = [1]
+- t_prime should contain a single value = Az_final * Bz_final
+- current_scalar should contain the full eq factor
+
+But if E_out/E_in aren't being updated correctly during binding, the accumulated values could be wrong.
+
+---
+
+## Next Steps
+
+### 1. Add Debug to buildTPrimePoly
+Print after each call:
+- `E_out.len`, `E_in.len`
+- First few values of E_out, E_in
+- Size and first few values of resulting t_prime
+
+### 2. Compare t_prime Round-by-Round
+For each round, compare Zolt's t_prime to Jolt's by adding debug prints to both sides.
+
+### 3. Verify E_out/E_in After Binding
+After each bind, verify that `E_out_vec` and `E_in_vec` are being trimmed correctly in split_eq.
 
 ---
 
@@ -96,43 +108,4 @@ zig build -Doptimize=ReleaseFast && ./zig-out/bin/zolt prove examples/fibonacci.
 # Jolt verification
 cd /Users/matteo/projects/jolt
 cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture
-```
-
----
-
-## Files Modified This Session
-
-| File | Changes |
-|------|---------|
-| `src/zkvm/spartan/streaming_outer.zig` | Bind az/bz on all rounds |
-| `src/zkvm/proof_converter.zig` | Use computeRemainingRoundPoly for all rounds |
-
----
-
-## Architecture Summary
-
-### Jolt's Stage 1 Flow (Outer Remaining Sumcheck)
-```
-1. UniSkip: degree-27 poly on domain {-4..5}
-2. After UniSkip: split_eq gets lagrange_tau_r0 scaling
-3. For each round:
-   a. If round > 0: next_window() rebuilds t_prime from bound az/bz
-   b. compute_message() gets (t0, t_inf) from t_prime
-   c. gruen_poly_deg_3() computes round polynomial
-   d. ingest_challenge() binds: split_eq, t_prime, az, bz
-4. Final output_claim = p(r) after all rounds
-5. Expected = tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod
-```
-
-### Zolt's Equivalent Implementation
-```
-1. UniSkip: same polynomial construction
-2. After UniSkip: split_eq.initWithScaling(lagrange_tau_r0)
-3. For each round:
-   a. If t_prime.num_vars == 0: rebuildTPrimePoly() from bound az/bz
-   b. computeTEvals() gets (t0, t_inf) from t_prime
-   c. computeCubicRoundPoly() computes round polynomial
-   d. bindRemainingRoundChallenge() binds: az, bz, split_eq, t_prime
-4. Final output_claim = current_claim after all rounds
-5. Jolt verifier checks same expected formula
 ```

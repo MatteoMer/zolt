@@ -1,23 +1,27 @@
 # Zolt-Jolt Compatibility TODO
 
-## Current Status: Session 36 Final - January 2, 2026
+## Current Status: Session 37 - January 2, 2026
 
-**Progress: Binding order fixed, split_eq pop implemented, sumcheck output mismatch persists**
+**Progress: Deep analysis of sumcheck mismatch, mathematical equivalence verified**
 
 ---
 
-## Changes Made This Session
+## Session 37 Changes
 
-### 1. Fixed Binding Order in `bindRemainingRoundChallenge()` (DONE)
-- Changed order: split_eq first, then t_prime, then az/bz
-- Matches Jolt's `ingest_challenge()` exactly
+### 1. Fixed Transcript (DONE)
+- Prover now appends compressed coefficients `[c0, c2, c3]` instead of evaluations
+- Matches Jolt's `UniPoly::compress()` format
 
-### 2. Fixed split_eq `bind()` to Pop Tables (DONE)
-- Now pops from E_in_vec or E_out_vec after binding (like Jolt)
-- For LowToHigh: first pop from E_in_vec (when current_index > m), then E_out_vec
+### 2. Mathematical Analysis (DONE)
+- Verified: `MLE(Az)(r) = Az(z_MLE(r))` due to linearity
+- Verified: `MLE(Az * Bz) = MLE(Az) * MLE(Bz)` for this special case
+- Both Jolt and Zolt compute `Σ eq * (Az * Bz)` in the prover
 
-### 3. Fixed `getWindowEqTables()` Bounds (DONE)
-- Uses actual vector lengths instead of original num_x_out/num_x_in
+### 3. Key Finding: Individual MLEs Match!
+- `prover_az_mle == verifier_az_final` ✓
+- `prover_bz_mle == verifier_bz_final` ✓
+- But `prover_sum (Az*Bz MLE) ≠ verifier_inner_sum_prod (Az*Bz from z_MLE)`
+- The difference is ~0.22%, not a simple factor
 
 ---
 

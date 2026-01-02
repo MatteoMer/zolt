@@ -803,8 +803,9 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 }
             } else {
                 // CYCLE ROUND: Determine if we're in streaming or linear phase
-                const num_remaining = self.numRounds();
-                const switch_over = num_remaining / 2;
+                // Jolt uses LinearOnlySchedule with switch_over = 0, meaning linear phase
+                // starts immediately after the streaming round (round 1)
+                const switch_over: usize = 0;
                 const is_linear_phase = self.current_round > switch_over;
 
                 if (is_linear_phase and self.az_poly != null and self.bz_poly != null) {
@@ -1346,37 +1347,33 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
         /// Bind a remaining round challenge
         ///
-        /// Matches Jolt's HalfSplitSchedule:
-        /// - Streaming phase (first half): update r_grid with each challenge
-        /// - Linear phase (second half): don't update r_grid, just bind split_eq
+        /// Matches Jolt's LinearOnlySchedule:
+        /// - Streaming round (round 1): update r_grid, then materialize Az/Bz
+        /// - Linear phase (round > 1): bind Az/Bz polynomials, don't update r_grid
         ///
         /// For the remaining sumcheck with num_rounds = 1 + num_cycle_vars:
-        /// - Switch-over is at round (num_rounds + 1) / 2
-        /// - Streaming rounds: 1 to switch_over (inclusive)
-        /// - Linear rounds: switch_over+1 to num_rounds (exclusive)
+        /// - Switch-over is at round 0 (linear phase starts immediately after streaming)
+        /// - Streaming round: 1 only
+        /// - Linear rounds: 2 to num_rounds
         pub fn bindRemainingRoundChallenge(self: *Self, r: F) !void {
             // If this is the streaming round (current_round == 1), save r_stream
             if (self.current_round == 1) {
                 self.r_stream = r;
             }
 
-            // Jolt's HalfSplitSchedule: streaming phase is first half of rounds
-            // For num_rounds = 1 + num_cycle_vars, switch-over is at num_rounds / 2
-            // This matches Jolt's halfway = num_rounds / 2 calculation
-            const num_remaining = self.numRounds(); // 1 + num_cycle_vars
-            const switch_over = num_remaining / 2;
+            // Jolt's LinearOnlySchedule: switch_over = 0
+            // This means linear phase starts immediately after the streaming round (round 1)
+            const switch_over: usize = 0;
 
-            // Streaming phase: rounds 1 to switch_over (inclusive) - update r_grid
-            // Linear phase: rounds > switch_over - bind Az/Bz polynomials
+            // Streaming phase: round 1 only - update r_grid
+            // Linear phase: rounds > 1 - bind Az/Bz polynomials
             if (self.current_round <= switch_over) {
-                // Streaming window phase: update r_grid
+                // This branch is never taken with switch_over = 0 since current_round >= 1
                 self.r_grid.update(r);
-
-                // At the end of streaming phase (entering linear phase),
-                // materialize the Az/Bz polynomials
-                if (self.current_round == switch_over) {
-                    try self.materializeLinearPhasePolynomials();
-                }
+            } else if (self.current_round == 1) {
+                // Streaming round (round 1): update r_grid and materialize
+                self.r_grid.update(r);
+                try self.materializeLinearPhasePolynomials();
             } else {
                 // Linear phase: bind Az/Bz polynomials with bindLow
                 if (self.az_poly) |*az| {

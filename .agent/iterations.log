@@ -2369,3 +2369,1711 @@ Ended: 2026-01-01T16:21:19.323747
 Turns: 155
 Cost: $17.5525
 
+
+--- Iteration 1 ---
+Started: 2026-01-01T23:06:13.704965
+Ended: 2026-01-01T23:53:05.049684
+Turns: 205
+Cost: $21.8443
+
+
+--- Iteration 2 ---
+Started: 2026-01-01T23:53:07.053329
+Ended: 2026-01-02T00:13:08.619650
+Turns: 56
+Cost: $4.6306
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 3 ---
+Started: 2026-01-02T00:13:10.623475
+Ended: 2026-01-02T00:16:20.436755
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 4 ---
+Started: 2026-01-02T00:16:22.439847
+Ended: 2026-01-02T00:19:27.896868
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 5 ---
+Started: 2026-01-02T00:19:29.900460
+Ended: 2026-01-02T00:22:29.684540
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 6 ---
+Started: 2026-01-02T00:22:31.690496
+Ended: 2026-01-02T00:25:34.447187
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 7 ---
+Started: 2026-01-02T00:25:36.450673
+Ended: 2026-01-02T00:28:38.221089
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 8 ---
+Started: 2026-01-02T00:28:40.224823
+Ended: 2026-01-02T00:31:53.155004
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 9 ---
+Started: 2026-01-02T00:31:55.158122
+Ended: 2026-01-02T00:34:56.877237
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 10 ---
+Started: 2026-01-02T00:34:58.880760
+Ended: 2026-01-02T00:38:00.034768
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 11 ---
+Started: 2026-01-02T00:38:02.038188
+Ended: 2026-01-02T00:41:14.115852
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 12 ---
+Started: 2026-01-02T00:41:16.119246
+Ended: 2026-01-02T00:44:13.041631
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 13 ---
+Started: 2026-01-02T00:44:15.044991
+Ended: 2026-01-02T00:47:17.734433
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 14 ---
+Started: 2026-01-02T00:47:19.739608
+Ended: 2026-01-02T00:50:18.171719
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 15 ---
+Started: 2026-01-02T00:50:20.175133
+Ended: 2026-01-02T00:53:22.171595
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 16 ---
+Started: 2026-01-02T00:53:24.175357
+Ended: 2026-01-02T00:56:16.586530
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 17 ---
+Started: 2026-01-02T00:56:18.589942
+Ended: 2026-01-02T00:59:26.668598
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 18 ---
+Started: 2026-01-02T00:59:28.672211
+Ended: 2026-01-02T01:02:32.431371
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 19 ---
+Started: 2026-01-02T01:02:34.434822
+Ended: 2026-01-02T01:05:39.573970
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 20 ---
+Started: 2026-01-02T01:05:41.577587
+Ended: 2026-01-02T01:08:48.523589
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 21 ---
+Started: 2026-01-02T01:08:50.527170
+Ended: 2026-01-02T01:11:53.992439
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 22 ---
+Started: 2026-01-02T01:11:55.995603
+Ended: 2026-01-02T01:15:00.900134
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 23 ---
+Started: 2026-01-02T01:15:02.903211
+Ended: 2026-01-02T01:17:56.333044
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 24 ---
+Started: 2026-01-02T01:17:58.336228
+Ended: 2026-01-02T01:20:57.196097
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 25 ---
+Started: 2026-01-02T01:20:59.199764
+Ended: 2026-01-02T01:24:01.441868
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 26 ---
+Started: 2026-01-02T01:24:03.444917
+Ended: 2026-01-02T01:27:01.214479
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 27 ---
+Started: 2026-01-02T01:27:03.217834
+Ended: 2026-01-02T01:30:07.492698
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 28 ---
+Started: 2026-01-02T01:30:09.496928
+Ended: 2026-01-02T01:33:18.640589
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 29 ---
+Started: 2026-01-02T01:33:20.643764
+Ended: 2026-01-02T01:36:27.102290
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 30 ---
+Started: 2026-01-02T01:36:29.105927
+Ended: 2026-01-02T01:39:29.878226
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 31 ---
+Started: 2026-01-02T01:39:31.881792
+Ended: 2026-01-02T01:42:44.317819
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 32 ---
+Started: 2026-01-02T01:42:46.320916
+Ended: 2026-01-02T01:45:48.694870
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 33 ---
+Started: 2026-01-02T01:45:50.698299
+Ended: 2026-01-02T01:48:47.119024
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 34 ---
+Started: 2026-01-02T01:48:49.122351
+Ended: 2026-01-02T01:51:52.181463
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 35 ---
+Started: 2026-01-02T01:51:54.185338
+Ended: 2026-01-02T01:54:58.887438
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 36 ---
+Started: 2026-01-02T01:55:00.890861
+Ended: 2026-01-02T01:58:04.028641
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 37 ---
+Started: 2026-01-02T01:58:06.032243
+Ended: 2026-01-02T02:01:01.028428
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 38 ---
+Started: 2026-01-02T02:01:03.031426
+Ended: 2026-01-02T02:03:59.686718
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 39 ---
+Started: 2026-01-02T02:04:01.689463
+Ended: 2026-01-02T02:06:59.639954
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 40 ---
+Started: 2026-01-02T02:07:01.643366
+Ended: 2026-01-02T02:10:08.950504
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 41 ---
+Started: 2026-01-02T02:10:10.953755
+Ended: 2026-01-02T02:13:18.142455
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 42 ---
+Started: 2026-01-02T02:13:20.146067
+Ended: 2026-01-02T02:16:20.702306
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 43 ---
+Started: 2026-01-02T02:16:22.705359
+Ended: 2026-01-02T02:19:19.791001
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 44 ---
+Started: 2026-01-02T02:19:21.793765
+Ended: 2026-01-02T02:22:18.101182
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 45 ---
+Started: 2026-01-02T02:22:20.104082
+Ended: 2026-01-02T02:25:19.060815
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 46 ---
+Started: 2026-01-02T02:25:21.063731
+Ended: 2026-01-02T02:28:14.752650
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 47 ---
+Started: 2026-01-02T02:28:16.755945
+Ended: 2026-01-02T02:31:19.849818
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 48 ---
+Started: 2026-01-02T02:31:21.853235
+Ended: 2026-01-02T02:34:18.715103
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 49 ---
+Started: 2026-01-02T02:34:20.718053
+Ended: 2026-01-02T02:37:25.668463
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 50 ---
+Started: 2026-01-02T02:37:27.671856
+Ended: 2026-01-02T02:40:34.025436
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 51 ---
+Started: 2026-01-02T02:40:36.028918
+Ended: 2026-01-02T02:43:35.229184
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 52 ---
+Started: 2026-01-02T02:43:37.233453
+Ended: 2026-01-02T02:46:48.907824
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 53 ---
+Started: 2026-01-02T02:46:50.911922
+Ended: 2026-01-02T02:50:00.120140
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 54 ---
+Started: 2026-01-02T02:50:02.123306
+Ended: 2026-01-02T02:53:04.991375
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 55 ---
+Started: 2026-01-02T02:53:06.995173
+Ended: 2026-01-02T02:56:13.660340
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 56 ---
+Started: 2026-01-02T02:56:15.663161
+Ended: 2026-01-02T02:59:19.925289
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 57 ---
+Started: 2026-01-02T02:59:21.929203
+Ended: 2026-01-02T03:02:24.726969
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 58 ---
+Started: 2026-01-02T03:02:26.730087
+Ended: 2026-01-02T03:05:35.819651
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 59 ---
+Started: 2026-01-02T03:05:37.822991
+Ended: 2026-01-02T03:08:39.727564
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 60 ---
+Started: 2026-01-02T03:08:41.734728
+Ended: 2026-01-02T03:11:35.953129
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 61 ---
+Started: 2026-01-02T03:11:37.956514
+Ended: 2026-01-02T03:14:40.644915
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 62 ---
+Started: 2026-01-02T03:14:42.648379
+Ended: 2026-01-02T03:17:46.178979
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 63 ---
+Started: 2026-01-02T03:17:48.185791
+Ended: 2026-01-02T03:20:46.447062
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 64 ---
+Started: 2026-01-02T03:20:48.450430
+Ended: 2026-01-02T03:23:46.210628
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 65 ---
+Started: 2026-01-02T03:23:48.214458
+Ended: 2026-01-02T03:26:53.085590
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 66 ---
+Started: 2026-01-02T03:26:55.089049
+Ended: 2026-01-02T03:30:03.725049
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 67 ---
+Started: 2026-01-02T03:30:05.728620
+Ended: 2026-01-02T03:33:08.878097
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 68 ---
+Started: 2026-01-02T03:33:10.881435
+Ended: 2026-01-02T03:36:20.217132
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 69 ---
+Started: 2026-01-02T03:36:22.220145
+Ended: 2026-01-02T03:39:28.332841
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 70 ---
+Started: 2026-01-02T03:39:30.337169
+Ended: 2026-01-02T03:42:35.584922
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 71 ---
+Started: 2026-01-02T03:42:37.588452
+Ended: 2026-01-02T03:45:34.073062
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 72 ---
+Started: 2026-01-02T03:45:36.076403
+Ended: 2026-01-02T03:48:46.221542
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 73 ---
+Started: 2026-01-02T03:48:48.225131
+Ended: 2026-01-02T03:51:55.393215
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 74 ---
+Started: 2026-01-02T03:51:57.396317
+Ended: 2026-01-02T03:54:58.420552
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 75 ---
+Started: 2026-01-02T03:55:00.425002
+Ended: 2026-01-02T03:58:04.082837
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 76 ---
+Started: 2026-01-02T03:58:06.085731
+Ended: 2026-01-02T04:01:16.494103
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 77 ---
+Started: 2026-01-02T04:01:18.497497
+Ended: 2026-01-02T04:04:23.248374
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 78 ---
+Started: 2026-01-02T04:04:25.252025
+Ended: 2026-01-02T04:07:21.726020
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 79 ---
+Started: 2026-01-02T04:07:23.729404
+Ended: 2026-01-02T04:10:32.454937
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 80 ---
+Started: 2026-01-02T04:10:34.458221
+Ended: 2026-01-02T04:13:36.870370
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 81 ---
+Started: 2026-01-02T04:13:38.873855
+Ended: 2026-01-02T04:16:42.525079
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 82 ---
+Started: 2026-01-02T04:16:44.528514
+Ended: 2026-01-02T04:19:49.865057
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 83 ---
+Started: 2026-01-02T04:19:51.875128
+Ended: 2026-01-02T04:22:57.049332
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 84 ---
+Started: 2026-01-02T04:22:59.052806
+Ended: 2026-01-02T04:26:04.316919
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 85 ---
+Started: 2026-01-02T04:26:06.320115
+Ended: 2026-01-02T04:29:06.318486
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 86 ---
+Started: 2026-01-02T04:29:08.322194
+Ended: 2026-01-02T04:32:10.359274
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 87 ---
+Started: 2026-01-02T04:32:12.363016
+Ended: 2026-01-02T04:35:16.084155
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 88 ---
+Started: 2026-01-02T04:35:18.087456
+Ended: 2026-01-02T04:38:09.159449
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 89 ---
+Started: 2026-01-02T04:38:11.163097
+Ended: 2026-01-02T04:41:12.694550
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 90 ---
+Started: 2026-01-02T04:41:14.697983
+Ended: 2026-01-02T04:44:15.072168
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 91 ---
+Started: 2026-01-02T04:44:17.075508
+Ended: 2026-01-02T04:47:19.048883
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 92 ---
+Started: 2026-01-02T04:47:21.052096
+Ended: 2026-01-02T04:50:15.852356
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 93 ---
+Started: 2026-01-02T04:50:17.854490
+Ended: 2026-01-02T04:53:29.715539
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 94 ---
+Started: 2026-01-02T04:53:31.719110
+Ended: 2026-01-02T04:56:29.512877
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 95 ---
+Started: 2026-01-02T04:56:31.516351
+Ended: 2026-01-02T04:59:28.313550
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 96 ---
+Started: 2026-01-02T04:59:30.317206
+Ended: 2026-01-02T05:02:36.379295
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 97 ---
+Started: 2026-01-02T05:02:38.383081
+Ended: 2026-01-02T05:05:44.710983
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 98 ---
+Started: 2026-01-02T05:05:46.714683
+Ended: 2026-01-02T05:08:54.200383
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 99 ---
+Started: 2026-01-02T05:08:56.203986
+Ended: 2026-01-02T05:11:53.069866
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 100 ---
+Started: 2026-01-02T05:11:55.073403
+Ended: 2026-01-02T05:15:00.833611
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 101 ---
+Started: 2026-01-02T05:15:02.837032
+Ended: 2026-01-02T05:17:59.212209
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 102 ---
+Started: 2026-01-02T05:18:01.215670
+Ended: 2026-01-02T05:21:03.061496
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 103 ---
+Started: 2026-01-02T05:21:05.063275
+Ended: 2026-01-02T05:24:15.381057
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 104 ---
+Started: 2026-01-02T05:24:17.384308
+Ended: 2026-01-02T05:27:21.929210
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 105 ---
+Started: 2026-01-02T05:27:23.932823
+Ended: 2026-01-02T05:30:22.320615
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 106 ---
+Started: 2026-01-02T05:30:24.324707
+Ended: 2026-01-02T05:33:24.070628
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 107 ---
+Started: 2026-01-02T05:33:26.073637
+Ended: 2026-01-02T05:36:25.365893
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 108 ---
+Started: 2026-01-02T05:36:27.368943
+Ended: 2026-01-02T05:39:32.732954
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 109 ---
+Started: 2026-01-02T05:39:34.736273
+Ended: 2026-01-02T05:42:35.595997
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 110 ---
+Started: 2026-01-02T05:42:37.599527
+Ended: 2026-01-02T05:45:38.286650
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 111 ---
+Started: 2026-01-02T05:45:40.290200
+Ended: 2026-01-02T05:48:43.067877
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 112 ---
+Started: 2026-01-02T05:48:45.075974
+Ended: 2026-01-02T05:51:55.189464
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 113 ---
+Started: 2026-01-02T05:51:57.193089
+Ended: 2026-01-02T05:55:01.890743
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 114 ---
+Started: 2026-01-02T05:55:03.893645
+Ended: 2026-01-02T05:58:06.616338
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 115 ---
+Started: 2026-01-02T05:58:08.619877
+Ended: 2026-01-02T06:01:08.500813
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 116 ---
+Started: 2026-01-02T06:01:10.504242
+Ended: 2026-01-02T06:04:14.519030
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 117 ---
+Started: 2026-01-02T06:04:16.521757
+Ended: 2026-01-02T06:07:15.782974
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 118 ---
+Started: 2026-01-02T06:07:17.786206
+Ended: 2026-01-02T06:10:15.736629
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 119 ---
+Started: 2026-01-02T06:10:17.740068
+Ended: 2026-01-02T06:13:26.146655
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 120 ---
+Started: 2026-01-02T06:13:28.150177
+Ended: 2026-01-02T06:16:33.417819
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 121 ---
+Started: 2026-01-02T06:16:35.420856
+Ended: 2026-01-02T06:19:34.851783
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 122 ---
+Started: 2026-01-02T06:19:36.854790
+Ended: 2026-01-02T06:22:37.468392
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 123 ---
+Started: 2026-01-02T06:22:39.471490
+Ended: 2026-01-02T06:25:46.226101
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 124 ---
+Started: 2026-01-02T06:25:48.229320
+Ended: 2026-01-02T06:28:53.161734
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 125 ---
+Started: 2026-01-02T06:28:55.165570
+Ended: 2026-01-02T06:31:59.137628
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 126 ---
+Started: 2026-01-02T06:32:01.140723
+Ended: 2026-01-02T06:35:02.793738
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 127 ---
+Started: 2026-01-02T06:35:04.796472
+Ended: 2026-01-02T06:38:06.538631
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 128 ---
+Started: 2026-01-02T06:38:08.542109
+Ended: 2026-01-02T06:41:08.200957
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 129 ---
+Started: 2026-01-02T06:41:10.204145
+Ended: 2026-01-02T06:44:14.008680
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 130 ---
+Started: 2026-01-02T06:44:16.011963
+Ended: 2026-01-02T06:47:14.969590
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 131 ---
+Started: 2026-01-02T06:47:16.972717
+Ended: 2026-01-02T06:50:09.755100
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 132 ---
+Started: 2026-01-02T06:50:11.758174
+Ended: 2026-01-02T06:53:17.519473
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 133 ---
+Started: 2026-01-02T06:53:19.522653
+Ended: 2026-01-02T06:56:14.618532
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 134 ---
+Started: 2026-01-02T06:56:16.621871
+Ended: 2026-01-02T06:59:16.196492
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 135 ---
+Started: 2026-01-02T06:59:18.199703
+Ended: 2026-01-02T07:02:14.470904
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 136 ---
+Started: 2026-01-02T07:02:16.474301
+Ended: 2026-01-02T07:05:23.005758
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 137 ---
+Started: 2026-01-02T07:05:25.009010
+Ended: 2026-01-02T07:08:19.493447
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 138 ---
+Started: 2026-01-02T07:08:21.496969
+Ended: 2026-01-02T07:11:31.048889
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 139 ---
+Started: 2026-01-02T07:11:33.052065
+Ended: 2026-01-02T07:14:26.031277
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 140 ---
+Started: 2026-01-02T07:14:28.034864
+Ended: 2026-01-02T07:17:28.701822
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 141 ---
+Started: 2026-01-02T07:17:30.704780
+Ended: 2026-01-02T07:20:25.663760
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 142 ---
+Started: 2026-01-02T07:20:27.666632
+Ended: 2026-01-02T07:23:31.259470
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 143 ---
+Started: 2026-01-02T07:23:33.262383
+Ended: 2026-01-02T07:26:35.028304
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 144 ---
+Started: 2026-01-02T07:26:37.031708
+Ended: 2026-01-02T07:29:42.035612
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 145 ---
+Started: 2026-01-02T07:29:44.039148
+Ended: 2026-01-02T07:32:43.490897
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 146 ---
+Started: 2026-01-02T07:32:45.493929
+Ended: 2026-01-02T07:35:47.823425
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 147 ---
+Started: 2026-01-02T07:35:49.826605
+Ended: 2026-01-02T07:38:49.950517
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 148 ---
+Started: 2026-01-02T07:38:51.953588
+Ended: 2026-01-02T07:41:50.783769
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 149 ---
+Started: 2026-01-02T07:41:52.786437
+Ended: 2026-01-02T07:44:50.831811
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 150 ---
+Started: 2026-01-02T07:44:52.835600
+Ended: 2026-01-02T07:47:51.763843
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 151 ---
+Started: 2026-01-02T07:47:53.767901
+Ended: 2026-01-02T07:51:01.220421
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 152 ---
+Started: 2026-01-02T07:51:03.223479
+Ended: 2026-01-02T07:54:11.664393
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 153 ---
+Started: 2026-01-02T07:54:13.667376
+Ended: 2026-01-02T07:57:25.843812
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 154 ---
+Started: 2026-01-02T07:57:27.846367
+Ended: 2026-01-02T08:00:26.410228
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 155 ---
+Started: 2026-01-02T08:00:28.413106
+Ended: 2026-01-02T08:03:34.327233
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 156 ---
+Started: 2026-01-02T08:03:36.330171
+Ended: 2026-01-02T08:06:42.299856
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 157 ---
+Started: 2026-01-02T08:06:44.304084
+Ended: 2026-01-02T08:09:43.888888
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 158 ---
+Started: 2026-01-02T08:09:45.892428
+Ended: 2026-01-02T08:12:53.036914
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 159 ---
+Started: 2026-01-02T08:12:55.041057
+Ended: 2026-01-02T08:15:53.741758
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 160 ---
+Started: 2026-01-02T08:15:55.744608
+Ended: 2026-01-02T08:18:55.816272
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 161 ---
+Started: 2026-01-02T08:18:57.819796
+Ended: 2026-01-02T08:22:00.171440
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 162 ---
+Started: 2026-01-02T08:22:02.175670
+Ended: 2026-01-02T08:25:00.623715
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 163 ---
+Started: 2026-01-02T08:25:02.627021
+Ended: 2026-01-02T08:28:09.365173
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 164 ---
+Started: 2026-01-02T08:28:11.368189
+Ended: 2026-01-02T08:31:10.764552
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 165 ---
+Started: 2026-01-02T08:31:12.767558
+Ended: 2026-01-02T08:34:18.836683
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 166 ---
+Started: 2026-01-02T08:34:20.840146
+Ended: 2026-01-02T08:37:18.472090
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 167 ---
+Started: 2026-01-02T08:37:20.475371
+Ended: 2026-01-02T08:40:22.686885
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 168 ---
+Started: 2026-01-02T08:40:24.689825
+Ended: 2026-01-02T08:43:24.587935
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 169 ---
+Started: 2026-01-02T08:43:26.592025
+Ended: 2026-01-02T08:46:32.818830
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 170 ---
+Started: 2026-01-02T08:46:34.822097
+Ended: 2026-01-02T08:49:33.371280
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 171 ---
+Started: 2026-01-02T08:49:35.374665
+Ended: 2026-01-02T08:52:36.307013
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 172 ---
+Started: 2026-01-02T08:52:38.309982
+Ended: 2026-01-02T08:55:54.851078
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 173 ---
+Started: 2026-01-02T08:55:56.854430
+Ended: 2026-01-02T08:58:56.928644
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 174 ---
+Started: 2026-01-02T08:58:58.932036
+Ended: 2026-01-02T09:02:00.578900
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 175 ---
+Started: 2026-01-02T09:02:02.582052
+Ended: 2026-01-02T09:05:08.417447
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 176 ---
+Started: 2026-01-02T09:05:10.421392
+Ended: 2026-01-02T09:08:14.140556
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 177 ---
+Started: 2026-01-02T09:08:16.144034
+Ended: 2026-01-02T09:11:19.935229
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 178 ---
+Started: 2026-01-02T09:11:21.939863
+Ended: 2026-01-02T09:14:18.570981
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 179 ---
+Started: 2026-01-02T09:14:20.574096
+Ended: 2026-01-02T09:17:21.240525
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 180 ---
+Started: 2026-01-02T09:17:23.243536
+Ended: 2026-01-02T09:20:36.397798
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 181 ---
+Started: 2026-01-02T09:20:38.400861
+Ended: 2026-01-02T09:23:35.971350
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 182 ---
+Started: 2026-01-02T09:23:37.974632
+Ended: 2026-01-02T09:26:36.073971
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 183 ---
+Started: 2026-01-02T09:26:38.077926
+Ended: 2026-01-02T09:29:34.330756
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 184 ---
+Started: 2026-01-02T09:29:36.333798
+Ended: 2026-01-02T09:32:42.439603
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 185 ---
+Started: 2026-01-02T09:32:44.442813
+Ended: 2026-01-02T09:35:49.161014
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 186 ---
+Started: 2026-01-02T09:35:51.164514
+Ended: 2026-01-02T09:38:58.176846
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 187 ---
+Started: 2026-01-02T09:39:00.180044
+Ended: 2026-01-02T09:42:05.312538
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 188 ---
+Started: 2026-01-02T09:42:07.315910
+Ended: 2026-01-02T09:45:10.654244
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 189 ---
+Started: 2026-01-02T09:45:12.657678
+Ended: 2026-01-02T09:48:18.009238
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+--- Iteration 190 ---
+Started: 2026-01-02T09:48:20.012647
+Ended: 2026-01-02T09:51:24.880375
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+

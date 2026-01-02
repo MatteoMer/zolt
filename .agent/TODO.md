@@ -1,131 +1,73 @@
 # Zolt-Jolt Compatibility TODO
 
-## Current Status: Session 32 - January 2, 2026
+## Current Status: Session 33 - January 2, 2026
 
 **All 702 Zolt tests pass**
 
-### Analysis This Session
+### Fixes Applied This Session
 
-1. **Proof Generation Works**: Zolt successfully generates proofs (`zig build && ./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o /tmp/zolt_proof.bin`)
+1. **Fixed Constraint 8 (RightLookupSub)**: Added missing 2^64 constant (`lc.constant = 0x10000000000000000`)
+2. **Fixed i128ToField**: Updated helpers in both `constraints.zig` and `jolt_r1cs.zig` to handle values > 2^64 using bytes representation
+3. **Fixed SUB witness generation**: Now correctly computes `LeftInput - RightInput + 2^64`
+4. **Constraint Audit**: Verified all 19 constraints match Jolt exactly (via Task agent)
 
-2. **Verification Fails at Stage 1**: The sumcheck output_claim doesn't match expected_output_claim
-   - output_claim = 18149181199645709635565994144274301613989920934825717026812937381996718340431
-   - expected = 9784440804643023978376654613918487285551699375196948804144755605390806131527
+### Current Issue: Stage 1 Sumcheck Still Fails
 
-3. **Eq Factor is Correct**: The cross-verification test confirms that `prover_eq_factor == verifier_eq_factor`
-
-4. **Az/Bz MLE Match**: The test shows "Az MLE match: true, Bz MLE match: true"
-
-5. **Root Cause Analysis**:
-   - Expected formula: `expected = tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod`
-   - Prover formula: `output_claim = eq_factor * sumcheck_accumulated_az_bz`
-   - The eq factors match, but `sumcheck_accumulated_az_bz != inner_sum_prod`
-   - This means the sumcheck prover is computing Az*Bz differently than what the verifier expects
-
-### Hypothesis
-
-The sumcheck prover computes:
+Verification error:
 ```
-Σ_cycle eq(tau, cycle) * Az(cycle) * Bz(cycle)  // Sum over cycles at each round
+output_claim:          17460831489166246924525756229519258101479150040426090837402456066148331301615
+expected_output_claim: 5659454754207529901068046179760836365067409963211356691285388103257563690698
 ```
 
-After binding to random point r, this becomes:
-```
-eq(tau, r) * MLE(Az * Bz, r)
-```
+The sumcheck round polynomials pass individually (p(0) + p(1) = claim), but the final claim doesn't match what the verifier computes.
 
-But the verifier expects:
-```
-eq(tau, r) * MLE(Az, r) * MLE(Bz, r)
-```
+### Analysis
 
-**Key insight**: `MLE(Az * Bz, r) ≠ MLE(Az, r) * MLE(Bz, r)` in general!
-
-The sumcheck should compute `MLE(Az, r) * MLE(Bz, r)`, NOT the MLE of the product.
-
-### The Problem
-
-Looking at Jolt's outer sumcheck, it uses a **multiquadratic polynomial** representation where:
-- `t'(X)` encodes Az and Bz separately
-- The round polynomial is built by multiplying the projections of Az and Bz
-
-In Zolt, the streaming round computes:
-```zig
-const prod_0 = az_g0.mul(bz_g0);  // Product at position 0
-const prod_inf = slope_az.mul(slope_bz);  // Product of slopes
-```
-
-This is correct! The Gruen construction uses:
-- t'(0) = Az(0) * Bz(0)
-- t'(∞) = (Az(1) - Az(0)) * (Bz(1) - Bz(0))
-
-Which gives a polynomial that evaluates to Az(X) * Bz(X) at any point X.
-
-So the structure is correct. The bug must be elsewhere...
-
-### NEW FINDING: Preprocessing Mismatch (Session 32)
-
-**Root Cause Identified**: Jolt's verifier uses its **own compile-time constraint definitions** to evaluate Az·Bz at the claimed point. It does NOT trust the prover's computation.
-
-#### How Jolt Verification Works
-
-The verifier calls `evaluate_inner_sum_product_at_point()` which:
-1. Uses `R1CS_CONSTRAINTS_FIRST_GROUP` and `R1CS_CONSTRAINTS_SECOND_GROUP` (compile-time)
-2. Evaluates each constraint's linear combinations using **Jolt's definitions**
-3. Computes Az·Bz directly from the R1CS input claims (from accumulator)
-
-If Zolt's constraint definitions don't match Jolt's exactly, verification will fail even if the prover is internally consistent.
-
-#### Critical Bug Found: Constraint 8 (RightLookupSub)
-
-**Jolt** (`jolt-core/src/zkvm/r1cs/constraints.rs:299-303`):
+The expected_output_claim is computed by Jolt as:
 ```rust
-if { SubtractOperands }
-=> ( RightLookupOperand ) == ( LeftInstructionInput - RightInstructionInput + 0x10000000000000000 )
-                                                                              ^^^^^^^^^^^^^^^^^^^
-                                                                              2^64 constant present
+result = tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod
+
+Where:
+- inner_sum_prod = Az_final * Bz_final
+- Az_final = az_g0 + r_stream * (az_g1 - az_g0)
+- Bz_final = bz_g0 + r_stream * (bz_g1 - bz_g0)
+- az_g0 = Σᵢ w[i] * lc_a[i].dot_product(z)  // z = R1CS input MLE evaluations
+- bz_g0 = Σᵢ w[i] * lc_b[i].dot_product(z)
 ```
 
-**Zolt** (`src/zkvm/r1cs/constraints.zig:336-348`):
-```zig
-.right = blk: {
-    var lc = LC.zero();
-    lc.terms[0] = .{ .input_index = .LeftInstructionInput, .coeff = 1 };
-    lc.terms[1] = .{ .input_index = .RightInstructionInput, .coeff = -1 };
-    lc.len = 2;
-    // 2^64 = 18446744073709551616 (too large for i128, handled separately) <-- MISSING!
-    break :blk lc;
-},
-```
+The issue is that:
+1. **Constraints match** - all 19 constraint definitions are identical between Zolt and Jolt
+2. **Eq factor matches** - `tau_high_bound_r0 * tau_bound_r_tail_reversed` is correct
+3. **inner_sum_prod mismatch** - The Az·Bz product computed by the prover differs from what verifier expects
 
-The `lc.constant = 0x10000000000000000;` is **missing** in Zolt! The comment says "handled separately" but there's no actual handling.
+### Possible Root Causes
 
-#### Required Actions
+1. **R1CS input MLE evaluations**: The opening claims for the 36 R1CS inputs might be computed incorrectly
+   - Need to verify `computeClaimedInputs` matches Jolt's MLE evaluation at r_cycle
 
-1. **Fix constraint 8**: Add the 2^64 constant to RightLookupSub
-2. **Audit ALL constraints**: Compare term-by-term against Jolt's `constraints.rs`
-3. **Verify input ordering**: Ensure `R1CSInputIndex` matches `JoltR1CSInputs` exactly
+2. **Lagrange weights mismatch**: The Lagrange basis weights L_i(r0) might differ
+   - Jolt uses domain {-4, -3, ..., 4, 5} (symmetric around 0.5)
+   - Need to verify Zolt uses the same domain and evaluation
 
-#### Files to Compare
+3. **r_cycle orientation**: The opening point might use wrong byte order
+   - Jolt: `r_cycle = sumcheck_challenges[1..].reverse()` (big-endian)
+   - Need to verify Zolt converts correctly
 
-| Jolt | Zolt |
-|------|------|
-| `jolt-core/src/zkvm/r1cs/constraints.rs` | `src/zkvm/r1cs/constraints.zig` |
-| `jolt-core/src/zkvm/r1cs/inputs.rs` | `src/zkvm/r1cs/constraints.zig` (R1CSInputIndex) |
-| `R1CS_CONSTRAINTS_FIRST_GROUP_LABELS` | `FIRST_GROUP_INDICES` |
-| `R1CS_CONSTRAINTS_SECOND_GROUP_LABELS` | `SECOND_GROUP_INDICES` |
+4. **Streaming vs Linear phase**: The linear phase materialization might have issues
+   - Jolt materializes Az/Bz once, then binds with `bound_poly_var_bot`
+   - Zolt implements this but might have indexing bugs
 
 ### Next Steps
 
-1. **Fix the 2^64 bug in constraint 8** (RightLookupSub)
-2. **Audit all 19 constraint definitions against Jolt**
+1. Add debug output to compare:
+   - `r1cs_input_evals[0..3]` between Zolt's opening claims and Jolt's expectation
+   - `az_g0, bz_g0, az_g1, bz_g1` values at verification time
+   - Lagrange weights `w[0..9]` at r0
 
-### If Still Failing After Constraint Fix, Investigate
-
-1. Compare Jolt's streaming round polynomial coefficients with Zolt's
-2. Check if the constraint group blending with r_stream is correct
-3. Verify the index mapping (x_out, x_in) -> cycle_idx is correct
-4. Check if there's an issue with how E_out/E_in tables are being used
+2. Create a minimal test case that:
+   - Uses a single cycle
+   - Prints intermediate values from both Zolt prover and Jolt verifier
+   - Identifies exact divergence point
 
 ### Test Commands
 ```bash
@@ -134,7 +76,7 @@ zig build test --summary all
 
 # Generate proof
 zig build -Doptimize=ReleaseFast && ./zig-out/bin/zolt prove examples/fibonacci.elf \
-  --jolt-format -o /tmp/zolt_proof.bin
+  --jolt-format -o /tmp/zolt_proof_dory.bin
 
 # Jolt verification tests
 cd /Users/matteo/projects/jolt
@@ -156,7 +98,8 @@ cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture
 - [x] evalsToCompressed format
 
 ### RISC-V & R1CS
-- [x] R1CS constraint definitions (19 constraints, 2 groups)
+- [x] R1CS constraint definitions (19 constraints, 2 groups) - FIXED
+- [x] Constraint 8 (RightLookupSub) now has 2^64 constant
 - [x] UniSkip polynomial generation
 - [x] Memory layout constants match Jolt
 - [x] R1CS input ordering matches Jolt's ALL_R1CS_INPUTS

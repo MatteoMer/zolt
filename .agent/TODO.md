@@ -2,95 +2,80 @@
 
 ## Current Status: Session 38 - January 2, 2026
 
-**Progress: Deep analysis of t_prime_poly construction and indexing**
+**712 tests pass. Stage 1 sumcheck output_claim mismatch remains.**
 
 ---
 
-## Key Findings
+## Summary of Findings
 
-### 1. EqPolynomial is Correct
-- Partition of unity test passes
-- Sum of eq evaluations equals 1
+### What Works ✅
+1. EqPolynomial - partition of unity holds, sum equals 1
+2. Individual Az and Bz MLE evaluations match between prover and verifier
+3. All 712 unit tests pass
+4. Proof generation completes successfully
 
-### 2. Individual Az/Bz MLEs Match
-- `Az MLE match: true, Bz MLE match: true`
+### What Doesn't Work ❌
+1. Stage 1 sumcheck output_claim doesn't match expected_output_claim
+   - Prover's inner product is ~79.5% of expected
+   - Difference: output=21656... vs expected=4977...
 
-### 3. Inner Product Mismatch
-- Prover's implicit inner product is ~79.5% of expected
-- This is the core issue to resolve
+### Root Cause Hypothesis
 
----
+The issue is in how `t_prime_poly` accumulates the product `Az * Bz` across cycles.
 
-## Root Cause Analysis
+Jolt has two materialization paths:
+1. `round_zero` - simpler, no r_grid scaling
+2. `general` - complex, with r_grid scaling
 
-### Jolt's Two Materialization Paths
+Zolt has one path that always uses r_grid, but at round 1, r_grid = [1.0], so this should be equivalent.
 
-Jolt has two different functions for materializing Az/Bz:
+The indexing formulas use different styles:
+- Jolt: `full_idx = grid_size * i + j` (multiplication)
+- Zolt: `full_idx = base_idx | x_val | r_idx` (bitwise OR)
 
-1. **`fused_materialise_polynomials_round_zero`** (first linear round)
-   - Uses `lagrange_evals_r0` directly (NO r_grid scaling)
-   - Iterates: `full_idx = grid_size * i + j`, `time_step = full_idx >> 1`
-   - When grid_size >= 2: fills two positions (az0, az1) per iteration
-
-2. **`fused_materialise_polynomials_general_with_multiquadratic`** (subsequent rounds)
-   - Uses `scaled_w = lagrange_evals_r0 * r_grid[r_idx]`
-   - More complex indexing with base_idx, x_val_shifted, r_idx
-
-### Zolt's Single Path
-
-Zolt only has one materialization function that ALWAYS uses r_grid:
-```zig
-scaled_w[r_idx][i] = lagrange_evals_r0[i] * r_grid[r_idx]
-```
-
-For first round, r_grid = [1.0], so this should be equivalent. But the indexing structure may differ.
-
-### Indexing Formula Difference
-
-**Jolt round_zero**:
-```rust
-let full_idx = grid_size * i + j;  // Multiplication
-let time_step_idx = full_idx >> 1;
-```
-
-**Zolt**:
-```zig
-const base_idx = (x_out << bits) | (x_in << bits);  // Bitwise OR
-const full_idx = base_idx | x_val | r_idx;
-const step_idx = full_idx >> 1;
-```
-
-These are mathematically equivalent when the bit positions don't overlap, but the structure is different.
+These should be mathematically equivalent when bit positions don't overlap, but verification is needed.
 
 ---
 
-## Investigation Needed
+## Next Steps
 
-1. **Trace both implementations** with the same inputs and compare cycle indices accessed
-2. **Verify head_in_bits/head_out_bits** calculation matches Jolt
-3. **Check the `grid_size >= 2` special case** - Jolt fills two positions per iteration
+1. Add debug logging to Zolt's `buildTPrimePoly` to print:
+   - cycle indices accessed
+   - Az/Bz values at each index
+   - accumulated t_prime values
+
+2. Add similar debug logging to Jolt's `fused_materialise_polynomials_round_zero`
+
+3. Compare the two side-by-side to find the divergence point
+
+4. The ~79.5% ratio (~4/5) suggests a systematic difference, possibly in how constraint groups are weighted
 
 ---
 
 ## Test Commands
 
 ```bash
-# Run Zolt tests
+# All tests pass
 zig build test --summary all
 
 # Generate proof
-zig build -Doptimize=ReleaseFast && ./zig-out/bin/zolt prove examples/fibonacci.elf \
-  --jolt-format -o /tmp/zolt_proof_dory.bin
+zig build -Doptimize=ReleaseFast
+./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o /tmp/zolt_proof_dory.bin
 
-# Jolt verification
+# Jolt verification (fails at Stage 1)
 cd /Users/matteo/projects/jolt
 cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture
 ```
 
 ---
 
-## Next Steps
+## Key Files
 
-1. Add detailed debug logging to both Zolt's materialization and Jolt's round_zero
-2. Compare cycle indices, group selections, and accumulated values
-3. Identify the exact point of divergence
+### Zolt
+- `src/zkvm/spartan/streaming_outer.zig` - materializeLinearPhasePolynomials, buildTPrimePoly
+- `src/poly/split_eq.zig` - getWindowEqTables, computeCubicRoundPoly
+- `src/poly/multiquadratic.zig` - MultiquadraticPolynomial
+
+### Jolt (Reference)
+- `jolt-core/src/zkvm/spartan/outer.rs` - fused_materialise_polynomials_round_zero
+- `jolt-core/src/poly/split_eq_poly.rs` - E_out_in_for_window

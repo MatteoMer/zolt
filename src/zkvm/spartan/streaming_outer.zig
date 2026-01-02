@@ -1424,8 +1424,9 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 const compressed = poly_mod.UniPoly(F).evalsToCompressed(round_poly);
                 try sumcheck_proof.addRoundPoly(&compressed);
 
-                // Get challenge
-                transcript.appendSlice(&round_poly);
+                // Get challenge - append compressed coefficients to match Jolt's transcript
+                // CRITICAL: Jolt appends compressed coefficients [c0, c2, c3], NOT evaluations!
+                transcript.appendSlice(&compressed);
                 const r = transcript.challengeScalar();
 
                 // Update state

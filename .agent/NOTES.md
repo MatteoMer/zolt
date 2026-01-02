@@ -1,6 +1,55 @@
 # Zolt-Jolt Compatibility Notes
 
-## Current Status (Session 32 - January 2, 2026)
+## Current Status (Session 39 - January 2, 2026)
+
+### Summary
+
+The Stage 1 sumcheck output_claim doesn't match the expected_output_claim. All 712 unit tests pass, and the transcript challenges are identical between prover and verifier.
+
+### Session 39 Investigation
+
+1. **Round zero materialization**: Updated `materializeLinearPhasePolynomials` to use the simple `full_idx = grid_size * i + j` indexing (matching Jolt's `fused_materialise_polynomials_round_zero`). However, this didn't change the proof output because when `num_r_bits = 0` (at round zero), both old and new formulas compute identical indices.
+
+2. **Transcript consistency**: The challenges are correctly shared between prover and verifier. The same `r_stream` value appears in both the round polynomial and the verification formula.
+
+3. **E_out/E_in tables**: These are correctly initialized with `[1]` at index 0, matching Jolt's invariant.
+
+4. **Multiquadratic expansion**: The `expandGrid` function correctly computes `[f0, f1, f1-f0]` for window_size=1, matching Jolt's `expand_linear_dim1`.
+
+### Verification Formula (from Jolt)
+
+```
+expected_output_claim = L(tau_high, r0) * eq(tau_low, r_reversed) * Az(rx_constr) * Bz(rx_constr)
+```
+
+Where:
+- `L(tau_high, r0)` = Lagrange kernel
+- `eq(tau_low, r_reversed)` = EqPolynomial MLE evaluation
+- `rx_constr = [r_stream, r0]` = constraint row randomness
+- `Az`, `Bz` = constraint polynomial evaluations
+
+### Current Values
+
+```
+output_claim:          21656329869382715893372831461077086717482664293827627865217976029788055707943
+expected_output_claim: 4977070801800327014657227951104439579081780871540314422928627443513195286072
+```
+
+### Next Steps
+
+1. Add debug output to trace t_prime_poly construction:
+   - Print t_prime_poly.evaluations[0], [1], [2] after construction
+   - Compare with what Jolt produces
+
+2. Verify E_out and E_in table values at round zero:
+   - Print E_out.len, E_in.len, first few values
+   - Compare with Jolt's getWindowEqTables output
+
+3. Check if the issue is in how current_scalar is used in computeCubicRoundPoly
+
+---
+
+## Previous Status (Session 32 - January 2, 2026)
 
 ### CRITICAL DISCOVERY: EqPolynomial is CORRECT!
 
@@ -42,45 +91,6 @@ Possible issues:
 2. This might be computing a different quantity than what Jolt's prover does
 3. The projection via `E_active` and `computeCubicRoundPoly` may have subtle bugs
 
-### Verification Values
-
-From test output:
-```
-output_claim:          21656329869382715893372831461077086717482664293827627865217976029788055707943
-expected_output_claim: 4977070801800327014657227951104439579081780871540314422928627443513195286072
-```
-
-### 712+ Tests Pass
-
-All tests pass including:
-- EqPolynomial partition of unity
-- Az/Bz MLE computation
-- Gruen cubic polynomial construction
-- Multiquadratic polynomial operations
-
-### Next Steps
-
-1. Add detailed tracing to each sumcheck round
-2. Compare t_prime_poly values between Zolt and Jolt
-3. Verify the round polynomial aggregation produces the correct final claim
-
----
-
-## Previous Status (Session 31 - January 2, 2026)
-
-### Recent Progress
-
-1. **Fixed transcript to use compressed coefficients** - The prover was appending evaluation points `[s(0), s(1), s(2), s(3)]` instead of compressed coefficients `[c0, c2, c3]`. Fixed in `streaming_outer.zig`.
-
-2. **Verified mathematical correctness** - For linear Az and Bz functions, the identity `MLE(Az)(r) * MLE(Bz)(r) = Az(z_MLE(r)) * Bz(z_MLE(r))` holds due to linearity.
-
-3. **Identified potential structural issue** - The Az/Bz computation in `materializeLinearPhasePolynomials` may not match Jolt's structure.
-
-### Key Observations
-
-1. **Individual Az and Bz MLEs match** - The test shows `Az MLE match: true, Bz MLE match: true`
-2. **But the products differ** - This suggests a subtle structural difference in how the values are combined
-
 ---
 
 ## Architecture Notes
@@ -106,3 +116,24 @@ From Jolt's eq_poly.rs:
 evals(r)[i] = eq(r, b₀…b_{n-1})
 where i has MSB b₀ and LSB b_{n-1}
 ```
+
+### Code Paths
+
+**Zolt prover flow:**
+1. `StreamingOuterProver.initWithScaling` - sets up split_eq with tau and scaling_factor
+2. `bindFirstRoundChallenge(r0)` - sets r_stream, current_round=1
+3. `computeRemainingRoundPoly()` calls:
+   - `materializeLinearPhasePolynomials()` - fills az_poly, bz_poly, t_prime_poly
+   - `computeTEvals()` - gets (t_zero, t_infinity) from t_prime_poly
+   - `split_eq.computeCubicRoundPoly(t_zero, t_infinity, previous_claim)` - builds round polynomial
+4. After each round: `bindRemainingRoundChallenge(r)` binds split_eq, t_prime_poly, az_poly, bz_poly
+
+**Jolt prover flow:**
+1. `OuterSharedState::new` - sets up split_eq_poly, r0
+2. `OuterLinearStage::initialize` calls:
+   - `fused_materialise_polynomials_round_zero` or `compute_evaluation_grid_from_polynomials_parallel`
+   - Builds az, bz, t_prime_poly
+3. `next_round` calls:
+   - `compute_t_evals` - gets (t_zero, t_infinity)
+   - `compute_cubic_round_poly` - builds round polynomial
+4. After each round: `ingest_challenge` binds all polynomials

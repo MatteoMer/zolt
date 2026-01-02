@@ -2,149 +2,75 @@
 
 ## Current Status: Session 35 - January 2, 2026
 
-**All 710 Zolt tests pass**
+**All 710 Zolt tests pass, but Jolt verification still fails**
 
 ### Completed This Session
 
 1. **MultiquadraticPolynomial.bind()** - Added Jolt-compatible quadratic interpolation
    - Formula: `f(r) = f(0)*(1-r) + f(1)*r + f(∞)*r(r-1)`
-   - Reference: `jolt-core/src/poly/multiquadratic_poly.rs:bind_first_variable`
 
 2. **GruenSplitEqPolynomial.getEActiveForWindow()** - Added E_active projection
-   - Computes eq table over active window bits (window_size - 1 bits)
-   - Reference: `jolt-core/src/poly/split_eq_poly.rs:E_active_for_window`
 
 3. **t_prime_poly integration** - Added to StreamingOuterProver
-   - `buildTPrimePoly()` - Creates multiquadratic from bound Az/Bz
-   - `rebuildTPrimePoly()` - nextWindow equivalent for rebuilding
-   - `computeTEvals()` - Projects t_prime using E_active weights
-   - **Bind t_prime_poly after each linear round** (CRITICAL fix!)
+   - Build, rebuild, bind, and project t_prime_poly
+
+4. **LinearOnlySchedule** - Fixed round handling
+   - Round 1 now initializes linear stage (matches Jolt's round 0)
+   - All rounds use linear phase (no streaming rounds)
 
 ---
 
-## Verified Architecture Match
+## Current Issue: Sumcheck Output Claim Mismatch
 
-### Jolt's ingest_challenge (OuterLinearStage)
+The sumcheck verification fails with:
+```
+output_claim:          8206907536993754864973510285637683658139731930814938521485939885759521476392
+expected_output_claim: 5887936957248500858334092112703331331673171118046881060635640978343116912473
+```
+
+### The Expected Output Claim Formula
+
+From `outer.rs:expected_output_claim`:
 ```rust
-fn ingest_challenge(&mut self, shared: &mut Self::Shared, r_j: F::Challenge, _round: usize) {
-    shared.split_eq_poly.bind(r_j);
-    if let Some(t_prime_poly) = shared.t_prime_poly.as_mut() {
-        t_prime_poly.bind(r_j, BindingOrder::LowToHigh);  // <-- CRITICAL
-    }
-    rayon::join(
-        || self.az.bind_parallel(r_j, BindingOrder::LowToHigh),
-        || self.bz.bind_parallel(r_j, BindingOrder::LowToHigh),
-    );
-}
+let rx_constr = &[sumcheck_challenges[0], self.params.r0];  // [r_stream, r0]
+let inner_sum_prod = self.key.evaluate_inner_sum_product_at_point(rx_constr, r1cs_input_evals);
+
+let tau_high_bound_r0 = LagrangePolynomial::lagrange_kernel(&tau_high, &r0);
+let tau_bound_r_tail_reversed = EqPolynomial::mle(tau_low, &r_tail_reversed);
+
+result = tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod
 ```
 
-### Zolt's bindRemainingRoundChallenge (now matches!)
-```zig
-pub fn bindRemainingRoundChallenge(self: *Self, r: F) !void {
-    // ... streaming/linear phase handling ...
+### Key Variables
+- `r0`: UniSkip challenge (used in Lagrange kernel)
+- `r_stream = sumcheck_challenges[0]`: First remaining sumcheck challenge (constraintグループ selector)
+- `r_tail_reversed`: All remaining sumcheck challenges in reverse order
 
-    try self.challenges.append(self.allocator, r);
-    self.split_eq.bind(r);
+### Suspected Issues
 
-    // Bind t_prime_poly (CRITICAL: matches Jolt's ingest_challenge)
-    if (self.t_prime_poly) |*t_prime| {
-        t_prime.bind(r);
-    }
-
-    self.current_round += 1;
-}
-```
+1. **E_active calculation may be wrong** for the projection
+2. **t_prime_poly structure** might not match Jolt's base-3 indexing
+3. **The expandGrid function** may not be implementing correctly
 
 ---
 
-## Next Steps
+## Debug Strategy
 
-### Phase 3: End-to-End Verification
-
-1. **Test proof generation with t_prime binding**
-   ```bash
-   zig build -Doptimize=ReleaseFast && ./zig-out/bin/zolt prove examples/fibonacci.elf \
-     --jolt-format -o /tmp/zolt_proof_dory.bin
-   ```
-
-2. **Run Jolt verification**
-   ```bash
-   cd /Users/matteo/projects/jolt
-   cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture
-   ```
-
-3. **Debug sumcheck intermediate values** (if needed)
-   - Compare t_prime_poly values after each bind
-   - Compare (t_zero, t_infinity) projections
-   - Compare round polynomial coefficients
+Need to add debug output to compare:
+1. t_prime_poly values at each round
+2. (t_zero, t_infinity) projections at each round
+3. Round polynomial evaluations [s(0), s(1), s(2), s(3)]
+4. Compare with Jolt's values at each step
 
 ---
 
-## Implementation Checklist
-
-### Phase 1: Primitives [COMPLETE]
-- [x] Add `MultiquadraticPolynomial.bind()` method
-- [x] Add unit tests for bind()
-- [x] Add `GruenSplitEqPolynomial.getEActiveForWindow()`
-- [x] Add unit tests for getEActiveForWindow()
-
-### Phase 2: t_prime Integration [COMPLETE]
-- [x] Add t_prime_poly field to StreamingOuterProver
-- [x] Add buildTPrimePoly() for initial materialization
-- [x] Add rebuildTPrimePoly() (nextWindow equivalent)
-- [x] Add computeTEvals() for projection
-- [x] Bind t_prime_poly in bindRemainingRoundChallenge
-- [x] Update computeRemainingRoundPoly to use t_prime in linear phase
-
-### Phase 3: Verification [IN PROGRESS]
-- [ ] Generate proof with new t_prime binding
-- [ ] Run Jolt verification test
-- [ ] Compare intermediate values if verification fails
-
----
-
-## Verified Correct Components
-
-### Transcript
-- [x] Blake2b transcript format matches Jolt
-- [x] Challenge scalar computation (128-bit, no masking)
-- [x] Field serialization (Arkworks LE format)
-
-### Polynomial Computation
-- [x] Gruen cubic polynomial formula
-- [x] Split eq polynomial factorization (E_out/E_in)
-- [x] bind() operation (eq factor computation)
-- [x] Lagrange interpolation
-- [x] evalsToCompressed format
-- [x] DensePolynomial.bindLow() matches Jolt's bound_poly_var_bot
-- [x] MultiquadraticPolynomial.bind() matches Jolt
-- [x] GruenSplitEqPolynomial.getEActiveForWindow() matches Jolt
-
-### RISC-V & R1CS
-- [x] R1CS constraint definitions (19 constraints, 2 groups)
-- [x] Constraint 8 (RightLookupSub) has 2^64 constant
-- [x] UniSkip polynomial generation
-- [x] Memory layout constants match Jolt
-- [x] R1CS input ordering matches Jolt's ALL_R1CS_INPUTS
-
-### Supporting Structures
-- [x] ExpandingTable implementation
-- [x] GruenSplitEqPolynomial (complete with E_active)
-- [x] MultiquadraticPolynomial (complete with bind)
-- [x] t_prime_poly binding in linear phase
-
-### All Tests Pass
-- [x] 710/710 Zolt tests pass
-
----
-
-## Key Files Modified This Session
+## Files Modified This Session
 
 | File | Changes |
 |------|---------|
-| `src/poly/multiquadratic.zig` | Added `bind()`, `isBound()`, `finalSumcheckClaim()` |
-| `src/poly/split_eq.zig` | Added `getEActiveForWindow()` |
-| `src/zkvm/spartan/streaming_outer.zig` | Added t_prime_poly field, buildTPrimePoly, rebuildTPrimePoly, computeTEvals, bind in ingestChallenge |
+| `src/poly/multiquadratic.zig` | Added bind(), isBound(), finalSumcheckClaim() |
+| `src/poly/split_eq.zig` | Added getEActiveForWindow() |
+| `src/zkvm/spartan/streaming_outer.zig` | Major restructure for LinearOnlySchedule |
 
 ---
 

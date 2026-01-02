@@ -1331,22 +1331,32 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 self.r_stream = r;
             }
 
-            // Jolt's LinearOnlySchedule: all rounds are linear phase
+            try self.challenges.append(self.allocator, r);
+
+            // CRITICAL: Match Jolt's ingest_challenge binding order exactly:
+            // 1. split_eq_poly.bind(r_j) FIRST
+            // 2. t_prime_poly.bind(r_j, BindingOrder::LowToHigh)
+            // 3. az.bind_parallel(r_j) and bz.bind_parallel(r_j)
+            //
+            // This order matters because getWindowEqTables reads from split_eq,
+            // and if we bind az/bz before split_eq, the eq tables used in
+            // buildTPrimePoly (next_window) will be at the wrong state.
+
+            // 1. Bind split_eq FIRST
+            self.split_eq.bind(r);
+
+            // 2. Bind t_prime_poly
+            if (self.t_prime_poly) |*t_prime| {
+                t_prime.bind(r);
+            }
+
+            // 3. Bind Az/Bz polynomials LAST
             // ALL rounds bind Az/Bz polynomials (this is critical for next_window to work!)
-            // In Jolt's ingest_challenge, az/bz are bound on EVERY round, including round 0.
             if (self.az_poly) |*az| {
                 az.bindLow(r);
             }
             if (self.bz_poly) |*bz| {
                 bz.bindLow(r);
-            }
-
-            try self.challenges.append(self.allocator, r);
-            self.split_eq.bind(r);
-
-            // Bind t_prime_poly (CRITICAL: matches Jolt's ingest_challenge)
-            if (self.t_prime_poly) |*t_prime| {
-                t_prime.bind(r);
             }
 
             self.current_round += 1;

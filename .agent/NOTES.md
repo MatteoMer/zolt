@@ -1,6 +1,72 @@
 # Zolt-Jolt Compatibility Notes
 
-## Current Status (Session 39 - January 2, 2026)
+## Current Status (Session 40 - January 2, 2026)
+
+### Summary
+
+Fixed the batching coefficient issue. Now round polynomials are scaled by `batching_coeff` before output. Challenges now match between prover and verifier. However, the final output_claim still doesn't match expected_output_claim.
+
+### Session 40 Key Progress
+
+1. **Batching coefficient applied**: Round polynomials are now multiplied by `batching_coeff` before being written to proof and transcript. The prover's internal state uses unscaled claims.
+
+2. **Transcript consistency verified**: The sumcheck challenges now match exactly between Zolt prover and Jolt verifier.
+
+3. **Lagrange kernel symmetry confirmed**: `L(x, y) = L(y, x)`, so argument order doesn't matter.
+
+4. **Eq polynomial binding verified**: Both implementations bind all 11 elements of tau_low.
+
+### Current Values
+
+```
+output_claim:          11745972059365673324717055336378505103382790433770080606002230314528714321637
+expected_output_claim: 13147110630967021857497758076978613720325907259294229523986769287815268967658
+```
+
+### Expected Output Claim Formula
+
+From Jolt's `OuterRemainingSumcheckVerifier::expected_output_claim`:
+
+```rust
+let tau_high = &tau[tau.len() - 1];
+let tau_low = &tau[..tau.len() - 1];
+
+// L(τ_high, r0) - Lagrange kernel at UniSkip challenge
+let tau_high_bound_r0 = LagrangePolynomial::lagrange_kernel(tau_high, &self.params.r0);
+
+// eq(τ_low, r_tail_reversed)
+let r_tail_reversed = sumcheck_challenges.iter().rev().collect();
+let tau_bound_r_tail_reversed = EqPolynomial::mle(tau_low, &r_tail_reversed);
+
+// Az(rx_constr) * Bz(rx_constr) where rx_constr = [r_stream, r0]
+let inner_sum_prod = key.evaluate_inner_sum_product_at_point(rx_constr, r1cs_input_evals);
+
+let result = tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod;
+// expected_output_claim = result * batching_coeff
+```
+
+### Remaining Hypothesis
+
+The output_claim from sumcheck should equal:
+```
+output_claim = eq_factor * (Az * Bz) * batching_coeff
+```
+
+Where `eq_factor = L(τ_high, r0) * eq(τ_low, r)` after all bindings.
+
+The mismatch suggests either:
+1. The eq_factor doesn't match (split_eq or Lagrange kernel issue)
+2. The Az*Bz product doesn't match (constraint evaluation issue)
+
+### Next Debug Steps
+
+1. Print `split_eq.current_scalar` at the end of sumcheck to verify eq_factor
+2. Print the final Az*Bz value from the prover
+3. Compare with Jolt's `tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod`
+
+---
+
+## Previous Status (Session 39 - January 2, 2026)
 
 ### Summary
 
@@ -8,88 +74,13 @@ The Stage 1 sumcheck output_claim doesn't match the expected_output_claim. All 7
 
 ### Session 39 Investigation
 
-1. **Round zero materialization**: Updated `materializeLinearPhasePolynomials` to use the simple `full_idx = grid_size * i + j` indexing (matching Jolt's `fused_materialise_polynomials_round_zero`). However, this didn't change the proof output because when `num_r_bits = 0` (at round zero), both old and new formulas compute identical indices.
+1. **Round zero materialization**: Updated `materializeLinearPhasePolynomials` to use the simple `full_idx = grid_size * i + j` indexing (matching Jolt's `fused_materialise_polynomials_round_zero`).
 
-2. **Transcript consistency**: The challenges are correctly shared between prover and verifier. The same `r_stream` value appears in both the round polynomial and the verification formula.
+2. **Transcript consistency**: The challenges are correctly shared between prover and verifier.
 
-3. **E_out/E_in tables**: These are correctly initialized with `[1]` at index 0, matching Jolt's invariant.
+3. **E_out/E_in tables**: These are correctly initialized with `[1]` at index 0.
 
-4. **Multiquadratic expansion**: The `expandGrid` function correctly computes `[f0, f1, f1-f0]` for window_size=1, matching Jolt's `expand_linear_dim1`.
-
-### Verification Formula (from Jolt)
-
-```
-expected_output_claim = L(tau_high, r0) * eq(tau_low, r_reversed) * Az(rx_constr) * Bz(rx_constr)
-```
-
-Where:
-- `L(tau_high, r0)` = Lagrange kernel
-- `eq(tau_low, r_reversed)` = EqPolynomial MLE evaluation
-- `rx_constr = [r_stream, r0]` = constraint row randomness
-- `Az`, `Bz` = constraint polynomial evaluations
-
-### Current Values
-
-```
-output_claim:          21656329869382715893372831461077086717482664293827627865217976029788055707943
-expected_output_claim: 4977070801800327014657227951104439579081780871540314422928627443513195286072
-```
-
-### Next Steps
-
-1. Add debug output to trace t_prime_poly construction:
-   - Print t_prime_poly.evaluations[0], [1], [2] after construction
-   - Compare with what Jolt produces
-
-2. Verify E_out and E_in table values at round zero:
-   - Print E_out.len, E_in.len, first few values
-   - Compare with Jolt's getWindowEqTables output
-
-3. Check if the issue is in how current_scalar is used in computeCubicRoundPoly
-
----
-
-## Previous Status (Session 32 - January 2, 2026)
-
-### CRITICAL DISCOVERY: EqPolynomial is CORRECT!
-
-**Verified:**
-1. ✅ EqPolynomial partition of unity test PASSES - sum equals 1
-2. ✅ Individual Az and Bz MLE evaluations MATCH between prover and verifier
-3. ✅ EqPolynomial with r=[5555, 6666] sums to exactly ONE
-
-**Debug output confirms:**
-```
-Sum:
-  ac96341c4ffffffb 36fc76959f60cd29 666ea36f7879462e 0e0a77c19a07df2f
-One:
-  ac96341c4ffffffb 36fc76959f60cd29 666ea36f7879462e 0e0a77c19a07df2f
-Sum == One? true
-```
-
-### The Inner Sum Product Mismatch Explained
-
-The test "inner_sum_prod: prover vs verifier computation" shows:
-- `prover_sum = Σ_t eq(r_cycle, t) * Az(t) * Bz(t)` (MLE of product)
-- `verifier_inner_sum_prod = Az_MLE(r_cycle) * Bz_MLE(r_cycle)` (product of MLEs)
-
-These are mathematically DIFFERENT quantities:
-```
-MLE(f*g)(r) ≠ MLE(f)(r) * MLE(g)(r)
-```
-
-HOWEVER, the sumcheck protocol produces the product of MLEs, NOT the MLE of products:
-- After binding all variables to r, the claim becomes: `eq(τ, r) * Az(r) * Bz(r)`
-- Here Az(r) and Bz(r) are single-point evaluations, which equal their MLE values
-
-### Root Cause Hypothesis
-
-The issue is in how the streaming outer prover's round polynomials are constructed. The sumcheck should produce `Az_MLE * Bz_MLE` at the final point, but something in the computation is causing it to compute `MLE(Az*Bz)` instead.
-
-Possible issues:
-1. The `buildTPrimePoly` function stores `Σ eq_weight * Az * Bz` per grid point
-2. This might be computing a different quantity than what Jolt's prover does
-3. The projection via `E_active` and `computeCubicRoundPoly` may have subtle bugs
+4. **Multiquadratic expansion**: The `expandGrid` function correctly computes `[f0, f1, f1-f0]` for window_size=1.
 
 ---
 
@@ -117,6 +108,13 @@ evals(r)[i] = eq(r, b₀…b_{n-1})
 where i has MSB b₀ and LSB b_{n-1}
 ```
 
+### Key Insight: MLE of Product vs Product of MLEs
+
+The sumcheck produces `Az_MLE(r) * Bz_MLE(r)` at the final point, NOT `MLE(Az*Bz)(r)`:
+- These are mathematically different: `MLE(f*g)(r) ≠ MLE(f)(r) * MLE(g)(r)`
+- After binding all variables to r, Az(r) and Bz(r) become single-point evaluations
+- The sumcheck correctly reduces to the product of these evaluations
+
 ### Code Paths
 
 **Zolt prover flow:**
@@ -130,10 +128,6 @@ where i has MSB b₀ and LSB b_{n-1}
 
 **Jolt prover flow:**
 1. `OuterSharedState::new` - sets up split_eq_poly, r0
-2. `OuterLinearStage::initialize` calls:
-   - `fused_materialise_polynomials_round_zero` or `compute_evaluation_grid_from_polynomials_parallel`
-   - Builds az, bz, t_prime_poly
-3. `next_round` calls:
-   - `compute_t_evals` - gets (t_zero, t_infinity)
-   - `compute_cubic_round_poly` - builds round polynomial
+2. `OuterLinearStage::initialize` - builds az, bz, t_prime_poly
+3. `next_round` - computes (t_zero, t_infinity) and cubic round poly
 4. After each round: `ingest_challenge` binds all polynomials

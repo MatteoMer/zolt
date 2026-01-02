@@ -30,6 +30,7 @@ const constraints = @import("../r1cs/constraints.zig");
 const univariate_skip = @import("../r1cs/univariate_skip.zig");
 const jolt_types = @import("../jolt_types.zig");
 const poly_mod = @import("../../poly/mod.zig");
+const multiquadratic = @import("../../poly/multiquadratic.zig");
 const GruenSplitEqPolynomial = poly_mod.GruenSplitEqPolynomial;
 const MultiquadraticPolynomial = poly_mod.MultiquadraticPolynomial;
 const utils = @import("../../utils/mod.zig");
@@ -92,6 +93,12 @@ pub fn StreamingOuterProver(comptime F: type) type {
         /// Materialized at linear phase start, bound each round with bindLow()
         /// Matches Jolt's OuterLinearStage.bz
         bz_poly: ?poly_mod.DensePolynomial(F),
+
+        /// Multiquadratic polynomial t' = Az * Bz on the ternary grid
+        /// Built during materialization and rebound each linear round.
+        /// Used for computing (t'(0), t'(∞)) projections in compute_t_evals.
+        /// Matches Jolt's OuterSharedState.t_prime_poly
+        t_prime_poly: ?MultiquadraticPolynomial(F),
 
         /// Allocator
         allocator: Allocator,
@@ -171,6 +178,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 .tau_high = tau_high,
                 .az_poly = null,
                 .bz_poly = null,
+                .t_prime_poly = null,
                 .allocator = allocator,
             };
         }
@@ -184,6 +192,9 @@ pub fn StreamingOuterProver(comptime F: type) type {
             }
             if (self.bz_poly) |*bz| {
                 bz.deinit();
+            }
+            if (self.t_prime_poly) |*t_prime| {
+                t_prime.deinit();
             }
         }
 
@@ -322,6 +333,129 @@ pub fn StreamingOuterProver(comptime F: type) type {
             // Free the temporary arrays since DensePolynomial.init copies them
             self.allocator.free(az_evals);
             self.allocator.free(bz_evals);
+
+            // Build t_prime_poly: multiquadratic polynomial of Az * Bz products
+            // The polynomial has window_size = 1 variable, so 3^1 = 3 evaluations
+            try self.buildTPrimePoly(window_size);
+        }
+
+        /// Build t_prime_poly from bound Az/Bz polynomials
+        ///
+        /// Matches Jolt's compute_evaluation_grid_from_polynomials_parallel.
+        /// Creates a MultiquadraticPolynomial of size 3^window_size where each entry is:
+        ///   t'[idx] = Σ_{x_out, x_in} E_out[x_out] * E_in[x_in] * Az[i,j] * Bz[i,j]
+        ///
+        /// where i = (x_out << num_xin_bits) | x_in and j indexes within the window grid.
+        fn buildTPrimePoly(self: *Self, window_size: usize) !void {
+            const az_poly = &(self.az_poly orelse return error.AzPolyNotInitialized);
+            const bz_poly = &(self.bz_poly orelse return error.BzPolyNotInitialized);
+
+            const eq_tables = self.split_eq.getWindowEqTables(0, window_size);
+            const E_out = eq_tables.E_out;
+            const E_in = eq_tables.E_in;
+
+            // Compute grid sizes
+            const grid_size = @as(usize, 1) << @intCast(window_size);
+            var three_pow_dim: usize = 1;
+            for (0..window_size) |_| three_pow_dim *= 3;
+
+            const num_xin_bits: u6 = if (E_in.len > 1) @intCast(std.math.log2_int(usize, E_in.len)) else 0;
+
+            // Allocate result array
+            var ans = try self.allocator.alloc(F, three_pow_dim);
+            errdefer self.allocator.free(ans);
+            @memset(ans, F.zero());
+
+            // Allocate temporary buffers for multiquadratic expansion
+            var az_grid = try self.allocator.alloc(F, grid_size);
+            defer self.allocator.free(az_grid);
+            var bz_grid = try self.allocator.alloc(F, grid_size);
+            defer self.allocator.free(bz_grid);
+            var buff_a = try self.allocator.alloc(F, three_pow_dim);
+            defer self.allocator.free(buff_a);
+            var buff_b = try self.allocator.alloc(F, three_pow_dim);
+            defer self.allocator.free(buff_b);
+
+            // For each (x_out, x_in) pair
+            for (0..E_out.len) |x_out| {
+                for (0..E_in.len) |x_in| {
+                    const i = (x_out << num_xin_bits) | x_in;
+
+                    // Extract az and bz values for this pair
+                    for (0..grid_size) |j| {
+                        const index = grid_size * i + j;
+                        if (index < az_poly.boundLen()) {
+                            az_grid[j] = az_poly.evaluations[index];
+                            bz_grid[j] = bz_poly.evaluations[index];
+                        } else {
+                            az_grid[j] = F.zero();
+                            bz_grid[j] = F.zero();
+                        }
+                    }
+
+                    // Expand linear grids to multiquadratic
+                    // For window_size = 1: buff[0] = grid[0], buff[1] = grid[1], buff[2] = grid[1] - grid[0]
+                    @memset(buff_a, F.zero());
+                    @memset(buff_b, F.zero());
+
+                    // Copy boolean evaluations to ternary positions
+                    for (0..grid_size) |linear_idx| {
+                        // Map linear index to ternary index (bits stay in {0,1})
+                        var ternary_idx: usize = 0;
+                        var pow3_factor: usize = 1;
+                        var idx = linear_idx;
+                        for (0..window_size) |_| {
+                            const bit = idx & 1;
+                            ternary_idx += bit * pow3_factor;
+                            pow3_factor *= 3;
+                            idx >>= 1;
+                        }
+                        buff_a[ternary_idx] = az_grid[linear_idx];
+                        buff_b[ternary_idx] = bz_grid[linear_idx];
+                    }
+
+                    // Expand to include infinity values: f(∞) = f(1) - f(0)
+                    multiquadratic.expandGrid(F, window_size, buff_a);
+                    multiquadratic.expandGrid(F, window_size, buff_b);
+
+                    // Accumulate Az * Bz * E_out * E_in
+                    const eq_weight = E_out[x_out].mul(E_in[x_in]);
+                    for (0..three_pow_dim) |idx| {
+                        ans[idx] = ans[idx].add(buff_a[idx].mul(buff_b[idx]).mul(eq_weight));
+                    }
+                }
+            }
+
+            // Create the MultiquadraticPolynomial
+            if (self.t_prime_poly) |*old| {
+                old.deinit();
+            }
+            self.t_prime_poly = try MultiquadraticPolynomial(F).init(self.allocator, window_size, ans);
+            self.allocator.free(ans);
+        }
+
+        /// Rebuild t_prime_poly from bound Az/Bz polynomials (for linear rounds after first)
+        ///
+        /// This is called at the start of each linear round (except the first which uses buildTPrimePoly).
+        /// It uses the already-bound az_poly and bz_poly to rebuild t_prime_poly.
+        fn rebuildTPrimePoly(self: *Self, window_size: usize) !void {
+            try self.buildTPrimePoly(window_size);
+        }
+
+        /// Compute (t'(0), t'(∞)) from t_prime_poly using E_active projection
+        ///
+        /// Matches Jolt's compute_t_evals in OuterSharedState.
+        /// Projects t_prime_poly to its first variable at evaluation points 0 and ∞,
+        /// weighted by eq(tau_active, ·) over the remaining coordinates.
+        fn computeTEvals(self: *Self, window_size: usize) !struct { t_zero: F, t_infinity: F } {
+            const t_prime_poly = &(self.t_prime_poly orelse return error.TPrimePolyNotInitialized);
+
+            // Get E_active: eq table over active window bits (all window bits except current Gruen variable)
+            const e_active = try self.split_eq.getEActiveForWindow(self.allocator, window_size);
+            defer self.allocator.free(e_active);
+
+            // Project t_prime_poly to first variable using E_active weights
+            return t_prime_poly.projectToFirstVariable(e_active);
         }
 
         /// Compute the first-round univariate skip polynomial
@@ -807,23 +941,31 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 // starts immediately after the streaming round (round 1)
                 const switch_over: usize = 0;
                 const is_linear_phase = self.current_round > switch_over;
+                const window_size: usize = 1;
 
-                if (is_linear_phase and self.az_poly != null and self.bz_poly != null) {
-                    // LINEAR PHASE: Use bound Az/Bz polynomials
+                if (is_linear_phase and self.t_prime_poly != null) {
+                    // LINEAR PHASE: Use t_prime_poly directly
                     //
-                    // The bound polynomials have already been materialized and bound
-                    // up to this point. We read using Jolt's indexing:
-                    //   az[grid_size * i + j] where i = (x_out << num_xin_bits) | x_in
+                    // The t_prime_poly was built during materializeLinearPhasePolynomials
+                    // and is bound after each round. We use computeTEvals to project
+                    // it to (t_zero, t_infinity) using E_active weights.
                     //
-                    // grid_size = 2 for window_size = 1
+                    // IMPORTANT: If t_prime_poly has num_vars == 0, we need to rebuild it
+                    // from the bound Az/Bz polynomials (this is nextWindow in Jolt)
+                    if (self.t_prime_poly.?.num_vars == 0 and self.az_poly != null and self.bz_poly != null) {
+                        // Rebuild t_prime_poly from bound Az/Bz (nextWindow equivalent)
+                        try self.rebuildTPrimePoly(window_size);
+                    }
+
+                    const t_evals = try self.computeTEvals(window_size);
+                    t_zero = t_evals.t_zero;
+                    t_infinity = t_evals.t_infinity;
+                } else if (is_linear_phase and self.az_poly != null and self.bz_poly != null) {
+                    // FALLBACK: Compute directly from bound Az/Bz polynomials
+                    // This path is taken if t_prime_poly is not available
                     const az_poly = &self.az_poly.?;
                     const bz_poly = &self.bz_poly.?;
                     const poly_len = az_poly.boundLen();
-
-                    // Debug: verify we're in linear phase
-                    std.debug.print("LINEAR PHASE: round={}, poly_len={}, E_out={}, E_in={}\n", .{
-                        self.current_round, poly_len, E_out.len, E_in.len,
-                    });
 
                     // grid_size for window_size = 1 is 2
                     const grid_size: usize = 2;
@@ -1386,6 +1528,11 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
             try self.challenges.append(self.allocator, r);
             self.split_eq.bind(r);
+
+            // Bind t_prime_poly (CRITICAL: matches Jolt's ingest_challenge)
+            if (self.t_prime_poly) |*t_prime| {
+                t_prime.bind(r);
+            }
 
             self.current_round += 1;
         }

@@ -1,69 +1,86 @@
 # Zolt-Jolt Compatibility TODO
 
-## Current Status: Session 39 - January 2, 2026
+## Current Status: Session 40 - January 2, 2026
 
-**712 tests pass. Stage 1 sumcheck output_claim mismatch persists.**
+**712 tests pass. Stage 1 sumcheck output_claim still mismatches expected_output_claim.**
 
 ---
 
 ## Summary of Investigation
 
-### What Works ✅
-1. EqPolynomial - partition of unity holds, sum equals 1
-2. Individual Az and Bz MLE evaluations match between prover and verifier
-3. All 712 unit tests pass
-4. Proof generation completes successfully
+### Session 40 Progress
 
-### What Doesn't Work ❌
-1. Stage 1 sumcheck output_claim doesn't match expected_output_claim
-   - output_claim: 21656329869382715893372831461077086717482664293827627865217976029788055707943
-   - expected: 4977070801800327014657227951104439579081780871540314422928627443513195286072
+1. **Discovered batching coefficient issue**: The round polynomials were not being scaled by the batching coefficient. Fixed in `proof_converter.zig` - now:
+   - Raw evaluations are computed by the prover (unscaled)
+   - Scaled evaluations = raw * batching_coeff are written to proof
+   - Scaled coefficients are hashed to transcript
+   - Unscaled claim is used for prover's internal state
 
-### Investigation in Session 39
+2. **Verified transcript consistency**: The challenges now match between prover and verifier (same r_i values in sumcheck debug output).
 
-**Finding 1: Round Zero vs General Materialization**
+3. **Remaining issue**: The final output_claim still doesn't match expected_output_claim:
+   - output_claim: 11745972059365673324717055336378505103382790433770080606002230314528714321637
+   - expected: 13147110630967021857497758076978613720325907259294229523986769287815268967658
 
-The jolt-rust-expert agent identified that Jolt has TWO materialization paths:
-- `fused_materialise_polynomials_round_zero`: Simple indexing with `full_idx = grid_size * i + j`
-- `fused_materialise_polynomials_general_with_multiquadratic`: Complex indexing with r_grid
+### Analysis of expected_output_claim
 
-Zolt was using the general path for all rounds. I updated `materializeLinearPhasePolynomials` to use the round zero logic, but the proof output is IDENTICAL before and after the change.
-
-**Possible explanations:**
-1. The materialization change doesn't affect the values written to az/bz at round zero
-2. The issue is elsewhere in the code path
-3. The formula is correct but some constants differ
-
-**Finding 2: Verification Formula**
-
-The verifier computes expected_output_claim as:
-```
-tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod
+From Jolt's verifier (outer.rs):
+```rust
+expected_output_claim = tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod * batching_coeff
 ```
 
-Where inner_sum_prod = Az(rx_constr, r_cycle) * Bz(rx_constr, r_cycle).
+Where:
+- `tau_high_bound_r0 = L(tau_high, r0_uniskip)` - Lagrange kernel at UniSkip challenge
+- `tau_bound_r_tail_reversed = eq(tau_low, [r10, r9, ..., r1, r0_sumcheck])` - eq poly at reversed challenges
+- `inner_sum_prod = Az(rx_constr) * Bz(rx_constr)` - R1CS matrix products
+- `rx_constr = [r0_sumcheck, r0_uniskip]` - constraint row point
 
-The rx_constr = [r_stream (sumcheck_challenges[0]), r0].
+### Key Questions
+
+1. **Eq polynomial direction**: Is `r_tail_reversed = [r10, ..., r0]` being computed correctly?
+   - In Jolt: `sumcheck_challenges.iter().rev().copied().collect()`
+   - sumcheck_challenges has 11 elements (rounds 0-10)
+   - reversed = [r10, r9, ..., r1, r0]
+
+2. **Split_eq binding order**: Zolt's split_eq uses LowToHigh binding. After binding:
+   - Round 0 challenge r0 is bound to lowest bit
+   - Round 10 challenge r10 is bound to highest bit
+   - Final eq evaluation should match eq(tau_low, [r0, r1, ..., r10]) in low-to-high bit order
+   - Which equals eq(tau_low_reversed, [r10, ..., r0]) in big-endian order
+
+3. **Is tau_low being constructed correctly?**
+   - tau = full challenge vector (length num_rows_bits = num_cycle_vars + 2)
+   - tau_high = tau[tau.len - 1]
+   - tau_low = tau[0..tau.len - 1]
+
+4. **Is the Lagrange kernel being applied correctly?**
+   - At initialization, split_eq gets scaling_factor = L(tau_high, r0_uniskip)
+   - This should be multiplied into all eq evaluations
+
+### Possible Issues
+
+1. **Variable ordering in eq polynomial**: The eq(tau_low, r_tail_reversed) might have wrong bit ordering
+
+2. **Off-by-one in tau split**: tau_low might be wrong length or content
+
+3. **Lagrange scaling factor**: The L(tau_high, r0) might not be correctly incorporated
 
 ---
 
 ## Next Steps
 
-1. **Add debug output to Zolt's computeRemainingRoundPoly**
-   - Print t_zero and t_infinity values
-   - Print the round polynomial evaluations
-   - Compare these with what Jolt would produce
+1. **Add debug output to Zolt prover**:
+   - Print tau, tau_high, tau_low at initialization
+   - Print the split_eq's current_scalar after initialization
+   - Print the final values of E_out, E_in tables
 
-2. **Debug buildTPrimePoly**
-   - Print the t_prime_poly.evaluations array
-   - Verify it matches Jolt's round_zero t_prime construction
+2. **Add debug output to track eq evaluation**:
+   - After final round, compute eq(tau_low, r) directly and compare
+   - Verify L(tau_high, r0) value matches Jolt
 
-3. **Check if the issue is in split_eq or multiquadratic**
-   - The E_out/E_in tables might differ
-   - The expandGrid logic might differ
-
-4. **Verify transcript consistency**
-   - The challenges must be generated identically
+3. **Trace the sumcheck claim evolution**:
+   - Print claim after each round
+   - Compare with what verifier expects
 
 ---
 
@@ -81,16 +98,3 @@ zig build -Doptimize=ReleaseFast
 cd /Users/matteo/projects/jolt
 cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture
 ```
-
----
-
-## Key Files
-
-### Zolt
-- `src/zkvm/spartan/streaming_outer.zig` - materializeLinearPhasePolynomials, buildTPrimePoly
-- `src/poly/split_eq.zig` - getWindowEqTables, computeCubicRoundPoly
-- `src/poly/multiquadratic.zig` - MultiquadraticPolynomial
-
-### Jolt (Reference)
-- `jolt-core/src/zkvm/spartan/outer.rs` - fused_materialise_polynomials_round_zero
-- `jolt-core/src/poly/split_eq_poly.rs` - E_out_in_for_window

@@ -412,17 +412,22 @@ pub fn ProofConverter(comptime F: type) type {
             // Bind the first-round challenge from transcript with the uni_skip_claim
             outer_prover.bindFirstRoundChallenge(r0, uni_skip_claim) catch {};
 
-            // IMPORTANT: Match Jolt's BatchedSumcheck::verify transcript flow exactly:
+            // IMPORTANT: Match Jolt's BatchedSumcheck::prove and verify transcript flow exactly:
             //   1. Append input_claim to transcript
             //   2. Get batching_coeffs via challenge_vector(1) - this modifies transcript state!
             //   3. Then process round polynomials
             //
+            // The batching coefficient is used to scale the round polynomials:
+            //   batched_poly = Σ poly_i * coeff_i
+            //
+            // For a single sumcheck instance, batched_poly = poly * coeff.
+            //
             // The input_claim for Stage 1 remaining sumcheck is uni_skip_claim.
             transcript.appendScalar(uni_skip_claim);
 
-            // Get batching coefficient (for single instance, we just need to consume one challenge)
-            // This advances the transcript state to match what the verifier expects.
-            _ = transcript.challengeScalar();
+            // Get batching coefficient
+            // This advances the transcript state AND provides the scaling factor
+            const batching_coeff = transcript.challengeScalar();
 
             // Generate remaining rounds
             // In Jolt, stage1_sumcheck_proof contains num_rounds polynomials
@@ -439,7 +444,7 @@ pub fn ProofConverter(comptime F: type) type {
             // 2. Rebuilds t_prime_poly from bound Az/Bz when needed
             // 3. Uses the multiquadratic method for all rounds
             for (0..num_remaining_rounds) |_| {
-                const evals: [4]F = outer_prover.computeRemainingRoundPoly() catch {
+                const raw_evals: [4]F = outer_prover.computeRemainingRoundPoly() catch {
                     // Fallback to zero polynomial
                     const coeffs = try self.allocator.alloc(F, 3);
                     @memset(coeffs, F.zero());
@@ -451,9 +456,25 @@ pub fn ProofConverter(comptime F: type) type {
                     continue;
                 };
 
-                // Convert evaluations [s(0), s(1), s(2), s(3)] to compressed coefficients [c0, c2, c3]
-                // The linear term c1 is recovered from the hint during verification
-                const compressed = poly_mod.UniPoly(F).evalsToCompressed(evals);
+                // CRITICAL: Apply batching coefficient to scale the evaluations for OUTPUT
+                // In Jolt's BatchedSumcheck::prove:
+                //   1. Individual prover computes unscaled poly
+                //   2. Batched poly = Σ individual_poly * coeff
+                //   3. Batched poly is hashed to transcript
+                //   4. Individual prover tracks UNSCALED claim for next round
+                //
+                // So we:
+                // - Scale the polynomial for output (to transcript and proof)
+                // - Keep unscaled claim for prover's internal state
+                const scaled_evals = [4]F{
+                    raw_evals[0].mul(batching_coeff),
+                    raw_evals[1].mul(batching_coeff),
+                    raw_evals[2].mul(batching_coeff),
+                    raw_evals[3].mul(batching_coeff),
+                };
+
+                // Convert SCALED evaluations to compressed coefficients for proof
+                const compressed = poly_mod.UniPoly(F).evalsToCompressed(scaled_evals);
                 const coeffs = try self.allocator.alloc(F, 3);
                 coeffs[0] = compressed[0]; // c0 (constant)
                 coeffs[1] = compressed[1]; // c2 (quadratic)
@@ -464,10 +485,7 @@ pub fn ProofConverter(comptime F: type) type {
                     .allocator = self.allocator,
                 });
 
-                // Append round polynomial to transcript using Jolt's CompressedUniPoly format:
-                // 1. "UniPoly_begin" message
-                // 2. coeffs_except_linear_term [c0, c2, c3]
-                // 3. "UniPoly_end" message
+                // Append SCALED round polynomial to transcript using Jolt's CompressedUniPoly format
                 transcript.appendMessage("UniPoly_begin");
                 transcript.appendScalar(compressed[0]); // c0
                 transcript.appendScalar(compressed[1]); // c2
@@ -478,9 +496,10 @@ pub fn ProofConverter(comptime F: type) type {
                 const challenge = transcript.challengeScalar();
                 try challenges.append(self.allocator, challenge);
 
-                // Bind challenge and update claim
+                // Bind challenge and update claim using UNSCALED evaluations
+                // The prover's internal claim tracking is unscaled - only the output is scaled
                 outer_prover.bindRemainingRoundChallenge(challenge) catch {};
-                outer_prover.updateClaim(evals, challenge);
+                outer_prover.updateClaim(raw_evals, challenge);
             }
 
             return Stage1Result{ .challenges = challenges, .r0 = r0, .uni_skip_claim = uni_skip_claim, .allocator = self.allocator };

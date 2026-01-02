@@ -143,20 +143,44 @@ pub fn LinearCombination(comptime max_terms: usize) type {
             return lc;
         }
 
+        /// Helper: convert i128 to field element (handles values > 2^64)
+        fn i128ToField(comptime F: type, val: i128) F {
+            if (val >= 0) {
+                const v: u128 = @intCast(val);
+                if (v <= 0xFFFFFFFFFFFFFFFF) {
+                    return F.fromU64(@intCast(v));
+                } else {
+                    // Value > 2^64, use bytes representation
+                    var bytes: [16]u8 = undefined;
+                    std.mem.writeInt(u128, &bytes, v, .little);
+                    return F.fromBytes(&bytes);
+                }
+            } else {
+                const neg_v: u128 = @intCast(-val);
+                if (neg_v <= 0xFFFFFFFFFFFFFFFF) {
+                    return F.zero().sub(F.fromU64(@intCast(neg_v)));
+                } else {
+                    // Value > 2^64, use bytes representation
+                    var bytes: [16]u8 = undefined;
+                    std.mem.writeInt(u128, &bytes, neg_v, .little);
+                    return F.zero().sub(F.fromBytes(&bytes));
+                }
+            }
+        }
+
         /// Evaluate the linear combination given witness values
         pub fn evaluate(self: Self, comptime F: type, witness: []const F) F {
-            var result = if (self.constant >= 0)
-                F.fromU64(@intCast(@as(u128, @intCast(self.constant))))
-            else
-                F.zero().sub(F.fromU64(@intCast(@as(u128, @intCast(-self.constant)))));
+            var result = i128ToField(F, self.constant);
 
             for (self.terms[0..self.len]) |term| {
                 const val = witness[term.input_index.toIndex()];
-                const scaled = if (term.coeff >= 0)
-                    val.mul(F.fromU64(@intCast(@as(u128, @intCast(term.coeff)))))
-                else
-                    val.mul(F.fromU64(@intCast(@as(u128, @intCast(-term.coeff))))).neg();
-                result = result.add(scaled);
+                const coeff_field = i128ToField(F, if (term.coeff >= 0) term.coeff else -term.coeff);
+                const scaled = val.mul(coeff_field);
+                if (term.coeff >= 0) {
+                    result = result.add(scaled);
+                } else {
+                    result = result.sub(scaled);
+                }
             }
 
             return result;
@@ -342,7 +366,8 @@ pub const UNIFORM_CONSTRAINTS = [_]UniformConstraint{
             lc.terms[0] = .{ .input_index = .LeftInstructionInput, .coeff = 1 };
             lc.terms[1] = .{ .input_index = .RightInstructionInput, .coeff = -1 };
             lc.len = 2;
-            // 2^64 = 18446744073709551616 (too large for i128, handled separately)
+            // 2^64 = 0x10000000000000000 = 18446744073709551616
+            lc.constant = 0x10000000000000000;
             break :blk lc;
         },
     },
@@ -773,8 +798,11 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                         self.values[R1CSInputIndex.FlagSubtractOperands.toIndex()] = F.one();
                         // Constraint 5: LeftLookup == 0 for Sub
                         self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
-                        // Constraint 8: RightLookup == RightInput - LeftInput for Sub
-                        self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input.sub(left_input);
+                        // Constraint 8: RightLookup == LeftInput - RightInput + 2^64 for Sub
+                        // The 2^64 offset converts to two's complement representation
+                        // 2^64 = 0x10000000000000000 represented as bytes
+                        const two_pow_64 = F.fromBytes(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0 });
+                        self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = left_input.sub(right_input).add(two_pow_64);
                     } else {
                         // ADD and other R-type
                         self.values[R1CSInputIndex.FlagAddOperands.toIndex()] = F.one();

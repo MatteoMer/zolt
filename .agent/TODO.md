@@ -63,7 +63,64 @@ Which gives a polynomial that evaluates to Az(X) * Bz(X) at any point X.
 
 So the structure is correct. The bug must be elsewhere...
 
+### NEW FINDING: Preprocessing Mismatch (Session 32)
+
+**Root Cause Identified**: Jolt's verifier uses its **own compile-time constraint definitions** to evaluate Az·Bz at the claimed point. It does NOT trust the prover's computation.
+
+#### How Jolt Verification Works
+
+The verifier calls `evaluate_inner_sum_product_at_point()` which:
+1. Uses `R1CS_CONSTRAINTS_FIRST_GROUP` and `R1CS_CONSTRAINTS_SECOND_GROUP` (compile-time)
+2. Evaluates each constraint's linear combinations using **Jolt's definitions**
+3. Computes Az·Bz directly from the R1CS input claims (from accumulator)
+
+If Zolt's constraint definitions don't match Jolt's exactly, verification will fail even if the prover is internally consistent.
+
+#### Critical Bug Found: Constraint 8 (RightLookupSub)
+
+**Jolt** (`jolt-core/src/zkvm/r1cs/constraints.rs:299-303`):
+```rust
+if { SubtractOperands }
+=> ( RightLookupOperand ) == ( LeftInstructionInput - RightInstructionInput + 0x10000000000000000 )
+                                                                              ^^^^^^^^^^^^^^^^^^^
+                                                                              2^64 constant present
+```
+
+**Zolt** (`src/zkvm/r1cs/constraints.zig:336-348`):
+```zig
+.right = blk: {
+    var lc = LC.zero();
+    lc.terms[0] = .{ .input_index = .LeftInstructionInput, .coeff = 1 };
+    lc.terms[1] = .{ .input_index = .RightInstructionInput, .coeff = -1 };
+    lc.len = 2;
+    // 2^64 = 18446744073709551616 (too large for i128, handled separately) <-- MISSING!
+    break :blk lc;
+},
+```
+
+The `lc.constant = 0x10000000000000000;` is **missing** in Zolt! The comment says "handled separately" but there's no actual handling.
+
+#### Required Actions
+
+1. **Fix constraint 8**: Add the 2^64 constant to RightLookupSub
+2. **Audit ALL constraints**: Compare term-by-term against Jolt's `constraints.rs`
+3. **Verify input ordering**: Ensure `R1CSInputIndex` matches `JoltR1CSInputs` exactly
+
+#### Files to Compare
+
+| Jolt | Zolt |
+|------|------|
+| `jolt-core/src/zkvm/r1cs/constraints.rs` | `src/zkvm/r1cs/constraints.zig` |
+| `jolt-core/src/zkvm/r1cs/inputs.rs` | `src/zkvm/r1cs/constraints.zig` (R1CSInputIndex) |
+| `R1CS_CONSTRAINTS_FIRST_GROUP_LABELS` | `FIRST_GROUP_INDICES` |
+| `R1CS_CONSTRAINTS_SECOND_GROUP_LABELS` | `SECOND_GROUP_INDICES` |
+
 ### Next Steps
+
+1. **Fix the 2^64 bug in constraint 8** (RightLookupSub)
+2. **Audit all 19 constraint definitions against Jolt**
+
+### If Still Failing After Constraint Fix, Investigate
 
 1. Compare Jolt's streaming round polynomial coefficients with Zolt's
 2. Check if the constraint group blending with r_stream is correct

@@ -212,6 +212,31 @@ pub fn JoltR1CS(comptime F: type) type {
             return true;
         }
 
+        /// Helper: convert i128 to field element (handles values > 2^64)
+        fn i128ToField(comptime FieldType: type, val: i128) FieldType {
+            if (val >= 0) {
+                const v: u128 = @intCast(val);
+                if (v <= 0xFFFFFFFFFFFFFFFF) {
+                    return FieldType.fromU64(@intCast(v));
+                } else {
+                    // Value > 2^64, use bytes representation
+                    var bytes: [16]u8 = undefined;
+                    std.mem.writeInt(u128, &bytes, v, .little);
+                    return FieldType.fromBytes(&bytes);
+                }
+            } else {
+                const neg_v: u128 = @intCast(-val);
+                if (neg_v <= 0xFFFFFFFFFFFFFFFF) {
+                    return FieldType.zero().sub(FieldType.fromU64(@intCast(neg_v)));
+                } else {
+                    // Value > 2^64, use bytes representation
+                    var bytes: [16]u8 = undefined;
+                    std.mem.writeInt(u128, &bytes, neg_v, .little);
+                    return FieldType.zero().sub(FieldType.fromBytes(&bytes));
+                }
+            }
+        }
+
         /// Helper: evaluate a linear combination at a given witness offset
         fn evaluateLC(
             comptime FieldType: type,
@@ -219,21 +244,20 @@ pub fn JoltR1CS(comptime F: type) type {
             witness: []const FieldType,
             witness_offset: usize,
         ) FieldType {
-            var result = if (lc.constant >= 0)
-                FieldType.fromU64(@intCast(@as(u128, @intCast(lc.constant))))
-            else
-                FieldType.zero().sub(FieldType.fromU64(@intCast(@as(u128, @intCast(-lc.constant)))));
+            var result = i128ToField(FieldType, lc.constant);
 
             for (lc.terms[0..lc.len]) |term| {
                 const idx = witness_offset + term.input_index.toIndex();
                 if (idx >= witness.len) continue;
 
                 const val = witness[idx];
-                const scaled = if (term.coeff >= 0)
-                    val.mul(FieldType.fromU64(@intCast(@as(u128, @intCast(term.coeff)))))
-                else
-                    val.mul(FieldType.fromU64(@intCast(@as(u128, @intCast(-term.coeff))))).neg();
-                result = result.add(scaled);
+                const coeff_field = i128ToField(FieldType, if (term.coeff >= 0) term.coeff else -term.coeff);
+                const scaled = val.mul(coeff_field);
+                if (term.coeff >= 0) {
+                    result = result.add(scaled);
+                } else {
+                    result = result.sub(scaled);
+                }
             }
 
             return result;

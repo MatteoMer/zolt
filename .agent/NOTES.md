@@ -43,6 +43,22 @@ Zolt combines them directly into one accumulator. This SHOULD be equivalent, but
 2. Verify the `full_idx` index mapping (cycle vs group)
 3. Check if there's a subtle off-by-one or ordering issue
 
+### New Finding: EqPolynomial Sum Issue
+
+The inner_sum_prod test shows:
+- `Σ eq(r_cycle, cycle) ≠ 1`
+
+This should be 1 by the partition of unity property. The test shows:
+```
+Σ eq(r_cycle, cycle) = ac96341c4ffffffb 36fc76959f60cd29 666ea36f7879462e 0e0a77c19a07df2f
+```
+
+This is NOT 1, which suggests a bug in either:
+1. The EqPolynomial.evals() implementation, or
+2. How the test uses it
+
+This is a critical bug that could explain the Az*Bz mismatch.
+
 ---
 
 ## Current Status (Session 30 - January 1, 2026)

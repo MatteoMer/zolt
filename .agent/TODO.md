@@ -1,12 +1,12 @@
 # Zolt-Jolt Compatibility TODO
 
-## Current Status: Session 38 - January 2, 2026
+## Current Status: Session 39 - January 2, 2026
 
-**712 tests pass. Stage 1 sumcheck output_claim mismatch remains.**
+**712 tests pass. Stage 1 sumcheck output_claim mismatch persists.**
 
 ---
 
-## Summary of Findings
+## Summary of Investigation
 
 ### What Works ✅
 1. EqPolynomial - partition of unity holds, sum equals 1
@@ -16,39 +16,54 @@
 
 ### What Doesn't Work ❌
 1. Stage 1 sumcheck output_claim doesn't match expected_output_claim
-   - Prover's inner product is ~79.5% of expected
-   - Difference: output=21656... vs expected=4977...
+   - output_claim: 21656329869382715893372831461077086717482664293827627865217976029788055707943
+   - expected: 4977070801800327014657227951104439579081780871540314422928627443513195286072
 
-### Root Cause Hypothesis
+### Investigation in Session 39
 
-The issue is in how `t_prime_poly` accumulates the product `Az * Bz` across cycles.
+**Finding 1: Round Zero vs General Materialization**
 
-Jolt has two materialization paths:
-1. `round_zero` - simpler, no r_grid scaling
-2. `general` - complex, with r_grid scaling
+The jolt-rust-expert agent identified that Jolt has TWO materialization paths:
+- `fused_materialise_polynomials_round_zero`: Simple indexing with `full_idx = grid_size * i + j`
+- `fused_materialise_polynomials_general_with_multiquadratic`: Complex indexing with r_grid
 
-Zolt has one path that always uses r_grid, but at round 1, r_grid = [1.0], so this should be equivalent.
+Zolt was using the general path for all rounds. I updated `materializeLinearPhasePolynomials` to use the round zero logic, but the proof output is IDENTICAL before and after the change.
 
-The indexing formulas use different styles:
-- Jolt: `full_idx = grid_size * i + j` (multiplication)
-- Zolt: `full_idx = base_idx | x_val | r_idx` (bitwise OR)
+**Possible explanations:**
+1. The materialization change doesn't affect the values written to az/bz at round zero
+2. The issue is elsewhere in the code path
+3. The formula is correct but some constants differ
 
-These should be mathematically equivalent when bit positions don't overlap, but verification is needed.
+**Finding 2: Verification Formula**
+
+The verifier computes expected_output_claim as:
+```
+tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod
+```
+
+Where inner_sum_prod = Az(rx_constr, r_cycle) * Bz(rx_constr, r_cycle).
+
+The rx_constr = [r_stream (sumcheck_challenges[0]), r0].
 
 ---
 
 ## Next Steps
 
-1. Add debug logging to Zolt's `buildTPrimePoly` to print:
-   - cycle indices accessed
-   - Az/Bz values at each index
-   - accumulated t_prime values
+1. **Add debug output to Zolt's computeRemainingRoundPoly**
+   - Print t_zero and t_infinity values
+   - Print the round polynomial evaluations
+   - Compare these with what Jolt would produce
 
-2. Add similar debug logging to Jolt's `fused_materialise_polynomials_round_zero`
+2. **Debug buildTPrimePoly**
+   - Print the t_prime_poly.evaluations array
+   - Verify it matches Jolt's round_zero t_prime construction
 
-3. Compare the two side-by-side to find the divergence point
+3. **Check if the issue is in split_eq or multiquadratic**
+   - The E_out/E_in tables might differ
+   - The expandGrid logic might differ
 
-4. The ~79.5% ratio (~4/5) suggests a systematic difference, possibly in how constraint groups are weighted
+4. **Verify transcript consistency**
+   - The challenges must be generated identically
 
 ---
 

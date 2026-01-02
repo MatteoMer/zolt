@@ -227,9 +227,12 @@ pub fn StreamingOuterProver(comptime F: type) type {
         /// 1. Reads from az[grid_size * i + j] and bz[grid_size * i + j]
         /// 2. Binds with bindLow() to halve the polynomial size
         pub fn materializeLinearPhasePolynomials(self: *Self) !void {
-            // For LinearOnlySchedule (round 0 in Jolt = round 1 in Zolt), we DON'T
-            // need r_stream yet. Materialization happens BEFORE the first challenge.
-            // Constraint groups are interleaved via index parity, not blended with r_stream.
+            // Use the round zero path - this is called BEFORE any challenges are bound.
+            // Jolt uses fused_materialise_polynomials_round_zero which has a simple
+            // index formula: full_idx = grid_size * i + j
+            //
+            // This differs from the general path which uses complex bitwise indices
+            // with r_grid. At round zero, we DON'T use r_grid scaling.
 
             // Get E_out and E_in tables for the current state
             // window_size = 1 for linear phase
@@ -237,15 +240,9 @@ pub fn StreamingOuterProver(comptime F: type) type {
             const eq_tables = self.split_eq.getWindowEqTables(0, window_size);
             const E_out = eq_tables.E_out;
             const E_in = eq_tables.E_in;
-            const head_in_bits: u6 = @intCast(eq_tables.head_in_bits);
 
             const num_x_out_vals = E_out.len;
             const num_x_in_vals = E_in.len;
-
-            // r_grid parameters
-            const r_grid = &self.r_grid;
-            const num_r_vals = r_grid.length();
-            const num_r_bits: u6 = if (num_r_vals > 1) @intCast(std.math.log2_int(usize, num_r_vals)) else 0;
 
             // Grid size for linear phase is 2^window_size = 2
             const grid_size: usize = @as(usize, 1) << @intCast(window_size);
@@ -262,67 +259,72 @@ pub fn StreamingOuterProver(comptime F: type) type {
             @memset(az_evals, F.zero());
             @memset(bz_evals, F.zero());
 
-            // Precompute scaled weights: scaled_w[r_idx][i] = lagrange_evals_r0[i] * r_grid[r_idx]
-            // This matches Jolt's scaled_w computation
-            var scaled_w = try self.allocator.alloc([FIRST_GROUP_SIZE]F, num_r_vals);
-            defer self.allocator.free(scaled_w);
-
-            for (0..num_r_vals) |r_idx| {
-                const r_weight = r_grid.get(r_idx);
-                for (0..FIRST_GROUP_SIZE) |t| {
-                    scaled_w[r_idx][t] = self.lagrange_evals_r0[t].mul(r_weight);
-                }
-            }
-
             // Iterate over (x_out, x_in) pairs
+            // This matches Jolt's round_zero loop: for i in 0..E_out.len*E_in.len
             for (0..num_x_out_vals) |x_out_val| {
                 for (0..num_x_in_vals) |x_in_val| {
-                    const pair_idx = x_out_val * num_x_in_vals + x_in_val;
+                    const i = x_out_val * num_x_in_vals + x_in_val;
 
-                    // Compute base_idx for this (x_out, x_in) pair
-                    // base_idx = (x_out << (x_in_bits + window + r_bits)) | (x_in << (window + r_bits))
-                    const base_idx: usize = (x_out_val << @intCast(head_in_bits + window_size + num_r_bits)) |
-                        (x_in_val << @intCast(window_size + num_r_bits));
+                    // Process pairs of grid positions together (j, j+1) for both constraint groups
+                    // This matches Jolt's optimized path: while j < grid_size { ... j += 2 }
+                    var j: usize = 0;
+                    while (j < grid_size) : (j += 2) {
+                        // Jolt's round_zero formula:
+                        //   full_idx = grid_size * i + j
+                        //   time_step_idx = full_idx >> 1
+                        //
+                        // For grid_size=2:
+                        //   full_idx = 2*i + j
+                        //   time_step_idx = i (since j is 0 or 1)
+                        const full_idx = grid_size * i + j;
+                        const time_step_idx = full_idx >> 1;
 
-                    // Accumulate for each x_val (window position) in 0..grid_size
-                    for (0..grid_size) |x_val| {
-                        var acc_az = F.zero();
-                        var acc_bz = F.zero();
+                        if (time_step_idx < self.cycle_witnesses.len) {
+                            const witness = &self.cycle_witnesses[time_step_idx];
 
-                        const x_val_shifted = x_val << num_r_bits;
+                            // Compute Az and Bz for first group (selector=0, j position)
+                            var az0 = F.zero();
+                            var bz0 = F.zero();
+                            for (0..FIRST_GROUP_SIZE) |t| {
+                                const constraint_idx = constraints.FIRST_GROUP_INDICES[t];
+                                const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
+                                const condition = constraint.condition.evaluate(F, witness.asSlice());
+                                const left = constraint.left.evaluate(F, witness.asSlice());
+                                const right = constraint.right.evaluate(F, witness.asSlice());
+                                const magnitude = left.sub(right);
 
-                        // Sum over r_grid
-                        for (0..num_r_vals) |r_idx| {
-                            const full_idx = base_idx | x_val_shifted | r_idx;
-                            const step_idx = full_idx >> 1;
-                            const selector: usize = full_idx & 1;
-
-                            if (step_idx < self.cycle_witnesses.len) {
-                                // Compute Az and Bz for this cycle/group using scaled weights
-                                const witness = &self.cycle_witnesses[step_idx];
-                                const group_indices = if (selector == 0) &constraints.FIRST_GROUP_INDICES else &constraints.SECOND_GROUP_INDICES;
-                                const group_size = if (selector == 0) FIRST_GROUP_SIZE else @min(SECOND_GROUP_SIZE, FIRST_GROUP_SIZE);
-
-                                for (0..group_size) |i| {
-                                    const constraint_idx = group_indices[i];
-                                    const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
-                                    const condition = constraint.condition.evaluate(F, witness.asSlice());
-                                    const left = constraint.left.evaluate(F, witness.asSlice());
-                                    const right = constraint.right.evaluate(F, witness.asSlice());
-                                    const magnitude = left.sub(right);
-
-                                    // Use scaled weight (lagrange * r_grid)
-                                    const w = scaled_w[r_idx][i];
-                                    acc_az = acc_az.add(w.mul(condition));
-                                    acc_bz = acc_bz.add(w.mul(magnitude));
-                                }
+                                // Use lagrange_evals_r0 directly (no r_grid scaling at round zero)
+                                const w = self.lagrange_evals_r0[t];
+                                az0 = az0.add(w.mul(condition));
+                                bz0 = bz0.add(w.mul(magnitude));
                             }
-                        }
 
-                        // Store in polynomial array using Jolt's indexing: az[grid_size * pair_idx + x_val]
-                        const array_idx = grid_size * pair_idx + x_val;
-                        az_evals[array_idx] = acc_az;
-                        bz_evals[array_idx] = acc_bz;
+                            // Compute Az and Bz for second group (selector=1, j+1 position)
+                            var az1 = F.zero();
+                            var bz1 = F.zero();
+                            for (0..@min(SECOND_GROUP_SIZE, FIRST_GROUP_SIZE)) |t| {
+                                const constraint_idx = constraints.SECOND_GROUP_INDICES[t];
+                                const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
+                                const condition = constraint.condition.evaluate(F, witness.asSlice());
+                                const left = constraint.left.evaluate(F, witness.asSlice());
+                                const right = constraint.right.evaluate(F, witness.asSlice());
+                                const magnitude = left.sub(right);
+
+                                // Use lagrange_evals_r0 directly (no r_grid scaling at round zero)
+                                const w = self.lagrange_evals_r0[t];
+                                az1 = az1.add(w.mul(condition));
+                                bz1 = bz1.add(w.mul(magnitude));
+                            }
+
+                            // Store in polynomial array
+                            // Jolt uses: az_chunk[j] = az0, az_chunk[j+1] = az1
+                            // Array index = grid_size * i + j
+                            const base_idx = grid_size * i;
+                            az_evals[base_idx + j] = az0;
+                            bz_evals[base_idx + j] = bz0;
+                            az_evals[base_idx + j + 1] = az1;
+                            bz_evals[base_idx + j + 1] = bz1;
+                        }
                     }
                 }
             }

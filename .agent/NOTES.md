@@ -59,6 +59,29 @@ This is NOT 1, which suggests a bug in either:
 
 This is a critical bug that could explain the Az*Bz mismatch.
 
+### Session 31 Analysis Summary
+
+**Mathematical Verification:**
+- Confirmed: `MLE(Az)(r) = Az(z_MLE(r))` due to linearity of Az in the witness
+- Confirmed: Jolt's prover computes `Σ eq * (Az * Bz)` (pointwise product)
+- Confirmed: Verifier expects `Az(z_MLE) * Bz(z_MLE)`
+- These ARE mathematically equivalent due to multilinearity
+
+**Implementation Analysis:**
+- Zolt's `materializeLinearPhasePolynomials` structure matches Jolt's
+- Both use `full_idx >> 1` for step_idx and `full_idx & 1` for selector
+- Both groups use same Lagrange weights for first 9 constraints
+
+**Remaining Mystery:**
+- Individual Az and Bz MLEs match perfectly
+- But `prover_sum` (Σ eq * Az * Bz) differs from `verifier_inner_sum_prod` (Az_MLE * Bz_MLE)
+- The difference is 0.22%, not a simple factor
+
+**Next Steps:**
+1. Add debug output to Jolt's prover to compare specific t_prime_poly values
+2. Compare the actual Az/Bz grid values between Zolt and Jolt at specific (x_out, x_in, x_val) coordinates
+3. Check if there's a subtle numerical precision issue in the accumulation
+
 ---
 
 ## Current Status (Session 30 - January 1, 2026)

@@ -1,6 +1,72 @@
 # Zolt-Jolt Compatibility Notes
 
-## Current Status (Session 31 - January 2, 2026)
+## Current Status (Session 32 - January 2, 2026)
+
+### CRITICAL DISCOVERY: EqPolynomial is CORRECT!
+
+**Verified:**
+1. ✅ EqPolynomial partition of unity test PASSES - sum equals 1
+2. ✅ Individual Az and Bz MLE evaluations MATCH between prover and verifier
+3. ✅ EqPolynomial with r=[5555, 6666] sums to exactly ONE
+
+**Debug output confirms:**
+```
+Sum:
+  ac96341c4ffffffb 36fc76959f60cd29 666ea36f7879462e 0e0a77c19a07df2f
+One:
+  ac96341c4ffffffb 36fc76959f60cd29 666ea36f7879462e 0e0a77c19a07df2f
+Sum == One? true
+```
+
+### The Inner Sum Product Mismatch Explained
+
+The test "inner_sum_prod: prover vs verifier computation" shows:
+- `prover_sum = Σ_t eq(r_cycle, t) * Az(t) * Bz(t)` (MLE of product)
+- `verifier_inner_sum_prod = Az_MLE(r_cycle) * Bz_MLE(r_cycle)` (product of MLEs)
+
+These are mathematically DIFFERENT quantities:
+```
+MLE(f*g)(r) ≠ MLE(f)(r) * MLE(g)(r)
+```
+
+HOWEVER, the sumcheck protocol produces the product of MLEs, NOT the MLE of products:
+- After binding all variables to r, the claim becomes: `eq(τ, r) * Az(r) * Bz(r)`
+- Here Az(r) and Bz(r) are single-point evaluations, which equal their MLE values
+
+### Root Cause Hypothesis
+
+The issue is in how the streaming outer prover's round polynomials are constructed. The sumcheck should produce `Az_MLE * Bz_MLE` at the final point, but something in the computation is causing it to compute `MLE(Az*Bz)` instead.
+
+Possible issues:
+1. The `buildTPrimePoly` function stores `Σ eq_weight * Az * Bz` per grid point
+2. This might be computing a different quantity than what Jolt's prover does
+3. The projection via `E_active` and `computeCubicRoundPoly` may have subtle bugs
+
+### Verification Values
+
+From test output:
+```
+output_claim:          21656329869382715893372831461077086717482664293827627865217976029788055707943
+expected_output_claim: 4977070801800327014657227951104439579081780871540314422928627443513195286072
+```
+
+### 712+ Tests Pass
+
+All tests pass including:
+- EqPolynomial partition of unity
+- Az/Bz MLE computation
+- Gruen cubic polynomial construction
+- Multiquadratic polynomial operations
+
+### Next Steps
+
+1. Add detailed tracing to each sumcheck round
+2. Compare t_prime_poly values between Zolt and Jolt
+3. Verify the round polynomial aggregation produces the correct final claim
+
+---
+
+## Previous Status (Session 31 - January 2, 2026)
 
 ### Recent Progress
 
@@ -10,607 +76,10 @@
 
 3. **Identified potential structural issue** - The Az/Bz computation in `materializeLinearPhasePolynomials` may not match Jolt's structure.
 
-### Current Issue
-
-The outer sumcheck verification fails:
-- `output_claim: 21656329869382715893372831461077086717482664293827627865217976029788055707943`
-- `expected_output_claim: 4977070801800327014657227951104439579081780871540314422928627443513195286072`
-
-The implicit Az*Bz values don't match:
-- Prover's: `18335350532138790221005973794571557670878860588539341712946879810521348482640`
-- Verifier's: `18375703733773529163378995903800776635654818143103579876647287795480596237786`
-- Ratio: 0.9978 (close but not equal)
-
 ### Key Observations
 
 1. **Individual Az and Bz MLEs match** - The test shows `Az MLE match: true, Bz MLE match: true`
 2. **But the products differ** - This suggests a subtle structural difference in how the values are combined
-
-### Jolt's Two-Group Bz Handling
-
-Jolt separates Bz into two accumulators:
-```rust
-acc_bz_first -> first group Bz
-acc_bz_second -> second group Bz
-bz_out = bz_first + bz_second
-```
-
-Zolt combines them directly into one accumulator. This SHOULD be equivalent, but may cause numerical differences.
-
-### Next Investigation Steps
-
-1. Compare exact Az/Bz values at specific cycles
-2. Verify the `full_idx` index mapping (cycle vs group)
-3. Check if there's a subtle off-by-one or ordering issue
-
-### New Finding: EqPolynomial Sum Issue
-
-The inner_sum_prod test shows:
-- `Σ eq(r_cycle, cycle) ≠ 1`
-
-This should be 1 by the partition of unity property. The test shows:
-```
-Σ eq(r_cycle, cycle) = ac96341c4ffffffb 36fc76959f60cd29 666ea36f7879462e 0e0a77c19a07df2f
-```
-
-This is NOT 1, which suggests a bug in either:
-1. The EqPolynomial.evals() implementation, or
-2. How the test uses it
-
-This is a critical bug that could explain the Az*Bz mismatch.
-
-### Session 31 Analysis Summary
-
-**Mathematical Verification:**
-- Confirmed: `MLE(Az)(r) = Az(z_MLE(r))` due to linearity of Az in the witness
-- Confirmed: Jolt's prover computes `Σ eq * (Az * Bz)` (pointwise product)
-- Confirmed: Verifier expects `Az(z_MLE) * Bz(z_MLE)`
-- These ARE mathematically equivalent due to multilinearity
-
-**Implementation Analysis:**
-- Zolt's `materializeLinearPhasePolynomials` structure matches Jolt's
-- Both use `full_idx >> 1` for step_idx and `full_idx & 1` for selector
-- Both groups use same Lagrange weights for first 9 constraints
-
-**Remaining Mystery:**
-- Individual Az and Bz MLEs match perfectly
-- But `prover_sum` (Σ eq * Az * Bz) differs from `verifier_inner_sum_prod` (Az_MLE * Bz_MLE)
-- The difference is 0.22%, not a simple factor
-
-**Next Steps:**
-1. Add debug output to Jolt's prover to compare specific t_prime_poly values
-2. Compare the actual Az/Bz grid values between Zolt and Jolt at specific (x_out, x_in, x_val) coordinates
-3. Check if there's a subtle numerical precision issue in the accumulation
-
----
-
-## Current Status (Session 30 - January 1, 2026)
-
-### Progress Made
-1. Added DensePolynomial.bindLow() matching Jolt's bound_poly_var_bot()
-2. Added az_poly/bz_poly storage to StreamingOuterProver
-3. Added materializeLinearPhasePolynomials() function
-4. Modified bindRemainingRoundChallenge() to:
-   - Materialize at switchover
-   - Bind polynomials in linear phase
-5. Modified computeRemainingRoundPoly() with separate linear phase path
-
-### Remaining Issue: Linear Phase Materialization Structure
-
-**Current Issue:**
-- `output_claim: 18149181199645709635565994144274301613989920934825717026812937381996718340431`
-- `expected_output_claim: 9784440804643023978376654613918487285551699375196948804144755605390806131527`
-- The values are unchanged from before - the linear phase isn't producing correct values
-
-### Root Cause Analysis
-
-The materialization structure doesn't match Jolt's `fused_materialise_polynomials_general_with_multiquadratic`.
-
-**Jolt's Materialization Structure:**
-```rust
-// Az/Bz arrays have size: E_out.len * E_in.len * grid_size
-for pair_idx in 0..E_out.len * E_in.len {
-    for x_val in 0..grid_size {
-        // Accumulate over r_grid (bound streaming variables)
-        for r_idx in 0..num_r_vals {
-            let full_idx = base | x_val_shifted | r_idx;
-            let step_idx = full_idx >> 1;
-            let selector = full_idx & 1;
-            // weight = scaled_w[r_idx] (Lagrange weights * r_grid weights)
-            acc_az[x_val] += weight * Az_group(step_idx, selector);
-            acc_bz[x_val] += weight * Bz_group(step_idx, selector);
-        }
-        // Store in polynomial array
-        az_chunk[grid_size * pair_idx + x_val] = acc_az[x_val];
-        bz_chunk[grid_size * pair_idx + x_val] = acc_bz[x_val];
-    }
-}
-```
-
-**Key Insight:**
-- The az/bz arrays are indexed by `(pair_idx, x_val)` pairs
-- After binding, the array halves in size but maintains this structure
-- `compute_evaluation_grid_from_polynomials_parallel` just reads `az[grid_size * i + j]`
-
-**What Zolt's Materialization Should Do:**
-1. Use the same indexing: `az[grid_size * pair_idx + x_val]`
-2. For each position, accumulate over r_grid with proper weights
-3. The polynomial size = `E_out.len * E_in.len * grid_size` (at materialization)
-4. After each linear round binding, size halves
-
-### The Problem
-
-Zolt's outer sumcheck has a **fundamental architectural difference** from Jolt in the **linear phase**.
-
-#### Jolt's Approach (Correct)
-Jolt's outer sumcheck has two distinct phases:
-
-1. **Streaming Phase** (first half of rounds):
-   - Uses `ExpandingTable` (r_grid) to weight contributions from the trace
-   - Iterates over cycles, selecting groups based on r_grid indices
-   - After each round, updates r_grid with the new challenge
-
-2. **Linear Phase** (second half of rounds):
-   - **Materializes Az/Bz polynomials** once at phase start
-   - **Binds** the polynomials each round with `az.bound_poly_var_bot(&r_j)`
-   - Uses the **bound polynomials** (not raw trace) for round computation
-   - Does NOT update r_grid
-
-Key code from Jolt's `OuterLinearStage`:
-```rust
-fn ingest_challenge(&mut self, shared: &mut Self::Shared, r_j: F::Challenge, _round: usize) {
-    shared.split_eq_poly.bind(r_j);
-    if let Some(t_prime_poly) = shared.t_prime_poly.as_mut() {
-        t_prime_poly.bind(r_j, BindingOrder::LowToHigh);
-    }
-    // CRITICAL: Bind the Az and Bz polynomials
-    self.az.bound_poly_var_bot(&r_j);
-    self.bz.bound_poly_var_bot(&r_j);
-}
-```
-
-#### Zolt's Approach (Incorrect)
-Zolt tries to use r_grid for ALL rounds:
-```zig
-// In cycle round, still iterating over r_grid
-const r_weight = r_grid.get(r_idx);
-const result = self.computeCycleAzBzForGroup(&self.cycle_witnesses[step_idx], selector);
-```
-
-The problem is that:
-1. After the streaming phase, r_grid encodes ALL bound challenges (r_stream + early cycle challenges)
-2. The indexing `step_idx = full_idx >> 1` and `selector = full_idx & 1` worked for streaming phase
-3. But in linear phase, this produces mathematically incorrect sums
-4. Zolt never "binds" Az/Bz polynomials - it recomputes from scratch each round
-
-### The Fix Required
-
-Zolt needs to match Jolt's architecture by:
-
-1. **Adding Az/Bz polynomial storage**:
-```zig
-az_poly: ?DensePolynomial(F),
-bz_poly: ?DensePolynomial(F),
-```
-
-2. **Materializing at linear phase start**:
-At the switchover point, compute Az/Bz for all cycles with current bound state
-
-3. **Binding each linear round**:
-```zig
-az_poly.bindLow(challenge);
-bz_poly.bindLow(challenge);
-```
-
-4. **Using bound polynomials for round computation**:
-Instead of recomputing from trace, use `az_poly[idx]` and `bz_poly[idx]`
-
-### Next Steps
-
-1. Implement DensePolynomial with bindLow() method
-2. Add polynomial storage to StreamingOuterProver
-3. Implement materializePolynomials() for linear phase start
-4. Modify linear round to use bound polynomials
-5. Test with Jolt's verifier
-
----
-
-## Previous Status (Session 29 - December 31, 2024)
-
-**Verified Components:**
-1. ✅ eq polynomial factor: `prover_eq_factor == verifier_eq_factor` (cross-verification test passes)
-2. ✅ R1CS constraint ordering matches Jolt's `R1CS_CONSTRAINTS_FIRST_GROUP` exactly
-3. ✅ R1CS input index ordering matches Jolt's `ALL_R1CS_INPUTS` exactly
-4. ✅ Lagrange weights `L_i(r0)` computed at symmetric domain {-4, ..., 5}
-5. ✅ 698 tests pass
-
-**Key Formula Analysis:**
-```
-expected = tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod
-
-Where:
-- inner_sum_prod = Az_final * Bz_final (computed from opening claims)
-- Az_final = Σᵢ w[i] * lc_a[i].dot_product(z(r_cycle)) + r_stream * (Az_g1 - Az_g0)
-- z(r_cycle) = MLE evaluations of R1CS inputs at challenge point
-```
-
-**Analysis of Cycle Round Az/Bz:**
-
-After investigation, the `selector = full_idx & 1` logic in cycle rounds IS CORRECT:
-- When `r_grid_len = 2` (after r_stream is bound), `selector = r_idx`
-- `r_idx = 0`: selector = 0, weight = (1-r_stream), uses group 0
-- `r_idx = 1`: selector = 1, weight = r_stream, uses group 1
-- Result: `az_grid[x_val] = (1-r_stream) * Az_g0 + r_stream * Az_g1` - correct blending!
-
-The code IS implementing the blending correctly via the r_grid weights.
-
-**Key Formula (from Jolt's verifier):**
-
-The verifier computes `inner_sum_prod` as:
-```
-z[i] = MLE(R1CS_input_i, r_cycle)  // from opening claims
-Az_g0 = Σᵢ w[i] * lc_a[i].dot_product(z)  // w = Lagrange weights at r0
-Az_g1 = Σᵢ w[i] * lc_a[i].dot_product(z)  // for second group constraints
-Az_final = Az_g0 + r_stream * (Az_g1 - Az_g0)
-Bz_final = Bz_g0 + r_stream * (Bz_g1 - Bz_g0)
-inner_sum_prod = Az_final * Bz_final
-```
-
-The prover computes (via sumcheck):
-```
-output_claim = eq_factor * Σ_cycle eq(r, cycle) * Az(cycle) * Bz(cycle)
-            = eq_factor * Az_MLE(r) * Bz_MLE(r)
-```
-
-These SHOULD match by MLE linearity. The issue remains unclear.
-
-**Remaining Investigation:**
-1. Compare actual R1CS input MLE evaluations between Zolt and what verifier uses
-2. Verify Az/Bz computation with MLE values matches sumcheck output
-
-## Session 29 Discovery (Late Evening)
-
-**Key Finding from Diagnostic Test:**
-
-The test shows that:
-- `MLE(witness[*][0], r_cycle) == z[0]` ✅ (MLE computation is correct)
-- `Σ eq(r_cycle, cycle) ≠ 1` (but this is expected in the eq polynomial formulation)
-
-**Critical Insight:**
-
-The formula `Σ_cycle eq(r, cycle) * (Az(cycle) * Bz(cycle))` gives the MLE of the product (Az*Bz),
-NOT the product of the MLEs!
-
-```
-MLE(f * g, r) = Σ_x eq(r, x) * f(x) * g(x)
-              ≠ MLE(f, r) * MLE(g, r)
-              = (Σ_x eq(r, x) * f(x)) * (Σ_x eq(r, x) * g(x))
-```
-
-**What Jolt's Verifier Actually Computes:**
-
-Looking more carefully at `evaluate_inner_sum_product_at_point`:
-- It computes `Az_final * Bz_final` where Az and Bz are evaluated ONCE using MLE values
-- This is: `(Σᵢ w[i] * lc_a[i](z)) * (Σᵢ w[i] * lc_b[i](z))`
-
-**Wait - this IS Az_MLE * Bz_MLE, not MLE(Az*Bz)!**
-
-So the verifier's expectation should be different from the sumcheck output...
-Unless the sumcheck is structured differently.
-
-**Re-reading the Spartan paper:**
-The outer sumcheck proves: `Σ_x eq(tau, x) * ẽ(Az, Bz, Cz)(x)`
-where ẽ is the virtual polynomial combining Az, Bz, Cz.
-
-For R1CS: ẽ = Az * Bz - Cz = Az * Bz (when Cz = 0 for satisfied constraints).
-
-After binding to r, the claim becomes: `eq(tau, r) * ẽ(r)`
-
-The verifier needs to compute ẽ(r) = Az(r) * Bz(r) where:
-- Az(r) = Σ_y A(r, y) * z(y) (summing over witness indices)
-- Since A is structured (Lagrange basis), Az(r) = Σᵢ L_i(r0) * lc_a[i](z(r_cycle))
-
-**The key is that r is 2D: (r0, r_cycle)**
-- r0 is the univariate skip challenge (constraint axis)
-- r_cycle is the cycle axis
-
-The sumcheck binds both axes, so the final Az(r) is:
-```
-Az(r0, r_cycle) = Σᵢ L_i(r0) * lc_a[i](z_MLE(r_cycle))
-```
-
-This IS what the verifier computes! So they should match.
-
-**Next step: Check if my test is using the wrong formula in the prover computation.**
-
----
-
-## Previous Status (Session 28 - December 31, 2024)
-
-### Analysis Summary
-
-**Verified Components:**
-1. ✅ r_cycle computation: `challenges[1..]` reversed to big-endian (matches Jolt's `normalize_opening_point`)
-2. ✅ eq polynomial: `∏ᵢ (τ[i] * r[i] + (1-τ[i]) * (1-r[i]))` (multiplication order doesn't matter)
-3. ✅ Az/Bz blending: `final = g0 + r_stream * (g1 - g0)` (matches Jolt)
-4. ✅ Lagrange kernel: `L(tau_high, r0)` passed as initial scaling to split_eq
-5. ✅ All 657 tests pass (including new cross-verification test)
-6. ✅ Cross-verification test passes: `prover_eq_factor == verifier_eq_factor`
-7. ✅ R1CS input ordering matches Jolt's ALL_R1CS_INPUTS exactly
-
-**Key Formula from Jolt's `expected_output_claim`:**
-```
-expected = tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod
-
-Where:
-- tau_high_bound_r0 = L(tau_high, r0) = Lagrange kernel at UniSkip challenge
-- tau_bound_r_tail_reversed = eq(tau_low, [r_n, ..., r_1, r_stream]) = eq polynomial with ALL sumcheck challenges reversed
-- inner_sum_prod = Az(r_stream, r0, z(r_cycle)) * Bz(r_stream, r0, z(r_cycle))
-- r_cycle = challenges[1..] reversed to big-endian (used for R1CS input MLE evaluations)
-```
-
-**Important Distinctions:**
-1. `r_tail_reversed` includes ALL sumcheck challenges (including r_stream)
-2. `r_cycle` for R1CS inputs excludes r_stream (it's `challenges[1..]` reversed)
-3. The eq polynomial in expected_output_claim uses the full `[r_n, ..., r_1, r_stream]` to match the tau_low binding order
-
-**Session 28 Results:**
-1. ✅ Created cross-verification test for eq polynomial factor
-2. ✅ Test passes: `prover_eq_factor == verifier_eq_factor`
-3. ✅ Verified R1CS input ordering matches Jolt's ALL_R1CS_INPUTS
-
-**Remaining Work:**
-If the Stage 1 sumcheck still fails with Jolt's verifier:
-1. Debug inner_sum_prod (Az*Bz) computation
-2. Compare prover's Az*Bz accumulation with verifier's opening claim computation
-
----
-
-## Previous Status (Session 27 - December 29, 2024)
-
-### Verification Progress
-
-**Major Progress:**
-1. ✅ Proof deserialization works - all 48 opening claims parsed correctly
-2. ✅ Jolt's preprocessing can be loaded (from /tmp/jolt_verifier_preprocessing.dat)
-3. ✅ Verifier instance created successfully
-4. ✅ 128-bit challenges now converted to Montgomery form
-5. ❌ Stage 1 sumcheck verification still fails (output_claim ≠ expected_output_claim)
-
-**Current Values:**
-```
-output_claim:          11331697095435039208873616544229270298263565208265409364435501006937104790550
-expected_output_claim: 12484965348201065871489189011985428966546791723664683385883331440930509110658
-Ratio: ~0.91
-```
-
-**Error Location:**
-`sumcheck.rs:248` - `output_claim != expected_output_claim`
-
-**Key Insight:**
-- The sumcheck rounds pass (p(0) + p(1) = claim for each round)
-- But the final claim doesn't match the expected value from R1CS evaluations
-
-**Root Cause Analysis:**
-The issue is NOT in:
-- ✅ Challenge format (now Montgomery form)
-- ✅ EqPolynomial evaluation
-- ✅ r_cycle computation
-
-The issue might be in:
-- The R1CS witness values themselves (do they match what Jolt expects?)
-- The streaming sumcheck's computation of Az*Bz
-- Some ordering or structure difference in how the trace is organized
-
-**Next Steps:**
-1. Compare R1CS witness values between Zolt and Jolt for a simple program
-2. Debug the sumcheck prover's intermediate values vs expected
-
-### Preprocessing Issue
-
-Zolt-generated preprocessing fails to deserialize because:
-1. Zolt adds UNIMPL instructions that Jolt's bytecode doesn't have
-2. The programs may be different due to different ELF decoding
-
-**Workaround:** Use Jolt's preprocessing file for cross-verification.
-
----
-
-## Previous Session (Session 26 - December 29, 2024)
-
-### Implicit Az*Bz Analysis
-
-Computed the implicit Az*Bz from the sumcheck output:
-
-```
-eq_factor = tau_high_bound_r0 * tau_bound_r_tail
-          = 9902220838585485861756225046178150348087355488875882769596587993516429520170
-
-inner_sum_prod (expected) = 12743996023445103930025687297173833157935883282725550257061179867498976368827
-implicit Az*Bz (output/eq) = 6845670145302814045138444113000749599157896909649021689277739372381215505241
-```
-
-The ratio is NOT a simple integer factor, ruling out simple scaling bugs.
-
-### Key Insight
-
-The sumcheck IS computing a valid proof (all rounds pass). But the Az*Bz it computes differs from what the opening claims produce.
-
-This suggests the issue is in HOW the sumcheck accumulates Az*Bz across cycles, not in the eq polynomial handling.
-
-### Possible Causes
-
-1. **Cycle ordering** - The sumcheck might access cycles in a different order than the MLE evaluation
-2. **Constraint evaluation** - The condition/magnitude values might differ
-3. **Accumulation structure** - The grid building might have subtle bugs
-
-### Next Steps
-
-1. Add debug output to print first 5 cycles' Az/Bz values
-2. Compare with equivalent computation in Jolt
-3. Find the divergence point
-
----
-
-## Session 23 - December 29, 2024
-
-### Stage 1 Verification - BREAKTHROUGH Analysis
-
-**Key Debug Findings:**
-
-1. ✅ UniSkip claim matches exactly: `13591663202569515315998923849316641932864363074482154783767228068389782823624`
-2. ✅ Round 0 s(0) matches: `6005620868732342382966507416812433762093958861677420752505123876486085602547`
-3. ✅ Round 0 s(1) matches: `7586042333837172933032416432504208170770404212804734031262104191903697221077`
-4. ✅ Final claim matches: `7120341815860535077792666425421583012196152296139946730075156877231654137396`
-
-**The sumcheck prover is CORRECT!** The issue is NOT in the polynomial computation.
-
-**Root Cause:**
-The mismatch is between `output_claim` (from sumcheck) and `expected_output_claim` (from R1CS evaluation).
-
-The sumcheck proves: `Σ_x eq(tau, x) * Az(x) * Bz(x) = 0`
-
-After binding to point r, the final claim is: `eq(tau, r) * Az(r) * Bz(r)`
-
-The verifier computes expected as: `L(tau_high, r0) * eq(tau_low, r_rev) * Az_MLE(r) * Bz_MLE(r)`
-
-For these to match:
-- `eq(tau, r)` should factor as `L(tau_high, r0) * eq(tau_low, r_rev)` ✓
-- `Az(r)` should equal `Az_MLE(r)` - this is where the issue might be
-
-**Hypothesis:**
-The sumcheck polynomial includes the eq factor differently than the verifier expects. The prover accumulates eq in `current_scalar` while computing t_zero/t_infinity, but the verifier's formula uses a different decomposition.
-
----
-
-## Session 22 - December 29, 2024
-
-### Stage 1 Index Structure Analysis
-
-**Key Finding**: Jolt's streaming sumcheck uses a complex index structure that Zolt may not be matching exactly.
-
-In Jolt's `fused_materialise_polynomials_round_zero`:
-```rust
-for (i, (az_chunk, bz_chunk)) in az.par_chunks_exact_mut(grid_size).zip(...).enumerate() {
-    // grid_size = 1 << window_size
-    while j < grid_size {
-        let full_idx = grid_size * i + j;
-        let time_step_idx = full_idx >> 1;  // Cycle index
-        let selector = full_idx & 1;  // Constraint group
-        // ...
-    }
-    // Final weight by E_out[i]
-}
-```
-
-The key insight is that:
-1. `i` is the combined (x_out, x_in) index
-2. `j` is within the window (handling the streaming variable)
-3. `time_step_idx = full_idx >> 1` means cycle indices are shared across constraint groups
-4. `selector = full_idx & 1` selects the constraint group (0 or 1)
-
-In Zolt's streaming round, we iterate directly over cycles, which may not match this structure.
-
-### Verified in Session 22
-
-1. ✅ Lagrange kernel L(tau_high, r0) - symmetric, matches Jolt
-2. ✅ tau_low extraction matches Jolt
-3. ✅ split_eq initialization with tau_low and lagrange_tau_r0 scaling
-4. ✅ bind() function matches Jolt's eq formula
-5. ✅ r_cycle_big_endian computation matches Jolt's normalize_opening_point
-6. ✅ R1CS input evaluations use correct eq polynomial
-
-### Still Investigating
-
-- Index structure in computeRemainingRoundPoly for streaming round
-- How E_out/E_in indices map to cycle indices
-- Whether Zolt's factorized eq is correct for the streaming round
-
----
-
-## Session 21 - December 29, 2024
-
-### Stage 1 Verification Issue
-
-**Problem**: All sumcheck rounds pass (p(0) + p(1) = claim), but final output_claim ≠ expected_output_claim
-
-**Latest Values:**
-- output_claim = 7120341815860535077792666425421583012196152296139946730075156877231654137396
-- expected = 2000541294615117218219795634222435854478303422072963760833200542270573423153
-- Ratio (integer): ~3.56
-- Ratio (field mod p): 8358532945086661905360953846561390757679463074586057649783072130911153544533
-
-### Verified Components (Session 21)
-
-1. ✅ Lagrange kernel L(tau_high, r0) - symmetric, order doesn't matter
-2. ✅ split_eq initialization with tau_low
-3. ✅ bind() updates current_scalar correctly
-4. ✅ computeCubicRoundPoly uses current_scalar for linear eq factor
-5. ✅ R1CS constraint group indices match Jolt exactly
-6. ✅ t'(∞) formula: product of slopes (Az(1)-Az(0)) * (Bz(1)-Bz(0))
-7. ✅ Individual sumcheck rounds pass verification
-8. ✅ Jolt uses LinearOnlySchedule (switch_over = 0)
-
-### Key Insight from Session 21
-
-Jolt uses `LinearOnlySchedule::new()` which sets `switch_over_point() = 0`, meaning ALL rounds use linear mode. However, Zolt's implementation has special "streaming round" logic for round 1. This distinction may not matter for correctness, but worth noting.
-
-### Expected Output Claim Formula
-
-```
-expected = tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod
-
-tau_high_bound_r0 = L(τ_high, r0) = 18796872752198882468706643523486633226658657759867260826380105601287106614970
-tau_bound_r_tail = eq(τ_low, r_tail_reversed) = 13330793061469069248256603124694999981346909330093035829032594788030901377683
-inner_sum_prod = Az_final * Bz_final = 12743996023445103930025687297173833157935883282725550257061179867498976368827
-
-Az_final = az_g0 + r_stream * (az_g1 - az_g0)
-Bz_final = bz_g0 + r_stream * (bz_g1 - bz_g0)
-
-az_g0 = 7543887623553796639022762555706702067884745212652401071075907851931007375221
-bz_g0 = 7385987366068817964405961970983403310894645058260096091751841775851519432644
-az_g1 = 21642654990609751288487014314124631874918846676589706504157890394950123239009
-bz_g1 = 3918541254077008785088751528944340709929299267734721029349343619431186429976
-```
-
-### Next Steps
-
-1. Add debug output to Zolt's streaming round:
-   - Print t_zero and t_infinity
-   - Print E_out and E_in table values for first few entries
-   - Print current_scalar at each round
-
-2. Compare Lagrange weights L_i(r0) between Zolt and Jolt
-
-3. Create minimal test with known correct values
-
-### Test Commands
-
-```bash
-# Jolt verification test
-cd /Users/matteo/projects/jolt
-cargo test --package jolt-core test_debug_stage1_verification -- --ignored --nocapture
-
-# Zolt tests
-cd /Users/matteo/projects/zolt
-zig build test --summary all
-```
-
----
-
-## Previous Sessions
-
-### Session 20 - tau_low fix
-
-Fixed UniSkip to use tau_low instead of full tau, avoiding double-counting τ_high.
-
-### Session 19 - EqPolynomial big-endian fix
-
-Fixed EqPolynomial.evals() to use big-endian indexing.
-
-### Session 17-18 - E_out/E_in tables
-
-Fixed split_eq E tables to use big-endian indexing.
 
 ---
 

@@ -1,122 +1,83 @@
 # Zolt-Jolt Compatibility TODO
 
-## Current Status: Session 37 - January 2, 2026
+## Current Status: Session 38 - January 2, 2026
 
-**Progress: Deep analysis of sumcheck mismatch, mathematical equivalence verified**
-
----
-
-## Session 37 Changes
-
-### 1. Fixed Transcript (DONE)
-- Prover now appends compressed coefficients `[c0, c2, c3]` instead of evaluations
-- Matches Jolt's `UniPoly::compress()` format
-
-### 2. Mathematical Analysis (DONE)
-- Verified: `MLE(Az)(r) = Az(z_MLE(r))` due to linearity
-- Verified: `MLE(Az * Bz) = MLE(Az) * MLE(Bz)` for this special case
-- Both Jolt and Zolt compute `Σ eq * (Az * Bz)` in the prover
-
-### 3. Key Finding: Individual MLEs Match!
-- `prover_az_mle == verifier_az_final` ✓
-- `prover_bz_mle == verifier_bz_final` ✓
-- But `prover_sum (Az*Bz MLE) ≠ verifier_inner_sum_prod (Az*Bz from z_MLE)`
-- The difference is ~0.22%, not a simple factor
+**Progress: Verified EqPolynomial is correct, identified mathematical issue in sumcheck**
 
 ---
 
-## Current Issue: Sumcheck Output Claim Mismatch (UNCHANGED)
+## Session 38 Findings
+
+### CRITICAL: EqPolynomial is CORRECT!
+
+1. ✅ Partition of unity test passes - sum of eq evaluations equals 1
+2. ✅ Test with r=[5555, 6666] confirms sum == F.one()
+3. ✅ Individual Az and Bz MLE values match between prover and verifier
+
+### The Mathematical Issue Explained
+
+The test computes two different quantities:
+- `prover_sum = Σ_t eq(r_cycle, t) * Az(t) * Bz(t)` = MLE(Az*Bz)
+- `verifier_inner_sum_prod = Az_MLE * Bz_MLE` = product of MLEs
+
+These are NOT equal in general: `MLE(f*g) ≠ MLE(f) * MLE(g)`
+
+HOWEVER, the sumcheck protocol should produce `MLE(f) * MLE(g)` after all bindings, because the final claim is a single-point evaluation.
+
+### Root Cause
+
+The issue is in how the round polynomials are constructed. The sumcheck should:
+1. In each round, compute the univariate polynomial over the remaining sum
+2. After binding all variables, arrive at `eq(τ, r) * Az(r) * Bz(r)`
+3. This equals `eq(τ, r) * MLE_Az(r) * MLE_Bz(r)`
+
+But something in Zolt's prover is causing it to compute the wrong intermediate values.
+
+---
+
+## Current Issue: Sumcheck Output Claim Mismatch
 
 ```
 output_claim:          21656329869382715893372831461077086717482664293827627865217976029788055707943
 expected_output_claim: 4977070801800327014657227951104439579081780871540314422928627443513195286072
 ```
 
-### Key Observations
-
-1. **Az/Bz MLE values match perfectly** between prover and verifier
-   - `Az MLE match: true, Bz MLE match: true`
-
-2. **The output_claim hasn't changed** after the split_eq fixes
-   - This suggests the issue is NOT in E_out/E_in table access
-   - The pop is an optimization, not a correctness fix
-
-3. **All 11 individual rounds pass** (p(0) + p(1) = claim)
-   - The polynomials are internally consistent
-   - But the final claim doesn't match expected
-
-4. **The mismatch is large** - different by ~4x
-   - Not a field arithmetic issue (would be close but off by a small amount)
+All 11 rounds pass individually (p(0) + p(1) = claim), but the final claim doesn't match expected.
 
 ---
 
-## Remaining Hypotheses
+## Remaining Investigation Areas
 
-### 1. t_prime Polynomial Construction
-The `buildTPrimePoly` function accumulates:
-```
-t_prime[idx] = Σ E_out[x_out] * E_in[x_in] * Az[i][j] * Bz[i][j]
-```
+### 1. Round Polynomial Construction
+The `computeRemainingRoundPoly` uses:
+- `t_zero` and `t_infinity` from t_prime projection
+- `computeCubicRoundPoly` from split_eq
 
-But this includes the eq factor from E_out * E_in, which is SEPARATE from current_scalar.
-The final output should be:
-```
-output_claim = current_scalar * (remaining_eq_factor) * Az_final * Bz_final
-```
+Need to verify:
+- Is t_prime storing the right values?
+- Is the projection formula correct?
+- Is the cubic construction matching Jolt's?
 
-Maybe the remaining_eq_factor is being computed incorrectly?
-
-### 2. current_scalar Initialization
-The split_eq is initialized with `lagrange_tau_r0` as the scaling factor.
-This becomes the initial `current_scalar`.
-
-But after all rounds are bound:
+### 2. t_prime_poly Building
+`buildTPrimePoly` accumulates:
 ```
-current_scalar = lagrange_tau_r0 * Π eq(tau[10-i], r_i)
+t_prime[idx] = Σ E_out * E_in * Az * Bz
 ```
 
-The verifier expects:
-```
-eq_factor = lagrange_tau_r0 * eq(tau_low, r_tail_reversed)
-```
+Need to compare index-by-index with Jolt's equivalent.
 
-These should be the same, but maybe there's an ordering issue?
-
-### 3. Round Polynomial Evaluation Point
-When computing the next round's claim:
-```
-claim = poly(r) where poly = [s(0), s(1), s(2), s(3)]
-```
-
-Are we evaluating at the right point?
-
----
-
-## Next Steps for Future Session
-
-### 1. Add Debug Output to Compare Values
-- Print t_zero, t_infinity for each round
-- Print current_scalar before/after each bind
-- Compare with Jolt's values (add similar prints to Jolt)
-
-### 2. Verify eq Factor Directly
-After all rounds, compute:
-```
-prover_eq = prover.split_eq.current_scalar
-verifier_eq = lagrange_tau_r0 * eq(tau_low, r_tail_reversed)
-```
-These should match!
-
-### 3. Check t_prime Final Value
-After all bindings, the t_prime polynomial should have a single value.
-This should equal `Az_final * Bz_final`.
+### 3. Variable Binding Order
+Both use LowToHigh, but verify:
+- split_eq binds correctly
+- t_prime_poly binds correctly
+- az_poly/bz_poly bind correctly
 
 ---
 
 ## Test Commands
 
 ```bash
-# Run Zolt tests (all 710 pass)
+# Run Zolt tests (all 712+ pass)
 zig build test --summary all
 
 # Generate proof
@@ -128,3 +89,19 @@ zig build -Doptimize=ReleaseFast && ./zig-out/bin/zolt prove examples/fibonacci.
 cd /Users/matteo/projects/jolt
 cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture
 ```
+
+---
+
+## Files Modified This Session
+
+1. `src/poly/mod.zig` - Added partition of unity tests for EqPolynomial
+2. `.agent/NOTES.md` - Updated with findings
+3. `.agent/TODO.md` - Updated status
+
+---
+
+## Next Steps
+
+1. Add detailed round-by-round debug output to streaming outer prover
+2. Compare t_prime values at each step between Zolt and Jolt
+3. Verify the mathematical relationship between prover computation and expected value

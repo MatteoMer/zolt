@@ -380,6 +380,72 @@ pub fn UniPoly(comptime F: type) type {
     };
 }
 
+test "EqPolynomial partition of unity" {
+    const F = field.BN254Scalar;
+    const testing = std.testing;
+
+    // Test 1: with r = [1/2, 1/3] (simple values)
+    {
+        const half = F.one().mul(F.fromU64(2).inverse().?);
+        const third = F.one().mul(F.fromU64(3).inverse().?);
+        const r = [_]F{ half, third };
+
+        var eq_poly = try EqPolynomial(F).init(testing.allocator, &r);
+        defer eq_poly.deinit();
+
+        const evals = try eq_poly.evals(testing.allocator);
+        defer testing.allocator.free(evals);
+
+        // Sum should equal 1
+        var sum = F.zero();
+        for (evals) |ev| {
+            sum = sum.add(ev);
+        }
+
+        // Check partition of unity
+        try testing.expect(sum.eql(F.one()));
+    }
+
+    // Test 2: with larger r values (like in the inner_sum_prod test)
+    {
+        const r = [_]F{ F.fromU64(5555), F.fromU64(6666) };
+
+        var eq_poly = try EqPolynomial(F).init(testing.allocator, &r);
+        defer eq_poly.deinit();
+
+        const evals = try eq_poly.evals(testing.allocator);
+        defer testing.allocator.free(evals);
+
+        // Sum should equal 1
+        var sum = F.zero();
+        for (evals) |ev| {
+            sum = sum.add(ev);
+        }
+
+        // FORCED Print for debugging
+        std.debug.print("\n\n=== PARTITION TEST ===\n", .{});
+        std.debug.print("r[0] (5555 as Montgomery):\n", .{});
+        for (r[0].limbs) |limb| std.debug.print("  {x:016}\n", .{limb});
+        std.debug.print("r[1] (6666 as Montgomery):\n", .{});
+        for (r[1].limbs) |limb| std.debug.print("  {x:016}\n", .{limb});
+        std.debug.print("Eq evals:\n", .{});
+        for (evals, 0..) |ev, i| {
+            std.debug.print("  [{d}]: ", .{i});
+            for (ev.limbs) |limb| std.debug.print("{x:016} ", .{limb});
+            std.debug.print("\n", .{});
+        }
+        std.debug.print("Sum:\n  ", .{});
+        for (sum.limbs) |limb| std.debug.print("{x:016} ", .{limb});
+        std.debug.print("\nOne:\n  ", .{});
+        for (F.one().limbs) |limb| std.debug.print("{x:016} ", .{limb});
+        std.debug.print("\nSum == One? {}\n", .{sum.eql(F.one())});
+        std.debug.print("=== END PARTITION TEST ===\n\n", .{});
+
+        // Check partition of unity
+        try testing.expect(sum.eql(F.one()));
+    }
+}
+
 test "unipoly interpolate degree 3" {
     const F = field.BN254Scalar;
 

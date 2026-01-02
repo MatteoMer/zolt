@@ -397,6 +397,69 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
 
             return .{ .eq_0 = eq_0, .eq_1 = eq_1 };
         }
+
+        /// Get the eq table for the "active" window bits (all window bits except the current Gruen variable)
+        ///
+        /// This is used when projecting a multiquadratic polynomial t'(z_0, ..., z_{w-1}) down to
+        /// a univariate in the first variable by summing against eq(tau_active, ·) over the
+        /// remaining coordinates.
+        ///
+        /// For window_size = 1: returns [1] (eq over zero variables)
+        /// For window_size > 1: returns eq(w_active, ·) where w_active is the first (window_size-1) bits of the window
+        ///
+        /// The complete factorization satisfies:
+        ///   log2(|E_out|) + log2(|E_in|) + log2(|E_active|) + 1 = #unbound bits
+        ///
+        /// Reference: jolt-core/src/poly/split_eq_poly.rs E_active_for_window
+        pub fn getEActiveForWindow(self: *const Self, allocator: Allocator, window_size: usize) ![]F {
+            // No active bits in a size-0/1 window; eq over zero vars is [1].
+            if (window_size <= 1) {
+                const result = try allocator.alloc(F, 1);
+                result[0] = F.one();
+                return result;
+            }
+
+            const num_unbound = self.current_index;
+
+            // Clamp to the maximum meaningful window size at this round.
+            if (window_size > num_unbound) {
+                const result = try allocator.alloc(F, 1);
+                result[0] = F.one();
+                return result;
+            }
+
+            // Extract the active window bits: w[window_start..window_start + window_size - 1]
+            // where window_start = remaining_w.len - window_size = num_unbound - window_size
+            const window_start = num_unbound - window_size;
+            const active_bits = window_size - 1; // All window bits except the current (last) one
+
+            // Compute full eq table over the active window bits
+            // w_active = tau[window_start..window_start + active_bits]
+            const table_size = @as(usize, 1) << @intCast(active_bits);
+            const result = try allocator.alloc(F, table_size);
+
+            // Build eq table using big-endian indexing
+            result[0] = F.one();
+            var current_size: usize = 1;
+
+            for (0..active_bits) |k| {
+                const tau_k = self.tau[window_start + k];
+                const one_minus_tau_k = F.one().sub(tau_k);
+
+                // Iterate in reverse to avoid overwriting needed values
+                var i: usize = current_size;
+                while (i > 0) {
+                    i -= 1;
+                    const scalar = result[i];
+                    // Big-endian: new bit is appended as LSB
+                    result[2 * i + 1] = scalar.mul(tau_k);
+                    result[2 * i] = scalar.mul(one_minus_tau_k);
+                }
+                current_size *= 2;
+            }
+
+            return result;
+        }
     };
 }
 
@@ -558,4 +621,61 @@ test "GruenSplitEqPolynomial: big-endian eq table correctness" {
     try testing.expect(eq_table[5].eql(expected_5));
     try testing.expect(eq_table[10].eql(expected_10));
     try testing.expect(eq_table[15].eql(expected_15));
+}
+
+test "GruenSplitEqPolynomial: getEActiveForWindow" {
+    const F = BN254Scalar;
+
+    // tau = [τ_0, τ_1, τ_2, τ_3] with length 4
+    const tau = [_]F{ F.fromU64(3), F.fromU64(5), F.fromU64(7), F.fromU64(11) };
+
+    var split_eq = try GruenSplitEqPolynomial(F).init(testing.allocator, &tau);
+    defer split_eq.deinit();
+
+    // With 4 unbound variables and window_size = 1:
+    // - No active bits (window_size - 1 = 0)
+    // - Should return [1]
+    const e_active_1 = try split_eq.getEActiveForWindow(testing.allocator, 1);
+    defer testing.allocator.free(e_active_1);
+    try testing.expectEqual(@as(usize, 1), e_active_1.len);
+    try testing.expect(e_active_1[0].eql(F.one()));
+
+    // With 4 unbound variables and window_size = 2:
+    // - window starts at index 4-2=2, so window = tau[2..4] = [7, 11]
+    // - active = tau[2..3] = [7] (1 bit)
+    // - E_active should have 2 entries: [1-7, 7] = [-6, 7]
+    const e_active_2 = try split_eq.getEActiveForWindow(testing.allocator, 2);
+    defer testing.allocator.free(e_active_2);
+    try testing.expectEqual(@as(usize, 2), e_active_2.len);
+    const expected_0_2 = F.one().sub(F.fromU64(7)); // 1 - 7 = -6
+    const expected_1_2 = F.fromU64(7);
+    try testing.expect(e_active_2[0].eql(expected_0_2));
+    try testing.expect(e_active_2[1].eql(expected_1_2));
+
+    // With 4 unbound variables and window_size = 3:
+    // - window starts at index 4-3=1, so window = tau[1..4] = [5, 7, 11]
+    // - active = tau[1..3] = [5, 7] (2 bits)
+    // - E_active should have 4 entries: eq([5,7], {0,0}), eq([5,7], {0,1}), eq([5,7], {1,0}), eq([5,7], {1,1})
+    const e_active_3 = try split_eq.getEActiveForWindow(testing.allocator, 3);
+    defer testing.allocator.free(e_active_3);
+    try testing.expectEqual(@as(usize, 4), e_active_3.len);
+
+    const tau_active_0 = F.fromU64(5);
+    const tau_active_1 = F.fromU64(7);
+    const one_minus_5 = F.one().sub(tau_active_0);
+    const one_minus_7 = F.one().sub(tau_active_1);
+
+    // Index 0 (00): (1-5)*(1-7) = -4 * -6 = 24
+    const exp_00 = one_minus_5.mul(one_minus_7);
+    // Index 1 (01): (1-5)*7 = -4 * 7 = -28
+    const exp_01 = one_minus_5.mul(tau_active_1);
+    // Index 2 (10): 5*(1-7) = 5 * -6 = -30
+    const exp_10 = tau_active_0.mul(one_minus_7);
+    // Index 3 (11): 5*7 = 35
+    const exp_11 = tau_active_0.mul(tau_active_1);
+
+    try testing.expect(e_active_3[0].eql(exp_00));
+    try testing.expect(e_active_3[1].eql(exp_01));
+    try testing.expect(e_active_3[2].eql(exp_10));
+    try testing.expect(e_active_3[3].eql(exp_11));
 }

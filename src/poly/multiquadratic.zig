@@ -123,6 +123,54 @@ pub fn MultiquadraticPolynomial(comptime F: type) type {
             return self.evaluations[2]; // Index for (∞, 0, 0, ...)
         }
 
+        /// Bind the first (least-significant) variable z_0 := r, reducing the
+        /// dimension from w to w-1 and keeping the base-3 layout invariant.
+        ///
+        /// For each assignment to (z_1, ..., z_{w-1}), we have three stored values
+        ///   f(0, ..), f(1, ..), f(∞, ..)
+        /// and interpolate the unique quadratic in z_0 that matches them, then
+        /// evaluate it at z_0 = r.
+        ///
+        /// Formula: f(r, rest) = f(0, rest) * (1 - r) + f(1, rest) * r + f(∞, rest) * r(r - 1)
+        ///
+        /// Reference: jolt-core/src/poly/multiquadratic_poly.rs bind_first_variable
+        pub fn bind(self: *Self, r: F) void {
+            if (self.num_vars == 0) return;
+
+            const new_size = pow3(self.num_vars - 1);
+            const one = F.one();
+
+            // r_term = r * (r - 1)
+            const r_term = r.mul(r.sub(one));
+
+            for (0..new_size) |new_idx| {
+                const old_base_idx = new_idx * 3;
+                const eval_at_0 = self.evaluations[old_base_idx]; // z_0 = 0
+                const eval_at_1 = self.evaluations[old_base_idx + 1]; // z_0 = 1
+                const eval_at_inf = self.evaluations[old_base_idx + 2]; // z_0 = ∞
+
+                // f(r) = f(0) * (1 - r) + f(1) * r + f(∞) * r(r - 1)
+                self.evaluations[new_idx] = eval_at_0.mul(one.sub(r))
+                    .add(eval_at_1.mul(r))
+                    .add(eval_at_inf.mul(r_term));
+            }
+
+            self.num_vars -= 1;
+            // Note: We don't reallocate/truncate the array - just reduce logical size
+            // The extra elements beyond pow3(num_vars) are now unused
+        }
+
+        /// Check if the polynomial has been fully bound (no remaining variables)
+        pub fn isBound(self: *const Self) bool {
+            return self.num_vars == 0;
+        }
+
+        /// Get the final claim after all variables have been bound
+        pub fn finalSumcheckClaim(self: *const Self) F {
+            std.debug.assert(self.isBound());
+            return self.evaluations[0];
+        }
+
         /// Project to first variable, summing over remaining variables with eq weights
         ///
         /// Computes:
@@ -386,4 +434,112 @@ test "MultiquadraticPolynomial: ternaryToBinaryIndex" {
     try testing.expectEqual(@as(usize, 1), ternaryToBinaryIndex(1, 2)); // (1, 0) -> 0b01
     try testing.expectEqual(@as(usize, 2), ternaryToBinaryIndex(3, 2)); // (0, 1) -> 0b10
     try testing.expectEqual(@as(usize, 3), ternaryToBinaryIndex(4, 2)); // (1, 1) -> 0b11
+}
+
+test "MultiquadraticPolynomial: bind 1 variable" {
+    const F = BN254Scalar;
+
+    // Linear polynomial: f(0) = 3, f(1) = 7
+    // f(x) = 3 + 4x (linear interpolation)
+    // After binding at r = 2: f(2) = 3 + 4*2 = 11
+    const linear = [_]F{ F.fromU64(3), F.fromU64(7) };
+
+    var poly = try MultiquadraticPolynomial(F).fromLinear(testing.allocator, 1, &linear);
+    defer poly.deinit();
+
+    // Verify initial state
+    try testing.expectEqual(@as(usize, 1), poly.num_vars);
+
+    // Bind at r = 2
+    // Formula: f(r) = f(0)*(1-r) + f(1)*r + f(∞)*r(r-1)
+    // f(∞) = 7 - 3 = 4
+    // f(2) = 3*(1-2) + 7*2 + 4*2*(2-1) = 3*(-1) + 14 + 4*2 = -3 + 14 + 8 = 19
+    const r = F.fromU64(2);
+    poly.bind(r);
+
+    try testing.expectEqual(@as(usize, 0), poly.num_vars);
+    try testing.expect(poly.isBound());
+
+    // Expected: f(2) = 3 + 4*2 = 11 for linear, but for multiquadratic:
+    // f(r) = f(0)*(1-r) + f(1)*r + f(∞)*r(r-1)
+    // = 3*(-1) + 7*2 + 4*2*1 = -3 + 14 + 8 = 19
+    const expected = F.fromU64(19);
+    try testing.expect(poly.finalSumcheckClaim().eql(expected));
+}
+
+test "MultiquadraticPolynomial: bind 2 variables" {
+    const F = BN254Scalar;
+
+    // Linear polynomial over {0,1}^2:
+    // f(0,0) = 1, f(1,0) = 2, f(0,1) = 3, f(1,1) = 4
+    const linear = [_]F{
+        F.fromU64(1), // (0,0)
+        F.fromU64(2), // (1,0)
+        F.fromU64(3), // (0,1)
+        F.fromU64(4), // (1,1)
+    };
+
+    var poly = try MultiquadraticPolynomial(F).fromLinear(testing.allocator, 2, &linear);
+    defer poly.deinit();
+
+    // Verify initial state
+    try testing.expectEqual(@as(usize, 2), poly.num_vars);
+    try testing.expect(!poly.isBound());
+
+    // Bind first variable (z_0) at r = 2
+    // For z_1 = 0: f(0,0)=1, f(1,0)=2, f(∞,0)=1
+    //   f(2,0) = 1*(1-2) + 2*2 + 1*2*(2-1) = -1 + 4 + 2 = 5
+    // For z_1 = 1: f(0,1)=3, f(1,1)=4, f(∞,1)=1
+    //   f(2,1) = 3*(-1) + 4*2 + 1*2*1 = -3 + 8 + 2 = 7
+    // For z_1 = ∞: f(0,∞)=2, f(1,∞)=2, f(∞,∞)=0
+    //   f(2,∞) = 2*(-1) + 2*2 + 0*2*1 = -2 + 4 + 0 = 2
+    const r1 = F.fromU64(2);
+    poly.bind(r1);
+
+    try testing.expectEqual(@as(usize, 1), poly.num_vars);
+    try testing.expect(!poly.isBound());
+
+    // After first bind, we should have 3 values:
+    // evals[0] = f(2, 0) = 5
+    // evals[1] = f(2, 1) = 7
+    // evals[2] = f(2, ∞) = 2
+    try testing.expect(poly.evaluations[0].eql(F.fromU64(5)));
+    try testing.expect(poly.evaluations[1].eql(F.fromU64(7)));
+    try testing.expect(poly.evaluations[2].eql(F.fromU64(2)));
+
+    // Bind second variable (z_1) at r = 3
+    // f(2, 3) = f(2,0)*(1-3) + f(2,1)*3 + f(2,∞)*3*(3-1)
+    //         = 5*(-2) + 7*3 + 2*3*2
+    //         = -10 + 21 + 12 = 23
+    const r2 = F.fromU64(3);
+    poly.bind(r2);
+
+    try testing.expectEqual(@as(usize, 0), poly.num_vars);
+    try testing.expect(poly.isBound());
+    try testing.expect(poly.finalSumcheckClaim().eql(F.fromU64(23)));
+}
+
+test "MultiquadraticPolynomial: bind with field challenge" {
+    const F = BN254Scalar;
+
+    // Linear polynomial: f(0) = 5, f(1) = 10
+    // f(∞) = 5
+    const linear = [_]F{ F.fromU64(5), F.fromU64(10) };
+
+    var poly = try MultiquadraticPolynomial(F).fromLinear(testing.allocator, 1, &linear);
+    defer poly.deinit();
+
+    // Bind at r = 0 should give f(0) = 5
+    const r_zero = F.zero();
+    var poly_copy_zero = try MultiquadraticPolynomial(F).init(testing.allocator, 1, poly.evaluations[0..3]);
+    defer poly_copy_zero.deinit();
+    poly_copy_zero.bind(r_zero);
+    try testing.expect(poly_copy_zero.finalSumcheckClaim().eql(F.fromU64(5)));
+
+    // Bind at r = 1 should give f(1) = 10
+    const r_one = F.one();
+    var poly_copy_one = try MultiquadraticPolynomial(F).init(testing.allocator, 1, poly.evaluations[0..3]);
+    defer poly_copy_one.deinit();
+    poly_copy_one.bind(r_one);
+    try testing.expect(poly_copy_one.finalSumcheckClaim().eql(F.fromU64(10)));
 }

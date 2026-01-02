@@ -502,6 +502,20 @@ pub fn ProofConverter(comptime F: type) type {
                 outer_prover.updateClaim(raw_evals, challenge);
             }
 
+            // DEBUG: Print final values for cross-verification
+            const debug_output = false; // Set to true to enable debug output
+            if (debug_output) {
+                const eq_scalar = outer_prover.split_eq.current_scalar;
+                const final_claim = outer_prover.current_claim;
+                std.debug.print("\n=== Stage 1 Sumcheck Debug ===\n", .{});
+                std.debug.print("Prover eq_factor:\n  {any}\n", .{eq_scalar.toBytesBE()});
+                std.debug.print("Prover final unscaled claim:\n  {any}\n", .{final_claim.toBytesBE()});
+                std.debug.print("Lagrange tau r0:\n  {any}\n", .{lagrange_tau_r0.toBytesBE()});
+                std.debug.print("Batching coeff:\n  {any}\n", .{batching_coeff.toBytesBE()});
+                std.debug.print("Num remaining rounds: {}\n", .{num_remaining_rounds});
+                std.debug.print("===============================\n", .{});
+            }
+
             return Stage1Result{ .challenges = challenges, .r0 = r0, .uni_skip_claim = uni_skip_claim, .allocator = self.allocator };
         }
 

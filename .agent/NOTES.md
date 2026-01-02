@@ -1,5 +1,50 @@
 # Zolt-Jolt Compatibility Notes
 
+## Current Status (Session 31 - January 2, 2026)
+
+### Recent Progress
+
+1. **Fixed transcript to use compressed coefficients** - The prover was appending evaluation points `[s(0), s(1), s(2), s(3)]` instead of compressed coefficients `[c0, c2, c3]`. Fixed in `streaming_outer.zig`.
+
+2. **Verified mathematical correctness** - For linear Az and Bz functions, the identity `MLE(Az)(r) * MLE(Bz)(r) = Az(z_MLE(r)) * Bz(z_MLE(r))` holds due to linearity.
+
+3. **Identified potential structural issue** - The Az/Bz computation in `materializeLinearPhasePolynomials` may not match Jolt's structure.
+
+### Current Issue
+
+The outer sumcheck verification fails:
+- `output_claim: 21656329869382715893372831461077086717482664293827627865217976029788055707943`
+- `expected_output_claim: 4977070801800327014657227951104439579081780871540314422928627443513195286072`
+
+The implicit Az*Bz values don't match:
+- Prover's: `18335350532138790221005973794571557670878860588539341712946879810521348482640`
+- Verifier's: `18375703733773529163378995903800776635654818143103579876647287795480596237786`
+- Ratio: 0.9978 (close but not equal)
+
+### Key Observations
+
+1. **Individual Az and Bz MLEs match** - The test shows `Az MLE match: true, Bz MLE match: true`
+2. **But the products differ** - This suggests a subtle structural difference in how the values are combined
+
+### Jolt's Two-Group Bz Handling
+
+Jolt separates Bz into two accumulators:
+```rust
+acc_bz_first -> first group Bz
+acc_bz_second -> second group Bz
+bz_out = bz_first + bz_second
+```
+
+Zolt combines them directly into one accumulator. This SHOULD be equivalent, but may cause numerical differences.
+
+### Next Investigation Steps
+
+1. Compare exact Az/Bz values at specific cycles
+2. Verify the `full_idx` index mapping (cycle vs group)
+3. Check if there's a subtle off-by-one or ordering issue
+
+---
+
 ## Current Status (Session 30 - January 1, 2026)
 
 ### Progress Made

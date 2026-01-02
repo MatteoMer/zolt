@@ -434,34 +434,21 @@ pub fn ProofConverter(comptime F: type) type {
             }
 
             // Generate all remaining round polynomials with transcript integration
-            for (0..num_remaining_rounds) |round_num| {
-                // Use multiquadratic method for cycle rounds (not streaming round)
-                const evals: [4]F = blk: {
-                    if (round_num == 0) {
-                        break :blk outer_prover.computeRemainingRoundPoly() catch {
-                            // Fallback to zero polynomial
-                            const coeffs = try self.allocator.alloc(F, 3);
-                            @memset(coeffs, F.zero());
-                            try proof.compressed_polys.append(self.allocator, .{
-                                .coeffs_except_linear_term = coeffs,
-                                .allocator = self.allocator,
-                            });
-                            try challenges.append(self.allocator, F.zero());
-                            continue;
-                        };
-                    } else {
-                        break :blk outer_prover.computeRemainingRoundPolyMultiquadratic() catch {
-                            // Fallback to zero polynomial
-                            const coeffs = try self.allocator.alloc(F, 3);
-                            @memset(coeffs, F.zero());
-                            try proof.compressed_polys.append(self.allocator, .{
-                                .coeffs_except_linear_term = coeffs,
-                                .allocator = self.allocator,
-                            });
-                            try challenges.append(self.allocator, F.zero());
-                            continue;
-                        };
-                    }
+            // Use computeRemainingRoundPoly for ALL rounds - it now properly:
+            // 1. Materializes Az/Bz on first call
+            // 2. Rebuilds t_prime_poly from bound Az/Bz when needed
+            // 3. Uses the multiquadratic method for all rounds
+            for (0..num_remaining_rounds) |_| {
+                const evals: [4]F = outer_prover.computeRemainingRoundPoly() catch {
+                    // Fallback to zero polynomial
+                    const coeffs = try self.allocator.alloc(F, 3);
+                    @memset(coeffs, F.zero());
+                    try proof.compressed_polys.append(self.allocator, .{
+                        .coeffs_except_linear_term = coeffs,
+                        .allocator = self.allocator,
+                    });
+                    try challenges.append(self.allocator, F.zero());
+                    continue;
                 };
 
                 // Convert evaluations [s(0), s(1), s(2), s(3)] to compressed coefficients [c0, c2, c3]

@@ -1332,17 +1332,13 @@ pub fn StreamingOuterProver(comptime F: type) type {
             }
 
             // Jolt's LinearOnlySchedule: all rounds are linear phase
-            // Round 1 is the switch-over point (materialization happened in compute_message)
-            // Rounds 2+ bind the already-materialized polynomials
-
-            // For all rounds after the first, bind Az/Bz polynomials
-            if (self.current_round > 1) {
-                if (self.az_poly) |*az| {
-                    az.bindLow(r);
-                }
-                if (self.bz_poly) |*bz| {
-                    bz.bindLow(r);
-                }
+            // ALL rounds bind Az/Bz polynomials (this is critical for next_window to work!)
+            // In Jolt's ingest_challenge, az/bz are bound on EVERY round, including round 0.
+            if (self.az_poly) |*az| {
+                az.bindLow(r);
+            }
+            if (self.bz_poly) |*bz| {
+                bz.bindLow(r);
             }
 
             try self.challenges.append(self.allocator, r);

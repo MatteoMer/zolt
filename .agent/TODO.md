@@ -2,58 +2,61 @@
 
 ## Current Status: Session 40 - January 2, 2026
 
-**712 tests pass. CRITICAL: transcript state diverges BEFORE Stage 1 remaining sumcheck.**
+**712 tests pass. CRITICAL: GT serialization likely causing transcript divergence.**
 
 ---
 
 ## CRITICAL Finding (Session 40)
 
-### Debug Output Comparison
+### The Problem
 
-**Zolt prover values:**
-- `lagrange_tau_r0`:  16352479363158949757474927920495789621963005842526293440633700861589541710157
-- `batching_coeff`:   337824298732027351174516659111631235902
-
-**Jolt verifier values:**
-- `tau_high_bound_r0`: 8028489090661391714608006371229486480224032252478234922314677496455554319506
-- `batching_coeff`:    174319264625250476236973977450622404778
+The batching coefficient and lagrange_tau_r0 don't match between Zolt and Jolt. This indicates that the transcript state diverged BEFORE Stage 1 remaining sumcheck began.
 
 ### Root Cause Analysis
 
-The **batching_coeff mismatch** proves that the transcript state diverged BEFORE Stage 1 remaining sumcheck. The batching coefficient is generated after:
+The transcript divergence happens because **GT (Fp12) element serialization** may not match between Zolt and Jolt:
 
-1. Commitments appended to transcript ← **LIKELY CULPRIT**
-2. tau = challenge_vector(num_rows_bits)
-3. UniSkip polynomial appended
-4. r0 = challengeScalar()
-5. uni_skip_claim appended
-6. batching_coeff = challengeScalar() ← DIFFERS
+1. **Zolt's `appendGT`**:
+   - Calls `gt.toBytes()` which serializes 12 Fp elements in little-endian
+   - Order: c0.c0.c0, c0.c0.c1, c0.c1.c0, c0.c1.c1, c0.c2.c0, c0.c2.c1, c1.c0.c0, c1.c0.c1, c1.c1.c0, c1.c1.c1, c1.c2.c0, c1.c2.c1
+   - Reverses all 384 bytes
+   - Appends to transcript
 
-### Hypothesis
+2. **Jolt's `append_serializable`**:
+   - Calls `serialize_uncompressed` (arkworks)
+   - Reverses all bytes
+   - Appends to transcript
 
-**Commitments are not being appended to transcript correctly.**
+If arkworks uses a different field element ordering within Fp12, or different byte order, the hashes will differ.
 
-Looking at the code in `convertWithTranscript`, I don't see commitments being appended to transcript. The Jolt verifier expects commitments to be hashed before tau is generated.
+### Data Points
 
-Without commitments in the transcript:
-- Zolt generates different tau values
-- Different tau_high leads to different lagrange_tau_r0
-- Different transcript state leads to different batching_coeff
+**Zolt prover values:**
+- `lagrange_tau_r0`: 16352479363158949757474927920495789621963005842526293440633700861589541710157
+- `batching_coeff`: 337824298732027351174516659111631235902
 
-### Next Steps (Priority Order)
+**Jolt verifier values:**
+- `tau_high_bound_r0`: 8028489090661391714608006371229486480224032252478234922314677496455554319506
+- `batching_coeff`: 174319264625250476236973977450622404778
 
-1. **Find where Jolt appends commitments to transcript**
-2. **Add commitment serialization to Zolt's transcript**
-3. **Verify tau values match after fix**
-4. **Verify batching_coeff matches after fix**
+### Verification Needed
+
+1. Confirm arkworks Fp12 serialization order
+2. Compare byte-by-byte output of Zolt's GT serialization vs arkworks
+3. Fix any ordering discrepancies
 
 ---
 
-## Earlier Fixes Applied
+## Next Steps
 
-1. ✅ Batching coefficient applied to round polynomials
-2. ✅ Prover internal state uses unscaled claims
-3. ✅ Round polynomials scaled for transcript hash
+1. **Create a GT serialization test**:
+   - Compute a known GT value (e.g., pairing of known points)
+   - Compare Zolt's serialization with arkworks serialization byte-by-byte
+   - Identify any ordering or format differences
+
+2. **Fix GT serialization to match arkworks**
+
+3. **Re-run Jolt verification test**
 
 ---
 

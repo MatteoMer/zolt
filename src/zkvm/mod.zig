@@ -429,8 +429,10 @@ pub fn JoltProver(comptime F: type) type {
             inputs: []const u8,
         ) !jolt_types.JoltProof(F, commitment_types.PolyCommitment, commitment_types.OpeningProof) {
             // Initialize memory config
+            // Use memory_size = 32768 to match Jolt fibonacci example
             var config = common.MemoryConfig{
                 .program_size = program_bytecode.len,
+                .memory_size = 32768,
             };
 
             // Initialize the emulator
@@ -482,12 +484,34 @@ pub fn JoltProver(comptime F: type) type {
 
             // Create JoltDevice for Fiat-Shamir preamble
             // This needs to match the device used by Jolt's verifier
+            // CRITICAL: Use actual emulator outputs and panic state for Fiat-Shamir transcript
+            const actual_outputs = emulator.getOutputs();
+            const actual_panic = emulator.device.panic;
+
+            // DEBUG: Print Fiat-Shamir preamble values
+            std.debug.print("\n=== Zolt Fiat-Shamir Preamble Debug ===\n", .{});
+            std.debug.print("inputs.len = {d}\n", .{inputs.len});
+            if (inputs.len > 0 and inputs.len <= 32) {
+                std.debug.print("inputs = {any}\n", .{inputs});
+            } else if (inputs.len > 32) {
+                std.debug.print("inputs[0..32] = {any}...\n", .{inputs[0..32]});
+            }
+            std.debug.print("outputs.len = {d}\n", .{actual_outputs.len});
+            if (actual_outputs.len > 0 and actual_outputs.len <= 32) {
+                std.debug.print("outputs = {any}\n", .{actual_outputs});
+            } else if (actual_outputs.len > 32) {
+                std.debug.print("outputs[0..32] = {any}...\n", .{actual_outputs[0..32]});
+            }
+            std.debug.print("panic = {}\n", .{actual_panic});
+            std.debug.print("========================================\n\n", .{});
+
             var device = try jolt_device.JoltDevice.fromEmulator(
                 self.allocator,
                 inputs,
-                &[_]u8{}, // outputs - would come from emulator output
-                false, // panic
+                actual_outputs,
+                actual_panic,
                 @intCast(program_bytecode.len),
+                config.memory_size, // Pass memory_size from config
             );
             defer device.deinit();
 
@@ -622,8 +646,10 @@ pub fn JoltProver(comptime F: type) type {
             const DoryScheme = Dory.DoryCommitmentScheme(F);
 
             // Initialize memory config
+            // Use memory_size = 32768 to match Jolt fibonacci example
             var config = common.MemoryConfig{
                 .program_size = program_bytecode.len,
+                .memory_size = 32768,
             };
 
             // Initialize the emulator
@@ -673,12 +699,34 @@ pub fn JoltProver(comptime F: type) type {
             try commitments.append(self.allocator, zolt_proof.register_proof.final_state_commitment);
 
             // Create JoltDevice for Fiat-Shamir preamble
+            // CRITICAL: Use actual emulator outputs and panic state for Fiat-Shamir transcript
+            const actual_outputs = emulator.getOutputs();
+            const actual_panic = emulator.device.panic;
+
+            // DEBUG: Print Fiat-Shamir preamble values
+            std.debug.print("\n=== Zolt Fiat-Shamir Preamble Debug (WithDory) ===\n", .{});
+            std.debug.print("inputs.len = {d}\n", .{inputs.len});
+            if (inputs.len > 0 and inputs.len <= 32) {
+                std.debug.print("inputs = {any}\n", .{inputs});
+            } else if (inputs.len > 32) {
+                std.debug.print("inputs[0..32] = {any}...\n", .{inputs[0..32]});
+            }
+            std.debug.print("outputs.len = {d}\n", .{actual_outputs.len});
+            if (actual_outputs.len > 0 and actual_outputs.len <= 32) {
+                std.debug.print("outputs = {any}\n", .{actual_outputs});
+            } else if (actual_outputs.len > 32) {
+                std.debug.print("outputs[0..32] = {any}...\n", .{actual_outputs[0..32]});
+            }
+            std.debug.print("panic = {}\n", .{actual_panic});
+            std.debug.print("=================================================\n\n", .{});
+
             var device = try jolt_device.JoltDevice.fromEmulator(
                 self.allocator,
                 inputs,
-                &[_]u8{}, // outputs
-                false, // panic
+                actual_outputs,
+                actual_panic,
                 @intCast(program_bytecode.len),
+                config.memory_size, // Pass memory_size from config
             );
             defer device.deinit();
 
@@ -753,16 +801,21 @@ pub fn JoltProver(comptime F: type) type {
             result.dory_commitments[4] = result.dory_commitments[3];
 
             // Append Dory commitments (GT elements) to transcript
-            for (result.dory_commitments) |comm| {
+            std.debug.print("\n[ZOLT PROVE] === Appending Dory Commitments ===\n", .{});
+            for (result.dory_commitments, 0..) |comm, idx| {
+                std.debug.print("[ZOLT PROVE] Appending Dory commitment {d}/5\n", .{idx + 1});
                 transcript.appendGT(comm);
             }
+            std.debug.print("[ZOLT PROVE] === Done Appending Commitments ===\n\n", .{});
 
             // Derive tau from transcript after preamble and commitments
             const num_cycle_vars = std.math.log2_int(usize, @max(1, cycle_witnesses.len));
             const num_rows_bits = num_cycle_vars + 2;
+            std.debug.print("[ZOLT PROVE] Deriving tau: num_cycle_vars={d}, num_rows_bits={d}\n", .{ num_cycle_vars, num_rows_bits });
             var tau = try self.allocator.alloc(F, num_rows_bits);
             defer self.allocator.free(tau);
             for (0..num_rows_bits) |i| {
+                std.debug.print("[ZOLT PROVE] tau[{d}] = challengeScalar()\n", .{i});
                 tau[i] = transcript.challengeScalar();
             }
 

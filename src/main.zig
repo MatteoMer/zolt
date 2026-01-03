@@ -180,9 +180,11 @@ fn runEmulator(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles: ?
     std.debug.print("Code size: {} bytes\n", .{program.bytecode.len});
     std.debug.print("Base address: 0x{x:0>8}\n", .{program.base_address});
 
-    // Create memory config
+    // Create memory config matching Jolt's fibonacci example settings
+    // This uses memory_size = 32KB to match Jolt-compiled guest's hardcoded addresses
     var config = zolt.common.MemoryConfig{
         .program_size = program.bytecode.len,
+        .memory_size = 32768, // Match Jolt fibonacci's memory_size
     };
 
     // Create emulator
@@ -276,7 +278,7 @@ fn runEmulator(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles: ?
     }
 }
 
-fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt: ?u64, output_path: ?[]const u8, json_format: bool, jolt_format: bool, srs_path: ?[]const u8, preprocessing_path: ?[]const u8) !void {
+fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt: ?u64, output_path: ?[]const u8, json_format: bool, jolt_format: bool, srs_path: ?[]const u8, preprocessing_path: ?[]const u8, input_bytes: ?[]const u8) !void {
     // srs_path: Optional path to a Jolt-exported Dory SRS file.
     // When provided, uses the same SRS as Jolt for exact commitment compatibility.
     std.debug.print("Zolt zkVM Prover\n", .{});
@@ -298,6 +300,9 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt:
     std.debug.print("  Entry point: 0x{x:0>8}\n", .{program.entry_point});
     std.debug.print("  Code size: {} bytes\n", .{program.bytecode.len});
     std.debug.print("  Max cycles: {}\n", .{max_cycles});
+    if (input_bytes) |inputs| {
+        std.debug.print("  Input bytes: {} bytes\n", .{inputs.len});
+    }
 
     // Step 1: Preprocess to get proving/verifying keys
     std.debug.print("\n[1/4] Preprocessing...\n", .{});
@@ -335,7 +340,7 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt:
     std.debug.print("  Components: HyperKZG, Lasso lookups, 24 tables\n", .{});
     timer.reset();
 
-    var proof = prover_inst.prove(program.bytecode, &[_]u8{}) catch |err| {
+    var proof = prover_inst.prove(program.bytecode, input_bytes orelse &[_]u8{}) catch |err| {
         std.debug.print("  Error generating proof: {}\n", .{err});
         return err;
     };
@@ -358,7 +363,7 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt:
     };
     verifier.setVerifyingKey(zkvm_vk);
 
-    const verify_result = verifier.verify(&proof, &[_]u8{}) catch |err| {
+    const verify_result = verifier.verify(&proof, input_bytes orelse &[_]u8{}) catch |err| {
         std.debug.print("  Error during verification: {}\n", .{err});
         return err;
     };
@@ -394,7 +399,7 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt:
                 std.debug.print("  Using Jolt SRS from: {s}\n", .{sp});
             }
 
-            var jolt_bundle = prover_inst.proveJoltCompatibleWithDoryAndSrs(program.bytecode, &[_]u8{}, srs_path) catch |err| {
+            var jolt_bundle = prover_inst.proveJoltCompatibleWithDoryAndSrs(program.bytecode, input_bytes orelse &[_]u8{}, srs_path) catch |err| {
                 std.debug.print("  Error generating Jolt-compatible proof: {s}\n", .{@errorName(err)});
                 return err;
             };
@@ -473,6 +478,7 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt:
         };
 
         // Create memory layout
+        // Use memory_size = 32768 to match Jolt fibonacci example
         const jolt_device = zolt.zkvm.jolt_device;
         const device = jolt_device.JoltDevice.fromEmulator(
             allocator,
@@ -480,6 +486,7 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt:
             &[_]u8{},
             false,
             @intCast(program.bytecode.len),
+            32768, // Match Jolt fibonacci's memory_size
         ) catch |err| {
             std.debug.print("  Error creating memory layout: {s}\n", .{@errorName(err)});
             bytecode_prep.deinit();
@@ -745,7 +752,7 @@ fn inspectSRS(allocator: std.mem.Allocator, ptau_path: []const u8) !void {
     std.debug.print("\nSRS inspection complete.\n", .{});
 }
 
-fn showTrace(allocator: std.mem.Allocator, elf_path: []const u8, max_steps_opt: ?usize) !void {
+fn showTrace(allocator: std.mem.Allocator, elf_path: []const u8, max_steps_opt: ?usize, input_bytes: ?[]const u8) !void {
     std.debug.print("Zolt Execution Trace\n", .{});
     std.debug.print("====================\n\n", .{});
 
@@ -766,9 +773,10 @@ fn showTrace(allocator: std.mem.Allocator, elf_path: []const u8, max_steps_opt: 
     std.debug.print("Entry point: 0x{x:0>8}\n", .{program.entry_point});
     std.debug.print("Code size: {} bytes\n\n", .{program.bytecode.len});
 
-    // Create memory config
+    // Create memory config matching Jolt's fibonacci example settings
     var config = zolt.common.MemoryConfig{
         .program_size = program.bytecode.len,
+        .memory_size = 32768, // Match Jolt fibonacci's memory_size
     };
 
     // Create emulator
@@ -777,6 +785,20 @@ fn showTrace(allocator: std.mem.Allocator, elf_path: []const u8, max_steps_opt: 
 
     // Load program into memory at the correct base address
     try emulator.loadProgramAt(program.bytecode, program.base_address);
+
+    // Set up inputs if provided
+    if (input_bytes) |inputs| {
+        try emulator.setInputs(inputs);
+        std.debug.print("Input bytes: {} bytes = {{ ", .{inputs.len});
+        for (inputs) |b| {
+            std.debug.print("{x:0>2} ", .{b});
+        }
+        std.debug.print("}}\n", .{});
+        std.debug.print("Input region: 0x{x:0>16} - 0x{x:0>16}\n\n", .{
+            emulator.device.memory_layout.input_start,
+            emulator.device.memory_layout.input_end,
+        });
+    }
 
     // Set entry point PC
     emulator.state.pc = program.entry_point;
@@ -1194,10 +1216,12 @@ pub fn main() !void {
                     std.debug.print("Show the execution trace of a RISC-V ELF binary.\n", .{});
                     std.debug.print("Displays each instruction with PC, opcode, and results.\n\n", .{});
                     std.debug.print("Options:\n", .{});
-                    std.debug.print("  --max N   Show at most N trace entries (default: 100)\n", .{});
+                    std.debug.print("  --max N           Show at most N trace entries (default: 100)\n", .{});
+                    std.debug.print("  --input-hex HEX   Set input as hex bytes (e.g., 03 for input 3)\n", .{});
                 } else {
                     var elf_path: ?[]const u8 = null;
                     var max_steps: ?usize = null;
+                    var input_hex: ?[]const u8 = null;
 
                     // First arg could be an option or the ELF path
                     if (std.mem.startsWith(u8, arg, "--")) {
@@ -1205,6 +1229,8 @@ pub fn main() !void {
                             if (args.next()) |n_str| {
                                 max_steps = std.fmt.parseInt(usize, n_str, 10) catch null;
                             }
+                        } else if (std.mem.eql(u8, arg, "--input-hex")) {
+                            input_hex = args.next();
                         }
                     } else {
                         elf_path = arg;
@@ -1217,14 +1243,36 @@ pub fn main() !void {
                                 if (args.next()) |n_str| {
                                     max_steps = std.fmt.parseInt(usize, n_str, 10) catch null;
                                 }
+                            } else if (std.mem.eql(u8, next_arg, "--input-hex")) {
+                                input_hex = args.next();
                             }
                         } else if (elf_path == null) {
                             elf_path = next_arg;
                         }
                     }
 
+                    // Parse hex input if provided
+                    var input_bytes_owned: ?[]u8 = null;
+                    defer if (input_bytes_owned) |b| allocator.free(b);
+
+                    if (input_hex) |hex| {
+                        var clean_hex = hex;
+                        if (std.mem.startsWith(u8, hex, "0x") or std.mem.startsWith(u8, hex, "0X")) {
+                            clean_hex = hex[2..];
+                        }
+                        const buf_len = (clean_hex.len + 1) / 2;
+                        input_bytes_owned = allocator.alloc(u8, buf_len) catch null;
+                        if (input_bytes_owned) |buf| {
+                            for (0..buf_len) |i| {
+                                const start = i * 2;
+                                const end = @min(start + 2, clean_hex.len);
+                                buf[i] = std.fmt.parseInt(u8, clean_hex[start..end], 16) catch 0;
+                            }
+                        }
+                    }
+
                     if (elf_path) |path| {
-                        showTrace(allocator, path, max_steps) catch |err| {
+                        showTrace(allocator, path, max_steps, input_bytes_owned) catch |err| {
                             std.debug.print("Failed to show trace: {s}\n", .{@errorName(err)});
                             std.process.exit(1);
                         };
@@ -1255,6 +1303,7 @@ pub fn main() !void {
                     std.debug.print("  --jolt-format            Output proof in Jolt-compatible format for cross-verification\n", .{});
                     std.debug.print("  --srs PATH               Use Dory SRS from PATH (exported by Jolt)\n", .{});
                     std.debug.print("  --export-preprocessing P Export Jolt-compatible preprocessing to file P\n", .{});
+                    std.debug.print("  --input-hex HEX          Set input as hex bytes (e.g., 20 for input 32)\n", .{});
                 } else {
                     // Parse options
                     var elf_path: ?[]const u8 = null;
@@ -1264,6 +1313,7 @@ pub fn main() !void {
                     var jolt_format = false;
                     var srs_path: ?[]const u8 = null;
                     var preprocessing_path: ?[]const u8 = null;
+                    var input_hex: ?[]const u8 = null;
 
                     // First arg could be an option or the ELF path
                     if (std.mem.startsWith(u8, arg, "-")) {
@@ -1281,6 +1331,8 @@ pub fn main() !void {
                             srs_path = args.next();
                         } else if (std.mem.eql(u8, arg, "--export-preprocessing")) {
                             preprocessing_path = args.next();
+                        } else if (std.mem.eql(u8, arg, "--input-hex")) {
+                            input_hex = args.next();
                         }
                     } else {
                         elf_path = arg;
@@ -1303,14 +1355,37 @@ pub fn main() !void {
                                 srs_path = args.next();
                             } else if (std.mem.eql(u8, next_arg, "--export-preprocessing")) {
                                 preprocessing_path = args.next();
+                            } else if (std.mem.eql(u8, next_arg, "--input-hex")) {
+                                input_hex = args.next();
                             }
                         } else if (elf_path == null) {
                             elf_path = next_arg;
                         }
                     }
 
+                    // Parse hex input if provided
+                    var input_bytes_owned: ?[]u8 = null;
+                    defer if (input_bytes_owned) |b| allocator.free(b);
+
+                    if (input_hex) |hex| {
+                        var clean_hex = hex;
+                        if (std.mem.startsWith(u8, hex, "0x") or std.mem.startsWith(u8, hex, "0X")) {
+                            clean_hex = hex[2..];
+                        }
+                        const buf_len = (clean_hex.len + 1) / 2;
+                        input_bytes_owned = allocator.alloc(u8, buf_len) catch null;
+                        if (input_bytes_owned) |buf| {
+                            var i: usize = 0;
+                            while (i < buf_len) : (i += 1) {
+                                const start = i * 2;
+                                const end = @min(start + 2, clean_hex.len);
+                                buf[i] = std.fmt.parseInt(u8, clean_hex[start..end], 16) catch 0;
+                            }
+                        }
+                    }
+
                     if (elf_path) |path| {
-                        runProver(allocator, path, max_cycles, output_path, json_format, jolt_format, srs_path, preprocessing_path) catch |err| {
+                        runProver(allocator, path, max_cycles, output_path, json_format, jolt_format, srs_path, preprocessing_path, input_bytes_owned) catch |err| {
                             std.debug.print("Failed to generate proof: {s}\n", .{@errorName(err)});
                             std.process.exit(1);
                         };

@@ -553,6 +553,128 @@ pub const Emulator = struct {
                 }
                 try self.registers.write(decoded.rd, result.rd_value);
             },
+            .OP_IMM_32 => {
+                // RV64I word operations (32-bit, sign-extended to 64)
+                const imm_lower: u32 = @truncate(@as(u64, @bitCast(@as(i64, decoded.imm))));
+                const rs1_lower: u32 = @truncate(rs1);
+                const result_32: i32 = switch (decoded.funct3) {
+                    0b000 => blk: {
+                        // ADDIW: rd = sext((rs1 + imm)[31:0])
+                        const imm_i32: i32 = @bitCast(imm_lower);
+                        const rs1_i32: i32 = @bitCast(rs1_lower);
+                        break :blk rs1_i32 +% imm_i32;
+                    },
+                    0b001 => blk: {
+                        // SLLIW: rd = sext((rs1 << shamt)[31:0])
+                        const shamt: u5 = @truncate(imm_lower & 0x1F);
+                        break :blk @bitCast(rs1_lower << shamt);
+                    },
+                    0b101 => blk: {
+                        // SRLIW or SRAIW
+                        const shamt: u5 = @truncate(imm_lower & 0x1F);
+                        if ((decoded.funct7 & 0x20) != 0) {
+                            // SRAIW: arithmetic right shift
+                            const rs1_i32: i32 = @bitCast(rs1_lower);
+                            break :blk rs1_i32 >> shamt;
+                        } else {
+                            // SRLIW: logical right shift
+                            break :blk @bitCast(rs1_lower >> shamt);
+                        }
+                    },
+                    else => 0,
+                };
+                result.rd_value = @bitCast(@as(i64, result_32));
+                try self.registers.write(decoded.rd, result.rd_value);
+            },
+            .OP_32 => {
+                // RV64I/M word operations (32-bit register-register, sign-extended to 64)
+                const rs1_lower: u32 = @truncate(rs1);
+                const rs2_lower: u32 = @truncate(rs2);
+                const result_32: i32 = if (decoded.funct7 == 0b0000001) blk: {
+                    // RV64M word operations
+                    break :blk switch (decoded.funct3) {
+                        0b000 => blk2: {
+                            // MULW: multiply word
+                            const a: i32 = @bitCast(rs1_lower);
+                            const b: i32 = @bitCast(rs2_lower);
+                            break :blk2 a *% b;
+                        },
+                        0b100 => blk2: {
+                            // DIVW: signed divide word
+                            const a: i32 = @bitCast(rs1_lower);
+                            const b: i32 = @bitCast(rs2_lower);
+                            if (b == 0) {
+                                break :blk2 -1;
+                            }
+                            if (a == std.math.minInt(i32) and b == -1) {
+                                break :blk2 a; // Overflow
+                            }
+                            break :blk2 @divTrunc(a, b);
+                        },
+                        0b101 => blk2: {
+                            // DIVUW: unsigned divide word
+                            if (rs2_lower == 0) {
+                                break :blk2 @bitCast(@as(u32, std.math.maxInt(u32)));
+                            }
+                            break :blk2 @bitCast(rs1_lower / rs2_lower);
+                        },
+                        0b110 => blk2: {
+                            // REMW: signed remainder word
+                            const a: i32 = @bitCast(rs1_lower);
+                            const b: i32 = @bitCast(rs2_lower);
+                            if (b == 0) {
+                                break :blk2 a;
+                            }
+                            if (a == std.math.minInt(i32) and b == -1) {
+                                break :blk2 0; // Overflow
+                            }
+                            break :blk2 @rem(a, b);
+                        },
+                        0b111 => blk2: {
+                            // REMUW: unsigned remainder word
+                            if (rs2_lower == 0) {
+                                break :blk2 @bitCast(rs1_lower);
+                            }
+                            break :blk2 @bitCast(rs1_lower % rs2_lower);
+                        },
+                        else => 0,
+                    };
+                } else blk: {
+                    // RV64I word operations
+                    break :blk switch (decoded.funct3) {
+                        0b000 => blk2: {
+                            // ADDW or SUBW
+                            const a: i32 = @bitCast(rs1_lower);
+                            const b: i32 = @bitCast(rs2_lower);
+                            if ((decoded.funct7 & 0x20) != 0) {
+                                break :blk2 a -% b; // SUBW
+                            } else {
+                                break :blk2 a +% b; // ADDW
+                            }
+                        },
+                        0b001 => blk2: {
+                            // SLLW: shift left logical word
+                            const shamt: u5 = @truncate(rs2_lower & 0x1F);
+                            break :blk2 @bitCast(rs1_lower << shamt);
+                        },
+                        0b101 => blk2: {
+                            // SRLW or SRAW
+                            const shamt: u5 = @truncate(rs2_lower & 0x1F);
+                            if ((decoded.funct7 & 0x20) != 0) {
+                                // SRAW: arithmetic right shift word
+                                const a: i32 = @bitCast(rs1_lower);
+                                break :blk2 a >> shamt;
+                            } else {
+                                // SRLW: logical right shift word
+                                break :blk2 @bitCast(rs1_lower >> shamt);
+                            }
+                        },
+                        else => 0,
+                    };
+                };
+                result.rd_value = @bitCast(@as(i64, result_32));
+                try self.registers.write(decoded.rd, result.rd_value);
+            },
             .SYSTEM => {
                 // ECALL and EBREAK
                 // funct12 field: ECALL = 0, EBREAK = 1

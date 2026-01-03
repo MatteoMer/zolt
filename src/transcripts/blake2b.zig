@@ -39,16 +39,26 @@ pub fn Blake2bTranscript(comptime F: type) type {
         pub fn init(label: []const u8) Self {
             std.debug.assert(label.len < 33);
 
+            std.debug.print("[ZOLT TRANSCRIPT] init: label=\"{s}\" (len={d})\n", .{ label, label.len });
+
             // Pad label to 32 bytes with zeros on the right
             var padded: [32]u8 = [_]u8{0} ** 32;
             const copy_len = @min(label.len, 32);
             @memcpy(padded[0..copy_len], label[0..copy_len]);
+
+            std.debug.print("[ZOLT TRANSCRIPT]   padded={{ ", .{});
+            for (padded[0..16]) |b| std.debug.print("{x:0>2} ", .{b});
+            std.debug.print("... }}\n", .{});
 
             // Hash the padded label to get initial state
             var h = Blake2b256.init(.{});
             h.update(&padded);
             var initial_state: [32]u8 = undefined;
             h.final(&initial_state);
+
+            std.debug.print("[ZOLT TRANSCRIPT]   initial_state={{ ", .{});
+            for (initial_state) |b| std.debug.print("{x:0>2} ", .{b});
+            std.debug.print("}}\n", .{});
 
             return Self{
                 .state = initial_state,
@@ -86,6 +96,8 @@ pub fn Blake2bTranscript(comptime F: type) type {
         pub fn appendMessage(self: *Self, msg: []const u8) void {
             std.debug.assert(msg.len < 33);
 
+            std.debug.print("[ZOLT TRANSCRIPT] appendMessage: \"{s}\" (len={d}), round={d}\n", .{ msg, msg.len, self.n_rounds });
+
             var h = self.hasher();
 
             if (msg.len == 32) {
@@ -100,17 +112,45 @@ pub fn Blake2bTranscript(comptime F: type) type {
             var result: [32]u8 = undefined;
             h.final(&result);
             self.updateState(result);
+
+            std.debug.print("[ZOLT TRANSCRIPT]   state_after={{ ", .{});
+            for (self.state[0..8]) |b| std.debug.print("{x:0>2} ", .{b});
+            std.debug.print("... }}\n", .{});
         }
 
         /// Append raw bytes to the transcript
         /// Matches Jolt's `fn append_bytes(&mut self, bytes: &[u8])`
         pub fn appendBytes(self: *Self, bytes: []const u8) void {
+            // DEBUG: Print state before
+            std.debug.print("[ZOLT TRANSCRIPT] appendBytes: len={d}, state_before={{ ", .{bytes.len});
+            for (self.state[0..8]) |b| std.debug.print("{x:0>2} ", .{b});
+            std.debug.print("... }}\n", .{});
+
+            // DEBUG: Print first and last bytes
+            if (bytes.len > 0) {
+                std.debug.print("[ZOLT TRANSCRIPT]   first_8_bytes={{ ", .{});
+                const print_len = @min(bytes.len, 8);
+                for (bytes[0..print_len]) |b| std.debug.print("{x:0>2} ", .{b});
+                std.debug.print("}}\n", .{});
+                if (bytes.len > 8) {
+                    std.debug.print("[ZOLT TRANSCRIPT]   last_8_bytes={{ ", .{});
+                    const last_start = bytes.len - @min(bytes.len, 8);
+                    for (bytes[last_start..]) |b| std.debug.print("{x:0>2} ", .{b});
+                    std.debug.print("}}\n", .{});
+                }
+            }
+
             var h = self.hasher();
             h.update(bytes);
 
             var result: [32]u8 = undefined;
             h.final(&result);
             self.updateState(result);
+
+            // DEBUG: Print state after
+            std.debug.print("[ZOLT TRANSCRIPT]   state_after={{ ", .{});
+            for (self.state[0..8]) |b| std.debug.print("{x:0>2} ", .{b});
+            std.debug.print("... }}\n", .{});
         }
 
         /// Append a u64 to the transcript
@@ -118,8 +158,14 @@ pub fn Blake2bTranscript(comptime F: type) type {
         ///
         /// Packs into 32 bytes: [0u8; 24] ++ x.to_be_bytes()
         pub fn appendU64(self: *Self, x: u64) void {
+            std.debug.print("[ZOLT TRANSCRIPT] appendU64: value={d} (0x{x})\n", .{ x, x });
+
             var data: [32]u8 = [_]u8{0} ** 32;
             mem.writeInt(u64, data[24..32], x, .big);
+
+            std.debug.print("[ZOLT TRANSCRIPT]   packed_bytes={{ ", .{});
+            for (data[24..32]) |b| std.debug.print("{x:0>2} ", .{b});
+            std.debug.print("}}\n", .{});
 
             var h = self.hasher();
             h.update(&data);
@@ -134,8 +180,12 @@ pub fn Blake2bTranscript(comptime F: type) type {
         ///
         /// Serializes LE, then reverses to BE for EVM compatibility.
         pub fn appendScalar(self: *Self, scalar: F) void {
+            std.debug.print("[ZOLT TRANSCRIPT] appendScalar:\n", .{});
+            std.debug.print("[ZOLT TRANSCRIPT]   montgomery_limbs={{ {x}, {x}, {x}, {x} }}\n", .{ scalar.limbs[0], scalar.limbs[1], scalar.limbs[2], scalar.limbs[3] });
+
             // First convert from Montgomery form to canonical form (matching arkworks)
             const standard = scalar.fromMontgomery();
+            std.debug.print("[ZOLT TRANSCRIPT]   standard_limbs={{ {x}, {x}, {x}, {x} }}\n", .{ standard.limbs[0], standard.limbs[1], standard.limbs[2], standard.limbs[3] });
 
             // Serialize to LE bytes
             var buf: [32]u8 = undefined;
@@ -143,11 +193,19 @@ pub fn Blake2bTranscript(comptime F: type) type {
                 mem.writeInt(u64, buf[i * 8 ..][0..8], standard.limbs[i], .little);
             }
 
+            std.debug.print("[ZOLT TRANSCRIPT]   le_bytes={{ ", .{});
+            for (buf[0..8]) |b| std.debug.print("{x:0>2} ", .{b});
+            std.debug.print("... }}\n", .{});
+
             // Reverse to BE for EVM compatibility
             var reversed: [32]u8 = undefined;
             for (0..32) |i| {
                 reversed[i] = buf[31 - i];
             }
+
+            std.debug.print("[ZOLT TRANSCRIPT]   be_bytes={{ ", .{});
+            for (reversed[0..8]) |b| std.debug.print("{x:0>2} ", .{b});
+            std.debug.print("... }}\n", .{});
 
             self.appendBytes(&reversed);
         }
@@ -213,51 +271,79 @@ pub fn Blake2bTranscript(comptime F: type) type {
             return self.challengeScalar128Bits();
         }
 
-        /// Get a 128-bit challenge scalar
-        /// Matches Jolt's `fn challenge_scalar_128_bits<F: JoltField>(&mut self) -> F`
+        /// Get a 128-bit challenge scalar (masked to 125 bits for Jolt compatibility)
+        /// Matches Jolt's `fn challenge_scalar_optimized<F: JoltField>(&mut self) -> F::Challenge`
         ///
         /// IMPORTANT: This must match Jolt's behavior exactly:
         /// 1. Get 16 bytes from transcript
         /// 2. Reverse them
-        /// 3. Interpret as big-endian u128
-        /// 4. Mask to 125 bits (for MontU128Challenge compatibility)
-        /// 5. Convert to field element
+        /// 3. Interpret as little-endian u128
+        /// 4. MASK TO 125 BITS (critical for MontU128Challenge compatibility!)
+        /// 5. Convert to field element in Montgomery form
+        ///
+        /// The 125-bit masking matches Jolt's MontU128Challenge::new() which does:
+        ///   let val_masked = value & (u128::MAX >> 3);
+        /// This ensures the challenge value is always less than 2^125, which is
+        /// guaranteed to be less than the BN254 scalar field modulus.
         pub fn challengeScalar128Bits(self: *Self) F {
+            std.debug.print("[ZOLT TRANSCRIPT] challengeScalar128Bits: round={d}\n", .{self.n_rounds});
+            std.debug.print("[ZOLT TRANSCRIPT]   state_before={{ ", .{});
+            for (self.state) |b| std.debug.print("{x:0>2} ", .{b});
+            std.debug.print("}}\n", .{});
+
             var buf: [16]u8 = undefined;
             self.challengeBytes(&buf);
 
-            // Reverse to match Jolt's approach
+            std.debug.print("[ZOLT TRANSCRIPT]   challenge_bytes={{ ", .{});
+            for (buf) |b| std.debug.print("{x:0>2} ", .{b});
+            std.debug.print("}}\n", .{});
+
+            // Reverse bytes and interpret as big-endian u128, matching Jolt's challenge_u128():
+            //   buf = buf.into_iter().rev().collect();
+            //   u128::from_be_bytes(buf.try_into().unwrap())
             var reversed: [16]u8 = undefined;
             for (0..16) |i| {
                 reversed[i] = buf[15 - i];
             }
 
-            // Jolt's from_le_bytes_mod_order interprets reversed bytes as little-endian
-            // Since we reversed the bytes, interpreting as LE is equivalent to
-            // the original bytes being interpreted as big-endian.
-            //
-            // For a 128-bit value that fits in the field (since BN254 p > 2^128),
-            // the result is just the 128-bit value directly.
-            //
-            // NOTE: No masking is done in Jolt's challenge_scalar_128_bits!
-            // The MontU128Challenge masking (125 bits) is only for the optimized
-            // version (challenge_scalar_optimized), not the regular version.
+            std.debug.print("[ZOLT TRANSCRIPT]   reversed={{ ", .{});
+            for (reversed) |b| std.debug.print("{x:0>2} ", .{b});
+            std.debug.print("}}\n", .{});
 
-            // Read as little-endian from reversed bytes (matching Jolt's from_le_bytes_mod_order)
-            const low: u64 = mem.readInt(u64, reversed[0..8], .little);
-            const high: u64 = mem.readInt(u64, reversed[8..16], .little);
+            // Read as big-endian u128 (matching Jolt's from_be_bytes)
+            // Big-endian: first byte is most significant
+            const high: u64 = mem.readInt(u64, reversed[0..8], .big);
+            const low: u64 = mem.readInt(u64, reversed[8..16], .big);
 
-            // Convert the 128-bit challenge to Montgomery form.
+            std.debug.print("[ZOLT TRANSCRIPT]   u128_high=0x{x}, u128_low=0x{x}\n", .{ high, low });
+
+            // CRITICAL: Mask to 125 bits to match Jolt's MontU128Challenge::new()
+            // Jolt does: let val_masked = value & (u128::MAX >> 3);
+            // This clears the top 3 bits of the 128-bit value.
+            const full_value: u128 = (@as(u128, high) << 64) | low;
+            const mask_125: u128 = (1 << 125) - 1; // Same as u128::MAX >> 3
+            const masked_value: u128 = full_value & mask_125;
+            const masked_low: u64 = @truncate(masked_value);
+            const masked_high: u64 = @truncate(masked_value >> 64);
+
+            std.debug.print("[ZOLT TRANSCRIPT]   full_value=0x{x}\n", .{full_value});
+            std.debug.print("[ZOLT TRANSCRIPT]   masked_value=0x{x} (125-bit)\n", .{masked_value});
+            std.debug.print("[ZOLT TRANSCRIPT]   masked_low=0x{x}, masked_high=0x{x}\n", .{ masked_low, masked_high });
+
+            // Convert the 125-bit challenge to Montgomery form.
             //
-            // The challenge value is (low + high * 2^64) as a 128-bit integer.
-            // We convert to Montgomery form for correct field arithmetic.
-            //
-            // Note: Jolt stores challenges as MontU128Challenge with [0, 0, low, high]
-            // in raw form and uses special Mul<MontU128Challenge> implementations.
-            // Since Zolt uses standard Montgomery multiplication everywhere,
-            // we convert to Montgomery form immediately.
-            const raw = F{ .limbs = .{ low, high, 0, 0 } };
-            return raw.toMontgomery();
+            // CRITICAL: Jolt stores challenges as MontU128Challenge with [0, 0, low, high]
+            // which represents the value (low * 2^128 + high * 2^192) when converted to Fr.
+            // Zolt must use the same limb ordering to match Jolt's representation exactly.
+            // This shifted representation is what Jolt uses in its optimized mul_hi_bigint_u128
+            // multiplication operations.
+            const raw = F{ .limbs = .{ 0, 0, masked_low, masked_high } };
+            const result = raw.toMontgomery();
+
+            std.debug.print("[ZOLT TRANSCRIPT]   raw_limbs=[0, 0, 0x{x}, 0x{x}]\n", .{ masked_low, masked_high });
+            std.debug.print("[ZOLT TRANSCRIPT]   mont_limbs=[0x{x}, 0x{x}, 0x{x}, 0x{x}]\n", .{ result.limbs[0], result.limbs[1], result.limbs[2], result.limbs[3] });
+
+            return result;
         }
 
         /// Get multiple challenge scalars
@@ -288,8 +374,11 @@ pub fn Blake2bTranscript(comptime F: type) type {
         /// Points are serialized as (x, y) in BE format.
         /// Point at infinity is serialized as 64 zero bytes.
         pub fn appendPoint(self: *Self, comptime Point: type, point: Point) void {
+            std.debug.print("[ZOLT TRANSCRIPT] appendPoint: round={d}\n", .{self.n_rounds});
+
             // Check for point at infinity
             if (point.isIdentity()) {
+                std.debug.print("[ZOLT TRANSCRIPT]   point_at_infinity=true\n", .{});
                 self.appendBytes(&([_]u8{0} ** 64));
                 return;
             }
@@ -314,6 +403,13 @@ pub fn Blake2bTranscript(comptime F: type) type {
                 y_reversed[i] = y_bytes[31 - i];
             }
 
+            std.debug.print("[ZOLT TRANSCRIPT]   x_be={{ ", .{});
+            for (x_reversed[0..8]) |b| std.debug.print("{x:0>2} ", .{b});
+            std.debug.print("... }}\n", .{});
+            std.debug.print("[ZOLT TRANSCRIPT]   y_be={{ ", .{});
+            for (y_reversed[0..8]) |b| std.debug.print("{x:0>2} ", .{b});
+            std.debug.print("... }}\n", .{});
+
             var h = self.hasher();
             h.update(&x_reversed);
             h.update(&y_reversed);
@@ -321,6 +417,10 @@ pub fn Blake2bTranscript(comptime F: type) type {
             var result: [32]u8 = undefined;
             h.final(&result);
             self.updateState(result);
+
+            std.debug.print("[ZOLT TRANSCRIPT]   state_after={{ ", .{});
+            for (self.state[0..8]) |b| std.debug.print("{x:0>2} ", .{b});
+            std.debug.print("... }}\n", .{});
         }
 
         /// Append multiple points to the transcript
@@ -353,28 +453,54 @@ pub fn Blake2bTranscript(comptime F: type) type {
         /// IMPORTANT: This matches Jolt's append_serializable which reverses
         /// all bytes after serialization for EVM compatibility.
         pub fn appendGT(self: *Self, gt: anytype) void {
+            std.debug.print("[ZOLT TRANSCRIPT] appendGT:\n", .{});
+
             const bytes = gt.toBytes();
+
+            std.debug.print("[ZOLT TRANSCRIPT]   raw_bytes[0..16]={{ ", .{});
+            for (bytes[0..16]) |b| std.debug.print("{x:0>2} ", .{b});
+            std.debug.print("}}\n", .{});
+            std.debug.print("[ZOLT TRANSCRIPT]   raw_bytes[368..384]={{ ", .{});
+            for (bytes[368..384]) |b| std.debug.print("{x:0>2} ", .{b});
+            std.debug.print("}}\n", .{});
+
             // Reverse bytes to match Jolt's append_serializable
             var reversed: [384]u8 = undefined;
             for (0..384) |i| {
                 reversed[i] = bytes[383 - i];
             }
+
+            std.debug.print("[ZOLT TRANSCRIPT]   reversed[0..16]={{ ", .{});
+            for (reversed[0..16]) |b| std.debug.print("{x:0>2} ", .{b});
+            std.debug.print("}}\n", .{});
+            std.debug.print("[ZOLT TRANSCRIPT]   reversed[368..384]={{ ", .{});
+            for (reversed[368..384]) |b| std.debug.print("{x:0>2} ", .{b});
+            std.debug.print("}}\n", .{});
+
             self.appendBytes(&reversed);
         }
 
         /// Append a G1 point to the transcript (compressed format)
         /// For Dory compatibility - appends the compressed serialized point
         pub fn appendG1Compressed(self: *Self, point: anytype) void {
+            std.debug.print("[ZOLT TRANSCRIPT] appendG1Compressed: round={d}\n", .{self.n_rounds});
             const dory = @import("../poly/commitment/dory.zig");
             const bytes = dory.compressG1(point);
+            std.debug.print("[ZOLT TRANSCRIPT]   compressed_bytes={{ ", .{});
+            for (bytes[0..16]) |b| std.debug.print("{x:0>2} ", .{b});
+            std.debug.print("... }}\n", .{});
             self.appendBytes(&bytes);
         }
 
         /// Append a G2 point to the transcript (compressed format)
         /// For Dory compatibility - appends the compressed serialized point
         pub fn appendG2Compressed(self: *Self, point: anytype) void {
+            std.debug.print("[ZOLT TRANSCRIPT] appendG2Compressed: round={d}\n", .{self.n_rounds});
             const dory = @import("../poly/commitment/dory.zig");
             const bytes = dory.compressG2(point);
+            std.debug.print("[ZOLT TRANSCRIPT]   compressed_bytes={{ ", .{});
+            for (bytes[0..16]) |b| std.debug.print("{x:0>2} ", .{b});
+            std.debug.print("... }}\n", .{});
             self.appendBytes(&bytes);
         }
     };

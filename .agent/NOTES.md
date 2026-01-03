@@ -41,6 +41,49 @@ Jolt's verifier prints challenges as full 256-bit field elements. This is becaus
 
 **CURRENT ISSUE:** The challenge VALUES themselves differ between Zolt and Jolt - not just the representation. Need to trace back to find where the transcript state diverges.
 
+### Session 49 Investigation (cont.)
+
+**Key Finding: tau values don't match**
+
+- Zolt's tau[11] (as shifted field element) = 3700036982749152569148447626330409071994233407396770520073887757500189507584
+- Jolt's tau_high = 4949406946327026266101368757399851829917753905666081332932170379465433058454
+- These are DIFFERENT!
+
+Since tau is derived from the transcript, this means the transcript states diverge somewhere before tau is derived (i.e., during or before the Dory commitment phase).
+
+**Round polynomial coefficients DO match:**
+- Zolt c0_le matches Jolt c0_bytes exactly
+- This confirms the sumcheck computation is correct
+- The issue is in the transcript/challenge derivation
+
+### CRITICAL DISCOVERY: from_bigint_unchecked behavior
+
+**ROOT CAUSE FOUND:**
+
+Arkworks' `from_bigint_unchecked(BigInt::new([0, 0, low, high]))` interprets the BigInt as ALREADY in Montgomery form! It does NOT multiply by R to convert to Montgomery.
+
+**What this means:**
+- Jolt stores `[0, 0, low, high]` as the Montgomery representation directly
+- When printing Fr, arkworks divides by R to get the canonical value
+- The canonical value is `(low * 2^128 + high * 2^192) / R mod p`
+
+**The bug in Zolt:**
+- Zolt was calling `toMontgomery()` on `[0, 0, low, high]`
+- This MULTIPLIED by R, giving `(low * 2^128 + high * 2^192) * R mod p`
+- This is the WRONG value!
+
+**The fix:**
+- Do NOT call `toMontgomery()`
+- Use `F{ .limbs = .{ 0, 0, masked_low, masked_high } }` directly
+- The limbs ARE the Montgomery representation
+
+**Verification:**
+```
+bigint = 3649381361935200060066435842883492086020528436178408344296001395814532382720
+fr_printed = 3350198182347904564092445461553703484396816537342330508621481301908782066970
+bigint / R mod p = 3350198182347904564092445461553703484396816537342330508621481301908782066970  ✓
+```
+
 ---
 
 ## Previous Status (Session 40 - January 2, 2026)

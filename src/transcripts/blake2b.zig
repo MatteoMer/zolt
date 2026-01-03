@@ -330,20 +330,20 @@ pub fn Blake2bTranscript(comptime F: type) type {
             std.debug.print("[ZOLT TRANSCRIPT]   masked_value=0x{x} (125-bit)\n", .{masked_value});
             std.debug.print("[ZOLT TRANSCRIPT]   masked_low=0x{x}, masked_high=0x{x}\n", .{ masked_low, masked_high });
 
-            // Convert the 125-bit challenge to Montgomery form.
+            // CRITICAL: Match Jolt's from_bigint_unchecked behavior exactly!
             //
-            // The 125-bit challenge value is stored with low 64 bits in limbs[0] and
-            // high 61 bits in limbs[1]. This represents the value (masked_low + masked_high * 2^64).
+            // Jolt's MontU128Challenge stores [0, 0, low, high] and converts to Fr via:
+            //   ark_bn254::Fr::from_bigint_unchecked(BigInt::new([0, 0, low, high]))
             //
-            // NOTE: Jolt's MontU128Challenge internally stores [0, 0, low, high] for its
-            // optimized representation, but when used as a field element, the actual VALUE
-            // is the 128-bit number (low + high * 2^64). We store it in limbs[0:1] for
-            // proper field element representation.
-            const raw = F{ .limbs = .{ masked_low, masked_high, 0, 0 } };
-            const result = raw.toMontgomery();
+            // In arkworks, from_bigint_unchecked interprets the BigInt as ALREADY in
+            // Montgomery form! It does NOT multiply by R. When you print the Fr, it
+            // divides by R to get the canonical value.
+            //
+            // So the INTERNAL Montgomery representation IS [0, 0, low, high].
+            // We must NOT call toMontgomery() - that would multiply by R and give wrong results!
+            const result = F{ .limbs = .{ 0, 0, masked_low, masked_high } };
 
-            std.debug.print("[ZOLT TRANSCRIPT]   raw_limbs=[0x{x}, 0x{x}, 0, 0]\n", .{ masked_low, masked_high });
-            std.debug.print("[ZOLT TRANSCRIPT]   mont_limbs=[0x{x}, 0x{x}, 0x{x}, 0x{x}]\n", .{ result.limbs[0], result.limbs[1], result.limbs[2], result.limbs[3] });
+            std.debug.print("[ZOLT TRANSCRIPT]   mont_limbs=[0, 0, 0x{x}, 0x{x}] (direct, no toMontgomery)\n", .{ masked_low, masked_high });
 
             return result;
         }

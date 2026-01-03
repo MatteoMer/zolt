@@ -457,12 +457,25 @@ pub fn ProofConverter(comptime F: type) type {
                 return Stage1Result{ .challenges = challenges, .r0 = r0, .uni_skip_claim = uni_skip_claim, .allocator = self.allocator };
             }
 
+            // DEBUG: Print initial claim (= uni_skip_claim * batching_coeff * 2^num_rounds factor)
+            // In Jolt, the initial claim for sumcheck is:
+            //   claim = input_claim.mul_pow_2(max_num_rounds - num_rounds) * coeff
+            // For a single instance with max_num_rounds = num_rounds:
+            //   claim = input_claim * coeff = uni_skip_claim * batching_coeff
+            const initial_claim = uni_skip_claim.mul(batching_coeff);
+            std.debug.print("[ZOLT] STAGE1_INITIAL: claim = {any}\n", .{initial_claim.toBytesBE()});
+            std.debug.print("[ZOLT] STAGE1_INITIAL: claim_le = {any}\n", .{initial_claim.toBytes()});
+
             // Generate all remaining round polynomials with transcript integration
             // Use computeRemainingRoundPoly for ALL rounds - it now properly:
             // 1. Materializes Az/Bz on first call
             // 2. Rebuilds t_prime_poly from bound Az/Bz when needed
             // 3. Uses the multiquadratic method for all rounds
             for (0..num_remaining_rounds) |round_idx| {
+                // DEBUG: Print current claim at start of round
+                std.debug.print("[ZOLT] STAGE1_ROUND_{}: current_claim = {any}\n", .{ round_idx, outer_prover.current_claim.toBytesBE() });
+                std.debug.print("[ZOLT] STAGE1_ROUND_{}: current_claim_le = {any}\n", .{ round_idx, outer_prover.current_claim.toBytes() });
+
                 const raw_evals: [4]F = outer_prover.computeRemainingRoundPoly() catch {
                     // Fallback to zero polynomial
                     const coeffs = try self.allocator.alloc(F, 3);
@@ -515,13 +528,13 @@ pub fn ProofConverter(comptime F: type) type {
                 coeffs[1] = compressed[1]; // c2 (quadratic)
                 coeffs[2] = compressed[2]; // c3 (cubic)
 
-                // DEBUG: Print compressed coefficients
-                std.debug.print("[ZOLT] STAGE1_ROUND_{}: compressed = [c0={any}, c2={any}, c3={any}]\n", .{
-                    round_idx,
-                    compressed[0].toBytesBE(),
-                    compressed[1].toBytesBE(),
-                    compressed[2].toBytesBE(),
-                });
+                // DEBUG: Print compressed coefficients in both BE and LE
+                std.debug.print("[ZOLT] STAGE1_ROUND_{}: c0 = {any}\n", .{ round_idx, compressed[0].toBytesBE() });
+                std.debug.print("[ZOLT] STAGE1_ROUND_{}: c0_le = {any}\n", .{ round_idx, compressed[0].toBytes() });
+                std.debug.print("[ZOLT] STAGE1_ROUND_{}: c2 = {any}\n", .{ round_idx, compressed[1].toBytesBE() });
+                std.debug.print("[ZOLT] STAGE1_ROUND_{}: c2_le = {any}\n", .{ round_idx, compressed[1].toBytes() });
+                std.debug.print("[ZOLT] STAGE1_ROUND_{}: c3 = {any}\n", .{ round_idx, compressed[2].toBytesBE() });
+                std.debug.print("[ZOLT] STAGE1_ROUND_{}: c3_le = {any}\n", .{ round_idx, compressed[2].toBytes() });
 
                 try proof.compressed_polys.append(self.allocator, .{
                     .coeffs_except_linear_term = coeffs,
@@ -539,13 +552,17 @@ pub fn ProofConverter(comptime F: type) type {
                 const challenge = transcript.challengeScalar();
                 try challenges.append(self.allocator, challenge);
 
-                // DEBUG: Print challenge
+                // DEBUG: Print challenge in both BE and LE
                 std.debug.print("[ZOLT] STAGE1_ROUND_{}: challenge = {any}\n", .{ round_idx, challenge.toBytesBE() });
+                std.debug.print("[ZOLT] STAGE1_ROUND_{}: challenge_le = {any}\n", .{ round_idx, challenge.toBytes() });
 
                 // Bind challenge and update claim using UNSCALED evaluations
                 // The prover's internal claim tracking is unscaled - only the output is scaled
                 outer_prover.bindRemainingRoundChallenge(challenge) catch {};
                 outer_prover.updateClaim(raw_evals, challenge);
+
+                // DEBUG: Print next_claim after update
+                std.debug.print("[ZOLT] STAGE1_ROUND_{}: next_claim = {any}\n", .{ round_idx, outer_prover.current_claim.toBytesBE() });
             }
 
             // DEBUG: Print final values for cross-verification

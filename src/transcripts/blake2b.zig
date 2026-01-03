@@ -332,15 +332,17 @@ pub fn Blake2bTranscript(comptime F: type) type {
 
             // Convert the 125-bit challenge to Montgomery form.
             //
-            // CRITICAL: Jolt stores challenges as MontU128Challenge with [0, 0, low, high]
-            // which represents the value (low * 2^128 + high * 2^192) when converted to Fr.
-            // Zolt must use the same limb ordering to match Jolt's representation exactly.
-            // This shifted representation is what Jolt uses in its optimized mul_hi_bigint_u128
-            // multiplication operations.
-            const raw = F{ .limbs = .{ 0, 0, masked_low, masked_high } };
+            // The 125-bit challenge value is stored with low 64 bits in limbs[0] and
+            // high 61 bits in limbs[1]. This represents the value (masked_low + masked_high * 2^64).
+            //
+            // NOTE: Jolt's MontU128Challenge internally stores [0, 0, low, high] for its
+            // optimized representation, but when used as a field element, the actual VALUE
+            // is the 128-bit number (low + high * 2^64). We store it in limbs[0:1] for
+            // proper field element representation.
+            const raw = F{ .limbs = .{ masked_low, masked_high, 0, 0 } };
             const result = raw.toMontgomery();
 
-            std.debug.print("[ZOLT TRANSCRIPT]   raw_limbs=[0, 0, 0x{x}, 0x{x}]\n", .{ masked_low, masked_high });
+            std.debug.print("[ZOLT TRANSCRIPT]   raw_limbs=[0x{x}, 0x{x}, 0, 0]\n", .{ masked_low, masked_high });
             std.debug.print("[ZOLT TRANSCRIPT]   mont_limbs=[0x{x}, 0x{x}, 0x{x}, 0x{x}]\n", .{ result.limbs[0], result.limbs[1], result.limbs[2], result.limbs[3] });
 
             return result;

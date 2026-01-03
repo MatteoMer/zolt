@@ -551,6 +551,95 @@ pub const SECOND_GROUP_INDICES: [9]usize = .{
     16, // NextUnexpPCUpdateOtherwise (moved from first group)
 };
 
+/// Check if a trace step is a NOOP instruction
+/// In RISC-V, NOOP is typically encoded as ADDI x0, x0, 0
+/// This matches Jolt's InstructionFlags::IsNoop semantics
+fn isNoopInstruction(step_opt: ?tracer.TraceStep) bool {
+    const step = step_opt orelse return false; // No next step means not a noop
+
+    // Extract opcode and instruction fields
+    const instr = step.instruction;
+    const opcode: u8 = @truncate(instr & 0x7F);
+
+    // Check if it's an I-type with opcode 0x13 (ADDI and friends)
+    if (opcode == 0x13) {
+        // Extract rd, rs1, funct3, and immediate
+        const rd: u8 = @truncate((instr >> 7) & 0x1F);
+        const rs1: u8 = @truncate((instr >> 15) & 0x1F);
+        const funct3: u8 = @truncate((instr >> 12) & 0x7);
+
+        // ADDI x0, x0, 0 is the canonical NOP
+        // funct3 = 0 for ADDI
+        if (rd == 0 and rs1 == 0 and funct3 == 0) {
+            // Also check immediate is 0 (I-type immediate in bits [31:20])
+            const imm: i32 = @bitCast(@as(u32, @truncate(instr >> 20)));
+            if (imm == 0) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+/// Compute the LookupOutput value for a trace step
+/// LookupOutput is the result of the instruction's lookup table operation.
+/// For JAL: jump target = PC + imm
+/// For JALR: jump target = (rs1 + imm) & ~1
+/// For other instructions: rd_value (the result written to rd)
+fn computeLookupOutput(comptime FieldType: type, step: tracer.TraceStep) FieldType {
+    const opcode: u8 = @truncate(step.instruction & 0x7F);
+
+    switch (opcode) {
+        0x6F => { // JAL
+            // LookupOutput = PC + imm (the jump target)
+            // The immediate is already computed in next_pc for successful jumps
+            // But we need to compute it from the instruction for the constraint
+            const imm = decodeJTypeImmediate(step.instruction);
+            const pc_i64: i64 = @intCast(step.pc);
+            const target = @as(u64, @bitCast(pc_i64 +% imm));
+            return FieldType.fromU64(target);
+        },
+        0x67 => { // JALR
+            // LookupOutput = (rs1 + imm) & ~1 (the jump target with LSB cleared)
+            const imm = decodeITypeImmediate(step.instruction);
+            const rs1_i64: i64 = @intCast(step.rs1_value);
+            const target = @as(u64, @bitCast(rs1_i64 +% imm)) & ~@as(u64, 1);
+            return FieldType.fromU64(target);
+        },
+        else => {
+            // For other instructions, use rd_value
+            return FieldType.fromU64(step.rd_value);
+        },
+    }
+}
+
+/// Decode J-type immediate (for JAL)
+fn decodeJTypeImmediate(instr: u32) i64 {
+    // J-type immediate: imm[20|10:1|11|19:12] - bits 31, 30:21, 20, 19:12
+    const imm20: u32 = (instr >> 31) & 0x1;
+    const imm10_1: u32 = (instr >> 21) & 0x3FF;
+    const imm11: u32 = (instr >> 20) & 0x1;
+    const imm19_12: u32 = (instr >> 12) & 0xFF;
+    const unsigned_imm: u32 = (imm20 << 20) | (imm19_12 << 12) | (imm11 << 11) | (imm10_1 << 1);
+    // Sign extend from bit 20
+    if (imm20 != 0) {
+        return @as(i64, @bitCast(@as(u64, unsigned_imm) | 0xFFFFFFFFFFE00000));
+    }
+    return @as(i64, unsigned_imm);
+}
+
+/// Decode I-type immediate (for JALR)
+fn decodeITypeImmediate(instr: u32) i64 {
+    // I-type immediate: imm[11:0] in bits 31:20
+    const unsigned_imm: u32 = instr >> 20;
+    // Sign extend from bit 11
+    if ((unsigned_imm & 0x800) != 0) {
+        return @as(i64, @bitCast(@as(u64, unsigned_imm) | 0xFFFFFFFFFFFFF000));
+    }
+    return @as(i64, unsigned_imm);
+}
+
 /// Per-cycle R1CS inputs extracted from execution trace
 pub fn R1CSCycleInputs(comptime F: type) type {
     return struct {
@@ -670,7 +759,10 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             // based on which operation type it is (constraints 5-11)
             // =================================================================
             // LookupOutput is the result value from the lookup table
-            inputs.values[R1CSInputIndex.LookupOutput.toIndex()] = F.fromU64(step.rd_value);
+            // For most instructions, this is the rd_value.
+            // For JAL/JALR, this is the jump target (PC + imm for JAL, (rs1 + imm) & ~1 for JALR)
+            const lookup_output = computeLookupOutput(F, step);
+            inputs.values[R1CSInputIndex.LookupOutput.toIndex()] = lookup_output;
 
             // =================================================================
             // PC values
@@ -690,6 +782,20 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             // Set remaining flags based on instruction opcode
             // =================================================================
             inputs.setFlagsFromInstruction(step.instruction);
+
+            // =================================================================
+            // ShouldJump = Jump && !NextIsNoop
+            // This must be computed AFTER setFlagsFromInstruction sets FlagJump
+            // =================================================================
+            const is_jump = inputs.values[R1CSInputIndex.FlagJump.toIndex()].eql(F.one());
+            if (is_jump) {
+                // Check if next instruction is a NOOP
+                const next_is_noop = isNoopInstruction(next_step);
+                if (!next_is_noop) {
+                    inputs.values[R1CSInputIndex.ShouldJump.toIndex()] = F.one();
+                }
+                // If next is noop, ShouldJump stays 0 (initialized)
+            }
 
             return inputs;
         }
@@ -825,7 +931,7 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                 },
                 0x6F => { // JAL
                     self.values[R1CSInputIndex.FlagJump.toIndex()] = F.one();
-                    self.values[R1CSInputIndex.ShouldJump.toIndex()] = F.one();
+                    // Note: ShouldJump is set in fromTraceStep based on NextIsNoop
                     self.values[R1CSInputIndex.WritePCtoRD.toIndex()] = F.one();
                     // NOT Add+Sub+Mul
                     self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
@@ -833,7 +939,7 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                 },
                 0x67 => { // JALR
                     self.values[R1CSInputIndex.FlagJump.toIndex()] = F.one();
-                    self.values[R1CSInputIndex.ShouldJump.toIndex()] = F.one();
+                    // Note: ShouldJump is set in fromTraceStep based on NextIsNoop
                     self.values[R1CSInputIndex.WritePCtoRD.toIndex()] = F.one();
                     // NOT Add+Sub+Mul
                     self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;

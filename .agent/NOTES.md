@@ -1,45 +1,45 @@
 # Zolt-Jolt Compatibility Notes
 
-## Current Status (Session 49 - January 3, 2026)
+## Current Status (Session 50 - January 3, 2026)
 
 ### Summary
 
-Working on challenge representation. Round polynomials match, but challenges still diverge between Zolt prover and Jolt verifier.
+Fixed from_bigint_unchecked interpretation. tau and r0 now match. Found round number offset in Stage 1 sumcheck.
 
-### Key Finding: Challenge Limb Representation
+### Key Finding: Round Number Offset
+
+After r0 challenge at round 55, there's a 1-round offset:
+
+| Operation | Zolt round | Jolt round |
+|-----------|------------|------------|
+| r0 challenge | 55 | 55 |
+| UniPoly_begin | 58 | 59 |
+| 1st sumcheck challenge | 63 | 64 |
+
+**Root Cause**: Jolt does one extra transcript operation between r0 and the first round polynomial. Need to identify what this is.
+
+### CRITICAL - from_bigint_unchecked Behavior (Session 49)
 
 **IMPORTANT - DO NOT CHANGE THIS:**
 
-The 128-bit (actually 125-bit masked) challenge is stored in limbs[0:1], NOT limbs[2:3]:
+arkworks' `from_bigint_unchecked(BigInt::new([0, 0, low, high]))` interprets the BigInt as ALREADY in Montgomery form!
 
 ```zig
-// CORRECT - represents the value (low + high * 2^64)
-const raw = F{ .limbs = .{ masked_low, masked_high, 0, 0 } };
-const result = raw.toMontgomery();
+// CORRECT - Use limbs directly, DO NOT call toMontgomery()
+const result = F{ .limbs = .{ 0, 0, masked_low, masked_high } };
 ```
 
-**Why NOT `[0, 0, low, high]`?**
+**Why this works:**
+- Jolt stores `[0, 0, low, high]` as the Montgomery representation directly
+- arkworks' `from_bigint_unchecked` does NOT multiply by R
+- When printing Fr, arkworks divides by R to get the canonical value
+- The canonical value is `(low * 2^128 + high * 2^192) / R mod p`
 
-- `[0, 0, low, high]` would represent `(low * 2^128 + high * 2^192)` - a value shifted by 2^128
-- This is NOT what we want for the field element value
-- Jolt's `MontU128Challenge` stores `[0, 0, low, high]` for its INTERNAL optimized representation
-- But when converted to Fr via `from_bigint_unchecked`, the VALUE is `low * 2^128 + high * 2^192`
-- In Zolt, we want the challenge to represent the actual 128-bit value, not the shifted value
+**What was wrong:**
+- Zolt was calling `toMontgomery()` on `[0, 0, low, high]`
+- This MULTIPLIED by R, giving wrong values
 
-**Serialization Format (toBytesBE):**
-
-When a challenge stored as `[low, high, 0, 0]` is serialized:
-1. `fromMontgomery()` converts to standard form: `[low, high, 0, 0]`
-2. Serialize to LE bytes: bytes[0..8]=low, bytes[8..16]=high, bytes[16..32]=zeros
-3. Reverse to BE: zeros in first 16 bytes, value in last 16 bytes
-
-This is expected and correct - the challenge IS a 128-bit value, so the upper 128 bits of the 256-bit field element are zero.
-
-**Jolt's Challenges Look Different:**
-
-Jolt's verifier prints challenges as full 256-bit field elements. This is because Jolt stores `MontU128Challenge` as `[0, 0, low, high]` and uses `from_bigint_unchecked` which interprets this as a shifted value. When printed, the Montgomery-form field element has non-zero bytes everywhere.
-
-**CURRENT ISSUE:** The challenge VALUES themselves differ between Zolt and Jolt - not just the representation. Need to trace back to find where the transcript state diverges.
+**After fix:** tau values now match between Zolt and Jolt.
 
 ### Session 49 Investigation (cont.)
 

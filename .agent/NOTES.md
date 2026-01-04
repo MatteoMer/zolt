@@ -1,10 +1,49 @@
 # Zolt-Jolt Compatibility Notes
 
-## Current Status (Session 51 - January 4, 2026)
+## Current Status (Session 52 - January 5, 2026)
 
 ### Summary
 
-Fixed round number offset. Transcript now aligned, round polynomials and challenges match. Sumcheck still fails on output_claim vs expected_output_claim.
+Deep investigation into sumcheck claim divergence. Found that eq_factor, Az_final, Bz_final, and opening claims all match Jolt exactly. But output_claim / eq_factor ≠ Az*Bz.
+
+### Session 52 - Gruen Polynomial Claim Divergence
+
+**Key Finding:**
+
+The Gruen polynomial q(X) is constructed to satisfy the sumcheck constraint s(0)+s(1)=previous_claim, but it does NOT equal the bound multiquadratic polynomial. This causes the claim to diverge from eq_factor * (Az*Bz at bound point).
+
+**All These Values Match Jolt:**
+1. eq_factor (split_eq.current_scalar): 11957315549363330504202442373139802627411419139285673324379667683258896529103
+2. Az_final * Bz_final: 12979092390518645131981692805702461345196587836340614110145230289986137758183
+3. r1cs_input_evals (opening claims): Match exactly (verified byte-by-byte)
+
+**But This Doesn't Match:**
+- Zolt implied_inner_sum_prod (output_claim / eq_factor): 15784999673434232655471753340953239083388838864127013231339270095339506918519
+- Expected: should equal Az_final * Bz_final
+
+**Root Cause Analysis:**
+
+The Gruen polynomial construction:
+1. q(0) = t_zero = Σ eq * Az(0) * Bz(0) ✓
+2. q(∞) = t_infinity = Σ eq * slope_products ✓
+3. q(1) is SOLVED from s(0)+s(1)=previous_claim constraint
+
+But q(1) ≠ Σ eq * Az(1) * Bz(1) in general!
+
+So after evaluating at challenge r:
+- q(r) ≠ bound_t_prime(r)
+- final_claim ≠ eq_factor * Az_final * Bz_final
+
+**Debug Output Verified:**
+- t_prime rebuild at round 11: E_out.len=1, E_in.len=1
+- t_prime[0] after rebuild = az[0]*bz[0] (correct!)
+- But claim update uses q(r), not bound_t_prime(r)
+
+**Next Step:** Investigate how Jolt's prover ensures the claim tracks correctly. There may be a different mechanism or state that we're missing.
+
+---
+
+## Previous Status (Session 51 - January 4, 2026)
 
 ### Session 51 - Round Offset Fix
 

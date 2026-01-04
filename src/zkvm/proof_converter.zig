@@ -568,6 +568,29 @@ pub fn ProofConverter(comptime F: type) type {
 
                 // DEBUG: Print next_claim after update
                 std.debug.print("[ZOLT] STAGE1_ROUND_{}: next_claim = {any}\n", .{ round_idx, outer_prover.current_claim.toBytesBE() });
+                std.debug.print("[ZOLT] STAGE1_ROUND_{}: split_eq.current_scalar = {any}\n", .{ round_idx, outer_prover.split_eq.current_scalar.toBytesBE() });
+                // Compute and print the implied inner product at this round
+                if (outer_prover.split_eq.current_scalar.inverse()) |eq_inv| {
+                    const implied = outer_prover.current_claim.mul(eq_inv);
+                    std.debug.print("[ZOLT] STAGE1_ROUND_{}: implied_inner_prod = {any}\n", .{ round_idx, implied.toBytesBE() });
+                }
+                // Print bound Az*Bz if available
+                if (outer_prover.az_poly) |az| {
+                    if (outer_prover.bz_poly) |bz| {
+                        if (az.evaluations.len > 0 and bz.evaluations.len > 0) {
+                            const az_bz = az.evaluations[0].mul(bz.evaluations[0]);
+                            std.debug.print("[ZOLT] STAGE1_ROUND_{}: az[0]*bz[0] = {any}\n", .{ round_idx, az_bz.toBytesBE() });
+                            std.debug.print("[ZOLT] STAGE1_ROUND_{}: az.len = {}, bz.len = {}\n", .{ round_idx, az.evaluations.len, bz.evaluations.len });
+                        }
+                    }
+                }
+                // Print t_prime values if available
+                if (outer_prover.t_prime_poly) |t_prime| {
+                    if (t_prime.evaluations.len > 0) {
+                        std.debug.print("[ZOLT] STAGE1_ROUND_{}: t_prime[0] = {any}\n", .{ round_idx, t_prime.evaluations[0].toBytesBE() });
+                        std.debug.print("[ZOLT] STAGE1_ROUND_{}: t_prime.num_vars = {}, len = {}\n", .{ round_idx, t_prime.num_vars, t_prime.evaluations.len });
+                    }
+                }
             }
 
             // DEBUG: Print final values for cross-verification
@@ -576,6 +599,29 @@ pub fn ProofConverter(comptime F: type) type {
             std.debug.print("[ZOLT] STAGE1_FINAL: eq_factor (split_eq.current_scalar) = {any}\n", .{eq_scalar.toBytesBE()});
             std.debug.print("[ZOLT] STAGE1_FINAL: output_claim (unscaled) = {any}\n", .{final_claim.toBytesBE()});
             std.debug.print("[ZOLT] STAGE1_FINAL: output_claim (scaled) = {any}\n", .{final_claim.mul(batching_coeff).toBytesBE()});
+            // Compute implied inner_sum_prod = output_claim / eq_factor
+            if (eq_scalar.inverse()) |eq_inv| {
+                const implied_inner_sum_prod = final_claim.mul(eq_inv);
+                std.debug.print("[ZOLT] STAGE1_FINAL: implied_inner_sum_prod (output/eq) = {any}\n", .{implied_inner_sum_prod.toBytesBE()});
+            }
+            // Print final bound Az/Bz values
+            if (outer_prover.az_poly) |az| {
+                if (az.evaluations.len > 0) {
+                    std.debug.print("[ZOLT] STAGE1_FINAL: az_poly final value = {any}\n", .{az.evaluations[0].toBytesBE()});
+                }
+            }
+            if (outer_prover.bz_poly) |bz| {
+                if (bz.evaluations.len > 0) {
+                    std.debug.print("[ZOLT] STAGE1_FINAL: bz_poly final value = {any}\n", .{bz.evaluations[0].toBytesBE()});
+                    // Also compute the product
+                    if (outer_prover.az_poly) |az| {
+                        if (az.evaluations.len > 0) {
+                            const az_bz_product = az.evaluations[0].mul(bz.evaluations[0]);
+                            std.debug.print("[ZOLT] STAGE1_FINAL: az_final * bz_final = {any}\n", .{az_bz_product.toBytesBE()});
+                        }
+                    }
+                }
+            }
             std.debug.print("[ZOLT] STAGE1_FINAL: num_challenges = {}\n", .{challenges.items.len});
             for (challenges.items, 0..) |c, i| {
                 std.debug.print("[ZOLT] STAGE1_FINAL: challenge[{}] = {any}\n", .{ i, c.toBytesBE() });
@@ -743,6 +789,18 @@ pub fn ProofConverter(comptime F: type) type {
                 cycle_witnesses,
                 r_cycle,
             );
+
+            // DEBUG: Print the first few R1CS input evaluations
+            std.debug.print("[ZOLT] OPENING_CLAIMS: r_cycle.len = {}\n", .{r_cycle.len});
+            std.debug.print("[ZOLT] OPENING_CLAIMS: cycle_witnesses.len = {}\n", .{cycle_witnesses.len});
+            // Print first and last r_cycle values
+            if (r_cycle.len > 0) {
+                std.debug.print("[ZOLT] OPENING_CLAIMS: r_cycle[0] = {any}\n", .{r_cycle[0].toBytes()});
+                std.debug.print("[ZOLT] OPENING_CLAIMS: r_cycle[last] = {any}\n", .{r_cycle[r_cycle.len - 1].toBytes()});
+            }
+            std.debug.print("[ZOLT] OPENING_CLAIMS: r1cs_input_evals[0] (LeftInstructionInput) = {any}\n", .{input_evals[0].toBytes()});
+            std.debug.print("[ZOLT] OPENING_CLAIMS: r1cs_input_evals[1] (RightInstructionInput) = {any}\n", .{input_evals[1].toBytes()});
+            std.debug.print("[ZOLT] OPENING_CLAIMS: r1cs_input_evals[2] (Product) = {any}\n", .{input_evals[2].toBytes()});
 
             // Add R1CS inputs for SpartanOuter with computed evaluations
             for (R1CS_VIRTUAL_POLYS, 0..) |poly, jolt_idx| {

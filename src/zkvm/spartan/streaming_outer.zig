@@ -906,12 +906,39 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 // from the bound Az/Bz polynomials (this is nextWindow in Jolt)
                 if (self.t_prime_poly.?.num_vars == 0 and self.az_poly != null and self.bz_poly != null) {
                     // Rebuild t_prime_poly from bound Az/Bz (nextWindow equivalent)
+                    // DEBUG: Print t_prime[0] BEFORE rebuild
+                    if (self.t_prime_poly) |t| {
+                        std.debug.print("[ZOLT] ROUND {} BEFORE REBUILD: t_prime[0] = {any}\n", .{ self.current_round, t.evaluations[0].toBytesBE() });
+                    }
+                    // DEBUG: Print E_out/E_in sizes before rebuild
+                    const eq_tables = self.split_eq.getWindowEqTables(0, window_size);
+                    std.debug.print("[ZOLT] ROUND {} REBUILD: E_out.len = {}, E_in.len = {}\n", .{ self.current_round, eq_tables.E_out.len, eq_tables.E_in.len });
+
                     try self.rebuildTPrimePoly(window_size);
+                    // DEBUG: Print t_prime[0] AFTER rebuild
+                    if (self.t_prime_poly) |t| {
+                        std.debug.print("[ZOLT] ROUND {} AFTER REBUILD: t_prime[0] = {any}\n", .{ self.current_round, t.evaluations[0].toBytesBE() });
+                        std.debug.print("[ZOLT] ROUND {} AFTER REBUILD: t_prime.num_vars = {}\n", .{ self.current_round, t.num_vars });
+                    }
+                    // DEBUG: Print what az[0]*bz[0] should be
+                    if (self.az_poly) |az| {
+                        if (self.bz_poly) |bz| {
+                            if (az.evaluations.len > 0 and bz.evaluations.len > 0) {
+                                const expected = az.evaluations[0].mul(bz.evaluations[0]);
+                                std.debug.print("[ZOLT] ROUND {} REBUILD: EXPECTED t_prime[0] = az[0]*bz[0] = {any}\n", .{ self.current_round, expected.toBytesBE() });
+                                std.debug.print("[ZOLT] ROUND {} REBUILD: az.len = {}, bz.len = {}\n", .{ self.current_round, az.evaluations.len, bz.evaluations.len });
+                            }
+                        }
+                    }
                 }
 
                 const t_evals = try self.computeTEvals(window_size);
                 t_zero = t_evals.t_zero;
                 t_infinity = t_evals.t_infinity;
+
+                // DEBUG: Print t_zero, t_infinity for this round
+                std.debug.print("[ZOLT] ROUND {}: t_zero = {any}\n", .{ self.current_round, t_zero.toBytesBE() });
+                std.debug.print("[ZOLT] ROUND {}: t_infinity = {any}\n", .{ self.current_round, t_infinity.toBytesBE() });
             } else {
                 // No t_prime_poly available (shouldn't happen with LinearOnlySchedule)
                 return error.TPrimePolyNotAvailable;

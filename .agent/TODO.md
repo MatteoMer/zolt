@@ -1,54 +1,57 @@
 # Zolt-Jolt Compatibility TODO
 
-## Current Status: Session 51 - January 4, 2026
+## Current Status: Session 52 - January 5, 2026
 
-**FIXED: Round number offset**
+**INVESTIGATING: Gruen polynomial claim divergence**
 
-Session 51 fixed the round offset issue:
-- Jolt's `cache_openings` appends `uni_skip_claim` to transcript BEFORE `BatchedSumcheck::verify`
-- Added extra `transcript.appendScalar(uni_skip_claim)` after r0 to match
-- UniPoly_begin now at round=59 in both Zolt and Jolt
-- Round polynomial coefficients match exactly
-- Sumcheck challenges match exactly
+Session 52 deep investigation findings:
+- eq_factor (split_eq.current_scalar) matches Jolt exactly ✓
+- Az_final * Bz_final (from bound polynomials) matches Jolt's inner_sum_prod exactly ✓
+- r1cs_input_evals (opening claims) match exactly ✓
+- BUT: output_claim / eq_factor ≠ Az_final * Bz_final ✗
 
-**CURRENT ISSUE: Sumcheck output_claim mismatch**
+**ROOT CAUSE IDENTIFIED:**
 
-The sumcheck still fails with:
+The Gruen polynomial q(X) is constructed to satisfy s(0)+s(1)=previous_claim, but it's NOT equivalent to the multiquadratic bound polynomial. Specifically:
+- q(0) = t_zero = Σ eq * Az(0) * Bz(0) ✓
+- q(∞) = t_infinity = Σ eq * slope_products ✓
+- q(1) is SOLVED from constraint, NOT from t(1) ✗
+
+This means q(r) ≠ bound_t_prime(r), causing the claim to diverge from eq_factor * (Az*Bz at bound point).
+
+**VALUES:**
 ```
-output_claim:          1981412718113544531505000459902467367241081743372122430443746733682840647343
-expected_output_claim: 5570169908849902992653081094926679248864263885808703143417188980283623941035
+Zolt eq_factor:              11957315549363330504202442373139802627411419139285673324379667683258896529103
+Jolt tau_high * tau_bound:   11957315549363330504202442373139802627411419139285673324379667683258896529103 ✓
+
+Zolt az_final * bz_final:    12979092390518645131981692805702461345196587836340614110145230289986137758183
+Jolt inner_sum_prod:         12979092390518645131981692805702461345196587836340614110145230289986137758183 ✓
+
+Zolt implied_inner_sum_prod: 15784999673434232655471753340953239083388838864127013231339270095339506918519
+(This should equal az_final * bz_final but doesn't!)
 ```
-
-All individual components match:
-- UniPoly_begin at round 59 (both)
-- c0, c2, c3 coefficients match byte-for-byte
-- First challenge matches byte-for-byte
-
-Need to investigate:
-1. How the verifier computes expected_output_claim
-2. Whether there's an issue with the final output_claim computation
-3. Whether opening claims in the proof are correct
 
 ---
 
 ## IMMEDIATE NEXT STEPS
 
-### 1. Debug expected_output_claim Computation
+### 1. Investigate Gruen Polynomial Claim Tracking
 
-The verifier computes expected_output_claim from:
-```rust
-let tau_high_bound_r0 = LagrangePolynomial::lagrange_kernel(&r0, &tau_high);
-let tau_bound_r_tail_reversed = EqPolynomial::mle(tau_low, &r_tail_reversed);
-let inner_sum_prod = key.evaluate_inner_sum_product_at_point(rx_constr, r1cs_input_evals);
-expected_output_claim = tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod * batching_coeff;
-```
+The Gruen polynomial construction uses:
+1. t_zero = t'(0) - sum of weighted Az(0)*Bz(0)
+2. t_infinity = t'(∞) - sum of weighted slope products
+3. q(1) = (previous_claim - l(0)*t_zero) / l(1)
 
-Compare these intermediate values between Zolt prover and Jolt verifier.
+But q(1) is NOT the same as Σ eq * Az(1) * Bz(1)!
 
-### 2. Verify Opening Claims
+Need to verify if Jolt's implementation has the same issue or if there's something different in how they handle this.
 
-The proof contains `opening_claims` which the verifier uses. Ensure these values are correct:
-- `Virtual(UnivariateSkip, SpartanOuter)` should equal uni_skip_claim
+### 2. Compare with Jolt's Claim Tracking
+
+Check if Jolt's prover uses a different method to ensure:
+- output_claim = eq_factor * Az_final * Bz_final
+
+Or if there's additional state that needs to be tracked.
 
 ---
 
@@ -66,8 +69,23 @@ cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture
 
 ---
 
+## Key Debug Output
+
+At round 11 (last round):
+```
+[ZOLT] ROUND 11 REBUILD: E_out.len = 1, E_in.len = 1
+[ZOLT] ROUND 11 AFTER REBUILD: t_prime[0] = az[0]*bz[0] (matches!)
+[ZOLT] ROUND 11: t_zero = (correct value)
+```
+
+But after the round polynomial is evaluated:
+- implied_inner_prod = output_claim / eq_factor ≠ az_final * bz_final
+
+---
+
 ## Previous Sessions Summary
 
+- **Session 52**: Deep investigation - eq_factor and Az*Bz match but claim doesn't
 - **Session 51**: Fixed round offset by adding cache_openings appendScalar; challenges now match
 - **Session 50**: Found round number offset between Zolt and Jolt after r0
 - **Session 49**: Fixed from_bigint_unchecked interpretation - tau values now match

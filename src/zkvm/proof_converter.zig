@@ -428,6 +428,11 @@ pub fn ProofConverter(comptime F: type) type {
             // Bind the first-round challenge from transcript with the uni_skip_claim
             outer_prover.bindFirstRoundChallenge(r0, uni_skip_claim) catch {};
 
+            // Match Jolt's cache_openings: after UniSkip verification, the verifier calls
+            // accumulator.append_virtual() which appends the uni_skip_claim to transcript.
+            // This happens BEFORE BatchedSumcheck::verify which also appends it.
+            transcript.appendScalar(uni_skip_claim);
+
             // IMPORTANT: Match Jolt's BatchedSumcheck::prove and verify transcript flow exactly:
             //   1. Append input_claim to transcript
             //   2. Get batching_coeffs via challenge_vector(1) - this modifies transcript state!

@@ -1,14 +1,46 @@
 # Zolt-Jolt Compatibility Notes
 
-## Current Status (Session 50 - January 3, 2026)
+## Current Status (Session 51 - January 4, 2026)
 
 ### Summary
 
-Fixed from_bigint_unchecked interpretation. tau and r0 now match. Found round number offset in Stage 1 sumcheck.
+Fixed round number offset. Transcript now aligned, round polynomials and challenges match. Sumcheck still fails on output_claim vs expected_output_claim.
 
-### Key Finding: Round Number Offset
+### Session 51 - Round Offset Fix
 
-After r0 challenge at round 55, there's a 1-round offset:
+**Root Cause Found and Fixed:**
+
+Jolt's verification flow after UniSkip:
+1. `UniSkipFirstRoundProof::verify` derives r0
+2. `cache_openings` calls `accumulator.append_virtual()` which appends uni_skip_claim to transcript
+3. `BatchedSumcheck::verify` appends uni_skip_claim again as input_claim
+4. Batching coefficient derived
+
+Zolt was missing step 2. Added `transcript.appendScalar(uni_skip_claim)` after r0.
+
+**Verification:**
+- UniPoly_begin now at round=59 in both
+- State before UniPoly_begin matches: `[1c, b7, 03, 0d, 14, 2d, 44, 65]`
+- c0, c2, c3 coefficients match byte-for-byte
+- First sumcheck challenge matches byte-for-byte
+
+### Current Issue: output_claim Mismatch
+
+```
+output_claim:          1981412718113544531505000459902467367241081743372122430443746733682840647343
+expected_output_claim: 5570169908849902992653081094926679248864263885808703143417188980283623941035
+```
+
+The output_claim is what comes out of sumcheck after all 11 rounds.
+The expected_output_claim is computed by verifier from opening claims.
+
+Since coefficients and challenges match, the issue is likely in:
+1. How expected_output_claim is computed (uses opening claims from proof)
+2. Whether opening claims in the proof are correct
+
+### Previous Session - Round Number Offset (Session 50)
+
+After r0 challenge at round 55, there was a 1-round offset:
 
 | Operation | Zolt round | Jolt round |
 |-----------|------------|------------|
@@ -16,7 +48,7 @@ After r0 challenge at round 55, there's a 1-round offset:
 | UniPoly_begin | 58 | 59 |
 | 1st sumcheck challenge | 63 | 64 |
 
-**Root Cause**: Jolt does one extra transcript operation between r0 and the first round polynomial. Need to identify what this is.
+**Root Cause**: Jolt's `cache_openings` appends uni_skip_claim before BatchedSumcheck.
 
 ### CRITICAL - from_bigint_unchecked Behavior (Session 49)
 

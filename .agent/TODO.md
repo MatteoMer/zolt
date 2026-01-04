@@ -1,55 +1,54 @@
 # Zolt-Jolt Compatibility TODO
 
-## Current Status: Session 50 - January 3, 2026
+## Current Status: Session 51 - January 4, 2026
 
-**FIXED: from_bigint_unchecked interpretation**
+**FIXED: Round number offset**
 
-Session 49 fixed the challenge representation:
-- arkworks' `from_bigint_unchecked` treats input as ALREADY in Montgomery form
-- Zolt now stores `[0, 0, low, high]` directly as limbs (no toMontgomery call)
-- tau values now match between Zolt and Jolt
+Session 51 fixed the round offset issue:
+- Jolt's `cache_openings` appends `uni_skip_claim` to transcript BEFORE `BatchedSumcheck::verify`
+- Added extra `transcript.appendScalar(uni_skip_claim)` after r0 to match
+- UniPoly_begin now at round=59 in both Zolt and Jolt
+- Round polynomial coefficients match exactly
+- Sumcheck challenges match exactly
 
-**CURRENT ISSUE: Round number offset**
+**CURRENT ISSUE: Sumcheck output_claim mismatch**
 
-After r0, there's a 1-round offset in transcript operations:
+The sumcheck still fails with:
+```
+output_claim:          1981412718113544531505000459902467367241081743372122430443746733682840647343
+expected_output_claim: 5570169908849902992653081094926679248864263885808703143417188980283623941035
+```
 
-| Operation | Zolt round | Jolt round |
-|-----------|------------|------------|
-| r0 challenge | 55 | 55 |
-| UniPoly_begin | 58 | 59 |
-| UniPoly_end | 62 | 63 |
-| 1st sumcheck challenge | 63 | 64 |
+All individual components match:
+- UniPoly_begin at round 59 (both)
+- c0, c2, c3 coefficients match byte-for-byte
+- First challenge matches byte-for-byte
 
-This suggests Jolt does one extra operation between r0 and Stage 1 sumcheck.
+Need to investigate:
+1. How the verifier computes expected_output_claim
+2. Whether there's an issue with the final output_claim computation
+3. Whether opening claims in the proof are correct
 
 ---
 
 ## IMMEDIATE NEXT STEPS
 
-### 1. Debug Transcript State Divergence
+### 1. Debug expected_output_claim Computation
 
-Compare transcript states at each operation between r0 and UniPoly_begin:
-- Jolt: UniPoly_begin at round=59, state_before=[1c, b7, 03, 0d, 14, 2d, 44, 65]
-- Zolt: UniPoly_begin at round=58, need to capture state_before
+The verifier computes expected_output_claim from:
+```rust
+let tau_high_bound_r0 = LagrangePolynomial::lagrange_kernel(&r0, &tau_high);
+let tau_bound_r_tail_reversed = EqPolynomial::mle(tau_low, &r_tail_reversed);
+let inner_sum_prod = key.evaluate_inner_sum_product_at_point(rx_constr, r1cs_input_evals);
+expected_output_claim = tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod * batching_coeff;
+```
 
-**Key Question**: What operation does Jolt do at round 56-58 that Zolt is missing?
+Compare these intermediate values between Zolt prover and Jolt verifier.
 
-### 2. Check Batched Sumcheck Flow
+### 2. Verify Opening Claims
 
-Jolt's BatchedSumcheck::prove:
-1. For each sumcheck instance: `transcript.append_scalar(&input_claim)`
-2. Get batching_coeffs: `transcript.challenge_vector(len)`
-3. Process round polynomials
-
-Zolt's proof_converter.zig (lines 442-446):
-1. `transcript.appendScalar(uni_skip_claim)` - this is round 56
-2. `batching_coeff = transcript.challengeScalar()` - this is round 57
-
-Does Jolt do something extra here?
-
-### 3. Add Debug Output
-
-Add state_before logging to Zolt's appendMessage for UniPoly_begin to compare with Jolt's [1c, b7, 03, 0d, 14, 2d, 44, 65].
+The proof contains `opening_claims` which the verifier uses. Ensure these values are correct:
+- `Virtual(UnivariateSkip, SpartanOuter)` should equal uni_skip_claim
 
 ---
 
@@ -69,6 +68,7 @@ cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture
 
 ## Previous Sessions Summary
 
+- **Session 51**: Fixed round offset by adding cache_openings appendScalar; challenges now match
 - **Session 50**: Found round number offset between Zolt and Jolt after r0
 - **Session 49**: Fixed from_bigint_unchecked interpretation - tau values now match
 - **Session 48**: Fixed challenge limb ordering, round polynomials now match

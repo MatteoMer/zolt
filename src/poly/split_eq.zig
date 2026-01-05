@@ -415,6 +415,14 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
             const s_2 = l_2.mul(q_2); // l(2) * q(2)
             const s_3 = l_3.mul(q_3); // l(3) * q(3)
 
+            // DEBUG: Verify s(0) + s(1) == previous_claim
+            const sum_check = s_0.add(s_1);
+            if (!sum_check.eql(previous_claim)) {
+                std.debug.print("[GRUEN DEBUG] MISMATCH: s(0)+s(1) != previous_claim at index {}\n", .{self.current_index});
+                std.debug.print("[GRUEN DEBUG]   s(0)+s(1) = {any}\n", .{sum_check.toBytesBE()});
+                std.debug.print("[GRUEN DEBUG]   previous_claim = {any}\n", .{previous_claim.toBytesBE()});
+            }
+
             return [4]F{ s_0, s_1, s_2, s_3 };
         }
 

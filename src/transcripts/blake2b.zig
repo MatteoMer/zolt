@@ -265,10 +265,56 @@ pub fn Blake2bTranscript(comptime F: type) type {
             return mem.readInt(u128, &reversed, .big);
         }
 
-        /// Get a challenge scalar (128-bit for performance)
-        /// Matches Jolt's `fn challenge_scalar<F: JoltField>(&mut self) -> F`
+        /// Get a challenge scalar (128-bit, MontU128Challenge-compatible)
+        /// Matches Jolt's `fn challenge_scalar_optimized<F: JoltField>(&mut self) -> F::Challenge`
+        ///
+        /// This returns a field element with the MontU128Challenge representation [0, 0, low, high].
+        /// Used for sumcheck challenges (r0, etc.) where Jolt uses MontU128Challenge.
+        ///
+        /// NOTE: For batching coefficients and other cases where Jolt uses proper Fr,
+        /// use challengeScalarFull() instead which converts to proper Montgomery form.
         pub fn challengeScalar(self: *Self) F {
             return self.challengeScalar128Bits();
+        }
+
+        /// Get a challenge scalar with proper Montgomery conversion
+        /// Matches Jolt's `fn challenge_scalar<F: JoltField>(&mut self) -> F` used via challenge_vector
+        ///
+        /// This returns a PROPER field element in Montgomery form, suitable for
+        /// standard field arithmetic. Used for batching coefficients where Jolt
+        /// uses F::from_bytes (via challenge_vector).
+        pub fn challengeScalarFull(self: *Self) F {
+            std.debug.print("[ZOLT TRANSCRIPT] challengeScalarFull: round={d}\n", .{self.n_rounds});
+
+            var buf: [16]u8 = undefined;
+            self.challengeBytes(&buf);
+
+            // Reverse bytes to match Jolt's behavior
+            var reversed: [16]u8 = undefined;
+            for (0..16) |i| {
+                reversed[i] = buf[15 - i];
+            }
+
+            // Interpret as little-endian integer and convert to field element
+            // This matches Jolt's F::from_bytes(&buf) which does from_le_bytes_mod_order
+            const low: u64 = mem.readInt(u64, reversed[0..8], .little);
+            const high: u64 = mem.readInt(u64, reversed[8..16], .little);
+
+            // Mask to 125 bits (same as MontU128Challenge)
+            const full_value: u128 = (@as(u128, high) << 64) | low;
+            const mask_125: u128 = (1 << 125) - 1;
+            const masked_value: u128 = full_value & mask_125;
+            const masked_low: u64 = @truncate(masked_value);
+            const masked_high: u64 = @truncate(masked_value >> 64);
+
+            // Store in lower limbs [low, high, 0, 0] as standard form
+            // then convert to Montgomery form
+            const standard = F{ .limbs = .{ masked_low, masked_high, 0, 0 } };
+            const result = standard.toMontgomery();
+
+            std.debug.print("[ZOLT TRANSCRIPT]   canonical_value=0x{x}{x:0>16}\n", .{ masked_high, masked_low });
+
+            return result;
         }
 
         /// Get a 128-bit challenge scalar (masked to 125 bits for Jolt compatibility)

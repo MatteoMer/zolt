@@ -1,12 +1,74 @@
 # Zolt-Jolt Compatibility Notes
 
-## Current Status (Session 52 - January 5, 2026)
+## Current Status (Session 53 - January 5, 2026)
 
 ### Summary
 
-Deep investigation into sumcheck claim divergence. Found that eq_factor, Az_final, Bz_final, and opening claims all match Jolt exactly. But output_claim / eq_factor ≠ Az*Bz.
+Fixed the batching coefficient Montgomery form bug. Initial claim now matches Jolt exactly. Sumcheck still fails due to Gruen polynomial claim divergence (original issue from Session 52).
 
-### Session 52 - Gruen Polynomial Claim Divergence
+### Session 53 - Batching Coefficient Fix
+
+**Key Finding:**
+
+Jolt uses TWO different challenge scalar derivation methods:
+
+1. **`challenge_scalar_optimized()`** → Returns `F::Challenge` (MontU128Challenge)
+   - Stores 128-bit value as `[0, 0, low, high]` directly
+   - Used for sumcheck challenges (r0, r1, etc.)
+   - Has special multiplication semantics
+
+2. **`challenge_scalar()`** (via `challenge_vector`) → Returns proper `F`
+   - Uses `F::from_bytes()` which converts to proper Montgomery form
+   - Used for batching coefficients
+   - Uses standard field multiplication
+
+**The Bug:**
+
+Zolt was using the `[0, 0, low, high]` representation for ALL challenges, which:
+- ✓ Correct for sumcheck challenges (matches MontU128Challenge)
+- ✗ Wrong for batching coefficients (should use proper Montgomery form)
+
+**Values Before Fix:**
+```
+uni_skip_claim: 6819845662591168690540177426014504904478356236997774174463102166949757228057 ✓ (matched)
+batching_coeff (Zolt): 3585365310819910961476179832490187488669617511825727803093062673748144578813 (WRONG - 256-bit)
+batching_coeff (Jolt): 38168636090528866393074519943917698662 (correct - 128-bit)
+initial_claim: MISMATCH
+```
+
+**Values After Fix:**
+```
+uni_skip_claim: 6819845662591168690540177426014504904478356236997774174463102166949757228057 ✓
+batching_coeff: 38168636090528866393074519943917698662 ✓ (now matches!)
+initial_claim: 21674923214564316833547681277109851767489952526125883853786217589527714841889 ✓ (now matches!)
+```
+
+**The Fix:**
+
+Added `challengeScalarFull()` method to transcript that:
+1. Gets 16 bytes from transcript
+2. Reverses them (matching Jolt)
+3. Interprets as 128-bit value
+4. Masks to 125 bits
+5. Stores in lower limbs `[low, high, 0, 0]`
+6. Converts to Montgomery form via `toMontgomery()`
+
+Updated `proof_converter.zig` to use `challengeScalarFull()` for batching_coeff.
+
+**Key Insight - Why `[0, 0, low, high]` Works for Sumcheck:**
+
+In Jolt, sumcheck challenges use `MontU128Challenge` which has special multiplication that handles the `[0, 0, low, high]` representation correctly. When Zolt uses this same representation with standard Montgomery multiplication, it still works because:
+- Both representations give the same result in polynomial evaluation
+- The `uni_skip_claim = poly.evaluate(r0)` matched even with the "wrong" representation
+
+But for batching coefficients:
+- `initial_claim = uni_skip_claim * batching_coeff`
+- Standard multiplication with `[0, 0, low, high]` gives wrong result
+- Need proper Montgomery form for correct multiplication
+
+---
+
+## Session 52 - Gruen Polynomial Claim Divergence
 
 **Key Finding:**
 
@@ -18,7 +80,7 @@ The Gruen polynomial q(X) is constructed to satisfy the sumcheck constraint s(0)
 3. r1cs_input_evals (opening claims): Match exactly (verified byte-by-byte)
 
 **But This Doesn't Match:**
-- Zolt implied_inner_sum_prod (output_claim / eq_factor): 15784999673434232655471753340953239083388838864127013231339270095339506918519
+- Zolt implied_inner_sum_prod (output_claim / eq_factor): differs from expected
 - Expected: should equal Az_final * Bz_final
 
 **Root Cause Analysis:**
@@ -34,18 +96,11 @@ So after evaluating at challenge r:
 - q(r) ≠ bound_t_prime(r)
 - final_claim ≠ eq_factor * Az_final * Bz_final
 
-**Debug Output Verified:**
-- t_prime rebuild at round 11: E_out.len=1, E_in.len=1
-- t_prime[0] after rebuild = az[0]*bz[0] (correct!)
-- But claim update uses q(r), not bound_t_prime(r)
-
 **Next Step:** Investigate how Jolt's prover ensures the claim tracks correctly. There may be a different mechanism or state that we're missing.
 
 ---
 
-## Previous Status (Session 51 - January 4, 2026)
-
-### Session 51 - Round Offset Fix
+## Session 51 - Round Offset Fix
 
 **Root Cause Found and Fixed:**
 
@@ -57,187 +112,34 @@ Jolt's verification flow after UniSkip:
 
 Zolt was missing step 2. Added `transcript.appendScalar(uni_skip_claim)` after r0.
 
-**Verification:**
-- UniPoly_begin now at round=59 in both
-- State before UniPoly_begin matches: `[1c, b7, 03, 0d, 14, 2d, 44, 65]`
-- c0, c2, c3 coefficients match byte-for-byte
-- First sumcheck challenge matches byte-for-byte
+---
 
-### Current Issue: output_claim Mismatch
+## CRITICAL - Challenge Scalar Methods
 
-```
-output_claim:          1981412718113544531505000459902467367241081743372122430443746733682840647343
-expected_output_claim: 5570169908849902992653081094926679248864263885808703143417188980283623941035
-```
-
-The output_claim is what comes out of sumcheck after all 11 rounds.
-The expected_output_claim is computed by verifier from opening claims.
-
-Since coefficients and challenges match, the issue is likely in:
-1. How expected_output_claim is computed (uses opening claims from proof)
-2. Whether opening claims in the proof are correct
-
-### Previous Session - Round Number Offset (Session 50)
-
-After r0 challenge at round 55, there was a 1-round offset:
-
-| Operation | Zolt round | Jolt round |
-|-----------|------------|------------|
-| r0 challenge | 55 | 55 |
-| UniPoly_begin | 58 | 59 |
-| 1st sumcheck challenge | 63 | 64 |
-
-**Root Cause**: Jolt's `cache_openings` appends uni_skip_claim before BatchedSumcheck.
-
-### CRITICAL - from_bigint_unchecked Behavior (Session 49)
-
-**IMPORTANT - DO NOT CHANGE THIS:**
-
-arkworks' `from_bigint_unchecked(BigInt::new([0, 0, low, high]))` interprets the BigInt as ALREADY in Montgomery form!
+### MontU128Challenge-style (for sumcheck challenges)
 
 ```zig
-// CORRECT - Use limbs directly, DO NOT call toMontgomery()
+// Used by challengeScalar() → challengeScalar128Bits()
 const result = F{ .limbs = .{ 0, 0, masked_low, masked_high } };
 ```
 
-**Why this works:**
-- Jolt stores `[0, 0, low, high]` as the Montgomery representation directly
-- arkworks' `from_bigint_unchecked` does NOT multiply by R
-- When printing Fr, arkworks divides by R to get the canonical value
-- The canonical value is `(low * 2^128 + high * 2^192) / R mod p`
+- Stores 128-bit value in upper limbs
+- DO NOT call toMontgomery()
+- Matches Jolt's MontU128Challenge representation
+- Used for r0, r1, r2, ... sumcheck challenges
 
-**What was wrong:**
-- Zolt was calling `toMontgomery()` on `[0, 0, low, high]`
-- This MULTIPLIED by R, giving wrong values
+### Proper Montgomery form (for batching coefficients)
 
-**After fix:** tau values now match between Zolt and Jolt.
-
-### Session 49 Investigation (cont.)
-
-**Key Finding: tau values don't match**
-
-- Zolt's tau[11] (as shifted field element) = 3700036982749152569148447626330409071994233407396770520073887757500189507584
-- Jolt's tau_high = 4949406946327026266101368757399851829917753905666081332932170379465433058454
-- These are DIFFERENT!
-
-Since tau is derived from the transcript, this means the transcript states diverge somewhere before tau is derived (i.e., during or before the Dory commitment phase).
-
-**Round polynomial coefficients DO match:**
-- Zolt c0_le matches Jolt c0_bytes exactly
-- This confirms the sumcheck computation is correct
-- The issue is in the transcript/challenge derivation
-
-### CRITICAL DISCOVERY: from_bigint_unchecked behavior
-
-**ROOT CAUSE FOUND:**
-
-Arkworks' `from_bigint_unchecked(BigInt::new([0, 0, low, high]))` interprets the BigInt as ALREADY in Montgomery form! It does NOT multiply by R to convert to Montgomery.
-
-**What this means:**
-- Jolt stores `[0, 0, low, high]` as the Montgomery representation directly
-- When printing Fr, arkworks divides by R to get the canonical value
-- The canonical value is `(low * 2^128 + high * 2^192) / R mod p`
-
-**The bug in Zolt:**
-- Zolt was calling `toMontgomery()` on `[0, 0, low, high]`
-- This MULTIPLIED by R, giving `(low * 2^128 + high * 2^192) * R mod p`
-- This is the WRONG value!
-
-**The fix:**
-- Do NOT call `toMontgomery()`
-- Use `F{ .limbs = .{ 0, 0, masked_low, masked_high } }` directly
-- The limbs ARE the Montgomery representation
-
-**Verification:**
-```
-bigint = 3649381361935200060066435842883492086020528436178408344296001395814532382720
-fr_printed = 3350198182347904564092445461553703484396816537342330508621481301908782066970
-bigint / R mod p = 3350198182347904564092445461553703484396816537342330508621481301908782066970  ✓
+```zig
+// Used by challengeScalarFull()
+const standard = F{ .limbs = .{ masked_low, masked_high, 0, 0 } };
+const result = standard.toMontgomery();
 ```
 
----
-
-## Previous Status (Session 40 - January 2, 2026)
-
-### Summary
-
-Fixed the batching coefficient issue. Now round polynomials are scaled by `batching_coeff` before output. Challenges now match between prover and verifier. However, the final output_claim still doesn't match expected_output_claim.
-
-### Session 40 Key Progress
-
-1. **Batching coefficient applied**: Round polynomials are now multiplied by `batching_coeff` before being written to proof and transcript. The prover's internal state uses unscaled claims.
-
-2. **Transcript consistency verified**: The sumcheck challenges now match exactly between Zolt prover and Jolt verifier.
-
-3. **Lagrange kernel symmetry confirmed**: `L(x, y) = L(y, x)`, so argument order doesn't matter.
-
-4. **Eq polynomial binding verified**: Both implementations bind all 11 elements of tau_low.
-
-### Current Values
-
-```
-output_claim:          11745972059365673324717055336378505103382790433770080606002230314528714321637
-expected_output_claim: 13147110630967021857497758076978613720325907259294229523986769287815268967658
-```
-
-### Expected Output Claim Formula
-
-From Jolt's `OuterRemainingSumcheckVerifier::expected_output_claim`:
-
-```rust
-let tau_high = &tau[tau.len() - 1];
-let tau_low = &tau[..tau.len() - 1];
-
-// L(τ_high, r0) - Lagrange kernel at UniSkip challenge
-let tau_high_bound_r0 = LagrangePolynomial::lagrange_kernel(tau_high, &self.params.r0);
-
-// eq(τ_low, r_tail_reversed)
-let r_tail_reversed = sumcheck_challenges.iter().rev().collect();
-let tau_bound_r_tail_reversed = EqPolynomial::mle(tau_low, &r_tail_reversed);
-
-// Az(rx_constr) * Bz(rx_constr) where rx_constr = [r_stream, r0]
-let inner_sum_prod = key.evaluate_inner_sum_product_at_point(rx_constr, r1cs_input_evals);
-
-let result = tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod;
-// expected_output_claim = result * batching_coeff
-```
-
-### Remaining Hypothesis
-
-The output_claim from sumcheck should equal:
-```
-output_claim = eq_factor * (Az * Bz) * batching_coeff
-```
-
-Where `eq_factor = L(τ_high, r0) * eq(τ_low, r)` after all bindings.
-
-The mismatch suggests either:
-1. The eq_factor doesn't match (split_eq or Lagrange kernel issue)
-2. The Az*Bz product doesn't match (constraint evaluation issue)
-
-### Next Debug Steps
-
-1. Print `split_eq.current_scalar` at the end of sumcheck to verify eq_factor
-2. Print the final Az*Bz value from the prover
-3. Compare with Jolt's `tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod`
-
----
-
-## Previous Status (Session 39 - January 2, 2026)
-
-### Summary
-
-The Stage 1 sumcheck output_claim doesn't match the expected_output_claim. All 712 unit tests pass, and the transcript challenges are identical between prover and verifier.
-
-### Session 39 Investigation
-
-1. **Round zero materialization**: Updated `materializeLinearPhasePolynomials` to use the simple `full_idx = grid_size * i + j` indexing (matching Jolt's `fused_materialise_polynomials_round_zero`).
-
-2. **Transcript consistency**: The challenges are correctly shared between prover and verifier.
-
-3. **E_out/E_in tables**: These are correctly initialized with `[1]` at index 0.
-
-4. **Multiquadratic expansion**: The `expandGrid` function correctly computes `[f0, f1, f1-f0]` for window_size=1.
+- Stores 128-bit value in lower limbs as standard form
+- MUST call toMontgomery() to convert
+- Matches Jolt's F::from_bytes() behavior
+- Used for batching coefficients
 
 ---
 

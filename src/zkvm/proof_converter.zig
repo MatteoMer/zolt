@@ -448,7 +448,9 @@ pub fn ProofConverter(comptime F: type) type {
 
             // Get batching coefficient
             // This advances the transcript state AND provides the scaling factor
-            const batching_coeff = transcript.challengeScalar();
+            // IMPORTANT: Use challengeScalarFull() which returns proper Montgomery form,
+            // matching Jolt's challenge_vector which uses F::from_bytes (not MontU128Challenge)
+            const batching_coeff = transcript.challengeScalarFull();
 
             // DEBUG: Print batching_coeff
             std.debug.print("[ZOLT] STAGE1_PRE: batching_coeff = {any}\n", .{batching_coeff.toBytesBE()});

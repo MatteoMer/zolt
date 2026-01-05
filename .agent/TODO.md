@@ -1,57 +1,66 @@
 # Zolt-Jolt Compatibility TODO
 
-## Current Status: Session 52 - January 5, 2026
+## Current Status: Session 53 - January 5, 2026
 
-**INVESTIGATING: Gruen polynomial claim divergence**
+**FIXED: Batching coefficient Montgomery form bug**
+**REMAINING: Gruen polynomial claim divergence**
 
-Session 52 deep investigation findings:
-- eq_factor (split_eq.current_scalar) matches Jolt exactly ✓
-- Az_final * Bz_final (from bound polynomials) matches Jolt's inner_sum_prod exactly ✓
-- r1cs_input_evals (opening claims) match exactly ✓
-- BUT: output_claim / eq_factor ≠ Az_final * Bz_final ✗
+Session 53 findings:
+- Fixed batching_coeff bug: was using `[0, 0, low, high]` (MontU128Challenge style) instead of proper Montgomery form
+- Added `challengeScalarFull()` for batching coefficients which properly converts to Montgomery form
+- Initial claim now matches Jolt exactly ✓
+- Sumcheck still fails due to Gruen polynomial claim divergence (original issue)
 
-**ROOT CAUSE IDENTIFIED:**
+---
 
-The Gruen polynomial q(X) is constructed to satisfy s(0)+s(1)=previous_claim, but it's NOT equivalent to the multiquadratic bound polynomial. Specifically:
+## Fixed in Session 53
+
+### Batching Coefficient Montgomery Form
+
+**Problem:**
+- `uni_skip_claim` matched between Zolt and Jolt ✓
+- `batching_coeff` did NOT match:
+  - Zolt: 3585365310819910961476179832490187488669617511825727803093062673748144578813 (256-bit)
+  - Jolt: 38168636090528866393074519943917698662 (128-bit)
+- `initial_claim = uni_skip_claim * batching_coeff` therefore didn't match
+
+**Root Cause:**
+Jolt uses TWO different challenge scalar methods:
+1. `challenge_scalar_optimized()` → returns `F::Challenge` (MontU128Challenge) with `[0, 0, low, high]` representation
+2. `challenge_scalar()` (via `challenge_vector`) → returns proper `F` via `F::from_bytes()` with Montgomery conversion
+
+Zolt was using the `[0, 0, low, high]` representation for BOTH, which is correct for sumcheck challenges but WRONG for batching coefficients.
+
+**Fix:**
+- Added `challengeScalarFull()` that properly converts to Montgomery form
+- Updated `proof_converter.zig` to use `challengeScalarFull()` for batching_coeff
+- Now: batching_coeff = 38168636090528866393074519943917698662 (matches Jolt!)
+- Now: initial_claim = 21674923214564316833547681277109851767489952526125883853786217589527714841889 (matches Jolt!)
+
+---
+
+## Remaining Issue: Gruen Polynomial Claim Divergence
+
+The sumcheck still fails:
+```
+output_claim:          3156099394088378331739429618582031493604140997965859776862374574205175751175
+expected_output_claim: 6520563849248945342410334176740245598125896542821607373002483479060307387386
+```
+
+### Root Cause (from Session 52)
+
+The Gruen polynomial q(X) is constructed to satisfy s(0)+s(1)=previous_claim, but it's NOT equivalent to the multiquadratic bound polynomial:
 - q(0) = t_zero = Σ eq * Az(0) * Bz(0) ✓
 - q(∞) = t_infinity = Σ eq * slope_products ✓
 - q(1) is SOLVED from constraint, NOT from t(1) ✗
 
-This means q(r) ≠ bound_t_prime(r), causing the claim to diverge from eq_factor * (Az*Bz at bound point).
+This means q(r) ≠ bound_t_prime(r), causing the claim to diverge.
 
-**VALUES:**
-```
-Zolt eq_factor:              11957315549363330504202442373139802627411419139285673324379667683258896529103
-Jolt tau_high * tau_bound:   11957315549363330504202442373139802627411419139285673324379667683258896529103 ✓
+### Next Steps
 
-Zolt az_final * bz_final:    12979092390518645131981692805702461345196587836340614110145230289986137758183
-Jolt inner_sum_prod:         12979092390518645131981692805702461345196587836340614110145230289986137758183 ✓
-
-Zolt implied_inner_sum_prod: 15784999673434232655471753340953239083388838864127013231339270095339506918519
-(This should equal az_final * bz_final but doesn't!)
-```
-
----
-
-## IMMEDIATE NEXT STEPS
-
-### 1. Investigate Gruen Polynomial Claim Tracking
-
-The Gruen polynomial construction uses:
-1. t_zero = t'(0) - sum of weighted Az(0)*Bz(0)
-2. t_infinity = t'(∞) - sum of weighted slope products
-3. q(1) = (previous_claim - l(0)*t_zero) / l(1)
-
-But q(1) is NOT the same as Σ eq * Az(1) * Bz(1)!
-
-Need to verify if Jolt's implementation has the same issue or if there's something different in how they handle this.
-
-### 2. Compare with Jolt's Claim Tracking
-
-Check if Jolt's prover uses a different method to ensure:
-- output_claim = eq_factor * Az_final * Bz_final
-
-Or if there's additional state that needs to be tracked.
+1. Investigate how Jolt's prover maintains claim consistency
+2. Check if there's additional state or correction mechanism we're missing
+3. Verify t_zero and t_infinity computation at each round
 
 ---
 
@@ -69,22 +78,9 @@ cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture
 
 ---
 
-## Key Debug Output
-
-At round 11 (last round):
-```
-[ZOLT] ROUND 11 REBUILD: E_out.len = 1, E_in.len = 1
-[ZOLT] ROUND 11 AFTER REBUILD: t_prime[0] = az[0]*bz[0] (matches!)
-[ZOLT] ROUND 11: t_zero = (correct value)
-```
-
-But after the round polynomial is evaluated:
-- implied_inner_prod = output_claim / eq_factor ≠ az_final * bz_final
-
----
-
 ## Previous Sessions Summary
 
+- **Session 53**: Fixed batching_coeff Montgomery form bug; initial_claim now matches
 - **Session 52**: Deep investigation - eq_factor and Az*Bz match but claim doesn't
 - **Session 51**: Fixed round offset by adding cache_openings appendScalar; challenges now match
 - **Session 50**: Found round number offset between Zolt and Jolt after r0

@@ -13015,3 +13015,25 @@ Cost: $7.2586
 Error: Command failed with exit code 1 (exit code: 1)
 Error output: Check stderr output for details
 
+
+--- Iteration 1 ---
+Started: 2026-01-05T11:26:36.018968
+Ended: 2026-01-05T11:26:38.573101
+Turns: 1
+Cost: $0.0000
+Error: Command failed with exit code 1 (exit code: 1)
+Error output: Check stderr output for details
+
+
+
+--- Session 55 ---
+Date: 2026-01-05
+Summary: rebuildTPrimePoly bug investigation
+Findings:
+- Verified polynomial coefficients match at all rounds
+- Verified challenges, eq_factor, scaling model all correct
+- FOUND BUG: rebuildTPrimePoly produces wrong t_prime values after binding
+- At ROUND 2: t_prime[0] != expected az[0]*bz[0] after rebuild
+- This causes claim drift from true bound polynomial
+Next: Fix rebuildTPrimePoly indexing to match Jolt's compute_evaluation_grid_from_polynomials_parallel
+

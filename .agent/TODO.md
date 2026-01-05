@@ -1,9 +1,28 @@
 # Zolt-Jolt Compatibility TODO
 
-## Current Status: Session 53 - January 5, 2026
+## Current Status: Session 55 - January 5, 2026
 
-**FIXED: Batching coefficient Montgomery form bug**
-**REMAINING: Gruen polynomial claim divergence**
+**FIXED: Batching coefficient Montgomery form bug** (Session 53)
+**REMAINING: rebuildTPrimePoly produces incorrect t_prime values**
+
+Session 55 findings:
+- Verified polynomial coefficients (c0, c2, c3) match exactly at all rounds ✓
+- Verified challenges match exactly (derived from same Fiat-Shamir transcript) ✓
+- Verified eq_factor computation is correct (lagrange_tau_r0 * product of eq bindings) ✓
+- Verified scaling model is consistent (prover unscaled, verifier scaled by batching_coeff) ✓
+- **BUG FOUND: rebuildTPrimePoly produces wrong t_prime values**
+  - At ROUND 2 after rebuild: t_prime[0] = {29, 42, 85, 202, ...}
+  - EXPECTED t_prime[0] = az[0]*bz[0] = {6, 206, 182, 204, ...} (different!)
+  - This causes claim to drift from true bound polynomial over rounds
+- The debug "EXPECTED" is misleading - t_prime[0] should be weighted sum Σ E*az*bz, not just az[0]*bz[0]
+- But the actual issue is that buildTPrimePoly indexing may not match bound Az/Bz state
+
+Session 54 findings:
+- Polynomial coefficients (c0, c2, c3) match exactly between Zolt and Jolt ✓
+- Claim propagation diverges: prover tracks unscaled, verifier tracks scaled
+- Changed q(2)/q(3) to use Jolt's recurrence relations (no effect - algebraically equivalent)
+- The implied_inner_sum_prod (output_claim / eq_factor) does NOT equal az_final * bz_final
+- Root cause: Gruen polynomial q(X) drifts from true bound polynomial t'(X) over rounds
 
 Session 53 findings:
 - Fixed batching_coeff bug: was using `[0, 0, low, high]` (MontU128Challenge style) instead of proper Montgomery form
@@ -58,9 +77,20 @@ This means q(r) ≠ bound_t_prime(r), causing the claim to diverge.
 
 ### Next Steps
 
-1. Investigate how Jolt's prover maintains claim consistency
-2. Check if there's additional state or correction mechanism we're missing
-3. Verify t_zero and t_infinity computation at each round
+1. **Fix rebuildTPrimePoly indexing** - The function calls buildTPrimePoly which assumes a specific layout. After Az/Bz are bound, the indices shift. Need to verify:
+   - E_out.len * E_in.len * grid_size == az.boundLen() (sizes match)
+   - The index formula `grid_size * i + j` accesses correct values after binding
+
+2. **Compare Jolt's compute_evaluation_grid_from_polynomials_parallel** - This is Jolt's equivalent. Key formula:
+   ```rust
+   let index = grid_size * i + j;
+   az_grid[j] = az[index];
+   ```
+   Verify Zolt uses same indexing scheme.
+
+3. **Add per-round t_zero/t_infinity values** - Print these from Jolt prover (already has debug) and compare with Zolt.
+
+4. **Test with minimal trace** - Try with 2 cycles to reduce debugging complexity.
 
 ---
 
@@ -80,6 +110,8 @@ cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture
 
 ## Previous Sessions Summary
 
+- **Session 55**: Found rebuildTPrimePoly bug - t_prime[0] values don't match expected after rebuild
+- **Session 54**: Verified coefficients match, confirmed claim drift issue
 - **Session 53**: Fixed batching_coeff Montgomery form bug; initial_claim now matches
 - **Session 52**: Deep investigation - eq_factor and Az*Bz match but claim doesn't
 - **Session 51**: Fixed round offset by adding cache_openings appendScalar; challenges now match

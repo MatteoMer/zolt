@@ -1,6 +1,71 @@
 # Zolt-Jolt Compatibility Notes
 
-## Current Status (Session 53 - January 5, 2026)
+## Current Status (Session 55 - January 5, 2026)
+
+### Summary
+
+Found the root cause of claim divergence: `rebuildTPrimePoly` produces incorrect t_prime values after Az/Bz are bound.
+
+### Session 55 - rebuildTPrimePoly Bug Investigation
+
+**Key Findings:**
+
+1. **Verified correct components:**
+   - Polynomial coefficients (c0, c2, c3) match exactly at ALL rounds ✓
+   - Challenges match exactly (same Fiat-Shamir transcript) ✓
+   - eq_factor computation is correct (lagrange_tau_r0 * eq bindings) ✓
+   - Scaling model is consistent (prover unscaled, verifier scaled by batching_coeff) ✓
+   - bindLow operation matches Jolt's bound_poly_var_bot ✓
+
+2. **BUG IDENTIFIED in rebuildTPrimePoly:**
+   ```
+   ROUND 2 AFTER REBUILD: t_prime[0] = {29, 42, 85, 202, ...}
+   EXPECTED t_prime[0] = az[0]*bz[0] = {6, 206, 182, 204, ...} (DIFFERENT!)
+   ```
+   - rebuildTPrimePoly calls buildTPrimePoly
+   - buildTPrimePoly iterates over E_out * E_in pairs and accesses az/bz by index
+   - After binding, the polynomial sizes reduce: az.boundLen() = 1024 (from 2048)
+   - The eq tables also change: E_out.len=32, E_in.len=16 (instead of 32*32)
+   - The product E_out.len * E_in.len * grid_size = 32*16*2 = 1024 matches az.boundLen() ✓
+   - BUT the values computed are still wrong
+
+3. **Debug EXPECTED is misleading:**
+   - t_prime[0] should be weighted sum: Σ E_out[i] * E_in[j] * az[idx] * bz[idx]
+   - NOT just az[0]*bz[0]
+   - However the actual sum is still producing wrong values
+
+4. **Comparison with Jolt:**
+   - Jolt's `compute_evaluation_grid_from_polynomials_parallel` uses same formula:
+     ```rust
+     let index = grid_size * i + j;
+     az_grid[j] = az[index];
+     ```
+   - Need to verify Zolt's iteration matches exactly
+
+**Root Cause Hypothesis:**
+The claim drift starts at round 2 when rebuildTPrimePoly is first called. The rebuilt t_prime polynomial doesn't match the actual bound polynomial state, causing the sumcheck claim to diverge from eq_factor * Az*Bz.
+
+---
+
+### Session 54 - Claim Propagation Investigation
+
+**Key Findings:**
+
+1. **Polynomial coefficients match exactly** - Verified that c0, c2, c3 bytes in Zolt's proof match what Jolt reads (accounting for endianness).
+
+2. **Batched sumcheck scaling model:**
+   - Prover computes UNSCALED polynomial from actual t_zero, t_infinity
+   - Polynomial is scaled by batching_coeff before sending to proof
+   - Verifier tracks SCALED claims (initial_claim * batching_coeff)
+   - Prover tracks UNSCALED claims internally
+
+3. **The mismatch:** Verified that `implied_inner_sum_prod (output_claim / eq_factor) != az_final * bz_final`, even though the sumcheck should give this equality.
+
+4. **Root cause hypothesis:** The Gruen polynomial q(X) is drifting from the true bound polynomial t'(X) over multiple rounds. While q(X) satisfies the sumcheck constraint s(0)+s(1)=claim, evaluating q(r) ≠ t'(r) in general.
+
+---
+
+## Session 53 - Batching Coefficient Fix (COMPLETED)
 
 ### Summary
 

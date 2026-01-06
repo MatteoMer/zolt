@@ -1,93 +1,84 @@
-# Stage 2 Implementation Plan
+# Stage 2 Implementation - Current State
 
-## Current Status: Stage 1 PASSES, Stage 2 placeholder zeros fail verification
+## Status: Ready for Integration
 
-**Goal:** Replace placeholder zeros with real sumcheck proofs for all 5 Stage 2 instances.
+### Completed Components
 
----
+1. **ProductVirtualRemainderProver** (`src/zkvm/spartan/product_remainder.zig`)
+   - Skeleton implemented with:
+     - `init(allocator, r0, tau, uni_skip_claim, cycle_witnesses)`
+     - `numRounds()` - returns n_cycle_vars
+     - `computeRoundPolynomial()` - returns compressed [c0, c2, c3]
+     - `bindChallenge(challenge)` - binds left/right/split_eq
+     - `computeOpeningClaims()` - computes 8 factor evaluations
 
-## Progress
+2. **BatchedSumcheckProver** (`src/zkvm/batched_sumcheck.zig`)
+   - Infrastructure for combining 5 instances
+   - Handles different round counts via scaling
+   - Properly combines polynomials with batching coefficients
 
-### Completed
-- [x] Stage 1 streaming outer prover (PASSES)
-- [x] Stage 1 UniSkip polynomial
-- [x] Stage 2 UniSkip polynomial (PASSES)
-- [x] ProductVirtualRemainderProver skeleton (src/zkvm/spartan/product_remainder.zig)
-- [x] BatchedSumcheckProver infrastructure (src/zkvm/batched_sumcheck.zig)
-- [x] All 712+ tests pass
+3. **Import added** to proof_converter.zig
 
-### In Progress
-- [ ] Wire ProductVirtualRemainderProver into proof_converter.zig
-- [ ] Test with real sumcheck proofs
+### Integration Task
 
-### Pending
-- [ ] Implement RamRafEvaluationSumcheckProver
-- [ ] Implement RamReadWriteCheckingProver
-- [ ] Implement OutputSumcheckProver
-- [ ] Implement InstructionLookupsClaimReductionProver
+The Stage 2 sumcheck proof generation in `convertWithTranscript` needs to:
 
----
+1. After Stage 2 UniSkip completes (have: r0, uni_skip_claim, tau):
 
-## Stage 2 Architecture
+2. Initialize 5 sumcheck instances:
+   ```
+   instances[0] = ProductVirtualRemainder(r0, tau, uni_skip_claim, witnesses)
+   instances[1] = ZeroInstance(log_ram_k rounds)  // RamRafEvaluation
+   instances[2] = ZeroInstance(log_ram_k + n_cycle_vars rounds)  // RamReadWriteChecking
+   instances[3] = ZeroInstance(log_ram_k rounds)  // OutputSumcheck
+   instances[4] = ZeroInstance(n_cycle_vars rounds)  // InstructionLookupsClaimReduction
+   ```
 
-```
-Stage 2 = BatchedSumcheck([
-    ProductVirtualRemainderProver,           // n_cycle_vars rounds, degree 3
-    RamRafEvaluationSumcheckProver,          // log_ram_k rounds, degree 2
-    RamReadWriteCheckingProver,              // log_ram_k + n_cycle_vars rounds, degree 3
-    OutputSumcheckProver,                    // log_ram_k rounds, degree 3
-    InstructionLookupsClaimReductionProver,  // n_cycle_vars rounds, degree 2
-])
-```
+3. Run batched sumcheck protocol:
+   - Append 5 input_claims to transcript
+   - Sample 5 batching coefficients
+   - For each round:
+     - Compute combined polynomial from all instances
+     - Append to transcript
+     - Sample challenge
+     - Bind all instances
+   - Output: round_polys[], challenges[]
 
-**Batching Protocol:**
-1. Append all 5 input_claims to transcript
-2. Sample 5 batching coefficients: α₀, α₁, α₂, α₃, α₄
-3. Scale claims: `scaled_claim[i] = claim[i] * 2^(max_rounds - rounds[i])`
-4. Compute batched_claim = Σᵢ αᵢ * scaled_claim[i]
-5. Run `max_rounds` sumcheck rounds (max = log_ram_k + n_cycle_vars)
-6. Each round: combine univariate polynomials h(z) = Σᵢ αᵢ * hᵢ(z)
+4. Cache opening claims:
+   - ProductVirtualRemainder: 8 factor evaluations at r_cycle
+   - Others: zeros
 
----
+### Key Files to Modify
 
-## Files Created
+- `src/zkvm/proof_converter.zig` (lines ~1110-1122)
+  - Replace `generateZeroSumcheckProof` with real batched sumcheck
+  - Add proper opening claims computation
 
-| File | Status |
-|------|--------|
-| `src/zkvm/spartan/product_remainder.zig` | Created |
-| `src/zkvm/batched_sumcheck.zig` | Created |
-| `src/zkvm/spartan/mod.zig` | Modified - added exports |
-| `src/zkvm/mod.zig` | Modified - added batched_sumcheck |
+### Testing
 
----
-
-## Test Commands
-
+After integration:
 ```bash
-# Run all Zolt tests
-zig build test --summary all
-
-# Expected: 712+ tests pass
+# Generate proof and verify with Jolt
+./zig-out/bin/zolt prove --jolt-format -o /tmp/proof.bin examples/simple.elf
+cd /Users/matteo/projects/jolt && cargo test test_verify_zolt_proof
 ```
 
----
+### Why This Should Work
 
-## Key Insights
+For programs without RAM/lookups:
+- ProductVirtualRemainder: non-zero input, real polynomials, real opening claims
+- RamRafEvaluation: zero input → zero output → zero expected
+- RamReadWriteChecking: zero input → zero output → zero expected
+- OutputSumcheck: zero input (always) → zero output → zero expected
+- InstructionLookupsClaimReduction: zero input → zero output → zero expected
 
-1. **Stage 2 has 5 instances with different round counts:**
-   - ProductVirtualRemainder: n_cycle_vars rounds
-   - RamRafEvaluation: log_ram_k rounds
-   - RamReadWriteChecking: log_ram_k + n_cycle_vars rounds (MAX)
-   - OutputSumcheck: log_ram_k rounds
-   - InstructionLookupsClaimReduction: n_cycle_vars rounds
+The verification equation `output_claim == expected_output_claim` passes when:
+- Real instance: real sumcheck matches real expected
+- Zero instance: 0 == 0
 
-2. **The batching handles different rounds by:**
-   - Scaling claims by 2^(max - rounds[i])
-   - Returning constant polynomials before instance starts
+## Next Session Tasks
 
-3. **Opening claims needed:**
-   - 8x PRODUCT_UNIQUE_FACTOR_VIRTUALS @ SpartanProductVirtualization
-   - RamRa @ RamRafEvaluation, RamReadWriteChecking
-   - RamVal, RamInc @ RamReadWriteChecking
-   - RamValFinal, RamValInit @ RamOutputCheck
-   - LookupOutput, LeftLookupOperand, RightLookupOperand @ InstructionClaimReduction
+1. Implement `generateStage2SumcheckProof` function
+2. Wire up ProductVirtualRemainder prover
+3. Create ZeroSumcheckInstance for other 4 instances
+4. Test end-to-end with Jolt verifier

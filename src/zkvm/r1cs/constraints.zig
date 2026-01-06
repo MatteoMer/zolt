@@ -745,24 +745,23 @@ fn computeInstructionInputs(comptime F: type, step: tracer.TraceStep) Instructio
         },
         // LUI: rd = imm
         0x37 => {
-            // left = 0, right = imm (U-type)
-            const imm: u64 = step.instruction & 0xFFFFF000;
+            // left = 0, right = imm (U-type, sign-extended)
+            const imm = decodeUTypeImmediate(step.instruction);
             return .{
                 .left = F.zero(),
-                .right = F.fromU64(imm),
-                .right_is_signed = false,
+                .right = signedI64ToField(F, imm),
+                .right_is_signed = true,
                 .right_i128 = @as(i128, imm),
             };
         },
         // AUIPC: rd = PC + imm
         0x17 => {
-            // left = PC, right = imm (U-type, treated as signed addition)
-            const imm: u64 = step.instruction & 0xFFFFF000;
-            // AUIPC uses signed addition for the immediate
+            // left = PC, right = imm (U-type, sign-extended)
+            const imm = decodeUTypeImmediate(step.instruction);
             return .{
                 .left = F.fromU64(step.pc),
-                .right = F.fromU64(imm),
-                .right_is_signed = false,
+                .right = signedI64ToField(F, imm),
+                .right_is_signed = true,
                 .right_i128 = @as(i128, imm),
             };
         },
@@ -807,6 +806,18 @@ fn decodeSTypeImmediate(instr: u32) i64 {
         return @as(i64, @bitCast(@as(u64, unsigned_imm) | 0xFFFFFFFFFFFFF000));
     }
     return @as(i64, unsigned_imm);
+}
+
+/// Decode U-type immediate (for LUI, AUIPC)
+/// The immediate occupies bits [31:12] and is sign-extended.
+/// Matches Jolt's FormatU::parse which does sign extension.
+fn decodeUTypeImmediate(instr: u32) i64 {
+    // Extract bits [31:12] with sign extension
+    // Jolt does: (word & 0xfffff000) as i32 as i64 as u64
+    // which sign-extends from bit 31
+    const unsigned_imm: u32 = instr & 0xFFFFF000;
+    // Sign extend from bit 31 (treat as i32, then extend to i64)
+    return @as(i64, @as(i32, @bitCast(unsigned_imm)));
 }
 
 /// Convert i64 to field element (handles negative values)

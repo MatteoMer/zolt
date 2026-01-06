@@ -1068,6 +1068,9 @@ pub fn ProofConverter(comptime F: type) type {
             // 1. Appends the polynomial coefficients to transcript
             // 2. Derives r0 challenge
             // 3. Calls cache_openings which appends UnivariateSkip claim
+            var r0_stage2: F = F.zero();
+            var uni_skip_claim_stage2: F = F.zero();
+
             if (jolt_proof.stage2_uni_skip_first_round_proof) |proof| {
                 // Append polynomial - matches Jolt's UniPoly::append_to_transcript
                 transcript.appendMessage("UncompressedUniPoly_begin");
@@ -1077,12 +1080,11 @@ pub fn ProofConverter(comptime F: type) type {
                 transcript.appendMessage("UncompressedUniPoly_end");
 
                 // Derive r0 challenge
-                const r0_stage2 = transcript.challengeScalar();
+                r0_stage2 = transcript.challengeScalar();
                 std.debug.print("[ZOLT] STAGE2: r0 = {any}\n", .{r0_stage2.toBytesBE()});
 
                 // Compute UnivariateSkip claim = poly(r0)
                 // uni_poly = [c0, c1, c2, ..., c12] -> poly(x) = c0 + c1*x + c2*x^2 + ...
-                var uni_skip_claim_stage2 = F.zero();
                 var r_power = F.one();
                 for (proof.uni_poly) |coeff| {
                     uni_skip_claim_stage2 = uni_skip_claim_stage2.add(coeff.mul(r_power));
@@ -1115,11 +1117,15 @@ pub fn ProofConverter(comptime F: type) type {
             // 4. RamOutputCheck: log_ram_k rounds
             // 5. InstructionLookupsClaimReduction: n_cycle_vars rounds
             // max_num_rounds = log_ram_k + n_cycle_vars
-            const stage2_max_rounds = log_ram_k + n_cycle_vars;
-            try self.generateZeroSumcheckProof(
+            try self.generateStage2BatchedSumcheckProof(
                 &jolt_proof.stage2_sumcheck_proof,
-                stage2_max_rounds,
-                3,
+                transcript,
+                r0_stage2,
+                uni_skip_claim_stage2,
+                tau,
+                cycle_witnesses,
+                n_cycle_vars,
+                log_ram_k,
             );
 
             // Add remaining opening claims

@@ -36,6 +36,7 @@ pub const ram = @import("ram/mod.zig");
 pub const registers = @import("registers/mod.zig");
 pub const serialization = @import("serialization.zig");
 pub const spartan = @import("spartan/mod.zig");
+pub const batched_sumcheck = @import("batched_sumcheck.zig");
 pub const verifier = @import("verifier.zig");
 
 // Re-export commitment types

@@ -567,10 +567,11 @@ pub fn ProofConverter(comptime F: type) type {
                 std.debug.print("[ZOLT] STAGE1_ROUND_{}: challenge = {any}\n", .{ round_idx, challenge.toBytesBE() });
                 std.debug.print("[ZOLT] STAGE1_ROUND_{}: challenge_le = {any}\n", .{ round_idx, challenge.toBytes() });
 
-                // Bind challenge and update claim using UNSCALED evaluations
-                // The prover's internal claim tracking is unscaled - only the output is scaled
+                // Bind challenge and update claim
+                // CRITICAL: The verifier uses eval_from_hint with SCALED coefficients and SCALED hint,
+                // so we must track SCALED claims to match the verifier's computation.
                 outer_prover.bindRemainingRoundChallenge(challenge) catch {};
-                outer_prover.updateClaim(raw_evals, challenge);
+                outer_prover.updateClaim(scaled_evals, challenge);
 
                 // DEBUG: Print next_claim after update
                 std.debug.print("[ZOLT] STAGE1_ROUND_{}: next_claim = {any}\n", .{ round_idx, outer_prover.current_claim.toBytesBE() });

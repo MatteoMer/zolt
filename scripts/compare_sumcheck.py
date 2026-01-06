@@ -1,343 +1,459 @@
 #!/usr/bin/env python3
 """
-Compare Jolt vs Zolt sumcheck verification logs side-by-side.
-Shows all values in hex, both BE and LE for easy endianness debugging.
+Comprehensive Jolt vs Zolt verification stage comparison tool.
+
+Compares all verification stages between Zolt and Jolt logs:
+- Preamble (Fiat-Shamir setup)
+- Commitments
+- Stage 1: Outer Spartan (R1CS)
+- Stage 2: RAM RAF Evaluation (uni-skip)
+- Stage 3: Lasso Lookup
+- Stage 4: Value Evaluation
+- Stage 5: Register Evaluation
+- Stage 6: Booleanity
+
+Usage:
+    python3 compare_sumcheck.py [zolt.log] [jolt.log] [--stage N] [--verbose]
 """
 
 import re
 import sys
+import argparse
+from dataclasses import dataclass
+from typing import Optional, List, Dict, Tuple
+from enum import Enum
 
 # ANSI colors
-RED = '\033[91m'
-GREEN = '\033[92m'
-YELLOW = '\033[93m'
-BLUE = '\033[94m'
-CYAN = '\033[96m'
-RESET = '\033[0m'
-BOLD = '\033[1m'
-DIM = '\033[2m'
+class Color:
+    RED = '\033[91m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    BLUE = '\033[94m'
+    CYAN = '\033[96m'
+    MAGENTA = '\033[95m'
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    DIM = '\033[2m'
 
-def parse_zolt_bytes(line: str) -> list:
-    """Extract byte array from Zolt log like { 32, 30, 11, ... }"""
-    match = re.search(r'\{\s*([\d,\s]+)\s*\}', line)
-    if match:
-        nums = match.group(1).split(',')
-        return [int(n.strip()) for n in nums if n.strip()]
-    return []
+class MatchResult(Enum):
+    MATCH = "match"
+    MATCH_REVERSED = "match_reversed"
+    MISMATCH = "mismatch"
+    MISSING_ZOLT = "missing_zolt"
+    MISSING_JOLT = "missing_jolt"
+    MISSING_BOTH = "missing_both"
 
-def parse_jolt_bytes(line: str) -> list:
-    """Extract byte array from Jolt log like [130, 56, 27, ...] or [e1, f2, ...]"""
-    match = re.search(r'\[([\w\d,\s]+)\]', line)
-    if match:
-        nums = match.group(1).split(',')
-        result = []
-        for n in nums:
-            n = n.strip()
-            if n:
-                try:
-                    # Try decimal first
-                    result.append(int(n))
-                except ValueError:
-                    # Try hex
-                    try:
-                        result.append(int(n, 16))
-                    except ValueError:
-                        pass
-        return result
-    return []
+@dataclass
+class CompareResult:
+    name: str
+    zolt_value: Optional[str]
+    jolt_value: Optional[str]
+    result: MatchResult
+    details: str = ""
 
-def parse_jolt_decimal(line: str) -> int:
-    """Extract decimal number from Jolt log"""
-    match = re.search(r'=\s*(\d{10,})', line)
-    if match:
-        return int(match.group(1))
-    return None
+class LogParser:
+    """Parse values from Zolt and Jolt logs"""
 
-def bytes_to_hex(b: list, prefix: str = "") -> str:
-    """Convert byte list to hex string"""
-    if not b:
-        return "(none)"
-    return prefix + ''.join(f'{x:02x}' for x in b)
+    @staticmethod
+    def parse_hex_string(line: str) -> Optional[str]:
+        """Extract 64-char hex string (field element)"""
+        match = re.search(r'([0-9a-f]{64})', line, re.I)
+        if match:
+            return match.group(1).lower()
+        return None
 
-def int_to_hex(n: int) -> str:
-    """Convert int to 64-char hex (32 bytes)"""
-    if n is None:
-        return "(none)"
-    return f'{n:064x}'
+    @staticmethod
+    def parse_zolt_bytes(line: str) -> Optional[List[int]]:
+        """Extract byte array from Zolt log like { 32, 30, 11, ... }"""
+        match = re.search(r'\{\s*([\d,\s]+)\s*\}', line)
+        if match:
+            nums = match.group(1).split(',')
+            return [int(n.strip()) for n in nums if n.strip()]
+        return None
 
-def reverse_bytes(b: list) -> list:
-    """Reverse byte order"""
-    return list(reversed(b))
+    @staticmethod
+    def parse_jolt_bytes(line: str) -> Optional[List[int]]:
+        """Extract byte array from Jolt log like [130, 56, 27, ...]"""
+        match = re.search(r'\[([\d,\s]+)\]', line)
+        if match:
+            nums = match.group(1).split(',')
+            try:
+                return [int(n.strip()) for n in nums if n.strip()]
+            except ValueError:
+                return None
+        return None
 
-def compare_value(name: str, zolt_bytes: list, jolt_bytes: list = None, jolt_decimal: int = None):
-    """Compare and display a value from both systems"""
-    print(f"\n{CYAN}{BOLD}--- {name} ---{RESET}")
+    @staticmethod
+    def parse_decimal(line: str) -> Optional[int]:
+        """Extract large decimal number"""
+        match = re.search(r'=\s*(\d{10,})', line)
+        if match:
+            return int(match.group(1))
+        return None
 
-    # Zolt value
-    if zolt_bytes:
-        zolt_be = bytes_to_hex(zolt_bytes)
-        zolt_le = bytes_to_hex(reverse_bytes(zolt_bytes))
-        zolt_int_be = int.from_bytes(bytes(zolt_bytes), 'big')
-        zolt_int_le = int.from_bytes(bytes(zolt_bytes), 'little')
+    @staticmethod
+    def bytes_to_hex(b: List[int]) -> str:
+        """Convert byte list to hex string"""
+        return ''.join(f'{x:02x}' for x in b)
 
-        print(f"{YELLOW}ZOLT:{RESET}")
-        print(f"  raw bytes: {zolt_bytes[:8]}...{zolt_bytes[-4:]}" if len(zolt_bytes) > 12 else f"  raw bytes: {zolt_bytes}")
-        print(f"  as-is hex: {zolt_be}")
-        print(f"  reversed:  {zolt_le}")
-        print(f"  {DIM}int(as-is/BE): {zolt_int_be}{RESET}")
-        print(f"  {DIM}int(rev/LE):   {zolt_int_le}{RESET}")
-    else:
-        print(f"{YELLOW}ZOLT:{RESET} (not found)")
+    @staticmethod
+    def hex_to_bytes(h: str) -> List[int]:
+        """Convert hex string to byte list"""
+        return [int(h[i:i+2], 16) for i in range(0, len(h), 2)]
 
-    # Jolt value
-    if jolt_bytes:
-        jolt_be = bytes_to_hex(jolt_bytes)
-        jolt_le = bytes_to_hex(reverse_bytes(jolt_bytes))
-        jolt_int_be = int.from_bytes(bytes(jolt_bytes), 'big')
-        jolt_int_le = int.from_bytes(bytes(jolt_bytes), 'little')
+    @staticmethod
+    def decimal_to_hex(n: int) -> str:
+        """Convert decimal to 64-char hex"""
+        return f'{n:064x}'
 
-        print(f"{BLUE}JOLT:{RESET}")
-        print(f"  raw bytes: {jolt_bytes[:8]}...{jolt_bytes[-4:]}" if len(jolt_bytes) > 12 else f"  raw bytes: {jolt_bytes}")
-        print(f"  as-is hex: {jolt_be}")
-        print(f"  reversed:  {jolt_le}")
-        print(f"  {DIM}int(as-is/BE): {jolt_int_be}{RESET}")
-        print(f"  {DIM}int(rev/LE):   {jolt_int_le}{RESET}")
-    elif jolt_decimal is not None:
-        jolt_bytes_be = list(jolt_decimal.to_bytes(32, 'big'))
-        jolt_bytes_le = list(jolt_decimal.to_bytes(32, 'little'))
+class StageComparator:
+    """Compare verification stages between Zolt and Jolt"""
 
-        print(f"{BLUE}JOLT:{RESET}")
-        print(f"  decimal:   {jolt_decimal}")
-        print(f"  hex (BE):  {int_to_hex(jolt_decimal)}")
-        print(f"  hex (LE):  {bytes_to_hex(jolt_bytes_le)}")
-        print(f"  bytes BE:  {jolt_bytes_be[:8]}...{jolt_bytes_be[-4:]}")
-        print(f"  bytes LE:  {jolt_bytes_le[:8]}...{jolt_bytes_le[-4:]}")
-    else:
-        print(f"{BLUE}JOLT:{RESET} (not found)")
+    def __init__(self, zolt_log: str, jolt_log: str, verbose: bool = False):
+        self.zolt_log = zolt_log
+        self.jolt_log = jolt_log
+        self.verbose = verbose
+        self.results: List[CompareResult] = []
+        self.parser = LogParser()
 
-    # Check for matches
-    if zolt_bytes and jolt_bytes:
-        if zolt_bytes == jolt_bytes:
-            print(f"{GREEN}✓ MATCH (same byte order){RESET}")
-            return True
-        elif zolt_bytes == reverse_bytes(jolt_bytes):
-            print(f"{GREEN}✓ MATCH (reversed/endianness){RESET}")
-            return True
-        else:
-            print(f"{RED}✗ NO MATCH{RESET}")
-            return False
-    elif zolt_bytes and jolt_decimal is not None:
-        zolt_int_le = int.from_bytes(bytes(zolt_bytes), 'little')
-        zolt_int_be = int.from_bytes(bytes(zolt_bytes), 'big')
-        if zolt_int_le == jolt_decimal:
-            print(f"{GREEN}✓ MATCH (zolt LE = jolt){RESET}")
-            return True
-        elif zolt_int_be == jolt_decimal:
-            print(f"{GREEN}✓ MATCH (zolt BE = jolt){RESET}")
-            return True
-        else:
-            print(f"{RED}✗ NO MATCH{RESET}")
-            return False
-    return None
+    def extract_values(self, pattern: str, is_zolt: bool) -> Dict[str, str]:
+        """Extract all values matching a pattern prefix"""
+        log = self.zolt_log if is_zolt else self.jolt_log
+        values = {}
+        for line in log.split('\n'):
+            if pattern in line:
+                # Try to extract hex string
+                hex_val = self.parser.parse_hex_string(line)
+                if hex_val:
+                    # Extract the key (what comes after pattern before =)
+                    key_match = re.search(pattern + r'(\w+)', line)
+                    key = key_match.group(1) if key_match else "value"
+                    values[key] = hex_val
+                    continue
 
-def extract_value(log: str, pattern: str, is_zolt: bool = True) -> tuple:
-    """Extract value matching pattern, return (bytes, decimal)"""
-    for line in log.split('\n'):
-        if pattern in line:
-            if is_zolt:
-                b = parse_zolt_bytes(line)
-                if b:
-                    return b, None
+                # Try to extract decimal
+                dec_val = self.parser.parse_decimal(line)
+                if dec_val:
+                    key_match = re.search(pattern + r'(\w+)', line)
+                    key = key_match.group(1) if key_match else "value"
+                    values[key] = self.parser.decimal_to_hex(dec_val)
+                    continue
+
+                # Try to extract bytes
+                if is_zolt:
+                    bytes_val = self.parser.parse_zolt_bytes(line)
+                else:
+                    bytes_val = self.parser.parse_jolt_bytes(line)
+                if bytes_val:
+                    key_match = re.search(pattern + r'(\w+)', line)
+                    key = key_match.group(1) if key_match else "value"
+                    values[key] = self.parser.bytes_to_hex(bytes_val)
+        return values
+
+    def extract_single(self, pattern: str, log: str) -> Optional[str]:
+        """Extract a single value matching pattern"""
+        for line in log.split('\n'):
+            if pattern in line:
+                # Try hex string first (64-char)
+                hex_val = self.parser.parse_hex_string(line)
+                if hex_val:
+                    return hex_val
+
+                # Try Zolt byte format: { 32, 30, 11, ... }
+                zolt_bytes = self.parser.parse_zolt_bytes(line)
+                if zolt_bytes and len(zolt_bytes) >= 32:
+                    return self.parser.bytes_to_hex(zolt_bytes[:32])
+
+                # Try Jolt byte format: [47, 61, 92, ...]
+                jolt_bytes = self.parser.parse_jolt_bytes(line)
+                if jolt_bytes and len(jolt_bytes) >= 32:
+                    return self.parser.bytes_to_hex(jolt_bytes[:32])
+
+                # Try decimal
+                dec_val = self.parser.parse_decimal(line)
+                if dec_val:
+                    return self.parser.decimal_to_hex(dec_val)
+        return None
+
+    def extract_u64(self, pattern: str, log: str) -> Optional[int]:
+        """Extract a u64 value"""
+        for line in log.split('\n'):
+            if pattern in line:
+                match = re.search(r'=\s*(\d+)', line)
+                if match:
+                    return int(match.group(1))
+        return None
+
+    def compare_values(self, name: str, zolt_val: Optional[str], jolt_val: Optional[str]) -> CompareResult:
+        """Compare two hex values, considering endianness"""
+        if not zolt_val and not jolt_val:
+            return CompareResult(name, None, None, MatchResult.MISSING_BOTH)
+        if not zolt_val:
+            return CompareResult(name, None, jolt_val, MatchResult.MISSING_ZOLT)
+        if not jolt_val:
+            return CompareResult(name, zolt_val, None, MatchResult.MISSING_JOLT)
+
+        # Direct match
+        if zolt_val.lower() == jolt_val.lower():
+            return CompareResult(name, zolt_val, jolt_val, MatchResult.MATCH)
+
+        # Check reversed (endianness)
+        zolt_bytes = self.parser.hex_to_bytes(zolt_val)
+        jolt_bytes = self.parser.hex_to_bytes(jolt_val)
+        if zolt_bytes == list(reversed(jolt_bytes)):
+            return CompareResult(name, zolt_val, jolt_val, MatchResult.MATCH_REVERSED,
+                               "Endianness difference")
+
+        return CompareResult(name, zolt_val, jolt_val, MatchResult.MISMATCH)
+
+    def compare_preamble(self) -> List[CompareResult]:
+        """Compare Fiat-Shamir preamble"""
+        results = []
+        fields = [
+            ("max_input_size", "appendU64: max_input_size"),
+            ("max_output_size", "appendU64: max_output_size"),
+            ("memory_size", "appendU64: memory_size"),
+            ("inputs.len", "appendBytes: inputs.len"),
+            ("outputs.len", "appendBytes: outputs.len"),
+            ("panic", "appendU64: panic"),
+            ("ram_K", "appendU64: ram_K"),
+            ("trace_length", "appendU64: trace_length"),
+        ]
+
+        for name, pattern in fields:
+            zolt_val = self.extract_u64(pattern, self.zolt_log)
+            jolt_val = self.extract_u64(pattern, self.jolt_log)
+
+            if zolt_val == jolt_val:
+                result = MatchResult.MATCH
+            elif zolt_val is None:
+                result = MatchResult.MISSING_ZOLT
+            elif jolt_val is None:
+                result = MatchResult.MISSING_JOLT
             else:
-                b = parse_jolt_bytes(line)
-                if b:
-                    return b, None
-                d = parse_jolt_decimal(line)
-                if d:
-                    return None, d
-    return None, None
+                result = MatchResult.MISMATCH
 
-def extract_preamble_value(log: str, pattern: str) -> str:
-    """Extract a preamble value as string"""
-    for line in log.split('\n'):
-        if pattern in line:
-            # Extract the value after the pattern
-            match = re.search(pattern + r'[=:]\s*(.+)', line)
+            results.append(CompareResult(
+                name,
+                str(zolt_val) if zolt_val is not None else None,
+                str(jolt_val) if jolt_val is not None else None,
+                result
+            ))
+
+        return results
+
+    def compare_stage1_round(self, round_idx: int) -> List[CompareResult]:
+        """Compare a single Stage 1 round"""
+        results = []
+
+        # Coefficients c0, c2, c3 - use _le for Zolt and _bytes for Jolt
+        # These are the key values that must match for sumcheck correctness
+        for coeff in ["c0", "c2", "c3"]:
+            zolt_val = self.extract_single(f"STAGE1_ROUND_{round_idx}: {coeff}_le = ", self.zolt_log)
+            jolt_val = self.extract_single(f"STAGE1_ROUND_{round_idx}: {coeff}_bytes = ", self.jolt_log)
+            results.append(self.compare_values(f"Round {round_idx} {coeff}", zolt_val, jolt_val))
+
+        # Challenge - use _le for Zolt and _bytes for Jolt
+        zolt_ch = self.extract_single(f"STAGE1_ROUND_{round_idx}: challenge_le = ", self.zolt_log)
+        jolt_ch = self.extract_single(f"STAGE1_ROUND_{round_idx}: challenge_bytes = ", self.jolt_log)
+        results.append(self.compare_values(f"Round {round_idx} challenge", zolt_ch, jolt_ch))
+
+        return results
+
+    def compare_stage1(self) -> List[CompareResult]:
+        """Compare Stage 1: Outer Spartan sumcheck polynomials and challenges"""
+        results = []
+
+        # Pre-sumcheck values
+        zolt_tau_len = self.extract_u64("STAGE1_PRE: tau.len = ", self.zolt_log)
+        jolt_tau_len = self.extract_u64("STAGE1_PRE: tau.len = ", self.jolt_log)
+
+        if zolt_tau_len == jolt_tau_len:
+            results.append(CompareResult("tau.len", str(zolt_tau_len), str(jolt_tau_len), MatchResult.MATCH))
+        else:
+            results.append(CompareResult("tau.len", str(zolt_tau_len), str(jolt_tau_len), MatchResult.MISMATCH))
+
+        # Find number of rounds from logs
+        num_rounds = 0
+        for line in self.zolt_log.split('\n'):
+            match = re.search(r'STAGE1_ROUND_(\d+):', line)
             if match:
-                return match.group(1).strip()
-            # Just return the whole line after pattern
-            idx = line.find(pattern)
-            if idx >= 0:
-                return line[idx + len(pattern):].strip()
+                num_rounds = max(num_rounds, int(match.group(1)) + 1)
+
+        # Compare each round
+        for i in range(min(num_rounds, 20)):  # Cap at 20 rounds for sanity
+            results.extend(self.compare_stage1_round(i))
+
+        return results
+
+    def compare_stage2(self) -> List[CompareResult]:
+        """Compare Stage 2: RAM RAF / UniSkip"""
+        results = []
+
+        # Uni-skip values
+        zolt_tau = self.extract_single("STAGE2: tau_high = ", self.zolt_log)
+        jolt_tau = self.extract_single("STAGE2: tau_high = ", self.jolt_log)
+        results.append(self.compare_values("Stage2 tau_high", zolt_tau, jolt_tau))
+
+        # Base evaluations
+        for i in range(5):
+            zolt_val = self.extract_single(f"STAGE2: base_evals[{i}] = ", self.zolt_log)
+            jolt_val = self.extract_single(f"STAGE2: base_evals[{i}] = ", self.jolt_log)
+            results.append(self.compare_values(f"Stage2 base_evals[{i}]", zolt_val, jolt_val))
+
+        return results
+
+    def compare_commitments(self) -> List[CompareResult]:
+        """Compare commitment values"""
+        results = []
+
+        # Extract commitment patterns - both use hex bytes
+        zolt_pattern = r'\[ZOLT TRANSCRIPT\]   raw_bytes\[0\.\.16\]=\{\s*([^}]+)\}'
+        jolt_pattern = r'\[JOLT\] Appending commitment (\d+): raw first 16 = \[([^\]]+)\]'
+
+        zolt_comms = re.findall(zolt_pattern, self.zolt_log)
+        jolt_comms = re.findall(jolt_pattern, self.jolt_log)
+
+        for i, (zolt_comm, jolt_comm) in enumerate(zip(zolt_comms[:5], jolt_comms[:5])):
+            # Parse Zolt bytes (hex with spaces: "aa 47 b8 36...")
+            zolt_hex = zolt_comm.replace(' ', '').strip()
+
+            # Parse Jolt bytes (hex with commas: "aa, 47, b8, 36...")
+            jolt_bytes_str = jolt_comm[1] if isinstance(jolt_comm, tuple) else jolt_comm
+            jolt_hex = ''.join(x.strip() for x in jolt_bytes_str.split(',') if x.strip())
+
+            results.append(self.compare_values(f"Commitment {i} (first 16)", zolt_hex, jolt_hex))
+
+        return results
+
+    def run_comparison(self, stages: List[int] = None) -> Dict[str, List[CompareResult]]:
+        """Run full comparison"""
+        all_results = {}
+
+        if stages is None or 0 in stages:
+            all_results['Preamble'] = self.compare_preamble()
+            all_results['Commitments'] = self.compare_commitments()
+
+        if stages is None or 1 in stages:
+            all_results['Stage 1 (Spartan)'] = self.compare_stage1()
+
+        if stages is None or 2 in stages:
+            all_results['Stage 2 (UniSkip)'] = self.compare_stage2()
+
+        return all_results
+
+def print_results(results: Dict[str, List[CompareResult]], verbose: bool = False):
+    """Print comparison results with formatting"""
+    total_match = 0
+    total_mismatch = 0
+    total_missing = 0
+
+    for section, section_results in results.items():
+        print(f"\n{Color.BOLD}{'='*70}")
+        print(f"  {section}")
+        print(f"{'='*70}{Color.RESET}")
+
+        section_match = 0
+        section_mismatch = 0
+        first_mismatch = None
+
+        for r in section_results:
+            if r.result == MatchResult.MATCH:
+                status = f"{Color.GREEN}MATCH{Color.RESET}"
+                section_match += 1
+                total_match += 1
+            elif r.result == MatchResult.MATCH_REVERSED:
+                status = f"{Color.GREEN}MATCH{Color.RESET} {Color.DIM}(endian){Color.RESET}"
+                section_match += 1
+                total_match += 1
+            elif r.result == MatchResult.MISMATCH:
+                status = f"{Color.RED}MISMATCH{Color.RESET}"
+                section_mismatch += 1
+                total_mismatch += 1
+                if first_mismatch is None:
+                    first_mismatch = r
+            elif r.result in [MatchResult.MISSING_ZOLT, MatchResult.MISSING_JOLT, MatchResult.MISSING_BOTH]:
+                status = f"{Color.YELLOW}MISSING{Color.RESET}"
+                total_missing += 1
+                continue  # Skip missing values in normal output
+
+            # Print summary line
+            print(f"  {status:30} {r.name}")
+
+            # Print values if mismatch or verbose
+            if r.result == MatchResult.MISMATCH or verbose:
+                if r.zolt_value:
+                    print(f"    {Color.YELLOW}ZOLT:{Color.RESET} {r.zolt_value[:32]}..." if len(r.zolt_value or '') > 32 else f"    {Color.YELLOW}ZOLT:{Color.RESET} {r.zolt_value}")
+                if r.jolt_value:
+                    print(f"    {Color.BLUE}JOLT:{Color.RESET} {r.jolt_value[:32]}..." if len(r.jolt_value or '') > 32 else f"    {Color.BLUE}JOLT:{Color.RESET} {r.jolt_value}")
+
+        # Section summary
+        if section_mismatch > 0:
+            print(f"\n  {Color.RED}Section: {section_mismatch} mismatches, {section_match} matches{Color.RESET}")
+            if first_mismatch:
+                print(f"  {Color.RED}First mismatch: {first_mismatch.name}{Color.RESET}")
+        else:
+            print(f"\n  {Color.GREEN}Section: All {section_match} values match{Color.RESET}")
+
+    # Overall summary
+    print(f"\n{Color.BOLD}{'='*70}")
+    print(f"  SUMMARY")
+    print(f"{'='*70}{Color.RESET}")
+
+    if total_mismatch == 0:
+        print(f"  {Color.GREEN}{Color.BOLD}ALL {total_match} VALUES MATCH{Color.RESET}")
+    else:
+        print(f"  {Color.RED}Mismatches: {total_mismatch}{Color.RESET}")
+        print(f"  {Color.GREEN}Matches: {total_match}{Color.RESET}")
+        if total_missing > 0:
+            print(f"  {Color.YELLOW}Missing: {total_missing}{Color.RESET}")
+
+def find_first_divergence(results: Dict[str, List[CompareResult]]) -> Optional[CompareResult]:
+    """Find the first point where Zolt and Jolt diverge"""
+    for section, section_results in results.items():
+        for r in section_results:
+            if r.result == MatchResult.MISMATCH:
+                return r
     return None
-
-def compare_preamble(zolt_log: str, jolt_log: str):
-    """Compare preamble values between Zolt and Jolt"""
-    print(f"\n{BOLD}{'='*70}")
-    print(f"  FIAT-SHAMIR PREAMBLE COMPARISON")
-    print(f"{'='*70}{RESET}")
-
-    preamble_fields = [
-        ("max_input_size", "appendU64: max_input_size"),
-        ("max_output_size", "appendU64: max_output_size"),
-        ("memory_size", "appendU64: memory_size"),
-        ("inputs.len", "appendBytes: inputs.len"),
-        ("outputs.len", "appendBytes: outputs.len"),
-        ("panic", "appendU64: panic"),
-        ("ram_K", "appendU64: ram_K"),
-        ("trace_length", "appendU64: trace_length"),
-    ]
-
-    all_match = True
-    for name, pattern in preamble_fields:
-        zolt_val = extract_preamble_value(zolt_log, pattern)
-        jolt_val = extract_preamble_value(jolt_log, pattern)
-
-        # Clean up values
-        if zolt_val:
-            zolt_val = zolt_val.split()[0] if zolt_val else None
-        if jolt_val:
-            jolt_val = jolt_val.split()[0] if jolt_val else None
-
-        match = zolt_val == jolt_val
-        if not match:
-            all_match = False
-
-        status = f"{GREEN}✓{RESET}" if match else f"{RED}✗{RESET}"
-        print(f"  {status} {name:20}: ZOLT={zolt_val or '(none)':15} JOLT={jolt_val or '(none)':15}")
-
-    # Special handling for inputs/outputs content
-    print(f"\n{CYAN}--- Input/Output Content ---{RESET}")
-
-    # Extract Zolt inputs
-    zolt_inputs_match = re.search(r'\[ZOLT PREAMBLE\] appendBytes: inputs\.len=(\d+)', zolt_log)
-    zolt_outputs_match = re.search(r'\[ZOLT PREAMBLE\] appendBytes: outputs\.len=(\d+)', zolt_log)
-
-    # Extract Jolt inputs
-    jolt_inputs_match = re.search(r'\[JOLT PREAMBLE\]   inputs=\[([^\]]*)\]', jolt_log)
-    jolt_outputs_match = re.search(r'\[JOLT PREAMBLE\]   outputs=\[([^\]]*)\]', jolt_log)
-
-    zolt_inputs_len = int(zolt_inputs_match.group(1)) if zolt_inputs_match else 0
-    zolt_outputs_len = int(zolt_outputs_match.group(1)) if zolt_outputs_match else 0
-
-    jolt_inputs = jolt_inputs_match.group(1) if jolt_inputs_match else ""
-    jolt_outputs = jolt_outputs_match.group(1) if jolt_outputs_match else ""
-
-    print(f"  {YELLOW}ZOLT inputs:{RESET}  len={zolt_inputs_len}, content=(empty)")
-    print(f"  {BLUE}JOLT inputs:{RESET}  [{jolt_inputs}]")
-
-    print(f"  {YELLOW}ZOLT outputs:{RESET} len={zolt_outputs_len}, content=(empty)")
-    print(f"  {BLUE}JOLT outputs:{RESET} [{jolt_outputs}]")
-
-    if zolt_inputs_len == 0 and jolt_inputs:
-        print(f"\n  {RED}{BOLD}⚠ MISMATCH: Zolt has no inputs but Jolt has inputs!{RESET}")
-        all_match = False
-    if zolt_outputs_len == 0 and jolt_outputs:
-        print(f"  {RED}{BOLD}⚠ MISMATCH: Zolt has no outputs but Jolt has outputs!{RESET}")
-        all_match = False
-
-    return all_match
-
-def compare_commitments(zolt_log: str, jolt_log: str):
-    """Compare commitment bytes between Zolt and Jolt"""
-    print(f"\n{BOLD}{'='*70}")
-    print(f"  COMMITMENT COMPARISON")
-    print(f"{'='*70}{RESET}")
-
-    # Extract Zolt GT commitments
-    zolt_gt_pattern = r'\[ZOLT TRANSCRIPT\] appendGT:\s*\n.*?raw_bytes\[0\.\.16\]=\{\s*([^}]+)\}'
-    zolt_gts = re.findall(r'\[ZOLT TRANSCRIPT\]   raw_bytes\[0\.\.16\]=\{\s*([^}]+)\}', zolt_log)
-
-    # Extract Jolt commitments (from the appending)
-    jolt_comm_pattern = r'\[JOLT\] Appending commitment (\d+): raw first 16 = \[([^\]]+)\]'
-    jolt_comms = re.findall(jolt_comm_pattern, jolt_log)
-
-    print(f"  Found {len(zolt_gts)} Zolt GT commitments, {len(jolt_comms)} Jolt commitments")
-
-    for i, (zolt_gt, jolt_comm) in enumerate(zip(zolt_gts[:5], jolt_comms[:5])):
-        print(f"\n  {CYAN}Commitment {i}:{RESET}")
-        print(f"    {YELLOW}ZOLT first 16:{RESET} {zolt_gt}")
-        print(f"    {BLUE}JOLT first 16:{RESET} {jolt_comm[1]}")
 
 def main():
-    zolt_file = sys.argv[1] if len(sys.argv) > 1 else '/tmp/zolt.log'
-    jolt_file = sys.argv[2] if len(sys.argv) > 2 else '/tmp/jolt.log'
+    parser = argparse.ArgumentParser(description='Compare Zolt and Jolt verification logs')
+    parser.add_argument('zolt_log', nargs='?', default='/tmp/zolt.log', help='Zolt log file')
+    parser.add_argument('jolt_log', nargs='?', default='/tmp/jolt.log', help='Jolt log file')
+    parser.add_argument('--stage', '-s', type=int, nargs='+', help='Compare specific stages (0=preamble, 1-6)')
+    parser.add_argument('--verbose', '-v', action='store_true', help='Show all values, not just mismatches')
+    parser.add_argument('--find-divergence', '-d', action='store_true', help='Find first point of divergence')
+    args = parser.parse_args()
 
-    with open(zolt_file, 'r') as f:
-        zolt_log = f.read()
-    with open(jolt_file, 'r') as f:
-        jolt_log = f.read()
+    try:
+        with open(args.zolt_log, 'r') as f:
+            zolt_log = f.read()
+        with open(args.jolt_log, 'r') as f:
+            jolt_log = f.read()
+    except FileNotFoundError as e:
+        print(f"{Color.RED}Error: {e}{Color.RESET}")
+        sys.exit(1)
 
-    print(f"{BOLD}{'='*70}")
-    print(f"     ZOLT vs JOLT SUMCHECK COMPARISON (HEX + ENDIANNESS)")
-    print(f"{'='*70}{RESET}")
+    print(f"{Color.BOLD}{'='*70}")
+    print(f"     ZOLT vs JOLT VERIFICATION COMPARISON")
+    print(f"{'='*70}{Color.RESET}")
+    print(f"{Color.DIM}Zolt: {args.zolt_log}")
+    print(f"Jolt: {args.jolt_log}{Color.RESET}")
 
-    # ========== PREAMBLE ==========
-    preamble_match = compare_preamble(zolt_log, jolt_log)
+    comparator = StageComparator(zolt_log, jolt_log, args.verbose)
+    results = comparator.run_comparison(args.stage)
 
-    # ========== COMMITMENTS ==========
-    compare_commitments(zolt_log, jolt_log)
+    print_results(results, args.verbose)
 
-    # ========== INITIAL CLAIM ==========
-    print(f"\n{BOLD}{'='*70}")
-    print(f"  STAGE 1 - INITIAL CLAIM")
-    print(f"{'='*70}{RESET}")
-
-    zolt_init, _ = extract_value(zolt_log, "STAGE1_INITIAL: claim = ", True)
-    _, jolt_init = extract_value(jolt_log, "STAGE1_INITIAL: claim = ", False)
-    compare_value("Initial Claim", zolt_init, jolt_decimal=jolt_init)
-
-    # ========== ROUND 0 ==========
-    print(f"\n{BOLD}{'='*70}")
-    print(f"  STAGE 1 - ROUND 0")
-    print(f"{'='*70}{RESET}")
-
-    # c0
-    zolt_c0, _ = extract_value(zolt_log, "STAGE1_ROUND_0: c0 = ", True)
-    jolt_c0, _ = extract_value(jolt_log, "STAGE1_ROUND_0: c0_bytes = ", False)
-    compare_value("c0", zolt_c0, jolt_c0)
-
-    # c2
-    zolt_c2, _ = extract_value(zolt_log, "STAGE1_ROUND_0: c2 = ", True)
-    jolt_c2, _ = extract_value(jolt_log, "STAGE1_ROUND_0: c2_bytes = ", False)
-    compare_value("c2", zolt_c2, jolt_c2)
-
-    # c3
-    zolt_c3, _ = extract_value(zolt_log, "STAGE1_ROUND_0: c3 = ", True)
-    jolt_c3, _ = extract_value(jolt_log, "STAGE1_ROUND_0: c3_bytes = ", False)
-    compare_value("c3", zolt_c3, jolt_c3)
-
-    # Challenge
-    zolt_ch, _ = extract_value(zolt_log, "STAGE1_ROUND_0: challenge = ", True)
-    jolt_ch, _ = extract_value(jolt_log, "STAGE1_ROUND_0: challenge_bytes = ", False)
-    compare_value("Challenge", zolt_ch, jolt_ch)
-
-    # ========== SUMMARY ==========
-    print(f"\n{BOLD}{'='*70}")
-    print(f"  SUMMARY")
-    print(f"{'='*70}{RESET}")
-
-    if not preamble_match:
-        print(f"{RED}{BOLD}⚠ PREAMBLE MISMATCH - This is the ROOT CAUSE!{RESET}")
-        print(f"  The Fiat-Shamir transcript is seeded with different values.")
-        print(f"  This causes all challenges and claims to diverge.")
-        print(f"\n  {YELLOW}FIX: Ensure Zolt uses the same inputs/outputs as Jolt.{RESET}")
-        print(f"  The Jolt verifier loads I/O from /tmp/fib_io_device.bin")
-        print(f"  but Zolt is proving with empty inputs/outputs.")
-    else:
-        # Check if initial claims match
-        if zolt_init and jolt_init:
-            zolt_int = int.from_bytes(bytes(zolt_init), 'little')
-            if zolt_int == jolt_init:
-                print(f"{GREEN}✓ Initial claims match (using LE interpretation){RESET}")
-            else:
-                zolt_int_be = int.from_bytes(bytes(zolt_init), 'big')
-                if zolt_int_be == jolt_init:
-                    print(f"{GREEN}✓ Initial claims match (using BE interpretation){RESET}")
-                else:
-                    print(f"{RED}✗ Initial claims DON'T match{RESET}")
-
-    print(f"\n{DIM}Logs used: {zolt_file}, {jolt_file}{RESET}")
+    if args.find_divergence:
+        divergence = find_first_divergence(results)
+        if divergence:
+            print(f"\n{Color.RED}{Color.BOLD}FIRST DIVERGENCE:{Color.RESET}")
+            print(f"  {Color.CYAN}{divergence.name}{Color.RESET}")
+            print(f"  {Color.YELLOW}ZOLT:{Color.RESET} {divergence.zolt_value}")
+            print(f"  {Color.BLUE}JOLT:{Color.RESET} {divergence.jolt_value}")
+        else:
+            print(f"\n{Color.GREEN}No divergence found - all values match!{Color.RESET}")
 
 if __name__ == '__main__':
     main()

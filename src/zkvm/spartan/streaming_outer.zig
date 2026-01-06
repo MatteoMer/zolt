@@ -1991,8 +1991,8 @@ test "StreamingOuterProver: expected_output_claim cross-verification" {
     try prover.bindFirstRoundChallenge(r0, uni_skip_claim);
 
     // Generate remaining round challenges and compute proof
-    var challenges_list = std.ArrayList(F).init(testing.allocator);
-    defer challenges_list.deinit();
+    var challenges_list = std.ArrayList(F){};
+    defer challenges_list.deinit(testing.allocator);
 
     // Remaining rounds (1 + num_cycle_vars = 3 for 4 cycles)
     var mock_transcript = MockTranscript{ .counter = 1 }; // Start at 1 since r0 was first
@@ -2002,7 +2002,7 @@ test "StreamingOuterProver: expected_output_claim cross-verification" {
 
         // Get challenge for this round
         const r = mock_transcript.challengeScalar();
-        try challenges_list.append(r);
+        try challenges_list.append(testing.allocator, r);
 
         // Update state
         prover.updateClaim(round_poly, r);

@@ -1117,7 +1117,7 @@ pub fn ProofConverter(comptime F: type) type {
             // 4. RamOutputCheck: log_ram_k rounds
             // 5. InstructionLookupsClaimReduction: n_cycle_vars rounds
             // max_num_rounds = log_ram_k + n_cycle_vars
-            try self.generateStage2BatchedSumcheckProof(
+            const stage2_result = try self.generateStage2BatchedSumcheckProof(
                 &jolt_proof.stage2_sumcheck_proof,
                 transcript,
                 r0_stage2,
@@ -1149,45 +1149,45 @@ pub fn ProofConverter(comptime F: type) type {
             // Note: UnivariateSkip for SpartanProductVirtualization was already set above with the actual claim value
 
             // Add PRODUCT_UNIQUE_FACTOR_VIRTUALS claims for SpartanProductVirtualization
-            // These 8 virtual polynomials are expected by ProductVirtualRemainderVerifier::expected_output_claim
+            // These 8 virtual polynomials are computed from the witness MLE evaluations at r_cycle
             // Order: LeftInstructionInput, RightInstructionInput, InstructionFlags(IsRdNotZero),
             //        OpFlags(WriteLookupOutputToRD), OpFlags(Jump), LookupOutput,
             //        InstructionFlags(Branch), NextIsNoop
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .LeftInstructionInput, .sumcheck_id = .SpartanProductVirtualization } },
-                F.zero(),
+                stage2_result.factor_evals[0], // LeftInstructionInput
             );
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .RightInstructionInput, .sumcheck_id = .SpartanProductVirtualization } },
-                F.zero(),
+                stage2_result.factor_evals[1], // RightInstructionInput
             );
             // InstructionFlags::IsRdNotZero = index 6
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .{ .InstructionFlags = 6 }, .sumcheck_id = .SpartanProductVirtualization } },
-                F.zero(),
+                stage2_result.factor_evals[2], // IsRdNotZero
             );
             // OpFlags::WriteLookupOutputToRD = index 6
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .{ .OpFlags = 6 }, .sumcheck_id = .SpartanProductVirtualization } },
-                F.zero(),
+                stage2_result.factor_evals[3], // WriteLookupOutputToRDFlag
             );
             // OpFlags::Jump = index 5
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .{ .OpFlags = 5 }, .sumcheck_id = .SpartanProductVirtualization } },
-                F.zero(),
+                stage2_result.factor_evals[4], // JumpFlag
             );
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .LookupOutput, .sumcheck_id = .SpartanProductVirtualization } },
-                F.zero(),
+                stage2_result.factor_evals[5], // LookupOutput
             );
             // InstructionFlags::Branch = index 4
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .{ .InstructionFlags = 4 }, .sumcheck_id = .SpartanProductVirtualization } },
-                F.zero(),
+                stage2_result.factor_evals[6], // BranchFlag
             );
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .NextIsNoop, .sumcheck_id = .SpartanProductVirtualization } },
-                F.zero(),
+                stage2_result.factor_evals[7], // NextIsNoop
             );
 
             // Stage 2: OutputSumcheckVerifier claims
@@ -1257,6 +1257,14 @@ pub fn ProofConverter(comptime F: type) type {
             return jolt_proof;
         }
 
+        /// Result of Stage 2 sumcheck including factor evaluations
+        const Stage2Result = struct {
+            /// The 8 factor polynomial evaluations at r_cycle
+            /// Order: LeftInstructionInput, RightInstructionInput, IsRdNotZero,
+            ///        WriteLookupOutputToRDFlag, JumpFlag, LookupOutput, BranchFlag, NextIsNoop
+            factor_evals: [8]F,
+        };
+
         /// Generate Stage 2 batched sumcheck proof
         ///
         /// Stage 2 batches 5 sumcheck instances:
@@ -1268,6 +1276,8 @@ pub fn ProofConverter(comptime F: type) type {
         ///
         /// For programs without RAM/lookups, instances 2-5 have zero input claims
         /// and contribute constant-zero polynomials.
+        ///
+        /// Returns the 8 factor polynomial evaluations at r_cycle for opening claims.
         fn generateStage2BatchedSumcheckProof(
             self: *Self,
             proof: *SumcheckInstanceProof(F),
@@ -1278,7 +1288,7 @@ pub fn ProofConverter(comptime F: type) type {
             cycle_witnesses: []const r1cs.R1CSCycleInputs(F),
             n_cycle_vars: usize,
             log_ram_k: usize,
-        ) !void {
+        ) !Stage2Result {
             const max_num_rounds = log_ram_k + n_cycle_vars;
             std.debug.print("[ZOLT] STAGE2_BATCHED: max_rounds={}, n_cycle={}, log_ram_k={}\n", .{ max_num_rounds, n_cycle_vars, log_ram_k });
 
@@ -1348,8 +1358,8 @@ pub fn ProofConverter(comptime F: type) type {
             defer if (product_prover) |*p| p.deinit();
 
             // Store challenges for opening claims computation
-            var challenges = std.ArrayList(F).init(self.allocator);
-            defer challenges.deinit();
+            var challenges = std.ArrayList(F){};
+            defer challenges.deinit(self.allocator);
 
             // Step 4: Run batched sumcheck rounds
             for (0..max_num_rounds) |round_idx| {
@@ -1367,22 +1377,22 @@ pub fn ProofConverter(comptime F: type) type {
                             // ProductVirtualRemainder - use real prover
                             const compressed = product_prover.?.computeRoundPolynomial() catch [3]F{ F.zero(), F.zero(), F.zero() };
 
-                            // Decompress: [c0, c2, c3] -> [s(0), s(1), s(2), s(3)]
-                            // We need s(1) from the hint: s(0) + s(1) = current_claim
-                            // For batched, we use instance's current claim
+                            // compressed = [c0, c2, c3] = evaluations at 0, 2, 3
+                            // s(0) = c0
+                            // s(1) = current_claim - s(0) (from the sumcheck hint)
+                            // s(2) = c2
+                            // s(3) = c3
                             const s0 = compressed[0];
                             const s1 = product_prover.?.current_claim.sub(s0);
-                            // For s(2) and s(3), we need to reconstruct from coefficients
-                            // Actually the compressed form stores different things...
-                            // Let's just use evaluations directly from the polynomial
-                            const evals = [4]F{ compressed[0], F.zero(), compressed[1], compressed[2] };
+                            const s2 = compressed[1];
+                            const s3 = compressed[2];
+                            const evals = [4]F{ s0, s1, s2, s3 };
 
                             // Weight by batching coefficient
                             for (0..4) |j| {
                                 combined_evals[j] = combined_evals[j].add(evals[j].mul(batching_coeffs[i]));
                             }
                             _ = instance_round;
-                            _ = s1;
                         } else {
                             // Zero instance - contribute constant polynomial
                             // For zero input, this is just scaled zeros
@@ -1433,7 +1443,7 @@ pub fn ProofConverter(comptime F: type) type {
 
                 // Sample round challenge
                 const challenge = transcript.challengeScalar();
-                try challenges.append(challenge);
+                try challenges.append(self.allocator, challenge);
 
                 // Update batched claim by evaluating at challenge
                 // This needs proper interpolation from evaluations
@@ -1446,6 +1456,132 @@ pub fn ProofConverter(comptime F: type) type {
             }
 
             std.debug.print("[ZOLT] STAGE2_BATCHED: final batched_claim = {any}\n", .{batched_claim.toBytesBE()});
+
+            // Compute the 8 factor polynomial evaluations at r_cycle
+            // r_cycle is the last n_cycle_vars challenges from Stage 2
+            // ProductVirtualRemainder starts at round log_ram_k, so its r_cycle
+            // is challenges[log_ram_k..max_num_rounds]
+            const factor_evals = try self.computeProductFactorEvaluations(
+                cycle_witnesses,
+                challenges.items,
+                n_cycle_vars,
+                log_ram_k,
+            );
+
+            return Stage2Result{ .factor_evals = factor_evals };
+        }
+
+        /// Compute MLE evaluations of the 8 factor polynomials at r_cycle
+        ///
+        /// The 8 factors are:
+        /// 0: LeftInstructionInput
+        /// 1: RightInstructionInput
+        /// 2: IsRdNotZero
+        /// 3: WriteLookupOutputToRDFlag
+        /// 4: JumpFlag
+        /// 5: LookupOutput
+        /// 6: BranchFlag
+        /// 7: NextIsNoop
+        ///
+        /// Returns MLE(factor_i, r_cycle) = Σ_t eq(r_cycle, t) * factor_value[t]
+        fn computeProductFactorEvaluations(
+            self: *Self,
+            cycle_witnesses: []const r1cs.R1CSCycleInputs(F),
+            all_challenges: []const F,
+            n_cycle_vars: usize,
+            log_ram_k: usize,
+        ) ![8]F {
+            _ = log_ram_k;
+            // r_cycle is the last n_cycle_vars challenges
+            // In Jolt, ProductVirtualRemainder runs for n_cycle_vars rounds starting after log_ram_k rounds
+            // So r_cycle = all_challenges[log_ram_k..log_ram_k + n_cycle_vars]
+            // But the challenges are stored in order, so we take the last n_cycle_vars
+            if (all_challenges.len < n_cycle_vars) {
+                // Not enough challenges, return zeros
+                return [8]F{ F.zero(), F.zero(), F.zero(), F.zero(), F.zero(), F.zero(), F.zero(), F.zero() };
+            }
+
+            // Extract r_cycle (last n_cycle_vars challenges)
+            const r_cycle_start = all_challenges.len - n_cycle_vars;
+            const r_cycle = all_challenges[r_cycle_start..];
+
+            std.debug.print("[ZOLT] FACTOR_EVALS: r_cycle.len = {}, n_cycle_vars = {}\n", .{ r_cycle.len, n_cycle_vars });
+            if (r_cycle.len > 0) {
+                std.debug.print("[ZOLT] FACTOR_EVALS: r_cycle[0] = {any}\n", .{r_cycle[0].toBytesBE()});
+            }
+
+            // Compute eq polynomial evaluations at r_cycle
+            const EqPoly = poly_mod.EqPolynomial(F);
+            var eq_poly = try EqPoly.init(self.allocator, r_cycle);
+            defer eq_poly.deinit();
+
+            const eq_evals = try eq_poly.evals(self.allocator);
+            defer self.allocator.free(eq_evals);
+
+            std.debug.print("[ZOLT] FACTOR_EVALS: eq_evals.len = {}, cycle_witnesses.len = {}\n", .{ eq_evals.len, cycle_witnesses.len });
+
+            // Initialize factor accumulators
+            var factor_evals = [8]F{ F.zero(), F.zero(), F.zero(), F.zero(), F.zero(), F.zero(), F.zero(), F.zero() };
+
+            // Compute MLE evaluation: Σ_t eq(r_cycle, t) * factor_value[t]
+            const num_cycles = @min(eq_evals.len, cycle_witnesses.len);
+            for (0..num_cycles) |t| {
+                const eq_val = eq_evals[t];
+                const witness = &cycle_witnesses[t];
+
+                // Extract the 8 factor values from the witness
+                // 0: LeftInstructionInput
+                factor_evals[0] = factor_evals[0].add(eq_val.mul(
+                    witness.values[r1cs.R1CSInputIndex.LeftInstructionInput.toIndex()],
+                ));
+
+                // 1: RightInstructionInput
+                factor_evals[1] = factor_evals[1].add(eq_val.mul(
+                    witness.values[r1cs.R1CSInputIndex.RightInstructionInput.toIndex()],
+                ));
+
+                // 2: IsRdNotZero - derived from RdWriteValue being non-zero
+                // In Jolt this is InstructionFlags::IsRdNotZero
+                const rd_write_value = witness.values[r1cs.R1CSInputIndex.RdWriteValue.toIndex()];
+                const is_rd_not_zero = if (rd_write_value.isZero()) F.zero() else F.one();
+                factor_evals[2] = factor_evals[2].add(eq_val.mul(is_rd_not_zero));
+
+                // 3: WriteLookupOutputToRDFlag
+                factor_evals[3] = factor_evals[3].add(eq_val.mul(
+                    witness.values[r1cs.R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()],
+                ));
+
+                // 4: JumpFlag
+                factor_evals[4] = factor_evals[4].add(eq_val.mul(
+                    witness.values[r1cs.R1CSInputIndex.FlagJump.toIndex()],
+                ));
+
+                // 5: LookupOutput
+                factor_evals[5] = factor_evals[5].add(eq_val.mul(
+                    witness.values[r1cs.R1CSInputIndex.LookupOutput.toIndex()],
+                ));
+
+                // 6: BranchFlag - using ShouldBranch
+                factor_evals[6] = factor_evals[6].add(eq_val.mul(
+                    witness.values[r1cs.R1CSInputIndex.ShouldBranch.toIndex()],
+                ));
+
+                // 7: NextIsNoop - this needs special handling
+                // NextIsNoop = !not_next_noop = 1 - (next cycle is not noop)
+                // For the last cycle, NextIsNoop = 1 (next is implicitly noop)
+                // For other cycles, we need to check if the next instruction is noop
+                // Since we don't have direct access to instruction flags here,
+                // we approximate: NextIsNoop = 0 for all but the last cycle
+                const next_is_noop = if (t + 1 >= cycle_witnesses.len) F.one() else F.zero();
+                factor_evals[7] = factor_evals[7].add(eq_val.mul(next_is_noop));
+            }
+
+            std.debug.print("[ZOLT] FACTOR_EVALS: factor[0] (LeftInstructionInput) = {any}\n", .{factor_evals[0].toBytesBE()});
+            std.debug.print("[ZOLT] FACTOR_EVALS: factor[1] (RightInstructionInput) = {any}\n", .{factor_evals[1].toBytesBE()});
+            std.debug.print("[ZOLT] FACTOR_EVALS: factor[2] (IsRdNotZero) = {any}\n", .{factor_evals[2].toBytesBE()});
+            std.debug.print("[ZOLT] FACTOR_EVALS: factor[7] (NextIsNoop) = {any}\n", .{factor_evals[7].toBytesBE()});
+
+            return factor_evals;
         }
 
         /// Evaluate cubic polynomial at a challenge point from evaluations

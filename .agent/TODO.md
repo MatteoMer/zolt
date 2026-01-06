@@ -31,20 +31,57 @@ Debug output shows correct structure:
 - extended_evals at base points (Y=0) are zero (satisfied constraints)
 - Non-zero values at extended points (Y=-9, Y=9)
 
-### Remaining Issues to Investigate
+### ROOT CAUSE IDENTIFIED
 
-1. **Lagrange kernel multiplication** in `interpolateFirstRoundPoly`:
-   - The Lagrange kernel L(τ_high, Y) is computed over the base domain {-4,...,5}
-   - It's multiplied with t₁(Y) which is interpolated from extended evaluations
-   - The resulting polynomial should satisfy Σ_Y s(Y) = 0
+**Zolt computes extended_evals at ALL 19 domain points, but Jolt only computes 9 extended_evals at INTERLEAVED targets.**
 
-2. **Power sums calculation**:
-   - Jolt uses `LagrangeHelper::power_sums::<N, OUT_LEN>()` over symmetric domain
-   - Need to verify Zolt's polynomial when evaluated with these power sums equals zero
+Jolt's `build_uniskip_first_round_poly` expects:
+- `extended_evals`: DEGREE=9 evaluations at interleaved targets `{-5, 6, -6, 7, -7, 8, -8, 9, -9}`
+- `base_evals`: Optional, defaults to zeros for the 10 base points `{-4,...,5}`
+- `t1_vals`: 19 values constructed by placing extended_evals at targets, zeros elsewhere
 
-3. **Polynomial coefficient ordering**:
-   - Zolt uses big-endian coefficient ordering (c_0 is constant term)
-   - Need to verify this matches Jolt's `UniPoly` format
+The fix requires:
+1. Modify `computeFirstRoundPoly` to compute evals at ONLY the 9 target points
+2. Build `t1_vals` array correctly (zeros at base, extended_evals at targets)
+3. Interpolate t1 from these 19 points to get 19 coefficients
+4. Multiply with 10-coefficient Lagrange kernel to get 28 coefficients
+
+### Detailed Jolt Algorithm
+
+From `jolt-core/src/subprotocols/univariate_skip.rs:77-125`:
+
+```rust
+// 1. Build t1_vals[EXTENDED_SIZE=19] array
+let mut t1_vals: [F; EXTENDED_SIZE] = [F::zero(); EXTENDED_SIZE];
+// Base evals (if provided) go at positions 5-14 (for base_left=-4)
+// Extended evals go at target positions
+
+// 2. Fill extended evals at target positions
+for (idx, &val) in extended_evals.iter().enumerate() {
+    let z = targets[idx];  // e.g., -5, 6, -6, 7, ...
+    let pos = (z + DEGREE) as usize;  // maps -9..9 to 0..18
+    t1_vals[pos] = val;
+}
+
+// 3. Interpolate t1 (degree-18) from 19 evaluations
+let t1_coeffs = LagrangePolynomial::interpolate_coeffs::<EXTENDED_SIZE>(&t1_vals);
+
+// 4. Compute Lagrange kernel L(tau_high, Y) coefficients (degree-9)
+let lagrange_values = LagrangePolynomial::evals::<Challenge, DOMAIN_SIZE>(&tau_high);
+let lagrange_coeffs = LagrangePolynomial::interpolate_coeffs::<DOMAIN_SIZE>(&lagrange_values);
+
+// 5. Multiply polynomials: (deg-9) * (deg-18) = deg-27 → 28 coefficients
+for (i, &a) in lagrange_coeffs.iter().enumerate() {
+    for (j, &b) in t1_coeffs.iter().enumerate() {
+        s1_coeffs[i + j] += a * b;
+    }
+}
+```
+
+The targets for outer sumcheck:
+- DOMAIN_SIZE=10, DEGREE=9
+- base_left=-4, base_right=5
+- targets = [-5, 6, -6, 7, -7, 8, -8, 9, -9]
 
 ---
 

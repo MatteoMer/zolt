@@ -537,16 +537,20 @@ pub fn OpeningClaims(comptime F: type) type {
         }
 
         /// Serialize to match Jolt's format
+        /// Field elements are serialized in standard form (not Montgomery form)
+        /// to match arkworks' serialize_compressed behavior
         pub fn serialize(self: *const Self, writer: anytype) !void {
             // Write number of entries
             try writer.writeInt(u64, self.entries.items.len, .little);
             // Write each (key, claim) pair
             for (self.entries.items) |entry| {
                 try entry.id.serialize(writer);
-                // Write claim as 32-byte LE
+                // Write claim as 32-byte LE in standard form (not Montgomery)
+                // This matches arkworks' serialize_compressed
+                const standard = entry.claim.fromMontgomery();
                 var buf: [32]u8 = undefined;
                 for (0..4) |i| {
-                    std.mem.writeInt(u64, buf[i * 8 ..][0..8], entry.claim.limbs[i], .little);
+                    std.mem.writeInt(u64, buf[i * 8 ..][0..8], standard.limbs[i], .little);
                 }
                 try writer.writeAll(&buf);
             }

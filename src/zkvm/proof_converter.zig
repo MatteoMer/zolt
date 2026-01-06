@@ -1062,6 +1062,51 @@ pub fn ProofConverter(comptime F: type) type {
                 tau_high_stage2,
             );
 
+            // CRITICAL: Append Stage 2 UniSkip polynomial to transcript (matching Jolt verifier flow)
+            // The verifier calls UniSkipFirstRoundProof::verify which:
+            // 1. Appends the polynomial coefficients to transcript
+            // 2. Derives r0 challenge
+            // 3. Calls cache_openings which appends UnivariateSkip claim
+            if (jolt_proof.stage2_uni_skip_first_round_proof) |proof| {
+                // Append polynomial - matches Jolt's UniPoly::append_to_transcript
+                transcript.appendMessage("UncompressedUniPoly_begin");
+                for (proof.uni_poly) |coeff| {
+                    transcript.appendScalar(coeff);
+                }
+                transcript.appendMessage("UncompressedUniPoly_end");
+
+                // Derive r0 challenge
+                const r0_stage2 = transcript.challengeScalar();
+                std.debug.print("[ZOLT] STAGE2: r0 = {any}\n", .{r0_stage2.toBytesBE()});
+
+                // Compute UnivariateSkip claim = poly(r0)
+                // uni_poly = [c0, c1, c2, ..., c12] -> poly(x) = c0 + c1*x + c2*x^2 + ...
+                var uni_skip_claim_stage2 = F.zero();
+                var r_power = F.one();
+                for (proof.uni_poly) |coeff| {
+                    uni_skip_claim_stage2 = uni_skip_claim_stage2.add(coeff.mul(r_power));
+                    r_power = r_power.mul(r0_stage2);
+                }
+                std.debug.print("[ZOLT] STAGE2: uni_skip_claim = {any}\n", .{uni_skip_claim_stage2.toBytesBE()});
+
+                // Append UnivariateSkip claim (this is what cache_openings does)
+                transcript.appendScalar(uni_skip_claim_stage2);
+
+                // Update the opening claim for UnivariateSkip at SpartanProductVirtualization
+                try jolt_proof.opening_claims.insert(
+                    .{ .Virtual = .{ .poly = .UnivariateSkip, .sumcheck_id = .SpartanProductVirtualization } },
+                    uni_skip_claim_stage2,
+                );
+
+                // Debug: verify the claim was inserted correctly
+                const inserted_claim = jolt_proof.opening_claims.get(.{ .Virtual = .{ .poly = .UnivariateSkip, .sumcheck_id = .SpartanProductVirtualization } });
+                if (inserted_claim) |claim| {
+                    std.debug.print("[ZOLT] STAGE2: inserted uni_skip_claim = {any}\n", .{claim.toBytesBE()});
+                } else {
+                    std.debug.print("[ZOLT] STAGE2: ERROR - uni_skip_claim was NOT inserted!\n", .{});
+                }
+            }
+
             // Stage 2 batches 5 sumcheck instances:
             // 1. ProductVirtualRemainder: n_cycle_vars rounds
             // 2. RamRafEvaluation: log_ram_k rounds
@@ -1094,10 +1139,7 @@ pub fn ProofConverter(comptime F: type) type {
                 .{ .Committed = .{ .poly = .RamInc, .sumcheck_id = .RamReadWriteChecking } },
                 F.zero(),
             );
-            try jolt_proof.opening_claims.insert(
-                .{ .Virtual = .{ .poly = .UnivariateSkip, .sumcheck_id = .SpartanProductVirtualization } },
-                F.zero(),
-            );
+            // Note: UnivariateSkip for SpartanProductVirtualization was already set above with the actual claim value
 
             // Add PRODUCT_UNIQUE_FACTOR_VIRTUALS claims for SpartanProductVirtualization
             // These 8 virtual polynomials are expected by ProductVirtualRemainderVerifier::expected_output_claim

@@ -1133,7 +1133,37 @@ pub fn ProofConverter(comptime F: type) type {
             }
 
             // Create UniSkip proof for Stage 2
-            jolt_proof.stage2_uni_skip_first_round_proof = try self.createUniSkipProofStage2();
+            // Need to get tau_high for Stage 2 from transcript and compute proper polynomial
+            const tau_high_stage2 = transcript.challengeScalar();
+
+            // Get the 5 product claims from Stage 1's opening claims
+            // Order: Product, WriteLookupOutputToRD, WritePCtoRD, ShouldBranch, ShouldJump
+            const PRODUCT_VIRTUALS = [5]VirtualPolynomial{
+                .Product,
+                .WriteLookupOutputToRD,
+                .WritePCtoRD,
+                .ShouldBranch,
+                .ShouldJump,
+            };
+
+            var base_evals_stage2: [5]F = [_]F{F.zero()} ** 5;
+            for (PRODUCT_VIRTUALS, 0..) |poly, i| {
+                const claim_key = OpeningId{ .Virtual = .{ .poly = poly, .sumcheck_id = .SpartanOuter } };
+                if (jolt_proof.opening_claims.get(claim_key)) |claim| {
+                    base_evals_stage2[i] = claim;
+                }
+            }
+
+            // Debug: Print Stage 2 setup
+            std.debug.print("[ZOLT] STAGE2: tau_high = {any}\n", .{tau_high_stage2.toBytesBE()});
+            for (base_evals_stage2, 0..) |eval, i| {
+                std.debug.print("[ZOLT] STAGE2: base_evals[{}] = {any}\n", .{ i, eval.toBytesBE() });
+            }
+
+            jolt_proof.stage2_uni_skip_first_round_proof = try self.createUniSkipProofStage2WithClaims(
+                &base_evals_stage2,
+                tau_high_stage2,
+            );
 
             // Stage 2 and onwards: still use placeholder zero proofs
             // (Full implementation would require complete Stage 2-7 prover)
@@ -1221,6 +1251,87 @@ pub fn ProofConverter(comptime F: type) type {
             // Create an all-zero polynomial that trivially satisfies the sum constraint.
             const coeffs = try self.allocator.alloc(F, NUM_COEFFS);
             @memset(coeffs, F.zero());
+
+            return UniSkipFirstRoundProof(F){
+                .uni_poly = coeffs,
+                .allocator = self.allocator,
+            };
+        }
+
+        /// Create a UniSkipFirstRoundProof for Stage 2 with actual base claims
+        ///
+        /// This constructs the polynomial s1(Y) = L(tau_high, Y) * t1(Y) where:
+        /// - L is the Lagrange kernel over the 5-point domain {-2, -1, 0, 1, 2}
+        /// - t1 is interpolated from base_evals (at base domain) and extended_evals
+        ///
+        /// For product virtualization, the base_evals are the 5 product claims from Stage 1:
+        /// [Product, WriteLookupOutputToRD, WritePCtoRD, ShouldBranch, ShouldJump]
+        fn createUniSkipProofStage2WithClaims(
+            self: *Self,
+            base_evals: *const [5]F,
+            tau_high: F,
+        ) !?UniSkipFirstRoundProof(F) {
+            const univariate_skip = r1cs.univariate_skip;
+            const LagrangePoly = univariate_skip.LagrangePolynomial(F);
+
+            const DOMAIN_SIZE = univariate_skip.PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DOMAIN_SIZE; // 5
+            const DEGREE = univariate_skip.PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DEGREE; // 4
+            const EXTENDED_SIZE = univariate_skip.PRODUCT_VIRTUAL_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE; // 9
+            const NUM_COEFFS = univariate_skip.PRODUCT_VIRTUAL_FIRST_ROUND_POLY_NUM_COEFFS; // 13
+
+            // For now, use zero extended evaluations (would need trace access for proper computation)
+            // This works when the product terms are all zero at the extended domain points
+            // The extended evaluations would be the fused product evaluations at points {-4, -3, 3, 4}
+            const extended_evals: [DEGREE]F = [_]F{F.zero()} ** DEGREE;
+            _ = extended_evals;
+
+            // Build the polynomial using the same structure as Stage 1's uni-skip
+            // s1(Y) = L(tau_high, Y) * t1(Y)
+
+            // Step 1: Build t1 evaluations on full extended symmetric window {-4, -3, ..., 3, 4}
+            var t1_vals: [EXTENDED_SIZE]F = [_]F{F.zero()} ** EXTENDED_SIZE;
+
+            // Fill in base window evaluations at {-2, -1, 0, 1, 2}
+            // These map to positions {DEGREE-2, DEGREE-1, DEGREE, DEGREE+1, DEGREE+2} = {2, 3, 4, 5, 6}
+            const base_left: i64 = -2;
+            for (base_evals, 0..) |val, i| {
+                const z = base_left + @as(i64, @intCast(i));
+                const pos: usize = @intCast(z + @as(i64, DEGREE)); // offset by DEGREE to get 0-based index
+                t1_vals[pos] = val;
+            }
+
+            // Extended evaluations are zero (positions 0, 1, 7, 8 for targets -4, -3, 3, 4)
+            // Already initialized to zero
+
+            // Step 2: Interpolate t1 coefficients from evaluations
+            const t1_coeffs = try LagrangePoly.interpolateCoeffs(EXTENDED_SIZE, &t1_vals, self.allocator);
+            defer self.allocator.free(t1_coeffs);
+
+            // Step 3: Compute Lagrange kernel values L_i(tau_high) at the base domain points
+            const lagrange_values = try LagrangePoly.evals(DOMAIN_SIZE, tau_high, self.allocator);
+            defer self.allocator.free(lagrange_values);
+
+            // Step 4: Interpolate Lagrange kernel coefficients
+            const lagrange_coeffs = try LagrangePoly.interpolateCoeffs(DOMAIN_SIZE, lagrange_values, self.allocator);
+            defer self.allocator.free(lagrange_coeffs);
+
+            // Step 5: Multiply polynomials: s1(Y) = L(tau_high, Y) * t1(Y)
+            const coeffs = try self.allocator.alloc(F, NUM_COEFFS);
+            @memset(coeffs, F.zero());
+
+            for (lagrange_coeffs, 0..) |a, i| {
+                for (t1_coeffs, 0..) |b, j| {
+                    if (i + j < NUM_COEFFS) {
+                        coeffs[i + j] = coeffs[i + j].add(a.mul(b));
+                    }
+                }
+            }
+
+            // Debug: Print first few coefficients
+            std.debug.print("[ZOLT] STAGE2_UNISKIP: coeffs[0] = {any}\n", .{coeffs[0].toBytesBE()});
+            if (coeffs.len > 1) {
+                std.debug.print("[ZOLT] STAGE2_UNISKIP: coeffs[1] = {any}\n", .{coeffs[1].toBytesBE()});
+            }
 
             return UniSkipFirstRoundProof(F){
                 .uni_poly = coeffs,

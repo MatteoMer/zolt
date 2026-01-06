@@ -526,6 +526,16 @@ pub fn OpeningClaims(comptime F: type) type {
             return self.entries.items.len;
         }
 
+        /// Get claim by OpeningId, returns null if not found
+        pub fn get(self: *const Self, id: OpeningId) ?F {
+            for (self.entries.items) |entry| {
+                if (id.order(entry.id) == .eq) {
+                    return entry.claim;
+                }
+            }
+            return null;
+        }
+
         /// Serialize to match Jolt's format
         pub fn serialize(self: *const Self, writer: anytype) !void {
             // Write number of entries

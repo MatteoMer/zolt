@@ -726,13 +726,12 @@ pub fn ProofConverter(comptime F: type) type {
 
             // Add the UnivariateSkip claim for SpartanOuter
             // This is uni_poly.evaluate(r0), the input_claim for the remaining sumcheck
+            // NOTE: Do NOT append to transcript here - the UniSkip claim was already appended
+            // twice earlier (once in cache_openings after r0 sampling, once in BatchedSumcheck::prove)
             try claims.insert(
                 .{ .Virtual = .{ .poly = .UnivariateSkip, .sumcheck_id = .SpartanOuter } },
                 uni_skip_claim,
             );
-
-            // Append UnivariateSkip claim to transcript as well
-            transcript.appendScalar(uni_skip_claim);
         }
 
         /// Create a UniSkipFirstRoundProof for Stage 1 (degree-27 polynomial)
@@ -952,6 +951,7 @@ pub fn ProofConverter(comptime F: type) type {
 
             // Compute derived parameters
             const n_cycle_vars = std.math.log2_int(usize, trace_length);
+            const log_ram_k = std.math.log2_int(usize, ram_K);
 
             // Copy commitments and append to transcript
             for (commitments) |c| {
@@ -1062,11 +1062,17 @@ pub fn ProofConverter(comptime F: type) type {
                 tau_high_stage2,
             );
 
-            // Stage 2 and onwards: still use placeholder zero proofs
-            // (Full implementation would require complete Stage 2-7 prover)
+            // Stage 2 batches 5 sumcheck instances:
+            // 1. ProductVirtualRemainder: n_cycle_vars rounds
+            // 2. RamRafEvaluation: log_ram_k rounds
+            // 3. RamReadWriteChecking: log_ram_k + n_cycle_vars rounds (max!)
+            // 4. RamOutputCheck: log_ram_k rounds
+            // 5. InstructionLookupsClaimReduction: n_cycle_vars rounds
+            // max_num_rounds = log_ram_k + n_cycle_vars
+            const stage2_max_rounds = log_ram_k + n_cycle_vars;
             try self.generateZeroSumcheckProof(
                 &jolt_proof.stage2_sumcheck_proof,
-                n_cycle_vars + 1,
+                stage2_max_rounds,
                 3,
             );
 
@@ -1080,16 +1086,88 @@ pub fn ProofConverter(comptime F: type) type {
                 F.zero(),
             );
             try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamReadWriteChecking } },
+                F.zero(),
+            );
+            // RamInc is a committed polynomial needed by RamReadWriteChecking
+            try jolt_proof.opening_claims.insert(
+                .{ .Committed = .{ .poly = .RamInc, .sumcheck_id = .RamReadWriteChecking } },
+                F.zero(),
+            );
+            try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .UnivariateSkip, .sumcheck_id = .SpartanProductVirtualization } },
+                F.zero(),
+            );
+
+            // Add PRODUCT_UNIQUE_FACTOR_VIRTUALS claims for SpartanProductVirtualization
+            // These 8 virtual polynomials are expected by ProductVirtualRemainderVerifier::expected_output_claim
+            // Order: LeftInstructionInput, RightInstructionInput, InstructionFlags(IsRdNotZero),
+            //        OpFlags(WriteLookupOutputToRD), OpFlags(Jump), LookupOutput,
+            //        InstructionFlags(Branch), NextIsNoop
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .LeftInstructionInput, .sumcheck_id = .SpartanProductVirtualization } },
+                F.zero(),
+            );
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .RightInstructionInput, .sumcheck_id = .SpartanProductVirtualization } },
+                F.zero(),
+            );
+            // InstructionFlags::IsRdNotZero = index 6
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .{ .InstructionFlags = 6 }, .sumcheck_id = .SpartanProductVirtualization } },
+                F.zero(),
+            );
+            // OpFlags::WriteLookupOutputToRD = index 6
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .{ .OpFlags = 6 }, .sumcheck_id = .SpartanProductVirtualization } },
+                F.zero(),
+            );
+            // OpFlags::Jump = index 5
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .{ .OpFlags = 5 }, .sumcheck_id = .SpartanProductVirtualization } },
+                F.zero(),
+            );
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .LookupOutput, .sumcheck_id = .SpartanProductVirtualization } },
+                F.zero(),
+            );
+            // InstructionFlags::Branch = index 4
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .{ .InstructionFlags = 4 }, .sumcheck_id = .SpartanProductVirtualization } },
+                F.zero(),
+            );
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .NextIsNoop, .sumcheck_id = .SpartanProductVirtualization } },
+                F.zero(),
+            );
+
+            // Stage 2: OutputSumcheckVerifier claims
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .RamValFinal, .sumcheck_id = .RamOutputCheck } },
+                F.zero(),
+            );
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .RamValInit, .sumcheck_id = .RamOutputCheck } },
+                F.zero(),
+            );
+
+            // Stage 2: InstructionLookupsClaimReductionSumcheckVerifier claims
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .LookupOutput, .sumcheck_id = .InstructionClaimReduction } },
+                F.zero(),
+            );
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .LeftLookupOperand, .sumcheck_id = .InstructionClaimReduction } },
+                F.zero(),
+            );
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .RightLookupOperand, .sumcheck_id = .InstructionClaimReduction } },
                 F.zero(),
             );
 
             // Stages 3-7 (placeholder)
             try self.generateZeroSumcheckProof(&jolt_proof.stage3_sumcheck_proof, n_cycle_vars, 3);
-            try jolt_proof.opening_claims.insert(
-                .{ .Virtual = .{ .poly = .LookupOutput, .sumcheck_id = .InstructionClaimReduction } },
-                F.zero(),
-            );
+            // LookupOutput at InstructionClaimReduction was already added in Stage 2
 
             try self.generateZeroSumcheckProof(&jolt_proof.stage4_sumcheck_proof, n_cycle_vars, 3);
             try jolt_proof.opening_claims.insert(

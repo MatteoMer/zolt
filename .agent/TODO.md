@@ -2,43 +2,65 @@
 
 ## Current Status: Session 56 - January 6, 2026
 
-**ROOT CAUSE FOUND: Missing Univariate Skip Implementation**
+**STATUS: Deep debugging - comparing az/bz group values**
 
-### New Finding (Session 56)
+### Latest Debug Values from Jolt Verifier
 
-The sumcheck verification fails because Zolt's prover uses **standard multilinear sumcheck**
-but Jolt's verifier expects the **univariate skip optimization** in the first round.
-
-**Evidence:**
 ```
-=== SUMCHECK VERIFICATION FAILED ===
+r_stream = 403453513528045288561805897703363889300374796249554293903824070113366263553
+r0 = 9956720580376218385912772229440842054804584136250960391272783931628043427152
+az_g0 = 7784823065365355150329898612995661848060669911039813026488804049763027733277
+bz_g0 = 17295306602198664491678763456607120003277220072842593579631007088433375750847
+az_g1 = 1819540214425536184764541679660107604875800049998949590309674377395141916961
+bz_g1 = 7283832083962387142906994059148710843912079143868948223318847447205362507259
+az_final = 18118550305323548719991270363692126563213624719115355489360394285597267782328
+bz_final = 189353324837795743110663437939657740667583580724624394002588005226092056829
+inner_sum_prod = 3428564744352329898278095955238265070037131657307455691194697055242544749299
+```
+
+### Test Results
+
+```
 output_claim:          3156099394088378331739429618582031493604140997965859776862374574205175751175
 expected_output_claim: 6520563849248945342410334176740245598125896542821607373002483479060307387386
 ```
 
-The `expected_output_claim` is computed by `evaluate_inner_sum_product_at_point` which:
-1. Gets Lagrange weights `w` over the univariate-skip base domain (10 points: -4 to 5)
-2. Computes `az_g0, bz_g0` by dotting **first group** constraints (10) with `z`
-3. Computes `az_g1, bz_g1` by dotting **second group** constraints (9) with `z`
-4. Blends: `az_final = az_g0 + r_stream * (az_g1 - az_g0)`
-5. Returns `az_final * bz_final`
+The sumcheck `output_claim` doesn't match `expected_output_claim`.
 
-But Zolt's prover computes a standard sumcheck over the full 19 constraints without this structure.
+### Root Cause Analysis
 
-### What Needs to Be Implemented
+The verifier computes:
+```rust
+expected_output_claim = tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod
+```
 
-1. **First Round (UniSkip)**: Prover must:
-   - Evaluate both constraint groups at Lagrange-weighted points
-   - Send coefficients for the univariate polynomial over the base domain
-   - Use `r_stream` to blend the two groups in subsequent rounds
+Where `inner_sum_prod = az_final * bz_final` comes from:
+```rust
+az_final = az_g0 + r_stream * (az_g1 - az_g0)
+bz_final = bz_g0 + r_stream * (bz_g1 - bz_g0)
+```
 
-2. **Constraint Grouping**: Match Jolt exactly:
-   - **First group (10 constraints)**: indices 1,2,3,4,5,6,11,14,17,18
-   - **Second group (9 constraints)**: indices 0,7,8,9,10,12,13,15,16
+And `az_g0`, `az_g1`, `bz_g0`, `bz_g1` are computed by:
+```rust
+for i in 0..FIRST_GROUP.len() {
+    az_g0 += w[i] * lc_a[i].dot_product(&z, z_const_col);
+    bz_g0 += w[i] * lc_b[i].dot_product(&z, z_const_col);
+}
+```
 
-3. **Verify Claims Match**: After implementing univariate skip, the verifier's
-   `inner_sum_prod = evaluate_inner_sum_product_at_point(...)` should equal
-   what the prover produces.
+**The prover must produce a final sumcheck claim that equals this formula.**
+
+### Next Steps
+
+1. Add debug output to Zolt prover to compute the same az/bz values
+2. Compare with Jolt's verifier values to find where they diverge
+3. Fix the computation that differs
+
+### Files to Add Debug Output
+
+- `src/zkvm/spartan/streaming_outer.zig` - Add function to compute az_g0/az_g1/bz_g0/bz_g1 at the bound point
+- Need to compute: `Σ w[i] * constraint_i.condition * z(r_cycle)` for Az
+- And: `Σ w[i] * (constraint_i.left - constraint_i.right) * z(r_cycle)` for Bz
 
 ---
 
@@ -49,53 +71,13 @@ But Zolt's prover computes a standard sumcheck over the full 19 constraints with
 - [x] Verify transcript challenges match (they do!)
 - [x] Verify r1cs_input_evals match between prover and verifier (they do!)
 - [x] Fix batching coefficient Montgomery form bug (Session 53)
-- [x] Identify root cause: missing univariate skip optimization
+- [x] Identify root cause: missing univariate skip optimization (partially)
+- [x] Add debug output to Jolt verifier to see az/bz group values
 
 ## In Progress
 
-- [ ] Implement univariate skip first round in Zolt's Spartan prover
-- [ ] Use Lagrange polynomial over domain [-4, 5] for constraint evaluation
-- [ ] Split constraints into first group (10) and second group (9)
-- [ ] Blend groups with r_stream challenge after first round
-
----
-
-## Reference Files
-
-### Jolt (implementation to match)
-- `jolt-core/src/zkvm/r1cs/evaluation.rs` - Grouped constraint evaluation
-- `jolt-core/src/zkvm/r1cs/key.rs` - `evaluate_inner_sum_product_at_point`
-- `jolt-core/src/subprotocols/univariate_skip.rs` - UniSkip targets
-
-### Zolt (files to modify)
-- `src/zkvm/r1cs/jolt_r1cs.zig` - JoltSpartanInterface (needs univariate skip)
-- `src/zkvm/r1cs/evaluation.zig` - Constraint evaluation helpers
-- `src/zkvm/r1cs/constraints.zig` - First/second group indices
-
----
-
-## Key Constants from Jolt
-
-```rust
-pub const OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE: usize = 10;  // domain {-4..5}
-pub const OUTER_UNIVARIATE_SKIP_DEGREE: usize = 5;        // polynomial degree
-
-// First group labels (10 constraints with boolean guards)
-R1CS_CONSTRAINTS_FIRST_GROUP_LABELS = [
-    RamAddrEqZeroIfNotLoadStore,       // constraint 1
-    RamReadEqRamWriteIfLoad,           // constraint 2
-    RamReadEqRdWriteIfLoad,            // constraint 3
-    Rs2EqRamWriteIfStore,              // constraint 4
-    LeftLookupZeroUnlessAddSubMul,     // constraint 5
-    LeftLookupEqLeftInputOtherwise,    // constraint 6
-    AssertLookupOne,                   // constraint 11
-    NextUnexpPCEqLookupIfShouldJump,   // constraint 14
-    NextPCEqPCPlusOneIfInline,         // constraint 17
-    MustStartSequenceFromBeginning,    // constraint 18
-]
-
-// Second group: constraints 0,7,8,9,10,12,13,15,16
-```
+- [ ] Add debug output to Zolt prover to compute same values
+- [ ] Compare Zolt az_g0/bz_g0/az_g1/bz_g1 with Jolt values
 
 ---
 
@@ -106,27 +88,52 @@ R1CS_CONSTRAINTS_FIRST_GROUP_LABELS = [
 zig build -Doptimize=ReleaseFast
 ./zig-out/bin/zolt prove /tmp/jolt-guest-targets/fibonacci-guest-fib/riscv64imac-unknown-none-elf/release/fibonacci-guest --jolt-format --input-hex 32 --export-preprocessing /tmp/zolt_preprocessing.bin -o /tmp/zolt_proof_dory.bin
 
-# Jolt verification test (with Zolt preprocessing)
-cd /Users/matteo/projects/jolt
-cargo test --package jolt-core test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
-
 # Jolt verification test (with Jolt preprocessing)
+cd /Users/matteo/projects/jolt
 cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture
 ```
 
 ---
 
-## Previous Sessions Summary
+## Key Formulas
 
-- **Session 56**: Found root cause - missing univariate skip optimization
-- **Session 55**: Found rebuildTPrimePoly bug - t_prime[0] values don't match expected after rebuild
-- **Session 54**: Verified coefficients match, confirmed claim drift issue
-- **Session 53**: Fixed batching_coeff Montgomery form bug; initial_claim now matches
-- **Session 52**: Deep investigation - eq_factor and Az*Bz match but claim doesn't
-- **Session 51**: Fixed round offset by adding cache_openings appendScalar; challenges now match
-- **Session 50**: Found round number offset between Zolt and Jolt after r0
-- **Session 49**: Fixed from_bigint_unchecked interpretation - tau values now match
-- **Session 48**: Fixed challenge limb ordering, round polynomials now match
-- **Session 47**: Fixed LookupOutput for JAL/JALR, UniSkip first-round now passes
-- **Session 46**: Fixed memory_size mismatch, transcript states now match
-- **Session 45**: Fixed RV64 word operations, fib(50) now works
+### Verifier's inner_sum_prod
+
+```rust
+// Lagrange weights at r0 over base domain {-4..5}
+let w = LagrangePolynomial::evals(&r0);
+
+// Group 0 (10 constraints)
+for i in 0..FIRST_GROUP.len() {
+    az_g0 += w[i] * lc_a[i].dot_product(&z, z_const_col);
+    bz_g0 += w[i] * lc_b[i].dot_product(&z, z_const_col);
+}
+
+// Group 1 (9 constraints)
+for i in 0..SECOND_GROUP.len() {
+    az_g1 += w[i] * lc_a[i].dot_product(&z, z_const_col);
+    bz_g1 += w[i] * lc_b[i].dot_product(&z, z_const_col);
+}
+
+// Blend with r_stream
+az_final = az_g0 + r_stream * (az_g1 - az_g0)
+bz_final = bz_g0 + r_stream * (bz_g1 - bz_g0)
+
+inner_sum_prod = az_final * bz_final
+```
+
+### Prover's Final Claim
+
+```
+output_claim = current_claim after all sumcheck rounds
+
+// This should equal:
+// sum over all (row, x_cycle) of: eq(tau, row||x_cycle) * Az(row, x_cycle) * Bz(row, x_cycle)
+// bound to the challenge point [r0, r_stream, r_1, ..., r_n]
+```
+
+### Expected Relationship
+
+```
+output_claim == tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod
+```

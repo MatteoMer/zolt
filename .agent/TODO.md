@@ -44,6 +44,32 @@ Jolt generates them from its internal `Cycle` structure with different semantics
 1. **Fix R1CS witness generation** - The `fromTraceStep` function needs to match Jolt's witness semantics
 2. **Verify witness values match** - Add debug output to compare cycle_witnesses[0] with Jolt's values
 3. **Consider trace format compatibility** - Zolt's TraceStep may not contain all fields Jolt expects
+4. **Study Jolt's `LookupQuery::to_instruction_inputs`** - This is how Jolt extracts LeftInstructionInput and RightInstructionInput from cycles
+5. **Consider shared trace format** - Zolt may need to use the same trace format as Jolt
+
+### Technical Note on Why Sumcheck Matches but Opening Claims Don't
+
+The sumcheck uses **constraint-weighted evaluations**:
+```
+Az(x) = Σ_constraint w[c] * constraint[c].condition(witness[x])
+```
+
+The opening claims use **raw witness values**:
+```
+r1cs_input_evals[i] = Σ_x eq(r, x) * witness[x].values[i]
+```
+
+These are different! The sumcheck only cares that Az*Bz = 0 (the R1CS is satisfied),
+which depends on the constraint RELATIONSHIPS being correct. The opening claims
+require the ABSOLUTE VALUES to match Jolt's semantics.
+
+The sumcheck matches because:
+- Zolt satisfies the same R1CS constraints as Jolt
+- The witness values may differ but still satisfy Az*Bz = 0
+
+The opening claims differ because:
+- Zolt's `fromTraceStep` extracts different values than Jolt's `from_trace`
+- Key differences likely in: LeftInstructionInput, RightInstructionInput, Product
 
 ---
 

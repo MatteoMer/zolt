@@ -2,74 +2,60 @@
 
 ## Current Status: Session 60 - January 6, 2026
 
-**STATUS: Instruction input semantics fixed. Opening claims still mismatch.**
+**STATUS: Round 0 polynomial correct, Round 1+ polynomials WRONG**
 
 ### Progress This Session
 
 1. ✅ Fixed instruction input semantics (`computeInstructionInputs`)
-   - Now correctly maps left/right instruction inputs per instruction type
-   - ADD: left=rs1, right=rs2
-   - ADDI: left=rs1, right=imm
-   - JAL: left=PC, right=imm
-   - AUIPC: left=PC, right=imm
-   - LUI: left=0, right=imm
-   - etc.
+   - LUI/AUIPC now use sign-extended U-type immediates
+   - Matches Jolt's FormatU::parse sign extension behavior
 
-2. ✅ Fixed updateClaim to use scaled evaluations
-   - The verifier uses eval_from_hint with SCALED coefficients and hint
-   - Prover now tracks scaled claims for consistency
+2. ✅ Fixed r1cs_input_evals - now match Jolt PERFECTLY
+   - r1cs_input_evals[0] matches ✓
+   - r1cs_input_evals[1] matches ✓
+   - r1cs_input_evals[2] matches ✓
 
-3. ✅ All sumcheck challenges match (verified all 11 challenges byte-by-byte)
+3. ✅ Round 0 polynomial is CORRECT
+   - All coefficients (c0, c2, c3) match Jolt
+   - Challenge matches
+   - next_claim matches
 
-4. ⏳ Opening claims (r1cs_input_evals) still don't match
-   - Witness values look correct for first instruction (AUIPC: left=PC, right=imm)
-   - EqPolynomial evaluation should be correct
-   - Need to verify the exact evaluation matches Jolt's
+4. ❌ Round 1+ polynomial computation is WRONG
+   - Round 1 s(0) correct, but s(1), s(2), s(3) wrong
+   - Sumcheck constraint `s(0) + s(1) = previous_claim` NOT satisfied
 
-### Current Issue
+### Root Cause Analysis
 
-Zolt r1cs_input_evals[0] ≠ Jolt r1cs_input_evals[0]
-
-Both sides use:
+**The Bug:**
 ```
-r1cs_input_evals[i] = Σ_t eq(r_cycle, t) * witness[t].values[i]
+Zolt computes: s(0) + s(1) = 2127849171702515242032736530567016046776512160048301414144827652734113940861
+Expected:      s(0) + s(1) = 18977235297014647440385331877696957720245438231586084249713843600848329563216
 ```
 
-Possible causes:
-1. EqPolynomial::evals indexing differs
-2. Cycle index mapping differs
-3. Field element byte ordering differs during evaluation
-4. r_cycle challenges are in different order
+The polynomial at Round 1 doesn't satisfy the sumcheck constraint!
 
-### Debug Info
+**Where the bug is:**
 
-Witness[0] values (first cycle):
-- LeftInstructionInput = PC = 0x80000000 ✓
-- RightInstructionInput = imm = 0x1000 ✓
-- Product = PC * imm (computed in field)
-- PC = 0x80000000 ✓
+The polynomial is computed by:
+1. `computeTEvals()` returns `(t_zero, t_infinity)` from bound t_prime polynomial
+2. `split_eq.computeCubicRoundPoly(t_zero, t_infinity, previous_claim)` constructs s(X)
 
-r_cycle ordering:
-- r_cycle.len = 10 (cycle challenges)
-- r_cycle[0] = challenge[10] reversed (last cycle challenge)
-- r_cycle[last] = challenge[1] reversed (first cycle challenge)
-- This matches Jolt's BIG_ENDIAN conversion
+The issue must be one of:
+- t_prime polynomial isn't being bound correctly after round 0
+- eq tables aren't updated correctly
+- The `computeTEvals` function extracts wrong values
 
-### Next Steps
+### Key Files
 
-1. **Add debug output to compare eq_evals[0..5]** - Verify EqPolynomial produces same values as Jolt
-2. **Check Jolt's accumulator semantics** - How are signed/unsigned values handled?
-3. **Verify field element representation** - Are values stored the same way?
-4. **Test with simpler trace** - Maybe 4 cycles instead of 1024
+- `src/zkvm/spartan/streaming_outer.zig:computeRemainingRoundPoly` - Polynomial computation
+- `src/zkvm/spartan/streaming_outer.zig:bindRemainingRoundChallenge` - Binding logic
+- `src/zkvm/spartan/streaming_outer.zig:computeTEvals` - t_zero/t_infinity extraction
+- `src/poly/split_eq.zig:computeCubicRoundPoly` - Gruen polynomial construction
 
----
+### Previous Session Progress
 
-## Files Involved
-
-- `src/zkvm/r1cs/constraints.zig:fromTraceStep` - R1CS witness generation (FIXED)
-- `src/zkvm/r1cs/constraints.zig:computeInstructionInputs` - Instruction input semantics (NEW)
-- `src/zkvm/r1cs/evaluation.zig:computeClaimedInputs` - MLE evaluation
-- `src/poly/mod.zig:EqPolynomial::evals` - Eq polynomial evaluation
+- Sessions 51-58: Various fixes (batching, round offset, transcript, UniSkip)
+- Session 59: Verified sumcheck polynomials match, identified r1cs_input_evals mismatch
 
 ## Test Commands
 

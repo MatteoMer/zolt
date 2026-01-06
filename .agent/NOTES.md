@@ -1,10 +1,38 @@
 # Zolt-Jolt Compatibility Notes
 
-## Current Status (Session 55 - January 5, 2026)
+## Current Status (Session 56 - January 6, 2026)
 
 ### Summary
 
-Found the root cause of claim divergence: `rebuildTPrimePoly` produces incorrect t_prime values after Az/Bz are bound.
+Root cause confirmed: The sumcheck verification fails because the **inner_sum_prod** computed by the verifier
+uses the two-group blending with `r_stream`, but Zolt's prover doesn't compute the same blended product.
+
+**Key Insight from Jolt Verifier:**
+```rust
+// In evaluate_inner_sum_product_at_point:
+let az_final = az_g0 + r_stream * (az_g1 - az_g0);
+let bz_final = bz_g0 + r_stream * (bz_g1 - bz_g0);
+inner_sum_prod = az_final * bz_final
+```
+
+The verifier expects the prover to produce a claim where the two constraint groups are blended
+using the `r_stream` challenge. The streaming round (first remaining round) produces `r_stream`.
+
+**Debug Output Analysis:**
+- r1cs_input_evals match between prover and verifier ✓
+- sumcheck challenges match (same Fiat-Shamir transcript) ✓
+- But output_claim ≠ expected_output_claim
+
+**Verification formula:**
+```
+expected_output_claim = inner_sum_prod * eq_eval * lagrange_tau_r0
+```
+
+Where `inner_sum_prod` uses the blended Az*Bz product from two constraint groups.
+
+---
+
+## Session 55 - rebuildTPrimePoly Bug Investigation (SUPERSEDED)
 
 ### Session 55 - rebuildTPrimePoly Bug Investigation
 

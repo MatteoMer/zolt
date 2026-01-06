@@ -504,24 +504,27 @@ pub fn StreamingOuterProver(comptime F: type) type {
         /// The cycle index is computed as:
         ///   base_step_idx = (x_out << num_x_in_prime_bits) | (x_in >> 1)
         /// where num_x_in_prime_bits = E_in_bits - 1 (removing group bit)
+        /// Compute the univariate skip first-round polynomial s1(Y) = L(τ_high, Y) · t1(Y)
+        ///
+        /// This matches Jolt's `build_uniskip_first_round_poly` algorithm:
+        /// 1. Compute extended_evals[DEGREE=9] at interleaved target points
+        /// 2. Build t1_vals[19] with zeros at base window, extended_evals at targets
+        /// 3. Interpolate t1 from evaluations to get 19 coefficients (degree-18)
+        /// 4. Compute Lagrange kernel L(τ_high, Y) with 10 coefficients (degree-9)
+        /// 5. Multiply polynomials: (deg-9) × (deg-18) = deg-27 → 28 coefficients
         pub fn computeFirstRoundPoly(self: *Self) ![FIRST_ROUND_NUM_COEFFS]F {
-            // For each point in the extended domain, compute the sum over all cycles AND groups
-            var extended_evals: [univariate_skip.OUTER_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE]F = undefined;
+            const DEGREE = univariate_skip.OUTER_UNIVARIATE_SKIP_DEGREE; // 9
+            const EXTENDED_SIZE = univariate_skip.OUTER_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE; // 19
 
-            // Jolt's UniSkip uses:
-            // - w_last = tau[tau.len - 1] is dropped (tau_high for Lagrange kernel)
-            // - wprime = tau[0..tau.len - 1] (tau.len - 1 elements)
-            // - m = tau.len / 2
-            // - w_out = wprime[0..m] = tau[0..m]
-            // - w_in = wprime[m..] = tau[m..tau.len - 1]
-            //
-            // So the eq polynomial is over tau.len - 1 variables:
-            //   eq(wprime, (x_out, x_in)) = eq(w_out, x_out) * eq(w_in, x_in)
+            // Step 1: Compute extended_evals at ONLY the 9 interleaved target points
+            // Targets are: {-5, 6, -6, 7, -7, 8, -8, 9, -9}
+            const targets = univariate_skip.UNISKIP_TARGETS;
+            var extended_evals: [DEGREE]F = [_]F{F.zero()} ** DEGREE;
 
-            // Calculate the split parameters matching Jolt's structure
+            // Build eq tables for the factored computation
             const m = self.full_tau.len / 2;
-            const num_x_out_bits = m;
             const wprime_len = if (self.full_tau.len > 0) self.full_tau.len - 1 else 0;
+            const num_x_out_bits = m;
             const num_x_in_bits = if (wprime_len > m) wprime_len - m else 0;
             const num_x_in_prime_bits = if (num_x_in_bits > 0) num_x_in_bits - 1 else 0;
 
@@ -536,8 +539,8 @@ pub fn StreamingOuterProver(comptime F: type) type {
             const E_in = try self.buildEqTable(self.full_tau[m .. self.full_tau.len - 1]);
             defer self.allocator.free(E_in);
 
-            // Evaluate at each domain point
-            for (0..univariate_skip.OUTER_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE) |domain_idx| {
+            // Compute extended_evals at each of the 9 target points
+            for (targets, 0..) |target_y, target_idx| {
                 var sum = F.zero();
 
                 // Iterate over all (x_out, x_in) pairs matching Jolt's par_fold_out_in
@@ -546,12 +549,9 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
                     for (0..num_x_in_vals) |x_in| {
                         const e_in = if (x_in < E_in.len) E_in[x_in] else F.zero();
-
-                        // The eq weight is the product e_out * e_in
                         const eq_val = e_out.mul(e_in);
 
-                        // Decode cycle index and group from x_out and x_in
-                        // base_step_idx = (x_out << num_x_in_prime_bits) | (x_in >> 1)
+                        // Decode cycle index and group
                         const x_in_prime = x_in >> 1;
                         const cycle = (x_out << @intCast(num_x_in_prime_bits)) | x_in_prime;
                         const group: u1 = @truncate(x_in & 1);
@@ -559,27 +559,236 @@ pub fn StreamingOuterProver(comptime F: type) type {
                         // Get witness for this cycle
                         if (cycle < self.cycle_witnesses.len) {
                             const witness = &self.cycle_witnesses[cycle];
-
-                            // Evaluate Az * Bz at this domain point for this group
-                            const az_bz = self.evaluateAzBzAtDomainPointForGroup(witness, domain_idx, group);
+                            // Evaluate Az * Bz at this target Y for this group
+                            const az_bz = self.evaluateAzBzAtTargetY(witness, target_y, group);
                             sum = sum.add(eq_val.mul(az_bz));
                         }
                     }
                 }
 
-                extended_evals[domain_idx] = sum;
+                extended_evals[target_idx] = sum;
             }
 
-            // DEBUG: Print some of the extended_evals
-            std.debug.print("[ZOLT UNISKIP] full_tau.len = {}, m = {}\n", .{ self.full_tau.len, m });
-            std.debug.print("[ZOLT UNISKIP] num_x_out_bits = {}, num_x_in_bits = {}, num_x_in_prime_bits = {}\n", .{ num_x_out_bits, num_x_in_bits, num_x_in_prime_bits });
-            std.debug.print("[ZOLT UNISKIP] E_out.len = {}, E_in.len = {}\n", .{ E_out.len, E_in.len });
-            std.debug.print("[ZOLT UNISKIP] extended_evals[0] = {any}\n", .{extended_evals[0].toBytesBE()});
-            std.debug.print("[ZOLT UNISKIP] extended_evals[9] = {any}\n", .{extended_evals[9].toBytesBE()}); // Y=0
-            std.debug.print("[ZOLT UNISKIP] extended_evals[18] = {any}\n", .{extended_evals[18].toBytesBE()});
+            // Step 2: Build t1_vals array (19 entries)
+            // Base window {-4,...,5} gets zeros, extended points get their evals
+            var t1_vals: [EXTENDED_SIZE]F = [_]F{F.zero()} ** EXTENDED_SIZE;
 
-            // Multiply by Lagrange kernel and interpolate to get coefficients
-            return self.interpolateFirstRoundPoly(&extended_evals);
+            // Fill in extended evaluations at target positions
+            for (targets, 0..) |z, idx| {
+                // pos maps z ∈ {-9,...,9} to index ∈ {0,...,18}
+                const pos: usize = @intCast(z + @as(i64, DEGREE));
+                t1_vals[pos] = extended_evals[idx];
+            }
+
+            // DEBUG output
+            std.debug.print("[ZOLT UNISKIP] full_tau.len = {}, m = {}\n", .{ self.full_tau.len, m });
+            std.debug.print("[ZOLT UNISKIP] extended_evals[0] (Y={}) = {any}\n", .{ targets[0], extended_evals[0].toBytesBE() });
+            std.debug.print("[ZOLT UNISKIP] extended_evals[8] (Y={}) = {any}\n", .{ targets[8], extended_evals[8].toBytesBE() });
+
+            // Step 3-5: Interpolate and multiply with Lagrange kernel
+            return self.buildUniSkipPolynomial(&t1_vals);
+        }
+
+        /// Evaluate Az * Bz at a specific target Y coordinate for a group
+        /// Target Y is one of the extended points: {-5, 6, -6, 7, -7, 8, -8, 9, -9}
+        fn evaluateAzBzAtTargetY(
+            self: *const Self,
+            witness: *const constraints.R1CSCycleInputs(F),
+            target_y: i64,
+            group: u1,
+        ) F {
+            _ = self;
+
+            // Select group-specific parameters
+            const group_size: usize = if (group == 0) FIRST_GROUP_SIZE else SECOND_GROUP_SIZE;
+            const group_indices = if (group == 0) &constraints.FIRST_GROUP_INDICES else &constraints.SECOND_GROUP_INDICES;
+
+            // Use Lagrange extrapolation to evaluate Az and Bz at target_y
+            // Base window:
+            // - FIRST_GROUP (10 constraints): {-4, -3, -2, -1, 0, 1, 2, 3, 4, 5}
+            // - SECOND_GROUP (9 constraints): {-4, -3, -2, -1, 0, 1, 2, 3, 4}
+            var az_base: [FIRST_GROUP_SIZE]F = undefined;
+            var bz_base: [FIRST_GROUP_SIZE]F = undefined;
+
+            for (0..group_size) |i| {
+                const constraint_idx = group_indices[i];
+                const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
+                az_base[i] = constraint.condition.evaluate(F, witness.asSlice());
+                bz_base[i] = constraint.left.evaluate(F, witness.asSlice())
+                    .sub(constraint.right.evaluate(F, witness.asSlice()));
+            }
+
+            // Use precomputed Lagrange coefficients to extrapolate to target_y
+            const targets = univariate_skip.UNISKIP_TARGETS;
+            var target_j: ?usize = null;
+            for (targets, 0..) |t, j| {
+                if (t == target_y) {
+                    target_j = j;
+                    break;
+                }
+            }
+
+            if (target_j) |j| {
+                const coeffs = univariate_skip.COEFFS_PER_J[j];
+
+                // Extrapolate Az(target_y) = Σ_i coeffs[i] * az_base[i]
+                var az_y = F.zero();
+                for (0..group_size) |i| {
+                    const c = coeffs[i];
+                    if (c != 0) {
+                        const c_field = if (c > 0)
+                            F.fromU64(@intCast(c))
+                        else
+                            F.zero().sub(F.fromU64(@intCast(-c)));
+                        az_y = az_y.add(az_base[i].mul(c_field));
+                    }
+                }
+
+                // Extrapolate Bz(target_y) = Σ_i coeffs[i] * bz_base[i]
+                var bz_y = F.zero();
+                for (0..group_size) |i| {
+                    const c = coeffs[i];
+                    if (c != 0) {
+                        const c_field = if (c > 0)
+                            F.fromU64(@intCast(c))
+                        else
+                            F.zero().sub(F.fromU64(@intCast(-c)));
+                        bz_y = bz_y.add(bz_base[i].mul(c_field));
+                    }
+                }
+
+                return az_y.mul(bz_y);
+            }
+
+            return F.zero();
+        }
+
+        /// Build the UniSkip polynomial s1(Y) = L(τ_high, Y) · t1(Y)
+        /// from t1 evaluations on the extended domain
+        fn buildUniSkipPolynomial(
+            self: *const Self,
+            t1_vals: *const [univariate_skip.OUTER_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE]F,
+        ) [FIRST_ROUND_NUM_COEFFS]F {
+            const DEGREE = univariate_skip.OUTER_UNIVARIATE_SKIP_DEGREE; // 9
+            const DOMAIN_SIZE = univariate_skip.OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE; // 10
+            const EXTENDED_SIZE = univariate_skip.OUTER_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE; // 19
+
+            // Step 3: Interpolate t1 from evaluations to coefficients (degree-18)
+            // Domain is {-DEGREE, ..., DEGREE} = {-9, ..., 9}
+            var t1_coeffs: [EXTENDED_SIZE]F = [_]F{F.zero()} ** EXTENDED_SIZE;
+            self.lagrangeInterpolate(t1_vals, &t1_coeffs, EXTENDED_SIZE, DEGREE);
+
+            // Step 4: Compute Lagrange kernel L(τ_high, Y) evaluations and coefficients
+            // Evaluate L_i(τ_high) for i ∈ {0, ..., DOMAIN_SIZE-1} where base domain is {-4, ..., 5}
+            const tau_high = self.tau_high;
+            var lagrange_evals: [DOMAIN_SIZE]F = undefined;
+            const base_left: i64 = -@as(i64, (DOMAIN_SIZE - 1) / 2);
+
+            for (0..DOMAIN_SIZE) |i| {
+                const x_i: i64 = base_left + @as(i64, @intCast(i));
+                var num = F.one();
+                var den = F.one();
+
+                for (0..DOMAIN_SIZE) |j| {
+                    if (i == j) continue;
+                    const x_j: i64 = base_left + @as(i64, @intCast(j));
+                    const x_j_field = if (x_j >= 0) F.fromU64(@intCast(x_j)) else F.zero().sub(F.fromU64(@intCast(-x_j)));
+                    num = num.mul(tau_high.sub(x_j_field));
+
+                    const diff: i64 = x_i - x_j;
+                    const diff_field = if (diff >= 0) F.fromU64(@intCast(diff)) else F.zero().sub(F.fromU64(@intCast(-diff)));
+                    den = den.mul(diff_field);
+                }
+
+                lagrange_evals[i] = num.mul(den.inverse().?);
+            }
+
+            // Interpolate Lagrange kernel to coefficients (degree-9)
+            var lagrange_coeffs: [DOMAIN_SIZE]F = [_]F{F.zero()} ** DOMAIN_SIZE;
+            self.lagrangeInterpolate(&lagrange_evals, &lagrange_coeffs, DOMAIN_SIZE, @as(i64, (DOMAIN_SIZE - 1) / 2));
+
+            // Step 5: Multiply polynomials (deg-9) × (deg-18) = deg-27 → 28 coefficients
+            var s1_coeffs: [FIRST_ROUND_NUM_COEFFS]F = [_]F{F.zero()} ** FIRST_ROUND_NUM_COEFFS;
+            for (0..DOMAIN_SIZE) |i| {
+                for (0..EXTENDED_SIZE) |j| {
+                    s1_coeffs[i + j] = s1_coeffs[i + j].add(lagrange_coeffs[i].mul(t1_coeffs[j]));
+                }
+            }
+
+            return s1_coeffs;
+        }
+
+        /// Lagrange interpolation from evaluations to coefficients
+        /// Evaluations are at symmetric integer domain {-half_size, ..., half_size}
+        fn lagrangeInterpolate(
+            self: *const Self,
+            evals: []const F,
+            coeffs: []F,
+            size: usize,
+            half_size: i64,
+        ) void {
+            _ = self;
+
+            // Initialize coeffs to zero
+            for (0..size) |k| {
+                coeffs[k] = F.zero();
+            }
+
+            // Lagrange interpolation: p(Y) = Σ_i y_i * L_i(Y)
+            for (0..size) |i| {
+                const y_i = evals[i];
+                if (y_i.eql(F.zero())) continue;
+
+                // Domain point x_i = -half_size + i
+                const x_i: i64 = -half_size + @as(i64, @intCast(i));
+
+                // Compute denominator Π_{j≠i} (x_i - x_j)
+                var den = F.one();
+                for (0..size) |j| {
+                    if (i == j) continue;
+                    const x_j: i64 = -half_size + @as(i64, @intCast(j));
+                    const diff: i64 = x_i - x_j;
+                    const diff_field = if (diff >= 0)
+                        F.fromU64(@intCast(diff))
+                    else
+                        F.zero().sub(F.fromU64(@intCast(-diff)));
+                    den = den.mul(diff_field);
+                }
+
+                const scale = y_i.mul(den.inverse().?);
+
+                // Build Lagrange basis polynomial Π_{j≠i} (Y - x_j)
+                var basis: [univariate_skip.OUTER_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE]F =
+                    [_]F{F.zero()} ** univariate_skip.OUTER_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE;
+                basis[0] = F.one();
+                var deg: usize = 0;
+
+                for (0..size) |j| {
+                    if (i == j) continue;
+                    const x_j: i64 = -half_size + @as(i64, @intCast(j));
+                    const neg_x_j = if (x_j >= 0)
+                        F.zero().sub(F.fromU64(@intCast(x_j)))
+                    else
+                        F.fromU64(@intCast(-x_j));
+
+                    // Multiply basis by (Y - x_j)
+                    var k: usize = deg + 1;
+                    while (k > 0) {
+                        k -= 1;
+                        const old = basis[k];
+                        if (k + 1 < coeffs.len) {
+                            basis[k + 1] = basis[k + 1].add(old);
+                        }
+                        basis[k] = old.mul(neg_x_j);
+                    }
+                    deg += 1;
+                }
+
+                // Add scaled basis to coefficients
+                for (0..size) |k| {
+                    coeffs[k] = coeffs[k].add(basis[k].mul(scale));
+                }
+            }
         }
 
         /// Build an eq polynomial evaluation table over the given tau values

@@ -1,95 +1,75 @@
 # Zolt-Jolt Compatibility TODO
 
-## Current Status: Session 59 - January 6, 2026
+## Current Status: Session 60 - January 6, 2026
 
-**STATUS: Sumcheck polynomials match perfectly! Opening claims mismatch.**
+**STATUS: Instruction input semantics fixed. Opening claims still mismatch.**
 
-### Key Finding
+### Progress This Session
 
-The entire sumcheck (UniSkip + remaining 11 rounds) produces IDENTICAL polynomials and challenges:
-- All 11 rounds: c0, c2, c3 coefficients match byte-for-byte
-- All challenges match
-- Output claim matches: `7379936223227643720496096556404058095654400826692293621824406143059361739906`
-- But expected_output_claim differs: `18262841792610895119506382142558123804551187240428090173583850498893311403655`
+1. ✅ Fixed instruction input semantics (`computeInstructionInputs`)
+   - Now correctly maps left/right instruction inputs per instruction type
+   - ADD: left=rs1, right=rs2
+   - ADDI: left=rs1, right=imm
+   - JAL: left=PC, right=imm
+   - AUIPC: left=PC, right=imm
+   - LUI: left=0, right=imm
+   - etc.
 
-The verifier's expected_output_claim = `lagrange_tau_r0 * tau_bound_r_tail * inner_sum_prod`
+2. ✅ Fixed updateClaim to use scaled evaluations
+   - The verifier uses eval_from_hint with SCALED coefficients and hint
+   - Prover now tracks scaled claims for consistency
 
-### Root Cause Analysis
+3. ✅ All sumcheck challenges match (verified all 11 challenges byte-by-byte)
 
-- `lagrange_tau_r0` matches ✓
-- `tau_bound_r_tail` matches (since challenges match) ✓
-- `inner_sum_prod` does NOT match!
+4. ⏳ Opening claims (r1cs_input_evals) still don't match
+   - Witness values look correct for first instruction (AUIPC: left=PC, right=imm)
+   - EqPolynomial evaluation should be correct
+   - Need to verify the exact evaluation matches Jolt's
 
-The verifier computes `inner_sum_prod` from `r1cs_input_evals` (the opening claims):
-- Zolt r1cs_input_evals[0]: `5231928340169930126114200659211794492272793854802256682327597965133309506589`
-- Jolt r1cs_input_evals[0]: `13323732181978876592732594325445545041189112629920616992481060020772236071179`
+### Current Issue
 
-The opening claims don't match because Zolt generates R1CS witnesses from `TraceStep` while
-Jolt generates them from its internal `Cycle` structure with different semantics.
+Zolt r1cs_input_evals[0] ≠ Jolt r1cs_input_evals[0]
 
-### Changes Completed This Session
+Both sides use:
+```
+r1cs_input_evals[i] = Σ_t eq(r_cycle, t) * witness[t].values[i]
+```
 
-1. ✅ Fixed batching coefficient - removed incorrect 125-bit masking
-2. ✅ Verified all sumcheck coefficients match byte-for-byte
-3. ✅ Verified all challenges match
+Possible causes:
+1. EqPolynomial::evals indexing differs
+2. Cycle index mapping differs
+3. Field element byte ordering differs during evaluation
+4. r_cycle challenges are in different order
 
-### Previous Fixes
+### Debug Info
 
-- ✅ UniSkip polynomial passes domain sum check
-- ✅ Remaining sumcheck rounds produce correct polynomials
-- ✅ Batching coefficient now matches (was masked to 125 bits incorrectly)
+Witness[0] values (first cycle):
+- LeftInstructionInput = PC = 0x80000000 ✓
+- RightInstructionInput = imm = 0x1000 ✓
+- Product = PC * imm (computed in field)
+- PC = 0x80000000 ✓
+
+r_cycle ordering:
+- r_cycle.len = 10 (cycle challenges)
+- r_cycle[0] = challenge[10] reversed (last cycle challenge)
+- r_cycle[last] = challenge[1] reversed (first cycle challenge)
+- This matches Jolt's BIG_ENDIAN conversion
 
 ### Next Steps
 
-1. **Fix R1CS witness generation** - The `fromTraceStep` function needs to match Jolt's witness semantics
-2. **Verify witness values match** - Add debug output to compare cycle_witnesses[0] with Jolt's values
-3. **Consider trace format compatibility** - Zolt's TraceStep may not contain all fields Jolt expects
-4. **Study Jolt's `LookupQuery::to_instruction_inputs`** - This is how Jolt extracts LeftInstructionInput and RightInstructionInput from cycles
-5. **Consider shared trace format** - Zolt may need to use the same trace format as Jolt
-
-### Technical Note on Why Sumcheck Matches but Opening Claims Don't
-
-The sumcheck uses **constraint-weighted evaluations**:
-```
-Az(x) = Σ_constraint w[c] * constraint[c].condition(witness[x])
-```
-
-The opening claims use **raw witness values**:
-```
-r1cs_input_evals[i] = Σ_x eq(r, x) * witness[x].values[i]
-```
-
-These are different! The sumcheck only cares that Az*Bz = 0 (the R1CS is satisfied),
-which depends on the constraint RELATIONSHIPS being correct. The opening claims
-require the ABSOLUTE VALUES to match Jolt's semantics.
-
-The sumcheck matches because:
-- Zolt satisfies the same R1CS constraints as Jolt
-- The witness values may differ but still satisfy Az*Bz = 0
-
-The opening claims differ because:
-- Zolt's `fromTraceStep` extracts different values than Jolt's `from_trace`
-- Key differences likely in: LeftInstructionInput, RightInstructionInput, Product
+1. **Add debug output to compare eq_evals[0..5]** - Verify EqPolynomial produces same values as Jolt
+2. **Check Jolt's accumulator semantics** - How are signed/unsigned values handled?
+3. **Verify field element representation** - Are values stored the same way?
+4. **Test with simpler trace** - Maybe 4 cycles instead of 1024
 
 ---
 
-## Technical Details
+## Files Involved
 
-### Verification Flow
-
-```
-1. Prover generates sumcheck proof (polynomials) - CORRECT ✓
-2. Prover generates opening claims (r1cs_input_evals) - MISMATCH ✗
-3. Verifier uses opening claims to compute expected_output_claim - FAILS
-```
-
-### Files Involved
-
-- `src/zkvm/r1cs/constraints.zig:fromTraceStep` - Generates R1CS witnesses
-- `src/zkvm/r1cs/evaluation.zig:computeClaimedInputs` - Computes MLE at r_cycle
-- `src/zkvm/proof_converter.zig:addSpartanOuterOpeningClaimsWithEvaluations` - Serializes claims
-
----
+- `src/zkvm/r1cs/constraints.zig:fromTraceStep` - R1CS witness generation (FIXED)
+- `src/zkvm/r1cs/constraints.zig:computeInstructionInputs` - Instruction input semantics (NEW)
+- `src/zkvm/r1cs/evaluation.zig:computeClaimedInputs` - MLE evaluation
+- `src/poly/mod.zig:EqPolynomial::evals` - Eq polynomial evaluation
 
 ## Test Commands
 
@@ -102,11 +82,3 @@ zig build -Doptimize=ReleaseFast
 cd /Users/matteo/projects/jolt
 cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture
 ```
-
----
-
-## Previous Sessions Summary
-
-- Session 58: UniSkip passes domain sum check
-- Session 57: Identified SECOND_GROUP missing from UniSkip
-- Sessions 51-56: Various fixes (batching, round offset, transcript)

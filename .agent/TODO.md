@@ -1,71 +1,78 @@
 # Zolt-Jolt Compatibility TODO
 
-## Current Status: Session 61 - January 6, 2026
+## Current Status: January 6, 2026 - Session 61
 
-**STATUS: Sumcheck Passes, Opening Claims Wrong**
+**STATUS: Opening claims are CORRECT, but expected_output_claim doesn't match**
+
+### Key Discovery
+
+The opening claims (r1cs_input_evals) in the proof file are CORRECT and match what Jolt reads. The issue is that Jolt's `expected_output_claim` (computed from R1CS matrices) doesn't match Zolt's `output_claim` (from sumcheck).
+
+### Debug Data
+
+**Zolt's output_claim:** `6773516909001919453588788632964349915676722363381828976724283873891965463518`
+
+**Jolt's expected_output_claim:** `2434835346226335308248403617389563027378536009995292689449902135365447362920`
+
+**Jolt's computation:**
+```
+expected_output_claim = tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod
+where:
+  tau_high_bound_r0 = 4727117031941196407385944657435434079136516688275922352384973912379816609693
+  tau_bound_r_tail_reversed = 13259834722364943624192342920911916962118484982517771566822504207737030243809
+  inner_sum_prod = 1221027240042985780108460212824162278077143256096887971142513640043566180374
+```
+
+### Root Cause Analysis
+
+The sumcheck output_claim should equal:
+```
+output_claim = eq(tau, r) * Az(r) * Bz(r)
+```
+
+The verifier's expected_output_claim is:
+```
+expected = tau_factor * inner_sum_prod
+        = tau_factor * Az_eval * Bz_eval
+```
+
+where Az_eval and Bz_eval are computed from the R1CS matrices and r1cs_input_evals.
+
+The discrepancy suggests either:
+1. **R1CS constraints differ** between Zolt and Jolt's preprocessing
+2. **R1CS evaluation differs** - how Zolt computes Az*Bz vs how Jolt evaluates
+3. **Preprocessing mismatch** - Jolt's verifier key may have different R1CS sparse matrices
 
 ### ✅ Confirmed Working
 
-1. **Transcript Compatibility**: Keccak256 transcript perfectly matches Jolt
-2. **Preamble**: Memory layout, inputs, outputs, panic, ram_K, trace_length all match
-3. **Dory Commitments**: GT element serialization matches
-4. **Tau Derivation**: All 12 tau values match exactly
-5. **UniSkip Polynomial**: All 28 coefficients match exactly
-6. **r0 Challenge**: Matches exactly after UniSkip polynomial appended
-7. **Batching Coefficient**: Matches exactly
-8. **All Sumcheck Rounds (0-10)**: Transcript states match at every round
-9. **All Sumcheck Challenges**: Every challenge matches between Zolt and Jolt
-10. **Output Claim**: Zolt's output_claim (scaled) matches Jolt's exactly
+1. **Transcript Compatibility**: All transcript states match
+2. **Preamble**: Matches
+3. **Dory Commitments**: Match
+4. **Tau Derivation**: All 12 values match
+5. **UniSkip Polynomial**: All coefficients match
+6. **All Sumcheck Challenges**: Match exactly
+7. **Opening Claims Serialization**: Values in proof file are correct
 
-### ❌ Current Issue: Opening Claims Wrong
+### ❌ Current Issue
 
-**The Problem:**
-
-Verification fails because Zolt's opening claims (r1cs_input_evals) don't match Jolt's expected values:
-
-| Input | Zolt Value | Jolt Expected |
-|-------|------------|---------------|
-| LeftInstructionInput | 111671539584291221291839977129744267341086976218214076725283565100174391436821 | 9906325628809186578319307187123224683532195550528121667958235291543194428406 |
-
-**Root Cause:**
-
-Opening claims are MLE evaluations at r_cycle. The issue is in how `computeClaimedInputs` evaluates the MLE.
-
-**Key Observations:**
-
-1. **r_cycle construction is correct** - Challenges are reversed properly from LITTLE_ENDIAN to BIG_ENDIAN
-2. **Witness values look correct** - First cycle has sensible values
-3. **The EqPolynomial evaluation may be wrong** - Either the indexing or the accumulation
+The R1CS evaluation produces different results:
+- Zolt computes `Az*Bz` during sumcheck → produces output_claim
+- Jolt verifier computes `Az_eval * Bz_eval` from R1CS matrices → produces expected_output_claim
+- These should be equal but aren't
 
 ### Next Steps
 
-1. **Add debug in MLE evaluation** - Print eq_evals for specific cycles and compare with Jolt
-2. **Verify cycle-to-hypercube mapping** - Check if cycle 0 maps to (0,0,...,0) or something else
-3. **Compare EqPolynomial semantics** - Ensure Zolt's "big-endian indexing" matches Jolt's `mle_endian`
-
-### Technical Details
-
-**Jolt's r_cycle (from outer.rs):**
-```rust
-let r_cycle = challenges[1..].to_vec();  // Skip r0
-OpeningPoint::<LITTLE_ENDIAN, F>::new(r_cycle).match_endianness()  // Reverse for BIG_ENDIAN
-```
-
-**Zolt's r_cycle (from proof_converter.zig):**
-```zig
-const cycle_challenges = all_challenges[1..];  // Skip r_stream
-for (0..cycle_challenges.len) |i| {
-    r_cycle_big_endian[i] = cycle_challenges[cycle_challenges.len - 1 - i];  // Reverse
-}
-```
-
-The construction appears identical but MLE evaluation produces different results.
+1. **Compare R1CS constraints** - Verify Zolt's R1CS matches Jolt's exactly
+2. **Check R1CS sparse matrix representation** - How Zolt represents vs how Jolt evaluates
+3. **Verify preprocessing export** - Ensure Zolt exports R1CS correctly
+4. **Add debug to R1CS evaluation** - Print Az_eval, Bz_eval from both sides
 
 ### Files to Investigate
 
-- `/Users/matteo/projects/zolt/src/zkvm/r1cs/evaluation.zig` - `computeClaimedInputs`
-- `/Users/matteo/projects/zolt/src/poly/mod.zig` - `EqPolynomial.evals`
-- `/Users/matteo/projects/jolt/jolt-core/src/poly/multilinear.rs` - Jolt's MLE semantics
+- `/Users/matteo/projects/zolt/src/zkvm/r1cs/constraints.zig` - Zolt's R1CS constraints
+- `/Users/matteo/projects/jolt/jolt-core/src/zkvm/r1cs/constraints.rs` - Jolt's R1CS constraints
+- `/Users/matteo/projects/jolt/jolt-core/src/zkvm/r1cs/evaluation.rs` - Jolt's R1CS evaluation
+- `/Users/matteo/projects/zolt/src/zkvm/spartan/streaming_outer.zig` - Zolt's sumcheck
 
 ## Test Commands
 
@@ -77,4 +84,7 @@ zig build -Doptimize=ReleaseFast
 # Jolt verification test
 cd /Users/matteo/projects/jolt
 cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture
+
+# Debug proof format
+cargo test --package jolt-core test_debug_zolt_format -- --ignored --nocapture
 ```

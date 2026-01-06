@@ -27,6 +27,10 @@ pub const JoltOuterProver = jolt_outer_prover.JoltOuterProver;
 pub const streaming_outer = @import("streaming_outer.zig");
 pub const StreamingOuterProver = streaming_outer.StreamingOuterProver;
 
+// Product virtualization remainder prover for Stage 2
+pub const product_remainder = @import("product_remainder.zig");
+pub const ProductVirtualRemainderProver = product_remainder.ProductVirtualRemainderProver;
+
 /// Spartan proof for R1CS
 pub fn R1CSProof(comptime F: type) type {
     return struct {

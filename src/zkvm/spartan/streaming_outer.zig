@@ -84,6 +84,11 @@ pub fn StreamingOuterProver(comptime F: type) type {
         /// This is stored separately because split_eq only receives tau_low
         tau_high: F,
 
+        /// Full tau vector (needed for UniSkip first round computation)
+        /// The split_eq receives tau_low = tau[0..tau.len-1], but UniSkip needs full tau
+        /// to compute the correct eq_table structure with E_out and E_in
+        full_tau: []const F,
+
         /// Linear phase: Bound Az polynomial
         /// Materialized at linear phase start, bound each round with bindLow()
         /// Matches Jolt's OuterLinearStage.az
@@ -164,6 +169,10 @@ pub fn StreamingOuterProver(comptime F: type) type {
             var r_grid = try ExpandingTable(F).init(allocator, padded_len, .LowToHigh);
             r_grid.reset(F.one());
 
+            // Copy full tau for UniSkip computation
+            const full_tau = try allocator.alloc(F, tau.len);
+            @memcpy(full_tau, tau);
+
             return Self{
                 .cycle_witnesses = cycle_witnesses,
                 .num_cycle_vars = num_cycle_vars,
@@ -176,6 +185,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 .r_stream = null,
                 .r_grid = r_grid,
                 .tau_high = tau_high,
+                .full_tau = full_tau,
                 .az_poly = null,
                 .bz_poly = null,
                 .t_prime_poly = null,
@@ -187,6 +197,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
             self.split_eq.deinit();
             self.challenges.deinit(self.allocator);
             self.r_grid.deinit();
+            self.allocator.free(self.full_tau);
             if (self.az_poly) |*az| {
                 az.deinit();
             }
@@ -478,30 +489,81 @@ pub fn StreamingOuterProver(comptime F: type) type {
         ///   s₁(Y) = L(τ_high, Y) * Σ_{x_out, x_in} eq(τ, x) * Az(x, Y) * Bz(x, Y)
         ///
         /// Returns coefficients for the degree-27 polynomial
+        ///
+        /// IMPORTANT: This loops over both constraint groups (FIRST_GROUP and SECOND_GROUP)
+        /// matching Jolt's implementation. In Jolt, x_in's LSB selects the group:
+        /// - x_in & 1 == 0 → FIRST_GROUP (10 constraints)
+        /// - x_in & 1 == 1 → SECOND_GROUP (9 constraints)
+        ///
+        /// CRITICAL: Jolt's UniSkip uses the FULL tau vector (num_cycle_vars + 2 elements)
+        /// to create the split_eq, NOT tau_low. This gives:
+        /// - m = (num_cycle_vars + 2) / 2 for the split
+        /// - E_out has m bits, E_in has (num_cycle_vars + 1 - m) bits
+        /// - w_last (tau[tau.len-1]) is DROPPED from the eq computation
+        ///
+        /// The cycle index is computed as:
+        ///   base_step_idx = (x_out << num_x_in_prime_bits) | (x_in >> 1)
+        /// where num_x_in_prime_bits = E_in_bits - 1 (removing group bit)
         pub fn computeFirstRoundPoly(self: *Self) ![FIRST_ROUND_NUM_COEFFS]F {
-            // For each point in the extended domain, compute the sum over all cycles
+            // For each point in the extended domain, compute the sum over all cycles AND groups
             var extended_evals: [univariate_skip.OUTER_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE]F = undefined;
 
-            // Get eq evaluations for cycles
-            const eq_table = try self.split_eq.getFullEqTable(self.allocator);
-            defer self.allocator.free(eq_table);
+            // Jolt's UniSkip uses:
+            // - w_last = tau[tau.len - 1] is dropped (tau_high for Lagrange kernel)
+            // - wprime = tau[0..tau.len - 1] (tau.len - 1 elements)
+            // - m = tau.len / 2
+            // - w_out = wprime[0..m] = tau[0..m]
+            // - w_in = wprime[m..] = tau[m..tau.len - 1]
+            //
+            // So the eq polynomial is over tau.len - 1 variables:
+            //   eq(wprime, (x_out, x_in)) = eq(w_out, x_out) * eq(w_in, x_in)
+
+            // Calculate the split parameters matching Jolt's structure
+            const m = self.full_tau.len / 2;
+            const num_x_out_bits = m;
+            const wprime_len = if (self.full_tau.len > 0) self.full_tau.len - 1 else 0;
+            const num_x_in_bits = if (wprime_len > m) wprime_len - m else 0;
+            const num_x_in_prime_bits = if (num_x_in_bits > 0) num_x_in_bits - 1 else 0;
+
+            const num_x_out_vals: usize = @as(usize, 1) << @intCast(num_x_out_bits);
+            const num_x_in_vals: usize = @as(usize, 1) << @intCast(num_x_in_bits);
+
+            // Build E_out (eq table over w_out = tau[0..m])
+            const E_out = try self.buildEqTable(self.full_tau[0..m]);
+            defer self.allocator.free(E_out);
+
+            // Build E_in (eq table over w_in = tau[m..tau.len-1])
+            const E_in = try self.buildEqTable(self.full_tau[m .. self.full_tau.len - 1]);
+            defer self.allocator.free(E_in);
 
             // Evaluate at each domain point
             for (0..univariate_skip.OUTER_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE) |domain_idx| {
                 var sum = F.zero();
 
-                // Sum over all cycles
-                for (0..@min(self.cycle_witnesses.len, self.padded_trace_len)) |cycle| {
-                    const eq_val = if (cycle < eq_table.len) eq_table[cycle] else F.zero();
+                // Iterate over all (x_out, x_in) pairs matching Jolt's par_fold_out_in
+                for (0..num_x_out_vals) |x_out| {
+                    const e_out = if (x_out < E_out.len) E_out[x_out] else F.zero();
 
-                    // Get Az and Bz for this cycle
-                    if (cycle < self.cycle_witnesses.len) {
-                        const witness = &self.cycle_witnesses[cycle];
+                    for (0..num_x_in_vals) |x_in| {
+                        const e_in = if (x_in < E_in.len) E_in[x_in] else F.zero();
 
-                        // Evaluate Az * Bz at this domain point
-                        // Domain point maps to constraint index
-                        const az_bz = self.evaluateAzBzAtDomainPoint(witness, domain_idx);
-                        sum = sum.add(eq_val.mul(az_bz));
+                        // The eq weight is the product e_out * e_in
+                        const eq_val = e_out.mul(e_in);
+
+                        // Decode cycle index and group from x_out and x_in
+                        // base_step_idx = (x_out << num_x_in_prime_bits) | (x_in >> 1)
+                        const x_in_prime = x_in >> 1;
+                        const cycle = (x_out << @intCast(num_x_in_prime_bits)) | x_in_prime;
+                        const group: u1 = @truncate(x_in & 1);
+
+                        // Get witness for this cycle
+                        if (cycle < self.cycle_witnesses.len) {
+                            const witness = &self.cycle_witnesses[cycle];
+
+                            // Evaluate Az * Bz at this domain point for this group
+                            const az_bz = self.evaluateAzBzAtDomainPointForGroup(witness, domain_idx, group);
+                            sum = sum.add(eq_val.mul(az_bz));
+                        }
                     }
                 }
 
@@ -512,24 +574,55 @@ pub fn StreamingOuterProver(comptime F: type) type {
             return self.interpolateFirstRoundPoly(&extended_evals);
         }
 
-        /// Evaluate Az * Bz for a single cycle at a specific domain point Y
+        /// Build an eq polynomial evaluation table over the given tau values
+        /// Uses big-endian indexing: tau[0] controls MSB of index
+        fn buildEqTable(self: *const Self, tau: []const F) ![]F {
+            const size: usize = @as(usize, 1) << @intCast(tau.len);
+            const result = try self.allocator.alloc(F, size);
+
+            // Start with 1
+            result[0] = F.one();
+            var current_size: usize = 1;
+
+            // For each variable, double the table size
+            for (tau) |tau_k| {
+                const one_minus_tau_k = F.one().sub(tau_k);
+
+                // Iterate in reverse to avoid overwriting needed values
+                var i: usize = current_size;
+                while (i > 0) {
+                    i -= 1;
+                    const scalar = result[i];
+                    // Big-endian: new bit is appended as LSB
+                    // Index 2*i (even, bit=0) gets (1-τ)
+                    // Index 2*i+1 (odd, bit=1) gets τ
+                    result[2 * i + 1] = scalar.mul(tau_k);
+                    result[2 * i] = scalar.mul(one_minus_tau_k);
+                }
+                current_size *= 2;
+            }
+
+            return result;
+        }
+
+        /// Evaluate Az * Bz for a single cycle at a specific domain point Y for a specific group
         ///
         /// The domain points are in the extended symmetric window:
         /// - Index 0: Y = -DEGREE (= -9)
         /// - Index 9: Y = 0
         /// - Index 18: Y = DEGREE (= 9)
         ///
-        /// For Y in the base window {-4, -3, ..., 4, 5}, we can directly evaluate
-        /// the constraint at that index.
+        /// Group selection:
+        /// - group=0 (FIRST_GROUP): 10 constraints at Y ∈ {-4, -3, ..., 4, 5}
+        /// - group=1 (SECOND_GROUP): 9 constraints at Y ∈ {-4, -3, ..., 3, 4}
         ///
-        /// For Y outside the base window, we use Lagrange extrapolation:
-        /// - Evaluate Az and Bz at base window points
-        /// - Extrapolate to Y using precomputed Lagrange coefficients
-        /// - Multiply extrapolated values
-        fn evaluateAzBzAtDomainPoint(
+        /// For Y in the base window, we can directly evaluate the constraint.
+        /// For Y outside the base window, we use Lagrange extrapolation.
+        fn evaluateAzBzAtDomainPointForGroup(
             self: *const Self,
             witness: *const constraints.R1CSCycleInputs(F),
             domain_idx: usize,
+            group: u1,
         ) F {
             _ = self;
 
@@ -540,34 +633,41 @@ pub fn StreamingOuterProver(comptime F: type) type {
             const DEGREE = univariate_skip.OUTER_UNIVARIATE_SKIP_DEGREE;
             const y_coord: i64 = @as(i64, @intCast(domain_idx)) - @as(i64, DEGREE);
 
-            // Base window is {-4, -3, -2, -1, 0, 1, 2, 3, 4, 5}
-            // which corresponds to base_left = -4, base_right = 5
-            const base_left: i64 = -@as(i64, (FIRST_GROUP_SIZE - 1) / 2);
-            const base_right: i64 = base_left + @as(i64, FIRST_GROUP_SIZE) - 1;
+            // Select group-specific parameters
+            // FIRST_GROUP (group=0): 10 constraints at Y ∈ {-4, ..., 5}, uses FIRST_GROUP_INDICES
+            // SECOND_GROUP (group=1): 9 constraints at Y ∈ {-4, ..., 4}, uses SECOND_GROUP_INDICES
+            const group_size: usize = if (group == 0) FIRST_GROUP_SIZE else SECOND_GROUP_SIZE;
+            const group_indices = if (group == 0) &constraints.FIRST_GROUP_INDICES else &constraints.SECOND_GROUP_INDICES;
 
-            // Check if Y is in the base window
+            // Base window:
+            // - FIRST_GROUP (10 constraints): {-4, -3, -2, -1, 0, 1, 2, 3, 4, 5}
+            // - SECOND_GROUP (9 constraints): {-4, -3, -2, -1, 0, 1, 2, 3, 4}
+            const base_left: i64 = -@as(i64, (group_size - 1) / 2);
+            const base_right: i64 = base_left + @as(i64, group_size) - 1;
+
+            // Check if Y is in the base window for this group
             if (y_coord >= base_left and y_coord <= base_right) {
                 // Y is in the base window - evaluate constraint directly
                 // Map Y to constraint index: Y = base_left + i => i = Y - base_left
                 const constraint_pos: usize = @intCast(y_coord - base_left);
 
-                // For a valid R1CS, Az*Bz should be ZERO at base window points
-                // because the constraints are satisfied
-                const constraint_idx = constraints.FIRST_GROUP_INDICES[constraint_pos];
-                const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
-                const az = constraint.condition.evaluate(F, witness.asSlice());
-                const bz = constraint.left.evaluate(F, witness.asSlice())
-                    .sub(constraint.right.evaluate(F, witness.asSlice()));
-                return az.mul(bz);
+                if (constraint_pos < group_size) {
+                    const constraint_idx = group_indices[constraint_pos];
+                    const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
+                    const az = constraint.condition.evaluate(F, witness.asSlice());
+                    const bz = constraint.left.evaluate(F, witness.asSlice())
+                        .sub(constraint.right.evaluate(F, witness.asSlice()));
+                    return az.mul(bz);
+                }
             }
 
             // Y is outside the base window - use Lagrange extrapolation
-            // Compute Az and Bz at all base window points
-            var az_base: [FIRST_GROUP_SIZE]F = undefined;
+            // Compute Az and Bz at all base window points for this group
+            var az_base: [FIRST_GROUP_SIZE]F = undefined; // Use max size for array
             var bz_base: [FIRST_GROUP_SIZE]F = undefined;
 
-            for (0..FIRST_GROUP_SIZE) |i| {
-                const constraint_idx = constraints.FIRST_GROUP_INDICES[i];
+            for (0..group_size) |i| {
+                const constraint_idx = group_indices[i];
                 const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
                 az_base[i] = constraint.condition.evaluate(F, witness.asSlice());
                 bz_base[i] = constraint.left.evaluate(F, witness.asSlice())
@@ -587,11 +687,13 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
             if (target_j) |j| {
                 // Use COEFFS_PER_J[j] for extrapolation
+                // Note: Both groups use the same COEFFS_PER_J, but SECOND_GROUP only uses
+                // the first 9 coefficients (group_size coefficients)
                 const coeffs = univariate_skip.COEFFS_PER_J[j];
 
                 // Extrapolate Az(Y) = Σ_i coeffs[i] * az_base[i]
                 var az_y = F.zero();
-                for (0..FIRST_GROUP_SIZE) |i| {
+                for (0..group_size) |i| {
                     const c = coeffs[i];
                     if (c != 0) {
                         const c_field = if (c > 0)
@@ -604,7 +706,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
                 // Extrapolate Bz(Y) = Σ_i coeffs[i] * bz_base[i]
                 var bz_y = F.zero();
-                for (0..FIRST_GROUP_SIZE) |i| {
+                for (0..group_size) |i| {
                     const c = coeffs[i];
                     if (c != 0) {
                         const c_field = if (c > 0)
@@ -620,6 +722,16 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
             // Should not reach here for valid domain indices
             return F.zero();
+        }
+
+        /// Legacy function for backwards compatibility - evaluates FIRST_GROUP only
+        /// Deprecated: Use evaluateAzBzAtDomainPointForGroup instead
+        fn evaluateAzBzAtDomainPoint(
+            self: *const Self,
+            witness: *const constraints.R1CSCycleInputs(F),
+            domain_idx: usize,
+        ) F {
+            return self.evaluateAzBzAtDomainPointForGroup(witness, domain_idx, 0);
         }
 
         /// Interpolate extended evaluations to polynomial coefficients

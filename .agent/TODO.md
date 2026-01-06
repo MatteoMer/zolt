@@ -1,61 +1,71 @@
 # Zolt-Jolt Compatibility TODO
 
-## Current Status: Session 60 - January 6, 2026
+## Current Status: Session 61 - January 6, 2026
 
-**STATUS: Round 0 polynomial correct, Round 1+ polynomials WRONG**
+**STATUS: Sumcheck Passes, Opening Claims Wrong**
 
-### Progress This Session
+### ✅ Confirmed Working
 
-1. ✅ Fixed instruction input semantics (`computeInstructionInputs`)
-   - LUI/AUIPC now use sign-extended U-type immediates
-   - Matches Jolt's FormatU::parse sign extension behavior
+1. **Transcript Compatibility**: Keccak256 transcript perfectly matches Jolt
+2. **Preamble**: Memory layout, inputs, outputs, panic, ram_K, trace_length all match
+3. **Dory Commitments**: GT element serialization matches
+4. **Tau Derivation**: All 12 tau values match exactly
+5. **UniSkip Polynomial**: All 28 coefficients match exactly
+6. **r0 Challenge**: Matches exactly after UniSkip polynomial appended
+7. **Batching Coefficient**: Matches exactly
+8. **All Sumcheck Rounds (0-10)**: Transcript states match at every round
+9. **All Sumcheck Challenges**: Every challenge matches between Zolt and Jolt
+10. **Output Claim**: Zolt's output_claim (scaled) matches Jolt's exactly
 
-2. ✅ Fixed r1cs_input_evals - now match Jolt PERFECTLY
-   - r1cs_input_evals[0] matches ✓
-   - r1cs_input_evals[1] matches ✓
-   - r1cs_input_evals[2] matches ✓
+### ❌ Current Issue: Opening Claims Wrong
 
-3. ✅ Round 0 polynomial is CORRECT
-   - All coefficients (c0, c2, c3) match Jolt
-   - Challenge matches
-   - next_claim matches
+**The Problem:**
 
-4. ❌ Round 1+ polynomial computation is WRONG
-   - Round 1 s(0) correct, but s(1), s(2), s(3) wrong
-   - Sumcheck constraint `s(0) + s(1) = previous_claim` NOT satisfied
+Verification fails because Zolt's opening claims (r1cs_input_evals) don't match Jolt's expected values:
 
-### Root Cause Analysis
+| Input | Zolt Value | Jolt Expected |
+|-------|------------|---------------|
+| LeftInstructionInput | 111671539584291221291839977129744267341086976218214076725283565100174391436821 | 9906325628809186578319307187123224683532195550528121667958235291543194428406 |
 
-**The Bug:**
+**Root Cause:**
+
+Opening claims are MLE evaluations at r_cycle. The issue is in how `computeClaimedInputs` evaluates the MLE.
+
+**Key Observations:**
+
+1. **r_cycle construction is correct** - Challenges are reversed properly from LITTLE_ENDIAN to BIG_ENDIAN
+2. **Witness values look correct** - First cycle has sensible values
+3. **The EqPolynomial evaluation may be wrong** - Either the indexing or the accumulation
+
+### Next Steps
+
+1. **Add debug in MLE evaluation** - Print eq_evals for specific cycles and compare with Jolt
+2. **Verify cycle-to-hypercube mapping** - Check if cycle 0 maps to (0,0,...,0) or something else
+3. **Compare EqPolynomial semantics** - Ensure Zolt's "big-endian indexing" matches Jolt's `mle_endian`
+
+### Technical Details
+
+**Jolt's r_cycle (from outer.rs):**
+```rust
+let r_cycle = challenges[1..].to_vec();  // Skip r0
+OpeningPoint::<LITTLE_ENDIAN, F>::new(r_cycle).match_endianness()  // Reverse for BIG_ENDIAN
 ```
-Zolt computes: s(0) + s(1) = 2127849171702515242032736530567016046776512160048301414144827652734113940861
-Expected:      s(0) + s(1) = 18977235297014647440385331877696957720245438231586084249713843600848329563216
+
+**Zolt's r_cycle (from proof_converter.zig):**
+```zig
+const cycle_challenges = all_challenges[1..];  // Skip r_stream
+for (0..cycle_challenges.len) |i| {
+    r_cycle_big_endian[i] = cycle_challenges[cycle_challenges.len - 1 - i];  // Reverse
+}
 ```
 
-The polynomial at Round 1 doesn't satisfy the sumcheck constraint!
+The construction appears identical but MLE evaluation produces different results.
 
-**Where the bug is:**
+### Files to Investigate
 
-The polynomial is computed by:
-1. `computeTEvals()` returns `(t_zero, t_infinity)` from bound t_prime polynomial
-2. `split_eq.computeCubicRoundPoly(t_zero, t_infinity, previous_claim)` constructs s(X)
-
-The issue must be one of:
-- t_prime polynomial isn't being bound correctly after round 0
-- eq tables aren't updated correctly
-- The `computeTEvals` function extracts wrong values
-
-### Key Files
-
-- `src/zkvm/spartan/streaming_outer.zig:computeRemainingRoundPoly` - Polynomial computation
-- `src/zkvm/spartan/streaming_outer.zig:bindRemainingRoundChallenge` - Binding logic
-- `src/zkvm/spartan/streaming_outer.zig:computeTEvals` - t_zero/t_infinity extraction
-- `src/poly/split_eq.zig:computeCubicRoundPoly` - Gruen polynomial construction
-
-### Previous Session Progress
-
-- Sessions 51-58: Various fixes (batching, round offset, transcript, UniSkip)
-- Session 59: Verified sumcheck polynomials match, identified r1cs_input_evals mismatch
+- `/Users/matteo/projects/zolt/src/zkvm/r1cs/evaluation.zig` - `computeClaimedInputs`
+- `/Users/matteo/projects/zolt/src/poly/mod.zig` - `EqPolynomial.evals`
+- `/Users/matteo/projects/jolt/jolt-core/src/poly/multilinear.rs` - Jolt's MLE semantics
 
 ## Test Commands
 

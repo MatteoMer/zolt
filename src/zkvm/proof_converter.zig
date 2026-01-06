@@ -918,6 +918,16 @@ pub fn ProofConverter(comptime F: type) type {
             // that properly handles both constraint groups
             const uni_poly_coeffs = try outer_prover.computeFirstRoundPoly();
 
+            // DEBUG: Print first few UniSkip coefficients
+            std.debug.print("[ZOLT UNISKIP_PROOF] Computing UniSkip from witnesses, tau.len={d}\n", .{tau.len});
+            std.debug.print("[ZOLT UNISKIP_PROOF] uni_poly_coeffs.len = {d}\n", .{uni_poly_coeffs.len});
+            if (uni_poly_coeffs.len > 0) {
+                std.debug.print("[ZOLT UNISKIP_PROOF] uni_poly_coeffs[0] = {any}\n", .{uni_poly_coeffs[0].toBytesBE()});
+            }
+            if (uni_poly_coeffs.len > 1) {
+                std.debug.print("[ZOLT UNISKIP_PROOF] uni_poly_coeffs[1] = {any}\n", .{uni_poly_coeffs[1].toBytesBE()});
+            }
+
             // Copy coefficients to our proof structure
             const coeffs = try self.allocator.alloc(F, NUM_COEFFS);
             @memset(coeffs, F.zero());

@@ -90,6 +90,22 @@ pub fn R1CSInputEvaluator(comptime F: type) type {
             const eq_evals = try eq_poly.evals(allocator);
             defer allocator.free(eq_evals);
 
+            // DEBUG: Print eq_evals for first few cycles
+            std.debug.print("[ZOLT MLE] effective_len = {}, eq_evals.len = {}\n", .{ effective_len, eq_evals.len });
+            if (eq_evals.len > 0) {
+                std.debug.print("[ZOLT MLE] eq_evals[0] = {any}\n", .{eq_evals[0].toBytesBE()});
+            }
+            if (eq_evals.len > 1) {
+                std.debug.print("[ZOLT MLE] eq_evals[1] = {any}\n", .{eq_evals[1].toBytesBE()});
+            }
+            if (eq_evals.len > 2) {
+                std.debug.print("[ZOLT MLE] eq_evals[2] = {any}\n", .{eq_evals[2].toBytesBE()});
+            }
+            // Print r_cycle values used
+            for (0..effective_len) |i| {
+                std.debug.print("[ZOLT MLE] r_cycle[{}] = {any}\n", .{ i, r_cycle[i].toBytesBE() });
+            }
+
             // Accumulate: result_i = Sum_t eq_evals[t] * witness[t].values[i]
             var result: [NUM_R1CS_INPUTS]F = [_]F{F.zero()} ** NUM_R1CS_INPUTS;
 

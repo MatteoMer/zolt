@@ -367,16 +367,6 @@ pub fn StreamingOuterProver(comptime F: type) type {
             const eq_tables = self.split_eq.getWindowEqTables(0, window_size);
             const E_out = eq_tables.E_out;
             const E_in = eq_tables.E_in;
-
-            // DEBUG: Print E_out[0] and E_in[0] values
-            if (E_out.len > 0 and E_in.len > 0) {
-                const eq_weight_00 = E_out[0].mul(E_in[0]);
-                std.debug.print("[ZOLT] buildTPrimePoly: E_out[0] = {any}\n", .{E_out[0].toBytesBE()});
-                std.debug.print("[ZOLT] buildTPrimePoly: E_in[0] = {any}\n", .{E_in[0].toBytesBE()});
-                std.debug.print("[ZOLT] buildTPrimePoly: E_out[0]*E_in[0] = {any}\n", .{eq_weight_00.toBytesBE()});
-                std.debug.print("[ZOLT] buildTPrimePoly: E_out.len = {}, E_in.len = {}, az_boundLen = {}, bz_boundLen = {}\n", .{ E_out.len, E_in.len, az_poly.boundLen(), bz_poly.boundLen() });
-            }
-
             // Compute grid sizes
             const grid_size = @as(usize, 1) << @intCast(window_size);
             var three_pow_dim: usize = 1;
@@ -581,9 +571,6 @@ pub fn StreamingOuterProver(comptime F: type) type {
             }
 
             // DEBUG output
-            std.debug.print("[ZOLT UNISKIP] full_tau.len = {}, m = {}\n", .{ self.full_tau.len, m });
-            std.debug.print("[ZOLT UNISKIP] extended_evals[0] (Y={}) = {any}\n", .{ targets[0], extended_evals[0].toBytesBE() });
-            std.debug.print("[ZOLT UNISKIP] extended_evals[8] (Y={}) = {any}\n", .{ targets[8], extended_evals[8].toBytesBE() });
 
             // Step 3-5: Interpolate and multiply with Lagrange kernel
             return self.buildUniSkipPolynomial(&t1_vals);
@@ -1245,49 +1232,12 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 if (self.t_prime_poly.?.num_vars == 0 and self.az_poly != null and self.bz_poly != null) {
                     // Rebuild t_prime_poly from bound Az/Bz (nextWindow equivalent)
                     // DEBUG: Print t_prime[0] BEFORE rebuild
-                    if (self.t_prime_poly) |t| {
-                        std.debug.print("[ZOLT] ROUND {} BEFORE REBUILD: t_prime[0] = {any}\n", .{ self.current_round, t.evaluations[0].toBytesBE() });
-                    }
-                    // DEBUG: Print E_out/E_in sizes before rebuild
-                    const eq_tables = self.split_eq.getWindowEqTables(0, window_size);
-                    std.debug.print("[ZOLT] ROUND {} REBUILD: E_out.len = {}, E_in.len = {}\n", .{ self.current_round, eq_tables.E_out.len, eq_tables.E_in.len });
-
                     try self.rebuildTPrimePoly(window_size);
-                    // DEBUG: Print t_prime evaluations AFTER rebuild
-                    if (self.t_prime_poly) |t| {
-                        std.debug.print("[ZOLT] ROUND {} AFTER REBUILD: t_prime[0] = {any}\n", .{ self.current_round, t.evaluations[0].toBytesBE() });
-                        if (t.evaluations.len > 1) {
-                            std.debug.print("[ZOLT] ROUND {} AFTER REBUILD: t_prime[1] = {any}\n", .{ self.current_round, t.evaluations[1].toBytesBE() });
-                        }
-                        if (t.evaluations.len > 2) {
-                            std.debug.print("[ZOLT] ROUND {} AFTER REBUILD: t_prime[2] = {any}\n", .{ self.current_round, t.evaluations[2].toBytesBE() });
-                        }
-                        std.debug.print("[ZOLT] ROUND {} AFTER REBUILD: t_prime.num_vars = {}\n", .{ self.current_round, t.num_vars });
-                    }
-                    // DEBUG: Print what az[0]*bz[0] should be
-                    if (self.az_poly) |az| {
-                        if (self.bz_poly) |bz| {
-                            if (az.evaluations.len > 0 and bz.evaluations.len > 0) {
-                                const expected = az.evaluations[0].mul(bz.evaluations[0]);
-                                std.debug.print("[ZOLT] ROUND {} REBUILD: EXPECTED t_prime[0] = az[0]*bz[0] = {any}\n", .{ self.current_round, expected.toBytesBE() });
-                                std.debug.print("[ZOLT] ROUND {} REBUILD: az.len = {}, bz.len = {}\n", .{ self.current_round, az.evaluations.len, bz.evaluations.len });
-                            }
-                        }
-                    }
                 }
 
                 const t_evals = try self.computeTEvals(window_size);
                 t_zero = t_evals.t_zero;
                 t_infinity = t_evals.t_infinity;
-
-                // DEBUG: Print t_zero, t_infinity and t_prime[1] for this round
-                std.debug.print("[ZOLT] ROUND {}: t_zero = {any}\n", .{ self.current_round, t_zero.toBytesBE() });
-                std.debug.print("[ZOLT] ROUND {}: t_infinity = {any}\n", .{ self.current_round, t_infinity.toBytesBE() });
-                if (self.t_prime_poly) |t| {
-                    if (t.evaluations.len > 1) {
-                        std.debug.print("[ZOLT] ROUND {}: t_prime[1] = {any}\n", .{ self.current_round, t.evaluations[1].toBytesBE() });
-                    }
-                }
             } else {
                 // No t_prime_poly available (shouldn't happen with LinearOnlySchedule)
                 return error.TPrimePolyNotAvailable;
@@ -1795,50 +1745,20 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
             // Remaining rounds
             while (self.current_round < self.numRounds()) {
-                // DEBUG: Print claim BEFORE computing round polynomial
-                std.debug.print("[ZOLT] ROUND {}: claim_before = {any}\n", .{ self.current_round, self.current_claim.toBytesBE() });
-
                 const round_poly = try self.computeRemainingRoundPoly();
 
-                // DEBUG: Print round polynomial evaluations and coefficients
-                std.debug.print("[ZOLT] ROUND {}: s(0) = {any}\n", .{ self.current_round, round_poly[0].toBytesBE() });
-                std.debug.print("[ZOLT] ROUND {}: s(1) = {any}\n", .{ self.current_round, round_poly[1].toBytesBE() });
-                const s0_plus_s1 = round_poly[0].add(round_poly[1]);
-                std.debug.print("[ZOLT] ROUND {}: s(0)+s(1) = {any}\n", .{ self.current_round, s0_plus_s1.toBytesBE() });
-                std.debug.print("[ZOLT] ROUND {}: previous_claim = {any}\n", .{ self.current_round, self.current_claim.toBytesBE() });
-                std.debug.print("[ZOLT] ROUND {}: s(0)+s(1) == claim? {}\n", .{ self.current_round, s0_plus_s1.eql(self.current_claim) });
-
-                // Print coefficients for comparison with Jolt
-                const coeffs = poly_mod.UniPoly(F).interpolateDegree3(round_poly);
-                std.debug.print("[ZOLT] ROUND {}: c0 = {any}\n", .{ self.current_round, coeffs[0].toBytesBE() });
-                std.debug.print("[ZOLT] ROUND {}: c1 = {any}\n", .{ self.current_round, coeffs[1].toBytesBE() });
-                std.debug.print("[ZOLT] ROUND {}: c2 = {any}\n", .{ self.current_round, coeffs[2].toBytesBE() });
-                std.debug.print("[ZOLT] ROUND {}: c3 = {any}\n", .{ self.current_round, coeffs[3].toBytesBE() });
-
-                // Check: hint-recovered c1 should match interpolated c1
-                // c1_hint = previous_claim - 2*c0 - c2 - c3
-                const c1_hint = self.current_claim.sub(coeffs[0]).sub(coeffs[0]).sub(coeffs[2]).sub(coeffs[3]);
-                std.debug.print("[ZOLT] ROUND {}: c1_hint = {any}\n", .{ self.current_round, c1_hint.toBytesBE() });
-                std.debug.print("[ZOLT] ROUND {}: c1 == c1_hint? {}\n", .{ self.current_round, coeffs[1].eql(c1_hint) });
-
-                // Add to proof: convert evaluations [s(0), s(1), s(2), s(3)] to
-                // compressed coefficient format [c0, c2, c3] as expected by Jolt
+                // Convert to compressed coefficient format [c0, c2, c3] for proof
                 const compressed = poly_mod.UniPoly(F).evalsToCompressed(round_poly);
                 try sumcheck_proof.addRoundPoly(&compressed);
 
-                // Get challenge - append compressed coefficients to match Jolt's transcript
-                // CRITICAL: Jolt appends compressed coefficients [c0, c2, c3], NOT evaluations!
+                // Get challenge from transcript
                 transcript.appendSlice(&compressed);
                 const r = transcript.challengeScalar();
-
-                // DEBUG: Print challenge for this round
-                std.debug.print("[ZOLT] ROUND {}: challenge = {any}\n", .{ self.current_round, r.toBytesBE() });
 
                 // Update state
                 self.updateClaim(round_poly, r);
 
                 // DEBUG: Print claim AFTER update
-                std.debug.print("[ZOLT] ROUND {}: claim_after = {any}\n", .{ self.current_round, self.current_claim.toBytesBE() });
 
                 try self.bindRemainingRoundChallenge(r);
             }
@@ -1980,24 +1900,7 @@ test "StreamingOuterProver: debug streaming round values" {
     // Compute the remaining round poly (streaming round)
     const poly_evals = try prover.computeRemainingRoundPoly();
 
-    // Print the evaluations for debugging
-    std.debug.print("\n=== Zolt Streaming Round Debug ===\n", .{});
-    std.debug.print("s(0) = {x}\n", .{@as([4]u64, @bitCast(poly_evals[0].limbs()))});
-    std.debug.print("s(1) = {x}\n", .{@as([4]u64, @bitCast(poly_evals[1].limbs()))});
-    std.debug.print("s(2) = {x}\n", .{@as([4]u64, @bitCast(poly_evals[2].limbs()))});
-    std.debug.print("s(3) = {x}\n", .{@as([4]u64, @bitCast(poly_evals[3].limbs()))});
-
-    // Also print the current_scalar and tau values
-    const current_scalar = prover.split_eq.current_scalar;
-    std.debug.print("current_scalar = {x}\n", .{@as([4]u64, @bitCast(current_scalar.limbs()))});
-    std.debug.print("tau[last] = {x}\n", .{@as([4]u64, @bitCast(prover.split_eq.tau[prover.split_eq.current_index - 1].limbs()))});
-
-    // Verify claim = s(0) + s(1)
-    const claim = poly_evals[0].add(poly_evals[1]);
-    std.debug.print("claim = s(0) + s(1) = {x}\n", .{@as([4]u64, @bitCast(claim.limbs()))});
-
     // Basic sanity: poly_evals should be non-trivial with these inputs
-    // (Just verify something was computed, not that it's all zeros)
     var any_nonzero = false;
     for (poly_evals) |v| {
         if (!v.eql(F.zero())) {
@@ -2152,7 +2055,7 @@ test "StreamingOuterProver: expected_output_claim cross-verification" {
     //
     // For now, use the prover's computed values since we're testing the eq/Lagrange part
     const r_stream = challenges[0];
-    const az_bz_combined = prover.computeCycleAzBzProductCombined(
+    _ = prover.computeCycleAzBzProductCombined(
         &witnesses[0], // Use first cycle as representative
         r_stream,
     );
@@ -2180,24 +2083,14 @@ test "StreamingOuterProver: expected_output_claim cross-verification" {
     // and multiplication is commutative, these should be equal.
     const verifier_eq_factor = lagrange_tau_r0.mul(tau_bound_r_tail_reversed);
 
-    std.debug.print("\n=== Cross-Verification Test ===\n", .{});
-    std.debug.print("output_claim = {x}\n", .{@as([4]u64, @bitCast(output_claim.limbs()))});
-    std.debug.print("prover_eq_factor = {x}\n", .{@as([4]u64, @bitCast(prover_eq_factor.limbs()))});
-    std.debug.print("verifier_eq_factor = {x}\n", .{@as([4]u64, @bitCast(verifier_eq_factor.limbs()))});
-    std.debug.print("lagrange_tau_r0 = {x}\n", .{@as([4]u64, @bitCast(lagrange_tau_r0.limbs()))});
-    std.debug.print("tau_bound_r_tail = {x}\n", .{@as([4]u64, @bitCast(tau_bound_r_tail_reversed.limbs()))});
-    std.debug.print("az_bz_combined = {x}\n", .{@as([4]u64, @bitCast(az_bz_combined.limbs()))});
 
     // The prover's eq factor should match the verifier's eq factor
     try testing.expect(prover_eq_factor.eql(verifier_eq_factor));
 
     // If eq factors match, then output_claim / verifier_eq_factor = inner_sum_prod
     // This should equal what the verifier computes from opening claims
-    const implied_inner_sum_prod = if (!verifier_eq_factor.eql(F.zero()))
+    _ = if (!verifier_eq_factor.eql(F.zero()))
         output_claim.mul(verifier_eq_factor.inverse().?)
     else
         F.zero();
-
-    std.debug.print("implied_inner_sum_prod = {x}\n", .{@as([4]u64, @bitCast(implied_inner_sum_prod.limbs()))});
-    std.debug.print("================================\n", .{});
 }

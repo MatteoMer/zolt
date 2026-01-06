@@ -276,29 +276,19 @@ class StageComparator:
         return None
 
     def compare_stage1_round(self, round_idx: int) -> List[CompareResult]:
-        """Compare a single Stage 1 round"""
+        """Compare a single Stage 1 round - coefficients and challenges only"""
         results = []
 
-        # Current claim - Zolt _le (LE bytes) vs Jolt decimal (convert to LE)
-        zolt_claim = self.extract_zolt_le_hex(f"STAGE1_ROUND_{round_idx}: current_claim_le = ")
-        jolt_claim = self.extract_jolt_decimal_as_le_hex(f"STAGE1_ROUND_{round_idx}: current_claim = ")
-        results.append(self.compare_values(f"Round {round_idx} claim", zolt_claim, jolt_claim))
-
-        # Coefficients c0, c2, c3 - use _le for Zolt and _bytes for Jolt
+        # Coefficients c0, c2, c3 - Zolt outputs LE bytes, Jolt uses _bytes suffix
         for coeff in ["c0", "c2", "c3"]:
-            zolt_val = self.extract_single(f"STAGE1_ROUND_{round_idx}: {coeff}_le = ", self.zolt_log)
+            zolt_val = self.extract_zolt_le_hex(f"STAGE1_ROUND_{round_idx}: {coeff} = ")
             jolt_val = self.extract_single(f"STAGE1_ROUND_{round_idx}: {coeff}_bytes = ", self.jolt_log)
             results.append(self.compare_values(f"Round {round_idx} {coeff}", zolt_val, jolt_val))
 
-        # Challenge - use _le for Zolt and _bytes for Jolt
-        zolt_ch = self.extract_single(f"STAGE1_ROUND_{round_idx}: challenge_le = ", self.zolt_log)
+        # Challenge - Zolt outputs LE bytes, Jolt uses _bytes suffix
+        zolt_ch = self.extract_zolt_le_hex(f"STAGE1_ROUND_{round_idx}: challenge = ")
         jolt_ch = self.extract_single(f"STAGE1_ROUND_{round_idx}: challenge_bytes = ", self.jolt_log)
         results.append(self.compare_values(f"Round {round_idx} challenge", zolt_ch, jolt_ch))
-
-        # Next claim - Zolt outputs BE, Jolt outputs decimal
-        zolt_next = self.extract_zolt_be_as_le_hex(f"STAGE1_ROUND_{round_idx}: next_claim = ")
-        jolt_next = self.extract_jolt_decimal_as_le_hex(f"STAGE1_ROUND_{round_idx}: next_claim = ")
-        results.append(self.compare_values(f"Round {round_idx} next_claim", zolt_next, jolt_next))
 
         return results
 
@@ -306,8 +296,8 @@ class StageComparator:
         """Compare Stage 1: Outer Spartan sumcheck polynomials and challenges"""
         results = []
 
-        # Pre-sumcheck values
-        zolt_tau_len = self.extract_u64("STAGE1_PRE: tau.len = ", self.zolt_log)
+        # tau.len - Zolt uses "STAGE1: tau.len", Jolt uses "STAGE1_PRE: tau.len"
+        zolt_tau_len = self.extract_u64("STAGE1: tau.len = ", self.zolt_log)
         jolt_tau_len = self.extract_u64("STAGE1_PRE: tau.len = ", self.jolt_log)
 
         if zolt_tau_len == jolt_tau_len:
@@ -315,8 +305,8 @@ class StageComparator:
         else:
             results.append(CompareResult("tau.len", str(zolt_tau_len), str(jolt_tau_len), MatchResult.MISMATCH))
 
-        # Initial claim - Zolt _le vs Jolt decimal (converted to LE)
-        zolt_init = self.extract_zolt_le_hex("STAGE1_INITIAL: claim_le = ")
+        # Initial claim - Zolt outputs LE bytes, Jolt outputs decimal
+        zolt_init = self.extract_zolt_le_hex("STAGE1_INITIAL: claim = ")
         jolt_init = self.extract_jolt_decimal_as_le_hex("STAGE1_INITIAL: claim = ")
         results.append(self.compare_values("Initial claim", zolt_init, jolt_init))
 
@@ -327,20 +317,9 @@ class StageComparator:
             if match:
                 num_rounds = max(num_rounds, int(match.group(1)) + 1)
 
-        # Compare each round
-        for i in range(min(num_rounds, 20)):  # Cap at 20 rounds for sanity
+        # Compare each round (coefficients and challenges)
+        for i in range(min(num_rounds, 20)):
             results.extend(self.compare_stage1_round(i))
-
-        # Final values
-        zolt_eq = self.extract_zolt_le_hex("STAGE1_FINAL: eq_factor")
-        jolt_eq = self.extract_jolt_decimal_as_le_hex("STAGE1_FINAL: eq_factor")
-        if zolt_eq or jolt_eq:
-            results.append(self.compare_values("Final eq_factor", zolt_eq, jolt_eq))
-
-        zolt_out = self.extract_zolt_le_hex("STAGE1_FINAL: output_claim")
-        jolt_out = self.extract_jolt_decimal_as_le_hex("STAGE1_FINAL: output_claim")
-        if zolt_out or jolt_out:
-            results.append(self.compare_values("Final output_claim", zolt_out, jolt_out))
 
         return results
 

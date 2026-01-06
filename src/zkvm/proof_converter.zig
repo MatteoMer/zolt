@@ -366,11 +366,8 @@ pub fn ProofConverter(comptime F: type) type {
             }
             const tau_high = tau[tau.len - 1];
 
-            // DEBUG: Print full tau vector
-            std.debug.print("[ZOLT] STAGE1_PRE: tau.len = {}\n", .{tau.len});
-            for (tau, 0..) |t, i| {
-                std.debug.print("[ZOLT] STAGE1_PRE: tau[{}] = {any}\n", .{ i, t.toBytesBE() });
-            }
+            // DEBUG: Print tau length (challenges from transcript)
+            std.debug.print("[ZOLT] STAGE1: tau.len = {}\n", .{tau.len});
 
             // The first round was already processed by UniSkip
             // Append the UniSkip polynomial to transcript using UniPoly format:
@@ -384,21 +381,13 @@ pub fn ProofConverter(comptime F: type) type {
             // Get the challenge for the first round (r0)
             const r0 = transcript.challengeScalar();
 
-            // DEBUG: Print r0
-            std.debug.print("[ZOLT] STAGE1_PRE: r0 = {any}\n", .{r0.toBytesBE()});
-
             // Compute the Lagrange kernel L(r0, tau_high) to use as initial scaling
-            // This matches Jolt's: lagrange_tau_r0 = LagrangePolynomial::lagrange_kernel(&r0, &tau_high)
             const lagrange_tau_r0 = try LagrangePoly.lagrangeKernel(
                 r1cs.univariate_skip.OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE,
                 r0,
                 tau_high,
                 self.allocator,
             );
-
-            // DEBUG: Print tau_high and lagrange_tau_r0
-            std.debug.print("[ZOLT] STAGE1_PRE: tau_high = {any}\n", .{tau_high.toBytesBE()});
-            std.debug.print("[ZOLT] STAGE1_PRE: lagrange_tau_r0 = {any}\n", .{lagrange_tau_r0.toBytesBE()});
 
             // Initialize the streaming prover with full tau and Lagrange kernel scaling
             // The prover internally extracts:
@@ -419,11 +408,7 @@ pub fn ProofConverter(comptime F: type) type {
             defer outer_prover.deinit();
 
             // Compute the UnivariateSkip claim: evaluation of UniSkip polynomial at r0
-            // Use evaluatePolyAtChallenge which handles the Jolt-format challenge [0, 0, low, high]
             const uni_skip_claim = evaluatePolyAtChallenge(uniskip_proof.uni_poly, r0);
-
-            // DEBUG: Print uni_skip_claim
-            std.debug.print("[ZOLT] STAGE1_PRE: uni_skip_claim = {any}\n", .{uni_skip_claim.toBytesBE()});
 
             // Bind the first-round challenge from transcript with the uni_skip_claim
             outer_prover.bindFirstRoundChallenge(r0, uni_skip_claim) catch {};
@@ -446,14 +431,8 @@ pub fn ProofConverter(comptime F: type) type {
             // The input_claim for Stage 1 remaining sumcheck is uni_skip_claim.
             transcript.appendScalar(uni_skip_claim);
 
-            // Get batching coefficient
-            // This advances the transcript state AND provides the scaling factor
-            // IMPORTANT: Use challengeScalarFull() which returns proper Montgomery form,
-            // matching Jolt's challenge_vector which uses F::from_bytes (not MontU128Challenge)
+            // Get batching coefficient - advances transcript state AND provides scaling factor
             const batching_coeff = transcript.challengeScalarFull();
-
-            // DEBUG: Print batching_coeff
-            std.debug.print("[ZOLT] STAGE1_PRE: batching_coeff = {any}\n", .{batching_coeff.toBytesBE()});
 
             // Generate remaining rounds
             // In Jolt, stage1_sumcheck_proof contains num_rounds polynomials
@@ -464,29 +443,12 @@ pub fn ProofConverter(comptime F: type) type {
                 return Stage1Result{ .challenges = challenges, .r0 = r0, .uni_skip_claim = uni_skip_claim, .allocator = self.allocator };
             }
 
-            // DEBUG: Print initial claim (= uni_skip_claim * batching_coeff * 2^num_rounds factor)
-            // In Jolt, the initial claim for sumcheck is:
-            //   claim = input_claim.mul_pow_2(max_num_rounds - num_rounds) * coeff
-            // For a single instance with max_num_rounds = num_rounds:
-            //   claim = input_claim * coeff = uni_skip_claim * batching_coeff
-            //
-            // NOTE: The prover tracks UNSCALED claims internally (outer_prover.current_claim
-            // is set to uni_skip_claim by bindFirstRoundChallenge). The SCALED coefficients
-            // are sent to the proof.
+            // Compute initial claim = uni_skip_claim * batching_coeff (for Jolt compatibility)
             const initial_claim = uni_skip_claim.mul(batching_coeff);
-            std.debug.print("[ZOLT] STAGE1_INITIAL: claim = {any}\n", .{initial_claim.toBytesBE()});
-            std.debug.print("[ZOLT] STAGE1_INITIAL: claim_le = {any}\n", .{initial_claim.toBytes()});
+            std.debug.print("[ZOLT] STAGE1_INITIAL: claim = {any}\n", .{initial_claim.toBytes()});
 
             // Generate all remaining round polynomials with transcript integration
-            // Use computeRemainingRoundPoly for ALL rounds - it now properly:
-            // 1. Materializes Az/Bz on first call
-            // 2. Rebuilds t_prime_poly from bound Az/Bz when needed
-            // 3. Uses the multiquadratic method for all rounds
             for (0..num_remaining_rounds) |round_idx| {
-                // DEBUG: Print current claim at start of round
-                std.debug.print("[ZOLT] STAGE1_ROUND_{}: current_claim = {any}\n", .{ round_idx, outer_prover.current_claim.toBytesBE() });
-                std.debug.print("[ZOLT] STAGE1_ROUND_{}: current_claim_le = {any}\n", .{ round_idx, outer_prover.current_claim.toBytes() });
-
                 const raw_evals: [4]F = outer_prover.computeRemainingRoundPoly() catch {
                     // Fallback to zero polynomial
                     const coeffs = try self.allocator.alloc(F, 3);
@@ -499,16 +461,7 @@ pub fn ProofConverter(comptime F: type) type {
                     continue;
                 };
 
-                // CRITICAL: Apply batching coefficient to scale the evaluations for OUTPUT
-                // In Jolt's BatchedSumcheck::prove:
-                //   1. Individual prover computes unscaled poly
-                //   2. Batched poly = Σ individual_poly * coeff
-                //   3. Batched poly is hashed to transcript
-                //   4. Individual prover tracks UNSCALED claim for next round
-                //
-                // So we:
-                // - Scale the polynomial for output (to transcript and proof)
-                // - Keep unscaled claim for prover's internal state
+                // Scale evaluations by batching coefficient for output
                 const scaled_evals = [4]F{
                     raw_evals[0].mul(batching_coeff),
                     raw_evals[1].mul(batching_coeff),
@@ -516,125 +469,44 @@ pub fn ProofConverter(comptime F: type) type {
                     raw_evals[3].mul(batching_coeff),
                 };
 
-                // DEBUG: Print raw and scaled evaluations
-                std.debug.print("[ZOLT] STAGE1_ROUND_{}: raw_evals = [{any}, {any}, {any}, {any}]\n", .{
-                    round_idx,
-                    raw_evals[0].toBytesBE(),
-                    raw_evals[1].toBytesBE(),
-                    raw_evals[2].toBytesBE(),
-                    raw_evals[3].toBytesBE(),
-                });
-                std.debug.print("[ZOLT] STAGE1_ROUND_{}: scaled_evals = [{any}, {any}, {any}, {any}]\n", .{
-                    round_idx,
-                    scaled_evals[0].toBytesBE(),
-                    scaled_evals[1].toBytesBE(),
-                    scaled_evals[2].toBytesBE(),
-                    scaled_evals[3].toBytesBE(),
-                });
-
-                // Convert SCALED evaluations to compressed coefficients for proof
+                // Convert to compressed coefficients for proof
                 const compressed = poly_mod.UniPoly(F).evalsToCompressed(scaled_evals);
                 const coeffs = try self.allocator.alloc(F, 3);
-                coeffs[0] = compressed[0]; // c0 (constant)
-                coeffs[1] = compressed[1]; // c2 (quadratic)
-                coeffs[2] = compressed[2]; // c3 (cubic)
+                coeffs[0] = compressed[0]; // c0
+                coeffs[1] = compressed[1]; // c2
+                coeffs[2] = compressed[2]; // c3
 
-                // DEBUG: Print compressed coefficients in both BE and LE
-                std.debug.print("[ZOLT] STAGE1_ROUND_{}: c0 = {any}\n", .{ round_idx, compressed[0].toBytesBE() });
-                std.debug.print("[ZOLT] STAGE1_ROUND_{}: c0_le = {any}\n", .{ round_idx, compressed[0].toBytes() });
-                std.debug.print("[ZOLT] STAGE1_ROUND_{}: c2 = {any}\n", .{ round_idx, compressed[1].toBytesBE() });
-                std.debug.print("[ZOLT] STAGE1_ROUND_{}: c2_le = {any}\n", .{ round_idx, compressed[1].toBytes() });
-                std.debug.print("[ZOLT] STAGE1_ROUND_{}: c3 = {any}\n", .{ round_idx, compressed[2].toBytesBE() });
-                std.debug.print("[ZOLT] STAGE1_ROUND_{}: c3_le = {any}\n", .{ round_idx, compressed[2].toBytes() });
+                // DEBUG: Print round polynomial coefficients (LE bytes for Jolt comparison)
+                std.debug.print("[ZOLT] STAGE1_ROUND_{}: c0 = {any}\n", .{ round_idx, compressed[0].toBytes() });
+                std.debug.print("[ZOLT] STAGE1_ROUND_{}: c2 = {any}\n", .{ round_idx, compressed[1].toBytes() });
+                std.debug.print("[ZOLT] STAGE1_ROUND_{}: c3 = {any}\n", .{ round_idx, compressed[2].toBytes() });
 
                 try proof.compressed_polys.append(self.allocator, .{
                     .coeffs_except_linear_term = coeffs,
                     .allocator = self.allocator,
                 });
 
-                // Append SCALED round polynomial to transcript using Jolt's CompressedUniPoly format
+                // Append round polynomial to transcript
                 transcript.appendMessage("UniPoly_begin");
-                transcript.appendScalar(compressed[0]); // c0
-                transcript.appendScalar(compressed[1]); // c2
-                transcript.appendScalar(compressed[2]); // c3
+                transcript.appendScalar(compressed[0]);
+                transcript.appendScalar(compressed[1]);
+                transcript.appendScalar(compressed[2]);
                 transcript.appendMessage("UniPoly_end");
 
                 // Get challenge from transcript
                 const challenge = transcript.challengeScalar();
                 try challenges.append(self.allocator, challenge);
 
-                // DEBUG: Print challenge in both BE and LE
-                std.debug.print("[ZOLT] STAGE1_ROUND_{}: challenge = {any}\n", .{ round_idx, challenge.toBytesBE() });
-                std.debug.print("[ZOLT] STAGE1_ROUND_{}: challenge_le = {any}\n", .{ round_idx, challenge.toBytes() });
+                // DEBUG: Print challenge (LE bytes for Jolt comparison)
+                std.debug.print("[ZOLT] STAGE1_ROUND_{}: challenge = {any}\n", .{ round_idx, challenge.toBytes() });
 
                 // Bind challenge and update claim
-                // IMPORTANT: The prover must track UNSCALED claims internally because
-                // computeRemainingRoundPoly uses current_claim to compute s(1) = claim - s(0)
-                // where s(0) is unscaled. The verifier uses eval_from_hint which works with
-                // scaled values, but that's a different computation path.
                 outer_prover.bindRemainingRoundChallenge(challenge) catch {};
                 outer_prover.updateClaim(raw_evals, challenge);
-
-                // DEBUG: Print next_claim after update
-                std.debug.print("[ZOLT] STAGE1_ROUND_{}: next_claim = {any}\n", .{ round_idx, outer_prover.current_claim.toBytesBE() });
-                std.debug.print("[ZOLT] STAGE1_ROUND_{}: split_eq.current_scalar = {any}\n", .{ round_idx, outer_prover.split_eq.current_scalar.toBytesBE() });
-                // Compute and print the implied inner product at this round
-                if (outer_prover.split_eq.current_scalar.inverse()) |eq_inv| {
-                    const implied = outer_prover.current_claim.mul(eq_inv);
-                    std.debug.print("[ZOLT] STAGE1_ROUND_{}: implied_inner_prod = {any}\n", .{ round_idx, implied.toBytesBE() });
-                }
-                // Print bound Az*Bz if available
-                if (outer_prover.az_poly) |az| {
-                    if (outer_prover.bz_poly) |bz| {
-                        if (az.evaluations.len > 0 and bz.evaluations.len > 0) {
-                            const az_bz = az.evaluations[0].mul(bz.evaluations[0]);
-                            std.debug.print("[ZOLT] STAGE1_ROUND_{}: az[0]*bz[0] = {any}\n", .{ round_idx, az_bz.toBytesBE() });
-                            std.debug.print("[ZOLT] STAGE1_ROUND_{}: az.len = {}, bz.len = {}\n", .{ round_idx, az.evaluations.len, bz.evaluations.len });
-                        }
-                    }
-                }
-                // Print t_prime values if available
-                if (outer_prover.t_prime_poly) |t_prime| {
-                    if (t_prime.evaluations.len > 0) {
-                        std.debug.print("[ZOLT] STAGE1_ROUND_{}: t_prime[0] = {any}\n", .{ round_idx, t_prime.evaluations[0].toBytesBE() });
-                        std.debug.print("[ZOLT] STAGE1_ROUND_{}: t_prime.num_vars = {}, len = {}\n", .{ round_idx, t_prime.num_vars, t_prime.evaluations.len });
-                    }
-                }
             }
 
-            // DEBUG: Print final values for cross-verification
-            const eq_scalar = outer_prover.split_eq.current_scalar;
-            const final_claim = outer_prover.current_claim;
-            std.debug.print("[ZOLT] STAGE1_FINAL: eq_factor (split_eq.current_scalar) = {any}\n", .{eq_scalar.toBytesBE()});
-            std.debug.print("[ZOLT] STAGE1_FINAL: output_claim (unscaled) = {any}\n", .{final_claim.toBytesBE()});
-            std.debug.print("[ZOLT] STAGE1_FINAL: output_claim (scaled) = {any}\n", .{final_claim.mul(batching_coeff).toBytesBE()});
-            // Compute implied inner_sum_prod = output_claim / eq_factor
-            if (eq_scalar.inverse()) |eq_inv| {
-                const implied_inner_sum_prod = final_claim.mul(eq_inv);
-                std.debug.print("[ZOLT] STAGE1_FINAL: implied_inner_sum_prod (output/eq) = {any}\n", .{implied_inner_sum_prod.toBytesBE()});
-            }
-            // Print final bound Az/Bz values
-            if (outer_prover.az_poly) |az| {
-                if (az.evaluations.len > 0) {
-                    std.debug.print("[ZOLT] STAGE1_FINAL: az_poly final value = {any}\n", .{az.evaluations[0].toBytesBE()});
-                }
-            }
-            if (outer_prover.bz_poly) |bz| {
-                if (bz.evaluations.len > 0) {
-                    std.debug.print("[ZOLT] STAGE1_FINAL: bz_poly final value = {any}\n", .{bz.evaluations[0].toBytesBE()});
-                    // Also compute the product
-                    if (outer_prover.az_poly) |az| {
-                        if (az.evaluations.len > 0) {
-                            const az_bz_product = az.evaluations[0].mul(bz.evaluations[0]);
-                            std.debug.print("[ZOLT] STAGE1_FINAL: az_final * bz_final = {any}\n", .{az_bz_product.toBytesBE()});
-                        }
-                    }
-                }
-            }
-            std.debug.print("[ZOLT] STAGE1_FINAL: num_challenges = {}\n", .{challenges.items.len});
-            for (challenges.items, 0..) |c, i| {
-                std.debug.print("[ZOLT] STAGE1_FINAL: challenge[{}] = {any}\n", .{ i, c.toBytesBE() });
-            }
+            // DEBUG: Print final summary
+            std.debug.print("[ZOLT] STAGE1_FINAL: num_rounds = {}\n", .{challenges.items.len});
 
             return Stage1Result{ .challenges = challenges, .r0 = r0, .uni_skip_claim = uni_skip_claim, .allocator = self.allocator };
         }
@@ -784,12 +656,17 @@ pub fn ProofConverter(comptime F: type) type {
         /// Add all 36 R1CS input opening claims for SpartanOuter with actual evaluations
         ///
         /// This computes the MLE evaluations at r_cycle and uses those as the claims.
+        ///
+        /// IMPORTANT: This also appends all 36 R1CS input claims to the transcript
+        /// in Jolt's order (ALL_R1CS_INPUTS). This is required for Fiat-Shamir
+        /// consistency before deriving Stage 2's tau_high challenge.
         fn addSpartanOuterOpeningClaimsWithEvaluations(
             self: *Self,
             claims: *OpeningClaims(F),
             cycle_witnesses: []const r1cs.R1CSCycleInputs(F),
             r_cycle: []const F,
             uni_skip_claim: F,
+            transcript: *Blake2bTranscript(F),
         ) !void {
             // Compute MLE evaluations at r_cycle
             const R1CSInputEvaluator = r1cs.R1CSInputEvaluator(F);
@@ -823,6 +700,10 @@ pub fn ProofConverter(comptime F: type) type {
             std.debug.print("[ZOLT] OPENING_CLAIMS: r1cs_input_evals[2] (Product) = {any}\n", .{input_evals[2].toBytes()});
 
             // Add R1CS inputs for SpartanOuter with computed evaluations
+            // AND append each claim to transcript in Jolt's order (for Fiat-Shamir)
+            std.debug.print("[ZOLT] OPENING_CLAIMS: Starting to append 36 claims to transcript\n", .{});
+            std.debug.print("[ZOLT] OPENING_CLAIMS: transcript state before = {any}\n", .{transcript.state[0..8]});
+
             for (R1CS_VIRTUAL_POLYS, 0..) |poly, jolt_idx| {
                 // Map Jolt's index to Zolt's R1CSInputIndex
                 const zolt_idx = JOLT_TO_ZOLT_R1CS_INDICES[jolt_idx].toIndex();
@@ -832,6 +713,15 @@ pub fn ProofConverter(comptime F: type) type {
                     .{ .Virtual = .{ .poly = poly, .sumcheck_id = .SpartanOuter } },
                     claim,
                 );
+
+                // Append claim to transcript (matching Jolt's cache_openings behavior)
+                transcript.appendScalar(claim);
+
+                // Debug first few claims
+                if (jolt_idx < 5) {
+                    std.debug.print("[ZOLT] OPENING_CLAIMS: claim[{}] = {any}, state = {any}\n",
+                        .{jolt_idx, claim.toBytesBE(), transcript.state[0..8]});
+                }
             }
 
             // Add the UnivariateSkip claim for SpartanOuter
@@ -840,6 +730,9 @@ pub fn ProofConverter(comptime F: type) type {
                 .{ .Virtual = .{ .poly = .UnivariateSkip, .sumcheck_id = .SpartanOuter } },
                 uni_skip_claim,
             );
+
+            // Append UnivariateSkip claim to transcript as well
+            transcript.appendScalar(uni_skip_claim);
         }
 
         /// Create a UniSkipFirstRoundProof for Stage 1 (degree-27 polynomial)
@@ -1126,6 +1019,7 @@ pub fn ProofConverter(comptime F: type) type {
                     cycle_witnesses,
                     r_cycle_big_endian,
                     result.uni_skip_claim,
+                    transcript,
                 );
             } else {
                 // Fallback to zero claims
@@ -1134,7 +1028,9 @@ pub fn ProofConverter(comptime F: type) type {
 
             // Create UniSkip proof for Stage 2
             // Need to get tau_high for Stage 2 from transcript and compute proper polynomial
+            std.debug.print("[ZOLT] STAGE2_PRE: transcript state before tau_high = {any}\n", .{transcript.state[0..8]});
             const tau_high_stage2 = transcript.challengeScalar();
+            std.debug.print("[ZOLT] STAGE2_PRE: transcript state after tau_high = {any}\n", .{transcript.state[0..8]});
 
             // Get the 5 product claims from Stage 1's opening claims
             // Order: Product, WriteLookupOutputToRD, WritePCtoRD, ShouldBranch, ShouldJump
@@ -1266,75 +1162,68 @@ pub fn ProofConverter(comptime F: type) type {
         ///
         /// For product virtualization, the base_evals are the 5 product claims from Stage 1:
         /// [Product, WriteLookupOutputToRD, WritePCtoRD, ShouldBranch, ShouldJump]
+        ///
+        /// The polynomial satisfies: Σ_t s1(t) = Σ_i L_i(tau_high) * base_evals[i] = input_claim
         fn createUniSkipProofStage2WithClaims(
             self: *Self,
             base_evals: *const [5]F,
             tau_high: F,
         ) !?UniSkipFirstRoundProof(F) {
             const univariate_skip = r1cs.univariate_skip;
-            const LagrangePoly = univariate_skip.LagrangePolynomial(F);
 
             const DOMAIN_SIZE = univariate_skip.PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DOMAIN_SIZE; // 5
             const DEGREE = univariate_skip.PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DEGREE; // 4
             const EXTENDED_SIZE = univariate_skip.PRODUCT_VIRTUAL_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE; // 9
             const NUM_COEFFS = univariate_skip.PRODUCT_VIRTUAL_FIRST_ROUND_POLY_NUM_COEFFS; // 13
 
-            // For now, use zero extended evaluations (would need trace access for proper computation)
-            // This works when the product terms are all zero at the extended domain points
-            // The extended evaluations would be the fused product evaluations at points {-4, -3, 3, 4}
+            // For Stage 2 Product Virtual, extended evaluations are the fused products
+            // at extended points {-4, -3, 3, 4}. Since we don't have trace access here,
+            // we use zeros. This is correct when the actual products at those points are zero.
             const extended_evals: [DEGREE]F = [_]F{F.zero()} ** DEGREE;
-            _ = extended_evals;
 
-            // Build the polynomial using the same structure as Stage 1's uni-skip
-            // s1(Y) = L(tau_high, Y) * t1(Y)
+            // Use the existing buildUniskipFirstRoundPoly function
+            var uni_poly = try univariate_skip.buildUniskipFirstRoundPoly(
+                F,
+                DOMAIN_SIZE,
+                DEGREE,
+                EXTENDED_SIZE,
+                NUM_COEFFS,
+                base_evals,
+                &extended_evals,
+                tau_high,
+                self.allocator,
+            );
 
-            // Step 1: Build t1 evaluations on full extended symmetric window {-4, -3, ..., 3, 4}
-            var t1_vals: [EXTENDED_SIZE]F = [_]F{F.zero()} ** EXTENDED_SIZE;
-
-            // Fill in base window evaluations at {-2, -1, 0, 1, 2}
-            // These map to positions {DEGREE-2, DEGREE-1, DEGREE, DEGREE+1, DEGREE+2} = {2, 3, 4, 5, 6}
-            const base_left: i64 = -2;
-            for (base_evals, 0..) |val, i| {
-                const z = base_left + @as(i64, @intCast(i));
-                const pos: usize = @intCast(z + @as(i64, DEGREE)); // offset by DEGREE to get 0-based index
-                t1_vals[pos] = val;
+            // Debug: Print polynomial details
+            std.debug.print("[ZOLT] STAGE2_UNISKIP: coeffs[0] = {any}\n", .{uni_poly.coeffs[0].toBytesBE()});
+            if (uni_poly.coeffs.len > 1) {
+                std.debug.print("[ZOLT] STAGE2_UNISKIP: coeffs[1] = {any}\n", .{uni_poly.coeffs[1].toBytesBE()});
             }
 
-            // Extended evaluations are zero (positions 0, 1, 7, 8 for targets -4, -3, 3, 4)
-            // Already initialized to zero
+            // Verify the polynomial satisfies the sum constraint
+            // input_claim = Σ L_i(tau_high) * base_evals[i]
+            const LagrangePoly = univariate_skip.LagrangePolynomial(F);
+            const lagrange_evals = try LagrangePoly.evals(DOMAIN_SIZE, tau_high, self.allocator);
+            defer self.allocator.free(lagrange_evals);
 
-            // Step 2: Interpolate t1 coefficients from evaluations
-            const t1_coeffs = try LagrangePoly.interpolateCoeffs(EXTENDED_SIZE, &t1_vals, self.allocator);
-            defer self.allocator.free(t1_coeffs);
-
-            // Step 3: Compute Lagrange kernel values L_i(tau_high) at the base domain points
-            const lagrange_values = try LagrangePoly.evals(DOMAIN_SIZE, tau_high, self.allocator);
-            defer self.allocator.free(lagrange_values);
-
-            // Step 4: Interpolate Lagrange kernel coefficients
-            const lagrange_coeffs = try LagrangePoly.interpolateCoeffs(DOMAIN_SIZE, lagrange_values, self.allocator);
-            defer self.allocator.free(lagrange_coeffs);
-
-            // Step 5: Multiply polynomials: s1(Y) = L(tau_high, Y) * t1(Y)
-            const coeffs = try self.allocator.alloc(F, NUM_COEFFS);
-            @memset(coeffs, F.zero());
-
-            for (lagrange_coeffs, 0..) |a, i| {
-                for (t1_coeffs, 0..) |b, j| {
-                    if (i + j < NUM_COEFFS) {
-                        coeffs[i + j] = coeffs[i + j].add(a.mul(b));
-                    }
-                }
+            var input_claim = F.zero();
+            for (base_evals, 0..) |eval, i| {
+                input_claim = input_claim.add(lagrange_evals[i].mul(eval));
             }
+            std.debug.print("[ZOLT] STAGE2_UNISKIP: input_claim = {any}\n", .{input_claim.toBytesBE()});
 
-            // Debug: Print first few coefficients
-            std.debug.print("[ZOLT] STAGE2_UNISKIP: coeffs[0] = {any}\n", .{coeffs[0].toBytesBE()});
-            if (coeffs.len > 1) {
-                std.debug.print("[ZOLT] STAGE2_UNISKIP: coeffs[1] = {any}\n", .{coeffs[1].toBytesBE()});
+            // Check domain sum
+            const power_sums = univariate_skip.computePowerSums(DOMAIN_SIZE, NUM_COEFFS);
+            var domain_sum = F.zero();
+            for (uni_poly.coeffs, 0..) |coeff, j| {
+                domain_sum = domain_sum.add(coeff.mulI128(power_sums[j]));
             }
+            std.debug.print("[ZOLT] STAGE2_UNISKIP: domain_sum = {any}\n", .{domain_sum.toBytesBE()});
+            std.debug.print("[ZOLT] STAGE2_UNISKIP: sum matches input_claim? {}\n", .{domain_sum.eql(input_claim)});
 
+            // Return as UniSkipFirstRoundProof
             return UniSkipFirstRoundProof(F){
-                .uni_poly = coeffs,
+                .uni_poly = uni_poly.coeffs,
                 .allocator = self.allocator,
             };
         }

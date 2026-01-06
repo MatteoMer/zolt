@@ -242,12 +242,49 @@ class StageComparator:
 
         return results
 
+    def extract_zolt_le_hex(self, pattern: str) -> Optional[str]:
+        """Extract Zolt value in LE format and convert to hex"""
+        for line in self.zolt_log.split('\n'):
+            if pattern in line:
+                zolt_bytes = self.parser.parse_zolt_bytes(line)
+                if zolt_bytes and len(zolt_bytes) >= 32:
+                    return self.parser.bytes_to_hex(zolt_bytes[:32])
+        return None
+
+    def extract_zolt_be_as_le_hex(self, pattern: str) -> Optional[str]:
+        """Extract Zolt value in BE format and convert to LE hex"""
+        for line in self.zolt_log.split('\n'):
+            if pattern in line:
+                zolt_bytes = self.parser.parse_zolt_bytes(line)
+                if zolt_bytes and len(zolt_bytes) >= 32:
+                    # Reverse BE to LE
+                    le_bytes = list(reversed(zolt_bytes[:32]))
+                    return self.parser.bytes_to_hex(le_bytes)
+        return None
+
+    def extract_jolt_decimal_as_le_hex(self, pattern: str) -> Optional[str]:
+        """Extract Jolt decimal and convert to LE hex for comparison with Zolt _le"""
+        for line in self.jolt_log.split('\n'):
+            if pattern in line:
+                dec_val = self.parser.parse_decimal(line)
+                if dec_val:
+                    # Convert decimal to BE hex, then reverse to LE
+                    be_hex = self.parser.decimal_to_hex(dec_val)
+                    be_bytes = self.parser.hex_to_bytes(be_hex)
+                    le_bytes = list(reversed(be_bytes))
+                    return self.parser.bytes_to_hex(le_bytes)
+        return None
+
     def compare_stage1_round(self, round_idx: int) -> List[CompareResult]:
         """Compare a single Stage 1 round"""
         results = []
 
+        # Current claim - Zolt _le (LE bytes) vs Jolt decimal (convert to LE)
+        zolt_claim = self.extract_zolt_le_hex(f"STAGE1_ROUND_{round_idx}: current_claim_le = ")
+        jolt_claim = self.extract_jolt_decimal_as_le_hex(f"STAGE1_ROUND_{round_idx}: current_claim = ")
+        results.append(self.compare_values(f"Round {round_idx} claim", zolt_claim, jolt_claim))
+
         # Coefficients c0, c2, c3 - use _le for Zolt and _bytes for Jolt
-        # These are the key values that must match for sumcheck correctness
         for coeff in ["c0", "c2", "c3"]:
             zolt_val = self.extract_single(f"STAGE1_ROUND_{round_idx}: {coeff}_le = ", self.zolt_log)
             jolt_val = self.extract_single(f"STAGE1_ROUND_{round_idx}: {coeff}_bytes = ", self.jolt_log)
@@ -257,6 +294,11 @@ class StageComparator:
         zolt_ch = self.extract_single(f"STAGE1_ROUND_{round_idx}: challenge_le = ", self.zolt_log)
         jolt_ch = self.extract_single(f"STAGE1_ROUND_{round_idx}: challenge_bytes = ", self.jolt_log)
         results.append(self.compare_values(f"Round {round_idx} challenge", zolt_ch, jolt_ch))
+
+        # Next claim - Zolt outputs BE, Jolt outputs decimal
+        zolt_next = self.extract_zolt_be_as_le_hex(f"STAGE1_ROUND_{round_idx}: next_claim = ")
+        jolt_next = self.extract_jolt_decimal_as_le_hex(f"STAGE1_ROUND_{round_idx}: next_claim = ")
+        results.append(self.compare_values(f"Round {round_idx} next_claim", zolt_next, jolt_next))
 
         return results
 
@@ -273,6 +315,11 @@ class StageComparator:
         else:
             results.append(CompareResult("tau.len", str(zolt_tau_len), str(jolt_tau_len), MatchResult.MISMATCH))
 
+        # Initial claim - Zolt _le vs Jolt decimal (converted to LE)
+        zolt_init = self.extract_zolt_le_hex("STAGE1_INITIAL: claim_le = ")
+        jolt_init = self.extract_jolt_decimal_as_le_hex("STAGE1_INITIAL: claim = ")
+        results.append(self.compare_values("Initial claim", zolt_init, jolt_init))
+
         # Find number of rounds from logs
         num_rounds = 0
         for line in self.zolt_log.split('\n'):
@@ -283,6 +330,17 @@ class StageComparator:
         # Compare each round
         for i in range(min(num_rounds, 20)):  # Cap at 20 rounds for sanity
             results.extend(self.compare_stage1_round(i))
+
+        # Final values
+        zolt_eq = self.extract_zolt_le_hex("STAGE1_FINAL: eq_factor")
+        jolt_eq = self.extract_jolt_decimal_as_le_hex("STAGE1_FINAL: eq_factor")
+        if zolt_eq or jolt_eq:
+            results.append(self.compare_values("Final eq_factor", zolt_eq, jolt_eq))
+
+        zolt_out = self.extract_zolt_le_hex("STAGE1_FINAL: output_claim")
+        jolt_out = self.extract_jolt_decimal_as_le_hex("STAGE1_FINAL: output_claim")
+        if zolt_out or jolt_out:
+            results.append(self.compare_values("Final output_claim", zolt_out, jolt_out))
 
         return results
 

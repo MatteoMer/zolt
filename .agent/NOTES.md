@@ -1,6 +1,62 @@
 # Zolt-Jolt Compatibility Notes
 
-## Current Status (Session 56 - January 6, 2026)
+## Current Status (Session 57 - January 6, 2026)
+
+### Summary
+
+**ROOT CAUSE CONFIRMED: UniSkip missing SECOND_GROUP evaluation**
+
+Zolt's `computeFirstRoundPoly` only evaluates FIRST_GROUP constraints, but Jolt evaluates BOTH groups.
+This creates an inconsistency between the UniSkip claim and the subsequent Gruen rounds.
+
+### Evidence
+
+Debug output at first Gruen round shows q(1) mismatch:
+```
+t_prime[1] = { 43, 88, 180, 151, ... }  (from az_poly which has both groups)
+q(1) from GRUEN = { 36, 193, 206, 150, ... }  (derived from uni_skip_claim)
+```
+
+The Gruen constraint `uni_skip_claim = l(0)*t_prime[0] + l(1)*t_prime[1]` fails because:
+- `uni_skip_claim` = sum over FIRST_GROUP only
+- `t_prime[0]/t_prime[1]` = properly weighted sums including both groups
+
+### The Bug Location
+
+**`evaluateAzBzAtDomainPoint`** (lines 548-600 in streaming_outer.zig):
+- Only uses `FIRST_GROUP_INDICES`
+- Never touches `SECOND_GROUP_INDICES`
+
+But **az_poly construction** (lines 285-326):
+- Computes BOTH groups: az0/bz0 for FIRST_GROUP, az1/bz1 for SECOND_GROUP
+- Stores interleaved: `az_evals[base_idx + j]` for group 0, `az_evals[base_idx + j + 1]` for group 1
+
+### Jolt's Approach
+
+From `jolt-core/src/zkvm/spartan/outer.rs:196-208`:
+```rust
+let is_group1 = (x_in & 1) == 1;
+if !is_group1 {
+    eval.extended_azbz_product_first_group(j)
+} else {
+    eval.extended_azbz_product_second_group(j)
+}
+```
+
+Jolt iterates over ALL `x_in` values:
+- Even `x_in` → FIRST_GROUP
+- Odd `x_in` → SECOND_GROUP
+
+### The Fix Required
+
+1. Update `evaluateAzBzAtDomainPoint` to take `group: u1` parameter
+2. Handle FIRST_GROUP (10 constraints) and SECOND_GROUP (9 constraints)
+3. Update `computeFirstRoundPoly` to loop over (cycle, group) pairs
+4. Use 11-bit eq_table index: `g = (cycle << 1) | group`
+
+---
+
+## Session 56 - January 6, 2026 (SUPERSEDED by Session 57)
 
 ### Summary
 
@@ -35,8 +91,6 @@ az_final = 181185503053235487199912703636921265632136247191153554893603942855972
 bz_final = 189353324837795743110663437939657740667583580724624394002588005226092056829
 inner_sum_prod = 3428564744352329898278095955238265070037131657307455691194697055242544749299
 ```
-
-**Next Step:** Add debug output to Zolt prover to compute the SAME values and compare
 
 **Verification formula:**
 ```

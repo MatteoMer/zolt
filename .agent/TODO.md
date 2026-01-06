@@ -1,66 +1,95 @@
 # Zolt-Jolt Compatibility TODO
 
-## Current Status: Session 56 - January 6, 2026
+## Current Status: Session 57 - January 6, 2026
 
-**STATUS: Deep debugging - comparing az/bz group values**
+**STATUS: ROOT CAUSE CONFIRMED - UniSkip missing SECOND_GROUP evaluation**
 
-### Latest Debug Values from Jolt Verifier
+### Root Cause
 
+**Zolt's UniSkip (`computeFirstRoundPoly`) only evaluates FIRST_GROUP constraints, but Jolt evaluates BOTH groups.**
+
+Evidence from debug output at ROUND 1:
 ```
-r_stream = 403453513528045288561805897703363889300374796249554293903824070113366263553
-r0 = 9956720580376218385912772229440842054804584136250960391272783931628043427152
-az_g0 = 7784823065365355150329898612995661848060669911039813026488804049763027733277
-bz_g0 = 17295306602198664491678763456607120003277220072842593579631007088433375750847
-az_g1 = 1819540214425536184764541679660107604875800049998949590309674377395141916961
-bz_g1 = 7283832083962387142906994059148710843912079143868948223318847447205362507259
-az_final = 18118550305323548719991270363692126563213624719115355489360394285597267782328
-bz_final = 189353324837795743110663437939657740667583580724624394002588005226092056829
-inner_sum_prod = 3428564744352329898278095955238265070037131657307455691194697055242544749299
+t_prime[1] = { 43, 88, 180, 151, ... }  (from az_poly which has both groups)
+q(1) from GRUEN = { 36, 193, 206, 150, ... }  (derived from uni_skip_claim)
 ```
+These don't match! The Gruen constraint `uni_skip_claim = l(0)*t_prime[0] + l(1)*t_prime[1]` fails.
 
-### Test Results
+### The Inconsistency
 
-```
-output_claim:          3156099394088378331739429618582031493604140997965859776862374574205175751175
-expected_output_claim: 6520563849248945342410334176740245598125896542821607373002483479060307387386
-```
+1. **UniSkip** (`computeFirstRoundPoly`):
+   - Loops over `cycle` from 0 to padded_trace_len (1024)
+   - Calls `evaluateAzBzAtDomainPoint(witness, domain_idx)`
+   - This function **only uses FIRST_GROUP_INDICES**
+   - Missing the SECOND_GROUP contribution entirely
 
-The sumcheck `output_claim` doesn't match `expected_output_claim`.
+2. **Remaining rounds** (`az_poly` construction):
+   - Lines 285-326 compute BOTH groups:
+     - `az_evals[base_idx + j] = az0` (FIRST_GROUP)
+     - `az_evals[base_idx + j + 1] = az1` (SECOND_GROUP)
+   - `t_prime` is built from `az_poly` with both groups interleaved
 
-### Root Cause Analysis
+3. **Result**:
+   - `uni_skip_claim` = sum over FIRST_GROUP only
+   - `t_prime[0]` = sum with group=0, `t_prime[1]` = sum with group=1
+   - The Gruen constraint cannot be satisfied because they represent different sums
 
-The verifier computes:
+### Jolt's UniSkip (for reference)
+
+From `jolt-core/src/zkvm/spartan/outer.rs:196-208`:
 ```rust
-expected_output_claim = tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod
-```
-
-Where `inner_sum_prod = az_final * bz_final` comes from:
-```rust
-az_final = az_g0 + r_stream * (az_g1 - az_g0)
-bz_final = bz_g0 + r_stream * (bz_g1 - bz_g0)
-```
-
-And `az_g0`, `az_g1`, `bz_g0`, `bz_g1` are computed by:
-```rust
-for i in 0..FIRST_GROUP.len() {
-    az_g0 += w[i] * lc_a[i].dot_product(&z, z_const_col);
-    bz_g0 += w[i] * lc_b[i].dot_product(&z, z_const_col);
+let is_group1 = (x_in & 1) == 1;
+for j in 0..OUTER_UNIVARIATE_SKIP_DEGREE {
+    let prod_s192 = if !is_group1 {
+        eval.extended_azbz_product_first_group(j)
+    } else {
+        eval.extended_azbz_product_second_group(j)
+    };
+    inner[j].fmadd(&e_in, &prod_s192);
 }
 ```
 
-**The prover must produce a final sumcheck claim that equals this formula.**
+Jolt iterates over all `x_in` values where:
+- Even `x_in`: evaluates FIRST_GROUP
+- Odd `x_in`: evaluates SECOND_GROUP
 
-### Next Steps
+### The Fix
 
-1. Add debug output to Zolt prover to compute the same az/bz values
-2. Compare with Jolt's verifier values to find where they diverge
-3. Fix the computation that differs
+Update `computeFirstRoundPoly` to match Jolt:
 
-### Files to Add Debug Output
+```zig
+// Current (WRONG):
+for (0..padded_trace_len) |cycle| {
+    const eq_val = eq_table[cycle];
+    const az_bz = evaluateAzBzAtDomainPoint(witness, domain_idx);  // FIRST_GROUP only
+    sum += eq_val * az_bz;
+}
 
-- `src/zkvm/spartan/streaming_outer.zig` - Add function to compute az_g0/az_g1/bz_g0/bz_g1 at the bound point
-- Need to compute: `Σ w[i] * constraint_i.condition * z(r_cycle)` for Az
-- And: `Σ w[i] * (constraint_i.left - constraint_i.right) * z(r_cycle)` for Bz
+// Fixed (sum over both groups):
+for (0..padded_trace_len) |cycle| {
+    for ([_]u1{0, 1}) |group| {
+        const g = (cycle << 1) | group;  // 11-bit index
+        const eq_val = eq_table[g];
+        const az_bz = evaluateAzBzAtDomainPoint(witness, domain_idx, group);
+        sum += eq_val * az_bz;
+    }
+}
+```
+
+And update `evaluateAzBzAtDomainPoint` to take a `group` parameter:
+- `group=0`: use `FIRST_GROUP_INDICES` (10 constraints)
+- `group=1`: use `SECOND_GROUP_INDICES` (9 constraints)
+
+---
+
+## Implementation Tasks
+
+- [ ] Update `evaluateAzBzAtDomainPoint` to accept `group: u1` parameter
+- [ ] Handle FIRST_GROUP (10 constraints at Y ∈ {-4,...,5}) and SECOND_GROUP (9 constraints at Y ∈ {-4,...,4})
+- [ ] Update `computeFirstRoundPoly` to loop over (cycle, group) pairs
+- [ ] Ensure eq_table indexing uses 11-bit index: `g = (cycle << 1) | group`
+- [ ] Test and verify q(1) matches t_prime[1] at first Gruen round
+- [ ] Verify final output_claim matches expected_output_claim
 
 ---
 
@@ -71,13 +100,9 @@ for i in 0..FIRST_GROUP.len() {
 - [x] Verify transcript challenges match (they do!)
 - [x] Verify r1cs_input_evals match between prover and verifier (they do!)
 - [x] Fix batching coefficient Montgomery form bug (Session 53)
-- [x] Identify root cause: missing univariate skip optimization (partially)
-- [x] Add debug output to Jolt verifier to see az/bz group values
-
-## In Progress
-
-- [ ] Add debug output to Zolt prover to compute same values
-- [ ] Compare Zolt az_g0/bz_g0/az_g1/bz_g1 with Jolt values
+- [x] Add debug output showing t_prime values and q(1) mismatch
+- [x] Trace Gruen constraint failure to UniSkip vs t_prime inconsistency
+- [x] Identify root cause: UniSkip missing SECOND_GROUP evaluation
 
 ---
 
@@ -88,52 +113,21 @@ for i in 0..FIRST_GROUP.len() {
 zig build -Doptimize=ReleaseFast
 ./zig-out/bin/zolt prove /tmp/jolt-guest-targets/fibonacci-guest-fib/riscv64imac-unknown-none-elf/release/fibonacci-guest --jolt-format --input-hex 32 --export-preprocessing /tmp/zolt_preprocessing.bin -o /tmp/zolt_proof_dory.bin
 
-# Jolt verification test (with Jolt preprocessing)
+# Jolt verification test
 cd /Users/matteo/projects/jolt
 cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture
 ```
 
 ---
 
-## Key Formulas
-
-### Verifier's inner_sum_prod
-
-```rust
-// Lagrange weights at r0 over base domain {-4..5}
-let w = LagrangePolynomial::evals(&r0);
-
-// Group 0 (10 constraints)
-for i in 0..FIRST_GROUP.len() {
-    az_g0 += w[i] * lc_a[i].dot_product(&z, z_const_col);
-    bz_g0 += w[i] * lc_b[i].dot_product(&z, z_const_col);
-}
-
-// Group 1 (9 constraints)
-for i in 0..SECOND_GROUP.len() {
-    az_g1 += w[i] * lc_a[i].dot_product(&z, z_const_col);
-    bz_g1 += w[i] * lc_b[i].dot_product(&z, z_const_col);
-}
-
-// Blend with r_stream
-az_final = az_g0 + r_stream * (az_g1 - az_g0)
-bz_final = bz_g0 + r_stream * (bz_g1 - bz_g0)
-
-inner_sum_prod = az_final * bz_final
-```
-
-### Prover's Final Claim
+## Debug Values from Jolt Verifier
 
 ```
-output_claim = current_claim after all sumcheck rounds
-
-// This should equal:
-// sum over all (row, x_cycle) of: eq(tau, row||x_cycle) * Az(row, x_cycle) * Bz(row, x_cycle)
-// bound to the challenge point [r0, r_stream, r_1, ..., r_n]
+inner_sum_prod = 3428564744352329898278095955238265070037131657307455691194697055242544749299
+az_g0 = 7784823065365355150329898612995661848060669911039813026488804049763027733277
+az_g1 = 1819540214425536184764541679660107604875800049998949590309674377395141916961
+bz_g0 = 17295306602198664491678763456607120003277220072842593579631007088433375750847
+bz_g1 = 7283832083962387142906994059148710843912079143868948223318847447205362507259
 ```
 
-### Expected Relationship
-
-```
-output_claim == tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod
-```
+The verifier blends groups: `az_final = az_g0 + r_stream * (az_g1 - az_g0)`

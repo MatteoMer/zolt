@@ -951,9 +951,14 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 t_zero = t_evals.t_zero;
                 t_infinity = t_evals.t_infinity;
 
-                // DEBUG: Print t_zero, t_infinity for this round
+                // DEBUG: Print t_zero, t_infinity and t_prime[1] for this round
                 std.debug.print("[ZOLT] ROUND {}: t_zero = {any}\n", .{ self.current_round, t_zero.toBytesBE() });
                 std.debug.print("[ZOLT] ROUND {}: t_infinity = {any}\n", .{ self.current_round, t_infinity.toBytesBE() });
+                if (self.t_prime_poly) |t| {
+                    if (t.evaluations.len > 1) {
+                        std.debug.print("[ZOLT] ROUND {}: t_prime[1] = {any}\n", .{ self.current_round, t.evaluations[1].toBytesBE() });
+                    }
+                }
             } else {
                 // No t_prime_poly available (shouldn't happen with LinearOnlySchedule)
                 return error.TPrimePolyNotAvailable;

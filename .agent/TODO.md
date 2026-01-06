@@ -2,19 +2,23 @@
 
 ## Current Status: January 6, 2026 - Session 61
 
-**STATUS: Opening claims are CORRECT, but expected_output_claim doesn't match**
+**STATUS: Opening claims are CORRECT, R1CS constraint order verified, output_claim mismatch persists**
 
-### Key Discovery
+### Key Findings
 
-The opening claims (r1cs_input_evals) in the proof file are CORRECT and match what Jolt reads. The issue is that Jolt's `expected_output_claim` (computed from R1CS matrices) doesn't match Zolt's `output_claim` (from sumcheck).
+1. **Opening claims in proof file are CORRECT** - Verified that bytes written by Zolt match exactly what Jolt reads
+2. **R1CS constraint order matches** - Verified FIRST_GROUP_INDICES and SECOND_GROUP_INDICES match Jolt's
+3. **Individual constraints look correct** - Compared RamAddrEqRs1PlusImmIfLoadStore, matches Jolt
 
-### Debug Data
+### The Issue
 
-**Zolt's output_claim:** `6773516909001919453588788632964349915676722363381828976724283873891965463518`
+Despite all the above matching, Jolt's `expected_output_claim` (computed from R1CS matrices) doesn't match Zolt's `output_claim` (from sumcheck):
 
-**Jolt's expected_output_claim:** `2434835346226335308248403617389563027378536009995292689449902135365447362920`
+- **Zolt output_claim:** `6773516909001919453588788632964349915676722363381828976724283873891965463518`
+- **Jolt expected:** `2434835346226335308248403617389563027378536009995292689449902135365447362920`
 
-**Jolt's computation:**
+### Jolt's Computation
+
 ```
 expected_output_claim = tau_high_bound_r0 * tau_bound_r_tail_reversed * inner_sum_prod
 where:
@@ -23,58 +27,25 @@ where:
   inner_sum_prod = 1221027240042985780108460212824162278077143256096887971142513640043566180374
 ```
 
-### Root Cause Analysis
+`inner_sum_prod` is computed by `evaluate_inner_sum_product_at_point(rx_constr, r1cs_input_evals)` which:
+1. Computes Lagrange weights `w` at `r0` over the domain {-4, ..., 5}
+2. For each group, sums `w[i] * lc_a.dot_product(z) * w[i] * lc_b.dot_product(z)` over constraints
+3. Blends groups using `r_stream`
 
-The sumcheck output_claim should equal:
-```
-output_claim = eq(tau, r) * Az(r) * Bz(r)
-```
+### Potential Issues to Investigate
 
-The verifier's expected_output_claim is:
-```
-expected = tau_factor * inner_sum_prod
-        = tau_factor * Az_eval * Bz_eval
-```
+1. **Lagrange basis evaluation** - Is Zolt's Lagrange kernel at r0 matching Jolt's?
+2. **Group blending formula** - Is `(1-r_stream)*g0 + r_stream*g1` matching Jolt's?
+3. **Constraint equation evaluation** - Are the `lc.dot_product(z)` values the same?
+4. **rx_constr order** - Is `[r_stream, r0]` or `[r0, r_stream]`?
 
-where Az_eval and Bz_eval are computed from the R1CS matrices and r1cs_input_evals.
+### Debug Data
 
-The discrepancy suggests either:
-1. **R1CS constraints differ** between Zolt and Jolt's preprocessing
-2. **R1CS evaluation differs** - how Zolt computes Az*Bz vs how Jolt evaluates
-3. **Preprocessing mismatch** - Jolt's verifier key may have different R1CS sparse matrices
+All sumcheck challenges match exactly between Zolt and Jolt:
+- r0 = 14367833564280337454825687001197154633344501482915202122217190070888490391598
+- r_stream (r_sumcheck[0]) = 401701074988603179123933526844662105332873635826937971775978583225973524867
 
-### ✅ Confirmed Working
-
-1. **Transcript Compatibility**: All transcript states match
-2. **Preamble**: Matches
-3. **Dory Commitments**: Match
-4. **Tau Derivation**: All 12 values match
-5. **UniSkip Polynomial**: All coefficients match
-6. **All Sumcheck Challenges**: Match exactly
-7. **Opening Claims Serialization**: Values in proof file are correct
-
-### ❌ Current Issue
-
-The R1CS evaluation produces different results:
-- Zolt computes `Az*Bz` during sumcheck → produces output_claim
-- Jolt verifier computes `Az_eval * Bz_eval` from R1CS matrices → produces expected_output_claim
-- These should be equal but aren't
-
-### Next Steps
-
-1. **Compare R1CS constraints** - Verify Zolt's R1CS matches Jolt's exactly
-2. **Check R1CS sparse matrix representation** - How Zolt represents vs how Jolt evaluates
-3. **Verify preprocessing export** - Ensure Zolt exports R1CS correctly
-4. **Add debug to R1CS evaluation** - Print Az_eval, Bz_eval from both sides
-
-### Files to Investigate
-
-- `/Users/matteo/projects/zolt/src/zkvm/r1cs/constraints.zig` - Zolt's R1CS constraints
-- `/Users/matteo/projects/jolt/jolt-core/src/zkvm/r1cs/constraints.rs` - Jolt's R1CS constraints
-- `/Users/matteo/projects/jolt/jolt-core/src/zkvm/r1cs/evaluation.rs` - Jolt's R1CS evaluation
-- `/Users/matteo/projects/zolt/src/zkvm/spartan/streaming_outer.zig` - Zolt's sumcheck
-
-## Test Commands
+### Test Commands
 
 ```bash
 # Build and generate proof
@@ -84,7 +55,4 @@ zig build -Doptimize=ReleaseFast
 # Jolt verification test
 cd /Users/matteo/projects/jolt
 cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture
-
-# Debug proof format
-cargo test --package jolt-core test_debug_zolt_format -- --ignored --nocapture
 ```

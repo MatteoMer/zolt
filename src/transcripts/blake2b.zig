@@ -283,6 +283,11 @@ pub fn Blake2bTranscript(comptime F: type) type {
         /// This returns a PROPER field element in Montgomery form, suitable for
         /// standard field arithmetic. Used for batching coefficients where Jolt
         /// uses F::from_bytes (via challenge_vector).
+        ///
+        /// CRITICAL: This does NOT mask to 125 bits - Jolt's F::from_bytes uses
+        /// from_le_bytes_mod_order which interprets the full 128 bits and reduces mod p.
+        /// This is different from challenge_scalar_optimized which uses MontU128Challenge
+        /// with 125-bit masking.
         pub fn challengeScalarFull(self: *Self) F {
             std.debug.print("[ZOLT TRANSCRIPT] challengeScalarFull: round={d}\n", .{self.n_rounds});
 
@@ -297,22 +302,18 @@ pub fn Blake2bTranscript(comptime F: type) type {
 
             // Interpret as little-endian integer and convert to field element
             // This matches Jolt's F::from_bytes(&buf) which does from_le_bytes_mod_order
+            // NO MASKING - use full 128-bit value
             const low: u64 = mem.readInt(u64, reversed[0..8], .little);
             const high: u64 = mem.readInt(u64, reversed[8..16], .little);
 
-            // Mask to 125 bits (same as MontU128Challenge)
-            const full_value: u128 = (@as(u128, high) << 64) | low;
-            const mask_125: u128 = (1 << 125) - 1;
-            const masked_value: u128 = full_value & mask_125;
-            const masked_low: u64 = @truncate(masked_value);
-            const masked_high: u64 = @truncate(masked_value >> 64);
-
             // Store in lower limbs [low, high, 0, 0] as standard form
             // then convert to Montgomery form
-            const standard = F{ .limbs = .{ masked_low, masked_high, 0, 0 } };
+            // Note: For 128-bit values < 2^128, no modular reduction is needed
+            // since 2^128 < BN254 scalar field order (~2^254)
+            const standard = F{ .limbs = .{ low, high, 0, 0 } };
             const result = standard.toMontgomery();
 
-            std.debug.print("[ZOLT TRANSCRIPT]   canonical_value=0x{x}{x:0>16}\n", .{ masked_high, masked_low });
+            std.debug.print("[ZOLT TRANSCRIPT]   canonical_value=0x{x}{x:0>16}\n", .{ high, low });
 
             return result;
         }

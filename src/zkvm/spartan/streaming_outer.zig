@@ -357,6 +357,15 @@ pub fn StreamingOuterProver(comptime F: type) type {
             const E_out = eq_tables.E_out;
             const E_in = eq_tables.E_in;
 
+            // DEBUG: Print E_out[0] and E_in[0] values
+            if (E_out.len > 0 and E_in.len > 0) {
+                const eq_weight_00 = E_out[0].mul(E_in[0]);
+                std.debug.print("[ZOLT] buildTPrimePoly: E_out[0] = {any}\n", .{E_out[0].toBytesBE()});
+                std.debug.print("[ZOLT] buildTPrimePoly: E_in[0] = {any}\n", .{E_in[0].toBytesBE()});
+                std.debug.print("[ZOLT] buildTPrimePoly: E_out[0]*E_in[0] = {any}\n", .{eq_weight_00.toBytesBE()});
+                std.debug.print("[ZOLT] buildTPrimePoly: E_out.len = {}, E_in.len = {}, az_boundLen = {}, bz_boundLen = {}\n", .{ E_out.len, E_in.len, az_poly.boundLen(), bz_poly.boundLen() });
+            }
+
             // Compute grid sizes
             const grid_size = @as(usize, 1) << @intCast(window_size);
             var three_pow_dim: usize = 1;
@@ -915,9 +924,15 @@ pub fn StreamingOuterProver(comptime F: type) type {
                     std.debug.print("[ZOLT] ROUND {} REBUILD: E_out.len = {}, E_in.len = {}\n", .{ self.current_round, eq_tables.E_out.len, eq_tables.E_in.len });
 
                     try self.rebuildTPrimePoly(window_size);
-                    // DEBUG: Print t_prime[0] AFTER rebuild
+                    // DEBUG: Print t_prime evaluations AFTER rebuild
                     if (self.t_prime_poly) |t| {
                         std.debug.print("[ZOLT] ROUND {} AFTER REBUILD: t_prime[0] = {any}\n", .{ self.current_round, t.evaluations[0].toBytesBE() });
+                        if (t.evaluations.len > 1) {
+                            std.debug.print("[ZOLT] ROUND {} AFTER REBUILD: t_prime[1] = {any}\n", .{ self.current_round, t.evaluations[1].toBytesBE() });
+                        }
+                        if (t.evaluations.len > 2) {
+                            std.debug.print("[ZOLT] ROUND {} AFTER REBUILD: t_prime[2] = {any}\n", .{ self.current_round, t.evaluations[2].toBytesBE() });
+                        }
                         std.debug.print("[ZOLT] ROUND {} AFTER REBUILD: t_prime.num_vars = {}\n", .{ self.current_round, t.num_vars });
                     }
                     // DEBUG: Print what az[0]*bz[0] should be

@@ -364,6 +364,9 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
             // where eq(b) = current_scalar * product of eq(τ_i, b) for current var
             const tau_curr = self.tau[self.current_index - 1];
 
+            // DEBUG: Print current_index and tau_curr
+            std.debug.print("[GRUEN] computeCubicRoundPoly: current_index = {}, tau_curr = tau[{}] = {any}\n", .{ self.current_index, self.current_index - 1, tau_curr.toBytesBE() });
+
             // eq(0) for current variable: current_scalar * (1 - τ_curr)
             const eq_0 = self.current_scalar.mul(F.one().sub(tau_curr));
             // eq(1) for current variable: current_scalar * τ_curr
@@ -424,6 +427,11 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
                 std.debug.print("[GRUEN DEBUG]   s(0)+s(1) = {any}\n", .{sum_check.toBytesBE()});
                 std.debug.print("[GRUEN DEBUG]   previous_claim = {any}\n", .{previous_claim.toBytesBE()});
             }
+
+            // DEBUG: Print detailed values for every round
+            std.debug.print("[GRUEN ROUND {}] q(0) = {any}\n", .{ self.current_index, c.toBytesBE() });
+            std.debug.print("[GRUEN ROUND {}] q(1) = {any}\n", .{ self.current_index, q_1.toBytesBE() });
+            std.debug.print("[GRUEN ROUND {}] previous_claim = {any}\n", .{ self.current_index, previous_claim.toBytesBE() });
 
             return [4]F{ s_0, s_1, s_2, s_3 };
         }

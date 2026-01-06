@@ -13037,3 +13037,10 @@ Findings:
 - This causes claim drift from true bound polynomial
 Next: Fix rebuildTPrimePoly indexing to match Jolt's compute_evaluation_grid_from_polynomials_parallel
 
+
+--- Iteration 1 ---
+Started: 2026-01-06T15:05:54.429506
+Ended: 2026-01-06T15:26:36.560065
+Turns: 139
+Cost: $12.7662
+

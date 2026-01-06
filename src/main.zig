@@ -497,11 +497,12 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt:
         defer device_mut.deinit();
 
         // Create shared preprocessing (transfer ownership)
-        const shared_prep = preprocessing.JoltSharedPreprocessing{
+        var shared_prep = preprocessing.JoltSharedPreprocessing{
             .bytecode = bytecode_prep,
             .ram = ram_prep,
             .memory_layout = device.memory_layout,
         };
+        defer shared_prep.deinit();
 
         // Create verifier setup from SRS if available
         const dory = zolt.poly.commitment.dory;

@@ -1446,7 +1446,31 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
             // Remaining rounds
             while (self.current_round < self.numRounds()) {
+                // DEBUG: Print claim BEFORE computing round polynomial
+                std.debug.print("[ZOLT] ROUND {}: claim_before = {any}\n", .{ self.current_round, self.current_claim.toBytesBE() });
+
                 const round_poly = try self.computeRemainingRoundPoly();
+
+                // DEBUG: Print round polynomial evaluations and coefficients
+                std.debug.print("[ZOLT] ROUND {}: s(0) = {any}\n", .{ self.current_round, round_poly[0].toBytesBE() });
+                std.debug.print("[ZOLT] ROUND {}: s(1) = {any}\n", .{ self.current_round, round_poly[1].toBytesBE() });
+                const s0_plus_s1 = round_poly[0].add(round_poly[1]);
+                std.debug.print("[ZOLT] ROUND {}: s(0)+s(1) = {any}\n", .{ self.current_round, s0_plus_s1.toBytesBE() });
+                std.debug.print("[ZOLT] ROUND {}: previous_claim = {any}\n", .{ self.current_round, self.current_claim.toBytesBE() });
+                std.debug.print("[ZOLT] ROUND {}: s(0)+s(1) == claim? {}\n", .{ self.current_round, s0_plus_s1.eql(self.current_claim) });
+
+                // Print coefficients for comparison with Jolt
+                const coeffs = poly_mod.UniPoly(F).interpolateDegree3(round_poly);
+                std.debug.print("[ZOLT] ROUND {}: c0 = {any}\n", .{ self.current_round, coeffs[0].toBytesBE() });
+                std.debug.print("[ZOLT] ROUND {}: c1 = {any}\n", .{ self.current_round, coeffs[1].toBytesBE() });
+                std.debug.print("[ZOLT] ROUND {}: c2 = {any}\n", .{ self.current_round, coeffs[2].toBytesBE() });
+                std.debug.print("[ZOLT] ROUND {}: c3 = {any}\n", .{ self.current_round, coeffs[3].toBytesBE() });
+
+                // Check: hint-recovered c1 should match interpolated c1
+                // c1_hint = previous_claim - 2*c0 - c2 - c3
+                const c1_hint = self.current_claim.sub(coeffs[0]).sub(coeffs[0]).sub(coeffs[2]).sub(coeffs[3]);
+                std.debug.print("[ZOLT] ROUND {}: c1_hint = {any}\n", .{ self.current_round, c1_hint.toBytesBE() });
+                std.debug.print("[ZOLT] ROUND {}: c1 == c1_hint? {}\n", .{ self.current_round, coeffs[1].eql(c1_hint) });
 
                 // Add to proof: convert evaluations [s(0), s(1), s(2), s(3)] to
                 // compressed coefficient format [c0, c2, c3] as expected by Jolt
@@ -1458,8 +1482,15 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 transcript.appendSlice(&compressed);
                 const r = transcript.challengeScalar();
 
+                // DEBUG: Print challenge for this round
+                std.debug.print("[ZOLT] ROUND {}: challenge = {any}\n", .{ self.current_round, r.toBytesBE() });
+
                 // Update state
                 self.updateClaim(round_poly, r);
+
+                // DEBUG: Print claim AFTER update
+                std.debug.print("[ZOLT] ROUND {}: claim_after = {any}\n", .{ self.current_round, self.current_claim.toBytesBE() });
+
                 try self.bindRemainingRoundChallenge(r);
             }
 

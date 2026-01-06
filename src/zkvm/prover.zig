@@ -296,16 +296,36 @@ pub fn MultiStageProver(comptime F: type) type {
         /// Prove all stages
         /// Returns the stage proofs - caller takes ownership and is responsible for cleanup
         pub fn prove(self: *Self, transcript: anytype) !JoltStageProofs(F) {
+            std.debug.print("\n[PROVER] ========================================\n", .{});
+            std.debug.print("[PROVER] Starting multi-stage proof\n", .{});
+            std.debug.print("[PROVER]   log_t={d}, log_k={d}, trace_len={d}\n", .{ self.log_t, self.log_k, self.trace.steps.items.len });
+            std.debug.print("[PROVER] ========================================\n\n", .{});
+
             try self.proveStage1(transcript);
+            std.debug.print("\n[PROVER] Stage 1 complete\n\n", .{});
+
             try self.proveStage2(transcript);
+            std.debug.print("\n[PROVER] Stage 2 complete\n\n", .{});
+
             try self.proveStage3(transcript);
+            std.debug.print("\n[PROVER] Stage 3 complete\n\n", .{});
+
             try self.proveStage4(transcript);
+            std.debug.print("\n[PROVER] Stage 4 complete\n\n", .{});
+
             try self.proveStage5(transcript);
+            std.debug.print("\n[PROVER] Stage 5 complete\n\n", .{});
+
             try self.proveStage6(transcript);
+            std.debug.print("\n[PROVER] Stage 6 complete\n\n", .{});
 
             // Store log_t and log_k for verifier transcript sync
             self.proofs.log_t = self.log_t;
             self.proofs.log_k = self.log_k;
+
+            std.debug.print("[PROVER] ========================================\n", .{});
+            std.debug.print("[PROVER] All stages complete!\n", .{});
+            std.debug.print("[PROVER] ========================================\n\n", .{});
 
             // Transfer ownership to caller
             self.proofs_transferred = true;
@@ -323,14 +343,19 @@ pub fn MultiStageProver(comptime F: type) type {
         /// - Degree: 2 (quadratic from Az * Bz term)
         /// - Opening claims: Az, Bz, Cz evaluations at final point
         fn proveStage1(self: *Self, transcript: anytype) !void {
+            std.debug.print("[PROVER STAGE 1] Starting Outer Spartan sumcheck\n", .{});
+
             const stage_proof = &self.proofs.stage_proofs[0];
 
             // Build Jolt R1CS from trace
             var jolt_r1cs = try r1cs.JoltR1CS(F).fromTrace(self.allocator, self.trace);
             defer jolt_r1cs.deinit();
 
+            std.debug.print("[PROVER STAGE 1]   num_cycles={d}, log_constraints={d}, padded={d}\n", .{ jolt_r1cs.num_cycles, jolt_r1cs.log_num_constraints, jolt_r1cs.padded_num_constraints });
+
             // Skip if no constraints
             if (jolt_r1cs.num_cycles == 0) {
+                std.debug.print("[PROVER STAGE 1]   Skipping - no cycles\n", .{});
                 self.current_stage = 1;
                 return;
             }
@@ -338,13 +363,16 @@ pub fn MultiStageProver(comptime F: type) type {
             // Build witness vector
             const witness = try jolt_r1cs.buildWitness();
             defer self.allocator.free(witness);
+            std.debug.print("[PROVER STAGE 1]   witness_size={d}\n", .{witness.len});
 
             // Get tau challenge from transcript (log_n field elements)
             const num_rounds = jolt_r1cs.log_num_constraints;
             const tau = try self.allocator.alloc(F, num_rounds);
             defer self.allocator.free(tau);
-            for (tau) |*t| {
+            std.debug.print("[PROVER STAGE 1]   getting {d} tau challenges\n", .{num_rounds});
+            for (tau, 0..) |*t, i| {
                 t.* = try transcript.challengeScalar("spartan_tau");
+                std.debug.print("[PROVER STAGE 1]     tau[{d}] = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ i, t.limbs[3], t.limbs[2], t.limbs[1], t.limbs[0] });
             }
 
             // Initialize Spartan interface
@@ -359,11 +387,20 @@ pub fn MultiStageProver(comptime F: type) type {
             // Record initial claim (should be 0 for valid witness)
             const initial_claim = spartan_iface.initialClaim();
             try stage_proof.final_claims.append(self.allocator, initial_claim);
+            std.debug.print("[PROVER STAGE 1]   initial_claim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ initial_claim.limbs[3], initial_claim.limbs[2], initial_claim.limbs[1], initial_claim.limbs[0] });
 
             // Run sumcheck rounds
             for (0..num_rounds) |round| {
+                std.debug.print("[PROVER STAGE 1]   --- Round {d}/{d} ---\n", .{ round, num_rounds });
+
                 // Compute round polynomial [p(0), p(1), p(2)]
                 const round_poly = try spartan_iface.computeRoundPolynomial();
+
+                std.debug.print("[PROVER STAGE 1]     p(0) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ round_poly[0].limbs[3], round_poly[0].limbs[2], round_poly[0].limbs[1], round_poly[0].limbs[0] });
+                std.debug.print("[PROVER STAGE 1]     p(1) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ round_poly[1].limbs[3], round_poly[1].limbs[2], round_poly[1].limbs[1], round_poly[1].limbs[0] });
+                std.debug.print("[PROVER STAGE 1]     p(2) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ round_poly[2].limbs[3], round_poly[2].limbs[2], round_poly[2].limbs[1], round_poly[2].limbs[0] });
+                const sum01 = round_poly[0].add(round_poly[1]);
+                std.debug.print("[PROVER STAGE 1]     p(0)+p(1) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ sum01.limbs[3], sum01.limbs[2], sum01.limbs[1], sum01.limbs[0] });
 
                 // Store polynomial in proof
                 const poly_copy = try self.allocator.alloc(F, 3);
@@ -380,21 +417,23 @@ pub fn MultiStageProver(comptime F: type) type {
                 // Get challenge from transcript
                 const challenge = try transcript.challengeScalar("spartan_round");
                 try stage_proof.addChallenge(challenge);
+                std.debug.print("[PROVER STAGE 1]     challenge=0x{x}\n", .{challenge.limbs[0]});
 
                 // Bind challenge for next round
                 try spartan_iface.bindChallenge(challenge);
-                _ = round;
             }
 
             // Record final evaluation and eval claims
             const final_eval = spartan_iface.getFinalEval();
             try stage_proof.final_claims.append(self.allocator, final_eval);
+            std.debug.print("[PROVER STAGE 1]   final_eval=0x{x}\n", .{final_eval.limbs[0]});
 
             // Get evaluation claims for Az, Bz, Cz at final point
             const eval_claims = spartan_iface.getEvalClaims();
             try stage_proof.final_claims.append(self.allocator, eval_claims[0]); // A(r)
             try stage_proof.final_claims.append(self.allocator, eval_claims[1]); // B(r)
             try stage_proof.final_claims.append(self.allocator, eval_claims[2]); // C(r)
+            std.debug.print("[PROVER STAGE 1]   eval_claims: A(r)=0x{x}, B(r)=0x{x}, C(r)=0x{x}\n", .{ eval_claims[0].limbs[0], eval_claims[1].limbs[0], eval_claims[2].limbs[0] });
 
             // Accumulate opening claims for commitment verification
             if (stage_proof.challenges.items.len > 0) {
@@ -422,13 +461,17 @@ pub fn MultiStageProver(comptime F: type) type {
         /// - Degree: 2 (product of two linear polynomials)
         /// - Opening claims: ra and unmap polynomial evaluations
         fn proveStage2(self: *Self, transcript: anytype) !void {
+            std.debug.print("[PROVER STAGE 2] Starting RAM RAF evaluation\n", .{});
+
             const stage_proof = &self.proofs.stage_proofs[1];
 
             // Get r_cycle challenges from transcript (binding cycle variables)
             const r_cycle = try self.allocator.alloc(F, self.log_t);
             defer self.allocator.free(r_cycle);
-            for (r_cycle) |*r| {
+            std.debug.print("[PROVER STAGE 2]   getting {d} r_cycle challenges\n", .{self.log_t});
+            for (r_cycle, 0..) |*r, i| {
                 r.* = try transcript.challengeScalar("r_cycle");
+                std.debug.print("[PROVER STAGE 2]     r_cycle[{d}]=0x{x}\n", .{ i, r.limbs[0] });
             }
 
             // Initialize RAF evaluation parameters
@@ -451,12 +494,17 @@ pub fn MultiStageProver(comptime F: type) type {
             // Compute and record initial claim
             const initial_claim = raf_prover.computeInitialClaim();
             try stage_proof.final_claims.append(self.allocator, initial_claim);
+            std.debug.print("[PROVER STAGE 2]   initial_claim=0x{x}\n", .{initial_claim.limbs[0]});
 
             // Run sumcheck rounds
             const num_rounds = raf_params.numRounds();
+            std.debug.print("[PROVER STAGE 2]   num_rounds={d}\n", .{num_rounds});
             for (0..num_rounds) |round| {
+                std.debug.print("[PROVER STAGE 2]   --- Round {d}/{d} ---\n", .{ round, num_rounds });
+
                 // Compute round polynomial [p(0), p(1)]
                 const round_poly = raf_prover.computeRoundPolynomial();
+                std.debug.print("[PROVER STAGE 2]     p(0)=0x{x}, p(1)=0x{x}\n", .{ round_poly[0].limbs[0], round_poly[1].limbs[0] });
 
                 // Store round polynomial in proof
                 const poly_copy = try self.allocator.alloc(F, 2);
@@ -467,15 +515,16 @@ pub fn MultiStageProver(comptime F: type) type {
                 // Get challenge from transcript
                 const challenge = try transcript.challengeScalar("raf_round");
                 try stage_proof.addChallenge(challenge);
+                std.debug.print("[PROVER STAGE 2]     challenge=0x{x}\n", .{challenge.limbs[0]});
 
                 // Bind the challenge for next round
                 try raf_prover.bindChallenge(challenge);
-                _ = round;
             }
 
             // Record final claim after all rounds
             const final_claim = raf_prover.getFinalClaim();
             try stage_proof.final_claims.append(self.allocator, final_claim);
+            std.debug.print("[PROVER STAGE 2]   final_claim=0x{x}\n", .{final_claim.limbs[0]});
 
             // Accumulate opening claims for ra and unmap polynomials
             // These will be verified in the final opening proof
@@ -503,10 +552,13 @@ pub fn MultiStageProver(comptime F: type) type {
         ///
         /// Opening claims: Lookup polynomial evaluations
         fn proveStage3(self: *Self, transcript: anytype) !void {
+            std.debug.print("[PROVER STAGE 3] Starting Lasso instruction lookup\n", .{});
+
             const stage_proof = &self.proofs.stage_proofs[2];
 
             // Get batching challenge γ for combining lookup instances
             const gamma = try transcript.challengeScalar("lasso_gamma");
+            std.debug.print("[PROVER STAGE 3]   gamma=0x{x}\n", .{gamma.limbs[0]});
 
             // Get lookup statistics for proof metadata
             const stats = self.lookup_trace.getStats();
@@ -514,9 +566,11 @@ pub fn MultiStageProver(comptime F: type) type {
 
             // Extract lookup indices from the trace
             const trace_entries = self.lookup_trace.getEntries();
+            std.debug.print("[PROVER STAGE 3]   num_lookup_entries={d}\n", .{trace_entries.len});
 
             if (trace_entries.len == 0) {
                 // No lookups to prove - stage is trivially complete
+                std.debug.print("[PROVER STAGE 3]   Skipping - no lookups\n", .{});
                 self.current_stage = 3;
                 return;
             }
@@ -535,8 +589,10 @@ pub fn MultiStageProver(comptime F: type) type {
             // Get reduction point from previous challenges
             const r_reduction = try self.allocator.alloc(F, self.log_t);
             defer self.allocator.free(r_reduction);
-            for (r_reduction) |*r| {
+            std.debug.print("[PROVER STAGE 3]   getting {d} r_reduction challenges\n", .{self.log_t});
+            for (r_reduction, 0..) |*r, i| {
                 r.* = try transcript.challengeScalar("r_reduction");
+                std.debug.print("[PROVER STAGE 3]     r_reduction[{d}]=0x{x}\n", .{ i, r.limbs[0] });
             }
 
             // Calculate log_K (address space size for tables)
@@ -550,6 +606,7 @@ pub fn MultiStageProver(comptime F: type) type {
                 log_K,
                 r_reduction,
             );
+            std.debug.print("[PROVER STAGE 3]   log_K={d}, log_T={d}, total_rounds={d}\n", .{ params.log_K, params.log_T, params.log_K + params.log_T });
 
             // Initialize and run Lasso prover
             var lasso_prover = try lasso.LassoProver(F).init(
@@ -563,12 +620,22 @@ pub fn MultiStageProver(comptime F: type) type {
             // Record initial claim (sum of eq evaluations)
             const initial_claim = lasso_prover.computeInitialClaim();
             try stage_proof.final_claims.append(self.allocator, initial_claim);
+            std.debug.print("[PROVER STAGE 3]   initial_claim=0x{x}\n", .{initial_claim.limbs[0]});
 
             // Run Lasso sumcheck rounds
             const total_rounds = params.log_K + params.log_T;
             for (0..total_rounds) |round| {
+                const phase_str = if (lasso_prover.isAddressPhase()) "ADDR" else "CYCLE";
+                std.debug.print("[PROVER STAGE 3]   --- Round {d}/{d} ({s}) ---\n", .{ round, total_rounds, phase_str });
+
                 // Compute round polynomial
                 var round_poly = try lasso_prover.computeRoundPolynomial();
+
+                std.debug.print("[PROVER STAGE 3]     coeffs: c0=0x{x}, c1=0x{x}", .{ round_poly.coeffs[0].limbs[0], round_poly.coeffs[1].limbs[0] });
+                if (round_poly.coeffs.len > 2) {
+                    std.debug.print(", c2=0x{x}", .{round_poly.coeffs[2].limbs[0]});
+                }
+                std.debug.print("\n", .{});
 
                 // Store polynomial coefficients in stage proof
                 try stage_proof.round_polys.append(self.allocator, round_poly.coeffs);
@@ -578,16 +645,18 @@ pub fn MultiStageProver(comptime F: type) type {
                 // Get challenge from transcript
                 const challenge = try transcript.challengeScalar("lasso_round");
                 try stage_proof.addChallenge(challenge);
+                std.debug.print("[PROVER STAGE 3]     challenge=0x{x}\n", .{challenge.limbs[0]});
 
                 // Bind the challenge
                 try lasso_prover.receiveChallenge(challenge);
-                _ = round;
+                std.debug.print("[PROVER STAGE 3]     new_claim=0x{x}\n", .{lasso_prover.current_claim.limbs[0]});
             }
 
             // Record final evaluation
             if (lasso_prover.isComplete()) {
                 const final_eval = lasso_prover.getFinalEval();
                 try stage_proof.final_claims.append(self.allocator, final_eval);
+                std.debug.print("[PROVER STAGE 3]   final_eval=0x{x}\n", .{final_eval.limbs[0]});
             }
 
             // Accumulate opening claims
@@ -617,20 +686,26 @@ pub fn MultiStageProver(comptime F: type) type {
         /// - Degree: 3 (product of inc, wa, LT polynomials)
         /// - Opening claims: inc, wa, LT polynomial evaluations
         fn proveStage4(self: *Self, transcript: anytype) !void {
+            std.debug.print("[PROVER STAGE 4] Starting memory value evaluation\n", .{});
+
             const stage_proof = &self.proofs.stage_proofs[3];
 
             // Get address challenge from previous stage
             const r_address = try self.allocator.alloc(F, self.log_k);
             defer self.allocator.free(r_address);
-            for (r_address) |*r| {
+            std.debug.print("[PROVER STAGE 4]   getting {d} r_address challenges\n", .{self.log_k});
+            for (r_address, 0..) |*r, i| {
                 r.* = try transcript.challengeScalar("r_address");
+                if (i < 4) std.debug.print("[PROVER STAGE 4]     r_address[{d}]=0x{x}\n", .{ i, r.limbs[0] });
             }
 
             // Get cycle challenge from previous stage
             const r_cycle = try self.allocator.alloc(F, self.log_t);
             defer self.allocator.free(r_cycle);
-            for (r_cycle) |*r| {
+            std.debug.print("[PROVER STAGE 4]   getting {d} r_cycle_val challenges\n", .{self.log_t});
+            for (r_cycle, 0..) |*r, i| {
                 r.* = try transcript.challengeScalar("r_cycle_val");
+                std.debug.print("[PROVER STAGE 4]     r_cycle_val[{d}]=0x{x}\n", .{ i, r.limbs[0] });
             }
 
             // Initial value evaluation (for uninitialized memory, this is 0)
@@ -639,6 +714,7 @@ pub fn MultiStageProver(comptime F: type) type {
             // Initialize value evaluation parameters
             const trace_len = self.trace.steps.items.len;
             const k = @as(usize, 1) << @intCast(self.log_k);
+            std.debug.print("[PROVER STAGE 4]   trace_len={d}, k={d}\n", .{ trace_len, k });
 
             var val_params = try ram.ValEvaluationParams(F).init(
                 self.allocator,
@@ -652,6 +728,7 @@ pub fn MultiStageProver(comptime F: type) type {
 
             // Skip if trace is empty
             if (trace_len == 0) {
+                std.debug.print("[PROVER STAGE 4]   Skipping - empty trace\n", .{});
                 self.current_stage = 4;
                 return;
             }
@@ -673,12 +750,17 @@ pub fn MultiStageProver(comptime F: type) type {
             // Compute and record initial claim
             const initial_claim = val_prover.computeInitialClaim();
             try stage_proof.final_claims.append(self.allocator, initial_claim);
+            std.debug.print("[PROVER STAGE 4]   initial_claim=0x{x}\n", .{initial_claim.limbs[0]});
 
             // Run sumcheck rounds
             const num_rounds = val_params.numRounds();
-            for (0..num_rounds) |_| {
+            std.debug.print("[PROVER STAGE 4]   num_rounds={d}\n", .{num_rounds});
+            for (0..num_rounds) |round| {
+                std.debug.print("[PROVER STAGE 4]   --- Round {d}/{d} ---\n", .{ round, num_rounds });
+
                 // Compute round polynomial [p(0), p(1), p(2), p(3)] for degree-3 sumcheck
                 const round_poly = val_prover.computeRoundPolynomial();
+                std.debug.print("[PROVER STAGE 4]     p(0)=0x{x}, p(1)=0x{x}, p(2)=0x{x}, p(3)=0x{x}\n", .{ round_poly[0].limbs[0], round_poly[1].limbs[0], round_poly[2].limbs[0], round_poly[3].limbs[0] });
 
                 // Store polynomial in proof (4 evaluations for degree-3)
                 const poly_copy = try self.allocator.alloc(F, 4);
@@ -691,6 +773,7 @@ pub fn MultiStageProver(comptime F: type) type {
                 // Get challenge from transcript
                 const challenge = try transcript.challengeScalar("val_eval_round");
                 try stage_proof.addChallenge(challenge);
+                std.debug.print("[PROVER STAGE 4]     challenge=0x{x}\n", .{challenge.limbs[0]});
 
                 // Bind the challenge with the round polynomial for proper claim update
                 val_prover.bindChallengeWithPoly(challenge, round_poly);
@@ -699,6 +782,7 @@ pub fn MultiStageProver(comptime F: type) type {
             // Record final claim
             const final_claim = val_prover.getFinalClaim();
             try stage_proof.final_claims.append(self.allocator, final_claim);
+            std.debug.print("[PROVER STAGE 4]   final_claim=0x{x}\n", .{final_claim.limbs[0]});
 
             // Accumulate opening claims
             if (stage_proof.challenges.items.len > 0) {
@@ -723,27 +807,35 @@ pub fn MultiStageProver(comptime F: type) type {
         ///
         /// Opening claims: Register polynomial evaluations
         fn proveStage5(self: *Self, transcript: anytype) !void {
+            std.debug.print("[PROVER STAGE 5] Starting register value evaluation\n", .{});
+
             const stage_proof = &self.proofs.stage_proofs[4];
 
             // Get register address challenge (5 bits for 32 registers)
             const log_regs: usize = 5; // log2(32) = 5
             const r_register = try self.allocator.alloc(F, log_regs);
             defer self.allocator.free(r_register);
-            for (r_register) |*r| {
+            std.debug.print("[PROVER STAGE 5]   getting {d} r_register challenges\n", .{log_regs});
+            for (r_register, 0..) |*r, i| {
                 r.* = try transcript.challengeScalar("r_register");
+                std.debug.print("[PROVER STAGE 5]     r_register[{d}]=0x{x}\n", .{ i, r.limbs[0] });
             }
 
             // Get cycle challenge for register evaluation
             const r_cycle_reg = try self.allocator.alloc(F, self.log_t);
             defer self.allocator.free(r_cycle_reg);
-            for (r_cycle_reg) |*r| {
+            std.debug.print("[PROVER STAGE 5]   getting {d} r_cycle_reg challenges\n", .{self.log_t});
+            for (r_cycle_reg, 0..) |*r, i| {
                 r.* = try transcript.challengeScalar("r_cycle_reg");
+                std.debug.print("[PROVER STAGE 5]     r_cycle_reg[{d}]=0x{x}\n", .{ i, r.limbs[0] });
             }
 
             // Register trace is embedded in the execution trace
             // We construct a simplified RAF+value check for registers
             const trace_len = self.trace.steps.items.len;
+            std.debug.print("[PROVER STAGE 5]   trace_len={d}\n", .{trace_len});
             if (trace_len == 0) {
+                std.debug.print("[PROVER STAGE 5]   Skipping - empty trace\n", .{});
                 self.current_stage = 5;
                 return;
             }
@@ -753,6 +845,7 @@ pub fn MultiStageProver(comptime F: type) type {
 
             // Pad to power of 2
             const n = @as(usize, 1) << @intCast(num_rounds);
+            std.debug.print("[PROVER STAGE 5]   num_rounds={d}, padded_n={d}\n", .{ num_rounds, n });
 
             // Materialize eq evaluations for each trace index
             // eq_evals[j] = eq(r_register, rd(j)) where rd(j) is destination reg at step j
@@ -778,6 +871,7 @@ pub fn MultiStageProver(comptime F: type) type {
 
             // Record initial claim for verifier
             try stage_proof.final_claims.append(self.allocator, current_claim);
+            std.debug.print("[PROVER STAGE 5]   initial_claim=0x{x}\n", .{current_claim.limbs[0]});
 
             // Working copy of evaluations that gets folded
             var working_evals = try self.allocator.alloc(F, n);
@@ -787,7 +881,9 @@ pub fn MultiStageProver(comptime F: type) type {
             var current_len = n;
 
             // Run sumcheck rounds (using degree-2 polynomials for multilinear)
-            for (0..num_rounds) |_| {
+            for (0..num_rounds) |round| {
+                std.debug.print("[PROVER STAGE 5]   --- Round {d}/{d} ---\n", .{ round, num_rounds });
+
                 // Compute round polynomial [p(0), p(2)] for degree-2 compressed format
                 // Verifier recovers p(1) from constraint p(0) + p(1) = claim
                 const poly_copy = try self.allocator.alloc(F, 2);
@@ -804,6 +900,9 @@ pub fn MultiStageProver(comptime F: type) type {
                 // Compute p(2) = 2*p(1) - p(0) for degree-1 polynomial (multilinear)
                 const sum_at_2 = sum_at_1.add(sum_at_1).sub(sum_at_0);
 
+                std.debug.print("[PROVER STAGE 5]     p(0)=0x{x}, p(1)=0x{x}, p(2)=0x{x}\n", .{ sum_at_0.limbs[0], sum_at_1.limbs[0], sum_at_2.limbs[0] });
+                std.debug.print("[PROVER STAGE 5]     p(0)+p(1)=0x{x}, claim=0x{x}\n", .{ sum_at_0.add(sum_at_1).limbs[0], current_claim.limbs[0] });
+
                 poly_copy[0] = sum_at_0;
                 poly_copy[1] = sum_at_2; // Store p(2), not p(1)
                 try stage_proof.round_polys.append(self.allocator, poly_copy);
@@ -811,6 +910,7 @@ pub fn MultiStageProver(comptime F: type) type {
                 // Get challenge from transcript
                 const challenge = try transcript.challengeScalar("reg_eval_round");
                 try stage_proof.addChallenge(challenge);
+                std.debug.print("[PROVER STAGE 5]     challenge=0x{x}\n", .{challenge.limbs[0]});
 
                 // Bind/fold the polynomial: f_new[i] = (1-r)*f[i] + r*f[i+half]
                 const one_minus_r = F.one().sub(challenge);
@@ -821,11 +921,13 @@ pub fn MultiStageProver(comptime F: type) type {
 
                 // Update current claim: p(r) = (1-r)*p(0) + r*p(1)
                 current_claim = one_minus_r.mul(sum_at_0).add(challenge.mul(sum_at_1));
+                std.debug.print("[PROVER STAGE 5]     new_claim=0x{x}\n", .{current_claim.limbs[0]});
             }
 
             // Record final claim (the value at the fully-bound point)
             const final_claim = if (current_len > 0) working_evals[0] else F.zero();
             try stage_proof.final_claims.append(self.allocator, final_claim);
+            std.debug.print("[PROVER STAGE 5]   final_claim=0x{x}\n", .{final_claim.limbs[0]});
 
             // Accumulate opening claims
             if (stage_proof.challenges.items.len > 0) {
@@ -866,14 +968,18 @@ pub fn MultiStageProver(comptime F: type) type {
         /// - Degree: 2 (quadratic for boolean check: f * (1-f))
         /// - Initial claim should be 0 for valid traces (all flags are boolean)
         fn proveStage6(self: *Self, transcript: anytype) !void {
+            std.debug.print("[PROVER STAGE 6] Starting booleanity and finalization\n", .{});
+
             const stage_proof = &self.proofs.stage_proofs[5];
 
             // Get batching challenge for combining boolean constraints
             const bool_challenge = try transcript.challengeScalar("booleanity");
-            _ = bool_challenge;
+            std.debug.print("[PROVER STAGE 6]   bool_challenge=0x{x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ bool_challenge.limbs[3], bool_challenge.limbs[2], bool_challenge.limbs[1], bool_challenge.limbs[0] });
 
             const trace_len = self.trace.steps.items.len;
+            std.debug.print("[PROVER STAGE 6]   trace_len={d}\n", .{trace_len});
             if (trace_len == 0) {
+                std.debug.print("[PROVER STAGE 6]   Skipping - empty trace\n", .{});
                 self.current_stage = 6;
                 return;
             }
@@ -883,6 +989,7 @@ pub fn MultiStageProver(comptime F: type) type {
 
             // Pad to power of 2
             const n = @as(usize, 1) << @intCast(num_rounds);
+            std.debug.print("[PROVER STAGE 6]   num_rounds={d}, padded_n={d}\n", .{ num_rounds, n });
 
             // For booleanity, we sum f*(1-f) over all flags for each trace step.
             // For valid traces, all flags are boolean so f*(1-f) = 0 for each.
@@ -914,6 +1021,7 @@ pub fn MultiStageProver(comptime F: type) type {
 
             // Record initial claim for verifier
             try stage_proof.final_claims.append(self.allocator, current_claim);
+            std.debug.print("[PROVER STAGE 6]   initial_claim=0x{x} (should be 0 for valid flags)\n", .{current_claim.limbs[0]});
 
             // Working copy of evaluations that gets folded
             var working_evals = try self.allocator.alloc(F, n);
@@ -923,7 +1031,9 @@ pub fn MultiStageProver(comptime F: type) type {
             var current_len = n;
 
             // Run sumcheck rounds
-            for (0..num_rounds) |_| {
+            for (0..num_rounds) |round| {
+                std.debug.print("[PROVER STAGE 6]   --- Round {d}/{d} ---\n", .{ round, num_rounds });
+
                 // Compute round polynomial [p(0), p(2)] for degree-2 compressed format
                 const poly_copy = try self.allocator.alloc(F, 2);
 
@@ -940,6 +1050,8 @@ pub fn MultiStageProver(comptime F: type) type {
                 // Compute p(2) = 2*p(1) - p(0) for degree-1 polynomial
                 const sum_at_2 = sum_at_1.add(sum_at_1).sub(sum_at_0);
 
+                std.debug.print("[PROVER STAGE 6]     p(0)=0x{x}, p(1)=0x{x}, p(2)=0x{x}\n", .{ sum_at_0.limbs[0], sum_at_1.limbs[0], sum_at_2.limbs[0] });
+
                 poly_copy[0] = sum_at_0;
                 poly_copy[1] = sum_at_2; // Store p(2), not p(1)
                 try stage_proof.round_polys.append(self.allocator, poly_copy);
@@ -947,6 +1059,7 @@ pub fn MultiStageProver(comptime F: type) type {
                 // Get challenge from transcript
                 const challenge = try transcript.challengeScalar("bool_round");
                 try stage_proof.addChallenge(challenge);
+                std.debug.print("[PROVER STAGE 6]     challenge=0x{x}\n", .{challenge.limbs[0]});
 
                 // Bind/fold the polynomial: f_new[i] = (1-r)*f[i] + r*f[i+half]
                 const one_minus_r = F.one().sub(challenge);
@@ -957,11 +1070,13 @@ pub fn MultiStageProver(comptime F: type) type {
 
                 // Update current claim: p(r) = (1-r)*p(0) + r*p(1)
                 current_claim = one_minus_r.mul(sum_at_0).add(challenge.mul(sum_at_1));
+                std.debug.print("[PROVER STAGE 6]     new_claim=0x{x}\n", .{current_claim.limbs[0]});
             }
 
             // Record final claim (the value at the fully-bound point)
             const final_claim = if (current_len > 0) working_evals[0] else F.zero();
             try stage_proof.final_claims.append(self.allocator, final_claim);
+            std.debug.print("[PROVER STAGE 6]   final_claim=0x{x}\n", .{final_claim.limbs[0]});
 
             // Accumulate opening claims for flag polynomials
             if (stage_proof.challenges.items.len > 0) {

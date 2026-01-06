@@ -399,15 +399,17 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
             // Now we have q(0), q(1), and the quadratic coefficient e
             // q(X) = c + d*X + e*X²
             // c = q_constant
-            // d = q(1) - c - e
+            // We don't need to compute d explicitly - use recurrence relations instead
+            // (matches Jolt's numerically stable approach)
             const c = q_constant;
             const e = q_quadratic_coeff;
-            const d = q_1.sub(c).sub(e);
 
-            // q(2) = c + 2d + 4e
-            const q_2 = c.add(d.mul(F.fromU64(2))).add(e.mul(F.fromU64(4)));
-            // q(3) = c + 3d + 9e
-            const q_3 = c.add(d.mul(F.fromU64(3))).add(e.mul(F.fromU64(9)));
+            // Use Jolt's recurrence relations for numerical stability:
+            // q(2) = 2*q(1) - q(0) + 2e
+            // q(3) = q(2) + q(1) - q(0) + 4e
+            const e_times_2 = e.add(e);
+            const q_2 = q_1.add(q_1).sub(c).add(e_times_2);
+            const q_3 = q_2.add(q_1).sub(c).add(e_times_2).add(e_times_2);
 
             // s(X) = l(X) * q(X)
             const s_0 = l_0.mul(c); // l(0) * q(0)

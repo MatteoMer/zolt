@@ -1,411 +1,194 @@
 # Zolt zkVM Implementation Plan
 
-## Current Status (December 2024 - Iteration 55+)
+## Current Status: Session 55 - January 5, 2026
 
-**PROJECT STATUS: JOLT COMPATIBILITY PHASE**
-
-The Zolt zkVM core is complete. New goal: **Make Zolt proofs verifiable by Jolt (Rust)**.
-
-See `PROMPT-2.md` for the full compatibility implementation guide.
-
-### Phase 1 Complete: Core zkVM
-- All 578 tests pass
-- All 9 C example programs compile, run, and prove correctly
-- Full CLI interface operational
-- Binary and JSON proof serialization working
-- Performance benchmarks showing competitive results
-- End-to-end verification working with strict sumcheck checking
-
-### Phase 2: Jolt Compatibility (IN PROGRESS)
-
-**Goal**: `zolt prove program.elf -o proof.bin` produces a proof that Jolt's Rust verifier accepts.
-
-#### Key Gaps to Address
-
-| Component | Zolt Current | Jolt Expected | Priority |
-|-----------|-------------|---------------|----------|
-| Transcript | Keccak-f[1600], 200-byte state | Blake2b-256, 32-byte state | CRITICAL |
-| Proof Structure | 6 stages grouped | 7 explicit stages + UniSkip | HIGH |
-| Serialization | "ZOLT" magic + custom | Arkworks CanonicalSerialize | HIGH |
-| Commitment | HyperKZG (test tau) | Dory (production SRS) | HIGH |
-| Field Encoding | Mixed endianness | LE serialize, reverse to BE | HIGH |
-
-#### Implementation Phases
-
-1. **Transcript Alignment** - Implement Blake2bTranscript matching Jolt exactly
-2. **Proof Structure** - Restructure to 7 stages with UniSkipFirstRoundProof
-3. **Serialization** - Remove ZOLT header, match arkworks format
-4. **Dory Completion** - Full streaming Dory with same SRS seed
-5. **Integration Testing** - Cross-verify Zolt proofs in Jolt
-
-### What's Working (Core zkVM)
-- BN254 field arithmetic (Montgomery form CIOS)
-- Extension fields (Fp2, Fp6, Fp12 tower)
-- HyperKZG polynomial commitments
-- Dory commitments (partial)
-- Spartan R1CS prover/verifier
-- Lasso lookup arguments with 24 table types
-- 6-stage sumcheck orchestration
-- RISC-V emulator (RV64IMC)
-- ELF loader (ELF32/ELF64)
-- Multi-scalar multiplication
-- Proof serialization (binary/JSON)
-- Full CLI with run/trace/prove/verify/stats commands
+**GOAL**: Make Zolt proofs verifiable by Jolt with Jolt's preprocessing.
 
 ---
 
-## Previous Status (December 2024 - Iteration 50)
+## Session 55 Findings: R1CS Constraint Key Mismatch
 
-### Session Summary - C Example Programs Complete
+### Key Discovery
 
-This iteration completed and verified all 9 C example programs:
+**Test with Zolt preprocessing: PASSES**
+**Test with Jolt preprocessing: FAILS**
 
-1. **Fixed C Examples**
-   - Fixed collatz.c, primes.c, signed.c to use proper `_start` with ecall termination
-   - Removed zolt_io_write_u64/read_u64 dependencies (not yet implemented)
-   - Compiled all 9 examples with RISC-V toolchain
+This proves:
+1. The sumcheck claim propagation is CORRECT
+2. The Gruen polynomial construction is CORRECT
+3. The issue is **R1CS constraint key mismatch** between Zolt and Jolt
 
-2. **Verified All Examples**
-   - fibonacci.elf: 55 (Fibonacci(10)) in 52 cycles
-   - sum.elf: 5050 (sum 1-100) in 6 cycles
-   - factorial.elf: 3628800 (10!) in 34 cycles
-   - gcd.elf: 63 (gcd/lcm combined) in 50 cycles
-   - collatz.elf: 111 (steps for n=27) in 825 cycles
-   - primes.elf: 25 (primes < 100) in 8000+ cycles
-   - signed.elf: -39 (signed arithmetic) in 5 cycles
-   - bitwise.elf: 209 (popcount + bit ops) in 169 cycles
-   - array.elf: 1465 (sum + max of squares)
+### How Verification Works
 
-3. **Tested Proving**
-   - Proved gcd.elf successfully with 50 cycles
-   - Verification passed
-
-## Previous Status (December 2024 - Iteration 49)
-
-### Session Summary - ELF Loading & ECALL Handling
-
-This iteration fixed critical issues with ELF program loading and program termination:
-
-1. **ELF Loading Fix**
-   - Added `loadProgramAt()` function to load bytecode at a specific base address
-   - Updated CLI run/trace commands to use ELF's base_address instead of fixed RAM_START_ADDRESS
-   - Updated `execute()` function to use base_address
-   - Fixed register state display to read from RegisterFile instead of VMState
-
-2. **ECALL Handling (Program Termination)**
-   - Added SYSTEM opcode handling to recognize ECALL instruction
-   - ECALL now returns `error.Ecall` to signal program exit
-   - Updated `run()` to treat ECALL as normal termination (not an error)
-   - Cycle count is now incremented even when ECALL terminates execution
-
-3. **PC Arithmetic Fix**
-   - Fixed AUIPC and JAL instructions to use wrapping arithmetic for high PC addresses
-   - Previously caused integer overflow panic for addresses >= 0x80000000
-
-4. **Verified C Programs**
-   - `fibonacci.elf`: Returns 55 in 51 cycles (correctly computes Fibonacci(10))
-   - `sum.elf`: Returns 5050 in 5 cycles (correctly computes sum 1-100)
-
-## Previous Status (December 2024 - Iteration 48)
-
-### Session Summary - More Example Programs
-
-This iteration focused on adding more C example programs:
-
-1. **New C Example Programs**
-   - `collatz.c` - Collatz sequence length for n=27 (111 steps)
-   - `signed.c` - Signed arithmetic operations demo
-   - `primes.c` - Count primes < 100 using trial division (25)
-   - Updated Makefile and README
-
-2. **Compression Investigation**
-   - Examined Zig 0.15's std.compress.flate API
-   - Found that compression is not fully implemented (has `@panic("TODO")`)
-   - Will wait for stdlib stabilization
-
-## Previous Status (December 2024 - Iteration 47)
-
-### Session Summary - Example Programs & Format Detection
-
-This iteration focused on adding more example programs and improving format detection:
-
-1. **New C Example Programs**
-   - `factorial.c` - Compute 10! = 3628800 (uses MUL instruction)
-   - `bitwise.c` - AND, OR, XOR, and shift operations demo
-   - `array.c` - Array store/load operations with sum and max
-   - `gcd.c` - GCD using Euclidean algorithm (DIV, REM)
-   - Updated Makefile with new targets and help message
-
-2. **Format Detection**
-   - Added `ProofFormat` enum (binary, json, gzip, unknown)
-   - Added `detectProofFormat()` function
-   - Added `readProofAutoDetectFull()` for full format auto-detection
-   - Updated verify and stats commands to use new detection
-
-3. **Compression Preparation**
-   - Added placeholder functions for gzip compression
-   - Detection works, but actual compression not yet implemented
-   - Zig 0.15's compression API requires streaming setup
-
-4. **Documentation**
-   - Updated CHANGELOG with v0.1.1 features
-   - Updated README with C examples documentation
-
-## Previous Status (December 2024 - Iteration 46)
-
-### Session Summary - Stats & Trace Commands Added
-
-This iteration added two new CLI commands for debugging and analysis:
-
-1. **Stats Command**
-   - `zolt stats <proof>` - Show detailed proof statistics
-   - Displays file format (JSON/Binary) and size
-   - Shows commitment status
-   - Shows R1CS proof information
-   - Per-stage sumcheck breakdown (rounds, coefficients, claims)
-   - Size breakdown estimates
-
-2. **Trace Command**
-   - `zolt trace <elf>` - Show execution trace for debugging
-   - Displays cycle, PC, instruction, RD value, disassembly
-   - Memory access annotations
-   - `--max N` option to limit display (default: 100 steps)
-   - Handles unknown opcodes gracefully
-
-3. **Documentation Updates**
-   - Updated README with new commands
-   - Updated help messages
-
-## Previous Status (December 2024 - Iteration 45)
-
-### Session Summary - JSON Deserialization Added
-
-This iteration added JSON deserialization support for proof loading:
-
-1. **JSON Proof Reader**
-   - `JsonProofReader(F)` type for parsing JSON proofs
-   - Helper functions: getString, getInt, getObject, getArray
-   - Field element parsing from hex strings
-   - Commitment parsing (G1 points)
-   - Stage proof parsing
-
-2. **Deserialization Functions**
-   - `deserializeProofFromJson()` - main deserialization function
-   - `readProofFromJsonFile()` - file I/O wrapper
-   - `readProofAutoDetect()` - auto-detects binary vs JSON format
-   - `isJsonProof()` - checks for ZOLT-JSON magic
-
-3. **CLI Updates**
-   - Verify command now auto-detects proof format
-   - Displays format type (JSON/Binary) in output
-
-4. **Bug Fixes**
-   - Fixed commitment field types (use base field Fp, not scalar field F)
-   - Added big-endian serialization for G1 point coordinates
-   - Fixed double-free in JSON proof deserialization
-   - Fixed Zig 0.15 API compatibility (bufPrint vs formatIntBuf)
-
-### Previous Session (Iteration 44) - JSON Serialization
-
-Previous iteration added:
-
-1. **JSON Serialization Format**
-   - Added human-readable JSON output format for proofs
-   - Uses "ZOLT-JSON" magic identifier
-   - Field elements serialized as 64-character hex strings
-   - Pretty-printed with proper indentation
-   - Full proof structure: bytecode, memory, register, R1CS, stages
-
-2. **JSON Writer Module**
-   - `JsonProofWriter(F)` type for building JSON output
-   - `fieldToHex()` and `hexToField()` conversion functions
-   - `serializeProofToJson()` for in-memory serialization
-   - `writeProofToJsonFile()` for file output
-
-3. **CLI JSON Option**
-   - Added `--json` option to prove command
-   - Example: `zolt prove --json -o proof.json program.elf`
-   - Shows format type and size when saving
-
-### Previous Session (Iteration 43) - Binary Serialization
-
-Previous iteration added:
-
-1. **Proof Serialization Module**
-   - Created `src/zkvm/serialization.zig` for binary proof format
-   - Magic header "ZOLT" with version for format identification
-   - Serialize/deserialize JoltProof, StageProof, JoltStageProofs
-   - File I/O helpers for saving and loading proofs
-
-2. **CLI Verify Command**
-   - Added `zolt verify <proof_file>` command
-   - Loads serialized proof and runs verification
-   - Displays proof metadata and verification result
-
-3. **CLI Prove Output Option**
-   - Added `-o/--output` option to save proofs to file
-   - Displays proof size when saving
-
-### Previous Session (Iteration 42) - CLI Info Command
-
-Previous iteration added:
-
-1. **CLI Info Command**
-   - Added `zolt info` command to display zkVM capabilities
-   - Shows proof system (HyperKZG, Spartan, Lasso, 6-stage sumcheck)
-   - Lists RISC-V support (60+ instructions, 24 lookup tables)
-   - Includes performance metrics and ELF loader info
-
-2. **CLI Run Options**
-   - Added `--max-cycles N` option to limit emulator cycles
-   - Added `--regs` option to display final register state
-   - Options work before or after ELF path
-   - Updated README with new command documentation
-
-3. **CLI Prove Options**
-   - Added `--max-cycles N` option to limit proving cycles
-   - Default: 1024 cycles
-   - Smaller values reduce SRS generation time
-
-### Previous Session (Iteration 40-41) - Complex Tests & Benchmarks
-
-Previous iterations added:
-
-1. **Bug Fix: Branch Target Calculation**
-   - Fixed PC overflow when calculating branch targets for high addresses (0x80000000+)
-   - PC was incorrectly cast to i32, now uses proper u64 arithmetic with signed immediate
-
-2. **Complex Program Tests**
-   - Arithmetic sequence test (sum 1 to 10 using loop)
-   - Memory store/load test (sw, lw instructions)
-   - Shift operations test (slli, srli, srai)
-   - Comparison operations test (slt, sltu)
-   - XOR and bit manipulation test
-
-3. **Benchmark Infrastructure**
-   - Added emulator benchmark (sum 1-100 loop: 88 us/op)
-   - Added prover benchmark (simple: 96ms, loop: 98ms)
-
-## Architecture Summary
-
-### Field Tower
-```
-Fp  = BN254 base field (254 bits) - G1 point coordinates
-Fr  = BN254 scalar field (254 bits) - scalars for multiplication
-
-Fp2 = Fp[u] / (u^2 + 1)
-Fp6 = Fp2[v] / (v^3 - xi)  where xi = 9 + u
-Fp12 = Fp6[w] / (w^2 - v)
+The verifier computes `expected_output_claim` using:
+```rust
+let inner_sum_prod = self.key.evaluate_inner_sum_product_at_point(rx_constr, r1cs_input_evals);
+expected_output_claim = eq_factor * inner_sum_prod * batching_coeff;
 ```
 
-### Proof Structure
+Where `self.key` is the R1CS sparse constraint key from **preprocessing**.
+
+When Zolt generates its own preprocessing, the constraint key matches what was used during proving, so verification passes.
+When using Jolt's preprocessing, the constraint key differs, so verification fails.
+
+### Root Cause
+
+Zolt's R1CS constraints differ from Jolt's. The `evaluate_inner_sum_product_at_point` function evaluates:
+- `Az(rx) = sum_y A(rx, y) * z(y)`
+- `Bz(rx) = sum_y B(rx, y) * z(y)`
+- `inner_sum_prod = Az * Bz`
+
+If A and B matrices differ, the product differs, causing verification failure.
+
+### Next Steps
+
+#### Step 1: Compare R1CS Constraints
+
+Compare Zolt's `UNIFORM_CONSTRAINTS` with Jolt's to identify differences:
+- Constraint count (should be same)
+- Constraint ordering (must match exactly)
+- Linear combination coefficients for condition/left/right
+
+**Zolt file**: `src/zkvm/r1cs/constraints.zig`
+**Jolt file**: `/Users/matteo/projects/jolt/jolt-core/src/r1cs/constraints.rs`
+
+#### Step 2: Compare Witness Mapping
+
+Ensure the witness input variables (ALL_R1CS_INPUTS) map to the same indices:
+- LeftInstructionInput, RightInstructionInput, Product, etc.
+- The order and indices must match exactly
+
+**Zolt file**: `src/zkvm/r1cs/inputs.zig`
+**Jolt file**: `/Users/matteo/projects/jolt/jolt-core/src/r1cs/inputs.rs`
+
+#### Step 3: Verify Constraint Evaluation
+
+Add debug output to compare Az, Bz evaluations at each constraint:
+- Print Az*Bz product for a test witness
+- Compare with Jolt's evaluation
+
+#### Step 4: Fix Mismatches
+
+Once differences are identified, update Zolt's constraints to match Jolt exactly.
+
+### Workaround (Already Working)
+
+If using Zolt-generated preprocessing with Zolt proofs, verification passes.
+This can be used as a fallback while fixing the constraint mismatch.
+
+### Key Files
+
+**Zolt:**
+- `src/zkvm/spartan/streaming_outer.zig` - streaming outer prover
+- `src/poly/split_eq.zig` - GruenSplitEqPolynomial
+- `src/poly/multiquadratic.zig` - MultiquadraticPolynomial
+- `src/zkvm/proof_converter.zig` - proof generation with transcript
+
+**Jolt:**
+- `/Users/matteo/projects/jolt/jolt-core/src/zkvm/spartan/outer.rs` - outer sumcheck
+- `/Users/matteo/projects/jolt/jolt-core/src/poly/split_eq_poly.rs` - GruenSplitEqPolynomial
+- `/Users/matteo/projects/jolt/jolt-core/src/poly/multiquadratic_poly.rs` - MultiquadraticPolynomial
+
+### Test Commands
+
+```bash
+# Build Zolt
+zig build -Doptimize=ReleaseFast
+
+# Generate proof with Zolt (with debug output)
+./zig-out/bin/zolt prove /tmp/jolt-guest-targets/fibonacci-guest-fib/riscv64imac-unknown-none-elf/release/fibonacci-guest --jolt-format --input-hex 32 -o /tmp/zolt_proof.bin 2>&1 | tee /tmp/zolt_prover.log
+
+# Verify with Jolt (with debug output)
+cd /Users/matteo/projects/jolt
+cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture 2>&1 | tee /tmp/jolt_verify.log
+
+# Compare logs
+diff <(grep 't_zero\|t_infinity\|eq_factor' /tmp/zolt_prover.log) <(grep 't_zero\|t_infinity\|eq_factor' /tmp/jolt_verify.log)
 ```
-JoltProof:
-  |-- bytecode_proof: Commitment to program bytecode
-  |-- memory_proof: Memory access commitments
-  |-- register_proof: Register file commitments
-  |-- r1cs_proof: R1CS/Spartan proof
-  +-- stage_proofs: 6-stage sumcheck proofs
-        |-- Stage 1: Outer Spartan (R1CS correctness) - degree 3
-        |-- Stage 2: RAM RAF evaluation - degree 2
-        |-- Stage 3: Lasso lookup (instruction lookups) - degree 2
-        |-- Stage 4: Value evaluation (memory consistency) - degree 3
-        |-- Stage 5: Register evaluation - degree 2
-        +-- Stage 6: Booleanity (flag constraints) - degree 2
+
+### Success Criteria
+
+- `output_claim == expected_output_claim` in Jolt verification
+- Stage 1 sumcheck passes without error
+- Proof verified successfully by Jolt
+
+---
+
+## Previous Sessions Summary
+
+- **Session 54**: Investigated claim propagation - coefficients match, claims diverge
+- **Session 53**: Fixed batching_coeff Montgomery form bug; initial_claim now matches
+- **Session 52**: Deep investigation - eq_factor and Az*Bz match but claim doesn't
+- **Session 51**: Fixed round offset by adding cache_openings appendScalar
+- **Session 50**: Found round number offset between Zolt and Jolt
+- **Session 49**: Fixed from_bigint_unchecked interpretation
+- **Session 48**: Fixed challenge limb ordering
+- **Session 47**: Fixed LookupOutput for JAL/JALR
+- **Session 46**: Fixed memory_size mismatch
+- **Session 45**: Fixed RV64 word operations
+
+---
+
+## Architecture Reference
+
+### Sumcheck Flow (Stage 1 - Outer Spartan)
+
+1. **UniSkip Round**: Produces r0, uni_skip_claim = poly(r0)
+2. **Remaining Rounds** (1 + num_cycle_vars):
+   - Compute t_zero, t_infinity from multiquadratic t_prime_poly
+   - Build Gruen polynomial: q(0)=t_zero, q(∞)=t_infinity, q(1) from constraint
+   - Compute cubic s(X) = l(X) * q(X) where l is linear eq polynomial
+   - Send scaled coefficients c0*α, c2*α, c3*α to proof
+   - Get challenge r from transcript
+   - Update claim: new_claim = s(r)
+   - Bind all polynomials (split_eq, t_prime, az, bz)
+
+### Batched Sumcheck Scaling
+
+- Prover tracks UNSCALED claims internally
+- Prover scales output coefficients by batching_coeff
+- Verifier tracks SCALED claims
+- Verifier recovers c1 from: `c1 = scaled_claim - 2*c0 - c2 - c3`
+
+### Gruen Polynomial Construction
+
+```
+l(X) = eq_0 + (eq_1 - eq_0) * X       // Linear eq polynomial
+q(0) = t_zero                         // From actual polynomial
+q(∞) = t_infinity                     // From actual polynomial
+q(1) = (claim - l(0)*q(0)) / l(1)     // Derived from constraint
+s(X) = l(X) * q(X)                    // Cubic round polynomial
 ```
 
-### Sumcheck Prover Requirements
+### Critical Binding Order
 
-Each sumcheck prover must maintain:
-- `current_claim`: The claim that p(0) + p(1) must equal
-- Internal state that gets bound/folded after each challenge
+After each round challenge r:
+1. `split_eq.bind(r)` - Update eq factor
+2. `t_prime_poly.bind(r)` - Bind multiquadratic
+3. `az_poly.bindLow(r)`, `bz_poly.bindLow(r)` - Bind Az/Bz
 
-**Critical Insight for Degree-3 Sumcheck:**
-- For product of k multilinear polynomials, the univariate has degree k
-- Need k+1 evaluation points for exact Lagrange interpolation
-- Degree 2: 3 points [p(0), p(1), p(2)]
-- Degree 3: 4 points [p(0), p(1), p(2), p(3)]
+---
 
-### Polynomial Format Summary
-- Stage 1 (Spartan): Degree 3, sends [p(0), p(1), p(2)]
-- Stage 2 (RAF): Degree 2, sends [p(0), p(2)]
-- Stage 3 (Lasso): Degree 2, sends coefficients [c0, c1, c2]
-- Stage 4 (Val): Degree 3, sends [p(0), p(1), p(2), p(3)]
-- Stage 5 (Register): Degree 2, sends [p(0), p(2)]
-- Stage 6 (Booleanity): Degree 2, sends [p(0), p(2)]
+## Project Overview
 
-## Components Status
+### Phase 1 Complete: Core zkVM
+- All 578 tests pass
+- 9 C example programs working
+- Full CLI (run/trace/prove/verify/stats)
+- Binary and JSON proof serialization
 
-### Fully Working ✅
-- **BN254 Pairing** - Full Miller loop, final exponentiation
-- **Extension Fields** - Fp2, Fp6, Fp12
-- **Field Arithmetic** - Montgomery form CIOS multiplication
-- **G1/G2 Point Arithmetic** - All operations
-- **Sumcheck Protocol** - Complete prover/verifier
-- **RISC-V Emulator** - Full RV64IMC execution
-- **ELF Loader** - ELF32/ELF64 parsing
-- **MSM** - Multi-scalar multiplication
-- **HyperKZG** - All operations
-- **Dory** - IPA-based commitment
-- **Host Execute** - Program execution with tracing
-- **Preprocessing** - Proving and verifying keys
-- **Spartan** - Proof generation and verification
-- **Lasso** - Lookup argument
-- **RAF Prover** - Memory checking
-- **Val Prover** - Value evaluation
-- **Stage 5 Prover** - Register evaluation
-- **Stage 6 Prover** - Booleanity
-- **Multi-stage Prover** - 6-stage orchestration
-- **Multi-stage Verifier** - Strict sumcheck verification
-- **Lookup Tables** - 24+ tables
-- **Instructions** - 60+ instruction types
+### Phase 2: Jolt Compatibility (IN PROGRESS)
+- Transcript alignment (Blake2b) ✓
+- Proof structure (7 stages + UniSkip) ✓
+- Serialization (arkworks format) ✓
+- Batching coefficient fix ✓
+- **Gruen polynomial claim divergence** ← CURRENT ISSUE
 
-## Future Work
-
-### High Priority
-1. Add verifier benchmarks
-2. Test with real RISC-V programs compiled from C/Rust
-
-### Medium Priority
-1. Performance optimization with SIMD
-2. Parallel sumcheck round computation
-
-### Low Priority
-1. Complete HyperKZG pairing verification
-2. More comprehensive benchmarking
-3. Add more example programs
-
-## Performance Metrics (from `zig build bench`)
-- Field addition: 4.1 ns/op
-- Field multiplication: 52.1 ns/op
-- Field inversion: 13.3 us/op
-- MSM (256 points): 0.49 ms/op
-- HyperKZG commit (1024): 1.5 ms/op
-- Emulator (sum 1-100, 304 cycles): 88 us/op
-- Prover (2 steps): ~96 ms/op
-- Prover (14 steps): ~98 ms/op
-
-## Commit History
-
-### Iteration 40
-1. Fix branch target calculation for high PC addresses
-2. Add complex program tests (loops, memory, shifts, comparisons)
-3. Add emulator and prover benchmarks
-
-### Iteration 39
-1. Fix Lasso prover eq_evals padding for cycle phase folding
-2. Fix Val prover to use 4-point interpolation for degree-3 sumcheck
-3. Full pipeline strict verification PASSES!
-
-### Iteration 38
-1. Fix Stage 5 & 6 provers to properly track sumcheck invariant
-2. Add sumcheck invariant tests for Stages 5 and 6
-
-### Iteration 37
-1. Fix Val prover polynomial binding for correct sumcheck
-2. Add comprehensive sumcheck invariant test for Val prover
-
-### Iteration 36
-1. Fix Lasso prover claim tracking for strict sumcheck verification
-2. Add test for Lasso prover claim tracking invariant
-3. Add RAF prover claim tracking test
+### Components Status ✅
+- BN254 field arithmetic, extension fields
+- HyperKZG/Dory polynomial commitments
+- Spartan R1CS prover/verifier
+- Lasso lookup arguments (24 tables)
+- 6-stage sumcheck orchestration
+- RISC-V emulator (RV64IMC)
+- ELF loader (ELF32/ELF64)

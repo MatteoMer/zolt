@@ -1,96 +1,101 @@
 # Zolt-Jolt Compatibility TODO
 
-## Current Status: Session 55 - January 5, 2026
+## Current Status: Session 56 - January 6, 2026
 
-**FIXED: Batching coefficient Montgomery form bug** (Session 53)
-**REMAINING: rebuildTPrimePoly produces incorrect t_prime values**
+**ROOT CAUSE FOUND: Missing Univariate Skip Implementation**
 
-Session 55 findings:
-- Verified polynomial coefficients (c0, c2, c3) match exactly at all rounds ✓
-- Verified challenges match exactly (derived from same Fiat-Shamir transcript) ✓
-- Verified eq_factor computation is correct (lagrange_tau_r0 * product of eq bindings) ✓
-- Verified scaling model is consistent (prover unscaled, verifier scaled by batching_coeff) ✓
-- **BUG FOUND: rebuildTPrimePoly produces wrong t_prime values**
-  - At ROUND 2 after rebuild: t_prime[0] = {29, 42, 85, 202, ...}
-  - EXPECTED t_prime[0] = az[0]*bz[0] = {6, 206, 182, 204, ...} (different!)
-  - This causes claim to drift from true bound polynomial over rounds
-- The debug "EXPECTED" is misleading - t_prime[0] should be weighted sum Σ E*az*bz, not just az[0]*bz[0]
-- But the actual issue is that buildTPrimePoly indexing may not match bound Az/Bz state
+### New Finding (Session 56)
 
-Session 54 findings:
-- Polynomial coefficients (c0, c2, c3) match exactly between Zolt and Jolt ✓
-- Claim propagation diverges: prover tracks unscaled, verifier tracks scaled
-- Changed q(2)/q(3) to use Jolt's recurrence relations (no effect - algebraically equivalent)
-- The implied_inner_sum_prod (output_claim / eq_factor) does NOT equal az_final * bz_final
-- Root cause: Gruen polynomial q(X) drifts from true bound polynomial t'(X) over rounds
+The sumcheck verification fails because Zolt's prover uses **standard multilinear sumcheck**
+but Jolt's verifier expects the **univariate skip optimization** in the first round.
 
-Session 53 findings:
-- Fixed batching_coeff bug: was using `[0, 0, low, high]` (MontU128Challenge style) instead of proper Montgomery form
-- Added `challengeScalarFull()` for batching coefficients which properly converts to Montgomery form
-- Initial claim now matches Jolt exactly ✓
-- Sumcheck still fails due to Gruen polynomial claim divergence (original issue)
-
----
-
-## Fixed in Session 53
-
-### Batching Coefficient Montgomery Form
-
-**Problem:**
-- `uni_skip_claim` matched between Zolt and Jolt ✓
-- `batching_coeff` did NOT match:
-  - Zolt: 3585365310819910961476179832490187488669617511825727803093062673748144578813 (256-bit)
-  - Jolt: 38168636090528866393074519943917698662 (128-bit)
-- `initial_claim = uni_skip_claim * batching_coeff` therefore didn't match
-
-**Root Cause:**
-Jolt uses TWO different challenge scalar methods:
-1. `challenge_scalar_optimized()` → returns `F::Challenge` (MontU128Challenge) with `[0, 0, low, high]` representation
-2. `challenge_scalar()` (via `challenge_vector`) → returns proper `F` via `F::from_bytes()` with Montgomery conversion
-
-Zolt was using the `[0, 0, low, high]` representation for BOTH, which is correct for sumcheck challenges but WRONG for batching coefficients.
-
-**Fix:**
-- Added `challengeScalarFull()` that properly converts to Montgomery form
-- Updated `proof_converter.zig` to use `challengeScalarFull()` for batching_coeff
-- Now: batching_coeff = 38168636090528866393074519943917698662 (matches Jolt!)
-- Now: initial_claim = 21674923214564316833547681277109851767489952526125883853786217589527714841889 (matches Jolt!)
-
----
-
-## Remaining Issue: Gruen Polynomial Claim Divergence
-
-The sumcheck still fails:
+**Evidence:**
 ```
+=== SUMCHECK VERIFICATION FAILED ===
 output_claim:          3156099394088378331739429618582031493604140997965859776862374574205175751175
 expected_output_claim: 6520563849248945342410334176740245598125896542821607373002483479060307387386
 ```
 
-### Root Cause (from Session 52)
+The `expected_output_claim` is computed by `evaluate_inner_sum_product_at_point` which:
+1. Gets Lagrange weights `w` over the univariate-skip base domain (10 points: -4 to 5)
+2. Computes `az_g0, bz_g0` by dotting **first group** constraints (10) with `z`
+3. Computes `az_g1, bz_g1` by dotting **second group** constraints (9) with `z`
+4. Blends: `az_final = az_g0 + r_stream * (az_g1 - az_g0)`
+5. Returns `az_final * bz_final`
 
-The Gruen polynomial q(X) is constructed to satisfy s(0)+s(1)=previous_claim, but it's NOT equivalent to the multiquadratic bound polynomial:
-- q(0) = t_zero = Σ eq * Az(0) * Bz(0) ✓
-- q(∞) = t_infinity = Σ eq * slope_products ✓
-- q(1) is SOLVED from constraint, NOT from t(1) ✗
+But Zolt's prover computes a standard sumcheck over the full 19 constraints without this structure.
 
-This means q(r) ≠ bound_t_prime(r), causing the claim to diverge.
+### What Needs to Be Implemented
 
-### Next Steps
+1. **First Round (UniSkip)**: Prover must:
+   - Evaluate both constraint groups at Lagrange-weighted points
+   - Send coefficients for the univariate polynomial over the base domain
+   - Use `r_stream` to blend the two groups in subsequent rounds
 
-1. **Fix rebuildTPrimePoly indexing** - The function calls buildTPrimePoly which assumes a specific layout. After Az/Bz are bound, the indices shift. Need to verify:
-   - E_out.len * E_in.len * grid_size == az.boundLen() (sizes match)
-   - The index formula `grid_size * i + j` accesses correct values after binding
+2. **Constraint Grouping**: Match Jolt exactly:
+   - **First group (10 constraints)**: indices 1,2,3,4,5,6,11,14,17,18
+   - **Second group (9 constraints)**: indices 0,7,8,9,10,12,13,15,16
 
-2. **Compare Jolt's compute_evaluation_grid_from_polynomials_parallel** - This is Jolt's equivalent. Key formula:
-   ```rust
-   let index = grid_size * i + j;
-   az_grid[j] = az[index];
-   ```
-   Verify Zolt uses same indexing scheme.
+3. **Verify Claims Match**: After implementing univariate skip, the verifier's
+   `inner_sum_prod = evaluate_inner_sum_product_at_point(...)` should equal
+   what the prover produces.
 
-3. **Add per-round t_zero/t_infinity values** - Print these from Jolt prover (already has debug) and compare with Zolt.
+---
 
-4. **Test with minimal trace** - Try with 2 cycles to reduce debugging complexity.
+## Completed Tasks
+
+- [x] Compare R1CS input ordering between Zolt and Jolt (they match!)
+- [x] Compare R1CS constraint ordering between Zolt and Jolt (they match!)
+- [x] Verify transcript challenges match (they do!)
+- [x] Verify r1cs_input_evals match between prover and verifier (they do!)
+- [x] Fix batching coefficient Montgomery form bug (Session 53)
+- [x] Identify root cause: missing univariate skip optimization
+
+## In Progress
+
+- [ ] Implement univariate skip first round in Zolt's Spartan prover
+- [ ] Use Lagrange polynomial over domain [-4, 5] for constraint evaluation
+- [ ] Split constraints into first group (10) and second group (9)
+- [ ] Blend groups with r_stream challenge after first round
+
+---
+
+## Reference Files
+
+### Jolt (implementation to match)
+- `jolt-core/src/zkvm/r1cs/evaluation.rs` - Grouped constraint evaluation
+- `jolt-core/src/zkvm/r1cs/key.rs` - `evaluate_inner_sum_product_at_point`
+- `jolt-core/src/subprotocols/univariate_skip.rs` - UniSkip targets
+
+### Zolt (files to modify)
+- `src/zkvm/r1cs/jolt_r1cs.zig` - JoltSpartanInterface (needs univariate skip)
+- `src/zkvm/r1cs/evaluation.zig` - Constraint evaluation helpers
+- `src/zkvm/r1cs/constraints.zig` - First/second group indices
+
+---
+
+## Key Constants from Jolt
+
+```rust
+pub const OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE: usize = 10;  // domain {-4..5}
+pub const OUTER_UNIVARIATE_SKIP_DEGREE: usize = 5;        // polynomial degree
+
+// First group labels (10 constraints with boolean guards)
+R1CS_CONSTRAINTS_FIRST_GROUP_LABELS = [
+    RamAddrEqZeroIfNotLoadStore,       // constraint 1
+    RamReadEqRamWriteIfLoad,           // constraint 2
+    RamReadEqRdWriteIfLoad,            // constraint 3
+    Rs2EqRamWriteIfStore,              // constraint 4
+    LeftLookupZeroUnlessAddSubMul,     // constraint 5
+    LeftLookupEqLeftInputOtherwise,    // constraint 6
+    AssertLookupOne,                   // constraint 11
+    NextUnexpPCEqLookupIfShouldJump,   // constraint 14
+    NextPCEqPCPlusOneIfInline,         // constraint 17
+    MustStartSequenceFromBeginning,    // constraint 18
+]
+
+// Second group: constraints 0,7,8,9,10,12,13,15,16
+```
 
 ---
 
@@ -99,10 +104,13 @@ This means q(r) ≠ bound_t_prime(r), causing the claim to diverge.
 ```bash
 # Build and generate proof
 zig build -Doptimize=ReleaseFast
-./zig-out/bin/zolt prove /tmp/jolt-guest-targets/fibonacci-guest-fib/riscv64imac-unknown-none-elf/release/fibonacci-guest --jolt-format --input-hex 32 -o /tmp/zolt_proof_dory.bin
+./zig-out/bin/zolt prove /tmp/jolt-guest-targets/fibonacci-guest-fib/riscv64imac-unknown-none-elf/release/fibonacci-guest --jolt-format --input-hex 32 --export-preprocessing /tmp/zolt_preprocessing.bin -o /tmp/zolt_proof_dory.bin
 
-# Jolt verification test
+# Jolt verification test (with Zolt preprocessing)
 cd /Users/matteo/projects/jolt
+cargo test --package jolt-core test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
+
+# Jolt verification test (with Jolt preprocessing)
 cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture
 ```
 
@@ -110,6 +118,7 @@ cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture
 
 ## Previous Sessions Summary
 
+- **Session 56**: Found root cause - missing univariate skip optimization
 - **Session 55**: Found rebuildTPrimePoly bug - t_prime[0] values don't match expected after rebuild
 - **Session 54**: Verified coefficients match, confirmed claim drift issue
 - **Session 53**: Fixed batching_coeff Montgomery form bug; initial_claim now matches

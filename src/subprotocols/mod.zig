@@ -78,6 +78,8 @@ pub fn Sumcheck(comptime F: type) type {
 
                 const half = self.polynomial.evaluations.len / 2;
 
+                std.debug.print("[SUMCHECK PROVER] round={d}, poly_len={d}, half={d}\n", .{ self.round, self.polynomial.evaluations.len, half });
+
                 // g(0) = sum of evaluations with first variable = 0
                 var g0 = F.zero();
                 for (0..half) |i| {
@@ -89,6 +91,9 @@ pub fn Sumcheck(comptime F: type) type {
                 for (0..half) |i| {
                     g1 = g1.add(self.polynomial.evaluations[i + half]);
                 }
+
+                std.debug.print("[SUMCHECK PROVER]   g(0)=0x{x}, g(1)=0x{x}\n", .{ g0.limbs[0], g1.limbs[0] });
+                std.debug.print("[SUMCHECK PROVER]   g(0)+g(1)=0x{x}\n", .{ g0.add(g1).limbs[0] });
 
                 // Coefficients: [g(0), g(1) - g(0)]
                 const coeffs = try allocator.alloc(F, 2);
@@ -105,11 +110,15 @@ pub fn Sumcheck(comptime F: type) type {
 
             /// Receive challenge and update state
             pub fn receiveChallenge(self: *Prover, challenge: F) !void {
+                std.debug.print("[SUMCHECK PROVER] receiveChallenge: round={d}, challenge=0x{x}\n", .{ self.round, challenge.limbs[0] });
+
                 // Bind the current variable to the challenge
                 const new_poly = try self.polynomial.bindFirst(challenge);
                 self.polynomial.deinit();
                 self.polynomial = new_poly;
                 self.round += 1;
+
+                std.debug.print("[SUMCHECK PROVER]   after_bind: new_poly_len={d}\n", .{self.polynomial.evaluations.len});
             }
 
             /// Check if the protocol is complete
@@ -159,7 +168,11 @@ pub fn Sumcheck(comptime F: type) type {
                 const p1 = round.poly.evaluate(F.one());
                 const sum = p0.add(p1);
 
+                std.debug.print("[SUMCHECK VERIFIER] round={d}: p(0)=0x{x}, p(1)=0x{x}\n", .{ self.round, p0.limbs[0], p1.limbs[0] });
+                std.debug.print("[SUMCHECK VERIFIER]   sum=0x{x}, claim=0x{x}, match={}\n", .{ sum.limbs[0], self.claim.limbs[0], sum.eql(self.claim) });
+
                 if (!sum.eql(self.claim)) {
+                    std.debug.print("[SUMCHECK VERIFIER] ERROR: sum != claim!\n", .{});
                     return error.SumcheckVerificationFailed;
                 }
 
@@ -170,6 +183,8 @@ pub fn Sumcheck(comptime F: type) type {
                 // - Previous claim
                 // This ensures reproducibility for testing while being deterministic
                 const challenge = self.deriveChallenge(&round);
+
+                std.debug.print("[SUMCHECK VERIFIER]   challenge=0x{x}\n", .{challenge.limbs[0]});
 
                 // Grow challenges array
                 const new_len = self.challenges_len + 1;
@@ -183,7 +198,9 @@ pub fn Sumcheck(comptime F: type) type {
                 self.challenges_len = new_len;
 
                 // Update claim for next round
-                self.claim = round.poly.evaluate(challenge);
+                const new_claim = round.poly.evaluate(challenge);
+                std.debug.print("[SUMCHECK VERIFIER]   new_claim=p(challenge)=0x{x}\n", .{new_claim.limbs[0]});
+                self.claim = new_claim;
                 self.round += 1;
 
                 return challenge;

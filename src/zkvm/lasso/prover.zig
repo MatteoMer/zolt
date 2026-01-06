@@ -230,11 +230,35 @@ pub fn LassoProver(comptime F: type) type {
         /// - g_i(0) + g_i(1) = current claim
         /// - The polynomial encodes the partial sums for variable i
         pub fn computeRoundPolynomial(self: *Self) !poly.UniPoly(F) {
-            if (self.isAddressPhase()) {
-                return self.computeAddressRoundPoly();
-            } else {
-                return self.computeCycleRoundPoly();
+            const is_addr = self.isAddressPhase();
+            std.debug.print("\n[LASSO PROVER] computeRoundPolynomial round={d} phase={s}\n", .{ self.round, if (is_addr) "address" else "cycle" });
+            std.debug.print("[LASSO PROVER] current_claim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ self.current_claim.limbs[3], self.current_claim.limbs[2], self.current_claim.limbs[1], self.current_claim.limbs[0] });
+
+            const result = if (is_addr)
+                try self.computeAddressRoundPoly()
+            else
+                try self.computeCycleRoundPoly();
+
+            // Print the computed polynomial
+            std.debug.print("[LASSO PROVER] round_poly coeffs:\n", .{});
+            for (result.coeffs, 0..) |c, i| {
+                std.debug.print("[LASSO PROVER]   c[{d}] = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ i, c.limbs[3], c.limbs[2], c.limbs[1], c.limbs[0] });
             }
+
+            // Verify sumcheck constraint
+            const c0 = result.coeffs[0];
+            const c1 = result.coeffs[1];
+            const c2 = if (result.coeffs.len > 2) result.coeffs[2] else F.zero();
+            const p0 = c0;
+            const p1 = c0.add(c1).add(c2);
+            const sum = p0.add(p1);
+            std.debug.print("[LASSO PROVER] p(0) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ p0.limbs[3], p0.limbs[2], p0.limbs[1], p0.limbs[0] });
+            std.debug.print("[LASSO PROVER] p(1) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ p1.limbs[3], p1.limbs[2], p1.limbs[1], p1.limbs[0] });
+            std.debug.print("[LASSO PROVER] p(0)+p(1) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ sum.limbs[3], sum.limbs[2], sum.limbs[1], sum.limbs[0] });
+            std.debug.print("[LASSO PROVER] claim     = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ self.current_claim.limbs[3], self.current_claim.limbs[2], self.current_claim.limbs[1], self.current_claim.limbs[0] });
+            std.debug.print("[LASSO PROVER] sumcheck_ok = {}\n", .{sum.eql(self.current_claim)});
+
+            return result;
         }
 
         /// Compute round polynomial for address phase (first LOG_K rounds)
@@ -340,16 +364,23 @@ pub fn LassoProver(comptime F: type) type {
         /// round polynomial just sent. The eq_evals are also updated to reflect
         /// the binding of this variable.
         pub fn receiveChallenge(self: *Self, challenge: F) !void {
+            const is_addr = self.isAddressPhase();
+            std.debug.print("\n[LASSO PROVER] receiveChallenge round={d} phase={s}\n", .{ self.round, if (is_addr) "address" else "cycle" });
+            std.debug.print("[LASSO PROVER] challenge = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ challenge.limbs[3], challenge.limbs[2], challenge.limbs[1], challenge.limbs[0] });
+            std.debug.print("[LASSO PROVER] current_claim (before) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ self.current_claim.limbs[3], self.current_claim.limbs[2], self.current_claim.limbs[1], self.current_claim.limbs[0] });
+
             // Record the challenge
             self.challenges[self.challenges_len] = challenge;
             self.challenges_len += 1;
 
-            if (self.isAddressPhase()) {
+            if (is_addr) {
                 // Address phase: bind the address variable
                 // Update eq_evals: for each index j, multiply by either r or (1-r)
                 // depending on whether bit `round` of lookup_indices[j] is 1 or 0
                 const round_bit = self.round;
                 const one_minus_r = F.one().sub(challenge);
+
+                std.debug.print("[LASSO PROVER] Address phase: binding bit {d}\n", .{round_bit});
 
                 for (self.lookup_indices, 0..) |idx, j| {
                     const bit = (idx >> @intCast(round_bit)) & 1;
@@ -381,8 +412,11 @@ pub fn LassoProver(comptime F: type) type {
                 // Cycle phase: bind the cycle variable
                 // Fold the eq_evals array in half
                 const num_cycles = self.eq_evals_len;
+                std.debug.print("[LASSO PROVER] Cycle phase: eq_evals_len={d}\n", .{num_cycles});
+
                 if (num_cycles <= 1) {
                     // No more folding possible
+                    std.debug.print("[LASSO PROVER] No more folding possible\n", .{});
                     self.round += 1;
                     return;
                 }
@@ -416,6 +450,7 @@ pub fn LassoProver(comptime F: type) type {
                 }
             }
 
+            std.debug.print("[LASSO PROVER] current_claim (after) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ self.current_claim.limbs[3], self.current_claim.limbs[2], self.current_claim.limbs[1], self.current_claim.limbs[0] });
             self.round += 1;
         }
 

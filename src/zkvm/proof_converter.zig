@@ -469,6 +469,10 @@ pub fn ProofConverter(comptime F: type) type {
             //   claim = input_claim.mul_pow_2(max_num_rounds - num_rounds) * coeff
             // For a single instance with max_num_rounds = num_rounds:
             //   claim = input_claim * coeff = uni_skip_claim * batching_coeff
+            //
+            // NOTE: The prover tracks UNSCALED claims internally (outer_prover.current_claim
+            // is set to uni_skip_claim by bindFirstRoundChallenge). The SCALED coefficients
+            // are sent to the proof.
             const initial_claim = uni_skip_claim.mul(batching_coeff);
             std.debug.print("[ZOLT] STAGE1_INITIAL: claim = {any}\n", .{initial_claim.toBytesBE()});
             std.debug.print("[ZOLT] STAGE1_INITIAL: claim_le = {any}\n", .{initial_claim.toBytes()});

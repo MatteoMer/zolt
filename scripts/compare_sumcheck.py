@@ -279,14 +279,18 @@ class StageComparator:
         """Compare a single Stage 1 round - coefficients and challenges only"""
         results = []
 
-        # Coefficients c0, c2, c3 - Zolt outputs LE bytes, Jolt uses _bytes suffix
+        # Coefficients c0, c2, c3 - try new format first, fall back to old _le suffix
         for coeff in ["c0", "c2", "c3"]:
             zolt_val = self.extract_zolt_le_hex(f"STAGE1_ROUND_{round_idx}: {coeff} = ")
+            if zolt_val is None:
+                zolt_val = self.extract_zolt_le_hex(f"STAGE1_ROUND_{round_idx}: {coeff}_le = ")
             jolt_val = self.extract_single(f"STAGE1_ROUND_{round_idx}: {coeff}_bytes = ", self.jolt_log)
             results.append(self.compare_values(f"Round {round_idx} {coeff}", zolt_val, jolt_val))
 
-        # Challenge - Zolt outputs LE bytes, Jolt uses _bytes suffix
+        # Challenge - try new format first, fall back to old _le suffix
         zolt_ch = self.extract_zolt_le_hex(f"STAGE1_ROUND_{round_idx}: challenge = ")
+        if zolt_ch is None:
+            zolt_ch = self.extract_zolt_le_hex(f"STAGE1_ROUND_{round_idx}: challenge_le = ")
         jolt_ch = self.extract_single(f"STAGE1_ROUND_{round_idx}: challenge_bytes = ", self.jolt_log)
         results.append(self.compare_values(f"Round {round_idx} challenge", zolt_ch, jolt_ch))
 
@@ -296,8 +300,10 @@ class StageComparator:
         """Compare Stage 1: Outer Spartan sumcheck polynomials and challenges"""
         results = []
 
-        # tau.len - Zolt uses "STAGE1: tau.len", Jolt uses "STAGE1_PRE: tau.len"
+        # tau.len - try both old and new Zolt format
         zolt_tau_len = self.extract_u64("STAGE1: tau.len = ", self.zolt_log)
+        if zolt_tau_len is None:
+            zolt_tau_len = self.extract_u64("STAGE1_PRE: tau.len = ", self.zolt_log)
         jolt_tau_len = self.extract_u64("STAGE1_PRE: tau.len = ", self.jolt_log)
 
         if zolt_tau_len == jolt_tau_len:
@@ -305,8 +311,10 @@ class StageComparator:
         else:
             results.append(CompareResult("tau.len", str(zolt_tau_len), str(jolt_tau_len), MatchResult.MISMATCH))
 
-        # Initial claim - Zolt outputs LE bytes, Jolt outputs decimal
+        # Initial claim - try new format first, fall back to old _le suffix
         zolt_init = self.extract_zolt_le_hex("STAGE1_INITIAL: claim = ")
+        if zolt_init is None:
+            zolt_init = self.extract_zolt_le_hex("STAGE1_INITIAL: claim_le = ")
         jolt_init = self.extract_jolt_decimal_as_le_hex("STAGE1_INITIAL: claim = ")
         results.append(self.compare_values("Initial claim", zolt_init, jolt_init))
 

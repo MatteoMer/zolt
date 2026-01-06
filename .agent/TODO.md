@@ -1,80 +1,86 @@
-# Stage 2 Implementation - Status
+# Zolt-Jolt Compatibility - Stage 2 Debugging
 
-## Current Status: Stage 2 Wired Up, Ready for Testing
+## Current Status
+Stage 2 sumcheck verification FAILING - output_claim != expected_output_claim
 
-### Completed ✅
+### Test Results
+- All 712 Zolt tests pass
+- Stage 2 verification fails with:
+  - output_claim: 12410090867396887919100369163684640024029021363712395692233063153596180695984
+  - expected_output_claim: varies based on r_cycle endianness
 
-1. **ProductVirtualRemainderProver** (`src/zkvm/spartan/product_remainder.zig`)
-   - Fuses 5 product constraints into left/right polynomials
-   - Computes cubic round polynomials [c0, c2, c3]
-   - Extracts 8 unique factor polynomial values per cycle
+## Issues Identified
 
-2. **BatchedSumcheckProver** (`src/zkvm/batched_sumcheck.zig`)
-   - Combines 5 instances with different round counts
-   - Handles batching protocol matching Jolt exactly
+### 1. Factor Polynomial Computation
+The 8 factor polynomials need correct values:
+- LeftInstructionInput (u64) ✓
+- RightInstructionInput (i128) ✓
+- IsRdNotZero - **WRONG**: using RdWriteValue != 0, should be rd_index != 0
+- WriteLookupOutputToRDFlag ✓
+- JumpFlag ✓
+- LookupOutput ✓
+- BranchFlag - **WRONG**: using ShouldBranch heuristic, should be instruction opcode 0x63
+- NextIsNoop - **WRONG**: using PC heuristic, should be next instruction's IsNoop flag
 
-3. **generateStage2BatchedSumcheckProof** in proof_converter.zig
-   - Replaces zero sumcheck with real batched sumcheck
-   - ProductVirtualRemainder uses real prover
-   - Other 4 instances contribute zero claims
+### 2. Round Polynomial Computation
+ProductVirtualRemainderProver computes:
+```
+s(X) = Σ eq(tau, x) * fused_left(x, X) * fused_right(x, X)
+```
+This may have endianness issues with tau or challenge binding.
 
-4. **All 712+ tests pass**
+### 3. Endianness
+- Tried reversing r_cycle for BIG_ENDIAN (like Jolt's OpeningPoint)
+- Still failing, expected_output_claim changes but doesn't match
 
-### In Progress 🔄
+## Next Steps
 
-1. **Test with Jolt verifier**
-   - Generate proof: `./zig-out/bin/zolt prove --jolt-format -o /tmp/proof.bin examples/simple.elf`
-   - Verify with Jolt: `cd /Users/matteo/projects/jolt && cargo test test_verify_zolt_proof`
+1. **Fix factor value extraction**
+   - Add rd_index to R1CS witnesses for IsRdNotZero
+   - Add instruction opcode for BranchFlag
+   - Add IsNoop flag for NextIsNoop
 
-### Known Issues / TODOs 📋
+2. **Verify round polynomial formula**
+   - Compare Jolt's ProductVirtualRemainderProver round computation
+   - Check eq polynomial binding order
 
-1. **ProductVirtualRemainder prover**
-   - Polynomial decompression may need fixing (lines 1364-1377 in proof_converter.zig)
-   - The evalsToCompressed / compressed format handling
+3. **Debug with smaller trace**
+   - Use 4-cycle program for easier debugging
+   - Print intermediate values on both sides
 
-2. **Opening claims for ProductVirtualRemainder**
-   - Need to compute 8 factor evaluations at r_cycle
-   - Currently set to zeros, need real values
+## Technical Details
 
-3. **Other 4 Stage 2 instances**
-   - Currently use zero claims (valid for simple programs)
-   - For full programs, need to implement:
-     - RamRafEvaluation
-     - RamReadWriteChecking
-     - OutputSumcheck
-     - InstructionLookupsClaimReduction
+### Jolt's expected_output_claim formula:
+```rust
+tau_high_bound_r0 * tau_bound_r_tail_reversed * fused_left * fused_right
+```
 
-### Test Commands
+Where:
+- tau_high = tau[tau.len - 1]
+- tau_low = tau[0..tau.len - 1]
+- r_tail_reversed = sumcheck_challenges reversed
+- fused_left = Σ w[i] * factor_left[i](r_cycle)
+- fused_right = Σ w[i] * factor_right[i](r_cycle)
+- w[i] = Lagrange weights at r0 over 5-point domain
+
+### Product Constraints (5 total):
+1. Product = LeftInstructionInput * RightInstructionInput
+2. WriteLookupOutputToRD = IsRdNotZero * OpFlags(WriteLookupOutputToRD)
+3. WritePCtoRD = IsRdNotZero * OpFlags(Jump)
+4. ShouldBranch = LookupOutput * InstructionFlags(Branch)
+5. ShouldJump = OpFlags(Jump) * (1 - NextIsNoop)
+
+## Commands
 
 ```bash
-# Run Zolt tests
+# Build and test
 zig build test --summary all
 
 # Generate proof
-zig build && ./zig-out/bin/zolt prove --jolt-format -o /tmp/proof.bin examples/simple.elf
+./zig-out/bin/zolt prove --jolt-format -o /tmp/proof.bin examples/fibonacci.elf
 
-# Verify with Jolt (in jolt directory)
+# Test with Jolt
+cp /tmp/proof.bin /tmp/zolt_proof_dory.bin
 cd /Users/matteo/projects/jolt
-cargo test test_verify_zolt_proof -- --ignored --nocapture
+cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture
 ```
-
-### Stage 2 Architecture Reference
-
-```
-Stage 2 = BatchedSumcheck([
-    ProductVirtualRemainder,           // n_cycle_vars rounds, degree 3
-    RamRafEvaluation,                  // log_ram_k rounds, degree 2
-    RamReadWriteChecking,              // log_ram_k + n_cycle_vars rounds (MAX)
-    OutputSumcheck,                    // log_ram_k rounds, degree 3
-    InstructionLookupsClaimReduction,  // n_cycle_vars rounds, degree 2
-])
-```
-
-### Why Zero Claims Should Work (for simple programs)
-
-For programs without RAM/lookups:
-- ProductVirtualRemainder: non-zero input, real polynomials
-- RamRafEvaluation: zero input → zero output → 0 == 0 ✓
-- RamReadWriteChecking: zero input → zero output → 0 == 0 ✓
-- OutputSumcheck: zero input (always) → zero output → 0 == 0 ✓
-- InstructionLookupsClaimReduction: zero input → zero output → 0 == 0 ✓

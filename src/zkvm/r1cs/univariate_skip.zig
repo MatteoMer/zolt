@@ -193,6 +193,35 @@ pub fn uniskipTargets(
     return targets;
 }
 
+/// Compute power sums S_k = Σ_{t in domain} t^k for k = 0, 1, ..., OUT_LEN-1
+///
+/// For a symmetric domain of size WINDOW_N centered at 0:
+/// - Domain points: {base_left, base_left+1, ..., base_right} where base_left = -⌊(N-1)/2⌋
+/// - S_0 = WINDOW_N (sum of 1s)
+/// - S_1 = 0 (odd power of symmetric domain)
+/// - S_2 = sum of squares
+/// - etc.
+///
+/// Matches Jolt's LagrangeHelper::power_sums.
+pub fn computePowerSums(comptime WINDOW_N: usize, comptime OUT_LEN: usize) [OUT_LEN]i128 {
+    var sums: [OUT_LEN]i128 = [_]i128{0} ** OUT_LEN;
+    const d = WINDOW_N - 1;
+    const start: i64 = -@as(i64, @intCast(d / 2));
+
+    for (0..WINDOW_N) |j| {
+        const t: i128 = @as(i128, start + @as(i64, @intCast(j)));
+        sums[0] += 1;
+
+        var pow: i128 = t;
+        for (1..OUT_LEN) |k| {
+            sums[k] += pow;
+            pow = pow * t;
+        }
+    }
+
+    return sums;
+}
+
 /// Lagrange polynomial utilities
 pub fn LagrangePolynomial(comptime F: type) type {
     return struct {

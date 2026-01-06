@@ -1,6 +1,59 @@
 # Zolt-Jolt Compatibility Notes
 
-## Current Status (Session 59 - January 6, 2026)
+## Current Status (Session 63 - January 6, 2026)
+
+### Summary
+
+**Stage 2 UniSkip input_claim mismatch - base_evals now match!**
+
+Fixed product virtualization witness values in `R1CSCycleInputs.fromTraceStep`:
+- `WriteLookupOutputToRD = IsRdNotZero * FlagWriteLookupOutputToRD`
+- `WritePCtoRD = IsRdNotZero * FlagJump`
+- `ShouldBranch = LookupOutput * BranchFlag`
+- `ShouldJump = FlagJump * (1 - NextIsNoop)`
+
+All 5 base_evals now match between Zolt and Jolt:
+- Product: ✅ MATCH
+- WriteLookupOutputToRD: ✅ MATCH
+- WritePCtoRD: ✅ MATCH (both 0)
+- ShouldBranch: ✅ MATCH (both 0)
+- ShouldJump: ✅ MATCH (both 0)
+
+### Current Issue: tau_high mismatch
+
+The input_claim computation is:
+```
+input_claim = Σ L_i(tau_high) * base_evals[i]
+```
+
+Since base_evals match, the issue is tau_high. In Jolt, Stage 2 samples a NEW tau_high:
+```rust
+// ProductVirtualUniSkipParams::new (product.rs:89-91)
+let r_cycle_outer = opening_accumulator.get_r_cycle_point(SumcheckId::SpartanOuter);
+let tau_high: F::Challenge = transcript.challenge_scalar();
+let tau = [r_cycle_outer.as_slice(), &[tau_high]].concat();
+```
+
+Zolt also samples from transcript, but the transcript states differ before sampling.
+This means something different is being appended to the transcript between Stage 1 and Stage 2.
+
+### Key Insight: Domain Sum vs Input Claim
+
+When I compute input_claim manually in Python:
+- Python result = Zolt's input_claim = Jolt's domain_sum (reversed)
+- But Jolt's input_claim is different from its domain_sum
+
+This confirms Zolt is computing the formula correctly, but with the wrong tau_high.
+
+### Next Steps
+
+1. Debug transcript state before Stage 2 tau_high sampling
+2. Compare what Jolt appends to transcript after Stage 1
+3. Ensure Zolt appends the same claims/values in the same order
+
+---
+
+## Previous Status (Session 59 - January 6, 2026)
 
 ### Summary
 

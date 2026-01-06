@@ -436,6 +436,47 @@ pub fn MontgomeryField(
             return self.montgomeryMul(self);
         }
 
+        /// Multiply by a signed 128-bit integer
+        /// Used for power sum computations in univariate skip verification
+        pub fn mulI128(self: Self, val: i128) Self {
+            if (val == 0) return Self.zero();
+            if (val == 1) return self;
+            if (val == -1) return self.neg();
+
+            if (val > 0) {
+                const uval: u128 = @intCast(val);
+                return self.mulU128(uval);
+            } else {
+                const uval: u128 = @intCast(-val);
+                return self.mulU128(uval).neg();
+            }
+        }
+
+        /// Multiply by an unsigned 128-bit integer
+        fn mulU128(self: Self, val: u128) Self {
+            if (val == 0) return Self.zero();
+            if (val == 1) return self;
+
+            // Convert u128 to field element and multiply
+            const low: u64 = @truncate(val);
+            const high: u64 = @truncate(val >> 64);
+
+            // Create field element from 128-bit value
+            var other = Self.fromU64(low);
+            if (high != 0) {
+                // Add high * 2^64 contribution
+                const high_fe = Self.fromU64(high);
+                // Multiply by 2^64 using repeated squaring
+                var two_64 = Self.fromU64(1);
+                for (0..64) |_| {
+                    two_64 = two_64.double();
+                }
+                other = other.add(high_fe.mul(two_64));
+            }
+
+            return self.mul(other);
+        }
+
         /// Doubling (2*self)
         pub fn double(self: Self) Self {
             return self.add(self);
@@ -769,6 +810,47 @@ pub const BN254Scalar = struct {
     /// Field multiplication
     pub fn mul(self: Self, other: Self) Self {
         return self.montgomeryMul(other);
+    }
+
+    /// Multiply by a signed 128-bit integer
+    /// Used for power sum computations in univariate skip verification
+    pub fn mulI128(self: Self, val: i128) Self {
+        if (val == 0) return Self.zero();
+        if (val == 1) return self;
+        if (val == -1) return self.neg();
+
+        if (val > 0) {
+            const uval: u128 = @intCast(val);
+            return self.mulU128(uval);
+        } else {
+            const uval: u128 = @intCast(-val);
+            return self.mulU128(uval).neg();
+        }
+    }
+
+    /// Multiply by an unsigned 128-bit integer
+    fn mulU128(self: Self, val: u128) Self {
+        if (val == 0) return Self.zero();
+        if (val == 1) return self;
+
+        // Convert u128 to field element and multiply
+        const low: u64 = @truncate(val);
+        const high: u64 = @truncate(val >> 64);
+
+        // Create field element from 128-bit value
+        var other = Self.fromU64(low);
+        if (high != 0) {
+            // Add high * 2^64 contribution
+            const high_fe = Self.fromU64(high);
+            // Multiply by 2^64 using repeated squaring
+            var two_64 = Self.fromU64(1);
+            for (0..64) |_| {
+                two_64 = two_64.double();
+            }
+            other = other.add(high_fe.mul(two_64));
+        }
+
+        return self.mul(other);
     }
 
     /// Field squaring (optimized using Karatsuba-like technique)

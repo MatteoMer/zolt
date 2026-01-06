@@ -329,6 +329,19 @@ class StageComparator:
         for i in range(min(num_rounds, 20)):
             results.extend(self.compare_stage1_round(i))
 
+        # Stage 1 UniSkip values (from verifier)
+        zolt_coeffs0 = self.extract_single("STAGE1_UNISKIP: coeffs[0] = ", self.zolt_log)
+        jolt_coeffs0 = self.extract_single("STAGE1_UNISKIP: coeffs[0] = ", self.jolt_log)
+        results.append(self.compare_values("Stage1 UniSkip coeffs[0]", zolt_coeffs0, jolt_coeffs0))
+
+        zolt_input_claim = self.extract_single("STAGE1_UNISKIP: input_claim = ", self.zolt_log)
+        jolt_input_claim = self.extract_single("STAGE1_UNISKIP: input_claim = ", self.jolt_log)
+        results.append(self.compare_values("Stage1 UniSkip input_claim", zolt_input_claim, jolt_input_claim))
+
+        zolt_domain_sum = self.extract_single("STAGE1_UNISKIP: domain_sum = ", self.zolt_log)
+        jolt_domain_sum = self.extract_single("STAGE1_UNISKIP: domain_sum = ", self.jolt_log)
+        results.append(self.compare_values("Stage1 UniSkip domain_sum", zolt_domain_sum, jolt_domain_sum))
+
         return results
 
     def compare_stage2(self) -> List[CompareResult]:
@@ -345,6 +358,19 @@ class StageComparator:
             zolt_val = self.extract_single(f"STAGE2: base_evals[{i}] = ", self.zolt_log)
             jolt_val = self.extract_single(f"STAGE2: base_evals[{i}] = ", self.jolt_log)
             results.append(self.compare_values(f"Stage2 base_evals[{i}]", zolt_val, jolt_val))
+
+        # UniSkip first round values
+        zolt_coeffs0 = self.extract_single("STAGE2_UNISKIP: coeffs[0] = ", self.zolt_log)
+        jolt_coeffs0 = self.extract_single("STAGE2_UNISKIP: coeffs[0] = ", self.jolt_log)
+        results.append(self.compare_values("Stage2 UniSkip coeffs[0]", zolt_coeffs0, jolt_coeffs0))
+
+        zolt_input_claim = self.extract_single("STAGE2_UNISKIP: input_claim = ", self.zolt_log)
+        jolt_input_claim = self.extract_single("STAGE2_UNISKIP: input_claim = ", self.jolt_log)
+        results.append(self.compare_values("Stage2 UniSkip input_claim", zolt_input_claim, jolt_input_claim))
+
+        zolt_domain_sum = self.extract_single("STAGE2_UNISKIP: domain_sum = ", self.zolt_log)
+        jolt_domain_sum = self.extract_single("STAGE2_UNISKIP: domain_sum = ", self.jolt_log)
+        results.append(self.compare_values("Stage2 UniSkip domain_sum", zolt_domain_sum, jolt_domain_sum))
 
         return results
 
@@ -425,8 +451,9 @@ def print_results(results: Dict[str, List[CompareResult]], verbose: bool = False
             # Print summary line
             print(f"  {status:30} {r.name}")
 
-            # Print values if mismatch or verbose
-            if r.result == MatchResult.MISMATCH or verbose:
+            # Print values if mismatch, verbose, or Stage 2 (for debugging UniSkip)
+            show_values = r.result == MatchResult.MISMATCH or verbose or "Stage 2" in section
+            if show_values:
                 if r.zolt_value:
                     print(f"    {Color.YELLOW}ZOLT:{Color.RESET} {r.zolt_value[:32]}..." if len(r.zolt_value or '') > 32 else f"    {Color.YELLOW}ZOLT:{Color.RESET} {r.zolt_value}")
                 if r.jolt_value:

@@ -1027,10 +1027,11 @@ pub fn ProofConverter(comptime F: type) type {
             }
 
             // Create UniSkip proof for Stage 2
-            // Need to get tau_high for Stage 2 from transcript and compute proper polynomial
+            // Jolt samples a NEW tau_high for Stage 2 from the transcript (see ProductVirtualUniSkipParams::new)
+            // tau = [r_cycle_outer, tau_high] where tau_high is freshly sampled
             std.debug.print("[ZOLT] STAGE2_PRE: transcript state before tau_high = {any}\n", .{transcript.state[0..8]});
             const tau_high_stage2 = transcript.challengeScalar();
-            std.debug.print("[ZOLT] STAGE2_PRE: transcript state after tau_high = {any}\n", .{transcript.state[0..8]});
+            std.debug.print("[ZOLT] STAGE2: sampled tau_high = {any}\n", .{tau_high_stage2.toBytesBE()});
 
             // Get the 5 product claims from Stage 1's opening claims
             // Order: Product, WriteLookupOutputToRD, WritePCtoRD, ShouldBranch, ShouldJump

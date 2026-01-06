@@ -607,6 +607,21 @@ fn computeLookupOutput(comptime FieldType: type, step: tracer.TraceStep) FieldTy
             const target = @as(u64, @bitCast(rs1_i64 +% imm)) & ~@as(u64, 1);
             return FieldType.fromU64(target);
         },
+        0x63 => { // Branch - LookupOutput = branch condition result (0 or 1)
+            const funct3: u3 = @truncate((step.instruction >> 12) & 0x7);
+            const rs1 = step.rs1_value;
+            const rs2 = step.rs2_value;
+            const taken: bool = switch (funct3) {
+                0x0 => rs1 == rs2, // BEQ
+                0x1 => rs1 != rs2, // BNE
+                0x4 => @as(i64, @bitCast(rs1)) < @as(i64, @bitCast(rs2)), // BLT (signed)
+                0x5 => @as(i64, @bitCast(rs1)) >= @as(i64, @bitCast(rs2)), // BGE (signed)
+                0x6 => rs1 < rs2, // BLTU (unsigned)
+                0x7 => rs1 >= rs2, // BGEU (unsigned)
+                else => false,
+            };
+            return if (taken) FieldType.one() else FieldType.zero();
+        },
         else => {
             // For other instructions, use rd_value
             return FieldType.fromU64(step.rd_value);
@@ -996,18 +1011,38 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             inputs.setFlagsFromInstruction(step.instruction);
 
             // =================================================================
-            // ShouldJump = Jump && !NextIsNoop
+            // ShouldJump = FlagJump * (1 - NextIsNoop)
             // This must be computed AFTER setFlagsFromInstruction sets FlagJump
             // =================================================================
-            const is_jump = inputs.values[R1CSInputIndex.FlagJump.toIndex()].eql(F.one());
-            if (is_jump) {
-                // Check if next instruction is a NOOP
-                const next_is_noop = isNoopInstruction(next_step);
-                if (!next_is_noop) {
-                    inputs.values[R1CSInputIndex.ShouldJump.toIndex()] = F.one();
-                }
-                // If next is noop, ShouldJump stays 0 (initialized)
-            }
+            const flag_jump = inputs.values[R1CSInputIndex.FlagJump.toIndex()];
+            const next_is_noop_f = if (isNoopInstruction(next_step)) F.one() else F.zero();
+            const one_minus_noop = F.one().sub(next_is_noop_f);
+            inputs.values[R1CSInputIndex.ShouldJump.toIndex()] = flag_jump.mul(one_minus_noop);
+
+            // =================================================================
+            // Compute Product Virtualization outputs (field products)
+            // These feed into Stage 2's base_evals for product sumcheck
+            // =================================================================
+
+            // IsRdNotZero: check if destination register != x0
+            const rd: u5 = @truncate((step.instruction >> 7) & 0x1F);
+            const is_rd_not_zero = if (rd != 0) F.one() else F.zero();
+
+            // BranchFlag: 1 if this is a branch instruction (opcode 0x63)
+            const instr_opcode: u8 = @truncate(step.instruction & 0x7F);
+            const branch_flag_f = if (instr_opcode == 0x63) F.one() else F.zero();
+
+            // WriteLookupOutputToRD = IsRdNotZero * FlagWriteLookupOutputToRD
+            const flag_wl = inputs.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()];
+            inputs.values[R1CSInputIndex.WriteLookupOutputToRD.toIndex()] = is_rd_not_zero.mul(flag_wl);
+
+            // WritePCtoRD = IsRdNotZero * FlagJump
+            inputs.values[R1CSInputIndex.WritePCtoRD.toIndex()] = is_rd_not_zero.mul(flag_jump);
+
+            // ShouldBranch = LookupOutput * BranchFlag
+            // LookupOutput contains the branch condition result (0 or 1) for branches
+            const lookup_out = inputs.values[R1CSInputIndex.LookupOutput.toIndex()];
+            inputs.values[R1CSInputIndex.ShouldBranch.toIndex()] = lookup_out.mul(branch_flag_f);
 
             return inputs;
         }
@@ -1143,8 +1178,7 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                 },
                 0x6F => { // JAL
                     self.values[R1CSInputIndex.FlagJump.toIndex()] = F.one();
-                    // Note: ShouldJump is set in fromTraceStep based on NextIsNoop
-                    self.values[R1CSInputIndex.WritePCtoRD.toIndex()] = F.one();
+                    // Note: ShouldJump and WritePCtoRD are computed as field products in fromTraceStep
                     // JAL uses AddOperands: lookup_operands = (0, PC + imm)
                     self.values[R1CSInputIndex.FlagAddOperands.toIndex()] = F.one();
                     // Constraint 5: LeftLookup == 0 for Add
@@ -1154,8 +1188,7 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                 },
                 0x67 => { // JALR
                     self.values[R1CSInputIndex.FlagJump.toIndex()] = F.one();
-                    // Note: ShouldJump is set in fromTraceStep based on NextIsNoop
-                    self.values[R1CSInputIndex.WritePCtoRD.toIndex()] = F.one();
+                    // Note: ShouldJump and WritePCtoRD are computed as field products in fromTraceStep
                     // JALR uses AddOperands: lookup_operands = (0, rs1 + imm)
                     self.values[R1CSInputIndex.FlagAddOperands.toIndex()] = F.one();
                     // Constraint 5: LeftLookup == 0 for Add

@@ -1,35 +1,52 @@
 # Zolt-Jolt Compatibility Notes
 
-## Current Status (Session 58 - January 6, 2026)
+## Current Status (Session 59 - January 6, 2026)
 
 ### Summary
 
-**IMPLEMENTED: UniSkip SECOND_GROUP evaluation**
+**BREAKTHROUGH: Sumcheck polynomials match EXACTLY!**
 
-Changes made:
-1. Added `evaluateAzBzAtDomainPointForGroup` to handle both constraint groups
-2. Added `buildEqTable` helper for factored E_out * E_in computation
-3. Updated `computeFirstRoundPoly` to properly iterate over both groups
-4. Added `full_tau` field to store complete tau vector for UniSkip
+After fixing the batching coefficient (was incorrectly masked to 125 bits), all 11 sumcheck
+rounds now produce identical polynomials and challenges between Zolt and Jolt:
+- c0, c2, c3 coefficients: MATCH byte-for-byte
+- Challenges: MATCH
+- Output claim: MATCH (`7379936223227643720496096556404058095654400826692293621824406143059361739906`)
 
-**STILL FAILING: Sumcheck verification mismatch**
+**NEW ISSUE: Opening claims (r1cs_input_evals) don't match**
 
-Despite fixing the SECOND_GROUP handling, verification still fails with:
-- output_claim: 3156099394088378331739429618582031493604140997965859776862374574205175751175
-- expected_output_claim: 6520563849248945342410334176740245598125896542821607373002483479060307387386
-
-### Root Cause Investigation Continues
-
-The key issue is that the output_claim from the prover sumcheck doesn't match what the verifier expects.
 The verifier computes:
 ```
-expected_output_claim = inner_sum_prod * eq_eval * lagrange_tau_r0
+expected_output_claim = lagrange_tau_r0 * tau_bound_r_tail * inner_sum_prod
 ```
 
-Possible remaining issues:
-1. First round polynomial coefficients may be wrong despite group handling
-2. Lagrange kernel L(tau_high, Y) multiplication may differ from Jolt
-3. Polynomial evaluation or coefficient ordering in the proof
+Where `inner_sum_prod` is computed from `r1cs_input_evals` using the preprocessing key.
+
+Values:
+- Zolt r1cs_input_evals[0]: `5231928340169930126114200659211794492272793854802256682327597965133309506589`
+- Jolt r1cs_input_evals[0]: `13323732181978876592732594325445545041189112629920616992481060020772236071179`
+
+### Root Cause
+
+The opening claims are computed by evaluating the R1CS witness MLEs at the challenge point `r_cycle`.
+Zolt generates witnesses from `TraceStep` via `fromTraceStep()`, while Jolt generates from its
+internal `Cycle` structure with different semantics.
+
+The sumcheck itself is CORRECT (prover polynomials match). The issue is the CLAIMS about what
+value the witness polynomials have at the challenge point.
+
+### Key Files
+
+- `src/zkvm/r1cs/constraints.zig:fromTraceStep` - Witness generation
+- `src/zkvm/r1cs/evaluation.zig:computeClaimedInputs` - MLE evaluation
+- Jolt: `src/zkvm/r1cs/evaluation.rs:compute_claimed_inputs`
+
+---
+
+## Previous Status (Session 58 - January 6, 2026)
+
+**IMPLEMENTED: UniSkip SECOND_GROUP evaluation**
+
+UniSkip now passes domain sum check. The remaining sumcheck was failing due to batching coefficient bug.
 
 ### Previous Status (Session 57)
 

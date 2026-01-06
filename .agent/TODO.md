@@ -1,41 +1,67 @@
 # Zolt-Jolt Compatibility TODO
 
-## Current Status: Session 58 - January 6, 2026
+## Current Status: Session 59 - January 6, 2026
 
-**STATUS: UniSkip polynomial passes domain sum check! Now debugging remaining sumcheck rounds.**
+**STATUS: Sumcheck polynomials match perfectly! Opening claims mismatch.**
 
-### Changes Completed
+### Key Finding
 
-1. ✅ Added `evaluateAzBzAtDomainPointForGroup` with group parameter
-2. ✅ Added `buildEqTable` helper for factored E_out * E_in computation
-3. ✅ Updated `computeFirstRoundPoly` to iterate over both groups
-4. ✅ Added `full_tau` field to store tau for UniSkip
-5. ✅ Fixed eq_table structure to use factored E_out * E_in (dropping tau_high)
-6. ✅ Updated `proof_converter.zig` to use `StreamingOuterProver`
-7. ✅ **Restructured UniSkip to compute 9 extended_evals at target points only**
-8. ✅ **UniSkip polynomial now passes domain sum check!**
+The entire sumcheck (UniSkip + remaining 11 rounds) produces IDENTICAL polynomials and challenges:
+- All 11 rounds: c0, c2, c3 coefficients match byte-for-byte
+- All challenges match
+- Output claim matches: `7379936223227643720496096556404058095654400826692293621824406143059361739906`
+- But expected_output_claim differs: `18262841792610895119506382142558123804551187240428090173583850498893311403655`
 
-### Current Debug State
+The verifier's expected_output_claim = `lagrange_tau_r0 * tau_bound_r_tail * inner_sum_prod`
 
-**UniSkip PASSES!** The domain sum check now passes. The remaining sumcheck rounds fail:
+### Root Cause Analysis
 
-```
-output_claim:          12640140186890871835397399826551813568033071071342265234934089331959908111894
-expected_output_claim: 1227477921082322617298641147962849807051365419641170255596401662086293721633
-```
+- `lagrange_tau_r0` matches ✓
+- `tau_bound_r_tail` matches (since challenges match) ✓
+- `inner_sum_prod` does NOT match!
 
-The issue is now in the remaining sumcheck rounds after UniSkip (rounds 1-11).
+The verifier computes `inner_sum_prod` from `r1cs_input_evals` (the opening claims):
+- Zolt r1cs_input_evals[0]: `5231928340169930126114200659211794492272793854802256682327597965133309506589`
+- Jolt r1cs_input_evals[0]: `13323732181978876592732594325445545041189112629920616992481060020772236071179`
 
-### Previous Issue (NOW FIXED)
+The opening claims don't match because Zolt generates R1CS witnesses from `TraceStep` while
+Jolt generates them from its internal `Cycle` structure with different semantics.
 
-UniSkip was computing extended_evals at ALL 19 domain points instead of 9 target points.
-This has been fixed. The UniSkip polynomial now passes domain sum verification.
+### Changes Completed This Session
+
+1. ✅ Fixed batching coefficient - removed incorrect 125-bit masking
+2. ✅ Verified all sumcheck coefficients match byte-for-byte
+3. ✅ Verified all challenges match
+
+### Previous Fixes
+
+- ✅ UniSkip polynomial passes domain sum check
+- ✅ Remaining sumcheck rounds produce correct polynomials
+- ✅ Batching coefficient now matches (was masked to 125 bits incorrectly)
 
 ### Next Steps
 
-1. Debug why the remaining sumcheck rounds fail after UniSkip
-2. Check if uni_skip_claim is computed correctly from polynomial evaluation at r0
-3. Verify the streaming rounds are using correct eq and Az/Bz values
+1. **Fix R1CS witness generation** - The `fromTraceStep` function needs to match Jolt's witness semantics
+2. **Verify witness values match** - Add debug output to compare cycle_witnesses[0] with Jolt's values
+3. **Consider trace format compatibility** - Zolt's TraceStep may not contain all fields Jolt expects
+
+---
+
+## Technical Details
+
+### Verification Flow
+
+```
+1. Prover generates sumcheck proof (polynomials) - CORRECT ✓
+2. Prover generates opening claims (r1cs_input_evals) - MISMATCH ✗
+3. Verifier uses opening claims to compute expected_output_claim - FAILS
+```
+
+### Files Involved
+
+- `src/zkvm/r1cs/constraints.zig:fromTraceStep` - Generates R1CS witnesses
+- `src/zkvm/r1cs/evaluation.zig:computeClaimedInputs` - Computes MLE at r_cycle
+- `src/zkvm/proof_converter.zig:addSpartanOuterOpeningClaimsWithEvaluations` - Serializes claims
 
 ---
 
@@ -53,40 +79,8 @@ cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture
 
 ---
 
-## Key Jolt Reference for UniSkip Verification
+## Previous Sessions Summary
 
-From `jolt-core/src/poly/unipoly.rs:327-338`:
-```rust
-pub fn check_sum_evals<const N: usize, const OUT_LEN: usize>(&self, claim: F) -> bool {
-    debug_assert_eq!(self.degree() + 1, OUT_LEN);
-    let power_sums = LagrangeHelper::power_sums::<N, OUT_LEN>();
-
-    // Check domain sum Σ_j a_j * S_j == claim
-    let mut sum = F::zero();
-    for (j, coeff) in self.coeffs.iter().enumerate() {
-        sum += coeff.mul_i128(power_sums[j]);
-    }
-    sum == claim
-}
-```
-
-For Stage 1 outer:
-- N = OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE = 10
-- OUT_LEN = OUTER_FIRST_ROUND_POLY_NUM_COEFFS = 28
-- claim = F::zero()
-
-The power_sums[j] = Σ_i (base_left + i)^j for i ∈ {0, ..., N-1} where base_left = -4
-
----
-
-## Previous Sessions
-
-### Session 57 - SECOND_GROUP Fix Identified
-
-Identified that `computeFirstRoundPoly` only evaluated FIRST_GROUP, missing SECOND_GROUP constraints.
-
-### Sessions 51-56 - Various Fixes
-
-- Batching coefficient Montgomery form fix
-- Round offset fix
-- Transcript flow matching
+- Session 58: UniSkip passes domain sum check
+- Session 57: Identified SECOND_GROUP missing from UniSkip
+- Sessions 51-56: Various fixes (batching, round offset, transcript)

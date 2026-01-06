@@ -570,6 +570,14 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 extended_evals[domain_idx] = sum;
             }
 
+            // DEBUG: Print some of the extended_evals
+            std.debug.print("[ZOLT UNISKIP] full_tau.len = {}, m = {}\n", .{ self.full_tau.len, m });
+            std.debug.print("[ZOLT UNISKIP] num_x_out_bits = {}, num_x_in_bits = {}, num_x_in_prime_bits = {}\n", .{ num_x_out_bits, num_x_in_bits, num_x_in_prime_bits });
+            std.debug.print("[ZOLT UNISKIP] E_out.len = {}, E_in.len = {}\n", .{ E_out.len, E_in.len });
+            std.debug.print("[ZOLT UNISKIP] extended_evals[0] = {any}\n", .{extended_evals[0].toBytesBE()});
+            std.debug.print("[ZOLT UNISKIP] extended_evals[9] = {any}\n", .{extended_evals[9].toBytesBE()}); // Y=0
+            std.debug.print("[ZOLT UNISKIP] extended_evals[18] = {any}\n", .{extended_evals[18].toBytesBE()});
+
             // Multiply by Lagrange kernel and interpolate to get coefficients
             return self.interpolateFirstRoundPoly(&extended_evals);
         }
@@ -642,8 +650,8 @@ pub fn StreamingOuterProver(comptime F: type) type {
             // Base window:
             // - FIRST_GROUP (10 constraints): {-4, -3, -2, -1, 0, 1, 2, 3, 4, 5}
             // - SECOND_GROUP (9 constraints): {-4, -3, -2, -1, 0, 1, 2, 3, 4}
-            const base_left: i64 = -@as(i64, (group_size - 1) / 2);
-            const base_right: i64 = base_left + @as(i64, group_size) - 1;
+            const base_left: i64 = -@as(i64, @intCast((group_size - 1) / 2));
+            const base_right: i64 = base_left + @as(i64, @intCast(group_size)) - 1;
 
             // Check if Y is in the base window for this group
             if (y_coord >= base_left and y_coord <= base_right) {

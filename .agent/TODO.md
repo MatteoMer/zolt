@@ -1,19 +1,26 @@
 # Zolt-Jolt Compatibility TODO
 
-## Current Status: Session 57 - January 6, 2026
+## Current Status: Session 58 - January 6, 2026
 
-**STATUS: ROOT CAUSE CONFIRMED - UniSkip missing SECOND_GROUP evaluation**
+**STATUS: SECOND_GROUP implemented, still debugging verification mismatch**
 
-### Root Cause
+### Changes Made
 
-**Zolt's UniSkip (`computeFirstRoundPoly`) only evaluates FIRST_GROUP constraints, but Jolt evaluates BOTH groups.**
+1. Added `evaluateAzBzAtDomainPointForGroup` with group parameter
+2. Added `buildEqTable` helper for factored E_out * E_in computation
+3. Updated `computeFirstRoundPoly` to iterate over both groups
+4. Added `full_tau` field to store tau for UniSkip
+5. Fixed eq_table structure to use factored E_out * E_in (dropping tau_high)
 
-Evidence from debug output at ROUND 1:
-```
-t_prime[1] = { 43, 88, 180, 151, ... }  (from az_poly which has both groups)
-q(1) from GRUEN = { 36, 193, 206, 150, ... }  (derived from uni_skip_claim)
-```
-These don't match! The Gruen constraint `uni_skip_claim = l(0)*t_prime[0] + l(1)*t_prime[1]` fails.
+### Still Failing
+
+Sumcheck verification still fails:
+- output_claim: 3156099394088378331739429618582031493604140997965859776862374574205175751175
+- expected_output_claim: 6520563849248945342410334176740245598125896542821607373002483479060307387386
+
+### Previous Root Cause (Session 57)
+
+**Zolt's UniSkip (`computeFirstRoundPoly`) only evaluated FIRST_GROUP constraints, but Jolt evaluates BOTH groups.**
 
 ### The Inconsistency
 

@@ -875,42 +875,42 @@ pub fn ProofConverter(comptime F: type) type {
 
             const NUM_COEFFS = r1cs.OUTER_FIRST_ROUND_POLY_NUM_COEFFS;
 
-            // Extract tau_low (all but the last element) and tau_high
-            // tau_high is used for the Lagrange kernel L(τ_high, Y)
-            // tau_low is used for the eq polynomial in t1(Y)
             if (tau.len < 2) {
                 return self.createUniSkipProofStage1();
             }
-            const tau_low = tau[0 .. tau.len - 1];
 
-            // Compute eq polynomial evaluations at tau_low (NOT full tau!)
-            // This ensures τ_high is only counted once via L(τ_high, Y)
-            var eq_poly = try poly_mod.EqPolynomial(F).init(self.allocator, tau_low);
-            defer eq_poly.deinit();
-            const eq_evals = try eq_poly.evals(self.allocator);
-            defer self.allocator.free(eq_evals);
-
-            // Use the Spartan outer prover to compute the first-round polynomial
-            // Pass full tau so it can extract tau_high for L(τ_high, Y)
-            var outer_prover = try spartan_outer.SpartanOuterProver(F).initFromWitnesses(
+            // Use the StreamingOuterProver which properly handles both FIRST_GROUP
+            // and SECOND_GROUP constraints in the UniSkip computation.
+            //
+            // Key differences from the old SpartanOuterProver:
+            // 1. Uses full_tau for UniSkip eq computation (dropping tau_high internally)
+            // 2. Iterates over both constraint groups (not just FIRST_GROUP)
+            // 3. Properly handles the cycle/group interleaving
+            //
+            // The StreamingOuterProver.initWithScaling takes:
+            // - cycle_witnesses: actual witness values per cycle
+            // - tau: FULL tau vector (num_cycle_vars + 2 elements)
+            // - lagrange_tau_r0: Lagrange kernel L(tau_high, r0) - but for UniSkip we use null
+            //   because the Lagrange kernel multiplication is done in interpolateFirstRoundPoly
+            var outer_prover = try streaming_outer.StreamingOuterProver(F).initWithScaling(
                 self.allocator,
                 cycle_witnesses,
-                eq_evals,
                 tau,
+                null, // No scaling for initial UniSkip - will be applied in interpolation
             );
             defer outer_prover.deinit();
 
-            // Compute the univariate skip polynomial
-            var uni_poly = try outer_prover.computeUniskipFirstRoundPoly();
-            defer uni_poly.deinit();
+            // Compute the univariate skip polynomial using the fixed implementation
+            // that properly handles both constraint groups
+            const uni_poly_coeffs = try outer_prover.computeFirstRoundPoly();
 
             // Copy coefficients to our proof structure
             const coeffs = try self.allocator.alloc(F, NUM_COEFFS);
             @memset(coeffs, F.zero());
 
             // Copy available coefficients (may be fewer than NUM_COEFFS)
-            const copy_len = @min(uni_poly.coeffs.len, NUM_COEFFS);
-            @memcpy(coeffs[0..copy_len], uni_poly.coeffs[0..copy_len]);
+            const copy_len = @min(uni_poly_coeffs.len, NUM_COEFFS);
+            @memcpy(coeffs[0..copy_len], uni_poly_coeffs[0..copy_len]);
 
             return UniSkipFirstRoundProof(F){
                 .uni_poly = coeffs,

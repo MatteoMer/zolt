@@ -2,44 +2,64 @@
 
 ## Current Status: January 6, 2026 - Session 61
 
-**STATUS: All 712 Zolt tests pass, but Jolt verification fails**
+**STATUS: Transcript and serialization working, inner_sum_prod mismatch persists**
 
 ### Summary
 
-The core algorithms are correct (all unit tests pass), but when running with real execution data, the verification fails because `expected_output_claim` doesn't match `output_claim`.
+All unit tests pass (712/712). The transcript, challenges, and serialization are all correct. The issue is that Jolt's `inner_sum_prod` (computed from R1CS constraints and opening claims) differs from what Zolt's sumcheck produces.
 
-### Key Findings
+### Key Insight
 
-1. **All 712 Zolt tests pass** - Including the cross-verification test
-2. **Opening claims serialize correctly** - Bytes in proof match what Jolt reads
-3. **R1CS constraint order matches** - FIRST/SECOND_GROUP_INDICES match Jolt
-4. **Transcript compatibility verified** - All states and challenges match
-5. **Tau factor matches** - `lagrange_tau_r0` is identical
+The verification formula is:
+```
+expected = tau_factor * inner_sum_prod
+        = tau_factor * (Sum(w[i] * Az_i(z)) * Sum(w[i] * Bz_i(z)))
+```
 
-### The Remaining Issue
+Where:
+- `tau_factor` MATCHES between Zolt and Jolt ✓
+- `z` (opening claims) are correct in proof ✓
+- But `inner_sum_prod` differs
 
-When running the real proof:
-- Zolt output_claim: `6773516909001919453588788632964349915676722363381828976724283873891965463518`
-- Jolt expected: `2434835346226335308248403617389563027378536009995292689449902135365447362920`
+This means either:
+1. The constraint definitions differ subtly
+2. The dot product computation differs
+3. There's a witness value difference in the trace
 
-From the tests, we know:
-- `tau_factor = tau_high_bound_r0 * tau_bound_r_tail_reversed` matches
-- `Az/Bz MLE` computations work correctly in unit tests
-- `inner_sum_prod` from prover should match verifier's
+### Verified Working
 
-### Potential Root Causes
+1. **Transcript compatibility** - All states match
+2. **Tau values** - `lagrange_tau_r0` matches exactly
+3. **Opening claims** - Bytes match what Jolt reads
+4. **R1CS constraint order** - FIRST/SECOND_GROUP_INDICES match
 
-1. **Witness generation** - The real `fromTraceStep` may produce different values than Jolt
-2. **Cycle indexing** - How cycles map to MLE indices in real execution
-3. **Padding** - How trace padding is handled in real execution
-4. **Integration bug** - Something in `proof_converter.zig` doesn't match the tested paths
+### Investigation Needed
 
-### Next Steps for Future Sessions
+1. **Compare constraint dot products**: Print the `lc.dot_product(z)` values from both sides
+2. **Compare witness values**: For the same trace, compare Zolt's and Jolt's R1CSCycleInputs
+3. **Instruction input computation**: Verify `to_instruction_inputs` logic matches
+4. **Signed integer handling**: Check Product computation for signed operands
 
-1. **Add debug output in real proof generation** to print Az/Bz values for first few cycles
-2. **Compare witness values** between Zolt's trace and Jolt's trace for same program
-3. **Check trace padding** - ensure padding zeros are in the right places
-4. **Verify cycle count** - ensure num_cycles matches between prover and verifier
+### Key Files
+
+- `/Users/matteo/projects/zolt/src/zkvm/r1cs/constraints.zig` - Zolt's witness generation
+- `/Users/matteo/projects/jolt/jolt-core/src/zkvm/r1cs/inputs.rs` - Jolt's witness generation
+- `/Users/matteo/projects/jolt/jolt-core/src/zkvm/instruction/add.rs` - Example instruction inputs
+
+### Technical Details
+
+**Jolt's inner_sum_prod computation (from key.rs):**
+```rust
+for i in 0..R1CS_CONSTRAINTS_FIRST_GROUP.len() {
+    let lc_a = &R1CS_CONSTRAINTS_FIRST_GROUP[i].cons.a;
+    let lc_b = &R1CS_CONSTRAINTS_FIRST_GROUP[i].cons.b;
+    az_g0 += w[i] * lc_a.dot_product::<F>(&z, z_const_col);
+    bz_g0 += w[i] * lc_b.dot_product::<F>(&z, z_const_col);
+}
+// Final: (az_g0 * (1-r_stream) + az_g1 * r_stream) * (bz_g0 * (1-r_stream) + bz_g1 * r_stream)
+```
+
+**Note:** `z_const_col = 36` means z has 37 elements (36 inputs + 1 constant column).
 
 ### Test Commands
 
@@ -48,15 +68,16 @@ From the tests, we know:
 zig build test
 
 # Generate real proof
-./zig-out/bin/zolt prove /tmp/jolt-guest-targets/fibonacci-guest-fib/riscv64imac-unknown-none-elf/release/fibonacci-guest --jolt-format --input-hex 32 --export-preprocessing /tmp/zolt_preprocessing.bin -o /tmp/zolt_proof_dory.bin
+./zig-out/bin/zolt prove /tmp/jolt-guest-targets/fibonacci-guest-fib/riscv64imac-unknown-none-elf/release/fibonacci-guest --jolt-format --input-hex 32 -o /tmp/zolt_proof_dory.bin
 
 # Jolt verification (fails)
 cd /Users/matteo/projects/jolt
 cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture
 ```
 
-### Files to Investigate
+### Next Session Actions
 
-1. `/Users/matteo/projects/zolt/src/zkvm/r1cs/constraints.zig` - `fromTraceStep` witness generation
-2. `/Users/matteo/projects/zolt/src/zkvm/proof_converter.zig` - Integration of components
-3. `/Users/matteo/projects/jolt/jolt-core/src/zkvm/r1cs/inputs.rs` - Jolt's `from_trace` for comparison
+1. Add debug in Jolt's `evaluate_inner_sum_product_at_point` to print per-constraint Az, Bz values
+2. Add debug in Zolt's sumcheck to print per-constraint Az, Bz values for first cycle
+3. Compare the values - find which constraint differs first
+4. Trace back to the witness generation difference

@@ -34,6 +34,7 @@ const field_mod = @import("../field/mod.zig");
 const r1cs = @import("r1cs/mod.zig");
 const spartan_outer = @import("spartan/outer.zig");
 const streaming_outer = @import("spartan/streaming_outer.zig");
+const product_remainder = @import("spartan/product_remainder.zig");
 const transcripts = @import("../transcripts/mod.zig");
 const Blake2bTranscript = transcripts.Blake2bTranscript;
 const poly_mod = @import("../poly/mod.zig");

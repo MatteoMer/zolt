@@ -804,6 +804,17 @@ pub fn ProofConverter(comptime F: type) type {
                 std.debug.print("[ZOLT] OPENING_CLAIMS: r_cycle[0] = {any}\n", .{r_cycle[0].toBytes()});
                 std.debug.print("[ZOLT] OPENING_CLAIMS: r_cycle[last] = {any}\n", .{r_cycle[r_cycle.len - 1].toBytes()});
             }
+            // Print first few witness values
+            if (cycle_witnesses.len > 0) {
+                std.debug.print("[ZOLT] OPENING_CLAIMS: witness[0].LeftInstructionInput = {any}\n", .{cycle_witnesses[0].values[0].toBytes()});
+                std.debug.print("[ZOLT] OPENING_CLAIMS: witness[0].RightInstructionInput = {any}\n", .{cycle_witnesses[0].values[1].toBytes()});
+                std.debug.print("[ZOLT] OPENING_CLAIMS: witness[0].Product = {any}\n", .{cycle_witnesses[0].values[2].toBytes()});
+                std.debug.print("[ZOLT] OPENING_CLAIMS: witness[0].PC = {any}\n", .{cycle_witnesses[0].values[6].toBytes()});
+            }
+            if (cycle_witnesses.len > 1) {
+                std.debug.print("[ZOLT] OPENING_CLAIMS: witness[1].LeftInstructionInput = {any}\n", .{cycle_witnesses[1].values[0].toBytes()});
+                std.debug.print("[ZOLT] OPENING_CLAIMS: witness[1].PC = {any}\n", .{cycle_witnesses[1].values[6].toBytes()});
+            }
             std.debug.print("[ZOLT] OPENING_CLAIMS: r1cs_input_evals[0] (LeftInstructionInput) = {any}\n", .{input_evals[0].toBytes()});
             std.debug.print("[ZOLT] OPENING_CLAIMS: r1cs_input_evals[1] (RightInstructionInput) = {any}\n", .{input_evals[1].toBytes()});
             std.debug.print("[ZOLT] OPENING_CLAIMS: r1cs_input_evals[2] (Product) = {any}\n", .{input_evals[2].toBytes()});

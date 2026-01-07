@@ -1,95 +1,66 @@
 # Zolt-Jolt Cross-Verification Progress
 
-## Session 16 Summary
+## Session 18 Summary
 
-### Achievements
-1. **RAF Prover Integrated** - Instance 1 now produces proper cubic [s(0), s(1), s(2), s(3)] output
-2. **Instance Timing Analysis** - Documented when each instance becomes active
-3. **Memory Trace Propagation** - Added memory_trace to ConversionConfig
+### Major Progress
+1. **All opening claims verified to match exactly**
+   - l_inst, r_inst, is_rd_not_zero, next_is_noop ✅
+   - fused_left, fused_right ✅
+   - ra_claim, val_claim, inc_claim ✅
 
-### Critical Discovery: Instance 2 Starts at Round 0!
+2. **Instance 0 (ProductVirtual) final claim matches** - Sumcheck produces correct result
 
-The batched sumcheck instance timing is:
-- Instance 0 (ProductVirtualRemainder): 10 rounds → starts at round 16
-- Instance 1 (RamRafEvaluation): 16 rounds → starts at round 10 ✅
-- **Instance 2 (RamReadWriteChecking): 26 rounds → starts at round 0!** ❌
-- Instance 3 (OutputSumcheck): 16 rounds → starts at round 10 ✅
-- Instance 4 (InstructionLookupsClaimReduction): 10 rounds → starts at round 16
+3. **Stage 1 passes completely** - All 712 internal tests pass
 
-**This means Instance 2 is the BLOCKER** - it has a non-zero input claim from the very first round, but our fallback produces incorrect polynomials.
+### Remaining Issue: Instance 2 (RWC)
 
-## RamReadWriteChecking Architecture (from Jolt)
+Despite all opening claims matching, the RWC sumcheck produces a different final claim.
 
-This is the most complex prover in Stage 2 - a 3-phase sparse matrix sumcheck:
+**Numbers:**
+- Our RWC final claim: 17925181248966282971112807010799772681208014801023116248823233609842789352688
+- Jolt expected claim: 11216823976254905917561036500968546773134980482196871908475958474138871482864
+- Ratio: ~1.6x (ours is larger)
 
-### Phase 1: Cycle-Major (Rounds 0 to log_T-1)
-- Entries sorted by (cycle, address)
-- Uses Gruen split-eq optimization
-- Binds cycle variables
+### Root Cause Analysis
 
-### Phase 2: Address-Major (Rounds log_T to log_T+log_K-1)
-- Re-sorts entries by (address, cycle)
-- Binds address variables
-- More efficient for address dimension
-
-### Phase 3: Dense (Remaining rounds if any)
-- Materializes to dense polynomials
-- Standard sumcheck
-
-### The Polynomial Being Proved
+The expected formula is:
 ```
-Σ_{k,j} eq(r_cycle, j) * ra(k,j) * (Val(k,j) + γ*(Val(k,j) + inc(j))) = rv_claim + γ*wv_claim
+final_claim = eq(r_cycle_params, r_cycle_sumcheck) * ra(opening_point) * (val + γ*(val + inc))
 ```
 
-Where:
-- k indexes addresses [0, K)
-- j indexes cycles [0, T)
-- ra(k,j) = 1 if address k accessed at cycle j
-- Val(k,j) = memory value at address k before cycle j
-- inc(j) = value increment at cycle j (write_val - read_val, or 0 for reads)
+Our sumcheck produces a different value because our eq polynomial handling is incorrect.
 
-## Implementation Status
+### Jolt's RWC Implementation (from expert analysis)
 
-| Instance | Prover | Status | Notes |
-|----------|--------|--------|-------|
-| 0 | ProductVirtualRemainder | ✅ | Working |
-| 1 | RafEvaluationProver | ✅ | Integrated this session |
-| 2 | RamReadWriteChecking | ❌ | **BLOCKER** - complex 3-phase prover |
-| 3 | OutputSumcheckProver | ✅ | Working |
-| 4 | InstructionLookupsClaimReduction | ❌ | Needs implementation |
+1. **Phase 1**: Uses `GruenSplitEqPolynomial` with E_out/E_in tables
+2. **Phase 2**: Uses `merged_eq` after Phase 1 completes
+3. `current_scalar` accumulates eq(w[i], r) as variables are bound
 
-## Key Files Modified This Session
+Key: The Gruen structure progressively reduces tables as challenges bind. Our simple `eq_evals[]` array doesn't properly account for binding.
 
-- `src/zkvm/proof_converter.zig` - RAF prover integration
-- `src/zkvm/ram/raf_checking.zig` - Added `computeRoundPolynomialCubic()`
-- `src/zkvm/mod.zig` - Pass memory_trace through config
-- `src/zkvm/prover.zig` - Updated RAF prover API usage
+### What We Tried
 
-## Test Commands
-```bash
-# Generate Zolt proof
-./zig-out/bin/zolt prove --jolt-format -o /tmp/zolt_proof_dory.bin examples/fibonacci.elf
+1. Recompute eq on-the-fly using bound challenges + params.r_cycle - Still wrong
+2. Simplified to use precomputed eq_evals directly - Same result
+3. Updated Phase 2 to compute eq_cycle properly - No change
 
-# Test with Jolt
-cd /Users/matteo/projects/jolt/jolt-core
-cargo test test_verify_zolt_proof -- --ignored --nocapture
-```
+### Technical Insight
 
-## Next Session Priority
+When binding challenge r at round i, the eq polynomial folds:
+- Original: eq(w, x) over all x ∈ {0,1}^n
+- After bind: eq(w', x') over x' ∈ {0,1}^{n-1}
+where the contribution from variable i is absorbed into a scalar.
 
-1. **Implement RamReadWriteCheckingProver** - This is the critical blocker
-   - Need sparse matrix construction from memory trace
-   - Phase transitions (cycle→address major)
-   - Gruen's split-eq optimization
-   - ~500 lines of code
+Our implementation doesn't properly track this folding.
 
-2. **Implement InstructionLookupsClaimReductionProver** - Secondary
-   - 2-phase prover
-   - Simpler than RAM checking
-   - ~200 lines of code
+### Next Steps
+
+1. Study Jolt's GruenSplitEqPolynomial::bind() more carefully
+2. Implement proper eq folding in our RWC prover
+3. Consider adding per-round debugging to compare with Jolt
 
 ## Technical References
 
 - Jolt RAM checking: `jolt-core/src/zkvm/ram/read_write_checking.rs`
 - Gruen optimization: `jolt-core/src/poly/split_eq_poly.rs`
-- Sparse matrix: `jolt-core/src/subprotocols/read_write_matrix/`
+- Our RWC prover: `src/zkvm/ram/read_write_checking.zig`

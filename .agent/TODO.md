@@ -5,72 +5,57 @@
 - Stage 2: FAILING ❌ (sumcheck output_claim mismatch)
 - Stage 3+: Not reached yet
 
-## Current Issue
-Stage 2 sumcheck output_claim doesn't match expected_output_claim:
-- `output_claim`: 7092315906761387499155192332297668483214634895487230792733107015466920310794
-- `expected_output_claim`: 11535186225949250426807989625067498736367003469117527002588759500768361489976
+## CRITICAL FINDING (Session 5)
 
-## Root Cause Analysis
+The ProductVirtualRemainder round 0 values are **completely different** between Zolt prover and a separate Jolt prover run:
 
-The sumcheck verification fails because the prover's `output_claim` doesn't match the verifier's `expected_output_claim`.
+**Jolt (LE first 8 bytes):**
+- t0 = b9 40 9a c7 e0 4b e9 a7
+- t_inf = 4a d3 0c 19 c0 9d 72 8f
+- claim = 3f 5a 2a 38 c3 d0 6c be
 
-### Expected Output Claim Formula (Jolt Verifier)
-```
-expected = L(τ_high, r0) * Eq(τ_low, r_tail_reversed) * fused_left * fused_right
-```
+**Zolt (LE last 8 bytes of BE):**
+- t0 = 63 69 06 26 07 42 54 07
+- t_inf = 93 ba a2 28 94 e0 5c c5
+- claim = 60 f7 55 cd 48 ef c9 c3
 
-The factor claims (fused_left/fused_right components) are appended to the transcript. The verifier reads these and computes expected_output_claim.
+**Important Note**: This comparison was between Jolt's fibonacci example (using Jolt SDK) and Zolt's fibonacci.elf. These are DIFFERENT PROGRAMS with different traces, so different values are expected.
 
-### Verified Components
+The actual issue is that when Jolt verifies a Zolt-generated proof, the values computed from the proof don't match what the verifier expects.
+
+## Root Cause Hypothesis
+
+The previous_claim for ProductVirtualRemainder round 0 should be the UniSkip output from Stage 2. If this value differs, all subsequent computations will differ.
+
+Possible causes:
+1. UniSkip computation uses different challenges or r0 values
+2. Tau values (from Stage 1) differ between what Zolt computes vs what Jolt expects
+3. The left/right polynomials are constructed from different trace data
+4. The fused polynomial values at each cycle don't match
+
+## Verified Components
 1. ✅ EqPolynomial.evals produces correct partition of unity (sum = 1)
 2. ✅ Witness values are populated from trace correctly
 3. ✅ Gruen polynomial computation matches Jolt's formula
-4. ✅ Challenges are reversed correctly for BIG_ENDIAN indexing
-5. ✅ Batched sumcheck structure follows Jolt's pattern
-
-### Suspected Issues
-1. **Factor claims differ** - Zolt's factor evaluations don't match Jolt's transcript bytes
-   - Zolt: `{ 4, 112, 107, ...}` (BE)
-   - Jolt: `[05, f8, e7, ...]` (LE first 8 bytes)
-   - These represent different field element values
-
-2. **Possible causes**:
-   - Witness values differ from Jolt's trace values
-   - Eq polynomial evaluation uses different indexing
-   - Challenge ordering differs subtly
-
-## Recent Session Findings
-
-### Session 5
-- Fixed EqPolynomial.evals to match Jolt's rev().step_by(2) iteration
-- Fixed computeRoundPolynomial to use interleaved format
-- Added debug output for eq_evals and witness values
-- **Finding**: eq_sum = 1 (partition of unity correct)
-- **Finding**: witness[0][LeftInstructionInput] = 0 (correct for LUI instruction)
+4. ✅ Stage 1 passes (bytecode, R1CS compatible)
 
 ## Key Files
 - `src/zkvm/proof_converter.zig` - Stage 2 batched sumcheck generation
 - `src/zkvm/spartan/product_remainder.zig` - ProductVirtualRemainder prover
-- `src/poly/split_eq.zig` - Gruen polynomial and eq tables
-- `src/poly/mod.zig` - EqPolynomial implementation
-- `src/zkvm/r1cs/constraints.zig` - Witness generation from trace
+
+## Next Steps
+1. **Compare Stage 2 input_claim** - the UniSkip claim that starts ProductVirtualRemainder
+2. **Compare tau values** - the challenges used for split_eq
+3. **Compare left[0]/right[0]** - first values of fused polynomials
+4. **Trace exact byte values** during Jolt verification to see what Jolt expects vs what Zolt provides
 
 ## Debug Commands
 ```bash
-# Build and test
-zig build test --summary all
-
-# Generate proof with debug output
+# Build and generate proof
 zig build -Doptimize=ReleaseFast
-./zig-out/bin/zolt prove --jolt-format -o /tmp/proof.bin examples/fibonacci.elf 2>&1 | grep -E "FACTOR_EVALS|GRUEN"
+./zig-out/bin/zolt prove --jolt-format -o /tmp/proof.bin examples/fibonacci.elf 2>&1 | grep -E "PRODUCT round"
 
 # Test with Jolt
 cd /Users/matteo/projects/jolt
 cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture 2>&1 | tail -100
 ```
-
-## Next Steps
-1. Add debug output to Jolt's `compute_claimed_factors` to print eq_one[0..2], eq_two[0..2], and trace values
-2. Compare exact field element values between Zolt and Jolt
-3. Check if RightInstructionInput uses signed vs unsigned representation correctly
-4. Verify the first few challenges match between Zolt and Jolt transcripts

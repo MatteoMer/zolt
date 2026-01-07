@@ -1,75 +1,70 @@
 # Zolt-Jolt Cross-Verification Progress
 
-## Session 15 Summary
+## Session 15 Final Summary
 
-### Root Cause Analysis: Stage 2 Failure
+### Achievements
+1. **Stage 2 UniSkip Fixed** - All 13 polynomial coefficients match between Zolt and Jolt
+2. **Transcript Alignment** - Stage 2 r0 = `8768758914789955585787902790032491769856779696899125603611137465800193155946` matches
+3. **Stage 1 Verified** - Passes Jolt verification completely
 
-The Stage 2 batched sumcheck fails at Jolt verification. After extensive debugging:
+### Remaining Work: Stage 2 Batched Sumcheck Provers
 
-#### 1. r0 Mismatch
-- Zolt r0: `8768758914789955585787902790032491769856779696899125603611137465800193155946`
-- Jolt r0: `16176819525807790011525369806787798080841445107270164702191186390206256879646`
+The Stage 2 batched sumcheck has 5 instances. Only 2 have proper provers:
 
-r0 is derived from the transcript after the Stage 2 UniSkip first round polynomial is appended.
+| Instance | Name | Rounds | Implementation Status |
+|----------|------|--------|----------------------|
+| 0 | ProductVirtualRemainder | 10 | ✅ Implemented |
+| 1 | RamRafEvaluation | 16 | ❌ Zero fallback |
+| 2 | RamReadWriteChecking | 26 | ❌ Zero fallback |
+| 3 | OutputSumcheck | 16 | ✅ Implemented |
+| 4 | InstructionLookupsClaimReduction | 10 | ❌ Zero fallback |
 
-#### 2. Sumcheck Claim Errors
-Starting at round 23, the sumcheck constraint `s(0)+s(1) != old_claim` fails.
+### Instance Details
 
-#### 3. Missing Provers
-The batched sumcheck has 5 instances:
-- Instance 0: ProductVirtualRemainder - **implemented**
-- Instance 1: RamRafEvaluation - **uses zero fallback**
-- Instance 2: RamReadWriteChecking - **uses zero fallback**
-- Instance 3: OutputSumcheck - **implemented**
-- Instance 4: InstructionLookupsClaimReduction - **uses zero fallback**
+#### Instance 1: RamRafEvaluation
+- Evaluates `eq(r_address, x)` for RAM access validation
+- Input claim: RamAddress opening from SpartanOuter
+- Reference: `jolt-core/src/zkvm/ram/raf_evaluation.rs`
 
-### What MATCHES Between Zolt and Jolt
+#### Instance 2: RamReadWriteChecking
+- Most complex - 3 phases
+- Validates RAM read/write consistency
+- Input claim: RamReadValue + gamma * RamWriteValue
+- Reference: `jolt-core/src/zkvm/ram/read_write_checking.rs`
 
-1. **fused_left**: `3680814111042145831100417079225278919431426777627349458700618452903652360804`
-2. **fused_right**: `5628401284835057616148875782341094898402011560234054472864896388346845354264`
-3. **tau_high**: `1724079782492782403949918631195347939403999634829548103697761600182229454970`
-4. **Stage 2 UniSkip domain_sum = input_claim** (polynomial passes sum check)
-5. **Stage 2 UniSkip coeffs[0]**: Both are zero
-6. **All 26 sumcheck challenges** (rounds 0-25)
-
-### Serialization Format
-
-The Stage 2 UniSkip polynomial serialization is correct:
-- Writes length (usize = 13 coefficients)
-- Writes all 13 coefficients as field elements (32 bytes each, LE)
-
-### Transcript Protocol
-
-UniSkip appends to transcript:
-1. `"UncompressedUniPoly_begin"`
-2. All coefficients (c0, c1, c2, ..., c12)
-3. `"UncompressedUniPoly_end"`
-4. Sample r0 challenge
-
-The issue may be in how coefficients c1-c12 are computed or serialized.
+#### Instance 4: InstructionLookupsClaimReduction
+- 2 phases: prefix-suffix sumcheck + regular sumcheck
+- Reduces instruction lookup claims
+- Input claim: LookupOutput + gamma * (LeftOperand + RightOperand)
+- Reference: `jolt-core/src/zkvm/claim_reductions/instruction_lookups.rs`
 
 ### Key Insight
 
-Despite the polynomial passing its internal sum check:
+The sumcheck protocol requires that:
 ```
-domain_sum = { 43, 113, 211, 223, 28, 171, 74, 188, 15, 63, 128, 23, 194, 28, 198, 221, 28, 243, 107, 60, 31, 26, 41, 160, 149, 101, 217, 37, 27, 218, 236, 52 } (Zolt BE)
-input_claim = [52, 236, 218, 27, 37, 217, 101, 149, 160, 41, 26, 31, 60, 107, 243, 28, 221, 198, 28, 194, 23, 128, 63, 15, 188, 74, 171, 28, 223, 211, 113, 43] (Jolt LE)
+s(0) + s(1) = old_claim
 ```
 
-These match (just different endianness in display). So the polynomial construction is correct, but the transcript state must differ somewhere.
+at every round. Instances with non-zero input claims must produce proper polynomial evaluations to satisfy this constraint. Simply contributing zeros is incorrect.
 
-### Next Steps
+### Test Commands
+```bash
+# Generate Zolt proof
+./zig-out/bin/zolt prove --jolt-format -o /tmp/zolt_proof_dory.bin examples/fibonacci.elf
 
-1. Compare ALL 13 coefficients between Zolt and Jolt (not just c0)
-2. Add more debug output to Jolt's UniSkip verification
-3. Trace transcript state byte-by-byte between Zolt and Jolt
+# Test with Jolt
+cd /Users/matteo/projects/jolt/jolt-core
+cargo test test_verify_zolt_proof -- --ignored --nocapture
+```
 
-### Files Modified
-- `src/zkvm/proof_converter.zig`
-- `src/zkvm/r1cs/univariate_skip.zig`
-- `.agent/TODO.md`
+### Technical Notes
 
-### Test Status
-- All 712 internal tests pass
-- Stage 1 passes Jolt verification
-- Stage 2 fails at batched sumcheck output_claim check
+1. **Batching Coefficients**: Each instance is scaled by a batching coefficient sampled from the transcript
+2. **Round Distribution**: Different instances become active at different rounds based on their polynomial sizes
+3. **Phase Transitions**: Some provers (like InstructionLookupsClaimReduction) have phase transitions mid-sumcheck
+
+### Files to Implement
+
+1. `src/zkvm/ram/raf_evaluation.zig` - New file for RamRafEvaluation prover
+2. `src/zkvm/ram/read_write_checking.zig` - New file for RamReadWriteChecking prover
+3. `src/zkvm/claim_reductions/instruction_lookups.zig` - New file for InstructionLookupsClaimReduction prover

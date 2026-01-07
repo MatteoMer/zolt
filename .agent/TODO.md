@@ -2,6 +2,31 @@
 
 ## Current Status: Session 14
 
+### Stage 2 Cross-Verification - IN PROGRESS
+
+The UniSkip extended evaluations are fixed, but the ProductVirtualRemainder sumcheck is still producing the wrong output claim.
+
+**Analysis from Jolt cross-verification:**
+- `output_claim = 18399905727734613027016857362443321745605316746004735455047505419992328320300`
+- `expected_output_claim = 17135332148321379181445270571371034736283030019078327201597244975562090816163`
+- Difference = ~1.26e75 (significant mismatch)
+
+The batched sumcheck has 5 instances:
+- Instance 0 (ProductVirtualRemainder): expected contribution = 17135332...
+- Instances 1-4: contribution = 0 (claims are zero)
+
+So the ProductVirtualRemainder prover is producing an incorrect final claim.
+
+**Key Jolt formulas:**
+- `expected_output_claim = L(τ_high, r0) · Eq(τ_low, r_tail^rev) · fused_left · fused_right`
+- τ is [r_cycle (BIG_ENDIAN), τ_high]
+- r_tail is the Stage 2 sumcheck challenges (reversed before use)
+
+**Next steps:**
+1. Check if the fused_left and fused_right values match between Zolt and Jolt
+2. Verify the split_eq polynomial is initialized correctly
+3. Check if the Lagrange kernel L(τ_high, r0) matches
+
 ### Stage 2 UniSkip Extended Evaluations - FIXED!
 
 **Key Fix**: The `createUniSkipProofStage2WithClaims` function was using zeros for extended evaluations. Now it computes the actual fused products at extended points {-3, 3, -4, 4} from the trace data.

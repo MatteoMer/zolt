@@ -1822,15 +1822,15 @@ pub fn ProofConverter(comptime F: type) type {
             }
 
             // Extract r_cycle (last n_cycle_vars challenges)
-            // Challenges are in LITTLE_ENDIAN order: r[0] binds variable 0 (LSB of cycle index)
-            // EqPolynomial.evals uses BIG_ENDIAN indexing: eq_evals[t] = eq(r, x) where x[0] = MSB of t
-            // For consistency, we need to REVERSE r so that:
-            //   - eq_evals[t] with x[n-1] = LSB of t = sumcheck variable 0 = r[0]
-            //   - This requires r_reversed[n-1] = r[0], i.e., reversed order
+            // These are the sumcheck challenges that were used to bind the ProductVirtualRemainder
+            // polynomial. Jolt uses normalize_opening_point which reverses the challenges to
+            // convert from LITTLE_ENDIAN to BIG_ENDIAN.
             const r_cycle_start = all_challenges.len - n_cycle_vars;
             const r_cycle_original = all_challenges[r_cycle_start..];
 
-            // Reverse r_cycle for BIG_ENDIAN eq indexing compatibility
+            // Jolt's normalize_opening_point reverses the challenges to convert from LE to BE.
+            // The factor claims must be computed at this reversed point to match the verifier's
+            // expected_output_claim computation.
             const r_cycle = try self.allocator.alloc(F, n_cycle_vars);
             defer self.allocator.free(r_cycle);
             for (0..n_cycle_vars) |i| {
@@ -1842,7 +1842,7 @@ pub fn ProofConverter(comptime F: type) type {
                 std.debug.print("[ZOLT] FACTOR_EVALS: r_cycle[0] (reversed) = {any}\n", .{r_cycle[0].toBytesBE()});
             }
 
-            // Compute eq polynomial evaluations at r_cycle (reversed for BIG_ENDIAN indexing)
+            // Compute eq polynomial evaluations at r_cycle (using BIG_ENDIAN indexing like Jolt)
             const EqPoly = poly_mod.EqPolynomial(F);
             var eq_poly = try EqPoly.init(self.allocator, r_cycle);
             defer eq_poly.deinit();

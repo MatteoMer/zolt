@@ -19,37 +19,55 @@ expected_output_claim: 213703441173426579885779118105866681333175965868818522817
 4. ✅ Round polynomial coefficients match (c0, c2, c3 for rounds 0, 25)
 5. ✅ Virtual polynomial factor evaluations match (l_inst, r_inst, etc.)
 6. ✅ Opening claims serialize correctly
+7. ✅ EqPolynomial formulas match Jolt
+8. ✅ split_eq binding formula matches Jolt (eq(tau, r) accumulation)
+9. ✅ computeCubicRoundPoly formula matches Jolt's gruen_poly_deg_3
+10. ✅ bindLow formula matches Jolt's bound_poly_var_bot
 
-### Root Cause Hypothesis
+### Root Cause Analysis
 
-Despite matching coefficients, the final polynomial evaluation differs. The sumcheck
-polynomial evaluation uses `eval_from_hint` which reconstructs the polynomial and
-evaluates. The discrepancy could be in:
+The sumcheck verification formula mismatch is subtle:
 
-1. **eq polynomial in the polynomial being proved** - Zolt's ProductVirtualRemainderProver
-   computes `L(τ_high, r0) * Eq(τ_low, x) * fused_left(x) * fused_right(x)`
+**Prover side (Zolt):**
+After binding challenges r[0], r[1], ..., r[n-1] with LowToHigh binding:
+- split_eq accumulates: `Eq(tau_reversed, r)` = `Eq(tau, r_reversed)` (due to index reversal)
+- left/right polynomials evaluate at: `left(r)`, `right(r)` (in LE convention)
+- Final claim: `Eq(tau, r_reversed) * left(r) * right(r)`
 
-2. **The split_eq polynomial binding** - How `current_scalar` accumulates during rounds
+**Verifier side (Jolt):**
+- Computes: `tau_bound_r_reversed = Eq(tau, r_reversed)`
+- Computes factor claims: `fused_left(r_reversed)`, `fused_right(r_reversed)`
+- Expected: `Eq(tau, r_reversed) * fused_left(r_reversed) * fused_right(r_reversed)`
 
-3. **Round start offset** - ProductVirtualRemainder starts at round `log_ram_k` (16),
-   but the expected_output_claim uses only the last `n_cycle_vars` (10) challenges
+**The Mismatch:**
+- Prover: `left(r) * right(r)`
+- Verifier expects: `left(r_reversed) * right(r_reversed)`
+
+The eq part matches, but the polynomial evaluations differ!
+
+### Why Jolt Works
+
+Jolt's prover and verifier must be consistent because:
+1. The polynomial indexing uses BIG_ENDIAN convention
+2. When bound with LowToHigh challenges, the BIG_ENDIAN indexing causes the
+   polynomial to effectively evaluate at the reversed point
+3. The factor claims use normalize_opening_point which also reverses
+
+Zolt may have a mismatch in how the polynomial is stored or indexed compared to Jolt.
+
+### Next Steps
+
+1. Check Zolt's DensePolynomial storage order vs Jolt's
+2. Verify that Zolt's fused_left/fused_right construction matches Jolt's
+3. Compare the polynomial values at cycle index 0, 1, etc. between Zolt and Jolt
+4. Consider if bindLow in Zolt produces LE indexing while Jolt uses BE
 
 ### Key Files
 
 - `src/zkvm/spartan/product_remainder.zig` - ProductVirtualRemainderProver
 - `src/poly/split_eq.zig` - GruenSplitEqPolynomial
-- `src/zkvm/proof_converter.zig` - Stage 2 batched sumcheck (generateStage2BatchedSumcheckProof)
-
-### Next Investigation Steps
-
-1. Add detailed trace in `computeCubicRoundPoly` showing:
-   - q_constant (t0_sum)
-   - q_quadratic_coeff (t_inf_sum)
-   - current_scalar (eq contribution)
-
-2. Compare eq polynomial values between Zolt prover and Jolt verifier at each round
-
-3. Check if ProductVirtualRemainder's `r_cycle` calculation matches what Jolt expects
+- `src/poly/mod.zig` - DensePolynomial.bindLow
+- `src/zkvm/proof_converter.zig` - Stage 2 batched sumcheck
 
 ## Previous Sessions
 

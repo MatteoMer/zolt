@@ -40,6 +40,7 @@ const Blake2bTranscript = transcripts.Blake2bTranscript;
 const poly_mod = @import("../poly/mod.zig");
 const jolt_device = @import("jolt_device.zig");
 const constants = @import("../common/constants.zig");
+const ram = @import("ram/mod.zig");
 
 /// Convert Zolt's internal proof to Jolt-compatible format
 pub fn ProofConverter(comptime F: type) type {
@@ -1182,6 +1183,7 @@ pub fn ProofConverter(comptime F: type) type {
                 n_cycle_vars,
                 log_ram_k,
                 &jolt_proof.opening_claims,
+                config,
             );
 
             // Add remaining opening claims
@@ -1262,7 +1264,9 @@ pub fn ProofConverter(comptime F: type) type {
                     const max_num_rounds = log_ram_k + n_cycle_vars;
                     if (stage2_result.challenges.len >= max_num_rounds and max_num_rounds >= log_ram_k) {
                         const r_address_prime = stage2_result.challenges[max_num_rounds - log_ram_k ..];
-                        std.debug.print("[ZOLT] OutputSumcheck: r_address_prime.len = {}\n", .{r_address_prime.len});
+                        std.debug.print("[ZOLT] OutputSumcheck: r_address_prime.len = {}, max_num_rounds={}, log_ram_k={}\n", .{ r_address_prime.len, max_num_rounds, log_ram_k });
+                        std.debug.print("[ZOLT] OutputSumcheck: r_address_prime[0] = {any}\n", .{r_address_prime[0].toBytesBE()});
+                        std.debug.print("[ZOLT] OutputSumcheck: r_address_prime[15] = {any}\n", .{r_address_prime[15].toBytesBE()});
 
                         // Get termination index via remapAddress
                         const termination_addr = memory_layout.termination;
@@ -1271,13 +1275,20 @@ pub fn ProofConverter(comptime F: type) type {
 
                         if (termination_index) |idx| {
                             // Compute eq(idx, r_address_prime) = Π (idx_i * r_i + (1 - idx_i) * (1 - r_i))
-                            // This is the Lagrange basis evaluation
+                            // This is the Lagrange basis evaluation.
+                            //
+                            // IMPORTANT: Jolt's r_address_prime uses BIG_ENDIAN convention:
+                            // - r_address_prime[0] corresponds to the MSB of the index
+                            // - r_address_prime[num_vars-1] corresponds to the LSB
+                            //
+                            // So for bit i (0 = LSB), we use r_address_prime[num_vars - 1 - i]
                             var result = F.one();
+                            const num_vars: u6 = @intCast(r_address_prime.len);
                             var bit_idx: u6 = 0;
-                            const num_vars = r_address_prime.len;
                             while (bit_idx < num_vars) : (bit_idx += 1) {
                                 const bit: u1 = @truncate((idx >> bit_idx) & 1);
-                                const r_i = r_address_prime[bit_idx];
+                                // BIG_ENDIAN: LSB (bit 0) uses last challenge, MSB uses first
+                                const r_i = r_address_prime[num_vars - 1 - bit_idx];
                                 const one_minus_r_i = F.one().sub(r_i);
                                 if (bit == 1) {
                                     result = result.mul(r_i);
@@ -1405,6 +1416,7 @@ pub fn ProofConverter(comptime F: type) type {
             n_cycle_vars: usize,
             log_ram_k: usize,
             opening_claims: *OpeningClaims(F),
+            config: ConversionConfig,
         ) !Stage2Result {
             const max_num_rounds = log_ram_k + n_cycle_vars;
             std.debug.print("[ZOLT] STAGE2_BATCHED: max_rounds={}, n_cycle={}, log_ram_k={}\n", .{ max_num_rounds, n_cycle_vars, log_ram_k });
@@ -1436,8 +1448,10 @@ pub fn ProofConverter(comptime F: type) type {
             // 2. OutputSumcheck samples r_address (log_ram_k challenges via challenge_vector_optimized)
             // challenge_vector_optimized uses challenge_scalar_optimized which HAS 125-bit masking
             // So we use challengeScalar() here
-            for (0..log_ram_k) |_| {
-                _ = transcript.challengeScalar();
+            const r_address = try self.allocator.alloc(F, log_ram_k);
+            defer self.allocator.free(r_address);
+            for (r_address) |*r| {
+                r.* = transcript.challengeScalar();
             }
 
             // 3. InstructionLookupsClaimReduction samples gamma (via challenge_scalar, NO masking)
@@ -1518,6 +1532,32 @@ pub fn ProofConverter(comptime F: type) type {
             }
             defer if (product_prover) |*p| p.deinit();
 
+            // Initialize OutputSumcheckProver if we have RAM state data
+            const OutputProver = ram.OutputSumcheckProver(F);
+            var output_prover: ?OutputProver = null;
+            const has_memory_layout = config.memory_layout != null;
+            const has_initial_ram = config.initial_ram != null;
+            const has_final_ram = config.final_ram != null;
+            std.debug.print("[ZOLT] STAGE2_BATCHED: memory_layout={any}, initial_ram={any}, final_ram={any}\n", .{
+                has_memory_layout,
+                has_initial_ram,
+                has_final_ram,
+            });
+            if (config.memory_layout != null and config.initial_ram != null and config.final_ram != null) {
+                std.debug.print("[ZOLT] STAGE2_BATCHED: Attempting to init OutputSumcheckProver...\n", .{});
+                output_prover = OutputProver.init(
+                    self.allocator,
+                    config.initial_ram.?,
+                    config.final_ram.?,
+                    r_address,
+                    config.memory_layout.?,
+                ) catch null;
+                if (output_prover) |_| {
+                    std.debug.print("[ZOLT] STAGE2_BATCHED: OutputSumcheckProver initialized\n", .{});
+                }
+            }
+            defer if (output_prover) |*p| p.deinit();
+
             // Store challenges for opening claims computation
             var challenges = std.ArrayList(F){};
             defer challenges.deinit(self.allocator);
@@ -1528,13 +1568,15 @@ pub fn ProofConverter(comptime F: type) type {
                 var combined_evals = [4]F{ F.zero(), F.zero(), F.zero(), F.zero() };
                 // Store ProductVirtualRemainder's evals for claim update
                 var product_evals_this_round: ?[4]F = null;
+                // Store OutputSumcheck's evals for claim update
+                var output_evals_this_round: ?[4]F = null;
 
                 for (0..5) |i| {
                     const start_round = max_num_rounds - rounds_per_instance[i];
 
                     if (round_idx >= start_round) {
                         // Instance is active
-                        const instance_round = round_idx - start_round;
+                        _ = round_idx - start_round; // instance_round (for debugging)
 
                         if (i == 0 and product_prover != null) {
                             // ProductVirtualRemainder - use real prover
@@ -1568,7 +1610,35 @@ pub fn ProofConverter(comptime F: type) type {
                             for (0..4) |j| {
                                 combined_evals[j] = combined_evals[j].add(product_evals_this_round.?[j].mul(batching_coeffs[i]));
                             }
-                            _ = instance_round;
+                        } else if (i == 3 and output_prover != null) {
+                            // OutputSumcheck - use real prover
+                            const output_compressed = output_prover.?.computeRoundPolynomial();
+                            if (round_idx == start_round) {
+                                std.debug.print("[ZOLT] OutputSumcheck: round {}, compressed[0]={any}\n", .{ round_idx, output_compressed[0].toBytesBE() });
+                            }
+
+                            // Convert compressed [c0, c2, c3] to evals [s0, s1, s2, s3]
+                            const c0 = output_compressed[0];
+                            const c2 = output_compressed[1];
+                            const c3 = output_compressed[2];
+                            // c1 = current_claim - 2*c0 - c2 - c3
+                            // For OutputSumcheck, input claim is 0, so current_claim for first round is 0
+                            // After first round, it's the evaluated value from previous round
+                            const current_claim_output = output_prover.?.current_claim;
+                            const c1 = current_claim_output.sub(c0).sub(c0).sub(c2).sub(c3);
+
+                            const s0_out = c0;
+                            const s1_out = current_claim_output.sub(s0_out);
+                            const s2_out = c0.add(c1.mul(F.fromU64(2))).add(c2.mul(F.fromU64(4))).add(c3.mul(F.fromU64(8)));
+                            const s3_out = c0.add(c1.mul(F.fromU64(3))).add(c2.mul(F.fromU64(9))).add(c3.mul(F.fromU64(27)));
+
+                            output_evals_this_round = [4]F{ s0_out, s1_out, s2_out, s3_out };
+
+                            // Weight by batching coefficient
+                            combined_evals[0] = combined_evals[0].add(s0_out.mul(batching_coeffs[i]));
+                            combined_evals[1] = combined_evals[1].add(s1_out.mul(batching_coeffs[i]));
+                            combined_evals[2] = combined_evals[2].add(s2_out.mul(batching_coeffs[i]));
+                            combined_evals[3] = combined_evals[3].add(s3_out.mul(batching_coeffs[i]));
                         } else {
                             // Zero instance - contribute constant polynomial
                             // For zero input, this is just scaled zeros
@@ -1639,6 +1709,15 @@ pub fn ProofConverter(comptime F: type) type {
                         product_prover.?.updateClaim(evals, challenge);
                     }
                     product_prover.?.bindChallenge(challenge) catch {};
+                }
+
+                // Bind challenge to OutputSumcheckProver when it's active
+                // OutputSumcheck starts at round (max_num_rounds - log_ram_k)
+                if (output_prover != null and round_idx >= (max_num_rounds - log_ram_k)) {
+                    if (output_evals_this_round) |evals| {
+                        output_prover.?.updateClaim(evals, challenge);
+                    }
+                    output_prover.?.bindChallenge(challenge);
                 }
             }
 
@@ -1960,6 +2039,10 @@ pub const ConversionConfig = struct {
     /// Memory layout for computing I/O polynomial evaluations
     /// If null, OutputSumcheck will use zero claims (which will fail verification)
     memory_layout: ?*const jolt_device.MemoryLayout = null,
+    /// Initial RAM state (before execution)
+    initial_ram: ?*const std.AutoHashMapUnmanaged(u64, u64) = null,
+    /// Final RAM state (after execution)
+    final_ram: ?*const std.AutoHashMapUnmanaged(u64, u64) = null,
 };
 
 // =============================================================================

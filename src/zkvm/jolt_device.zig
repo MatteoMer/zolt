@@ -110,10 +110,11 @@ pub const JoltDevice = struct {
         memory_size_opt: ?u64,
     ) !Self {
         // Use Jolt's default constants (from common/src/constants.rs)
+        // These MUST match the values used when Jolt generates the preprocessing!
         const DEFAULT_MAX_INPUT_SIZE: u64 = 4096;
         const DEFAULT_MAX_OUTPUT_SIZE: u64 = 4096;
-        const DEFAULT_MAX_TRUSTED_ADVICE_SIZE: u64 = 0; // No advice by default
-        const DEFAULT_MAX_UNTRUSTED_ADVICE_SIZE: u64 = 0;
+        const DEFAULT_MAX_TRUSTED_ADVICE_SIZE: u64 = 4096; // Must match Jolt's default
+        const DEFAULT_MAX_UNTRUSTED_ADVICE_SIZE: u64 = 4096; // Must match Jolt's default
         const DEFAULT_MEMORY_SIZE: u64 = 1024 * 1024 * 128; // 128 MB
         const DEFAULT_STACK_SIZE: u64 = 4096; // 4 KB
         const RAM_START_ADDRESS: u64 = 0x80000000;

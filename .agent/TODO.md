@@ -2,53 +2,55 @@
 
 ## Current Status
 - Stage 1: PASSING ✅
-- Stage 2: FAILING ❌ (Claim ordering mismatch causing val_final_claim read as 0)
+- Stage 2: FAILING ❌ (OutputSumcheckProver produces wrong polynomial coefficients)
 - Stage 3+: Not reached yet
-- All 712 Zolt tests pass
+- All Zolt tests pass
 
-## Session 8 Progress
+## Session 9 Progress
 
-### Memory Layout Fixed ✅
-- Fixed `zkvm/jolt_device.zig` to place I/O region BEFORE RAM_START_ADDRESS
-- termination address now at 0x7FFFE008 (correct) instead of RAM region
-- remapAddress() returns index 1025 (correct) instead of 268M
+### OutputSumcheckProver Implementation ✅
+- Created src/zkvm/ram/output_check.zig with OutputSumcheckProver
+- Integrated into Stage 2 batched sumcheck in proof_converter.zig
+- RAM state data (initial/final) now passed from emulator to converter
+- r_address challenges sampled in correct order
 
-### OpeningId Ordering Fixed ✅
-- Changed order() to compare poly FIRST, then sumcheck_id
-- Added VirtualPolynomial.order() and CommittedPolynomial.order()
-- Added test for Virtual claim ordering - passes
+### Stage 2 Sumcheck Structure
+5 instances in batched sumcheck:
+- Instance 0: ProductVirtualRemainder ✅ (working correctly)
+- Instance 1: RamRafEvaluation (treated as zero - needs implementation)
+- Instance 2: RamReadWriteChecking (treated as zero - needs implementation)
+- Instance 3: OutputSumcheck ❌ (implemented but wrong polynomials)
+- Instance 4: InstructionClaimReduction (treated as zero - needs implementation)
 
-### val_final_claim Computation ✅
-- Passed memory_layout through ConversionConfig
-- val_final_claim IS being computed (non-zero value)
-- val_final_claim IS being serialized to proof file correctly
+### CURRENT ISSUE: OutputSumcheckProver EQ Polynomial Binding Order
 
-### CURRENT ISSUE: Claim Alignment Mismatch
+Jolt verification fails:
+- Expected output_claim: 12558447015227526731091241411293250621525229972846007269528435424240713158110
+- Actual output_claim: 10555406300081192179452048418528136201389824333451681887399411041092911249053
 
-When Jolt deserializes the proof:
-- Jolt reads `RamValFinal@RamOutputCheck` claim as 0
-- But Zolt serialized a non-zero value at that position
+Root Cause:
+1. Jolt uses `BindingOrder::LowToHigh` (LSB first)
+2. Our EQ polynomial uses MSB-first indexing
+3. The `par_fold_out_in_unreduced` operation is not implemented
+4. GruenSplitEqPolynomial optimization not used
 
-Root cause: Claims appear at different positions in Zolt vs Jolt ordering.
+### Next Steps (Priority Order)
 
-Example:
-- Zolt claim 5: `Virtual(NextIsNoop, SpartanProductVirtualization)`
-- Jolt expects claim 5: `Virtual(NextIsVirtual, SpartanOuter)`
+1. **Fix EQ polynomial binding order** - Use LowToHigh instead of MSB-first
+2. **Fix polynomial binding** - All polynomials (val_final, val_io, io_mask) need LowToHigh binding
+3. **Implement proper round polynomial computation** - Match Jolt's par_fold_out_in_unreduced
+4. **Verify OutputSumcheck produces correct polynomials**
 
-Both order by `(poly, sumcheck_id)` tuple where poly comes first.
-Since NextIsNoop(4) < NextIsVirtual(5), NextIsNoop should come first.
-But Jolt's file shows NextIsVirtual at position 5.
+### Files Modified This Session
+- src/zkvm/ram/output_check.zig - NEW: OutputSumcheckProver skeleton
+- src/zkvm/ram/mod.zig - Export OutputSumcheck module
+- src/zkvm/proof_converter.zig - Integrate OutputSumcheck, pass config
+- src/zkvm/mod.zig - Pass RAM state data (initial/final) to converter
 
-This could mean:
-1. Jolt generates a different set of claims
-2. Jolt has a different ordering for some reason
-3. There's additional criteria in Jolt's ordering
-
-### Next Steps
-
-1. Compare FULL claim lists from Jolt-generated proof vs Zolt-generated proof
-2. Check if Jolt preprocessing generates a different set of claims
-3. Verify BTreeMap serialization order in arkworks
+### Reference Files (Jolt)
+- jolt-core/src/zkvm/ram/output_check.rs - OutputSumcheckProver implementation
+- jolt-core/src/poly/split_eq_poly.rs - GruenSplitEqPolynomial with LowToHigh binding
+- jolt-core/src/poly/dense_mlpoly.rs - DensePolynomial with bind_parallel
 
 ## Previous Session Progress
 
@@ -56,14 +58,10 @@ This could mean:
 1. ✅ Stage 2 input_claims (all 5 match Jolt)
 2. ✅ Stage 2 gamma_rwc and gamma_instr
 3. ✅ Batching coefficients
-4. ✅ Polynomial coefficients (c0, c2, c3) for all 26 rounds
+4. ✅ Polynomial coefficients for ProductVirtualRemainder
 5. ✅ Sumcheck challenges for all 26 rounds
 6. ✅ 8 factor evaluations
 7. ✅ Factor claims inserted into proof correctly
 
 ## Commits
-- `964ec0f`: Fixed OpeningId ordering and memory layout
-- `abe09a4`: Fixed input_claims and gamma sampling
-- `5033064`: Debug - polynomial coefficients match
-- `78a09cf`: Deep dive - termination bit is the issue
-- `68db1c2`: WIP structure improvements for OutputSumcheck
+- Previous: Fixed OpeningId ordering, memory layout, input_claims, gammas

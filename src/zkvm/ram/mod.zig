@@ -26,6 +26,11 @@ pub const LtPolynomial = val_evaluation.LtPolynomial;
 pub const ValEvaluationProver = val_evaluation.ValEvaluationProver;
 pub const ValEvaluationVerifier = val_evaluation.ValEvaluationVerifier;
 
+// Output checking (IO region verification)
+pub const output_check = @import("output_check.zig");
+pub const OutputSumcheckParams = output_check.OutputSumcheckParams;
+pub const OutputSumcheckProver = output_check.OutputSumcheckProver;
+
 /// Memory operation type
 pub const MemoryOp = enum {
     Read,

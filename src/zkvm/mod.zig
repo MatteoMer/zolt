@@ -598,6 +598,30 @@ pub fn JoltProver(comptime F: type) type {
                 tau[i] = transcript.challengeScalar();
             }
 
+            // For OutputSumcheck, we need initial and final RAM states
+            // Initial RAM is empty (or would contain ELF-loaded data)
+            // Final RAM is the state after execution
+            // For now, use empty initial state and emulator's final state
+            var empty_initial_ram = std.AutoHashMapUnmanaged(u64, u64){};
+
+            // Create config as named variable to ensure pointer validity
+            const init_ram_ptr: ?*const std.AutoHashMapUnmanaged(u64, u64) = &empty_initial_ram;
+            const final_ram_ptr: ?*const std.AutoHashMapUnmanaged(u64, u64) = &emulator.ram.memory;
+            std.debug.print("[ZOLT] proveJoltCompatible: init_ram_ptr={any}, final_ram_ptr={any}\n", .{
+                init_ram_ptr != null,
+                final_ram_ptr != null,
+            });
+            const convert_config = proof_converter.ConversionConfig{
+                .bytecode_K = 1 << 16,
+                // Must match Jolt's config.rs: log_k_chunk <= 8
+                .log_k_chunk = 4,
+                // Jolt uses LOG_K / 8 = 128 / 8 = 16 for small traces
+                .lookups_ra_virtual_log_k_chunk = 16,
+                .memory_layout = &device.memory_layout, // Pass memory layout for OutputSumcheck
+                .initial_ram = init_ram_ptr,
+                .final_ram = final_ram_ptr,
+            };
+
             // Convert to Jolt-compatible format with transcript integration
             return converter.convertWithTranscript(
                 commitment_types.PolyCommitment,
@@ -605,14 +629,7 @@ pub fn JoltProver(comptime F: type) type {
                 &stage_proofs,
                 commitments.items,
                 null, // joint_opening_proof - would come from Dory
-                .{
-                    .bytecode_K = 1 << 16,
-                    // Must match Jolt's config.rs: log_k_chunk <= 8
-                    .log_k_chunk = 4,
-                    // Jolt uses LOG_K / 8 = 128 / 8 = 16 for small traces
-                    .lookups_ra_virtual_log_k_chunk = 16,
-                    .memory_layout = &device.memory_layout, // Pass memory layout for OutputSumcheck
-                },
+                convert_config,
                 cycle_witnesses,
                 tau,
                 &transcript,
@@ -821,6 +838,11 @@ pub fn JoltProver(comptime F: type) type {
                 tau[i] = transcript.challengeScalar();
             }
 
+            // For OutputSumcheck, we need initial and final RAM states
+            var empty_initial_ram_dory = std.AutoHashMapUnmanaged(u64, u64){};
+            const init_ram_dory: ?*const std.AutoHashMapUnmanaged(u64, u64) = &empty_initial_ram_dory;
+            const final_ram_dory: ?*const std.AutoHashMapUnmanaged(u64, u64) = &emulator.ram.memory;
+
             // Convert to Jolt-compatible format with transcript integration
             result.proof = try converter.convertWithTranscript(
                 commitment_types.PolyCommitment,
@@ -828,11 +850,13 @@ pub fn JoltProver(comptime F: type) type {
                 &stage_proofs,
                 commitments.items,
                 null,
-                .{
+                proof_converter.ConversionConfig{
                     .bytecode_K = 1 << 16,
                     .log_k_chunk = 4,
                     .lookups_ra_virtual_log_k_chunk = 16,
                     .memory_layout = &device.memory_layout, // Pass memory layout for OutputSumcheck
+                    .initial_ram = init_ram_dory,
+                    .final_ram = final_ram_dory,
                 },
                 cycle_witnesses,
                 tau,
@@ -987,6 +1011,11 @@ pub fn JoltProver(comptime F: type) type {
                 tau[i] = transcript.challengeScalar();
             }
 
+            // For OutputSumcheck, we need initial and final RAM states
+            var empty_initial_ram_device = std.AutoHashMapUnmanaged(u64, u64){};
+            const init_ram_device: ?*const std.AutoHashMapUnmanaged(u64, u64) = &empty_initial_ram_device;
+            const final_ram_device: ?*const std.AutoHashMapUnmanaged(u64, u64) = &emulator.ram.memory;
+
             // Convert to Jolt-compatible format with transcript integration
             return converter.convertWithTranscript(
                 commitment_types.PolyCommitment,
@@ -994,11 +1023,13 @@ pub fn JoltProver(comptime F: type) type {
                 &stage_proofs,
                 commitments.items,
                 null,
-                .{
+                proof_converter.ConversionConfig{
                     .bytecode_K = 1 << 16,
                     .log_k_chunk = 4,
                     .lookups_ra_virtual_log_k_chunk = 16,
                     .memory_layout = &device.memory_layout, // Pass memory layout for OutputSumcheck
+                    .initial_ram = init_ram_device,
+                    .final_ram = final_ram_device,
                 },
                 cycle_witnesses,
                 tau,

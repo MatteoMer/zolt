@@ -1749,21 +1749,16 @@ pub fn ProofConverter(comptime F: type) type {
                             }
                         }
                     } else {
-                        // Instance hasn't started yet
-                        if (i == 1 or i == 2 or i == 4) {
-                            // Instances 1, 2, 4: contribute zero until their provers are implemented
-                            // (These should really reduce properly but we don't have their provers)
-                        } else {
-                            // Other instances - contribute scaled input claim as constant
-                            const scale_power = max_num_rounds - rounds_per_instance[i] - round_idx - 1;
-                            var scaled = input_claims[i];
-                            for (0..scale_power) |_| {
-                                scaled = scaled.add(scaled);
-                            }
-                            const weighted = scaled.mul(batching_coeffs[i]);
-                            for (0..4) |j| {
-                                combined_evals[j] = combined_evals[j].add(weighted);
-                            }
+                        // Instance hasn't started yet - contribute scaled input claim as constant
+                        // This applies to ALL instances, including 1, 2, 4
+                        const scale_power = max_num_rounds - rounds_per_instance[i] - round_idx - 1;
+                        var scaled = input_claims[i];
+                        for (0..scale_power) |_| {
+                            scaled = scaled.add(scaled);
+                        }
+                        const weighted = scaled.mul(batching_coeffs[i]);
+                        for (0..4) |j| {
+                            combined_evals[j] = combined_evals[j].add(weighted);
                         }
                     }
                 }
@@ -1809,6 +1804,11 @@ pub fn ProofConverter(comptime F: type) type {
                     std.debug.print("[ZOLT CLAIM] round {}: old_claim = {any}\n", .{ round_idx, old_claim.toBytesBE() });
                     std.debug.print("[ZOLT CLAIM] round {}: s(0)+s(1) = {any}\n", .{ round_idx, combined_evals[0].add(combined_evals[1]).toBytesBE() });
                     std.debug.print("[ZOLT CLAIM] round {}: new_claim = {any}\n", .{ round_idx, batched_claim.toBytesBE() });
+                    // Check: s(0) + s(1) should equal old_claim for soundness
+                    const sum_check = combined_evals[0].add(combined_evals[1]);
+                    if (!sum_check.eql(old_claim)) {
+                        std.debug.print("[ZOLT CLAIM ERROR] round {}: s(0)+s(1) != old_claim!\n", .{round_idx});
+                    }
                 }
 
                 // Bind challenge in all active instances and update their claims

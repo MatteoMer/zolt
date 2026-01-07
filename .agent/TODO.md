@@ -2,51 +2,60 @@
 
 ## Current Status
 - Stage 1: PASSING ✅
-- Stage 2: FAILING ❌ (sumcheck polynomial coefficients don't produce correct output_claim)
+- Stage 2: FAILING ❌ (OutputSumcheck expected_output_claim != 0)
 - Stage 3+: Not reached yet
 
-## Session 7 Progress
+## Session 7 Final Progress
 
-### FIXED Issues (abe09a4)
-1. ✅ Stage 2 input_claims now correctly computed:
-   - input_claim[0] = uni_skip_claim from SpartanProductVirtualization
-   - input_claim[1] = RamAddress from SpartanOuter
-   - input_claim[2] = RamReadValue + gamma_rwc * RamWriteValue
-   - input_claim[3] = 0 (hardcoded for OutputSumcheck)
-   - input_claim[4] = LookupOutput + gamma_instr * LeftOperand + gamma_instr^2 * RightOperand
+### Verified Components (ALL MATCH!)
+1. ✅ Stage 2 input_claims (all 5 match Jolt)
+2. ✅ Stage 2 gamma_rwc and gamma_instr
+3. ✅ Batching coefficients
+4. ✅ Polynomial coefficients (c0, c2, c3) for all 26 rounds
+5. ✅ Sumcheck challenges for all 26 rounds
+6. ✅ 8 factor evaluations (LeftInstructionInput, RightInstructionInput, etc.)
+7. ✅ Factor claims inserted into proof correctly
 
-2. ✅ Gamma sampling fixed:
-   - gamma_rwc uses challengeScalarFull() (no 125-bit masking)
-   - gamma_instr uses challengeScalarFull() (no 125-bit masking)
-   - OutputSumcheck r_address uses challengeScalar() (125-bit masking)
+### ROOT CAUSE IDENTIFIED
 
-3. ✅ All input claims and gammas match between Zolt and Jolt
-
-### Current Issue
-
-Stage 2 sumcheck verification fails with:
+Stage 2 expected_output_claim computation shows:
 ```
-output_claim:          10555406300081192179452048418528136201389824333451681887399411041092911249053
-expected_output_claim: 11671835959330980630006413824685797328653240839754705273799237559896046640754
+Instance 0 (ProductVirtualRemainder): claim=21572905787847890716862997770158461178426084346937578986156607546482633860011
+Instance 1 (RamRafEvaluation): claim=0
+Instance 2 (RamReadWriteChecking): claim=0
+Instance 3 (OutputSumcheck): claim=18879790779448816066373906755770008515526190607768701928996156399943982985463 (!)
+Instance 4 (InstructionLookupsClaimReduction): claim=0
 ```
 
-The issue is in the **sumcheck polynomial generation** during Stage 2 rounds.
-The batched sumcheck has 26 rounds (log_ram_k + n_cycle_vars = 16 + 10).
+**OutputSumcheck (instance 3) has a NON-ZERO expected_output_claim!**
+
+Even though `input_claim = 0` (zero-check), the `expected_output_claim` is computed from:
+- `VirtualPolynomial::RamValFinal` at `SumcheckId::RamOutputCheck`
+- `io_mask` and `val_io` MLE evaluations at the random address challenge
+
+This means the OutputSumcheck polynomial contributes to the final expected_output_claim,
+but Zolt's current implementation generates a zero polynomial for OutputSumcheck.
+
+### The Problem in Detail
+
+OutputSumcheck proves:
+```
+Σ_k eq(r_address, k) ⋅ io_mask(k) ⋅ (Val_final(k) − Val_io(k)) = 0
+```
+
+At the end of the sumcheck:
+1. `output_claim` = polynomial evaluated at final challenge
+2. `expected_output_claim` = computed from MLE evaluations of io_mask, Val_final, Val_io
+
+For a program with memory, even if there's no explicit output, `expected_output_claim` depends
+on the final RAM state, not just zeros.
 
 ### Next Steps
-1. Debug Stage 2 sumcheck polynomial coefficients round-by-round
-2. Compare Zolt's polynomial evaluations with Jolt's expected values
-3. Fix ProductVirtualRemainder polynomial generation
-4. Verify the sumcheck output matches expected_output_claim
+1. Implement proper OutputSumcheck sumcheck polynomial generation
+2. OR: Understand what `RamValFinal` claim is needed and provide it
+3. This requires modeling the RAM subsystem correctly
 
-## Verified Components
-1. ✅ Field element serialization (LE bytes match arkworks)
-2. ✅ Factor evaluations (l_inst, r_inst, etc.)
-3. ✅ Transcript synchronization through Stage 1
-4. ✅ tau_high sampling matches
-5. ✅ Opening claims loaded correctly from proof
-6. ✅ uni_skip_claim for ProductVirtualRemainder
-7. ✅ Stage 2 input_claims (all 5 match Jolt)
-8. ✅ Stage 2 gamma_rwc and gamma_instr
-9. ✅ Batching coefficients (transcript state synchronized)
-10. ❌ Stage 2 sumcheck polynomial coefficients (need investigation)
+## Files Modified
+- `src/transcripts/blake2b.zig`: Fixed challengeScalar128Bits and challengeScalarFull
+- `src/zkvm/proof_converter.zig`: Fixed Stage 2 input_claims and gamma sampling
+- Jolt: Added debugging for expected_output_claim per instance

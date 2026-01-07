@@ -1,53 +1,71 @@
 # Zolt-Jolt Cross-Verification Progress
 
-## Session 15 Final Summary
+## Session 16 Summary
 
 ### Achievements
-1. **Stage 2 UniSkip Fixed** - All 13 polynomial coefficients match between Zolt and Jolt
-2. **Transcript Alignment** - Stage 2 r0 = `8768758914789955585787902790032491769856779696899125603611137465800193155946` matches
-3. **Stage 1 Verified** - Passes Jolt verification completely
+1. **RAF Prover Integrated** - Instance 1 now produces proper cubic [s(0), s(1), s(2), s(3)] output
+2. **Instance Timing Analysis** - Documented when each instance becomes active
+3. **Memory Trace Propagation** - Added memory_trace to ConversionConfig
 
-### Remaining Work: Stage 2 Batched Sumcheck Provers
+### Critical Discovery: Instance 2 Starts at Round 0!
 
-The Stage 2 batched sumcheck has 5 instances. Only 2 have proper provers:
+The batched sumcheck instance timing is:
+- Instance 0 (ProductVirtualRemainder): 10 rounds → starts at round 16
+- Instance 1 (RamRafEvaluation): 16 rounds → starts at round 10 ✅
+- **Instance 2 (RamReadWriteChecking): 26 rounds → starts at round 0!** ❌
+- Instance 3 (OutputSumcheck): 16 rounds → starts at round 10 ✅
+- Instance 4 (InstructionLookupsClaimReduction): 10 rounds → starts at round 16
 
-| Instance | Name | Rounds | Implementation Status |
-|----------|------|--------|----------------------|
-| 0 | ProductVirtualRemainder | 10 | ✅ Implemented |
-| 1 | RamRafEvaluation | 16 | ❌ Zero fallback |
-| 2 | RamReadWriteChecking | 26 | ❌ Zero fallback |
-| 3 | OutputSumcheck | 16 | ✅ Implemented |
-| 4 | InstructionLookupsClaimReduction | 10 | ❌ Zero fallback |
+**This means Instance 2 is the BLOCKER** - it has a non-zero input claim from the very first round, but our fallback produces incorrect polynomials.
 
-### Instance Details
+## RamReadWriteChecking Architecture (from Jolt)
 
-#### Instance 1: RamRafEvaluation
-- Evaluates `eq(r_address, x)` for RAM access validation
-- Input claim: RamAddress opening from SpartanOuter
-- Reference: `jolt-core/src/zkvm/ram/raf_evaluation.rs`
+This is the most complex prover in Stage 2 - a 3-phase sparse matrix sumcheck:
 
-#### Instance 2: RamReadWriteChecking
-- Most complex - 3 phases
-- Validates RAM read/write consistency
-- Input claim: RamReadValue + gamma * RamWriteValue
-- Reference: `jolt-core/src/zkvm/ram/read_write_checking.rs`
+### Phase 1: Cycle-Major (Rounds 0 to log_T-1)
+- Entries sorted by (cycle, address)
+- Uses Gruen split-eq optimization
+- Binds cycle variables
 
-#### Instance 4: InstructionLookupsClaimReduction
-- 2 phases: prefix-suffix sumcheck + regular sumcheck
-- Reduces instruction lookup claims
-- Input claim: LookupOutput + gamma * (LeftOperand + RightOperand)
-- Reference: `jolt-core/src/zkvm/claim_reductions/instruction_lookups.rs`
+### Phase 2: Address-Major (Rounds log_T to log_T+log_K-1)
+- Re-sorts entries by (address, cycle)
+- Binds address variables
+- More efficient for address dimension
 
-### Key Insight
+### Phase 3: Dense (Remaining rounds if any)
+- Materializes to dense polynomials
+- Standard sumcheck
 
-The sumcheck protocol requires that:
+### The Polynomial Being Proved
 ```
-s(0) + s(1) = old_claim
+Σ_{k,j} eq(r_cycle, j) * ra(k,j) * (Val(k,j) + γ*(Val(k,j) + inc(j))) = rv_claim + γ*wv_claim
 ```
 
-at every round. Instances with non-zero input claims must produce proper polynomial evaluations to satisfy this constraint. Simply contributing zeros is incorrect.
+Where:
+- k indexes addresses [0, K)
+- j indexes cycles [0, T)
+- ra(k,j) = 1 if address k accessed at cycle j
+- Val(k,j) = memory value at address k before cycle j
+- inc(j) = value increment at cycle j (write_val - read_val, or 0 for reads)
 
-### Test Commands
+## Implementation Status
+
+| Instance | Prover | Status | Notes |
+|----------|--------|--------|-------|
+| 0 | ProductVirtualRemainder | ✅ | Working |
+| 1 | RafEvaluationProver | ✅ | Integrated this session |
+| 2 | RamReadWriteChecking | ❌ | **BLOCKER** - complex 3-phase prover |
+| 3 | OutputSumcheckProver | ✅ | Working |
+| 4 | InstructionLookupsClaimReduction | ❌ | Needs implementation |
+
+## Key Files Modified This Session
+
+- `src/zkvm/proof_converter.zig` - RAF prover integration
+- `src/zkvm/ram/raf_checking.zig` - Added `computeRoundPolynomialCubic()`
+- `src/zkvm/mod.zig` - Pass memory_trace through config
+- `src/zkvm/prover.zig` - Updated RAF prover API usage
+
+## Test Commands
 ```bash
 # Generate Zolt proof
 ./zig-out/bin/zolt prove --jolt-format -o /tmp/zolt_proof_dory.bin examples/fibonacci.elf
@@ -57,14 +75,21 @@ cd /Users/matteo/projects/jolt/jolt-core
 cargo test test_verify_zolt_proof -- --ignored --nocapture
 ```
 
-### Technical Notes
+## Next Session Priority
 
-1. **Batching Coefficients**: Each instance is scaled by a batching coefficient sampled from the transcript
-2. **Round Distribution**: Different instances become active at different rounds based on their polynomial sizes
-3. **Phase Transitions**: Some provers (like InstructionLookupsClaimReduction) have phase transitions mid-sumcheck
+1. **Implement RamReadWriteCheckingProver** - This is the critical blocker
+   - Need sparse matrix construction from memory trace
+   - Phase transitions (cycle→address major)
+   - Gruen's split-eq optimization
+   - ~500 lines of code
 
-### Files to Implement
+2. **Implement InstructionLookupsClaimReductionProver** - Secondary
+   - 2-phase prover
+   - Simpler than RAM checking
+   - ~200 lines of code
 
-1. `src/zkvm/ram/raf_evaluation.zig` - New file for RamRafEvaluation prover
-2. `src/zkvm/ram/read_write_checking.zig` - New file for RamReadWriteChecking prover
-3. `src/zkvm/claim_reductions/instruction_lookups.zig` - New file for InstructionLookupsClaimReduction prover
+## Technical References
+
+- Jolt RAM checking: `jolt-core/src/zkvm/ram/read_write_checking.rs`
+- Gruen optimization: `jolt-core/src/poly/split_eq_poly.rs`
+- Sparse matrix: `jolt-core/src/subprotocols/read_write_matrix/`

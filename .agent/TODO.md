@@ -1,4 +1,4 @@
-# Zolt-Jolt Compatibility - Session 17 Progress
+# Zolt-Jolt Compatibility - Session 18 Progress
 
 ## Status Summary
 
@@ -6,44 +6,39 @@
 - All 712 internal tests pass
 - Stage 1 passes Jolt verification completely
 - Stage 2 sumcheck constraint (s(0)+s(1) = claim) passes ALL 26 rounds
-- All 5 instance provers integrated and producing correct round polynomials
-- ProductVirtualRemainder final claim matches Jolt's expected Instance 0 claim
+- All 5 instance provers integrated and producing round polynomials
+- Individual RWC opening claims (ra, val, inc) now computed
+- Fixed double-free bug in InstructionLookupsProver
+- Fixed computeEq for big-endian interpretation
 
 ### ❌ REMAINING ISSUE
 Stage 2 verification fails because:
-- `output_claim` (21589049...) ≠ `expected_output_claim` (9898116...)
-- Our prover produces non-zero contributions from ALL 5 instances
-- Jolt's verifier expects only Instance 0 to contribute (Instances 1-4 show claim=0)
+- `output_claim` ≠ `expected_output_claim`
+- Difference is ~80e75 (a large number, similar to one instance contribution)
 
-**Root Cause**: We're inserting `F.zero()` for polynomial opening claims like `RamRa`, `RamVal`, etc.
-This makes Jolt's expected_output_claim computation return 0 for Instances 1-4.
+**Root Cause Investigation**:
+The expected_output_claim is computed from our opening claims:
+```
+eq_eval_cycle * ra_claim * (val_claim + gamma * (val_claim + inc_claim))
+```
 
-## Fixes Made This Session
+Our claims may not correspond to the actual polynomial values that our
+sumcheck prover is computing. Need to trace through polynomial construction.
 
-1. Fixed lagrangeC2 formula in output_check.zig
-2. Added bindChallenge/updateClaim for InstructionLookups prover
-3. Fixed claim_before capture for ProductVirtualRemainder
-4. Verified all sumcheck rounds satisfy s(0)+s(1) = claim
+## Instance Contributions (from Jolt debug output)
 
-## Opening Claims Needed (Currently F.zero())
-
-To fix Stage 2, we need to compute actual values for:
-- `RamRa` @ `RamRafEvaluation` (Instance 1)
-- `RamVal` @ `RamReadWriteChecking` (Instance 2)
-- `RamRa` @ `RamReadWriteChecking` (Instance 2)
-- `RamValFinal` @ `RamOutputCheck` (Instance 3)
-- `LookupOutput` @ `InstructionClaimReduction` (Instance 4)
-- etc.
-
-These are polynomial evaluations at the sumcheck challenge points.
+For Stage 2:
+- Instance 0 (ProductVirtual): 8369935295803813061188230597022735237
+- Instance 1 (RAF): 7819199229764417167347615577448458590
+- Instance 2 (RWC): 5221874132503095678699145889033794949
+- Instance 3 (OutputSumcheck): 0
+- Instance 4 (InstructionLookups): 0
 
 ## Next Steps
 
-1. Compute RAF opening claim (ra_input_claim at opening point)
-2. Compute RWC opening claims (val, ra at opening point)
-3. Compute Output opening claims
-4. Compute InstructionLookups opening claims
-5. Verify Stage 2 passes
+1. **Trace RWC polynomial construction** - Verify sparse matrix entries match actual memory trace
+2. **Compare with Jolt's expected values** - Check if our ra/val/inc evaluations match what Jolt expects
+3. **Debug Instance 0 (ProductVirtual)** - May also have incorrect contribution
 
 ## Verification Commands
 

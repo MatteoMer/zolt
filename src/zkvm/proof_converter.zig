@@ -1627,10 +1627,17 @@ pub fn ProofConverter(comptime F: type) type {
             }
             defer if (output_prover) |*p| p.deinit();
 
-            // Skip RafEvaluationProver for now - instances 1, 2, 4 use zero fallback
-            // TODO: Implement proper provers for these instances
+            // Initialize RafEvaluationProver (Instance 1) if we have memory trace
+            const RafProver = ram.RafEvaluationProver(F);
+            var raf_prover: ?RafProver = null;
             const has_memory_trace = config.memory_trace != null;
             std.debug.print("[ZOLT] STAGE2_BATCHED: memory_trace={any}\n", .{has_memory_trace});
+
+            // Defer for raf_prover cleanup - note: prover initialized later in round loop
+            defer if (raf_prover) |*rp| rp.deinit();
+
+            // Store RAF evals for claim update
+            var raf_evals_this_round: ?[4]F = null;
 
             // Track individual claims for each instance (needed for zero-poly instances)
             var individual_claims: [5]F = undefined;
@@ -1724,16 +1731,89 @@ pub fn ProofConverter(comptime F: type) type {
                             combined_evals[1] = combined_evals[1].add(s1_out.mul(batching_coeffs[i]));
                             combined_evals[2] = combined_evals[2].add(s2_out.mul(batching_coeffs[i]));
                             combined_evals[3] = combined_evals[3].add(s3_out.mul(batching_coeffs[i]));
-                        } else if (i == 1 or i == 2 or i == 4) {
-                            // Instances 1, 2, 4 without provers - contribute zero polynomial
-                            // These need proper provers but for now skip them
-                            // The verifier will compute expected_output_claim based on the polynomial evaluation
-                            // For compatibility, we should really implement the provers
-                            // TEMPORARY: Skip contribution (assuming these evaluate to zero in this simple program)
+                        } else if (i == 1) {
+                            // Instance 1: RafEvaluation (log_ram_k rounds, degree 2)
+                            // Initialize RAF prover at start_round using r_cycle = challenges[0..n_cycle_vars]
+                            if (round_idx == start_round and raf_prover == null and config.memory_trace != null) {
+                                // Get r_cycle from challenges collected so far (rounds 0 to start_round-1)
+                                if (challenges.items.len >= n_cycle_vars) {
+                                    const r_cycle_slice = challenges.items[0..n_cycle_vars];
+                                    const r_cycle = try self.allocator.alloc(F, n_cycle_vars);
+                                    defer self.allocator.free(r_cycle);
+                                    @memcpy(r_cycle, r_cycle_slice);
+
+                                    // Get start address from memory layout or use default
+                                    const start_addr: u64 = if (config.memory_layout) |ml|
+                                        ml.getLowestAddress()
+                                    else
+                                        0x80000000;
+
+                                    // Initialize RAF params
+                                    var raf_params = try ram.RafEvaluationParams(F).init(
+                                        self.allocator,
+                                        log_ram_k,
+                                        start_addr,
+                                        r_cycle,
+                                    );
+                                    defer raf_params.deinit();
+
+                                    // Use input_claim[1] (RamAddress from SpartanOuter) as initial claim
+                                    const raf_initial_claim = input_claims[1];
+                                    std.debug.print("[ZOLT] RAF: Initializing with claim = {any}\n", .{raf_initial_claim.toBytesBE()});
+
+                                    raf_prover = RafProver.init(
+                                        self.allocator,
+                                        config.memory_trace.?,
+                                        raf_params,
+                                        raf_initial_claim,
+                                    ) catch null;
+                                    if (raf_prover != null) {
+                                        std.debug.print("[ZOLT] RAF: Prover initialized\n", .{});
+                                    }
+                                }
+                            }
+
+                            if (raf_prover) |*rp| {
+                                // Compute RAF round polynomial [s(0), s(1), s(2), s(3)]
+                                const raf_evals = rp.computeRoundPolynomialCubic();
+                                raf_evals_this_round = raf_evals;
+
+                                // Weight by batching coefficient
+                                for (0..4) |j| {
+                                    combined_evals[j] = combined_evals[j].add(raf_evals[j].mul(batching_coeffs[i]));
+                                }
+                            } else {
+                                // Fallback: use scaled claim as constant polynomial
+                                if (round_idx == start_round) {
+                                    std.debug.print("[ZOLT] WARNING: Instance 1 (RAF) using fallback - no prover\n", .{});
+                                }
+                                const remaining_rounds = rounds_per_instance[i] - (round_idx - start_round);
+                                var scaled = individual_claims[i];
+                                for (0..remaining_rounds) |_| {
+                                    scaled = scaled.mul(F.fromU64(2));
+                                }
+                                scaled = scaled.mul(F.fromU64(2).inverse().?); // Divide back once
+                                const weighted = scaled.mul(batching_coeffs[i]);
+                                for (0..4) |j| {
+                                    combined_evals[j] = combined_evals[j].add(weighted);
+                                }
+                            }
+                        } else if (i == 2 or i == 4) {
+                            // Instances 2, 4 - still using fallback for now
                             if (round_idx == start_round) {
                                 std.debug.print("[ZOLT] WARNING: Instance {} using zero polynomial fallback\n", .{i});
                             }
-                            // Zero contribution - don't add anything
+                            // Fallback: use scaled claim as constant polynomial (will reduce to 0 over rounds)
+                            const instance_round = round_idx - start_round;
+                            const remaining_rounds = rounds_per_instance[i] - 1 - instance_round;
+                            var scaled = input_claims[i];
+                            for (0..remaining_rounds) |_| {
+                                scaled = scaled.add(scaled);
+                            }
+                            const weighted = scaled.mul(batching_coeffs[i]);
+                            for (0..4) |j| {
+                                combined_evals[j] = combined_evals[j].add(weighted);
+                            }
                         } else {
                             // Zero instance (actually zero input claim)
                             // For zero input, this is just scaled zeros
@@ -1829,6 +1909,17 @@ pub fn ProofConverter(comptime F: type) type {
                     output_prover.?.bindChallenge(challenge);
                 }
 
+                // Bind challenge to RAF prover when it's active
+                // RAF starts at round (max_num_rounds - log_ram_k)
+                if (raf_prover != null and round_idx >= (max_num_rounds - log_ram_k)) {
+                    if (raf_evals_this_round) |evals| {
+                        raf_prover.?.updateClaim(evals, challenge);
+                    }
+                    raf_prover.?.bindChallenge(challenge) catch {};
+                }
+
+                // Reset per-round evals
+                raf_evals_this_round = null;
             }
 
             std.debug.print("[ZOLT] STAGE2_BATCHED: final batched_claim = {any}\n", .{batched_claim.toBytesBE()});

@@ -611,6 +611,10 @@ pub fn JoltProver(comptime F: type) type {
                 init_ram_ptr != null,
                 final_ram_ptr != null,
             });
+
+            // Get memory trace for RAF evaluation sumcheck
+            const memory_trace_ptr1: *const ram.MemoryTrace = &emulator.ram.trace;
+
             const convert_config = proof_converter.ConversionConfig{
                 .bytecode_K = 1 << 16,
                 // Must match Jolt's config.rs: log_k_chunk <= 8
@@ -620,6 +624,7 @@ pub fn JoltProver(comptime F: type) type {
                 .memory_layout = &device.memory_layout, // Pass memory layout for OutputSumcheck
                 .initial_ram = init_ram_ptr,
                 .final_ram = final_ram_ptr,
+                .memory_trace = memory_trace_ptr1, // Pass memory trace for RAF sumcheck
             };
 
             // Convert to Jolt-compatible format with transcript integration
@@ -843,6 +848,9 @@ pub fn JoltProver(comptime F: type) type {
             const init_ram_dory: ?*const std.AutoHashMapUnmanaged(u64, u64) = &empty_initial_ram_dory;
             const final_ram_dory: ?*const std.AutoHashMapUnmanaged(u64, u64) = &emulator.ram.memory;
 
+            // Get memory trace for RAF evaluation sumcheck
+            const memory_trace_ptr: *const ram.MemoryTrace = &emulator.ram.trace;
+
             // Convert to Jolt-compatible format with transcript integration
             result.proof = try converter.convertWithTranscript(
                 commitment_types.PolyCommitment,
@@ -857,6 +865,7 @@ pub fn JoltProver(comptime F: type) type {
                     .memory_layout = &device.memory_layout, // Pass memory layout for OutputSumcheck
                     .initial_ram = init_ram_dory,
                     .final_ram = final_ram_dory,
+                    .memory_trace = memory_trace_ptr, // Pass memory trace for RAF sumcheck
                 },
                 cycle_witnesses,
                 tau,
@@ -1016,6 +1025,9 @@ pub fn JoltProver(comptime F: type) type {
             const init_ram_device: ?*const std.AutoHashMapUnmanaged(u64, u64) = &empty_initial_ram_device;
             const final_ram_device: ?*const std.AutoHashMapUnmanaged(u64, u64) = &emulator.ram.memory;
 
+            // Get memory trace for RAF evaluation sumcheck
+            const memory_trace_ptr2: *const ram.MemoryTrace = &emulator.ram.trace;
+
             // Convert to Jolt-compatible format with transcript integration
             return converter.convertWithTranscript(
                 commitment_types.PolyCommitment,
@@ -1030,6 +1042,7 @@ pub fn JoltProver(comptime F: type) type {
                     .memory_layout = &device.memory_layout, // Pass memory layout for OutputSumcheck
                     .initial_ram = init_ram_device,
                     .final_ram = final_ram_device,
+                    .memory_trace = memory_trace_ptr2, // Pass memory trace for RAF sumcheck
                 },
                 cycle_witnesses,
                 tau,

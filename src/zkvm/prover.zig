@@ -483,16 +483,35 @@ pub fn MultiStageProver(comptime F: type) type {
             );
             defer raf_params.deinit();
 
-            // Initialize RAF prover with memory trace
+            // Compute initial claim first, then initialize RAF prover
+            const initial_claim = blk: {
+                var ra_temp = try ram.RaPolynomial(F).fromTrace(
+                    self.allocator,
+                    self.memory_trace,
+                    raf_params.r_cycle,
+                    raf_params.start_address,
+                    raf_params.log_k,
+                );
+                defer ra_temp.deinit();
+
+                var claim = F.zero();
+                const unmap_temp = ram.UnmapPolynomial(F).init(raf_params.log_k, raf_params.start_address);
+                for (0..ra_temp.evals.len) |k| {
+                    const ra_k = ra_temp.get(k);
+                    const unmap_k = F.fromU64(unmap_temp.evaluateAtIndex(k));
+                    claim = claim.add(ra_k.mul(unmap_k));
+                }
+                break :blk claim;
+            };
+
+            // Initialize RAF prover with memory trace and computed claim
             var raf_prover = try ram.RafEvaluationProver(F).init(
                 self.allocator,
                 self.memory_trace,
                 raf_params,
+                initial_claim,
             );
             defer raf_prover.deinit();
-
-            // Compute and record initial claim
-            const initial_claim = raf_prover.computeInitialClaim();
             try stage_proof.final_claims.append(self.allocator, initial_claim);
             std.debug.print("[PROVER STAGE 2]   initial_claim=0x{x}\n", .{initial_claim.limbs[0]});
 
@@ -502,14 +521,14 @@ pub fn MultiStageProver(comptime F: type) type {
             for (0..num_rounds) |round| {
                 std.debug.print("[PROVER STAGE 2]   --- Round {d}/{d} ---\n", .{ round, num_rounds });
 
-                // Compute round polynomial [p(0), p(1)]
-                const round_poly = raf_prover.computeRoundPolynomial();
-                std.debug.print("[PROVER STAGE 2]     p(0)=0x{x}, p(1)=0x{x}\n", .{ round_poly[0].limbs[0], round_poly[1].limbs[0] });
+                // Compute round polynomial [s(0), s(1), s(2), s(3)]
+                const round_poly = raf_prover.computeRoundPolynomialCubic();
+                std.debug.print("[PROVER STAGE 2]     s(0)=0x{x}, s(1)=0x{x}\n", .{ round_poly[0].limbs[0], round_poly[1].limbs[0] });
 
-                // Store round polynomial in proof
+                // Store round polynomial in proof (just s(0) and s(2) for degree-2 compression)
                 const poly_copy = try self.allocator.alloc(F, 2);
                 poly_copy[0] = round_poly[0];
-                poly_copy[1] = round_poly[1];
+                poly_copy[1] = round_poly[2]; // s(2) instead of s(1)
                 try stage_proof.round_polys.append(self.allocator, poly_copy);
 
                 // Get challenge from transcript
@@ -517,7 +536,8 @@ pub fn MultiStageProver(comptime F: type) type {
                 try stage_proof.addChallenge(challenge);
                 std.debug.print("[PROVER STAGE 2]     challenge=0x{x}\n", .{challenge.limbs[0]});
 
-                // Bind the challenge for next round
+                // Update claim and bind the challenge for next round
+                raf_prover.updateClaim(round_poly, challenge);
                 try raf_prover.bindChallenge(challenge);
             }
 

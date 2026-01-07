@@ -253,6 +253,8 @@ pub fn RafEvaluationProver(comptime F: type) type {
         params: RafEvaluationParams(F),
         /// Current round
         round: usize,
+        /// Current claim (updated after each round)
+        current_claim: F,
         /// Bound values from previous rounds
         bound_values: std.ArrayListUnmanaged(F),
         allocator: Allocator,
@@ -261,6 +263,7 @@ pub fn RafEvaluationProver(comptime F: type) type {
             allocator: Allocator,
             trace: *const MemoryTrace,
             params: RafEvaluationParams(F),
+            initial_claim: F,
         ) !Self {
             const ra = try RaPolynomial(F).fromTrace(
                 allocator,
@@ -277,6 +280,7 @@ pub fn RafEvaluationProver(comptime F: type) type {
                 .unmap = unmap,
                 .params = params,
                 .round = 0,
+                .current_claim = initial_claim,
                 .bound_values = .{},
                 .allocator = allocator,
             };
@@ -299,16 +303,21 @@ pub fn RafEvaluationProver(comptime F: type) type {
         }
 
         /// Compute the round polynomial for the current round
-        /// Returns [p(0), p(2)] for degree-2 sumcheck (product of two multilinear polynomials)
+        /// Returns [s(0), s(1), s(2), s(3)] for batched cubic sumcheck compatibility.
         ///
         /// For a product of two multilinear polynomials, the sumcheck polynomial has degree 2.
-        /// We send evaluations at x=0 and x=2, and the verifier uses the constraint
-        /// p(0) + p(1) = previous_claim to recover p(1).
+        /// However, for batched sumcheck with cubic degree bound, we pad with s(3) extrapolated.
         ///
-        /// This matches the Jolt optimization that sends 2 field elements instead of 3.
-        pub fn computeRoundPolynomial(self: *Self) [2]F {
+        /// The polynomial s(X) = c0 + c1*X + c2*X^2 satisfies:
+        /// - s(0) + s(1) = current_claim
+        /// - s(0), s(2) are computed from the polynomial evaluation
+        /// - s(1) = claim - s(0)
+        /// - s(3) = c0 + 3*c1 + 9*c2 (extrapolated quadratic)
+        pub fn computeRoundPolynomialCubic(self: *Self) [4]F {
+            const current_claim = self.current_claim;
             const half = self.ra.evals.len / 2;
-            var evals: [2]F = .{ F.zero(), F.zero() };
+            var s0: F = F.zero();
+            var s2: F = F.zero();
 
             // Compute the base contribution from already-bound variables
             // unmap(k) = start_address + 8 * Σ_j bound_values[j] * 2^j + 8 * current_var * 2^round + ...
@@ -346,20 +355,34 @@ pub fn RafEvaluationProver(comptime F: type) type {
                     remaining_power *= 2;
                 }
 
-                // unmap at x = 0, 1, 2:
+                // unmap at x = 0, 2:
                 // unmap(x) = base + x*current_power + remaining
-                // unmap(0) = base + remaining
-                // unmap(1) = base + current_power + remaining
-                // unmap(2) = base + 2*current_power + remaining
                 const unmap_at_0 = base_contribution.add(remaining_contrib);
                 const unmap_at_2 = base_contribution.add(F.fromU64(current_power * 2)).add(remaining_contrib);
 
-                // Accumulate p(0) = Σ ra(0) * unmap(0) and p(2) = Σ ra(2) * unmap(2)
-                evals[0] = evals[0].add(ra_lo.mul(unmap_at_0));
-                evals[1] = evals[1].add(ra_at_2.mul(unmap_at_2));
+                // Accumulate s(0) = Σ ra(0) * unmap(0) and s(2) = Σ ra(2) * unmap(2)
+                s0 = s0.add(ra_lo.mul(unmap_at_0));
+                s2 = s2.add(ra_at_2.mul(unmap_at_2));
             }
 
-            return evals;
+            // Compute s(1) from sumcheck constraint: s(0) + s(1) = current_claim
+            const s1 = current_claim.sub(s0);
+
+            // For degree-2 polynomial: s(X) = c0 + c1*X + c2*X^2
+            // s(0) = c0
+            // s(1) = c0 + c1 + c2
+            // s(2) = c0 + 2*c1 + 4*c2
+            // Solve for c2: c2 = (s(2) - 2*s(1) + s(0)) / 2
+            // s(3) = c0 + 3*c1 + 9*c2
+            //      = s(0) + 3*(s(1) - s(0) - c2) + 9*c2
+            //      = s(0) + 3*s(1) - 3*s(0) + 6*c2
+            //      = -2*s(0) + 3*s(1) + 6*c2
+            //      = -2*s(0) + 3*s(1) + 3*(s(2) - 2*s(1) + s(0))
+            //      = -2*s(0) + 3*s(1) + 3*s(2) - 6*s(1) + 3*s(0)
+            //      = s(0) - 3*s(1) + 3*s(2)
+            const s3 = s0.sub(s1.mul(F.fromU64(3))).add(s2.mul(F.fromU64(3)));
+
+            return [4]F{ s0, s1, s2, s3 };
         }
 
         /// Process a challenge and bind the current variable
@@ -367,6 +390,34 @@ pub fn RafEvaluationProver(comptime F: type) type {
             self.ra.bind(challenge);
             try self.bound_values.append(self.allocator, challenge);
             self.round += 1;
+        }
+
+        /// Update claim after evaluating round polynomial at challenge
+        pub fn updateClaim(self: *Self, evals: [4]F, challenge: F) void {
+            // Lagrange interpolation at challenge from evals at 0, 1, 2, 3
+            const c = challenge;
+            const c_minus_1 = c.sub(F.one());
+            const c_minus_2 = c.sub(F.fromU64(2));
+            const c_minus_3 = c.sub(F.fromU64(3));
+
+            // L0(c) = (c-1)(c-2)(c-3) / (0-1)(0-2)(0-3) = (c-1)(c-2)(c-3) / -6
+            const neg6 = F.zero().sub(F.fromU64(6));
+            const L0 = c_minus_1.mul(c_minus_2).mul(c_minus_3).mul(neg6.inverse().?);
+
+            // L1(c) = c(c-2)(c-3) / (1-0)(1-2)(1-3) = c(c-2)(c-3) / 2
+            const L1 = c.mul(c_minus_2).mul(c_minus_3).mul(F.fromU64(2).inverse().?);
+
+            // L2(c) = c(c-1)(c-3) / (2-0)(2-1)(2-3) = c(c-1)(c-3) / -2
+            const neg2 = F.zero().sub(F.fromU64(2));
+            const L2 = c.mul(c_minus_1).mul(c_minus_3).mul(neg2.inverse().?);
+
+            // L3(c) = c(c-1)(c-2) / (3-0)(3-1)(3-2) = c(c-1)(c-2) / 6
+            const L3 = c.mul(c_minus_1).mul(c_minus_2).mul(F.fromU64(6).inverse().?);
+
+            self.current_claim = evals[0].mul(L0)
+                .add(evals[1].mul(L1))
+                .add(evals[2].mul(L2))
+                .add(evals[3].mul(L3));
         }
 
         /// Get the final evaluation claim
@@ -597,7 +648,9 @@ test "raf evaluation prover init" {
     );
     defer params.deinit();
 
-    var prover = try RafEvaluationProver(F).init(allocator, &trace, params);
+    // Use a test claim
+    const test_claim = F.fromU64(12345);
+    var prover = try RafEvaluationProver(F).init(allocator, &trace, params, test_claim);
     defer prover.deinit();
 
     // Initial claim should be computable
@@ -648,51 +701,52 @@ test "raf prover claim tracking" {
     );
     defer params.deinit();
 
-    var prover = try RafEvaluationProver(F).init(allocator, &trace, params);
+    // Initialize with the computed initial claim
+    const initial_claim = blk: {
+        // Compute initial claim: Σ_k ra(k) ⋅ unmap(k) - we need to compute this before init
+        // For this test, we'll use a placeholder and verify the sumcheck property
+        var ra_temp = try RaPolynomial(F).fromTrace(
+            allocator,
+            &trace,
+            &r_cycle,
+            0x80000000,
+            3,
+        );
+        defer ra_temp.deinit();
+
+        var claim = F.zero();
+        const unmap = UnmapPolynomial(F).init(3, 0x80000000);
+        for (0..ra_temp.evals.len) |k| {
+            const ra_k = ra_temp.get(k);
+            const unmap_k = F.fromU64(unmap.evaluateAtIndex(k));
+            claim = claim.add(ra_k.mul(unmap_k));
+        }
+        break :blk claim;
+    };
+
+    var prover = try RafEvaluationProver(F).init(allocator, &trace, params, initial_claim);
     defer prover.deinit();
 
     // Verify sumcheck invariant: p(0) + p(1) = current_claim for each round
     const num_rounds = params.numRounds(); // 3 rounds for log_k = 3
 
-    // Compute initial claim
-    var current_claim = prover.computeInitialClaim();
+    for (0..num_rounds) |round_num| {
+        const current_claim = prover.current_claim;
 
-    for (0..num_rounds) |round| {
-        // Compute round polynomial [p(0), p(2)]
-        const round_poly = prover.computeRoundPolynomial();
+        // Compute round polynomial [s(0), s(1), s(2), s(3)]
+        const round_poly = prover.computeRoundPolynomialCubic();
 
-        // The prover sends [p(0), p(2)]
-        // Verifier recovers p(1) = claim - p(0)
-        const p_at_0 = round_poly[0];
-        const p_at_2 = round_poly[1];
-        const p_at_1 = current_claim.sub(p_at_0);
-
-        // Verify p(0) + p(1) = current_claim
-        const sum = p_at_0.add(p_at_1);
+        // Verify s(0) + s(1) = current_claim
+        const sum = round_poly[0].add(round_poly[1]);
         try std.testing.expect(sum.eql(current_claim));
 
         // Generate a challenge
-        const challenge = F.fromU64(@intCast(round + 10));
+        const challenge = F.fromU64(@intCast(round_num + 10));
+
+        // Update claim using Lagrange interpolation
+        prover.updateClaim(round_poly, challenge);
 
         // Bind the challenge
         try prover.bindChallenge(challenge);
-
-        // Compute p(r) using quadratic Lagrange interpolation
-        const two = F.fromU64(2);
-        const r_minus_1 = challenge.sub(F.one());
-        const r_minus_2 = challenge.sub(two);
-
-        // L0(r) = (r-1)(r-2)/((0-1)(0-2)) = (r-1)(r-2)/2
-        const L0 = r_minus_1.mul(r_minus_2).mul(two.inverse().?);
-        // L1(r) = r(r-2)/((1-0)(1-2)) = -r(r-2)
-        const L1 = challenge.mul(r_minus_2).neg();
-        // L2(r) = r(r-1)/((2-0)(2-1)) = r(r-1)/2
-        const L2 = challenge.mul(r_minus_1).mul(two.inverse().?);
-
-        const expected_new_claim = p_at_0.mul(L0).add(p_at_1.mul(L1)).add(p_at_2.mul(L2));
-
-        // The claim after folding should match p(r)
-        // Recompute what the claim should be based on folded polynomials
-        current_claim = expected_new_claim;
     }
 }

@@ -5,60 +5,45 @@
 ### ✅ COMPLETED
 - All 712 internal tests pass
 - Stage 1 passes Jolt verification completely
-- Stage 2 sumcheck constraint (s(0)+s(1) = claim) passes all rounds
-- All 5 instance provers integrated and updating claims correctly
+- Stage 2 sumcheck constraint (s(0)+s(1) = claim) passes ALL 26 rounds
+- All 5 instance provers integrated and producing correct round polynomials
+- ProductVirtualRemainder final claim matches Jolt's expected Instance 0 claim
 
 ### ❌ REMAINING ISSUE
-- Stage 2 output_claim ≠ expected_output_claim
-- The sumcheck ROUNDS are correct (claims propagate properly)
-- The FINAL claim doesn't match what verifier expects from polynomial openings
+Stage 2 verification fails because:
+- `output_claim` (21589049...) ≠ `expected_output_claim` (9898116...)
+- Our prover produces non-zero contributions from ALL 5 instances
+- Jolt's verifier expects only Instance 0 to contribute (Instances 1-4 show claim=0)
 
-## Stage 2 Analysis
-
-### Current Numbers
-- Zolt output_claim: 21589049388974437284381767714841252907584727603323336789751151772545883922031
-- Jolt expected_output_claim: 9898116330490506910341296015176916681340621516181642175616333993492433350690
-
-### Verified Components (MATCH ✅):
-- fused_left: 6890326872915039705262170125493404951295898969136690654065828419097758694280
-- fused_right: 16403093111254811232256366631936514937767139743124672059436405855732128935088
-
-### Expected Output Claim Formula (Instance 0):
-```
-expected = tau_high_bound_r0 * tau_bound_r_tail_reversed * fused_left * fused_right
-```
-
-Where:
-- tau_high_bound_r0 = 20155157908076722556502616784924511038746646565368255767444635160140374572918
-- tau_bound_r_tail_reversed = 20142916058911915487407898995168112567948371721580244419193443500655839812742
-
-### Root Cause Analysis
-The fused_left/fused_right (opening claims) MATCH between Zolt and Jolt.
-The tau_high_bound_r0 (Lagrange kernel) should match if r0 matches.
-The tau_bound_r_tail_reversed depends on:
-1. tau_low values (should be identical from transcript)
-2. r_tail_reversed = reversed(r_cycle challenges)
-
-The issue is likely in:
-1. Challenge ordering (reversed vs not)
-2. Split_eq binding direction
+**Root Cause**: We're inserting `F.zero()` for polynomial opening claims like `RamRa`, `RamVal`, etc.
+This makes Jolt's expected_output_claim computation return 0 for Instances 1-4.
 
 ## Fixes Made This Session
 
-1. Fixed lagrangeC2 formula in output_check.zig:
-   - OLD: c2 = (s(0) - 2*s(1) + s(2)) / 2 (WRONG - gives c2 + 3*c3)
-   - NEW: c2 = (2*s(0) - 5*s(1) + 4*s(2) - s(3)) / 2 (CORRECT)
-
+1. Fixed lagrangeC2 formula in output_check.zig
 2. Added bindChallenge/updateClaim for InstructionLookups prover
-
 3. Fixed claim_before capture for ProductVirtualRemainder
+4. Verified all sumcheck rounds satisfy s(0)+s(1) = claim
+
+## Opening Claims Needed (Currently F.zero())
+
+To fix Stage 2, we need to compute actual values for:
+- `RamRa` @ `RamRafEvaluation` (Instance 1)
+- `RamVal` @ `RamReadWriteChecking` (Instance 2)
+- `RamRa` @ `RamReadWriteChecking` (Instance 2)
+- `RamValFinal` @ `RamOutputCheck` (Instance 3)
+- `LookupOutput` @ `InstructionClaimReduction` (Instance 4)
+- etc.
+
+These are polynomial evaluations at the sumcheck challenge points.
 
 ## Next Steps
 
-1. Verify tau values match between Zolt and Jolt
-2. Check challenge ordering in EqPolynomial::mle evaluation
-3. Verify split_eq binding direction (LowToHigh)
-4. Compare r_cycle challenges between prover and verifier
+1. Compute RAF opening claim (ra_input_claim at opening point)
+2. Compute RWC opening claims (val, ra at opening point)
+3. Compute Output opening claims
+4. Compute InstructionLookups opening claims
+5. Verify Stage 2 passes
 
 ## Verification Commands
 

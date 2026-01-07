@@ -1531,6 +1531,14 @@ pub fn ProofConverter(comptime F: type) type {
 
             std.debug.print("[ZOLT] STAGE2_BATCHED: final batched_claim = {any}\n", .{batched_claim.toBytesBE()});
 
+            // Debug: Print all challenges in LE format for comparison with Jolt
+            std.debug.print("[ZOLT] STAGE2_BATCHED: challenges.len = {}\n", .{challenges.items.len});
+            for (challenges.items, 0..) |ch, idx| {
+                const be_bytes = ch.toBytesBE();
+                // Convert to LE: last 8 bytes of BE = first 8 bytes of LE
+                std.debug.print("[ZOLT] STAGE2_BATCHED: challenge[{}] LE first 8 bytes = [{x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}]\n", .{ idx, be_bytes[31], be_bytes[30], be_bytes[29], be_bytes[28], be_bytes[27], be_bytes[26], be_bytes[25], be_bytes[24] });
+            }
+
             // Compute the 8 factor polynomial evaluations at r_cycle
             // r_cycle is the last n_cycle_vars challenges from Stage 2
             // ProductVirtualRemainder starts at round log_ram_k, so its r_cycle

@@ -5,57 +5,49 @@
 - Stage 2: FAILING ❌ (sumcheck output_claim mismatch)
 - Stage 3+: Not reached yet
 
-## CRITICAL FINDING (Session 5)
+## CRITICAL FINDING (Session 6)
 
-The ProductVirtualRemainder round 0 values are **completely different** between Zolt prover and a separate Jolt prover run:
+**The sumcheck polynomial coefficients are DIFFERENT between what Zolt writes and what Jolt reads!**
 
-**Jolt (LE first 8 bytes):**
-- t0 = b9 40 9a c7 e0 4b e9 a7
-- t_inf = 4a d3 0c 19 c0 9d 72 8f
-- claim = 3f 5a 2a 38 c3 d0 6c be
+Example from Stage 2 round 25:
+- Zolt prover generates c0 = 18957844668819946272... (BE bytes: {41, 233, 194, ...})
+- Jolt verifier reads c0 = 14124309671825385295... (LE bytes: [218, 112, 200, ...])
 
-**Zolt (LE last 8 bytes of BE):**
-- t0 = 63 69 06 26 07 42 54 07
-- t_inf = 93 ba a2 28 94 e0 5c c5
-- claim = 60 f7 55 cd 48 ef c9 c3
+This is a **serialization format mismatch** - the proof file bytes don't correctly convey the polynomial values.
 
-**Important Note**: This comparison was between Jolt's fibonacci example (using Jolt SDK) and Zolt's fibonacci.elf. These are DIFFERENT PROGRAMS with different traces, so different values are expected.
+### What We Know:
+1. ✅ tau_high values match between prover and verifier
+2. ✅ Stage 1 challenges match (transcript synchronized)
+3. ❌ Stage 2 round polynomials are read differently by Jolt
 
-The actual issue is that when Jolt verifies a Zolt-generated proof, the values computed from the proof don't match what the verifier expects.
+### Root Cause
+The JoltProof serialization writes polynomial coefficients in a format that Jolt doesn't correctly read. This could be:
+1. Field element byte order (LE vs BE) mismatch
+2. Proof structure layout mismatch
+3. Wrong polynomial section being read
 
-## Root Cause Hypothesis
-
-The previous_claim for ProductVirtualRemainder round 0 should be the UniSkip output from Stage 2. If this value differs, all subsequent computations will differ.
-
-Possible causes:
-1. UniSkip computation uses different challenges or r0 values
-2. Tau values (from Stage 1) differ between what Zolt computes vs what Jolt expects
-3. The left/right polynomials are constructed from different trace data
-4. The fused polynomial values at each cycle don't match
-
-## Verified Components
-1. ✅ EqPolynomial.evals produces correct partition of unity (sum = 1)
-2. ✅ Witness values are populated from trace correctly
-3. ✅ Gruen polynomial computation matches Jolt's formula
-4. ✅ Stage 1 passes (bytecode, R1CS compatible)
-
-## Key Files
-- `src/zkvm/proof_converter.zig` - Stage 2 batched sumcheck generation
-- `src/zkvm/spartan/product_remainder.zig` - ProductVirtualRemainder prover
+### Files to Debug
+- `/Users/matteo/projects/zolt/src/zkvm/jolt_serialization.zig` - Proof writer
+- `/Users/matteo/projects/jolt/jolt-core/src/zkvm/proof_serialization.rs` - Proof reader
 
 ## Next Steps
-1. **Compare Stage 2 input_claim** - the UniSkip claim that starts ProductVirtualRemainder
-2. **Compare tau values** - the challenges used for split_eq
-3. **Compare left[0]/right[0]** - first values of fused polynomials
-4. **Trace exact byte values** during Jolt verification to see what Jolt expects vs what Zolt provides
+1. **Compare proof binary structure** - Hexdump and match fields
+2. **Verify field element serialization** - LE bytes should match arkworks format
+3. **Check sumcheck proof section offset** - Make sure Jolt reads from correct offset
+
+## Verified Components
+1. ✅ EqPolynomial.evals produces correct partition of unity
+2. ✅ Witness values populated from trace correctly
+3. ✅ Stage 1 passes verification
+4. ✅ Transcript synchronization through tau_high sampling
 
 ## Debug Commands
 ```bash
-# Build and generate proof
+# Build and generate proof with debug
 zig build -Doptimize=ReleaseFast
-./zig-out/bin/zolt prove --jolt-format -o /tmp/proof.bin examples/fibonacci.elf 2>&1 | grep -E "PRODUCT round"
+./zig-out/bin/zolt prove --jolt-format -o /tmp/proof.bin examples/fibonacci.elf 2>&1 | grep "STAGE2_BATCHED round 25"
 
 # Test with Jolt
 cd /Users/matteo/projects/jolt
-cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture 2>&1 | tail -100
+cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture 2>&1 | grep "STAGE1_ROUND_25"
 ```

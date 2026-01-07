@@ -1,66 +1,66 @@
 # Zolt-Jolt Cross-Verification Progress
 
-## Session 18 Summary
+## Session 19 Summary - Stage 2 Investigation
 
-### Major Progress
-1. **All opening claims verified to match exactly**
-   - l_inst, r_inst, is_rd_not_zero, next_is_noop ✅
-   - fused_left, fused_right ✅
-   - ra_claim, val_claim, inc_claim ✅
+### Major Findings
 
-2. **Instance 0 (ProductVirtual) final claim matches** - Sumcheck produces correct result
+1. **Fixed Instance 4 (InstructionLookupsClaimReduction) endianness bug**
+   - `computeEq` in `instruction_lookups.zig` was using LITTLE ENDIAN bit indexing
+   - But `r_spartan` (from `tau[0..n_cycle_vars]`) is in BIG ENDIAN format
+   - Fixed by changing `x >> i` to `x >> (n - 1 - i)`
 
-3. **Stage 1 passes completely** - All 712 internal tests pass
+2. **All Instance 0 (ProductVirtual) components now match between Zolt and Jolt:**
+   - `split_eq.current_scalar` matches `tau_high_bound_r0 * tau_bound_r_tail_reversed`
+   - `fused_left` matches exactly
+   - `fused_right` matches exactly
+   - `left * right * eq` matches expected
 
-### Remaining Issue: Instance 2 (RWC)
+3. **Current Issue: Batched sumcheck output_claim diverges**
+   - Expected (computed from components): 19828484771497821494602704840470477639244539279836761038780805731500438199328
+   - Zolt output_claim: 5584134810285329217002595006333176637104372627852824503579688439906349437652
+   - The final polynomial values are correct, but the sumcheck claim evolution is wrong
 
-Despite all opening claims matching, the RWC sumcheck produces a different final claim.
+### Debugging Progress
 
-**Numbers:**
-- Our RWC final claim: 17925181248966282971112807010799772681208014801023116248823233609842789352688
-- Jolt expected claim: 11216823976254905917561036500968546773134980482196871908475958474138871482864
-- Ratio: ~1.6x (ours is larger)
-
-### Root Cause Analysis
-
-The expected formula is:
+The individual components match:
 ```
-final_claim = eq(r_cycle_params, r_cycle_sumcheck) * ra(opening_point) * (val + γ*(val + inc))
+Zolt left:  3020136264963051235489773022866837256495459151625256950341582263426242632602
+Jolt fused_left:  3020136264963051235489773022866837256495459151625256950341582263426242632602
+
+Zolt right: 9255024100601318676668993040097161032104347331651195994818994872862207439177
+Jolt fused_right: 9255024100601318676668993040097161032104347331651195994818994872862207439177
+
+Zolt eq:    20475033914414057635964920496637706243132929093097161521099370097473395544235
+Jolt eq (L * Eq): 20475033914414057635964920496637706243132929093097161521099370097473395544235
 ```
 
-Our sumcheck produces a different value because our eq polynomial handling is incorrect.
+But the sumcheck claim diverges, suggesting the round polynomial computation in the batched sumcheck has an issue.
 
-### Jolt's RWC Implementation (from expert analysis)
+### Key Insight
 
-1. **Phase 1**: Uses `GruenSplitEqPolynomial` with E_out/E_in tables
-2. **Phase 2**: Uses `merged_eq` after Phase 1 completes
-3. `current_scalar` accumulates eq(w[i], r) as variables are bound
+Instance 4 fix propagated through Fiat-Shamir:
+- Before fix: Instance 4 contributed a wrong non-zero claim
+- After fix: Instance 4 contributes 0 (correct)
+- But the challenges changed throughout, so the verification point changed
 
-Key: The Gruen structure progressively reduces tables as challenges bind. Our simple `eq_evals[]` array doesn't properly account for binding.
+### Suspected Root Cause
 
-### What We Tried
+The issue is likely in how the batched sumcheck combines round polynomials from the 5 instances, specifically in `proof_converter.zig:generateStage2BatchedSumcheckProof`.
 
-1. Recompute eq on-the-fly using bound challenges + params.r_cycle - Still wrong
-2. Simplified to use precomputed eq_evals directly - Same result
-3. Updated Phase 2 to compute eq_cycle properly - No change
+The claim update logic might not be tracking the sumcheck evolution correctly.
 
-### Technical Insight
-
-When binding challenge r at round i, the eq polynomial folds:
-- Original: eq(w, x) over all x ∈ {0,1}^n
-- After bind: eq(w', x') over x' ∈ {0,1}^{n-1}
-where the contribution from variable i is absorbed into a scalar.
-
-Our implementation doesn't properly track this folding.
+### Files Changed
+- `src/zkvm/claim_reductions/instruction_lookups.zig` - Fixed `computeEq` endianness
 
 ### Next Steps
 
-1. Study Jolt's GruenSplitEqPolynomial::bind() more carefully
-2. Implement proper eq folding in our RWC prover
-3. Consider adding per-round debugging to compare with Jolt
+1. Compare per-round polynomial values between Zolt and Jolt
+2. Check if the round polynomial conversion (evals -> coefficients -> evals) is correct
+3. Verify the claim update formula: `new_claim = s(challenge)` using Lagrange interpolation
 
 ## Technical References
 
-- Jolt RAM checking: `jolt-core/src/zkvm/ram/read_write_checking.rs`
-- Gruen optimization: `jolt-core/src/poly/split_eq_poly.rs`
-- Our RWC prover: `src/zkvm/ram/read_write_checking.zig`
+- Jolt ProductVirtual: `jolt-core/src/zkvm/spartan/product.rs`
+- Jolt BatchedSumcheck: `jolt-core/src/subprotocols/sumcheck.rs`
+- Zolt Stage 2 prover: `src/zkvm/proof_converter.zig:generateStage2BatchedSumcheckProof`
+- Zolt split_eq: `src/poly/split_eq.zig`

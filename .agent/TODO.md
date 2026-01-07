@@ -2,49 +2,48 @@
 
 ## Current Status
 
-### ✅ COMPLETED
+### Completed
 - Stage 1 passes Jolt verification completely
 - All 712 internal tests pass
-- R1CS witness generation fixed:
-  - RamReadValue for stores now uses pre-value (not zero)
-- RWC prover improvements:
-  - r_cycle uses correct slice: tau[0..n_cycle_vars]
-  - eq computation uses BIG_ENDIAN order (MSB first)
-  - inc = new_value - prev_value (signed difference)
-  - val_coeff = pre-value for writes, value for reads
-  - inc polynomial folds during Phase 1 binding
-  - Phase 2 uses eq_evals[0] and inc[0] as scalars
-- Memory trace separation:
-  - Instruction fetches use untraced reads (bytecode commitment, not RAM trace)
-  - Program loading uses untraced writes (initial state, not execution trace)
-- ELF loading fixed:
-  - proveJoltCompatibleWithDoryAndSrsAtAddress accepts base_address and entry_point
-  - Programs loaded at correct address (not hardcoded RAM_START_ADDRESS)
+- R1CS witness generation fixed
+- RWC prover improvements (eq endianness, inc computation, etc.)
+- Memory trace separation (instruction fetches untraced, program loading untraced)
+- ELF loading fixed (correct base_address and entry_point)
+- RWC SUMCHECK FIXED: Instance 2 now produces claim=0 (correct for fibonacci)
+- **Instance 4 (InstructionLookupsClaimReduction) endianness FIXED**
 
-### ✅ RWC SUMCHECK FIXED
-- RWC (Instance 2) now produces claim=0 for fibonacci (correct - no RAM operations)
-- total_sum and current_claim now match!
-
-### ❌ IN PROGRESS - Stage 2 ProductVirtual Mismatch
+### In Progress - Stage 2 Batched Sumcheck Output Claim Mismatch
 
 **The Issue:**
+All individual components match between Zolt and Jolt:
+- fused_left matches
+- fused_right matches
+- split_eq.current_scalar matches (L * Eq)
+- Challenges match exactly
+
+But the batched sumcheck output_claim diverges:
 ```
-output_claim:          21156486024890420644021865284593324425941707831228671205398077315638214271613
-expected_output_claim: 17764994705888080168286558985700513012579491205889951058836940863591331707629
+Expected:     19828484771497821494602704840470477639244539279836761038780805731500438199328
+Zolt output:  5584134810285329217002595006333176637104372627852824503579688439906349437652
 ```
 
-Instance breakdown:
-- Instance 0 (ProductVirtual): claim=10905316..., contribution=17764994... (problem here)
-- Instance 1 (RegistersVal): claim=0
-- Instance 2 (RWC): claim=0 ✅ FIXED
+**Root Cause Investigation:**
+The issue is in the sumcheck claim evolution, not the final polynomial values.
+The round polynomial computation or claim update formula has a bug.
+
+**Instance Status:**
+- Instance 0 (ProductVirtual): Components match, claim evolution wrong
+- Instance 1 (RegistersVal): claim=0 (inactive for fibonacci)
+- Instance 2 (RWC): claim=0 (correct)
 - Instance 3 (OutputCheck): claim=0
-- Instance 4 (InstructionClaimReduction): claim=0
+- Instance 4 (InstructionClaimReduction): claim=0 (FIXED endianness)
 
 ## Next Steps
 
-1. Investigate ProductVirtual polynomial computation
-2. Compare how Zolt vs Jolt compute ProductVirtual claims
-3. Check polynomial ordering or coefficient issues
+1. Add per-round debug output comparing Zolt vs Jolt polynomial values
+2. Verify the compressed -> evals -> Lagrange eval flow is correct
+3. Check if round polynomial coefficients match between Zolt and Jolt
+4. Investigate claim update: `new_claim = s(challenge)` computation
 
 ## Verification Commands
 
@@ -61,7 +60,8 @@ cargo test test_verify_zolt_proof -- --ignored --nocapture
 ```
 
 ## Code Locations
-- RWC prover: `/Users/matteo/projects/zolt/src/zkvm/ram/read_write_checking.zig`
-- Jolt RWC: `/Users/matteo/projects/jolt/jolt-core/src/zkvm/ram/read_write_checking.rs`
-- R1CS witness: `/Users/matteo/projects/zolt/src/zkvm/r1cs/constraints.zig`
+- ProductVirtual prover: `/Users/matteo/projects/zolt/src/zkvm/spartan/product_remainder.zig`
+- Jolt ProductVirtual: `/Users/matteo/projects/jolt/jolt-core/src/zkvm/spartan/product.rs`
+- Split Eq polynomial: `/Users/matteo/projects/zolt/src/poly/split_eq.zig`
 - Proof converter: `/Users/matteo/projects/zolt/src/zkvm/proof_converter.zig`
+- InstructionLookups: `/Users/matteo/projects/zolt/src/zkvm/claim_reductions/instruction_lookups.zig`

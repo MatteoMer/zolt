@@ -257,11 +257,14 @@ pub fn InstructionLookupsProver(comptime F: type) type {
     };
 }
 
-/// Compute eq(r, x) for a binary index x
+/// Compute eq(r, x) for a binary index x using BIG ENDIAN indexing
+/// r[0] corresponds to MSB of x, r[n-1] corresponds to LSB
 fn computeEq(comptime F: type, r: []const F, x: usize) F {
     var result = F.one();
+    const n = r.len;
     for (r, 0..) |ri, i| {
-        const xi: u1 = @truncate(x >> @intCast(i));
+        // BIG ENDIAN: r[0] is MSB, r[n-1] is LSB
+        const xi: u1 = @truncate(x >> @intCast(n - 1 - i));
         if (xi == 1) {
             result = result.mul(ri);
         } else {

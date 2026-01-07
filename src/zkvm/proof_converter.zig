@@ -1769,6 +1769,15 @@ pub fn ProofConverter(comptime F: type) type {
                 std.debug.print("[ZOLT] STAGE2_BATCHED: challenge[{}] LE first 8 bytes = [{x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}]\n", .{ idx, be_bytes[31], be_bytes[30], be_bytes[29], be_bytes[28], be_bytes[27], be_bytes[26], be_bytes[25], be_bytes[24] });
             }
 
+            // Debug: Print prover's final left/right values
+            if (product_prover) |pp| {
+                std.debug.print("[ZOLT] PROVER FINAL: left[0] = {any}\n", .{pp.left_poly.evaluations[0].toBytesBE()});
+                std.debug.print("[ZOLT] PROVER FINAL: right[0] = {any}\n", .{pp.right_poly.evaluations[0].toBytesBE()});
+                std.debug.print("[ZOLT] PROVER FINAL: split_eq.current_scalar = {any}\n", .{pp.split_eq.current_scalar.toBytesBE()});
+                const prover_final = pp.left_poly.evaluations[0].mul(pp.right_poly.evaluations[0]).mul(pp.split_eq.current_scalar);
+                std.debug.print("[ZOLT] PROVER FINAL: left * right * eq = {any}\n", .{prover_final.toBytesBE()});
+            }
+
             // Compute the 8 factor polynomial evaluations at r_cycle
             // r_cycle is the last n_cycle_vars challenges from Stage 2
             // ProductVirtualRemainder starts at round log_ram_k, so its r_cycle
@@ -1779,6 +1788,29 @@ pub fn ProofConverter(comptime F: type) type {
                 n_cycle_vars,
                 log_ram_k,
             );
+
+            // Debug: Compute fused_left and fused_right from factor_evals and compare
+            // Lagrange weights at r0_stage2
+            const LagrangePoly = r1cs.univariate_skip.LagrangePolynomial(F);
+            const w = try LagrangePoly.evals(5, r0_stage2, self.allocator);
+            defer self.allocator.free(w);
+
+            // fused_left = w[0]*l_inst + w[1]*is_rd_not_zero + w[2]*is_rd_not_zero + w[3]*lookup_out + w[4]*j_flag
+            const fused_left = w[0].mul(factor_evals[0])
+                .add(w[1].mul(factor_evals[2]))
+                .add(w[2].mul(factor_evals[2]))
+                .add(w[3].mul(factor_evals[5]))
+                .add(w[4].mul(factor_evals[4]));
+            // fused_right = w[0]*r_inst + w[1]*wl_flag + w[2]*j_flag + w[3]*branch_flag + w[4]*(1 - next_is_noop)
+            const one_minus_next_noop = F.one().sub(factor_evals[7]);
+            const fused_right = w[0].mul(factor_evals[1])
+                .add(w[1].mul(factor_evals[3]))
+                .add(w[2].mul(factor_evals[4]))
+                .add(w[3].mul(factor_evals[6]))
+                .add(w[4].mul(one_minus_next_noop));
+
+            std.debug.print("[ZOLT] FACTOR CLAIMS: fused_left = {any}\n", .{fused_left.toBytesBE()});
+            std.debug.print("[ZOLT] FACTOR CLAIMS: fused_right = {any}\n", .{fused_right.toBytesBE()});
 
             // Copy challenges to return them
             const challenges_copy = try self.allocator.alloc(F, challenges.items.len);

@@ -338,6 +338,24 @@ pub fn ProductVirtualRemainderProver(comptime F: type) type {
                     self.current_round,
                     claim_be[31], claim_be[30], claim_be[29], claim_be[28], claim_be[27], claim_be[26], claim_be[25], claim_be[24],
                 });
+                // Print split_eq state
+                std.debug.print("[ZOLT PRODUCT round {}] split_eq.current_scalar = {any}\n", .{
+                    self.current_round,
+                    self.split_eq.current_scalar.toBytesBE(),
+                });
+                std.debug.print("[ZOLT PRODUCT round {}] E_out.len = {}, E_in.len = {}\n", .{
+                    self.current_round,
+                    E_out.len,
+                    E_in.len,
+                });
+            }
+
+            // Print final state after last round
+            if (self.current_round + 1 == self.num_cycle_vars) {
+                std.debug.print("[ZOLT PRODUCT FINAL] left[0] = {any}\n", .{self.left_poly.evaluations[0].toBytesBE()});
+                std.debug.print("[ZOLT PRODUCT FINAL] right[0] = {any}\n", .{self.right_poly.evaluations[0].toBytesBE()});
+                std.debug.print("[ZOLT PRODUCT FINAL] left[1] = {any}\n", .{self.left_poly.evaluations[1].toBytesBE()});
+                std.debug.print("[ZOLT PRODUCT FINAL] right[1] = {any}\n", .{self.right_poly.evaluations[1].toBytesBE()});
             }
 
             // Use Gruen's polynomial construction to get the cubic round polynomial

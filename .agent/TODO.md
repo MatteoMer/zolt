@@ -2,7 +2,7 @@
 
 ## Current Status
 - Stage 1: PASSING ✅
-- Stage 2: FAILING ❌ (OutputSumcheck expected_output_claim != 0)
+- Stage 2: FAILING ❌ (OutputSumcheck val_final_claim != val_io_eval)
 - Stage 3+: Not reached yet
 
 ## Session 7 Final Progress
@@ -16,46 +16,68 @@
 6. ✅ 8 factor evaluations (LeftInstructionInput, RightInstructionInput, etc.)
 7. ✅ Factor claims inserted into proof correctly
 
-### ROOT CAUSE IDENTIFIED
+### ROOT CAUSE DEEP DIVE
 
-Stage 2 expected_output_claim computation shows:
+#### The Problem
+
+OutputSumcheck (instance 3) has a NON-ZERO `expected_output_claim` even though `input_claim = 0`.
+
+The `expected_output_claim` formula is:
 ```
-Instance 0 (ProductVirtualRemainder): claim=21572905787847890716862997770158461178426084346937578986156607546482633860011
-Instance 1 (RamRafEvaluation): claim=0
-Instance 2 (RamReadWriteChecking): claim=0
-Instance 3 (OutputSumcheck): claim=18879790779448816066373906755770008515526190607768701928996156399943982985463 (!)
-Instance 4 (InstructionLookupsClaimReduction): claim=0
-```
-
-**OutputSumcheck (instance 3) has a NON-ZERO expected_output_claim!**
-
-Even though `input_claim = 0` (zero-check), the `expected_output_claim` is computed from:
-- `VirtualPolynomial::RamValFinal` at `SumcheckId::RamOutputCheck`
-- `io_mask` and `val_io` MLE evaluations at the random address challenge
-
-This means the OutputSumcheck polynomial contributes to the final expected_output_claim,
-but Zolt's current implementation generates a zero polynomial for OutputSumcheck.
-
-### The Problem in Detail
-
-OutputSumcheck proves:
-```
-Σ_k eq(r_address, k) ⋅ io_mask(k) ⋅ (Val_final(k) − Val_io(k)) = 0
+expected_output_claim = eq_eval * io_mask_eval * (val_final_claim - val_io_eval)
 ```
 
-At the end of the sumcheck:
-1. `output_claim` = polynomial evaluated at final challenge
-2. `expected_output_claim` = computed from MLE evaluations of io_mask, Val_final, Val_io
+Where:
+- `val_final_claim = 0` (currently set by Zolt)
+- `val_io_eval = MLE(ProgramIOPolynomial, r_address_prime) ≠ 0`
 
-For a program with memory, even if there's no explicit output, `expected_output_claim` depends
-on the final RAM state, not just zeros.
+The non-zero `val_io_eval` comes from **the termination bit**. Even with empty inputs/outputs,
+`ProgramIOPolynomial` sets `coeffs[termination_index] = 1` for successful execution.
+
+#### Why val_io_eval is Non-Zero
+
+For a correctly executing program:
+- `program_io.inputs = []` (empty)
+- `program_io.outputs = []` (empty)
+- `program_io.panic = false`
+- Therefore: `coeffs[termination_index] = 1`
+
+The MLE evaluation at random point `r_address_prime`:
+```
+val_io_eval = eq(termination_index, r_address_prime) * 1 ≠ 0
+```
+
+#### The Fix Required
+
+For OutputSumcheck to pass, we need:
+```
+val_final_claim = val_io_eval
+```
+
+This means computing `val_io_eval = MLE(termination_bit_poly, r_address_prime)` where:
+1. `termination_bit_poly` is a polynomial with a single `1` at `termination_index`
+2. `r_address_prime = challenges[10..26]` (last 16 challenges from Stage 2 sumcheck)
+
+The computation is: `eq(termination_index, r_address_prime)` where `eq` is the Lagrange basis.
+
+### Implementation Status
+
+✅ Stage2Result now includes `challenges` slice for use in val_io computation
+✅ ConversionConfig extended with `memory_layout` field
+✅ Imports added for jolt_device and constants
+❌ val_io_eval computation not yet implemented
 
 ### Next Steps
-1. Implement proper OutputSumcheck sumcheck polynomial generation
-2. OR: Understand what `RamValFinal` claim is needed and provide it
-3. This requires modeling the RAM subsystem correctly
 
-## Files Modified
-- `src/transcripts/blake2b.zig`: Fixed challengeScalar128Bits and challengeScalarFull
-- `src/zkvm/proof_converter.zig`: Fixed Stage 2 input_claims and gamma sampling
-- Jolt: Added debugging for expected_output_claim per instance
+1. Pass memory_layout through ConversionConfig
+2. Implement `computeValIoEval(memory_layout, challenges)`:
+   - Get `termination_index` from memory layout
+   - Compute `eq(termination_index, r_address_prime)`
+   - Set `RamValFinal at RamOutputCheck = result`
+3. Test Stage 2 verification passes
+
+## Commits
+- `abe09a4`: Fixed input_claims and gamma sampling
+- `5033064`: Debug - polynomial coefficients match
+- `78a09cf`: Deep dive - termination bit is the issue
+- `68db1c2`: WIP structure improvements for OutputSumcheck

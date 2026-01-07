@@ -1659,10 +1659,12 @@ pub fn ProofConverter(comptime F: type) type {
             if (config.memory_trace != null) {
                 // RWC needs r_cycle from SpartanOuter challenges (already available in tau)
                 // and gamma from transcript (gamma_rwc)
+                // tau_stage2 = [r_cycle_reversed (n_cycle_vars), tau_high_stage2]
+                // So r_cycle = tau[0..n_cycle_vars] (the first n_cycle_vars elements)
                 var rwc_params = ram.RamReadWriteCheckingParams(F).init(
                     self.allocator,
                     gamma_rwc,
-                    tau[tau.len - n_cycle_vars ..], // r_cycle is the last n_cycle_vars of tau
+                    tau[0..n_cycle_vars], // r_cycle is the first n_cycle_vars elements of tau
                     log_ram_k,
                     n_cycle_vars,
                     if (config.memory_layout) |ml| ml.getLowestAddress() else 0x80000000,
@@ -1794,11 +1796,11 @@ pub fn ProofConverter(comptime F: type) type {
                             combined_evals[3] = combined_evals[3].add(s3_out.mul(batching_coeffs[i]));
                         } else if (i == 1) {
                             // Instance 1: RafEvaluation (log_ram_k rounds, degree 2)
-                            // Initialize RAF prover at start_round using r_cycle from tau (last n_cycle_vars)
+                            // Initialize RAF prover at start_round using r_cycle from tau (first n_cycle_vars)
                             if (round_idx == start_round and raf_prover == null and config.memory_trace != null) {
                                 // r_cycle comes from tau (like RWC), NOT from sumcheck challenges
-                                // tau[tau.len - n_cycle_vars ..] = last 10 tau values = r_cycle
-                                const r_cycle_slice = tau[tau.len - n_cycle_vars ..];
+                                // tau_stage2 = [r_cycle_reversed, tau_high] so r_cycle = tau[0..n_cycle_vars]
+                                const r_cycle_slice = tau[0..n_cycle_vars];
                                 const r_cycle = try self.allocator.alloc(F, n_cycle_vars);
                                 @memcpy(r_cycle, r_cycle_slice);
 
@@ -1896,8 +1898,8 @@ pub fn ProofConverter(comptime F: type) type {
                             // Instance 4: InstructionLookupsClaimReduction (10 rounds, starts at round 16)
                             // Initialize at start_round using r_spartan from challenges
                             if (round_idx == start_round and instr_prover == null and cycle_witnesses.len > 0) {
-                                // r_spartan is the last n_cycle_vars of tau
-                                const r_spartan = tau[tau.len - n_cycle_vars ..];
+                                // r_spartan = tau[0..n_cycle_vars] (the first n_cycle_vars elements)
+                                const r_spartan = tau[0..n_cycle_vars];
 
                                 var instr_params = claim_reductions.InstructionLookupsParams(F).init(
                                     self.allocator,

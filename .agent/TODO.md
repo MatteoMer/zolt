@@ -1,81 +1,62 @@
 # Zolt-Jolt Compatibility - Status Update
 
-## Current Status
-- **Stage 1: PASSING ✅** - Sumcheck output_claim matches
-- **Stage 2: Preprocessing mismatch** - Different programs have different tau values
-- **Preprocessing Export: Format Mismatch** - SRS size differs (11 vs 13 entries)
-- All Zolt tests pass (712/712)
+## Current Status: Session 11
 
-## What Works
-1. **Proof serialization/deserialization** ✅ - Jolt can deserialize Zolt proofs
-2. **Virtual polynomial claims** ✅ - All values match exactly:
-   - LeftInstructionInput ✅
-   - RightInstructionInput ✅
-   - IsRdNotZero ✅
-   - NextIsNoop ✅
-3. **OutputSumcheck** ✅ - val_final_claim == val_io_eval (difference = 0)
-4. **Stage 1 sumcheck** ✅ - output_claim is correct
+### Stage 2 Sumcheck Failure
 
-## Root Cause
+- **Stage 1: PASSING ✅** - Sumcheck output_claim matches expected
+- **Stage 2: FAILING ❌** - output_claim != expected_output_claim
 
-### Problem 1: Different Programs
-- Zolt's fibonacci.elf: RV32 (32-bit RISC-V)
-- Jolt's fibonacci guest: RV64IMAC (64-bit RISC-V)
-- Different bytecode → Different tau values → Different expected claims
-
-### Problem 2: Different SRS
-- Zolt generates its own SRS with `DorySRS.setup(allocator, 20)`
-- Jolt uses `DoryGlobals` with runtime-computed dimensions
-- Different SRS → Different commitment verification values
-
-### Observed Values
-- Zolt tau[10]: `10082273819133654128073895258316729483365029118085832455614804789697107726281`
-- Jolt tau_high: `1724079782492782403949918631195347939403999634829548103697761600182229454970`
-
-## Solution Path
-
-For full cross-verification, we need:
-
-### Option 1: Shared SRS (Production Approach)
-1. Generate a universal SRS through trusted setup
-2. Both Zolt and Jolt use the same SRS
-3. Export/import SRS in compatible format
-
-### Option 2: Same Program Binary
-1. Compile a RV64IMAC program that both can execute
-2. Zolt needs RV64 support (currently RV32)
-
-### Option 3: Jolt Preprocessing for Zolt ELF
-1. Add Jolt API to preprocess external ELF files
-2. Use Jolt-generated preprocessing with Zolt proof
-
-## Session 10 Commits
-- `362e8ab`: fix(output-sumcheck): Reverse r_address_prime for big-endian evaluation
-
-## Technical Details
-
-### Preprocessing Format Comparison
 ```
-Zolt: 0b 00 00 00 00 00 00 00 (11 delta_1l entries)
-Jolt: 0d 00 00 00 00 00 00 00 (13 delta_1l entries)
+output_claim:          15813746968267243297450630513407769417288591023625754132394390395019523654383
+expected_output_claim: 21370344117342657988577911810586668133317596586881852281711504041258248730449
 ```
 
-The different array lengths indicate different SRS dimensions.
+### What Matches (Verified)
+1. ✅ tau_high matches between Zolt and Jolt
+2. ✅ Initial batched claim matches
+3. ✅ All 26 Stage 2 challenges match byte-for-byte
+4. ✅ Round polynomial coefficients match (c0, c2, c3 for rounds 0, 25)
+5. ✅ Virtual polynomial factor evaluations match (l_inst, r_inst, etc.)
+6. ✅ Opening claims serialize correctly
 
-### Instruction Serialization
-Both use JSON format via serde_json, but field names must match exactly.
-Zolt's preprocessing export includes BytecodePreprocessing, RAMPreprocessing, MemoryLayout, and DoryVerifierSetup.
+### Root Cause Hypothesis
 
-## Next Steps
+Despite matching coefficients, the final polynomial evaluation differs. The sumcheck
+polynomial evaluation uses `eval_from_hint` which reconstructs the polynomial and
+evaluates. The discrepancy could be in:
 
-1. **Align SRS Generation**
-   - Match Zolt's SRS seed/parameters with Jolt's
-   - Or implement SRS import/export
+1. **eq polynomial in the polynomial being proved** - Zolt's ProductVirtualRemainderProver
+   computes `L(τ_high, r0) * Eq(τ_low, x) * fused_left(x) * fused_right(x)`
 
-2. **Add RV64 Support to Zolt**
-   - Would allow proving Jolt-compiled programs
-   - Significant effort but clean solution
+2. **The split_eq polynomial binding** - How `current_scalar` accumulates during rounds
 
-3. **Jolt API Extension**
-   - Add function to preprocess arbitrary ELF
-   - Use that for cross-verification testing
+3. **Round start offset** - ProductVirtualRemainder starts at round `log_ram_k` (16),
+   but the expected_output_claim uses only the last `n_cycle_vars` (10) challenges
+
+### Key Files
+
+- `src/zkvm/spartan/product_remainder.zig` - ProductVirtualRemainderProver
+- `src/poly/split_eq.zig` - GruenSplitEqPolynomial
+- `src/zkvm/proof_converter.zig` - Stage 2 batched sumcheck (generateStage2BatchedSumcheckProof)
+
+### Next Investigation Steps
+
+1. Add detailed trace in `computeCubicRoundPoly` showing:
+   - q_constant (t0_sum)
+   - q_quadratic_coeff (t_inf_sum)
+   - current_scalar (eq contribution)
+
+2. Compare eq polynomial values between Zolt prover and Jolt verifier at each round
+
+3. Check if ProductVirtualRemainder's `r_cycle` calculation matches what Jolt expects
+
+## Previous Sessions
+
+### Session 10
+- Fixed output-sumcheck r_address_prime reversal
+- Stage 1 started passing
+
+### Session 9
+- Fixed transcript challenge sampling
+- Aligned MontU128Challenge representation

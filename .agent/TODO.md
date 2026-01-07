@@ -1,8 +1,8 @@
 # Zolt-Jolt Compatibility - Status Update
 
-## Current Status: Session 11
+## Current Status: Session 12
 
-### Stage 2 Sumcheck Failure
+### Stage 2 Sumcheck Failure - Deep Investigation
 
 - **Stage 1: PASSING ✅** - Sumcheck output_claim matches expected
 - **Stage 2: FAILING ❌** - output_claim != expected_output_claim
@@ -11,6 +11,39 @@
 output_claim:          15813746968267243297450630513407769417288591023625754132394390395019523654383
 expected_output_claim: 21370344117342657988577911810586668133317596586881852281711504041258248730449
 ```
+
+### Progress This Session
+
+1. **Fixed computeEqEvalsGeneric** - Now uses BIG_ENDIAN indexing to match Jolt:
+   - r[0] controls MSB of index (not LSB)
+   - This aligns with Jolt's EqPolynomial::evals() convention
+
+2. **Verified split_eq construction** - E_out_vec and E_in_vec use correct big-endian indexing
+
+3. **Verified polynomial storage** - left/right polynomials stored sequentially matching Jolt
+
+4. **Verified Gruen cubic** - computeCubicRoundPoly formula matches Jolt's gruen_poly_deg_3
+
+5. **Verified binding** - bindLow formula matches Jolt's bound_poly_var_bot
+
+### Mathematical Analysis
+
+**The Key Identity:**
+`MLE_LE(poly, r) = MLE_BE(poly, r_reversed)` when using the same sequential polynomial storage.
+
+This means:
+- Prover binds with LowToHigh, computing `MLE_LE(left, r)`
+- Factor claims compute `MLE_BE(factor, r_reversed)` using big-endian eq tables
+- These should be equal!
+
+**Why Still Failing:**
+The eq polynomial part and polynomial evaluation part should both match. But the
+sumcheck output doesn't match the expected. This suggests either:
+
+1. **Round polynomial computation issue** - t0/t_inf values differ
+2. **First round handling** - Jolt handles first round differently
+3. **Claim update logic** - Evaluation at challenge differs
+4. **Something in the batched sumcheck** - Coefficient combining issue
 
 ### What Matches (Verified)
 1. ✅ tau_high matches between Zolt and Jolt
@@ -23,44 +56,14 @@ expected_output_claim: 213703441173426579885779118105866681333175965868818522817
 8. ✅ split_eq binding formula matches Jolt (eq(tau, r) accumulation)
 9. ✅ computeCubicRoundPoly formula matches Jolt's gruen_poly_deg_3
 10. ✅ bindLow formula matches Jolt's bound_poly_var_bot
-
-### Root Cause Analysis
-
-The sumcheck verification formula mismatch is subtle:
-
-**Prover side (Zolt):**
-After binding challenges r[0], r[1], ..., r[n-1] with LowToHigh binding:
-- split_eq accumulates: `Eq(tau_reversed, r)` = `Eq(tau, r_reversed)` (due to index reversal)
-- left/right polynomials evaluate at: `left(r)`, `right(r)` (in LE convention)
-- Final claim: `Eq(tau, r_reversed) * left(r) * right(r)`
-
-**Verifier side (Jolt):**
-- Computes: `tau_bound_r_reversed = Eq(tau, r_reversed)`
-- Computes factor claims: `fused_left(r_reversed)`, `fused_right(r_reversed)`
-- Expected: `Eq(tau, r_reversed) * fused_left(r_reversed) * fused_right(r_reversed)`
-
-**The Mismatch:**
-- Prover: `left(r) * right(r)`
-- Verifier expects: `left(r_reversed) * right(r_reversed)`
-
-The eq part matches, but the polynomial evaluations differ!
-
-### Why Jolt Works
-
-Jolt's prover and verifier must be consistent because:
-1. The polynomial indexing uses BIG_ENDIAN convention
-2. When bound with LowToHigh challenges, the BIG_ENDIAN indexing causes the
-   polynomial to effectively evaluate at the reversed point
-3. The factor claims use normalize_opening_point which also reverses
-
-Zolt may have a mismatch in how the polynomial is stored or indexed compared to Jolt.
+11. ✅ Big-endian eq indexing in factor claim computation (fixed this session)
 
 ### Next Steps
 
-1. Check Zolt's DensePolynomial storage order vs Jolt's
-2. Verify that Zolt's fused_left/fused_right construction matches Jolt's
-3. Compare the polynomial values at cycle index 0, 1, etc. between Zolt and Jolt
-4. Consider if bindLow in Zolt produces LE indexing while Jolt uses BE
+1. **Debug t0/t_inf values** - Add output to compare per-round values with Jolt
+2. **Check first round special handling** - Jolt's `compute_first_quadratic_evals_and_bound_polys`
+3. **Trace claim updates** - Verify s(r_challenge) computation matches
+4. **Compare intermediate claims** - After each round, are prover and verifier claims same?
 
 ### Key Files
 
@@ -70,6 +73,10 @@ Zolt may have a mismatch in how the polynomial is stored or indexed compared to 
 - `src/zkvm/proof_converter.zig` - Stage 2 batched sumcheck
 
 ## Previous Sessions
+
+### Session 11
+- Verified extensive formula matching between Zolt and Jolt
+- Identified that polynomial indexing/storage must match exactly
 
 ### Session 10
 - Fixed output-sumcheck r_address_prime reversal

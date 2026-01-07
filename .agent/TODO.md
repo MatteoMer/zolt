@@ -1,8 +1,8 @@
 # Zolt-Jolt Compatibility - Status Update
 
-## Current Status: Session 12
+## Current Status: Session 12 (Continued)
 
-### Stage 2 Sumcheck Failure - Deep Investigation
+### Stage 2 Sumcheck Failure - Root Cause Found!
 
 - **Stage 1: PASSING ✅** - Sumcheck output_claim matches expected
 - **Stage 2: FAILING ❌** - output_claim != expected_output_claim
@@ -12,65 +12,62 @@ output_claim:          158137469682672432974506305134077694172885910236257541323
 expected_output_claim: 21370344117342657988577911810586668133317596586881852281711504041258248730449
 ```
 
-### Progress This Session
+### MAJOR BREAKTHROUGH: Final Values Match!
 
-1. **Fixed computeEqEvalsGeneric** - Now uses BIG_ENDIAN indexing to match Jolt:
-   - r[0] controls MSB of index (not LSB)
-   - This aligns with Jolt's EqPolynomial::evals() convention
+After extensive debugging, I found that **ALL** of the following match exactly between Zolt and Jolt:
 
-2. **Verified split_eq construction** - E_out_vec and E_in_vec use correct big-endian indexing
+1. ✅ **left[0]** - Prover's final left polynomial value
+2. ✅ **right[0]** - Prover's final right polynomial value
+3. ✅ **split_eq.current_scalar** - Equals tau_high_bound_r0 * tau_bound_r_tail_reversed
+4. ✅ **fused_left** - Computed from factor claims matches left[0]
+5. ✅ **fused_right** - Computed from factor claims matches right[0]
+6. ✅ **left * right * eq** - ProductVirtualRemainder's expected claim = 19131931169602397700325994909403612608099043325475370665412093729674884104319
+7. ✅ **Initial batched claim** - 712179532459811457325748625852270562576712947602781856366289191649144450642
 
-3. **Verified polynomial storage** - left/right polynomials stored sequentially matching Jolt
+### The Problem
 
-4. **Verified Gruen cubic** - computeCubicRoundPoly formula matches Jolt's gruen_poly_deg_3
+Since the final polynomial evaluations are correct, but the sumcheck output_claim is wrong, the issue is in **how the round polynomials accumulate** during the sumcheck:
 
-5. **Verified binding** - bindLow formula matches Jolt's bound_poly_var_bot
+The sumcheck verifier iterates:
+1. Start with batched_initial_claim (matches ✅)
+2. For each round: claim = round_poly(challenge)
+3. After 26 rounds: output_claim (wrong!)
 
-### Mathematical Analysis
+The round polynomial evaluations at each challenge must be producing a different trajectory than expected, even though the final values are correct.
 
-**The Key Identity:**
-`MLE_LE(poly, r) = MLE_BE(poly, r_reversed)` when using the same sequential polynomial storage.
+### Possible Issues
 
-This means:
-- Prover binds with LowToHigh, computing `MLE_LE(left, r)`
-- Factor claims compute `MLE_BE(factor, r_reversed)` using big-endian eq tables
-- These should be equal!
-
-**Why Still Failing:**
-The eq polynomial part and polynomial evaluation part should both match. But the
-sumcheck output doesn't match the expected. This suggests either:
-
-1. **Round polynomial computation issue** - t0/t_inf values differ
-2. **First round handling** - Jolt handles first round differently
-3. **Claim update logic** - Evaluation at challenge differs
-4. **Something in the batched sumcheck** - Coefficient combining issue
-
-### What Matches (Verified)
-1. ✅ tau_high matches between Zolt and Jolt
-2. ✅ Initial batched claim matches
-3. ✅ All 26 Stage 2 challenges match byte-for-byte
-4. ✅ Round polynomial coefficients match (c0, c2, c3 for rounds 0, 25)
-5. ✅ Virtual polynomial factor evaluations match (l_inst, r_inst, etc.)
-6. ✅ Opening claims serialize correctly
-7. ✅ EqPolynomial formulas match Jolt
-8. ✅ split_eq binding formula matches Jolt (eq(tau, r) accumulation)
-9. ✅ computeCubicRoundPoly formula matches Jolt's gruen_poly_deg_3
-10. ✅ bindLow formula matches Jolt's bound_poly_var_bot
-11. ✅ Big-endian eq indexing in factor claim computation (fixed this session)
+1. **Round polynomial construction** - The compressed [c0, c2, c3] being written might be computed correctly for the claim at that round, but the hint recovery in the verifier uses a different claim
+2. **Batching coefficient application** - The way instances are combined in each round might differ
+3. **Claim update timing** - When the claim is updated vs when it's used for next round
 
 ### Next Steps
 
-1. **Debug t0/t_inf values** - Add output to compare per-round values with Jolt
-2. **Check first round special handling** - Jolt's `compute_first_quadratic_evals_and_bound_polys`
-3. **Trace claim updates** - Verify s(r_challenge) computation matches
-4. **Compare intermediate claims** - After each round, are prover and verifier claims same?
+1. Add detailed per-round debug to compare:
+   - Zolt's claim before each round
+   - Zolt's round polynomial evaluations s(0), s(1), s(2), s(3)
+   - Zolt's claim after evaluating s(challenge)
+2. Compare with Jolt's verifier step-by-step trace
+3. Find the first round where claims diverge
+
+### Key Finding: Batching Matters!
+
+The expected_output_claim is **not** just the ProductVirtualRemainder's claim, but:
+```
+expected = coeff[0] * product_claim + coeff[1] * 0 + coeff[2] * 0 + coeff[3] * 0 + coeff[4] * 0
+        = coeff[0] * product_claim
+        = 338733333185391054954706473760189339532 * 19131931169602397700325994909403612608099043325475370665412093729674884104319
+        = 21370344117342657988577911810586668133317596586881852281711504041258248730449 (mod p)
+```
+
+The sumcheck output_claim should equal this batched value, but it equals 15813746... instead.
 
 ### Key Files
 
 - `src/zkvm/spartan/product_remainder.zig` - ProductVirtualRemainderProver
 - `src/poly/split_eq.zig` - GruenSplitEqPolynomial
-- `src/poly/mod.zig` - DensePolynomial.bindLow
 - `src/zkvm/proof_converter.zig` - Stage 2 batched sumcheck
+- `jolt-core/src/subprotocols/sumcheck.rs` - Jolt's sumcheck verifier
 
 ## Previous Sessions
 

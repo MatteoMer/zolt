@@ -1388,6 +1388,7 @@ pub fn ProofConverter(comptime F: type) type {
             }
 
             std.debug.print("[ZOLT] STAGE2_BATCHED: initial batched_claim = {any}\n", .{batched_claim.toBytesBE()});
+            std.debug.print("[ZOLT] STAGE2_BATCHED: uni_skip_claim_stage2 (product input) = {any}\n", .{uni_skip_claim_stage2.toBytesBE()});
 
             // Initialize ProductVirtualRemainder prover (only if we have witnesses)
             const ProductRemainderProver = product_remainder.ProductVirtualRemainderProver(F);
@@ -1485,6 +1486,13 @@ pub fn ProofConverter(comptime F: type) type {
 
                 // Convert to compressed coefficients [c0, c2, c3]
                 const compressed = poly_mod.UniPoly(F).evalsToCompressed(combined_evals);
+
+                if (round_idx == 0 or round_idx == 16 or round_idx == max_num_rounds - 1) {
+                    std.debug.print("[ZOLT] STAGE2_BATCHED round {}: combined_evals[0] = {any}\n", .{ round_idx, combined_evals[0].toBytesBE() });
+                    std.debug.print("[ZOLT] STAGE2_BATCHED round {}: combined_evals[1] = {any}\n", .{ round_idx, combined_evals[1].toBytesBE() });
+                    std.debug.print("[ZOLT] STAGE2_BATCHED round {}: compressed[0] (c0) = {any}\n", .{ round_idx, compressed[0].toBytesBE() });
+                    std.debug.print("[ZOLT] STAGE2_BATCHED round {}: compressed[2] (c3) = {any}\n", .{ round_idx, compressed[2].toBytesBE() });
+                }
 
                 // Append to proof
                 const coeffs = try self.allocator.alloc(F, 3);

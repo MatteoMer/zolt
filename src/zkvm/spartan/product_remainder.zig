@@ -288,9 +288,8 @@ pub fn ProductVirtualRemainderProver(comptime F: type) type {
 
                 for (0..E_in.len) |x_in| {
                     const g = (x_out << num_xin_bits) | x_in;
-                    const half = self.left_poly.boundLen() / 2;
 
-                    // Standard MLE layout: lo at g, hi at g+half
+                    // Standard MLE layout: lo at g, hi at g+half (half is from outer scope)
                     if (g < half) {
                         // Get left/right at lo and hi positions
                         const l_lo = self.left_poly.evaluations[g];

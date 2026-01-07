@@ -1,5 +1,24 @@
 # Zolt-Jolt Compatibility - Status Update
 
+## Session 14 Summary
+
+### Major Progress Made:
+1. ✅ Fixed Stage 2 UniSkip extended evaluations
+2. ✅ Added `computeProductVirtualExtendedEvals` function
+3. ✅ Made instances 1, 2, 4 contribute zero (no provers)
+4. ✅ Verified that ProductVirtualRemainder final values match Jolt:
+   - fused_left MATCHES
+   - fused_right MATCHES
+   - split_eq.current_scalar MATCHES
+   - instance 0 final claim MATCHES
+
+### Remaining Issue:
+The sumcheck output_claim differs from expected_output_claim:
+- output_claim = 13130043...
+- expected = 2295742...
+
+This is a claim propagation issue in the batched sumcheck, not a polynomial evaluation issue.
+
 ## Current Status: Session 14
 
 ### Stage 2 Cross-Verification - IN PROGRESS

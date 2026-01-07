@@ -1,87 +1,70 @@
 # Zolt-Jolt Compatibility - Status Update
 
-## Session 15 Summary
+## Session 15 - Final Summary
 
 ### Current Status
 - ✅ All 712 internal tests pass (`zig build test`)
 - ✅ Stage 1 passes Jolt verification
-- ❌ Stage 2 fails Jolt verification
+- ✅ Stage 2 UniSkip r0 now matches Jolt
+- ❌ Stage 2 batched sumcheck fails
 
-### Stage 2 Root Cause Analysis
+### Critical Finding: Stage 2 UniSkip Fixed!
+After extensive debugging, the Stage 2 UniSkip transcript is now correctly aligned:
+- All 13 polynomial coefficients match between Zolt and Jolt
+- r0 = `8768758914789955585787902790032491769856779696899125603611137465800193155946` (matches!)
 
-The Stage 2 batched sumcheck fails due to **multiple issues**:
+### Remaining Issue: Stage 2 Batched Sumcheck
 
-#### Issue 1: r0 Mismatch
-The Stage 2 r0 (UniSkip challenge) differs between Zolt and Jolt:
-- Zolt r0: `8768758914789955585787902790032491769856779696899125603611137465800193155946`
-- Jolt r0: `16176819525807790011525369806787798080841445107270164702191186390206256879646`
+The batched sumcheck has 5 instances. Only instances 0 and 3 have proper provers:
 
-r0 comes from the opening_accumulator after UniSkip verification. The transcript must match for r0 to match.
+| Instance | Name | Status | Input Claim | Expected Output |
+|----------|------|--------|-------------|-----------------|
+| 0 | ProductVirtualRemainder | ✅ Implemented | non-zero | fused products |
+| 1 | RamRafEvaluation | ❌ Zero fallback | non-zero | 0 |
+| 2 | RamReadWriteChecking | ❌ Zero fallback | non-zero | 0 |
+| 3 | OutputSumcheck | ✅ Implemented | 0 | 0 |
+| 4 | InstructionLookupsClaimReduction | ❌ Zero fallback | non-zero | 0 |
 
-#### Issue 2: Sumcheck Claim Violations
-Errors starting at round 23:
+### Sumcheck Claim Errors
+- Round 0: `s(0)+s(1) != old_claim`
+- Round 23-25: `s(0)+s(1) != old_claim`
+
+These errors occur because instances 1, 2, 4 have non-zero input claims but contribute zero polynomials.
+
+### What's Needed
+
+1. **RamRafEvaluation Prover** (instance 1)
+   - Evaluates `eq(r_address, x)` polynomial
+   - Reference: `jolt-core/src/zkvm/ram/raf_evaluation.rs`
+   - 16 rounds
+
+2. **RamReadWriteChecking Prover** (instance 2)
+   - Most complex - 3 phases
+   - Reference: `jolt-core/src/zkvm/ram/read_write_checking.rs`
+   - 26 rounds
+
+3. **InstructionLookupsClaimReduction Prover** (instance 4)
+   - 2 phases: prefix-suffix sumcheck + regular sumcheck
+   - Reference: `jolt-core/src/zkvm/claim_reductions/instruction_lookups.rs`
+   - 10 rounds
+
+### Alternative Approach
+For the fibonacci program specifically, RAM operations are minimal. The provers might be simplified if the actual polynomial evaluations are zero. However, the sumcheck protocol requires proper polynomial contributions even if they evaluate to zero at the end.
+
+## Verification Steps
+
+To reproduce:
+```bash
+# Generate Zolt proof
+./zig-out/bin/zolt prove --jolt-format -o /tmp/zolt_proof_dory.bin examples/fibonacci.elf
+
+# Test with Jolt
+cd /Users/matteo/projects/jolt/jolt-core
+cargo test test_verify_zolt_proof -- --ignored --nocapture
 ```
-[ZOLT CLAIM ERROR] round 23: s(0)+s(1) != old_claim!
-[ZOLT CLAIM ERROR] round 24: s(0)+s(1) != old_claim!
-[ZOLT CLAIM ERROR] round 25: s(0)+s(1) != old_claim!
-```
 
-This happens because instances 1, 2, 4 use zero polynomial fallback instead of proper provers.
-
-#### Issue 3: Missing Sumcheck Provers
-Stage 2 has 5 batched sumcheck instances:
-- Instance 0: ProductVirtualRemainder ✅ (implemented)
-- Instance 1: RamRafEvaluation ❌ (zero fallback)
-- Instance 2: RamReadWriteChecking ❌ (zero fallback)
-- Instance 3: OutputSumcheck ✅ (implemented)
-- Instance 4: InstructionLookupsClaimReduction ❌ (zero fallback)
-
-Input claims for instances 1, 2, 4 are NON-ZERO but their polynomials contribute zero.
-
-### What Works
-- ✅ fused_left matches Jolt: `3680814111042145831100417079225278919431426777627349458700618452903652360804`
-- ✅ fused_right matches Jolt: `5628401284835057616148875782341094898402011560234054472864896388346845354264`
-- ✅ tau_high matches Jolt: `1724079782492782403949918631195347939403999634829548103697761600182229454970`
-- ✅ All 26 sumcheck challenges (rounds 16-25 for ProductVirtualRemainder) match
-- ✅ Stage 1 complete verification
-
-### Next Steps (Priority Order)
-
-1. **Debug r0 Derivation**
-   - Compare Stage 2 UniSkip first round polynomial between Zolt and Jolt
-   - Check transcript state before/after UniSkip
-   - Fix any coefficient serialization issues
-
-2. **Implement Missing Provers** (after r0 is fixed)
-   - RamRafEvaluation prover (16 rounds)
-   - RamReadWriteChecking prover (26 rounds, 3-phase)
-   - InstructionLookupsClaimReduction prover (10 rounds)
-
-3. **Ensure Sumcheck Soundness**
-   - s(0) + s(1) must equal old_claim at every round
-   - All 5 instances must contribute correct polynomial evaluations
-
-### Files to Investigate
-- `/Users/matteo/projects/zolt/src/zkvm/proof_converter.zig` - Stage 2 proof generation
-- `/Users/matteo/projects/jolt/jolt-core/src/zkvm/spartan/product.rs` - ProductVirtualUniSkip
-- `/Users/matteo/projects/jolt/jolt-core/src/zkvm/ram/raf_evaluation.rs` - RafEvaluation
-- `/Users/matteo/projects/jolt/jolt-core/src/zkvm/ram/read_write_checking.rs` - ReadWriteChecking
-- `/Users/matteo/projects/jolt/jolt-core/src/zkvm/claim_reductions/instruction_lookups.rs` - InstructionClaimReduction
-
-## Previous Sessions
-
-### Session 14
-- Fixed Stage 2 UniSkip extended evaluations
-- Verified fused_left/fused_right/split_eq match
-- Instance 0 final claim matches
-
-### Session 13
-- Identified r0 mismatch as root cause
-- Transcript states match but r0 differs
-
-### Session 11-12
-- Fixed Stage 1 output-sumcheck
-- Stage 1 started passing
-
-### Session 10
-- Implemented Stage 1 streaming outer prover
+## Key Files
+- `src/zkvm/proof_converter.zig` - Main proof conversion and Stage 2 batched sumcheck
+- `src/zkvm/r1cs/univariate_skip.zig` - UniSkip polynomial construction
+- `src/zkvm/spartan/product_remainder.zig` - ProductVirtualRemainder prover
+- `src/zkvm/ram/output_check.zig` - OutputSumcheck prover

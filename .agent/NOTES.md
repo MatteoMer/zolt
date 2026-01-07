@@ -4,82 +4,78 @@
 
 ### Summary
 
-**Stage 1 PASSES, Stage 2 UniSkip PASSES, Stage 2 Sumcheck WIRED UP**
+**Stage 1 PASSES, Stage 2 FAILS at sumcheck verification**
 
-Stage 2 batched sumcheck is now wired up with:
-- ProductVirtualRemainderProver for real product constraint proofs
-- Zero claims for other 4 instances (RamRaf, RamRW, Output, InstructionClaim)
+The Stage 2 batched sumcheck produces `output_claim` that doesn't match the verifier's `expected_output_claim`.
 
-### What Was Done This Session
+### Recent Fixes Applied
 
-1. **Created ProductVirtualRemainderProver** (`src/zkvm/spartan/product_remainder.zig`)
-   - Fuses 5 product constraints into left/right polynomials using Lagrange weights
-   - Computes cubic round polynomials [c0, c2, c3]
-   - Extracts 8 unique factor polynomial values per cycle
-   - Matches Jolt's ProductVirtualRemainderProver structure
+1. **tau_stage2 construction** - Now uses reversed Stage 1 challenges + tau_high_stage2
+2. **Gruen polynomial construction** - Changed from direct evaluation to t0/t_inf method
+3. **Compressed coefficient handling** - Correctly reconstruct evaluations from [c0, c2, c3]
+4. **Index cleanup** - Using standard MLE indexing conventions
 
-2. **Created BatchedSumcheckProver** (`src/zkvm/batched_sumcheck.zig`)
-   - Infrastructure for combining 5 instances with different round counts
-   - Handles batching protocol: scale claims, sample coefficients, combine polynomials
-   - Proper transcript operations matching Jolt exactly
+### Current Values
 
-3. **Wired generateStage2BatchedSumcheckProof** in proof_converter.zig
-   - Replaces generateZeroSumcheckProof call
-   - Passes r0_stage2, uni_skip_claim, tau, cycle_witnesses
-   - ProductVirtualRemainder uses real prover
-   - Other 4 instances contribute zero (valid for simple programs)
+Latest test output:
+- `output_claim`: 6712305349781773213915836621366914034919475189156389350844584049700714314367
+- `expected_output_claim`: 8321209767613183988201183581193448103173376364360119728613327078546122551176
 
-### Stage 2 Transcript Flow
+### Analysis
 
-Verified to match Jolt exactly:
+The `expected_output_claim` in Jolt is computed as:
 ```
-1. Append input_claims[0..5] to transcript
-2. Sample batching_coeffs[0..5] using challenge_vector
-3. For each round:
-   a. Compute combined polynomial from all instances
-   b. transcript.append_message("UniPoly_begin")
-   c. transcript.append_scalar(c0, c2, c3)
-   d. transcript.append_message("UniPoly_end")
-   e. Sample round_challenge
-4. Cache opening claims
+L(tau_high, r0) * eq(tau_low, r_reversed) * fused_left(claims) * fused_right(claims)
 ```
 
-### Test Status
+Where:
+- `L(tau_high, r0)` = Lagrange kernel
+- `eq(tau_low, r_reversed)` = eq polynomial with reversed challenges
+- `fused_left/right` = combinations of 8 factor polynomial claims
 
-- All 712+ tests pass
-- Stage 2 batched sumcheck generates non-zero polynomials
-- Transcript operations are in correct order
+The `output_claim` is the final claim from sumcheck evaluation.
 
-### Known Issues / Next Steps
+### Potential Issues
 
-1. **ProductVirtualRemainder polynomial generation** - The current implementation may need debugging
-   - Need to verify the compressed format is correct
-   - Need to verify left/right fusion is matching Jolt
+1. **Round polynomial computation** - t0 and t_inf may not match Jolt's calculation
+2. **Split eq tables** - E_out/E_in indexing may differ
+3. **Binding order interaction** - LowToHigh vs how variables are actually bound
+4. **Initial polynomial layout** - How fused left/right are stored
 
-2. **Opening claims** - Currently set to zero for instances 2-5
-   - This is valid for programs without RAM/lookups
-   - Need to compute real claims for full programs
+### Key Insight: Jolt's Interleaved Storage
 
-3. **Testing with Jolt verifier** - Need end-to-end test
-   - Generate proof with `zolt prove`
-   - Verify with Jolt's verifier
+Jolt's `compute_first_quadratic_evals_and_bound_polys` stores left/right in interleaved format:
+```rust
+let off = 2 * x_in_val;
+left_chunk[off] = left0;      // lo value (even trace idx)
+left_chunk[off + 1] = left1;  // hi value (odd trace idx)
+```
 
-### Files Modified
+My Zolt code stores sequentially:
+```zig
+left_evals[idx] = fusedLeft(witness[idx]);
+```
 
-| File | Changes |
-|------|---------|
-| `src/zkvm/spartan/product_remainder.zig` | NEW - ProductVirtualRemainderProver |
-| `src/zkvm/batched_sumcheck.zig` | NEW - Batched sumcheck infrastructure |
-| `src/zkvm/spartan/mod.zig` | Added exports |
-| `src/zkvm/mod.zig` | Added batched_sumcheck |
-| `src/zkvm/proof_converter.zig` | Added generateStage2BatchedSumcheckProof, wired up |
+For standard MLE representation, this sequential storage IS correct because:
+- Index i has binary decomposition where LSB = i mod 2
+- Indices 2k and 2k+1 ARE the lo/hi pair for the same upper bits
+
+### Next Steps
+
+1. Add detailed debug output comparing:
+   - t0 and t_inf values between Zolt and Jolt
+   - Split eq E_out and E_in tables
+   - Current scalar progression
+
+2. Check if the issue is in:
+   - How `getWindowEqTables` returns tables
+   - How Gruen polynomial combines t0/t_inf
+   - The claim update logic
+
+3. Consider creating a minimal test case that runs the same computation in both Zolt and Jolt
 
 ---
 
 ## Previous Sessions
 
-See earlier notes for Stage 1 fixes including:
-- Montgomery form serialization
-- Batching coefficient handling
-- UniSkip polynomial construction
-- Opening claims witness matching
+See git history for earlier notes on Stage 1 fixes.

@@ -470,6 +470,11 @@ fn computeLagrangeWeightsGeneric(comptime F: type, allocator: Allocator, r0: F) 
 }
 
 /// Compute eq(r, j) for all j in [0, n)
+///
+/// Uses BIG ENDIAN indexing to match Jolt's EqPolynomial::evals:
+/// - r[0] controls the MSB of the index
+/// - r[n-1] controls the LSB of the index
+/// - result[idx] = Π_i eq(bit_i(idx), r[i]) where bit_i is from MSB
 fn computeEqEvalsGeneric(comptime F: type, allocator: Allocator, r: []const F, n: usize) ![]F {
     const padded_n = nextPowerOfTwo(n);
     const log_n = std.math.log2_int(usize, padded_n);
@@ -481,18 +486,25 @@ fn computeEqEvalsGeneric(comptime F: type, allocator: Allocator, r: []const F, n
     result[0] = F.one();
     var current_size: usize = 1;
 
-    // Build eq table iteratively
-    for (0..log_n) |i| {
-        const ri = if (i < r.len) r[i] else F.zero();
-        const one_minus_ri = F.one().sub(ri);
+    // Build eq table iteratively using BIG ENDIAN indexing (like Jolt)
+    // Process r[0] first, which controls the MSB of the index
+    // This means in each iteration, we process r[j] and double the table size
+    // with r[j] controlling the newly added bit (which is the MSB of the new indices)
+    for (0..log_n) |j| {
+        const rj = if (j < r.len) r[j] else F.zero();
+        const one_minus_rj = F.one().sub(rj);
 
-        // Process in reverse to avoid overwriting
-        var j = current_size;
-        while (j > 0) {
-            j -= 1;
-            const val = result[j];
-            result[j] = val.mul(one_minus_ri); // j with bit i = 0
-            result[j + current_size] = val.mul(ri); // j with bit i = 1
+        // Process from size-1 down to 0, setting:
+        // - result[2*i+1] = result[i] * rj     (odd index = bit set = rj factor)
+        // - result[2*i] = result[i] * (1-rj)  (even index = bit clear = (1-rj) factor)
+        // But we need to iterate in reverse to avoid overwriting
+        var i = current_size;
+        while (i > 0) {
+            i -= 1;
+            const val = result[i];
+            // In BIG ENDIAN: odd indices (bit=1) get rj, even indices (bit=0) get (1-rj)
+            result[2 * i + 1] = val.mul(rj);
+            result[2 * i] = val.mul(one_minus_rj);
         }
         current_size *= 2;
     }

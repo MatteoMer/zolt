@@ -1092,8 +1092,14 @@ pub fn ProofConverter(comptime F: type) type {
                 }
                 std.debug.print("[ZOLT] STAGE2: uni_skip_claim = {any}\n", .{uni_skip_claim_stage2.toBytesBE()});
 
+                // Debug: print transcript state before appending uni_skip_claim
+                std.debug.print("[ZOLT] STAGE2: transcript state BEFORE uni_skip_claim append = {any}\n", .{transcript.state[0..8]});
+
                 // Append UnivariateSkip claim (this is what cache_openings does)
                 transcript.appendScalar(uni_skip_claim_stage2);
+
+                // Debug: print transcript state after appending uni_skip_claim
+                std.debug.print("[ZOLT] STAGE2: transcript state AFTER uni_skip_claim append = {any}\n", .{transcript.state[0..8]});
 
                 // Update the opening claim for UnivariateSkip at SpartanProductVirtualization
                 try jolt_proof.opening_claims.insert(
@@ -1173,6 +1179,7 @@ pub fn ProofConverter(comptime F: type) type {
                 cycle_witnesses,
                 n_cycle_vars,
                 log_ram_k,
+                &jolt_proof.opening_claims,
             );
 
             // Add remaining opening claims
@@ -1335,23 +1342,67 @@ pub fn ProofConverter(comptime F: type) type {
             cycle_witnesses: []const r1cs.R1CSCycleInputs(F),
             n_cycle_vars: usize,
             log_ram_k: usize,
+            opening_claims: *OpeningClaims(F),
         ) !Stage2Result {
             const max_num_rounds = log_ram_k + n_cycle_vars;
             std.debug.print("[ZOLT] STAGE2_BATCHED: max_rounds={}, n_cycle={}, log_ram_k={}\n", .{ max_num_rounds, n_cycle_vars, log_ram_k });
 
             // Define the 5 instances with their input claims and round counts
-            // Instance 0: ProductVirtualRemainder (input = uni_skip_claim, starts at round = log_ram_k)
-            // Instance 1: RamRafEvaluation (input = 0, starts at round = n_cycle_vars)
-            // Instance 2: RamReadWriteChecking (input = 0, starts at round = 0)
-            // Instance 3: OutputSumcheck (input = 0, starts at round = n_cycle_vars)
-            // Instance 4: InstructionLookupsClaimReduction (input = 0, starts at round = log_ram_k)
+            // Instance 0: ProductVirtualRemainder (input = uni_skip_claim from SpartanProductVirtualization)
+            // Instance 1: RamRafEvaluation (input = RamAddress from SpartanOuter)
+            // Instance 2: RamReadWriteChecking (input = RamReadValue + gamma * RamWriteValue)
+            // Instance 3: OutputSumcheck (input = 0)
+            // Instance 4: InstructionLookupsClaimReduction (input = LookupOutput + gamma * LeftOperand + gamma^2 * RightOperand)
+
+            // Get opening claims from proof (these were set during Stage 1)
+            const ram_address_claim = opening_claims.get(.{ .Virtual = .{ .poly = .RamAddress, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
+            const ram_read_value_claim = opening_claims.get(.{ .Virtual = .{ .poly = .RamReadValue, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
+            const ram_write_value_claim = opening_claims.get(.{ .Virtual = .{ .poly = .RamWriteValue, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
+            const lookup_output_claim = opening_claims.get(.{ .Virtual = .{ .poly = .LookupOutput, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
+            const left_operand_claim = opening_claims.get(.{ .Virtual = .{ .poly = .LeftLookupOperand, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
+            const right_operand_claim = opening_claims.get(.{ .Virtual = .{ .poly = .RightLookupOperand, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
+
+            // Sample gammas from transcript in the same order as Jolt:
+            // CRITICAL: Stage 2 gammas use challenge_scalar (NOT challenge_scalar_optimized)
+            // which means they use F::from_bytes (from_le_bytes_mod_order) without 125-bit masking.
+            // We use challengeScalarFull() for this.
+            //
+            // 1. RamReadWriteChecking samples gamma first
+            const gamma_rwc = transcript.challengeScalarFull();
+            std.debug.print("[ZOLT] STAGE2_BATCHED: gamma_rwc = {any}\n", .{gamma_rwc.toBytesBE()});
+
+            // 2. OutputSumcheck samples r_address (log_ram_k challenges via challenge_vector_optimized)
+            // challenge_vector_optimized uses challenge_scalar_optimized which HAS 125-bit masking
+            // So we use challengeScalar() here
+            for (0..log_ram_k) |_| {
+                _ = transcript.challengeScalar();
+            }
+
+            // 3. InstructionLookupsClaimReduction samples gamma (via challenge_scalar, NO masking)
+            const gamma_instr = transcript.challengeScalarFull();
+            const gamma_instr_sqr = gamma_instr.mul(gamma_instr);
+            std.debug.print("[ZOLT] STAGE2_BATCHED: gamma_instr = {any}\n", .{gamma_instr.toBytesBE()});
+
+            // Compute input_claims:
+            // input_claim[1] = RamAddress from SpartanOuter
+            // input_claim[2] = RamReadValue + gamma_rwc * RamWriteValue
+            // input_claim[4] = LookupOutput + gamma_instr * LeftOperand + gamma_instr^2 * RightOperand
+            const input_claim_1 = ram_address_claim;
+            const input_claim_2 = ram_read_value_claim.add(gamma_rwc.mul(ram_write_value_claim));
+            const input_claim_4 = lookup_output_claim.add(gamma_instr.mul(left_operand_claim)).add(gamma_instr_sqr.mul(right_operand_claim));
+
+            std.debug.print("[ZOLT] STAGE2_BATCHED: input_claim[0] (ProductVirtualRemainder) = {any}\n", .{uni_skip_claim_stage2.toBytesBE()});
+            std.debug.print("[ZOLT] STAGE2_BATCHED: input_claim[1] (RamRafEvaluation) = {any}\n", .{input_claim_1.toBytesBE()});
+            std.debug.print("[ZOLT] STAGE2_BATCHED: input_claim[2] (RamReadWriteChecking) = {any}\n", .{input_claim_2.toBytesBE()});
+            std.debug.print("[ZOLT] STAGE2_BATCHED: input_claim[3] (OutputSumcheck) = 0\n", .{});
+            std.debug.print("[ZOLT] STAGE2_BATCHED: input_claim[4] (InstructionLookupsClaimReduction) = {any}\n", .{input_claim_4.toBytesBE()});
 
             const input_claims = [5]F{
                 uni_skip_claim_stage2, // ProductVirtualRemainder
-                F.zero(), // RamRafEvaluation
-                F.zero(), // RamReadWriteChecking
+                input_claim_1, // RamRafEvaluation
+                input_claim_2, // RamReadWriteChecking
                 F.zero(), // OutputSumcheck
-                F.zero(), // InstructionLookupsClaimReduction
+                input_claim_4, // InstructionLookupsClaimReduction
             };
 
             const rounds_per_instance = [5]usize{

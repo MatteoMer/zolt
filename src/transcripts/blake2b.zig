@@ -330,8 +330,15 @@ pub fn Blake2bTranscript(comptime F: type) type {
         ///
         /// The 125-bit masking matches Jolt's MontU128Challenge::new() which does:
         ///   let val_masked = value & (u128::MAX >> 3);
-        /// This ensures the challenge value is always less than 2^125, which is
-        /// guaranteed to be less than the BN254 scalar field modulus.
+        /// Challenge scalar for sumcheck challenges (125-bit masking + Montgomery direct)
+        ///
+        /// This matches Jolt's challenge_scalar_optimized which uses MontU128Challenge:
+        /// 1. Get 16 bytes from challenge_bytes
+        /// 2. Reverse to get u128 in BE order
+        /// 3. Mask to 125 bits
+        /// 4. Store directly in Montgomery form limbs [0, 0, low, high]
+        ///
+        /// Used for Stage 1 sumcheck challenges (r0, r_i).
         pub fn challengeScalar128Bits(self: *Self) F {
             std.debug.print("[ZOLT TRANSCRIPT] challengeScalar128Bits: round={d}\n", .{self.n_rounds});
             std.debug.print("[ZOLT TRANSCRIPT]   state_before={{ ", .{});
@@ -345,9 +352,7 @@ pub fn Blake2bTranscript(comptime F: type) type {
             for (buf) |b| std.debug.print("{x:0>2} ", .{b});
             std.debug.print("}}\n", .{});
 
-            // Reverse bytes and interpret as big-endian u128, matching Jolt's challenge_u128():
-            //   buf = buf.into_iter().rev().collect();
-            //   u128::from_be_bytes(buf.try_into().unwrap())
+            // Reverse bytes to get u128 in BE order (Jolt's: buf.into_iter().rev())
             var reversed: [16]u8 = undefined;
             for (0..16) |i| {
                 reversed[i] = buf[15 - i];
@@ -357,40 +362,25 @@ pub fn Blake2bTranscript(comptime F: type) type {
             for (reversed) |b| std.debug.print("{x:0>2} ", .{b});
             std.debug.print("}}\n", .{});
 
-            // Read as big-endian u128 (matching Jolt's from_be_bytes)
-            // Big-endian: first byte is most significant
+            // Read as BE u128
             const high: u64 = mem.readInt(u64, reversed[0..8], .big);
             const low: u64 = mem.readInt(u64, reversed[8..16], .big);
 
-            std.debug.print("[ZOLT TRANSCRIPT]   u128_high=0x{x}, u128_low=0x{x}\n", .{ high, low });
-
-            // CRITICAL: Mask to 125 bits to match Jolt's MontU128Challenge::new()
-            // Jolt does: let val_masked = value & (u128::MAX >> 3);
-            // This clears the top 3 bits of the 128-bit value.
+            // Mask to 125 bits (MontU128Challenge::new does: value & (u128::MAX >> 3))
             const full_value: u128 = (@as(u128, high) << 64) | low;
-            const mask_125: u128 = (1 << 125) - 1; // Same as u128::MAX >> 3
+            const mask_125: u128 = (1 << 125) - 1;
             const masked_value: u128 = full_value & mask_125;
             const masked_low: u64 = @truncate(masked_value);
             const masked_high: u64 = @truncate(masked_value >> 64);
 
             std.debug.print("[ZOLT TRANSCRIPT]   full_value=0x{x}\n", .{full_value});
             std.debug.print("[ZOLT TRANSCRIPT]   masked_value=0x{x} (125-bit)\n", .{masked_value});
-            std.debug.print("[ZOLT TRANSCRIPT]   masked_low=0x{x}, masked_high=0x{x}\n", .{ masked_low, masked_high });
 
-            // CRITICAL: Match Jolt's from_bigint_unchecked behavior exactly!
-            //
-            // Jolt's MontU128Challenge stores [0, 0, low, high] and converts to Fr via:
-            //   ark_bn254::Fr::from_bigint_unchecked(BigInt::new([0, 0, low, high]))
-            //
-            // In arkworks, from_bigint_unchecked interprets the BigInt as ALREADY in
-            // Montgomery form! It does NOT multiply by R. When you print the Fr, it
-            // divides by R to get the canonical value.
-            //
-            // So the INTERNAL Montgomery representation IS [0, 0, low, high].
-            // We must NOT call toMontgomery() - that would multiply by R and give wrong results!
+            // Store directly in Montgomery form [0, 0, low, high]
+            // This matches Jolt's from_bigint_unchecked which interprets as already Montgomery
             const result = F{ .limbs = .{ 0, 0, masked_low, masked_high } };
 
-            std.debug.print("[ZOLT TRANSCRIPT]   mont_limbs=[0, 0, 0x{x}, 0x{x}] (direct, no toMontgomery)\n", .{ masked_low, masked_high });
+            std.debug.print("[ZOLT TRANSCRIPT]   mont_limbs=[0, 0, 0x{x}, 0x{x}]\n", .{ masked_low, masked_high });
 
             return result;
         }

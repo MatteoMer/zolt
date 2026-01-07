@@ -1,44 +1,34 @@
-# Zolt-Jolt Compatibility - Session 18 Progress
+# Zolt-Jolt Compatibility - Session Progress
 
-## Status Summary
+## Current Status
 
 ### ✅ COMPLETED
-- All 712 internal tests pass
 - Stage 1 passes Jolt verification completely
-- Stage 2 sumcheck constraint (s(0)+s(1) = claim) passes ALL 26 rounds
-- All 5 instance provers integrated and producing round polynomials
-- Individual RWC opening claims (ra, val, inc) now computed
-- Fixed double-free bug in InstructionLookupsProver
-- Fixed computeEq for big-endian interpretation
+- All 712 internal tests pass
+- All opening claims verified to match Jolt exactly:
+  - l_inst, r_inst, is_rd_not_zero, next_is_noop, fused_left, fused_right ✓
+  - ra_claim, val_claim, inc_claim ✓
+- Instance 0 (ProductVirtualRemainder) final claim matches exactly
 
-### ❌ REMAINING ISSUE
-Stage 2 verification fails because:
-- `output_claim` ≠ `expected_output_claim`
-- Difference is ~80e75 (a large number, similar to one instance contribution)
+### ❌ IN PROGRESS
+Stage 2 fails because Instance 2 (RWC) final claim doesn't match.
 
-**Root Cause Investigation**:
-The expected_output_claim is computed from our opening claims:
-```
-eq_eval_cycle * ra_claim * (val_claim + gamma * (val_claim + inc_claim))
-```
+**Root Cause Identified:**
+Our RWC prover's eq polynomial handling is incorrect. The issue is:
+1. Phase 1 eq polynomial computation was fixed to properly bind sumcheck challenges
+2. Phase 2 still uses stale eq_evals that don't account for binding
+3. The overall structure of how we compute round polynomials may not match Jolt's sparse matrix approach
 
-Our claims may not correspond to the actual polynomial values that our
-sumcheck prover is computing. Need to trace through polynomial construction.
-
-## Instance Contributions (from Jolt debug output)
-
-For Stage 2:
-- Instance 0 (ProductVirtual): 8369935295803813061188230597022735237
-- Instance 1 (RAF): 7819199229764417167347615577448458590
-- Instance 2 (RWC): 5221874132503095678699145889033794949
-- Instance 3 (OutputSumcheck): 0
-- Instance 4 (InstructionLookups): 0
+**Current Difference:**
+- Our RWC final: 17925181248966282971112807010799772681208014801023116248823233609842789352688
+- Jolt expected:  11216823976254905917561036500968546773134980482196871908475958474138871482864
 
 ## Next Steps
 
-1. **Trace RWC polynomial construction** - Verify sparse matrix entries match actual memory trace
-2. **Compare with Jolt's expected values** - Check if our ra/val/inc evaluations match what Jolt expects
-3. **Debug Instance 0 (ProductVirtual)** - May also have incorrect contribution
+1. Study Jolt's RWC prover more carefully - understand the GruenSplitEqPolynomial and matrix structure
+2. Fix Phase 2 to properly handle the eq polynomial after all cycle variables are bound
+3. Verify the sparse matrix iteration matches Jolt's approach
+4. Fix the double-free memory bug
 
 ## Verification Commands
 
@@ -53,3 +43,7 @@ zig build test --summary all
 cd /Users/matteo/projects/jolt/jolt-core
 cargo test test_verify_zolt_proof -- --ignored --nocapture
 ```
+
+## Code Locations
+- RWC prover: `/Users/matteo/projects/zolt/src/zkvm/ram/read_write_checking.zig`
+- Jolt RWC: `/Users/matteo/projects/jolt/jolt-core/src/zkvm/ram/read_write_checking.rs`

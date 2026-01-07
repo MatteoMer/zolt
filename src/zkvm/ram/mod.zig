@@ -31,6 +31,11 @@ pub const output_check = @import("output_check.zig");
 pub const OutputSumcheckParams = output_check.OutputSumcheckParams;
 pub const OutputSumcheckProver = output_check.OutputSumcheckProver;
 
+// Read/Write checking for RAM consistency
+pub const read_write_checking = @import("read_write_checking.zig");
+pub const RamReadWriteCheckingParams = read_write_checking.RamReadWriteCheckingParams;
+pub const RamReadWriteCheckingProver = read_write_checking.RamReadWriteCheckingProver;
+
 /// Memory operation type
 pub const MemoryOp = enum {
     Read,

@@ -22,10 +22,24 @@ So the ProductVirtualRemainder prover is producing an incorrect final claim.
 - τ is [r_cycle (BIG_ENDIAN), τ_high]
 - r_tail is the Stage 2 sumcheck challenges (reversed before use)
 
+**Investigation progress:**
+1. ✅ fused_left and fused_right values MATCH between Zolt and Jolt
+2. ✅ L*Eq (split_eq.current_scalar) MATCHES
+3. ✅ ProductVirtualRemainder instance 0 final claim MATCHES: 17831747...
+4. ✅ Sumcheck challenges (r_tail) MATCH between Zolt and Jolt
+5. ❌ Batched sumcheck output differs by ~1.26e75
+
+**Root cause identified:**
+The difference comes from instances 1, 2, 4 which should contribute zero to the sum:
+- In Jolt: instances 1, 2, 4 have expected_output_claim = 0
+- In Zolt: these instances have non-zero input_claims from Stage 1
+
+The issue is that Stage 2's non-ProductVirtualRemainder instances (RamRafEvaluation, RamReadWriteChecking, InstructionLookupsClaimReduction) are contributing non-zero values when they should contribute zero.
+
 **Next steps:**
-1. Check if the fused_left and fused_right values match between Zolt and Jolt
-2. Verify the split_eq polynomial is initialized correctly
-3. Check if the Lagrange kernel L(τ_high, r0) matches
+1. Check if the input claims for instances 1, 2, 4 should actually be zero
+2. Or check if the sumcheck polynomials for these instances should reduce to zero
+3. Verify that the other instance provers are implemented correctly
 
 ### Stage 2 UniSkip Extended Evaluations - FIXED!
 

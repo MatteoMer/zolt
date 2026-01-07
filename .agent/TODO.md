@@ -79,10 +79,25 @@ BUT the sumcheck output_claim still differs:
 
 The difference is ~10.8e75. The issue is in how the sumcheck rounds propagate the batched claim.
 
-**Next investigation:**
-- Check if the round polynomials are being computed correctly
-- Verify the claim update after each round
-- Check if the batching coefficients are applied correctly
+**Latest Finding:**
+The sumcheck constraint `s(0)+s(1) = old_claim` is violated because instances 1, 2, 4 have different input claims between Zolt and Jolt:
+
+In Jolt's transcript:
+- `RamRa RamRafEvaluation, claim = 0`
+- `RamVal RamReadWriteChecking, claim = 0`
+- `LookupOutput InstructionClaimReduction, claim = 0`
+
+In Zolt:
+- These are computed as NON-ZERO from Stage 1 opening claims
+
+The input claims come from Stage 1 opening claims (RamAddress, RamReadValue, etc.). If Jolt's claims are zero but Zolt's aren't, then either:
+1. Stage 1 opening claims are computed differently, OR
+2. The claims are for different virtual polynomials
+
+**Next Steps:**
+1. Check how Jolt computes the opening claims for RamRa, RamVal, LookupOutput
+2. Verify that Stage 1 is producing the same opening claims as Jolt
+3. Trace the claim values through the entire pipeline
 
 ### Stage 2 UniSkip Extended Evaluations - FIXED!
 

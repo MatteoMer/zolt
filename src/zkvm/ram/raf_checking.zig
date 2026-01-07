@@ -152,7 +152,9 @@ pub fn RaPolynomial(comptime F: type) type {
         /// Bind the first variable to value r
         /// Reduces from n variables to n-1 variables
         pub fn bind(self: *Self, r: F) void {
-            const half = self.evals.len / 2;
+            // The "active" length is 2^num_vars, not evals.len
+            const active_len: usize = @as(usize, 1) << @intCast(self.num_vars);
+            const half = active_len / 2;
             for (0..half) |i| {
                 // Interpolate: (1-r) * evals[i] + r * evals[i + half]
                 const lo = self.evals[i];
@@ -164,8 +166,13 @@ pub fn RaPolynomial(comptime F: type) type {
         }
 
         /// Get final claim after all bindings
+        /// After k bindings, the "active" portion is evals[0..2^(num_vars)]
+        /// When num_vars = 0, returns evals[0] (single value remaining)
         pub fn finalClaim(self: *const Self) F {
             if (self.evals.len == 0) return F.zero();
+            // After binding, evals[0] contains the final value
+            const active_len: usize = @as(usize, 1) << @intCast(self.num_vars);
+            std.debug.print("[RA DEBUG] finalClaim: num_vars={}, active_len={}, evals[0]={any}\n", .{ self.num_vars, active_len, self.evals[0].toBytesBE() });
             return self.evals[0];
         }
     };
@@ -289,6 +296,9 @@ pub fn RafEvaluationProver(comptime F: type) type {
         pub fn deinit(self: *Self) void {
             self.ra.deinit();
             self.bound_values.deinit(self.allocator);
+            // Clean up params (frees r_cycle)
+            var params = self.params;
+            params.deinit();
         }
 
         /// Compute the initial claim: Σ_k ra(k) ⋅ unmap(k)

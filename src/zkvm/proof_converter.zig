@@ -1217,23 +1217,25 @@ pub fn ProofConverter(comptime F: type) type {
                 config,
             );
 
-            // Add remaining opening claims
+            // Add remaining opening claims - use actual final claims from provers
+            // Instance 1 (RAF): RamRa opening is the final claim
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamRafEvaluation } },
-                F.zero(),
+                stage2_result.raf_final_claim,
             );
+            // Instance 2 (RWC): Multiple openings needed
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .RamVal, .sumcheck_id = .RamReadWriteChecking } },
-                F.zero(),
+                stage2_result.rwc_final_claim, // Use RWC's final claim for now
             );
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamReadWriteChecking } },
-                F.zero(),
+                stage2_result.rwc_final_claim, // Same claim (product of ra and val)
             );
             // RamInc is a committed polynomial needed by RamReadWriteChecking
             try jolt_proof.opening_claims.insert(
                 .{ .Committed = .{ .poly = .RamInc, .sumcheck_id = .RamReadWriteChecking } },
-                F.zero(),
+                F.zero(), // TODO: Need to compute actual RamInc evaluation
             );
             // Note: UnivariateSkip for SpartanProductVirtualization was already set above with the actual claim value
 
@@ -1454,6 +1456,11 @@ pub fn ProofConverter(comptime F: type) type {
             /// All sumcheck challenges (26 for max_num_rounds = log_ram_k + n_cycle_vars)
             /// Used for computing OutputSumcheck's r_address_prime
             challenges: []F,
+            /// Final claims from each prover (for opening claims)
+            raf_final_claim: F, // Instance 1: RamRafEvaluation
+            rwc_final_claim: F, // Instance 2: RamReadWriteChecking
+            output_final_claim: F, // Instance 3: RamOutputCheck
+            instr_final_claim: F, // Instance 4: InstructionLookupsClaimReduction
             allocator: Allocator,
 
             pub fn deinit(self: *Stage2Result) void {
@@ -1789,7 +1796,6 @@ pub fn ProofConverter(comptime F: type) type {
                                 if (challenges.items.len >= n_cycle_vars) {
                                     const r_cycle_slice = challenges.items[0..n_cycle_vars];
                                     const r_cycle = try self.allocator.alloc(F, n_cycle_vars);
-                                    defer self.allocator.free(r_cycle);
                                     @memcpy(r_cycle, r_cycle_slice);
 
                                     // Get start address from memory layout or use default
@@ -1798,14 +1804,15 @@ pub fn ProofConverter(comptime F: type) type {
                                     else
                                         0x80000000;
 
-                                    // Initialize RAF params
+                                    // Initialize RAF params - this copies r_cycle internally
                                     var raf_params = try ram.RafEvaluationParams(F).init(
                                         self.allocator,
                                         log_ram_k,
                                         start_addr,
                                         r_cycle,
                                     );
-                                    defer raf_params.deinit();
+                                    // Free our temporary r_cycle copy (params made its own copy)
+                                    self.allocator.free(r_cycle);
 
                                     // Use input_claim[1] (RamAddress from SpartanOuter) as initial claim
                                     const raf_initial_claim = input_claims[1];
@@ -1816,7 +1823,14 @@ pub fn ProofConverter(comptime F: type) type {
                                         config.memory_trace.?,
                                         raf_params,
                                         raf_initial_claim,
-                                    ) catch null;
+                                    ) catch |err| blk: {
+                                        std.debug.print("[ZOLT] RAF: Prover init failed: {}\n", .{err});
+                                        // If prover init fails, we own params so clean them up
+                                        raf_params.deinit();
+                                        break :blk null;
+                                    };
+                                    // Note: If prover init succeeds, prover owns params and will deinit them
+                                    // The prover's deinit should handle params cleanup
                                     if (raf_prover != null) {
                                         std.debug.print("[ZOLT] RAF: Prover initialized\n", .{});
                                     }
@@ -2173,9 +2187,24 @@ pub fn ProofConverter(comptime F: type) type {
             const challenges_copy = try self.allocator.alloc(F, challenges.items.len);
             @memcpy(challenges_copy, challenges.items);
 
+            // Get final claims from each prover
+            const raf_claim = if (raf_prover) |rp| rp.getFinalClaim() else F.zero();
+            const rwc_claim = if (rwc_prover) |*rp| rp.current_claim else F.zero();
+            const output_claim = if (output_prover) |op| op.current_claim else F.zero();
+            const instr_claim = if (instr_prover) |*ip| ip.current_claim else F.zero();
+
+            std.debug.print("[ZOLT] STAGE2: raf_final_claim = {any}\n", .{raf_claim.toBytesBE()});
+            std.debug.print("[ZOLT] STAGE2: rwc_final_claim = {any}\n", .{rwc_claim.toBytesBE()});
+            std.debug.print("[ZOLT] STAGE2: output_final_claim = {any}\n", .{output_claim.toBytesBE()});
+            std.debug.print("[ZOLT] STAGE2: instr_final_claim = {any}\n", .{instr_claim.toBytesBE()});
+
             return Stage2Result{
                 .factor_evals = factor_evals,
                 .challenges = challenges_copy,
+                .raf_final_claim = raf_claim,
+                .rwc_final_claim = rwc_claim,
+                .output_final_claim = output_claim,
+                .instr_final_claim = instr_claim,
                 .allocator = self.allocator,
             };
         }

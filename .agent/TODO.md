@@ -1,4 +1,4 @@
-# Zolt-Jolt Compatibility - Session 15 Complete
+# Zolt-Jolt Compatibility - Session 16 Progress
 
 ## Status Summary
 
@@ -7,65 +7,57 @@
 - Stage 1 passes Jolt verification completely
 - Stage 2 UniSkip r0 matches Jolt (transcript aligned)
 - Stage 2 UniSkip polynomial coefficients verified identical
+- RafEvaluationProver integrated (Instance 1)
 
 ### ❌ REMAINING
-- Stage 2 batched sumcheck fails (3 missing provers)
+- Stage 2 batched sumcheck fails (2 missing provers)
 
-## Detailed Analysis
+## Instance Timing in Stage 2
 
-### Stage 2 Batched Sumcheck Architecture
+Understanding when each instance becomes "active" in the batched sumcheck:
 
-The Stage 2 batched sumcheck verifies 5 instances in parallel:
+| Instance | Prover | Rounds | Start Round | Status |
+|----------|--------|--------|-------------|--------|
+| 0 | ProductVirtualRemainder | 10 | 16 | ✅ Working |
+| 1 | RamRafEvaluation | 16 | 10 | ✅ RAF prover integrated |
+| 2 | RamReadWriteChecking | 26 | **0** | ❌ **CRITICAL - needs prover** |
+| 3 | OutputSumcheck | 16 | 10 | ✅ Working |
+| 4 | InstructionLookupsClaimReduction | 10 | 16 | ❌ Needs prover |
 
-| Instance | Prover | Rounds | Status |
-|----------|--------|--------|--------|
-| 0 | ProductVirtualRemainder | 10 | ✅ Implemented |
-| 1 | RamRafEvaluation | 16 | ❌ Missing |
-| 2 | RamReadWriteChecking | 26 | ❌ Missing |
-| 3 | OutputSumcheck | 16 | ✅ Implemented |
-| 4 | InstructionLookupsClaimReduction | 10 | ❌ Missing |
+## Critical Issue
 
-### Error Analysis
+**Instance 2 (RamReadWriteChecking) starts at round 0 and has non-zero input claim!**
 
-Current errors:
-```
-Round 0: s(0)+s(1) != old_claim
-Round 23: s(0)+s(1) != old_claim
-Round 24: s(0)+s(1) != old_claim
-Round 25: s(0)+s(1) != old_claim
-```
+This is the most complex prover (3-phase, 26 rounds) and needs to be implemented
+for the batched sumcheck to pass.
 
-Root cause: Instances 1, 2, 4 have non-zero input claims but contribute zero polynomials.
+Current error at round 0: `s(0)+s(1) != old_claim` because instance 2's
+fallback constant polynomial doesn't satisfy the batched constraint.
 
-### Implementation Requirements
+## Implementation Progress
 
-Each missing prover requires:
+### Completed
+- ✅ RAF prover (Instance 1) produces cubic [s(0), s(1), s(2), s(3)]
+- ✅ RAF prover initializes at round 10 with r_cycle from challenges[0..10]
+- ✅ Memory trace passed through ConversionConfig
+- ✅ RAF prover binds challenges and updates claims properly
 
-1. **RamRafEvaluation** (`jolt-core/src/zkvm/ram/raf_evaluation.rs`)
-   - Eq polynomial evaluation over RAM addresses
-   - 16 rounds of sumcheck
-   - Input: RamAddress claim from SpartanOuter
+### In Progress
+- 🔄 RamReadWriteCheckingProver (Instance 2) - CRITICAL
 
-2. **RamReadWriteChecking** (`jolt-core/src/zkvm/ram/read_write_checking.rs`)
-   - 3-phase prover (most complex)
-   - Validates RAM read/write consistency
-   - 26 rounds total
+### Pending
+- ⏳ InstructionLookupsClaimReductionProver (Instance 4)
+- ⏳ Full Jolt verification pass
 
-3. **InstructionLookupsClaimReduction** (`jolt-core/src/zkvm/claim_reductions/instruction_lookups.rs`)
-   - 2-phase prover (prefix-suffix + regular)
-   - Reduces lookup operand claims
-   - 10 rounds total
+## Next Steps
 
-### Key Files
-
-Modified:
-- `src/zkvm/proof_converter.zig` - Stage 2 proof generation
-- `src/zkvm/r1cs/univariate_skip.zig` - UniSkip polynomial construction
-
-To Create:
-- `src/zkvm/ram/raf_evaluation.zig`
-- `src/zkvm/ram/read_write_checking.zig`
-- `src/zkvm/claim_reductions/instruction_lookups.zig`
+1. Study Jolt's RamReadWriteChecking implementation
+2. Implement 3-phase prover:
+   - Phase 1: read_checking (eq over cycles × ra × val)
+   - Phase 2: write_checking (eq × wa × next_val)
+   - Phase 3: init_final_checking
+3. Integrate into Stage 2 batched sumcheck starting at round 0
+4. Test with Jolt verification
 
 ## Verification Commands
 
@@ -80,10 +72,3 @@ zig build test --summary all
 cd /Users/matteo/projects/jolt/jolt-core
 cargo test test_verify_zolt_proof -- --ignored --nocapture
 ```
-
-## Progress Metrics
-
-- Tests: 712/712 passing ✅
-- Stage 1: PASS ✅
-- Stage 2 UniSkip: PASS ✅
-- Stage 2 Batched Sumcheck: FAIL ❌ (missing 3 provers)

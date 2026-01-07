@@ -96,7 +96,7 @@ pub fn Blake2bTranscript(comptime F: type) type {
         pub fn appendMessage(self: *Self, msg: []const u8) void {
             std.debug.assert(msg.len < 33);
 
-            std.debug.print("[ZOLT TRANSCRIPT] appendMessage: \"{s}\" (len={d}), round={d}\n", .{ msg, msg.len, self.n_rounds });
+            std.debug.print("[ZOLT TRANSCRIPT] appendMessage: \"{s}\" (len={d}), round={d}, state_before=[{x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}]\n", .{ msg, msg.len, self.n_rounds, self.state[0], self.state[1], self.state[2], self.state[3], self.state[4], self.state[5], self.state[6], self.state[7] });
 
             var h = self.hasher();
 

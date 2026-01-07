@@ -1252,43 +1252,74 @@ pub fn ProofConverter(comptime F: type) type {
             // For OutputSumcheck, val_final_claim should equal val_io_eval at r_address_prime
             // where r_address_prime = challenges[10..26] (last 16 challenges for OutputSumcheck)
             //
-            // For a program with no I/O, val_io polynomial has only the termination bit set to 1.
-            // val_io_eval = MLE(val_io, r_address_prime) = eq(termination_index, r_address_prime)
+            // Jolt's ProgramIOPolynomial::evaluate does:
+            // 1. Split r_address_prime into r_hi (first n-m) and r_lo (last m) where m = poly.num_vars
+            // 2. Evaluate poly at r_lo
+            // 3. Multiply by Π(1-r_i) for r_hi
             //
-            // Since we're proving correct execution (termination = 1 in final RAM),
-            // val_final should equal val_io, so val_final_claim = val_io_eval.
+            // The polynomial only covers the IO region (indices 0 to range_end where range_end < K)
+            // For programs with no I/O, only termination bit is set to 1.
             const val_final_claim = blk: {
                 if (config.memory_layout) |memory_layout| {
-                    // Compute val_io_eval = eq(termination_index, r_address_prime)
-                    // where r_address_prime = challenges[max_num_rounds - 16..] (last 16 for OutputSumcheck)
                     const max_num_rounds = log_ram_k + n_cycle_vars;
                     if (stage2_result.challenges.len >= max_num_rounds and max_num_rounds >= log_ram_k) {
-                        const r_address_prime = stage2_result.challenges[max_num_rounds - log_ram_k ..];
-                        std.debug.print("[ZOLT] OutputSumcheck: r_address_prime.len = {}, max_num_rounds={}, log_ram_k={}\n", .{ r_address_prime.len, max_num_rounds, log_ram_k });
-                        std.debug.print("[ZOLT] OutputSumcheck: r_address_prime[0] = {any}\n", .{r_address_prime[0].toBytesBE()});
-                        std.debug.print("[ZOLT] OutputSumcheck: r_address_prime[15] = {any}\n", .{r_address_prime[15].toBytesBE()});
+                        // Get the OutputSumcheck challenges (last log_ram_k elements)
+                        const r_address_little_endian = stage2_result.challenges[max_num_rounds - log_ram_k ..];
+
+                        // CRITICAL: Jolt's normalize_opening_point REVERSES the challenges
+                        // from LITTLE_ENDIAN to BIG_ENDIAN. We must do the same.
+                        var r_address_prime: [16]F = undefined;
+                        std.debug.assert(r_address_little_endian.len <= 16);
+                        for (0..r_address_little_endian.len) |i| {
+                            r_address_prime[i] = r_address_little_endian[r_address_little_endian.len - 1 - i];
+                        }
+
+                        std.debug.print("[ZOLT] OutputSumcheck: r_address_prime.len = {}, max_num_rounds={}, log_ram_k={}\n", .{ r_address_little_endian.len, max_num_rounds, log_ram_k });
+                        std.debug.print("[ZOLT] OutputSumcheck: r_address_prime[0] (after reverse) = {any}\n", .{r_address_prime[0].toBytesBE()});
+                        std.debug.print("[ZOLT] OutputSumcheck: r_address_prime[15] (after reverse) = {any}\n", .{r_address_prime[15].toBytesBE()});
 
                         // Get termination index via remapAddress
                         const termination_addr = memory_layout.termination;
                         const termination_index = memory_layout.remapAddress(termination_addr);
                         std.debug.print("[ZOLT] OutputSumcheck: termination_addr = 0x{X}, termination_index = {?}\n", .{ termination_addr, termination_index });
 
+                        // Compute IO polynomial size (indices 0 to range_end, rounded to power of 2)
+                        // range_end = remap_address(RAM_START_ADDRESS)
+                        const range_end = memory_layout.remapAddress(constants.RAM_START_ADDRESS) orelse 4096;
+                        const io_poly_size = std.math.ceilPowerOfTwo(usize, range_end) catch range_end;
+                        const io_poly_vars: usize = if (io_poly_size <= 1) 1 else std.math.log2_int(usize, io_poly_size);
+
+                        std.debug.print("[ZOLT] OutputSumcheck: range_end={}, io_poly_size={}, io_poly_vars={}\n", .{ range_end, io_poly_size, io_poly_vars });
+
                         if (termination_index) |idx| {
-                            // Compute eq(idx, r_address_prime) = Π (idx_i * r_i + (1 - idx_i) * (1 - r_i))
-                            // This is the Lagrange basis evaluation.
+                            // Jolt's ProgramIOPolynomial::evaluate splits r_address:
+                            // - r_lo = last io_poly_vars challenges (indices for the poly)
+                            // - r_hi = first (log_K - io_poly_vars) challenges (extra high bits)
                             //
-                            // IMPORTANT: Jolt's r_address_prime uses BIG_ENDIAN convention:
-                            // - r_address_prime[0] corresponds to the MSB of the index
-                            // - r_address_prime[num_vars-1] corresponds to the LSB
+                            // Result = poly.evaluate(r_lo) * Π(1-r_i) for r_hi
                             //
-                            // So for bit i (0 = LSB), we use r_address_prime[num_vars - 1 - i]
+                            // For a poly with only termination bit set, poly.evaluate(r_lo) = eq(term_idx, r_lo)
+                            // where term_idx is the termination index WITHIN the IO region
+
+                            const num_vars = r_address_little_endian.len;
+                            const r_hi_len = num_vars - io_poly_vars;
+
+                            std.debug.print("[ZOLT] OutputSumcheck: num_vars={}, io_poly_vars={}, r_hi_len={}, term_idx={}\n", .{ num_vars, io_poly_vars, r_hi_len, idx });
+
+                            // Compute eq(termination_idx, r_lo) where r_lo = r_address_prime[r_hi_len..]
+                            // After the reversal, r_address_prime is in BIG_ENDIAN order:
+                            // - r_address_prime[0] = MSB
+                            // - r_address_prime[num_vars-1] = LSB
                             var result = F.one();
-                            const num_vars: u6 = @intCast(r_address_prime.len);
-                            var bit_idx: u6 = 0;
-                            while (bit_idx < num_vars) : (bit_idx += 1) {
-                                const bit: u1 = @truncate((idx >> bit_idx) & 1);
-                                // BIG_ENDIAN: LSB (bit 0) uses last challenge, MSB uses first
-                                const r_i = r_address_prime[num_vars - 1 - bit_idx];
+
+                            // For r_lo (the last io_poly_vars elements of r_address_prime)
+                            // r_lo[0] = r_address_prime[r_hi_len] corresponds to bit (io_poly_vars-1) of index
+                            // r_lo[io_poly_vars-1] = r_address_prime[num_vars-1] corresponds to bit 0 of index
+                            for (0..io_poly_vars) |bit_idx| {
+                                const bit: u1 = @truncate((idx >> @as(u6, @intCast(bit_idx))) & 1);
+                                // Big-endian: bit 0 (LSB) uses last element of r_lo
+                                const lo_idx = r_hi_len + (io_poly_vars - 1 - bit_idx);
+                                const r_i = r_address_prime[lo_idx];
                                 const one_minus_r_i = F.one().sub(r_i);
                                 if (bit == 1) {
                                     result = result.mul(r_i);
@@ -1296,6 +1327,13 @@ pub fn ProofConverter(comptime F: type) type {
                                     result = result.mul(one_minus_r_i);
                                 }
                             }
+
+                            // Multiply by Π(1 - r_i) for r_hi (first r_hi_len elements)
+                            for (0..r_hi_len) |hi_idx| {
+                                const r_i = r_address_prime[hi_idx];
+                                result = result.mul(F.one().sub(r_i));
+                            }
+
                             std.debug.print("[ZOLT] OutputSumcheck: val_io_eval (termination) = {any}\n", .{result.toBytesBE()});
                             break :blk result;
                         }

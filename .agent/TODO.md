@@ -2,81 +2,64 @@
 
 ## Current Status
 - Stage 1: PASSING ✅
-- Stage 2: FAILING ❌ (OutputSumcheck polynomial coefficients don't match expected)
+- Stage 2: FAILING ❌ (OutputSumcheck passes but overall Stage 2 fails)
 - Stage 3+: Not reached yet
-- All Zolt tests pass
+- All Zolt tests pass (712/712)
 
-## Session 9 Progress Summary
+## Session 10 Progress Summary
 
-### What Was Implemented
-1. **OutputSumcheckProver** (`src/zkvm/ram/output_check.zig`)
-   - Created prover structure with val_init, val_final, val_io, io_mask, eq_r_address
-   - Implemented computeRoundPolynomial() and bindChallenge()
-   - Fixed EQ polynomial to use LowToHigh (LSB-first) binding order
-   - Fixed address mapping (indexToAddress uses lowest + k * 8)
-   - Fixed termination handling (set BOTH val_final AND val_io to 1)
+### What Was Fixed
+1. **OutputSumcheck val_io_eval now matches val_final_claim!**
+   - The key fix was reversing r_address_prime challenges
+   - Jolt's normalize_opening_point() reverses the challenges from LITTLE_ENDIAN to BIG_ENDIAN
+   - We now do the same transformation before computing eq(termination_idx, r_lo)
 
-2. **Integration into Stage 2** (`src/zkvm/proof_converter.zig`)
-   - Added config parameter with initial_ram and final_ram pointers
-   - Sample r_address challenges in correct order
-   - Initialize OutputSumcheckProver when RAM state data is available
-   - Call computeRoundPolynomial() for instance 3
-
-3. **Data Flow** (`src/zkvm/mod.zig`)
-   - Pass emulator.ram.memory as final_ram
-   - Pass empty hash map as initial_ram
-
-### Current Issue
-
-The Stage 2 sumcheck verification fails:
+### Current State
 ```
-output_claim:          10555406300081192179452048418528136201389824333451681887399411041092911249053
-expected_output_claim: 12558447015227526731091241411293250621525229972846007269528435424240713158110
+val_final_claim = 4090788711564709752600661633314048823660767229681104565575745914624396081249
+val_io_eval = 4090788711564709752600661633314048823660767229681104565575745914624396081249
+(val_final_claim - val_io_eval) = 0
+result = 0
 ```
 
-**Root Cause Analysis:**
-1. OutputSumcheck produces all-zero polynomials because:
-   - For a correctly executing program, val_final = val_io everywhere in IO region
-   - This means (val_final - val_io) = 0 everywhere
-   - So the sumcheck polynomial Σ eq * io_mask * 0 = 0
+### Remaining Issue
+Stage 2 batched sumcheck fails because SpartanProductVirtualization (instance 0) contribution doesn't match:
+```
+output_claim:          15813746968267243297450630513407769417288591023625754132394390395019523654383
+expected_output_claim: 21370344117342657988577911810586668133317596586881852281711504041258248730449
+```
 
-2. BUT Jolt's verifier computes a NON-ZERO expected output:
-   - val_final_claim from proof = 9598091504631331533319367171027748529696916355377122795493041621516413382685
-   - val_io_eval computed = 5891669863525244341570117655318363701041112705294068835900114259741218367302
-   - These don't match! (difference = 3706421641106087191749249515709384828655803650083053959592927361775195015383)
+The OutputSumcheck (instance 3) correctly contributes 0, but the instance 0 (SpartanProductVirtualization) computes a different expected claim than what we produce.
 
-3. The mismatch between val_final_claim and val_io_eval means:
-   - Either our val_final_claim serialization is wrong
-   - Or Jolt's val_io_eval computation differs from ours
-   - Most likely: bit ordering/endianness issue in the eq(idx, r) computation
+This seems to be a mismatch in the tau_bound_r_tail_reversed and fused_left/fused_right values.
+
+### Debug Info
+Jolt shows for SpartanProductVirtualization:
+- tau_high_bound_r0 = 408861100181677889664005218184814811644684877424956415825331202739222796118
+- tau_bound_r_tail_reversed = 13711711649518001980487072027115550362350948748829776349909583297355170067443
+- fused_left = 15479400476700808083175193706386825626005767142779158246159402270795992278944
+- fused_right = 16089746625107921886379479343676619567444150947455675976379397017146086344498
 
 ### Next Steps
+1. **Compare Zolt's Stage 1 sumcheck output** to what Jolt expects
+   - The Stage 1 output_claim should match Stage 2's initial expected claim
+   - If they don't match, there's a transcript divergence
 
-1. **Debug val_final_claim vs val_io_eval mismatch**
-   - Compare the exact bytes being serialized for RamValFinal claim
-   - Verify the termination_index computation matches Jolt
-   - Check if LowToHigh vs BIG_ENDIAN convention is correct
+2. **Trace the fused_left/fused_right computation**
+   - These are computed from l_inst, r_inst, is_rd_not_zero, next_is_noop
+   - These values come from Stage 2's virtual polynomial evaluations
 
-2. **Ensure OutputSumcheck polynomials are computed correctly**
-   - For a correctly executing program, the polynomial SHOULD be zero
-   - This is correct behavior when val_final = val_io
-
-3. **Verify the expected_output_claim computation in Jolt matches**
-   - The batched sumcheck output should match the individual instance outputs
+3. **Verify tau serialization**
+   - tau values are derived from the preprocessing
+   - Make sure we're using the same tau as Jolt's preprocessing
 
 ### Files Modified This Session
-- src/zkvm/ram/output_check.zig - NEW: OutputSumcheckProver
-- src/zkvm/ram/mod.zig - Export OutputSumcheck module
-- src/zkvm/proof_converter.zig - Integrate OutputSumcheck, pass config
-- src/zkvm/mod.zig - Pass RAM state data to converter
+- src/zkvm/proof_converter.zig - Fixed r_address_prime reversal for OutputSumcheck
 
 ### Commits This Session
-- `cc1985e`: feat(output-sumcheck): Add OutputSumcheckProver infrastructure
+- (pending) fix(output-sumcheck): Reverse r_address_prime for big-endian evaluation
 
 ## Previous Session Summary
-All Stage 2 internal values match Jolt:
-- Input claims (all 5)
-- Gamma values (rwc, instr)
-- Batching coefficients
-- ProductVirtualRemainder polynomial coefficients
-- Sumcheck challenges (all 26 rounds)
+- OutputSumcheckProver implemented
+- Termination bit handling fixed (val_final = val_io = 1 at termination index)
+- Commit: cc1985e

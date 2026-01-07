@@ -257,6 +257,14 @@ pub fn ArkworksSerializer(comptime F: type) type {
                 switch (entry.id) {
                     .Virtual => |v| {
                         std.debug.print("[SERIALIZE] Claim {d:02}: Virtual({s}, {s})\n", .{ i, @tagName(v.poly), @tagName(v.sumcheck_id) });
+                        // Debug RamValFinal specifically
+                        if (v.poly == .RamValFinal and v.sumcheck_id == .RamOutputCheck) {
+                            const le_bytes = entry.claim.toBytes();
+                            std.debug.print("[SERIALIZE] RamValFinal bytes (LE first 8): [{x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}]\n", .{
+                                le_bytes[0], le_bytes[1], le_bytes[2], le_bytes[3],
+                                le_bytes[4], le_bytes[5], le_bytes[6], le_bytes[7],
+                            });
+                        }
                     },
                     .Committed => |c| {
                         std.debug.print("[SERIALIZE] Claim {d:02}: Committed({s}, {s})\n", .{ i, @tagName(c.poly), @tagName(c.sumcheck_id) });

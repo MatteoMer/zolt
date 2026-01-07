@@ -1,11 +1,13 @@
 # Zolt-Jolt Compatibility - Stage 2 Progress
 
 ## Current Status
-Stage 2 sumcheck verification improving but still failing.
+- Stage 1: PASSING ✅
+- Stage 2: FAILING ❌ (claim mismatch after tau_stage2 fix)
+- Stage 3+: Not reached yet
 
-### Latest Values (after claim update fix)
-- output_claim:          20291704288663086458385602321745330294718053661243679658093460943559986613657
-- expected_output_claim: 15745090188359599137189004113283834746953666719330265610972696622859550686329
+### Latest Values (after tau_stage2 fix)
+- output_claim:          14867822501945056124760436278298769782043474221052097072713539181667688027183
+- expected_output_claim: 7131681515739848144364178122568074008762470833002613723202290098936339019660
 
 ### Tests
 - All 712 Zolt tests pass
@@ -28,20 +30,31 @@ Stage 2 sumcheck verification improving but still failing.
 - Challenges reversed for factor evaluation
 - Matches Jolt's OpeningPoint<BIG_ENDIAN> convention
 
+### 4. Correct tau for Stage 2 (commit 7b9d285)
+- Stage 2 tau should be [r_cycle_stage1..., tau_high_stage2]
+- NOT the original tau from Stage 1
+- Matches Jolt's ProductVirtualUniSkipParams::new
+
 ## Remaining Issues
 
-The output_claim and expected_output_claim are now within ~30% of each other (20291e75 vs 15745e75) but still don't match.
+The expected_output_claim for ProductVirtualRemainder is computed as:
+```
+tau_high_bound_r0 * tau_bound_r_tail_reversed * fused_left * fused_right
+```
 
-Possible causes:
-1. **Round polynomial computation** - The cubic polynomial s(X) might have errors
-2. **Split_eq binding** - The eq polynomial binding might differ from Jolt
-3. **Endianness** - Subtle ordering differences in tau or other parameters
+Where:
+- fused_left = w[0]*l_inst + w[1]*is_rd_not_zero + w[2]*is_rd_not_zero + w[3]*lookup_out + w[4]*j_flag
+- fused_right = w[0]*r_inst + w[1]*wl_flag + w[2]*j_flag + w[3]*branch_flag + w[4]*(1-next_is_noop)
+- w[0..4] = Lagrange weights at r0 over 5-point domain
+- tau_bound_r_tail_reversed = eq(tau_low, r_cycle_reversed)
+
+The sumcheck round polynomials need to be consistent with this formula.
 
 ## Debugging Strategy
 
-1. **Add more debug output** - Print intermediate values in both Zolt and Jolt
-2. **Compare round by round** - Verify each round's polynomial matches
-3. **Test with smaller trace** - Use 4-cycle trace for easier debugging
+1. **Check round polynomial computation** - My current approach computes evaluations directly, not using Gruen's polynomial
+2. **Verify tau_low ordering** - tau_low for Stage 2 should be [r_1, r_2, ..., r_n] (cycle challenges from Stage 1)
+3. **Compare eq polynomial evaluations** - Ensure eq(tau_low, x) matches Jolt
 
 ## Commands
 

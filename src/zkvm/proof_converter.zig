@@ -1422,15 +1422,28 @@ pub fn ProofConverter(comptime F: type) type {
                             // ProductVirtualRemainder - use real prover
                             const compressed = product_prover.?.computeRoundPolynomial() catch [3]F{ F.zero(), F.zero(), F.zero() };
 
-                            // compressed = [c0, c2, c3] = evaluations at 0, 2, 3
+                            // compressed = [c0, c2, c3] = coefficients, NOT evaluations!
+                            // Polynomial: s(X) = c0 + c1*X + c2*X^2 + c3*X^3
+                            // where c1 is recovered from: s(0) + s(1) = current_claim
                             // s(0) = c0
-                            // s(1) = current_claim - s(0) (from the sumcheck hint)
-                            // s(2) = c2
-                            // s(3) = c3
-                            const s0 = compressed[0];
-                            const s1 = product_prover.?.current_claim.sub(s0);
-                            const s2 = compressed[1];
-                            const s3 = compressed[2];
+                            // s(1) = c0 + c1 + c2 + c3 = current_claim - c0
+                            // => c1 = current_claim - 2*c0 - c2 - c3
+                            const c0 = compressed[0];
+                            const c2 = compressed[1];
+                            const c3 = compressed[2];
+                            const current_claim_local = product_prover.?.current_claim;
+                            const c1 = current_claim_local.sub(c0).sub(c0).sub(c2).sub(c3);
+
+                            // Now compute evaluations at 0, 1, 2, 3
+                            // s(0) = c0
+                            const s0 = c0;
+                            // s(1) = c0 + c1 + c2 + c3 = current_claim - s(0)
+                            const s1 = current_claim_local.sub(s0);
+                            // s(2) = c0 + 2*c1 + 4*c2 + 8*c3
+                            const s2 = c0.add(c1.mul(F.fromU64(2))).add(c2.mul(F.fromU64(4))).add(c3.mul(F.fromU64(8)));
+                            // s(3) = c0 + 3*c1 + 9*c2 + 27*c3
+                            const s3 = c0.add(c1.mul(F.fromU64(3))).add(c2.mul(F.fromU64(9))).add(c3.mul(F.fromU64(27)));
+
                             product_evals_this_round = [4]F{ s0, s1, s2, s3 };
 
                             // Weight by batching coefficient

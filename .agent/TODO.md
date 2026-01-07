@@ -36,10 +36,22 @@ The difference comes from instances 1, 2, 4 which should contribute zero to the 
 
 The issue is that Stage 2's non-ProductVirtualRemainder instances (RamRafEvaluation, RamReadWriteChecking, InstructionLookupsClaimReduction) are contributing non-zero values when they should contribute zero.
 
+**Key insight from Jolt analysis:**
+- Instances 1, 2, 4 DO have non-zero input claims from Stage 1
+- But their expected_output_claim = 0 because the sumcheck polynomial is designed to reduce to zero
+- These instances have SPECIFIC polynomial structures that must be sumchecked
+
+**The problem:**
+Zolt doesn't implement real provers for instances 1, 2, 4. It's falling through to a "constant polynomial" fallback that doesn't correctly reduce the input claims to zero output claims.
+
+**Fix options:**
+1. Implement proper provers for RamRafEvaluation, RamReadWriteChecking, InstructionLookupsClaimReduction
+2. Or understand why these should evaluate to zero and handle specially
+
 **Next steps:**
-1. Check if the input claims for instances 1, 2, 4 should actually be zero
-2. Or check if the sumcheck polynomials for these instances should reduce to zero
-3. Verify that the other instance provers are implemented correctly
+1. Implement RafEvaluationProver for instance 1
+2. Implement RamReadWriteCheckingProver for instance 2
+3. Implement InstructionClaimReductionProver for instance 4
 
 ### Stage 2 UniSkip Extended Evaluations - FIXED!
 

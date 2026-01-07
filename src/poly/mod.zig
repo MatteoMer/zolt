@@ -246,10 +246,19 @@ pub fn EqPolynomial(comptime F: type) type {
             @memset(result, F.one());
 
             // Build evaluations using Jolt's algorithm (big-endian indexing)
-            // Process variables in order: r[0], r[1], ..., r[n-1]
-            // After processing r[j], we have 2^(j+1) entries where:
-            // - bit 0 (MSB after j iterations) corresponds to r[0]
-            // - bit j (LSB after j iterations) corresponds to r[j]
+            // Jolt's algorithm:
+            //   for j in 0..r.len() {
+            //       size *= 2;
+            //       for i in (0..size).rev().step_by(2) {
+            //           let scalar = evals[i / 2];
+            //           evals[i] = scalar * r[j];
+            //           evals[i - 1] = scalar - evals[i];
+            //       }
+            //   }
+            //
+            // (0..size).rev().step_by(2) gives odd indices in descending order:
+            // For size=4: [3, 1]
+            // For size=8: [7, 5, 3, 1]
             //
             // All challenges are expected to be in Montgomery form.
             var current_size: usize = 1;
@@ -257,15 +266,20 @@ pub fn EqPolynomial(comptime F: type) type {
                 // Double the size for this variable
                 current_size *= 2;
 
-                // Process indices from high to low
-                var i = current_size;
-                while (i >= 2) {
-                    i -= 2;
-                    // result[i] will have r[j] = 0, result[i+1] will have r[j] = 1
-                    const scalar = result[i / 2];
+                // Process odd indices from high to low (matching Jolt's rev().step_by(2))
+                var i = current_size - 1; // Start at highest odd index
+                while (i >= 1) {
+                    // i is odd, so i-1 is even
+                    const scalar = result[i / 2]; // i/2 = (i-1)/2 for odd i
                     const r_j = self.r[j];
-                    result[i + 1] = scalar.mul(r_j);
-                    result[i] = scalar.sub(result[i + 1]); // scalar * (1 - r[j])
+                    result[i] = scalar.mul(r_j); // higher index (odd) gets r[j]
+                    result[i - 1] = scalar.sub(result[i]); // lower index (even) gets 1 - r[j]
+
+                    if (i >= 2) {
+                        i -= 2;
+                    } else {
+                        break;
+                    }
                 }
             }
 

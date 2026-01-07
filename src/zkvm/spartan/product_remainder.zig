@@ -267,8 +267,11 @@ pub fn ProductVirtualRemainderProver(comptime F: type) type {
         ///
         /// Returns [s(0), s(2), s(3)] - the compressed cubic polynomial
         pub fn computeRoundPolynomial(self: *Self) ![3]F {
-            const half = self.left_poly.boundLen() / 2;
-            if (half == 0) {
+            // Number of groups - each group has 2 adjacent values (lo, hi)
+            const n = self.left_poly.boundLen();
+            const num_groups = n / 2;
+
+            if (num_groups == 0) {
                 return [3]F{ self.current_claim, F.zero(), F.zero() };
             }
 
@@ -279,6 +282,7 @@ pub fn ProductVirtualRemainderProver(comptime F: type) type {
             const num_xin_bits: u6 = if (E_in.len > 1) @intCast(std.math.log2_int(usize, E_in.len)) else 0;
 
             // Compute t0 and t_inf using the Gruen structure (matching Jolt's remaining_quadratic_evals)
+            // Uses interleaved format: left[2*g] = lo, left[2*g+1] = hi
             var t0_sum: F = F.zero();
             var t_inf_sum: F = F.zero();
 
@@ -289,13 +293,13 @@ pub fn ProductVirtualRemainderProver(comptime F: type) type {
                 for (0..E_in.len) |x_in| {
                     const g = (x_out << num_xin_bits) | x_in;
 
-                    // Standard MLE layout: lo at g, hi at g+half (half is from outer scope)
-                    if (g < half) {
-                        // Get left/right at lo and hi positions
-                        const l_lo = self.left_poly.evaluations[g];
-                        const l_hi = self.left_poly.evaluations[g + half];
-                        const r_lo = self.right_poly.evaluations[g];
-                        const r_hi = self.right_poly.evaluations[g + half];
+                    // Interleaved layout: lo at 2*g, hi at 2*g+1
+                    if (g < num_groups) {
+                        // Get left/right at lo and hi positions (adjacent pairs)
+                        const l_lo = self.left_poly.evaluations[2 * g];
+                        const l_hi = self.left_poly.evaluations[2 * g + 1];
+                        const r_lo = self.right_poly.evaluations[2 * g];
+                        const r_hi = self.right_poly.evaluations[2 * g + 1];
 
                         // t0 = left_lo * right_lo
                         const p0 = l_lo.mul(r_lo);

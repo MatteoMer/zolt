@@ -38,7 +38,7 @@ const product_remainder = @import("spartan/product_remainder.zig");
 const transcripts = @import("../transcripts/mod.zig");
 const Blake2bTranscript = transcripts.Blake2bTranscript;
 const poly_mod = @import("../poly/mod.zig");
-const jolt_device = @import("../common/jolt_device.zig");
+const jolt_device = @import("jolt_device.zig");
 const constants = @import("../common/constants.zig");
 
 /// Convert Zolt's internal proof to Jolt-compatible format
@@ -1255,17 +1255,50 @@ pub fn ProofConverter(comptime F: type) type {
             //
             // Since we're proving correct execution (termination = 1 in final RAM),
             // val_final should equal val_io, so val_final_claim = val_io_eval.
-            //
-            // For now, use a simplified approach: assume val_final = val_io for correct execution.
-            // This means expected_output_claim = eq * io_mask * (val_final - val_io) = 0.
-            // To achieve this, we need val_final_claim = val_io_eval.
-            //
-            // TODO: Implement proper val_io computation based on memory layout
-            // For now, keep it zero since computing the exact termination index MLE
-            // requires knowledge of the memory layout that we don't currently pass through.
+            const val_final_claim = blk: {
+                if (config.memory_layout) |memory_layout| {
+                    // Compute val_io_eval = eq(termination_index, r_address_prime)
+                    // where r_address_prime = challenges[max_num_rounds - 16..] (last 16 for OutputSumcheck)
+                    const max_num_rounds = log_ram_k + n_cycle_vars;
+                    if (stage2_result.challenges.len >= max_num_rounds and max_num_rounds >= log_ram_k) {
+                        const r_address_prime = stage2_result.challenges[max_num_rounds - log_ram_k ..];
+                        std.debug.print("[ZOLT] OutputSumcheck: r_address_prime.len = {}\n", .{r_address_prime.len});
+
+                        // Get termination index via remapAddress
+                        const termination_addr = memory_layout.termination;
+                        const termination_index = memory_layout.remapAddress(termination_addr);
+                        std.debug.print("[ZOLT] OutputSumcheck: termination_addr = 0x{X}, termination_index = {?}\n", .{ termination_addr, termination_index });
+
+                        if (termination_index) |idx| {
+                            // Compute eq(idx, r_address_prime) = Π (idx_i * r_i + (1 - idx_i) * (1 - r_i))
+                            // This is the Lagrange basis evaluation
+                            var result = F.one();
+                            var bit_idx: u6 = 0;
+                            const num_vars = r_address_prime.len;
+                            while (bit_idx < num_vars) : (bit_idx += 1) {
+                                const bit: u1 = @truncate((idx >> bit_idx) & 1);
+                                const r_i = r_address_prime[bit_idx];
+                                const one_minus_r_i = F.one().sub(r_i);
+                                if (bit == 1) {
+                                    result = result.mul(r_i);
+                                } else {
+                                    result = result.mul(one_minus_r_i);
+                                }
+                            }
+                            std.debug.print("[ZOLT] OutputSumcheck: val_io_eval (termination) = {any}\n", .{result.toBytesBE()});
+                            break :blk result;
+                        }
+                    }
+                }
+                // No memory layout provided, use zero (will fail verification)
+                std.debug.print("[ZOLT] OutputSumcheck: using zero val_final_claim (no memory layout)\n", .{});
+                break :blk F.zero();
+            };
+
+            std.debug.print("[ZOLT] OutputSumcheck: inserting val_final_claim = {any}\n", .{val_final_claim.toBytesBE()});
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .RamValFinal, .sumcheck_id = .RamOutputCheck } },
-                F.zero(),
+                val_final_claim,
             );
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .RamValInit, .sumcheck_id = .RamOutputCheck } },

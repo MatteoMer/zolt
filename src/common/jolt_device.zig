@@ -138,6 +138,21 @@ pub const MemoryLayout = struct {
         return @min(self.trusted_advice_start, self.untrusted_advice_start);
     }
 
+    /// Remap an address to an index in the memory polynomial
+    /// Returns null if address is 0 (no read/write)
+    /// The index is (address - lowest_address) / 8
+    pub fn remapAddress(self: *const MemoryLayout, address: u64) ?u64 {
+        if (address == 0) {
+            return null;
+        }
+        const lowest_address = self.getLowestAddress();
+        if (address >= lowest_address) {
+            return (address - lowest_address) / 8;
+        } else {
+            @panic("Unexpected address");
+        }
+    }
+
     /// Returns the total emulator memory size
     pub fn getTotalMemorySize(self: *const MemoryLayout) u64 {
         return self.memory_size + self.stack_size + constants.STACK_CANARY_SIZE;

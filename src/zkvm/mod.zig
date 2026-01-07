@@ -611,6 +611,7 @@ pub fn JoltProver(comptime F: type) type {
                     .log_k_chunk = 4,
                     // Jolt uses LOG_K / 8 = 128 / 8 = 16 for small traces
                     .lookups_ra_virtual_log_k_chunk = 16,
+                    .memory_layout = &device.memory_layout, // Pass memory layout for OutputSumcheck
                 },
                 cycle_witnesses,
                 tau,
@@ -831,6 +832,7 @@ pub fn JoltProver(comptime F: type) type {
                     .bytecode_K = 1 << 16,
                     .log_k_chunk = 4,
                     .lookups_ra_virtual_log_k_chunk = 16,
+                    .memory_layout = &device.memory_layout, // Pass memory layout for OutputSumcheck
                 },
                 cycle_witnesses,
                 tau,
@@ -996,6 +998,7 @@ pub fn JoltProver(comptime F: type) type {
                     .bytecode_K = 1 << 16,
                     .log_k_chunk = 4,
                     .lookups_ra_virtual_log_k_chunk = 16,
+                    .memory_layout = &device.memory_layout, // Pass memory layout for OutputSumcheck
                 },
                 cycle_witnesses,
                 tau,

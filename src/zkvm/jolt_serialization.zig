@@ -252,7 +252,22 @@ pub fn ArkworksSerializer(comptime F: type) type {
         /// Write OpeningClaims (BTreeMap format)
         pub fn writeOpeningClaims(self: *Self, claims: *const jolt_types.OpeningClaims(F)) !void {
             try self.writeUsize(claims.entries.items.len);
-            for (claims.entries.items) |entry| {
+            for (claims.entries.items, 0..) |entry, i| {
+                // Debug: print ALL claims
+                switch (entry.id) {
+                    .Virtual => |v| {
+                        std.debug.print("[SERIALIZE] Claim {d:02}: Virtual({s}, {s})\n", .{ i, @tagName(v.poly), @tagName(v.sumcheck_id) });
+                    },
+                    .Committed => |c| {
+                        std.debug.print("[SERIALIZE] Claim {d:02}: Committed({s}, {s})\n", .{ i, @tagName(c.poly), @tagName(c.sumcheck_id) });
+                    },
+                    .UntrustedAdvice => |sid| {
+                        std.debug.print("[SERIALIZE] Claim {d:02}: UntrustedAdvice({s})\n", .{ i, @tagName(sid) });
+                    },
+                    .TrustedAdvice => |sid| {
+                        std.debug.print("[SERIALIZE] Claim {d:02}: TrustedAdvice({s})\n", .{ i, @tagName(sid) });
+                    },
+                }
                 try self.writeOpeningId(entry.id);
                 try self.writeFieldElement(entry.claim);
             }

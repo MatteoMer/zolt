@@ -86,6 +86,29 @@ pub const CommittedPolynomial = union(enum) {
             else => error.InvalidData,
         };
     }
+
+    /// Compare for ordering to match Rust's derived Ord
+    pub fn order(a: CommittedPolynomial, b: CommittedPolynomial) std.math.Order {
+        // Compare by variant tag first
+        const tag_a = @intFromEnum(std.meta.activeTag(a));
+        const tag_b = @intFromEnum(std.meta.activeTag(b));
+        if (tag_a != tag_b) {
+            return std.math.order(tag_a, tag_b);
+        }
+        // Same variant - compare payload
+        switch (a) {
+            .RdInc, .RamInc => return .eq,
+            .InstructionRa => |val_a| {
+                return std.math.order(val_a, b.InstructionRa);
+            },
+            .BytecodeRa => |val_a| {
+                return std.math.order(val_a, b.BytecodeRa);
+            },
+            .RamRa => |val_a| {
+                return std.math.order(val_a, b.RamRa);
+            },
+        }
+    }
 };
 
 // =============================================================================
@@ -136,6 +159,18 @@ pub const VirtualPolynomial = union(enum) {
     OpFlags: u8,
     InstructionFlags: u8,
     LookupTableFlag: usize,
+
+    /// Compare for ordering to match Rust's derived Ord
+    pub fn order(a: VirtualPolynomial, b: VirtualPolynomial) std.math.Order {
+        // Compare by variant tag first
+        const tag_a = @intFromEnum(std.meta.activeTag(a));
+        const tag_b = @intFromEnum(std.meta.activeTag(b));
+        if (tag_a != tag_b) {
+            return std.math.order(tag_a, tag_b);
+        }
+        // Same variant - compare payload
+        return orderByPayload(a, b);
+    }
 
     /// Compare payloads of two VirtualPolynomials with the same tag
     /// Returns .eq if they're completely equal, otherwise .lt or .gt
@@ -261,6 +296,9 @@ pub const OpeningId = union(enum) {
     }
 
     /// Compare for ordering (needed for BTreeMap-like structure)
+    /// IMPORTANT: Must match Rust's derived Ord for OpeningId which compares:
+    /// 1. Variant index first (Committed=0, Virtual=1, UntrustedAdvice=2, TrustedAdvice=3)
+    /// 2. For Committed/Virtual: (poly, sumcheck_id) - poly FIRST, then sumcheck_id
     pub fn order(a: OpeningId, b: OpeningId) std.math.Order {
         // Compare by variant first
         const a_tag = @intFromEnum(std.meta.activeTag(a));
@@ -281,24 +319,19 @@ pub const OpeningId = union(enum) {
             },
             .Committed => |c_a| {
                 const c_b = b.Committed;
-                // Compare sumcheck_id first, then poly
-                const cmp = std.math.order(@intFromEnum(c_a.sumcheck_id), @intFromEnum(c_b.sumcheck_id));
-                if (cmp != .eq) return cmp;
-                // For simplicity, use memory comparison (could be more detailed)
-                return std.math.order(@intFromEnum(std.meta.activeTag(c_a.poly)), @intFromEnum(std.meta.activeTag(c_b.poly)));
+                // Rust derives Ord for (CommittedPolynomial, SumcheckId) as tuple order:
+                // First compare poly, then sumcheck_id
+                const poly_cmp = CommittedPolynomial.order(c_a.poly, c_b.poly);
+                if (poly_cmp != .eq) return poly_cmp;
+                return std.math.order(@intFromEnum(c_a.sumcheck_id), @intFromEnum(c_b.sumcheck_id));
             },
             .Virtual => |v_a| {
                 const v_b = b.Virtual;
-                const cmp = std.math.order(@intFromEnum(v_a.sumcheck_id), @intFromEnum(v_b.sumcheck_id));
-                if (cmp != .eq) return cmp;
-                // Compare polynomial by tag first
-                const tag_a = @intFromEnum(std.meta.activeTag(v_a.poly));
-                const tag_b = @intFromEnum(std.meta.activeTag(v_b.poly));
-                if (tag_a != tag_b) {
-                    return std.math.order(tag_a, tag_b);
-                }
-                // Same tag - compare payload if applicable
-                return VirtualPolynomial.orderByPayload(v_a.poly, v_b.poly);
+                // Rust derives Ord for (VirtualPolynomial, SumcheckId) as tuple order:
+                // First compare poly, then sumcheck_id
+                const poly_cmp = VirtualPolynomial.order(v_a.poly, v_b.poly);
+                if (poly_cmp != .eq) return poly_cmp;
+                return std.math.order(@intFromEnum(v_a.sumcheck_id), @intFromEnum(v_b.sumcheck_id));
             },
         }
     }
@@ -746,6 +779,29 @@ test "OpeningClaims ordering" {
     try testing.expectEqual(SumcheckId.SpartanOuter, claims.entries.items[0].id.UntrustedAdvice);
     try testing.expectEqual(SumcheckId.RamValEvaluation, claims.entries.items[1].id.UntrustedAdvice);
     try testing.expectEqual(SumcheckId.SpartanOuter, claims.entries.items[2].id.TrustedAdvice);
+}
+
+test "OpeningClaims Virtual ordering - poly first then sumcheck_id" {
+    const Claims = OpeningClaims(BN254Scalar);
+    var claims = Claims.init(testing.allocator);
+    defer claims.deinit();
+
+    // Test that poly is compared BEFORE sumcheck_id (Rust's derived Ord behavior)
+    // Insert in order that tests poly-first comparison:
+    // - NextIsNoop@SpartanProductVirtualization (poly=4, sumcheck=1)
+    // - NextIsVirtual@SpartanOuter (poly=5, sumcheck=0)
+    // Even though sumcheck_id 0 < 1, poly 4 < 5 should determine order
+    try claims.insert(.{ .Virtual = .{ .poly = .NextIsNoop, .sumcheck_id = .SpartanProductVirtualization } }, BN254Scalar.fromU64(1));
+    try claims.insert(.{ .Virtual = .{ .poly = .NextIsVirtual, .sumcheck_id = .SpartanOuter } }, BN254Scalar.fromU64(2));
+
+    try testing.expectEqual(@as(usize, 2), claims.len());
+
+    // Poly comes first in comparison, so NextIsNoop(4) < NextIsVirtual(5)
+    // regardless of sumcheck_id. NextIsNoop should be at index 0.
+    const first = claims.entries.items[0].id.Virtual;
+    const second = claims.entries.items[1].id.Virtual;
+    try testing.expectEqual(VirtualPolynomial.NextIsNoop, first.poly);
+    try testing.expectEqual(VirtualPolynomial.NextIsVirtual, second.poly);
 }
 
 test "SumcheckInstanceProof basic" {

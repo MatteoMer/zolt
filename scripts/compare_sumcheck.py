@@ -12,8 +12,11 @@ Compares all verification stages between Zolt and Jolt logs:
 - Stage 5: Register Evaluation
 - Stage 6: Booleanity
 
+NEW: Transcript state tracking to catch state-dependent divergence.
+
 Usage:
     python3 compare_sumcheck.py [zolt.log] [jolt.log] [--stage N] [--verbose]
+    python3 compare_sumcheck.py --transcript  # Compare transcript state evolution
 """
 
 import re
@@ -50,6 +53,399 @@ class CompareResult:
     jolt_value: Optional[str]
     result: MatchResult
     details: str = ""
+
+@dataclass
+class TranscriptOp:
+    """A single transcript operation"""
+    op_type: str  # "append_u64", "append_bytes", "append_message", "challenge"
+    label: str
+    value: str  # hex or numeric value
+    state_before: str  # transcript state before op
+    state_after: str  # transcript state after op
+    round_num: int
+    line_num: int
+
+class TranscriptAnalyzer:
+    """Analyze transcript state evolution to find divergence"""
+
+    def __init__(self, zolt_log: str, jolt_log: str):
+        self.zolt_log = zolt_log
+        self.jolt_log = jolt_log
+        self.zolt_ops: List[TranscriptOp] = []
+        self.jolt_ops: List[TranscriptOp] = []
+
+    def parse_zolt_transcript(self) -> List[TranscriptOp]:
+        """Parse Zolt transcript operations"""
+        ops = []
+        lines = self.zolt_log.split('\n')
+
+        # Patterns for Zolt transcript logs
+        # [ZOLT TRANSCRIPT] appendU64: max_input_size = 1024, round=0, state_before={ aa bb cc ... }
+        append_pattern = re.compile(
+            r'\[ZOLT TRANSCRIPT\]\s+(\w+):\s+(\S+)\s*=\s*([^,]+),\s*round=(\d+),\s*state_before=\{([^}]*)\}'
+        )
+        state_after_pattern = re.compile(r'\[ZOLT TRANSCRIPT\]\s+state_after=\{([^}]*)\}')
+        challenge_pattern = re.compile(
+            r'\[ZOLT TRANSCRIPT\]\s+challenge:\s*(\S+)\s*=\s*\{([^}]*)\},\s*round=(\d+)'
+        )
+
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+
+            # Check for append operation
+            match = append_pattern.search(line)
+            if match:
+                op_type = match.group(1)
+                label = match.group(2)
+                value = match.group(3).strip()
+                round_num = int(match.group(4))
+                state_before = match.group(5).replace(' ', '')
+
+                # Look for state_after on next line
+                state_after = ""
+                if i + 1 < len(lines):
+                    after_match = state_after_pattern.search(lines[i + 1])
+                    if after_match:
+                        state_after = after_match.group(1).replace(' ', '')
+                        i += 1
+
+                ops.append(TranscriptOp(
+                    op_type=op_type,
+                    label=label,
+                    value=value,
+                    state_before=state_before,
+                    state_after=state_after,
+                    round_num=round_num,
+                    line_num=i
+                ))
+
+            # Check for challenge
+            ch_match = challenge_pattern.search(line)
+            if ch_match:
+                label = ch_match.group(1)
+                value = ch_match.group(2).replace(' ', '')
+                round_num = int(ch_match.group(3))
+                ops.append(TranscriptOp(
+                    op_type="challenge",
+                    label=label,
+                    value=value,
+                    state_before="",
+                    state_after="",
+                    round_num=round_num,
+                    line_num=i
+                ))
+
+            i += 1
+
+        return ops
+
+    def parse_jolt_transcript(self) -> List[TranscriptOp]:
+        """Parse Jolt transcript operations"""
+        ops = []
+        lines = self.jolt_log.split('\n')
+
+        # Patterns for Jolt transcript logs
+        # [JOLT TRANSCRIPT] append_u64: value=1024, round=0, state_before=[aa, bb, cc, ...]
+        append_u64_pattern = re.compile(
+            r'\[JOLT TRANSCRIPT\]\s+append_u64:\s+value=(\d+),\s*round=(\d+),\s*state_before=\[([^\]]*)\]'
+        )
+        append_bytes_pattern = re.compile(
+            r'\[JOLT TRANSCRIPT\]\s+append_bytes:\s+len=(\d+),\s*round=(\d+),\s*state_before=\[([^\]]*)\]'
+        )
+        append_msg_pattern = re.compile(
+            r'\[JOLT TRANSCRIPT\]\s+append_message:\s+(\S+),\s*round=(\d+),\s*state_before=\[([^\]]*)\]'
+        )
+        state_after_pattern = re.compile(r'\[JOLT TRANSCRIPT\]\s+state_after=\[([^\]]*)\]')
+        challenge_pattern = re.compile(
+            r'\[JOLT TRANSCRIPT\]\s+challenge:\s*(\S+)\s*=\s*\[([^\]]*)\],\s*round=(\d+)'
+        )
+
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+
+            # Check append_u64
+            match = append_u64_pattern.search(line)
+            if match:
+                value = match.group(1)
+                round_num = int(match.group(2))
+                state_before = self._normalize_jolt_state(match.group(3))
+
+                state_after = ""
+                if i + 1 < len(lines):
+                    after_match = state_after_pattern.search(lines[i + 1])
+                    if after_match:
+                        state_after = self._normalize_jolt_state(after_match.group(1))
+                        i += 1
+
+                ops.append(TranscriptOp(
+                    op_type="append_u64",
+                    label="u64",
+                    value=value,
+                    state_before=state_before,
+                    state_after=state_after,
+                    round_num=round_num,
+                    line_num=i
+                ))
+
+            # Check append_bytes
+            match = append_bytes_pattern.search(line)
+            if match:
+                value = f"len={match.group(1)}"
+                round_num = int(match.group(2))
+                state_before = self._normalize_jolt_state(match.group(3))
+
+                state_after = ""
+                if i + 1 < len(lines):
+                    after_match = state_after_pattern.search(lines[i + 1])
+                    if after_match:
+                        state_after = self._normalize_jolt_state(after_match.group(1))
+                        i += 1
+
+                ops.append(TranscriptOp(
+                    op_type="append_bytes",
+                    label="bytes",
+                    value=value,
+                    state_before=state_before,
+                    state_after=state_after,
+                    round_num=round_num,
+                    line_num=i
+                ))
+
+            # Check append_message
+            match = append_msg_pattern.search(line)
+            if match:
+                label = match.group(1)
+                round_num = int(match.group(2))
+                state_before = self._normalize_jolt_state(match.group(3))
+
+                state_after = ""
+                if i + 1 < len(lines):
+                    after_match = state_after_pattern.search(lines[i + 1])
+                    if after_match:
+                        state_after = self._normalize_jolt_state(after_match.group(1))
+                        i += 1
+
+                ops.append(TranscriptOp(
+                    op_type="append_message",
+                    label=label,
+                    value="",
+                    state_before=state_before,
+                    state_after=state_after,
+                    round_num=round_num,
+                    line_num=i
+                ))
+
+            # Check challenge
+            ch_match = challenge_pattern.search(line)
+            if ch_match:
+                label = ch_match.group(1)
+                value = self._normalize_jolt_state(ch_match.group(2))
+                round_num = int(ch_match.group(3))
+                ops.append(TranscriptOp(
+                    op_type="challenge",
+                    label=label,
+                    value=value,
+                    state_before="",
+                    state_after="",
+                    round_num=round_num,
+                    line_num=i
+                ))
+
+            i += 1
+
+        return ops
+
+    def _normalize_jolt_state(self, state: str) -> str:
+        """Convert Jolt state format [130, 56, 27] to hex"""
+        try:
+            nums = [int(x.strip()) for x in state.split(',') if x.strip()]
+            return ''.join(f'{n:02x}' for n in nums)
+        except:
+            return state
+
+    def find_state_divergence(self) -> Optional[Tuple[int, TranscriptOp, TranscriptOp, str]]:
+        """Find the first point where transcript states diverge.
+        Returns (index, zolt_op, jolt_op, reason) or None if no divergence."""
+
+        self.zolt_ops = self.parse_zolt_transcript()
+        self.jolt_ops = self.parse_jolt_transcript()
+
+        # Compare state_after values in sequence
+        min_len = min(len(self.zolt_ops), len(self.jolt_ops))
+
+        for i in range(min_len):
+            zolt_op = self.zolt_ops[i]
+            jolt_op = self.jolt_ops[i]
+
+            # Check if state_after matches (the cumulative state)
+            if zolt_op.state_after and jolt_op.state_after:
+                if zolt_op.state_after != jolt_op.state_after:
+                    return (i, zolt_op, jolt_op, "state_after mismatch")
+
+            # Check if operation types match
+            if zolt_op.op_type != jolt_op.op_type:
+                return (i, zolt_op, jolt_op, f"op_type mismatch: {zolt_op.op_type} vs {jolt_op.op_type}")
+
+            # Check round numbers
+            if zolt_op.round_num != jolt_op.round_num:
+                return (i, zolt_op, jolt_op, f"round mismatch: {zolt_op.round_num} vs {jolt_op.round_num}")
+
+        # Check if one log has more ops than the other
+        if len(self.zolt_ops) != len(self.jolt_ops):
+            return (min_len, None, None,
+                    f"operation count mismatch: Zolt has {len(self.zolt_ops)}, Jolt has {len(self.jolt_ops)}")
+
+        return None
+
+    def print_ops_around(self, index: int, context: int = 3):
+        """Print operations around a given index for debugging"""
+        start = max(0, index - context)
+        end = min(len(self.zolt_ops), len(self.jolt_ops), index + context + 1)
+
+        print(f"\n{Color.BOLD}Transcript operations around divergence (index {index}):{Color.RESET}")
+        print(f"\n{Color.YELLOW}ZOLT operations:{Color.RESET}")
+        for i in range(start, min(end, len(self.zolt_ops))):
+            op = self.zolt_ops[i]
+            marker = " >>> " if i == index else "     "
+            print(f"{marker}[{i}] {op.op_type}: {op.label}={op.value[:20] if op.value else ''}, round={op.round_num}")
+            if op.state_after:
+                print(f"          state_after: {op.state_after[:32]}...")
+
+        print(f"\n{Color.BLUE}JOLT operations:{Color.RESET}")
+        for i in range(start, min(end, len(self.jolt_ops))):
+            op = self.jolt_ops[i]
+            marker = " >>> " if i == index else "     "
+            print(f"{marker}[{i}] {op.op_type}: {op.label}={op.value[:20] if op.value else ''}, round={op.round_num}")
+            if op.state_after:
+                print(f"          state_after: {op.state_after[:32]}...")
+
+    def compare_stage_boundaries(self) -> List[Tuple[str, str, str, bool]]:
+        """Compare transcript state at stage boundaries.
+        Returns list of (stage_name, zolt_state, jolt_state, matches)"""
+        results = []
+
+        # Look for stage markers in both logs
+        stage_markers = [
+            ("STAGE1_PRE", "Stage 1 start"),
+            ("STAGE1_FINAL", "Stage 1 end"),
+            ("STAGE2_PRE", "Stage 2 start"),
+            ("STAGE2_FINAL", "Stage 2 end"),
+        ]
+
+        for marker, name in stage_markers:
+            zolt_state = self._extract_state_at_marker(self.zolt_log, marker, is_zolt=True)
+            jolt_state = self._extract_state_at_marker(self.jolt_log, marker, is_zolt=False)
+            matches = zolt_state == jolt_state if zolt_state and jolt_state else False
+            results.append((name, zolt_state or "N/A", jolt_state or "N/A", matches))
+
+        return results
+
+    def _extract_state_at_marker(self, log: str, marker: str, is_zolt: bool) -> Optional[str]:
+        """Extract transcript state at a given marker"""
+        for line in log.split('\n'):
+            if marker in line and "transcript_state" in line:
+                if is_zolt:
+                    match = re.search(r'transcript_state=\{([^}]*)\}', line)
+                    if match:
+                        return match.group(1).replace(' ', '')
+                else:
+                    match = re.search(r'transcript_state=\[([^\]]*)\]', line)
+                    if match:
+                        return self._normalize_jolt_state(match.group(1))
+        return None
+
+    def analyze_stage2_tau_high(self) -> Dict[str, any]:
+        """Specifically analyze Stage 2 tau_high sampling point - common failure point"""
+        result = {
+            'zolt_pre_state': None,
+            'jolt_pre_state': None,
+            'zolt_tau_high': None,
+            'jolt_tau_high': None,
+            'zolt_r_cycle_len': None,
+            'jolt_r_cycle_len': None,
+            'states_match': False,
+            'tau_high_match': False,
+        }
+
+        # Extract STAGE2_PRE transcript state (state before tau_high sampling)
+        for line in self.zolt_log.split('\n'):
+            if 'STAGE2_PRE' in line and 'transcript_state' in line:
+                match = re.search(r'transcript_state=\{([^}]*)\}', line)
+                if match:
+                    result['zolt_pre_state'] = match.group(1).replace(' ', '')
+            if 'STAGE2:' in line and 'r_cycle.len' in line:
+                match = re.search(r'r_cycle\.len\s*=\s*(\d+)', line)
+                if match:
+                    result['zolt_r_cycle_len'] = int(match.group(1))
+            if 'STAGE2:' in line and 'tau_high' in line:
+                match = re.search(r'tau_high\s*=\s*\{([^}]*)\}', line)
+                if match:
+                    result['zolt_tau_high'] = match.group(1).replace(' ', '')
+
+        for line in self.jolt_log.split('\n'):
+            if 'STAGE2_PRE' in line and 'transcript_state' in line:
+                match = re.search(r'transcript_state=\[([^\]]*)\]', line)
+                if match:
+                    result['jolt_pre_state'] = self._normalize_jolt_state(match.group(1))
+            if 'STAGE2:' in line and 'r_cycle.len' in line:
+                match = re.search(r'r_cycle\.len\s*=\s*(\d+)', line)
+                if match:
+                    result['jolt_r_cycle_len'] = int(match.group(1))
+            if 'STAGE2:' in line and 'tau_high' in line:
+                # Jolt might output as bytes or hex
+                match = re.search(r'tau_high\s*=\s*\[([^\]]*)\]', line)
+                if match:
+                    result['jolt_tau_high'] = self._normalize_jolt_state(match.group(1))
+                else:
+                    match = re.search(r'tau_high\s*=\s*([0-9a-f]{64})', line, re.I)
+                    if match:
+                        result['jolt_tau_high'] = match.group(1).lower()
+
+        # Check matches
+        if result['zolt_pre_state'] and result['jolt_pre_state']:
+            result['states_match'] = result['zolt_pre_state'] == result['jolt_pre_state']
+
+        if result['zolt_tau_high'] and result['jolt_tau_high']:
+            result['tau_high_match'] = result['zolt_tau_high'] == result['jolt_tau_high']
+
+        return result
+
+    def analyze_opening_claims(self) -> List[Tuple[str, str, str, bool]]:
+        """Compare opening claims added during verification.
+        Returns list of (claim_id, zolt_value, jolt_value, matches)"""
+        results = []
+
+        # Pattern for opening claims
+        # [JOLT] Opening claim: SumcheckId::Outer => point=[...], eval=...
+        zolt_claims = {}
+        jolt_claims = {}
+
+        for line in self.zolt_log.split('\n'):
+            match = re.search(r'Opening claim:\s*(\S+)\s*=>\s*.*eval\s*=\s*\{([^}]*)\}', line)
+            if match:
+                claim_id = match.group(1)
+                eval_val = match.group(2).replace(' ', '')
+                zolt_claims[claim_id] = eval_val
+
+        for line in self.jolt_log.split('\n'):
+            match = re.search(r'Opening claim:\s*(\S+)\s*=>\s*.*eval\s*=\s*\[([^\]]*)\]', line)
+            if match:
+                claim_id = match.group(1)
+                eval_val = self._normalize_jolt_state(match.group(2))
+                jolt_claims[claim_id] = eval_val
+
+        # Compare claims
+        all_ids = set(zolt_claims.keys()) | set(jolt_claims.keys())
+        for claim_id in sorted(all_ids):
+            zolt_val = zolt_claims.get(claim_id, "N/A")
+            jolt_val = jolt_claims.get(claim_id, "N/A")
+            matches = zolt_val == jolt_val if zolt_val != "N/A" and jolt_val != "N/A" else False
+            results.append((claim_id, zolt_val, jolt_val, matches))
+
+        return results
+
 
 class LogParser:
     """Parse values from Zolt and Jolt logs"""
@@ -374,6 +770,85 @@ class StageComparator:
 
         return results
 
+    def compare_stage2_batched(self) -> List[CompareResult]:
+        """Compare Stage 2 batched sumcheck - all 5 proofs"""
+        results = []
+
+        # Compare input claims for each of the 5 instances
+        for i in range(5):
+            zolt_val = self.extract_zolt_le_hex(f"STAGE2_PRE: input_claim[{i}] = ")
+            jolt_val = self.extract_single(f"STAGE2_PRE: input_claim[{i}]_bytes = ", self.jolt_log)
+            results.append(self.compare_values(f"Stage2 input_claim[{i}]", zolt_val, jolt_val))
+
+            # Also compare num_rounds and degree
+            zolt_rounds = self.extract_u64(f"STAGE2_PRE: num_rounds[{i}] = ", self.zolt_log)
+            jolt_rounds = self.extract_u64(f"STAGE2_PRE: num_rounds[{i}] = ", self.jolt_log)
+            if zolt_rounds == jolt_rounds:
+                results.append(CompareResult(f"Stage2 num_rounds[{i}]", str(zolt_rounds), str(jolt_rounds), MatchResult.MATCH))
+            else:
+                results.append(CompareResult(f"Stage2 num_rounds[{i}]", str(zolt_rounds), str(jolt_rounds), MatchResult.MISMATCH))
+
+        # Compare batching coefficients
+        for i in range(5):
+            zolt_val = self.extract_zolt_le_hex(f"STAGE2_PRE: batching_coeff[{i}] = ")
+            jolt_val = self.extract_single(f"STAGE2_PRE: batching_coeff[{i}]_bytes = ", self.jolt_log)
+            results.append(self.compare_values(f"Stage2 batching_coeff[{i}]", zolt_val, jolt_val))
+
+        # Compare initial batched claim
+        zolt_claim = self.extract_zolt_le_hex("STAGE2_INITIAL: batched_claim = ")
+        jolt_claim = self.extract_single("STAGE2_INITIAL: batched_claim_bytes = ", self.jolt_log)
+        results.append(self.compare_values("Stage2 initial claim", zolt_claim, jolt_claim))
+
+        # Find number of rounds from logs
+        num_rounds = self.find_max_round("STAGE2_ROUND_")
+
+        # Compare rounds (limit to first 30 for sanity)
+        for i in range(min(num_rounds, 30)):
+            results.extend(self.compare_stage2_round(i))
+
+        # Compare final output claim
+        zolt_final = self.extract_zolt_le_hex("STAGE2_FINAL: output_claim = ")
+        jolt_final = self.extract_single("STAGE2_FINAL: output_claim_bytes = ", self.jolt_log)
+        results.append(self.compare_values("Stage2 final claim", zolt_final, jolt_final))
+
+        return results
+
+    def compare_stage2_round(self, round_idx: int) -> List[CompareResult]:
+        """Compare Stage 2 round values"""
+        results = []
+
+        # Current claim
+        zolt_claim = self.extract_zolt_le_hex(f"STAGE2_ROUND_{round_idx}: current_claim = ")
+        jolt_claim = self.extract_single(f"STAGE2_ROUND_{round_idx}: current_claim_bytes = ", self.jolt_log)
+        results.append(self.compare_values(f"Stage2 round {round_idx} claim", zolt_claim, jolt_claim))
+
+        # Coefficients c0, c2, c3
+        for coeff in ["c0", "c2", "c3"]:
+            zolt_val = self.extract_zolt_le_hex(f"STAGE2_ROUND_{round_idx}: {coeff} = ")
+            jolt_val = self.extract_single(f"STAGE2_ROUND_{round_idx}: {coeff}_bytes = ", self.jolt_log)
+            results.append(self.compare_values(f"Stage2 round {round_idx} {coeff}", zolt_val, jolt_val))
+
+        # Challenge
+        zolt_ch = self.extract_zolt_le_hex(f"STAGE2_ROUND_{round_idx}: challenge = ")
+        jolt_ch = self.extract_single(f"STAGE2_ROUND_{round_idx}: challenge_bytes = ", self.jolt_log)
+        results.append(self.compare_values(f"Stage2 round {round_idx} challenge", zolt_ch, jolt_ch))
+
+        # Next claim
+        zolt_next = self.extract_zolt_le_hex(f"STAGE2_ROUND_{round_idx}: next_claim = ")
+        jolt_next = self.extract_single(f"STAGE2_ROUND_{round_idx}: next_claim_bytes = ", self.jolt_log)
+        results.append(self.compare_values(f"Stage2 round {round_idx} next_claim", zolt_next, jolt_next))
+
+        return results
+
+    def find_max_round(self, prefix: str) -> int:
+        """Find the maximum round number from logs"""
+        max_round = 0
+        for line in self.zolt_log.split('\n') + self.jolt_log.split('\n'):
+            match = re.search(prefix + r'(\d+):', line)
+            if match:
+                max_round = max(max_round, int(match.group(1)) + 1)
+        return max_round
+
     def compare_commitments(self) -> List[CompareResult]:
         """Compare commitment values"""
         results = []
@@ -410,6 +885,7 @@ class StageComparator:
 
         if stages is None or 2 in stages:
             all_results['Stage 2 (UniSkip)'] = self.compare_stage2()
+            all_results['Stage 2 (Batched Sumcheck)'] = self.compare_stage2_batched()
 
         return all_results
 
@@ -488,6 +964,111 @@ def find_first_divergence(results: Dict[str, List[CompareResult]]) -> Optional[C
                 return r
     return None
 
+def run_transcript_comparison(zolt_log: str, jolt_log: str, verbose: bool = False):
+    """Run transcript state comparison to find state-dependent divergence"""
+    print(f"\n{Color.BOLD}{'='*70}")
+    print(f"  TRANSCRIPT STATE ANALYSIS")
+    print(f"{'='*70}{Color.RESET}")
+
+    analyzer = TranscriptAnalyzer(zolt_log, jolt_log)
+
+    # First, compare stage boundaries
+    print(f"\n{Color.BOLD}Stage Boundary States:{Color.RESET}")
+    boundaries = analyzer.compare_stage_boundaries()
+    for name, zolt_state, jolt_state, matches in boundaries:
+        status = f"{Color.GREEN}MATCH{Color.RESET}" if matches else f"{Color.RED}MISMATCH{Color.RESET}"
+        print(f"  {status:30} {name}")
+        if not matches or verbose:
+            print(f"    {Color.YELLOW}ZOLT:{Color.RESET} {zolt_state[:48]}..." if len(zolt_state) > 48 else f"    {Color.YELLOW}ZOLT:{Color.RESET} {zolt_state}")
+            print(f"    {Color.BLUE}JOLT:{Color.RESET} {jolt_state[:48]}..." if len(jolt_state) > 48 else f"    {Color.BLUE}JOLT:{Color.RESET} {jolt_state}")
+
+    # Find first divergence in transcript operations
+    print(f"\n{Color.BOLD}Transcript Operation Analysis:{Color.RESET}")
+    divergence = analyzer.find_state_divergence()
+
+    if divergence:
+        idx, zolt_op, jolt_op, reason = divergence
+        print(f"\n{Color.RED}{Color.BOLD}TRANSCRIPT DIVERGENCE FOUND at operation {idx}:{Color.RESET}")
+        print(f"  Reason: {Color.CYAN}{reason}{Color.RESET}")
+
+        if zolt_op and jolt_op:
+            print(f"\n  {Color.YELLOW}ZOLT operation:{Color.RESET}")
+            print(f"    type: {zolt_op.op_type}, label: {zolt_op.label}")
+            print(f"    value: {zolt_op.value[:40]}..." if len(zolt_op.value) > 40 else f"    value: {zolt_op.value}")
+            print(f"    round: {zolt_op.round_num}")
+            print(f"    state_after: {zolt_op.state_after[:48]}..." if len(zolt_op.state_after) > 48 else f"    state_after: {zolt_op.state_after}")
+
+            print(f"\n  {Color.BLUE}JOLT operation:{Color.RESET}")
+            print(f"    type: {jolt_op.op_type}, label: {jolt_op.label}")
+            print(f"    value: {jolt_op.value[:40]}..." if len(jolt_op.value) > 40 else f"    value: {jolt_op.value}")
+            print(f"    round: {jolt_op.round_num}")
+            print(f"    state_after: {jolt_op.state_after[:48]}..." if len(jolt_op.state_after) > 48 else f"    state_after: {jolt_op.state_after}")
+
+        # Print surrounding context
+        analyzer.print_ops_around(idx, context=5)
+
+        print(f"\n{Color.BOLD}What this means:{Color.RESET}")
+        print(f"  The transcript state diverged at operation {idx}.")
+        print(f"  Even if sumcheck values match, the verification will fail because")
+        print(f"  challenges are derived from this cumulative state.")
+        print(f"  Check what was appended differently at this point.")
+    else:
+        zolt_count = len(analyzer.zolt_ops)
+        jolt_count = len(analyzer.jolt_ops)
+        print(f"  {Color.GREEN}No transcript divergence detected!{Color.RESET}")
+        print(f"  Parsed {zolt_count} Zolt ops and {jolt_count} Jolt ops")
+
+        if zolt_count == 0 or jolt_count == 0:
+            print(f"\n  {Color.YELLOW}WARNING: No transcript operations parsed.{Color.RESET}")
+            print(f"  Make sure your logs include [ZOLT TRANSCRIPT] and [JOLT TRANSCRIPT] output.")
+            print(f"  You may need to enable transcript debug logging in both implementations.")
+
+    # Stage 2 tau_high specific analysis (common failure point)
+    print(f"\n{Color.BOLD}Stage 2 tau_high Analysis (common failure point):{Color.RESET}")
+    tau_high_info = analyzer.analyze_stage2_tau_high()
+
+    if tau_high_info['zolt_pre_state'] or tau_high_info['jolt_pre_state']:
+        state_status = f"{Color.GREEN}MATCH{Color.RESET}" if tau_high_info['states_match'] else f"{Color.RED}MISMATCH{Color.RESET}"
+        print(f"  Pre-sampling state: {state_status}")
+        if not tau_high_info['states_match'] or verbose:
+            print(f"    {Color.YELLOW}ZOLT:{Color.RESET} {tau_high_info['zolt_pre_state'][:48] if tau_high_info['zolt_pre_state'] else 'N/A'}...")
+            print(f"    {Color.BLUE}JOLT:{Color.RESET} {tau_high_info['jolt_pre_state'][:48] if tau_high_info['jolt_pre_state'] else 'N/A'}...")
+
+        if tau_high_info['zolt_r_cycle_len'] or tau_high_info['jolt_r_cycle_len']:
+            r_match = tau_high_info['zolt_r_cycle_len'] == tau_high_info['jolt_r_cycle_len']
+            r_status = f"{Color.GREEN}MATCH{Color.RESET}" if r_match else f"{Color.RED}MISMATCH{Color.RESET}"
+            print(f"  r_cycle.len: {r_status} (Zolt: {tau_high_info['zolt_r_cycle_len']}, Jolt: {tau_high_info['jolt_r_cycle_len']})")
+
+        tau_status = f"{Color.GREEN}MATCH{Color.RESET}" if tau_high_info['tau_high_match'] else f"{Color.RED}MISMATCH{Color.RESET}"
+        print(f"  Sampled tau_high: {tau_status}")
+        if not tau_high_info['tau_high_match'] or verbose:
+            print(f"    {Color.YELLOW}ZOLT:{Color.RESET} {tau_high_info['zolt_tau_high'][:48] if tau_high_info['zolt_tau_high'] else 'N/A'}...")
+            print(f"    {Color.BLUE}JOLT:{Color.RESET} {tau_high_info['jolt_tau_high'][:48] if tau_high_info['jolt_tau_high'] else 'N/A'}...")
+
+        if not tau_high_info['states_match'] and tau_high_info['zolt_pre_state'] and tau_high_info['jolt_pre_state']:
+            print(f"\n  {Color.RED}{Color.BOLD}LIKELY ROOT CAUSE:{Color.RESET}")
+            print(f"  Transcript state differs BEFORE Stage 2 tau_high sampling.")
+            print(f"  This means Stage 1 or commitments left the transcript in different states.")
+            print(f"  Check: commitment byte order, Stage 1 final values, r_cycle serialization.")
+    else:
+        print(f"  {Color.YELLOW}No Stage 2 tau_high debug output found in logs.{Color.RESET}")
+        print(f"  Add STAGE2_PRE transcript_state logging to debug.")
+
+    # Opening claims analysis
+    print(f"\n{Color.BOLD}Opening Claims Analysis:{Color.RESET}")
+    claims = analyzer.analyze_opening_claims()
+    if claims:
+        for claim_id, zolt_val, jolt_val, matches in claims:
+            status = f"{Color.GREEN}MATCH{Color.RESET}" if matches else f"{Color.RED}MISMATCH{Color.RESET}"
+            print(f"  {status:30} {claim_id}")
+            if not matches or verbose:
+                print(f"    {Color.YELLOW}ZOLT:{Color.RESET} {zolt_val[:32] if zolt_val and zolt_val != 'N/A' else zolt_val}...")
+                print(f"    {Color.BLUE}JOLT:{Color.RESET} {jolt_val[:32] if jolt_val and jolt_val != 'N/A' else jolt_val}...")
+    else:
+        print(f"  {Color.DIM}No opening claims found in logs.{Color.RESET}")
+        print(f"  Add 'Opening claim: <id> => eval=...' logging to track claims.")
+
+
 def main():
     parser = argparse.ArgumentParser(description='Compare Zolt and Jolt verification logs')
     parser.add_argument('zolt_log', nargs='?', default='/tmp/zolt.log', help='Zolt log file')
@@ -495,6 +1076,8 @@ def main():
     parser.add_argument('--stage', '-s', type=int, nargs='+', help='Compare specific stages (0=preamble, 1-6)')
     parser.add_argument('--verbose', '-v', action='store_true', help='Show all values, not just mismatches')
     parser.add_argument('--find-divergence', '-d', action='store_true', help='Find first point of divergence')
+    parser.add_argument('--transcript', '-t', action='store_true',
+                        help='Compare transcript state evolution (finds state-dependent bugs)')
     args = parser.parse_args()
 
     try:
@@ -512,6 +1095,10 @@ def main():
     print(f"{Color.DIM}Zolt: {args.zolt_log}")
     print(f"Jolt: {args.jolt_log}{Color.RESET}")
 
+    # Run transcript comparison if requested
+    if args.transcript:
+        run_transcript_comparison(zolt_log, jolt_log, args.verbose)
+
     comparator = StageComparator(zolt_log, jolt_log, args.verbose)
     results = comparator.run_comparison(args.stage)
 
@@ -526,6 +1113,18 @@ def main():
             print(f"  {Color.BLUE}JOLT:{Color.RESET} {divergence.jolt_value}")
         else:
             print(f"\n{Color.GREEN}No divergence found - all values match!{Color.RESET}")
+
+    # If all values match but user didn't use --transcript, suggest it
+    all_match = all(
+        r.result in [MatchResult.MATCH, MatchResult.MATCH_REVERSED, MatchResult.MISSING_BOTH,
+                     MatchResult.MISSING_ZOLT, MatchResult.MISSING_JOLT]
+        for section_results in results.values()
+        for r in section_results
+    )
+    if all_match and not args.transcript:
+        print(f"\n{Color.YELLOW}{Color.BOLD}TIP:{Color.RESET} All values match but verification still failing?")
+        print(f"     Run with {Color.CYAN}--transcript{Color.RESET} to compare transcript state evolution.")
+        print(f"     This can catch state-dependent bugs that value comparison misses.")
 
 if __name__ == '__main__':
     main()

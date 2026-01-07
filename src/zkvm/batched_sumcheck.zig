@@ -125,15 +125,38 @@ pub fn BatchedSumcheckProver(comptime F: type) type {
         /// This must be called after all instances are added and before generating proofs.
         /// The transcript should have already received all input_claims.
         pub fn setupBatching(self: *Self, transcript: *Blake2bTranscript(F)) !void {
-            // Append all input claims to transcript
-            for (self.instances.items) |instance| {
+            // Debug: print instance count and detect stage
+            const stage_prefix = switch (self.instances.items.len) {
+                1 => "STAGE1",
+                5 => "STAGE2",
+                3 => "STAGE3",
+                else => "STAGE_UNKNOWN",
+            };
+
+            // Append all input claims to transcript (with debug output)
+            for (self.instances.items, 0..) |instance, i| {
+                const claim_bytes = instance.input_claim.toBytes();
+                std.debug.print("[ZOLT] {s}_PRE: input_claim[{d}] = {{ ", .{ stage_prefix, i });
+                for (claim_bytes) |b| {
+                    std.debug.print("{d}, ", .{b});
+                }
+                std.debug.print("}}\n", .{});
+                std.debug.print("[ZOLT] {s}_PRE: num_rounds[{d}] = {d}\n", .{ stage_prefix, i, instance.num_rounds });
+                std.debug.print("[ZOLT] {s}_PRE: degree[{d}] = {d}\n", .{ stage_prefix, i, instance.degree });
                 transcript.appendScalar(instance.input_claim);
             }
 
-            // Sample batching coefficients
-            for (0..self.instances.items.len) |_| {
+            // Sample batching coefficients (with debug output)
+            std.debug.print("[ZOLT] {s}_PRE: batching_coeffs.len = {d}\n", .{ stage_prefix, self.instances.items.len });
+            for (0..self.instances.items.len) |i| {
                 const coeff = transcript.challengeScalarFull();
                 try self.batching_coeffs.append(self.allocator, coeff);
+                const coeff_bytes = coeff.toBytes();
+                std.debug.print("[ZOLT] {s}_PRE: batching_coeff[{d}] = {{ ", .{ stage_prefix, i });
+                for (coeff_bytes) |b| {
+                    std.debug.print("{d}, ", .{b});
+                }
+                std.debug.print("}}\n", .{});
             }
 
             // Compute initial batched claim
@@ -150,6 +173,14 @@ pub fn BatchedSumcheckProver(comptime F: type) type {
                 batched_claim = batched_claim.add(scaled_claim.mul(self.batching_coeffs.items[i]));
             }
             self.current_claim = batched_claim;
+
+            // Debug: print initial batched claim
+            const claim_bytes = batched_claim.toBytes();
+            std.debug.print("[ZOLT] {s}_INITIAL: batched_claim = {{ ", .{stage_prefix});
+            for (claim_bytes) |b| {
+                std.debug.print("{d}, ", .{b});
+            }
+            std.debug.print("}}\n", .{});
         }
 
         /// Compute the combined round polynomial for the current round
@@ -280,9 +311,49 @@ pub fn generateBatchedProof(
 
     const num_rounds = prover.numRounds();
 
+    // Detect stage for debug prefix
+    const stage_prefix = switch (prover.instances.items.len) {
+        1 => "STAGE1",
+        5 => "STAGE2",
+        3 => "STAGE3",
+        else => "STAGE_UNKNOWN",
+    };
+
+    std.debug.print("[ZOLT] {s} Sumcheck proof: {d} rounds\n", .{ stage_prefix, num_rounds });
+
     for (0..num_rounds) |round_idx| {
+        // Debug: print current claim at start of round
+        const claim_bytes = prover.current_claim.toBytes();
+        std.debug.print("[ZOLT] {s}_ROUND_{d}: current_claim = {{ ", .{ stage_prefix, round_idx });
+        for (claim_bytes) |b| {
+            std.debug.print("{d}, ", .{b});
+        }
+        std.debug.print("}}\n", .{});
+
         // Compute round polynomial
         const round_evals = try prover.computeRoundPolynomial();
+
+        // Debug: print round polynomial coefficients
+        const c0_bytes = round_evals[0].toBytes();
+        std.debug.print("[ZOLT] {s}_ROUND_{d}: c0 = {{ ", .{ stage_prefix, round_idx });
+        for (c0_bytes) |b| {
+            std.debug.print("{d}, ", .{b});
+        }
+        std.debug.print("}}\n", .{});
+
+        const c2_bytes = round_evals[1].toBytes();
+        std.debug.print("[ZOLT] {s}_ROUND_{d}: c2 = {{ ", .{ stage_prefix, round_idx });
+        for (c2_bytes) |b| {
+            std.debug.print("{d}, ", .{b});
+        }
+        std.debug.print("}}\n", .{});
+
+        const c3_bytes = round_evals[2].toBytes();
+        std.debug.print("[ZOLT] {s}_ROUND_{d}: c3 = {{ ", .{ stage_prefix, round_idx });
+        for (c3_bytes) |b| {
+            std.debug.print("{d}, ", .{b});
+        }
+        std.debug.print("}}\n", .{});
 
         // Store in proof
         try proof.round_polys.append(prover.allocator, round_evals);
@@ -298,31 +369,59 @@ pub fn generateBatchedProof(
         const challenge = transcript.challengeScalar();
         try proof.challenges.append(prover.allocator, challenge);
 
+        // Debug: print challenge
+        const chal_bytes = challenge.toBytes();
+        std.debug.print("[ZOLT] {s}_ROUND_{d}: challenge = {{ ", .{ stage_prefix, round_idx });
+        for (chal_bytes) |b| {
+            std.debug.print("{d}, ", .{b});
+        }
+        std.debug.print("}}\n", .{});
+
         // Compute full evaluations for claim update
         // Need to recover s(0), s(1), s(2), s(3) from compressed [c0, c2, c3]
+        // The polynomial is: s(X) = c0 + c1*X + c2*X^2 + c3*X^3
+        // We have: c0 = round_evals[0], c2 = round_evals[1], c3 = round_evals[2]
+        // Recover c1 from: s(0) + s(1) = current_claim = c0 + (c0 + c1 + c2 + c3)
+        //                  => c1 = current_claim - 2*c0 - c2 - c3
+        const c0 = round_evals[0];
+        const c2 = round_evals[1];
+        const c3 = round_evals[2];
+        const c1 = prover.current_claim.sub(c0).sub(c0).sub(c2).sub(c3);
+
+        // Evaluate polynomial at 0, 1, 2, 3 to get full evaluations
         // s(0) = c0
-        // s(0) + s(1) = current_claim => s(1) = current_claim - c0
-        // Use Lagrange to get s(2), s(3) from the cubic
-        const s0 = round_evals[0];
-        const s1 = prover.current_claim.sub(s0);
+        // s(1) = c0 + c1 + c2 + c3
+        // s(2) = c0 + 2*c1 + 4*c2 + 8*c3
+        // s(3) = c0 + 3*c1 + 9*c2 + 27*c3
+        const s0 = c0;
+        const s1 = c0.add(c1).add(c2).add(c3);
+        const s2 = c0.add(c1.mul(F.fromU64(2))).add(c2.mul(F.fromU64(4))).add(c3.mul(F.fromU64(8)));
+        const s3 = c0.add(c1.mul(F.fromU64(3))).add(c2.mul(F.fromU64(9))).add(c3.mul(F.fromU64(27)));
 
-        // For cubic interpolation, we need to reconstruct s(2), s(3)
-        // The compressed form stores [c0, c2, c3] where the polynomial is:
-        // s(X) = c0 + c1*X + c2*X^2 + c3*X^3
-        // We have c0 = round_evals[0], and we stored c2, c3 in positions 1, 2
-        // c1 can be recovered from s(0) + s(1) = current_claim
-
-        // Full evaluations for updateClaim
-        const full_evals = [4]F{ s0, s1, round_evals[1], round_evals[2] };
+        const full_evals = [4]F{ s0, s1, s2, s3 };
 
         // Update prover state
         prover.updateClaim(full_evals, challenge);
         try prover.bindChallenge(challenge);
 
-        _ = round_idx;
+        // Debug: print next claim
+        const next_claim_bytes = prover.current_claim.toBytes();
+        std.debug.print("[ZOLT] {s}_ROUND_{d}: next_claim = {{ ", .{ stage_prefix, round_idx });
+        for (next_claim_bytes) |b| {
+            std.debug.print("{d}, ", .{b});
+        }
+        std.debug.print("}}\n", .{});
     }
 
     proof.final_claim = prover.getFinalClaim();
+
+    // Debug: print final claim
+    const final_bytes = proof.final_claim.toBytes();
+    std.debug.print("[ZOLT] {s}_FINAL: output_claim = {{ ", .{stage_prefix});
+    for (final_bytes) |b| {
+        std.debug.print("{d}, ", .{b});
+    }
+    std.debug.print("}}\n", .{});
 
     // Cache openings in all instances
     try prover.cacheOpenings();

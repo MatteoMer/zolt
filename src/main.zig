@@ -344,7 +344,12 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt:
         std.debug.print("  Error generating proof: {}\n", .{err});
         return err;
     };
-    defer proof.deinit();
+    var should_deinit_proof = true;
+    defer {
+        if (should_deinit_proof) {
+            proof.deinit();
+        }
+    }
 
     const prove_time = timer.read();
     std.debug.print("  Proof generated successfully!\n", .{});
@@ -410,6 +415,10 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt:
                 return err;
             };
             defer jolt_bundle.deinit();
+
+            // Skip deinit of the first proof since jolt_bundle has its own cleanup
+            // This avoids potential memory corruption between the two proofs
+            should_deinit_proof = false;
 
             // Serialize using the bundled Dory commitments
             // This ensures the commitments in the proof match those used in the transcript

@@ -97,10 +97,15 @@ pub fn StageProof(comptime F: type) type {
         allocator: Allocator,
 
         pub fn init(allocator: Allocator) Self {
+            // Use empty slices that won't cause issues when deinit is called
+            // capacity = 0 ensures deinit() won't try to free the items pointer
+            const empty_round_polys: std.ArrayListUnmanaged([]F) = .{};
+            const empty_challenges: std.ArrayListUnmanaged(F) = .{};
+            const empty_final_claims: std.ArrayListUnmanaged(F) = .{};
             return Self{
-                .round_polys = .{},
-                .challenges = .{},
-                .final_claims = .{},
+                .round_polys = empty_round_polys,
+                .challenges = empty_challenges,
+                .final_claims = empty_final_claims,
                 .allocator = allocator,
             };
         }

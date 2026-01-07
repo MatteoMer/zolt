@@ -1175,6 +1175,15 @@ pub fn ProofConverter(comptime F: type) type {
                 else
                     all_challenges;
 
+                // Debug: print Stage 1 challenges
+                std.debug.print("[ZOLT] STAGE1_CHALLENGES: all_challenges.len = {}, cycle_challenges.len = {}\n", .{ all_challenges.len, cycle_challenges.len });
+                if (cycle_challenges.len > 0) {
+                    const r0_bytes = cycle_challenges[0].toBytesBE();
+                    const rlast_bytes = cycle_challenges[cycle_challenges.len - 1].toBytesBE();
+                    std.debug.print("[ZOLT] STAGE1_CHALLENGES: cycle_challenges[0] (r_0) = {any}\n", .{r0_bytes});
+                    std.debug.print("[ZOLT] STAGE1_CHALLENGES: cycle_challenges[last] (r_{{n-1}}) = {any}\n", .{rlast_bytes});
+                }
+
                 // CRITICAL: In Jolt, the opening point r_cycle is stored in BIG_ENDIAN order
                 // (reversed from sumcheck challenge order).
                 // See OuterRemainingSumcheckParams::normalize_opening_point which converts
@@ -1577,10 +1586,33 @@ pub fn ProofConverter(comptime F: type) type {
                 transcript.appendScalar(claim);
             }
 
+            // Debug: STAGE2_PRE logs for compare_sumcheck.py compatibility
+            for (0..5) |i| {
+                const claim_bytes = input_claims[i].toBytes();
+                std.debug.print("[ZOLT] STAGE2_PRE: input_claim[{d}] = {{ ", .{i});
+                for (claim_bytes) |b| {
+                    std.debug.print("{d}, ", .{b});
+                }
+                std.debug.print("}}\n", .{});
+                std.debug.print("[ZOLT] STAGE2_PRE: num_rounds[{d}] = {d}\n", .{ i, rounds_per_instance[i] });
+                std.debug.print("[ZOLT] STAGE2_PRE: degree[{d}] = 3\n", .{i}); // All instances use degree 3 max
+            }
+
             // Step 2: Sample batching coefficients
             var batching_coeffs: [5]F = undefined;
             for (0..5) |i| {
                 batching_coeffs[i] = transcript.challengeScalarFull();
+            }
+
+            // Debug: STAGE2_PRE batching coefficient logs for compare_sumcheck.py
+            std.debug.print("[ZOLT] STAGE2_PRE: batching_coeffs.len = 5\n", .{});
+            for (0..5) |i| {
+                const coeff_bytes = batching_coeffs[i].toBytes();
+                std.debug.print("[ZOLT] STAGE2_PRE: batching_coeff[{d}] = {{ ", .{i});
+                for (coeff_bytes) |b| {
+                    std.debug.print("{d}, ", .{b});
+                }
+                std.debug.print("}}\n", .{});
             }
 
             std.debug.print("[ZOLT] STAGE2_BATCHED: batching_coeff[0] = {any}\n", .{batching_coeffs[0].toBytesBE()});
@@ -1599,6 +1631,16 @@ pub fn ProofConverter(comptime F: type) type {
 
             std.debug.print("[ZOLT] STAGE2_BATCHED: initial batched_claim = {any}\n", .{batched_claim.toBytesBE()});
             std.debug.print("[ZOLT] STAGE2_BATCHED: uni_skip_claim_stage2 (product input) = {any}\n", .{uni_skip_claim_stage2.toBytesBE()});
+
+            // Debug: STAGE2_INITIAL log for compare_sumcheck.py
+            {
+                const claim_bytes = batched_claim.toBytes();
+                std.debug.print("[ZOLT] STAGE2_INITIAL: batched_claim = {{ ", .{});
+                for (claim_bytes) |b| {
+                    std.debug.print("{d}, ", .{b});
+                }
+                std.debug.print("}}\n", .{});
+            }
 
             // Initialize ProductVirtualRemainder prover (only if we have witnesses)
             const ProductRemainderProver = product_remainder.ProductVirtualRemainderProver(F);
@@ -2039,6 +2081,39 @@ pub fn ProofConverter(comptime F: type) type {
                 const old_claim = batched_claim;
                 batched_claim = evaluateCubicAtChallengeFromEvals(combined_evals, challenge);
 
+                // Debug: STAGE2_ROUND logs for compare_sumcheck.py
+                {
+                    const old_bytes = old_claim.toBytes();
+                    std.debug.print("[ZOLT] STAGE2_ROUND_{d}: current_claim = {{ ", .{round_idx});
+                    for (old_bytes) |b| std.debug.print("{d}, ", .{b});
+                    std.debug.print("}}\n", .{});
+
+                    const c0_bytes = compressed[0].toBytes();
+                    std.debug.print("[ZOLT] STAGE2_ROUND_{d}: c0 = {{ ", .{round_idx});
+                    for (c0_bytes) |b| std.debug.print("{d}, ", .{b});
+                    std.debug.print("}}\n", .{});
+
+                    const c2_bytes = compressed[1].toBytes();
+                    std.debug.print("[ZOLT] STAGE2_ROUND_{d}: c2 = {{ ", .{round_idx});
+                    for (c2_bytes) |b| std.debug.print("{d}, ", .{b});
+                    std.debug.print("}}\n", .{});
+
+                    const c3_bytes = compressed[2].toBytes();
+                    std.debug.print("[ZOLT] STAGE2_ROUND_{d}: c3 = {{ ", .{round_idx});
+                    for (c3_bytes) |b| std.debug.print("{d}, ", .{b});
+                    std.debug.print("}}\n", .{});
+
+                    const chal_bytes = challenge.toBytes();
+                    std.debug.print("[ZOLT] STAGE2_ROUND_{d}: challenge = {{ ", .{round_idx});
+                    for (chal_bytes) |b| std.debug.print("{d}, ", .{b});
+                    std.debug.print("}}\n", .{});
+
+                    const new_bytes = batched_claim.toBytes();
+                    std.debug.print("[ZOLT] STAGE2_ROUND_{d}: next_claim = {{ ", .{round_idx});
+                    for (new_bytes) |b| std.debug.print("{d}, ", .{b});
+                    std.debug.print("}}\n", .{});
+                }
+
                 // Debug: Print claim trajectory for first few and last few rounds
                 if (round_idx < 3 or round_idx >= max_num_rounds - 5) {
                     std.debug.print("[ZOLT CLAIM] round {}: old_claim = {any}\n", .{ round_idx, old_claim.toBytesBE() });
@@ -2144,6 +2219,16 @@ pub fn ProofConverter(comptime F: type) type {
             }
 
             std.debug.print("[ZOLT] STAGE2_BATCHED: final batched_claim = {any}\n", .{batched_claim.toBytesBE()});
+
+            // Debug: STAGE2_FINAL log for compare_sumcheck.py
+            {
+                const final_bytes = batched_claim.toBytes();
+                std.debug.print("[ZOLT] STAGE2_FINAL: output_claim = {{ ", .{});
+                for (final_bytes) |b| {
+                    std.debug.print("{d}, ", .{b});
+                }
+                std.debug.print("}}\n", .{});
+            }
 
             // Debug: Print all challenges in LE format for comparison with Jolt
             std.debug.print("[ZOLT] STAGE2_BATCHED: challenges.len = {}\n", .{challenges.items.len});

@@ -1117,12 +1117,55 @@ pub fn ProofConverter(comptime F: type) type {
             // 4. RamOutputCheck: log_ram_k rounds
             // 5. InstructionLookupsClaimReduction: n_cycle_vars rounds
             // max_num_rounds = log_ram_k + n_cycle_vars
+            //
+            // CRITICAL: Stage 2's tau is NOT the original tau from Stage 1!
+            // It's built from [r_cycle_stage1, tau_high_stage2] where:
+            // - r_cycle_stage1 = the sumcheck challenges from Stage 1 (opening point)
+            // - tau_high_stage2 = freshly sampled challenge
+            // See Jolt's ProductVirtualUniSkipParams::new
+            var tau_stage2 = try self.allocator.alloc(F, n_cycle_vars + 1);
+            defer self.allocator.free(tau_stage2);
+
+            // Build tau_stage2 from Stage 1 challenges
+            if (stage1_result) |result| {
+                const all_challenges = result.challenges.items;
+                // Skip the first challenge (r_stream) to get r_cycle
+                const cycle_challenges = if (all_challenges.len > 1)
+                    all_challenges[1..]
+                else
+                    all_challenges;
+
+                // Copy cycle challenges as tau_low (keeping LITTLE_ENDIAN order)
+                // In Jolt, the opening point r_cycle is stored in the order the sumcheck
+                // challenges were generated (LITTLE_ENDIAN: r[0] = first challenge)
+                for (0..n_cycle_vars) |i| {
+                    if (i < cycle_challenges.len) {
+                        tau_stage2[i] = cycle_challenges[i];
+                    } else {
+                        tau_stage2[i] = F.zero();
+                    }
+                }
+            } else {
+                // Fallback to zeros
+                for (0..n_cycle_vars) |i| {
+                    tau_stage2[i] = F.zero();
+                }
+            }
+            // Append tau_high_stage2 as the last element
+            tau_stage2[n_cycle_vars] = tau_high_stage2;
+
+            std.debug.print("[ZOLT] STAGE2: tau_stage2.len = {}\n", .{tau_stage2.len});
+            if (tau_stage2.len > 0) {
+                std.debug.print("[ZOLT] STAGE2: tau_stage2[0] = {any}\n", .{tau_stage2[0].toBytesBE()});
+                std.debug.print("[ZOLT] STAGE2: tau_stage2[last] = {any}\n", .{tau_stage2[tau_stage2.len - 1].toBytesBE()});
+            }
+
             const stage2_result = try self.generateStage2BatchedSumcheckProof(
                 &jolt_proof.stage2_sumcheck_proof,
                 transcript,
                 r0_stage2,
                 uni_skip_claim_stage2,
-                tau,
+                tau_stage2,
                 cycle_witnesses,
                 n_cycle_vars,
                 log_ram_k,

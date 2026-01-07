@@ -1061,9 +1061,40 @@ pub fn ProofConverter(comptime F: type) type {
                 std.debug.print("[ZOLT] STAGE2: base_evals[{}] = {any}\n", .{ i, eval.toBytesBE() });
             }
 
+            // Build tau_stage2 BEFORE calling createUniSkipProofStage2WithClaims
+            // tau_stage2 = [r_cycle_reversed, tau_high_stage2]
+            const tau_stage2_early = try self.allocator.alloc(F, n_cycle_vars + 1);
+            defer self.allocator.free(tau_stage2_early);
+
+            if (stage1_result) |result| {
+                const all_challenges = result.challenges.items;
+                // Skip the first challenge (r_stream) to get r_cycle
+                const cycle_challenges = if (all_challenges.len > 1)
+                    all_challenges[1..]
+                else
+                    all_challenges;
+
+                // r_cycle reversed (BIG_ENDIAN)
+                for (0..n_cycle_vars) |i| {
+                    const src_idx = n_cycle_vars - 1 - i;
+                    if (src_idx < cycle_challenges.len) {
+                        tau_stage2_early[i] = cycle_challenges[src_idx];
+                    } else {
+                        tau_stage2_early[i] = F.zero();
+                    }
+                }
+            } else {
+                for (0..n_cycle_vars) |i| {
+                    tau_stage2_early[i] = F.zero();
+                }
+            }
+            tau_stage2_early[n_cycle_vars] = tau_high_stage2;
+
             jolt_proof.stage2_uni_skip_first_round_proof = try self.createUniSkipProofStage2WithClaims(
                 &base_evals_stage2,
                 tau_high_stage2,
+                cycle_witnesses,
+                tau_stage2_early,
             );
 
             // CRITICAL: Append Stage 2 UniSkip polynomial to transcript (matching Jolt verifier flow)
@@ -2057,7 +2088,7 @@ pub fn ProofConverter(comptime F: type) type {
             };
         }
 
-        /// Create a UniSkipFirstRoundProof for Stage 2 with actual base claims
+        /// Create a UniSkipFirstRoundProof for Stage 2 with actual base claims and extended evaluations
         ///
         /// This constructs the polynomial s1(Y) = L(tau_high, Y) * t1(Y) where:
         /// - L is the Lagrange kernel over the 5-point domain {-2, -1, 0, 1, 2}
@@ -2066,11 +2097,15 @@ pub fn ProofConverter(comptime F: type) type {
         /// For product virtualization, the base_evals are the 5 product claims from Stage 1:
         /// [Product, WriteLookupOutputToRD, WritePCtoRD, ShouldBranch, ShouldJump]
         ///
+        /// The extended_evals are the fused products at extended points {-3, 3, -4, 4}.
+        ///
         /// The polynomial satisfies: Σ_t s1(t) = Σ_i L_i(tau_high) * base_evals[i] = input_claim
         fn createUniSkipProofStage2WithClaims(
             self: *Self,
             base_evals: *const [5]F,
             tau_high: F,
+            cycle_witnesses: []const r1cs.R1CSCycleInputs(F),
+            tau_stage2: []const F,
         ) !?UniSkipFirstRoundProof(F) {
             const univariate_skip = r1cs.univariate_skip;
 
@@ -2079,10 +2114,36 @@ pub fn ProofConverter(comptime F: type) type {
             const EXTENDED_SIZE = univariate_skip.PRODUCT_VIRTUAL_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE; // 9
             const NUM_COEFFS = univariate_skip.PRODUCT_VIRTUAL_FIRST_ROUND_POLY_NUM_COEFFS; // 13
 
-            // For Stage 2 Product Virtual, extended evaluations are the fused products
-            // at extended points {-4, -3, 3, 4}. Since we don't have trace access here,
-            // we use zeros. This is correct when the actual products at those points are zero.
-            const extended_evals: [DEGREE]F = [_]F{F.zero()} ** DEGREE;
+            // Compute extended evaluations from cycle witnesses using the 5 product constraints
+            // Extended points {-3, 3, -4, 4} require the fused products computed from witness data
+            const extended_evals: [DEGREE]F = blk: {
+                if (cycle_witnesses.len == 0) {
+                    // No witnesses - use zeros
+                    break :blk [_]F{F.zero()} ** DEGREE;
+                }
+
+                // Extract the 8 product factors from each cycle witness
+                const cycle_factors = try self.allocator.alloc([8]F, cycle_witnesses.len);
+                defer self.allocator.free(cycle_factors);
+
+                for (cycle_witnesses, 0..) |witness, idx| {
+                    cycle_factors[idx] = extractProductFactors(F, &witness, cycle_witnesses, idx);
+                }
+
+                // Compute extended evaluations using the precomputed Lagrange coefficients
+                break :blk try univariate_skip.computeProductVirtualExtendedEvals(
+                    F,
+                    cycle_factors,
+                    tau_stage2,
+                    self.allocator,
+                );
+            };
+
+            // Debug: Print extended evaluations
+            std.debug.print("[ZOLT] STAGE2_UNISKIP: extended_evals[0] = {any}\n", .{extended_evals[0].toBytesBE()});
+            std.debug.print("[ZOLT] STAGE2_UNISKIP: extended_evals[1] = {any}\n", .{extended_evals[1].toBytesBE()});
+            std.debug.print("[ZOLT] STAGE2_UNISKIP: extended_evals[2] = {any}\n", .{extended_evals[2].toBytesBE()});
+            std.debug.print("[ZOLT] STAGE2_UNISKIP: extended_evals[3] = {any}\n", .{extended_evals[3].toBytesBE()});
 
             // Use the existing buildUniskipFirstRoundPoly function
             var uni_poly = try univariate_skip.buildUniskipFirstRoundPoly(
@@ -2130,6 +2191,53 @@ pub fn ProofConverter(comptime F: type) type {
                 .allocator = self.allocator,
             };
         }
+    };
+}
+
+/// Extract the 8 product factors from an R1CS cycle witness
+///
+/// The 8 factors are:
+///   [0] LeftInstructionInput
+///   [1] RightInstructionInput
+///   [2] IsRdNotZero
+///   [3] WriteLookupOutputToRDFlag
+///   [4] JumpFlag
+///   [5] LookupOutput
+///   [6] BranchFlag
+///   [7] NextIsNoop
+fn extractProductFactors(
+    comptime F: type,
+    witness: *const r1cs.R1CSCycleInputs(F),
+    all_witnesses: []const r1cs.R1CSCycleInputs(F),
+    cycle_idx: usize,
+) [8]F {
+    const R1CSInputIndex = r1cs.R1CSInputIndex;
+
+    return [8]F{
+        // 0: LeftInstructionInput
+        witness.values[R1CSInputIndex.LeftInstructionInput.toIndex()],
+        // 1: RightInstructionInput
+        witness.values[R1CSInputIndex.RightInstructionInput.toIndex()],
+        // 2: IsRdNotZero - directly from FlagIsRdNotZero (rd register index != 0)
+        witness.values[R1CSInputIndex.FlagIsRdNotZero.toIndex()],
+        // 3: WriteLookupOutputToRDFlag (OpFlags::WriteLookupOutputToRD)
+        witness.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()],
+        // 4: JumpFlag (OpFlags::Jump)
+        witness.values[R1CSInputIndex.FlagJump.toIndex()],
+        // 5: LookupOutput
+        witness.values[R1CSInputIndex.LookupOutput.toIndex()],
+        // 6: BranchFlag (InstructionFlags::Branch)
+        witness.values[R1CSInputIndex.FlagBranch.toIndex()],
+        // 7: NextIsNoop - 1 if next instruction is a noop
+        // NextIsNoop = trace[t+1].IsNoop (for t+1 < len), else true
+        blk: {
+            if (cycle_idx + 1 < all_witnesses.len) {
+                const next_witness = &all_witnesses[cycle_idx + 1];
+                break :blk next_witness.values[R1CSInputIndex.FlagIsNoop.toIndex()];
+            }
+            // Last cycle: NextIsNoop = true
+            break :blk F.one();
+        },
     };
 }
 

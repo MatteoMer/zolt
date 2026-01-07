@@ -1,6 +1,22 @@
 # Zolt-Jolt Compatibility - Status Update
 
-## Current Status: Session 13
+## Current Status: Session 14
+
+### Stage 2 UniSkip Extended Evaluations - FIXED!
+
+**Key Fix**: The `createUniSkipProofStage2WithClaims` function was using zeros for extended evaluations. Now it computes the actual fused products at extended points {-3, 3, -4, 4} from the trace data.
+
+### What Was Done
+1. Added precomputed Lagrange coefficients for Product Virtual extended targets
+2. Added `computeProductVirtualExtendedEvals` function to compute extended evals from cycle witnesses
+3. Added `extractProductFactors` helper to extract the 8 product factors from R1CS witnesses
+4. Updated `createUniSkipProofStage2WithClaims` to use actual extended evaluations
+
+### Test Results
+- All 712 tests pass
+- example-pipeline passes with all stages verified
+
+### Previous Status: Session 13
 
 ### Stage 2 Failure - MULTIPLE ROOT CAUSES IDENTIFIED!
 

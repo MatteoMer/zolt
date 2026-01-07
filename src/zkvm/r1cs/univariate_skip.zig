@@ -52,6 +52,37 @@ pub const PRODUCT_VIRTUAL_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE: usize = 2 * PROD
 pub const PRODUCT_VIRTUAL_FIRST_ROUND_POLY_NUM_COEFFS: usize = 3 * PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DEGREE + 1;
 pub const PRODUCT_VIRTUAL_FIRST_ROUND_POLY_DEGREE_BOUND: usize = PRODUCT_VIRTUAL_FIRST_ROUND_POLY_NUM_COEFFS - 1;
 
+/// Product Virtual uniskip extended targets: {-3, 3, -4, 4}
+pub const PRODUCT_VIRTUAL_UNISKIP_TARGETS: [PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DEGREE]i64 = uniskipTargets(
+    PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DOMAIN_SIZE,
+    PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DEGREE,
+);
+
+/// Base left index for product virtual domain {-2, -1, 0, 1, 2}: base_left = -2
+pub const PRODUCT_VIRTUAL_BASE_LEFT: i64 = -@as(i64, @intCast((PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DOMAIN_SIZE - 1) / 2));
+
+/// Target shifts: PRODUCT_VIRTUAL_UNISKIP_TARGETS[j] - PRODUCT_VIRTUAL_BASE_LEFT
+/// For evaluating polynomial at extended points from base window indices {0,1,2,3,4}
+pub const PRODUCT_VIRTUAL_TARGET_SHIFTS: [PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DEGREE]i64 = blk: {
+    var out: [PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DEGREE]i64 = undefined;
+    for (0..PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DEGREE) |j| {
+        out[j] = PRODUCT_VIRTUAL_UNISKIP_TARGETS[j] - PRODUCT_VIRTUAL_BASE_LEFT;
+    }
+    break :blk out;
+};
+
+/// Precomputed Lagrange coefficients for each extended target point j (Product Virtual).
+/// PRODUCT_VIRTUAL_COEFFS_PER_J[j] gives the weights for evaluating a polynomial at target point j
+/// from its evaluations at the base window indices {0, 1, 2, 3, 4}.
+/// This matches Jolt's PRODUCT_VIRTUAL_COEFFS_PER_J in evaluation.rs.
+pub const PRODUCT_VIRTUAL_COEFFS_PER_J: [PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DEGREE][PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DOMAIN_SIZE]i32 = blk: {
+    var out: [PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DEGREE][PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DOMAIN_SIZE]i32 = undefined;
+    for (0..PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DEGREE) |j| {
+        out[j] = LagrangeHelper.shiftCoeffsI32(PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DOMAIN_SIZE, PRODUCT_VIRTUAL_TARGET_SHIFTS[j]);
+    }
+    break :blk out;
+};
+
 /// Univariate polynomial representation
 pub fn UniPoly(comptime F: type) type {
     return struct {
@@ -551,6 +582,156 @@ pub fn UniSkipFirstRoundProof(comptime F: type) type {
             }
         }
     };
+}
+
+// ============================================================================
+// Product Virtual Extended Evaluations
+// ============================================================================
+
+/// Compute extended evaluations for Product Virtual UniSkip polynomial.
+///
+/// For each extended target point z in {-3, 3, -4, 4}, computes:
+///   t1(z) = Σ_x eq(τ, x) · fused_left(x, z) · fused_right(x, z)
+///
+/// Where fused_left and fused_right are computed by applying Lagrange shift
+/// coefficients to the 5 base product left/right factors.
+///
+/// The 5 product constraints are:
+///   0: Product = LeftInstructionInput * RightInstructionInput
+///   1: WriteLookupOutputToRD = IsRdNotZero * WriteLookupOutputToRDFlag
+///   2: WritePCtoRD = IsRdNotZero * JumpFlag
+///   3: ShouldBranch = LookupOutput * BranchFlag
+///   4: ShouldJump = JumpFlag * (1 - NextIsNoop)
+///
+/// This matches Jolt's ProductVirtualUniSkipProver::compute_univariate_skip_extended_evals.
+pub fn computeProductVirtualExtendedEvals(
+    comptime F: type,
+    /// Product cycle inputs - array of per-cycle factor values
+    /// Each element has 8 factors:
+    ///   [0] LeftInstructionInput
+    ///   [1] RightInstructionInput
+    ///   [2] IsRdNotZero
+    ///   [3] WriteLookupOutputToRDFlag
+    ///   [4] JumpFlag
+    ///   [5] LookupOutput
+    ///   [6] BranchFlag
+    ///   [7] NextIsNoop
+    cycle_factors: []const [8]F,
+    /// Full tau vector for computing eq polynomial
+    tau: []const F,
+    allocator: std.mem.Allocator,
+) ![PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DEGREE]F {
+    const DEGREE = PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DEGREE;
+    const DOMAIN_SIZE = PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DOMAIN_SIZE;
+
+    // Pad cycle length to power of 2 for eq_evals
+    const padded_len = nextPowerOfTwo(cycle_factors.len);
+
+    // Compute eq evaluations at each cycle index
+    // eq(τ, x) where x is the binary representation of cycle index
+    const eq_evals = try computeEqEvals(F, tau, padded_len, allocator);
+    defer allocator.free(eq_evals);
+
+    // Result: extended evaluations for 4 target points
+    var extended_evals: [DEGREE]F = [_]F{F.zero()} ** DEGREE;
+
+    // For each extended target j ∈ {0, 1, 2, 3} corresponding to {-3, 3, -4, 4}
+    for (0..DEGREE) |j| {
+        const coeffs: *const [DOMAIN_SIZE]i32 = &PRODUCT_VIRTUAL_COEFFS_PER_J[j];
+
+        // Accumulate over all cycles
+        var sum = F.zero();
+        for (0..cycle_factors.len) |x| {
+            const factors: *const [8]F = &cycle_factors[x];
+            const eq_x = eq_evals[x];
+
+            // Compute fused_left(x, z) = Σ_i c[i] * left_i(x)
+            // left factors: [0] LeftInstructionInput, [2] IsRdNotZero (for 1,2), [5] LookupOutput, [4] JumpFlag
+            var fused_left = F.zero();
+            fused_left = fused_left.add(mulByI32(F, factors[0], coeffs[0])); // LeftInstructionInput
+            fused_left = fused_left.add(mulByI32(F, factors[2], coeffs[1])); // IsRdNotZero (constraint 1)
+            fused_left = fused_left.add(mulByI32(F, factors[2], coeffs[2])); // IsRdNotZero (constraint 2)
+            fused_left = fused_left.add(mulByI32(F, factors[5], coeffs[3])); // LookupOutput
+            fused_left = fused_left.add(mulByI32(F, factors[4], coeffs[4])); // JumpFlag
+
+            // Compute fused_right(x, z) = Σ_i c[i] * right_i(x)
+            // right factors: [1] RightInstructionInput, [3] WriteLookupOutputToRDFlag, [4] JumpFlag, [6] BranchFlag, (1-[7]) not_next_noop
+            const one_minus_next_noop = F.one().sub(factors[7]);
+            var fused_right = F.zero();
+            fused_right = fused_right.add(mulByI32(F, factors[1], coeffs[0])); // RightInstructionInput
+            fused_right = fused_right.add(mulByI32(F, factors[3], coeffs[1])); // WriteLookupOutputToRDFlag
+            fused_right = fused_right.add(mulByI32(F, factors[4], coeffs[2])); // JumpFlag
+            fused_right = fused_right.add(mulByI32(F, factors[6], coeffs[3])); // BranchFlag
+            fused_right = fused_right.add(mulByI32(F, one_minus_next_noop, coeffs[4])); // (1 - NextIsNoop)
+
+            // Accumulate: eq(τ, x) * fused_left * fused_right
+            sum = sum.add(eq_x.mul(fused_left).mul(fused_right));
+        }
+
+        // Pad contributions (padded cycles have zero factors, so eq*0*0 = 0)
+        // No explicit handling needed
+
+        extended_evals[j] = sum;
+    }
+
+    return extended_evals;
+}
+
+/// Helper: multiply field element by i32 coefficient
+fn mulByI32(comptime F: type, a: F, c: i32) F {
+    if (c == 0) return F.zero();
+    if (c == 1) return a;
+    if (c == -1) return F.zero().sub(a);
+    if (c > 0) {
+        return a.mul(F.fromU64(@intCast(c)));
+    } else {
+        return F.zero().sub(a.mul(F.fromU64(@intCast(-c))));
+    }
+}
+
+/// Compute eq(τ, x) for all x in [0, padded_len)
+/// Uses BIG ENDIAN indexing to match Jolt's EqPolynomial::evals
+fn computeEqEvals(comptime F: type, tau: []const F, padded_len: usize, allocator: std.mem.Allocator) ![]F {
+    if (padded_len == 0) return error.EmptyInput;
+
+    const log_n = if (padded_len > 1) std.math.log2_int(usize, padded_len) else 0;
+    const result = try allocator.alloc(F, padded_len);
+    errdefer allocator.free(result);
+
+    // Initialize with 1
+    result[0] = F.one();
+    var current_size: usize = 1;
+
+    // Build eq table iteratively using BIG ENDIAN indexing
+    for (0..log_n) |j| {
+        const rj = if (j < tau.len) tau[j] else F.zero();
+        const one_minus_rj = F.one().sub(rj);
+
+        var i = current_size;
+        while (i > 0) {
+            i -= 1;
+            const val = result[i];
+            result[2 * i + 1] = val.mul(rj);
+            result[2 * i] = val.mul(one_minus_rj);
+        }
+        current_size *= 2;
+    }
+
+    return result;
+}
+
+/// Round up to next power of two
+fn nextPowerOfTwo(n: usize) usize {
+    if (n == 0) return 1;
+    if (n == 1) return 1;
+    var v = n - 1;
+    v |= v >> 1;
+    v |= v >> 2;
+    v |= v >> 4;
+    v |= v >> 8;
+    v |= v >> 16;
+    v |= v >> 32;
+    return v + 1;
 }
 
 // ============================================================================

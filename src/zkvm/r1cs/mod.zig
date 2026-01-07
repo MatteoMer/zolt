@@ -49,6 +49,7 @@ pub const UniPoly = univariate_skip.UniPoly;
 pub const UniSkipFirstRoundProof = univariate_skip.UniSkipFirstRoundProof;
 pub const LagrangePolynomial = univariate_skip.LagrangePolynomial;
 pub const buildUniskipFirstRoundPoly = univariate_skip.buildUniskipFirstRoundPoly;
+pub const computeProductVirtualExtendedEvals = univariate_skip.computeProductVirtualExtendedEvals;
 
 // Univariate skip constants
 pub const NUM_R1CS_CONSTRAINTS = univariate_skip.NUM_R1CS_CONSTRAINTS;

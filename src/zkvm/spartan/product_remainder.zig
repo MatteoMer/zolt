@@ -287,14 +287,16 @@ pub fn ProductVirtualRemainderProver(comptime F: type) type {
                 var inner_t_inf: F = F.zero();
 
                 for (0..E_in.len) |x_in| {
-                    const i = (x_out << num_xin_bits) | x_in;
+                    const g = (x_out << num_xin_bits) | x_in;
+                    const half = self.left_poly.boundLen() / 2;
 
-                    if (i < half) {
+                    // Standard MLE layout: lo at g, hi at g+half
+                    if (g < half) {
                         // Get left/right at lo and hi positions
-                        const l_lo = self.left_poly.evaluations[i];
-                        const l_hi = self.left_poly.evaluations[i + half];
-                        const r_lo = self.right_poly.evaluations[i];
-                        const r_hi = self.right_poly.evaluations[i + half];
+                        const l_lo = self.left_poly.evaluations[g];
+                        const l_hi = self.left_poly.evaluations[g + half];
+                        const r_lo = self.right_poly.evaluations[g];
+                        const r_hi = self.right_poly.evaluations[g + half];
 
                         // t0 = left_lo * right_lo
                         const p0 = l_lo.mul(r_lo);

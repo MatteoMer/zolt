@@ -364,9 +364,6 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
             // where eq(b) = current_scalar * product of eq(τ_i, b) for current var
             const tau_curr = self.tau[self.current_index - 1];
 
-            // DEBUG: Print current_index and tau_curr
-            std.debug.print("[GRUEN] computeCubicRoundPoly: current_index = {}, tau_curr = tau[{}] = {any}\n", .{ self.current_index, self.current_index - 1, tau_curr.toBytesBE() });
-
             // eq(0) for current variable: current_scalar * (1 - τ_curr)
             const eq_0 = self.current_scalar.mul(F.one().sub(tau_curr));
             // eq(1) for current variable: current_scalar * τ_curr

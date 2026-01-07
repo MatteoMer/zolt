@@ -223,6 +223,13 @@ pub fn InstructionLookupsProver(comptime F: type) type {
                 self.right_operands[i] = right_lo.add(challenge.mul(right_hi.sub(right_lo)));
             }
 
+            // Reduce the effective length of all arrays to half
+            // Since these are slices, we update the len field directly
+            self.eq_evals = self.eq_evals[0..half];
+            self.lookup_outputs = self.lookup_outputs[0..half];
+            self.left_operands = self.left_operands[0..half];
+            self.right_operands = self.right_operands[0..half];
+
             self.round += 1;
         }
 

@@ -1996,6 +1996,14 @@ pub fn ProofConverter(comptime F: type) type {
                                 const instr_evals = ip.computeRoundPolynomialCubic();
                                 instr_evals_this_round = instr_evals;
 
+                                // Debug: Print Instance 4 contribution at round 16
+                                if (round_idx == 16 or round_idx == 25) {
+                                    std.debug.print("[ZOLT DEBUG] Round {}: Instance 4 s(0) = {any}\n", .{ round_idx, instr_evals[0].toBytesBE() });
+                                    std.debug.print("[ZOLT DEBUG] Round {}: Instance 4 s(1) = {any}\n", .{ round_idx, instr_evals[1].toBytesBE() });
+                                    std.debug.print("[ZOLT DEBUG] Round {}: Instance 4 s(0)+s(1) = {any}\n", .{ round_idx, instr_evals[0].add(instr_evals[1]).toBytesBE() });
+                                    std.debug.print("[ZOLT DEBUG] Round {}: Instance 4 current_claim = {any}\n", .{ round_idx, ip.current_claim.toBytesBE() });
+                                }
+
                                 // Weight by batching coefficient
                                 for (0..4) |j| {
                                     combined_evals[j] = combined_evals[j].add(instr_evals[j].mul(batching_coeffs[i]));
@@ -2003,7 +2011,7 @@ pub fn ProofConverter(comptime F: type) type {
                             } else {
                                 // Fallback if no prover
                                 if (round_idx == start_round) {
-                                    std.debug.print("[ZOLT] WARNING: Instance 4 (InstrLookups) using fallback - no prover\n", .{});
+                                    std.debug.print("[ZOLT] WARNING: Instance 4 (InstrLookups) using fallback - no prover at round {}\n", .{round_idx});
                                 }
                                 const instance_round = round_idx - start_round;
                                 const remaining_rounds = rounds_per_instance[i] - 1 - instance_round;
@@ -2171,7 +2179,15 @@ pub fn ProofConverter(comptime F: type) type {
                 if (product_prover != null and round_idx >= (max_num_rounds - n_cycle_vars)) {
                     // Update the ProductVirtualRemainder's claim for the next round
                     if (product_evals_this_round) |evals| {
+                        // Debug: Print Instance 0's claim before and after update
+                        if (round_idx == 16 or round_idx == 25) {
+                            std.debug.print("[ZOLT DEBUG] Round {}: Instance 0 claim BEFORE update = {any}\n", .{ round_idx, product_prover.?.current_claim.toBytesBE() });
+                            std.debug.print("[ZOLT DEBUG] Round {}: Instance 0 evals = [{any}, {any}, {any}, {any}]\n", .{ round_idx, evals[0].toBytesBE(), evals[1].toBytesBE(), evals[2].toBytesBE(), evals[3].toBytesBE() });
+                        }
                         product_prover.?.updateClaim(evals, challenge);
+                        if (round_idx == 16 or round_idx == 25) {
+                            std.debug.print("[ZOLT DEBUG] Round {}: Instance 0 claim AFTER update = {any}\n", .{ round_idx, product_prover.?.current_claim.toBytesBE() });
+                        }
                     }
                     product_prover.?.bindChallenge(challenge) catch {};
                 }

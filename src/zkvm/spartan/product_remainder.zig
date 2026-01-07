@@ -258,75 +258,69 @@ pub fn ProductVirtualRemainderProver(comptime F: type) type {
             return REMAINDER_DEGREE;
         }
 
-        /// Compute the round polynomial for the current round
+        /// Compute the round polynomial for the current round using Gruen's method
+        ///
+        /// This matches Jolt's ProductVirtualRemainderProver::compute_message exactly:
+        /// 1. Compute t0 = Σ eq * left_lo * right_lo (constant coefficient)
+        /// 2. Compute t_inf = Σ eq * (left_hi - left_lo) * (right_hi - right_lo) (quadratic coefficient)
+        /// 3. Use split_eq.computeCubicRoundPoly(t0, t_inf, current_claim)
         ///
         /// Returns [s(0), s(2), s(3)] - the compressed cubic polynomial
-        /// (linear coefficient s(1) is recovered from the hint: s(0) + s(1) = claim)
         pub fn computeRoundPolynomial(self: *Self) ![3]F {
             const half = self.left_poly.boundLen() / 2;
             if (half == 0) {
                 return [3]F{ self.current_claim, F.zero(), F.zero() };
             }
 
-            // Get eq table projections for this round
+            // Get eq table projections for this round (matching Jolt's E_out_in_for_window)
             const eq_tables = self.split_eq.getWindowEqTables(self.current_round, 1);
             const E_out = eq_tables.E_out;
             const E_in = eq_tables.E_in;
-
-            // Compute t(0), t(1), t(2), t(3) where t(X) = Σ eq(tau, x) * left(x,X) * right(x,X)
-            var t_evals = [4]F{ F.zero(), F.zero(), F.zero(), F.zero() };
-
-            // For each (x_out, x_in) pair
             const num_xin_bits: u6 = if (E_in.len > 1) @intCast(std.math.log2_int(usize, E_in.len)) else 0;
 
+            // Compute t0 and t_inf using the Gruen structure (matching Jolt's remaining_quadratic_evals)
+            var t0_sum: F = F.zero();
+            var t_inf_sum: F = F.zero();
+
             for (0..E_out.len) |x_out| {
-                var inner_sums = [4]F{ F.zero(), F.zero(), F.zero(), F.zero() };
+                var inner_t0: F = F.zero();
+                var inner_t_inf: F = F.zero();
 
                 for (0..E_in.len) |x_in| {
                     const i = (x_out << num_xin_bits) | x_in;
 
                     if (i < half) {
                         // Get left/right at lo and hi positions
-                        const l0 = self.left_poly.evaluations[i];
-                        const l1 = self.left_poly.evaluations[i + half];
-                        const r0 = self.right_poly.evaluations[i];
-                        const r1 = self.right_poly.evaluations[i + half];
+                        const l_lo = self.left_poly.evaluations[i];
+                        const l_hi = self.left_poly.evaluations[i + half];
+                        const r_lo = self.right_poly.evaluations[i];
+                        const r_hi = self.right_poly.evaluations[i + half];
 
-                        // Compute t(X) = left(X) * right(X)
-                        // t(0) = l0 * r0
-                        // t(1) = l1 * r1
-                        // t(2) = (2*l1 - l0) * (2*r1 - r0)
-                        // t(3) = (3*l1 - 2*l0) * (3*r1 - 2*r0)
-                        const t0 = l0.mul(r0);
-                        const t1 = l1.mul(r1);
+                        // t0 = left_lo * right_lo
+                        const p0 = l_lo.mul(r_lo);
 
-                        const l2 = l1.add(l1).sub(l0);
-                        const r2 = r1.add(r1).sub(r0);
-                        const t2 = l2.mul(r2);
-
-                        const l3 = l1.mul(F.fromU64(3)).sub(l0.mul(F.fromU64(2)));
-                        const r3 = r1.mul(F.fromU64(3)).sub(r0.mul(F.fromU64(2)));
-                        const t3 = l3.mul(r3);
+                        // t_inf = (left_hi - left_lo) * (right_hi - right_lo)
+                        // This is the "slope" term that becomes the quadratic coefficient
+                        const slope = l_hi.sub(l_lo).mul(r_hi.sub(r_lo));
 
                         // Weight by E_in
                         const e_in = E_in[x_in];
-                        inner_sums[0] = inner_sums[0].add(t0.mul(e_in));
-                        inner_sums[1] = inner_sums[1].add(t1.mul(e_in));
-                        inner_sums[2] = inner_sums[2].add(t2.mul(e_in));
-                        inner_sums[3] = inner_sums[3].add(t3.mul(e_in));
+                        inner_t0 = inner_t0.add(p0.mul(e_in));
+                        inner_t_inf = inner_t_inf.add(slope.mul(e_in));
                     }
                 }
 
                 // Weight by E_out
                 const e_out = E_out[x_out];
-                t_evals[0] = t_evals[0].add(inner_sums[0].mul(e_out));
-                t_evals[1] = t_evals[1].add(inner_sums[1].mul(e_out));
-                t_evals[2] = t_evals[2].add(inner_sums[2].mul(e_out));
-                t_evals[3] = t_evals[3].add(inner_sums[3].mul(e_out));
+                t0_sum = t0_sum.add(inner_t0.mul(e_out));
+                t_inf_sum = t_inf_sum.add(inner_t_inf.mul(e_out));
             }
 
+            // Use Gruen's polynomial construction to get the cubic round polynomial
+            const evals = self.split_eq.computeCubicRoundPoly(t0_sum, t_inf_sum, self.current_claim);
+
             // Convert evaluations to compressed coefficients [c0, c2, c3]
-            return poly_mod.UniPoly(F).evalsToCompressed(t_evals);
+            return poly_mod.UniPoly(F).evalsToCompressed(evals);
         }
 
         /// Bind the challenge for this round and update state

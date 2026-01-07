@@ -1365,6 +1365,8 @@ pub fn ProofConverter(comptime F: type) type {
             for (0..max_num_rounds) |round_idx| {
                 // Compute combined polynomial from all instances
                 var combined_evals = [4]F{ F.zero(), F.zero(), F.zero(), F.zero() };
+                // Store ProductVirtualRemainder's evals for claim update
+                var product_evals_this_round: ?[4]F = null;
 
                 for (0..5) |i| {
                     const start_round = max_num_rounds - rounds_per_instance[i];
@@ -1386,11 +1388,11 @@ pub fn ProofConverter(comptime F: type) type {
                             const s1 = product_prover.?.current_claim.sub(s0);
                             const s2 = compressed[1];
                             const s3 = compressed[2];
-                            const evals = [4]F{ s0, s1, s2, s3 };
+                            product_evals_this_round = [4]F{ s0, s1, s2, s3 };
 
                             // Weight by batching coefficient
                             for (0..4) |j| {
-                                combined_evals[j] = combined_evals[j].add(evals[j].mul(batching_coeffs[i]));
+                                combined_evals[j] = combined_evals[j].add(product_evals_this_round.?[j].mul(batching_coeffs[i]));
                             }
                             _ = instance_round;
                         } else {
@@ -1449,8 +1451,12 @@ pub fn ProofConverter(comptime F: type) type {
                 // This needs proper interpolation from evaluations
                 batched_claim = evaluateCubicAtChallengeFromEvals(combined_evals, challenge);
 
-                // Bind challenge in all active instances
+                // Bind challenge in all active instances and update their claims
                 if (product_prover != null and round_idx >= (max_num_rounds - n_cycle_vars)) {
+                    // Update the ProductVirtualRemainder's claim for the next round
+                    if (product_evals_this_round) |evals| {
+                        product_prover.?.updateClaim(evals, challenge);
+                    }
                     product_prover.?.bindChallenge(challenge) catch {};
                 }
             }

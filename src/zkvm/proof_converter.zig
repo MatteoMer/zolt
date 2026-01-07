@@ -38,6 +38,8 @@ const product_remainder = @import("spartan/product_remainder.zig");
 const transcripts = @import("../transcripts/mod.zig");
 const Blake2bTranscript = transcripts.Blake2bTranscript;
 const poly_mod = @import("../poly/mod.zig");
+const jolt_device = @import("../common/jolt_device.zig");
+const constants = @import("../common/constants.zig");
 
 /// Convert Zolt's internal proof to Jolt-compatible format
 pub fn ProofConverter(comptime F: type) type {
@@ -1170,7 +1172,7 @@ pub fn ProofConverter(comptime F: type) type {
                 std.debug.print("[ZOLT] STAGE2: tau_stage2[last] = {any}\n", .{tau_stage2[tau_stage2.len - 1].toBytesBE()});
             }
 
-            const stage2_result = try self.generateStage2BatchedSumcheckProof(
+            var stage2_result = try self.generateStage2BatchedSumcheckProof(
                 &jolt_proof.stage2_sumcheck_proof,
                 transcript,
                 r0_stage2,
@@ -1245,6 +1247,22 @@ pub fn ProofConverter(comptime F: type) type {
             );
 
             // Stage 2: OutputSumcheckVerifier claims
+            // For OutputSumcheck, val_final_claim should equal val_io_eval at r_address_prime
+            // where r_address_prime = challenges[10..26] (last 16 challenges for OutputSumcheck)
+            //
+            // For a program with no I/O, val_io polynomial has only the termination bit set to 1.
+            // val_io_eval = MLE(val_io, r_address_prime) = eq(termination_index, r_address_prime)
+            //
+            // Since we're proving correct execution (termination = 1 in final RAM),
+            // val_final should equal val_io, so val_final_claim = val_io_eval.
+            //
+            // For now, use a simplified approach: assume val_final = val_io for correct execution.
+            // This means expected_output_claim = eq * io_mask * (val_final - val_io) = 0.
+            // To achieve this, we need val_final_claim = val_io_eval.
+            //
+            // TODO: Implement proper val_io computation based on memory layout
+            // For now, keep it zero since computing the exact termination index MLE
+            // requires knowledge of the memory layout that we don't currently pass through.
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .RamValFinal, .sumcheck_id = .RamOutputCheck } },
                 F.zero(),
@@ -1253,6 +1271,9 @@ pub fn ProofConverter(comptime F: type) type {
                 .{ .Virtual = .{ .poly = .RamValInit, .sumcheck_id = .RamOutputCheck } },
                 F.zero(),
             );
+
+            // Clean up stage2_result
+            defer stage2_result.deinit();
 
             // Stage 2: InstructionLookupsClaimReductionSumcheckVerifier claims
             try jolt_proof.opening_claims.insert(
@@ -1311,12 +1332,20 @@ pub fn ProofConverter(comptime F: type) type {
             return jolt_proof;
         }
 
-        /// Result of Stage 2 sumcheck including factor evaluations
+        /// Result of Stage 2 sumcheck including factor evaluations and challenges
         const Stage2Result = struct {
             /// The 8 factor polynomial evaluations at r_cycle
             /// Order: LeftInstructionInput, RightInstructionInput, IsRdNotZero,
             ///        WriteLookupOutputToRDFlag, JumpFlag, LookupOutput, BranchFlag, NextIsNoop
             factor_evals: [8]F,
+            /// All sumcheck challenges (26 for max_num_rounds = log_ram_k + n_cycle_vars)
+            /// Used for computing OutputSumcheck's r_address_prime
+            challenges: []F,
+            allocator: Allocator,
+
+            pub fn deinit(self: *Stage2Result) void {
+                self.allocator.free(self.challenges);
+            }
         };
 
         /// Generate Stage 2 batched sumcheck proof
@@ -1601,7 +1630,15 @@ pub fn ProofConverter(comptime F: type) type {
                 log_ram_k,
             );
 
-            return Stage2Result{ .factor_evals = factor_evals };
+            // Copy challenges to return them
+            const challenges_copy = try self.allocator.alloc(F, challenges.items.len);
+            @memcpy(challenges_copy, challenges.items);
+
+            return Stage2Result{
+                .factor_evals = factor_evals,
+                .challenges = challenges_copy,
+                .allocator = self.allocator,
+            };
         }
 
         /// Compute MLE evaluations of the 8 factor polynomials at r_cycle
@@ -1887,6 +1924,9 @@ pub const ConversionConfig = struct {
     log_k_chunk: usize = 4,
     /// Log of chunk size for lookups RA virtualization (LOG_K / 8 = 128 / 8 = 16 for small traces)
     lookups_ra_virtual_log_k_chunk: usize = 16,
+    /// Memory layout for computing I/O polynomial evaluations
+    /// If null, OutputSumcheck will use zero claims (which will fail verification)
+    memory_layout: ?*const jolt_device.MemoryLayout = null,
 };
 
 // =============================================================================

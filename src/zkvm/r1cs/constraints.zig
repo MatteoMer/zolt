@@ -957,13 +957,17 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             if (is_load) {
                 // Constraint 2: RamReadValue == RamWriteValue (for Load)
                 // Constraint 3: RamReadValue == RdWriteValue (for Load)
+                // For loads: both read and write value are the value read from memory
                 inputs.values[R1CSInputIndex.RamReadValue.toIndex()] = mem_val_f;
                 inputs.values[R1CSInputIndex.RamWriteValue.toIndex()] = mem_val_f;
                 inputs.values[R1CSInputIndex.RdWriteValue.toIndex()] = mem_val_f;
             } else if (is_store) {
+                // For stores:
+                // - RamReadValue = pre-value (value before write) = step.memory_value
+                // - RamWriteValue = post-value (value being written) = step.rs2_value
                 // Constraint 4: Rs2Value == RamWriteValue (for Store)
-                inputs.values[R1CSInputIndex.RamReadValue.toIndex()] = F.zero();
-                inputs.values[R1CSInputIndex.RamWriteValue.toIndex()] = F.fromU64(step.rs2_value);
+                inputs.values[R1CSInputIndex.RamReadValue.toIndex()] = mem_val_f; // pre-value
+                inputs.values[R1CSInputIndex.RamWriteValue.toIndex()] = F.fromU64(step.rs2_value); // post-value
                 inputs.values[R1CSInputIndex.RdWriteValue.toIndex()] = F.fromU64(step.rd_value);
             } else {
                 // Non-memory: set to reasonable defaults

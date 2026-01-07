@@ -1516,6 +1516,9 @@ pub fn ProofConverter(comptime F: type) type {
             const left_operand_claim = opening_claims.get(.{ .Virtual = .{ .poly = .LeftLookupOperand, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
             const right_operand_claim = opening_claims.get(.{ .Virtual = .{ .poly = .RightLookupOperand, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
 
+            std.debug.print("[ZOLT] RWC_DEBUG: ram_read_value_claim = {any}\n", .{ram_read_value_claim.toBytesBE()});
+            std.debug.print("[ZOLT] RWC_DEBUG: ram_write_value_claim = {any}\n", .{ram_write_value_claim.toBytesBE()});
+
             // Sample gammas from transcript in the same order as Jolt:
             // CRITICAL: Stage 2 gammas use challenge_scalar (NOT challenge_scalar_optimized)
             // which means they use F::from_bytes (from_le_bytes_mod_order) without 125-bit masking.

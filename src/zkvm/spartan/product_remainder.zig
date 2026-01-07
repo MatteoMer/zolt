@@ -409,14 +409,9 @@ fn extractProductInputs(
             witness.values[constraints.R1CSInputIndex.LeftInstructionInput.toIndex()],
             // 1: RightInstructionInput
             witness.values[constraints.R1CSInputIndex.RightInstructionInput.toIndex()],
-            // 2: IsRdNotZero - computed from rd destination register
-            // In Jolt, this is 1 if the destination register is not x0
-            // We can infer from RdWriteValue being non-zero OR from flag
-            blk: {
-                // Check if RdWriteValue is non-zero as a proxy for rd != 0
-                const rd_val = witness.values[constraints.R1CSInputIndex.RdWriteValue.toIndex()];
-                break :blk if (rd_val.eql(F.zero())) F.zero() else F.one();
-            },
+            // 2: IsRdNotZero - directly from FlagIsRdNotZero (rd register index != 0)
+            // In Jolt, this is InstructionFlags::IsRdNotZero
+            witness.values[constraints.R1CSInputIndex.FlagIsRdNotZero.toIndex()],
             // 3: WriteLookupOutputToRDFlag (OpFlags::WriteLookupOutputToRD)
             witness.values[constraints.R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()],
             // 4: JumpFlag (OpFlags::Jump)
@@ -424,35 +419,19 @@ fn extractProductInputs(
             // 5: LookupOutput
             witness.values[constraints.R1CSInputIndex.LookupOutput.toIndex()],
             // 6: BranchFlag (InstructionFlags::Branch)
-            // This is 1 for branch instructions (opcode 0x63)
-            // We approximate by checking if ShouldBranch could be non-zero
-            blk: {
-                // For branches, ShouldBranch = LookupOutput * BranchFlag
-                // If should_branch is non-zero, branch_flag must be 1
-                const should_branch = witness.values[constraints.R1CSInputIndex.ShouldBranch.toIndex()];
-                if (!should_branch.eql(F.zero())) {
-                    break :blk F.one();
-                }
-                // Otherwise, check if this could be a branch instruction
-                // We'd need opcode info, but for now assume 0
-                break :blk F.zero();
-            },
+            // Directly from FlagBranch (opcode == 0x63)
+            witness.values[constraints.R1CSInputIndex.FlagBranch.toIndex()],
             // 7: NextIsNoop - 1 if next instruction is a noop
+            // NextIsNoop = !not_next_noop = trace[t+1].IsNoop (for t+1 < len)
+            // For last cycle, NextIsNoop = true (not_next_noop = false)
             blk: {
                 if (cycle_idx + 1 < all_witnesses.len) {
-                    // Check if next instruction is a noop
-                    // A noop typically has all-zero inputs or specific flag
+                    // Use next cycle's IsNoop flag
                     const next_witness = &all_witnesses[cycle_idx + 1];
-                    const next_pc = next_witness.values[constraints.R1CSInputIndex.PC.toIndex()];
-                    const curr_pc = witness.values[constraints.R1CSInputIndex.PC.toIndex()];
-
-                    // If PC didn't change, it might be a noop
-                    // This is a heuristic - real implementation should check instruction type
-                    if (next_pc.eql(curr_pc)) {
-                        break :blk F.one();
-                    }
+                    break :blk next_witness.values[constraints.R1CSInputIndex.FlagIsNoop.toIndex()];
                 }
-                break :blk F.zero();
+                // Last cycle: not_next_noop = false, so NextIsNoop = true
+                break :blk F.one();
             },
         },
     };

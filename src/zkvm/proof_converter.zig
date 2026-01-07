@@ -1549,11 +1549,11 @@ pub fn ProofConverter(comptime F: type) type {
                     witness.values[r1cs.R1CSInputIndex.RightInstructionInput.toIndex()],
                 ));
 
-                // 2: IsRdNotZero - derived from RdWriteValue being non-zero
+                // 2: IsRdNotZero - from FlagIsRdNotZero (rd register index != 0)
                 // In Jolt this is InstructionFlags::IsRdNotZero
-                const rd_write_value = witness.values[r1cs.R1CSInputIndex.RdWriteValue.toIndex()];
-                const is_rd_not_zero = if (rd_write_value.isZero()) F.zero() else F.one();
-                factor_evals[2] = factor_evals[2].add(eq_val.mul(is_rd_not_zero));
+                factor_evals[2] = factor_evals[2].add(eq_val.mul(
+                    witness.values[r1cs.R1CSInputIndex.FlagIsRdNotZero.toIndex()],
+                ));
 
                 // 3: WriteLookupOutputToRDFlag
                 factor_evals[3] = factor_evals[3].add(eq_val.mul(
@@ -1570,18 +1570,26 @@ pub fn ProofConverter(comptime F: type) type {
                     witness.values[r1cs.R1CSInputIndex.LookupOutput.toIndex()],
                 ));
 
-                // 6: BranchFlag - using ShouldBranch
+                // 6: BranchFlag - from FlagBranch (opcode == 0x63)
+                // In Jolt this is InstructionFlags::Branch
                 factor_evals[6] = factor_evals[6].add(eq_val.mul(
-                    witness.values[r1cs.R1CSInputIndex.ShouldBranch.toIndex()],
+                    witness.values[r1cs.R1CSInputIndex.FlagBranch.toIndex()],
                 ));
 
-                // 7: NextIsNoop - this needs special handling
-                // NextIsNoop = !not_next_noop = 1 - (next cycle is not noop)
-                // For the last cycle, NextIsNoop = 1 (next is implicitly noop)
-                // For other cycles, we need to check if the next instruction is noop
-                // Since we don't have direct access to instruction flags here,
-                // we approximate: NextIsNoop = 0 for all but the last cycle
-                const next_is_noop = if (t + 1 >= cycle_witnesses.len) F.one() else F.zero();
+                // 7: NextIsNoop - check if next instruction is a noop
+                // In Jolt: NextIsNoop = !not_next_noop where not_next_noop = !trace[t+1].IsNoop
+                // So NextIsNoop = trace[t+1].IsNoop
+                // For last cycle, NextIsNoop = false (Jolt uses false for final cycle)
+                const next_is_noop = blk: {
+                    if (t + 1 < cycle_witnesses.len) {
+                        // Check next cycle's IsNoop flag
+                        break :blk cycle_witnesses[t + 1].values[r1cs.R1CSInputIndex.FlagIsNoop.toIndex()];
+                    }
+                    // For last cycle, Jolt sets not_next_noop = false, so NextIsNoop would be true
+                    // But wait - in Jolt: NextIsNoop = !not_next_noop
+                    // For last cycle: not_next_noop = false (hardcoded), so NextIsNoop = true = !false
+                    break :blk F.one();
+                };
                 factor_evals[7] = factor_evals[7].add(eq_val.mul(next_is_noop));
             }
 

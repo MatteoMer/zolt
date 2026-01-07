@@ -76,8 +76,13 @@ pub const R1CSInputIndex = enum(u8) {
     FlagAdvice = 33,
     FlagIsCompressed = 34,
     FlagIsFirstInSequence = 35,
+    // Additional flags for product virtualization factor polynomials
+    // These are derived from instruction fields and needed for Stage 2 factor evaluation
+    FlagIsRdNotZero = 36, // 1 if rd register index != 0
+    FlagBranch = 37, // 1 if instruction opcode == 0x63 (branch)
+    FlagIsNoop = 38, // 1 if this is a noop instruction
 
-    pub const NUM_INPUTS = 36;
+    pub const NUM_INPUTS = 39;
 
     pub fn toIndex(self: R1CSInputIndex) usize {
         return @intFromEnum(self);
@@ -1043,6 +1048,22 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             // LookupOutput contains the branch condition result (0 or 1) for branches
             const lookup_out = inputs.values[R1CSInputIndex.LookupOutput.toIndex()];
             inputs.values[R1CSInputIndex.ShouldBranch.toIndex()] = lookup_out.mul(branch_flag_f);
+
+            // Store the raw flags for product virtualization factor evaluation
+            inputs.values[R1CSInputIndex.FlagIsRdNotZero.toIndex()] = is_rd_not_zero;
+            inputs.values[R1CSInputIndex.FlagBranch.toIndex()] = branch_flag_f;
+
+            // IsNoop: check if this is a noop instruction
+            // Noop typically has opcode 0x13 (ADDI) with rd=x0, rs1=x0, imm=0
+            // We can approximate by checking if PC didn't advance and no side effects
+            const is_noop = blk: {
+                // Check if this is an ADDI instruction to x0
+                if (instr_opcode == 0x13 and rd == 0) {
+                    break :blk F.one();
+                }
+                break :blk F.zero();
+            };
+            inputs.values[R1CSInputIndex.FlagIsNoop.toIndex()] = is_noop;
 
             return inputs;
         }

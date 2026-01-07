@@ -1,6 +1,6 @@
 # Zolt-Jolt Compatibility Notes
 
-## Current Status (Session 6 - January 7, 2026)
+## Current Status (Session 13 - January 7, 2026)
 
 ### Summary
 
@@ -8,70 +8,99 @@
 
 The Stage 2 batched sumcheck produces `output_claim` that doesn't match the verifier's `expected_output_claim`.
 
-### CRITICAL FINDING: Serialization Mismatch
+### ROOT CAUSE IDENTIFIED: r0 Mismatch
 
-The polynomial coefficients written by Zolt are read as DIFFERENT values by Jolt!
+The Stage 2 failure is caused by mismatched `r0` values between Zolt and Jolt:
 
-**Zolt writes (Stage 2, round 25, c0):**
-- BE bytes: `{41, 233, 194, 132, ...}`
-- Value: 18957844668819946272...
+- **Zolt r0**: `5629772851639812945906736172593031815056148939881883788449064297659372967906`
+- **Jolt r0**: `16176819525807790011525369806787798080841445107270164702191186390206256879646`
 
-**Jolt reads (STAGE1_ROUND_25, c0):**
-- LE bytes: `[218, 112, 200, 225, ...]`
-- Value: 14124309671825385295...
+This causes `tau_high_bound_r0` to differ:
+- Zolt's prover computes with one r0
+- Jolt's verifier expects a different r0
+- The `expected_output_claim` formula depends on `tau_high_bound_r0`
 
-These are COMPLETELY DIFFERENT values, indicating a serialization/deserialization format mismatch.
+### r0 Derivation Path
 
-### What Works
+In Jolt, `r0` for Stage 2 comes from:
+```rust
+// In ProductVirtualRemainderParams::new()
+let (r_uni_skip, _) = opening_accumulator.get_virtual_polynomial_opening(
+    VirtualPolynomial::UnivariateSkip,
+    SumcheckId::SpartanProductVirtualization,
+);
+let r0 = r_uni_skip[0];
+```
 
-1. ✅ tau_high values match (transcript synchronized)
-2. ✅ Stage 1 challenges match between prover/verifier
-3. ✅ Basic field element serialization (toBytes produces LE)
+This `r_uni_skip` is the **opening point** (not the claim) that was stored when the UniSkip verification appended to the accumulator.
 
-### Root Cause Hypothesis
+### Problem: Opening Points vs Claims
 
-The proof binary is being read at the wrong offset, OR there's a structural mismatch between how Zolt serializes and how Jolt deserializes.
+Zolt's `OpeningClaims` only stores claim values, NOT opening points! The Jolt accumulator stores both:
+- `(OpeningPoint, claim_value)` for each opening
 
-### Jolt Proof Structure (expected order)
+But Zolt only stores:
+- `claim_value`
+
+So when Stage 2 needs the opening point for UnivariateSkip at SpartanProductVirtualization, it can't get it because Zolt didn't store it!
+
+### Verified Matching Values
+
+These values MATCH between Zolt and Jolt:
+- `fused_left`: 15479400476700808083175193706386825626005767142779158246159402270795992278944
+- `fused_right`: 16089746625107921886379479343676619567444150947455675976379397017146086344498
+- All polynomial coefficients (c0, c2, c3) for all 26 rounds
+- All round challenges for all 26 rounds
+
+### What Differs
+
+- `r0` (Stage 2 UniSkip challenge) - from transcript state divergence
+- Consequently `tau_high_bound_r0`
+- Consequently `expected_output_claim` for instance 0
+
+### Error Values
 
 ```
-1. opening_claims (BTreeMap<OpeningId, F>)
-2. commitments (Vec<Commitment>)
-3. stage1_uni_skip_first_round_proof
-4. stage1_sumcheck_proof (Vec<CompressedUniPoly>)
-5. stage2_uni_skip_first_round_proof
-6. stage2_sumcheck_proof (Vec<CompressedUniPoly>)
-7-11. stage3-7_sumcheck_proof
-12. joint_opening_proof
-13-17. Optional proofs/commitments
-18-22. Configuration values (usize)
+output_claim:          15813746968267243297450630513407769417288591023625754132394390395019523654383
+expected_output_claim: 21370344117342657988577911810586668133317596586881852281711504041258248730449
 ```
+
+### Secondary Issue: Constant Polynomials
+
+For instances 1, 2, 4 (RafEvaluation, RamReadWriteChecking, InstructionLookupsClaimReduction):
+- Zolt uses constant polynomials but these instances have non-zero input claims
+- The expected_output_claim is 0 for these (because ra=0, val=0)
+- Constant polynomials don't reduce to 0, they reduce to input_claim/2^N
+- This is a secondary issue that becomes visible only after fixing the r0 issue
 
 ### Next Steps
 
-1. Add byte-offset tracking to Jolt's deserializer
-2. Compare exact byte positions for each section
-3. Verify CompressedUniPoly serialization matches arkworks format
-4. Check if sumcheck proof sections are at correct offsets
+1. **Fix r0 derivation for Stage 2**:
+   - Track transcript state between rounds 54 and 176
+   - Find where Zolt and Jolt transcript states diverge
+   - The r0 is sampled at round 177
 
-### Debugging Commands
-
-```bash
-# Generate proof with debug
-./zig-out/bin/zolt prove --jolt-format -o /tmp/proof.bin examples/fibonacci.elf 2>&1 | grep "STAGE2_BATCHED round 25"
-
-# Verify with Jolt
-cd /Users/matteo/projects/jolt
-cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture 2>&1 | grep "STAGE1_ROUND_25"
-```
+2. **Once r0 is fixed**, address the constant polynomial issue for instances 1, 2, 4:
+   - Option A: Implement proper RAF/RWC/Instruction provers
+   - Option B: Use zero-polynomial with hint approach
 
 ---
 
-## Previous Session Analysis
+## Previous Sessions
 
-The `expected_output_claim` in Jolt is computed as:
-```
-L(tau_high, r0) * eq(tau_low, r_reversed) * fused_left(claims) * fused_right(claims)
-```
+### Session 12
+- Identified individual claims match but claim trajectory diverges
+- Found that s(0) + s(1) != claim for combined polynomial
 
-This formula was verified to be correct, but the issue is now identified as a serialization problem, not a computation problem.
+### Session 11
+- Fixed Stage 1 output-sumcheck r_address_prime reversal
+- Stage 1 started passing
+
+### Session 10
+- Implemented Stage 1 streaming outer prover
+- Fixed constraint evaluation ordering
+
+### Earlier Sessions
+- Established transcript compatibility with Jolt
+- Fixed field element serialization (LE format)
+- Fixed polynomial coefficient compression format

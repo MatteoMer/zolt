@@ -1596,6 +1596,37 @@ pub fn ProofConverter(comptime F: type) type {
             }
             defer if (output_prover) |*p| p.deinit();
 
+            // Initialize RafEvaluationProver if we have memory trace
+            const RafProver = ram.RafEvaluationProver(F);
+            var raf_prover: ?RafProver = null;
+            const has_memory_trace = config.memory_trace != null;
+            std.debug.print("[ZOLT] STAGE2_BATCHED: memory_trace={any}\n", .{has_memory_trace});
+            if (config.memory_trace != null and config.memory_layout != null) {
+                // Get r_cycle from the opening claims - this is the point from Stage 1
+                // For RAF, r_cycle should come from SpartanOuter's challenges
+                // We don't have direct access to those challenges here, so we'll use
+                // the challenges we generate during this sumcheck
+                // Actually, r_cycle is FIXED before Stage 2 - it's determined by Stage 1
+                // For now, we'll create a placeholder and update the prover design later
+
+                // The r_cycle used in RAF is the sumcheck challenges from Stage 1's outer sumcheck
+                // Since we don't have those here, we'll skip RAF prover initialization for now
+                // and rely on zero-polynomial approach for instances without provers
+                std.debug.print("[ZOLT] STAGE2_BATCHED: Skipping RafEvaluationProver (r_cycle unavailable)\n", .{});
+            }
+            defer if (raf_prover) |*p| p.deinit();
+
+            // Track individual claims for each instance (needed for zero-poly instances)
+            var individual_claims: [5]F = undefined;
+            for (0..5) |i| {
+                const scale_power = max_num_rounds - rounds_per_instance[i];
+                var scaled = input_claims[i];
+                for (0..scale_power) |_| {
+                    scaled = scaled.add(scaled);
+                }
+                individual_claims[i] = scaled;
+            }
+
             // Store challenges for opening claims computation
             var challenges = std.ArrayList(F){};
             defer challenges.deinit(self.allocator);
@@ -1738,7 +1769,15 @@ pub fn ProofConverter(comptime F: type) type {
 
                 // Update batched claim by evaluating at challenge
                 // This needs proper interpolation from evaluations
+                const old_claim = batched_claim;
                 batched_claim = evaluateCubicAtChallengeFromEvals(combined_evals, challenge);
+
+                // Debug: Print claim trajectory for first few and last few rounds
+                if (round_idx < 3 or round_idx >= max_num_rounds - 3) {
+                    std.debug.print("[ZOLT CLAIM] round {}: old_claim = {any}\n", .{ round_idx, old_claim.toBytesBE() });
+                    std.debug.print("[ZOLT CLAIM] round {}: s(0)+s(1) = {any}\n", .{ round_idx, combined_evals[0].add(combined_evals[1]).toBytesBE() });
+                    std.debug.print("[ZOLT CLAIM] round {}: new_claim = {any}\n", .{ round_idx, batched_claim.toBytesBE() });
+                }
 
                 // Bind challenge in all active instances and update their claims
                 if (product_prover != null and round_idx >= (max_num_rounds - n_cycle_vars)) {
@@ -2113,6 +2152,9 @@ pub const ConversionConfig = struct {
     initial_ram: ?*const std.AutoHashMapUnmanaged(u64, u64) = null,
     /// Final RAM state (after execution)
     final_ram: ?*const std.AutoHashMapUnmanaged(u64, u64) = null,
+    /// Memory trace for RAF evaluation sumcheck
+    /// If null, uses zero-polynomial approach (may fail for non-zero claims)
+    memory_trace: ?*const ram.MemoryTrace = null,
 };
 
 // =============================================================================

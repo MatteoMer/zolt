@@ -1605,12 +1605,26 @@ pub fn ProofConverter(comptime F: type) type {
             defer self.allocator.free(eq_evals);
 
             std.debug.print("[ZOLT] FACTOR_EVALS: eq_evals.len = {}, cycle_witnesses.len = {}\n", .{ eq_evals.len, cycle_witnesses.len });
+            std.debug.print("[ZOLT] FACTOR_EVALS: eq_evals[0] = {any}\n", .{eq_evals[0].toBytesBE()});
+            std.debug.print("[ZOLT] FACTOR_EVALS: eq_evals[1] = {any}\n", .{eq_evals[1].toBytesBE()});
+            std.debug.print("[ZOLT] FACTOR_EVALS: eq_evals[2] = {any}\n", .{eq_evals[2].toBytesBE()});
+            // Print sum of eq_evals (should be 1 for partition of unity)
+            var eq_sum = F.zero();
+            for (eq_evals) |ev| {
+                eq_sum = eq_sum.add(ev);
+            }
+            std.debug.print("[ZOLT] FACTOR_EVALS: eq_sum = {any} (should be 1)\n", .{eq_sum.toBytesBE()});
 
             // Initialize factor accumulators
             var factor_evals = [8]F{ F.zero(), F.zero(), F.zero(), F.zero(), F.zero(), F.zero(), F.zero(), F.zero() };
 
             // Compute MLE evaluation: Σ_t eq(r_cycle, t) * factor_value[t]
             const num_cycles = @min(eq_evals.len, cycle_witnesses.len);
+
+            // Debug: Print witness values for cycle 0
+            std.debug.print("[ZOLT] FACTOR_EVALS: witness[0][LeftInstructionInput] = {any}\n", .{cycle_witnesses[0].values[r1cs.R1CSInputIndex.LeftInstructionInput.toIndex()].toBytesBE()});
+            std.debug.print("[ZOLT] FACTOR_EVALS: witness[0][RightInstructionInput] = {any}\n", .{cycle_witnesses[0].values[r1cs.R1CSInputIndex.RightInstructionInput.toIndex()].toBytesBE()});
+
             for (0..num_cycles) |t| {
                 const eq_val = eq_evals[t];
                 const witness = &cycle_witnesses[t];

@@ -1,6 +1,6 @@
 # Zolt-Jolt Compatibility Notes
 
-## Current Status (Session 65 - January 7, 2026)
+## Current Status (Session 6 - January 7, 2026)
 
 ### Summary
 
@@ -8,74 +8,70 @@
 
 The Stage 2 batched sumcheck produces `output_claim` that doesn't match the verifier's `expected_output_claim`.
 
-### Recent Fixes Applied
+### CRITICAL FINDING: Serialization Mismatch
 
-1. **tau_stage2 construction** - Now uses reversed Stage 1 challenges + tau_high_stage2
-2. **Gruen polynomial construction** - Changed from direct evaluation to t0/t_inf method
-3. **Compressed coefficient handling** - Correctly reconstruct evaluations from [c0, c2, c3]
-4. **Index cleanup** - Using standard MLE indexing conventions
+The polynomial coefficients written by Zolt are read as DIFFERENT values by Jolt!
 
-### Current Values
+**Zolt writes (Stage 2, round 25, c0):**
+- BE bytes: `{41, 233, 194, 132, ...}`
+- Value: 18957844668819946272...
 
-Latest test output:
-- `output_claim`: 6712305349781773213915836621366914034919475189156389350844584049700714314367
-- `expected_output_claim`: 8321209767613183988201183581193448103173376364360119728613327078546122551176
+**Jolt reads (STAGE1_ROUND_25, c0):**
+- LE bytes: `[218, 112, 200, 225, ...]`
+- Value: 14124309671825385295...
 
-### Analysis
+These are COMPLETELY DIFFERENT values, indicating a serialization/deserialization format mismatch.
+
+### What Works
+
+1. ✅ tau_high values match (transcript synchronized)
+2. ✅ Stage 1 challenges match between prover/verifier
+3. ✅ Basic field element serialization (toBytes produces LE)
+
+### Root Cause Hypothesis
+
+The proof binary is being read at the wrong offset, OR there's a structural mismatch between how Zolt serializes and how Jolt deserializes.
+
+### Jolt Proof Structure (expected order)
+
+```
+1. opening_claims (BTreeMap<OpeningId, F>)
+2. commitments (Vec<Commitment>)
+3. stage1_uni_skip_first_round_proof
+4. stage1_sumcheck_proof (Vec<CompressedUniPoly>)
+5. stage2_uni_skip_first_round_proof
+6. stage2_sumcheck_proof (Vec<CompressedUniPoly>)
+7-11. stage3-7_sumcheck_proof
+12. joint_opening_proof
+13-17. Optional proofs/commitments
+18-22. Configuration values (usize)
+```
+
+### Next Steps
+
+1. Add byte-offset tracking to Jolt's deserializer
+2. Compare exact byte positions for each section
+3. Verify CompressedUniPoly serialization matches arkworks format
+4. Check if sumcheck proof sections are at correct offsets
+
+### Debugging Commands
+
+```bash
+# Generate proof with debug
+./zig-out/bin/zolt prove --jolt-format -o /tmp/proof.bin examples/fibonacci.elf 2>&1 | grep "STAGE2_BATCHED round 25"
+
+# Verify with Jolt
+cd /Users/matteo/projects/jolt
+cargo test --package jolt-core test_verify_zolt_proof -- --ignored --nocapture 2>&1 | grep "STAGE1_ROUND_25"
+```
+
+---
+
+## Previous Session Analysis
 
 The `expected_output_claim` in Jolt is computed as:
 ```
 L(tau_high, r0) * eq(tau_low, r_reversed) * fused_left(claims) * fused_right(claims)
 ```
 
-Where:
-- `L(tau_high, r0)` = Lagrange kernel
-- `eq(tau_low, r_reversed)` = eq polynomial with reversed challenges
-- `fused_left/right` = combinations of 8 factor polynomial claims
-
-The `output_claim` is the final claim from sumcheck evaluation.
-
-### Potential Issues
-
-1. **Round polynomial computation** - t0 and t_inf may not match Jolt's calculation
-2. **Split eq tables** - E_out/E_in indexing may differ
-3. **Binding order interaction** - LowToHigh vs how variables are actually bound
-4. **Initial polynomial layout** - How fused left/right are stored
-
-### Key Insight: Jolt's Interleaved Storage
-
-Jolt's `compute_first_quadratic_evals_and_bound_polys` stores left/right in interleaved format:
-```rust
-let off = 2 * x_in_val;
-left_chunk[off] = left0;      // lo value (even trace idx)
-left_chunk[off + 1] = left1;  // hi value (odd trace idx)
-```
-
-My Zolt code stores sequentially:
-```zig
-left_evals[idx] = fusedLeft(witness[idx]);
-```
-
-For standard MLE representation, this sequential storage IS correct because:
-- Index i has binary decomposition where LSB = i mod 2
-- Indices 2k and 2k+1 ARE the lo/hi pair for the same upper bits
-
-### Next Steps
-
-1. Add detailed debug output comparing:
-   - t0 and t_inf values between Zolt and Jolt
-   - Split eq E_out and E_in tables
-   - Current scalar progression
-
-2. Check if the issue is in:
-   - How `getWindowEqTables` returns tables
-   - How Gruen polynomial combines t0/t_inf
-   - The claim update logic
-
-3. Consider creating a minimal test case that runs the same computation in both Zolt and Jolt
-
----
-
-## Previous Sessions
-
-See git history for earlier notes on Stage 1 fixes.
+This formula was verified to be correct, but the issue is now identified as a serialization problem, not a computation problem.

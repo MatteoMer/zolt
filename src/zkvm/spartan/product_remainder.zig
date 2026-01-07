@@ -321,6 +321,25 @@ pub fn ProductVirtualRemainderProver(comptime F: type) type {
                 t_inf_sum = t_inf_sum.add(inner_t_inf.mul(e_out));
             }
 
+            // Debug output for first 3 rounds (matching Jolt's debug)
+            if (self.current_round < 3) {
+                const t0_be = t0_sum.toBytesBE();
+                const tinf_be = t_inf_sum.toBytesBE();
+                const claim_be = self.current_claim.toBytesBE();
+                std.debug.print("[ZOLT PRODUCT round {}] t0 last 8 bytes (LE): {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2}\n", .{
+                    self.current_round,
+                    t0_be[31], t0_be[30], t0_be[29], t0_be[28], t0_be[27], t0_be[26], t0_be[25], t0_be[24],
+                });
+                std.debug.print("[ZOLT PRODUCT round {}] t_inf last 8 bytes (LE): {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2}\n", .{
+                    self.current_round,
+                    tinf_be[31], tinf_be[30], tinf_be[29], tinf_be[28], tinf_be[27], tinf_be[26], tinf_be[25], tinf_be[24],
+                });
+                std.debug.print("[ZOLT PRODUCT round {}] previous_claim last 8 bytes (LE): {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2}\n", .{
+                    self.current_round,
+                    claim_be[31], claim_be[30], claim_be[29], claim_be[28], claim_be[27], claim_be[26], claim_be[25], claim_be[24],
+                });
+            }
+
             // Use Gruen's polynomial construction to get the cubic round polynomial
             const evals = self.split_eq.computeCubicRoundPoly(t0_sum, t_inf_sum, self.current_claim);
 

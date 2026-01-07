@@ -1,72 +1,47 @@
-# Zolt-Jolt Compatibility - Stage 2 Debugging
+# Zolt-Jolt Compatibility - Stage 2 Progress
 
 ## Current Status
-Stage 2 sumcheck verification FAILING - output_claim != expected_output_claim
+Stage 2 sumcheck verification improving but still failing.
 
-### Latest Values
-- output_claim:          19330663220293480209656412701223293038883720376917369484599270483629981507895
-- expected_output_claim: 11465411700650658245294917902500914114009241845259440237908447388745039084178
+### Latest Values (after claim update fix)
+- output_claim:          20291704288663086458385602321745330294718053661243679658093460943559986613657
+- expected_output_claim: 15745090188359599137189004113283834746953666719330265610972696622859550686329
 
 ### Tests
 - All 712 Zolt tests pass
-- Factor flags now correctly tracked (IsRdNotZero, BranchFlag, IsNoop)
+- Jolt verification failing at Stage 2
 
-## Root Cause Investigation
+## Completed Fixes
 
-### Eq Polynomial Ordering Issue
+### 1. Factor Flags in R1CS (commit fd6e5b7)
+- Added FlagIsRdNotZero: 1 if rd register index != 0
+- Added FlagBranch: 1 if instruction opcode == 0x63
+- Added FlagIsNoop: 1 if this is a noop instruction
+- NUM_INPUTS increased from 36 to 39
 
-The verifier computes:
-```rust
-let r_tail_reversed: Vec<F::Challenge> = sumcheck_challenges.iter().rev().copied().collect();
-let tau_bound_r_tail_reversed = EqPolynomial::mle(tau_low, &r_tail_reversed);
-```
+### 2. Claim Update for ProductVirtualRemainder (commit 85898bb)
+- CRITICAL: Added updateClaim(evals, challenge) before bindChallenge()
+- Without this, the hint s(1) = current_claim - s(0) uses wrong claim
+- This significantly improved the output_claim value
 
-This is `Eq(tau_low, [r_{n-1}, ..., r_1, r_0])`.
+### 3. R_cycle Reversal for BIG_ENDIAN (commit 95b565a)
+- Challenges reversed for factor evaluation
+- Matches Jolt's OpeningPoint<BIG_ENDIAN> convention
 
-The prover uses split_eq with LowToHigh binding:
-- Round 0: bind variable 0 to r_0
-- Round 1: bind variable 1 to r_1
-- ...
+## Remaining Issues
 
-After all rounds, the prover has `Eq(tau_low, [r_0, r_1, ..., r_{n-1}])`.
+The output_claim and expected_output_claim are now within ~30% of each other (20291e75 vs 15745e75) but still don't match.
 
-These are NOT the same:
-- Prover: Π_i (tau[i] * r_i + ...)
-- Verifier: Π_i (tau[i] * r_{n-1-i} + ...)
+Possible causes:
+1. **Round polynomial computation** - The cubic polynomial s(X) might have errors
+2. **Split_eq binding** - The eq polynomial binding might differ from Jolt
+3. **Endianness** - Subtle ordering differences in tau or other parameters
 
-### Key Question
-How does Jolt handle this mismatch? The split_eq polynomial must do something to account for the reversal.
+## Debugging Strategy
 
-Possible explanations:
-1. The split_eq structure naturally handles the reversal through its variable layout
-2. There's a compensating transformation somewhere in the code
-3. The factor evaluations are computed with the same reversal, canceling out
-
-### Next Steps
-
-1. **Deep dive into split_eq binding**
-   - Trace exactly what happens when bind() is called
-   - Verify if the accumulated scalar accounts for reversal
-
-2. **Compare with Jolt prover directly**
-   - Print intermediate values from Jolt's ProductVirtualRemainderProver
-   - Compare with Zolt's values
-
-3. **Simplify test case**
-   - Use 4-cycle trace for easier debugging
-   - Compare round polynomials between Zolt and Jolt
-
-## Factor Polynomial Status
-
-All 8 factors now correctly extracted:
-- [x] LeftInstructionInput - from R1CS input
-- [x] RightInstructionInput - from R1CS input
-- [x] IsRdNotZero - from FlagIsRdNotZero (rd != 0)
-- [x] WriteLookupOutputToRDFlag - from R1CS input
-- [x] JumpFlag - from R1CS input
-- [x] LookupOutput - from R1CS input
-- [x] BranchFlag - from FlagBranch (opcode == 0x63)
-- [x] NextIsNoop - from next cycle's FlagIsNoop
+1. **Add more debug output** - Print intermediate values in both Zolt and Jolt
+2. **Compare round by round** - Verify each round's polynomial matches
+3. **Test with smaller trace** - Use 4-cycle trace for easier debugging
 
 ## Commands
 

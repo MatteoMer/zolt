@@ -1703,36 +1703,6 @@ pub fn ProofConverter(comptime F: type) type {
 
             // Step 4: Run batched sumcheck rounds
             for (0..max_num_rounds) |round_idx| {
-                // DEBUG: Print current claims at start of round 23
-                if (round_idx == 23) {
-                    std.debug.print("[ZOLT ROUND 23 START] batched_claim = {any}\n", .{batched_claim.toBytesBE()});
-                    var expected_batched: F = F.zero();
-                    if (product_prover) |pp| {
-                        std.debug.print("[ZOLT ROUND 23 START] instance 0 claim = {any}\n", .{pp.current_claim.toBytesBE()});
-                        expected_batched = expected_batched.add(pp.current_claim.mul(batching_coeffs[0]));
-                    }
-                    if (raf_prover) |rp| {
-                        std.debug.print("[ZOLT ROUND 23 START] instance 1 claim = {any}\n", .{rp.current_claim.toBytesBE()});
-                        expected_batched = expected_batched.add(rp.current_claim.mul(batching_coeffs[1]));
-                    }
-                    if (rwc_prover) |*rwcp| {
-                        std.debug.print("[ZOLT ROUND 23 START] instance 2 claim = {any}\n", .{rwcp.current_claim.toBytesBE()});
-                        expected_batched = expected_batched.add(rwcp.current_claim.mul(batching_coeffs[2]));
-                    }
-                    if (output_prover) |op| {
-                        std.debug.print("[ZOLT ROUND 23 START] instance 3 claim = {any}\n", .{op.current_claim.toBytesBE()});
-                        expected_batched = expected_batched.add(op.current_claim.mul(batching_coeffs[3]));
-                    }
-                    if (instr_prover) |*ip| {
-                        std.debug.print("[ZOLT ROUND 23 START] instance 4 claim = {any}\n", .{ip.current_claim.toBytesBE()});
-                        expected_batched = expected_batched.add(ip.current_claim.mul(batching_coeffs[4]));
-                    }
-                    std.debug.print("[ZOLT ROUND 23 START] expected_batched = {any}\n", .{expected_batched.toBytesBE()});
-                    if (!expected_batched.eql(batched_claim)) {
-                        std.debug.print("[ZOLT ROUND 23 START] ERROR: expected_batched != batched_claim!\n", .{});
-                    }
-                }
-
                 // Compute combined polynomial from all instances
                 var combined_evals = [4]F{ F.zero(), F.zero(), F.zero(), F.zero() };
                 // Store ProductVirtualRemainder's evals for claim update
@@ -2041,42 +2011,6 @@ pub fn ProofConverter(comptime F: type) type {
                 // This needs proper interpolation from evaluations
                 const old_claim = batched_claim;
                 batched_claim = evaluateCubicAtChallengeFromEvals(combined_evals, challenge);
-
-                // DEBUG: At end of round 22, verify batched_claim == sum of new instance claims
-                if (round_idx == 22) {
-                    std.debug.print("[ZOLT ROUND 22 END] new batched_claim = {any}\n", .{batched_claim.toBytesBE()});
-                    var expected_new_batched: F = F.zero();
-                    // Instance claims will be updated after this, so compute what they should be
-                    if (product_evals_this_round) |pe| {
-                        const new_claim_0 = evaluateCubicAtChallengeFromEvals(pe, challenge);
-                        std.debug.print("[ZOLT ROUND 22 END] instance 0 new claim = {any}\n", .{new_claim_0.toBytesBE()});
-                        expected_new_batched = expected_new_batched.add(new_claim_0.mul(batching_coeffs[0]));
-                    }
-                    if (raf_evals_this_round) |re| {
-                        const new_claim_1 = evaluateCubicAtChallengeFromEvals(re, challenge);
-                        std.debug.print("[ZOLT ROUND 22 END] instance 1 new claim = {any}\n", .{new_claim_1.toBytesBE()});
-                        expected_new_batched = expected_new_batched.add(new_claim_1.mul(batching_coeffs[1]));
-                    }
-                    if (rwc_evals_this_round) |re| {
-                        const new_claim_2 = evaluateCubicAtChallengeFromEvals(re, challenge);
-                        std.debug.print("[ZOLT ROUND 22 END] instance 2 new claim = {any}\n", .{new_claim_2.toBytesBE()});
-                        expected_new_batched = expected_new_batched.add(new_claim_2.mul(batching_coeffs[2]));
-                    }
-                    if (output_evals_this_round) |oe| {
-                        const new_claim_3 = evaluateCubicAtChallengeFromEvals(oe, challenge);
-                        std.debug.print("[ZOLT ROUND 22 END] instance 3 new claim = {any}\n", .{new_claim_3.toBytesBE()});
-                        expected_new_batched = expected_new_batched.add(new_claim_3.mul(batching_coeffs[3]));
-                    }
-                    if (instr_evals_this_round) |ie| {
-                        const new_claim_4 = evaluateCubicAtChallengeFromEvals(ie, challenge);
-                        std.debug.print("[ZOLT ROUND 22 END] instance 4 new claim = {any}\n", .{new_claim_4.toBytesBE()});
-                        expected_new_batched = expected_new_batched.add(new_claim_4.mul(batching_coeffs[4]));
-                    }
-                    std.debug.print("[ZOLT ROUND 22 END] expected_new_batched = {any}\n", .{expected_new_batched.toBytesBE()});
-                    if (!expected_new_batched.eql(batched_claim)) {
-                        std.debug.print("[ZOLT ROUND 22 END] ERROR: mismatch!\n", .{});
-                    }
-                }
 
                 // Debug: Print claim trajectory for first few and last few rounds
                 if (round_idx < 3 or round_idx >= max_num_rounds - 5) {

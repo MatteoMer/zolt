@@ -1,63 +1,64 @@
-# Zolt-Jolt Compatibility - Session 16 Progress
+# Zolt-Jolt Compatibility - Session 17 Progress
 
 ## Status Summary
 
 ### ✅ COMPLETED
 - All 712 internal tests pass
 - Stage 1 passes Jolt verification completely
-- Stage 2 UniSkip r0 matches Jolt (transcript aligned)
-- Stage 2 UniSkip polynomial coefficients verified identical
-- RafEvaluationProver integrated (Instance 1)
+- Stage 2 sumcheck constraint (s(0)+s(1) = claim) passes all rounds
+- All 5 instance provers integrated and updating claims correctly
 
-### ❌ REMAINING
-- Stage 2 batched sumcheck fails (2 missing provers)
+### ❌ REMAINING ISSUE
+- Stage 2 output_claim ≠ expected_output_claim
+- The sumcheck ROUNDS are correct (claims propagate properly)
+- The FINAL claim doesn't match what verifier expects from polynomial openings
 
-## Instance Timing in Stage 2
+## Stage 2 Analysis
 
-Understanding when each instance becomes "active" in the batched sumcheck:
+### Current Numbers
+- Zolt output_claim: 21589049388974437284381767714841252907584727603323336789751151772545883922031
+- Jolt expected_output_claim: 9898116330490506910341296015176916681340621516181642175616333993492433350690
 
-| Instance | Prover | Rounds | Start Round | Status |
-|----------|--------|--------|-------------|--------|
-| 0 | ProductVirtualRemainder | 10 | 16 | ✅ Working |
-| 1 | RamRafEvaluation | 16 | 10 | ✅ RAF prover integrated |
-| 2 | RamReadWriteChecking | 26 | **0** | ❌ **CRITICAL - needs prover** |
-| 3 | OutputSumcheck | 16 | 10 | ✅ Working |
-| 4 | InstructionLookupsClaimReduction | 10 | 16 | ❌ Needs prover |
+### Verified Components (MATCH ✅):
+- fused_left: 6890326872915039705262170125493404951295898969136690654065828419097758694280
+- fused_right: 16403093111254811232256366631936514937767139743124672059436405855732128935088
 
-## Critical Issue
+### Expected Output Claim Formula (Instance 0):
+```
+expected = tau_high_bound_r0 * tau_bound_r_tail_reversed * fused_left * fused_right
+```
 
-**Instance 2 (RamReadWriteChecking) starts at round 0 and has non-zero input claim!**
+Where:
+- tau_high_bound_r0 = 20155157908076722556502616784924511038746646565368255767444635160140374572918
+- tau_bound_r_tail_reversed = 20142916058911915487407898995168112567948371721580244419193443500655839812742
 
-This is the most complex prover (3-phase, 26 rounds) and needs to be implemented
-for the batched sumcheck to pass.
+### Root Cause Analysis
+The fused_left/fused_right (opening claims) MATCH between Zolt and Jolt.
+The tau_high_bound_r0 (Lagrange kernel) should match if r0 matches.
+The tau_bound_r_tail_reversed depends on:
+1. tau_low values (should be identical from transcript)
+2. r_tail_reversed = reversed(r_cycle challenges)
 
-Current error at round 0: `s(0)+s(1) != old_claim` because instance 2's
-fallback constant polynomial doesn't satisfy the batched constraint.
+The issue is likely in:
+1. Challenge ordering (reversed vs not)
+2. Split_eq binding direction
 
-## Implementation Progress
+## Fixes Made This Session
 
-### Completed
-- ✅ RAF prover (Instance 1) produces cubic [s(0), s(1), s(2), s(3)]
-- ✅ RAF prover initializes at round 10 with r_cycle from challenges[0..10]
-- ✅ Memory trace passed through ConversionConfig
-- ✅ RAF prover binds challenges and updates claims properly
+1. Fixed lagrangeC2 formula in output_check.zig:
+   - OLD: c2 = (s(0) - 2*s(1) + s(2)) / 2 (WRONG - gives c2 + 3*c3)
+   - NEW: c2 = (2*s(0) - 5*s(1) + 4*s(2) - s(3)) / 2 (CORRECT)
 
-### In Progress
-- 🔄 RamReadWriteCheckingProver (Instance 2) - CRITICAL
+2. Added bindChallenge/updateClaim for InstructionLookups prover
 
-### Pending
-- ⏳ InstructionLookupsClaimReductionProver (Instance 4)
-- ⏳ Full Jolt verification pass
+3. Fixed claim_before capture for ProductVirtualRemainder
 
 ## Next Steps
 
-1. Study Jolt's RamReadWriteChecking implementation
-2. Implement 3-phase prover:
-   - Phase 1: read_checking (eq over cycles × ra × val)
-   - Phase 2: write_checking (eq × wa × next_val)
-   - Phase 3: init_final_checking
-3. Integrate into Stage 2 batched sumcheck starting at round 0
-4. Test with Jolt verification
+1. Verify tau values match between Zolt and Jolt
+2. Check challenge ordering in EqPolynomial::mle evaluation
+3. Verify split_eq binding direction (LowToHigh)
+4. Compare r_cycle challenges between prover and verifier
 
 ## Verification Commands
 

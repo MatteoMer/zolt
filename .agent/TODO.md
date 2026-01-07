@@ -1,195 +1,86 @@
 # Zolt-Jolt Compatibility - Status Update
 
-## Session 14 Summary
+## Session 15 Summary
 
-### Major Progress Made:
-1. ✅ Fixed Stage 2 UniSkip extended evaluations
-2. ✅ Added `computeProductVirtualExtendedEvals` function
-3. ✅ Made instances 1, 2, 4 contribute zero (no provers)
-4. ✅ Verified that ProductVirtualRemainder final values match Jolt:
-   - fused_left MATCHES
-   - fused_right MATCHES
-   - split_eq.current_scalar MATCHES
-   - instance 0 final claim MATCHES
+### Current Status
+- ✅ All 712 internal tests pass (`zig build test`)
+- ✅ Stage 1 passes Jolt verification
+- ❌ Stage 2 fails Jolt verification
 
-### Remaining Issue:
-The sumcheck output_claim differs from expected_output_claim:
-- output_claim = 13130043...
-- expected = 2295742...
+### Stage 2 Root Cause Analysis
 
-This is a claim propagation issue in the batched sumcheck, not a polynomial evaluation issue.
+The Stage 2 batched sumcheck fails due to **multiple issues**:
 
-## Current Status: Session 14
+#### Issue 1: r0 Mismatch
+The Stage 2 r0 (UniSkip challenge) differs between Zolt and Jolt:
+- Zolt r0: `8768758914789955585787902790032491769856779696899125603611137465800193155946`
+- Jolt r0: `16176819525807790011525369806787798080841445107270164702191186390206256879646`
 
-### Stage 2 Cross-Verification - IN PROGRESS
+r0 comes from the opening_accumulator after UniSkip verification. The transcript must match for r0 to match.
 
-The UniSkip extended evaluations are fixed, but the ProductVirtualRemainder sumcheck is still producing the wrong output claim.
-
-**Analysis from Jolt cross-verification:**
-- `output_claim = 18399905727734613027016857362443321745605316746004735455047505419992328320300`
-- `expected_output_claim = 17135332148321379181445270571371034736283030019078327201597244975562090816163`
-- Difference = ~1.26e75 (significant mismatch)
-
-The batched sumcheck has 5 instances:
-- Instance 0 (ProductVirtualRemainder): expected contribution = 17135332...
-- Instances 1-4: contribution = 0 (claims are zero)
-
-So the ProductVirtualRemainder prover is producing an incorrect final claim.
-
-**Key Jolt formulas:**
-- `expected_output_claim = L(τ_high, r0) · Eq(τ_low, r_tail^rev) · fused_left · fused_right`
-- τ is [r_cycle (BIG_ENDIAN), τ_high]
-- r_tail is the Stage 2 sumcheck challenges (reversed before use)
-
-**Investigation progress:**
-1. ✅ fused_left and fused_right values MATCH between Zolt and Jolt
-2. ✅ L*Eq (split_eq.current_scalar) MATCHES
-3. ✅ ProductVirtualRemainder instance 0 final claim MATCHES: 17831747...
-4. ✅ Sumcheck challenges (r_tail) MATCH between Zolt and Jolt
-5. ❌ Batched sumcheck output differs by ~1.26e75
-
-**Root cause identified:**
-The difference comes from instances 1, 2, 4 which should contribute zero to the sum:
-- In Jolt: instances 1, 2, 4 have expected_output_claim = 0
-- In Zolt: these instances have non-zero input_claims from Stage 1
-
-The issue is that Stage 2's non-ProductVirtualRemainder instances (RamRafEvaluation, RamReadWriteChecking, InstructionLookupsClaimReduction) are contributing non-zero values when they should contribute zero.
-
-**Key insight from Jolt analysis:**
-- Instances 1, 2, 4 DO have non-zero input claims from Stage 1
-- But their expected_output_claim = 0 because the sumcheck polynomial is designed to reduce to zero
-- These instances have SPECIFIC polynomial structures that must be sumchecked
-
-**The problem:**
-Zolt doesn't implement real provers for instances 1, 2, 4. It's falling through to a "constant polynomial" fallback that doesn't correctly reduce the input claims to zero output claims.
-
-**Fix applied:**
-Made instances 1, 2, 4 contribute zero since they don't have provers.
-This fixes the contribution mismatch - now only instance 0 contributes.
-
-**Current Status:**
-- fused_left ✅ MATCHES
-- fused_right ✅ MATCHES
-- split_eq.current_scalar ✅ MATCHES
-- instance 0 final claim ✅ MATCHES (19103803472447925646689046558827033182125864555931779922964870737545929086694)
-
-BUT the sumcheck output_claim still differs:
-- output_claim = 13130043288876748407534104942147783362107023038787622158270485794647137661886
-- expected = 2295742622808762941071385456204427887109704547050427734326653795493571346489
-
-The difference is ~10.8e75. The issue is in how the sumcheck rounds propagate the batched claim.
-
-**Latest Finding:**
-The sumcheck constraint `s(0)+s(1) = old_claim` is violated because instances 1, 2, 4 have different input claims between Zolt and Jolt:
-
-In Jolt's transcript:
-- `RamRa RamRafEvaluation, claim = 0`
-- `RamVal RamReadWriteChecking, claim = 0`
-- `LookupOutput InstructionClaimReduction, claim = 0`
-
-In Zolt:
-- These are computed as NON-ZERO from Stage 1 opening claims
-
-The input claims come from Stage 1 opening claims (RamAddress, RamReadValue, etc.). If Jolt's claims are zero but Zolt's aren't, then either:
-1. Stage 1 opening claims are computed differently, OR
-2. The claims are for different virtual polynomials
-
-**Next Steps:**
-1. Check how Jolt computes the opening claims for RamRa, RamVal, LookupOutput
-2. Verify that Stage 1 is producing the same opening claims as Jolt
-3. Trace the claim values through the entire pipeline
-
-### Stage 2 UniSkip Extended Evaluations - FIXED!
-
-**Key Fix**: The `createUniSkipProofStage2WithClaims` function was using zeros for extended evaluations. Now it computes the actual fused products at extended points {-3, 3, -4, 4} from the trace data.
-
-### What Was Done
-1. Added precomputed Lagrange coefficients for Product Virtual extended targets
-2. Added `computeProductVirtualExtendedEvals` function to compute extended evals from cycle witnesses
-3. Added `extractProductFactors` helper to extract the 8 product factors from R1CS witnesses
-4. Updated `createUniSkipProofStage2WithClaims` to use actual extended evaluations
-
-### Test Results
-- All 712 tests pass
-- example-pipeline passes with all stages verified
-
-### Previous Status: Session 13
-
-### Stage 2 Failure - MULTIPLE ROOT CAUSES IDENTIFIED!
-
-- **Stage 1: PASSING ✅** - Sumcheck output_claim matches expected
-- **Stage 2: FAILING ❌** - output_claim != expected_output_claim
-
+#### Issue 2: Sumcheck Claim Violations
+Errors starting at round 23:
 ```
-output_claim:          15813746968267243297450630513407769417288591023625754132394390395019523654383
-expected_output_claim: 21370344117342657988577911810586668133317596586881852281711504041258248730449
+[ZOLT CLAIM ERROR] round 23: s(0)+s(1) != old_claim!
+[ZOLT CLAIM ERROR] round 24: s(0)+s(1) != old_claim!
+[ZOLT CLAIM ERROR] round 25: s(0)+s(1) != old_claim!
 ```
 
-### ROOT CAUSE 1: Stage 2 UniSkip Extended Evaluations
+This happens because instances 1, 2, 4 use zero polynomial fallback instead of proper provers.
 
-**CRITICAL BUG FOUND**: `createUniSkipProofStage2WithClaims` uses zeros for extended evaluations:
-```zig
-const extended_evals: [DEGREE]F = [_]F{F.zero()} ** DEGREE;
-```
+#### Issue 3: Missing Sumcheck Provers
+Stage 2 has 5 batched sumcheck instances:
+- Instance 0: ProductVirtualRemainder ✅ (implemented)
+- Instance 1: RamRafEvaluation ❌ (zero fallback)
+- Instance 2: RamReadWriteChecking ❌ (zero fallback)
+- Instance 3: OutputSumcheck ✅ (implemented)
+- Instance 4: InstructionLookupsClaimReduction ❌ (zero fallback)
 
-The extended evaluations at points {-4, -3, 3, 4} should be the actual fused products computed from the trace. Using zeros produces an incorrect UniSkip polynomial which causes:
-1. Wrong polynomial coefficients appended to transcript
-2. Different transcript state
-3. Different r0 challenge derived
-4. Mismatch between Zolt's prover r0 and Jolt's verifier r0
-
-**Evidence**:
-- Transcript states match at rounds 54 and 176
-- But r0 values differ:
-  - Zolt r0: `5629772851639812945906736172593031815056148939881883788449064297659372967906`
-  - Jolt r0: `16176819525807790011525369806787798080841445107270164702191186390206256879646`
-
-**Fix**: Need trace access to compute extended evaluations for ProductVirtual UniSkip.
-
-### ROOT CAUSE 2: Constant Polynomials for Active Instances
-
-For instances 1, 2, 4 (RamRafEvaluation, RamReadWriteChecking, InstructionLookupsClaimReduction):
-- Zolt generates constant polynomials instead of actual sumcheck round polynomials
-- These instances have non-zero input claims, so they need actual provers
-- Expected output for these is 0 (since ra=0, val=0), but constant polynomials don't reduce to 0
-
-### Key Findings This Session
-
-1. **Transcript states match up to round 176** - the divergence happens during Stage 2 UniSkip
-2. **fused_left and fused_right values match** - the witness evaluations are correct
-3. **The r0 is derived from UniSkip polynomial** - not stored in opening claims
-4. **Opening claims only store values, not points** - but Jolt needs opening points too
+Input claims for instances 1, 2, 4 are NON-ZERO but their polynomials contribute zero.
 
 ### What Works
-1. ✅ Stage 1 passes completely
-2. ✅ Initial batched claim matches
-3. ✅ All 26 round polynomial coefficients match (c0, c2, c3)
-4. ✅ All 26 round challenges match
-5. ✅ fused_left and fused_right factor claims match
+- ✅ fused_left matches Jolt: `3680814111042145831100417079225278919431426777627349458700618452903652360804`
+- ✅ fused_right matches Jolt: `5628401284835057616148875782341094898402011560234054472864896388346845354264`
+- ✅ tau_high matches Jolt: `1724079782492782403949918631195347939403999634829548103697761600182229454970`
+- ✅ All 26 sumcheck challenges (rounds 16-25 for ProductVirtualRemainder) match
+- ✅ Stage 1 complete verification
 
-### What Needs Fixing (in priority order)
-1. **Stage 2 UniSkip extended evaluations** - need trace access
-2. **Constant polynomial approach** - need actual provers for instances 1, 2, 4
+### Next Steps (Priority Order)
 
-### Fix Strategy
+1. **Debug r0 Derivation**
+   - Compare Stage 2 UniSkip first round polynomial between Zolt and Jolt
+   - Check transcript state before/after UniSkip
+   - Fix any coefficient serialization issues
 
-**Step 1: Fix UniSkip Extended Evaluations**
-- Add trace access to proof converter
-- Compute actual extended evaluations for ProductVirtual UniSkip
-- This should make r0 match
+2. **Implement Missing Provers** (after r0 is fixed)
+   - RamRafEvaluation prover (16 rounds)
+   - RamReadWriteChecking prover (26 rounds, 3-phase)
+   - InstructionLookupsClaimReduction prover (10 rounds)
 
-**Step 2: Fix Instance Provers (after r0 is fixed)**
-- Implement actual provers for RAF, RWC, and Instruction claim reduction
-- Or verify that these instances should have zero input claims for fibonacci
+3. **Ensure Sumcheck Soundness**
+   - s(0) + s(1) must equal old_claim at every round
+   - All 5 instances must contribute correct polynomial evaluations
+
+### Files to Investigate
+- `/Users/matteo/projects/zolt/src/zkvm/proof_converter.zig` - Stage 2 proof generation
+- `/Users/matteo/projects/jolt/jolt-core/src/zkvm/spartan/product.rs` - ProductVirtualUniSkip
+- `/Users/matteo/projects/jolt/jolt-core/src/zkvm/ram/raf_evaluation.rs` - RafEvaluation
+- `/Users/matteo/projects/jolt/jolt-core/src/zkvm/ram/read_write_checking.rs` - ReadWriteChecking
+- `/Users/matteo/projects/jolt/jolt-core/src/zkvm/claim_reductions/instruction_lookups.rs` - InstructionClaimReduction
 
 ## Previous Sessions
 
-### Session 12
-- Found that polynomial coefficients and challenges match
-- Identified that s(0)+s(1) != claim at round 0
+### Session 14
+- Fixed Stage 2 UniSkip extended evaluations
+- Verified fused_left/fused_right/split_eq match
+- Instance 0 final claim matches
 
-### Session 11
-- Fixed output-sumcheck r_address_prime reversal
+### Session 13
+- Identified r0 mismatch as root cause
+- Transcript states match but r0 differs
+
+### Session 11-12
+- Fixed Stage 1 output-sumcheck
 - Stage 1 started passing
 
 ### Session 10

@@ -1502,26 +1502,29 @@ pub fn ProofConverter(comptime F: type) type {
             }
 
             // Extract r_cycle (last n_cycle_vars challenges)
-            // In Jolt, challenges are stored LITTLE_ENDIAN and converted to BIG_ENDIAN
-            // for factor evaluation. BIG_ENDIAN means reversed order.
+            // Challenges are in LITTLE_ENDIAN order: r[0] binds variable 0 (LSB of cycle index)
+            // EqPolynomial.evals uses BIG_ENDIAN indexing: eq_evals[t] = eq(r, x) where x[0] = MSB of t
+            // For consistency, we need to REVERSE r so that:
+            //   - eq_evals[t] with x[n-1] = LSB of t = sumcheck variable 0 = r[0]
+            //   - This requires r_reversed[n-1] = r[0], i.e., reversed order
             const r_cycle_start = all_challenges.len - n_cycle_vars;
-            const r_cycle_little_endian = all_challenges[r_cycle_start..];
+            const r_cycle_original = all_challenges[r_cycle_start..];
 
-            // Reverse to get BIG_ENDIAN order (matching Jolt's OpeningPoint<BIG_ENDIAN>)
-            const r_cycle_big_endian = try self.allocator.alloc(F, n_cycle_vars);
-            defer self.allocator.free(r_cycle_big_endian);
+            // Reverse r_cycle for BIG_ENDIAN eq indexing compatibility
+            const r_cycle = try self.allocator.alloc(F, n_cycle_vars);
+            defer self.allocator.free(r_cycle);
             for (0..n_cycle_vars) |i| {
-                r_cycle_big_endian[i] = r_cycle_little_endian[n_cycle_vars - 1 - i];
+                r_cycle[i] = r_cycle_original[n_cycle_vars - 1 - i];
             }
 
-            std.debug.print("[ZOLT] FACTOR_EVALS: r_cycle.len = {}, n_cycle_vars = {}\n", .{ r_cycle_big_endian.len, n_cycle_vars });
-            if (r_cycle_big_endian.len > 0) {
-                std.debug.print("[ZOLT] FACTOR_EVALS: r_cycle[0] (BIG_ENDIAN) = {any}\n", .{r_cycle_big_endian[0].toBytesBE()});
+            std.debug.print("[ZOLT] FACTOR_EVALS: r_cycle.len = {}, n_cycle_vars = {}\n", .{ r_cycle.len, n_cycle_vars });
+            if (r_cycle.len > 0) {
+                std.debug.print("[ZOLT] FACTOR_EVALS: r_cycle[0] (reversed) = {any}\n", .{r_cycle[0].toBytesBE()});
             }
 
-            // Compute eq polynomial evaluations at r_cycle (BIG_ENDIAN)
+            // Compute eq polynomial evaluations at r_cycle (reversed for BIG_ENDIAN indexing)
             const EqPoly = poly_mod.EqPolynomial(F);
-            var eq_poly = try EqPoly.init(self.allocator, r_cycle_big_endian);
+            var eq_poly = try EqPoly.init(self.allocator, r_cycle);
             defer eq_poly.deinit();
 
             const eq_evals = try eq_poly.evals(self.allocator);

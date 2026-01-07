@@ -1658,7 +1658,6 @@ pub fn ProofConverter(comptime F: type) type {
                 ) catch null;
 
                 if (rwc_params) |*params| {
-                    defer params.deinit();
                     rwc_prover = RWCProver.init(
                         self.allocator,
                         config.memory_trace.?,
@@ -1669,10 +1668,23 @@ pub fn ProofConverter(comptime F: type) type {
 
                     if (rwc_prover != null) {
                         std.debug.print("[ZOLT] RWC: Prover initialized for instance 2\n", .{});
+                    } else {
+                        // If prover init failed, we own the params so deinit them
+                        params.deinit();
                     }
                 }
             }
+            // Prover owns params and will deinit them
             defer if (rwc_prover) |*rp| rp.deinit();
+
+            // Initialize InstructionLookupsProver (Instance 4) - starts at round 16
+            const claim_reductions = @import("claim_reductions/mod.zig");
+            const InstrLookupsProver = claim_reductions.InstructionLookupsProver(F);
+            var instr_prover: ?InstrLookupsProver = null;
+            var instr_evals_this_round: ?[4]F = null;
+
+            // Instance 4 will be initialized at round 16 when it becomes active
+            defer if (instr_prover) |*ip| ip.deinit();
 
             // Track individual claims for each instance (needed for zero-poly instances)
             var individual_claims: [5]F = undefined;
@@ -1691,6 +1703,36 @@ pub fn ProofConverter(comptime F: type) type {
 
             // Step 4: Run batched sumcheck rounds
             for (0..max_num_rounds) |round_idx| {
+                // DEBUG: Print current claims at start of round 23
+                if (round_idx == 23) {
+                    std.debug.print("[ZOLT ROUND 23 START] batched_claim = {any}\n", .{batched_claim.toBytesBE()});
+                    var expected_batched: F = F.zero();
+                    if (product_prover) |pp| {
+                        std.debug.print("[ZOLT ROUND 23 START] instance 0 claim = {any}\n", .{pp.current_claim.toBytesBE()});
+                        expected_batched = expected_batched.add(pp.current_claim.mul(batching_coeffs[0]));
+                    }
+                    if (raf_prover) |rp| {
+                        std.debug.print("[ZOLT ROUND 23 START] instance 1 claim = {any}\n", .{rp.current_claim.toBytesBE()});
+                        expected_batched = expected_batched.add(rp.current_claim.mul(batching_coeffs[1]));
+                    }
+                    if (rwc_prover) |*rwcp| {
+                        std.debug.print("[ZOLT ROUND 23 START] instance 2 claim = {any}\n", .{rwcp.current_claim.toBytesBE()});
+                        expected_batched = expected_batched.add(rwcp.current_claim.mul(batching_coeffs[2]));
+                    }
+                    if (output_prover) |op| {
+                        std.debug.print("[ZOLT ROUND 23 START] instance 3 claim = {any}\n", .{op.current_claim.toBytesBE()});
+                        expected_batched = expected_batched.add(op.current_claim.mul(batching_coeffs[3]));
+                    }
+                    if (instr_prover) |*ip| {
+                        std.debug.print("[ZOLT ROUND 23 START] instance 4 claim = {any}\n", .{ip.current_claim.toBytesBE()});
+                        expected_batched = expected_batched.add(ip.current_claim.mul(batching_coeffs[4]));
+                    }
+                    std.debug.print("[ZOLT ROUND 23 START] expected_batched = {any}\n", .{expected_batched.toBytesBE()});
+                    if (!expected_batched.eql(batched_claim)) {
+                        std.debug.print("[ZOLT ROUND 23 START] ERROR: expected_batched != batched_claim!\n", .{});
+                    }
+                }
+
                 // Compute combined polynomial from all instances
                 var combined_evals = [4]F{ F.zero(), F.zero(), F.zero(), F.zero() };
                 // Store ProductVirtualRemainder's evals for claim update
@@ -1707,6 +1749,8 @@ pub fn ProofConverter(comptime F: type) type {
 
                         if (i == 0 and product_prover != null) {
                             // ProductVirtualRemainder - use real prover
+                            // Save the claim BEFORE computing polynomial (should match poly's s(0)+s(1))
+                            const claim_before = product_prover.?.current_claim;
                             const compressed = product_prover.?.computeRoundPolynomial() catch [3]F{ F.zero(), F.zero(), F.zero() };
 
                             // compressed = [c0, c2, c3] = coefficients, NOT evaluations!
@@ -1718,7 +1762,8 @@ pub fn ProofConverter(comptime F: type) type {
                             const c0 = compressed[0];
                             const c2 = compressed[1];
                             const c3 = compressed[2];
-                            const current_claim_local = product_prover.?.current_claim;
+                            // Use claim_before, not current_claim (which might change)
+                            const current_claim_local = claim_before;
                             const c1 = current_claim_local.sub(c0).sub(c0).sub(c2).sub(c3);
 
                             // Now compute evaluations at 0, 1, 2, 3
@@ -1861,20 +1906,76 @@ pub fn ProofConverter(comptime F: type) type {
                                 }
                             }
                         } else if (i == 4) {
-                            // Instance 4 - still using fallback for now
-                            if (round_idx == start_round) {
-                                std.debug.print("[ZOLT] WARNING: Instance {} using zero polynomial fallback\n", .{i});
+                            // Instance 4: InstructionLookupsClaimReduction (10 rounds, starts at round 16)
+                            // Initialize at start_round using r_spartan from challenges
+                            if (round_idx == start_round and instr_prover == null and cycle_witnesses.len > 0) {
+                                // r_spartan is the last n_cycle_vars of tau
+                                const r_spartan = tau[tau.len - n_cycle_vars ..];
+
+                                var instr_params = claim_reductions.InstructionLookupsParams(F).init(
+                                    self.allocator,
+                                    gamma_instr,
+                                    r_spartan,
+                                    n_cycle_vars,
+                                ) catch null;
+
+                                if (instr_params) |*params| {
+                                    defer params.deinit();
+
+                                    // Extract lookup values from witness
+                                    const lookup_outputs = try self.allocator.alloc(F, cycle_witnesses.len);
+                                    defer self.allocator.free(lookup_outputs);
+                                    const left_operands = try self.allocator.alloc(F, cycle_witnesses.len);
+                                    defer self.allocator.free(left_operands);
+                                    const right_operands = try self.allocator.alloc(F, cycle_witnesses.len);
+                                    defer self.allocator.free(right_operands);
+
+                                    const R1CSInputIndex = @import("r1cs/constraints.zig").R1CSInputIndex;
+                                    for (cycle_witnesses, 0..) |w, wi| {
+                                        lookup_outputs[wi] = w.values[R1CSInputIndex.LookupOutput.toIndex()];
+                                        left_operands[wi] = w.values[R1CSInputIndex.LeftLookupOperand.toIndex()];
+                                        right_operands[wi] = w.values[R1CSInputIndex.RightLookupOperand.toIndex()];
+                                    }
+
+                                    instr_prover = InstrLookupsProver.init(
+                                        self.allocator,
+                                        params.*,
+                                        input_claims[4],
+                                        lookup_outputs,
+                                        left_operands,
+                                        right_operands,
+                                    ) catch null;
+
+                                    if (instr_prover != null) {
+                                        std.debug.print("[ZOLT] InstrLookups: Prover initialized for instance 4\n", .{});
+                                    }
+                                }
                             }
-                            // Fallback: use scaled claim as constant polynomial
-                            const instance_round = round_idx - start_round;
-                            const remaining_rounds = rounds_per_instance[i] - 1 - instance_round;
-                            var scaled = input_claims[i];
-                            for (0..remaining_rounds) |_| {
-                                scaled = scaled.add(scaled);
-                            }
-                            const weighted = scaled.mul(batching_coeffs[i]);
-                            for (0..4) |j| {
-                                combined_evals[j] = combined_evals[j].add(weighted);
+
+                            if (instr_prover) |*ip| {
+                                // Compute instruction lookups round polynomial
+                                const instr_evals = ip.computeRoundPolynomialCubic();
+                                instr_evals_this_round = instr_evals;
+
+                                // Weight by batching coefficient
+                                for (0..4) |j| {
+                                    combined_evals[j] = combined_evals[j].add(instr_evals[j].mul(batching_coeffs[i]));
+                                }
+                            } else {
+                                // Fallback if no prover
+                                if (round_idx == start_round) {
+                                    std.debug.print("[ZOLT] WARNING: Instance 4 (InstrLookups) using fallback - no prover\n", .{});
+                                }
+                                const instance_round = round_idx - start_round;
+                                const remaining_rounds = rounds_per_instance[i] - 1 - instance_round;
+                                var scaled = input_claims[i];
+                                for (0..remaining_rounds) |_| {
+                                    scaled = scaled.add(scaled);
+                                }
+                                const weighted = scaled.mul(batching_coeffs[i]);
+                                for (0..4) |j| {
+                                    combined_evals[j] = combined_evals[j].add(weighted);
+                                }
                             }
                         } else {
                             // Zero instance (actually zero input claim)
@@ -1941,8 +2042,44 @@ pub fn ProofConverter(comptime F: type) type {
                 const old_claim = batched_claim;
                 batched_claim = evaluateCubicAtChallengeFromEvals(combined_evals, challenge);
 
+                // DEBUG: At end of round 22, verify batched_claim == sum of new instance claims
+                if (round_idx == 22) {
+                    std.debug.print("[ZOLT ROUND 22 END] new batched_claim = {any}\n", .{batched_claim.toBytesBE()});
+                    var expected_new_batched: F = F.zero();
+                    // Instance claims will be updated after this, so compute what they should be
+                    if (product_evals_this_round) |pe| {
+                        const new_claim_0 = evaluateCubicAtChallengeFromEvals(pe, challenge);
+                        std.debug.print("[ZOLT ROUND 22 END] instance 0 new claim = {any}\n", .{new_claim_0.toBytesBE()});
+                        expected_new_batched = expected_new_batched.add(new_claim_0.mul(batching_coeffs[0]));
+                    }
+                    if (raf_evals_this_round) |re| {
+                        const new_claim_1 = evaluateCubicAtChallengeFromEvals(re, challenge);
+                        std.debug.print("[ZOLT ROUND 22 END] instance 1 new claim = {any}\n", .{new_claim_1.toBytesBE()});
+                        expected_new_batched = expected_new_batched.add(new_claim_1.mul(batching_coeffs[1]));
+                    }
+                    if (rwc_evals_this_round) |re| {
+                        const new_claim_2 = evaluateCubicAtChallengeFromEvals(re, challenge);
+                        std.debug.print("[ZOLT ROUND 22 END] instance 2 new claim = {any}\n", .{new_claim_2.toBytesBE()});
+                        expected_new_batched = expected_new_batched.add(new_claim_2.mul(batching_coeffs[2]));
+                    }
+                    if (output_evals_this_round) |oe| {
+                        const new_claim_3 = evaluateCubicAtChallengeFromEvals(oe, challenge);
+                        std.debug.print("[ZOLT ROUND 22 END] instance 3 new claim = {any}\n", .{new_claim_3.toBytesBE()});
+                        expected_new_batched = expected_new_batched.add(new_claim_3.mul(batching_coeffs[3]));
+                    }
+                    if (instr_evals_this_round) |ie| {
+                        const new_claim_4 = evaluateCubicAtChallengeFromEvals(ie, challenge);
+                        std.debug.print("[ZOLT ROUND 22 END] instance 4 new claim = {any}\n", .{new_claim_4.toBytesBE()});
+                        expected_new_batched = expected_new_batched.add(new_claim_4.mul(batching_coeffs[4]));
+                    }
+                    std.debug.print("[ZOLT ROUND 22 END] expected_new_batched = {any}\n", .{expected_new_batched.toBytesBE()});
+                    if (!expected_new_batched.eql(batched_claim)) {
+                        std.debug.print("[ZOLT ROUND 22 END] ERROR: mismatch!\n", .{});
+                    }
+                }
+
                 // Debug: Print claim trajectory for first few and last few rounds
-                if (round_idx < 3 or round_idx >= max_num_rounds - 3) {
+                if (round_idx < 3 or round_idx >= max_num_rounds - 5) {
                     std.debug.print("[ZOLT CLAIM] round {}: old_claim = {any}\n", .{ round_idx, old_claim.toBytesBE() });
                     std.debug.print("[ZOLT CLAIM] round {}: s(0)+s(1) = {any}\n", .{ round_idx, combined_evals[0].add(combined_evals[1]).toBytesBE() });
                     std.debug.print("[ZOLT CLAIM] round {}: new_claim = {any}\n", .{ round_idx, batched_claim.toBytesBE() });
@@ -1950,6 +2087,47 @@ pub fn ProofConverter(comptime F: type) type {
                     const sum_check = combined_evals[0].add(combined_evals[1]);
                     if (!sum_check.eql(old_claim)) {
                         std.debug.print("[ZOLT CLAIM ERROR] round {}: s(0)+s(1) != old_claim!\n", .{round_idx});
+                        // Print individual instance contributions
+                        std.debug.print("[ZOLT DEBUG] Instance contributions at round {}:\n", .{round_idx});
+                        std.debug.print("  Instance 0 (ProductVirtual) active: {}, prover: {}\n", .{ round_idx >= max_num_rounds - n_cycle_vars, product_prover != null });
+                        if (product_evals_this_round) |pe| {
+                            const ps = pe[0].add(pe[1]).mul(batching_coeffs[0]);
+                            std.debug.print("  Instance 0: s0+s1 contrib = {any}\n", .{ps.toBytesBE()});
+                            std.debug.print("  Instance 0: s0 = {any}, s1 = {any}\n", .{ pe[0].toBytesBE(), pe[1].toBytesBE() });
+                            std.debug.print("  Instance 0: s0+s1 = {any}\n", .{pe[0].add(pe[1]).toBytesBE()});
+                            // Note: pp.current_claim is ALREADY UPDATED for next round at this point!
+                            std.debug.print("  Instance 0: current_claim (next round) = {any}\n", .{if (product_prover) |pp| pp.current_claim.toBytesBE() else [_]u8{0} ** 32});
+                        } else {
+                            std.debug.print("  Instance 0: NULL evals\n", .{});
+                        }
+                        std.debug.print("  Instance 1 (RAF) active: {}, prover: {}\n", .{ round_idx >= max_num_rounds - log_ram_k, raf_prover != null });
+                        if (raf_evals_this_round) |re| {
+                            const rs = re[0].add(re[1]).mul(batching_coeffs[1]);
+                            std.debug.print("  Instance 1: s0+s1 contrib = {any}\n", .{rs.toBytesBE()});
+                        } else {
+                            std.debug.print("  Instance 1: NULL evals\n", .{});
+                        }
+                        std.debug.print("  Instance 2 (RWC) active: {}, prover: {}\n", .{ round_idx >= 0, rwc_prover != null });
+                        if (rwc_evals_this_round) |re| {
+                            const rs = re[0].add(re[1]).mul(batching_coeffs[2]);
+                            std.debug.print("  Instance 2: s0+s1 contrib = {any}\n", .{rs.toBytesBE()});
+                        } else {
+                            std.debug.print("  Instance 2: NULL evals\n", .{});
+                        }
+                        std.debug.print("  Instance 3 (Output) active: {}, prover: {}\n", .{ round_idx >= max_num_rounds - log_ram_k, output_prover != null });
+                        if (output_evals_this_round) |oe| {
+                            const os = oe[0].add(oe[1]).mul(batching_coeffs[3]);
+                            std.debug.print("  Instance 3: s0+s1 contrib = {any}\n", .{os.toBytesBE()});
+                        } else {
+                            std.debug.print("  Instance 3: NULL evals\n", .{});
+                        }
+                        std.debug.print("  Instance 4 (Instr) active: {}, prover: {}\n", .{ round_idx >= max_num_rounds - n_cycle_vars, instr_prover != null });
+                        if (instr_evals_this_round) |ie| {
+                            const is = ie[0].add(ie[1]).mul(batching_coeffs[4]);
+                            std.debug.print("  Instance 4: s0+s1 contrib = {any}\n", .{is.toBytesBE()});
+                        } else {
+                            std.debug.print("  Instance 4: NULL evals\n", .{});
+                        }
                     }
                 }
 
@@ -1989,9 +2167,19 @@ pub fn ProofConverter(comptime F: type) type {
                     rwcp.bindChallenge(challenge) catch {};
                 }
 
+                // Bind challenge to InstructionLookups prover when it's active
+                // InstructionLookups starts at round (max_num_rounds - n_cycle_vars)
+                if (instr_prover != null and round_idx >= (max_num_rounds - n_cycle_vars)) {
+                    if (instr_evals_this_round) |evals| {
+                        instr_prover.?.updateClaim(evals, challenge);
+                    }
+                    instr_prover.?.bindChallenge(challenge) catch {};
+                }
+
                 // Reset per-round evals
                 raf_evals_this_round = null;
                 rwc_evals_this_round = null;
+                instr_evals_this_round = null;
             }
 
             std.debug.print("[ZOLT] STAGE2_BATCHED: final batched_claim = {any}\n", .{batched_claim.toBytesBE()});

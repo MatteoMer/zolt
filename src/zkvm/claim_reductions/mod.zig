@@ -25,6 +25,11 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+// Instruction Lookups Claim Reduction prover
+pub const instruction_lookups = @import("instruction_lookups.zig");
+pub const InstructionLookupsParams = instruction_lookups.InstructionLookupsParams;
+pub const InstructionLookupsProver = instruction_lookups.InstructionLookupsProver;
+
 /// Constants for claim reductions
 pub const XLEN: usize = 64; // 64-bit RISC-V word size
 pub const LOG_K: usize = XLEN * 2; // Log of table size for lookups

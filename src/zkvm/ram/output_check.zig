@@ -328,10 +328,16 @@ pub fn OutputSumcheckProver(comptime F: type) type {
 
         // Helper: compute c2 from evaluations using Lagrange
         fn lagrangeC2(evals: [4]F) F {
-            // c2 = (s(0) - 2*s(1) + s(2)) / 2
+            // c2 = (2*s(0) - 5*s(1) + 4*s(2) - s(3)) / 2
             const two = F.fromU64(2);
+            const four = F.fromU64(4);
+            const five = F.fromU64(5);
             const half = two.inverse() orelse F.zero();
-            return evals[0].sub(evals[1].mul(two)).add(evals[2]).mul(half);
+            return evals[0].mul(two)
+                .sub(evals[1].mul(five))
+                .add(evals[2].mul(four))
+                .sub(evals[3])
+                .mul(half);
         }
 
         // Helper: compute c3 from evaluations

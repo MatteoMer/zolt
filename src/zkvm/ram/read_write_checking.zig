@@ -168,14 +168,43 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             }
 
             var entries = std.ArrayListUnmanaged(Entry){};
+            var first_few_accesses: usize = 0;
+            var skipped_count: usize = 0;
+            var accepted_count: usize = 0;
             for (trace.accesses.items) |access| {
                 if (access.timestamp >= T) continue;
+
+                // Debug first few accesses
+                if (first_few_accesses < 5) {
+                    std.debug.print("[RWC TRACE] access #{}: addr=0x{x}, val={}, op={s}, cycle={}, start_addr=0x{x}\n", .{
+                        first_few_accesses,
+                        access.address,
+                        access.value,
+                        if (access.op == .Read) "Read" else "Write",
+                        access.timestamp,
+                        params.start_address,
+                    });
+                    first_few_accesses += 1;
+                }
 
                 const addr_idx = blk: {
                     if (access.address >= params.start_address) {
                         const idx = (access.address - params.start_address) / 8;
-                        if (idx < K) break :blk idx;
+                        if (idx < K) {
+                            accepted_count += 1;
+                            if (accepted_count <= 3) {
+                                std.debug.print("[RWC ACCEPTED] addr=0x{x}, idx={}, val={}, op={s}, cycle={}\n", .{
+                                    access.address,
+                                    idx,
+                                    access.value,
+                                    if (access.op == .Read) "Read" else "Write",
+                                    access.timestamp,
+                                });
+                            }
+                            break :blk idx;
+                        }
                     }
+                    skipped_count += 1;
                     continue;
                 };
 
@@ -221,6 +250,13 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                     return a.address < b.address;
                 }
             }.lessThan);
+
+            std.debug.print("[RWC INIT] Total trace accesses: {}, accepted: {}, skipped: {}, entries created: {}\n", .{
+                trace.accesses.items.len,
+                accepted_count,
+                skipped_count,
+                entries.items.len,
+            });
 
             // Initialize eq polynomial evaluations: eq(r_cycle, j) for each cycle j
             // r_cycle is in BIG_ENDIAN order (MSB first, as stored in tau)
@@ -329,19 +365,27 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 std.debug.print("[RWC VERIFY] Round 0: entries.len = {}\n", .{self.entries.items.len});
                 std.debug.print("[RWC VERIFY] Round 0: eq_size = {}\n", .{self.eq_size});
 
-                // Print first entry details
-                if (self.entries.items.len > 0) {
-                    const first = self.entries.items[0];
-                    std.debug.print("[RWC VERIFY] First entry: cycle={}, addr={}, eq={any}\n", .{
-                        first.cycle,
-                        first.address,
-                        self.eq_evals[first.cycle].toBytesBE(),
+                // Print first few entry details (including raw prev/next values)
+                for (0..@min(5, self.entries.items.len)) |ei| {
+                    const entry = self.entries.items[ei];
+                    const inc_entry = self.inc[entry.cycle];
+                    std.debug.print("[RWC ENTRY {}] cycle={}, addr_idx={}, prev_val={}, next_val={}, val_coeff={any}, inc={any}, eq={any}, contrib={any}\n", .{
+                        ei,
+                        entry.cycle,
+                        entry.address,
+                        entry.prev_val,
+                        entry.next_val,
+                        entry.val_coeff.toBytesBE(),
+                        inc_entry.toBytesBE(),
+                        self.eq_evals[entry.cycle].toBytesBE(),
+                        blk: {
+                            const eq_j = self.eq_evals[entry.cycle];
+                            const val_term = entry.val_coeff;
+                            const inner = val_term.add(gamma.mul(val_term.add(inc_entry)));
+                            break :blk eq_j.mul(entry.ra_coeff).mul(inner).toBytesBE();
+                        },
                     });
                 }
-                // Also print eq for a few other cycles
-                std.debug.print("[RWC VERIFY] eq[0] = {any}\n", .{self.eq_evals[0].toBytesBE()});
-                std.debug.print("[RWC VERIFY] eq[1] = {any}\n", .{self.eq_evals[1].toBytesBE()});
-                std.debug.print("[RWC VERIFY] eq[2] = {any}\n", .{self.eq_evals[2].toBytesBE()});
                 std.debug.print("[RWC VERIFY] eq_sum (partition of unity) = {any}\n", .{blk: {
                     var sum = F.zero();
                     for (self.eq_evals[0..self.eq_size]) |e| sum = sum.add(e);

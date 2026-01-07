@@ -152,6 +152,40 @@ pub const RAMState = struct {
         try self.trace.recordWrite(word_addr, word, timestamp);
     }
 
+    /// Write a byte to memory WITHOUT recording to trace (for initialization/program loading)
+    pub fn writeByteUntraced(self: *RAMState, address: u64, value: u8) !void {
+        const word_addr = address & ~@as(u64, 7);
+        const byte_offset = @as(u3, @truncate(address & 7));
+
+        var word = self.memory.get(word_addr) orelse 0;
+        const mask = @as(u64, 0xFF) << (@as(u6, byte_offset) * 8);
+        word = (word & ~mask) | (@as(u64, value) << (@as(u6, byte_offset) * 8));
+
+        try self.memory.put(self.allocator, word_addr, word);
+        // NOTE: No trace recording - this is for initialization only
+    }
+
+    /// Write a word to memory WITHOUT recording to trace (for initialization/program loading)
+    pub fn writeUntraced(self: *RAMState, address: u64, value: u64) !void {
+        try self.memory.put(self.allocator, address, value);
+        // NOTE: No trace recording - this is for initialization only
+    }
+
+    /// Read a word from memory WITHOUT recording to trace (for instruction fetches)
+    /// In Jolt, instruction fetches are proven via bytecode commitment, not RAM trace.
+    pub fn readUntraced(self: *RAMState, address: u64) u64 {
+        return self.memory.get(address) orelse 0;
+    }
+
+    /// Read a byte from memory WITHOUT recording to trace (for instruction fetches)
+    /// In Jolt, instruction fetches are proven via bytecode commitment, not RAM trace.
+    pub fn readByteUntraced(self: *RAMState, address: u64) u8 {
+        const word_addr = address & ~@as(u64, 7);
+        const byte_offset = @as(u3, @truncate(address & 7));
+        const word = self.memory.get(word_addr) orelse 0;
+        return @truncate(word >> (@as(u6, byte_offset) * 8));
+    }
+
     /// Clone the trace for external use
     /// The caller owns the returned trace and must call deinit() on it.
     pub fn toTrace(self: *const RAMState, allocator: Allocator) !MemoryTrace {

@@ -399,7 +399,13 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt:
                 std.debug.print("  Using Jolt SRS from: {s}\n", .{sp});
             }
 
-            var jolt_bundle = prover_inst.proveJoltCompatibleWithDoryAndSrs(program.bytecode, input_bytes orelse &[_]u8{}, srs_path) catch |err| {
+            var jolt_bundle = prover_inst.proveJoltCompatibleWithDoryAndSrsAtAddress(
+                program.bytecode,
+                input_bytes orelse &[_]u8{},
+                srs_path,
+                program.base_address,
+                program.entry_point,
+            ) catch |err| {
                 std.debug.print("  Error generating Jolt-compatible proof: {s}\n", .{@errorName(err)});
                 return err;
             };

@@ -5,30 +5,41 @@
 ### ✅ COMPLETED
 - Stage 1 passes Jolt verification completely
 - All 712 internal tests pass
-- All opening claims verified to match Jolt exactly:
-  - l_inst, r_inst, is_rd_not_zero, next_is_noop, fused_left, fused_right ✓
-  - ra_claim, val_claim, inc_claim ✓
-- Instance 0 (ProductVirtualRemainder) final claim matches exactly
+- R1CS witness generation fixed:
+  - RamReadValue for stores now uses pre-value (not zero)
+- RWC prover improvements:
+  - r_cycle uses correct slice: tau[0..n_cycle_vars]
+  - eq computation uses BIG_ENDIAN order (MSB first)
+  - inc = new_value - prev_value (signed difference)
+  - val_coeff = pre-value for writes, value for reads
+  - inc polynomial folds during Phase 1 binding
+  - Phase 2 uses eq_evals[0] and inc[0] as scalars
 
 ### ❌ IN PROGRESS
-Stage 2 fails because Instance 2 (RWC) final claim doesn't match.
+Stage 2 fails because the RWC sumcheck total_sum doesn't match current_claim.
 
-**Root Cause Identified:**
-Our RWC prover's eq polynomial handling is incorrect. The issue is:
-1. Phase 1 eq polynomial computation was fixed to properly bind sumcheck challenges
-2. Phase 2 still uses stale eq_evals that don't account for binding
-3. The overall structure of how we compute round polynomials may not match Jolt's sparse matrix approach
+**The Issue:**
+- `total_sum = Σ eq(r_cycle, j) * ra(k,j) * (val + γ*(inc + val))` over all entries
+- `current_claim = ram_read_value_claim + γ * ram_write_value_claim`
+- These don't match even though both are computed from the same data
 
-**Current Difference:**
-- Our RWC final: 17925181248966282971112807010799772681208014801023116248823233609842789352688
-- Jolt expected:  11216823976254905917561036500968546773134980482196871908475958474138871482864
+**Latest Debug Output:**
+```
+total_sum = { 41, 42, 209, ... }
+current_claim = { 36, 80, 231, ... }
+```
+
+**Possible Root Causes:**
+1. Entry values (val, inc) may not match R1CS values exactly
+2. Memory trace entries may not correspond 1:1 with R1CS cycles
+3. r_cycle ordering between MLE evaluation and RWC sumcheck may differ
 
 ## Next Steps
 
-1. Study Jolt's RWC prover more carefully - understand the GruenSplitEqPolynomial and matrix structure
-2. Fix Phase 2 to properly handle the eq polynomial after all cycle variables are bound
-3. Verify the sparse matrix iteration matches Jolt's approach
-4. Fix the double-free memory bug
+1. Add debug to print first few entry contributions in detail
+2. Compare entry val_coeff values with R1CS witness RamReadValue for same cycles
+3. Verify memory trace is built consistently with R1CS witness
+4. Check if there are cycles with RAM access in R1CS but not in memory trace
 
 ## Verification Commands
 
@@ -47,3 +58,4 @@ cargo test test_verify_zolt_proof -- --ignored --nocapture
 ## Code Locations
 - RWC prover: `/Users/matteo/projects/zolt/src/zkvm/ram/read_write_checking.zig`
 - Jolt RWC: `/Users/matteo/projects/jolt/jolt-core/src/zkvm/ram/read_write_checking.rs`
+- R1CS witness: `/Users/matteo/projects/zolt/src/zkvm/r1cs/constraints.zig`

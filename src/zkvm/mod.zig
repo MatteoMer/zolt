@@ -666,6 +666,26 @@ pub fn JoltProver(comptime F: type) type {
             inputs: []const u8,
             srs_path: ?[]const u8,
         ) !jolt_types.JoltProofWithDory(F, commitment_types.PolyCommitment, commitment_types.OpeningProof) {
+            // Use default RAM_START_ADDRESS for backward compatibility
+            return self.proveJoltCompatibleWithDoryAndSrsAtAddress(
+                program_bytecode,
+                inputs,
+                srs_path,
+                common.constants.RAM_START_ADDRESS,
+                common.constants.RAM_START_ADDRESS,
+            );
+        }
+
+        /// Generate a Jolt-compatible proof with Dory commitments bundled
+        /// Allows specifying custom base_address and entry_point for ELF programs
+        pub fn proveJoltCompatibleWithDoryAndSrsAtAddress(
+            self: *Self,
+            program_bytecode: []const u8,
+            inputs: []const u8,
+            srs_path: ?[]const u8,
+            base_address: u64,
+            entry_point: u64,
+        ) !jolt_types.JoltProofWithDory(F, commitment_types.PolyCommitment, commitment_types.OpeningProof) {
             const JoltProofWithDory = jolt_types.JoltProofWithDory(F, commitment_types.PolyCommitment, commitment_types.OpeningProof);
             const DoryScheme = Dory.DoryCommitmentScheme(F);
 
@@ -682,8 +702,10 @@ pub fn JoltProver(comptime F: type) type {
 
             emulator.max_cycles = self.max_cycles;
 
-            // Load and execute the program
-            try emulator.loadProgram(program_bytecode);
+            // Load the program at the correct base address and set entry point
+            try emulator.loadProgramAt(program_bytecode, base_address);
+            emulator.state.pc = entry_point;
+
             if (inputs.len > 0) {
                 try emulator.setInputs(inputs);
             }

@@ -110,10 +110,13 @@ pub const Emulator = struct {
     }
 
     /// Load a program into memory at a specific base address
+    /// NOTE: This does NOT record to the trace - program loading is part of initial state, not execution.
+    /// Jolt treats program loading as initial memory state, not as execution trace entries.
     pub fn loadProgramAt(self: *Emulator, bytecode: []const u8, base_address: u64) !void {
         var addr: u64 = base_address;
         for (bytecode) |byte| {
-            try self.ram.writeByte(addr, byte, 0);
+            // Use untraced write - program loading is initial state, not execution
+            try self.ram.writeByteUntraced(addr, byte);
             addr += 1;
         }
     }
@@ -192,6 +195,8 @@ pub const Emulator = struct {
         const instruction = try self.fetchInstruction();
         self.state.instruction = instruction;
 
+        // Debug removed for now - too noisy
+
         // Decode
         const decoded = zkvm.instruction.DecodedInstruction.decode(instruction);
 
@@ -253,11 +258,15 @@ pub const Emulator = struct {
 
     /// Fetch instruction from memory, handling compressed instructions
     /// Returns the 32-bit instruction (expanded if compressed) and updates PC accordingly
+    ///
+    /// NOTE: Instruction fetches do NOT record to the RAM trace.
+    /// In Jolt, instruction fetches are proven via bytecode commitment, not the RAM trace.
+    /// Only explicit data memory operations (LW, SW) are recorded in the RAM trace.
     fn fetchInstruction(self: *Emulator) !u32 {
-        // First fetch the lower 16 bits
+        // First fetch the lower 16 bits - use untraced reads
         var halfword: u32 = 0;
         inline for (0..2) |i| {
-            const byte = try self.ram.readByte(self.state.pc + i, self.state.cycle);
+            const byte = self.ram.readByteUntraced(self.state.pc + i);
             halfword |= @as(u32, byte) << (@as(u5, @intCast(i)) * 8);
         }
 
@@ -269,10 +278,10 @@ pub const Emulator = struct {
             self.is_compressed = true;
             return expanded;
         } else {
-            // 32-bit instruction - fetch the remaining 16 bits
+            // 32-bit instruction - fetch the remaining 16 bits - use untraced reads
             var instruction = halfword;
             inline for (2..4) |i| {
-                const byte = try self.ram.readByte(self.state.pc + i, self.state.cycle);
+                const byte = self.ram.readByteUntraced(self.state.pc + i);
                 instruction |= @as(u32, byte) << (@as(u5, @intCast(i)) * 8);
             }
             self.is_compressed = false;

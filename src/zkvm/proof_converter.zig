@@ -1223,19 +1223,19 @@ pub fn ProofConverter(comptime F: type) type {
                 .{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamRafEvaluation } },
                 stage2_result.raf_final_claim,
             );
-            // Instance 2 (RWC): Multiple openings needed
+            // Instance 2 (RWC): Individual opening claims for ra, val, inc
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .RamVal, .sumcheck_id = .RamReadWriteChecking } },
-                stage2_result.rwc_final_claim, // Use RWC's final claim for now
+                stage2_result.rwc_val_claim, // RamVal evaluation at opening point
             );
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamReadWriteChecking } },
-                stage2_result.rwc_final_claim, // Same claim (product of ra and val)
+                stage2_result.rwc_ra_claim, // RamRa evaluation at opening point
             );
             // RamInc is a committed polynomial needed by RamReadWriteChecking
             try jolt_proof.opening_claims.insert(
                 .{ .Committed = .{ .poly = .RamInc, .sumcheck_id = .RamReadWriteChecking } },
-                F.zero(), // TODO: Need to compute actual RamInc evaluation
+                stage2_result.rwc_inc_claim, // RamInc evaluation at r_cycle
             );
             // Note: UnivariateSkip for SpartanProductVirtualization was already set above with the actual claim value
 
@@ -1458,9 +1458,13 @@ pub fn ProofConverter(comptime F: type) type {
             challenges: []F,
             /// Final claims from each prover (for opening claims)
             raf_final_claim: F, // Instance 1: RamRafEvaluation
-            rwc_final_claim: F, // Instance 2: RamReadWriteChecking
+            rwc_final_claim: F, // Instance 2: RamReadWriteChecking (combined claim)
             output_final_claim: F, // Instance 3: RamOutputCheck
             instr_final_claim: F, // Instance 4: InstructionLookupsClaimReduction
+            /// Individual RWC opening claims (ra, val, inc)
+            rwc_ra_claim: F,
+            rwc_val_claim: F,
+            rwc_inc_claim: F,
             allocator: Allocator,
 
             pub fn deinit(self: *Stage2Result) void {
@@ -1790,50 +1794,49 @@ pub fn ProofConverter(comptime F: type) type {
                             combined_evals[3] = combined_evals[3].add(s3_out.mul(batching_coeffs[i]));
                         } else if (i == 1) {
                             // Instance 1: RafEvaluation (log_ram_k rounds, degree 2)
-                            // Initialize RAF prover at start_round using r_cycle = challenges[0..n_cycle_vars]
+                            // Initialize RAF prover at start_round using r_cycle from tau (last n_cycle_vars)
                             if (round_idx == start_round and raf_prover == null and config.memory_trace != null) {
-                                // Get r_cycle from challenges collected so far (rounds 0 to start_round-1)
-                                if (challenges.items.len >= n_cycle_vars) {
-                                    const r_cycle_slice = challenges.items[0..n_cycle_vars];
-                                    const r_cycle = try self.allocator.alloc(F, n_cycle_vars);
-                                    @memcpy(r_cycle, r_cycle_slice);
+                                // r_cycle comes from tau (like RWC), NOT from sumcheck challenges
+                                // tau[tau.len - n_cycle_vars ..] = last 10 tau values = r_cycle
+                                const r_cycle_slice = tau[tau.len - n_cycle_vars ..];
+                                const r_cycle = try self.allocator.alloc(F, n_cycle_vars);
+                                @memcpy(r_cycle, r_cycle_slice);
 
-                                    // Get start address from memory layout or use default
-                                    const start_addr: u64 = if (config.memory_layout) |ml|
-                                        ml.getLowestAddress()
-                                    else
-                                        0x80000000;
+                                // Get start address from memory layout or use default
+                                const start_addr: u64 = if (config.memory_layout) |ml|
+                                    ml.getLowestAddress()
+                                else
+                                    0x80000000;
 
-                                    // Initialize RAF params - this copies r_cycle internally
-                                    var raf_params = try ram.RafEvaluationParams(F).init(
-                                        self.allocator,
-                                        log_ram_k,
-                                        start_addr,
-                                        r_cycle,
-                                    );
-                                    // Free our temporary r_cycle copy (params made its own copy)
-                                    self.allocator.free(r_cycle);
+                                // Initialize RAF params - this copies r_cycle internally
+                                var raf_params = try ram.RafEvaluationParams(F).init(
+                                    self.allocator,
+                                    log_ram_k,
+                                    start_addr,
+                                    r_cycle,
+                                );
+                                // Free our temporary r_cycle copy (params made its own copy)
+                                self.allocator.free(r_cycle);
 
-                                    // Use input_claim[1] (RamAddress from SpartanOuter) as initial claim
-                                    const raf_initial_claim = input_claims[1];
-                                    std.debug.print("[ZOLT] RAF: Initializing with claim = {any}\n", .{raf_initial_claim.toBytesBE()});
+                                // Use input_claim[1] (RamAddress from SpartanOuter) as initial claim
+                                const raf_initial_claim = input_claims[1];
+                                std.debug.print("[ZOLT] RAF: Initializing with claim = {any}\n", .{raf_initial_claim.toBytesBE()});
 
-                                    raf_prover = RafProver.init(
-                                        self.allocator,
-                                        config.memory_trace.?,
-                                        raf_params,
-                                        raf_initial_claim,
-                                    ) catch |err| blk: {
-                                        std.debug.print("[ZOLT] RAF: Prover init failed: {}\n", .{err});
-                                        // If prover init fails, we own params so clean them up
-                                        raf_params.deinit();
-                                        break :blk null;
-                                    };
-                                    // Note: If prover init succeeds, prover owns params and will deinit them
-                                    // The prover's deinit should handle params cleanup
-                                    if (raf_prover != null) {
-                                        std.debug.print("[ZOLT] RAF: Prover initialized\n", .{});
-                                    }
+                                raf_prover = RafProver.init(
+                                    self.allocator,
+                                    config.memory_trace.?,
+                                    raf_params,
+                                    raf_initial_claim,
+                                ) catch |err| blk: {
+                                    std.debug.print("[ZOLT] RAF: Prover init failed: {}\n", .{err});
+                                    // If prover init fails, we own params so clean them up
+                                    raf_params.deinit();
+                                    break :blk null;
+                                };
+                                // Note: If prover init succeeds, prover owns params and will deinit them
+                                // The prover's deinit should handle params cleanup
+                                if (raf_prover != null) {
+                                    std.debug.print("[ZOLT] RAF: Prover initialized\n", .{});
                                 }
                             }
 
@@ -1904,8 +1907,6 @@ pub fn ProofConverter(comptime F: type) type {
                                 ) catch null;
 
                                 if (instr_params) |*params| {
-                                    defer params.deinit();
-
                                     // Extract lookup values from witness
                                     const lookup_outputs = try self.allocator.alloc(F, cycle_witnesses.len);
                                     defer self.allocator.free(lookup_outputs);
@@ -1928,10 +1929,17 @@ pub fn ProofConverter(comptime F: type) type {
                                         lookup_outputs,
                                         left_operands,
                                         right_operands,
-                                    ) catch null;
+                                    ) catch blk: {
+                                        // If prover init fails, we need to clean up params
+                                        params.deinit();
+                                        break :blk null;
+                                    };
 
                                     if (instr_prover != null) {
                                         std.debug.print("[ZOLT] InstrLookups: Prover initialized for instance 4\n", .{});
+                                    } else {
+                                        // If prover init returned null without error (shouldn't happen), clean up
+                                        // Actually the catch block handles this case
                                     }
                                 }
                             }
@@ -2193,6 +2201,24 @@ pub fn ProofConverter(comptime F: type) type {
             const output_claim = if (output_prover) |op| op.current_claim else F.zero();
             const instr_claim = if (instr_prover) |*ip| ip.current_claim else F.zero();
 
+            // Get individual RWC opening claims (ra, val, inc)
+            var rwc_ra_claim = F.zero();
+            var rwc_val_claim = F.zero();
+            var rwc_inc_claim = F.zero();
+            std.debug.print("[ZOLT] STAGE2 RWC: rwc_prover is_null = {}\n", .{rwc_prover == null});
+            if (rwc_prover) |*rp| {
+                std.debug.print("[ZOLT] STAGE2 RWC: getting opening claims...\n", .{});
+                const rwc_opening_claims = rp.getOpeningClaims(challenges.items);
+                rwc_ra_claim = rwc_opening_claims.ra_claim;
+                rwc_val_claim = rwc_opening_claims.val_claim;
+                rwc_inc_claim = rwc_opening_claims.inc_claim;
+                std.debug.print("[ZOLT] STAGE2 RWC: ra_claim = {any}\n", .{rwc_ra_claim.toBytesBE()});
+                std.debug.print("[ZOLT] STAGE2 RWC: val_claim = {any}\n", .{rwc_val_claim.toBytesBE()});
+                std.debug.print("[ZOLT] STAGE2 RWC: inc_claim = {any}\n", .{rwc_inc_claim.toBytesBE()});
+            } else {
+                std.debug.print("[ZOLT] STAGE2 RWC: prover is null, using zero claims\n", .{});
+            }
+
             std.debug.print("[ZOLT] STAGE2: raf_final_claim = {any}\n", .{raf_claim.toBytesBE()});
             std.debug.print("[ZOLT] STAGE2: rwc_final_claim = {any}\n", .{rwc_claim.toBytesBE()});
             std.debug.print("[ZOLT] STAGE2: output_final_claim = {any}\n", .{output_claim.toBytesBE()});
@@ -2205,6 +2231,9 @@ pub fn ProofConverter(comptime F: type) type {
                 .rwc_final_claim = rwc_claim,
                 .output_final_claim = output_claim,
                 .instr_final_claim = instr_claim,
+                .rwc_ra_claim = rwc_ra_claim,
+                .rwc_val_claim = rwc_val_claim,
+                .rwc_inc_claim = rwc_inc_claim,
                 .allocator = self.allocator,
             };
         }

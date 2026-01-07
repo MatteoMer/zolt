@@ -117,6 +117,13 @@ pub fn RaPolynomial(comptime F: type) type {
                 }
             }
 
+            // Debug: Print initial evals summary
+            var non_zero_count: usize = 0;
+            for (evals) |e| {
+                if (!e.eql(F.zero())) non_zero_count += 1;
+            }
+            std.debug.print("[RA INIT] k_size={}, non_zero_evals={}, evals[0]={any}\n", .{ k_size, non_zero_count, evals[0].toBytesBE() });
+
             return Self{
                 .evals = evals,
                 .num_vars = log_k,

@@ -369,18 +369,100 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
         pub fn isComplete(self: *const Self) bool {
             return self.round >= self.params.numRounds();
         }
+
+        /// Get individual polynomial opening claims after sumcheck completes.
+        /// Returns (ra_claim, val_claim, inc_claim) which can be used to verify the expected output claim.
+        ///
+        /// These are computed by evaluating each polynomial at the opening point:
+        /// - ra: evaluated at r_address || r_cycle (full opening point)
+        /// - val: evaluated at r_address || r_cycle (full opening point)
+        /// - inc: evaluated at r_cycle (only cycle variables)
+        pub fn getOpeningClaims(self: *const Self, r_sumcheck: []const F) OpeningClaims(F) {
+            const log_k = self.params.log_k;
+            const log_t = self.params.log_t;
+
+            // Parse sumcheck challenges into r_address and r_cycle parts
+            // RWC uses: r_address || r_cycle ordering in the opening point
+            // Phase 1 binds cycle vars, Phase 2 binds address vars
+            // The challenges need to be reorganized into big-endian order
+
+            // For simplicity, assume:
+            // - First log_t challenges are for cycle variables (Phase 1)
+            // - Next log_k challenges are for address variables (Phase 2)
+            // Then reverse to get big-endian
+
+            var r_cycle: [32]F = undefined;
+            var r_address: [32]F = undefined;
+            @memset(&r_cycle, F.zero());
+            @memset(&r_address, F.zero());
+
+            // Phase 1 challenges (cycle) - need to be reversed for big-endian
+            for (0..@min(log_t, r_sumcheck.len)) |i| {
+                r_cycle[log_t - 1 - i] = r_sumcheck[i];
+            }
+            // Phase 2 challenges (address) - need to be reversed for big-endian
+            for (0..@min(log_k, r_sumcheck.len -| log_t)) |i| {
+                r_address[log_k - 1 - i] = r_sumcheck[log_t + i];
+            }
+
+            // Compute ra_claim = MLE(ra)(r_address, r_cycle)
+            // ra is a sparse polynomial: ra(k,j) = 1 if entry (k,j) exists, 0 otherwise
+            var ra_claim = F.zero();
+            for (self.entries.items) |entry| {
+                const eq_addr = computeEq(F, r_address[0..log_k], entry.address);
+                const eq_cycle = computeEq(F, r_cycle[0..log_t], entry.cycle);
+                ra_claim = ra_claim.add(eq_addr.mul(eq_cycle).mul(entry.ra_coeff));
+            }
+
+            // Compute val_claim = MLE(val)(r_address, r_cycle)
+            // val is also sparse: val(k,j) = entry.val_coeff for existing entries
+            var val_claim = F.zero();
+            for (self.entries.items) |entry| {
+                const eq_addr = computeEq(F, r_address[0..log_k], entry.address);
+                const eq_cycle = computeEq(F, r_cycle[0..log_t], entry.cycle);
+                val_claim = val_claim.add(eq_addr.mul(eq_cycle).mul(entry.val_coeff));
+            }
+
+            // Compute inc_claim = MLE(inc)(r_cycle)
+            // inc is a dense polynomial over cycles only
+            var inc_claim = F.zero();
+            const T = @as(usize, 1) << @intCast(log_t);
+            for (0..@min(T, self.inc.len)) |j| {
+                const eq_cycle = computeEq(F, r_cycle[0..log_t], j);
+                inc_claim = inc_claim.add(eq_cycle.mul(self.inc[j]));
+            }
+
+            return OpeningClaims(F){
+                .ra_claim = ra_claim,
+                .val_claim = val_claim,
+                .inc_claim = inc_claim,
+            };
+        }
+    };
+}
+
+/// Opening claims for RamReadWriteChecking verification
+pub fn OpeningClaims(comptime F: type) type {
+    return struct {
+        ra_claim: F,
+        val_claim: F,
+        inc_claim: F,
     };
 }
 
 /// Compute eq(r, x) for a binary index x
+/// r is in BIG-ENDIAN order: r[0] is MSB, r[n-1] is LSB
+/// x is interpreted with bit i mapped to r[i] where bit i = bit (n-1-i) of x
 fn computeEq(comptime F: type, r: []const F, x: usize) F {
     var result = F.one();
-    for (r, 0..) |ri, i| {
-        const xi: u1 = @truncate(x >> @intCast(i));
+    const n = r.len;
+    for (0..n) |i| {
+        // r[i] corresponds to bit (n-1-i) of x (MSB first in r)
+        const xi: u1 = @truncate(x >> @intCast(n - 1 - i));
         if (xi == 1) {
-            result = result.mul(ri);
+            result = result.mul(r[i]);
         } else {
-            result = result.mul(F.one().sub(ri));
+            result = result.mul(F.one().sub(r[i]));
         }
     }
     return result;

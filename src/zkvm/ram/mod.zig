@@ -35,6 +35,7 @@ pub const OutputSumcheckProver = output_check.OutputSumcheckProver;
 pub const read_write_checking = @import("read_write_checking.zig");
 pub const RamReadWriteCheckingParams = read_write_checking.RamReadWriteCheckingParams;
 pub const RamReadWriteCheckingProver = read_write_checking.RamReadWriteCheckingProver;
+pub const RamRWCOpeningClaims = read_write_checking.OpeningClaims;
 
 /// Memory operation type
 pub const MemoryOp = enum {

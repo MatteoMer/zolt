@@ -14,32 +14,37 @@
   - val_coeff = pre-value for writes, value for reads
   - inc polynomial folds during Phase 1 binding
   - Phase 2 uses eq_evals[0] and inc[0] as scalars
+- Memory trace separation:
+  - Instruction fetches use untraced reads (bytecode commitment, not RAM trace)
+  - Program loading uses untraced writes (initial state, not execution trace)
+- ELF loading fixed:
+  - proveJoltCompatibleWithDoryAndSrsAtAddress accepts base_address and entry_point
+  - Programs loaded at correct address (not hardcoded RAM_START_ADDRESS)
 
-### ❌ IN PROGRESS
-Stage 2 fails because the RWC sumcheck total_sum doesn't match current_claim.
+### ✅ RWC SUMCHECK FIXED
+- RWC (Instance 2) now produces claim=0 for fibonacci (correct - no RAM operations)
+- total_sum and current_claim now match!
+
+### ❌ IN PROGRESS - Stage 2 ProductVirtual Mismatch
 
 **The Issue:**
-- `total_sum = Σ eq(r_cycle, j) * ra(k,j) * (val + γ*(inc + val))` over all entries
-- `current_claim = ram_read_value_claim + γ * ram_write_value_claim`
-- These don't match even though both are computed from the same data
-
-**Latest Debug Output:**
 ```
-total_sum = { 41, 42, 209, ... }
-current_claim = { 36, 80, 231, ... }
+output_claim:          21156486024890420644021865284593324425941707831228671205398077315638214271613
+expected_output_claim: 17764994705888080168286558985700513012579491205889951058836940863591331707629
 ```
 
-**Possible Root Causes:**
-1. Entry values (val, inc) may not match R1CS values exactly
-2. Memory trace entries may not correspond 1:1 with R1CS cycles
-3. r_cycle ordering between MLE evaluation and RWC sumcheck may differ
+Instance breakdown:
+- Instance 0 (ProductVirtual): claim=10905316..., contribution=17764994... (problem here)
+- Instance 1 (RegistersVal): claim=0
+- Instance 2 (RWC): claim=0 ✅ FIXED
+- Instance 3 (OutputCheck): claim=0
+- Instance 4 (InstructionClaimReduction): claim=0
 
 ## Next Steps
 
-1. Add debug to print first few entry contributions in detail
-2. Compare entry val_coeff values with R1CS witness RamReadValue for same cycles
-3. Verify memory trace is built consistently with R1CS witness
-4. Check if there are cycles with RAM access in R1CS but not in memory trace
+1. Investigate ProductVirtual polynomial computation
+2. Compare how Zolt vs Jolt compute ProductVirtual claims
+3. Check polynomial ordering or coefficient issues
 
 ## Verification Commands
 
@@ -59,3 +64,4 @@ cargo test test_verify_zolt_proof -- --ignored --nocapture
 - RWC prover: `/Users/matteo/projects/zolt/src/zkvm/ram/read_write_checking.zig`
 - Jolt RWC: `/Users/matteo/projects/jolt/jolt-core/src/zkvm/ram/read_write_checking.rs`
 - R1CS witness: `/Users/matteo/projects/zolt/src/zkvm/r1cs/constraints.zig`
+- Proof converter: `/Users/matteo/projects/zolt/src/zkvm/proof_converter.zig`

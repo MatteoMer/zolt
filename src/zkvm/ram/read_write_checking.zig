@@ -168,43 +168,14 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             }
 
             var entries = std.ArrayListUnmanaged(Entry){};
-            var first_few_accesses: usize = 0;
-            var skipped_count: usize = 0;
-            var accepted_count: usize = 0;
             for (trace.accesses.items) |access| {
                 if (access.timestamp >= T) continue;
-
-                // Debug first few accesses
-                if (first_few_accesses < 5) {
-                    std.debug.print("[RWC TRACE] access #{}: addr=0x{x}, val={}, op={s}, cycle={}, start_addr=0x{x}\n", .{
-                        first_few_accesses,
-                        access.address,
-                        access.value,
-                        if (access.op == .Read) "Read" else "Write",
-                        access.timestamp,
-                        params.start_address,
-                    });
-                    first_few_accesses += 1;
-                }
 
                 const addr_idx = blk: {
                     if (access.address >= params.start_address) {
                         const idx = (access.address - params.start_address) / 8;
-                        if (idx < K) {
-                            accepted_count += 1;
-                            if (accepted_count <= 3) {
-                                std.debug.print("[RWC ACCEPTED] addr=0x{x}, idx={}, val={}, op={s}, cycle={}\n", .{
-                                    access.address,
-                                    idx,
-                                    access.value,
-                                    if (access.op == .Read) "Read" else "Write",
-                                    access.timestamp,
-                                });
-                            }
-                            break :blk idx;
-                        }
+                        if (idx < K) break :blk idx;
                     }
-                    skipped_count += 1;
                     continue;
                 };
 
@@ -251,12 +222,6 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 }
             }.lessThan);
 
-            std.debug.print("[RWC INIT] Total trace accesses: {}, accepted: {}, skipped: {}, entries created: {}\n", .{
-                trace.accesses.items.len,
-                accepted_count,
-                skipped_count,
-                entries.items.len,
-            });
 
             // Initialize eq polynomial evaluations: eq(r_cycle, j) for each cycle j
             // r_cycle is in BIG_ENDIAN order (MSB first, as stored in tau)
@@ -300,16 +265,6 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             else
                 self.computePhase2Polynomial(gamma);
 
-            // Debug: Print round info for first few and last few rounds
-            if (self.round < 3 or self.round >= self.params.log_t + self.params.log_k - 3) {
-                std.debug.print("[RWC] round {}: phase={}, s0+s1={any}\n", .{
-                    self.round,
-                    if (in_phase1) @as(u8, 1) else @as(u8, 2),
-                    result[0].add(result[1]).toBytesBE(),
-                });
-                std.debug.print("[RWC] round {}: current_claim={any}\n", .{ self.round, self.current_claim.toBytesBE() });
-            }
-
             return result;
         }
 
@@ -326,9 +281,6 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             var s1: F = F.zero();
 
             const half_size = self.eq_size / 2;
-
-            // Debug: on round 0, verify total sum matches initial claim
-            var total_sum: F = F.zero();
 
             for (self.entries.items) |entry| {
                 // For LowToHigh binding, round r binds bit r (from LSB)
@@ -349,48 +301,11 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 const inner = val_term.add(gamma.mul(val_term.add(inc_term)));
                 const contribution = eq_j.mul(entry.ra_coeff).mul(inner);
 
-                total_sum = total_sum.add(contribution);
-
                 if (in_lower_half) {
                     s0 = s0.add(contribution);
                 } else {
                     s1 = s1.add(contribution);
                 }
-            }
-
-            // Debug: on round 0, print the total sum vs current claim
-            if (self.round == 0) {
-                std.debug.print("[RWC VERIFY] Round 0: total_sum = {any}\n", .{total_sum.toBytesBE()});
-                std.debug.print("[RWC VERIFY] Round 0: current_claim = {any}\n", .{self.current_claim.toBytesBE()});
-                std.debug.print("[RWC VERIFY] Round 0: entries.len = {}\n", .{self.entries.items.len});
-                std.debug.print("[RWC VERIFY] Round 0: eq_size = {}\n", .{self.eq_size});
-
-                // Print first few entry details (including raw prev/next values)
-                for (0..@min(5, self.entries.items.len)) |ei| {
-                    const entry = self.entries.items[ei];
-                    const inc_entry = self.inc[entry.cycle];
-                    std.debug.print("[RWC ENTRY {}] cycle={}, addr_idx={}, prev_val={}, next_val={}, val_coeff={any}, inc={any}, eq={any}, contrib={any}\n", .{
-                        ei,
-                        entry.cycle,
-                        entry.address,
-                        entry.prev_val,
-                        entry.next_val,
-                        entry.val_coeff.toBytesBE(),
-                        inc_entry.toBytesBE(),
-                        self.eq_evals[entry.cycle].toBytesBE(),
-                        blk: {
-                            const eq_j = self.eq_evals[entry.cycle];
-                            const val_term = entry.val_coeff;
-                            const inner = val_term.add(gamma.mul(val_term.add(inc_entry)));
-                            break :blk eq_j.mul(entry.ra_coeff).mul(inner).toBytesBE();
-                        },
-                    });
-                }
-                std.debug.print("[RWC VERIFY] eq_sum (partition of unity) = {any}\n", .{blk: {
-                    var sum = F.zero();
-                    for (self.eq_evals[0..self.eq_size]) |e| sum = sum.add(e);
-                    break :blk sum.toBytesBE();
-                }});
             }
 
             // For RWC Phase 1, the round polynomial is LINEAR in X

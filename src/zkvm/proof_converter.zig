@@ -1135,12 +1135,16 @@ pub fn ProofConverter(comptime F: type) type {
                 else
                     all_challenges;
 
-                // Copy cycle challenges as tau_low (keeping LITTLE_ENDIAN order)
-                // In Jolt, the opening point r_cycle is stored in the order the sumcheck
-                // challenges were generated (LITTLE_ENDIAN: r[0] = first challenge)
+                // CRITICAL: In Jolt, the opening point r_cycle is stored in BIG_ENDIAN order
+                // (reversed from sumcheck challenge order).
+                // See OuterRemainingSumcheckParams::normalize_opening_point which converts
+                // from LITTLE_ENDIAN to BIG_ENDIAN via match_endianness() (reverses the vector)
+                //
+                // So tau_stage2 = [r_cycle_reversed, tau_high] where r_cycle_reversed[i] = r_cycle[n-1-i]
                 for (0..n_cycle_vars) |i| {
-                    if (i < cycle_challenges.len) {
-                        tau_stage2[i] = cycle_challenges[i];
+                    const src_idx = n_cycle_vars - 1 - i;
+                    if (src_idx < cycle_challenges.len) {
+                        tau_stage2[i] = cycle_challenges[src_idx];
                     } else {
                         tau_stage2[i] = F.zero();
                     }

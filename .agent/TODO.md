@@ -2,66 +2,81 @@
 
 ## Current Status
 - Stage 1: PASSING ✅
-- Stage 2: FAILING ❌ (OutputSumcheckProver produces wrong polynomial coefficients)
+- Stage 2: FAILING ❌ (OutputSumcheck polynomial coefficients don't match expected)
 - Stage 3+: Not reached yet
 - All Zolt tests pass
 
-## Session 9 Progress
+## Session 9 Progress Summary
 
-### OutputSumcheckProver Implementation ✅
-- Created src/zkvm/ram/output_check.zig with OutputSumcheckProver
-- Integrated into Stage 2 batched sumcheck in proof_converter.zig
-- RAM state data (initial/final) now passed from emulator to converter
-- r_address challenges sampled in correct order
+### What Was Implemented
+1. **OutputSumcheckProver** (`src/zkvm/ram/output_check.zig`)
+   - Created prover structure with val_init, val_final, val_io, io_mask, eq_r_address
+   - Implemented computeRoundPolynomial() and bindChallenge()
+   - Fixed EQ polynomial to use LowToHigh (LSB-first) binding order
+   - Fixed address mapping (indexToAddress uses lowest + k * 8)
+   - Fixed termination handling (set BOTH val_final AND val_io to 1)
 
-### Stage 2 Sumcheck Structure
-5 instances in batched sumcheck:
-- Instance 0: ProductVirtualRemainder ✅ (working correctly)
-- Instance 1: RamRafEvaluation (treated as zero - needs implementation)
-- Instance 2: RamReadWriteChecking (treated as zero - needs implementation)
-- Instance 3: OutputSumcheck ❌ (implemented but wrong polynomials)
-- Instance 4: InstructionClaimReduction (treated as zero - needs implementation)
+2. **Integration into Stage 2** (`src/zkvm/proof_converter.zig`)
+   - Added config parameter with initial_ram and final_ram pointers
+   - Sample r_address challenges in correct order
+   - Initialize OutputSumcheckProver when RAM state data is available
+   - Call computeRoundPolynomial() for instance 3
 
-### CURRENT ISSUE: OutputSumcheckProver EQ Polynomial Binding Order
+3. **Data Flow** (`src/zkvm/mod.zig`)
+   - Pass emulator.ram.memory as final_ram
+   - Pass empty hash map as initial_ram
 
-Jolt verification fails:
-- Expected output_claim: 12558447015227526731091241411293250621525229972846007269528435424240713158110
-- Actual output_claim: 10555406300081192179452048418528136201389824333451681887399411041092911249053
+### Current Issue
 
-Root Cause:
-1. Jolt uses `BindingOrder::LowToHigh` (LSB first)
-2. Our EQ polynomial uses MSB-first indexing
-3. The `par_fold_out_in_unreduced` operation is not implemented
-4. GruenSplitEqPolynomial optimization not used
+The Stage 2 sumcheck verification fails:
+```
+output_claim:          10555406300081192179452048418528136201389824333451681887399411041092911249053
+expected_output_claim: 12558447015227526731091241411293250621525229972846007269528435424240713158110
+```
 
-### Next Steps (Priority Order)
+**Root Cause Analysis:**
+1. OutputSumcheck produces all-zero polynomials because:
+   - For a correctly executing program, val_final = val_io everywhere in IO region
+   - This means (val_final - val_io) = 0 everywhere
+   - So the sumcheck polynomial Σ eq * io_mask * 0 = 0
 
-1. **Fix EQ polynomial binding order** - Use LowToHigh instead of MSB-first
-2. **Fix polynomial binding** - All polynomials (val_final, val_io, io_mask) need LowToHigh binding
-3. **Implement proper round polynomial computation** - Match Jolt's par_fold_out_in_unreduced
-4. **Verify OutputSumcheck produces correct polynomials**
+2. BUT Jolt's verifier computes a NON-ZERO expected output:
+   - val_final_claim from proof = 9598091504631331533319367171027748529696916355377122795493041621516413382685
+   - val_io_eval computed = 5891669863525244341570117655318363701041112705294068835900114259741218367302
+   - These don't match! (difference = 3706421641106087191749249515709384828655803650083053959592927361775195015383)
+
+3. The mismatch between val_final_claim and val_io_eval means:
+   - Either our val_final_claim serialization is wrong
+   - Or Jolt's val_io_eval computation differs from ours
+   - Most likely: bit ordering/endianness issue in the eq(idx, r) computation
+
+### Next Steps
+
+1. **Debug val_final_claim vs val_io_eval mismatch**
+   - Compare the exact bytes being serialized for RamValFinal claim
+   - Verify the termination_index computation matches Jolt
+   - Check if LowToHigh vs BIG_ENDIAN convention is correct
+
+2. **Ensure OutputSumcheck polynomials are computed correctly**
+   - For a correctly executing program, the polynomial SHOULD be zero
+   - This is correct behavior when val_final = val_io
+
+3. **Verify the expected_output_claim computation in Jolt matches**
+   - The batched sumcheck output should match the individual instance outputs
 
 ### Files Modified This Session
-- src/zkvm/ram/output_check.zig - NEW: OutputSumcheckProver skeleton
+- src/zkvm/ram/output_check.zig - NEW: OutputSumcheckProver
 - src/zkvm/ram/mod.zig - Export OutputSumcheck module
 - src/zkvm/proof_converter.zig - Integrate OutputSumcheck, pass config
-- src/zkvm/mod.zig - Pass RAM state data (initial/final) to converter
+- src/zkvm/mod.zig - Pass RAM state data to converter
 
-### Reference Files (Jolt)
-- jolt-core/src/zkvm/ram/output_check.rs - OutputSumcheckProver implementation
-- jolt-core/src/poly/split_eq_poly.rs - GruenSplitEqPolynomial with LowToHigh binding
-- jolt-core/src/poly/dense_mlpoly.rs - DensePolynomial with bind_parallel
+### Commits This Session
+- `cc1985e`: feat(output-sumcheck): Add OutputSumcheckProver infrastructure
 
-## Previous Session Progress
-
-### Verified Components (ALL MATCH!)
-1. ✅ Stage 2 input_claims (all 5 match Jolt)
-2. ✅ Stage 2 gamma_rwc and gamma_instr
-3. ✅ Batching coefficients
-4. ✅ Polynomial coefficients for ProductVirtualRemainder
-5. ✅ Sumcheck challenges for all 26 rounds
-6. ✅ 8 factor evaluations
-7. ✅ Factor claims inserted into proof correctly
-
-## Commits
-- Previous: Fixed OpeningId ordering, memory layout, input_claims, gammas
+## Previous Session Summary
+All Stage 2 internal values match Jolt:
+- Input claims (all 5)
+- Gamma values (rwc, instr)
+- Batching coefficients
+- ProductVirtualRemainder polynomial coefficients
+- Sumcheck challenges (all 26 rounds)

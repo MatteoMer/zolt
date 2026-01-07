@@ -162,11 +162,15 @@ pub fn OutputSumcheckProver(comptime F: type) type {
 
             // Set termination bit if not panicking
             // For a correctly terminating program, termination addr should have value 1
+            // BOTH val_final and val_io must have termination=1 for a correctly executing program
             const termination_index = remapAddress(memory_layout.termination, memory_layout) orelse 0;
             std.debug.print("[ZOLT] OutputSumcheck: termination_index={}, in IO={}\n", .{ termination_index, termination_index >= io_start and termination_index < io_end });
             if (termination_index < K and termination_index >= io_start and termination_index < io_end) {
+                // Set both val_final AND val_io to 1 at termination index
+                // This makes val_final[termination] - val_io[termination] = 1 - 1 = 0
+                val_final[termination_index] = F.one();
                 val_io[termination_index] = F.one();
-                std.debug.print("[ZOLT] OutputSumcheck: set val_io[{}] = 1 (termination)\n", .{termination_index});
+                std.debug.print("[ZOLT] OutputSumcheck: set val_final[{}] = val_io[{}] = 1 (termination)\n", .{ termination_index, termination_index });
             }
 
             // Compute EQ polynomial evaluations

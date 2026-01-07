@@ -233,47 +233,150 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
         }
 
         fn computePhase1Polynomial(self: *Self, gamma: F) [4]F {
-            // In phase 1, we're summing over address-cycle pairs
-            // For each cycle pair (2j, 2j+1), compute contribution
+            // In phase 1, we're binding cycle variables.
+            // The sumcheck is over: Σ_{k,j} eq(r_cycle_params, j) * ra(k,j) * (val(k,j) + γ*(val+inc))
+            //
+            // For round r, we're computing s(X) where X binds variable r of the cycle.
+            // Variables 0..r-1 are already bound by challenges in self.challenges.
+            // Variables r+1..log_t-1 are still being summed over (contribute to s(0) and s(1)).
+            //
+            // For each entry with cycle j:
+            //   - Extract bit r of j to determine if this contributes to s(0) or s(1)
+            //   - Compute eq contribution from:
+            //     * Bound variables 0..r-1: use challenges already bound
+            //     * Current variable r: contributes 1 (we're evaluating at both 0 and 1)
+            //     * Remaining variables r+1..log_t-1: use r_cycle_params[r+1..]
+
             var s0: F = F.zero();
-            var s2: F = F.zero();
+            var s1: F = F.zero();
 
-            const current_half = @as(usize, 1) << @intCast(self.params.log_t - self.round - 1);
+            const log_t = self.params.log_t;
+            const r = self.round; // Current round (binding variable r)
 
-            // Simple approach: iterate over sparse entries
-            // Group by cycle pair and compute contributions
             for (self.entries.items) |entry| {
-                const effective_cycle = entry.cycle >> @intCast(self.round);
-                const cycle_pair = effective_cycle / 2;
-                const is_odd = (effective_cycle & 1) == 1;
+                // Extract bit r of the cycle (this determines s(0) vs s(1))
+                const current_bit: u1 = @truncate(entry.cycle >> @intCast(log_t - 1 - r));
 
-                if (cycle_pair >= current_half) continue;
+                // Compute eq contribution from already-bound variables (0..r-1)
+                var eq_bound = F.one();
+                for (0..r) |i| {
+                    const bit_i: u1 = @truncate(entry.cycle >> @intCast(log_t - 1 - i));
+                    const r_i = self.challenges.items[i];
+                    if (bit_i == 1) {
+                        eq_bound = eq_bound.mul(r_i);
+                    } else {
+                        eq_bound = eq_bound.mul(F.one().sub(r_i));
+                    }
+                }
 
-                // Get eq evaluation for this cycle
-                const eq_j = self.eq_evals[entry.cycle];
+                // Compute eq contribution from remaining unbound variables (r+1..log_t-1)
+                // These use r_cycle_params
+                var eq_remaining = F.one();
+                for (r + 1..log_t) |i| {
+                    const bit_i: u1 = @truncate(entry.cycle >> @intCast(log_t - 1 - i));
+                    const r_i = self.params.r_cycle[i];
+                    if (bit_i == 1) {
+                        eq_remaining = eq_remaining.mul(r_i);
+                    } else {
+                        eq_remaining = eq_remaining.mul(F.one().sub(r_i));
+                    }
+                }
 
-                // Compute the sumcheck contribution:
-                // eq(r_cycle, j) * ra(k,j) * (Val + γ*(Val + inc))
+                // Total eq contribution (excluding the current variable r)
+                const eq_partial = eq_bound.mul(eq_remaining);
+
+                // Also include the contribution from r_cycle_params[r] for the current variable
+                // At X=0: contributes (1 - r_cycle_params[r])
+                // At X=1: contributes r_cycle_params[r]
+                const r_param_r = self.params.r_cycle[r];
+
+                // Compute polynomial contribution
                 const val_term = entry.val_coeff;
                 const inc_term = self.inc[entry.cycle];
                 const inner = val_term.add(gamma.mul(val_term.add(inc_term)));
-                const contribution = eq_j.mul(entry.ra_coeff).mul(inner);
+                const base_contribution = eq_partial.mul(entry.ra_coeff).mul(inner);
 
-                if (is_odd) {
-                    // Contributes to x=1 term
-                    s2 = s2.add(contribution);
+                if (current_bit == 0) {
+                    // This entry contributes to s(0)
+                    // s(0) = Σ entries with bit_r=0, weighted by (1 - r_param_r)
+                    s0 = s0.add(base_contribution.mul(F.one().sub(r_param_r)));
                 } else {
-                    // Contributes to x=0 term
-                    s0 = s0.add(contribution);
+                    // This entry contributes to s(1)
+                    // s(1) = Σ entries with bit_r=1, weighted by r_param_r
+                    s1 = s1.add(base_contribution.mul(r_param_r));
                 }
             }
 
-            // Compute s(1) from constraint: s(0) + s(1) = current_claim
-            const s1 = self.current_claim.sub(s0);
+            // Extrapolate to s(2) and s(3) for cubic polynomial
+            // For a quadratic polynomial, we can use s(2) = s(0) - s(1) + some_correction
+            // But actually, our sumcheck should be degree 2 in the eq variable
+            // The round polynomial is: s(X) = Σ eq(X) * ra * inner
+            // where eq(X) is linear in X.
+            //
+            // For proper extrapolation, we need s(2):
+            // s(2) = Σ entries with bit_r=0, weighted by (1 - 2*r_param_r)
+            //      + Σ entries with bit_r=1, weighted by 2*r_param_r
+            // This comes from eq(X=2, r_param_r) = X*r_param_r + (1-X)*(1-r_param_r) at X=2
+            // = 2*r_param_r + (-1)*(1-r_param_r) = 2*r_param_r - 1 + r_param_r = 3*r_param_r - 1
 
-            // For degree-3 polynomial padding (we have degree 2 effectively)
-            // s(3) = extrapolation: s(0) - 3*s(1) + 3*s(2)
-            const s3 = s0.sub(s1.mul(F.fromU64(3))).add(s2.mul(F.fromU64(3)));
+            // Simpler: s is linear in X, so s(2) = 2*s(1) - s(0) and s(3) = 3*s(1) - 2*s(0)
+            // Actually for eq polynomial: eq(X) = (1-X)*(1-r) + X*r = (1-r) + X*(2r-1)
+            // So s(X) = sum * ((1-r) + X*(2r-1)) which is linear
+            // s(0) = sum * (1-r)
+            // s(1) = sum * r
+            // s(2) = sum * ((1-r) + 2*(2r-1)) = sum * (1-r + 4r - 2) = sum * (3r - 1)
+            // s(3) = sum * ((1-r) + 3*(2r-1)) = sum * (1-r + 6r - 3) = sum * (5r - 2)
+
+            // But we computed s(0) and s(1) directly. To get s(2):
+            // s(0) = sum * (1-r), s(1) = sum * r
+            // sum = s(0)/(1-r) = s(1)/r (if r != 0, 1)
+            // For numerical stability, compute s(2) = 3*s(1) - 2*s(0) + (s(0) - s(1))
+            // Actually: s(2) = s(0) + 2*(s(1) - s(0)) + (something for quadratic)
+            //
+            // Hmm, let me just compute s(2) directly for now
+            var s2: F = F.zero();
+            for (self.entries.items) |entry| {
+                const current_bit: u1 = @truncate(entry.cycle >> @intCast(log_t - 1 - r));
+                var eq_bound = F.one();
+                for (0..r) |i| {
+                    const bit_i: u1 = @truncate(entry.cycle >> @intCast(log_t - 1 - i));
+                    const r_i = self.challenges.items[i];
+                    if (bit_i == 1) {
+                        eq_bound = eq_bound.mul(r_i);
+                    } else {
+                        eq_bound = eq_bound.mul(F.one().sub(r_i));
+                    }
+                }
+                var eq_remaining = F.one();
+                for (r + 1..log_t) |i| {
+                    const bit_i: u1 = @truncate(entry.cycle >> @intCast(log_t - 1 - i));
+                    const r_i = self.params.r_cycle[i];
+                    if (bit_i == 1) {
+                        eq_remaining = eq_remaining.mul(r_i);
+                    } else {
+                        eq_remaining = eq_remaining.mul(F.one().sub(r_i));
+                    }
+                }
+                const eq_partial = eq_bound.mul(eq_remaining);
+                const r_param_r = self.params.r_cycle[r];
+                const val_term = entry.val_coeff;
+                const inc_term = self.inc[entry.cycle];
+                const inner = val_term.add(gamma.mul(val_term.add(inc_term)));
+                const base_contribution = eq_partial.mul(entry.ra_coeff).mul(inner);
+
+                // At X=2: eq(2, r) = 2*r - (1-r) = 3r - 1
+                const eq_at_2 = if (current_bit == 0)
+                    F.one().sub(r_param_r).sub(r_param_r) // (1 - 2r) for bit=0
+                else
+                    r_param_r.add(r_param_r); // 2r for bit=1
+
+                s2 = s2.add(base_contribution.mul(eq_at_2));
+            }
+
+            // s(3) by similar logic or extrapolation
+            // For now, use linear extrapolation from s(0), s(1), s(2)
+            // Assuming quadratic, s(3) = 3*s(2) - 3*s(1) + s(0) (Newton forward diff)
+            const s3 = s2.mul(F.fromU64(3)).sub(s1.mul(F.fromU64(3))).add(s0);
 
             return [4]F{ s0, s1, s2, s3 };
         }

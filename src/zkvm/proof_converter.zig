@@ -1639,6 +1639,41 @@ pub fn ProofConverter(comptime F: type) type {
             // Store RAF evals for claim update
             var raf_evals_this_round: ?[4]F = null;
 
+            // Initialize RamReadWriteCheckingProver (Instance 2) - starts at round 0!
+            const RWCProver = ram.RamReadWriteCheckingProver(F);
+            var rwc_prover: ?RWCProver = null;
+            var rwc_evals_this_round: ?[4]F = null;
+
+            // Initialize RWC prover if we have memory trace
+            if (config.memory_trace != null) {
+                // RWC needs r_cycle from SpartanOuter challenges (already available in tau)
+                // and gamma from transcript (gamma_rwc)
+                var rwc_params = ram.RamReadWriteCheckingParams(F).init(
+                    self.allocator,
+                    gamma_rwc,
+                    tau[tau.len - n_cycle_vars ..], // r_cycle is the last n_cycle_vars of tau
+                    log_ram_k,
+                    n_cycle_vars,
+                    if (config.memory_layout) |ml| ml.getLowestAddress() else 0x80000000,
+                ) catch null;
+
+                if (rwc_params) |*params| {
+                    defer params.deinit();
+                    rwc_prover = RWCProver.init(
+                        self.allocator,
+                        config.memory_trace.?,
+                        params.*,
+                        input_claims[2], // Instance 2 input claim
+                        config.initial_ram,
+                    ) catch null;
+
+                    if (rwc_prover != null) {
+                        std.debug.print("[ZOLT] RWC: Prover initialized for instance 2\n", .{});
+                    }
+                }
+            }
+            defer if (rwc_prover) |*rp| rp.deinit();
+
             // Track individual claims for each instance (needed for zero-poly instances)
             var individual_claims: [5]F = undefined;
             for (0..5) |i| {
@@ -1798,12 +1833,39 @@ pub fn ProofConverter(comptime F: type) type {
                                     combined_evals[j] = combined_evals[j].add(weighted);
                                 }
                             }
-                        } else if (i == 2 or i == 4) {
-                            // Instances 2, 4 - still using fallback for now
+                        } else if (i == 2) {
+                            // Instance 2: RamReadWriteChecking (26 rounds, starts at round 0)
+                            if (rwc_prover) |*rwcp| {
+                                // Compute RWC round polynomial
+                                const rwc_evals = rwcp.computeRoundPolynomialCubic();
+                                rwc_evals_this_round = rwc_evals;
+
+                                // Weight by batching coefficient
+                                for (0..4) |j| {
+                                    combined_evals[j] = combined_evals[j].add(rwc_evals[j].mul(batching_coeffs[i]));
+                                }
+                            } else {
+                                // Fallback if no prover
+                                if (round_idx == start_round) {
+                                    std.debug.print("[ZOLT] WARNING: Instance 2 (RWC) using fallback - no prover\n", .{});
+                                }
+                                const instance_round = round_idx - start_round;
+                                const remaining_rounds = rounds_per_instance[i] - 1 - instance_round;
+                                var scaled = input_claims[i];
+                                for (0..remaining_rounds) |_| {
+                                    scaled = scaled.add(scaled);
+                                }
+                                const weighted = scaled.mul(batching_coeffs[i]);
+                                for (0..4) |j| {
+                                    combined_evals[j] = combined_evals[j].add(weighted);
+                                }
+                            }
+                        } else if (i == 4) {
+                            // Instance 4 - still using fallback for now
                             if (round_idx == start_round) {
                                 std.debug.print("[ZOLT] WARNING: Instance {} using zero polynomial fallback\n", .{i});
                             }
-                            // Fallback: use scaled claim as constant polynomial (will reduce to 0 over rounds)
+                            // Fallback: use scaled claim as constant polynomial
                             const instance_round = round_idx - start_round;
                             const remaining_rounds = rounds_per_instance[i] - 1 - instance_round;
                             var scaled = input_claims[i];
@@ -1918,8 +1980,18 @@ pub fn ProofConverter(comptime F: type) type {
                     raf_prover.?.bindChallenge(challenge) catch {};
                 }
 
+                // Bind challenge to RWC prover when it's active
+                // RWC starts at round 0 (max_num_rounds - 26 = 0)
+                if (rwc_prover) |*rwcp| {
+                    if (rwc_evals_this_round) |evals| {
+                        rwcp.updateClaim(evals, challenge);
+                    }
+                    rwcp.bindChallenge(challenge) catch {};
+                }
+
                 // Reset per-round evals
                 raf_evals_this_round = null;
+                rwc_evals_this_round = null;
             }
 
             std.debug.print("[ZOLT] STAGE2_BATCHED: final batched_claim = {any}\n", .{batched_claim.toBytesBE()});

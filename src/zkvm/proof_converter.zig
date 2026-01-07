@@ -2148,7 +2148,7 @@ pub fn ProofConverter(comptime F: type) type {
             std.debug.print("[ZOLT] STAGE2_UNISKIP: extended_evals[3] = {any}\n", .{extended_evals[3].toBytesBE()});
 
             // Use the existing buildUniskipFirstRoundPoly function
-            var uni_poly = try univariate_skip.buildUniskipFirstRoundPoly(
+            const uni_poly = try univariate_skip.buildUniskipFirstRoundPoly(
                 F,
                 DOMAIN_SIZE,
                 DEGREE,
@@ -2160,11 +2160,16 @@ pub fn ProofConverter(comptime F: type) type {
                 self.allocator,
             );
 
-            // Debug: Print polynomial details
-            std.debug.print("[ZOLT] STAGE2_UNISKIP: coeffs[0] = {any}\n", .{uni_poly.coeffs[0].toBytesBE()});
-            if (uni_poly.coeffs.len > 1) {
-                std.debug.print("[ZOLT] STAGE2_UNISKIP: coeffs[1] = {any}\n", .{uni_poly.coeffs[1].toBytesBE()});
+            // Debug: Print ALL polynomial coefficients for comparison with Jolt (LE format like Jolt)
+            for (uni_poly.coeffs, 0..) |coeff, ci| {
+                var le_bytes: [32]u8 = undefined;
+                const be_bytes = coeff.toBytesBE();
+                for (0..32) |bi| {
+                    le_bytes[bi] = be_bytes[31 - bi];
+                }
+                std.debug.print("[ZOLT] STAGE2_UNISKIP: coeffs[{}] = {any}\n", .{ ci, le_bytes });
             }
+            std.debug.print("[ZOLT] STAGE2_UNISKIP: total num_coeffs = {}\n", .{uni_poly.coeffs.len});
 
             // Verify the polynomial satisfies the sum constraint
             // input_claim = Σ L_i(tau_high) * base_evals[i]

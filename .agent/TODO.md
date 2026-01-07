@@ -1,70 +1,89 @@
-# Zolt-Jolt Compatibility - Status Update
+# Zolt-Jolt Compatibility - Session 15 Complete
 
-## Session 15 - Final Summary
+## Status Summary
 
-### Current Status
-- ✅ All 712 internal tests pass (`zig build test`)
-- ✅ Stage 1 passes Jolt verification
-- ✅ Stage 2 UniSkip r0 now matches Jolt
-- ❌ Stage 2 batched sumcheck fails
+### ✅ COMPLETED
+- All 712 internal tests pass
+- Stage 1 passes Jolt verification completely
+- Stage 2 UniSkip r0 matches Jolt (transcript aligned)
+- Stage 2 UniSkip polynomial coefficients verified identical
 
-### Critical Finding: Stage 2 UniSkip Fixed!
-After extensive debugging, the Stage 2 UniSkip transcript is now correctly aligned:
-- All 13 polynomial coefficients match between Zolt and Jolt
-- r0 = `8768758914789955585787902790032491769856779696899125603611137465800193155946` (matches!)
+### ❌ REMAINING
+- Stage 2 batched sumcheck fails (3 missing provers)
 
-### Remaining Issue: Stage 2 Batched Sumcheck
+## Detailed Analysis
 
-The batched sumcheck has 5 instances. Only instances 0 and 3 have proper provers:
+### Stage 2 Batched Sumcheck Architecture
 
-| Instance | Name | Status | Input Claim | Expected Output |
-|----------|------|--------|-------------|-----------------|
-| 0 | ProductVirtualRemainder | ✅ Implemented | non-zero | fused products |
-| 1 | RamRafEvaluation | ❌ Zero fallback | non-zero | 0 |
-| 2 | RamReadWriteChecking | ❌ Zero fallback | non-zero | 0 |
-| 3 | OutputSumcheck | ✅ Implemented | 0 | 0 |
-| 4 | InstructionLookupsClaimReduction | ❌ Zero fallback | non-zero | 0 |
+The Stage 2 batched sumcheck verifies 5 instances in parallel:
 
-### Sumcheck Claim Errors
-- Round 0: `s(0)+s(1) != old_claim`
-- Round 23-25: `s(0)+s(1) != old_claim`
+| Instance | Prover | Rounds | Status |
+|----------|--------|--------|--------|
+| 0 | ProductVirtualRemainder | 10 | ✅ Implemented |
+| 1 | RamRafEvaluation | 16 | ❌ Missing |
+| 2 | RamReadWriteChecking | 26 | ❌ Missing |
+| 3 | OutputSumcheck | 16 | ✅ Implemented |
+| 4 | InstructionLookupsClaimReduction | 10 | ❌ Missing |
 
-These errors occur because instances 1, 2, 4 have non-zero input claims but contribute zero polynomials.
+### Error Analysis
 
-### What's Needed
+Current errors:
+```
+Round 0: s(0)+s(1) != old_claim
+Round 23: s(0)+s(1) != old_claim
+Round 24: s(0)+s(1) != old_claim
+Round 25: s(0)+s(1) != old_claim
+```
 
-1. **RamRafEvaluation Prover** (instance 1)
-   - Evaluates `eq(r_address, x)` polynomial
-   - Reference: `jolt-core/src/zkvm/ram/raf_evaluation.rs`
-   - 16 rounds
+Root cause: Instances 1, 2, 4 have non-zero input claims but contribute zero polynomials.
 
-2. **RamReadWriteChecking Prover** (instance 2)
-   - Most complex - 3 phases
-   - Reference: `jolt-core/src/zkvm/ram/read_write_checking.rs`
-   - 26 rounds
+### Implementation Requirements
 
-3. **InstructionLookupsClaimReduction Prover** (instance 4)
-   - 2 phases: prefix-suffix sumcheck + regular sumcheck
-   - Reference: `jolt-core/src/zkvm/claim_reductions/instruction_lookups.rs`
-   - 10 rounds
+Each missing prover requires:
 
-### Alternative Approach
-For the fibonacci program specifically, RAM operations are minimal. The provers might be simplified if the actual polynomial evaluations are zero. However, the sumcheck protocol requires proper polynomial contributions even if they evaluate to zero at the end.
+1. **RamRafEvaluation** (`jolt-core/src/zkvm/ram/raf_evaluation.rs`)
+   - Eq polynomial evaluation over RAM addresses
+   - 16 rounds of sumcheck
+   - Input: RamAddress claim from SpartanOuter
 
-## Verification Steps
+2. **RamReadWriteChecking** (`jolt-core/src/zkvm/ram/read_write_checking.rs`)
+   - 3-phase prover (most complex)
+   - Validates RAM read/write consistency
+   - 26 rounds total
 
-To reproduce:
+3. **InstructionLookupsClaimReduction** (`jolt-core/src/zkvm/claim_reductions/instruction_lookups.rs`)
+   - 2-phase prover (prefix-suffix + regular)
+   - Reduces lookup operand claims
+   - 10 rounds total
+
+### Key Files
+
+Modified:
+- `src/zkvm/proof_converter.zig` - Stage 2 proof generation
+- `src/zkvm/r1cs/univariate_skip.zig` - UniSkip polynomial construction
+
+To Create:
+- `src/zkvm/ram/raf_evaluation.zig`
+- `src/zkvm/ram/read_write_checking.zig`
+- `src/zkvm/claim_reductions/instruction_lookups.zig`
+
+## Verification Commands
+
 ```bash
-# Generate Zolt proof
+# Build and test Zolt
+zig build test --summary all
+
+# Generate Jolt-compatible proof
 ./zig-out/bin/zolt prove --jolt-format -o /tmp/zolt_proof_dory.bin examples/fibonacci.elf
 
-# Test with Jolt
+# Verify with Jolt
 cd /Users/matteo/projects/jolt/jolt-core
 cargo test test_verify_zolt_proof -- --ignored --nocapture
 ```
 
-## Key Files
-- `src/zkvm/proof_converter.zig` - Main proof conversion and Stage 2 batched sumcheck
-- `src/zkvm/r1cs/univariate_skip.zig` - UniSkip polynomial construction
-- `src/zkvm/spartan/product_remainder.zig` - ProductVirtualRemainder prover
-- `src/zkvm/ram/output_check.zig` - OutputSumcheck prover
+## Progress Metrics
+
+- Tests: 712/712 passing ✅
+- Stage 1: PASS ✅
+- Stage 2 UniSkip: PASS ✅
+- Stage 2 Batched Sumcheck: FAIL ❌ (missing 3 provers)

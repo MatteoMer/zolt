@@ -1,77 +1,84 @@
 # Zolt-Jolt Compatibility - Current Status
 
-## Summary (Session 30 - Updated)
+## Summary (Session 31 - Updated)
 
-**Stage 1**: PASSES ✓
-**Stage 2**: PASSES ✓
-**Stage 3**: FAILS - Round polynomial computation incorrect
+**Stage 1**: PASSES
+**Stage 2**: PASSES
+**Stage 3**: FAILS - Opening claims mismatch for Shift and InstructionInput
 
-### Latest Finding: Input Claims Match!
+### Latest Finding: Round Polynomials ARE Correct!
 
-All Stage 3 input claims are **CORRECT** and match Jolt:
+All Stage 3 sumcheck round polynomials **MATCH** between Zolt and Jolt:
 
-| Claim | Zolt (first 8 bytes BE) | Jolt (first 8 bytes BE) | Match |
-|-------|-------------------------|-------------------------|-------|
-| shift_input_claim | matches | matches | ✓ |
-| instr_input_claim | matches | matches | ✓ |
-| reg_input_claim | matches | matches | ✓ |
+| Round | c0 | c2 | c3 | Challenge |
+|-------|----|----|----|-----------|
+| 0 | MATCH | MATCH | MATCH | MATCH |
+| 1 | MATCH | MATCH | MATCH | MATCH |
+| 2 | MATCH | MATCH | MATCH | MATCH |
+| 3 | MATCH | MATCH | MATCH | MATCH |
+| 4 | MATCH | MATCH | MATCH | MATCH |
+| ... | ... | ... | ... | ... |
 
-The individual Next* claims also match:
-- NextUnexpandedPC = 5016914920442655063139027353295106901665615638715450801907420320438791241677 ✓
-- NextPC = same as above ✓
-- NextIsVirtual = 0 ✓
-- NextIsFirstInSequence = 0 ✓
-- NextIsNoop = 14175110745294312468493177356540255929141240160643613108653122477912496566260 ✓
+The sumcheck protocol is working correctly. The issue is the **opening claims**.
 
-Gamma powers also match:
-- gamma_powers[0] = 1 ✓
-- gamma_powers[1] = 167342415292111346589945515279189495473 ✓
+### ROOT CAUSE: Opening Claims Mismatch
 
-### ROOT CAUSE
+The Stage 3 verification fails because the final MLE evaluations (opening claims) don't match:
 
-The Stage 3 sumcheck verification fails because the **round polynomials** are generating an incorrect final `output_claim`:
+| Instance | Zolt Claim | Jolt Expected | Match |
+|----------|------------|---------------|-------|
+| Shift | 13328834370005231... | 9669677241730825... | **NO** |
+| InstructionInput | 3842266989647484... | 10802936892837509... | **NO** |
+| Registers | 6520606900337296... | 6520606900337296... | **YES** |
 
-- `output_claim` (from round polys) = 1673574733889313935270617916743060218503432297743197831652540070081185994486
-- `expected_output_claim` (from opening claims) = 21327743636063891625108510123531019119449360721408058830639529124915741467777
+```
+output_claim:          6108158350971909917768492919875926703216279897287968891477060522070057021008
+expected_output_claim: 10978770909765126050242131433050941553872066487109074337453920367876979372731
+```
 
-The round polynomial computation in `stage3_prover.zig` is producing wrong evaluations.
+### Analysis
 
-### Verified So Far
+Since the **Registers** claim matches but **Shift** and **InstructionInput** don't:
 
-1. ✓ Input claims are correct (NextUnexpandedPC, NextPC, etc.)
-2. ✓ Gamma powers are correct
-3. ✓ Binding formula is correct: `new[i] = (1-r)*old[2i] + r*old[2i+1]`
-4. ✓ Round polynomial approach: compute p(0), p(2), derive p(1) from claim
-5. ✓ Coefficient interpolation formula (finite differences for degree 3)
+1. The core MLE binding mechanism is correct (Registers works)
+2. The eq polynomial evaluations are likely correct
+3. The issue is specific to **Shift** and **InstructionInput** `finalClaims()` computation
+4. Possibly related to eq_plus_one handling or the specific MLE structure
 
 ### Investigation Needed
 
-1. **eq+1 polynomial evaluations**: Are they computed correctly at each index?
-   - Current: Using `EqPlusOnePolynomial.mle(r, j_bits)` for each j
-   - Jolt: Uses `EqPlusOnePrefixSuffixPoly` with prefix-suffix optimization
-   - These should be equivalent mathematically
+1. **ShiftMLEs.finalClaims()** - Check how the bound values are extracted
+   - Are the eq_plus_one values being combined correctly?
+   - Is the gamma^4 * (1-noop) term computed right?
 
-2. **MLE values from trace**: Are the witness values extracted correctly?
-   - ShiftMLEs: unexpanded_pc, pc, is_virtual, is_first_in_sequence, is_noop
-   - InstructionInputMLEs: left_is_rs1, rs1_value, etc.
-   - RegistersMLEs: rd_write_value, rs1_value, rs2_value
+2. **InstrInputMLEs.finalClaims()** - Check the left/right operand combination
+   - Are the flag values (left_is_rs1, left_is_pc, etc.) correct after binding?
+   - Is the (eq_outer + gamma^2 * eq_product) weighting correct?
 
-3. **Product formula**: Is the round polynomial formula correct?
-   - Shift: eq+1_outer * val + gamma^4 * (1-noop) * eq+1_product
-   - Instr: (eq_outer + gamma^2 * eq_product) * (right + gamma * left)
-   - Reg: eq * (rd + gamma*rs1 + gamma^2*rs2)
+3. **eq_plus_one polynomial** - Verify the shift formula
+   - eq_plus_one(r, j) should equal eq(r, j+1)
+   - Check if binding order affects the final value
+
+### Verified So Far
+
+1. Round polynomial coefficients (c0, c2, c3) - ALL MATCH
+2. Challenges derived from transcript - ALL MATCH
+3. Batching coefficients - ALL MATCH
+4. Initial batched claim - MATCHES
+5. Registers opening claim - MATCHES
+6. Shift opening claim - MISMATCH
+7. InstructionInput opening claim - MISMATCH
 
 ### Next Steps
 
-1. Add debug output for round 0 values to compare with Jolt
-2. Print eq+1 evaluations at indices 0, 1, 2, 3 for first round
-3. Print MLE values at same indices
-4. Compare computed p(0), p(2) with expected
+1. Debug `ShiftMLEs.finalClaims()` to compare with Jolt's expected value
+2. Debug `InstrInputMLEs.finalClaims()` similarly
+3. Add debug output for the final bound MLE values
+4. Compare eq_plus_one final evaluations between Zolt and Jolt
 
 ### Key Files
 
-- `/Users/matteo/projects/zolt/src/zkvm/spartan/stage3_prover.zig` - Round polynomial generation
-- `/Users/matteo/projects/jolt/jolt-core/src/zkvm/spartan/shift.rs` - ShiftSumcheck implementation
-- `/Users/matteo/projects/jolt/jolt-core/src/zkvm/spartan/instruction_input.rs` - InstructionInputSumcheck
-- `/Users/matteo/projects/jolt/jolt-core/src/zkvm/claim_reductions/registers.rs` - RegistersClaimReduction
-- `/Users/matteo/projects/jolt/jolt-core/src/poly/eq_plus_one_poly.rs` - eq+1 polynomial
+- `/Users/matteo/projects/zolt/src/zkvm/spartan/stage3_prover.zig` - Opening claim computation
+- `/Users/matteo/projects/jolt/jolt-core/src/zkvm/spartan/shift.rs` - ShiftSumcheck finalClaims
+- `/Users/matteo/projects/jolt/jolt-core/src/zkvm/spartan/instruction_input.rs` - InstructionInput finalClaims
+- `/Users/matteo/projects/jolt/jolt-core/src/zkvm/claim_reductions/registers.rs` - Registers finalClaims

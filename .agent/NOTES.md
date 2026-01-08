@@ -1,5 +1,71 @@
 # Zolt-Jolt Cross-Verification Progress
 
+## Session 31 Summary - Stage 3 Opening Claims Analysis (2026-01-08)
+
+### Major Discovery: Round Polynomials Are Correct!
+
+After adding comprehensive debug output, we confirmed that **all Stage 3 sumcheck round polynomials match** between Zolt and Jolt:
+
+- All c0, c2, c3 coefficients: MATCH
+- All challenges: MATCH
+- Initial batched claim: MATCH
+
+The sumcheck protocol itself is working correctly.
+
+### Root Cause Identified: Opening Claims Mismatch
+
+The verification fails because the **final opening claims** don't match:
+
+| Instance | Match |
+|----------|-------|
+| Shift | NO |
+| InstructionInput | NO |
+| Registers | YES |
+
+Specific values:
+- **Shift**: Zolt=13328834370005231..., Jolt expects=9669677241730825...
+- **InstructionInput**: Zolt=3842266989647484..., Jolt expects=10802936892837509...
+- **Registers**: EXACT MATCH
+
+### Implications
+
+Since Registers works but Shift/InstructionInput don't:
+
+1. The core MLE binding mechanism is correct
+2. The eq polynomial evaluations are likely correct
+3. The issue is specific to how Shift and InstructionInput compute their final claims
+4. Possibly related to eq_plus_one handling
+
+### Debug Output Added
+
+Added comprehensive debug to `stage3_prover.zig`:
+- r_outer/r_product input values
+- MLE sample values at trace start
+- eq/eq_plus_one polynomial evaluations
+- All 10 rounds of coefficients, challenges, next_claims
+- Final opening claims for all 16 fields
+
+### Testing Commands Used
+
+```bash
+# Generate proof with preprocessing
+zig build run -- prove --jolt-format --export-preprocessing /tmp/zolt_preprocessing.bin \
+  -o /tmp/zolt_proof_dory.bin examples/fibonacci.elf
+
+# Run Jolt verification
+cd /Users/matteo/projects/jolt && cargo test --release -p jolt-core \
+  test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
+```
+
+### Next Steps
+
+1. Debug `ShiftMLEs.finalClaims()` implementation
+2. Debug `InstrInputMLEs.finalClaims()` implementation
+3. Compare how eq_plus_one is used in the final claim computation
+4. Check if the MLE binding affects Shift/InstructionInput differently than Registers
+
+---
+
 ## Session 30 Summary - Stage 3 Round Polynomial Debugging (2026-01-08)
 
 ### Key Findings

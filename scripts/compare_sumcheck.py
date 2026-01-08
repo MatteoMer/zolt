@@ -7,7 +7,7 @@ Compares all verification stages between Zolt and Jolt logs:
 - Commitments
 - Stage 1: Outer Spartan (R1CS)
 - Stage 2: RAM RAF Evaluation (uni-skip)
-- Stage 3: Lasso Lookup
+- Stage 3: Lasso Lookup (Shift, InstructionInput, RegistersClaimReduction)
 - Stage 4: Value Evaluation
 - Stage 5: Register Evaluation
 - Stage 6: Booleanity
@@ -17,6 +17,10 @@ NEW: Transcript state tracking to catch state-dependent divergence.
 Usage:
     python3 compare_sumcheck.py [zolt.log] [jolt.log] [--stage N] [--verbose]
     python3 compare_sumcheck.py --transcript  # Compare transcript state evolution
+
+Stage 3 Debug Output Format:
+    Zolt: [ZOLT] STAGE3_PRE: ... = { bytes }
+    Jolt: [JOLT] STAGE3_PRE: ... = Field(0x...) or [n1, n2, ...]
 """
 
 import re
@@ -849,6 +853,205 @@ class StageComparator:
                 max_round = max(max_round, int(match.group(1)) + 1)
         return max_round
 
+    def compare_stage3(self) -> List[CompareResult]:
+        """Compare Stage 3: Batched Sumcheck (Shift, InstructionInput, Registers)"""
+        results = []
+
+        # Compare r_outer and r_product inputs
+        for name in ["r_outer", "r_product"]:
+            zolt_len = self.extract_u64(f"STAGE3_PRE: {name}.len = ", self.zolt_log)
+            jolt_len = self.extract_u64(f"STAGE3_PRE: {name}.len = ", self.jolt_log)
+            if zolt_len is not None or jolt_len is not None:
+                match = MatchResult.MATCH if zolt_len == jolt_len else MatchResult.MISMATCH
+                results.append(CompareResult(f"Stage3 {name}.len", str(zolt_len), str(jolt_len), match))
+
+            zolt_val = self.extract_zolt_le_hex(f"STAGE3_PRE: {name}[0] = ")
+            jolt_val = self.extract_jolt_debug_bytes(f"[JOLT] STAGE3_PRE: {name}[0] = ")
+            if zolt_val or jolt_val:
+                results.append(self.compare_values(f"Stage3 {name}[0]", zolt_val, jolt_val))
+
+            zolt_val = self.extract_zolt_le_hex(f"STAGE3_PRE: {name}[last] = ")
+            jolt_val = self.extract_jolt_debug_bytes(f"[JOLT] STAGE3_PRE: {name}[last] = ")
+            if zolt_val or jolt_val:
+                results.append(self.compare_values(f"Stage3 {name}[last]", zolt_val, jolt_val))
+
+        # Compare gamma powers for ShiftSumcheck (5 values)
+        for i in range(5):
+            zolt_val = self.extract_zolt_le_hex(f"STAGE3_SHIFT: gamma_powers[{i}] = ")
+            jolt_val = self.extract_single(f"STAGE3_SHIFT: gamma_powers[{i}]_bytes = ", self.jolt_log)
+            # Try alternative Jolt format (Debug output)
+            if not jolt_val:
+                jolt_val = self.extract_jolt_debug_bytes(f"[JOLT_SHIFT] gamma_powers[{i}] = ")
+            results.append(self.compare_values(f"Shift gamma[{i}]", zolt_val, jolt_val))
+
+        # Compare InstructionInput gamma
+        zolt_instr_gamma = self.extract_zolt_le_hex("STAGE3_INSTR: gamma = ")
+        jolt_instr_gamma = self.extract_jolt_debug_bytes("[JOLT_INSTR] gamma = ")
+        results.append(self.compare_values("Instr gamma", zolt_instr_gamma, jolt_instr_gamma))
+
+        # Compare Registers gamma
+        zolt_reg_gamma = self.extract_zolt_le_hex("STAGE3_REG: gamma = ")
+        jolt_reg_gamma = self.extract_jolt_debug_bytes("[JOLT] STAGE3_REG: gamma = ")
+        results.append(self.compare_values("Reg gamma", zolt_reg_gamma, jolt_reg_gamma))
+
+        # Compare shift input claim individual components
+        shift_components = [
+            ("NextUnexpandedPC", "input_claim_next_unexpanded_pc"),
+            ("NextPC", "input_claim_next_pc"),
+            ("NextIsVirtual", "input_claim_next_is_virtual"),
+            ("NextIsFirstInSequence", "input_claim_next_is_first_in_sequence"),
+            ("NextIsNoop", "input_claim_next_is_noop"),
+        ]
+        for zolt_name, jolt_name in shift_components:
+            zolt_val = self.extract_zolt_le_hex(f"STAGE3_SHIFT_INPUT: {zolt_name} = ")
+            jolt_val = self.extract_jolt_debug_bytes(f"[JOLT_SHIFT] {jolt_name} = ")
+            results.append(self.compare_values(f"Shift {zolt_name}", zolt_val, jolt_val))
+
+        # Compare input claims for each instance
+        for i, name in enumerate(["Shift", "InstrInput", "Registers"]):
+            zolt_val = self.extract_zolt_le_hex(f"STAGE3_PRE: input_claim[{i}]")
+            jolt_val = self.extract_single(f"STAGE3_PRE: input_claim[{i}]_bytes = ", self.jolt_log)
+            if not jolt_val:
+                jolt_val = self.extract_jolt_debug_bytes(f"[JOLT] STAGE3_PRE: input_claim[{i}] = ")
+            results.append(self.compare_values(f"Stage3 input_claim[{i}] ({name})", zolt_val, jolt_val))
+
+        # Compare batching coefficients
+        for i in range(3):
+            zolt_val = self.extract_zolt_le_hex(f"STAGE3_PRE: batching_coeff[{i}] = ")
+            jolt_val = self.extract_single(f"STAGE3_PRE: batching_coeff[{i}]_bytes = ", self.jolt_log)
+            results.append(self.compare_values(f"Stage3 batching_coeff[{i}]", zolt_val, jolt_val))
+
+        # Compare initial batched claim
+        zolt_claim = self.extract_zolt_le_hex("STAGE3_INITIAL: batched_claim = ")
+        jolt_claim = self.extract_single("STAGE3_INITIAL: batched_claim_bytes = ", self.jolt_log)
+        results.append(self.compare_values("Stage3 initial claim", zolt_claim, jolt_claim))
+
+        # Compare MLE sample values
+        mle_fields = [
+            ("STAGE3_MLE: unexpanded_pc[0]", "MLE unexpanded_pc[0]"),
+            ("STAGE3_MLE: pc[0]", "MLE pc[0]"),
+            ("STAGE3_MLE: is_virtual[0]", "MLE is_virtual[0]"),
+            ("STAGE3_MLE: is_noop[0]", "MLE is_noop[0]"),
+            ("STAGE3_MLE: left_is_rs1[0]", "MLE left_is_rs1[0]"),
+            ("STAGE3_MLE: rs1_value[0]", "MLE rs1_value[0]"),
+            ("STAGE3_MLE: rd_write_value[0]", "MLE rd_write_value[0]"),
+        ]
+        for pattern, name in mle_fields:
+            zolt_val = self.extract_zolt_le_hex(f"{pattern} = ")
+            jolt_val = self.extract_jolt_debug_bytes(f"[JOLT] {pattern} = ")
+            if zolt_val or jolt_val:
+                results.append(self.compare_values(name, zolt_val, jolt_val))
+
+        # Compare eq polynomial evaluations
+        eq_fields = [
+            ("STAGE3_EQ: eq_r_outer[0]", "eq_r_outer[0]"),
+            ("STAGE3_EQ: eq_r_product[0]", "eq_r_product[0]"),
+            ("STAGE3_EQ: eq_plus_one_outer[0]", "eq_plus_one_outer[0]"),
+            ("STAGE3_EQ: eq_plus_one_product[0]", "eq_plus_one_product[0]"),
+        ]
+        for pattern, name in eq_fields:
+            zolt_val = self.extract_zolt_le_hex(f"{pattern} = ")
+            jolt_val = self.extract_jolt_debug_bytes(f"[JOLT] {pattern} = ")
+            if zolt_val or jolt_val:
+                results.append(self.compare_values(name, zolt_val, jolt_val))
+
+        # Compare first 10 rounds (or all if fewer)
+        num_rounds = min(self.find_max_round("STAGE3_ROUND_"), 10)
+        for i in range(num_rounds):
+            results.extend(self.compare_stage3_round(i))
+
+        # Compare final output claim
+        zolt_final = self.extract_zolt_le_hex("STAGE3_FINAL: output_claim = ")
+        jolt_final = self.extract_jolt_debug_bytes("[JOLT] STAGE3_FINAL: output_claim = ")
+        results.append(self.compare_values("Stage3 final claim", zolt_final, jolt_final))
+
+        # Compare final individual claims
+        for name in ["shift_claim", "instr_claim", "reg_claim"]:
+            zolt_val = self.extract_zolt_le_hex(f"STAGE3_FINAL: {name} = ")
+            jolt_val = self.extract_jolt_debug_bytes(f"[JOLT] STAGE3_FINAL: {name} = ")
+            if zolt_val or jolt_val:
+                results.append(self.compare_values(f"Stage3 final {name}", zolt_val, jolt_val))
+
+        # Compare opening claims
+        opening_fields = [
+            ("STAGE3_OPENING: unexpanded_pc", "Opening unexpanded_pc"),
+            ("STAGE3_OPENING: pc", "Opening pc"),
+            ("STAGE3_OPENING: is_virtual", "Opening is_virtual"),
+            ("STAGE3_OPENING: is_noop", "Opening is_noop"),
+            ("STAGE3_OPENING: left_is_rs1", "Opening left_is_rs1"),
+            ("STAGE3_OPENING: rs1_value", "Opening rs1_value"),
+            ("STAGE3_OPENING: rd_write_value", "Opening rd_write_value"),
+        ]
+        for pattern, name in opening_fields:
+            zolt_val = self.extract_zolt_le_hex(f"{pattern} = ")
+            jolt_val = self.extract_jolt_debug_bytes(f"[JOLT] {pattern} = ")
+            if zolt_val or jolt_val:
+                results.append(self.compare_values(name, zolt_val, jolt_val))
+
+        return results
+
+    def compare_stage3_round(self, round_idx: int) -> List[CompareResult]:
+        """Compare Stage 3 round values"""
+        results = []
+
+        # Current claim
+        zolt_claim = self.extract_zolt_le_hex(f"STAGE3_ROUND_{round_idx}: current_claim = ")
+        jolt_claim = self.extract_jolt_debug_bytes(f"[JOLT] STAGE3_ROUND_{round_idx}: current_claim = ")
+        if not jolt_claim:
+            jolt_claim = self.extract_single(f"STAGE3_ROUND_{round_idx}: current_claim_bytes = ", self.jolt_log)
+        results.append(self.compare_values(f"Stage3 round {round_idx} claim", zolt_claim, jolt_claim))
+
+        # Individual sumcheck claims
+        for name in ["shift_claim", "instr_claim", "reg_claim"]:
+            zolt_val = self.extract_zolt_le_hex(f"STAGE3_ROUND_{round_idx}: {name} = ")
+            jolt_val = self.extract_jolt_debug_bytes(f"[JOLT] STAGE3_ROUND_{round_idx}: {name} = ")
+            if zolt_val or jolt_val:
+                results.append(self.compare_values(f"Stage3 round {round_idx} {name}", zolt_val, jolt_val))
+
+        # Coefficients c0, c2, c3
+        for coeff in ["c0", "c2", "c3"]:
+            zolt_val = self.extract_zolt_le_hex(f"STAGE3_ROUND_{round_idx}: {coeff} = ")
+            jolt_val = self.extract_single(f"STAGE3_ROUND_{round_idx}: {coeff}_bytes = ", self.jolt_log)
+            if not jolt_val:
+                jolt_val = self.extract_jolt_debug_bytes(f"[JOLT] STAGE3_ROUND_{round_idx}: {coeff} = ")
+            results.append(self.compare_values(f"Stage3 round {round_idx} {coeff}", zolt_val, jolt_val))
+
+        # Challenge
+        zolt_ch = self.extract_zolt_le_hex(f"STAGE3_ROUND_{round_idx}: challenge = ")
+        jolt_ch = self.extract_single(f"STAGE3_ROUND_{round_idx}: challenge_bytes = ", self.jolt_log)
+        if not jolt_ch:
+            jolt_ch = self.extract_jolt_debug_bytes(f"[JOLT] STAGE3_ROUND_{round_idx}: challenge = ")
+        results.append(self.compare_values(f"Stage3 round {round_idx} challenge", zolt_ch, jolt_ch))
+
+        # Next claim
+        zolt_next = self.extract_zolt_le_hex(f"STAGE3_ROUND_{round_idx}: next_claim = ")
+        jolt_next = self.extract_jolt_debug_bytes(f"[JOLT] STAGE3_ROUND_{round_idx}: next_claim = ")
+        if zolt_next or jolt_next:
+            results.append(self.compare_values(f"Stage3 round {round_idx} next_claim", zolt_next, jolt_next))
+
+        return results
+
+    def extract_jolt_debug_bytes(self, pattern: str) -> Optional[str]:
+        """Extract bytes from Jolt Debug format: SomeField(0x..., ...)"""
+        for line in self.jolt_log.split('\n'):
+            if pattern in line:
+                # Try to find ark-ff field debug format like: SomeField(0xabc123...)
+                match = re.search(r'\(0x([0-9a-fA-F]+)', line)
+                if match:
+                    hex_val = match.group(1).lower()
+                    # Pad to 64 chars if needed
+                    if len(hex_val) < 64:
+                        hex_val = hex_val.zfill(64)
+                    # The 0x format is big-endian, convert to little-endian bytes for comparison
+                    # Actually, let's return as-is and handle in comparison
+                    return hex_val
+
+                # Try byte array format [n1, n2, ...]
+                bytes_val = self.parser.parse_jolt_bytes(line)
+                if bytes_val and len(bytes_val) >= 32:
+                    return self.parser.bytes_to_hex(bytes_val[:32])
+        return None
+
     def compare_commitments(self) -> List[CompareResult]:
         """Compare commitment values"""
         results = []
@@ -886,6 +1089,9 @@ class StageComparator:
         if stages is None or 2 in stages:
             all_results['Stage 2 (UniSkip)'] = self.compare_stage2()
             all_results['Stage 2 (Batched Sumcheck)'] = self.compare_stage2_batched()
+
+        if stages is None or 3 in stages:
+            all_results['Stage 3 (Lasso Lookup)'] = self.compare_stage3()
 
         return all_results
 
@@ -927,8 +1133,8 @@ def print_results(results: Dict[str, List[CompareResult]], verbose: bool = False
             # Print summary line
             print(f"  {status:30} {r.name}")
 
-            # Print values if mismatch, verbose, or Stage 2 (for debugging UniSkip)
-            show_values = r.result == MatchResult.MISMATCH or verbose or "Stage 2" in section
+            # Print values if mismatch, verbose, or Stage 2/3 (for debugging)
+            show_values = r.result == MatchResult.MISMATCH or verbose or "Stage 2" in section or "Stage 3" in section
             if show_values:
                 if r.zolt_value:
                     print(f"    {Color.YELLOW}ZOLT:{Color.RESET} {r.zolt_value[:32]}..." if len(r.zolt_value or '') > 32 else f"    {Color.YELLOW}ZOLT:{Color.RESET} {r.zolt_value}")

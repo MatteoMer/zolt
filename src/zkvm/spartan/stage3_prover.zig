@@ -127,7 +127,26 @@ pub fn Stage3Prover(comptime F: type) type {
             std.debug.print("[STAGE3] Starting with {} rounds, trace_len={}\n", .{ num_rounds, trace_len });
 
             // DEBUG: Print transcript state BEFORE gamma derivation
-            std.debug.print("[STAGE3] Transcript state BEFORE gamma derivation = {any}\n", .{transcript.state[0..8]});
+            std.debug.print("\n[ZOLT] ========== STAGE 3 BEGIN ==========\n", .{});
+            std.debug.print("[ZOLT] STAGE3_PRE: transcript_state = {{ {any} }}\n", .{transcript.state[0..16]});
+
+            // DEBUG: Print r_outer and r_product inputs
+            std.debug.print("[ZOLT] STAGE3_PRE: r_outer.len = {}\n", .{r_outer.len});
+            std.debug.print("[ZOLT] STAGE3_PRE: r_product.len = {}\n", .{r_product.len});
+            if (r_outer.len > 0) {
+                std.debug.print("[ZOLT] STAGE3_PRE: r_outer[0] = {{ {any} }}\n", .{r_outer[0].toBytes()});
+                if (r_outer.len > 1) {
+                    std.debug.print("[ZOLT] STAGE3_PRE: r_outer[1] = {{ {any} }}\n", .{r_outer[1].toBytes()});
+                }
+                std.debug.print("[ZOLT] STAGE3_PRE: r_outer[last] = {{ {any} }}\n", .{r_outer[r_outer.len - 1].toBytes()});
+            }
+            if (r_product.len > 0) {
+                std.debug.print("[ZOLT] STAGE3_PRE: r_product[0] = {{ {any} }}\n", .{r_product[0].toBytes()});
+                if (r_product.len > 1) {
+                    std.debug.print("[ZOLT] STAGE3_PRE: r_product[1] = {{ {any} }}\n", .{r_product[1].toBytes()});
+                }
+                std.debug.print("[ZOLT] STAGE3_PRE: r_product[last] = {{ {any} }}\n", .{r_product[r_product.len - 1].toBytes()});
+            }
 
             // Phase 1: Derive parameters (BEFORE BatchedSumcheck::verify)
             // NOTE: Stage 3 uses challenge_scalar (NOT challenge_scalar_optimized) which means
@@ -136,42 +155,46 @@ pub fn Stage3Prover(comptime F: type) type {
             // ShiftSumcheckParams::new - derive 5 gamma powers
             const shift_gamma_powers = try self.deriveGammaPowersFull(transcript, 5);
             defer self.allocator.free(shift_gamma_powers);
-            std.debug.print("[STAGE3] shift gamma[1] mont_limbs = [{x}, {x}, {x}, {x}]\n", .{ shift_gamma_powers[1].limbs[0], shift_gamma_powers[1].limbs[1], shift_gamma_powers[1].limbs[2], shift_gamma_powers[1].limbs[3] });
-            const g0_be = shift_gamma_powers[0].toBytesBE();
-            const g1_be = shift_gamma_powers[1].toBytesBE();
-            std.debug.print("[STAGE3] shift gamma[0] full bytes = {any}\n", .{g0_be});
-            std.debug.print("[STAGE3] shift gamma[1] full bytes = {any}\n", .{g1_be});
+
+            // Debug: Print all 5 gamma powers in LE bytes format for comparison
+            std.debug.print("[ZOLT] STAGE3_SHIFT: gamma_powers[0] = {{ {any} }}\n", .{shift_gamma_powers[0].toBytes()});
+            std.debug.print("[ZOLT] STAGE3_SHIFT: gamma_powers[1] = {{ {any} }}\n", .{shift_gamma_powers[1].toBytes()});
+            std.debug.print("[ZOLT] STAGE3_SHIFT: gamma_powers[2] = {{ {any} }}\n", .{shift_gamma_powers[2].toBytes()});
+            std.debug.print("[ZOLT] STAGE3_SHIFT: gamma_powers[3] = {{ {any} }}\n", .{shift_gamma_powers[3].toBytes()});
+            std.debug.print("[ZOLT] STAGE3_SHIFT: gamma_powers[4] = {{ {any} }}\n", .{shift_gamma_powers[4].toBytes()});
 
             // InstructionInputParams::new - derive 1 gamma
             const instr_gamma = transcript.challengeScalarFull();
             const instr_gamma_sqr = instr_gamma.mul(instr_gamma);
-            std.debug.print("[STAGE3] instr_gamma = {any}\n", .{instr_gamma.toBytesBE()[0..8]});
+            std.debug.print("[ZOLT] STAGE3_INSTR: gamma = {{ {any} }}\n", .{instr_gamma.toBytes()});
+            std.debug.print("[ZOLT] STAGE3_INSTR: gamma_sqr = {{ {any} }}\n", .{instr_gamma_sqr.toBytes()});
 
             // RegistersClaimReductionSumcheckParams::new - derive 1 gamma
             const reg_gamma = transcript.challengeScalarFull();
             const reg_gamma_sqr = reg_gamma.mul(reg_gamma);
-            std.debug.print("[STAGE3] reg_gamma = {any}\n", .{reg_gamma.toBytesBE()[0..8]});
+            std.debug.print("[ZOLT] STAGE3_REG: gamma = {{ {any} }}\n", .{reg_gamma.toBytes()});
+            std.debug.print("[ZOLT] STAGE3_REG: gamma_sqr = {{ {any} }}\n", .{reg_gamma_sqr.toBytes()});
 
             // Compute input claims for each sumcheck instance
             const shift_input_claim = self.computeShiftInputClaim(
                 opening_claims,
                 shift_gamma_powers,
             );
-            std.debug.print("[STAGE3] shift_input_claim = {any}\n", .{shift_input_claim.toBytesBE()[0..8]});
+            std.debug.print("[ZOLT] STAGE3_PRE: input_claim[0] (Shift) = {{ {any} }}\n", .{shift_input_claim.toBytes()});
 
             const instr_input_claim = self.computeInstructionInputClaim(
                 opening_claims,
                 instr_gamma,
                 instr_gamma_sqr,
             );
-            std.debug.print("[STAGE3] instr_input_claim = {any}\n", .{instr_input_claim.toBytesBE()[0..8]});
+            std.debug.print("[ZOLT] STAGE3_PRE: input_claim[1] (InstrInput) = {{ {any} }}\n", .{instr_input_claim.toBytes()});
 
             const reg_input_claim = self.computeRegistersInputClaim(
                 opening_claims,
                 reg_gamma,
                 reg_gamma_sqr,
             );
-            std.debug.print("[STAGE3] reg_input_claim = {any}\n", .{reg_input_claim.toBytesBE()[0..8]});
+            std.debug.print("[ZOLT] STAGE3_PRE: input_claim[2] (Registers) = {{ {any} }}\n", .{reg_input_claim.toBytes()});
 
             // Phase 2: BatchedSumcheck::verify protocol
 
@@ -186,13 +209,15 @@ pub fn Stage3Prover(comptime F: type) type {
             for (0..3) |i| {
                 batching_coeffs[i] = transcript.challengeScalarFull();
             }
-            std.debug.print("[STAGE3] batching_coeff[0] = {any}\n", .{batching_coeffs[0].toBytesBE()[0..8]});
+            std.debug.print("[ZOLT] STAGE3_PRE: batching_coeff[0] = {{ {any} }}\n", .{batching_coeffs[0].toBytes()});
+            std.debug.print("[ZOLT] STAGE3_PRE: batching_coeff[1] = {{ {any} }}\n", .{batching_coeffs[1].toBytes()});
+            std.debug.print("[ZOLT] STAGE3_PRE: batching_coeff[2] = {{ {any} }}\n", .{batching_coeffs[2].toBytes()});
 
             // Compute the combined initial claim
             var combined_claim = shift_input_claim.mul(batching_coeffs[0]);
             combined_claim = combined_claim.add(instr_input_claim.mul(batching_coeffs[1]));
             combined_claim = combined_claim.add(reg_input_claim.mul(batching_coeffs[2]));
-            std.debug.print("[STAGE3] combined initial claim = {any}\n", .{combined_claim.toBytesBE()[0..8]});
+            std.debug.print("[ZOLT] STAGE3_INITIAL: batched_claim = {{ {any} }}\n", .{combined_claim.toBytes()});
 
             // Allocate challenges
             var challenges = try self.allocator.alloc(F, num_rounds);
@@ -225,6 +250,57 @@ pub fn Stage3Prover(comptime F: type) type {
 
             const eq_plus_one_product_evals = try self.computeEqPlusOneEvals(r_product, trace_len);
             defer self.allocator.free(eq_plus_one_product_evals);
+
+            // DEBUG: Print MLE sample values
+            std.debug.print("\n[ZOLT] STAGE3_MLE: shift_mles sample values:\n", .{});
+            if (trace_len > 0) {
+                std.debug.print("[ZOLT] STAGE3_MLE: unexpanded_pc[0] = {{ {any} }}\n", .{shift_mles.unexpanded_pc[0].toBytes()});
+                std.debug.print("[ZOLT] STAGE3_MLE: pc[0] = {{ {any} }}\n", .{shift_mles.pc[0].toBytes()});
+                std.debug.print("[ZOLT] STAGE3_MLE: is_virtual[0] = {{ {any} }}\n", .{shift_mles.is_virtual[0].toBytes()});
+                std.debug.print("[ZOLT] STAGE3_MLE: is_first_in_sequence[0] = {{ {any} }}\n", .{shift_mles.is_first_in_sequence[0].toBytes()});
+                std.debug.print("[ZOLT] STAGE3_MLE: is_noop[0] = {{ {any} }}\n", .{shift_mles.is_noop[0].toBytes()});
+                if (trace_len > 1) {
+                    std.debug.print("[ZOLT] STAGE3_MLE: unexpanded_pc[1] = {{ {any} }}\n", .{shift_mles.unexpanded_pc[1].toBytes()});
+                    std.debug.print("[ZOLT] STAGE3_MLE: is_noop[1] = {{ {any} }}\n", .{shift_mles.is_noop[1].toBytes()});
+                }
+            }
+
+            std.debug.print("\n[ZOLT] STAGE3_MLE: instr_mles sample values:\n", .{});
+            if (trace_len > 0) {
+                std.debug.print("[ZOLT] STAGE3_MLE: left_is_rs1[0] = {{ {any} }}\n", .{instr_mles.left_is_rs1[0].toBytes()});
+                std.debug.print("[ZOLT] STAGE3_MLE: rs1_value[0] = {{ {any} }}\n", .{instr_mles.rs1_value[0].toBytes()});
+                std.debug.print("[ZOLT] STAGE3_MLE: right_is_rs2[0] = {{ {any} }}\n", .{instr_mles.right_is_rs2[0].toBytes()});
+                std.debug.print("[ZOLT] STAGE3_MLE: rs2_value[0] = {{ {any} }}\n", .{instr_mles.rs2_value[0].toBytes()});
+                std.debug.print("[ZOLT] STAGE3_MLE: imm[0] = {{ {any} }}\n", .{instr_mles.imm[0].toBytes()});
+            }
+
+            std.debug.print("\n[ZOLT] STAGE3_MLE: reg_mles sample values:\n", .{});
+            if (trace_len > 0) {
+                std.debug.print("[ZOLT] STAGE3_MLE: rd_write_value[0] = {{ {any} }}\n", .{reg_mles.rd_write_value[0].toBytes()});
+                std.debug.print("[ZOLT] STAGE3_MLE: rs1_value[0] = {{ {any} }}\n", .{reg_mles.rs1_value[0].toBytes()});
+                std.debug.print("[ZOLT] STAGE3_MLE: rs2_value[0] = {{ {any} }}\n", .{reg_mles.rs2_value[0].toBytes()});
+            }
+
+            // DEBUG: Print eq polynomial sample values
+            std.debug.print("\n[ZOLT] STAGE3_EQ: eq polynomial evaluations:\n", .{});
+            if (eq_r_outer_evals.len > 0) {
+                std.debug.print("[ZOLT] STAGE3_EQ: eq_r_outer[0] = {{ {any} }}\n", .{eq_r_outer_evals[0].toBytes()});
+                if (eq_r_outer_evals.len > 1) {
+                    std.debug.print("[ZOLT] STAGE3_EQ: eq_r_outer[1] = {{ {any} }}\n", .{eq_r_outer_evals[1].toBytes()});
+                }
+            }
+            if (eq_r_product_evals.len > 0) {
+                std.debug.print("[ZOLT] STAGE3_EQ: eq_r_product[0] = {{ {any} }}\n", .{eq_r_product_evals[0].toBytes()});
+            }
+            if (eq_plus_one_outer_evals.len > 0) {
+                std.debug.print("[ZOLT] STAGE3_EQ: eq_plus_one_outer[0] = {{ {any} }}\n", .{eq_plus_one_outer_evals[0].toBytes()});
+                if (eq_plus_one_outer_evals.len > 1) {
+                    std.debug.print("[ZOLT] STAGE3_EQ: eq_plus_one_outer[1] = {{ {any} }}\n", .{eq_plus_one_outer_evals[1].toBytes()});
+                }
+            }
+            if (eq_plus_one_product_evals.len > 0) {
+                std.debug.print("[ZOLT] STAGE3_EQ: eq_plus_one_product[0] = {{ {any} }}\n", .{eq_plus_one_product_evals[0].toBytes()});
+            }
 
             // Track current claims for each instance
             var current_shift_claim = shift_input_claim;
@@ -281,38 +357,31 @@ pub fn Stage3Prover(comptime F: type) type {
                 const reg_p1 = current_reg_claim.sub(reg_evals_02[0]);
                 const reg_evals: [3]F = .{ reg_evals_02[0], reg_p1, reg_evals_02[1] };
 
-                // Debug round 0 evaluations
-                if (round == 0) {
-                    std.debug.print("\n[STAGE3] === ROUND 0 DEBUG ===\n", .{});
-                    std.debug.print("[STAGE3] shift_evals: p(0)={any}, p(1)={any}, p(2)={any}\n", .{
-                        shift_evals[0].toBytesBE()[0..8],
-                        shift_evals[1].toBytesBE()[0..8],
-                        shift_evals[2].toBytesBE()[0..8],
-                    });
-                    std.debug.print("[STAGE3] shift p(0)+p(1) = {any}, claim = {any}\n", .{
-                        shift_evals[0].add(shift_evals[1]).toBytesBE()[0..8],
-                        current_shift_claim.toBytesBE()[0..8],
-                    });
-                    std.debug.print("[STAGE3] instr_evals: p(0)={any}, p(1)={any}, p(2)={any}, p(3)={any}\n", .{
-                        instr_evals[0].toBytesBE()[0..8],
-                        instr_evals[1].toBytesBE()[0..8],
-                        instr_evals[2].toBytesBE()[0..8],
-                        instr_evals[3].toBytesBE()[0..8],
-                    });
-                    std.debug.print("[STAGE3] reg_evals: p(0)={any}, p(1)={any}, p(2)={any}\n", .{
-                        reg_evals[0].toBytesBE()[0..8],
-                        reg_evals[1].toBytesBE()[0..8],
-                        reg_evals[2].toBytesBE()[0..8],
-                    });
-                    // Print some eq+1 values
-                    std.debug.print("[STAGE3] eq+1_outer[0]={any}, eq+1_outer[1]={any}\n", .{
-                        eq_plus_one_outer_evals[0].toBytesBE()[0..8],
-                        eq_plus_one_outer_evals[1].toBytesBE()[0..8],
-                    });
-                    std.debug.print("[STAGE3] MLE: upc[0]={any}, upc[1]={any}\n", .{
-                        shift_mles.unexpanded_pc[0].toBytesBE()[0..8],
-                        shift_mles.unexpanded_pc[1].toBytesBE()[0..8],
-                    });
+                // Debug round evaluations (all rounds for comprehensive analysis)
+                // First 10 rounds: full detail; rest: summary only
+                const detailed = round < 10;
+
+                std.debug.print("\n[ZOLT] STAGE3_ROUND_{}: current_claim = {{ {any} }}\n", .{ round, combined_claim.toBytes() });
+                std.debug.print("[ZOLT] STAGE3_ROUND_{}: shift_claim = {{ {any} }}\n", .{ round, current_shift_claim.toBytes() });
+                std.debug.print("[ZOLT] STAGE3_ROUND_{}: instr_claim = {{ {any} }}\n", .{ round, current_instr_claim.toBytes() });
+                std.debug.print("[ZOLT] STAGE3_ROUND_{}: reg_claim = {{ {any} }}\n", .{ round, current_reg_claim.toBytes() });
+
+                if (detailed) {
+                    // Shift evaluations
+                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: shift_p0 = {{ {any} }}\n", .{ round, shift_evals[0].toBytes() });
+                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: shift_p1 = {{ {any} }}\n", .{ round, shift_evals[1].toBytes() });
+                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: shift_p2 = {{ {any} }}\n", .{ round, shift_evals[2].toBytes() });
+
+                    // Instruction input evaluations
+                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: instr_p0 = {{ {any} }}\n", .{ round, instr_evals[0].toBytes() });
+                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: instr_p1 = {{ {any} }}\n", .{ round, instr_evals[1].toBytes() });
+                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: instr_p2 = {{ {any} }}\n", .{ round, instr_evals[2].toBytes() });
+                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: instr_p3 = {{ {any} }}\n", .{ round, instr_evals[3].toBytes() });
+
+                    // Registers evaluations
+                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: reg_p0 = {{ {any} }}\n", .{ round, reg_evals[0].toBytes() });
+                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: reg_p1 = {{ {any} }}\n", .{ round, reg_evals[1].toBytes() });
+                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: reg_p2 = {{ {any} }}\n", .{ round, reg_evals[2].toBytes() });
                 }
 
                 // Combine round polynomials (all evaluated at 0, 1, 2, 3)
@@ -351,16 +420,40 @@ pub fn Stage3Prover(comptime F: type) type {
                 }
                 transcript.appendMessage("UniPoly_end");
 
+                // Debug: Print compressed coefficients before transcript append
+                std.debug.print("[ZOLT] STAGE3_ROUND_{}: c0 = {{ {any} }}\n", .{ round, compressed[0].toBytes() });
+                std.debug.print("[ZOLT] STAGE3_ROUND_{}: c2 = {{ {any} }}\n", .{ round, compressed[1].toBytes() });
+                std.debug.print("[ZOLT] STAGE3_ROUND_{}: c3 = {{ {any} }}\n", .{ round, compressed[2].toBytes() });
+
+                // Also print the full combined polynomial coefficients for debugging
+                if (detailed) {
+                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: combined_coeffs = [{{ {any} }}, {{ {any} }}, {{ {any} }}, {{ {any} }}]\n", .{
+                        round,
+                        combined_coeffs[0].toBytes(),
+                        combined_coeffs[1].toBytes(),
+                        combined_coeffs[2].toBytes(),
+                        combined_coeffs[3].toBytes(),
+                    });
+
+                    // Also print combined evals for verification
+                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: combined_evals = [{{ {any} }}, {{ {any} }}, {{ {any} }}, {{ {any} }}]\n", .{
+                        round,
+                        combined_evals[0].toBytes(),
+                        combined_evals[1].toBytes(),
+                        combined_evals[2].toBytes(),
+                        combined_evals[3].toBytes(),
+                    });
+                }
+
                 // Derive challenge
                 const r_j = transcript.challengeScalar();
                 challenges[round] = r_j;
 
-                if (round < 3) {
-                    std.debug.print("[STAGE3] round {} challenge = {any}\n", .{ round, r_j.toBytesBE()[0..8] });
-                }
+                std.debug.print("[ZOLT] STAGE3_ROUND_{}: challenge = {{ {any} }}\n", .{ round, r_j.toBytes() });
 
                 // Evaluate combined polynomial at r_j to get next claim
                 combined_claim = self.evaluatePolyAtPoint(combined_coeffs, r_j);
+                std.debug.print("[ZOLT] STAGE3_ROUND_{}: next_claim = {{ {any} }}\n", .{ round, combined_claim.toBytes() });
 
                 // Update individual claims by evaluating their polynomials at r_j
                 const shift_coeffs = try self.evalsToCoeffs(&shift_evals, 2);
@@ -387,17 +480,46 @@ pub fn Stage3Prover(comptime F: type) type {
                 self.bindEqEvals(eq_plus_one_product_evals, r_j);
             }
 
-            std.debug.print("[STAGE3] Final claims: shift={any}, instr={any}, reg={any}\n", .{
-                current_shift_claim.toBytesBE()[0..8],
-                current_instr_claim.toBytesBE()[0..8],
-                current_reg_claim.toBytesBE()[0..8],
-            });
+            std.debug.print("\n[ZOLT] STAGE3_FINAL: output_claim = {{ {any} }}\n", .{combined_claim.toBytes()});
+            std.debug.print("[ZOLT] STAGE3_FINAL: shift_claim = {{ {any} }}\n", .{current_shift_claim.toBytes()});
+            std.debug.print("[ZOLT] STAGE3_FINAL: instr_claim = {{ {any} }}\n", .{current_instr_claim.toBytes()});
+            std.debug.print("[ZOLT] STAGE3_FINAL: reg_claim = {{ {any} }}\n", .{current_reg_claim.toBytes()});
+            std.debug.print("[ZOLT] STAGE3_FINAL: num_rounds = {}\n", .{num_rounds});
+
+            // Print final challenges
+            std.debug.print("[ZOLT] STAGE3_FINAL: challenges[0] = {{ {any} }}\n", .{challenges[0].toBytes()});
+            if (num_rounds > 1) {
+                std.debug.print("[ZOLT] STAGE3_FINAL: challenges[last] = {{ {any} }}\n", .{challenges[num_rounds - 1].toBytes()});
+            }
 
             // Phase 3: Compute and cache opening claims
             // After all rounds, the MLEs are bound to single values
             const shift_claims = shift_mles.finalClaims();
             const instr_claims = instr_mles.finalClaims();
             const reg_claims = reg_mles.finalClaims();
+
+            // DEBUG: Print opening claims
+            std.debug.print("\n[ZOLT] STAGE3_OPENING: Shift sumcheck claims:\n", .{});
+            std.debug.print("[ZOLT] STAGE3_OPENING: unexpanded_pc = {{ {any} }}\n", .{shift_claims.unexpanded_pc.toBytes()});
+            std.debug.print("[ZOLT] STAGE3_OPENING: pc = {{ {any} }}\n", .{shift_claims.pc.toBytes()});
+            std.debug.print("[ZOLT] STAGE3_OPENING: is_virtual = {{ {any} }}\n", .{shift_claims.is_virtual.toBytes()});
+            std.debug.print("[ZOLT] STAGE3_OPENING: is_first_in_sequence = {{ {any} }}\n", .{shift_claims.is_first_in_sequence.toBytes()});
+            std.debug.print("[ZOLT] STAGE3_OPENING: is_noop = {{ {any} }}\n", .{shift_claims.is_noop.toBytes()});
+
+            std.debug.print("\n[ZOLT] STAGE3_OPENING: InstructionInput sumcheck claims:\n", .{});
+            std.debug.print("[ZOLT] STAGE3_OPENING: left_is_rs1 = {{ {any} }}\n", .{instr_claims.left_is_rs1.toBytes()});
+            std.debug.print("[ZOLT] STAGE3_OPENING: rs1_value = {{ {any} }}\n", .{instr_claims.rs1_value.toBytes()});
+            std.debug.print("[ZOLT] STAGE3_OPENING: left_is_pc = {{ {any} }}\n", .{instr_claims.left_is_pc.toBytes()});
+            std.debug.print("[ZOLT] STAGE3_OPENING: unexpanded_pc = {{ {any} }}\n", .{instr_claims.unexpanded_pc.toBytes()});
+            std.debug.print("[ZOLT] STAGE3_OPENING: right_is_rs2 = {{ {any} }}\n", .{instr_claims.right_is_rs2.toBytes()});
+            std.debug.print("[ZOLT] STAGE3_OPENING: rs2_value = {{ {any} }}\n", .{instr_claims.rs2_value.toBytes()});
+            std.debug.print("[ZOLT] STAGE3_OPENING: right_is_imm = {{ {any} }}\n", .{instr_claims.right_is_imm.toBytes()});
+            std.debug.print("[ZOLT] STAGE3_OPENING: imm = {{ {any} }}\n", .{instr_claims.imm.toBytes()});
+
+            std.debug.print("\n[ZOLT] STAGE3_OPENING: RegistersClaimReduction claims:\n", .{});
+            std.debug.print("[ZOLT] STAGE3_OPENING: rd_write_value = {{ {any} }}\n", .{reg_claims.rd_write_value.toBytes()});
+            std.debug.print("[ZOLT] STAGE3_OPENING: rs1_value = {{ {any} }}\n", .{reg_claims.rs1_value.toBytes()});
+            std.debug.print("[ZOLT] STAGE3_OPENING: rs2_value = {{ {any} }}\n", .{reg_claims.rs2_value.toBytes()});
 
             // Append opening claims to transcript (cache_openings)
             // ShiftSumcheck: 5 claims
@@ -491,12 +613,12 @@ pub fn Stage3Prover(comptime F: type) type {
             const next_is_first = opening_claims.get(.{ .Virtual = .{ .poly = .NextIsFirstInSequence, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
             const next_is_noop = opening_claims.get(.{ .Virtual = .{ .poly = .NextIsNoop, .sumcheck_id = .SpartanProductVirtualization } }) orelse F.zero();
 
-            // DEBUG: Print the individual claims
-            std.debug.print("[STAGE3] shift_input: next_unexpanded_pc = {any}\n", .{next_unexpanded_pc.toBytesBE()});
-            std.debug.print("[STAGE3] shift_input: next_pc = {any}\n", .{next_pc.toBytesBE()});
-            std.debug.print("[STAGE3] shift_input: next_is_virtual = {any}\n", .{next_is_virtual.toBytesBE()});
-            std.debug.print("[STAGE3] shift_input: next_is_first = {any}\n", .{next_is_first.toBytesBE()});
-            std.debug.print("[STAGE3] shift_input: next_is_noop = {any}\n", .{next_is_noop.toBytesBE()});
+            // DEBUG: Print the individual claims with consistent format
+            std.debug.print("[ZOLT] STAGE3_SHIFT_INPUT: NextUnexpandedPC = {{ {any} }}\n", .{next_unexpanded_pc.toBytes()});
+            std.debug.print("[ZOLT] STAGE3_SHIFT_INPUT: NextPC = {{ {any} }}\n", .{next_pc.toBytes()});
+            std.debug.print("[ZOLT] STAGE3_SHIFT_INPUT: NextIsVirtual = {{ {any} }}\n", .{next_is_virtual.toBytes()});
+            std.debug.print("[ZOLT] STAGE3_SHIFT_INPUT: NextIsFirstInSequence = {{ {any} }}\n", .{next_is_first.toBytes()});
+            std.debug.print("[ZOLT] STAGE3_SHIFT_INPUT: NextIsNoop = {{ {any} }}\n", .{next_is_noop.toBytes()});
 
             var result = next_unexpanded_pc;
             result = result.add(gamma_powers[1].mul(next_pc));
@@ -520,6 +642,12 @@ pub fn Stage3Prover(comptime F: type) type {
             const left_2 = opening_claims.get(.{ .Virtual = .{ .poly = .LeftInstructionInput, .sumcheck_id = .SpartanProductVirtualization } }) orelse F.zero();
             const right_2 = opening_claims.get(.{ .Virtual = .{ .poly = .RightInstructionInput, .sumcheck_id = .SpartanProductVirtualization } }) orelse F.zero();
 
+            // DEBUG: Print the individual claims
+            std.debug.print("[ZOLT] STAGE3_INSTR_INPUT: LeftInstructionInput(Outer) = {{ {any} }}\n", .{left_1.toBytes()});
+            std.debug.print("[ZOLT] STAGE3_INSTR_INPUT: RightInstructionInput(Outer) = {{ {any} }}\n", .{right_1.toBytes()});
+            std.debug.print("[ZOLT] STAGE3_INSTR_INPUT: LeftInstructionInput(Product) = {{ {any} }}\n", .{left_2.toBytes()});
+            std.debug.print("[ZOLT] STAGE3_INSTR_INPUT: RightInstructionInput(Product) = {{ {any} }}\n", .{right_2.toBytes()});
+
             const claim_1 = right_1.add(gamma.mul(left_1));
             const claim_2 = right_2.add(gamma.mul(left_2));
             return claim_1.add(gamma_sqr.mul(claim_2));
@@ -537,6 +665,11 @@ pub fn Stage3Prover(comptime F: type) type {
             const rd = opening_claims.get(.{ .Virtual = .{ .poly = .RdWriteValue, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
             const rs1 = opening_claims.get(.{ .Virtual = .{ .poly = .Rs1Value, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
             const rs2 = opening_claims.get(.{ .Virtual = .{ .poly = .Rs2Value, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
+
+            // DEBUG: Print the individual claims
+            std.debug.print("[ZOLT] STAGE3_REG_INPUT: RdWriteValue = {{ {any} }}\n", .{rd.toBytes()});
+            std.debug.print("[ZOLT] STAGE3_REG_INPUT: Rs1Value = {{ {any} }}\n", .{rs1.toBytes()});
+            std.debug.print("[ZOLT] STAGE3_REG_INPUT: Rs2Value = {{ {any} }}\n", .{rs2.toBytes()});
 
             var result = rd;
             result = result.add(gamma.mul(rs1));
@@ -614,18 +747,18 @@ pub fn Stage3Prover(comptime F: type) type {
                     is_first_in_sequence[i] = values[R1CSInputIndex.FlagIsFirstInSequence.toIndex()];
                     is_noop[i] = values[R1CSInputIndex.FlagIsNoop.toIndex()];
 
-                    // Debug first few cycles
+                    // Debug first few cycles - show last 8 bytes where small values reside
                     if (i < 3) {
                         std.debug.print("[STAGE3] cycle[{}]: raw_upc_idx7={any}, raw_pc_idx6={any}\n", .{
                             i,
-                            values[7].toBytesBE()[0..8], // UnexpandedPC = 7
-                            values[6].toBytesBE()[0..8], // PC = 6
+                            values[7].toBytesBE()[24..32], // UnexpandedPC = 7, last 8 bytes
+                            values[6].toBytesBE()[24..32], // PC = 6, last 8 bytes
                         });
                         std.debug.print("[STAGE3] cycle[{}]: via_enum: upc={any}, pc={any}, noop={any}\n", .{
                             i,
-                            unexpanded_pc[i].toBytesBE()[0..8],
-                            pc[i].toBytesBE()[0..8],
-                            is_noop[i].toBytesBE()[0..8],
+                            unexpanded_pc[i].toBytesBE()[24..32],
+                            pc[i].toBytesBE()[24..32],
+                            is_noop[i].toBytesBE()[24..32],
                         });
                     }
                 } else {

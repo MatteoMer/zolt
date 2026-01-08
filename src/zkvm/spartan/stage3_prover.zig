@@ -174,9 +174,10 @@ pub fn Stage3Prover(comptime F: type) type {
             transcript.appendScalar(reg_input_claim);
 
             // Derive batching coefficients (line 204 in sumcheck.rs)
+            // NOTE: Jolt's challenge_vector uses challenge_scalar (full 128 bits, no masking)
             var batching_coeffs: [3]F = undefined;
             for (0..3) |i| {
-                batching_coeffs[i] = transcript.challengeScalar();
+                batching_coeffs[i] = transcript.challengeScalarFull();
             }
             std.debug.print("[STAGE3] batching_coeff[0] = {any}\n", .{batching_coeffs[0].toBytesBE()[0..8]});
 
@@ -291,11 +292,12 @@ pub fn Stage3Prover(comptime F: type) type {
                 });
 
                 // Append compressed poly to transcript
-                transcript.appendMessage("CompressedUniPoly_begin");
+                // NOTE: Jolt uses "UniPoly_begin/end" (NOT "CompressedUniPoly") for CompressedUniPoly
+                transcript.appendMessage("UniPoly_begin");
                 for (compressed) |coeff| {
                     transcript.appendScalar(coeff);
                 }
-                transcript.appendMessage("CompressedUniPoly_end");
+                transcript.appendMessage("UniPoly_end");
 
                 // Derive challenge
                 const r_j = transcript.challengeScalar();

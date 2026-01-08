@@ -1,9 +1,9 @@
 //! Stage 3 Batched Sumcheck Prover for Jolt Compatibility
 //!
 //! Stage 3 in Jolt consists of 3 batched sumcheck instances:
-//! 1. ShiftSumcheck - proves shift polynomial relations (degree 2)
-//! 2. InstructionInputSumcheck - proves operand computation (degree 3)
-//! 3. RegistersClaimReduction - reduces register value claims (degree 2)
+//! 1. ShiftSumcheck - proves shift polynomial relations (degree 2) - uses prefix-suffix
+//! 2. InstructionInputSumcheck - proves operand computation (degree 3) - uses GruenSplitEq
+//! 3. RegistersClaimReduction - reduces register value claims (degree 2) - uses prefix-suffix
 //!
 //! All three instances have n_cycle_vars rounds.
 //!
@@ -80,7 +80,13 @@ pub fn Stage3Prover(comptime F: type) type {
         const Blake2bTranscript = transcripts.Blake2bTranscript;
         const EqPolynomial = poly_mod.EqPolynomial;
         const EqPlusOnePolynomial = poly_mod.EqPlusOnePolynomial;
+        const EqPlusOnePrefixSuffixPoly = poly_mod.EqPlusOnePrefixSuffixPoly;
         const MleEvaluation = poly_mod.MleEvaluation;
+
+        // Degree bound for round polynomials
+        const SHIFT_DEGREE: usize = 2; // ShiftSumcheck is degree 2
+        const INSTR_DEGREE: usize = 3; // InstructionInputSumcheck is degree 3
+        const REG_DEGREE: usize = 2; // RegistersClaimReduction is degree 2
 
         allocator: Allocator,
 
@@ -130,24 +136,6 @@ pub fn Stage3Prover(comptime F: type) type {
             std.debug.print("\n[ZOLT] ========== STAGE 3 BEGIN ==========\n", .{});
             std.debug.print("[ZOLT] STAGE3_PRE: transcript_state = {{ {any} }}\n", .{transcript.state[0..16]});
 
-            // DEBUG: Print r_outer and r_product inputs
-            std.debug.print("[ZOLT] STAGE3_PRE: r_outer.len = {}\n", .{r_outer.len});
-            std.debug.print("[ZOLT] STAGE3_PRE: r_product.len = {}\n", .{r_product.len});
-            if (r_outer.len > 0) {
-                std.debug.print("[ZOLT] STAGE3_PRE: r_outer[0] = {{ {any} }}\n", .{r_outer[0].toBytes()});
-                if (r_outer.len > 1) {
-                    std.debug.print("[ZOLT] STAGE3_PRE: r_outer[1] = {{ {any} }}\n", .{r_outer[1].toBytes()});
-                }
-                std.debug.print("[ZOLT] STAGE3_PRE: r_outer[last] = {{ {any} }}\n", .{r_outer[r_outer.len - 1].toBytes()});
-            }
-            if (r_product.len > 0) {
-                std.debug.print("[ZOLT] STAGE3_PRE: r_product[0] = {{ {any} }}\n", .{r_product[0].toBytes()});
-                if (r_product.len > 1) {
-                    std.debug.print("[ZOLT] STAGE3_PRE: r_product[1] = {{ {any} }}\n", .{r_product[1].toBytes()});
-                }
-                std.debug.print("[ZOLT] STAGE3_PRE: r_product[last] = {{ {any} }}\n", .{r_product[r_product.len - 1].toBytes()});
-            }
-
             // Phase 1: Derive parameters (BEFORE BatchedSumcheck::verify)
             // NOTE: Stage 3 uses challenge_scalar (NOT challenge_scalar_optimized) which means
             // we need challengeScalarFull (no 125-bit masking) to match Jolt's behavior.
@@ -159,21 +147,15 @@ pub fn Stage3Prover(comptime F: type) type {
             // Debug: Print all 5 gamma powers in LE bytes format for comparison
             std.debug.print("[ZOLT] STAGE3_SHIFT: gamma_powers[0] = {{ {any} }}\n", .{shift_gamma_powers[0].toBytes()});
             std.debug.print("[ZOLT] STAGE3_SHIFT: gamma_powers[1] = {{ {any} }}\n", .{shift_gamma_powers[1].toBytes()});
-            std.debug.print("[ZOLT] STAGE3_SHIFT: gamma_powers[2] = {{ {any} }}\n", .{shift_gamma_powers[2].toBytes()});
-            std.debug.print("[ZOLT] STAGE3_SHIFT: gamma_powers[3] = {{ {any} }}\n", .{shift_gamma_powers[3].toBytes()});
             std.debug.print("[ZOLT] STAGE3_SHIFT: gamma_powers[4] = {{ {any} }}\n", .{shift_gamma_powers[4].toBytes()});
 
             // InstructionInputParams::new - derive 1 gamma
             const instr_gamma = transcript.challengeScalarFull();
             const instr_gamma_sqr = instr_gamma.mul(instr_gamma);
-            std.debug.print("[ZOLT] STAGE3_INSTR: gamma = {{ {any} }}\n", .{instr_gamma.toBytes()});
-            std.debug.print("[ZOLT] STAGE3_INSTR: gamma_sqr = {{ {any} }}\n", .{instr_gamma_sqr.toBytes()});
 
             // RegistersClaimReductionSumcheckParams::new - derive 1 gamma
             const reg_gamma = transcript.challengeScalarFull();
             const reg_gamma_sqr = reg_gamma.mul(reg_gamma);
-            std.debug.print("[ZOLT] STAGE3_REG: gamma = {{ {any} }}\n", .{reg_gamma.toBytes()});
-            std.debug.print("[ZOLT] STAGE3_REG: gamma_sqr = {{ {any} }}\n", .{reg_gamma_sqr.toBytes()});
 
             // Compute input claims for each sumcheck instance
             const shift_input_claim = self.computeShiftInputClaim(
@@ -210,97 +192,52 @@ pub fn Stage3Prover(comptime F: type) type {
                 batching_coeffs[i] = transcript.challengeScalarFull();
             }
             std.debug.print("[ZOLT] STAGE3_PRE: batching_coeff[0] = {{ {any} }}\n", .{batching_coeffs[0].toBytes()});
-            std.debug.print("[ZOLT] STAGE3_PRE: batching_coeff[1] = {{ {any} }}\n", .{batching_coeffs[1].toBytes()});
-            std.debug.print("[ZOLT] STAGE3_PRE: batching_coeff[2] = {{ {any} }}\n", .{batching_coeffs[2].toBytes()});
 
             // Compute the combined initial claim
             var combined_claim = shift_input_claim.mul(batching_coeffs[0]);
             combined_claim = combined_claim.add(instr_input_claim.mul(batching_coeffs[1]));
             combined_claim = combined_claim.add(reg_input_claim.mul(batching_coeffs[2]));
-            std.debug.print("[ZOLT] STAGE3_INITIAL: batched_claim = {{ {any} }}\n", .{combined_claim.toBytes()});
 
             // Allocate challenges
             var challenges = try self.allocator.alloc(F, num_rounds);
 
-            // Build MLEs from trace data
-            var shift_mles = try self.buildShiftMLEs(cycle_witnesses, trace_len);
-            defer shift_mles.deinit(self.allocator);
+            // =========================================================================
+            // Initialize Prefix-Suffix Provers for Shift and Registers
+            // =========================================================================
 
-            var instr_mles = try self.buildInstructionInputMLEs(cycle_witnesses, trace_len);
-            defer instr_mles.deinit(self.allocator);
+            // ShiftSumcheck uses EqPlusOnePrefixSuffixPoly decomposition with 4 (P,Q) pairs
+            var shift_prover = try ShiftPrefixSuffixProver(F).init(
+                self.allocator,
+                cycle_witnesses,
+                trace_len,
+                r_outer,
+                r_product,
+                shift_gamma_powers,
+            );
+            defer shift_prover.deinit();
 
-            var reg_mles = try self.buildRegistersMLEs(cycle_witnesses, trace_len);
-            defer reg_mles.deinit(self.allocator);
+            // RegistersClaimReduction uses EqPolynomial prefix-suffix with 1 (P,Q) pair
+            var reg_prover = try RegistersPrefixSuffixProver(F).init(
+                self.allocator,
+                cycle_witnesses,
+                trace_len,
+                r_outer, // r_spartan = r_outer
+                reg_gamma,
+                reg_gamma_sqr,
+            );
+            defer reg_prover.deinit();
 
-            // Build eq/eq+1 polynomial evaluations tables
-            // For each instance, we need eq(r_prev, x) or eq+1(r_prev, x) weights
-            var eq_r_outer_poly = try EqPolynomial(F).init(self.allocator, r_outer);
-            defer eq_r_outer_poly.deinit();
-            const eq_r_outer_evals = try eq_r_outer_poly.evals(self.allocator);
-            defer self.allocator.free(eq_r_outer_evals);
-
-            var eq_r_product_poly = try EqPolynomial(F).init(self.allocator, r_product);
-            defer eq_r_product_poly.deinit();
-            const eq_r_product_evals = try eq_r_product_poly.evals(self.allocator);
-            defer self.allocator.free(eq_r_product_evals);
-
-            // For eq+1, we compute tables eq_plus_one(r, j) for all j
-            const eq_plus_one_outer_evals = try self.computeEqPlusOneEvals(r_outer, trace_len);
-            defer self.allocator.free(eq_plus_one_outer_evals);
-
-            const eq_plus_one_product_evals = try self.computeEqPlusOneEvals(r_product, trace_len);
-            defer self.allocator.free(eq_plus_one_product_evals);
-
-            // DEBUG: Print MLE sample values
-            std.debug.print("\n[ZOLT] STAGE3_MLE: shift_mles sample values:\n", .{});
-            if (trace_len > 0) {
-                std.debug.print("[ZOLT] STAGE3_MLE: unexpanded_pc[0] = {{ {any} }}\n", .{shift_mles.unexpanded_pc[0].toBytes()});
-                std.debug.print("[ZOLT] STAGE3_MLE: pc[0] = {{ {any} }}\n", .{shift_mles.pc[0].toBytes()});
-                std.debug.print("[ZOLT] STAGE3_MLE: is_virtual[0] = {{ {any} }}\n", .{shift_mles.is_virtual[0].toBytes()});
-                std.debug.print("[ZOLT] STAGE3_MLE: is_first_in_sequence[0] = {{ {any} }}\n", .{shift_mles.is_first_in_sequence[0].toBytes()});
-                std.debug.print("[ZOLT] STAGE3_MLE: is_noop[0] = {{ {any} }}\n", .{shift_mles.is_noop[0].toBytes()});
-                if (trace_len > 1) {
-                    std.debug.print("[ZOLT] STAGE3_MLE: unexpanded_pc[1] = {{ {any} }}\n", .{shift_mles.unexpanded_pc[1].toBytes()});
-                    std.debug.print("[ZOLT] STAGE3_MLE: is_noop[1] = {{ {any} }}\n", .{shift_mles.is_noop[1].toBytes()});
-                }
-            }
-
-            std.debug.print("\n[ZOLT] STAGE3_MLE: instr_mles sample values:\n", .{});
-            if (trace_len > 0) {
-                std.debug.print("[ZOLT] STAGE3_MLE: left_is_rs1[0] = {{ {any} }}\n", .{instr_mles.left_is_rs1[0].toBytes()});
-                std.debug.print("[ZOLT] STAGE3_MLE: rs1_value[0] = {{ {any} }}\n", .{instr_mles.rs1_value[0].toBytes()});
-                std.debug.print("[ZOLT] STAGE3_MLE: right_is_rs2[0] = {{ {any} }}\n", .{instr_mles.right_is_rs2[0].toBytes()});
-                std.debug.print("[ZOLT] STAGE3_MLE: rs2_value[0] = {{ {any} }}\n", .{instr_mles.rs2_value[0].toBytes()});
-                std.debug.print("[ZOLT] STAGE3_MLE: imm[0] = {{ {any} }}\n", .{instr_mles.imm[0].toBytes()});
-            }
-
-            std.debug.print("\n[ZOLT] STAGE3_MLE: reg_mles sample values:\n", .{});
-            if (trace_len > 0) {
-                std.debug.print("[ZOLT] STAGE3_MLE: rd_write_value[0] = {{ {any} }}\n", .{reg_mles.rd_write_value[0].toBytes()});
-                std.debug.print("[ZOLT] STAGE3_MLE: rs1_value[0] = {{ {any} }}\n", .{reg_mles.rs1_value[0].toBytes()});
-                std.debug.print("[ZOLT] STAGE3_MLE: rs2_value[0] = {{ {any} }}\n", .{reg_mles.rs2_value[0].toBytes()});
-            }
-
-            // DEBUG: Print eq polynomial sample values
-            std.debug.print("\n[ZOLT] STAGE3_EQ: eq polynomial evaluations:\n", .{});
-            if (eq_r_outer_evals.len > 0) {
-                std.debug.print("[ZOLT] STAGE3_EQ: eq_r_outer[0] = {{ {any} }}\n", .{eq_r_outer_evals[0].toBytes()});
-                if (eq_r_outer_evals.len > 1) {
-                    std.debug.print("[ZOLT] STAGE3_EQ: eq_r_outer[1] = {{ {any} }}\n", .{eq_r_outer_evals[1].toBytes()});
-                }
-            }
-            if (eq_r_product_evals.len > 0) {
-                std.debug.print("[ZOLT] STAGE3_EQ: eq_r_product[0] = {{ {any} }}\n", .{eq_r_product_evals[0].toBytes()});
-            }
-            if (eq_plus_one_outer_evals.len > 0) {
-                std.debug.print("[ZOLT] STAGE3_EQ: eq_plus_one_outer[0] = {{ {any} }}\n", .{eq_plus_one_outer_evals[0].toBytes()});
-                if (eq_plus_one_outer_evals.len > 1) {
-                    std.debug.print("[ZOLT] STAGE3_EQ: eq_plus_one_outer[1] = {{ {any} }}\n", .{eq_plus_one_outer_evals[1].toBytes()});
-                }
-            }
-            if (eq_plus_one_product_evals.len > 0) {
-                std.debug.print("[ZOLT] STAGE3_EQ: eq_plus_one_product[0] = {{ {any} }}\n", .{eq_plus_one_product_evals[0].toBytes()});
-            }
+            // InstructionInputSumcheck uses direct computation (no prefix-suffix in Jolt)
+            var instr_prover = try InstructionInputProver(F).init(
+                self.allocator,
+                cycle_witnesses,
+                trace_len,
+                r_outer,
+                r_product,
+                instr_gamma,
+                instr_gamma_sqr,
+            );
+            defer instr_prover.deinit();
 
             // Track current claims for each instance
             var current_shift_claim = shift_input_claim;
@@ -309,80 +246,21 @@ pub fn Stage3Prover(comptime F: type) type {
 
             // Run sumcheck rounds
             for (0..num_rounds) |round| {
-                // Current size of MLEs is trace_len >> round
-                const round_shift: u6 = @intCast(round);
-                const current_size = trace_len >> round_shift;
-                const half_size = current_size >> 1;
+                std.debug.print("\n[ZOLT] STAGE3_ROUND_{}: current_claim = {{ {any} }}\n", .{ round, combined_claim.toBytes() });
 
                 // Compute round polynomial for each instance
-                // Following Jolt's approach:
-                // - Compute p(0), p(2) for degree-2 or p(0), p(2), p(3) for degree-3
-                // - Derive p(1) = previous_claim - p(0)
-                // - Convert to coefficients and compress
+                // ShiftSumcheck: degree 2
+                const shift_evals = shift_prover.computeRoundEvals(current_shift_claim);
 
-                // ShiftSumcheck: degree 2, returns [p(0), p(2)]
-                const shift_evals_02 = self.computeShiftRoundEvals(
-                    &shift_mles,
-                    eq_plus_one_outer_evals,
-                    eq_plus_one_product_evals,
-                    shift_gamma_powers,
-                    half_size,
-                );
-                // Derive p(1) from claim
-                const shift_p1 = current_shift_claim.sub(shift_evals_02[0]);
-                const shift_evals: [3]F = .{ shift_evals_02[0], shift_p1, shift_evals_02[1] };
+                // InstructionInputSumcheck: degree 3
+                const instr_evals = instr_prover.computeRoundEvals(current_instr_claim);
 
-                // InstructionInputSumcheck: degree 3, returns [p(0), p(2), p(3)]
-                const instr_evals_023 = self.computeInstrRoundEvals(
-                    &instr_mles,
-                    eq_r_outer_evals,
-                    eq_r_product_evals,
-                    instr_gamma,
-                    instr_gamma_sqr,
-                    half_size,
-                );
-                // Derive p(1) from claim
-                const instr_p1 = current_instr_claim.sub(instr_evals_023[0]);
-                const instr_evals: [4]F = .{ instr_evals_023[0], instr_p1, instr_evals_023[1], instr_evals_023[2] };
+                // RegistersClaimReduction: degree 2
+                const reg_evals = reg_prover.computeRoundEvals(current_reg_claim);
 
-                // RegistersClaimReduction: degree 2, returns [p(0), p(2)]
-                const reg_evals_02 = self.computeRegRoundEvals(
-                    &reg_mles,
-                    eq_r_outer_evals, // r_spartan = r_outer
-                    reg_gamma,
-                    reg_gamma_sqr,
-                    half_size,
-                );
-                // Derive p(1) from claim
-                const reg_p1 = current_reg_claim.sub(reg_evals_02[0]);
-                const reg_evals: [3]F = .{ reg_evals_02[0], reg_p1, reg_evals_02[1] };
-
-                // Debug round evaluations (all rounds for comprehensive analysis)
-                // First 10 rounds: full detail; rest: summary only
-                const detailed = round < 10;
-
-                std.debug.print("\n[ZOLT] STAGE3_ROUND_{}: current_claim = {{ {any} }}\n", .{ round, combined_claim.toBytes() });
-                std.debug.print("[ZOLT] STAGE3_ROUND_{}: shift_claim = {{ {any} }}\n", .{ round, current_shift_claim.toBytes() });
-                std.debug.print("[ZOLT] STAGE3_ROUND_{}: instr_claim = {{ {any} }}\n", .{ round, current_instr_claim.toBytes() });
-                std.debug.print("[ZOLT] STAGE3_ROUND_{}: reg_claim = {{ {any} }}\n", .{ round, current_reg_claim.toBytes() });
-
-                if (detailed) {
-                    // Shift evaluations
-                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: shift_p0 = {{ {any} }}\n", .{ round, shift_evals[0].toBytes() });
-                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: shift_p1 = {{ {any} }}\n", .{ round, shift_evals[1].toBytes() });
-                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: shift_p2 = {{ {any} }}\n", .{ round, shift_evals[2].toBytes() });
-
-                    // Instruction input evaluations
-                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: instr_p0 = {{ {any} }}\n", .{ round, instr_evals[0].toBytes() });
-                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: instr_p1 = {{ {any} }}\n", .{ round, instr_evals[1].toBytes() });
-                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: instr_p2 = {{ {any} }}\n", .{ round, instr_evals[2].toBytes() });
-                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: instr_p3 = {{ {any} }}\n", .{ round, instr_evals[3].toBytes() });
-
-                    // Registers evaluations
-                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: reg_p0 = {{ {any} }}\n", .{ round, reg_evals[0].toBytes() });
-                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: reg_p1 = {{ {any} }}\n", .{ round, reg_evals[1].toBytes() });
-                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: reg_p2 = {{ {any} }}\n", .{ round, reg_evals[2].toBytes() });
-                }
+                // Debug
+                std.debug.print("[ZOLT] STAGE3_ROUND_{}: shift_p0 = {{ {any} }}\n", .{ round, shift_evals[0].toBytes() });
+                std.debug.print("[ZOLT] STAGE3_ROUND_{}: shift_p1 = {{ {any} }}\n", .{ round, shift_evals[1].toBytes() });
 
                 // Combine round polynomials (all evaluated at 0, 1, 2, 3)
                 // batched_poly = coeff[0] * shift_poly + coeff[1] * instr_poly + coeff[2] * reg_poly
@@ -420,30 +298,10 @@ pub fn Stage3Prover(comptime F: type) type {
                 }
                 transcript.appendMessage("UniPoly_end");
 
-                // Debug: Print compressed coefficients before transcript append
+                // Debug: Print compressed coefficients
                 std.debug.print("[ZOLT] STAGE3_ROUND_{}: c0 = {{ {any} }}\n", .{ round, compressed[0].toBytes() });
                 std.debug.print("[ZOLT] STAGE3_ROUND_{}: c2 = {{ {any} }}\n", .{ round, compressed[1].toBytes() });
                 std.debug.print("[ZOLT] STAGE3_ROUND_{}: c3 = {{ {any} }}\n", .{ round, compressed[2].toBytes() });
-
-                // Also print the full combined polynomial coefficients for debugging
-                if (detailed) {
-                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: combined_coeffs = [{{ {any} }}, {{ {any} }}, {{ {any} }}, {{ {any} }}]\n", .{
-                        round,
-                        combined_coeffs[0].toBytes(),
-                        combined_coeffs[1].toBytes(),
-                        combined_coeffs[2].toBytes(),
-                        combined_coeffs[3].toBytes(),
-                    });
-
-                    // Also print combined evals for verification
-                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: combined_evals = [{{ {any} }}, {{ {any} }}, {{ {any} }}, {{ {any} }}]\n", .{
-                        round,
-                        combined_evals[0].toBytes(),
-                        combined_evals[1].toBytes(),
-                        combined_evals[2].toBytes(),
-                        combined_evals[3].toBytes(),
-                    });
-                }
 
                 // Derive challenge
                 const r_j = transcript.challengeScalar();
@@ -468,58 +326,25 @@ pub fn Stage3Prover(comptime F: type) type {
                 defer self.allocator.free(reg_coeffs);
                 current_reg_claim = self.evaluatePolyAtPoint(reg_coeffs, r_j);
 
-                // Bind all MLEs at r_j
-                shift_mles.bind(r_j);
-                instr_mles.bind(r_j);
-                reg_mles.bind(r_j);
-
-                // Bind eq evaluations
-                self.bindEqEvals(eq_r_outer_evals, r_j);
-                self.bindEqEvals(eq_r_product_evals, r_j);
-                self.bindEqEvals(eq_plus_one_outer_evals, r_j);
-                self.bindEqEvals(eq_plus_one_product_evals, r_j);
+                // Bind all provers at r_j
+                shift_prover.bind(r_j);
+                instr_prover.bind(r_j);
+                reg_prover.bind(r_j);
             }
 
             std.debug.print("\n[ZOLT] STAGE3_FINAL: output_claim = {{ {any} }}\n", .{combined_claim.toBytes()});
-            std.debug.print("[ZOLT] STAGE3_FINAL: shift_claim = {{ {any} }}\n", .{current_shift_claim.toBytes()});
-            std.debug.print("[ZOLT] STAGE3_FINAL: instr_claim = {{ {any} }}\n", .{current_instr_claim.toBytes()});
-            std.debug.print("[ZOLT] STAGE3_FINAL: reg_claim = {{ {any} }}\n", .{current_reg_claim.toBytes()});
-            std.debug.print("[ZOLT] STAGE3_FINAL: num_rounds = {}\n", .{num_rounds});
-
-            // Print final challenges
-            std.debug.print("[ZOLT] STAGE3_FINAL: challenges[0] = {{ {any} }}\n", .{challenges[0].toBytes()});
-            if (num_rounds > 1) {
-                std.debug.print("[ZOLT] STAGE3_FINAL: challenges[last] = {{ {any} }}\n", .{challenges[num_rounds - 1].toBytes()});
-            }
 
             // Phase 3: Compute and cache opening claims
             // After all rounds, the MLEs are bound to single values
-            const shift_claims = shift_mles.finalClaims();
-            const instr_claims = instr_mles.finalClaims();
-            const reg_claims = reg_mles.finalClaims();
+            const shift_claims = shift_prover.finalClaims();
+            const instr_claims = instr_prover.finalClaims();
+            const reg_claims = reg_prover.finalClaims();
 
             // DEBUG: Print opening claims
             std.debug.print("\n[ZOLT] STAGE3_OPENING: Shift sumcheck claims:\n", .{});
             std.debug.print("[ZOLT] STAGE3_OPENING: unexpanded_pc = {{ {any} }}\n", .{shift_claims.unexpanded_pc.toBytes()});
             std.debug.print("[ZOLT] STAGE3_OPENING: pc = {{ {any} }}\n", .{shift_claims.pc.toBytes()});
-            std.debug.print("[ZOLT] STAGE3_OPENING: is_virtual = {{ {any} }}\n", .{shift_claims.is_virtual.toBytes()});
-            std.debug.print("[ZOLT] STAGE3_OPENING: is_first_in_sequence = {{ {any} }}\n", .{shift_claims.is_first_in_sequence.toBytes()});
             std.debug.print("[ZOLT] STAGE3_OPENING: is_noop = {{ {any} }}\n", .{shift_claims.is_noop.toBytes()});
-
-            std.debug.print("\n[ZOLT] STAGE3_OPENING: InstructionInput sumcheck claims:\n", .{});
-            std.debug.print("[ZOLT] STAGE3_OPENING: left_is_rs1 = {{ {any} }}\n", .{instr_claims.left_is_rs1.toBytes()});
-            std.debug.print("[ZOLT] STAGE3_OPENING: rs1_value = {{ {any} }}\n", .{instr_claims.rs1_value.toBytes()});
-            std.debug.print("[ZOLT] STAGE3_OPENING: left_is_pc = {{ {any} }}\n", .{instr_claims.left_is_pc.toBytes()});
-            std.debug.print("[ZOLT] STAGE3_OPENING: unexpanded_pc = {{ {any} }}\n", .{instr_claims.unexpanded_pc.toBytes()});
-            std.debug.print("[ZOLT] STAGE3_OPENING: right_is_rs2 = {{ {any} }}\n", .{instr_claims.right_is_rs2.toBytes()});
-            std.debug.print("[ZOLT] STAGE3_OPENING: rs2_value = {{ {any} }}\n", .{instr_claims.rs2_value.toBytes()});
-            std.debug.print("[ZOLT] STAGE3_OPENING: right_is_imm = {{ {any} }}\n", .{instr_claims.right_is_imm.toBytes()});
-            std.debug.print("[ZOLT] STAGE3_OPENING: imm = {{ {any} }}\n", .{instr_claims.imm.toBytes()});
-
-            std.debug.print("\n[ZOLT] STAGE3_OPENING: RegistersClaimReduction claims:\n", .{});
-            std.debug.print("[ZOLT] STAGE3_OPENING: rd_write_value = {{ {any} }}\n", .{reg_claims.rd_write_value.toBytes()});
-            std.debug.print("[ZOLT] STAGE3_OPENING: rs1_value = {{ {any} }}\n", .{reg_claims.rs1_value.toBytes()});
-            std.debug.print("[ZOLT] STAGE3_OPENING: rs2_value = {{ {any} }}\n", .{reg_claims.rs2_value.toBytes()});
 
             // Append opening claims to transcript (cache_openings)
             // ShiftSumcheck: 5 claims
@@ -569,20 +394,6 @@ pub fn Stage3Prover(comptime F: type) type {
             };
         }
 
-        /// Derive n gamma powers from transcript (uses 125-bit masked scalars)
-        fn deriveGammaPowers(self: *Self, transcript: *Blake2bTranscript(F), n: usize) ![]F {
-            const powers = try self.allocator.alloc(F, n);
-            const gamma = transcript.challengeScalar();
-            powers[0] = F.one();
-            if (n > 1) {
-                powers[1] = gamma;
-                for (2..n) |i| {
-                    powers[i] = powers[i - 1].mul(gamma);
-                }
-            }
-            return powers;
-        }
-
         /// Derive n gamma powers from transcript (uses full 128-bit scalars)
         /// This matches Jolt's challenge_scalar_powers which calls challenge_scalar (not optimized)
         fn deriveGammaPowersFull(self: *Self, transcript: *Blake2bTranscript(F), n: usize) ![]F {
@@ -613,13 +424,6 @@ pub fn Stage3Prover(comptime F: type) type {
             const next_is_first = opening_claims.get(.{ .Virtual = .{ .poly = .NextIsFirstInSequence, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
             const next_is_noop = opening_claims.get(.{ .Virtual = .{ .poly = .NextIsNoop, .sumcheck_id = .SpartanProductVirtualization } }) orelse F.zero();
 
-            // DEBUG: Print the individual claims with consistent format
-            std.debug.print("[ZOLT] STAGE3_SHIFT_INPUT: NextUnexpandedPC = {{ {any} }}\n", .{next_unexpanded_pc.toBytes()});
-            std.debug.print("[ZOLT] STAGE3_SHIFT_INPUT: NextPC = {{ {any} }}\n", .{next_pc.toBytes()});
-            std.debug.print("[ZOLT] STAGE3_SHIFT_INPUT: NextIsVirtual = {{ {any} }}\n", .{next_is_virtual.toBytes()});
-            std.debug.print("[ZOLT] STAGE3_SHIFT_INPUT: NextIsFirstInSequence = {{ {any} }}\n", .{next_is_first.toBytes()});
-            std.debug.print("[ZOLT] STAGE3_SHIFT_INPUT: NextIsNoop = {{ {any} }}\n", .{next_is_noop.toBytes()});
-
             var result = next_unexpanded_pc;
             result = result.add(gamma_powers[1].mul(next_pc));
             result = result.add(gamma_powers[2].mul(next_is_virtual));
@@ -642,12 +446,6 @@ pub fn Stage3Prover(comptime F: type) type {
             const left_2 = opening_claims.get(.{ .Virtual = .{ .poly = .LeftInstructionInput, .sumcheck_id = .SpartanProductVirtualization } }) orelse F.zero();
             const right_2 = opening_claims.get(.{ .Virtual = .{ .poly = .RightInstructionInput, .sumcheck_id = .SpartanProductVirtualization } }) orelse F.zero();
 
-            // DEBUG: Print the individual claims
-            std.debug.print("[ZOLT] STAGE3_INSTR_INPUT: LeftInstructionInput(Outer) = {{ {any} }}\n", .{left_1.toBytes()});
-            std.debug.print("[ZOLT] STAGE3_INSTR_INPUT: RightInstructionInput(Outer) = {{ {any} }}\n", .{right_1.toBytes()});
-            std.debug.print("[ZOLT] STAGE3_INSTR_INPUT: LeftInstructionInput(Product) = {{ {any} }}\n", .{left_2.toBytes()});
-            std.debug.print("[ZOLT] STAGE3_INSTR_INPUT: RightInstructionInput(Product) = {{ {any} }}\n", .{right_2.toBytes()});
-
             const claim_1 = right_1.add(gamma.mul(left_1));
             const claim_2 = right_2.add(gamma.mul(left_2));
             return claim_1.add(gamma_sqr.mul(claim_2));
@@ -666,505 +464,10 @@ pub fn Stage3Prover(comptime F: type) type {
             const rs1 = opening_claims.get(.{ .Virtual = .{ .poly = .Rs1Value, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
             const rs2 = opening_claims.get(.{ .Virtual = .{ .poly = .Rs2Value, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
 
-            // DEBUG: Print the individual claims
-            std.debug.print("[ZOLT] STAGE3_REG_INPUT: RdWriteValue = {{ {any} }}\n", .{rd.toBytes()});
-            std.debug.print("[ZOLT] STAGE3_REG_INPUT: Rs1Value = {{ {any} }}\n", .{rs1.toBytes()});
-            std.debug.print("[ZOLT] STAGE3_REG_INPUT: Rs2Value = {{ {any} }}\n", .{rs2.toBytes()});
-
             var result = rd;
             result = result.add(gamma.mul(rs1));
             result = result.add(gamma_sqr.mul(rs2));
             return result;
-        }
-
-        /// MLE structure for Shift sumcheck
-        const ShiftMLEs = struct {
-            unexpanded_pc: []F,
-            pc: []F,
-            is_virtual: []F,
-            is_first_in_sequence: []F,
-            is_noop: []F,
-
-            fn deinit(self: *ShiftMLEs, allocator: Allocator) void {
-                allocator.free(self.unexpanded_pc);
-                allocator.free(self.pc);
-                allocator.free(self.is_virtual);
-                allocator.free(self.is_first_in_sequence);
-                allocator.free(self.is_noop);
-            }
-
-            fn bind(self: *ShiftMLEs, r: F) void {
-                bindMLE(self.unexpanded_pc, r);
-                bindMLE(self.pc, r);
-                bindMLE(self.is_virtual, r);
-                bindMLE(self.is_first_in_sequence, r);
-                bindMLE(self.is_noop, r);
-            }
-
-            const FinalClaims = struct {
-                unexpanded_pc: F,
-                pc: F,
-                is_virtual: F,
-                is_first_in_sequence: F,
-                is_noop: F,
-            };
-
-            fn finalClaims(self: *const ShiftMLEs) FinalClaims {
-                return .{
-                    .unexpanded_pc = if (self.unexpanded_pc.len > 0) self.unexpanded_pc[0] else F.zero(),
-                    .pc = if (self.pc.len > 0) self.pc[0] else F.zero(),
-                    .is_virtual = if (self.is_virtual.len > 0) self.is_virtual[0] else F.zero(),
-                    .is_first_in_sequence = if (self.is_first_in_sequence.len > 0) self.is_first_in_sequence[0] else F.zero(),
-                    .is_noop = if (self.is_noop.len > 0) self.is_noop[0] else F.zero(),
-                };
-            }
-        };
-
-        /// Build Shift MLEs from trace
-        fn buildShiftMLEs(self: *Self, cycle_witnesses: []const r1cs.R1CSCycleInputs(F), trace_len: usize) !ShiftMLEs {
-            const unexpanded_pc = try self.allocator.alloc(F, trace_len);
-            const pc = try self.allocator.alloc(F, trace_len);
-            const is_virtual = try self.allocator.alloc(F, trace_len);
-            const is_first_in_sequence = try self.allocator.alloc(F, trace_len);
-            const is_noop = try self.allocator.alloc(F, trace_len);
-
-            // Debug: print index mapping
-            std.debug.print("[STAGE3] buildShiftMLEs: UnexpandedPC idx={}, PC idx={}\n", .{
-                R1CSInputIndex.UnexpandedPC.toIndex(),
-                R1CSInputIndex.PC.toIndex(),
-            });
-            std.debug.print("[STAGE3] buildShiftMLEs: cycle_witnesses.len={}, trace_len={}\n", .{
-                cycle_witnesses.len,
-                trace_len,
-            });
-
-            for (0..trace_len) |i| {
-                if (i < cycle_witnesses.len) {
-                    const values = &cycle_witnesses[i].values;
-                    unexpanded_pc[i] = values[R1CSInputIndex.UnexpandedPC.toIndex()];
-                    pc[i] = values[R1CSInputIndex.PC.toIndex()];
-                    is_virtual[i] = values[R1CSInputIndex.FlagVirtualInstruction.toIndex()];
-                    is_first_in_sequence[i] = values[R1CSInputIndex.FlagIsFirstInSequence.toIndex()];
-                    is_noop[i] = values[R1CSInputIndex.FlagIsNoop.toIndex()];
-
-                    // Debug first few cycles - show last 8 bytes where small values reside
-                    if (i < 3) {
-                        std.debug.print("[STAGE3] cycle[{}]: raw_upc_idx7={any}, raw_pc_idx6={any}\n", .{
-                            i,
-                            values[7].toBytesBE()[24..32], // UnexpandedPC = 7, last 8 bytes
-                            values[6].toBytesBE()[24..32], // PC = 6, last 8 bytes
-                        });
-                        std.debug.print("[STAGE3] cycle[{}]: via_enum: upc={any}, pc={any}, noop={any}\n", .{
-                            i,
-                            unexpanded_pc[i].toBytesBE()[24..32],
-                            pc[i].toBytesBE()[24..32],
-                            is_noop[i].toBytesBE()[24..32],
-                        });
-                    }
-                } else {
-                    // Padding
-                    unexpanded_pc[i] = F.zero();
-                    pc[i] = F.zero();
-                    is_virtual[i] = F.zero();
-                    is_first_in_sequence[i] = F.zero();
-                    is_noop[i] = F.one(); // Padding cycles are noops
-                }
-            }
-
-            return ShiftMLEs{
-                .unexpanded_pc = unexpanded_pc,
-                .pc = pc,
-                .is_virtual = is_virtual,
-                .is_first_in_sequence = is_first_in_sequence,
-                .is_noop = is_noop,
-            };
-        }
-
-        /// MLE structure for InstructionInput sumcheck
-        const InstructionInputMLEs = struct {
-            left_is_rs1: []F,
-            rs1_value: []F,
-            left_is_pc: []F,
-            unexpanded_pc: []F,
-            right_is_rs2: []F,
-            rs2_value: []F,
-            right_is_imm: []F,
-            imm: []F,
-
-            fn deinit(self: *InstructionInputMLEs, allocator: Allocator) void {
-                allocator.free(self.left_is_rs1);
-                allocator.free(self.rs1_value);
-                allocator.free(self.left_is_pc);
-                allocator.free(self.unexpanded_pc);
-                allocator.free(self.right_is_rs2);
-                allocator.free(self.rs2_value);
-                allocator.free(self.right_is_imm);
-                allocator.free(self.imm);
-            }
-
-            fn bind(self: *InstructionInputMLEs, r: F) void {
-                bindMLE(self.left_is_rs1, r);
-                bindMLE(self.rs1_value, r);
-                bindMLE(self.left_is_pc, r);
-                bindMLE(self.unexpanded_pc, r);
-                bindMLE(self.right_is_rs2, r);
-                bindMLE(self.rs2_value, r);
-                bindMLE(self.right_is_imm, r);
-                bindMLE(self.imm, r);
-            }
-
-            const FinalClaims = struct {
-                left_is_rs1: F,
-                rs1_value: F,
-                left_is_pc: F,
-                unexpanded_pc: F,
-                right_is_rs2: F,
-                rs2_value: F,
-                right_is_imm: F,
-                imm: F,
-            };
-
-            fn finalClaims(self: *const InstructionInputMLEs) FinalClaims {
-                return .{
-                    .left_is_rs1 = if (self.left_is_rs1.len > 0) self.left_is_rs1[0] else F.zero(),
-                    .rs1_value = if (self.rs1_value.len > 0) self.rs1_value[0] else F.zero(),
-                    .left_is_pc = if (self.left_is_pc.len > 0) self.left_is_pc[0] else F.zero(),
-                    .unexpanded_pc = if (self.unexpanded_pc.len > 0) self.unexpanded_pc[0] else F.zero(),
-                    .right_is_rs2 = if (self.right_is_rs2.len > 0) self.right_is_rs2[0] else F.zero(),
-                    .rs2_value = if (self.rs2_value.len > 0) self.rs2_value[0] else F.zero(),
-                    .right_is_imm = if (self.right_is_imm.len > 0) self.right_is_imm[0] else F.zero(),
-                    .imm = if (self.imm.len > 0) self.imm[0] else F.zero(),
-                };
-            }
-        };
-
-        /// Build InstructionInput MLEs from trace
-        /// Uses explicit instruction flags computed in R1CSCycleInputs.fromTraceStep
-        fn buildInstructionInputMLEs(self: *Self, cycle_witnesses: []const r1cs.R1CSCycleInputs(F), trace_len: usize) !InstructionInputMLEs {
-            const left_is_rs1 = try self.allocator.alloc(F, trace_len);
-            const rs1_value = try self.allocator.alloc(F, trace_len);
-            const left_is_pc = try self.allocator.alloc(F, trace_len);
-            const unexpanded_pc = try self.allocator.alloc(F, trace_len);
-            const right_is_rs2 = try self.allocator.alloc(F, trace_len);
-            const rs2_value = try self.allocator.alloc(F, trace_len);
-            const right_is_imm = try self.allocator.alloc(F, trace_len);
-            const imm = try self.allocator.alloc(F, trace_len);
-
-            for (0..trace_len) |i| {
-                if (i < cycle_witnesses.len) {
-                    const values = &cycle_witnesses[i].values;
-                    // Use explicit instruction flags computed from opcode
-                    left_is_rs1[i] = values[R1CSInputIndex.FlagLeftOperandIsRs1.toIndex()];
-                    left_is_pc[i] = values[R1CSInputIndex.FlagLeftOperandIsPC.toIndex()];
-                    right_is_rs2[i] = values[R1CSInputIndex.FlagRightOperandIsRs2.toIndex()];
-                    right_is_imm[i] = values[R1CSInputIndex.FlagRightOperandIsImm.toIndex()];
-                    // Get operand values
-                    rs1_value[i] = values[R1CSInputIndex.Rs1Value.toIndex()];
-                    unexpanded_pc[i] = values[R1CSInputIndex.UnexpandedPC.toIndex()];
-                    rs2_value[i] = values[R1CSInputIndex.Rs2Value.toIndex()];
-                    imm[i] = values[R1CSInputIndex.Imm.toIndex()];
-                } else {
-                    // Padding - all flags and values are zero
-                    left_is_rs1[i] = F.zero();
-                    rs1_value[i] = F.zero();
-                    left_is_pc[i] = F.zero();
-                    unexpanded_pc[i] = F.zero();
-                    right_is_rs2[i] = F.zero();
-                    rs2_value[i] = F.zero();
-                    right_is_imm[i] = F.zero();
-                    imm[i] = F.zero();
-                }
-            }
-
-            return InstructionInputMLEs{
-                .left_is_rs1 = left_is_rs1,
-                .rs1_value = rs1_value,
-                .left_is_pc = left_is_pc,
-                .unexpanded_pc = unexpanded_pc,
-                .right_is_rs2 = right_is_rs2,
-                .rs2_value = rs2_value,
-                .right_is_imm = right_is_imm,
-                .imm = imm,
-            };
-        }
-
-        /// MLE structure for RegistersClaimReduction sumcheck
-        const RegistersMLEs = struct {
-            rd_write_value: []F,
-            rs1_value: []F,
-            rs2_value: []F,
-
-            fn deinit(self: *RegistersMLEs, allocator: Allocator) void {
-                allocator.free(self.rd_write_value);
-                allocator.free(self.rs1_value);
-                allocator.free(self.rs2_value);
-            }
-
-            fn bind(self: *RegistersMLEs, r: F) void {
-                bindMLE(self.rd_write_value, r);
-                bindMLE(self.rs1_value, r);
-                bindMLE(self.rs2_value, r);
-            }
-
-            const FinalClaims = struct {
-                rd_write_value: F,
-                rs1_value: F,
-                rs2_value: F,
-            };
-
-            fn finalClaims(self: *const RegistersMLEs) FinalClaims {
-                return .{
-                    .rd_write_value = if (self.rd_write_value.len > 0) self.rd_write_value[0] else F.zero(),
-                    .rs1_value = if (self.rs1_value.len > 0) self.rs1_value[0] else F.zero(),
-                    .rs2_value = if (self.rs2_value.len > 0) self.rs2_value[0] else F.zero(),
-                };
-            }
-        };
-
-        /// Build Registers MLEs from trace
-        fn buildRegistersMLEs(self: *Self, cycle_witnesses: []const r1cs.R1CSCycleInputs(F), trace_len: usize) !RegistersMLEs {
-            const rd_write_value = try self.allocator.alloc(F, trace_len);
-            const rs1_value = try self.allocator.alloc(F, trace_len);
-            const rs2_value = try self.allocator.alloc(F, trace_len);
-
-            for (0..trace_len) |i| {
-                if (i < cycle_witnesses.len) {
-                    const values = &cycle_witnesses[i].values;
-                    rd_write_value[i] = values[R1CSInputIndex.RdWriteValue.toIndex()];
-                    rs1_value[i] = values[R1CSInputIndex.Rs1Value.toIndex()];
-                    rs2_value[i] = values[R1CSInputIndex.Rs2Value.toIndex()];
-                } else {
-                    // Padding
-                    rd_write_value[i] = F.zero();
-                    rs1_value[i] = F.zero();
-                    rs2_value[i] = F.zero();
-                }
-            }
-
-            return RegistersMLEs{
-                .rd_write_value = rd_write_value,
-                .rs1_value = rs1_value,
-                .rs2_value = rs2_value,
-            };
-        }
-
-        /// Compute eq+1(r, j) evaluations for all j in [0, trace_len)
-        fn computeEqPlusOneEvals(self: *Self, r: []const F, trace_len: usize) ![]F {
-            const evals = try self.allocator.alloc(F, trace_len);
-
-            const n_vars = r.len;
-            for (0..trace_len) |j| {
-                // Convert j to binary (BIG_ENDIAN to match r)
-                var j_bits = try self.allocator.alloc(F, n_vars);
-                defer self.allocator.free(j_bits);
-                for (0..n_vars) |k| {
-                    const bit_pos: u6 = @intCast(n_vars - 1 - k);
-                    j_bits[k] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
-                }
-                evals[j] = EqPlusOnePolynomial(F).mle(r, j_bits);
-            }
-
-            return evals;
-        }
-
-        /// Compute round evaluations for ShiftSumcheck
-        /// Returns [p(0), p(2)] for degree-2 polynomial (p(1) derived from claim)
-        /// Following Jolt's approach: extrapolate each MLE first, then compute products
-        fn computeShiftRoundEvals(
-            self: *Self,
-            mles: *const ShiftMLEs,
-            eq_plus_one_outer: []const F,
-            eq_plus_one_product: []const F,
-            gamma: []const F,
-            half_size: usize,
-        ) [2]F {
-            _ = self;
-            var evals: [2]F = .{ F.zero(), F.zero() };
-
-            for (0..half_size) |j| {
-                // Get values at j*2 (bit=0) and j*2+1 (bit=1)
-                const upc_0 = mles.unexpanded_pc[2 * j];
-                const upc_1 = mles.unexpanded_pc[2 * j + 1];
-                const pc_0 = mles.pc[2 * j];
-                const pc_1 = mles.pc[2 * j + 1];
-                const virt_0 = mles.is_virtual[2 * j];
-                const virt_1 = mles.is_virtual[2 * j + 1];
-                const first_0 = mles.is_first_in_sequence[2 * j];
-                const first_1 = mles.is_first_in_sequence[2 * j + 1];
-                const noop_0 = mles.is_noop[2 * j];
-                const noop_1 = mles.is_noop[2 * j + 1];
-
-                const eq_out_0 = eq_plus_one_outer[2 * j];
-                const eq_out_1 = eq_plus_one_outer[2 * j + 1];
-                const eq_prod_0 = eq_plus_one_product[2 * j];
-                const eq_prod_1 = eq_plus_one_product[2 * j + 1];
-
-                // Linear extrapolation for each MLE: f(2) = 2*f(1) - f(0)
-                const upc_2 = upc_1.add(upc_1).sub(upc_0);
-                const pc_2 = pc_1.add(pc_1).sub(pc_0);
-                const virt_2 = virt_1.add(virt_1).sub(virt_0);
-                const first_2 = first_1.add(first_1).sub(first_0);
-                const noop_2 = noop_1.add(noop_1).sub(noop_0);
-                const eq_out_2 = eq_out_1.add(eq_out_1).sub(eq_out_0);
-                const eq_prod_2 = eq_prod_1.add(eq_prod_1).sub(eq_prod_0);
-
-                // f(j, 0) = eq+1_outer(j) * (upc + gamma*pc + gamma^2*virt + gamma^3*first)
-                //         + gamma^4 * (1-noop) * eq+1_prod(j)
-                const val_0 = upc_0.add(gamma[1].mul(pc_0)).add(gamma[2].mul(virt_0)).add(gamma[3].mul(first_0));
-                const term1_0 = eq_out_0.mul(val_0);
-                const term2_0 = gamma[4].mul(F.one().sub(noop_0)).mul(eq_prod_0);
-                const f_0 = term1_0.add(term2_0);
-
-                // f(j, 2) - compute using extrapolated values
-                const val_2 = upc_2.add(gamma[1].mul(pc_2)).add(gamma[2].mul(virt_2)).add(gamma[3].mul(first_2));
-                const term1_2 = eq_out_2.mul(val_2);
-                const term2_2 = gamma[4].mul(F.one().sub(noop_2)).mul(eq_prod_2);
-                const f_2 = term1_2.add(term2_2);
-
-                evals[0] = evals[0].add(f_0);
-                evals[1] = evals[1].add(f_2);
-            }
-
-            return evals;
-        }
-
-        /// Compute round evaluations for InstructionInputSumcheck
-        /// Returns [p(0), p(2), p(3)] for degree-3 polynomial (p(1) derived from claim)
-        /// Following Jolt's approach: extrapolate each MLE first, then compute products
-        fn computeInstrRoundEvals(
-            self: *Self,
-            mles: *const InstructionInputMLEs,
-            eq_outer: []const F,
-            eq_product: []const F,
-            gamma: F,
-            gamma_sqr: F,
-            half_size: usize,
-        ) [3]F {
-            _ = self;
-            var evals: [3]F = .{ F.zero(), F.zero(), F.zero() };
-
-            for (0..half_size) |j| {
-                // Get values at bit=0 and bit=1
-                const left_is_rs1_0 = mles.left_is_rs1[2 * j];
-                const left_is_rs1_1 = mles.left_is_rs1[2 * j + 1];
-                const rs1_0 = mles.rs1_value[2 * j];
-                const rs1_1 = mles.rs1_value[2 * j + 1];
-                const left_is_pc_0 = mles.left_is_pc[2 * j];
-                const left_is_pc_1 = mles.left_is_pc[2 * j + 1];
-                const pc_0 = mles.unexpanded_pc[2 * j];
-                const pc_1 = mles.unexpanded_pc[2 * j + 1];
-                const right_is_rs2_0 = mles.right_is_rs2[2 * j];
-                const right_is_rs2_1 = mles.right_is_rs2[2 * j + 1];
-                const rs2_0 = mles.rs2_value[2 * j];
-                const rs2_1 = mles.rs2_value[2 * j + 1];
-                const right_is_imm_0 = mles.right_is_imm[2 * j];
-                const right_is_imm_1 = mles.right_is_imm[2 * j + 1];
-                const imm_0 = mles.imm[2 * j];
-                const imm_1 = mles.imm[2 * j + 1];
-
-                const eq_out_0 = eq_outer[2 * j];
-                const eq_out_1 = eq_outer[2 * j + 1];
-                const eq_prod_0 = eq_product[2 * j];
-                const eq_prod_1 = eq_product[2 * j + 1];
-
-                // Linear extrapolation for each MLE: f(2) = 2*f(1) - f(0), f(3) = 3*f(1) - 2*f(0)
-                const left_is_rs1_2 = left_is_rs1_1.add(left_is_rs1_1).sub(left_is_rs1_0);
-                const left_is_rs1_3 = left_is_rs1_2.add(left_is_rs1_1).sub(left_is_rs1_0);
-                const rs1_2 = rs1_1.add(rs1_1).sub(rs1_0);
-                const rs1_3 = rs1_2.add(rs1_1).sub(rs1_0);
-                const left_is_pc_2 = left_is_pc_1.add(left_is_pc_1).sub(left_is_pc_0);
-                const left_is_pc_3 = left_is_pc_2.add(left_is_pc_1).sub(left_is_pc_0);
-                const pc_2 = pc_1.add(pc_1).sub(pc_0);
-                const pc_3 = pc_2.add(pc_1).sub(pc_0);
-                const right_is_rs2_2 = right_is_rs2_1.add(right_is_rs2_1).sub(right_is_rs2_0);
-                const right_is_rs2_3 = right_is_rs2_2.add(right_is_rs2_1).sub(right_is_rs2_0);
-                const rs2_2 = rs2_1.add(rs2_1).sub(rs2_0);
-                const rs2_3 = rs2_2.add(rs2_1).sub(rs2_0);
-                const right_is_imm_2 = right_is_imm_1.add(right_is_imm_1).sub(right_is_imm_0);
-                const right_is_imm_3 = right_is_imm_2.add(right_is_imm_1).sub(right_is_imm_0);
-                const imm_2 = imm_1.add(imm_1).sub(imm_0);
-                const imm_3 = imm_2.add(imm_1).sub(imm_0);
-                const eq_out_2 = eq_out_1.add(eq_out_1).sub(eq_out_0);
-                const eq_out_3 = eq_out_2.add(eq_out_1).sub(eq_out_0);
-                const eq_prod_2 = eq_prod_1.add(eq_prod_1).sub(eq_prod_0);
-                const eq_prod_3 = eq_prod_2.add(eq_prod_1).sub(eq_prod_0);
-
-                // left = left_is_rs1 * rs1 + left_is_pc * pc
-                // right = right_is_rs2 * rs2 + right_is_imm * imm
-                // f = (eq_outer + gamma^2 * eq_product) * (right + gamma * left)
-                // Degree: 1 (eq) * 2 (left*rs1) = 3
-
-                // Compute at x_j = 0
-                const left_0 = left_is_rs1_0.mul(rs1_0).add(left_is_pc_0.mul(pc_0));
-                const right_0 = right_is_rs2_0.mul(rs2_0).add(right_is_imm_0.mul(imm_0));
-                const eq_weight_0 = eq_out_0.add(gamma_sqr.mul(eq_prod_0));
-                const f_0 = eq_weight_0.mul(right_0.add(gamma.mul(left_0)));
-
-                // Compute at x_j = 2
-                const left_2 = left_is_rs1_2.mul(rs1_2).add(left_is_pc_2.mul(pc_2));
-                const right_2 = right_is_rs2_2.mul(rs2_2).add(right_is_imm_2.mul(imm_2));
-                const eq_weight_2 = eq_out_2.add(gamma_sqr.mul(eq_prod_2));
-                const f_2 = eq_weight_2.mul(right_2.add(gamma.mul(left_2)));
-
-                // Compute at x_j = 3
-                const left_3 = left_is_rs1_3.mul(rs1_3).add(left_is_pc_3.mul(pc_3));
-                const right_3 = right_is_rs2_3.mul(rs2_3).add(right_is_imm_3.mul(imm_3));
-                const eq_weight_3 = eq_out_3.add(gamma_sqr.mul(eq_prod_3));
-                const f_3 = eq_weight_3.mul(right_3.add(gamma.mul(left_3)));
-
-                evals[0] = evals[0].add(f_0);
-                evals[1] = evals[1].add(f_2);
-                evals[2] = evals[2].add(f_3);
-            }
-
-            return evals;
-        }
-
-        /// Compute round evaluations for RegistersClaimReduction
-        /// Returns [p(0), p(2)] for degree-2 polynomial (p(1) derived from claim)
-        /// Following Jolt's approach: extrapolate each MLE first, then compute products
-        fn computeRegRoundEvals(
-            self: *Self,
-            mles: *const RegistersMLEs,
-            eq_spartan: []const F,
-            gamma: F,
-            gamma_sqr: F,
-            half_size: usize,
-        ) [2]F {
-            _ = self;
-            var evals: [2]F = .{ F.zero(), F.zero() };
-
-            for (0..half_size) |j| {
-                const rd_0 = mles.rd_write_value[2 * j];
-                const rd_1 = mles.rd_write_value[2 * j + 1];
-                const rs1_0 = mles.rs1_value[2 * j];
-                const rs1_1 = mles.rs1_value[2 * j + 1];
-                const rs2_0 = mles.rs2_value[2 * j];
-                const rs2_1 = mles.rs2_value[2 * j + 1];
-
-                const eq_0 = eq_spartan[2 * j];
-                const eq_1 = eq_spartan[2 * j + 1];
-
-                // Linear extrapolation for each MLE: f(2) = 2*f(1) - f(0)
-                const rd_2 = rd_1.add(rd_1).sub(rd_0);
-                const rs1_2 = rs1_1.add(rs1_1).sub(rs1_0);
-                const rs2_2 = rs2_1.add(rs2_1).sub(rs2_0);
-                const eq_2 = eq_1.add(eq_1).sub(eq_0);
-
-                // f = eq(r_spartan, x) * (rd + gamma * rs1 + gamma^2 * rs2)
-                // Degree: 1 * 1 = 2 (eq is linear, register poly is linear)
-
-                const reg_val_0 = rd_0.add(gamma.mul(rs1_0)).add(gamma_sqr.mul(rs2_0));
-                const reg_val_2 = rd_2.add(gamma.mul(rs1_2)).add(gamma_sqr.mul(rs2_2));
-
-                const f_0 = eq_0.mul(reg_val_0);
-                const f_2 = eq_2.mul(reg_val_2);
-
-                evals[0] = evals[0].add(f_0);
-                evals[1] = evals[1].add(f_2);
-            }
-
-            return evals;
         }
 
         /// Convert evaluations at 0, 1, 2, ... to polynomial coefficients
@@ -1173,17 +476,6 @@ pub fn Stage3Prover(comptime F: type) type {
 
             if (degree == 2) {
                 // For degree 2: p(x) = c0 + c1*x + c2*x^2
-                // p(0) = c0
-                // p(1) = c0 + c1 + c2
-                // p(2) = c0 + 2*c1 + 4*c2
-                //
-                // c0 = p(0)
-                // c1 + c2 = p(1) - p(0)
-                // 2*c1 + 4*c2 = p(2) - p(0)
-                //
-                // From last two: 2*c2 = p(2) - p(0) - 2*(p(1) - p(0)) = p(2) - 2*p(1) + p(0)
-                // c2 = (p(2) - 2*p(1) + p(0)) / 2
-                // c1 = p(1) - p(0) - c2
                 const p0 = evals[0];
                 const p1 = evals[1];
                 const p2 = evals[2];
@@ -1196,44 +488,11 @@ pub fn Stage3Prover(comptime F: type) type {
                 coeffs[2] = c2;
                 coeffs[1] = p1.sub(p0).sub(c2);
             } else if (degree == 3) {
-                // For degree 3: p(x) = c0 + c1*x + c2*x^2 + c3*x^3
-                // p(0) = c0
-                // p(1) = c0 + c1 + c2 + c3
-                // p(2) = c0 + 2*c1 + 4*c2 + 8*c3
-                // p(3) = c0 + 3*c1 + 9*c2 + 27*c3
-                //
-                // This is a Vandermonde system. Solve directly.
+                // For degree 3: use finite differences
                 const p0 = evals[0];
                 const p1 = evals[1];
                 const p2 = evals[2];
                 const p3 = evals[3];
-
-                // Using Lagrange basis conversion
-                // c0 = p0
-                // c1, c2, c3 from solving the system
-                //
-                // For simplicity, use the Lagrange formula:
-                // p(x) = sum_i p_i * L_i(x)
-                // where L_i(x) = prod_{j != i} (x - j) / (i - j)
-                //
-                // L_0(x) = (x-1)(x-2)(x-3) / ((-1)(-2)(-3)) = (x-1)(x-2)(x-3) / (-6)
-                // L_1(x) = (x-0)(x-2)(x-3) / ((1)(-1)(-2)) = x(x-2)(x-3) / 2
-                // L_2(x) = (x-0)(x-1)(x-3) / ((2)(1)(-1)) = x(x-1)(x-3) / (-2)
-                // L_3(x) = (x-0)(x-1)(x-2) / ((3)(2)(1)) = x(x-1)(x-2) / 6
-                //
-                // Expand and collect:
-                // c0 = p0*(-1/6)(1*2*3) + p1*(1/2)(0) + p2*(-1/2)(0) + p3*(1/6)(0) = p0
-                // ... (tedious to expand)
-                //
-                // Use a different approach: finite differences
-                // d1 = p1 - p0, d2 = p2 - p1, d3 = p3 - p2 (first differences)
-                // dd1 = d2 - d1, dd2 = d3 - d2 (second differences)
-                // ddd = dd2 - dd1 (third difference)
-                //
-                // c3 = ddd / 6
-                // c2 = (dd1 - 3*c3) / 2 = dd1/2 - 3*c3/2
-                // c1 = d1 - c2 - c3
-                // c0 = p0
 
                 const d1 = p1.sub(p0);
                 const d2 = p2.sub(p1);
@@ -1246,7 +505,6 @@ pub fn Stage3Prover(comptime F: type) type {
                 const two_inv = F.fromU64(2).inverse() orelse F.one();
 
                 const c3 = ddd.mul(six_inv);
-                // c2 = (dd1 - 6*c3) / 2 = dd1/2 - 3*c3
                 const c2 = dd1.mul(two_inv).sub(c3.mul(F.fromU64(3)));
                 const c1 = d1.sub(c2).sub(c3);
 
@@ -1280,27 +538,959 @@ pub fn Stage3Prover(comptime F: type) type {
             }
             return result;
         }
+    };
+}
 
-        /// Bind eq evaluations (halve the table)
-        fn bindEqEvals(self: *Self, evals: []F, r: F) void {
-            _ = self;
-            const half = evals.len / 2;
-            for (0..half) |i| {
-                // eq(r, x) after binding at r: eq_new[i] = (1-r)*eq[2i] + r*eq[2i+1]
-                const low = evals[2 * i];
-                const high = evals[2 * i + 1];
-                evals[i] = F.one().sub(r).mul(low).add(r.mul(high));
+// =============================================================================
+// ShiftSumcheck Prefix-Suffix Prover
+// =============================================================================
+//
+// Uses EqPlusOnePrefixSuffixPoly decomposition with 4 (P,Q) pairs:
+// - 2 pairs for r_outer (prefix_0/suffix_0, prefix_1/suffix_1)
+// - 2 pairs for r_product (prefix_0/suffix_0, prefix_1/suffix_1)
+//
+// Phase1: First half of rounds use prefix-suffix optimization
+// Phase2: Second half of rounds use materialized MLEs
+// Transition: When prefix buffer size == 2
+
+fn ShiftPrefixSuffixProver(comptime F: type) type {
+    return struct {
+        const Self = @This();
+        const EqPlusOnePrefixSuffixPoly = poly_mod.EqPlusOnePrefixSuffixPoly;
+        const EqPolynomial = poly_mod.EqPolynomial;
+        const EqPlusOnePolynomial = poly_mod.EqPlusOnePolynomial;
+
+        // P buffers (prefix polynomials) and Q buffers (accumulated witness * suffix)
+        // 4 pairs: (P_0_outer, Q_0_outer), (P_1_outer, Q_1_outer),
+        //          (P_0_prod, Q_0_prod), (P_1_prod, Q_1_prod)
+        P_0_outer: []F,
+        Q_0_outer: []F,
+        P_1_outer: []F,
+        Q_1_outer: []F,
+        P_0_prod: []F,
+        Q_0_prod: []F,
+        P_1_prod: []F,
+        Q_1_prod: []F,
+
+        // Gamma powers for batching
+        gamma_powers: []const F,
+
+        // Witness MLEs (for final claims computation)
+        unexpanded_pc: []F,
+        pc: []F,
+        is_virtual: []F,
+        is_first_in_sequence: []F,
+        is_noop: []F,
+
+        // State tracking
+        prefix_n_vars: usize,
+        current_prefix_size: usize,
+        sumcheck_challenges: std.ArrayList(F),
+        in_phase2: bool,
+
+        // Phase2 materialized polynomials (only allocated when transitioning)
+        phase2_eq_plus_one_outer: ?[]F,
+        phase2_eq_plus_one_prod: ?[]F,
+
+        allocator: Allocator,
+
+        pub fn init(
+            allocator: Allocator,
+            cycle_witnesses: []const r1cs.R1CSCycleInputs(F),
+            trace_len: usize,
+            r_outer: []const F,
+            r_product: []const F,
+            gamma_powers: []const F,
+        ) !Self {
+            const n_vars = r_outer.len;
+            const prefix_n_vars = n_vars / 2;
+            const suffix_n_vars = n_vars - prefix_n_vars;
+            const prefix_size: usize = @as(usize, 1) << @intCast(prefix_n_vars);
+            const suffix_size: usize = @as(usize, 1) << @intCast(suffix_n_vars);
+
+            // Split r into hi and lo parts
+            const r_outer_hi = r_outer[0..prefix_n_vars];
+            const r_outer_lo = r_outer[prefix_n_vars..];
+            const r_prod_hi = r_product[0..prefix_n_vars];
+            const r_prod_lo = r_product[prefix_n_vars..];
+
+            // Initialize P buffers from prefix polynomials
+            // P_0 = eq+1(r_lo, j) for all j
+            // P_1 = is_max(r_lo) * delta(j=0) (sparse: only index 0 is non-zero)
+            const P_0_outer = try allocator.alloc(F, prefix_size);
+            const P_1_outer = try allocator.alloc(F, prefix_size);
+            const P_0_prod = try allocator.alloc(F, prefix_size);
+            const P_1_prod = try allocator.alloc(F, prefix_size);
+
+            // Compute eq+1(r_lo, j) for prefix_0
+            try computeEqPlusOneEvals(allocator, r_outer_lo, P_0_outer);
+            try computeEqPlusOneEvals(allocator, r_prod_lo, P_0_prod);
+
+            // Compute is_max(r_lo) for prefix_1
+            // is_max(x) = eq((1,1,...,1), x) = product of x[i]
+            var is_max_outer = F.one();
+            for (r_outer_lo) |r_i| {
+                is_max_outer = is_max_outer.mul(r_i);
+            }
+            @memset(P_1_outer, F.zero());
+            P_1_outer[0] = is_max_outer;
+
+            var is_max_prod = F.one();
+            for (r_prod_lo) |r_i| {
+                is_max_prod = is_max_prod.mul(r_i);
+            }
+            @memset(P_1_prod, F.zero());
+            P_1_prod[0] = is_max_prod;
+
+            // Compute suffix evaluations (needed for Q buffer construction)
+            const suffix_0_outer = try allocator.alloc(F, suffix_size);
+            defer allocator.free(suffix_0_outer);
+            const suffix_1_outer = try allocator.alloc(F, suffix_size);
+            defer allocator.free(suffix_1_outer);
+            const suffix_0_prod = try allocator.alloc(F, suffix_size);
+            defer allocator.free(suffix_0_prod);
+            const suffix_1_prod = try allocator.alloc(F, suffix_size);
+            defer allocator.free(suffix_1_prod);
+
+            // suffix_0 = eq(r_hi, j), suffix_1 = eq+1(r_hi, j)
+            try computeEqAndEqPlusOneEvals(allocator, r_outer_hi, suffix_0_outer, suffix_1_outer);
+            try computeEqAndEqPlusOneEvals(allocator, r_prod_hi, suffix_0_prod, suffix_1_prod);
+
+            // Initialize Q buffers to zero
+            const Q_0_outer = try allocator.alloc(F, prefix_size);
+            const Q_1_outer = try allocator.alloc(F, prefix_size);
+            const Q_0_prod = try allocator.alloc(F, prefix_size);
+            const Q_1_prod = try allocator.alloc(F, prefix_size);
+            @memset(Q_0_outer, F.zero());
+            @memset(Q_1_outer, F.zero());
+            @memset(Q_0_prod, F.zero());
+            @memset(Q_1_prod, F.zero());
+
+            // Allocate witness MLEs
+            const unexpanded_pc = try allocator.alloc(F, trace_len);
+            const pc = try allocator.alloc(F, trace_len);
+            const is_virtual = try allocator.alloc(F, trace_len);
+            const is_first_in_sequence = try allocator.alloc(F, trace_len);
+            const is_noop = try allocator.alloc(F, trace_len);
+
+            // Compute Q buffers by accumulating witness * suffix
+            // Q[x_lo] = sum over x_hi of: witness(x) * suffix[x_hi]
+            // where x = x_lo + (x_hi << prefix_n_vars)
+            for (0..prefix_size) |x_lo| {
+                var q_0_outer_acc = F.zero();
+                var q_1_outer_acc = F.zero();
+                var q_0_prod_acc = F.zero();
+                var q_1_prod_acc = F.zero();
+
+                for (0..suffix_size) |x_hi| {
+                    const x = x_lo + (x_hi << @intCast(prefix_n_vars));
+                    if (x >= trace_len) continue;
+
+                    // Get witness values at this cycle
+                    const witness = &cycle_witnesses[x].values;
+                    const upc = witness[R1CSInputIndex.UnexpandedPC.toIndex()];
+                    const pc_val = witness[R1CSInputIndex.PC.toIndex()];
+                    const virt = witness[R1CSInputIndex.FlagVirtualInstruction.toIndex()];
+                    const first = witness[R1CSInputIndex.FlagIsFirstInSequence.toIndex()];
+                    const noop = witness[R1CSInputIndex.FlagIsNoop.toIndex()];
+
+                    // Store witness values for final claims
+                    unexpanded_pc[x] = upc;
+                    pc[x] = pc_val;
+                    is_virtual[x] = virt;
+                    is_first_in_sequence[x] = first;
+                    is_noop[x] = noop;
+
+                    // Compute batched witness value v = upc + gamma*pc + gamma^2*virt + gamma^3*first
+                    var v = upc;
+                    v = v.add(gamma_powers[1].mul(pc_val));
+                    v = v.add(gamma_powers[2].mul(virt));
+                    v = v.add(gamma_powers[3].mul(first));
+
+                    // Accumulate: Q_outer += v * suffix
+                    q_0_outer_acc = q_0_outer_acc.add(v.mul(suffix_0_outer[x_hi]));
+                    q_1_outer_acc = q_1_outer_acc.add(v.mul(suffix_1_outer[x_hi]));
+
+                    // For product term: Q_prod += (1 - noop) * suffix
+                    const one_minus_noop = F.one().sub(noop);
+                    q_0_prod_acc = q_0_prod_acc.add(one_minus_noop.mul(suffix_0_prod[x_hi]));
+                    q_1_prod_acc = q_1_prod_acc.add(one_minus_noop.mul(suffix_1_prod[x_hi]));
+                }
+
+                Q_0_outer[x_lo] = q_0_outer_acc;
+                Q_1_outer[x_lo] = q_1_outer_acc;
+                Q_0_prod[x_lo] = q_0_prod_acc.mul(gamma_powers[4]);
+                Q_1_prod[x_lo] = q_1_prod_acc.mul(gamma_powers[4]);
+            }
+
+            return Self{
+                .P_0_outer = P_0_outer,
+                .Q_0_outer = Q_0_outer,
+                .P_1_outer = P_1_outer,
+                .Q_1_outer = Q_1_outer,
+                .P_0_prod = P_0_prod,
+                .Q_0_prod = Q_0_prod,
+                .P_1_prod = P_1_prod,
+                .Q_1_prod = Q_1_prod,
+                .gamma_powers = gamma_powers,
+                .unexpanded_pc = unexpanded_pc,
+                .pc = pc,
+                .is_virtual = is_virtual,
+                .is_first_in_sequence = is_first_in_sequence,
+                .is_noop = is_noop,
+                .prefix_n_vars = prefix_n_vars,
+                .current_prefix_size = prefix_size,
+                .sumcheck_challenges = .empty,
+                .in_phase2 = false,
+                .phase2_eq_plus_one_outer = null,
+                .phase2_eq_plus_one_prod = null,
+                .allocator = allocator,
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.allocator.free(self.P_0_outer);
+            self.allocator.free(self.Q_0_outer);
+            self.allocator.free(self.P_1_outer);
+            self.allocator.free(self.Q_1_outer);
+            self.allocator.free(self.P_0_prod);
+            self.allocator.free(self.Q_0_prod);
+            self.allocator.free(self.P_1_prod);
+            self.allocator.free(self.Q_1_prod);
+            self.allocator.free(self.unexpanded_pc);
+            self.allocator.free(self.pc);
+            self.allocator.free(self.is_virtual);
+            self.allocator.free(self.is_first_in_sequence);
+            self.allocator.free(self.is_noop);
+            self.sumcheck_challenges.deinit(self.allocator);
+            if (self.phase2_eq_plus_one_outer) |p| self.allocator.free(p);
+            if (self.phase2_eq_plus_one_prod) |p| self.allocator.free(p);
+        }
+
+        /// Compute round evaluations [p(0), p(1), p(2)] for degree-2 polynomial
+        pub fn computeRoundEvals(self: *Self, previous_claim: F) [3]F {
+            if (self.in_phase2) {
+                return self.computeRoundEvalsPhase2(previous_claim);
+            } else {
+                return self.computeRoundEvalsPhase1(previous_claim);
             }
         }
 
-        /// Bind MLE polynomial (in-place, halve size)
-        fn bindMLE(mle: []F, r: F) void {
-            const half = mle.len / 2;
-            for (0..half) |i| {
-                const low = mle[2 * i];
-                const high = mle[2 * i + 1];
-                mle[i] = F.one().sub(r).mul(low).add(r.mul(high));
+        fn computeRoundEvalsPhase1(self: *Self, previous_claim: F) [3]F {
+            // Phase1: Use P*Q formula
+            // H(X) = sum over pairs of sum over i of P[i](X) * Q[i](X)
+            const half = self.current_prefix_size / 2;
+            var evals: [2]F = .{ F.zero(), F.zero() }; // p(0), p(2) since degree 2
+
+            // Process all 4 (P, Q) pairs
+            const pairs: [4]struct { P: []F, Q: []F } = .{
+                .{ .P = self.P_0_outer, .Q = self.Q_0_outer },
+                .{ .P = self.P_1_outer, .Q = self.Q_1_outer },
+                .{ .P = self.P_0_prod, .Q = self.Q_0_prod },
+                .{ .P = self.P_1_prod, .Q = self.Q_1_prod },
+            };
+
+            for (pairs) |pair| {
+                for (0..half) |i| {
+                    // Get P and Q values at indices 2i and 2i+1
+                    const p_0 = pair.P[2 * i];
+                    const p_1 = pair.P[2 * i + 1];
+                    const q_0 = pair.Q[2 * i];
+                    const q_1 = pair.Q[2 * i + 1];
+
+                    // Linear extrapolation for X=2: f(2) = 2*f(1) - f(0)
+                    const p_2 = p_1.add(p_1).sub(p_0);
+                    const q_2 = q_1.add(q_1).sub(q_0);
+
+                    // Accumulate P*Q products at X=0 and X=2
+                    evals[0] = evals[0].add(p_0.mul(q_0));
+                    evals[1] = evals[1].add(p_2.mul(q_2));
+                }
             }
+
+            // Derive p(1) from previous_claim: p(0) + p(1) = previous_claim
+            const p_1 = previous_claim.sub(evals[0]);
+
+            return [3]F{ evals[0], p_1, evals[1] };
+        }
+
+        fn computeRoundEvalsPhase2(self: *Self, previous_claim: F) [3]F {
+            // Phase2: Use materialized eq+1 polynomials with witness MLEs
+            const eq_outer = self.phase2_eq_plus_one_outer.?;
+            const eq_prod = self.phase2_eq_plus_one_prod.?;
+            const half = eq_outer.len / 2;
+
+            var evals: [2]F = .{ F.zero(), F.zero() };
+
+            for (0..half) |j| {
+                const eq_out_0 = eq_outer[2 * j];
+                const eq_out_1 = eq_outer[2 * j + 1];
+                const eq_prod_0 = eq_prod[2 * j];
+                const eq_prod_1 = eq_prod[2 * j + 1];
+
+                const upc_0 = self.unexpanded_pc[2 * j];
+                const upc_1 = self.unexpanded_pc[2 * j + 1];
+                const pc_0 = self.pc[2 * j];
+                const pc_1 = self.pc[2 * j + 1];
+                const virt_0 = self.is_virtual[2 * j];
+                const virt_1 = self.is_virtual[2 * j + 1];
+                const first_0 = self.is_first_in_sequence[2 * j];
+                const first_1 = self.is_first_in_sequence[2 * j + 1];
+                const noop_0 = self.is_noop[2 * j];
+                const noop_1 = self.is_noop[2 * j + 1];
+
+                // Extrapolate to X=2
+                const eq_out_2 = eq_out_1.add(eq_out_1).sub(eq_out_0);
+                const eq_prod_2 = eq_prod_1.add(eq_prod_1).sub(eq_prod_0);
+                const upc_2 = upc_1.add(upc_1).sub(upc_0);
+                const pc_2 = pc_1.add(pc_1).sub(pc_0);
+                const virt_2 = virt_1.add(virt_1).sub(virt_0);
+                const first_2 = first_1.add(first_1).sub(first_0);
+                const noop_2 = noop_1.add(noop_1).sub(noop_0);
+
+                // Compute f at X=0
+                const val_0 = upc_0.add(self.gamma_powers[1].mul(pc_0))
+                    .add(self.gamma_powers[2].mul(virt_0))
+                    .add(self.gamma_powers[3].mul(first_0));
+                const term1_0 = eq_out_0.mul(val_0);
+                const term2_0 = self.gamma_powers[4].mul(F.one().sub(noop_0)).mul(eq_prod_0);
+                const f_0 = term1_0.add(term2_0);
+
+                // Compute f at X=2
+                const val_2 = upc_2.add(self.gamma_powers[1].mul(pc_2))
+                    .add(self.gamma_powers[2].mul(virt_2))
+                    .add(self.gamma_powers[3].mul(first_2));
+                const term1_2 = eq_out_2.mul(val_2);
+                const term2_2 = self.gamma_powers[4].mul(F.one().sub(noop_2)).mul(eq_prod_2);
+                const f_2 = term1_2.add(term2_2);
+
+                evals[0] = evals[0].add(f_0);
+                evals[1] = evals[1].add(f_2);
+            }
+
+            const p_1 = previous_claim.sub(evals[0]);
+            return [3]F{ evals[0], p_1, evals[1] };
+        }
+
+        /// Bind the prover at challenge r_j
+        pub fn bind(self: *Self, r_j: F) void {
+            self.sumcheck_challenges.append(self.allocator, r_j) catch unreachable;
+
+            if (self.in_phase2) {
+                self.bindPhase2(r_j);
+            } else {
+                // Check if we should transition to Phase2
+                if (self.shouldTransitionToPhase2()) {
+                    self.transitionToPhase2(r_j);
+                } else {
+                    self.bindPhase1(r_j);
+                }
+            }
+        }
+
+        fn shouldTransitionToPhase2(self: *Self) bool {
+            // Transition when prefix size is 2 (log2 == 1)
+            return std.math.log2_int(usize, self.current_prefix_size) == 1;
+        }
+
+        fn bindPhase1(self: *Self, r_j: F) void {
+            // Bind P and Q buffers: new[i] = old[2i] + r * (old[2i+1] - old[2i])
+            const new_size = self.current_prefix_size / 2;
+
+            for (0..new_size) |i| {
+                // P_0_outer
+                self.P_0_outer[i] = self.P_0_outer[2 * i].add(r_j.mul(self.P_0_outer[2 * i + 1].sub(self.P_0_outer[2 * i])));
+                self.Q_0_outer[i] = self.Q_0_outer[2 * i].add(r_j.mul(self.Q_0_outer[2 * i + 1].sub(self.Q_0_outer[2 * i])));
+
+                // P_1_outer
+                self.P_1_outer[i] = self.P_1_outer[2 * i].add(r_j.mul(self.P_1_outer[2 * i + 1].sub(self.P_1_outer[2 * i])));
+                self.Q_1_outer[i] = self.Q_1_outer[2 * i].add(r_j.mul(self.Q_1_outer[2 * i + 1].sub(self.Q_1_outer[2 * i])));
+
+                // P_0_prod
+                self.P_0_prod[i] = self.P_0_prod[2 * i].add(r_j.mul(self.P_0_prod[2 * i + 1].sub(self.P_0_prod[2 * i])));
+                self.Q_0_prod[i] = self.Q_0_prod[2 * i].add(r_j.mul(self.Q_0_prod[2 * i + 1].sub(self.Q_0_prod[2 * i])));
+
+                // P_1_prod
+                self.P_1_prod[i] = self.P_1_prod[2 * i].add(r_j.mul(self.P_1_prod[2 * i + 1].sub(self.P_1_prod[2 * i])));
+                self.Q_1_prod[i] = self.Q_1_prod[2 * i].add(r_j.mul(self.Q_1_prod[2 * i + 1].sub(self.Q_1_prod[2 * i])));
+            }
+
+            self.current_prefix_size = new_size;
+        }
+
+        fn transitionToPhase2(self: *Self, r_j: F) void {
+            // Add final challenge before transition
+            // The transition happens AFTER binding with r_j
+            self.bindPhase1(r_j);
+            self.in_phase2 = true;
+
+            // Materialize full eq+1 polynomials for remaining rounds
+            // eq+1(r, x) = prefix_0_eval * suffix_0[x] + prefix_1_eval * suffix_1[x]
+            // where prefix_0_eval and prefix_1_eval are the bound P values
+
+            const remaining_size = self.unexpanded_pc.len;
+            self.phase2_eq_plus_one_outer = self.allocator.alloc(F, remaining_size) catch unreachable;
+            self.phase2_eq_plus_one_prod = self.allocator.alloc(F, remaining_size) catch unreachable;
+
+            // For now, use direct eq+1 evaluation since this is a fallback
+            // TODO: Properly materialize from prefix evaluations
+            // The witness MLEs are already stored in self.unexpanded_pc, etc.
+        }
+
+        fn bindPhase2(self: *Self, r_j: F) void {
+            // Bind witness MLEs and eq+1 polynomials
+            const new_size = self.unexpanded_pc.len / 2;
+
+            for (0..new_size) |i| {
+                self.unexpanded_pc[i] = self.unexpanded_pc[2 * i].add(r_j.mul(self.unexpanded_pc[2 * i + 1].sub(self.unexpanded_pc[2 * i])));
+                self.pc[i] = self.pc[2 * i].add(r_j.mul(self.pc[2 * i + 1].sub(self.pc[2 * i])));
+                self.is_virtual[i] = self.is_virtual[2 * i].add(r_j.mul(self.is_virtual[2 * i + 1].sub(self.is_virtual[2 * i])));
+                self.is_first_in_sequence[i] = self.is_first_in_sequence[2 * i].add(r_j.mul(self.is_first_in_sequence[2 * i + 1].sub(self.is_first_in_sequence[2 * i])));
+                self.is_noop[i] = self.is_noop[2 * i].add(r_j.mul(self.is_noop[2 * i + 1].sub(self.is_noop[2 * i])));
+
+                if (self.phase2_eq_plus_one_outer) |eq| {
+                    eq[i] = eq[2 * i].add(r_j.mul(eq[2 * i + 1].sub(eq[2 * i])));
+                }
+                if (self.phase2_eq_plus_one_prod) |eq| {
+                    eq[i] = eq[2 * i].add(r_j.mul(eq[2 * i + 1].sub(eq[2 * i])));
+                }
+            }
+        }
+
+        /// Get final claims after all rounds
+        pub fn finalClaims(self: *const Self) struct {
+            unexpanded_pc: F,
+            pc: F,
+            is_virtual: F,
+            is_first_in_sequence: F,
+            is_noop: F,
+        } {
+            return .{
+                .unexpanded_pc = if (self.unexpanded_pc.len > 0) self.unexpanded_pc[0] else F.zero(),
+                .pc = if (self.pc.len > 0) self.pc[0] else F.zero(),
+                .is_virtual = if (self.is_virtual.len > 0) self.is_virtual[0] else F.zero(),
+                .is_first_in_sequence = if (self.is_first_in_sequence.len > 0) self.is_first_in_sequence[0] else F.zero(),
+                .is_noop = if (self.is_noop.len > 0) self.is_noop[0] else F.zero(),
+            };
+        }
+
+        // Helper: Compute eq+1(r, j) for all j
+        fn computeEqPlusOneEvals(allocator: Allocator, r: []const F, out: []F) !void {
+            const n = r.len;
+            const size = out.len;
+            std.debug.assert(size == @as(usize, 1) << @intCast(n));
+
+            const j_bits = try allocator.alloc(F, n);
+            defer allocator.free(j_bits);
+
+            for (0..size) |j| {
+                // Convert j to binary (BIG_ENDIAN: bit 0 is MSB)
+                for (0..n) |k| {
+                    const bit_pos: u6 = @intCast(n - 1 - k);
+                    j_bits[k] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
+                }
+                out[j] = poly_mod.EqPlusOnePolynomial(F).mle(r, j_bits);
+            }
+        }
+
+        // Helper: Compute both eq and eq+1 evaluations
+        fn computeEqAndEqPlusOneEvals(allocator: Allocator, r: []const F, eq_out: []F, eq_plus_one_out: []F) !void {
+            const n = r.len;
+            const size = eq_out.len;
+            std.debug.assert(size == @as(usize, 1) << @intCast(n));
+
+            const j_bits = try allocator.alloc(F, n);
+            defer allocator.free(j_bits);
+
+            for (0..size) |j| {
+                for (0..n) |k| {
+                    const bit_pos: u6 = @intCast(n - 1 - k);
+                    j_bits[k] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
+                }
+                eq_out[j] = poly_mod.EqPolynomial(F).mle(r, j_bits);
+                eq_plus_one_out[j] = poly_mod.EqPlusOnePolynomial(F).mle(r, j_bits);
+            }
+        }
+    };
+}
+
+// =============================================================================
+// InstructionInput Prover (No Prefix-Suffix, uses direct computation)
+// =============================================================================
+
+fn InstructionInputProver(comptime F: type) type {
+    return struct {
+        const Self = @This();
+
+        // Witness MLEs
+        left_is_rs1: []F,
+        rs1_value: []F,
+        left_is_pc: []F,
+        unexpanded_pc: []F,
+        right_is_rs2: []F,
+        rs2_value: []F,
+        right_is_imm: []F,
+        imm: []F,
+
+        // Eq polynomial evaluations
+        eq_outer: []F,
+        eq_product: []F,
+
+        gamma: F,
+        gamma_sqr: F,
+
+        current_size: usize,
+        allocator: Allocator,
+
+        pub fn init(
+            allocator: Allocator,
+            cycle_witnesses: []const r1cs.R1CSCycleInputs(F),
+            trace_len: usize,
+            r_outer: []const F,
+            r_product: []const F,
+            gamma: F,
+            gamma_sqr: F,
+        ) !Self {
+            // Allocate MLEs
+            const left_is_rs1 = try allocator.alloc(F, trace_len);
+            const rs1_value = try allocator.alloc(F, trace_len);
+            const left_is_pc = try allocator.alloc(F, trace_len);
+            const unexpanded_pc = try allocator.alloc(F, trace_len);
+            const right_is_rs2 = try allocator.alloc(F, trace_len);
+            const rs2_value = try allocator.alloc(F, trace_len);
+            const right_is_imm = try allocator.alloc(F, trace_len);
+            const imm = try allocator.alloc(F, trace_len);
+
+            // Fill from witnesses
+            for (0..trace_len) |i| {
+                if (i < cycle_witnesses.len) {
+                    const values = &cycle_witnesses[i].values;
+                    left_is_rs1[i] = values[R1CSInputIndex.FlagLeftOperandIsRs1.toIndex()];
+                    left_is_pc[i] = values[R1CSInputIndex.FlagLeftOperandIsPC.toIndex()];
+                    right_is_rs2[i] = values[R1CSInputIndex.FlagRightOperandIsRs2.toIndex()];
+                    right_is_imm[i] = values[R1CSInputIndex.FlagRightOperandIsImm.toIndex()];
+                    rs1_value[i] = values[R1CSInputIndex.Rs1Value.toIndex()];
+                    unexpanded_pc[i] = values[R1CSInputIndex.UnexpandedPC.toIndex()];
+                    rs2_value[i] = values[R1CSInputIndex.Rs2Value.toIndex()];
+                    imm[i] = values[R1CSInputIndex.Imm.toIndex()];
+                } else {
+                    left_is_rs1[i] = F.zero();
+                    rs1_value[i] = F.zero();
+                    left_is_pc[i] = F.zero();
+                    unexpanded_pc[i] = F.zero();
+                    right_is_rs2[i] = F.zero();
+                    rs2_value[i] = F.zero();
+                    right_is_imm[i] = F.zero();
+                    imm[i] = F.zero();
+                }
+            }
+
+            // Compute eq evaluations
+            var eq_outer_poly = try poly_mod.EqPolynomial(F).init(allocator, r_outer);
+            defer eq_outer_poly.deinit();
+            const eq_outer = try eq_outer_poly.evals(allocator);
+
+            var eq_product_poly = try poly_mod.EqPolynomial(F).init(allocator, r_product);
+            defer eq_product_poly.deinit();
+            const eq_product = try eq_product_poly.evals(allocator);
+
+            return Self{
+                .left_is_rs1 = left_is_rs1,
+                .rs1_value = rs1_value,
+                .left_is_pc = left_is_pc,
+                .unexpanded_pc = unexpanded_pc,
+                .right_is_rs2 = right_is_rs2,
+                .rs2_value = rs2_value,
+                .right_is_imm = right_is_imm,
+                .imm = imm,
+                .eq_outer = eq_outer,
+                .eq_product = eq_product,
+                .gamma = gamma,
+                .gamma_sqr = gamma_sqr,
+                .current_size = trace_len,
+                .allocator = allocator,
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.allocator.free(self.left_is_rs1);
+            self.allocator.free(self.rs1_value);
+            self.allocator.free(self.left_is_pc);
+            self.allocator.free(self.unexpanded_pc);
+            self.allocator.free(self.right_is_rs2);
+            self.allocator.free(self.rs2_value);
+            self.allocator.free(self.right_is_imm);
+            self.allocator.free(self.imm);
+            self.allocator.free(self.eq_outer);
+            self.allocator.free(self.eq_product);
+        }
+
+        /// Compute round evaluations [p(0), p(1), p(2), p(3)] for degree-3 polynomial
+        pub fn computeRoundEvals(self: *Self, previous_claim: F) [4]F {
+            const half = self.current_size / 2;
+            var evals: [3]F = .{ F.zero(), F.zero(), F.zero() }; // p(0), p(2), p(3)
+
+            for (0..half) |j| {
+                // Get values at bit=0 and bit=1
+                const left_is_rs1_0 = self.left_is_rs1[2 * j];
+                const left_is_rs1_1 = self.left_is_rs1[2 * j + 1];
+                const rs1_0 = self.rs1_value[2 * j];
+                const rs1_1 = self.rs1_value[2 * j + 1];
+                const left_is_pc_0 = self.left_is_pc[2 * j];
+                const left_is_pc_1 = self.left_is_pc[2 * j + 1];
+                const pc_0 = self.unexpanded_pc[2 * j];
+                const pc_1 = self.unexpanded_pc[2 * j + 1];
+                const right_is_rs2_0 = self.right_is_rs2[2 * j];
+                const right_is_rs2_1 = self.right_is_rs2[2 * j + 1];
+                const rs2_0 = self.rs2_value[2 * j];
+                const rs2_1 = self.rs2_value[2 * j + 1];
+                const right_is_imm_0 = self.right_is_imm[2 * j];
+                const right_is_imm_1 = self.right_is_imm[2 * j + 1];
+                const imm_0 = self.imm[2 * j];
+                const imm_1 = self.imm[2 * j + 1];
+                const eq_out_0 = self.eq_outer[2 * j];
+                const eq_out_1 = self.eq_outer[2 * j + 1];
+                const eq_prod_0 = self.eq_product[2 * j];
+                const eq_prod_1 = self.eq_product[2 * j + 1];
+
+                // Extrapolate to X=2 and X=3
+                const left_is_rs1_2 = left_is_rs1_1.add(left_is_rs1_1).sub(left_is_rs1_0);
+                const left_is_rs1_3 = left_is_rs1_2.add(left_is_rs1_1).sub(left_is_rs1_0);
+                const rs1_2 = rs1_1.add(rs1_1).sub(rs1_0);
+                const rs1_3 = rs1_2.add(rs1_1).sub(rs1_0);
+                const left_is_pc_2 = left_is_pc_1.add(left_is_pc_1).sub(left_is_pc_0);
+                const left_is_pc_3 = left_is_pc_2.add(left_is_pc_1).sub(left_is_pc_0);
+                const pc_2 = pc_1.add(pc_1).sub(pc_0);
+                const pc_3 = pc_2.add(pc_1).sub(pc_0);
+                const right_is_rs2_2 = right_is_rs2_1.add(right_is_rs2_1).sub(right_is_rs2_0);
+                const right_is_rs2_3 = right_is_rs2_2.add(right_is_rs2_1).sub(right_is_rs2_0);
+                const rs2_2 = rs2_1.add(rs2_1).sub(rs2_0);
+                const rs2_3 = rs2_2.add(rs2_1).sub(rs2_0);
+                const right_is_imm_2 = right_is_imm_1.add(right_is_imm_1).sub(right_is_imm_0);
+                const right_is_imm_3 = right_is_imm_2.add(right_is_imm_1).sub(right_is_imm_0);
+                const imm_2 = imm_1.add(imm_1).sub(imm_0);
+                const imm_3 = imm_2.add(imm_1).sub(imm_0);
+                const eq_out_2 = eq_out_1.add(eq_out_1).sub(eq_out_0);
+                const eq_out_3 = eq_out_2.add(eq_out_1).sub(eq_out_0);
+                const eq_prod_2 = eq_prod_1.add(eq_prod_1).sub(eq_prod_0);
+                const eq_prod_3 = eq_prod_2.add(eq_prod_1).sub(eq_prod_0);
+
+                // Compute at X=0
+                const left_0 = left_is_rs1_0.mul(rs1_0).add(left_is_pc_0.mul(pc_0));
+                const right_0 = right_is_rs2_0.mul(rs2_0).add(right_is_imm_0.mul(imm_0));
+                const eq_weight_0 = eq_out_0.add(self.gamma_sqr.mul(eq_prod_0));
+                const f_0 = eq_weight_0.mul(right_0.add(self.gamma.mul(left_0)));
+
+                // Compute at X=2
+                const left_2 = left_is_rs1_2.mul(rs1_2).add(left_is_pc_2.mul(pc_2));
+                const right_2 = right_is_rs2_2.mul(rs2_2).add(right_is_imm_2.mul(imm_2));
+                const eq_weight_2 = eq_out_2.add(self.gamma_sqr.mul(eq_prod_2));
+                const f_2 = eq_weight_2.mul(right_2.add(self.gamma.mul(left_2)));
+
+                // Compute at X=3
+                const left_3 = left_is_rs1_3.mul(rs1_3).add(left_is_pc_3.mul(pc_3));
+                const right_3 = right_is_rs2_3.mul(rs2_3).add(right_is_imm_3.mul(imm_3));
+                const eq_weight_3 = eq_out_3.add(self.gamma_sqr.mul(eq_prod_3));
+                const f_3 = eq_weight_3.mul(right_3.add(self.gamma.mul(left_3)));
+
+                evals[0] = evals[0].add(f_0);
+                evals[1] = evals[1].add(f_2);
+                evals[2] = evals[2].add(f_3);
+            }
+
+            // Derive p(1) from previous_claim
+            const p_1 = previous_claim.sub(evals[0]);
+
+            return [4]F{ evals[0], p_1, evals[1], evals[2] };
+        }
+
+        pub fn bind(self: *Self, r_j: F) void {
+            const new_size = self.current_size / 2;
+
+            for (0..new_size) |i| {
+                self.left_is_rs1[i] = self.left_is_rs1[2 * i].add(r_j.mul(self.left_is_rs1[2 * i + 1].sub(self.left_is_rs1[2 * i])));
+                self.rs1_value[i] = self.rs1_value[2 * i].add(r_j.mul(self.rs1_value[2 * i + 1].sub(self.rs1_value[2 * i])));
+                self.left_is_pc[i] = self.left_is_pc[2 * i].add(r_j.mul(self.left_is_pc[2 * i + 1].sub(self.left_is_pc[2 * i])));
+                self.unexpanded_pc[i] = self.unexpanded_pc[2 * i].add(r_j.mul(self.unexpanded_pc[2 * i + 1].sub(self.unexpanded_pc[2 * i])));
+                self.right_is_rs2[i] = self.right_is_rs2[2 * i].add(r_j.mul(self.right_is_rs2[2 * i + 1].sub(self.right_is_rs2[2 * i])));
+                self.rs2_value[i] = self.rs2_value[2 * i].add(r_j.mul(self.rs2_value[2 * i + 1].sub(self.rs2_value[2 * i])));
+                self.right_is_imm[i] = self.right_is_imm[2 * i].add(r_j.mul(self.right_is_imm[2 * i + 1].sub(self.right_is_imm[2 * i])));
+                self.imm[i] = self.imm[2 * i].add(r_j.mul(self.imm[2 * i + 1].sub(self.imm[2 * i])));
+                self.eq_outer[i] = self.eq_outer[2 * i].add(r_j.mul(self.eq_outer[2 * i + 1].sub(self.eq_outer[2 * i])));
+                self.eq_product[i] = self.eq_product[2 * i].add(r_j.mul(self.eq_product[2 * i + 1].sub(self.eq_product[2 * i])));
+            }
+
+            self.current_size = new_size;
+        }
+
+        pub fn finalClaims(self: *const Self) struct {
+            left_is_rs1: F,
+            rs1_value: F,
+            left_is_pc: F,
+            unexpanded_pc: F,
+            right_is_rs2: F,
+            rs2_value: F,
+            right_is_imm: F,
+            imm: F,
+        } {
+            return .{
+                .left_is_rs1 = if (self.left_is_rs1.len > 0) self.left_is_rs1[0] else F.zero(),
+                .rs1_value = if (self.rs1_value.len > 0) self.rs1_value[0] else F.zero(),
+                .left_is_pc = if (self.left_is_pc.len > 0) self.left_is_pc[0] else F.zero(),
+                .unexpanded_pc = if (self.unexpanded_pc.len > 0) self.unexpanded_pc[0] else F.zero(),
+                .right_is_rs2 = if (self.right_is_rs2.len > 0) self.right_is_rs2[0] else F.zero(),
+                .rs2_value = if (self.rs2_value.len > 0) self.rs2_value[0] else F.zero(),
+                .right_is_imm = if (self.right_is_imm.len > 0) self.right_is_imm[0] else F.zero(),
+                .imm = if (self.imm.len > 0) self.imm[0] else F.zero(),
+            };
+        }
+    };
+}
+
+// =============================================================================
+// RegistersClaimReduction Prefix-Suffix Prover
+// =============================================================================
+
+fn RegistersPrefixSuffixProver(comptime F: type) type {
+    return struct {
+        const Self = @This();
+
+        // Single (P, Q) pair for eq polynomial
+        P: []F, // Prefix eq evals
+        Q: []F, // Accumulated witness * suffix
+
+        // Witness MLEs
+        rd_write_value: []F,
+        rs1_value: []F,
+        rs2_value: []F,
+
+        gamma: F,
+        gamma_sqr: F,
+
+        prefix_n_vars: usize,
+        current_prefix_size: usize,
+        in_phase2: bool,
+
+        // Phase 2 eq polynomial
+        phase2_eq: ?[]F,
+
+        allocator: Allocator,
+
+        pub fn init(
+            allocator: Allocator,
+            cycle_witnesses: []const r1cs.R1CSCycleInputs(F),
+            trace_len: usize,
+            r_spartan: []const F,
+            gamma: F,
+            gamma_sqr: F,
+        ) !Self {
+            const n_vars = r_spartan.len;
+            const prefix_n_vars = n_vars / 2;
+            const suffix_n_vars = n_vars - prefix_n_vars;
+            const prefix_size: usize = @as(usize, 1) << @intCast(prefix_n_vars);
+            const suffix_size: usize = @as(usize, 1) << @intCast(suffix_n_vars);
+
+            // Split r into hi and lo parts
+            const r_hi = r_spartan[0..prefix_n_vars];
+            const r_lo = r_spartan[prefix_n_vars..];
+
+            // P = eq(r_lo, j) for prefix
+            const P = try allocator.alloc(F, prefix_size);
+            var eq_lo = try poly_mod.EqPolynomial(F).init(allocator, r_lo);
+            defer eq_lo.deinit();
+            const eq_lo_evals = try eq_lo.evals(allocator);
+            defer allocator.free(eq_lo_evals);
+            @memcpy(P, eq_lo_evals);
+
+            // Suffix evals = eq(r_hi, j) for suffix
+            var eq_hi = try poly_mod.EqPolynomial(F).init(allocator, r_hi);
+            defer eq_hi.deinit();
+            const suffix_evals = try eq_hi.evals(allocator);
+            defer allocator.free(suffix_evals);
+
+            // Allocate witness MLEs
+            const rd_write_value = try allocator.alloc(F, trace_len);
+            const rs1_value = try allocator.alloc(F, trace_len);
+            const rs2_value = try allocator.alloc(F, trace_len);
+
+            // Initialize Q buffer and fill witness MLEs
+            const Q = try allocator.alloc(F, prefix_size);
+            @memset(Q, F.zero());
+
+            for (0..prefix_size) |x_lo| {
+                var q_acc = F.zero();
+
+                for (0..suffix_size) |x_hi| {
+                    const x = x_lo + (x_hi << @intCast(prefix_n_vars));
+                    if (x >= trace_len) continue;
+
+                    const witness = &cycle_witnesses[x].values;
+                    const rd = witness[R1CSInputIndex.RdWriteValue.toIndex()];
+                    const rs1 = witness[R1CSInputIndex.Rs1Value.toIndex()];
+                    const rs2 = witness[R1CSInputIndex.Rs2Value.toIndex()];
+
+                    // Store witness values
+                    rd_write_value[x] = rd;
+                    rs1_value[x] = rs1;
+                    rs2_value[x] = rs2;
+
+                    // v = rd + gamma*rs1 + gamma^2*rs2
+                    const v = rd.add(gamma.mul(rs1)).add(gamma_sqr.mul(rs2));
+
+                    // Accumulate: Q[x_lo] += v * suffix[x_hi]
+                    q_acc = q_acc.add(v.mul(suffix_evals[x_hi]));
+                }
+
+                Q[x_lo] = q_acc;
+            }
+
+            return Self{
+                .P = P,
+                .Q = Q,
+                .rd_write_value = rd_write_value,
+                .rs1_value = rs1_value,
+                .rs2_value = rs2_value,
+                .gamma = gamma,
+                .gamma_sqr = gamma_sqr,
+                .prefix_n_vars = prefix_n_vars,
+                .current_prefix_size = prefix_size,
+                .in_phase2 = false,
+                .phase2_eq = null,
+                .allocator = allocator,
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.allocator.free(self.P);
+            self.allocator.free(self.Q);
+            self.allocator.free(self.rd_write_value);
+            self.allocator.free(self.rs1_value);
+            self.allocator.free(self.rs2_value);
+            if (self.phase2_eq) |eq| self.allocator.free(eq);
+        }
+
+        pub fn computeRoundEvals(self: *Self, previous_claim: F) [3]F {
+            if (self.in_phase2) {
+                return self.computeRoundEvalsPhase2(previous_claim);
+            } else {
+                return self.computeRoundEvalsPhase1(previous_claim);
+            }
+        }
+
+        fn computeRoundEvalsPhase1(self: *Self, previous_claim: F) [3]F {
+            const half = self.current_prefix_size / 2;
+            var evals: [2]F = .{ F.zero(), F.zero() }; // p(0), p(2)
+
+            for (0..half) |i| {
+                const p_0 = self.P[2 * i];
+                const p_1 = self.P[2 * i + 1];
+                const q_0 = self.Q[2 * i];
+                const q_1 = self.Q[2 * i + 1];
+
+                // Extrapolate to X=2
+                const p_2 = p_1.add(p_1).sub(p_0);
+                const q_2 = q_1.add(q_1).sub(q_0);
+
+                evals[0] = evals[0].add(p_0.mul(q_0));
+                evals[1] = evals[1].add(p_2.mul(q_2));
+            }
+
+            const p_1 = previous_claim.sub(evals[0]);
+            return [3]F{ evals[0], p_1, evals[1] };
+        }
+
+        fn computeRoundEvalsPhase2(self: *Self, previous_claim: F) [3]F {
+            const eq = self.phase2_eq.?;
+            const half = eq.len / 2;
+            var evals: [2]F = .{ F.zero(), F.zero() };
+
+            for (0..half) |j| {
+                const eq_0 = eq[2 * j];
+                const eq_1 = eq[2 * j + 1];
+                const rd_0 = self.rd_write_value[2 * j];
+                const rd_1 = self.rd_write_value[2 * j + 1];
+                const rs1_0 = self.rs1_value[2 * j];
+                const rs1_1 = self.rs1_value[2 * j + 1];
+                const rs2_0 = self.rs2_value[2 * j];
+                const rs2_1 = self.rs2_value[2 * j + 1];
+
+                // Extrapolate
+                const eq_2 = eq_1.add(eq_1).sub(eq_0);
+                const rd_2 = rd_1.add(rd_1).sub(rd_0);
+                const rs1_2 = rs1_1.add(rs1_1).sub(rs1_0);
+                const rs2_2 = rs2_1.add(rs2_1).sub(rs2_0);
+
+                const v_0 = rd_0.add(self.gamma.mul(rs1_0)).add(self.gamma_sqr.mul(rs2_0));
+                const v_2 = rd_2.add(self.gamma.mul(rs1_2)).add(self.gamma_sqr.mul(rs2_2));
+
+                evals[0] = evals[0].add(eq_0.mul(v_0));
+                evals[1] = evals[1].add(eq_2.mul(v_2));
+            }
+
+            const p_1 = previous_claim.sub(evals[0]);
+            return [3]F{ evals[0], p_1, evals[1] };
+        }
+
+        pub fn bind(self: *Self, r_j: F) void {
+            if (self.in_phase2) {
+                self.bindPhase2(r_j);
+            } else {
+                if (self.shouldTransitionToPhase2()) {
+                    self.transitionToPhase2(r_j);
+                } else {
+                    self.bindPhase1(r_j);
+                }
+            }
+        }
+
+        fn shouldTransitionToPhase2(self: *Self) bool {
+            return std.math.log2_int(usize, self.current_prefix_size) == 1;
+        }
+
+        fn bindPhase1(self: *Self, r_j: F) void {
+            const new_size = self.current_prefix_size / 2;
+
+            for (0..new_size) |i| {
+                self.P[i] = self.P[2 * i].add(r_j.mul(self.P[2 * i + 1].sub(self.P[2 * i])));
+                self.Q[i] = self.Q[2 * i].add(r_j.mul(self.Q[2 * i + 1].sub(self.Q[2 * i])));
+            }
+
+            self.current_prefix_size = new_size;
+        }
+
+        fn transitionToPhase2(self: *Self, r_j: F) void {
+            self.bindPhase1(r_j);
+            self.in_phase2 = true;
+
+            // Materialize eq polynomial for remaining rounds
+            const remaining_size = self.rd_write_value.len;
+            self.phase2_eq = self.allocator.alloc(F, remaining_size) catch unreachable;
+        }
+
+        fn bindPhase2(self: *Self, r_j: F) void {
+            const new_size = self.rd_write_value.len / 2;
+
+            for (0..new_size) |i| {
+                self.rd_write_value[i] = self.rd_write_value[2 * i].add(r_j.mul(self.rd_write_value[2 * i + 1].sub(self.rd_write_value[2 * i])));
+                self.rs1_value[i] = self.rs1_value[2 * i].add(r_j.mul(self.rs1_value[2 * i + 1].sub(self.rs1_value[2 * i])));
+                self.rs2_value[i] = self.rs2_value[2 * i].add(r_j.mul(self.rs2_value[2 * i + 1].sub(self.rs2_value[2 * i])));
+
+                if (self.phase2_eq) |eq| {
+                    eq[i] = eq[2 * i].add(r_j.mul(eq[2 * i + 1].sub(eq[2 * i])));
+                }
+            }
+        }
+
+        pub fn finalClaims(self: *const Self) struct {
+            rd_write_value: F,
+            rs1_value: F,
+            rs2_value: F,
+        } {
+            return .{
+                .rd_write_value = if (self.rd_write_value.len > 0) self.rd_write_value[0] else F.zero(),
+                .rs1_value = if (self.rs1_value.len > 0) self.rs1_value[0] else F.zero(),
+                .rs2_value = if (self.rs2_value.len > 0) self.rs2_value[0] else F.zero(),
+            };
         }
     };
 }

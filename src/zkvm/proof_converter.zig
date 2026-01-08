@@ -1272,6 +1272,15 @@ pub fn ProofConverter(comptime F: type) type {
             // Order: LeftInstructionInput, RightInstructionInput, InstructionFlags(IsRdNotZero),
             //        OpFlags(WriteLookupOutputToRD), OpFlags(Jump), LookupOutput,
             //        InstructionFlags(Branch), NextIsNoop
+            std.debug.print("[ZOLT PRODUCT] factor_evals for SpartanProductVirtualization:\n", .{});
+            std.debug.print("[ZOLT PRODUCT]   factor[0] (l_inst) = {any}\n", .{stage2_result.factor_evals[0].toBytesBE()});
+            std.debug.print("[ZOLT PRODUCT]   factor[1] (r_inst) = {any}\n", .{stage2_result.factor_evals[1].toBytesBE()});
+            std.debug.print("[ZOLT PRODUCT]   factor[2] (is_rd_not_zero) = {any}\n", .{stage2_result.factor_evals[2].toBytesBE()});
+            std.debug.print("[ZOLT PRODUCT]   factor[3] (wl_flag) = {any}\n", .{stage2_result.factor_evals[3].toBytesBE()});
+            std.debug.print("[ZOLT PRODUCT]   factor[4] (j_flag) = {any}\n", .{stage2_result.factor_evals[4].toBytesBE()});
+            std.debug.print("[ZOLT PRODUCT]   factor[5] (lookup_out) = {any}\n", .{stage2_result.factor_evals[5].toBytesBE()});
+            std.debug.print("[ZOLT PRODUCT]   factor[6] (branch_flag) = {any}\n", .{stage2_result.factor_evals[6].toBytesBE()});
+            std.debug.print("[ZOLT PRODUCT]   factor[7] (next_is_noop) = {any}\n", .{stage2_result.factor_evals[7].toBytesBE()});
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .LeftInstructionInput, .sumcheck_id = .SpartanProductVirtualization } },
                 stage2_result.factor_evals[0], // LeftInstructionInput

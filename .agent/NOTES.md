@@ -1,5 +1,109 @@
 # Zolt-Jolt Cross-Verification Progress
 
+## Session 25 Summary - Factor Claim Mismatch Analysis (2026-01-08)
+
+### Key Discovery
+
+The Stage 2 sumcheck fails because **factor claims don't match** between Zolt and Jolt.
+
+### Factor Claims Comparison (Fibonacci test)
+
+| Factor | Description | Match | Difference |
+|--------|-------------|-------|------------|
+| 0 | LeftInstructionInput | ✓ Exact match | 0 |
+| 1 | RightInstructionInput | ✓ Exact match | 0 |
+| 2 | IsRdNotZero | ✗ | ~4194304 (2^22) |
+| 3 | WriteLookupOutputToRD | ✗ | significant |
+| 4 | Jump | ✓ Exact match | 0 |
+| 5 | LookupOutput | ✗ | significant |
+| 6 | Branch | ✗ | significant |
+| 7 | NextIsNoop | ✗ | ~129 |
+
+### Observations
+
+1. **Factors 0, 1, 4 match exactly** - These are computed correctly:
+   - LeftInstructionInput: MLE evaluation works
+   - RightInstructionInput: MLE evaluation works
+   - Jump flag: Circuit flag computation works
+
+2. **Factors 2, 3, 5, 6, 7 don't match** - Small-ish differences suggest:
+   - The witness values themselves are different for some cycles
+   - NOT an endianness issue (factors 0, 1, 4 would fail too)
+   - NOT an MLE computation issue (same algorithm used)
+
+### Root Cause Hypothesis
+
+The witness values for these flags differ between Zolt and Jolt:
+- `IsRdNotZero` - How Zolt determines rd != 0
+- `WriteLookupOutputToRD` - How Zolt sets this circuit flag
+- `LookupOutput` - How Zolt computes lookup results
+- `Branch` - How Zolt determines branch flag
+- `NextIsNoop` - How Zolt determines if next instruction is noop
+
+### How Jolt Computes These Values
+
+From `ProductCycleInputs::from_trace`:
+```rust
+// is_rd_not_zero: instruction_flags[InstructionFlags::IsRdNotZero]
+// write_lookup_output_to_rd_flag: flags_view[CircuitFlags::WriteLookupOutputToRD]
+// lookup_output: LookupQuery::to_lookup_output(cycle)
+// branch_flag: instruction_flags[InstructionFlags::Branch]
+// not_next_noop: !trace[t+1].instruction_flags()[InstructionFlags::IsNoop] (or false for last)
+```
+
+### Next Steps
+
+1. Debug witness generation in Zolt's `R1CSCycleInputs::fromTraceStep`
+2. Verify each flag is set consistently with Jolt's semantics
+3. Compare raw trace data to ensure instruction parsing matches
+
+### Files to Investigate
+- `src/zkvm/r1cs/constraints.zig`: `R1CSCycleInputs.fromTraceStep()`, `setFlagsFromInstruction()`
+- `src/zkvm/proof_converter.zig`: `computeProductFactorEvaluations()`
+
+---
+
+## Session 24 Summary - Deep Stage 2 Analysis
+
+### Key Finding
+Stage 2 sumcheck proof is mathematically valid - all rounds pass:
+- All 26 rounds have matching c0, c2, c3 coefficients
+- All 26 challenges match
+- Final output_claim matches: 13123490541784894264218864301865646689101148350774762798288422615780802764028
+
+BUT expected_output_claim differs from output_claim, indicating opening claims mismatch.
+
+### Detailed Comparison Results
+
+| Value | Zolt | Jolt | Match |
+|-------|------|------|-------|
+| gamma_rwc | 31086377837778175205123147017089894504 | Same | ✓ |
+| r_address challenge bytes | Identical | Same | ✓ |
+| val_final_claim | 17708184114734783145538053377514369906907256976835332190588297692773985493533 | Same | ✓ |
+| All 26 round polynomials | Byte-identical | Same | ✓ |
+| output_claim | 13123490541784894264218864301865646689101148350774762798288422615780802764028 | Same | ✓ |
+| expected_output_claim | N/A | 13551736511186635527939534124733318337862614044088180116386301103911465144413 | **Mismatch** |
+
+### Instance Contributions (Stage 2)
+- Instance 0 (ProductVirtual): claim=19366854058847837639268755478203018132153606224021885848136854669519817243621
+- Instance 1 (RAF): claim=0
+- Instance 2 (RWC): claim=0
+- Instance 3 (Output): claim=16569652859076173421498202873716701161554115357020607472481625342580247939354
+- Instance 4 (Instruction): claim=1281769312034380278185881668539414319935475418875412314915363312819906677592
+
+### The Paradox
+Sumcheck verification should guarantee that output_claim equals the sum of polynomial evaluations at the challenge point. The opening claims are supposed to be those evaluations.
+
+If output_claim ≠ expected_output_claim, one of these must be true:
+1. The opening claims in the proof don't match what was used in prover computation
+2. The verifier computes expected_output_claim differently than the prover
+3. There's a normalization/endianness issue in how claims are serialized/deserialized
+
+### Next Investigation
+Need to add debug output to Jolt's ProductVirtualRemainderVerifier to see exactly which factor_evals it reads from the accumulator and compare with what Zolt sends.
+
+---
+
 ## Session 23 Summary - Fixed Double-Prove Issue
 
 ### Major Progress

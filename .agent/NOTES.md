@@ -1,5 +1,75 @@
 # Zolt-Jolt Cross-Verification Progress
 
+## Session 20 Summary - Stage 1 tau Mismatch
+
+### Critical Finding: tau Values Differ
+
+The Stage 1 `tau` values sampled from the transcript differ between Zolt and Jolt:
+- Zolt tau[0] = 759180986986426178918369937758990285438920684980950670784015002138546871782
+- Jolt tau[0] = 5099858431598424328551710934302323790717024242011569457717680063482014863998
+
+ALL 12 tau values differ! This is the root cause of Stage 1 verification failure.
+
+### Why This Matters
+
+The `tau` vector is sampled via Fiat-Shamir from the transcript AFTER:
+1. Proof configuration values are appended
+2. Polynomial commitments are appended
+
+The transcript state before tau sampling must be identical between prover and verifier.
+
+### Verification Flow (Expected)
+1. Verifier appends proof config to transcript (trace_length, ram_K, bytecode_K, etc.)
+2. Verifier appends commitments to transcript
+3. Verifier samples tau = transcript.challenge_vector(num_rows_bits)
+4. Verifier runs Stage 1 sumcheck verification
+5. At end: output_claim should equal expected_output_claim
+
+### What DOES Match
+
+Despite tau mismatch, these values match:
+1. **r_cycle (sumcheck challenges)** - The round polynomials produce matching challenges
+2. **R1CS input claims** - The MLE evaluations at r_cycle match exactly
+3. **Round polynomial coefficients (c0, c2, c3)** - All match byte-for-byte
+
+### The Actual Problem
+
+The mismatch chain:
+1. Transcript state differs → tau values differ
+2. tau values differ → eq(τ, x) polynomial differs
+3. eq polynomial differs → expected_output_claim differs
+4. expected_output_claim ≠ output_claim → verification fails
+
+### What Zolt Does Before Stage 1
+
+Looking at `convertWithTranscript`:
+1. Copies commitments
+2. Creates UniSkip proof from witnesses and tau
+3. Generates streaming outer sumcheck proof with transcript
+
+But the tau is RECEIVED from the caller, not sampled from transcript. The issue is that Zolt uses its own tau, but Jolt's verifier samples tau from the commitments in the proof!
+
+### Solution
+
+The tau vector must be sampled from the transcript by both prover and verifier:
+1. Prover appends commitments to transcript
+2. Prover samples tau from transcript
+3. Prover uses this tau for sumcheck
+4. Verifier receives proof with commitments
+5. Verifier appends same commitments to its transcript
+6. Verifier samples same tau from transcript
+7. Tau values match!
+
+The issue is that Zolt's prover receives tau as a parameter, but it should be sampling tau from the transcript after appending commitments.
+
+### Next Steps
+
+1. Fix Zolt to sample tau from transcript AFTER appending commitments
+2. Ensure commitment serialization matches Jolt's format exactly
+3. Re-run verification
+
+---
+
 ## Session 19 Summary - Stage 2 Investigation
 
 ### Major Findings

@@ -3,66 +3,40 @@
 ## Summary
 
 **Stage 1**: PASSES ✓
-**Stage 2**: FAILS - OutputSumcheck zero-check fails
+**Stage 2**: OutputSumcheck now passes (panic/termination bits fixed)
+**Proof Deserialization**: FAILS - "invalid data" error
 
-## Root Cause Found!
+## Progress This Session
 
-The OutputSumcheck prover fails the sumcheck soundness check `s(0) + s(1) = current_claim` in EVERY round.
+### 1. Fixed OutputSumcheck Zero-Check (DONE)
 
-This is because the zero-check sum is NOT zero:
+Root cause was that the fibonacci.elf was linked at wrong address (0x7FFFF000 in IO region instead of 0x80000000 in RAM).
+
+Fixed by:
+1. Rebuilding fibonacci.elf with correct linker script (`-T jolt.ld` with text at 0x80000000)
+2. Setting panic/termination bits in val_final to match Jolt's gen_ram_final_memory_state behavior
+
+### 2. Proof Deserialization Error (CURRENT ISSUE)
+
+The Jolt verifier test now fails with:
 ```
-sum_k eq(r_address, k) * io_mask(k) * (val_final(k) - val_io(k)) ≠ 0
+Failed to deserialize proof: the input buffer contained invalid data
 ```
 
-### Why the sum is non-zero:
+This is an arkworks serialization error, suggesting one of the Dory group elements or field elements is malformed in the proof file.
 
-1. IO region: indices [1024, 4096) (addresses 0x7FFFA000 to 0x80000000)
-2. io_mask = 1 for this entire range
-3. val_io only has:
-   - panic (0) at index 2048
-   - termination (1) at index 2049
-4. val_final has non-zero values at indices 3584-3598 (addresses 0x7FFFF000-0x7FFFF0F8)
-5. Since val_io[3584..3598] = 0 but val_final[3584..3598] ≠ 0, the difference is non-zero!
+### Next Investigation Steps
 
-### Key Question
+1. [ ] Compare proof structure between old working proof and new proof
+2. [ ] Check if Dory commitment points are valid BN254 curve points
+3. [ ] Verify field elements are correctly serialized (LE Montgomery form)
+4. [ ] Check if the proof size changed unexpectedly
 
-What are the values at addresses 0x7FFFF000-0x7FFFF0F8?
+### Potential Causes
 
-Looking at the values:
-- k=3584: val=282579962709375 (0x101010101FF = appears to be ABI padding or stack setup)
-- k=3586: val=4310892546
-- k=3590: val=8070450545133223943 (0x7000000000000007)
-- etc.
-
-These look like stack frame setup or initial register spills before the stack pointer is properly initialized.
-
-### Possible Causes
-
-1. **Zolt is incorrectly classifying these addresses as being in the IO region**
-   - But the addresses ARE in [input_start, RAM_START), so this is correct per Jolt's definition
-
-2. **Zolt's RAM trace includes spurious writes that Jolt doesn't see**
-   - Possible if trace serialization/deserialization differs
-
-3. **The Fibonacci program writes to these addresses legitimately, but Jolt handles it differently**
-   - Perhaps Jolt's val_io includes advice data that Zolt doesn't?
-
-### Next Steps
-
-1. [ ] Run Jolt's native Fibonacci prove/verify to see if it passes
-2. [ ] Compare Jolt's and Zolt's val_final at the problematic indices
-3. [ ] Check if these addresses are in the advice region (which might be handled differently)
-4. [ ] Investigate whether val_io should include more data than just input/output/panic/termination
-
-### Individual Claims That Match
-
-- val_final_claim ✓
-- val_io_eval ✓
-- eq_eval ✓
-- io_mask_eval ✓
-- expected_output_claim (computed from above) = 4629... ✓
-
-But the prover's current_claim = 11607... ≠ 4629... because the underlying sum is not zero.
+1. **Different trace length** - old ELF ran much longer (wrong address), new ELF is smaller
+2. **Proof structure mismatch** - different number of commitments/claims
+3. **Serialization bug** - Dory points might be malformed
 
 ## Testing Commands
 
@@ -77,7 +51,7 @@ zig build -Doptimize=ReleaseFast
 cd /Users/matteo/projects/jolt/jolt-core && cargo test test_verify_zolt_proof_with_zolt_preprocessing --release -- --ignored --nocapture
 ```
 
-## Files Modified in This Session
+## Commits Made
 
-1. `/Users/matteo/projects/zolt/src/zkvm/ram/output_check.zig` - Added debug output
-2. `/Users/matteo/projects/zolt/src/zkvm/proof_converter.zig` - Added inst3 debug tracking
+1. 60c1ad1 - debug: Found OutputSumcheck zero-check failure root cause
+2. b74cb76 - fix: Set panic/termination bits in val_final + correct ELF base address

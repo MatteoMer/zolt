@@ -509,8 +509,13 @@ pub fn ProofConverter(comptime F: type) type {
                 outer_prover.updateClaim(raw_evals, challenge);
             }
 
-            // DEBUG: Print final summary
+            // DEBUG: Print final summary including eq factor from split_eq
             std.debug.print("[ZOLT] STAGE1_FINAL: num_rounds = {}\n", .{challenges.items.len});
+            const prover_eq_factor = outer_prover.split_eq.current_scalar;
+            std.debug.print("[ZOLT] STAGE1_FINAL: prover eq_factor (split_eq.current_scalar) = {any}\n", .{prover_eq_factor.toBytes()});
+            std.debug.print("[ZOLT] STAGE1_FINAL: prover eq_factor limbs = [{x}, {x}, {x}, {x}]\n", .{
+                prover_eq_factor.limbs[0], prover_eq_factor.limbs[1], prover_eq_factor.limbs[2], prover_eq_factor.limbs[3],
+            });
 
             return Stage1Result{ .challenges = challenges, .r0 = r0, .uni_skip_claim = uni_skip_claim, .allocator = self.allocator };
         }
@@ -2115,7 +2120,9 @@ pub fn ProofConverter(comptime F: type) type {
                 try challenges.append(self.allocator, challenge);
 
                 // Update batched claim by evaluating at challenge
-                // This needs proper interpolation from evaluations
+                // The prover must maintain consistency: combined_evals should produce the same
+                // evaluation as evalFromHint. For now, use evaluateCubicAtChallengeFromEvals
+                // since that's what the prover computes.
                 const old_claim = batched_claim;
                 batched_claim = evaluateCubicAtChallengeFromEvals(combined_evals, challenge);
 
@@ -2262,6 +2269,55 @@ pub fn ProofConverter(comptime F: type) type {
                 raf_evals_this_round = null;
                 rwc_evals_this_round = null;
                 instr_evals_this_round = null;
+
+                // CRITICAL: Update individual_claims for each instance by evaluating at challenge
+                // This is required for the batched sumcheck to maintain correct claim tracking
+                // For inactive instances, the constant polynomial evaluates to the same scaled value
+                // For active instances, we update based on the polynomial evaluation
+                for (0..5) |i| {
+                    const start_round = max_num_rounds - rounds_per_instance[i];
+                    if (round_idx >= start_round) {
+                        // Instance was active this round - update claim to polynomial evaluation at challenge
+                        // For active instances, the claim update is handled by their provers
+                        // We just need to track what the batched contribution would be
+                        if (i == 0 and product_prover != null) {
+                            individual_claims[i] = product_prover.?.current_claim;
+                        } else if (i == 1 and raf_prover != null) {
+                            individual_claims[i] = raf_prover.?.current_claim;
+                        } else if (i == 2 and rwc_prover != null) {
+                            individual_claims[i] = rwc_prover.?.current_claim;
+                        } else if (i == 3 and output_prover != null) {
+                            individual_claims[i] = output_prover.?.current_claim;
+                        } else if (i == 4 and instr_prover != null) {
+                            individual_claims[i] = instr_prover.?.current_claim;
+                        } else {
+                            // Fallback: for instances without provers, keep tracking manually
+                            // The claim after evaluating constant polynomial at r is just the constant
+                            const remaining = rounds_per_instance[i] - (round_idx - start_round) - 1;
+                            var scaled = input_claims[i];
+                            for (0..remaining) |_| {
+                                scaled = scaled.add(scaled);
+                            }
+                            individual_claims[i] = scaled;
+                        }
+                    } else {
+                        // Instance not yet active - constant polynomial evaluates to scaled claim
+                        // scale_power = remaining rounds until activation - 1
+                        // = (start_round - round_idx - 1) where start_round = max_num_rounds - rounds_per_instance[i]
+                        const start_round_i = max_num_rounds - rounds_per_instance[i];
+                        if (round_idx + 1 < start_round_i) {
+                            const scale_power = start_round_i - round_idx - 2;
+                            var scaled = input_claims[i];
+                            for (0..scale_power) |_| {
+                                scaled = scaled.add(scaled);
+                            }
+                            individual_claims[i] = scaled;
+                        } else {
+                            // At the round just before activation, scale_power = 0
+                            individual_claims[i] = input_claims[i];
+                        }
+                    }
+                }
             }
 
             std.debug.print("[ZOLT] STAGE2_BATCHED: final batched_claim = {any}\n", .{batched_claim.toBytesBE()});
@@ -2519,6 +2575,22 @@ pub fn ProofConverter(comptime F: type) type {
             std.debug.print("[ZOLT] FACTOR_EVALS: factor[7] (NextIsNoop) = {any}\n", .{factor_evals[7].toBytesBE()});
 
             return factor_evals;
+        }
+
+        /// Evaluate polynomial at challenge using Jolt's eval_from_hint formula
+        /// This is the verifier's computation from compressed coefficients [c0, c2, c3] and hint
+        fn evalFromHint(compressed: [3]F, hint: F, x: F) F {
+            const c0 = compressed[0];
+            const c2 = compressed[1];
+            const c3 = compressed[2];
+
+            // Recover c1 = hint - 2*c0 - c2 - c3
+            const c1 = hint.sub(c0).sub(c0).sub(c2).sub(c3);
+
+            // P(x) = c0 + c1*x + c2*x^2 + c3*x^3
+            const x2 = x.mul(x);
+            const x3 = x2.mul(x);
+            return c0.add(c1.mul(x)).add(c2.mul(x2)).add(c3.mul(x3));
         }
 
         /// Evaluate cubic polynomial at a challenge point from evaluations

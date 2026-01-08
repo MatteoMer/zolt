@@ -2581,9 +2581,33 @@ pub fn ProofConverter(comptime F: type) type {
                 factor_evals[7] = factor_evals[7].add(eq_val.mul(next_is_noop));
             }
 
+            // Handle padding cycles (indices from cycle_witnesses.len to eq_evals.len)
+            // Padding cycles are NoOp cycles in Jolt. For NoOp:
+            // - Factors 0-6: all zero (no instruction input, no flags set, no output)
+            // - Factor 7 (NextIsNoop): 1 (next cycle is also a NoOp, except the last one)
+            //
+            // In Jolt's trace.resize(padded_trace_len, Cycle::NoOp):
+            // - All padding cycles have IsNoop = true
+            // - not_next_noop = !trace[t+1].IsNoop, so for padding it's !true = false
+            // - NextIsNoop = !not_next_noop = !false = true
+            //
+            // So for padding cycles, only factor 7 contributes: eq_val * 1
+            for (cycle_witnesses.len..eq_evals.len) |t| {
+                const eq_val = eq_evals[t];
+                // Factors 0-6: all zero for NoOp (nothing to add)
+                // Factor 7 (NextIsNoop): For padding cycles, NextIsNoop = true
+                // Exception: the very last cycle (t == eq_evals.len - 1) has NextIsNoop = true
+                // because Jolt hardcodes not_next_noop = false for the final cycle
+                factor_evals[7] = factor_evals[7].add(eq_val);
+            }
+
             std.debug.print("[ZOLT] FACTOR_EVALS: factor[0] (LeftInstructionInput) = {any}\n", .{factor_evals[0].toBytesBE()});
             std.debug.print("[ZOLT] FACTOR_EVALS: factor[1] (RightInstructionInput) = {any}\n", .{factor_evals[1].toBytesBE()});
             std.debug.print("[ZOLT] FACTOR_EVALS: factor[2] (IsRdNotZero) = {any}\n", .{factor_evals[2].toBytesBE()});
+            std.debug.print("[ZOLT] FACTOR_EVALS: factor[3] (WriteLookupOutputToRD) = {any}\n", .{factor_evals[3].toBytesBE()});
+            std.debug.print("[ZOLT] FACTOR_EVALS: factor[4] (Jump) = {any}\n", .{factor_evals[4].toBytesBE()});
+            std.debug.print("[ZOLT] FACTOR_EVALS: factor[5] (LookupOutput) = {any}\n", .{factor_evals[5].toBytesBE()});
+            std.debug.print("[ZOLT] FACTOR_EVALS: factor[6] (Branch) = {any}\n", .{factor_evals[6].toBytesBE()});
             std.debug.print("[ZOLT] FACTOR_EVALS: factor[7] (NextIsNoop) = {any}\n", .{factor_evals[7].toBytesBE()});
 
             return factor_evals;

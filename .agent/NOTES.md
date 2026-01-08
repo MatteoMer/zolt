@@ -61,6 +61,42 @@ From `ProductCycleInputs::from_trace`:
 - `src/zkvm/r1cs/constraints.zig`: `R1CSCycleInputs.fromTraceStep()`, `setFlagsFromInstruction()`
 - `src/zkvm/proof_converter.zig`: `computeProductFactorEvaluations()`
 
+### Root Cause Identified
+
+**Zolt doesn't track virtual instruction sequences.**
+
+In Jolt, complex instructions are expanded into virtual steps:
+- `CircuitFlags::VirtualInstruction = true` for virtual steps
+- Each virtual step has specific flag values based on the instruction type
+- `IsNoop` flag is set based on the instruction type, not just opcode
+
+Zolt's `setFlagsFromInstruction` only knows the opcode byte, not:
+- Whether this is a virtual instruction step
+- Whether this is a compressed instruction
+- Whether this is the first in a sequence
+- The specific instruction type (AND vs OR vs XOR, etc.)
+
+This causes incorrect values for:
+- Factor 2 (IsRdNotZero): Virtual steps may have different rd handling
+- Factor 3 (WriteLookupOutputToRD): Each instruction type sets this differently
+- Factor 5 (LookupOutput): Depends on instruction-specific computation
+- Factor 6 (Branch): Needs InstructionFlags::Branch, not just opcode
+- Factor 7 (NextIsNoop): Needs IsNoop flag on instruction, not just opcode check
+
+### Fix Required
+
+1. **Enhance Zolt's trace format** to include:
+   - Virtual instruction sequence flag
+   - Instruction type enum (not just opcode)
+   - Per-instruction circuit_flags array
+
+2. **Update `R1CSCycleInputs.fromTraceStep`** to:
+   - Read flags from the trace instead of computing from opcode
+   - Handle virtual instruction sequences properly
+   - Compute IsNoop based on instruction type
+
+3. **Update `computeProductFactorEvaluations`** to use the correct flag values
+
 ---
 
 ## Session 24 Summary - Deep Stage 2 Analysis

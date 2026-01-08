@@ -1,39 +1,49 @@
 # Zolt-Jolt Compatibility - Current Status
 
-## Summary (Session 29 - Updated)
+## Summary (Session 30 - Updated)
 
 **Stage 1**: PASSES with Zolt preprocessing ✓
 **Stage 2**: PASSES with Zolt preprocessing ✓
-**Stage 3**: FAILS - Round polynomials produce wrong output_claim
+**Stage 3**: FAILS - Transcript state diverges before gamma derivation
 **Stage 4-7**: Untested (blocked on Stage 3)
 
-### Latest Progress: Gamma Values Fixed! ✓
+### Latest Progress: Transcript Debugging
 
-The gamma values now match between Zolt and Jolt:
-- shift_gamma[1] = 167342415292111346589945515279189495473 ✓
-- instr_gamma and reg_gamma also match ✓
+**Finding:** All claim VALUES match between Zolt and Jolt:
+- 8 Stage 2 factor claims ✓
+- 3 RWC claims (0, 0, 0) ✓
+- 1 RAF claim (0) ✓
+- 2 Output claims (RamValFinal, 0) ✓
+- 3 InstructionLookups claims (LookupOutput, LeftOperand, RightOperand) ✓
 
-The fix: Stage 3 uses Jolt's `challenge_scalar` (NOT `challenge_scalar_optimized`),
-which does NOT apply 125-bit masking. Zolt was using `challengeScalar` with masking.
-Now using `challengeScalarFull` which properly converts the 128-bit value.
+**Finding:** Stage 2 round polynomials match between Zolt and Jolt ✓
 
-### Current Issue: Sumcheck Round Polynomials
+**Finding:** Stage 2 input_claims now being appended before batching coeffs ✓
 
-```
-Stage 3 output_claim:          12471530361947505251693797544524218046917141118486157199773065282661666309311
-Stage 3 expected_output_claim: 5306394876981572062168920462043199017393461233968153260958946411171098925214
-```
+**Issue:** Transcript state still diverges after Stage 2 cache_openings:
+- **Zolt state:** `25 57 93 8e d9 16 ec 86`
+- **Jolt state:** `a5 8c 14 ac b6 53 de 71`
 
-The round polynomials are not computing the correct function. The expected_output_claim
-is computed from opening claims, which are now correct. So the issue must be in the
-Stage 3 prover's round polynomial computation.
+### Current Hypothesis
+
+Even though all claim VALUES match, the transcript states are different. This could be because:
+1. Claim order differs in some subtle way
+2. A hidden claim is being appended that we're not tracking
+3. Serialization format difference (unlikely since we verified appendScalar matches)
 
 ### Next Steps
 
-1. [ ] Debug Stage 3 round polynomial computation
-2. [ ] Verify eq/eq+1 polynomial evaluations are correct
-3. [ ] Verify the batched sumcheck claim computation
-4. [ ] Check that witness data is being used correctly
+1. [ ] Add side-by-side transcript state tracing to find exact divergence point
+2. [ ] Check if any claims are missing in Stage 2 cache_openings
+3. [ ] Verify appendBytes produces identical hashes for same input
+
+### Key Debug Output
+
+Stage 3 start states:
+```
+Zolt: { 37, 87, 147, 142, 217, 22, 236, 134 } = 25 57 93 8e d9 16 ec 86
+Jolt: [a5, 8c, 14, ac, b6, 53, de, 71]
+```
 
 ### Testing Commands
 
@@ -48,11 +58,6 @@ cd /Users/matteo/projects/jolt/jolt-core && \
   cargo test test_verify_zolt_proof_with_zolt_preprocessing --release -- --ignored --nocapture
 ```
 
-### Key Insights
-
-1. **125-bit masking difference**: Stage 1-2 sumcheck challenges use `challenge_scalar_optimized`
-   with 125-bit masking. Stage 3 uses `challenge_scalar` WITHOUT masking.
-
-2. **Transcript state matches**: After Stage 2 cache_openings, transcript states are identical.
-
-3. **Claim values match**: All 17 Stage 2 cache_openings claims match between Zolt and Jolt.
+### Files Modified
+- `/Users/matteo/projects/zolt/src/zkvm/proof_converter.zig` - Main proof conversion logic
+- `/Users/matteo/projects/zolt/src/zkvm/spartan/stage3_prover.zig` - Stage 3 prover

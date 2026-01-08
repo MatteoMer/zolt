@@ -1,67 +1,58 @@
 # Zolt-Jolt Compatibility - Progress Update
 
-## Current Status: OutputSumcheck val_final_claim Fixed
+## Iteration 10 Summary
 
-### Recent Changes (Iteration 10)
-1. Added `output_val_final_claim` to Stage2Result struct
-2. Use `output_prover.getFinalClaims().val_final` for the RamValFinal opening claim
-3. Verified initialization: `io_mask * (val_final - val_io) = 0` at all integer points ✓
+### Fixed: OutputSumcheck val_final_claim
+
+**Problem**: The `val_final_claim` inserted into opening_claims was being computed incorrectly. The code was computing a derived value (effectively `val_io_eval`) instead of the actual `Val_final(r')` MLE evaluation from the prover.
+
+**Solution**:
+1. Added `output_val_final_claim` field to Stage2Result struct
+2. Set it from `output_prover.getFinalClaims().val_final` - the actual MLE of val_final after binding all sumcheck challenges
+3. Use this value when inserting the RamValFinal opening claim
+
+**Commits**:
+- `111a067` - feat: use actual Val_final(r') from OutputSumcheck prover for opening claim
+- `1dbe9d7` - docs: update TODO.md with OutputSumcheck understanding
+- `38b30fe` - chore: remove verbose debug output from OutputSumcheck
 
 ### Key Understanding
 
-The OutputSumcheck protocol:
-1. **Prover** runs sumcheck on `eq(r_address, k) * io_mask(k) * (Val_final(k) - Val_io(k))`
-2. **Input claim** = 0 (zero-check)
-3. **Final claim** = MLE evaluation at random point r' (can be non-zero!)
-4. **Prover caches** `Val_final(r')` (the MLE of val_final at r')
+The OutputSumcheck is a **zero-check** that proves:
+```
+Σ_k eq(r_address, k) * io_mask(k) * (Val_final(k) - Val_io(k)) = 0
+```
 
-The **Verifier** computes expected_output_claim as:
+Key insight: The MLE evaluation at a random point r' is **non-zero** even though the sum over integer points is zero. This is expected behavior:
+- At integer k: `io_mask[k] * (val_final[k] - val_io[k]) = 0` for all k (verified at initialization)
+- At random r': the product of MLEs can be non-zero due to interpolation
+
+The verifier's expected_output_claim formula:
 ```
 eq(r_address, r') * io_mask_eval * (val_final_claim - val_io_eval)
 ```
 
 Where:
-- `val_final_claim` = from prover (should be `Val_final(r')`)
-- `val_io_eval` = `ProgramIOPolynomial(r')` from public I/O
-- `io_mask_eval` = `RangeMaskPolynomial(r')` using LT formula
+- `val_final_claim` = from prover (MLE of Val_final at r') - **NOW CORRECTLY SET**
+- `val_io_eval` = computed from ProgramIOPolynomial
+- `io_mask_eval` = computed from RangeMaskPolynomial
 
-### Important Insight: Non-Zero Final Claim is EXPECTED
+### Test Results
 
-The MLE of `eq * io_mask * (val_final - val_io)` is **zero at integer points** but
-**non-zero at random evaluation points**. This is because:
-- At integer points: `io_mask[k] * (val_final[k] - val_io[k]) = 0` for all k
-- At random point r': the MLEs are interpolations, and the product can be non-zero
-
-Example:
-- `io[0]=1, v[0]=0` (IO region: mask=1, diff=0)
-- `io[1]=0, v[1]=5` (non-IO: mask=0, diff=5)
-- After binding to r: `io(r) = 1-r`, `v(r) = 5r`
-- Product: `(1-r) * 5r ≠ 0` for most r!
-
-### Verification Formula Match
-
-For Zolt proof to verify in Jolt:
-1. Prover's sumcheck final claim = `eq(r_address, r') * io_mask(r') * (Val_final(r') - Val_io(r'))`
-2. Verifier's expected = `eq_eval * io_mask_eval * (val_final_claim - val_io_eval)`
-
-These must match. The key is:
-- `val_final_claim` must be `Val_final(r')` - NOW FIXED to use prover's actual value
-- `val_io_eval` from `ProgramIOPolynomial` must match prover's `Val_io(r')`
-
-### Files Modified
-- `src/zkvm/proof_converter.zig`: Added output_val_final_claim, use prover's value
-- `src/zkvm/ram/output_check.zig`: Added initialization debug check
-
-### Previous Issues (Now Understood)
-- Non-zero output_final_claim is EXPECTED (not a bug)
-- The mismatch was because we were computing val_final_claim incorrectly
-- Now using the actual prover's bound value
+- Zolt internal verifier: All 6 stages PASSED ✓
+- Tests compile and run without errors
+- Need to test against actual Jolt verifier
 
 ### Next Steps
-1. ✅ Commit current changes
-2. Run full test suite to verify no regressions
-3. Test against actual Jolt verifier
-4. If still failing, check ProgramIOPolynomial evaluation matches
+
+1. ✅ Fix val_final_claim computation
+2. ✅ Clean up debug output
+3. ✅ Verify Zolt internal verification passes
+4. Test against Jolt verifier (requires Jolt test setup)
+5. If still failing, verify:
+   - ProgramIOPolynomial evaluation matches
+   - RangeMaskPolynomial evaluation matches
+   - Endianness of opening points
 
 ---
 
@@ -76,3 +67,9 @@ These must match. The key is:
 6. Stage 2 r0 ✓
 7. ALL 26 Stage 2 round coefficients (c0, c2, c3) ✓
 8. ALL 26 Stage 2 challenges ✓
+9. fused_left and fused_right ✓
+
+### The Issue Was
+- output_claim vs expected_output_claim mismatch
+- Cause: incorrect val_final_claim computation
+- Fix: use prover's actual MLE evaluation

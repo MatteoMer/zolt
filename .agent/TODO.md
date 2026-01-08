@@ -7,62 +7,69 @@
 **Stage 3**: FAILS - Zero polynomials produce wrong output claim
 **Stage 4-7**: Untested (blocked on Stage 3)
 
-## Session Progress
+## Session 27 Progress (2026-01-08)
 
 ### Completed
 1. ✓ Added EqPlusOnePolynomial to poly/mod.zig
 2. ✓ Added static EqPolynomial.mle() method
 3. ✓ Created stage3_prover.zig framework
 4. ✓ Analyzed Stage 3 expected_output_claim formulas
+5. ✓ Fixed Stage 3 prover to use R1CSInputIndex correctly
+6. ✓ Documented sumcheck eval_from_hint behavior
 
-### Stage 3 Architecture Understanding
+### Key Discovery
 
-Stage 3 is a batched sumcheck with 3 instances:
+The sumcheck verification in Jolt uses `eval_from_hint` which:
+- Recovers linear term as `hint - 2*c0 - c2 - c3 - ...`
+- Evaluates `p(r) = c0 + linear_term * r + c2 * r² + ...`
+- For zero polynomials: `p(r) = claim * r`
 
-1. **ShiftSumcheck** (degree 2, n_cycle_vars rounds)
-   - Proves: `Σ_j eq+1(r_outer, j) * (upc + γ*pc + γ²*virt + γ³*first) + γ⁴*(1-noop) * eq+1(r_prod, j)`
-   - Opening claims at `SumcheckId::SpartanShift`:
-     - UnexpandedPC, PC, OpFlags(VirtualInstruction), OpFlags(IsFirstInSequence), InstructionFlags(IsNoop)
+This means zero polynomials don't cause round verification failure, but produce wrong final output.
 
-2. **InstructionInputSumcheck** (degree 3, n_cycle_vars rounds)
-   - Proves: `(eq(r, r_stage1) + γ²*eq(r, r_stage2)) * (right + γ*left)`
-   - Where:
-     - `left = left_is_rs1 * rs1_value + left_is_pc * unexpanded_pc`
-     - `right = right_is_rs2 * rs2_value + right_is_imm * imm`
-   - Opening claims at `SumcheckId::InstructionInputVirtualization`:
-     - InstructionFlags(LeftOperandIsRs1Value, LeftOperandIsPC, RightOperandIsRs2Value, RightOperandIsImm)
-     - Rs1Value, Rs2Value, UnexpandedPC, Imm
+### Stage 3 Architecture
 
-3. **RegistersClaimReduction** (degree 2, n_cycle_vars rounds)
-   - Proves: `eq(r, r_spartan) * (rd + γ*rs1 + γ²*rs2)`
-   - Opening claims at `SumcheckId::RegistersClaimReduction`:
-     - RdWriteValue, Rs1Value, Rs2Value
+Stage 3 is a batched sumcheck with 3 instances (all n_cycle_vars rounds):
 
-### Remaining Work for Stage 3
+1. **ShiftSumcheck** (degree 2)
+   - Expected output: `Σ γ[i] * claim[i] * eq+1(r_outer, r) + γ[4] * (1-noop) * eq+1(r_prod, r)`
+   - Needs EqPlusOnePolynomial for shift relations
 
-1. **InstructionFlags per cycle**: Need to compute LeftOperandIsRs1Value, etc. from instruction opcode
-   - These are stored in Jolt's `InstructionFlags` enum
-   - Our `InstructionFlags` enum exists but isn't stored per cycle in R1CSCycleInputs
-   - Solution: Compute from instruction opcode in buildInstructionInputMLEs()
+2. **InstructionInputSumcheck** (degree 3)
+   - Expected output: `(eq(r, r_stage1) + γ² * eq(r, r_stage2)) * (right + γ * left)`
+   - Needs instruction flag inference from operand values
 
-2. **Proper round polynomial computation**:
-   - Current implementation is simplified (doesn't use eq/eq+1 properly)
-   - Need to sum over hypercube with correct weighting
+3. **RegistersClaimReduction** (degree 2)
+   - Expected output: `eq(r, r_spartan) * (rd + γ * rs1 + γ² * rs2)`
+   - Straightforward register value MLE evaluation
 
-3. **Transcript flow matching**:
-   - Verify the exact order matches Jolt's verifier
-   - 5 gamma powers (shift) + 1 gamma (instr) + 1 gamma (regs)
-   - 3 input claims → 3 batching coeffs
-   - Rounds: compressed poly + challenge
-   - 16 opening claims (5+8+3)
-
-### Files Modified
+### Files Created/Modified
 
 - `src/poly/mod.zig`: Added EqPlusOnePolynomial, EqPolynomial.mle()
 - `src/zkvm/spartan/mod.zig`: Export stage3_prover
-- `src/zkvm/spartan/stage3_prover.zig`: New Stage 3 prover framework
+- `src/zkvm/spartan/stage3_prover.zig`: Stage 3 prover framework (incomplete)
 
-### Testing Commands
+### Commits This Session
+
+1. fdb7698 - feat: Add EqPlusOnePolynomial and Stage 3 prover framework
+2. a1a2580 - docs: Update TODO with Stage 3 architecture analysis
+3. 90d4c53 - fix: Update Stage 3 prover to use R1CSInputIndex correctly
+4. e13a4c6 - docs: Document sumcheck eval_from_hint behavior
+
+## Next Steps
+
+### Immediate (Stage 3)
+1. [ ] Implement proper round polynomial computation with eq/eq+1 weighting
+2. [ ] Integrate Stage 3 prover into proof_converter
+3. [ ] Handle transcript flow matching Jolt exactly
+4. [ ] Test Stage 3 verification
+
+### Later (Stages 4-7)
+1. [ ] Implement Stage 4: Bytecode + Instruction claim reduction
+2. [ ] Implement Stage 5: RAM RAF + RAM Val evaluations
+3. [ ] Implement Stage 6: Registers Val + RAM claim reductions
+4. [ ] Implement Stage 7: Hamming weight claim reduction
+
+## Testing Commands
 
 ```bash
 # Build Zolt
@@ -78,14 +85,9 @@ zig build test --summary all
 cd /Users/matteo/projects/jolt/jolt-core && cargo test test_verify_zolt_proof_with_zolt_preprocessing --release -- --ignored --nocapture
 ```
 
-## Next Steps
+## Key Insights
 
-1. [ ] Add instruction flags storage to R1CSCycleInputs or compute per-cycle
-2. [ ] Implement proper round polynomial computation with eq/eq+1 weighting
-3. [ ] Integrate Stage 3 prover into proof_converter
-4. [ ] Test Stage 3 verification
-5. [ ] Implement Stages 4-7 (similar pattern)
-
-## Commits This Session
-
-- fdb7698: feat: Add EqPlusOnePolynomial and Stage 3 prover framework
+1. **Sumcheck verification is lenient**: Uses eval_from_hint, doesn't check p(0)+p(1)=claim
+2. **Zero polynomials propagate claims**: Final output = claim * Π(r_i)
+3. **EqPlusOne is essential**: ShiftSumcheck needs eq+1(x,y) = 1 iff y = x+1
+4. **Instruction flags matter**: InstructionInput needs left/right operand sources

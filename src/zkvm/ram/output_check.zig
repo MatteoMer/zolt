@@ -370,10 +370,25 @@ pub fn OutputSumcheckProver(comptime F: type) type {
         }
 
         /// Get final claim values
-        pub fn getFinalClaims(self: *const Self) struct { val_final: F, val_init: F } {
+        pub fn getFinalClaims(self: *const Self) struct { val_final: F, val_init: F, val_io: F, eq_r_address: F, io_mask: F } {
+            // Debug output for comparing with Jolt
+            std.debug.print("[ZOLT OUTPUT_CHECK] val_final[0]: {any}\n", .{self.val_final[0].toBytesBE()});
+            std.debug.print("[ZOLT OUTPUT_CHECK] val_init[0]: {any}\n", .{self.val_init[0].toBytesBE()});
+            std.debug.print("[ZOLT OUTPUT_CHECK] val_io[0]: {any}\n", .{self.val_io[0].toBytesBE()});
+            std.debug.print("[ZOLT OUTPUT_CHECK] eq_r_address[0]: {any}\n", .{self.eq_r_address[0].toBytesBE()});
+            std.debug.print("[ZOLT OUTPUT_CHECK] io_mask[0]: {any}\n", .{self.io_mask[0].toBytesBE()});
+            // Compute expected: eq * io_mask * (val_final - val_io)
+            const diff = self.val_final[0].sub(self.val_io[0]);
+            const expected = self.eq_r_address[0].mul(self.io_mask[0]).mul(diff);
+            std.debug.print("[ZOLT OUTPUT_CHECK] (val_final - val_io)[0]: {any}\n", .{diff.toBytesBE()});
+            std.debug.print("[ZOLT OUTPUT_CHECK] expected (eq * io_mask * diff)[0]: {any}\n", .{expected.toBytesBE()});
+
             return .{
                 .val_final = self.val_final[0],
                 .val_init = self.val_init[0],
+                .val_io = self.val_io[0],
+                .eq_r_address = self.eq_r_address[0],
+                .io_mask = self.io_mask[0],
             };
         }
 

@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Major Progress**: Stage 1 passes, Stage 2 OutputSumcheck now produces non-zero claims but still has mismatch.
+**Major Progress**: Stage 1 passes, Stage 2 has eq polynomial evaluation mismatch identified.
 
 ### Completed ✓
 1. All 712 Zolt internal tests pass
@@ -16,72 +16,78 @@
 9. Preprocessing export works (93KB)
 10. **Stage 1 verification PASSES!**
 11. **OutputSumcheck now uses program I/O data for val_io polynomial**
+12. **Identified root cause: EQ polynomial evaluation ordering mismatch**
 
-### Current Status: Stage 2 Expected Output Claim Mismatch
+### ROOT CAUSE IDENTIFIED ✅
 
-Instance 3 (OutputSumcheck) now produces non-zero claims, but they don't match:
+Added debug output to compare Zolt vs Jolt OutputSumcheck values:
+
+| Value | Zolt | Jolt | Match? |
+|-------|------|------|--------|
+| val_final[0] | ✅ | ✅ | YES |
+| val_io[0] | ✅ | ✅ | YES |
+| io_mask[0] | ✅ | ✅ | YES |
+| (val_final - val_io)[0] | ✅ | ✅ | YES |
+| **eq_r_address[0]** | ❌ | ❌ | **NO** |
+| expected | ❌ | ❌ | NO (due to eq mismatch) |
+
+**The EQ polynomial evaluations don't match!**
+
+### Root Cause Analysis
+
+The EQ polynomial mismatch is due to **challenge ordering**:
+
+1. **Jolt** computes: `eq_eval = EqPolynomial::mle(r_address, r_address_prime)`
+   - `r_address` = original challenge (generated before sumcheck)
+   - `r_address_prime` = sumcheck challenges **normalized to BIG_ENDIAN** (reversed)
+
+2. **Zolt** computes: `eq_r_address` bound with sumcheck challenges
+   - Challenges bound in **LITTLE_ENDIAN** order (not reversed)
+   - Final `eq_r_address[0] = eq(r_address, [s_0, s_1, ..., s_15])`
+
+**Math difference**:
+- Jolt: `eq(r_address, [s_15, s_14, ..., s_0])` (BIG_ENDIAN)
+- Zolt: `eq(r_address, [s_0, s_1, ..., s_15])` (LITTLE_ENDIAN)
+
+These produce different values because the eq polynomial is:
 ```
-output_claim:          360423619528169532790606316037632682400105269297297952787160974999665739278
-expected_output_claim: 1517077064984070876282582683460369922057346739017387399119058233283595484647
+eq(x, y) = Π_i (x_i * y_i + (1-x_i)*(1-y_i))
 ```
 
-### Key Changes Made This Session
+Swapping the pairing order changes the result!
 
-1. Updated `OutputSumcheckProver.init()` to accept program inputs, outputs, and panic flag
-2. Modified `val_io` construction to match Jolt's `ProgramIOPolynomial`:
-   - Populates input bytes at `input_start` index
-   - Populates output bytes at `output_start` index
-   - Sets panic bit at `panic` index
-   - Sets termination bit at `termination` index (if not panicking)
-3. Updated `ConversionConfig` to pass program I/O data
-4. Updated call sites in `mod.zig` to pass device.inputs, device.outputs, device.panic
+### Fix Required
 
-### Root Cause Analysis (In Progress)
+Options:
+1. **Reverse challenges in Zolt**: After sumcheck, compute eq_eval using reversed challenges
+2. **Change binding order in Zolt**: Bind variables in reverse order (breaks sumcheck)
+3. **Post-process eq_r_address**: Compute correct value after all rounds
 
-The issue appears to be polynomial size/evaluation differences:
-
-1. **Zolt**: Creates `val_io` as a 65536-element polynomial (16 variables)
-2. **Jolt**: `ProgramIOPolynomial` has only 4096 elements (12 variables)
-   - Evaluates as: `MLE(coeffs, r_lo) * Π(1 - r_hi[i])` where r_lo has 12 elements, r_hi has 4 elements
-
-For a polynomial that's only non-zero for indices < 4096:
-- The MLE over 16 variables should theoretically equal the 12-variable MLE times `Π(1-r_hi)`
-- But the implementation details (bit ordering, indexing) matter!
+Option 1 or 3 seems most feasible.
 
 ### Next Steps
 
-1. [ ] Verify that Zolt's `val_io` polynomial structure matches Jolt's `ProgramIOPolynomial` exactly
-2. [ ] Check bit ordering in EQ polynomial evaluations (Jolt uses big-endian indexing)
-3. [ ] Compare `val_final_claim` values between Zolt and Jolt debug output
-4. [ ] Compare `val_io_eval` computation between prover and verifier
-5. [ ] Consider implementing ProgramIOPolynomial-style evaluation in Zolt
+1. [ ] Implement eq polynomial evaluation with reversed challenges in OutputSumcheck
+2. [ ] Ensure the expected_output_claim matches Jolt's computation
+3. [ ] Test and verify Instance 3 passes
+4. [ ] Investigate remaining Instances (0, 4) if needed
 
 ### Debug Commands
 
 ```bash
-# Generate Jolt-format proof
+# Generate Jolt-format proof with debug
 ./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format \
     --export-preprocessing /tmp/zolt_preprocessing.bin \
-    -o /tmp/zolt_proof_dory.bin
+    -o /tmp/zolt_proof_dory.bin 2>&1 | grep "OUTPUT_CHECK"
 
 # Verify in Jolt (with debug output)
 cd /Users/matteo/projects/jolt
-cargo test --release -p jolt-core test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
+cargo test --release -p jolt-core test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture 2>&1 | grep "OUTPUT_CHECK"
 ```
 
-### Latest Jolt Verification Output (Key Lines)
+### Files Modified
 
-```
-[JOLT] INSTANCE[3]: num_rounds=16, claim=21020514113593014076443849375132710987374427750385355553672158660451917205135
-...
-=== SUMCHECK VERIFICATION FAILED ===
-output_claim:          360423619528169532790606316037632682400105269297297952787160974999665739278
-expected_output_claim: 1517077064984070876282582683460369922057346739017387399119058233283595484647
-```
-
-### Files to Investigate
-
-- `src/zkvm/ram/output_check.zig` - OutputSumcheckProver (updated)
-- `jolt-core/src/poly/program_io_polynomial.rs` - ProgramIOPolynomial
-- `jolt-core/src/zkvm/ram/output_check.rs` - OutputSumcheckVerifier
-- `jolt-core/src/poly/eq_poly.rs` - EqPolynomial (big-endian indexing)
+- `src/zkvm/ram/output_check.zig` - Added debug output, updated init signature
+- `src/zkvm/proof_converter.zig` - Updated ConversionConfig for program I/O
+- `src/zkvm/mod.zig` - Updated call sites to pass program I/O
+- `jolt-core/src/zkvm/ram/output_check.rs` - Added debug output (Jolt side)

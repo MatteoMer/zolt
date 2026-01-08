@@ -2141,6 +2141,7 @@ pub fn ProofConverter(comptime F: type) type {
                 const old_claim = batched_claim;
                 batched_claim = evalFromHint(compressed, old_claim, challenge);
 
+
                 // Debug: STAGE2_ROUND logs for compare_sumcheck.py
                 {
                     const old_bytes = old_claim.toBytes();
@@ -2333,9 +2334,41 @@ pub fn ProofConverter(comptime F: type) type {
                         }
                     }
                 }
+
+                // Debug: Check divergence between batched_claim and sum of individual claims
+                // Do this AFTER individual_claims update so they're in sync
+                if (round_idx == 15 or round_idx == 16 or round_idx == 25) {
+                    var should_be_batched = F.zero();
+                    for (0..5) |dbg_i| {
+                        should_be_batched = should_be_batched.add(individual_claims[dbg_i].mul(batching_coeffs[dbg_i]));
+                    }
+                    std.debug.print("[ZOLT SYNC] round {}: batched = {any}\n", .{ round_idx, batched_claim.toBytesBE() });
+                    std.debug.print("[ZOLT SYNC] round {}: should_be = {any}\n", .{ round_idx, should_be_batched.toBytesBE() });
+                    std.debug.print("[ZOLT SYNC] round {}: match = {}\n", .{ round_idx, batched_claim.eql(should_be_batched) });
+                }
             }
 
             std.debug.print("[ZOLT] STAGE2_BATCHED: final batched_claim = {any}\n", .{batched_claim.toBytesBE()});
+
+            // Debug: Verify batched_claim equals sum of (coeff * prover_claim)
+            // Also check if individual_claims matches prover.current_claim
+            var expected_batched = F.zero();
+            if (product_prover) |pp| {
+                expected_batched = expected_batched.add(pp.current_claim.mul(batching_coeffs[0]));
+                std.debug.print("[ZOLT DEBUG] inst0 prover.current_claim = {any}\n", .{pp.current_claim.toBytesBE()});
+                std.debug.print("[ZOLT DEBUG] inst0 individual_claims[0] = {any}\n", .{individual_claims[0].toBytesBE()});
+                std.debug.print("[ZOLT DEBUG] inst0 MATCH: {}\n", .{pp.current_claim.eql(individual_claims[0])});
+            }
+            // Instances 1, 2, 3 contribute 0 (their final claims are 0)
+            if (instr_prover) |*ip| {
+                expected_batched = expected_batched.add(ip.current_claim.mul(batching_coeffs[4]));
+                std.debug.print("[ZOLT DEBUG] inst4 prover.current_claim = {any}\n", .{ip.current_claim.toBytesBE()});
+                std.debug.print("[ZOLT DEBUG] inst4 individual_claims[4] = {any}\n", .{individual_claims[4].toBytesBE()});
+                std.debug.print("[ZOLT DEBUG] inst4 MATCH: {}\n", .{ip.current_claim.eql(individual_claims[4])});
+            }
+            std.debug.print("[ZOLT DEBUG] expected_batched (from provers) = {any}\n", .{expected_batched.toBytesBE()});
+            std.debug.print("[ZOLT DEBUG] actual batched = {any}\n", .{batched_claim.toBytesBE()});
+            std.debug.print("[ZOLT DEBUG] MATCH: {}\n", .{expected_batched.eql(batched_claim)});
 
             // Debug: STAGE2_FINAL log for compare_sumcheck.py
             {

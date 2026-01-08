@@ -1310,105 +1310,18 @@ pub fn ProofConverter(comptime F: type) type {
             );
 
             // Stage 2: OutputSumcheckVerifier claims
-            // For OutputSumcheck, val_final_claim should equal val_io_eval at r_address_prime
-            // where r_address_prime = challenges[10..26] (last 16 challenges for OutputSumcheck)
+            // val_final_claim is the MLE evaluation Val_final(r') at the opening point
+            // This comes from the OutputSumcheck prover's val_final polynomial after binding
             //
-            // Jolt's ProgramIOPolynomial::evaluate does:
-            // 1. Split r_address_prime into r_hi (first n-m) and r_lo (last m) where m = poly.num_vars
-            // 2. Evaluate poly at r_lo
-            // 3. Multiply by Π(1-r_i) for r_hi
+            // Jolt's verifier computes expected_output_claim as:
+            //   eq(r_address, r') * io_mask(r') * (val_final_claim - val_io_eval)
             //
-            // The polynomial only covers the IO region (indices 0 to range_end where range_end < K)
-            // For programs with no I/O, only termination bit is set to 1.
-            const val_final_claim = blk: {
-                if (config.memory_layout) |memory_layout| {
-                    const max_num_rounds = log_ram_k + n_cycle_vars;
-                    if (stage2_result.challenges.len >= max_num_rounds and max_num_rounds >= log_ram_k) {
-                        // Get the OutputSumcheck challenges (last log_ram_k elements)
-                        const r_address_little_endian = stage2_result.challenges[max_num_rounds - log_ram_k ..];
-
-                        // CRITICAL: Jolt's normalize_opening_point REVERSES the challenges
-                        // from LITTLE_ENDIAN to BIG_ENDIAN. We must do the same.
-                        var r_address_prime: [16]F = undefined;
-                        std.debug.assert(r_address_little_endian.len <= 16);
-                        for (0..r_address_little_endian.len) |i| {
-                            r_address_prime[i] = r_address_little_endian[r_address_little_endian.len - 1 - i];
-                        }
-
-                        std.debug.print("[ZOLT] OutputSumcheck: r_address_prime.len = {}, max_num_rounds={}, log_ram_k={}\n", .{ r_address_little_endian.len, max_num_rounds, log_ram_k });
-                        std.debug.print("[ZOLT] OutputSumcheck: r_address_prime[0] (after reverse) = {any}\n", .{r_address_prime[0].toBytesBE()});
-                        std.debug.print("[ZOLT] OutputSumcheck: r_address_prime[15] (after reverse) = {any}\n", .{r_address_prime[15].toBytesBE()});
-
-                        // Get termination index via remapAddress
-                        const termination_addr = memory_layout.termination;
-                        const termination_index = memory_layout.remapAddress(termination_addr);
-                        std.debug.print("[ZOLT] OutputSumcheck: termination_addr = 0x{X}, termination_index = {?}\n", .{ termination_addr, termination_index });
-
-                        // Compute IO polynomial size (indices 0 to range_end, rounded to power of 2)
-                        // range_end = remap_address(RAM_START_ADDRESS)
-                        const range_end = memory_layout.remapAddress(constants.RAM_START_ADDRESS) orelse 4096;
-                        const io_poly_size = std.math.ceilPowerOfTwo(usize, range_end) catch range_end;
-                        const io_poly_vars: usize = if (io_poly_size <= 1) 1 else std.math.log2_int(usize, io_poly_size);
-
-                        std.debug.print("[ZOLT] OutputSumcheck: range_end={}, io_poly_size={}, io_poly_vars={}\n", .{ range_end, io_poly_size, io_poly_vars });
-
-                        if (termination_index) |idx| {
-                            // Jolt's ProgramIOPolynomial::evaluate splits r_address:
-                            // - r_lo = last io_poly_vars challenges (indices for the poly)
-                            // - r_hi = first (log_K - io_poly_vars) challenges (extra high bits)
-                            //
-                            // Result = poly.evaluate(r_lo) * Π(1-r_i) for r_hi
-                            //
-                            // For a poly with only termination bit set, poly.evaluate(r_lo) = eq(term_idx, r_lo)
-                            // where term_idx is the termination index WITHIN the IO region
-
-                            const num_vars = r_address_little_endian.len;
-                            const r_hi_len = num_vars - io_poly_vars;
-
-                            std.debug.print("[ZOLT] OutputSumcheck: num_vars={}, io_poly_vars={}, r_hi_len={}, term_idx={}\n", .{ num_vars, io_poly_vars, r_hi_len, idx });
-
-                            // Compute eq(termination_idx, r_lo) where r_lo = r_address_prime[r_hi_len..]
-                            // After the reversal, r_address_prime is in BIG_ENDIAN order:
-                            // - r_address_prime[0] = MSB
-                            // - r_address_prime[num_vars-1] = LSB
-                            var result = F.one();
-
-                            // For r_lo (the last io_poly_vars elements of r_address_prime)
-                            // r_lo[0] = r_address_prime[r_hi_len] corresponds to bit (io_poly_vars-1) of index
-                            // r_lo[io_poly_vars-1] = r_address_prime[num_vars-1] corresponds to bit 0 of index
-                            for (0..io_poly_vars) |bit_idx| {
-                                const bit: u1 = @truncate((idx >> @as(u6, @intCast(bit_idx))) & 1);
-                                // Big-endian: bit 0 (LSB) uses last element of r_lo
-                                const lo_idx = r_hi_len + (io_poly_vars - 1 - bit_idx);
-                                const r_i = r_address_prime[lo_idx];
-                                const one_minus_r_i = F.one().sub(r_i);
-                                if (bit == 1) {
-                                    result = result.mul(r_i);
-                                } else {
-                                    result = result.mul(one_minus_r_i);
-                                }
-                            }
-
-                            // Multiply by Π(1 - r_i) for r_hi (first r_hi_len elements)
-                            for (0..r_hi_len) |hi_idx| {
-                                const r_i = r_address_prime[hi_idx];
-                                result = result.mul(F.one().sub(r_i));
-                            }
-
-                            std.debug.print("[ZOLT] OutputSumcheck: val_io_eval (termination) = {any}\n", .{result.toBytesBE()});
-                            break :blk result;
-                        }
-                    }
-                }
-                // No memory layout provided, use zero (will fail verification)
-                std.debug.print("[ZOLT] OutputSumcheck: using zero val_final_claim (no memory layout)\n", .{});
-                break :blk F.zero();
-            };
-
-            std.debug.print("[ZOLT] OutputSumcheck: inserting val_final_claim = {any}\n", .{val_final_claim.toBytesBE()});
+            // For a correctly executing program where Val_final = Val_io in the IO region,
+            // this should equal zero.
+            std.debug.print("[ZOLT] OutputSumcheck: inserting val_final_claim (from prover) = {any}\n", .{stage2_result.output_val_final_claim.toBytesBE()});
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .RamValFinal, .sumcheck_id = .RamOutputCheck } },
-                val_final_claim,
+                stage2_result.output_val_final_claim,
             );
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .RamValInit, .sumcheck_id = .RamOutputCheck } },
@@ -1488,8 +1401,11 @@ pub fn ProofConverter(comptime F: type) type {
             /// Final claims from each prover (for opening claims)
             raf_final_claim: F, // Instance 1: RamRafEvaluation
             rwc_final_claim: F, // Instance 2: RamReadWriteChecking (combined claim)
-            output_final_claim: F, // Instance 3: RamOutputCheck
+            output_final_claim: F, // Instance 3: RamOutputCheck sumcheck final claim
             instr_final_claim: F, // Instance 4: InstructionLookupsClaimReduction (combined)
+            /// OutputSumcheck's Val_final polynomial evaluation at r_address_prime
+            /// This is the MLE evaluation Val_final(r'), needed for opening claim
+            output_val_final_claim: F, // Val_final(r') for RamValFinal opening
             /// Individual RWC opening claims (ra, val, inc)
             rwc_ra_claim: F,
             rwc_val_claim: F,
@@ -1839,13 +1755,15 @@ pub fn ProofConverter(comptime F: type) type {
                             // OutputSumcheck - use real prover
                             const output_compressed = output_prover.?.computeRoundPolynomial();
                             {
-                                const is_c0_zero = output_compressed[0].toBytesBE()[0] == 0 and output_compressed[0].toBytesBE()[31] == 0;
-                                const is_claim_zero = output_prover.?.current_claim.toBytesBE()[0] == 0 and output_prover.?.current_claim.toBytesBE()[31] == 0;
-                                std.debug.print("[ZOLT] OUT r{}: c0_zero={}, claim_zero={}\n", .{
-                                    round_idx,
-                                    is_c0_zero,
-                                    is_claim_zero,
-                                });
+                                if (round_idx == 22 or round_idx == 23) {
+                                    std.debug.print("[ZOLT] OUT r{}: c0={any}, c2={any}, c3={any}, claim_before={any}\n", .{
+                                        round_idx,
+                                        output_compressed[0].toBytesBE(),
+                                        output_compressed[1].toBytesBE(),
+                                        output_compressed[2].toBytesBE(),
+                                        output_prover.?.current_claim.toBytesBE(),
+                                    });
+                                }
                             }
 
                             // Convert compressed [c0, c2, c3] to evals [s0, s1, s2, s3]
@@ -2484,6 +2402,11 @@ pub fn ProofConverter(comptime F: type) type {
             std.debug.print("[ZOLT] STAGE2: output_final_claim = {any}\n", .{output_claim.toBytesBE()});
             std.debug.print("[ZOLT] STAGE2: instr_final_claim = {any}\n", .{instr_claim.toBytesBE()});
 
+            // Get Val_final(r') from the OutputSumcheck prover
+            // This is the MLE evaluation of val_final at the final opening point
+            const output_val_final = if (output_prover) |op| op.getFinalClaims().val_final else F.zero();
+            std.debug.print("[ZOLT] STAGE2: output_val_final_claim (from prover) = {any}\n", .{output_val_final.toBytesBE()});
+
             return Stage2Result{
                 .factor_evals = factor_evals,
                 .challenges = challenges_copy,
@@ -2491,6 +2414,7 @@ pub fn ProofConverter(comptime F: type) type {
                 .rwc_final_claim = rwc_claim,
                 .output_final_claim = output_claim,
                 .instr_final_claim = instr_claim,
+                .output_val_final_claim = output_val_final,
                 .rwc_ra_claim = rwc_ra_claim,
                 .rwc_val_claim = rwc_val_claim,
                 .rwc_inc_claim = rwc_inc_claim,

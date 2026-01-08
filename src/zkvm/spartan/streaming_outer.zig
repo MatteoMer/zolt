@@ -162,6 +162,24 @@ pub fn StreamingOuterProver(comptime F: type) type {
             // tau_low is passed to split_eq for the remaining rounds.
             const tau_high = if (tau.len > 0) tau[tau.len - 1] else F.zero();
             const tau_low = if (tau.len > 0) tau[0 .. tau.len - 1] else tau;
+
+            // DEBUG: Print tau values used by streaming outer prover
+            std.debug.print("[STREAMING_OUTER] initWithScaling: tau.len={d}\n", .{tau.len});
+            std.debug.print("[STREAMING_OUTER] tau_high (limbs) = [{x}, {x}, {x}, {x}]\n", .{
+                tau_high.limbs[0], tau_high.limbs[1], tau_high.limbs[2], tau_high.limbs[3],
+            });
+            if (tau.len > 0) {
+                std.debug.print("[STREAMING_OUTER] tau[0] (limbs) = [{x}, {x}, {x}, {x}]\n", .{
+                    tau[0].limbs[0], tau[0].limbs[1], tau[0].limbs[2], tau[0].limbs[3],
+                });
+            }
+            std.debug.print("[STREAMING_OUTER] lagrange_tau_r0 present = {}\n", .{lagrange_tau_r0 != null});
+            if (lagrange_tau_r0) |l| {
+                std.debug.print("[STREAMING_OUTER] lagrange_tau_r0 (limbs) = [{x}, {x}, {x}, {x}]\n", .{
+                    l.limbs[0], l.limbs[1], l.limbs[2], l.limbs[3],
+                });
+            }
+
             const split_eq = try GruenSplitEqPolynomial(F).initWithScaling(allocator, tau_low, lagrange_tau_r0);
 
             // Initialize r_grid for tracking bound challenge weights

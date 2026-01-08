@@ -1611,12 +1611,20 @@ pub fn ProofConverter(comptime F: type) type {
             });
             if (config.memory_layout != null and config.initial_ram != null and config.final_ram != null) {
                 std.debug.print("[ZOLT] STAGE2_BATCHED: Attempting to init OutputSumcheckProver...\n", .{});
+                std.debug.print("[ZOLT] STAGE2_BATCHED: program_inputs={?}, program_outputs={?}, is_panicking={}\n", .{
+                    if (config.program_inputs) |p| p.len else null,
+                    if (config.program_outputs) |p| p.len else null,
+                    config.is_panicking,
+                });
                 output_prover = OutputProver.init(
                     self.allocator,
                     config.initial_ram.?,
                     config.final_ram.?,
                     r_address,
                     config.memory_layout.?,
+                    config.program_inputs,
+                    config.program_outputs,
+                    config.is_panicking,
                 ) catch null;
                 if (output_prover) |_| {
                     std.debug.print("[ZOLT] STAGE2_BATCHED: OutputSumcheckProver initialized\n", .{});
@@ -2816,6 +2824,12 @@ pub const ConversionConfig = struct {
     /// Memory trace for RAF evaluation sumcheck
     /// If null, uses zero-polynomial approach (may fail for non-zero claims)
     memory_trace: ?*const ram.MemoryTrace = null,
+    /// Program input bytes (for OutputSumcheck's ProgramIOPolynomial)
+    program_inputs: ?[]const u8 = null,
+    /// Program output bytes (for OutputSumcheck's ProgramIOPolynomial)
+    program_outputs: ?[]const u8 = null,
+    /// Whether the program panicked (for OutputSumcheck's ProgramIOPolynomial)
+    is_panicking: bool = false,
 };
 
 // =============================================================================

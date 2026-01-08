@@ -100,19 +100,25 @@ pub fn OutputSumcheckProver(comptime F: type) type {
         /// Allocator
         allocator: Allocator,
 
-        /// Initialize from RAM states and memory layout
+        /// Initialize from RAM states, memory layout, and program I/O
         ///
         /// Parameters:
         /// - initial_ram: Initial RAM state as sparse map (address -> value)
         /// - final_ram: Final RAM state as sparse map (address -> value)
         /// - r_address: Random address challenges
         /// - memory_layout: Memory layout defining IO region
+        /// - inputs: Program input bytes (optional)
+        /// - outputs: Program output bytes (optional)
+        /// - is_panicking: Whether the program panicked
         pub fn init(
             allocator: Allocator,
             initial_ram: *const std.AutoHashMapUnmanaged(u64, u64),
             final_ram: *const std.AutoHashMapUnmanaged(u64, u64),
             r_address: []const F,
             memory_layout: *const jolt_device.MemoryLayout,
+            inputs: ?[]const u8,
+            outputs: ?[]const u8,
+            is_panicking: bool,
         ) !Self {
             const log_K = r_address.len;
             const K: usize = @as(usize, 1) << @intCast(log_K);
@@ -144,33 +150,78 @@ pub fn OutputSumcheckProver(comptime F: type) type {
             }
             std.debug.print("[ZOLT] OutputSumcheck: non_zero_count={}, io_region_values={}, K={}\n", .{ non_zero_count, io_region_values, K });
 
-            // Compute IO region bounds
+            // Compute IO region bounds (matches Jolt's ProgramIOPolynomial)
             const io_start = remapAddress(memory_layout.input_start, memory_layout) orelse 0;
             const io_end = remapAddress(constants.RAM_START_ADDRESS, memory_layout) orelse K;
             std.debug.print("[ZOLT] OutputSumcheck: io_start={}, io_end={}\n", .{ io_start, io_end });
 
-            // Initialize io_mask and val_io
-            for (io_mask, val_io, 0..) |*mask, *vio, k| {
-                if (k >= io_start and k < io_end) {
-                    mask.* = F.one();
-                    vio.* = val_final[k]; // Copy from final state
-                } else {
-                    mask.* = F.zero();
-                    vio.* = F.zero();
-                }
+            // Initialize io_mask and val_io from program I/O (matching Jolt's ProgramIOPolynomial)
+            // val_io is the "expected" values that the verifier will check against val_final
+            @memset(val_io, F.zero());
+            @memset(io_mask, F.zero());
+
+            // Set io_mask for the IO region
+            for (io_start..@min(io_end, K)) |k| {
+                io_mask[k] = F.one();
             }
 
-            // Set termination bit if not panicking
-            // For a correctly terminating program, termination addr should have value 1
-            // BOTH val_final and val_io must have termination=1 for a correctly executing program
+            // Populate val_io from inputs (8-byte words starting at input_start)
+            if (inputs) |input_bytes| {
+                const input_index_start = remapAddress(memory_layout.input_start, memory_layout) orelse 0;
+                var input_index = input_index_start;
+                var i: usize = 0;
+                while (i < input_bytes.len) : (i += 8) {
+                    if (input_index >= K) break;
+                    // Convert 8 bytes to u64 (little-endian)
+                    var word: u64 = 0;
+                    const end = @min(i + 8, input_bytes.len);
+                    for (i..end) |j| {
+                        word |= @as(u64, input_bytes[j]) << @intCast((j - i) * 8);
+                    }
+                    val_io[input_index] = F.fromU64(word);
+                    if (input_index < 10 or input_index >= K - 10) {
+                        std.debug.print("[ZOLT] OutputSumcheck: val_io[{}] = {} (input word)\n", .{ input_index, word });
+                    }
+                    input_index += 1;
+                }
+                std.debug.print("[ZOLT] OutputSumcheck: populated {} input words starting at index {}\n", .{ (input_bytes.len + 7) / 8, input_index_start });
+            }
+
+            // Populate val_io from outputs (8-byte words starting at output_start)
+            if (outputs) |output_bytes| {
+                const output_index_start = remapAddress(memory_layout.output_start, memory_layout) orelse 0;
+                var output_index = output_index_start;
+                var i: usize = 0;
+                while (i < output_bytes.len) : (i += 8) {
+                    if (output_index >= K) break;
+                    // Convert 8 bytes to u64 (little-endian)
+                    var word: u64 = 0;
+                    const end = @min(i + 8, output_bytes.len);
+                    for (i..end) |j| {
+                        word |= @as(u64, output_bytes[j]) << @intCast((j - i) * 8);
+                    }
+                    val_io[output_index] = F.fromU64(word);
+                    if (output_index < 10 or output_index >= K - 10) {
+                        std.debug.print("[ZOLT] OutputSumcheck: val_io[{}] = {} (output word)\n", .{ output_index, word });
+                    }
+                    output_index += 1;
+                }
+                std.debug.print("[ZOLT] OutputSumcheck: populated {} output words starting at index {}\n", .{ (output_bytes.len + 7) / 8, output_index_start });
+            }
+
+            // Set panic bit in val_io (matching Jolt's ProgramIOPolynomial)
+            const panic_index = remapAddress(memory_layout.panic, memory_layout) orelse 0;
+            if (panic_index < K) {
+                val_io[panic_index] = if (is_panicking) F.one() else F.zero();
+                std.debug.print("[ZOLT] OutputSumcheck: val_io[{}] = {} (panic bit)\n", .{ panic_index, if (is_panicking) @as(u64, 1) else @as(u64, 0) });
+            }
+
+            // Set termination bit in val_io if not panicking (matching Jolt's ProgramIOPolynomial)
             const termination_index = remapAddress(memory_layout.termination, memory_layout) orelse 0;
             std.debug.print("[ZOLT] OutputSumcheck: termination_index={}, in IO={}\n", .{ termination_index, termination_index >= io_start and termination_index < io_end });
-            if (termination_index < K and termination_index >= io_start and termination_index < io_end) {
-                // Set both val_final AND val_io to 1 at termination index
-                // This makes val_final[termination] - val_io[termination] = 1 - 1 = 0
-                val_final[termination_index] = F.one();
+            if (!is_panicking and termination_index < K) {
                 val_io[termination_index] = F.one();
-                std.debug.print("[ZOLT] OutputSumcheck: set val_final[{}] = val_io[{}] = 1 (termination)\n", .{ termination_index, termination_index });
+                std.debug.print("[ZOLT] OutputSumcheck: val_io[{}] = 1 (termination bit, not panicking)\n", .{termination_index});
             }
 
             // Compute EQ polynomial evaluations

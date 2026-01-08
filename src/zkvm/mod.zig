@@ -625,6 +625,10 @@ pub fn JoltProver(comptime F: type) type {
                 .initial_ram = init_ram_ptr,
                 .final_ram = final_ram_ptr,
                 .memory_trace = memory_trace_ptr1, // Pass memory trace for RAF sumcheck
+                // Program I/O for OutputSumcheck's ProgramIOPolynomial
+                .program_inputs = device.inputs,
+                .program_outputs = device.outputs,
+                .is_panicking = device.panic,
             };
 
             // Convert to Jolt-compatible format with transcript integration
@@ -888,6 +892,10 @@ pub fn JoltProver(comptime F: type) type {
                     .initial_ram = init_ram_dory,
                     .final_ram = final_ram_dory,
                     .memory_trace = memory_trace_ptr, // Pass memory trace for RAF sumcheck
+                    // Program I/O for OutputSumcheck's ProgramIOPolynomial
+                    .program_inputs = device.inputs,
+                    .program_outputs = device.outputs,
+                    .is_panicking = device.panic,
                 },
                 cycle_witnesses,
                 tau,

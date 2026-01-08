@@ -176,22 +176,6 @@ pub fn OutputSumcheckProver(comptime F: type) type {
             // Compute EQ polynomial evaluations
             computeEqEvals(F, eq_r_address, r_address);
 
-            // DEBUG: Check that val_final = val_io in IO region
-            var mismatch_count: usize = 0;
-            for (0..K) |k| {
-                const in_io = k >= io_start and k < io_end;
-                const val_diff = val_final[k].sub(val_io[k]);
-                const mask_val = io_mask[k];
-                const product = mask_val.mul(val_diff);
-                if (!product.eql(F.zero())) {
-                    mismatch_count += 1;
-                    if (mismatch_count <= 5) {
-                        std.debug.print("[ZOLT OUT INIT] k={}, in_io={}, mask={}, vf-vio non-zero!\n", .{ k, in_io, if (mask_val.eql(F.one())) @as(u8, 1) else @as(u8, 0) });
-                    }
-                }
-            }
-            std.debug.print("[ZOLT OUT INIT] Total mismatches (mask * (vf-vio) != 0): {}\n", .{mismatch_count});
-
             return Self{
                 .val_init = val_init,
                 .val_final = val_final,
@@ -227,9 +211,6 @@ pub fn OutputSumcheckProver(comptime F: type) type {
             var s1 = F.zero();
             var s2 = F.zero();
             var s3 = F.zero();
-
-            // Debug: count non-zero contributions
-            var nonzero_contrib_count: usize = 0;
 
             // For each pair (2g, 2g+1)
             for (0..half) |g| {
@@ -276,34 +257,10 @@ pub fn OutputSumcheckProver(comptime F: type) type {
                 const v3 = v2.add(dv);
                 const p3 = eq3.mul(io3).mul(v3);
 
-                // Debug: check for non-zero contributions
-                if (!p0.eql(F.zero()) or !p1.eql(F.zero())) {
-                    if (nonzero_contrib_count < 3) {
-                        std.debug.print("[ZOLT OUT] NONZERO: idx0={}, idx1={}, io0={}, io1={}, v0={}, v1={}\n", .{
-                            idx0, idx1,
-                            if (io0.eql(F.zero())) @as(u8, 0) else if (io0.eql(F.one())) @as(u8, 1) else @as(u8, 2),
-                            if (io1.eql(F.zero())) @as(u8, 0) else if (io1.eql(F.one())) @as(u8, 1) else @as(u8, 2),
-                            if (v0.eql(F.zero())) @as(u8, 0) else @as(u8, 1),
-                            if (v1.eql(F.zero())) @as(u8, 0) else @as(u8, 1),
-                        });
-                    }
-                    nonzero_contrib_count += 1;
-                }
-
                 s0 = s0.add(p0);
                 s1 = s1.add(p1);
                 s2 = s2.add(p2);
                 s3 = s3.add(p3);
-            }
-
-            // Debug: log the round polynomial
-            const round = self.num_vars - @as(usize, @intCast(std.math.log2(@as(u64, @intCast(self.current_size)))));
-            if (!s0.eql(F.zero()) or !s1.eql(F.zero())) {
-                std.debug.print("[ZOLT OUT] round={}: s0+s1 NONZERO (count={}), s0={}, s1={}\n", .{
-                    round, nonzero_contrib_count,
-                    if (s0.eql(F.zero())) @as(u8, 0) else @as(u8, 1),
-                    if (s1.eql(F.zero())) @as(u8, 0) else @as(u8, 1),
-                });
             }
 
             // Convert evaluations to compressed coefficients [c0, c2, c3]

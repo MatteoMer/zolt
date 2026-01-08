@@ -1,11 +1,39 @@
 # Zolt-Jolt Compatibility - Current Status
 
-## Summary
+## Summary (Session 28)
 
-**Stage 1**: PASSES (outer sumcheck) ✓
-**Stage 2**: PASSES (product virtualization + RAM RAF) ✓
-**Stage 3**: FAILS - Zero polynomials produce wrong output claim
+**Stage 1**: PASSES with Zolt preprocessing ✓
+**Stage 2**: PASSES with Zolt preprocessing ✓
+**Stage 3**: FAILS - Round polynomials produce wrong output_claim
 **Stage 4-7**: Untested (blocked on Stage 3)
+
+### Important: Use Zolt Preprocessing!
+
+The test `test_verify_zolt_proof` (uses Jolt preprocessing) fails at Stage 1.
+Use `test_verify_zolt_proof_with_zolt_preprocessing` instead.
+
+```bash
+# Generate proof with preprocessing
+./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format \
+  --export-preprocessing /tmp/zolt_preprocessing.bin \
+  -o /tmp/zolt_proof_dory.bin --srs /tmp/jolt_dory_srs.bin
+
+# Test with Zolt preprocessing
+cd /Users/matteo/projects/jolt/jolt-core && \
+  cargo test test_verify_zolt_proof_with_zolt_preprocessing --release -- --ignored --nocapture
+```
+
+### Stage 3 Failure Details
+
+```
+output_claim:          20577841778877219275547658846017849540037880489939953429278770536770306134083
+expected_output_claim: 5338855503670768469593231154982602907961044230168061695638087912869958288945
+```
+
+The round polynomials don't compute the correct function. Likely causes:
+1. Instruction flags (LeftOperandIsRs1Value, etc.) are inferred incorrectly
+2. eq_plus_one polynomial evaluation is wrong
+3. MLE binding is incorrect
 
 ## Session 27 Progress (2026-01-08)
 

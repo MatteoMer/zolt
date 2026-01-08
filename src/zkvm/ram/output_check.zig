@@ -123,6 +123,12 @@ pub fn OutputSumcheckProver(comptime F: type) type {
             const log_K = r_address.len;
             const K: usize = @as(usize, 1) << @intCast(log_K);
 
+            // Debug: Print r_address for comparison with Jolt
+            std.debug.print("[ZOLT OUTPUT_CHECK] r_address (log_K={}):\n", .{log_K});
+            for (r_address, 0..) |r, i| {
+                std.debug.print("[ZOLT OUTPUT_CHECK]   r_address[{}] = {any}\n", .{i, r.toBytesBE()});
+            }
+
             // Allocate arrays
             const val_init = try allocator.alloc(F, K);
             const val_final = try allocator.alloc(F, K);
@@ -439,44 +445,43 @@ fn remapAddress(address: u64, memory_layout: *const jolt_device.MemoryLayout) ?u
     return @as(usize, @intCast(offset / 8));
 }
 
-/// Compute EQ polynomial evaluations using LowToHigh (LSB-first) ordering
-/// eq_evals[k] = eq(r, k) where k's bit 0 = x_0 (first variable to bind)
+/// Compute EQ polynomial evaluations using BIG-ENDIAN ordering (like Jolt)
+/// eq_evals[k] = eq(r, k) where k is interpreted in big-endian:
+/// - Bit 0 of k (MSB position) corresponds to r[0]
+/// - Bit n-1 of k (LSB position) corresponds to r[n-1]
 ///
-/// This matches Jolt's LowToHigh binding order:
-/// - Variable 0 (r[0]) corresponds to bit 0 (LSB) of index k
-/// - Variable n-1 (r[n-1]) corresponds to bit n-1 (MSB) of index k
+/// This matches Jolt's EqPolynomial::evals() and allows standard bot-binding
+/// (binding pairs (0,1), (2,3), etc.) to correctly bind the LAST variable first.
+///
+/// When LowToHigh binding is used (bind last variable first with s_0, etc.):
+/// - s_0 binds r[n-1] (the last variable)
+/// - s_1 binds r[n-2]
+/// - ...
+/// - s_{n-1} binds r[0]
+///
+/// Final result: eq(r, [s_{n-1}, s_{n-2}, ..., s_0]) = eq(r, reverse(sumcheck_challenges))
+/// This matches what Jolt's verifier expects when it reverses the challenges.
 fn computeEqEvals(comptime F: type, eq_evals: []F, r: []const F) void {
     const n = r.len;
-    const size = eq_evals.len;
+    var size: usize = 1;
 
-    // eq(r, x) = Π_i (r_i * x_i + (1-r_i) * (1-x_i))
-    //          = Π_i ((1-r_i) + (2*r_i - 1) * x_i)
+    // Start with eq_evals[0] = 1
+    eq_evals[0] = F.one();
 
-    // Start with all 1s
-    for (eq_evals) |*e| {
-        e.* = F.one();
-    }
-
-    // For each variable i (from 0 to n-1, matching LowToHigh binding)
-    // Variable i corresponds to bit i of the index
-    for (0..n) |i| {
-        const r_i = r[i];
-        const one_minus_r = F.one().sub(r_i);
-        // Stride for variable i: indices differ by 2^i in bit i
-        const stride = @as(usize, 1) << @intCast(i);
-
-        var k: usize = 0;
-        while (k < size) : (k += 2 * stride) {
-            for (0..stride) |j| {
-                const idx0 = k + j;
-                const idx1 = k + j + stride;
-                if (idx1 < size) {
-                    // idx0 has bit i = 0, idx1 has bit i = 1
-                    const val = eq_evals[idx0];
-                    eq_evals[idx0] = val.mul(one_minus_r);
-                    eq_evals[idx1] = val.mul(r_i);
-                }
-            }
+    // Build up the eq table iteratively (like Jolt's evals_serial)
+    // Process r[0] first (MSB), then r[1], ..., r[n-1] (LSB)
+    for (0..n) |j| {
+        // In each iteration, we double the size
+        size *= 2;
+        // Process pairs in reverse order to avoid overwriting values we still need
+        var i: usize = size;
+        while (i >= 2) : (i -= 2) {
+            // Copy each element from the prior iteration twice
+            const scalar = eq_evals[(i - 2) / 2];
+            // eq_evals[i-1] is for x_j = 1 (multiply by r[j])
+            // eq_evals[i-2] is for x_j = 0 (multiply by 1 - r[j])
+            eq_evals[i - 1] = scalar.mul(r[j]);
+            eq_evals[i - 2] = scalar.sub(eq_evals[i - 1]);
         }
     }
 }

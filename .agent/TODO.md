@@ -1,93 +1,59 @@
-# Zolt-Jolt Compatibility - Iteration 13 Status
+# Zolt-Jolt Compatibility - Iteration 14 Status
 
 ## Summary
 
-**Major Progress**: Stage 1 passes, Stage 2 has eq polynomial evaluation mismatch identified.
+**Status**: Stage 1 passes, Stage 2 has transcript mismatch in r_address sampling.
+
+### New Finding
+The previous "EQ polynomial ordering" hypothesis was incorrect. The actual issue is **r_address values differ between Zolt and Jolt**.
 
 ### Completed ✓
 1. All 712 Zolt internal tests pass
-2. All 6 verification stages pass in Zolt's internal verifier
-3. Compressed G1/G2 serialization implemented
-4. Preprocessing loads successfully in Jolt
-5. Proof deserialization works in Jolt
-6. Transcript initial states match between Zolt and Jolt
-7. Fixed double-prove issue in --jolt-format mode
-8. Jolt-format proof generated successfully (32KB)
-9. Preprocessing export works (93KB)
-10. **Stage 1 verification PASSES!**
-11. **OutputSumcheck now uses program I/O data for val_io polynomial**
-12. **Identified root cause: EQ polynomial evaluation ordering mismatch**
+2. Stage 1 verification PASSES in Jolt
+3. Fixed computeEqEvals to use big-endian ordering (matching Jolt)
+4. gamma_rwc matches between Zolt and Jolt ✓
 
-### ROOT CAUSE IDENTIFIED ✅
+### Current Issue: r_address Mismatch
 
-Added debug output to compare Zolt vs Jolt OutputSumcheck values:
+Despite correct round counts and gamma_rwc matching, r_address values differ:
+- Zolt r_address[0]: 19039565092020683038185790567646070878007400533548331450519833455249204308507
+- Jolt r_address[0]: 7962179938130852157218692959767706856444757081102233151385452154497670316032
+- gamma_rwc: MATCHES ✓ (72439255043403958777314423659479935078)
 
-| Value | Zolt | Jolt | Match? |
-|-------|------|------|--------|
-| val_final[0] | ✅ | ✅ | YES |
-| val_io[0] | ✅ | ✅ | YES |
-| io_mask[0] | ✅ | ✅ | YES |
-| (val_final - val_io)[0] | ✅ | ✅ | YES |
-| **eq_r_address[0]** | ❌ | ❌ | **NO** |
-| expected | ❌ | ❌ | NO (due to eq mismatch) |
+### Transcript Flow Analysis
 
-**The EQ polynomial evaluations don't match!**
+Zolt transcript operations for Stage 2 batched sumcheck:
+1. `challengeScalarFull` round=179 → gamma_rwc (MATCHES JOLT ✓)
+2. `challengeScalar128Bits` rounds 180-195 → r_address (16 challenges)
+3. `challengeScalarFull` round=196 → gamma_instr
 
-### Root Cause Analysis
+The round count is correct (16 r_address challenges). But the FIRST r_address challenge differs.
 
-The EQ polynomial mismatch is due to **challenge ordering**:
+### Hypothesis
 
-1. **Jolt** computes: `eq_eval = EqPolynomial::mle(r_address, r_address_prime)`
-   - `r_address` = original challenge (generated before sumcheck)
-   - `r_address_prime` = sumcheck challenges **normalized to BIG_ENDIAN** (reversed)
+The issue is likely in how bytes are interpreted after gamma_rwc:
+- Jolt's `challenge_scalar` uses 16 bytes → reversed → `F::from_bytes` (from_le_bytes_mod_order)
+- Jolt's `challenge_scalar_optimized` uses 16 bytes → reversed → u128 → masked to 125 bits → MontU128Challenge
 
-2. **Zolt** computes: `eq_r_address` bound with sumcheck challenges
-   - Challenges bound in **LITTLE_ENDIAN** order (not reversed)
-   - Final `eq_r_address[0] = eq(r_address, [s_0, s_1, ..., s_15])`
+The critical question: What are the RAW bytes for r_address[0]?
 
-**Math difference**:
-- Jolt: `eq(r_address, [s_15, s_14, ..., s_0])` (BIG_ENDIAN)
-- Zolt: `eq(r_address, [s_0, s_1, ..., s_15])` (LITTLE_ENDIAN)
+In Jolt:
+- challenge_u128 gets 16 bytes, reverses them, interprets as BE u128
+- MontU128Challenge::from(u128) masks to 125 bits and stores in Montgomery form
 
-These produce different values because the eq polynomial is:
-```
-eq(x, y) = Π_i (x_i * y_i + (1-x_i)*(1-y_i))
-```
+In Zolt:
+- challengeScalar128Bits gets 16 bytes, reverses them, masks to 125 bits, stores in Montgomery form
 
-Swapping the pairing order changes the result!
+### Next Step
 
-### Fix Required
+Add debug output to compare the raw 16 bytes extracted for the first r_address challenge in both Zolt and Jolt.
 
-Options:
-1. **Reverse challenges in Zolt**: After sumcheck, compute eq_eval using reversed challenges
-2. **Change binding order in Zolt**: Bind variables in reverse order (breaks sumcheck)
-3. **Post-process eq_r_address**: Compute correct value after all rounds
+### Files with Debug Output
+- `src/transcripts/blake2b.zig` - Added debug for challengeScalar128Bits
+- `jolt-core/src/zkvm/ram/output_check.rs` - Added r_address debug
+- `jolt-core/src/zkvm/ram/read_write_checking.rs` - Added gamma debug
 
-Option 1 or 3 seems most feasible.
-
-### Next Steps
-
-1. [ ] Implement eq polynomial evaluation with reversed challenges in OutputSumcheck
-2. [ ] Ensure the expected_output_claim matches Jolt's computation
-3. [ ] Test and verify Instance 3 passes
-4. [ ] Investigate remaining Instances (0, 4) if needed
-
-### Debug Commands
-
-```bash
-# Generate Jolt-format proof with debug
-./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format \
-    --export-preprocessing /tmp/zolt_preprocessing.bin \
-    -o /tmp/zolt_proof_dory.bin 2>&1 | grep "OUTPUT_CHECK"
-
-# Verify in Jolt (with debug output)
-cd /Users/matteo/projects/jolt
-cargo test --release -p jolt-core test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture 2>&1 | grep "OUTPUT_CHECK"
-```
-
-### Files Modified
-
-- `src/zkvm/ram/output_check.zig` - Added debug output, updated init signature
-- `src/zkvm/proof_converter.zig` - Updated ConversionConfig for program I/O
-- `src/zkvm/mod.zig` - Updated call sites to pass program I/O
-- `jolt-core/src/zkvm/ram/output_check.rs` - Added debug output (Jolt side)
+### Tests Status
+- All 578+ tests pass ✓
+- Stage 1 passes ✓
+- Stage 2 OutputSumcheck fails (r_address mismatch)

@@ -413,6 +413,7 @@ pub fn ProofConverter(comptime F: type) type {
 
             // Compute the UnivariateSkip claim: evaluation of UniSkip polynomial at r0
             const uni_skip_claim = evaluatePolyAtChallenge(uniskip_proof.uni_poly, r0);
+            std.debug.print("[ZOLT] STAGE1: uni_skip_claim@SpartanOuter = {any}\n", .{uni_skip_claim.toBytesBE()});
 
             // Bind the first-round challenge from transcript with the uni_skip_claim
             outer_prover.bindFirstRoundChallenge(r0, uni_skip_claim) catch {};
@@ -420,6 +421,7 @@ pub fn ProofConverter(comptime F: type) type {
             // Match Jolt's cache_openings: after UniSkip verification, the verifier calls
             // accumulator.append_virtual() which appends the uni_skip_claim to transcript.
             // This happens BEFORE BatchedSumcheck::verify which also appends it.
+            std.debug.print("[ZOLT] STAGE1: appending uni_skip_claim (cache_openings)\n", .{});
             transcript.appendScalar(uni_skip_claim);
 
             // IMPORTANT: Match Jolt's BatchedSumcheck::prove and verify transcript flow exactly:

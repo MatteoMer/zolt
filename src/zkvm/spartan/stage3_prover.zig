@@ -274,9 +274,22 @@ pub fn Stage3Prover(comptime F: type) type {
                         .add(reg_val.mul(batching_coeffs[2]));
                 }
 
+                // Debug: Print evaluations
+                if (round < 3) {
+                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: p0 = {{ {any} }}\n", .{ round, combined_evals[0].toBytes() });
+                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: p1 = {{ {any} }}\n", .{ round, combined_evals[1].toBytes() });
+                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: p0+p1 = {{ {any} }}\n", .{ round, combined_evals[0].add(combined_evals[1]).toBytes() });
+                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: current_claim (should match p0+p1) = {{ {any} }}\n", .{ round, combined_claim.toBytes() });
+                }
+
                 // Convert evaluations to coefficients
                 const combined_coeffs = try self.evalsToCoeffs(&combined_evals, 3);
                 defer self.allocator.free(combined_coeffs);
+
+                // Debug: Print all coefficients including c1
+                if (round < 3) {
+                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: c1 = {{ {any} }}\n", .{ round, combined_coeffs[1].toBytes() });
+                }
 
                 // Compress: [c0, c2, c3] (c1 recovered from hint = combined_claim)
                 const compressed = try self.allocator.alloc(F, 3);
@@ -724,6 +737,14 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
                 Q_1_prod[x_lo] = q_1_prod_acc.mul(gamma_powers[4]);
             }
 
+            // DEBUG: Print initial witness MLE values
+            std.debug.print("\n[ZOLT] SHIFT_INIT: trace_len={d}, prefix_size={d}, suffix_size={d}\n", .{ trace_len, prefix_size, suffix_size });
+            std.debug.print("[ZOLT] SHIFT_INIT: unexpanded_pc[0..4] = ", .{});
+            for (0..@min(4, trace_len)) |i| {
+                std.debug.print("{any} ", .{unexpanded_pc[i].toBytes()[0..8]});
+            }
+            std.debug.print("\n", .{});
+
             return Self{
                 .P_0_outer = P_0_outer,
                 .Q_0_outer = Q_0_outer,
@@ -779,10 +800,13 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
         }
 
         fn computeRoundEvalsPhase1(self: *Self, previous_claim: F) [3]F {
-            // Phase1: Use P*Q formula
-            // H(X) = sum over pairs of sum over i of P[i](X) * Q[i](X)
+            // Phase1: Use P*Q formula for prefix-suffix sumcheck
+            // For LowToHigh binding, we're binding the first variable X
+            // H(X) = sum_j P[2j + X] * Q[2j + X]
+            // So H(0) = sum_j P[2j] * Q[2j]    (X=0)
+            //    H(1) = sum_j P[2j+1] * Q[2j+1] (X=1)
             const half = self.current_prefix_size / 2;
-            var evals: [2]F = .{ F.zero(), F.zero() }; // p(0), p(2) since degree 2
+            var evals: [3]F = .{ F.zero(), F.zero(), F.zero() }; // p(0), p(1), p(2)
 
             // Process all 4 (P, Q) pairs
             const pairs: [4]struct { P: []F, Q: []F } = .{
@@ -795,25 +819,32 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             for (pairs) |pair| {
                 for (0..half) |i| {
                     // Get P and Q values at indices 2i and 2i+1
-                    const p_0 = pair.P[2 * i];
-                    const p_1 = pair.P[2 * i + 1];
-                    const q_0 = pair.Q[2 * i];
-                    const q_1 = pair.Q[2 * i + 1];
+                    const p_at_0 = pair.P[2 * i];       // P evaluated when X=0
+                    const p_at_1 = pair.P[2 * i + 1];   // P evaluated when X=1
+                    const q_at_0 = pair.Q[2 * i];       // Q evaluated when X=0
+                    const q_at_1 = pair.Q[2 * i + 1];   // Q evaluated when X=1
 
                     // Linear extrapolation for X=2: f(2) = 2*f(1) - f(0)
-                    const p_2 = p_1.add(p_1).sub(p_0);
-                    const q_2 = q_1.add(q_1).sub(q_0);
+                    const p_at_2 = p_at_1.add(p_at_1).sub(p_at_0);
+                    const q_at_2 = q_at_1.add(q_at_1).sub(q_at_0);
 
-                    // Accumulate P*Q products at X=0 and X=2
-                    evals[0] = evals[0].add(p_0.mul(q_0));
-                    evals[1] = evals[1].add(p_2.mul(q_2));
+                    // H(X) = Σ_j P_j(X) * Q_j(X)
+                    // H(0) = Σ_j P_j(0) * Q_j(0) = Σ_j P[2j] * Q[2j]
+                    // H(1) = Σ_j P_j(1) * Q_j(1) = Σ_j P[2j+1] * Q[2j+1]
+                    // H(2) = Σ_j P_j(2) * Q_j(2) (extrapolated)
+                    evals[0] = evals[0].add(p_at_0.mul(q_at_0));
+                    evals[1] = evals[1].add(p_at_1.mul(q_at_1));
+                    evals[2] = evals[2].add(p_at_2.mul(q_at_2));
                 }
             }
 
-            // Derive p(1) from previous_claim: p(0) + p(1) = previous_claim
-            const p_1 = previous_claim.sub(evals[0]);
+            // DEBUG: Verify sumcheck invariant p(0) + p(1) = previous_claim
+            const computed_sum = evals[0].add(evals[1]);
+            if (!computed_sum.eql(previous_claim)) {
+                std.debug.print("[ZOLT] SHIFT INVARIANT FAIL: p(0)+p(1) = {{ {any} }}, expected = {{ {any} }}\n", .{ computed_sum.toBytes(), previous_claim.toBytes() });
+            }
 
-            return [3]F{ evals[0], p_1, evals[1] };
+            return evals;
         }
 
         fn computeRoundEvalsPhase2(self: *Self, previous_claim: F) [3]F {
@@ -920,14 +951,16 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             self.current_prefix_size = new_prefix_size;
 
             // Bind witness MLEs (needed for final claims computation)
-            // Binding in LowToHigh order
+            // Binding in HighToLow order (MSB first) to match Jolt's opening point normalization
+            // Formula: new[i] = old[i] + r * (old[i + half] - old[i])
             const witness_new_size = self.current_witness_size / 2;
             for (0..witness_new_size) |i| {
-                self.unexpanded_pc[i] = self.unexpanded_pc[2 * i].add(r_j.mul(self.unexpanded_pc[2 * i + 1].sub(self.unexpanded_pc[2 * i])));
-                self.pc[i] = self.pc[2 * i].add(r_j.mul(self.pc[2 * i + 1].sub(self.pc[2 * i])));
-                self.is_virtual[i] = self.is_virtual[2 * i].add(r_j.mul(self.is_virtual[2 * i + 1].sub(self.is_virtual[2 * i])));
-                self.is_first_in_sequence[i] = self.is_first_in_sequence[2 * i].add(r_j.mul(self.is_first_in_sequence[2 * i + 1].sub(self.is_first_in_sequence[2 * i])));
-                self.is_noop[i] = self.is_noop[2 * i].add(r_j.mul(self.is_noop[2 * i + 1].sub(self.is_noop[2 * i])));
+                const half = witness_new_size;
+                self.unexpanded_pc[i] = self.unexpanded_pc[i].add(r_j.mul(self.unexpanded_pc[i + half].sub(self.unexpanded_pc[i])));
+                self.pc[i] = self.pc[i].add(r_j.mul(self.pc[i + half].sub(self.pc[i])));
+                self.is_virtual[i] = self.is_virtual[i].add(r_j.mul(self.is_virtual[i + half].sub(self.is_virtual[i])));
+                self.is_first_in_sequence[i] = self.is_first_in_sequence[i].add(r_j.mul(self.is_first_in_sequence[i + half].sub(self.is_first_in_sequence[i])));
+                self.is_noop[i] = self.is_noop[i].add(r_j.mul(self.is_noop[i + half].sub(self.is_noop[i])));
             }
             self.current_witness_size = witness_new_size;
         }
@@ -938,35 +971,89 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             self.bindPhase1(r_j);
             self.in_phase2 = true;
 
+            // DEBUG: Print witness values after Phase 1
+            std.debug.print("\n[ZOLT] SHIFT_PHASE2_START: witness_size={d}\n", .{self.current_witness_size});
+            std.debug.print("[ZOLT] SHIFT_PHASE2_START: unexpanded_pc[0..4] = ", .{});
+            for (0..@min(4, self.current_witness_size)) |i| {
+                std.debug.print("{any} ", .{self.unexpanded_pc[i].toBytes()[0..8]});
+            }
+            std.debug.print("\n", .{});
+
             // Materialize full eq+1 polynomials for remaining rounds
             // eq+1(r, x) = prefix_0_eval * suffix_0[x] + prefix_1_eval * suffix_1[x]
             // where prefix_0_eval and prefix_1_eval are the bound P values
+            //
+            // After Phase 1, the prefix buffers are reduced to size 1 (fully bound)
+            // The remaining suffix variables are bound in Phase 2
 
-            const remaining_size = self.unexpanded_pc.len;
+            // Get the bound prefix evaluations (for potential future use)
+            _ = self.P_0_outer[0];
+            _ = self.P_1_outer[0];
+            _ = self.P_0_prod[0];
+            _ = self.P_1_prod[0];
+
+            // Similarly for Q buffers (not needed for eq+1 but for reference)
+            // Q_0_outer[0] is the accumulated witness sum weighted by suffix_0
+            // Q_1_outer[0] is the accumulated witness sum weighted by suffix_1
+
+            // For Phase 2, we need the eq+1 polynomial over the remaining suffix variables.
+            // The current witness size tells us how many suffix evaluations we need.
+            const remaining_size = self.current_witness_size;
             self.phase2_eq_plus_one_outer = self.allocator.alloc(F, remaining_size) catch unreachable;
             self.phase2_eq_plus_one_prod = self.allocator.alloc(F, remaining_size) catch unreachable;
 
-            // For now, use direct eq+1 evaluation since this is a fallback
-            // TODO: Properly materialize from prefix evaluations
-            // The witness MLEs are already stored in self.unexpanded_pc, etc.
+            // Compute eq+1 evaluations for each suffix index
+            // For Phase 2, the eq+1 polynomial is:
+            //   eq+1(r_bound, r_suffix, j) = prefix_0_eval * suffix_0[j] + prefix_1_eval * suffix_1[j]
+            //
+            // But we need to compute suffix_0[j] and suffix_1[j] for the **remaining** suffix variables
+            // after Phase 1 has bound the prefix variables.
+            //
+            // Actually, in Phase 2, we work directly with the witness MLEs and the scalar eq+1 evaluations.
+            // The eq+1(r_outer, r) term becomes just a scalar multiplier after all rounds.
+            //
+            // For the round polynomial computation in Phase 2, we use the formula:
+            //   f(x) = eq+1_outer(x) * (witness stuff) + eq+1_prod(x) * (1 - noop)
+            //
+            // Since we're now past Phase 1, the P*Q formula no longer applies.
+            // We need to materialize the eq+1 tables from their current state.
+            //
+            // For now, initialize with identity (will be bound during Phase 2)
+            // This is a simplification - the full eq+1 evaluation needs the suffix table
+            @memset(self.phase2_eq_plus_one_outer.?, F.one());
+            @memset(self.phase2_eq_plus_one_prod.?, F.one());
+
+            // Actually, we need to think about this more carefully:
+            // After Phase 1, we have bound prefix_n_vars variables.
+            // The witness MLEs now have size = original_size / (2^prefix_n_vars) = suffix_size
+            // But we're iterating over trace indices, not suffix indices.
+            //
+            // The key insight is that after binding, the witness MLEs ARE the correct partial evaluations.
+            // For the final claims, we just need to continue binding them in Phase 2.
+            //
+            // The eq+1 computation for Phase 2 is more complex and requires the full suffix tables,
+            // which we didn't preserve. For now, let's just use the witness bindings directly
+            // since the round polynomial computation in Phase 2 actually just needs the witness values.
         }
 
         fn bindPhase2(self: *Self, r_j: F) void {
             // Bind witness MLEs and eq+1 polynomials
+            // Using HighToLow order (MSB first) to match Jolt's opening point normalization
             const new_size = self.current_witness_size / 2;
+            const half = new_size;
 
             for (0..new_size) |i| {
-                self.unexpanded_pc[i] = self.unexpanded_pc[2 * i].add(r_j.mul(self.unexpanded_pc[2 * i + 1].sub(self.unexpanded_pc[2 * i])));
-                self.pc[i] = self.pc[2 * i].add(r_j.mul(self.pc[2 * i + 1].sub(self.pc[2 * i])));
-                self.is_virtual[i] = self.is_virtual[2 * i].add(r_j.mul(self.is_virtual[2 * i + 1].sub(self.is_virtual[2 * i])));
-                self.is_first_in_sequence[i] = self.is_first_in_sequence[2 * i].add(r_j.mul(self.is_first_in_sequence[2 * i + 1].sub(self.is_first_in_sequence[2 * i])));
-                self.is_noop[i] = self.is_noop[2 * i].add(r_j.mul(self.is_noop[2 * i + 1].sub(self.is_noop[2 * i])));
+                self.unexpanded_pc[i] = self.unexpanded_pc[i].add(r_j.mul(self.unexpanded_pc[i + half].sub(self.unexpanded_pc[i])));
+                self.pc[i] = self.pc[i].add(r_j.mul(self.pc[i + half].sub(self.pc[i])));
+                self.is_virtual[i] = self.is_virtual[i].add(r_j.mul(self.is_virtual[i + half].sub(self.is_virtual[i])));
+                self.is_first_in_sequence[i] = self.is_first_in_sequence[i].add(r_j.mul(self.is_first_in_sequence[i + half].sub(self.is_first_in_sequence[i])));
+                self.is_noop[i] = self.is_noop[i].add(r_j.mul(self.is_noop[i + half].sub(self.is_noop[i])));
 
                 if (self.phase2_eq_plus_one_outer) |eq| {
-                    eq[i] = eq[2 * i].add(r_j.mul(eq[2 * i + 1].sub(eq[2 * i])));
+                    eq[i] = eq[i].add(r_j.mul(eq[i + half].sub(eq[i])));
                 }
                 if (self.phase2_eq_plus_one_prod) |eq| {
-                    eq[i] = eq[2 * i].add(r_j.mul(eq[2 * i + 1].sub(eq[2 * i])));
+                    eq[i] = eq[i].add(r_j.mul(eq[i + half].sub(eq[i])));
                 }
             }
             self.current_witness_size = new_size;
@@ -1222,19 +1309,21 @@ fn InstructionInputProver(comptime F: type) type {
         }
 
         pub fn bind(self: *Self, r_j: F) void {
+            // Bind in HighToLow order (MSB first) to match Jolt's opening point normalization
             const new_size = self.current_size / 2;
+            const half = new_size;
 
             for (0..new_size) |i| {
-                self.left_is_rs1[i] = self.left_is_rs1[2 * i].add(r_j.mul(self.left_is_rs1[2 * i + 1].sub(self.left_is_rs1[2 * i])));
-                self.rs1_value[i] = self.rs1_value[2 * i].add(r_j.mul(self.rs1_value[2 * i + 1].sub(self.rs1_value[2 * i])));
-                self.left_is_pc[i] = self.left_is_pc[2 * i].add(r_j.mul(self.left_is_pc[2 * i + 1].sub(self.left_is_pc[2 * i])));
-                self.unexpanded_pc[i] = self.unexpanded_pc[2 * i].add(r_j.mul(self.unexpanded_pc[2 * i + 1].sub(self.unexpanded_pc[2 * i])));
-                self.right_is_rs2[i] = self.right_is_rs2[2 * i].add(r_j.mul(self.right_is_rs2[2 * i + 1].sub(self.right_is_rs2[2 * i])));
-                self.rs2_value[i] = self.rs2_value[2 * i].add(r_j.mul(self.rs2_value[2 * i + 1].sub(self.rs2_value[2 * i])));
-                self.right_is_imm[i] = self.right_is_imm[2 * i].add(r_j.mul(self.right_is_imm[2 * i + 1].sub(self.right_is_imm[2 * i])));
-                self.imm[i] = self.imm[2 * i].add(r_j.mul(self.imm[2 * i + 1].sub(self.imm[2 * i])));
-                self.eq_outer[i] = self.eq_outer[2 * i].add(r_j.mul(self.eq_outer[2 * i + 1].sub(self.eq_outer[2 * i])));
-                self.eq_product[i] = self.eq_product[2 * i].add(r_j.mul(self.eq_product[2 * i + 1].sub(self.eq_product[2 * i])));
+                self.left_is_rs1[i] = self.left_is_rs1[i].add(r_j.mul(self.left_is_rs1[i + half].sub(self.left_is_rs1[i])));
+                self.rs1_value[i] = self.rs1_value[i].add(r_j.mul(self.rs1_value[i + half].sub(self.rs1_value[i])));
+                self.left_is_pc[i] = self.left_is_pc[i].add(r_j.mul(self.left_is_pc[i + half].sub(self.left_is_pc[i])));
+                self.unexpanded_pc[i] = self.unexpanded_pc[i].add(r_j.mul(self.unexpanded_pc[i + half].sub(self.unexpanded_pc[i])));
+                self.right_is_rs2[i] = self.right_is_rs2[i].add(r_j.mul(self.right_is_rs2[i + half].sub(self.right_is_rs2[i])));
+                self.rs2_value[i] = self.rs2_value[i].add(r_j.mul(self.rs2_value[i + half].sub(self.rs2_value[i])));
+                self.right_is_imm[i] = self.right_is_imm[i].add(r_j.mul(self.right_is_imm[i + half].sub(self.right_is_imm[i])));
+                self.imm[i] = self.imm[i].add(r_j.mul(self.imm[i + half].sub(self.imm[i])));
+                self.eq_outer[i] = self.eq_outer[i].add(r_j.mul(self.eq_outer[i + half].sub(self.eq_outer[i])));
+                self.eq_product[i] = self.eq_product[i].add(r_j.mul(self.eq_product[i + half].sub(self.eq_product[i])));
             }
 
             self.current_size = new_size;
@@ -1476,12 +1565,13 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
 
             self.current_prefix_size = new_prefix_size;
 
-            // Also bind witness MLEs
+            // Also bind witness MLEs in HighToLow order (MSB first)
             const witness_new_size = self.current_witness_size / 2;
+            const half = witness_new_size;
             for (0..witness_new_size) |i| {
-                self.rd_write_value[i] = self.rd_write_value[2 * i].add(r_j.mul(self.rd_write_value[2 * i + 1].sub(self.rd_write_value[2 * i])));
-                self.rs1_value[i] = self.rs1_value[2 * i].add(r_j.mul(self.rs1_value[2 * i + 1].sub(self.rs1_value[2 * i])));
-                self.rs2_value[i] = self.rs2_value[2 * i].add(r_j.mul(self.rs2_value[2 * i + 1].sub(self.rs2_value[2 * i])));
+                self.rd_write_value[i] = self.rd_write_value[i].add(r_j.mul(self.rd_write_value[i + half].sub(self.rd_write_value[i])));
+                self.rs1_value[i] = self.rs1_value[i].add(r_j.mul(self.rs1_value[i + half].sub(self.rs1_value[i])));
+                self.rs2_value[i] = self.rs2_value[i].add(r_j.mul(self.rs2_value[i + half].sub(self.rs2_value[i])));
             }
             self.current_witness_size = witness_new_size;
         }
@@ -1496,15 +1586,17 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
         }
 
         fn bindPhase2(self: *Self, r_j: F) void {
+            // Bind in HighToLow order (MSB first)
             const new_size = self.current_witness_size / 2;
+            const half = new_size;
 
             for (0..new_size) |i| {
-                self.rd_write_value[i] = self.rd_write_value[2 * i].add(r_j.mul(self.rd_write_value[2 * i + 1].sub(self.rd_write_value[2 * i])));
-                self.rs1_value[i] = self.rs1_value[2 * i].add(r_j.mul(self.rs1_value[2 * i + 1].sub(self.rs1_value[2 * i])));
-                self.rs2_value[i] = self.rs2_value[2 * i].add(r_j.mul(self.rs2_value[2 * i + 1].sub(self.rs2_value[2 * i])));
+                self.rd_write_value[i] = self.rd_write_value[i].add(r_j.mul(self.rd_write_value[i + half].sub(self.rd_write_value[i])));
+                self.rs1_value[i] = self.rs1_value[i].add(r_j.mul(self.rs1_value[i + half].sub(self.rs1_value[i])));
+                self.rs2_value[i] = self.rs2_value[i].add(r_j.mul(self.rs2_value[i + half].sub(self.rs2_value[i])));
 
                 if (self.phase2_eq) |eq| {
-                    eq[i] = eq[2 * i].add(r_j.mul(eq[2 * i + 1].sub(eq[2 * i])));
+                    eq[i] = eq[i].add(r_j.mul(eq[i + half].sub(eq[i])));
                 }
             }
             self.current_witness_size = new_size;

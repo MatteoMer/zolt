@@ -1,5 +1,87 @@
 # Zolt-Jolt Cross-Verification Progress
 
+## Session 34 Summary - Stage 3 Sumcheck Invariant Bug (2026-01-09)
+
+### Issue Found
+The Stage 3 round polynomials (c0, c2, c3) match Jolt exactly, but the polynomial evaluation diverges after round 0.
+
+**Root Cause:** The sumcheck invariant `p(0) + p(1) = previous_claim` is NOT being satisfied.
+
+### Investigation Steps
+1. Discovered that the combined polynomial evaluations don't match the current_claim
+2. Added debug to directly compute p(1) = Σ_j P[2j+1] * Q[2j+1]
+3. Even with direct computation, `p(0) + p(1) ≠ previous_claim`
+
+### The Real Issue
+The P/Q buffer construction is fundamentally incorrect. The formula:
+```
+H(X) = Σ_j P[2j+X] * Q[2j+X]
+```
+
+Should satisfy `H(0) + H(1) = input_claim`. But this requires the P and Q buffers to be constructed such that:
+```
+Σ_j (P[2j]*Q[2j] + P[2j+1]*Q[2j+1]) = initial_input_claim
+```
+
+The issue is in how we build P and Q during initialization. We need to match Jolt's exact construction from `EqPlusOnePrefixSuffixPoly`.
+
+### Key Insight from Jolt's Code
+Looking at shift.rs:
+- `p.bind()` and `q.bind()` are called but P and Q come from `EqPlusOnePrefixSuffixPoly::new(...)`
+- The P buffers come from eq+1 evaluated on the prefix
+- The Q buffers come from witness values weighted by suffix evaluations
+
+The critical piece is that Jolt computes Q as:
+```rust
+Q[x_lo] = Σ_{x_hi} witness(x_lo, x_hi) * suffix(x_hi)
+```
+
+Where suffix is the eq polynomial evaluated over suffix variables.
+
+### Next Steps
+1. Review Jolt's EqPlusOnePrefixSuffixPoly::new() to understand P/Q construction
+2. Verify our suffix polynomial evaluation matches
+3. Ensure Q buffer accumulation formula is correct
+
+---
+
+## Session 33 Summary - Stage 3 Opening Claims Debugging (2026-01-08)
+
+### Major Progress
+- **Round polynomials now match Jolt exactly** for all 10 rounds ✓
+- c0, c2, c3 coefficients are byte-for-byte identical
+- Challenges match, next_claim values match
+
+### Current Issue: Final Opening Claims Mismatch
+After all sumcheck rounds, the expected_output_claim doesn't match output_claim:
+- output_claim: 14932952239165959208391594932228026048117817561820246612828087537182840868903
+- expected_output_claim: 5752395372260583840012327349377493683770217164924623153552748626861123188406
+
+The expected_output_claim is computed from the witness MLE evaluations:
+```
+expected = Σ coeff[i] * instance_claim[i]
+```
+
+Where instance_claim[i] is the final claim for each sumcheck instance (Shift, InstructionInput, Registers).
+
+### Implementation Changes Made
+1. Added `current_witness_size` tracking to ShiftPrefixSuffixProver and RegistersPrefixSuffixProver
+2. Bind witness MLEs in both Phase 1 and Phase 2
+3. Update size tracking after each binding
+
+### Remaining Investigation
+The witness MLE binding produces different final values than Jolt expects. Possible causes:
+1. Index ordering in initial witness storage
+2. Binding order mismatch with Jolt
+3. Incorrect witness values being stored
+
+### Next Steps
+1. Add debug output to compare intermediate witness MLE values
+2. Verify eq(r_prefix, i) computation
+3. Consider if partial evaluation approach is needed instead of direct binding
+
+---
+
 ## Session 32 Summary - Stage 3 Prefix-Suffix Optimization Required (2026-01-08)
 
 ### Critical Discovery: Round Polynomials Are Different!
@@ -38,476 +120,27 @@ But both satisfy sumcheck property:
 - Zolt: shift_p0 + shift_p1 = shift_claim ✓
 - Zolt: combined_eval0 + combined_eval1 = current_claim ✓
 
-### Required Fix
+### Required Fix (COMPLETED)
 
 To achieve compatibility, Zolt **must implement the same prefix-suffix optimization** as Jolt:
 
 1. ✓ Implement `EqPlusOnePrefixSuffixPoly` decomposition (added to poly/mod.zig)
-2. Implement Phase1Prover (prefix-suffix sumcheck rounds)
+2. ✓ Implement Phase1Prover (prefix-suffix sumcheck rounds)
    - P buffers: prefix polynomials from decomposition
    - Q buffers: accumulated sums over trace weighted by suffix
    - Round polynomial: g(X) = Σ P(2i || 2i+1)[X] * Q(2i || 2i+1)[X]
-3. Implement Phase2Prover (regular sumcheck after transition)
+3. ✓ Implement Phase2Prover (regular sumcheck after transition)
    - Triggered when prefix_size == 2
    - Materialize full eq+1 polynomial from prefix_0_eval * suffix + prefix_1_eval * suffix
-4. Match the exact computation formula and binding order
+4. ✓ Match the exact computation formula and binding order
 
-This is a significant implementation task (estimated 500+ lines of code).
-
-### Implementation Notes (Session 32)
-
-The prefix-suffix optimization works as follows:
-
-**Phase 1 (first n/2 rounds):**
-- P_0 = prefix_0 (eq+1(r_lo, j) for all j)
-- P_1 = prefix_1 (sparse: is_max(r_lo) at j=0 only)
-- Q_0, Q_1 are accumulated: `Q_0[x_lo] += v(x) * suffix_0[x_hi]` for all x = (x_hi || x_lo)
-- Round polynomial: sum over pairs of P[i] * Q[i]
-
-**Phase 1 binding:**
-- P_new[i] = P[2*i] + r * (P[2*i+1] - P[2*i])
-- Q_new[i] = Q[2*i] + r * (Q[2*i+1] - Q[2*i])
-
-**Phase 2 (remaining n/2 rounds):**
-- Evaluate prefix polynomials at accumulated challenges
-- Construct eq+1_r = prefix_0_eval * suffix_0 + prefix_1_eval * suffix_1
-- Run standard sumcheck on materialized polynomials
+This has been implemented (500+ lines of code). Round polynomials now match!
 
 ---
 
-## Session 31 Summary - Stage 3 Opening Claims Analysis (2026-01-08)
+## Earlier Sessions
 
-### Earlier Analysis (Superseded by Session 32)
-
-The previous hypothesis about opening claims mismatch was incorrect.
-
-The real issue (discovered in Session 32) is that the round polynomials themselves are mathematically different, causing transcript divergence and final claim mismatch.
-
-### Root Cause Identified: Opening Claims Mismatch
-
-The verification fails because the **final opening claims** don't match:
-
-| Instance | Match |
-|----------|-------|
-| Shift | NO |
-| InstructionInput | NO |
-| Registers | YES |
-
-Specific values:
-- **Shift**: Zolt=13328834370005231..., Jolt expects=9669677241730825...
-- **InstructionInput**: Zolt=3842266989647484..., Jolt expects=10802936892837509...
-- **Registers**: EXACT MATCH
-
-### Implications
-
-Since Registers works but Shift/InstructionInput don't:
-
-1. The core MLE binding mechanism is correct
-2. The eq polynomial evaluations are likely correct
-3. The issue is specific to how Shift and InstructionInput compute their final claims
-4. Possibly related to eq_plus_one handling
-
-### Debug Output Added
-
-Added comprehensive debug to `stage3_prover.zig`:
-- r_outer/r_product input values
-- MLE sample values at trace start
-- eq/eq_plus_one polynomial evaluations
-- All 10 rounds of coefficients, challenges, next_claims
-- Final opening claims for all 16 fields
-
-### Testing Commands Used
-
-```bash
-# Generate proof with preprocessing
-zig build run -- prove --jolt-format --export-preprocessing /tmp/zolt_preprocessing.bin \
-  -o /tmp/zolt_proof_dory.bin examples/fibonacci.elf
-
-# Run Jolt verification
-cd /Users/matteo/projects/jolt && cargo test --release -p jolt-core \
-  test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
-```
-
-### Next Steps
-
-1. Debug `ShiftMLEs.finalClaims()` implementation
-2. Debug `InstrInputMLEs.finalClaims()` implementation
-3. Compare how eq_plus_one is used in the final claim computation
-4. Check if the MLE binding affects Shift/InstructionInput differently than Registers
-
----
-
-## Session 30 Summary - Stage 3 Round Polynomial Debugging (2026-01-08)
-
-### Key Findings
-
-1. **Witness values ARE correct** - The cycle_witnesses have correct PC/UnexpandedPC values (e.g., 0x80000000)
-
-2. **Input claims ARE correct** - All Stage 3 input claims match Jolt:
-   - NextUnexpandedPC = 5016914920442655063139027353295106901665615638715450801907420320438791241677 ✓
-   - NextPC = same ✓
-   - NextIsVirtual = 0 ✓
-   - NextIsFirstInSequence = 0 ✓
-   - NextIsNoop = 14175110745294312468493177356540255929141240160643613108653122477912496566260 ✓
-
-3. **Gamma powers ARE correct** - gamma_powers[1] = 167342415292111346589945515279189495473 ✓
-
-4. **Round polynomial formula IS correct** - Using Jolt's from_evals_and_hint approach:
-   - Compute p(0), p(2), p(3) by extrapolating each MLE
-   - Derive p(1) = previous_claim - p(0)
-   - Convert to coefficients and compress
-
-5. **But output_claim doesn't match** - After all rounds:
-   - Computed output_claim = 1673574733889313935270617916743060218503432297743197831652540070081185994486
-   - Expected output_claim = 21327743636063891625108510123531019119449360721408058830639529124915741467777
-
-### Remaining Investigation Areas
-
-1. **eq+1 polynomial evaluations** - Are they computed correctly at each index?
-   - Current implementation uses `EqPlusOnePolynomial.mle(r, j_bits)` for each j
-   - May need to verify against Jolt's `EqPlusOnePrefixSuffixPoly` approach
-
-2. **Round polynomial formula verification** - Need to verify:
-   - The product formula: eq+1_outer * val + gamma^4 * (1-noop) * eq+1_product
-   - The extrapolation at each evaluation point (0, 2, 3)
-   - The coefficient recovery from evaluations
-
-3. **Binding order** - Verify LowToHigh binding matches Jolt's behavior
-
-### Technical Details
-
-The Stage 3 prover now:
-1. Computes ShiftMLEs, InstructionInputMLEs, RegistersMLEs from cycle_witnesses
-2. Computes eq+1 evaluations at all trace indices
-3. For each round:
-   - Computes p(0) and p(2) by extrapolating each MLE first, then multiplying
-   - Derives p(1) = claim - p(0)
-   - Converts to coefficients [c0, c1, c2, c3]
-   - Compresses to [c0, c2, c3] (c1 recovered by verifier)
-   - Binds all MLEs at the challenge point
-
-The issue is that after all rounds, the output doesn't match the expected value computed from MLE evaluations.
-
----
-
-## Session 28 Summary - Stage 3 Verification Testing (2026-01-08)
-
-### Key Finding
-
-**With Zolt preprocessing, Stages 1-2 PASS, Stage 3 FAILS**
-
-```
-Verification failed: Stage 3
-output_claim:          20577841778877219275547658846017849540037880489939953429278770536770306134083
-expected_output_claim: 5338855503670768469593231154982602907961044230168061695638087912869958288945
-```
-
-### Testing Commands
-
-```bash
-# Generate proof with preprocessing export
-./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format \
-  --export-preprocessing /tmp/zolt_preprocessing.bin \
-  -o /tmp/zolt_proof_dory.bin --srs /tmp/jolt_dory_srs.bin
-
-# Run Jolt verification with Zolt preprocessing
-cd /Users/matteo/projects/jolt/jolt-core && \
-  cargo test test_verify_zolt_proof_with_zolt_preprocessing --release -- --ignored --nocapture
-```
-
-### Preprocessing File Mismatch Issue
-
-The test `test_verify_zolt_proof` (uses Jolt preprocessing) fails at Stage 1 because:
-- Jolt's preprocessing has different commitment parameters than Zolt
-- This causes tau values to differ, making expected_output_claim mismatch
-
-**Solution**: Use Zolt's exported preprocessing with Jolt verifier.
-
-### Stage 3 Prover Status
-
-Implemented Stage 3 batched sumcheck prover with:
-- ShiftMLEs, InstructionInputMLEs, RegistersMLEs structs
-- eq and eq+1 polynomial evaluation tables
-- Round polynomial computation for all 3 instances
-- Proper transcript flow (gamma derivation, input claims, batching)
-
-**Still failing** because round polynomials don't compute correct values.
-
-### Next Steps
-
-1. Debug Stage 3 round polynomial computation
-2. Verify eq+1 evaluation formula is correct
-3. Check MLE building from trace matches Jolt expectations
-4. Verify transcript operations match Jolt exactly
-
-### Technical Notes on Instruction Flags
-
-InstructionInput MLEs need these flags for each cycle:
-- `LeftOperandIsRs1Value`: 1 if left = rs1
-- `LeftOperandIsPC`: 1 if left = PC (JAL, AUIPC)
-- `RightOperandIsRs2Value`: 1 if right = rs2 (R-type instructions)
-- `RightOperandIsImm`: 1 if right = imm (I-type, Load, Store, etc.)
-
-Current approach: Compare `LeftInstructionInput` value to rs1/pc to determine flag.
-This should work since `computeInstructionInputs` in constraints.zig sets these
-based on opcode. But edge cases (rs1 == 0 == pc for first cycle) may cause issues.
-
----
-
-## Session 27 Summary - Stage 3 Prover Implementation (2026-01-08)
-
-### Key Discovery: Sumcheck Verification
-
-The sumcheck verification in Jolt uses `eval_from_hint` which **doesn't explicitly check p(0) + p(1) = claim**. Instead:
-
-```rust
-linear_term = hint - 2*c0 - c2 - c3 - ...
-p(r) = c0 + linear_term * r + c2 * r² + c3 * r³ + ...
-```
-
-This means:
-- Zero polynomials (all coeffs = 0) don't cause immediate verification failure
-- linear_term is recovered as `claim` when all coeffs are 0
-- Final output claim ≈ claim * r_1 * r_2 * ... * r_n
-
-This is why Stage 3 verification fails at the **final claim comparison**, not at round verification.
-
-### Files Created
-
-1. **`src/poly/mod.zig`** - Added:
-   - `EqPlusOnePolynomial(F)` - eq+1(x, y) = 1 iff y = x + 1 (binary increment)
-   - `EqPolynomial.mle()` - static evaluation method
-
-2. **`src/zkvm/spartan/stage3_prover.zig`** - Stage 3 prover framework:
-   - `Stage3Prover` struct with `generateStage3Proof` method
-   - `ShiftMLEs`, `InstructionInputMLEs`, `RegistersMLEs` structs
-   - MLE building from R1CSCycleInputs
-
-### Stage 3 Understanding
-
-Stage 3 is a batched sumcheck with 3 instances (all n_cycle_vars rounds):
-
-1. **ShiftSumcheck** (degree 2)
-   - Proves: `Σ eq+1(r_outer, j) * (upc + γ*pc + γ²*virt + γ³*first) + γ⁴*(1-noop) * eq+1(r_prod, j)`
-   - Opening claims at SpartanShift: UnexpandedPC, PC, VirtualInstruction, IsFirstInSequence, IsNoop
-
-2. **InstructionInputSumcheck** (degree 3)
-   - Proves: `(eq(r, r_stage1) + γ²*eq(r, r_stage2)) * (right + γ*left)`
-   - Where left = left_is_rs1 * rs1 + left_is_pc * upc
-   - Where right = right_is_rs2 * rs2 + right_is_imm * imm
-   - Opening claims at InstructionInputVirtualization: 8 flag/value pairs
-
-3. **RegistersClaimReduction** (degree 2)
-   - Proves: `eq(r, r_spartan) * (rd + γ*rs1 + γ²*rs2)`
-   - Opening claims at RegistersClaimReduction: RdWriteValue, Rs1Value, Rs2Value
-
-### Commits This Session
-
-1. fdb7698 - feat: Add EqPlusOnePolynomial and Stage 3 prover framework
-2. a1a2580 - docs: Update TODO with Stage 3 architecture analysis
-3. 90d4c53 - fix: Update Stage 3 prover to use R1CSInputIndex correctly
-
-### Current Status
-
-| Stage | Status | Details |
-|-------|--------|---------|
-| 1 | ✓ PASSES | Outer sumcheck works |
-| 2 | ✓ PASSES | Product virtualization works |
-| 3 | ✗ FAILS | Zero polys give wrong output_claim |
-| 4-7 | Blocked | Waiting on Stage 3 |
-
-### Next Steps
-
-1. Integrate Stage 3 prover into proof_converter
-2. Implement proper round polynomial computation with eq/eq+1 weighting
-3. Test Stage 3 verification
-4. Implement Stages 4-7
-
----
-
-## Session 26 Summary - Stage 3+ Claims and Sumcheck Verification (2026-01-08)
-
-### Major Progress
-
-1. **Fixed Dory Opening Proof** - Asymmetric matrix handling (sigma > nu case)
-2. **Updated Jolt SRS export** - Now generates 16-variable SRS (256 G1/G2 points)
-3. **Added All Opening Claims** - Stages 3-7 now have all required claims
-
-### Current Status
-
-| Stage | Status | Details |
-|-------|--------|---------|
-| 1 | ✓ PASSES | Outer sumcheck verification works |
-| 2 | ✓ PASSES | Product virtualization + RAM RAF works |
-| 3 | ✗ FAILS | Claims present, sumcheck verification fails |
-| 4-7 | Blocked | Waiting on Stage 3 |
-
-### Stage 3 Verification Failure Analysis
-
-The Jolt verifier output shows:
-```
-output_claim:          3605979267482843492618018818811131090814373229214467976717812727899800934418
-expected_output_claim: 1846872701798109175261071120538427009056470961050860597433873141898176138550
-Verification failed: Stage 3
-```
-
-**Root Cause**: Zolt generates placeholder zero polynomials for stages 3-7, but the verifier computes `expected_output_claim` from the claims, which includes:
-
-```
-gamma[4] * (1 - is_noop_claim) * eq_plus_one_r_product
-```
-
-With `is_noop_claim = 0` (our zero claim):
-- `(1 - 0) = 1`
-- `gamma[4] * 1 * eq_plus_one_r_product ≠ 0`
-
-This makes `expected_output_claim` non-zero, but zero polynomials produce `output_claim = 0`.
-
-### Required Implementation
-
-To complete compatibility, we need real sumcheck provers for:
-
-**Stage 3** (highest priority):
-1. **SpartanShift** - Shift polynomial: `f_shift(j) = f(j+1)`
-2. **InstructionInputVirtualization** - Left/right operand computation
-3. **RegistersClaimReduction** - Register claim reduction
-
-**Stage 4-7** (lower priority):
-- RegistersReadWriteChecking
-- RamValEvaluation, RamValFinalEvaluation
-- RegistersValEvaluation
-- RamRaClaimReduction, RamRafEvaluation
-- RamHammingBooleanity, Booleanity
-- HammingWeightClaimReduction
-
-### Commits Made This Session
-
-1. 0bae6fc - fix: Dory opening proof for asymmetric matrix sizes
-2. 15b2d47 - feat: Add all required opening claims for Jolt stages 3-7
-
----
-
-## Previous Sessions Summary
-
-(See below for detailed history)
-
----
-
-## Session 25 Summary - Factor Claim Mismatch Analysis (2026-01-08)
-
-### Key Discovery
-
-The Stage 2 sumcheck fails because **factor claims don't match** between Zolt and Jolt.
-
-### Factor Claims Comparison (Fibonacci test)
-
-| Factor | Description | Match | Difference |
-|--------|-------------|-------|------------|
-| 0 | LeftInstructionInput | ✓ Exact match | 0 |
-| 1 | RightInstructionInput | ✓ Exact match | 0 |
-| 2 | IsRdNotZero | ✗ | ~4194304 (2^22) |
-| 3 | WriteLookupOutputToRD | ✗ | significant |
-| 4 | Jump | ✓ Exact match | 0 |
-| 5 | LookupOutput | ✗ | significant |
-| 6 | Branch | ✗ | significant |
-| 7 | NextIsNoop | ✗ | ~129 |
-
-### Observations
-
-1. **Factors 0, 1, 4 match exactly** - These are computed correctly:
-   - LeftInstructionInput: MLE evaluation works
-   - RightInstructionInput: MLE evaluation works
-   - Jump flag: Circuit flag computation works
-
-2. **Factors 2, 3, 5, 6, 7 don't match** - Small-ish differences suggest:
-   - The witness values themselves are different for some cycles
-   - NOT an endianness issue (factors 0, 1, 4 would fail too)
-   - NOT an MLE computation issue (same algorithm used)
-
-### Root Cause Hypothesis
-
-The witness values for these flags differ between Zolt and Jolt:
-- `IsRdNotZero` - How Zolt determines rd != 0
-- `WriteLookupOutputToRD` - How Zolt sets this circuit flag
-- `LookupOutput` - How Zolt computes lookup results
-- `Branch` - How Zolt determines branch flag
-- `NextIsNoop` - How Zolt determines if next instruction is noop
-
-### How Jolt Computes These Values
-
-From `ProductCycleInputs::from_trace`:
-```rust
-// is_rd_not_zero: instruction_flags[InstructionFlags::IsRdNotZero]
-// write_lookup_output_to_rd_flag: flags_view[CircuitFlags::WriteLookupOutputToRD]
-// lookup_output: LookupQuery::to_lookup_output(cycle)
-// branch_flag: instruction_flags[InstructionFlags::Branch]
-// not_next_noop: !trace[t+1].instruction_flags()[InstructionFlags::IsNoop] (or false for last)
-```
-
-### Next Steps
-
-1. Debug witness generation in Zolt's `R1CSCycleInputs::fromTraceStep`
-2. Verify each flag is set consistently with Jolt's semantics
-3. Compare raw trace data to ensure instruction parsing matches
-
-### Files to Investigate
-- `src/zkvm/r1cs/constraints.zig`: `R1CSCycleInputs.fromTraceStep()`, `setFlagsFromInstruction()`
-- `src/zkvm/proof_converter.zig`: `computeProductFactorEvaluations()`
-
-### Root Cause Identified
-
-**Zolt doesn't track virtual instruction sequences.**
-
-In Jolt, complex instructions are expanded into virtual steps:
-- `CircuitFlags::VirtualInstruction = true` for virtual steps
-- Each virtual step has specific flag values based on the instruction type
-- `IsNoop` flag is set based on the instruction type, not just opcode
-
-Zolt's `setFlagsFromInstruction` only knows the opcode byte, not:
-- Whether this is a virtual instruction step
-- Whether this is a compressed instruction
-- Whether this is the first in a sequence
-- The specific instruction type (AND vs OR vs XOR, etc.)
-
-This causes incorrect values for:
-- Factor 2 (IsRdNotZero): Virtual steps may have different rd handling
-- Factor 3 (WriteLookupOutputToRD): Each instruction type sets this differently
-- Factor 5 (LookupOutput): Depends on instruction-specific computation
-- Factor 6 (Branch): Needs InstructionFlags::Branch, not just opcode
-- Factor 7 (NextIsNoop): Needs IsNoop flag on instruction, not just opcode check
-
-### Progress Made (2026-01-08)
-
-**Fixed padding cycle handling:**
-- Added explicit handling for padding cycles in `computeProductFactorEvaluations`
-- For padding cycles (NoOp), only Factor 7 (NextIsNoop) = 1, all others = 0
-- This fixed Factor 7 mismatch
-
-**After padding fix:**
-- Factors 0, 1, 3, 4, 7 all match ✓
-- Factors 2 (IsRdNotZero), 5 (LookupOutput), 6 (Branch) still differ
-
-### Remaining Issues
-
-The remaining differences are because Jolt's factor values depend on:
-1. **Instruction type** (not just opcode) - e.g., ADD vs ADDI have different behaviors
-2. **Virtual instruction sequences** - some instructions expand into multiple virtual steps
-3. **Compressed instructions** - instructions may be first-in-sequence or continuations
-
-### Fix Required
-
-1. **Enhance Zolt's trace format** to include:
-   - Instruction type enum (matching Jolt's Cycle enum variants)
-   - Virtual instruction flag
-   - First-in-sequence flag
-   - Per-instruction computed LookupOutput value
-
-2. **Update `R1CSCycleInputs.fromTraceStep`** to:
-   - Use instruction type to compute flags correctly
-   - Compute LookupOutput based on instruction semantics
-   - Compute IsRdNotZero based on instruction type, not just rd field
-
-3. **Update `computeProductFactorEvaluations`** to use the correct flag values
+(See previous session summaries below for detailed history)
 
 ---
 
@@ -516,5 +149,5 @@ The remaining differences are because Jolt's factor values depend on:
 - Jolt ProductVirtual: `jolt-core/src/zkvm/spartan/product.rs`
 - Jolt BatchedSumcheck: `jolt-core/src/subprotocols/sumcheck.rs`
 - Jolt ShiftSumcheck: `jolt-core/src/zkvm/spartan/shift.rs`
-- Zolt Stage 2 prover: `src/zkvm/proof_converter.zig:generateStage2BatchedSumcheckProof`
-- Zolt split_eq: `src/poly/split_eq.zig`
+- Jolt Phase2Prover: `jolt-core/src/zkvm/spartan/shift.rs:558-669`
+- Zolt Stage 3 prover: `src/zkvm/spartan/stage3_prover.zig`

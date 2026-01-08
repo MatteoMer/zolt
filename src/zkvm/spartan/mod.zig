@@ -31,6 +31,11 @@ pub const StreamingOuterProver = streaming_outer.StreamingOuterProver;
 pub const product_remainder = @import("product_remainder.zig");
 pub const ProductVirtualRemainderProver = product_remainder.ProductVirtualRemainderProver;
 
+// Stage 3 prover (ShiftSumcheck, InstructionInput, RegistersClaimReduction)
+pub const stage3_prover = @import("stage3_prover.zig");
+pub const Stage3Prover = stage3_prover.Stage3Prover;
+pub const Stage3Result = stage3_prover.Stage3Result;
+
 /// Spartan proof for R1CS
 pub fn R1CSProof(comptime F: type) type {
     return struct {

@@ -273,6 +273,18 @@ pub fn InstructionLookupsProver(comptime F: type) type {
         pub fn isComplete(self: *const Self) bool {
             return self.round >= self.params.numRounds();
         }
+
+        /// Get the individual opening claims after all rounds are complete
+        /// Returns: { lookup_output, left_operand, right_operand }
+        pub fn getOpeningClaims(self: *const Self) struct { lookup_output: F, left_operand: F, right_operand: F } {
+            // After all rounds, the arrays have been folded down to length 1
+            // These are the MLE evaluations at the sumcheck challenges
+            return .{
+                .lookup_output = if (self.lookup_outputs.len > 0) self.lookup_outputs[0] else F.zero(),
+                .left_operand = if (self.left_operands.len > 0) self.left_operands[0] else F.zero(),
+                .right_operand = if (self.right_operands.len > 0) self.right_operands[0] else F.zero(),
+            };
+        }
     };
 }
 

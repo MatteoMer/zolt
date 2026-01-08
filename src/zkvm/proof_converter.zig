@@ -1419,17 +1419,18 @@ pub fn ProofConverter(comptime F: type) type {
             defer stage2_result.deinit();
 
             // Stage 2: InstructionLookupsClaimReductionSumcheckVerifier claims
+            // These are the MLE evaluations of the lookup polynomials at the sumcheck challenges
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .LookupOutput, .sumcheck_id = .InstructionClaimReduction } },
-                F.zero(),
+                stage2_result.instr_lookup_output_claim,
             );
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .LeftLookupOperand, .sumcheck_id = .InstructionClaimReduction } },
-                F.zero(),
+                stage2_result.instr_left_operand_claim,
             );
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .RightLookupOperand, .sumcheck_id = .InstructionClaimReduction } },
-                F.zero(),
+                stage2_result.instr_right_operand_claim,
             );
 
             // Stages 3-7 (placeholder)
@@ -1488,11 +1489,15 @@ pub fn ProofConverter(comptime F: type) type {
             raf_final_claim: F, // Instance 1: RamRafEvaluation
             rwc_final_claim: F, // Instance 2: RamReadWriteChecking (combined claim)
             output_final_claim: F, // Instance 3: RamOutputCheck
-            instr_final_claim: F, // Instance 4: InstructionLookupsClaimReduction
+            instr_final_claim: F, // Instance 4: InstructionLookupsClaimReduction (combined)
             /// Individual RWC opening claims (ra, val, inc)
             rwc_ra_claim: F,
             rwc_val_claim: F,
             rwc_inc_claim: F,
+            /// Individual InstructionLookups opening claims
+            instr_lookup_output_claim: F,
+            instr_left_operand_claim: F,
+            instr_right_operand_claim: F,
             allocator: Allocator,
 
             pub fn deinit(self: *Stage2Result) void {
@@ -1970,9 +1975,16 @@ pub fn ProofConverter(comptime F: type) type {
                             // we use a simpler approach: compute the round polynomial that reduces
                             // the input_claim to 0 at the final round.
                             //
-                            // For now, disable InstructionLookupsProver and use scaled fallback.
-                            // This works because the expected_output_claim for Instance 4 is 0.
-                            const use_instr_prover = false;
+                            // Enable InstructionLookupsProver for proper sumcheck reduction
+                            // The fallback was incorrect - it produced input_claim/2^n instead of 0
+                            const use_instr_prover = true;
+
+                            // Debug: Check why prover init condition fails
+                            if (round_idx == start_round) {
+                                std.debug.print("[ZOLT DEBUG] Instance 4: round_idx={}, start_round={}, use_instr_prover={}, instr_prover_null={}, cycle_witnesses.len={}\n", .{
+                                    round_idx, start_round, use_instr_prover, instr_prover == null, cycle_witnesses.len,
+                                });
+                            }
 
                             if (use_instr_prover and round_idx == start_round and instr_prover == null and cycle_witnesses.len > 0) {
                                 // r_spartan is the opening point from SpartanOuter for LookupOutput
@@ -2414,6 +2426,20 @@ pub fn ProofConverter(comptime F: type) type {
                 std.debug.print("[ZOLT] STAGE2 RWC: prover is null, using zero claims\n", .{});
             }
 
+            // Get individual InstructionLookups opening claims
+            var instr_lookup_output = F.zero();
+            var instr_left_operand = F.zero();
+            var instr_right_operand = F.zero();
+            if (instr_prover) |*ip| {
+                const instr_opening_claims = ip.getOpeningClaims();
+                instr_lookup_output = instr_opening_claims.lookup_output;
+                instr_left_operand = instr_opening_claims.left_operand;
+                instr_right_operand = instr_opening_claims.right_operand;
+                std.debug.print("[ZOLT] STAGE2 Instr: lookup_output = {any}\n", .{instr_lookup_output.toBytesBE()});
+                std.debug.print("[ZOLT] STAGE2 Instr: left_operand = {any}\n", .{instr_left_operand.toBytesBE()});
+                std.debug.print("[ZOLT] STAGE2 Instr: right_operand = {any}\n", .{instr_right_operand.toBytesBE()});
+            }
+
             std.debug.print("[ZOLT] STAGE2: raf_final_claim = {any}\n", .{raf_claim.toBytesBE()});
             std.debug.print("[ZOLT] STAGE2: rwc_final_claim = {any}\n", .{rwc_claim.toBytesBE()});
             std.debug.print("[ZOLT] STAGE2: output_final_claim = {any}\n", .{output_claim.toBytesBE()});
@@ -2429,6 +2455,9 @@ pub fn ProofConverter(comptime F: type) type {
                 .rwc_ra_claim = rwc_ra_claim,
                 .rwc_val_claim = rwc_val_claim,
                 .rwc_inc_claim = rwc_inc_claim,
+                .instr_lookup_output_claim = instr_lookup_output,
+                .instr_left_operand_claim = instr_left_operand,
+                .instr_right_operand_claim = instr_right_operand,
                 .allocator = self.allocator,
             };
         }

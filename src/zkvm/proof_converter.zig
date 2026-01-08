@@ -2120,11 +2120,12 @@ pub fn ProofConverter(comptime F: type) type {
                 try challenges.append(self.allocator, challenge);
 
                 // Update batched claim by evaluating at challenge
-                // The prover must maintain consistency: combined_evals should produce the same
-                // evaluation as evalFromHint. For now, use evaluateCubicAtChallengeFromEvals
-                // since that's what the prover computes.
+                // CRITICAL: Must use evalFromHint (same as Jolt's verifier) to ensure
+                // the claim evolution matches. Using Lagrange interpolation from combined_evals
+                // would give different results because the evaluations may not be consistent
+                // with what Jolt expects (different s1, s2, s3 can produce the same c0, c2, c3).
                 const old_claim = batched_claim;
-                batched_claim = evaluateCubicAtChallengeFromEvals(combined_evals, challenge);
+                batched_claim = evalFromHint(compressed, old_claim, challenge);
 
                 // Debug: STAGE2_ROUND logs for compare_sumcheck.py
                 {

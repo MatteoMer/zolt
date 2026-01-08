@@ -1,87 +1,96 @@
 # Zolt-Jolt Compatibility - Stage 2 tau_high Mismatch
 
-## Current Status: Stage 2 Verification Fails (tau_high divergence)
+## Current Status: Deep Investigation of Transcript Divergence
 
-### What Works (After evalFromHint fix)
-- [x] Stage 1 (SpartanOuter) verification passes
-- [x] Stage 2 polynomial coefficients (c0, c2, c3) match Jolt at each round
-- [x] Stage 2 challenges match between Zolt and Jolt
+### What Works (Verified)
+- [x] Stage 1 sumcheck proof generation
+- [x] Stage 2 polynomial coefficients match Jolt
+- [x] Stage 2 challenges match Jolt
 - [x] Stage 2 output_claim evolution matches (fixed with evalFromHint)
 - [x] fused_left/fused_right match exactly
+- [x] uni_skip_claim@SpartanOuter value matches Jolt (15578270688667249954...)
+- [x] All 36 R1CS input claim values match Jolt
 - [x] All 712 tests pass
 
-### Current Problem
-- Stage 2 sumcheck verification fails because expected_output_claim differs
-- Root cause: tau_high for Stage 2 differs due to transcript state divergence
+### Current Problem: tau_high Sampling Diverges
 
-**Values:**
-- `output_claim = 11948928263400051798463901278432764058724926493141863520413443728531572654384` (MATCHES!)
-- `expected_output_claim = 14998460073388315545242452814285195471990034347995786920854240537701021643062` (DIFFERS)
+Despite all claim VALUES matching, the tau_high sampled for Stage 2 differs:
 - Zolt tau_high: 55597861199438361161714452967226452302444674035205491421209262082033450074888
 - Jolt tau_high: 3964043112274501458186604711136127524303697198496731069976411879372059241338
 
-### Root Cause: Transcript Append Order Mismatch
+The transcript state at tau_high sampling differs, causing expected_output_claim mismatch.
 
-The transcript state before tau_high sampling differs because opening claims are appended in different order.
+### Verified Transcript Sequence
 
-**Jolt's order (after Stage 1 completes):**
-1. OuterUniSkip verifier calls cache_openings → appends UnivariateSkip@SpartanOuter
-2. OuterRemainingSumcheck verifier calls cache_openings → appends 36 R1CS input claims
-3. Then samples tau_high for Stage 2
+**Jolt Stage 1 verification order:**
+1. [UniSkip verify] uni_poly appended
+2. [UniSkip verify] r0 sampled
+3. [UniSkip verify] cache_openings → append UnivariateSkip claim
+4. [BatchedSumcheck] append input_claim (uni_skip_claim)
+5. [BatchedSumcheck] batching_coeffs sampled
+6. [BatchedSumcheck] process 11 rounds
+7. [BatchedSumcheck] cache_openings → append 36 R1CS claims
+8. Sample tau_high for Stage 2
 
-**Zolt's current order:**
-1. During Stage 1: appends uni_skip_claim twice (cache_openings + BatchedSumcheck input)
-2. Processes sumcheck rounds
-3. After Stage 1: appends 36 R1CS input claims (addSpartanOuterOpeningClaimsWithEvaluations)
-4. Samples tau_high
+**Zolt Stage 1 proof generation order:**
+1. uni_poly appended
+2. r0 sampled
+3. Line 425: append uni_skip_claim (cache_openings equivalent)
+4. Line 438: append uni_skip_claim (BatchedSumcheck input)
+5. batching_coeff sampled
+6. process 11 rounds
+7. addSpartanOuterOpeningClaimsWithEvaluations: append 36 R1CS claims
+8. Sample tau_high for Stage 2
 
-The exact sequence and ordering must match Jolt's verification flow precisely.
+The sequences appear to match, but the transcript state still diverges.
 
-### Fix Required
+### Investigation Needed
 
-1. **Trace Jolt's exact transcript append order:**
-   - When does OuterUniSkip.cache_openings run relative to sumcheck?
-   - When does OuterRemainingSumcheck.cache_openings run?
-   - What's the exact sequence before tau_high sampling?
+1. **Compare exact bytes appended** at each step between Zolt and Jolt
+2. **Check if there's an extra/missing append** somewhere
+3. **Verify round polynomial encoding** is byte-identical
+4. **Check if batching_coeff sampling** produces the same value
 
-2. **Fix Zolt's append order to match:**
-   - Adjust where/when UnivariateSkip claim is appended
-   - Ensure R1CS claims are appended at correct position
+### Possible Root Causes
 
-3. **Verify tau_high matches after fix**
+1. Different byte encoding of claims (big endian vs little endian)
+2. Extra or missing transcript appends
+3. Different round polynomial coefficient encoding
+4. Different batching coefficient computation
 
-### Files to Modify
-- `src/zkvm/proof_converter.zig` - Fix transcript append order
+### Files to Investigate
+- `src/zkvm/proof_converter.zig` - Stage 1 proof generation
+- `src/transcripts/blake2b.zig` - Transcript implementation
+- Jolt's `verifier.rs` - Stage 1 verification
 
-### Key Insight from Session 21
-
-The evalFromHint fix resolved the claim evolution mismatch:
-- Before: Zolt used Lagrange interpolation from combined_evals → wrong next_claim
-- After: Zolt uses eval_from_hint formula → next_claim matches Jolt byte-for-byte
-
-The remaining issue is purely about transcript state before tau_high sampling.
-
-## Verification Commands
-
+### Test Commands
 ```bash
 # Build and test Zolt
 zig build test --summary all
 
-# Generate Jolt-compatible proof
-./zig-out/bin/zolt prove --jolt-format -o /tmp/zolt_proof_dory.bin examples/fibonacci.elf
+# Generate proof with debug output
+./zig-out/bin/zolt prove --jolt-format -o /tmp/zolt_proof_dory.bin examples/fibonacci.elf 2>&1 | grep -E "appendBytes|STAGE1|OPENING_CLAIMS"
 
 # Verify with Jolt
 cd /Users/matteo/projects/jolt/jolt-core
-cargo test test_verify_zolt_proof -- --ignored --nocapture
+cargo test test_verify_zolt_proof -- --ignored --nocapture 2>&1 | grep -E "append_virtual|STAGE"
 ```
 
-## Code Locations
-- Proof converter: `/Users/matteo/projects/zolt/src/zkvm/proof_converter.zig`
-- ProductVirtual prover: `/Users/matteo/projects/zolt/src/zkvm/spartan/product_remainder.zig`
-- Blake2b transcript: `/Users/matteo/projects/zolt/src/transcripts/blake2b.zig`
-- Jolt outer.rs (cache_openings): `/Users/matteo/projects/jolt/jolt-core/src/zkvm/spartan/outer.rs`
+## Technical Summary
+
+### Key Values That Match
+- uni_skip_claim@SpartanOuter: 15578270688667249954692364540555337347090181127244999411735720905215105446756
+- LeftInstructionInput: 6149008884082944649395010520634152975755517950284410925647529691383783473665
+- RightInstructionInput: 5305691460212091458894976248163812456721981669912385268553172458466588619558
+- Product: 18665406647812718617781198690494953139719373408826706814854637365498608866768
+- (all 36 R1CS claims match)
+
+### Values That Differ
+- Transcript state before tau_high sampling
+- tau_high value itself
+- expected_output_claim (computed from tau_high)
 
 ## Session History
-- Session 21: Fixed evalFromHint for claim update, output_claim now matches, identified tau_high divergence
+- Session 21: Fixed evalFromHint, identified tau_high divergence, verified all claim values match
 - Session 20: Identified Stage 1 tau mismatch root cause
-- Session 19: Fixed Instance 4 endianness bug, all component values match
+- Session 19: Fixed Instance 4 endianness bug

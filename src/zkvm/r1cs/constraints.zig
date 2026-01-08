@@ -81,8 +81,14 @@ pub const R1CSInputIndex = enum(u8) {
     FlagIsRdNotZero = 36, // 1 if rd register index != 0
     FlagBranch = 37, // 1 if instruction opcode == 0x63 (branch)
     FlagIsNoop = 38, // 1 if this is a noop instruction
+    // InstructionFlags for Stage 3 InstructionInput sumcheck
+    // These determine which operand values are used for left/right instruction inputs
+    FlagLeftOperandIsRs1 = 39, // 1 if left instruction input is rs1 value
+    FlagLeftOperandIsPC = 40, // 1 if left instruction input is PC (JAL, AUIPC)
+    FlagRightOperandIsRs2 = 41, // 1 if right instruction input is rs2 value (R-type)
+    FlagRightOperandIsImm = 42, // 1 if right instruction input is immediate (I-type, etc.)
 
-    pub const NUM_INPUTS = 39;
+    pub const NUM_INPUTS = 43;
 
     pub fn toIndex(self: R1CSInputIndex) usize {
         return @intFromEnum(self);
@@ -1057,17 +1063,61 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             inputs.values[R1CSInputIndex.FlagIsRdNotZero.toIndex()] = is_rd_not_zero;
             inputs.values[R1CSInputIndex.FlagBranch.toIndex()] = branch_flag_f;
 
-            // IsNoop: check if this is a noop instruction
-            // Noop typically has opcode 0x13 (ADDI) with rd=x0, rs1=x0, imm=0
-            // We can approximate by checking if PC didn't advance and no side effects
-            const is_noop = blk: {
-                // Check if this is an ADDI instruction to x0
-                if (instr_opcode == 0x13 and rd == 0) {
-                    break :blk F.one();
-                }
-                break :blk F.zero();
+            // IsNoop: In Jolt, IsNoop is only true for the synthetic Cycle::NoOp padding cycles
+            // Real instructions (even ADDI x0, x0, 0) have IsNoop = false
+            // We only mark this as noop for padding cycles (which are handled separately)
+            // Real trace cycles always have IsNoop = false
+            inputs.values[R1CSInputIndex.FlagIsNoop.toIndex()] = F.zero();
+
+            // =================================================================
+            // Instruction operand flags for Stage 3 InstructionInput sumcheck
+            // These determine which values are used as left/right instruction inputs
+            // =================================================================
+            //
+            // Based on RISC-V instruction formats:
+            // - R-type (0x33): left=rs1, right=rs2
+            // - I-type (0x13 ALU, 0x03 Load, 0x67 JALR): left=rs1, right=imm
+            // - S-type (0x23): left=rs1, right=imm (for address calculation)
+            // - B-type (0x63): left=rs1, right=rs2 (for comparison)
+            // - U-type (0x37 LUI): rd = imm, no operand flags set
+            // - U-type (0x17 AUIPC): left=PC, right=imm
+            // - J-type (0x6F JAL): left=PC, right=imm
+            //
+            // Note: For most instructions, exactly one of left_is_rs1/left_is_pc is 1
+            // and exactly one of right_is_rs2/right_is_imm is 1
+            const left_is_rs1: F = switch (instr_opcode) {
+                0x33 => F.one(), // R-type: left = rs1
+                0x13, 0x03, 0x67 => F.one(), // I-type: left = rs1
+                0x23 => F.one(), // S-type: left = rs1 (for address)
+                0x63 => F.one(), // B-type: left = rs1
+                0x37 => F.zero(), // LUI: no operand
+                0x17 => F.zero(), // AUIPC: left = PC
+                0x6F => F.zero(), // JAL: left = PC
+                else => F.one(), // Default: assume rs1
             };
-            inputs.values[R1CSInputIndex.FlagIsNoop.toIndex()] = is_noop;
+            const left_is_pc: F = switch (instr_opcode) {
+                0x17 => F.one(), // AUIPC: left = PC
+                0x6F => F.one(), // JAL: left = PC
+                else => F.zero(),
+            };
+            const right_is_rs2: F = switch (instr_opcode) {
+                0x33 => F.one(), // R-type: right = rs2
+                0x63 => F.one(), // B-type: right = rs2 (for comparison)
+                else => F.zero(),
+            };
+            const right_is_imm: F = switch (instr_opcode) {
+                0x13, 0x03, 0x67 => F.one(), // I-type: right = imm
+                0x23 => F.one(), // S-type: right = imm (for address offset)
+                0x37 => F.one(), // LUI: right = imm (upper bits)
+                0x17 => F.one(), // AUIPC: right = imm
+                0x6F => F.one(), // JAL: right = imm (offset)
+                else => F.zero(),
+            };
+
+            inputs.values[R1CSInputIndex.FlagLeftOperandIsRs1.toIndex()] = left_is_rs1;
+            inputs.values[R1CSInputIndex.FlagLeftOperandIsPC.toIndex()] = left_is_pc;
+            inputs.values[R1CSInputIndex.FlagRightOperandIsRs2.toIndex()] = right_is_rs2;
+            inputs.values[R1CSInputIndex.FlagRightOperandIsImm.toIndex()] = right_is_imm;
 
             return inputs;
         }

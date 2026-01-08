@@ -581,8 +581,8 @@ test "jolt r1cs witness generation" {
     // First element should be 1
     try std.testing.expect(witness[0].eql(F.one()));
 
-    // Witness size should be 1 + 39 (NUM_INPUTS)
-    try std.testing.expectEqual(@as(usize, 40), witness.len);
+    // Witness size should be 1 + 43 (NUM_INPUTS after adding instruction flags)
+    try std.testing.expectEqual(@as(usize, 44), witness.len);
 }
 
 test "jolt r1cs Az Bz Cz computation" {

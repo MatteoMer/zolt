@@ -839,6 +839,7 @@ pub fn Stage3Prover(comptime F: type) type {
         };
 
         /// Build InstructionInput MLEs from trace
+        /// Uses explicit instruction flags computed in R1CSCycleInputs.fromTraceStep
         fn buildInstructionInputMLEs(self: *Self, cycle_witnesses: []const r1cs.R1CSCycleInputs(F), trace_len: usize) !InstructionInputMLEs {
             const left_is_rs1 = try self.allocator.alloc(F, trace_len);
             const rs1_value = try self.allocator.alloc(F, trace_len);
@@ -852,52 +853,18 @@ pub fn Stage3Prover(comptime F: type) type {
             for (0..trace_len) |i| {
                 if (i < cycle_witnesses.len) {
                     const values = &cycle_witnesses[i].values;
+                    // Use explicit instruction flags computed from opcode
+                    left_is_rs1[i] = values[R1CSInputIndex.FlagLeftOperandIsRs1.toIndex()];
+                    left_is_pc[i] = values[R1CSInputIndex.FlagLeftOperandIsPC.toIndex()];
+                    right_is_rs2[i] = values[R1CSInputIndex.FlagRightOperandIsRs2.toIndex()];
+                    right_is_imm[i] = values[R1CSInputIndex.FlagRightOperandIsImm.toIndex()];
+                    // Get operand values
                     rs1_value[i] = values[R1CSInputIndex.Rs1Value.toIndex()];
                     unexpanded_pc[i] = values[R1CSInputIndex.UnexpandedPC.toIndex()];
                     rs2_value[i] = values[R1CSInputIndex.Rs2Value.toIndex()];
                     imm[i] = values[R1CSInputIndex.Imm.toIndex()];
-
-                    // Determine instruction flags from instruction behavior
-                    // In Jolt, these are InstructionFlags::LeftOperandIsRs1Value etc.
-                    // For most instructions, left operand is rs1 and right is either rs2 or imm
-                    //
-                    // Heuristic: Look at the left/right instruction input values
-                    const left_input = values[R1CSInputIndex.LeftInstructionInput.toIndex()];
-                    const right_input = values[R1CSInputIndex.RightInstructionInput.toIndex()];
-                    const rs1 = values[R1CSInputIndex.Rs1Value.toIndex()];
-                    const rs2 = values[R1CSInputIndex.Rs2Value.toIndex()];
-                    const pc_val = values[R1CSInputIndex.UnexpandedPC.toIndex()];
-                    const imm_val = values[R1CSInputIndex.Imm.toIndex()];
-
-                    // If left_input == rs1, then left_is_rs1 = 1
-                    // If left_input == pc, then left_is_pc = 1
-                    // (They should be mutually exclusive)
-                    if (left_input.eql(rs1)) {
-                        left_is_rs1[i] = F.one();
-                        left_is_pc[i] = F.zero();
-                    } else if (left_input.eql(pc_val)) {
-                        left_is_rs1[i] = F.zero();
-                        left_is_pc[i] = F.one();
-                    } else {
-                        // Default: most instructions use rs1
-                        left_is_rs1[i] = F.one();
-                        left_is_pc[i] = F.zero();
-                    }
-
-                    // Similarly for right operand
-                    if (right_input.eql(rs2)) {
-                        right_is_rs2[i] = F.one();
-                        right_is_imm[i] = F.zero();
-                    } else if (right_input.eql(imm_val)) {
-                        right_is_rs2[i] = F.zero();
-                        right_is_imm[i] = F.one();
-                    } else {
-                        // Default: use immediate
-                        right_is_rs2[i] = F.zero();
-                        right_is_imm[i] = F.one();
-                    }
                 } else {
-                    // Padding
+                    // Padding - all flags and values are zero
                     left_is_rs1[i] = F.zero();
                     rs1_value[i] = F.zero();
                     left_is_pc[i] = F.zero();

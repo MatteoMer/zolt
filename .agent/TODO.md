@@ -1,8 +1,38 @@
 # Zolt-Jolt Compatibility - Session Progress
 
-## Current Status
+## Current Status - Stage 1 Verification FAILING
 
-### Completed
+### Latest Investigation (Session 20)
+
+**The Issue:**
+Stage 1 sumcheck fails verification:
+- output_claim = 5432751117362380103203654158354751845196758204094496608671051075867706632852
+- expected_output_claim = 2332121999397912168590328420637227578807705930017219958164421593908045537253
+
+**Key Findings:**
+
+1. **Transcript state matches** ✓
+   - Preamble values match (max_input_size, max_output_size, etc.)
+   - Commitment bytes match
+   - State after commitments: `[e9, 3a, 94, cd, b0, 5c, 64, 8d, ...]`
+
+2. **tau derivation uses correct format:**
+   - Blake2b `challengeScalar128Bits` produces `[0, 0, low, high]` limbs
+   - This matches Jolt's MontU128Challenge format
+   - BigInt = `low*2^128 + high*2^192` (stored in Montgomery form)
+   - Canonical = `BigInt * R^-1 mod p`
+
+3. **Round polynomials match** ✓
+   - All c0, c2, c3 coefficients match byte-for-byte
+   - Challenges derived from transcript match
+
+4. **R1CS input claims match** ✓
+   - LeftInstructionInput, RightInstructionInput, Product all match
+
+**Root Cause Hypothesis:**
+The eq(τ, r) factor computation differs. Although tau limbs are stored correctly, the split_eq polynomial may not be computing the same eq factor as Jolt's verifier.
+
+### Prior Completed
 - Stage 1 passes Jolt verification completely
 - All 712 internal tests pass
 - R1CS witness generation fixed

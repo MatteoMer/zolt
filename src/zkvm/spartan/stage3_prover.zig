@@ -119,19 +119,29 @@ pub fn Stage3Prover(comptime F: type) type {
 
             std.debug.print("[STAGE3] Starting with {} rounds, trace_len={}\n", .{ num_rounds, trace_len });
 
+            // DEBUG: Print transcript state BEFORE gamma derivation
+            std.debug.print("[STAGE3] Transcript state BEFORE gamma derivation = {any}\n", .{transcript.state[0..8]});
+
             // Phase 1: Derive parameters (BEFORE BatchedSumcheck::verify)
+            // NOTE: Stage 3 uses challenge_scalar (NOT challenge_scalar_optimized) which means
+            // we need challengeScalarFull (no 125-bit masking) to match Jolt's behavior.
+            //
             // ShiftSumcheckParams::new - derive 5 gamma powers
-            const shift_gamma_powers = try self.deriveGammaPowers(transcript, 5);
+            const shift_gamma_powers = try self.deriveGammaPowersFull(transcript, 5);
             defer self.allocator.free(shift_gamma_powers);
-            std.debug.print("[STAGE3] shift gamma[0..2] = {any}, {any}\n", .{ shift_gamma_powers[0].toBytesBE()[0..8], shift_gamma_powers[1].toBytesBE()[0..8] });
+            std.debug.print("[STAGE3] shift gamma[1] mont_limbs = [{x}, {x}, {x}, {x}]\n", .{ shift_gamma_powers[1].limbs[0], shift_gamma_powers[1].limbs[1], shift_gamma_powers[1].limbs[2], shift_gamma_powers[1].limbs[3] });
+            const g0_be = shift_gamma_powers[0].toBytesBE();
+            const g1_be = shift_gamma_powers[1].toBytesBE();
+            std.debug.print("[STAGE3] shift gamma[0] full bytes = {any}\n", .{g0_be});
+            std.debug.print("[STAGE3] shift gamma[1] full bytes = {any}\n", .{g1_be});
 
             // InstructionInputParams::new - derive 1 gamma
-            const instr_gamma = transcript.challengeScalar();
+            const instr_gamma = transcript.challengeScalarFull();
             const instr_gamma_sqr = instr_gamma.mul(instr_gamma);
             std.debug.print("[STAGE3] instr_gamma = {any}\n", .{instr_gamma.toBytesBE()[0..8]});
 
             // RegistersClaimReductionSumcheckParams::new - derive 1 gamma
-            const reg_gamma = transcript.challengeScalar();
+            const reg_gamma = transcript.challengeScalarFull();
             const reg_gamma_sqr = reg_gamma.mul(reg_gamma);
             std.debug.print("[STAGE3] reg_gamma = {any}\n", .{reg_gamma.toBytesBE()[0..8]});
 
@@ -383,10 +393,25 @@ pub fn Stage3Prover(comptime F: type) type {
             };
         }
 
-        /// Derive n gamma powers from transcript
+        /// Derive n gamma powers from transcript (uses 125-bit masked scalars)
         fn deriveGammaPowers(self: *Self, transcript: *Blake2bTranscript(F), n: usize) ![]F {
             const powers = try self.allocator.alloc(F, n);
             const gamma = transcript.challengeScalar();
+            powers[0] = F.one();
+            if (n > 1) {
+                powers[1] = gamma;
+                for (2..n) |i| {
+                    powers[i] = powers[i - 1].mul(gamma);
+                }
+            }
+            return powers;
+        }
+
+        /// Derive n gamma powers from transcript (uses full 128-bit scalars)
+        /// This matches Jolt's challenge_scalar_powers which calls challenge_scalar (not optimized)
+        fn deriveGammaPowersFull(self: *Self, transcript: *Blake2bTranscript(F), n: usize) ![]F {
+            const powers = try self.allocator.alloc(F, n);
+            const gamma = transcript.challengeScalarFull();
             powers[0] = F.one();
             if (n > 1) {
                 powers[1] = gamma;

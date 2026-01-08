@@ -299,7 +299,9 @@ pub fn Blake2bTranscript(comptime F: type) type {
             // Note: For 128-bit values < 2^128, no modular reduction is needed
             // since 2^128 < BN254 scalar field order (~2^254)
             const standard = F{ .limbs = .{ low, high, 0, 0 } };
+            std.debug.print("[ZOLT TRANSCRIPT]   standard_limbs=[0x{x}, 0x{x}, 0, 0]\n", .{ low, high });
             const result = standard.toMontgomery();
+            std.debug.print("[ZOLT TRANSCRIPT]   mont_result=[0x{x}, 0x{x}, 0x{x}, 0x{x}]\n", .{ result.limbs[0], result.limbs[1], result.limbs[2], result.limbs[3] });
 
             std.debug.print("[ZOLT TRANSCRIPT]   canonical_value=0x{x}{x:0>16}\n", .{ high, low });
 

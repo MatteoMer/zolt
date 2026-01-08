@@ -213,6 +213,14 @@ pub fn MontgomeryField(
         pub fn toBytesBE(self: Self) [32]u8 {
             // First convert from Montgomery form
             const standard = self.fromMontgomery();
+            // DEBUG
+            if (standard.limbs[0] == 0 and standard.limbs[1] == 0 and standard.limbs[2] == 0 and standard.limbs[3] == 0) {
+                if (self.limbs[0] != 0 or self.limbs[1] != 0 or self.limbs[2] != 0 or self.limbs[3] != 0) {
+                    std.debug.print("[ZOLT DEBUG] toBytesBE: non-zero input produced zero output!\n", .{});
+                    std.debug.print("[ZOLT DEBUG]   input_limbs = [{x}, {x}, {x}, {x}]\n", .{ self.limbs[0], self.limbs[1], self.limbs[2], self.limbs[3] });
+                    std.debug.print("[ZOLT DEBUG]   output_limbs = [{x}, {x}, {x}, {x}]\n", .{ standard.limbs[0], standard.limbs[1], standard.limbs[2], standard.limbs[3] });
+                }
+            }
 
             // Convert limbs to bytes (little-endian)
             var le_bytes: [32]u8 = undefined;

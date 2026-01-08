@@ -1,75 +1,73 @@
-# Zolt-Jolt Compatibility - Progress Update
+# Zolt-Jolt Compatibility - Iteration 11 Summary
 
-## Iteration 10 Summary
+## Current Status
 
-### Fixed: OutputSumcheck val_final_claim
+### Tests
+- All Zolt internal tests pass with exit code 0
+- Zolt's 6-stage internal verifier PASSES for all stages:
+  - Stage 1 (Spartan): PASSED
+  - Stage 2 (RAM RAF): PASSED
+  - Stage 3 (Lasso): PASSED
+  - Stage 4 (Value): PASSED
+  - Stage 5 (Register): PASSED
+  - Stage 6 (Booleanity): PASSED
 
-**Problem**: The `val_final_claim` inserted into opening_claims was being computed incorrectly. The code was computing a derived value (effectively `val_io_eval`) instead of the actual `Val_final(r')` MLE evaluation from the prover.
+### Proof Serialization
+- Jolt-format proof serialization works ✓
+- Deserialization test in Jolt PASSES (`test_deserialize_zolt_proof`)
+- Proof bytes are correctly formatted for arkworks
 
-**Solution**:
-1. Added `output_val_final_claim` field to Stage2Result struct
-2. Set it from `output_prover.getFinalClaims().val_final` - the actual MLE of val_final after binding all sumcheck challenges
-3. Use this value when inserting the RamValFinal opening claim
+### Cross-Verification Issue
+When attempting to verify Zolt proof with Jolt's verifier:
+- Stage 1 sumcheck fails with output_claim mismatch
+- **Root cause**: Different programs being proven
+  - Zolt uses `fibonacci.elf` (C code, fib(10)=55)
+  - Jolt uses `fibonacci-guest` (Rust, fib(50), 128-bit arithmetic, SDK runtime)
 
-**Commits**:
-- `111a067` - feat: use actual Val_final(r') from OutputSumcheck prover for opening claim
-- `1dbe9d7` - docs: update TODO.md with OutputSumcheck understanding
-- `38b30fe` - chore: remove verbose debug output from OutputSumcheck
+### Key Findings
 
-### Key Understanding
+1. **Program Compatibility**: For cross-verification to work, Zolt must prove **the exact same ELF** that Jolt uses.
 
-The OutputSumcheck is a **zero-check** that proves:
-```
-Σ_k eq(r_address, k) * io_mask(k) * (Val_final(k) - Val_io(k)) = 0
-```
+2. **Jolt Guest ELF Location**:
+   ```
+   /tmp/jolt-guest-targets/fibonacci-guest-fib/riscv64imac-unknown-none-elf/release/fibonacci-guest
+   ```
+   - Format: ELF 64-bit LSB, RISC-V, RVC, soft-float ABI, statically linked
 
-Key insight: The MLE evaluation at a random point r' is **non-zero** even though the sum over integer points is zero. This is expected behavior:
-- At integer k: `io_mask[k] * (val_final[k] - val_io[k]) = 0` for all k (verified at initialization)
-- At random r': the product of MLEs can be non-zero due to interpolation
+3. **Execution Differences**:
+   - Jolt guest uses `SYSTEM` (ecall) instructions for I/O
+   - Jolt guest expects specific memory layout (input/output regions)
+   - Jolt SDK uses postcard serialization for inputs
 
-The verifier's expected_output_claim formula:
-```
-eq(r_address, r') * io_mask_eval * (val_final_claim - val_io_eval)
-```
+## Next Steps
 
-Where:
-- `val_final_claim` = from prover (MLE of Val_final at r') - **NOW CORRECTLY SET**
-- `val_io_eval` = computed from ProgramIOPolynomial
-- `io_mask_eval` = computed from RangeMaskPolynomial
+### Option A: Run Jolt Guest in Zolt
+1. Add support for Jolt's I/O convention (input bytes at 0x7fff8000)
+2. Handle SYSTEM calls correctly
+3. Match memory layout exactly
 
-### Test Results
+### Option B: Create Compatible Test Program
+1. Create a minimal Jolt guest that:
+   - Uses same build toolchain
+   - Has same SDK dependencies
+   - Uses same memory layout
+2. Have Jolt export the ELF, preprocessing, and proof
+3. Use Zolt to prove the same ELF and compare
 
-- Zolt internal verifier: All 6 stages PASSED ✓
-- Tests compile and run without errors
-- Need to test against actual Jolt verifier
+### Option C: Debug Transcript Divergence
+1. Restore Jolt debug output (git stash pop)
+2. Compare transcript state at each step
+3. Find exact point of divergence
 
-### Next Steps
+## Technical Details
 
-1. ✅ Fix val_final_claim computation
-2. ✅ Clean up debug output
-3. ✅ Verify Zolt internal verification passes
-4. Test against Jolt verifier (requires Jolt test setup)
-5. If still failing, verify:
-   - ProgramIOPolynomial evaluation matches
-   - RangeMaskPolynomial evaluation matches
-   - Endianness of opening points
+### Proof Sizes
+- Zolt internal format: ~10KB for 256 cycles
+- Jolt format (Dory): ~32KB for 256 cycles
+- Jolt native proof: ~67KB for 50 iterations
 
----
+### Key Values from Last Run
+- Zolt output_claim: 13341694253320792207898818675544641744423324780186566512606436749524497154341
+- Jolt expected: 13993936375866540635487266661744168976503279552720049959007000136664747058730
 
-## Previous Investigation Summary
-
-### What MATCHES between Zolt and Jolt:
-1. Stage 1 sumcheck proof - all rounds pass ✓
-2. Stage 2 initial batched_claim ✓
-3. Stage 2 batching_coeffs (all 5) ✓
-4. Stage 2 input_claims for all 5 instances ✓
-5. Stage 2 tau_high ✓
-6. Stage 2 r0 ✓
-7. ALL 26 Stage 2 round coefficients (c0, c2, c3) ✓
-8. ALL 26 Stage 2 challenges ✓
-9. fused_left and fused_right ✓
-
-### The Issue Was
-- output_claim vs expected_output_claim mismatch
-- Cause: incorrect val_final_claim computation
-- Fix: use prover's actual MLE evaluation
+The mismatch is fundamental - these are different programs producing different traces.

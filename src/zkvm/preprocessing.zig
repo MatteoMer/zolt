@@ -1056,70 +1056,71 @@ fn serializeFp(fp: *const @import("../field/mod.zig").BN254BaseField, writer: an
 }
 
 fn serializeG1(point: G1Point, writer: anytype) !void {
-    // G1 is serialized as (x, y) with flags in y's last byte
+    // G1 compressed serialization: 32 bytes (x coordinate + flags)
+    // arkworks compressed format: x with flags in MSB of last limb
     if (point.infinity) {
-        // Point at infinity: write 0s with infinity flag
-        for (0..8) |_| {
+        // Point at infinity: write 0s with infinity flag (bit 62)
+        for (0..3) |_| {
             try writer.writeInt(u64, 0, .little);
         }
+        // Set infinity flag (bit 62 = 0x4000_0000_0000_0000)
+        try writer.writeInt(u64, 0x4000000000000000, .little);
         return;
     }
 
     // Write x coordinate (32 bytes LE, standard form)
     const x_std = point.x.fromMontgomery();
-    for (0..4) |i| {
+    for (0..3) |i| {
         try writer.writeInt(u64, x_std.limbs[i], .little);
     }
 
-    // Write y coordinate with flags
-    const y_std = point.y.fromMontgomery();
-    for (0..3) |i| {
-        try writer.writeInt(u64, y_std.limbs[i], .little);
-    }
-    // Set flag bits in top 2 bits of last limb
-    // For uncompressed, we just set bit 6 if infinity (but we handled that above)
-    // Otherwise no flags needed for uncompressed
+    // Set flag bits in top byte of last limb of x:
+    // - bit 63: y sign (positive_y_over_neg_y flag)
+    // - bit 62: infinity (already handled above)
     const neg_y = point.y.neg();
     const y_is_positive = lexicographicallyLess(point.y, neg_y);
-    var last_limb = y_std.limbs[3];
+    var last_limb = x_std.limbs[3];
     if (!y_is_positive) {
-        last_limb |= 0x8000000000000000; // Set bit 63
+        last_limb |= 0x8000000000000000; // Set bit 63 if y is "negative"
     }
     try writer.writeInt(u64, last_limb, .little);
 }
 
 fn serializeG2(point: G2Point, writer: anytype) !void {
-    // G2 is serialized as (x, y) where x and y are Fp2
+    // G2 compressed serialization: 64 bytes (x as Fp2 + flags)
+    // arkworks compressed format: x.c0, x.c1 with flags in MSB of x.c1's last limb
     if (point.infinity) {
-        // Point at infinity: write 0s with infinity flag
-        for (0..16) |_| {
+        // Point at infinity: write 0s with infinity flag (bit 62 of x.c1)
+        for (0..7) |_| {
             try writer.writeInt(u64, 0, .little);
         }
+        // Set infinity flag (bit 62 = 0x4000_0000_0000_0000)
+        try writer.writeInt(u64, 0x4000000000000000, .little);
         return;
     }
 
-    // Write x.c0, x.c1, y.c0, y.c1
+    // Write x.c0 (32 bytes)
     const x_c0_std = point.x.c0.fromMontgomery();
     for (0..4) |i| {
         try writer.writeInt(u64, x_c0_std.limbs[i], .little);
     }
 
+    // Write x.c1 (32 bytes) with flags in MSB
     const x_c1_std = point.x.c1.fromMontgomery();
-    for (0..4) |i| {
+    for (0..3) |i| {
         try writer.writeInt(u64, x_c1_std.limbs[i], .little);
     }
 
-    const y_c0_std = point.y.c0.fromMontgomery();
-    for (0..4) |i| {
-        try writer.writeInt(u64, y_c0_std.limbs[i], .little);
+    // Set flag bits in top byte of last limb of x.c1:
+    // - bit 63: y sign (for Fp2, compare lexicographically)
+    // - bit 62: infinity (already handled above)
+    const neg_y = point.y.neg();
+    const y_is_positive = lexicographicallyLessFp2(point.y, neg_y);
+    var last_limb = x_c1_std.limbs[3];
+    if (!y_is_positive) {
+        last_limb |= 0x8000000000000000; // Set bit 63 if y is "negative"
     }
-
-    const y_c1_std = point.y.c1.fromMontgomery();
-    for (0..3) |i| {
-        try writer.writeInt(u64, y_c1_std.limbs[i], .little);
-    }
-    // Flags in last limb
-    try writer.writeInt(u64, y_c1_std.limbs[3], .little);
+    try writer.writeInt(u64, last_limb, .little);
 }
 
 fn lexicographicallyLess(a: @import("../field/mod.zig").BN254BaseField, b: @import("../field/mod.zig").BN254BaseField) bool {
@@ -1130,6 +1131,33 @@ fn lexicographicallyLess(a: @import("../field/mod.zig").BN254BaseField, b: @impo
         i -= 1;
         if (a_std.limbs[i] < b_std.limbs[i]) return true;
         if (a_std.limbs[i] > b_std.limbs[i]) return false;
+    }
+    return false; // Equal
+}
+
+fn lexicographicallyLessFp2(a: pairing.Fp2, b: pairing.Fp2) bool {
+    // For Fp2 = (c0, c1), compare c1 first (more significant), then c0
+    // This matches arkworks' lexicographic ordering for Fp2
+    const a_c1_std = a.c1.fromMontgomery();
+    const b_c1_std = b.c1.fromMontgomery();
+
+    // Compare c1 (more significant)
+    var i: usize = 4;
+    while (i > 0) {
+        i -= 1;
+        if (a_c1_std.limbs[i] < b_c1_std.limbs[i]) return true;
+        if (a_c1_std.limbs[i] > b_c1_std.limbs[i]) return false;
+    }
+
+    // c1 is equal, compare c0
+    const a_c0_std = a.c0.fromMontgomery();
+    const b_c0_std = b.c0.fromMontgomery();
+
+    i = 4;
+    while (i > 0) {
+        i -= 1;
+        if (a_c0_std.limbs[i] < b_c0_std.limbs[i]) return true;
+        if (a_c0_std.limbs[i] > b_c0_std.limbs[i]) return false;
     }
     return false; // Equal
 }

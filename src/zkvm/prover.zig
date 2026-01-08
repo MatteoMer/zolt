@@ -480,13 +480,13 @@ pub fn MultiStageProver(comptime F: type) type {
             }
 
             // Initialize RAF evaluation parameters
+            // Note: The prover takes ownership of params - deinit called via raf_prover.deinit()
             var raf_params = try ram.RafEvaluationParams(F).init(
                 self.allocator,
                 self.log_k,
                 self.start_address,
                 r_cycle,
             );
-            defer raf_params.deinit();
 
             // Compute initial claim first, then initialize RAF prover
             const initial_claim = blk: {

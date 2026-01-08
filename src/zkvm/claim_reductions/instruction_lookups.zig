@@ -78,6 +78,8 @@ pub fn InstructionLookupsProver(comptime F: type) type {
         challenges: std.ArrayListUnmanaged(F),
         /// Allocator
         allocator: Allocator,
+        /// Original allocation size (for proper deallocation after slicing)
+        original_size: usize,
 
         pub fn init(
             allocator: Allocator,
@@ -123,20 +125,24 @@ pub fn InstructionLookupsProver(comptime F: type) type {
                 .right_operands = right,
                 .challenges = challenges_list,
                 .allocator = allocator,
+                .original_size = T,
             };
         }
 
         pub fn deinit(self: *Self) void {
-            self.allocator.free(self.eq_evals);
-            self.allocator.free(self.lookup_outputs);
-            self.allocator.free(self.left_operands);
-            self.allocator.free(self.right_operands);
+            // Restore original slice lengths for proper deallocation
+            // (bindChallenge may have shrunk them)
+            self.allocator.free(self.eq_evals.ptr[0..self.original_size]);
+            self.allocator.free(self.lookup_outputs.ptr[0..self.original_size]);
+            self.allocator.free(self.left_operands.ptr[0..self.original_size]);
+            self.allocator.free(self.right_operands.ptr[0..self.original_size]);
             self.challenges.deinit(self.allocator);
             self.params.deinit();
         }
 
         /// Compute round polynomial [s(0), s(1), s(2), s(3)] for batched cubic sumcheck
         /// Note: This is actually degree-2, but we pad to degree-3 for batching
+        /// Uses LowToHigh binding order: pairs (2j, 2j+1) to bind LSB first
         pub fn computeRoundPolynomialCubic(self: *Self) [4]F {
             const gamma = self.params.gamma;
             const gamma_sqr = self.params.gamma_sqr;
@@ -147,10 +153,11 @@ pub fn InstructionLookupsProver(comptime F: type) type {
             const current_len = self.eq_evals.len;
             const half = current_len / 2;
 
-            // Sum over pairs (2j, 2j+1)
+            // Sum over pairs (2j, 2j+1) - LowToHigh binding order
             for (0..half) |idx| {
-                const lo_idx = idx;
-                const hi_idx = idx + half;
+                // LowToHigh: use consecutive pairs (2*idx, 2*idx+1)
+                const lo_idx = 2 * idx;
+                const hi_idx = 2 * idx + 1;
 
                 // Get eq evaluations
                 const eq_lo = self.eq_evals[lo_idx];
@@ -197,29 +204,34 @@ pub fn InstructionLookupsProver(comptime F: type) type {
         }
 
         /// Bind a challenge after round polynomial computation
+        /// Uses LowToHigh binding order: fold pairs (2i, 2i+1) into position i
         pub fn bindChallenge(self: *Self, challenge: F) !void {
             try self.challenges.append(self.allocator, challenge);
 
-            // Fold all polynomials using the challenge
+            // Fold all polynomials using the challenge - LowToHigh order
             const current_len = self.eq_evals.len;
             const half = current_len / 2;
 
             for (0..half) |i| {
-                // Linear interpolation: new[i] = (1-r)*lo + r*hi
-                const eq_lo = self.eq_evals[i];
-                const eq_hi = self.eq_evals[i + half];
+                // LowToHigh: fold pairs (2i, 2i+1) into position i
+                const lo_idx = 2 * i;
+                const hi_idx = 2 * i + 1;
+
+                // Linear interpolation: new[i] = (1-r)*lo + r*hi = lo + r*(hi - lo)
+                const eq_lo = self.eq_evals[lo_idx];
+                const eq_hi = self.eq_evals[hi_idx];
                 self.eq_evals[i] = eq_lo.add(challenge.mul(eq_hi.sub(eq_lo)));
 
-                const lo_lo = self.lookup_outputs[i];
-                const lo_hi = self.lookup_outputs[i + half];
+                const lo_lo = self.lookup_outputs[lo_idx];
+                const lo_hi = self.lookup_outputs[hi_idx];
                 self.lookup_outputs[i] = lo_lo.add(challenge.mul(lo_hi.sub(lo_lo)));
 
-                const left_lo = self.left_operands[i];
-                const left_hi = self.left_operands[i + half];
+                const left_lo = self.left_operands[lo_idx];
+                const left_hi = self.left_operands[hi_idx];
                 self.left_operands[i] = left_lo.add(challenge.mul(left_hi.sub(left_lo)));
 
-                const right_lo = self.right_operands[i];
-                const right_hi = self.right_operands[i + half];
+                const right_lo = self.right_operands[lo_idx];
+                const right_hi = self.right_operands[hi_idx];
                 self.right_operands[i] = right_lo.add(challenge.mul(right_hi.sub(right_lo)));
             }
 

@@ -1838,8 +1838,14 @@ pub fn ProofConverter(comptime F: type) type {
                         } else if (i == 3 and output_prover != null) {
                             // OutputSumcheck - use real prover
                             const output_compressed = output_prover.?.computeRoundPolynomial();
-                            if (round_idx == start_round) {
-                                std.debug.print("[ZOLT] OutputSumcheck: round {}, compressed[0]={any}\n", .{ round_idx, output_compressed[0].toBytesBE() });
+                            {
+                                const is_c0_zero = output_compressed[0].toBytesBE()[0] == 0 and output_compressed[0].toBytesBE()[31] == 0;
+                                const is_claim_zero = output_prover.?.current_claim.toBytesBE()[0] == 0 and output_prover.?.current_claim.toBytesBE()[31] == 0;
+                                std.debug.print("[ZOLT] OUT r{}: c0_zero={}, claim_zero={}\n", .{
+                                    round_idx,
+                                    is_c0_zero,
+                                    is_claim_zero,
+                                });
                             }
 
                             // Convert compressed [c0, c2, c3] to evals [s0, s1, s2, s3]

@@ -1,71 +1,83 @@
-# Zolt-Jolt Compatibility - Session 25 Status
+# Zolt-Jolt Compatibility - Current Status
 
 ## Summary
 
-**Status**: Stage 1 passes, Stage 2 fails due to factor claim mismatches.
+**Stage 1**: PASSES ✓
+**Stage 2**: FAILS - factor claims mismatch
 
-## Current Issue: Factor Claims Mismatch
+## Progress Made
 
-After fixing padding cycle handling for NextIsNoop, 5 of 8 factors now match:
+1. **All 712 Zolt tests pass** ✓
+2. **Stage 1 verification passes in Jolt** ✓
+3. **Fixed padding cycle handling for NextIsNoop** ✓
+4. **5 of 8 factor claims now match** ✓
 
-| Factor | Description | Status | Notes |
-|--------|-------------|--------|-------|
+## Factor Claims Status
+
+| Factor | Name | Status | Notes |
+|--------|------|--------|-------|
 | 0 | LeftInstructionInput | ✓ Match | MLE evaluation correct |
 | 1 | RightInstructionInput | ✓ Match | MLE evaluation correct |
-| 2 | IsRdNotZero | ✗ Small diff (~2^22) | Instruction-type-specific |
-| 3 | WriteLookupOutputToRD | ✓ Match | Fixed |
-| 4 | Jump | ✓ Match | Circuit flag correct |
-| 5 | LookupOutput | ✗ Large diff | Instruction-type-specific |
-| 6 | Branch | ✗ Large diff | Instruction-type-specific |
-| 7 | NextIsNoop | ✓ Match | Fixed with padding handling |
+| 2 | IsRdNotZero | ✗ diff=4194304 | Need investigation |
+| 3 | WriteLookupOutputToRD | ✓ Match | |
+| 4 | Jump | ✓ Match | |
+| 5 | LookupOutput | ✗ Large diff | Need investigation |
+| 6 | Branch | ✗ Large diff | Need investigation |
+| 7 | NextIsNoop | ✓ Match | Fixed with padding |
 
-## Root Cause
+## Technical Details
 
-The remaining mismatches (factors 2, 5, 6) are caused by Zolt not having instruction-type-specific information that Jolt has:
+### What Works
+- Transcript handling
+- Field arithmetic
+- Sumcheck round polynomial generation
+- Opening claim serialization
+- Eq polynomial evaluation
+- Factor MLE evaluation (5/8 correct)
 
-1. **Instruction type enum** - Jolt knows if a cycle is ADD, ADDI, BEQ, etc.
-2. **Virtual instruction tracking** - Jolt expands some instructions into virtual sequences
-3. **Per-instruction LookupOutput** - Each instruction type computes to_lookup_output() differently
+### What Doesn't Work
+The remaining 3 factor mismatches suggest:
+1. Some cycles have incorrect `IsRdNotZero` values
+2. Some cycles have incorrect `LookupOutput` values
+3. Some cycles have incorrect `Branch` flag values
 
-## Completed ✓
-
-1. All 712 Zolt internal tests pass
-2. Stage 1 verification PASSES in Jolt
-3. Fixed padding cycle handling for NextIsNoop (factor 7)
-4. Factors 0, 1, 3, 4, 7 now match
-
-## Required Fix
-
-To fix the remaining factor claims, Zolt needs:
-
-### Option 1: Enhance Trace Format
-Add instruction type information to the trace:
-- Instruction type enum (ADD, ADDI, BEQ, etc.)
-- IsVirtual flag
-- Pre-computed LookupOutput value
-
-### Option 2: Match Jolt's Computation
-For each instruction type, implement Jolt's exact:
-- `to_lookup_output()` logic
-- `instruction_flags()` logic
-- `circuit_flags()` logic
-
-## Files to Modify
-
-- `src/zkvm/r1cs/constraints.zig` - R1CSCycleInputs.fromTraceStep
-- `src/zkvm/proof_converter.zig` - computeProductFactorEvaluations
-- `src/vm/interpreter.zig` - trace generation
+### Code Locations
+- Factor evaluation: `src/zkvm/proof_converter.zig:computeProductFactorEvaluations`
+- Witness generation: `src/zkvm/r1cs/constraints.zig:fromTraceStep`
+- LookupOutput computation: `src/zkvm/r1cs/constraints.zig:computeLookupOutput`
+- Flag computation: `src/zkvm/r1cs/constraints.zig:setFlagsFromInstruction`
 
 ## Next Steps
 
-1. [ ] Understand how Jolt determines instruction types from RISC-V bytes
-2. [ ] Implement instruction type detection in Zolt
-3. [ ] Implement per-instruction LookupOutput computation
-4. [ ] Update witness generation with correct flag values
-5. [ ] Verify Stage 2 passes
+1. **Add cycle-by-cycle debug output** for factor computation
+   - Print instruction opcode for each cycle
+   - Print computed values vs expected
+   - Identify specific cycles with mismatches
 
-## Recent Changes
+2. **Compare Zolt vs Jolt witness values**
+   - For a small trace (like Fibonacci)
+   - Identify where values diverge
 
-- Added padding cycle handling in `computeProductFactorEvaluations`
-- Fixed NextIsNoop factor by adding eq_eval contributions for padding cycles
-- Updated NOTES.md with detailed analysis
+3. **Fix identified mismatches**
+   - Update `computeLookupOutput` if needed
+   - Update `setFlagsFromInstruction` if needed
+
+## Files to Check
+
+- Jolt: `jolt-core/src/zkvm/r1cs/inputs.rs` - how Jolt computes witness values
+- Jolt: `jolt-core/src/zkvm/instruction/*.rs` - instruction-specific implementations
+- Zolt: `src/zkvm/r1cs/constraints.zig` - witness generation
+- Zolt: `src/zkvm/proof_converter.zig` - factor evaluation
+
+## Testing Commands
+
+```bash
+# Build Zolt
+zig build -Doptimize=ReleaseFast
+
+# Generate proof with debug
+./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format --export-preprocessing /tmp/zolt_preprocessing.bin -o /tmp/zolt_proof_dory.bin
+
+# Run Jolt verification
+cd /Users/matteo/projects/jolt/jolt-core && cargo test test_verify_zolt_proof_with_zolt_preprocessing --release -- --ignored --nocapture
+```

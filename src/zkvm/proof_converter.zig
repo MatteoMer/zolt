@@ -442,6 +442,7 @@ pub fn ProofConverter(comptime F: type) type {
 
             // Get batching coefficient - advances transcript state AND provides scaling factor
             const batching_coeff = transcript.challengeScalarFull();
+            std.debug.print("[ZOLT] STAGE1: batching_coeff = {any}\n", .{batching_coeff.toBytesBE()});
 
             // Generate remaining rounds
             // In Jolt, stage1_sumcheck_proof contains num_rounds polynomials
@@ -1402,6 +1403,9 @@ pub fn ProofConverter(comptime F: type) type {
             transcript.appendScalar(F.zero()); // RamValInit (we set to 0)
 
             // Instance 4: InstructionLookupsClaimReduction - 3 claims
+            std.debug.print("[ZOLT] cache_openings[14] (LookupOutput) full = {any}\n", .{stage2_result.instr_lookup_output_claim.toBytesBE()});
+            std.debug.print("[ZOLT] cache_openings[15] (LeftLookupOperand) full = {any}\n", .{stage2_result.instr_left_operand_claim.toBytesBE()});
+            std.debug.print("[ZOLT] cache_openings[16] (RightLookupOperand) full = {any}\n", .{stage2_result.instr_right_operand_claim.toBytesBE()});
             transcript.appendScalar(stage2_result.instr_lookup_output_claim); // LookupOutput
             transcript.appendScalar(stage2_result.instr_left_operand_claim); // LeftLookupOperand
             transcript.appendScalar(stage2_result.instr_right_operand_claim); // RightLookupOperand
@@ -1758,8 +1762,9 @@ pub fn ProofConverter(comptime F: type) type {
                 std.debug.print("[ZOLT] STAGE2_PRE: num_rounds[{d}] = {d}\n", .{ i, rounds_per_instance[i] });
                 std.debug.print("[ZOLT] STAGE2_PRE: degree[{d}] = 3\n", .{i}); // All instances use degree 3 max
             }
+            std.debug.print("[ZOLT] STAGE2: transcript state after input_claims = {any}\n", .{transcript.state[0..8]});
 
-            // Step 2: Sample batching coefficients
+            // Step 2: Sample batching coefficients (input claims already appended at line 1747)
             var batching_coeffs: [5]F = undefined;
             for (0..5) |i| {
                 batching_coeffs[i] = transcript.challengeScalarFull();

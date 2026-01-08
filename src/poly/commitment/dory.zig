@@ -1207,7 +1207,11 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             errdefer allocator.free(second_messages);
 
             // Step 6: Run reduce-and-fold rounds
-            var current_len = vec_len;
+            // Handle asymmetric case: g1_vec has 2^sigma elements, g2_vec has 2^nu elements
+            const col_len = @as(usize, 1) << @intCast(sigma); // g1_vec size
+            const row_len = @as(usize, 1) << @intCast(nu); // g2_vec size
+            var current_col_len = col_len;
+            var current_row_len = row_len;
             var round: usize = 0;
 
             // Working arrays that get folded
@@ -1228,27 +1232,33 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             @memcpy(s2_work, s2);
 
             while (round < num_rounds) : (round += 1) {
+                // Use the maximum of current dimensions for working length
+                const current_len = @max(current_col_len, current_row_len);
                 const n2 = current_len / 2;
 
+                // For g2_vec operations, use minimum of n2 and available g2 elements
+                const g2_size = @min(n2, current_row_len);
+
                 // Compute first reduce message
-                // D1L = multiPair(v1_l, g2_vec[0..n2])
-                // D1R = multiPair(v1_r, g2_vec[0..n2])
-                const d1_left = multiPairG1G2(v1_work[0..n2], params.g2_vec[0..n2]);
-                const d1_right = multiPairG1G2(v1_work[n2..current_len], params.g2_vec[0..n2]);
+                // D1L = multiPair(v1_l, g2_vec[0..g2_size])
+                // D1R = multiPair(v1_r, g2_vec[0..g2_size])
+                const d1_left = multiPairG1G2(v1_work[0..g2_size], params.g2_vec[0..g2_size]);
+                const d1_right = multiPairG1G2(v1_work[n2..@min(n2 + g2_size, current_len)], params.g2_vec[0..g2_size]);
 
                 // D2L = multiPair(g1_vec[0..n2], v2_l)
                 // D2R = multiPair(g1_vec[0..n2], v2_r)
-                const d2_left = multiPairG1G2(params.g1_vec[0..n2], v2_work[0..n2]);
-                const d2_right = multiPairG1G2(params.g1_vec[0..n2], v2_work[n2..current_len]);
+                const g1_size = @min(n2, current_col_len);
+                const d2_left = multiPairG1G2(params.g1_vec[0..g1_size], v2_work[0..g1_size]);
+                const d2_right = multiPairG1G2(params.g1_vec[0..g1_size], v2_work[n2..@min(n2 + g1_size, current_len)]);
 
-                // E1_beta = MSM(g1_vec[0..current_len], s2_work[0..current_len])
+                // E1_beta = MSM(g1_vec[0..current_col_len], s2_work[0..current_col_len])
                 const e1_beta = msm.MSM(F, Fp).compute(
-                    params.g1_vec[0..current_len],
-                    s2_work[0..current_len],
+                    params.g1_vec[0..current_col_len],
+                    s2_work[0..current_col_len],
                 );
 
-                // E2_beta = MSM(g2_vec[0..current_len], s1_work[0..current_len])
-                const e2_beta = msmG2(F, params.g2_vec[0..current_len], s1_work[0..current_len]);
+                // E2_beta = MSM(g2_vec[0..current_row_len], s1_work[0..current_row_len])
+                const e2_beta = msmG2(F, params.g2_vec[0..current_row_len], s1_work[0..current_row_len]);
 
                 first_messages[round] = FirstReduceMessage{
                     .d1_left = d1_left,
@@ -1265,10 +1275,12 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 const beta_inv = beta.inverse() orelse F.one();
 
                 // Apply first challenge: v1 += beta * g1_vec, v2 += beta_inv * g2_vec
-                for (0..current_len) |i| {
+                // Only apply for indices within the valid range of each vector
+                for (0..current_col_len) |i| {
                     const scaled_g1 = msm.MSM(F, Fp).scalarMul(params.g1_vec[i], beta).toAffine();
                     v1_work[i] = v1_work[i].add(scaled_g1);
-
+                }
+                for (0..current_row_len) |i| {
                     const scaled_g2 = params.g2_vec[i].scalarMul(beta_inv);
                     v2_work[i] = v2_work[i].add(scaled_g2);
                 }
@@ -1276,18 +1288,20 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 // Compute second reduce message
                 // C+ = multiPair(v1_l, v2_r)
                 // C- = multiPair(v1_r, v2_l)
-                const c_plus = multiPairG1G2(v1_work[0..n2], v2_work[n2..current_len]);
-                const c_minus = multiPairG1G2(v1_work[n2..current_len], v2_work[0..n2]);
+                const v1_half = @min(n2, current_col_len);
+                const v2_half = @min(n2, current_row_len);
+                const c_plus = multiPairG1G2(v1_work[0..v1_half], v2_work[n2..@min(n2 + v2_half, current_len)]);
+                const c_minus = multiPairG1G2(v1_work[n2..@min(n2 + v1_half, current_len)], v2_work[0..v2_half]);
 
                 // E1+ = MSM(v1_l, s2_r)
                 // E1- = MSM(v1_r, s2_l)
-                const e1_plus = msm.MSM(F, Fp).compute(v1_work[0..n2], s2_work[n2..current_len]);
-                const e1_minus = msm.MSM(F, Fp).compute(v1_work[n2..current_len], s2_work[0..n2]);
+                const e1_plus = msm.MSM(F, Fp).compute(v1_work[0..v1_half], s2_work[n2..@min(n2 + v1_half, current_len)]);
+                const e1_minus = msm.MSM(F, Fp).compute(v1_work[n2..@min(n2 + v1_half, current_len)], s2_work[0..v1_half]);
 
                 // E2+ = MSM(v2_r, s1_l)
                 // E2- = MSM(v2_l, s1_r)
-                const e2_plus = msmG2(F, v2_work[n2..current_len], s1_work[0..n2]);
-                const e2_minus = msmG2(F, v2_work[0..n2], s1_work[n2..current_len]);
+                const e2_plus = msmG2(F, v2_work[n2..@min(n2 + v2_half, current_len)], s1_work[0..v2_half]);
+                const e2_minus = msmG2(F, v2_work[0..v2_half], s1_work[n2..@min(n2 + v2_half, current_len)]);
 
                 second_messages[round] = SecondReduceMessage{
                     .c_plus = c_plus,
@@ -1304,28 +1318,30 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
 
                 // Apply second challenge: fold vectors
                 // v1 = alpha * v1_l + v1_r
-                for (0..n2) |i| {
+                for (0..v1_half) |i| {
                     const scaled_l = msm.MSM(F, Fp).scalarMul(v1_work[i], alpha).toAffine();
                     v1_work[i] = scaled_l.add(v1_work[i + n2]);
                 }
 
                 // v2 = alpha_inv * v2_l + v2_r
-                for (0..n2) |i| {
+                for (0..v2_half) |i| {
                     const scaled_l = v2_work[i].scalarMul(alpha_inv);
                     v2_work[i] = scaled_l.add(v2_work[i + n2]);
                 }
 
-                // s1 = alpha * s1_l + s1_r
-                for (0..n2) |i| {
+                // s1 = alpha * s1_l + s1_r (row dimension)
+                for (0..v2_half) |i| {
                     s1_work[i] = alpha.mul(s1_work[i]).add(s1_work[i + n2]);
                 }
 
-                // s2 = alpha_inv * s2_l + s2_r
-                for (0..n2) |i| {
+                // s2 = alpha_inv * s2_l + s2_r (col dimension)
+                for (0..v1_half) |i| {
                     s2_work[i] = alpha_inv.mul(s2_work[i]).add(s2_work[i + n2]);
                 }
 
-                current_len = n2;
+                // Update dimensions for next round
+                if (current_col_len > 1) current_col_len = current_col_len / 2;
+                if (current_row_len > 1) current_row_len = current_row_len / 2;
             }
 
             // Step 7: Compute final scalar product message

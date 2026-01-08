@@ -1,67 +1,67 @@
-# Zolt-Jolt Compatibility - Deep Debugging Session
+# Zolt-Jolt Compatibility - Progress Update
 
-## Current Status: Instance 3 (OutputSumcheck) Bug Investigation
+## Current Status: OutputSumcheck val_final_claim Fixed
 
-### CRITICAL BUG IDENTIFIED
+### Recent Changes (Iteration 10)
+1. Added `output_val_final_claim` to Stage2Result struct
+2. Use `output_prover.getFinalClaims().val_final` for the RamValFinal opening claim
+3. Verified initialization: `io_mask * (val_final - val_io) = 0` at all integer points ✓
 
-Instance 3 (OutputSumcheck/RamOutputCheck) is producing a non-zero final claim even though it should be zero:
+### Key Understanding
 
-- Input claim = 0 (correct, Jolt expects 0)
-- Expected final claim = 0 (Jolt)
-- Actual final claim = non-zero (Zolt)
+The OutputSumcheck protocol:
+1. **Prover** runs sumcheck on `eq(r_address, k) * io_mask(k) * (Val_final(k) - Val_io(k))`
+2. **Input claim** = 0 (zero-check)
+3. **Final claim** = MLE evaluation at random point r' (can be non-zero!)
+4. **Prover caches** `Val_final(r')` (the MLE of val_final at r')
 
-This causes the expected_output_claim mismatch because Instance 3's contribution (coeff * claim) becomes non-zero when it should be 0.
-
-### Understanding the Protocol
-
-OutputSumcheck proves a **zero-check**:
+The **Verifier** computes expected_output_claim as:
 ```
-Σ_k eq(r_address, k) * io_mask(k) * (Val_final(k) - Val_io(k)) = 0
-```
-
-- `input_claim = 0` always (this is a zero-check)
-- `final_claim = eq(r_address, r') * io_mask(r') * (Val_final(r') - Val_io(r'))`
-  - where r' = sumcheck challenges (normalized to BIG_ENDIAN)
-
-### Jolt's claim update mechanism
-
-The verifier uses `eval_from_hint`:
-```rust
-c1 = hint - 2*c0 - c2 - c3
-P(r) = c0 + c1*r + c2*r^2 + c3*r^3
+eq(r_address, r') * io_mask_eval * (val_final_claim - val_io_eval)
 ```
 
-where `hint = s(0) + s(1) = previous_claim`.
+Where:
+- `val_final_claim` = from prover (should be `Val_final(r')`)
+- `val_io_eval` = `ProgramIOPolynomial(r')` from public I/O
+- `io_mask_eval` = `RangeMaskPolynomial(r')` using LT formula
 
-### Potential Root Causes
+### Important Insight: Non-Zero Final Claim is EXPECTED
 
-1. **OutputSumcheckProver polynomial not identically zero**
-   - If io_mask ≠ 0 somewhere AND Val_final ≠ Val_io there, the polynomial is non-zero
-   - The `v = Val_final - Val_io` must be 0 in the entire IO region
+The MLE of `eq * io_mask * (val_final - val_io)` is **zero at integer points** but
+**non-zero at random evaluation points**. This is because:
+- At integer points: `io_mask[k] * (val_final[k] - val_io[k]) = 0` for all k
+- At random point r': the MLEs are interpolations, and the product can be non-zero
 
-2. **Claim update using wrong hint value**
-   - The prover's `updateClaim` should use the previous claim as hint
-   - Currently it uses Lagrange to recompute c2, c3 from evaluations, which SHOULD be equivalent
+Example:
+- `io[0]=1, v[0]=0` (IO region: mask=1, diff=0)
+- `io[1]=0, v[1]=5` (non-IO: mask=0, diff=5)
+- After binding to r: `io(r) = 1-r`, `v(r) = 5r`
+- Product: `(1-r) * 5r ≠ 0` for most r!
 
-3. **Endianness mismatch in challenge handling**
-   - Jolt normalizes opening points: LITTLE_ENDIAN → BIG_ENDIAN
-   - Zolt must do the same
+### Verification Formula Match
+
+For Zolt proof to verify in Jolt:
+1. Prover's sumcheck final claim = `eq(r_address, r') * io_mask(r') * (Val_final(r') - Val_io(r'))`
+2. Verifier's expected = `eq_eval * io_mask_eval * (val_final_claim - val_io_eval)`
+
+These must match. The key is:
+- `val_final_claim` must be `Val_final(r')` - NOW FIXED to use prover's actual value
+- `val_io_eval` from `ProgramIOPolynomial` must match prover's `Val_io(r')`
+
+### Files Modified
+- `src/zkvm/proof_converter.zig`: Added output_val_final_claim, use prover's value
+- `src/zkvm/ram/output_check.zig`: Added initialization debug check
+
+### Previous Issues (Now Understood)
+- Non-zero output_final_claim is EXPECTED (not a bug)
+- The mismatch was because we were computing val_final_claim incorrectly
+- Now using the actual prover's bound value
 
 ### Next Steps
-
-1. Add debug output to OutputSumcheckProver to see:
-   - Round-by-round s(0), s(1), s(2), s(3) values
-   - Whether they're all zero (as expected)
-   - If not, which index k has non-zero contribution
-
-2. Verify that Val_final[k] = Val_io[k] for all k in IO region
-
-3. Check if the io_mask is correctly computed
-
-### Files:
-- Zolt OutputSumcheck: src/zkvm/ram/output_check.zig
-- Zolt proof converter: src/zkvm/proof_converter.zig (Stage 2 batched sumcheck)
-- Jolt OutputSumcheck: jolt-core/src/zkvm/ram/output_check.rs
+1. ✅ Commit current changes
+2. Run full test suite to verify no regressions
+3. Test against actual Jolt verifier
+4. If still failing, check ProgramIOPolynomial evaluation matches
 
 ---
 
@@ -76,18 +76,3 @@ where `hint = s(0) + s(1) = previous_claim`.
 6. Stage 2 r0 ✓
 7. ALL 26 Stage 2 round coefficients (c0, c2, c3) ✓
 8. ALL 26 Stage 2 challenges ✓
-9. Final output_claim ✓
-10. All factor claims match ✓
-11. Instance 4 claims match ✓
-12. fused_left and fused_right ✓
-
-### The Problem:
-- output_claim: 6490144552088470893406121612867210580460735058165315075507596046977766530265
-- expected_output_claim: 15485190143933819853706813441242742544529637182177746571977160761342770740673
-
-### Expected contribution breakdown (from Jolt):
-- Instance 0 (ProductVirtual): contribution ≠ 0
-- Instance 1 (RAF): contribution = 0
-- Instance 2 (RWC): contribution = 0
-- Instance 3 (Output): contribution = 0 (expected)
-- Instance 4 (Instruction): contribution ≠ 0

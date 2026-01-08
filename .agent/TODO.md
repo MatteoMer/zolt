@@ -1,51 +1,55 @@
-# Zolt-Jolt Compatibility - Iteration 11 Final Status
+# Zolt-Jolt Compatibility - Iteration 11 Status
 
-## Major Milestone: Preprocessing Loads Successfully!
+## Summary
+
+**Major milestone achieved**: Preprocessing serialization now fully works!
 
 ### Completed ✓
-1. All Zolt internal tests pass (578+ tests)
-2. All 6 verification stages pass in Zolt's internal verifier:
-   - Stage 1 (Spartan): PASSED
-   - Stage 2 (RAM RAF): PASSED
-   - Stage 3 (Lasso): PASSED
-   - Stage 4 (Value): PASSED
-   - Stage 5 (Register): PASSED
-   - Stage 6 (Booleanity): PASSED
+1. All 578+ Zolt internal tests pass
+2. All 6 verification stages pass in Zolt's internal verifier
+3. Compressed G1/G2 serialization implemented (32 bytes / 64 bytes)
+4. **Preprocessing loads successfully in Jolt**
+5. Proof deserialization works in Jolt
+6. Transcript initial states match between Zolt and Jolt
+7. Early transcript operations (u64, GT appends) produce matching states
 
-3. **Preprocessing serialization fixed:**
-   - Changed G1 from 64-byte uncompressed to 32-byte compressed
-   - Changed G2 from 128-byte uncompressed to 64-byte compressed
-   - Added `lexicographicallyLessFp2` for y-sign comparison
-   - Jolt now successfully loads Zolt preprocessing!
+### Current Status: Stage 2 Sumcheck Mismatch
 
-4. Proof deserialization works in Jolt (`test_deserialize_zolt_proof` passes)
+When Jolt verifies Zolt's proof (using Zolt's preprocessing):
+- Transcripts match through early operations ✓
+- Many sumcheck rounds process correctly ✓
+- Stage 2 ultimately fails with output_claim != expected_output_claim
 
-### Current Issue: Stage 2 Sumcheck Mismatch
-When verifying Zolt proof with Jolt verifier (using Zolt preprocessing):
 ```
 output_claim:          8141111963480257581714252924501836673583058093716114064628226798780401994421
 expected_output_claim: 4537099298375307027146868881873428441182995211198837031121273528989598760718
 ```
 
-The proof was generated correctly by Zolt (internal verification passes), but Jolt's verifier computes different expected values.
+### Root Cause Analysis
 
-### Possible Causes
-1. **Transcript divergence**: Different challenge generation order
-2. **Polynomial evaluation differences**: Same challenges, different evals
-3. **R1CS constraint format**: Subtle differences in constraint layout
-4. **Sumcheck round ordering**: Different iteration order
+The proof is valid internally (Zolt verifies it). The issue is that when Jolt reconstructs `expected_output_claim` from polynomial openings, it gets a different value than what the proof contains.
 
-### Technical Changes This Iteration
-1. `serializeG1()`: 32-byte compressed format with y-sign in MSB
-2. `serializeG2()`: 64-byte compressed format with y-sign in x.c1 MSB
-3. Added `lexicographicallyLessFp2()` for Fp2 comparison
-4. Preprocessing size: 93648 → 93456 bytes (optimized)
+This could be due to:
+1. Opening accumulator caching differences
+2. Polynomial evaluation point ordering
+3. Virtual polynomial handling differences
+4. R1CS constraint layout differences
+
+### Technical Changes Made
+
+1. `serializeG1()`: 32-byte compressed format
+   - x coordinate (32 bytes) with y-sign in MSB
+
+2. `serializeG2()`: 64-byte compressed format
+   - x.c0 + x.c1 (64 bytes) with y-sign in x.c1 MSB
+
+3. `lexicographicallyLessFp2()`: For Fp2 comparison in G2 compression
 
 ### Files Modified
 - `src/zkvm/preprocessing.zig`
 
-### Next Steps for Full Compatibility
-1. Add transcript state logging to both Zolt and Jolt
-2. Compare challenge values at each sumcheck round
-3. Identify exact point of divergence
-4. Fix any ordering or encoding differences
+### Next Steps
+1. Add logging to Zolt's opening accumulator to compare with Jolt's
+2. Compare polynomial opening claims at each stage
+3. Verify sumcheck instance configurations match
+4. Check if claim reduction order matches

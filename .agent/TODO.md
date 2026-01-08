@@ -1,84 +1,127 @@
-# Zolt-Jolt Compatibility - Current Status
+# Zolt-Jolt Compatibility - Current Progress
 
-## Summary (Session 31 - Updated)
+## Current Status: Stage 3 Prefix-Suffix Optimization Required
 
-**Stage 1**: PASSES
-**Stage 2**: PASSES
-**Stage 3**: FAILS - Opening claims mismatch for Shift and InstructionInput
+### Problem Identified (Session 32)
 
-### Latest Finding: Round Polynomials ARE Correct!
+Stage 3 verification fails because **Zolt and Jolt produce different (but both valid) round polynomials**:
 
-All Stage 3 sumcheck round polynomials **MATCH** between Zolt and Jolt:
+- Both satisfy `p(0) + p(1) = previous_claim` ✓
+- But coefficients differ due to different computation approaches
+- Different coefficients → different Fiat-Shamir challenges → verification failure
 
-| Round | c0 | c2 | c3 | Challenge |
-|-------|----|----|----|-----------|
-| 0 | MATCH | MATCH | MATCH | MATCH |
-| 1 | MATCH | MATCH | MATCH | MATCH |
-| 2 | MATCH | MATCH | MATCH | MATCH |
-| 3 | MATCH | MATCH | MATCH | MATCH |
-| 4 | MATCH | MATCH | MATCH | MATCH |
-| ... | ... | ... | ... | ... |
+### Root Cause
 
-The sumcheck protocol is working correctly. The issue is the **opening claims**.
+Jolt uses **prefix-suffix sumcheck optimization** in Stage 3:
+1. Split eq+1(r, x) into prefix and suffix components
+2. Use P/Q buffers to efficiently compute round polynomials
+3. Transition from Phase1 (prefix-suffix) to Phase2 (direct) after n/2 rounds
 
-### ROOT CAUSE: Opening Claims Mismatch
+Zolt uses **naive direct computation**:
+- Iterates over all indices computing sumcheck directly
+- Produces valid but different round polynomials
 
-The Stage 3 verification fails because the final MLE evaluations (opening claims) don't match:
+### Evidence
 
-| Instance | Zolt Claim | Jolt Expected | Match |
-|----------|------------|---------------|-------|
-| Shift | 13328834370005231... | 9669677241730825... | **NO** |
-| InstructionInput | 3842266989647484... | 10802936892837509... | **NO** |
-| Registers | 6520606900337296... | 6520606900337296... | **YES** |
+Round 0 coefficient comparison:
+- Zolt c0: 15162749667655265946555954462559066615162111224393573091137614644230810640633
+- Jolt c0: 7091024619817638108434831413024896929049773929476085946006737149609972313435
+- **Completely different!**
 
+But both satisfy sumcheck property:
+- Zolt: shift_p0 + shift_p1 = shift_claim ✓
+- Zolt: combined_eval0 + combined_eval1 = current_claim ✓
+
+### Implementation Plan
+
+#### Completed ✓
+1. Added `EqPlusOnePrefixSuffixPoly` struct to poly/mod.zig
+   - Decomposes eq+1 into prefix_0, suffix_0, prefix_1, suffix_1
+   - Computes all evaluations at initialization
+
+#### In Progress
+2. Refactor Stage 3 prover to use prefix-suffix optimization
+   - Need to implement P/Q buffer initialization
+   - Need to implement Phase1 round polynomial computation
+   - Need to implement Phase1 binding (halve P and Q buffers)
+   - Need to implement Phase2 transition when prefix_size == 2
+
+#### Remaining Work
+3. Implement Phase2 materialization
+   - Evaluate prefix polynomials at accumulated challenges
+   - Construct full eq+1 polynomial for remaining rounds
+   - Run standard sumcheck for remaining variables
+
+4. Test round polynomial compatibility
+   - Verify c0, c2, c3 coefficients match Jolt's output
+   - Verify challenges match
+   - Verify final output claim matches
+
+### Technical Details
+
+#### Phase1 Round Polynomial Formula
+
+For each pair (P, Q):
 ```
-output_claim:          6108158350971909917768492919875926703216279897287968891477060522070057021008
-expected_output_claim: 10978770909765126050242131433050941553872066487109074337453920367876979372731
+g(0) = Σ_i P[2*i] * Q[2*i]
+g(1) = Σ_i P[2*i+1] * Q[2*i+1]
 ```
 
-### Analysis
+Then compress using `from_evals_and_hint(previous_claim, [g(0), g(1)])`.
 
-Since the **Registers** claim matches but **Shift** and **InstructionInput** don't:
+#### Phase1 Binding
 
-1. The core MLE binding mechanism is correct (Registers works)
-2. The eq polynomial evaluations are likely correct
-3. The issue is specific to **Shift** and **InstructionInput** `finalClaims()` computation
-4. Possibly related to eq_plus_one handling or the specific MLE structure
+After receiving challenge r_j:
+```
+P_new[i] = P[2*i] + r_j * (P[2*i+1] - P[2*i])
+Q_new[i] = Q[2*i] + r_j * (Q[2*i+1] - Q[2*i])
+```
 
-### Investigation Needed
+#### Phase2 Transition
 
-1. **ShiftMLEs.finalClaims()** - Check how the bound values are extracted
-   - Are the eq_plus_one values being combined correctly?
-   - Is the gamma^4 * (1-noop) term computed right?
+Occurs when `prefix_size == 2` (log2 of size == 1).
+Evaluate prefix polynomials at sumcheck challenges, then materialize full eq+1.
 
-2. **InstrInputMLEs.finalClaims()** - Check the left/right operand combination
-   - Are the flag values (left_is_rs1, left_is_pc, etc.) correct after binding?
-   - Is the (eq_outer + gamma^2 * eq_product) weighting correct?
+### Files to Modify
 
-3. **eq_plus_one polynomial** - Verify the shift formula
-   - eq_plus_one(r, j) should equal eq(r, j+1)
-   - Check if binding order affects the final value
+- `src/poly/mod.zig` - EqPlusOnePrefixSuffixPoly ✓
+- `src/zkvm/spartan/stage3_prover.zig` - Main prover refactor (major)
 
-### Verified So Far
+### Testing Commands
 
-1. Round polynomial coefficients (c0, c2, c3) - ALL MATCH
-2. Challenges derived from transcript - ALL MATCH
-3. Batching coefficients - ALL MATCH
-4. Initial batched claim - MATCHES
-5. Registers opening claim - MATCHES
-6. Shift opening claim - MISMATCH
-7. InstructionInput opening claim - MISMATCH
+```bash
+# Generate proof
+./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format \
+  --export-preprocessing /tmp/zolt_preprocessing.bin \
+  -o /tmp/zolt_proof_dory.bin --srs /tmp/jolt_dory_srs.bin
 
-### Next Steps
+# Verify with Jolt
+cd /Users/matteo/projects/jolt && cargo test -p jolt-core \
+  test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 
-1. Debug `ShiftMLEs.finalClaims()` to compare with Jolt's expected value
-2. Debug `InstrInputMLEs.finalClaims()` similarly
-3. Add debug output for the final bound MLE values
-4. Compare eq_plus_one final evaluations between Zolt and Jolt
+# Run Zolt tests
+zig build test
+```
 
-### Key Files
+### Success Criteria
 
-- `/Users/matteo/projects/zolt/src/zkvm/spartan/stage3_prover.zig` - Opening claim computation
-- `/Users/matteo/projects/jolt/jolt-core/src/zkvm/spartan/shift.rs` - ShiftSumcheck finalClaims
-- `/Users/matteo/projects/jolt/jolt-core/src/zkvm/spartan/instruction_input.rs` - InstructionInput finalClaims
-- `/Users/matteo/projects/jolt/jolt-core/src/zkvm/claim_reductions/registers.rs` - Registers finalClaims
+1. Stage 3 round 0 c0, c2, c3 coefficients match Jolt's
+2. All 10 rounds produce matching polynomials
+3. Final output_claim matches expected_output_claim
+4. Full proof verification passes
+
+---
+
+## Overall Progress
+
+| Stage | Status | Notes |
+|-------|--------|-------|
+| 1 | ✓ PASSES | Outer Spartan sumcheck works |
+| 2 | ✓ PASSES | Product virtualization works |
+| 3 | ✗ FAILS | Prefix-suffix optimization needed |
+| 4-7 | Blocked | Waiting on Stage 3 |
+
+## Tests Status
+
+- `zig build test`: All 578+ tests pass
+- Jolt verification with Zolt preprocessing: Stage 3 fails

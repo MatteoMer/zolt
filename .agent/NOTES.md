@@ -42,12 +42,36 @@ But both satisfy sumcheck property:
 
 To achieve compatibility, Zolt **must implement the same prefix-suffix optimization** as Jolt:
 
-1. Implement `EqPlusOnePrefixSuffixPoly` decomposition
+1. ✓ Implement `EqPlusOnePrefixSuffixPoly` decomposition (added to poly/mod.zig)
 2. Implement Phase1Prover (prefix-suffix sumcheck rounds)
+   - P buffers: prefix polynomials from decomposition
+   - Q buffers: accumulated sums over trace weighted by suffix
+   - Round polynomial: g(X) = Σ P(2i || 2i+1)[X] * Q(2i || 2i+1)[X]
 3. Implement Phase2Prover (regular sumcheck after transition)
+   - Triggered when prefix_size == 2
+   - Materialize full eq+1 polynomial from prefix_0_eval * suffix + prefix_1_eval * suffix
 4. Match the exact computation formula and binding order
 
-This is a significant implementation task.
+This is a significant implementation task (estimated 500+ lines of code).
+
+### Implementation Notes (Session 32)
+
+The prefix-suffix optimization works as follows:
+
+**Phase 1 (first n/2 rounds):**
+- P_0 = prefix_0 (eq+1(r_lo, j) for all j)
+- P_1 = prefix_1 (sparse: is_max(r_lo) at j=0 only)
+- Q_0, Q_1 are accumulated: `Q_0[x_lo] += v(x) * suffix_0[x_hi]` for all x = (x_hi || x_lo)
+- Round polynomial: sum over pairs of P[i] * Q[i]
+
+**Phase 1 binding:**
+- P_new[i] = P[2*i] + r * (P[2*i+1] - P[2*i])
+- Q_new[i] = Q[2*i] + r * (Q[2*i+1] - Q[2*i])
+
+**Phase 2 (remaining n/2 rounds):**
+- Evaluate prefix polynomials at accumulated challenges
+- Construct eq+1_r = prefix_0_eval * suffix_0 + prefix_1_eval * suffix_1
+- Run standard sumcheck on materialized polynomials
 
 ---
 

@@ -444,6 +444,139 @@ pub fn EqPlusOnePolynomial(comptime F: type) type {
     };
 }
 
+/// Prefix-suffix decomposition of eq+1 polynomial for sumcheck optimization.
+///
+/// Decomposes eq+1((r_hi, r_lo), (y_hi, y_lo)) as:
+///   prefix_0(r_lo, y_lo) * suffix_0(r_hi, y_hi) +
+///   prefix_1(r_lo, y_lo) * suffix_1(r_hi, y_hi)
+///
+/// This allows efficient sumcheck computation by operating on smaller polynomials.
+/// The decomposition is correct because:
+/// - prefix_0 = eq+1(r_lo, j) for all j
+/// - suffix_0 = eq(r_hi, j) for all j
+/// - prefix_1 = is_max(r_lo) * delta(j=0) (sparse: only non-zero at index 0)
+/// - suffix_1 = eq+1(r_hi, j) for all j
+///
+/// where is_max(r_lo) = eq((1,1,...,1), r_lo)
+pub fn EqPlusOnePrefixSuffixPoly(comptime F: type) type {
+    return struct {
+        const Self = @This();
+
+        /// Evals of eq+1(r_lo, j) for all j in {0, 1, ..., 2^(n/2)-1}
+        prefix_0: []F,
+        /// Evals of eq(r_hi, j) for all j in {0, 1, ..., 2^(n/2)-1}
+        suffix_0: []F,
+        /// Evals of is_max(r_lo) * delta(j=0) - only index 0 is non-zero
+        prefix_1: []F,
+        /// Evals of eq+1(r_hi, j) for all j
+        suffix_1: []F,
+
+        allocator: Allocator,
+
+        /// Create prefix-suffix decomposition for point r (in BIG_ENDIAN order)
+        /// r is split at the midpoint: r = (r_hi || r_lo)
+        pub fn init(allocator: Allocator, r: []const F) !Self {
+            std.debug.assert(r.len >= 2);
+            const mid = r.len / 2;
+            const r_hi = r[0..mid];
+            const r_lo = r[mid..];
+
+            const n_lo = r_lo.len;
+            const n_hi = r_hi.len;
+            const size_lo: usize = @as(usize, 1) << @intCast(n_lo);
+            const size_hi: usize = @as(usize, 1) << @intCast(n_hi);
+
+            // Allocate buffers
+            const prefix_0 = try allocator.alloc(F, size_lo);
+            const suffix_0 = try allocator.alloc(F, size_hi);
+            const prefix_1 = try allocator.alloc(F, size_lo);
+            const suffix_1 = try allocator.alloc(F, size_hi);
+
+            // Compute is_max(r_lo) = eq((1,1,...,1), r_lo)
+            var is_max_eval = F.one();
+            for (0..n_lo) |i| {
+                // eq((1), r_lo[i]) = r_lo[i] * 1 + (1-r_lo[i]) * 0 = r_lo[i]
+                is_max_eval = is_max_eval.mul(r_lo[i]);
+            }
+
+            // Initialize prefix_1: only non-zero at index 0
+            @memset(prefix_1, F.zero());
+            prefix_1[0] = is_max_eval;
+
+            // Compute eq+1(r_lo, j) and eq+1(r_hi, j) for all j
+            // Also compute eq(r_hi, j) = suffix_0
+            try computeEqPlusOneEvals(allocator, r_lo, prefix_0);
+            try computeEqAndEqPlusOneEvals(allocator, r_hi, suffix_0, suffix_1);
+
+            return Self{
+                .prefix_0 = prefix_0,
+                .suffix_0 = suffix_0,
+                .prefix_1 = prefix_1,
+                .suffix_1 = suffix_1,
+                .allocator = allocator,
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.allocator.free(self.prefix_0);
+            self.allocator.free(self.suffix_0);
+            self.allocator.free(self.prefix_1);
+            self.allocator.free(self.suffix_1);
+        }
+
+        /// Get the size of the prefix arrays
+        pub fn prefixSize(self: *const Self) usize {
+            return self.prefix_0.len;
+        }
+
+        /// Get the size of the suffix arrays
+        pub fn suffixSize(self: *const Self) usize {
+            return self.suffix_0.len;
+        }
+
+        /// Helper to compute eq+1(r, j) for all j in {0, ..., 2^n - 1}
+        fn computeEqPlusOneEvals(allocator: Allocator, r: []const F, out: []F) !void {
+            const n = r.len;
+            const size = out.len;
+            std.debug.assert(size == @as(usize, 1) << @intCast(n));
+
+            // For each j, compute eq+1(r, j)
+            const j_bits = try allocator.alloc(F, n);
+            defer allocator.free(j_bits);
+
+            for (0..size) |j| {
+                // Convert j to binary (BIG_ENDIAN: bit 0 is MSB)
+                for (0..n) |k| {
+                    const bit_pos: u6 = @intCast(n - 1 - k);
+                    j_bits[k] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
+                }
+                out[j] = EqPlusOnePolynomial(F).mle(r, j_bits);
+            }
+        }
+
+        /// Helper to compute both eq(r, j) and eq+1(r, j) for all j
+        fn computeEqAndEqPlusOneEvals(allocator: Allocator, r: []const F, eq_out: []F, eq_plus_one_out: []F) !void {
+            const n = r.len;
+            const size = eq_out.len;
+            std.debug.assert(size == @as(usize, 1) << @intCast(n));
+            std.debug.assert(eq_plus_one_out.len == size);
+
+            const j_bits = try allocator.alloc(F, n);
+            defer allocator.free(j_bits);
+
+            for (0..size) |j| {
+                // Convert j to binary (BIG_ENDIAN: bit 0 is MSB)
+                for (0..n) |bit_idx| {
+                    const bit_pos: u6 = @intCast(n - 1 - bit_idx);
+                    j_bits[bit_idx] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
+                }
+                eq_out[j] = EqPolynomial(F).mle(r, j_bits);
+                eq_plus_one_out[j] = EqPlusOnePolynomial(F).mle(r, j_bits);
+            }
+        }
+    };
+}
+
 /// Univariate polynomial (used in sumcheck)
 pub fn UniPoly(comptime F: type) type {
     return struct {

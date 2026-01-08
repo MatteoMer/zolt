@@ -232,20 +232,25 @@ pub fn Stage3Prover(comptime F: type) type {
                 const half_size = current_size >> 1;
 
                 // Compute round polynomial for each instance
-                // The round poly p(X) = sum_{remaining vars} f(bound vars, X, remaining)
-                // For degree d, we need d+1 evaluations: p(0), p(1), ..., p(d)
+                // Following Jolt's approach:
+                // - Compute p(0), p(2) for degree-2 or p(0), p(2), p(3) for degree-3
+                // - Derive p(1) = previous_claim - p(0)
+                // - Convert to coefficients and compress
 
-                // ShiftSumcheck: degree 2
-                const shift_evals = self.computeShiftRoundEvals(
+                // ShiftSumcheck: degree 2, returns [p(0), p(2)]
+                const shift_evals_02 = self.computeShiftRoundEvals(
                     &shift_mles,
                     eq_plus_one_outer_evals,
                     eq_plus_one_product_evals,
                     shift_gamma_powers,
                     half_size,
                 );
+                // Derive p(1) from claim
+                const shift_p1 = current_shift_claim.sub(shift_evals_02[0]);
+                const shift_evals: [3]F = .{ shift_evals_02[0], shift_p1, shift_evals_02[1] };
 
-                // InstructionInputSumcheck: degree 3
-                const instr_evals = self.computeInstrRoundEvals(
+                // InstructionInputSumcheck: degree 3, returns [p(0), p(2), p(3)]
+                const instr_evals_023 = self.computeInstrRoundEvals(
                     &instr_mles,
                     eq_r_outer_evals,
                     eq_r_product_evals,
@@ -253,17 +258,23 @@ pub fn Stage3Prover(comptime F: type) type {
                     instr_gamma_sqr,
                     half_size,
                 );
+                // Derive p(1) from claim
+                const instr_p1 = current_instr_claim.sub(instr_evals_023[0]);
+                const instr_evals: [4]F = .{ instr_evals_023[0], instr_p1, instr_evals_023[1], instr_evals_023[2] };
 
-                // RegistersClaimReduction: degree 2
-                const reg_evals = self.computeRegRoundEvals(
+                // RegistersClaimReduction: degree 2, returns [p(0), p(2)]
+                const reg_evals_02 = self.computeRegRoundEvals(
                     &reg_mles,
                     eq_r_outer_evals, // r_spartan = r_outer
                     reg_gamma,
                     reg_gamma_sqr,
                     half_size,
                 );
+                // Derive p(1) from claim
+                const reg_p1 = current_reg_claim.sub(reg_evals_02[0]);
+                const reg_evals: [3]F = .{ reg_evals_02[0], reg_p1, reg_evals_02[1] };
 
-                // Combine round polynomials
+                // Combine round polynomials (all evaluated at 0, 1, 2, 3)
                 // batched_poly = coeff[0] * shift_poly + coeff[1] * instr_poly + coeff[2] * reg_poly
                 var combined_evals: [4]F = undefined;
                 for (0..4) |i| {
@@ -310,8 +321,8 @@ pub fn Stage3Prover(comptime F: type) type {
                 // Evaluate combined polynomial at r_j to get next claim
                 combined_claim = self.evaluatePolyAtPoint(combined_coeffs, r_j);
 
-                // Update individual claims for tracking
-                const shift_coeffs = try self.evalsToCoeffs(&[_]F{ shift_evals[0], shift_evals[1], shift_evals[2] }, 2);
+                // Update individual claims by evaluating their polynomials at r_j
+                const shift_coeffs = try self.evalsToCoeffs(&shift_evals, 2);
                 defer self.allocator.free(shift_coeffs);
                 current_shift_claim = self.evaluatePolyAtPoint(shift_coeffs, r_j);
 
@@ -319,7 +330,7 @@ pub fn Stage3Prover(comptime F: type) type {
                 defer self.allocator.free(instr_coeffs);
                 current_instr_claim = self.evaluatePolyAtPoint(instr_coeffs, r_j);
 
-                const reg_coeffs = try self.evalsToCoeffs(&[_]F{ reg_evals[0], reg_evals[1], reg_evals[2] }, 2);
+                const reg_coeffs = try self.evalsToCoeffs(&reg_evals, 2);
                 defer self.allocator.free(reg_coeffs);
                 current_reg_claim = self.evaluatePolyAtPoint(reg_coeffs, r_j);
 
@@ -784,7 +795,8 @@ pub fn Stage3Prover(comptime F: type) type {
         }
 
         /// Compute round evaluations for ShiftSumcheck
-        /// Returns [p(0), p(1), p(2)] for degree-2 polynomial
+        /// Returns [p(0), p(2)] for degree-2 polynomial (p(1) derived from claim)
+        /// Following Jolt's approach: extrapolate each MLE first, then compute products
         fn computeShiftRoundEvals(
             self: *Self,
             mles: *const ShiftMLEs,
@@ -792,9 +804,9 @@ pub fn Stage3Prover(comptime F: type) type {
             eq_plus_one_product: []const F,
             gamma: []const F,
             half_size: usize,
-        ) [3]F {
+        ) [2]F {
             _ = self;
-            var evals: [3]F = .{ F.zero(), F.zero(), F.zero() };
+            var evals: [2]F = .{ F.zero(), F.zero() };
 
             for (0..half_size) |j| {
                 // Get values at j*2 (bit=0) and j*2+1 (bit=1)
@@ -814,6 +826,15 @@ pub fn Stage3Prover(comptime F: type) type {
                 const eq_prod_0 = eq_plus_one_product[2 * j];
                 const eq_prod_1 = eq_plus_one_product[2 * j + 1];
 
+                // Linear extrapolation for each MLE: f(2) = 2*f(1) - f(0)
+                const upc_2 = upc_1.add(upc_1).sub(upc_0);
+                const pc_2 = pc_1.add(pc_1).sub(pc_0);
+                const virt_2 = virt_1.add(virt_1).sub(virt_0);
+                const first_2 = first_1.add(first_1).sub(first_0);
+                const noop_2 = noop_1.add(noop_1).sub(noop_0);
+                const eq_out_2 = eq_out_1.add(eq_out_1).sub(eq_out_0);
+                const eq_prod_2 = eq_prod_1.add(eq_prod_1).sub(eq_prod_0);
+
                 // f(j, 0) = eq+1_outer(j) * (upc + gamma*pc + gamma^2*virt + gamma^3*first)
                 //         + gamma^4 * (1-noop) * eq+1_prod(j)
                 const val_0 = upc_0.add(gamma[1].mul(pc_0)).add(gamma[2].mul(virt_0)).add(gamma[3].mul(first_0));
@@ -821,32 +842,22 @@ pub fn Stage3Prover(comptime F: type) type {
                 const term2_0 = gamma[4].mul(F.one().sub(noop_0)).mul(eq_prod_0);
                 const f_0 = term1_0.add(term2_0);
 
-                // f(j, 1)
-                const val_1 = upc_1.add(gamma[1].mul(pc_1)).add(gamma[2].mul(virt_1)).add(gamma[3].mul(first_1));
-                const term1_1 = eq_out_1.mul(val_1);
-                const term2_1 = gamma[4].mul(F.one().sub(noop_1)).mul(eq_prod_1);
-                const f_1 = term1_1.add(term2_1);
-
-                // For degree-2, we need p(0), p(1), p(2)
-                // But eq+1 is already linear in its second argument within each term
-                // The polynomial f(x_j, remaining) where x_j varies over field is degree 1 in x_j
-                // multiplied by eq which is also degree 1, giving degree 2 total.
-                // For a degree-2 sumcheck, p(0), p(1) suffice to define the polynomial
-                // We use Lagrange interpolation to get p(2).
-                // p(X) through (0, f_0) and (1, f_1) is: f_0 + (f_1 - f_0) * X
-                // p(2) = f_0 + 2*(f_1 - f_0) = 2*f_1 - f_0
-                const f_2 = f_1.add(f_1).sub(f_0);
+                // f(j, 2) - compute using extrapolated values
+                const val_2 = upc_2.add(gamma[1].mul(pc_2)).add(gamma[2].mul(virt_2)).add(gamma[3].mul(first_2));
+                const term1_2 = eq_out_2.mul(val_2);
+                const term2_2 = gamma[4].mul(F.one().sub(noop_2)).mul(eq_prod_2);
+                const f_2 = term1_2.add(term2_2);
 
                 evals[0] = evals[0].add(f_0);
-                evals[1] = evals[1].add(f_1);
-                evals[2] = evals[2].add(f_2);
+                evals[1] = evals[1].add(f_2);
             }
 
             return evals;
         }
 
         /// Compute round evaluations for InstructionInputSumcheck
-        /// Returns [p(0), p(1), p(2), p(3)] for degree-3 polynomial
+        /// Returns [p(0), p(2), p(3)] for degree-3 polynomial (p(1) derived from claim)
+        /// Following Jolt's approach: extrapolate each MLE first, then compute products
         fn computeInstrRoundEvals(
             self: *Self,
             mles: *const InstructionInputMLEs,
@@ -855,9 +866,9 @@ pub fn Stage3Prover(comptime F: type) type {
             gamma: F,
             gamma_sqr: F,
             half_size: usize,
-        ) [4]F {
+        ) [3]F {
             _ = self;
-            var evals: [4]F = .{ F.zero(), F.zero(), F.zero(), F.zero() };
+            var evals: [3]F = .{ F.zero(), F.zero(), F.zero() };
 
             for (0..half_size) |j| {
                 // Get values at bit=0 and bit=1
@@ -883,13 +894,32 @@ pub fn Stage3Prover(comptime F: type) type {
                 const eq_prod_0 = eq_product[2 * j];
                 const eq_prod_1 = eq_product[2 * j + 1];
 
+                // Linear extrapolation for each MLE: f(2) = 2*f(1) - f(0), f(3) = 3*f(1) - 2*f(0)
+                const left_is_rs1_2 = left_is_rs1_1.add(left_is_rs1_1).sub(left_is_rs1_0);
+                const left_is_rs1_3 = left_is_rs1_2.add(left_is_rs1_1).sub(left_is_rs1_0);
+                const rs1_2 = rs1_1.add(rs1_1).sub(rs1_0);
+                const rs1_3 = rs1_2.add(rs1_1).sub(rs1_0);
+                const left_is_pc_2 = left_is_pc_1.add(left_is_pc_1).sub(left_is_pc_0);
+                const left_is_pc_3 = left_is_pc_2.add(left_is_pc_1).sub(left_is_pc_0);
+                const pc_2 = pc_1.add(pc_1).sub(pc_0);
+                const pc_3 = pc_2.add(pc_1).sub(pc_0);
+                const right_is_rs2_2 = right_is_rs2_1.add(right_is_rs2_1).sub(right_is_rs2_0);
+                const right_is_rs2_3 = right_is_rs2_2.add(right_is_rs2_1).sub(right_is_rs2_0);
+                const rs2_2 = rs2_1.add(rs2_1).sub(rs2_0);
+                const rs2_3 = rs2_2.add(rs2_1).sub(rs2_0);
+                const right_is_imm_2 = right_is_imm_1.add(right_is_imm_1).sub(right_is_imm_0);
+                const right_is_imm_3 = right_is_imm_2.add(right_is_imm_1).sub(right_is_imm_0);
+                const imm_2 = imm_1.add(imm_1).sub(imm_0);
+                const imm_3 = imm_2.add(imm_1).sub(imm_0);
+                const eq_out_2 = eq_out_1.add(eq_out_1).sub(eq_out_0);
+                const eq_out_3 = eq_out_2.add(eq_out_1).sub(eq_out_0);
+                const eq_prod_2 = eq_prod_1.add(eq_prod_1).sub(eq_prod_0);
+                const eq_prod_3 = eq_prod_2.add(eq_prod_1).sub(eq_prod_0);
+
                 // left = left_is_rs1 * rs1 + left_is_pc * pc
                 // right = right_is_rs2 * rs2 + right_is_imm * imm
                 // f = (eq_outer + gamma^2 * eq_product) * (right + gamma * left)
-                // Degree analysis:
-                // - eq terms are multilinear in x_j
-                // - left and right are products of multilinear terms (degree 2 in x_j)
-                // - Total: degree 1 * degree 2 = degree 3
+                // Degree: 1 (eq) * 2 (left*rs1) = 3
 
                 // Compute at x_j = 0
                 const left_0 = left_is_rs1_0.mul(rs1_0).add(left_is_pc_0.mul(pc_0));
@@ -897,44 +927,29 @@ pub fn Stage3Prover(comptime F: type) type {
                 const eq_weight_0 = eq_out_0.add(gamma_sqr.mul(eq_prod_0));
                 const f_0 = eq_weight_0.mul(right_0.add(gamma.mul(left_0)));
 
-                // Compute at x_j = 1
-                const left_1 = left_is_rs1_1.mul(rs1_1).add(left_is_pc_1.mul(pc_1));
-                const right_1 = right_is_rs2_1.mul(rs2_1).add(right_is_imm_1.mul(imm_1));
-                const eq_weight_1 = eq_out_1.add(gamma_sqr.mul(eq_prod_1));
-                const f_1 = eq_weight_1.mul(right_1.add(gamma.mul(left_1)));
+                // Compute at x_j = 2
+                const left_2 = left_is_rs1_2.mul(rs1_2).add(left_is_pc_2.mul(pc_2));
+                const right_2 = right_is_rs2_2.mul(rs2_2).add(right_is_imm_2.mul(imm_2));
+                const eq_weight_2 = eq_out_2.add(gamma_sqr.mul(eq_prod_2));
+                const f_2 = eq_weight_2.mul(right_2.add(gamma.mul(left_2)));
 
-                // For degree 3, we need p(0), p(1), p(2), p(3)
-                // We have samples at 0 and 1. For a valid sumcheck, the other evals
-                // come from the polynomial structure.
-                //
-                // Since the MLE values at x_j = 0 and x_j = 1 are the only meaningful ones,
-                // and the polynomial is degree 3, we need to extrapolate.
-                // The approach: p(x) = sum_j f(j, x) where f is degree 3 in x.
-                //
-                // For a multilinear polynomial g(x), g(0) = g_low, g(1) = g_high
-                // g(x) = g_low * (1-x) + g_high * x (linear interpolation)
-                // g(2) = g_low * (-1) + g_high * 2 = 2*g_high - g_low
-                // g(3) = g_low * (-2) + g_high * 3 = 3*g_high - 2*g_low
-                //
-                // For products: (a_0 + (a_1-a_0)*x)(b_0 + (b_1-b_0)*x) etc.
-                // This gets complex. Use extrapolation from f_0, f_1.
-                //
-                // For now, use linear extrapolation (underestimate of degree):
-                const diff = f_1.sub(f_0);
-                const f_2 = f_1.add(diff); // f_0 + 2*diff
-                const f_3 = f_2.add(diff); // f_0 + 3*diff
+                // Compute at x_j = 3
+                const left_3 = left_is_rs1_3.mul(rs1_3).add(left_is_pc_3.mul(pc_3));
+                const right_3 = right_is_rs2_3.mul(rs2_3).add(right_is_imm_3.mul(imm_3));
+                const eq_weight_3 = eq_out_3.add(gamma_sqr.mul(eq_prod_3));
+                const f_3 = eq_weight_3.mul(right_3.add(gamma.mul(left_3)));
 
                 evals[0] = evals[0].add(f_0);
-                evals[1] = evals[1].add(f_1);
-                evals[2] = evals[2].add(f_2);
-                evals[3] = evals[3].add(f_3);
+                evals[1] = evals[1].add(f_2);
+                evals[2] = evals[2].add(f_3);
             }
 
             return evals;
         }
 
         /// Compute round evaluations for RegistersClaimReduction
-        /// Returns [p(0), p(1), p(2)] for degree-2 polynomial
+        /// Returns [p(0), p(2)] for degree-2 polynomial (p(1) derived from claim)
+        /// Following Jolt's approach: extrapolate each MLE first, then compute products
         fn computeRegRoundEvals(
             self: *Self,
             mles: *const RegistersMLEs,
@@ -942,9 +957,9 @@ pub fn Stage3Prover(comptime F: type) type {
             gamma: F,
             gamma_sqr: F,
             half_size: usize,
-        ) [3]F {
+        ) [2]F {
             _ = self;
-            var evals: [3]F = .{ F.zero(), F.zero(), F.zero() };
+            var evals: [2]F = .{ F.zero(), F.zero() };
 
             for (0..half_size) |j| {
                 const rd_0 = mles.rd_write_value[2 * j];
@@ -957,21 +972,23 @@ pub fn Stage3Prover(comptime F: type) type {
                 const eq_0 = eq_spartan[2 * j];
                 const eq_1 = eq_spartan[2 * j + 1];
 
+                // Linear extrapolation for each MLE: f(2) = 2*f(1) - f(0)
+                const rd_2 = rd_1.add(rd_1).sub(rd_0);
+                const rs1_2 = rs1_1.add(rs1_1).sub(rs1_0);
+                const rs2_2 = rs2_1.add(rs2_1).sub(rs2_0);
+                const eq_2 = eq_1.add(eq_1).sub(eq_0);
+
                 // f = eq(r_spartan, x) * (rd + gamma * rs1 + gamma^2 * rs2)
                 // Degree: 1 * 1 = 2 (eq is linear, register poly is linear)
 
                 const reg_val_0 = rd_0.add(gamma.mul(rs1_0)).add(gamma_sqr.mul(rs2_0));
-                const reg_val_1 = rd_1.add(gamma.mul(rs1_1)).add(gamma_sqr.mul(rs2_1));
+                const reg_val_2 = rd_2.add(gamma.mul(rs1_2)).add(gamma_sqr.mul(rs2_2));
 
                 const f_0 = eq_0.mul(reg_val_0);
-                const f_1 = eq_1.mul(reg_val_1);
-
-                // Degree 2 extrapolation
-                const f_2 = f_1.add(f_1).sub(f_0);
+                const f_2 = eq_2.mul(reg_val_2);
 
                 evals[0] = evals[0].add(f_0);
-                evals[1] = evals[1].add(f_1);
-                evals[2] = evals[2].add(f_2);
+                evals[1] = evals[1].add(f_2);
             }
 
             return evals;

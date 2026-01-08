@@ -180,12 +180,8 @@ pub fn Blake2bTranscript(comptime F: type) type {
         ///
         /// Serializes LE, then reverses to BE for EVM compatibility.
         pub fn appendScalar(self: *Self, scalar: F) void {
-            std.debug.print("[ZOLT TRANSCRIPT] appendScalar:\n", .{});
-            std.debug.print("[ZOLT TRANSCRIPT]   montgomery_limbs={{ {x}, {x}, {x}, {x} }}\n", .{ scalar.limbs[0], scalar.limbs[1], scalar.limbs[2], scalar.limbs[3] });
-
             // First convert from Montgomery form to canonical form (matching arkworks)
             const standard = scalar.fromMontgomery();
-            std.debug.print("[ZOLT TRANSCRIPT]   standard_limbs={{ {x}, {x}, {x}, {x} }}\n", .{ standard.limbs[0], standard.limbs[1], standard.limbs[2], standard.limbs[3] });
 
             // Serialize to LE bytes
             var buf: [32]u8 = undefined;
@@ -193,19 +189,11 @@ pub fn Blake2bTranscript(comptime F: type) type {
                 mem.writeInt(u64, buf[i * 8 ..][0..8], standard.limbs[i], .little);
             }
 
-            std.debug.print("[ZOLT TRANSCRIPT]   le_bytes={{ ", .{});
-            for (buf[0..8]) |b| std.debug.print("{x:0>2} ", .{b});
-            std.debug.print("... }}\n", .{});
-
             // Reverse to BE for EVM compatibility
             var reversed: [32]u8 = undefined;
             for (0..32) |i| {
                 reversed[i] = buf[31 - i];
             }
-
-            std.debug.print("[ZOLT TRANSCRIPT]   be_bytes={{ ", .{});
-            for (reversed[0..8]) |b| std.debug.print("{x:0>2} ", .{b});
-            std.debug.print("... }}\n", .{});
 
             self.appendBytes(&reversed);
         }

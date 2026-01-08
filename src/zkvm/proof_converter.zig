@@ -1378,7 +1378,9 @@ pub fn ProofConverter(comptime F: type) type {
             // Instance 0: ProductVirtualRemainder - 8 claims
             // Order: LeftInstructionInput, RightInstructionInput, IsRdNotZero, WriteLookupOutputToRD,
             //        Jump, LookupOutput, Branch, NextIsNoop
+            std.debug.print("[ZOLT_PRODUCT] factor[0] BE bytes = {any}\n", .{stage2_result.factor_evals[0].toBytesBE()[0..8]});
             transcript.appendScalar(stage2_result.factor_evals[0]); // LeftInstructionInput
+            std.debug.print("[ZOLT_PRODUCT] factor[1] BE bytes = {any}\n", .{stage2_result.factor_evals[1].toBytesBE()[0..8]});
             transcript.appendScalar(stage2_result.factor_evals[1]); // RightInstructionInput
             transcript.appendScalar(stage2_result.factor_evals[2]); // IsRdNotZero
             transcript.appendScalar(stage2_result.factor_evals[3]); // WriteLookupOutputToRD

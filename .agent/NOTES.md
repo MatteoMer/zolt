@@ -1,5 +1,58 @@
 # Zolt-Jolt Cross-Verification Progress
 
+## Session 30 Summary - Stage 3 Round Polynomial Debugging (2026-01-08)
+
+### Key Findings
+
+1. **Witness values ARE correct** - The cycle_witnesses have correct PC/UnexpandedPC values (e.g., 0x80000000)
+
+2. **Input claims ARE correct** - All Stage 3 input claims match Jolt:
+   - NextUnexpandedPC = 5016914920442655063139027353295106901665615638715450801907420320438791241677 ✓
+   - NextPC = same ✓
+   - NextIsVirtual = 0 ✓
+   - NextIsFirstInSequence = 0 ✓
+   - NextIsNoop = 14175110745294312468493177356540255929141240160643613108653122477912496566260 ✓
+
+3. **Gamma powers ARE correct** - gamma_powers[1] = 167342415292111346589945515279189495473 ✓
+
+4. **Round polynomial formula IS correct** - Using Jolt's from_evals_and_hint approach:
+   - Compute p(0), p(2), p(3) by extrapolating each MLE
+   - Derive p(1) = previous_claim - p(0)
+   - Convert to coefficients and compress
+
+5. **But output_claim doesn't match** - After all rounds:
+   - Computed output_claim = 1673574733889313935270617916743060218503432297743197831652540070081185994486
+   - Expected output_claim = 21327743636063891625108510123531019119449360721408058830639529124915741467777
+
+### Remaining Investigation Areas
+
+1. **eq+1 polynomial evaluations** - Are they computed correctly at each index?
+   - Current implementation uses `EqPlusOnePolynomial.mle(r, j_bits)` for each j
+   - May need to verify against Jolt's `EqPlusOnePrefixSuffixPoly` approach
+
+2. **Round polynomial formula verification** - Need to verify:
+   - The product formula: eq+1_outer * val + gamma^4 * (1-noop) * eq+1_product
+   - The extrapolation at each evaluation point (0, 2, 3)
+   - The coefficient recovery from evaluations
+
+3. **Binding order** - Verify LowToHigh binding matches Jolt's behavior
+
+### Technical Details
+
+The Stage 3 prover now:
+1. Computes ShiftMLEs, InstructionInputMLEs, RegistersMLEs from cycle_witnesses
+2. Computes eq+1 evaluations at all trace indices
+3. For each round:
+   - Computes p(0) and p(2) by extrapolating each MLE first, then multiplying
+   - Derives p(1) = claim - p(0)
+   - Converts to coefficients [c0, c1, c2, c3]
+   - Compresses to [c0, c2, c3] (c1 recovered by verifier)
+   - Binds all MLEs at the challenge point
+
+The issue is that after all rounds, the output doesn't match the expected value computed from MLE evaluations.
+
+---
+
 ## Session 28 Summary - Stage 3 Verification Testing (2026-01-08)
 
 ### Key Finding

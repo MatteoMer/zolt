@@ -117,6 +117,13 @@ pub fn Stage3Prover(comptime F: type) type {
             const num_rounds = n_cycle_vars;
             const trace_len = cycle_witnesses.len;
 
+            // Debug: Check what witnesses we received
+            std.debug.print("[STAGE3] generateStage3Proof: cycle_witnesses.len = {}\n", .{cycle_witnesses.len});
+            if (cycle_witnesses.len > 0) {
+                std.debug.print("[STAGE3] generateStage3Proof: witness[0].PC (idx 6) = {any}\n", .{cycle_witnesses[0].values[6].toBytesBE()});
+                std.debug.print("[STAGE3] generateStage3Proof: witness[0].UPC (idx 7) = {any}\n", .{cycle_witnesses[0].values[7].toBytesBE()});
+            }
+
             std.debug.print("[STAGE3] Starting with {} rounds, trace_len={}\n", .{ num_rounds, trace_len });
 
             // DEBUG: Print transcript state BEFORE gamma derivation
@@ -273,6 +280,40 @@ pub fn Stage3Prover(comptime F: type) type {
                 // Derive p(1) from claim
                 const reg_p1 = current_reg_claim.sub(reg_evals_02[0]);
                 const reg_evals: [3]F = .{ reg_evals_02[0], reg_p1, reg_evals_02[1] };
+
+                // Debug round 0 evaluations
+                if (round == 0) {
+                    std.debug.print("\n[STAGE3] === ROUND 0 DEBUG ===\n", .{});
+                    std.debug.print("[STAGE3] shift_evals: p(0)={any}, p(1)={any}, p(2)={any}\n", .{
+                        shift_evals[0].toBytesBE()[0..8],
+                        shift_evals[1].toBytesBE()[0..8],
+                        shift_evals[2].toBytesBE()[0..8],
+                    });
+                    std.debug.print("[STAGE3] shift p(0)+p(1) = {any}, claim = {any}\n", .{
+                        shift_evals[0].add(shift_evals[1]).toBytesBE()[0..8],
+                        current_shift_claim.toBytesBE()[0..8],
+                    });
+                    std.debug.print("[STAGE3] instr_evals: p(0)={any}, p(1)={any}, p(2)={any}, p(3)={any}\n", .{
+                        instr_evals[0].toBytesBE()[0..8],
+                        instr_evals[1].toBytesBE()[0..8],
+                        instr_evals[2].toBytesBE()[0..8],
+                        instr_evals[3].toBytesBE()[0..8],
+                    });
+                    std.debug.print("[STAGE3] reg_evals: p(0)={any}, p(1)={any}, p(2)={any}\n", .{
+                        reg_evals[0].toBytesBE()[0..8],
+                        reg_evals[1].toBytesBE()[0..8],
+                        reg_evals[2].toBytesBE()[0..8],
+                    });
+                    // Print some eq+1 values
+                    std.debug.print("[STAGE3] eq+1_outer[0]={any}, eq+1_outer[1]={any}\n", .{
+                        eq_plus_one_outer_evals[0].toBytesBE()[0..8],
+                        eq_plus_one_outer_evals[1].toBytesBE()[0..8],
+                    });
+                    std.debug.print("[STAGE3] MLE: upc[0]={any}, upc[1]={any}\n", .{
+                        shift_mles.unexpanded_pc[0].toBytesBE()[0..8],
+                        shift_mles.unexpanded_pc[1].toBytesBE()[0..8],
+                    });
+                }
 
                 // Combine round polynomials (all evaluated at 0, 1, 2, 3)
                 // batched_poly = coeff[0] * shift_poly + coeff[1] * instr_poly + coeff[2] * reg_poly
@@ -554,6 +595,16 @@ pub fn Stage3Prover(comptime F: type) type {
             const is_first_in_sequence = try self.allocator.alloc(F, trace_len);
             const is_noop = try self.allocator.alloc(F, trace_len);
 
+            // Debug: print index mapping
+            std.debug.print("[STAGE3] buildShiftMLEs: UnexpandedPC idx={}, PC idx={}\n", .{
+                R1CSInputIndex.UnexpandedPC.toIndex(),
+                R1CSInputIndex.PC.toIndex(),
+            });
+            std.debug.print("[STAGE3] buildShiftMLEs: cycle_witnesses.len={}, trace_len={}\n", .{
+                cycle_witnesses.len,
+                trace_len,
+            });
+
             for (0..trace_len) |i| {
                 if (i < cycle_witnesses.len) {
                     const values = &cycle_witnesses[i].values;
@@ -562,6 +613,21 @@ pub fn Stage3Prover(comptime F: type) type {
                     is_virtual[i] = values[R1CSInputIndex.FlagVirtualInstruction.toIndex()];
                     is_first_in_sequence[i] = values[R1CSInputIndex.FlagIsFirstInSequence.toIndex()];
                     is_noop[i] = values[R1CSInputIndex.FlagIsNoop.toIndex()];
+
+                    // Debug first few cycles
+                    if (i < 3) {
+                        std.debug.print("[STAGE3] cycle[{}]: raw_upc_idx7={any}, raw_pc_idx6={any}\n", .{
+                            i,
+                            values[7].toBytesBE()[0..8], // UnexpandedPC = 7
+                            values[6].toBytesBE()[0..8], // PC = 6
+                        });
+                        std.debug.print("[STAGE3] cycle[{}]: via_enum: upc={any}, pc={any}, noop={any}\n", .{
+                            i,
+                            unexpanded_pc[i].toBytesBE()[0..8],
+                            pc[i].toBytesBE()[0..8],
+                            is_noop[i].toBytesBE()[0..8],
+                        });
+                    }
                 } else {
                     // Padding
                     unexpanded_pc[i] = F.zero();

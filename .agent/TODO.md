@@ -1,6 +1,45 @@
 # Zolt-Jolt Compatibility - Deep Debugging Session
 
-## Current Status: Stage 2 expected_output_claim Mismatch
+## Current Status: Instance 3 (OutputSumcheck) Bug Found
+
+### CRITICAL BUG IDENTIFIED
+
+Instance 3 (OutputSumcheck/RamOutputCheck) is producing a non-zero final claim even though it should be zero:
+
+- Input claim = 0 (correct, Jolt expects 0)
+- Expected final claim = 0 (Jolt)
+- Actual final claim = 21588850216212122343821529909671251486881515828259512811727777151157961353485 (Zolt)
+
+This causes the expected_output_claim mismatch because Instance 3's contribution (coeff * claim) becomes non-zero when it should be 0.
+
+### Root Cause Analysis
+
+The OutputSumcheckProver proves:
+```
+Σ_k eq(r_address, k) * io_mask(k) * (val_final(k) - val_io(k)) = 0
+```
+
+For a correct execution with no public outputs, val_io = val_final in the IO region, so the sum should be 0.
+
+However, Zolt's prover is outputting non-zero intermediate values. The bug is likely in:
+1. `updateClaim` function in output_check.zig
+2. `bindChallenge` function in output_check.zig
+3. How the combined round polynomial is being processed in proof_converter.zig
+
+### Key Debug Finding
+
+Round 10 (first round of OutputSumcheck) has compressed[0] = 0, which is correct for a zero polynomial.
+But by the end of the sumcheck, the final claim is non-zero.
+
+This suggests the claim update or polynomial binding is incorrect.
+
+### Fix Location
+- src/zkvm/ram/output_check.zig (OutputSumcheckProver)
+- src/zkvm/proof_converter.zig (Stage 2 batched sumcheck)
+
+---
+
+## Previous Investigation: Stage 2 expected_output_claim Mismatch
 
 ### What Has Been Verified to MATCH:
 1. Stage 1 sumcheck proof matches completely

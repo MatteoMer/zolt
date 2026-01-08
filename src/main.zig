@@ -340,16 +340,179 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt:
     std.debug.print("  Components: HyperKZG, Lasso lookups, 24 tables\n", .{});
     timer.reset();
 
+    // For jolt_format, use the Jolt-compatible proving path directly
+    // This generates a proof with Dory commitments in Jolt's format
+    if (jolt_format) {
+        if (output_path) |path| {
+            std.debug.print("  Generating Jolt-compatible proof with Dory commitments...\n", .{});
+
+            if (srs_path) |sp| {
+                std.debug.print("  Using Jolt SRS from: {s}\n", .{sp});
+            }
+
+            var jolt_bundle = prover_inst.proveJoltCompatibleWithDoryAndSrsAtAddress(
+                program.bytecode,
+                input_bytes orelse &[_]u8{},
+                srs_path,
+                program.base_address,
+                program.entry_point,
+            ) catch |err| {
+                std.debug.print("  Error generating Jolt-compatible proof: {s}\n", .{@errorName(err)});
+                return err;
+            };
+            defer jolt_bundle.deinit();
+
+            const prove_time = timer.read();
+            std.debug.print("  Proof generated successfully!\n", .{});
+            std.debug.print("  Time: {d:.2} ms\n", .{@as(f64, @floatFromInt(prove_time)) / 1_000_000.0});
+
+            // Serialize using the bundled Dory commitments
+            const jolt_bytes = prover_inst.serializeJoltProofWithDory(&jolt_bundle) catch |err| {
+                std.debug.print("  Error serializing Jolt proof with Dory: {}\n", .{err});
+                return err;
+            };
+            defer allocator.free(jolt_bytes);
+
+            std.debug.print("\nSaving proof to: {s}\n", .{path});
+            const file = std.fs.cwd().createFile(path, .{}) catch |err| {
+                std.debug.print("  Error creating output file: {}\n", .{err});
+                return err;
+            };
+            defer file.close();
+            file.writeAll(jolt_bytes) catch |err| {
+                std.debug.print("  Error writing Jolt proof: {}\n", .{err});
+                return err;
+            };
+
+            std.debug.print("  Format: Jolt (Dory commitments, arkworks-compatible)\n", .{});
+            std.debug.print("  Proof size: {} bytes ({d:.2} KB)\n", .{ jolt_bytes.len, @as(f64, @floatFromInt(jolt_bytes.len)) / 1024.0 });
+            std.debug.print("  Proof saved successfully!\n", .{});
+
+            // Export preprocessing if requested
+            if (preprocessing_path) |pp_path| {
+                std.debug.print("\nExporting preprocessing to: {s}\n", .{pp_path});
+
+                // Generate preprocessing using the same bytecode
+                const preprocessing = zolt.zkvm.preprocessing;
+                var bytecode_prep = preprocessing.BytecodePreprocessing.preprocess(allocator, program.bytecode, program.entry_point) catch |err| {
+                    std.debug.print("  Error generating bytecode preprocessing: {s}\n", .{@errorName(err)});
+                    return err;
+                };
+
+                // Create memory init from bytecode
+                const mem_init_entries = try allocator.alloc(struct { u64, u8 }, program.bytecode.len);
+                defer allocator.free(mem_init_entries);
+                for (program.bytecode, 0..) |byte, i| {
+                    mem_init_entries[i] = .{ program.entry_point + i, byte };
+                }
+
+                var ram_prep = preprocessing.RAMPreprocessing.preprocess(allocator, mem_init_entries) catch |err| {
+                    std.debug.print("  Error generating RAM preprocessing: {s}\n", .{@errorName(err)});
+                    bytecode_prep.deinit();
+                    return err;
+                };
+
+                // Create memory layout
+                const jolt_device = zolt.zkvm.jolt_device;
+                const device = jolt_device.JoltDevice.fromEmulator(
+                    allocator,
+                    &[_]u8{},
+                    &[_]u8{},
+                    false,
+                    @intCast(program.bytecode.len),
+                    32768,
+                ) catch |err| {
+                    std.debug.print("  Error creating memory layout: {s}\n", .{@errorName(err)});
+                    bytecode_prep.deinit();
+                    ram_prep.deinit();
+                    return err;
+                };
+                var device_mut = device;
+                defer device_mut.deinit();
+
+                // Create shared preprocessing (transfer ownership)
+                var shared_prep = preprocessing.JoltSharedPreprocessing{
+                    .bytecode = bytecode_prep,
+                    .ram = ram_prep,
+                    .memory_layout = device.memory_layout,
+                };
+                defer shared_prep.deinit();
+
+                // Create verifier setup from SRS if available
+                const dory = zolt.poly.commitment.dory;
+                const DoryCommitmentScheme = dory.DoryCommitmentScheme(zolt.field.BN254Scalar);
+
+                // Generate or load SRS for verifier setup
+                var srs = blk: {
+                    if (srs_path) |srs_file| {
+                        if (DoryCommitmentScheme.loadFromFile(allocator, srs_file)) |loaded| {
+                            break :blk loaded;
+                        } else |_| {
+                            std.debug.print("  Warning: Could not load SRS for verifier setup\n", .{});
+                            std.debug.print("  Generating default SRS (may not match Jolt exactly)...\n", .{});
+                        }
+                    }
+                    // Generate default SRS
+                    break :blk DoryCommitmentScheme.setup(allocator, 20) catch |err| {
+                        std.debug.print("  Error generating SRS: {s}\n", .{@errorName(err)});
+                        return err;
+                    };
+                };
+                defer srs.deinit();
+
+                // Create verifier setup from SRS
+                var verifier_setup = preprocessing.DoryVerifierSetup.fromSRS(allocator, &srs) catch |err| {
+                    std.debug.print("  Error creating verifier setup: {s}\n", .{@errorName(err)});
+                    return err;
+                };
+                defer verifier_setup.deinit();
+
+                // Serialize to ArrayList first, then write to file
+                var buffer = std.ArrayListUnmanaged(u8){};
+                defer buffer.deinit(allocator);
+
+                // Serialize generators (DoryVerifierSetup)
+                verifier_setup.serialize(buffer.writer(allocator)) catch |err| {
+                    std.debug.print("  Error serializing verifier setup: {s}\n", .{@errorName(err)});
+                    return err;
+                };
+
+                // Serialize shared preprocessing
+                shared_prep.serialize(allocator, buffer.writer(allocator)) catch |err| {
+                    std.debug.print("  Error serializing shared preprocessing: {s}\n", .{@errorName(err)});
+                    return err;
+                };
+
+                const pp_file = std.fs.cwd().createFile(pp_path, .{}) catch |err| {
+                    std.debug.print("  Error creating preprocessing file: {s}\n", .{@errorName(err)});
+                    return err;
+                };
+                defer pp_file.close();
+
+                pp_file.writeAll(buffer.items) catch |err| {
+                    std.debug.print("  Error writing preprocessing: {s}\n", .{@errorName(err)});
+                    return err;
+                };
+
+                std.debug.print("  Preprocessing exported successfully! ({} bytes)\n", .{buffer.items.len});
+                std.debug.print("  This file can be loaded by Jolt for cross-verification.\n", .{});
+            }
+
+            const total_time = timer.read();
+            std.debug.print("\nTotal time: {d:.2} ms\n", .{@as(f64, @floatFromInt(total_time)) / 1_000_000.0});
+            return;
+        } else {
+            std.debug.print("  Error: --jolt-format requires an output path (-o)\n", .{});
+            return;
+        }
+    }
+
+    // Standard Zolt proof generation path
     var proof = prover_inst.prove(program.bytecode, input_bytes orelse &[_]u8{}) catch |err| {
         std.debug.print("  Error generating proof: {}\n", .{err});
         return err;
     };
-    var should_deinit_proof = true;
-    defer {
-        if (should_deinit_proof) {
-            proof.deinit();
-        }
-    }
+    defer proof.deinit();
 
     const prove_time = timer.read();
     std.debug.print("  Proof generated successfully!\n", .{});
@@ -390,57 +553,11 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt:
     std.debug.print("  Register commitment: {s}\n", .{if (!proof.register_proof.commitment.isZero()) "present" else "none"});
     std.debug.print("  Stage proofs: {s}\n", .{if (proof.stage_proofs != null) "present" else "none"});
 
-    // Save proof to file if output path specified
+    // Save proof to file if output path specified (non-jolt-format)
     if (output_path) |path| {
         std.debug.print("\nSaving proof to: {s}\n", .{path});
 
-        if (jolt_format) {
-            // Save in Jolt-compatible format for cross-verification
-            // Uses proveJoltCompatibleWithDory to ensure Dory commitments match
-            // between the transcript and the serialized proof
-            std.debug.print("  Generating Jolt-compatible proof with Dory commitments...\n", .{});
-
-            if (srs_path) |sp| {
-                std.debug.print("  Using Jolt SRS from: {s}\n", .{sp});
-            }
-
-            var jolt_bundle = prover_inst.proveJoltCompatibleWithDoryAndSrsAtAddress(
-                program.bytecode,
-                input_bytes orelse &[_]u8{},
-                srs_path,
-                program.base_address,
-                program.entry_point,
-            ) catch |err| {
-                std.debug.print("  Error generating Jolt-compatible proof: {s}\n", .{@errorName(err)});
-                return err;
-            };
-            defer jolt_bundle.deinit();
-
-            // Skip deinit of the first proof since jolt_bundle has its own cleanup
-            // This avoids potential memory corruption between the two proofs
-            should_deinit_proof = false;
-
-            // Serialize using the bundled Dory commitments
-            // This ensures the commitments in the proof match those used in the transcript
-            const jolt_bytes = prover_inst.serializeJoltProofWithDory(&jolt_bundle) catch |err| {
-                std.debug.print("  Error serializing Jolt proof with Dory: {}\n", .{err});
-                return err;
-            };
-            defer allocator.free(jolt_bytes);
-
-            const file = std.fs.cwd().createFile(path, .{}) catch |err| {
-                std.debug.print("  Error creating output file: {}\n", .{err});
-                return err;
-            };
-            defer file.close();
-            file.writeAll(jolt_bytes) catch |err| {
-                std.debug.print("  Error writing Jolt proof: {}\n", .{err});
-                return err;
-            };
-
-            std.debug.print("  Format: Jolt (Dory commitments, arkworks-compatible)\n", .{});
-            std.debug.print("  Proof size: {} bytes ({d:.2} KB)\n", .{ jolt_bytes.len, @as(f64, @floatFromInt(jolt_bytes.len)) / 1024.0 });
-        } else if (json_format) {
+        if (json_format) {
             // Save as JSON
             zolt.zkvm.writeProofToJsonFile(BN254Scalar, allocator, proof, path) catch |err| {
                 std.debug.print("  Error saving proof: {}\n", .{err});

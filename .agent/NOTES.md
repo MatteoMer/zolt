@@ -1,5 +1,69 @@
 # Zolt-Jolt Cross-Verification Progress
 
+## Session 21 Summary - evalFromHint Fix and tau_high Divergence
+
+### Key Fix: Stage 2 Claim Update
+
+Fixed the Stage 2 sumcheck claim evolution to use `evalFromHint` instead of Lagrange interpolation.
+
+**Problem:** The prover was using Lagrange interpolation from `combined_evals` to compute `next_claim`, but the verifier uses `eval_from_hint` which reconstructs c1 from the hint and computes P(r) directly from coefficients.
+
+**Root Cause:** Different evaluation sets [s0, s1, s2, s3] can produce the same compressed coefficients [c0, c2, c3] but give different Lagrange evaluations at the challenge point.
+
+**Fix:** In `proof_converter.zig`, changed line 2127 from:
+```zig
+batched_claim = evaluateCubicAtChallengeFromEvals(combined_evals, challenge);
+```
+to:
+```zig
+batched_claim = evalFromHint(compressed, old_claim, challenge);
+```
+
+**Result:** Stage 2 output_claim now matches Jolt's computation exactly:
+- Initial batched claim: matches
+- Final output_claim: matches (11948928263400051798463901278432764058724926493141863520413443728531572654384)
+- Round 16+ next_claim: matches byte-for-byte
+- fused_left/fused_right: matches exactly
+
+### Remaining Issue: tau_high for Stage 2
+
+The expected_output_claim still differs because tau_high for Stage 2 is different:
+- Zolt tau_high: 55597861199438361161714452967226452302444674035205491421209262082033450074888
+- Jolt tau_high: 3964043112274501458186604711136127524303697198496731069976411879372059241338
+
+This causes expected_output_claim mismatch because:
+```
+expected = tau_high_bound_r0 * tau_bound_r_tail_reversed * fused_left * fused_right * batching_coeff
+```
+
+### Root Cause of tau_high Divergence
+
+The transcript state differs at the point of tau_high sampling (between Stage 1 completion and Stage 2 start). This is caused by:
+
+1. **Opening claims order mismatch**: After Stage 1 completes, both Zolt and Jolt append opening claims to the transcript. The order must match exactly.
+
+2. **Jolt's order**:
+   - OuterUniSkip verifier calls cache_openings → appends UnivariateSkip claim
+   - OuterRemainingSumcheck verifier calls cache_openings → appends 36 R1CS input claims
+
+3. **Zolt's current order** (in addSpartanOuterOpeningClaimsWithEvaluations):
+   - Appends 36 R1CS input claims
+   - Does NOT append UnivariateSkip (claims it was already appended earlier)
+
+The issue is that Zolt's ordering of transcript appends doesn't match Jolt's exact sequence.
+
+### Next Steps
+
+1. Trace the exact order of transcript appends in Jolt's verification flow
+2. Match Zolt's cache_openings to append claims in the same order
+3. Verify UnivariateSkip claim is appended at the correct position
+4. Re-run verification
+
+### Files Changed
+- `src/zkvm/proof_converter.zig` - Fixed evalFromHint usage
+
+---
+
 ## Session 20 Summary - Stage 1 tau Mismatch
 
 ### Critical Finding: tau Values Differ

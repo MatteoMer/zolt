@@ -265,6 +265,10 @@ pub fn ArkworksSerializer(comptime F: type) type {
                                 le_bytes[4], le_bytes[5], le_bytes[6], le_bytes[7],
                             });
                         }
+                        // Debug LeftInstructionInput at SpartanProductVirtualization
+                        if (v.poly == .LeftInstructionInput and v.sumcheck_id == .SpartanProductVirtualization) {
+                            std.debug.print("[SERIALIZE] LeftInstructionInput@ProdVirt = {any}\n", .{entry.claim.toBytesBE()});
+                        }
                     },
                     .Committed => |c| {
                         std.debug.print("[SERIALIZE] Claim {d:02}: Committed({s}, {s})\n", .{ i, @tagName(c.poly), @tagName(c.sumcheck_id) });

@@ -1358,6 +1358,55 @@ pub fn ProofConverter(comptime F: type) type {
                 stage2_result.instr_right_operand_claim,
             );
 
+            // CRITICAL: Append Stage 2 cache_openings claims to transcript
+            // After Stage 2 sumcheck, Jolt's verifier calls cache_openings for each instance
+            // which appends claim values to the transcript. We must emulate this exactly.
+            //
+            // Order follows BatchedSumcheck::verify loop over instances:
+            // 1. ProductVirtualRemainder: 8 claims in PRODUCT_UNIQUE_FACTOR_VIRTUALS order
+            // 2. RamRafEvaluation: 1 claim (RamRa)
+            // 3. RamReadWriteChecking: 3 claims (RamVal, RamRa, RamInc)
+            // 4. OutputSumcheck: 2 claims (RamValFinal, RamValInit)
+            // 5. InstructionLookupsClaimReduction: 3 claims (LookupOutput, LeftLookupOperand, RightLookupOperand)
+            std.debug.print("[ZOLT] Stage 2 cache_openings: appending claims to transcript\n", .{});
+            std.debug.print("[ZOLT] cache_openings[0] (LeftInstructionInput) = {any}\n", .{stage2_result.factor_evals[0].toBytesBE()[0..8]});
+            std.debug.print("[ZOLT] cache_openings[8] (RamRa_RAF) = {any}\n", .{stage2_result.raf_final_claim.toBytesBE()[0..8]});
+            std.debug.print("[ZOLT] cache_openings[9] (RamVal_RWC) = {any}\n", .{stage2_result.rwc_val_claim.toBytesBE()[0..8]});
+            std.debug.print("[ZOLT] cache_openings[12] (RamValFinal) = {any}\n", .{stage2_result.output_val_final_claim.toBytesBE()[0..8]});
+            std.debug.print("[ZOLT] cache_openings[14] (LookupOutput) = {any}\n", .{stage2_result.instr_lookup_output_claim.toBytesBE()[0..8]});
+
+            // Instance 0: ProductVirtualRemainder - 8 claims
+            // Order: LeftInstructionInput, RightInstructionInput, IsRdNotZero, WriteLookupOutputToRD,
+            //        Jump, LookupOutput, Branch, NextIsNoop
+            transcript.appendScalar(stage2_result.factor_evals[0]); // LeftInstructionInput
+            transcript.appendScalar(stage2_result.factor_evals[1]); // RightInstructionInput
+            transcript.appendScalar(stage2_result.factor_evals[2]); // IsRdNotZero
+            transcript.appendScalar(stage2_result.factor_evals[3]); // WriteLookupOutputToRD
+            transcript.appendScalar(stage2_result.factor_evals[4]); // Jump
+            transcript.appendScalar(stage2_result.factor_evals[5]); // LookupOutput
+            transcript.appendScalar(stage2_result.factor_evals[6]); // Branch
+            transcript.appendScalar(stage2_result.factor_evals[7]); // NextIsNoop
+
+            // Instance 1: RamRafEvaluation - 1 claim
+            transcript.appendScalar(stage2_result.raf_final_claim); // RamRa
+
+            // Instance 2: RamReadWriteChecking - 3 claims
+            transcript.appendScalar(stage2_result.rwc_val_claim); // RamVal
+            transcript.appendScalar(stage2_result.rwc_ra_claim); // RamRa
+            transcript.appendScalar(stage2_result.rwc_inc_claim); // RamInc
+
+            // Instance 3: OutputSumcheck - 2 claims
+            transcript.appendScalar(stage2_result.output_val_final_claim); // RamValFinal
+            transcript.appendScalar(F.zero()); // RamValInit (we set to 0)
+
+            // Instance 4: InstructionLookupsClaimReduction - 3 claims
+            transcript.appendScalar(stage2_result.instr_lookup_output_claim); // LookupOutput
+            transcript.appendScalar(stage2_result.instr_left_operand_claim); // LeftLookupOperand
+            transcript.appendScalar(stage2_result.instr_right_operand_claim); // RightLookupOperand
+
+            std.debug.print("[ZOLT] Stage 2 cache_openings: appended 17 claims to transcript\n", .{});
+            std.debug.print("[ZOLT] Stage 2 transcript state after cache_openings = {any}\n", .{transcript.state[0..8]});
+
             // Stage 3: SpartanShift, InstructionInput, RegistersClaimReduction
             // Extract r_product from Stage 2 challenges (last n_cycle_vars in BIG_ENDIAN)
             var r_product = try self.allocator.alloc(F, n_cycle_vars);

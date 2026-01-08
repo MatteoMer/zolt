@@ -1,16 +1,63 @@
 # Zolt-Jolt Cross-Verification Progress
 
+## Session 32 Summary - Stage 3 Prefix-Suffix Optimization Required (2026-01-08)
+
+### Critical Discovery: Round Polynomials Are Different!
+
+After extensive debugging, we discovered that **Zolt and Jolt produce mathematically different (but both valid) round polynomials**.
+
+**Both polynomials satisfy the sumcheck property `p(0) + p(1) = previous_claim`**, but they are different polynomials.
+
+### The Root Cause
+
+Jolt's Stage 3 prover uses a **prefix-suffix decomposition optimization** (EqPlusOnePrefixSuffixPoly):
+- Splits the point r into (r_hi, r_lo)
+- Computes eq+1((r_hi, r_lo), (y_hi, y_lo)) = prefix_0 * suffix_0 + prefix_1 * suffix_1
+- Uses this to efficiently compute round polynomials
+
+Zolt's Stage 3 prover uses a **naive direct computation**:
+- Iterates over all indices computing the sumcheck directly
+- Produces valid round polynomials, but with different coefficients
+
+### Why This Breaks Verification
+
+1. Zolt produces round polynomial p_zolt(X) with coefficients [c0_z, c1_z, c2_z, c3_z]
+2. Jolt prover would produce p_jolt(X) with coefficients [c0_j, c1_j, c2_j, c3_j]
+3. Both satisfy p(0) + p(1) = claim, but c0_z ≠ c0_j, etc.
+4. Since Fiat-Shamir challenges are derived from the polynomial coefficients, different coefficients → different challenges
+5. Different challenges → different final output claims
+
+### Evidence
+
+Round 0 comparison:
+- Zolt c0: 15162749667655265946555954462559066615162111224393573091137614644230810640633
+- Jolt c0: 7091024619817638108434831413024896929049773929476085946006737149609972313435
+- Completely different!
+
+But both satisfy sumcheck property:
+- Zolt: shift_p0 + shift_p1 = shift_claim ✓
+- Zolt: combined_eval0 + combined_eval1 = current_claim ✓
+
+### Required Fix
+
+To achieve compatibility, Zolt **must implement the same prefix-suffix optimization** as Jolt:
+
+1. Implement `EqPlusOnePrefixSuffixPoly` decomposition
+2. Implement Phase1Prover (prefix-suffix sumcheck rounds)
+3. Implement Phase2Prover (regular sumcheck after transition)
+4. Match the exact computation formula and binding order
+
+This is a significant implementation task.
+
+---
+
 ## Session 31 Summary - Stage 3 Opening Claims Analysis (2026-01-08)
 
-### Major Discovery: Round Polynomials Are Correct!
+### Earlier Analysis (Superseded by Session 32)
 
-After adding comprehensive debug output, we confirmed that **all Stage 3 sumcheck round polynomials match** between Zolt and Jolt:
+The previous hypothesis about opening claims mismatch was incorrect.
 
-- All c0, c2, c3 coefficients: MATCH
-- All challenges: MATCH
-- Initial batched claim: MATCH
-
-The sumcheck protocol itself is working correctly.
+The real issue (discovered in Session 32) is that the round polynomials themselves are mathematically different, causing transcript divergence and final claim mismatch.
 
 ### Root Cause Identified: Opening Claims Mismatch
 

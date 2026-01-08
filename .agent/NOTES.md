@@ -1,5 +1,76 @@
 # Zolt-Jolt Cross-Verification Progress
 
+## Session 27 Summary - Stage 3 Prover Implementation (2026-01-08)
+
+### Key Discovery: Sumcheck Verification
+
+The sumcheck verification in Jolt uses `eval_from_hint` which **doesn't explicitly check p(0) + p(1) = claim**. Instead:
+
+```rust
+linear_term = hint - 2*c0 - c2 - c3 - ...
+p(r) = c0 + linear_term * r + c2 * r² + c3 * r³ + ...
+```
+
+This means:
+- Zero polynomials (all coeffs = 0) don't cause immediate verification failure
+- linear_term is recovered as `claim` when all coeffs are 0
+- Final output claim ≈ claim * r_1 * r_2 * ... * r_n
+
+This is why Stage 3 verification fails at the **final claim comparison**, not at round verification.
+
+### Files Created
+
+1. **`src/poly/mod.zig`** - Added:
+   - `EqPlusOnePolynomial(F)` - eq+1(x, y) = 1 iff y = x + 1 (binary increment)
+   - `EqPolynomial.mle()` - static evaluation method
+
+2. **`src/zkvm/spartan/stage3_prover.zig`** - Stage 3 prover framework:
+   - `Stage3Prover` struct with `generateStage3Proof` method
+   - `ShiftMLEs`, `InstructionInputMLEs`, `RegistersMLEs` structs
+   - MLE building from R1CSCycleInputs
+
+### Stage 3 Understanding
+
+Stage 3 is a batched sumcheck with 3 instances (all n_cycle_vars rounds):
+
+1. **ShiftSumcheck** (degree 2)
+   - Proves: `Σ eq+1(r_outer, j) * (upc + γ*pc + γ²*virt + γ³*first) + γ⁴*(1-noop) * eq+1(r_prod, j)`
+   - Opening claims at SpartanShift: UnexpandedPC, PC, VirtualInstruction, IsFirstInSequence, IsNoop
+
+2. **InstructionInputSumcheck** (degree 3)
+   - Proves: `(eq(r, r_stage1) + γ²*eq(r, r_stage2)) * (right + γ*left)`
+   - Where left = left_is_rs1 * rs1 + left_is_pc * upc
+   - Where right = right_is_rs2 * rs2 + right_is_imm * imm
+   - Opening claims at InstructionInputVirtualization: 8 flag/value pairs
+
+3. **RegistersClaimReduction** (degree 2)
+   - Proves: `eq(r, r_spartan) * (rd + γ*rs1 + γ²*rs2)`
+   - Opening claims at RegistersClaimReduction: RdWriteValue, Rs1Value, Rs2Value
+
+### Commits This Session
+
+1. fdb7698 - feat: Add EqPlusOnePolynomial and Stage 3 prover framework
+2. a1a2580 - docs: Update TODO with Stage 3 architecture analysis
+3. 90d4c53 - fix: Update Stage 3 prover to use R1CSInputIndex correctly
+
+### Current Status
+
+| Stage | Status | Details |
+|-------|--------|---------|
+| 1 | ✓ PASSES | Outer sumcheck works |
+| 2 | ✓ PASSES | Product virtualization works |
+| 3 | ✗ FAILS | Zero polys give wrong output_claim |
+| 4-7 | Blocked | Waiting on Stage 3 |
+
+### Next Steps
+
+1. Integrate Stage 3 prover into proof_converter
+2. Implement proper round polynomial computation with eq/eq+1 weighting
+3. Test Stage 3 verification
+4. Implement Stages 4-7
+
+---
+
 ## Session 26 Summary - Stage 3+ Claims and Sumcheck Verification (2026-01-08)
 
 ### Major Progress

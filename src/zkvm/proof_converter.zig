@@ -41,6 +41,7 @@ const poly_mod = @import("../poly/mod.zig");
 const jolt_device = @import("jolt_device.zig");
 const constants = @import("../common/constants.zig");
 const ram = @import("ram/mod.zig");
+const instruction = @import("instruction/mod.zig");
 
 /// Convert Zolt's internal proof to Jolt-compatible format
 pub fn ProofConverter(comptime F: type) type {
@@ -1355,30 +1356,154 @@ pub fn ProofConverter(comptime F: type) type {
                 stage2_result.instr_right_operand_claim,
             );
 
-            // Stages 3-7 (placeholder)
+            // Stage 3: SpartanShift, InstructionInput, RegistersClaimReduction, BytecodeReadRaf, IncClaimReduction
             try self.generateZeroSumcheckProof(&jolt_proof.stage3_sumcheck_proof, n_cycle_vars, 3);
+
+            // SpartanShift claims (shift polynomials)
+            // These are evaluated at the shift sumcheck's opening point
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .UnexpandedPC, .sumcheck_id = .SpartanShift } },
+                F.zero(),
+            );
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .PC, .sumcheck_id = .SpartanShift } },
+                F.zero(),
+            );
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .{ .OpFlags = @intFromEnum(instruction.CircuitFlags.VirtualInstruction) }, .sumcheck_id = .SpartanShift } },
+                F.zero(),
+            );
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .{ .OpFlags = @intFromEnum(instruction.CircuitFlags.IsFirstInSequence) }, .sumcheck_id = .SpartanShift } },
+                F.zero(),
+            );
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .{ .InstructionFlags = @intFromEnum(instruction.InstructionFlags.IsNoop) }, .sumcheck_id = .SpartanShift } },
+                F.zero(),
+            );
+
+            // InstructionInputVirtualization claims
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .{ .InstructionFlags = @intFromEnum(instruction.InstructionFlags.LeftOperandIsRs1Value) }, .sumcheck_id = .InstructionInputVirtualization } },
+                F.zero(),
+            );
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .Rs1Value, .sumcheck_id = .InstructionInputVirtualization } },
+                F.zero(),
+            );
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .{ .InstructionFlags = @intFromEnum(instruction.InstructionFlags.LeftOperandIsPC) }, .sumcheck_id = .InstructionInputVirtualization } },
+                F.zero(),
+            );
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .UnexpandedPC, .sumcheck_id = .InstructionInputVirtualization } },
+                F.zero(),
+            );
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .{ .InstructionFlags = @intFromEnum(instruction.InstructionFlags.RightOperandIsRs2Value) }, .sumcheck_id = .InstructionInputVirtualization } },
+                F.zero(),
+            );
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .Rs2Value, .sumcheck_id = .InstructionInputVirtualization } },
+                F.zero(),
+            );
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .{ .InstructionFlags = @intFromEnum(instruction.InstructionFlags.RightOperandIsImm) }, .sumcheck_id = .InstructionInputVirtualization } },
+                F.zero(),
+            );
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .Imm, .sumcheck_id = .InstructionInputVirtualization } },
+                F.zero(),
+            );
+
+            // RegistersClaimReduction claims
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .RdWriteValue, .sumcheck_id = .RegistersClaimReduction } },
+                F.zero(),
+            );
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .Rs1Value, .sumcheck_id = .RegistersClaimReduction } },
+                F.zero(),
+            );
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .Rs2Value, .sumcheck_id = .RegistersClaimReduction } },
+                F.zero(),
+            );
+
+            // BytecodeReadRaf claims (InstructionReadRaf in Jolt)
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .InstructionRafFlag, .sumcheck_id = .BytecodeReadRaf } },
+                F.zero(),
+            );
+            // InstructionRa chunks (just add first chunk for now)
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .{ .InstructionRa = 0 }, .sumcheck_id = .BytecodeReadRaf } },
+                F.zero(),
+            );
+
+            // IncClaimReduction claims (Increment checking)
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .IncClaimReduction } },
+                F.zero(),
+            );
+
             // LookupOutput at InstructionClaimReduction was already added in Stage 2
 
+            // Stage 4: RegistersReadWriteChecking, RamValEvaluation, RamValFinalEvaluation
             try self.generateZeroSumcheckProof(&jolt_proof.stage4_sumcheck_proof, n_cycle_vars, 3);
+
+            // RegistersReadWriteChecking claims
             try jolt_proof.opening_claims.insert(
-                .{ .Virtual = .{ .poly = .RamVal, .sumcheck_id = .RamValEvaluation } },
+                .{ .Virtual = .{ .poly = .RegistersVal, .sumcheck_id = .RegistersReadWriteChecking } },
                 F.zero(),
             );
             try jolt_proof.opening_claims.insert(
-                .{ .Virtual = .{ .poly = .RamValFinal, .sumcheck_id = .RamValFinalEvaluation } },
+                .{ .Virtual = .{ .poly = .Rs1Ra, .sumcheck_id = .RegistersReadWriteChecking } },
+                F.zero(),
+            );
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .Rs2Ra, .sumcheck_id = .RegistersReadWriteChecking } },
+                F.zero(),
+            );
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .RdWa, .sumcheck_id = .RegistersReadWriteChecking } },
                 F.zero(),
             );
 
-            try self.generateZeroSumcheckProof(&jolt_proof.stage5_sumcheck_proof, n_cycle_vars, 3);
+            // RamValEvaluation claims
             try jolt_proof.opening_claims.insert(
-                .{ .Virtual = .{ .poly = .RegistersVal, .sumcheck_id = .RegistersValEvaluation } },
+                .{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamValEvaluation } },
                 F.zero(),
             );
+
+            // RamValFinalEvaluation claims
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamValFinalEvaluation } },
+                F.zero(),
+            );
+
+            // Stage 5: RegistersValEvaluation, RamRaClaimReduction, RamRafEvaluation
+            try self.generateZeroSumcheckProof(&jolt_proof.stage5_sumcheck_proof, n_cycle_vars, 3);
+
+            // RegistersValEvaluation claims
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .RdWa, .sumcheck_id = .RegistersValEvaluation } },
+                F.zero(),
+            );
+
+            // RamRaClaimReduction claims
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamRaClaimReduction } },
                 F.zero(),
             );
 
+            // RamRafEvaluation claims
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamRafEvaluation } },
+                F.zero(),
+            );
+
+            // Stage 6: RamHammingBooleanity, Booleanity, RamRaVirtualization
             try self.generateZeroSumcheckProof(&jolt_proof.stage6_sumcheck_proof, n_cycle_vars, 3);
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .RamHammingWeight, .sumcheck_id = .Booleanity } },
@@ -1389,6 +1514,7 @@ pub fn ProofConverter(comptime F: type) type {
                 F.zero(),
             );
 
+            // Stage 7: HammingWeightClaimReduction
             try self.generateZeroSumcheckProof(&jolt_proof.stage7_sumcheck_proof, config.log_k_chunk, 3);
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .RamHammingWeight, .sumcheck_id = .HammingWeightClaimReduction } },

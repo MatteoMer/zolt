@@ -2522,9 +2522,26 @@ pub fn ProofConverter(comptime F: type) type {
             std.debug.print("[ZOLT] FACTOR_EVALS: witness[0][LeftInstructionInput] = {any}\n", .{cycle_witnesses[0].values[r1cs.R1CSInputIndex.LeftInstructionInput.toIndex()].toBytesBE()});
             std.debug.print("[ZOLT] FACTOR_EVALS: witness[0][RightInstructionInput] = {any}\n", .{cycle_witnesses[0].values[r1cs.R1CSInputIndex.RightInstructionInput.toIndex()].toBytesBE()});
 
+            // Track per-cycle contributions for debugging
+            var cycle_count_with_nonzero_branch: usize = 0;
+            var cycle_count_with_nonzero_lookup_output: usize = 0;
+
             for (0..num_cycles) |t| {
                 const eq_val = eq_evals[t];
                 const witness = &cycle_witnesses[t];
+
+                // Debug: Track non-zero values
+                const branch_val = witness.values[r1cs.R1CSInputIndex.FlagBranch.toIndex()];
+                const lookup_output_val = witness.values[r1cs.R1CSInputIndex.LookupOutput.toIndex()];
+                if (!branch_val.eql(F.zero())) {
+                    cycle_count_with_nonzero_branch += 1;
+                    if (cycle_count_with_nonzero_branch <= 5) {
+                        std.debug.print("[ZOLT DEBUG] Cycle {} has Branch=1, LookupOutput={any}\n", .{ t, lookup_output_val.toBytesBE()[28..32] });
+                    }
+                }
+                if (!lookup_output_val.eql(F.zero())) {
+                    cycle_count_with_nonzero_lookup_output += 1;
+                }
 
                 // Extract the 8 factor values from the witness
                 // 0: LeftInstructionInput
@@ -2580,6 +2597,10 @@ pub fn ProofConverter(comptime F: type) type {
                 };
                 factor_evals[7] = factor_evals[7].add(eq_val.mul(next_is_noop));
             }
+
+            // Debug: Print counts
+            std.debug.print("[ZOLT DEBUG] Cycles with non-zero Branch: {}\n", .{cycle_count_with_nonzero_branch});
+            std.debug.print("[ZOLT DEBUG] Cycles with non-zero LookupOutput: {}\n", .{cycle_count_with_nonzero_lookup_output});
 
             // Handle padding cycles (indices from cycle_witnesses.len to eq_evals.len)
             // Padding cycles are NoOp cycles in Jolt. For NoOp:

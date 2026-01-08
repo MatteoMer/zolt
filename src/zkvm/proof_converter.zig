@@ -42,6 +42,8 @@ const jolt_device = @import("jolt_device.zig");
 const constants = @import("../common/constants.zig");
 const ram = @import("ram/mod.zig");
 const instruction = @import("instruction/mod.zig");
+const spartan_mod = @import("spartan/mod.zig");
+const Stage3Prover = spartan_mod.Stage3Prover;
 
 /// Convert Zolt's internal proof to Jolt-compatible format
 pub fn ProofConverter(comptime F: type) type {
@@ -1356,78 +1358,110 @@ pub fn ProofConverter(comptime F: type) type {
                 stage2_result.instr_right_operand_claim,
             );
 
-            // Stage 3: SpartanShift, InstructionInput, RegistersClaimReduction, BytecodeReadRaf, IncClaimReduction
-            try self.generateZeroSumcheckProof(&jolt_proof.stage3_sumcheck_proof, n_cycle_vars, 3);
+            // Stage 3: SpartanShift, InstructionInput, RegistersClaimReduction
+            // Extract r_product from Stage 2 challenges (last n_cycle_vars in BIG_ENDIAN)
+            var r_product = try self.allocator.alloc(F, n_cycle_vars);
+            defer self.allocator.free(r_product);
+            {
+                // Stage 2 challenges are in sumcheck order (LITTLE_ENDIAN)
+                // ProductVirtualRemainder uses the last n_cycle_vars challenges
+                // We need to reverse to get BIG_ENDIAN order
+                const stage2_chals = stage2_result.challenges;
+                const product_start = if (stage2_chals.len > n_cycle_vars) stage2_chals.len - n_cycle_vars else 0;
+                for (0..n_cycle_vars) |i| {
+                    const src_idx = n_cycle_vars - 1 - i;
+                    if (product_start + src_idx < stage2_chals.len) {
+                        r_product[i] = stage2_chals[product_start + src_idx];
+                    } else {
+                        r_product[i] = F.zero();
+                    }
+                }
+            }
 
-            // SpartanShift claims (shift polynomials)
-            // These are evaluated at the shift sumcheck's opening point
+            std.debug.print("[ZOLT] STAGE3: r_spartan_original[0] = {any}\n", .{r_spartan_original[0].toBytesBE()[0..8]});
+            std.debug.print("[ZOLT] STAGE3: r_product[0] = {any}\n", .{r_product[0].toBytesBE()[0..8]});
+
+            // Generate Stage 3 proof using the proper sumcheck prover
+            var stage3_prover_instance = Stage3Prover(F).init(self.allocator);
+            var stage3_result = try stage3_prover_instance.generateStage3Proof(
+                &jolt_proof.stage3_sumcheck_proof,
+                transcript,
+                &jolt_proof.opening_claims,
+                cycle_witnesses,
+                n_cycle_vars,
+                r_spartan_original, // r_outer in BIG_ENDIAN
+                r_product, // r_product in BIG_ENDIAN
+            );
+            defer stage3_result.deinit();
+
+            // SpartanShift claims (from Stage 3 prover)
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .UnexpandedPC, .sumcheck_id = .SpartanShift } },
-                F.zero(),
+                stage3_result.shift_unexpanded_pc_claim,
             );
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .PC, .sumcheck_id = .SpartanShift } },
-                F.zero(),
+                stage3_result.shift_pc_claim,
             );
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .{ .OpFlags = @intFromEnum(instruction.CircuitFlags.VirtualInstruction) }, .sumcheck_id = .SpartanShift } },
-                F.zero(),
+                stage3_result.shift_is_virtual_claim,
             );
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .{ .OpFlags = @intFromEnum(instruction.CircuitFlags.IsFirstInSequence) }, .sumcheck_id = .SpartanShift } },
-                F.zero(),
+                stage3_result.shift_is_first_in_sequence_claim,
             );
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .{ .InstructionFlags = @intFromEnum(instruction.InstructionFlags.IsNoop) }, .sumcheck_id = .SpartanShift } },
-                F.zero(),
+                stage3_result.shift_is_noop_claim,
             );
 
-            // InstructionInputVirtualization claims
+            // InstructionInputVirtualization claims (from Stage 3 prover)
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .{ .InstructionFlags = @intFromEnum(instruction.InstructionFlags.LeftOperandIsRs1Value) }, .sumcheck_id = .InstructionInputVirtualization } },
-                F.zero(),
+                stage3_result.instr_left_is_rs1_claim,
             );
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .Rs1Value, .sumcheck_id = .InstructionInputVirtualization } },
-                F.zero(),
+                stage3_result.instr_rs1_value_claim,
             );
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .{ .InstructionFlags = @intFromEnum(instruction.InstructionFlags.LeftOperandIsPC) }, .sumcheck_id = .InstructionInputVirtualization } },
-                F.zero(),
+                stage3_result.instr_left_is_pc_claim,
             );
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .UnexpandedPC, .sumcheck_id = .InstructionInputVirtualization } },
-                F.zero(),
+                stage3_result.instr_unexpanded_pc_claim,
             );
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .{ .InstructionFlags = @intFromEnum(instruction.InstructionFlags.RightOperandIsRs2Value) }, .sumcheck_id = .InstructionInputVirtualization } },
-                F.zero(),
+                stage3_result.instr_right_is_rs2_claim,
             );
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .Rs2Value, .sumcheck_id = .InstructionInputVirtualization } },
-                F.zero(),
+                stage3_result.instr_rs2_value_claim,
             );
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .{ .InstructionFlags = @intFromEnum(instruction.InstructionFlags.RightOperandIsImm) }, .sumcheck_id = .InstructionInputVirtualization } },
-                F.zero(),
+                stage3_result.instr_right_is_imm_claim,
             );
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .Imm, .sumcheck_id = .InstructionInputVirtualization } },
-                F.zero(),
+                stage3_result.instr_imm_claim,
             );
 
-            // RegistersClaimReduction claims
+            // RegistersClaimReduction claims (from Stage 3 prover)
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .RdWriteValue, .sumcheck_id = .RegistersClaimReduction } },
-                F.zero(),
+                stage3_result.reg_rd_write_value_claim,
             );
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .Rs1Value, .sumcheck_id = .RegistersClaimReduction } },
-                F.zero(),
+                stage3_result.reg_rs1_value_claim,
             );
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .Rs2Value, .sumcheck_id = .RegistersClaimReduction } },
-                F.zero(),
+                stage3_result.reg_rs2_value_claim,
             );
 
             // BytecodeReadRaf claims (InstructionReadRaf in Jolt)

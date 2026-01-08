@@ -157,9 +157,13 @@ pub fn OutputSumcheckProver(comptime F: type) type {
             std.debug.print("[ZOLT] OutputSumcheck: non_zero_count={}, io_region_values={}, K={}\n", .{ non_zero_count, io_region_values, K });
 
             // Compute IO region bounds (matches Jolt's ProgramIOPolynomial)
+            const lowest = memory_layout.getLowestAddress();
             const io_start = remapAddress(memory_layout.input_start, memory_layout) orelse 0;
             const io_end = remapAddress(constants.RAM_START_ADDRESS, memory_layout) orelse K;
-            std.debug.print("[ZOLT] OutputSumcheck: io_start={}, io_end={}\n", .{ io_start, io_end });
+            std.debug.print("[ZOLT] OutputSumcheck: lowest=0x{X:0>16}, io_start={}, io_end={}\n", .{ lowest, io_start, io_end });
+            std.debug.print("[ZOLT] OutputSumcheck: input_start=0x{X:0>16}, RAM_START=0x{X:0>16}\n", .{ memory_layout.input_start, constants.RAM_START_ADDRESS });
+            std.debug.print("[ZOLT] OutputSumcheck: output_start=0x{X:0>16}, output_end=0x{X:0>16}\n", .{ memory_layout.output_start, memory_layout.output_end });
+            std.debug.print("[ZOLT] OutputSumcheck: panic=0x{X:0>16}, termination=0x{X:0>16}\n", .{ memory_layout.panic, memory_layout.termination });
 
             // Initialize io_mask and val_io from program I/O (matching Jolt's ProgramIOPolynomial)
             // val_io is the "expected" values that the verifier will check against val_final
@@ -318,6 +322,16 @@ pub fn OutputSumcheckProver(comptime F: type) type {
                 s1 = s1.add(p1);
                 s2 = s2.add(p2);
                 s3 = s3.add(p3);
+            }
+
+            // Debug: verify sumcheck soundness s0 + s1 == current_claim
+            const sum_check = s0.add(s1);
+            if (!sum_check.eql(self.current_claim)) {
+                std.debug.print("[ZOLT OUTPUT_CHECK ERROR] s0 + s1 != current_claim!\n", .{});
+                std.debug.print("  s0 = {any}\n", .{s0.toBytesBE()});
+                std.debug.print("  s1 = {any}\n", .{s1.toBytesBE()});
+                std.debug.print("  s0+s1 = {any}\n", .{sum_check.toBytesBE()});
+                std.debug.print("  current_claim = {any}\n", .{self.current_claim.toBytesBE()});
             }
 
             // Convert evaluations to compressed coefficients [c0, c2, c3]

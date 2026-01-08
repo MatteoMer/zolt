@@ -2300,7 +2300,13 @@ pub fn ProofConverter(comptime F: type) type {
                 std.debug.print("[ZOLT DEBUG] inst0 individual_claims[0] = {any}\n", .{individual_claims[0].toBytesBE()});
                 std.debug.print("[ZOLT DEBUG] inst0 MATCH: {}\n", .{pp.current_claim.eql(individual_claims[0])});
             }
-            // Instances 1, 2, 3 contribute 0 (their final claims are 0)
+            // Instances 1, 2 contribute 0 (their final claims are 0), but Instance 3 may not!
+            if (output_prover) |op| {
+                expected_batched = expected_batched.add(op.current_claim.mul(batching_coeffs[3]));
+                std.debug.print("[ZOLT DEBUG] inst3 prover.current_claim = {any}\n", .{op.current_claim.toBytesBE()});
+                std.debug.print("[ZOLT DEBUG] inst3 individual_claims[3] = {any}\n", .{individual_claims[3].toBytesBE()});
+                std.debug.print("[ZOLT DEBUG] inst3 MATCH: {}\n", .{op.current_claim.eql(individual_claims[3])});
+            }
             if (instr_prover) |*ip| {
                 expected_batched = expected_batched.add(ip.current_claim.mul(batching_coeffs[4]));
                 std.debug.print("[ZOLT DEBUG] inst4 prover.current_claim = {any}\n", .{ip.current_claim.toBytesBE()});

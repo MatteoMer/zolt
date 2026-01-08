@@ -3,60 +3,66 @@
 ## Summary
 
 **Stage 1**: PASSES ✓
-**Stage 2**: FAILS - expected_output_claim mismatch (factor claims now match!)
+**Stage 2**: FAILS - OutputSumcheck zero-check fails
 
-## Major Progress Made
+## Root Cause Found!
 
-1. **All 712 Zolt tests pass** ✓
-2. **Stage 1 verification passes in Jolt** ✓
-3. **Fixed padding cycle handling for NextIsNoop** ✓
-4. **ALL 8 factor claims now match** ✓ (BIG WIN!)
+The OutputSumcheck prover fails the sumcheck soundness check `s(0) + s(1) = current_claim` in EVERY round.
 
-## Factor Claims Status - ALL MATCH!
-
-| Factor | Name | Status |
-|--------|------|--------|
-| 0 | LeftInstructionInput | ✓ Match |
-| 1 | RightInstructionInput | ✓ Match |
-| 2 | IsRdNotZero | ✓ Match |
-| 3 | WriteLookupOutputToRD | ✓ Match |
-| 4 | Jump | ✓ Match |
-| 5 | LookupOutput | ✓ Match |
-| 6 | Branch | ✓ Match |
-| 7 | NextIsNoop | ✓ Match |
-
-## Current Issue: expected_output_claim Mismatch
-
-Even though all 8 factor claims match, Stage 2 still fails:
+This is because the zero-check sum is NOT zero:
 ```
-output_claim:          7968339453898952278492854492263892690580431086104069366291509038777485287144
-expected_output_claim: 17524728173478701695928056251526582543863257995984347203943631711982665529987
+sum_k eq(r_address, k) * io_mask(k) * (val_final(k) - val_io(k)) ≠ 0
 ```
 
-### Instance Claims (from Jolt verifier)
-- Instance 0 (ProductVirtualRemainder): claim=323010183737825912300525185814087827916999767420637254937364551562019036232
-- Instance 2 (RamReadWriteChecking): claim=0
-- Instance 3 (OutputSumcheck): claim=4629280518433924343510614228232107193939545672773376108683093806229559212788
-- Instance 4 (InstructionClaimReduction): claim=19614600178290052887893682520874546269347390393183921025796677152367870851638
+### Why the sum is non-zero:
 
-### Possible Issues
-1. Instance 0's expected_output_claim may use different tau_low/r_tail_reversed
-2. One of the other instances (2, 3, 4) may have wrong expected_output_claim
-3. The batching coefficients may be different
+1. IO region: indices [1024, 4096) (addresses 0x7FFFA000 to 0x80000000)
+2. io_mask = 1 for this entire range
+3. val_io only has:
+   - panic (0) at index 2048
+   - termination (1) at index 2049
+4. val_final has non-zero values at indices 3584-3598 (addresses 0x7FFFF000-0x7FFFF0F8)
+5. Since val_io[3584..3598] = 0 but val_final[3584..3598] ≠ 0, the difference is non-zero!
 
-## Next Steps
+### Key Question
 
-1. [ ] Debug ProductVirtualRemainder expected_output_claim computation
-   - Check tau_low values
-   - Check r_tail_reversed values
-   - Check tau_bound_r_tail_reversed computation
-   - Check fused_left and fused_right computation
+What are the values at addresses 0x7FFFF000-0x7FFFF0F8?
 
-2. [ ] Debug other instance expected_output_claim computations
-   - Instance 3 (OutputSumcheck)
-   - Instance 4 (InstructionClaimReduction)
+Looking at the values:
+- k=3584: val=282579962709375 (0x101010101FF = appears to be ABI padding or stack setup)
+- k=3586: val=4310892546
+- k=3590: val=8070450545133223943 (0x7000000000000007)
+- etc.
 
-3. [ ] Compare Zolt's output_claim with Jolt's expected_output_claim breakdown
+These look like stack frame setup or initial register spills before the stack pointer is properly initialized.
+
+### Possible Causes
+
+1. **Zolt is incorrectly classifying these addresses as being in the IO region**
+   - But the addresses ARE in [input_start, RAM_START), so this is correct per Jolt's definition
+
+2. **Zolt's RAM trace includes spurious writes that Jolt doesn't see**
+   - Possible if trace serialization/deserialization differs
+
+3. **The Fibonacci program writes to these addresses legitimately, but Jolt handles it differently**
+   - Perhaps Jolt's val_io includes advice data that Zolt doesn't?
+
+### Next Steps
+
+1. [ ] Run Jolt's native Fibonacci prove/verify to see if it passes
+2. [ ] Compare Jolt's and Zolt's val_final at the problematic indices
+3. [ ] Check if these addresses are in the advice region (which might be handled differently)
+4. [ ] Investigate whether val_io should include more data than just input/output/panic/termination
+
+### Individual Claims That Match
+
+- val_final_claim ✓
+- val_io_eval ✓
+- eq_eval ✓
+- io_mask_eval ✓
+- expected_output_claim (computed from above) = 4629... ✓
+
+But the prover's current_claim = 11607... ≠ 4629... because the underlying sum is not zero.
 
 ## Testing Commands
 
@@ -64,9 +70,14 @@ expected_output_claim: 175247281734787016959280562515265825438632579959843472039
 # Build Zolt
 zig build -Doptimize=ReleaseFast
 
-# Generate proof with debug
+# Generate proof
 ./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format --export-preprocessing /tmp/zolt_preprocessing.bin -o /tmp/zolt_proof_dory.bin
 
 # Run Jolt verification
 cd /Users/matteo/projects/jolt/jolt-core && cargo test test_verify_zolt_proof_with_zolt_preprocessing --release -- --ignored --nocapture
 ```
+
+## Files Modified in This Session
+
+1. `/Users/matteo/projects/zolt/src/zkvm/ram/output_check.zig` - Added debug output
+2. `/Users/matteo/projects/zolt/src/zkvm/proof_converter.zig` - Added inst3 debug tracking

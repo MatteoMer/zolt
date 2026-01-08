@@ -1,5 +1,57 @@
 # Zolt-Jolt Cross-Verification Progress
 
+## Session 28 Summary - Stage 3 Verification Testing (2026-01-08)
+
+### Key Finding
+
+**With Zolt preprocessing, Stages 1-2 PASS, Stage 3 FAILS**
+
+```
+Verification failed: Stage 3
+output_claim:          20577841778877219275547658846017849540037880489939953429278770536770306134083
+expected_output_claim: 5338855503670768469593231154982602907961044230168061695638087912869958288945
+```
+
+### Testing Commands
+
+```bash
+# Generate proof with preprocessing export
+./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format \
+  --export-preprocessing /tmp/zolt_preprocessing.bin \
+  -o /tmp/zolt_proof_dory.bin --srs /tmp/jolt_dory_srs.bin
+
+# Run Jolt verification with Zolt preprocessing
+cd /Users/matteo/projects/jolt/jolt-core && \
+  cargo test test_verify_zolt_proof_with_zolt_preprocessing --release -- --ignored --nocapture
+```
+
+### Preprocessing File Mismatch Issue
+
+The test `test_verify_zolt_proof` (uses Jolt preprocessing) fails at Stage 1 because:
+- Jolt's preprocessing has different commitment parameters than Zolt
+- This causes tau values to differ, making expected_output_claim mismatch
+
+**Solution**: Use Zolt's exported preprocessing with Jolt verifier.
+
+### Stage 3 Prover Status
+
+Implemented Stage 3 batched sumcheck prover with:
+- ShiftMLEs, InstructionInputMLEs, RegistersMLEs structs
+- eq and eq+1 polynomial evaluation tables
+- Round polynomial computation for all 3 instances
+- Proper transcript flow (gamma derivation, input claims, batching)
+
+**Still failing** because round polynomials don't compute correct values.
+
+### Next Steps
+
+1. Debug Stage 3 round polynomial computation
+2. Verify eq+1 evaluation formula is correct
+3. Check MLE building from trace matches Jolt expectations
+4. Verify transcript operations match Jolt exactly
+
+---
+
 ## Session 27 Summary - Stage 3 Prover Implementation (2026-01-08)
 
 ### Key Discovery: Sumcheck Verification

@@ -83,17 +83,36 @@ This causes incorrect values for:
 - Factor 6 (Branch): Needs InstructionFlags::Branch, not just opcode
 - Factor 7 (NextIsNoop): Needs IsNoop flag on instruction, not just opcode check
 
+### Progress Made (2026-01-08)
+
+**Fixed padding cycle handling:**
+- Added explicit handling for padding cycles in `computeProductFactorEvaluations`
+- For padding cycles (NoOp), only Factor 7 (NextIsNoop) = 1, all others = 0
+- This fixed Factor 7 mismatch
+
+**After padding fix:**
+- Factors 0, 1, 3, 4, 7 all match ✓
+- Factors 2 (IsRdNotZero), 5 (LookupOutput), 6 (Branch) still differ
+
+### Remaining Issues
+
+The remaining differences are because Jolt's factor values depend on:
+1. **Instruction type** (not just opcode) - e.g., ADD vs ADDI have different behaviors
+2. **Virtual instruction sequences** - some instructions expand into multiple virtual steps
+3. **Compressed instructions** - instructions may be first-in-sequence or continuations
+
 ### Fix Required
 
 1. **Enhance Zolt's trace format** to include:
-   - Virtual instruction sequence flag
-   - Instruction type enum (not just opcode)
-   - Per-instruction circuit_flags array
+   - Instruction type enum (matching Jolt's Cycle enum variants)
+   - Virtual instruction flag
+   - First-in-sequence flag
+   - Per-instruction computed LookupOutput value
 
 2. **Update `R1CSCycleInputs.fromTraceStep`** to:
-   - Read flags from the trace instead of computing from opcode
-   - Handle virtual instruction sequences properly
-   - Compute IsNoop based on instruction type
+   - Use instruction type to compute flags correctly
+   - Compute LookupOutput based on instruction semantics
+   - Compute IsRdNotZero based on instruction type, not just rd field
 
 3. **Update `computeProductFactorEvaluations`** to use the correct flag values
 

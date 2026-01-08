@@ -450,6 +450,13 @@ pub fn Stage3Prover(comptime F: type) type {
             const next_is_first = opening_claims.get(.{ .Virtual = .{ .poly = .NextIsFirstInSequence, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
             const next_is_noop = opening_claims.get(.{ .Virtual = .{ .poly = .NextIsNoop, .sumcheck_id = .SpartanProductVirtualization } }) orelse F.zero();
 
+            // DEBUG: Print the individual claims
+            std.debug.print("[STAGE3] shift_input: next_unexpanded_pc = {any}\n", .{next_unexpanded_pc.toBytesBE()});
+            std.debug.print("[STAGE3] shift_input: next_pc = {any}\n", .{next_pc.toBytesBE()});
+            std.debug.print("[STAGE3] shift_input: next_is_virtual = {any}\n", .{next_is_virtual.toBytesBE()});
+            std.debug.print("[STAGE3] shift_input: next_is_first = {any}\n", .{next_is_first.toBytesBE()});
+            std.debug.print("[STAGE3] shift_input: next_is_noop = {any}\n", .{next_is_noop.toBytesBE()});
+
             var result = next_unexpanded_pc;
             result = result.add(gamma_powers[1].mul(next_pc));
             result = result.add(gamma_powers[2].mul(next_is_virtual));
@@ -1073,7 +1080,8 @@ pub fn Stage3Prover(comptime F: type) type {
                 const two_inv = F.fromU64(2).inverse() orelse F.one();
 
                 const c3 = ddd.mul(six_inv);
-                const c2 = dd1.mul(two_inv).sub(c3.mul(F.fromU64(3)).mul(two_inv));
+                // c2 = (dd1 - 6*c3) / 2 = dd1/2 - 3*c3
+                const c2 = dd1.mul(two_inv).sub(c3.mul(F.fromU64(3)));
                 const c1 = d1.sub(c2).sub(c3);
 
                 coeffs[0] = p0;

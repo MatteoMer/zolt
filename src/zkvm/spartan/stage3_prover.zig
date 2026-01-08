@@ -585,6 +585,7 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
         // State tracking
         prefix_n_vars: usize,
         current_prefix_size: usize,
+        current_witness_size: usize, // Track witness MLE size separately
         sumcheck_challenges: std.ArrayList(F),
         in_phase2: bool,
 
@@ -740,6 +741,7 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
                 .is_noop = is_noop,
                 .prefix_n_vars = prefix_n_vars,
                 .current_prefix_size = prefix_size,
+                .current_witness_size = trace_len,
                 .sumcheck_challenges = .empty,
                 .in_phase2 = false,
                 .phase2_eq_plus_one_outer = null,
@@ -895,9 +897,9 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
 
         fn bindPhase1(self: *Self, r_j: F) void {
             // Bind P and Q buffers: new[i] = old[2i] + r * (old[2i+1] - old[2i])
-            const new_size = self.current_prefix_size / 2;
+            const new_prefix_size = self.current_prefix_size / 2;
 
-            for (0..new_size) |i| {
+            for (0..new_prefix_size) |i| {
                 // P_0_outer
                 self.P_0_outer[i] = self.P_0_outer[2 * i].add(r_j.mul(self.P_0_outer[2 * i + 1].sub(self.P_0_outer[2 * i])));
                 self.Q_0_outer[i] = self.Q_0_outer[2 * i].add(r_j.mul(self.Q_0_outer[2 * i + 1].sub(self.Q_0_outer[2 * i])));
@@ -915,7 +917,19 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
                 self.Q_1_prod[i] = self.Q_1_prod[2 * i].add(r_j.mul(self.Q_1_prod[2 * i + 1].sub(self.Q_1_prod[2 * i])));
             }
 
-            self.current_prefix_size = new_size;
+            self.current_prefix_size = new_prefix_size;
+
+            // Bind witness MLEs (needed for final claims computation)
+            // Binding in LowToHigh order
+            const witness_new_size = self.current_witness_size / 2;
+            for (0..witness_new_size) |i| {
+                self.unexpanded_pc[i] = self.unexpanded_pc[2 * i].add(r_j.mul(self.unexpanded_pc[2 * i + 1].sub(self.unexpanded_pc[2 * i])));
+                self.pc[i] = self.pc[2 * i].add(r_j.mul(self.pc[2 * i + 1].sub(self.pc[2 * i])));
+                self.is_virtual[i] = self.is_virtual[2 * i].add(r_j.mul(self.is_virtual[2 * i + 1].sub(self.is_virtual[2 * i])));
+                self.is_first_in_sequence[i] = self.is_first_in_sequence[2 * i].add(r_j.mul(self.is_first_in_sequence[2 * i + 1].sub(self.is_first_in_sequence[2 * i])));
+                self.is_noop[i] = self.is_noop[2 * i].add(r_j.mul(self.is_noop[2 * i + 1].sub(self.is_noop[2 * i])));
+            }
+            self.current_witness_size = witness_new_size;
         }
 
         fn transitionToPhase2(self: *Self, r_j: F) void {
@@ -939,7 +953,7 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
 
         fn bindPhase2(self: *Self, r_j: F) void {
             // Bind witness MLEs and eq+1 polynomials
-            const new_size = self.unexpanded_pc.len / 2;
+            const new_size = self.current_witness_size / 2;
 
             for (0..new_size) |i| {
                 self.unexpanded_pc[i] = self.unexpanded_pc[2 * i].add(r_j.mul(self.unexpanded_pc[2 * i + 1].sub(self.unexpanded_pc[2 * i])));
@@ -955,9 +969,11 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
                     eq[i] = eq[2 * i].add(r_j.mul(eq[2 * i + 1].sub(eq[2 * i])));
                 }
             }
+            self.current_witness_size = new_size;
         }
 
         /// Get final claims after all rounds
+        /// After all rounds, current_witness_size should be 1
         pub fn finalClaims(self: *const Self) struct {
             unexpanded_pc: F,
             pc: F,
@@ -965,12 +981,13 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             is_first_in_sequence: F,
             is_noop: F,
         } {
+            std.debug.assert(self.current_witness_size == 1);
             return .{
-                .unexpanded_pc = if (self.unexpanded_pc.len > 0) self.unexpanded_pc[0] else F.zero(),
-                .pc = if (self.pc.len > 0) self.pc[0] else F.zero(),
-                .is_virtual = if (self.is_virtual.len > 0) self.is_virtual[0] else F.zero(),
-                .is_first_in_sequence = if (self.is_first_in_sequence.len > 0) self.is_first_in_sequence[0] else F.zero(),
-                .is_noop = if (self.is_noop.len > 0) self.is_noop[0] else F.zero(),
+                .unexpanded_pc = self.unexpanded_pc[0],
+                .pc = self.pc[0],
+                .is_virtual = self.is_virtual[0],
+                .is_first_in_sequence = self.is_first_in_sequence[0],
+                .is_noop = self.is_noop[0],
             };
         }
 
@@ -1269,6 +1286,7 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
 
         prefix_n_vars: usize,
         current_prefix_size: usize,
+        current_witness_size: usize,
         in_phase2: bool,
 
         // Phase 2 eq polynomial
@@ -1354,6 +1372,7 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
                 .gamma_sqr = gamma_sqr,
                 .prefix_n_vars = prefix_n_vars,
                 .current_prefix_size = prefix_size,
+                .current_witness_size = trace_len,
                 .in_phase2 = false,
                 .phase2_eq = null,
                 .allocator = allocator,
@@ -1448,14 +1467,23 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
         }
 
         fn bindPhase1(self: *Self, r_j: F) void {
-            const new_size = self.current_prefix_size / 2;
+            const new_prefix_size = self.current_prefix_size / 2;
 
-            for (0..new_size) |i| {
+            for (0..new_prefix_size) |i| {
                 self.P[i] = self.P[2 * i].add(r_j.mul(self.P[2 * i + 1].sub(self.P[2 * i])));
                 self.Q[i] = self.Q[2 * i].add(r_j.mul(self.Q[2 * i + 1].sub(self.Q[2 * i])));
             }
 
-            self.current_prefix_size = new_size;
+            self.current_prefix_size = new_prefix_size;
+
+            // Also bind witness MLEs
+            const witness_new_size = self.current_witness_size / 2;
+            for (0..witness_new_size) |i| {
+                self.rd_write_value[i] = self.rd_write_value[2 * i].add(r_j.mul(self.rd_write_value[2 * i + 1].sub(self.rd_write_value[2 * i])));
+                self.rs1_value[i] = self.rs1_value[2 * i].add(r_j.mul(self.rs1_value[2 * i + 1].sub(self.rs1_value[2 * i])));
+                self.rs2_value[i] = self.rs2_value[2 * i].add(r_j.mul(self.rs2_value[2 * i + 1].sub(self.rs2_value[2 * i])));
+            }
+            self.current_witness_size = witness_new_size;
         }
 
         fn transitionToPhase2(self: *Self, r_j: F) void {
@@ -1463,12 +1491,12 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
             self.in_phase2 = true;
 
             // Materialize eq polynomial for remaining rounds
-            const remaining_size = self.rd_write_value.len;
+            const remaining_size = self.current_witness_size;
             self.phase2_eq = self.allocator.alloc(F, remaining_size) catch unreachable;
         }
 
         fn bindPhase2(self: *Self, r_j: F) void {
-            const new_size = self.rd_write_value.len / 2;
+            const new_size = self.current_witness_size / 2;
 
             for (0..new_size) |i| {
                 self.rd_write_value[i] = self.rd_write_value[2 * i].add(r_j.mul(self.rd_write_value[2 * i + 1].sub(self.rd_write_value[2 * i])));
@@ -1479,6 +1507,7 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
                     eq[i] = eq[2 * i].add(r_j.mul(eq[2 * i + 1].sub(eq[2 * i])));
                 }
             }
+            self.current_witness_size = new_size;
         }
 
         pub fn finalClaims(self: *const Self) struct {
@@ -1486,10 +1515,11 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
             rs1_value: F,
             rs2_value: F,
         } {
+            std.debug.assert(self.current_witness_size == 1);
             return .{
-                .rd_write_value = if (self.rd_write_value.len > 0) self.rd_write_value[0] else F.zero(),
-                .rs1_value = if (self.rs1_value.len > 0) self.rs1_value[0] else F.zero(),
-                .rs2_value = if (self.rs2_value.len > 0) self.rs2_value[0] else F.zero(),
+                .rd_write_value = self.rd_write_value[0],
+                .rs1_value = self.rs1_value[0],
+                .rs2_value = self.rs2_value[0],
             };
         }
     };

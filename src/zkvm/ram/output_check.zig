@@ -156,6 +156,19 @@ pub fn OutputSumcheckProver(comptime F: type) type {
             }
             std.debug.print("[ZOLT] OutputSumcheck: non_zero_count={}, io_region_values={}, K={}\n", .{ non_zero_count, io_region_values, K });
 
+            // Set panic and termination bits in val_final (matching Jolt's gen_ram_final_memory_state)
+            // Jolt sets these AFTER getting the final memory state from the tracer
+            const panic_index = remapAddress(memory_layout.panic, memory_layout) orelse 0;
+            if (panic_index < K) {
+                val_final[panic_index] = if (is_panicking) F.one() else F.zero();
+                std.debug.print("[ZOLT] OutputSumcheck: val_final[{}] = {} (panic bit)\n", .{ panic_index, if (is_panicking) @as(u64, 1) else @as(u64, 0) });
+            }
+            const termination_index = remapAddress(memory_layout.termination, memory_layout) orelse 0;
+            if (!is_panicking and termination_index < K) {
+                val_final[termination_index] = F.one();
+                std.debug.print("[ZOLT] OutputSumcheck: val_final[{}] = 1 (termination bit, not panicking)\n", .{termination_index});
+            }
+
             // Compute IO region bounds (matches Jolt's ProgramIOPolynomial)
             const lowest = memory_layout.getLowestAddress();
             const io_start = remapAddress(memory_layout.input_start, memory_layout) orelse 0;
@@ -220,14 +233,13 @@ pub fn OutputSumcheckProver(comptime F: type) type {
             }
 
             // Set panic bit in val_io (matching Jolt's ProgramIOPolynomial)
-            const panic_index = remapAddress(memory_layout.panic, memory_layout) orelse 0;
+            // (panic_index and termination_index already defined above for val_final)
             if (panic_index < K) {
                 val_io[panic_index] = if (is_panicking) F.one() else F.zero();
                 std.debug.print("[ZOLT] OutputSumcheck: val_io[{}] = {} (panic bit)\n", .{ panic_index, if (is_panicking) @as(u64, 1) else @as(u64, 0) });
             }
 
             // Set termination bit in val_io if not panicking (matching Jolt's ProgramIOPolynomial)
-            const termination_index = remapAddress(memory_layout.termination, memory_layout) orelse 0;
             std.debug.print("[ZOLT] OutputSumcheck: termination_index={}, in IO={}\n", .{ termination_index, termination_index >= io_start and termination_index < io_end });
             if (!is_panicking and termination_index < K) {
                 val_io[termination_index] = F.one();

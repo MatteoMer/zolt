@@ -50,6 +50,18 @@ Implemented Stage 3 batched sumcheck prover with:
 3. Check MLE building from trace matches Jolt expectations
 4. Verify transcript operations match Jolt exactly
 
+### Technical Notes on Instruction Flags
+
+InstructionInput MLEs need these flags for each cycle:
+- `LeftOperandIsRs1Value`: 1 if left = rs1
+- `LeftOperandIsPC`: 1 if left = PC (JAL, AUIPC)
+- `RightOperandIsRs2Value`: 1 if right = rs2 (R-type instructions)
+- `RightOperandIsImm`: 1 if right = imm (I-type, Load, Store, etc.)
+
+Current approach: Compare `LeftInstructionInput` value to rs1/pc to determine flag.
+This should work since `computeInstructionInputs` in constraints.zig sets these
+based on opcode. But edge cases (rs1 == 0 == pc for first cycle) may cause issues.
+
 ---
 
 ## Session 27 Summary - Stage 3 Prover Implementation (2026-01-08)

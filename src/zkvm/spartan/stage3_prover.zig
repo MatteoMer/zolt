@@ -764,6 +764,32 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             }
             std.debug.print("\n", .{});
 
+            // DEBUG: Print last cycle's Next values (should be 0 for last cycle)
+            const last_idx = trace_len - 1;
+            const last_witness = &cycle_witnesses[last_idx].values;
+            std.debug.print("[ZOLT] SHIFT_INIT: cycle_witnesses[{}].NextUPC = {any}\n", .{ last_idx, last_witness[R1CSInputIndex.NextUnexpandedPC.toIndex()].toBytes()[0..8] });
+            std.debug.print("[ZOLT] SHIFT_INIT: cycle_witnesses[{}].NextPC = {any}\n", .{ last_idx, last_witness[R1CSInputIndex.NextPC.toIndex()].toBytes()[0..8] });
+            std.debug.print("[ZOLT] SHIFT_INIT: cycle_witnesses[{}].NextIsVirtual = {any}\n", .{ last_idx, last_witness[R1CSInputIndex.NextIsVirtual.toIndex()].toBytes()[0..8] });
+            std.debug.print("[ZOLT] SHIFT_INIT: cycle_witnesses[{}].NextIsFirst = {any}\n", .{ last_idx, last_witness[R1CSInputIndex.NextIsFirstInSequence.toIndex()].toBytes()[0..8] });
+
+            // DEBUG: Verify NextUPC[j] = UPC[j+1] relationship for all j
+            var next_shift_mismatch_count: usize = 0;
+            for (0..trace_len - 1) |check_j| {
+                const next_upc_j = cycle_witnesses[check_j].values[R1CSInputIndex.NextUnexpandedPC.toIndex()];
+                const upc_j_plus_1 = cycle_witnesses[check_j + 1].values[R1CSInputIndex.UnexpandedPC.toIndex()];
+                if (!next_upc_j.eql(upc_j_plus_1)) {
+                    if (next_shift_mismatch_count < 5) {
+                        std.debug.print("[ZOLT] SHIFT_INIT: MISMATCH NextUPC[{}] != UPC[{}]: {any} != {any}\n", .{ check_j, check_j + 1, next_upc_j.toBytes()[0..8], upc_j_plus_1.toBytes()[0..8] });
+                    }
+                    next_shift_mismatch_count += 1;
+                }
+            }
+            if (next_shift_mismatch_count > 0) {
+                std.debug.print("[ZOLT] SHIFT_INIT: Found {} mismatches in NextUPC[j] = UPC[j+1] relationship!\n", .{next_shift_mismatch_count});
+            } else {
+                std.debug.print("[ZOLT] SHIFT_INIT: NextUPC[j] = UPC[j+1] verified for all {} cycles\n", .{trace_len - 1});
+            }
+
             // DEBUG: Verify grand sum = Σ P[j]*Q[j]
             var grand_sum = F.zero();
             for (0..prefix_size) |j| {
@@ -837,6 +863,18 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             }
             std.debug.print("[ZOLT] SHIFT_INIT: next_sum (using Next polys with eq) = {{ {any} }}\n", .{next_sum.toBytes()});
 
+            // DEBUG: Compute the difference and the expected boundary term
+            const diff = next_sum.sub(direct_sum);
+            std.debug.print("[ZOLT] SHIFT_INIT: next_sum - direct_sum = {{ {any} }}\n", .{diff.toBytes()});
+
+            // The boundary term should be eq(r, N-1) * (batched Next values at index N-1)
+            // This is the term that's in next_sum but not in direct_sum
+
+            // Also compare next_sum to input_claim - if r_outer is correct, they should match
+            // (Assuming the opening claims were computed at r_outer)
+            std.debug.print("[ZOLT] SHIFT_INIT: r_outer[0] = {{ {any} }}\n", .{r_outer[0].toBytes()[0..8]});
+            std.debug.print("[ZOLT] SHIFT_INIT: r_outer[last] = {{ {any} }}\n", .{r_outer[r_outer.len - 1].toBytes()[0..8]});
+
             // DEBUG: Verify the relationship Next[j] = Current[j+1]
             std.debug.print("[ZOLT] SHIFT_INIT: Checking Next[j] = Current[j+1] relationship:\n", .{});
             for (0..@min(5, trace_len - 1)) |test_j| {
@@ -848,6 +886,51 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
                     next_upc_j.toBytes()[0..8],
                     curr_upc_j1.toBytes()[0..8],
                     next_upc_j.eql(curr_upc_j1),
+                });
+            }
+
+            // DEBUG: Verify eq(r, k-1) = eq+1(r, k) relationship and boundary behavior
+            std.debug.print("[ZOLT] SHIFT_INIT: Verifying eq(r, k-1) = eq+1(r, k):\n", .{});
+
+            // Check eq+1(r, 0) - this is the boundary case
+            @memset(j_bits, F.zero()); // j = 0 in bits
+            const eq_plus_one_at_0 = poly_mod.EqPlusOnePolynomial(F).mle(r_outer, j_bits);
+            std.debug.print("  eq+1(r, 0) = {any} (should be ~0 unless r=max)\n", .{eq_plus_one_at_0.toBytes()[0..8]});
+
+            // Check eq+1(r, N-1) where N = trace_len - this is also a boundary case
+            const n_minus_1 = trace_len - 1;
+            for (0..n_vars) |bit_idx| {
+                const bit_pos: u6 = @intCast(n_vars - 1 - bit_idx);
+                j_bits[bit_idx] = if ((n_minus_1 >> bit_pos) & 1 == 1) F.one() else F.zero();
+            }
+            const eq_plus_one_at_n_minus_1 = poly_mod.EqPlusOnePolynomial(F).mle(r_outer, j_bits);
+            std.debug.print("  eq+1(r, N-1={d}) = {any} (should be 0 by design)\n", .{ n_minus_1, eq_plus_one_at_n_minus_1.toBytes()[0..8] });
+
+            // Check eq(r, N-1) for comparison
+            const eq_at_n_minus_1 = poly_mod.EqPolynomial(F).mle(r_outer, j_bits);
+            std.debug.print("  eq(r, N-1={d}) = {any}\n", .{ n_minus_1, eq_at_n_minus_1.toBytes()[0..8] });
+
+            for (1..@min(5, trace_len)) |k| {
+                // Compute eq(r_outer, k-1)
+                for (0..n_vars) |bit_idx| {
+                    const bit_pos: u6 = @intCast(n_vars - 1 - bit_idx);
+                    j_bits[bit_idx] = if (((k - 1) >> bit_pos) & 1 == 1) F.one() else F.zero();
+                }
+                const eq_k_minus_1 = poly_mod.EqPolynomial(F).mle(r_outer, j_bits);
+
+                // Compute eq+1(r_outer, k)
+                for (0..n_vars) |bit_idx| {
+                    const bit_pos: u6 = @intCast(n_vars - 1 - bit_idx);
+                    j_bits[bit_idx] = if ((k >> bit_pos) & 1 == 1) F.one() else F.zero();
+                }
+                const eq_plus_one_k = poly_mod.EqPlusOnePolynomial(F).mle(r_outer, j_bits);
+
+                const match = eq_k_minus_1.eql(eq_plus_one_k);
+                std.debug.print("  k={d}: eq(r,k-1)={any}, eq+1(r,k)={any}, match={}\n", .{
+                    k,
+                    eq_k_minus_1.toBytes()[0..8],
+                    eq_plus_one_k.toBytes()[0..8],
+                    match,
                 });
             }
 

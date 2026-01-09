@@ -1011,13 +1011,37 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             // =================================================================
             inputs.values[R1CSInputIndex.PC.toIndex()] = F.fromU64(step.pc);
             inputs.values[R1CSInputIndex.UnexpandedPC.toIndex()] = F.fromU64(step.pc);
-            inputs.values[R1CSInputIndex.NextPC.toIndex()] = F.fromU64(step.next_pc);
-            inputs.values[R1CSInputIndex.NextUnexpandedPC.toIndex()] = F.fromU64(step.next_pc);
 
-            // Use next step's PC if available
+            // Use next step's values if available, otherwise 0
+            // This matches Jolt's behavior where the last cycle's Next* values are 0
+            // because there is no valid next cycle
             if (next_step) |ns| {
                 inputs.values[R1CSInputIndex.NextPC.toIndex()] = F.fromU64(ns.pc);
                 inputs.values[R1CSInputIndex.NextUnexpandedPC.toIndex()] = F.fromU64(ns.pc);
+
+                // Set NextIsVirtual and NextIsFirstInSequence from next step's circuit flags
+                // These are determined by the instruction type at the next cycle
+                const ns_opcode: u8 = @truncate(ns.instruction & 0x7F);
+
+                // VirtualInstruction: true if next instruction is a "virtual" sequence
+                // In Jolt, virtual sequences are used for multi-step operations
+                // For RISC-V instructions, most real instructions are NOT virtual
+                // The only virtual instruction in Jolt is "virtual sequence advice"
+                // which we don't emit in the trace, so NextIsVirtual is always 0
+                inputs.values[R1CSInputIndex.NextIsVirtual.toIndex()] = F.zero();
+
+                // IsFirstInSequence: true if next instruction starts a new sequence
+                // In Jolt, most instructions are the first and only step in their sequence
+                // Virtual instructions that span multiple cycles would not be first
+                // For now, all real RISC-V instructions are first in their sequence
+                _ = ns_opcode;
+                inputs.values[R1CSInputIndex.NextIsFirstInSequence.toIndex()] = F.one();
+            } else {
+                // No next step means last cycle - all Next* values are 0
+                inputs.values[R1CSInputIndex.NextPC.toIndex()] = F.zero();
+                inputs.values[R1CSInputIndex.NextUnexpandedPC.toIndex()] = F.zero();
+                inputs.values[R1CSInputIndex.NextIsVirtual.toIndex()] = F.zero();
+                inputs.values[R1CSInputIndex.NextIsFirstInSequence.toIndex()] = F.zero();
             }
 
             // =================================================================

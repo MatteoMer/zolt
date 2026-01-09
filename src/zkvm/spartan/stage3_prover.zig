@@ -437,11 +437,15 @@ pub fn Stage3Prover(comptime F: type) type {
             const next_is_first = opening_claims.get(.{ .Virtual = .{ .poly = .NextIsFirstInSequence, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
             const next_is_noop = opening_claims.get(.{ .Virtual = .{ .poly = .NextIsNoop, .sumcheck_id = .SpartanProductVirtualization } }) orelse F.zero();
 
-            std.debug.print("[ZOLT] SHIFT_INPUT: next_unexpanded_pc = {{ {any} }}\n", .{next_unexpanded_pc.toBytes()[0..16]});
-            std.debug.print("[ZOLT] SHIFT_INPUT: next_pc = {{ {any} }}\n", .{next_pc.toBytes()[0..16]});
-            std.debug.print("[ZOLT] SHIFT_INPUT: next_is_virtual = {{ {any} }}\n", .{next_is_virtual.toBytes()[0..16]});
-            std.debug.print("[ZOLT] SHIFT_INPUT: next_is_first = {{ {any} }}\n", .{next_is_first.toBytes()[0..16]});
-            std.debug.print("[ZOLT] SHIFT_INPUT: next_is_noop = {{ {any} }}\n", .{next_is_noop.toBytes()[0..16]});
+            std.debug.print("[ZOLT] SHIFT_INPUT: next_unexpanded_pc = {{ {any} }}\n", .{next_unexpanded_pc.toBytes()});
+            std.debug.print("[ZOLT] SHIFT_INPUT: next_pc = {{ {any} }}\n", .{next_pc.toBytes()});
+            std.debug.print("[ZOLT] SHIFT_INPUT: next_is_virtual = {{ {any} }}\n", .{next_is_virtual.toBytes()});
+            std.debug.print("[ZOLT] SHIFT_INPUT: next_is_first = {{ {any} }}\n", .{next_is_first.toBytes()});
+            std.debug.print("[ZOLT] SHIFT_INPUT: next_is_noop = {{ {any} }}\n", .{next_is_noop.toBytes()});
+            std.debug.print("[ZOLT] SHIFT_INPUT: gamma_powers[4] = {{ {any} }}\n", .{gamma_powers[4].toBytes()});
+            // Also verify the input claim is correctly computed
+            std.debug.print("[ZOLT] SHIFT_INPUT: 1 - next_is_noop = {{ {any} }}\n", .{F.one().sub(next_is_noop).toBytes()});
+            std.debug.print("[ZOLT] SHIFT_INPUT: gamma^4 * (1-noop) = {{ {any} }}\n", .{gamma_powers[4].mul(F.one().sub(next_is_noop)).toBytes()});
 
             var result = next_unexpanded_pc;
             result = result.add(gamma_powers[1].mul(next_pc));
@@ -802,6 +806,50 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
                 direct_sum = direct_sum.add(gamma_powers[4].mul(eq_plus_one_prod).mul(F.one().sub(noop)));
             }
             std.debug.print("[ZOLT] SHIFT_INIT: direct_sum = {{ {any} }}\n", .{direct_sum.toBytes()});
+
+            // DEBUG: Compute what the input_claim should be based on "Next" polynomial evaluations
+            // This uses the SAME witness but reads from NextUnexpandedPC, NextPC, etc. with EQ weighting
+            var next_sum = F.zero();
+            for (0..trace_len) |jj| {
+                // Convert jj to BIG_ENDIAN bits
+                for (0..n_vars) |k| {
+                    const bit_pos: u6 = @intCast(n_vars - 1 - k);
+                    j_bits[k] = if ((jj >> bit_pos) & 1 == 1) F.one() else F.zero();
+                }
+
+                const eq_outer = poly_mod.EqPolynomial(F).mle(r_outer, j_bits);
+                const eq_prod = poly_mod.EqPolynomial(F).mle(r_product, j_bits);
+
+                const witness = &cycle_witnesses[jj].values;
+                const next_upc = witness[R1CSInputIndex.NextUnexpandedPC.toIndex()];
+                const next_pc = witness[R1CSInputIndex.NextPC.toIndex()];
+                const next_virt = witness[R1CSInputIndex.NextIsVirtual.toIndex()];
+                const next_first = witness[R1CSInputIndex.NextIsFirstInSequence.toIndex()];
+                const next_noop = witness[R1CSInputIndex.FlagIsNoop.toIndex()]; // FlagIsNoop is the "NextIsNoop" from product virtualization
+
+                var next_v = next_upc;
+                next_v = next_v.add(gamma_powers[1].mul(next_pc));
+                next_v = next_v.add(gamma_powers[2].mul(next_virt));
+                next_v = next_v.add(gamma_powers[3].mul(next_first));
+
+                next_sum = next_sum.add(eq_outer.mul(next_v));
+                next_sum = next_sum.add(gamma_powers[4].mul(eq_prod).mul(F.one().sub(next_noop)));
+            }
+            std.debug.print("[ZOLT] SHIFT_INIT: next_sum (using Next polys with eq) = {{ {any} }}\n", .{next_sum.toBytes()});
+
+            // DEBUG: Verify the relationship Next[j] = Current[j+1]
+            std.debug.print("[ZOLT] SHIFT_INIT: Checking Next[j] = Current[j+1] relationship:\n", .{});
+            for (0..@min(5, trace_len - 1)) |test_j| {
+                _ = cycle_witnesses[test_j].values[R1CSInputIndex.UnexpandedPC.toIndex()]; // Current j
+                const next_upc_j = cycle_witnesses[test_j].values[R1CSInputIndex.NextUnexpandedPC.toIndex()];
+                const curr_upc_j1 = cycle_witnesses[test_j + 1].values[R1CSInputIndex.UnexpandedPC.toIndex()];
+                std.debug.print("  j={d}: NextUPC[j]={any}, UPC[j+1]={any}, match={}\n", .{
+                    test_j,
+                    next_upc_j.toBytes()[0..8],
+                    curr_upc_j1.toBytes()[0..8],
+                    next_upc_j.eql(curr_upc_j1),
+                });
+            }
 
             return Self{
                 .P_0_outer = P_0_outer,

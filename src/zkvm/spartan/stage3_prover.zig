@@ -437,6 +437,12 @@ pub fn Stage3Prover(comptime F: type) type {
             const next_is_first = opening_claims.get(.{ .Virtual = .{ .poly = .NextIsFirstInSequence, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
             const next_is_noop = opening_claims.get(.{ .Virtual = .{ .poly = .NextIsNoop, .sumcheck_id = .SpartanProductVirtualization } }) orelse F.zero();
 
+            std.debug.print("[ZOLT] SHIFT_INPUT: next_unexpanded_pc = {{ {any} }}\n", .{next_unexpanded_pc.toBytes()[0..16]});
+            std.debug.print("[ZOLT] SHIFT_INPUT: next_pc = {{ {any} }}\n", .{next_pc.toBytes()[0..16]});
+            std.debug.print("[ZOLT] SHIFT_INPUT: next_is_virtual = {{ {any} }}\n", .{next_is_virtual.toBytes()[0..16]});
+            std.debug.print("[ZOLT] SHIFT_INPUT: next_is_first = {{ {any} }}\n", .{next_is_first.toBytes()[0..16]});
+            std.debug.print("[ZOLT] SHIFT_INPUT: next_is_noop = {{ {any} }}\n", .{next_is_noop.toBytes()[0..16]});
+
             var result = next_unexpanded_pc;
             result = result.add(gamma_powers[1].mul(next_pc));
             result = result.add(gamma_powers[2].mul(next_is_virtual));
@@ -597,10 +603,19 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
 
         // State tracking
         prefix_n_vars: usize,
+        suffix_n_vars: usize,
         current_prefix_size: usize,
         current_witness_size: usize, // Track witness MLE size separately
         sumcheck_challenges: std.ArrayList(F),
         in_phase2: bool,
+
+        // Original points (needed for Phase 2 transition)
+        r_outer: []const F,
+        r_product: []const F,
+
+        // Original trace (needed for Phase 2 witness MLE reconstruction)
+        cycle_witnesses: []const r1cs.R1CSCycleInputs(F),
+        trace_len: usize,
 
         // Phase2 materialized polynomials (only allocated when transitioning)
         phase2_eq_plus_one_outer: ?[]F,
@@ -745,6 +760,49 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             }
             std.debug.print("\n", .{});
 
+            // DEBUG: Verify grand sum = Σ P[j]*Q[j]
+            var grand_sum = F.zero();
+            for (0..prefix_size) |j| {
+                grand_sum = grand_sum.add(P_0_outer[j].mul(Q_0_outer[j]));
+                grand_sum = grand_sum.add(P_1_outer[j].mul(Q_1_outer[j]));
+                grand_sum = grand_sum.add(P_0_prod[j].mul(Q_0_prod[j]));
+                grand_sum = grand_sum.add(P_1_prod[j].mul(Q_1_prod[j]));
+            }
+            std.debug.print("[ZOLT] SHIFT_INIT: grand_sum(P*Q) = {{ {any} }}\n", .{grand_sum.toBytes()});
+
+            // DEBUG: Compute direct sum without prefix-suffix optimization
+            // sum = Σ_j eq+1(r_outer, j) * [upc(j) + γ*pc(j) + γ²*virt(j) + γ³*first(j)]
+            //     + γ⁴ * Σ_j eq+1(r_prod, j) * (1 - noop(j))
+            var direct_sum = F.zero();
+            const j_bits = try allocator.alloc(F, n_vars);
+            defer allocator.free(j_bits);
+            for (0..trace_len) |j| {
+                // Convert j to BIG_ENDIAN bits
+                for (0..n_vars) |k| {
+                    const bit_pos: u6 = @intCast(n_vars - 1 - k);
+                    j_bits[k] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
+                }
+
+                const eq_plus_one_outer = poly_mod.EqPlusOnePolynomial(F).mle(r_outer, j_bits);
+                const eq_plus_one_prod = poly_mod.EqPlusOnePolynomial(F).mle(r_product, j_bits);
+
+                const witness = &cycle_witnesses[j].values;
+                const upc = witness[R1CSInputIndex.UnexpandedPC.toIndex()];
+                const pc_val = witness[R1CSInputIndex.PC.toIndex()];
+                const virt = witness[R1CSInputIndex.FlagVirtualInstruction.toIndex()];
+                const first = witness[R1CSInputIndex.FlagIsFirstInSequence.toIndex()];
+                const noop = witness[R1CSInputIndex.FlagIsNoop.toIndex()];
+
+                var v = upc;
+                v = v.add(gamma_powers[1].mul(pc_val));
+                v = v.add(gamma_powers[2].mul(virt));
+                v = v.add(gamma_powers[3].mul(first));
+
+                direct_sum = direct_sum.add(eq_plus_one_outer.mul(v));
+                direct_sum = direct_sum.add(gamma_powers[4].mul(eq_plus_one_prod).mul(F.one().sub(noop)));
+            }
+            std.debug.print("[ZOLT] SHIFT_INIT: direct_sum = {{ {any} }}\n", .{direct_sum.toBytes()});
+
             return Self{
                 .P_0_outer = P_0_outer,
                 .Q_0_outer = Q_0_outer,
@@ -761,10 +819,15 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
                 .is_first_in_sequence = is_first_in_sequence,
                 .is_noop = is_noop,
                 .prefix_n_vars = prefix_n_vars,
+                .suffix_n_vars = suffix_n_vars,
                 .current_prefix_size = prefix_size,
                 .current_witness_size = trace_len,
                 .sumcheck_challenges = .empty,
                 .in_phase2 = false,
+                .r_outer = r_outer,
+                .r_product = r_product,
+                .cycle_witnesses = cycle_witnesses,
+                .trace_len = trace_len,
                 .phase2_eq_plus_one_outer = null,
                 .phase2_eq_plus_one_prod = null,
                 .allocator = allocator,
@@ -907,15 +970,16 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
 
         /// Bind the prover at challenge r_j
         pub fn bind(self: *Self, r_j: F) void {
-            self.sumcheck_challenges.append(self.allocator, r_j) catch unreachable;
-
             if (self.in_phase2) {
                 self.bindPhase2(r_j);
             } else {
                 // Check if we should transition to Phase2
                 if (self.shouldTransitionToPhase2()) {
+                    // transitionToPhase2 handles appending the challenge itself
                     self.transitionToPhase2(r_j);
                 } else {
+                    // Append challenge for Phase 1 binding
+                    self.sumcheck_challenges.append(self.allocator, r_j) catch unreachable;
                     self.bindPhase1(r_j);
                 }
             }
@@ -949,114 +1013,245 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             }
 
             self.current_prefix_size = new_prefix_size;
-
-            // Bind witness MLEs (needed for final claims computation)
-            // Binding in HighToLow order (MSB first) to match Jolt's opening point normalization
-            // Formula: new[i] = old[i] + r * (old[i + half] - old[i])
-            const witness_new_size = self.current_witness_size / 2;
-            for (0..witness_new_size) |i| {
-                const half = witness_new_size;
-                self.unexpanded_pc[i] = self.unexpanded_pc[i].add(r_j.mul(self.unexpanded_pc[i + half].sub(self.unexpanded_pc[i])));
-                self.pc[i] = self.pc[i].add(r_j.mul(self.pc[i + half].sub(self.pc[i])));
-                self.is_virtual[i] = self.is_virtual[i].add(r_j.mul(self.is_virtual[i + half].sub(self.is_virtual[i])));
-                self.is_first_in_sequence[i] = self.is_first_in_sequence[i].add(r_j.mul(self.is_first_in_sequence[i + half].sub(self.is_first_in_sequence[i])));
-                self.is_noop[i] = self.is_noop[i].add(r_j.mul(self.is_noop[i + half].sub(self.is_noop[i])));
-            }
-            self.current_witness_size = witness_new_size;
+            // Note: Witness MLEs are NOT bound in Phase 1. They are reconstructed
+            // from scratch during transitionToPhase2 using Eq(r_prefix, i) weighting.
         }
 
         fn transitionToPhase2(self: *Self, r_j: F) void {
-            // Add final challenge before transition
-            // The transition happens AFTER binding with r_j
-            self.bindPhase1(r_j);
+            // The transition happens AFTER binding with the final Phase 1 challenge r_j
+            // First, bind the P/Q buffers one last time (they become size 1)
+            const new_prefix_size = self.current_prefix_size / 2;
+            for (0..new_prefix_size) |i| {
+                self.P_0_outer[i] = self.P_0_outer[2 * i].add(r_j.mul(self.P_0_outer[2 * i + 1].sub(self.P_0_outer[2 * i])));
+                self.Q_0_outer[i] = self.Q_0_outer[2 * i].add(r_j.mul(self.Q_0_outer[2 * i + 1].sub(self.Q_0_outer[2 * i])));
+                self.P_1_outer[i] = self.P_1_outer[2 * i].add(r_j.mul(self.P_1_outer[2 * i + 1].sub(self.P_1_outer[2 * i])));
+                self.Q_1_outer[i] = self.Q_1_outer[2 * i].add(r_j.mul(self.Q_1_outer[2 * i + 1].sub(self.Q_1_outer[2 * i])));
+                self.P_0_prod[i] = self.P_0_prod[2 * i].add(r_j.mul(self.P_0_prod[2 * i + 1].sub(self.P_0_prod[2 * i])));
+                self.Q_0_prod[i] = self.Q_0_prod[2 * i].add(r_j.mul(self.Q_0_prod[2 * i + 1].sub(self.Q_0_prod[2 * i])));
+                self.P_1_prod[i] = self.P_1_prod[2 * i].add(r_j.mul(self.P_1_prod[2 * i + 1].sub(self.P_1_prod[2 * i])));
+                self.Q_1_prod[i] = self.Q_1_prod[2 * i].add(r_j.mul(self.Q_1_prod[2 * i + 1].sub(self.Q_1_prod[2 * i])));
+            }
+            self.current_prefix_size = new_prefix_size;
+
+            // Store final challenge
+            self.sumcheck_challenges.append(self.allocator, r_j) catch unreachable;
             self.in_phase2 = true;
 
-            // DEBUG: Print witness values after Phase 1
-            std.debug.print("\n[ZOLT] SHIFT_PHASE2_START: witness_size={d}\n", .{self.current_witness_size});
-            std.debug.print("[ZOLT] SHIFT_PHASE2_START: unexpanded_pc[0..4] = ", .{});
-            for (0..@min(4, self.current_witness_size)) |i| {
-                std.debug.print("{any} ", .{self.unexpanded_pc[i].toBytes()[0..8]});
+            // Collect all Phase 1 challenges as r_prefix
+            const r_prefix = self.sumcheck_challenges.items;
+            const n_remaining_rounds = self.suffix_n_vars;
+            const suffix_size: usize = @as(usize, 1) << @intCast(n_remaining_rounds);
+
+            std.debug.print("\n[ZOLT] SHIFT_PHASE2_START: n_remaining_rounds={d}, suffix_size={d}\n", .{ n_remaining_rounds, suffix_size });
+            std.debug.print("[ZOLT] SHIFT_PHASE2_START: r_prefix.len={d}\n", .{r_prefix.len});
+
+            // =====================================================================
+            // Step 1: Regenerate prefix-suffix decomposition from original r_outer/r_product
+            // and evaluate prefix at r_prefix to get scalar values
+            // =====================================================================
+
+            // For r_outer: split into hi (prefix) and lo (suffix) parts
+            const r_outer_hi = self.r_outer[0..self.prefix_n_vars]; // This is for the SUFFIX part
+            const r_outer_lo = self.r_outer[self.prefix_n_vars..]; // This is for the PREFIX part
+
+            // Regenerate prefix polynomials for r_outer
+            // prefix_0 = eq+1(r_lo, j) for j in [0, prefix_size)
+            // prefix_1 = is_max(r_lo) * delta(j=0)
+            const prefix_size_outer: usize = @as(usize, 1) << @intCast(r_outer_lo.len);
+            const prefix_0_outer = self.allocator.alloc(F, prefix_size_outer) catch unreachable;
+            defer self.allocator.free(prefix_0_outer);
+            computeEqPlusOneEvals(self.allocator, r_outer_lo, prefix_0_outer) catch unreachable;
+
+            const prefix_1_outer = self.allocator.alloc(F, prefix_size_outer) catch unreachable;
+            defer self.allocator.free(prefix_1_outer);
+            @memset(prefix_1_outer, F.zero());
+            var is_max_outer = F.one();
+            for (r_outer_lo) |r_i| {
+                is_max_outer = is_max_outer.mul(r_i);
             }
-            std.debug.print("\n", .{});
+            prefix_1_outer[0] = is_max_outer;
 
-            // Materialize full eq+1 polynomials for remaining rounds
-            // eq+1(r, x) = prefix_0_eval * suffix_0[x] + prefix_1_eval * suffix_1[x]
-            // where prefix_0_eval and prefix_1_eval are the bound P values
-            //
-            // After Phase 1, the prefix buffers are reduced to size 1 (fully bound)
-            // The remaining suffix variables are bound in Phase 2
+            // Evaluate prefix polynomials at r_prefix
+            const prefix_0_eval_outer = evaluateMle(prefix_0_outer, r_prefix);
+            const prefix_1_eval_outer = evaluateMle(prefix_1_outer, r_prefix);
 
-            // Get the bound prefix evaluations (for potential future use)
-            _ = self.P_0_outer[0];
-            _ = self.P_1_outer[0];
-            _ = self.P_0_prod[0];
-            _ = self.P_1_prod[0];
+            // Regenerate suffix polynomials for r_outer
+            // suffix_0 = eq(r_hi, j), suffix_1 = eq+1(r_hi, j)
+            const suffix_0_outer = self.allocator.alloc(F, suffix_size) catch unreachable;
+            defer self.allocator.free(suffix_0_outer);
+            const suffix_1_outer = self.allocator.alloc(F, suffix_size) catch unreachable;
+            defer self.allocator.free(suffix_1_outer);
+            computeEqAndEqPlusOneEvals(self.allocator, r_outer_hi, suffix_0_outer, suffix_1_outer) catch unreachable;
 
-            // Similarly for Q buffers (not needed for eq+1 but for reference)
-            // Q_0_outer[0] is the accumulated witness sum weighted by suffix_0
-            // Q_1_outer[0] is the accumulated witness sum weighted by suffix_1
+            // Same for r_product
+            const r_prod_hi = self.r_product[0..self.prefix_n_vars];
+            const r_prod_lo = self.r_product[self.prefix_n_vars..];
 
-            // For Phase 2, we need the eq+1 polynomial over the remaining suffix variables.
-            // The current witness size tells us how many suffix evaluations we need.
-            const remaining_size = self.current_witness_size;
-            self.phase2_eq_plus_one_outer = self.allocator.alloc(F, remaining_size) catch unreachable;
-            self.phase2_eq_plus_one_prod = self.allocator.alloc(F, remaining_size) catch unreachable;
+            const prefix_size_prod: usize = @as(usize, 1) << @intCast(r_prod_lo.len);
+            const prefix_0_prod = self.allocator.alloc(F, prefix_size_prod) catch unreachable;
+            defer self.allocator.free(prefix_0_prod);
+            computeEqPlusOneEvals(self.allocator, r_prod_lo, prefix_0_prod) catch unreachable;
 
-            // Compute eq+1 evaluations for each suffix index
-            // For Phase 2, the eq+1 polynomial is:
-            //   eq+1(r_bound, r_suffix, j) = prefix_0_eval * suffix_0[j] + prefix_1_eval * suffix_1[j]
-            //
-            // But we need to compute suffix_0[j] and suffix_1[j] for the **remaining** suffix variables
-            // after Phase 1 has bound the prefix variables.
-            //
-            // Actually, in Phase 2, we work directly with the witness MLEs and the scalar eq+1 evaluations.
-            // The eq+1(r_outer, r) term becomes just a scalar multiplier after all rounds.
-            //
-            // For the round polynomial computation in Phase 2, we use the formula:
-            //   f(x) = eq+1_outer(x) * (witness stuff) + eq+1_prod(x) * (1 - noop)
-            //
-            // Since we're now past Phase 1, the P*Q formula no longer applies.
-            // We need to materialize the eq+1 tables from their current state.
-            //
-            // For now, initialize with identity (will be bound during Phase 2)
-            // This is a simplification - the full eq+1 evaluation needs the suffix table
-            @memset(self.phase2_eq_plus_one_outer.?, F.one());
-            @memset(self.phase2_eq_plus_one_prod.?, F.one());
+            const prefix_1_prod = self.allocator.alloc(F, prefix_size_prod) catch unreachable;
+            defer self.allocator.free(prefix_1_prod);
+            @memset(prefix_1_prod, F.zero());
+            var is_max_prod = F.one();
+            for (r_prod_lo) |r_i| {
+                is_max_prod = is_max_prod.mul(r_i);
+            }
+            prefix_1_prod[0] = is_max_prod;
 
-            // Actually, we need to think about this more carefully:
-            // After Phase 1, we have bound prefix_n_vars variables.
-            // The witness MLEs now have size = original_size / (2^prefix_n_vars) = suffix_size
-            // But we're iterating over trace indices, not suffix indices.
-            //
-            // The key insight is that after binding, the witness MLEs ARE the correct partial evaluations.
-            // For the final claims, we just need to continue binding them in Phase 2.
-            //
-            // The eq+1 computation for Phase 2 is more complex and requires the full suffix tables,
-            // which we didn't preserve. For now, let's just use the witness bindings directly
-            // since the round polynomial computation in Phase 2 actually just needs the witness values.
+            const prefix_0_eval_prod = evaluateMle(prefix_0_prod, r_prefix);
+            const prefix_1_eval_prod = evaluateMle(prefix_1_prod, r_prefix);
+
+            const suffix_0_prod = self.allocator.alloc(F, suffix_size) catch unreachable;
+            defer self.allocator.free(suffix_0_prod);
+            const suffix_1_prod = self.allocator.alloc(F, suffix_size) catch unreachable;
+            defer self.allocator.free(suffix_1_prod);
+            computeEqAndEqPlusOneEvals(self.allocator, r_prod_hi, suffix_0_prod, suffix_1_prod) catch unreachable;
+
+            // =====================================================================
+            // Step 2: Construct eq+1(r_outer, (r_prefix, j)) for all j in suffix domain
+            // eq+1(r, (r_prefix, j)) = prefix_0_eval * suffix_0[j] + prefix_1_eval * suffix_1[j]
+            // =====================================================================
+
+            self.phase2_eq_plus_one_outer = self.allocator.alloc(F, suffix_size) catch unreachable;
+            self.phase2_eq_plus_one_prod = self.allocator.alloc(F, suffix_size) catch unreachable;
+
+            for (0..suffix_size) |j| {
+                self.phase2_eq_plus_one_outer.?[j] = prefix_0_eval_outer.mul(suffix_0_outer[j])
+                    .add(prefix_1_eval_outer.mul(suffix_1_outer[j]));
+                self.phase2_eq_plus_one_prod.?[j] = prefix_0_eval_prod.mul(suffix_0_prod[j])
+                    .add(prefix_1_eval_prod.mul(suffix_1_prod[j]));
+            }
+
+            // =====================================================================
+            // Step 3: Construct witness MLEs by summing over prefix domain weighted by Eq(r_prefix, i)
+            // poly[j] = Σ_i Eq(r_prefix, i) * witness[i * suffix_size + j]
+            // =====================================================================
+
+            // Compute Eq(r_prefix, i) for all i in prefix domain
+            const prefix_domain_size: usize = @as(usize, 1) << @intCast(r_prefix.len);
+            const eq_evals = self.allocator.alloc(F, prefix_domain_size) catch unreachable;
+            defer self.allocator.free(eq_evals);
+            computeEqEvals(self.allocator, r_prefix, eq_evals) catch unreachable;
+
+            // Reallocate witness MLEs to suffix_size
+            self.allocator.free(self.unexpanded_pc);
+            self.allocator.free(self.pc);
+            self.allocator.free(self.is_virtual);
+            self.allocator.free(self.is_first_in_sequence);
+            self.allocator.free(self.is_noop);
+
+            self.unexpanded_pc = self.allocator.alloc(F, suffix_size) catch unreachable;
+            self.pc = self.allocator.alloc(F, suffix_size) catch unreachable;
+            self.is_virtual = self.allocator.alloc(F, suffix_size) catch unreachable;
+            self.is_first_in_sequence = self.allocator.alloc(F, suffix_size) catch unreachable;
+            self.is_noop = self.allocator.alloc(F, suffix_size) catch unreachable;
+
+            @memset(self.unexpanded_pc, F.zero());
+            @memset(self.pc, F.zero());
+            @memset(self.is_virtual, F.zero());
+            @memset(self.is_first_in_sequence, F.zero());
+            @memset(self.is_noop, F.zero());
+
+            // Sum over prefix domain
+            for (0..suffix_size) |j| {
+                var upc_acc = F.zero();
+                var pc_acc = F.zero();
+                var virt_acc = F.zero();
+                var first_acc = F.zero();
+                var noop_acc = F.zero();
+
+                for (0..prefix_domain_size) |i| {
+                    // Trace index = i * suffix_size + j (interleaved layout)
+                    // But Jolt uses trace.par_chunks(eq_evals.len()), meaning:
+                    // For suffix index j, the trace indices are j*prefix_domain_size + i
+                    const trace_idx = j * prefix_domain_size + i;
+                    if (trace_idx >= self.trace_len) continue;
+
+                    const witness = &self.cycle_witnesses[trace_idx].values;
+                    const eq_eval = eq_evals[i];
+
+                    upc_acc = upc_acc.add(eq_eval.mul(witness[R1CSInputIndex.UnexpandedPC.toIndex()]));
+                    pc_acc = pc_acc.add(eq_eval.mul(witness[R1CSInputIndex.PC.toIndex()]));
+                    virt_acc = virt_acc.add(eq_eval.mul(witness[R1CSInputIndex.FlagVirtualInstruction.toIndex()]));
+                    first_acc = first_acc.add(eq_eval.mul(witness[R1CSInputIndex.FlagIsFirstInSequence.toIndex()]));
+                    noop_acc = noop_acc.add(eq_eval.mul(witness[R1CSInputIndex.FlagIsNoop.toIndex()]));
+                }
+
+                self.unexpanded_pc[j] = upc_acc;
+                self.pc[j] = pc_acc;
+                self.is_virtual[j] = virt_acc;
+                self.is_first_in_sequence[j] = first_acc;
+                self.is_noop[j] = noop_acc;
+            }
+
+            self.current_witness_size = suffix_size;
+
+            std.debug.print("[ZOLT] SHIFT_PHASE2_START: eq+1_outer[0] = {{ {any} }}\n", .{self.phase2_eq_plus_one_outer.?[0].toBytes()[0..8]});
+            std.debug.print("[ZOLT] SHIFT_PHASE2_START: unexpanded_pc[0] = {{ {any} }}\n", .{self.unexpanded_pc[0].toBytes()[0..8]});
         }
 
         fn bindPhase2(self: *Self, r_j: F) void {
-            // Bind witness MLEs and eq+1 polynomials
-            // Using HighToLow order (MSB first) to match Jolt's opening point normalization
+            // Bind witness MLEs and eq+1 polynomials using LowToHigh order
+            // Formula: new[i] = old[2*i] + r * (old[2*i+1] - old[2*i])
             const new_size = self.current_witness_size / 2;
-            const half = new_size;
 
             for (0..new_size) |i| {
-                self.unexpanded_pc[i] = self.unexpanded_pc[i].add(r_j.mul(self.unexpanded_pc[i + half].sub(self.unexpanded_pc[i])));
-                self.pc[i] = self.pc[i].add(r_j.mul(self.pc[i + half].sub(self.pc[i])));
-                self.is_virtual[i] = self.is_virtual[i].add(r_j.mul(self.is_virtual[i + half].sub(self.is_virtual[i])));
-                self.is_first_in_sequence[i] = self.is_first_in_sequence[i].add(r_j.mul(self.is_first_in_sequence[i + half].sub(self.is_first_in_sequence[i])));
-                self.is_noop[i] = self.is_noop[i].add(r_j.mul(self.is_noop[i + half].sub(self.is_noop[i])));
+                self.unexpanded_pc[i] = self.unexpanded_pc[2 * i].add(r_j.mul(self.unexpanded_pc[2 * i + 1].sub(self.unexpanded_pc[2 * i])));
+                self.pc[i] = self.pc[2 * i].add(r_j.mul(self.pc[2 * i + 1].sub(self.pc[2 * i])));
+                self.is_virtual[i] = self.is_virtual[2 * i].add(r_j.mul(self.is_virtual[2 * i + 1].sub(self.is_virtual[2 * i])));
+                self.is_first_in_sequence[i] = self.is_first_in_sequence[2 * i].add(r_j.mul(self.is_first_in_sequence[2 * i + 1].sub(self.is_first_in_sequence[2 * i])));
+                self.is_noop[i] = self.is_noop[2 * i].add(r_j.mul(self.is_noop[2 * i + 1].sub(self.is_noop[2 * i])));
 
                 if (self.phase2_eq_plus_one_outer) |eq| {
-                    eq[i] = eq[i].add(r_j.mul(eq[i + half].sub(eq[i])));
+                    eq[i] = eq[2 * i].add(r_j.mul(eq[2 * i + 1].sub(eq[2 * i])));
                 }
                 if (self.phase2_eq_plus_one_prod) |eq| {
-                    eq[i] = eq[i].add(r_j.mul(eq[i + half].sub(eq[i])));
+                    eq[i] = eq[2 * i].add(r_j.mul(eq[2 * i + 1].sub(eq[2 * i])));
                 }
             }
             self.current_witness_size = new_size;
+        }
+
+        // Helper: Evaluate MLE at a point
+        fn evaluateMle(coeffs: []const F, point: []const F) F {
+            if (coeffs.len == 1) return coeffs[0];
+            if (point.len == 0) return coeffs[0];
+
+            const temp = std.heap.page_allocator.alloc(F, coeffs.len) catch unreachable;
+            defer std.heap.page_allocator.free(temp);
+            @memcpy(temp, coeffs);
+
+            var current_len = coeffs.len;
+            for (point) |r_i| {
+                const half = current_len / 2;
+                for (0..half) |i| {
+                    temp[i] = temp[2 * i].add(r_i.mul(temp[2 * i + 1].sub(temp[2 * i])));
+                }
+                current_len = half;
+            }
+            return temp[0];
+        }
+
+        // Helper: Compute Eq(r, j) for all j
+        fn computeEqEvals(allocator: Allocator, r: []const F, out: []F) !void {
+            const n = r.len;
+            const size = out.len;
+            std.debug.assert(size == @as(usize, 1) << @intCast(n));
+
+            const j_bits = try allocator.alloc(F, n);
+            defer allocator.free(j_bits);
+
+            for (0..size) |j| {
+                // Convert j to binary (BIG_ENDIAN: bit 0 is MSB)
+                for (0..n) |k| {
+                    const bit_pos: u6 = @intCast(n - 1 - k);
+                    j_bits[k] = if ((j >> bit_pos) & 1 == 1) F.one() else F.zero();
+                }
+                out[j] = poly_mod.EqPolynomial(F).mle(r, j_bits);
+            }
         }
 
         /// Get final claims after all rounds

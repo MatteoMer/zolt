@@ -1566,6 +1566,11 @@ pub fn ProofConverter(comptime F: type) type {
                 .{ .Virtual = .{ .poly = .RdWa, .sumcheck_id = .RegistersReadWriteChecking } },
                 F.zero(),
             );
+            // CRITICAL: RdInc dense polynomial claim for Stage 4
+            try jolt_proof.opening_claims.insert(
+                .{ .Committed = .{ .poly = .RdInc, .sumcheck_id = .RegistersReadWriteChecking } },
+                F.zero(),
+            );
 
             // RamValEvaluation claims
             try jolt_proof.opening_claims.insert(
@@ -1578,6 +1583,15 @@ pub fn ProofConverter(comptime F: type) type {
                 .{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamValFinalEvaluation } },
                 F.zero(),
             );
+            // RamInc claim for Stage 4 (needed by RamValEvaluation and RamValFinalEvaluation)
+            try jolt_proof.opening_claims.insert(
+                .{ .Committed = .{ .poly = .RamInc, .sumcheck_id = .RamValEvaluation } },
+                F.zero(),
+            );
+            try jolt_proof.opening_claims.insert(
+                .{ .Committed = .{ .poly = .RamInc, .sumcheck_id = .RamValFinalEvaluation } },
+                F.zero(),
+            );
 
             // Stage 5: RegistersValEvaluation, RamRaClaimReduction, RamRafEvaluation
             try self.generateZeroSumcheckProof(&jolt_proof.stage5_sumcheck_proof, n_cycle_vars, 3);
@@ -1585,6 +1599,11 @@ pub fn ProofConverter(comptime F: type) type {
             // RegistersValEvaluation claims
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .RdWa, .sumcheck_id = .RegistersValEvaluation } },
+                F.zero(),
+            );
+            // RdInc claim for Stage 5 (needed by RegistersValEvaluation)
+            try jolt_proof.opening_claims.insert(
+                .{ .Committed = .{ .poly = .RdInc, .sumcheck_id = .RegistersValEvaluation } },
                 F.zero(),
             );
 
@@ -1600,7 +1619,7 @@ pub fn ProofConverter(comptime F: type) type {
                 F.zero(),
             );
 
-            // Stage 6: RamHammingBooleanity, Booleanity, RamRaVirtualization
+            // Stage 6: RamHammingBooleanity, Booleanity, RamRaVirtualization, IncClaimReduction
             try self.generateZeroSumcheckProof(&jolt_proof.stage6_sumcheck_proof, n_cycle_vars, 3);
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .RamHammingWeight, .sumcheck_id = .Booleanity } },
@@ -1608,6 +1627,16 @@ pub fn ProofConverter(comptime F: type) type {
             );
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .RamHammingWeight, .sumcheck_id = .RamHammingBooleanity } },
+                F.zero(),
+            );
+            // IncClaimReduction claims (Stage 6) - these reduce RdInc and RamInc to a single point
+            // Required for Stage 8 batch opening
+            try jolt_proof.opening_claims.insert(
+                .{ .Committed = .{ .poly = .RdInc, .sumcheck_id = .IncClaimReduction } },
+                F.zero(),
+            );
+            try jolt_proof.opening_claims.insert(
+                .{ .Committed = .{ .poly = .RamInc, .sumcheck_id = .IncClaimReduction } },
                 F.zero(),
             );
 

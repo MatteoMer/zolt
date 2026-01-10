@@ -1,50 +1,48 @@
 # Zolt-Jolt Compatibility TODO
 
-## Current Status: Stage 3 InstructionInput Mismatch
+## Current Progress
 
-### Completed (This Session)
-1. **Stage 1** - PASSES verification
-2. **Stage 2** - PASSES verification
-3. **Stage 3 Shift sumcheck** - shift_match = true (final claim correct)
-4. **eq+1 polynomial** - eq+1_outer match = true, eq+1_prod match = true
-5. **Fixed computeInstructionInputs** - Returns 0 for ECALL, FENCE, and unknown opcodes
+### ✅ Stage 1 - PASSES
+- Outer Spartan sumcheck with univariate skip
+- All round polynomials verified
 
-### Current Issue: InstructionInput/Registers Claim Mismatch
+### ✅ Stage 2 - PASSES
+- Batched sumcheck with 5 instances
+- ProductVirtualRemainder, RamRAF, RamRWC, OutputSumcheck, InstructionLookupsClaimReduction
 
-**Root Cause Identified:**
-The InstructionInput prover computes right operand as:
-```
-right = right_is_rs2 * rs2_value + right_is_imm * imm
-```
+### ✅ Stage 3 - PASSES
+- Shift, InstructionInput, RegistersClaimReduction sumchecks
+- Fixed InstructionInput witness consistency
+- Fixed RegistersClaimReduction prefix challenge ordering
 
-But for 10/256 cycles, this formula doesn't equal `RightInstructionInput` stored in R1CS witness.
+### 🔄 Stage 4 - IN PROGRESS
+- Fixed round count: LOG_K + log2(T) = 7 + 8 = 15 rounds
+- **BLOCKING**: Requires dense polynomial commitments:
+  - `CommittedPolynomial::RdInc` - Register increment (post_value - pre_value)
+  - `CommittedPolynomial::RamInc` - RAM increment
+  - These are committed polynomials requiring Dory commitments
 
-**Mismatching Cycles:**
-- Cycle 1: computed=0, witness=1
-- Cycles 8, 13, 18, 23: computed=0, witness=0x43E1F593F0000000 (large value, likely address)
-- And 5 more...
+### ❌ Stages 5-7 - PENDING
+- Stage 5: Address checking
+- Stage 6: RAF evaluation
+- Stage 7: Final RAM evaluation
 
-**Why It Matters:**
-The eq-weighted sum `Σ eq(r, i) * right_computed[i]` must equal the opening claim
-`RightInstructionInput @ r`. If individual values differ, the sum won't match.
+## Key Technical Findings
 
-### Investigation Findings
-1. Stage 3 debug shows `shift_match = true` - Shift sumcheck works correctly
-2. After all rounds, `left_match = true, right_match = true` (using sumcheck challenges)
-3. At initialization, `right_match = false` because eq-weighted sum at r_outer differs
-4. The flags (`FlagRightOperandIsRs2`, `FlagRightOperandIsImm`) may not be set consistently
-   with what `computeInstructionInputs` returns for the `RightInstructionInput` value
+### Register Count
+- REGISTER_COUNT = 32 (RISCV) + 96 (Virtual) = 128
+- LOG_K = log2(128) = 7
+- Stage 4 max_rounds = LOG_K + n_cycle_vars
+
+### Dense vs Virtual Polynomials
+- **Virtual**: Computed on-the-fly from witness, no commitment
+- **Dense/Committed**: Requires Dory commitment, stored in proof.commitments[]
+- Stage 4 uses both virtual (RegistersVal, Rs1Ra, etc.) and dense (RdInc, RamInc)
 
 ### Next Steps
-1. [ ] Add debug to trace what instruction types are at mismatching cycles
-2. [ ] Ensure setFlagsFromInstruction flags match computeInstructionInputs values
-3. [ ] Consider: are cycles 8,13,18,23 virtual instruction sequences?
-4. [ ] Fix all mismatches so that `right_is_rs2*rs2 + right_is_imm*imm == RightInstructionInput`
-
-### Pending
-- [ ] Fix Registers sumcheck claim (reg_match = false)
-- [ ] Achieve sum_equals_claim = true
-- [ ] Pass Stage 3 verification
+1. Generate proper Dory commitments for RdInc/RamInc polynomials
+2. Ensure commitment indices match Jolt's expectations
+3. Continue to Stages 5-7
 
 ## Progress Summary
 
@@ -52,13 +50,16 @@ The eq-weighted sum `Σ eq(r, i) * right_computed[i]` must equal the opening cla
 |-------|--------|-------|
 | 1 | ✅ PASSES | Using ZOLT preprocessing |
 | 2 | ✅ PASSES | |
-| 3 | ❌ FAILS | instr_match=false, reg_match=false |
-| 4-7 | Blocked | |
+| 3 | ✅ PASSES | Fixed instruction/registers claims |
+| 4 | 🔄 IN PROGRESS | Round count fixed, needs dense commitments |
+| 5-7 | Blocked | |
 
 ## Key Files
 - `src/zkvm/spartan/stage3_prover.zig` - Stage 3 prover with InstructionInput
 - `src/zkvm/r1cs/constraints.zig` - computeInstructionInputs, setFlagsFromInstruction
-- Jolt: `jolt-core/src/zkvm/spartan/instruction_input.rs` - Reference implementation
+- `src/zkvm/proof_converter.zig` - Proof generation and stage rounds
+- Jolt: `jolt-core/src/zkvm/registers/read_write_checking.rs` - RegistersReadWriteChecking
+- Jolt: `jolt-core/src/zkvm/witness.rs` - RdInc/RamInc polynomial generation
 
 ## Testing
 ```bash

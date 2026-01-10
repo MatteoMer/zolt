@@ -1,51 +1,64 @@
 # Zolt-Jolt Compatibility TODO
 
-## Current Status: Stage 1 PASSES, Stage 3 FAILS
+## Current Status: Stage 3 InstructionInput Mismatch
 
-### Issues Fixed (This Session)
-1. **Test configuration** - Now uses ZOLT preprocessing instead of JOLT preprocessing
-2. **Tau length** - Uses correct `num_rows_bits = num_cycle_vars + 2`
-3. **Stage 1 verification** - Now passes completely
+### Completed (This Session)
+1. **Stage 1** - PASSES verification
+2. **Stage 2** - PASSES verification
+3. **Stage 3 Shift sumcheck** - shift_match = true (final claim correct)
+4. **eq+1 polynomial** - eq+1_outer match = true, eq+1_prod match = true
+5. **Fixed computeInstructionInputs** - Returns 0 for ECALL, FENCE, and unknown opcodes
 
-### Current Issue: Stage 3 Expected Output Claim Mismatch
+### Current Issue: InstructionInput/Registers Claim Mismatch
 
-Error:
+**Root Cause Identified:**
+The InstructionInput prover computes right operand as:
 ```
-output_claim:          14748667221680201172814846157814975891768271694788348475862484542619931435291
-expected_output_claim: 21057875695859459713163748271204739962975184771552325082098103420465800885546
+right = right_is_rs2 * rs2_value + right_is_imm * imm
 ```
 
-Stage 3 consists of 3 sumcheck instances:
-1. ShiftSumcheckVerifier
-2. InstructionInputSumcheckVerifier
-3. RegistersClaimReductionSumcheckVerifier
+But for 10/256 cycles, this formula doesn't equal `RightInstructionInput` stored in R1CS witness.
 
-The output_claim from ZOLT's sumcheck matches what JOLT receives.
-The expected_output_claim computed by JOLT's verifier doesn't match.
+**Mismatching Cycles:**
+- Cycle 1: computed=0, witness=1
+- Cycles 8, 13, 18, 23: computed=0, witness=0x43E1F593F0000000 (large value, likely address)
+- And 5 more...
 
-This means the witness opening claims sent by ZOLT for Stage 3 polynomials are incorrect
-or being computed at the wrong evaluation point.
+**Why It Matters:**
+The eq-weighted sum `Σ eq(r, i) * right_computed[i]` must equal the opening claim
+`RightInstructionInput @ r`. If individual values differ, the sum won't match.
+
+### Investigation Findings
+1. Stage 3 debug shows `shift_match = true` - Shift sumcheck works correctly
+2. After all rounds, `left_match = true, right_match = true` (using sumcheck challenges)
+3. At initialization, `right_match = false` because eq-weighted sum at r_outer differs
+4. The flags (`FlagRightOperandIsRs2`, `FlagRightOperandIsImm`) may not be set consistently
+   with what `computeInstructionInputs` returns for the `RightInstructionInput` value
 
 ### Next Steps
-1. Investigate Stage 3's expected_output_claim computation in Jolt
-2. Check what witness openings are being sent for Stage 3
-3. Verify the evaluation point (r_cycle) matches between ZOLT and JOLT
-4. Fix the Stage 3 opening claims
+1. [ ] Add debug to trace what instruction types are at mismatching cycles
+2. [ ] Ensure setFlagsFromInstruction flags match computeInstructionInputs values
+3. [ ] Consider: are cycles 8,13,18,23 virtual instruction sequences?
+4. [ ] Fix all mismatches so that `right_is_rs2*rs2 + right_is_imm*imm == RightInstructionInput`
 
-### Overall Progress
+### Pending
+- [ ] Fix Registers sumcheck claim (reg_match = false)
+- [ ] Achieve sum_equals_claim = true
+- [ ] Pass Stage 3 verification
+
+## Progress Summary
 
 | Stage | Status | Notes |
 |-------|--------|-------|
-| 1 | ✅ PASSES | Using ZOLT preprocessing, tau length fixed |
-| 2 | Unknown | Not reached yet |
-| 3 | ❌ FAILS | output_claim correct, expected_output_claim wrong |
-| 4-7 | Blocked | Waiting on Stage 3 |
+| 1 | ✅ PASSES | Using ZOLT preprocessing |
+| 2 | ✅ PASSES | |
+| 3 | ❌ FAILS | instr_match=false, reg_match=false |
+| 4-7 | Blocked | |
 
-### Key Files
-- `/Users/matteo/projects/zolt/src/zkvm/proof_converter.zig` - Stage 3 proof generation
-- `/Users/matteo/projects/jolt/jolt-core/src/zkvm/spartan/shift.rs` - Shift sumcheck
-- `/Users/matteo/projects/jolt/jolt-core/src/zkvm/spartan/instruction_input.rs` - InstrInput sumcheck
-- `/Users/matteo/projects/jolt/jolt-core/src/registers/claim_reduction.rs` - Registers sumcheck
+## Key Files
+- `src/zkvm/spartan/stage3_prover.zig` - Stage 3 prover with InstructionInput
+- `src/zkvm/r1cs/constraints.zig` - computeInstructionInputs, setFlagsFromInstruction
+- Jolt: `jolt-core/src/zkvm/spartan/instruction_input.rs` - Reference implementation
 
 ## Testing
 ```bash

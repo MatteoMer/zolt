@@ -1003,17 +1003,70 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             }
 
             // =================================================================
-            // Instruction inputs and lookups
-            // CRITICAL: These are instruction-specific, NOT always rs1/rs2!
-            // Must match Jolt's LookupQuery::to_instruction_inputs semantics.
+            // Instruction inputs computed using the flag formula
+            // CRITICAL: Must match the sumcheck formula used in Stage 3:
+            //   left = left_is_rs1 * rs1_value + left_is_pc * unexpanded_pc
+            //   right = right_is_rs2 * rs2_value + right_is_imm * imm
             // =================================================================
-            const instruction_inputs = computeInstructionInputs(F, step);
-            inputs.values[R1CSInputIndex.LeftInstructionInput.toIndex()] = instruction_inputs.left;
-            inputs.values[R1CSInputIndex.RightInstructionInput.toIndex()] = instruction_inputs.right;
+
+            // First, compute the operand flags based on opcode
+            const instr_opcode = opcode; // Already computed above
+            const left_is_rs1: F = switch (instr_opcode) {
+                0x33 => F.one(), // R-type: left = rs1
+                0x13, 0x03, 0x67 => F.one(), // I-type: left = rs1
+                0x23 => F.one(), // S-type: left = rs1 (for address)
+                0x63 => F.one(), // B-type: left = rs1
+                0x37 => F.zero(), // LUI: no operand
+                0x17 => F.zero(), // AUIPC: left = PC
+                0x6F => F.zero(), // JAL: left = PC
+                0x1B => F.one(), // OP-IMM-32: left = rs1
+                0x3B => F.one(), // OP-32: left = rs1
+                0x73 => F.zero(), // SYSTEM (ECALL/EBREAK): no operand
+                0x0F => F.zero(), // FENCE: no operand
+                else => F.zero(),
+            };
+            const left_is_pc: F = switch (instr_opcode) {
+                0x17 => F.one(), // AUIPC: left = PC
+                0x6F => F.one(), // JAL: left = PC
+                else => F.zero(),
+            };
+            const right_is_rs2: F = switch (instr_opcode) {
+                0x33 => F.one(), // R-type: right = rs2
+                0x63 => F.one(), // B-type: right = rs2 (for comparison)
+                0x3B => F.one(), // OP-32: right = rs2 (ADDW, SUBW, etc.)
+                else => F.zero(),
+            };
+            const right_is_imm: F = switch (instr_opcode) {
+                0x13, 0x03, 0x67 => F.one(), // I-type: right = imm
+                0x23 => F.one(), // S-type: right = imm (for address offset)
+                0x37 => F.one(), // LUI: right = imm (upper bits)
+                0x17 => F.one(), // AUIPC: right = imm
+                0x6F => F.one(), // JAL: right = imm (offset)
+                0x1B => F.one(), // OP-IMM-32: right = imm (ADDIW, etc.)
+                else => F.zero(),
+            };
+
+            // Store the flags (will be used in Stage 3 InstructionInput sumcheck)
+            inputs.values[R1CSInputIndex.FlagLeftOperandIsRs1.toIndex()] = left_is_rs1;
+            inputs.values[R1CSInputIndex.FlagLeftOperandIsPC.toIndex()] = left_is_pc;
+            inputs.values[R1CSInputIndex.FlagRightOperandIsRs2.toIndex()] = right_is_rs2;
+            inputs.values[R1CSInputIndex.FlagRightOperandIsImm.toIndex()] = right_is_imm;
+
+            // Now compute instruction inputs using the EXACT same formula as the sumcheck:
+            // This ensures consistency between witness and sumcheck computation
+            const rs1_val = inputs.values[R1CSInputIndex.Rs1Value.toIndex()];
+            const rs2_val = inputs.values[R1CSInputIndex.Rs2Value.toIndex()];
+            const pc_val = F.fromU64(step.unexpanded_pc); // Use unexpanded_pc, not expanded PC
+            const imm_val = imm; // Already computed above via deriveImmediate
+
+            const left_instr_input = left_is_rs1.mul(rs1_val).add(left_is_pc.mul(pc_val));
+            const right_instr_input = right_is_rs2.mul(rs2_val).add(right_is_imm.mul(imm_val));
+
+            inputs.values[R1CSInputIndex.LeftInstructionInput.toIndex()] = left_instr_input;
+            inputs.values[R1CSInputIndex.RightInstructionInput.toIndex()] = right_instr_input;
 
             // Product = left_input * right_input (for multiply instructions)
-            // Using signed multiplication to match Jolt's S64 * S128 semantics
-            const product = computeProduct(F, instruction_inputs);
+            const product = left_instr_input.mul(right_instr_input);
             inputs.values[R1CSInputIndex.Product.toIndex()] = product;
 
             // =================================================================
@@ -1091,7 +1144,7 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             const is_rd_not_zero = if (rd != 0) F.one() else F.zero();
 
             // BranchFlag: 1 if this is a branch instruction (opcode 0x63)
-            const instr_opcode: u8 = @truncate(step.instruction & 0x7F);
+            // Note: instr_opcode is already defined above for instruction inputs
             const branch_flag_f = if (instr_opcode == 0x63) F.one() else F.zero();
 
             // WriteLookupOutputToRD = IsRdNotZero * FlagWriteLookupOutputToRD
@@ -1116,61 +1169,8 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             // Real trace cycles always have IsNoop = false
             inputs.values[R1CSInputIndex.FlagIsNoop.toIndex()] = F.zero();
 
-            // =================================================================
-            // Instruction operand flags for Stage 3 InstructionInput sumcheck
-            // These determine which values are used as left/right instruction inputs
-            // =================================================================
-            //
-            // Based on RISC-V instruction formats:
-            // - R-type (0x33): left=rs1, right=rs2
-            // - I-type (0x13 ALU, 0x03 Load, 0x67 JALR): left=rs1, right=imm
-            // - S-type (0x23): left=rs1, right=imm (for address calculation)
-            // - B-type (0x63): left=rs1, right=rs2 (for comparison)
-            // - U-type (0x37 LUI): rd = imm, no operand flags set
-            // - U-type (0x17 AUIPC): left=PC, right=imm
-            // - J-type (0x6F JAL): left=PC, right=imm
-            //
-            // Note: For most instructions, exactly one of left_is_rs1/left_is_pc is 1
-            // and exactly one of right_is_rs2/right_is_imm is 1
-            const left_is_rs1: F = switch (instr_opcode) {
-                0x33 => F.one(), // R-type: left = rs1
-                0x13, 0x03, 0x67 => F.one(), // I-type: left = rs1
-                0x23 => F.one(), // S-type: left = rs1 (for address)
-                0x63 => F.one(), // B-type: left = rs1
-                0x37 => F.zero(), // LUI: no operand
-                0x17 => F.zero(), // AUIPC: left = PC
-                0x6F => F.zero(), // JAL: left = PC
-                0x1B => F.one(), // OP-IMM-32: left = rs1
-                0x3B => F.one(), // OP-32: left = rs1
-                0x73 => F.zero(), // SYSTEM (ECALL/EBREAK): no operand
-                0x0F => F.zero(), // FENCE: no operand
-                else => F.zero(), // Default: no operand (matching instruction input behavior)
-            };
-            const left_is_pc: F = switch (instr_opcode) {
-                0x17 => F.one(), // AUIPC: left = PC
-                0x6F => F.one(), // JAL: left = PC
-                else => F.zero(),
-            };
-            const right_is_rs2: F = switch (instr_opcode) {
-                0x33 => F.one(), // R-type: right = rs2
-                0x63 => F.one(), // B-type: right = rs2 (for comparison)
-                0x3B => F.one(), // OP-32: right = rs2 (ADDW, SUBW, etc.)
-                else => F.zero(),
-            };
-            const right_is_imm: F = switch (instr_opcode) {
-                0x13, 0x03, 0x67 => F.one(), // I-type: right = imm
-                0x23 => F.one(), // S-type: right = imm (for address offset)
-                0x37 => F.one(), // LUI: right = imm (upper bits)
-                0x17 => F.one(), // AUIPC: right = imm
-                0x6F => F.one(), // JAL: right = imm (offset)
-                0x1B => F.one(), // OP-IMM-32: right = imm (ADDIW, etc.)
-                else => F.zero(),
-            };
-
-            inputs.values[R1CSInputIndex.FlagLeftOperandIsRs1.toIndex()] = left_is_rs1;
-            inputs.values[R1CSInputIndex.FlagLeftOperandIsPC.toIndex()] = left_is_pc;
-            inputs.values[R1CSInputIndex.FlagRightOperandIsRs2.toIndex()] = right_is_rs2;
-            inputs.values[R1CSInputIndex.FlagRightOperandIsImm.toIndex()] = right_is_imm;
+            // Instruction operand flags already set earlier (before computing instruction inputs)
+            // This ensures consistency between flags and LeftInstructionInput/RightInstructionInput
 
             return inputs;
         }

@@ -90,8 +90,11 @@ pub fn JoltR1CS(comptime F: type) type {
                     // NoOp padding cycle: all zeros with IsNoop=1
                     cycle_witnesses[i] = R1CSCycleInputs(F).createNoopWitness();
                 } else {
-                    // Real cycle: next step always exists after padding
-                    const next_step = trace.steps.items[i + 1];
+                    // Real cycle: pass next step if available
+                    const next_step: ?tracer.TraceStep = if (i + 1 < num_cycles)
+                        trace.steps.items[i + 1]
+                    else
+                        null;
                     cycle_witnesses[i] = R1CSCycleInputs(F).fromTraceStep(step, next_step);
                 }
             }

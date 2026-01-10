@@ -809,13 +809,34 @@ fn computeInstructionInputs(comptime F: type, step: tracer.TraceStep) Instructio
                 .right_i128 = @as(i128, step.rs2_value),
             };
         },
-        // Default: treat as R-type (left=rs1, right=rs2)
+        // SYSTEM: ECALL, EBREAK (opcode 0x73)
+        0x73 => {
+            // No instruction inputs for system calls
+            return .{
+                .left = F.zero(),
+                .right = F.zero(),
+                .right_is_signed = false,
+                .right_i128 = 0,
+            };
+        },
+        // MISC-MEM: FENCE (opcode 0x0F)
+        0x0F => {
+            // No instruction inputs for fence
+            return .{
+                .left = F.zero(),
+                .right = F.zero(),
+                .right_is_signed = false,
+                .right_i128 = 0,
+            };
+        },
+        // Default: treat as no inputs (matching Jolt's default behavior for unknown instructions)
+        // This ensures right_is_rs2*rs2 + right_is_imm*imm = RightInstructionInput = 0
         else => {
             return .{
-                .left = F.fromU64(step.rs1_value),
-                .right = F.fromU64(step.rs2_value),
+                .left = F.zero(),
+                .right = F.zero(),
                 .right_is_signed = false,
-                .right_i128 = @as(i128, step.rs2_value),
+                .right_i128 = 0,
             };
         },
     }
@@ -1119,7 +1140,11 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                 0x37 => F.zero(), // LUI: no operand
                 0x17 => F.zero(), // AUIPC: left = PC
                 0x6F => F.zero(), // JAL: left = PC
-                else => F.one(), // Default: assume rs1
+                0x1B => F.one(), // OP-IMM-32: left = rs1
+                0x3B => F.one(), // OP-32: left = rs1
+                0x73 => F.zero(), // SYSTEM (ECALL/EBREAK): no operand
+                0x0F => F.zero(), // FENCE: no operand
+                else => F.zero(), // Default: no operand (matching instruction input behavior)
             };
             const left_is_pc: F = switch (instr_opcode) {
                 0x17 => F.one(), // AUIPC: left = PC
@@ -1129,6 +1154,7 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             const right_is_rs2: F = switch (instr_opcode) {
                 0x33 => F.one(), // R-type: right = rs2
                 0x63 => F.one(), // B-type: right = rs2 (for comparison)
+                0x3B => F.one(), // OP-32: right = rs2 (ADDW, SUBW, etc.)
                 else => F.zero(),
             };
             const right_is_imm: F = switch (instr_opcode) {
@@ -1137,6 +1163,7 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                 0x37 => F.one(), // LUI: right = imm (upper bits)
                 0x17 => F.one(), // AUIPC: right = imm
                 0x6F => F.one(), // JAL: right = imm (offset)
+                0x1B => F.one(), // OP-IMM-32: right = imm (ADDIW, etc.)
                 else => F.zero(),
             };
 

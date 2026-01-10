@@ -239,6 +239,67 @@ pub fn Stage3Prover(comptime F: type) type {
             );
             defer instr_prover.deinit();
 
+            // DEBUG: Check initial witness values and compute initial sum
+            std.debug.print("\n[ZOLT] INSTR_INIT: trace_len = {}, prover.current_size = {}\n", .{ trace_len, instr_prover.current_size });
+            // Compute the full sum to verify it equals input_claim
+            var full_sum = F.zero();
+            var left_sum = F.zero();
+            var right_sum = F.zero();
+            for (0..trace_len) |i| {
+                const left_i = instr_prover.left_is_rs1[i].mul(instr_prover.rs1_value[i])
+                    .add(instr_prover.left_is_pc[i].mul(instr_prover.unexpanded_pc[i]));
+                const right_i = instr_prover.right_is_rs2[i].mul(instr_prover.rs2_value[i])
+                    .add(instr_prover.right_is_imm[i].mul(instr_prover.imm[i]));
+                const eq_weight_i = instr_prover.eq_outer[i].add(instr_gamma_sqr.mul(instr_prover.eq_product[i]));
+                full_sum = full_sum.add(eq_weight_i.mul(right_i.add(instr_gamma.mul(left_i))));
+
+                // Also compute eq-weighted sums of left and right separately for each stage
+                left_sum = left_sum.add(instr_prover.eq_outer[i].mul(left_i));
+                right_sum = right_sum.add(instr_prover.eq_outer[i].mul(right_i));
+            }
+            std.debug.print("[ZOLT] INSTR_INIT: full_sum = {{ {any} }}\n", .{full_sum.toBytes()[0..8]});
+            std.debug.print("[ZOLT] INSTR_INIT: instr_input_claim = {{ {any} }}\n", .{instr_input_claim.toBytes()[0..8]});
+            std.debug.print("[ZOLT] INSTR_INIT: sum_equals_claim = {}\n", .{full_sum.eql(instr_input_claim)});
+
+            // The eq-weighted left_sum should equal left_1 from opening claims
+            // left_1 = LeftInstructionInput evaluated at r_outer
+            const left_1_from_openings = opening_claims.get(.{ .Virtual = .{ .poly = .LeftInstructionInput, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
+            const right_1_from_openings = opening_claims.get(.{ .Virtual = .{ .poly = .RightInstructionInput, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
+            std.debug.print("[ZOLT] INSTR_INIT: eq_weighted_left_sum = {{ {any} }}\n", .{left_sum.toBytes()[0..8]});
+            std.debug.print("[ZOLT] INSTR_INIT: left_1_from_openings = {{ {any} }}\n", .{left_1_from_openings.toBytes()[0..8]});
+            std.debug.print("[ZOLT] INSTR_INIT: left_match = {}\n", .{left_sum.eql(left_1_from_openings)});
+            std.debug.print("[ZOLT] INSTR_INIT: eq_weighted_right_sum = {{ {any} }}\n", .{right_sum.toBytes()[0..8]});
+            std.debug.print("[ZOLT] INSTR_INIT: right_1_from_openings = {{ {any} }}\n", .{right_1_from_openings.toBytes()[0..8]});
+            std.debug.print("[ZOLT] INSTR_INIT: right_match = {}\n", .{right_sum.eql(right_1_from_openings)});
+
+            // Debug: find mismatches
+            {
+                var mismatch_count: usize = 0;
+                for (0..trace_len) |idx| {
+                    const right_computed = instr_prover.right_is_rs2[idx].mul(instr_prover.rs2_value[idx])
+                        .add(instr_prover.right_is_imm[idx].mul(instr_prover.imm[idx]));
+                    const right_from_witness = if (idx < cycle_witnesses.len)
+                        cycle_witnesses[idx].values[R1CSInputIndex.RightInstructionInput.toIndex()]
+                    else
+                        F.zero();
+                    if (!right_computed.eql(right_from_witness)) {
+                        mismatch_count += 1;
+                        if (mismatch_count <= 5) {
+                            std.debug.print("[ZOLT] INSTR_INIT: MISMATCH at cycle {}: computed = {{ {any} }}, witness = {{ {any} }}\n", .{ idx, right_computed.toBytes()[0..8], right_from_witness.toBytes()[0..8] });
+                            std.debug.print("[ZOLT]   right_is_rs2 = {{ {any} }}, rs2 = {{ {any} }}\n", .{ instr_prover.right_is_rs2[idx].toBytes()[0..8], instr_prover.rs2_value[idx].toBytes()[0..8] });
+                            std.debug.print("[ZOLT]   right_is_imm = {{ {any} }}, imm = {{ {any} }}\n", .{ instr_prover.right_is_imm[idx].toBytes()[0..8], instr_prover.imm[idx].toBytes()[0..8] });
+                            // Also print the instruction for this cycle
+                            if (idx < cycle_witnesses.len) {
+                                const instr = cycle_witnesses[idx].values[R1CSInputIndex.Product.toIndex()]; // Using Product as proxy (need actual instruction)
+                                _ = instr;
+                                // Get opcode from witness if available
+                            }
+                        }
+                    }
+                }
+                std.debug.print("[ZOLT] INSTR_INIT: right mismatch_count = {} / {}\n", .{ mismatch_count, trace_len });
+            }
+
             // Track current claims for each instance
             var current_shift_claim = shift_input_claim;
             var current_instr_claim = instr_input_claim;
@@ -255,8 +316,87 @@ pub fn Stage3Prover(comptime F: type) type {
                 // InstructionInputSumcheck: degree 3
                 const instr_evals = instr_prover.computeRoundEvals(current_instr_claim);
 
+                // DEBUG: Verify instr_evals at round 0
+                if (round == 0) {
+                    // Manually compute p(0) and p(1) sums
+                    var manual_p0 = F.zero();
+                    var manual_p1 = F.zero();
+                    const half = instr_prover.current_size / 2;
+                    for (0..half) |j| {
+                        const left_0 = instr_prover.left_is_rs1[2 * j].mul(instr_prover.rs1_value[2 * j])
+                            .add(instr_prover.left_is_pc[2 * j].mul(instr_prover.unexpanded_pc[2 * j]));
+                        const right_0 = instr_prover.right_is_rs2[2 * j].mul(instr_prover.rs2_value[2 * j])
+                            .add(instr_prover.right_is_imm[2 * j].mul(instr_prover.imm[2 * j]));
+                        const eq_w_0 = instr_prover.eq_outer[2 * j].add(instr_gamma_sqr.mul(instr_prover.eq_product[2 * j]));
+                        manual_p0 = manual_p0.add(eq_w_0.mul(right_0.add(instr_gamma.mul(left_0))));
+
+                        const left_1 = instr_prover.left_is_rs1[2 * j + 1].mul(instr_prover.rs1_value[2 * j + 1])
+                            .add(instr_prover.left_is_pc[2 * j + 1].mul(instr_prover.unexpanded_pc[2 * j + 1]));
+                        const right_1 = instr_prover.right_is_rs2[2 * j + 1].mul(instr_prover.rs2_value[2 * j + 1])
+                            .add(instr_prover.right_is_imm[2 * j + 1].mul(instr_prover.imm[2 * j + 1]));
+                        const eq_w_1 = instr_prover.eq_outer[2 * j + 1].add(instr_gamma_sqr.mul(instr_prover.eq_product[2 * j + 1]));
+                        manual_p1 = manual_p1.add(eq_w_1.mul(right_1.add(instr_gamma.mul(left_1))));
+                    }
+                    std.debug.print("[ZOLT] ROUND0_VERIFY: manual_p0 = {{ {any} }}\n", .{manual_p0.toBytes()[0..8]});
+                    std.debug.print("[ZOLT] ROUND0_VERIFY: instr_evals[0] = {{ {any} }}\n", .{instr_evals[0].toBytes()[0..8]});
+                    std.debug.print("[ZOLT] ROUND0_VERIFY: p0_match = {}\n", .{manual_p0.eql(instr_evals[0])});
+                    std.debug.print("[ZOLT] ROUND0_VERIFY: manual_p1 = {{ {any} }}\n", .{manual_p1.toBytes()[0..8]});
+                    std.debug.print("[ZOLT] ROUND0_VERIFY: derived p1 = {{ {any} }}\n", .{instr_evals[1].toBytes()[0..8]});
+                    std.debug.print("[ZOLT] ROUND0_VERIFY: p0+p1 = {{ {any} }}\n", .{manual_p0.add(manual_p1).toBytes()[0..8]});
+                    std.debug.print("[ZOLT] ROUND0_VERIFY: input_claim = {{ {any} }}\n", .{current_instr_claim.toBytes()[0..8]});
+                }
+
                 // RegistersClaimReduction: degree 2
                 const reg_evals = reg_prover.computeRoundEvals(current_reg_claim);
+
+                // DEBUG: After last round, manually check the formula
+                if (round == num_rounds - 1) {
+                    std.debug.print("[ZOLT] LAST_ROUND: instr_evals = [p0={{ {any} }}, p1={{ {any} }}, p2={{ {any} }}, p3={{ {any} }}]\n", .{
+                        instr_evals[0].toBytes()[0..8],
+                        instr_evals[1].toBytes()[0..8],
+                        instr_evals[2].toBytes()[0..8],
+                        instr_evals[3].toBytes()[0..8],
+                    });
+
+                    // Manually compute what the polynomial value should be at different points
+                    // The prover should have current_size = 2 at this point
+                    std.debug.print("[ZOLT] LAST_ROUND: instr_prover.current_size = {}\n", .{instr_prover.current_size});
+
+                    // Check the sumcheck invariant: p(0) + p(1) = previous_claim
+                    const p0_plus_p1 = instr_evals[0].add(instr_evals[1]);
+                    std.debug.print("[ZOLT] LAST_ROUND: p0+p1 = {{ {any} }}\n", .{p0_plus_p1.toBytes()[0..8]});
+                    std.debug.print("[ZOLT] LAST_ROUND: current_instr_claim = {{ {any} }}\n", .{current_instr_claim.toBytes()[0..8]});
+                    std.debug.print("[ZOLT] LAST_ROUND: sumcheck_invariant_ok = {}\n", .{p0_plus_p1.eql(current_instr_claim)});
+
+                    // Manually compute what f(0) and f(1) should be from the raw values
+                    // Before bind, current_size = 2, so we have values at indices 0 and 1
+                    const left_0 = instr_prover.left_is_rs1[0].mul(instr_prover.rs1_value[0])
+                        .add(instr_prover.left_is_pc[0].mul(instr_prover.unexpanded_pc[0]));
+                    const right_0 = instr_prover.right_is_rs2[0].mul(instr_prover.rs2_value[0])
+                        .add(instr_prover.right_is_imm[0].mul(instr_prover.imm[0]));
+                    const eq_weight_0 = instr_prover.eq_outer[0].add(instr_gamma_sqr.mul(instr_prover.eq_product[0]));
+                    const f_0 = eq_weight_0.mul(right_0.add(instr_gamma.mul(left_0)));
+
+                    const left_1 = instr_prover.left_is_rs1[1].mul(instr_prover.rs1_value[1])
+                        .add(instr_prover.left_is_pc[1].mul(instr_prover.unexpanded_pc[1]));
+                    const right_1 = instr_prover.right_is_rs2[1].mul(instr_prover.rs2_value[1])
+                        .add(instr_prover.right_is_imm[1].mul(instr_prover.imm[1]));
+                    const eq_weight_1 = instr_prover.eq_outer[1].add(instr_gamma_sqr.mul(instr_prover.eq_product[1]));
+                    const f_1 = eq_weight_1.mul(right_1.add(instr_gamma.mul(left_1)));
+
+                    std.debug.print("[ZOLT] LAST_ROUND: manual_f0 = {{ {any} }}\n", .{f_0.toBytes()[0..8]});
+                    std.debug.print("[ZOLT] LAST_ROUND: manual_f1 = {{ {any} }}\n", .{f_1.toBytes()[0..8]});
+                    std.debug.print("[ZOLT] LAST_ROUND: f0_match = {}, f1_match = {}\n", .{ f_0.eql(instr_evals[0]), f_1.eql(instr_evals[1]) });
+
+                    // Check actual witness values at index 1
+                    std.debug.print("[ZOLT] LAST_ROUND: left_is_rs1[1] = {{ {any} }}\n", .{instr_prover.left_is_rs1[1].toBytes()[0..8]});
+                    std.debug.print("[ZOLT] LAST_ROUND: rs1_value[1] = {{ {any} }}\n", .{instr_prover.rs1_value[1].toBytes()[0..8]});
+                    std.debug.print("[ZOLT] LAST_ROUND: eq_outer[1] = {{ {any} }}\n", .{instr_prover.eq_outer[1].toBytes()[0..8]});
+                    std.debug.print("[ZOLT] LAST_ROUND: eq_product[1] = {{ {any} }}\n", .{instr_prover.eq_product[1].toBytes()[0..8]});
+                    std.debug.print("[ZOLT] LAST_ROUND: eq_weight_1 = {{ {any} }}\n", .{eq_weight_1.toBytes()[0..8]});
+                    std.debug.print("[ZOLT] LAST_ROUND: left_1 = {{ {any} }}\n", .{left_1.toBytes()[0..8]});
+                    std.debug.print("[ZOLT] LAST_ROUND: right_1 = {{ {any} }}\n", .{right_1.toBytes()[0..8]});
+                }
 
                 // Debug: Check individual prover invariants
                 if (round < 3) {
@@ -380,6 +520,45 @@ pub fn Stage3Prover(comptime F: type) type {
                 shift_prover.bind(r_j);
                 instr_prover.bind(r_j);
                 reg_prover.bind(r_j);
+
+                // DEBUG: Track nonzero count and verify sumcheck invariant after each bind
+                {
+                    // Verify sumcheck invariant: does the actual f(0) + f(1) sum match?
+                    // At this point we've just bound with r_j, so current_size is halved
+                    // Let's check the NEXT round's invariant by computing f(0) and f(1) from the new bound values
+                    if (round < num_rounds - 1) {
+                        // After binding, current_size is halved
+                        const next_half = instr_prover.current_size / 2;
+                        if (next_half > 0) {
+                            // Compute f(0) sum over the next round's indices
+                            var f0_sum = F.zero();
+                            var f1_sum = F.zero();
+                            for (0..next_half) |j| {
+                                const left_0 = instr_prover.left_is_rs1[2 * j].mul(instr_prover.rs1_value[2 * j])
+                                    .add(instr_prover.left_is_pc[2 * j].mul(instr_prover.unexpanded_pc[2 * j]));
+                                const right_0 = instr_prover.right_is_rs2[2 * j].mul(instr_prover.rs2_value[2 * j])
+                                    .add(instr_prover.right_is_imm[2 * j].mul(instr_prover.imm[2 * j]));
+                                const eq_w_0 = instr_prover.eq_outer[2 * j].add(instr_gamma_sqr.mul(instr_prover.eq_product[2 * j]));
+                                const contrib_0 = eq_w_0.mul(right_0.add(instr_gamma.mul(left_0)));
+                                f0_sum = f0_sum.add(contrib_0);
+
+                                const left_1 = instr_prover.left_is_rs1[2 * j + 1].mul(instr_prover.rs1_value[2 * j + 1])
+                                    .add(instr_prover.left_is_pc[2 * j + 1].mul(instr_prover.unexpanded_pc[2 * j + 1]));
+                                const right_1 = instr_prover.right_is_rs2[2 * j + 1].mul(instr_prover.rs2_value[2 * j + 1])
+                                    .add(instr_prover.right_is_imm[2 * j + 1].mul(instr_prover.imm[2 * j + 1]));
+                                const eq_w_1 = instr_prover.eq_outer[2 * j + 1].add(instr_gamma_sqr.mul(instr_prover.eq_product[2 * j + 1]));
+                                const contrib_1 = eq_w_1.mul(right_1.add(instr_gamma.mul(left_1)));
+                                f1_sum = f1_sum.add(contrib_1);
+                            }
+                            const total_sum = f0_sum.add(f1_sum);
+                            // Compare with the updated current_instr_claim (which was just set to p(r_j))
+                            const matches = total_sum.eql(current_instr_claim);
+                            if (round >= 5 or !matches) {
+                                std.debug.print("[ZOLT] VERIFY_ROUND_{}: actual_f0+f1 = {{ {any} }}, current_instr_claim = {{ {any} }}, match={}\n", .{ round + 1, total_sum.toBytes()[0..8], current_instr_claim.toBytes()[0..8], matches });
+                            }
+                        }
+                    }
+                }
             }
 
             std.debug.print("\n[ZOLT] STAGE3_FINAL: output_claim = {{ {any} }}\n", .{combined_claim.toBytes()});
@@ -410,9 +589,6 @@ pub fn Stage3Prover(comptime F: type) type {
                 std.debug.print("[ZOLT] STAGE3_DEBUG: challenges[0] = {{ {any} }}\n", .{challenges[0].toBytes()[0..8]});
                 std.debug.print("[ZOLT] STAGE3_DEBUG: reversed_challenges[0] = {{ {any} }}\n", .{reversed_challenges[0].toBytes()[0..8]});
 
-                _ = i_claims;
-                _ = r_claims;
-
                 // Compute shift_expected = eq+1(r_outer, r_final) * [upc + γ*pc + γ²*virt + γ³*first] + γ⁴*(1-noop)*eq+1(r_prod, r_final)
                 const shift_val = s_claims.unexpanded_pc
                     .add(shift_gamma_powers[1].mul(s_claims.pc))
@@ -435,6 +611,78 @@ pub fn Stage3Prover(comptime F: type) type {
                 std.debug.print("[ZOLT] STAGE3_DEBUG: prover eq+1_prod = {{ {any} }}\n", .{prover_eq_plus_one_prod.toBytes()});
                 std.debug.print("[ZOLT] STAGE3_DEBUG: verifier eq+1_prod = {{ {any} }}\n", .{eq_plus_one_r_prod.toBytes()});
                 std.debug.print("[ZOLT] STAGE3_DEBUG: eq+1_prod match = {}\n", .{prover_eq_plus_one_prod.eql(eq_plus_one_r_prod)});
+
+                // Compute InstructionInput expected_output_claim
+                var eq_outer = try poly_mod.EqPolynomial(F).init(self.allocator, r_outer);
+                defer eq_outer.deinit();
+                const eq_r_stage_1 = eq_outer.evaluate(reversed_challenges);
+
+                var eq_prod = try poly_mod.EqPolynomial(F).init(self.allocator, r_product);
+                defer eq_prod.deinit();
+                const eq_r_stage_2 = eq_prod.evaluate(reversed_challenges);
+
+                const left_instr = i_claims.left_is_rs1.mul(i_claims.rs1_value)
+                    .add(i_claims.left_is_pc.mul(i_claims.unexpanded_pc));
+                const right_instr = i_claims.right_is_rs2.mul(i_claims.rs2_value)
+                    .add(i_claims.right_is_imm.mul(i_claims.imm));
+                const instr_expected = (eq_r_stage_1.add(instr_gamma_sqr.mul(eq_r_stage_2)))
+                    .mul(right_instr.add(instr_gamma.mul(left_instr)));
+
+                std.debug.print("\n[ZOLT] STAGE3_DEBUG: eq_r_stage_1 = {{ {any} }}\n", .{eq_r_stage_1.toBytes()});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: eq_r_stage_2 = {{ {any} }}\n", .{eq_r_stage_2.toBytes()});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: left_instr (from i_claims) = {{ {any} }}\n", .{left_instr.toBytes()});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: right_instr (from i_claims) = {{ {any} }}\n", .{right_instr.toBytes()});
+
+                // Compute directly from prover's final witness values
+                const direct_left = instr_prover.left_is_rs1[0].mul(instr_prover.rs1_value[0])
+                    .add(instr_prover.left_is_pc[0].mul(instr_prover.unexpanded_pc[0]));
+                const direct_right = instr_prover.right_is_rs2[0].mul(instr_prover.rs2_value[0])
+                    .add(instr_prover.right_is_imm[0].mul(instr_prover.imm[0]));
+                std.debug.print("[ZOLT] STAGE3_DEBUG: direct_left = {{ {any} }}\n", .{direct_left.toBytes()});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: direct_right = {{ {any} }}\n", .{direct_right.toBytes()});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: left_match = {}, right_match = {}\n", .{ direct_left.eql(left_instr), direct_right.eql(right_instr) });
+
+                // Now recompute instr_expected using prover's eq values
+                const prover_eq_weight = instr_prover.eq_outer[0].add(instr_gamma_sqr.mul(instr_prover.eq_product[0]));
+                const prover_f = prover_eq_weight.mul(direct_right.add(instr_gamma.mul(direct_left)));
+                std.debug.print("[ZOLT] STAGE3_DEBUG: prover_f = {{ {any} }}\n", .{prover_f.toBytes()});
+
+                // Check the individual claim components
+                std.debug.print("[ZOLT] STAGE3_DEBUG: i_claims.left_is_rs1 = {{ {any} }}\n", .{i_claims.left_is_rs1.toBytes()[0..8]});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: i_claims.rs1_value = {{ {any} }}\n", .{i_claims.rs1_value.toBytes()[0..8]});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: i_claims.left_is_pc = {{ {any} }}\n", .{i_claims.left_is_pc.toBytes()[0..8]});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: i_claims.unexpanded_pc = {{ {any} }}\n", .{i_claims.unexpanded_pc.toBytes()[0..8]});
+
+                // Check individual witness MLE values
+                std.debug.print("[ZOLT] STAGE3_DEBUG: instr_prover.left_is_rs1[0] = {{ {any} }}\n", .{instr_prover.left_is_rs1[0].toBytes()[0..8]});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: instr_prover.rs1_value[0] = {{ {any} }}\n", .{instr_prover.rs1_value[0].toBytes()[0..8]});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: instr_prover.left_is_pc[0] = {{ {any} }}\n", .{instr_prover.left_is_pc[0].toBytes()[0..8]});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: instr_prover.unexpanded_pc[0] = {{ {any} }}\n", .{instr_prover.unexpanded_pc[0].toBytes()[0..8]});
+
+                std.debug.print("[ZOLT] STAGE3_DEBUG: instr_prover_eq_outer[0] = {{ {any} }}\n", .{instr_prover.eq_outer[0].toBytes()});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: instr_prover_eq_prod[0] = {{ {any} }}\n", .{instr_prover.eq_product[0].toBytes()});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: instr_expected = {{ {any} }}\n", .{instr_expected.toBytes()});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: current_instr_claim = {{ {any} }}\n", .{current_instr_claim.toBytes()});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: instr_match = {}\n", .{instr_expected.eql(current_instr_claim)});
+
+                // Compute Registers expected_output_claim
+                // eq(r, r_spartan) * (rd + gamma*rs1 + gamma^2*rs2)
+                const reg_val = r_claims.rd_write_value
+                    .add(reg_gamma.mul(r_claims.rs1_value))
+                    .add(reg_gamma_sqr.mul(r_claims.rs2_value));
+                const reg_expected = eq_r_stage_1.mul(reg_val);
+
+                std.debug.print("\n[ZOLT] STAGE3_DEBUG: reg_expected = {{ {any} }}\n", .{reg_expected.toBytes()});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: current_reg_claim = {{ {any} }}\n", .{current_reg_claim.toBytes()});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: reg_match = {}\n", .{reg_expected.eql(current_reg_claim)});
+
+                // Compute final expected_output_claim
+                const final_expected = batching_coeffs[0].mul(shift_expected)
+                    .add(batching_coeffs[1].mul(instr_expected))
+                    .add(batching_coeffs[2].mul(reg_expected));
+                std.debug.print("\n[ZOLT] STAGE3_DEBUG: final_expected = {{ {any} }}\n", .{final_expected.toBytes()});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: combined_claim = {{ {any} }}\n", .{combined_claim.toBytes()});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: final_match = {}\n", .{final_expected.eql(combined_claim)});
             }
 
             // Phase 3: Compute and cache opening claims

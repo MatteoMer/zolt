@@ -98,7 +98,7 @@ pub fn ProofConverter(comptime F: type) type {
 
             // Compute derived parameters
             const n_cycle_vars = std.math.log2_int(usize, trace_length);
-            const log_ram_k = std.math.log2_int(usize, ram_K);
+            _ = std.math.log2_int(usize, ram_K);
 
             // Copy commitments
             for (commitments) |c| {
@@ -166,9 +166,11 @@ pub fn ProofConverter(comptime F: type) type {
             );
 
             // Stage 4: Registers RW + RAM val evaluation + final
+            // RegistersReadWriteChecking has LOG_K + log2(T) rounds where LOG_K = 7 (128 registers)
+            const log_registers_stage4 = 7;
             try self.generateZeroSumcheckProof(
                 &jolt_proof.stage4_sumcheck_proof,
-                log_ram_k,
+                log_registers_stage4 + n_cycle_vars,
                 3,
             );
 
@@ -926,8 +928,10 @@ pub fn ProofConverter(comptime F: type) type {
             );
 
             // Stages 3-7 (placeholder)
+            // Stage 4 needs LOG_K + n_cycle_vars rounds where LOG_K = 7 (128 registers)
+            const log_registers = 7;
             try self.generateZeroSumcheckProof(&jolt_proof.stage3_sumcheck_proof, n_cycle_vars, 3);
-            try self.generateZeroSumcheckProof(&jolt_proof.stage4_sumcheck_proof, n_cycle_vars, 3);
+            try self.generateZeroSumcheckProof(&jolt_proof.stage4_sumcheck_proof, log_registers + n_cycle_vars, 3);
             try self.generateZeroSumcheckProof(&jolt_proof.stage5_sumcheck_proof, n_cycle_vars, 3);
             try self.generateZeroSumcheckProof(&jolt_proof.stage6_sumcheck_proof, n_cycle_vars, 3);
             try self.generateZeroSumcheckProof(&jolt_proof.stage7_sumcheck_proof, n_cycle_vars, 3);
@@ -1539,7 +1543,11 @@ pub fn ProofConverter(comptime F: type) type {
             // LookupOutput at InstructionClaimReduction was already added in Stage 2
 
             // Stage 4: RegistersReadWriteChecking, RamValEvaluation, RamValFinalEvaluation
-            try self.generateZeroSumcheckProof(&jolt_proof.stage4_sumcheck_proof, n_cycle_vars, 3);
+            // RegistersReadWriteChecking has LOG_K + log2(T) rounds where LOG_K = log2(REGISTER_COUNT)
+            // REGISTER_COUNT = 32 (RISCV) + 96 (Virtual) = 128, so LOG_K = 7
+            const log_registers = 7; // log2(128) = 7
+            const stage4_max_rounds = log_registers + n_cycle_vars;
+            try self.generateZeroSumcheckProof(&jolt_proof.stage4_sumcheck_proof, stage4_max_rounds, 3);
 
             // RegistersReadWriteChecking claims
             try jolt_proof.opening_claims.insert(

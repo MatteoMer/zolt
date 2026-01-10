@@ -1313,6 +1313,12 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             const prefix_0_eval_outer = evaluateMle(prefix_0_outer, r_prefix_be);
             const prefix_1_eval_outer = evaluateMle(prefix_1_outer, r_prefix_be);
 
+            // DEBUG: Print prefix evaluation details
+            std.debug.print("[ZOLT] SHIFT_PREFIX: r_prefix_be[0] = {any}\n", .{r_prefix_be[0].toBytes()[0..8]});
+            std.debug.print("[ZOLT] SHIFT_PREFIX: r_prefix_be[last] = {any}\n", .{r_prefix_be[r_prefix_be.len - 1].toBytes()[0..8]});
+            std.debug.print("[ZOLT] SHIFT_PREFIX: prefix_0_eval_outer = {any}\n", .{prefix_0_eval_outer.toBytes()[0..8]});
+            std.debug.print("[ZOLT] SHIFT_PREFIX: prefix_1_eval_outer = {any}\n", .{prefix_1_eval_outer.toBytes()[0..8]});
+
             // Regenerate suffix polynomials for r_outer
             // SUFFIX uses r_hi (Jolt convention)
             const suffix_0_outer = self.allocator.alloc(F, suffix_size) catch unreachable;
@@ -1431,6 +1437,28 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
 
             std.debug.print("[ZOLT] SHIFT_PHASE2_START: eq+1_outer[0] = {{ {any} }}\n", .{self.phase2_eq_plus_one_outer.?[0].toBytes()[0..8]});
             std.debug.print("[ZOLT] SHIFT_PHASE2_START: unexpanded_pc[0] = {{ {any} }}\n", .{self.unexpanded_pc[0].toBytes()[0..8]});
+
+            // DEBUG: Verify eq+1_outer initialization by direct evaluation
+            {
+                // eq+1_outer[0] should equal eq+1(r_outer, (r_prefix_be, [0,0,...,0]))
+                // where [0,0,...,0] is all zeros (suffix_n_vars zeros)
+                // This is: prefix_0_eval * suffix_0[0] + prefix_1_eval * suffix_1[0]
+
+                // First, verify suffix_0[0] = eq(r_outer_hi, [0,...,0])
+                // eq([r0,r1,...], [0,0,...]) should be prod(1-ri)
+                var expected_suffix_0_at_0 = F.one();
+                for (r_outer_hi) |ri| {
+                    expected_suffix_0_at_0 = expected_suffix_0_at_0.mul(F.one().sub(ri));
+                }
+                std.debug.print("[ZOLT] SHIFT_DEBUG: expected suffix_0[0] = {any}\n", .{expected_suffix_0_at_0.toBytes()[0..8]});
+                std.debug.print("[ZOLT] SHIFT_DEBUG: actual suffix_0_outer[0] = {any}\n", .{suffix_0_outer[0].toBytes()[0..8]});
+
+                // eq+1([r0,r1,...], [0,0,...]) should be 0 (because y=0 is not a successor of any x >= 0)
+                // Actually no, eq+1(x, y) = 1 iff y = x+1
+                // For y=[0,...,0] (binary 0), we need x = -1 which doesn't exist in unsigned
+                // So eq+1(anything, [0,...,0]) = 0
+                std.debug.print("[ZOLT] SHIFT_DEBUG: suffix_1_outer[0] should be ~0: {any}\n", .{suffix_1_outer[0].toBytes()[0..8]});
+            }
         }
 
         fn bindPhase2(self: *Self, r_j: F) void {
@@ -1438,11 +1466,26 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             // Formula: new[i] = old[2*i] + r * (old[2*i+1] - old[2*i])
             const new_size = self.current_witness_size / 2;
 
+            // Debug: print current state before binding
+            if (self.current_witness_size <= 16) {
+                std.debug.print("[ZOLT] SHIFT_BIND: size={}, r_j={any}\n", .{ self.current_witness_size, r_j.toBytes()[0..8] });
+                if (self.phase2_eq_plus_one_outer) |eq| {
+                    std.debug.print("[ZOLT] SHIFT_BIND: eq+1_outer[0]={any}, eq+1_outer[1]={any}\n", .{ eq[0].toBytes()[0..8], eq[1].toBytes()[0..8] });
+                }
+            }
+
             for (0..new_size) |i| {
                 self.unexpanded_pc[i] = self.unexpanded_pc[2 * i].add(r_j.mul(self.unexpanded_pc[2 * i + 1].sub(self.unexpanded_pc[2 * i])));
                 self.pc[i] = self.pc[2 * i].add(r_j.mul(self.pc[2 * i + 1].sub(self.pc[2 * i])));
                 self.is_virtual[i] = self.is_virtual[2 * i].add(r_j.mul(self.is_virtual[2 * i + 1].sub(self.is_virtual[2 * i])));
                 self.is_first_in_sequence[i] = self.is_first_in_sequence[2 * i].add(r_j.mul(self.is_first_in_sequence[2 * i + 1].sub(self.is_first_in_sequence[2 * i])));
+
+                // Debug after last binding
+                if (new_size == 1 and self.phase2_eq_plus_one_outer != null) {
+                    const eq = self.phase2_eq_plus_one_outer.?;
+                    const new_val = eq[0].add(r_j.mul(eq[1].sub(eq[0])));
+                    std.debug.print("[ZOLT] SHIFT_BIND_FINAL: new eq+1_outer[0]={any}\n", .{new_val.toBytes()});
+                }
                 self.is_noop[i] = self.is_noop[2 * i].add(r_j.mul(self.is_noop[2 * i + 1].sub(self.is_noop[2 * i])));
 
                 if (self.phase2_eq_plus_one_outer) |eq| {

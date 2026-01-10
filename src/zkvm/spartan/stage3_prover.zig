@@ -672,9 +672,20 @@ pub fn Stage3Prover(comptime F: type) type {
                     .add(reg_gamma_sqr.mul(r_claims.rs2_value));
                 const reg_expected = eq_r_stage_1.mul(reg_val);
 
-                std.debug.print("\n[ZOLT] STAGE3_DEBUG: reg_expected = {{ {any} }}\n", .{reg_expected.toBytes()});
+                std.debug.print("\n[ZOLT] STAGE3_DEBUG: r_claims.rd_write_value = {{ {any} }}\n", .{r_claims.rd_write_value.toBytes()});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: r_claims.rs1_value = {{ {any} }}\n", .{r_claims.rs1_value.toBytes()});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: r_claims.rs2_value = {{ {any} }}\n", .{r_claims.rs2_value.toBytes()});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: reg_gamma = {{ {any} }}\n", .{reg_gamma.toBytes()});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: reg_val = {{ {any} }}\n", .{reg_val.toBytes()});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: eq_r_stage_1 = {{ {any} }}\n", .{eq_r_stage_1.toBytes()});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: reg_expected = {{ {any} }}\n", .{reg_expected.toBytes()});
                 std.debug.print("[ZOLT] STAGE3_DEBUG: current_reg_claim = {{ {any} }}\n", .{current_reg_claim.toBytes()});
                 std.debug.print("[ZOLT] STAGE3_DEBUG: reg_match = {}\n", .{reg_expected.eql(current_reg_claim)});
+
+                // Also compute what the prover's eq polynomial should be
+                const prover_eq_final = reg_prover.phase2_eq.?[0];
+                std.debug.print("[ZOLT] STAGE3_DEBUG: prover_eq_final = {{ {any} }}\n", .{prover_eq_final.toBytes()});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: prover_eq vs eq_r_stage_1: {}\n", .{prover_eq_final.eql(eq_r_stage_1)});
 
                 // Compute final expected_output_claim
                 const final_expected = batching_coeffs[0].mul(shift_expected)
@@ -2166,6 +2177,13 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
         // Phase 2 eq polynomial
         phase2_eq: ?[]F,
 
+        // r_hi for Phase 2 initialization (eq suffix)
+        r_hi: []const F,
+        // r_lo for prefix evaluation in Phase 2
+        r_lo: []const F,
+        // Accumulated prefix challenges
+        prefix_challenges: std.ArrayList(F),
+
         allocator: Allocator,
 
         pub fn init(
@@ -2252,6 +2270,9 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
                 .current_witness_size = trace_len,
                 .in_phase2 = false,
                 .phase2_eq = null,
+                .r_hi = r_hi,
+                .r_lo = r_lo,
+                .prefix_challenges = std.ArrayList(F).initCapacity(allocator, @intCast(prefix_n_vars)) catch unreachable,
                 .allocator = allocator,
             };
         }
@@ -2259,6 +2280,7 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
         pub fn deinit(self: *Self) void {
             self.allocator.free(self.P);
             self.allocator.free(self.Q);
+            self.prefix_challenges.deinit(self.allocator);
             self.allocator.free(self.rd_write_value);
             self.allocator.free(self.rs1_value);
             self.allocator.free(self.rs2_value);
@@ -2361,15 +2383,49 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
                 self.rs2_value[i] = self.rs2_value[2 * i].add(r_j.mul(self.rs2_value[2 * i + 1].sub(self.rs2_value[2 * i])));
             }
             self.current_witness_size = witness_new_size;
+
+            // Record challenge for Phase 2 initialization
+            self.prefix_challenges.append(self.allocator, r_j) catch unreachable;
         }
 
         fn transitionToPhase2(self: *Self, r_j: F) void {
+            // Final bind and record challenge
             self.bindPhase1(r_j);
             self.in_phase2 = true;
 
-            // Materialize eq polynomial for remaining rounds
+            // Materialize eq polynomial for Phase 2:
+            // eq_suffix = eq(r_hi, j) * eq(r_prefix, r_lo)
+            // where r_prefix = accumulated prefix challenges
+
             const remaining_size = self.current_witness_size;
             self.phase2_eq = self.allocator.alloc(F, remaining_size) catch unreachable;
+
+            // Compute eq(r_prefix, r_lo) - the prefix evaluation
+            // r_prefix = prefix challenges (reversed from little-endian to big-endian)
+            // r_lo = second half of r_spartan (already in big-endian order)
+            //
+            // Jolt converts prefix_challenges from LITTLE_ENDIAN to BIG_ENDIAN via match_endianness(),
+            // which reverses the vector. We need to do the same.
+            const reversed_prefix = self.allocator.alloc(F, self.prefix_challenges.items.len) catch unreachable;
+            defer self.allocator.free(reversed_prefix);
+            for (0..self.prefix_challenges.items.len) |i| {
+                reversed_prefix[i] = self.prefix_challenges.items[self.prefix_challenges.items.len - 1 - i];
+            }
+
+            var eq_prefix = poly_mod.EqPolynomial(F).init(self.allocator, self.r_lo) catch unreachable;
+            defer eq_prefix.deinit();
+            const eq_prefix_eval = eq_prefix.evaluate(reversed_prefix);
+
+            // Compute eq(r_hi, j) for each j in [0, remaining_size)
+            var eq_suffix = poly_mod.EqPolynomial(F).init(self.allocator, self.r_hi) catch unreachable;
+            defer eq_suffix.deinit();
+            const eq_suffix_evals = eq_suffix.evals(self.allocator) catch unreachable;
+            defer self.allocator.free(eq_suffix_evals);
+
+            // phase2_eq[j] = eq_suffix[j] * eq_prefix_eval
+            for (0..remaining_size) |j| {
+                self.phase2_eq.?[j] = eq_suffix_evals[j].mul(eq_prefix_eval);
+            }
         }
 
         fn bindPhase2(self: *Self, r_j: F) void {

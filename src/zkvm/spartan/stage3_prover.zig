@@ -1309,15 +1309,26 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             }
             prefix_1_outer[0] = is_max_outer;
 
-            // Evaluate prefix polynomials at r_prefix (using BIG_ENDIAN version)
-            const prefix_0_eval_outer = evaluateMle(prefix_0_outer, r_prefix_be);
-            const prefix_1_eval_outer = evaluateMle(prefix_1_outer, r_prefix_be);
+            // Evaluate prefix polynomials at r_prefix
+            // NOTE: evaluateMle expects LITTLE_ENDIAN order (point[0] binds LSB)
+            // r_prefix_le (original from sumcheck_challenges) is already in little-endian order
+            // r_prefix_be is the big-endian version we created above by reversing
+            // For MLE evaluation, we need little-endian, so use r_prefix_le directly
+            const prefix_0_eval_outer = evaluateMle(prefix_0_outer, r_prefix_le);
+            const prefix_1_eval_outer = evaluateMle(prefix_1_outer, r_prefix_le);
 
             // DEBUG: Print prefix evaluation details
             std.debug.print("[ZOLT] SHIFT_PREFIX: r_prefix_be[0] = {any}\n", .{r_prefix_be[0].toBytes()[0..8]});
             std.debug.print("[ZOLT] SHIFT_PREFIX: r_prefix_be[last] = {any}\n", .{r_prefix_be[r_prefix_be.len - 1].toBytes()[0..8]});
             std.debug.print("[ZOLT] SHIFT_PREFIX: prefix_0_eval_outer = {any}\n", .{prefix_0_eval_outer.toBytes()[0..8]});
             std.debug.print("[ZOLT] SHIFT_PREFIX: prefix_1_eval_outer = {any}\n", .{prefix_1_eval_outer.toBytes()[0..8]});
+
+            // DEBUG: Print r_outer_hi and r_outer_lo (the fixed points from Stage 1)
+            // Using BE for comparison with STAGE1_CHALLENGES output
+            std.debug.print("[ZOLT] SHIFT_PREFIX: r_outer_hi[0] (BE) = {any}\n", .{r_outer_hi[0].toBytesBE()[0..8]});
+            std.debug.print("[ZOLT] SHIFT_PREFIX: r_outer_hi[last] (BE) = {any}\n", .{r_outer_hi[r_outer_hi.len - 1].toBytesBE()[0..8]});
+            std.debug.print("[ZOLT] SHIFT_PREFIX: r_outer_lo[0] (BE) = {any}\n", .{r_outer_lo[0].toBytesBE()[0..8]});
+            std.debug.print("[ZOLT] SHIFT_PREFIX: r_outer_lo[last] (BE) = {any}\n", .{r_outer_lo[r_outer_lo.len - 1].toBytesBE()[0..8]});
 
             // Regenerate suffix polynomials for r_outer
             // SUFFIX uses r_hi (Jolt convention)
@@ -1346,8 +1357,9 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             }
             prefix_1_prod[0] = is_max_prod;
 
-            const prefix_0_eval_prod = evaluateMle(prefix_0_prod, r_prefix_be);
-            const prefix_1_eval_prod = evaluateMle(prefix_1_prod, r_prefix_be);
+            // Use r_prefix_le for MLE evaluation (little-endian for evaluateMle)
+            const prefix_0_eval_prod = evaluateMle(prefix_0_prod, r_prefix_le);
+            const prefix_1_eval_prod = evaluateMle(prefix_1_prod, r_prefix_le);
 
             // SUFFIX uses r_hi (Jolt convention)
             const suffix_0_prod = self.allocator.alloc(F, suffix_size) catch unreachable;
@@ -1458,6 +1470,53 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
                 // For y=[0,...,0] (binary 0), we need x = -1 which doesn't exist in unsigned
                 // So eq+1(anything, [0,...,0]) = 0
                 std.debug.print("[ZOLT] SHIFT_DEBUG: suffix_1_outer[0] should be ~0: {any}\n", .{suffix_1_outer[0].toBytes()[0..8]});
+
+                // CRITICAL TEST: Evaluate eq+1(r_outer, (r_prefix_be, [0,0,0,0])) directly
+                // and compare with phase2_eq_plus_one_outer[0]
+                //
+                // Construct full y = (r_prefix_be, zeros_4) in big-endian
+                // Wait no, the formula is eq+1(r_outer, (y_hi, y_lo)) where y_lo is bound first.
+                // At index j=0 (all zeros for suffix), y = (zeros_4, r_prefix_be)
+                // So full_y = (zeros_suffix, r_prefix_be) where zeros_suffix has suffix_n_vars zeros
+                const full_y = self.allocator.alloc(F, self.r_outer.len) catch unreachable;
+                defer self.allocator.free(full_y);
+
+                // Big-endian: first half = suffix = zeros (for j=0), second half = prefix = r_prefix_be
+                for (0..self.suffix_n_vars) |i| {
+                    full_y[i] = F.zero();
+                }
+                for (0..r_prefix_be.len) |i| {
+                    full_y[self.suffix_n_vars + i] = r_prefix_be[i];
+                }
+
+                // Direct evaluation
+                const direct_eq_plus_one = poly_mod.EqPlusOnePolynomial(F).mle(self.r_outer, full_y);
+                std.debug.print("[ZOLT] SHIFT_CRITICAL: direct eq+1(r_outer, (zeros, r_prefix)) = {any}\n", .{direct_eq_plus_one.toBytes()});
+                std.debug.print("[ZOLT] SHIFT_CRITICAL: phase2_eq+1_outer[0] = {any}\n", .{self.phase2_eq_plus_one_outer.?[0].toBytes()});
+                std.debug.print("[ZOLT] SHIFT_CRITICAL: match = {}\n", .{direct_eq_plus_one.eql(self.phase2_eq_plus_one_outer.?[0])});
+
+                // Debug: check formula components
+                // phase2_eq+1_outer[0] = prefix_0_eval * suffix_0[0] + prefix_1_eval * suffix_1[0]
+                const expected_from_formula = prefix_0_eval_outer.mul(suffix_0_outer[0])
+                    .add(prefix_1_eval_outer.mul(suffix_1_outer[0]));
+                std.debug.print("[ZOLT] SHIFT_CRITICAL: from_formula = {any}\n", .{expected_from_formula.toBytes()});
+                std.debug.print("[ZOLT] SHIFT_CRITICAL: formula_match = {}\n", .{expected_from_formula.eql(self.phase2_eq_plus_one_outer.?[0])});
+
+                // Debug: prefix_0 and suffix_0 individually
+                // Direct eq+1(r_lo, y_lo) where y_lo = r_prefix_be
+                const direct_prefix_eval = poly_mod.EqPlusOnePolynomial(F).mle(r_outer_lo, r_prefix_be);
+                std.debug.print("[ZOLT] SHIFT_CRITICAL: direct eq+1(r_lo, y_lo) = {any}\n", .{direct_prefix_eval.toBytes()});
+                std.debug.print("[ZOLT] SHIFT_CRITICAL: prefix_0_eval_outer = {any}\n", .{prefix_0_eval_outer.toBytes()});
+                std.debug.print("[ZOLT] SHIFT_CRITICAL: prefix_match = {}\n", .{direct_prefix_eval.eql(prefix_0_eval_outer)});
+
+                // Direct eq(r_hi, y_hi) where y_hi = zeros
+                const zeros_hi = self.allocator.alloc(F, self.suffix_n_vars) catch unreachable;
+                defer self.allocator.free(zeros_hi);
+                @memset(zeros_hi, F.zero());
+                const direct_suffix_eval = poly_mod.EqPolynomial(F).mle(r_outer_hi, zeros_hi);
+                std.debug.print("[ZOLT] SHIFT_CRITICAL: direct eq(r_hi, zeros) = {any}\n", .{direct_suffix_eval.toBytes()});
+                std.debug.print("[ZOLT] SHIFT_CRITICAL: suffix_0[0] = {any}\n", .{suffix_0_outer[0].toBytes()});
+                std.debug.print("[ZOLT] SHIFT_CRITICAL: suffix_match = {}\n", .{direct_suffix_eval.eql(suffix_0_outer[0])});
             }
         }
 

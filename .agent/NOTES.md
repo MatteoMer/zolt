@@ -1,5 +1,55 @@
 # Zolt-Jolt Cross-Verification Progress
 
+## Session 35 Summary - Stage 1 Fix + Prefix-Suffix Convention (2026-01-10)
+
+### Stage 1 Fix (SUCCESS)
+Stage 1 was failing because `NextPC = 0` for last cycle broke MLE polynomial consistency.
+
+**Root Cause:** Setting `NextPC = 0` when next is NoOp changes the MLE polynomial, causing the sumcheck claimed sum to not match actual polynomial evaluation.
+
+**Fix Applied:**
+```zig
+// Even when next is NoOp, use step.next_pc to preserve MLE consistency
+inputs.values[R1CSInputIndex.NextPC.toIndex()] = F.fromU64(step.next_pc);
+```
+
+The constraint `if ShouldJump => NextPC == LookupOutput` is still satisfied because:
+- `ShouldJump = Jump * (1 - next_is_noop) = 0` when next is NoOp
+- So the constraint is trivially satisfied regardless of NextPC value
+
+### Prefix-Suffix r_hi/r_lo Convention Fix
+Discovered that Zolt had the prefix-suffix decomposition backwards from Jolt.
+
+**Jolt Convention:**
+- r_hi = r[0..mid] (first half) → used for **SUFFIX**
+- r_lo = r[mid..n] (second half) → used for **PREFIX**
+- prefix_size = 2^len(r_lo), suffix_size = 2^len(r_hi)
+
+**Zolt Had (WRONG):**
+- r_hi → PREFIX
+- r_lo → SUFFIX
+
+**Fixed in:**
+- `ShiftPrefixSuffixProver.init()`
+- `ShiftPrefixSuffixProver.transitionToPhase2()`
+- `RegistersPrefixSuffixProver.init()`
+
+### Other Changes
+- Added `unexpanded_pc` field to TraceStep (for future virtual sequence support)
+- Added `is_noop` flag and `padWithNoop()` for trace padding
+
+### Current Status
+- **Stage 1: PASSES** ✓
+- **Stage 2: PASSES** ✓
+- **Stage 3: FAILS** - prefix-suffix fix applied but `grand_sum != input_claim`
+- **Stages 4-7: Blocked**
+
+### Commits
+- `02fcac3` - fix: Stage 1 verification + NoOp padding + prefix-suffix decomposition
+- `cd2df80` - chore: add build_verify.sh script
+
+---
+
 ## Session 34 Summary - Stage 3 Sumcheck Invariant Bug (2026-01-09)
 
 ### Issue Found

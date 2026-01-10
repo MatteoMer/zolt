@@ -61,7 +61,7 @@ zolt bench
 
 # Run a RISC-V ELF binary
 zolt run program.elf
-zolt run --max-cycles 1000 --regs program.elf  # Limit cycles, show registers
+zolt run --regs program.elf  # Show final register state
 
 # Show execution trace (for debugging)
 zolt trace program.elf                           # Show first 100 steps

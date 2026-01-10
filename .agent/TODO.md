@@ -1,96 +1,63 @@
 # Zolt-Jolt Compatibility TODO
 
-## Current Status: Stage 3 ShiftSumcheck Debugging
+## Current Status: Stage 3 Expected Output Claim Investigation
 
-### Key Finding (2025-01-09)
-The prefix-suffix decomposition is mathematically correct:
-- `grand_sum(P*Q)` = `{ 51, 156, 139, 8, ... }`
-- `direct_sum` = `{ 51, 156, 139, 8, ... }` (matches grand_sum!)
-- **BUT** `input_claim` = `{ 254, 135, 82, 218, ... }` (completely different)
+### Issues Fixed
+1. **Binding order** - All provers now use LowToHigh binding consistently
+2. **Degree-2 extrapolation** - Properly extrapolate shift/reg to x=3 using `p(3) = p0 - 3*p1 + 3*p2`
+3. **Sumcheck invariant** - `p(0)+p(1) = claim` verified at each round
+4. **Batched polynomial consistency** - `batched_sum == combined_claim` verified
 
-The sumcheck would work if grand_sum == input_claim, but they don't match!
+### Current Issue
+Sumcheck rounds pass but final output_claim doesn't match expected_output_claim:
+```
+output_claim:          14479714286458141723416680681829317356766515671419249179721686829661484481208
+expected_output_claim: 19829957079326482140855077841713818330258980683739449213840778147525912490313
+```
 
-### Hypotheses to Test
-1. **Opening claim point mismatch**: The input claim might be computed at a different point (r_outer) than where we're evaluating the sum.
+### Understanding the Verifier
+From Jolt expert analysis, verifier computes:
+```rust
+expected_output_claim = sumcheck_instances
+    .iter()
+    .zip(batching_coeffs.iter())
+    .map(|(sumcheck, coeff)| {
+        sumcheck.cache_openings(accumulator, transcript, r_slice);
+        sumcheck.expected_output_claim(accumulator, r_slice) * coeff
+    })
+    .sum();
+```
 
-2. **Wrong polynomial structure**: The "Next" virtual polynomials might not have the relationship I expect:
-   - I assume: `NextUnexpandedPC[j] = UnexpandedPC[j+1]`
-   - Reality might be different
+For Shift specifically:
+```rust
+expected = eq+1(r_outer, r_final) * [upc(r_final) + γ*pc(r_final) + γ²*virt(r_final) + γ³*first(r_final)]
+         + γ⁴ * (1 - noop(r_final)) * eq+1(r_product, r_final)
+```
 
-3. **Witness index mismatch**: The indices used in shift sumcheck might differ from what Jolt uses.
+### Likely Root Cause
+The prover's shift polynomial should match this formula exactly. Need to verify:
+1. eq+1 polynomial evaluations at r_final match between prover and verifier
+2. Opening claims (upc, pc, etc.) match the MLE evaluations at r_final
+3. Phase 2 transition correctly materializes eq+1 polynomials
 
 ### Next Steps
-1. Add debug output to compare `r_outer` point used in input claim vs direct sum
-2. Verify the relationship between "Next" polynomials and current cycle values
-3. Check if the outer sumcheck opening claims are at the right point
-
-## Implementation Done
-- [x] Stage 3 prover structure
-- [x] ShiftPrefixSuffixProver with 4 (P,Q) pairs
-- [x] InstructionInputProver (direct computation)
-- [x] RegistersPrefixSuffixProver with 1 (P,Q) pair
-- [x] Phase 2 transition with eq+1 materialization
-
-## Pending
-- [ ] Debug why grand_sum != input_claim
-- [ ] Test Stage 3 against Jolt verifier
-- [ ] Implement Stages 4-7 sumcheck provers
-- [ ] Full proof verification test
-
-## Key Formulas
-
-### EqPlusOnePrefixSuffixPoly Decomposition
-```
-eq+1((r_hi, r_lo), (y_hi, y_lo)) =
-    eq+1(r_lo, y_lo) * eq(r_hi, y_hi) +
-    is_max(r_lo) * is_min(y_lo) * eq+1(r_hi, y_hi)
-```
-
-Where:
-- r is split at mid: r_hi = r[0..mid], r_lo = r[mid..n]
-- prefix_0[j] = eq+1(r_lo, j)
-- suffix_0[j] = eq(r_hi, j)
-- prefix_1[0] = is_max(r_lo), all other indices = 0
-- suffix_1[j] = eq+1(r_hi, j)
-- is_max(x) = product of x[i] for all i (= eq((1)^n, x))
-
-### Q Buffer Construction
-```
-Q[x_lo] = Σ_{x_hi} witness(x) * suffix[x_hi]
-where x = x_lo + (x_hi << prefix_n_vars)
-```
-
-### Shift Sumcheck Relationship
-```
-input_claim = NextUnexpandedPC(r) + γ*NextPC(r) + γ²*NextIsVirtual(r) + γ³*NextIsFirst(r) + γ⁴*(1-NextIsNoop(r))
-sumcheck = Σ_j eq+1(r,j) * [UPC(j) + γ*PC(j) + γ²*Virt(j) + γ³*First(j)] + γ⁴*Σ_j eq+1(r_prod,j)*(1-Noop(j))
-
-These should be equal because:
-- eq+1(r, j) = 1 when j = r + 1
-- So Σ_j eq+1(r,j) * f(j) = f(r+1) = Next(r)
-```
+1. Add debug to print eq+1 evaluations at final challenge point
+2. Verify opening claims match expected MLE values
+3. Check Phase 2 eq+1 materialization in ShiftPrefixSuffixProver
 
 ## Overall Progress
 
 | Stage | Status | Notes |
 |-------|--------|-------|
-| 1 | ✓ PASSES | Outer Spartan sumcheck works |
+| 1 | ✓ PASSES | MLE consistency fixed |
 | 2 | ✓ PASSES | Product virtualization works |
-| 3 | DEBUGGING | grand_sum != input_claim |
+| 3 | IN PROGRESS | Sumcheck rounds pass, output claim mismatch |
 | 4-7 | Blocked | Waiting on Stage 3 |
 
-## Testing Commands
+## Files Modified
+- `src/zkvm/spartan/stage3_prover.zig` - binding order, extrapolation, debug output
 
+## Testing
 ```bash
-# Generate proof
-./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format \
-  --export-preprocessing /tmp/zolt_preprocessing.bin \
-  -o /tmp/zolt_proof_dory.bin --srs /tmp/jolt_dory_srs.bin
-
-# Verify with Jolt
-cd /Users/matteo/projects/jolt && cargo test -p jolt-core \
-  test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
-
-# Run Zolt tests
-zig build test
+bash scripts/build_verify.sh
 ```

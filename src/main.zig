@@ -163,7 +163,7 @@ fn parseCommand(arg: []const u8) Command {
     return .unknown;
 }
 
-fn runEmulator(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles: ?u64, show_regs: bool, input_bytes: ?[]const u8) !void {
+fn runEmulator(allocator: std.mem.Allocator, elf_path: []const u8, show_regs: bool, input_bytes: ?[]const u8) !void {
     std.debug.print("Loading ELF: {s}\n", .{elf_path});
 
     // Load the ELF file
@@ -207,24 +207,14 @@ fn runEmulator(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles: ?
     // Set entry point PC
     emulator.state.pc = program.entry_point;
 
-    const cycle_limit = max_cycles orelse 16 * 1024 * 1024; // Default 16M cycles
-    std.debug.print("Max cycles: {}\n", .{cycle_limit});
     std.debug.print("\nStarting execution...\n", .{});
 
-    // Run the emulator step by step
-    var running = true;
-    while (running and emulator.state.cycle < cycle_limit) {
-        running = emulator.step() catch |err| {
-            std.debug.print("Execution stopped: {}\n", .{err});
-            break;
-        };
-    }
+    // Run the emulator until termination
+    emulator.run() catch |err| {
+        std.debug.print("Execution stopped: {}\n", .{err});
+    };
 
-    if (emulator.state.cycle >= cycle_limit) {
-        std.debug.print("\nCycle limit reached!\n", .{});
-    } else {
-        std.debug.print("\nExecution complete!\n", .{});
-    }
+    std.debug.print("\nExecution complete!\n", .{});
     std.debug.print("Cycles executed: {}\n", .{emulator.state.cycle});
     std.debug.print("Final PC: 0x{x:0>8}\n", .{emulator.state.pc});
     std.debug.print("Trace entries: {}\n", .{emulator.trace.len()});
@@ -278,13 +268,13 @@ fn runEmulator(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles: ?
     }
 }
 
-fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt: ?u64, output_path: ?[]const u8, json_format: bool, jolt_format: bool, srs_path: ?[]const u8, preprocessing_path: ?[]const u8, input_bytes: ?[]const u8) !void {
+fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, trace_length_opt: ?u64, output_path: ?[]const u8, json_format: bool, jolt_format: bool, srs_path: ?[]const u8, preprocessing_path: ?[]const u8, input_bytes: ?[]const u8) !void {
     // srs_path: Optional path to a Jolt-exported Dory SRS file.
     // When provided, uses the same SRS as Jolt for exact commitment compatibility.
     std.debug.print("Zolt zkVM Prover\n", .{});
     std.debug.print("================\n\n", .{});
 
-    const max_cycles = max_cycles_opt orelse 1024;
+    const trace_length = trace_length_opt orelse 1024;
 
     // Load the ELF file
     std.debug.print("Loading ELF: {s}\n", .{elf_path});
@@ -299,7 +289,7 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt:
 
     std.debug.print("  Entry point: 0x{x:0>8}\n", .{program.entry_point});
     std.debug.print("  Code size: {} bytes\n", .{program.bytecode.len});
-    std.debug.print("  Max cycles: {}\n", .{max_cycles});
+    std.debug.print("  Trace length: {}\n", .{trace_length});
     if (input_bytes) |inputs| {
         std.debug.print("  Input bytes: {} bytes\n", .{inputs.len});
     }
@@ -309,7 +299,7 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt:
     var timer = std.time.Timer.start() catch return;
 
     var preprocessor = zolt.host.Preprocessing(BN254Scalar).init(allocator);
-    preprocessor.setMaxTraceLength(max_cycles);
+    preprocessor.setMaxTraceLength(trace_length);
 
     var keys = try preprocessor.preprocess(&program);
     defer keys.pk.deinit();
@@ -325,7 +315,6 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, max_cycles_opt:
     timer.reset();
 
     var prover_inst = zolt.zkvm.JoltProver(BN254Scalar).init(allocator);
-    prover_inst.setMaxCycles(max_cycles);
     // Convert host ProvingKey to zkvm ProvingKey
     const zkvm_pk = zolt.zkvm.ProvingKey.fromSRS(keys.pk.srs);
     prover_inst.setProvingKey(zkvm_pk);
@@ -935,7 +924,6 @@ fn showTrace(allocator: std.mem.Allocator, elf_path: []const u8, max_steps_opt: 
 
     // Set entry point PC
     emulator.state.pc = program.entry_point;
-    emulator.max_cycles = 16 * 1024 * 1024;
 
     // Run and collect trace
     var running = true;
@@ -1239,14 +1227,12 @@ pub fn main() !void {
                     std.debug.print("Run a RISC-V ELF binary in the emulator.\n", .{});
                     std.debug.print("The emulator supports RV64IMC instructions.\n\n", .{});
                     std.debug.print("Options:\n", .{});
-                    std.debug.print("  --max-cycles N   Limit execution to N cycles (default: 16M)\n", .{});
                     std.debug.print("  --regs           Show final register state\n", .{});
                     std.debug.print("  --input FILE     Load input bytes from FILE\n", .{});
                     std.debug.print("  --input-hex HEX  Set input as hex bytes (e.g., 0x32 for input 50)\n", .{});
                 } else {
                     // Parse options
                     var elf_path: ?[]const u8 = null;
-                    var max_cycles: ?u64 = null;
                     var show_regs = false;
                     var input_file: ?[]const u8 = null;
                     var input_hex: ?[]const u8 = null;
@@ -1255,10 +1241,6 @@ pub fn main() !void {
                     if (std.mem.startsWith(u8, arg, "--")) {
                         if (std.mem.eql(u8, arg, "--regs")) {
                             show_regs = true;
-                        } else if (std.mem.eql(u8, arg, "--max-cycles")) {
-                            if (args.next()) |cycles_str| {
-                                max_cycles = std.fmt.parseInt(u64, cycles_str, 10) catch null;
-                            }
                         } else if (std.mem.eql(u8, arg, "--input")) {
                             input_file = args.next();
                         } else if (std.mem.eql(u8, arg, "--input-hex")) {
@@ -1273,10 +1255,6 @@ pub fn main() !void {
                         if (std.mem.startsWith(u8, next_arg, "--")) {
                             if (std.mem.eql(u8, next_arg, "--regs")) {
                                 show_regs = true;
-                            } else if (std.mem.eql(u8, next_arg, "--max-cycles")) {
-                                if (args.next()) |cycles_str| {
-                                    max_cycles = std.fmt.parseInt(u64, cycles_str, 10) catch null;
-                                }
                             } else if (std.mem.eql(u8, next_arg, "--input")) {
                                 input_file = args.next();
                             } else if (std.mem.eql(u8, next_arg, "--input-hex")) {
@@ -1328,7 +1306,7 @@ pub fn main() !void {
                     }
 
                     if (elf_path) |path| {
-                        runEmulator(allocator, path, max_cycles, show_regs, input_bytes_owned) catch |err| {
+                        runEmulator(allocator, path, show_regs, input_bytes_owned) catch |err| {
                             std.debug.print("Failed to run program: {s}\n", .{@errorName(err)});
                             std.process.exit(1);
                         };
@@ -1430,7 +1408,7 @@ pub fn main() !void {
                     std.debug.print("  3. Generate proof using multi-stage sumcheck\n", .{});
                     std.debug.print("  4. Verify the proof\n\n", .{});
                     std.debug.print("Options:\n", .{});
-                    std.debug.print("  --max-cycles N           Limit execution to N cycles (default: 1024)\n", .{});
+                    std.debug.print("  --trace-length N         Set trace length for proof system (default: 1024)\n", .{});
                     std.debug.print("  -o, --output F           Save proof to file F\n", .{});
                     std.debug.print("  --json                   Output proof in JSON format (human readable)\n", .{});
                     std.debug.print("  --jolt-format            Output proof in Jolt-compatible format for cross-verification\n", .{});
@@ -1440,7 +1418,7 @@ pub fn main() !void {
                 } else {
                     // Parse options
                     var elf_path: ?[]const u8 = null;
-                    var max_cycles: ?u64 = null;
+                    var trace_length: ?u64 = null;
                     var output_path: ?[]const u8 = null;
                     var json_format = false;
                     var jolt_format = false;
@@ -1450,9 +1428,9 @@ pub fn main() !void {
 
                     // First arg could be an option or the ELF path
                     if (std.mem.startsWith(u8, arg, "-")) {
-                        if (std.mem.eql(u8, arg, "--max-cycles")) {
-                            if (args.next()) |cycles_str| {
-                                max_cycles = std.fmt.parseInt(u64, cycles_str, 10) catch null;
+                        if (std.mem.eql(u8, arg, "--trace-length")) {
+                            if (args.next()) |len_str| {
+                                trace_length = std.fmt.parseInt(u64, len_str, 10) catch null;
                             }
                         } else if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
                             output_path = args.next();
@@ -1474,9 +1452,9 @@ pub fn main() !void {
                     // Parse remaining args
                     while (args.next()) |next_arg| {
                         if (std.mem.startsWith(u8, next_arg, "-")) {
-                            if (std.mem.eql(u8, next_arg, "--max-cycles")) {
-                                if (args.next()) |cycles_str| {
-                                    max_cycles = std.fmt.parseInt(u64, cycles_str, 10) catch null;
+                            if (std.mem.eql(u8, next_arg, "--trace-length")) {
+                                if (args.next()) |len_str| {
+                                    trace_length = std.fmt.parseInt(u64, len_str, 10) catch null;
                                 }
                             } else if (std.mem.eql(u8, next_arg, "-o") or std.mem.eql(u8, next_arg, "--output")) {
                                 output_path = args.next();
@@ -1518,7 +1496,7 @@ pub fn main() !void {
                     }
 
                     if (elf_path) |path| {
-                        runProver(allocator, path, max_cycles, output_path, json_format, jolt_format, srs_path, preprocessing_path, input_bytes_owned) catch |err| {
+                        runProver(allocator, path, trace_length, output_path, json_format, jolt_format, srs_path, preprocessing_path, input_bytes_owned) catch |err| {
                             std.debug.print("Failed to generate proof: {s}\n", .{@errorName(err)});
                             std.process.exit(1);
                         };

@@ -658,7 +658,6 @@ test "serialize and deserialize full JoltProof" {
 
     // Create a prover
     var prover_inst = zkvm.JoltProver(F).init(allocator);
-    prover_inst.max_cycles = 64;
 
     // Generate a proof
     var proof = try prover_inst.prove(&program, &[_]u8{});
@@ -1106,7 +1105,6 @@ test "full proof JSON serialization" {
 
     // Create prover and generate proof
     var prover_inst = zkvm.JoltProver(F).init(allocator);
-    prover_inst.max_cycles = 64;
 
     var proof = try prover_inst.prove(&program, &[_]u8{});
     defer proof.deinit();
@@ -1529,7 +1527,6 @@ test "JSON roundtrip with stage proofs" {
 
     // Create prover and generate proof
     var prover_inst = zkvm.JoltProver(F).init(allocator);
-    prover_inst.max_cycles = 64;
 
     var proof = try prover_inst.prove(&program, &[_]u8{});
     defer proof.deinit();

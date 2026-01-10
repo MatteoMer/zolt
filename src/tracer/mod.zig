@@ -129,10 +129,10 @@ pub const Emulator = struct {
     trace: ExecutionTrace,
     /// Lookup trace for Lasso proofs
     lookup_trace: zkvm.instruction.LookupTraceCollector(64),
-    /// Maximum cycles to execute
-    max_cycles: u64,
     /// Whether the current instruction is compressed
     is_compressed: bool,
+    /// Previous PC for infinite loop detection (matching Jolt's termination heuristic)
+    prev_pc: u64,
     allocator: Allocator,
 
     pub fn init(allocator: Allocator, config: *const common.MemoryConfig) Emulator {
@@ -143,8 +143,8 @@ pub const Emulator = struct {
             .device = common.JoltDevice.init(allocator, config),
             .trace = ExecutionTrace.init(allocator),
             .lookup_trace = zkvm.instruction.LookupTraceCollector(64).init(allocator),
-            .max_cycles = common.constants.DEFAULT_MAX_TRACE_LENGTH,
             .is_compressed = false,
+            .prev_pc = 0, // Will be set to initial PC on first step
             .allocator = allocator,
         };
     }
@@ -235,8 +235,14 @@ pub const Emulator = struct {
 
     /// Execute a single instruction
     pub fn step(self: *Emulator) !bool {
-        if (self.state.cycle >= self.max_cycles) {
-            return false; // Max cycles reached
+        // Infinite loop detection (matching Jolt's termination heuristic)
+        // If PC hasn't changed since last step, the program has terminated
+        // via an infinite loop (e.g., JAL x0, 0). This is standard for bare-metal
+        // RISC-V programs without an OS to return to.
+        // Skip this check on first step (prev_pc == 0 and state.pc != 0)
+        if (self.prev_pc != 0 and self.prev_pc == self.state.pc) {
+            std.debug.print("[TRACE] Detected infinite loop at PC 0x{x:0>8}, cycle {d}\n", .{ self.state.pc, self.state.cycle });
+            return false; // Program terminated via infinite loop
         }
 
         // Fetch instruction
@@ -287,6 +293,9 @@ pub const Emulator = struct {
             .is_compressed = self.is_compressed,
         });
 
+        // Update prev_pc for infinite loop detection (set to current PC before we change it)
+        self.prev_pc = self.state.pc;
+
         // Update state
         self.state.pc = result.next_pc;
         self.state.cycle += 1;
@@ -295,15 +304,27 @@ pub const Emulator = struct {
         return true;
     }
 
-    /// Run until completion or max cycles
-    /// Stops on ECALL (normal program termination) or max cycles
+    /// Run until completion
+    /// Stops on ECALL (normal program termination) or infinite loop detection
     pub fn run(self: *Emulator) !void {
         while (true) {
             const running = self.step() catch |err| switch (err) {
-                error.Ecall => return, // Normal termination
+                error.Ecall => {
+                    std.debug.print("[TRACE] Terminated via ECALL at cycle {d}\n", .{self.state.cycle});
+                    return; // Normal termination
+                },
                 else => return err,
             };
-            if (!running) return;
+            if (!running) {
+                // Program terminated via infinite loop detection
+                std.debug.print("[TRACE] Terminated via infinite loop at PC 0x{x}, cycle {d}\n", .{ self.state.pc, self.state.cycle });
+                // Print last instruction to verify it's a jump
+                if (self.trace.steps.items.len > 0) {
+                    const last_step = self.trace.steps.items[self.trace.steps.items.len - 1];
+                    std.debug.print("[TRACE] Last instruction: 0x{x:0>8} at PC 0x{x}\n", .{ last_step.instruction, last_step.pc });
+                }
+                return;
+            }
         }
     }
 
@@ -757,8 +778,11 @@ pub const Emulator = struct {
                         // Check if it's a termination request via device address
                         return error.Ecall;
                     } else {
-                        // Unknown ECALL - for Jolt guests, continue execution
-                        // This handles Jolt SDK's internal ECALLs that we don't recognize
+                        // For standard bare-metal programs (like fibonacci.c), ECALL is
+                        // used as the exit syscall. Terminate execution.
+                        // Note: Jolt SDK programs use infinite loop for termination,
+                        // but simple C programs use ECALL.
+                        return error.Ecall;
                     }
                 }
                 // EBREAK and other system instructions - treat as NOP

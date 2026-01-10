@@ -563,6 +563,7 @@ test "jolt r1cs witness generation" {
     try trace.steps.append(allocator, .{
         .cycle = 0,
         .pc = 0x1000,
+        .unexpanded_pc = 0x1000,
         .instruction = 0x00000013, // NOP (addi x0, x0, 0)
         .rs1_value = 0,
         .rs2_value = 0,
@@ -601,6 +602,7 @@ test "jolt r1cs Az Bz Cz computation" {
     try trace.steps.append(allocator, .{
         .cycle = 0,
         .pc = 0x1000,
+        .unexpanded_pc = 0x1000,
         .instruction = 0x00000013,
         .rs1_value = 0,
         .rs2_value = 0,
@@ -648,6 +650,7 @@ test "jolt spartan interface" {
     try trace.steps.append(allocator, .{
         .cycle = 0,
         .pc = 0x1000,
+        .unexpanded_pc = 0x1000,
         .instruction = 0x00000013,
         .rs1_value = 0,
         .rs2_value = 0,

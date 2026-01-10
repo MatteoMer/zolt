@@ -1,20 +1,20 @@
 # Makefile for Zolt example programs
 #
 # Prerequisites:
-#   - RISC-V toolchain (riscv32-unknown-elf-gcc)
+#   - RISC-V toolchain (riscv64-elf-gcc from homebrew)
 #
 # Usage:
 #   make all       - Build all examples
 #   make clean     - Remove built files
 #   make fibonacci - Build fibonacci example
 
-# Use the SP1 toolchain if available
-RISCV_CC ?= $(shell which riscv32-unknown-elf-gcc 2>/dev/null || echo riscv32-unknown-elf-gcc)
-RISCV_OBJDUMP ?= $(shell which riscv32-unknown-elf-objdump 2>/dev/null || echo riscv32-unknown-elf-objdump)
+# Use riscv64-elf-gcc (homebrew) for RV64 - matching Jolt's architecture
+RISCV_CC ?= $(shell which riscv64-elf-gcc 2>/dev/null || echo riscv64-elf-gcc)
+RISCV_OBJDUMP ?= $(shell which riscv64-elf-objdump 2>/dev/null || echo riscv64-elf-objdump)
 
-# Compiler flags
-CFLAGS = -march=rv32im -mabi=ilp32 -nostdlib -O2
-LDFLAGS = -Wl,-Ttext=0x80000000
+# Compiler flags for RV64 (matching Jolt)
+CFLAGS = -march=rv64im -mabi=lp64 -nostdlib -O2
+LDFLAGS = -T linker.ld -nostartfiles
 
 # All targets
 TARGETS = fibonacci.elf sum.elf factorial.elf bitwise.elf array.elf gcd.elf collatz.elf signed.elf primes.elf

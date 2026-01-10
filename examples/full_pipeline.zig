@@ -94,7 +94,6 @@ pub fn main() !void {
     timer.reset();
 
     var prover = JoltProver.init(allocator);
-    prover.setMaxCycles(64);
 
     // Set the proving key for generating commitments
     const zkvm_pk = zolt.zkvm.ProvingKey.fromSRS(keys.pk.srs);

@@ -1014,16 +1014,21 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             inputs.values[R1CSInputIndex.UnexpandedPC.toIndex()] = F.fromU64(step.unexpanded_pc);
 
             // Use next step's values if available
-            // IMPORTANT: Even when next is NoOp, we set NextPC = step.next_pc to preserve
-            // MLE polynomial consistency. Setting NextPC = 0 breaks the sumcheck.
-            // The constraint "if ShouldJump => NextPC == LookupOutput" is still satisfied
-            // because ShouldJump = Jump * (1 - next_is_noop) = 0 when next is NoOp.
+            // Match Jolt's behavior: When next cycle is NoOp, all Next* values are 0.
+            // This is required for the Stage 3 shift sumcheck which verifies:
+            //   NextUPC[j] = UPC[j+1] for all j
+            // Since NoOp cycles have UPC = 0, we need NextUPC = 0 at the boundary.
+            //
+            // For Stage 1 constraint 16 (NextUnexpPCUpdateOtherwise), this works because:
+            // - Jump/branch instructions: condition = 0 (disabled)
+            // - RISC-V programs typically end with ECALL or jump at termination
+            // - The tracer stops at infinite loop detection (before the loop instruction)
             if (next_step) |ns| {
                 if (ns.is_noop) {
-                    // Next is NoOp padding: use current step's next_pc to preserve MLE consistency
-                    // This is the WORKAROUND from STAGE1_INVESTIGATION.md
-                    inputs.values[R1CSInputIndex.NextPC.toIndex()] = F.fromU64(step.next_pc);
-                    inputs.values[R1CSInputIndex.NextUnexpandedPC.toIndex()] = F.fromU64(step.next_pc);
+                    // Next is NoOp padding: set all Next* values to 0 (matching Jolt)
+                    // In Jolt: NoOp.normalize().address = 0 and get_pc(NoOp) = 0
+                    inputs.values[R1CSInputIndex.NextPC.toIndex()] = F.zero();
+                    inputs.values[R1CSInputIndex.NextUnexpandedPC.toIndex()] = F.zero();
                 } else {
                     // Next is a real step: use its PC values
                     inputs.values[R1CSInputIndex.NextPC.toIndex()] = F.fromU64(ns.pc);
@@ -1034,9 +1039,9 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                 inputs.values[R1CSInputIndex.NextIsVirtual.toIndex()] = F.zero();
                 inputs.values[R1CSInputIndex.NextIsFirstInSequence.toIndex()] = F.zero();
             } else {
-                // No next step: use current step's next_pc to preserve MLE consistency
-                inputs.values[R1CSInputIndex.NextPC.toIndex()] = F.fromU64(step.next_pc);
-                inputs.values[R1CSInputIndex.NextUnexpandedPC.toIndex()] = F.fromU64(step.next_pc);
+                // No next step: all Next* values are 0 (matching Jolt)
+                inputs.values[R1CSInputIndex.NextPC.toIndex()] = F.zero();
+                inputs.values[R1CSInputIndex.NextUnexpandedPC.toIndex()] = F.zero();
                 inputs.values[R1CSInputIndex.NextIsVirtual.toIndex()] = F.zero();
                 inputs.values[R1CSInputIndex.NextIsFirstInSequence.toIndex()] = F.zero();
             }

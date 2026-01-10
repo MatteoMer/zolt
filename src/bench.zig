@@ -356,7 +356,6 @@ fn benchEmulator() !void {
         for (0..iterations) |_| {
             var emu = tracer.Emulator.init(allocator, &config);
             defer emu.deinit();
-            emu.max_cycles = 512;
             emu.loadProgram(&program) catch continue;
             emu.run() catch continue;
         }
@@ -393,7 +392,6 @@ fn benchProver() !void {
     // Run emulation once to get trace
     var emu = tracer.Emulator.init(allocator, &config);
     defer emu.deinit();
-    emu.max_cycles = 8;
     try emu.loadProgram(&program);
     try emu.run();
 
@@ -431,7 +429,6 @@ fn benchProver() !void {
     // Benchmark with more steps
     var emu2 = tracer.Emulator.init(allocator, &config);
     defer emu2.deinit();
-    emu2.max_cycles = 32;
 
     // Program with a small loop (4 iterations)
     const loop_program = [_]u8{
@@ -496,7 +493,6 @@ fn benchProofSize() !void {
     // Run emulation to get trace
     var emu = tracer.Emulator.init(allocator, &config);
     defer emu.deinit();
-    emu.max_cycles = 8;
     try emu.loadProgram(&simple_program);
     try emu.run();
 
@@ -535,7 +531,6 @@ fn benchProofSize() !void {
     // Now with a loop program
     var emu2 = tracer.Emulator.init(allocator, &config);
     defer emu2.deinit();
-    emu2.max_cycles = 32;
 
     const loop_program = [_]u8{
         0x93, 0x00, 0x40, 0x00, // addi x1, x0, 4
@@ -602,7 +597,6 @@ fn benchVerifier() !void {
     // Run emulation to get trace
     var emu = tracer.Emulator.init(allocator, &config);
     defer emu.deinit();
-    emu.max_cycles = 8;
     try emu.loadProgram(&program);
     try emu.run();
 
@@ -652,7 +646,6 @@ fn benchVerifier() !void {
     // Now with a loop program (more cycles)
     var emu2 = tracer.Emulator.init(allocator, &config);
     defer emu2.deinit();
-    emu2.max_cycles = 32;
 
     const loop_program = [_]u8{
         0x93, 0x00, 0x40, 0x00, // addi x1, x0, 4

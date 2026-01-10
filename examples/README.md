@@ -153,4 +153,4 @@ int main(void) {
 - **Collatz example**: Takes 825 cycles
 - **Simple examples**: Finish in < 100 cycles
 
-The proving time scales with the number of cycles. For faster proving during development, use `--max-cycles` to limit execution.
+The proving time scales with the trace length. For faster proving during development, use `--trace-length` to configure the proof system.

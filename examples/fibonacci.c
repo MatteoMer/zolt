@@ -1,8 +1,8 @@
 // Simple Fibonacci example for Zolt zkVM
 // Computes the 10th Fibonacci number
 //
-// Compile with:
-//   riscv32-unknown-elf-gcc -march=rv32im -mabi=ilp32 -nostdlib -O2 \
+// Compile with (RV64):
+//   riscv64-elf-gcc -march=rv64im -mabi=lp64 -nostdlib -O2 \
 //     -Wl,-Ttext=0x80000000 -o fibonacci.elf fibonacci.c
 
 // Minimal startup code
@@ -14,8 +14,9 @@ void _start(void) {
         "li sp, 0x80010000\n"
         // Call main and store result in a0
         "call main\n"
-        // Exit via ecall
-        "ecall\n"
+        // Terminate via infinite loop (matching Jolt's termination heuristic)
+        // The tracer detects when PC doesn't change and stops execution
+        "1: j 1b\n"
     );
 }
 

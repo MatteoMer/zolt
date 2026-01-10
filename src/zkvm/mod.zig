@@ -285,14 +285,12 @@ pub fn JoltProver(comptime F: type) type {
         const Self = @This();
 
         allocator: Allocator,
-        max_cycles: u64,
         /// Optional proving key for generating actual commitments
         proving_key: ?ProvingKey,
 
         pub fn init(allocator: Allocator) Self {
             return .{
                 .allocator = allocator,
-                .max_cycles = common.constants.DEFAULT_MAX_TRACE_LENGTH,
                 .proving_key = null,
             };
         }
@@ -301,7 +299,6 @@ pub fn JoltProver(comptime F: type) type {
         pub fn initWithKey(allocator: Allocator, proving_key: ProvingKey) Self {
             return .{
                 .allocator = allocator,
-                .max_cycles = common.constants.DEFAULT_MAX_TRACE_LENGTH,
                 .proving_key = proving_key,
             };
         }
@@ -326,9 +323,6 @@ pub fn JoltProver(comptime F: type) type {
             // Initialize the emulator
             var emulator = tracer.Emulator.init(self.allocator, &config);
             defer emulator.deinit();
-
-            // Set max cycles
-            emulator.max_cycles = self.max_cycles;
 
             // Load the program into memory
             try emulator.loadProgram(program_bytecode);
@@ -442,8 +436,6 @@ pub fn JoltProver(comptime F: type) type {
             // Initialize the emulator
             var emulator = tracer.Emulator.init(self.allocator, &config);
             defer emulator.deinit();
-
-            emulator.max_cycles = self.max_cycles;
 
             // Load and execute the program
             try emulator.loadProgram(program_bytecode);
@@ -710,8 +702,6 @@ pub fn JoltProver(comptime F: type) type {
             var emulator = tracer.Emulator.init(self.allocator, &config);
             defer emulator.deinit();
 
-            emulator.max_cycles = self.max_cycles;
-
             // Load the program at the correct base address and set entry point
             try emulator.loadProgramAt(program_bytecode, base_address);
             emulator.state.pc = entry_point;
@@ -932,8 +922,6 @@ pub fn JoltProver(comptime F: type) type {
             // Initialize the emulator
             var emulator = tracer.Emulator.init(self.allocator, &config);
             defer emulator.deinit();
-
-            emulator.max_cycles = self.max_cycles;
 
             // Load and execute the program
             try emulator.loadProgram(program_bytecode);
@@ -1430,11 +1418,6 @@ pub fn JoltProver(comptime F: type) type {
             };
         }
 
-        /// Set the maximum number of cycles to execute
-        pub fn setMaxCycles(self: *Self, max_cycles: u64) void {
-            self.max_cycles = max_cycles;
-        }
-
         /// Set the proving key
         pub fn setProvingKey(self: *Self, pk: ProvingKey) void {
             self.proving_key = pk;
@@ -1864,6 +1847,7 @@ test "r1cs-spartan: witness generation and Az Bz Cz computation" {
     try trace.steps.append(allocator, .{
         .cycle = 0,
         .pc = 0x1000,
+        .unexpanded_pc = 0x1000,
         .instruction = 0x00500093, // ADDI x1, x0, 5
         .rs1_value = 0,
         .rs2_value = 0,
@@ -1878,6 +1862,7 @@ test "r1cs-spartan: witness generation and Az Bz Cz computation" {
     try trace.steps.append(allocator, .{
         .cycle = 1,
         .pc = 0x1004,
+        .unexpanded_pc = 0x1004,
         .instruction = 0x00A00113, // ADDI x2, x0, 10
         .rs1_value = 0,
         .rs2_value = 0,
@@ -2039,7 +2024,6 @@ test "jolt verifier commitment opening - empty commitment" {
 //     const allocator = std.testing.allocator;
 //     const program_bytecode = [_]u8{ 0x01, 0x00 }; // c.nop
 //     var prover_inst = JoltProver(F).init(allocator);
-//     prover_inst.setMaxCycles(5);
 //     var proof = try prover_inst.prove(&program_bytecode, &[_]u8{});
 //     defer proof.deinit();
 //     try std.testing.expect(proof.stage_proofs != null);

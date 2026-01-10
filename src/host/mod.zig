@@ -157,8 +157,6 @@ pub const ExecutionTrace = struct {
 
 /// Program execution options
 pub const ExecutionOptions = struct {
-    /// Maximum number of cycles to execute
-    max_cycles: u64 = common.constants.DEFAULT_MAX_TRACE_LENGTH,
     /// Whether to record trace for proving
     record_trace: bool = true,
 };
@@ -171,7 +169,7 @@ pub fn execute(
     allocator: Allocator,
     program: *const Program,
     inputs: []const u8,
-    options: ExecutionOptions,
+    _: ExecutionOptions,
 ) !ExecutionTrace {
     // Create memory config for the emulator
     var config = common.MemoryConfig{
@@ -181,9 +179,6 @@ pub fn execute(
     // Initialize the emulator
     var emulator = tracer.Emulator.init(allocator, &config);
     defer emulator.deinit();
-
-    // Set max cycles
-    emulator.max_cycles = options.max_cycles;
 
     // Load the program into memory at the correct base address
     try emulator.loadProgramAt(program.bytecode, program.base_address);
@@ -560,10 +555,8 @@ test "execute runs simple program" {
         .allocator = allocator,
     };
 
-    // Execute with small cycle limit
-    var trace = try execute(allocator, &program, &[_]u8{}, .{
-        .max_cycles = 10,
-    });
+    // Execute
+    var trace = try execute(allocator, &program, &[_]u8{}, .{});
     defer trace.deinit();
 
     // Should have executed at least 1 cycle
@@ -592,9 +585,7 @@ test "execute with longer program" {
     };
 
     // Execute
-    var trace = try execute(allocator, &program, &[_]u8{}, .{
-        .max_cycles = 50,
-    });
+    var trace = try execute(allocator, &program, &[_]u8{}, .{});
     defer trace.deinit();
 
     // Should have executed at least 3 cycles for the 3 instructions
@@ -745,9 +736,7 @@ test "ELFLoader execute minimal program" {
     var program = try loader.load(&elf_data);
     defer program.deinit();
 
-    var trace = try execute(allocator, &program, &[_]u8{}, .{
-        .max_cycles = 10,
-    });
+    var trace = try execute(allocator, &program, &[_]u8{}, .{});
     defer trace.deinit();
 
     // Should complete (ecall triggers halt)

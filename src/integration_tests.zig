@@ -294,7 +294,6 @@ test "e2e: simple addi program execution trace" {
 
     var emu = tracer.Emulator.init(allocator, &config);
     defer emu.deinit();
-    emu.max_cycles = 128;
 
     // Simple NOP-like program to test the emulator runs without crashing
     // The specific instruction encoding may vary - we just want to test the trace
@@ -352,7 +351,6 @@ test "e2e: multi-instruction program emulation" {
 
     var emu = tracer.Emulator.init(allocator, &config);
     defer emu.deinit();
-    emu.max_cycles = 64;
 
     // Program that computes: x1 = 16, x2 = 20, with limited instruction set
     // Note: Some encodings were incorrect, using simpler valid ones
@@ -376,7 +374,6 @@ test "e2e: execute and trace multiple instructions" {
 
     var emu = tracer.Emulator.init(allocator, &config);
     defer emu.deinit();
-    emu.max_cycles = 32;
 
     // Simple sequence of NOP-like instructions
     const program = [_]u8{
@@ -479,7 +476,6 @@ test "emulator: arithmetic sequence (sum 1 to 10)" {
 
     var emu = tracer.Emulator.init(allocator, &config);
     defer emu.deinit();
-    emu.max_cycles = 128;
 
     // Program:
     //   addi x1, x0, 10   ; counter = 10
@@ -515,7 +511,6 @@ test "emulator: memory store and load" {
 
     var emu = tracer.Emulator.init(allocator, &config);
     defer emu.deinit();
-    emu.max_cycles = 32;
 
     // Program:
     //   addi x1, x0, 42      ; x1 = 42
@@ -557,7 +552,6 @@ test "emulator: shift operations" {
 
     var emu = tracer.Emulator.init(allocator, &config);
     defer emu.deinit();
-    emu.max_cycles = 32;
 
     // Program:
     //   addi x1, x0, 1      ; x1 = 1
@@ -598,7 +592,6 @@ test "emulator: comparison operations" {
 
     var emu = tracer.Emulator.init(allocator, &config);
     defer emu.deinit();
-    emu.max_cycles = 32;
 
     // Program:
     //   addi x1, x0, 5       ; x1 = 5
@@ -637,7 +630,6 @@ test "emulator: XOR and bit manipulation" {
 
     var emu = tracer.Emulator.init(allocator, &config);
     defer emu.deinit();
-    emu.max_cycles = 32;
 
     // Program:
     //   addi x1, x0, 0x55    ; x1 = 0b01010101

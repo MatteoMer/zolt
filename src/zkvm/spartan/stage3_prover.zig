@@ -258,17 +258,31 @@ pub fn Stage3Prover(comptime F: type) type {
                 // RegistersClaimReduction: degree 2
                 const reg_evals = reg_prover.computeRoundEvals(current_reg_claim);
 
-                // Debug
+                // Debug: Check individual prover invariants
+                if (round < 3) {
+                    const shift_sum = shift_evals[0].add(shift_evals[1]);
+                    const instr_sum = instr_evals[0].add(instr_evals[1]);
+                    const reg_sum = reg_evals[0].add(reg_evals[1]);
+                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: shift_p0+p1 = {{ {any} }}, shift_claim = {{ {any} }}, match={}\n", .{ round, shift_sum.toBytes()[0..8], current_shift_claim.toBytes()[0..8], shift_sum.eql(current_shift_claim) });
+                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: instr_p0+p1 = {{ {any} }}, instr_claim = {{ {any} }}, match={}\n", .{ round, instr_sum.toBytes()[0..8], current_instr_claim.toBytes()[0..8], instr_sum.eql(current_instr_claim) });
+                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: reg_p0+p1 = {{ {any} }}, reg_claim = {{ {any} }}, match={}\n", .{ round, reg_sum.toBytes()[0..8], current_reg_claim.toBytes()[0..8], reg_sum.eql(current_reg_claim) });
+                }
                 std.debug.print("[ZOLT] STAGE3_ROUND_{}: shift_p0 = {{ {any} }}\n", .{ round, shift_evals[0].toBytes() });
                 std.debug.print("[ZOLT] STAGE3_ROUND_{}: shift_p1 = {{ {any} }}\n", .{ round, shift_evals[1].toBytes() });
 
                 // Combine round polynomials (all evaluated at 0, 1, 2, 3)
                 // batched_poly = coeff[0] * shift_poly + coeff[1] * instr_poly + coeff[2] * reg_poly
+                // NOTE: shift and reg are degree-2, but we need their values at x=3 via extrapolation
+                // Linear extrapolation: p(3) = 3*p(1) - 3*p(0) + p(-1) is wrong for degree-2
+                // Quadratic extrapolation: p(3) = 3*p(2) - 3*p(1) + p(0)
+                const shift_p3 = shift_evals[2].mul(F.fromU64(3)).sub(shift_evals[1].mul(F.fromU64(3))).add(shift_evals[0]);
+                const reg_p3 = reg_evals[2].mul(F.fromU64(3)).sub(reg_evals[1].mul(F.fromU64(3))).add(reg_evals[0]);
+
                 var combined_evals: [4]F = undefined;
                 for (0..4) |i| {
-                    const shift_val = if (i < 3) shift_evals[i] else F.zero();
+                    const shift_val = if (i < 3) shift_evals[i] else shift_p3;
                     const instr_val = instr_evals[i];
-                    const reg_val = if (i < 3) reg_evals[i] else F.zero();
+                    const reg_val = if (i < 3) reg_evals[i] else reg_p3;
                     combined_evals[i] = shift_val.mul(batching_coeffs[0])
                         .add(instr_val.mul(batching_coeffs[1]))
                         .add(reg_val.mul(batching_coeffs[2]));
@@ -339,6 +353,29 @@ pub fn Stage3Prover(comptime F: type) type {
                 defer self.allocator.free(reg_coeffs);
                 current_reg_claim = self.evaluatePolyAtPoint(reg_coeffs, r_j);
 
+                // DEBUG: Verify combined_claim equals batched sum of individual claims
+                if (round < 3) {
+                    // Test: evaluate combined poly at point 0 - should equal combined_evals[0]
+                    const test_p0 = self.evaluatePolyAtPoint(combined_coeffs, F.zero());
+                    const expect_p0 = combined_evals[0];
+                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: combined_poly(0) = {{ {any} }}, expect = {{ {any} }}, match={}\n", .{ round, test_p0.toBytes()[0..8], expect_p0.toBytes()[0..8], test_p0.eql(expect_p0) });
+
+                    // Direct sum check
+                    const direct_combined = batching_coeffs[0].mul(self.evaluatePolyAtPoint(shift_coeffs, r_j))
+                        .add(batching_coeffs[1].mul(self.evaluatePolyAtPoint(instr_coeffs, r_j)))
+                        .add(batching_coeffs[2].mul(self.evaluatePolyAtPoint(reg_coeffs, r_j)));
+                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: direct_combined = {{ {any} }}\n", .{ round, direct_combined.toBytes()[0..8] });
+                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: combined_claim = {{ {any} }}\n", .{ round, combined_claim.toBytes()[0..8] });
+
+                    const batched_sum = batching_coeffs[0].mul(current_shift_claim)
+                        .add(batching_coeffs[1].mul(current_instr_claim))
+                        .add(batching_coeffs[2].mul(current_reg_claim));
+                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: batched_sum = {{ {any} }}\n", .{ round, batched_sum.toBytes()[0..8] });
+                    if (!batched_sum.eql(combined_claim)) {
+                        std.debug.print("[ZOLT] STAGE3_ROUND_{}: MISMATCH: batched_sum != combined_claim!\n", .{round});
+                    }
+                }
+
                 // Bind all provers at r_j
                 shift_prover.bind(r_j);
                 instr_prover.bind(r_j);
@@ -346,6 +383,59 @@ pub fn Stage3Prover(comptime F: type) type {
             }
 
             std.debug.print("\n[ZOLT] STAGE3_FINAL: output_claim = {{ {any} }}\n", .{combined_claim.toBytes()});
+
+            // DEBUG: Compute expected_output_claim like verifier
+            {
+                // Get final opening claims from provers
+                const s_claims = shift_prover.finalClaims();
+                const i_claims = instr_prover.finalClaims();
+                const r_claims = reg_prover.finalClaims();
+
+                // Compute eq+1 evaluations at final challenge point
+                // NOTE: Jolt's verifier uses normalize_opening_point which REVERSES challenges for BigEndian
+                const reversed_challenges = try self.allocator.alloc(F, challenges.len);
+                defer self.allocator.free(reversed_challenges);
+                for (0..challenges.len) |i| {
+                    reversed_challenges[i] = challenges[challenges.len - 1 - i];
+                }
+
+                var eq_plus_one_outer = try poly_mod.EqPlusOnePolynomial(F).init(self.allocator, r_outer);
+                defer eq_plus_one_outer.deinit();
+                const eq_plus_one_r_outer = eq_plus_one_outer.evaluate(reversed_challenges);
+
+                var eq_plus_one_prod = try poly_mod.EqPlusOnePolynomial(F).init(self.allocator, r_product);
+                defer eq_plus_one_prod.deinit();
+                const eq_plus_one_r_prod = eq_plus_one_prod.evaluate(reversed_challenges);
+
+                std.debug.print("[ZOLT] STAGE3_DEBUG: challenges[0] = {{ {any} }}\n", .{challenges[0].toBytes()[0..8]});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: reversed_challenges[0] = {{ {any} }}\n", .{reversed_challenges[0].toBytes()[0..8]});
+
+                _ = i_claims;
+                _ = r_claims;
+
+                // Compute shift_expected = eq+1(r_outer, r_final) * [upc + γ*pc + γ²*virt + γ³*first] + γ⁴*(1-noop)*eq+1(r_prod, r_final)
+                const shift_val = s_claims.unexpanded_pc
+                    .add(shift_gamma_powers[1].mul(s_claims.pc))
+                    .add(shift_gamma_powers[2].mul(s_claims.is_virtual))
+                    .add(shift_gamma_powers[3].mul(s_claims.is_first_in_sequence));
+                const shift_expected = eq_plus_one_r_outer.mul(shift_val)
+                    .add(shift_gamma_powers[4].mul(F.one().sub(s_claims.is_noop)).mul(eq_plus_one_r_prod));
+
+                std.debug.print("\n[ZOLT] STAGE3_DEBUG: shift_val = {{ {any} }}\n", .{shift_val.toBytes()[0..8]});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: shift_expected = {{ {any} }}\n", .{shift_expected.toBytes()});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: current_shift_claim = {{ {any} }}\n", .{current_shift_claim.toBytes()});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: shift_match = {}\n", .{shift_expected.eql(current_shift_claim)});
+
+                // Check prover's eq+1 values
+                const prover_eq_plus_one_outer = shift_prover.phase2_eq_plus_one_outer.?[0];
+                const prover_eq_plus_one_prod = shift_prover.phase2_eq_plus_one_prod.?[0];
+                std.debug.print("[ZOLT] STAGE3_DEBUG: prover eq+1_outer = {{ {any} }}\n", .{prover_eq_plus_one_outer.toBytes()});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: verifier eq+1_outer = {{ {any} }}\n", .{eq_plus_one_r_outer.toBytes()});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: eq+1_outer match = {}\n", .{prover_eq_plus_one_outer.eql(eq_plus_one_r_outer)});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: prover eq+1_prod = {{ {any} }}\n", .{prover_eq_plus_one_prod.toBytes()});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: verifier eq+1_prod = {{ {any} }}\n", .{eq_plus_one_r_prod.toBytes()});
+                std.debug.print("[ZOLT] STAGE3_DEBUG: eq+1_prod match = {}\n", .{prover_eq_plus_one_prod.eql(eq_plus_one_r_prod)});
+            }
 
             // Phase 3: Compute and cache opening claims
             // After all rounds, the MLEs are bound to single values
@@ -1175,12 +1265,21 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             self.in_phase2 = true;
 
             // Collect all Phase 1 challenges as r_prefix
-            const r_prefix = self.sumcheck_challenges.items;
+            // CRITICAL: Jolt converts from LITTLE_ENDIAN (sumcheck order) to BIG_ENDIAN (MLE indexing)
+            // by reversing the challenges array. We must do the same.
+            // sumcheck_challenges[0] = first round = binds LSB variable
+            // After reversal: r_prefix_be[0] = last challenge = MSB variable
+            const r_prefix_le = self.sumcheck_challenges.items;
+            const r_prefix_be = self.allocator.alloc(F, r_prefix_le.len) catch unreachable;
+            defer self.allocator.free(r_prefix_be);
+            for (0..r_prefix_le.len) |i| {
+                r_prefix_be[i] = r_prefix_le[r_prefix_le.len - 1 - i];
+            }
             const n_remaining_rounds = self.suffix_n_vars;
             const suffix_size: usize = @as(usize, 1) << @intCast(n_remaining_rounds);
 
             std.debug.print("\n[ZOLT] SHIFT_PHASE2_START: n_remaining_rounds={d}, suffix_size={d}\n", .{ n_remaining_rounds, suffix_size });
-            std.debug.print("[ZOLT] SHIFT_PHASE2_START: r_prefix.len={d}\n", .{r_prefix.len});
+            std.debug.print("[ZOLT] SHIFT_PHASE2_START: r_prefix_be.len={d}\n", .{r_prefix_be.len});
 
             // =====================================================================
             // Step 1: Regenerate prefix-suffix decomposition from original r_outer/r_product
@@ -1210,9 +1309,9 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             }
             prefix_1_outer[0] = is_max_outer;
 
-            // Evaluate prefix polynomials at r_prefix
-            const prefix_0_eval_outer = evaluateMle(prefix_0_outer, r_prefix);
-            const prefix_1_eval_outer = evaluateMle(prefix_1_outer, r_prefix);
+            // Evaluate prefix polynomials at r_prefix (using BIG_ENDIAN version)
+            const prefix_0_eval_outer = evaluateMle(prefix_0_outer, r_prefix_be);
+            const prefix_1_eval_outer = evaluateMle(prefix_1_outer, r_prefix_be);
 
             // Regenerate suffix polynomials for r_outer
             // SUFFIX uses r_hi (Jolt convention)
@@ -1241,8 +1340,8 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             }
             prefix_1_prod[0] = is_max_prod;
 
-            const prefix_0_eval_prod = evaluateMle(prefix_0_prod, r_prefix);
-            const prefix_1_eval_prod = evaluateMle(prefix_1_prod, r_prefix);
+            const prefix_0_eval_prod = evaluateMle(prefix_0_prod, r_prefix_be);
+            const prefix_1_eval_prod = evaluateMle(prefix_1_prod, r_prefix_be);
 
             // SUFFIX uses r_hi (Jolt convention)
             const suffix_0_prod = self.allocator.alloc(F, suffix_size) catch unreachable;
@@ -1271,11 +1370,11 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             // poly[j] = Σ_i Eq(r_prefix, i) * witness[i * suffix_size + j]
             // =====================================================================
 
-            // Compute Eq(r_prefix, i) for all i in prefix domain
-            const prefix_domain_size: usize = @as(usize, 1) << @intCast(r_prefix.len);
+            // Compute Eq(r_prefix, i) for all i in prefix domain (using BIG_ENDIAN version)
+            const prefix_domain_size: usize = @as(usize, 1) << @intCast(r_prefix_be.len);
             const eq_evals = self.allocator.alloc(F, prefix_domain_size) catch unreachable;
             defer self.allocator.free(eq_evals);
-            computeEqEvals(self.allocator, r_prefix, eq_evals) catch unreachable;
+            computeEqEvals(self.allocator, r_prefix_be, eq_evals) catch unreachable;
 
             // Reallocate witness MLEs to suffix_size
             self.allocator.free(self.unexpanded_pc);
@@ -1645,21 +1744,21 @@ fn InstructionInputProver(comptime F: type) type {
         }
 
         pub fn bind(self: *Self, r_j: F) void {
-            // Bind in HighToLow order (MSB first) to match Jolt's opening point normalization
+            // Bind in LowToHigh order to match computeRoundEvals indexing (2*i, 2*i+1)
+            // new[i] = old[2*i] + r * (old[2*i+1] - old[2*i])
             const new_size = self.current_size / 2;
-            const half = new_size;
 
             for (0..new_size) |i| {
-                self.left_is_rs1[i] = self.left_is_rs1[i].add(r_j.mul(self.left_is_rs1[i + half].sub(self.left_is_rs1[i])));
-                self.rs1_value[i] = self.rs1_value[i].add(r_j.mul(self.rs1_value[i + half].sub(self.rs1_value[i])));
-                self.left_is_pc[i] = self.left_is_pc[i].add(r_j.mul(self.left_is_pc[i + half].sub(self.left_is_pc[i])));
-                self.unexpanded_pc[i] = self.unexpanded_pc[i].add(r_j.mul(self.unexpanded_pc[i + half].sub(self.unexpanded_pc[i])));
-                self.right_is_rs2[i] = self.right_is_rs2[i].add(r_j.mul(self.right_is_rs2[i + half].sub(self.right_is_rs2[i])));
-                self.rs2_value[i] = self.rs2_value[i].add(r_j.mul(self.rs2_value[i + half].sub(self.rs2_value[i])));
-                self.right_is_imm[i] = self.right_is_imm[i].add(r_j.mul(self.right_is_imm[i + half].sub(self.right_is_imm[i])));
-                self.imm[i] = self.imm[i].add(r_j.mul(self.imm[i + half].sub(self.imm[i])));
-                self.eq_outer[i] = self.eq_outer[i].add(r_j.mul(self.eq_outer[i + half].sub(self.eq_outer[i])));
-                self.eq_product[i] = self.eq_product[i].add(r_j.mul(self.eq_product[i + half].sub(self.eq_product[i])));
+                self.left_is_rs1[i] = self.left_is_rs1[2 * i].add(r_j.mul(self.left_is_rs1[2 * i + 1].sub(self.left_is_rs1[2 * i])));
+                self.rs1_value[i] = self.rs1_value[2 * i].add(r_j.mul(self.rs1_value[2 * i + 1].sub(self.rs1_value[2 * i])));
+                self.left_is_pc[i] = self.left_is_pc[2 * i].add(r_j.mul(self.left_is_pc[2 * i + 1].sub(self.left_is_pc[2 * i])));
+                self.unexpanded_pc[i] = self.unexpanded_pc[2 * i].add(r_j.mul(self.unexpanded_pc[2 * i + 1].sub(self.unexpanded_pc[2 * i])));
+                self.right_is_rs2[i] = self.right_is_rs2[2 * i].add(r_j.mul(self.right_is_rs2[2 * i + 1].sub(self.right_is_rs2[2 * i])));
+                self.rs2_value[i] = self.rs2_value[2 * i].add(r_j.mul(self.rs2_value[2 * i + 1].sub(self.rs2_value[2 * i])));
+                self.right_is_imm[i] = self.right_is_imm[2 * i].add(r_j.mul(self.right_is_imm[2 * i + 1].sub(self.right_is_imm[2 * i])));
+                self.imm[i] = self.imm[2 * i].add(r_j.mul(self.imm[2 * i + 1].sub(self.imm[2 * i])));
+                self.eq_outer[i] = self.eq_outer[2 * i].add(r_j.mul(self.eq_outer[2 * i + 1].sub(self.eq_outer[2 * i])));
+                self.eq_product[i] = self.eq_product[2 * i].add(r_j.mul(self.eq_product[2 * i + 1].sub(self.eq_product[2 * i])));
             }
 
             self.current_size = new_size;
@@ -1904,13 +2003,12 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
 
             self.current_prefix_size = new_prefix_size;
 
-            // Also bind witness MLEs in HighToLow order (MSB first)
+            // Also bind witness MLEs in LowToHigh order to match computeRoundEvals indexing
             const witness_new_size = self.current_witness_size / 2;
-            const half = witness_new_size;
             for (0..witness_new_size) |i| {
-                self.rd_write_value[i] = self.rd_write_value[i].add(r_j.mul(self.rd_write_value[i + half].sub(self.rd_write_value[i])));
-                self.rs1_value[i] = self.rs1_value[i].add(r_j.mul(self.rs1_value[i + half].sub(self.rs1_value[i])));
-                self.rs2_value[i] = self.rs2_value[i].add(r_j.mul(self.rs2_value[i + half].sub(self.rs2_value[i])));
+                self.rd_write_value[i] = self.rd_write_value[2 * i].add(r_j.mul(self.rd_write_value[2 * i + 1].sub(self.rd_write_value[2 * i])));
+                self.rs1_value[i] = self.rs1_value[2 * i].add(r_j.mul(self.rs1_value[2 * i + 1].sub(self.rs1_value[2 * i])));
+                self.rs2_value[i] = self.rs2_value[2 * i].add(r_j.mul(self.rs2_value[2 * i + 1].sub(self.rs2_value[2 * i])));
             }
             self.current_witness_size = witness_new_size;
         }
@@ -1925,17 +2023,16 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
         }
 
         fn bindPhase2(self: *Self, r_j: F) void {
-            // Bind in HighToLow order (MSB first)
+            // Bind in LowToHigh order to match computeRoundEvalsPhase2 indexing (2*j, 2*j+1)
             const new_size = self.current_witness_size / 2;
-            const half = new_size;
 
             for (0..new_size) |i| {
-                self.rd_write_value[i] = self.rd_write_value[i].add(r_j.mul(self.rd_write_value[i + half].sub(self.rd_write_value[i])));
-                self.rs1_value[i] = self.rs1_value[i].add(r_j.mul(self.rs1_value[i + half].sub(self.rs1_value[i])));
-                self.rs2_value[i] = self.rs2_value[i].add(r_j.mul(self.rs2_value[i + half].sub(self.rs2_value[i])));
+                self.rd_write_value[i] = self.rd_write_value[2 * i].add(r_j.mul(self.rd_write_value[2 * i + 1].sub(self.rd_write_value[2 * i])));
+                self.rs1_value[i] = self.rs1_value[2 * i].add(r_j.mul(self.rs1_value[2 * i + 1].sub(self.rs1_value[2 * i])));
+                self.rs2_value[i] = self.rs2_value[2 * i].add(r_j.mul(self.rs2_value[2 * i + 1].sub(self.rs2_value[2 * i])));
 
                 if (self.phase2_eq) |eq| {
-                    eq[i] = eq[i].add(r_j.mul(eq[i + half].sub(eq[i])));
+                    eq[i] = eq[2 * i].add(r_j.mul(eq[2 * i + 1].sub(eq[2 * i])));
                 }
             }
             self.current_witness_size = new_size;

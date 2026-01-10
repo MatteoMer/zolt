@@ -568,21 +568,20 @@ pub const SECOND_GROUP_INDICES: [9]usize = .{
 fn isNoopInstruction(step_opt: ?tracer.TraceStep) bool {
     const step = step_opt orelse return false; // No next step means not a noop
 
-    // Extract opcode and instruction fields
+    // Check if this is a NoOp padding cycle (marked explicitly)
+    if (step.is_noop) return true;
+
+    // Check if it's ADDI x0, x0, 0 (the canonical NOP instruction)
     const instr = step.instruction;
     const opcode: u8 = @truncate(instr & 0x7F);
 
-    // Check if it's an I-type with opcode 0x13 (ADDI and friends)
     if (opcode == 0x13) {
-        // Extract rd, rs1, funct3, and immediate
         const rd: u8 = @truncate((instr >> 7) & 0x1F);
         const rs1: u8 = @truncate((instr >> 15) & 0x1F);
         const funct3: u8 = @truncate((instr >> 12) & 0x7);
 
-        // ADDI x0, x0, 0 is the canonical NOP
-        // funct3 = 0 for ADDI
+        // ADDI x0, x0, 0: funct3 = 0, rd = 0, rs1 = 0, imm = 0
         if (rd == 0 and rs1 == 0 and funct3 == 0) {
-            // Also check immediate is 0 (I-type immediate in bits [31:20])
             const imm: i32 = @bitCast(@as(u32, @truncate(instr >> 20)));
             if (imm == 0) {
                 return true;
@@ -1008,38 +1007,36 @@ pub fn R1CSCycleInputs(comptime F: type) type {
 
             // =================================================================
             // PC values
+            // PC = expanded PC (bytecode array index)
+            // UnexpandedPC = raw RISC-V address (for now same as pc, will differ with virtual sequences)
             // =================================================================
             inputs.values[R1CSInputIndex.PC.toIndex()] = F.fromU64(step.pc);
-            inputs.values[R1CSInputIndex.UnexpandedPC.toIndex()] = F.fromU64(step.pc);
+            inputs.values[R1CSInputIndex.UnexpandedPC.toIndex()] = F.fromU64(step.unexpanded_pc);
 
-            // Use next step's values if available, otherwise 0
-            // This matches Jolt's behavior where the last cycle's Next* values are 0
-            // because there is no valid next cycle
+            // Use next step's values if available
+            // IMPORTANT: Even when next is NoOp, we set NextPC = step.next_pc to preserve
+            // MLE polynomial consistency. Setting NextPC = 0 breaks the sumcheck.
+            // The constraint "if ShouldJump => NextPC == LookupOutput" is still satisfied
+            // because ShouldJump = Jump * (1 - next_is_noop) = 0 when next is NoOp.
             if (next_step) |ns| {
-                inputs.values[R1CSInputIndex.NextPC.toIndex()] = F.fromU64(ns.pc);
-                inputs.values[R1CSInputIndex.NextUnexpandedPC.toIndex()] = F.fromU64(ns.pc);
-
-                // Set NextIsVirtual and NextIsFirstInSequence from next step's circuit flags
-                // These are determined by the instruction type at the next cycle
-                const ns_opcode: u8 = @truncate(ns.instruction & 0x7F);
-
-                // VirtualInstruction: true if next instruction is a "virtual" sequence
-                // In Jolt, virtual sequences are used for multi-step operations
-                // For RISC-V instructions, most real instructions are NOT virtual
-                // The only virtual instruction in Jolt is "virtual sequence advice"
-                // which we don't emit in the trace, so NextIsVirtual is always 0
+                if (ns.is_noop) {
+                    // Next is NoOp padding: use current step's next_pc to preserve MLE consistency
+                    // This is the WORKAROUND from STAGE1_INVESTIGATION.md
+                    inputs.values[R1CSInputIndex.NextPC.toIndex()] = F.fromU64(step.next_pc);
+                    inputs.values[R1CSInputIndex.NextUnexpandedPC.toIndex()] = F.fromU64(step.next_pc);
+                } else {
+                    // Next is a real step: use its PC values
+                    inputs.values[R1CSInputIndex.NextPC.toIndex()] = F.fromU64(ns.pc);
+                    inputs.values[R1CSInputIndex.NextUnexpandedPC.toIndex()] = F.fromU64(ns.unexpanded_pc);
+                }
+                // NextIsVirtual and NextIsFirstInSequence are always 0
+                // (no virtual sequences in our RISC-V trace)
                 inputs.values[R1CSInputIndex.NextIsVirtual.toIndex()] = F.zero();
-
-                // IsFirstInSequence: true if next instruction starts a new sequence
-                // In Jolt, most instructions are the first and only step in their sequence
-                // Virtual instructions that span multiple cycles would not be first
-                // For now, all real RISC-V instructions are first in their sequence
-                _ = ns_opcode;
-                inputs.values[R1CSInputIndex.NextIsFirstInSequence.toIndex()] = F.one();
+                inputs.values[R1CSInputIndex.NextIsFirstInSequence.toIndex()] = F.zero();
             } else {
-                // No next step means last cycle - all Next* values are 0
-                inputs.values[R1CSInputIndex.NextPC.toIndex()] = F.zero();
-                inputs.values[R1CSInputIndex.NextUnexpandedPC.toIndex()] = F.zero();
+                // No next step: use current step's next_pc to preserve MLE consistency
+                inputs.values[R1CSInputIndex.NextPC.toIndex()] = F.fromU64(step.next_pc);
+                inputs.values[R1CSInputIndex.NextUnexpandedPC.toIndex()] = F.fromU64(step.next_pc);
                 inputs.values[R1CSInputIndex.NextIsVirtual.toIndex()] = F.zero();
                 inputs.values[R1CSInputIndex.NextIsFirstInSequence.toIndex()] = F.zero();
             }
@@ -1336,6 +1333,33 @@ pub fn R1CSCycleInputs(comptime F: type) type {
         pub fn asSlice(self: *const Self) []const F {
             return &self.values;
         }
+
+        /// Create witness values for a NoOp padding cycle.
+        ///
+        /// In Jolt, the trace is padded with Cycle::NoOp after the last real cycle.
+        /// NoOp cycles have all values = 0 except for two flags:
+        /// - FlagDoNotUpdateUnexpandedPC = 1
+        /// - FlagIsNoop = 1
+        ///
+        /// Reference: jolt-core/src/zkvm/instruction/mod.rs (Instruction::NoOp flags)
+        pub fn createNoopWitness() Self {
+            var inputs = Self{
+                .values = [_]F{F.zero()} ** R1CSInputIndex.NUM_INPUTS,
+            };
+
+            // Only two flags are true for NoOp cycles
+            inputs.values[R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();
+            inputs.values[R1CSInputIndex.FlagIsNoop.toIndex()] = F.one();
+
+            // All other values remain zero:
+            // - PC = 0, NextPC = 0, UnexpandedPC = 0, NextUnexpandedPC = 0
+            // - All register values = 0
+            // - All instruction inputs/outputs = 0
+            // - All other flags = 0
+            // - ShouldJump = 0 (Jump is 0, so Jump * (1 - NextIsNoop) = 0)
+
+            return inputs;
+        }
     };
 }
 
@@ -1355,7 +1379,13 @@ pub fn R1CSWitnessGenerator(comptime F: type) type {
             // No resources to free - this is just a wrapper
         }
 
-        /// Generate witness for all cycles in trace
+        /// Generate witness for all cycles in trace.
+        ///
+        /// The trace must be pre-padded with NoOp cycles (via padWithNoop).
+        /// - NoOp padding cycles use createNoopWitness() (all zeros with IsNoop=1)
+        /// - Real cycles use fromTraceStep() with the next step (real or NoOp)
+        ///
+        /// Reference: jolt-core/src/zkvm/prover.rs (trace.resize with Cycle::NoOp)
         pub fn generateWitness(
             self: *Self,
             trace: *const tracer.ExecutionTrace,
@@ -1367,12 +1397,17 @@ pub fn R1CSWitnessGenerator(comptime F: type) type {
 
             const witnesses = try self.allocator.alloc(R1CSCycleInputs(F), num_cycles);
 
-            for (trace.steps.items, 0..) |step, i| {
-                const next_step = if (i + 1 < num_cycles)
-                    trace.steps.items[i + 1]
-                else
-                    null;
-                witnesses[i] = R1CSCycleInputs(F).fromTraceStep(step, next_step);
+            for (0..num_cycles) |i| {
+                const step = trace.steps.items[i];
+
+                if (step.is_noop) {
+                    // NoOp padding cycle: all zeros with IsNoop=1
+                    witnesses[i] = R1CSCycleInputs(F).createNoopWitness();
+                } else {
+                    // Real cycle: next step always exists after padding
+                    const next_step = trace.steps.items[i + 1];
+                    witnesses[i] = R1CSCycleInputs(F).fromTraceStep(step, next_step);
+                }
             }
 
             return witnesses;

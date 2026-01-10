@@ -12,8 +12,12 @@ const zkvm = @import("../zkvm/mod.zig");
 pub const TraceStep = struct {
     /// Cycle number
     cycle: u64,
-    /// Program counter before execution
+    /// Program counter before execution (expanded PC - bytecode array index)
     pc: u64,
+    /// Unexpanded PC (raw RISC-V instruction address from ELF)
+    /// For programs without virtual sequences, this equals pc.
+    /// When virtual sequences are used (e.g., MUL expansion), pc != unexpanded_pc.
+    unexpanded_pc: u64,
     /// Instruction executed (expanded to 32-bit if compressed)
     instruction: u32,
     /// Source register 1 value
@@ -32,6 +36,8 @@ pub const TraceStep = struct {
     next_pc: u64,
     /// Whether the original instruction was compressed (RVC - 2 bytes)
     is_compressed: bool,
+    /// Whether this is a NoOp padding cycle (not a real execution step)
+    is_noop: bool = false,
 };
 
 /// Full execution trace
@@ -64,6 +70,48 @@ pub const ExecutionTrace = struct {
     pub fn get(self: *const ExecutionTrace, index: usize) ?TraceStep {
         if (index >= self.steps.items.len) return null;
         return self.steps.items[index];
+    }
+
+    /// Pad trace with NoOp cycles to next power of 2 (matching Jolt's behavior).
+    /// Minimum padded length is 256, otherwise (len + 1).next_power_of_two().
+    /// This ensures the last real cycle has a NoOp as its next cycle.
+    pub fn padWithNoop(self: *ExecutionTrace) !void {
+        const unpadded_len = self.steps.items.len;
+
+        // Skip if already padded (check if last step is NoOp)
+        if (unpadded_len > 0 and self.steps.items[unpadded_len - 1].is_noop) {
+            return; // Already padded
+        }
+
+        const padded_len = if (unpadded_len < 256)
+            256
+        else
+            std.math.ceilPowerOfTwo(usize, unpadded_len + 1) catch unreachable;
+
+        std.debug.print("[PADDING] Padding trace from {d} to {d} cycles\n", .{ unpadded_len, padded_len });
+
+        // Create NoOp step template - all zeros with is_noop = true
+        const noop_step = TraceStep{
+            .cycle = 0,
+            .pc = 0,
+            .unexpanded_pc = 0,
+            .instruction = 0,
+            .rs1_value = 0,
+            .rs2_value = 0,
+            .rd_value = 0,
+            .memory_addr = null,
+            .memory_value = null,
+            .is_memory_write = false,
+            .next_pc = 0,
+            .is_compressed = false,
+            .is_noop = true,
+        };
+
+        // Pad with NoOp cycles
+        try self.steps.ensureTotalCapacity(self.allocator, padded_len);
+        while (self.steps.items.len < padded_len) {
+            self.steps.appendAssumeCapacity(noop_step);
+        }
     }
 };
 
@@ -225,6 +273,9 @@ pub const Emulator = struct {
         try self.trace.addStep(.{
             .cycle = self.state.cycle,
             .pc = self.state.pc,
+            // For now without virtual sequences, unexpanded_pc = pc
+            // When virtual sequences are implemented, this would be the raw RISC-V address
+            .unexpanded_pc = self.state.pc,
             .instruction = instruction,
             .rs1_value = rs1_value,
             .rs2_value = rs2_value,

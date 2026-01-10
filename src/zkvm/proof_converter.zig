@@ -2825,6 +2825,9 @@ pub fn ProofConverter(comptime F: type) type {
             std.debug.print("[ZOLT DEBUG] Cycles with non-zero LookupOutput: {}\n", .{cycle_count_with_nonzero_lookup_output});
 
             // Handle padding cycles (indices from cycle_witnesses.len to eq_evals.len)
+            // Note: If cycle_witnesses already includes NoOp padding (from R1CS witness generator),
+            // this loop may not execute. Only run if witnesses are shorter than eq domain.
+            //
             // Padding cycles are NoOp cycles in Jolt. For NoOp:
             // - Factors 0-6: all zero (no instruction input, no flags set, no output)
             // - Factor 7 (NextIsNoop): 1 (next cycle is also a NoOp, except the last one)
@@ -2835,13 +2838,15 @@ pub fn ProofConverter(comptime F: type) type {
             // - NextIsNoop = !not_next_noop = !false = true
             //
             // So for padding cycles, only factor 7 contributes: eq_val * 1
-            for (cycle_witnesses.len..eq_evals.len) |t| {
-                const eq_val = eq_evals[t];
-                // Factors 0-6: all zero for NoOp (nothing to add)
-                // Factor 7 (NextIsNoop): For padding cycles, NextIsNoop = true
-                // Exception: the very last cycle (t == eq_evals.len - 1) has NextIsNoop = true
-                // because Jolt hardcodes not_next_noop = false for the final cycle
-                factor_evals[7] = factor_evals[7].add(eq_val);
+            if (cycle_witnesses.len < eq_evals.len) {
+                for (cycle_witnesses.len..eq_evals.len) |t| {
+                    const eq_val = eq_evals[t];
+                    // Factors 0-6: all zero for NoOp (nothing to add)
+                    // Factor 7 (NextIsNoop): For padding cycles, NextIsNoop = true
+                    // Exception: the very last cycle (t == eq_evals.len - 1) has NextIsNoop = true
+                    // because Jolt hardcodes not_next_noop = false for the final cycle
+                    factor_evals[7] = factor_evals[7].add(eq_val);
+                }
             }
 
             std.debug.print("[ZOLT] FACTOR_EVALS: factor[0] (LeftInstructionInput) = {any}\n", .{factor_evals[0].toBytesBE()});

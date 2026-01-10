@@ -636,26 +636,30 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             gamma_powers: []const F,
         ) !Self {
             const n_vars = r_outer.len;
-            const prefix_n_vars = n_vars / 2;
-            const suffix_n_vars = n_vars - prefix_n_vars;
+            // Split r into hi (first half) and lo (second half)
+            // Jolt convention: PREFIX uses r_lo, SUFFIX uses r_hi
+            const split_point = n_vars / 2;
+            const r_outer_hi = r_outer[0..split_point]; // First half -> used for SUFFIX
+            const r_outer_lo = r_outer[split_point..]; // Second half -> used for PREFIX
+            const r_prod_hi = r_product[0..split_point];
+            const r_prod_lo = r_product[split_point..];
+
+            // Sizes: prefix_size = 2^len(r_lo), suffix_size = 2^len(r_hi)
+            const prefix_n_vars = r_outer_lo.len; // = n_vars - split_point
+            const suffix_n_vars = r_outer_hi.len; // = split_point
             const prefix_size: usize = @as(usize, 1) << @intCast(prefix_n_vars);
             const suffix_size: usize = @as(usize, 1) << @intCast(suffix_n_vars);
 
-            // Split r into hi and lo parts
-            const r_outer_hi = r_outer[0..prefix_n_vars];
-            const r_outer_lo = r_outer[prefix_n_vars..];
-            const r_prod_hi = r_product[0..prefix_n_vars];
-            const r_prod_lo = r_product[prefix_n_vars..];
-
-            // Initialize P buffers from prefix polynomials
-            // P_0 = eq+1(r_lo, j) for all j
-            // P_1 = is_max(r_lo) * delta(j=0) (sparse: only index 0 is non-zero)
+            // Initialize P buffers (prefix polynomials)
+            // PREFIX uses r_lo (Jolt convention)
+            // P_0 = eq+1(r_lo, j) for j in [0, prefix_size)
+            // P_1 = is_max(r_lo) * delta(j=0)
             const P_0_outer = try allocator.alloc(F, prefix_size);
             const P_1_outer = try allocator.alloc(F, prefix_size);
             const P_0_prod = try allocator.alloc(F, prefix_size);
             const P_1_prod = try allocator.alloc(F, prefix_size);
 
-            // Compute eq+1(r_lo, j) for prefix_0
+            // Compute eq+1(r_lo, j) - PREFIX uses r_lo (Jolt convention)
             try computeEqPlusOneEvals(allocator, r_outer_lo, P_0_outer);
             try computeEqPlusOneEvals(allocator, r_prod_lo, P_0_prod);
 
@@ -676,6 +680,8 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             P_1_prod[0] = is_max_prod;
 
             // Compute suffix evaluations (needed for Q buffer construction)
+            // SUFFIX uses r_hi (Jolt convention)
+            // suffix evaluations are indexed by x_hi in [0, suffix_size)
             const suffix_0_outer = try allocator.alloc(F, suffix_size);
             defer allocator.free(suffix_0_outer);
             const suffix_1_outer = try allocator.alloc(F, suffix_size);
@@ -685,7 +691,7 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             const suffix_1_prod = try allocator.alloc(F, suffix_size);
             defer allocator.free(suffix_1_prod);
 
-            // suffix_0 = eq(r_hi, j), suffix_1 = eq+1(r_hi, j)
+            // SUFFIX uses r_hi (Jolt convention)
             try computeEqAndEqPlusOneEvals(allocator, r_outer_hi, suffix_0_outer, suffix_1_outer);
             try computeEqAndEqPlusOneEvals(allocator, r_prod_hi, suffix_0_prod, suffix_1_prod);
 
@@ -1181,13 +1187,15 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             // and evaluate prefix at r_prefix to get scalar values
             // =====================================================================
 
-            // For r_outer: split into hi (prefix) and lo (suffix) parts
-            const r_outer_hi = self.r_outer[0..self.prefix_n_vars]; // This is for the SUFFIX part
-            const r_outer_lo = self.r_outer[self.prefix_n_vars..]; // This is for the PREFIX part
+            // For r_outer: split into hi and lo parts (Jolt convention)
+            // r_hi (first half) -> used for SUFFIX
+            // r_lo (second half) -> used for PREFIX
+            // split_point = suffix_n_vars (original n_vars / 2)
+            const r_outer_hi = self.r_outer[0..self.suffix_n_vars]; // For SUFFIX
+            const r_outer_lo = self.r_outer[self.suffix_n_vars..]; // For PREFIX
 
             // Regenerate prefix polynomials for r_outer
-            // prefix_0 = eq+1(r_lo, j) for j in [0, prefix_size)
-            // prefix_1 = is_max(r_lo) * delta(j=0)
+            // PREFIX uses r_lo (Jolt convention)
             const prefix_size_outer: usize = @as(usize, 1) << @intCast(r_outer_lo.len);
             const prefix_0_outer = self.allocator.alloc(F, prefix_size_outer) catch unreachable;
             defer self.allocator.free(prefix_0_outer);
@@ -1207,7 +1215,7 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             const prefix_1_eval_outer = evaluateMle(prefix_1_outer, r_prefix);
 
             // Regenerate suffix polynomials for r_outer
-            // suffix_0 = eq(r_hi, j), suffix_1 = eq+1(r_hi, j)
+            // SUFFIX uses r_hi (Jolt convention)
             const suffix_0_outer = self.allocator.alloc(F, suffix_size) catch unreachable;
             defer self.allocator.free(suffix_0_outer);
             const suffix_1_outer = self.allocator.alloc(F, suffix_size) catch unreachable;
@@ -1215,9 +1223,10 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             computeEqAndEqPlusOneEvals(self.allocator, r_outer_hi, suffix_0_outer, suffix_1_outer) catch unreachable;
 
             // Same for r_product
-            const r_prod_hi = self.r_product[0..self.prefix_n_vars];
-            const r_prod_lo = self.r_product[self.prefix_n_vars..];
+            const r_prod_hi = self.r_product[0..self.suffix_n_vars]; // For SUFFIX
+            const r_prod_lo = self.r_product[self.suffix_n_vars..]; // For PREFIX
 
+            // PREFIX uses r_lo (Jolt convention)
             const prefix_size_prod: usize = @as(usize, 1) << @intCast(r_prod_lo.len);
             const prefix_0_prod = self.allocator.alloc(F, prefix_size_prod) catch unreachable;
             defer self.allocator.free(prefix_0_prod);
@@ -1235,6 +1244,7 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             const prefix_0_eval_prod = evaluateMle(prefix_0_prod, r_prefix);
             const prefix_1_eval_prod = evaluateMle(prefix_1_prod, r_prefix);
 
+            // SUFFIX uses r_hi (Jolt convention)
             const suffix_0_prod = self.allocator.alloc(F, suffix_size) catch unreachable;
             defer self.allocator.free(suffix_0_prod);
             const suffix_1_prod = self.allocator.alloc(F, suffix_size) catch unreachable;
@@ -1718,16 +1728,19 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
             gamma_sqr: F,
         ) !Self {
             const n_vars = r_spartan.len;
-            const prefix_n_vars = n_vars / 2;
-            const suffix_n_vars = n_vars - prefix_n_vars;
+            // Split r into hi (first half) and lo (second half)
+            // Jolt convention: PREFIX uses r_lo, SUFFIX uses r_hi
+            const split_point = n_vars / 2;
+            const r_hi = r_spartan[0..split_point]; // First half -> used for SUFFIX
+            const r_lo = r_spartan[split_point..]; // Second half -> used for PREFIX
+
+            // Sizes: prefix_size = 2^len(r_lo), suffix_size = 2^len(r_hi)
+            const prefix_n_vars = r_lo.len; // = n_vars - split_point
+            const suffix_n_vars = r_hi.len; // = split_point
             const prefix_size: usize = @as(usize, 1) << @intCast(prefix_n_vars);
             const suffix_size: usize = @as(usize, 1) << @intCast(suffix_n_vars);
 
-            // Split r into hi and lo parts
-            const r_hi = r_spartan[0..prefix_n_vars];
-            const r_lo = r_spartan[prefix_n_vars..];
-
-            // P = eq(r_lo, j) for prefix
+            // P = eq(r_lo, j) for PREFIX (Jolt convention)
             const P = try allocator.alloc(F, prefix_size);
             var eq_lo = try poly_mod.EqPolynomial(F).init(allocator, r_lo);
             defer eq_lo.deinit();
@@ -1735,7 +1748,7 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
             defer allocator.free(eq_lo_evals);
             @memcpy(P, eq_lo_evals);
 
-            // Suffix evals = eq(r_hi, j) for suffix
+            // Suffix evals = eq(r_hi, j) for SUFFIX (Jolt convention)
             var eq_hi = try poly_mod.EqPolynomial(F).init(allocator, r_hi);
             defer eq_hi.deinit();
             const suffix_evals = try eq_hi.evals(allocator);

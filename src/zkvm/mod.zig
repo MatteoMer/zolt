@@ -341,6 +341,9 @@ pub fn JoltProver(comptime F: type) type {
             // Execute the program
             try emulator.run();
 
+            // Pad trace with NoOp cycles (matching Jolt's behavior)
+            try emulator.trace.padWithNoop();
+
             // Initialize transcript for Fiat-Shamir
             var transcript = try transcripts.Transcript(F).init(self.allocator, "Jolt");
             defer transcript.deinit();
@@ -448,6 +451,9 @@ pub fn JoltProver(comptime F: type) type {
                 try emulator.setInputs(inputs);
             }
             try emulator.run();
+
+            // Pad trace with NoOp cycles (matching Jolt's behavior)
+            try emulator.trace.padWithNoop();
 
             // Initialize Blake2b transcript for Jolt compatibility
             // MUST use "Jolt" label to match Jolt verifier exactly
@@ -715,6 +721,9 @@ pub fn JoltProver(comptime F: type) type {
             }
             try emulator.run();
 
+            // Pad trace with NoOp cycles (matching Jolt's behavior)
+            try emulator.trace.padWithNoop();
+
             // Initialize Blake2b transcript for Jolt compatibility
             const Blake2bTranscript = transcripts.Blake2bTranscript(F);
             var transcript = Blake2bTranscript.init("Jolt");
@@ -932,6 +941,9 @@ pub fn JoltProver(comptime F: type) type {
                 try emulator.setInputs(inputs);
             }
             try emulator.run();
+
+            // Pad trace with NoOp cycles (matching Jolt's behavior)
+            try emulator.trace.padWithNoop();
 
             // Initialize Blake2b transcript for Jolt compatibility
             const Blake2bTranscript = transcripts.Blake2bTranscript(F);

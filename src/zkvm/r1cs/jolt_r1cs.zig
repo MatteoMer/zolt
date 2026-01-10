@@ -85,11 +85,15 @@ pub fn JoltR1CS(comptime F: type) type {
             const cycle_witnesses = try allocator.alloc(R1CSCycleInputs(F), num_cycles);
             for (0..num_cycles) |i| {
                 const step = trace.steps.items[i];
-                const next_step = if (i + 1 < num_cycles)
-                    trace.steps.items[i + 1]
-                else
-                    null;
-                cycle_witnesses[i] = R1CSCycleInputs(F).fromTraceStep(step, next_step);
+
+                if (step.is_noop) {
+                    // NoOp padding cycle: all zeros with IsNoop=1
+                    cycle_witnesses[i] = R1CSCycleInputs(F).createNoopWitness();
+                } else {
+                    // Real cycle: next step always exists after padding
+                    const next_step = trace.steps.items[i + 1];
+                    cycle_witnesses[i] = R1CSCycleInputs(F).fromTraceStep(step, next_step);
+                }
             }
 
             return Self{

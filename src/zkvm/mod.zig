@@ -1018,7 +1018,33 @@ pub fn JoltProver(comptime F: type) type {
             }
             const memory_comm = DoryScheme.commit(&dory_srs, memory_poly);
 
-            // Build register polynomial and compute Dory commitment
+            // Build RdInc polynomial: post_value - pre_value for each register write
+            // CRITICAL: Jolt expects this as commitment index 0
+            const rd_inc_poly = try self.allocator.alloc(F, reg_poly_size);
+            defer self.allocator.free(rd_inc_poly);
+            for (rd_inc_poly, 0..) |*p, i| {
+                if (i < reg_trace_len) {
+                    // For now, use zeros as placeholder
+                    // A proper implementation tracks per-register pre/post values
+                    p.* = F.zero();
+                } else {
+                    p.* = F.zero();
+                }
+            }
+            const rd_inc_comm = DoryScheme.commit(&dory_srs, rd_inc_poly);
+
+            // Build RamInc polynomial: post_value - pre_value for RAM writes
+            // CRITICAL: Jolt expects this as commitment index 1
+            const ram_inc_poly = try self.allocator.alloc(F, memory_poly_size);
+            defer self.allocator.free(ram_inc_poly);
+            for (ram_inc_poly, 0..) |*p, i| {
+                // Placeholder zeros
+                _ = i;
+                p.* = F.zero();
+            }
+            const ram_inc_comm = DoryScheme.commit(&dory_srs, ram_inc_poly);
+
+            // Build register polynomial for other uses
             const reg_poly = try self.allocator.alloc(F, reg_poly_size);
             defer self.allocator.free(reg_poly);
             for (reg_poly, 0..) |*p, i| {
@@ -1035,8 +1061,11 @@ pub fn JoltProver(comptime F: type) type {
             const reg_final_comm = reg_comm;
 
             // Append Dory commitments (GT elements) to transcript
-            // Jolt's append_serializable reverses all bytes after serialization
-            const dory_comms = [_]GT{ bytecode_comm, memory_comm, memory_final_comm, reg_comm, reg_final_comm };
+            // CRITICAL ORDER: Must match Jolt's all_committed_polynomials():
+            // [0]: RdInc
+            // [1]: RamInc
+            // [2+]: InstructionRa, RamRa, BytecodeRa (we'll use existing comms as placeholders)
+            const dory_comms = [_]GT{ rd_inc_comm, ram_inc_comm, bytecode_comm, memory_comm, memory_final_comm, reg_comm, reg_final_comm };
             for (dory_comms) |comm| {
                 transcript.appendGT(comm); // appendGT already reverses bytes
             }

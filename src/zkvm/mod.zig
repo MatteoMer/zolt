@@ -627,6 +627,8 @@ pub fn JoltProver(comptime F: type) type {
                 .program_inputs = device.inputs,
                 .program_outputs = device.outputs,
                 .is_panicking = device.panic,
+                // Execution trace for Stage 4 RegistersReadWriteChecking
+                .execution_trace = &emulator.trace,
             };
 
             // Convert to Jolt-compatible format with transcript integration
@@ -895,6 +897,7 @@ pub fn JoltProver(comptime F: type) type {
                     .program_inputs = device.inputs,
                     .program_outputs = device.outputs,
                     .is_panicking = device.panic,
+                    .execution_trace = &emulator.trace,
                 },
                 cycle_witnesses,
                 tau,
@@ -1102,6 +1105,7 @@ pub fn JoltProver(comptime F: type) type {
                     .initial_ram = init_ram_device,
                     .final_ram = final_ram_device,
                     .memory_trace = memory_trace_ptr2, // Pass memory trace for RAF sumcheck
+                    .execution_trace = &emulator.trace,
                 },
                 cycle_witnesses,
                 tau,

@@ -1547,30 +1547,105 @@ pub fn ProofConverter(comptime F: type) type {
             // REGISTER_COUNT = 32 (RISCV) + 96 (Virtual) = 128, so LOG_K = 7
             const log_registers = 7; // log2(128) = 7
             const stage4_max_rounds = log_registers + n_cycle_vars;
-            try self.generateZeroSumcheckProof(&jolt_proof.stage4_sumcheck_proof, stage4_max_rounds, 3);
 
-            // RegistersReadWriteChecking claims
-            try jolt_proof.opening_claims.insert(
-                .{ .Virtual = .{ .poly = .RegistersVal, .sumcheck_id = .RegistersReadWriteChecking } },
-                F.zero(),
-            );
-            try jolt_proof.opening_claims.insert(
-                .{ .Virtual = .{ .poly = .Rs1Ra, .sumcheck_id = .RegistersReadWriteChecking } },
-                F.zero(),
-            );
-            try jolt_proof.opening_claims.insert(
-                .{ .Virtual = .{ .poly = .Rs2Ra, .sumcheck_id = .RegistersReadWriteChecking } },
-                F.zero(),
-            );
-            try jolt_proof.opening_claims.insert(
-                .{ .Virtual = .{ .poly = .RdWa, .sumcheck_id = .RegistersReadWriteChecking } },
-                F.zero(),
-            );
-            // CRITICAL: RdInc dense polynomial claim for Stage 4
-            try jolt_proof.opening_claims.insert(
-                .{ .Committed = .{ .poly = .RdInc, .sumcheck_id = .RegistersReadWriteChecking } },
-                F.zero(),
-            );
+            // Stage 4 RegistersReadWriteChecking needs:
+            // - gamma from transcript (challenge scalar)
+            // - r_cycle from Stage 3 (the sumcheck challenges from RegistersClaimReduction)
+            // - execution trace from config
+            const gamma_stage4 = transcript.challengeScalarFull();
+            std.debug.print("[STAGE4] gamma = {any}\n", .{gamma_stage4.toBytesBE()[0..8]});
+
+            // Use Stage 4 prover if we have execution trace, otherwise fall back to zero proof
+            stage4_block: {
+            if (config.execution_trace) |trace| {
+                const Stage4ProverType = spartan_mod.stage4_prover.Stage4Prover(F);
+                var stage4_prover = Stage4ProverType.init(
+                    self.allocator,
+                    trace,
+                    gamma_stage4,
+                    stage3_result.challenges,
+                ) catch |err| {
+                    // Fall back to zero proof on init error
+                    std.debug.print("[STAGE4] Prover init error: {any}, using zero proof\n", .{err});
+                    try self.generateZeroSumcheckProof(&jolt_proof.stage4_sumcheck_proof, stage4_max_rounds, 3);
+                    try jolt_proof.opening_claims.insert(.{ .Virtual = .{ .poly = .RegistersVal, .sumcheck_id = .RegistersReadWriteChecking } }, F.zero());
+                    try jolt_proof.opening_claims.insert(.{ .Virtual = .{ .poly = .Rs1Ra, .sumcheck_id = .RegistersReadWriteChecking } }, F.zero());
+                    try jolt_proof.opening_claims.insert(.{ .Virtual = .{ .poly = .Rs2Ra, .sumcheck_id = .RegistersReadWriteChecking } }, F.zero());
+                    try jolt_proof.opening_claims.insert(.{ .Virtual = .{ .poly = .RdWa, .sumcheck_id = .RegistersReadWriteChecking } }, F.zero());
+                    try jolt_proof.opening_claims.insert(.{ .Committed = .{ .poly = .RdInc, .sumcheck_id = .RegistersReadWriteChecking } }, F.zero());
+                    break :stage4_block;
+                };
+                defer stage4_prover.deinit();
+
+                var stage4_result = stage4_prover.prove(transcript) catch |err| {
+                    // Fall back to zero proof on prove error
+                    std.debug.print("[STAGE4] Prover error: {any}, using zero proof\n", .{err});
+                    try self.generateZeroSumcheckProof(&jolt_proof.stage4_sumcheck_proof, stage4_max_rounds, 3);
+                    try jolt_proof.opening_claims.insert(.{ .Virtual = .{ .poly = .RegistersVal, .sumcheck_id = .RegistersReadWriteChecking } }, F.zero());
+                    try jolt_proof.opening_claims.insert(.{ .Virtual = .{ .poly = .Rs1Ra, .sumcheck_id = .RegistersReadWriteChecking } }, F.zero());
+                    try jolt_proof.opening_claims.insert(.{ .Virtual = .{ .poly = .Rs2Ra, .sumcheck_id = .RegistersReadWriteChecking } }, F.zero());
+                    try jolt_proof.opening_claims.insert(.{ .Virtual = .{ .poly = .RdWa, .sumcheck_id = .RegistersReadWriteChecking } }, F.zero());
+                    try jolt_proof.opening_claims.insert(.{ .Committed = .{ .poly = .RdInc, .sumcheck_id = .RegistersReadWriteChecking } }, F.zero());
+                    break :stage4_block;
+                };
+                defer stage4_result.deinit();
+
+                // Copy round polynomials to proof using addRoundPoly (converts to CompressedUniPoly)
+                for (stage4_result.round_polys) |round_poly| {
+                    try jolt_proof.stage4_sumcheck_proof.addRoundPoly(&round_poly.coeffs);
+                }
+
+                // RegistersReadWriteChecking claims from actual sumcheck
+                try jolt_proof.opening_claims.insert(
+                    .{ .Virtual = .{ .poly = .RegistersVal, .sumcheck_id = .RegistersReadWriteChecking } },
+                    stage4_result.val_claim,
+                );
+                try jolt_proof.opening_claims.insert(
+                    .{ .Virtual = .{ .poly = .Rs1Ra, .sumcheck_id = .RegistersReadWriteChecking } },
+                    stage4_result.rs1_ra_claim,
+                );
+                try jolt_proof.opening_claims.insert(
+                    .{ .Virtual = .{ .poly = .Rs2Ra, .sumcheck_id = .RegistersReadWriteChecking } },
+                    stage4_result.rs2_ra_claim,
+                );
+                try jolt_proof.opening_claims.insert(
+                    .{ .Virtual = .{ .poly = .RdWa, .sumcheck_id = .RegistersReadWriteChecking } },
+                    stage4_result.rd_wa_claim,
+                );
+                // CRITICAL: RdInc dense polynomial claim for Stage 4
+                try jolt_proof.opening_claims.insert(
+                    .{ .Committed = .{ .poly = .RdInc, .sumcheck_id = .RegistersReadWriteChecking } },
+                    stage4_result.inc_claim,
+                );
+            } else {
+                // Fallback to zero proof when no trace is available
+                std.debug.print("[STAGE4] No execution trace, using zero proof\n", .{});
+                try self.generateZeroSumcheckProof(&jolt_proof.stage4_sumcheck_proof, stage4_max_rounds, 3);
+
+                // RegistersReadWriteChecking claims
+                try jolt_proof.opening_claims.insert(
+                    .{ .Virtual = .{ .poly = .RegistersVal, .sumcheck_id = .RegistersReadWriteChecking } },
+                    F.zero(),
+                );
+                try jolt_proof.opening_claims.insert(
+                    .{ .Virtual = .{ .poly = .Rs1Ra, .sumcheck_id = .RegistersReadWriteChecking } },
+                    F.zero(),
+                );
+                try jolt_proof.opening_claims.insert(
+                    .{ .Virtual = .{ .poly = .Rs2Ra, .sumcheck_id = .RegistersReadWriteChecking } },
+                    F.zero(),
+                );
+                try jolt_proof.opening_claims.insert(
+                    .{ .Virtual = .{ .poly = .RdWa, .sumcheck_id = .RegistersReadWriteChecking } },
+                    F.zero(),
+                );
+                // CRITICAL: RdInc dense polynomial claim for Stage 4
+                try jolt_proof.opening_claims.insert(
+                    .{ .Committed = .{ .poly = .RdInc, .sumcheck_id = .RegistersReadWriteChecking } },
+                    F.zero(),
+                );
+            }
+            } // end stage4_block
 
             // RamValEvaluation claims
             try jolt_proof.opening_claims.insert(
@@ -3125,6 +3200,8 @@ fn extractProductFactors(
 /// These values must match Jolt's config.rs:
 /// - log_k_chunk: Must be <= 8 (Jolt uses 4 for small traces, 8 for large)
 /// - lookups_ra_virtual_log_k_chunk: Jolt uses LOG_K/8 (=16) for small traces
+const tracer = @import("../tracer/mod.zig");
+
 pub const ConversionConfig = struct {
     /// Bytecode address space size (K)
     bytecode_K: usize = 1 << 16,
@@ -3148,6 +3225,9 @@ pub const ConversionConfig = struct {
     program_outputs: ?[]const u8 = null,
     /// Whether the program panicked (for OutputSumcheck's ProgramIOPolynomial)
     is_panicking: bool = false,
+    /// Execution trace for Stage 4 RegistersReadWriteChecking
+    /// If null, Stage 4 uses zero-polynomial approach (which fails verification)
+    execution_trace: ?*const tracer.ExecutionTrace = null,
 };
 
 // =============================================================================

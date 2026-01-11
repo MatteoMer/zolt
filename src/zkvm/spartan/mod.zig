@@ -36,6 +36,9 @@ pub const stage3_prover = @import("stage3_prover.zig");
 pub const Stage3Prover = stage3_prover.Stage3Prover;
 pub const Stage3Result = stage3_prover.Stage3Result;
 
+// Stage 4 prover (RegistersReadWriteChecking)
+pub const stage4_prover = @import("stage4_prover.zig");
+
 // Prefix-suffix optimization for Stage 3
 pub const prefix_suffix = @import("prefix_suffix.zig");
 pub const Phase1Prover = prefix_suffix.Phase1Prover;

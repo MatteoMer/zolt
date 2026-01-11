@@ -121,13 +121,18 @@ pub fn Stage4Prover(comptime F: type) type {
         current_T: usize,
         current_K: usize,
 
+        /// Batching coefficient for Stage 4's batched sumcheck
+        /// The prover multiplies all round polynomial coefficients by this value
+        /// before appending to transcript, so prover and verifier derive the same challenges
+        batching_coeff: F,
+
         pub fn init(
             allocator: Allocator,
             trace: *const ExecutionTrace,
             gamma: F,
             r_cycle: []const F,
         ) !Self {
-            return initWithClaims(allocator, trace, gamma, r_cycle, null);
+            return initWithClaims(allocator, trace, gamma, r_cycle, null, F.one());
         }
 
         pub fn initWithClaims(
@@ -136,6 +141,7 @@ pub fn Stage4Prover(comptime F: type) type {
             gamma: F,
             r_cycle: []const F,
             stage3_claims: ?Stage3Claims(F),
+            batching_coeff: F,
         ) !Self {
             const trace_len = trace.steps.items.len;
             if (trace_len == 0) return error.EmptyTrace;
@@ -321,6 +327,7 @@ pub fn Stage4Prover(comptime F: type) type {
                 .eq_cycle_evals = eq_cycle_evals,
                 .current_T = T,
                 .current_K = K,
+                .batching_coeff = batching_coeff,
             };
         }
 
@@ -384,7 +391,10 @@ pub fn Stage4Prover(comptime F: type) type {
             }
 
             // Use expected claim from Stage 3 if available, otherwise use computed
-            var current_claim = if (expected_claim) |exp| exp else computed_claim;
+            // Multiply by batching coefficient to track batched claims throughout sumcheck
+            const unbatched_claim = if (expected_claim) |exp| exp else computed_claim;
+            var current_claim = unbatched_claim.mul(self.batching_coeff);
+            std.debug.print("[STAGE4] Batched input claim = {any}\n", .{current_claim.toBytes()});
 
             std.debug.print("[STAGE4] Starting sumcheck with {} rounds (log_T={}, LOG_K={})\n", .{ self.num_rounds, self.log_T, LOG_K });
             std.debug.print("[STAGE4] T={}, K={}\n", .{ self.T, K });
@@ -427,21 +437,29 @@ pub fn Stage4Prover(comptime F: type) type {
 
                 // Append compressed form to transcript: [c0, c2, c3] (skip c1)
                 // This matches Jolt's CompressedUniPoly format
-                transcript.appendScalar(round_poly.coeffs[0]);
-                transcript.appendScalar(round_poly.coeffs[2]);
-                transcript.appendScalar(round_poly.coeffs[3]);
+                // IMPORTANT: Multiply by batching_coeff so prover and verifier derive same challenges
+                transcript.appendScalar(round_poly.coeffs[0].mul(self.batching_coeff));
+                transcript.appendScalar(round_poly.coeffs[2].mul(self.batching_coeff));
+                transcript.appendScalar(round_poly.coeffs[3].mul(self.batching_coeff));
 
                 // Get challenge
                 const challenge = transcript.challengeScalar();
                 challenges[round] = challenge;
 
                 // Bind variable and update claim
-                current_claim = round_poly.evaluateAt(challenge);
+                // Multiply by batching_coeff since we're tracking batched claims
+                current_claim = round_poly.evaluateAt(challenge).mul(self.batching_coeff);
 
                 // Bind polynomials (halve their size)
                 self.bindPolynomials(round, challenge);
 
-                round_polys[round] = round_poly;
+                // Store BATCHED coefficients in round_polys for the proof
+                // The verifier will see batched coefficients and derive the same challenges
+                var batched_poly = round_poly;
+                for (0..4) |i| {
+                    batched_poly.coeffs[i] = round_poly.coeffs[i].mul(self.batching_coeff);
+                }
+                round_polys[round] = batched_poly;
 
                 if (round < 3 or round >= self.num_rounds - 3) {
                     std.debug.print("[STAGE4] Round {}: claim = {any}, challenge = {any}\n",

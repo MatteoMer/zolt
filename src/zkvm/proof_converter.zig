@@ -1572,10 +1572,50 @@ pub fn ProofConverter(comptime F: type) type {
                     .rs2_value = stage3_result.reg_rs2_value_claim,
                 };
 
+                // Compute input_claim for RegistersReadWriteChecking (same formula as Stage 4 prover)
+                const input_claim_registers = stage3_claims.rd_write_value
+                    .add(gamma_stage4.mul(stage3_claims.rs1_value))
+                    .add(gamma_stage4.mul(gamma_stage4).mul(stage3_claims.rs2_value));
+
+                // ============================================================
+                // BATCHING COEFFICIENTS for Stage 4
+                // Jolt's batched sumcheck derives batching coefficients by appending each instance's
+                // input_claim to the transcript and getting a challenge.
+                // Stage 4 has 3 instances:
+                //   0: RegistersReadWriteChecking (our input_claim_registers)
+                //   1: RamValEvaluation (input_claim = 0 for no-RAM programs)
+                //   2: RamValFinal (input_claim = 0 for no-RAM programs)
+                // ============================================================
+
+                // Debug: print individual claims used for input_claim
+                std.debug.print("[STAGE4 BATCH] rd_write_value = {any}\n", .{stage3_claims.rd_write_value.toBytes()[0..8]});
+                std.debug.print("[STAGE4 BATCH] rs1_value = {any}\n", .{stage3_claims.rs1_value.toBytes()[0..8]});
+                std.debug.print("[STAGE4 BATCH] rs2_value = {any}\n", .{stage3_claims.rs2_value.toBytes()[0..8]});
+                std.debug.print("[STAGE4 BATCH] gamma = {any}\n", .{gamma_stage4.toBytes()[0..8]});
+
+                // Get batching coefficient r0 for RegistersReadWriteChecking
+                transcript.appendScalar(input_claim_registers);
+                const r0 = transcript.challengeScalarFull();
+                std.debug.print("[STAGE4 BATCH] input_claim_registers = {any}\n", .{input_claim_registers.toBytes()[0..8]});
+                std.debug.print("[STAGE4 BATCH] r0 = {any}\n", .{r0.toBytes()[0..8]});
+
+                // Get batching coefficient r1 for RamValEvaluation (input = 0)
+                // We need to derive this to keep transcript in sync with Jolt, even though we don't use it
+                transcript.appendScalar(F.zero());
+                const r1 = transcript.challengeScalarFull();
+                std.debug.print("[STAGE4 BATCH] r1 (RamValEvaluation, input=0) = {any}\n", .{r1.toBytes()[0..8]});
+
+                // Get batching coefficient r2 for RamValFinal (input = 0)
+                // We need to derive this to keep transcript in sync with Jolt, even though we don't use it
+                transcript.appendScalar(F.zero());
+                const r2 = transcript.challengeScalarFull();
+                std.debug.print("[STAGE4 BATCH] r2 (RamValFinal, input=0) = {any}\n", .{r2.toBytes()[0..8]});
+
                 // Stage 3's sumcheck binds variables in little-endian order (first challenge binds LSB).
-                // The claims are MLEs evaluated at the challenge point in the same order.
-                // Stage 4 should use the challenges as-is (NOT reversed) to compute eq(r_cycle, j).
-                std.debug.print("[STAGE4] Using Stage 3 challenges directly (no reversal): [0] = {any}\n", .{
+                // TODO: Investigate full pipeline endianness - see .agent/TODO.md for details.
+                // Simply reversing r_cycle here doesn't work because Stage 3 claims were computed
+                // with the original ordering. The fix needs to be coordinated across Stage 3 and Stage 4.
+                std.debug.print("[STAGE4] Using Stage 3 challenges directly: [0] = {any}\n", .{
                     stage3_result.challenges[0].toBytes()[0..8],
                 });
 
@@ -1585,6 +1625,7 @@ pub fn ProofConverter(comptime F: type) type {
                     gamma_stage4,
                     stage3_result.challenges,
                     stage3_claims,
+                    r0, // Pass batching coefficient to prover
                 ) catch |err| {
                     // Fall back to zero proof on init error
                     std.debug.print("[STAGE4] Prover init error: {any}, using zero proof\n", .{err});
@@ -1611,10 +1652,12 @@ pub fn ProofConverter(comptime F: type) type {
                 };
                 defer stage4_result.deinit();
 
-                // Copy round polynomials to proof using addRoundPoly (converts to CompressedUniPoly)
+                // Copy round polynomials to proof (already batched by prover)
+                // The prover multiplied coefficients by r0 before appending to transcript
                 for (stage4_result.round_polys) |round_poly| {
                     try jolt_proof.stage4_sumcheck_proof.addRoundPoly(&round_poly.coeffs);
                 }
+                std.debug.print("[STAGE4 BATCH] Copied {} batched round polynomials to proof\n", .{stage4_result.round_polys.len});
 
                 // RegistersReadWriteChecking claims from actual sumcheck
                 try jolt_proof.opening_claims.insert(

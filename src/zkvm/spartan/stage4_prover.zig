@@ -407,6 +407,24 @@ pub fn Stage4Prover(comptime F: type) type {
                 // Compute round polynomial (returns full coefficients)
                 const round_poly = self.computeRoundPolynomial(round, current_claim);
 
+                // Debug: print round polynomial coefficients for comparison with Jolt
+                if (round < 3) {
+                    std.debug.print("[STAGE4_COEFF] Round {}: c0 = {any}\n", .{ round, round_poly.coeffs[0].toBytes() });
+                    std.debug.print("[STAGE4_COEFF] Round {}: c1 = {any}\n", .{ round, round_poly.coeffs[1].toBytes() });
+                    std.debug.print("[STAGE4_COEFF] Round {}: c2 = {any}\n", .{ round, round_poly.coeffs[2].toBytes() });
+                    std.debug.print("[STAGE4_COEFF] Round {}: c3 = {any}\n", .{ round, round_poly.coeffs[3].toBytes() });
+                    std.debug.print("[STAGE4_COEFF] Round {}: current_claim = {any}\n", .{ round, current_claim.toBytes() });
+
+                    // Verify p(0) + p(1) = current_claim
+                    const p0 = round_poly.coeffs[0];
+                    const p1 = round_poly.coeffs[0].add(round_poly.coeffs[1]).add(round_poly.coeffs[2]).add(round_poly.coeffs[3]);
+                    const sum = p0.add(p1);
+                    std.debug.print("[STAGE4_COEFF] Round {}: p(0) = {any}\n", .{ round, p0.toBytes() });
+                    std.debug.print("[STAGE4_COEFF] Round {}: p(1) = {any}\n", .{ round, p1.toBytes() });
+                    std.debug.print("[STAGE4_COEFF] Round {}: p(0)+p(1) = {any}\n", .{ round, sum.toBytes() });
+                    std.debug.print("[STAGE4_COEFF] Round {}: matches claim? {}\n", .{ round, sum.eql(current_claim) });
+                }
+
                 // Append compressed form to transcript: [c0, c2, c3] (skip c1)
                 // This matches Jolt's CompressedUniPoly format
                 transcript.appendScalar(round_poly.coeffs[0]);
@@ -433,14 +451,46 @@ pub fn Stage4Prover(comptime F: type) type {
 
             std.debug.print("[STAGE4] Final claim = {any}\n", .{current_claim.toBytes()});
 
+            // Debug: print final polynomial evaluations and verify expected formula
+            const val_claim = self.val_poly[0];
+            const rs1_ra_claim = self.rs1_ra_poly[0];
+            const rs2_ra_claim = self.rs2_ra_poly[0];
+            const rd_wa_claim = self.rd_wa_poly[0];
+            const inc_claim = self.inc_poly[0];
+            const eq_claim = self.eq_cycle_evals[0];
+
+            std.debug.print("[STAGE4_FINAL] val_claim = {any}\n", .{val_claim.toBytes()});
+            std.debug.print("[STAGE4_FINAL] rs1_ra_claim = {any}\n", .{rs1_ra_claim.toBytes()});
+            std.debug.print("[STAGE4_FINAL] rs2_ra_claim = {any}\n", .{rs2_ra_claim.toBytes()});
+            std.debug.print("[STAGE4_FINAL] rd_wa_claim = {any}\n", .{rd_wa_claim.toBytes()});
+            std.debug.print("[STAGE4_FINAL] inc_claim = {any}\n", .{inc_claim.toBytes()});
+            std.debug.print("[STAGE4_FINAL] eq_claim (after binding) = {any}\n", .{eq_claim.toBytes()});
+
+            // Compute expected output claim using the verifier's formula:
+            // eq(r_cycle, r_cycle') * (rd_wa * (inc + val) + γ * rs1_ra * val + γ² * rs2_ra * val)
+            const rd_wv = rd_wa_claim.mul(inc_claim.add(val_claim));
+            const rs1_v = rs1_ra_claim.mul(val_claim);
+            const rs2_v = rs2_ra_claim.mul(val_claim);
+            const gamma_sq_final = self.gamma.mul(self.gamma);
+            const combined = rd_wv.add(self.gamma.mul(rs1_v)).add(gamma_sq_final.mul(rs2_v));
+            const computed_expected_claim = eq_claim.mul(combined);
+
+            std.debug.print("[STAGE4_FINAL] rd_wv = {any}\n", .{rd_wv.toBytes()});
+            std.debug.print("[STAGE4_FINAL] rs1_v = {any}\n", .{rs1_v.toBytes()});
+            std.debug.print("[STAGE4_FINAL] rs2_v = {any}\n", .{rs2_v.toBytes()});
+            std.debug.print("[STAGE4_FINAL] combined (rd_wv + γ*rs1_v + γ²*rs2_v) = {any}\n", .{combined.toBytes()});
+            std.debug.print("[STAGE4_FINAL] computed expected claim (eq * combined) = {any}\n", .{computed_expected_claim.toBytes()});
+            std.debug.print("[STAGE4_FINAL] actual final claim = {any}\n", .{current_claim.toBytes()});
+            std.debug.print("[STAGE4_FINAL] match? {}\n", .{computed_expected_claim.eql(current_claim)});
+
             // Extract final claims
             return Stage4Result(F){
                 .round_polys = round_polys,
-                .val_claim = self.val_poly[0],
-                .rs1_ra_claim = self.rs1_ra_poly[0],
-                .rs2_ra_claim = self.rs2_ra_poly[0],
-                .rd_wa_claim = self.rd_wa_poly[0],
-                .inc_claim = self.inc_poly[0],
+                .val_claim = val_claim,
+                .rs1_ra_claim = rs1_ra_claim,
+                .rs2_ra_claim = rs2_ra_claim,
+                .rd_wa_claim = rd_wa_claim,
+                .inc_claim = inc_claim,
                 .challenges = challenges,
                 .allocator = self.allocator,
             };
@@ -484,53 +534,80 @@ pub fn Stage4Prover(comptime F: type) type {
         ///
         /// IMPORTANT: Jolt binds CYCLE variables first (log_T rounds), then ADDRESS variables (LOG_K rounds)
         /// After each binding, current_T or current_K halves, and live values are at positions 0..current/2-1
+        ///
+        /// KEY INSIGHT: For a product of multilinear polynomials, we must compute univariate
+        /// restrictions for each component separately, then multiply pointwise. This is because:
+        ///   (f * g)(t) = f(t) * g(t)  for each evaluation point t
+        /// But the product's univariate polynomial is NOT the product of the univariate polynomials
+        /// evaluated separately at different indices.
         fn computeRoundPolynomial(self: *Self, round: usize, current_claim: F) RoundPoly(F) {
             const is_cycle_round = round < self.log_T;
+            const gamma_sq = self.gamma.mul(self.gamma);
 
-            // Compute evaluations at 0, 1
+            // We need evaluations at 0, 1, 2, 3 for a degree-3 polynomial
+            // The polynomial is: eq * [rd_wa * (val + inc) + gamma * rs1_ra * val + gamma^2 * rs2_ra * val]
+            // This is degree 3: eq (degree 1) * [ products of degree-1 terms ]
             var evals: [4]F = .{ F.zero(), F.zero(), F.zero(), F.zero() };
 
             if (is_cycle_round) {
                 // Binding cycle variable (first log_T rounds)
-                // Use low-to-high binding: live values are at positions 0..current_T-1
-                // Split by bit 0 of index (even vs odd)
+                // For each pair (j_even, j_odd), compute univariate restriction evals
                 const half_T = self.current_T / 2;
-
-                // Debug: compare with alternative sum
-                var alt_sum = F.zero();
-                for (0..self.current_K) |k| {
-                    for (0..self.current_T) |j| {
-                        const idx = k * self.T + j;
-                        const eq_j = self.eq_cycle_evals[j];
-                        const contrib = self.computeContribution(idx, j);
-                        alt_sum = alt_sum.add(eq_j.mul(contrib));
-                    }
-                }
 
                 for (0..self.current_K) |k| {
                     for (0..half_T) |i| {
-                        // Even index (bit 0 = 0) -> X = 0
-                        const j0 = 2 * i;
+                        const j0 = 2 * i; // Even index -> X = 0
+                        const j1 = 2 * i + 1; // Odd index -> X = 1
                         const idx0 = k * self.T + j0;
-                        const eq_j0 = self.eq_cycle_evals[j0];
-                        const contrib0 = self.computeContribution(idx0, j0);
-                        evals[0] = evals[0].add(eq_j0.mul(contrib0));
-
-                        // Odd index (bit 0 = 1) -> X = 1
-                        const j1 = 2 * i + 1;
                         const idx1 = k * self.T + j1;
-                        const eq_j1 = self.eq_cycle_evals[j1];
-                        const contrib1 = self.computeContribution(idx1, j1);
-                        evals[1] = evals[1].add(eq_j1.mul(contrib1));
-                    }
-                }
 
-                if (round > 0 and round < 3) {
-                    std.debug.print("[STAGE4] Round {} alt_sum = {any}\n", .{ round, alt_sum.toBytes()[0..16] });
+                        // Get component values at j0 (X=0) and j1 (X=1)
+                        const eq_0 = self.eq_cycle_evals[j0];
+                        const eq_1 = self.eq_cycle_evals[j1];
+                        const val_0 = self.val_poly[idx0];
+                        const val_1 = self.val_poly[idx1];
+                        const rd_wa_0 = self.rd_wa_poly[idx0];
+                        const rd_wa_1 = self.rd_wa_poly[idx1];
+                        const rs1_ra_0 = self.rs1_ra_poly[idx0];
+                        const rs1_ra_1 = self.rs1_ra_poly[idx1];
+                        const rs2_ra_0 = self.rs2_ra_poly[idx0];
+                        const rs2_ra_1 = self.rs2_ra_poly[idx1];
+                        const inc_0 = self.inc_poly[j0];
+                        const inc_1 = self.inc_poly[j1];
+
+                        // Compute univariate restriction evals at t = 0, 1, 2, 3
+                        // For a linear polynomial with values f0, f1:
+                        // f(t) = f0 + t * (f1 - f0) = (1-t)*f0 + t*f1
+                        inline for (0..4) |t| {
+                            const t_field = F.fromU64(t);
+                            const one_minus_t = F.one().sub(t_field);
+
+                            // Interpolate each component: comp(t) = (1-t)*comp_0 + t*comp_1
+                            const eq_t = one_minus_t.mul(eq_0).add(t_field.mul(eq_1));
+                            const val_t = one_minus_t.mul(val_0).add(t_field.mul(val_1));
+                            const rd_wa_t = one_minus_t.mul(rd_wa_0).add(t_field.mul(rd_wa_1));
+                            const rs1_ra_t = one_minus_t.mul(rs1_ra_0).add(t_field.mul(rs1_ra_1));
+                            const rs2_ra_t = one_minus_t.mul(rs2_ra_0).add(t_field.mul(rs2_ra_1));
+                            const inc_t = one_minus_t.mul(inc_0).add(t_field.mul(inc_1));
+
+                            // Compute the combined contribution at this evaluation point
+                            // rd_wv = rd_wa * (val + inc)
+                            // rs1_v = rs1_ra * val
+                            // rs2_v = rs2_ra * val
+                            // combined = rd_wv + gamma * rs1_v + gamma^2 * rs2_v
+                            const rd_wv_t = rd_wa_t.mul(val_t.add(inc_t));
+                            const rs1_v_t = rs1_ra_t.mul(val_t);
+                            const rs2_v_t = rs2_ra_t.mul(val_t);
+                            const combined_t = rd_wv_t.add(self.gamma.mul(rs1_v_t)).add(gamma_sq.mul(rs2_v_t));
+
+                            // Multiply by eq and accumulate
+                            evals[t] = evals[t].add(eq_t.mul(combined_t));
+                        }
+                    }
                 }
             } else {
                 // Binding address variable (next LOG_K rounds)
-                // Live values are at address indices 0..current_K-1
+                // For each pair (k_even, k_odd), compute univariate restriction evals
                 const half_K = self.current_K / 2;
 
                 for (0..half_K) |i| {
@@ -538,25 +615,45 @@ pub fn Stage4Prover(comptime F: type) type {
                     const k1 = 2 * i + 1; // Odd address -> X = 1
 
                     for (0..self.current_T) |j| {
-                        const eq_j = self.eq_cycle_evals[j];
-
                         const idx0 = k0 * self.T + j;
-                        const contrib0 = self.computeContribution(idx0, j);
-                        evals[0] = evals[0].add(eq_j.mul(contrib0));
-
                         const idx1 = k1 * self.T + j;
-                        const contrib1 = self.computeContribution(idx1, j);
-                        evals[1] = evals[1].add(eq_j.mul(contrib1));
+                        const eq_j = self.eq_cycle_evals[j];
+                        const inc_j = self.inc_poly[j];
+
+                        // Get component values at k0 (X=0) and k1 (X=1)
+                        const val_0 = self.val_poly[idx0];
+                        const val_1 = self.val_poly[idx1];
+                        const rd_wa_0 = self.rd_wa_poly[idx0];
+                        const rd_wa_1 = self.rd_wa_poly[idx1];
+                        const rs1_ra_0 = self.rs1_ra_poly[idx0];
+                        const rs1_ra_1 = self.rs1_ra_poly[idx1];
+                        const rs2_ra_0 = self.rs2_ra_poly[idx0];
+                        const rs2_ra_1 = self.rs2_ra_poly[idx1];
+
+                        // Compute univariate restriction evals at t = 0, 1, 2, 3
+                        // eq and inc don't depend on k, so they're constant for this variable
+                        inline for (0..4) |t| {
+                            const t_field = F.fromU64(t);
+                            const one_minus_t = F.one().sub(t_field);
+
+                            // Interpolate address-dependent components
+                            const val_t = one_minus_t.mul(val_0).add(t_field.mul(val_1));
+                            const rd_wa_t = one_minus_t.mul(rd_wa_0).add(t_field.mul(rd_wa_1));
+                            const rs1_ra_t = one_minus_t.mul(rs1_ra_0).add(t_field.mul(rs1_ra_1));
+                            const rs2_ra_t = one_minus_t.mul(rs2_ra_0).add(t_field.mul(rs2_ra_1));
+
+                            // Compute combined contribution
+                            const rd_wv_t = rd_wa_t.mul(val_t.add(inc_j));
+                            const rs1_v_t = rs1_ra_t.mul(val_t);
+                            const rs2_v_t = rs2_ra_t.mul(val_t);
+                            const combined_t = rd_wv_t.add(self.gamma.mul(rs1_v_t)).add(gamma_sq.mul(rs2_v_t));
+
+                            // Multiply by eq (constant for address rounds) and accumulate
+                            evals[t] = evals[t].add(eq_j.mul(combined_t));
+                        }
                     }
                 }
             }
-
-            // For degree 2 polynomial, extrapolate to get p(2), p(3)
-            // p(X) = c0 + c1*X + c2*X² where p(0)=evals[0], p(1)=evals[1]
-            // p(2) = c0 + 2*c1 + 4*c2
-            // For linear extrapolation: p(2) = 2*p(1) - p(0)
-            evals[2] = evals[1].mul(F.fromU64(2)).sub(evals[0]);
-            evals[3] = evals[2].mul(F.fromU64(2)).sub(evals[1]);
 
             // Verify p(0) + p(1) = current_claim
             const sum = evals[0].add(evals[1]);
@@ -568,29 +665,50 @@ pub fn Stage4Prover(comptime F: type) type {
                 }
             }
 
-            // Compute full coefficients [c0, c1, c2, c3]
-            // For p(X) = c0 + c1*X + c2*X² + c3*X³:
+            // Compute coefficients from evaluations using Lagrange interpolation
+            // For degree-3 polynomial with evals at 0, 1, 2, 3:
+            // p(x) = sum_{i=0}^{3} evals[i] * L_i(x)
+            // where L_i(x) = prod_{j != i} (x - j) / (i - j)
+            //
+            // We need coefficients c0, c1, c2, c3 where p(x) = c0 + c1*x + c2*x² + c3*x³
+            const c0 = evals[0];
+
+            // Use the constraint p(0) + p(1) = claim to help verify
+            // c1 can be derived from the other evaluations
+
+            // Lagrange interpolation for coefficients:
+            // Given p(0), p(1), p(2), p(3), we can solve for c0, c1, c2, c3
+            //
             // p(0) = c0
             // p(1) = c0 + c1 + c2 + c3
-            // p(0) + p(1) = claim => 2*c0 + c1 + c2 + c3 = claim
-            // => c1 = claim - 2*c0 - c2 - c3
-            const c0 = evals[0];
-            const c3 = F.zero(); // Assume degree 2 (quadratic) for simplicity
-
-            // For quadratic: p(2) = c0 + 2*c1 + 4*c2
-            // We have c1 = claim - 2*c0 - c2
-            // p(2) = c0 + 2*(claim - 2*c0 - c2) + 4*c2
-            //      = c0 + 2*claim - 4*c0 - 2*c2 + 4*c2
-            //      = c0 + 2*claim - 4*c0 + 2*c2
-            //      = 2*claim - 3*c0 + 2*c2
-            // => c2 = (p(2) - 2*claim + 3*c0) / 2
+            // p(2) = c0 + 2*c1 + 4*c2 + 8*c3
+            // p(3) = c0 + 3*c1 + 9*c2 + 27*c3
+            //
+            // Solving:
+            // c1 = (-11*p(0) + 18*p(1) - 9*p(2) + 2*p(3)) / 6
+            // c2 = (2*p(0) - 5*p(1) + 4*p(2) - p(3)) / 2
+            // c3 = (-p(0) + 3*p(1) - 3*p(2) + p(3)) / 6
+            const six = F.fromU64(6);
+            const six_inv = six.inverse() orelse F.one();
             const two = F.fromU64(2);
-            const three = F.fromU64(3);
-            const two_inv = two.inverse() orelse F.one(); // 2^-1 mod p
-            const c2 = evals[2].sub(current_claim.mul(two)).add(c0.mul(three)).mul(two_inv);
+            const two_inv = two.inverse() orelse F.one();
 
-            // c1 = claim - 2*c0 - c2 - c3
-            const c1 = current_claim.sub(c0.mul(two)).sub(c2).sub(c3);
+            // c3 = (-p(0) + 3*p(1) - 3*p(2) + p(3)) / 6
+            const c3 = evals[0].neg()
+                .add(evals[1].mul(F.fromU64(3)))
+                .sub(evals[2].mul(F.fromU64(3)))
+                .add(evals[3])
+                .mul(six_inv);
+
+            // c2 = (2*p(0) - 5*p(1) + 4*p(2) - p(3)) / 2
+            const c2 = evals[0].mul(two)
+                .sub(evals[1].mul(F.fromU64(5)))
+                .add(evals[2].mul(F.fromU64(4)))
+                .sub(evals[3])
+                .mul(two_inv);
+
+            // c1 = p(1) - p(0) - c2 - c3 (from p(1) = c0 + c1 + c2 + c3)
+            const c1 = evals[1].sub(evals[0]).sub(c2).sub(c3);
 
             return RoundPoly(F){
                 .coeffs = .{ c0, c1, c2, c3 },

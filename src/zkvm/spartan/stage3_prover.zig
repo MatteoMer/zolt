@@ -2230,6 +2230,9 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
             const Q = try allocator.alloc(F, prefix_size);
             @memset(Q, F.zero());
 
+            // Debug: Print first few R1CS witness values
+            std.debug.print("[STAGE3] RegistersClaimReduction: trace_len={}, prefix_size={}, suffix_size={}\n", .{ trace_len, prefix_size, suffix_size });
+
             for (0..prefix_size) |x_lo| {
                 var q_acc = F.zero();
 
@@ -2241,6 +2244,39 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
                     const rd = witness[R1CSInputIndex.RdWriteValue.toIndex()];
                     const rs1 = witness[R1CSInputIndex.Rs1Value.toIndex()];
                     const rs2 = witness[R1CSInputIndex.Rs2Value.toIndex()];
+
+                    // Debug: Print first few cycles
+                    if (x < 5) {
+                        // Extract raw u64 values for comparison with Stage 4
+                        const rd_limbs = rd.toBytes();
+                        const rd_u64: u64 = @as(u64, rd_limbs[0]) |
+                            (@as(u64, rd_limbs[1]) << 8) |
+                            (@as(u64, rd_limbs[2]) << 16) |
+                            (@as(u64, rd_limbs[3]) << 24) |
+                            (@as(u64, rd_limbs[4]) << 32) |
+                            (@as(u64, rd_limbs[5]) << 40) |
+                            (@as(u64, rd_limbs[6]) << 48) |
+                            (@as(u64, rd_limbs[7]) << 56);
+                        const rs1_limbs = rs1.toBytes();
+                        const rs1_u64: u64 = @as(u64, rs1_limbs[0]) |
+                            (@as(u64, rs1_limbs[1]) << 8) |
+                            (@as(u64, rs1_limbs[2]) << 16) |
+                            (@as(u64, rs1_limbs[3]) << 24) |
+                            (@as(u64, rs1_limbs[4]) << 32) |
+                            (@as(u64, rs1_limbs[5]) << 40) |
+                            (@as(u64, rs1_limbs[6]) << 48) |
+                            (@as(u64, rs1_limbs[7]) << 56);
+                        const rs2_limbs = rs2.toBytes();
+                        const rs2_u64: u64 = @as(u64, rs2_limbs[0]) |
+                            (@as(u64, rs2_limbs[1]) << 8) |
+                            (@as(u64, rs2_limbs[2]) << 16) |
+                            (@as(u64, rs2_limbs[3]) << 24) |
+                            (@as(u64, rs2_limbs[4]) << 32) |
+                            (@as(u64, rs2_limbs[5]) << 40) |
+                            (@as(u64, rs2_limbs[6]) << 48) |
+                            (@as(u64, rs2_limbs[7]) << 56);
+                        std.debug.print("[STAGE3] Cycle {}: rd_wv={}, rs1_v={}, rs2_v={}\n", .{ x, rd_u64, rs1_u64, rs2_u64 });
+                    }
 
                     // Store witness values
                     rd_write_value[x] = rd;

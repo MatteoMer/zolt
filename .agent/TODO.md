@@ -2,58 +2,69 @@
 
 ## Current Progress
 
-### ✅ Stage 1 - PASSES
-### ✅ Stage 2 - PASSES
-### ✅ Stage 3 - PASSES
+### Stages 1-3: PASS
+### Stage 4: ROOT CAUSE IDENTIFIED
 
-### 🔄 Stage 4 - DEBUGGING IN PROGRESS
+## Stage 4 Root Cause: eq Polynomial Endianness Mismatch
 
-**✅ FIXED Issues:**
-1. Challenge ordering: Stage 3 challenges passed as-is (no reversal needed)
-2. RdWriteValue: Set to 0 for non-writing instructions (STORE, BRANCH, rd=0)
-3. Rs1Value/Rs2Value: Set to 0 for instructions that don't read rs1/rs2 (LUI, JAL, AUIPC)
-4. Input claim mismatch: Fixed by ensuring R1CS witness matches Jolt's behavior
-5. K value: Confirmed K=128 (32 RISC-V + 96 virtual registers), LOG_K=7
+**FINDING**: The polynomial opening claims all match perfectly, but the eq polynomial evaluation differs!
 
-**✅ VERIFIED CORRECT:**
-- Simple MLE computation matches Stage 3 claims ✓
-- Computed input claim == Expected input claim from Stage 3 ✓
-- Round 0 sumcheck passes ✓
+- Zolt eq_claim: `{ 205, 98, 173, 194, ... }`
+- Jolt eq_eval: `{ 27, 82, 75, 12, ... }`
 
-**🔴 CURRENT BUG: Product Polynomial Binding**
+### The Issue
 
-Round 0 passes, but Round 1+ fails. Root cause identified:
+Jolt stores `r_cycle` (from Stage 3) in **BIG_ENDIAN** format:
+- Stage 3 sumcheck produces challenges `[r0, r1, r2, ...]` where `r0` binds LSB (little-endian/binding order)
+- Jolt's `normalize_opening_point` **REVERSES** them to `[..., r2, r1, r0]` for BIG_ENDIAN
+- Result: `r_cycle[0]` = MSB, `r_cycle[n-1]` = LSB
 
-The Stage 4 polynomial is a PRODUCT of simpler polynomials:
-```
-P(k,j) = eq(r,j) * [rd_wa(k,j)*(inc(j)+val(k,j)) + γ*rs1_ra(k,j)*val(k,j) + ...]
+Zolt passes Stage 3 challenges **directly without reversing**:
+```zig
+// WRONG: Using challenges in binding order (LITTLE_ENDIAN)
+stage3_result.challenges  // [r0, r1, ...] where r0=LSB
 ```
 
-**The Problem:**
-After binding variable 0 with challenge r, I was binding each component separately then multiplying:
+### The Fix
+
+Reverse the Stage 3 challenges before passing to Stage 4:
+
+```zig
+// Reverse challenges from Stage 3 to convert from LITTLE_ENDIAN to BIG_ENDIAN
+const r_cycle = try self.allocator.alloc(F, stage3_result.challenges.len);
+for (0..stage3_result.challenges.len) |i| {
+    r_cycle[i] = stage3_result.challenges[stage3_result.challenges.len - 1 - i];
+}
 ```
-rd_wa' * val' ≠ (rd_wa * val)'  // These are NOT equal!
+
+### Location to Fix
+
+File: `src/zkvm/proof_converter.zig` lines 1575-1586
+
+Change from:
+```zig
+var stage4_prover = Stage4ProverType.initWithClaims(
+    ...
+    stage3_result.challenges,  // WRONG: little-endian order
+    ...
+)
 ```
 
-**Jolt's Solution (from Rust code analysis):**
-Jolt uses "sumcheck evaluations" - for each index, it:
-1. Computes univariate restriction evals for each component: `rd_wa_evals[0,1,2]`, `val_evals[0,1,2]`, etc.
-2. Multiplies pointwise: `result[i] = rd_wa_evals[i] * val_evals[i]`
-3. Does NOT use standard binding formula on the product
+To:
+```zig
+var stage4_prover = Stage4ProverType.initWithClaims(
+    ...
+    reversed_challenges,  // CORRECT: big-endian order
+    ...
+)
+```
 
-**Next Steps:**
-1. Rewrite `computeRoundPolynomial` to compute sumcheck_evals for each component separately
-2. Multiply the evals pointwise to get correct round polynomial
-3. Remove the incorrect binding-then-multiply approach
+## Previous Fixes Applied
 
-## Key Files
-- `src/zkvm/spartan/stage4_prover.zig` - Stage 4 prover (needs sumcheck_evals rewrite)
-- `src/zkvm/r1cs/constraints.zig` - R1CS witness (Rs1Value/Rs2Value fix applied)
-
-## Reference: Jolt Implementation
-- `jolt-core/src/zkvm/registers/read_write_checking.rs` - Phase 3 sumcheck logic
-- `jolt-core/src/poly/multilinear_polynomial.rs` - sumcheck_evals function
-- `jolt-core/src/subprotocols/read_write_matrix/registers.rs` - Sparse matrix for Phases 1/2
+1. **Sumcheck polynomial computation** - Now uses pointwise multiplication of univariate restriction evals
+2. **Challenge ordering** - Stage 3 challenges passed correctly for claim computation
+3. **Register values** - Rs1Value/Rs2Value set to 0 for instructions that don't read them
+4. **K value** - Confirmed K=128 (32 RISC-V + 96 virtual registers)
 
 ## Testing
 ```bash

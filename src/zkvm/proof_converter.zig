@@ -1510,6 +1510,10 @@ pub fn ProofConverter(comptime F: type) type {
             );
 
             // RegistersClaimReduction claims (from Stage 3 prover)
+            std.debug.print("[ZOLT STAGE3->4] RegistersClaimReduction claims:\n", .{});
+            std.debug.print("[ZOLT STAGE3->4]   rd_write_value = {any}\n", .{stage3_result.reg_rd_write_value_claim.toBytes()});
+            std.debug.print("[ZOLT STAGE3->4]   rs1_value = {any}\n", .{stage3_result.reg_rs1_value_claim.toBytes()});
+            std.debug.print("[ZOLT STAGE3->4]   rs2_value = {any}\n", .{stage3_result.reg_rs2_value_claim.toBytes()});
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .RdWriteValue, .sumcheck_id = .RegistersClaimReduction } },
                 stage3_result.reg_rd_write_value_claim,
@@ -1559,11 +1563,28 @@ pub fn ProofConverter(comptime F: type) type {
             stage4_block: {
             if (config.execution_trace) |trace| {
                 const Stage4ProverType = spartan_mod.stage4_prover.Stage4Prover(F);
-                var stage4_prover = Stage4ProverType.init(
+                const Stage3Claims = spartan_mod.stage4_prover.Stage3Claims(F);
+
+                // Pass Stage 3 claims so Stage 4 can use the correct input claim
+                const stage3_claims = Stage3Claims{
+                    .rd_write_value = stage3_result.reg_rd_write_value_claim,
+                    .rs1_value = stage3_result.reg_rs1_value_claim,
+                    .rs2_value = stage3_result.reg_rs2_value_claim,
+                };
+
+                // Stage 3's sumcheck binds variables in little-endian order (first challenge binds LSB).
+                // The claims are MLEs evaluated at the challenge point in the same order.
+                // Stage 4 should use the challenges as-is (NOT reversed) to compute eq(r_cycle, j).
+                std.debug.print("[STAGE4] Using Stage 3 challenges directly (no reversal): [0] = {any}\n", .{
+                    stage3_result.challenges[0].toBytes()[0..8],
+                });
+
+                var stage4_prover = Stage4ProverType.initWithClaims(
                     self.allocator,
                     trace,
                     gamma_stage4,
                     stage3_result.challenges,
+                    stage3_claims,
                 ) catch |err| {
                     // Fall back to zero proof on init error
                     std.debug.print("[STAGE4] Prover init error: {any}, using zero proof\n", .{err});

@@ -571,15 +571,16 @@ pub fn OpeningClaims(comptime F: type) type {
 
         /// Serialize to match Jolt's format
         /// Field elements are serialized in standard form (not Montgomery form)
-        /// to match arkworks' serialize_compressed behavior
+        /// arkworks' serialize_compressed converts from Montgomery form to standard form
+        /// and deserialize_compressed expects standard form bytes
         pub fn serialize(self: *const Self, writer: anytype) !void {
             // Write number of entries
             try writer.writeInt(u64, self.entries.items.len, .little);
             // Write each (key, claim) pair
             for (self.entries.items) |entry| {
                 try entry.id.serialize(writer);
-                // Write claim as 32-byte LE in standard form (not Montgomery)
-                // This matches arkworks' serialize_compressed
+                // Write claim as 32-byte LE in standard form
+                // This matches arkworks' serialize_compressed behavior
                 const standard = entry.claim.fromMontgomery();
                 var buf: [32]u8 = undefined;
                 for (0..4) |i| {

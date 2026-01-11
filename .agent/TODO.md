@@ -3,77 +3,57 @@
 ## Current Progress
 
 ### ✅ Stage 1 - PASSES
-- Outer Spartan sumcheck with univariate skip
-- All round polynomials verified
-
 ### ✅ Stage 2 - PASSES
-- Batched sumcheck with 5 instances
-- ProductVirtualRemainder, RamRAF, RamRWC, OutputSumcheck, InstructionLookupsClaimReduction
-
 ### ✅ Stage 3 - PASSES
-- Shift, InstructionInput, RegistersClaimReduction sumchecks
-- Fixed InstructionInput witness consistency
-- Fixed RegistersClaimReduction prefix challenge ordering
 
-### 🔄 Stage 4 - PROVER IMPLEMENTED BUT INCORRECT
-**Status:** Stage 4 prover is integrated but produces incorrect polynomial evaluations.
+### 🔄 Stage 4 - DEBUGGING IN PROGRESS
 
-**What's Implemented:**
-- `src/zkvm/spartan/stage4_prover.zig` - Full Stage 4 prover module
-- Integrates with proof_converter via execution_trace in ConversionConfig
-- Generates round polynomials and opening claims
+**✅ FIXED Issues:**
+1. Challenge ordering: Stage 3 challenges passed as-is (no reversal needed)
+2. RdWriteValue: Set to 0 for non-writing instructions (STORE, BRANCH, rd=0)
+3. Rs1Value/Rs2Value: Set to 0 for instructions that don't read rs1/rs2 (LUI, JAL, AUIPC)
+4. Input claim mismatch: Fixed by ensuring R1CS witness matches Jolt's behavior
+5. K value: Confirmed K=128 (32 RISC-V + 96 virtual registers), LOG_K=7
 
-**Root Cause of Failures:**
-The sumcheck polynomial evaluations don't satisfy `p(0) + p(1) = claim`. This indicates:
-1. The polynomial construction from trace is incorrect
-2. The indexing scheme (k * T + j) may not match Jolt's MLE ordering
-3. The register value tracking may have bugs
+**✅ VERIFIED CORRECT:**
+- Simple MLE computation matches Stage 3 claims ✓
+- Computed input claim == Expected input claim from Stage 3 ✓
+- Round 0 sumcheck passes ✓
 
-**Jolt's Implementation Notes:**
-- Uses `ReadWriteMatrixCycleMajor` - a sparse representation
-- Binds **cycle variables first** (log_T rounds), then address variables (LOG_K rounds)
-- Uses Gruen optimization for sparse matrix sumcheck
-- The MLE evaluation order matters critically
+**🔴 CURRENT BUG: Product Polynomial Binding**
 
-**Key Difference:**
-Jolt's RegistersReadWriteChecking prover uses:
-1. Sparse matrix representation for efficiency
-2. Complex entry types (`RegistersCycleMajorEntry`) that track ra, wa, val together
-3. Special handling for "implicit" entries (zeros)
+Round 0 passes, but Round 1+ fails. Root cause identified:
 
-Our implementation uses dense arrays which should be correct in principle but may have ordering issues.
+The Stage 4 polynomial is a PRODUCT of simpler polynomials:
+```
+P(k,j) = eq(r,j) * [rd_wa(k,j)*(inc(j)+val(k,j)) + γ*rs1_ra(k,j)*val(k,j) + ...]
+```
 
-**To Debug Further:**
-1. Compare the input claim computation against what Jolt computes
-2. Verify the eq polynomial evaluation matches Jolt's `EqPolynomial::mle_endian`
-3. Check if r_cycle from Stage 3 is in correct format (big-endian vs little-endian)
+**The Problem:**
+After binding variable 0 with challenge r, I was binding each component separately then multiplying:
+```
+rd_wa' * val' ≠ (rd_wa * val)'  // These are NOT equal!
+```
 
-### ❌ Stages 5-7 - BLOCKED
+**Jolt's Solution (from Rust code analysis):**
+Jolt uses "sumcheck evaluations" - for each index, it:
+1. Computes univariate restriction evals for each component: `rd_wa_evals[0,1,2]`, `val_evals[0,1,2]`, etc.
+2. Multiplies pointwise: `result[i] = rd_wa_evals[i] * val_evals[i]`
+3. Does NOT use standard binding formula on the product
 
-## Key Technical Findings
+**Next Steps:**
+1. Rewrite `computeRoundPolynomial` to compute sumcheck_evals for each component separately
+2. Multiply the evals pointwise to get correct round polynomial
+3. Remove the incorrect binding-then-multiply approach
 
-### Variable Ordering (IMPORTANT!)
-Jolt's RegistersReadWriteChecking:
-- **First log_T rounds:** Bind cycle variables (j)
-- **Next LOG_K rounds:** Bind address variables (k)
+## Key Files
+- `src/zkvm/spartan/stage4_prover.zig` - Stage 4 prover (needs sumcheck_evals rewrite)
+- `src/zkvm/r1cs/constraints.zig` - R1CS witness (Rs1Value/Rs2Value fix applied)
 
-This is documented in `cycle_major.rs`:
-> "Entries are sorted by `(row, col)` - optimal for binding cycle variables first."
-
-### Opening Claims Flow for Stage 4
-1. Stage 3 produces: RdWriteValue, Rs1Value, Rs2Value @ RegistersClaimReduction
-2. Stage 4 RegistersReadWriteChecking:
-   - gamma sampled from transcript (challengeScalarFull)
-   - r_cycle = Stage 3 challenges
-   - input_claim = rd_wv + γ*(rs1_rv + γ*rs2_rv)
-   - Runs sumcheck over log_T + LOG_K = 8 + 7 = 15 rounds
-   - Output claims: RegistersVal, Rs1Ra, Rs2Ra, RdWa, RdInc
-
-## Files Modified
-- `src/zkvm/spartan/stage4_prover.zig` - NEW: Stage 4 prover implementation
-- `src/zkvm/spartan/mod.zig` - Added stage4_prover export
-- `src/zkvm/proof_converter.zig` - Integrated Stage 4 prover, added execution_trace to config
-- `src/zkvm/mod.zig` - Pass execution_trace in ConversionConfig
+## Reference: Jolt Implementation
+- `jolt-core/src/zkvm/registers/read_write_checking.rs` - Phase 3 sumcheck logic
+- `jolt-core/src/poly/multilinear_polynomial.rs` - sumcheck_evals function
+- `jolt-core/src/subprotocols/read_write_matrix/registers.rs` - Sparse matrix for Phases 1/2
 
 ## Testing
 ```bash

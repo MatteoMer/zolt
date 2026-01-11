@@ -956,9 +956,42 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             const imm = inputs.deriveImmediate(step.instruction);
             inputs.values[R1CSInputIndex.Imm.toIndex()] = imm;
 
-            // Register values
-            inputs.values[R1CSInputIndex.Rs1Value.toIndex()] = F.fromU64(step.rs1_value);
-            inputs.values[R1CSInputIndex.Rs2Value.toIndex()] = F.fromU64(step.rs2_value);
+            // Register values - only set for instructions that actually read the registers
+            // This matches Jolt's cycle.rs1_read().unwrap_or_default().1 behavior
+            //
+            // Instructions that read rs1:
+            //   I-type: 0x13 (ALU-I), 0x03 (LOAD), 0x67 (JALR), 0x1b (ALU-I-32)
+            //   R-type: 0x33 (ALU-R), 0x3b (ALU-R-32)
+            //   S-type: 0x23 (STORE)
+            //   B-type: 0x63 (BRANCH)
+            //
+            // Instructions that DON'T read rs1 (Rs1Value = 0):
+            //   U-type: 0x37 (LUI), 0x17 (AUIPC)
+            //   J-type: 0x6f (JAL)
+            const reads_rs1 = switch (opcode) {
+                0x13, 0x03, 0x67, 0x1b, 0x33, 0x3b, 0x23, 0x63 => true,
+                else => false,
+            };
+            if (reads_rs1) {
+                inputs.values[R1CSInputIndex.Rs1Value.toIndex()] = F.fromU64(step.rs1_value);
+            }
+            // else Rs1Value stays 0 (initialized in init())
+
+            // Instructions that read rs2:
+            //   R-type: 0x33 (ALU-R), 0x3b (ALU-R-32)
+            //   S-type: 0x23 (STORE)
+            //   B-type: 0x63 (BRANCH)
+            //
+            // Instructions that DON'T read rs2 (Rs2Value = 0):
+            //   All I-type, U-type, J-type
+            const reads_rs2 = switch (opcode) {
+                0x33, 0x3b, 0x23, 0x63 => true,
+                else => false,
+            };
+            if (reads_rs2) {
+                inputs.values[R1CSInputIndex.Rs2Value.toIndex()] = F.fromU64(step.rs2_value);
+            }
+            // else Rs2Value stays 0 (initialized in init())
 
             // =================================================================
             // RAM-related values - must satisfy constraints 0-4
@@ -980,6 +1013,15 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             const mem_val = step.memory_value orelse 0;
             const mem_val_f = F.fromU64(mem_val);
 
+            // Extract rd register index from instruction
+            const rd: u5 = @truncate((step.instruction >> 7) & 0x1f);
+
+            // Determine if instruction writes to rd (matches Stage 4 logic)
+            // STORE (0x23) and BRANCH (0x63) don't write to rd
+            // Also, rd == 0 means no write (x0 is always 0)
+            const is_branch = (opcode == 0x63);
+            const writes_to_rd = !is_store and !is_branch and (rd != 0);
+
             if (is_load) {
                 // Constraint 2: RamReadValue == RamWriteValue (for Load)
                 // Constraint 3: RamReadValue == RdWriteValue (for Load)
@@ -992,14 +1034,20 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                 // - RamReadValue = pre-value (value before write) = step.memory_value
                 // - RamWriteValue = post-value (value being written) = step.rs2_value
                 // Constraint 4: Rs2Value == RamWriteValue (for Store)
+                // CRITICAL: Stores don't write to rd, so RdWriteValue = 0
                 inputs.values[R1CSInputIndex.RamReadValue.toIndex()] = mem_val_f; // pre-value
                 inputs.values[R1CSInputIndex.RamWriteValue.toIndex()] = F.fromU64(step.rs2_value); // post-value
-                inputs.values[R1CSInputIndex.RdWriteValue.toIndex()] = F.fromU64(step.rd_value);
+                inputs.values[R1CSInputIndex.RdWriteValue.toIndex()] = F.zero();
             } else {
-                // Non-memory: set to reasonable defaults
+                // Non-memory instructions
                 inputs.values[R1CSInputIndex.RamReadValue.toIndex()] = F.zero();
                 inputs.values[R1CSInputIndex.RamWriteValue.toIndex()] = F.zero();
-                inputs.values[R1CSInputIndex.RdWriteValue.toIndex()] = F.fromU64(step.rd_value);
+                // CRITICAL: Only set RdWriteValue if instruction actually writes to rd
+                // Branch (0x63) and rd == 0 don't write. This matches Stage 4's polynomial construction.
+                inputs.values[R1CSInputIndex.RdWriteValue.toIndex()] = if (writes_to_rd)
+                    F.fromU64(step.rd_value)
+                else
+                    F.zero();
             }
 
             // =================================================================
@@ -1140,7 +1188,7 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             // =================================================================
 
             // IsRdNotZero: check if destination register != x0
-            const rd: u5 = @truncate((step.instruction >> 7) & 0x1F);
+            // Note: rd was already extracted above for RdWriteValue computation
             const is_rd_not_zero = if (rd != 0) F.one() else F.zero();
 
             // BranchFlag: 1 if this is a branch instruction (opcode 0x63)

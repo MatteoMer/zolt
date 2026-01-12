@@ -3,74 +3,62 @@
 ## Current Progress
 
 ### Stages 1-3: PASS
-### Stage 4: IN PROGRESS - Input Claim Value Mismatch Identified
+### Stage 4: IN PROGRESS - Claims Match, Batched Sumcheck Diverges
 
-## Stage 4 Investigation (Updated 2026-01-11)
+## Stage 4 Investigation (Updated 2026-01-12)
 
-### NEW ROOT CAUSE: Input Claim Values Differ Beyond First 8 Bytes
+### FIXED: Eq Polynomial Endianness Issue
 
-**Status:** The batching coefficient derivation order was fixed, but the actual input_claim values being appended to the transcript differ between Zolt and Jolt.
+**Root Cause:** The eq polynomial was changed from little-endian to big-endian ordering, with corresponding challenge reversal. This broke the Stage 4 sumcheck because the polynomial indexing didn't match the execution trace indexing.
 
-**Latest Finding:**
-- The first 8 bytes of component claims (rd_write_value, rs1_value, rs2_value) match
-- The gamma values match (0x25d645b7560ee63c)
-- BUT the full 32-byte input_claim values differ when appended to transcript:
-  ```
-  Zolt claim BE first 8:  [0x29, 0x14, 0x12, 0xa5, 0x6a, 0x0e, 0x23, 0x80]
-  Jolt claim BE first 8:  [0x00, 0x19, 0x76, 0x26, 0x3d, 0x11, 0xdb, 0x57]
-  ```
+**Fix Applied:**
+1. Reverted `computeEqEvals` to LE ordering (r[0] binds LSB of index)
+2. Removed challenge reversal - pass Stage 3 challenges directly
 
-**Implication:**
-The full 32-byte claim values (rd_write_value, rs1_value, rs2_value) likely differ beyond their first 8 bytes. Zolt's Stage 3 claims appear to be larger values (non-zero MSBs), while Jolt's claims may be smaller values (leading zeros in BE).
+**Result:** Stage 4 claims now match perfectly:
+```
+[STAGE4] Simple rd_wv MLE sum = { 218, 190, 87, 33, ... }
+[STAGE4] Expected rd_wv from Stage 3 = { 218, 190, 87, 33, ... } ✓ MATCH
+
+[STAGE4] Simple rs1_v MLE sum = { 4, 11, 232, 188, ... }
+[STAGE4] Expected rs1_v from Stage 3 = { 4, 11, 232, 188, ... } ✓ MATCH
+
+[STAGE4] Simple rs2_v MLE sum = { 115, 117, 41, 122, ... }
+[STAGE4] Expected rs2_v from Stage 3 = { 115, 117, 41, 122, ... } ✓ MATCH
+```
+
+### CURRENT ISSUE: Batched Sumcheck Output Mismatch
+
+**Symptom:**
+```
+output_claim:          4025718365397880246610377225086562173672770992931618085272964253447434290014
+expected_output_claim: 12140057478814186156378889252409437120722846392760694384171609527722202919821
+```
+
+**Likely Cause:** Transcript state divergence when deriving batching coefficients. The batching coefficients (coeff_0, coeff_1, coeff_2) are derived from the transcript after appending input claims. If the transcript state differs between Zolt prover and Jolt verifier at this point, the coefficients will differ.
 
 **Investigation Areas:**
-1. Check if Zolt's MLE evaluations at Stage 3 challenges are computing correct claim values
-2. Verify the full 32-byte claim values match between Zolt and Jolt
-3. Confirm Montgomery form handling is consistent
+1. Compare transcript state before deriving batching coefficients
+2. Verify input_claim values appended to transcript match exactly (full 32-byte BE)
+3. Check if RamValEvaluation/RamValFinal input claims (currently 0) should be non-zero
 
-### Previous Fixes Applied
+### Key Insight from Debugging
 
-1. **Batching coefficient derivation order** - Fixed to append ALL claims first, then derive ALL coefficients (matching Jolt's BatchedSumcheck)
-2. **Stage 3 cache_openings** - Already handled by Stage 3 prover (no duplicate appends needed)
-3. **Transcript implementation** - Confirmed to match Jolt's (Montgomery→Canonical→LE→reverse to BE)
+The previous hypothesis about "input claim values differ beyond first 8 bytes" was misleading. The actual issue was:
+- The eq polynomial bit ordering (LE vs BE) determines how indices map to challenge points
+- Stage 3 sumcheck binds variables in LE order (first challenge binds LSB)
+- Stage 4's eq polynomial must use the same ordering to correctly evaluate eq(r_cycle, j)
 
-### Code Structure Understanding
+### Code Structure
 
-**Stage 3 → Stage 4 Flow in Jolt:**
-1. Stage 3 BatchedSumcheck completes
-2. cache_openings() called for each Stage 3 verifier (16 appends total)
-3. Stage 4 gamma derived (RegistersReadWriteCheckingParams::new)
-4. verifier_accumulate_advice() - no-op for Fibonacci
-5. Stage 4 BatchedSumcheck: append 3 input claims, derive 3 batching coefficients
+**Eq Polynomial Ordering:**
+- LE (correct): `r[0]` corresponds to LSB of index, `r[n-1]` to MSB
+- BE (incorrect for our use): `r[0]` corresponds to MSB of index
 
-**Zolt's Current Implementation:**
-1. Stage 3 prover generates round polys and appends 16 cache_openings claims
-2. Stage 4 gamma derived
-3. Compute input_claim = rd_write_value + gamma*rs1_value + gamma²*rs2_value
-4. Append 3 claims (input_claim, 0, 0), derive 3 coefficients (r0, r1, r2)
-
-### Debug Values (Current)
-
-**Stage 4 Input Claims (after computation):**
-```
-Zolt input_claim LE first 8: [6b, dc, 1e, a9, c7, be, 21, 90]
-Jolt input_claim result:     [6b, dc, 1e, a9, c7, be, 21, 90] ✓ (match!)
-```
-
-**BUT when appended to transcript (full 32-byte BE):**
-```
-Zolt: starts with [0x29, 0x14, 0x12, ...]
-Jolt: starts with [0x00, 0x19, 0x76, ...]
-```
-
-This discrepancy suggests the FULL claim values differ even though the first 8 LE bytes match.
-
-### Next Steps
-
-1. **Print full 32-byte claim values** in both Zolt and Jolt to compare
-2. **Check if Jolt's claims are small values** (fitting in <128 bits, hence leading zeros)
-3. **Verify Zolt's Stage 3 MLE evaluations** are computing correct claim values
-4. **Compare Montgomery representations** if necessary
+**Stage 3 → Stage 4 Challenge Flow:**
+1. Stage 3 sumcheck produces challenges `[r_0, r_1, ..., r_{n-1}]`
+2. `r_0` was bound first (to dimension 0, which is LSB)
+3. Stage 4 uses these challenges directly with LE eq polynomial
 
 ## Testing
 ```bash

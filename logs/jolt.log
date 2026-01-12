@@ -9,7 +9,7 @@ Loading ELF: examples/fibonacci.elf
 [1/4] Preprocessing...
   SRS degree: 1280
   Max trace length: 1024
-  Time: 1651.08 ms
+  Time: 1667.76 ms
 
 [2/4] Initializing prover...
   Prover initialized with proving key
@@ -1015,118 +1015,118 @@ Loading ELF: examples/fibonacci.elf
 [PROVER STAGE 4]     challenge=0x671a96cfe02c9fc
 [PROVER STAGE 4]   final_claim=0x0
 error(gpa): Double free detected. Allocation: 
-/Users/matteo/projects/zolt/src/zkvm/ram/val_evaluation.zig:52:52: 0x104da78e3 in init (zolt)
+/Users/matteo/projects/zolt/src/zkvm/ram/val_evaluation.zig:52:52: 0x1006d78e3 in init (zolt)
             const r_addr_copy = try allocator.alloc(F, r_address.len);
                                                    ^
-/Users/matteo/projects/zolt/src/zkvm/prover.zig:744:65: 0x104daa51f in proveStage4__anon_23443 (zolt)
+/Users/matteo/projects/zolt/src/zkvm/prover.zig:744:65: 0x1006da51f in proveStage4__anon_23443 (zolt)
             var val_params = try ram.ValEvaluationParams(F).init(
                                                                 ^
-/Users/matteo/projects/zolt/src/zkvm/prover.zig:318:33: 0x104db16df in prove__anon_21734 (zolt)
+/Users/matteo/projects/zolt/src/zkvm/prover.zig:318:33: 0x1006e16df in prove__anon_21734 (zolt)
             try self.proveStage4(transcript);
                                 ^
-/Users/matteo/projects/zolt/src/zkvm/mod.zig:452:55: 0x104db30e3 in prove (zolt)
+/Users/matteo/projects/zolt/src/zkvm/mod.zig:452:55: 0x1006e30e3 in prove (zolt)
             const stage_proofs = try multi_stage.prove(&transcript);
                                                       ^
-/Users/matteo/projects/zolt/src/zkvm/mod.zig:787:44: 0x104e2f90f in proveJoltCompatibleWithDoryAndSrsAtAddress (zolt)
+/Users/matteo/projects/zolt/src/zkvm/mod.zig:787:44: 0x10075fdd7 in proveJoltCompatibleWithDoryAndSrsAtAddress (zolt)
             var zolt_proof = try self.prove(program_bytecode, inputs);
                                            ^
-/Users/matteo/projects/zolt/src/main.zig:342:85: 0x104e648ab in runProver (zolt)
+/Users/matteo/projects/zolt/src/main.zig:342:85: 0x100794d73 in runProver (zolt)
             var jolt_bundle = prover_inst.proveJoltCompatibleWithDoryAndSrsAtAddress(
                                                                                     ^
  First free: 
-/Users/matteo/projects/zolt/src/zkvm/ram/val_evaluation.zig:69:32: 0x104dab5a7 in deinit (zolt)
+/Users/matteo/projects/zolt/src/zkvm/ram/val_evaluation.zig:69:32: 0x1006db5a7 in deinit (zolt)
             self.allocator.free(self.r_address);
                                ^
-/Users/matteo/projects/zolt/src/zkvm/ram/val_evaluation.zig:452:31: 0x104dab67f in deinit (zolt)
+/Users/matteo/projects/zolt/src/zkvm/ram/val_evaluation.zig:452:31: 0x1006db67f in deinit (zolt)
             self.params.deinit();
                               ^
-/Users/matteo/projects/zolt/src/zkvm/prover.zig:769:36: 0x104daad7f in proveStage4__anon_23443 (zolt)
+/Users/matteo/projects/zolt/src/zkvm/prover.zig:769:36: 0x1006dad7f in proveStage4__anon_23443 (zolt)
             defer val_prover.deinit();
                                    ^
-/Users/matteo/projects/zolt/src/zkvm/prover.zig:318:33: 0x104db16df in prove__anon_21734 (zolt)
+/Users/matteo/projects/zolt/src/zkvm/prover.zig:318:33: 0x1006e16df in prove__anon_21734 (zolt)
             try self.proveStage4(transcript);
                                 ^
-/Users/matteo/projects/zolt/src/zkvm/mod.zig:452:55: 0x104db30e3 in prove (zolt)
+/Users/matteo/projects/zolt/src/zkvm/mod.zig:452:55: 0x1006e30e3 in prove (zolt)
             const stage_proofs = try multi_stage.prove(&transcript);
                                                       ^
-/Users/matteo/projects/zolt/src/zkvm/mod.zig:787:44: 0x104e2f90f in proveJoltCompatibleWithDoryAndSrsAtAddress (zolt)
+/Users/matteo/projects/zolt/src/zkvm/mod.zig:787:44: 0x10075fdd7 in proveJoltCompatibleWithDoryAndSrsAtAddress (zolt)
             var zolt_proof = try self.prove(program_bytecode, inputs);
                                            ^
  Second free: 
-/Users/matteo/projects/zolt/src/zkvm/ram/val_evaluation.zig:69:32: 0x104dab5a7 in deinit (zolt)
+/Users/matteo/projects/zolt/src/zkvm/ram/val_evaluation.zig:69:32: 0x1006db5a7 in deinit (zolt)
             self.allocator.free(self.r_address);
                                ^
-/Users/matteo/projects/zolt/src/zkvm/prover.zig:752:36: 0x104daad8b in proveStage4__anon_23443 (zolt)
+/Users/matteo/projects/zolt/src/zkvm/prover.zig:752:36: 0x1006dad8b in proveStage4__anon_23443 (zolt)
             defer val_params.deinit();
                                    ^
-/Users/matteo/projects/zolt/src/zkvm/prover.zig:318:33: 0x104db16df in prove__anon_21734 (zolt)
+/Users/matteo/projects/zolt/src/zkvm/prover.zig:318:33: 0x1006e16df in prove__anon_21734 (zolt)
             try self.proveStage4(transcript);
                                 ^
-/Users/matteo/projects/zolt/src/zkvm/mod.zig:452:55: 0x104db30e3 in prove (zolt)
+/Users/matteo/projects/zolt/src/zkvm/mod.zig:452:55: 0x1006e30e3 in prove (zolt)
             const stage_proofs = try multi_stage.prove(&transcript);
                                                       ^
-/Users/matteo/projects/zolt/src/zkvm/mod.zig:787:44: 0x104e2f90f in proveJoltCompatibleWithDoryAndSrsAtAddress (zolt)
+/Users/matteo/projects/zolt/src/zkvm/mod.zig:787:44: 0x10075fdd7 in proveJoltCompatibleWithDoryAndSrsAtAddress (zolt)
             var zolt_proof = try self.prove(program_bytecode, inputs);
                                            ^
-/Users/matteo/projects/zolt/src/main.zig:342:85: 0x104e648ab in runProver (zolt)
+/Users/matteo/projects/zolt/src/main.zig:342:85: 0x100794d73 in runProver (zolt)
             var jolt_bundle = prover_inst.proveJoltCompatibleWithDoryAndSrsAtAddress(
                                                                                     ^
 
 error(gpa): Double free detected. Allocation: 
-/Users/matteo/projects/zolt/src/zkvm/ram/val_evaluation.zig:55:53: 0x104da79db in init (zolt)
+/Users/matteo/projects/zolt/src/zkvm/ram/val_evaluation.zig:55:53: 0x1006d79db in init (zolt)
             const r_cycle_copy = try allocator.alloc(F, r_cycle.len);
                                                     ^
-/Users/matteo/projects/zolt/src/zkvm/prover.zig:744:65: 0x104daa51f in proveStage4__anon_23443 (zolt)
+/Users/matteo/projects/zolt/src/zkvm/prover.zig:744:65: 0x1006da51f in proveStage4__anon_23443 (zolt)
             var val_params = try ram.ValEvaluationParams(F).init(
                                                                 ^
-/Users/matteo/projects/zolt/src/zkvm/prover.zig:318:33: 0x104db16df in prove__anon_21734 (zolt)
+/Users/matteo/projects/zolt/src/zkvm/prover.zig:318:33: 0x1006e16df in prove__anon_21734 (zolt)
             try self.proveStage4(transcript);
                                 ^
-/Users/matteo/projects/zolt/src/zkvm/mod.zig:452:55: 0x104db30e3 in prove (zolt)
+/Users/matteo/projects/zolt/src/zkvm/mod.zig:452:55: 0x1006e30e3 in prove (zolt)
             const stage_proofs = try multi_stage.prove(&transcript);
                                                       ^
-/Users/matteo/projects/zolt/src/zkvm/mod.zig:787:44: 0x104e2f90f in proveJoltCompatibleWithDoryAndSrsAtAddress (zolt)
+/Users/matteo/projects/zolt/src/zkvm/mod.zig:787:44: 0x10075fdd7 in proveJoltCompatibleWithDoryAndSrsAtAddress (zolt)
             var zolt_proof = try self.prove(program_bytecode, inputs);
                                            ^
-/Users/matteo/projects/zolt/src/main.zig:342:85: 0x104e648ab in runProver (zolt)
+/Users/matteo/projects/zolt/src/main.zig:342:85: 0x100794d73 in runProver (zolt)
             var jolt_bundle = prover_inst.proveJoltCompatibleWithDoryAndSrsAtAddress(
                                                                                     ^
  First free: 
-/Users/matteo/projects/zolt/src/zkvm/ram/val_evaluation.zig:70:32: 0x104dab5c3 in deinit (zolt)
+/Users/matteo/projects/zolt/src/zkvm/ram/val_evaluation.zig:70:32: 0x1006db5c3 in deinit (zolt)
             self.allocator.free(self.r_cycle);
                                ^
-/Users/matteo/projects/zolt/src/zkvm/ram/val_evaluation.zig:452:31: 0x104dab67f in deinit (zolt)
+/Users/matteo/projects/zolt/src/zkvm/ram/val_evaluation.zig:452:31: 0x1006db67f in deinit (zolt)
             self.params.deinit();
                               ^
-/Users/matteo/projects/zolt/src/zkvm/prover.zig:769:36: 0x104daad7f in proveStage4__anon_23443 (zolt)
+/Users/matteo/projects/zolt/src/zkvm/prover.zig:769:36: 0x1006dad7f in proveStage4__anon_23443 (zolt)
             defer val_prover.deinit();
                                    ^
-/Users/matteo/projects/zolt/src/zkvm/prover.zig:318:33: 0x104db16df in prove__anon_21734 (zolt)
+/Users/matteo/projects/zolt/src/zkvm/prover.zig:318:33: 0x1006e16df in prove__anon_21734 (zolt)
             try self.proveStage4(transcript);
                                 ^
-/Users/matteo/projects/zolt/src/zkvm/mod.zig:452:55: 0x104db30e3 in prove (zolt)
+/Users/matteo/projects/zolt/src/zkvm/mod.zig:452:55: 0x1006e30e3 in prove (zolt)
             const stage_proofs = try multi_stage.prove(&transcript);
                                                       ^
-/Users/matteo/projects/zolt/src/zkvm/mod.zig:787:44: 0x104e2f90f in proveJoltCompatibleWithDoryAndSrsAtAddress (zolt)
+/Users/matteo/projects/zolt/src/zkvm/mod.zig:787:44: 0x10075fdd7 in proveJoltCompatibleWithDoryAndSrsAtAddress (zolt)
             var zolt_proof = try self.prove(program_bytecode, inputs);
                                            ^
  Second free: 
-/Users/matteo/projects/zolt/src/zkvm/ram/val_evaluation.zig:70:32: 0x104dab5c3 in deinit (zolt)
+/Users/matteo/projects/zolt/src/zkvm/ram/val_evaluation.zig:70:32: 0x1006db5c3 in deinit (zolt)
             self.allocator.free(self.r_cycle);
                                ^
-/Users/matteo/projects/zolt/src/zkvm/prover.zig:752:36: 0x104daad8b in proveStage4__anon_23443 (zolt)
+/Users/matteo/projects/zolt/src/zkvm/prover.zig:752:36: 0x1006dad8b in proveStage4__anon_23443 (zolt)
             defer val_params.deinit();
                                    ^
-/Users/matteo/projects/zolt/src/zkvm/prover.zig:318:33: 0x104db16df in prove__anon_21734 (zolt)
+/Users/matteo/projects/zolt/src/zkvm/prover.zig:318:33: 0x1006e16df in prove__anon_21734 (zolt)
             try self.proveStage4(transcript);
                                 ^
-/Users/matteo/projects/zolt/src/zkvm/mod.zig:452:55: 0x104db30e3 in prove (zolt)
+/Users/matteo/projects/zolt/src/zkvm/mod.zig:452:55: 0x1006e30e3 in prove (zolt)
             const stage_proofs = try multi_stage.prove(&transcript);
                                                       ^
-/Users/matteo/projects/zolt/src/zkvm/mod.zig:787:44: 0x104e2f90f in proveJoltCompatibleWithDoryAndSrsAtAddress (zolt)
+/Users/matteo/projects/zolt/src/zkvm/mod.zig:787:44: 0x10075fdd7 in proveJoltCompatibleWithDoryAndSrsAtAddress (zolt)
             var zolt_proof = try self.prove(program_bytecode, inputs);
                                            ^
-/Users/matteo/projects/zolt/src/main.zig:342:85: 0x104e648ab in runProver (zolt)
+/Users/matteo/projects/zolt/src/main.zig:342:85: 0x100794d73 in runProver (zolt)
             var jolt_bundle = prover_inst.proveJoltCompatibleWithDoryAndSrsAtAddress(
                                                                                     ^
 
@@ -3936,6 +3936,10 @@ G1[3] raw y bytes from file: ecd96fb59b73088c085229cc70a5ff22
 [ZOLT TRANSCRIPT]   canonical_value=0xbc6db96da7e28854f05610b16fa99513
 [STAGE4] gamma_full_BE = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 188, 109, 185, 109, 167, 226, 136, 84, 240, 86, 16, 177, 111, 169, 149, 19 }
 [STAGE4] gamma (as u128 in low bits) = { 12953443850515548848, 14726055188274886996 }
+[ZOLT STAGE4] rwc_val_claim_BE = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+[ZOLT STAGE4] val_init_eval_BE = { 46, 10, 81, 218, 161, 164, 3, 54, 220, 13, 196, 98, 253, 233, 174, 161, 177, 90, 92, 101, 15, 84, 7, 124, 234, 136, 104, 155, 139, 113, 241, 27 }
+[ZOLT STAGE4] output_val_final_claim_BE = { 44, 206, 121, 106, 69, 234, 52, 150, 81, 208, 248, 102, 95, 152, 50, 90, 163, 114, 159, 255, 100, 90, 14, 224, 186, 15, 232, 4, 227, 217, 94, 208 }
+[ZOLT STAGE4] output_val_init_claim_BE = { 46, 10, 81, 218, 161, 164, 3, 54, 220, 13, 196, 98, 253, 233, 174, 161, 177, 90, 92, 101, 15, 84, 7, 124, 234, 136, 104, 155, 139, 113, 241, 27 }
 [ZOLT TRANSCRIPT] appendBytes: len=32, state_before={ bc 6d b9 6d a7 e2 88 54 ... }
 [ZOLT TRANSCRIPT]   first_8_bytes={ 00 ae 07 8b 64 ad 74 9d }
 [ZOLT TRANSCRIPT]   last_8_bytes={ df 87 95 1b 70 ab 83 27 }
@@ -4433,7 +4437,7 @@ G1[3] raw y bytes from file: ecd96fb59b73088c085229cc70a5ff22
 [ZOLT TRANSCRIPT]   last_8_bytes={ 00 00 00 00 00 00 00 00 }
 [ZOLT TRANSCRIPT]   state_after={ c2 a0 36 07 20 2f 28 7d ... }
   Proof generated successfully!
-  Time: 4064.43 ms
+  Time: 4597.65 ms
 [SERIALIZE] Claim 00: Committed(RdInc, RegistersReadWriteChecking)
 [SERIALIZE] Claim 01: Committed(RdInc, RegistersValEvaluation)
 [SERIALIZE] Claim 02: Committed(RdInc, IncClaimReduction)
@@ -4541,7 +4545,7 @@ G1[3] raw y bytes from file: ecd96fb59b73088c085229cc70a5ff22
   Preprocessing exported successfully! (22508 bytes)
   This file can be loaded by Jolt for cross-verification.
 
-Total time: 24526.76 ms
+Total time: 25413.74 ms
 tee: scripts/../logs/jolt.log: No such file or directory
 warning: unused import: `ark_serialize::CanonicalSerialize`
    --> jolt-core/src/zkvm/registers/read_write_checking.rs:139:13
@@ -4605,7 +4609,7 @@ warning: unused variable: `poly`
     = note: `#[warn(unused_variables)]` on by default
 
 warning: `jolt-core` (lib test) generated 8 warnings (4 duplicates) (run `cargo fix --lib -p jolt-core --tests` to apply 2 suggestions)
-    Finished `test` profile [optimized + debuginfo] target(s) in 0.58s
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.61s
      Running unittests src/lib.rs (target/debug/deps/jolt_core-5b4f3d7cf2427008)
 
 running 1 test
@@ -7232,7 +7236,7 @@ Initial claim for sumcheck: 7539521078799679760884360927637926659992307683287079
 [JOLT STAGE4 DEBUG]   sumcheck_challenges[12] = [4c, 99, 5b, 87, 78, 41, 1b, fd]
 [JOLT STAGE4 DEBUG]   sumcheck_challenges[13] = [66, 97, aa, 19, 70, ac, b4, b1]
 [JOLT STAGE4 DEBUG]   sumcheck_challenges[14] = [68, 5f, 20, cf, 38, 70, 7f, b9]
-[JOLT STAGE4 DEBUG] params ptr addr = 0x16b6262d8
+[JOLT STAGE4 DEBUG] params ptr addr = 0x16f4062d8
 [JOLT STAGE4 DEBUG] params.r_cycle (stored) len = 8
 [JOLT STAGE4 DEBUG]   params.r_cycle_stored[0] = [e5, 44, 91, 1d, 07, be, 76, a7]
 [JOLT STAGE4 DEBUG]   params.r_cycle_stored[1] = [d4, 56, ed, 7d, 4d, d8, 1a, 2f]
@@ -7304,7 +7308,7 @@ Caused by:
     Sumcheck verification failed
 test zolt_compat_test::tests::test_verify_zolt_proof_with_zolt_preprocessing ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 396 filtered out; finished in 0.08s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 396 filtered out; finished in 0.09s
 
      Running unittests src/bin/jolt_core.rs (target/debug/deps/jolt_core-48cd9b6b37a2dc50)
 

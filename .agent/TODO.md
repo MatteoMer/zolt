@@ -3,86 +3,75 @@
 ## Current Progress
 
 ### Stages 1-3: PASS
-### Stage 4: IN PROGRESS - Batched Sumcheck Output Mismatch
+### Stage 4: IN PROGRESS - Transcript Divergence Found
 
 ## Stage 4 Investigation (Updated 2026-01-12)
 
-### VERIFIED: normalize_opening_point Works Correctly
+### VERIFIED CORRECT
 
-Added debug to Jolt's `normalize_opening_point` in `read_write_checking.rs`. Confirmed:
-- T = 256, phase1_num_rounds = 8, phase2_num_rounds = 7
-- sumcheck_challenges.len = 15
-- r_cycle is correctly reconstructed (8 elements, non-zero)
-- The function correctly reverses phase1 challenges to get r_cycle
+1. **normalize_opening_point Works Correctly** - r_cycle is correctly reconstructed
+2. **gamma matches between Zolt and Jolt** - Value: 250464584498748727615350532275610162451
+3. **Round polynomial coefficients (c0, c2) match** - Verified byte-by-byte
+4. **Instance 0 input_claim (RegistersReadWriteChecking) matches**
 
-Example output:
-```
-[NORMALIZE] T = 256, phase1_num_rounds = 8, phase2_num_rounds = 7
-[NORMALIZE]   r_cycle[0] = [ac, a9, ed, b9, 97, 43, db, 44]
-[NORMALIZE]   r_cycle[7] = [9a, 95, 69, 5e, 07, 04, 10, de]  (reversed sumcheck_challenges[0])
-```
-
-### CURRENT ISSUE: Batched Sumcheck Output Mismatch
+### ROOT CAUSE FOUND: Transcript Diverges Due to Input Claim Mismatch
 
 **Symptom:**
-```
-output_claim:          4025718365397880246610377225086562173672770992931618085272964253447434290014
-expected_output_claim: 12140057478814186156378889252409437120722846392760694384171609527722202919821
-```
+- Batching coefficients differ between Zolt and Jolt
+- Round 0 challenges differ despite same round polynomial coefficients
+- output_claim (4025...) != expected_output_claim (12140...)
 
-**Instance Breakdown (from Jolt verifier):**
-- Instance 0 (RegistersReadWriteChecking): expected_claim = 4801..., coeff = 53772..., weighted = 12140...
-- Instance 1 (RamValEvaluation): expected_claim = 0
-- Instance 2 (RamValFinal): expected_claim = 0
+**Root Cause:**
+The input claims for **Instance 1 (RamValEvaluation)** and **Instance 2 (ValFinalSumcheck)** differ between Zolt and Jolt.
 
-**Key Observation:** The ratio expected/output ≈ 3x but not exactly. This suggests the round polynomial evaluations in Zolt prover differ from what Jolt verifier expects.
+**Jolt's Stage 4 Input Claims (from verifier debug):**
+- Instance 0: 307483459531037776443095509592867762877490066210083905177366244070544605991
+- Instance 1: 1063618430616024228610198021464576543949054712450992483279253898727921684198
+- Instance 2: 21330192240049295511200146006695953640064028237054731883905956060590810557878
 
-### Root Cause Hypothesis: Challenge Ordering in Sumcheck
+**How Input Claims are Computed:**
+- `input_claim_val_eval = rwc_val_claim - val_init_eval`
+- `input_claim_val_final = output_val_final_claim - output_val_init_claim`
 
-Jolt uses **LowToHigh sparse sumcheck** binding:
-- Round 0 binds the LAST variable (highest bit)
-- Challenges are stored as [r_{n-1}, r_{n-2}, ..., r_0]
-- normalize_opening_point reverses them to get [r_0, r_1, ..., r_{n-1}]
+If either component is computed differently, the transcript diverges immediately after appending input claims, causing all subsequent challenges and batching coefficients to differ.
 
-Zolt uses **dense sumcheck** binding:
-- Round 0 binds the FIRST variable (lowest bit)
-- Challenges are stored as [r_0, r_1, ..., r_{n-1}]
-- When Jolt reverses, it gets WRONG order [r_{n-1}, ..., r_0]
+### Stage 4 Transcript Protocol (verified correct order)
 
-This affects how eq(r_cycle_stage4, r_cycle_stage3) is computed in expected_output_claim.
+1. gamma = challenge_scalar()
+2. (no advice appends for fibonacci)
+3. append_scalar(input_claim_registers)    ← Instance 0 - MATCHES
+4. append_scalar(input_claim_val_eval)     ← Instance 1 - MISMATCH?
+5. append_scalar(input_claim_val_final)    ← Instance 2 - MISMATCH?
+6. batch0 = challenge_vector[0]
+7. batch1 = challenge_vector[1]
+8. batch2 = challenge_vector[2]
+9. For each round: append poly coeffs, derive challenge
 
 ### TODO: Next Steps
 
-1. **Compare batching coefficients** between Zolt and Jolt
-   - Check `[ZOLT] STAGE4: batching_coeff` vs Jolt's coefficients
-   - They should match exactly (same transcript state → same coefficients)
+1. **Compare input_claim_val_eval components:**
+   - Compare `rwc_val_claim` between Zolt and Jolt
+   - Compare `val_init_eval` between Zolt and Jolt
 
-2. **Check challenge ordering in Stage 4 prover**
-   - Zolt stores challenges in `stage4_r_sumcheck[round_idx] = challenge`
-   - This is [c0, c1, ..., c14] (HighToLow binding)
-   - But sumcheck polynomial evaluation expects LowToHigh?
+2. **Compare input_claim_val_final components:**
+   - Compare `output_val_final_claim` between Zolt and Jolt
+   - Compare `output_val_init_claim` between Zolt and Jolt
 
-3. **Verify the eq polynomial evaluation**
-   - In `expected_output_claim`: `eq(r_cycle_stage4, r_cycle_stage3)`
-   - r_cycle_stage4 = reversed challenges from Stage 4
-   - r_cycle_stage3 = challenges from Stage 3 (stored in params)
-   - Are both in same endianness?
-
-4. **Add debug to compare round-by-round**
-   - Print each round's claim update in Zolt
-   - Compare to what verifier expects at each round
+3. **Trace r_address derivation:**
+   - The val_init_eval depends on r_address from Stage 2
+   - If r_address differs, val_init_eval will differ
 
 ### Files to Investigate
 
 **Zolt:**
-- `src/zkvm/proof_converter.zig` lines 1670-1822 (Stage 4 batched sumcheck)
-- `src/zkvm/spartan/stage4_prover.zig` (RegistersReadWriteChecking prover)
+- `src/zkvm/proof_converter.zig` lines 1650-1660 (Stage 4 input claim computation)
+- Stage 2 output: rwc_val_claim, output_val_final_claim, output_val_init_claim
 
 **Jolt:**
-- `jolt-core/src/zkvm/registers/read_write_checking.rs` (normalize_opening_point, expected_output_claim)
-- `jolt-core/src/subprotocols/sumcheck.rs` (BatchedSumcheck::verify)
+- `jolt-core/src/zkvm/ram/val_evaluation.rs:160-166` (RamValEvaluation input_claim)
+- `jolt-core/src/zkvm/ram/val_final.rs:135-141` (ValFinalSumcheck input_claim)
 
 ## Testing
 ```bash
-bash scripts/build_verify.sh  # Output now goes to logs/ directory
+bash scripts/build_verify.sh  # Output goes to logs/ directory
 ```

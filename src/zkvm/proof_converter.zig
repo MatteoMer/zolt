@@ -1560,7 +1560,9 @@ pub fn ProofConverter(comptime F: type) type {
             // - r_cycle from Stage 3 (the sumcheck challenges from RegistersClaimReduction)
             // - execution trace from config
             const gamma_stage4 = transcript.challengeScalarFull();
-            std.debug.print("[STAGE4] gamma = {any}\n", .{gamma_stage4.toBytesBE()[0..8]});
+            std.debug.print("[STAGE4] gamma_full_BE = {any}\n", .{gamma_stage4.toBytesBE()});
+            // Print gamma as decimal for comparison with Jolt
+            std.debug.print("[STAGE4] gamma (as u128 in low bits) = {any}\n", .{gamma_stage4.limbs[0..2].*});
 
             // Use Stage 4 prover if we have execution and memory trace data.
             stage4_block: {
@@ -1653,6 +1655,12 @@ pub fn ProofConverter(comptime F: type) type {
                 const input_claim_val_eval = stage2_result.rwc_val_claim.sub(val_init_eval);
                 const input_claim_val_final = stage2_result.output_val_final_claim.sub(stage2_result.output_val_init_claim);
 
+                // Debug: print components
+                std.debug.print("[ZOLT STAGE4] rwc_val_claim_BE = {any}\n", .{stage2_result.rwc_val_claim.toBytesBE()});
+                std.debug.print("[ZOLT STAGE4] val_init_eval_BE = {any}\n", .{val_init_eval.toBytesBE()});
+                std.debug.print("[ZOLT STAGE4] output_val_final_claim_BE = {any}\n", .{stage2_result.output_val_final_claim.toBytesBE()});
+                std.debug.print("[ZOLT STAGE4] output_val_init_claim_BE = {any}\n", .{stage2_result.output_val_init_claim.toBytesBE()});
+
                 transcript.appendScalar(input_claim_registers);
                 transcript.appendScalar(input_claim_val_eval);
                 transcript.appendScalar(input_claim_val_final);
@@ -1660,6 +1668,15 @@ pub fn ProofConverter(comptime F: type) type {
                 const batch0 = transcript.challengeScalarFull();
                 const batch1 = transcript.challengeScalarFull();
                 const batch2 = transcript.challengeScalarFull();
+
+                std.debug.print("[ZOLT STAGE4] input_claim_registers_BE = {any}\n", .{input_claim_registers.toBytesBE()});
+                std.debug.print("[ZOLT STAGE4] input_claim_val_eval_BE = {any}\n", .{input_claim_val_eval.toBytesBE()});
+                std.debug.print("[ZOLT STAGE4] input_claim_val_final_BE = {any}\n", .{input_claim_val_final.toBytesBE()});
+                std.debug.print("[ZOLT STAGE4] batching_coeff[0]_BE = {any}\n", .{batch0.toBytesBE()});
+                // Print low limbs as u64 for easier decimal comparison
+                std.debug.print("[ZOLT STAGE4] batching_coeff[0]_limbs = lo={}, hi={}\n", .{ batch0.limbs[0], batch0.limbs[1] });
+                std.debug.print("[ZOLT STAGE4] batching_coeff[1]_BE = {any}\n", .{batch1.toBytesBE()});
+                std.debug.print("[ZOLT STAGE4] batching_coeff[2]_BE = {any}\n", .{batch2.toBytesBE()});
 
                 const batching_coeffs = [3]F{ batch0, batch1, batch2 };
                 const input_claims = [3]F{ input_claim_registers, input_claim_val_eval, input_claim_val_final };
@@ -1740,8 +1757,12 @@ pub fn ProofConverter(comptime F: type) type {
                     for (0..scale_power) |_| {
                         scaled = scaled.add(scaled);
                     }
-                    batched_claim = batched_claim.add(scaled.mul(batching_coeffs[i]));
+                    const weighted = scaled.mul(batching_coeffs[i]);
+                    std.debug.print("[ZOLT STAGE4] Instance {} scale_power={}, weighted contribution = {any}\n", .{ i, scale_power, weighted.toBytesBE()[0..16] });
+                    batched_claim = batched_claim.add(weighted);
                 }
+                std.debug.print("[ZOLT STAGE4] Initial batched_claim = {any}\n", .{batched_claim.toBytesBE()[0..16]});
+                std.debug.print("[ZOLT STAGE4] rounds: regs={}, val_eval={}, val_final={}, max={}\n", .{ stage4_max_rounds, val_eval_rounds, val_final_rounds, stage4_max_rounds });
 
                 var regs_current_claim = input_claim_registers;
 
@@ -1799,6 +1820,12 @@ pub fn ProofConverter(comptime F: type) type {
                     var coeffs = [_]F{ compressed[0], compressed[1], compressed[2] };
                     try jolt_proof.stage4_sumcheck_proof.addRoundPoly(&coeffs);
 
+                    if (round_idx < 3 or round_idx >= stage4_max_rounds - 2) {
+                        std.debug.print("[ZOLT STAGE4] Round {}: c0 = {any}\n", .{ round_idx, compressed[0].toBytesBE()[0..16] });
+                        std.debug.print("[ZOLT STAGE4] Round {}: c2 = {any}\n", .{ round_idx, compressed[2].toBytesBE()[0..16] });
+                        std.debug.print("[ZOLT STAGE4] Round {}: batched_claim = {any}\n", .{ round_idx, batched_claim.toBytesBE()[0..16] });
+                    }
+
                     transcript.appendMessage("UniPoly_begin");
                     transcript.appendScalar(compressed[0]);
                     transcript.appendScalar(compressed[1]);
@@ -1810,6 +1837,11 @@ pub fn ProofConverter(comptime F: type) type {
                     const old_claim = batched_claim;
                     batched_claim = evalFromHint(compressed, old_claim, challenge);
 
+                    if (round_idx < 3 or round_idx >= stage4_max_rounds - 2) {
+                        std.debug.print("[ZOLT STAGE4] Round {}: challenge = {any}\n", .{ round_idx, challenge.toBytesBE()[0..16] });
+                        std.debug.print("[ZOLT STAGE4] Round {}: new batched_claim = {any}\n", .{ round_idx, batched_claim.toBytesBE()[0..16] });
+                    }
+
                     regs_current_claim = evaluateCubicAtChallengeFromEvals(regs_evals, challenge);
                     regs_prover.bindChallenge(round_idx, challenge);
 
@@ -1820,6 +1852,8 @@ pub fn ProofConverter(comptime F: type) type {
                         val_final_prover.bindChallengeWithPoly(challenge, evals);
                     }
                 }
+
+                std.debug.print("[ZOLT STAGE4] Final batched_claim = {any}\n", .{batched_claim.toBytesBE()});
 
                 const regs_claims = regs_prover.getFinalClaims();
                 const val_eval_openings = val_eval_prover.getFinalOpenings();

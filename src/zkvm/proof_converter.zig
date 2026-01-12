@@ -1342,7 +1342,7 @@ pub fn ProofConverter(comptime F: type) type {
             );
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .RamValInit, .sumcheck_id = .RamOutputCheck } },
-                F.zero(),
+                stage2_result.output_val_init_claim,
             );
 
             // Clean up stage2_result
@@ -1404,7 +1404,7 @@ pub fn ProofConverter(comptime F: type) type {
 
             // Instance 3: OutputSumcheck - 2 claims
             transcript.appendScalar(stage2_result.output_val_final_claim); // RamValFinal
-            transcript.appendScalar(F.zero()); // RamValInit (we set to 0)
+            transcript.appendScalar(stage2_result.output_val_init_claim); // RamValInit
 
             // Instance 4: InstructionLookupsClaimReduction - 3 claims
             std.debug.print("[ZOLT] cache_openings[14] (LookupOutput) full = {any}\n", .{stage2_result.instr_lookup_output_claim.toBytesBE()});
@@ -1552,6 +1552,9 @@ pub fn ProofConverter(comptime F: type) type {
             const log_registers = 7; // log2(128) = 7
             const stage4_max_rounds = log_registers + n_cycle_vars;
 
+            // NOTE: Stage 3's cache_openings (16 claims) are already appended to the transcript
+            // by stage3_prover.generateStage3Proof() - no need to append again here.
+
             // Stage 4 RegistersReadWriteChecking needs:
             // - gamma from transcript (challenge scalar)
             // - r_cycle from Stage 3 (the sumcheck challenges from RegistersClaimReduction)
@@ -1559,75 +1562,123 @@ pub fn ProofConverter(comptime F: type) type {
             const gamma_stage4 = transcript.challengeScalarFull();
             std.debug.print("[STAGE4] gamma = {any}\n", .{gamma_stage4.toBytesBE()[0..8]});
 
-            // Use Stage 4 prover if we have execution trace, otherwise fall back to zero proof
+            // Use Stage 4 prover if we have execution and memory trace data.
             stage4_block: {
-            if (config.execution_trace) |trace| {
+                const trace = config.execution_trace orelse {
+                    std.debug.print("[STAGE4] No execution trace, using zero proof\n", .{});
+                    try self.generateZeroSumcheckProof(&jolt_proof.stage4_sumcheck_proof, stage4_max_rounds, 3);
+                    try jolt_proof.opening_claims.insert(.{ .Virtual = .{ .poly = .RegistersVal, .sumcheck_id = .RegistersReadWriteChecking } }, F.zero());
+                    try jolt_proof.opening_claims.insert(.{ .Virtual = .{ .poly = .Rs1Ra, .sumcheck_id = .RegistersReadWriteChecking } }, F.zero());
+                    try jolt_proof.opening_claims.insert(.{ .Virtual = .{ .poly = .Rs2Ra, .sumcheck_id = .RegistersReadWriteChecking } }, F.zero());
+                    try jolt_proof.opening_claims.insert(.{ .Virtual = .{ .poly = .RdWa, .sumcheck_id = .RegistersReadWriteChecking } }, F.zero());
+                    try jolt_proof.opening_claims.insert(.{ .Committed = .{ .poly = .RdInc, .sumcheck_id = .RegistersReadWriteChecking } }, F.zero());
+                    try jolt_proof.opening_claims.insert(.{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamValEvaluation } }, F.zero());
+                    try jolt_proof.opening_claims.insert(.{ .Committed = .{ .poly = .RamInc, .sumcheck_id = .RamValEvaluation } }, F.zero());
+                    try jolt_proof.opening_claims.insert(.{ .Committed = .{ .poly = .RamInc, .sumcheck_id = .RamValFinalEvaluation } }, F.zero());
+                    try jolt_proof.opening_claims.insert(.{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamValFinalEvaluation } }, F.zero());
+                    break :stage4_block;
+                };
+                const memory_trace = config.memory_trace orelse {
+                    std.debug.print("[STAGE4] No memory trace, using zero proof\n", .{});
+                    try self.generateZeroSumcheckProof(&jolt_proof.stage4_sumcheck_proof, stage4_max_rounds, 3);
+                    try jolt_proof.opening_claims.insert(.{ .Virtual = .{ .poly = .RegistersVal, .sumcheck_id = .RegistersReadWriteChecking } }, F.zero());
+                    try jolt_proof.opening_claims.insert(.{ .Virtual = .{ .poly = .Rs1Ra, .sumcheck_id = .RegistersReadWriteChecking } }, F.zero());
+                    try jolt_proof.opening_claims.insert(.{ .Virtual = .{ .poly = .Rs2Ra, .sumcheck_id = .RegistersReadWriteChecking } }, F.zero());
+                    try jolt_proof.opening_claims.insert(.{ .Virtual = .{ .poly = .RdWa, .sumcheck_id = .RegistersReadWriteChecking } }, F.zero());
+                    try jolt_proof.opening_claims.insert(.{ .Committed = .{ .poly = .RdInc, .sumcheck_id = .RegistersReadWriteChecking } }, F.zero());
+                    try jolt_proof.opening_claims.insert(.{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamValEvaluation } }, F.zero());
+                    try jolt_proof.opening_claims.insert(.{ .Committed = .{ .poly = .RamInc, .sumcheck_id = .RamValEvaluation } }, F.zero());
+                    try jolt_proof.opening_claims.insert(.{ .Committed = .{ .poly = .RamInc, .sumcheck_id = .RamValFinalEvaluation } }, F.zero());
+                    try jolt_proof.opening_claims.insert(.{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamValFinalEvaluation } }, F.zero());
+                    break :stage4_block;
+                };
+
                 const Stage4ProverType = spartan_mod.stage4_prover.Stage4Prover(F);
                 const Stage3Claims = spartan_mod.stage4_prover.Stage3Claims(F);
 
-                // Pass Stage 3 claims so Stage 4 can use the correct input claim
                 const stage3_claims = Stage3Claims{
                     .rd_write_value = stage3_result.reg_rd_write_value_claim,
                     .rs1_value = stage3_result.reg_rs1_value_claim,
                     .rs2_value = stage3_result.reg_rs2_value_claim,
                 };
 
-                // Compute input_claim for RegistersReadWriteChecking (same formula as Stage 4 prover)
                 const input_claim_registers = stage3_claims.rd_write_value
                     .add(gamma_stage4.mul(stage3_claims.rs1_value))
                     .add(gamma_stage4.mul(gamma_stage4).mul(stage3_claims.rs2_value));
 
-                // ============================================================
-                // BATCHING COEFFICIENTS for Stage 4
-                // Jolt's batched sumcheck derives batching coefficients by appending each instance's
-                // input_claim to the transcript and getting a challenge.
-                // Stage 4 has 3 instances:
-                //   0: RegistersReadWriteChecking (our input_claim_registers)
-                //   1: RamValEvaluation (input_claim = 0 for no-RAM programs)
-                //   2: RamValFinal (input_claim = 0 for no-RAM programs)
-                // ============================================================
+                // Derive r_address and r_cycle from Stage 2 RWC sumcheck challenges (BIG_ENDIAN).
+                var r_cycle_be = try self.allocator.alloc(F, n_cycle_vars);
+                defer self.allocator.free(r_cycle_be);
+                @memset(r_cycle_be, F.zero());
 
-                // Debug: print individual claims used for input_claim
-                std.debug.print("[STAGE4 BATCH] rd_write_value = {any}\n", .{stage3_claims.rd_write_value.toBytes()[0..8]});
-                std.debug.print("[STAGE4 BATCH] rs1_value = {any}\n", .{stage3_claims.rs1_value.toBytes()[0..8]});
-                std.debug.print("[STAGE4 BATCH] rs2_value = {any}\n", .{stage3_claims.rs2_value.toBytes()[0..8]});
-                std.debug.print("[STAGE4 BATCH] gamma = {any}\n", .{gamma_stage4.toBytes()[0..8]});
+                var r_address_be = try self.allocator.alloc(F, log_ram_k);
+                defer self.allocator.free(r_address_be);
+                @memset(r_address_be, F.zero());
 
-                // Get batching coefficient r0 for RegistersReadWriteChecking
+                for (0..n_cycle_vars) |i| {
+                    if (i < stage2_result.challenges.len) {
+                        r_cycle_be[n_cycle_vars - 1 - i] = stage2_result.challenges[i];
+                    }
+                }
+                for (0..log_ram_k) |i| {
+                    const idx = n_cycle_vars + i;
+                    if (idx < stage2_result.challenges.len) {
+                        r_address_be[log_ram_k - 1 - i] = stage2_result.challenges[idx];
+                    }
+                }
+
+                // Reverse to LITTLE_ENDIAN for MLE helpers.
+                var r_cycle_le = try self.allocator.alloc(F, n_cycle_vars);
+                defer self.allocator.free(r_cycle_le);
+                for (0..n_cycle_vars) |i| {
+                    r_cycle_le[i] = r_cycle_be[n_cycle_vars - 1 - i];
+                }
+
+                var r_address_le = try self.allocator.alloc(F, log_ram_k);
+                defer self.allocator.free(r_address_le);
+                for (0..log_ram_k) |i| {
+                    r_address_le[i] = r_address_be[log_ram_k - 1 - i];
+                }
+
+                const start_address: u64 = if (config.memory_layout) |ml|
+                    ml.getLowestAddress()
+                else
+                    constants.RAM_START_ADDRESS;
+
+                var val_init_eval = F.zero();
+                if (config.initial_ram != null and config.memory_layout != null) {
+                    val_init_eval = computeInitialRamEval(config.initial_ram.?, config.memory_layout.?, r_address_be, log_ram_k);
+                }
+
+                const input_claim_val_eval = stage2_result.rwc_val_claim.sub(val_init_eval);
+                const input_claim_val_final = stage2_result.output_val_final_claim.sub(stage2_result.output_val_init_claim);
+
                 transcript.appendScalar(input_claim_registers);
-                const r0 = transcript.challengeScalarFull();
-                std.debug.print("[STAGE4 BATCH] input_claim_registers = {any}\n", .{input_claim_registers.toBytes()[0..8]});
-                std.debug.print("[STAGE4 BATCH] r0 = {any}\n", .{r0.toBytes()[0..8]});
+                transcript.appendScalar(input_claim_val_eval);
+                transcript.appendScalar(input_claim_val_final);
 
-                // Get batching coefficient r1 for RamValEvaluation (input = 0)
-                // We need to derive this to keep transcript in sync with Jolt, even though we don't use it
-                transcript.appendScalar(F.zero());
-                const r1 = transcript.challengeScalarFull();
-                std.debug.print("[STAGE4 BATCH] r1 (RamValEvaluation, input=0) = {any}\n", .{r1.toBytes()[0..8]});
+                const batch0 = transcript.challengeScalarFull();
+                const batch1 = transcript.challengeScalarFull();
+                const batch2 = transcript.challengeScalarFull();
 
-                // Get batching coefficient r2 for RamValFinal (input = 0)
-                // We need to derive this to keep transcript in sync with Jolt, even though we don't use it
-                transcript.appendScalar(F.zero());
-                const r2 = transcript.challengeScalarFull();
-                std.debug.print("[STAGE4 BATCH] r2 (RamValFinal, input=0) = {any}\n", .{r2.toBytes()[0..8]});
+                const batching_coeffs = [3]F{ batch0, batch1, batch2 };
+                const input_claims = [3]F{ input_claim_registers, input_claim_val_eval, input_claim_val_final };
 
-                // Stage 3's sumcheck binds variables in little-endian order (first challenge binds LSB).
-                // TODO: Investigate full pipeline endianness - see .agent/TODO.md for details.
-                // Simply reversing r_cycle here doesn't work because Stage 3 claims were computed
-                // with the original ordering. The fix needs to be coordinated across Stage 3 and Stage 4.
-                std.debug.print("[STAGE4] Using Stage 3 challenges directly: [0] = {any}\n", .{
-                    stage3_result.challenges[0].toBytes()[0..8],
-                });
+                // Initialize provers.
+                var stage3_r_cycle_be = try self.allocator.alloc(F, stage3_result.challenges.len);
+                defer self.allocator.free(stage3_r_cycle_be);
+                for (0..stage3_result.challenges.len) |i| {
+                    stage3_r_cycle_be[i] = stage3_result.challenges[stage3_result.challenges.len - 1 - i];
+                }
 
-                var stage4_prover = Stage4ProverType.initWithClaims(
+                var regs_prover = Stage4ProverType.initWithClaims(
                     self.allocator,
                     trace,
                     gamma_stage4,
-                    stage3_result.challenges,
+                    stage3_r_cycle_be,
                     stage3_claims,
-                    r0, // Pass batching coefficient to prover
+                    F.one(),
                 ) catch |err| {
-                    // Fall back to zero proof on init error
                     std.debug.print("[STAGE4] Prover init error: {any}, using zero proof\n", .{err});
                     try self.generateZeroSumcheckProof(&jolt_proof.stage4_sumcheck_proof, stage4_max_rounds, 3);
                     try jolt_proof.opening_claims.insert(.{ .Virtual = .{ .poly = .RegistersVal, .sumcheck_id = .RegistersReadWriteChecking } }, F.zero());
@@ -1635,102 +1686,247 @@ pub fn ProofConverter(comptime F: type) type {
                     try jolt_proof.opening_claims.insert(.{ .Virtual = .{ .poly = .Rs2Ra, .sumcheck_id = .RegistersReadWriteChecking } }, F.zero());
                     try jolt_proof.opening_claims.insert(.{ .Virtual = .{ .poly = .RdWa, .sumcheck_id = .RegistersReadWriteChecking } }, F.zero());
                     try jolt_proof.opening_claims.insert(.{ .Committed = .{ .poly = .RdInc, .sumcheck_id = .RegistersReadWriteChecking } }, F.zero());
+                    try jolt_proof.opening_claims.insert(.{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamValEvaluation } }, F.zero());
+                    try jolt_proof.opening_claims.insert(.{ .Committed = .{ .poly = .RamInc, .sumcheck_id = .RamValEvaluation } }, F.zero());
+                    try jolt_proof.opening_claims.insert(.{ .Committed = .{ .poly = .RamInc, .sumcheck_id = .RamValFinalEvaluation } }, F.zero());
+                    try jolt_proof.opening_claims.insert(.{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamValFinalEvaluation } }, F.zero());
                     break :stage4_block;
                 };
-                defer stage4_prover.deinit();
+                defer regs_prover.deinit();
 
-                var stage4_result = stage4_prover.prove(transcript) catch |err| {
-                    // Fall back to zero proof on prove error
-                    std.debug.print("[STAGE4] Prover error: {any}, using zero proof\n", .{err});
-                    try self.generateZeroSumcheckProof(&jolt_proof.stage4_sumcheck_proof, stage4_max_rounds, 3);
-                    try jolt_proof.opening_claims.insert(.{ .Virtual = .{ .poly = .RegistersVal, .sumcheck_id = .RegistersReadWriteChecking } }, F.zero());
-                    try jolt_proof.opening_claims.insert(.{ .Virtual = .{ .poly = .Rs1Ra, .sumcheck_id = .RegistersReadWriteChecking } }, F.zero());
-                    try jolt_proof.opening_claims.insert(.{ .Virtual = .{ .poly = .Rs2Ra, .sumcheck_id = .RegistersReadWriteChecking } }, F.zero());
-                    try jolt_proof.opening_claims.insert(.{ .Virtual = .{ .poly = .RdWa, .sumcheck_id = .RegistersReadWriteChecking } }, F.zero());
-                    try jolt_proof.opening_claims.insert(.{ .Committed = .{ .poly = .RdInc, .sumcheck_id = .RegistersReadWriteChecking } }, F.zero());
-                    break :stage4_block;
-                };
-                defer stage4_result.deinit();
+                const trace_len = trace.steps.items.len;
+                const val_eval_params = try ram.ValEvaluationParams(F).init(
+                    self.allocator,
+                    val_init_eval,
+                    trace_len,
+                    ram_K,
+                    r_address_le,
+                    r_cycle_le,
+                );
+                var val_eval_prover = try ram.ValEvaluationProver(F).init(
+                    self.allocator,
+                    memory_trace,
+                    config.initial_ram,
+                    val_eval_params,
+                    start_address,
+                );
+                defer val_eval_prover.deinit();
 
-                // Copy round polynomials to proof (already batched by prover)
-                // The prover multiplied coefficients by r0 before appending to transcript
-                for (stage4_result.round_polys) |round_poly| {
-                    try jolt_proof.stage4_sumcheck_proof.addRoundPoly(&round_poly.coeffs);
+                var r_address_raf_le = try self.allocator.alloc(F, stage2_result.r_address_raf.len);
+                defer self.allocator.free(r_address_raf_le);
+                for (0..stage2_result.r_address_raf.len) |i| {
+                    r_address_raf_le[i] = stage2_result.r_address_raf[stage2_result.r_address_raf.len - 1 - i];
                 }
-                std.debug.print("[STAGE4 BATCH] Copied {} batched round polynomials to proof\n", .{stage4_result.round_polys.len});
 
-                // RegistersReadWriteChecking claims from actual sumcheck
+                const val_final_params = try ram.ValFinalParams(F).init(
+                    self.allocator,
+                    trace_len,
+                    r_address_raf_le,
+                );
+                var val_final_prover = try ram.ValFinalProver(F).init(
+                    self.allocator,
+                    memory_trace,
+                    config.initial_ram,
+                    val_final_params,
+                    start_address,
+                );
+                defer val_final_prover.deinit();
+
+                const val_eval_rounds = val_eval_prover.numRounds();
+                const val_final_rounds = val_final_prover.numRounds();
+                const rounds_per_instance = [3]usize{ stage4_max_rounds, val_eval_rounds, val_final_rounds };
+
+                // Initial batched claim.
+                var batched_claim = F.zero();
+                for (0..3) |i| {
+                    const scale_power = stage4_max_rounds - rounds_per_instance[i];
+                    var scaled = input_claims[i];
+                    for (0..scale_power) |_| {
+                        scaled = scaled.add(scaled);
+                    }
+                    batched_claim = batched_claim.add(scaled.mul(batching_coeffs[i]));
+                }
+
+                var regs_current_claim = input_claim_registers;
+
+                var stage4_r_sumcheck = try self.allocator.alloc(F, stage4_max_rounds);
+                defer self.allocator.free(stage4_r_sumcheck);
+
+                for (0..stage4_max_rounds) |round_idx| {
+                    const remaining_rounds = stage4_max_rounds - round_idx;
+                    var combined_evals = [4]F{ F.zero(), F.zero(), F.zero(), F.zero() };
+
+                    const regs_evals = regs_prover.computeRoundEvals(round_idx, regs_current_claim);
+                    for (0..4) |j| {
+                        combined_evals[j] = combined_evals[j].add(regs_evals[j].mul(batching_coeffs[0]));
+                    }
+
+                    var val_eval_evals_opt: ?[4]F = null;
+                    if (remaining_rounds > val_eval_rounds) {
+                        const scale_power = remaining_rounds - val_eval_rounds - 1;
+                        var scaled = input_claim_val_eval;
+                        for (0..scale_power) |_| {
+                            scaled = scaled.add(scaled);
+                        }
+                        const weighted = scaled.mul(batching_coeffs[1]);
+                        for (0..4) |j| {
+                            combined_evals[j] = combined_evals[j].add(weighted);
+                        }
+                    } else {
+                        const evals = val_eval_prover.computeRoundPolynomial();
+                        val_eval_evals_opt = evals;
+                        for (0..4) |j| {
+                            combined_evals[j] = combined_evals[j].add(evals[j].mul(batching_coeffs[1]));
+                        }
+                    }
+
+                    var val_final_evals_opt: ?[4]F = null;
+                    if (remaining_rounds > val_final_rounds) {
+                        const scale_power = remaining_rounds - val_final_rounds - 1;
+                        var scaled = input_claim_val_final;
+                        for (0..scale_power) |_| {
+                            scaled = scaled.add(scaled);
+                        }
+                        const weighted = scaled.mul(batching_coeffs[2]);
+                        for (0..4) |j| {
+                            combined_evals[j] = combined_evals[j].add(weighted);
+                        }
+                    } else {
+                        const evals = val_final_prover.computeRoundPolynomial();
+                        val_final_evals_opt = evals;
+                        for (0..4) |j| {
+                            combined_evals[j] = combined_evals[j].add(evals[j].mul(batching_coeffs[2]));
+                        }
+                    }
+
+                    const compressed = poly_mod.UniPoly(F).evalsToCompressed(combined_evals);
+                    var coeffs = [_]F{ compressed[0], compressed[1], compressed[2] };
+                    try jolt_proof.stage4_sumcheck_proof.addRoundPoly(&coeffs);
+
+                    transcript.appendMessage("UniPoly_begin");
+                    transcript.appendScalar(compressed[0]);
+                    transcript.appendScalar(compressed[1]);
+                    transcript.appendScalar(compressed[2]);
+                    transcript.appendMessage("UniPoly_end");
+
+                    const challenge = transcript.challengeScalar();
+                    stage4_r_sumcheck[round_idx] = challenge;
+                    const old_claim = batched_claim;
+                    batched_claim = evalFromHint(compressed, old_claim, challenge);
+
+                    regs_current_claim = evaluateCubicAtChallengeFromEvals(regs_evals, challenge);
+                    regs_prover.bindChallenge(round_idx, challenge);
+
+                    if (val_eval_evals_opt) |evals| {
+                        val_eval_prover.bindChallengeWithPoly(challenge, evals);
+                    }
+                    if (val_final_evals_opt) |evals| {
+                        val_final_prover.bindChallengeWithPoly(challenge, evals);
+                    }
+                }
+
+                const regs_claims = regs_prover.getFinalClaims();
+                const val_eval_openings = val_eval_prover.getFinalOpenings();
+                const val_final_openings = val_final_prover.getFinalOpenings();
+
+                const r_cycle_sumcheck_le = stage4_r_sumcheck[0..n_cycle_vars];
+                var r_cycle_sumcheck_be = try self.allocator.alloc(F, n_cycle_vars);
+                defer self.allocator.free(r_cycle_sumcheck_be);
+                for (0..n_cycle_vars) |i| {
+                    r_cycle_sumcheck_be[i] = r_cycle_sumcheck_le[n_cycle_vars - 1 - i];
+                }
+
+                // DEBUG: Compare Stage 4 r_cycle and Stage 3 r_cycle ordering (LE bytes).
+                std.debug.print("[STAGE4 ZOLT CHECK] r_cycle_sumcheck_le.len = {}\n", .{r_cycle_sumcheck_le.len});
+                for (0..r_cycle_sumcheck_le.len) |i| {
+                    const bytes = r_cycle_sumcheck_le[i].toBytes();
+                    std.debug.print("[STAGE4 ZOLT CHECK]   r_cycle_sumcheck_le[{}] = {any}\n", .{ i, bytes[0..8] });
+                }
+                std.debug.print("[STAGE4 ZOLT CHECK] r_cycle_sumcheck_be.len = {}\n", .{r_cycle_sumcheck_be.len});
+                for (0..r_cycle_sumcheck_be.len) |i| {
+                    const bytes = r_cycle_sumcheck_be[i].toBytes();
+                    std.debug.print("[STAGE4 ZOLT CHECK]   r_cycle_sumcheck_be[{}] = {any}\n", .{ i, bytes[0..8] });
+                }
+                std.debug.print("[STAGE4 ZOLT CHECK] stage3_r_cycle_be.len = {}\n", .{stage3_r_cycle_be.len});
+                for (0..stage3_r_cycle_be.len) |i| {
+                    const bytes = stage3_r_cycle_be[i].toBytes();
+                    std.debug.print("[STAGE4 ZOLT CHECK]   stage3_r_cycle_be[{}] = {any}\n", .{ i, bytes[0..8] });
+                }
+
+                const rd_write_value_claim = regs_claims.rd_wa_claim.mul(regs_claims.inc_claim.add(regs_claims.val_claim));
+                const rs1_value_claim = regs_claims.rs1_ra_claim.mul(regs_claims.val_claim);
+                const rs2_value_claim = regs_claims.rs2_ra_claim.mul(regs_claims.val_claim);
+                const combined = rd_write_value_claim.add(gamma_stage4.mul(rs1_value_claim.add(gamma_stage4.mul(rs2_value_claim))));
+                const stage3_r_cycle_le = stage3_result.challenges;
+                const eq_val_be = poly_mod.EqPolynomial(F).mle(r_cycle_sumcheck_be, stage3_r_cycle_be);
+                const eq_val_le = poly_mod.EqPolynomial(F).mle(r_cycle_sumcheck_le, stage3_r_cycle_le);
+                const eq_val_cross1 = poly_mod.EqPolynomial(F).mle(r_cycle_sumcheck_le, stage3_r_cycle_be);
+                const eq_val_cross2 = poly_mod.EqPolynomial(F).mle(r_cycle_sumcheck_be, stage3_r_cycle_le);
+                const expected_claim = eq_val_be.mul(combined);
+
+                std.debug.print("[STAGE4 ZOLT CHECK] regs_output_claim = {any}\n", .{regs_current_claim.toBytes()});
+                std.debug.print("[STAGE4 ZOLT CHECK] combined = {any}\n", .{combined.toBytes()});
+                std.debug.print("[STAGE4 ZOLT CHECK] eq_val_be = {any}\n", .{eq_val_be.toBytes()});
+                std.debug.print("[STAGE4 ZOLT CHECK] eq_val_le = {any}\n", .{eq_val_le.toBytes()});
+                std.debug.print("[STAGE4 ZOLT CHECK] eq_val_cross1 = {any}\n", .{eq_val_cross1.toBytes()});
+                std.debug.print("[STAGE4 ZOLT CHECK] eq_val_cross2 = {any}\n", .{eq_val_cross2.toBytes()});
+                std.debug.print("[STAGE4 ZOLT CHECK] expected = {any}\n", .{expected_claim.toBytes()});
+
+                // RegistersReadWriteChecking claims.
                 try jolt_proof.opening_claims.insert(
                     .{ .Virtual = .{ .poly = .RegistersVal, .sumcheck_id = .RegistersReadWriteChecking } },
-                    stage4_result.val_claim,
+                    regs_claims.val_claim,
                 );
                 try jolt_proof.opening_claims.insert(
                     .{ .Virtual = .{ .poly = .Rs1Ra, .sumcheck_id = .RegistersReadWriteChecking } },
-                    stage4_result.rs1_ra_claim,
+                    regs_claims.rs1_ra_claim,
                 );
                 try jolt_proof.opening_claims.insert(
                     .{ .Virtual = .{ .poly = .Rs2Ra, .sumcheck_id = .RegistersReadWriteChecking } },
-                    stage4_result.rs2_ra_claim,
+                    regs_claims.rs2_ra_claim,
                 );
                 try jolt_proof.opening_claims.insert(
                     .{ .Virtual = .{ .poly = .RdWa, .sumcheck_id = .RegistersReadWriteChecking } },
-                    stage4_result.rd_wa_claim,
+                    regs_claims.rd_wa_claim,
                 );
-                // CRITICAL: RdInc dense polynomial claim for Stage 4
                 try jolt_proof.opening_claims.insert(
                     .{ .Committed = .{ .poly = .RdInc, .sumcheck_id = .RegistersReadWriteChecking } },
-                    stage4_result.inc_claim,
+                    regs_claims.inc_claim,
                 );
-            } else {
-                // Fallback to zero proof when no trace is available
-                std.debug.print("[STAGE4] No execution trace, using zero proof\n", .{});
-                try self.generateZeroSumcheckProof(&jolt_proof.stage4_sumcheck_proof, stage4_max_rounds, 3);
 
-                // RegistersReadWriteChecking claims
+                // RamValEvaluation claims (RamRa then RamInc).
                 try jolt_proof.opening_claims.insert(
-                    .{ .Virtual = .{ .poly = .RegistersVal, .sumcheck_id = .RegistersReadWriteChecking } },
-                    F.zero(),
+                    .{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamValEvaluation } },
+                    val_eval_openings.wa_eval,
                 );
                 try jolt_proof.opening_claims.insert(
-                    .{ .Virtual = .{ .poly = .Rs1Ra, .sumcheck_id = .RegistersReadWriteChecking } },
-                    F.zero(),
+                    .{ .Committed = .{ .poly = .RamInc, .sumcheck_id = .RamValEvaluation } },
+                    val_eval_openings.inc_eval,
+                );
+
+                // RamValFinalEvaluation claims (RamInc then RamRa).
+                try jolt_proof.opening_claims.insert(
+                    .{ .Committed = .{ .poly = .RamInc, .sumcheck_id = .RamValFinalEvaluation } },
+                    val_final_openings.inc_eval,
                 );
                 try jolt_proof.opening_claims.insert(
-                    .{ .Virtual = .{ .poly = .Rs2Ra, .sumcheck_id = .RegistersReadWriteChecking } },
-                    F.zero(),
+                    .{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamValFinalEvaluation } },
+                    val_final_openings.wa_eval,
                 );
-                try jolt_proof.opening_claims.insert(
-                    .{ .Virtual = .{ .poly = .RdWa, .sumcheck_id = .RegistersReadWriteChecking } },
-                    F.zero(),
-                );
-                // CRITICAL: RdInc dense polynomial claim for Stage 4
-                try jolt_proof.opening_claims.insert(
-                    .{ .Committed = .{ .poly = .RdInc, .sumcheck_id = .RegistersReadWriteChecking } },
-                    F.zero(),
-                );
-            }
+
+                // Cache openings into transcript in Jolt order.
+                transcript.appendScalar(regs_claims.val_claim);
+                transcript.appendScalar(regs_claims.rs1_ra_claim);
+                transcript.appendScalar(regs_claims.rs2_ra_claim);
+                transcript.appendScalar(regs_claims.rd_wa_claim);
+                transcript.appendScalar(regs_claims.inc_claim);
+
+                transcript.appendScalar(val_eval_openings.wa_eval);
+                transcript.appendScalar(val_eval_openings.inc_eval);
+
+                transcript.appendScalar(val_final_openings.inc_eval);
+                transcript.appendScalar(val_final_openings.wa_eval);
             } // end stage4_block
-
-            // RamValEvaluation claims
-            try jolt_proof.opening_claims.insert(
-                .{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamValEvaluation } },
-                F.zero(),
-            );
-
-            // RamValFinalEvaluation claims
-            try jolt_proof.opening_claims.insert(
-                .{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamValFinalEvaluation } },
-                F.zero(),
-            );
-            // RamInc claim for Stage 4 (needed by RamValEvaluation and RamValFinalEvaluation)
-            try jolt_proof.opening_claims.insert(
-                .{ .Committed = .{ .poly = .RamInc, .sumcheck_id = .RamValEvaluation } },
-                F.zero(),
-            );
-            try jolt_proof.opening_claims.insert(
-                .{ .Committed = .{ .poly = .RamInc, .sumcheck_id = .RamValFinalEvaluation } },
-                F.zero(),
-            );
 
             // Stage 5: RegistersValEvaluation, RamRaClaimReduction, RamRafEvaluation
             try self.generateZeroSumcheckProof(&jolt_proof.stage5_sumcheck_proof, n_cycle_vars, 3);
@@ -1806,6 +2002,10 @@ pub fn ProofConverter(comptime F: type) type {
             /// OutputSumcheck's Val_final polynomial evaluation at r_address_prime
             /// This is the MLE evaluation Val_final(r'), needed for opening claim
             output_val_final_claim: F, // Val_final(r') for RamValFinal opening
+            /// OutputSumcheck's Val_init polynomial evaluation at r_address_prime
+            output_val_init_claim: F, // Val_init(r') for RamValInit opening
+            /// OutputSumcheck's r_address challenges (big-endian order)
+            r_address_raf: []F,
             /// Individual RWC opening claims (ra, val, inc)
             rwc_ra_claim: F,
             rwc_val_claim: F,
@@ -1818,6 +2018,7 @@ pub fn ProofConverter(comptime F: type) type {
 
             pub fn deinit(self: *Stage2Result) void {
                 self.allocator.free(self.challenges);
+                self.allocator.free(self.r_address_raf);
             }
         };
 
@@ -1882,7 +2083,6 @@ pub fn ProofConverter(comptime F: type) type {
             // challenge_vector_optimized uses challenge_scalar_optimized which HAS 125-bit masking
             // So we use challengeScalar() here
             const r_address = try self.allocator.alloc(F, log_ram_k);
-            defer self.allocator.free(r_address);
             for (r_address) |*r| {
                 r.* = transcript.challengeScalar();
             }
@@ -2817,10 +3017,17 @@ pub fn ProofConverter(comptime F: type) type {
             std.debug.print("[ZOLT] STAGE2: output_final_claim = {any}\n", .{output_claim.toBytesBE()});
             std.debug.print("[ZOLT] STAGE2: instr_final_claim = {any}\n", .{instr_claim.toBytesBE()});
 
-            // Get Val_final(r') from the OutputSumcheck prover
-            // This is the MLE evaluation of val_final at the final opening point
-            const output_val_final = if (output_prover) |op| op.getFinalClaims().val_final else F.zero();
+            // Get Val_final(r') and Val_init(r') from the OutputSumcheck prover
+            // These are the MLE evaluations at the final opening point
+            var output_val_final = F.zero();
+            var output_val_init = F.zero();
+            if (output_prover) |op| {
+                const output_claims = op.getFinalClaims();
+                output_val_final = output_claims.val_final;
+                output_val_init = output_claims.val_init;
+            }
             std.debug.print("[ZOLT] STAGE2: output_val_final_claim (from prover) = {any}\n", .{output_val_final.toBytesBE()});
+            std.debug.print("[ZOLT] STAGE2: output_val_init_claim (from prover) = {any}\n", .{output_val_init.toBytesBE()});
 
             return Stage2Result{
                 .factor_evals = factor_evals,
@@ -2830,6 +3037,8 @@ pub fn ProofConverter(comptime F: type) type {
                 .output_final_claim = output_claim,
                 .instr_final_claim = instr_claim,
                 .output_val_final_claim = output_val_final,
+                .output_val_init_claim = output_val_init,
+                .r_address_raf = r_address,
                 .rwc_ra_claim = rwc_ra_claim,
                 .rwc_val_claim = rwc_val_claim,
                 .rwc_inc_claim = rwc_inc_claim,
@@ -3051,6 +3260,48 @@ pub fn ProofConverter(comptime F: type) type {
             const x2 = x.mul(x);
             const x3 = x2.mul(x);
             return c0.add(c1.mul(x)).add(c2.mul(x2)).add(c3.mul(x3));
+        }
+
+        /// Compute eq(r, idx) where r is in BIG_ENDIAN order (MSB first).
+        fn computeEqAtPointBigEndian(r: []const F, idx: usize) F {
+            var result = F.one();
+            const n = r.len;
+            for (0..n) |i| {
+                const bit = (idx >> @intCast(n - 1 - i)) & 1;
+                if (bit == 1) {
+                    result = result.mul(r[i]);
+                } else {
+                    result = result.mul(F.one().sub(r[i]));
+                }
+            }
+            return result;
+        }
+
+        /// Evaluate the initial RAM polynomial at r_address (BIG_ENDIAN).
+        fn computeInitialRamEval(
+            initial_ram: *const std.AutoHashMapUnmanaged(u64, u64),
+            memory_layout: *const jolt_device.MemoryLayout,
+            r_address_be: []const F,
+            log_ram_k: usize,
+        ) F {
+            var result = F.zero();
+            const start_address = memory_layout.getLowestAddress();
+            const max_idx: usize = @as(usize, 1) << @intCast(log_ram_k);
+
+            var iter = initial_ram.iterator();
+            while (iter.next()) |entry| {
+                const addr = entry.key_ptr.*;
+                if (addr < start_address) continue;
+
+                const idx = @as(usize, @intCast((addr - start_address) / 8));
+                if (idx >= max_idx) continue;
+
+                const eq_val = computeEqAtPointBigEndian(r_address_be, idx);
+                const val = F.fromU64(entry.value_ptr.*);
+                result = result.add(eq_val.mul(val));
+            }
+
+            return result;
         }
 
         /// Evaluate cubic polynomial at a challenge point from evaluations

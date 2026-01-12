@@ -98,9 +98,13 @@ pub fn IncPolynomial(comptime F: type) type {
         pub fn fromTrace(
             allocator: Allocator,
             trace: *const MemoryTrace,
+            trace_len: usize,
+            start_address: u64,
+            k: usize,
+            initial_ram: ?*const std.AutoHashMapUnmanaged(u64, u64),
         ) !Self {
-            const trace_len = trace.accesses.items.len;
-            const padded_len = if (trace_len == 0) 1 else std.math.ceilPowerOfTwo(usize, trace_len) catch trace_len;
+            const effective_len = if (trace_len == 0) 1 else trace_len;
+            const padded_len = std.math.ceilPowerOfTwo(usize, effective_len) catch effective_len;
             const num_vars = if (padded_len <= 1) 0 else std.math.log2_int_ceil(usize, padded_len);
 
             const evals = try allocator.alloc(F, padded_len);
@@ -108,27 +112,43 @@ pub fn IncPolynomial(comptime F: type) type {
                 e.* = F.zero();
             }
 
-            // Track last written value per address for computing increments
+            // Track last written value per address for computing increments.
+            // Initialize from the provided initial RAM map (if any).
             var last_value = std.AutoHashMap(u64, u64).init(allocator);
             defer last_value.deinit();
 
-            for (trace.accesses.items, 0..) |access, j| {
-                if (j >= padded_len) break;
-
-                if (access.op == .Write) {
-                    const old_val = last_value.get(access.address) orelse 0;
-                    const new_val = access.value;
-
-                    // inc = new_val - old_val (as field element)
-                    if (new_val >= old_val) {
-                        evals[j] = F.fromU64(new_val - old_val);
-                    } else {
-                        // Negative difference: -|diff|
-                        evals[j] = F.zero().sub(F.fromU64(old_val - new_val));
-                    }
-
-                    try last_value.put(access.address, new_val);
+            if (initial_ram) |ram| {
+                var iter = ram.iterator();
+                while (iter.next()) |entry| {
+                    const addr = entry.key_ptr.*;
+                    if (addr < start_address) continue;
+                    const idx = (addr - start_address) / 8;
+                    if (idx >= k) continue;
+                    try last_value.put(addr, entry.value_ptr.*);
                 }
+            }
+
+            for (trace.accesses.items) |access| {
+                if (access.op != .Write) continue;
+                if (access.address < start_address) continue;
+                const idx = (access.address - start_address) / 8;
+                if (idx >= k) continue;
+
+                const timestamp = @as(usize, @intCast(access.timestamp));
+                if (timestamp >= trace_len) continue;
+
+                const old_val = last_value.get(access.address) orelse 0;
+                const new_val = access.value;
+
+                // inc = new_val - old_val (as field element)
+                if (new_val >= old_val) {
+                    evals[timestamp] = F.fromU64(new_val - old_val);
+                } else {
+                    // Negative difference: -|diff|
+                    evals[timestamp] = F.zero().sub(F.fromU64(old_val - new_val));
+                }
+
+                try last_value.put(access.address, new_val);
             }
 
             return Self{
@@ -189,11 +209,13 @@ pub fn WaPolynomial(comptime F: type) type {
         pub fn fromTrace(
             allocator: Allocator,
             trace: *const MemoryTrace,
+            trace_len: usize,
             r_address: []const F,
             start_address: u64,
+            k: usize,
         ) !Self {
-            const trace_len = trace.accesses.items.len;
-            const padded_len = if (trace_len == 0) 1 else std.math.ceilPowerOfTwo(usize, trace_len) catch trace_len;
+            const effective_len = if (trace_len == 0) 1 else trace_len;
+            const padded_len = std.math.ceilPowerOfTwo(usize, effective_len) catch effective_len;
             const num_cycle_vars = if (padded_len <= 1) 0 else std.math.log2_int_ceil(usize, padded_len);
 
             const write_addresses = try allocator.alloc(?u64, padded_len);
@@ -201,13 +223,15 @@ pub fn WaPolynomial(comptime F: type) type {
                 w.* = null;
             }
 
-            for (trace.accesses.items, 0..) |access, j| {
-                if (j >= padded_len) break;
+            for (trace.accesses.items) |access| {
+                if (access.op != .Write) continue;
+                if (access.address < start_address) continue;
+                const remapped = (access.address - start_address) / 8;
+                if (remapped >= k) continue;
 
-                if (access.op == .Write and access.address >= start_address) {
-                    const remapped = (access.address - start_address) / 8;
-                    write_addresses[j] = remapped;
-                }
+                const timestamp = @as(usize, @intCast(access.timestamp));
+                if (timestamp >= trace_len) continue;
+                write_addresses[timestamp] = remapped;
             }
 
             const r_addr_copy = try allocator.alloc(F, r_address.len);
@@ -357,18 +381,31 @@ pub fn ValEvaluationProver(comptime F: type) type {
         pub fn init(
             allocator: Allocator,
             trace: *const MemoryTrace,
-            initial_state: []const u64,
+            initial_ram: ?*const std.AutoHashMapUnmanaged(u64, u64),
             params: ValEvaluationParams(F),
             start_address: u64,
         ) !Self {
-            _ = initial_state;
 
             // Build inc polynomial
-            var inc_poly = try IncPolynomial(F).fromTrace(allocator, trace);
+            var inc_poly = try IncPolynomial(F).fromTrace(
+                allocator,
+                trace,
+                params.trace_len,
+                start_address,
+                params.k,
+                initial_ram,
+            );
             defer inc_poly.deinit();
 
             // Build wa polynomial helper
-            var wa_poly = try WaPolynomial(F).fromTrace(allocator, trace, params.r_address, start_address);
+            var wa_poly = try WaPolynomial(F).fromTrace(
+                allocator,
+                trace,
+                params.trace_len,
+                params.r_address,
+                start_address,
+                params.k,
+            );
             defer wa_poly.deinit();
 
             // Build lt polynomial helper
@@ -412,6 +449,7 @@ pub fn ValEvaluationProver(comptime F: type) type {
             self.allocator.free(self.inc_evals);
             self.allocator.free(self.wa_evals);
             self.allocator.free(self.lt_evals);
+            self.params.deinit();
         }
 
         /// Get the initial claim for the sumcheck
@@ -550,6 +588,16 @@ pub fn ValEvaluationProver(comptime F: type) type {
             return self.inc_evals[0].mul(self.wa_evals[0]).mul(self.lt_evals[0]);
         }
 
+        pub fn getFinalOpenings(self: *const Self) struct { inc_eval: F, wa_eval: F } {
+            if (self.inc_evals.len == 0) {
+                return .{ .inc_eval = F.zero(), .wa_eval = F.zero() };
+            }
+            return .{
+                .inc_eval = self.inc_evals[0],
+                .wa_eval = self.wa_evals[0],
+            };
+        }
+
         /// Check if complete
         pub fn isComplete(self: *const Self) bool {
             return self.round >= self.numRounds();
@@ -670,7 +718,7 @@ test "inc polynomial from empty trace" {
     var trace = MemoryTrace.init(allocator);
     defer trace.deinit();
 
-    var inc = try IncPolynomial(F).fromTrace(allocator, &trace);
+    var inc = try IncPolynomial(F).fromTrace(allocator, &trace, 1, 0x80000000, 1, null);
     defer inc.deinit();
 
     // Empty trace should give zero
@@ -690,7 +738,7 @@ test "inc polynomial from trace with write" {
     // Write 100 to same address (inc = 100 - 42 = 58)
     try trace.recordWrite(0x80000000, 100, 1);
 
-    var inc = try IncPolynomial(F).fromTrace(allocator, &trace);
+    var inc = try IncPolynomial(F).fromTrace(allocator, &trace, 2, 0x80000000, 4, null);
     defer inc.deinit();
 
     // First write: inc = 42 - 0 = 42
@@ -712,7 +760,7 @@ test "wa polynomial initialization" {
     try trace.recordWrite(0x80000010, 100, 2); // Writes to slot 2
 
     const r_address = [_]F{ F.zero(), F.zero(), F.zero(), F.zero() }; // slot 0
-    var wa = try WaPolynomial(F).fromTrace(allocator, &trace, &r_address, 0x80000000);
+    var wa = try WaPolynomial(F).fromTrace(allocator, &trace, 3, &r_address, 0x80000000, 16);
     defer wa.deinit();
 
     // Cycle 0 wrote to slot 1
@@ -803,7 +851,7 @@ test "val prover sumcheck invariant: p(0) + p(1) = current_claim" {
     var prover = try ValEvaluationProver(F).init(
         allocator,
         &trace,
-        &[_]u64{},
+        null,
         params,
         0x80000000,
     );

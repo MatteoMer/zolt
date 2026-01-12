@@ -92,6 +92,59 @@ pub const ProofFormat = serialization.ProofFormat;
 pub const GZIP_MAGIC = serialization.GZIP_MAGIC;
 pub const CompressionError = serialization.CompressionError;
 
+fn writeByteToRamMap(
+    map: *std.AutoHashMapUnmanaged(u64, u64),
+    allocator: Allocator,
+    address: u64,
+    value: u8,
+) !void {
+    const word_addr = address & ~@as(u64, 7);
+    const byte_offset: u3 = @truncate(address & 7);
+
+    var word = map.get(word_addr) orelse 0;
+    const mask = @as(u64, 0xFF) << (@as(u6, byte_offset) * 8);
+    word = (word & ~mask) | (@as(u64, value) << (@as(u6, byte_offset) * 8));
+
+    try map.put(allocator, word_addr, word);
+}
+
+fn writeBytesToRamMap(
+    map: *std.AutoHashMapUnmanaged(u64, u64),
+    allocator: Allocator,
+    base_address: u64,
+    bytes: []const u8,
+) !void {
+    for (bytes, 0..) |byte, idx| {
+        try writeByteToRamMap(map, allocator, base_address + @as(u64, idx), byte);
+    }
+}
+
+fn buildInitialRamMap(
+    allocator: Allocator,
+    program_bytecode: []const u8,
+    base_address: u64,
+    device: *const jolt_device.JoltDevice,
+) !std.AutoHashMapUnmanaged(u64, u64) {
+    var map = std.AutoHashMapUnmanaged(u64, u64){};
+    errdefer map.deinit(allocator);
+
+    // Program bytes live at RAM_START_ADDRESS (or custom base for ELF).
+    try writeBytesToRamMap(&map, allocator, base_address, program_bytecode);
+
+    // Populate IO-region bytes (inputs + advice) as initial RAM state.
+    if (device.trusted_advice.len > 0) {
+        try writeBytesToRamMap(&map, allocator, device.memory_layout.trusted_advice_start, device.trusted_advice);
+    }
+    if (device.untrusted_advice.len > 0) {
+        try writeBytesToRamMap(&map, allocator, device.memory_layout.untrusted_advice_start, device.untrusted_advice);
+    }
+    if (device.inputs.len > 0) {
+        try writeBytesToRamMap(&map, allocator, device.memory_layout.input_start, device.inputs);
+    }
+
+    return map;
+}
+
 /// RISC-V register indices
 pub const Register = enum(u8) {
     // Standard RISC-V registers
@@ -596,14 +649,17 @@ pub fn JoltProver(comptime F: type) type {
                 tau[i] = transcript.challengeScalar();
             }
 
-            // For OutputSumcheck, we need initial and final RAM states
-            // Initial RAM is empty (or would contain ELF-loaded data)
-            // Final RAM is the state after execution
-            // For now, use empty initial state and emulator's final state
-            var empty_initial_ram = std.AutoHashMapUnmanaged(u64, u64){};
+            // Build initial RAM state to match Jolt (program + IO region).
+            var initial_ram = try buildInitialRamMap(
+                self.allocator,
+                program_bytecode,
+                common.constants.RAM_START_ADDRESS,
+                &device,
+            );
+            defer initial_ram.deinit(self.allocator);
 
             // Create config as named variable to ensure pointer validity
-            const init_ram_ptr: ?*const std.AutoHashMapUnmanaged(u64, u64) = &empty_initial_ram;
+            const init_ram_ptr: ?*const std.AutoHashMapUnmanaged(u64, u64) = &initial_ram;
             const final_ram_ptr: ?*const std.AutoHashMapUnmanaged(u64, u64) = &emulator.ram.memory;
             std.debug.print("[ZOLT] proveJoltCompatible: init_ram_ptr={any}, final_ram_ptr={any}\n", .{
                 init_ram_ptr != null,
@@ -871,8 +927,14 @@ pub fn JoltProver(comptime F: type) type {
             }
 
             // For OutputSumcheck, we need initial and final RAM states
-            var empty_initial_ram_dory = std.AutoHashMapUnmanaged(u64, u64){};
-            const init_ram_dory: ?*const std.AutoHashMapUnmanaged(u64, u64) = &empty_initial_ram_dory;
+            var initial_ram_dory = try buildInitialRamMap(
+                self.allocator,
+                program_bytecode,
+                base_address,
+                &device,
+            );
+            defer initial_ram_dory.deinit(self.allocator);
+            const init_ram_dory: ?*const std.AutoHashMapUnmanaged(u64, u64) = &initial_ram_dory;
             const final_ram_dory: ?*const std.AutoHashMapUnmanaged(u64, u64) = &emulator.ram.memory;
 
             // Get memory trace for RAF evaluation sumcheck
@@ -1083,8 +1145,14 @@ pub fn JoltProver(comptime F: type) type {
             }
 
             // For OutputSumcheck, we need initial and final RAM states
-            var empty_initial_ram_device = std.AutoHashMapUnmanaged(u64, u64){};
-            const init_ram_device: ?*const std.AutoHashMapUnmanaged(u64, u64) = &empty_initial_ram_device;
+            var initial_ram_device = try buildInitialRamMap(
+                self.allocator,
+                program_bytecode,
+                common.constants.RAM_START_ADDRESS,
+                &device,
+            );
+            defer initial_ram_device.deinit(self.allocator);
+            const init_ram_device: ?*const std.AutoHashMapUnmanaged(u64, u64) = &initial_ram_device;
             const final_ram_device: ?*const std.AutoHashMapUnmanaged(u64, u64) = &emulator.ram.memory;
 
             // Get memory trace for RAF evaluation sumcheck

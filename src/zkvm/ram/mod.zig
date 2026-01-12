@@ -26,6 +26,11 @@ pub const LtPolynomial = val_evaluation.LtPolynomial;
 pub const ValEvaluationProver = val_evaluation.ValEvaluationProver;
 pub const ValEvaluationVerifier = val_evaluation.ValEvaluationVerifier;
 
+// Final value evaluation checking
+pub const val_final = @import("val_final.zig");
+pub const ValFinalParams = val_final.ValFinalParams;
+pub const ValFinalProver = val_final.ValFinalProver;
+
 // Output checking (IO region verification)
 pub const output_check = @import("output_check.zig");
 pub const OutputSumcheckParams = output_check.OutputSumcheckParams;

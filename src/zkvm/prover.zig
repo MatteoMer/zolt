@@ -759,14 +759,10 @@ pub fn MultiStageProver(comptime F: type) type {
             }
 
             // Initialize value evaluation prover
-            const initial_state = try self.allocator.alloc(u64, k);
-            defer self.allocator.free(initial_state);
-            @memset(initial_state, 0);
-
             var val_prover = try ram.ValEvaluationProver(F).init(
                 self.allocator,
                 self.memory_trace,
-                initial_state,
+                null,
                 val_params,
                 self.start_address,
             );

@@ -3,101 +3,74 @@
 ## Current Progress
 
 ### Stages 1-3: PASS
-### Stage 4: IN PROGRESS - Batching Implemented, Transcript Divergence Issue
+### Stage 4: IN PROGRESS - Input Claim Value Mismatch Identified
 
 ## Stage 4 Investigation (Updated 2026-01-11)
 
-### ROOT CAUSE IDENTIFIED: Missing Batching Coefficient - IMPLEMENTED
+### NEW ROOT CAUSE: Input Claim Values Differ Beyond First 8 Bytes
 
-**Status:** Batching coefficient implemented in Stage 4 prover, but verification still fails due to transcript state divergence.
+**Status:** The batching coefficient derivation order was fixed, but the actual input_claim values being appended to the transcript differ between Zolt and Jolt.
 
-**What was done:**
-1. Added `batching_coeff` parameter to Stage 4 prover
-2. Prover now multiplies round polynomial coefficients by batching_coeff before appending to transcript
-3. Prover tracks batched claims throughout sumcheck
-
-### CURRENT ISSUE: Transcript State Divergence
-
-**Observation:**
-- Zolt's `r0` batching coefficient ≠ Jolt's `coeff_0`
-- But the `input_claim` values are IDENTICAL:
+**Latest Finding:**
+- The first 8 bytes of component claims (rd_write_value, rs1_value, rs2_value) match
+- The gamma values match (0x25d645b7560ee63c)
+- BUT the full 32-byte input_claim values differ when appended to transcript:
   ```
-  Zolt: rd_write_value = [58, 70, 2a, 66, ...] ✓
-  Jolt: rd_wv_claim    = [58, 70, 2a, 66, ...] ✓
-
-  Zolt: rs1_value = [61, 30, 4c, 9d, ...] ✓
-  Jolt: rs1_rv_claim = [61, 30, 4c, 9d, ...] ✓
-
-  Zolt: input_claim_registers = [6b, dc, 1e, a9, ...] ✓
-  Jolt: result = [6b, dc, 1e, a9, ...] ✓
-  ```
-- And the `gamma` values are also IDENTICAL (first 64 bits):
-  ```
-  Zolt: 0x25d645b7560ee63c
-  Jolt: 0x25d645b7560ee63c ✓
+  Zolt claim BE first 8:  [0x29, 0x14, 0x12, 0xa5, 0x6a, 0x0e, 0x23, 0x80]
+  Jolt claim BE first 8:  [0x00, 0x19, 0x76, 0x26, 0x3d, 0x11, 0xdb, 0x57]
   ```
 
 **Implication:**
-Since gamma and input_claim match, but r0/coeff_0 don't match, the transcript state must diverge BETWEEN:
-1. gamma derivation (after Stage 3)
-2. Batching coefficient derivation (start of Stage 4 sumcheck)
+The full 32-byte claim values (rd_write_value, rs1_value, rs2_value) likely differ beyond their first 8 bytes. Zolt's Stage 3 claims appear to be larger values (non-zero MSBs), while Jolt's claims may be smaller values (leading zeros in BE).
 
-**Possible Divergence Points:**
-1. `verifier_accumulate_advice()` in Jolt - called after gamma, before BatchedSumcheck
-   - This might append advice-related data to transcript for programs with advice
-   - For fibonacci (no advice), this should be a no-op
-
-2. RAM verifier initialization - Jolt creates RamValEvaluationSumcheckVerifier and ValFinalSumcheckVerifier
-   - These don't take transcript as parameter, so shouldn't modify it
-
-3. Different Stage 3 claim reduction handling?
-
-### Debug Values
-
-**Stage 4 Batching:**
-```
-Zolt r0 = { 117, 117, 84, 63, 252, 182, 234, 189 }
-Jolt coeff_0 = 34501835073289124989986282317166852958 (0x19f4cfcd902ed538614231d1e6cebb5e)
-```
-
-**Stage 4 Sumcheck:**
-```
-output_claim = 7776653789547607390977439245232485355949181060166366194138714198419271251763
-expected_output_claim = 3237708061191035719840323018238722061055447934202833244355840997888460025119
-```
-
-### Next Steps
-
-1. **Add transcript hash debug** - Print transcript internal state (hash) in both Zolt and Jolt right before deriving batching coefficient
-2. **Trace Stage 3 → Stage 4 transition** - Ensure all transcript messages match exactly
-3. **Check for missing transcript appends** - Verify Zolt appends all the same data as Jolt between stages
-
-### Code Changes Made
-
-**Stage 4 Prover (`stage4_prover.zig`):**
-- Added `batching_coeff: F` field to prover struct
-- Modified `initWithClaims` to accept batching coefficient
-- Prover multiplies round polynomial coefficients by batching_coeff before appending to transcript
-- Prover tracks batched claims: `current_claim = batching_coeff * unbatched_claim`
-
-**Proof Converter (`proof_converter.zig`):**
-- Derives batching coefficients r0, r1, r2 from transcript (same pattern as Jolt)
-- Passes r0 to Stage 4 prover
-
-### Previous Fixes Still Valid
-
-1. **r_cycle from Stage 3** - Correctly passed and stored in opening accumulator
-2. **Opening claims** - Correctly serialized and retrieved
-3. **eq polynomial computation** - Working correctly (params.r_cycle has correct non-zero values)
-4. **gamma values** - Match between prover and verifier
+**Investigation Areas:**
+1. Check if Zolt's MLE evaluations at Stage 3 challenges are computing correct claim values
+2. Verify the full 32-byte claim values match between Zolt and Jolt
+3. Confirm Montgomery form handling is consistent
 
 ### Previous Fixes Applied
 
-1. **Sumcheck polynomial computation** - Now uses pointwise multiplication of univariate restriction evals
-2. **Challenge ordering** - Stage 3 challenges passed correctly for claim computation
-3. **Register values** - Rs1Value/Rs2Value set to 0 for instructions that don't read them
-4. **K value** - Confirmed K=128 (32 RISC-V + 96 virtual registers)
-5. **Batching coefficient** - Stage 4 prover now applies batching coefficient
+1. **Batching coefficient derivation order** - Fixed to append ALL claims first, then derive ALL coefficients (matching Jolt's BatchedSumcheck)
+2. **Stage 3 cache_openings** - Already handled by Stage 3 prover (no duplicate appends needed)
+3. **Transcript implementation** - Confirmed to match Jolt's (Montgomery→Canonical→LE→reverse to BE)
+
+### Code Structure Understanding
+
+**Stage 3 → Stage 4 Flow in Jolt:**
+1. Stage 3 BatchedSumcheck completes
+2. cache_openings() called for each Stage 3 verifier (16 appends total)
+3. Stage 4 gamma derived (RegistersReadWriteCheckingParams::new)
+4. verifier_accumulate_advice() - no-op for Fibonacci
+5. Stage 4 BatchedSumcheck: append 3 input claims, derive 3 batching coefficients
+
+**Zolt's Current Implementation:**
+1. Stage 3 prover generates round polys and appends 16 cache_openings claims
+2. Stage 4 gamma derived
+3. Compute input_claim = rd_write_value + gamma*rs1_value + gamma²*rs2_value
+4. Append 3 claims (input_claim, 0, 0), derive 3 coefficients (r0, r1, r2)
+
+### Debug Values (Current)
+
+**Stage 4 Input Claims (after computation):**
+```
+Zolt input_claim LE first 8: [6b, dc, 1e, a9, c7, be, 21, 90]
+Jolt input_claim result:     [6b, dc, 1e, a9, c7, be, 21, 90] ✓ (match!)
+```
+
+**BUT when appended to transcript (full 32-byte BE):**
+```
+Zolt: starts with [0x29, 0x14, 0x12, ...]
+Jolt: starts with [0x00, 0x19, 0x76, ...]
+```
+
+This discrepancy suggests the FULL claim values differ even though the first 8 LE bytes match.
+
+### Next Steps
+
+1. **Print full 32-byte claim values** in both Zolt and Jolt to compare
+2. **Check if Jolt's claims are small values** (fitting in <128 bits, hence leading zeros)
+3. **Verify Zolt's Stage 3 MLE evaluations** are computing correct claim values
+4. **Compare Montgomery representations** if necessary
 
 ## Testing
 ```bash

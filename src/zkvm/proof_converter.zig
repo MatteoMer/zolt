@@ -1665,17 +1665,13 @@ pub fn ProofConverter(comptime F: type) type {
                 const input_claims = [3]F{ input_claim_registers, input_claim_val_eval, input_claim_val_final };
 
                 // Initialize provers.
-                var stage3_r_cycle_be = try self.allocator.alloc(F, stage3_result.challenges.len);
-                defer self.allocator.free(stage3_r_cycle_be);
-                for (0..stage3_result.challenges.len) |i| {
-                    stage3_r_cycle_be[i] = stage3_result.challenges[stage3_result.challenges.len - 1 - i];
-                }
-
+                // Stage 3's sumcheck binds variables in little-endian order (first challenge binds LSB).
+                // Pass challenges directly - do NOT reverse them.
                 var regs_prover = Stage4ProverType.initWithClaims(
                     self.allocator,
                     trace,
                     gamma_stage4,
-                    stage3_r_cycle_be,
+                    stage3_result.challenges,
                     stage3_claims,
                     F.one(),
                 ) catch |err| {
@@ -1847,30 +1843,21 @@ pub fn ProofConverter(comptime F: type) type {
                     const bytes = r_cycle_sumcheck_be[i].toBytes();
                     std.debug.print("[STAGE4 ZOLT CHECK]   r_cycle_sumcheck_be[{}] = {any}\n", .{ i, bytes[0..8] });
                 }
-                std.debug.print("[STAGE4 ZOLT CHECK] stage3_r_cycle_be.len = {}\n", .{stage3_r_cycle_be.len});
-                for (0..stage3_r_cycle_be.len) |i| {
-                    const bytes = stage3_r_cycle_be[i].toBytes();
-                    std.debug.print("[STAGE4 ZOLT CHECK]   stage3_r_cycle_be[{}] = {any}\n", .{ i, bytes[0..8] });
+                std.debug.print("[STAGE4 ZOLT CHECK] stage3_r_cycle (LE).len = {}\n", .{stage3_result.challenges.len});
+                for (0..stage3_result.challenges.len) |i| {
+                    const bytes = stage3_result.challenges[i].toBytes();
+                    std.debug.print("[STAGE4 ZOLT CHECK]   stage3_r_cycle[{}] = {any}\n", .{ i, bytes[0..8] });
                 }
 
                 const rd_write_value_claim = regs_claims.rd_wa_claim.mul(regs_claims.inc_claim.add(regs_claims.val_claim));
                 const rs1_value_claim = regs_claims.rs1_ra_claim.mul(regs_claims.val_claim);
                 const rs2_value_claim = regs_claims.rs2_ra_claim.mul(regs_claims.val_claim);
                 const combined = rd_write_value_claim.add(gamma_stage4.mul(rs1_value_claim.add(gamma_stage4.mul(rs2_value_claim))));
-                const stage3_r_cycle_le = stage3_result.challenges;
-                const eq_val_be = poly_mod.EqPolynomial(F).mle(r_cycle_sumcheck_be, stage3_r_cycle_be);
-                const eq_val_le = poly_mod.EqPolynomial(F).mle(r_cycle_sumcheck_le, stage3_r_cycle_le);
-                const eq_val_cross1 = poly_mod.EqPolynomial(F).mle(r_cycle_sumcheck_le, stage3_r_cycle_be);
-                const eq_val_cross2 = poly_mod.EqPolynomial(F).mle(r_cycle_sumcheck_be, stage3_r_cycle_le);
-                const expected_claim = eq_val_be.mul(combined);
+                const eq_val_le = poly_mod.EqPolynomial(F).mle(r_cycle_sumcheck_le, stage3_result.challenges);
 
                 std.debug.print("[STAGE4 ZOLT CHECK] regs_output_claim = {any}\n", .{regs_current_claim.toBytes()});
                 std.debug.print("[STAGE4 ZOLT CHECK] combined = {any}\n", .{combined.toBytes()});
-                std.debug.print("[STAGE4 ZOLT CHECK] eq_val_be = {any}\n", .{eq_val_be.toBytes()});
                 std.debug.print("[STAGE4 ZOLT CHECK] eq_val_le = {any}\n", .{eq_val_le.toBytes()});
-                std.debug.print("[STAGE4 ZOLT CHECK] eq_val_cross1 = {any}\n", .{eq_val_cross1.toBytes()});
-                std.debug.print("[STAGE4 ZOLT CHECK] eq_val_cross2 = {any}\n", .{eq_val_cross2.toBytes()});
-                std.debug.print("[STAGE4 ZOLT CHECK] expected = {any}\n", .{expected_claim.toBytes()});
 
                 // RegistersReadWriteChecking claims.
                 try jolt_proof.opening_claims.insert(

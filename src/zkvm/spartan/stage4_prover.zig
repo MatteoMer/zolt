@@ -790,30 +790,25 @@ pub fn Stage4Prover(comptime F: type) type {
 }
 
 /// Compute eq polynomial evaluations: eq(r, i) for i in [0, 2^n)
+/// Uses little-endian ordering: r[0] binds the LSB of index i
 fn computeEqEvals(comptime F: type, output: []F, r: []const F) !void {
     const n = r.len;
     const size = @as(usize, 1) << @intCast(n);
 
     if (output.len < size) return error.OutputTooSmall;
 
-    // Big-endian table construction (matches Jolt's EqPolynomial::evals).
+    // Initialize
     output[0] = F.one();
 
-    var current_size: usize = 1;
-    for (r) |r_i| {
-        current_size *= 2;
+    for (r, 0..) |r_i, i| {
+        const half = @as(usize, 1) << @intCast(i);
+        const one_minus_r_i = F.one().sub(r_i);
 
-        var i = current_size - 1; // start at highest odd index
-        while (i >= 1) {
-            const scalar = output[i / 2];
-            output[i] = scalar.mul(r_i);
-            output[i - 1] = scalar.sub(output[i]);
-
-            if (i >= 2) {
-                i -= 2;
-            } else {
-                break;
-            }
+        var j = half;
+        while (j > 0) {
+            j -= 1;
+            output[j + half] = output[j].mul(r_i);
+            output[j] = output[j].mul(one_minus_r_i);
         }
     }
 }

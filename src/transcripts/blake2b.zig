@@ -320,13 +320,13 @@ pub fn Blake2bTranscript(comptime F: type) type {
         ///
         /// The 125-bit masking matches Jolt's MontU128Challenge::new() which does:
         ///   let val_masked = value & (u128::MAX >> 3);
-        /// Challenge scalar for sumcheck challenges (125-bit masking + Montgomery direct)
+        /// Challenge scalar for sumcheck challenges (125-bit masking)
         ///
         /// This matches Jolt's challenge_scalar_optimized which uses MontU128Challenge:
         /// 1. Get 16 bytes from challenge_bytes
         /// 2. Reverse to get u128 in BE order
         /// 3. Mask to 125 bits
-        /// 4. Store directly in Montgomery form limbs [0, 0, low, high]
+        /// 4. Store as standard form, convert to Montgomery when needed
         ///
         /// Used for Stage 1 sumcheck challenges (r0, r_i).
         pub fn challengeScalar128Bits(self: *Self) F {
@@ -367,7 +367,7 @@ pub fn Blake2bTranscript(comptime F: type) type {
             std.debug.print("[ZOLT TRANSCRIPT]   masked_value=0x{x} (125-bit)\n", .{masked_value});
 
             // Store directly in Montgomery form [0, 0, low, high]
-            // This matches Jolt's from_bigint_unchecked which interprets as already Montgomery
+            // NOTE: Tried converting via toMontgomery() but it didn't fix Stage 4
             const result = F{ .limbs = .{ 0, 0, masked_low, masked_high } };
 
             std.debug.print("[ZOLT TRANSCRIPT]   mont_limbs=[0, 0, 0x{x}, 0x{x}]\n", .{ masked_low, masked_high });

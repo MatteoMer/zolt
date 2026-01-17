@@ -1,5 +1,48 @@
 # Zolt-Jolt Cross-Verification Progress
 
+## Session 42 Summary - Sumcheck Polynomial Issue (2026-01-17)
+
+### New Findings
+
+#### Opening Claims ARE Being Computed
+The opening claims ARE using actual polynomial evaluations (not zeros):
+- Zolt's `r1cs_input_evals[0]` (LeftInstructionInput) computes to ~20050671788...
+- This matches Jolt's expected value
+- 36 R1CS input claims are appended to transcript in correct order
+- The `addSpartanOuterOpeningClaimsWithEvaluations` function is being called
+
+#### The Real Issue: Sumcheck Polynomial Coefficients
+The sumcheck verification failure is NOT due to opening claims, but the **sumcheck proof polynomials**:
+- `output_claim` (from proof): 10634556229438437044377436930505224242122955378672273598842115985622605632100
+- `expected_output_claim` (from evaluations): 17179895292250284685319038554266025066782411088335892517994655937988141579529
+
+These values should match. The verifier computes `expected_output_claim` from:
+1. R1CS input evaluations (opening claims) - CORRECT
+2. R1CS constraint matrix evaluations
+3. Tau/challenge parameters
+
+The `output_claim` comes from evaluating the proof's polynomial at challenges. The mismatch means:
+1. The sumcheck proof polynomials are incorrectly generated
+2. OR the challenges used during proving differ from verification
+3. OR the Az*Bz computation is wrong
+
+### Root Cause Hypothesis
+
+Looking at `generateStreamingOuterSumcheckProofWithTranscript`:
+- Creates round polynomials for outer Spartan sumcheck
+- Each round polynomial encodes sum over boolean hypercube
+- Verifier checks: sum(poly(0), poly(1)) == prev_claim
+
+If proof polynomials don't match expected structure, verification fails.
+
+### Next Steps
+
+1. **Compare sumcheck challenges**: Verify r0, r1, ... match between Zolt prover and Jolt verifier
+2. **Debug Az*Bz evaluation**: Ensure R1CS constraint evaluation matches Jolt
+3. **Verify polynomial coefficients**: Compare proof coefficients with expected values
+
+---
+
 ## Session 41 Summary - Montgomery Fix & Serialization (2026-01-17)
 
 ### Major Accomplishments
@@ -16,38 +59,14 @@
    - Issue: Proof was missing the claims count header
    - Result: Jolt can now deserialize Zolt proofs successfully
 
-### Current Blocker: Commitment Mismatch
-
-Cross-verification fails at Stage 1 because:
-- Zolt and Jolt produce **different Dory commitments** for the polynomials
-- Commitments are appended to the Fiat-Shamir transcript
-- Different commitments → different transcript states → different challenges
-- Different challenges → sumcheck verification fails
-
-**Error:**
-```
-output_claim:          14184556905709553188252266513419299337140543956476510328335642523536328101946
-expected_output_claim: 4850043052968955019670601823786826972287752356873852008418437649167667199602
-```
-
-### Next Steps to Complete Cross-Verification
-
-For full cross-verification to work, Zolt needs to:
-1. **Option A**: Implement Dory commitment scheme that produces identical GT elements
-   - Multi-scalar multiplication with G1/G2 points from SRS
-   - Multi-pairing computation to produce GT commitment
-2. **Option B**: Use shared commitment data
-   - Have Jolt export commitments, Zolt reuses them
-   - Only proves sumcheck execution matches, not commitment computation
-
-### Stage Status After Fixes
+### Stage Status
 
 | Stage | Internal (Zolt) | Cross-verify (Jolt) | Notes |
 |-------|-----------------|---------------------|-------|
-| 1 | ✅ PASS | ❌ Commit mismatch | Transcript diverges from commitments |
+| 1 | ✅ PASS | ❌ Sumcheck mismatch | Polynomial coefficients wrong |
 | 2 | ✅ PASS | - | - |
 | 3 | ✅ PASS | - | - |
-| 4 | ✅ PASS | - | Montgomery fix applied |
+| 4 | ✅ PASS | Montgomery fix applied |
 | 5 | ✅ PASS | - | - |
 | 6 | ✅ PASS | - | - |
 
@@ -99,3 +118,4 @@ but interprets them as a BigInt that gets converted to Montgomery via from_bigin
 - Jolt BatchedSumcheck verify: `jolt-core/src/subprotocols/sumcheck.rs:180`
 - Zolt Blake2b transcript: `src/transcripts/blake2b.zig`
 - Zolt Stage 4 proof: `src/zkvm/proof_converter.zig` line ~1700
+- Zolt sumcheck generation: `src/zkvm/proof_converter.zig:generateStreamingOuterSumcheckProofWithTranscript`

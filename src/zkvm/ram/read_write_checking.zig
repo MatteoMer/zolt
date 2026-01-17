@@ -281,53 +281,73 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
         }
 
         fn computePhase1Polynomial(self: *Self, gamma: F) [4]F {
-            // Phase 1: Binding cycle variables
-            // For round r, we partition entries by bit r of their cycle index
-            // s(0) = sum over entries where bit r = 0
-            // s(1) = sum over entries where bit r = 1
+            // Phase 1: Using Gruen's optimization matching Jolt
             //
-            // The eq polynomial contribution is eq_evals[effective_cycle] which has been
-            // folded to reflect bound variables. Similarly, inc[effective_cycle].
+            // The polynomial has the form s(X) = l(X) * q(X) where:
+            // - l(X) is the linear eq factor for the current variable
+            // - q(X) is quadratic: q(X) = c + d*X + e*X²
+            //
+            // We compute:
+            // - q_constant = q(0) = sum over entries of E_prefix * ra * (val + γ*(val + inc_at_even))
+            // - q_quadratic = q(∞) = sum over entries of E_prefix * ra * γ * inc_slope
+            //
+            // Then use computeCubicRoundPoly to get [s(0), s(1), s(2), s(3)]
 
-            var s0: F = F.zero();
-            var s1: F = F.zero();
+            var gruen_eq = &self.gruen_eq.?;
 
-            const half_size = self.eq_size / 2;
+            // Get E_out and E_in tables for the current window
+            const tables = gruen_eq.getWindowEqTables(gruen_eq.current_index, 1);
+            const E_out = tables.E_out;
+            const E_in = tables.E_in;
+            const head_in_bits = tables.head_in_bits;
+
+            var q_constant: F = F.zero();
+            var q_quadratic: F = F.zero();
 
             for (self.entries.items) |entry| {
-                // For LowToHigh binding, round r binds bit r (from LSB)
-                // After r rounds, effective_cycle = entry.cycle >> r = entry.cycle % eq_size
-
                 const effective_cycle = entry.cycle % self.eq_size;
-                const in_lower_half = effective_cycle < half_size;
+                const row_pair_idx = effective_cycle / 2; // Group entries by pairs
 
-                // Get eq contribution from the folded eq_evals
-                const eq_j = self.eq_evals[effective_cycle];
+                // Compute E_out[x_out] * E_in[x_in] for this entry's prefix
+                // x_out = row_pair_idx >> head_in_bits
+                // x_in = row_pair_idx & ((1 << head_in_bits) - 1)
+                const x_out = row_pair_idx >> @intCast(head_in_bits);
+                const x_in_mask = (@as(usize, 1) << @intCast(head_in_bits)) - 1;
+                const x_in = row_pair_idx & x_in_mask;
 
-                // Get inc contribution from the folded inc polynomial
-                // Note: inc has also been folded to size eq_size
-                const inc_term = self.inc[effective_cycle];
+                const E_out_val = if (x_out < E_out.len) E_out[x_out] else F.one();
+                const E_in_val = if (x_in < E_in.len) E_in[x_in] else F.one();
+                const E_prefix = E_out_val.mul(E_in_val);
 
-                // Compute contribution: eq * ra * (val + γ*(val + inc))
+                // Get inc values for the even and odd entries of this row pair
+                const even_idx = row_pair_idx * 2;
+                const odd_idx = even_idx + 1;
+
+                const inc_even = if (even_idx < self.inc.len) self.inc[even_idx] else F.zero();
+                const inc_odd = if (odd_idx < self.inc.len) self.inc[odd_idx] else F.zero();
+                const inc_slope = inc_odd.sub(inc_even);
+
+                // Contribution to q(0): E_prefix * ra * (val + γ*(val + inc_even))
                 const val_term = entry.val_coeff;
-                const inner = val_term.add(gamma.mul(val_term.add(inc_term)));
-                const contribution = eq_j.mul(entry.ra_coeff).mul(inner);
+                const inner_at_0 = val_term.add(gamma.mul(val_term.add(inc_even)));
+                const contrib_constant = E_prefix.mul(entry.ra_coeff).mul(inner_at_0);
+                q_constant = q_constant.add(contrib_constant);
 
-                if (in_lower_half) {
-                    s0 = s0.add(contribution);
-                } else {
-                    s1 = s1.add(contribution);
-                }
+                // Contribution to q(∞): E_prefix * ra * γ * inc_slope
+                // This is the coefficient of X² in the final polynomial
+                const contrib_quadratic = E_prefix.mul(entry.ra_coeff).mul(gamma).mul(inc_slope);
+                q_quadratic = q_quadratic.add(contrib_quadratic);
             }
 
-            // For RWC Phase 1, the round polynomial is LINEAR in X
-            // s(X) = s(0) + (s(1) - s(0)) * X
-            // s(2) = s(0) + 2*(s(1) - s(0)) = 2*s(1) - s(0)
-            // s(3) = s(0) + 3*(s(1) - s(0)) = 3*s(1) - 2*s(0)
-            const s2 = s1.add(s1).sub(s0);
-            const s3 = s1.mul(F.fromU64(3)).sub(s0.add(s0));
+            // Use Gruen's formula to compute s(X) = l(X) * q(X)
+            // where l(X) is the current linear eq factor
+            const result = gruen_eq.computeCubicRoundPoly(q_constant, q_quadratic, self.current_claim);
 
-            return [4]F{ s0, s1, s2, s3 };
+            std.debug.print("[RWC PHASE1] round={}, q_constant={any}\n", .{ self.round, q_constant.toBytesBE()[0..8] });
+            std.debug.print("[RWC PHASE1] q_quadratic={any}, current_claim={any}\n", .{ q_quadratic.toBytesBE()[0..8], self.current_claim.toBytesBE()[0..8] });
+            std.debug.print("[RWC PHASE1] result: s0={any}, s1={any}\n", .{ result[0].toBytesBE()[0..8], result[1].toBytesBE()[0..8] });
+
+            return result;
         }
 
         fn computePhase2Polynomial(self: *Self, gamma: F) [4]F {
@@ -411,6 +431,11 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 }
 
                 self.eq_size = half;
+
+                // Bind the Gruen eq polynomial to update current_scalar and E tables
+                if (self.gruen_eq) |*geq| {
+                    geq.bind(challenge);
+                }
             }
 
             self.round += 1;

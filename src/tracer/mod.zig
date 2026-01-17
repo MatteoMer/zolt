@@ -311,9 +311,10 @@ pub const Emulator = struct {
             const running = self.step() catch |err| switch (err) {
                 error.Ecall => {
                     std.debug.print("[TRACE] Terminated via ECALL at cycle {d}\n", .{self.state.cycle});
-                    // Record termination write to RAM trace (matching Jolt's behavior)
-                    // Jolt programs write 1 to termination address via SDK; we do it synthetically
-                    try self.recordTerminationWrite();
+                    // NOTE: In Jolt, the termination bit is set directly in val_final during
+                    // OutputSumcheck, NOT in the execution/memory trace. The RWC sumcheck
+                    // only includes actual LOAD/STORE instructions from the trace.
+                    // We do NOT record a synthetic termination write here.
                     return; // Normal termination
                 },
                 else => return err,
@@ -326,23 +327,18 @@ pub const Emulator = struct {
                     const last_step = self.trace.steps.items[self.trace.steps.items.len - 1];
                     std.debug.print("[TRACE] Last instruction: 0x{x:0>8} at PC 0x{x}\n", .{ last_step.instruction, last_step.pc });
                 }
-                // Record termination write to RAM trace (matching Jolt's behavior)
-                try self.recordTerminationWrite();
+                // NOTE: In Jolt, the termination bit is set directly in val_final during
+                // OutputSumcheck, NOT in the execution/memory trace. The RWC sumcheck
+                // only includes actual LOAD/STORE instructions from the trace.
+                // We do NOT record a synthetic termination write here.
                 return;
             }
         }
     }
 
-    /// Record a synthetic termination write to the RAM trace.
-    /// This ensures val_final - val_init at termination address equals the trace sum Σ inc * wa.
-    /// In Jolt, guest programs write to termination address via SDK; in Zolt, we do it synthetically.
-    fn recordTerminationWrite(self: *Emulator) !void {
-        const termination_addr = self.device.memory_layout.termination;
-        std.debug.print("[TRACE] Recording synthetic termination write to 0x{x:0>16} at cycle {d}\n", .{ termination_addr, self.state.cycle });
-        // Record a write of value 1 to termination address
-        // This creates inc=1, wa=eq(r_address, termination_index) in the ValFinalSumcheck
-        try self.ram.trace.recordWrite(termination_addr, 1, self.state.cycle);
-    }
+    // NOTE: recordTerminationWrite was removed. In Jolt, the termination bit
+    // is set directly in val_final during OutputSumcheck. It is NOT part of
+    // the execution/memory trace, so RWC sumcheck doesn't include it.
 
     /// Fetch instruction from memory, handling compressed instructions
     /// Returns the 32-bit instruction (expanded if compressed) and updates PC accordingly

@@ -1702,7 +1702,7 @@ pub fn ProofConverter(comptime F: type) type {
                     gamma_stage4,
                     stage3_r_cycle_le,
                     stage3_claims,
-                    F.one(),
+                    batch0, // Use the correct batching coefficient from transcript
                 ) catch |err| {
                     std.debug.print("[STAGE4] Prover init error: {any}, using zero proof\n", .{err});
                     try self.generateZeroSumcheckProof(&jolt_proof.stage4_sumcheck_proof, stage4_max_rounds, 3);
@@ -1941,6 +1941,19 @@ pub fn ProofConverter(comptime F: type) type {
                 std.debug.print("[STAGE4 ZOLT CHECK] regs_output_claim = {any}\n", .{regs_current_claim.toBytes()});
                 std.debug.print("[STAGE4 ZOLT CHECK] combined = {any}\n", .{combined.toBytes()});
                 std.debug.print("[STAGE4 ZOLT CHECK] eq_val_le = {any}\n", .{eq_val_le.toBytes()});
+
+                // Print claims that will be stored (for comparison with Jolt's debug output)
+                std.debug.print("[ZOLT STAGE4 CLAIMS] val_claim bytes = {any}\n", .{regs_claims.val_claim.toBytes()});
+                std.debug.print("[ZOLT STAGE4 CLAIMS] rs1_ra_claim bytes = {any}\n", .{regs_claims.rs1_ra_claim.toBytes()});
+                std.debug.print("[ZOLT STAGE4 CLAIMS] rs2_ra_claim bytes = {any}\n", .{regs_claims.rs2_ra_claim.toBytes()});
+                std.debug.print("[ZOLT STAGE4 CLAIMS] rd_wa_claim bytes = {any}\n", .{regs_claims.rd_wa_claim.toBytes()});
+                std.debug.print("[ZOLT STAGE4 CLAIMS] inc_claim bytes = {any}\n", .{regs_claims.inc_claim.toBytes()});
+
+                // Print computed values for comparison with Jolt
+                std.debug.print("[ZOLT STAGE4 CLAIMS] rd_write_value_claim (rd_wa*(inc+val)) bytes = {any}\n", .{rd_write_value_claim.toBytes()});
+                std.debug.print("[ZOLT STAGE4 CLAIMS] rs1_value_claim (rs1_ra*val) bytes = {any}\n", .{rs1_value_claim.toBytes()});
+                std.debug.print("[ZOLT STAGE4 CLAIMS] rs2_value_claim (rs2_ra*val) bytes = {any}\n", .{rs2_value_claim.toBytes()});
+                std.debug.print("[ZOLT STAGE4 CLAIMS] expected_output = eq * combined = {any}\n", .{eq_val_le.mul(combined).toBytes()});
 
                 // RegistersReadWriteChecking claims.
                 try jolt_proof.opening_claims.insert(

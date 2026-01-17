@@ -1,5 +1,61 @@
 # Zolt-Jolt Cross-Verification Progress
 
+## Session 36 Summary - Stage 4 Verification Failure Analysis (2026-01-17)
+
+### Current Status
+- **Stage 1: PASSES** ✓
+- **Stage 2: PASSES** ✓
+- **Stage 3: PASSES** ✓
+- **Stage 4: FAILS** - output_claim ≠ expected_output_claim
+
+### Stage 4 Failure Analysis
+
+The Stage 4 sumcheck (RegistersReadWriteChecking) verification fails because:
+- output_claim = 17388657012463501289028458753211654741331023344380174987495804360843521599428
+- expected_output_claim = 13087017565662880187225932472750198262574881263786061171449896105154105298773
+
+### Expected Output Claim Formula (from Jolt)
+```rust
+let (_, r_cycle) = r.split_at(LOG_K);  // r_cycle from Stage 4 challenges (BE)
+let eq_val = EqPolynomial::mle_endian(&r_cycle, &self.params.r_cycle);  // eq(stage4, stage3)
+
+// Claims from accumulator (from Zolt's proof)
+let rd_write_value_claim = rd_wa_claim * (inc_claim + val_claim);
+let rs1_value_claim = rs1_ra_claim * val_claim;
+let rs2_value_claim = rs2_ra_claim * val_claim;
+
+let combined = rd_write_value_claim + gamma * (rs1_value_claim + gamma * rs2_value_claim);
+expected = eq_val * combined
+```
+
+### Key Observations
+
+1. **r_cycle values differ (correctly)**:
+   - r_cycle (from sumcheck) = Stage 4's normalized cycle challenges
+   - params.r_cycle (stored) = Stage 3's normalized opening point
+   These SHOULD be different - they're from different stages.
+
+2. **eq polynomial computation**:
+   - Jolt: `mle_endian(r4_be, r3_be)` pairs positionally
+   - Zolt: `mle(r4_le, r3_le)` also pairs positionally
+   - Since eq(a_be, b_be) = eq(a_le, b_le), these should match!
+
+3. **Variable binding order matches**:
+   - Jolt Phase 1: log_T cycle rounds (LowToHigh)
+   - Jolt Phase 2: LOG_K address rounds (LowToHigh)
+   - Zolt: Same order (cycle first, then address)
+
+4. **Possible root cause**:
+   - The claims (val_claim, rd_wa_claim, etc.) stored by Zolt might not match what Jolt expects
+   - The polynomial structure might differ from Jolt's expectation
+
+### Next Steps
+1. Add debug to compare Zolt's final claims with Jolt's received claims
+2. Verify the eq_val matches between Zolt and Jolt
+3. Check if the polynomial contribution formula matches
+
+---
+
 ## Session 35 Summary - Stage 1 Fix + Prefix-Suffix Convention (2026-01-10)
 
 ### Stage 1 Fix (SUCCESS)

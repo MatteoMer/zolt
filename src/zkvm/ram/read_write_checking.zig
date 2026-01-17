@@ -281,17 +281,19 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
         }
 
         fn computePhase1Polynomial(self: *Self, gamma: F) [4]F {
-            // Phase 1: Using Gruen's optimization matching Jolt
+            // Phase 1: Using Gruen's optimization matching Jolt exactly
             //
             // The polynomial has the form s(X) = l(X) * q(X) where:
             // - l(X) is the linear eq factor for the current variable
             // - q(X) is quadratic: q(X) = c + d*X + e*X²
             //
-            // We compute:
-            // - q_constant = q(0) = sum over entries of E_prefix * ra * (val + γ*(val + inc_at_even))
-            // - q_quadratic = q(∞) = sum over entries of E_prefix * ra * γ * inc_slope
+            // Jolt's formula for each (even, odd) entry pair at column k:
+            //   ra_evals = [ra_even, ra_odd - ra_even]  // [ra_0, ra_infty]
+            //   val_evals = [val_even, val_odd - val_even]  // [val_0, val_infty]
+            //   inc_evals = [inc_even, inc_odd - inc_even]  // [inc_0, inc_infty]
             //
-            // Then use computeCubicRoundPoly to get [s(0), s(1), s(2), s(3)]
+            //   q_constant += E_prefix * ra_0 * (val_0 + gamma * (inc_0 + val_0))
+            //   q_quadratic += E_prefix * ra_infty * (val_infty + gamma * (inc_infty + val_infty))
 
             var gruen_eq = &self.gruen_eq.?;
 
@@ -304,43 +306,97 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             var q_constant: F = F.zero();
             var q_quadratic: F = F.zero();
 
-            for (self.entries.items) |entry| {
+            // Group entries by row pair (rows 2j and 2j+1 for each j)
+            // For each column, we need to find entries at even and odd rows
+            var entry_idx: usize = 0;
+            while (entry_idx < self.entries.items.len) {
+                const entry = self.entries.items[entry_idx];
                 const effective_cycle = entry.cycle % self.eq_size;
-                const row_pair_idx = effective_cycle / 2; // Group entries by pairs
+                const row_pair_idx = effective_cycle / 2; // j = cycle / 2
 
-                // Compute E_out[x_out] * E_in[x_in] for this entry's prefix
-                // x_out = row_pair_idx >> head_in_bits
-                // x_in = row_pair_idx & ((1 << head_in_bits) - 1)
+                // Find even and odd entries for this column at this row pair
+                const is_even_row = effective_cycle % 2 == 0;
+
+                // Compute E_prefix = E_out[x_out] * E_in[x_in]
                 const x_out = row_pair_idx >> @intCast(head_in_bits);
                 const x_in_mask = (@as(usize, 1) << @intCast(head_in_bits)) - 1;
                 const x_in = row_pair_idx & x_in_mask;
-
                 const E_out_val = if (x_out < E_out.len) E_out[x_out] else F.one();
                 const E_in_val = if (x_in < E_in.len) E_in[x_in] else F.one();
                 const E_prefix = E_out_val.mul(E_in_val);
 
-                // Get inc values for the even and odd entries of this row pair
-                const even_idx = row_pair_idx * 2;
-                const odd_idx = even_idx + 1;
+                // Get inc values for this row pair
+                const j_prime = row_pair_idx * 2; // even row index
+                const inc_0 = if (j_prime < self.inc.len) self.inc[j_prime] else F.zero();
+                const inc_1 = if (j_prime + 1 < self.inc.len) self.inc[j_prime + 1] else F.zero();
+                const inc_infty = inc_1.sub(inc_0);
+                const inc_evals = [2]F{ inc_0, inc_infty };
 
-                const inc_even = if (even_idx < self.inc.len) self.inc[even_idx] else F.zero();
-                const inc_odd = if (odd_idx < self.inc.len) self.inc[odd_idx] else F.zero();
-                const inc_slope = inc_odd.sub(inc_even);
+                // Compute ra_evals and val_evals based on which entries exist
+                // Case 1: Only even entry exists (common case for sparse matrix)
+                // Case 2: Only odd entry exists
+                // Case 3: Both entries exist (check if next entry is in same row pair)
 
-                // Contribution to q(0): E_prefix * ra * (val + γ*(val + inc_even))
-                const val_term = entry.val_coeff;
-                const inner_at_0 = val_term.add(gamma.mul(val_term.add(inc_even)));
-                const contrib_constant = E_prefix.mul(entry.ra_coeff).mul(inner_at_0);
-                q_constant = q_constant.add(contrib_constant);
+                var ra_0: F = undefined;
+                var ra_infty: F = undefined;
+                var val_0: F = undefined;
+                var val_infty: F = undefined;
 
-                // Contribution to q(∞): E_prefix * ra * γ * inc_slope
-                // This is the coefficient of X² in the final polynomial
-                const contrib_quadratic = E_prefix.mul(entry.ra_coeff).mul(gamma).mul(inc_slope);
-                q_quadratic = q_quadratic.add(contrib_quadratic);
+                if (is_even_row) {
+                    // Entry is at even row - check if there's a matching odd entry
+                    const has_odd = blk: {
+                        if (entry_idx + 1 < self.entries.items.len) {
+                            const next = self.entries.items[entry_idx + 1];
+                            const next_effective = next.cycle % self.eq_size;
+                            const next_pair = next_effective / 2;
+                            break :blk (next_pair == row_pair_idx and next.address == entry.address and next_effective % 2 == 1);
+                        }
+                        break :blk false;
+                    };
+
+                    if (has_odd) {
+                        // Both even and odd entries exist
+                        const odd_entry = self.entries.items[entry_idx + 1];
+                        ra_0 = entry.ra_coeff;
+                        ra_infty = odd_entry.ra_coeff.sub(entry.ra_coeff);
+                        val_0 = entry.val_coeff;
+                        val_infty = odd_entry.val_coeff.sub(entry.val_coeff);
+                        entry_idx += 2; // Skip both entries
+                    } else {
+                        // Only even entry exists - odd entry is implicit
+                        // odd_val_coeff = entry.next_val (value after this access)
+                        const odd_val_coeff = F.fromU64(entry.next_val);
+                        ra_0 = entry.ra_coeff;
+                        ra_infty = F.zero().sub(entry.ra_coeff); // -ra_even
+                        val_0 = entry.val_coeff;
+                        val_infty = odd_val_coeff.sub(entry.val_coeff);
+                        entry_idx += 1;
+                    }
+                } else {
+                    // Entry is at odd row - even entry is implicit
+                    // even_val_coeff = entry.prev_val (value before this access)
+                    const even_val_coeff = F.fromU64(entry.prev_val);
+                    ra_0 = F.zero(); // No access at even row
+                    ra_infty = entry.ra_coeff;
+                    val_0 = even_val_coeff;
+                    val_infty = entry.val_coeff.sub(even_val_coeff);
+                    entry_idx += 1;
+                }
+
+                // Apply Jolt's formula:
+                // q_constant += E_prefix * ra_0 * (val_0 + gamma * (inc_0 + val_0))
+                // q_quadratic += E_prefix * ra_infty * (val_infty + gamma * (inc_infty + val_infty))
+                const inner_0 = val_0.add(gamma.mul(inc_evals[0].add(val_0)));
+                const inner_infty = val_infty.add(gamma.mul(inc_evals[1].add(val_infty)));
+
+                const contrib_0 = E_prefix.mul(ra_0).mul(inner_0);
+                const contrib_infty = E_prefix.mul(ra_infty).mul(inner_infty);
+
+                q_constant = q_constant.add(contrib_0);
+                q_quadratic = q_quadratic.add(contrib_infty);
             }
 
             // Use Gruen's formula to compute s(X) = l(X) * q(X)
-            // where l(X) is the current linear eq factor
             const result = gruen_eq.computeCubicRoundPoly(q_constant, q_quadratic, self.current_claim);
 
             std.debug.print("[RWC PHASE1] round={}, q_constant={any}\n", .{ self.round, q_constant.toBytesBE()[0..8] });

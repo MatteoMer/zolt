@@ -1,73 +1,94 @@
 # Zolt-Jolt Cross-Verification Progress
 
-## Session 37 Summary - Stage 2 RWC Debugging (2026-01-17)
+## Session 39 Summary - Phase 2 AddressMajor Implementation (2026-01-17)
 
 ### Current Status
 - **Stage 1: PASSES** ✓
-- **Stage 2: FAILS** - output_claim ≠ expected_output_claim
+- **Stage 2: FAILS** - investigating RWC expected_claim mismatch
 
-### Key Discovery: Fibonacci Has 1 Memory Operation!
-- Entry at cycle=54, addr=2049 (RAM address 0x80004008)
-- This is likely for output/termination mechanism
-- The RWC sumcheck is NOT a zero polynomial!
+### Key Changes This Session
 
-### Stage 2 Failure Details
+1. **Implemented AddressMajor ordering for Phase 2**
+   - Sort entries by (address, cycle) at start of Phase 2
+   - Group by column pairs (2k, 2k+1)
+   - Track checkpoints per column pair as entries are processed
+   - Compute [s(0), s(2)] and derive s(1) from current_claim
+
+2. **Implemented Phase 2 entry binding**
+   - `bindEntriesAddressMajor` function
+   - `bindAddressMajorPair` for (Some, Some) case
+   - `bindAddressMajorEvenOnly` for (Some, None) case
+   - `bindAddressMajorOddOnly` for (None, Some) case
+
+### Major Discovery: R1CS Witness Missing Memory Operations
+
+**ROOT CAUSE FOUND:**
+- Fibonacci program has NO actual STORE/LOAD instructions!
+- Program terminates via infinite loop detection at cycle 54
+- The only "memory write" is the synthetic termination write added to MemoryTrace
+- This synthetic write is NOT reflected in ExecutionTrace steps
+- R1CS witness is built from ExecutionTrace
+- Result: RamReadValue=0, RamWriteValue=0 for ALL cycles
+
+**Evidence from logs:**
 ```
-output_claim:          8531846635557760858493086388539389736059592909629786934607653033526197973299
-expected_output_claim: 17808130426384425926507399004264546912094784764713076233980989102782648691939
-```
-
-### Stage 2 Batched Sumcheck (5 Instances)
-1. ProductVirtualRemainder - 8 rounds, input_claim = uni_skip_claim
-2. RamRafEvaluation - 16 rounds, input_claim = 0 (RAM address at SpartanOuter = 0)
-3. RamReadWriteChecking - 24 rounds, input_claim = 0 (RamReadValue + gamma*RamWriteValue = 0)
-4. OutputSumcheck - 16 rounds, input_claim = 0
-5. InstructionLookupsClaimReduction - 8 rounds, input_claim = non-zero
-
-### RWC Instance Analysis
-The RWC has 1 entry: cycle=54, addr=2049
-
-Expected output claim formula (from Jolt):
-```rust
-eq_eval_cycle * ra_claim * (val_claim + gamma * (val_claim + inc_claim))
-```
-
-Zolt's opening claims after Stage 2:
-- ra_claim (non-zero): evaluates to eq(r_addr, 2049) * eq(r_cycle, 54)
-- val_claim (non-zero): MLE of Val at (r_addr, r_cycle)
-- inc_claim (non-zero): MLE of Inc at r_cycle
-
-### Potential Issues
-1. The round polynomials may not exactly match Jolt's formula
-2. Opening claims might be computed at wrong point
-3. eq polynomial endianness differences
-4. gamma_rwc synchronization between Zolt and Jolt
-
-### Debug Output Added
-```
-[ZOLT] STAGE2 RWC: entries.len = 1
-[ZOLT] STAGE2 RWC: entry[0]: cycle=54, addr=2049
-[ZOLT] STAGE2 RWC: ra_claim = non-zero
-[ZOLT] STAGE2 RWC: val_claim = non-zero
-[ZOLT] STAGE2 RWC: inc_claim = non-zero
+[R1CS GEN] Total steps with memory access: 0
+[ZOLT] OPENING_CLAIMS: claim[13] = { 0, 0, ... }  (RamReadValue)
+[ZOLT] OPENING_CLAIMS: claim[14] = { 0, 0, ... }  (RamWriteValue)
 ```
 
-### Root Cause Found: GruenSplitEqPolynomial Required
+### Unexpected Result: Jolt expects non-zero RWC claim
 
-Jolt's RWC prover uses the Dao-Thaler + Gruen optimization (GruenSplitEqPolynomial)
-which produces specific round polynomial coefficients. This is the same issue that
-affected Stage 3 (Shift sumcheck), which was fixed in Session 32.
+**Jolt's expected_claim for Instance 2 (RWC):**
+```
+expected_claim = 3148303805315997521479349691467259099534742698741779098822247733559209807773
+```
 
-Reference: https://eprint.iacr.org/2024/1210.pdf
+This is VERY non-zero, despite:
+- Zolt's proof having zero for RamReadValue and RamWriteValue
+- The formula being `rv_claim + gamma * wv_claim`
 
-The solution requires implementing GruenSplitEqPolynomial for Zolt's RWC prover
-to match Jolt's round polynomial coefficients exactly.
+**Possible explanations:**
+1. Jolt's fibonacci test might use a different program with actual memory ops
+2. Jolt might handle termination differently
+3. There might be a serialization mismatch in how claims are stored/read
 
-### Next Steps
-1. Implement GruenSplitEqPolynomial in Zig
-2. Update RWC prover to use the Gruen optimization
-3. Match binding order (LowToHigh)
-4. Ensure prefix eq tables match Jolt's structure
+### Investigation Path
+
+The next step is to add debug output to Jolt's verifier to trace:
+1. What values are read from the proof for RamReadValue/RamWriteValue
+2. What gamma is used
+3. How expected_claim is actually computed
+
+### Files Modified
+- `src/zkvm/ram/read_write_checking.zig`
+  - Complete rewrite of `computePhase2Polynomial`
+  - Added `computePhase2Evals`, `computePhase2EvalsEvenOnly`, `computePhase2EvalsOddOnly`
+  - Added `bindEntriesAddressMajor`
+  - Added binding helper functions
+
+---
+
+## Session 38 Summary - RWC Phase 2 Investigation (2026-01-17)
+
+### Key Finding: Phase 2 Uses AddressMajor Iteration
+
+**Jolt's Phase 2:**
+- Entries sorted by column (address), then by row (cycle)
+- Iterates: for each column pair (2k, 2k+1), merge entries by cycle
+- Uses `even_checkpoint` and `odd_checkpoint` that track state across cycles
+- Checkpoints come from val_init and are updated as entries are processed
+
+**Zolt's Phase 2 (was):**
+- Entries remained in cycle-major order
+- Iterated directly over entries
+- Used bound val_init as static checkpoints
+- Missing the cycle-by-cycle state tracking
+
+### Memory Trace vs Execution Trace
+- MemoryTrace: Tracks actual RAM accesses (cycle 54: addr=2049, write value=1)
+- ExecutionTrace: Records trace steps with optional memory_addr/memory_value
+- R1CS witness is built from ExecutionTrace, not MemoryTrace
 
 ---
 

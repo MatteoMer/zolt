@@ -1,12 +1,59 @@
 # Zolt-Jolt Cross-Verification Progress
 
-## Session 40 Summary - Stage 4 Investigation (2026-01-17)
+## Session 41 Summary - Montgomery Fix & Serialization (2026-01-17)
 
-### Current Status
-- **Stage 1: PASSES** ✓
-- **Stage 2: PASSES** ✓ (Fixed by removing synthetic termination write)
-- **Stage 3: PASSES** ✓
-- **Stage 4: FAILS** - sumcheck output_claim != expected_output_claim
+### Major Accomplishments
+
+1. **Fixed Stage 4 Montgomery Conversion** ✅
+   - Root cause: Jolt's MontU128Challenge stores [0, 0, L, H] as BigInt representation
+   - When converted to Fr: represents 2^128 * original_value (NOT the original 125-bit value)
+   - OLD Zolt behavior: directly stored [0, 0, L, H] as Montgomery limbs (WRONG)
+   - FIX: Store [0, 0, L, H] as standard form, then call toMontgomery()
+   - Result: All 6 Zolt internal verification stages now PASS
+
+2. **Fixed Proof Serialization Format** ✅
+   - Issue: Using `--jolt` flag instead of `--jolt-format`
+   - Issue: Proof was missing the claims count header
+   - Result: Jolt can now deserialize Zolt proofs successfully
+
+### Current Blocker: Commitment Mismatch
+
+Cross-verification fails at Stage 1 because:
+- Zolt and Jolt produce **different Dory commitments** for the polynomials
+- Commitments are appended to the Fiat-Shamir transcript
+- Different commitments → different transcript states → different challenges
+- Different challenges → sumcheck verification fails
+
+**Error:**
+```
+output_claim:          14184556905709553188252266513419299337140543956476510328335642523536328101946
+expected_output_claim: 4850043052968955019670601823786826972287752356873852008418437649167667199602
+```
+
+### Next Steps to Complete Cross-Verification
+
+For full cross-verification to work, Zolt needs to:
+1. **Option A**: Implement Dory commitment scheme that produces identical GT elements
+   - Multi-scalar multiplication with G1/G2 points from SRS
+   - Multi-pairing computation to produce GT commitment
+2. **Option B**: Use shared commitment data
+   - Have Jolt export commitments, Zolt reuses them
+   - Only proves sumcheck execution matches, not commitment computation
+
+### Stage Status After Fixes
+
+| Stage | Internal (Zolt) | Cross-verify (Jolt) | Notes |
+|-------|-----------------|---------------------|-------|
+| 1 | ✅ PASS | ❌ Commit mismatch | Transcript diverges from commitments |
+| 2 | ✅ PASS | - | - |
+| 3 | ✅ PASS | - | - |
+| 4 | ✅ PASS | - | Montgomery fix applied |
+| 5 | ✅ PASS | - | - |
+| 6 | ✅ PASS | - | - |
+
+---
+
+## Session 40 Summary - Stage 4 Investigation (2026-01-17)
 
 ### Stage 2 Fix
 Removed synthetic termination write from memory trace. In Jolt, the termination bit
@@ -22,59 +69,17 @@ The RWC sumcheck only includes actual LOAD/STORE instructions.
 4. **Batching coefficients**: MATCH
 5. **Polynomial coefficients in proof**: MATCH
 
-#### The Mystery
-Despite all values matching, the sumcheck verification fails:
-- output_claim = 19271728596168755243423895321875251085487803860811927729070795448153376555895
-- expected_output_claim = 5465056395000139767713092380206826725893519464559027111920075372240160609265
-
-The transcript state matches after UniPoly_end (round 438):
-- Jolt: state = [a1, 26, 18, ca, 99, 40, f2, f2]
-- Zolt: state = [a1, 26, 18, ca, 99, 40, f2, f2]
-
-But the derived challenges differ:
-- Zolt: { 28, 74, 106, 25, 220, 50, 233, 243, ... }
-- Jolt: [ac, f8, 38, db, 2a, a4, 4d, ce, ...]
-
 ### Root Cause Analysis
 
-The challenge in Zolt is stored as:
+The challenge in Zolt was stored as:
 ```zig
 result = F{ .limbs = .{ 0, 0, masked_low, masked_high } };
 ```
 
-But this is NOT proper Montgomery form. When toBytesBE() is called (which calls
-fromMontgomery()), it converts incorrectly.
+This is NOT proper Montgomery form. Jolt's MontU128Challenge stores the same bytes
+but interprets them as a BigInt that gets converted to Montgomery via from_bigint_unchecked.
 
-**Key insight from challenge derivation debug:**
-- mont_limbs = [0, 0, 0xb5ba64b08cc4cef5, 0x0cf838db2aa44dce]
-- But challenge.toBytesBE() shows { 28, 74, 106, 25, ... }
-
-The [0, 0, low, high] format is Jolt's MontU128Challenge optimization, but Zolt's
-field type expects proper Montgomery form. When Zolt multiplies by this challenge,
-it may produce wrong results.
-
-### Hypothesis
-Jolt's MontU128Challenge has special multiplication code that handles the [0, 0, low, high]
-format. Zolt's F type doesn't have this specialization, so field operations with the
-challenge produce incorrect results.
-
-### Potential Fix
-Convert the 125-bit challenge to proper Montgomery form:
-```zig
-const standard_value = F{ .limbs = .{ low, high, 0, 0 } };
-const montgomery = standard_value.toMontgomery();
-```
-
-But the code has a comment saying this was tried and didn't work - need to investigate why.
-
----
-
-## Session 39 Summary - Stage 2 Fix (2026-01-17)
-
-Found that Fibonacci has NO actual STORE/LOAD instructions. The synthetic termination
-write was causing a mismatch between R1CS claims (0) and RWC polynomial (non-zero).
-
-Fixed by removing recordTerminationWrite() calls from the tracer.
+**Fix applied in Session 41**: Convert properly using toMontgomery().
 
 ---
 

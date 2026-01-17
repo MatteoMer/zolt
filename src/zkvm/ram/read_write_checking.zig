@@ -84,6 +84,53 @@ pub fn CycleMajorEntry(comptime F: type) type {
         prev_val: u64,
         /// Next value (for tracking write increments)
         next_val: u64,
+
+        /// Bind entries at even and odd rows to create a new entry at row/2
+        /// Matches Jolt's CycleMajorMatrixEntry::bind_entries
+        pub fn bindEntries(even: ?*const Self, odd: ?*const Self, r: F) ?Self {
+            if (even != null and odd != null) {
+                // Both entries exist
+                const e = even.?.*;
+                const o = odd.?.*;
+                std.debug.assert(e.cycle % 2 == 0);
+                std.debug.assert(o.cycle % 2 == 1);
+                std.debug.assert(e.address == o.address);
+                return Self{
+                    .cycle = e.cycle / 2,
+                    .address = e.address,
+                    .ra_coeff = e.ra_coeff.add(r.mul(o.ra_coeff.sub(e.ra_coeff))),
+                    .val_coeff = e.val_coeff.add(r.mul(o.val_coeff.sub(e.val_coeff))),
+                    .prev_val = e.prev_val,
+                    .next_val = o.next_val,
+                };
+            } else if (even != null) {
+                // Only even entry exists - odd is implicit
+                const e = even.?.*;
+                const odd_val_coeff = F.fromU64(e.next_val);
+                return Self{
+                    .cycle = e.cycle / 2,
+                    .address = e.address,
+                    .ra_coeff = F.one().sub(r).mul(e.ra_coeff),
+                    .val_coeff = e.val_coeff.add(r.mul(odd_val_coeff.sub(e.val_coeff))),
+                    .prev_val = e.prev_val,
+                    .next_val = e.next_val,
+                };
+            } else if (odd != null) {
+                // Only odd entry exists - even is implicit
+                const o = odd.?.*;
+                const even_val_coeff = F.fromU64(o.prev_val);
+                return Self{
+                    .cycle = o.cycle / 2,
+                    .address = o.address,
+                    .ra_coeff = r.mul(o.ra_coeff),
+                    .val_coeff = even_val_coeff.add(r.mul(o.val_coeff.sub(even_val_coeff))),
+                    .prev_val = o.prev_val,
+                    .next_val = o.next_val,
+                };
+            } else {
+                return null;
+            }
+        }
     };
 }
 
@@ -190,12 +237,17 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 if (access.op == .Write) {
                     // inc = new_value - prev_value (can be negative, use field arithmetic)
                     const new_val = access.value;
-                    if (new_val >= prev_val) {
-                        inc[access.timestamp] = F.fromU64(new_val - prev_val);
-                    } else {
-                        // new_val < prev_val: inc = -(prev_val - new_val) = p - (prev_val - new_val)
-                        inc[access.timestamp] = F.zero().sub(F.fromU64(prev_val - new_val));
-                    }
+                    const inc_val = if (new_val >= prev_val)
+                        F.fromU64(new_val - prev_val)
+                    else
+                        F.zero().sub(F.fromU64(prev_val - new_val));
+                    inc[access.timestamp] = inc_val;
+                    std.debug.print("[RWC INC SET] cycle={}, new_val={}, prev_val={}, inc={any}\n", .{
+                        access.timestamp,
+                        new_val,
+                        prev_val,
+                        inc_val.toBytesBE(),
+                    });
                     // Update current value for this address
                     try current_val_per_addr.put(allocator, addr_idx, new_val);
                 }
@@ -215,6 +267,16 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                     .val_coeff = val_coeff,
                     .prev_val = prev_val,
                     .next_val = access.value,
+                });
+
+                std.debug.print("[RWC INIT] entry: cycle={}, addr={}, op={}, prev_val={}, next_val={}, inc[{}]={any}\n", .{
+                    access.timestamp,
+                    addr_idx,
+                    @intFromEnum(access.op),
+                    prev_val,
+                    access.value,
+                    access.timestamp,
+                    if (access.timestamp < T) inc[access.timestamp].toBytesBE()[0..8] else &[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0 },
                 });
             }
 
@@ -239,6 +301,14 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             // Initialize GruenSplitEqPolynomial for Phase 1 optimization
             // This matches Jolt's structure for computing round polynomials
             const gruen_eq = try GruenSplitEq.init(allocator, params.r_cycle);
+
+            std.debug.print("[RWC INIT] tau.len = {}, current_index = {}\n", .{ params.r_cycle.len, gruen_eq.current_index });
+            if (params.r_cycle.len > 0) {
+                std.debug.print("[RWC INIT] tau[0] = {any}\n", .{params.r_cycle[0].toBytesBE()[0..8]});
+                if (params.r_cycle.len > 1) {
+                    std.debug.print("[RWC INIT] tau[last] = {any}\n", .{params.r_cycle[params.r_cycle.len - 1].toBytesBE()[0..8]});
+                }
+            }
 
             return Self{
                 .params = params,
@@ -307,11 +377,12 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             var q_quadratic: F = F.zero();
 
             // Group entries by row pair (rows 2j and 2j+1 for each j)
-            // For each column, we need to find entries at even and odd rows
+            // Entries are bound after each round, so entry.cycle is the current row
             var entry_idx: usize = 0;
             while (entry_idx < self.entries.items.len) {
                 const entry = self.entries.items[entry_idx];
-                const effective_cycle = entry.cycle % self.eq_size;
+                // Since entries are bound, entry.cycle is the current effective cycle
+                const effective_cycle = entry.cycle;
                 const row_pair_idx = effective_cycle / 2; // j = cycle / 2
 
                 // Find even and odd entries for this column at this row pair
@@ -347,7 +418,8 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                     const has_odd = blk: {
                         if (entry_idx + 1 < self.entries.items.len) {
                             const next = self.entries.items[entry_idx + 1];
-                            const next_effective = next.cycle % self.eq_size;
+                            // Entries are bound, so next.cycle is the current row
+                            const next_effective = next.cycle;
                             const next_pair = next_effective / 2;
                             break :blk (next_pair == row_pair_idx and next.address == entry.address and next_effective % 2 == 1);
                         }
@@ -412,11 +484,27 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             // After Phase 1, eq_evals[0] contains eq(r_cycle_params, r_sumcheck_challenges)
             // and inc has been folded to a scalar inc_scalar = inc(r_sumcheck_challenges)
 
+            std.debug.print("[RWC PHASE2] round={}, entries.len={}\n", .{ self.round, self.entries.items.len });
+
             var s0: F = F.zero();
             var s1: F = F.zero();
 
             const log_t = self.params.log_t;
             const addr_round = self.round - log_t;
+
+            // Debug: show eq_cycle_scalar and inc_scalar at the start of Phase 2
+            if (addr_round == 0) {
+                std.debug.print("[RWC PHASE2] eq_cycle_scalar = {any}\n", .{self.eq_evals[0].toBytesBE()[0..8]});
+                std.debug.print("[RWC PHASE2] inc_scalar = {any}\n", .{self.inc[0].toBytesBE()[0..8]});
+                if (self.entries.items.len > 0) {
+                    const e = self.entries.items[0];
+                    std.debug.print("[RWC PHASE2] entry[0]: addr={}, ra_coeff={any}, val_coeff={any}\n", .{
+                        e.address,
+                        e.ra_coeff.toBytesBE()[0..8],
+                        e.val_coeff.toBytesBE()[0..8],
+                    });
+                }
+            }
 
             // After all cycle variables are bound:
             // - eq_evals[0] is the scalar eq(r_cycle_params, r_cycle_sumcheck)
@@ -471,18 +559,21 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             if (in_phase1 and self.eq_size > 1) {
                 const half = self.eq_size / 2;
 
-                // Fold eq_evals: eq_new[i] = (1-r)*eq_old[i] + r*eq_old[i + half]
+                // Fold eq_evals using LowToHigh binding to match inc and entries:
+                // bound[i] = (1-r)*coeff[2*i] + r*coeff[2*i+1]
+                // This matches Jolt's merged_eq.bind_parallel(r_j, BindingOrder::LowToHigh)
                 for (0..half) |i| {
-                    const lo = self.eq_evals[i];
-                    const hi = self.eq_evals[i + half];
+                    const lo = self.eq_evals[2 * i];
+                    const hi = self.eq_evals[2 * i + 1];
                     self.eq_evals[i] = lo.add(challenge.mul(hi.sub(lo)));
                 }
 
-                // Fold inc: inc_new[i] = (1-r)*inc_old[i] + r*inc_old[i + half]
-                // This binds inc polynomial to the sumcheck challenge (LowToHigh binding)
+                // Fold inc using LowToHigh binding to match Jolt:
+                // bound[i] = (1-r)*coeff[2*i] + r*coeff[2*i+1]
+                // This matches Jolt's inc.bind_parallel(r_j, BindingOrder::LowToHigh)
                 for (0..half) |i| {
-                    const lo = self.inc[i];
-                    const hi = self.inc[i + half];
+                    const lo = self.inc[2 * i];
+                    const hi = self.inc[2 * i + 1];
                     self.inc[i] = lo.add(challenge.mul(hi.sub(lo)));
                 }
 
@@ -492,9 +583,61 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 if (self.gruen_eq) |*geq| {
                     geq.bind(challenge);
                 }
+
+                // Bind entries: group by (row/2, col), create bound entries
+                // This matches Jolt's ReadWriteMatrixCycleMajor::bind
+                try self.bindEntries(challenge);
             }
 
             self.round += 1;
+        }
+
+        /// Bind entries by grouping (row/2, col) and creating bound entries
+        fn bindEntries(self: *Self, r: F) !void {
+            var new_entries = std.ArrayListUnmanaged(Entry){};
+
+            var i: usize = 0;
+            while (i < self.entries.items.len) {
+                const entry = &self.entries.items[i];
+                const pair_key = entry.cycle / 2;
+                const addr_key = entry.address;
+                const is_even = entry.cycle % 2 == 0;
+
+                // Look for matching odd entry at next position
+                var odd_entry: ?*const Entry = null;
+                var even_entry: ?*const Entry = null;
+
+                if (is_even) {
+                    even_entry = entry;
+                    // Check if next entry is the odd counterpart
+                    if (i + 1 < self.entries.items.len) {
+                        const next = &self.entries.items[i + 1];
+                        if (next.cycle / 2 == pair_key and next.address == addr_key and next.cycle % 2 == 1) {
+                            odd_entry = next;
+                            i += 1; // Skip next entry
+                        }
+                    }
+                } else {
+                    odd_entry = entry;
+                }
+
+                // Bind the entry pair
+                if (Entry.bindEntries(even_entry, odd_entry, r)) |bound| {
+                    try new_entries.append(self.allocator, bound);
+                }
+
+                i += 1;
+            }
+
+            // Replace old entries with bound entries
+            self.entries.deinit(self.allocator);
+            self.entries = new_entries;
+
+            std.debug.print("[RWC BIND] round={}, entries.len after bind={}\n", .{ self.round, self.entries.items.len });
+            if (self.entries.items.len > 0) {
+                const e = self.entries.items[0];
+                std.debug.print("[RWC BIND]   entry[0]: cycle={}, addr={}, ra_coeff={any}\n", .{ e.cycle, e.address, e.ra_coeff.toBytesBE()[0..8] });
+            }
         }
 
         /// Update claim after evaluating polynomial at challenge

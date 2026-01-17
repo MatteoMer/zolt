@@ -479,21 +479,32 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
         }
 
         fn computePhase2Polynomial(self: *Self, gamma: F) [4]F {
-            // Phase 2: Binding address variables
-            // All cycle variables are bound, so eq over cycles is a scalar
-            // After Phase 1, eq_evals[0] contains eq(r_cycle_params, r_sumcheck_challenges)
-            // and inc has been folded to a scalar inc_scalar = inc(r_sumcheck_challenges)
-
-            std.debug.print("[RWC PHASE2] round={}, entries.len={}\n", .{ self.round, self.entries.items.len });
-
-            var s0: F = F.zero();
-            var s1: F = F.zero();
+            // Phase 2: Binding address variables using AddressMajor ordering
+            //
+            // Jolt's approach:
+            // 1. Entries sorted by (column, row) = (address, cycle)
+            // 2. Group by column pairs (2k, 2k+1)
+            // 3. For each pair, merge by row with checkpoint tracking
+            // 4. Return [s(0), s(2)] and derive s(1) from current_claim
+            //
+            // At start of Phase 2, entries should be in AddressMajor order.
 
             const log_t = self.params.log_t;
             const addr_round = self.round - log_t;
 
-            // Debug: show eq_cycle_scalar and inc_scalar at the start of Phase 2
+            std.debug.print("[RWC PHASE2] round={}, addr_round={}, entries.len={}\n", .{ self.round, addr_round, self.entries.items.len });
+
+            // Convert to AddressMajor at start of Phase 2
             if (addr_round == 0) {
+                // Sort entries by (address, cycle) for AddressMajor ordering
+                std.mem.sort(Entry, self.entries.items, {}, struct {
+                    fn lessThan(_: void, a: Entry, b: Entry) bool {
+                        if (a.address != b.address) return a.address < b.address;
+                        return a.cycle < b.cycle;
+                    }
+                }.lessThan);
+
+                std.debug.print("[RWC PHASE2] Converted to AddressMajor order\n", .{});
                 std.debug.print("[RWC PHASE2] eq_cycle_scalar = {any}\n", .{self.eq_evals[0].toBytesBE()[0..8]});
                 std.debug.print("[RWC PHASE2] inc_scalar = {any}\n", .{self.inc[0].toBytesBE()[0..8]});
                 if (self.entries.items.len > 0) {
@@ -512,89 +523,180 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             const eq_cycle_scalar = self.eq_evals[0];
             const inc_scalar = self.inc[0];
 
-            // Compute s(0), s(1), s(2) directly as polynomial evaluations
-            // For each entry, ra and val are linear in the address variable X
-            // s(X) = eq * ra(X) * (val(X) + γ*(inc + val(X))) is degree-2 in X
+            // Compute [s(0), s(2)] using Jolt's AddressMajor approach
+            // Then derive s(1) = current_claim - s(0)
+            var s0: F = F.zero();
             var s2: F = F.zero();
 
             // Get val_init checkpoint at the current bound point
-            // After binding addr_round variables, val_init is at current_size = K / 2^addr_round
             const K = @as(usize, 1) << @intCast(self.params.log_k);
             const val_init_current_size = K >> @intCast(addr_round);
 
-            for (self.entries.items) |entry| {
-                // The current address bit being bound determines if this entry contributes to s(0) or s(1)
-                const current_addr_bit: u1 = @truncate(entry.address >> @intCast(addr_round));
+            // Process entries grouped by column pairs
+            // Entries are sorted by (address, cycle), so we iterate in column order
+            var entry_idx: usize = 0;
+            while (entry_idx < self.entries.items.len) {
+                const entry = self.entries.items[entry_idx];
 
-                // For checkpoint lookup, we need the col_pair index in the bound val_init
-                // entry.address / 2^(addr_round+1) gives the pair index after binding current round
-                const col_pair = entry.address >> @intCast(addr_round + 1);
+                // Determine column pair for this entry
+                const col = entry.address >> @intCast(addr_round);
+                const col_pair = col / 2;
                 const even_col_idx = col_pair * 2;
                 const odd_col_idx = even_col_idx + 1;
 
-                // Get checkpoint from bound val_init
-                const even_checkpoint = if (even_col_idx < val_init_current_size)
+                // Get checkpoints from bound val_init
+                var even_checkpoint = if (even_col_idx < val_init_current_size)
                     self.val_init[even_col_idx]
                 else
                     F.zero();
-                const odd_checkpoint = if (odd_col_idx < val_init_current_size)
+                var odd_checkpoint = if (odd_col_idx < val_init_current_size)
                     self.val_init[odd_col_idx]
                 else
                     F.zero();
 
-                // Compute eq over bound address variables only
-                var eq_addr = F.one();
-                for (0..addr_round) |i| {
-                    const bit_i: u1 = @truncate(entry.address >> @intCast(i));
-                    const r_i = self.challenges.items[log_t + i];
-                    if (bit_i == 1) {
-                        eq_addr = eq_addr.mul(r_i);
+                // Collect all entries in this column pair
+                // Process them in row (cycle) order, tracking checkpoints
+                const pair_start = entry_idx;
+                var pair_end = entry_idx;
+                while (pair_end < self.entries.items.len) {
+                    const e = self.entries.items[pair_end];
+                    const e_col = e.address >> @intCast(addr_round);
+                    const e_pair = e_col / 2;
+                    if (e_pair != col_pair) break;
+                    pair_end += 1;
+                }
+
+                // Split entries in this pair into even_col and odd_col by column
+                // Then merge by row (cycle) with checkpoint tracking
+
+                // Find start of odd column within this pair
+                var odd_start_idx = pair_start;
+                while (odd_start_idx < pair_end) {
+                    const e = self.entries.items[odd_start_idx];
+                    const e_col = e.address >> @intCast(addr_round);
+                    if (e_col % 2 == 1) break;
+                    odd_start_idx += 1;
+                }
+
+                // Now entries[pair_start..odd_start_idx] are even column, entries[odd_start_idx..pair_end] are odd column
+                const even_start = pair_start;
+                const even_end = odd_start_idx;
+                const odd_start = odd_start_idx;
+                const odd_end = pair_end;
+
+                var even_idx = even_start;
+                var odd_idx = odd_start;
+
+                // Merge by row (cycle) - matching Jolt's seq_prover_message_contribution
+                while (even_idx < even_end and odd_idx < odd_end) {
+                    const even_entry = &self.entries.items[even_idx];
+                    const odd_entry = &self.entries.items[odd_idx];
+
+                    if (even_entry.cycle == odd_entry.cycle) {
+                        // Both entries at same row
+                        const evals = computePhase2Evals(
+                            even_entry,
+                            odd_entry,
+                            even_checkpoint,
+                            odd_checkpoint,
+                            inc_scalar,
+                            eq_cycle_scalar,
+                            gamma,
+                            addr_round,
+                            log_t,
+                            self.challenges.items,
+                        );
+                        s0 = s0.add(evals[0]);
+                        s2 = s2.add(evals[1]);
+                        even_checkpoint = F.fromU64(even_entry.next_val);
+                        odd_checkpoint = F.fromU64(odd_entry.next_val);
+                        even_idx += 1;
+                        odd_idx += 1;
+                    } else if (even_entry.cycle < odd_entry.cycle) {
+                        // Only even entry at this row
+                        const evals = computePhase2EvalsEvenOnly(
+                            even_entry,
+                            even_checkpoint,
+                            odd_checkpoint,
+                            inc_scalar,
+                            eq_cycle_scalar,
+                            gamma,
+                            addr_round,
+                            log_t,
+                            self.challenges.items,
+                        );
+                        s0 = s0.add(evals[0]);
+                        s2 = s2.add(evals[1]);
+                        even_checkpoint = F.fromU64(even_entry.next_val);
+                        even_idx += 1;
                     } else {
-                        eq_addr = eq_addr.mul(F.one().sub(r_i));
+                        // Only odd entry at this row
+                        const evals = computePhase2EvalsOddOnly(
+                            odd_entry,
+                            even_checkpoint,
+                            odd_checkpoint,
+                            inc_scalar,
+                            eq_cycle_scalar,
+                            gamma,
+                            addr_round,
+                            log_t,
+                            self.challenges.items,
+                        );
+                        s0 = s0.add(evals[0]);
+                        s2 = s2.add(evals[1]);
+                        odd_checkpoint = F.fromU64(odd_entry.next_val);
+                        odd_idx += 1;
                     }
                 }
 
-                // eq_partial = eq_cycle_scalar * eq_addr
-                const eq_partial = eq_cycle_scalar.mul(eq_addr);
-
-                const ra_coeff = entry.ra_coeff;
-                const val_coeff = entry.val_coeff;
-                const one_plus_gamma = F.one().add(gamma);
-
-                if (current_addr_bit == 0) {
-                    // Entry at even column: ra(0) = ra_coeff, ra(1) = 0
-                    // val(0) = val_coeff, val(1) = odd_checkpoint
-                    const ra_0 = ra_coeff;
-                    const val_0 = val_coeff;
-                    const val_1 = odd_checkpoint;
-                    const ra_2 = F.zero().sub(ra_coeff); // ra(2) = 2*ra(1) - ra(0) = 0 - ra_coeff = -ra_coeff
-                    const val_2 = val_1.add(val_1).sub(val_0); // val(2) = 2*val(1) - val(0)
-
-                    const inner_0 = val_0.mul(one_plus_gamma).add(gamma.mul(inc_scalar));
-                    const inner_2 = val_2.mul(one_plus_gamma).add(gamma.mul(inc_scalar));
-
-                    s0 = s0.add(eq_partial.mul(ra_0).mul(inner_0));
-                    // s1 contribution = 0 (ra(1) = 0)
-                    s2 = s2.add(eq_partial.mul(ra_2).mul(inner_2));
-                } else {
-                    // Entry at odd column: ra(0) = 0, ra(1) = ra_coeff
-                    // val(0) = even_checkpoint, val(1) = val_coeff
-                    const ra_1 = ra_coeff;
-                    const val_0 = even_checkpoint;
-                    const val_1 = val_coeff;
-                    const ra_2 = ra_1.add(ra_1); // ra(2) = 2*ra(1) - ra(0) = 2*ra_coeff - 0
-                    const val_2 = val_1.add(val_1).sub(val_0); // val(2) = 2*val(1) - val(0)
-
-                    const inner_1 = val_1.mul(one_plus_gamma).add(gamma.mul(inc_scalar));
-                    const inner_2 = val_2.mul(one_plus_gamma).add(gamma.mul(inc_scalar));
-
-                    // s0 contribution = 0 (ra(0) = 0)
-                    s1 = s1.add(eq_partial.mul(ra_1).mul(inner_1));
-                    s2 = s2.add(eq_partial.mul(ra_2).mul(inner_2));
+                // Process remaining even entries
+                while (even_idx < even_end) {
+                    const even_entry = &self.entries.items[even_idx];
+                    const evals = computePhase2EvalsEvenOnly(
+                        even_entry,
+                        even_checkpoint,
+                        odd_checkpoint,
+                        inc_scalar,
+                        eq_cycle_scalar,
+                        gamma,
+                        addr_round,
+                        log_t,
+                        self.challenges.items,
+                    );
+                    s0 = s0.add(evals[0]);
+                    s2 = s2.add(evals[1]);
+                    even_checkpoint = F.fromU64(even_entry.next_val);
+                    even_idx += 1;
                 }
+
+                // Process remaining odd entries
+                while (odd_idx < odd_end) {
+                    const odd_entry = &self.entries.items[odd_idx];
+                    const evals = computePhase2EvalsOddOnly(
+                        odd_entry,
+                        even_checkpoint,
+                        odd_checkpoint,
+                        inc_scalar,
+                        eq_cycle_scalar,
+                        gamma,
+                        addr_round,
+                        log_t,
+                        self.challenges.items,
+                    );
+                    s0 = s0.add(evals[0]);
+                    s2 = s2.add(evals[1]);
+                    odd_checkpoint = F.fromU64(odd_entry.next_val);
+                    odd_idx += 1;
+                }
+
+                entry_idx = pair_end;
             }
 
-            // For degree-2 polynomial: s(3) = 3*s(2) - 3*s(1) + s(0) (Lagrange extrapolation)
+            // Derive s(1) from current_claim using Jolt's from_evals_and_hint approach:
+            // s(0) + s(1) = current_claim => s(1) = current_claim - s(0)
+            const s1 = self.current_claim.sub(s0);
+
+            // Extrapolate s(3) for degree-2 polynomial
             const s3 = s2.mul(F.fromU64(3)).sub(s1.mul(F.fromU64(3))).add(s0);
 
             if (addr_round < 3) {
@@ -606,6 +708,137 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             }
 
             return [4]F{ s0, s1, s2, s3 };
+        }
+
+        /// Compute [s(0), s(2)] contribution for both even and odd entries at same row
+        fn computePhase2Evals(
+            even_entry: *const Entry,
+            odd_entry: *const Entry,
+            even_checkpoint: F,
+            odd_checkpoint: F,
+            inc_eval: F,
+            eq_eval: F,
+            gamma: F,
+            addr_round: usize,
+            log_t: usize,
+            challenges: []const F,
+        ) [2]F {
+            _ = even_checkpoint;
+            _ = odd_checkpoint;
+
+            // Compute eq over bound address variables
+            var eq_addr = F.one();
+            for (0..addr_round) |i| {
+                const bit_i: u1 = @truncate(even_entry.address >> @intCast(i));
+                const r_i = challenges[log_t + i];
+                if (bit_i == 1) {
+                    eq_addr = eq_addr.mul(r_i);
+                } else {
+                    eq_addr = eq_addr.mul(F.one().sub(r_i));
+                }
+            }
+            const eq_partial = eq_eval.mul(eq_addr);
+
+            // ra_evals = [ra_even, 2*ra_odd - ra_even]
+            const ra_0 = even_entry.ra_coeff;
+            const ra_2 = odd_entry.ra_coeff.add(odd_entry.ra_coeff).sub(even_entry.ra_coeff);
+
+            // val_evals = [val_even, 2*val_odd - val_even]
+            const val_0 = even_entry.val_coeff;
+            const val_2 = odd_entry.val_coeff.add(odd_entry.val_coeff).sub(even_entry.val_coeff);
+
+            const one_plus_gamma = F.one().add(gamma);
+            const s0_contrib = eq_partial.mul(ra_0).mul(val_0.mul(one_plus_gamma).add(gamma.mul(inc_eval)));
+            const s2_contrib = eq_partial.mul(ra_2).mul(val_2.mul(one_plus_gamma).add(gamma.mul(inc_eval)));
+
+            return [2]F{ s0_contrib, s2_contrib };
+        }
+
+        /// Compute [s(0), s(2)] contribution when only even entry exists
+        fn computePhase2EvalsEvenOnly(
+            even_entry: *const Entry,
+            even_checkpoint: F,
+            odd_checkpoint: F,
+            inc_eval: F,
+            eq_eval: F,
+            gamma: F,
+            addr_round: usize,
+            log_t: usize,
+            challenges: []const F,
+        ) [2]F {
+            _ = even_checkpoint;
+
+            // Compute eq over bound address variables
+            var eq_addr = F.one();
+            for (0..addr_round) |i| {
+                const bit_i: u1 = @truncate(even_entry.address >> @intCast(i));
+                const r_i = challenges[log_t + i];
+                if (bit_i == 1) {
+                    eq_addr = eq_addr.mul(r_i);
+                } else {
+                    eq_addr = eq_addr.mul(F.one().sub(r_i));
+                }
+            }
+            const eq_partial = eq_eval.mul(eq_addr);
+
+            // Implicit odd entry has ra=0, val=odd_checkpoint
+            // ra_evals = [ra_even, -ra_even] (since odd ra = 0)
+            const ra_0 = even_entry.ra_coeff;
+            const ra_2 = F.zero().sub(even_entry.ra_coeff); // 2*0 - ra_even = -ra_even
+
+            // val_evals = [val_even, 2*odd_checkpoint - val_even]
+            const val_0 = even_entry.val_coeff;
+            const val_2 = odd_checkpoint.add(odd_checkpoint).sub(even_entry.val_coeff);
+
+            const one_plus_gamma = F.one().add(gamma);
+            const s0_contrib = eq_partial.mul(ra_0).mul(val_0.mul(one_plus_gamma).add(gamma.mul(inc_eval)));
+            const s2_contrib = eq_partial.mul(ra_2).mul(val_2.mul(one_plus_gamma).add(gamma.mul(inc_eval)));
+
+            return [2]F{ s0_contrib, s2_contrib };
+        }
+
+        /// Compute [s(0), s(2)] contribution when only odd entry exists
+        fn computePhase2EvalsOddOnly(
+            odd_entry: *const Entry,
+            even_checkpoint: F,
+            odd_checkpoint: F,
+            inc_eval: F,
+            eq_eval: F,
+            gamma: F,
+            addr_round: usize,
+            log_t: usize,
+            challenges: []const F,
+        ) [2]F {
+            _ = odd_checkpoint;
+
+            // Compute eq over bound address variables
+            var eq_addr = F.one();
+            for (0..addr_round) |i| {
+                const bit_i: u1 = @truncate(odd_entry.address >> @intCast(i));
+                const r_i = challenges[log_t + i];
+                if (bit_i == 1) {
+                    eq_addr = eq_addr.mul(r_i);
+                } else {
+                    eq_addr = eq_addr.mul(F.one().sub(r_i));
+                }
+            }
+            const eq_partial = eq_eval.mul(eq_addr);
+
+            // Implicit even entry has ra=0, val=even_checkpoint
+            // ra_evals = [0, 2*ra_odd] (since even ra = 0)
+            const ra_0 = F.zero();
+            const ra_2 = odd_entry.ra_coeff.add(odd_entry.ra_coeff); // 2*ra_odd - 0
+
+            // val_evals = [even_checkpoint, 2*val_odd - even_checkpoint]
+            const val_0 = even_checkpoint;
+            const val_2 = odd_entry.val_coeff.add(odd_entry.val_coeff).sub(even_checkpoint);
+
+            const one_plus_gamma = F.one().add(gamma);
+            // s(0) = 0 since ra(0) = 0
+            const s0_contrib = eq_partial.mul(ra_0).mul(val_0.mul(one_plus_gamma).add(gamma.mul(inc_eval)));
+            const s2_contrib = eq_partial.mul(ra_2).mul(val_2.mul(one_plus_gamma).add(gamma.mul(inc_eval)));
+
+            return [2]F{ s0_contrib, s2_contrib };
         }
 
         /// Bind a challenge after round polynomial computation
@@ -663,9 +896,179 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                         self.val_init[i] = lo.add(challenge.mul(hi.sub(lo)));
                     }
                 }
+
+                // Bind entries in AddressMajor format (by column pairs)
+                try self.bindEntriesAddressMajor(challenge, addr_round);
             }
 
             self.round += 1;
+        }
+
+        /// Bind entries in AddressMajor format for Phase 2
+        /// Groups entries by column pairs (2k, 2k+1) and merges by row
+        fn bindEntriesAddressMajor(self: *Self, r: F, addr_round: usize) !void {
+            const K = @as(usize, 1) << @intCast(self.params.log_k);
+            const val_init_current_size = K >> @intCast(addr_round);
+
+            var new_entries = std.ArrayListUnmanaged(Entry){};
+
+            var entry_idx: usize = 0;
+            while (entry_idx < self.entries.items.len) {
+                const entry = self.entries.items[entry_idx];
+
+                // Determine column pair for this entry
+                const col = entry.address >> @intCast(addr_round);
+                const col_pair = col / 2;
+                const even_col_idx = col_pair * 2;
+                const odd_col_idx = even_col_idx + 1;
+
+                // Get checkpoints from bound val_init
+                var even_checkpoint = if (even_col_idx < val_init_current_size)
+                    self.val_init[even_col_idx]
+                else
+                    F.zero();
+                var odd_checkpoint = if (odd_col_idx < val_init_current_size)
+                    self.val_init[odd_col_idx]
+                else
+                    F.zero();
+
+                // Find all entries in this column pair
+                var pair_end = entry_idx;
+                while (pair_end < self.entries.items.len) {
+                    const e = self.entries.items[pair_end];
+                    const e_col = e.address >> @intCast(addr_round);
+                    const e_pair = e_col / 2;
+                    if (e_pair != col_pair) break;
+                    pair_end += 1;
+                }
+
+                // Split into even and odd columns within this pair
+                var j = entry_idx;
+                while (j < pair_end) {
+                    const e = self.entries.items[j];
+                    const e_col = e.address >> @intCast(addr_round);
+                    if (e_col % 2 == 1) break;
+                    j += 1;
+                }
+
+                const even_start = entry_idx;
+                const even_end = j;
+                const odd_start = j;
+                const odd_end = pair_end;
+
+                var even_idx = even_start;
+                var odd_idx = odd_start;
+
+                // Merge by row with checkpoint tracking
+                while (even_idx < even_end and odd_idx < odd_end) {
+                    const even_entry = &self.entries.items[even_idx];
+                    const odd_entry = &self.entries.items[odd_idx];
+
+                    if (even_entry.cycle == odd_entry.cycle) {
+                        // Both entries at same row - bind them together
+                        if (bindAddressMajorPair(even_entry, odd_entry, even_checkpoint, odd_checkpoint, r)) |bound| {
+                            try new_entries.append(self.allocator, bound);
+                        }
+                        even_checkpoint = F.fromU64(even_entry.next_val);
+                        odd_checkpoint = F.fromU64(odd_entry.next_val);
+                        even_idx += 1;
+                        odd_idx += 1;
+                    } else if (even_entry.cycle < odd_entry.cycle) {
+                        // Only even entry at this row
+                        if (bindAddressMajorEvenOnly(even_entry, even_checkpoint, odd_checkpoint, r)) |bound| {
+                            try new_entries.append(self.allocator, bound);
+                        }
+                        even_checkpoint = F.fromU64(even_entry.next_val);
+                        even_idx += 1;
+                    } else {
+                        // Only odd entry at this row
+                        if (bindAddressMajorOddOnly(odd_entry, even_checkpoint, odd_checkpoint, r)) |bound| {
+                            try new_entries.append(self.allocator, bound);
+                        }
+                        odd_checkpoint = F.fromU64(odd_entry.next_val);
+                        odd_idx += 1;
+                    }
+                }
+
+                // Process remaining even entries
+                while (even_idx < even_end) {
+                    const even_entry = &self.entries.items[even_idx];
+                    if (bindAddressMajorEvenOnly(even_entry, even_checkpoint, odd_checkpoint, r)) |bound| {
+                        try new_entries.append(self.allocator, bound);
+                    }
+                    even_checkpoint = F.fromU64(even_entry.next_val);
+                    even_idx += 1;
+                }
+
+                // Process remaining odd entries
+                while (odd_idx < odd_end) {
+                    const odd_entry = &self.entries.items[odd_idx];
+                    if (bindAddressMajorOddOnly(odd_entry, even_checkpoint, odd_checkpoint, r)) |bound| {
+                        try new_entries.append(self.allocator, bound);
+                    }
+                    odd_checkpoint = F.fromU64(odd_entry.next_val);
+                    odd_idx += 1;
+                }
+
+                entry_idx = pair_end;
+            }
+
+            // Replace old entries with bound entries
+            self.entries.deinit(self.allocator);
+            self.entries = new_entries;
+
+            std.debug.print("[RWC BIND PHASE2] addr_round={}, entries.len after bind={}\n", .{ addr_round, self.entries.items.len });
+        }
+
+        /// Bind two adjacent column entries together (both even and odd exist)
+        fn bindAddressMajorPair(even: *const Entry, odd: *const Entry, even_checkpoint: F, odd_checkpoint: F, r: F) ?Entry {
+            _ = even_checkpoint;
+            _ = odd_checkpoint;
+
+            // Matching Jolt's RamAddressMajorEntry::bind_entries (Some, Some) case
+            // For prev_val and next_val, we keep as u64 (track the original trace values)
+            // The actual binding uses field arithmetic on val_coeff
+            return Entry{
+                .cycle = even.cycle,
+                .address = even.address / 2,
+                .ra_coeff = even.ra_coeff.add(r.mul(odd.ra_coeff.sub(even.ra_coeff))),
+                .val_coeff = even.val_coeff.add(r.mul(odd.val_coeff.sub(even.val_coeff))),
+                .prev_val = even.prev_val, // Keep tracking (used for implicit entries)
+                .next_val = odd.next_val, // Use the final value after binding
+            };
+        }
+
+        /// Bind when only even entry exists (odd is implicit with ra=0, val=checkpoint)
+        fn bindAddressMajorEvenOnly(even: *const Entry, even_checkpoint: F, odd_checkpoint: F, r: F) ?Entry {
+            _ = even_checkpoint;
+
+            // Matching Jolt's (Some(even), None) case
+            // Implicit odd has ra=0, val=odd_checkpoint
+            const one_minus_r = F.one().sub(r);
+            return Entry{
+                .cycle = even.cycle,
+                .address = even.address / 2,
+                .ra_coeff = one_minus_r.mul(even.ra_coeff), // (1-r)*ra_even + r*0
+                .val_coeff = even.val_coeff.add(r.mul(odd_checkpoint.sub(even.val_coeff))),
+                .prev_val = even.prev_val, // Keep tracking
+                .next_val = even.next_val,
+            };
+        }
+
+        /// Bind when only odd entry exists (even is implicit with ra=0, val=checkpoint)
+        fn bindAddressMajorOddOnly(odd: *const Entry, even_checkpoint: F, odd_checkpoint: F, r: F) ?Entry {
+            _ = odd_checkpoint;
+
+            // Matching Jolt's (None, Some(odd)) case
+            // Implicit even has ra=0, val=even_checkpoint
+            return Entry{
+                .cycle = odd.cycle,
+                .address = odd.address / 2,
+                .ra_coeff = r.mul(odd.ra_coeff), // (1-r)*0 + r*ra_odd
+                .val_coeff = even_checkpoint.add(r.mul(odd.val_coeff.sub(even_checkpoint))),
+                .prev_val = odd.prev_val,
+                .next_val = odd.next_val,
+            };
         }
 
         /// Bind entries by grouping (row/2, col) and creating bound entries

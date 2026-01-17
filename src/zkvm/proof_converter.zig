@@ -734,8 +734,8 @@ pub fn ProofConverter(comptime F: type) type {
                 // Append claim to transcript (matching Jolt's cache_openings behavior)
                 transcript.appendScalar(claim);
 
-                // Debug first few claims and Next* claims
-                if (jolt_idx < 5 or (jolt_idx >= 17 and jolt_idx <= 20)) {
+                // Debug first few claims, RamReadValue, RamWriteValue, and Next* claims
+                if (jolt_idx < 5 or (jolt_idx >= 13 and jolt_idx <= 20)) {
                     std.debug.print("[ZOLT] OPENING_CLAIMS: claim[{}] = {any}, state = {any}\n",
                         .{jolt_idx, claim.toBytesBE(), transcript.state[0..8]});
                 }

@@ -5,70 +5,57 @@
 | Stage | Status | Notes |
 |-------|--------|-------|
 | 1 | ✅ PASS | Univariate skip sumcheck |
-| 2 | ❌ FAIL | RWC Phase 2 needs AddressMajor representation |
+| 2 | ❌ FAIL | RWC expected claim mismatch - investigating |
 | 3 | ⏳ Blocked | Waiting for Stage 2 |
 | 4 | ⏳ Blocked | Waiting for Stage 3 |
 | 5-7 | ⏳ Blocked | Waiting for Stage 4 |
 
-## Session 38 Summary (2026-01-17)
+## Session 39 Summary (2026-01-17)
 
 ### Completed
-1. ✅ Fixed inc binding to use LowToHigh order
-2. ✅ Fixed eq_evals binding to use LowToHigh order
-3. ✅ Added val_init binding in Phase 2
-4. ✅ Added checkpoint-aware Phase 2 polynomial computation
+1. ✅ Implemented AddressMajor ordering for Phase 2
+   - Sort entries by (address, cycle) at start of Phase 2
+   - Group by column pairs with checkpoint tracking
+   - Compute [s(0), s(2)] and derive s(1) from current_claim
+2. ✅ Implemented Phase 2 entry binding
+   - bindAddressMajorPair for (Some, Some) case
+   - bindAddressMajorEvenOnly for (Some, None) case
+   - bindAddressMajorOddOnly for (None, Some) case
 
-### Remaining Issue
-The fundamental issue is that **Jolt's Phase 2 uses AddressMajor iteration** while Zolt uses cycle-major iteration:
+### Issue Found: R1CS Witness Missing Memory Operations
 
-**Jolt's Phase 2:**
-- Entries sorted by column (address), then by row (cycle)
-- Iterates: for each column pair (2k, 2k+1), merge entries by cycle
-- Uses `even_checkpoint` and `odd_checkpoint` that track state across cycles
-- Checkpoints come from val_init and are updated as entries are processed
+**ROOT CAUSE:**
+- Fibonacci program has NO STORE/LOAD instructions
+- The only "memory write" is the synthetic termination write
+- Synthetic write is added to MemoryTrace but NOT to ExecutionTrace
+- R1CS witness builds from ExecutionTrace
+- Result: RamReadValue=0, RamWriteValue=0 for all cycles
 
-**Zolt's Phase 2 (current):**
-- Entries remain in cycle-major order
-- Iterates directly over entries
-- Uses bound val_init as static checkpoints
-- Missing the cycle-by-cycle state tracking
+**Evidence:**
+- `[R1CS GEN] Total steps with memory access: 0`
+- `claim[13] = { 0, 0, ... }` (RamReadValue)
+- `claim[14] = { 0, 0, ... }` (RamWriteValue)
 
-### Key Difference
-In Jolt, when processing a column pair, if only one column has an entry at a given cycle:
-- The implicit entry gets val from the checkpoint (which is the previous val at that address)
-- The checkpoint is updated after processing each cycle
+**But Jolt expects non-zero:**
+- Instance 2 expected_claim = 3148303805315997521479349691467259099534742698741779098822247733559209807773
 
-This is fundamentally different from what Zolt does.
+### Stage 2 Verification Results
+- output_claim = 9372091488520543937914220410023422887748128142472392185375157440884454716621
+- expected_output_claim = 1649620375365432227061373494601203837685206271295948652652812281106374890120
+- MISMATCH
 
-### Options to Fix
-
-**Option A: Implement AddressMajor representation (proper fix)**
-1. After Phase 1, convert entries to AddressMajor order (sort by address)
-2. Implement seq_prover_message_contribution logic:
-   - For each column pair, iterate by cycle
-   - Track even_checkpoint and odd_checkpoint per column
-   - Use checkpoints for implicit entries
-3. Bind entries by address (column halving)
-
-**Option B: Use Phase 3 approach (simpler but different)**
-1. After Phase 1, materialize ra and val as dense polynomials
-2. Use dense sumcheck for Phase 2 (address binding)
-3. Avoids sparse matrix complexity but changes proof structure
-
-**Option C: Skip Phase 2 sparse sumcheck**
-1. If fibonacci only has 1 RAM entry, sparse computation might not matter
-2. But this doesn't solve the general case
-
-### Recommended Next Steps
-1. Implement AddressMajor sparse matrix representation
-2. Convert CycleMajor to AddressMajor at end of Phase 1
-3. Implement proper seq_prover_message_contribution with checkpoint tracking
+### Next Steps
+1. [ ] Investigate how Jolt handles termination for programs without memory ops
+2. [ ] Check if synthetic termination write should affect R1CS RamWriteValue claim
+3. [ ] Verify all 5 Stage 2 instance claims match Jolt's expectations
+4. [ ] Test AddressMajor Phase 2 implementation with program that has actual memory ops
 
 ## Files Modified This Session
 - `src/zkvm/ram/read_write_checking.zig`
-  - Added LowToHigh binding for inc and eq_evals
-  - Added val_init binding in Phase 2
-  - Updated Phase 2 polynomial computation with checkpoint support
+  - Complete rewrite of computePhase2Polynomial for AddressMajor ordering
+  - Added computePhase2Evals, computePhase2EvalsEvenOnly, computePhase2EvalsOddOnly
+  - Added bindEntriesAddressMajor for Phase 2 binding
+  - Added bindAddressMajorPair, bindAddressMajorEvenOnly, bindAddressMajorOddOnly
 
 ## Testing Commands
 

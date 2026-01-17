@@ -17,52 +17,66 @@
 - This is for output/termination mechanism
 - The RWC sumcheck is NOT a zero polynomial!
 
-### Stage 2 Failure Details
+### Current Implementation Status
+- Added GruenSplitEqPolynomial to RWC prover
+- Modified computePhase1Polynomial to use Gruen formula
+- Round polynomials are being computed but still not matching Jolt
+
+### Root Cause: Complex Sparse Matrix Structure
+
+Jolt's RWC prover uses a sophisticated sparse matrix structure:
+1. **Cycle-major matrix** for Phase 1 (binding cycle variables)
+2. **Address-major matrix** for Phase 2 (binding address variables)
+3. **Even/odd row pairing** for computing quadratic coefficients
+
+The key function `ReadWriteMatrixCycleMajor::prover_message_contribution`:
+- Takes even_row and odd_row entries (entries at rows 2j and 2j+1)
+- Computes `[q(0), q(∞)]` coefficients for the row pair
+- Uses `inc_evals = [inc_0, inc_infty]` where inc_infty = inc_1 - inc_0
+
+The formula for each entry pair involves:
+```rust
+// For each (even, odd) entry pair at address k:
+ra_0 * (val_0 + gamma * (val_0 + inc_0))     // X=0 contribution
+ra_infty * (val_infty + gamma * (val_infty + inc_infty))  // slope-of-slope
 ```
-output_claim:          8531846635557760858493086388539389736059592909629786934607653033526197973299
-expected_output_claim: 17808130426384425926507399004264546912094784764713076233980989102782648691939
-```
 
-### Root Cause: GruenSplitEqPolynomial Optimization Required
+Where:
+- `ra_0`, `ra_infty` are the ra polynomial values at even/odd rows
+- `val_0`, `val_infty` are the val polynomial values at even/odd rows
+- `inc_0`, `inc_infty` are the inc values (inc_infty = inc_1 - inc_0)
 
-**The Problem:**
+### Implementation Required
 
-Jolt's RamReadWriteChecking sumcheck uses the Dao-Thaler + Gruen optimization
-(GruenSplitEqPolynomial) which produces specific round polynomial coefficients.
+To match Jolt exactly, Zolt's RWC prover needs:
 
-Zolt's naive direct computation produces mathematically equivalent polynomials,
-but with DIFFERENT coefficient representations. Since Fiat-Shamir challenges
-depend on the exact coefficients:
-- Different coefficients → different challenges
-- Different challenges → different final claims
-- Different claims → verification fails
+1. **Sparse matrix reorganization**:
+   - Group entries by row pairs (rows 2j and 2j+1)
+   - Handle cases where even or odd entry may be missing
 
-This is the EXACT same issue we faced with Stage 3's Shift sumcheck (Session 32),
-which was fixed by implementing the prefix-suffix optimization.
+2. **Proper inc computation**:
+   - `inc_0 = inc.get_bound_coeff(j_prime)`
+   - `inc_1 = inc.get_bound_coeff(j_prime + 1)`
+   - `inc_infty = inc_1 - inc_0`
 
-**Jolt's Implementation:**
-- Uses GruenSplitEqPolynomial from `jolt-core/src/poly/split_eq_poly.rs`
-- 800+ lines implementing Dao-Thaler + Gruen optimization
-- Paper reference: https://eprint.iacr.org/2024/1210.pdf
+3. **Entry contribution formula**:
+   - Implement `compute_evals(even, odd, inc_evals, gamma) -> [q_0, q_infty]`
+   - Sum contributions weighted by E_out * E_in
 
-### Solution Required
+4. **Gruen formula application**:
+   - `gruen_eq.gruen_poly_deg_3(q_constant, q_quadratic, previous_claim)`
 
-Implement GruenSplitEqPolynomial for Zolt's RWC prover to match Jolt's
-round polynomial coefficients exactly.
+### Files to Reference
 
-Key components:
-1. Split eq(w, x) into three parts: E_out, E_in, current variable
-2. Cache prefix eq tables for efficient computation
-3. Use `gruen_poly_deg_3` formula for cubic round polynomials
-4. Match binding order (LowToHigh)
+- `jolt-core/src/subprotocols/read_write_matrix/cycle_major.rs` - Entry struct and compute_evals
+- `jolt-core/src/subprotocols/read_write_matrix/address_major.rs` - Phase 2 computation
+- `jolt-core/src/zkvm/ram/read_write_checking.rs` - Phase 1/2 orchestration
 
 ### Debug Output Added
 ```
-[ZOLT] STAGE2 RWC: entries.len = 1
-[ZOLT] STAGE2 RWC: entry[0]: cycle=54, addr=2049
-[ZOLT] STAGE2 RWC: ra_claim = non-zero
-[ZOLT] STAGE2 RWC: val_claim = non-zero
-[ZOLT] STAGE2 RWC: inc_claim = non-zero
+[RWC PHASE1] round=X, q_constant=..., q_quadratic=..., current_claim=...
+[RWC PHASE1] result: s0=..., s1=...
+[GRUEN ROUND X] q(0)=..., q(1)=..., previous_claim=...
 ```
 
 ## Testing Commands
@@ -75,7 +89,9 @@ zig build && ./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format --exp
 cd /Users/matteo/projects/jolt && ZOLT_LOGS_DIR=/Users/matteo/projects/zolt/logs cargo test --package jolt-core test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
 
-## Files to Modify
+## Next Steps
 
-1. `src/zkvm/ram/read_write_checking.zig` - Implement GruenSplitEqPolynomial optimization
-2. May need new `src/poly/split_eq_poly.zig` for shared implementation
+1. Implement proper even/odd row pairing in RWC
+2. Compute inc_evals correctly for each row pair
+3. Implement entry contribution formula matching Jolt
+4. Test and verify round polynomials match

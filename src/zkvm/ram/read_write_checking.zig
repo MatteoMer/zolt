@@ -15,6 +15,7 @@ const Allocator = std.mem.Allocator;
 const MemoryTrace = @import("mod.zig").MemoryTrace;
 const MemoryAccess = @import("mod.zig").MemoryAccess;
 const MemoryOp = @import("mod.zig").MemoryOp;
+const split_eq = @import("../../poly/split_eq.zig");
 
 /// Parameters for RAM read/write checking
 pub fn RamReadWriteCheckingParams(comptime F: type) type {
@@ -93,6 +94,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
     return struct {
         const Self = @This();
         const Entry = CycleMajorEntry(F);
+        const GruenSplitEq = split_eq.GruenSplitEqPolynomial(F);
 
         /// Parameters
         params: RamReadWriteCheckingParams(F),
@@ -112,6 +114,8 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
         eq_evals: []F,
         /// Current effective size of eq_evals (halves each round in Phase 1)
         eq_size: usize,
+        /// Gruen split eq polynomial for optimized round polynomial computation
+        gruen_eq: ?GruenSplitEq,
         /// Allocator
         allocator: Allocator,
 
@@ -232,6 +236,10 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
 
             const challenges_list = std.ArrayListUnmanaged(F){};
 
+            // Initialize GruenSplitEqPolynomial for Phase 1 optimization
+            // This matches Jolt's structure for computing round polynomials
+            const gruen_eq = try GruenSplitEq.init(allocator, params.r_cycle);
+
             return Self{
                 .params = params,
                 .current_claim = initial_claim,
@@ -242,6 +250,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 .challenges = challenges_list,
                 .eq_evals = eq_evals,
                 .eq_size = T,
+                .gruen_eq = gruen_eq,
                 .allocator = allocator,
             };
         }
@@ -252,6 +261,9 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             self.allocator.free(self.val_init);
             self.allocator.free(self.eq_evals);
             self.challenges.deinit(self.allocator);
+            if (self.gruen_eq) |*geq| {
+                geq.deinit();
+            }
             self.params.deinit();
         }
 

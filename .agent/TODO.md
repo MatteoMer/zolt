@@ -7,75 +7,78 @@
 | 1 | ✅ PASS | Univariate skip sumcheck |
 | 2 | ✅ PASS | Batched sumcheck (5 instances) |
 | 3 | ✅ PASS | Challenges match between Zolt and Jolt |
-| 4 | ❌ FAIL | output_claim ≠ expected_output_claim |
+| 4 | ❌ FAIL | input_claim_val_final mismatch |
 | 5-6 | ⏳ Blocked | Waiting for Stage 4 |
 
-## Stage 4 Root Cause: FOUND!
+## Stage 4 Root Cause Analysis
 
-### The Bug: Missing Batching Coefficient
+### Fixed: Batching Coefficient ✅
+Zolt now uses `batch0` from transcript instead of `F.one()`.
+- Commit: `fix(stage4): use correct batching coefficient from transcript`
+- The batching coefficients match between Zolt and Jolt.
 
-**The claims (val, rd_wa, rs1_ra, etc.) all MATCH between Zolt and Jolt!**
+### Verified Matching Values ✅
+- Claims (val, rd_wa, rs1_ra, etc.) - MATCH
+- eq_val bytes - MATCH
+- combined bytes - MATCH
+- batching_coeffs[0] = 93683484670461660293859922911333626135 - MATCH
 
-The eq_val and combined values also MATCH:
-- eq_val bytes: [94, 4a, 2b, 5f, ...] ✅
-- combined bytes: [80, 5d, c7, 14, ...] ✅
+### Remaining Issue: input_claim_val_final ❌
 
-**The problem is the BATCHING COEFFICIENT!**
+Stage 4 has 3 instances:
+1. Instance 0: RegistersReadWriteChecking - ✅ Working
+2. Instance 1: RamValEvaluation - input_claim = 0 ✅
+3. Instance 2: RamValFinalEvaluation - **input_claim ≠ 0 BUT Jolt expects 0**
 
-Stage 4 is a batched sumcheck with 3 instances:
-1. Instance 0: RegistersReadWriteChecking (non-zero polynomial)
-2. Instance 1: RamValEvaluation (zero polynomial for Zolt)
-3. Instance 2: RamValFinalEvaluation (zero polynomial for Zolt)
+**The Problem:**
 
-Jolt's BatchedSumcheck::verify does:
+Jolt's verifier computes input_claim for Instance 2:
 ```rust
-// 1. Append input_claim for each instance to transcript
-sumcheck_instances.iter().for_each(|sumcheck| {
-    let input_claim = sumcheck.input_claim(accumulator);
-    transcript.append_scalar(&input_claim);
-});
+// From proof:
+let val_final_claim = accumulator.get(RamValFinal@RamOutputCheck);
 
-// 2. Derive batching coefficients from transcript
-let batching_coeffs: Vec<F> = transcript.challenge_vector(sumcheck_instances.len());
+// Computed from actual initial RAM:
+let val_init_eval = initial_ram_state.evaluate(&r_address_final);
 
-// 3. Verify: output_claim == sum_i(coeff_i * instance_i_expected_claim)
+// Input claim:
+input_claim = val_final_claim - val_init_eval
 ```
 
-The weighted expected is: `coeff_0 * expected_0 + coeff_1 * 0 + coeff_2 * 0 = coeff_0 * expected_0`
+For input_claim = 0:
+- `val_final_claim` must equal `val_init_eval`
+- Zolt must store RamValFinal@RamOutputCheck = evaluation of initial RAM
 
-But Zolt uses `F.one()` (coefficient = 1) instead of `coeff_0`!
-
-### Fix Required
-
-Before running Stage 4 sumcheck:
-1. Compute input_claim for all 3 instances
-2. Append them to transcript IN ORDER
-3. Get `batching_coeffs = transcript.challenge_vector(3)`
-4. Pass `batching_coeffs[0]` to Stage 4 prover to scale round polynomials
-
-The round polynomials should be: `round_poly * batching_coeffs[0]`
-
-### Debug Output Analysis
-
-The eq values are being used correctly:
+**Current State:**
 ```
-[STAGE4 INIT] eq_cycle_evals[0] = { 59, 244, 75, 167, 205, 155, 74, 77 }
-[ZOLT STAGE4 EQ_USE] eq_cycle_evals[0] = { 59, 244, 75, 167, 205, 155, 74, 77 }
+Zolt: output_val_final_claim ≠ output_val_init_claim (from Stage 2 output sumcheck)
+Jolt: expects RamValFinal = val_init_eval (so input_claim = 0)
 ```
 
-The round polynomial evaluations are non-zero:
-```
-[PROOF_CONV STAGE4] Round 0 regs_evals:
-  regs_evals[0] = { 91, 171, 190, 37, ... }
-  regs_evals[1] = { 67, 79, 33, 77, ... }
-```
+### Root Cause
 
-### Next Investigation Steps
+Zolt's Stage 2 output sumcheck produces `output_val_final_claim` that doesn't match
+the initial RAM evaluation. This could be because:
 
-1. Compare the polynomial values (val, rd_wa, rs1_ra, rs2_ra, inc) between Zolt and Jolt
-2. Check if GruenSplitEqPolynomial has special handling that Zolt is missing
-3. Verify MLE evaluation point matches what Jolt expects
-4. Compare exact round polynomial formulas
+1. The output sumcheck polynomial is computing the wrong values
+2. The binding point is incorrect
+3. The relationship between val_final and val_init is misunderstood
+
+### Next Steps to Fix Stage 4
+
+1. **Investigate Stage 2 Output Sumcheck**
+   - Understand what val_final and val_init represent
+   - For a correct execution, val_final at output addresses should equal expected output
+   - The output sumcheck should verify this relationship
+
+2. **Check Jolt's Expected Behavior**
+   - For fibonacci with input (0,1) and output 55
+   - What should val_final_claim evaluate to?
+   - Why does Jolt expect input_claim = 0?
+
+3. **Possible Fix**
+   - Store RamValFinal@RamOutputCheck = initial RAM evaluation (same as RamValInit)
+   - This would make input_claim = 0
+   - But need to verify this doesn't break Stage 2 verification
 
 ## Testing Commands
 

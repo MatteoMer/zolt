@@ -523,15 +523,16 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             const val_init_current_size = K >> @intCast(addr_round);
 
             for (self.entries.items) |entry| {
-                // Column pair index: entry.address / 2 after addr_round bindings
-                // But entry.address hasn't been modified, so we compute the effective column
-                const effective_col = entry.address >> @intCast(addr_round);
-                const col_pair = effective_col / 2;
-                const is_even_col = effective_col % 2 == 0;
+                // The current address bit being bound determines if this entry contributes to s(0) or s(1)
+                const current_addr_bit: u1 = @truncate(entry.address >> @intCast(addr_round));
 
-                // Get checkpoint from bound val_init
+                // For checkpoint lookup, we need the col_pair index in the bound val_init
+                // entry.address / 2^(addr_round+1) gives the pair index after binding current round
+                const col_pair = entry.address >> @intCast(addr_round + 1);
                 const even_col_idx = col_pair * 2;
                 const odd_col_idx = even_col_idx + 1;
+
+                // Get checkpoint from bound val_init
                 const even_checkpoint = if (even_col_idx < val_init_current_size)
                     self.val_init[even_col_idx]
                 else
@@ -560,7 +561,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 const val_coeff = entry.val_coeff;
                 const one_plus_gamma = F.one().add(gamma);
 
-                if (is_even_col) {
+                if (current_addr_bit == 0) {
                     // Entry at even column: ra(0) = ra_coeff, ra(1) = 0
                     // val(0) = val_coeff, val(1) = odd_checkpoint
                     const ra_0 = ra_coeff;

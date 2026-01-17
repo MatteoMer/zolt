@@ -1161,6 +1161,9 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
             const start: i64 = -@as(i64, (FIRST_GROUP_SIZE - 1) / 2); // = -4
 
+            // DEBUG: Print r0
+            std.debug.print("[ZOLT] computeLagrangeEvalsAtR0: r0 = {any}\n", .{r0.toBytesBE()});
+
             for (0..FIRST_GROUP_SIZE) |i| {
                 _ = start + @as(i64, @intCast(i)); // actual domain point (unused but shows semantics)
                 var numer = F.one();
@@ -1192,6 +1195,11 @@ pub fn StreamingOuterProver(comptime F: type) type {
                     numer.mul(denom.inverse().?)
                 else
                     F.zero();
+            }
+
+            // DEBUG: Print all Lagrange weights
+            for (0..FIRST_GROUP_SIZE) |i| {
+                std.debug.print("[ZOLT] computeLagrangeEvalsAtR0: w[{d}] = {any}\n", .{ i, self.lagrange_evals_r0[i].toBytesBE() });
             }
         }
 

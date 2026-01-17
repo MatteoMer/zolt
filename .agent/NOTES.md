@@ -52,11 +52,22 @@ Zolt's opening claims after Stage 2:
 [ZOLT] STAGE2 RWC: inc_claim = non-zero
 ```
 
+### Root Cause Found: GruenSplitEqPolynomial Required
+
+Jolt's RWC prover uses the Dao-Thaler + Gruen optimization (GruenSplitEqPolynomial)
+which produces specific round polynomial coefficients. This is the same issue that
+affected Stage 3 (Shift sumcheck), which was fixed in Session 32.
+
+Reference: https://eprint.iacr.org/2024/1210.pdf
+
+The solution requires implementing GruenSplitEqPolynomial for Zolt's RWC prover
+to match Jolt's round polynomial coefficients exactly.
+
 ### Next Steps
-1. Compare gamma_rwc between Zolt and Jolt
-2. Verify eq_eval_cycle computation
-3. Check if round polynomial matches expected formula
-4. Debug the RWC prover round-by-round
+1. Implement GruenSplitEqPolynomial in Zig
+2. Update RWC prover to use the Gruen optimization
+3. Match binding order (LowToHigh)
+4. Ensure prefix eq tables match Jolt's structure
 
 ---
 

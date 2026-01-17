@@ -5,80 +5,65 @@
 | Stage | Status | Notes |
 |-------|--------|-------|
 | 1 | ✅ PASS | Univariate skip sumcheck |
-| 2 | ✅ PASS | Batched sumcheck (5 instances) |
-| 3 | ✅ PASS | Challenges match between Zolt and Jolt |
-| 4 | ❌ FAIL | input_claim_val_final mismatch |
-| 5-6 | ⏳ Blocked | Waiting for Stage 4 |
+| 2 | ❌ FAIL | RamReadWriteChecking round polynomial mismatch |
+| 3 | ⏳ Blocked | Waiting for Stage 2 |
+| 4 | ⏳ Blocked | Waiting for Stage 3 |
+| 5-7 | ⏳ Blocked | Waiting for Stage 4 |
 
-## Stage 4 Root Cause Analysis
+## Stage 2 Root Cause Analysis (Session 37)
 
-### Fixed: Batching Coefficient ✅
-Zolt now uses `batch0` from transcript instead of `F.one()`.
-- Commit: `fix(stage4): use correct batching coefficient from transcript`
-- The batching coefficients match between Zolt and Jolt.
+### Key Discovery: Fibonacci Has 1 Memory Operation!
+- Entry at cycle=54, addr=2049 (RAM address 0x80004008)
+- This is for output/termination mechanism
+- The RWC sumcheck is NOT a zero polynomial!
 
-### Verified Matching Values ✅
-- Claims (val, rd_wa, rs1_ra, etc.) - MATCH
-- eq_val bytes - MATCH
-- combined bytes - MATCH
-- batching_coeffs[0] = 93683484670461660293859922911333626135 - MATCH
+### Stage 2 Failure Details
+```
+output_claim:          8531846635557760858493086388539389736059592909629786934607653033526197973299
+expected_output_claim: 17808130426384425926507399004264546912094784764713076233980989102782648691939
+```
 
-### Remaining Issue: input_claim_val_final ❌
-
-Stage 4 has 3 instances:
-1. Instance 0: RegistersReadWriteChecking - ✅ Working
-2. Instance 1: RamValEvaluation - input_claim = 0 ✅
-3. Instance 2: RamValFinalEvaluation - **input_claim ≠ 0 BUT Jolt expects 0**
+### Root Cause: GruenSplitEqPolynomial Optimization Required
 
 **The Problem:**
 
-Jolt's verifier computes input_claim for Instance 2:
-```rust
-// From proof:
-let val_final_claim = accumulator.get(RamValFinal@RamOutputCheck);
+Jolt's RamReadWriteChecking sumcheck uses the Dao-Thaler + Gruen optimization
+(GruenSplitEqPolynomial) which produces specific round polynomial coefficients.
 
-// Computed from actual initial RAM:
-let val_init_eval = initial_ram_state.evaluate(&r_address_final);
+Zolt's naive direct computation produces mathematically equivalent polynomials,
+but with DIFFERENT coefficient representations. Since Fiat-Shamir challenges
+depend on the exact coefficients:
+- Different coefficients → different challenges
+- Different challenges → different final claims
+- Different claims → verification fails
 
-// Input claim:
-input_claim = val_final_claim - val_init_eval
+This is the EXACT same issue we faced with Stage 3's Shift sumcheck (Session 32),
+which was fixed by implementing the prefix-suffix optimization.
+
+**Jolt's Implementation:**
+- Uses GruenSplitEqPolynomial from `jolt-core/src/poly/split_eq_poly.rs`
+- 800+ lines implementing Dao-Thaler + Gruen optimization
+- Paper reference: https://eprint.iacr.org/2024/1210.pdf
+
+### Solution Required
+
+Implement GruenSplitEqPolynomial for Zolt's RWC prover to match Jolt's
+round polynomial coefficients exactly.
+
+Key components:
+1. Split eq(w, x) into three parts: E_out, E_in, current variable
+2. Cache prefix eq tables for efficient computation
+3. Use `gruen_poly_deg_3` formula for cubic round polynomials
+4. Match binding order (LowToHigh)
+
+### Debug Output Added
 ```
-
-For input_claim = 0:
-- `val_final_claim` must equal `val_init_eval`
-- Zolt must store RamValFinal@RamOutputCheck = evaluation of initial RAM
-
-**Current State:**
+[ZOLT] STAGE2 RWC: entries.len = 1
+[ZOLT] STAGE2 RWC: entry[0]: cycle=54, addr=2049
+[ZOLT] STAGE2 RWC: ra_claim = non-zero
+[ZOLT] STAGE2 RWC: val_claim = non-zero
+[ZOLT] STAGE2 RWC: inc_claim = non-zero
 ```
-Zolt: output_val_final_claim ≠ output_val_init_claim (from Stage 2 output sumcheck)
-Jolt: expects RamValFinal = val_init_eval (so input_claim = 0)
-```
-
-### Root Cause
-
-Zolt's Stage 2 output sumcheck produces `output_val_final_claim` that doesn't match
-the initial RAM evaluation. This could be because:
-
-1. The output sumcheck polynomial is computing the wrong values
-2. The binding point is incorrect
-3. The relationship between val_final and val_init is misunderstood
-
-### Next Steps to Fix Stage 4
-
-1. **Investigate Stage 2 Output Sumcheck**
-   - Understand what val_final and val_init represent
-   - For a correct execution, val_final at output addresses should equal expected output
-   - The output sumcheck should verify this relationship
-
-2. **Check Jolt's Expected Behavior**
-   - For fibonacci with input (0,1) and output 55
-   - What should val_final_claim evaluate to?
-   - Why does Jolt expect input_claim = 0?
-
-3. **Possible Fix**
-   - Store RamValFinal@RamOutputCheck = initial RAM evaluation (same as RamValInit)
-   - This would make input_claim = 0
-   - But need to verify this doesn't break Stage 2 verification
 
 ## Testing Commands
 
@@ -89,3 +74,8 @@ zig build && ./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format --exp
 # Run Jolt verifier
 cd /Users/matteo/projects/jolt && ZOLT_LOGS_DIR=/Users/matteo/projects/zolt/logs cargo test --package jolt-core test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
+
+## Files to Modify
+
+1. `src/zkvm/ram/read_write_checking.zig` - Implement GruenSplitEqPolynomial optimization
+2. May need new `src/poly/split_eq_poly.zig` for shared implementation

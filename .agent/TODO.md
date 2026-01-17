@@ -5,64 +5,46 @@
 | Stage | Status | Notes |
 |-------|--------|-------|
 | 1 | ✅ PASS | Univariate skip sumcheck |
-| 2 | ❌ FAIL | RWC expected claim mismatch - investigating |
-| 3 | ⏳ Blocked | Waiting for Stage 2 |
-| 4 | ⏳ Blocked | Waiting for Stage 3 |
+| 2 | ✅ PASS | RWC now passes (removed synthetic termination write) |
+| 3 | ✅ PASS | RegistersClaimReduction |
+| 4 | ❌ FAIL | Sumcheck output_claim != expected_output_claim |
 | 5-7 | ⏳ Blocked | Waiting for Stage 4 |
 
-## Session 39 Summary (2026-01-17)
+## Session 40 Summary (2026-01-17)
 
 ### Completed
-1. ✅ Implemented AddressMajor ordering for Phase 2
-   - Sort entries by (address, cycle) at start of Phase 2
-   - Group by column pairs with checkpoint tracking
-   - Compute [s(0), s(2)] and derive s(1) from current_claim
-2. ✅ Implemented Phase 2 entry binding
-   - bindAddressMajorPair for (Some, Some) case
-   - bindAddressMajorEvenOnly for (Some, None) case
-   - bindAddressMajorOddOnly for (None, Some) case
+1. ✅ Fixed Stage 2 RWC mismatch
+   - Root cause: Zolt was adding synthetic termination write to memory trace
+   - Jolt only sets termination bit in val_final, NOT in execution trace
+   - Fix: Removed recordTerminationWrite() calls from tracer
+   - Stage 2 now passes!
 
-### Issue Found: R1CS Witness Missing Memory Operations
+### Current Issue: Stage 4 RegistersReadWriteChecking
 
-**ROOT CAUSE:**
-- Fibonacci program has NO STORE/LOAD instructions
-- The only "memory write" is the synthetic termination write
-- Synthetic write is added to MemoryTrace but NOT to ExecutionTrace
-- R1CS witness builds from ExecutionTrace
-- Result: RamReadValue=0, RamWriteValue=0 for all cycles
+**Symptom:**
+- Jolt verification fails at Stage 4
+- output_claim = 19271728596168755243423895321875251085487803860811927729070795448153376555895
+- expected_output_claim = 5465056395000139767713092380206826725893519464559027111920075372240160609265
 
-**Evidence:**
-- `[R1CS GEN] Total steps with memory access: 0`
-- `claim[13] = { 0, 0, ... }` (RamReadValue)
-- `claim[14] = { 0, 0, ... }` (RamWriteValue)
+**Analysis:**
+- Stage 4 has 15 rounds (LOG_K=7 + log_T=8)
+- Initial claim: 6327777426086953187456610298387046691641445481470372610958906907463930640269
+- Zolt's eq_val and combined values MATCH Jolt's
+- But final sumcheck claim doesn't match expected
 
-**But Jolt expects non-zero:**
-- Instance 2 expected_claim = 3148303805315997521479349691467259099534742698741779098822247733559209807773
+**Key Debug Values:**
+- Zolt eq_val_le matches Jolt eq_val bytes exactly
+- Zolt combined matches Jolt combined bytes exactly
+- The issue is in the sumcheck polynomial computation
 
-### Stage 2 Verification Results
-- output_claim = 9372091488520543937914220410023422887748128142472392185375157440884454716621
-- expected_output_claim = 1649620375365432227061373494601203837685206271295948652652812281106374890120
-- MISMATCH
+**Hypothesis:**
+The Stage 4 prover polynomial computation might have a bug. Even though
+individual claims match, the round polynomial evaluations might be wrong.
 
 ### Next Steps
-1. [ ] Investigate how Jolt handles termination for programs without memory ops
-2. [ ] Check if synthetic termination write should affect R1CS RamWriteValue claim
-3. [ ] Verify all 5 Stage 2 instance claims match Jolt's expectations
-4. [ ] Test AddressMajor Phase 2 implementation with program that has actual memory ops
+1. Compare Stage 4 round 0 coefficients between Zolt and Jolt
+2. Trace through polynomial evaluation for first few rounds
+3. Check if eq polynomial is applied correctly in round evaluation
 
-## Files Modified This Session
-- `src/zkvm/ram/read_write_checking.zig`
-  - Complete rewrite of computePhase2Polynomial for AddressMajor ordering
-  - Added computePhase2Evals, computePhase2EvalsEvenOnly, computePhase2EvalsOddOnly
-  - Added bindEntriesAddressMajor for Phase 2 binding
-  - Added bindAddressMajorPair, bindAddressMajorEvenOnly, bindAddressMajorOddOnly
-
-## Testing Commands
-
-```bash
-# Build and run prover
-zig build && ./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format --export-preprocessing logs/zolt_preprocessing.bin -o logs/zolt_proof_dory.bin --srs /tmp/jolt_dory_srs.bin
-
-# Run Jolt verifier
-cd /Users/matteo/projects/jolt && ZOLT_LOGS_DIR=/Users/matteo/projects/zolt/logs cargo test --package jolt-core test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
-```
+## Commit History
+- 5cec222: fix: remove synthetic termination write from memory trace (Stage 2 fix)

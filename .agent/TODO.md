@@ -5,60 +5,70 @@
 | Stage | Status | Notes |
 |-------|--------|-------|
 | 1 | ✅ PASS | Univariate skip sumcheck |
-| 2 | ❌ FAIL | RamReadWriteChecking Phase 2 formula needs checkpoint tracking |
+| 2 | ❌ FAIL | RWC Phase 2 needs AddressMajor representation |
 | 3 | ⏳ Blocked | Waiting for Stage 2 |
 | 4 | ⏳ Blocked | Waiting for Stage 3 |
 | 5-7 | ⏳ Blocked | Waiting for Stage 4 |
 
-## Session 38 Progress - RWC Debugging (2026-01-17)
+## Session 38 Summary (2026-01-17)
 
-### What's Working
-1. ✅ Phase 1 binding with LowToHigh order for inc, eq_evals, and entries
-2. ✅ Phase 1 round polynomial computation with GruenSplitEq
-3. ✅ Entry transformation during Phase 1 (cycle halving)
+### Completed
+1. ✅ Fixed inc binding to use LowToHigh order
+2. ✅ Fixed eq_evals binding to use LowToHigh order
+3. ✅ Added val_init binding in Phase 2
+4. ✅ Added checkpoint-aware Phase 2 polynomial computation
 
-### What's Not Working
-1. ❌ Phase 2 polynomial computation - formula doesn't match Jolt exactly
+### Remaining Issue
+The fundamental issue is that **Jolt's Phase 2 uses AddressMajor iteration** while Zolt uses cycle-major iteration:
 
-### Root Cause Analysis
+**Jolt's Phase 2:**
+- Entries sorted by column (address), then by row (cycle)
+- Iterates: for each column pair (2k, 2k+1), merge entries by cycle
+- Uses `even_checkpoint` and `odd_checkpoint` that track state across cycles
+- Checkpoints come from val_init and are updated as entries are processed
 
-Jolt's Phase 2 uses an **AddressMajor sparse matrix** representation that:
-1. Sorts entries by column (address) instead of row (cycle)
-2. Tracks `val_init` - initial values for each address
-3. Tracks `prev_val` and `next_val` for each entry to handle state transitions
-4. Uses `even_checkpoint` and `odd_checkpoint` when merging column pairs
+**Zolt's Phase 2 (current):**
+- Entries remain in cycle-major order
+- Iterates directly over entries
+- Uses bound val_init as static checkpoints
+- Missing the cycle-by-cycle state tracking
 
-The formula in Jolt's `seq_prover_message_contribution`:
-```rust
-// For each pair of columns (even_col, odd_col):
-// Iterate entries by row (cycle), merge even and odd entries
-// Use checkpoints for implicit entries (missing even or odd)
-eq.get_bound_coeff(row) * ra(X) * (val(X) + γ*(inc + val(X)))
-```
+### Key Difference
+In Jolt, when processing a column pair, if only one column has an entry at a given cycle:
+- The implicit entry gets val from the checkpoint (which is the previous val at that address)
+- The checkpoint is updated after processing each cycle
 
-Where:
-- `ra(X)` and `val(X)` are linear in the address variable X
-- For odd-only entry: ra(0)=0, ra(1)=ra_coeff, val(0)=checkpoint, val(1)=val_coeff
-- For even-only entry: ra(0)=ra_coeff, ra(1)=0, val(0)=val_coeff, val(1)=checkpoint
+This is fundamentally different from what Zolt does.
 
-### Required Changes for Phase 2
+### Options to Fix
 
-1. **Track initial RAM values** (val_init) for computing checkpoints
-2. **Store prev_val/next_val** in entries for state tracking
-3. **Implement proper column pair iteration** with checkpoint handling
-4. **Compute s(2) correctly** using the checkpoint-aware formula:
-   ```
-   ra(2) = 2*ra(1) - ra(0)  // linear extrapolation
-   val(2) = 2*val(1) - val(0)  // using checkpoint for missing entry
-   s(2) = eq * ra(2) * (val(2) + γ*(inc + val(2)))
-   ```
+**Option A: Implement AddressMajor representation (proper fix)**
+1. After Phase 1, convert entries to AddressMajor order (sort by address)
+2. Implement seq_prover_message_contribution logic:
+   - For each column pair, iterate by cycle
+   - Track even_checkpoint and odd_checkpoint per column
+   - Use checkpoints for implicit entries
+3. Bind entries by address (column halving)
 
-### Alternative Approach
+**Option B: Use Phase 3 approach (simpler but different)**
+1. After Phase 1, materialize ra and val as dense polynomials
+2. Use dense sumcheck for Phase 2 (address binding)
+3. Avoids sparse matrix complexity but changes proof structure
 
-Instead of implementing AddressMajor sparse matrix, could potentially:
-1. Use Jolt's Phase 3 approach (dense polynomials) for all address variables
-2. This would require materializing ra and val polynomials after Phase 1
-3. Simpler but potentially more expensive for large RAM
+**Option C: Skip Phase 2 sparse sumcheck**
+1. If fibonacci only has 1 RAM entry, sparse computation might not matter
+2. But this doesn't solve the general case
+
+### Recommended Next Steps
+1. Implement AddressMajor sparse matrix representation
+2. Convert CycleMajor to AddressMajor at end of Phase 1
+3. Implement proper seq_prover_message_contribution with checkpoint tracking
+
+## Files Modified This Session
+- `src/zkvm/ram/read_write_checking.zig`
+  - Added LowToHigh binding for inc and eq_evals
+  - Added val_init binding in Phase 2
+  - Updated Phase 2 polynomial computation with checkpoint support
 
 ## Testing Commands
 
@@ -69,8 +79,3 @@ zig build && ./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format --exp
 # Run Jolt verifier
 cd /Users/matteo/projects/jolt && ZOLT_LOGS_DIR=/Users/matteo/projects/zolt/logs cargo test --package jolt-core test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
-
-## Files to Modify
-
-- `src/zkvm/ram/read_write_checking.zig` - Main RWC implementation
-- Need to add val_init tracking and checkpoint computation

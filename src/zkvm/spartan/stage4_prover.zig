@@ -155,6 +155,15 @@ pub fn Stage4Prover(comptime F: type) type {
                 return error.InvalidRCycleLength;
             }
 
+            // Debug: Print r_cycle values for comparison with Jolt
+            std.debug.print("[ZOLT STAGE4 INIT] r_cycle (from Stage 3) len={}\n", .{r_cycle.len});
+            for (r_cycle, 0..) |v, i| {
+                // Print as decimal for comparison with Jolt's {:?} output
+                // Field element is in Montgomery form, convert to standard for comparison
+                const std_form = v.fromMontgomery();
+                std.debug.print("[ZOLT STAGE4 INIT]   r_cycle[{}] = limbs: [{}, {}, {}, {}]\n", .{ i, std_form.limbs[0], std_form.limbs[1], std_form.limbs[2], std_form.limbs[3] });
+            }
+
             const num_rounds = LOG_K + log_T;
             const total_size = K * T;
 
@@ -551,6 +560,18 @@ pub fn Stage4Prover(comptime F: type) type {
             const is_cycle_round = round < self.log_T;
             const gamma_sq = self.gamma.mul(self.gamma);
 
+            // Debug: Print eq polynomial values for Round 0
+            if (round == 0) {
+                std.debug.print("[ZOLT STAGE4 EQ] Round 0 eq polynomial values (first 8):\n", .{});
+                for (0..@min(8, self.eq_cycle_evals.len)) |j| {
+                    std.debug.print("[ZOLT STAGE4 EQ]   eq_cycle[{}] = {any}\n", .{ j, self.eq_cycle_evals[j].toBytes() });
+                }
+                std.debug.print("[ZOLT STAGE4 EQ] r_cycle used to compute eq:\n", .{});
+                for (0..@min(8, self.r_cycle.len)) |j| {
+                    std.debug.print("[ZOLT STAGE4 EQ]   r_cycle[{}] = {any}\n", .{ j, self.r_cycle[j].toBytes() });
+                }
+            }
+
             // We need evaluations at 0, 1, 2, 3 for a degree-3 polynomial.
             var evals: [4]F = .{ F.zero(), F.zero(), F.zero(), F.zero() };
 
@@ -640,6 +661,18 @@ pub fn Stage4Prover(comptime F: type) type {
             }
 
             const sum = evals[0].add(evals[1]);
+
+            // Debug: Print evaluations for Round 0 to compare with Jolt
+            if (round == 0) {
+                std.debug.print("[ZOLT STAGE4 EVALS] Round 0 polynomial evaluations:\n", .{});
+                std.debug.print("[ZOLT STAGE4 EVALS]   p(0) = {any}\n", .{evals[0].toBytes()});
+                std.debug.print("[ZOLT STAGE4 EVALS]   p(1) = {any}\n", .{evals[1].toBytes()});
+                std.debug.print("[ZOLT STAGE4 EVALS]   p(2) = {any}\n", .{evals[2].toBytes()});
+                std.debug.print("[ZOLT STAGE4 EVALS]   p(3) = {any}\n", .{evals[3].toBytes()});
+                std.debug.print("[ZOLT STAGE4 EVALS]   p(0)+p(1) = {any}\n", .{sum.toBytes()});
+                std.debug.print("[ZOLT STAGE4 EVALS]   current_claim = {any}\n", .{current_claim.toBytes()});
+            }
+
             if (!sum.eql(current_claim)) {
                 if (round < 3) {
                     std.debug.print("[STAGE4] Round {} mismatch: p(0)+p(1) = {any}\n", .{ round, sum.toBytes()[0..16] });

@@ -1453,6 +1453,12 @@ pub fn ProofConverter(comptime F: type) type {
             );
             defer stage3_result.deinit();
 
+            // Debug: Print Stage 3 challenges for comparison with Jolt
+            std.debug.print("[ZOLT STAGE3 RESULT] challenges.len = {}\n", .{stage3_result.challenges.len});
+            for (stage3_result.challenges, 0..) |c, i| {
+                std.debug.print("[ZOLT STAGE3 RESULT]   challenge[{}] = {any}\n", .{ i, c.toBytes()[0..8] });
+            }
+
             // SpartanShift claims (from Stage 3 prover)
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .UnexpandedPC, .sumcheck_id = .SpartanShift } },
@@ -1682,13 +1688,19 @@ pub fn ProofConverter(comptime F: type) type {
                 const input_claims = [3]F{ input_claim_registers, input_claim_val_eval, input_claim_val_final };
 
                 // Initialize provers.
-                // Stage 3's sumcheck binds variables in little-endian order (first challenge binds LSB).
-                // Pass challenges directly - do NOT reverse them.
+                // CRITICAL FIX: Stage 3's sumcheck binds variables in the order challenges are sampled.
+                // The final claim rd_write_value_claim = f(c0, c1, ..., cn) in that order.
+                // Stage 4's eq polynomial must use the SAME ordering so that:
+                //   Σ_j eq(r, j) * f(j) = f(r) = rd_write_value_claim when r = Stage 3 challenges
+                // We do NOT reverse to BE here - we use the original LE order for the prover.
+                // (The BE conversion is only for serialization to match Jolt's opening_point format.)
+                const stage3_r_cycle_le = stage3_result.challenges;
+
                 var regs_prover = Stage4ProverType.initWithClaims(
                     self.allocator,
                     trace,
                     gamma_stage4,
-                    stage3_result.challenges,
+                    stage3_r_cycle_le,
                     stage3_claims,
                     F.one(),
                 ) catch |err| {
@@ -1877,10 +1889,10 @@ pub fn ProofConverter(comptime F: type) type {
                     const bytes = r_cycle_sumcheck_be[i].toBytes();
                     std.debug.print("[STAGE4 ZOLT CHECK]   r_cycle_sumcheck_be[{}] = {any}\n", .{ i, bytes[0..8] });
                 }
-                std.debug.print("[STAGE4 ZOLT CHECK] stage3_r_cycle (LE).len = {}\n", .{stage3_result.challenges.len});
-                for (0..stage3_result.challenges.len) |i| {
-                    const bytes = stage3_result.challenges[i].toBytes();
-                    std.debug.print("[STAGE4 ZOLT CHECK]   stage3_r_cycle[{}] = {any}\n", .{ i, bytes[0..8] });
+                std.debug.print("[STAGE4 ZOLT CHECK] stage3_r_cycle (LE, passed to prover).len = {}\n", .{stage3_r_cycle_le.len});
+                for (0..stage3_r_cycle_le.len) |i| {
+                    const bytes = stage3_r_cycle_le[i].toBytes();
+                    std.debug.print("[STAGE4 ZOLT CHECK]   stage3_r_cycle_le[{}] = {any}\n", .{ i, bytes[0..8] });
                 }
 
                 const rd_write_value_claim = regs_claims.rd_wa_claim.mul(regs_claims.inc_claim.add(regs_claims.val_claim));

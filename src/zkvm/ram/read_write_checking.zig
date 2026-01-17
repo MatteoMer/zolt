@@ -451,11 +451,22 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 ra_claim = ra_claim.add(eq_addr.mul(eq_cycle).mul(entry.ra_coeff));
             }
 
+            // Compute base: val_init.evaluate(r_address) = Σ_k eq(r_address, k) * val_init[k]
+            // This is the "background" value from initial RAM state
             var val_claim = F.zero();
+            const K = @as(usize, 1) << @intCast(log_k);
+            for (0..@min(K, self.val_init.len)) |k| {
+                const eq_addr = computeEq(F, r_address[0..log_k], k);
+                val_claim = val_claim.add(eq_addr.mul(self.val_init[k]));
+            }
+
+            // Add entry contributions: eq(r_addr, addr) * eq(r_cycle, cycle) * (entry.val_coeff - val_init[addr])
+            // Each entry represents a RAM operation that overwrites the initial value at that (addr, cycle)
             for (self.entries.items) |entry| {
                 const eq_addr = computeEq(F, r_address[0..log_k], entry.address);
                 const eq_cycle = computeEq(F, r_cycle[0..log_t], entry.cycle);
-                val_claim = val_claim.add(eq_addr.mul(eq_cycle).mul(entry.val_coeff));
+                const delta = entry.val_coeff.sub(self.val_init[entry.address]);
+                val_claim = val_claim.add(eq_addr.mul(eq_cycle).mul(delta));
             }
 
             var inc_claim = F.zero();

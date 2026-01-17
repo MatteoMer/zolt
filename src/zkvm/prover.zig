@@ -749,7 +749,7 @@ pub fn MultiStageProver(comptime F: type) type {
                 r_address,
                 r_cycle,
             );
-            defer val_params.deinit();
+            // Note: val_params ownership is transferred to val_prover, which calls deinit on it
 
             // Skip if trace is empty
             if (trace_len == 0) {

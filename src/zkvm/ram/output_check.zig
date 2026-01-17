@@ -139,22 +139,37 @@ pub fn OutputSumcheckProver(comptime F: type) type {
             // Initialize val_init and val_final from sparse maps
             var non_zero_count: usize = 0;
             var io_region_values: usize = 0;
+            var init_non_zero_count: usize = 0;
+            var init_bytecode_count: usize = 0;
             for (val_init, val_final, 0..) |*vi, *vf, k| {
                 // Convert index k to address
                 const address = indexToAddress(k, memory_layout);
 
                 // Look up values (default 0)
-                vi.* = if (initial_ram.get(address)) |v| F.fromU64(v) else F.zero();
+                vi.* = if (initial_ram.get(address)) |v| blk: {
+                    init_non_zero_count += 1;
+                    if (k >= 4096) {
+                        init_bytecode_count += 1;
+                    }
+                    if (k < 5 or (k >= 4096 and k < 4100)) {
+                        std.debug.print("[ZOLT] OutputSumcheck: initial_ram k={}, addr=0x{X:0>8}, val=0x{X}\n", .{ k, address, v });
+                    }
+                    break :blk F.fromU64(v);
+                } else F.zero();
                 vf.* = if (final_ram.get(address)) |v| blk: {
                     non_zero_count += 1;
                     if (k >= 1024 and k < 4096) { // IO region
                         io_region_values += 1;
                         std.debug.print("[ZOLT] OutputSumcheck: IO region k={}, addr=0x{X:0>8}, val={}\n", .{ k, address, v });
                     }
+                    if (k < 5 or (k >= 4096 and k < 4100)) {
+                        std.debug.print("[ZOLT] OutputSumcheck: final_ram k={}, addr=0x{X:0>8}, val=0x{X}\n", .{ k, address, v });
+                    }
                     break :blk F.fromU64(v);
                 } else F.zero();
             }
-            std.debug.print("[ZOLT] OutputSumcheck: non_zero_count={}, io_region_values={}, K={}\n", .{ non_zero_count, io_region_values, K });
+            std.debug.print("[ZOLT] OutputSumcheck: final_ram non_zero_count={}, io_region_values={}, K={}\n", .{ non_zero_count, io_region_values, K });
+            std.debug.print("[ZOLT] OutputSumcheck: initial_ram non_zero_count={}, bytecode_count={}\n", .{ init_non_zero_count, init_bytecode_count });
 
             // Set panic and termination bits in val_final (matching Jolt's gen_ram_final_memory_state)
             // Jolt sets these AFTER getting the final memory state from the tracer

@@ -26,20 +26,35 @@ The `output_claim` comes from evaluating the proof's polynomial at challenges. T
 2. OR the challenges used during proving differ from verification
 3. OR the Az*Bz computation is wrong
 
-### Root Cause Hypothesis
+### Root Cause: Streaming Outer Prover Bug
 
-Looking at `generateStreamingOuterSumcheckProofWithTranscript`:
-- Creates round polynomials for outer Spartan sumcheck
-- Each round polynomial encodes sum over boolean hypercube
-- Verifier checks: sum(poly(0), poly(1)) == prev_claim
+**Key Discovery:**
+- The round polynomial coefficients ARE non-zero (correct)
+- The batching_coeff MATCHES between Zolt and Jolt (185020165269464640985840804826040774859)
+- The challenges appear to be derived correctly from transcript
+- BUT the final output_claim doesn't match expected_output_claim
 
-If proof polynomials don't match expected structure, verification fails.
+**The Problem:**
+The streaming outer prover generates polynomials that are **internally consistent** (sum(p(0), p(1)) == claim passes) but encode the **wrong computation**. The Az*Bz evaluation in the streaming prover differs from what Jolt's verifier expects.
+
+**Evidence:**
+- Jolt's `inner_sum_prod (Az*Bz)` = 14279035532130326282759614533689080459036208928223103610768541756919699764986
+- But proof produces output_claim = 10634556229438437044377436930505224242122955378672273598842115985622605632100
+- These should be related by tau factors, but the mismatch suggests Az*Bz is computed differently
+
+**Likely Bug Location:**
+`src/zkvm/spartan/streaming_outer.zig`:
+- `materializeLinearPhasePolynomials()` - Az/Bz computation
+- `computeRemainingRoundPoly()` - Round polynomial generation
+- Constraint group splitting (FIRST_GROUP_INDICES, SECOND_GROUP_INDICES)
+- Lagrange kernel application
 
 ### Next Steps
 
-1. **Compare sumcheck challenges**: Verify r0, r1, ... match between Zolt prover and Jolt verifier
-2. **Debug Az*Bz evaluation**: Ensure R1CS constraint evaluation matches Jolt
-3. **Verify polynomial coefficients**: Compare proof coefficients with expected values
+1. **Debug Az/Bz values**: Add logging to show actual Az*Bz products during streaming prover
+2. **Compare constraint evaluation**: Check if R1CS constraint evaluation matches Jolt
+3. **Verify split_eq handling**: Ensure eq polynomial factorization is correct
+4. **Check Lagrange kernel**: Verify lagrange_tau_r0 is applied correctly
 
 ---
 

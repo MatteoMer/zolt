@@ -1,115 +1,96 @@
 # Zolt-Jolt Cross-Verification Progress
 
-## Session 39 Summary - Phase 2 AddressMajor Implementation (2026-01-17)
+## Session 40 Summary - Stage 4 Investigation (2026-01-17)
 
 ### Current Status
 - **Stage 1: PASSES** ✓
-- **Stage 2: FAILS** - investigating RWC expected_claim mismatch
+- **Stage 2: PASSES** ✓ (Fixed by removing synthetic termination write)
+- **Stage 3: PASSES** ✓
+- **Stage 4: FAILS** - sumcheck output_claim != expected_output_claim
 
-### Key Changes This Session
+### Stage 2 Fix
+Removed synthetic termination write from memory trace. In Jolt, the termination bit
+is set directly in val_final during OutputSumcheck, NOT in the execution/memory trace.
+The RWC sumcheck only includes actual LOAD/STORE instructions.
 
-1. **Implemented AddressMajor ordering for Phase 2**
-   - Sort entries by (address, cycle) at start of Phase 2
-   - Group by column pairs (2k, 2k+1)
-   - Track checkpoints per column pair as entries are processed
-   - Compute [s(0), s(2)] and derive s(1) from current_claim
+### Stage 4 Deep Investigation
 
-2. **Implemented Phase 2 entry binding**
-   - `bindEntriesAddressMajor` function
-   - `bindAddressMajorPair` for (Some, Some) case
-   - `bindAddressMajorEvenOnly` for (Some, None) case
-   - `bindAddressMajorOddOnly` for (None, Some) case
+#### Verified Matches
+1. **Transcript state**: IDENTICAL between Zolt and Jolt at all checkpoints
+2. **Challenge bytes**: IDENTICAL (f5 ce c4 8c b0 64 ba b5 ce 4d a4 2a db 38 f8 ac)
+3. **Input claims**: ALL THREE match exactly
+4. **Batching coefficients**: MATCH
+5. **Polynomial coefficients in proof**: MATCH
 
-### Major Discovery: R1CS Witness Missing Memory Operations
+#### The Mystery
+Despite all values matching, the sumcheck verification fails:
+- output_claim = 19271728596168755243423895321875251085487803860811927729070795448153376555895
+- expected_output_claim = 5465056395000139767713092380206826725893519464559027111920075372240160609265
 
-**ROOT CAUSE FOUND:**
-- Fibonacci program has NO actual STORE/LOAD instructions!
-- Program terminates via infinite loop detection at cycle 54
-- The only "memory write" is the synthetic termination write added to MemoryTrace
-- This synthetic write is NOT reflected in ExecutionTrace steps
-- R1CS witness is built from ExecutionTrace
-- Result: RamReadValue=0, RamWriteValue=0 for ALL cycles
+The transcript state matches after UniPoly_end (round 438):
+- Jolt: state = [a1, 26, 18, ca, 99, 40, f2, f2]
+- Zolt: state = [a1, 26, 18, ca, 99, 40, f2, f2]
 
-**Evidence from logs:**
-```
-[R1CS GEN] Total steps with memory access: 0
-[ZOLT] OPENING_CLAIMS: claim[13] = { 0, 0, ... }  (RamReadValue)
-[ZOLT] OPENING_CLAIMS: claim[14] = { 0, 0, ... }  (RamWriteValue)
-```
+But the derived challenges differ:
+- Zolt: { 28, 74, 106, 25, 220, 50, 233, 243, ... }
+- Jolt: [ac, f8, 38, db, 2a, a4, 4d, ce, ...]
 
-### Unexpected Result: Jolt expects non-zero RWC claim
+### Root Cause Analysis
 
-**Jolt's expected_claim for Instance 2 (RWC):**
-```
-expected_claim = 3148303805315997521479349691467259099534742698741779098822247733559209807773
+The challenge in Zolt is stored as:
+```zig
+result = F{ .limbs = .{ 0, 0, masked_low, masked_high } };
 ```
 
-This is VERY non-zero, despite:
-- Zolt's proof having zero for RamReadValue and RamWriteValue
-- The formula being `rv_claim + gamma * wv_claim`
+But this is NOT proper Montgomery form. When toBytesBE() is called (which calls
+fromMontgomery()), it converts incorrectly.
 
-**Possible explanations:**
-1. Jolt's fibonacci test might use a different program with actual memory ops
-2. Jolt might handle termination differently
-3. There might be a serialization mismatch in how claims are stored/read
+**Key insight from challenge derivation debug:**
+- mont_limbs = [0, 0, 0xb5ba64b08cc4cef5, 0x0cf838db2aa44dce]
+- But challenge.toBytesBE() shows { 28, 74, 106, 25, ... }
 
-### Investigation Path
+The [0, 0, low, high] format is Jolt's MontU128Challenge optimization, but Zolt's
+field type expects proper Montgomery form. When Zolt multiplies by this challenge,
+it may produce wrong results.
 
-The next step is to add debug output to Jolt's verifier to trace:
-1. What values are read from the proof for RamReadValue/RamWriteValue
-2. What gamma is used
-3. How expected_claim is actually computed
+### Hypothesis
+Jolt's MontU128Challenge has special multiplication code that handles the [0, 0, low, high]
+format. Zolt's F type doesn't have this specialization, so field operations with the
+challenge produce incorrect results.
 
-### Files Modified
-- `src/zkvm/ram/read_write_checking.zig`
-  - Complete rewrite of `computePhase2Polynomial`
-  - Added `computePhase2Evals`, `computePhase2EvalsEvenOnly`, `computePhase2EvalsOddOnly`
-  - Added `bindEntriesAddressMajor`
-  - Added binding helper functions
+### Potential Fix
+Convert the 125-bit challenge to proper Montgomery form:
+```zig
+const standard_value = F{ .limbs = .{ low, high, 0, 0 } };
+const montgomery = standard_value.toMontgomery();
+```
+
+But the code has a comment saying this was tried and didn't work - need to investigate why.
 
 ---
 
-## Session 38 Summary - RWC Phase 2 Investigation (2026-01-17)
+## Session 39 Summary - Stage 2 Fix (2026-01-17)
 
-### Key Finding: Phase 2 Uses AddressMajor Iteration
+Found that Fibonacci has NO actual STORE/LOAD instructions. The synthetic termination
+write was causing a mismatch between R1CS claims (0) and RWC polynomial (non-zero).
 
-**Jolt's Phase 2:**
-- Entries sorted by column (address), then by row (cycle)
-- Iterates: for each column pair (2k, 2k+1), merge entries by cycle
-- Uses `even_checkpoint` and `odd_checkpoint` that track state across cycles
-- Checkpoints come from val_init and are updated as entries are processed
-
-**Zolt's Phase 2 (was):**
-- Entries remained in cycle-major order
-- Iterated directly over entries
-- Used bound val_init as static checkpoints
-- Missing the cycle-by-cycle state tracking
-
-### Memory Trace vs Execution Trace
-- MemoryTrace: Tracks actual RAM accesses (cycle 54: addr=2049, write value=1)
-- ExecutionTrace: Records trace steps with optional memory_addr/memory_value
-- R1CS witness is built from ExecutionTrace, not MemoryTrace
+Fixed by removing recordTerminationWrite() calls from the tracer.
 
 ---
 
-## Previous Sessions Summary
+## Previous Sessions
 
-### Stage 4 Issue (from Session 36)
-Stage 4 was failing with val_final mismatch - now deferred until Stage 2 is fixed.
-
-### Stage 3 Fix (from Session 35)
+### Stage 3 Fix (Session 35)
 - Fixed prefix-suffix decomposition convention (r_hi/r_lo)
-- Stage 3 now passes
 
 ### Stage 1 Fix
 - Fixed NextPC = 0 issue for NoOp padding
-- Stage 1 passes
 
 ---
 
 ## Technical References
 
-- Jolt RamReadWriteChecking: `jolt-core/src/zkvm/ram/read_write_checking.rs`
-- Jolt BatchedSumcheck: `jolt-core/src/subprotocols/sumcheck.rs`
-- Zolt RWC Prover: `src/zkvm/ram/read_write_checking.zig`
-- Zolt Stage 2: `src/zkvm/proof_converter.zig` (generateStage2BatchedSumcheck)
+- Jolt MontU128Challenge: `jolt-core/src/field/challenge/mont_ark_u128.rs`
+- Jolt BatchedSumcheck verify: `jolt-core/src/subprotocols/sumcheck.rs:180`
+- Zolt Blake2b transcript: `src/transcripts/blake2b.zig`
+- Zolt Stage 4 proof: `src/zkvm/proof_converter.zig` line ~1700

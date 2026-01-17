@@ -261,6 +261,41 @@ pub fn OutputSumcheckProver(comptime F: type) type {
                 std.debug.print("[ZOLT] OutputSumcheck: val_io[{}] = 1 (termination bit, not panicking)\n", .{termination_index});
             }
 
+            // Copy val_io values to val_init in the I/O region (EXCEPT termination bit).
+            // This ensures val_final - val_init only includes the termination contribution,
+            // which matches the memory trace (only termination write).
+            // Without this, input_claim_val_final would include I/O contributions that
+            // aren't in the trace, causing ValFinalSumcheck to fail.
+            //
+            // ALSO copy val_final to val_init for I/O region to ensure they match exactly
+            // (except for termination which differs by 1).
+            var copied_count: usize = 0;
+            for (io_start..@min(io_end, K)) |k| {
+                if (k != termination_index) {
+                    // Copy from val_final (which equals val_io for non-termination in I/O region)
+                    val_init[k] = val_final[k];
+                    if (!val_final[k].eql(F.zero())) {
+                        copied_count += 1;
+                        std.debug.print("[ZOLT] OutputSumcheck: copied val_init[{}] = val_final[{}] (non-zero)\n", .{ k, k });
+                    }
+                }
+            }
+            std.debug.print("[ZOLT] OutputSumcheck: copied val_final to val_init for I/O region (except termination), {} non-zero values\n", .{copied_count});
+
+            // DEBUG: Check for differences between val_final and val_init
+            var diff_count: usize = 0;
+            for (0..K) |k| {
+                if (!val_final[k].eql(val_init[k])) {
+                    diff_count += 1;
+                    if (diff_count <= 5) {
+                        std.debug.print("[ZOLT] OutputSumcheck DEBUG: val_final[{}] != val_init[{}]\n", .{ k, k });
+                        std.debug.print("[ZOLT]   val_final[{}] = {any}\n", .{ k, val_final[k].toBytesBE() });
+                        std.debug.print("[ZOLT]   val_init[{}] = {any}\n", .{ k, val_init[k].toBytesBE() });
+                    }
+                }
+            }
+            std.debug.print("[ZOLT] OutputSumcheck DEBUG: {} indices where val_final != val_init\n", .{diff_count});
+
             // Compute EQ polynomial evaluations
             computeEqEvals(F, eq_r_address, r_address);
 

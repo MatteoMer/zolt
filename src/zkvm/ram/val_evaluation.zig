@@ -128,14 +128,24 @@ pub fn IncPolynomial(comptime F: type) type {
                 }
             }
 
+            std.debug.print("[IncPolynomial] Processing {} accesses, trace_len={}, start_address=0x{X:0>16}, k={}\n", .{ trace.accesses.items.len, trace_len, start_address, k });
             for (trace.accesses.items) |access| {
                 if (access.op != .Write) continue;
-                if (access.address < start_address) continue;
+                if (access.address < start_address) {
+                    std.debug.print("[IncPolynomial] Skipping write at 0x{X:0>16}: address < start_address\n", .{access.address});
+                    continue;
+                }
                 const idx = (access.address - start_address) / 8;
-                if (idx >= k) continue;
+                if (idx >= k) {
+                    std.debug.print("[IncPolynomial] Skipping write at 0x{X:0>16}: idx {} >= k {}\n", .{ access.address, idx, k });
+                    continue;
+                }
 
                 const timestamp = @as(usize, @intCast(access.timestamp));
-                if (timestamp >= trace_len) continue;
+                if (timestamp >= trace_len) {
+                    std.debug.print("[IncPolynomial] Skipping write at 0x{X:0>16}: timestamp {} >= trace_len {}\n", .{ access.address, timestamp, trace_len });
+                    continue;
+                }
 
                 const old_val = last_value.get(access.address) orelse 0;
                 const new_val = access.value;
@@ -147,6 +157,8 @@ pub fn IncPolynomial(comptime F: type) type {
                     // Negative difference: -|diff|
                     evals[timestamp] = F.zero().sub(F.fromU64(old_val - new_val));
                 }
+
+                std.debug.print("[IncPolynomial] Write at idx={}, timestamp={}, old_val={}, new_val={}, inc={}\n", .{ idx, timestamp, old_val, new_val, if (new_val >= old_val) new_val - old_val else 0 });
 
                 try last_value.put(access.address, new_val);
             }

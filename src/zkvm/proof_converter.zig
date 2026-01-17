@@ -1737,16 +1737,38 @@ pub fn ProofConverter(comptime F: type) type {
                 );
                 defer val_eval_prover.deinit();
 
-                var r_address_raf_le = try self.allocator.alloc(F, stage2_result.r_address_raf.len);
-                defer self.allocator.free(r_address_raf_le);
-                for (0..stage2_result.r_address_raf.len) |i| {
-                    r_address_raf_le[i] = stage2_result.r_address_raf[stage2_result.r_address_raf.len - 1 - i];
+                // The OutputSumcheck's binding point comes from Stage 2's batched sumcheck challenges.
+                // OutputSumcheck runs for log_ram_k rounds, so it binds using challenges[0..log_ram_k].
+                //
+                // OutputSumcheck's binding order ("bot-binding"):
+                // - Round 0 binds variable 0 (LSB in index) with challenge[0]
+                // - Round i binds variable i with challenge[i]
+                // - Round n-1 binds variable n-1 (MSB) with challenge[n-1]
+                //
+                // After binding: evaluation point = [challenge[0], challenge[1], ..., challenge[n-1]]
+                // This is NOT reversed - use challenges directly.
+                var r_address_for_val_final = try self.allocator.alloc(F, log_ram_k);
+                defer self.allocator.free(r_address_for_val_final);
+                for (0..log_ram_k) |i| {
+                    // Use binding challenges from Stage 2 (first log_ram_k challenges)
+                    // NO REVERSAL - use in order
+                    r_address_for_val_final[i] = stage2_result.challenges[i];
+                }
+
+                // DEBUG: Compare r_address used by OutputSumcheck vs ValFinalProver
+                std.debug.print("[ZOLT STAGE4 DEBUG] Using Stage2 binding challenges for ValFinalProver:\n", .{});
+                for (0..@min(4, log_ram_k)) |i| {
+                    std.debug.print("[ZOLT STAGE4 DEBUG]   stage2_challenges[{}] = {any}\n", .{ i, stage2_result.challenges[i].toBytesBE() });
+                }
+                std.debug.print("[ZOLT STAGE4 DEBUG] r_address_for_val_final (reversed binding challenges):\n", .{});
+                for (0..@min(4, r_address_for_val_final.len)) |i| {
+                    std.debug.print("[ZOLT STAGE4 DEBUG]   r_address_for_val_final[{}] = {any}\n", .{ i, r_address_for_val_final[i].toBytesBE() });
                 }
 
                 const val_final_params = try ram.ValFinalParams(F).init(
                     self.allocator,
                     trace_len,
-                    r_address_raf_le,
+                    r_address_for_val_final,
                 );
                 var val_final_prover = try ram.ValFinalProver(F).init(
                     self.allocator,
@@ -1756,6 +1778,29 @@ pub fn ProofConverter(comptime F: type) type {
                     start_address,
                 );
                 defer val_final_prover.deinit();
+
+                // DEBUG: Compare input_claim from claims vs actual polynomial sum
+                const val_final_poly_sum = val_final_prover.computeInitialClaim();
+                const val_eval_poly_sum = val_eval_prover.computeInitialClaim();
+                std.debug.print("[ZOLT STAGE4 DEBUG] input_claim_val_final (from claims) = {any}\n", .{input_claim_val_final.toBytesBE()});
+                std.debug.print("[ZOLT STAGE4 DEBUG] val_final_poly_sum (actual Σ inc*wa) = {any}\n", .{val_final_poly_sum.toBytesBE()});
+                std.debug.print("[ZOLT STAGE4 DEBUG] Claims match? {}\n", .{input_claim_val_final.eql(val_final_poly_sum)});
+                std.debug.print("[ZOLT STAGE4 DEBUG] input_claim_val_eval (from claims) = {any}\n", .{input_claim_val_eval.toBytesBE()});
+                std.debug.print("[ZOLT STAGE4 DEBUG] val_eval_poly_sum (actual Σ inc*wa*lt) = {any}\n", .{val_eval_poly_sum.toBytesBE()});
+                std.debug.print("[ZOLT STAGE4 DEBUG] Claims match? {}\n", .{input_claim_val_eval.eql(val_eval_poly_sum)});
+
+                // DEBUG: Compute eq at termination_index (2049) using both methods
+                // Use local helper to compute eq(r, k) with LE bit ordering
+                const termination_index: usize = 2049;
+                const eq_at_term_reversed = computeEqAtPointLE(r_address_for_val_final, termination_index);
+                std.debug.print("[ZOLT STAGE4 DEBUG] eq_LE(r_address_for_val_final, 2049) = {any}\n", .{eq_at_term_reversed.toBytesBE()});
+                // Compute eq_LE using original r_address_raf (non-reversed)
+                const eq_at_term_orig = computeEqAtPointLE(stage2_result.r_address_raf, termination_index);
+                std.debug.print("[ZOLT STAGE4 DEBUG] eq_LE(r_address_raf, 2049) = {any}\n", .{eq_at_term_orig.toBytesBE()});
+                // Compute eq_BE using original r_address_raf
+                const eq_at_term_be = computeEqAtPointBigEndian(stage2_result.r_address_raf, termination_index);
+                std.debug.print("[ZOLT STAGE4 DEBUG] eq_BE(r_address_raf, 2049) = {any}\n", .{eq_at_term_be.toBytesBE()});
+                std.debug.print("[ZOLT STAGE4 DEBUG] input_claim_val_final should equal one of these\n", .{});
 
                 const val_eval_rounds = val_eval_prover.numRounds();
                 const val_final_rounds = val_final_prover.numRounds();
@@ -3070,6 +3115,10 @@ pub fn ProofConverter(comptime F: type) type {
             std.debug.print("[ZOLT] STAGE2 RWC: rwc_prover is_null = {}\n", .{rwc_prover == null});
             if (rwc_prover) |*rp| {
                 std.debug.print("[ZOLT] STAGE2 RWC: getting opening claims...\n", .{});
+                std.debug.print("[ZOLT] STAGE2 RWC: entries.len = {}\n", .{rp.entries.items.len});
+                for (rp.entries.items, 0..) |entry, idx| {
+                    std.debug.print("[ZOLT] STAGE2 RWC: entry[{}]: cycle={}, addr={}, ra={any}\n", .{ idx, entry.cycle, entry.address, entry.ra_coeff.toBytesBE()[0..8] });
+                }
                 const rwc_opening_claims = rp.getOpeningClaims(challenges.items);
                 rwc_ra_claim = rwc_opening_claims.ra_claim;
                 rwc_val_claim = rwc_opening_claims.val_claim;
@@ -3355,6 +3404,21 @@ pub fn ProofConverter(comptime F: type) type {
                     result = result.mul(r[i]);
                 } else {
                     result = result.mul(F.one().sub(r[i]));
+                }
+            }
+            return result;
+        }
+
+        /// Compute eq(r, idx) where r is in LITTLE_ENDIAN order (LSB first).
+        /// bit i of idx corresponds to r[i].
+        fn computeEqAtPointLE(r: []const F, idx: usize) F {
+            var result = F.one();
+            for (r, 0..) |ri, i| {
+                const bit = (idx >> @intCast(i)) & 1;
+                if (bit == 1) {
+                    result = result.mul(ri);
+                } else {
+                    result = result.mul(F.one().sub(ri));
                 }
             }
             return result;

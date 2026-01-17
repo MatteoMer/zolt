@@ -202,8 +202,17 @@ pub fn ArkworksSerializer(comptime F: type) type {
 
         /// Write a SumcheckInstanceProof
         pub fn writeSumcheckInstanceProof(self: *Self, proof: *const jolt_types.SumcheckInstanceProof(F)) !void {
-            try self.writeUsize(proof.compressed_polys.items.len);
-            for (proof.compressed_polys.items) |*poly| {
+            const num_rounds = proof.compressed_polys.items.len;
+            std.debug.print("[SERIALIZATION] Writing SumcheckInstanceProof with {} rounds\n", .{num_rounds});
+            try self.writeUsize(num_rounds);
+            for (proof.compressed_polys.items, 0..) |*poly, i| {
+                if (i == 0 and num_rounds == 15) {
+                    // This is likely Stage 4 - print the first round coefficients
+                    std.debug.print("[SERIALIZATION] Stage4 Round 0 coeffs ({} elements):\n", .{poly.coeffs_except_linear_term.len});
+                    for (poly.coeffs_except_linear_term, 0..) |coeff, j| {
+                        std.debug.print("[SERIALIZATION]   coeffs[{}] = {any}\n", .{ j, coeff.toBytes() });
+                    }
+                }
                 try self.writeCompressedUniPoly(poly);
             }
         }

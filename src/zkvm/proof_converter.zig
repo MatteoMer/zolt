@@ -1786,6 +1786,16 @@ pub fn ProofConverter(comptime F: type) type {
                     var combined_evals = [4]F{ F.zero(), F.zero(), F.zero(), F.zero() };
 
                     const regs_evals = regs_prover.computeRoundEvals(round_idx, regs_current_claim);
+
+                    // Debug: Print regs_evals for round 0
+                    if (round_idx == 0) {
+                        std.debug.print("[PROOF_CONV STAGE4] Round 0 regs_evals:\n", .{});
+                        std.debug.print("[PROOF_CONV STAGE4]   regs_evals[0] = {any}\n", .{ regs_evals[0].toBytes()[0..8] });
+                        std.debug.print("[PROOF_CONV STAGE4]   regs_evals[1] = {any}\n", .{ regs_evals[1].toBytes()[0..8] });
+                        std.debug.print("[PROOF_CONV STAGE4]   regs_evals[2] = {any}\n", .{ regs_evals[2].toBytes()[0..8] });
+                        std.debug.print("[PROOF_CONV STAGE4]   regs_evals[3] = {any}\n", .{ regs_evals[3].toBytes()[0..8] });
+                    }
+
                     for (0..4) |j| {
                         combined_evals[j] = combined_evals[j].add(regs_evals[j].mul(batching_coeffs[0]));
                     }
@@ -1828,14 +1838,41 @@ pub fn ProofConverter(comptime F: type) type {
                         }
                     }
 
+                    // Get FULL coefficients [c0, c1, c2, c3] for the CompressedUniPoly.init
+                    // (it expects full coefficients and removes the linear term c1 internally)
+                    const full_coeffs = poly_mod.UniPoly(F).interpolateDegree3(combined_evals);
+                    var coeffs = [_]F{ full_coeffs[0], full_coeffs[1], full_coeffs[2], full_coeffs[3] };
+
+                    // Debug: Verify p(0) + p(1) = batched_claim
+                    if (round_idx == 0) {
+                        const p0 = combined_evals[0];
+                        const p1 = combined_evals[1];
+                        const sum = p0.add(p1);
+                        std.debug.print("[ZOLT STAGE4 CHECK] Round {}: p(0) = {any}\n", .{ round_idx, p0.toBytesBE()[0..16] });
+                        std.debug.print("[ZOLT STAGE4 CHECK] Round {}: p(1) = {any}\n", .{ round_idx, p1.toBytesBE()[0..16] });
+                        std.debug.print("[ZOLT STAGE4 CHECK] Round {}: p(0)+p(1) = {any}\n", .{ round_idx, sum.toBytesBE()[0..16] });
+                        std.debug.print("[ZOLT STAGE4 CHECK] Round {}: batched_claim = {any}\n", .{ round_idx, batched_claim.toBytesBE()[0..16] });
+                        std.debug.print("[ZOLT STAGE4 CHECK] Round {}: match? {}\n", .{ round_idx, sum.eql(batched_claim) });
+                    }
+
+                    const coeffs_slice: []const F = &coeffs;
+                    try jolt_proof.stage4_sumcheck_proof.addRoundPoly(coeffs_slice);
+
+                    // Get compressed coefficients [c0, c2, c3] for transcript
                     const compressed = poly_mod.UniPoly(F).evalsToCompressed(combined_evals);
-                    var coeffs = [_]F{ compressed[0], compressed[1], compressed[2] };
-                    try jolt_proof.stage4_sumcheck_proof.addRoundPoly(&coeffs);
 
                     if (round_idx < 3 or round_idx >= stage4_max_rounds - 2) {
                         std.debug.print("[ZOLT STAGE4] Round {}: c0 = {any}\n", .{ round_idx, compressed[0].toBytesBE()[0..16] });
                         std.debug.print("[ZOLT STAGE4] Round {}: c2 = {any}\n", .{ round_idx, compressed[2].toBytesBE()[0..16] });
                         std.debug.print("[ZOLT STAGE4] Round {}: batched_claim = {any}\n", .{ round_idx, batched_claim.toBytesBE()[0..16] });
+                    }
+
+                    // Debug: Show exact bytes being appended to transcript for Round 0
+                    if (round_idx == 0) {
+                        std.debug.print("[ZOLT STAGE4 TRANSCRIPT] Round 0 coefficients (LE bytes stored in proof):\n", .{});
+                        std.debug.print("[ZOLT STAGE4 TRANSCRIPT]   coeffs[0] = c0 (32 bytes) = {any}\n", .{coeffs[0].toBytes()});
+                        std.debug.print("[ZOLT STAGE4 TRANSCRIPT]   coeffs[1] = c2 (32 bytes) = {any}\n", .{coeffs[1].toBytes()});
+                        std.debug.print("[ZOLT STAGE4 TRANSCRIPT]   coeffs[2] = c3 (32 bytes) = {any}\n", .{coeffs[2].toBytes()});
                     }
 
                     transcript.appendMessage("UniPoly_begin");

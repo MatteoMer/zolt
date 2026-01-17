@@ -265,8 +265,33 @@ pub fn Stage4Prover(comptime F: type) type {
             }
 
             // Precompute eq(r_cycle', j) evaluations
+            // IMPORTANT: Jolt uses BIG-ENDIAN ordering for eq polynomial (r[0] = MSB).
+            // Zolt receives challenges in LE order (r[0] = first challenge = LSB).
+            // We must reverse to match Jolt's BE convention.
+            const r_cycle_be = try allocator.alloc(F, r_cycle.len);
+            defer allocator.free(r_cycle_be);
+            for (0..r_cycle.len) |i| {
+                r_cycle_be[i] = r_cycle[r_cycle.len - 1 - i];
+            }
+
+            // Debug: print r_cycle LE vs BE ordering
+            std.debug.print("[STAGE4 INIT] r_cycle_le (original):\n", .{});
+            for (0..@min(4, r_cycle.len)) |i| {
+                std.debug.print("[STAGE4 INIT]   r_cycle_le[{}] = {any}\n", .{ i, r_cycle[i].toBytes()[0..8] });
+            }
+            std.debug.print("[STAGE4 INIT] r_cycle_be (reversed):\n", .{});
+            for (0..@min(4, r_cycle_be.len)) |i| {
+                std.debug.print("[STAGE4 INIT]   r_cycle_be[{}] = {any}\n", .{ i, r_cycle_be[i].toBytes()[0..8] });
+            }
+
             const eq_cycle_evals = try allocator.alloc(F, T);
-            try computeEqEvals(F, eq_cycle_evals, r_cycle);
+            try computeEqEvalsBE(F, eq_cycle_evals, r_cycle_be);
+
+            // Debug: print first few eq evaluations
+            std.debug.print("[STAGE4 INIT] eq_cycle_evals (from BE):\n", .{});
+            for (0..@min(4, eq_cycle_evals.len)) |j| {
+                std.debug.print("[STAGE4 INIT]   eq_cycle_evals[{}] = {any}\n", .{ j, eq_cycle_evals[j].toBytes()[0..8] });
+            }
 
             // Debug: Compute simple MLE sums to verify eq polynomial
             // These should match Stage 3's claims
@@ -562,14 +587,10 @@ pub fn Stage4Prover(comptime F: type) type {
 
             // Debug: Print eq polynomial values for Round 0
             if (round == 0) {
-                std.debug.print("[ZOLT STAGE4 EQ] Round 0 eq polynomial values (first 8):\n", .{});
-                for (0..@min(8, self.eq_cycle_evals.len)) |j| {
-                    std.debug.print("[ZOLT STAGE4 EQ]   eq_cycle[{}] = {any}\n", .{ j, self.eq_cycle_evals[j].toBytes() });
-                }
-                std.debug.print("[ZOLT STAGE4 EQ] r_cycle used to compute eq:\n", .{});
-                for (0..@min(8, self.r_cycle.len)) |j| {
-                    std.debug.print("[ZOLT STAGE4 EQ]   r_cycle[{}] = {any}\n", .{ j, self.r_cycle[j].toBytes() });
-                }
+                std.debug.print("[ZOLT STAGE4 EQ_USE] Round 0 - eq values being used:\n", .{});
+                std.debug.print("[ZOLT STAGE4 EQ_USE]   eq_cycle_evals[0] = {any}\n", .{ self.eq_cycle_evals[0].toBytes()[0..8] });
+                std.debug.print("[ZOLT STAGE4 EQ_USE]   eq_cycle_evals[1] = {any}\n", .{ self.eq_cycle_evals[1].toBytes()[0..8] });
+                std.debug.print("[ZOLT STAGE4 EQ_USE]   current_claim = {any}\n", .{ current_claim.toBytes()[0..8] });
             }
 
             // We need evaluations at 0, 1, 2, 3 for a degree-3 polynomial.
@@ -820,6 +841,47 @@ pub fn Stage4Prover(comptime F: type) type {
             };
         }
     };
+}
+
+/// Compute eq polynomial evaluations: eq(r, i) for i in [0, 2^n)
+/// Uses BIG-ENDIAN ordering to match Jolt's convention:
+/// r[0] corresponds to the MSB (highest bit) of index i.
+/// This matches Jolt's EqPolynomial::evals() function.
+fn computeEqEvalsBE(comptime F: type, output: []F, r: []const F) !void {
+    const n = r.len;
+    const size = @as(usize, 1) << @intCast(n);
+
+    if (output.len < size) return error.OutputTooSmall;
+
+    // Initialize - matches Jolt's vec![F::one(); r.len().pow2()]
+    output[0] = F.one();
+    for (1..size) |i| {
+        output[i] = F.zero();
+    }
+
+    // Build the table iteratively, matching Jolt's evals_serial logic:
+    // for j in 0..r.len() {
+    //     size *= 2;
+    //     for i in (0..size).rev().step_by(2) {
+    //         let scalar = evals[i / 2];
+    //         evals[i] = scalar * r[j];
+    //         evals[i - 1] = scalar - evals[i];
+    //     }
+    // }
+    var current_size: usize = 1;
+    for (r) |r_j| {
+        current_size *= 2;
+        // Iterate from current_size-1 down to 1 by 2
+        // Process pairs (i-1, i) for i = current_size-1, current_size-3, ..., 1
+        var i: usize = current_size - 1;
+        while (i > 0) {
+            const scalar = output[i / 2];
+            output[i] = scalar.mul(r_j);
+            output[i - 1] = scalar.sub(output[i]);
+            if (i < 2) break;  // Prevent underflow on next subtraction
+            i -= 2;
+        }
+    }
 }
 
 /// Compute eq polynomial evaluations: eq(r, i) for i in [0, 2^n)

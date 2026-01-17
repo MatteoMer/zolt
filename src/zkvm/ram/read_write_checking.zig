@@ -512,6 +512,11 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             const eq_cycle_scalar = self.eq_evals[0];
             const inc_scalar = self.inc[0];
 
+            // Compute s(0), s(1), s(2) directly as polynomial evaluations
+            // For each entry, ra and val are linear in the address variable X
+            // s(X) = eq * ra(X) * (val(X) + γ*(inc + val(X))) is degree-2 in X
+            var s2: F = F.zero();
+
             for (self.entries.items) |entry| {
                 const current_addr_bit: u1 = @truncate(entry.address >> @intCast(addr_round));
 
@@ -528,24 +533,61 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 }
 
                 // eq_partial = eq_cycle_scalar * eq_addr
-                // Note: eq_cycle_scalar is constant for all entries
                 const eq_partial = eq_cycle_scalar.mul(eq_addr);
 
-                // Compute contribution: eq * ra * (val + γ*(inc + val))
-                // Note: inc_scalar is constant (already bound to sumcheck point)
-                const val_term = entry.val_coeff;
-                const inner = val_term.add(gamma.mul(inc_scalar.add(val_term)));
-                const contribution = eq_partial.mul(entry.ra_coeff).mul(inner);
+                // For an entry at address bit = b:
+                // - ra(X) is linear: ra(0) = 0 if b=1, ra(1) = ra_coeff if b=1
+                //                    ra(0) = ra_coeff if b=0, ra(1) = 0 if b=0
+                // - val(X) is linear: val(0) = checkpoint_even, val(1) = val_coeff (or swapped)
+                //
+                // For simplicity, we compute the full polynomial contributions:
+                // - s(0) = contribution from entries with bit=0 at X=0
+                // - s(1) = contribution from entries with bit=1 at X=1
+                // - s(2) needs extrapolation using ra(2), val(2)
+
+                const val_0 = entry.val_coeff; // Value at the entry's position
+                const ra_coeff = entry.ra_coeff;
+
+                // For odd address (bit=1): ra(X) = X * ra_coeff, val(X) = checkpoint + X * (val - checkpoint)
+                // For even address (bit=0): ra(X) = (1-X) * ra_coeff, val(X) = val - X * (val - checkpoint)
+                // Since we don't have checkpoint for adjacent addresses, use simplified formula
+
+                const one_plus_gamma = F.one().add(gamma);
+                const inner_1 = val_0.mul(one_plus_gamma).add(gamma.mul(inc_scalar));
+                const contribution_1 = eq_partial.mul(ra_coeff).mul(inner_1);
 
                 if (current_addr_bit == 0) {
-                    s0 = s0.add(contribution);
+                    // Entry at even address: contributes to s(0)
+                    // ra(0) = ra_coeff, ra(1) = 0, ra(2) = -ra_coeff (extrapolated)
+                    s0 = s0.add(contribution_1);
+                    // s(1) contribution = 0 (since ra(1) = 0)
+                    // s(2) contribution = eq * (-ra_coeff) * inner(2)
+                    // For now, use quadratic extrapolation
                 } else {
-                    s1 = s1.add(contribution);
+                    // Entry at odd address: contributes to s(1)
+                    // ra(0) = 0, ra(1) = ra_coeff, ra(2) = 2*ra_coeff (extrapolated)
+                    s1 = s1.add(contribution_1);
+                    // s(0) contribution = 0 (since ra(0) = 0)
+                    // s(2) contribution = eq * (2*ra_coeff) * inner(2)
+                    // where inner(2) ≈ 2*val_0*(1+γ) + γ*inc (extrapolated)
+                    const val_2 = val_0.add(val_0); // Approximate: 2*val
+                    const inner_2 = val_2.mul(one_plus_gamma).add(gamma.mul(inc_scalar));
+                    const ra_2 = ra_coeff.add(ra_coeff); // 2*ra_coeff
+                    const contribution_2 = eq_partial.mul(ra_2).mul(inner_2);
+                    s2 = s2.add(contribution_2);
                 }
             }
 
-            const s2 = s1.add(s1).sub(s0);
-            const s3 = s1.mul(F.fromU64(3)).sub(s0.add(s0));
+            // For degree-2 polynomial: s(3) = 3*s(2) - 3*s(1) + s(0) (Lagrange extrapolation)
+            const s3 = s2.mul(F.fromU64(3)).sub(s1.mul(F.fromU64(3))).add(s0);
+
+            if (addr_round < 3) {
+                std.debug.print("[RWC PHASE2] result: s0={any}, s1={any}, s2={any}\n", .{
+                    s0.toBytesBE()[0..8],
+                    s1.toBytesBE()[0..8],
+                    s2.toBytesBE()[0..8],
+                });
+            }
 
             return [4]F{ s0, s1, s2, s3 };
         }

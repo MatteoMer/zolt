@@ -29,11 +29,17 @@
 
 ### Current Blocker: Execution Trace Mismatch
 
-Cross-verification fails because Zolt and Jolt produce **different execution traces**:
-- Zolt executes `examples/fibonacci.elf` (Zolt's binary)
-- Jolt executes `fibonacci-guest` (Jolt's guest binary)
+Cross-verification fails even with the SAME binary and input:
+- Tested with Jolt's `fibonacci-guest` binary at `/tmp/jolt-guest-targets/fibonacci-guest-fib/riscv64imac-unknown-none-elf/release/fibonacci-guest`
+- Tested with input 50 (`--input-hex 32`)
+- Verification still fails at Stage 1 with different challenges
 
-Even with the same SRS, different polynomial evaluations → different commitments → different transcript state → different challenges.
+This means Zolt's emulator produces different execution traces than Jolt's tracer for the same RISC-V program.
+
+Root cause: **Emulator semantics differ between Zolt and Jolt**
+- Memory layout may differ
+- Register handling may differ
+- Instruction interpretation may differ
 
 **For true cross-verification, we need:**
 1. **Option A**: Use EXACTLY the same binary
@@ -45,6 +51,7 @@ Even with the same SRS, different polynomial evaluations → different commitmen
 3. **Option C**: Match execution semantics
    - Ensure Zolt's emulator produces identical traces for identical programs
    - Requires byte-level compatibility of RISC-V implementation
+   - there's a rust toolchain for jolt when doing rustup toolchain. maybe interesting
 
 ## Next Steps
 1. Export Jolt's fibonacci guest binary and use it in Zolt
@@ -64,7 +71,16 @@ zig build run -- prove examples/fibonacci.elf --jolt-format --srs /tmp/jolt_dory
 cd /path/to/jolt/jolt-core && cargo test test_verify_zolt_proof --release -- --nocapture --ignored
 ```
 
+## Test Results (Session 41)
+
+- **714/714 unit tests pass** ✅
+- One integration test killed (signal 9, likely OOM): `host.mod.test.execute runs simple program`
+- All sumcheck verifier tests pass
+- All field arithmetic tests pass
+- All transcript tests pass
+
 ## Commit History
+- f1f7651: docs: update TODO with cross-verification analysis
 - d328b37: docs: update notes with cross-verification findings
 - 54200fa: fix: convert challenge scalar to proper Montgomery form (Stage 4 fix)
 - 5cec222: fix: remove synthetic termination write from memory trace (Stage 2 fix)

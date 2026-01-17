@@ -517,8 +517,29 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             // s(X) = eq * ra(X) * (val(X) + γ*(inc + val(X))) is degree-2 in X
             var s2: F = F.zero();
 
+            // Get val_init checkpoint at the current bound point
+            // After binding addr_round variables, val_init is at current_size = K / 2^addr_round
+            const K = @as(usize, 1) << @intCast(self.params.log_k);
+            const val_init_current_size = K >> @intCast(addr_round);
+
             for (self.entries.items) |entry| {
-                const current_addr_bit: u1 = @truncate(entry.address >> @intCast(addr_round));
+                // Column pair index: entry.address / 2 after addr_round bindings
+                // But entry.address hasn't been modified, so we compute the effective column
+                const effective_col = entry.address >> @intCast(addr_round);
+                const col_pair = effective_col / 2;
+                const is_even_col = effective_col % 2 == 0;
+
+                // Get checkpoint from bound val_init
+                const even_col_idx = col_pair * 2;
+                const odd_col_idx = even_col_idx + 1;
+                const even_checkpoint = if (even_col_idx < val_init_current_size)
+                    self.val_init[even_col_idx]
+                else
+                    F.zero();
+                const odd_checkpoint = if (odd_col_idx < val_init_current_size)
+                    self.val_init[odd_col_idx]
+                else
+                    F.zero();
 
                 // Compute eq over bound address variables only
                 var eq_addr = F.one();
@@ -535,46 +556,40 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 // eq_partial = eq_cycle_scalar * eq_addr
                 const eq_partial = eq_cycle_scalar.mul(eq_addr);
 
-                // For an entry at address bit = b:
-                // - ra(X) is linear: ra(0) = 0 if b=1, ra(1) = ra_coeff if b=1
-                //                    ra(0) = ra_coeff if b=0, ra(1) = 0 if b=0
-                // - val(X) is linear: val(0) = checkpoint_even, val(1) = val_coeff (or swapped)
-                //
-                // For simplicity, we compute the full polynomial contributions:
-                // - s(0) = contribution from entries with bit=0 at X=0
-                // - s(1) = contribution from entries with bit=1 at X=1
-                // - s(2) needs extrapolation using ra(2), val(2)
-
-                const val_0 = entry.val_coeff; // Value at the entry's position
                 const ra_coeff = entry.ra_coeff;
-
-                // For odd address (bit=1): ra(X) = X * ra_coeff, val(X) = checkpoint + X * (val - checkpoint)
-                // For even address (bit=0): ra(X) = (1-X) * ra_coeff, val(X) = val - X * (val - checkpoint)
-                // Since we don't have checkpoint for adjacent addresses, use simplified formula
-
+                const val_coeff = entry.val_coeff;
                 const one_plus_gamma = F.one().add(gamma);
-                const inner_1 = val_0.mul(one_plus_gamma).add(gamma.mul(inc_scalar));
-                const contribution_1 = eq_partial.mul(ra_coeff).mul(inner_1);
 
-                if (current_addr_bit == 0) {
-                    // Entry at even address: contributes to s(0)
-                    // ra(0) = ra_coeff, ra(1) = 0, ra(2) = -ra_coeff (extrapolated)
-                    s0 = s0.add(contribution_1);
-                    // s(1) contribution = 0 (since ra(1) = 0)
-                    // s(2) contribution = eq * (-ra_coeff) * inner(2)
-                    // For now, use quadratic extrapolation
-                } else {
-                    // Entry at odd address: contributes to s(1)
-                    // ra(0) = 0, ra(1) = ra_coeff, ra(2) = 2*ra_coeff (extrapolated)
-                    s1 = s1.add(contribution_1);
-                    // s(0) contribution = 0 (since ra(0) = 0)
-                    // s(2) contribution = eq * (2*ra_coeff) * inner(2)
-                    // where inner(2) ≈ 2*val_0*(1+γ) + γ*inc (extrapolated)
-                    const val_2 = val_0.add(val_0); // Approximate: 2*val
+                if (is_even_col) {
+                    // Entry at even column: ra(0) = ra_coeff, ra(1) = 0
+                    // val(0) = val_coeff, val(1) = odd_checkpoint
+                    const ra_0 = ra_coeff;
+                    const val_0 = val_coeff;
+                    const val_1 = odd_checkpoint;
+                    const ra_2 = F.zero().sub(ra_coeff); // ra(2) = 2*ra(1) - ra(0) = 0 - ra_coeff = -ra_coeff
+                    const val_2 = val_1.add(val_1).sub(val_0); // val(2) = 2*val(1) - val(0)
+
+                    const inner_0 = val_0.mul(one_plus_gamma).add(gamma.mul(inc_scalar));
                     const inner_2 = val_2.mul(one_plus_gamma).add(gamma.mul(inc_scalar));
-                    const ra_2 = ra_coeff.add(ra_coeff); // 2*ra_coeff
-                    const contribution_2 = eq_partial.mul(ra_2).mul(inner_2);
-                    s2 = s2.add(contribution_2);
+
+                    s0 = s0.add(eq_partial.mul(ra_0).mul(inner_0));
+                    // s1 contribution = 0 (ra(1) = 0)
+                    s2 = s2.add(eq_partial.mul(ra_2).mul(inner_2));
+                } else {
+                    // Entry at odd column: ra(0) = 0, ra(1) = ra_coeff
+                    // val(0) = even_checkpoint, val(1) = val_coeff
+                    const ra_1 = ra_coeff;
+                    const val_0 = even_checkpoint;
+                    const val_1 = val_coeff;
+                    const ra_2 = ra_1.add(ra_1); // ra(2) = 2*ra(1) - ra(0) = 2*ra_coeff - 0
+                    const val_2 = val_1.add(val_1).sub(val_0); // val(2) = 2*val(1) - val(0)
+
+                    const inner_1 = val_1.mul(one_plus_gamma).add(gamma.mul(inc_scalar));
+                    const inner_2 = val_2.mul(one_plus_gamma).add(gamma.mul(inc_scalar));
+
+                    // s0 contribution = 0 (ra(0) = 0)
+                    s1 = s1.add(eq_partial.mul(ra_1).mul(inner_1));
+                    s2 = s2.add(eq_partial.mul(ra_2).mul(inner_2));
                 }
             }
 
@@ -629,6 +644,24 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 // Bind entries: group by (row/2, col), create bound entries
                 // This matches Jolt's ReadWriteMatrixCycleMajor::bind
                 try self.bindEntries(challenge);
+            }
+
+            // Fold val_init in Phase 2
+            // This matches Jolt's val_init.bind_parallel(r, BindingOrder::LowToHigh)
+            const in_phase2 = self.round >= self.params.log_t and
+                self.round < self.params.log_t + self.params.log_k;
+            if (in_phase2) {
+                const addr_round = self.round - self.params.log_t;
+                const K = @as(usize, 1) << @intCast(self.params.log_k);
+                const current_size = K >> @intCast(addr_round);
+                if (current_size > 1) {
+                    const half = current_size / 2;
+                    for (0..half) |i| {
+                        const lo = self.val_init[2 * i];
+                        const hi = self.val_init[2 * i + 1];
+                        self.val_init[i] = lo.add(challenge.mul(hi.sub(lo)));
+                    }
+                }
             }
 
             self.round += 1;

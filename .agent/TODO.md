@@ -7,66 +7,54 @@
 | 1 | ✅ PASS | ✅ PASS | Fixed MontU128Challenge |
 | 2 | ✅ PASS | ✅ PASS | - |
 | 3 | ✅ PASS | ✅ PASS | - |
-| 4 | ✅ PASS | ❌ FAIL | Sumcheck output_claim mismatch |
+| 4 | ✅ PASS | ❌ FAIL | Input claim mismatch for val_eval/val_final |
 | 5 | ✅ PASS | - | Blocked by Stage 4 |
 | 6 | ✅ PASS | - | Blocked by Stage 4 |
 
 ## Session 45 Progress (2026-01-18)
 
 ### Fixed Issues
-1. ✅ **val_eval and val_final input claims**: Now use actual polynomial sums (0 for Fibonacci)
-   - Before: Used derived claims from Stage 2 (non-zero)
-   - After: Use actual polynomial sums computed from provers (0 for no-RAM programs)
-   - This fixed Jolt's Instance 1 and Instance 2 expected_claim to be 0
+1. ✅ **Stage 4 actual polynomial sums**: Now use actual polynomial sums from provers (0 for Fibonacci)
+   - val_eval_prover.computeInitialClaim() = 0
+   - val_final_prover.computeInitialClaim() = 0
 
-### Remaining Issue
-The sumcheck polynomial rounds produce a different `output_claim` than `expected_output_claim`:
-```
-output_claim:          3159763944798181886722852590115930947586131532755679042258164540994444897089
-expected_output_claim: 4857024169349606329580068783301423991985019660972366542411131427015650777104
-```
+### Root Cause Analysis
 
-This indicates the sumcheck round polynomial coefficients don't evaluate correctly at the challenges.
+**The Problem:**
+Stage 4's batched sumcheck has 3 instances. For each instance, Jolt appends `input_claim` to transcript before sampling batching coefficients.
 
-### Debug Values from Last Run
-Jolt Stage 4:
-- Instance 0 expected_claim = 17177621565056141430840966297488157406781932625004861742899573144370995217735
-- coeff = 116658923796321962861521498013863413240
-- eq_val = 11120493948656633218659538332974463697959928087456130038626595260978605918283
-- combined = 6240241591786886181707067559668125496115098553042097044753792988593967656359
+**Jolt's input_claim computation:**
+1. RegistersReadWriteChecking: `rd_wv_claim + gamma * (rs1_rv_claim + gamma * rs2_rv_claim)`
+2. RamValEvaluation: `rwc_val_claim - init_eval` where init_eval = initial_ram.evaluate(r_address)
+3. RamValFinal: `val_final_claim - val_init_eval` where val_init_eval computed from initial_ram
 
-### Possible Causes
-1. **Batching coefficient mismatch**: Different transcript states leading to different batch coefficients
-2. **Round polynomial computation**: Zolt's round polynomials may not match Jolt's expected format
-3. **Eq polynomial index binding**: The eq polynomial may still have incorrect index pairing
+**For Fibonacci (no RAM ops):**
+- Instances 2 and 3 should have input_claim = 0
+- But Jolt computes non-zero values because the opening claims in the proof differ from Jolt's computed init_eval
 
-### Next Steps
-1. [ ] Compare Zolt's batching_coeff[0] with Jolt's coeff to verify they match
-2. [ ] If batching coeffs differ, trace transcript divergence after Stage 3
-3. [ ] If batching coeffs match, the issue is in round polynomial generation
-4. [ ] Add debug output for round 0 polynomial coefficients comparison
+**Claim Sources:**
+- `rwc_val_claim`: From Zolt's RWC prover's getOpeningClaims()
+- `init_eval`: Jolt computes from initial_ram_state.evaluate(r_address)
 
-## Previous Session Analysis (Session 44)
+For no-RAM programs, RamVal polynomial = initial_ram everywhere, so:
+- rwc_val_claim SHOULD equal init_eval
+- But they differ due to r_address endianness or polynomial representation differences
 
-**Root Cause Found:**
-The eq polynomial binding order doesn't match between Zolt's prover and Jolt's verifier.
+### Investigation Needed
 
-**Jolt's verifier expects:**
-```
-eq_val = Π_i eq_term(r_cycle_BE[i], params.r_cycle_BE[i])
-       = Π_i eq_term(challenges[log_T-1-i], stage3[log_T-1-i])
-```
-This pairs challenges[j] with stage3[j] (same index).
+1. **r_address Endianness**: Zolt's RWC prover reverses challenges when building r_address
+   - Line 1158-1159: `r_address[log_k - 1 - i] = r_sumcheck[log_t + i]`
+   - This creates BE r_address from LE challenges
+   - Need to verify this matches what Jolt expects
 
-**Zolt's prover computes:**
-```
-eq_val = Π_i eq_term(r_cycle_be[i], c[i])
-       = Π_i eq_term(stage3[log_T-1-i], c[i])
-```
-This pairs stage3[log_T-1-i] with c[i] (reversed index pairing).
+2. **val_init Population**: Check how Zolt's RWC prover's val_init is populated
+   - Is it the same as Jolt's initial_ram_state?
 
-## Files Modified This Session
-- `src/zkvm/proof_converter.zig`: Fixed Stage 4 input claims for val_eval and val_final
+3. **Opening Point Storage**: Verify the opening point stored in proof matches r_address used in computation
+
+### Files Involved
+- `src/zkvm/ram/read_write_checking.zig`: RWC prover and getOpeningClaims()
+- `src/zkvm/proof_converter.zig`: Claims storage and Stage 4 batching
 
 ## Commands
 
@@ -87,8 +75,6 @@ zig build test
 - No modifications needed on Jolt side
 
 ## Previous Sessions Summary
+- **Session 45**: Fixed Stage 4 polynomial sums, identified input_claim mismatch for val_eval/val_final
 - **Session 44**: Fixed eq polynomial analysis, identified index reversal issue
 - **Session 43**: Fixed Stage 1 MontU128Challenge conversion
-- **Session 42**: Identified streaming outer prover Az*Bz mismatch
-- **Session 41**: Fixed Stage 4 Montgomery conversion, proof serialization
-- **Session 40**: Fixed Stage 2 synthetic termination write

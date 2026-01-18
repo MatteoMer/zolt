@@ -264,6 +264,23 @@ pub fn Stage4Prover(comptime F: type) type {
                 }
             }
 
+            // Fill padding cycles with final register values
+            // This is critical for correct polynomial extrapolation when pairing real cycles with padding
+            if (trace_len < T) {
+                std.debug.print("[STAGE4] Filling padding cycles {} to {} with final register values\n", .{ trace_len, T - 1 });
+                for (trace_len..T) |cycle| {
+                    // Set val(k, j) for all registers k to their final values
+                    for (0..32) |k| {
+                        val_poly[k * T + cycle] = F.fromU64(register_values[k]);
+                    }
+                    // Extend to full K registers (Jolt uses 128)
+                    for (32..K) |k| {
+                        val_poly[k * T + cycle] = F.zero();
+                    }
+                    // Note: ra, wa, inc remain 0 for padding cycles (no register access)
+                }
+            }
+
             // Precompute eq(r_cycle', j) evaluations
             // The sumcheck binds variables in LE order (round 0 binds bit_0, round 1 binds bit_1, etc.)
             // After binding, the bound point k has bits [c_0, c_1, ..., c_{n-1}] where c_i = round i challenge.

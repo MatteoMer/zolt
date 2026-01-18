@@ -11,62 +11,50 @@
 | 5 | ✅ PASS | - | Blocked by Stage 4 |
 | 6 | ✅ PASS | - | Blocked by Stage 4 |
 
-## Session 46 Progress (2026-01-18)
+## Session 47 Progress (2026-01-18)
 
-### Deep Analysis of Stage 4 Failure
+### Deep Code Analysis
 
-**Key Findings - Values that MATCH:**
-- gamma matches between Zolt and Jolt ✓
-- input_claim matches ✓
-- params.r_cycle (Stage 3 challenges) matches ✓
-- val_claim, rs1_ra_claim, rs2_ra_claim, rd_wa_claim, inc_claim all match ✓
-- Sumcheck univariate checks pass (round polynomials are internally consistent)
+**Jolt Stage 4 Prover Structure:**
+1. Phase 1: Binds all cycle variables (log_T rounds) using:
+   - `GruenSplitEqPolynomial` (splits eq into E_out * E_in)
+   - `ReadWriteMatrixCycleMajor` (sparse matrix representation)
+   - `prover_message_contribution` computes **quadratic coefficients** [q(0), q_quadratic]
+   - `gruen_poly_deg_3` converts to cubic polynomial evaluations
 
-**Key Finding - The Root Cause:**
-The sumcheck CHALLENGES diverge between Zolt prover and Jolt verifier:
-```
-Zolt's r_cycle_sumcheck_le[0]: [4a, ad, 41, d4, 07, 40, 75, 65]
-Jolt's r_cycle[7] (should match): [41, fa, bd, 56, c6, 07, e2, a7]
-```
-These are completely different values!
+2. Phase 2: Binds all address variables (LOG_K rounds) using:
+   - `ReadWriteMatrixAddressMajor`
+   - Dense merged_eq polynomial
 
-**Why Challenges Diverge:**
-1. Challenges are derived from transcript using Fiat-Shamir
-2. Transcript incorporates round polynomial coefficients
-3. If Zolt's round polys differ from Jolt's expected, challenges diverge
-4. The sumcheck still "passes" because each round is internally consistent
-5. But the POLYNOMIAL being proven is different from what Jolt expects
+3. Phase 3: Dense computation for any remaining variables
 
-**The Fundamental Difference:**
-Jolt's Stage 4 prover uses:
-- `GruenSplitEqPolynomial` with LowToHigh binding for eq
-- `ReadWriteMatrixCycleMajor` sparse matrix for ra/wa/val
-- Complex sparse ops in `prover_message_contribution`
+**Key Insight: Coefficient vs Evaluation Representation**
+Jolt's `compute_evals` returns `[eval_0, eval_infty]`:
+- `eval_0` = contribution at X=0
+- `eval_infty` = coefficient of X in the linear polynomial (the "slope")
 
-Zolt's Stage 4 prover uses:
-- Dense `computeEqEvalsBE` for eq polynomial
-- Dense arrays for val_poly, rd_wa_poly, etc.
-- Direct iteration over all (j, k) pairs
+This is NOT `[p(0), p(1)]` but rather polynomial coefficients!
 
-While mathematically equivalent, subtle differences in:
-1. Sparse vs dense handling
-2. Implicit zero handling
-3. Indexing conventions
-...cause different round polynomial coefficients.
+The `gruen_poly_deg_3` then converts these quadratic coefficients to actual evaluations.
 
-### What Needs to Happen
+**Zolt's Approach:**
+1. Computes actual evaluations at X=0, 1, 2, 3 directly
+2. Then interpolates to get coefficients
 
-To fix Stage 4, Zolt's round polynomial coefficients MUST exactly match Jolt's.
-Options:
-1. **Port Jolt's sparse matrix representation** (complex but correct)
-2. **Find the specific computation difference** (debugging approach)
-3. **Add debug output to Jolt's prover** to compare coefficient by coefficient
+**The Problem:**
+The final polynomial should be mathematically the same, but Jolt's sparse matrix handles missing entries differently:
+- Missing entries have implicit ra=0, wa=0
+- Val is inferred from `prev_val` and `next_val` of adjacent entries
 
-### Verified Matches
-- gamma bytes match ✓
-- input_claim bytes match ✓
-- params.r_cycle bytes match ✓
-- All 5 opening claims bytes match ✓
+Zolt's dense representation:
+- Explicitly stores all entries
+- Zero entries still contribute to the sum (but with 0 contribution)
+
+### Next Steps
+1. Run side-by-side comparison of Round 0 computation
+2. Verify eq polynomial values match between Zolt and Jolt
+3. Check if sparse vs dense handling causes the difference
+4. Consider porting Gruen optimization to Zolt
 
 ## Commands
 
@@ -89,9 +77,11 @@ zig build test
 ## Files to Study
 - Jolt prover: `/Users/matteo/projects/jolt/jolt-core/src/zkvm/registers/read_write_checking.rs`
 - Jolt sparse matrix: `/Users/matteo/projects/jolt/jolt-core/src/subprotocols/read_write_matrix/`
+- Jolt Gruen eq: `/Users/matteo/projects/jolt/jolt-core/src/poly/split_eq_poly.rs`
 - Zolt prover: `/Users/matteo/projects/zolt/src/zkvm/spartan/stage4_prover.zig`
 
 ## Previous Sessions Summary
+- **Session 47**: Deep analysis of Jolt's Gruen optimization and sparse matrix
 - **Session 46**: Confirmed values match but round poly coefficients differ
 - **Session 45**: Fixed Stage 4 polynomial sums, identified input_claim mismatch
 - **Session 44**: Fixed eq polynomial analysis, identified index reversal issue

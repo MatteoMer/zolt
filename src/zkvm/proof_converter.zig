@@ -1616,8 +1616,9 @@ pub fn ProofConverter(comptime F: type) type {
                     break :stage4_block;
                 };
 
-                const Stage4ProverType = spartan_mod.stage4_prover.Stage4Prover(F);
-                const Stage3Claims = spartan_mod.stage4_prover.Stage3Claims(F);
+                // Use the Gruen-optimized Stage 4 prover for Jolt compatibility
+                const Stage4ProverType = spartan_mod.stage4_gruen_prover.Stage4GruenProver(F);
+                const Stage3Claims = spartan_mod.stage4_gruen_prover.Stage3Claims(F);
 
                 const stage3_claims = Stage3Claims{
                     .rd_write_value = stage3_result.reg_rd_write_value_claim,

@@ -39,6 +39,14 @@ pub const Stage3Result = stage3_prover.Stage3Result;
 // Stage 4 prover (RegistersReadWriteChecking)
 pub const stage4_prover = @import("stage4_prover.zig");
 
+// Stage 4 Gruen prover (matches Jolt's algorithm exactly)
+pub const stage4_gruen_prover = @import("stage4_gruen_prover.zig");
+pub const Stage4GruenProver = stage4_gruen_prover.Stage4GruenProver;
+
+// Gruen eq polynomial optimization
+pub const gruen_eq = @import("gruen_eq.zig");
+pub const GruenSplitEqPolynomial = gruen_eq.GruenSplitEqPolynomial;
+
 // Prefix-suffix optimization for Stage 3
 pub const prefix_suffix = @import("prefix_suffix.zig");
 pub const Phase1Prover = prefix_suffix.Phase1Prover;

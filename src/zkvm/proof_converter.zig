@@ -1568,10 +1568,22 @@ pub fn ProofConverter(comptime F: type) type {
             // - gamma from transcript (challenge scalar)
             // - r_cycle from Stage 3 (the sumcheck challenges from RegistersClaimReduction)
             // - execution trace from config
+            // DEBUG: Print transcript state before gamma
+            std.debug.print("[STAGE4 TRANSCRIPT] State BEFORE gamma challenge:\n", .{});
+            std.debug.print("[STAGE4 TRANSCRIPT]   state = {{ ", .{});
+            for (transcript.state[0..8]) |b| std.debug.print("{x:0>2} ", .{b});
+            std.debug.print("}}\n", .{});
+
             const gamma_stage4 = transcript.challengeScalarFull();
             std.debug.print("[STAGE4] gamma_full_BE = {any}\n", .{gamma_stage4.toBytesBE()});
             // Print gamma as decimal for comparison with Jolt
             std.debug.print("[STAGE4] gamma (as u128 in low bits) = {any}\n", .{gamma_stage4.limbs[0..2].*});
+
+            // DEBUG: Print transcript state after gamma
+            std.debug.print("[STAGE4 TRANSCRIPT] State AFTER gamma challenge:\n", .{});
+            std.debug.print("[STAGE4 TRANSCRIPT]   state = {{ ", .{});
+            for (transcript.state[0..8]) |b| std.debug.print("{x:0>2} ", .{b});
+            std.debug.print("}}\n", .{});
 
             // Use Stage 4 prover if we have execution and memory trace data.
             stage4_block: {
@@ -1732,22 +1744,32 @@ pub fn ProofConverter(comptime F: type) type {
                 );
                 defer val_final_prover_early.deinit();
 
-                // Compute actual polynomial sums - these are the correct input claims
-                const input_claim_val_eval = val_eval_prover_early.computeInitialClaim();
-                const input_claim_val_final = val_final_prover_early.computeInitialClaim();
+                // CRITICAL: The input_claim for ValEvaluation is computed from the opening accumulator,
+                // NOT from the polynomial sum. The formula is:
+                //   input_claim = claimed_evaluation(RamVal) - init_eval
+                // This matches Jolt's SumcheckInstanceParams::input_claim implementation.
+                const input_claim_val_eval = stage2_result.rwc_val_claim.sub(val_init_eval);
+                const input_claim_val_final = stage2_result.output_val_final_claim.sub(stage2_result.output_val_init_claim);
 
-                // Debug: show derived vs actual claims
-                const derived_val_eval = stage2_result.rwc_val_claim.sub(val_init_eval);
-                const derived_val_final = stage2_result.output_val_final_claim.sub(stage2_result.output_val_init_claim);
-                std.debug.print("[ZOLT STAGE4] derived val_eval claim: {any}\n", .{derived_val_eval.toBytesBE()[0..16]});
-                std.debug.print("[ZOLT STAGE4] actual val_eval claim (poly sum): {any}\n", .{input_claim_val_eval.toBytesBE()[0..16]});
-                std.debug.print("[ZOLT STAGE4] derived val_final claim: {any}\n", .{derived_val_final.toBytesBE()[0..16]});
-                std.debug.print("[ZOLT STAGE4] actual val_final claim (poly sum): {any}\n", .{input_claim_val_final.toBytesBE()[0..16]});
+                std.debug.print("[ZOLT STAGE4] input_claim_val_eval (derived from accumulator): {any}\n", .{input_claim_val_eval.toBytesBE()});
+                std.debug.print("[ZOLT STAGE4] input_claim_val_final (derived from accumulator): {any}\n", .{input_claim_val_final.toBytesBE()});
+
+                // DEBUG: Print transcript state before input claims
+                std.debug.print("[STAGE4 TRANSCRIPT] State BEFORE input claims:\n", .{});
+                std.debug.print("[STAGE4 TRANSCRIPT]   state = {{ ", .{});
+                for (transcript.state[0..8]) |b| std.debug.print("{x:0>2} ", .{b});
+                std.debug.print("}}\n", .{});
 
                 // Append input claims to transcript (this is what Jolt does)
                 transcript.appendScalar(input_claim_registers);
                 transcript.appendScalar(input_claim_val_eval);
                 transcript.appendScalar(input_claim_val_final);
+
+                // DEBUG: Print transcript state after input claims
+                std.debug.print("[STAGE4 TRANSCRIPT] State AFTER input claims (BEFORE batch coeffs):\n", .{});
+                std.debug.print("[STAGE4 TRANSCRIPT]   state = {{ ", .{});
+                for (transcript.state[0..8]) |b| std.debug.print("{x:0>2} ", .{b});
+                std.debug.print("}}\n", .{});
 
                 // Sample batching coefficients
                 const batch0 = transcript.challengeScalarFull();

@@ -436,6 +436,8 @@ pub fn Stage4GruenProver(comptime F: type) type {
             // Accumulate [q(0), q_X2_coeff]
             var q_0 = F.zero();
             var q_X2 = F.zero();
+            var nonzero_count: usize = 0;
+            const is_round_0 = self.current_T == self.T;
 
             const half_T = self.current_T / 2;
 
@@ -483,6 +485,23 @@ pub fn Stage4GruenProver(comptime F: type) type {
                     // C_X2_coeff = ra_slope*val_slope + wa_slope*(val_slope+inc_slope)
                     // This matches Jolt's compute_evals which uses inc_evals[1] for the slope term.
                     const c_X2 = ra_slope.mul(val_slope).add(wa_slope.mul(val_slope.add(inc_slope)));
+
+                    // Debug: print first few nonzero contributions in Round 0
+                    if (is_round_0 and !c_0.eql(F.zero()) and nonzero_count < 5) {
+                        nonzero_count += 1;
+                        std.debug.print("[STAGE4_CONTRIB] k={}, j_pair=({},{}): ra_even={any}, wa_even={any}, val_even={any}, inc_0={any}\n", .{
+                            k, j_prime, j_odd,
+                            ra_even.toBytes()[0..8],
+                            wa_even.toBytes()[0..8],
+                            val_even.toBytes()[0..8],
+                            inc_0.toBytes()[0..8],
+                        });
+                        std.debug.print("[STAGE4_CONTRIB]   c_0={any}, c_X2={any}, E_combined={any}\n", .{
+                            c_0.toBytes()[0..8],
+                            c_X2.toBytes()[0..8],
+                            E_combined.toBytes()[0..8],
+                        });
+                    }
 
                     // Accumulate with E_out * E_in factor
                     q_0 = q_0.add(E_combined.mul(c_0));

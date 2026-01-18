@@ -1260,6 +1260,11 @@ pub fn ProofConverter(comptime F: type) type {
                 stage2_result.raf_final_claim,
             );
             // Instance 2 (RWC): Individual opening claims for ra, val, inc
+            // NOTE: The rwc_val_claim is the evaluation of RamVal at the Stage 2 opening point.
+            // For Stage 4's RamValEvaluation, Jolt computes input_claim = rwc_val_claim - init_eval.
+            // For programs without RAM ops, this should be 0 only if rwc_val_claim equals init_eval.
+            // However, changing this claim would break Stage 2's expected_output_claim check.
+            // The root cause needs to be fixed in the RWC prover's polynomial computation.
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .RamVal, .sumcheck_id = .RamReadWriteChecking } },
                 stage2_result.rwc_val_claim, // RamVal evaluation at opening point
@@ -1330,11 +1335,9 @@ pub fn ProofConverter(comptime F: type) type {
             // val_final_claim is the MLE evaluation Val_final(r') at the opening point
             // This comes from the OutputSumcheck prover's val_final polynomial after binding
             //
-            // Jolt's verifier computes expected_output_claim as:
-            //   eq(r_address, r') * io_mask(r') * (val_final_claim - val_io_eval)
-            //
-            // For a correctly executing program where Val_final = Val_io in the IO region,
-            // this should equal zero.
+            // NOTE: We keep the original output_val_final_claim here because it's used in Stage 2's
+            // expected_output_claim computation. The sumcheck polynomial rounds were generated based
+            // on this value, so changing it would break Stage 2 verification.
             std.debug.print("[ZOLT] OutputSumcheck: inserting val_final_claim (from prover) = {any}\n", .{stage2_result.output_val_final_claim.toBytesBE()});
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .RamValFinal, .sumcheck_id = .RamOutputCheck } },

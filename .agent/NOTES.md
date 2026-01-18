@@ -1,5 +1,86 @@
 # Zolt-Jolt Cross-Verification Progress
 
+## Session 46 Summary - Stage 4 Round Polynomial Mismatch (2026-01-18)
+
+### Verified Facts
+1. **gamma matches** between Zolt and Jolt ✓
+2. **input_claim matches** ✓
+3. **params.r_cycle (Stage 3 challenges) matches** ✓
+4. **All 5 opening claims match** (val, rs1_ra, rs2_ra, rd_wa, inc) ✓
+5. **Sumcheck univariate checks pass** (internally consistent)
+
+### The Problem
+Round 0 polynomial coefficients are completely different:
+
+**Jolt's round 0 coefficients (from native prover):**
+```
+coeffs[0] = [c9, bd, 24, 80, fd, 25, 4f, 66, ...]
+coeffs[1] = [c4, 31, 54, 6f, f7, a8, 04, 71, ...]
+coeffs[2] = [28, 07, 8a, 46, 27, 62, fd, c6, ...]
+coeffs[3] = [64, ab, e8, 66, ad, 84, 4b, b8, ...]
+```
+
+**Zolt's round 0 coefficients:**
+```
+coeffs[0] = [77, bb, 08, ec, 88, 15, 06, 86, ...]
+coeffs[1] = [a9, 39, 38, 6a, dc, db, 0f, 2a, ...]
+coeffs[2] = [d6, 96, 40, 95, c4, 1f, e8, b7, ...]
+```
+
+### Root Cause: Different Prover Implementations
+
+**Jolt's Stage 4 Prover:**
+1. Uses `GruenSplitEqPolynomial` with `LowToHigh` binding
+2. Uses `ReadWriteMatrixCycleMajor` sparse matrix representation
+3. Computes via `prover_message_contribution` on sparse entries only
+4. Applies Gruen optimization: eq = E_out * E_in
+
+**Zolt's Stage 4 Prover:**
+1. Uses `computeEqEvalsBE` dense eq polynomial
+2. Uses dense arrays: `val_poly[k * T + j]`
+3. Iterates over all (j, k) pairs directly
+4. No Gruen optimization
+
+### Key Structural Differences
+
+1. **Sparse vs Dense**:
+   - Jolt: Only stores non-zero entries (sparse matrix)
+   - Zolt: Dense arrays with many zeros
+
+2. **Eq Polynomial**:
+   - Jolt: GruenSplitEqPolynomial (splits into E_in and E_out for efficiency)
+   - Zolt: Dense array of size T
+
+3. **Round Poly Computation**:
+   - Jolt: `prover_message_contribution` processes sparse entries
+   - Zolt: Direct iteration over all pairs
+
+### Why They Compute Different Polynomials
+
+Both should represent the same polynomial:
+```
+P(j, k) = eq(r_cycle, j) * combined(j, k)
+```
+
+But the round polynomial coefficients differ because:
+1. Jolt's Gruen optimization reorders the summation
+2. Different sparse matrix processing vs dense iteration
+3. Possibly different zero-handling
+
+**This causes the sumcheck challenges to diverge**, which causes eq_val to differ, which causes the verification to fail.
+
+### Files to Study
+- Jolt sparse matrix: `jolt-core/src/subprotocols/read_write_matrix/`
+- Jolt Gruen eq: `jolt-core/src/poly/gruen_split_eq_poly.rs`
+- Jolt prover: `jolt-core/src/zkvm/registers/read_write_checking.rs`
+- Zolt prover: `src/zkvm/spartan/stage4_prover.zig`
+
+### Potential Fixes
+1. **Full port**: Rewrite Zolt's Stage 4 prover to match Jolt's sparse + Gruen approach
+2. **Debug deeper**: Add step-by-step comparison to find exact divergence
+
+---
+
 ## Session 42 Summary - Sumcheck Polynomial Issue (2026-01-17)
 
 ### New Findings
@@ -37,25 +118,6 @@ The `output_claim` comes from evaluating the proof's polynomial at challenges. T
 **The Problem:**
 The streaming outer prover generates polynomials that are **internally consistent** (sum(p(0), p(1)) == claim passes) but encode the **wrong computation**. The Az*Bz evaluation in the streaming prover differs from what Jolt's verifier expects.
 
-**Evidence:**
-- Jolt's `inner_sum_prod (Az*Bz)` = 14279035532130326282759614533689080459036208928223103610768541756919699764986
-- But proof produces output_claim = 10634556229438437044377436930505224242122955378672273598842115985622605632100
-- These should be related by tau factors, but the mismatch suggests Az*Bz is computed differently
-
-**Likely Bug Location:**
-`src/zkvm/spartan/streaming_outer.zig`:
-- `materializeLinearPhasePolynomials()` - Az/Bz computation
-- `computeRemainingRoundPoly()` - Round polynomial generation
-- Constraint group splitting (FIRST_GROUP_INDICES, SECOND_GROUP_INDICES)
-- Lagrange kernel application
-
-### Next Steps
-
-1. **Debug Az/Bz values**: Add logging to show actual Az*Bz products during streaming prover
-2. **Compare constraint evaluation**: Check if R1CS constraint evaluation matches Jolt
-3. **Verify split_eq handling**: Ensure eq polynomial factorization is correct
-4. **Check Lagrange kernel**: Verify lagrange_tau_r0 is applied correctly
-
 ---
 
 ## Session 41 Summary - Montgomery Fix & Serialization (2026-01-17)
@@ -74,56 +136,16 @@ The streaming outer prover generates polynomials that are **internally consisten
    - Issue: Proof was missing the claims count header
    - Result: Jolt can now deserialize Zolt proofs successfully
 
-### Stage Status
+### Stage Status (as of Session 46)
 
 | Stage | Internal (Zolt) | Cross-verify (Jolt) | Notes |
 |-------|-----------------|---------------------|-------|
-| 1 | ✅ PASS | ❌ Sumcheck mismatch | Polynomial coefficients wrong |
-| 2 | ✅ PASS | - | - |
-| 3 | ✅ PASS | - | - |
-| 4 | ✅ PASS | Montgomery fix applied |
-| 5 | ✅ PASS | - | - |
-| 6 | ✅ PASS | - | - |
-
----
-
-## Session 40 Summary - Stage 4 Investigation (2026-01-17)
-
-### Stage 2 Fix
-Removed synthetic termination write from memory trace. In Jolt, the termination bit
-is set directly in val_final during OutputSumcheck, NOT in the execution/memory trace.
-The RWC sumcheck only includes actual LOAD/STORE instructions.
-
-### Stage 4 Deep Investigation
-
-#### Verified Matches
-1. **Transcript state**: IDENTICAL between Zolt and Jolt at all checkpoints
-2. **Challenge bytes**: IDENTICAL (f5 ce c4 8c b0 64 ba b5 ce 4d a4 2a db 38 f8 ac)
-3. **Input claims**: ALL THREE match exactly
-4. **Batching coefficients**: MATCH
-5. **Polynomial coefficients in proof**: MATCH
-
-### Root Cause Analysis
-
-The challenge in Zolt was stored as:
-```zig
-result = F{ .limbs = .{ 0, 0, masked_low, masked_high } };
-```
-
-This is NOT proper Montgomery form. Jolt's MontU128Challenge stores the same bytes
-but interprets them as a BigInt that gets converted to Montgomery via from_bigint_unchecked.
-
-**Fix applied in Session 41**: Convert properly using toMontgomery().
-
----
-
-## Previous Sessions
-
-### Stage 3 Fix (Session 35)
-- Fixed prefix-suffix decomposition convention (r_hi/r_lo)
-
-### Stage 1 Fix
-- Fixed NextPC = 0 issue for NoOp padding
+| 1 | ✅ PASS | ✅ PASS | Fixed MontU128Challenge |
+| 2 | ✅ PASS | ✅ PASS | - |
+| 3 | ✅ PASS | ✅ PASS | - |
+| 4 | ✅ PASS | ❌ FAIL | Round poly coefficients differ (sparse vs dense) |
+| 5 | ✅ PASS | - | Blocked by Stage 4 |
+| 6 | ✅ PASS | - | Blocked by Stage 4 |
 
 ---
 
@@ -131,6 +153,7 @@ but interprets them as a BigInt that gets converted to Montgomery via from_bigin
 
 - Jolt MontU128Challenge: `jolt-core/src/field/challenge/mont_ark_u128.rs`
 - Jolt BatchedSumcheck verify: `jolt-core/src/subprotocols/sumcheck.rs:180`
+- Jolt Stage 4 prover: `jolt-core/src/zkvm/registers/read_write_checking.rs`
+- Jolt sparse matrix: `jolt-core/src/subprotocols/read_write_matrix/`
 - Zolt Blake2b transcript: `src/transcripts/blake2b.zig`
-- Zolt Stage 4 proof: `src/zkvm/proof_converter.zig` line ~1700
-- Zolt sumcheck generation: `src/zkvm/proof_converter.zig:generateStreamingOuterSumcheckProofWithTranscript`
+- Zolt Stage 4 prover: `src/zkvm/spartan/stage4_prover.zig`

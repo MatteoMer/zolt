@@ -1,5 +1,48 @@
 # Zolt-Jolt Cross-Verification Progress
 
+## Session 49 Summary - Stage 4 Deep Investigation (2026-01-18)
+
+### Key Finding: All Inputs Match, But Round Polynomials Differ
+
+After extensive debugging, verified that ALL inputs to Stage 4 prover match between Zolt and Jolt:
+
+1. **r_cycle_be matches params.r_cycle byte-for-byte**:
+   - r_cycle_be[0] = [80, fc, d1, 50, 52, 28, 5d, 74, ...] ✓
+   - r_cycle_be[7] = [91, ed, 3b, 94, 29, 37, 61, e9, ...] ✓
+
+2. **Input claim matches**:
+   - First 8 bytes: [33, 72, a2, ea, 5e, ba, ea, a4] ✓
+
+3. **Opcode-based register handling matches Jolt's per-instruction logic**:
+   - RS1 reads: 0x13, 0x03, 0x67, 0x1b, 0x33, 0x3b, 0x23, 0x63 ✓
+   - RS2 reads: 0x33, 0x3b, 0x23, 0x63 ✓
+   - RD writes: all except 0x23 (Store), 0x63 (Branch) ✓
+
+4. **Formula verification**:
+   - c_0 = ra_0*val_0 + wa_0*(val_0+inc_0) ✓
+   - c_X2 = ra_slope*val_slope + wa_slope*(val_slope+inc_slope) ✓
+
+### The Mystery
+
+Despite all inputs being correct:
+- Zolt's internal check passes: p(0) + p(1) = current_claim ✓
+- But output_claim (19271728...) ≠ expected_output_claim (5465056...)
+
+The round polynomial coefficients are DIFFERENT, producing different challenges.
+
+### Remaining Hypotheses
+
+1. **E_in/E_out table values**: Tables might be computed with different values
+2. **Trace interpretation**: val_poly might have different actual values
+3. **Accumulation precision**: Jolt uses unreduced Montgomery, Zolt uses reduced
+4. **Edge case handling**: Empty sparse entries vs dense zeros
+
+### Debug Output Added
+- `[STAGE4_GRUEN_INIT]` prints all r_cycle_be values for comparison
+- E_in.len, E_out.len, num_x_in_bits verification
+
+---
+
 ## Session 48 Summary - Stage 4 Deep Debugging (2026-01-18)
 
 ### Key Finding: Both Gruen and Original Provers Fail!

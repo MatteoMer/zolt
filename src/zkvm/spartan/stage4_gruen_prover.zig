@@ -234,6 +234,12 @@ pub fn Stage4GruenProver(comptime F: type) type {
                 r_cycle_be[i] = r_cycle[r_cycle.len - 1 - i];
             }
 
+            // Debug: Print r_cycle_be values to compare with Jolt's params.r_cycle
+            std.debug.print("\n[STAGE4_GRUEN_INIT] r_cycle_be (should match Jolt's params.r_cycle):\n", .{});
+            for (0..r_cycle_be.len) |i| {
+                std.debug.print("[STAGE4_GRUEN_INIT]   r_cycle_be[{}] = {any}\n", .{ i, r_cycle_be[i].toBytes() });
+            }
+
             const gruen_eq_poly = try GruenSplitEqPolynomial(F).init(allocator, r_cycle_be);
             allocator.free(r_cycle_be); // GruenSplitEqPolynomial makes its own copy
 
@@ -402,6 +408,31 @@ pub fn Stage4GruenProver(comptime F: type) type {
             const num_x_in_bits: usize = if (E_in_len > 1) @ctz(E_in_len) else 0;
             const x_bitmask = if (num_x_in_bits < 64) ((@as(usize, 1) << @intCast(num_x_in_bits)) - 1) else @as(usize, 0);
 
+            // Debug: Print Gruen state for first few calls
+            if (self.current_T >= self.T / 2) {
+                std.debug.print("[GRUEN_DEBUG] Phase 1: current_T={}, T={}, current_scalar={any}\n", .{
+                    self.current_T,
+                    self.T,
+                    gruen.current_scalar.toBytes()[0..8],
+                });
+                std.debug.print("[GRUEN_DEBUG]   current_index={}, w[{}]={any}\n", .{
+                    gruen.current_index,
+                    gruen.current_index - 1,
+                    gruen.get_current_w().toBytes()[0..8],
+                });
+                std.debug.print("[GRUEN_DEBUG]   E_in.len={}, E_out.len={}, num_x_in_bits={}\n", .{
+                    E_in_len,
+                    E_out.len,
+                    num_x_in_bits,
+                });
+                if (E_out.len > 0) {
+                    std.debug.print("[GRUEN_DEBUG]   E_out[0]={any}\n", .{E_out[0].toBytes()[0..8]});
+                }
+                if (E_in_len > 0) {
+                    std.debug.print("[GRUEN_DEBUG]   E_in[0]={any}\n", .{E_in[0].toBytes()[0..8]});
+                }
+            }
+
             // Accumulate [q(0), q_X2_coeff]
             var q_0 = F.zero();
             var q_X2 = F.zero();
@@ -421,11 +452,11 @@ pub fn Stage4GruenProver(comptime F: type) type {
                 const E_out_eval = if (x_out < E_out.len) E_out[x_out] else F.one();
                 const E_combined = E_out_eval.mul(E_in_eval);
 
-                // Get inc evaluation at even cycle
-                // IMPORTANT: To match Jolt's behavior, inc is treated as CONSTANT (no slope).
-                // Jolt uses: inc_evals = [inc_coeff, 0], meaning inc_slope = 0.
-                // The inc value only matters when wa != 0 (i.e., for the written register).
+                // Get inc evaluations: [inc_0, inc_slope]
+                // Jolt uses: inc_evals = [inc(j_even), inc(j_odd) - inc(j_even)]
                 const inc_0 = self.inc_poly[j_prime];
+                const inc_1 = self.inc_poly[j_odd];
+                const inc_slope = inc_1.sub(inc_0);
 
                 // Sum over all registers
                 for (0..self.current_K) |k| {
@@ -445,14 +476,13 @@ pub fn Stage4GruenProver(comptime F: type) type {
                     const wa_slope = wa_odd.sub(wa_even);
                     const val_slope = val_odd.sub(val_even);
 
-                    // C(X) = ra(X)*val(X) + wa(X)*(val(X)+inc)
-                    // where inc is constant (no slope) to match Jolt.
-                    // C(0) = ra(0)*val(0) + wa(0)*(val(0)+inc)
+                    // C(X) = ra(X)*val(X) + wa(X)*(val(X)+inc(X))
+                    // C(0) = ra(0)*val(0) + wa(0)*(val(0)+inc(0))
                     const c_0 = ra_even.mul(val_even).add(wa_even.mul(val_even.add(inc_0)));
 
-                    // C_X2_coeff = ra_slope*val_slope + wa_slope*val_slope
-                    // NOTE: No inc_slope term because Jolt treats inc as constant.
-                    const c_X2 = ra_slope.mul(val_slope).add(wa_slope.mul(val_slope));
+                    // C_X2_coeff = ra_slope*val_slope + wa_slope*(val_slope+inc_slope)
+                    // This matches Jolt's compute_evals which uses inc_evals[1] for the slope term.
+                    const c_X2 = ra_slope.mul(val_slope).add(wa_slope.mul(val_slope.add(inc_slope)));
 
                     // Accumulate with E_out * E_in factor
                     q_0 = q_0.add(E_combined.mul(c_0));
@@ -460,8 +490,29 @@ pub fn Stage4GruenProver(comptime F: type) type {
                 }
             }
 
+            // Debug: Print q_0 and q_X2 for first round
+            if (self.current_T >= self.T / 2) {
+                std.debug.print("[GRUEN_DEBUG]   q_0={any}, q_X2={any}\n", .{
+                    q_0.toBytes()[0..8],
+                    q_X2.toBytes()[0..8],
+                });
+                std.debug.print("[GRUEN_DEBUG]   previous_claim={any}\n", .{previous_claim.toBytes()[0..8]});
+            }
+
             // Use gruenPolyDeg3 to convert [q(0), q_X2] to cubic coefficients
             const coeffs = gruen.gruenPolyDeg3(q_0, q_X2, previous_claim);
+
+            // Debug: Print final coefficients for first round
+            if (self.current_T >= self.T / 2) {
+                std.debug.print("[GRUEN_DEBUG]   coeffs[0]={any}, coeffs[1]={any}\n", .{
+                    coeffs[0].toBytes()[0..8],
+                    coeffs[1].toBytes()[0..8],
+                });
+                std.debug.print("[GRUEN_DEBUG]   coeffs[2]={any}, coeffs[3]={any}\n", .{
+                    coeffs[2].toBytes()[0..8],
+                    coeffs[3].toBytes()[0..8],
+                });
+            }
 
             return RoundPoly(F){ .coeffs = coeffs };
         }

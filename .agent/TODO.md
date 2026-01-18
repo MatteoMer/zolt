@@ -13,6 +13,35 @@
 
 ## Session 47 Progress (2026-01-18)
 
+### Latest Findings
+
+**What Matches:**
+- gamma_stage4 bytes match between Zolt and Jolt ✓
+- input_claim_registers bytes match exactly ✓
+- input_claim_val_eval = 0 matches (no memory ops) ✓
+- input_claim_val_final = 0 matches (no memory ops) ✓
+- Padding fix applied: val_poly for padding cycles now filled ✓
+
+**What Doesn't Match:**
+- batching_coeff[0] differs between Zolt and Jolt
+- This causes all sumcheck challenges to diverge
+- r_cycle from Stage 4 sumcheck ≠ params.r_cycle from Stage 3
+- Verification fails because eq_val is computed wrong
+
+**Probable Root Cause:**
+The transcript state is different when batching coefficients are sampled.
+This could be due to:
+1. `verifier_accumulate_advice` modifying transcript (check if fibonacci has advice)
+2. Different order of operations between Zolt and Jolt
+3. Some transcript operation Zolt is missing
+
+**Investigation Needed:**
+1. Add debug output for transcript state after gamma sampling
+2. Compare Zolt vs Jolt transcript state byte-by-byte
+3. Identify the exact operation causing divergence
+
+---
+
 ### Deep Code Analysis
 
 **Jolt Stage 4 Prover Structure:**

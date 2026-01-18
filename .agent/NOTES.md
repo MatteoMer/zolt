@@ -1,5 +1,49 @@
 # Zolt-Jolt Cross-Verification Progress
 
+## Session 47 Summary - Stage 4 Detailed Analysis (2026-01-18)
+
+### Latest Findings
+
+1. **Padding Fix Applied** (commit 35dd23b):
+   - Fixed padding cycles not having final register values
+   - This was causing incorrect polynomial extrapolation for pairs straddling real/padding boundary
+
+2. **val_eval and val_final claims = 0**: This is CORRECT for fibonacci since there are no memory operations (only registers). Instance 1 and 2 having expected_claim=0 is expected.
+
+3. **RegistersReadWriteChecking mismatch persists**:
+   - output_claim = 3159763944798181886722852590115930947586131532755679042258164540994444897089
+   - expected_output_claim = 4857024169349606329580068783301423991985019660972366542411131427015650777104
+
+4. **r_cycle divergence confirmed**:
+   - r_cycle from Stage 4 sumcheck (derived from coefficients) is COMPLETELY different from params.r_cycle
+   - This causes eq_val mismatch, leading to verification failure
+
+### Zolt Round 0 Output
+```
+p(0) = { 9, 229, 235, 172, 204, 112, 210, 123, ... } (BE)
+p(1) = { 10, 128, 241, 96, 234, 213, 124, 124, ... } (BE)
+p(0)+p(1) = batched_claim ✓
+challenge = { 26, 202, 171, 10, 84, 123, 125, 173, ... } (BE)
+```
+
+### Jolt Expected r_cycle (from params)
+```
+r_cycle[0] bytes: [80, fc, d1, 50, 52, 28, 5d, 74]
+r_cycle[1] bytes: [69, e1, d4, 1c, db, 43, 0f, 41]
+...
+```
+
+### Jolt Received r_cycle (from Stage 4 sumcheck)
+```
+r_cycle[0] bytes: [c5, 35, 86, 31, 18, a9, 39, 17]
+r_cycle[1] bytes: [00, f1, d2, 03, 03, 37, 7d, fd]
+...
+```
+
+These don't match, confirming the round polynomial coefficients produce wrong challenges.
+
+---
+
 ## Session 46 Summary - Stage 4 Round Polynomial Mismatch (2026-01-18)
 
 ### Verified Facts

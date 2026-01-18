@@ -1658,8 +1658,22 @@ pub fn ProofConverter(comptime F: type) type {
                     val_init_eval = computeInitialRamEval(config.initial_ram.?, config.memory_layout.?, r_address_be, log_ram_k);
                 }
 
-                const input_claim_val_eval = stage2_result.rwc_val_claim.sub(val_init_eval);
-                const input_claim_val_final = stage2_result.output_val_final_claim.sub(stage2_result.output_val_init_claim);
+                // NOTE: For programs without RAM operations (like Fibonacci), the actual polynomial
+                // sums for val_eval and val_final are 0. We'll compute the actual sums later and use
+                // those as input claims instead of the derived claims from Stage 2.
+                // The derived claims (rwc_val_claim - val_init_eval) may not equal the actual sums
+                // due to differences in how Jolt computes these claims internally.
+                //
+                // For now, we need to append the EXPECTED claims to the transcript (what Jolt expects).
+                // Jolt's verifier computes input_claim = claimed_evaluation - init_eval, where
+                // claimed_evaluation comes from the proof's opening_claims. If there are no RAM ops,
+                // claimed_evaluation should equal init_eval, giving input_claim = 0.
+                //
+                // IMPORTANT: The transcript must receive what Jolt's verifier expects, not what
+                // Zolt computes from Stage 2. For programs without RAM, this is 0.
+                //
+                // We'll compute the actual polynomial sums after initializing the provers and
+                // use those as the input claims.
 
                 // Debug: print components
                 std.debug.print("[ZOLT STAGE4] rwc_val_claim_BE = {any}\n", .{stage2_result.rwc_val_claim.toBytesBE()});
@@ -1667,10 +1681,72 @@ pub fn ProofConverter(comptime F: type) type {
                 std.debug.print("[ZOLT STAGE4] output_val_final_claim_BE = {any}\n", .{stage2_result.output_val_final_claim.toBytesBE()});
                 std.debug.print("[ZOLT STAGE4] output_val_init_claim_BE = {any}\n", .{stage2_result.output_val_init_claim.toBytesBE()});
 
+                // IMPORTANT: Initialize val_eval and val_final provers FIRST to compute their
+                // actual polynomial sums. These sums are what Jolt expects as input claims.
+                //
+                // For programs without RAM operations (like Fibonacci), both sums are 0.
+                // The sumcheck protocol proves: Σ_j f(j) = input_claim
+                // So for no-RAM programs: input_claim = 0
+
+                // Initialize val_eval prover to get its polynomial sum
+                const trace_len = trace.steps.items.len;
+                const val_eval_params_early = try ram.ValEvaluationParams(F).init(
+                    self.allocator,
+                    val_init_eval,
+                    trace_len,
+                    ram_K,
+                    r_address_le,
+                    r_cycle_le,
+                );
+                var val_eval_prover_early = try ram.ValEvaluationProver(F).init(
+                    self.allocator,
+                    memory_trace,
+                    config.initial_ram,
+                    val_eval_params_early,
+                    start_address,
+                );
+                defer val_eval_prover_early.deinit();
+
+                // Initialize val_final prover to get its polynomial sum
+                // The OutputSumcheck's binding point comes from Stage 2's batched sumcheck challenges.
+                var r_address_for_val_final_early = try self.allocator.alloc(F, log_ram_k);
+                defer self.allocator.free(r_address_for_val_final_early);
+                for (0..log_ram_k) |i| {
+                    r_address_for_val_final_early[i] = stage2_result.challenges[i];
+                }
+
+                const val_final_params_early = try ram.ValFinalParams(F).init(
+                    self.allocator,
+                    trace_len,
+                    r_address_for_val_final_early,
+                );
+                var val_final_prover_early = try ram.ValFinalProver(F).init(
+                    self.allocator,
+                    memory_trace,
+                    config.initial_ram,
+                    val_final_params_early,
+                    start_address,
+                );
+                defer val_final_prover_early.deinit();
+
+                // Compute actual polynomial sums - these are the correct input claims
+                const input_claim_val_eval = val_eval_prover_early.computeInitialClaim();
+                const input_claim_val_final = val_final_prover_early.computeInitialClaim();
+
+                // Debug: show derived vs actual claims
+                const derived_val_eval = stage2_result.rwc_val_claim.sub(val_init_eval);
+                const derived_val_final = stage2_result.output_val_final_claim.sub(stage2_result.output_val_init_claim);
+                std.debug.print("[ZOLT STAGE4] derived val_eval claim: {any}\n", .{derived_val_eval.toBytesBE()[0..16]});
+                std.debug.print("[ZOLT STAGE4] actual val_eval claim (poly sum): {any}\n", .{input_claim_val_eval.toBytesBE()[0..16]});
+                std.debug.print("[ZOLT STAGE4] derived val_final claim: {any}\n", .{derived_val_final.toBytesBE()[0..16]});
+                std.debug.print("[ZOLT STAGE4] actual val_final claim (poly sum): {any}\n", .{input_claim_val_final.toBytesBE()[0..16]});
+
+                // Append input claims to transcript (this is what Jolt does)
                 transcript.appendScalar(input_claim_registers);
                 transcript.appendScalar(input_claim_val_eval);
                 transcript.appendScalar(input_claim_val_final);
 
+                // Sample batching coefficients
                 const batch0 = transcript.challengeScalarFull();
                 const batch1 = transcript.challengeScalarFull();
                 const batch2 = transcript.challengeScalarFull();
@@ -1679,7 +1755,6 @@ pub fn ProofConverter(comptime F: type) type {
                 std.debug.print("[ZOLT STAGE4] input_claim_val_eval_BE = {any}\n", .{input_claim_val_eval.toBytesBE()});
                 std.debug.print("[ZOLT STAGE4] input_claim_val_final_BE = {any}\n", .{input_claim_val_final.toBytesBE()});
                 std.debug.print("[ZOLT STAGE4] batching_coeff[0]_BE = {any}\n", .{batch0.toBytesBE()});
-                // Print low limbs as u64 for easier decimal comparison
                 std.debug.print("[ZOLT STAGE4] batching_coeff[0]_limbs = lo={}, hi={}\n", .{ batch0.limbs[0], batch0.limbs[1] });
                 std.debug.print("[ZOLT STAGE4] batching_coeff[1]_BE = {any}\n", .{batch1.toBytesBE()});
                 std.debug.print("[ZOLT STAGE4] batching_coeff[2]_BE = {any}\n", .{batch2.toBytesBE()});
@@ -1687,7 +1762,7 @@ pub fn ProofConverter(comptime F: type) type {
                 const batching_coeffs = [3]F{ batch0, batch1, batch2 };
                 const input_claims = [3]F{ input_claim_registers, input_claim_val_eval, input_claim_val_final };
 
-                // Initialize provers.
+                // Now initialize regs prover with actual batch0
                 // CRITICAL FIX: Stage 3's sumcheck binds variables in the order challenges are sampled.
                 // The final claim rd_write_value_claim = f(c0, c1, ..., cn) in that order.
                 // Stage 4's eq polynomial must use the SAME ordering so that:
@@ -1719,91 +1794,12 @@ pub fn ProofConverter(comptime F: type) type {
                 };
                 defer regs_prover.deinit();
 
-                const trace_len = trace.steps.items.len;
-                const val_eval_params = try ram.ValEvaluationParams(F).init(
-                    self.allocator,
-                    val_init_eval,
-                    trace_len,
-                    ram_K,
-                    r_address_le,
-                    r_cycle_le,
-                );
-                var val_eval_prover = try ram.ValEvaluationProver(F).init(
-                    self.allocator,
-                    memory_trace,
-                    config.initial_ram,
-                    val_eval_params,
-                    start_address,
-                );
-                defer val_eval_prover.deinit();
+                // Use the already-initialized provers (from earlier) for round computation
+                // NOTE: val_eval_prover_early and val_final_prover_early are used instead of
+                // re-initializing here to avoid duplication
 
-                // The OutputSumcheck's binding point comes from Stage 2's batched sumcheck challenges.
-                // OutputSumcheck runs for log_ram_k rounds, so it binds using challenges[0..log_ram_k].
-                //
-                // OutputSumcheck's binding order ("bot-binding"):
-                // - Round 0 binds variable 0 (LSB in index) with challenge[0]
-                // - Round i binds variable i with challenge[i]
-                // - Round n-1 binds variable n-1 (MSB) with challenge[n-1]
-                //
-                // After binding: evaluation point = [challenge[0], challenge[1], ..., challenge[n-1]]
-                // This is NOT reversed - use challenges directly.
-                var r_address_for_val_final = try self.allocator.alloc(F, log_ram_k);
-                defer self.allocator.free(r_address_for_val_final);
-                for (0..log_ram_k) |i| {
-                    // Use binding challenges from Stage 2 (first log_ram_k challenges)
-                    // NO REVERSAL - use in order
-                    r_address_for_val_final[i] = stage2_result.challenges[i];
-                }
-
-                // DEBUG: Compare r_address used by OutputSumcheck vs ValFinalProver
-                std.debug.print("[ZOLT STAGE4 DEBUG] Using Stage2 binding challenges for ValFinalProver:\n", .{});
-                for (0..@min(4, log_ram_k)) |i| {
-                    std.debug.print("[ZOLT STAGE4 DEBUG]   stage2_challenges[{}] = {any}\n", .{ i, stage2_result.challenges[i].toBytesBE() });
-                }
-                std.debug.print("[ZOLT STAGE4 DEBUG] r_address_for_val_final (reversed binding challenges):\n", .{});
-                for (0..@min(4, r_address_for_val_final.len)) |i| {
-                    std.debug.print("[ZOLT STAGE4 DEBUG]   r_address_for_val_final[{}] = {any}\n", .{ i, r_address_for_val_final[i].toBytesBE() });
-                }
-
-                const val_final_params = try ram.ValFinalParams(F).init(
-                    self.allocator,
-                    trace_len,
-                    r_address_for_val_final,
-                );
-                var val_final_prover = try ram.ValFinalProver(F).init(
-                    self.allocator,
-                    memory_trace,
-                    config.initial_ram,
-                    val_final_params,
-                    start_address,
-                );
-                defer val_final_prover.deinit();
-
-                // DEBUG: Compare input_claim from claims vs actual polynomial sum
-                const val_final_poly_sum = val_final_prover.computeInitialClaim();
-                const val_eval_poly_sum = val_eval_prover.computeInitialClaim();
-                std.debug.print("[ZOLT STAGE4 DEBUG] input_claim_val_final (from claims) = {any}\n", .{input_claim_val_final.toBytesBE()});
-                std.debug.print("[ZOLT STAGE4 DEBUG] val_final_poly_sum (actual Σ inc*wa) = {any}\n", .{val_final_poly_sum.toBytesBE()});
-                std.debug.print("[ZOLT STAGE4 DEBUG] Claims match? {}\n", .{input_claim_val_final.eql(val_final_poly_sum)});
-                std.debug.print("[ZOLT STAGE4 DEBUG] input_claim_val_eval (from claims) = {any}\n", .{input_claim_val_eval.toBytesBE()});
-                std.debug.print("[ZOLT STAGE4 DEBUG] val_eval_poly_sum (actual Σ inc*wa*lt) = {any}\n", .{val_eval_poly_sum.toBytesBE()});
-                std.debug.print("[ZOLT STAGE4 DEBUG] Claims match? {}\n", .{input_claim_val_eval.eql(val_eval_poly_sum)});
-
-                // DEBUG: Compute eq at termination_index (2049) using both methods
-                // Use local helper to compute eq(r, k) with LE bit ordering
-                const termination_index: usize = 2049;
-                const eq_at_term_reversed = computeEqAtPointLE(r_address_for_val_final, termination_index);
-                std.debug.print("[ZOLT STAGE4 DEBUG] eq_LE(r_address_for_val_final, 2049) = {any}\n", .{eq_at_term_reversed.toBytesBE()});
-                // Compute eq_LE using original r_address_raf (non-reversed)
-                const eq_at_term_orig = computeEqAtPointLE(stage2_result.r_address_raf, termination_index);
-                std.debug.print("[ZOLT STAGE4 DEBUG] eq_LE(r_address_raf, 2049) = {any}\n", .{eq_at_term_orig.toBytesBE()});
-                // Compute eq_BE using original r_address_raf
-                const eq_at_term_be = computeEqAtPointBigEndian(stage2_result.r_address_raf, termination_index);
-                std.debug.print("[ZOLT STAGE4 DEBUG] eq_BE(r_address_raf, 2049) = {any}\n", .{eq_at_term_be.toBytesBE()});
-                std.debug.print("[ZOLT STAGE4 DEBUG] input_claim_val_final should equal one of these\n", .{});
-
-                const val_eval_rounds = val_eval_prover.numRounds();
-                const val_final_rounds = val_final_prover.numRounds();
+                const val_eval_rounds = val_eval_prover_early.numRounds();
+                const val_final_rounds = val_final_prover_early.numRounds();
                 const rounds_per_instance = [3]usize{ stage4_max_rounds, val_eval_rounds, val_final_rounds };
 
                 // Initial batched claim.
@@ -1857,7 +1853,7 @@ pub fn ProofConverter(comptime F: type) type {
                             combined_evals[j] = combined_evals[j].add(weighted);
                         }
                     } else {
-                        const evals = val_eval_prover.computeRoundPolynomial();
+                        const evals = val_eval_prover_early.computeRoundPolynomial();
                         val_eval_evals_opt = evals;
                         for (0..4) |j| {
                             combined_evals[j] = combined_evals[j].add(evals[j].mul(batching_coeffs[1]));
@@ -1876,7 +1872,7 @@ pub fn ProofConverter(comptime F: type) type {
                             combined_evals[j] = combined_evals[j].add(weighted);
                         }
                     } else {
-                        const evals = val_final_prover.computeRoundPolynomial();
+                        const evals = val_final_prover_early.computeRoundPolynomial();
                         val_final_evals_opt = evals;
                         for (0..4) |j| {
                             combined_evals[j] = combined_evals[j].add(evals[j].mul(batching_coeffs[2]));
@@ -1940,18 +1936,18 @@ pub fn ProofConverter(comptime F: type) type {
                     regs_prover.bindChallenge(round_idx, challenge);
 
                     if (val_eval_evals_opt) |evals| {
-                        val_eval_prover.bindChallengeWithPoly(challenge, evals);
+                        val_eval_prover_early.bindChallengeWithPoly(challenge, evals);
                     }
                     if (val_final_evals_opt) |evals| {
-                        val_final_prover.bindChallengeWithPoly(challenge, evals);
+                        val_final_prover_early.bindChallengeWithPoly(challenge, evals);
                     }
                 }
 
                 std.debug.print("[ZOLT STAGE4] Final batched_claim = {any}\n", .{batched_claim.toBytesBE()});
 
                 const regs_claims = regs_prover.getFinalClaims();
-                const val_eval_openings = val_eval_prover.getFinalOpenings();
-                const val_final_openings = val_final_prover.getFinalOpenings();
+                const val_eval_openings = val_eval_prover_early.getFinalOpenings();
+                const val_final_openings = val_final_prover_early.getFinalOpenings();
 
                 const r_cycle_sumcheck_le = stage4_r_sumcheck[0..n_cycle_vars];
                 var r_cycle_sumcheck_be = try self.allocator.alloc(F, n_cycle_vars);

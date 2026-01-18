@@ -265,23 +265,23 @@ pub fn Stage4Prover(comptime F: type) type {
             }
 
             // Precompute eq(r_cycle', j) evaluations
-            // IMPORTANT: Jolt uses BIG-ENDIAN ordering for eq polynomial (r[0] = MSB).
-            // Zolt receives challenges in LE order (r[0] = first challenge = LSB).
-            // We must reverse to match Jolt's BE convention.
+            // The sumcheck binds variables in LE order (round 0 binds bit_0, round 1 binds bit_1, etc.)
+            // After binding, the bound point k has bits [c_0, c_1, ..., c_{n-1}] where c_i = round i challenge.
+            //
+            // computeEqEvalsBE builds eq_evals[k] = eq(r, k) where r[i] pairs with k's bit at position (n-1-i).
+            // So r[0] pairs with c_{n-1}, r[1] pairs with c_{n-2}, ..., r[n-1] pairs with c_0.
+            //
+            // Jolt's verifier computes eq(r_cycle_BE, params.r_cycle_BE) = Π_j (c_j * p_j + ...)
+            // where r_cycle_BE = [c_{n-1}, ..., c_0] and params.r_cycle_BE = [p_{n-1}, ..., p_0].
+            //
+            // For the prover to match:
+            // - Use r = [p_{n-1}, ..., p_0] (r_cycle_be)
+            // - Then r[i] = p_{n-1-i} pairs with c_{n-1-i}
+            // - Result: Π_j (p_j * c_j + ...) = verifier's expected eq_val
             const r_cycle_be = try allocator.alloc(F, r_cycle.len);
             defer allocator.free(r_cycle_be);
             for (0..r_cycle.len) |i| {
                 r_cycle_be[i] = r_cycle[r_cycle.len - 1 - i];
-            }
-
-            // Debug: print r_cycle LE vs BE ordering
-            std.debug.print("[STAGE4 INIT] r_cycle_le (original):\n", .{});
-            for (0..@min(4, r_cycle.len)) |i| {
-                std.debug.print("[STAGE4 INIT]   r_cycle_le[{}] = {any}\n", .{ i, r_cycle[i].toBytes()[0..8] });
-            }
-            std.debug.print("[STAGE4 INIT] r_cycle_be (reversed):\n", .{});
-            for (0..@min(4, r_cycle_be.len)) |i| {
-                std.debug.print("[STAGE4 INIT]   r_cycle_be[{}] = {any}\n", .{ i, r_cycle_be[i].toBytes()[0..8] });
             }
 
             const eq_cycle_evals = try allocator.alloc(F, T);

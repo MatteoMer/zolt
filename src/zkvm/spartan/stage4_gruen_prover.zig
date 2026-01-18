@@ -421,10 +421,11 @@ pub fn Stage4GruenProver(comptime F: type) type {
                 const E_out_eval = if (x_out < E_out.len) E_out[x_out] else F.one();
                 const E_combined = E_out_eval.mul(E_in_eval);
 
-                // Get inc evaluations: [inc(j_even), inc_slope]
+                // Get inc evaluation at even cycle
+                // IMPORTANT: To match Jolt's behavior, inc is treated as CONSTANT (no slope).
+                // Jolt uses: inc_evals = [inc_coeff, 0], meaning inc_slope = 0.
+                // The inc value only matters when wa != 0 (i.e., for the written register).
                 const inc_0 = self.inc_poly[j_prime];
-                const inc_1 = self.inc_poly[j_odd];
-                const inc_slope = inc_1.sub(inc_0);
 
                 // Sum over all registers
                 for (0..self.current_K) |k| {
@@ -444,12 +445,14 @@ pub fn Stage4GruenProver(comptime F: type) type {
                     const wa_slope = wa_odd.sub(wa_even);
                     const val_slope = val_odd.sub(val_even);
 
-                    // C(X) = ra(X)*val(X) + wa(X)*(val(X)+inc(X))
-                    // C(0) = ra(0)*val(0) + wa(0)*(val(0)+inc(0))
+                    // C(X) = ra(X)*val(X) + wa(X)*(val(X)+inc)
+                    // where inc is constant (no slope) to match Jolt.
+                    // C(0) = ra(0)*val(0) + wa(0)*(val(0)+inc)
                     const c_0 = ra_even.mul(val_even).add(wa_even.mul(val_even.add(inc_0)));
 
-                    // C_X2_coeff = ra_slope*val_slope + wa_slope*(val_slope+inc_slope)
-                    const c_X2 = ra_slope.mul(val_slope).add(wa_slope.mul(val_slope.add(inc_slope)));
+                    // C_X2_coeff = ra_slope*val_slope + wa_slope*val_slope
+                    // NOTE: No inc_slope term because Jolt treats inc as constant.
+                    const c_X2 = ra_slope.mul(val_slope).add(wa_slope.mul(val_slope));
 
                     // Accumulate with E_out * E_in factor
                     q_0 = q_0.add(E_combined.mul(c_0));

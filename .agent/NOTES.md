@@ -1,5 +1,54 @@
 # Zolt-Jolt Cross-Verification Progress
 
+## Session 48 Summary - Stage 4 Deep Debugging (2026-01-18)
+
+### Key Finding: Both Gruen and Original Provers Fail!
+
+Tested both implementations:
+1. `stage4_gruen_prover.zig` - Gruen-optimized (matches Jolt's approach)
+2. `stage4_prover.zig` - Original dense implementation
+
+**BOTH produce the same failure pattern**, indicating the issue is NOT in the Gruen optimization itself.
+
+### What's Working
+1. **Claims match**: val_claim, rs1_ra_claim, rs2_ra_claim, rd_wa_claim, inc_claim all match between Zolt and Jolt
+2. **Gamma matches**: Verified byte-by-byte
+3. **r_cycle (Stage 3 challenges) matches**: Verified byte-by-byte
+4. **Transcript state at Stage 4 start appears to match**: `[8d, f6, 85, 47, 1a, b6, 8d, c2]`
+5. **Internal sumcheck relation satisfied**: p(0)+p(1)=claim passes for all rounds
+
+### What's Failing
+The r_sumcheck challenges derived from round polynomials don't match r_cycle:
+- Jolt expected r_cycle[0]: `[80, fc, d1, 50, 52, 28, 5d, 74]`
+- Actual r_sumcheck[0]: Completely different values
+
+This causes eq(r_cycle, r_sumcheck) != 1, leading to verification failure.
+
+### Fix Applied: inc_slope = 0
+Changed `phase1ComputeMessage` in `stage4_gruen_prover.zig`:
+```zig
+// OLD: c_X2 = ra_slope*val_slope + wa_slope*(val_slope+inc_slope)
+// NEW: c_X2 = ra_slope*val_slope + wa_slope*val_slope
+```
+
+This matches Jolt's behavior where `inc_evals = [inc_coeff, 0]` (constant, no slope).
+**Result**: Still fails, so this wasn't the only issue.
+
+### Hypotheses for Root Cause
+
+1. **eq polynomial indexing**: The dense eq_evals might be indexed differently than expected
+2. **Binding order implementation**: LowToHigh binding might have subtle differences
+3. **E_out/E_in table construction**: The evalsCached function might differ from Jolt's
+4. **gruenPolyDeg3 computation**: Might have subtle numerical differences
+
+### Next Steps
+1. Add step-by-step debugging to compare eq polynomial values
+2. Create a minimal test case (2 cycles, 1 register) to verify formulas
+3. Compare E_out_current/E_in_current return values between Zolt and Jolt
+4. Verify gruenPolyDeg3 output matches Jolt's implementation exactly
+
+---
+
 ## Session 47 Summary - Stage 4 Detailed Analysis (2026-01-18)
 
 ### Latest Findings
@@ -83,7 +132,7 @@ coeffs[2] = [d6, 96, 40, 95, c4, 1f, e8, b7, ...]
 1. Uses `computeEqEvalsBE` dense eq polynomial
 2. Uses dense arrays: `val_poly[k * T + j]`
 3. Iterates over all (j, k) pairs directly
-4. No Gruen optimization
+4. Now also has Gruen implementation (still fails)
 
 ### Key Structural Differences
 
@@ -93,7 +142,7 @@ coeffs[2] = [d6, 96, 40, 95, c4, 1f, e8, b7, ...]
 
 2. **Eq Polynomial**:
    - Jolt: GruenSplitEqPolynomial (splits into E_in and E_out for efficiency)
-   - Zolt: Dense array of size T
+   - Zolt: GruenSplitEqPolynomial (Zig port) or dense array of size T
 
 3. **Round Poly Computation**:
    - Jolt: `prover_message_contribution` processes sparse entries
@@ -115,52 +164,15 @@ But the round polynomial coefficients differ because:
 
 ### Files to Study
 - Jolt sparse matrix: `jolt-core/src/subprotocols/read_write_matrix/`
-- Jolt Gruen eq: `jolt-core/src/poly/gruen_split_eq_poly.rs`
+- Jolt Gruen eq: `jolt-core/src/poly/split_eq_poly.rs`
 - Jolt prover: `jolt-core/src/zkvm/registers/read_write_checking.rs`
-- Zolt prover: `src/zkvm/spartan/stage4_prover.zig`
+- Zolt provers: `src/zkvm/spartan/stage4_prover.zig`, `stage4_gruen_prover.zig`
+- Zolt Gruen eq: `src/zkvm/spartan/gruen_eq.zig`
 
 ### Potential Fixes
-1. **Full port**: Rewrite Zolt's Stage 4 prover to match Jolt's sparse + Gruen approach
+1. **Full port**: Continue porting Jolt's exact implementation
 2. **Debug deeper**: Add step-by-step comparison to find exact divergence
-
----
-
-## Session 42 Summary - Sumcheck Polynomial Issue (2026-01-17)
-
-### New Findings
-
-#### Opening Claims ARE Being Computed
-The opening claims ARE using actual polynomial evaluations (not zeros):
-- Zolt's `r1cs_input_evals[0]` (LeftInstructionInput) computes to ~20050671788...
-- This matches Jolt's expected value
-- 36 R1CS input claims are appended to transcript in correct order
-- The `addSpartanOuterOpeningClaimsWithEvaluations` function is being called
-
-#### The Real Issue: Sumcheck Polynomial Coefficients
-The sumcheck verification failure is NOT due to opening claims, but the **sumcheck proof polynomials**:
-- `output_claim` (from proof): 10634556229438437044377436930505224242122955378672273598842115985622605632100
-- `expected_output_claim` (from evaluations): 17179895292250284685319038554266025066782411088335892517994655937988141579529
-
-These values should match. The verifier computes `expected_output_claim` from:
-1. R1CS input evaluations (opening claims) - CORRECT
-2. R1CS constraint matrix evaluations
-3. Tau/challenge parameters
-
-The `output_claim` comes from evaluating the proof's polynomial at challenges. The mismatch means:
-1. The sumcheck proof polynomials are incorrectly generated
-2. OR the challenges used during proving differ from verification
-3. OR the Az*Bz computation is wrong
-
-### Root Cause: Streaming Outer Prover Bug
-
-**Key Discovery:**
-- The round polynomial coefficients ARE non-zero (correct)
-- The batching_coeff MATCHES between Zolt and Jolt (185020165269464640985840804826040774859)
-- The challenges appear to be derived correctly from transcript
-- BUT the final output_claim doesn't match expected_output_claim
-
-**The Problem:**
-The streaming outer prover generates polynomials that are **internally consistent** (sum(p(0), p(1)) == claim passes) but encode the **wrong computation**. The Az*Bz evaluation in the streaming prover differs from what Jolt's verifier expects.
+3. **Minimal test case**: Create simple 2-cycle test to verify formulas
 
 ---
 
@@ -180,14 +192,14 @@ The streaming outer prover generates polynomials that are **internally consisten
    - Issue: Proof was missing the claims count header
    - Result: Jolt can now deserialize Zolt proofs successfully
 
-### Stage Status (as of Session 46)
+### Stage Status (as of Session 48)
 
 | Stage | Internal (Zolt) | Cross-verify (Jolt) | Notes |
 |-------|-----------------|---------------------|-------|
 | 1 | ✅ PASS | ✅ PASS | Fixed MontU128Challenge |
 | 2 | ✅ PASS | ✅ PASS | - |
 | 3 | ✅ PASS | ✅ PASS | - |
-| 4 | ✅ PASS | ❌ FAIL | Round poly coefficients differ (sparse vs dense) |
+| 4 | ✅ PASS | ❌ FAIL | Round poly coefficients differ |
 | 5 | ✅ PASS | - | Blocked by Stage 4 |
 | 6 | ✅ PASS | - | Blocked by Stage 4 |
 
@@ -199,5 +211,7 @@ The streaming outer prover generates polynomials that are **internally consisten
 - Jolt BatchedSumcheck verify: `jolt-core/src/subprotocols/sumcheck.rs:180`
 - Jolt Stage 4 prover: `jolt-core/src/zkvm/registers/read_write_checking.rs`
 - Jolt sparse matrix: `jolt-core/src/subprotocols/read_write_matrix/`
+- Jolt Gruen eq: `jolt-core/src/poly/split_eq_poly.rs`
 - Zolt Blake2b transcript: `src/transcripts/blake2b.zig`
-- Zolt Stage 4 prover: `src/zkvm/spartan/stage4_prover.zig`
+- Zolt Stage 4 provers: `src/zkvm/spartan/stage4_prover.zig`, `stage4_gruen_prover.zig`
+- Zolt Gruen eq: `src/zkvm/spartan/gruen_eq.zig`

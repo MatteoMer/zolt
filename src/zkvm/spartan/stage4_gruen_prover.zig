@@ -186,6 +186,12 @@ pub fn Stage4GruenProver(comptime F: type) type {
                     else => false,
                 };
                 if (reads_rs1 and rs1 < 32) {
+                    // CRITICAL: Verify tracked value matches trace value
+                    if (cycle < 5 and register_values[rs1] != step.rs1_value) {
+                        std.debug.print("[VAL_MISMATCH] cycle={}, rs1={}: tracked={}, trace={}\n", .{
+                            cycle, rs1, register_values[rs1], step.rs1_value,
+                        });
+                    }
                     rs1_ra_poly[@as(usize, rs1) * T + cycle] = F.one();
                     ra_poly[@as(usize, rs1) * T + cycle] = ra_poly[@as(usize, rs1) * T + cycle].add(gamma);
                 }
@@ -196,6 +202,12 @@ pub fn Stage4GruenProver(comptime F: type) type {
                     else => false,
                 };
                 if (reads_rs2 and rs2 < 32) {
+                    // CRITICAL: Verify tracked value matches trace value
+                    if (cycle < 5 and register_values[rs2] != step.rs2_value) {
+                        std.debug.print("[VAL_MISMATCH] cycle={}, rs2={}: tracked={}, trace={}\n", .{
+                            cycle, rs2, register_values[rs2], step.rs2_value,
+                        });
+                    }
                     rs2_ra_poly[@as(usize, rs2) * T + cycle] = F.one();
                     ra_poly[@as(usize, rs2) * T + cycle] = ra_poly[@as(usize, rs2) * T + cycle].add(gamma_sq);
                 }

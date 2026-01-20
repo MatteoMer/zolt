@@ -1940,13 +1940,49 @@ pub fn ProofConverter(comptime F: type) type {
                         std.debug.print("[ZOLT STAGE4 TRANSCRIPT]   coeffs[0] = c0 (32 bytes) = {any}\n", .{coeffs[0].toBytes()});
                         std.debug.print("[ZOLT STAGE4 TRANSCRIPT]   coeffs[1] = c2 (32 bytes) = {any}\n", .{coeffs[1].toBytes()});
                         std.debug.print("[ZOLT STAGE4 TRANSCRIPT]   coeffs[2] = c3 (32 bytes) = {any}\n", .{coeffs[2].toBytes()});
+                        // Also print compressed coeffs to verify they match
+                        std.debug.print("[ZOLT STAGE4 TRANSCRIPT] Compressed coeffs for transcript (should match above):\n", .{});
+                        std.debug.print("[ZOLT STAGE4 TRANSCRIPT]   compressed[0] = c0 (32 bytes) = {any}\n", .{compressed[0].toBytes()});
+                        std.debug.print("[ZOLT STAGE4 TRANSCRIPT]   compressed[1] = c2 (32 bytes) = {any}\n", .{compressed[1].toBytes()});
+                        std.debug.print("[ZOLT STAGE4 TRANSCRIPT]   compressed[2] = c3 (32 bytes) = {any}\n", .{compressed[2].toBytes()});
+                        // Print BE versions for comparison with Jolt
+                        const c0_be = compressed[0].fromMontgomery();
+                        std.debug.print("[ZOLT STAGE4 TRANSCRIPT] c0 for transcript (BE for Jolt comparison): first 8 bytes = ", .{});
+                        var buf: [32]u8 = undefined;
+                        for (0..4) |i| {
+                            std.mem.writeInt(u64, buf[i * 8 ..][0..8], c0_be.limbs[i], .little);
+                        }
+                        var reversed: [32]u8 = undefined;
+                        for (0..32) |i| {
+                            reversed[i] = buf[31 - i];
+                        }
+                        std.debug.print("[{x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}]\n", .{ reversed[0], reversed[1], reversed[2], reversed[3], reversed[4], reversed[5], reversed[6], reversed[7] });
                     }
 
+                    if (round_idx == 0) {
+                        std.debug.print("[ZOLT STAGE4 TRANSCRIPT] State BEFORE UniPoly_begin: {any}\n", .{transcript.state[0..8]});
+                    }
                     transcript.appendMessage("UniPoly_begin");
+                    if (round_idx == 0) {
+                        std.debug.print("[ZOLT STAGE4 TRANSCRIPT] State AFTER UniPoly_begin: {any}\n", .{transcript.state[0..8]});
+                    }
                     transcript.appendScalar(compressed[0]);
+                    if (round_idx == 0) {
+                        std.debug.print("[ZOLT STAGE4 TRANSCRIPT] State AFTER c0: {any}\n", .{transcript.state[0..8]});
+                    }
                     transcript.appendScalar(compressed[1]);
+                    if (round_idx == 0) {
+                        std.debug.print("[ZOLT STAGE4 TRANSCRIPT] State AFTER c2: {any}\n", .{transcript.state[0..8]});
+                    }
                     transcript.appendScalar(compressed[2]);
+                    if (round_idx == 0) {
+                        std.debug.print("[ZOLT STAGE4 TRANSCRIPT] State AFTER c3: {any}\n", .{transcript.state[0..8]});
+                    }
                     transcript.appendMessage("UniPoly_end");
+                    if (round_idx == 0) {
+                        std.debug.print("[ZOLT STAGE4 TRANSCRIPT] State AFTER UniPoly_end (full 32 bytes): {any}\n", .{transcript.state});
+                        std.debug.print("[ZOLT STAGE4 TRANSCRIPT] Round counter BEFORE challenge: {d}\n", .{transcript.n_rounds});
+                    }
 
                     const challenge = transcript.challengeScalar();
                     stage4_r_sumcheck[round_idx] = challenge;
@@ -3413,7 +3449,21 @@ pub fn ProofConverter(comptime F: type) type {
             // P(x) = c0 + c1*x + c2*x^2 + c3*x^3
             const x2 = x.mul(x);
             const x3 = x2.mul(x);
-            return c0.add(c1.mul(x)).add(c2.mul(x2)).add(c3.mul(x3));
+            const result = c0.add(c1.mul(x)).add(c2.mul(x2)).add(c3.mul(x3));
+
+            // Debug: Print intermediate values for Stage 4 first round
+            // Stage 4 Round 0 challenge has limbs[2] = 0xb5ba64b08cc4cef5
+            if (x.limbs[2] == 0xb5ba64b08cc4cef5) {
+                std.debug.print("[ZOLT evalFromHint STAGE4 R0] Found Stage 4 Round 0!\n", .{});
+                std.debug.print("[ZOLT evalFromHint STAGE4 R0]   x limbs = [0x{x}, 0x{x}, 0x{x}, 0x{x}]\n", .{ x.limbs[0], x.limbs[1], x.limbs[2], x.limbs[3] });
+                std.debug.print("[ZOLT evalFromHint STAGE4 R0]   x2 limbs = [0x{x}, 0x{x}, 0x{x}, 0x{x}]\n", .{ x2.limbs[0], x2.limbs[1], x2.limbs[2], x2.limbs[3] });
+                std.debug.print("[ZOLT evalFromHint STAGE4 R0]   c0 limbs = [0x{x}, 0x{x}, 0x{x}, 0x{x}]\n", .{ c0.limbs[0], c0.limbs[1], c0.limbs[2], c0.limbs[3] });
+                std.debug.print("[ZOLT evalFromHint STAGE4 R0]   c1 limbs = [0x{x}, 0x{x}, 0x{x}, 0x{x}]\n", .{ c1.limbs[0], c1.limbs[1], c1.limbs[2], c1.limbs[3] });
+                std.debug.print("[ZOLT evalFromHint STAGE4 R0]   hint limbs = [0x{x}, 0x{x}, 0x{x}, 0x{x}]\n", .{ hint.limbs[0], hint.limbs[1], hint.limbs[2], hint.limbs[3] });
+                std.debug.print("[ZOLT evalFromHint STAGE4 R0]   result limbs = [0x{x}, 0x{x}, 0x{x}, 0x{x}]\n", .{ result.limbs[0], result.limbs[1], result.limbs[2], result.limbs[3] });
+            }
+
+            return result;
         }
 
         /// Compute eq(r, idx) where r is in BIG_ENDIAN order (MSB first).

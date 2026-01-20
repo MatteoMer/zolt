@@ -11,9 +11,57 @@
 | 5 | ✅ PASS | - | Blocked by Stage 4 |
 | 6 | ✅ PASS | - | Blocked by Stage 4 |
 
+## Session 48 Progress (2026-01-20)
+
+### Deep Investigation of Stage 4 Round Polynomial Mismatch
+
+**Verified Components (all match between Zolt and Jolt):**
+- [x] gamma value from transcript
+- [x] r_cycle_be passed to GruenSplitEqPolynomial
+- [x] ra_poly contains correct gamma factors (gamma for rs1, gamma^2 for rs2)
+- [x] E_in/E_out table computation logic
+- [x] gruenPolyDeg3 formula (mathematically equivalent to Jolt's gruen_poly_deg_3)
+- [x] interpolateDegree3 and evalsToCompressed formulas
+- [x] Cycle-to-(x_out, x_in, x_last) decomposition
+
+**Key Debug Findings:**
+```
+Jolt verifier output:
+- r_cycle from sumcheck: [c1, 1d, 68, 46, ...] (derived from proof coefficients)
+- params.r_cycle: [80, fc, d1, 50, ...] (expected from preprocessing)
+```
+
+The sumcheck-derived r_cycle differs from params.r_cycle because Zolt's
+round polynomial coefficients produce different Fiat-Shamir challenges.
+
+**Zolt Internal Check Passes:**
+- p(0) + p(1) = batched_claim ✓ (sumcheck relation satisfied)
+- But the polynomial itself is DIFFERENT from what Jolt expects
+
+**Analysis of Individual Contributions:**
+For k=2, j_pair=(0,1) at cycle 0:
+- ra_even = 0 (no read), wa_even = 1 (write)
+- val_even = 0, inc_0 = 32768
+- c_0 = 0*0 + 1*(0+32768) = 32768 ✓
+
+The per-entry contributions appear correct, but the accumulated
+q_0 and q_X2 differ from Jolt's expected values.
+
+**Remaining Hypotheses:**
+1. E_in/E_out table indexing might differ in edge cases
+2. The inc_poly handling after binding might not match Jolt's sparse iteration
+3. current_T/current_K update timing might be off
+
+**Next Investigation Steps:**
+1. Add side-by-side E_out[0..4] and E_in[0..4] comparison
+2. Create minimal test case with single register write
+3. Compare intermediate values at each accumulation step
+
+---
+
 ## Session 47 Progress (2026-01-18)
 
-### Latest Findings (Updated)
+### Previous Findings
 
 **FIXED - Transcript Synchronization:**
 - gamma_stage4 bytes match between Zolt and Jolt ✓
@@ -23,34 +71,6 @@
 - Padding fix applied: val_poly for padding cycles now filled ✓
 - Transcript state after input claims: `[75, 0f, 4a, 12, 44, 5c, d0, 24]` matches ✓
 - Batching coefficients now match ✓
-
-**REMAINING ISSUE - Round Polynomial Coefficients:**
-Jolt Stage 4 Round 0 coefficients (LE bytes):
-- c0_bytes = [175, 203, 5, 251, 28, 188, 99, 10, ...]
-- c2_bytes = [229, 122, 188, 188, 236, 68, 132, 131, ...]
-- c3_bytes = [151, 106, 90, 172, 115, 202, 59, 141, ...]
-
-Zolt Stage 4 Round 0 coefficients:
-- c0 = { 251, 39, 236, 197, 111, 171, 135, 176, ... }
-- c2 = { 196, 91, 223, 7, 40, 209, 118, 126, ... }
-- c3 = { 237, 164, 171, 42, 199, 9, 20, 191, ... }
-
-These are COMPLETELY different. The fundamental issue is in how
-RegistersReadWriteChecking computes its round polynomials.
-
-**Root Cause:**
-Zolt's Stage 4 prover uses dense iteration, while Jolt uses:
-1. GruenSplitEqPolynomial with LowToHigh binding
-2. ReadWriteMatrixCycleMajor sparse representation
-3. gruen_poly_deg_3 conversion from quadratic coefficients to cubic evaluations
-
-The mathematical polynomial should be the same, but the computation differs.
-
-**Next Steps:**
-1. Compare Round 0 computation step-by-step between Zolt and Jolt
-2. Verify eq polynomial values match at cycle indices
-3. Check if iteration order (k, j) matches
-4. Consider porting Jolt's sparse+Gruen algorithm to Zolt
 
 ---
 

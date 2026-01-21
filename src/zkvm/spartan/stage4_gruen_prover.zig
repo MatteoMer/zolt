@@ -501,12 +501,27 @@ pub fn Stage4GruenProver(comptime F: type) type {
                     // Debug: print first few nonzero contributions in Round 0
                     if (is_round_0 and !c_0.eql(F.zero()) and nonzero_count < 5) {
                         nonzero_count += 1;
-                        std.debug.print("[STAGE4_CONTRIB] k={}, j_pair=({},{}): ra_even={any}, wa_even={any}, val_even={any}, inc_0={any}\n", .{
-                            k, j_prime, j_odd,
+                        std.debug.print("[STAGE4_CONTRIB] k={}, j_pair=({},{}): idx_even={}, idx_odd={}\n", .{
+                            k, j_prime, j_odd, idx_even, idx_odd,
+                        });
+                        std.debug.print("[STAGE4_CONTRIB]   EVEN: ra={any}, wa={any}, val={any}\n", .{
                             ra_even.toBytes()[0..8],
                             wa_even.toBytes()[0..8],
                             val_even.toBytes()[0..8],
+                        });
+                        std.debug.print("[STAGE4_CONTRIB]   ODD:  ra={any}, wa={any}, val={any}\n", .{
+                            ra_odd.toBytes()[0..8],
+                            wa_odd.toBytes()[0..8],
+                            val_odd.toBytes()[0..8],
+                        });
+                        std.debug.print("[STAGE4_CONTRIB]   SLOPE: ra={any}, wa={any}, val={any}\n", .{
+                            ra_slope.toBytes()[0..8],
+                            wa_slope.toBytes()[0..8],
+                            val_slope.toBytes()[0..8],
+                        });
+                        std.debug.print("[STAGE4_CONTRIB]   inc_0={any}, inc_slope={any}\n", .{
                             inc_0.toBytes()[0..8],
+                            inc_slope.toBytes()[0..8],
                         });
                         std.debug.print("[STAGE4_CONTRIB]   c_0={any}, c_X2={any}, E_combined={any}\n", .{
                             c_0.toBytes()[0..8],

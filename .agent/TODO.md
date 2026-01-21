@@ -11,6 +11,36 @@
 | 5 | ✅ PASS | - | Blocked by Stage 4 |
 | 6 | ✅ PASS | - | Blocked by Stage 4 |
 
+## Session 51 Progress (2026-01-21)
+
+### Added Detailed Debug Tracing for E_out/E_in Comparison
+
+**New Debug Output Added:**
+- E_out and E_in table structure (lengths, first 4 entries)
+- current_scalar and current_w values
+- Per-contribution x_out, x_in, E_out, E_in values
+- Pair 0 (first j pair) detailed contributions for all registers
+
+**Zolt Debug Output (Round 0):**
+```
+n=8, m=4
+E_out.len=16, E_in.len=8
+E_out[0] = { 63, 200, 23, 119, 168, 156, 128, 140, ... }
+E_in[0] = { 105, 57, 186, 110, 51, 166, 185, 214, ... }
+
+Pair 0 contributions for k=2:
+  ra_even={0,0,0,0,0,0,0,0}, wa_even={1,0,0,0,0,0,0,0}, val_even={0,0,0,0,0,0,0,0}
+  ra_odd={8,216,230,198,206,150,22,128}, wa_odd={1,0,0,0,0,0,0,0}, val_odd={0,128,0,0,0,0,0,0}
+  c_0={0,128,0,0,0,0,0,0}, c_X2={0,0,4,108,115,99,103,75}
+```
+
+**Next Steps:**
+1. Get matching Jolt debug output for same fibonacci.elf trace
+2. Compare E_out/E_in table values between Zolt and Jolt
+3. Identify exact point of divergence in q_0/q_X2 accumulation
+
+---
+
 ## Session 50 Progress (2026-01-21)
 
 ### Deep Investigation of Stage 4 q_0/q_X2 Mismatch

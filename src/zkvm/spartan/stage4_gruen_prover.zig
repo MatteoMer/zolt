@@ -253,6 +253,37 @@ pub fn Stage4GruenProver(comptime F: type) type {
             }
 
             const gruen_eq_poly = try GruenSplitEqPolynomial(F).init(allocator, r_cycle_be);
+
+            // Debug: Print E_out and E_in table details for comparison with Jolt
+            {
+                const m = r_cycle_be.len / 2;
+                std.debug.print("\n[STAGE4_GRUEN_INIT] GruenSplitEqPolynomial structure:\n", .{});
+                std.debug.print("[STAGE4_GRUEN_INIT]   n={}, m={}\n", .{ r_cycle_be.len, m });
+                std.debug.print("[STAGE4_GRUEN_INIT]   w_out = r_cycle_be[0..{}] (indices 0..{})\n", .{ m, m - 1 });
+                std.debug.print("[STAGE4_GRUEN_INIT]   w_in = r_cycle_be[{}..{}]\n", .{ m, r_cycle_be.len - 1 });
+                std.debug.print("[STAGE4_GRUEN_INIT]   w_last = r_cycle_be[{}]\n", .{r_cycle_be.len - 1});
+
+                const E_out = gruen_eq_poly.E_out_current();
+                const E_in = gruen_eq_poly.E_in_current();
+
+                std.debug.print("[STAGE4_GRUEN_INIT]   E_out.len={}, E_in.len={}\n", .{ E_out.len, E_in.len });
+
+                // Print first 4 E_out entries (serialized as 32-byte arrays)
+                std.debug.print("[STAGE4_GRUEN_INIT]   E_out[0..min(4, len)]:\n", .{});
+                for (0..@min(4, E_out.len)) |i| {
+                    std.debug.print("[STAGE4_GRUEN_INIT]     E_out[{}] = {any}\n", .{ i, E_out[i].toBytes() });
+                }
+
+                // Print first 4 E_in entries
+                std.debug.print("[STAGE4_GRUEN_INIT]   E_in[0..min(4, len)]:\n", .{});
+                for (0..@min(4, E_in.len)) |i| {
+                    std.debug.print("[STAGE4_GRUEN_INIT]     E_in[{}] = {any}\n", .{ i, E_in[i].toBytes() });
+                }
+
+                // Print current_scalar and current_w
+                std.debug.print("[STAGE4_GRUEN_INIT]   current_scalar = {any}\n", .{gruen_eq_poly.current_scalar.toBytes()});
+                std.debug.print("[STAGE4_GRUEN_INIT]   current_w (w_last) = {any}\n", .{gruen_eq_poly.get_current_w().toBytes()});
+            }
             allocator.free(r_cycle_be); // GruenSplitEqPolynomial makes its own copy
 
             // Copy r_cycle (keep original LE order for other uses)
@@ -545,6 +576,32 @@ pub fn Stage4GruenProver(comptime F: type) type {
                             c_0.toBytes()[0..8],
                             c_X2.toBytes()[0..8],
                             E_combined.toBytes()[0..8],
+                        });
+                        // Also print x_out, x_in for this contribution
+                        std.debug.print("[STAGE4_CONTRIB]   x_out={}, x_in={}, E_out={any}, E_in={any}\n", .{
+                            x_out,
+                            x_in,
+                            E_out_eval.toBytes()[0..8],
+                            E_in_eval.toBytes()[0..8],
+                        });
+                    }
+
+                    // Additional debug: print ALL contributions for i=0 (first pair) in round 0
+                    if (is_round_0 and i == 0 and (!ra_even.eql(F.zero()) or !wa_even.eql(F.zero()) or !ra_odd.eql(F.zero()) or !wa_odd.eql(F.zero()))) {
+                        std.debug.print("[STAGE4_PAIR0] k={}: ra_even={any}, wa_even={any}, val_even={any}\n", .{
+                            k,
+                            ra_even.toBytes()[0..8],
+                            wa_even.toBytes()[0..8],
+                            val_even.toBytes()[0..8],
+                        });
+                        std.debug.print("[STAGE4_PAIR0]   ra_odd={any}, wa_odd={any}, val_odd={any}\n", .{
+                            ra_odd.toBytes()[0..8],
+                            wa_odd.toBytes()[0..8],
+                            val_odd.toBytes()[0..8],
+                        });
+                        std.debug.print("[STAGE4_PAIR0]   c_0={any}, c_X2={any}\n", .{
+                            c_0.toBytes()[0..8],
+                            c_X2.toBytes()[0..8],
                         });
                     }
 

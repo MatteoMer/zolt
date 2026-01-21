@@ -11,6 +11,85 @@
 | 5 | ✅ PASS | - | Blocked by Stage 4 |
 | 6 | ✅ PASS | - | Blocked by Stage 4 |
 
+## Session 50 Progress (2026-01-21)
+
+### Deep Investigation of Stage 4 q_0/q_X2 Mismatch
+
+**Verified Components (all match between Zolt and Jolt):**
+- [x] input_claim_registers (converted and compared byte-by-byte)
+- [x] gamma value from transcript
+- [x] r_cycle_be values (all 8 values match params.r_cycle exactly)
+- [x] Polynomial formulas: c_0 = ra_even*val_even + wa_even*(val_even+inc_0)
+- [x] Polynomial formulas: c_X2 = ra_slope*val_slope + wa_slope*(val_slope+inc_slope)
+- [x] E_in/E_out table indexing logic
+
+**Debug Output Comparison:**
+
+Zolt Round 0:
+```
+q_0 = { 208, 184, 198, 139, 236, 153, 15, 1, ... }
+q_X2 = { 108, 114, 119, 247, 43, 73, 247, 11, ... }
+previous_claim = { 51, 114, 162, 234, 94, 186, 234, 164, ... }
+```
+
+Jolt Round 0 (from prover):
+```
+q_0 = [230, 40, 53, 41, 4, 58, 165, 153, ...]
+q_X2 = [160, 132, 230, 84, 30, 20, 87, 220, ...]
+```
+
+**Key Finding:**
+The q_0 and q_X2 values are DIFFERENT even though all the input parameters appear to match.
+This means the difference is in how the intermediate values are computed/accumulated.
+
+**Polynomial Values (Zolt, register k=2):**
+```
+j=0: val=0, ra=0, wa=1
+j=1: val=32768 (0x8000), ra=gamma, wa=1
+j=2: val=32769 (0x8001), ra=gamma, wa=1
+j=3: val=65536 (0x10000), ra=0, wa=0
+```
+
+**Remaining Suspects:**
+1. GruenSplitEqPolynomial E_in/E_out table VALUES (not indexing)
+2. current_scalar updates during binding
+3. The w[] array initialization from r_cycle
+4. Subtle difference in how sparse vs dense iteration combines contributions
+
+**Next Investigation Steps:**
+1. Add debug to compare E_out[0] and E_in[0] values with Jolt
+2. Trace through the first contribution (k=2, j=0,1) in both systems
+3. Verify w[] array in GruenSplitEqPolynomial matches Jolt
+
+---
+
+## Session 49 Progress (2026-01-21)
+
+### Key Finding: Coefficient Comparison Shows Complete Mismatch
+
+**Zolt Round 0 coeffs (serialized):**
+```
+coeffs[0] = { 167, 2, 138, 133, 197, 33, 242, 168, ... }
+coeffs[1] = { 213, 211, 179, 236, 114, 215, 98, 219, ... }
+coeffs[2] = { 28, 7, 243, 236, 36, 154, 133, 63, ... }
+```
+
+**Jolt Round 0 coeffs (from fibonacci example):**
+```
+coeffs[0] = [201, 189, 36, 128, 253, 37, 79, 102, ...]
+coeffs[1] = [196, 49, 84, 111, 247, 168, 4, 113, ...]
+coeffs[2] = [40, 7, 138, 70, 39, 98, 253, 198, ...]
+```
+
+The coefficients are **completely different** - not even close.
+
+**Resolution:**
+- Internal Zolt verification uses a DIFFERENT Stage 4 prover than proof_converter
+- proof_converter uses Stage4GruenProver for Jolt compatibility
+- The Stage4GruenProver IS producing non-zero coefficients correctly
+
+---
+
 ## Session 48 Progress (2026-01-20)
 
 ### Deep Investigation of Stage 4 Round Polynomial Mismatch

@@ -259,6 +259,24 @@ pub fn Stage4GruenProver(comptime F: type) type {
             const r_cycle_copy = try allocator.alloc(F, r_cycle.len);
             @memcpy(r_cycle_copy, r_cycle);
 
+            // Debug: Print first few polynomial values for comparison with Jolt
+            std.debug.print("[STAGE4 INIT] T={}, K={}, gamma={any}\n", .{ T, K, gamma.toBytes()[0..8] });
+            std.debug.print("[STAGE4 INIT] First 4 entries for register k=2 (j=0..3):\n", .{});
+            for (0..4) |j| {
+                const idx = 2 * T + j;
+                std.debug.print("  j={}: val={any}, ra={any}, wa={any}\n", .{
+                    j,
+                    val_poly[idx].toBytes()[0..8],
+                    ra_poly[idx].toBytes()[0..8],
+                    rd_wa_poly[idx].toBytes()[0..8],
+                });
+            }
+            std.debug.print("[STAGE4 INIT] inc_poly first 4: ", .{});
+            for (0..4) |j| {
+                std.debug.print("{any} ", .{inc_poly[j].toBytes()[0..8]});
+            }
+            std.debug.print("\n", .{});
+
             return Self{
                 .allocator = allocator,
                 .T = T,
@@ -536,13 +554,11 @@ pub fn Stage4GruenProver(comptime F: type) type {
                 }
             }
 
-            // Debug: Print q_0 and q_X2 for first round
+            // Debug: Print q_0 and q_X2 for first round (full 32 bytes)
             if (self.current_T >= self.T / 2) {
-                std.debug.print("[GRUEN_DEBUG]   q_0={any}, q_X2={any}\n", .{
-                    q_0.toBytes()[0..8],
-                    q_X2.toBytes()[0..8],
-                });
-                std.debug.print("[GRUEN_DEBUG]   previous_claim={any}\n", .{previous_claim.toBytes()[0..8]});
+                std.debug.print("[GRUEN_DEBUG] q_0 = {any}\n", .{q_0.toBytes()});
+                std.debug.print("[GRUEN_DEBUG] q_X2 = {any}\n", .{q_X2.toBytes()});
+                std.debug.print("[GRUEN_DEBUG] previous_claim = {any}\n", .{previous_claim.toBytes()});
             }
 
             // Use gruenPolyDeg3 to convert [q(0), q_X2] to cubic coefficients

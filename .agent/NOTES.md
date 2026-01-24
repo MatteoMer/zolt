@@ -1,5 +1,50 @@
 # Zolt-Jolt Cross-Verification Progress
 
+## Session 52 Summary - Debug Output Working (2026-01-24)
+
+### Key Finding: Debug Output Now Showing
+
+Fixed the issue with missing debug output - the SRS file was missing! When running without `--srs`:
+```
+zig build run -- prove examples/fibonacci.elf --jolt-format -o /tmp/zolt_proof.bin
+```
+
+All debug output now appears:
+
+**Zolt Stage 4 Round 0 (q_0, q_X2):**
+```
+q_0 = { 142, 134, 24, 23, 198, 184, 119, 182, ... }
+q_X2 = { 142, 219, 181, 75, 210, 72, 66, 115, ... }
+regs_evals[0] = { 136, 205, 113, 48, 248, 104, 6, 240 }
+regs_evals[1] = { 188, 135, 97, 158, 228, 141, 236, 192 }
+regs_evals[2] = { 58, 166, 205, 230, 72, 241, 230, 251 }
+regs_evals[3] = { 55, 198, 84, 181, 234, 185, 133, 134 }
+```
+
+**E_out/E_in Table Values (Round 0):**
+```
+E_out[0] = { 71, 160, 211, 72, 66, 155, 28, 51, ... }
+E_out[1] = { 41, 243, 104, 67, 21, 89, 78, 158, ... }
+E_in[0] = { 212, 155, 232, 122, 38, 129, 172, 11, ... }
+E_in[1] = { 146, 223, 209, 85, 252, 189, 104, 204, ... }
+```
+
+**First Contribution (k=2, j_pair=(0,1)):**
+```
+EVEN: ra={ 0, 0, 0, 0, 0, 0, 0, 0 }, wa={ 1, 0, 0, 0, 0, 0, 0, 0 }, val={ 0, 0, 0, 0, 0, 0, 0, 0 }
+ODD:  ra={ 165, 220, 86, 216, 147, 169, 75, 108 }, wa={ 1, 0, 0, 0, 0, 0, 0, 0 }, val={ 0, 128, 0, 0, 0, 0, 0, 0 }
+inc_0={ 0, 128, 0, 0, 0, 0, 0, 0 }, inc_slope={ 2, 128, 255, 239, 147, 245, 225, 67 }
+```
+
+### Next Steps
+
+1. Export Jolt SRS and preprocessing for exact comparison
+2. Run cross-verification test to see current failure mode
+3. Compare E_out/E_in values with Jolt's native prover
+4. Investigate if polynomial values (val_poly) match expectations
+
+---
+
 ## Session 49 Summary - Stage 4 Deep Investigation (2026-01-18)
 
 ### Key Finding: All Inputs Match, But Round Polynomials Differ

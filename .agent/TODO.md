@@ -11,6 +11,76 @@
 | 5 | ✅ PASS | - | Blocked by Stage 4 |
 | 6 | ✅ PASS | - | Blocked by Stage 4 |
 
+## Session 52 Progress - Cross-Verification Test (2026-01-24)
+
+### Cross-Verification Result: STAGE 4 FAILURE
+
+Successfully generated proof and ran Jolt cross-verification test:
+```bash
+cd /Users/matteo/projects/jolt/jolt-core && \
+  cargo test test_verify_zolt_proof_with_zolt_preprocessing --release -- --nocapture --ignored
+```
+
+**Verification Result:**
+- Stages 1-3: PASS
+- Stage 4: FAIL (Sumcheck verification failed)
+
+**Root Cause Analysis:**
+
+1. **r_cycle mismatch:**
+   - Jolt r_cycle[0] from sumcheck: `[a1, d3, 18, 73, 0b, 81, f7, 4f]`
+   - Jolt params.r_cycle[0] (expected): `[7e, 54, 44, cd, b8, 4f, c4, f6]`
+   - These should be IDENTICAL but are completely different!
+
+2. **eq_val != expected:**
+   - eq_val = 14547277650427858... (eq evaluated at sumcheck-derived r_cycle)
+   - combined = 11536200169523487...
+   - expected = 8138691954662080... (from claims)
+   - eq_val * combined != expected, causing verification failure
+
+3. **Why they differ:**
+   - Zolt's round polynomial coefficients are different from Jolt's
+   - Different coefficients → different Fiat-Shamir challenges → different r_cycle
+   - This causes eq(r_cycle_expected, r_cycle_actual) != 1
+
+**Key Observation:**
+The Zolt serialization output shows:
+```
+[SERIALIZATION] Stage4 Round 0 coeffs:
+  coeffs[0] = { 167, 2, 138, 133, 197, 33, 242, 168, ... }
+  coeffs[1] = { 213, 211, 179, 236, 114, 215, 98, 219, ... }
+  coeffs[2] = { 28, 7, 243, 236, 36, 154, 133, 63, ... }
+```
+
+These coefficients generate the sumcheck challenges. Since they differ from Jolt's native prover output, the challenges diverge immediately.
+
+### Next Steps
+
+1. **Add Jolt native prover debug output** to compare Round 0 coefficients
+2. **Compare intermediate values**:
+   - E_out/E_in table values
+   - Polynomial values (val_poly, ra_poly, wa_poly)
+   - q_0 and q_X2 accumulation
+3. **Identify exact point of divergence** in the round polynomial computation
+4. **Fix the divergence** to match Jolt's implementation exactly
+
+### Commands Used
+
+Generate proof:
+```bash
+zig build run -- prove examples/fibonacci.elf --jolt-format \
+  --export-preprocessing /tmp/zolt_preprocessing.bin \
+  -o /tmp/zolt_proof_dory.bin
+```
+
+Cross-verify:
+```bash
+cd /Users/matteo/projects/jolt/jolt-core && \
+  cargo test test_verify_zolt_proof_with_zolt_preprocessing --release -- --nocapture --ignored
+```
+
+---
+
 ## Session 51 Progress (2026-01-21)
 
 ### Added Detailed Debug Tracing for E_out/E_in Comparison

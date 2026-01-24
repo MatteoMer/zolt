@@ -956,12 +956,14 @@ pub fn ProofConverter(comptime F: type) type {
             tau: []const F,
             transcript: *Blake2bTranscript(F),
         ) !JoltProofType(F, Commitment, Proof) {
+            std.debug.print("\n[PROOF_CONV] ===== STARTING CONVERT WITH TRANSCRIPT =====\n", .{});
             var jolt_proof = JoltProofType(F, Commitment, Proof).init(self.allocator);
 
             // Copy configuration parameters
             const trace_length: usize = @as(usize, 1) << @intCast(zolt_stage_proofs.log_t);
             const ram_K: usize = @as(usize, 1) << @intCast(zolt_stage_proofs.log_k);
 
+            std.debug.print("[PROOF_CONV] trace_length={}, ram_K={}\n", .{ trace_length, ram_K });
             jolt_proof.trace_length = trace_length;
             jolt_proof.ram_K = ram_K;
             jolt_proof.bytecode_K = config.bytecode_K;
@@ -1617,6 +1619,8 @@ pub fn ProofConverter(comptime F: type) type {
                 };
 
                 // Use the Gruen-optimized Stage 4 prover for Jolt compatibility
+                std.debug.print("\n[PROOF_CONV] ===== STARTING STAGE 4 REGISTER CHECKING =====\n", .{});
+                std.debug.print("[PROOF_CONV] Using Stage4GruenProver for Jolt compatibility\n", .{});
                 const Stage4ProverType = spartan_mod.stage4_gruen_prover.Stage4GruenProver(F);
                 const Stage3Claims = spartan_mod.stage4_gruen_prover.Stage3Claims(F);
 

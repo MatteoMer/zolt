@@ -1,0 +1,6 @@
+{
+  "dependencies": {},
+  "devDependencies": {
+    "smithers-orchestrator": "^0.2.10"
+  }
+}

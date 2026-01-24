@@ -1,5 +1,22 @@
 # Zolt-Jolt Compatibility TODO
 
+## Executive Summary
+
+**Status:** 3/6 stages passing cross-verification (Stages 1-3 ✅, Stage 4 ❌)
+
+**Blocking Issue:** Stage 4 round polynomial coefficients differ between Zolt and Jolt
+- Zolt coeffs[0]: `[167, 2, 138, 133, ...]`
+- Expected (unknown - need Jolt debug): `[???, ???, ???, ...]`
+- Impact: Different Fiat-Shamir challenges → r_cycle mismatch → verification failure
+
+**Root Cause:** Unknown - polynomial computation diverges despite matching inputs
+- All inputs verified: gamma ✓, r_cycle ✓, claims ✓
+- Outputs differ: q_0 ❌, q_X2 ❌, coefficients ❌
+
+**Next Action:** Add Jolt debug output to compare Round 0 coefficients directly
+
+---
+
 ## Current Progress
 
 | Stage | Internal (Zolt) | Cross-verify (Jolt) | Notes |
@@ -7,7 +24,7 @@
 | 1 | ✅ PASS | ✅ PASS | Fixed MontU128Challenge |
 | 2 | ✅ PASS | ✅ PASS | - |
 | 3 | ✅ PASS | ✅ PASS | - |
-| 4 | ✅ PASS | ❌ FAIL | Sumcheck challenges diverge |
+| 4 | ✅ PASS | ❌ FAIL | Round poly coefficients diverge |
 | 5 | ✅ PASS | - | Blocked by Stage 4 |
 | 6 | ✅ PASS | - | Blocked by Stage 4 |
 
@@ -54,15 +71,33 @@ The Zolt serialization output shows:
 
 These coefficients generate the sumcheck challenges. Since they differ from Jolt's native prover output, the challenges diverge immediately.
 
-### Next Steps
+### Action Plan to Fix Stage 4
 
-1. **Add Jolt native prover debug output** to compare Round 0 coefficients
-2. **Compare intermediate values**:
-   - E_out/E_in table values
-   - Polynomial values (val_poly, ra_poly, wa_poly)
-   - q_0 and q_X2 accumulation
-3. **Identify exact point of divergence** in the round polynomial computation
-4. **Fix the divergence** to match Jolt's implementation exactly
+**Priority 1: Compare Round Polynomial Coefficients**
+1. Add debug output to Jolt's `read_write_checking.rs` to print Round 0 coefficients
+2. Run Jolt fibonacci example: `cd jolt && cargo run --example fibonacci`
+3. Compare Jolt's coeffs with Zolt's: `[167, 2, 138, ...]`, `[213, 211, ...]`, `[28, 7, 243, ...]`
+
+**Priority 2: Trace Polynomial Values**
+1. Add debug to print first 4 entries of val_poly, ra_poly, wa_poly in both systems
+2. Verify gamma, gamma_sq values match exactly
+3. Check register value tracking logic (val_poly should have value BEFORE cycle)
+
+**Priority 3: E_out/E_in Table Comparison**
+1. Compare E_out[0..4] and E_in[0..4] between Zolt and Jolt
+2. Verify w_out, w_in, w_last slicing is correct
+3. Check that evalsCached produces same results
+
+**Priority 4: q_0/q_X2 Accumulation**
+1. Add detailed tracing for first contribution (k=2, j=0)
+2. Verify: c_0 = ra_even*val_even + wa_even*(val_even+inc_0)
+3. Verify: c_X2 = ra_slope*val_slope + wa_slope*(val_slope+inc_slope)
+4. Check E_combined = E_out[x_out] * E_in[x_in] matches
+
+**Priority 5: Create Minimal Test Case**
+1. Create 2-cycle fibonacci test with known expected values
+2. Manually compute expected q_0 and q_X2
+3. Verify step-by-step against both implementations
 
 ### Commands Used
 

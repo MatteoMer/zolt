@@ -36,12 +36,61 @@ ODD:  ra={ 165, 220, 86, 216, 147, 169, 75, 108 }, wa={ 1, 0, 0, 0, 0, 0, 0, 0 }
 inc_0={ 0, 128, 0, 0, 0, 0, 0, 0 }, inc_slope={ 2, 128, 255, 239, 147, 245, 225, 67 }
 ```
 
+### Cross-Verification Test Results
+
+Successfully ran Jolt verifier on Zolt-generated proof:
+
+**Command:**
+```bash
+zig build run -- prove examples/fibonacci.elf --jolt-format \
+  --export-preprocessing /tmp/zolt_preprocessing.bin \
+  -o /tmp/zolt_proof_dory.bin
+
+cd /Users/matteo/projects/jolt/jolt-core && \
+  cargo test test_verify_zolt_proof_with_zolt_preprocessing --release -- --nocapture --ignored
+```
+
+**Results:**
+- ✅ Stage 1 (Outer Spartan): PASS
+- ✅ Stage 2 (Lasso lookups): PASS
+- ✅ Stage 3 (Register claims): PASS
+- ❌ Stage 4 (Register RWC): FAIL
+
+**Failure Analysis:**
+```
+output_claim:          3110039466046447483900250223050551234127534443712699458605485358576992771996
+expected_output_claim: 1714094508039949549364454035354307069625501160663719062284025310540203859155
+```
+
+The verification fails because:
+1. Zolt's Stage 4 round polynomial coefficients differ from Jolt's
+2. Different coefficients → different Fiat-Shamir challenges
+3. r_cycle from sumcheck: `[a1, d3, 18, 73, ...]` (actual)
+4. r_cycle from params: `[7e, 54, 44, cd, ...]` (expected)
+5. Since r_cycle differs, `eq(r_expected, r_actual) * combined != expected`
+
+**Zolt's Round 0 Coefficients:**
+```
+coeffs[0] = { 167, 2, 138, 133, 197, 33, 242, 168, ... }
+coeffs[1] = { 213, 211, 179, 236, 114, 215, 98, 219, ... }
+coeffs[2] = { 28, 7, 243, 236, 36, 154, 133, 63, ... }
+```
+
+These must match Jolt's coefficients exactly for the proof to verify.
+
 ### Next Steps
 
-1. Export Jolt SRS and preprocessing for exact comparison
-2. Run cross-verification test to see current failure mode
-3. Compare E_out/E_in values with Jolt's native prover
-4. Investigate if polynomial values (val_poly) match expectations
+1. **Compare with Jolt native prover** - Run Jolt's fibonacci example with debug output to see their Round 0 coefficients
+2. **Step-by-step comparison** - Compare q_0 and q_X2 accumulation between Zolt and Jolt
+3. **Investigate val_poly construction** - Verify that register value tracking matches Jolt's implementation
+4. **Check E_out/E_in computation** - Ensure GruenSplitEqPolynomial produces identical table values
+5. **Test with minimal trace** - Create 2-cycle test case to isolate the divergence
+
+The key insight is that while all INPUTS to Stage 4 match (gamma, r_cycle, claims), the polynomial computation itself diverges. This points to either:
+- Incorrect polynomial value construction (val_poly, ra_poly, wa_poly)
+- Different E_out/E_in table values from GruenSplitEqPolynomial
+- Accumulation bugs in q_0/q_X2 computation
+- Subtle difference in how sparse entries are handled
 
 ---
 

@@ -1673,10 +1673,15 @@ pub fn ProofConverter(comptime F: type) type {
                 else
                     constants.RAM_START_ADDRESS;
 
-                var val_init_eval = F.zero();
-                if (config.initial_ram != null and config.memory_layout != null) {
-                    val_init_eval = computeInitialRamEval(config.initial_ram.?, config.memory_layout.?, r_address_be, log_ram_k);
-                }
+                // Use val_init evaluation from OutputSumcheck (stored in opening accumulator)
+                // OutputSumcheck bound val_init to val_init[0], which is the MLE evaluation at r_address.
+                // This matches Jolt's approach: ValFinalSumcheck retrieves val_init_eval from the
+                // opening accumulator rather than recomputing it.
+                const val_init_eval = stage2_result.output_val_init_claim;
+
+                std.debug.print("[ZOLT STAGE4 FIX] Using val_init_eval from OutputSumcheck:\n", .{});
+                std.debug.print("[ZOLT STAGE4 FIX]   output_val_init_claim = {any}\n", .{stage2_result.output_val_init_claim.toBytesBE()});
+                std.debug.print("[ZOLT STAGE4 FIX]   output_val_final_claim = {any}\n", .{stage2_result.output_val_final_claim.toBytesBE()});
 
                 // NOTE: For programs without RAM operations (like Fibonacci), the actual polynomial
                 // sums for val_eval and val_final are 0. We'll compute the actual sums later and use
@@ -1753,10 +1758,13 @@ pub fn ProofConverter(comptime F: type) type {
                 // NOT from the polynomial sum. The formula is:
                 //   input_claim = claimed_evaluation(RamVal) - init_eval
                 // This matches Jolt's SumcheckInstanceParams::input_claim implementation.
+                // Both instances use val_init_eval which comes from OutputSumcheck's bound value.
                 const input_claim_val_eval = stage2_result.rwc_val_claim.sub(val_init_eval);
-                // CRITICAL FIX: RamValFinalEvaluation's input_claim should use val_init_eval (from params),
-                // NOT output_val_init_claim (from OutputSumcheck accumulator).
-                // This matches Jolt's RamValFinalEvaluation::input_claim() implementation.
+
+                // CRITICAL: RamValFinalEvaluation's input_claim uses val_init_eval from OutputSumcheck.
+                // Jolt stores val_init[0] in the opening accumulator after OutputSumcheck completes,
+                // then retrieves it for ValFinalSumcheck. This is output_val_init_claim in our code.
+                // See: jolt-core/src/zkvm/ram/val_final.rs:135-141 and output_check.rs:212-237
                 const input_claim_val_final = stage2_result.output_val_final_claim.sub(val_init_eval);
 
                 std.debug.print("[ZOLT STAGE4] input_claim_val_eval (derived from accumulator): {any}\n", .{input_claim_val_eval.toBytesBE()});

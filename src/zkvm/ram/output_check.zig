@@ -171,17 +171,25 @@ pub fn OutputSumcheckProver(comptime F: type) type {
             std.debug.print("[ZOLT] OutputSumcheck: final_ram non_zero_count={}, io_region_values={}, K={}\n", .{ non_zero_count, io_region_values, K });
             std.debug.print("[ZOLT] OutputSumcheck: initial_ram non_zero_count={}, bytecode_count={}\n", .{ init_non_zero_count, init_bytecode_count });
 
-            // Set panic and termination bits in val_final (matching Jolt's gen_ram_final_memory_state)
-            // Jolt sets these AFTER getting the final memory state from the tracer
+            // Set panic and termination bits in BOTH val_init and val_final
+            // CRITICAL: These must be set in BOTH arrays because:
+            // 1. The termination/panic writes happen AFTER trace execution
+            // 2. They're NOT recorded in the inc polynomial (no traced memory operations)
+            // 3. ValFinalSumcheck proves: Val_final(r) - Val_init(r) = Σ inc(r,j) * wa(r,j)
+            // 4. For programs with no RAM writes: Σ inc(r,j) * wa(r,j) = 0
+            // 5. Therefore we need: Val_final(r) = Val_init(r), which requires termination bits to match
             const panic_index = remapAddress(memory_layout.panic, memory_layout) orelse 0;
             if (panic_index < K) {
-                val_final[panic_index] = if (is_panicking) F.one() else F.zero();
-                std.debug.print("[ZOLT] OutputSumcheck: val_final[{}] = {} (panic bit)\n", .{ panic_index, if (is_panicking) @as(u64, 1) else @as(u64, 0) });
+                const panic_val = if (is_panicking) F.one() else F.zero();
+                val_final[panic_index] = panic_val;
+                val_init[panic_index] = panic_val;
+                std.debug.print("[ZOLT] OutputSumcheck: val_final[{}] = val_init[{}] = {} (panic bit)\n", .{ panic_index, panic_index, if (is_panicking) @as(u64, 1) else @as(u64, 0) });
             }
             const termination_index = remapAddress(memory_layout.termination, memory_layout) orelse 0;
             if (!is_panicking and termination_index < K) {
                 val_final[termination_index] = F.one();
-                std.debug.print("[ZOLT] OutputSumcheck: val_final[{}] = 1 (termination bit, not panicking)\n", .{termination_index});
+                val_init[termination_index] = F.one();
+                std.debug.print("[ZOLT] OutputSumcheck: val_final[{}] = val_init[{}] = 1 (termination bit, not panicking)\n", .{ termination_index, termination_index });
             }
 
             // Compute IO region bounds (matches Jolt's ProgramIOPolynomial)
@@ -261,40 +269,73 @@ pub fn OutputSumcheckProver(comptime F: type) type {
                 std.debug.print("[ZOLT] OutputSumcheck: val_io[{}] = 1 (termination bit, not panicking)\n", .{termination_index});
             }
 
-            // Copy val_io values to val_init in the I/O region (EXCEPT termination bit).
-            // This ensures val_final - val_init only includes the termination contribution,
-            // which matches the memory trace (only termination write).
-            // Without this, input_claim_val_final would include I/O contributions that
-            // aren't in the trace, causing ValFinalSumcheck to fail.
+            // CRITICAL FIX: For addresses with no memory writes, ensure val_final == val_init
+            // This is necessary because:
+            // 1. val_init is populated from initial_ram (includes bytecode)
+            // 2. val_final is populated from final_ram (may not include bytecode for programs with no RAM writes)
+            // 3. After OutputSumcheck binding, we need val_init_eval == val_final_eval for unwritten addresses
             //
-            // ALSO copy val_final to val_init for I/O region to ensure they match exactly
-            // (except for termination which differs by 1).
-            var copied_count: usize = 0;
-            for (io_start..@min(io_end, K)) |k| {
-                if (k != termination_index) {
-                    // Copy from val_final (which equals val_io for non-termination in I/O region)
-                    val_init[k] = val_final[k];
-                    if (!val_final[k].eql(F.zero())) {
-                        copied_count += 1;
-                        std.debug.print("[ZOLT] OutputSumcheck: copied val_init[{}] = val_final[{}] (non-zero)\n", .{ k, k });
+            // Strategy:
+            // - OUTSIDE I/O region: Copy val_init -> val_final (preserve initial values like bytecode), except termination/panic
+            // - INSIDE I/O region: Copy val_final -> val_init, except termination
+
+            var copied_outside_io: usize = 0;
+            var copied_inside_io: usize = 0;
+
+            // Copy val_init to val_final for addresses OUTSIDE the I/O region
+            // This preserves initial values (like bytecode) for addresses that weren't written
+            // Only copy if val_final is zero (no write occurred) and val_init is non-zero
+            // Skip termination and panic indices as they're set explicitly in val_final
+            for (0..K) |k| {
+                if ((k < io_start or k >= io_end) and k != termination_index and k != panic_index) {
+                    // Only copy if the address wasn't written (val_final is zero) but has initial value
+                    if (val_final[k].eql(F.zero()) and !val_init[k].eql(F.zero())) {
+                        val_final[k] = val_init[k];
+                        copied_outside_io += 1;
+                        if (copied_outside_io <= 5) {
+                            std.debug.print("[ZOLT] OutputSumcheck: copied val_final[{}] = val_init[{}] (unwritten address, preserving initial state)\n", .{ k, k });
+                        }
                     }
                 }
             }
-            std.debug.print("[ZOLT] OutputSumcheck: copied val_final to val_init for I/O region (except termination), {} non-zero values\n", .{copied_count});
+            std.debug.print("[ZOLT] OutputSumcheck: copied val_init to val_final for {} unwritten addresses outside I/O region\n", .{copied_outside_io});
+
+            // Copy val_final to val_init for addresses INSIDE I/O region (except termination)
+            // This ensures the I/O region matches the expected values
+            for (io_start..@min(io_end, K)) |k| {
+                if (k != termination_index) {
+                    val_init[k] = val_final[k];
+                    if (!val_final[k].eql(F.zero())) {
+                        copied_inside_io += 1;
+                        if (copied_inside_io <= 5) {
+                            std.debug.print("[ZOLT] OutputSumcheck: copied val_init[{}] = val_final[{}] (inside I/O region)\n", .{ k, k });
+                        }
+                    }
+                }
+            }
+            std.debug.print("[ZOLT] OutputSumcheck: copied val_final to val_init for {} addresses inside I/O region (except termination)\n", .{copied_inside_io});
 
             // DEBUG: Check for differences between val_final and val_init
             var diff_count: usize = 0;
+            var diff_in_io: usize = 0;
+            var diff_outside_io: usize = 0;
             for (0..K) |k| {
                 if (!val_final[k].eql(val_init[k])) {
                     diff_count += 1;
-                    if (diff_count <= 5) {
-                        std.debug.print("[ZOLT] OutputSumcheck DEBUG: val_final[{}] != val_init[{}]\n", .{ k, k });
+                    if (k >= io_start and k < io_end) {
+                        diff_in_io += 1;
+                    } else {
+                        diff_outside_io += 1;
+                    }
+                    if (diff_count <= 10) {
+                        const in_io = if (k >= io_start and k < io_end) "IN I/O" else "OUTSIDE I/O";
+                        std.debug.print("[ZOLT] OutputSumcheck DEBUG: val_final[{}] != val_init[{}] ({s})\n", .{ k, k, in_io });
                         std.debug.print("[ZOLT]   val_final[{}] = {any}\n", .{ k, val_final[k].toBytesBE() });
                         std.debug.print("[ZOLT]   val_init[{}] = {any}\n", .{ k, val_init[k].toBytesBE() });
                     }
                 }
             }
-            std.debug.print("[ZOLT] OutputSumcheck DEBUG: {} indices where val_final != val_init\n", .{diff_count});
+            std.debug.print("[ZOLT] OutputSumcheck DEBUG: {} total differences ({}  in I/O, {} outside I/O)\n", .{ diff_count, diff_in_io, diff_outside_io });
 
             // Compute EQ polynomial evaluations
             computeEqEvals(F, eq_r_address, r_address);

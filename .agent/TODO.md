@@ -95,12 +95,35 @@ Stage 4 sumcheck has a **batched claim computation mismatch**:
 - This should equal the expected_output_claim = 16312... (before batching coefficient)
 - Then Instance 0 weighted = expected_output_claim * coeff should = 14040...
 
-**Root Cause**: The issue is NOT in polynomial generation or serialization. The polynomials are correct, but when Jolt's verifier evaluates them through the sumcheck rounds, it arrives at a different final claim (3222...) than what it expects (14040...).
+**BREAKTHROUGH (Session 62 - Part 2):**
 
-This suggests:
-1. The batched sumcheck is computing the wrong combined polynomial
-2. OR instances 1&2 are contributing incorrectly during rounds where they haven't started
-3. OR there's a mismatch in how the final claim is scaled/combined across instances
+✅ **ALL 15 sumcheck rounds match PERFECTLY!**:
+- Initial batched_claim: `8353800845797471892957852304028707864816912644711435457539773061910360616203` ✅ Match
+- Round 0 next_claim: `9794045122350346090318168103879095805179191807002823692559248174472879681882` ✅ Match
+- Rounds 1-13: ALL MATCH ✅
+- Round 14 (final): `3222202605336969917752560428519260639714485547316395735332587040365989955898` ✅ Match
+
+✅ **eq_val * combined computation is CORRECT**:
+- Computed: `16312594108896115280983001186205331480915541977747372249472626050588421392719`
+- Expected: `16312594108896115280983001186205331480915541977747372249472626050588421392719` ✅ Match!
+
+❌ **BUT: Final sumcheck output doesn't match expected weighted sum**:
+- Sumcheck output_claim: `3222...`
+- Jolt expects: `coeff[0] * 16312... = 14040...`
+- These DON'T match!
+
+**ROOT CAUSE FOUND**: Instance 2 (RamValFinalEvaluation) has **non-zero input_claim**!
+- Instance 0 input_claim: Non-zero (correct)
+- Instance 1 input_claim: `0` ✅
+- Instance 2 input_claim: `5258723638175825215483753966464390100826417414032932059867770167991589922285` ❌ (SHOULD BE 0!)
+
+But Jolt expects Instance 2's **expected_claim = 0**. This means:
+1. Instance 2's input_claim is WRONG (should be 0, not 5258...)
+2. OR Instance 2 correctly evaluates to 0 at the final point despite non-zero input
+3. The non-zero input_claim is contaminating the batched sumcheck!
+
+**Critical**: `input_claim_val_final = output_val_final_claim - output_val_init_claim`
+This computation is producing a non-zero value when it should be 0!
 
 ### What Was Fixed (Session 59 - Today)
 

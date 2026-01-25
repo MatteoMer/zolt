@@ -1,8 +1,8 @@
 # Zolt-Jolt Compatibility TODO
 
-## 🎯 Current Task: Debug Stage 4 - Sumcheck Serialization
+## 🎯 Current Task: Fix Termination Write Tracing
 
-**Status:** Stages 1-2-3 ✅ PASSING | Stage 4 ❌ Proof serialization mismatch
+**Status:** Stages 1-2-3 ✅ PASSING | Stage 4 ❌ Termination write not in trace
 
 ### CRITICAL BUGS FIXED (Session 61 - 2026-01-25) 🎉
 
@@ -433,3 +433,26 @@ See `.agent/SERIALIZATION_BUG_FOUND.md` and `.agent/BUG_FOUND.md` for detailed a
 - **Cycle Structure**: `/Users/matteo/projects/jolt/tracer/src/instruction/mod.rs`
   - `fn rd_write()`: returns `(rd_index, pre_value, post_value)`
   - `fn ram_access()`: returns RAMAccess enum with pre/post values
+---
+
+## 🔍 Session 63 Part 2: Termination Write Not Traced
+
+**ROOT CAUSE IDENTIFIED**: Zolt does NOT record the termination write in the RAM trace, but Jolt DOES!
+
+**How Jolt Works**:
+- Guest: `unsafe { core::ptr::write_volatile(termination_addr, 1); }`
+- Generates RISC-V `SB` instruction → traced as `RAMWrite {pre: 0, post: 1}`
+- `inc` polynomial captures it: `inc[cycle] = 1 - 0 = 1`
+- ValFinalSumcheck: `Val_final(r) - Val_init(r) = Σ inc(r,j) * wa(r,j)` balances
+
+**How Zolt Works**:
+- Termination write executes but `src/tracer/mod.zig:341, 357` SKIPS recording it
+- Result: `inc` and `wa` are EMPTY (0 RAM writes for Fibonacci)
+- ValFinalSumcheck: LHS = 1, RHS = 0 ❌ MISMATCH!
+
+**Current Status**:
+- ✅ Instance 2 (RamValFinalEvaluation) input_claim = 0 (with workaround)
+- ❌ Instance 1 (RamValEvaluation) input_claim ≠ 0 (RWC val mismatch)
+
+**Fix**: Modify tracer to record termination write OR set termination bit in ALL val_init polynomials (RWC + OutputSumcheck).
+

@@ -184,8 +184,12 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             const val_init = try allocator.alloc(F, K);
             @memset(val_init, F.zero());
 
+            std.debug.print("[RWC INIT] params.start_address = 0x{x:0>16}\n", .{params.start_address});
+            std.debug.print("[RWC INIT] K = {}, initial_ram entries = {}\n", .{ K, if (initial_ram) |ram| ram.count() else 0 });
+
             if (initial_ram) |ram| {
                 var iter = ram.iterator();
+                var populated_count: usize = 0;
                 while (iter.next()) |entry| {
                     const addr = entry.key_ptr.*;
                     const val = entry.value_ptr.*;
@@ -193,9 +197,11 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                         const idx = (addr - params.start_address) / 8;
                         if (idx < K) {
                             val_init[idx] = F.fromU64(val);
+                            populated_count += 1;
                         }
                     }
                 }
+                std.debug.print("[RWC INIT] Populated {} val_init entries\n", .{populated_count});
             }
 
             // Build sparse matrix entries from trace
@@ -1168,12 +1174,21 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
 
             // Compute base: val_init.evaluate(r_address) = Σ_k eq(r_address, k) * val_init[k]
             // This is the "background" value from initial RAM state
+            std.debug.print("[RWC GET_OPENING] Computing val_claim with log_k={}\n", .{log_k});
+            std.debug.print("[RWC GET_OPENING] r_address[0..5] = ", .{});
+            for (0..@min(5, log_k)) |i| {
+                std.debug.print("{{ {any} }}, ", .{r_address[i].toBytes()[0..8]});
+            }
+            std.debug.print("\n", .{});
+            std.debug.print("[RWC GET_OPENING] val_init.len = {}\n", .{self.val_init.len});
+
             var val_claim = F.zero();
             const K = @as(usize, 1) << @intCast(log_k);
             for (0..@min(K, self.val_init.len)) |k| {
                 const eq_addr = computeEq(F, r_address[0..log_k], k);
                 val_claim = val_claim.add(eq_addr.mul(self.val_init[k]));
             }
+            std.debug.print("[RWC GET_OPENING] val_claim result = {any}\n", .{val_claim.toBytes()[0..8]});
 
             // Add entry contributions: eq(r_addr, addr) * eq(r_cycle, cycle) * (entry.val_coeff - val_init[addr])
             // Each entry represents a RAM operation that overwrites the initial value at that (addr, cycle)

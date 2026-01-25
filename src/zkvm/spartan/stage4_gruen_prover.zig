@@ -431,13 +431,40 @@ pub fn Stage4GruenProver(comptime F: type) type {
                 round_polys[round] = round_poly;
             }
 
+            // Final claims after all rounds
+            const val_claim = self.val_poly[0];
+            const rs1_ra_claim = self.rs1_ra_poly[0];
+            const rs2_ra_claim = self.rs2_ra_poly[0];
+            const rd_wa_claim = self.rd_wa_poly[0];
+            const inc_claim = self.inc_poly[0];
+
+            // Debug: Print final claims for comparison with Jolt
+            std.debug.print("\n[ZOLT STAGE4 FINAL CLAIMS]\n", .{});
+            std.debug.print("[ZOLT STAGE4]   val_claim = {any}\n", .{val_claim.toBytes()});
+            std.debug.print("[ZOLT STAGE4]   rs1_ra_claim = {any}\n", .{rs1_ra_claim.toBytes()});
+            std.debug.print("[ZOLT STAGE4]   rs2_ra_claim = {any}\n", .{rs2_ra_claim.toBytes()});
+            std.debug.print("[ZOLT STAGE4]   rd_wa_claim = {any}\n", .{rd_wa_claim.toBytes()});
+            std.debug.print("[ZOLT STAGE4]   inc_claim = {any}\n", .{inc_claim.toBytes()});
+
+            // Compute expected output claim using Jolt's formula
+            const rd_write_value_claim = rd_wa_claim.mul(inc_claim.add(val_claim));
+            const rs1_value_claim = rs1_ra_claim.mul(val_claim);
+            const rs2_value_claim = rs2_ra_claim.mul(val_claim);
+            const combined = rd_write_value_claim.add(
+                self.gamma.mul(rs1_value_claim.add(self.gamma.mul(rs2_value_claim)))
+            );
+            std.debug.print("[ZOLT STAGE4]   rd_write_value_claim = {any}\n", .{rd_write_value_claim.toBytes()});
+            std.debug.print("[ZOLT STAGE4]   rs1_value_claim = {any}\n", .{rs1_value_claim.toBytes()});
+            std.debug.print("[ZOLT STAGE4]   rs2_value_claim = {any}\n", .{rs2_value_claim.toBytes()});
+            std.debug.print("[ZOLT STAGE4]   combined = {any}\n", .{combined.toBytes()});
+
             return Stage4Result(F){
                 .round_polys = round_polys,
-                .val_claim = self.val_poly[0],
-                .rs1_ra_claim = self.rs1_ra_poly[0],
-                .rs2_ra_claim = self.rs2_ra_poly[0],
-                .rd_wa_claim = self.rd_wa_poly[0],
-                .inc_claim = self.inc_poly[0],
+                .val_claim = val_claim,
+                .rs1_ra_claim = rs1_ra_claim,
+                .rs2_ra_claim = rs2_ra_claim,
+                .rd_wa_claim = rd_wa_claim,
+                .inc_claim = inc_claim,
                 .challenges = challenges,
                 .allocator = self.allocator,
             };

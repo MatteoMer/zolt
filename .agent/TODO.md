@@ -1,28 +1,28 @@
 # Zolt-Jolt Compatibility TODO
 
-## 🎯 Current Task: Debug Stage 4 Sumcheck - Systematic 9% Error
+## 🎯 Current Task: Debug Stage 4 - Challenge Ordering Issue
 
-**Status:** Stages 1-3 ✅ PASSING | Stage 4 ❌ Sumcheck output_claim 9% too high
+**Status:** Stages 1-3 ✅ PASSING | Stage 4 ❌ Variable binding order mismatch
 
-### Problem
+### Problem & Root Cause Analysis
 
-Stages 1-3 now **PASS** with Jolt verifier! 🎉 But Stage 4 sumcheck still fails:
+**Symptoms:**
+- Stages 1-3: ✅ PASS
+- Stage 4: ❌ FAIL - output_claim is 9% higher than expected
+- Round 0 polynomial: ✅ Satisfies p(0) + p(1) = batched_claim
+- Final polynomial claims: ✅ ALL MATCH between Zolt and Jolt
+- Expected output claim: ✅ Zolt's computation matches Jolt
 
-```
-[JOLT BATCHED] output_claim          = 13790373438827639882557683572286534321489361070389115930961142260387674941556
-[JOLT BATCHED] expected_output_claim = 12640480056023150955589545284889516342512199511163763258096899648096280534264
-=== SUMCHECK VERIFICATION FAILED ===
-Ratio: output_claim / expected ≈ 1.091 (9% too high)
-```
+**Key Finding:** The issue is **NOT** in polynomial values, but in **variable binding order**!
 
-**Key insight from Jolt debug output**:
-```
-[JOLT STAGE4 DEBUG]   combined = 4588861476706251528214274896846760497413099305186908645592958406990187831418
-[JOLT STAGE4 DEBUG]   expected = 8494940868042831272571427889592148129715827118309988888518489912562301393374
-Ratio: expected / combined ≈ 1.85 (not quite 2x, but close!)
-```
+Jolt's `normalize_opening_point` (read_write_checking.rs):
+1. Splits sumcheck_challenges into phase1, phase2, phase3
+2. **REVERSES** challenges within each phase (LITTLE_ENDIAN → BIG_ENDIAN)
+3. Concatenates in specific order: phase3_cycle (rev) + phase1 (rev), phase3_address (rev) + phase2 (rev)
 
-This suggests a systematic scaling issue in RegistersReadWriteChecking (Instance 0).
+If Zolt binds variables in a different order than what Jolt's normalization expects, we get:
+- ✅ Final evaluations correct (evaluating at same point after all normalization)
+- ❌ Sumcheck fails (intermediate binding order doesn't match verifier's expectations)
 
 ### What Was Fixed (Session 59 - Today)
 

@@ -2,17 +2,19 @@
 
 ## 🎯 Current Task: Implement Ra Polynomial Generation
 
-**Status:** Deserialization ✅ | Stage 4 Verification ❌
+**Status:** Deserialization ✅ | Ra Polynomials ✅ (generated) | Stage 4 Verification ❌ (values incorrect)
 
 ### Problem
 
-All Ra polynomials (RdInc, RamInc, InstructionRa, RamRa, BytecodeRa) currently use **placeholder zeros**. This causes Stage 4 sumcheck verification to fail:
+Ra polynomials are now generated with actual trace data (no longer zeros), but Stage 4 sumcheck still fails with different values:
 
 ```
-[JOLT BATCHED] output_claim = 1325153125132160899168867956201815784436434169935850550065084196483614852929
-[JOLT BATCHED] expected_output_claim (sum) = 3380844551770219579454432242172301426581831348205714865574138823780865483063
+[JOLT BATCHED] output_claim = 13790373438827639882557683572286534321489361070389115930961142260387674941556
+[JOLT BATCHED] expected_output_claim (sum) = 12640480056023150955589545284889516342512199511163763258096899648096280534264
 === SUMCHECK VERIFICATION FAILED ===
 ```
+
+**Root cause**: Pre/post value tracking for RdInc/RamInc may not match Jolt's approach. Need to investigate how Jolt's tracer stores register pre/post values vs Zolt's approach.
 
 ### What Needs to Be Implemented
 
@@ -74,7 +76,9 @@ All Ra polynomials (RdInc, RamInc, InstructionRa, RamRa, BytecodeRa) currently u
 | 5 | ✅ PASS | - | Blocked by Stage 4 |
 | 6 | ✅ PASS | - | Blocked by Stage 4 |
 
-**Recent Fix (Session 57)**: ✅ Commitment serialization - all 37 commitments now generated and serialized correctly
+**Recent Progress**:
+- Session 57: ✅ Commitment serialization - all 37 commitments generated and serialized
+- Session 58: ✅ Ra polynomial implementation - all polynomials use real trace data (no longer zeros)
 
 ---
 
@@ -105,9 +109,14 @@ zig build
 
 ## Recent Session History
 
+**Session 58 (2026-01-25)**: ⚡ Implemented Ra polynomial generation - RdInc, RamInc, InstructionRa, RamRa, BytecodeRa all generate real values from trace. Stage 4 still fails but with different output_claim, indicating progress. Need to investigate pre/post value tracking.
+
 **Session 57 (2026-01-25)**: ✅ Fixed serialization - implemented all 37 commitments (RdInc, RamInc, InstructionRa[], RamRa[], BytecodeRa[])
+
 **Session 56 (2026-01-25)**: 🔥 Identified root cause - commitment count mismatch (5 vs 37)
+
 **Session 55 (2026-01-24)**: Fixed double-batching in Stage4GruenProver
+
 **Session 52-54**: Cross-verification setup, deep code audit
 
 See `.agent/SERIALIZATION_BUG_FOUND.md` and `.agent/BUG_FOUND.md` for detailed analysis

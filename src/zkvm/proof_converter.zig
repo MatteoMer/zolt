@@ -1841,10 +1841,12 @@ pub fn ProofConverter(comptime F: type) type {
                         scaled = scaled.add(scaled);
                     }
                     const weighted = scaled.mul(batching_coeffs[i]);
-                    std.debug.print("[ZOLT STAGE4] Instance {} scale_power={}, weighted contribution = {any}\n", .{ i, scale_power, weighted.toBytesBE()[0..16] });
+                    std.debug.print("[ZOLT STAGE4] Instance {} scale_power={}, scaled = {any}\n", .{ i, scale_power, scaled.toBytesBE() });
+                    std.debug.print("[ZOLT STAGE4] Instance {} weighted contribution (LE) = {any}\n", .{ i, weighted.toBytes() });
                     batched_claim = batched_claim.add(weighted);
                 }
-                std.debug.print("[ZOLT STAGE4] Initial batched_claim = {any}\n", .{batched_claim.toBytesBE()[0..16]});
+                std.debug.print("[ZOLT STAGE4] Initial batched_claim (LE) = {any}\n", .{batched_claim.toBytes()});
+                std.debug.print("[ZOLT STAGE4] Initial batched_claim (BE) = {any}\n", .{batched_claim.toBytesBE()});
                 std.debug.print("[ZOLT STAGE4] rounds: regs={}, val_eval={}, val_final={}, max={}\n", .{ stage4_max_rounds, val_eval_rounds, val_final_rounds, stage4_max_rounds });
 
                 var regs_current_claim = input_claim_registers;
@@ -2000,8 +2002,8 @@ pub fn ProofConverter(comptime F: type) type {
                     batched_claim = evalFromHint(compressed, old_claim, challenge);
 
                     if (round_idx < 3 or round_idx >= stage4_max_rounds - 2) {
-                        std.debug.print("[ZOLT STAGE4] Round {}: challenge = {any}\n", .{ round_idx, challenge.toBytesBE()[0..16] });
-                        std.debug.print("[ZOLT STAGE4] Round {}: new batched_claim = {any}\n", .{ round_idx, batched_claim.toBytesBE()[0..16] });
+                        std.debug.print("[ZOLT STAGE4] Round {}: challenge (LE) = {any}\n", .{ round_idx, challenge.toBytes() });
+                        std.debug.print("[ZOLT STAGE4] Round {}: new batched_claim (LE) = {any}\n", .{ round_idx, batched_claim.toBytes() });
                     }
 
                     regs_current_claim = evaluateCubicAtChallengeFromEvals(regs_evals, challenge);

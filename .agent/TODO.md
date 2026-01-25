@@ -72,15 +72,35 @@ const inc_claim = self.inc[0]; // Just use the bound value!
 
 **Remaining Issue:**
 
-Stage 4 sumcheck has a **proof serialization/deserialization mismatch**:
+Stage 4 sumcheck has a **batched claim computation mismatch**:
 - Zolt computes final batched_claim: **26477452956988969139049508369983257081713655557682043515982918407251104571143**
 - Jolt reads output_claim from proof: **3222202605336969917752560428519260639714485547316395735332587040365989955898**
-- Jolt verifier expects: **14040906104615165865748342028504031406407271517016916344822754339107148783910**
+- Jolt verifier expects (Instance 0 weighted): **14040906104615165865748342028504031406407271517016916344822754339107148783910**
 
-The final batched_claim computed doesn't match what Jolt reads from the serialized proof, suggesting:
-1. Sumcheck rounds aren't being written correctly to the proof
-2. OR the batched sumcheck structure is malformed
-3. OR there's a mismatch in how Zolt writes vs how Jolt reads the proof
+**Deep Investigation (Session 62)**:
+
+✅ **Polynomial coefficients are CORRECT**:
+- Verified Round 0-14: ALL coefficients (c0, c2, c3) match exactly between Zolt and Jolt
+- Round 0: c0, c2, c3 all match
+- Round 14: c0, c2, c3 all match
+- The polynomial evaluations being written to the proof are correct!
+
+✅ **Expected output values match**:
+- eq_val (LE bytes) matches: `[e4, 11, 97, 09, b9, 11, b8, a5, ...]`
+- combined (LE bytes) matches: `[8f, f1, 64, 8c, 0b, 34, 15, a9, ...]`
+- expected_output = eq_val * combined is computed correctly by both
+
+❌ **BUT: Final sumcheck claim is wrong**:
+- After 15 rounds of sumcheck, Jolt computes output_claim = 3222...
+- This should equal the expected_output_claim = 16312... (before batching coefficient)
+- Then Instance 0 weighted = expected_output_claim * coeff should = 14040...
+
+**Root Cause**: The issue is NOT in polynomial generation or serialization. The polynomials are correct, but when Jolt's verifier evaluates them through the sumcheck rounds, it arrives at a different final claim (3222...) than what it expects (14040...).
+
+This suggests:
+1. The batched sumcheck is computing the wrong combined polynomial
+2. OR instances 1&2 are contributing incorrectly during rounds where they haven't started
+3. OR there's a mismatch in how the final claim is scaled/combined across instances
 
 ### What Was Fixed (Session 59 - Today)
 

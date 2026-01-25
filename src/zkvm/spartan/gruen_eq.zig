@@ -161,6 +161,15 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
             const eq_eval_2 = eq_eval_1.add(eq_m);
             const eq_eval_3 = eq_eval_2.add(eq_m);
 
+            // Debug Round 0 only
+            const is_round_0 = self.current_index == self.w.len;
+            if (is_round_0) {
+                std.debug.print("[ZOLT gruenPolyDeg3] eq_eval_0={any}\n", .{eq_eval_0.toBytes()[0..8]});
+                std.debug.print("[ZOLT gruenPolyDeg3] eq_eval_1={any}\n", .{eq_eval_1.toBytes()[0..8]});
+                std.debug.print("[ZOLT gruenPolyDeg3] q_constant={any}\n", .{q_constant.toBytes()[0..8]});
+                std.debug.print("[ZOLT gruenPolyDeg3] q_quadratic_coeff={any}\n", .{q_quadratic_coeff.toBytes()[0..8]});
+            }
+
             // Quadratic polynomial q(X) = c + d*X + e*X^2
             // We have: c = q_constant, e = q_quadratic_coeff
             // We need to find d using the constraint s(0) + s(1) = s_0_plus_s_1

@@ -1,19 +1,59 @@
 # Zolt-Jolt Compatibility TODO
 
-## Executive Summary
+## 🔥 CRITICAL BUG FOUND - Session 56 (2026-01-25)
+
+**ROOT CAUSE IDENTIFIED: Commitment Serialization Mismatch**
+
+The cross-verification failure is NOT due to incorrect polynomial computation. The issue is in the **serialization format**:
+
+### Issue #1: Uncompressed GT Elements (384 bytes vs ~288 bytes)
+- **Location**: `src/zkvm/mod.zig:1360`, `src/field/pairing.zig:635`
+- **Problem**: Writing GT elements uncompressed (12 × 32 = 384 bytes)
+- **Expected**: Compressed format (~288 bytes per arkworks spec)
+- **Impact**: +480 bytes offset for 5 commitments alone!
+
+### Issue #2: Wrong Number of Commitments (5 vs ~37)
+- **Location**: `src/zkvm/mod.zig:1360`
+- **Problem**: Writing only 5 commitments
+- **Expected**: `2 + instruction_d + ram_d + bytecode_d ≈ 37` commitments
+  - RdInc, RamInc (2 base)
+  - InstructionRa[0..31] (32 for LOG_K=128, log_k_chunk=4)
+  - RamRa[0..ram_d-1] (2-5 depending on program)
+  - BytecodeRa[0..bytecode_d-1] (1-2 depending on program)
+- **Impact**: Missing ~9,000 bytes of commitment data!
+
+### Combined Impact
+When Jolt deserializes:
+1. Reads commitments: expects ~37 × 288 bytes, gets 5 × 384 bytes
+2. **Deserialization offset is wrong by ~9,000 bytes**
+3. When reading Stage 4 sumcheck, actually reads Stage 1 data!
+4. Stage 4 output_claim equals Stage 1 final claim (evidence of misalignment)
+
+**See:** `.agent/SERIALIZATION_BUG_FOUND.md` for complete analysis
+
+**Files to Fix:**
+1. `src/field/pairing.zig` - Add `toBytesCompressed()` for Fp12/GT
+2. `src/zkvm/jolt_serialization.zig` - Add `writeGTCompressed()`
+3. `src/zkvm/proof_converter.zig` - Track all committed polynomials
+4. `src/zkvm/mod.zig` - Serialize all commitments in compressed format
+
+---
+
+## Executive Summary (Previous Understanding - NOW SUPERSEDED)
 
 **Status:** 3/6 stages passing cross-verification (Stages 1-3 ✅, Stage 4 ❌)
 
-**Blocking Issue:** Stage 4 round polynomial coefficients differ between Zolt and Jolt
-- Zolt coeffs[0]: `[167, 2, 138, 133, ...]`
-- Expected (unknown - need Jolt debug): `[???, ???, ???, ...]`
-- Impact: Different Fiat-Shamir challenges → r_cycle mismatch → verification failure
+**BUG FOUND & FIXED:** Double-batching in Stage4GruenProver
+- **Location**: `stage4_gruen_prover.zig:430-434`
+- **Issue**: Round polynomials batched twice (transcript + storage)
+- **Fix**: Store unbatched polynomials
+- **Result**: Individual register prover now correct (p(0)+p(1)=claim ✓)
 
-**Root Cause:** Unknown - polynomial computation diverges despite matching inputs
-- All inputs verified: gamma ✓, r_cycle ✓, claims ✓
-- Outputs differ: q_0 ❌, q_X2 ❌, coefficients ❌
+**Previous Hypothesis (INCORRECT):** Combined polynomial in proof_converter
+- This was NOT the issue - the polynomials are actually correct!
+- The real issue is serialization offset causing Jolt to read wrong data
 
-**Next Action:** Add Jolt debug output to compare Round 0 coefficients directly
+**See:** `.agent/BUG_FOUND.md` for previous polynomial analysis (still valuable for understanding Stage 4 implementation)
 
 ---
 
@@ -27,6 +67,161 @@
 | 4 | ✅ PASS | ❌ FAIL | Round poly coefficients diverge |
 | 5 | ✅ PASS | - | Blocked by Stage 4 |
 | 6 | ✅ PASS | - | Blocked by Stage 4 |
+
+## Session 55 Progress - BUG FOUND! (2026-01-24)
+
+### Major Breakthrough: Found and Fixed Double-Batching Bug
+
+**Bug Found:**
+- Location: `stage4_gruen_prover.zig`, lines 430-434
+- Issue: Round polynomials were being batched TWICE
+  1. First batched when appending to transcript (for Fiat-Shamir)
+  2. Then batched AGAIN when storing in `round_polys`
+- This caused coefficients to be multiplied by `batching_coeff²` instead of `batching_coeff`
+
+**Fix Applied:**
+```zig
+// OLD (buggy):
+var batched_poly = round_poly;
+for (0..4) |i| {
+    batched_poly.coeffs[i] = round_poly.coeffs[i].mul(self.batching_coeff);
+}
+round_polys[round] = batched_poly;
+
+// NEW (fixed):
+round_polys[round] = round_poly;  // Store unbatched
+```
+
+**Verification:**
+- ✅ Individual register prover polynomial is now CORRECT
+- ✅ Sumcheck relation holds: `p(0) + p(1) = current_claim`
+- ✅ All formulas verified correct through deep code audit
+- ❌ Cross-verification still fails (different issue)
+
+**Remaining Problem:**
+The proof_converter combines 3 instances:
+1. Register RW prover (CORRECT ✓)
+2. RAM val evaluation (suspect ❌)
+3. Val final evaluation (suspect ❌)
+
+The combined polynomial produces wrong output_claim, even though register prover is correct.
+This suggests instances 2 & 3 are contributing non-zero values when they should be zero for programs without RAM.
+
+**Investigation Methodology:**
+1. Deep code audit comparing all Zolt vs Jolt implementations
+2. Added extensive debug logging for coefficients, evaluations, and claims
+3. Traced through proof_converter to find where coefficients diverge
+4. Discovered mismatch between gruenPolyDeg3 output and serialization
+5. Found double-batching by tracing coefficient storage
+
+**See:** `.agent/BUG_FOUND.md` for complete analysis
+
+---
+
+## Session 54 Progress - Deep Code Audit (2026-01-24)
+
+### Investigation: Option 3 - Deep Code Audit
+
+**Goal:** Line-by-line comparison of Zolt and Jolt Stage 4 implementations.
+
+**Scope Audited:**
+1. Polynomial formulas (c_0, c_X2 computation)
+2. val_poly semantics
+3. x_in/x_out indexing logic
+4. evalsCached table building
+5. Sparse vs dense handling
+6. gruenPolyDeg3 conversion
+7. Coefficient interpolation
+
+**Findings:**
+- ✅ ALL core implementations match exactly!
+- ✅ Formulas: `c_0 = ra_even*val_even + wa_even*(val_even+inc_0)` - IDENTICAL
+- ✅ Formulas: `c_X2 = ra_slope*val_slope + wa_slope*(val_slope+inc_slope)` - IDENTICAL
+- ✅ val_poly stores value BEFORE cycle - MATCHES
+- ✅ x_in/x_out computation: `x_in = i & x_bitmask` - MATCHES
+- ✅ evalsCached loop: `curr[i] = scalar * w[k]; curr[i-1] = scalar - curr[i]` - IDENTICAL
+- ✅ gruenPolyDeg3: All 60+ lines match exactly
+- ✅ fromEvals (Lagrange interpolation): MATCHES
+
+**Key Differences Found:**
+1. **Sparse vs Dense**: Jolt uses sparse matrix (only touched registers), Zolt iterates all registers
+   - Analysis: Should be mathematically equivalent (untouched registers contribute 0)
+2. **Binding Order**: Both bind LSB-to-MSB, but Zolt reverses r_cycle array first
+   - Zolt: Reverses to r_cycle_be, then binds from index n-1 to 0
+   - Jolt: Uses LowToHigh binding with non-reversed array, binds from index n-1 to 0
+   - Analysis: Should be equivalent
+
+**Conclusion:**
+Since ALL implementations match, the bug must be extremely subtle:
+- Possible accumulation error (double-counting, wrong order)
+- Possible coordinate/indexing edge case
+- Possible field arithmetic precision issue
+
+**See:** `.agent/deep_code_audit.md` for full line-by-line comparison
+
+**Next Actions:**
+Given that all code matches, we need a different approach:
+1. **Add contribution-level logging**: Log each E_combined * c_0 addition to q_0
+2. **Compare first 5 contributions**: Check if accumulation diverges early
+3. **Check for off-by-one errors**: Verify loop bounds, index calculations
+4. **Test minimal case**: Create 2-cycle trace, manually verify
+
+---
+
+## Session 53 Progress - Coefficient Analysis (2026-01-24)
+
+### Investigation: Comparison Challenge
+
+**Goal:** Compare Zolt and Jolt Stage 4 Round 0 coefficients to understand divergence.
+
+**Findings:**
+1. **Jolt fibonacci-guest coefficients captured:**
+   - Test: `fib_e2e_dory` (fibonacci-guest with input 100u32)
+   - Round 0 coeffs: `[31, ed, 7b, ...]`, `[54, e9, 89, ...]`, `[4a, 84, 37, ...]`
+   - **Problem:** This is a DIFFERENT program from Zolt's fibonacci.elf!
+
+2. **Zolt fibonacci.elf characteristics:**
+   - Bare-metal program that computes fib(10) = 55
+   - No inputs, no Jolt framework
+   - Trace length: 256 (padded)
+   - Cannot directly compare coefficients with Jolt's fibonacci-guest
+
+3. **Attempted Solution:**
+   - Tried to create Jolt test to prove same fibonacci.elf
+   - Encountered API compatibility issues (Jolt uses host/guest framework)
+   - Would need significant adaptation to support bare-metal ELF
+
+4. **Fresh Zolt Proof Generation:**
+   - Generated new proof with full debug output
+   - Captured detailed Stage 4 intermediate values:
+     - q_0 = `{ 142, 134, 24, 23, 198, 184, 119, 182, ... }`
+     - q_X2 = `{ 142, 219, 181, 75, 210, 72, 66, 115, ... }`
+     - E_out[0] = `{ 71, 160, 211, 72, 66, 155, 28, 51, ... }`
+     - E_in[0] = `{ 212, 155, 232, 122, 38, 129, 172, 11, ... }`
+   - Per-contribution debug shows computation details
+
+5. **Documentation:**
+   - Created `.agent/stage4_analysis.md` with comprehensive analysis
+   - Documents inputs, intermediate values, hypotheses, and next steps
+
+**Next Steps:**
+
+**Option 1 (Recommended): Manual Verification**
+- Take first contribution (k=2, j_pair=(0,1)) values from debug output
+- Manually compute expected q_0/q_X2 contribution using Jolt formulas
+- Compare with Zolt's computation to find divergence point
+
+**Option 2: Create Minimal Test Case**
+- Create 2-cycle fibonacci in both Zolt and Jolt
+- Manually compute all expected values
+- Compare step-by-step
+
+**Option 3: Deep Code Audit**
+- Line-by-line comparison of stage4_gruen_prover.zig vs read_write_checking.rs
+- Focus on GruenSplitEqPolynomial and phase1_compute_message
+- Check for subtle formula differences
+
+---
 
 ## Session 52 Progress - Cross-Verification Test (2026-01-24)
 

@@ -1272,28 +1272,44 @@ pub fn JoltProver(comptime F: type) type {
 
             // Write stage 1
             // UniSkipFirstRoundProof is required in Jolt (not optional)
+            // Write stage 1
+            std.debug.print("[SERIALIZE] Writing Stage 1...\n", .{});
             if (jolt_proof_ptr.stage1_uni_skip_first_round_proof) |*p| {
+                std.debug.print("[SERIALIZE]   Stage 1 UniSkipFirstRound: {} coeffs\n", .{p.uni_poly.len});
                 try serializer.writeUniSkipFirstRoundProof(p);
             } else {
-                // Write empty UniPoly (length = 0)
+                std.debug.print("[SERIALIZE]   Stage 1 UniSkipFirstRound: NONE (writing 0)\n", .{});
                 try serializer.writeUsize(0);
             }
+            std.debug.print("[SERIALIZE]   Stage 1 Sumcheck: {} rounds\n", .{jolt_proof_ptr.stage1_sumcheck_proof.compressed_polys.items.len});
             try serializer.writeSumcheckInstanceProof(&jolt_proof_ptr.stage1_sumcheck_proof);
 
             // Write stage 2
+            std.debug.print("[SERIALIZE] Writing Stage 2...\n", .{});
             if (jolt_proof_ptr.stage2_uni_skip_first_round_proof) |*p| {
+                std.debug.print("[SERIALIZE]   Stage 2 UniSkipFirstRound: {} coeffs\n", .{p.uni_poly.len});
                 try serializer.writeUniSkipFirstRoundProof(p);
             } else {
-                // Write empty UniPoly (length = 0)
+                std.debug.print("[SERIALIZE]   Stage 2 UniSkipFirstRound: NONE (writing 0)\n", .{});
                 try serializer.writeUsize(0);
             }
+            std.debug.print("[SERIALIZE]   Stage 2 Sumcheck: {} rounds\n", .{jolt_proof_ptr.stage2_sumcheck_proof.compressed_polys.items.len});
             try serializer.writeSumcheckInstanceProof(&jolt_proof_ptr.stage2_sumcheck_proof);
 
             // Write stages 3-7
+            std.debug.print("[SERIALIZE] Writing Stage 3: {} rounds\n", .{jolt_proof_ptr.stage3_sumcheck_proof.compressed_polys.items.len});
             try serializer.writeSumcheckInstanceProof(&jolt_proof_ptr.stage3_sumcheck_proof);
+
+            std.debug.print("[SERIALIZE] Writing Stage 4: {} rounds\n", .{jolt_proof_ptr.stage4_sumcheck_proof.compressed_polys.items.len});
             try serializer.writeSumcheckInstanceProof(&jolt_proof_ptr.stage4_sumcheck_proof);
+
+            std.debug.print("[SERIALIZE] Writing Stage 5: {} rounds\n", .{jolt_proof_ptr.stage5_sumcheck_proof.compressed_polys.items.len});
             try serializer.writeSumcheckInstanceProof(&jolt_proof_ptr.stage5_sumcheck_proof);
+
+            std.debug.print("[SERIALIZE] Writing Stage 6: {} rounds\n", .{jolt_proof_ptr.stage6_sumcheck_proof.compressed_polys.items.len});
             try serializer.writeSumcheckInstanceProof(&jolt_proof_ptr.stage6_sumcheck_proof);
+
+            std.debug.print("[SERIALIZE] Writing Stage 7: {} rounds\n", .{jolt_proof_ptr.stage7_sumcheck_proof.compressed_polys.items.len});
             try serializer.writeSumcheckInstanceProof(&jolt_proof_ptr.stage7_sumcheck_proof);
 
             // Write joint opening proof
@@ -1347,26 +1363,43 @@ pub fn JoltProver(comptime F: type) type {
             }
 
             // Write stage 1 (UniSkip + sumcheck)
+            std.debug.print("[SERIALIZE] Writing Stage 1...\n", .{});
             if (bundle.proof.stage1_uni_skip_first_round_proof) |*p| {
+                std.debug.print("[SERIALIZE]   Stage 1 UniSkipFirstRound: {} coeffs\n", .{p.uni_poly.len});
                 try serializer.writeUniSkipFirstRoundProof(p);
             } else {
+                std.debug.print("[SERIALIZE]   Stage 1 UniSkipFirstRound: NONE (writing 0)\n", .{});
                 try serializer.writeUsize(0);
             }
+            std.debug.print("[SERIALIZE]   Stage 1 Sumcheck: {} rounds\n", .{bundle.proof.stage1_sumcheck_proof.compressed_polys.items.len});
             try serializer.writeSumcheckInstanceProof(&bundle.proof.stage1_sumcheck_proof);
 
             // Write stage 2 (UniSkip + sumcheck)
+            std.debug.print("[SERIALIZE] Writing Stage 2...\n", .{});
             if (bundle.proof.stage2_uni_skip_first_round_proof) |*p| {
+                std.debug.print("[SERIALIZE]   Stage 2 UniSkipFirstRound: {} coeffs\n", .{p.uni_poly.len});
                 try serializer.writeUniSkipFirstRoundProof(p);
             } else {
+                std.debug.print("[SERIALIZE]   Stage 2 UniSkipFirstRound: NONE (writing 0)\n", .{});
                 try serializer.writeUsize(0);
             }
+            std.debug.print("[SERIALIZE]   Stage 2 Sumcheck: {} rounds\n", .{bundle.proof.stage2_sumcheck_proof.compressed_polys.items.len});
             try serializer.writeSumcheckInstanceProof(&bundle.proof.stage2_sumcheck_proof);
 
             // Write stages 3-7 (sumcheck only)
+            std.debug.print("[SERIALIZE] Writing Stage 3: {} rounds\n", .{bundle.proof.stage3_sumcheck_proof.compressed_polys.items.len});
             try serializer.writeSumcheckInstanceProof(&bundle.proof.stage3_sumcheck_proof);
+
+            std.debug.print("[SERIALIZE] Writing Stage 4: {} rounds\n", .{bundle.proof.stage4_sumcheck_proof.compressed_polys.items.len});
             try serializer.writeSumcheckInstanceProof(&bundle.proof.stage4_sumcheck_proof);
+
+            std.debug.print("[SERIALIZE] Writing Stage 5: {} rounds\n", .{bundle.proof.stage5_sumcheck_proof.compressed_polys.items.len});
             try serializer.writeSumcheckInstanceProof(&bundle.proof.stage5_sumcheck_proof);
+
+            std.debug.print("[SERIALIZE] Writing Stage 6: {} rounds\n", .{bundle.proof.stage6_sumcheck_proof.compressed_polys.items.len});
             try serializer.writeSumcheckInstanceProof(&bundle.proof.stage6_sumcheck_proof);
+
+            std.debug.print("[SERIALIZE] Writing Stage 7: {} rounds\n", .{bundle.proof.stage7_sumcheck_proof.compressed_polys.items.len});
             try serializer.writeSumcheckInstanceProof(&bundle.proof.stage7_sumcheck_proof);
 
             // Write joint opening proof

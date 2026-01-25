@@ -427,11 +427,8 @@ pub fn Stage4GruenProver(comptime F: type) type {
 
                 self.bindPolynomials(round, challenge);
 
-                var batched_poly = round_poly;
-                for (0..4) |i| {
-                    batched_poly.coeffs[i] = round_poly.coeffs[i].mul(self.batching_coeff);
-                }
-                round_polys[round] = batched_poly;
+                // Store UNBATCHED polynomial (batching is only for transcript/challenge)
+                round_polys[round] = round_poly;
             }
 
             return Stage4Result(F){
@@ -548,10 +545,11 @@ pub fn Stage4GruenProver(comptime F: type) type {
                     const c_X2 = ra_slope.mul(val_slope).add(wa_slope.mul(val_slope.add(inc_slope)));
 
                     // Debug: print first few nonzero contributions in Round 0
-                    if (is_round_0 and !c_0.eql(F.zero()) and nonzero_count < 5) {
+                    const has_nonzero = !c_0.eql(F.zero()) or !c_X2.eql(F.zero());
+                    if (is_round_0 and has_nonzero and nonzero_count < 5) {
                         nonzero_count += 1;
-                        std.debug.print("[STAGE4_CONTRIB] k={}, j_pair=({},{}): idx_even={}, idx_odd={}\n", .{
-                            k, j_prime, j_odd, idx_even, idx_odd,
+                        std.debug.print("[STAGE4_CONTRIB #{} i={}, k={}] j_pair=({},{}): idx_even={}, idx_odd={}\n", .{
+                            nonzero_count, i, k, j_prime, j_odd, idx_even, idx_odd,
                         });
                         std.debug.print("[STAGE4_CONTRIB]   EVEN: ra={any}, wa={any}, val={any}\n", .{
                             ra_even.toBytes()[0..8],
@@ -606,31 +604,50 @@ pub fn Stage4GruenProver(comptime F: type) type {
                     }
 
                     // Accumulate with E_out * E_in factor
-                    q_0 = q_0.add(E_combined.mul(c_0));
-                    q_X2 = q_X2.add(E_combined.mul(c_X2));
+                    const contrib_0 = E_combined.mul(c_0);
+                    const contrib_X2 = E_combined.mul(c_X2);
+                    q_0 = q_0.add(contrib_0);
+                    q_X2 = q_X2.add(contrib_X2);
+
+                    // Debug: print first 3 accumulations in Round 0
+                    if (is_round_0 and (!contrib_0.eql(F.zero()) or !contrib_X2.eql(F.zero())) and nonzero_count <= 3) {
+                        std.debug.print("[ZOLT ACCUM] contrib #{}: E_combined*c_0={any}\n", .{
+                            nonzero_count,
+                            contrib_0.toBytes()[0..16],
+                        });
+                        std.debug.print("[ZOLT ACCUM] q_0 (after)={any}\n", .{q_0.toBytes()[0..16]});
+                        std.debug.print("[ZOLT ACCUM] contrib #{}: E_combined*c_X2={any}\n", .{
+                            nonzero_count,
+                            contrib_X2.toBytes()[0..16],
+                        });
+                        std.debug.print("[ZOLT ACCUM] q_X2 (after)={any}\n", .{q_X2.toBytes()[0..16]});
+                    }
                 }
             }
 
             // Debug: Print q_0 and q_X2 for first round (full 32 bytes)
             if (self.current_T >= self.T / 2) {
-                std.debug.print("[GRUEN_DEBUG] q_0 = {any}\n", .{q_0.toBytes()});
-                std.debug.print("[GRUEN_DEBUG] q_X2 = {any}\n", .{q_X2.toBytes()});
-                std.debug.print("[GRUEN_DEBUG] previous_claim = {any}\n", .{previous_claim.toBytes()});
+                std.debug.print("[ZOLT PHASE1 q_0] = {any}\n", .{q_0.toBytes()});
+                std.debug.print("[ZOLT PHASE1 q_X2] = {any}\n", .{q_X2.toBytes()});
+                std.debug.print("[ZOLT PHASE1 previous_claim] = {any}\n", .{previous_claim.toBytes()});
+                std.debug.print("[ZOLT PHASE1] Round completed, current_T={}, half_T={}\n", .{ self.current_T, half_T });
             }
 
             // Use gruenPolyDeg3 to convert [q(0), q_X2] to cubic coefficients
+            if (self.current_T >= self.T / 2) {
+                std.debug.print("[ZOLT PHASE1] Before gruenPolyDeg3: current_index={}, w.len={}\n", .{
+                    gruen.current_index,
+                    gruen.w.len,
+                });
+            }
             const coeffs = gruen.gruenPolyDeg3(q_0, q_X2, previous_claim);
 
             // Debug: Print final coefficients for first round
             if (self.current_T >= self.T / 2) {
-                std.debug.print("[GRUEN_DEBUG]   coeffs[0]={any}, coeffs[1]={any}\n", .{
-                    coeffs[0].toBytes()[0..8],
-                    coeffs[1].toBytes()[0..8],
-                });
-                std.debug.print("[GRUEN_DEBUG]   coeffs[2]={any}, coeffs[3]={any}\n", .{
-                    coeffs[2].toBytes()[0..8],
-                    coeffs[3].toBytes()[0..8],
-                });
+                std.debug.print("[ZOLT PHASE1 COEFFS] c0={any}\n", .{coeffs[0].toBytes()});
+                std.debug.print("[ZOLT PHASE1 COEFFS] c1={any}\n", .{coeffs[1].toBytes()});
+                std.debug.print("[ZOLT PHASE1 COEFFS] c2={any}\n", .{coeffs[2].toBytes()});
+                std.debug.print("[ZOLT PHASE1 COEFFS] c3={any}\n", .{coeffs[3].toBytes()});
             }
 
             return RoundPoly(F){ .coeffs = coeffs };

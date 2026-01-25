@@ -1858,13 +1858,18 @@ pub fn ProofConverter(comptime F: type) type {
 
                     const regs_evals = regs_prover.computeRoundEvals(round_idx, regs_current_claim);
 
-                    // Debug: Print regs_evals for round 0
+                    // Debug: Print regs_evals and claim for round 0
                     if (round_idx == 0) {
+                        std.debug.print("[PROOF_CONV STAGE4] Round 0 inputs:\n", .{});
+                        std.debug.print("[PROOF_CONV STAGE4]   regs_current_claim = {any}\n", .{ regs_current_claim.toBytes() });
                         std.debug.print("[PROOF_CONV STAGE4] Round 0 regs_evals:\n", .{});
-                        std.debug.print("[PROOF_CONV STAGE4]   regs_evals[0] = {any}\n", .{ regs_evals[0].toBytes()[0..8] });
-                        std.debug.print("[PROOF_CONV STAGE4]   regs_evals[1] = {any}\n", .{ regs_evals[1].toBytes()[0..8] });
-                        std.debug.print("[PROOF_CONV STAGE4]   regs_evals[2] = {any}\n", .{ regs_evals[2].toBytes()[0..8] });
-                        std.debug.print("[PROOF_CONV STAGE4]   regs_evals[3] = {any}\n", .{ regs_evals[3].toBytes()[0..8] });
+                        std.debug.print("[PROOF_CONV STAGE4]   regs_evals[0] = {any}\n", .{ regs_evals[0].toBytes() });
+                        std.debug.print("[PROOF_CONV STAGE4]   regs_evals[1] = {any}\n", .{ regs_evals[1].toBytes() });
+                        std.debug.print("[PROOF_CONV STAGE4]   regs_evals[2] = {any}\n", .{ regs_evals[2].toBytes() });
+                        std.debug.print("[PROOF_CONV STAGE4]   regs_evals[3] = {any}\n", .{ regs_evals[3].toBytes() });
+                        const sum01 = regs_evals[0].add(regs_evals[1]);
+                        std.debug.print("[PROOF_CONV STAGE4]   p(0)+p(1) = {any}\n", .{ sum01.toBytes() });
+                        std.debug.print("[PROOF_CONV STAGE4]   should equal regs_current_claim? {}\n", .{ sum01.eql(regs_current_claim) });
                     }
 
                     for (0..4) |j| {

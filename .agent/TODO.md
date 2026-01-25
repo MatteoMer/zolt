@@ -109,23 +109,55 @@ output_claim = eq_val * combined
 - Jolt expected: `[de, d9, 51, 0a, d7, 14, 22, 42, 0c, 18, c6, f7, 51, f4, cd, 90, ...]`
 - First 12 bytes match! Difference starts at byte 13
 
+### Root Cause Found - Transcript Divergence! (Session 60 cont.)
+
+**CRITICAL DISCOVERY**: The batching coefficients don't match between Zolt and Jolt!
+
+**Verified Matches**:
+- ✅ Input claims ALL MATCH:
+  - Instance 0 (RegistersRWC): `10960129572097163177603722996998750391162218193231933792862644774061483523224`
+  - Instance 1 (RamValEval): `16843726827876190648710859579071819473340754364270059307512129120184648645607`
+  - Instance 2 (RamValFinal): `5258723638175825215483753966464390100826417414032932059867770167991589922285`
+
+**Batching Coefficients Mismatch** ❌:
+```
+Instance 0:
+  Zolt:  163320999741960436325050883603688376856
+  Jolt:  32951307615119296988740679619783089786
+
+Instance 1:
+  Zolt:  176932814840088648024187126714333406679
+  Jolt:  285977201933363026445562837187426589829
+
+Instance 2:
+  Zolt:  336461337500628531265857785923175776380
+  Jolt:  164827475813667398540528739772213502205
+```
+
+**Transcript State Comparison**:
+- Zolt after gamma: `{ ee 49 80 e3 36 3b de 88 }`
+- Jolt before input claims: `{ 66 a9 f8 b1 cf, b8 4b 45 }` (**DIFFERENT!**)
+
+This proves the transcript states diverge BEFORE sampling batching coefficients, even though:
+- ✅ Input claims are correct
+- ✅ eq polynomial is correct
+- ✅ gamma matches
+
 ### Next Investigation Steps
 
-1. **Debug expected_output computation mismatch**
-   - eq_val ✅ matches
-   - combined ✅ matches
-   - But eq_val * combined ≠ Jolt's expected (differs at byte 13)
-   - **Hypothesis**: Field multiplication might have subtle difference
-   - Action: Add detailed logging of intermediate multiplication values
+1. **Find transcript divergence point**
+   - Trace backwards from gamma sampling
+   - Check what's appended between Stage 3 cache openings and gamma
+   - Look for missing/extra transcript.appendScalar() calls
 
-2. **Check batching coefficients**
-   - Instance 0 weighted contribution might be wrong
-   - Compare batching_coeffs[0] with Jolt
-   - Verify scaling_power computation
+2. **Compare Stage 3 to Stage 4 transition**
+   - Verify Stage 3 cache openings are appended correctly
+   - Check order of appending (16 values expected)
+   - Ensure no extra challenges sampled between stages
 
-3. **Investigate RamValEvaluation/RamValFinalEvaluation**
-   - Both show expected_claim = 0 in Jolt (correct for Fibonacci)
-   - Verify Zolt also computes 0 for these instances
+3. **Check advice commitments**
+   - Jolt shows: `has_untrusted_advice_commitment=false, has_trusted_advice_commitment=false`
+   - Verify Zolt doesn't append any advice commitments
 
 ### What Was Implemented (Session 58)
 

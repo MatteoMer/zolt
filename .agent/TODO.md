@@ -112,18 +112,31 @@ Stage 4 sumcheck has a **batched claim computation mismatch**:
 - Jolt expects: `coeff[0] * 16312... = 14040...`
 - These DON'T match!
 
-**ROOT CAUSE FOUND**: Instance 2 (RamValFinalEvaluation) has **non-zero input_claim**!
-- Instance 0 input_claim: Non-zero (correct)
-- Instance 1 input_claim: `0` ✅
-- Instance 2 input_claim: `5258723638175825215483753966464390100826417414032932059867770167991589922285` ❌ (SHOULD BE 0!)
+**ROOT CAUSE FOUND (Session 63 - 2026-01-25)**: Termination bit handling in OutputSumcheck!
 
-But Jolt expects Instance 2's **expected_claim = 0**. This means:
-1. Instance 2's input_claim is WRONG (should be 0, not 5258...)
-2. OR Instance 2 correctly evaluates to 0 at the final point despite non-zero input
-3. The non-zero input_claim is contaminating the batched sumcheck!
+**The Bug**:
+- Termination bit was set ONLY in `val_final`, not in `val_init`
+- This created: `val_final[termination_index] = 1, val_init[termination_index] = 0`
+- After OutputSumcheck binding: `output_val_final_claim ≠ output_val_init_claim`
+- This made `input_claim_val_final = output_val_final_claim - val_init_eval` non-zero!
 
-**Critical**: `input_claim_val_final = output_val_final_claim - output_val_init_claim`
-This computation is producing a non-zero value when it should be 0!
+**The Fix** (`src/zkvm/ram/output_check.zig:174-192`):
+- Set termination/panic bits in **BOTH** `val_init` and `val_final`
+- Reason: Termination write happens AFTER trace execution, NOT recorded in `inc` polynomial
+- ValFinalSumcheck proves: `Val_final(r) - Val_init(r) = Σ inc(r,j) * wa(r,j)`
+- For programs with no RAM writes: RHS = 0, so we need LHS = 0
+- Therefore: `val_final[k] = val_init[k]` for all k (including termination)
+
+**Also Fixed** (`src/zkvm/proof_converter.zig:1671-1680`):
+- Use `val_init_eval` from OutputSumcheck's opening accumulator (= `output_val_init_claim`)
+- NOT separately recomputed via `computeInitialRamEval()`
+- Matches Jolt's approach: retrieve from accumulator, don't recompute
+
+**Result (Session 63)**:
+- ✅ Instance 1 (RamValEvaluation) input_claim = 0
+- ✅ Instance 2 (RamValFinalEvaluation) input_claim = 0
+- ✅ Jolt verifier: `Instance 1 expected_claim = 0`, `Instance 2 expected_claim = 0`
+- ❌ **Remaining**: Proof serialization mismatch (output_claim ≠ expected_output_claim)
 
 ### What Was Fixed (Session 59 - Today)
 

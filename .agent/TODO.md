@@ -91,21 +91,41 @@ output_claim = eq_val * combined
 
 **Detailed Analysis**: See `.agent/STAGE4_CHALLENGE_ORDERING_ANALYSIS.md`
 
-### Next Steps (Priority Fix)
+### Fix Applied - BIG_ENDIAN eq polynomial (Session 60)
 
-1. **Verify opening point construction in proof_converter.zig**
-   - Check how sumcheck challenges are split into r_address and r_cycle
-   - Ensure both are in BIG_ENDIAN format
-   - Verify they match Jolt's normalize_opening_point output
+**CRITICAL FIX IMPLEMENTED** in `proof_converter.zig:2051`:
+- Changed from LITTLE_ENDIAN to BIG_ENDIAN for eq polynomial computation
+- Converts both r_cycle_sumcheck and stage3_r_cycle to BIG_ENDIAN before calling `mle()`
+- Matches Jolt's `RegistersReadWriteCheckingVerifier::expected_output_claim` behavior
 
-2. **Add comprehensive debug logging**
-   - Print sumcheck challenges in order generated
-   - Print opening point after normalize_opening_point equivalent
-   - Compare with Jolt's debug output
+**Results**:
+- ✅ eq_val now MATCHES between Zolt and Jolt: `[b3, f2, 8c, 0b, 5c, 46, bf, 7d, ...]`
+- ✅ combined value MATCHES: `[7a, a0, c5, 44, 6d, 20, 7e, 64, ...]`
+- ❌ expected_output still has slight mismatch (different starting at byte 13)
+- ❌ Batched output_claim still fails verification
 
-3. **Test the fix**
-   - Run cross-verification test
-   - Check if output_claim now matches
+**Current Status**:
+- Zolt expected_output: `[de, d9, 51, 0a, d7, 14, 22, 42, 0c, 18, c6, f7, 69, f1, 54, cd, ...]`
+- Jolt expected: `[de, d9, 51, 0a, d7, 14, 22, 42, 0c, 18, c6, f7, 51, f4, cd, 90, ...]`
+- First 12 bytes match! Difference starts at byte 13
+
+### Next Investigation Steps
+
+1. **Debug expected_output computation mismatch**
+   - eq_val ✅ matches
+   - combined ✅ matches
+   - But eq_val * combined ≠ Jolt's expected (differs at byte 13)
+   - **Hypothesis**: Field multiplication might have subtle difference
+   - Action: Add detailed logging of intermediate multiplication values
+
+2. **Check batching coefficients**
+   - Instance 0 weighted contribution might be wrong
+   - Compare batching_coeffs[0] with Jolt
+   - Verify scaling_power computation
+
+3. **Investigate RamValEvaluation/RamValFinalEvaluation**
+   - Both show expected_claim = 0 in Jolt (correct for Fibonacci)
+   - Verify Zolt also computes 0 for these instances
 
 ### What Was Implemented (Session 58)
 

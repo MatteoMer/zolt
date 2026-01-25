@@ -45,6 +45,17 @@ For Fibonacci (no RAM writes):
 
 These claims represent RAM state evaluations. For a program with no RAM writes, initial and final RAM states should be identical, making both differences zero.
 
+**Verification:**
+With CORRECT input claims (0, 0, 0 becomes 8494940..., 0, 0):
+- Initial batched_claim would be: 12640480056023150955589545284889516342512199511163763258096280534264
+- This EXACTLY matches Jolt verifier's expected_output_claim! ✅
+
+**Additional Finding:**
+- Jolt's PROVER also computes Instance 0 input_claim = 10960129... (same as Zolt)
+- But Jolt's VERIFIER expects Instance 0 = 8494940...
+- This suggests the input_claim formula might be different between prover and verifier in Jolt
+- OR there's something about how Stage 4 instances are set up that we're missing
+
 ### What Was Fixed (Session 59 - Today)
 
 **Implemented proper pre/post value tracking**:

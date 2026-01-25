@@ -1939,7 +1939,8 @@ pub fn ProofConverter(comptime F: type) type {
 
                     if (round_idx < 3 or round_idx >= stage4_max_rounds - 2) {
                         std.debug.print("[ZOLT STAGE4] Round {}: c0 = {any}\n", .{ round_idx, compressed[0].toBytesBE()[0..16] });
-                        std.debug.print("[ZOLT STAGE4] Round {}: c2 = {any}\n", .{ round_idx, compressed[2].toBytesBE()[0..16] });
+                        std.debug.print("[ZOLT STAGE4] Round {}: c2 (actual) = {any}\n", .{ round_idx, compressed[1].toBytesBE()[0..16] });
+                        std.debug.print("[ZOLT STAGE4] Round {}: c3 = {any}\n", .{ round_idx, compressed[2].toBytesBE()[0..16] });
                         std.debug.print("[ZOLT STAGE4] Round {}: batched_claim = {any}\n", .{ round_idx, batched_claim.toBytesBE()[0..16] });
                     }
 
@@ -2078,7 +2079,9 @@ pub fn ProofConverter(comptime F: type) type {
                 std.debug.print("[ZOLT STAGE4 CLAIMS] rd_write_value_claim (rd_wa*(inc+val)) bytes = {any}\n", .{rd_write_value_claim.toBytes()});
                 std.debug.print("[ZOLT STAGE4 CLAIMS] rs1_value_claim (rs1_ra*val) bytes = {any}\n", .{rs1_value_claim.toBytes()});
                 std.debug.print("[ZOLT STAGE4 CLAIMS] rs2_value_claim (rs2_ra*val) bytes = {any}\n", .{rs2_value_claim.toBytes()});
-                std.debug.print("[ZOLT STAGE4 CLAIMS] expected_output = eq_be * combined = {any}\n", .{eq_val_be.mul(combined).toBytes()});
+                const expected_output = eq_val_be.mul(combined);
+                std.debug.print("[ZOLT STAGE4 CLAIMS] expected_output = eq_be * combined = {any}\n", .{expected_output.toBytes()});
+                std.debug.print("[ZOLT STAGE4 CLAIMS] expected_output (BE bytes) = {any}\n", .{expected_output.toBytesBE()});
 
                 // RegistersReadWriteChecking claims.
                 try jolt_proof.opening_claims.insert(

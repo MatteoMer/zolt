@@ -65,25 +65,47 @@ Pre/post values ARE being captured correctly:
 - 39 non-zero register increments out of 52 writes
 - Yet output_claim is still wrong by same amount!
 
-### Next Investigation Steps
+### Analysis Complete - Root Cause Identified (Session 60)
 
-The pre/post values are correct, but the output_claim is unchanged. Possible issues:
+**CRITICAL FINDING**: The issue is in **opening point construction and endianness**!
 
-1. **Field Arithmetic** - Are we handling negative increments correctly?
-   - Check signed vs unsigned conversion at `@intCast`
-   - Verify field negation for negative increments
+Jolt's `normalize_opening_point` (read_write_checking.rs:138-173):
+1. Splits sumcheck challenges: `[phase1_cycle, phase2_address, phase3]`
+2. Reverses each phase: `phase1.rev()`, `phase2.rev()`, `phase3.rev()`
+3. **Reorders to**: `[r_address, r_cycle]` = `[phase2.rev(), phase1.rev()]`
+4. Returns opening point in BIG_ENDIAN: `[addr_{LOG_K-1}..addr_0, cycle_{log_T-1}..cycle_0]`
 
-2. **Polynomial Indexing** - Are increments at correct cycle indices?
-   - Verify `poly[i]` matches cycle index in trace
-   - Check padding/alignment with poly_size
+Verifier's expected_output_claim (read_write_checking.rs:138+):
+```rust
+let r = normalize_opening_point(sumcheck_challenges);
+let (_, r_cycle) = r.split_at(LOG_K);  // Extract last log_T elements
+let eq_val = EqPolynomial::mle_endian(&r_cycle, &params.r_cycle);  // Both BIG_ENDIAN
+output_claim = eq_val * combined
+```
 
-3. **Batching/Evaluation** - Is Stage 4 batching different?
-   - Compare how Zolt vs Jolt evaluates RdInc polynomial
-   - Check if there's an off-by-one in how Instance 0 is computed
+**Zolt's Current Behavior**:
+- ✅ Binding order correct: cycle vars first, then address vars
+- ✅ Polynomial indexing correct: `idx = k * T + j`
+- ✅ GruenSplitEqPolynomial uses correct BIG_ENDIAN for r_cycle
+- ❌ **Missing**: Proper opening point construction for verification
 
-4. **Other Ra Polynomials** - InstructionRa/RamRa/BytecodeRa might be wrong
-   - Instance 0 is RdInc, but Instance 1/2 might affect batching
-   - Check if InstructionRa chunks are computed correctly
+**Detailed Analysis**: See `.agent/STAGE4_CHALLENGE_ORDERING_ANALYSIS.md`
+
+### Next Steps (Priority Fix)
+
+1. **Verify opening point construction in proof_converter.zig**
+   - Check how sumcheck challenges are split into r_address and r_cycle
+   - Ensure both are in BIG_ENDIAN format
+   - Verify they match Jolt's normalize_opening_point output
+
+2. **Add comprehensive debug logging**
+   - Print sumcheck challenges in order generated
+   - Print opening point after normalize_opening_point equivalent
+   - Compare with Jolt's debug output
+
+3. **Test the fix**
+   - Run cross-verification test
+   - Check if output_claim now matches
 
 ### What Was Implemented (Session 58)
 

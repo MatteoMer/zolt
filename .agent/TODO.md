@@ -1,19 +1,28 @@
 # Zolt-Jolt Compatibility TODO
 
-## 🎯 Current Task: Debug Stage 4 - Pre/Post Values Captured But Still Failing
+## 🎯 Current Task: Debug Stage 4 Sumcheck - Systematic 9% Error
 
-**Status:** Deserialization ✅ | Ra Polynomials ✅ | Pre/Post Capture ✅ | Stage 4 Verification ❌ (still wrong)
+**Status:** Stages 1-3 ✅ PASSING | Stage 4 ❌ Sumcheck output_claim 9% too high
 
 ### Problem
 
-Stage 4 sumcheck verification still fails with the SAME values even after implementing pre/post value capture:
+Stages 1-3 now **PASS** with Jolt verifier! 🎉 But Stage 4 sumcheck still fails:
 
 ```
 [JOLT BATCHED] output_claim          = 13790373438827639882557683572286534321489361070389115930961142260387674941556
 [JOLT BATCHED] expected_output_claim = 12640480056023150955589545284889516342512199511163763258096899648096280534264
 === SUMCHECK VERIFICATION FAILED ===
-Difference: ~1.15e57 (about 5% of field modulus)
+Ratio: output_claim / expected ≈ 1.091 (9% too high)
 ```
+
+**Key insight from Jolt debug output**:
+```
+[JOLT STAGE4 DEBUG]   combined = 4588861476706251528214274896846760497413099305186908645592958406990187831418
+[JOLT STAGE4 DEBUG]   expected = 8494940868042831272571427889592148129715827118309988888518489912562301393374
+Ratio: expected / combined ≈ 1.85 (not quite 2x, but close!)
+```
+
+This suggests a systematic scaling issue in RegistersReadWriteChecking (Instance 0).
 
 ### What Was Fixed (Session 59 - Today)
 

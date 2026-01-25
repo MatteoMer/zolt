@@ -2048,11 +2048,24 @@ pub fn ProofConverter(comptime F: type) type {
                 const rs1_value_claim = regs_claims.rs1_ra_claim.mul(regs_claims.val_claim);
                 const rs2_value_claim = regs_claims.rs2_ra_claim.mul(regs_claims.val_claim);
                 const combined = rd_write_value_claim.add(gamma_stage4.mul(rs1_value_claim.add(gamma_stage4.mul(rs2_value_claim))));
-                const eq_val_le = poly_mod.EqPolynomial(F).mle(r_cycle_sumcheck_le, stage3_result.challenges);
+
+                // CRITICAL FIX: Jolt's verifier uses BIG_ENDIAN for eq polynomial computation
+                // (see RegistersReadWriteCheckingVerifier::expected_output_claim)
+                // Must convert both r_cycle vectors to BIG_ENDIAN to match Jolt's normalize_opening_point
+                var stage3_r_cycle_be = try self.allocator.alloc(F, stage3_result.challenges.len);
+                defer self.allocator.free(stage3_r_cycle_be);
+                for (0..stage3_result.challenges.len) |i| {
+                    stage3_r_cycle_be[i] = stage3_result.challenges[stage3_result.challenges.len - 1 - i];
+                }
+
+                const eq_val_be = poly_mod.EqPolynomial(F).mle(r_cycle_sumcheck_be, stage3_r_cycle_be);
+
+                std.debug.print("[STAGE4 ZOLT CHECK] eq_val_be (BIG_ENDIAN) = {any}\n", .{eq_val_be.toBytes()});
+                std.debug.print("[STAGE4 ZOLT CHECK] eq_val_be vs eq_val_le match? {}\n", .{eq_val_be.eql(poly_mod.EqPolynomial(F).mle(r_cycle_sumcheck_le, stage3_result.challenges))});
 
                 std.debug.print("[STAGE4 ZOLT CHECK] regs_output_claim = {any}\n", .{regs_current_claim.toBytes()});
                 std.debug.print("[STAGE4 ZOLT CHECK] combined = {any}\n", .{combined.toBytes()});
-                std.debug.print("[STAGE4 ZOLT CHECK] eq_val_le = {any}\n", .{eq_val_le.toBytes()});
+                std.debug.print("[STAGE4 ZOLT CHECK] eq_val_be = {any}\n", .{eq_val_be.toBytes()});
 
                 // Print claims that will be stored (for comparison with Jolt's debug output)
                 std.debug.print("[ZOLT STAGE4 CLAIMS] val_claim bytes = {any}\n", .{regs_claims.val_claim.toBytes()});
@@ -2065,7 +2078,7 @@ pub fn ProofConverter(comptime F: type) type {
                 std.debug.print("[ZOLT STAGE4 CLAIMS] rd_write_value_claim (rd_wa*(inc+val)) bytes = {any}\n", .{rd_write_value_claim.toBytes()});
                 std.debug.print("[ZOLT STAGE4 CLAIMS] rs1_value_claim (rs1_ra*val) bytes = {any}\n", .{rs1_value_claim.toBytes()});
                 std.debug.print("[ZOLT STAGE4 CLAIMS] rs2_value_claim (rs2_ra*val) bytes = {any}\n", .{rs2_value_claim.toBytes()});
-                std.debug.print("[ZOLT STAGE4 CLAIMS] expected_output = eq * combined = {any}\n", .{eq_val_le.mul(combined).toBytes()});
+                std.debug.print("[ZOLT STAGE4 CLAIMS] expected_output = eq_be * combined = {any}\n", .{eq_val_be.mul(combined).toBytes()});
 
                 // RegistersReadWriteChecking claims.
                 try jolt_proof.opening_claims.insert(

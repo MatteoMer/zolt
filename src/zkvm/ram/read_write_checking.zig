@@ -1207,12 +1207,14 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 val_claim = val_claim.add(eq_addr.mul(eq_cycle).mul(delta));
             }
 
-            var inc_claim = F.zero();
-            const T = @as(usize, 1) << @intCast(log_t);
-            for (0..@min(T, self.inc.len)) |j| {
-                const eq_cycle = computeEq(F, r_cycle[0..log_t], j);
-                inc_claim = inc_claim.add(eq_cycle.mul(self.inc[j]));
-            }
+            // CRITICAL FIX: Same issue as val_init! After all log_t binding rounds complete
+            // in Phase 1, inc has been fully bound down to a single value at inc[0].
+            // The rest of the array contains stale data from before binding.
+            //
+            // After full binding, just use inc[0] directly instead of iterating.
+            const inc_claim = self.inc[0];
+
+            std.debug.print("[RWC GET_OPENING] inc_claim (bound inc[0]) = {any}\n", .{inc_claim.toBytes()[0..8]});
 
             return OpeningClaims(F){
                 .ra_claim = ra_claim,

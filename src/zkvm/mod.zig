@@ -917,42 +917,43 @@ pub fn JoltProver(comptime F: type) type {
             var all_commitments: std.ArrayListUnmanaged(GT) = .{};
             defer all_commitments.deinit(self.allocator);
 
-            // RdInc: register destination increment polynomial (placeholder zeros for now)
-            const rd_inc_poly = try self.allocator.alloc(F, reg_poly_size);
+            // RdInc: register destination increment polynomial
+            const rd_inc_poly = try self.buildRdIncPolynomial(&emulator.trace, reg_poly_size);
             defer self.allocator.free(rd_inc_poly);
-            @memset(rd_inc_poly, F.zero());
             try all_commitments.append(self.allocator, DoryScheme.commit(&dory_srs, rd_inc_poly));
 
-            // RamInc: RAM increment polynomial (placeholder zeros for now)
-            const ram_inc_poly = try self.allocator.alloc(F, memory_poly_size);
+            // RamInc: RAM increment polynomial
+            const ram_inc_poly = try self.buildRamIncPolynomial(&emulator.trace, memory_poly_size);
             defer self.allocator.free(ram_inc_poly);
-            @memset(ram_inc_poly, F.zero());
             try all_commitments.append(self.allocator, DoryScheme.commit(&dory_srs, ram_inc_poly));
 
-            // InstructionRa[0..instruction_d-1]: instruction read address chunks (placeholder zeros)
+            // InstructionRa[0..instruction_d-1]: instruction read address chunks
             var idx: usize = 0;
             while (idx < instruction_d) : (idx += 1) {
-                const instruction_ra_poly = try self.allocator.alloc(F, reg_poly_size);
+                // Compute shift for this chunk: log_k_chunk * (instruction_d - 1 - idx)
+                const shift = log_k_chunk * (instruction_d - 1 - idx);
+                const instruction_ra_poly = try self.buildInstructionRaPolynomial(&emulator.lookup_trace, reg_poly_size, log_k_chunk, shift);
                 defer self.allocator.free(instruction_ra_poly);
-                @memset(instruction_ra_poly, F.zero());
                 try all_commitments.append(self.allocator, DoryScheme.commit(&dory_srs, instruction_ra_poly));
             }
 
-            // RamRa[0..ram_d-1]: RAM read address chunks (placeholder zeros)
+            // RamRa[0..ram_d-1]: RAM read address chunks
             idx = 0;
             while (idx < ram_d) : (idx += 1) {
-                const ram_ra_poly = try self.allocator.alloc(F, memory_poly_size);
+                // Compute shift for this chunk: log_k_chunk * (ram_d - 1 - idx)
+                const shift = log_k_chunk * (ram_d - 1 - idx);
+                const ram_ra_poly = try self.buildRamRaPolynomial(&emulator.trace, memory_poly_size, log_k_chunk, shift);
                 defer self.allocator.free(ram_ra_poly);
-                @memset(ram_ra_poly, F.zero());
                 try all_commitments.append(self.allocator, DoryScheme.commit(&dory_srs, ram_ra_poly));
             }
 
-            // BytecodeRa[0..bytecode_d-1]: bytecode read address chunks (placeholder zeros)
+            // BytecodeRa[0..bytecode_d-1]: bytecode read address chunks
             idx = 0;
             while (idx < bytecode_d) : (idx += 1) {
-                const bytecode_ra_poly = try self.allocator.alloc(F, bytecode_poly_size);
+                // Compute shift for this chunk: log_k_chunk * (bytecode_d - 1 - idx)
+                const shift = log_k_chunk * (bytecode_d - 1 - idx);
+                const bytecode_ra_poly = try self.buildBytecodeRaPolynomial(&emulator.trace, bytecode_poly_size, log_k_chunk, shift);
                 defer self.allocator.free(bytecode_ra_poly);
-                @memset(bytecode_ra_poly, F.zero());
                 try all_commitments.append(self.allocator, DoryScheme.commit(&dory_srs, bytecode_ra_poly));
             }
 
@@ -1612,6 +1613,179 @@ pub fn JoltProver(comptime F: type) type {
         /// Set the proving key
         pub fn setProvingKey(self: *Self, pk: ProvingKey) void {
             self.proving_key = pk;
+        }
+
+        // ===== Ra Polynomial Helpers =====
+
+        /// Build RdInc polynomial: rd_inc[i] = post_value[rd] - pre_value[rd]
+        fn buildRdIncPolynomial(
+            self: *Self,
+            trace: *const tracer.ExecutionTrace,
+            poly_size: usize,
+        ) ![]F {
+            const poly = try self.allocator.alloc(F, poly_size);
+            errdefer self.allocator.free(poly);
+            @memset(poly, F.zero());
+
+            // Track current register values (initialized to 0)
+            var register_state: [32]i128 = [_]i128{0} ** 32;
+
+            // Iterate through trace and compute increments
+            for (trace.steps.items, 0..) |step, i| {
+                if (i >= poly_size) break;
+
+                // Decode instruction to get rd
+                const decoded = instruction.DecodedInstruction.decode(step.instruction);
+                const rd = decoded.rd;
+
+                // For register writes (rd != 0), compute increment
+                if (rd != 0) {
+                    const pre_value = register_state[rd];
+                    const post_value: i128 = @intCast(step.rd_value);
+                    const increment = post_value - pre_value;
+
+                    // Store increment as field element (handle negative numbers)
+                    poly[i] = if (increment >= 0)
+                        F.fromU64(@intCast(increment))
+                    else
+                        F.fromU64(@intCast(-increment)).neg();
+
+                    // Update register state
+                    register_state[rd] = post_value;
+                } else {
+                    // No write to rd (or rd=x0 which is always 0)
+                    poly[i] = F.zero();
+                }
+            }
+
+            return poly;
+        }
+
+        /// Build RamInc polynomial: ram_inc[i] = post_value[addr] - pre_value[addr]
+        fn buildRamIncPolynomial(
+            self: *Self,
+            trace: *const tracer.ExecutionTrace,
+            poly_size: usize,
+        ) ![]F {
+            const poly = try self.allocator.alloc(F, poly_size);
+            errdefer self.allocator.free(poly);
+            @memset(poly, F.zero());
+
+            // Track current memory values per address using a hashmap
+            var memory_state = std.AutoHashMap(u64, i128).init(self.allocator);
+            defer memory_state.deinit();
+
+            // Iterate through trace and compute increments for memory writes
+            for (trace.steps.items, 0..) |step, i| {
+                if (i >= poly_size) break;
+
+                // Check if this is a memory write
+                if (step.is_memory_write) {
+                    if (step.memory_addr) |addr| {
+                        const pre_value = memory_state.get(addr) orelse 0;
+                        const post_value: i128 = @intCast(step.memory_value orelse 0);
+                        const increment = post_value - pre_value;
+
+                        // Store increment as field element (handle negative numbers)
+                        poly[i] = if (increment >= 0)
+                            F.fromU64(@intCast(increment))
+                        else
+                            F.fromU64(@intCast(-increment)).neg();
+
+                        // Update memory state
+                        try memory_state.put(addr, post_value);
+                    } else {
+                        poly[i] = F.zero();
+                    }
+                } else {
+                    // No memory write
+                    poly[i] = F.zero();
+                }
+            }
+
+            return poly;
+        }
+
+        /// Build InstructionRa polynomial: extract chunk idx from lookup indices
+        fn buildInstructionRaPolynomial(
+            self: *Self,
+            lookup_trace: *const instruction.LookupTraceCollector(64),
+            poly_size: usize,
+            log_k_chunk: usize,
+            shift: usize,
+        ) ![]F {
+            const poly = try self.allocator.alloc(F, poly_size);
+            errdefer self.allocator.free(poly);
+            @memset(poly, F.zero());
+
+            const k_chunk: u128 = @as(u128, 1) << @intCast(log_k_chunk);
+            const mask: u128 = k_chunk - 1;
+
+            // Extract chunks from lookup indices
+            for (lookup_trace.entries.items, 0..) |entry, i| {
+                if (i >= poly_size) break;
+
+                const chunk: u128 = (entry.index >> @intCast(shift)) & mask;
+                poly[i] = F.fromU64(@intCast(chunk));
+            }
+
+            return poly;
+        }
+
+        /// Build RamRa polynomial: extract chunk idx from RAM addresses
+        fn buildRamRaPolynomial(
+            self: *Self,
+            trace: *const tracer.ExecutionTrace,
+            poly_size: usize,
+            log_k_chunk: usize,
+            shift: usize,
+        ) ![]F {
+            const poly = try self.allocator.alloc(F, poly_size);
+            errdefer self.allocator.free(poly);
+            @memset(poly, F.zero());
+
+            const k_chunk: u64 = @as(u64, 1) << @intCast(log_k_chunk);
+            const mask: u64 = k_chunk - 1;
+
+            // Extract chunks from RAM addresses
+            for (trace.steps.items, 0..) |step, i| {
+                if (i >= poly_size) break;
+
+                if (step.memory_addr) |addr| {
+                    const chunk: u64 = (addr >> @intCast(shift)) & mask;
+                    poly[i] = F.fromU64(chunk);
+                } else {
+                    poly[i] = F.zero();
+                }
+            }
+
+            return poly;
+        }
+
+        /// Build BytecodeRa polynomial: extract chunk idx from PCs
+        fn buildBytecodeRaPolynomial(
+            self: *Self,
+            trace: *const tracer.ExecutionTrace,
+            poly_size: usize,
+            log_k_chunk: usize,
+            shift: usize,
+        ) ![]F {
+            const poly = try self.allocator.alloc(F, poly_size);
+            errdefer self.allocator.free(poly);
+            @memset(poly, F.zero());
+
+            const k_chunk: u64 = @as(u64, 1) << @intCast(log_k_chunk);
+            const mask: u64 = k_chunk - 1;
+
+            // Extract chunks from PCs
+            for (trace.steps.items, 0..) |step, i| {
+                if (i >= poly_size) break;
+
+                const chunk: u64 = (step.pc >> @intCast(shift)) & mask;
+                poly[i] = F.fromU64(chunk);
+            }
+
+            return poly;
         }
     };
 }

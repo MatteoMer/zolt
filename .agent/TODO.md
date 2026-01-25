@@ -1,28 +1,49 @@
 # Zolt-Jolt Compatibility TODO
 
-## 🎯 Current Task: Debug Stage 4 - Challenge Ordering Issue
+## 🎯 Current Task: Debug Stage 4 - Input Claim Mismatch
 
-**Status:** Stages 1-3 ✅ PASSING | Stage 4 ❌ Variable binding order mismatch
+**Status:** Stages 1-3 ✅ PASSING | Stage 4 ❌ Input claims incorrect
 
-### Problem & Root Cause Analysis
+### ROOT CAUSE FOUND (Session 61 - 2026-01-25)
 
-**Symptoms:**
-- Stages 1-3: ✅ PASS
-- Stage 4: ❌ FAIL - output_claim is 9% higher than expected
-- Round 0 polynomial: ✅ Satisfies p(0) + p(1) = batched_claim
-- Final polynomial claims: ✅ ALL MATCH between Zolt and Jolt
-- Expected output claim: ✅ Zolt's computation matches Jolt
+**The Problem:**
+Stage 4 batched sumcheck verification fails because the **input claims are incorrect**.
 
-**Key Finding:** The issue is **NOT** in polynomial values, but in **variable binding order**!
+**Verified Facts:**
+- ✅ Batching coefficients MATCH between Zolt and Jolt (all 3 coefficients identical)
+- ✅ eq polynomial computation is CORRECT (BIG_ENDIAN fix from Session 60)
+- ❌ Input claims for Stage 4's three instances are WRONG
 
-Jolt's `normalize_opening_point` (read_write_checking.rs):
-1. Splits sumcheck_challenges into phase1, phase2, phase3
-2. **REVERSES** challenges within each phase (LITTLE_ENDIAN → BIG_ENDIAN)
-3. Concatenates in specific order: phase3_cycle (rev) + phase1 (rev), phase3_address (rev) + phase2 (rev)
+**Input Claim Mismatch:**
 
-If Zolt binds variables in a different order than what Jolt's normalization expects, we get:
-- ✅ Final evaluations correct (evaluating at same point after all normalization)
-- ❌ Sumcheck fails (intermediate binding order doesn't match verifier's expectations)
+For Fibonacci (no RAM writes), the expected input claims are:
+- Instance 0 (RegistersReadWriteChecking): 8494940868042831272571427889592148129715827118309988888518489912562301393374
+- Instance 1 (RamValEvaluation): 0
+- Instance 2 (RamValFinalEvaluation): 0
+
+But Zolt computes:
+- Instance 0: 10960129572097163177603722996998750391162218193231933792862644774061483523224 ❌
+- Instance 1: 16843726827876190648710859579071819473340754364270059307512129120184648645607 ❌ (should be 0)
+- Instance 2: 5258723638175825215483753966464390100826417414032932059867770167991589922285 ❌ (should be 0)
+
+**Result:**
+- Initial batched_claim is computed from wrong input claims
+- This propagates through all 15 sumcheck rounds
+- Final output_claim = 13790373438827639882557683572286534321489361070389115930961142260387674941556 (9% too high)
+- Expected output_claim = 12640480056023150955589545284889516342512199511163763258096280534264 ✓ (Jolt's verifier value)
+
+**The Issue:**
+Looking at proof_converter.zig:1756-1757:
+```zig
+const input_claim_val_eval = stage2_result.rwc_val_claim.sub(val_init_eval);
+const input_claim_val_final = stage2_result.output_val_final_claim.sub(stage2_result.output_val_init_claim);
+```
+
+For Fibonacci (no RAM writes):
+- `rwc_val_claim` ≠ `val_init_eval` (but should be equal!)
+- `output_val_final_claim` ≠ `output_val_init_claim` (but should be equal!)
+
+These claims represent RAM state evaluations. For a program with no RAM writes, initial and final RAM states should be identical, making both differences zero.
 
 ### What Was Fixed (Session 59 - Today)
 
@@ -143,21 +164,27 @@ This proves the transcript states diverge BEFORE sampling batching coefficients,
 - ✅ eq polynomial is correct
 - ✅ gamma matches
 
-### Next Investigation Steps
+### Next Steps to Fix
 
-1. **Find transcript divergence point**
-   - Trace backwards from gamma sampling
-   - Check what's appended between Stage 3 cache openings and gamma
-   - Look for missing/extra transcript.appendScalar() calls
+1. **Investigate RAM claim computation in Stage 2**
+   - Check how `rwc_val_claim` is computed in Stage 2 RWC sumcheck
+   - Verify `val_init_eval` computation (should come from initial RAM state)
+   - Compare with Jolt's computation in `/Users/matteo/projects/jolt/jolt-core/src/zkvm/ram/read_write_checking.rs`
 
-2. **Compare Stage 3 to Stage 4 transition**
-   - Verify Stage 3 cache openings are appended correctly
-   - Check order of appending (16 values expected)
-   - Ensure no extra challenges sampled between stages
+2. **Check ValFinal claim computation**
+   - Investigate `output_val_final_claim` and `output_val_init_claim`
+   - These come from Stage 2's OutputSumcheck
+   - Should both evaluate the same polynomial (RamVal) at different points
 
-3. **Check advice commitments**
-   - Jolt shows: `has_untrusted_advice_commitment=false, has_trusted_advice_commitment=false`
-   - Verify Zolt doesn't append any advice commitments
+3. **Verify for no-RAM case**
+   - Fibonacci has NO memory writes (only reads of program data)
+   - Confirm that Jolt also gets input_claim = 0 for Instances 1 and 2
+   - Check if there's special handling for programs without RAM operations
+
+4. **Root cause options**
+   - Option A: RAM trace includes spurious writes
+   - Option B: Initial/final RAM state evaluations are at wrong points
+   - Option C: The formula `rwc_val_claim - val_init_eval` is incorrect
 
 ### What Was Implemented (Session 58)
 
@@ -263,6 +290,12 @@ zig build
 ---
 
 ## Recent Session History
+
+**Session 61 (2026-01-25)**: 🎯 **ROOT CAUSE FOUND** - Stage 4 input claims are incorrect! For Fibonacci (no RAM), Instances 1&2 should have input_claim=0 but Zolt computes non-zero values. Instance 0 also has wrong value. The batching coefficients DO match now after Session 60's eq polynomial fix. Issue is in Stage 2's RAM claim computation.
+
+**Session 60 (2026-01-25)**: ✅ Fixed eq polynomial endianness (BIG_ENDIAN) - this made batching coefficients match Jolt! But input claims still wrong.
+
+**Session 59 (2026-01-25)**: ✅ Implemented proper pre/post value tracking in TraceStep and RAMState.
 
 **Session 58 (2026-01-25)**: ⚡ Implemented Ra polynomial generation - RdInc, RamInc, InstructionRa, RamRa, BytecodeRa all generate real values from trace. Stage 4 still fails but with different output_claim, indicating progress. Need to investigate pre/post value tracking.
 

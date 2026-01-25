@@ -3527,11 +3527,10 @@ pub fn ProofConverter(comptime F: type) type {
         ) F {
             std.debug.print("[COMPUTE_INIT_RAM_EVAL] Computing with log_ram_k={}\n", .{log_ram_k});
             std.debug.print("[COMPUTE_INIT_RAM_EVAL] r_address_be.len = {}\n", .{r_address_be.len});
-            std.debug.print("[COMPUTE_INIT_RAM_EVAL] r_address_be[0..5] = ", .{});
-            for (0..@min(5, r_address_be.len)) |i| {
-                std.debug.print("{{ {any} }}, ", .{r_address_be[i].toBytes()[0..8]});
+            std.debug.print("[COMPUTE_INIT_RAM_EVAL] Full r_address_be array (all {} elements):\n", .{r_address_be.len});
+            for (0..r_address_be.len) |i| {
+                std.debug.print("[COMPUTE_INIT_RAM_EVAL]   r_address_be[{}] = {any}\n", .{ i, r_address_be[i].toBytes()[0..8] });
             }
-            std.debug.print("\n", .{});
             std.debug.print("[COMPUTE_INIT_RAM_EVAL] initial_ram.count() = {}\n", .{initial_ram.count()});
 
             var result = F.zero();
@@ -3541,6 +3540,7 @@ pub fn ProofConverter(comptime F: type) type {
 
             var processed_count: usize = 0;
 
+            std.debug.print("[COMPUTE_INIT_RAM_EVAL] Processing initial_ram entries:\n", .{});
             var iter = initial_ram.iterator();
             while (iter.next()) |entry| {
                 const addr = entry.key_ptr.*;
@@ -3552,6 +3552,9 @@ pub fn ProofConverter(comptime F: type) type {
                 const eq_val = computeEqAtPointBigEndian(r_address_be, idx);
                 const val = F.fromU64(entry.value_ptr.*);
                 result = result.add(eq_val.mul(val));
+                if (processed_count < 5) {
+                    std.debug.print("[COMPUTE_INIT_RAM_EVAL]   addr=0x{x:0>16}, idx={}, val={}, eq_val={any}\n", .{ addr, idx, entry.value_ptr.*, eq_val.toBytes()[0..8] });
+                }
                 processed_count += 1;
             }
 

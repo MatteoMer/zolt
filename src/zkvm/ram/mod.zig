@@ -52,8 +52,10 @@ pub const MemoryOp = enum {
 pub const MemoryAccess = struct {
     /// Memory address
     address: u64,
-    /// Value read or written
+    /// Value read or written (for reads, this is the value read; for writes, this is the POST value)
     value: u64,
+    /// Pre-value (only meaningful for writes, stores the value BEFORE the write)
+    pre_value: u64,
     /// Operation type
     op: MemoryOp,
     /// Timestamp (cycle number)
@@ -81,16 +83,18 @@ pub const MemoryTrace = struct {
         try self.accesses.append(self.allocator, .{
             .address = address,
             .value = value,
+            .pre_value = 0, // Not meaningful for reads
             .op = .Read,
             .timestamp = timestamp,
         });
     }
 
-    /// Record a write operation
-    pub fn recordWrite(self: *MemoryTrace, address: u64, value: u64, timestamp: u64) !void {
+    /// Record a write operation (now includes pre-value for increment computation)
+    pub fn recordWrite(self: *MemoryTrace, address: u64, pre_value: u64, post_value: u64, timestamp: u64) !void {
         try self.accesses.append(self.allocator, .{
             .address = address,
-            .value = value,
+            .value = post_value, // POST value
+            .pre_value = pre_value, // PRE value (before write)
             .op = .Write,
             .timestamp = timestamp,
         });
@@ -132,8 +136,9 @@ pub const RAMState = struct {
 
     /// Write a word to memory
     pub fn write(self: *RAMState, address: u64, value: u64, timestamp: u64) !void {
+        const pre_value = self.memory.get(address) orelse 0; // Capture PRE value before write
         try self.memory.put(self.allocator, address, value);
-        try self.trace.recordWrite(address, value, timestamp);
+        try self.trace.recordWrite(address, pre_value, value, timestamp); // Store both pre and post
     }
 
     /// Read a byte from memory
@@ -149,12 +154,12 @@ pub const RAMState = struct {
         const word_addr = address & ~@as(u64, 7);
         const byte_offset = @as(u3, @truncate(address & 7));
 
-        var word = self.memory.get(word_addr) orelse 0;
+        const pre_word = self.memory.get(word_addr) orelse 0; // Capture PRE value
         const mask = @as(u64, 0xFF) << (@as(u6, byte_offset) * 8);
-        word = (word & ~mask) | (@as(u64, value) << (@as(u6, byte_offset) * 8));
+        const post_word = (pre_word & ~mask) | (@as(u64, value) << (@as(u6, byte_offset) * 8)); // Compute POST value
 
-        try self.memory.put(self.allocator, word_addr, word);
-        try self.trace.recordWrite(word_addr, word, timestamp);
+        try self.memory.put(self.allocator, word_addr, post_word);
+        try self.trace.recordWrite(word_addr, pre_word, post_word, timestamp); // Store both pre and post
     }
 
     /// Write a byte to memory WITHOUT recording to trace (for initialization/program loading)

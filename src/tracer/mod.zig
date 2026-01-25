@@ -24,11 +24,15 @@ pub const TraceStep = struct {
     rs1_value: u64,
     /// Source register 2 value
     rs2_value: u64,
-    /// Destination register value (after execution)
+    /// Destination register value BEFORE execution (pre-value for increment computation)
+    rd_pre_value: u64,
+    /// Destination register value AFTER execution (post-value)
     rd_value: u64,
     /// Memory address accessed (if any)
     memory_addr: ?u64,
-    /// Memory value (if any)
+    /// Memory value BEFORE write (pre-value for increment computation, only meaningful for writes)
+    memory_pre_value: ?u64,
+    /// Memory value AFTER write (post-value, only meaningful for writes)
     memory_value: ?u64,
     /// Whether this is a memory write
     is_memory_write: bool,
@@ -98,8 +102,10 @@ pub const ExecutionTrace = struct {
             .instruction = 0,
             .rs1_value = 0,
             .rs2_value = 0,
+            .rd_pre_value = 0,
             .rd_value = 0,
             .memory_addr = null,
+            .memory_pre_value = null,
             .memory_value = null,
             .is_memory_write = false,
             .next_pc = 0,
@@ -257,6 +263,8 @@ pub const Emulator = struct {
         // Record pre-execution state
         const rs1_value = try self.registers.read(decoded.rs1);
         const rs2_value = try self.registers.read(decoded.rs2);
+        // Capture rd pre-value (before instruction execution, just like Jolt does)
+        const rd_pre_value = try self.registers.read(decoded.rd);
 
         // Record lookup trace for Lasso proofs (before execution)
         try self.lookup_trace.recordInstruction(
@@ -275,6 +283,20 @@ pub const Emulator = struct {
             return err;
         };
 
+        // For memory writes, get pre-value from the RAM trace (it was just recorded during write)
+        // The RAM trace records both pre and post values for each write operation
+        const memory_pre_value: ?u64 = if (result.is_memory_write) blk: {
+            // The most recent write in RAM trace corresponds to this cycle's write
+            const ram_accesses = self.ram.trace.accesses.items;
+            if (ram_accesses.len > 0) {
+                const last_access = ram_accesses[ram_accesses.len - 1];
+                if (last_access.op == .Write and last_access.timestamp == self.state.cycle) {
+                    break :blk last_access.pre_value;
+                }
+            }
+            break :blk null;
+        } else null;
+
         // Record trace step
         try self.trace.addStep(.{
             .cycle = self.state.cycle,
@@ -285,8 +307,10 @@ pub const Emulator = struct {
             .instruction = instruction,
             .rs1_value = rs1_value,
             .rs2_value = rs2_value,
+            .rd_pre_value = rd_pre_value,
             .rd_value = result.rd_value,
             .memory_addr = result.memory_addr,
+            .memory_pre_value = memory_pre_value, // Populated from RAM trace
             .memory_value = result.memory_value,
             .is_memory_write = result.is_memory_write,
             .next_pc = result.next_pc,

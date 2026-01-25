@@ -864,7 +864,7 @@ pub fn JoltProver(comptime F: type) type {
             // Build and store polynomial evaluations
             var result = JoltProofWithDory.init(self.allocator);
 
-            // Bytecode polynomial
+            // Store bytecode/memory/register eval polynomials (for opening proof later)
             result.bytecode_evals = try self.allocator.alloc(F, bytecode_poly_size);
             for (result.bytecode_evals, 0..) |*p, i| {
                 if (i < program_bytecode.len) {
@@ -873,9 +873,7 @@ pub fn JoltProver(comptime F: type) type {
                     p.* = F.zero();
                 }
             }
-            result.dory_commitments[0] = DoryScheme.commit(&dory_srs, result.bytecode_evals);
 
-            // Memory polynomial
             result.memory_evals = try self.allocator.alloc(F, memory_poly_size);
             for (result.memory_evals, 0..) |*p, i| {
                 if (i < memory_trace_len) {
@@ -884,14 +882,10 @@ pub fn JoltProver(comptime F: type) type {
                     p.* = F.zero();
                 }
             }
-            result.dory_commitments[1] = DoryScheme.commit(&dory_srs, result.memory_evals);
 
-            // Memory final (same as memory for now)
             result.memory_final_evals = try self.allocator.alloc(F, memory_poly_size);
             @memcpy(result.memory_final_evals, result.memory_evals);
-            result.dory_commitments[2] = result.dory_commitments[1];
 
-            // Register polynomial
             result.register_evals = try self.allocator.alloc(F, reg_poly_size);
             for (result.register_evals, 0..) |*p, i| {
                 if (i < reg_trace_len) {
@@ -900,17 +894,75 @@ pub fn JoltProver(comptime F: type) type {
                     p.* = F.zero();
                 }
             }
-            result.dory_commitments[3] = DoryScheme.commit(&dory_srs, result.register_evals);
 
-            // Register final (same as register for now)
             result.register_final_evals = try self.allocator.alloc(F, reg_poly_size);
             @memcpy(result.register_final_evals, result.register_evals);
-            result.dory_commitments[4] = result.dory_commitments[3];
+
+            // Calculate OneHot parameters using Jolt's formula: d = ceil(log_k / log_k_chunk)
+            const log_k_chunk: usize = 4; // Must match convert_config below
+            const LOG_K_INSTRUCTION: usize = 128; // XLEN * 2 = 64 * 2
+            const log_bytecode_k = if (bytecode_poly_size <= 1) 0 else std.math.log2_int(usize, bytecode_poly_size);
+            const log_ram_k = if (memory_poly_size <= 1) 0 else std.math.log2_int(usize, memory_poly_size);
+
+            const instruction_d = (LOG_K_INSTRUCTION + log_k_chunk - 1) / log_k_chunk; // ceil division
+            const bytecode_d = if (log_bytecode_k == 0) 1 else (log_bytecode_k + log_k_chunk - 1) / log_k_chunk;
+            const ram_d = if (log_ram_k == 0) 1 else (log_ram_k + log_k_chunk - 1) / log_k_chunk;
+
+            std.debug.print("\n[ZOLT] OneHot params: instruction_d={}, bytecode_d={}, ram_d={}\n", .{ instruction_d, bytecode_d, ram_d });
+            std.debug.print("[ZOLT] Total commitments = 2 + {} + {} + {} = {}\n", .{ instruction_d, ram_d, bytecode_d, 2 + instruction_d + ram_d + bytecode_d });
+
+            // Build commitment polynomials and compute Dory commitments
+            // Order: RdInc, RamInc, InstructionRa[0..instruction_d-1], RamRa[0..ram_d-1], BytecodeRa[0..bytecode_d-1]
+            const GT = Dory.GT;
+            var all_commitments: std.ArrayListUnmanaged(GT) = .{};
+            defer all_commitments.deinit(self.allocator);
+
+            // RdInc: register destination increment polynomial (placeholder zeros for now)
+            const rd_inc_poly = try self.allocator.alloc(F, reg_poly_size);
+            defer self.allocator.free(rd_inc_poly);
+            @memset(rd_inc_poly, F.zero());
+            try all_commitments.append(self.allocator, DoryScheme.commit(&dory_srs, rd_inc_poly));
+
+            // RamInc: RAM increment polynomial (placeholder zeros for now)
+            const ram_inc_poly = try self.allocator.alloc(F, memory_poly_size);
+            defer self.allocator.free(ram_inc_poly);
+            @memset(ram_inc_poly, F.zero());
+            try all_commitments.append(self.allocator, DoryScheme.commit(&dory_srs, ram_inc_poly));
+
+            // InstructionRa[0..instruction_d-1]: instruction read address chunks (placeholder zeros)
+            var idx: usize = 0;
+            while (idx < instruction_d) : (idx += 1) {
+                const instruction_ra_poly = try self.allocator.alloc(F, reg_poly_size);
+                defer self.allocator.free(instruction_ra_poly);
+                @memset(instruction_ra_poly, F.zero());
+                try all_commitments.append(self.allocator, DoryScheme.commit(&dory_srs, instruction_ra_poly));
+            }
+
+            // RamRa[0..ram_d-1]: RAM read address chunks (placeholder zeros)
+            idx = 0;
+            while (idx < ram_d) : (idx += 1) {
+                const ram_ra_poly = try self.allocator.alloc(F, memory_poly_size);
+                defer self.allocator.free(ram_ra_poly);
+                @memset(ram_ra_poly, F.zero());
+                try all_commitments.append(self.allocator, DoryScheme.commit(&dory_srs, ram_ra_poly));
+            }
+
+            // BytecodeRa[0..bytecode_d-1]: bytecode read address chunks (placeholder zeros)
+            idx = 0;
+            while (idx < bytecode_d) : (idx += 1) {
+                const bytecode_ra_poly = try self.allocator.alloc(F, bytecode_poly_size);
+                defer self.allocator.free(bytecode_ra_poly);
+                @memset(bytecode_ra_poly, F.zero());
+                try all_commitments.append(self.allocator, DoryScheme.commit(&dory_srs, bytecode_ra_poly));
+            }
+
+            // Store commitments in result
+            result.dory_commitments = try all_commitments.toOwnedSlice(self.allocator);
 
             // Append Dory commitments (GT elements) to transcript
             std.debug.print("\n[ZOLT PROVE] === Appending Dory Commitments ===\n", .{});
-            for (result.dory_commitments, 0..) |comm, idx| {
-                std.debug.print("[ZOLT PROVE] Appending Dory commitment {d}/5\n", .{idx + 1});
+            for (result.dory_commitments, 0..) |comm, comm_idx| {
+                std.debug.print("[ZOLT PROVE] Appending Dory commitment {}/{}\n", .{ comm_idx + 1, result.dory_commitments.len });
                 transcript.appendGT(comm);
             }
             std.debug.print("[ZOLT PROVE] === Done Appending Commitments ===\n\n", .{});
@@ -1262,8 +1314,11 @@ pub fn JoltProver(comptime F: type) type {
             // Write opening claims
             try serializer.writeOpeningClaims(&jolt_proof_ptr.opening_claims);
 
+            // DEPRECATED: This function only creates 5 commitments (old format)
+            // Use serializeJoltProofWithDory instead which creates all ~37 commitments
             // Write Dory commitments (GT elements, 384 bytes each)
-            try serializer.writeUsize(5); // 5 commitments
+            std.debug.print("[SERIALIZE] DEPRECATED: serializeJoltProofDory only writes 5 commitments (old format)\n", .{});
+            try serializer.writeUsize(5); // 5 commitments (WRONG - should be ~37)
             try serializer.writeGT(bytecode_comm);
             try serializer.writeGT(memory_comm);
             try serializer.writeGT(memory_final_comm);
@@ -1357,7 +1412,9 @@ pub fn JoltProver(comptime F: type) type {
             try serializer.writeOpeningClaims(&bundle.proof.opening_claims);
 
             // Write the pre-computed Dory commitments (GT elements, 384 bytes each)
-            try serializer.writeUsize(5);
+            // Order: RdInc, RamInc, InstructionRa[0..instruction_d-1], RamRa[0..ram_d-1], BytecodeRa[0..bytecode_d-1]
+            std.debug.print("[SERIALIZE] Writing {} Dory commitments\n", .{bundle.dory_commitments.len});
+            try serializer.writeUsize(bundle.dory_commitments.len);
             for (bundle.dory_commitments) |comm| {
                 try serializer.writeGT(comm);
             }

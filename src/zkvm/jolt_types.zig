@@ -709,8 +709,9 @@ pub fn JoltProofWithDory(comptime F: type, comptime Commitment: type, comptime P
         proof: JoltProof(F, Commitment, Proof),
 
         /// Dory commitments (GT elements) computed during proving
-        /// Order: bytecode, memory, memory_final, registers, registers_final
-        dory_commitments: [5]GT,
+        /// Order: RdInc, RamInc, InstructionRa[0..instruction_d-1], RamRa[0..ram_d-1], BytecodeRa[0..bytecode_d-1]
+        /// Total count: 2 + instruction_d + ram_d + bytecode_d (typically ~37)
+        dory_commitments: []GT,
 
         /// Polynomial evaluations used to compute the Dory commitments
         /// These are stored so they can be used for generating the opening proof
@@ -725,7 +726,7 @@ pub fn JoltProofWithDory(comptime F: type, comptime Commitment: type, comptime P
         pub fn init(allocator: Allocator) Self {
             return Self{
                 .proof = JoltProof(F, Commitment, Proof).init(allocator),
-                .dory_commitments = [_]GT{GT.one()} ** 5, // one() is the multiplicative identity for GT
+                .dory_commitments = &[_]GT{}, // Empty slice, will be allocated during proving
                 .bytecode_evals = &[_]F{},
                 .memory_evals = &[_]F{},
                 .memory_final_evals = &[_]F{},
@@ -737,6 +738,7 @@ pub fn JoltProofWithDory(comptime F: type, comptime Commitment: type, comptime P
 
         pub fn deinit(self: *Self) void {
             self.proof.deinit();
+            if (self.dory_commitments.len > 0) self.allocator.free(self.dory_commitments);
             if (self.bytecode_evals.len > 0) self.allocator.free(self.bytecode_evals);
             if (self.memory_evals.len > 0) self.allocator.free(self.memory_evals);
             if (self.memory_final_evals.len > 0) self.allocator.free(self.memory_final_evals);

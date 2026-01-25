@@ -171,25 +171,32 @@ pub fn OutputSumcheckProver(comptime F: type) type {
             std.debug.print("[ZOLT] OutputSumcheck: final_ram non_zero_count={}, io_region_values={}, K={}\n", .{ non_zero_count, io_region_values, K });
             std.debug.print("[ZOLT] OutputSumcheck: initial_ram non_zero_count={}, bytecode_count={}\n", .{ init_non_zero_count, init_bytecode_count });
 
-            // Set panic and termination bits in BOTH val_init and val_final
-            // CRITICAL: These must be set in BOTH arrays because:
-            // 1. The termination/panic writes happen AFTER trace execution
-            // 2. They're NOT recorded in the inc polynomial (no traced memory operations)
-            // 3. ValFinalSumcheck proves: Val_final(r) - Val_init(r) = Σ inc(r,j) * wa(r,j)
-            // 4. For programs with no RAM writes: Σ inc(r,j) * wa(r,j) = 0
-            // 5. Therefore we need: Val_final(r) = Val_init(r), which requires termination bits to match
+            // WORKAROUND: Set panic and termination bits in BOTH val_init and val_final
+            //
+            // ROOT CAUSE: Zolt's tracer does NOT record the termination write in the RAM trace
+            // (see src/tracer/mod.zig:341, 357). But Jolt DOES record it as a normal RISC-V
+            // store instruction, which populates the inc and wa polynomials.
+            //
+            // Proper fix: Modify Zolt's emulator to naturally record the termination write
+            // when the guest program executes the SB (store byte) instruction.
+            //
+            // Current workaround: Set termination bit in BOTH val_init and val_final so that:
+            // - Val_final(term_addr) - Val_init(term_addr) = 1 - 1 = 0
+            // - This matches: Σ inc(term_addr,j) * wa(term_addr,j) = 0 (since no write in trace)
+            //
+            // This workaround is INCORRECT for the long term but allows progress on verification.
             const panic_index = remapAddress(memory_layout.panic, memory_layout) orelse 0;
             if (panic_index < K) {
                 const panic_val = if (is_panicking) F.one() else F.zero();
                 val_final[panic_index] = panic_val;
-                val_init[panic_index] = panic_val;
-                std.debug.print("[ZOLT] OutputSumcheck: val_final[{}] = val_init[{}] = {} (panic bit)\n", .{ panic_index, panic_index, if (is_panicking) @as(u64, 1) else @as(u64, 0) });
+                val_init[panic_index] = panic_val; // WORKAROUND
+                std.debug.print("[ZOLT] OutputSumcheck: val_final[{}] = val_init[{}] = {} (panic bit - WORKAROUND)\n", .{ panic_index, panic_index, if (is_panicking) @as(u64, 1) else @as(u64, 0) });
             }
             const termination_index = remapAddress(memory_layout.termination, memory_layout) orelse 0;
             if (!is_panicking and termination_index < K) {
                 val_final[termination_index] = F.one();
-                val_init[termination_index] = F.one();
-                std.debug.print("[ZOLT] OutputSumcheck: val_final[{}] = val_init[{}] = 1 (termination bit, not panicking)\n", .{ termination_index, termination_index });
+                val_init[termination_index] = F.one(); // WORKAROUND
+                std.debug.print("[ZOLT] OutputSumcheck: val_final[{}] = val_init[{}] = 1 (termination bit - WORKAROUND)\n", .{ termination_index, termination_index });
             }
 
             // Compute IO region bounds (matches Jolt's ProgramIOPolynomial)

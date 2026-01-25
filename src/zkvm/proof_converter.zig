@@ -1754,7 +1754,10 @@ pub fn ProofConverter(comptime F: type) type {
                 //   input_claim = claimed_evaluation(RamVal) - init_eval
                 // This matches Jolt's SumcheckInstanceParams::input_claim implementation.
                 const input_claim_val_eval = stage2_result.rwc_val_claim.sub(val_init_eval);
-                const input_claim_val_final = stage2_result.output_val_final_claim.sub(stage2_result.output_val_init_claim);
+                // CRITICAL FIX: RamValFinalEvaluation's input_claim should use val_init_eval (from params),
+                // NOT output_val_init_claim (from OutputSumcheck accumulator).
+                // This matches Jolt's RamValFinalEvaluation::input_claim() implementation.
+                const input_claim_val_final = stage2_result.output_val_final_claim.sub(val_init_eval);
 
                 std.debug.print("[ZOLT STAGE4] input_claim_val_eval (derived from accumulator): {any}\n", .{input_claim_val_eval.toBytesBE()});
                 std.debug.print("[ZOLT STAGE4] input_claim_val_final (derived from accumulator): {any}\n", .{input_claim_val_final.toBytesBE()});

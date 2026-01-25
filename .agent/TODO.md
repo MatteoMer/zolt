@@ -1,12 +1,12 @@
 # Zolt-Jolt Compatibility TODO
 
-## 🎯 Current Task: Fix Stage 4 Sumcheck - Pre/Post Value Tracking
+## 🎯 Current Task: Debug Stage 4 - Pre/Post Values Captured But Still Failing
 
-**Status:** Deserialization ✅ | Ra Polynomials ✅ (generated) | Stage 4 Verification ❌ (incorrect values)
+**Status:** Deserialization ✅ | Ra Polynomials ✅ | Pre/Post Capture ✅ | Stage 4 Verification ❌ (still wrong)
 
 ### Problem
 
-Ra polynomials are now generating real values from trace data, but Stage 4 sumcheck verification still fails:
+Stage 4 sumcheck verification still fails with the SAME values even after implementing pre/post value capture:
 
 ```
 [JOLT BATCHED] output_claim          = 13790373438827639882557683572286534321489361070389115930961142260387674941556
@@ -15,21 +15,66 @@ Ra polynomials are now generating real values from trace data, but Stage 4 sumch
 Difference: ~1.15e57 (about 5% of field modulus)
 ```
 
-### Root Cause Analysis
+### What Was Fixed (Session 59 - Today)
 
-**Hypothesis**: Pre/post value tracking for RdInc/RamInc doesn't match Jolt's approach.
+**Implemented proper pre/post value tracking**:
 
-**Key Observations**:
-1. Jolt's `cycle.rd_write()` returns `(rd_index, pre_value, post_value)` for each cycle
-2. Zolt's `TraceStep` only stores `rd_value` (post-execution value)
-3. Current implementation **manually tracks** register state across cycles to compute pre-values
-4. This may introduce discrepancies in how increments are computed
+1. ✅ **Extended TraceStep** (`src/tracer/mod.zig:12-43`)
+   - Added `rd_pre_value: u64` - captures rd value BEFORE instruction execution
+   - Added `memory_pre_value: ?u64` - captures memory value BEFORE write
+   - Both fields now populated from trace data, matching Jolt's Cycle struct
 
-**Investigation Needed**:
-- Does Jolt store both pre/post values in each Cycle struct?
-- How does Jolt's tracer capture the "before" state of rd?
-- Should Zolt's TraceStep be extended to include both rd_pre_value and rd_post_value?
-- Are we computing increments per-cycle correctly, or should we be using register trace data directly?
+2. ✅ **Enhanced RAMState** (`src/zkvm/ram/mod.zig`)
+   - Modified `MemoryAccess` to store both `pre_value` and `value` (post)
+   - Updated `write()` and `writeByte()` to capture pre-value during write
+   - RAM trace now records both values, just like Jolt's RAMWrite
+
+3. ✅ **Fixed Tracer** (`src/tracer/mod.zig:266-310`)
+   - Captures `rd_pre_value` before execute() at line 266
+   - Retrieves `memory_pre_value` from RAM trace after write at lines 286-295
+   - Both values correctly populated in TraceStep
+
+4. ✅ **Updated Ra Polynomial Generation**
+   - `buildRdIncPolynomial`: Now uses direct `rd_pre_value` and `rd_value` from trace
+   - `buildRamIncPolynomial`: Uses `memory_pre_value` and `memory_value` from trace
+   - No more manual state tracking - matches Jolt's approach exactly
+
+### Debug Evidence
+
+Pre/post values ARE being captured correctly:
+```
+[RDINC DEBUG] cycle=0, rd=x2, pre=0, post=32768, inc=32768
+[RDINC DEBUG] cycle=1, rd=x2, pre=32768, post=32769, inc=1
+[RDINC DEBUG] cycle=2, rd=x2, pre=32769, post=2147549184, inc=2147516415
+[RDINC DEBUG] Total rd writes: 52, Non-zero increments: 39
+[RAMINC DEBUG] Total writes: 0, Non-zero increments: 0
+```
+
+**Observations**:
+- RdInc pre-values are CHANGING correctly (0 → 32768 → 32769)
+- Fibonacci example has NO memory writes (RamInc is all zeros)
+- 39 non-zero register increments out of 52 writes
+- Yet output_claim is still wrong by same amount!
+
+### Next Investigation Steps
+
+The pre/post values are correct, but the output_claim is unchanged. Possible issues:
+
+1. **Field Arithmetic** - Are we handling negative increments correctly?
+   - Check signed vs unsigned conversion at `@intCast`
+   - Verify field negation for negative increments
+
+2. **Polynomial Indexing** - Are increments at correct cycle indices?
+   - Verify `poly[i]` matches cycle index in trace
+   - Check padding/alignment with poly_size
+
+3. **Batching/Evaluation** - Is Stage 4 batching different?
+   - Compare how Zolt vs Jolt evaluates RdInc polynomial
+   - Check if there's an off-by-one in how Instance 0 is computed
+
+4. **Other Ra Polynomials** - InstructionRa/RamRa/BytecodeRa might be wrong
+   - Instance 0 is RdInc, but Instance 1/2 might affect batching
+   - Check if InstructionRa chunks are computed correctly
 
 ### What Was Implemented (Session 58)
 

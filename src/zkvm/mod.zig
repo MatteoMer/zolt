@@ -1627,9 +1627,6 @@ pub fn JoltProver(comptime F: type) type {
             errdefer self.allocator.free(poly);
             @memset(poly, F.zero());
 
-            var write_count: usize = 0;
-            var non_zero_increments: usize = 0;
-
             // Iterate through trace and compute increments from pre/post values
             // This matches Jolt's approach: post_value - pre_value
             // See: jolt-core/src/zkvm/witness.rs:69-77
@@ -1643,17 +1640,9 @@ pub fn JoltProver(comptime F: type) type {
                 // For register writes (rd != 0), compute increment using trace's pre/post values
                 // TraceStep now stores both rd_pre_value and rd_value (post), just like Jolt's Cycle
                 if (rd != 0) {
-                    write_count += 1;
                     const pre_value: i128 = @intCast(step.rd_pre_value);
                     const post_value: i128 = @intCast(step.rd_value);
                     const increment = post_value - pre_value;
-
-                    if (increment != 0) {
-                        non_zero_increments += 1;
-                        if (non_zero_increments <= 3) {
-                            std.debug.print("[RDINC DEBUG] cycle={d}, rd=x{d}, pre={d}, post={d}, inc={d}\n", .{ i, rd, pre_value, post_value, increment });
-                        }
-                    }
 
                     // Store increment as field element (handle negative numbers)
                     poly[i] = if (increment >= 0)
@@ -1665,8 +1654,6 @@ pub fn JoltProver(comptime F: type) type {
                     poly[i] = F.zero();
                 }
             }
-
-            std.debug.print("[RDINC DEBUG] Total rd writes: {d}, Non-zero increments: {d}\n", .{ write_count, non_zero_increments });
 
             return poly;
         }
@@ -1682,9 +1669,6 @@ pub fn JoltProver(comptime F: type) type {
             errdefer self.allocator.free(poly);
             @memset(poly, F.zero());
 
-            var write_count: usize = 0;
-            var non_zero_increments: usize = 0;
-
             // Iterate through execution trace cycles (NOT memory trace accesses!)
             // This matches Jolt's approach: iterate through cycles, compute increment for each
             // See: jolt-core/src/zkvm/witness.rs:79-89
@@ -1694,17 +1678,9 @@ pub fn JoltProver(comptime F: type) type {
                 // Check if this cycle has a memory write
                 // TraceStep now stores both memory_pre_value and memory_value (post), just like Jolt's RAMWrite
                 if (step.is_memory_write) {
-                    write_count += 1;
                     const pre_value: i128 = @intCast(step.memory_pre_value orelse 0);
                     const post_value: i128 = @intCast(step.memory_value orelse 0);
                     const increment = post_value - pre_value;
-
-                    if (increment != 0) {
-                        non_zero_increments += 1;
-                        if (non_zero_increments <= 3) {
-                            std.debug.print("[RAMINC DEBUG] cycle={d}, addr=0x{x}, pre={d}, post={d}, inc={d}\n", .{ i, step.memory_addr orelse 0, pre_value, post_value, increment });
-                        }
-                    }
 
                     // Store increment as field element (handle negative numbers)
                     poly[i] = if (increment >= 0)
@@ -1716,8 +1692,6 @@ pub fn JoltProver(comptime F: type) type {
                     poly[i] = F.zero();
                 }
             }
-
-            std.debug.print("[RAMINC DEBUG] Total writes: {d}, Non-zero increments: {d}\n", .{ write_count, non_zero_increments });
 
             return poly;
         }

@@ -172,6 +172,8 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             params: RamReadWriteCheckingParams(F),
             initial_claim: F,
             initial_ram: ?*const std.AutoHashMapUnmanaged(u64, u64),
+            memory_layout: ?*const @import("../jolt_device.zig").MemoryLayout,
+            is_panicking: bool,
         ) !Self {
             const K = @as(usize, 1) << @intCast(params.log_k);
             const T = @as(usize, 1) << @intCast(params.log_t);
@@ -206,6 +208,31 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                     }
                 }
                 std.debug.print("[RWC INIT] Populated {} val_init entries (shown first 5)\n", .{populated_count});
+            }
+
+            // WORKAROUND: Set panic and termination bits in val_init to match OutputSumcheck
+            //
+            // ROOT CAUSE: Zolt's tracer does NOT record the termination write in the RAM trace
+            // (see src/tracer/mod.zig:341, 357). But Jolt DOES record it as a normal RISC-V
+            // store instruction, which populates the inc and wa polynomials.
+            //
+            // This workaround ensures RWC's val_init matches OutputSumcheck's val_init exactly,
+            // so that Instance 1 (RamValEvaluation) has input_claim = 0.
+            //
+            // Without this: rwc_val_claim ≠ val_init_eval (they use different val_init values)
+            // With this: rwc_val_claim = val_init_eval (both use same val_init with termination bit)
+            if (memory_layout) |ml| {
+                const panic_index = remapAddress(ml.panic, ml, params.start_address) orelse 0;
+                if (panic_index < K) {
+                    const panic_val = if (is_panicking) F.one() else F.zero();
+                    val_init[panic_index] = panic_val;
+                    std.debug.print("[RWC INIT] val_init[{}] = {} (panic bit - WORKAROUND)\n", .{ panic_index, if (is_panicking) @as(u64, 1) else @as(u64, 0) });
+                }
+                const termination_index = remapAddress(ml.termination, ml, params.start_address) orelse 0;
+                if (!is_panicking and termination_index < K) {
+                    val_init[termination_index] = F.one();
+                    std.debug.print("[RWC INIT] val_init[{}] = 1 (termination bit - WORKAROUND)\n", .{termination_index});
+                }
             }
 
             // Build sparse matrix entries from trace
@@ -1267,6 +1294,20 @@ fn computeEq(comptime F: type, r: []const F, x: usize) F {
     return result;
 }
 
+/// Remap address to index (matches logic from output_check.zig)
+fn remapAddress(address: u64, memory_layout: *const @import("../jolt_device.zig").MemoryLayout, start_address: u64) ?usize {
+    const lowest = memory_layout.getLowestAddress();
+    if (address < lowest) return null;
+    const offset = address - lowest;
+    if (offset % 8 != 0) return null;
+    const index = @as(usize, @intCast(offset / 8));
+
+    // Validate that this index is within the RAM range starting at start_address
+    if (lowest + offset < start_address) return null;
+
+    return index;
+}
+
 test "ram read write checking prover initialization" {
     const allocator = std.testing.allocator;
     const field = @import("../../field/mod.zig");
@@ -1295,6 +1336,8 @@ test "ram read write checking prover initialization" {
         params,
         F.fromU64(100),
         null,
+        null, // memory_layout
+        false, // is_panicking
     );
     defer prover.deinit();
 

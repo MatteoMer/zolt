@@ -2496,6 +2496,8 @@ pub fn ProofConverter(comptime F: type) type {
                         params.*,
                         input_claims[2], // Instance 2 input claim
                         config.initial_ram,
+                        config.memory_layout, // Pass memory_layout for termination bit workaround
+                        config.is_panicking, // Pass panic status
                     ) catch null;
 
                     if (rwc_prover != null) {

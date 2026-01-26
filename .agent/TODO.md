@@ -1,8 +1,8 @@
 # Zolt-Jolt Compatibility TODO
 
-## 🎯 Current Task: Fix Termination Write Tracing
+## 🎯 Current Task: Fix Stage 4 Output Claim Mismatch
 
-**Status:** Stages 1-2-3 ✅ PASSING | Stage 4 ❌ Termination write not in trace
+**Status:** Stages 1-2-3 ✅ PASSING | Stage 4 ❌ Sumcheck output_claim mismatch
 
 ### CRITICAL BUGS FIXED (Session 61 - 2026-01-25) 🎉
 
@@ -132,11 +132,30 @@ Stage 4 sumcheck has a **batched claim computation mismatch**:
 - NOT separately recomputed via `computeInitialRamEval()`
 - Matches Jolt's approach: retrieve from accumulator, don't recompute
 
-**Result (Session 63)**:
-- ✅ Instance 1 (RamValEvaluation) input_claim = 0
-- ✅ Instance 2 (RamValFinalEvaluation) input_claim = 0
-- ✅ Jolt verifier: `Instance 1 expected_claim = 0`, `Instance 2 expected_claim = 0`
-- ❌ **Remaining**: Proof serialization mismatch (output_claim ≠ expected_output_claim)
+**Result (Session 63 - Part 1)**:
+- ✅ Instance 2 (RamValFinalEvaluation) input_claim = 0 (fixed by setting termination in both val_init and val_final)
+- ❌ Instance 1 (RamValEvaluation) input_claim ≠ 0 (RWC and OutputSumcheck had different val_init)
+
+**BREAKTHROUGH (Session 63 - Part 2 - 2026-01-26)**: Fixed RWC val_init to match OutputSumcheck!
+
+**The Second Bug**:
+- RWC's val_init had termination=0 (from initial_ram, no workaround)
+- OutputSumcheck's val_init had termination=1 (with Session 63 Part 1 workaround)
+- These are supposed to be the SAME polynomial but had different termination bits!
+- Result: rwc_val_claim ≠ val_init_eval → Instance 1 input_claim ≠ 0
+
+**The Fix** (`src/zkvm/ram/read_write_checking.zig:211-235`):
+- Added memory_layout and is_panicking parameters to RWC init()
+- Set termination bit in RWC's val_init (same workaround as OutputSumcheck)
+- Now both RWC and OutputSumcheck use identical val_init with termination=1
+
+**Result (Session 63 - Part 2)**:
+- ✅ Instance 1 (RamValEvaluation) expected_claim = 0 in Jolt verifier!
+- ✅ Instance 2 (RamValFinalEvaluation) expected_claim = 0 (still working!)
+- ❌ **Remaining**: Stage 4 sumcheck output_claim mismatch:
+  - Jolt reads from proof: 2794768927403232170685203001712134750206965869554042859404932801547924672323
+  - Jolt expects: 19036722498929976088547735251378923562016308482664214076291639064331774676064
+  - This is the final remaining issue before full cross-verification works!
 
 ### What Was Fixed (Session 59 - Today)
 

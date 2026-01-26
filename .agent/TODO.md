@@ -157,6 +157,40 @@ Stage 4 sumcheck has a **batched claim computation mismatch**:
   - Jolt expects: 19036722498929976088547735251378923562016308482664214076291639064331774676064
   - This is the final remaining issue before full cross-verification works!
 
+### Session 64 Analysis (2026-01-26)
+
+**Key Findings:**
+
+1. **Instance 1&2 expected_claim = 0 CONFIRMED** ✅
+   - RamValEvaluation: `expected_output = inc_claim × wa_claim × LT(r, r_cycle)`
+   - RamValFinalEvaluation: `expected_output = inc_claim × wa_claim`
+   - For programs without RAM ops, both inc and wa are 0, so expected = 0
+
+2. **Batched Sumcheck Equation**:
+   ```
+   output_claim = Σ coeff[i] × instance[i].expected_output_claim
+              = coeff[0] × instance0_expected + 0 + 0
+              = coeff[0] × eq(r_cycle, stage3_r_cycle) × combined
+   ```
+
+3. **The Mismatch Analysis**:
+   - Sumcheck produces `output_claim` from iterating polynomial rounds
+   - Verifier computes `expected_output_claim` from opening claims:
+     - val_claim, rs1_ra_claim, rs2_ra_claim, rd_wa_claim, inc_claim
+     - Formula: eq × (rd_wa×(inc+val) + γ×(rs1_ra×val) + γ²×(rs2_ra×val))
+
+   - If these don't match, verification fails
+   - The polynomial rounds supposedly match, but the final output doesn't
+
+4. **Added Debug Output** (`proof_converter.zig:2117-2132`):
+   - Shows batched_claim (sumcheck output)
+   - Shows expected_output (Instance 0)
+   - Shows coeff[0] × expected_output
+   - Shows Instance 1&2 expected (should be 0)
+   - Compares if they match
+
+**Waiting for prover output with verify check to see exact values...**
+
 ### What Was Fixed (Session 59 - Today)
 
 **Implemented proper pre/post value tracking**:

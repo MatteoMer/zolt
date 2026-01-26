@@ -2118,6 +2118,19 @@ pub fn ProofConverter(comptime F: type) type {
                 std.debug.print("[ZOLT STAGE4 CLAIMS] expected_output = eq_be * combined = {any}\n", .{expected_output.toBytes()});
                 std.debug.print("[ZOLT STAGE4 CLAIMS] expected_output (BE bytes) = {any}\n", .{expected_output.toBytesBE()});
 
+                // CRITICAL DEBUG: Compare sumcheck output_claim with expected_output_claim
+                // If these don't match, verification will fail!
+                const weighted_expected = expected_output.mul(batching_coeffs[0]);
+                std.debug.print("\n[ZOLT STAGE4 VERIFY CHECK]\n", .{});
+                std.debug.print("  batched_claim (sumcheck output) = {any}\n", .{batched_claim.toBytesBE()});
+                std.debug.print("  expected_output (Instance 0) = {any}\n", .{expected_output.toBytesBE()});
+                std.debug.print("  coeff[0] = {any}\n", .{batching_coeffs[0].toBytesBE()});
+                std.debug.print("  coeff[0] * expected_output = {any}\n", .{weighted_expected.toBytesBE()});
+                std.debug.print("  Instance 1 expected = inc*wa = {any}\n", .{val_eval_openings.inc_eval.mul(val_eval_openings.wa_eval).toBytesBE()});
+                std.debug.print("  Instance 2 expected = inc*wa = {any}\n", .{val_final_openings.inc_eval.mul(val_final_openings.wa_eval).toBytesBE()});
+                std.debug.print("  Do they match? {}\n", .{batched_claim.eql(weighted_expected)});
+                std.debug.print("[END VERIFY CHECK]\n\n", .{});
+
                 // RegistersReadWriteChecking claims.
                 try jolt_proof.opening_claims.insert(
                     .{ .Virtual = .{ .poly = .RegistersVal, .sumcheck_id = .RegistersReadWriteChecking } },

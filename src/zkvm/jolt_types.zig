@@ -397,14 +397,17 @@ pub fn CompressedUniPoly(comptime F: type) type {
         }
 
         /// Serialize to match Jolt's format
+        /// Field elements must be in standard form (not Montgomery) to match arkworks
         pub fn serialize(self: *const Self, writer: anytype) !void {
             // Write length as u64
             try writer.writeInt(u64, self.coeffs_except_linear_term.len, .little);
-            // Write each coefficient
+            // Write each coefficient in standard form (not Montgomery)
             for (self.coeffs_except_linear_term) |coeff| {
+                // Convert from Montgomery to standard form for arkworks compatibility
+                const standard = coeff.fromMontgomery();
                 var buf: [32]u8 = undefined;
                 for (0..4) |i| {
-                    std.mem.writeInt(u64, buf[i * 8 ..][0..8], coeff.limbs[i], .little);
+                    std.mem.writeInt(u64, buf[i * 8 ..][0..8], standard.limbs[i], .little);
                 }
                 try writer.writeAll(&buf);
             }
@@ -485,14 +488,17 @@ pub fn UniSkipFirstRoundProof(comptime F: type) type {
         }
 
         /// Serialize to match Jolt's format
+        /// Field elements must be in standard form (not Montgomery) to match arkworks
         pub fn serialize(self: *const Self, writer: anytype) !void {
             // Write number of coefficients
             try writer.writeInt(u64, self.uni_poly.len, .little);
-            // Write each coefficient
+            // Write each coefficient in standard form (not Montgomery)
             for (self.uni_poly) |coeff| {
+                // Convert from Montgomery to standard form for arkworks compatibility
+                const standard = coeff.fromMontgomery();
                 var buf: [32]u8 = undefined;
                 for (0..4) |i| {
-                    std.mem.writeInt(u64, buf[i * 8 ..][0..8], coeff.limbs[i], .little);
+                    std.mem.writeInt(u64, buf[i * 8 ..][0..8], standard.limbs[i], .little);
                 }
                 try writer.writeAll(&buf);
             }

@@ -1903,6 +1903,14 @@ pub fn ProofConverter(comptime F: type) type {
                     } else {
                         const evals = val_eval_prover_early.computeRoundPolynomial();
                         val_eval_evals_opt = evals;
+                        // DEBUG: Check if val_eval is contributing non-zero
+                        if (round_idx == val_eval_rounds or round_idx == stage4_max_rounds - val_eval_rounds) {
+                            std.debug.print("[ZOLT STAGE4 DEBUG] Round {}: val_eval starts/first active round\n", .{round_idx});
+                            std.debug.print("[ZOLT STAGE4 DEBUG]   val_eval_evals[0] = {any}\n", .{evals[0].toBytes()[0..8]});
+                            std.debug.print("[ZOLT STAGE4 DEBUG]   val_eval_evals[1] = {any}\n", .{evals[1].toBytes()[0..8]});
+                            const contribution = evals[0].mul(batching_coeffs[1]);
+                            std.debug.print("[ZOLT STAGE4 DEBUG]   val_eval contribution p(0)*coeff = {any}\n", .{contribution.toBytes()[0..8]});
+                        }
                         for (0..4) |j| {
                             combined_evals[j] = combined_evals[j].add(evals[j].mul(batching_coeffs[1]));
                         }
@@ -1922,6 +1930,14 @@ pub fn ProofConverter(comptime F: type) type {
                     } else {
                         const evals = val_final_prover_early.computeRoundPolynomial();
                         val_final_evals_opt = evals;
+                        // DEBUG: Check if val_final is contributing non-zero
+                        if (round_idx == val_final_rounds or round_idx == stage4_max_rounds - val_final_rounds) {
+                            std.debug.print("[ZOLT STAGE4 DEBUG] Round {}: val_final starts/first active round\n", .{round_idx});
+                            std.debug.print("[ZOLT STAGE4 DEBUG]   val_final_evals[0] = {any}\n", .{evals[0].toBytes()[0..8]});
+                            std.debug.print("[ZOLT STAGE4 DEBUG]   val_final_evals[1] = {any}\n", .{evals[1].toBytes()[0..8]});
+                            const contribution = evals[0].mul(batching_coeffs[2]);
+                            std.debug.print("[ZOLT STAGE4 DEBUG]   val_final contribution p(0)*coeff = {any}\n", .{contribution.toBytes()[0..8]});
+                        }
                         for (0..4) |j| {
                             combined_evals[j] = combined_evals[j].add(evals[j].mul(batching_coeffs[2]));
                         }
@@ -2029,6 +2045,12 @@ pub fn ProofConverter(comptime F: type) type {
                 }
 
                 std.debug.print("[ZOLT STAGE4] Final batched_claim = {any}\n", .{batched_claim.toBytesBE()});
+
+                // DEBUG: Compare final claims
+                std.debug.print("[ZOLT STAGE4 FINAL DEBUG] regs_current_claim (poly_0 final) = {any}\n", .{regs_current_claim.toBytes()});
+                std.debug.print("[ZOLT STAGE4 FINAL DEBUG] coeff[0] * regs_current = {any}\n", .{batching_coeffs[0].mul(regs_current_claim).toBytes()});
+                std.debug.print("[ZOLT STAGE4 FINAL DEBUG] batched_claim = {any}\n", .{batched_claim.toBytes()});
+                std.debug.print("[ZOLT STAGE4 FINAL DEBUG] Match? {}\n", .{batched_claim.eql(batching_coeffs[0].mul(regs_current_claim))});
 
                 const regs_claims = regs_prover.getFinalClaims();
                 const val_eval_openings = val_eval_prover_early.getFinalOpenings();

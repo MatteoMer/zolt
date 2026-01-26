@@ -1265,12 +1265,15 @@ test "stage 5 sumcheck invariant: p(0) + p(1) = current_claim" {
     for (0..4) |i| {
         const step = tracer.TraceStep{
             .pc = @intCast(i * 4),
+            .unexpanded_pc = @intCast(i * 4),
             .instruction = @intCast((i << 7) | 0x33), // rd = i, R-type instruction
             .rs1_value = 0,
             .rs2_value = 0,
+            .rd_pre_value = 0,
             .rd_value = 0,
             .cycle = i,
             .memory_addr = null,
+            .memory_pre_value = null,
             .memory_value = null,
             .is_memory_write = false,
             .next_pc = @intCast((i + 1) * 4),
@@ -1322,12 +1325,15 @@ test "stage 6 sumcheck invariant: all zeros for valid trace" {
     for (0..4) |i| {
         const step = tracer.TraceStep{
             .pc = @intCast(i * 4),
+            .unexpanded_pc = @intCast(i * 4),
             .instruction = 0x00000033, // ADD x0, x0, x0 (valid instruction)
             .rs1_value = 0,
             .rs2_value = 0,
+            .rd_pre_value = 0,
             .rd_value = 0,
             .cycle = i,
             .memory_addr = null,
+            .memory_pre_value = null,
             .memory_value = null,
             .is_memory_write = false,
             .next_pc = @intCast((i + 1) * 4),

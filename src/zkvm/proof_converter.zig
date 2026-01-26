@@ -2532,8 +2532,8 @@ pub fn ProofConverter(comptime F: type) type {
             }
 
             // Store challenges for opening claims computation
-            var challenges = std.ArrayList(F){};
-            defer challenges.deinit(self.allocator);
+            var challenges = std.ArrayList(F).init(self.allocator);
+            defer challenges.deinit();
 
             // Step 4: Run batched sumcheck rounds
             for (0..max_num_rounds) |round_idx| {
@@ -2890,7 +2890,7 @@ pub fn ProofConverter(comptime F: type) type {
 
                 // Sample round challenge
                 const challenge = transcript.challengeScalar();
-                try challenges.append(self.allocator, challenge);
+                try challenges.append(challenge);
 
                 // Update batched claim by evaluating at challenge
                 // CRITICAL: Must use evalFromHint (same as Jolt's verifier) to ensure

@@ -1308,7 +1308,7 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
                 .suffix_n_vars = suffix_n_vars,
                 .current_prefix_size = prefix_size,
                 .current_witness_size = trace_len,
-                .sumcheck_challenges = .empty,
+                .sumcheck_challenges = std.ArrayList(F).init(allocator),
                 .in_phase2 = false,
                 .r_outer = r_outer,
                 .r_product = r_product,
@@ -1334,7 +1334,7 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             self.allocator.free(self.is_virtual);
             self.allocator.free(self.is_first_in_sequence);
             self.allocator.free(self.is_noop);
-            self.sumcheck_challenges.deinit(self.allocator);
+            self.sumcheck_challenges.deinit();
             if (self.phase2_eq_plus_one_outer) |p| self.allocator.free(p);
             if (self.phase2_eq_plus_one_prod) |p| self.allocator.free(p);
         }
@@ -1465,7 +1465,7 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
                     self.transitionToPhase2(r_j);
                 } else {
                     // Append challenge for Phase 1 binding
-                    self.sumcheck_challenges.append(self.allocator, r_j) catch unreachable;
+                    self.sumcheck_challenges.append(r_j) catch unreachable;
                     self.bindPhase1(r_j);
                 }
             }
@@ -1520,7 +1520,7 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             self.current_prefix_size = new_prefix_size;
 
             // Store final challenge
-            self.sumcheck_challenges.append(self.allocator, r_j) catch unreachable;
+            self.sumcheck_challenges.append(r_j) catch unreachable;
             self.in_phase2 = true;
 
             // Collect all Phase 1 challenges as r_prefix
@@ -2316,7 +2316,7 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
         pub fn deinit(self: *Self) void {
             self.allocator.free(self.P);
             self.allocator.free(self.Q);
-            self.prefix_challenges.deinit(self.allocator);
+            self.prefix_challenges.deinit();
             self.allocator.free(self.rd_write_value);
             self.allocator.free(self.rs1_value);
             self.allocator.free(self.rs2_value);
@@ -2421,7 +2421,7 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
             self.current_witness_size = witness_new_size;
 
             // Record challenge for Phase 2 initialization
-            self.prefix_challenges.append(self.allocator, r_j) catch unreachable;
+            self.prefix_challenges.append(r_j) catch unreachable;
         }
 
         fn transitionToPhase2(self: *Self, r_j: F) void {

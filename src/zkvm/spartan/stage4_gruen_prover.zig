@@ -867,39 +867,21 @@ test "stage4 gruen prover basic" {
 
     // Add a simple instruction
     try trace.steps.append(.{
-        .cycle = 0,
         .pc = 0,
-        .unexpanded_pc = 0,
         .instruction = 0x00500093, // addi x1, x0, 5
         .rs1_value = 0,
         .rs2_value = 0,
-        .rd_pre_value = 0,
         .rd_value = 5,
-        .memory_addr = null,
-        .memory_pre_value = null,
-        .memory_value = null,
-        .is_memory_write = false,
-        .next_pc = 4,
-        .is_compressed = false,
         .is_noop = false,
     });
 
     // Pad to power of 2
     try trace.steps.append(.{
-        .cycle = 1,
         .pc = 4,
-        .unexpanded_pc = 4,
         .instruction = 0,
         .rs1_value = 0,
         .rs2_value = 0,
-        .rd_pre_value = 0,
         .rd_value = 0,
-        .memory_addr = null,
-        .memory_pre_value = null,
-        .memory_value = null,
-        .is_memory_write = false,
-        .next_pc = 8,
-        .is_compressed = false,
         .is_noop = true,
     });
 

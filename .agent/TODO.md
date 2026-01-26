@@ -4,6 +4,30 @@
 
 **Status:** Stages 1-2-3 ✅ PASSING | Stage 4 ❌ Sumcheck output_claim mismatch
 
+### Session 65 Update (2026-01-26)
+
+**CRITICAL DISCOVERY**: Zolt's internal computation is CORRECT!
+
+The verify check added in Session 64 shows:
+```
+batched_claim = coeff[0] * expected_output = TRUE
+Instance 1&2 expected = 0 (correct for no-RAM programs)
+```
+
+**Implication**: The sumcheck polynomial rounds are computed correctly. The issue must be:
+1. Transcript divergence (challenges differ between Zolt prover and Jolt verifier)
+2. Serialization format mismatch
+3. The verifier recomputes output_claim iteratively using `eval_from_hint` - any
+   divergence in challenges causes the final output_claim to differ
+
+**Key Understanding from Jolt Code Analysis**:
+- Output claim is NOT stored in proof - it's RECOMPUTED by verifier
+- Verifier iterates: `e = eval_from_hint(compressed_poly[i], e, challenge[i])`
+- Final `e` is the `output_claim` that gets compared to `expected_output_claim`
+
+**Next Step**: Add debug output to Jolt's verifier to see what challenges and values it computes,
+then compare with Zolt's output.
+
 ### CRITICAL BUGS FIXED (Session 61 - 2026-01-25) 🎉
 
 **BUG #1: val_init Iteration After Binding**

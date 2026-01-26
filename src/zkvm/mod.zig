@@ -2206,8 +2206,10 @@ test "r1cs-spartan: witness generation and Az Bz Cz computation" {
         .instruction = 0x00500093, // ADDI x1, x0, 5
         .rs1_value = 0,
         .rs2_value = 0,
+        .rd_pre_value = 0, // x1 was 0 before
         .rd_value = 5,
         .memory_addr = null,
+        .memory_pre_value = null,
         .memory_value = null,
         .is_memory_write = false,
         .next_pc = 0x1004,
@@ -2221,8 +2223,10 @@ test "r1cs-spartan: witness generation and Az Bz Cz computation" {
         .instruction = 0x00A00113, // ADDI x2, x0, 10
         .rs1_value = 0,
         .rs2_value = 0,
+        .rd_pre_value = 0, // x2 was 0 before
         .rd_value = 10,
         .memory_addr = null,
+        .memory_pre_value = null,
         .memory_value = null,
         .is_memory_write = false,
         .next_pc = 0x1008,

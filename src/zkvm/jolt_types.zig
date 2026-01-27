@@ -12,7 +12,7 @@ const Allocator = std.mem.Allocator;
 // SumcheckId - Identifies which sumcheck a claim belongs to
 // =============================================================================
 
-/// Matches Jolt's SumcheckId enum (22 variants)
+/// Matches Jolt's SumcheckId enum (24 variants)
 /// Reference: jolt-core/src/poly/opening_proof.rs
 pub const SumcheckId = enum(u8) {
     SpartanOuter = 0,
@@ -35,10 +35,12 @@ pub const SumcheckId = enum(u8) {
     RegistersValEvaluation = 17,
     BytecodeReadRaf = 18,
     Booleanity = 19,
-    IncClaimReduction = 20,
-    HammingWeightClaimReduction = 21,
+    AdviceClaimReductionCyclePhase = 20,
+    AdviceClaimReduction = 21,
+    IncClaimReduction = 22,
+    HammingWeightClaimReduction = 23,
 
-    pub const COUNT: usize = 22;
+    pub const COUNT: usize = 24;
 };
 
 // =============================================================================
@@ -768,7 +770,7 @@ const testing = std.testing;
 const BN254Scalar = @import("../field/mod.zig").BN254Scalar;
 
 test "SumcheckId count" {
-    try testing.expectEqual(@as(usize, 22), SumcheckId.COUNT);
+    try testing.expectEqual(@as(usize, 24), SumcheckId.COUNT);
 }
 
 test "OpeningId encoding bases" {

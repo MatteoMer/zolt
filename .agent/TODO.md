@@ -4,6 +4,26 @@
 
 **Status:** Stages 1-2-3 ✅ PASSING | Stage 4 ❌ Sumcheck output_claim mismatch
 
+### Session 66 Update (2026-01-27)
+
+**BUG FIXED: Missing SumcheckId variants causing serialization mismatch!**
+
+**Root Cause:**
+- Zolt defined 22 SumcheckId variants, but Jolt has 24
+- Missing: `AdviceClaimReductionCyclePhase` (id=20) and `AdviceClaimReduction` (id=21)
+- This caused wrong OpeningId encoding bases:
+  - TRUSTED_ADVICE_BASE: was 22, should be 24
+  - COMMITTED_BASE: was 44, should be 48
+  - VIRTUAL_BASE: was 66, should be 72
+
+**Impact:**
+- Every Committed and Virtual OpeningId was serialized with wrong fused byte
+- Jolt deserializer would interpret claims as wrong types
+
+**Fix Committed:** `280c687` - Added missing variants and fixed bases
+
+**Verification Needed:** Run Jolt verifier to confirm this fixes the Stage 4 mismatch
+
 ### Session 65 Update (2026-01-26)
 
 **CRITICAL DISCOVERY**: Zolt's internal computation is CORRECT!

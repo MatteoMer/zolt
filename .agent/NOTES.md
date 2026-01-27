@@ -1,5 +1,39 @@
 # Zolt-Jolt Cross-Verification Progress
 
+## Session 66 Summary - SumcheckId Fix (2026-01-27)
+
+### Critical Bug Fixed: Missing SumcheckId Variants
+
+**Root Cause:**
+Zolt's SumcheckId enum had 22 variants, but Jolt has 24. The missing variants were:
+- `AdviceClaimReductionCyclePhase` (id=20)
+- `AdviceClaimReduction` (id=21)
+
+This caused all OpeningId encoding bases to be off by 2:
+- Old: TRUSTED_ADVICE_BASE=22, COMMITTED_BASE=44, VIRTUAL_BASE=66
+- New: TRUSTED_ADVICE_BASE=24, COMMITTED_BASE=48, VIRTUAL_BASE=72
+
+**Impact:**
+Every Committed and Virtual claim in the proof was serialized with the wrong fused byte,
+causing Jolt deserializer to misinterpret the claims entirely.
+
+**Fix:** Commit 280c687 - Added missing SumcheckId variants
+
+### Proof Structure Verification
+
+After the fix, proof structure parses correctly:
+- 91 claims (3127 bytes)
+- 37 commitments (384 bytes each = 14208 bytes)
+- Stage 1 UniSkip: 28 coeffs
+- Stage 1-7 sumcheck proofs with correct round counts
+
+### Remaining Work
+
+Need to run Jolt verifier to confirm the fix resolves Stage 4 mismatch.
+Currently blocked by missing OpenSSL/pkg-config for Jolt compilation.
+
+---
+
 ## Session 52 Summary - Debug Output Working (2026-01-24)
 
 ### Key Finding: Debug Output Now Showing

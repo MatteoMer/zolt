@@ -334,35 +334,8 @@ pub fn ArkworksSerializer(comptime F: type) type {
                 try writeProof(self, p);
             }
 
-            // 7. Advice proofs (all optional)
-            if (proof.trusted_advice_val_evaluation_proof) |p| {
-                try self.writeU8(1);
-                try writeProof(self, p);
-            } else {
-                try self.writeU8(0);
-            }
-
-            if (proof.trusted_advice_val_final_proof) |p| {
-                try self.writeU8(1);
-                try writeProof(self, p);
-            } else {
-                try self.writeU8(0);
-            }
-
-            if (proof.untrusted_advice_val_evaluation_proof) |p| {
-                try self.writeU8(1);
-                try writeProof(self, p);
-            } else {
-                try self.writeU8(0);
-            }
-
-            if (proof.untrusted_advice_val_final_proof) |p| {
-                try self.writeU8(1);
-                try writeProof(self, p);
-            } else {
-                try self.writeU8(0);
-            }
-
+            // 7. Untrusted advice commitment (Option<Commitment>)
+            // Note: Jolt uses Option encoding: 1 byte flag + commitment if present
             if (proof.untrusted_advice_commitment) |c| {
                 try self.writeU8(1);
                 try writeCommitment(self, c);
@@ -370,12 +343,37 @@ pub fn ArkworksSerializer(comptime F: type) type {
                 try self.writeU8(0);
             }
 
-            // 8. Configuration
+            // 8. Configuration (matches Jolt's JoltProof struct order)
+            std.debug.print("[SERIALIZE CONFIG] trace_length={}, ram_K={}, bytecode_K={}\n", .{
+                proof.trace_length, proof.ram_K, proof.bytecode_K,
+            });
             try self.writeUsize(proof.trace_length);
             try self.writeUsize(proof.ram_K);
             try self.writeUsize(proof.bytecode_K);
-            try self.writeUsize(proof.log_k_chunk);
-            try self.writeUsize(proof.lookups_ra_virtual_log_k_chunk);
+
+            // 9. ReadWriteConfig (4 * u8)
+            std.debug.print("[SERIALIZE CONFIG] rw_config={},{},{},{}\n", .{
+                proof.rw_config.ram_rw_phase1_num_rounds,
+                proof.rw_config.ram_rw_phase2_num_rounds,
+                proof.rw_config.registers_rw_phase1_num_rounds,
+                proof.rw_config.registers_rw_phase2_num_rounds,
+            });
+            try self.writeU8(proof.rw_config.ram_rw_phase1_num_rounds);
+            try self.writeU8(proof.rw_config.ram_rw_phase2_num_rounds);
+            try self.writeU8(proof.rw_config.registers_rw_phase1_num_rounds);
+            try self.writeU8(proof.rw_config.registers_rw_phase2_num_rounds);
+
+            // 10. OneHotConfig (2 * u8)
+            std.debug.print("[SERIALIZE CONFIG] one_hot_config={},{}\n", .{
+                proof.one_hot_config.log_k_chunk,
+                proof.one_hot_config.lookups_ra_virtual_log_k_chunk,
+            });
+            try self.writeU8(proof.one_hot_config.log_k_chunk);
+            try self.writeU8(proof.one_hot_config.lookups_ra_virtual_log_k_chunk);
+
+            // 11. DoryLayout (u8: 0 = Wide, 1 = Tall)
+            std.debug.print("[SERIALIZE CONFIG] dory_layout={}\n", .{proof.dory_layout});
+            try self.writeU8(proof.dory_layout);
         }
 
         /// Write a JoltProof using Dory commitments (GT elements)

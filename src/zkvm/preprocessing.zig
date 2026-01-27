@@ -442,6 +442,7 @@ pub const JoltSharedPreprocessing = struct {
     bytecode: BytecodePreprocessing,
     ram: RAMPreprocessing,
     memory_layout: MemoryLayout,
+    max_padded_trace_length: usize,
 
     pub fn deinit(self: *JoltSharedPreprocessing) void {
         self.bytecode.deinit();
@@ -453,6 +454,8 @@ pub const JoltSharedPreprocessing = struct {
         try self.bytecode.serialize(allocator, writer);
         try self.ram.serialize(writer);
         try serializeMemoryLayout(&self.memory_layout, writer);
+        // max_padded_trace_length: usize (as u64)
+        try writer.writeInt(u64, @intCast(self.max_padded_trace_length), .little);
     }
 };
 

@@ -1492,19 +1492,26 @@ pub fn JoltProver(comptime F: type) type {
                 try serializer.writeDoryProof(&dory_proof);
             }
 
-            // Write advice proofs (all None)
-            try serializer.writeU8(0);
-            try serializer.writeU8(0);
-            try serializer.writeU8(0);
-            try serializer.writeU8(0);
+            // Write untrusted_advice_commitment (Option<Commitment>) - None
             try serializer.writeU8(0);
 
-            // Write configuration
+            // Write configuration (matches Jolt's JoltProof struct)
             try serializer.writeUsize(bundle.proof.trace_length);
             try serializer.writeUsize(bundle.proof.ram_K);
             try serializer.writeUsize(bundle.proof.bytecode_K);
-            try serializer.writeUsize(bundle.proof.log_k_chunk);
-            try serializer.writeUsize(bundle.proof.lookups_ra_virtual_log_k_chunk);
+
+            // Write ReadWriteConfig (4 * u8)
+            try serializer.writeU8(bundle.proof.rw_config.ram_rw_phase1_num_rounds);
+            try serializer.writeU8(bundle.proof.rw_config.ram_rw_phase2_num_rounds);
+            try serializer.writeU8(bundle.proof.rw_config.registers_rw_phase1_num_rounds);
+            try serializer.writeU8(bundle.proof.rw_config.registers_rw_phase2_num_rounds);
+
+            // Write OneHotConfig (2 * u8)
+            try serializer.writeU8(bundle.proof.one_hot_config.log_k_chunk);
+            try serializer.writeU8(bundle.proof.one_hot_config.lookups_ra_virtual_log_k_chunk);
+
+            // Write DoryLayout (u8: 0 = Wide, 1 = Tall)
+            try serializer.writeU8(bundle.proof.dory_layout);
 
             return serializer.toOwnedSlice();
         }

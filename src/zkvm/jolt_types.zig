@@ -9,6 +9,54 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 // =============================================================================
+// Config Types - Configuration structures for proof parameters
+// =============================================================================
+
+/// Configuration for read-write checking sumchecks.
+/// Matches Jolt's ReadWriteConfig (4 * u8 = 4 bytes)
+pub const ReadWriteConfig = struct {
+    ram_rw_phase1_num_rounds: u8,
+    ram_rw_phase2_num_rounds: u8,
+    registers_rw_phase1_num_rounds: u8,
+    registers_rw_phase2_num_rounds: u8,
+
+    pub fn default(log_t: u8, log_k: u8) ReadWriteConfig {
+        // Default: half of cycle variables in phase 1, rest in phase 2
+        const ram_phase1 = log_t / 2;
+        const ram_phase2 = log_k;
+        const reg_phase1 = log_t / 2;
+        const reg_phase2: u8 = 5; // log2(32 registers) = 5
+
+        return .{
+            .ram_rw_phase1_num_rounds = ram_phase1,
+            .ram_rw_phase2_num_rounds = ram_phase2,
+            .registers_rw_phase1_num_rounds = reg_phase1,
+            .registers_rw_phase2_num_rounds = reg_phase2,
+        };
+    }
+};
+
+/// Configuration for one-hot encoding.
+/// Matches Jolt's OneHotConfig (2 * u8 = 2 bytes)
+pub const OneHotConfig = struct {
+    log_k_chunk: u8,
+    lookups_ra_virtual_log_k_chunk: u8,
+
+    pub fn default() OneHotConfig {
+        return .{
+            .log_k_chunk = 4,
+            .lookups_ra_virtual_log_k_chunk = 16,
+        };
+    }
+};
+
+/// DoryLayout enum (stored as u8: 0 = Wide, 1 = Tall)
+pub const DoryLayout = enum(u8) {
+    Wide = 0,
+    Tall = 1,
+};
+
+// =============================================================================
 // SumcheckId - Identifies which sumcheck a claim belongs to
 // =============================================================================
 
@@ -651,6 +699,11 @@ pub fn JoltProof(comptime F: type, comptime Commitment: type, comptime Proof: ty
         trace_length: usize,
         ram_K: usize,
         bytecode_K: usize,
+        rw_config: ReadWriteConfig,
+        one_hot_config: OneHotConfig,
+        dory_layout: u8,
+
+        /// Legacy fields for compatibility (used by proof_converter)
         log_k_chunk: usize,
         lookups_ra_virtual_log_k_chunk: usize,
 
@@ -679,6 +732,9 @@ pub fn JoltProof(comptime F: type, comptime Commitment: type, comptime Proof: ty
                 .trace_length = 0,
                 .ram_K = 0,
                 .bytecode_K = 0,
+                .rw_config = ReadWriteConfig.default(8, 16),
+                .one_hot_config = OneHotConfig.default(),
+                .dory_layout = 0, // Wide layout
                 .log_k_chunk = 0,
                 .lookups_ra_virtual_log_k_chunk = 0,
                 .allocator = allocator,

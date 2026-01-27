@@ -96,6 +96,16 @@ pub fn ProofConverter(comptime F: type) type {
             jolt_proof.log_k_chunk = config.log_k_chunk;
             jolt_proof.lookups_ra_virtual_log_k_chunk = config.lookups_ra_virtual_log_k_chunk;
 
+            // Set config structs (matching Jolt's serialization format)
+            const log_t: u8 = @intCast(zolt_stage_proofs.log_t);
+            const log_k: u8 = @intCast(zolt_stage_proofs.log_k);
+            jolt_proof.rw_config = jolt_types.ReadWriteConfig.default(log_t, log_k);
+            jolt_proof.one_hot_config = .{
+                .log_k_chunk = @intCast(config.log_k_chunk),
+                .lookups_ra_virtual_log_k_chunk = @intCast(config.lookups_ra_virtual_log_k_chunk),
+            };
+            jolt_proof.dory_layout = 0; // Wide layout
+
             // Compute derived parameters
             const n_cycle_vars = std.math.log2_int(usize, trace_length);
             _ = std.math.log2_int(usize, ram_K);
@@ -878,6 +888,16 @@ pub fn ProofConverter(comptime F: type) type {
             jolt_proof.log_k_chunk = config.log_k_chunk;
             jolt_proof.lookups_ra_virtual_log_k_chunk = config.lookups_ra_virtual_log_k_chunk;
 
+            // Set config structs (matching Jolt's serialization format)
+            const log_t: u8 = @intCast(zolt_stage_proofs.log_t);
+            const log_k: u8 = @intCast(zolt_stage_proofs.log_k);
+            jolt_proof.rw_config = jolt_types.ReadWriteConfig.default(log_t, log_k);
+            jolt_proof.one_hot_config = .{
+                .log_k_chunk = @intCast(config.log_k_chunk),
+                .lookups_ra_virtual_log_k_chunk = @intCast(config.lookups_ra_virtual_log_k_chunk),
+            };
+            jolt_proof.dory_layout = 0; // Wide layout
+
             // Compute derived parameters
             const n_cycle_vars = std.math.log2_int(usize, trace_length);
             const log_ram_k = std.math.log2_int(usize, ram_K);
@@ -969,6 +989,16 @@ pub fn ProofConverter(comptime F: type) type {
             jolt_proof.bytecode_K = config.bytecode_K;
             jolt_proof.log_k_chunk = config.log_k_chunk;
             jolt_proof.lookups_ra_virtual_log_k_chunk = config.lookups_ra_virtual_log_k_chunk;
+
+            // Set config structs (matching Jolt's serialization format)
+            const log_t: u8 = @intCast(zolt_stage_proofs.log_t);
+            const log_k: u8 = @intCast(zolt_stage_proofs.log_k);
+            jolt_proof.rw_config = jolt_types.ReadWriteConfig.default(log_t, log_k);
+            jolt_proof.one_hot_config = .{
+                .log_k_chunk = @intCast(config.log_k_chunk),
+                .lookups_ra_virtual_log_k_chunk = @intCast(config.lookups_ra_virtual_log_k_chunk),
+            };
+            jolt_proof.dory_layout = 0; // Wide layout
 
             // Compute derived parameters
             const n_cycle_vars = std.math.log2_int(usize, trace_length);

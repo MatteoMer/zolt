@@ -424,6 +424,7 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, trace_length_op
                     .bytecode = bytecode_prep,
                     .ram = ram_prep,
                     .memory_layout = device.memory_layout,
+                    .max_padded_trace_length = keys.pk.max_trace_length,
                 };
                 defer shared_prep.deinit();
 
@@ -622,6 +623,7 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, trace_length_op
             .bytecode = bytecode_prep,
             .ram = ram_prep,
             .memory_layout = device.memory_layout,
+            .max_padded_trace_length = keys.pk.max_trace_length,
         };
         defer shared_prep.deinit();
 

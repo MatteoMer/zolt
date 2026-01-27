@@ -12,7 +12,7 @@ const Allocator = std.mem.Allocator;
 // SumcheckId - Identifies which sumcheck a claim belongs to
 // =============================================================================
 
-/// Matches Jolt's SumcheckId enum (24 variants)
+/// Matches Jolt's SumcheckId enum (22 variants)
 /// Reference: jolt-core/src/poly/opening_proof.rs
 pub const SumcheckId = enum(u8) {
     SpartanOuter = 0,
@@ -35,12 +35,10 @@ pub const SumcheckId = enum(u8) {
     RegistersValEvaluation = 17,
     BytecodeReadRaf = 18,
     Booleanity = 19,
-    AdviceClaimReductionCyclePhase = 20,
-    AdviceClaimReduction = 21,
-    IncClaimReduction = 22,
-    HammingWeightClaimReduction = 23,
+    IncClaimReduction = 20,
+    HammingWeightClaimReduction = 21,
 
-    pub const COUNT: usize = 24;
+    pub const COUNT: usize = 22;
 };
 
 // =============================================================================
@@ -55,6 +53,8 @@ pub const CommittedPolynomial = union(enum) {
     InstructionRa: usize,
     BytecodeRa: usize,
     RamRa: usize,
+    TrustedAdvice,
+    UntrustedAdvice,
 
     /// Serialize in Jolt's compact format
     pub fn serialize(self: CommittedPolynomial, writer: anytype) !void {
@@ -73,6 +73,8 @@ pub const CommittedPolynomial = union(enum) {
                 try writer.writeByte(4);
                 try writer.writeByte(@truncate(i));
             },
+            .TrustedAdvice => try writer.writeByte(5),
+            .UntrustedAdvice => try writer.writeByte(6),
         }
     }
 
@@ -85,6 +87,8 @@ pub const CommittedPolynomial = union(enum) {
             2 => CommittedPolynomial{ .InstructionRa = try reader.readByte() },
             3 => CommittedPolynomial{ .BytecodeRa = try reader.readByte() },
             4 => CommittedPolynomial{ .RamRa = try reader.readByte() },
+            5 => .TrustedAdvice,
+            6 => .UntrustedAdvice,
             else => error.InvalidData,
         };
     }
@@ -99,7 +103,7 @@ pub const CommittedPolynomial = union(enum) {
         }
         // Same variant - compare payload
         switch (a) {
-            .RdInc, .RamInc => return .eq,
+            .RdInc, .RamInc, .TrustedAdvice, .UntrustedAdvice => return .eq,
             .InstructionRa => |val_a| {
                 return std.math.order(val_a, b.InstructionRa);
             },
@@ -764,7 +768,7 @@ const testing = std.testing;
 const BN254Scalar = @import("../field/mod.zig").BN254Scalar;
 
 test "SumcheckId count" {
-    try testing.expectEqual(@as(usize, 24), SumcheckId.COUNT);
+    try testing.expectEqual(@as(usize, 22), SumcheckId.COUNT);
 }
 
 test "OpeningId encoding bases" {

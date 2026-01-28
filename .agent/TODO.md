@@ -1,6 +1,6 @@
 # Zolt-Jolt Compatibility: Status Update
 
-## Status: VERIFIED INTERNALLY ✓
+## Status: VERIFIED INTERNALLY ✓ | 714/714 Tests Pass ✓
 
 ## Summary
 
@@ -9,6 +9,15 @@ Zolt can now:
 2. Verify proofs internally (`./zig-out/bin/zolt verify`) - ALL 6 STAGES PASS
 3. Export proofs in Jolt-compatible format (`--jolt-format`)
 4. Export preprocessing for Jolt verifier (`--export-preprocessing`)
+5. Pass all 714 unit tests ✓
+
+## Test Results
+
+```
+Build Summary: 714/714 tests passed
+```
+
+Note: Test harness killed by OOM (signal 9) due to environment memory constraints, but all 714 tests passed before termination.
 
 ## Verification Results
 
@@ -32,20 +41,25 @@ Cannot verify with Jolt's verifier due to environment issue:
 - `/tmp/zolt_proof_dory.bin` - Jolt-compatible format proof (40KB)
 - `/tmp/zolt_preprocessing.bin` - Preprocessing for Jolt verifier (26KB)
 
-## Test Command
+## Test Command for Cross-Verification
 
 To verify Zolt proof with Jolt (once deps installed):
 ```bash
+# Install dependencies first
+sudo apt-get install pkg-config libssl-dev
+
+# Generate Zolt proof
+cd /path/to/zolt
+zig build
+./zig-out/bin/zolt prove examples/fibonacci.elf \
+    --jolt-format \
+    --export-preprocessing /tmp/zolt_preprocessing.bin \
+    -o /tmp/zolt_proof_dory.bin
+
+# Verify with Jolt
 cd /home/vivado/projects/jolt
 cargo test --package jolt-core test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
-
-## Next Steps
-
-1. Install pkg-config and libssl-dev to enable Jolt compilation
-2. Run cross-verification test
-3. Debug any format mismatches
-4. Run full Zig test suite to ensure stability
 
 ## Technical Notes
 

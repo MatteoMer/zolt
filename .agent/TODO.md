@@ -1,91 +1,53 @@
-# Zolt-Jolt Compatibility: Final Status
+# Zolt-Jolt Compatibility: Status
 
-## Status: PROOF FORMAT VERIFIED ✅ | JOLT CROSS-VERIFICATION PENDING ⏳
+## Status: Stage 2 Sumcheck Debug ⏳
 
-## Session 77 Summary (2026-01-28)
+## Session Summary (2026-01-28)
 
 ### Verified Working
+1. **Proof Deserialization** ✅ - Jolt can deserialize Zolt proofs
+2. **Stage 1 Verification** ✅ - Passes
+3. **Stage 2 Transcript Sync** ✅ - Challenges match exactly
+4. **Stage 2 Initial Claims** ✅ - All 5 instances have matching input claims
+5. **Stage 2 Batching Coefficients** ✅ - Match exactly
+6. **Stage 2 Round Polynomials** ✅ - c0, c2, c3 match for all rounds
+7. **Stage 2 Final Output Claim** ✅ - `[50, 8d, 70, 43, ...]` matches
 
-1. **Native Zolt Verification** ✅
-   - All 6 stages pass
-   - Fibonacci (54 cycles → 256 padded) verifies correctly
+### The Bug: Expected Output Claim Mismatch
 
-2. **Unit Tests** ✅
-   - 714/714 tests pass
+After 24 rounds of Stage 2 sumcheck:
+- **Zolt/Jolt output_claim** (from sumcheck): `[50, 8d, 70, 43, ...]`
+- **Jolt expected_claim** (from instance evaluations): `[38, d1, cc, 37, ...]`
 
-3. **Jolt-Compatible Proof Format** ✅
-   - Proof size: 40,531 bytes
-
-   **Verified Structure:**
-   ```
-   Opening claims: 91 (parsed successfully)
-   Dory commitments: 37 GT elements (14,208 bytes)
-   Stage 1: UniSkip (28 coeffs) + Sumcheck (9 rounds)
-   Stage 2: UniSkip (13 coeffs) + Sumcheck (24 rounds)
-   Stage 3: Sumcheck (8 rounds)
-   Stage 4: Sumcheck (15 rounds)
-   Stage 5: Sumcheck (8 rounds)
-   Stage 6: Sumcheck (8 rounds)
-   Stage 7: Sumcheck (4 rounds)
-   Dory opening proof: 13,868 bytes
-   Configuration (from end of file):
-     - untrusted_advice: None (0x00)
-     - trace_length: 256
-     - ram_K: 65536
-     - bytecode_K: 65536
-     - ReadWriteConfig: 0x07041004
-     - OneHotConfig: 0x1004
-     - DoryLayout: 0 (Wide)
-   ```
-
-### Blocked: Jolt Cross-Verification
-
-Cannot run Jolt verifier tests due to missing system dependencies:
-- `pkg-config` not installed
-- `libssl-dev` not installed
-- No sudo access to install
-
-### To Complete Cross-Verification
-
-On a system with root access:
-
-```bash
-# 1. Install dependencies
-sudo apt-get install pkg-config libssl-dev
-
-# 2. Generate Zolt proof
-cd /path/to/zolt
-zig build run -- prove examples/fibonacci.elf --jolt-format -o /tmp/zolt_proof_dory.bin
-
-# 3. Run Jolt verifier test
-cd /path/to/jolt
-cargo test test_deserialize_zolt_proof -- --ignored --nocapture
+The expected claim is computed as:
+```
+expected = sum(instance[i].output_claim(r_sumcheck) * batching_coeff[i])
 ```
 
-If deserialization works, run full verification:
-```bash
-cargo test test_verify_zolt_proof -- --ignored --nocapture
-```
+This means the verifier is computing different polynomial evaluations than what the prover computed. The issue is in how Zolt's Stage 2 prover evaluates the instance polynomials.
 
-### Technical Notes
+### Next Steps
 
-The proof format has been verified byte-by-byte to match Jolt's expected format:
-- Field elements: 32 bytes LE (arkworks CanonicalSerialize)
-- GT elements: 384 bytes (Fq12 uncompressed)
-- Length prefixes: u64 LE
-- G1 compressed: 32 bytes
-- G2 compressed: 64 bytes
+1. Debug which instance(s) have incorrect output claims
+2. Compare Zolt vs Jolt evaluation at the final sumcheck point
+3. Fix the polynomial evaluation to match Jolt's expectations
 
-### Success Criteria Status
+### Files to Check
+- `/home/vivado/projects/zolt/src/zkvm/proof_converter.zig` - Stage 2 prover
+- Stage 2 instances:
+  - ProductVirtualRemainder
+  - RamRafEvaluation
+  - RamReadWriteChecking
+  - OutputSumcheck
+  - InstructionLookupsClaimReduction
 
-- [x] `zig build test` passes all tests ✅ (714/714)
-- [x] Zolt generates proof for example program ✅
-- [x] Proof format matches Jolt's expected format ✅
-- [ ] Proof verified by Jolt's verifier ⏳ (blocked on deps)
-- [x] No modifications needed on Jolt side ✅
+### Technical Details
 
----
+Stage 2 batches 5 sumcheck instances:
+- Instance 0: ProductVirtualRemainder (8 rounds)
+- Instance 1: RamRafEvaluation (16 rounds)
+- Instance 2: RamReadWriteChecking (24 rounds - max)
+- Instance 3: OutputSumcheck (16 rounds)
+- Instance 4: InstructionLookupsClaimReduction (8 rounds)
 
-## SESSION_ENDING
-
-This session ends with proof format verification complete. The next step is to run the actual Jolt verifier once the system dependencies are available.
+Each instance computes `output_claim(r) = eq(opening_point, r[offset:]) * polynomial_value`

@@ -14181,3 +14181,12 @@ Cost: $21.7428
 Tokens: 0 in / 0 out
 Session ending: Ralph signaled SESSION_ENDING
 
+
+--- Iteration 1 ---
+Started: 2026-01-28T20:48:49.483486
+Ended: 2026-01-28T21:29:00.234009
+Turns: 99
+Cost: $5.1216
+Tokens: 0 in / 0 out
+Session ending: Ralph signaled SESSION_ENDING
+

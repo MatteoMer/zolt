@@ -1,71 +1,66 @@
-# Zolt-Jolt Compatibility: Stage 4 Sumcheck Issue
+# Zolt-Jolt Compatibility: Stage 4 Final Claim Mismatch
 
-## Status: In Progress (Session 70)
+## Status: In Progress (Session 70 - continued)
 
 ## Current Issue
 
-The Stage 4 sumcheck produces a final claim (`batched_claim`) that doesn't match the expected output:
-- `batched_claim` = `{ 56, 208, 132, ... }` (from sumcheck evolution)
-- `expected_output` = `{ 165, 170, 243, ... }` (eq * combined)
-- `total_expected` = `{ 40, 66, 17, ... }` (coeff * expected)
+The Stage 4 sumcheck produces a final claim that doesn't match the expected output:
+- `regs_current_claim` = `{ 85, 93, 128, 139, ... }` (from sumcheck evolution)
+- `expected_output` = `{ 165, 170, 243, 243, ... }` (eq * combined)
+- These SHOULD be equal but they're not!
 
-These don't match, causing verification to fail.
+## Key Finding: Constraint Satisfied But Final Claim Wrong
 
-## Key Findings (Session 70)
+The sumcheck constraint `p(0)+p(1)=claim` is satisfied at EVERY round:
+- No "[STAGE4 SUMCHECK CONSTRAINT VIOLATION]" messages printed
+- Phase 2/3 correctly use `from_evals_and_hint` pattern
 
-### 1. Sumcheck Constraint IS Satisfied
-- Each round correctly maintains `p(0) + p(1) = previous_claim`
-- No constraint violations detected
-- The Phase 2/3 fix for `from_evals_and_hint` pattern is working
+But the polynomial being computed doesn't produce the expected final value.
 
-### 2. Final Claim Mismatch
-```
-[ZOLT STAGE4 FINAL BIND] expected (eq * combined) = { 165, 170, 243, ... }
-[ZOLT STAGE4 FINAL DEBUG] regs_current_claim = { 85, 93, 128, ... }
-```
+## Analysis Done
 
-The prover's final sumcheck claim doesn't equal `eq_scalar * combined`.
+1. **Formula Verified**: `combined = ra*val + wa*(val+inc)` matches Jolt
+2. **Eq Polynomial**: `merged_eq[0]` after all bindings matches `eq_val_be` computed from challenges
+3. **Phase Configuration**: Phase 1 (4 rounds) + Phase 2 (7 rounds) + Phase 3 (4 rounds) = 15 total
+4. **Binding Operation**: Standard multilinear interpolation `new = lo*(1-c) + hi*c` is correct
 
-### 3. Polynomial Values Are Correct
-- `eq_scalar` (merged_eq[0]) matches `eq_val_be` computed from challenges
-- `combined = ra*val + wa*(val+inc)` formula matches Jolt's
-- Individual claims (val_claim, ra_claims, etc.) are computed correctly
+## Remaining Investigation Areas
 
-### 4. Root Cause Hypothesis: Variable Binding Order
-The sumcheck binds variables in a specific order:
-- Phase 1: First log_T/2 cycle variables
-- Phase 2: LOG_K address variables
-- Phase 3: Remaining cycle variables
+1. **Phase 1 Gruen Polynomial**: The `gruenPolyDeg3` function combines eq and body polynomials
+   - Need to verify the cubic polynomial construction is correct
+   - Particularly the recovery of the linear coefficient using the hint
 
-Jolt's `normalize_opening_point` reorganizes challenges:
-- `r_cycle = reversed(phase3_cycle) ++ reversed(phase1)`
-- `r_address = reversed(phase3_address) ++ reversed(phase2)`
+2. **Phase 2/3 Eq Multiplication**: Check if `eval_0 = sum(eq[j] * combined)` includes eq correctly
+   - Formula looks correct but could have indexing issues
 
-The mismatch may be in how `regs_current_claim` evolves vs how the expected output is computed.
+3. **Variable Ordering**: The sumcheck binds variables in a specific order
+   - Phase 1: First log_T/2 cycle vars (Gruen)
+   - Phase 2: All LOG_K address vars
+   - Phase 3: Remaining cycle vars
+   - Expected output uses `normalize_opening_point` which reorders challenges
 
-## Files Modified This Session
+4. **Possible Issue**: The `expected_output` computation uses a different challenge ordering
+   than what the sumcheck actually binds. Need to verify they produce the same eq*combined value.
 
-- `/home/vivado/projects/zolt/src/zkvm/ram/val_evaluation.zig`: Added `lt_eval` to `getFinalOpenings`
-- `/home/vivado/projects/zolt/src/zkvm/proof_converter.zig`: Improved debug output for 3-instance comparison
-- `/home/vivado/projects/zolt/src/zkvm/spartan/stage4_gruen_prover.zig`: Added sumcheck constraint verification
+## Files to Check
+
+- `gruen_eq.zig:214` - `gruenPolyDeg3` function
+- `stage4_gruen_prover.zig:561` - `phase1ComputeMessage`
+- `stage4_gruen_prover.zig:764` - `phase2ComputeMessage`
+- `stage4_gruen_prover.zig:853` - `phase3ComputeMessage`
+- `proof_converter.zig:2269-2281` - `r_cycle_sumcheck_be` construction
 
 ## Next Steps
 
-1. **Investigate variable binding order**:
-   - Compare Zolt's polynomial binding with Jolt's MLE evaluation order
-   - Ensure eq polynomial initialization matches Jolt's GruenSplitEqPolynomial
-
-2. **Debug specific round values**:
-   - Print eq * combined at each round to trace divergence
-   - Compare with Jolt's prover output (if buildable)
-
-3. **Consider alternative approaches**:
-   - May need to restructure polynomial binding to match Jolt's exact variable order
-   - Or compute expected output using the same binding order as sumcheck
+1. Add debug output comparing eq polynomial at each round
+2. Verify `regs_current_claim` evolution matches expected at each round
+3. Check if the issue is in Phase 1 (Gruen) or Phase 2/3 (dense eq)
 
 ## Session Summary
 
-- Phase 2/3 sumcheck fix verified (constraint satisfied at every round)
-- Root cause identified: final claim doesn't match expected output
-- Most likely cause: variable binding order mismatch
-- Need to align Zolt's binding order with Jolt's expected MLE evaluation order
+- Confirmed sumcheck constraint is satisfied at every round
+- Identified that final claim doesn't match expected output
+- Issue likely in polynomial coefficient computation or variable ordering
+- Need to trace round-by-round to find where divergence occurs
+
+SESSION_ENDING - saved progress to TODO.md for next session.

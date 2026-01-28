@@ -1777,6 +1777,27 @@ pub fn ProofConverter(comptime F: type) type {
                     r_cycle_le[i] = r_cycle_be[n_cycle_vars - 1 - i];
                 }
 
+                // DEBUG: Print r_cycle_be and r_cycle_le for LT polynomial debugging
+                std.debug.print("[ZOLT LT DEBUG SETUP] n_cycle_vars = {}, r_cycle_be.len = {}, r_cycle_le.len = {}\n", .{ n_cycle_vars, r_cycle_be.len, r_cycle_le.len });
+                {
+                    const b0 = r_cycle_be[0].toBytes();
+                    const b1 = r_cycle_be[1].toBytes();
+                    const b7 = r_cycle_be[7].toBytes();
+                    const b6 = r_cycle_be[6].toBytes();
+                    std.debug.print("[ZOLT LT DEBUG] r_cycle_be[0] = {{ {}, {}, {}, {}, {}, {}, {}, {} }}\n", .{ b0[0], b0[1], b0[2], b0[3], b0[4], b0[5], b0[6], b0[7] });
+                    std.debug.print("[ZOLT LT DEBUG] r_cycle_be[1] = {{ {}, {}, {}, {}, {}, {}, {}, {} }}\n", .{ b1[0], b1[1], b1[2], b1[3], b1[4], b1[5], b1[6], b1[7] });
+                    std.debug.print("[ZOLT LT DEBUG] r_cycle_be[6] = {{ {}, {}, {}, {}, {}, {}, {}, {} }}\n", .{ b6[0], b6[1], b6[2], b6[3], b6[4], b6[5], b6[6], b6[7] });
+                    std.debug.print("[ZOLT LT DEBUG] r_cycle_be[7] = {{ {}, {}, {}, {}, {}, {}, {}, {} }}\n", .{ b7[0], b7[1], b7[2], b7[3], b7[4], b7[5], b7[6], b7[7] });
+                    const l0 = r_cycle_le[0].toBytes();
+                    const l1 = r_cycle_le[1].toBytes();
+                    const l6 = r_cycle_le[6].toBytes();
+                    const l7 = r_cycle_le[7].toBytes();
+                    std.debug.print("[ZOLT LT DEBUG] r_cycle_le[0] (=be[7]) = {{ {}, {}, {}, {}, {}, {}, {}, {} }}\n", .{ l0[0], l0[1], l0[2], l0[3], l0[4], l0[5], l0[6], l0[7] });
+                    std.debug.print("[ZOLT LT DEBUG] r_cycle_le[1] (=be[6]) = {{ {}, {}, {}, {}, {}, {}, {}, {} }}\n", .{ l1[0], l1[1], l1[2], l1[3], l1[4], l1[5], l1[6], l1[7] });
+                    std.debug.print("[ZOLT LT DEBUG] r_cycle_le[6] (=be[1]) = {{ {}, {}, {}, {}, {}, {}, {}, {} }}\n", .{ l6[0], l6[1], l6[2], l6[3], l6[4], l6[5], l6[6], l6[7] });
+                    std.debug.print("[ZOLT LT DEBUG] r_cycle_le[7] (=be[0]) = {{ {}, {}, {}, {}, {}, {}, {}, {} }}\n", .{ l7[0], l7[1], l7[2], l7[3], l7[4], l7[5], l7[6], l7[7] });
+                }
+
                 var r_address_le = try self.allocator.alloc(F, log_ram_k);
                 defer self.allocator.free(r_address_le);
                 for (0..log_ram_k) |i| {
@@ -1927,6 +1948,12 @@ pub fn ProofConverter(comptime F: type) type {
                 );
                 defer val_eval_prover_early.deinit();
 
+                // Debug: verify which r_cycle was passed
+                std.debug.print("[PROOF_CONVERTER EARLY PROVER] val_eval_prover_early initialized with:\n", .{});
+                std.debug.print("  start_address = 0x{X:0>16}\n", .{start_address});
+                std.debug.print("  r_cycle_le[0] (passed to prover) = {any}\n", .{r_cycle_le[0].toBytes()[0..8]});
+                std.debug.print("  val_eval_prover_early.lt_evals[0] = {any}\n", .{val_eval_prover_early.lt_evals[0].toBytes()[0..8]});
+
                 // Initialize val_final prover to get its polynomial sum
                 // The OutputSumcheck's binding point comes from Stage 2's batched sumcheck challenges.
                 var r_address_for_val_final_early = try self.allocator.alloc(F, log_ram_k);
@@ -1966,6 +1993,13 @@ pub fn ProofConverter(comptime F: type) type {
 
                 std.debug.print("[ZOLT STAGE4] input_claim_val_eval (derived from accumulator): {any}\n", .{input_claim_val_eval.toBytesBE()});
                 std.debug.print("[ZOLT STAGE4] input_claim_val_final (derived from accumulator): {any}\n", .{input_claim_val_final.toBytesBE()});
+
+                // DEBUG: Compare input_claim_val_eval with prover's initial claim
+                // They should be equal if the sumcheck is consistent!
+                std.debug.print("\n[ZOLT STAGE4 CLAIM MISMATCH DEBUG]\n", .{});
+                std.debug.print("  input_claim_val_eval (from accumulator) = {any}\n", .{input_claim_val_eval.toBytes()});
+                std.debug.print("  val_eval_prover initial_claim = {any}\n", .{val_eval_prover_early.computeInitialClaim().toBytes()});
+                std.debug.print("  Match? {}\n", .{input_claim_val_eval.eql(val_eval_prover_early.computeInitialClaim())});
 
                 // DEBUG: Print transcript state before input claims
                 std.debug.print("[STAGE4 TRANSCRIPT] State BEFORE input claims:\n", .{});
@@ -2232,7 +2266,17 @@ pub fn ProofConverter(comptime F: type) type {
                     regs_prover.bindChallenge(round_idx, challenge);
 
                     if (val_eval_evals_opt) |evals| {
+                        const var_idx = round_idx - 7; // Which variable we're binding (0-7)
+                        if (round_idx == 7 or round_idx == 14) {
+                            std.debug.print("[ZOLT BIND DEBUG] Round {}: binding var {} with challenge (BE)={any}\n", .{ round_idx, var_idx, challenge.toBytesBE() });
+                            std.debug.print("[ZOLT BIND DEBUG]   BEFORE: lt_evals[0] (BE)={any}\n", .{val_eval_prover_early.lt_evals[0].toBytesBE()});
+                            std.debug.print("[ZOLT BIND DEBUG]   BEFORE: lt_evals[1] (BE)={any}\n", .{val_eval_prover_early.lt_evals[1].toBytesBE()});
+                            std.debug.print("[ZOLT BIND DEBUG]   effectiveLen={}\n", .{val_eval_prover_early.effectiveLen()});
+                        }
                         val_eval_prover_early.bindChallengeWithPoly(challenge, evals);
+                        if (round_idx == 7 or round_idx == 14) {
+                            std.debug.print("[ZOLT BIND DEBUG]   AFTER: lt_evals[0] (BE)={any}\n", .{val_eval_prover_early.lt_evals[0].toBytesBE()});
+                        }
                     }
                     if (val_final_evals_opt) |evals| {
                         val_final_prover_early.bindChallengeWithPoly(challenge, evals);
@@ -2243,13 +2287,29 @@ pub fn ProofConverter(comptime F: type) type {
 
                 // DEBUG: Compare final claims
                 std.debug.print("[ZOLT STAGE4 FINAL DEBUG] regs_current_claim (poly_0 final) = {any}\n", .{regs_current_claim.toBytes()});
+                std.debug.print("[ZOLT STAGE4 FINAL DEBUG] val_eval_current_claim (poly_1 final) = {any}\n", .{val_eval_prover_early.getCurrentClaim().toBytes()});
+                std.debug.print("[ZOLT STAGE4 FINAL DEBUG] val_final_current_claim (poly_2 final) = {any}\n", .{val_final_prover_early.getFinalClaim().toBytes()});
+
+                // Compute expected sum from prover tracking
+                const prover_expected = batching_coeffs[0].mul(regs_current_claim)
+                    .add(batching_coeffs[1].mul(val_eval_prover_early.getCurrentClaim()))
+                    .add(batching_coeffs[2].mul(val_final_prover_early.getFinalClaim()));
+
                 std.debug.print("[ZOLT STAGE4 FINAL DEBUG] coeff[0] * regs_current = {any}\n", .{batching_coeffs[0].mul(regs_current_claim).toBytes()});
+                std.debug.print("[ZOLT STAGE4 FINAL DEBUG] coeff[1] * val_eval_current = {any}\n", .{batching_coeffs[1].mul(val_eval_prover_early.getCurrentClaim()).toBytes()});
+                std.debug.print("[ZOLT STAGE4 FINAL DEBUG] coeff[2] * val_final_current = {any}\n", .{batching_coeffs[2].mul(val_final_prover_early.getFinalClaim()).toBytes()});
+                std.debug.print("[ZOLT STAGE4 FINAL DEBUG] prover_expected (sum) = {any}\n", .{prover_expected.toBytes()});
                 std.debug.print("[ZOLT STAGE4 FINAL DEBUG] batched_claim = {any}\n", .{batched_claim.toBytes()});
-                std.debug.print("[ZOLT STAGE4 FINAL DEBUG] Match? {}\n", .{batched_claim.eql(batching_coeffs[0].mul(regs_current_claim))});
+                std.debug.print("[ZOLT STAGE4 FINAL DEBUG] Match? {}\n", .{batched_claim.eql(prover_expected)});
 
                 const regs_claims = regs_prover.getFinalClaims();
                 const val_eval_openings = val_eval_prover_early.getFinalOpenings();
                 const val_final_openings = val_final_prover_early.getFinalOpenings();
+
+                // DEBUG: Print the final LT value from prover
+                std.debug.print("[ZOLT LT FINAL] val_eval_openings.lt_eval (from prover binding) = {any}\n", .{val_eval_openings.lt_eval.toBytesBE()});
+                std.debug.print("[ZOLT LT FINAL] val_eval_openings.inc_eval = {any}\n", .{val_eval_openings.inc_eval.toBytesBE()});
+                std.debug.print("[ZOLT LT FINAL] val_eval_openings.wa_eval = {any}\n", .{val_eval_openings.wa_eval.toBytesBE()});
 
                 // CRITICAL FIX: Construct r_cycle following Jolt's normalize_opening_point
                 // From jolt-core/src/zkvm/registers/read_write_checking.rs:
@@ -2419,9 +2479,47 @@ pub fn ProofConverter(comptime F: type) type {
                         });
                     }
                 }
-                std.debug.print("  lt_eval_computed (Jolt formula) = {any}\n", .{lt_eval_computed.toBytesBE()});
+                std.debug.print("  lt_eval_computed (Jolt formula, BE) = {any}\n", .{lt_eval_computed.toBytesBE()});
                 std.debug.print("  lt_eval_prover (from binding) = {any}\n", .{val_eval_openings.lt_eval.toBytesBE()});
-                std.debug.print("  Match? {}\n\n", .{lt_eval_computed.eql(val_eval_openings.lt_eval)});
+                std.debug.print("  Match? {}\n", .{lt_eval_computed.eql(val_eval_openings.lt_eval)});
+
+                // Also compute LT using LE formulation (which the prover should use)
+                // LE bound point: stage4_r_sumcheck[7..15] in order (s7, s8, ..., s14)
+                // r_cycle_le is the LE version of r_cycle
+                var lt_eval_le = F.zero();
+                std.debug.print("[ZOLT LT DEBUG] Computing LT using LE formulation:\n", .{});
+                for (0..n_cycle_vars) |i| {
+                    // i = bit position (0 = LSB)
+                    // s[i] = challenge for bit i = stage4_r_sumcheck[7 + i]
+                    const si = stage4_r_sumcheck[val_eval_offset + i];
+                    // LT(s, r) = Σ_i (1 - s_i) * r_i * Π_{k>i} eq(s_k, r_k)
+                    // where s_i is the challenge for bit position i
+                    var contrib = r_cycle_le[i];
+                    const one_minus_si = F.one().sub(si);
+                    contrib = contrib.mul(one_minus_si);
+
+                    // Multiply by eq for bits k > i
+                    for ((i + 1)..n_cycle_vars) |k| {
+                        const sk = stage4_r_sumcheck[val_eval_offset + k];
+                        const rk = r_cycle_le[k];
+                        // eq(sk, rk) = sk*rk + (1-sk)*(1-rk)
+                        const eq_sk_rk = sk.mul(rk).add(F.one().sub(sk).mul(F.one().sub(rk)));
+                        contrib = contrib.mul(eq_sk_rk);
+                    }
+
+                    lt_eval_le = lt_eval_le.add(contrib);
+                    if (i < 3) {
+                        std.debug.print("  [{}] s={any}, r={any}, contrib={any}\n", .{
+                            i,
+                            stage4_r_sumcheck[val_eval_offset + i].toBytes()[0..8],
+                            r_cycle_le[i].toBytes()[0..8],
+                            contrib.toBytes()[0..8],
+                        });
+                    }
+                }
+                std.debug.print("  lt_eval_le (LE formulation) = {any}\n", .{lt_eval_le.toBytesBE()});
+                std.debug.print("  lt_eval_prover (from binding) = {any}\n", .{val_eval_openings.lt_eval.toBytesBE()});
+                std.debug.print("  Match LE? {}\n\n", .{lt_eval_le.eql(val_eval_openings.lt_eval)});
 
                 const weighted_expected_0 = expected_output.mul(batching_coeffs[0]);
                 const expected_1 = val_eval_openings.inc_eval.mul(val_eval_openings.wa_eval).mul(val_eval_openings.lt_eval);

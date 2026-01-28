@@ -1,86 +1,59 @@
 # Zolt-Jolt Compatibility: Status Update
 
-## Status: LT POLYNOMIAL FIXED - BATCHED CLAIM MISMATCH REMAINING
+## Status: STAGE 4 INPUT CLAIM MISMATCH IDENTIFIED
 
-## Session 73 Progress (2026-01-28)
+## Session 74 Progress (2026-01-28)
 
-### ✓ Fixed: LT Polynomial Binding Order
+### Key Finding: ValEvaluation Input Claim Mismatch
 
-The LT polynomial mismatch has been resolved. Changed all polynomial binding from HighToLow (half-based indexing) to LowToHigh (adjacent-pair indexing):
-
-- **Before**: `new[i] = (1-r)*old[i] + r*old[i+half]` (HighToLow)
-- **After**: `new[i] = (1-r)*old[2*i] + r*old[2*i+1]` (LowToHigh)
-
-Fixed files:
-- `val_evaluation.zig` - ValEvaluationProver
-- `val_final.zig` - ValFinalProver
-- `raf_checking.zig` - RaPolynomial and RafSumcheckProver
-- `jolt_r1cs.zig` - R1CS sumcheck
-- `jolt_outer_prover.zig` - Outer prover
-- `outer.zig` - Spartan outer prover
-
-**Commit**: `859cd7e` - "fix: Use LowToHigh binding order for polynomial folding"
-
-### Debug Output Shows LT Now Matches
+The Stage 4 verification fails because the ValEvaluation prover's initial claim doesn't match `input_claim_val_eval`:
 
 ```
-[ZOLT LT DEBUG] Computing LT(r, r_cycle):
-  lt_eval_computed (Jolt formula, BE) = { 41, 152, 72, ... }
-  lt_eval_prover (from binding) = { 41, 152, 72, ... }
-  Match? true
-
-[ZOLT LT DEBUG] Computing LT using LE formulation:
-  lt_eval_le (LE formulation) = { 41, 152, 72, ... }
-  lt_eval_prover (from binding) = { 41, 152, 72, ... }
-  Match LE? true
+input_claim_val_eval (from accumulator) = { 164, 183, 91, 114, 236, 92, 48, 36, ... }
+val_eval_prover initial_claim = { 178, 177, 67, 89, 63, 118, 102, 181, ... }
+Match? false
 ```
 
-### Current Issue: Stage 4 Final Verification Mismatch
+### Root Cause Analysis
 
-The sumcheck itself runs correctly (Round 0 `p(0)+p(1) == batched_claim` passes), but the final verification check fails:
-
+The ValEvaluation sumcheck proves:
 ```
-batched_claim (sumcheck output) = { 35, 3, 197, 27, 84, 39, 252, 206, ... }
-total_expected = { 15, 44, 17, 109, 110, 245, 207, 87, ... }
-Do they match? false
+Val(r) - Val_init(r_address) = Σ_{j} inc(j) * wa(r_address, j) * LT(j, r_cycle)
 ```
 
-Where `total_expected` = weighted sum of:
-- Instance 0: eq(r_sumcheck, r_cycle) * combined
-- Instance 1: inc * wa * lt (ValEvaluation)
-- Instance 2: inc * wa (ValFinal)
+Where:
+- LHS = `rwc_val_claim - init_eval_for_val_eval` = `input_claim_val_eval` (from Stage 2)
+- RHS = `Σ inc(j) * wa(j) * lt(j)` = prover's `initial_claim` (computed locally)
 
-### Key Observations
+These SHOULD be equal but they're not. This means:
+1. The prover is using different r_address/r_cycle than Stage 2
+2. OR the inc/wa/lt polynomials are incorrectly computed
+3. OR there's a mismatch in how the opening point is normalized
 
-1. **Initial claim matches**: `[ZOLT STAGE4 CHECK] Round 0: match? true`
-2. **LT values match**: Both Jolt formula and LE formulation produce same result
-3. **Final claim mismatch**: `total_expected != batched_claim`
+### Debugging Steps Needed
 
-### Possible Root Causes
+1. **Verify r_address matches**: Check if the r_address passed to ValEvaluation prover matches Stage 2's r_address
+2. **Verify r_cycle matches**: Same for r_cycle
+3. **Verify start_address**: The inc/wa polynomials use start_address - ensure it's consistent
+4. **Check synthetic termination write handling**: Fibonacci has only one RAM write (termination). Verify it's handled consistently.
 
-1. **eq polynomial computation**: The `eq(r_sumcheck, r_cycle)` may be using wrong endianness for one or both inputs
+### Key Code Locations
 
-2. **combined polynomial**: The `combined` value from RegistersRWC claims might not match what the verifier expects
+- `proof_converter.zig:1748-1805` - r_cycle_be/r_cycle_le construction from Stage 2 challenges
+- `proof_converter.zig:1942-1949` - ValEvaluation prover initialization
+- `val_evaluation.zig:423-522` - ValEvaluationProver init and initial claim computation
+- `read_write_checking.zig:1210-1290` - RWC getOpeningClaims (rwc_val_claim computation)
 
-3. **Claim tracking**: The `regs_current_claim` tracking through rounds may diverge from the actual batched polynomial
+### Native Verification Status
 
-### Key Files for Next Session
-
-- `src/zkvm/proof_converter.zig:2380-2537` - eq_val_be and expected_output computation
-- `src/zkvm/spartan/stage4_gruen_prover.zig` - RegistersRWC prover
-- `src/poly/mod.zig` - EqPolynomial.mle function
+All 6 stages pass in native verification. The issue is specifically in cross-verification where:
+- Stage 4 input claims are computed from Stage 2 opening accumulator
+- These must match the prover's internal polynomial sums
 
 ### Next Steps
 
-1. Add debug to compare Zolt's `eq(r_sumcheck, r_cycle)` with Jolt's computation
-2. Verify `r_sumcheck` normalization matches Jolt's `normalize_opening_point`
-3. Check if `combined` computation follows Jolt's formula exactly
+1. Add debug to compare r_address/r_cycle between Stage 2 RWC and ValEvaluation prover
+2. Trace through the synthetic termination write to see if it affects both sides equally
+3. Verify start_address is consistent (0x7fff8000 for both?)
 
-### Test Results
-
-- 714 unit tests pass ✓
-- Native verification passes all 6 stages ✓
-- Jolt export produces proof file ✓
-- **Cross-verification fails at Stage 4**: total_expected != batched_claim
-
-SESSION_ENDING - LT polynomial fixed. Need to investigate eq polynomial and combined computation for the Stage 4 mismatch.
+SESSION_ENDING - Identified input claim mismatch as root cause. Need to verify r_address/r_cycle consistency.

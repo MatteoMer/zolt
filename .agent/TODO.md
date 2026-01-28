@@ -1,6 +1,6 @@
 # Zolt-Jolt Compatibility: Status Update
 
-## Status: CROSS-VERIFICATION IN PROGRESS
+## Status: DEBUGGING STAGE 4 FINAL CLAIM MISMATCH
 
 ## Summary
 
@@ -15,52 +15,48 @@ Zolt can now:
 
 ## Cross-Verification Status
 
-Using pre-built Jolt test binary (`jolt_core-14bdfbb6b9004947`):
+Using pre-built Jolt test binary:
 
 ```
 ✓ test_deserialize_zolt_proof - PASSED
-  Successfully deserialized: trace_length=256, RAM K=65536, 37 commitments
-
 ✓ test_load_zolt_preprocessing - PASSED
-  Memory layout and bytecode correctly parsed
-
-✗ test_verify_zolt_proof_with_zolt_preprocessing - FAILS
-  "Verification failed: Stage 4 - Sumcheck verification failed"
+✗ test_verify_zolt_proof_with_zolt_preprocessing - FAILS at Stage 4
 ```
 
-## Stage 4 Issue Analysis
+## Root Cause Analysis
 
-The sumcheck rounds pass, but the final claim check fails:
+The sumcheck rounds pass but the final claim check fails because:
+
 ```
-output_claim != expected_output_claim
+batched_claim (sumcheck output): { 37, 242, 198, 79, ... }
+total_expected (verifier computes): { 31, 29, 72, 150, ... }
 ```
 
-In Jolt's RegistersReadWriteChecking verifier:
-1. `normalize_opening_point(sumcheck_challenges)` transforms challenges:
-   - Phase 1 challenges (Gruen): reversed
-   - Phase 2 challenges (address): reversed
-   - Phase 3 challenges (remaining cycle + address): reversed
-   - Output: [r_address | r_cycle] in BIG_ENDIAN
+These values differ completely. Investigation shows:
 
-2. `expected_output_claim` computes:
-   ```
-   eq_eval = EqPolynomial::mle_endian(r_cycle_from_sumcheck, params.r_cycle)
-   combined = rd_wa * (inc + val) + gamma * rs1_ra * val + gamma^2 * rs2_ra * val
-   result = eq_eval * combined
-   ```
+1. **The sumcheck polynomial computation is correct** - p(0)+p(1) = claim for each round ✓
+2. **The r_cycle values are being passed correctly** between stages ✓
+3. **BUT: The eq_eval computation in the final claim may be wrong**
 
-3. The `mle_endian` function pairs elements positionally when both are same endianness.
+The issue is likely in how the eq polynomial is evaluated for the final expected claim:
+```rust
+// Jolt's expected_output_claim:
+eq_eval = EqPolynomial::mle_endian(r_cycle_from_sumcheck, params.r_cycle)
+```
 
-## Hypothesis
+Zolt's computation at line 2328:
+```zig
+const eq_val_be = poly_mod.EqPolynomial(F).mle(r_cycle_sumcheck_be, stage3_r_cycle_be);
+```
 
-The issue may be in how Zolt:
-- Computes the final `eq_eval` value
-- Orders the r_cycle variables
-- Computes the `combined` claims formula
+Need to verify:
+1. Both vectors have correct endianness
+2. The mle function matches Jolt's mle_endian when endianness matches
+3. The r_cycle values are correctly extracted from sumcheck challenges
 
 ## Files Generated
 
-- `/tmp/fib_proof.bin` - Zolt native format proof (11KB)
+- `/tmp/fib_proof.bin` - Zolt native format proof
 - `/tmp/zolt_proof_dory.bin` - Jolt-compatible format proof (40KB)
 - `/tmp/zolt_preprocessing.bin` - Preprocessing for Jolt verifier (26KB)
 
@@ -78,25 +74,16 @@ The issue may be in how Zolt:
 
 ## Next Steps
 
-1. Compare Zolt's Stage 4 final claim computation with Jolt's
-2. Check `normalize_opening_point` implementation in Zolt
-3. Verify r_cycle endianness is correct
-4. Check the `combined` formula matches exactly
+1. Add debug output to show exact eq_val computation comparison
+2. Verify r_cycle_sumcheck_be matches normalize_opening_point output
+3. Verify stage3_r_cycle_be matches params.r_cycle
+4. Consider if mle vs mle_endian difference matters
 
-## Technical Notes
+## Key Insight
 
-### Jolt's RegistersRWC expected_output_claim formula
-```rust
-let rd_write_value_claim = rd_wa_claim * (inc_claim + val_claim);
-let rs1_value_claim = rs1_ra_claim * val_claim;
-let rs2_value_claim = rs2_ra_claim * val_claim;
-let eq_eval = EqPolynomial::mle_endian(&r_cycle, &self.params.r_cycle);
-let combined = rd_write_value_claim + gamma * (rs1_value_claim + gamma * rs2_value_claim);
-result = eq_eval * combined
-```
+The sumcheck rounds all pass correctly - p(0)+p(1) = claim for each round.
+This means the polynomial computation is correct.
+The issue is specifically in the **expected_output_claim** computation which
+uses the eq polynomial evaluated at the final r_cycle point.
 
-### Variable Order in normalize_opening_point
-- Phase 1: First log_T/2 rounds bind cycle vars (reversed)
-- Phase 2: Next LOG_K rounds bind address vars (reversed)
-- Phase 3: Remaining rounds bind cycle then address vars (both reversed)
-- Final: [r_address | r_cycle] concatenated
+SESSION_ENDING: Have identified the specific mismatch but need more investigation to find the exact cause. The eq_eval computation or r_cycle extraction may have a bug.

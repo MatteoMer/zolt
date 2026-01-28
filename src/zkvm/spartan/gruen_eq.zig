@@ -240,7 +240,8 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
 
             // q(1) = c + d + e => cubic_eval_1 = eq_eval_1 * q(1)
             // => q(1) = cubic_eval_1 / eq_eval_1
-            const quadratic_eval_1 = cubic_eval_1.mul(eq_eval_1.inverse() orelse F.one());
+            // NOTE: eq_eval_1 should never be zero in valid execution (random challenge assumption)
+            const quadratic_eval_1 = cubic_eval_1.mul(eq_eval_1.inverse() orelse @panic("eq_eval_1 is zero - this should never happen with random challenges"));
 
             // q(2) = c + 2d + 4e = q(1) + q(1) - q(0) + 2e
             const e_times_2 = q_quadratic_coeff.add(q_quadratic_coeff);

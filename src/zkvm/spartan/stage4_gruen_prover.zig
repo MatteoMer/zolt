@@ -108,7 +108,17 @@ pub fn Stage4GruenProver(comptime F: type) type {
         /// Batching coefficient
         batching_coeff: F,
 
-        /// Alias for compatibility with existing code
+        /// Phase configuration for Gruen binding (from ReadWriteConfig)
+        /// Phase 1: first phase1_num_rounds cycle vars
+        /// Phase 2: next phase2_num_rounds address vars
+        /// Phase 3: remaining (log_T - phase1_num_rounds) cycle vars
+        phase1_num_rounds: usize,
+        phase2_num_rounds: usize,
+
+        /// Merged eq polynomial for Phase 3 (after Gruen eq is fully bound)
+        merged_eq: ?[]F,
+
+        /// Alias for compatibility with existing code (uses default phase config)
         pub fn initWithClaims(
             allocator: Allocator,
             trace: *const ExecutionTrace,
@@ -117,16 +127,24 @@ pub fn Stage4GruenProver(comptime F: type) type {
             stage3_claims: ?Stage3Claims(F),
             batching_coeff: F,
         ) !Self {
-            return init(allocator, trace, gamma, r_cycle, stage3_claims, batching_coeff);
+            // Default phase config: phase1 = log_T / 2, phase2 = LOG_K
+            const T = std.math.ceilPowerOfTwo(usize, trace.steps.items.len) catch trace.steps.items.len;
+            const log_T = @ctz(T);
+            const phase1_num_rounds = log_T / 2;
+            const phase2_num_rounds = LOG_K;
+            return initWithPhaseConfig(allocator, trace, gamma, r_cycle, stage3_claims, batching_coeff, phase1_num_rounds, phase2_num_rounds);
         }
 
-        pub fn init(
+        /// Initialize with explicit phase configuration (from ReadWriteConfig)
+        pub fn initWithPhaseConfig(
             allocator: Allocator,
             trace: *const ExecutionTrace,
             gamma: F,
             r_cycle: []const F,
             stage3_claims: ?Stage3Claims(F),
             batching_coeff: F,
+            phase1_num_rounds: usize,
+            phase2_num_rounds: usize,
         ) !Self {
             const trace_len = trace.steps.items.len;
             if (trace_len == 0) return error.EmptyTrace;
@@ -316,6 +334,12 @@ pub fn Stage4GruenProver(comptime F: type) type {
             }
             std.debug.print("\n", .{});
 
+            std.debug.print("[STAGE4 INIT] Phase config: phase1={}, phase2={}, phase3_cycle={}\n", .{
+                phase1_num_rounds,
+                phase2_num_rounds,
+                log_T - phase1_num_rounds,
+            });
+
             return Self{
                 .allocator = allocator,
                 .T = T,
@@ -335,6 +359,9 @@ pub fn Stage4GruenProver(comptime F: type) type {
                 .current_T = T,
                 .current_K = K,
                 .batching_coeff = batching_coeff,
+                .phase1_num_rounds = phase1_num_rounds,
+                .phase2_num_rounds = phase2_num_rounds,
+                .merged_eq = null,
             };
         }
 
@@ -348,6 +375,9 @@ pub fn Stage4GruenProver(comptime F: type) type {
             self.allocator.free(@constCast(self.r_cycle));
             if (self.gruen_eq) |*g| {
                 g.deinit();
+            }
+            if (self.merged_eq) |merged| {
+                self.allocator.free(merged);
             }
         }
 
@@ -484,14 +514,27 @@ pub fn Stage4GruenProver(comptime F: type) type {
             };
         }
 
-        /// Compute round polynomial using Gruen optimization
+        /// Compute round polynomial using Gruen optimization with 3-phase structure
+        ///
+        /// Phase 1 (rounds 0 to phase1-1): Bind first phase1_num_rounds cycle vars via Gruen
+        /// Phase 2 (rounds phase1 to phase1+phase2-1): Bind address vars (eq NOT bound)
+        /// Phase 3 (rounds phase1+phase2 to end): Bind remaining cycle vars via merged eq
         fn computeRoundPolynomialGruen(self: *Self, round: usize, current_claim: F) RoundPoly(F) {
-            if (round < self.log_T) {
-                // Phase 1: Binding cycle variables using Gruen
+            const phase1_end = self.phase1_num_rounds;
+            const phase2_end = phase1_end + self.phase2_num_rounds;
+
+            if (round < phase1_end) {
+                // Phase 1: Binding first cycle variables using Gruen
+                std.debug.print("[STAGE4] Round {} -> Phase 1 (cycle via Gruen)\n", .{round});
                 return self.phase1ComputeMessage(current_claim);
+            } else if (round < phase2_end) {
+                // Phase 2: Binding address variables (eq polynomial NOT bound here)
+                std.debug.print("[STAGE4] Round {} -> Phase 2 (address, eq not bound)\n", .{round});
+                return self.phase2ComputeMessage(round, current_claim);
             } else {
-                // Phase 2/3: Binding address variables (dense computation)
-                return self.phase23ComputeMessage(round, current_claim);
+                // Phase 3: Binding remaining cycle variables using merged dense eq
+                std.debug.print("[STAGE4] Round {} -> Phase 3 (cycle via dense eq)\n", .{round});
+                return self.phase3ComputeMessage(round, current_claim);
             }
         }
 
@@ -694,20 +737,21 @@ pub fn Stage4GruenProver(comptime F: type) type {
             return RoundPoly(F){ .coeffs = coeffs };
         }
 
-        /// Phase 2/3: Compute round polynomial for address variable binding (dense)
-        fn phase23ComputeMessage(self: *Self, round: usize, previous_claim: F) RoundPoly(F) {
-            _ = round;
-            _ = previous_claim; // Used for verification, not computation
+        /// Phase 2: Compute round polynomial for address variable binding
+        ///
+        /// In Phase 2, the merged_eq polynomial has been computed (from Gruen) but is NOT bound.
+        /// We iterate over address pairs (k_even, k_odd) and sum over all cycle indices j,
+        /// multiplying by merged_eq[j].
+        ///
+        /// Returns degree-2 polynomial: [eval0, eval1, eval2]
+        fn phase2ComputeMessage(self: *Self, round: usize, previous_claim: F) RoundPoly(F) {
+            _ = previous_claim;
+            const merged_eq = self.merged_eq orelse @panic("merged_eq not initialized for Phase 2");
 
-            // For address binding, use direct evaluation at 0, 1, 2, 3
             const half_K = self.current_K / 2;
-            var evals: [4]F = .{ F.zero(), F.zero(), F.zero(), F.zero() };
 
-            // We need the merged eq polynomial after all cycle variables are bound
-            // At this point, gruen_eq.current_scalar contains eq(w_bound, r_bound)
-            // and we need to compute eq over remaining address variables
-            const gruen = &self.gruen_eq.?;
-            const eq_scalar = gruen.current_scalar;
+            // Accumulate evaluations at X = 0, 1, 2
+            var evals: [3]F = .{ F.zero(), F.zero(), F.zero() };
 
             for (0..half_K) |i| {
                 const k_even = 2 * i;
@@ -717,6 +761,7 @@ pub fn Stage4GruenProver(comptime F: type) type {
                     const idx_even = k_even * self.T + j;
                     const idx_odd = k_odd * self.T + j;
                     const inc_j = self.inc_poly[j];
+                    const eq_j = merged_eq[j];
 
                     // Get polynomial values
                     const ra_even = self.ra_poly[idx_even];
@@ -726,23 +771,154 @@ pub fn Stage4GruenProver(comptime F: type) type {
                     const val_even = self.val_poly[idx_even];
                     const val_odd = self.val_poly[idx_odd];
 
-                    // Evaluate at X = 0, 1, 2, 3
-                    inline for (0..4) |t| {
-                        const t_field = F.fromU64(t);
-                        const one_minus_t = F.one().sub(t_field);
+                    // Compute slopes for linear interpolation
+                    const ra_slope = ra_odd.sub(ra_even);
+                    const wa_slope = wa_odd.sub(wa_even);
+                    const val_slope = val_odd.sub(val_even);
 
-                        const ra_t = one_minus_t.mul(ra_even).add(t_field.mul(ra_odd));
-                        const wa_t = one_minus_t.mul(wa_even).add(t_field.mul(wa_odd));
-                        const val_t = one_minus_t.mul(val_even).add(t_field.mul(val_odd));
+                    // Evaluate combined polynomial at X = 0, 1, 2
+                    // C(X) = ra(X)*val(X) + wa(X)*(val(X)+inc)
+                    inline for (0..3) |t| {
+                        const t_field = F.fromU64(t);
+
+                        const ra_t = ra_even.add(t_field.mul(ra_slope));
+                        const wa_t = wa_even.add(t_field.mul(wa_slope));
+                        const val_t = val_even.add(t_field.mul(val_slope));
 
                         const combined_t = ra_t.mul(val_t).add(wa_t.mul(val_t.add(inc_j)));
-                        evals[t] = evals[t].add(eq_scalar.mul(combined_t));
+                        evals[t] = evals[t].add(eq_j.mul(combined_t));
                     }
                 }
             }
 
-            // Convert evaluations to coefficients
-            return coeffsFromEvals(evals);
+            // Debug for first phase 2 round
+            if (round == self.phase1_num_rounds) {
+                std.debug.print("[STAGE4 PHASE2] First round: evals[0..3] = [{any}, {any}, {any}]\n", .{
+                    evals[0].toBytes()[0..8],
+                    evals[1].toBytes()[0..8],
+                    evals[2].toBytes()[0..8],
+                });
+            }
+
+            // Convert 3 evaluations to degree-2 coefficients, then pad to degree-3
+            // p(X) = c0 + c1*X + c2*X^2 + 0*X^3
+            // evals[0] = c0
+            // evals[1] = c0 + c1 + c2
+            // evals[2] = c0 + 2*c1 + 4*c2
+            const c0 = evals[0];
+            // c2 = (evals[0] - 2*evals[1] + evals[2]) / 2
+            const two = F.fromU64(2);
+            const two_inv = two.inverse() orelse F.one();
+            const c2 = evals[0].sub(evals[1].mul(two)).add(evals[2]).mul(two_inv);
+            // c1 = evals[1] - evals[0] - c2
+            const c1 = evals[1].sub(evals[0]).sub(c2);
+
+            return RoundPoly(F){ .coeffs = .{ c0, c1, c2, F.zero() } };
+        }
+
+        /// Phase 3: Compute round polynomial for remaining cycle variable binding
+        ///
+        /// In Phase 3, both merged_eq and inc_poly are bound along with the value polynomials.
+        /// This handles the remaining cycle variables after Phase 1/2.
+        ///
+        /// For RegistersRWC: All 4 Phase 3 rounds bind cycle variables.
+        /// The degree-2 polynomial comes from: eq(X) * [ra(X)*val(X) + wa(X)*(val(X)+inc(X))]
+        fn phase3ComputeMessage(self: *Self, round: usize, previous_claim: F) RoundPoly(F) {
+            _ = previous_claim;
+            const merged_eq = self.merged_eq orelse @panic("merged_eq not initialized for Phase 3");
+
+            const half_T = self.current_T / 2;
+            const K_prime = self.current_K;
+
+            // Debug Phase 3 state
+            std.debug.print("[STAGE4 PHASE3] Round {}: current_T={}, half_T={}, K_prime={}, merged_eq.len={}\n", .{
+                round,
+                self.current_T,
+                half_T,
+                K_prime,
+                merged_eq.len,
+            });
+
+            // Accumulate evaluations at X = 0, 1, 2
+            var evals: [3]F = .{ F.zero(), F.zero(), F.zero() };
+
+            for (0..half_T) |j| {
+                const j_even = 2 * j;
+                const j_odd = j_even + 1;
+
+                // Get inc and eq evaluations for this pair
+                const inc_even = self.inc_poly[j_even];
+                const inc_odd = self.inc_poly[j_odd];
+                const inc_slope = inc_odd.sub(inc_even);
+
+                const eq_even = merged_eq[j_even];
+                const eq_odd = merged_eq[j_odd];
+                const eq_slope = eq_odd.sub(eq_even);
+
+                // Sum over all registers
+                for (0..K_prime) |k| {
+                    const idx_even = k * self.T + j_even;
+                    const idx_odd = k * self.T + j_odd;
+
+                    const ra_even = self.ra_poly[idx_even];
+                    const ra_odd = self.ra_poly[idx_odd];
+                    const wa_even = self.rd_wa_poly[idx_even];
+                    const wa_odd = self.rd_wa_poly[idx_odd];
+                    const val_even = self.val_poly[idx_even];
+                    const val_odd = self.val_poly[idx_odd];
+
+                    const ra_slope = ra_odd.sub(ra_even);
+                    const wa_slope = wa_odd.sub(wa_even);
+                    const val_slope = val_odd.sub(val_even);
+
+                    // Evaluate combined*eq at X = 0, 1, 2
+                    inline for (0..3) |t| {
+                        const t_field = F.fromU64(t);
+
+                        const ra_t = ra_even.add(t_field.mul(ra_slope));
+                        const wa_t = wa_even.add(t_field.mul(wa_slope));
+                        const val_t = val_even.add(t_field.mul(val_slope));
+                        const inc_t = inc_even.add(t_field.mul(inc_slope));
+                        const eq_t = eq_even.add(t_field.mul(eq_slope));
+
+                        const combined_t = ra_t.mul(val_t).add(wa_t.mul(val_t.add(inc_t)));
+                        evals[t] = evals[t].add(eq_t.mul(combined_t));
+                    }
+                }
+            }
+
+            // Debug for first phase 3 round
+            if (round == self.phase1_num_rounds + self.phase2_num_rounds) {
+                std.debug.print("[STAGE4 PHASE3] First round: evals[0..3] = [{any}, {any}, {any}]\n", .{
+                    evals[0].toBytes()[0..8],
+                    evals[1].toBytes()[0..8],
+                    evals[2].toBytes()[0..8],
+                });
+            }
+
+            // Debug all Phase 3 rounds
+            std.debug.print("[STAGE4 PHASE3] Round {} evals: [{any}, {any}, {any}]\n", .{
+                round,
+                evals[0].toBytes()[0..8],
+                evals[1].toBytes()[0..8],
+                evals[2].toBytes()[0..8],
+            });
+
+            // Convert 3 evaluations to degree-2 coefficients, padded to degree-3
+            const c0 = evals[0];
+            const two = F.fromU64(2);
+            const two_inv = two.inverse() orelse F.one();
+            const c2 = evals[0].sub(evals[1].mul(two)).add(evals[2]).mul(two_inv);
+            const c1 = evals[1].sub(evals[0]).sub(c2);
+
+            std.debug.print("[STAGE4 PHASE3] Round {} coeffs: c0={any}, c1={any}, c2={any}\n", .{
+                round,
+                c0.toBytes()[0..8],
+                c1.toBytes()[0..8],
+                c2.toBytes()[0..8],
+            });
+
+            return RoundPoly(F){ .coeffs = .{ c0, c1, c2, F.zero() } };
         }
 
         fn coeffsFromEvals(evals: [4]F) RoundPoly(F) {
@@ -770,14 +946,21 @@ pub fn Stage4GruenProver(comptime F: type) type {
         }
 
         /// Bind polynomials after receiving a challenge
+        ///
+        /// Phase 1: Bind cycle vars (inc, gruen_eq, value polys over cycle dim)
+        ///          At end of Phase 1, merge gruen_eq into dense merged_eq
+        /// Phase 2: Bind address vars (value polys over address dim). Eq NOT bound.
+        /// Phase 3: Bind remaining cycle vars (inc, merged_eq, value polys over cycle dim)
         fn bindPolynomials(self: *Self, round: usize, challenge: F) void {
-            const is_cycle_round = round < self.log_T;
+            const phase1_end = self.phase1_num_rounds;
+            const phase2_end = phase1_end + self.phase2_num_rounds;
             const one_minus_c = F.one().sub(challenge);
 
-            if (is_cycle_round) {
+            if (round < phase1_end) {
+                // Phase 1: Bind cycle variable
                 const half_T = self.current_T / 2;
 
-                // Bind cycle variable using low-to-high
+                // Bind cycle variable using low-to-high for value polys
                 for (0..self.current_K) |k| {
                     for (0..half_T) |i| {
                         const j_lo = 2 * i;
@@ -805,10 +988,26 @@ pub fn Stage4GruenProver(comptime F: type) type {
 
                 // Bind the Gruen eq polynomial
                 self.gruen_eq.?.bind(challenge);
-            } else {
+
+                // At the end of Phase 1, merge the Gruen eq into dense form
+                if (round == phase1_end - 1) {
+                    std.debug.print("[STAGE4 BIND] End of Phase 1 (round {}), merging Gruen eq\n", .{round});
+                    const merged = self.gruen_eq.?.merge(self.allocator) catch @panic("Failed to merge eq");
+                    self.merged_eq = merged;
+
+                    // Debug: print merged eq info
+                    std.debug.print("[STAGE4 BIND]   merged_eq.len = {}, current_T = {}\n", .{
+                        merged.len,
+                        self.current_T,
+                    });
+                    if (merged.len > 0) {
+                        std.debug.print("[STAGE4 BIND]   merged_eq[0] = {any}\n", .{merged[0].toBytes()[0..8]});
+                    }
+                }
+            } else if (round < phase2_end) {
+                // Phase 2: Bind address variable (eq NOT bound)
                 const half_K = self.current_K / 2;
 
-                // Bind address variable
                 for (0..half_K) |i| {
                     const k_lo = 2 * i;
                     const k_hi = k_lo + 1;
@@ -827,6 +1026,44 @@ pub fn Stage4GruenProver(comptime F: type) type {
                 }
 
                 self.current_K = half_K;
+            } else {
+                // Phase 3: Bind remaining cycle variables (including inc and merged_eq)
+                const half_T = self.current_T / 2;
+
+                // Bind cycle variable for value polys
+                for (0..self.current_K) |k| {
+                    for (0..half_T) |i| {
+                        const j_lo = 2 * i;
+                        const j_hi = j_lo + 1;
+                        const idx_lo = k * self.T + j_lo;
+                        const idx_hi = k * self.T + j_hi;
+                        const new_idx = k * self.T + i;
+
+                        self.val_poly[new_idx] = self.val_poly[idx_lo].mul(one_minus_c).add(self.val_poly[idx_hi].mul(challenge));
+                        self.rd_wa_poly[new_idx] = self.rd_wa_poly[idx_lo].mul(one_minus_c).add(self.rd_wa_poly[idx_hi].mul(challenge));
+                        self.ra_poly[new_idx] = self.ra_poly[idx_lo].mul(one_minus_c).add(self.ra_poly[idx_hi].mul(challenge));
+                        self.rs1_ra_poly[new_idx] = self.rs1_ra_poly[idx_lo].mul(one_minus_c).add(self.rs1_ra_poly[idx_hi].mul(challenge));
+                        self.rs2_ra_poly[new_idx] = self.rs2_ra_poly[idx_lo].mul(one_minus_c).add(self.rs2_ra_poly[idx_hi].mul(challenge));
+                    }
+                }
+
+                // Bind inc_poly
+                for (0..half_T) |i| {
+                    const j_lo = 2 * i;
+                    const j_hi = j_lo + 1;
+                    self.inc_poly[i] = self.inc_poly[j_lo].mul(one_minus_c).add(self.inc_poly[j_hi].mul(challenge));
+                }
+
+                // Bind merged_eq
+                if (self.merged_eq) |merged_eq| {
+                    for (0..half_T) |i| {
+                        const j_lo = 2 * i;
+                        const j_hi = j_lo + 1;
+                        merged_eq[i] = merged_eq[j_lo].mul(one_minus_c).add(merged_eq[j_hi].mul(challenge));
+                    }
+                }
+
+                self.current_T = half_T;
             }
         }
 

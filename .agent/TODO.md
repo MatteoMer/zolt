@@ -1,77 +1,60 @@
 # Zolt-Jolt Compatibility: Stage 4 Fix
 
 ## Current Status
-Stage 4 RegistersRWC sumcheck verification fails with `output_claim != expected_claim`.
+Stage 4 RegistersRWC sumcheck verification still fails with `output_claim != expected_claim`.
 
-## Root Cause Found ✅
-**Zolt's Stage 4 prover doesn't respect the phase configuration!**
+## Progress Made ✅
 
-In `stage4_gruen_prover.zig`, line 489:
-```zig
-if (round < self.log_T) {
-    // Phase 1: Binding cycle variables using Gruen
-    return self.phase1ComputeMessage(current_claim);
-}
-```
+### 1. Implemented 3-Phase Structure
+The Stage 4 prover now correctly uses:
+- **Phase 1** (rounds 0-3): Bind first 4 cycle vars via Gruen
+- **Phase 2** (rounds 4-10): Bind 7 address vars (eq NOT bound)
+- **Phase 3** (rounds 11-14): Bind remaining 4 cycle vars via merged dense eq
 
-This treats ALL first log_T rounds as Phase 1 (cycle binding), but the actual config is:
-- `phase1_num_rounds = 4` (from ReadWriteConfig)
-- `phase2_num_rounds = 7` (LOG_REGISTER_COUNT = 7)
-- `phase3_cycle_len = 4` (remaining cycle vars)
-- `phase3_address_len = 0` (all address vars handled in phase2)
+### 2. Key Code Changes
+- `stage4_gruen_prover.zig`:
+  - Added `phase1_num_rounds` and `phase2_num_rounds` fields
+  - Added `merged_eq` field for dense eq after Phase 1
+  - Implemented `phase2ComputeMessage` for address binding
+  - Implemented `phase3ComputeMessage` for remaining cycle binding
+  - Updated `bindPolynomials` with 3-phase binding logic
 
-The correct structure should be:
-- Phase 1 (rounds 0-3): Bind cycle vars via Gruen
-- Phase 2 (rounds 4-10): Bind address vars via Gruen
-- Phase 3 (rounds 11-14): Bind remaining cycle vars (dense)
+- `gruen_eq.zig`:
+  - Added `merge()` function to convert Gruen eq to dense polynomial
 
-## Verified ✅
-1. Stage 3 challenges match perfectly between Zolt and Jolt
-2. Stage 4's `params.r_cycle` (from Stage 3) matches between Zolt and Jolt
-3. Stage 4 input claims match
-4. Stage 4 batching coefficients match
-5. Stage 4 sumcheck challenges match (all 15 rounds)
-6. Stage 4 final claims match (val, rs1_ra, rs2_ra, rd_wa, inc)
+### 3. Verified Working
+- Stage 3 challenges match perfectly between Zolt and Jolt ✅
+- Phase structure debug output shows correct phase transitions ✅
+- Phase 3 produces non-zero polynomial coefficients ✅
 
-## Issue
-The eq polynomial binding order doesn't match Jolt's because Zolt binds:
-- Rounds 0-7: ALL cycle vars (wrong!)
-- Rounds 8-14: address vars
+## Current Issue
 
-But Jolt binds:
-- Rounds 0-3: FIRST 4 cycle vars (Phase 1)
-- Rounds 4-10: ALL 7 address vars (Phase 2)
-- Rounds 11-14: REMAINING 4 cycle vars (Phase 3)
+**Round 14 polynomial mismatch:**
+- Zolt computes non-zero coefficients for round 14:
+  - `c0 = {15, 233, 235, 113, ...}` (non-zero)
+  - `c1 = {105, 121, 0, 145, ...}` (non-zero)
+  - `c2 = {137, 157, 19, 237, ...}` (non-zero)
+- But Jolt deserializes all zeros for round 14
 
-This causes `eq_eval = EqPolynomial::mle_endian(&r_cycle, &params.r_cycle)` to produce different values because `r_cycle` is constructed from Stage 4's sumcheck challenges using `normalize_opening_point`:
+**Possible causes:**
+1. Serialization issue for round 14
+2. Different degree bounds between implementations
+3. The actual polynomial SHOULD be zero but Zolt is computing wrong values
 
-```rust
-// Jolt's normalize_opening_point for 15 rounds:
-r_cycle = [c14, c13, c12, c11, c3, c2, c1, c0]  // NOT [c7, c6, ..., c0]
-```
+**Note:** Looking at earlier rounds in Jolt's output, Phase 3 rounds (11-13) have `c3 = 0` (degree 2), which Zolt is producing correctly. But round 14's c0 is also zero in Jolt, suggesting a fundamental difference.
 
-## Fix Required
-Modify `stage4_gruen_prover.zig` to:
-1. Accept `phase1_num_rounds` and `phase2_num_rounds` from ReadWriteConfig
-2. Use 3-phase structure:
-   - Phase 1: first `phase1_num_rounds` rounds bind cycle vars via Gruen
-   - Phase 2: next `phase2_num_rounds` rounds bind address vars (new!)
-   - Phase 3: remaining rounds bind more cycle vars (dense)
-3. Ensure the eq polynomial is bound in the same order as Jolt
+## Investigation Needed
 
-## Tasks
-- [x] Fix ReadWriteConfig to use correct LOG_REGISTER_COUNT (7, not 5)
-- [x] Verify Stage 3 challenges match
-- [x] Verify params.r_cycle matches
-- [x] Identify root cause: phase config not used in Stage 4 prover
-- [ ] **IN PROGRESS**: Fix Stage 4 prover to use correct 3-phase structure
-- [ ] Verify eq_eval matches after fix
-- [ ] Run full verification test
+1. Compare how Jolt handles the final round of Phase 3
+2. Check if there's special handling for when `current_T = 2`
+3. Verify the polynomial evaluation formula is correct for the final round
+4. Check if Jolt's `inc.len() == 1` case applies here (it shouldn't for RegistersRWC)
 
-## Key Files
-- `/home/vivado/projects/zolt/src/zkvm/spartan/stage4_gruen_prover.zig` - Needs phase config
-- `/home/vivado/projects/zolt/src/zkvm/jolt_types.zig` - ReadWriteConfig (fixed)
-- `/home/vivado/projects/jolt/jolt-core/src/zkvm/registers/read_write_checking.rs` - Reference implementation
+## Next Steps
+- [ ] Add detailed debug for round 14 serialization
+- [ ] Compare Zolt and Jolt polynomial values at round 14
+- [ ] Verify merged_eq binding is correct in Phase 3
+- [ ] Check if final eq_eval matches between implementations
 
 ## Commands
 ```bash
@@ -81,3 +64,9 @@ zig build -Doptimize=ReleaseFast run -- prove examples/fibonacci.elf --jolt-form
 # Test verification
 cd /home/vivado/projects/jolt && cargo test --package jolt-core --no-default-features --features "minimal,zolt-debug" test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
+
+## Key Files
+- `/home/vivado/projects/zolt/src/zkvm/spartan/stage4_gruen_prover.zig`
+- `/home/vivado/projects/zolt/src/zkvm/spartan/gruen_eq.zig`
+- `/home/vivado/projects/zolt/src/zkvm/proof_converter.zig`
+- `/home/vivado/projects/jolt/jolt-core/src/zkvm/registers/read_write_checking.rs`

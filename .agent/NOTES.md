@@ -1,5 +1,54 @@
 # Zolt-Jolt Cross-Verification Progress
 
+## Session 71 Summary - Stage 4 Batched Sumcheck Debug (2026-01-28)
+
+### Key Findings
+
+#### 1. Instance 0 (RegistersRWC) is CORRECT
+- After all 15 rounds, `regs_current_claim` matches `expected_output (eq * combined)`
+- The eq polynomial (`merged_eq[0]`) matches `eq_val_be` computed via MLE
+- This validates the Stage 4 sumcheck is fundamentally working for Instance 0
+
+#### 2. The Problem: Batched Claim Mismatch
+```
+batched_claim (sumcheck output) = { 13, 174, 120, 9, 233, 120, ... }
+total_expected (from openings) = { 18, 61, 142, 143, 28, 54, ... }
+Do they match? false
+```
+
+Instance 0's contribution is correct, but the total doesn't match.
+
+#### 3. Synthetic Termination Write Discovery
+- Fibonacci has NO actual RAM operations
+- But Zolt injects a "synthetic termination write" at address `0x7fffc008`
+- This write is at cycle 54, setting value from 0 to 1
+- RWC prover uses `start_address=0x7fff8000` and SEES this write
+- Committed RamInc uses `start_address=0x80000000` and SKIPS it
+- ValEvaluation/ValFinal provers use `start_address=0x7fff8000` and SEE it
+
+#### 4. ValEvaluation Polynomial Behavior Anomaly
+- At all active rounds, `val_eval_evals[1] = 0`
+- With only one nonzero entry at cycle 54, this is only expected for some rounds
+- 54 = 0b00110110, so after round 0, index becomes 27 (odd)
+- At round 1, index 27 should be in UPPER half → `evals[1] ≠ 0`
+- But debug shows `evals[1] = 0` → suggests folding issue or zero `wa/lt` values
+
+### Root Cause Hypothesis
+
+The ValEvaluation prover's `inc_evals` array may not be correctly tracking the termination write through the folding process. Possible issues:
+1. The `wa_evals[54]` or `lt_evals[54]` are zero, causing product to be zero
+2. The folding logic has a bug for sparse polynomials
+3. There's a mismatch between address-indexed and cycle-indexed arrays
+
+### Next Steps
+
+1. Add debug output to trace `inc_evals`, `wa_evals`, `lt_evals` at cycle 54
+2. Verify that `wa_evals[54] = eq(r_address, 2049)` is nonzero
+3. Verify that `lt_evals[54] = LT(54, r_cycle)` is nonzero
+4. If both are nonzero, trace through folding to see where value goes
+
+---
+
 ## Session 70 Summary - Stage 4 Final Claim Mismatch (2026-01-28)
 
 ### Key Finding: regs_current_claim ≠ eq_scalar * combined

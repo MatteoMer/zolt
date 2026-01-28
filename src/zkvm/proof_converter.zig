@@ -2239,12 +2239,57 @@ pub fn ProofConverter(comptime F: type) type {
                 const val_eval_openings = val_eval_prover_early.getFinalOpenings();
                 const val_final_openings = val_final_prover_early.getFinalOpenings();
 
-                const r_cycle_sumcheck_le = stage4_r_sumcheck[0..n_cycle_vars];
+                // CRITICAL FIX: Construct r_cycle following Jolt's normalize_opening_point
+                // From jolt-core/src/zkvm/registers/read_write_checking.rs:
+                //   r_cycle = [reversed(phase3_cycle), reversed(phase1)]
+                //
+                // Stage 4 sumcheck has 3 phases:
+                //   Phase 1: rounds 0 to phase1-1 (cycle vars, low-to-high)
+                //   Phase 2: rounds phase1 to phase1+phase2-1 (address vars, low-to-high)
+                //   Phase 3: rounds phase1+phase2 to end (remaining cycle vars + address vars, low-to-high)
+                //
+                // For RegistersRWC, phase3 has only remaining cycle vars (no additional address vars)
+                const regs_phase1_rounds: usize = jolt_proof.rw_config.registers_rw_phase1_num_rounds;
+                const regs_phase2_rounds: usize = jolt_proof.rw_config.registers_rw_phase2_num_rounds;
+                const regs_phase3_cycle_len = n_cycle_vars - regs_phase1_rounds;
+
+                std.debug.print("[ZOLT STAGE4 FIX] normalize_opening_point reconstruction:\n", .{});
+                std.debug.print("[ZOLT STAGE4 FIX]   regs_phase1_rounds = {}\n", .{regs_phase1_rounds});
+                std.debug.print("[ZOLT STAGE4 FIX]   regs_phase2_rounds = {}\n", .{regs_phase2_rounds});
+                std.debug.print("[ZOLT STAGE4 FIX]   regs_phase3_cycle_len = {}\n", .{regs_phase3_cycle_len});
+                std.debug.print("[ZOLT STAGE4 FIX]   n_cycle_vars = {}\n", .{n_cycle_vars});
+
+                // Extract phase1 challenges (rounds 0 to phase1-1)
+                const regs_phase1_challenges = stage4_r_sumcheck[0..regs_phase1_rounds];
+
+                // Extract phase3 cycle challenges (rounds phase1+phase2 to phase1+phase2+phase3_cycle_len-1)
+                const regs_phase3_start = regs_phase1_rounds + regs_phase2_rounds;
+                const regs_phase3_cycle_chall = stage4_r_sumcheck[regs_phase3_start .. regs_phase3_start + regs_phase3_cycle_len];
+
+                // Construct r_cycle = [reversed(phase3_cycle), reversed(phase1)]
+                // This matches Jolt's normalize_opening_point exactly
                 var r_cycle_sumcheck_be = try self.allocator.alloc(F, n_cycle_vars);
                 defer self.allocator.free(r_cycle_sumcheck_be);
-                for (0..n_cycle_vars) |i| {
-                    r_cycle_sumcheck_be[i] = r_cycle_sumcheck_le[n_cycle_vars - 1 - i];
+
+                // First: reversed phase3_cycle challenges
+                for (0..regs_phase3_cycle_len) |i| {
+                    r_cycle_sumcheck_be[i] = regs_phase3_cycle_chall[regs_phase3_cycle_len - 1 - i];
                 }
+                // Then: reversed phase1 challenges
+                for (0..regs_phase1_rounds) |i| {
+                    r_cycle_sumcheck_be[regs_phase3_cycle_len + i] = regs_phase1_challenges[regs_phase1_rounds - 1 - i];
+                }
+
+                std.debug.print("[ZOLT STAGE4 FIX] r_cycle construction:\n", .{});
+                std.debug.print("[ZOLT STAGE4 FIX]   r_cycle_sumcheck_be[0] (should be round {} challenge reversed) = {any}\n", .{
+                    regs_phase3_start + regs_phase3_cycle_len - 1,
+                    r_cycle_sumcheck_be[0].toBytes()[0..8],
+                });
+                std.debug.print("[ZOLT STAGE4 FIX]   r_cycle_sumcheck_be[{}] (should be round {} challenge reversed) = {any}\n", .{
+                    regs_phase3_cycle_len,
+                    regs_phase1_rounds - 1,
+                    r_cycle_sumcheck_be[regs_phase3_cycle_len].toBytes()[0..8],
+                });
 
                 // DEBUG: Print raw limbs of r_cycle_sumcheck_be[0] for comparison with Jolt's Challenge
                 std.debug.print("\n[ZOLT STAGE4 CHALLENGE DEBUG] r_cycle_sumcheck_be[0] RAW LIMBS:\n", .{});
@@ -2254,18 +2299,13 @@ pub fn ProofConverter(comptime F: type) type {
                 std.debug.print("  limbs[3] = 0x{x} (this is 'high' in Jolt's Challenge)\n", .{r_cycle_sumcheck_be[0].limbs[3]});
                 std.debug.print("  Jolt's r_cycle[0] should have: low=0x..., high=0x... (read from bytes 16-31)\n", .{});
 
-                // DEBUG: Compare Stage 4 r_cycle and Stage 3 r_cycle ordering (LE bytes).
-                std.debug.print("[STAGE4 ZOLT CHECK] r_cycle_sumcheck_le.len = {}\n", .{r_cycle_sumcheck_le.len});
-                for (0..r_cycle_sumcheck_le.len) |i| {
-                    const bytes = r_cycle_sumcheck_le[i].toBytes();
-                    std.debug.print("[STAGE4 ZOLT CHECK]   r_cycle_sumcheck_le[{}] = {any}\n", .{ i, bytes[0..8] });
-                }
+                // DEBUG: Compare Stage 4 r_cycle (now correctly constructed with normalize_opening_point logic)
                 std.debug.print("[STAGE4 ZOLT CHECK] r_cycle_sumcheck_be.len = {}\n", .{r_cycle_sumcheck_be.len});
                 for (0..r_cycle_sumcheck_be.len) |i| {
                     const bytes = r_cycle_sumcheck_be[i].toBytes();
                     std.debug.print("[STAGE4 ZOLT CHECK]   r_cycle_sumcheck_be[{}] (FULL 32 bytes) = {any}\n", .{ i, bytes });
                 }
-                std.debug.print("[STAGE4 ZOLT CHECK] stage3_r_cycle (LE, passed to prover).len = {}\n", .{stage3_r_cycle_le.len});
+                std.debug.print("[STAGE4 ZOLT CHECK] stage3_r_cycle_le (original from Stage 3).len = {}\n", .{stage3_r_cycle_le.len});
                 for (0..stage3_r_cycle_le.len) |i| {
                     const bytes = stage3_r_cycle_le[i].toBytes();
                     std.debug.print("[STAGE4 ZOLT CHECK]   stage3_r_cycle_le[{}] = {any}\n", .{ i, bytes[0..8] });
@@ -2288,7 +2328,6 @@ pub fn ProofConverter(comptime F: type) type {
                 const eq_val_be = poly_mod.EqPolynomial(F).mle(r_cycle_sumcheck_be, stage3_r_cycle_be);
 
                 std.debug.print("[STAGE4 ZOLT CHECK] eq_val_be (BIG_ENDIAN) = {any}\n", .{eq_val_be.toBytes()});
-                std.debug.print("[STAGE4 ZOLT CHECK] eq_val_be vs eq_val_le match? {}\n", .{eq_val_be.eql(poly_mod.EqPolynomial(F).mle(r_cycle_sumcheck_le, stage3_result.challenges))});
 
                 std.debug.print("[STAGE4 ZOLT CHECK] regs_output_claim = {any}\n", .{regs_current_claim.toBytes()});
                 std.debug.print("[STAGE4 ZOLT CHECK] combined = {any}\n", .{combined.toBytes()});

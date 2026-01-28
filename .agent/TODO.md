@@ -1,81 +1,66 @@
-# Zolt-Jolt Compatibility: Stage 4 Input Claim Issue
+# Zolt-Jolt Compatibility: Stage 4 Internal Check Issue
 
-## Status: In Progress
+## Status: In Progress (Session 69)
 
-## Recent Changes (Session 68)
+## Current Issue
 
-1. **Removed termination bit workaround from RWC prover** (`cee6b7e`)
-   - RWC's val_init now matches Jolt's initial RAM (no termination bit)
-   - For programs without RAM ops, `input_claim_val_eval = 0` should be correct
+The Stage 4 sumcheck internal consistency check is failing:
+```
+[ZOLT STAGE4 FINAL DEBUG] Match? false
+```
 
-2. **Identified OutputSumcheck workaround** still in place
-   - Sets termination in BOTH val_init and val_final
-   - This makes OutputSumcheck internally consistent but breaks ValFinal input_claim
+This check compares:
+- `batched_claim`: The final claim from sumcheck (after all binding rounds)
+- `coeff[0] * regs_current_claim`: Expected claim from polynomial evaluations
 
-## Root Cause Analysis
+They should be equal but they're not.
 
-### The Termination Bit Problem
+## Debug Output Analysis
 
-**Jolt's approach:**
-- Emulator records termination write as a real RISC-V store instruction
-- This creates a sparse matrix entry: `inc=1`, `wa=term_addr`
-- `val_init[term] = 0` (initial RAM)
-- `val_final[term] = 1` (after termination write)
-- OutputSumcheck: `val_final - val_init = 1 = Σ inc * wa` ✓
+From the proof generation:
+```
+[ZOLT STAGE4 FINAL DEBUG] coeff[0] * regs_current = { 112, 237, 127, 101, ...
+[ZOLT STAGE4 FINAL DEBUG] batched_claim = { 231, 126, 223, 191, ...
+[ZOLT STAGE4 FINAL DEBUG] Match? false
+```
 
-**Zolt's approach (with workaround):**
-- Tracer does NOT record termination write
-- No sparse entry for termination
-- Workaround sets BOTH: `val_init[term] = 1`, `val_final[term] = 1`
-- OutputSumcheck: `val_final - val_init = 0 = Σ inc * wa` ✓ (internally consistent)
+## Session 69 Findings
 
-**The problem:**
-- `output_val_final_claim` includes termination=1 (from OutputSumcheck's val_final)
-- `init_eval_for_val_final` computed from `config.initial_ram` has termination=0
-- `input_claim_val_final = 1 - 0 = termination_contribution ≠ 0`
+1. **Jolt dependency issues**: Cannot build Jolt due to missing OpenSSL/pkg-config on this system
+2. **The internal check failure is in Stage 4 prover** (not transcript or serialization issue)
+3. **The prover uses Stage4GruenProver** with Gruen optimization for eq polynomial
 
-But the NOTES say Zolt sends zeros... need to verify actual debug output.
+## Root Cause Candidates
 
-## Proper Fix Options
+1. **evalFromHint formula mismatch**: The hint-based evaluation might not match Jolt's
+2. **Polynomial binding order**: The challenge binding might be in wrong order
+3. **eq polynomial computation**: The GruenSplitEqPolynomial might produce wrong values
+4. **Phase configuration**: The phase1/phase2/phase3 round split might be incorrect
 
-1. **Have Zolt's tracer record termination write** (like Jolt)
-   - Modify `src/tracer/mod.zig` to emit a store instruction for termination
-   - This would make sparse matrix entries correct
-   - OutputSumcheck's val_final would naturally have termination=1
+## Key Files
 
-2. **Remove ALL termination workarounds** and accept that:
-   - For no-RAM programs, all input_claims = 0
-   - Need to verify Jolt also produces zeros for such programs
-
-3. **Align val_final/val_init computation** with what verifier expects
-   - Ensure `output_val_final_claim` and `init_eval_for_val_final` use same basis
+- `/home/vivado/projects/zolt/src/zkvm/proof_converter.zig:2032-2362` - Stage 4 sumcheck loop
+- `/home/vivado/projects/zolt/src/zkvm/spartan/stage4_gruen_prover.zig` - Stage 4 prover
+- `/home/vivado/projects/zolt/jolt/jolt-core/src/zkvm/registers/read_write_checking.rs:815-914` - Jolt verifier
 
 ## Next Steps
 
-1. Add debug output to print actual values of:
-   - `output_val_final_claim` from OutputSumcheck
-   - `init_eval_for_val_final` from `computeInitialRamEval`
-   - `input_claim_val_final` before appending to transcript
+1. **Debug the sumcheck binding loop**:
+   - Add more detailed logging for each round
+   - Compare `batched_claim` evolution with expected
+   - Verify `evalFromHint` produces correct values
 
-2. Verify if Jolt truly expects non-zero for Fibonacci
-   - May need to run Jolt on Fibonacci and check debug output
-   - The NOTES might be from a different test case
+2. **Verify polynomial evaluations**:
+   - Check if `regs_current_claim` is being computed correctly
+   - Verify eq polynomial evaluations match Jolt
 
-3. If Jolt expects zeros for Fibonacci:
-   - Ensure both workarounds are properly consistent
-   - val_init in OutputSumcheck should match `computeInitialRamEval`
-
-## Files Involved
-
-- `/home/vivado/projects/zolt/src/zkvm/ram/read_write_checking.zig` - RWC workaround (REMOVED)
-- `/home/vivado/projects/zolt/src/zkvm/ram/output_check.zig` - OutputSumcheck workaround (STILL PRESENT)
-- `/home/vivado/projects/zolt/src/zkvm/proof_converter.zig` - input_claim computation
-- `/home/vivado/projects/zolt/src/tracer/mod.zig` - Emulator termination handling
+3. **Compare with Jolt prover** (if dependency issues can be resolved):
+   - Run Jolt prover with same input
+   - Compare round-by-round output
 
 ## Session Summary
 
-- Understood Jolt's opening point handling (reconstructed, not stored)
-- Understood Jolt's verifier RECOMPUTES init_eval from preprocessing
-- Removed RWC termination workaround
-- Need to address OutputSumcheck termination workaround
-- Need to verify actual debug output to confirm hypothesis
+- Started investigating Stage 4 internal check failure
+- Analyzed proof_converter.zig Stage 4 implementation
+- Could not run cross-verification test due to OpenSSL build dependency
+- Need to resolve internal consistency check before cross-verification can work

@@ -1,5 +1,68 @@
 # Zolt-Jolt Cross-Verification Progress
 
+## Session 69 Summary - Stage 4 Internal Consistency Bug (2026-01-28)
+
+### Key Finding: Internal Sumcheck Consistency Failure
+
+The Stage 4 sumcheck internal consistency check is failing because:
+```
+regs_current_claim ≠ expected_output
+```
+
+Even though both use the same:
+- eq polynomial value: `{ 217, 23, 239, 206, 84, 218, 209, 78, ... }`
+- combined value: `{ 40, 229, 105, 197, ... }`
+- expected output (eq * combined): `{ 98, 177, 18, 229, ... }` (LE)
+
+But `regs_current_claim` (from round-by-round evaluation) gives:
+`{ 47, 105, 199, 69, ... }` (LE) - DIFFERENT!
+
+### Root Cause Hypothesis
+
+The issue is in how `regs_current_claim` evolves through the sumcheck rounds. It's computed as:
+```zig
+regs_current_claim = evaluateCubicAtChallengeFromEvals(regs_evals, challenge);
+```
+
+Where `regs_evals` comes from `regs_prover.computeRoundEvals()`.
+
+The `computeRoundPolynomialGruen` function computes round polynomials in 3 phases:
+1. Phase 1: Cycle vars via Gruen eq optimization
+2. Phase 2: Address vars (eq not bound)
+3. Phase 3: Remaining cycle vars via merged dense eq
+
+The error likely occurs in one of these phases - the polynomial computation doesn't correctly represent the sumcheck invariant.
+
+### Critical Debug Output Analysis
+
+```
+[ZOLT STAGE4 FINAL DEBUG] Match? false
+```
+
+This is `batched_claim.eql(batching_coeffs[0].mul(regs_current_claim))` - they don't match.
+
+Since RAM instances (1 and 2) have zero claims:
+```
+Instance 1 expected = inc*wa = { 0, 0, 0, 0, ...
+Instance 2 expected = inc*wa = { 0, 0, 0, 0, ...
+```
+
+The batched_claim should equal `coeff[0] * final_claim_0`.
+
+### Key Files for Investigation
+
+1. `proof_converter.zig:2053-2228` - Main Stage 4 sumcheck loop
+2. `stage4_gruen_prover.zig:538-555` - `computeRoundPolynomialGruen` dispatcher
+3. `stage4_gruen_prover.zig:561` - `phase1ComputeMessage` (Gruen optimization)
+4. `stage4_gruen_prover.zig` - `phase2ComputeMessage` and `phase3ComputeMessage`
+
+### Blocked: Jolt Build Issues
+
+Could not run cross-verification test due to missing OpenSSL/pkg-config packages.
+System doesn't have sudo access to install dependencies.
+
+---
+
 ## Session 68 Summary - Stage 4 Fix Applied (2026-01-28)
 
 ### Fix Applied: Removed Termination Bit Workaround

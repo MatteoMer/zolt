@@ -846,10 +846,11 @@ pub fn Stage4GruenProver(comptime F: type) type {
         /// In Phase 3, both merged_eq and inc_poly are bound along with the value polynomials.
         /// This handles the remaining cycle variables after Phase 1/2.
         ///
-        /// For RegistersRWC: All 4 Phase 3 rounds bind cycle variables.
-        /// The degree-2 polynomial comes from: eq(X) * [ra(X)*val(X) + wa(X)*(val(X)+inc(X))]
+        /// CRITICAL: Phase 3 has TWO cases (matching Jolt exactly):
+        /// 1. Cycle variables remaining (current_T > 1): Degree 3, compute [p(0), p(2), p(3)]
+        /// 2. Cycle variables fully bound (current_T == 1): Degree 2, compute [p(0), p(2)]
         ///
-        /// Uses the from_evals_and_hint pattern: compute p(0) and p(2), recover p(1) = previous_claim - p(0)
+        /// Uses the from_evals_and_hint pattern: recover p(1) = previous_claim - p(0)
         fn phase3ComputeMessage(self: *Self, round: usize, previous_claim: F) RoundPoly(F) {
             const merged_eq = self.merged_eq orelse @panic("merged_eq not initialized for Phase 3");
 
@@ -865,90 +866,152 @@ pub fn Stage4GruenProver(comptime F: type) type {
                 merged_eq.len,
             });
 
-            // Accumulate evaluations at X = 0 and X = 2 only (Jolt optimization)
-            // p(1) will be recovered from previous_claim
-            var eval_0 = F.zero();
-            var eval_2 = F.zero();
+            // Check if cycle variables remain or are fully bound
+            // Jolt: if inc.len() > 1, we have cycle vars remaining → degree 3
+            //       if inc.len() == 1, cycles fully bound → degree 2
+            const cycles_remaining = self.current_T > 1;
 
-            for (0..half_T) |j| {
-                const j_even = 2 * j;
-                const j_odd = j_even + 1;
+            if (cycles_remaining) {
+                // DEGREE 3: Cycle variables remaining
+                // Compute evaluations at X = 0, 2, 3 (Jolt uses [p(0), p(2), p(3)])
+                var eval_0 = F.zero();
+                var eval_2 = F.zero();
+                var eval_3 = F.zero();
 
-                // Get inc and eq evaluations for this pair
-                const inc_even = self.inc_poly[j_even];
-                const inc_odd = self.inc_poly[j_odd];
-                const inc_slope = inc_odd.sub(inc_even);
+                for (0..half_T) |j| {
+                    const j_even = 2 * j;
+                    const j_odd = j_even + 1;
 
-                const eq_even = merged_eq[j_even];
-                const eq_odd = merged_eq[j_odd];
-                const eq_slope = eq_odd.sub(eq_even);
+                    // Get inc and eq evaluations for this pair
+                    const inc_even = self.inc_poly[j_even];
+                    const inc_odd = self.inc_poly[j_odd];
+                    const inc_slope = inc_odd.sub(inc_even);
 
-                // Sum over all registers
-                for (0..K_prime) |k| {
-                    const idx_even = k * self.T + j_even;
-                    const idx_odd = k * self.T + j_odd;
+                    const eq_even = merged_eq[j_even];
+                    const eq_odd = merged_eq[j_odd];
+                    const eq_slope = eq_odd.sub(eq_even);
 
-                    const ra_even = self.ra_poly[idx_even];
-                    const ra_odd = self.ra_poly[idx_odd];
-                    const wa_even = self.rd_wa_poly[idx_even];
-                    const wa_odd = self.rd_wa_poly[idx_odd];
-                    const val_even = self.val_poly[idx_even];
-                    const val_odd = self.val_poly[idx_odd];
+                    // Compute inc and eq at evaluation points
+                    const inc_2 = inc_even.add(F.fromU64(2).mul(inc_slope));
+                    const inc_3 = inc_even.add(F.fromU64(3).mul(inc_slope));
+                    const eq_2 = eq_even.add(F.fromU64(2).mul(eq_slope));
+                    const eq_3 = eq_even.add(F.fromU64(3).mul(eq_slope));
+
+                    // Sum over all registers for this cycle pair
+                    var inner_0 = F.zero();
+                    var inner_2 = F.zero();
+                    var inner_3 = F.zero();
+
+                    for (0..K_prime) |k| {
+                        const idx_even = k * self.T + j_even;
+                        const idx_odd = k * self.T + j_odd;
+
+                        const ra_even = self.ra_poly[idx_even];
+                        const ra_odd = self.ra_poly[idx_odd];
+                        const wa_even = self.rd_wa_poly[idx_even];
+                        const wa_odd = self.rd_wa_poly[idx_odd];
+                        const val_even = self.val_poly[idx_even];
+                        const val_odd = self.val_poly[idx_odd];
+
+                        const ra_slope = ra_odd.sub(ra_even);
+                        const wa_slope = wa_odd.sub(wa_even);
+                        const val_slope = val_odd.sub(val_even);
+
+                        // Evaluate combined at X = 0, 2, 3
+                        const combined_0 = ra_even.mul(val_even).add(wa_even.mul(val_even.add(inc_even)));
+                        inner_0 = inner_0.add(combined_0);
+
+                        const ra_2 = ra_even.add(F.fromU64(2).mul(ra_slope));
+                        const wa_2 = wa_even.add(F.fromU64(2).mul(wa_slope));
+                        const val_2 = val_even.add(F.fromU64(2).mul(val_slope));
+                        const combined_2 = ra_2.mul(val_2).add(wa_2.mul(val_2.add(inc_2)));
+                        inner_2 = inner_2.add(combined_2);
+
+                        const ra_3 = ra_even.add(F.fromU64(3).mul(ra_slope));
+                        const wa_3 = wa_even.add(F.fromU64(3).mul(wa_slope));
+                        const val_3 = val_even.add(F.fromU64(3).mul(val_slope));
+                        const combined_3 = ra_3.mul(val_3).add(wa_3.mul(val_3.add(inc_3)));
+                        inner_3 = inner_3.add(combined_3);
+                    }
+
+                    // Multiply by eq at each evaluation point (Jolt: eq_evals * inner)
+                    eval_0 = eval_0.add(eq_even.mul(inner_0));
+                    eval_2 = eval_2.add(eq_2.mul(inner_2));
+                    eval_3 = eval_3.add(eq_3.mul(inner_3));
+                }
+
+                // Recover p(1) using the hint: p(1) = previous_claim - p(0)
+                const eval_1 = previous_claim.sub(eval_0);
+
+                std.debug.print("[STAGE4 PHASE3] Round {} (deg3) evals: [0,1,2,3] = [{any}, {any}, {any}, {any}]\n", .{
+                    round,
+                    eval_0.toBytes()[0..8],
+                    eval_1.toBytes()[0..8],
+                    eval_2.toBytes()[0..8],
+                    eval_3.toBytes()[0..8],
+                });
+
+                // Convert 4 evaluations to degree-3 coefficients
+                return coeffsFromEvals(.{ eval_0, eval_1, eval_2, eval_3 });
+            } else {
+                // DEGREE 2: Cycle variables fully bound
+                // Compute evaluations at X = 0, 2 only
+                const inc_eval = self.inc_poly[0];
+                const eq_eval = merged_eq[0];
+
+                var eval_0 = F.zero();
+                var eval_2 = F.zero();
+
+                for (0..K_prime / 2) |i| {
+                    const k_even = 2 * i;
+                    const k_odd = k_even + 1;
+
+                    const ra_even = self.ra_poly[k_even * self.T];
+                    const ra_odd = self.ra_poly[k_odd * self.T];
+                    const wa_even = self.rd_wa_poly[k_even * self.T];
+                    const wa_odd = self.rd_wa_poly[k_odd * self.T];
+                    const val_even = self.val_poly[k_even * self.T];
+                    const val_odd = self.val_poly[k_odd * self.T];
 
                     const ra_slope = ra_odd.sub(ra_even);
                     const wa_slope = wa_odd.sub(wa_even);
                     const val_slope = val_odd.sub(val_even);
 
-                    // Evaluate combined*eq at X = 0
-                    const combined_0 = ra_even.mul(val_even).add(wa_even.mul(val_even.add(inc_even)));
-                    eval_0 = eval_0.add(eq_even.mul(combined_0));
+                    // Evaluate combined at X = 0
+                    const combined_0 = ra_even.mul(val_even).add(wa_even.mul(val_even.add(inc_eval)));
+                    eval_0 = eval_0.add(combined_0);
 
-                    // Evaluate combined*eq at X = 2
+                    // Evaluate combined at X = 2
                     const ra_2 = ra_even.add(F.fromU64(2).mul(ra_slope));
                     const wa_2 = wa_even.add(F.fromU64(2).mul(wa_slope));
                     const val_2 = val_even.add(F.fromU64(2).mul(val_slope));
-                    const inc_2 = inc_even.add(F.fromU64(2).mul(inc_slope));
-                    const eq_2 = eq_even.add(F.fromU64(2).mul(eq_slope));
-                    const combined_2 = ra_2.mul(val_2).add(wa_2.mul(val_2.add(inc_2)));
-                    eval_2 = eval_2.add(eq_2.mul(combined_2));
+                    const combined_2 = ra_2.mul(val_2).add(wa_2.mul(val_2.add(inc_eval)));
+                    eval_2 = eval_2.add(combined_2);
                 }
-            }
 
-            // Recover p(1) using the hint: p(1) = previous_claim - p(0)
-            const eval_1 = previous_claim.sub(eval_0);
+                // Multiply by eq scalar
+                eval_0 = eq_eval.mul(eval_0);
+                eval_2 = eq_eval.mul(eval_2);
 
-            // Debug for first phase 3 round
-            if (round == self.phase1_num_rounds + self.phase2_num_rounds) {
-                std.debug.print("[STAGE4 PHASE3] First round: evals[0,1,2] = [{any}, {any}, {any}]\n", .{
+                // Recover p(1) using the hint: p(1) = previous_claim - p(0)
+                const eval_1 = previous_claim.sub(eval_0);
+
+                std.debug.print("[STAGE4 PHASE3] Round {} (deg2) evals: [0,1,2] = [{any}, {any}, {any}]\n", .{
+                    round,
                     eval_0.toBytes()[0..8],
                     eval_1.toBytes()[0..8],
                     eval_2.toBytes()[0..8],
                 });
+
+                // Convert 3 evaluations to degree-2 coefficients, padded to degree-3
+                const c0 = eval_0;
+                const two = F.fromU64(2);
+                const two_inv = two.inverse() orelse F.one();
+                const c2 = eval_0.sub(eval_1.mul(two)).add(eval_2).mul(two_inv);
+                const c1 = eval_1.sub(eval_0).sub(c2);
+
+                return RoundPoly(F){ .coeffs = .{ c0, c1, c2, F.zero() } };
             }
-
-            // Debug all Phase 3 rounds
-            std.debug.print("[STAGE4 PHASE3] Round {} evals: [{any}, {any}, {any}]\n", .{
-                round,
-                eval_0.toBytes()[0..8],
-                eval_1.toBytes()[0..8],
-                eval_2.toBytes()[0..8],
-            });
-
-            // Convert 3 evaluations to degree-2 coefficients, padded to degree-3
-            const c0 = eval_0;
-            const two = F.fromU64(2);
-            const two_inv = two.inverse() orelse F.one();
-            const c2 = eval_0.sub(eval_1.mul(two)).add(eval_2).mul(two_inv);
-            const c1 = eval_1.sub(eval_0).sub(c2);
-
-            std.debug.print("[STAGE4 PHASE3] Round {} coeffs: c0={any}, c1={any}, c2={any}\n", .{
-                round,
-                c0.toBytes()[0..8],
-                c1.toBytes()[0..8],
-                c2.toBytes()[0..8],
-            });
-
-            return RoundPoly(F){ .coeffs = .{ c0, c1, c2, F.zero() } };
         }
 
         fn coeffsFromEvals(evals: [4]F) RoundPoly(F) {

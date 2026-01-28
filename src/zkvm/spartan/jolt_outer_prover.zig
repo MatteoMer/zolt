@@ -157,14 +157,14 @@ pub fn JoltOuterProver(comptime F: type) type {
 
             // p(0) = sum of first half
             var p0 = F.zero();
+            // LowToHigh: p(0) sums even indices (LSB=0), p(1) sums odd indices (LSB=1)
             for (0..half) |i| {
-                p0 = p0.add(self.working_evals[i]);
+                p0 = p0.add(self.working_evals[2 * i]);
             }
 
-            // p(1) = sum of second half
             var p1 = F.zero();
             for (0..half) |i| {
-                p1 = p1.add(self.working_evals[i + half]);
+                p1 = p1.add(self.working_evals[2 * i + 1]);
             }
 
             // p(2) = 2*p(1) - p(0) (linear extrapolation)
@@ -189,16 +189,16 @@ pub fn JoltOuterProver(comptime F: type) type {
             // Evaluate p(0), p(1), p(2), p(3)
             // p(X) = sum over x_{i+1},...,x_n of f(r_1,...,r_{i-1}, X, x_{i+1},...,x_n)
 
-            // p(0) = sum of first half (X = 0)
+            // LowToHigh: p(0) sums even indices (X = 0)
             var p0 = F.zero();
             for (0..half) |i| {
-                p0 = p0.add(self.working_evals[i]);
+                p0 = p0.add(self.working_evals[2 * i]);
             }
 
-            // p(1) = sum of second half (X = 1)
+            // p(1) sums odd indices (X = 1)
             var p1 = F.zero();
             for (0..half) |i| {
-                p1 = p1.add(self.working_evals[i + half]);
+                p1 = p1.add(self.working_evals[2 * i + 1]);
             }
 
             // For degree-2 polynomial from multilinear * multilinear:
@@ -224,6 +224,7 @@ pub fn JoltOuterProver(comptime F: type) type {
         }
 
         /// Bind the challenge and update state for next round
+        /// Uses LowToHigh binding: new[i] = (1-r) * old[2*i] + r * old[2*i+1]
         pub fn bindChallenge(self: *Self, challenge: F) !void {
             try self.challenges.append(self.allocator, challenge);
 
@@ -232,30 +233,19 @@ pub fn JoltOuterProver(comptime F: type) type {
             const half = self.current_len / 2;
             const one_minus_r = F.one().sub(challenge);
 
-            // Fold: new[i] = (1-r) * old[i] + r * old[i + half]
+            // Fold using LowToHigh: new[i] = (1-r) * old[2*i] + r * old[2*i+1]
             for (0..half) |i| {
-                self.working_evals[i] = one_minus_r.mul(self.working_evals[i])
-                    .add(challenge.mul(self.working_evals[i + half]));
+                self.working_evals[i] = one_minus_r.mul(self.working_evals[2 * i])
+                    .add(challenge.mul(self.working_evals[2 * i + 1]));
             }
 
-            // Update current claim
-            const p0 = blk: {
-                var sum = F.zero();
-                for (0..half) |i| {
-                    sum = sum.add(self.working_evals[i]);
-                }
-                break :blk sum;
-            };
-            const p1 = blk: {
-                var sum = F.zero();
-                for (0..half) |i| {
-                    sum = sum.add(self.working_evals[i + half]);
-                }
-                break :blk sum;
-            };
+            // Update current claim - sum over the folded values
+            var new_claim = F.zero();
+            for (0..half) |i| {
+                new_claim = new_claim.add(self.working_evals[i]);
+            }
 
-            // new_claim = (1-r) * p(0) + r * p(1)
-            self.current_claim = one_minus_r.mul(p0).add(challenge.mul(p1));
+            self.current_claim = new_claim;
             self.current_len = half;
         }
 

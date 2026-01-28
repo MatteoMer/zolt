@@ -372,14 +372,13 @@ pub fn SpartanOuterProver(comptime F: type) type {
 
             const half = self.current_len / 2;
 
-            // p(0) = sum of first half
-            // p(1) = sum of second half
+            // LowToHigh: p(0) sums even indices (LSB=0), p(1) sums odd indices (LSB=1)
             var p0 = F.zero();
             var p1 = F.zero();
 
             for (0..half) |i| {
-                p0 = p0.add(self.working_vals[i]);
-                p1 = p1.add(self.working_vals[i + half]);
+                p0 = p0.add(self.working_vals[2 * i]);
+                p1 = p1.add(self.working_vals[2 * i + 1]);
             }
 
             // p(2) = linear extrapolation
@@ -388,7 +387,7 @@ pub fn SpartanOuterProver(comptime F: type) type {
             return [3]F{ p0, p1, p2 };
         }
 
-        /// Bind challenge for a round
+        /// Bind challenge for a round using LowToHigh order
         pub fn bindChallenge(self: *Self, challenge: F) !void {
             try self.challenges.append(self.allocator, challenge);
 
@@ -397,10 +396,10 @@ pub fn SpartanOuterProver(comptime F: type) type {
             const half = self.current_len / 2;
             const one_minus_r = F.one().sub(challenge);
 
-            // Fold: new[i] = (1-r) * old[i] + r * old[i + half]
+            // LowToHigh: new[i] = (1-r) * old[2*i] + r * old[2*i+1]
             for (0..half) |i| {
-                self.working_vals[i] = one_minus_r.mul(self.working_vals[i])
-                    .add(challenge.mul(self.working_vals[i + half]));
+                self.working_vals[i] = one_minus_r.mul(self.working_vals[2 * i])
+                    .add(challenge.mul(self.working_vals[2 * i + 1]));
             }
 
             self.current_len = half;

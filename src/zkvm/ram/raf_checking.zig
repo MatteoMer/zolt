@@ -156,17 +156,18 @@ pub fn RaPolynomial(comptime F: type) type {
             return self.evals[k];
         }
 
-        /// Bind the first variable to value r
+        /// Bind the first variable (LSB) to value r using LowToHigh order.
+        /// Uses adjacent-pair folding: new[i] = (1-r)*old[2*i] + r*old[2*i+1]
         /// Reduces from n variables to n-1 variables
         pub fn bind(self: *Self, r: F) void {
             // The "active" length is 2^num_vars, not evals.len
             const active_len: usize = @as(usize, 1) << @intCast(self.num_vars);
             const half = active_len / 2;
+            const one_minus_r = F.one().sub(r);
             for (0..half) |i| {
-                // Interpolate: (1-r) * evals[i] + r * evals[i + half]
-                const lo = self.evals[i];
-                const hi = self.evals[i + half];
-                const one_minus_r = F.one().sub(r);
+                // LowToHigh interpolation: adjacent pairs (2*i, 2*i+1)
+                const lo = self.evals[2 * i];
+                const hi = self.evals[2 * i + 1];
                 self.evals[i] = one_minus_r.mul(lo).add(r.mul(hi));
             }
             self.num_vars -= 1;
@@ -330,9 +331,12 @@ pub fn RafEvaluationProver(comptime F: type) type {
         /// - s(0), s(2) are computed from the polynomial evaluation
         /// - s(1) = claim - s(0)
         /// - s(3) = c0 + 3*c1 + 9*c2 (extrapolated quadratic)
+        /// Uses LowToHigh indexing: ra(x=0) at index 2*i, ra(x=1) at index 2*i+1
         pub fn computeRoundPolynomialCubic(self: *Self) [4]F {
             const current_claim = self.current_claim;
-            const half = self.ra.evals.len / 2;
+            // Active length is 2^(num_vars - round)
+            const active_len: usize = @as(usize, 1) << @intCast(self.ra.num_vars);
+            const half = active_len / 2;
             var s0: F = F.zero();
             var s2: F = F.zero();
 
@@ -349,16 +353,19 @@ pub fn RafEvaluationProver(comptime F: type) type {
             const current_power = power;
 
             for (0..half) |i| {
-                // For sumcheck evals at x = 0, 1, 2:
+                // For LowToHigh binding, x=0 is at index 2*i (bit 0 = 0)
+                // and x=1 is at index 2*i+1 (bit 0 = 1)
                 // ra(x) = (1-x)*ra_lo + x*ra_hi (linear interpolation)
                 // ra(0) = ra_lo
                 // ra(1) = ra_hi
                 // ra(2) = 2*ra_hi - ra_lo
-                const ra_lo = self.ra.evals[i];
-                const ra_hi = self.ra.evals[i + half];
+                const ra_lo = self.ra.evals[2 * i];
+                const ra_hi = self.ra.evals[2 * i + 1];
                 const ra_at_2 = ra_hi.add(ra_hi).sub(ra_lo); // 2*ra_hi - ra_lo
 
                 // Compute remaining contribution for the index i
+                // With LowToHigh binding, i represents the higher bits (bits round+1, round+2, ...)
+                // The remaining contribution comes from these higher bits
                 var remaining_contrib = F.zero();
                 var remaining_power: u64 = current_power * 2;
                 const remaining_vars = self.unmap.num_vars - self.round - 1;

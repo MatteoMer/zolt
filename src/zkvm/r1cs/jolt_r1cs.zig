@@ -427,14 +427,15 @@ pub fn JoltSpartanInterface(comptime F: type) type {
 
             const half = self.current_len / 2;
 
-            // p(0) = sum of first half
-            // p(1) = sum of second half
+            // p(0) = sum over indices with LSB=0 (even indices)
+            // p(1) = sum over indices with LSB=1 (odd indices)
+            // Using LowToHigh indexing to match Jolt's binding order
             var p0 = F.zero();
             var p1 = F.zero();
 
             for (0..half) |i| {
-                p0 = p0.add(self.combined_poly[i]);
-                p1 = p1.add(self.combined_poly[i + half]);
+                p0 = p0.add(self.combined_poly[2 * i]);
+                p1 = p1.add(self.combined_poly[2 * i + 1]);
             }
 
             // p(2) = extrapolation for linear polynomial
@@ -469,10 +470,10 @@ pub fn JoltSpartanInterface(comptime F: type) type {
             const half = self.current_len / 2;
             const one_minus_r = F.one().sub(challenge);
 
-            // Fold: new[i] = (1-r) * old[i] + r * old[i + half]
+            // Fold using LowToHigh: new[i] = (1-r) * old[2*i] + r * old[2*i+1]
             for (0..half) |i| {
-                self.combined_poly[i] = one_minus_r.mul(self.combined_poly[i])
-                    .add(challenge.mul(self.combined_poly[i + half]));
+                self.combined_poly[i] = one_minus_r.mul(self.combined_poly[2 * i])
+                    .add(challenge.mul(self.combined_poly[2 * i + 1]));
             }
 
             // Update the effective length

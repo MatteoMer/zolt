@@ -190,13 +190,14 @@ pub fn IncPolynomial(comptime F: type) type {
             return self.evals[j];
         }
 
-        /// Bind the first variable to value r
+        /// Bind the first variable (LSB) to value r using LowToHigh order.
+        /// Uses adjacent-pair folding: new[i] = (1-r)*old[2*i] + r*old[2*i+1]
         pub fn bind(self: *Self, r: F) void {
             const half = self.evals.len / 2;
+            const one_minus_r = F.one().sub(r);
             for (0..half) |i| {
-                const lo = self.evals[i];
-                const hi = self.evals[i + half];
-                const one_minus_r = F.one().sub(r);
+                const lo = self.evals[2 * i];
+                const hi = self.evals[2 * i + 1];
                 self.evals[i] = one_minus_r.mul(lo).add(r.mul(hi));
             }
             if (self.num_vars > 0) self.num_vars -= 1;
@@ -312,7 +313,7 @@ pub fn LtPolynomial(comptime F: type) type {
         /// LT(x, y) = 1 iff x < y, computed as MLE over bit comparisons
         pub fn evaluateAtIndex(self: *const Self, j: usize) F {
             // LT(j, r) = Σ_{i} (1-j_i) * r_i * Π_{k>i} eq(j_k, r_k)
-            // where j_i is bit i of j
+            // where j_i is bit i of j (LSB = bit 0)
             var result = F.zero();
 
             for (0..self.num_vars) |i| {
@@ -322,7 +323,7 @@ pub fn LtPolynomial(comptime F: type) type {
                     // Contribution: r[i] * Π_{k>i} eq(j_k, r_k)
                     var contrib = self.r_cycle[i];
 
-                    // Multiply by eq for higher bits
+                    // Multiply by eq for higher bits (more significant than position i)
                     for ((i + 1)..self.num_vars) |k| {
                         const jk = (j >> @intCast(k)) & 1;
                         const rk = self.r_cycle[k];
@@ -337,6 +338,35 @@ pub fn LtPolynomial(comptime F: type) type {
                 }
             }
 
+            return result;
+        }
+
+        /// Debug: evaluate LT and print intermediate values
+        pub fn evaluateAtIndexDebug(self: *const Self, j: usize) F {
+            var result = F.zero();
+            std.debug.print("[LT DEBUG] evaluateAtIndex(j={}) num_vars={}\n", .{ j, self.num_vars });
+
+            for (0..self.num_vars) |i| {
+                const ji = (j >> @intCast(i)) & 1;
+                std.debug.print("  bit[{}] of j = {}\n", .{ i, ji });
+                if (ji == 0) {
+                    var contrib = self.r_cycle[i];
+                    std.debug.print("  i={}: r_cycle[{}] = {any}\n", .{ i, i, self.r_cycle[i].toBytes()[0..8] });
+
+                    for ((i + 1)..self.num_vars) |k| {
+                        const jk = (j >> @intCast(k)) & 1;
+                        const rk = self.r_cycle[k];
+                        const eq_factor = if (jk == 1) rk else F.one().sub(rk);
+                        std.debug.print("    k={}: j_k={}, r_cycle[k]={any}, eq_factor={any}\n", .{ k, jk, rk.toBytes()[0..8], eq_factor.toBytes()[0..8] });
+                        contrib = contrib.mul(eq_factor);
+                    }
+
+                    std.debug.print("  i={}: contribution = {any}\n", .{ i, contrib.toBytes()[0..8] });
+                    result = result.add(contrib);
+                }
+            }
+
+            std.debug.print("[LT DEBUG] final result = {any}\n", .{result.toBytes()[0..8]});
             return result;
         }
 
@@ -439,6 +469,31 @@ pub fn ValEvaluationProver(comptime F: type) type {
                 lt_evals[j] = lt_poly.evaluateAtIndex(j);
             }
 
+            // Debug: print initial LT evaluations for indices 0, 1, 128 (to check pattern)
+            std.debug.print("[VALEVAL_INIT] LT polynomial values:\n", .{});
+            std.debug.print("  lt_evals[0] = {any}\n", .{lt_evals[0].toBytes()[0..8]});
+            std.debug.print("  lt_evals[1] = {any}\n", .{lt_evals[1].toBytes()[0..8]});
+            std.debug.print("  lt_evals[128] = {any}\n", .{if (n > 128) lt_evals[128].toBytes()[0..8] else lt_evals[0].toBytes()[0..8]});
+            std.debug.print("  r_cycle values (from params):\n", .{});
+            for (0..@min(3, params.r_cycle.len)) |i| {
+                std.debug.print("    r_cycle[{}] = {any}\n", .{ i, params.r_cycle[i].toBytes()[0..8] });
+            }
+            // Verify LT(0, r_cycle) computation
+            // For j=0: LT(0, r) = r[0]*(1-r[1])*(1-r[2])*...*(1-r[n-1]) + r[1]*(1-r[2])*...*(1-r[n-1]) + ...
+            // Actually just print the formula computation:
+            std.debug.print("  Verifying LT(0, r_cycle) directly:\n", .{});
+            var lt_0_direct = F.zero();
+            for (0..num_vars) |i| {
+                var contrib = params.r_cycle[i];
+                for ((i + 1)..num_vars) |k| {
+                    contrib = contrib.mul(F.one().sub(params.r_cycle[k]));
+                }
+                lt_0_direct = lt_0_direct.add(contrib);
+            }
+            std.debug.print("    LT(0, r_cycle) direct = {any}\n", .{lt_0_direct.toBytes()[0..8]});
+            std.debug.print("    lt_evals[0] = {any}\n", .{lt_evals[0].toBytes()[0..8]});
+            std.debug.print("    Match? {}\n", .{lt_0_direct.eql(lt_evals[0])});
+
             // Compute initial claim
             var initial_claim = F.zero();
             for (0..n) |j| {
@@ -483,6 +538,7 @@ pub fn ValEvaluationProver(comptime F: type) type {
         /// For degree-3 sumcheck (product of 3 multilinear), we need 4 evaluations:
         ///   p(x) = Σ_{j} inc(x,j) · wa(x,j) · lt(x,j)
         /// where the current variable takes value x and we sum over remaining indices.
+        /// Uses LowToHigh indexing: x=0 at index 2*i, x=1 at index 2*i+1
         pub fn computeRoundPolynomial(self: *Self) [4]F {
             var evals: [4]F = .{ F.zero(), F.zero(), F.zero(), F.zero() };
             const n = self.effectiveLen();
@@ -497,15 +553,15 @@ pub fn ValEvaluationProver(comptime F: type) type {
             }
 
             for (0..half) |i| {
-                // Evaluations at x = 0 (lower half)
-                const inc_0 = self.inc_evals[i];
-                const wa_0 = self.wa_evals[i];
-                const lt_0 = self.lt_evals[i];
+                // For LowToHigh binding, x=0 is at index 2*i (bit 0 = 0)
+                // and x=1 is at index 2*i+1 (bit 0 = 1)
+                const inc_0 = self.inc_evals[2 * i];
+                const wa_0 = self.wa_evals[2 * i];
+                const lt_0 = self.lt_evals[2 * i];
 
-                // Evaluations at x = 1 (upper half)
-                const inc_1 = self.inc_evals[i + half];
-                const wa_1 = self.wa_evals[i + half];
-                const lt_1 = self.lt_evals[i + half];
+                const inc_1 = self.inc_evals[2 * i + 1];
+                const wa_1 = self.wa_evals[2 * i + 1];
+                const lt_1 = self.lt_evals[2 * i + 1];
 
                 // p(0): product at x = 0
                 evals[0] = evals[0].add(inc_0.mul(wa_0).mul(lt_0));
@@ -536,7 +592,9 @@ pub fn ValEvaluationProver(comptime F: type) type {
         }
 
         /// Bind the current variable to challenge r, and provide round polynomial values
-        /// This folds all three polynomials: f_new[i] = (1-r)*f[i] + r*f[i+half]
+        /// This folds all three polynomials using LowToHigh binding order:
+        /// f_new[i] = (1-r)*f[2*i] + r*f[2*i+1]
+        /// This binds the LSB variable (bit 0 of index) first, matching Jolt's behavior.
         /// The round polynomial values [p(0), p(1), p(2), p(3)] are used to compute the new claim
         pub fn bindChallengeWithPoly(self: *Self, r: F, round_poly: [4]F) void {
             const n = self.effectiveLen();
@@ -548,14 +606,16 @@ pub fn ValEvaluationProver(comptime F: type) type {
 
             const one_minus_r = F.one().sub(r);
 
-            // Fold all three polynomials
+            // Fold all three polynomials using LowToHigh binding:
+            // new[i] = (1-r)*old[2*i] + r*old[2*i+1]
+            // This binds the variable corresponding to bit 0 of the index (LSB).
             for (0..half) |i| {
-                // inc: interpolate between low and high
-                self.inc_evals[i] = one_minus_r.mul(self.inc_evals[i]).add(r.mul(self.inc_evals[i + half]));
+                // inc: interpolate between adjacent pairs
+                self.inc_evals[i] = one_minus_r.mul(self.inc_evals[2 * i]).add(r.mul(self.inc_evals[2 * i + 1]));
                 // wa: interpolate
-                self.wa_evals[i] = one_minus_r.mul(self.wa_evals[i]).add(r.mul(self.wa_evals[i + half]));
+                self.wa_evals[i] = one_minus_r.mul(self.wa_evals[2 * i]).add(r.mul(self.wa_evals[2 * i + 1]));
                 // lt: interpolate
-                self.lt_evals[i] = one_minus_r.mul(self.lt_evals[i]).add(r.mul(self.lt_evals[i + half]));
+                self.lt_evals[i] = one_minus_r.mul(self.lt_evals[2 * i]).add(r.mul(self.lt_evals[2 * i + 1]));
             }
 
             // Conceptually shrink the arrays (we'll use fewer elements)

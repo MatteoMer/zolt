@@ -145,6 +145,7 @@ pub fn ValFinalProver(comptime F: type) type {
         }
 
         /// Compute round polynomial [p(0), p(1), p(2), p(3)]
+        /// Uses LowToHigh indexing: x=0 at index 2*i, x=1 at index 2*i+1
         pub fn computeRoundPolynomial(self: *Self) [4]F {
             var evals: [4]F = .{ F.zero(), F.zero(), F.zero(), F.zero() };
             const n = self.effectiveLen();
@@ -161,10 +162,12 @@ pub fn ValFinalProver(comptime F: type) type {
             const three = F.fromU64(3);
 
             for (0..half) |i| {
-                const inc_0 = self.inc_evals[i];
-                const wa_0 = self.wa_evals[i];
-                const inc_1 = self.inc_evals[i + half];
-                const wa_1 = self.wa_evals[i + half];
+                // For LowToHigh binding, x=0 is at index 2*i (bit 0 = 0)
+                // and x=1 is at index 2*i+1 (bit 0 = 1)
+                const inc_0 = self.inc_evals[2 * i];
+                const wa_0 = self.wa_evals[2 * i];
+                const inc_1 = self.inc_evals[2 * i + 1];
+                const wa_1 = self.wa_evals[2 * i + 1];
 
                 // p(0) and p(1)
                 evals[0] = evals[0].add(inc_0.mul(wa_0));
@@ -183,6 +186,7 @@ pub fn ValFinalProver(comptime F: type) type {
             return evals;
         }
 
+        /// Uses LowToHigh binding: new[i] = (1-r)*old[2*i] + r*old[2*i+1]
         pub fn bindChallengeWithPoly(self: *Self, r: F, round_poly: [4]F) void {
             const n = self.effectiveLen();
             const half = n / 2;
@@ -193,8 +197,8 @@ pub fn ValFinalProver(comptime F: type) type {
 
             const one_minus_r = F.one().sub(r);
             for (0..half) |i| {
-                self.inc_evals[i] = one_minus_r.mul(self.inc_evals[i]).add(r.mul(self.inc_evals[i + half]));
-                self.wa_evals[i] = one_minus_r.mul(self.wa_evals[i]).add(r.mul(self.wa_evals[i + half]));
+                self.inc_evals[i] = one_minus_r.mul(self.inc_evals[2 * i]).add(r.mul(self.inc_evals[2 * i + 1]));
+                self.wa_evals[i] = one_minus_r.mul(self.wa_evals[2 * i]).add(r.mul(self.wa_evals[2 * i + 1]));
             }
             for (half..n) |i| {
                 self.inc_evals[i] = F.zero();

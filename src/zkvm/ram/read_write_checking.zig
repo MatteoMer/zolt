@@ -30,6 +30,12 @@ pub fn RamReadWriteCheckingParams(comptime F: type) type {
         log_k: usize,
         /// Log2 of trace length
         log_t: usize,
+        /// Number of rounds in Phase 1 (cycle binding) - determines when Phase 2 starts
+        /// This allows the prover to match the batched sumcheck's 3-phase structure:
+        /// - Phase 1: phase1_num_rounds (some cycle vars)
+        /// - Phase 2: log_k (all address vars)
+        /// - Phase 3: remaining (rest of cycle vars)
+        phase1_num_rounds: usize,
         /// Start address of RAM region
         start_address: u64,
         /// Allocator for internal use
@@ -43,6 +49,19 @@ pub fn RamReadWriteCheckingParams(comptime F: type) type {
             log_t: usize,
             start_address: u64,
         ) !Self {
+            // Default: use log_t for backward compatibility
+            return initWithPhaseConfig(allocator, gamma, r_cycle, log_k, log_t, log_t, start_address);
+        }
+
+        pub fn initWithPhaseConfig(
+            allocator: Allocator,
+            gamma: F,
+            r_cycle: []const F,
+            log_k: usize,
+            log_t: usize,
+            phase1_num_rounds: usize,
+            start_address: u64,
+        ) !Self {
             const r_cycle_copy = try allocator.alloc(F, r_cycle.len);
             @memcpy(r_cycle_copy, r_cycle);
 
@@ -51,6 +70,7 @@ pub fn RamReadWriteCheckingParams(comptime F: type) type {
                 .r_cycle = r_cycle_copy,
                 .log_k = log_k,
                 .log_t = log_t,
+                .phase1_num_rounds = phase1_num_rounds,
                 .start_address = start_address,
                 .allocator = allocator,
             };
@@ -370,9 +390,16 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
         /// Compute round polynomial [s(0), s(1), s(2), s(3)] for batched cubic sumcheck
         pub fn computeRoundPolynomialCubic(self: *Self) [4]F {
             const gamma = self.params.gamma;
-            const in_phase1 = self.round < self.params.log_t;
+            const phase1_end = self.params.phase1_num_rounds;
+            const phase2_end = phase1_end + self.params.log_k;
 
-            const result = if (in_phase1)
+            // Phase structure for batched sumcheck:
+            // - Phase 1: phase1_num_rounds (some cycle vars) - cycle-major entries
+            // - Phase 2: log_k rounds (all address vars) - address-major entries + val_init
+            // - Phase 3: remaining (rest of cycle vars) - cycle-major entries
+            const in_cycle_phase = self.round < phase1_end or self.round >= phase2_end;
+
+            const result = if (in_cycle_phase)
                 self.computePhase1Polynomial(gamma)
             else
                 self.computePhase2Polynomial(gamma);
@@ -519,8 +546,8 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             //
             // At start of Phase 2, entries should be in AddressMajor order.
 
-            const log_t = self.params.log_t;
-            const addr_round = self.round - log_t;
+            const phase1_end = self.params.phase1_num_rounds;
+            const addr_round = self.round - phase1_end;
 
             std.debug.print("[RWC PHASE2] round={}, addr_round={}, entries.len={}\n", .{ self.round, addr_round, self.entries.items.len });
 
@@ -633,7 +660,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                             eq_cycle_scalar,
                             gamma,
                             addr_round,
-                            log_t,
+                            phase1_end,
                             self.challenges.items,
                         );
                         s0 = s0.add(evals[0]);
@@ -652,7 +679,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                             eq_cycle_scalar,
                             gamma,
                             addr_round,
-                            log_t,
+                            phase1_end,
                             self.challenges.items,
                         );
                         s0 = s0.add(evals[0]);
@@ -669,7 +696,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                             eq_cycle_scalar,
                             gamma,
                             addr_round,
-                            log_t,
+                            phase1_end,
                             self.challenges.items,
                         );
                         s0 = s0.add(evals[0]);
@@ -690,7 +717,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                         eq_cycle_scalar,
                         gamma,
                         addr_round,
-                        log_t,
+                        phase1_end,
                         self.challenges.items,
                     );
                     s0 = s0.add(evals[0]);
@@ -710,7 +737,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                         eq_cycle_scalar,
                         gamma,
                         addr_round,
-                        log_t,
+                        phase1_end,
                         self.challenges.items,
                     );
                     s0 = s0.add(evals[0]);
@@ -750,7 +777,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             eq_eval: F,
             gamma: F,
             addr_round: usize,
-            log_t: usize,
+            phase1_end: usize,
             challenges: []const F,
         ) [2]F {
             _ = even_checkpoint;
@@ -760,7 +787,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             var eq_addr = F.one();
             for (0..addr_round) |i| {
                 const bit_i: u1 = @truncate(even_entry.address >> @intCast(i));
-                const r_i = challenges[log_t + i];
+                const r_i = challenges[phase1_end + i];
                 if (bit_i == 1) {
                     eq_addr = eq_addr.mul(r_i);
                 } else {
@@ -793,7 +820,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             eq_eval: F,
             gamma: F,
             addr_round: usize,
-            log_t: usize,
+            phase1_end: usize,
             challenges: []const F,
         ) [2]F {
             _ = even_checkpoint;
@@ -802,7 +829,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             var eq_addr = F.one();
             for (0..addr_round) |i| {
                 const bit_i: u1 = @truncate(even_entry.address >> @intCast(i));
-                const r_i = challenges[log_t + i];
+                const r_i = challenges[phase1_end + i];
                 if (bit_i == 1) {
                     eq_addr = eq_addr.mul(r_i);
                 } else {
@@ -836,7 +863,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             eq_eval: F,
             gamma: F,
             addr_round: usize,
-            log_t: usize,
+            phase1_end: usize,
             challenges: []const F,
         ) [2]F {
             _ = odd_checkpoint;
@@ -845,7 +872,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             var eq_addr = F.one();
             for (0..addr_round) |i| {
                 const bit_i: u1 = @truncate(odd_entry.address >> @intCast(i));
-                const r_i = challenges[log_t + i];
+                const r_i = challenges[phase1_end + i];
                 if (bit_i == 1) {
                     eq_addr = eq_addr.mul(r_i);
                 } else {
@@ -875,9 +902,17 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
         pub fn bindChallenge(self: *Self, challenge: F) !void {
             try self.challenges.append(self.allocator, challenge);
 
-            // Fold eq_evals and inc in Phase 1
-            const in_phase1 = self.round < self.params.log_t;
-            if (in_phase1 and self.eq_size > 1) {
+            // Phase structure for batched sumcheck:
+            // - Phase 1: phase1_num_rounds (some cycle vars) - eq and inc binding
+            // - Phase 2: log_k rounds (all address vars) - val_init binding
+            // - Phase 3: remaining (rest of cycle vars + any extra address vars)
+            const phase1_end = self.params.phase1_num_rounds;
+            const phase2_end = phase1_end + self.params.log_k;
+
+            // Fold eq_evals and inc in Phase 1 (and Phase 3 for remaining cycle vars)
+            // In the 3-phase structure, cycle vars are bound in Phase 1 and Phase 3
+            const in_cycle_phase = self.round < phase1_end or self.round >= phase2_end;
+            if (in_cycle_phase and self.eq_size > 1) {
                 const half = self.eq_size / 2;
 
                 // Fold eq_evals using LowToHigh binding to match inc and entries:
@@ -910,12 +945,11 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 try self.bindEntries(challenge);
             }
 
-            // Fold val_init in Phase 2
+            // Fold val_init in Phase 2 (address binding phase)
             // This matches Jolt's val_init.bind_parallel(r, BindingOrder::LowToHigh)
-            const in_phase2 = self.round >= self.params.log_t and
-                self.round < self.params.log_t + self.params.log_k;
+            const in_phase2 = self.round >= phase1_end and self.round < phase2_end;
             if (in_phase2) {
-                const addr_round = self.round - self.params.log_t;
+                const addr_round = self.round - phase1_end;
                 const K = @as(usize, 1) << @intCast(self.params.log_k);
                 const current_size = K >> @intCast(addr_round);
                 if (current_size > 1) {
@@ -1176,17 +1210,40 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
         pub fn getOpeningClaims(self: *const Self, r_sumcheck: []const F) OpeningClaims(F) {
             const log_k = self.params.log_k;
             const log_t = self.params.log_t;
+            const phase1_end = self.params.phase1_num_rounds;
+            const phase2_end = phase1_end + log_k;
+            const phase3_cycle_len = log_t - phase1_end;
 
             var r_cycle: [32]F = undefined;
             var r_address: [32]F = undefined;
             @memset(&r_cycle, F.zero());
             @memset(&r_address, F.zero());
 
-            for (0..@min(log_t, r_sumcheck.len)) |i| {
-                r_cycle[log_t - 1 - i] = r_sumcheck[i];
+            // Extract r_address from Phase 2 challenges (reversed)
+            // Phase 2: r_sumcheck[phase1_end..phase2_end]
+            for (0..@min(log_k, r_sumcheck.len -| phase1_end)) |i| {
+                const src_idx = phase1_end + i;
+                if (src_idx < r_sumcheck.len) {
+                    r_address[log_k - 1 - i] = r_sumcheck[src_idx];
+                }
             }
-            for (0..@min(log_k, r_sumcheck.len -| log_t)) |i| {
-                r_address[log_k - 1 - i] = r_sumcheck[log_t + i];
+
+            // Extract r_cycle from Phase 1 and Phase 3 challenges
+            // r_cycle = reverse(phase3_cycle) ++ reverse(phase1)
+            // Phase 1: r_sumcheck[0..phase1_end] -> r_cycle[phase3_cycle_len..]
+            // Phase 3 cycle: r_sumcheck[phase2_end..] -> r_cycle[0..phase3_cycle_len]
+            for (0..@min(phase1_end, r_sumcheck.len)) |i| {
+                const dest_idx = phase3_cycle_len + (phase1_end - 1 - i);
+                if (dest_idx < log_t) {
+                    r_cycle[dest_idx] = r_sumcheck[i];
+                }
+            }
+            for (0..@min(phase3_cycle_len, r_sumcheck.len -| phase2_end)) |i| {
+                const src_idx = phase2_end + i;
+                if (src_idx < r_sumcheck.len) {
+                    const dest_idx = phase3_cycle_len - 1 - i;
+                    r_cycle[dest_idx] = r_sumcheck[src_idx];
+                }
             }
 
             var ra_claim = F.zero();

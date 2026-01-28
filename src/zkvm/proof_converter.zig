@@ -1817,42 +1817,50 @@ pub fn ProofConverter(comptime F: type) type {
                     break :blk F.zero();
                 };
 
-                // For ValFinal, compute init_eval at the OutputCheck r_address
-                // using computeInitialRamEval (which only includes bytecode + inputs).
+                // For ValFinal, compute init_eval at the OutputSumcheck's SUMCHECK CHALLENGES.
                 //
-                // IMPORTANT: We cannot use output_val_init_claim directly because the OutputSumcheck
-                // prover's val_init polynomial includes termination bits (as a WORKAROUND), but
-                // Jolt's verifier computes init_eval from eval_initial_ram_mle which only includes
-                // bytecode + inputs (NOT termination bits).
+                // CRITICAL INSIGHT: The r_address used for ValFinal is NOT the pre-sampled r_address_raf!
                 //
-                // OutputSumcheck's r_address comes from Stage 2 challenges at offset 8..24
-                // (OutputSumcheck has log_ram_k=16 rounds starting at max_rounds - log_ram_k = 24 - 16 = 8)
-                // The r_address is normalized by reversing the challenges (LITTLE_ENDIAN to BIG_ENDIAN).
-                const output_check_offset = n_cycle_vars; // max_rounds - log_ram_k = (log_ram_k + n_cycle_vars) - log_ram_k = n_cycle_vars
-                var r_address_output_check = try self.allocator.alloc(F, log_ram_k);
-                defer self.allocator.free(r_address_output_check);
+                // In Jolt's OutputSumcheck:
+                // 1. r_address (pre-sampled) is used for the eq(r_address, k) polynomial
+                // 2. The sumcheck binds val_final(k) and val_init(k) over index k
+                // 3. After binding, val_final[0] = val_final(r_sumcheck) where r_sumcheck = OutputSumcheck challenges
+                // 4. The opening_point cached in accumulator is normalize_opening_point(sumcheck_challenges)
+                //
+                // So output_val_final_claim is evaluated at r_sumcheck (the last log_ram_k Stage 2 challenges),
+                // NOT at r_address_raf. We must compute init_eval_for_val_final at the same point!
+                //
+                // OutputSumcheck runs from round (max_num_rounds - log_ram_k) to (max_num_rounds - 1).
+                // Its challenges are stage2_result.challenges[max_num_rounds - log_ram_k .. max_num_rounds].
+                //
+                // Jolt's normalize_opening_point reverses the challenges (LE -> BE conversion).
+                var r_address_output_sumcheck = try self.allocator.alloc(F, log_ram_k);
+                defer self.allocator.free(r_address_output_sumcheck);
 
-                // OutputSumcheck uses LITTLE_ENDIAN -> BIG_ENDIAN normalization (reverse)
+                // Extract OutputSumcheck's sumcheck challenges and reverse (normalize_opening_point)
+                const max_num_rounds_stage2 = stage2_result.challenges.len;
+                const output_sumcheck_start = if (max_num_rounds_stage2 >= log_ram_k) max_num_rounds_stage2 - log_ram_k else 0;
                 for (0..log_ram_k) |i| {
-                    const src_idx = output_check_offset + i;
-                    if (src_idx < stage2_result.challenges.len) {
-                        // Reverse: challenges[offset+i] goes to r_address[log_ram_k-1-i]
-                        r_address_output_check[log_ram_k - 1 - i] = stage2_result.challenges[src_idx];
+                    const src_idx = output_sumcheck_start + i;
+                    if (src_idx < max_num_rounds_stage2) {
+                        // Reverse order: challenge[0] -> r_address[log_ram_k-1], etc.
+                        r_address_output_sumcheck[log_ram_k - 1 - i] = stage2_result.challenges[src_idx];
                     } else {
-                        r_address_output_check[log_ram_k - 1 - i] = F.zero();
+                        r_address_output_sumcheck[log_ram_k - 1 - i] = F.zero();
                     }
                 }
 
-                std.debug.print("[ZOLT STAGE4 FIX] r_address_output_check (first 4):\n", .{});
+                std.debug.print("[ZOLT STAGE4 FIX] r_address_output_sumcheck from Stage 2 challenges (first 4):\n", .{});
                 for (0..@min(4, log_ram_k)) |i| {
-                    std.debug.print("[ZOLT STAGE4 FIX]   r_address_output_check[{}] = {any}\n", .{ i, r_address_output_check[i].toBytesBE() });
+                    std.debug.print("[ZOLT STAGE4 FIX]   r_address_output_sumcheck[{}] = {any}\n", .{ i, r_address_output_sumcheck[i].toBytesBE() });
                 }
+                std.debug.print("[ZOLT STAGE4 FIX] Output sumcheck challenge indices: {} to {}\n", .{ output_sumcheck_start, max_num_rounds_stage2 });
 
                 const init_eval_for_val_final = blk: {
                     if (config.initial_ram) |ir| {
                         if (config.memory_layout) |ml| {
-                            const result = computeInitialRamEval(ir, ml, r_address_output_check, log_ram_k);
-                            std.debug.print("[ZOLT STAGE4 FIX] Computed init_eval_for_val_final at OutputCheck r_address:\n", .{});
+                            const result = computeInitialRamEval(ir, ml, r_address_output_sumcheck, log_ram_k);
+                            std.debug.print("[ZOLT STAGE4 FIX] Computed init_eval_for_val_final at OutputSumcheck challenges:\n", .{});
                             std.debug.print("[ZOLT STAGE4 FIX]   init_eval_for_val_final = {any}\n", .{result.toBytesBE()});
                             break :blk result;
                         }
@@ -2765,12 +2773,20 @@ pub fn ProofConverter(comptime F: type) type {
                 // and gamma from transcript (gamma_rwc)
                 // tau_stage2 = [r_cycle_reversed (n_cycle_vars), tau_high_stage2]
                 // So r_cycle = tau[0..n_cycle_vars] (the first n_cycle_vars elements)
-                var rwc_params = ram.RamReadWriteCheckingParams(F).init(
+                //
+                // CRITICAL: The batched sumcheck uses a 3-phase structure where:
+                // - Phase 1: phase1_num_rounds cycle vars
+                // - Phase 2: log_k address vars
+                // - Phase 3: remaining cycle vars
+                // Default phase1_num_rounds = log_t / 2, matching Jolt's ReadWriteConfig.default()
+                const phase1_num_rounds = n_cycle_vars / 2;
+                var rwc_params = ram.RamReadWriteCheckingParams(F).initWithPhaseConfig(
                     self.allocator,
                     gamma_rwc,
                     tau[0..n_cycle_vars], // r_cycle is the first n_cycle_vars elements of tau
                     log_ram_k,
                     n_cycle_vars,
+                    phase1_num_rounds,
                     if (config.memory_layout) |ml| ml.getLowestAddress() else 0x80000000,
                 ) catch null;
 
@@ -3296,6 +3312,9 @@ pub fn ProofConverter(comptime F: type) type {
                         output_prover.?.updateClaim(evals, challenge);
                     }
                     output_prover.?.bindChallenge(challenge);
+                    // Debug: log the challenges received by OutputSumcheck
+                    const output_round_idx = round_idx - (max_num_rounds - log_ram_k);
+                    std.debug.print("[ZOLT OUTPUT_BIND] round_idx={}, output_round_idx={}, challenge={any}\n", .{ round_idx, output_round_idx, challenge.toBytesBE() });
                 }
 
                 // Bind challenge to RAF prover when it's active
@@ -3832,7 +3851,7 @@ pub fn ProofConverter(comptime F: type) type {
             std.debug.print("[COMPUTE_INIT_RAM_EVAL] r_address_be.len = {}\n", .{r_address_be.len});
             std.debug.print("[COMPUTE_INIT_RAM_EVAL] Full r_address_be array (all {} elements):\n", .{r_address_be.len});
             for (0..r_address_be.len) |i| {
-                std.debug.print("[COMPUTE_INIT_RAM_EVAL]   r_address_be[{}] = {any}\n", .{ i, r_address_be[i].toBytes()[0..8] });
+                std.debug.print("[COMPUTE_INIT_RAM_EVAL]   r_address_be[{}] (BE) = {any}\n", .{ i, r_address_be[i].toBytesBE() });
             }
             std.debug.print("[COMPUTE_INIT_RAM_EVAL] initial_ram.count() = {}\n", .{initial_ram.count()});
 

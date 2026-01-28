@@ -1,5 +1,30 @@
 # Zolt-Jolt Cross-Verification Progress
 
+## Session 68 Summary - Stage 4 Fix Applied (2026-01-28)
+
+### Fix Applied: Removed Termination Bit Workaround
+
+**Commit:** `cee6b7e` - Remove termination bit workaround from RWC prover
+
+**Analysis:**
+1. Jolt's initial RAM state does NOT include termination or panic bits
+2. These bits are only in the final RAM state (val_final), used by OutputSumcheck
+3. Zolt's workaround was incorrectly adding termination bit to val_init
+4. This caused `rwc_val_claim` to include termination when it shouldn't
+
+**Expected Result:**
+For programs without RAM operations (like Fibonacci):
+- `rwc_val_claim` = MLE(initial_ram) @ r_address
+- `init_eval` = MLE(initial_ram) @ r_address (computed by verifier)
+- `input_claim = 0` (correct for both Zolt and Jolt)
+
+**Key Insight:**
+Opening points are NOT stored in serialized proof - both prover and verifier
+reconstruct them from sumcheck challenges using `normalize_opening_point`.
+Zolt's proof format (only storing key + claim) is correct.
+
+---
+
 ## Session 67 Summary - Stage 4 Input Claim Mismatch (2026-01-27)
 
 ### Critical Finding: Stage 4 Transcript Divergence

@@ -1,6 +1,6 @@
 # Zolt-Jolt Compatibility: Status Update
 
-## Status: DEBUGGING PROOF DESERIALIZATION / STAGE 4 VALIDATION
+## Status: ROOT CAUSE FOUND - LT POLYNOMIAL MISMATCH
 
 ## Summary
 
@@ -17,126 +17,80 @@ Zolt can now:
 
 Verification fails at Stage 4: `Sumcheck verification failed`
 
-## Current Issue Analysis (Session 72)
+## ROOT CAUSE IDENTIFIED (Session 72)
 
-### Two Separate Issues Identified
+### LT Polynomial Mismatch
 
-#### Issue 1: Proof Deserialization Failure
-When proof/preprocessing are out of sync:
-```
-Failed to deserialize proof: the input buffer contained invalid data
-```
-**Fix**: Always regenerate proof and preprocessing together
-
-#### Issue 2: Stage 4 inc_claim/wa_claim Zero in Jolt
-
-Jolt's verifier receives ZERO for `inc_claim` and `wa_claim`:
+The LT (Less-Than) polynomial computation doesn't match between Zolt's prover and Jolt's verifier:
 
 ```
-ValEvaluation expected_output_claim debug:
-  inc_claim: [00, 00, 00, 00, ...]  <-- ALL ZEROS!
-  wa_claim: [00, 00, 00, 00, ...]   <-- ALL ZEROS!
-  lt_eval: [a1, b1, 48, 02, ...]    <-- Non-zero (computed correctly)
-  result (inc*wa*lt): [00, 00, ...]  <-- Zero because inc*wa = 0
+[ZOLT LT DEBUG] Computing LT(r, r_cycle):
+  lt_eval_computed (Jolt formula) = { 32, 36, 41, 131, 38, 192, 145, 187, ... }
+  lt_eval_prover (from binding)   = { 45, 226, 211, 44, 147, 119, 45, 90, ... }
+  Match? false
 ```
 
-But Zolt computes NONZERO values:
-```
-[ZOLT STAGE4 VALEVAL DEBUG]
-  val_eval_openings.inc_eval = { 9, 53, 218, 196, ... }   <-- NONZERO!
-  val_eval_openings.wa_eval = { 17, 245, 253, 169, ... }  <-- NONZERO!
-```
+**This is the root cause of the Stage 4 verification failure.**
 
-### Serialization Format Analysis
+### The Issue
 
-Verified that OpeningId serialization format matches between Zolt and Jolt:
-- UNTRUSTED_ADVICE_BASE = 0
-- TRUSTED_ADVICE_BASE = 24
-- COMMITTED_BASE = 48
-- VIRTUAL_BASE = 72
+The LT polynomial is used in `ValEvaluation::expected_output_claim()` to compute `inc * wa * lt`. Since `lt` doesn't match between prover and verifier, the expected output claim doesn't match the sumcheck output claim.
 
-For `CommittedPolynomial::RamInc` (value 1) with `SumcheckId::RamValEvaluation` (value 10):
-- fused = 48 + 10 = 58
-- poly = 1
+Looking at the debug output:
+- x values (from Stage 4 sumcheck challenges): `{ 19, 204, 144, 7, ... }`, etc.
+- y values (from Stage 2 r_cycle): `{ 84, 119, 25, 226, ... }`, etc.
 
-Both Zolt and Jolt use the same encoding.
+### Likely Causes
 
-### Sumcheck Instance Matching Verified
+1. **r_cycle point mismatch**: The prover's LtPolynomial is bound with a different r_cycle point than what the verifier uses.
 
-All 5 instances match at the end of Stage 4:
-```
-[ZOLT DEBUG] inst0 MATCH: true
-[ZOLT DEBUG] inst1 MATCH: true
-[ZOLT DEBUG] inst2 MATCH: true
-[ZOLT DEBUG] inst3 MATCH: true
-[ZOLT DEBUG] inst4 MATCH: true
-[ZOLT DEBUG] expected_batched (from provers) = { 6, 218, 102, ... }
-[ZOLT DEBUG] actual batched = { 6, 218, 102, ... }
-[ZOLT DEBUG] MATCH: true
-```
+2. **Endianness issue**: The LT computation iterates MSB-to-LSB, but there may be a mismatch in how the challenge bytes are interpreted.
 
-The sumcheck round polynomials are correct, but the expected output claim fails
-because Jolt receives zero for the opening claims.
+3. **normalize_opening_point issue**: The verifier's `normalize_opening_point` may construct r_cycle differently than what the prover used.
 
 ### Next Steps
 
-1. **Regenerate proof/preprocessing** - Currently running, ~5 minutes
-2. **Add debug to Jolt deserialization** - Print the raw bytes being read for RamInc claims
-3. **Compare byte-by-byte** - hexdump both Zolt output and check against Jolt's expected format
-4. **Check BTreeMap iteration order** - Verify the claims are written in the order Jolt expects
+1. **Compare r_cycle points** - Check that the r_cycle used to initialize LtPolynomial in the prover matches what the verifier reconstructs via normalize_opening_point.
 
-### Debug Code Added
+2. **Check LtPolynomial::bind ordering** - The LtPolynomial uses LowToHigh binding order. Verify this matches Jolt's expectation.
 
-In `src/zkvm/jolt_types.zig` - Added debug output for RamInc claims during serialization:
-```zig
-// In OpeningClaims.serialize():
-switch (entry.id) {
-    .Committed => |c| {
-        switch (c.poly) {
-            .RamInc => {
-                std.debug.print("[SERIALIZE DEBUG] Claim {}: RamInc/{} = {any}\n", ...);
-            },
-            ...
-        }
-    },
-    ...
-}
-```
+3. **Verify challenge interpretation** - Ensure the 32-byte challenges are interpreted the same way in both systems.
 
-### Test Commands
+### Relevant Code Locations
+
+Zolt:
+- `src/zkvm/ram/val_evaluation.zig` - LtPolynomial initialization and binding
+- `src/zkvm/proof_converter.zig` - Stage 4 LT debug code (around line 2380)
+
+Jolt:
+- `jolt-core/src/zkvm/ram/val_evaluation.rs` - LT computation formula (lines 386-391):
+  ```rust
+  for (x, y) in zip(&r.r, &r_cycle.r) {
+      lt_eval += (F::one() - x) * y * eq_term;
+      eq_term *= F::one() - x - y + *x * y + *x * y;
+  }
+  ```
+
+### Debug Command
 
 ```bash
-# Generate proof and preprocessing (must be run together)
 ./zig-out/bin/zolt prove examples/fibonacci.elf \
-    --export-preprocessing /home/vivado/projects/zolt/logs/zolt_preprocessing.bin \
-    -o /home/vivado/projects/zolt/logs/zolt_proof_dory.bin
-
-# Run Jolt verification with debug
-cd /home/vivado/projects/jolt && \
-cargo test --no-default-features --features minimal,zolt-debug --release \
-    -p jolt-core test_verify_zolt_proof_with_zolt_preprocessing \
-    -- --ignored --nocapture
-
-# Hexdump opening claims section
-xxd /home/vivado/projects/zolt/logs/zolt_proof_dory.bin | head -100
+    --export-preprocessing /tmp/zolt_preprocessing_new.bin \
+    -o /tmp/native_proof.bin \
+    --jolt-format /tmp/zolt_proof_jolt.bin 2>&1 | grep "LT DEBUG"
 ```
 
-### Key Files
+## Previous Session Progress
 
-- `src/zkvm/jolt_types.zig` - OpeningId and OpeningClaims serialization
-- `src/zkvm/proof_converter.zig` - Stage 4 claim insertion (lines 2486-2512)
-- Jolt: `jolt-core/src/poly/opening_proof.rs` - OpeningId deserialization
-- Jolt: `jolt-core/src/zkvm/proof_serialization.rs` - Claims deserialization
+- Fixed termination write inclusion
+- Fixed start_address in proof_converter
+- Verified serialization format matches
+- All 5 Stage 4 sumcheck instances match their individual provers
+- Batched claim computation is correct
 
-## Currently Running
+## Files
 
-Prover is regenerating proof and preprocessing:
-```bash
-./zig-out/bin/zolt prove examples/fibonacci.elf \
-    --export-preprocessing /home/vivado/projects/zolt/logs/zolt_preprocessing.bin \
-    -o /home/vivado/projects/zolt/logs/zolt_proof_dory.bin
-```
+- Proof generation command completed, check `/tmp/` for output files
+- Need to copy to `/home/vivado/projects/zolt/logs/` before running Jolt test
 
-Check with: `pgrep -f "zig-out/bin/zolt" && tail -20 /tmp/prover_debug.log`
-
-SESSION_ENDING - Prover still running, need to verify deserialization and debug inc_claim/wa_claim issue
+SESSION_ENDING - Root cause found: LT polynomial mismatch. Need to debug r_cycle point and binding order.

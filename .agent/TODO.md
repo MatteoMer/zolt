@@ -17,80 +17,81 @@ Zolt can now:
 
 Verification fails at Stage 4: `batched_claim ≠ total_expected`
 
-## Current Issue Analysis (Session 71)
+## Current Issue Analysis (Session 71 - Updated)
 
-### Key Finding: Instance 0 (RegistersRWC) is CORRECT
+### Recent Progress (This Session)
 
-The RegistersRWC instance computes correctly:
-- `regs_current_claim (poly_0 final)` = `expected_output (eq * combined)` ✓
-- The eq polynomial (`merged_eq[0]`) matches `eq_val_be` computed via MLE ✓
+1. **Fixed termination write issue**:
+   - The synthetic termination write IS now being recorded
+   - `[TRACE] Recorded synthetic termination write: addr=0x7fffc008, cycle=54`
 
-### The Problem: Batched Claim Mismatch
+2. **Fixed start_address in proof_converter**:
+   - Now uses `memory_layout.getLowestAddress() = 0x7FFF8000`
+   - IncPolynomial correctly includes the termination write: `Write at idx=2049, timestamp=54, old_val=0, new_val=1, inc=1`
+
+3. **ValEval and ValFinal now produce NONZERO expected outputs**:
+   - Instance 1 (ValEval): `inc*wa*lt={ 18, 125, 12, 131, ... }` (was all zeros before)
+   - Instance 2 (ValFinal): `inc*wa={ 12, 200, 234, 237, ... }` (was all zeros before)
+
+### Current Mismatch
 
 After all 15 rounds of Stage 4:
-- `batched_claim` = `{ 13, 174, 120, 9, 233, 120, 62, 18, ... }` (sumcheck output)
-- `total_expected` = `{ 18, 61, 142, 143, 28, 54, 66, 104, ... }` (computed from openings)
+- `batched_claim (sumcheck output)` = `{ 13, 174, 120, 9, 233, 120, 62, 18, ... }`
+- `total_expected (weighted sum)` = `{ 18, 61, 142, 143, 28, 54, 66, 104, ... }`
 
-These don't match because the weighted sum of instance outputs doesn't equal the evolved batched_claim.
+These still don't match!
 
-### Stage 4 Batched Sumcheck Structure
-
-The batched sumcheck has 3 instances with different round counts:
-- Instance 0 (RegistersRWC): 15 rounds, offset=0, uses challenges[0..15]
-- Instance 1 (ValEvaluation): 8 rounds, offset=7, uses challenges[7..15]
-- Instance 2 (ValFinal): 8 rounds, offset=7, uses challenges[7..15]
-
-### Root Cause Hypothesis
-
-The expected output computation may not be using the correct challenge slice for Instances 1 and 2.
-
-In Jolt's verifier:
-- Instance 1's expected output uses `r_sumcheck[7..15]` (the LAST 8 challenges)
-- Instance 2's expected output uses `r_sumcheck[7..15]` (same slice)
-
-In Zolt's proof_converter, need to verify:
-- `val_eval_openings` are computed at the correct bound point
-- `val_final_openings` are computed at the correct bound point
-- The expected output formula uses the correct LT/EQ evaluations
-
-### Verification Check Details
+### Debug Details
 
 ```
-batched_claim = { 13, 174, 120, 9, ... }  (sumcheck output after 15 rounds)
-Instance 0: expected={ eq*combined }, coeff={...}, weighted={...}
-Instance 1: expected={ inc*wa*lt }, coeff={...}, weighted={...}
-Instance 2: expected={ inc*wa }, coeff={...}, weighted={...}
-total_expected = weighted_0 + weighted_1 + weighted_2 = { 18, 61, 142, 143, ... }
-Do they match? false
+[ZOLT STAGE4 VERIFY CHECK]
+  batched_claim (sumcheck output) = { 13, 174, 120, 9, 233, 120, 62, 18, ... }
+  Instance 0: expected={ 0, 223, 38, 219, ... }
+  Instance 1 (ValEval): inc*wa*lt={ 18, 125, 12, 131, ... }  <- NONZERO NOW!
+  Instance 2 (ValFinal): inc*wa={ 12, 200, 234, 237, ... }  <- NONZERO NOW!
+  total_expected = { 18, 61, 142, 143, ... }
+  Do they match? false
 ```
 
-## Next Steps
+### Remaining Issues to Debug
 
-1. **Verify Instance 1 and 2 binding order**:
-   - Ensure `val_eval_prover` and `val_final_prover` bind challenges in the correct order
-   - The first variable should bind to challenge[7], not challenge[0]
+1. **LT polynomial computation**:
+   - The LT polynomial uses r_cycle ordering
+   - Need to verify r_cycle_LE vs r_cycle_BE ordering matches Jolt
 
-2. **Verify LT polynomial evaluation**:
-   - `lt_eval` should be `LT(r_sumcheck[7..15], r_cycle_from_Stage2)`
-   - Check if the LT polynomial is being evaluated at the correct point
+2. **eq polynomial for expected output**:
+   - RegistersRWC expected output uses `eq(r_cycle_sumcheck, stage3_r_cycle)`
+   - Need to verify the endianness of both points
 
-3. **Debug the scaling/deferred contribution**:
-   - Rounds 0-6: Instances 1&2 contribute `2^(remaining-8) * input_claim * coeff` as constant
-   - Rounds 7-14: Instances 1&2 contribute actual polynomial evaluations
-   - Verify the transition is happening correctly
+3. **Sumcheck polynomial composition**:
+   - The batched sumcheck combines RegistersRWC, ValEval, and ValFinal
+   - Need to verify the polynomial contribution at each round
+
+### Key Files
+
+- `/home/vivado/projects/zolt/src/zkvm/proof_converter.zig` - Stage 4 prover
+  - Line 1786-1793: start_address now uses memory_layout.getLowestAddress() ✓
+  - Line 2336: eq_val_be computation for RegistersRWC
+
+- `/home/vivado/projects/zolt/src/zkvm/ram/val_evaluation.zig` - ValEvaluation prover
+  - LtPolynomial implementation
+
+- `/home/vivado/projects/jolt/jolt-core/src/zkvm/ram/val_evaluation.rs` - Reference
+
+### Test Commands
+
+```bash
+# Generate Jolt-compatible proof with debug output
+./zig-out/bin/zolt prove examples/fibonacci.elf -o /tmp/proof.bin \
+    --jolt-format /tmp/jolt_proof.bin 2>&1 | tee /tmp/stage4_debug.log
+
+# Check specific debug info
+grep "IncPolynomial" /tmp/stage4_debug.log
+grep "VERIFY CHECK" /tmp/stage4_debug.log
+```
 
 ## Files Generated
 
-- `/tmp/fib_proof.bin` - Zolt native format proof
-- `/tmp/zolt_proof_dory.bin` - Jolt-compatible format proof
-- `/tmp/zolt_preprocessing.bin` - Preprocessing for Jolt verifier
-
-## Test Commands
-
-```bash
-# Run full proof generation
-./zig-out/bin/zolt prove examples/fibonacci.elf -o /tmp/fib_proof.bin \
-    --jolt-format /tmp/zolt_proof_dory.bin \
-    --export-preprocessing /tmp/zolt_preprocessing.bin 2>&1 | \
-    grep -E "VERIFY CHECK|Do they match"
-```
+- `/tmp/test_proof.bin` - Zolt native format proof
+- `/tmp/test_jolt.bin` - Jolt-compatible format proof (40531 bytes)
+- `/tmp/jolt_prove.log` - Full debug output

@@ -445,6 +445,16 @@ pub fn ValEvaluationProver(comptime F: type) type {
                 initial_claim = initial_claim.add(inc_evals[j].mul(wa_evals[j]).mul(lt_evals[j]));
             }
 
+            // Debug: print value at j=54 (known termination write cycle)
+            if (n > 54) {
+                std.debug.print("[VALEVAL_INIT] At j=54: inc={any}, wa={any}, lt={any}\n", .{
+                    inc_evals[54].toBytes()[0..8],
+                    wa_evals[54].toBytes()[0..8],
+                    lt_evals[54].toBytes()[0..8],
+                });
+            }
+            std.debug.print("[VALEVAL_INIT] n={}, initial_claim={any}\n", .{ n, initial_claim.toBytes()[0..8] });
+
             return Self{
                 .inc_evals = inc_evals,
                 .wa_evals = wa_evals,

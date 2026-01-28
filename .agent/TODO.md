@@ -1,6 +1,6 @@
 # Zolt-Jolt Compatibility: Status Update
 
-## Status: VERIFIED INTERNALLY ✓ | 714/714 Tests Pass ✓
+## Status: CROSS-VERIFICATION IN PROGRESS
 
 ## Summary
 
@@ -10,30 +10,53 @@ Zolt can now:
 3. Export proofs in Jolt-compatible format (`--jolt-format`)
 4. Export preprocessing for Jolt verifier (`--export-preprocessing`)
 5. Pass all 714 unit tests ✓
+6. **Proof successfully deserializes in Jolt** ✓
+7. **Preprocessing successfully deserializes in Jolt** ✓
 
-## Test Results
+## Cross-Verification Status
+
+Using pre-built Jolt test binary (`jolt_core-14bdfbb6b9004947`):
 
 ```
-Build Summary: 714/714 tests passed
+✓ test_deserialize_zolt_proof - PASSED
+  Successfully deserialized: trace_length=256, RAM K=65536, 37 commitments
+
+✓ test_load_zolt_preprocessing - PASSED
+  Memory layout and bytecode correctly parsed
+
+✗ test_verify_zolt_proof_with_zolt_preprocessing - FAILS
+  "Verification failed: Stage 4 - Sumcheck verification failed"
 ```
 
-Note: Test harness killed by OOM (signal 9) due to environment memory constraints, but all 714 tests passed before termination.
+## Stage 4 Issue Analysis
 
-## Verification Results
+The sumcheck rounds pass, but the final claim check fails:
+```
+output_claim != expected_output_claim
+```
 
-All 6 stages pass internal verification:
-- Stage 1: Outer Spartan (R1CS instruction correctness) ✓
-- Stage 2: RAM RAF Evaluation ✓
-- Stage 3: Lasso Lookup ✓
-- Stage 4: Value Evaluation ✓
-- Stage 5: Register Evaluation ✓
-- Stage 6: Booleanity ✓
+In Jolt's RegistersReadWriteChecking verifier:
+1. `normalize_opening_point(sumcheck_challenges)` transforms challenges:
+   - Phase 1 challenges (Gruen): reversed
+   - Phase 2 challenges (address): reversed
+   - Phase 3 challenges (remaining cycle + address): reversed
+   - Output: [r_address | r_cycle] in BIG_ENDIAN
 
-## Current Blocker: Cross-Verification
+2. `expected_output_claim` computes:
+   ```
+   eq_eval = EqPolynomial::mle_endian(r_cycle_from_sumcheck, params.r_cycle)
+   combined = rd_wa * (inc + val) + gamma * rs1_ra * val + gamma^2 * rs2_ra * val
+   result = eq_eval * combined
+   ```
 
-Cannot verify with Jolt's verifier due to environment issue:
-- OpenSSL/pkg-config not available on this machine
-- Need `sudo apt-get install pkg-config libssl-dev` to build Jolt
+3. The `mle_endian` function pairs elements positionally when both are same endianness.
+
+## Hypothesis
+
+The issue may be in how Zolt:
+- Computes the final `eq_eval` value
+- Orders the r_cycle variables
+- Computes the `combined` claims formula
 
 ## Files Generated
 
@@ -41,34 +64,39 @@ Cannot verify with Jolt's verifier due to environment issue:
 - `/tmp/zolt_proof_dory.bin` - Jolt-compatible format proof (40KB)
 - `/tmp/zolt_preprocessing.bin` - Preprocessing for Jolt verifier (26KB)
 
-## Test Command for Cross-Verification
+## Test Commands
 
-To verify Zolt proof with Jolt (once deps installed):
 ```bash
-# Install dependencies first
-sudo apt-get install pkg-config libssl-dev
+# Run deserialization test (works)
+/home/vivado/projects/jolt/target/debug/deps/jolt_core-14bdfbb6b9004947 \
+    zolt_compat_test::tests::test_deserialize_zolt_proof --ignored --nocapture
 
-# Generate Zolt proof
-cd /path/to/zolt
-zig build
-./zig-out/bin/zolt prove examples/fibonacci.elf \
-    --jolt-format \
-    --export-preprocessing /tmp/zolt_preprocessing.bin \
-    -o /tmp/zolt_proof_dory.bin
-
-# Verify with Jolt
-cd /home/vivado/projects/jolt
-cargo test --package jolt-core test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
+# Run full verification (fails at Stage 4)
+/home/vivado/projects/jolt/target/debug/deps/jolt_core-14bdfbb6b9004947 \
+    zolt_compat_test::tests::test_verify_zolt_proof_with_zolt_preprocessing --ignored --nocapture
 ```
+
+## Next Steps
+
+1. Compare Zolt's Stage 4 final claim computation with Jolt's
+2. Check `normalize_opening_point` implementation in Zolt
+3. Verify r_cycle endianness is correct
+4. Check the `combined` formula matches exactly
 
 ## Technical Notes
 
-### Stage 4 Phase 3 Fix (Applied in Previous Sessions)
-- Phase 3 computes degree-3 polynomial when cycle variables remain
-- Phase 3 computes degree-2 polynomial when cycles are fully bound
-- This matches Jolt's implementation
+### Jolt's RegistersRWC expected_output_claim formula
+```rust
+let rd_write_value_claim = rd_wa_claim * (inc_claim + val_claim);
+let rs1_value_claim = rs1_ra_claim * val_claim;
+let rs2_value_claim = rs2_ra_claim * val_claim;
+let eq_eval = EqPolynomial::mle_endian(&r_cycle, &self.params.r_cycle);
+let combined = rd_write_value_claim + gamma * (rs1_value_claim + gamma * rs2_value_claim);
+result = eq_eval * combined
+```
 
-### Polynomial Format
-- Jolt-compatible format uses arkworks serialization
-- Field elements: 32 bytes little-endian (Montgomery form converted to standard)
-- GT elements (Dory commitments): 384 bytes uncompressed
+### Variable Order in normalize_opening_point
+- Phase 1: First log_T/2 rounds bind cycle vars (reversed)
+- Phase 2: Next LOG_K rounds bind address vars (reversed)
+- Phase 3: Remaining rounds bind cycle then address vars (both reversed)
+- Final: [r_address | r_cycle] concatenated

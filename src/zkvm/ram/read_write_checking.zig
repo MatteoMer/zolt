@@ -210,30 +210,23 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 std.debug.print("[RWC INIT] Populated {} val_init entries (shown first 5)\n", .{populated_count});
             }
 
-            // WORKAROUND: Set panic and termination bits in val_init to match OutputSumcheck
+            // NOTE: We do NOT add termination or panic bits to val_init here.
             //
-            // ROOT CAUSE: Zolt's tracer does NOT record the termination write in the RAM trace
-            // (see src/tracer/mod.zig:341, 357). But Jolt DOES record it as a normal RISC-V
-            // store instruction, which populates the inc and wa polynomials.
+            // Jolt's initial RAM state (used for eval_initial_ram_mle in verification)
+            // includes: bytecode, inputs, trusted/untrusted advice.
+            // It does NOT include: outputs, panic bit, termination bit.
             //
-            // This workaround ensures RWC's val_init matches OutputSumcheck's val_init exactly,
-            // so that Instance 1 (RamValEvaluation) has input_claim = 0.
+            // The termination bit is only in the FINAL RAM state (val_final), which is
+            // used by OutputSumcheck, not RamReadWriteChecking.
             //
-            // Without this: rwc_val_claim ≠ val_init_eval (they use different val_init values)
-            // With this: rwc_val_claim = val_init_eval (both use same val_init with termination bit)
-            if (memory_layout) |ml| {
-                const panic_index = remapAddress(ml.panic, ml, params.start_address) orelse 0;
-                if (panic_index < K) {
-                    const panic_val = if (is_panicking) F.one() else F.zero();
-                    val_init[panic_index] = panic_val;
-                    std.debug.print("[RWC INIT] val_init[{}] = {} (panic bit - WORKAROUND)\n", .{ panic_index, if (is_panicking) @as(u64, 1) else @as(u64, 0) });
-                }
-                const termination_index = remapAddress(ml.termination, ml, params.start_address) orelse 0;
-                if (!is_panicking and termination_index < K) {
-                    val_init[termination_index] = F.one();
-                    std.debug.print("[RWC INIT] val_init[{}] = 1 (termination bit - WORKAROUND)\n", .{termination_index});
-                }
-            }
+            // For programs without RAM operations (like Fibonacci):
+            //   - rwc_val_claim = MLE(initial_ram) @ r_address
+            //   - init_eval = MLE(initial_ram) @ r_address (computed by verifier)
+            //   - input_claim = rwc_val_claim - init_eval = 0
+            //
+            // This matches Jolt's behavior exactly.
+            _ = memory_layout;
+            _ = is_panicking;
 
             // Build sparse matrix entries from trace
             // Track current value per address to compute inc = new_value - prev_value

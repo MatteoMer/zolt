@@ -2001,6 +2001,22 @@ pub fn ProofConverter(comptime F: type) type {
                 std.debug.print("  val_eval_prover initial_claim = {any}\n", .{val_eval_prover_early.computeInitialClaim().toBytes()});
                 std.debug.print("  Match? {}\n", .{input_claim_val_eval.eql(val_eval_prover_early.computeInitialClaim())});
 
+                // Debug: print r_address and r_cycle passed to prover
+                std.debug.print("  r_address_le passed to prover:\n", .{});
+                for (0..@min(4, r_address_le.len)) |i| {
+                    std.debug.print("    r_address_le[{}] = {any}\n", .{ i, r_address_le[i].toBytes()[0..8] });
+                }
+                std.debug.print("  r_cycle_le passed to prover:\n", .{});
+                for (0..@min(4, r_cycle_le.len)) |i| {
+                    std.debug.print("    r_cycle_le[{}] = {any}\n", .{ i, r_cycle_le[i].toBytes()[0..8] });
+                }
+
+                // Also print what RWC used to compute rwc_val_claim
+                std.debug.print("  RWC used these Stage 2 challenges to compute rwc_val_claim:\n", .{});
+                for (0..@min(4, stage2_result.challenges.len)) |i| {
+                    std.debug.print("    stage2_challenges[{}] = {any}\n", .{ i, stage2_result.challenges[i].toBytes()[0..8] });
+                }
+
                 // DEBUG: Print transcript state before input claims
                 std.debug.print("[STAGE4 TRANSCRIPT] State BEFORE input claims:\n", .{});
                 std.debug.print("[STAGE4 TRANSCRIPT]   state = {{ ", .{});

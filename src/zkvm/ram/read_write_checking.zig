@@ -1246,6 +1246,26 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 }
             }
 
+            // DEBUG: Print r_cycle as used by RWC
+            std.debug.print("[RWC GET_OPENING] r_cycle used by RWC (BE, all {}):\n", .{log_t});
+            for (0..log_t) |i| {
+                std.debug.print("[RWC GET_OPENING]   r_cycle[{}] = {any}\n", .{ i, r_cycle[i].toBytes()[0..8] });
+            }
+            std.debug.print("[RWC GET_OPENING] phase1_end={}, phase2_end={}, phase3_cycle_len={}\n", .{ phase1_end, phase2_end, phase3_cycle_len });
+            std.debug.print("[RWC GET_OPENING] r_sumcheck.len={}\n", .{r_sumcheck.len});
+            std.debug.print("[RWC GET_OPENING] Challenges used:\n", .{});
+            std.debug.print("  Phase1 [0..{}]: ", .{phase1_end});
+            for (0..@min(phase1_end, r_sumcheck.len)) |i| {
+                std.debug.print("{any} ", .{r_sumcheck[i].toBytes()[0..4]});
+            }
+            std.debug.print("\n", .{});
+            std.debug.print("  Phase3_cycle [{}..{}]: ", .{ phase2_end, phase2_end + phase3_cycle_len });
+            for (0..@min(phase3_cycle_len, r_sumcheck.len -| phase2_end)) |i| {
+                const src_idx = phase2_end + i;
+                std.debug.print("{any} ", .{r_sumcheck[src_idx].toBytes()[0..4]});
+            }
+            std.debug.print("\n", .{});
+
             var ra_claim = F.zero();
             for (self.entries.items) |entry| {
                 const eq_addr = computeEq(F, r_address[0..log_k], entry.address);

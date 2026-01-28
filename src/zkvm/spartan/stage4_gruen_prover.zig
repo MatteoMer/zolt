@@ -482,6 +482,22 @@ pub fn Stage4GruenProver(comptime F: type) type {
                 std.debug.print("[ZOLT STAGE4 EQ_EVAL] This should match Jolt's eq_eval in expected_output_claim\n", .{});
             }
 
+            // Debug: Print final merged_eq[0] after all Phase 3 bindings
+            if (self.merged_eq) |merged| {
+                std.debug.print("\n[ZOLT STAGE4 FINAL] merged_eq[0] (final eq scalar) = {any}\n", .{merged[0].toBytes()});
+                std.debug.print("[ZOLT STAGE4 FINAL] This should match Jolt's eq_eval\n", .{});
+
+                // Compute what the final polynomial sum should be
+                const eq_scalar = merged[0];
+                const ra = self.ra_poly[0];
+                const wa = self.rd_wa_poly[0];
+                const val = self.val_poly[0];
+                const inc = self.inc_poly[0];
+                const expected_combined = ra.mul(val).add(wa.mul(val.add(inc)));
+                const expected_poly_final = eq_scalar.mul(expected_combined);
+                std.debug.print("[ZOLT STAGE4 FINAL] computed eq * combined = {any}\n", .{expected_poly_final.toBytes()});
+            }
+
             // Debug: Print final claims for comparison with Jolt
             std.debug.print("\n[ZOLT STAGE4 FINAL CLAIMS]\n", .{});
             std.debug.print("[ZOLT STAGE4]   val_claim = {any}\n", .{val_claim.toBytes()});
@@ -1087,6 +1103,29 @@ pub fn Stage4GruenProver(comptime F: type) type {
         /// Bind challenge after getting round evaluations (compatible with existing interface)
         pub fn bindChallenge(self: *Self, round: usize, challenge: F) void {
             self.bindPolynomials(round, challenge);
+
+            // Debug: After last round, print final eq scalar
+            if (round == self.num_rounds - 1) {
+                std.debug.print("\n[ZOLT STAGE4 FINAL BIND] After round {}, merged_eq[0] = ", .{round});
+                if (self.merged_eq) |merged| {
+                    std.debug.print("{any}\n", .{merged[0].toBytes()});
+                    std.debug.print("[ZOLT STAGE4 FINAL BIND] This should match Jolt's eq_eval\n", .{});
+
+                    // Compute expected final sum
+                    const eq_scalar = merged[0];
+                    const ra = self.ra_poly[0];
+                    const wa = self.rd_wa_poly[0];
+                    const val = self.val_poly[0];
+                    const inc = self.inc_poly[0];
+                    const combined = ra.mul(val).add(wa.mul(val.add(inc)));
+                    const expected = eq_scalar.mul(combined);
+                    std.debug.print("[ZOLT STAGE4 FINAL BIND] eq_scalar = {any}\n", .{eq_scalar.toBytes()});
+                    std.debug.print("[ZOLT STAGE4 FINAL BIND] combined (ra*val + wa*(val+inc)) = {any}\n", .{combined.toBytes()});
+                    std.debug.print("[ZOLT STAGE4 FINAL BIND] expected (eq * combined) = {any}\n", .{expected.toBytes()});
+                } else {
+                    std.debug.print("(null)\n", .{});
+                }
+            }
         }
 
         pub fn getFinalClaims(self: *const Self) struct {

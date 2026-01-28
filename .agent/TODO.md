@@ -1,60 +1,60 @@
-# Zolt-Jolt Compatibility: Stage 4 Fix
+# Zolt-Jolt Compatibility: Stage 4 Bug Found!
 
-## Current Status
-Stage 4 RegistersRWC sumcheck verification still fails with `output_claim != expected_claim`.
+## Bug Identified
 
-## Progress Made ✅
+The prover's GruenSplitEqPolynomial binding produces a DIFFERENT eq value than the MLE computation:
 
-### 1. Implemented 3-Phase Structure
-The Stage 4 prover now correctly uses:
-- **Phase 1** (rounds 0-3): Bind first 4 cycle vars via Gruen
-- **Phase 2** (rounds 4-10): Bind 7 address vars (eq NOT bound)
-- **Phase 3** (rounds 11-14): Bind remaining 4 cycle vars via merged dense eq
+- `merged_eq[0]` (prover after binding) = `{ 79, 186, 5, 90, ... }`
+- `eq_val_be` (MLE via EqPolynomial.mle) = `{ 12, 14, 181, 194, ... }`
 
-### 2. Key Code Changes
-- `stage4_gruen_prover.zig`:
-  - Added `phase1_num_rounds` and `phase2_num_rounds` fields
-  - Added `merged_eq` field for dense eq after Phase 1
-  - Implemented `phase2ComputeMessage` for address binding
-  - Implemented `phase3ComputeMessage` for remaining cycle binding
-  - Updated `bindPolynomials` with 3-phase binding logic
+The MLE value MATCHES Jolt's eq_eval, so the MLE computation is correct. **The bug is in the prover's GruenSplitEqPolynomial binding.**
 
-- `gruen_eq.zig`:
-  - Added `merge()` function to convert Gruen eq to dense polynomial
+## Key Observations
 
-### 3. Verified Working
-- Stage 3 challenges match perfectly between Zolt and Jolt ✅
-- Phase structure debug output shows correct phase transitions ✅
-- Phase 3 produces non-zero polynomial coefficients ✅
+1. **Stage 3 challenges match** - Both Zolt and Jolt have the same params.r_cycle
+2. **Stage 4 challenges match** - Both use the same transcript state
+3. **Combined values match** - Both compute the same `combined = rd_write_value + gamma * (...)`
+4. **MLE eq_eval matches** - Zolt's `EqPolynomial.mle()` gives same result as Jolt
 
-## Current Issue
+## What Should Happen
 
-**Round 14 polynomial mismatch:**
-- Zolt computes non-zero coefficients for round 14:
-  - `c0 = {15, 233, 235, 113, ...}` (non-zero)
-  - `c1 = {105, 121, 0, 145, ...}` (non-zero)
-  - `c2 = {137, 157, 19, 237, ...}` (non-zero)
-- But Jolt deserializes all zeros for round 14
+The GruenSplitEqPolynomial accumulates:
+```
+current_scalar = ∏_{i in phase1} eq(w[n-1-i], challenge[i])
+```
 
-**Possible causes:**
-1. Serialization issue for round 14
-2. Different degree bounds between implementations
-3. The actual polynomial SHOULD be zero but Zolt is computing wrong values
+Then merge() creates:
+```
+merged_eq[j] = current_scalar * eq(w[0..remaining], j)
+```
 
-**Note:** Looking at earlier rounds in Jolt's output, Phase 3 rounds (11-13) have `c3 = 0` (degree 2), which Zolt is producing correctly. But round 14's c0 is also zero in Jolt, suggesting a fundamental difference.
+And Phase 3 binding should reduce merged_eq to:
+```
+merged_eq[0] = ∏_{all i} eq(w[n-1-i], challenge[i])
+             = eq(w_reversed, challenges)
+             = eq(challenges_normalized, w)
+```
 
-## Investigation Needed
+This should equal `eq_val_be` computed via MLE!
 
-1. Compare how Jolt handles the final round of Phase 3
-2. Check if there's special handling for when `current_T = 2`
-3. Verify the polynomial evaluation formula is correct for the final round
-4. Check if Jolt's `inc.len() == 1` case applies here (it shouldn't for RegistersRWC)
+## Possible Root Causes
 
-## Next Steps
-- [ ] Add detailed debug for round 14 serialization
-- [ ] Compare Zolt and Jolt polynomial values at round 14
-- [ ] Verify merged_eq binding is correct in Phase 3
-- [ ] Check if final eq_eval matches between implementations
+1. **Table indexing in evalsCached** - The E_out/E_in tables might use different bit ordering than expected
+2. **Merge function** - The index layout `i = i_out * E_in.len + i_in` might not match the data polynomial layout
+3. **Phase 3 binding order** - LowToHigh binding of merged_eq might not correctly correspond to the challenges
+
+## Investigation Plan
+
+1. Compare E_out/E_in table values with direct eq evaluations at specific indices
+2. Verify merged_eq immediately after merge() matches expected values
+3. Trace Phase 3 binding step by step vs direct eq binding
+
+## Files to Fix
+
+- `/home/vivado/projects/zolt/src/zkvm/spartan/gruen_eq.zig` - GruenSplitEqPolynomial
+  - Check: evalsCached, merge, bind
+- `/home/vivado/projects/zolt/src/zkvm/spartan/stage4_gruen_prover.zig` - Phase 3 binding
+  - Check: bindPolynomials for Phase 3
 
 ## Commands
 ```bash
@@ -64,9 +64,3 @@ zig build -Doptimize=ReleaseFast run -- prove examples/fibonacci.elf --jolt-form
 # Test verification
 cd /home/vivado/projects/jolt && cargo test --package jolt-core --no-default-features --features "minimal,zolt-debug" test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
-
-## Key Files
-- `/home/vivado/projects/zolt/src/zkvm/spartan/stage4_gruen_prover.zig`
-- `/home/vivado/projects/zolt/src/zkvm/spartan/gruen_eq.zig`
-- `/home/vivado/projects/zolt/src/zkvm/proof_converter.zig`
-- `/home/vivado/projects/jolt/jolt-core/src/zkvm/registers/read_write_checking.rs`

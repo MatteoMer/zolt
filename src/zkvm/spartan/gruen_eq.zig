@@ -121,6 +121,18 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
             const w_i = self.w[self.current_index - 1];
             const prod_w_r = w_i.mul(r);
             const eq_val = F.one().sub(w_i).sub(r).add(prod_w_r).add(prod_w_r);
+
+            // Debug: Print binding details for first few rounds
+            if (self.current_index <= 8 and self.current_index >= 5) {
+                std.debug.print("[GRUEN BIND] Round {}: binding w[{}] against r\n", .{8 - self.current_index, self.current_index - 1});
+                std.debug.print("[GRUEN BIND]   w_i.limbs = [{x}, {x}, {x}, {x}]\n", .{w_i.limbs[0], w_i.limbs[1], w_i.limbs[2], w_i.limbs[3]});
+                std.debug.print("[GRUEN BIND]   r.limbs = [{x}, {x}, {x}, {x}]\n", .{r.limbs[0], r.limbs[1], r.limbs[2], r.limbs[3]});
+                std.debug.print("[GRUEN BIND]   eq_val.limbs = [{x}, {x}, {x}, {x}]\n", .{eq_val.limbs[0], eq_val.limbs[1], eq_val.limbs[2], eq_val.limbs[3]});
+                std.debug.print("[GRUEN BIND]   prev scalar.limbs = [{x}, {x}, {x}, {x}]\n", .{self.current_scalar.limbs[0], self.current_scalar.limbs[1], self.current_scalar.limbs[2], self.current_scalar.limbs[3]});
+                const new_scalar = self.current_scalar.mul(eq_val);
+                std.debug.print("[GRUEN BIND]   new scalar.limbs = [{x}, {x}, {x}, {x}]\n", .{new_scalar.limbs[0], new_scalar.limbs[1], new_scalar.limbs[2], new_scalar.limbs[3]});
+            }
+
             self.current_scalar = self.current_scalar.mul(eq_val);
 
             // Decrement current_index

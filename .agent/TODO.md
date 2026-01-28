@@ -1,62 +1,53 @@
-# Zolt-Jolt Compatibility: Stage 4 Bug Found!
+# Zolt-Jolt Compatibility: Stage 4 Progress
 
-## Bug Identified
+## Completed Fix: merge() Function
 
-The prover's GruenSplitEqPolynomial binding produces a DIFFERENT eq value than the MLE computation:
+Fixed the `merge()` function in GruenSplitEqPolynomial to match Jolt's implementation:
 
-- `merged_eq[0]` (prover after binding) = `{ 79, 186, 5, 90, ... }`
-- `eq_val_be` (MLE via EqPolynomial.mle) = `{ 12, 14, 181, 194, ... }`
-
-The MLE value MATCHES Jolt's eq_eval, so the MLE computation is correct. **The bug is in the prover's GruenSplitEqPolynomial binding.**
-
-## Key Observations
-
-1. **Stage 3 challenges match** - Both Zolt and Jolt have the same params.r_cycle
-2. **Stage 4 challenges match** - Both use the same transcript state
-3. **Combined values match** - Both compute the same `combined = rd_write_value + gamma * (...)`
-4. **MLE eq_eval matches** - Zolt's `EqPolynomial.mle()` gives same result as Jolt
-
-## What Should Happen
-
-The GruenSplitEqPolynomial accumulates:
-```
-current_scalar = ∏_{i in phase1} eq(w[n-1-i], challenge[i])
+**Before (broken):**
+```zig
+// Used cached E_out/E_in tables with incorrect bit decomposition
+merged[i] = self.current_scalar.mul(E_out[i_out]).mul(E_in[i_in]);
 ```
 
-Then merge() creates:
-```
-merged_eq[j] = current_scalar * eq(w[0..remaining], j)
-```
-
-And Phase 3 binding should reduce merged_eq to:
-```
-merged_eq[0] = ∏_{all i} eq(w[n-1-i], challenge[i])
-             = eq(w_reversed, challenges)
-             = eq(challenges_normalized, w)
+**After (correct):**
+```zig
+// Use EqPolynomial to directly compute eq(w[0..current_index], x)
+// This matches Jolt's: EqPolynomial::evals_parallel(&self.w[..self.current_index], Some(self.current_scalar))
+const EqPoly = poly.EqPolynomial(F);
+const merged = try EqPoly.evalsSliceWithScaling(F, allocator, self.w[0..remaining_vars], self.current_scalar);
 ```
 
-This should equal `eq_val_be` computed via MLE!
+**Verification:** The eq_eval values now match between Zolt prover and Jolt verifier:
+- Zolt's `merged_eq[0]` = `d8 d0 62 f3 fe 93 6a 58 ...`
+- Jolt's `eq_eval` = `[d8, d0, 62, f3, fe, 93, 6a, 58, ...]`
 
-## Possible Root Causes
+## Current Issue: Opening Claims Mismatch
 
-1. **Table indexing in evalsCached** - The E_out/E_in tables might use different bit ordering than expected
-2. **Merge function** - The index layout `i = i_out * E_in.len + i_in` might not match the data polynomial layout
-3. **Phase 3 binding order** - LowToHigh binding of merged_eq might not correctly correspond to the challenges
+The merge() fix is correct, but Stage 4 verification still fails because:
 
-## Investigation Plan
+1. **Sumcheck is internally consistent:**
+   - Zolt's batched_claim = `73 57 fa 78 ...`
+   - Jolt's output_claim = `73 57 fa 78 ...` ✓ MATCH
 
-1. Compare E_out/E_in table values with direct eq evaluations at specific indices
-2. Verify merged_eq immediately after merge() matches expected values
-3. Trace Phase 3 binding step by step vs direct eq binding
+2. **Expected claim doesn't match output:**
+   - Expected = coeff[0] * (eq * combined) = `b9 89 d9 c7 ...`
+   - Output = `73 57 fa 78 ...`
+   - These DON'T match!
 
-## Files to Fix
+3. **Root cause:** The opening claims stored in the accumulator don't match the actual polynomial evaluations at the sumcheck point.
 
-- `/home/vivado/projects/zolt/src/zkvm/spartan/gruen_eq.zig` - GruenSplitEqPolynomial
-  - Check: evalsCached, merge, bind
-- `/home/vivado/projects/zolt/src/zkvm/spartan/stage4_gruen_prover.zig` - Phase 3 binding
-  - Check: bindPolynomials for Phase 3
+## Next Steps
 
-## Commands
+1. Investigate how claims are stored in the opening accumulator
+2. Compare Zolt's `cache_openings` implementation with Jolt's
+3. Verify that the polynomial evaluations (val, ra, wa, inc) after binding equal the claimed openings
+
+## Files Modified
+- `/home/vivado/projects/zolt/src/zkvm/spartan/gruen_eq.zig` - Fixed merge() function
+- `/home/vivado/projects/zolt/src/poly/mod.zig` - Added evalsSliceWithScaling()
+
+## Debug Commands
 ```bash
 # Generate proof
 zig build -Doptimize=ReleaseFast run -- prove examples/fibonacci.elf --jolt-format -o /tmp/zolt_proof_dory.bin

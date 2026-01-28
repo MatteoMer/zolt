@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const poly = @import("../../poly/mod.zig");
 
 /// Gruen Split Equality Polynomial
 ///
@@ -161,19 +162,14 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
         /// length 2^remaining_vars and represents eq(w_remaining, x_remaining).
         ///
         /// This is called at the end of Phase 1 to create merged_eq for Phase 2/3.
+        ///
+        /// IMPORTANT: This function MUST match Jolt's SplitEqPoly::merge() exactly.
+        /// Jolt's merge() for LowToHigh binding:
+        ///   EqPolynomial::evals_parallel(&self.w[..self.current_index], Some(self.current_scalar))
+        ///
+        /// This computes eq(w[0..current_index], x) for all x in {0,1}^current_index,
+        /// scaled by current_scalar which holds eq(w_bound, r_bound).
         pub fn merge(self: *const Self, allocator: Allocator) ![]F {
-            // At this point:
-            // - current_scalar contains eq(w_bound, r_bound) from bound variables
-            // - E_out_current and E_in_current contain tables for remaining variables
-            // - current_index tells us how many variables remain
-
-            // Get the current E tables
-            const E_out = self.E_out_current();
-            const E_in = self.E_in_current();
-
-            // Compute the size of merged eq
-            // merged_eq has one entry per remaining cycle configuration
-            // The size is E_out.len * E_in.len (if current_index > 1) or 1 (if fully bound)
             const remaining_vars = self.current_index;
 
             if (remaining_vars == 0) {
@@ -183,61 +179,23 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
                 return merged;
             }
 
-            // For the remaining variables, we need to expand E_out × E_in × eq_linear
-            // But at the end of Phase 1, we've already bound through w_last, so:
-            // merged[j] = current_scalar * E_out[j_out] * E_in[j_in]
-            // where j = j_out * |E_in| + j_in (or some similar mapping)
-
-            // After binding current_index variables (from the end), we have:
-            // - Variables 0 to (current_index - 1) are unbound
-            // - Variables current_index to (n-1) are bound
-
-            // The merged eq should have 2^current_index entries
-            const merged_len = @as(usize, 1) << @intCast(remaining_vars);
-            const merged = try allocator.alloc(F, merged_len);
-
-            // At end of Phase 1, we have bound phase1_num_rounds variables (the LSB cycle vars)
-            // The remaining cycle variables are in E_out and E_in
-            // We need to materialize the full eq polynomial over these remaining vars
-
-            // E_out covers the outer (high) bits, E_in covers the inner bits
-            // merged[i] = current_scalar * E_out[i_out] * E_in[i_in]
-
-            if (E_in.len <= 1 and E_out.len <= 1) {
-                // Both are degenerate (single element)
-                const e_out_val = if (E_out.len > 0) E_out[0] else F.one();
-                const e_in_val = if (E_in.len > 0) E_in[0] else F.one();
-                merged[0] = self.current_scalar.mul(e_out_val).mul(e_in_val);
-                return merged;
-            }
-
-            // Figure out the bit layout
-            const num_in_bits = if (E_in.len > 1) @ctz(E_in.len) else 0;
-
-            // Fill merged eq
-            for (0..merged_len) |i| {
-                // Decompose i into out and in indices
-                // Layout: i = i_out * E_in.len + i_in
-                const i_in = if (E_in.len > 1) (i & (E_in.len - 1)) else 0;
-                const i_out = if (E_in.len > 1) (i >> @intCast(num_in_bits)) else i;
-
-                const e_out_val = if (i_out < E_out.len) E_out[i_out] else F.one();
-                const e_in_val = if (i_in < E_in.len) E_in[i_in] else F.one();
-
-                merged[i] = self.current_scalar.mul(e_out_val).mul(e_in_val);
-            }
+            // Use EqPolynomial to directly compute eq(w[0..current_index], x) for all x,
+            // scaled by current_scalar. This matches Jolt's implementation exactly.
+            //
+            // w[0..current_index] contains the remaining unbound challenge coordinates
+            // current_scalar contains eq(w_bound, r_bound) from already-bound variables
+            const EqPoly = poly.EqPolynomial(F);
+            const merged = try EqPoly.evalsSliceWithScaling(F, allocator, self.w[0..remaining_vars], self.current_scalar);
 
             // Debug output
-            std.debug.print("[GRUEN MERGE] remaining_vars={}, merged_len={}, E_out.len={}, E_in.len={}\n", .{
+            std.debug.print("[GRUEN MERGE] remaining_vars={}, merged_len={}, using EqPolynomial.evalsSliceWithScaling\n", .{
                 remaining_vars,
-                merged_len,
-                E_out.len,
-                E_in.len,
+                merged.len,
             });
-            if (merged_len > 0) {
+            if (merged.len > 0) {
                 std.debug.print("[GRUEN MERGE]   merged[0] = {any}\n", .{merged[0].toBytes()[0..8]});
             }
-            if (merged_len > 1) {
+            if (merged.len > 1) {
                 std.debug.print("[GRUEN MERGE]   merged[1] = {any}\n", .{merged[1].toBytes()[0..8]});
             }
 

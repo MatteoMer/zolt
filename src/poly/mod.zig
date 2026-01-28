@@ -238,49 +238,52 @@ pub fn EqPolynomial(comptime F: type) type {
         /// - index 1 → eq(r, [0, 0, ..., 1])  (LSB = 1, so last var x_{n-1} = 1)
         /// - etc.
         pub fn evals(self: *const Self, allocator: Allocator) ![]F {
-            const n = self.r.len;
-            const size = @as(usize, 1) << @as(u6, @intCast(n));
-            const result = try allocator.alloc(F, size);
+            return evalsSliceWithScaling(F, allocator, self.r, null);
+        }
 
-            // Initialize with scaling factor (1 for no scaling)
-            @memset(result, F.one());
+        /// Compute eq evaluations over a slice with optional scaling factor
+        /// This is the core implementation used by both instance and static methods.
+        ///
+        /// Matches Jolt's EqPolynomial::evals_parallel algorithm:
+        /// - Iterates through r in reverse order (big-endian)
+        /// - For each step, doubles the active region size
+        /// - result[0..size] is the active region
+        /// - For each i in active region: result[i+size] = result[i] * r[j], result[i] -= result[i+size]
+        pub fn evalsSliceWithScaling(comptime FieldType: type, allocator: Allocator, r: []const FieldType, scaling_factor: ?FieldType) ![]FieldType {
+            const n = r.len;
+            if (n == 0) {
+                const result = try allocator.alloc(FieldType, 1);
+                result[0] = scaling_factor orelse FieldType.one();
+                return result;
+            }
 
-            // Build evaluations using Jolt's algorithm (big-endian indexing)
-            // Jolt's algorithm:
-            //   for j in 0..r.len() {
-            //       size *= 2;
-            //       for i in (0..size).rev().step_by(2) {
-            //           let scalar = evals[i / 2];
-            //           evals[i] = scalar * r[j];
-            //           evals[i - 1] = scalar - evals[i];
-            //       }
-            //   }
-            //
-            // (0..size).rev().step_by(2) gives odd indices in descending order:
-            // For size=4: [3, 1]
-            // For size=8: [7, 5, 3, 1]
-            //
-            // All challenges are expected to be in Montgomery form.
-            var current_size: usize = 1;
-            for (0..n) |j| {
-                // Double the size for this variable
-                current_size *= 2;
+            const final_size = @as(usize, 1) << @as(u6, @intCast(n));
+            const result = try allocator.alloc(FieldType, final_size);
 
-                // Process odd indices from high to low (matching Jolt's rev().step_by(2))
-                var i = current_size - 1; // Start at highest odd index
-                while (i >= 1) {
-                    // i is odd, so i-1 is even
-                    const scalar = result[i / 2]; // i/2 = (i-1)/2 for odd i
-                    const r_j = self.r[j];
-                    result[i] = scalar.mul(r_j); // higher index (odd) gets r[j]
-                    result[i - 1] = scalar.sub(result[i]); // lower index (even) gets 1 - r[j]
+            // Initialize first element with scaling factor
+            @memset(result, FieldType.zero());
+            result[0] = scaling_factor orelse FieldType.one();
 
-                    if (i >= 2) {
-                        i -= 2;
-                    } else {
-                        break;
-                    }
+            // Build evaluations using Jolt's evals_parallel algorithm
+            // Jolt iterates r in reverse: for r in r.iter().rev()
+            // This gives big-endian indexing where r[0] is MSB
+            var size: usize = 1;
+            var j: usize = n;
+            while (j > 0) {
+                j -= 1;
+                const r_j = r[j];
+
+                // For each i in [0, size), compute:
+                // result[i + size] = result[i] * r[j]
+                // result[i] = result[i] - result[i + size]
+                for (0..size) |i| {
+                    const x = result[i];
+                    const y = x.mul(r_j);
+                    result[i + size] = y;
+                    result[i] = x.sub(y);
                 }
+
+                size *= 2;
             }
 
             return result;

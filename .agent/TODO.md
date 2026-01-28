@@ -1,6 +1,6 @@
 # Zolt-Jolt Compatibility: Status Update
 
-## Status: DEBUGGING STAGE 4 BATCHED SUMCHECK MISMATCH
+## Status: DEBUGGING STAGE 4 inc_claim/wa_claim ZERO ISSUE
 
 ## Summary
 
@@ -15,83 +15,115 @@ Zolt can now:
 
 ## Cross-Verification Status
 
-Verification fails at Stage 4: `batched_claim ≠ total_expected`
+Verification fails at Stage 4: `Sumcheck verification failed`
 
-## Current Issue Analysis (Session 71 - Updated)
+## Current Issue Analysis (Session 72)
 
-### Recent Progress (This Session)
+### Key Finding
 
-1. **Fixed termination write issue**:
-   - The synthetic termination write IS now being recorded
-   - `[TRACE] Recorded synthetic termination write: addr=0x7fffc008, cycle=54`
-
-2. **Fixed start_address in proof_converter**:
-   - Now uses `memory_layout.getLowestAddress() = 0x7FFF8000`
-   - IncPolynomial correctly includes the termination write: `Write at idx=2049, timestamp=54, old_val=0, new_val=1, inc=1`
-
-3. **ValEval and ValFinal now produce NONZERO expected outputs**:
-   - Instance 1 (ValEval): `inc*wa*lt={ 18, 125, 12, 131, ... }` (was all zeros before)
-   - Instance 2 (ValFinal): `inc*wa={ 12, 200, 234, 237, ... }` (was all zeros before)
-
-### Current Mismatch
-
-After all 15 rounds of Stage 4:
-- `batched_claim (sumcheck output)` = `{ 13, 174, 120, 9, 233, 120, 62, 18, ... }`
-- `total_expected (weighted sum)` = `{ 18, 61, 142, 143, 28, 54, 66, 104, ... }`
-
-These still don't match!
-
-### Debug Details
+Jolt's verifier is receiving ZERO values for `inc_claim` and `wa_claim` when computing ValEvaluation and ValFinal expected outputs:
 
 ```
-[ZOLT STAGE4 VERIFY CHECK]
-  batched_claim (sumcheck output) = { 13, 174, 120, 9, 233, 120, 62, 18, ... }
-  Instance 0: expected={ 0, 223, 38, 219, ... }
-  Instance 1 (ValEval): inc*wa*lt={ 18, 125, 12, 131, ... }  <- NONZERO NOW!
-  Instance 2 (ValFinal): inc*wa={ 12, 200, 234, 237, ... }  <- NONZERO NOW!
-  total_expected = { 18, 61, 142, 143, ... }
-  Do they match? false
+ValEvaluation expected_output_claim debug:
+  inc_claim: [00, 00, 00, 00, ...]  <-- ALL ZEROS!
+  wa_claim: [00, 00, 00, 00, ...]   <-- ALL ZEROS!
+  lt_eval: [a1, b1, 48, 02, ...]    <-- Non-zero (computed correctly)
+  result (inc*wa*lt): [00, 00, ...]  <-- Zero because inc*wa = 0
+
+ValFinal expected_output_claim debug:
+  inc_claim: [00, 00, 00, 00, ...]  <-- ALL ZEROS!
+  wa_claim: [00, 00, 00, 00, ...]   <-- ALL ZEROS!
+  result (inc*wa): [00, 00, ...]     <-- Zero
 ```
 
-### Remaining Issues to Debug
+BUT Zolt is computing NONZERO values:
 
-1. **LT polynomial computation**:
-   - The LT polynomial uses r_cycle ordering
-   - Need to verify r_cycle_LE vs r_cycle_BE ordering matches Jolt
+```
+[ZOLT STAGE4 VALEVAL DEBUG]
+  val_eval_openings.inc_eval = { 9, 53, 218, 196, ... }   <-- NONZERO!
+  val_eval_openings.wa_eval = { 17, 245, 253, 169, ... }  <-- NONZERO!
+  val_eval_openings.lt_eval = { 45, 226, 211, 44, ... }   <-- NONZERO!
+```
 
-2. **eq polynomial for expected output**:
-   - RegistersRWC expected output uses `eq(r_cycle_sumcheck, stage3_r_cycle)`
-   - Need to verify the endianness of both points
+### Potential Issues
 
-3. **Sumcheck polynomial composition**:
-   - The batched sumcheck combines RegistersRWC, ValEval, and ValFinal
-   - Need to verify the polynomial contribution at each round
+1. **Opening key mismatch**: Zolt serializes with key `(CommittedPolynomial::RamInc, SumcheckId::RamValEvaluation)`
+   but Jolt might be looking up with a different key due to:
+   - Enum ordering differences
+   - Serialization format mismatch
+
+2. **Value serialization**: The claim values are converted from Montgomery form using `fromMontgomery()`,
+   but there might be an issue with how the bytes are written or interpreted.
+
+### Serialization Debug Added
+
+Added debug output to `jolt_types.zig` to print RamInc claims during serialization:
+```zig
+// In OpeningClaims.serialize():
+// Debug: Print RamInc claims
+switch (entry.id) {
+    .Committed => |c| {
+        switch (c.poly) {
+            .RamInc => {
+                std.debug.print("[SERIALIZE DEBUG] Claim {}: RamInc/{} = {any}\n", ...);
+            },
+            ...
+        }
+    },
+    ...
+}
+```
+
+### Next Steps
+
+1. **Wait for prover to complete** - Currently running with debug output
+2. **Compare serialized bytes** - Check if Zolt writes nonzero bytes for RamInc claims
+3. **Verify Jolt lookup** - Debug how Jolt's `get_committed_polynomial_opening` finds claims
+4. **Check BTreeMap ordering** - Jolt uses BTreeMap which orders by key; verify our ordering matches
+
+### Sumcheck Instance Matches
+
+All individual instances match after 15 rounds:
+```
+[ZOLT DEBUG] inst0 MATCH: true
+[ZOLT DEBUG] inst1 MATCH: true
+[ZOLT DEBUG] inst2 MATCH: true
+[ZOLT DEBUG] inst3 MATCH: true
+[ZOLT DEBUG] inst4 MATCH: true
+[ZOLT DEBUG] expected_batched (from provers) = { 6, 218, 102, ... }
+[ZOLT DEBUG] actual batched = { 6, 218, 102, ... }
+[ZOLT DEBUG] MATCH: true
+```
+
+But the **expected_output_claim** computation fails because inc_claim and wa_claim are zero in Jolt.
 
 ### Key Files
 
-- `/home/vivado/projects/zolt/src/zkvm/proof_converter.zig` - Stage 4 prover
-  - Line 1786-1793: start_address now uses memory_layout.getLowestAddress() ✓
-  - Line 2336: eq_val_be computation for RegistersRWC
+- `/home/vivado/projects/zolt/src/zkvm/jolt_types.zig` - OpeningClaims serialization
+  - Line 643-660: serialize() function with debug output added
 
-- `/home/vivado/projects/zolt/src/zkvm/ram/val_evaluation.zig` - ValEvaluation prover
-  - LtPolynomial implementation
+- `/home/vivado/projects/zolt/src/zkvm/proof_converter.zig` - Stage 4 claim insertion
+  - Line 2486-2489: RamInc/RamValEvaluation claim insertion
 
-- `/home/vivado/projects/jolt/jolt-core/src/zkvm/ram/val_evaluation.rs` - Reference
+- `/home/vivado/projects/jolt/jolt-core/src/zkvm/ram/val_evaluation.rs` - Jolt verifier
+  - Line 393-396: get_committed_polynomial_opening for inc_claim
 
 ### Test Commands
 
 ```bash
-# Generate Jolt-compatible proof with debug output
-./zig-out/bin/zolt prove examples/fibonacci.elf -o /tmp/proof.bin \
-    --jolt-format /tmp/jolt_proof.bin 2>&1 | tee /tmp/stage4_debug.log
+# Generate proof with debug output
+./zig-out/bin/zolt prove examples/fibonacci.elf \
+    --export-preprocessing /tmp/zolt_preprocessing.bin \
+    -o /tmp/zolt_proof_dory.bin 2>&1 | grep "SERIALIZE DEBUG\|RamInc"
 
-# Check specific debug info
-grep "IncPolynomial" /tmp/stage4_debug.log
-grep "VERIFY CHECK" /tmp/stage4_debug.log
+# Run Jolt verification with zolt-debug feature
+cd /home/vivado/projects/jolt && \
+cargo test --no-default-features --features minimal,zolt-debug --release \
+    -p jolt-core test_verify_zolt_proof_with_zolt_preprocessing \
+    -- --ignored --nocapture
 ```
 
 ## Files Generated
 
-- `/tmp/test_proof.bin` - Zolt native format proof
-- `/tmp/test_jolt.bin` - Jolt-compatible format proof (40531 bytes)
-- `/tmp/jolt_prove.log` - Full debug output
+- `/home/vivado/projects/zolt/logs/zolt_proof_dory.bin` - Jolt-compatible proof
+- `/home/vivado/projects/zolt/logs/zolt_preprocessing.bin` - Verifier preprocessing

@@ -2365,11 +2365,74 @@ pub fn ProofConverter(comptime F: type) type {
                 // Instance 0: eq_val * combined (RegistersRWC)
                 // Instance 1: inc_eval * wa_eval * lt_eval (ValEvaluation)
                 // Instance 2: inc_eval * wa_eval (ValFinal)
+
+                // Debug: Print individual openings for Instance 1 (ValEvaluation)
+                std.debug.print("\n[ZOLT STAGE4 VALEVAL DEBUG]\n", .{});
+                std.debug.print("  val_eval_openings.inc_eval = {any}\n", .{val_eval_openings.inc_eval.toBytesBE()});
+                std.debug.print("  val_eval_openings.wa_eval = {any}\n", .{val_eval_openings.wa_eval.toBytesBE()});
+                std.debug.print("  val_eval_openings.lt_eval (from prover) = {any}\n", .{val_eval_openings.lt_eval.toBytesBE()});
+
+                // Compute lt_eval using Jolt's formula for comparison
+                // In Jolt, ValEvaluation's normalize_opening_point just reverses the challenges
+                // (since it only has one phase - cycle variables bound low-to-high)
+                // The challenges are stage4_r_sumcheck[7..15] (8 rounds for ValEvaluation)
+                //
+                // LT(r, r_cycle) where r is normalized challenges, r_cycle is from Stage 2 RWC
+                // Jolt's formula (MSB to LSB iteration):
+                //   lt_eval = 0, eq_term = 1
+                //   for (x, y) in zip(r_BE, r_cycle_BE):
+                //     lt_eval += (1-x) * y * eq_term
+                //     eq_term *= (1-x-y+2xy) = eq(x, y)
+
+                // Extract ValEvaluation challenges (last 8 rounds of Stage 4)
+                const val_eval_offset = 7; // ValEvaluation starts at round 7
+                var val_eval_r_be: [8]F = undefined; // Normalized to BE (reversed)
+                for (0..8) |i| {
+                    // Reverse: r_be[0] = challenge[7], r_be[1] = challenge[6], ...
+                    val_eval_r_be[i] = stage4_r_sumcheck[val_eval_offset + 7 - i];
+                }
+
+                // r_cycle for ValEvaluation comes from RamVal @ RamReadWriteChecking (Stage 2)
+                // We need to extract just the cycle portion from r_val_be
+                // In proof_converter, this is stored in r_cycle_be (already computed earlier)
+                // For ValEvaluation, this should be the SAME r_cycle as Stage 2 RWC
+
+                // Compute LT(r_be, r_cycle_be) using Jolt's formula
+                var lt_eval_computed = F.zero();
+                var eq_term = F.one();
+                std.debug.print("\n[ZOLT LT DEBUG] Computing LT(r, r_cycle):\n", .{});
+                for (0..n_cycle_vars) |i| {
+                    const x = val_eval_r_be[i];
+                    const y = r_cycle_be[i];
+                    // lt_eval += (1-x) * y * eq_term
+                    const one_minus_x = F.one().sub(x);
+                    const contribution = one_minus_x.mul(y).mul(eq_term);
+                    lt_eval_computed = lt_eval_computed.add(contribution);
+                    // eq_term *= eq(x, y) = (1-x)(1-y) + xy = 1 - x - y + 2xy
+                    const one_minus_y = F.one().sub(y);
+                    const xy = x.mul(y);
+                    const eq_xy = one_minus_x.mul(one_minus_y).add(xy);
+                    eq_term = eq_term.mul(eq_xy);
+                    if (i < 4) {
+                        std.debug.print("  [{}] x={any}, y={any}, contrib={any}\n", .{
+                            i, x.toBytes()[0..8], y.toBytes()[0..8], contribution.toBytes()[0..8],
+                        });
+                    }
+                }
+                std.debug.print("  lt_eval_computed (Jolt formula) = {any}\n", .{lt_eval_computed.toBytesBE()});
+                std.debug.print("  lt_eval_prover (from binding) = {any}\n", .{val_eval_openings.lt_eval.toBytesBE()});
+                std.debug.print("  Match? {}\n\n", .{lt_eval_computed.eql(val_eval_openings.lt_eval)});
+
                 const weighted_expected_0 = expected_output.mul(batching_coeffs[0]);
                 const expected_1 = val_eval_openings.inc_eval.mul(val_eval_openings.wa_eval).mul(val_eval_openings.lt_eval);
                 const weighted_expected_1 = expected_1.mul(batching_coeffs[1]);
                 const expected_2 = val_final_openings.inc_eval.mul(val_final_openings.wa_eval);
                 const weighted_expected_2 = expected_2.mul(batching_coeffs[2]);
+
+                // Debug: Print individual openings for Instance 2 (ValFinal)
+                std.debug.print("\n[ZOLT STAGE4 VALFINAL DEBUG]\n", .{});
+                std.debug.print("  val_final_openings.inc_eval = {any}\n", .{val_final_openings.inc_eval.toBytesBE()});
+                std.debug.print("  val_final_openings.wa_eval = {any}\n", .{val_final_openings.wa_eval.toBytesBE()});
                 const total_expected = weighted_expected_0.add(weighted_expected_1).add(weighted_expected_2);
 
                 std.debug.print("\n[ZOLT STAGE4 VERIFY CHECK]\n", .{});
@@ -3426,7 +3489,28 @@ pub fn ProofConverter(comptime F: type) type {
                 std.debug.print("[ZOLT DEBUG] inst0 individual_claims[0] = {any}\n", .{individual_claims[0].toBytesBE()});
                 std.debug.print("[ZOLT DEBUG] inst0 MATCH: {}\n", .{pp.current_claim.eql(individual_claims[0])});
             }
-            // Instances 1, 2 contribute 0 (their final claims are 0), but Instance 3 may not!
+            // Instance 1 (RAF)
+            if (raf_prover) |rp| {
+                expected_batched = expected_batched.add(rp.current_claim.mul(batching_coeffs[1]));
+                std.debug.print("[ZOLT DEBUG] inst1 prover.current_claim = {any}\n", .{rp.current_claim.toBytesBE()});
+                std.debug.print("[ZOLT DEBUG] inst1 individual_claims[1] = {any}\n", .{individual_claims[1].toBytesBE()});
+                std.debug.print("[ZOLT DEBUG] inst1 MATCH: {}\n", .{rp.current_claim.eql(individual_claims[1])});
+            } else {
+                // No prover - use individual_claims tracking
+                expected_batched = expected_batched.add(individual_claims[1].mul(batching_coeffs[1]));
+                std.debug.print("[ZOLT DEBUG] inst1 (no prover) individual_claims[1] = {any}\n", .{individual_claims[1].toBytesBE()});
+            }
+            // Instance 2 (RWC)
+            if (rwc_prover) |rp| {
+                expected_batched = expected_batched.add(rp.current_claim.mul(batching_coeffs[2]));
+                std.debug.print("[ZOLT DEBUG] inst2 prover.current_claim = {any}\n", .{rp.current_claim.toBytesBE()});
+                std.debug.print("[ZOLT DEBUG] inst2 individual_claims[2] = {any}\n", .{individual_claims[2].toBytesBE()});
+                std.debug.print("[ZOLT DEBUG] inst2 MATCH: {}\n", .{rp.current_claim.eql(individual_claims[2])});
+            } else {
+                // No prover - use individual_claims tracking
+                expected_batched = expected_batched.add(individual_claims[2].mul(batching_coeffs[2]));
+                std.debug.print("[ZOLT DEBUG] inst2 (no prover) individual_claims[2] = {any}\n", .{individual_claims[2].toBytesBE()});
+            }
             if (output_prover) |op| {
                 expected_batched = expected_batched.add(op.current_claim.mul(batching_coeffs[3]));
                 std.debug.print("[ZOLT DEBUG] inst3 prover.current_claim = {any}\n", .{op.current_claim.toBytesBE()});

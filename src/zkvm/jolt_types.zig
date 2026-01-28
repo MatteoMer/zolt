@@ -644,7 +644,7 @@ pub fn OpeningClaims(comptime F: type) type {
             // Write number of entries
             try writer.writeInt(u64, self.entries.items.len, .little);
             // Write each (key, claim) pair
-            for (self.entries.items) |entry| {
+            for (self.entries.items, 0..) |entry, idx| {
                 try entry.id.serialize(writer);
                 // Write claim as 32-byte LE in standard form
                 // This matches arkworks' serialize_compressed behavior
@@ -654,6 +654,19 @@ pub fn OpeningClaims(comptime F: type) type {
                     std.mem.writeInt(u64, buf[i * 8 ..][0..8], standard.limbs[i], .little);
                 }
                 try writer.writeAll(&buf);
+
+                // Debug: Print RamInc claims
+                switch (entry.id) {
+                    .Committed => |c| {
+                        switch (c.poly) {
+                            .RamInc => {
+                                std.debug.print("[SERIALIZE DEBUG] Claim {}: RamInc/{} = {any}\n", .{ idx, c.sumcheck_id, buf });
+                            },
+                            else => {},
+                        }
+                    },
+                    else => {},
+                }
             }
         }
     };

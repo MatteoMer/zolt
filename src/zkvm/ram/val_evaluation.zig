@@ -469,6 +469,18 @@ pub fn ValEvaluationProver(comptime F: type) type {
                 lt_evals[j] = lt_poly.evaluateAtIndex(j);
             }
 
+            // Debug: print r_address used by this prover (first and last 4)
+            std.debug.print("[VALEVAL_INIT] r_address from params, len={} (LE):\n", .{params.r_address.len});
+            for (0..@min(4, params.r_address.len)) |i| {
+                std.debug.print("  r_address[{}] = {any}\n", .{ i, params.r_address[i].toBytes()[0..8] });
+            }
+            // Also print last 4 to verify full array
+            if (params.r_address.len > 4) {
+                for ((params.r_address.len - 4)..params.r_address.len) |i| {
+                    std.debug.print("  r_address[{}] = {any}\n", .{ i, params.r_address[i].toBytes()[0..8] });
+                }
+            }
+
             // Debug: print initial LT evaluations for indices 0, 1, 128 (to check pattern)
             std.debug.print("[VALEVAL_INIT] LT polynomial values:\n", .{});
             std.debug.print("  lt_evals[0] = {any}\n", .{lt_evals[0].toBytes()[0..8]});

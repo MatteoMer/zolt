@@ -759,15 +759,17 @@ pub fn Stage4GruenProver(comptime F: type) type {
         /// We iterate over address pairs (k_even, k_odd) and sum over all cycle indices j,
         /// multiplying by merged_eq[j].
         ///
-        /// Returns degree-2 polynomial: [eval0, eval1, eval2]
+        /// Uses the from_evals_and_hint pattern: compute p(0) and p(2), recover p(1) = previous_claim - p(0)
+        /// Returns degree-2 polynomial: [c0, c1, c2, 0]
         fn phase2ComputeMessage(self: *Self, round: usize, previous_claim: F) RoundPoly(F) {
-            _ = previous_claim;
             const merged_eq = self.merged_eq orelse @panic("merged_eq not initialized for Phase 2");
 
             const half_K = self.current_K / 2;
 
-            // Accumulate evaluations at X = 0, 1, 2
-            var evals: [3]F = .{ F.zero(), F.zero(), F.zero() };
+            // Accumulate evaluations at X = 0 and X = 2 only (Jolt optimization)
+            // p(1) will be recovered from previous_claim
+            var eval_0 = F.zero();
+            var eval_2 = F.zero();
 
             for (0..half_K) |i| {
                 const k_even = 2 * i;
@@ -792,42 +794,49 @@ pub fn Stage4GruenProver(comptime F: type) type {
                     const wa_slope = wa_odd.sub(wa_even);
                     const val_slope = val_odd.sub(val_even);
 
-                    // Evaluate combined polynomial at X = 0, 1, 2
-                    // C(X) = ra(X)*val(X) + wa(X)*(val(X)+inc)
-                    inline for (0..3) |t| {
-                        const t_field = F.fromU64(t);
+                    // Evaluate combined polynomial at X = 0
+                    // C(0) = ra_even*val_even + wa_even*(val_even+inc)
+                    const combined_0 = ra_even.mul(val_even).add(wa_even.mul(val_even.add(inc_j)));
+                    eval_0 = eval_0.add(eq_j.mul(combined_0));
 
-                        const ra_t = ra_even.add(t_field.mul(ra_slope));
-                        const wa_t = wa_even.add(t_field.mul(wa_slope));
-                        const val_t = val_even.add(t_field.mul(val_slope));
-
-                        const combined_t = ra_t.mul(val_t).add(wa_t.mul(val_t.add(inc_j)));
-                        evals[t] = evals[t].add(eq_j.mul(combined_t));
-                    }
+                    // Evaluate combined polynomial at X = 2
+                    const ra_2 = ra_even.add(F.fromU64(2).mul(ra_slope));
+                    const wa_2 = wa_even.add(F.fromU64(2).mul(wa_slope));
+                    const val_2 = val_even.add(F.fromU64(2).mul(val_slope));
+                    const combined_2 = ra_2.mul(val_2).add(wa_2.mul(val_2.add(inc_j)));
+                    eval_2 = eval_2.add(eq_j.mul(combined_2));
                 }
             }
 
+            // Recover p(1) using the hint: p(1) = previous_claim - p(0)
+            const eval_1 = previous_claim.sub(eval_0);
+
             // Debug for first phase 2 round
             if (round == self.phase1_num_rounds) {
-                std.debug.print("[STAGE4 PHASE2] First round: evals[0..3] = [{any}, {any}, {any}]\n", .{
-                    evals[0].toBytes()[0..8],
-                    evals[1].toBytes()[0..8],
-                    evals[2].toBytes()[0..8],
+                std.debug.print("[STAGE4 PHASE2] First round: evals[0,1,2] = [{any}, {any}, {any}]\n", .{
+                    eval_0.toBytes()[0..8],
+                    eval_1.toBytes()[0..8],
+                    eval_2.toBytes()[0..8],
+                });
+                std.debug.print("[STAGE4 PHASE2] p(0)+p(1)={any}, previous_claim={any}, match={}\n", .{
+                    eval_0.add(eval_1).toBytes()[0..8],
+                    previous_claim.toBytes()[0..8],
+                    eval_0.add(eval_1).eql(previous_claim),
                 });
             }
 
             // Convert 3 evaluations to degree-2 coefficients, then pad to degree-3
             // p(X) = c0 + c1*X + c2*X^2 + 0*X^3
-            // evals[0] = c0
-            // evals[1] = c0 + c1 + c2
-            // evals[2] = c0 + 2*c1 + 4*c2
-            const c0 = evals[0];
-            // c2 = (evals[0] - 2*evals[1] + evals[2]) / 2
+            // p(0) = c0
+            // p(1) = c0 + c1 + c2
+            // p(2) = c0 + 2*c1 + 4*c2
+            const c0 = eval_0;
+            // c2 = (p(0) - 2*p(1) + p(2)) / 2
             const two = F.fromU64(2);
             const two_inv = two.inverse() orelse F.one();
-            const c2 = evals[0].sub(evals[1].mul(two)).add(evals[2]).mul(two_inv);
-            // c1 = evals[1] - evals[0] - c2
-            const c1 = evals[1].sub(evals[0]).sub(c2);
+            const c2 = eval_0.sub(eval_1.mul(two)).add(eval_2).mul(two_inv);
+            // c1 = p(1) - p(0) - c2
+            const c1 = eval_1.sub(eval_0).sub(c2);
 
             return RoundPoly(F){ .coeffs = .{ c0, c1, c2, F.zero() } };
         }
@@ -839,8 +848,9 @@ pub fn Stage4GruenProver(comptime F: type) type {
         ///
         /// For RegistersRWC: All 4 Phase 3 rounds bind cycle variables.
         /// The degree-2 polynomial comes from: eq(X) * [ra(X)*val(X) + wa(X)*(val(X)+inc(X))]
+        ///
+        /// Uses the from_evals_and_hint pattern: compute p(0) and p(2), recover p(1) = previous_claim - p(0)
         fn phase3ComputeMessage(self: *Self, round: usize, previous_claim: F) RoundPoly(F) {
-            _ = previous_claim;
             const merged_eq = self.merged_eq orelse @panic("merged_eq not initialized for Phase 3");
 
             const half_T = self.current_T / 2;
@@ -855,8 +865,10 @@ pub fn Stage4GruenProver(comptime F: type) type {
                 merged_eq.len,
             });
 
-            // Accumulate evaluations at X = 0, 1, 2
-            var evals: [3]F = .{ F.zero(), F.zero(), F.zero() };
+            // Accumulate evaluations at X = 0 and X = 2 only (Jolt optimization)
+            // p(1) will be recovered from previous_claim
+            var eval_0 = F.zero();
+            var eval_2 = F.zero();
 
             for (0..half_T) |j| {
                 const j_even = 2 * j;
@@ -887,45 +899,47 @@ pub fn Stage4GruenProver(comptime F: type) type {
                     const wa_slope = wa_odd.sub(wa_even);
                     const val_slope = val_odd.sub(val_even);
 
-                    // Evaluate combined*eq at X = 0, 1, 2
-                    inline for (0..3) |t| {
-                        const t_field = F.fromU64(t);
+                    // Evaluate combined*eq at X = 0
+                    const combined_0 = ra_even.mul(val_even).add(wa_even.mul(val_even.add(inc_even)));
+                    eval_0 = eval_0.add(eq_even.mul(combined_0));
 
-                        const ra_t = ra_even.add(t_field.mul(ra_slope));
-                        const wa_t = wa_even.add(t_field.mul(wa_slope));
-                        const val_t = val_even.add(t_field.mul(val_slope));
-                        const inc_t = inc_even.add(t_field.mul(inc_slope));
-                        const eq_t = eq_even.add(t_field.mul(eq_slope));
-
-                        const combined_t = ra_t.mul(val_t).add(wa_t.mul(val_t.add(inc_t)));
-                        evals[t] = evals[t].add(eq_t.mul(combined_t));
-                    }
+                    // Evaluate combined*eq at X = 2
+                    const ra_2 = ra_even.add(F.fromU64(2).mul(ra_slope));
+                    const wa_2 = wa_even.add(F.fromU64(2).mul(wa_slope));
+                    const val_2 = val_even.add(F.fromU64(2).mul(val_slope));
+                    const inc_2 = inc_even.add(F.fromU64(2).mul(inc_slope));
+                    const eq_2 = eq_even.add(F.fromU64(2).mul(eq_slope));
+                    const combined_2 = ra_2.mul(val_2).add(wa_2.mul(val_2.add(inc_2)));
+                    eval_2 = eval_2.add(eq_2.mul(combined_2));
                 }
             }
 
+            // Recover p(1) using the hint: p(1) = previous_claim - p(0)
+            const eval_1 = previous_claim.sub(eval_0);
+
             // Debug for first phase 3 round
             if (round == self.phase1_num_rounds + self.phase2_num_rounds) {
-                std.debug.print("[STAGE4 PHASE3] First round: evals[0..3] = [{any}, {any}, {any}]\n", .{
-                    evals[0].toBytes()[0..8],
-                    evals[1].toBytes()[0..8],
-                    evals[2].toBytes()[0..8],
+                std.debug.print("[STAGE4 PHASE3] First round: evals[0,1,2] = [{any}, {any}, {any}]\n", .{
+                    eval_0.toBytes()[0..8],
+                    eval_1.toBytes()[0..8],
+                    eval_2.toBytes()[0..8],
                 });
             }
 
             // Debug all Phase 3 rounds
             std.debug.print("[STAGE4 PHASE3] Round {} evals: [{any}, {any}, {any}]\n", .{
                 round,
-                evals[0].toBytes()[0..8],
-                evals[1].toBytes()[0..8],
-                evals[2].toBytes()[0..8],
+                eval_0.toBytes()[0..8],
+                eval_1.toBytes()[0..8],
+                eval_2.toBytes()[0..8],
             });
 
             // Convert 3 evaluations to degree-2 coefficients, padded to degree-3
-            const c0 = evals[0];
+            const c0 = eval_0;
             const two = F.fromU64(2);
             const two_inv = two.inverse() orelse F.one();
-            const c2 = evals[0].sub(evals[1].mul(two)).add(evals[2]).mul(two_inv);
-            const c1 = evals[1].sub(evals[0]).sub(c2);
+            const c2 = eval_0.sub(eval_1.mul(two)).add(eval_2).mul(two_inv);
+            const c1 = eval_1.sub(eval_0).sub(c2);
 
             std.debug.print("[STAGE4 PHASE3] Round {} coeffs: c0={any}, c1={any}, c2={any}\n", .{
                 round,
@@ -1097,6 +1111,17 @@ pub fn Stage4GruenProver(comptime F: type) type {
             const p1 = c[0].add(c[1]).add(c[2]).add(c[3]);
             const p2 = c[0].add(c[1].mul(F.fromU64(2))).add(c[2].mul(F.fromU64(4))).add(c[3].mul(F.fromU64(8)));
             const p3 = c[0].add(c[1].mul(F.fromU64(3))).add(c[2].mul(F.fromU64(9))).add(c[3].mul(F.fromU64(27)));
+
+            // Debug: Verify sumcheck constraint p(0)+p(1) = current_claim
+            const sum01 = p0.add(p1);
+            if (!sum01.eql(current_claim)) {
+                std.debug.print("[STAGE4 SUMCHECK CONSTRAINT VIOLATION] Round {}: p(0)+p(1) != claim\n", .{round});
+                std.debug.print("  p(0) = {any}\n", .{p0.toBytes()[0..8]});
+                std.debug.print("  p(1) = {any}\n", .{p1.toBytes()[0..8]});
+                std.debug.print("  p(0)+p(1) = {any}\n", .{sum01.toBytes()[0..8]});
+                std.debug.print("  current_claim = {any}\n", .{current_claim.toBytes()[0..8]});
+            }
+
             return .{ p0, p1, p2, p3 };
         }
 

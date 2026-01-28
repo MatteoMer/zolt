@@ -2350,15 +2350,35 @@ pub fn ProofConverter(comptime F: type) type {
 
                 // CRITICAL DEBUG: Compare sumcheck output_claim with expected_output_claim
                 // If these don't match, verification will fail!
-                const weighted_expected = expected_output.mul(batching_coeffs[0]);
+                // Instance 0: eq_val * combined (RegistersRWC)
+                // Instance 1: inc_eval * wa_eval * lt_eval (ValEvaluation)
+                // Instance 2: inc_eval * wa_eval (ValFinal)
+                const weighted_expected_0 = expected_output.mul(batching_coeffs[0]);
+                const expected_1 = val_eval_openings.inc_eval.mul(val_eval_openings.wa_eval).mul(val_eval_openings.lt_eval);
+                const weighted_expected_1 = expected_1.mul(batching_coeffs[1]);
+                const expected_2 = val_final_openings.inc_eval.mul(val_final_openings.wa_eval);
+                const weighted_expected_2 = expected_2.mul(batching_coeffs[2]);
+                const total_expected = weighted_expected_0.add(weighted_expected_1).add(weighted_expected_2);
+
                 std.debug.print("\n[ZOLT STAGE4 VERIFY CHECK]\n", .{});
                 std.debug.print("  batched_claim (sumcheck output) = {any}\n", .{batched_claim.toBytesBE()});
-                std.debug.print("  expected_output (Instance 0) = {any}\n", .{expected_output.toBytesBE()});
-                std.debug.print("  coeff[0] = {any}\n", .{batching_coeffs[0].toBytesBE()});
-                std.debug.print("  coeff[0] * expected_output = {any}\n", .{weighted_expected.toBytesBE()});
-                std.debug.print("  Instance 1 expected = inc*wa = {any}\n", .{val_eval_openings.inc_eval.mul(val_eval_openings.wa_eval).toBytesBE()});
-                std.debug.print("  Instance 2 expected = inc*wa = {any}\n", .{val_final_openings.inc_eval.mul(val_final_openings.wa_eval).toBytesBE()});
-                std.debug.print("  Do they match? {}\n", .{batched_claim.eql(weighted_expected)});
+                std.debug.print("  Instance 0: expected={any}, coeff={any}, weighted={any}\n", .{
+                    expected_output.toBytesBE()[0..8],
+                    batching_coeffs[0].toBytesBE()[0..8],
+                    weighted_expected_0.toBytesBE()[0..8],
+                });
+                std.debug.print("  Instance 1 (ValEval): inc*wa*lt={any}, coeff={any}, weighted={any}\n", .{
+                    expected_1.toBytesBE()[0..8],
+                    batching_coeffs[1].toBytesBE()[0..8],
+                    weighted_expected_1.toBytesBE()[0..8],
+                });
+                std.debug.print("  Instance 2 (ValFinal): inc*wa={any}, coeff={any}, weighted={any}\n", .{
+                    expected_2.toBytesBE()[0..8],
+                    batching_coeffs[2].toBytesBE()[0..8],
+                    weighted_expected_2.toBytesBE()[0..8],
+                });
+                std.debug.print("  total_expected = {any}\n", .{total_expected.toBytesBE()});
+                std.debug.print("  Do they match? {}\n", .{batched_claim.eql(total_expected)});
                 std.debug.print("[END VERIFY CHECK]\n\n", .{});
 
                 // RegistersReadWriteChecking claims.

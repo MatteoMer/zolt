@@ -600,13 +600,14 @@ pub fn ValEvaluationProver(comptime F: type) type {
             return self.inc_evals[0].mul(self.wa_evals[0]).mul(self.lt_evals[0]);
         }
 
-        pub fn getFinalOpenings(self: *const Self) struct { inc_eval: F, wa_eval: F } {
+        pub fn getFinalOpenings(self: *const Self) struct { inc_eval: F, wa_eval: F, lt_eval: F } {
             if (self.inc_evals.len == 0) {
-                return .{ .inc_eval = F.zero(), .wa_eval = F.zero() };
+                return .{ .inc_eval = F.zero(), .wa_eval = F.zero(), .lt_eval = F.zero() };
             }
             return .{
                 .inc_eval = self.inc_evals[0],
                 .wa_eval = self.wa_evals[0],
+                .lt_eval = self.lt_evals[0],
             };
         }
 

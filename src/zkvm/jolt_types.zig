@@ -7,10 +7,11 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const common = @import("../common/mod.zig");
 
 // =============================================================================
 // Config Types - Configuration structures for proof parameters
-// =============================================================================
+// =================================================================== ==========
 
 /// Configuration for read-write checking sumchecks.
 /// Matches Jolt's ReadWriteConfig (4 * u8 = 4 bytes)
@@ -20,12 +21,16 @@ pub const ReadWriteConfig = struct {
     registers_rw_phase1_num_rounds: u8,
     registers_rw_phase2_num_rounds: u8,
 
+    /// log2(REGISTER_COUNT) = log2(128) = 7
+    /// REGISTER_COUNT = 32 (RISCV) + 96 (Virtual) = 128
+    pub const LOG_REGISTER_COUNT: u8 = std.math.log2_int(u8, common.REGISTER_COUNT);
+
     pub fn default(log_t: u8, log_k: u8) ReadWriteConfig {
         // Default: half of cycle variables in phase 1, rest in phase 2
         const ram_phase1 = log_t / 2;
         const ram_phase2 = log_k;
         const reg_phase1 = log_t / 2;
-        const reg_phase2: u8 = 5; // log2(32 registers) = 5
+        const reg_phase2: u8 = LOG_REGISTER_COUNT;
 
         return .{
             .ram_rw_phase1_num_rounds = ram_phase1,

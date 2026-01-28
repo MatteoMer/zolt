@@ -1,95 +1,83 @@
-# Zolt-Jolt Compatibility TODO
+# Zolt-Jolt Compatibility: Stage 4 Fix
 
-## 🎯 Current Status: Stage 4 eq_eval Mismatch (Transcript Divergence)
+## Current Status
+Stage 4 RegistersRWC sumcheck verification fails with `output_claim != expected_claim`.
 
-**Session 69 (2026-01-27)**
+## Root Cause Found ✅
+**Zolt's Stage 4 prover doesn't respect the phase configuration!**
 
-### ✅ Previous Fixes (from earlier sessions)
-
-1. **Fixed proof header serialization** - Verification reaches Stage 4
-2. **Stage 4 Round Polynomials are CORRECT** - Coefficient bytes match
-3. **Fixed ValEvaluation and ValFinal** - Different init_eval points
-4. **Stage 4 Input Claims now match** - All 3 instances (RegistersRWC, RamValEval, ValFinal)
-
-### 🔴 Current Issue: Stage 4 Challenges Differ Between Prover and Verifier
-
-**Symptom:** Stage 4 fails with `output_claim != expected_claim` because eq_eval values differ.
-
-**Root Cause:** The Fiat-Shamir transcript produces different challenges!
-
-**Debug Evidence:**
-```
-Zolt Stage 4 challenge #7: low=0x233d551037bcd329, high=0x04fd755bc3f284a6
-Jolt r_cycle[0] (should be c7): low=0x03967406_1269aa55, high=0x022c6820_0a4a1842
+In `stage4_gruen_prover.zig`, line 489:
+```zig
+if (round < self.log_T) {
+    // Phase 1: Binding cycle variables using Gruen
+    return self.phase1ComputeMessage(current_claim);
+}
 ```
 
-These are COMPLETELY different values! This means the proof data diverges somewhere.
+This treats ALL first log_T rounds as Phase 1 (cycle binding), but the actual config is:
+- `phase1_num_rounds = 4` (from ReadWriteConfig)
+- `phase2_num_rounds = 7` (LOG_REGISTER_COUNT = 7)
+- `phase3_cycle_len = 4` (remaining cycle vars)
+- `phase3_address_len = 0` (all address vars handled in phase2)
 
-**Important:** Stage 3 challenges DO match perfectly, so the issue starts in Stage 4.
+The correct structure should be:
+- Phase 1 (rounds 0-3): Bind cycle vars via Gruen
+- Phase 2 (rounds 4-10): Bind address vars via Gruen
+- Phase 3 (rounds 11-14): Bind remaining cycle vars (dense)
 
-### 📊 Investigation Findings
+## Verified ✅
+1. Stage 3 challenges match perfectly between Zolt and Jolt
+2. Stage 4's `params.r_cycle` (from Stage 3) matches between Zolt and Jolt
+3. Stage 4 input claims match
+4. Stage 4 batching coefficients match
+5. Stage 4 sumcheck challenges match (all 15 rounds)
+6. Stage 4 final claims match (val, rs1_ra, rs2_ra, rd_wa, inc)
 
-1. **Understanding Jolt's normalize_opening_point:**
-   - Phase 1: 8 rounds (cycle vars via Gruen)
-   - Phase 2: 7 rounds (address vars via Gruen)
-   - Phase 3: 0 rounds (for our 256-step trace)
-   - r_cycle = [c7, c6, ..., c0] (challenge #7 through #0, reversed)
-   - r_address = [c14, c13, ..., c8]
+## Issue
+The eq polynomial binding order doesn't match Jolt's because Zolt binds:
+- Rounds 0-7: ALL cycle vars (wrong!)
+- Rounds 8-14: address vars
 
-2. **Zolt's Current Approach is Correct (Ordering):**
-   - Takes first 8 challenges, reverses → matches Jolt's r_cycle construction
+But Jolt binds:
+- Rounds 0-3: FIRST 4 cycle vars (Phase 1)
+- Rounds 4-10: ALL 7 address vars (Phase 2)
+- Rounds 11-14: REMAINING 4 cycle vars (Phase 3)
 
-3. **The Transcript Diverges:**
-   Since both implementations use Fiat-Shamir, the proof data being appended must differ.
+This causes `eq_eval = EqPolynomial::mle_endian(&r_cycle, &params.r_cycle)` to produce different values because `r_cycle` is constructed from Stage 4's sumcheck challenges using `normalize_opening_point`:
 
-   Possible causes:
-   - Round polynomial coefficients computed incorrectly
-   - Different serialization of round poly coefficients
-   - Missing or extra data being appended
+```rust
+// Jolt's normalize_opening_point for 15 rounds:
+r_cycle = [c14, c13, c12, c11, c3, c2, c1, c0]  // NOT [c7, c6, ..., c0]
+```
 
-### 📋 Next Steps
+## Fix Required
+Modify `stage4_gruen_prover.zig` to:
+1. Accept `phase1_num_rounds` and `phase2_num_rounds` from ReadWriteConfig
+2. Use 3-phase structure:
+   - Phase 1: first `phase1_num_rounds` rounds bind cycle vars via Gruen
+   - Phase 2: next `phase2_num_rounds` rounds bind address vars (new!)
+   - Phase 3: remaining rounds bind more cycle vars (dense)
+3. Ensure the eq polynomial is bound in the same order as Jolt
 
-1. **Compare Round 0 coefficients exactly:**
-   - Print c0, c2, c3 being appended in Zolt Stage 4 Round 0
-   - Print what Jolt verifier reads from the proof
-   - They should be identical bytes
+## Tasks
+- [x] Fix ReadWriteConfig to use correct LOG_REGISTER_COUNT (7, not 5)
+- [x] Verify Stage 3 challenges match
+- [x] Verify params.r_cycle matches
+- [x] Identify root cause: phase config not used in Stage 4 prover
+- [ ] **IN PROGRESS**: Fix Stage 4 prover to use correct 3-phase structure
+- [ ] Verify eq_eval matches after fix
+- [ ] Run full verification test
 
-2. **Check Stage 4 proof serialization:**
-   - 3 coefficients per round: c0, c2, c3
-   - Verify byte ordering
+## Key Files
+- `/home/vivado/projects/zolt/src/zkvm/spartan/stage4_gruen_prover.zig` - Needs phase config
+- `/home/vivado/projects/zolt/src/zkvm/jolt_types.zig` - ReadWriteConfig (fixed)
+- `/home/vivado/projects/jolt/jolt-core/src/zkvm/registers/read_write_checking.rs` - Reference implementation
 
-3. **Debug transcript state:**
-   - Print Zolt's transcript state after each Stage 4 round
-   - Compare with what Jolt's verifier's transcript produces
-
-### Commands
-
+## Commands
 ```bash
 # Generate proof
 zig build -Doptimize=ReleaseFast run -- prove examples/fibonacci.elf --jolt-format -o /tmp/zolt_proof_dory.bin
 
-# Copy files
-cp /tmp/zolt_preprocessing.bin /tmp/jolt_verifier_preprocessing.dat
-
-# Test verification with debug
+# Test verification
 cd /home/vivado/projects/jolt && cargo test --package jolt-core --no-default-features --features "minimal,zolt-debug" test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
-
-### Key Files
-
-- `/home/vivado/projects/zolt/src/zkvm/proof_converter.zig` - Stage 4 proof generation (line 2038+)
-- `/home/vivado/projects/zolt/src/zkvm/spartan/stage4_gruen_prover.zig` - Gruen eq prover
-- `/home/vivado/projects/jolt/jolt-core/src/zkvm/registers/read_write_checking.rs` - Jolt verifier
-- `/home/vivado/projects/jolt/jolt-core/src/subprotocols/sumcheck.rs` - Sumcheck verification
-
-### Success Criteria
-
-- [x] Proof header deserializes correctly
-- [x] Stage 4 round polynomials serialize correctly (format)
-- [x] ValEvaluation uses correct r_address (RWC point)
-- [x] ValFinal uses correct r_address (OutputCheck point)
-- [x] Stage 4 input claims match verifier expectations (all 3 instances)
-- [ ] **Stage 4 challenges match between prover/verifier** ← CURRENT BLOCKER
-- [ ] eq_eval computation matches Jolt verifier
-- [ ] Stage 4 sumcheck verification passes
-- [ ] Full Jolt verification passes

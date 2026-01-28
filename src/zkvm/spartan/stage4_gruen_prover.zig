@@ -247,9 +247,17 @@ pub fn Stage4GruenProver(comptime F: type) type {
             }
 
             // Debug: Print r_cycle_be values to compare with Jolt's params.r_cycle
+            // NOTE: r_cycle_be values are MontU128Challenge-style [0, 0, low, high] limbs
             std.debug.print("\n[STAGE4_GRUEN_INIT] r_cycle_be (should match Jolt's params.r_cycle):\n", .{});
             for (0..r_cycle_be.len) |i| {
-                std.debug.print("[STAGE4_GRUEN_INIT]   r_cycle_be[{}] = {any}\n", .{ i, r_cycle_be[i].toBytes() });
+                const c = r_cycle_be[i];
+                // Print in Jolt Challenge format: [16 zeros, low_LE, high_LE]
+                var jolt_format: [32]u8 = [_]u8{0} ** 32;
+                std.mem.writeInt(u64, jolt_format[16..24], c.limbs[2], .little);
+                std.mem.writeInt(u64, jolt_format[24..32], c.limbs[3], .little);
+                std.debug.print("[STAGE4_GRUEN_INIT]   r_cycle_be[{}] = {{ ", .{i});
+                for (jolt_format) |b| std.debug.print("{x:0>2} ", .{b});
+                std.debug.print("}}\n", .{});
             }
 
             const gruen_eq_poly = try GruenSplitEqPolynomial(F).init(allocator, r_cycle_be);

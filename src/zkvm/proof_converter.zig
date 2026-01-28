@@ -1489,9 +1489,24 @@ pub fn ProofConverter(comptime F: type) type {
             defer stage3_result.deinit();
 
             // Debug: Print Stage 3 challenges for comparison with Jolt
+            // NOTE: Stage 3 challenges are MontU128Challenge-style [0, 0, low, high] limbs
+            // where the limbs ARE the Montgomery representation directly.
+            // To compare with Jolt's params.r_cycle, we need to look at limbs[2] and limbs[3].
             std.debug.print("[ZOLT STAGE3 RESULT] challenges.len = {}\n", .{stage3_result.challenges.len});
             for (stage3_result.challenges, 0..) |c, i| {
-                std.debug.print("[ZOLT STAGE3 RESULT]   challenge[{}] = {any}\n", .{ i, c.toBytes()[0..8] });
+                std.debug.print("[ZOLT STAGE3 RESULT]   challenge[{}] limbs = [0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}]\n", .{ i, c.limbs[0], c.limbs[1], c.limbs[2], c.limbs[3] });
+            }
+            // Also print in the format that matches Jolt's params.r_cycle (16 zero bytes + 16 data bytes)
+            std.debug.print("[ZOLT STAGE3 RESULT] As Jolt Challenge format (reversed to BIG_ENDIAN r_cycle_be):\n", .{});
+            for (0..stage3_result.challenges.len) |i| {
+                const c = stage3_result.challenges[stage3_result.challenges.len - 1 - i];
+                // Jolt's Challenge serializes as [0, 0, low_LE, high_LE] where each u64 is in LE bytes
+                var jolt_format: [32]u8 = [_]u8{0} ** 32;
+                std.mem.writeInt(u64, jolt_format[16..24], c.limbs[2], .little);
+                std.mem.writeInt(u64, jolt_format[24..32], c.limbs[3], .little);
+                std.debug.print("[ZOLT STAGE3 RESULT]   r_cycle_be[{}] = {{ ", .{i});
+                for (jolt_format) |b| std.debug.print("{x:0>2} ", .{b});
+                std.debug.print("}}\n", .{});
             }
 
             // SpartanShift claims (from Stage 3 prover)
@@ -2136,12 +2151,11 @@ pub fn ProofConverter(comptime F: type) type {
                     // Get compressed coefficients [c0, c2, c3] for transcript
                     const compressed = poly_mod.UniPoly(F).evalsToCompressed(combined_evals);
 
-                    if (round_idx < 3 or round_idx >= stage4_max_rounds - 2) {
-                        std.debug.print("[ZOLT STAGE4] Round {}: c0 = {any}\n", .{ round_idx, compressed[0].toBytesBE()[0..16] });
-                        std.debug.print("[ZOLT STAGE4] Round {}: c2 (actual) = {any}\n", .{ round_idx, compressed[1].toBytesBE()[0..16] });
-                        std.debug.print("[ZOLT STAGE4] Round {}: c3 = {any}\n", .{ round_idx, compressed[2].toBytesBE()[0..16] });
-                        std.debug.print("[ZOLT STAGE4] Round {}: batched_claim = {any}\n", .{ round_idx, batched_claim.toBytesBE()[0..16] });
-                    }
+                    // Print all rounds for debugging transcript divergence
+                    std.debug.print("[ZOLT STAGE4] Round {}: c0 = {any}\n", .{ round_idx, compressed[0].toBytesBE()[0..16] });
+                    std.debug.print("[ZOLT STAGE4] Round {}: c2 (actual) = {any}\n", .{ round_idx, compressed[1].toBytesBE()[0..16] });
+                    std.debug.print("[ZOLT STAGE4] Round {}: c3 = {any}\n", .{ round_idx, compressed[2].toBytesBE()[0..16] });
+                    std.debug.print("[ZOLT STAGE4] Round {}: batched_claim = {any}\n", .{ round_idx, batched_claim.toBytesBE()[0..16] });
 
                     // Debug: Show exact bytes being appended to transcript for Round 0
                     if (round_idx == 0) {
@@ -2198,10 +2212,9 @@ pub fn ProofConverter(comptime F: type) type {
                     const old_claim = batched_claim;
                     batched_claim = evalFromHint(compressed, old_claim, challenge);
 
-                    if (round_idx < 3 or round_idx >= stage4_max_rounds - 2) {
-                        std.debug.print("[ZOLT STAGE4] Round {}: challenge (LE) = {any}\n", .{ round_idx, challenge.toBytes() });
-                        std.debug.print("[ZOLT STAGE4] Round {}: new batched_claim (LE) = {any}\n", .{ round_idx, batched_claim.toBytes() });
-                    }
+                    // Print all 15 rounds for debugging transcript divergence
+                    std.debug.print("[ZOLT STAGE4] Round {}: challenge (LE) = {any}\n", .{ round_idx, challenge.toBytes() });
+                    std.debug.print("[ZOLT STAGE4] Round {}: new batched_claim (LE) = {any}\n", .{ round_idx, batched_claim.toBytes() });
 
                     regs_current_claim = evaluateCubicAtChallengeFromEvals(regs_evals, challenge);
                     regs_prover.bindChallenge(round_idx, challenge);

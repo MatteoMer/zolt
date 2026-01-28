@@ -438,6 +438,12 @@ pub fn Stage4GruenProver(comptime F: type) type {
             const rd_wa_claim = self.rd_wa_poly[0];
             const inc_claim = self.inc_poly[0];
 
+            // Debug: Print final eq scalar for comparison with Jolt's eq_eval
+            if (self.gruen_eq) |gruen| {
+                std.debug.print("\n[ZOLT STAGE4 EQ_EVAL] gruen.current_scalar = {any}\n", .{gruen.current_scalar.toBytes()});
+                std.debug.print("[ZOLT STAGE4 EQ_EVAL] This should match Jolt's eq_eval in expected_output_claim\n", .{});
+            }
+
             // Debug: Print final claims for comparison with Jolt
             std.debug.print("\n[ZOLT STAGE4 FINAL CLAIMS]\n", .{});
             std.debug.print("[ZOLT STAGE4]   val_claim = {any}\n", .{val_claim.toBytes()});

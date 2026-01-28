@@ -1664,24 +1664,94 @@ pub fn ProofConverter(comptime F: type) type {
                     .add(gamma_stage4.mul(stage3_claims.rs1_value))
                     .add(gamma_stage4.mul(gamma_stage4).mul(stage3_claims.rs2_value));
 
-                // Derive r_address and r_cycle from Stage 2 RWC sumcheck challenges (BIG_ENDIAN).
-                var r_cycle_be = try self.allocator.alloc(F, n_cycle_vars);
-                defer self.allocator.free(r_cycle_be);
-                @memset(r_cycle_be, F.zero());
+                // Derive r_address from Stage 2 RWC sumcheck challenges using normalize_opening_point.
+                //
+                // RamReadWriteChecking has 3 phases:
+                // - Phase 1: phase1_num_rounds cycle vars (bound low-to-high)
+                // - Phase 2: phase2_num_rounds address vars (bound low-to-high)
+                // - Phase 3: (log_T - phase1) cycle vars + (log_K - phase2) address vars
+                //
+                // With default config (phase1 = log_T/2, phase2 = log_K):
+                // - Phase 1: challenges[0..phase1]
+                // - Phase 2: challenges[phase1..phase1+phase2]
+                // - Phase 3 cycle: challenges[phase1+phase2..phase1+phase2+phase3_cycle]
+                //
+                // normalize_opening_point returns:
+                // - r_cycle = reverse(phase3_cycle) ++ reverse(phase1)
+                // - r_address = reverse(phase3_address) ++ reverse(phase2)
+                // - opening_point = [r_address, r_cycle]
+                //
+                // ValEvaluation splits at log_K to get r_address.
 
+                // Get phase config from the proof
+                const phase1 = jolt_proof.rw_config.ram_rw_phase1_num_rounds;
+                const phase2 = jolt_proof.rw_config.ram_rw_phase2_num_rounds;
+                const phase3_cycle_len = n_cycle_vars - phase1;
+                const phase3_address_len = log_ram_k - phase2;
+
+                std.debug.print("[ZOLT STAGE4] Phase config: phase1={}, phase2={}, phase3_cycle={}, phase3_addr={}\n", .{ phase1, phase2, phase3_cycle_len, phase3_address_len });
+
+                // Extract r_address using normalize_opening_point logic:
+                // r_address = reverse(phase3_address) ++ reverse(phase2)
+                // With default config (phase2 = log_K, phase3_address = 0):
+                // r_address = reverse(challenges[phase1..phase1+phase2])
                 var r_address_be = try self.allocator.alloc(F, log_ram_k);
                 defer self.allocator.free(r_address_be);
                 @memset(r_address_be, F.zero());
 
-                for (0..n_cycle_vars) |i| {
-                    if (i < stage2_result.challenges.len) {
-                        r_cycle_be[n_cycle_vars - 1 - i] = stage2_result.challenges[i];
+                // Phase 2 address challenges are at indices [phase1..phase1+phase2)
+                const phase2_start = phase1;
+                for (0..phase2) |i| {
+                    const src_idx = phase2_start + i;
+                    if (src_idx < stage2_result.challenges.len) {
+                        // reverse(phase2): put challenge at phase2_start+i into r_address[phase2-1-i]
+                        // Then prepend to phase3_address (which is at r_address[0..phase3_address_len])
+                        const dest_idx = phase3_address_len + (phase2 - 1 - i);
+                        if (dest_idx < log_ram_k) {
+                            r_address_be[dest_idx] = stage2_result.challenges[src_idx];
+                        }
                     }
                 }
-                for (0..log_ram_k) |i| {
-                    const idx = n_cycle_vars + i;
-                    if (idx < stage2_result.challenges.len) {
-                        r_address_be[log_ram_k - 1 - i] = stage2_result.challenges[idx];
+                // Phase 3 address challenges are at indices [phase1+phase2+phase3_cycle..end)
+                const phase3_addr_start = phase1 + phase2 + phase3_cycle_len;
+                for (0..phase3_address_len) |i| {
+                    const src_idx = phase3_addr_start + i;
+                    if (src_idx < stage2_result.challenges.len) {
+                        // reverse(phase3_address): put into r_address[phase3_addr_len-1-i]
+                        const dest_idx = phase3_address_len - 1 - i;
+                        r_address_be[dest_idx] = stage2_result.challenges[src_idx];
+                    }
+                }
+
+                std.debug.print("[ZOLT STAGE4] r_address_be computed (first 5):\n", .{});
+                for (0..@min(5, log_ram_k)) |i| {
+                    std.debug.print("[ZOLT STAGE4]   r_address_be[{}] = {any}\n", .{ i, r_address_be[i].toBytes()[0..8] });
+                }
+
+                // Also extract r_cycle for other uses
+                // r_cycle = reverse(phase3_cycle) ++ reverse(phase1)
+                var r_cycle_be = try self.allocator.alloc(F, n_cycle_vars);
+                defer self.allocator.free(r_cycle_be);
+                @memset(r_cycle_be, F.zero());
+
+                // Phase 1 cycle challenges at indices [0..phase1)
+                for (0..phase1) |i| {
+                    if (i < stage2_result.challenges.len) {
+                        // reverse(phase1): put into r_cycle[phase3_cycle_len + (phase1-1-i)]
+                        const dest_idx = phase3_cycle_len + (phase1 - 1 - i);
+                        if (dest_idx < n_cycle_vars) {
+                            r_cycle_be[dest_idx] = stage2_result.challenges[i];
+                        }
+                    }
+                }
+                // Phase 3 cycle challenges at indices [phase1+phase2..phase1+phase2+phase3_cycle_len)
+                const phase3_cycle_start = phase1 + phase2;
+                for (0..phase3_cycle_len) |i| {
+                    const src_idx = phase3_cycle_start + i;
+                    if (src_idx < stage2_result.challenges.len) {
+                        // reverse(phase3_cycle): put into r_cycle[phase3_cycle_len-1-i]
+                        const dest_idx = phase3_cycle_len - 1 - i;
+                        r_cycle_be[dest_idx] = stage2_result.challenges[src_idx];
                     }
                 }
 
@@ -1703,15 +1773,83 @@ pub fn ProofConverter(comptime F: type) type {
                 else
                     constants.RAM_START_ADDRESS;
 
-                // Use val_init evaluation from OutputSumcheck (stored in opening accumulator)
-                // OutputSumcheck bound val_init to val_init[0], which is the MLE evaluation at r_address.
-                // This matches Jolt's approach: ValFinalSumcheck retrieves val_init_eval from the
-                // opening accumulator rather than recomputing it.
-                const val_init_eval = stage2_result.output_val_init_claim;
+                // CRITICAL FIX: ValEvaluation and ValFinal use DIFFERENT r_address points!
+                //
+                // For ValEvaluation:
+                //   - Jolt verifier gets r_address from RamVal @ RamReadWriteChecking
+                //   - This is r_address_be that we computed from Stage 2 RWC challenges above
+                //   - init_eval = eval_initial_ram_mle(r_address from RWC)
+                //
+                // For ValFinal:
+                //   - Jolt verifier gets r_address from RamValFinal @ RamOutputCheck
+                //   - This is the same point where output_val_init_claim was computed
+                //   - init_eval = output_val_init_claim (from OutputSumcheck)
+                //
+                // Previously we used output_val_init_claim for both, which is WRONG!
 
-                std.debug.print("[ZOLT STAGE4 FIX] Using val_init_eval from OutputSumcheck:\n", .{});
-                std.debug.print("[ZOLT STAGE4 FIX]   output_val_init_claim = {any}\n", .{stage2_result.output_val_init_claim.toBytesBE()});
-                std.debug.print("[ZOLT STAGE4 FIX]   output_val_final_claim = {any}\n", .{stage2_result.output_val_final_claim.toBytesBE()});
+                // Compute init_eval for ValEvaluation at the RWC r_address
+                const init_eval_for_val_eval = blk: {
+                    if (config.initial_ram) |ir| {
+                        if (config.memory_layout) |ml| {
+                            const result = computeInitialRamEval(ir, ml, r_address_be, log_ram_k);
+                            std.debug.print("[ZOLT STAGE4 FIX] Computed init_eval_for_val_eval at RWC r_address:\n", .{});
+                            std.debug.print("[ZOLT STAGE4 FIX]   init_eval_for_val_eval = {any}\n", .{result.toBytesBE()});
+                            break :blk result;
+                        }
+                    }
+                    // No RAM -> init_eval = 0
+                    std.debug.print("[ZOLT STAGE4 FIX] No initial_ram/memory_layout, using zero for init_eval_for_val_eval\n", .{});
+                    break :blk F.zero();
+                };
+
+                // For ValFinal, compute init_eval at the OutputCheck r_address
+                // using computeInitialRamEval (which only includes bytecode + inputs).
+                //
+                // IMPORTANT: We cannot use output_val_init_claim directly because the OutputSumcheck
+                // prover's val_init polynomial includes termination bits (as a WORKAROUND), but
+                // Jolt's verifier computes init_eval from eval_initial_ram_mle which only includes
+                // bytecode + inputs (NOT termination bits).
+                //
+                // OutputSumcheck's r_address comes from Stage 2 challenges at offset 8..24
+                // (OutputSumcheck has log_ram_k=16 rounds starting at max_rounds - log_ram_k = 24 - 16 = 8)
+                // The r_address is normalized by reversing the challenges (LITTLE_ENDIAN to BIG_ENDIAN).
+                const output_check_offset = n_cycle_vars; // max_rounds - log_ram_k = (log_ram_k + n_cycle_vars) - log_ram_k = n_cycle_vars
+                var r_address_output_check = try self.allocator.alloc(F, log_ram_k);
+                defer self.allocator.free(r_address_output_check);
+
+                // OutputSumcheck uses LITTLE_ENDIAN -> BIG_ENDIAN normalization (reverse)
+                for (0..log_ram_k) |i| {
+                    const src_idx = output_check_offset + i;
+                    if (src_idx < stage2_result.challenges.len) {
+                        // Reverse: challenges[offset+i] goes to r_address[log_ram_k-1-i]
+                        r_address_output_check[log_ram_k - 1 - i] = stage2_result.challenges[src_idx];
+                    } else {
+                        r_address_output_check[log_ram_k - 1 - i] = F.zero();
+                    }
+                }
+
+                std.debug.print("[ZOLT STAGE4 FIX] r_address_output_check (first 4):\n", .{});
+                for (0..@min(4, log_ram_k)) |i| {
+                    std.debug.print("[ZOLT STAGE4 FIX]   r_address_output_check[{}] = {any}\n", .{ i, r_address_output_check[i].toBytesBE() });
+                }
+
+                const init_eval_for_val_final = blk: {
+                    if (config.initial_ram) |ir| {
+                        if (config.memory_layout) |ml| {
+                            const result = computeInitialRamEval(ir, ml, r_address_output_check, log_ram_k);
+                            std.debug.print("[ZOLT STAGE4 FIX] Computed init_eval_for_val_final at OutputCheck r_address:\n", .{});
+                            std.debug.print("[ZOLT STAGE4 FIX]   init_eval_for_val_final = {any}\n", .{result.toBytesBE()});
+                            break :blk result;
+                        }
+                    }
+                    // No RAM -> init_eval = 0
+                    std.debug.print("[ZOLT STAGE4 FIX] No initial_ram/memory_layout, using zero for init_eval_for_val_final\n", .{});
+                    break :blk F.zero();
+                };
+
+                std.debug.print("[ZOLT STAGE4 FIX] init_eval_for_val_eval = {any}\n", .{init_eval_for_val_eval.toBytesBE()});
+                std.debug.print("[ZOLT STAGE4 FIX] init_eval_for_val_final = {any}\n", .{init_eval_for_val_final.toBytesBE()});
+                std.debug.print("[ZOLT STAGE4 FIX] output_val_final_claim = {any}\n", .{stage2_result.output_val_final_claim.toBytesBE()});
 
                 // NOTE: For programs without RAM operations (like Fibonacci), the actual polynomial
                 // sums for val_eval and val_final are 0. We'll compute the actual sums later and use
@@ -1732,9 +1870,9 @@ pub fn ProofConverter(comptime F: type) type {
 
                 // Debug: print components
                 std.debug.print("[ZOLT STAGE4] rwc_val_claim_BE = {any}\n", .{stage2_result.rwc_val_claim.toBytesBE()});
-                std.debug.print("[ZOLT STAGE4] val_init_eval_BE = {any}\n", .{val_init_eval.toBytesBE()});
+                std.debug.print("[ZOLT STAGE4] init_eval_for_val_eval_BE = {any}\n", .{init_eval_for_val_eval.toBytesBE()});
                 std.debug.print("[ZOLT STAGE4] output_val_final_claim_BE = {any}\n", .{stage2_result.output_val_final_claim.toBytesBE()});
-                std.debug.print("[ZOLT STAGE4] output_val_init_claim_BE = {any}\n", .{stage2_result.output_val_init_claim.toBytesBE()});
+                std.debug.print("[ZOLT STAGE4] init_eval_for_val_final_BE = {any}\n", .{init_eval_for_val_final.toBytesBE()});
 
                 // IMPORTANT: Initialize val_eval and val_final provers FIRST to compute their
                 // actual polynomial sums. These sums are what Jolt expects as input claims.
@@ -1747,7 +1885,7 @@ pub fn ProofConverter(comptime F: type) type {
                 const trace_len = trace.steps.items.len;
                 const val_eval_params_early = try ram.ValEvaluationParams(F).init(
                     self.allocator,
-                    val_init_eval,
+                    init_eval_for_val_eval, // Use the correct init_eval computed at RWC r_address
                     trace_len,
                     ram_K,
                     r_address_le,
@@ -1784,18 +1922,20 @@ pub fn ProofConverter(comptime F: type) type {
                 );
                 defer val_final_prover_early.deinit();
 
-                // CRITICAL: The input_claim for ValEvaluation is computed from the opening accumulator,
-                // NOT from the polynomial sum. The formula is:
-                //   input_claim = claimed_evaluation(RamVal) - init_eval
-                // This matches Jolt's SumcheckInstanceParams::input_claim implementation.
-                // Both instances use val_init_eval which comes from OutputSumcheck's bound value.
-                const input_claim_val_eval = stage2_result.rwc_val_claim.sub(val_init_eval);
+                // CRITICAL: The input_claim for ValEvaluation is computed from the opening accumulator.
+                // The formula is:
+                //   input_claim = claimed_evaluation(RamVal @ RWC) - init_eval(r_address from RWC)
+                // This matches Jolt's SumcheckInstanceParams::input_claim implementation in val_evaluation.rs.
+                // We use init_eval_for_val_eval which was computed at the RWC r_address.
+                const input_claim_val_eval = stage2_result.rwc_val_claim.sub(init_eval_for_val_eval);
 
-                // CRITICAL: RamValFinalEvaluation's input_claim uses val_init_eval from OutputSumcheck.
+                // CRITICAL: RamValFinalEvaluation's input_claim uses init_eval at the OutputCheck r_address.
+                // The formula is:
+                //   input_claim = val_final_claim(@ OutputCheck) - init_eval(r_address from OutputCheck)
                 // Jolt stores val_init[0] in the opening accumulator after OutputSumcheck completes,
                 // then retrieves it for ValFinalSumcheck. This is output_val_init_claim in our code.
-                // See: jolt-core/src/zkvm/ram/val_final.rs:135-141 and output_check.rs:212-237
-                const input_claim_val_final = stage2_result.output_val_final_claim.sub(val_init_eval);
+                // See: jolt-core/src/zkvm/ram/val_final.rs:70-76 and 137-142
+                const input_claim_val_final = stage2_result.output_val_final_claim.sub(init_eval_for_val_final);
 
                 std.debug.print("[ZOLT STAGE4] input_claim_val_eval (derived from accumulator): {any}\n", .{input_claim_val_eval.toBytesBE()});
                 std.debug.print("[ZOLT STAGE4] input_claim_val_final (derived from accumulator): {any}\n", .{input_claim_val_final.toBytesBE()});
@@ -2093,6 +2233,14 @@ pub fn ProofConverter(comptime F: type) type {
                     r_cycle_sumcheck_be[i] = r_cycle_sumcheck_le[n_cycle_vars - 1 - i];
                 }
 
+                // DEBUG: Print raw limbs of r_cycle_sumcheck_be[0] for comparison with Jolt's Challenge
+                std.debug.print("\n[ZOLT STAGE4 CHALLENGE DEBUG] r_cycle_sumcheck_be[0] RAW LIMBS:\n", .{});
+                std.debug.print("  limbs[0] = 0x{x}\n", .{r_cycle_sumcheck_be[0].limbs[0]});
+                std.debug.print("  limbs[1] = 0x{x}\n", .{r_cycle_sumcheck_be[0].limbs[1]});
+                std.debug.print("  limbs[2] = 0x{x} (this is 'low' in Jolt's Challenge)\n", .{r_cycle_sumcheck_be[0].limbs[2]});
+                std.debug.print("  limbs[3] = 0x{x} (this is 'high' in Jolt's Challenge)\n", .{r_cycle_sumcheck_be[0].limbs[3]});
+                std.debug.print("  Jolt's r_cycle[0] should have: low=0x..., high=0x... (read from bytes 16-31)\n", .{});
+
                 // DEBUG: Compare Stage 4 r_cycle and Stage 3 r_cycle ordering (LE bytes).
                 std.debug.print("[STAGE4 ZOLT CHECK] r_cycle_sumcheck_le.len = {}\n", .{r_cycle_sumcheck_le.len});
                 for (0..r_cycle_sumcheck_le.len) |i| {
@@ -2102,7 +2250,7 @@ pub fn ProofConverter(comptime F: type) type {
                 std.debug.print("[STAGE4 ZOLT CHECK] r_cycle_sumcheck_be.len = {}\n", .{r_cycle_sumcheck_be.len});
                 for (0..r_cycle_sumcheck_be.len) |i| {
                     const bytes = r_cycle_sumcheck_be[i].toBytes();
-                    std.debug.print("[STAGE4 ZOLT CHECK]   r_cycle_sumcheck_be[{}] = {any}\n", .{ i, bytes[0..8] });
+                    std.debug.print("[STAGE4 ZOLT CHECK]   r_cycle_sumcheck_be[{}] (FULL 32 bytes) = {any}\n", .{ i, bytes });
                 }
                 std.debug.print("[STAGE4 ZOLT CHECK] stage3_r_cycle (LE, passed to prover).len = {}\n", .{stage3_r_cycle_le.len});
                 for (0..stage3_r_cycle_le.len) |i| {

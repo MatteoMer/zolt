@@ -1,10 +1,10 @@
 # Zolt-Jolt Compatibility: Stage 4 Final Claim Fix
 
-## Status: In Progress (Session 71)
+## Status: In Progress (Session 71 - continued)
 
-## Recent Fix Applied
+## Fixes Applied This Session
 
-### Phase 3 Degree-3 Polynomial Fix (Committed: e40d5cf)
+### 1. Phase 3 Degree-3 Polynomial Fix (Committed: e40d5cf)
 
 **Root Cause Found:** Phase 3 was always computing degree-2 polynomial, but Jolt has TWO cases:
 1. **Cycles remaining** (current_T > 1): Degree 3, compute [p(0), p(2), p(3)]
@@ -12,9 +12,15 @@
 
 **Fix Applied:** Updated `phase3ComputeMessage` to check `cycles_remaining = self.current_T > 1` and compute degree-3 polynomial with evaluations at [0, 2, 3] when cycle variables remain.
 
-## Current Testing
+### 2. Division by Zero Handling (Committed: 0d74965)
 
-Need to test the Phase 3 fix with actual Jolt verification. The test suite is running into OOM issues before reaching Stage 4.
+Changed `gruen_eq.zig` to panic on eq_eval_1=0 instead of silently returning wrong value. This matches Jolt's assumption that random challenges won't be exactly zero.
+
+## Current Blocker
+
+Tests are being killed by OOM/signal 9 before reaching Stage 4, likely due to:
+- Excessive debug output being buffered
+- Other tests consuming memory before Stage 4 tests run
 
 ## Files Modified
 
@@ -43,13 +49,17 @@ where `combined = rd_wa*(inc+val) + gamma*rs1_ra*val + gamma^2*rs2_ra*val`
 
 ## Next Steps
 
-1. Run full test with Jolt verifier to check Stage 4 fix
-2. If still failing, investigate Phase 1 Gruen polynomial computation
-3. Check if merged_eq[0] matches expected eq_val after all bindings
+1. Reduce debug output to allow tests to complete
+2. Run full test with Jolt verifier to check Stage 4 fix
+3. If still failing, investigate Phase 1 Gruen polynomial computation
+4. Check if merged_eq[0] matches expected eq_val after all bindings
 
 ## Session Summary
 
 - Identified Phase 3 degree issue through Jolt code analysis
 - Fixed Phase 3 to compute degree-3 polynomial when cycles remain
 - Updated edge case handling in gruen_eq.zig
-- Committed fix to main branch
+- Both fixes committed to main branch
+- Tests blocked by OOM issues (unrelated to fix)
+
+SESSION_ENDING - saved progress to TODO.md

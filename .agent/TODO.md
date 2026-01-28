@@ -1,93 +1,81 @@
 # Zolt-Jolt Compatibility: Stage 4 Input Claim Issue
 
-## Current Problem
+## Status: In Progress
 
-Stage 4 verification fails because the transcript diverges at the input claims:
-- Jolt verifier expects: `instance[1]` (RamValEval) = NON-ZERO
-- Zolt prover sends: `instance[1]` (RamValEval) = ZERO
+## Recent Changes (Session 68)
 
-But for Fibonacci (no RAM ops), both should be ZERO! So why does Jolt compute non-zero?
+1. **Removed termination bit workaround from RWC prover** (`cee6b7e`)
+   - RWC's val_init now matches Jolt's initial RAM (no termination bit)
+   - For programs without RAM ops, `input_claim_val_eval = 0` should be correct
 
-## Key Findings (Session 68)
+2. **Identified OutputSumcheck workaround** still in place
+   - Sets termination in BOTH val_init and val_final
+   - This makes OutputSumcheck internally consistent but breaks ValFinal input_claim
 
-### 1. Opening Points Are Reconstructed, Not Stored
+## Root Cause Analysis
 
-Both Jolt prover/verifier reconstruct opening points from sumcheck challenges:
-- Jolt's proof serialization skips `_opening_point` (only stores key + claim)
-- Verifier initializes with `OpeningPoint::default()`, then populates during `cache_openings`
-- `normalize_opening_point(sumcheck_challenges)` reconstructs `r_address` and `r_cycle`
+### The Termination Bit Problem
 
-Zolt's format is correct (only stores key + claim).
+**Jolt's approach:**
+- Emulator records termination write as a real RISC-V store instruction
+- This creates a sparse matrix entry: `inc=1`, `wa=term_addr`
+- `val_init[term] = 0` (initial RAM)
+- `val_final[term] = 1` (after termination write)
+- OutputSumcheck: `val_final - val_init = 1 = Σ inc * wa` ✓
 
-### 2. The `init_eval` Computation Flow
+**Zolt's approach (with workaround):**
+- Tracer does NOT record termination write
+- No sparse entry for termination
+- Workaround sets BOTH: `val_init[term] = 1`, `val_final[term] = 1`
+- OutputSumcheck: `val_final - val_init = 0 = Σ inc * wa` ✓ (internally consistent)
 
-For RamValEvaluation's input_claim:
-```
-input_claim = claimed_evaluation - init_eval
-```
+**The problem:**
+- `output_val_final_claim` includes termination=1 (from OutputSumcheck's val_final)
+- `init_eval_for_val_final` computed from `config.initial_ram` has termination=0
+- `input_claim_val_final = 1 - 0 = termination_contribution ≠ 0`
 
-Where:
-- `claimed_evaluation` = proof.opening_claims[RamVal @ RamReadWriteChecking]
-- `init_eval` = computed during verification from:
-  - advice_contributions (from commitment openings)
-  - val_init_public_eval (bytecode + inputs, computed directly)
+But the NOTES say Zolt sends zeros... need to verify actual debug output.
 
-### 3. For Programs Without RAM Ops (Fibonacci)
+## Proper Fix Options
 
-- `claimed_evaluation` = MLE(initial_ram) @ r_address
-- `init_eval` = MLE(bytecode + inputs) @ r_address
-- Since initial_ram = bytecode + inputs (+ advice if any), these should be EQUAL
-- `input_claim = 0` is CORRECT for Fibonacci!
+1. **Have Zolt's tracer record termination write** (like Jolt)
+   - Modify `src/tracer/mod.zig` to emit a store instruction for termination
+   - This would make sparse matrix entries correct
+   - OutputSumcheck's val_final would naturally have termination=1
 
-### 4. The Mismatch
+2. **Remove ALL termination workarounds** and accept that:
+   - For no-RAM programs, all input_claims = 0
+   - Need to verify Jolt also produces zeros for such programs
 
-The NOTES indicate Jolt computes non-zero while Zolt sends zero. Possible causes:
-1. `r_address` reconstruction differs between Jolt verifier and Zolt prover
-2. Jolt's `eval_initial_ram_mle` includes something extra that Zolt's `computeInitialRamEval` doesn't
-3. The `claimed_evaluation` stored in the proof differs from what Jolt expects
-
-### 5. Termination Bit Workaround Issue
-
-Zolt's RWC prover has a workaround that adds termination bit to `val_init`:
-```zig
-// In read_write_checking.zig
-val_init[termination_index] = F.one();  // WORKAROUND
-```
-
-But Jolt's `initial_ram` does NOT include termination bit (only final_ram does).
-
-This creates a mismatch:
-- `rwc_val_claim` = MLE(initial_ram + termination) @ r_address (Zolt)
-- But Jolt expects: `rwc_val_claim` = MLE(initial_ram) @ r_address
-
-The workaround comment claims it makes input_claim=0, but that's wrong if `computeInitialRamEval` doesn't also add termination bit.
-
-## Recommended Fix
-
-**Remove the termination bit workaround** from RWC prover:
-1. Jolt's prover does NOT add termination to initial RAM
-2. Jolt's emulator records termination as a real RAM write (creates sparse entry)
-3. Zolt's tracer currently skips termination write (see tracer/mod.zig comments)
-
-Correct approach:
-1. Either have Zolt's tracer record termination write like Jolt
-2. Or remove the workaround entirely and accept that for no-RAM programs, both rwc_val_claim and init_eval are equal (giving input_claim = 0)
+3. **Align val_final/val_init computation** with what verifier expects
+   - Ensure `output_val_final_claim` and `init_eval_for_val_final` use same basis
 
 ## Next Steps
 
-1. **Remove termination bit workaround** from RWC prover's val_init
-2. **Test with Fibonacci** - input_claim should be 0 for both Zolt and Jolt
-3. **If Jolt still expects non-zero**, investigate what Jolt's preprocessing includes
+1. Add debug output to print actual values of:
+   - `output_val_final_claim` from OutputSumcheck
+   - `init_eval_for_val_final` from `computeInitialRamEval`
+   - `input_claim_val_final` before appending to transcript
+
+2. Verify if Jolt truly expects non-zero for Fibonacci
+   - May need to run Jolt on Fibonacci and check debug output
+   - The NOTES might be from a different test case
+
+3. If Jolt expects zeros for Fibonacci:
+   - Ensure both workarounds are properly consistent
+   - val_init in OutputSumcheck should match `computeInitialRamEval`
 
 ## Files Involved
 
-- `/home/vivado/projects/zolt/src/zkvm/proof_converter.zig` - Stage 4 input claim computation
-- `/home/vivado/projects/zolt/src/zkvm/ram/read_write_checking.zig` - RWC prover with termination workaround (lines 224-236)
-- `/home/vivado/projects/zolt/src/zkvm/mod.zig` - buildInitialRamMap function
+- `/home/vivado/projects/zolt/src/zkvm/ram/read_write_checking.zig` - RWC workaround (REMOVED)
+- `/home/vivado/projects/zolt/src/zkvm/ram/output_check.zig` - OutputSumcheck workaround (STILL PRESENT)
+- `/home/vivado/projects/zolt/src/zkvm/proof_converter.zig` - input_claim computation
+- `/home/vivado/projects/zolt/src/tracer/mod.zig` - Emulator termination handling
 
-## Session Notes
+## Session Summary
 
-- Spent significant time understanding Jolt's opening point handling
-- Opening points are NOT in serialized proof - reconstructed during verification
-- For no-RAM programs, input_claim = 0 is mathematically correct
-- The NOTES may have been from a different test case with actual RAM operations
+- Understood Jolt's opening point handling (reconstructed, not stored)
+- Understood Jolt's verifier RECOMPUTES init_eval from preprocessing
+- Removed RWC termination workaround
+- Need to address OutputSumcheck termination workaround
+- Need to verify actual debug output to confirm hypothesis

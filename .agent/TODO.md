@@ -1,6 +1,6 @@
 # Zolt-Jolt Compatibility: Status Update
 
-## Status: LT POLYNOMIAL FIXED - NEW ISSUE IN BATCHED CLAIM
+## Status: LT POLYNOMIAL FIXED - BATCHED CLAIM MISMATCH REMAINING
 
 ## Session 73 Progress (2026-01-28)
 
@@ -35,51 +35,52 @@ Fixed files:
   Match LE? true
 ```
 
-### Current Issue: Stage 4 Batched Claim Mismatch
+### Current Issue: Stage 4 Final Verification Mismatch
 
-Despite the LT polynomial fix, the Stage 4 verification still shows:
+The sumcheck itself runs correctly (Round 0 `p(0)+p(1) == batched_claim` passes), but the final verification check fails:
+
 ```
-batched_claim (sumcheck output) = { 35, 3, 197, 27, ... }
-total_expected = { 15, 44, 17, 109, ... }
+batched_claim (sumcheck output) = { 35, 3, 197, 27, 84, 39, 252, 206, ... }
+total_expected = { 15, 44, 17, 109, 110, 245, 207, 87, ... }
 Do they match? false
 ```
 
-The individual instance computations:
-- Instance 0 (RegistersRWC): eq * combined
-- Instance 1 (ValEval): inc * wa * lt - **LT NOW CORRECT**
-- Instance 2 (ValFinal): inc * wa
+Where `total_expected` = weighted sum of:
+- Instance 0: eq(r_sumcheck, r_cycle) * combined
+- Instance 1: inc * wa * lt (ValEvaluation)
+- Instance 2: inc * wa (ValFinal)
 
-The weighted sum of these doesn't equal the sumcheck output claim.
+### Key Observations
 
-### Possible Causes
+1. **Initial claim matches**: `[ZOLT STAGE4 CHECK] Round 0: match? true`
+2. **LT values match**: Both Jolt formula and LE formulation produce same result
+3. **Final claim mismatch**: `total_expected != batched_claim`
 
-1. **Claim update during binding**: The round-by-round claim update may not correctly track the batched claim through all rounds.
+### Possible Root Causes
 
-2. **Coefficient handling**: The batching coefficients look correct (non-zero in lower 128 bits), but need to verify they're applied correctly.
+1. **eq polynomial computation**: The `eq(r_sumcheck, r_cycle)` may be using wrong endianness for one or both inputs
 
-3. **Round polynomial construction**: After fixing binding order, need to verify `computeRoundPolynomial` uses consistent indexing across all instances.
+2. **combined polynomial**: The `combined` value from RegistersRWC claims might not match what the verifier expects
 
-4. **Phase transitions**: Stage 4 has multiple phases (cycle binding, address binding) - check phase transition handling.
+3. **Claim tracking**: The `regs_current_claim` tracking through rounds may diverge from the actual batched polynomial
+
+### Key Files for Next Session
+
+- `src/zkvm/proof_converter.zig:2380-2537` - eq_val_be and expected_output computation
+- `src/zkvm/spartan/stage4_gruen_prover.zig` - RegistersRWC prover
+- `src/poly/mod.zig` - EqPolynomial.mle function
 
 ### Next Steps
 
-1. Add more detailed debug output to trace the batched claim evolution round-by-round
-2. Compare the round polynomial values at each step between Zolt prover and what Jolt verifier expects
-3. Verify the `regs_current_claim` matches `eq * combined` after all bindings
-4. Check if the issue is in how the 3 instance contributions are batched
-
-### Files for Investigation
-
-- `src/zkvm/proof_converter.zig:2032-2537` - Stage 4 sumcheck loop
-- `src/zkvm/spartan/stage4_gruen_prover.zig` - Gruen prover for RegistersRWC
-- `src/zkvm/ram/val_evaluation.zig` - ValEvaluation prover (fixed)
-- `src/zkvm/ram/val_final.zig` - ValFinal prover (fixed)
+1. Add debug to compare Zolt's `eq(r_sumcheck, r_cycle)` with Jolt's computation
+2. Verify `r_sumcheck` normalization matches Jolt's `normalize_opening_point`
+3. Check if `combined` computation follows Jolt's formula exactly
 
 ### Test Results
 
 - 714 unit tests pass ✓
 - Native verification passes all 6 stages ✓
 - Jolt export produces proof file ✓
-- **Cross-verification fails at Stage 4**: batched claim mismatch
+- **Cross-verification fails at Stage 4**: total_expected != batched_claim
 
-SESSION_ENDING - LT polynomial fixed, need to debug batched claim computation.
+SESSION_ENDING - LT polynomial fixed. Need to investigate eq polynomial and combined computation for the Stage 4 mismatch.

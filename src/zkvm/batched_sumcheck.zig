@@ -204,11 +204,26 @@ pub fn BatchedSumcheckProver(comptime F: type) type {
                         combined_evals[j] = combined_evals[j].add(evals[j].mul(coeff));
                     }
                 } else {
-                    // Instance hasn't started yet - contribute constant polynomial = scaled_input_claim
-                    // For a constant polynomial, s(X) = c for all X
+                    // Instance hasn't started yet - contribute constant polynomial
+                    //
+                    // In Jolt, for inactive instances:
+                    // - individual_claims[i] starts at input_claim * 2^offset
+                    // - Each round, poly = constant(individual_claims[i] / 2)
+                    // - Then individual_claims[i] = poly.eval(r) = individual_claims[i] / 2
+                    //
+                    // So at round r, individual_claims[i] = input_claim * 2^(offset - r)
+                    // And the polynomial contribution is individual_claims[i] / 2 = input_claim * 2^(offset - r - 1)
+                    //
+                    // We compute this directly:
                     const scale_power = self.max_num_rounds - instance.num_rounds - self.current_round;
+                    // scale_power = offset - r, so we need 2^(scale_power - 1)
+                    if (scale_power == 0) {
+                        // Edge case: about to become active, should not happen in normal flow
+                        continue;
+                    }
                     var scaled = instance.input_claim;
-                    for (0..scale_power) |_| {
+                    // Compute input_claim * 2^(scale_power - 1)
+                    for (0..scale_power - 1) |_| {
                         scaled = scaled.add(scaled);
                     }
                     const weighted = scaled.mul(self.batching_coeffs.items[i]);

@@ -2195,16 +2195,18 @@ pub fn ProofConverter(comptime F: type) type {
                     const full_coeffs = poly_mod.UniPoly(F).interpolateDegree3(combined_evals);
                     var coeffs = [_]F{ full_coeffs[0], full_coeffs[1], full_coeffs[2], full_coeffs[3] };
 
-                    // Debug: Verify p(0) + p(1) = batched_claim
-                    if (round_idx == 0) {
+                    // Debug: Verify p(0) + p(1) = batched_claim for ALL rounds
+                    {
                         const p0 = combined_evals[0];
                         const p1 = combined_evals[1];
                         const sum = p0.add(p1);
-                        std.debug.print("[ZOLT STAGE4 CHECK] Round {}: p(0) = {any}\n", .{ round_idx, p0.toBytesBE()[0..16] });
-                        std.debug.print("[ZOLT STAGE4 CHECK] Round {}: p(1) = {any}\n", .{ round_idx, p1.toBytesBE()[0..16] });
-                        std.debug.print("[ZOLT STAGE4 CHECK] Round {}: p(0)+p(1) = {any}\n", .{ round_idx, sum.toBytesBE()[0..16] });
-                        std.debug.print("[ZOLT STAGE4 CHECK] Round {}: batched_claim = {any}\n", .{ round_idx, batched_claim.toBytesBE()[0..16] });
-                        std.debug.print("[ZOLT STAGE4 CHECK] Round {}: match? {}\n", .{ round_idx, sum.eql(batched_claim) });
+                        if (!sum.eql(batched_claim)) {
+                            std.debug.print("[ZOLT STAGE4 CHECK FAIL] Round {}: p(0)+p(1) != batched_claim!\n", .{round_idx});
+                            std.debug.print("[ZOLT STAGE4 CHECK FAIL]   p(0) = {any}\n", .{p0.toBytesBE()[0..16]});
+                            std.debug.print("[ZOLT STAGE4 CHECK FAIL]   p(1) = {any}\n", .{p1.toBytesBE()[0..16]});
+                            std.debug.print("[ZOLT STAGE4 CHECK FAIL]   p(0)+p(1) = {any}\n", .{sum.toBytesBE()[0..16]});
+                            std.debug.print("[ZOLT STAGE4 CHECK FAIL]   batched_claim = {any}\n", .{batched_claim.toBytesBE()[0..16]});
+                        }
                     }
 
                     const coeffs_slice: []const F = &coeffs;

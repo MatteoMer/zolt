@@ -1,6 +1,45 @@
 # Zolt-Jolt Cross-Verification Progress
 
-## Session 78 Summary - ROOT CAUSE FOUND: Synthetic Termination Write (2026-01-29)
+## Session 78 Update - Stages 1-3 PASS, Stage 4 FAILS (2026-01-29)
+
+### MAJOR PROGRESS: Stages 1-3 now pass!
+
+**Fix applied:**
+- When `input_claim = 0` for RAF (Instance 1) or RWC (Instance 2), skip prover initialization
+- This causes the batched sumcheck to use zero polynomials, matching Jolt's expectations
+- Code changes in `/home/vivado/projects/zolt/src/zkvm/proof_converter.zig`
+
+### Current Issue: Stage 4 fails
+
+**Error:**
+```
+output_claim:   [fc, f5, b5, 80, ...]
+expected_claim: [2d, 76, 8b, f4, ...]
+Verification failed: Stage 4
+```
+
+**Key observation from Jolt debug:**
+```
+r_cycle (from sumcheck): [7b, be, 40, f8, ...]
+params.r_cycle (from Stage 3): [d7, 9b, 60, 5e, ...]
+```
+
+These differ because:
+- `r_cycle (from sumcheck)` is built from Stage 4 sumcheck challenges
+- `params.r_cycle (from Stage 3)` is passed from Stage 3's RegistersClaimReduction
+
+In Jolt, expected_output_claim uses `params.r_cycle` (from Stage 3), but Zolt might be using the wrong one.
+
+**Stage 4 structure:**
+- Instance 0: RegistersRWC - uses r_cycle from Stage 3
+- Instance 1: ValEvaluation - uses r_address from Stage 2
+- Instance 2: ValFinal - uses r_address from Stage 2
+
+Need to verify Zolt's Stage 4 prover is using the correct r_cycle/r_address from previous stages.
+
+---
+
+## Session 78 Part 1 - Fixed Stage 2 (2026-01-29)
 
 ### Major Finding
 

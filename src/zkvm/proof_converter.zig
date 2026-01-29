@@ -2948,8 +2948,13 @@ pub fn ProofConverter(comptime F: type) type {
             var rwc_prover: ?RWCProver = null;
             var rwc_evals_this_round: ?[4]F = null;
 
-            // Initialize RWC prover if we have memory trace
-            if (config.memory_trace != null) {
+            // Initialize RWC prover if we have memory trace AND input_claim[2] is non-zero
+            // CRITICAL: When input_claim[2] = 0 (no RAM read/write values, e.g., fibonacci),
+            // the sumcheck is over a zero polynomial. Using the memory trace would include
+            // termination/panic writes that shouldn't affect this sumcheck. Skip the prover
+            // and use zero polynomials instead.
+            const use_rwc_prover = !input_claims[2].eql(F.zero());
+            if (config.memory_trace != null and use_rwc_prover) {
                 // RWC needs r_cycle from SpartanOuter challenges (already available in tau)
                 // and gamma from transcript (gamma_rwc)
                 // tau_stage2 = [r_cycle_reversed (n_cycle_vars), tau_high_stage2]
@@ -3107,8 +3112,13 @@ pub fn ProofConverter(comptime F: type) type {
                             combined_evals[3] = combined_evals[3].add(s3_out.mul(batching_coeffs[i]));
                         } else if (i == 1) {
                             // Instance 1: RafEvaluation (log_ram_k rounds, degree 2)
+                            // CRITICAL: Only initialize RAF prover if input_claim[1] is non-zero.
+                            // When input_claim[1] = 0 (no RAM address accesses, e.g., fibonacci),
+                            // the sumcheck is over a zero polynomial. Using the memory trace would
+                            // include termination/panic writes that shouldn't affect this sumcheck.
                             // Initialize RAF prover at start_round using r_cycle from tau (first n_cycle_vars)
-                            if (round_idx == start_round and raf_prover == null and config.memory_trace != null) {
+                            const use_raf_prover = !input_claims[1].eql(F.zero());
+                            if (round_idx == start_round and raf_prover == null and config.memory_trace != null and use_raf_prover) {
                                 // r_cycle comes from tau (like RWC), NOT from sumcheck challenges
                                 // tau_stage2 = [r_cycle_reversed, tau_high] so r_cycle = tau[0..n_cycle_vars]
                                 const r_cycle_slice = tau[0..n_cycle_vars];

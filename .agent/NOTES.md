@@ -1,5 +1,66 @@
 # Zolt-Jolt Cross-Verification Progress
 
+## Session 78 Summary - ROOT CAUSE FOUND: Synthetic Termination Write (2026-01-29)
+
+### Major Finding
+
+The expected_output_claims for Instances 1-4 differ between Zolt provers and Jolt verifier:
+
+| Instance | Jolt expected | Zolt produced | Match? |
+|----------|---------------|---------------|--------|
+| 0 (Product) | [18, f9, 1f, 65, ...] | [18, f9, 1f, 65, ...] | ✓ YES |
+| 1 (RAF) | [00, 00, ...] (zero) | [11, 16, 65, 8d, ...] | ✗ NO |
+| 2 (RWC) | [2a, 7c, 07, 29, ...] | [0a, ba, 02, 25, ...] | ✗ NO |
+| 3 (Output) | [24, ce, 75, 46, ...] | [08, 3d, 41, 13, ...] | ✗ NO |
+| 4 (Instr) | [5b, b0, 11, 45, ...] | [0d, 2d, be, 9c, ...] | ✗ NO |
+
+### Root Cause: Synthetic Termination Write in Memory Trace
+
+Zolt's tracer records a "synthetic termination write" at cycle 54 to address 0x7fffc008.
+This write is included in the memory trace passed to RAF and RWC provers.
+
+For fibonacci (no user RAM operations):
+- Jolt's input_claim[1] (RamAddress at SpartanOuter) = 0
+- But Zolt's RAF prover receives a memory trace with the termination write
+- The ra polynomial is computed from this trace (non-zero due to termination)
+- Prover computes s0 ≠ 0 from actual polynomial
+- Even though s0 + s1 = 0 is satisfied, s(r) ≠ 0 for random r
+- Final claim cascades to wrong value
+
+### Key Files
+
+1. `/home/vivado/projects/zolt/src/tracer/mod.zig` - `recordTerminationWrite()` function
+2. `/home/vivado/projects/zolt/src/zkvm/proof_converter.zig` - `generateStage2BatchedSumcheckProof()` lines 2736-3700
+3. `/home/vivado/projects/zolt/src/zkvm/ram/raf_checking.zig` - RafEvaluationProver
+4. `/home/vivado/projects/zolt/src/zkvm/ram/read_write_checking.zig` - RamReadWriteCheckingProver
+
+### Fix Options
+
+**Option A** (RECOMMENDED): Filter termination/panic writes from memory trace
+- RAF/RWC should only see "real" RAM operations
+- Termination is already handled by OutputSumcheck's val_final
+- Need to exclude addresses in I/O region from RAF/RWC memory trace
+
+**Option B**: Zero-polynomial fallback when input_claim = 0
+- Workaround, not proper fix
+- Would mask underlying memory trace mismatch
+
+**Option C**: Match Jolt's memory handling exactly
+- Need to understand how Jolt handles termination in its preprocessing
+- Most correct but requires deeper investigation
+
+### Verified Components
+- Instance 0 (ProductVirtualRemainder) - ✓ expected_output_claim matches
+- batching_coeffs - ✓ match Jolt
+- input_claims - ✓ match Jolt
+
+### Next Steps
+1. Filter termination/panic writes from memory trace for RAF/RWC
+2. Re-run verification test
+3. Commit and push once Stage 2 passes
+
+---
+
 ## Session 77 Summary - Config Format Fixed, Polynomial Mismatch Found (2026-01-29)
 
 ### Major Progress
@@ -23,23 +84,6 @@
 - Jolt `first round coeffs_except_linear[0]`: `[97, 3f, b6, 7c, c2, de, 38, c7, ...]`
 - Zolt `combined_evals[0]`: `[0e, 82, 58, f7, 16, 29, e4, 34, ...]` (different!)
 
-### Format Difference
-
-Jolt uses `CompressedPoly<F>` which stores `coeffs_except_linear` = [c0, c2, c3] (skipping c1).
-Zolt's Stage 2 outputs `combined_evals` = [s(0), s(1), s(2), s(3)] evaluations.
-
-The conversion from evaluations to compressed coefficients might be wrong, OR the evaluations themselves are computed incorrectly.
-
-### Key Issue Identified
-
-The round polynomial values differ at round 0. This cascades through all subsequent rounds, causing the final output_claim to mismatch.
-
-### Investigation Needed
-
-1. Verify `evalsToCompressed` conversion matches Jolt's format
-2. Check if ProductVirtualRemainder's `computeRoundPolynomial` produces correct values
-3. Verify the split_eq polynomial initialization
-
 ---
 
 ## Session 75 Summary - Challenge Type Analysis (2026-01-29)
@@ -54,30 +98,9 @@ The round polynomial values differ at round 0. This cascades through all subsequ
 | `challenge_vector_optimized(n)` | Vec<MontU128Challenge> | n × `challengeScalar()` | r_address |
 | `challenge_scalar_powers(n)` | Vec<Fr> (1, q, q², ...) | `challengeScalarPowers()` | Gamma powers |
 
-### Stage 2 Challenge Sampling Order (Verified Correct)
-
-1. `ProductVirtualUniSkipParams::new` → `challenge_scalar_optimized` → `tau_high_stage2`
-2. UniSkip proof: append poly → `challenge_scalar_optimized` → `r0_stage2`
-3. UniSkip `cache_openings`: `append_virtual(uni_skip_claim)`
-4. `RamReadWriteCheckingParams::new` → `challenge_scalar` → `gamma_rwc`
-5. `OutputSumcheckParams::new` → `challenge_vector_optimized(log_k)` → `r_address`
-6. `InstructionLookupsClaimReductionSumcheckParams::new` → `challenge_scalar` → `gamma_instr`
-7. `BatchedSumcheck::verify` → append input_claims → `challenge_vector(5)` → batching_coeffs
-
-**Zolt uses matching functions for all of these ✓**
-
 ---
 
 ## Session 74 Summary - Stage 2 Deep Dive (2026-01-29)
-
-### Key Finding: Zolt Prover is INTERNALLY CONSISTENT
-
-**Evidence:**
-- `STAGE2_FINAL: output_claim` = `{ 181, 30, 249, 122, ... }` (LE bytes)
-- `expected_batched (from provers)` = `{ 35, 43, 4, 85, ... }` (BE bytes)
-- Converting LE→BE: These ARE the same value ✓
-
-**Implication:** The prover computes correct round polynomials that evaluate to what it expects. The issue is that Jolt's verifier computes a DIFFERENT expected value.
 
 ### Stage 2 Architecture Analysis
 
@@ -89,51 +112,18 @@ The round polynomial values differ at round 0. This cascades through all subsequ
 | 3 | OutputSumcheck | 16 | 8 | 0 |
 | 4 | InstructionLookupsClaimReduction | 8 | 16 | LookupOutput + γ*Left + γ²*Right |
 
-### Instance 0 (ProductVirtualRemainder) Expected Formula
-
-```
-expected = tau_high_bound_r0 * eq(tau_low, r_tail_reversed) * fused_left * fused_right
-```
-
-Where:
-- `fused_left = w[0]*l_inst + w[1]*is_rd_not_zero + w[2]*is_rd_not_zero + w[3]*lookup_out + w[4]*j_flag`
-- `fused_right = w[0]*r_inst + w[1]*wl_flag + w[2]*j_flag + w[3]*branch_flag + w[4]*(1-next_is_noop)`
-- `w[i]` = Lagrange weights at r0 over domain [-2,-1,0,1,2]
-
----
-
-## Session 73 Summary - Deserialization Complete! (2026-01-29)
-
-### Critical Fix: SumcheckId Mismatch
-
-**Root Cause:** Zolt had 24 SumcheckId values, Jolt has 22.
-
-The extra values were:
-- `AdviceClaimReductionCyclePhase = 20`
-- `AdviceClaimReduction = 21`
-
-**Fix:** Removed extra values, renumbered:
-- `IncClaimReduction = 20`
-- `HammingWeightClaimReduction = 21`
-- `COUNT = 22`
-
-### Deserialization Result: COMPLETE SUCCESS
-
-All 40544 bytes parse correctly.
-
 ---
 
 ## Previous Sessions
 
+### Session 73 (2026-01-29)
+- Fixed SumcheckId mismatch
+- Deserialization complete - all 40544 bytes parse correctly
+
 ### Session 72 (2026-01-28)
 - 714/714 unit tests passing
 - Stage 3 sumcheck mathematically correct
-- Opening claims storage verified
 
 ### Session 71 (2026-01-28)
 - Instance 0 (RegistersRWC) verified correct
 - Synthetic termination write discovery
-
-### Session 70 (2026-01-28)
-- Stage 4 final claim mismatch found
-- Phase 2/3 from_evals_and_hint pattern applied

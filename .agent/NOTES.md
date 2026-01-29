@@ -1,5 +1,46 @@
 # Zolt-Jolt Cross-Verification Progress
 
+## Session 75 Summary - Challenge Type Analysis (2026-01-29)
+
+### Challenge Type Mapping Verified
+
+| Jolt Function | Returns | Zolt Equivalent | Use Case |
+|---------------|---------|-----------------|----------|
+| `challenge_scalar::<F>()` | Fr (Montgomery) | `challengeScalarFull()` | Batching coeffs, gamma values |
+| `challenge_scalar_optimized::<F>()` | MontU128Challenge (125-bit, `[0,0,L,H]`) | `challengeScalar()` | tau_high, r0, sumcheck r_i |
+| `challenge_vector(n)` | Vec<Fr> | n × `challengeScalarFull()` | Batching coeffs |
+| `challenge_vector_optimized(n)` | Vec<MontU128Challenge> | n × `challengeScalar()` | r_address |
+| `challenge_scalar_powers(n)` | Vec<Fr> (1, q, q², ...) | `challengeScalarPowers()` | Gamma powers |
+
+### Stage 2 Challenge Sampling Order (Verified Correct)
+
+1. `ProductVirtualUniSkipParams::new` → `challenge_scalar_optimized` → `tau_high_stage2`
+2. UniSkip proof: append poly → `challenge_scalar_optimized` → `r0_stage2`
+3. UniSkip `cache_openings`: `append_virtual(uni_skip_claim)`
+4. `RamReadWriteCheckingParams::new` → `challenge_scalar` → `gamma_rwc`
+5. `OutputSumcheckParams::new` → `challenge_vector_optimized(log_k)` → `r_address`
+6. `InstructionLookupsClaimReductionSumcheckParams::new` → `challenge_scalar` → `gamma_instr`
+7. `BatchedSumcheck::verify` → append input_claims → `challenge_vector(5)` → batching_coeffs
+
+**Zolt uses matching functions for all of these ✓**
+
+### Remaining Hypothesis: Opening Claims Storage
+
+The verifier retrieves factor evaluations from opening_claims map using:
+- `(VirtualPolynomial::X, SumcheckId::SpartanProductVirtualization)`
+
+If Zolt stores these at incorrect keys or with wrong values, the expected formula will compute wrong.
+
+Factor polynomials checked (need values verification):
+- InstructionOutput @ SpartanProductVirtualization
+- IsRdNotZero @ SpartanProductVirtualization
+- WriteLookupOutputToRD @ SpartanProductVirtualization
+- Jump @ SpartanProductVirtualization
+- Branch @ SpartanProductVirtualization
+- NextIsNoop @ SpartanProductVirtualization
+
+---
+
 ## Session 74 Summary - Stage 2 Deep Dive (2026-01-29)
 
 ### Key Finding: Zolt Prover is INTERNALLY CONSISTENT

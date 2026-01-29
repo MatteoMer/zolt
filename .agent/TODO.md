@@ -1,6 +1,69 @@
 # Zolt-Jolt Compatibility: Current Status
 
-## Status: Stage 2 Verification Failure - Transcript Analysis Needed 🔴
+## Status: Stage 2 Verification Failure - Challenge Type Analysis Complete 🔴
+
+## Session 75 Summary (2026-01-29)
+
+### Key Finding: Challenge Type Mapping Verified Correct
+
+| Jolt Function | Zolt Function | Masking | Montgomery |
+|---------------|---------------|---------|------------|
+| `challenge_scalar_optimized` | `challengeScalar()` | 125-bit | No (raw `[0,0,L,H]`) |
+| `challenge_scalar` | `challengeScalarFull()` | None | Yes (proper Fr) |
+| `challenge_vector_optimized` | n × `challengeScalar()` | 125-bit | No |
+| `challenge_vector` | n × `challengeScalarFull()` | None | Yes |
+
+### Stage 2 Challenge Sampling Order (Verified Matches Jolt)
+
+1. `ProductVirtualUniSkipParams::new` → `challenge_scalar_optimized` → `tau_high_stage2`
+2. UniSkip proof: append poly → `challenge_scalar_optimized` → `r0_stage2`
+3. UniSkip `cache_openings`: `append_virtual(uni_skip_claim)`
+4. `RamReadWriteCheckingParams::new` → `challenge_scalar` → `gamma_rwc`
+5. `OutputSumcheckParams::new` → `challenge_vector_optimized(log_k)` → `r_address`
+6. `InstructionLookupsClaimReductionSumcheckParams::new` → `challenge_scalar` → `gamma_instr`
+7. `BatchedSumcheck::verify` → append input_claims → `challenge_vector(5)` → batching_coeffs
+
+### Factor Polynomial Order (Verified Matches `PRODUCT_UNIQUE_FACTOR_VIRTUALS`)
+
+- [0] LeftInstructionInput
+- [1] RightInstructionInput
+- [2] InstructionFlags(IsRdNotZero) = index 6
+- [3] OpFlags(WriteLookupOutputToRD) = index 6
+- [4] OpFlags(Jump) = index 5
+- [5] LookupOutput
+- [6] InstructionFlags(Branch) = index 4
+- [7] NextIsNoop
+
+### Blocking Issue
+
+Cannot run Jolt tests to compare transcript state:
+```
+pkg-config: command not found
+openssl-sys build failed
+```
+
+Need: `sudo apt-get install pkg-config libssl-dev`
+
+### Remaining Hypothesis
+
+Since challenge types and order are correct, the issue must be:
+1. **Transcript state divergence** - Some bytes being appended differently
+2. **Factor evaluation values** - MLE computation at r_cycle differs
+3. **Opening claim storage** - Values stored at wrong keys
+
+### Next Steps (Priority Order)
+
+1. [ ] **HIGH PRIORITY**: Install system deps to run Jolt with `zolt-debug`
+2. [ ] Compare transcript state hex dump at tau_high sampling point
+3. [ ] Compare batching_coeffs[0..4] between Zolt and Jolt
+4. [ ] Compare factor_evals with Jolt's ProductVirtualEval::compute_claimed_factors
+
+### Test Status
+
+- ✅ 714/714 unit tests passing
+- ❌ Integration test OOM killed (signal 9)
+
+---
 
 ## Session 74 Summary (2026-01-29)
 
@@ -27,56 +90,10 @@
    - "UncompressedUniPoly_begin/end" for UniPoly ✓
 5. **Scalar encoding** - LE to BE reversal matches ✓
 
-### Stage 1 Sumcheck Verified Working
-
-Zolt generates real Stage 1 round polynomials with:
-- 9 rounds (1 streaming + 8 cycle vars)
-- Non-zero coefficients (c0, c2, c3)
-- Challenges derived from transcript
-
-Example:
-```
-[ZOLT] STAGE1_ROUND_0: c0 = { 179, 252, 58, 169, ... }
-[ZOLT] STAGE1_ROUND_0: challenge = { 66, 175, 255, 237, ... }
-```
-
 ### Suspected Issue: Transcript State Divergence
 
 Transcript state before tau_high sampling:
 - Zolt: `{ 37, 204, 55, 100, 179, 84, 234, 62 }`
-
-If Jolt's verifier has different state here, everything downstream will fail.
-
-Possible causes:
-1. Stage 1 UniSkip polynomial encoding differs
-2. Stage 1 sumcheck round polynomial encoding differs
-3. Stage 1 cache_openings claim values differ
-4. Some transcript operation differs
-
-### Blocking Issue
-
-Cannot run Jolt tests directly:
-```
-pkg-config: command not found
-openssl-sys build failed
-```
-
-### Next Steps
-
-1. [ ] **HIGH PRIORITY**: Get system dependencies installed to run Jolt tests with `zolt-debug`
-2. [ ] Compare Stage 1 UniSkip polynomial bytes between Zolt and Jolt
-3. [ ] Compare Stage 1 round polynomial bytes
-4. [ ] Compare Stage 1 final claim values
-
-### Commands
-
-```bash
-# Generate proof
-./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o proof.bin --srs /tmp/jolt_dory_srs.bin
-
-# Verify with Jolt (needs openssl)
-cd /home/vivado/projects/jolt && cargo test --features zolt-debug test_verify_zolt_proof -- --ignored --nocapture
-```
 
 ---
 

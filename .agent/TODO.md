@@ -1,64 +1,94 @@
 # Zolt-Jolt Compatibility: Current Status
 
-## Status: Debugging Stage 3 Initial Claim ⏳
+## Status: Ready for Jolt Verification ⏳
 
-## Session Summary (2026-01-29)
+## Session 72 Summary (2026-01-29)
 
-### Key Findings
+### Verified ✓
 
-**714/714 Unit Tests Pass!** All Zolt unit tests are passing.
+1. **714/714 Unit Tests Pass** - All Zolt internal tests passing
+2. **Stage 3 Sumcheck Mathematically Correct** - All 8 rounds verify p(0)+p(1)=claim
+3. **Individual Instance Claims Correct** - shift, instr, reg claims match at each round
+4. **Opening Claims Storage/Retrieval** - Claims correctly stored by Stage 1/2 and read by Stage 3
+5. **Transcript Flow** - Matches Jolt's design (gamma derivation, input_claims append, batching coeffs)
 
-**Stage 1 is CORRECT!** Verified in previous sessions.
+### Current Blocker
 
-**Stage 3 Flow Verified:**
-- Transcript state at Stage 3 boundary: `{ 218, 190, 38, 231, ... }` matches expected
-- Individual input_claim formulas match Jolt exactly:
-  - ShiftSumcheck: `NextUnexpandedPC + γ*NextPC + γ²*NextIsVirtual + γ³*NextIsFirst + γ⁴*(1-NextIsNoop)`
-  - InstructionInput: `(RightOuter + γ*LeftOuter) + γ²*(RightProduct + γ*LeftProduct)`
-  - RegistersClaimReduction: `RdWriteValue + γ*Rs1Value + γ²*Rs2Value`
-- Batching coefficient derivation matches Jolt (uses `challenge_scalar` = full 128-bit)
-- Opening claims are stored and retrieved correctly
+Cannot run Jolt verifier due to missing system dependencies:
+- `pkg-config` package
+- `libssl-dev` package
 
-### Current Investigation
+These require sudo access which is not available.
 
-The Stage 3 initial_claim mismatch may be due to:
-1. **Outdated TODO notes** - The expected Jolt value `[da, a3, 24, 84, ...]` needs verification
-2. **r_cycle evaluation point** - Verify the MLE evaluation point matches what Jolt expects
-3. **Need Jolt verifier** - Without running Jolt's verifier, we can't confirm the actual error
+### Next Steps (Requires Dependencies)
 
-### Technical Details
+1. **Install dependencies**:
+   ```bash
+   sudo apt-get install pkg-config libssl-dev
+   ```
 
-**Zolt Stage 3 Values:**
+2. **Run Jolt verification**:
+   ```bash
+   cd /home/vivado/projects/zolt/jolt
+   cargo test zolt_compat -- --ignored --nocapture
+   ```
+
+3. **If verification fails**, the error message will indicate:
+   - Which stage fails
+   - What claim doesn't match
+   - This will pinpoint exactly where Zolt differs from Jolt
+
+### Alternative Approach
+
+Generate a reference proof with Jolt and compare byte-by-byte:
+```bash
+cd /home/vivado/projects/zolt/jolt/examples/fibonacci
+cargo run -- --save
+# Creates /tmp/fib_proof.bin
+
+# Compare with Zolt proof
+xxd /tmp/fib_proof.bin > /tmp/jolt_proof.hex
+xxd /tmp/zolt_test.bin > /tmp/zolt_proof.hex
+diff /tmp/jolt_proof.hex /tmp/zolt_proof.hex
 ```
-transcript_state: { 218, 190, 38, 231, 136, 156, 76, 190 }
-input_claim[0] (Shift): { 30, 39, 195, 164, 59, 14, 143, 21, ... }
-input_claim[1] (InstrInput): { 90, 193, 204, 241, 164, 156, 192, 62, ... }
-input_claim[2] (Registers): { 75, 0, 96, 142, 99, 112, 107, 174, ... }
-batching_coeff[0]: { 40, 209, 4, 96, 132, 232, 161, 190, ... }
-current_claim (ROUND_0): { 7, 141, 69, 74, 209, 62, 182, 63, ... }
-```
 
-**Individual instance verification (ROUND_0):**
-- shift_p0+p1 = shift_claim ✓
-- instr_p0+p1 = instr_claim ✓
-- reg_p0+p1 = reg_claim ✓
+## Technical Details
 
-### Next Steps
+### Stage 3 Input Claims Read From Opening Accumulator
 
-1. **Install Dependencies**: Need pkg-config/libssl-dev to run Jolt verification
-2. **Run Jolt Verifier**: Get actual error message from Jolt
-3. **Compare with fresh Jolt run**: Generate a reference proof with Jolt and compare byte-by-byte
+**ShiftSumcheck**:
+- NextUnexpandedPC @ SpartanOuter: `{ 127, 220, 98, 84, ... }`
+- NextPC @ SpartanOuter: `{ 127, 220, 98, 84, ... }` (same as unexpanded)
+- NextIsVirtual @ SpartanOuter: `{ 0, 0, 0, ... }`
+- NextIsFirstInSequence @ SpartanOuter: `{ 0, 0, 0, ... }`
+- NextIsNoop @ SpartanProductVirtualization: `{ 152, 69, 221, 72, ... }`
 
-## Completed
+**InstructionInputSumcheck**:
+- LeftInstructionInput @ SpartanOuter
+- RightInstructionInput @ SpartanOuter
+- LeftInstructionInput @ SpartanProductVirtualization
+- RightInstructionInput @ SpartanProductVirtualization
 
-- [x] Implemented Stage 1 UniSkip + Remaining sumcheck prover
-- [x] Verified Stage 1 matches Jolt exactly
-- [x] Implemented Stage 3 RegistersClaimReduction prover
-- [x] Verified Stage 3 input_claim formulas match Jolt
-- [x] Verified Stage 3 batching coefficient derivation matches Jolt
-- [x] All 714 unit tests passing
+**RegistersClaimReduction**:
+- Rs1Value @ SpartanOuter
+- Rs2Value @ SpartanOuter
+- RdWriteValue @ SpartanOuter
 
-## In Progress
+### Proof File Generated
 
-- [ ] Run Jolt verifier to get actual error
-- [ ] Compare proof bytes with Jolt-generated reference
+- Path: `/tmp/zolt_test.bin`
+- Size: ~40KB
+- Contains: All sumcheck proofs, opening claims, commitments
+
+## Completed This Session
+
+- [x] Verified Stage 3 sumcheck mechanics are correct
+- [x] Confirmed opening claims are stored/retrieved correctly
+- [x] Traced full Stage 3 flow through all 8 rounds
+- [x] Updated documentation with detailed findings
+
+## Remaining Work
+
+- [ ] Install dependencies and run Jolt verifier
+- [ ] Compare proof with Jolt reference
+- [ ] Fix any discrepancies identified by verifier

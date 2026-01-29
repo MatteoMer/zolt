@@ -1492,26 +1492,25 @@ pub fn JoltProver(comptime F: type) type {
                 try serializer.writeDoryProof(&dory_proof);
             }
 
-            // Write untrusted_advice_commitment (Option<Commitment>) - None
+            // Write advice proofs (all None for programs without advice)
+            // 1. trusted_advice_val_evaluation_proof: Option<PCS::Proof>
+            try serializer.writeU8(0);
+            // 2. trusted_advice_val_final_proof: Option<PCS::Proof>
+            try serializer.writeU8(0);
+            // 3. untrusted_advice_val_evaluation_proof: Option<PCS::Proof>
+            try serializer.writeU8(0);
+            // 4. untrusted_advice_val_final_proof: Option<PCS::Proof>
+            try serializer.writeU8(0);
+            // 5. untrusted_advice_commitment: Option<PCS::Commitment>
             try serializer.writeU8(0);
 
-            // Write configuration (matches Jolt's JoltProof struct)
+            // Write configuration (matches Jolt's JoltProof struct exactly)
+            // All 5 fields are usize (8 bytes on 64-bit)
             try serializer.writeUsize(bundle.proof.trace_length);
             try serializer.writeUsize(bundle.proof.ram_K);
             try serializer.writeUsize(bundle.proof.bytecode_K);
-
-            // Write ReadWriteConfig (4 * u8)
-            try serializer.writeU8(bundle.proof.rw_config.ram_rw_phase1_num_rounds);
-            try serializer.writeU8(bundle.proof.rw_config.ram_rw_phase2_num_rounds);
-            try serializer.writeU8(bundle.proof.rw_config.registers_rw_phase1_num_rounds);
-            try serializer.writeU8(bundle.proof.rw_config.registers_rw_phase2_num_rounds);
-
-            // Write OneHotConfig (2 * u8)
-            try serializer.writeU8(bundle.proof.one_hot_config.log_k_chunk);
-            try serializer.writeU8(bundle.proof.one_hot_config.lookups_ra_virtual_log_k_chunk);
-
-            // Write DoryLayout (u8: 0 = Wide, 1 = Tall)
-            try serializer.writeU8(bundle.proof.dory_layout);
+            try serializer.writeUsize(@as(usize, bundle.proof.one_hot_config.log_k_chunk));
+            try serializer.writeUsize(@as(usize, bundle.proof.one_hot_config.lookups_ra_virtual_log_k_chunk));
 
             return serializer.toOwnedSlice();
         }

@@ -1418,9 +1418,9 @@ pub fn ProofConverter(comptime F: type) type {
             // Instance 0: ProductVirtualRemainder - 8 claims
             // Order: LeftInstructionInput, RightInstructionInput, IsRdNotZero, WriteLookupOutputToRD,
             //        Jump, LookupOutput, Branch, NextIsNoop
-            std.debug.print("[ZOLT_PRODUCT] factor[0] BE bytes = {any}\n", .{stage2_result.factor_evals[0].toBytesBE()[0..8]});
+            std.debug.print("[ZOLT_PRODUCT] factor[0] LE FULL = {any}\n", .{stage2_result.factor_evals[0].toBytes()});
             transcript.appendScalar(stage2_result.factor_evals[0]); // LeftInstructionInput
-            std.debug.print("[ZOLT_PRODUCT] factor[1] BE bytes = {any}\n", .{stage2_result.factor_evals[1].toBytesBE()[0..8]});
+            std.debug.print("[ZOLT_PRODUCT] factor[1] LE FULL = {any}\n", .{stage2_result.factor_evals[1].toBytes()});
             transcript.appendScalar(stage2_result.factor_evals[1]); // RightInstructionInput
             transcript.appendScalar(stage2_result.factor_evals[2]); // IsRdNotZero
             transcript.appendScalar(stage2_result.factor_evals[3]); // WriteLookupOutputToRD
@@ -3833,7 +3833,12 @@ pub fn ProofConverter(comptime F: type) type {
 
             std.debug.print("[ZOLT] FACTOR_EVALS: r_cycle.len = {}, n_cycle_vars = {}\n", .{ r_cycle.len, n_cycle_vars });
             if (r_cycle.len > 0) {
-                std.debug.print("[ZOLT] FACTOR_EVALS: r_cycle[0] (reversed) = {any}\n", .{r_cycle[0].toBytesBE()});
+                std.debug.print("[ZOLT] FACTOR_EVALS: r_cycle[0] BE = {any}\n", .{r_cycle[0].toBytesBE()});
+                std.debug.print("[ZOLT] FACTOR_EVALS: r_cycle[0] LE = {any}\n", .{r_cycle[0].toBytes()});
+                std.debug.print("[ZOLT] FACTOR_EVALS: r_cycle_original[0] BE = {any}\n", .{r_cycle_original[0].toBytesBE()});
+            }
+            if (r_cycle.len > 7) {
+                std.debug.print("[ZOLT] FACTOR_EVALS: r_cycle[7] LE = {any}\n", .{r_cycle[7].toBytes()});
             }
 
             // Compute eq polynomial evaluations at r_cycle (using BIG_ENDIAN indexing like Jolt)
@@ -3861,8 +3866,22 @@ pub fn ProofConverter(comptime F: type) type {
             // Compute MLE evaluation: Σ_t eq(r_cycle, t) * factor_value[t]
             const num_cycles = @min(eq_evals.len, cycle_witnesses.len);
 
-            // Debug: Print witness values for cycle 0
-            std.debug.print("[ZOLT] FACTOR_EVALS: witness[0][LeftInstructionInput] = {any}\n", .{cycle_witnesses[0].values[r1cs.R1CSInputIndex.LeftInstructionInput.toIndex()].toBytesBE()});
+            // Debug: Print witness values for several cycles
+            std.debug.print("[ZOLT] FACTOR_EVALS: witness[0][LeftInstructionInput] LE = {any}\n", .{cycle_witnesses[0].values[r1cs.R1CSInputIndex.LeftInstructionInput.toIndex()].toBytes()});
+            std.debug.print("[ZOLT] FACTOR_EVALS: witness[1][LeftInstructionInput] LE = {any}\n", .{cycle_witnesses[1].values[r1cs.R1CSInputIndex.LeftInstructionInput.toIndex()].toBytes()});
+
+            // Count non-zero LeftInstructionInput values
+            var nonzero_left_count: usize = 0;
+            for (0..@min(256, cycle_witnesses.len)) |t| {
+                const val = cycle_witnesses[t].values[r1cs.R1CSInputIndex.LeftInstructionInput.toIndex()];
+                if (!val.eql(F.zero())) {
+                    nonzero_left_count += 1;
+                    if (nonzero_left_count <= 3) {
+                        std.debug.print("[ZOLT] FACTOR_EVALS: witness[{}][LeftInstructionInput] = {any}\n", .{t, val.toBytes()});
+                    }
+                }
+            }
+            std.debug.print("[ZOLT] FACTOR_EVALS: total nonzero LeftInstructionInput in 256 cycles = {}\n", .{nonzero_left_count});
             std.debug.print("[ZOLT] FACTOR_EVALS: witness[0][RightInstructionInput] = {any}\n", .{cycle_witnesses[0].values[r1cs.R1CSInputIndex.RightInstructionInput.toIndex()].toBytesBE()});
 
             // Track per-cycle contributions for debugging

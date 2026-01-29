@@ -1,74 +1,67 @@
 # Zolt-Jolt Compatibility: Stage 2 Debug
 
-## Status: Factor Evaluation Mismatch Investigation ⏳
+## Status: Instance 0 Expected Claim Investigation ⏳
 
 ## Session Summary (2026-01-28 evening)
 
-### Verified Working
-1. **Proof Deserialization** ✅ - Jolt can deserialize Zolt proofs
-2. **Stage 1 Verification** ✅ - Passes
-3. **Stage 2 Transcript Sync** ✅ - Challenges match exactly through all 24 rounds
-4. **Stage 2 Initial Claims** ✅ - All 5 instance input claims match
-5. **Stage 2 Batching Coefficients** ✅ - Match exactly
-6. **Stage 2 Round Polynomials** ✅ - c0, c2, c3 match for all 24 rounds
-7. **Stage 2 Sumcheck Output Claim** ✅ - `[50, 8d, 70, 43, ...]` matches
+### Major Breakthrough
+**Factor evaluations ARE correct!** The opening_claims stored by Zolt match what Jolt reads:
+- Zolt factor[0] (LeftInstructionInput) LE: `fd 52 a8 83 5d 65 a5 6f ...`
+- Jolt reads l_inst: `[fd, 52, a8, 83, 5d, 65, a5, 6f, ...]`
 
-### KEY BUG IDENTIFIED: Factor Evaluations Don't Match
+**r_cycle (opening point) is also correct:**
+- Zolt r_cycle[0] LE: `60 93 28 51 48 90 bf 6d ...`
+- Jolt opening_point[0]: `[60, 93, 28, 51, 48, 90, bf, 6d, ...]`
 
-The factor polynomial evaluations stored in `opening_claims` by Zolt don't match what Jolt reads when computing `expected_output_claim`.
+### Current Issue
 
-**Jolt reads from opening_claims** (ProductVirtualRemainder Instance 0):
-- `l_inst (LeftInstructionInput): [fd, 52, a8, 83, 5d, 65, a5, 6f, ...]`
-- `r_inst (RightInstructionInput): [21, 81, 2b, 04, 91, 40, 14, 5e, ...]`
-- etc.
+The factor evaluations match, but Jolt's `expected_output_claim` calculation still produces a different result. This suggests the issue is in:
 
-**Zolt stores** (cache_openings[0] LeftInstructionInput):
-- First 8 BE bytes: `43 85 16 42 5f 95 17 fd` - **DIFFERENT!**
+1. **tau parameters** - used in tau_high_bound_r0 and tau_bound_r_tail_rev
+2. **r0 (univariate skip challenge)** - used in Lagrange weights and Lagrange kernel
+3. **Lagrange polynomial computation** - weights w[i] for fusing
 
-### Why Sumcheck Passes But Verification Fails
+### Jolt's Expected Output Claim Formula
 
-1. Zolt generates Stage 2 round polynomials
-2. All 24 rounds satisfy `p(0) + p(1) = claim` (internally consistent)
-3. Challenges are synchronized (transcript matches)
-4. Final `output_claim` matches what verifier computes from sumcheck
-5. **BUT**: Verifier then computes `expected_claim` using factor evals from `opening_claims`
-6. Since factor evals are wrong, `expected_claim ≠ output_claim`
-
-### Root Cause Hypothesis
-
-The factor evaluations are computed as MLE evaluations:
+For Instance 0 (ProductVirtualRemainder):
 ```
-factor[i] = Σ_t eq(r_cycle, t) * witness[t].factor[i]
+fused_left = w[0]*l_inst + w[1]*is_rd_not_zero + w[2]*is_rd_not_zero + w[3]*lookup_out + w[4]*j_flag
+fused_right = w[0]*r_inst + w[1]*wl_flag + w[2]*j_flag + w[3]*branch + w[4]*(1-next_is_noop)
+tau_high_bound_r0 = L(tau_high, r0)  // Lagrange kernel
+tau_bound_r_tail_rev = eq(tau_low, r_cycle^rev)
+
+expected = tau_high_bound_r0 * tau_bound_r_tail_rev * fused_left * fused_right
 ```
 
-Where `r_cycle = reverse(challenges[16..24])` (last 8 of 24 Stage 2 challenges)
+### Jolt's Intermediate Values
 
-Possible issues:
-1. **r_cycle extraction** - wrong challenge slice or wrong reversal order
-2. **eq polynomial** - wrong evaluation (though eq_sum=1 suggests it's OK)
-3. **witness values** - extracting wrong fields from R1CS inputs
-4. **MLE formula** - using different indexing than Jolt expects
+From debug:
+- fused_left: `[0d, 8b, ee, 53, ...]`
+- fused_right: `[b5, 12, 81, 28, ...]`
+- tau_high_bound_r0: `[5c, 00, 3f, 64, ...]`
+- tau_bound_r_tail_rev: `[48, b6, bc, 4e, ...]`
+- expected_output_claim: `[18, f9, 1f, 65, ...]`
 
-### Next Debugging Steps
+### Next Steps
 
-1. Print exact r_cycle from Jolt verifier and compare with Zolt
-2. Print single witness value and trace through MLE computation
-3. Check Jolt's factor evaluation formula in cache_openings
-4. Verify Zolt extracts correct R1CS fields for each factor
+1. Add debug to Zolt to compute the same intermediate values
+2. Compare tau_high, tau_low, r0 between Zolt and Jolt
+3. Compare Lagrange weights w[i]
+4. Compare fused_left, fused_right
+5. Identify which calculation diverges
 
-### Technical Context
+### Technical Insight
 
-Stage 2 has 5 batched instances with different round counts:
-- Instance 0: ProductVirtualRemainder (8 rounds, offset=16)
-- Instance 1: RamRafEvaluation (16 rounds, offset=8)
-- Instance 2: RamReadWriteChecking (24 rounds, offset=0) - MAX
-- Instance 3: OutputSumcheck (16 rounds, offset=8)
-- Instance 4: InstructionLookupsClaimReduction (8 rounds, offset=16)
+The sumcheck passes because:
+- Round polynomials satisfy p(0)+p(1)=claim at each round
+- Final output_claim matches between prover and verifier
 
-For Instance 0, the factor claims should be MLE evaluations at normalized(challenges[16..24]).
+But expected_output_claim differs because:
+- The formula computes what the sumcheck SHOULD have produced
+- If the polynomial being proved differs from what the formula expects, they won't match
 
-### Files
+### Files Modified
 
-- `/home/vivado/projects/jolt/jolt-core/src/zkvm/spartan/product.rs` - Jolt's expected_output_claim
-- `/home/vivado/projects/zolt/src/zkvm/proof_converter.zig` - Zolt's factor computation
-- `/home/vivado/projects/zolt/src/zkvm/spartan/product_remainder.zig` - ProductVirtualRemainder prover
+- `/home/vivado/projects/jolt/jolt-core/src/subprotocols/sumcheck.rs` - debug output
+- `/home/vivado/projects/jolt/jolt-core/src/zkvm/spartan/product.rs` - debug output
+- `/home/vivado/projects/zolt/src/zkvm/proof_converter.zig` - debug output

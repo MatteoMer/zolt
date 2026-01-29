@@ -24,6 +24,8 @@ const MemoryOp = mod.MemoryOp;
 const MemoryAccess = mod.MemoryAccess;
 const MemoryTrace = mod.MemoryTrace;
 
+const jolt_device = @import("../jolt_device.zig");
+
 /// Parameters for Value Evaluation sumcheck
 pub fn ValEvaluationParams(comptime F: type) type {
     return struct {
@@ -95,6 +97,11 @@ pub fn IncPolynomial(comptime F: type) type {
 
         /// Initialize from memory trace
         /// inc(j) = value_after_write - value_before_write for writes, 0 otherwise
+        ///
+        /// IMPORTANT: Synthetic termination/panic writes are NOT included in Jolt's trace.
+        /// If memory_layout is provided, writes to termination/panic addresses are skipped.
+        /// This matches Jolt's behavior where these bits are set directly in the final memory
+        /// state without corresponding trace entries.
         pub fn fromTrace(
             allocator: Allocator,
             trace: *const MemoryTrace,
@@ -102,6 +109,20 @@ pub fn IncPolynomial(comptime F: type) type {
             start_address: u64,
             k: usize,
             initial_ram: ?*const std.AutoHashMapUnmanaged(u64, u64),
+        ) !Self {
+            // Call the full version with no memory_layout (no filtering)
+            return fromTraceWithLayout(allocator, trace, trace_len, start_address, k, initial_ram, null);
+        }
+
+        /// Initialize from memory trace, optionally filtering out termination/panic writes
+        pub fn fromTraceWithLayout(
+            allocator: Allocator,
+            trace: *const MemoryTrace,
+            trace_len: usize,
+            start_address: u64,
+            k: usize,
+            initial_ram: ?*const std.AutoHashMapUnmanaged(u64, u64),
+            memory_layout: ?*const jolt_device.MemoryLayout,
         ) !Self {
             const effective_len = if (trace_len == 0) 1 else trace_len;
             const padded_len = std.math.ceilPowerOfTwo(usize, effective_len) catch effective_len;
@@ -135,6 +156,16 @@ pub fn IncPolynomial(comptime F: type) type {
                     std.debug.print("[IncPolynomial] Skipping write at 0x{X:0>16}: address < start_address\n", .{access.address});
                     continue;
                 }
+
+                // CRITICAL: Skip writes to termination/panic addresses (synthetic writes).
+                // Jolt does NOT include these in the trace - they are set directly in final memory.
+                if (memory_layout) |ml| {
+                    if (access.address == ml.termination or access.address == ml.panic) {
+                        std.debug.print("[IncPolynomial] Skipping SYNTHETIC write at 0x{X:0>16}: termination/panic address\n", .{access.address});
+                        continue;
+                    }
+                }
+
                 const idx = (access.address - start_address) / 8;
                 if (idx >= k) {
                     std.debug.print("[IncPolynomial] Skipping write at 0x{X:0>16}: idx {} >= k {}\n", .{ access.address, idx, k });
@@ -427,15 +458,33 @@ pub fn ValEvaluationProver(comptime F: type) type {
             params: ValEvaluationParams(F),
             start_address: u64,
         ) !Self {
+            // Call full version with no memory_layout (no filtering of synthetic writes)
+            return initWithLayout(allocator, trace, initial_ram, params, start_address, null);
+        }
 
-            // Build inc polynomial
-            var inc_poly = try IncPolynomial(F).fromTrace(
+        /// Initialize with optional memory_layout to filter out synthetic termination/panic writes
+        ///
+        /// IMPORTANT: Pass memory_layout to exclude synthetic writes from the inc polynomial.
+        /// This matches Jolt's behavior where termination/panic bits are set directly in
+        /// final memory without corresponding trace entries.
+        pub fn initWithLayout(
+            allocator: Allocator,
+            trace: *const MemoryTrace,
+            initial_ram: ?*const std.AutoHashMapUnmanaged(u64, u64),
+            params: ValEvaluationParams(F),
+            start_address: u64,
+            memory_layout: ?*const jolt_device.MemoryLayout,
+        ) !Self {
+
+            // Build inc polynomial (filtering out synthetic writes if memory_layout provided)
+            var inc_poly = try IncPolynomial(F).fromTraceWithLayout(
                 allocator,
                 trace,
                 params.trace_len,
                 start_address,
                 params.k,
                 initial_ram,
+                memory_layout,
             );
             defer inc_poly.deinit();
 

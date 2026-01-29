@@ -1,67 +1,82 @@
-# Zolt-Jolt Compatibility: Stage 2 Debug
+# Zolt-Jolt Compatibility: Stage 3/4 Challenge Debug
 
-## Status: Instance 0 Expected Claim Investigation ⏳
+## Status: Investigating Stage 3 Input Claim Mismatch ⏳
 
-## Session Summary (2026-01-28 evening)
+## Session Summary (2026-01-29)
 
-### Major Breakthrough
-**Factor evaluations ARE correct!** The opening_claims stored by Zolt match what Jolt reads:
-- Zolt factor[0] (LeftInstructionInput) LE: `fd 52 a8 83 5d 65 a5 6f ...`
-- Jolt reads l_inst: `[fd, 52, a8, 83, 5d, 65, a5, 6f, ...]`
+### Key Finding
 
-**r_cycle (opening point) is also correct:**
-- Zolt r_cycle[0] LE: `60 93 28 51 48 90 bf 6d ...`
-- Jolt opening_point[0]: `[60, 93, 28, 51, 48, 90, bf, 6d, ...]`
+The Stage 4 sumcheck fails because `params.r_cycle` (Stage 3 challenges) doesn't match between Zolt prover and Jolt verifier.
 
-### Current Issue
+### Root Cause Chain
 
-The factor evaluations match, but Jolt's `expected_output_claim` calculation still produces a different result. This suggests the issue is in:
+1. **Stage 3 initial claims differ**:
+   - Jolt's verifier computes Stage 3 initial_claim: `[da, a3, 24, 84, db, 59, f8, 88, ...]`
+   - Zolt's prover produces Stage 3 current_claim: `[07, 8d, 45, 4a, d1, 3e, b6, 3f, ...]`
 
-1. **tau parameters** - used in tau_high_bound_r0 and tau_bound_r_tail_rev
-2. **r0 (univariate skip challenge)** - used in Lagrange weights and Lagrange kernel
-3. **Lagrange polynomial computation** - weights w[i] for fusing
+2. **Stage 3 input claims come from Stage 1's SpartanOuter**:
+   - `RegistersClaimReduction.input_claim` uses:
+     - `RdWriteValue` @ `SpartanOuter`
+     - `Rs1Value` @ `SpartanOuter`
+     - `Rs2Value` @ `SpartanOuter`
+   - These are computed from R1CS evaluations at Stage 1's r_cycle
 
-### Jolt's Expected Output Claim Formula
+3. **Stage 1 initial_claim mismatch**:
+   - Jolt expects: `[db, b1, f8, a9, eb, ed, 61, 41, ...]` with 9 rounds
+   - Zolt produces: `0x0` (all zeros!) with 13 rounds
+   - **This is suspicious** - zero initial claim suggests the R1CS sum is zero
 
-For Instance 0 (ProductVirtualRemainder):
+### Analysis
+
+The Zolt Stage 1 sumcheck produces all-zero round polynomials because:
+- Either Az ⊙ Bz = Cz for all rows (R1CS is trivially satisfied everywhere)
+- Or there's a bug in how the R1CS evaluation polynomial is computed
+
+But Jolt expects a NON-ZERO initial claim, which means Jolt's prover computes a non-zero R1CS sum.
+
+### Comparison Data
+
+#### Zolt Stage 3 r_cycle (passed to Stage 4):
 ```
-fused_left = w[0]*l_inst + w[1]*is_rd_not_zero + w[2]*is_rd_not_zero + w[3]*lookup_out + w[4]*j_flag
-fused_right = w[0]*r_inst + w[1]*wl_flag + w[2]*j_flag + w[3]*branch + w[4]*(1-next_is_noop)
-tau_high_bound_r0 = L(tau_high, r0)  // Lagrange kernel
-tau_bound_r_tail_rev = eq(tau_low, r_cycle^rev)
-
-expected = tau_high_bound_r0 * tau_bound_r_tail_rev * fused_left * fused_right
+r_cycle_be[0] = { 00...00 4e 55 11 b5 4e 49 62 7f 3d e9 51 ee bb 38 23 1f }
+r_cycle_be[1] = { 00...00 38 65 34 87 6f 99 63 13 2d d6 e8 95 cf 0d 32 17 }
+...
 ```
 
-### Jolt's Intermediate Values
+#### Jolt's verifier params.r_cycle (from Stage 3):
+```
+params.r_cycle[0]: [00..00, 3c, 22, 3b, 5f, f7, 37, 45, fa, a6, 03, e4, e5, bc, ec, c8, 18]
+params.r_cycle[1]: [00..00, b3, bc, 28, 96, 5b, 3c, ff, 82, 63, f2, ea, 64, d9, c6, 89, 00]
+...
+```
 
-From debug:
-- fused_left: `[0d, 8b, ee, 53, ...]`
-- fused_right: `[b5, 12, 81, 28, ...]`
-- tau_high_bound_r0: `[5c, 00, 3f, 64, ...]`
-- tau_bound_r_tail_rev: `[48, b6, bc, 4e, ...]`
-- expected_output_claim: `[18, f9, 1f, 65, ...]`
+These are completely different because the Stage 3 sumcheck produced different round polynomials.
 
 ### Next Steps
 
-1. Add debug to Zolt to compute the same intermediate values
-2. Compare tau_high, tau_low, r0 between Zolt and Jolt
-3. Compare Lagrange weights w[i]
-4. Compare fused_left, fused_right
-5. Identify which calculation diverges
+1. **Debug Stage 1 R1CS polynomial**:
+   - Verify Az, Bz, Cz are computed correctly
+   - Check the eq polynomial is initialized properly with tau challenges
+   - Ensure the combined polynomial f(x) = Σ eq(τ,x) * (Az(x) * Bz(x) - Cz(x)) is correct
 
-### Technical Insight
+2. **Verify transcript consistency**:
+   - Compare transcript states at each stage between Zolt and Jolt
+   - Ensure commitments are appended in identical order
 
-The sumcheck passes because:
-- Round polynomials satisfy p(0)+p(1)=claim at each round
-- Final output_claim matches between prover and verifier
+3. **Compare Stage 1 output**:
+   - The final claim after Stage 1 sumcheck
+   - The r_cycle challenges produced
 
-But expected_output_claim differs because:
-- The formula computes what the sumcheck SHOULD have produced
-- If the polynomial being proved differs from what the formula expects, they won't match
+## Completed
 
-### Files Modified
+- [x] Implemented Stage 4 RegistersReadWriteChecking with Gruen optimization
+- [x] Implemented Stage 3 RegistersClaimReduction prover
+- [x] Added extensive debug output
+- [x] Identified that Stage 1 initial_claim = 0 in Zolt but non-zero in Jolt
+- [x] Traced the claim mismatch back to Stage 1
 
-- `/home/vivado/projects/jolt/jolt-core/src/subprotocols/sumcheck.rs` - debug output
-- `/home/vivado/projects/jolt/jolt-core/src/zkvm/spartan/product.rs` - debug output
-- `/home/vivado/projects/zolt/src/zkvm/proof_converter.zig` - debug output
+## In Progress
+
+- [ ] Debug Stage 1 R1CS polynomial evaluation
+- [ ] Fix the zero initial_claim issue
+- [ ] Verify transcript consistency

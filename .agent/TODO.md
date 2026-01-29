@@ -14,6 +14,17 @@
 **Failing:**
 - ❌ Stage 2 sumcheck verification - expected_output_claim mismatch
 
+### Changes Made This Session
+
+1. Added `deserialize_from_bytes_uncompressed` method to `Serializable` trait in Jolt
+2. Fixed test to use correct deserialization format (compressed for both preprocessing and proof)
+3. Identified that Stage 2's `expected_output_claim` doesn't match the proof's `output_claim`
+
+### Commits
+
+- `db0e57e3` - feat: add uncompressed deserialization support to Serializable trait
+- `de20eda` - docs: update TODO.md with Stage 2 failure analysis
+
 ### Stage 2 Error Details
 
 ```
@@ -28,12 +39,21 @@ Stage 2 is a batched sumcheck with 5 instances:
 4. OutputSumcheckVerifier (log_ram_k rounds)
 5. InstructionLookupsClaimReductionSumcheckVerifier (n_cycle_vars rounds)
 
-Instance expected_claims from Jolt verifier:
-- Instance 0: 13162261949552616826381676439296451788601018621847815047898609024679378399536
-- Instance 1: 0 (ProductVirtualRemainder - zeros for simple program)
-- Instance 2: 18644577964730782764190402023295937512886863831479486117757364935258160752617
-- Instance 3: 20429994345422184441049916064819417529654187996943582502607189827673613930347
-- Instance 4: 19475503802839692994087720930790055641780649560464270942640555911588860270906
+### Key Discovery: Factor Claims Source
+
+The `expected_output_claim` for each Stage 2 instance depends on factor claims retrieved from the proof's opening claims at `SumcheckId::SpartanProductVirtualization`:
+
+**ProductVirtualRemainderVerifier needs these 8 factors:**
+1. VirtualPolynomial::LeftInstructionInput
+2. VirtualPolynomial::RightInstructionInput
+3. VirtualPolynomial::InstructionFlags(IsRdNotZero = 6)
+4. VirtualPolynomial::OpFlags(WriteLookupOutputToRD = 6)
+5. VirtualPolynomial::OpFlags(Jump = 5)
+6. VirtualPolynomial::LookupOutput
+7. VirtualPolynomial::InstructionFlags(Branch = 4)
+8. VirtualPolynomial::NextIsNoop
+
+These are stored in Zolt at `proof_converter.zig` lines 1329-1364 in `stage2_result.factor_evals`.
 
 ### Root Cause Analysis
 
@@ -49,53 +69,29 @@ The mismatch indicates Zolt's Stage 2 sumcheck proof has:
 
 ### Next Steps (Priority Order)
 
-1. [ ] Compare Zolt's Stage 2 round polynomials with what Jolt computes
-2. [ ] Debug the factor polynomial evaluations for each instance
-3. [ ] Verify the r_cycle point used for MLE evaluations
-4. [ ] Check if Stage 2's opening claims match Jolt's expected format
+1. [ ] Add debug prints in Jolt to show the 8 factor claims it retrieves from the proof
+2. [ ] Compare with what Zolt stores in `factor_evals[0..7]`
+3. [ ] Verify the MLE evaluations at r_cycle are correct in Zolt
+4. [ ] If factor claims match, investigate transcript state divergence
+
+### How to Run Tests
+
+```bash
+# Run Jolt verification test
+ZOLT_LOGS_DIR=/home/vivado/projects/zolt/logs cargo test --features "minimal" --no-default-features -p jolt-core test_verify_zolt_proof_with_zolt_preprocessing -- --nocapture --ignored
+
+# Run Zolt proof generation
+cd /home/vivado/projects/zolt
+zig build && ./zig-out/bin/zolt prove examples/fibonacci.elf --export-preprocessing logs/zolt_preprocessing.bin -o logs/zolt_proof_dory.bin
+```
 
 ### Technical Details
 - trace_length: 256 (padded from 54 actual cycles)
 - n_cycle_vars: 8
 - log_ram_k: 16
 - Stage 2: 24 rounds
-
-### Commits
-- `db0e57e3` - feat: add uncompressed deserialization support to Serializable trait
-
----
-
-## Session 75 Summary (2026-01-29)
-
-### Key Finding: Challenge Type Mapping Verified Correct
-
-| Jolt Function | Zolt Function | Masking | Montgomery |
-|---------------|---------------|---------|------------|
-| `challenge_scalar_optimized` | `challengeScalar()` | 125-bit | No (raw `[0,0,L,H]`) |
-| `challenge_scalar` | `challengeScalarFull()` | None | Yes (proper Fr) |
-| `challenge_vector_optimized` | n × `challengeScalar()` | 125-bit | No |
-| `challenge_vector` | n × `challengeScalarFull()` | None | Yes |
-
-### Stage 2 Challenge Sampling Order (Verified Matches Jolt)
-
-1. `ProductVirtualUniSkipParams::new` → `challenge_scalar_optimized` → `tau_high_stage2`
-2. UniSkip proof: append poly → `challenge_scalar_optimized` → `r0_stage2`
-3. UniSkip `cache_openings`: `append_virtual(uni_skip_claim)`
-4. `RamReadWriteCheckingParams::new` → `challenge_scalar` → `gamma_rwc`
-5. `OutputSumcheckParams::new` → `challenge_vector_optimized(log_k)` → `r_address`
-6. `InstructionLookupsClaimReductionSumcheckParams::new` → `challenge_scalar` → `gamma_instr`
-7. `BatchedSumcheck::verify` → append input_claims → `challenge_vector(5)` → batching_coeffs
-
-### Factor Polynomial Order (Verified Matches `PRODUCT_UNIQUE_FACTOR_VIRTUALS`)
-
-- [0] LeftInstructionInput
-- [1] RightInstructionInput
-- [2] InstructionFlags(IsRdNotZero) = index 6
-- [3] OpFlags(WriteLookupOutputToRD) = index 6
-- [4] OpFlags(Jump) = index 5
-- [5] LookupOutput
-- [6] InstructionFlags(Branch) = index 4
-- [7] NextIsNoop
+- Proof file: `/home/vivado/projects/zolt/logs/zolt_proof_dory.bin` (40544 bytes)
+- Preprocessing file: `/home/vivado/projects/zolt/logs/zolt_preprocessing.bin` (26356 bytes)
 
 ---
 
@@ -105,3 +101,20 @@ The mismatch indicates Zolt's Stage 2 sumcheck proof has:
 - ✅ Proof serialization/deserialization working
 - ✅ Stage 1 verification passing
 - ❌ Stage 2 verification failing
+
+---
+
+## Previous Sessions
+
+### Session 75 (2026-01-29)
+- Verified challenge type mapping correct
+- Verified factor polynomial order matches `PRODUCT_UNIQUE_FACTOR_VIRTUALS`
+
+### Session 74 (2026-01-29)
+- Verified Zolt's prover is internally consistent
+- SumcheckId enum has 22 values matching Jolt
+
+### Session 73 (2026-01-29)
+- Fixed SumcheckId mismatch
+- Fixed proof serialization format
+- Proof deserializes completely

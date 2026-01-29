@@ -1492,25 +1492,28 @@ pub fn JoltProver(comptime F: type) type {
                 try serializer.writeDoryProof(&dory_proof);
             }
 
-            // Write advice proofs (all None for programs without advice)
-            // 1. trusted_advice_val_evaluation_proof: Option<PCS::Proof>
-            try serializer.writeU8(0);
-            // 2. trusted_advice_val_final_proof: Option<PCS::Proof>
-            try serializer.writeU8(0);
-            // 3. untrusted_advice_val_evaluation_proof: Option<PCS::Proof>
-            try serializer.writeU8(0);
-            // 4. untrusted_advice_val_final_proof: Option<PCS::Proof>
-            try serializer.writeU8(0);
-            // 5. untrusted_advice_commitment: Option<PCS::Commitment>
-            try serializer.writeU8(0);
+            // Write untrusted_advice_commitment: Option<PCS::Commitment>
+            // Jolt's JoltProof only has this one advice-related field
+            try serializer.writeU8(0); // None
 
             // Write configuration (matches Jolt's JoltProof struct exactly)
-            // All 5 fields are usize (8 bytes on 64-bit)
+            // Fields in order: trace_length, ram_K, bytecode_K, rw_config, one_hot_config, dory_layout
             try serializer.writeUsize(bundle.proof.trace_length);
             try serializer.writeUsize(bundle.proof.ram_K);
             try serializer.writeUsize(bundle.proof.bytecode_K);
-            try serializer.writeUsize(@as(usize, bundle.proof.one_hot_config.log_k_chunk));
-            try serializer.writeUsize(@as(usize, bundle.proof.one_hot_config.lookups_ra_virtual_log_k_chunk));
+
+            // ReadWriteConfig: 4 u8 fields
+            try serializer.writeU8(bundle.proof.rw_config.ram_rw_phase1_num_rounds);
+            try serializer.writeU8(bundle.proof.rw_config.ram_rw_phase2_num_rounds);
+            try serializer.writeU8(bundle.proof.rw_config.registers_rw_phase1_num_rounds);
+            try serializer.writeU8(bundle.proof.rw_config.registers_rw_phase2_num_rounds);
+
+            // OneHotConfig: 2 u8 fields
+            try serializer.writeU8(bundle.proof.one_hot_config.log_k_chunk);
+            try serializer.writeU8(bundle.proof.one_hot_config.lookups_ra_virtual_log_k_chunk);
+
+            // DoryLayout: 1 u8 (0 = Wide, 1 = Tall)
+            try serializer.writeU8(bundle.proof.dory_layout);
 
             return serializer.toOwnedSlice();
         }

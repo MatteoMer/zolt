@@ -34,15 +34,27 @@
 - [6] InstructionFlags(Branch) = index 4
 - [7] NextIsNoop
 
-### Blocking Issue
+### Blocking Issue #1 (RESOLVED)
 
-Cannot run Jolt tests to compare transcript state:
+Initially couldn't build Jolt - but found workaround:
+```bash
+cargo test --features "minimal,zolt-debug" --no-default-features -p jolt-core
 ```
-pkg-config: command not found
-openssl-sys build failed
+This builds without openssl dependency!
+
+### Blocking Issue #2 (NEW - Active)
+
+Proof deserialization fails - GT elements invalid:
+```
+Commitment 0: first bytes 54 d5 1a e7 ...
+   INVALID GT: InvalidData
 ```
 
-Need: `sudo apt-get install pkg-config libssl-dev`
+The commitments in `logs/zolt_proof_dory.bin` are not valid arkworks Fq12 elements.
+This may be because:
+1. Commitments were computed incorrectly in Zolt's Dory commitment scheme
+2. Serialization format doesn't match arkworks' `serialize_uncompressed`
+3. Commitments are placeholder/zero values that aren't valid GT elements
 
 ### Remaining Hypothesis
 
@@ -53,10 +65,11 @@ Since challenge types and order are correct, the issue must be:
 
 ### Next Steps (Priority Order)
 
-1. [ ] **HIGH PRIORITY**: Install system deps to run Jolt with `zolt-debug`
-2. [ ] Compare transcript state hex dump at tau_high sampling point
-3. [ ] Compare batching_coeffs[0..4] between Zolt and Jolt
-4. [ ] Compare factor_evals with Jolt's ProductVirtualEval::compute_claimed_factors
+1. [x] Build Jolt with `minimal,zolt-debug` features (DONE - works without openssl)
+2. [ ] **HIGH PRIORITY**: Fix GT element serialization to match arkworks format
+3. [ ] Generate new proof with valid commitments
+4. [ ] Run Jolt verification test to compare transcript states
+5. [ ] Compare batching_coeffs[0..4] between Zolt and Jolt
 
 ### Test Status
 

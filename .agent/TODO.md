@@ -1,120 +1,95 @@
 # Zolt-Jolt Compatibility: Current Status
 
-## Status: Stage 2 Verification Failure 🔴
+## Status: Stage 2 Sumcheck Proof Polynomials Wrong 🔴
 
-## Session 76 Summary (2026-01-29)
+## Session 77 Summary (2026-01-29)
 
-### Major Progress: Proof Deserialization Fixed!
+### Progress Made
 
-**Working:**
-- ✅ Proof deserialization (all 7 stages, 91 opening claims, 37 commitments)
-- ✅ Stage 1 (OuterRemainingSumcheck) verification passes
-- ✅ Preprocessing loading from both compressed and uncompressed formats
+1. **Fixed config serialization** - trace_length, ram_K, bytecode_K, ReadWriteConfig, OneHotConfig, DoryLayout now match Jolt format exactly
 
-**Failing:**
-- ❌ Stage 2 sumcheck verification - expected_output_claim mismatch
+2. **Proof deserialization works** - 91 opening claims, 37 commitments parsed correctly
 
-### Changes Made This Session
+3. **Stage 1 passes** - Outer Spartan sumcheck verification passes
 
-1. Added `deserialize_from_bytes_uncompressed` method to `Serializable` trait in Jolt
-2. Fixed test to use correct deserialization format (compressed for both preprocessing and proof)
-3. Identified that Stage 2's `expected_output_claim` doesn't match the proof's `output_claim`
+4. **Found Stage 2 root cause**: The `RamAddress` claim at `SpartanOuter` is correctly ZERO (fibonacci has no loads/stores, so the polynomial is identically zero)
 
-### Commits
+5. **Real issue identified**: The sumcheck output_claim doesn't match expected_claim:
+   ```
+   output_claim:   [50, 8d, 70, 43, ...]
+   expected_claim: [38, d1, cc, 37, ...]
+   ```
 
-- `db0e57e3` - feat: add uncompressed deserialization support to Serializable trait
-- `de20eda` - docs: update TODO.md with Stage 2 failure analysis
+### Detailed Analysis
 
-### Stage 2 Error Details
-
+Verified via proof parsing:
 ```
-output_claim:          15906954023365202249122192714132265766544458757312739318826275235085359324853
-expected_output_claim: 11386433087960536582639845443917888291615956842149860534020066572649924103188
+Claim 50: Virtual(poly=29, sumcheck=0) = ZERO  (RamAddress at SpartanOuter)
 ```
+This is CORRECT - fibonacci has no memory operations, so RamAddress polynomial is identically zero.
 
-Stage 2 is a batched sumcheck with 5 instances:
-1. ProductVirtualRemainderVerifier (n_cycle_vars rounds)
-2. RamRafEvaluationSumcheckVerifier (log_ram_k rounds)
-3. RamReadWriteCheckingVerifier (log_ram_k + n_cycle_vars rounds - max!)
-4. OutputSumcheckVerifier (log_ram_k rounds)
-5. InstructionLookupsClaimReductionSumcheckVerifier (n_cycle_vars rounds)
+The expected_claim is computed from 5 instance contributions:
+- Instance 0: ProductVirtualRemainder - non-zero contribution
+- Instance 1: RamRafEvaluation - zero (correct - no loads/stores)
+- Instance 2: RamReadWriteChecking - zero (correct - no memory ops)
+- Instance 3: OutputSumcheck - zero (correct)
+- Instance 4: InstructionClaimReduction - non-zero contribution
 
-### Key Discovery: Factor Claims Source
+The sumcheck polynomial rounds produce an `output_claim`, but this doesn't match what the verifier computes from the instance expected_output_claims.
 
-The `expected_output_claim` for each Stage 2 instance depends on factor claims retrieved from the proof's opening claims at `SumcheckId::SpartanProductVirtualization`:
+**This means the Stage 2 sumcheck polynomials computed by Zolt are wrong.**
 
-**ProductVirtualRemainderVerifier needs these 8 factors:**
-1. VirtualPolynomial::LeftInstructionInput
-2. VirtualPolynomial::RightInstructionInput
-3. VirtualPolynomial::InstructionFlags(IsRdNotZero = 6)
-4. VirtualPolynomial::OpFlags(WriteLookupOutputToRD = 6)
-5. VirtualPolynomial::OpFlags(Jump = 5)
-6. VirtualPolynomial::LookupOutput
-7. VirtualPolynomial::InstructionFlags(Branch = 4)
-8. VirtualPolynomial::NextIsNoop
+### Key Files to Investigate
 
-These are stored in Zolt at `proof_converter.zig` lines 1329-1364 in `stage2_result.factor_evals`.
+1. `/home/vivado/projects/zolt/src/zkvm/proof_converter.zig` lines 2700-3200 - Stage 2 batched sumcheck generation
+2. Look at how Stage 2 polynomials are computed vs how Jolt computes them
 
-### Root Cause Analysis
+### How Jolt Computes Instance Expected Output Claims
 
-The expected_output_claim is computed from:
-1. Opening claims stored in proof (factor evaluations at r_cycle point)
-2. Batching coefficients derived from transcript
-3. Weighted sum of all instance claims
+For each instance at r_final (the sumcheck challenges):
+1. `ProductVirtualRemainder::expected_output_claim(r)` - evaluates factor polys at r
+2. `RamRafEvaluation::expected_output_claim(r)` - evaluates unmap * raf at r
+3. `RamReadWriteChecking::expected_output_claim(r)` - evaluates read/write checking
+4. `OutputSumcheck::expected_output_claim(r)` - evaluates program I/O check
+5. `InstructionClaimReduction::expected_output_claim(r)` - evaluates instruction lookup reduction
 
-The mismatch indicates Zolt's Stage 2 sumcheck proof has:
-- Incorrect round polynomials, OR
-- Incorrect opening claims for the verifier's computation, OR
-- Transcript divergence causing different batching coefficients
+The verifier sums these (weighted by batching coeffs) and expects it to match output_claim from proof.
 
-### Next Steps (Priority Order)
+### Next Steps
 
-1. [ ] Add debug prints in Jolt to show the 8 factor claims it retrieves from the proof
-2. [ ] Compare with what Zolt stores in `factor_evals[0..7]`
-3. [ ] Verify the MLE evaluations at r_cycle are correct in Zolt
-4. [ ] If factor claims match, investigate transcript state divergence
+1. [ ] Add debug prints to Zolt's Stage 2 polynomial computation
+2. [ ] Compare Zolt's final round polynomial evaluation with Jolt's expected values
+3. [ ] Verify batching coefficients match
+4. [ ] Verify each instance's polynomial is computed correctly
+
+### Commits Made
+- `0baedb0` - fix: correct Jolt config serialization format
 
 ### How to Run Tests
 
 ```bash
-# Run Jolt verification test
-ZOLT_LOGS_DIR=/home/vivado/projects/zolt/logs cargo test --features "minimal" --no-default-features -p jolt-core test_verify_zolt_proof_with_zolt_preprocessing -- --nocapture --ignored
+# Jolt verification test
+cd /home/vivado/projects/jolt
+ZOLT_LOGS_DIR=/home/vivado/projects/zolt/logs cargo test --features "minimal,zolt-debug" --no-default-features -p jolt-core test_verify_zolt_proof_with_zolt_preprocessing -- --nocapture --ignored
 
-# Run Zolt proof generation
+# Zolt proof generation
 cd /home/vivado/projects/zolt
-zig build && ./zig-out/bin/zolt prove examples/fibonacci.elf --export-preprocessing logs/zolt_preprocessing.bin -o logs/zolt_proof_dory.bin
+zig build -Doptimize=ReleaseSafe && ./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format --export-preprocessing logs/zolt_preprocessing.bin -o logs/zolt_proof_dory.bin
 ```
 
-### Technical Details
-- trace_length: 256 (padded from 54 actual cycles)
-- n_cycle_vars: 8
-- log_ram_k: 16
-- Stage 2: 24 rounds
-- Proof file: `/home/vivado/projects/zolt/logs/zolt_proof_dory.bin` (40544 bytes)
-- Preprocessing file: `/home/vivado/projects/zolt/logs/zolt_preprocessing.bin` (26356 bytes)
+## Technical Details
+- trace_length: 256
+- ram_K: 65536
+- bytecode_K: 65536
+- Stage 2 max_rounds: 24 (log_ram_k + n_cycle_vars = 16 + 8)
 
 ---
 
-## Test Status
+## Previous Progress
 
-- ✅ 714/714 unit tests passing
-- ✅ Proof serialization/deserialization working
-- ✅ Stage 1 verification passing
-- ❌ Stage 2 verification failing
+### Session 76
+- Fixed ZOLT header issue using `--jolt-format`
 
----
-
-## Previous Sessions
-
-### Session 75 (2026-01-29)
-- Verified challenge type mapping correct
-- Verified factor polynomial order matches `PRODUCT_UNIQUE_FACTOR_VIRTUALS`
-
-### Session 74 (2026-01-29)
-- Verified Zolt's prover is internally consistent
-- SumcheckId enum has 22 values matching Jolt
-
-### Session 73 (2026-01-29)
+### Earlier Sessions
 - Fixed SumcheckId mismatch
-- Fixed proof serialization format
-- Proof deserializes completely
+- Verified factor polynomial ordering

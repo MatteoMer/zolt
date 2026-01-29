@@ -1,94 +1,97 @@
 # Zolt-Jolt Compatibility: Current Status
 
-## Status: Ready for Jolt Verification ⏳
+## Status: Deserialization Complete, Verification In Progress ⏳
 
-## Session 72 Summary (2026-01-29)
+## Session 73 Summary (2026-01-29)
 
-### Verified ✓
+### Major Fix: SumcheckId Mismatch
 
-1. **714/714 Unit Tests Pass** - All Zolt internal tests passing
-2. **Stage 3 Sumcheck Mathematically Correct** - All 8 rounds verify p(0)+p(1)=claim
-3. **Individual Instance Claims Correct** - shift, instr, reg claims match at each round
-4. **Opening Claims Storage/Retrieval** - Claims correctly stored by Stage 1/2 and read by Stage 3
-5. **Transcript Flow** - Matches Jolt's design (gamma derivation, input_claims append, batching coeffs)
+**Problem Found:**
+- Zolt had 24 SumcheckId values, Jolt has 22
+- This caused OpeningId base offsets to be wrong:
+  - Zolt: 0/24/48/72 (UNTRUSTED/TRUSTED/COMMITTED/VIRTUAL)
+  - Jolt: 0/22/44/66
 
-### Current Blocker
+**Fix Applied:**
+- Removed `AdviceClaimReductionCyclePhase` and `AdviceClaimReduction`
+- Renumbered `IncClaimReduction` to 20, `HammingWeightClaimReduction` to 21
+- COUNT now 22 to match Jolt exactly
 
-Cannot run Jolt verifier due to missing system dependencies:
-- `pkg-config` package
-- `libssl-dev` package
+### Proof Serialization Fixed
 
-These require sudo access which is not available.
+**Problems Found:**
+1. Missing 4 advice proof options (only had 1 for commitment)
+2. Configuration written as mix of u8 and usize, should be 5 usizes
 
-### Next Steps (Requires Dependencies)
+**Fixes Applied:**
+- Added all 5 advice proof options (4 proofs + 1 commitment, all None)
+- Changed configuration to exactly 5 usizes matching Jolt's struct
 
-1. **Install dependencies**:
-   ```bash
-   sudo apt-get install pkg-config libssl-dev
-   ```
+### Current State
 
-2. **Run Jolt verification**:
-   ```bash
-   cd /home/vivado/projects/zolt/jolt
-   cargo test zolt_compat -- --ignored --nocapture
-   ```
+**Proof Deserialization: COMPLETE ✓**
+```
+=== Step 1: Claims ===
+OK: 91 claims
 
-3. **If verification fails**, the error message will indicate:
-   - Which stage fails
-   - What claim doesn't match
-   - This will pinpoint exactly where Zolt differs from Jolt
+=== Step 2: Commitments (Vec<GT>) ===
+OK: 37 commitments
 
-### Alternative Approach
+=== Steps 3-11: Sumcheck Stages ===
+All OK
 
-Generate a reference proof with Jolt and compare byte-by-byte:
-```bash
-cd /home/vivado/projects/zolt/jolt/examples/fibonacci
-cargo run -- --save
-# Creates /tmp/fib_proof.bin
+=== Step 12: Dory Opening Proof ===
+OK: 5 rounds, nu=4, sigma=5
 
-# Compare with Zolt proof
-xxd /tmp/fib_proof.bin > /tmp/jolt_proof.hex
-xxd /tmp/zolt_test.bin > /tmp/zolt_proof.hex
-diff /tmp/jolt_proof.hex /tmp/zolt_proof.hex
+=== Steps 13-17: Advice Proofs & Commitment ===
+All OK (None values)
+
+=== Steps 18-22: Configuration ===
+trace_length: 256
+ram_K: 65536
+bytecode_K: 65536
+log_k_chunk: 4
+lookups_ra_virtual_log_k_chunk: 16
+
+=== COMPLETE ===
+Final position: 40544, Total: 40544
 ```
 
-## Technical Details
+**Verification: FAILS at Stage 2**
+```
+output_claim:          21381532812498647026951017256069055058409470421711163232531942150439292669264
+expected_output_claim: 7589737359806175897404235347050845364246073571786737297475678711983129582270
+```
 
-### Stage 3 Input Claims Read From Opening Accumulator
+### Next Steps
 
-**ShiftSumcheck**:
-- NextUnexpandedPC @ SpartanOuter: `{ 127, 220, 98, 84, ... }`
-- NextPC @ SpartanOuter: `{ 127, 220, 98, 84, ... }` (same as unexpanded)
-- NextIsVirtual @ SpartanOuter: `{ 0, 0, 0, ... }`
-- NextIsFirstInSequence @ SpartanOuter: `{ 0, 0, 0, ... }`
-- NextIsNoop @ SpartanProductVirtualization: `{ 152, 69, 221, 72, ... }`
+The proof deserializes completely but verification fails at Stage 2 sumcheck. This means:
 
-**InstructionInputSumcheck**:
-- LeftInstructionInput @ SpartanOuter
-- RightInstructionInput @ SpartanOuter
-- LeftInstructionInput @ SpartanProductVirtualization
-- RightInstructionInput @ SpartanProductVirtualization
+1. **The sumcheck polynomial values in the proof don't match verifier expectations**
+2. This could be caused by:
+   - Transcript state mismatch between Zolt prover and Jolt verifier
+   - Incorrect polynomial computations in Stage 2
+   - Wrong claims being accumulated
 
-**RegistersClaimReduction**:
-- Rs1Value @ SpartanOuter
-- Rs2Value @ SpartanOuter
-- RdWriteValue @ SpartanOuter
+To debug:
+1. Add transcript state logging to Zolt's Stage 2 prover
+2. Compare challenge derivation at each sumcheck round
+3. Trace the batched claims and coefficients
 
-### Proof File Generated
+### Files Modified This Session
 
-- Path: `/tmp/zolt_test.bin`
-- Size: ~40KB
-- Contains: All sumcheck proofs, opening claims, commitments
+1. `src/zkvm/jolt_types.zig` - Fixed SumcheckId enum (22 values)
+2. `src/zkvm/mod.zig` - Fixed serialization:
+   - All 5 advice proof options
+   - Configuration as 5 usizes
 
-## Completed This Session
+## Previous Sessions
 
-- [x] Verified Stage 3 sumcheck mechanics are correct
-- [x] Confirmed opening claims are stored/retrieved correctly
-- [x] Traced full Stage 3 flow through all 8 rounds
-- [x] Updated documentation with detailed findings
+### Session 72 (2026-01-28)
+- 714/714 unit tests passing
+- Stage 3 sumcheck verified mathematically correct
+- Opening claims storage/retrieval verified
 
-## Remaining Work
-
-- [ ] Install dependencies and run Jolt verifier
-- [ ] Compare proof with Jolt reference
-- [ ] Fix any discrepancies identified by verifier
+### Session 71 (2026-01-28)
+- Instance 0 (RegistersRWC) verified correct
+- Synthetic termination write discovery

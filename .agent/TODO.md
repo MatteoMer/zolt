@@ -1,6 +1,69 @@
 # Zolt-Jolt Compatibility: Current Status
 
-## Status: Stage 2 Verification Failure - Challenge Type Analysis Complete 🔴
+## Status: Stage 2 Verification Failure 🔴
+
+## Session 76 Summary (2026-01-29)
+
+### Major Progress: Proof Deserialization Fixed!
+
+**Working:**
+- ✅ Proof deserialization (all 7 stages, 91 opening claims, 37 commitments)
+- ✅ Stage 1 (OuterRemainingSumcheck) verification passes
+- ✅ Preprocessing loading from both compressed and uncompressed formats
+
+**Failing:**
+- ❌ Stage 2 sumcheck verification - expected_output_claim mismatch
+
+### Stage 2 Error Details
+
+```
+output_claim:          15906954023365202249122192714132265766544458757312739318826275235085359324853
+expected_output_claim: 11386433087960536582639845443917888291615956842149860534020066572649924103188
+```
+
+Stage 2 is a batched sumcheck with 5 instances:
+1. ProductVirtualRemainderVerifier (n_cycle_vars rounds)
+2. RamRafEvaluationSumcheckVerifier (log_ram_k rounds)
+3. RamReadWriteCheckingVerifier (log_ram_k + n_cycle_vars rounds - max!)
+4. OutputSumcheckVerifier (log_ram_k rounds)
+5. InstructionLookupsClaimReductionSumcheckVerifier (n_cycle_vars rounds)
+
+Instance expected_claims from Jolt verifier:
+- Instance 0: 13162261949552616826381676439296451788601018621847815047898609024679378399536
+- Instance 1: 0 (ProductVirtualRemainder - zeros for simple program)
+- Instance 2: 18644577964730782764190402023295937512886863831479486117757364935258160752617
+- Instance 3: 20429994345422184441049916064819417529654187996943582502607189827673613930347
+- Instance 4: 19475503802839692994087720930790055641780649560464270942640555911588860270906
+
+### Root Cause Analysis
+
+The expected_output_claim is computed from:
+1. Opening claims stored in proof (factor evaluations at r_cycle point)
+2. Batching coefficients derived from transcript
+3. Weighted sum of all instance claims
+
+The mismatch indicates Zolt's Stage 2 sumcheck proof has:
+- Incorrect round polynomials, OR
+- Incorrect opening claims for the verifier's computation, OR
+- Transcript divergence causing different batching coefficients
+
+### Next Steps (Priority Order)
+
+1. [ ] Compare Zolt's Stage 2 round polynomials with what Jolt computes
+2. [ ] Debug the factor polynomial evaluations for each instance
+3. [ ] Verify the r_cycle point used for MLE evaluations
+4. [ ] Check if Stage 2's opening claims match Jolt's expected format
+
+### Technical Details
+- trace_length: 256 (padded from 54 actual cycles)
+- n_cycle_vars: 8
+- log_ram_k: 16
+- Stage 2: 24 rounds
+
+### Commits
+- `db0e57e3` - feat: add uncompressed deserialization support to Serializable trait
+
+---
 
 ## Session 75 Summary (2026-01-29)
 
@@ -34,89 +97,11 @@
 - [6] InstructionFlags(Branch) = index 4
 - [7] NextIsNoop
 
-### Blocking Issue #1 (RESOLVED)
+---
 
-Initially couldn't build Jolt - but found workaround:
-```bash
-cargo test --features "minimal,zolt-debug" --no-default-features -p jolt-core
-```
-This builds without openssl dependency!
-
-### Blocking Issue #2 (NEW - Active)
-
-Proof deserialization fails - GT elements invalid:
-```
-Commitment 0: first bytes 54 d5 1a e7 ...
-   INVALID GT: InvalidData
-```
-
-The commitments in `logs/zolt_proof_dory.bin` are not valid arkworks Fq12 elements.
-This may be because:
-1. Commitments were computed incorrectly in Zolt's Dory commitment scheme
-2. Serialization format doesn't match arkworks' `serialize_uncompressed`
-3. Commitments are placeholder/zero values that aren't valid GT elements
-
-### Remaining Hypothesis
-
-Since challenge types and order are correct, the issue must be:
-1. **Transcript state divergence** - Some bytes being appended differently
-2. **Factor evaluation values** - MLE computation at r_cycle differs
-3. **Opening claim storage** - Values stored at wrong keys
-
-### Next Steps (Priority Order)
-
-1. [x] Build Jolt with `minimal,zolt-debug` features (DONE - works without openssl)
-2. [ ] **HIGH PRIORITY**: Fix GT element serialization to match arkworks format
-3. [ ] Generate new proof with valid commitments
-4. [ ] Run Jolt verification test to compare transcript states
-5. [ ] Compare batching_coeffs[0..4] between Zolt and Jolt
-
-### Test Status
+## Test Status
 
 - ✅ 714/714 unit tests passing
-- ❌ Integration test OOM killed (signal 9)
-
----
-
-## Session 74 Summary (2026-01-29)
-
-### Key Finding: Zolt's Prover is INTERNALLY CONSISTENT
-
-**Evidence:**
-- Stage 2 `output_claim` (sumcheck evaluation) = `expected_batched` (prover formula) ✓
-- All 5 instance claims match internally ✓
-- Factor claims stored at correct (poly, sumcheck_id) pairs ✓
-
-**Implication:** Jolt's verifier must be computing different expected_output_claim.
-
-### Verified Correct
-
-1. **SumcheckId enum** - 22 values matching Jolt
-2. **Factor claim indices**:
-   - InstructionFlags::IsRdNotZero = 6 ✓
-   - InstructionFlags::Branch = 4 ✓
-   - OpFlags::Jump = 5 ✓
-   - OpFlags::WriteLookupOutputToRD = 6 ✓
-3. **R1CS input ordering** - `R1CS_VIRTUAL_POLYS` matches Jolt's `ALL_R1CS_INPUTS`
-4. **Transcript message labels**:
-   - "UniPoly_begin/end" for CompressedUniPoly ✓
-   - "UncompressedUniPoly_begin/end" for UniPoly ✓
-5. **Scalar encoding** - LE to BE reversal matches ✓
-
-### Suspected Issue: Transcript State Divergence
-
-Transcript state before tau_high sampling:
-- Zolt: `{ 37, 204, 55, 100, 179, 84, 234, 62 }`
-
----
-
-## Previous Sessions
-
-### Session 73 (2026-01-29)
-- Fixed SumcheckId mismatch (22 values, not 24)
-- Fixed proof serialization (5 advice options, 5 usize config)
-- Proof deserializes completely ✓
-
-### Session 72 (2026-01-28)
-- 714/714 unit tests passing
-- Stage 3 mathematically verified
+- ✅ Proof serialization/deserialization working
+- ✅ Stage 1 verification passing
+- ❌ Stage 2 verification failing

@@ -1,88 +1,84 @@
 # Zolt-Jolt Compatibility: Current Status
 
-## Status: Stage 2 Sumcheck Verification Failure 🔴
+## Status: Stage 2 Verification Failure - Transcript Analysis Needed 🔴
 
 ## Session 74 Summary (2026-01-29)
 
-### Analysis: Stage 2 Output Claim Mismatch
+### Key Finding: Zolt's Prover is INTERNALLY CONSISTENT
 
-**Problem:**
-Zolt generates proof where Stage 2 sumcheck fails:
-- `output_claim` (sumcheck evaluation) ≠ `expected_output_claim` (verifier formula)
-- Values: 21381532... vs 7589737... (different by factor ~3x)
+**Evidence:**
+- Stage 2 `output_claim` (sumcheck evaluation) = `expected_batched` (prover formula) ✓
+- All 5 instance claims match internally ✓
+- Factor claims stored at correct (poly, sumcheck_id) pairs ✓
 
-**Key Insight: Zolt's Internal Consistency is CORRECT**
-- `STAGE2_FINAL: output_claim` = `{ 181, 30, 249, 122, ... }` (LE bytes)
-- `expected_batched (from provers)` = `{ 35, 43, 4, 85, ... }` (BE bytes)
-- These ARE the same value (LE reversed = BE) ✓
+**Implication:** Jolt's verifier must be computing different expected_output_claim.
 
-**Therefore:** The issue is Jolt's verifier computing a DIFFERENT expected_output_claim.
+### Verified Correct
 
-### Stage 2 Architecture (5 Instances)
+1. **SumcheckId enum** - 22 values matching Jolt
+2. **Factor claim indices**:
+   - InstructionFlags::IsRdNotZero = 6 ✓
+   - InstructionFlags::Branch = 4 ✓
+   - OpFlags::Jump = 5 ✓
+   - OpFlags::WriteLookupOutputToRD = 6 ✓
+3. **R1CS input ordering** - `R1CS_VIRTUAL_POLYS` matches Jolt's `ALL_R1CS_INPUTS`
+4. **Transcript message labels**:
+   - "UniPoly_begin/end" for CompressedUniPoly ✓
+   - "UncompressedUniPoly_begin/end" for UniPoly ✓
+5. **Scalar encoding** - LE to BE reversal matches ✓
 
-| Idx | Instance | Rounds | Start Round | input_claim |
-|-----|----------|--------|-------------|-------------|
-| 0 | ProductVirtualRemainder | 8 | 16 | uni_skip_claim |
-| 1 | RamRafEvaluation | 16 | 8 | RamAddress@SpartanOuter |
-| 2 | RamReadWriteChecking | 24 | 0 | RamReadValue + γ*RamWriteValue |
-| 3 | OutputSumcheck | 16 | 8 | 0 |
-| 4 | InstructionLookupsClaimReduction | 8 | 16 | LookupOutput + γ*Left + γ²*Right |
+### Stage 1 Sumcheck Verified Working
 
-max_rounds = 24, n_cycle_vars = 8, log_ram_k = 16
+Zolt generates real Stage 1 round polynomials with:
+- 9 rounds (1 streaming + 8 cycle vars)
+- Non-zero coefficients (c0, c2, c3)
+- Challenges derived from transcript
 
-### Expected Output Claim Formulas (Jolt Verifier)
-
-**Instance 0 (ProductVirtualRemainder):**
+Example:
 ```
-tau_high_bound_r0 * eq(tau_low, r_tail_reversed) * fused_left * fused_right
+[ZOLT] STAGE1_ROUND_0: c0 = { 179, 252, 58, 169, ... }
+[ZOLT] STAGE1_ROUND_0: challenge = { 66, 175, 255, 237, ... }
 ```
-- Reads claims from SpartanProductVirtualization
 
-**Instance 4 (InstructionLookupsClaimReduction):**
-```
-eq(opening_point, r_spartan) * (lookup_output + γ*left + γ²*right)
-```
-- opening_point = normalized Stage 2 challenges[16..23]
-- r_spartan = LookupOutput's opening point from SpartanOuter
-- Claims from InstructionClaimReduction
+### Suspected Issue: Transcript State Divergence
 
-### Suspected Root Cause
+Transcript state before tau_high sampling:
+- Zolt: `{ 37, 204, 55, 100, 179, 84, 234, 62 }`
 
-The expected_output_claim computation requires opening claims stored at specific (VirtualPolynomial, SumcheckId) pairs. If Zolt stores these claims differently from what Jolt expects:
-- Different values
-- Different sumcheck_ids
-- Different ordering/endianness
+If Jolt's verifier has different state here, everything downstream will fail.
 
-Then Jolt's verifier formula produces wrong result.
-
-### Current Opening Claims in Zolt Proof (sample)
-
-From log:
-- `claim[13]` = RamReadValue@SpartanOuter = **ZERO**
-- `claim[14]` = RamWriteValue@SpartanOuter = **ZERO**
-- These are correct for fibonacci (no load/store ops)
-
-### Next Steps
-
-1. **HIGH PRIORITY**: Run Jolt with `zolt-debug` feature to see per-instance expected values
-   - Requires: `sudo apt-get install pkg-config libssl-dev`
-
-2. Compare batching_coeffs between Zolt and Jolt
-   - Zolt Stage 2 coeffs: `82,247,239,154...`, `198,106,87,42...`, etc.
-
-3. Check Instance 4's r_spartan handling
-   - r_spartan[0] = `{ 11, 189, 190, 138, ... }` (from Stage 1)
-   - Stage 2 challenge[16] = `[6a, 48, b2, db, ...]`
+Possible causes:
+1. Stage 1 UniSkip polynomial encoding differs
+2. Stage 1 sumcheck round polynomial encoding differs
+3. Stage 1 cache_openings claim values differ
+4. Some transcript operation differs
 
 ### Blocking Issue
 
-Cannot run Jolt verification test - missing system dependencies:
+Cannot run Jolt tests directly:
 ```
 pkg-config: command not found
 openssl-sys build failed
 ```
 
-Workaround: Analyze from Zolt logs and Jolt source code.
+### Next Steps
+
+1. [ ] **HIGH PRIORITY**: Get system dependencies installed to run Jolt tests with `zolt-debug`
+2. [ ] Compare Stage 1 UniSkip polynomial bytes between Zolt and Jolt
+3. [ ] Compare Stage 1 round polynomial bytes
+4. [ ] Compare Stage 1 final claim values
+
+### Commands
+
+```bash
+# Generate proof
+./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o proof.bin --srs /tmp/jolt_dory_srs.bin
+
+# Verify with Jolt (needs openssl)
+cd /home/vivado/projects/jolt && cargo test --features zolt-debug test_verify_zolt_proof -- --ignored --nocapture
+```
+
+---
 
 ## Previous Sessions
 
@@ -94,7 +90,3 @@ Workaround: Analyze from Zolt logs and Jolt source code.
 ### Session 72 (2026-01-28)
 - 714/714 unit tests passing
 - Stage 3 mathematically verified
-
-### Session 71 (2026-01-28)
-- Instance 0 verified correct
-- Synthetic termination write

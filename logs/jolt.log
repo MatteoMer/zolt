@@ -1,205 +1,157 @@
-warning: unused import: `ark_serialize::CanonicalSerialize`
-   --> jolt-core/src/subprotocols/sumcheck.rs:196:21
-    |
-196 |                 use ark_serialize::CanonicalSerialize;
-    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    |
-    = note: `#[warn(unused_imports)]` on by default
-
-warning: unused import: `ark_serialize::CanonicalSerialize`
-   --> jolt-core/src/subprotocols/sumcheck.rs:209:21
-    |
-209 |                 use ark_serialize::CanonicalSerialize;
-    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-warning: unused import: `ark_serialize::CanonicalSerialize`
-   --> jolt-core/src/subprotocols/sumcheck.rs:237:17
-    |
-237 |             use ark_serialize::CanonicalSerialize;
-    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-warning: unused import: `ark_serialize::CanonicalSerialize`
-   --> jolt-core/src/subprotocols/sumcheck.rs:276:21
-    |
-276 |                 use ark_serialize::CanonicalSerialize;
-    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-warning: unused import: `ark_serialize::CanonicalSerialize`
-   --> jolt-core/src/subprotocols/sumcheck.rs:355:21
-    |
-355 |                 use ark_serialize::CanonicalSerialize;
-    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-warning: unused variable: `poly`
-   --> jolt-core/src/zolt_compat_test.rs:681:13
-    |
-681 |         let poly: MultilinearPolynomial<Fr> = coeffs.into();
-    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_poly`
-    |
-    = note: `#[warn(unused_variables)]` on by default
-
-warning: unused variable: `verifier`
-   --> jolt-core/src/zolt_compat_test.rs:956:13
-    |
-956 |         let verifier = RV64IMACVerifier::new(
-    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_verifier`
-
-warning: type alias `Fr` is never used
-   --> jolt-core/src/zolt_compat_test.rs:901:14
-    |
-901 |         type Fr = ark_bn254::Fr;
-    |              ^^
-    |
-    = note: `#[warn(dead_code)]` on by default
-
-warning: `jolt-core` (lib test) generated 8 warnings
-    Finished `test` profile [optimized + debuginfo] target(s) in 0.20s
-     Running unittests src/lib.rs (target/debug/deps/jolt_core-894a908bdc505d5b)
-
-running 1 test
-Loaded all files:
-  Preprocessing: 26356 bytes
-  Proof: 40531 bytes
-  Trace length: 256
-  Commitments: 37
-Verifier created, running verification...
-Sumcheck starting:
-  initial_claim: [db, b1, f8, a9, eb, ed, 61, 41, ac, 8c, fb, 3c, 60, 1a, 7a, bc, 13, 49, 4b, 6a, 8f, 14, 8b, 20, ea, 7a, ea, 74, c8, 32, 25, 30]
-  max_num_rounds: 9
-  max_degree: 3
-  first round coeffs_except_linear:
-    [0]: [11, f5, 09, 43, df, 7c, 85, e0, 9e, 7a, ee, 87, fb, 6e, de, 61, 3e, 39, b5, 81, 52, 4d, b9, 3e, aa, 8a, 19, 55, 24, 93, 3f, 0e]
-    [1]: [15, 0e, c5, ba, cb, f8, 0a, 6b, 3a, 02, 7f, a5, de, 77, 1e, 9a, e6, 83, 41, 7e, 42, 8a, 3b, 46, 41, 3a, 8c, 51, 01, 60, a9, 10]
-    [2]: [ed, c8, c8, 65, 78, 27, 38, 6e, 9a, c9, b2, 22, 50, fe, aa, f0, 6c, 1a, b9, d2, ad, 6e, b9, b9, ec, a2, a0, 10, 1b, 22, 38, 1b]
-Sumcheck starting:
-  initial_claim: [fd, 01, cb, 55, e8, 69, da, 8f, f6, 5d, 80, 78, 75, dc, da, 1d, 35, 66, cd, 94, 2b, 57, 50, 64, 6b, 2c, b8, 17, e3, fb, 67, 2e]
-  max_num_rounds: 24
-  max_degree: 3
-  first round coeffs_except_linear:
-    [0]: [ff, 80, e5, 22, be, 2f, de, e9, 43, e7, 1c, f9, 5e, 62, 07, 23, 49, 5f, 27, 0b, 71, 4e, 50, 8e, 4a, e6, 74, fc, 2a, 25, 66, 2f]
-    [1]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
-    [2]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
-RamReadWriteCheckingVerifier::cache_openings debug:
-  sumcheck_challenges.len() = 24
-  params.phase1_num_rounds = 4
-  params.phase2_num_rounds = 16
-  params.K = 65536, params.T = 256
-  sumcheck_challenges[0]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 2f, fd, 2a, e1, cc, ef, 96, 71, 36, 3d, d9, 0a, 0d, 38, 8f, 04]
-  sumcheck_challenges[1]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 72, 1c, c1, e3, 1b, c6, 4e, c0, b4, 2a, 20, d5, f2, 93, c2, 19]
-  sumcheck_challenges[2]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 78, 5f, 46, 9c, 85, 76, 81, 45, 5d, ff, 57, c7, 88, de, 25, 17]
-  sumcheck_challenges[3]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 0c, 11, 48, 90, c2, 68, 18, bf, ae, 0f, d9, f7, 83, 87, f3, 17]
-  sumcheck_challenges[4]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 01, 17, e5, 2a, 60, 3d, b8, e6, e5, f7, 99, 9e, 6c, 44, d4, 16]
-  sumcheck_challenges[5]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 14, e0, ed, 23, 53, 17, 4c, 1d, 38, 1c, f3, 63, 34, 7d, 90, 0b]
-  sumcheck_challenges[6]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 98, 0f, 51, 4f, ef, 81, 4c, c9, fb, f1, 94, 02, d8, d9, e2, 00]
-  sumcheck_challenges[7]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, a3, 0a, f5, 6f, 59, be, f8, 33, 94, a6, f2, c7, ac, b8, ac, 05]
-  sumcheck_challenges[8]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, ab, b0, 41, 52, bd, 95, 47, 69, d9, 8b, 53, 7b, cb, ef, d3, 16]
-  sumcheck_challenges[9]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, b4, 53, 9b, ae, 55, 1b, b6, 63, f0, f4, 66, f2, 21, 4e, 2f, 0f]
-  sumcheck_challenges[10]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, a0, 05, f0, 7e, 96, a3, d4, 30, 95, ed, 8b, 39, f2, be, 3f, 14]
-  sumcheck_challenges[11]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 6c, 7f, 38, 6f, ac, 96, da, 43, 7d, 9d, 3f, 68, 0d, af, aa, 1e]
-  sumcheck_challenges[12]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 64, 0f, bb, 45, f9, a7, 38, 49, 79, 88, 1f, f8, 66, 2f, 06, 07]
-  sumcheck_challenges[13]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 11, 25, 4c, ad, 3d, 58, 9f, 7b, 72, 17, 40, 7c, 3e, a6, b6, 07]
-  sumcheck_challenges[14]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 7c, 80, ae, bf, 73, c3, 60, da, 0f, d5, 04, 5d, 69, 92, 17, 01]
-  sumcheck_challenges[15]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 80, 8b, e8, 5b, 05, ab, 87, 98, 85, 89, 2e, 13, 10, 51, 7c, 05]
-  sumcheck_challenges[16]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 9f, 55, 11, a6, 00, 1e, 5b, 0d, 15, 66, 8f, 8c, a2, 26, a7, 1e]
-  sumcheck_challenges[17]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 7f, 4f, 44, 21, cc, cb, 7f, fb, 5c, 12, 4b, 38, 2e, 68, 42, 15]
-  sumcheck_challenges[18]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, fe, 33, 5f, 9b, 40, 3e, 76, 23, c6, 84, a6, 22, 1b, c1, 10, 19]
-  sumcheck_challenges[19]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 24, 9f, 7b, cd, a9, 77, 36, e8, 6a, 94, 0b, f4, 63, df, 90, 0e]
-  sumcheck_challenges[20]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, c0, ce, ea, 9b, 0d, 48, 8d, 9a, f7, a8, 8d, 03, 0e, db, 88, 19]
-  sumcheck_challenges[21]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 1c, 68, 89, d3, f8, 76, e9, e8, 27, 29, 4d, 67, 85, 97, 52, 1d]
-  sumcheck_challenges[22]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 30, 4f, 58, 1e, 69, a8, 78, 13, 03, e7, f8, 52, f1, c0, be, 18]
-  sumcheck_challenges[23]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 66, fc, d4, d1, 8d, 14, 99, 32, 7f, 9d, b9, 08, c3, 53, 1e, 0d]
-Sumcheck starting:
-  initial_claim: [da, a3, 24, 84, db, 59, f8, 88, 54, 79, a1, dd, 03, 3a, b5, 62, c7, 8a, f0, 90, 02, 26, 25, cd, d0, 5e, 51, 58, ca, 4e, 7d, 24]
-  max_num_rounds: 8
-  max_degree: 3
-  first round coeffs_except_linear:
-    [0]: [da, 84, 1d, c4, 78, 74, a2, 2d, b2, b6, fe, a8, 56, ed, 68, 22, 94, 34, da, 38, 11, 49, 8d, 11, ca, 70, 63, b0, 3c, 17, 0b, 2c]
-    [1]: [23, f4, e6, d5, 55, 7a, fc, cc, cd, ec, ae, ac, 3a, 84, 60, 30, 35, 32, 6a, be, 6d, 06, 7b, 5a, 3f, 51, 22, 29, 64, 82, 89, 25]
-    [2]: [73, 32, 76, 05, d7, df, 81, 08, a0, be, e8, d2, 06, ad, 33, 90, 2e, 21, e8, 6c, 64, bb, 2c, 25, 7e, 1c, 30, 08, e9, 8f, 34, 15]
-ValEvaluationSumcheckParams::new_from_verifier debug:
-  r_address.r.len() = 16
-  r_address[0]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 24, 9f, 7b, cd, a9, 77, 36, e8, 6a, 94, 0b, f4, 63, df, 90, 0e]
-  r_address[1]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, fe, 33, 5f, 9b, 40, 3e, 76, 23, c6, 84, a6, 22, 1b, c1, 10, 19]
-  r_address[2]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 7f, 4f, 44, 21, cc, cb, 7f, fb, 5c, 12, 4b, 38, 2e, 68, 42, 15]
-  r_address[3]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 9f, 55, 11, a6, 00, 1e, 5b, 0d, 15, 66, 8f, 8c, a2, 26, a7, 1e]
-  r_address[4]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 80, 8b, e8, 5b, 05, ab, 87, 98, 85, 89, 2e, 13, 10, 51, 7c, 05]
-  r_address[5]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 7c, 80, ae, bf, 73, c3, 60, da, 0f, d5, 04, 5d, 69, 92, 17, 01]
-  r_address[6]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 11, 25, 4c, ad, 3d, 58, 9f, 7b, 72, 17, 40, 7c, 3e, a6, b6, 07]
-  r_address[7]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 64, 0f, bb, 45, f9, a7, 38, 49, 79, 88, 1f, f8, 66, 2f, 06, 07]
-  r_address[8]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 6c, 7f, 38, 6f, ac, 96, da, 43, 7d, 9d, 3f, 68, 0d, af, aa, 1e]
-  r_address[9]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, a0, 05, f0, 7e, 96, a3, d4, 30, 95, ed, 8b, 39, f2, be, 3f, 14]
-  r_address[10]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, b4, 53, 9b, ae, 55, 1b, b6, 63, f0, f4, 66, f2, 21, 4e, 2f, 0f]
-  r_address[11]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, ab, b0, 41, 52, bd, 95, 47, 69, d9, 8b, 53, 7b, cb, ef, d3, 16]
-  r_address[12]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, a3, 0a, f5, 6f, 59, be, f8, 33, 94, a6, f2, c7, ac, b8, ac, 05]
-  r_address[13]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 98, 0f, 51, 4f, ef, 81, 4c, c9, fb, f1, 94, 02, d8, d9, e2, 00]
-  r_address[14]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 14, e0, ed, 23, 53, 17, 4c, 1d, 38, 1c, f3, 63, 34, 7d, 90, 0b]
-  r_address[15]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 01, 17, e5, 2a, 60, 3d, b8, e6, e5, f7, 99, 9e, 6c, 44, d4, 16]
-  init_eval: [75, f3, d2, 26, c7, eb, cb, ec, 64, 4b, 13, ae, e3, 9e, a7, 63, a4, 57, a9, 52, ab, 2d, 23, ba, 29, b1, 07, e3, 73, e3, 5f, 00]
-  val_init_public_eval: [75, f3, d2, 26, c7, eb, cb, ec, 64, 4b, 13, ae, e3, 9e, a7, 63, a4, 57, a9, 52, ab, 2d, 23, ba, 29, b1, 07, e3, 73, e3, 5f, 00]
-ValFinalSumcheckParams::new_from_verifier debug:
-  r_address.len() = 16
-  r_address[0]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 66, fc, d4, d1, 8d, 14, 99, 32, 7f, 9d, b9, 08, c3, 53, 1e, 0d]
-  r_address[1]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 30, 4f, 58, 1e, 69, a8, 78, 13, 03, e7, f8, 52, f1, c0, be, 18]
-  r_address[2]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 1c, 68, 89, d3, f8, 76, e9, e8, 27, 29, 4d, 67, 85, 97, 52, 1d]
-  r_address[3]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, c0, ce, ea, 9b, 0d, 48, 8d, 9a, f7, a8, 8d, 03, 0e, db, 88, 19]
-  val_init_eval: [70, 81, a5, ed, ab, 2c, 82, a2, 8d, b0, b4, 44, 5b, 10, bd, d2, 3b, 7d, 21, a3, 67, 19, 0c, 57, e7, 50, e0, 87, ae, 72, 83, 16]
-  val_init_public_eval: [70, 81, a5, ed, ab, 2c, 82, a2, 8d, b0, b4, 44, 5b, 10, bd, d2, 3b, 7d, 21, a3, 67, 19, 0c, 57, e7, 50, e0, 87, ae, 72, 83, 16]
-Stage 4 verifier - appending input claims:
-  instance[0] input_claim: [46, 1e, 5e, 08, ac, 95, 3a, 5e, ee, 50, 8c, a0, 8f, c2, 15, 2b, be, 87, 23, ed, 64, 35, 64, e6, 2c, 92, 40, bf, 24, 76, 44, 04]
-  instance[1] input_claim: [e8, 73, 76, d5, 1c, c0, a2, 16, 10, 49, 85, 76, 3c, 84, 00, 6c, 28, 02, 58, 1c, d3, 53, e4, 47, 70, 88, 5f, 47, 3f, e4, c3, 21]
-  instance[2] input_claim: [ed, e5, a3, 0e, 38, 7f, ec, 60, e7, e3, e3, df, c4, 12, eb, fc, 90, dc, df, cb, 16, 68, fb, aa, b2, e8, 86, a2, 04, 55, a0, 0b]
-Stage 4 verifier - batching coeffs:
-  coeff[0]: [99, 68, b4, 52, 88, 4b, f2, 2e, f0, 7c, d1, 37, c4, 7b, 91, c1, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
-  coeff[1]: [3b, 36, d2, 35, 4d, 2a, 6b, e4, 1d, 7e, 3b, f7, a3, 4e, 96, be, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
-  coeff[2]: [fb, a3, ea, b1, 9c, 13, f2, 27, e5, 6b, 47, 04, 00, 3d, 90, 27, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
-Sumcheck starting:
-  initial_claim: [8a, f4, 10, e8, f6, 7c, f6, 77, 7a, c1, a5, 7a, 74, 8d, f7, b3, db, 17, 58, c3, 63, b8, 65, b4, 88, 05, a5, 01, 9c, 08, 56, 18]
-  max_num_rounds: 15
-  max_degree: 3
-  first round coeffs_except_linear:
-    [0]: [90, bb, 83, 77, 33, f9, b3, 4e, 48, 30, 3a, df, 93, aa, ba, 6d, cb, e0, f6, 0f, c7, 03, 07, e5, 74, 3b, 79, 3f, 5d, da, db, 19]
-    [1]: [35, 4a, 1d, 73, be, 51, e4, 62, 4c, 59, 80, 96, 0a, e2, f4, 03, 0f, 97, 18, d8, 7c, 01, d6, bb, 77, 4c, b2, 5f, 5e, 75, ff, 0e]
-    [2]: [54, e7, 04, 20, 96, ca, 45, b7, 8c, c0, 23, e9, 4b, a7, fa, 31, f4, 93, 10, 63, f0, 29, 60, 80, 52, c3, e9, c6, c3, 27, d5, 02]
-  Round 0 challenge: [a3, 30, 9a, d1, 6f, fe, 1d, ed, ba, 94, 4b, 7b, 97, 83, 36, 6a, 85, 0b, 26, 68, b5, 59, 14, be, e6, d4, ee, 07, ab, d6, b0, 19]
-  Round 0 new_claim: [92, a7, 1f, 51, 06, 2d, 1e, c4, da, 17, 4c, a6, 59, 08, 07, 9b, 3d, 5a, be, 3a, 3a, 56, b3, 2b, 3e, b0, 7c, f0, 5f, 6a, cd, 16]
-  Round 1 challenge: [6e, 70, d6, 9e, f1, 2c, 2a, 70, 2f, b2, 48, 58, 14, 80, 0f, 13, 2c, d7, 68, f4, 5c, 47, eb, 51, a6, db, e4, 73, 71, 99, ba, 25]
-  Round 1 new_claim: [6a, 7f, eb, f6, 4e, 47, c7, 8a, fe, 5f, 14, dd, 4c, 74, df, ec, 5d, 3d, d1, ea, c8, af, f5, 06, 6b, 17, 03, 4c, 53, ce, 9b, 19]
-  Round 2 challenge: [18, 27, e9, 9e, ed, cd, 4e, 2e, bf, 89, df, 7b, 79, 55, 4e, d8, bb, be, fe, 1b, 89, 81, f7, a6, e4, 99, f3, 30, cb, 87, 71, 1a]
-  Round 2 new_claim: [07, 98, 67, e2, fa, e3, 79, 8b, a4, be, 51, eb, 9c, 3b, 3b, 70, d0, 57, 67, b3, 6c, 70, 9c, 8d, bc, d8, 1a, 2f, 16, 0e, bd, 08]
-RegistersRWC expected_output_claim:
-  val_claim:    [5c, 22, 59, 3b, c4, 32, 85, b7, ea, 39, ce, b8, c3, 66, ea, 1f, 65, 5f, 45, a2, 3f, 45, 77, af, 67, a2, 5a, f0, 24, 7b, 0c, 0e]
-  rs1_ra_claim: [57, 89, 9a, e3, 68, 0c, ed, 07, ee, 89, 32, da, 42, 9d, 91, 63, 18, fa, c4, db, 85, 79, 63, ef, a9, f7, 07, 58, e0, 88, 20, 13]
-  rs2_ra_claim: [c8, 70, 0b, df, 89, 7b, a2, ff, 1b, 90, ed, 26, 4e, c0, 00, 6a, 2d, d1, 01, b3, 8c, 1b, ab, 9f, 6e, cf, 50, e4, 37, 31, 46, 0a]
-  rd_wa_claim:  [6b, 28, dc, 97, 6b, fe, 4f, 7e, 14, 71, 5e, 24, ad, 89, 0b, 3d, 6c, 6d, f7, 59, 72, 55, ad, 29, 61, e0, 55, 51, 50, 6a, 92, 18]
-  inc_claim:    [ea, 3c, 1b, 57, d9, 87, 4e, dc, 43, a5, 6d, e9, 54, b0, c6, ed, 72, e2, 9c, b0, 72, 86, 0c, 26, 93, 5c, d3, d1, 9a, 85, 1d, 1b]
-  eq_eval:      [75, 9f, ea, f2, 1d, c3, ce, ab, 48, 91, 0b, e0, ad, ad, c1, d7, fe, bf, 3f, 80, ff, 9a, b8, e5, 7a, 4c, 4c, c8, dd, be, 0c, 0f]
-  combined:     [fe, 53, 13, e3, 5c, 02, 32, ed, 81, d1, 5a, df, d4, 35, 1f, 47, 7a, 11, fd, 02, 5b, 12, 87, 82, ff, 27, 0e, e8, a1, 74, 46, 08]
-  r_cycle (from sumcheck): 8 elements
-    r_cycle[0]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 55, aa, 69, 12, 06, 74, 96, 03, 42, 18, 4a, 0a, 20, 68, 2c, 02]
-    r_cycle[1]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 10, 99, cf, bd, fa, dc, 99, e7, 64, 6d, e8, 8a, 63, c1, 4d, 10]
-    r_cycle[2]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, c9, 9f, 72, 26, d1, 1a, 92, b9, 3c, b6, 99, da, 64, a6, 5b, 18]
-    r_cycle[3]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 24, 06, 9e, 65, a8, f7, 8f, fe, e6, a7, 8a, 7d, 84, 19, 6c, 1a]
-    r_cycle[4]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 71, c3, 8e, 82, b0, a6, 40, 32, 5b, 70, c8, 7f, 51, a7, 62, 08]
-    r_cycle[5]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, c9, 2e, 7e, 63, be, 53, 24, c4, ad, af, 78, a7, e3, ca, 29, 0c]
-    r_cycle[6]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, f6, 07, ca, ab, dc, 13, 6b, 7b, 06, 73, ae, ad, 2d, 0e, 89, 1a]
-    r_cycle[7]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 16, e1, f5, bb, cd, 21, 22, b3, 94, 63, 20, d8, c4, 8b, b7, 0c]
-  params.r_cycle (from Stage 3): 8 elements
-    params.r_cycle[0]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 3c, 22, 3b, 5f, f7, 37, 45, fa, a6, 03, e4, e5, bc, ec, c8, 18]
-    params.r_cycle[1]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, b3, bc, 28, 96, 5b, 3c, ff, 82, 63, f2, ea, 64, d9, c6, 89, 00]
-    params.r_cycle[2]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 52, cc, 8c, ec, 6c, 5f, 00, b6, a5, 12, e1, fe, 3e, 3c, 8b, 02]
-    params.r_cycle[3]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 8b, 95, 7c, 99, 02, f5, 89, 80, 2c, 79, e7, 3e, 68, b4, 45, 14]
-    params.r_cycle[4]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 7d, f8, bc, a5, 1a, 01, f1, ff, a6, d6, b5, 54, ce, cb, 92, 09]
-    params.r_cycle[5]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, da, 05, 52, 5e, a5, b7, 64, 8d, 91, bd, 31, af, e1, 2c, bb, 1d]
-    params.r_cycle[6]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 27, 59, 08, e7, 9a, bd, 45, 0c, 77, 55, e6, e6, ce, 9c, 8c, 11]
-    params.r_cycle[7]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 55, 46, 60, f4, 28, dd, 76, a8, d4, 32, ca, a4, 26, 6f, 8f, 05]
-Sumcheck verification failed!
-  output_claim:   [20, 21, 89, 4b, 8d, f7, 0b, b8, b2, 1a, 8a, 35, 0d, f6, 42, 02, d6, 57, 1b, 5c, bc, 3b, 9a, 44, 0f, 90, bc, 3b, f3, 3d, aa, 02]
-  expected_claim: [2a, 9f, 3a, 37, 83, 59, fb, 4d, cf, 33, 40, cd, 25, ee, a5, 93, 74, f1, 01, cf, f3, 54, af, 9c, 9b, fa, 01, 15, 3c, 55, f3, 16]
-Verification failed: Stage 4
+   Compiling ark-std v0.5.0
+   Compiling openssl-sys v0.9.111
+   Compiling tokio-util v0.7.17
+   Compiling openssl-macros v0.1.1
+   Compiling native-tls v0.2.14
+   Compiling atomic-waker v1.1.2
+   Compiling tower-service v0.3.3
+   Compiling try-lock v0.2.5
+warning: openssl-sys@0.9.111: Could not find directory of OpenSSL installation, and this `-sys` crate cannot proceed without this knowledge. If OpenSSL is installed and this crate had trouble finding it,  you can set the `OPENSSL_DIR` environment variable for the compilation process. See stderr section below for further information.
+error: failed to run custom build command for `openssl-sys v0.9.111`
 
 Caused by:
-    Sumcheck verification failed
-test zolt_compat_test::tests::test_verify_zolt_proof_with_zolt_preprocessing ... ok
+  process didn't exit successfully: `/home/vivado/projects/jolt/target/debug/build/openssl-sys-be802f1747f21891/build-script-main` (exit status: 101)
+  --- stdout
+  cargo:rustc-check-cfg=cfg(osslconf, values("OPENSSL_NO_OCB", "OPENSSL_NO_SM4", "OPENSSL_NO_SEED", "OPENSSL_NO_CHACHA", "OPENSSL_NO_CAST", "OPENSSL_NO_IDEA", "OPENSSL_NO_CAMELLIA", "OPENSSL_NO_RC4", "OPENSSL_NO_BF", "OPENSSL_NO_PSK", "OPENSSL_NO_DEPRECATED_3_0", "OPENSSL_NO_SCRYPT", "OPENSSL_NO_SM3", "OPENSSL_NO_RMD160", "OPENSSL_NO_EC2M", "OPENSSL_NO_OCSP", "OPENSSL_NO_CMS", "OPENSSL_NO_COMP", "OPENSSL_NO_SOCK", "OPENSSL_NO_STDIO", "OPENSSL_NO_EC", "OPENSSL_NO_SSL3_METHOD", "OPENSSL_NO_KRB5", "OPENSSL_NO_TLSEXT", "OPENSSL_NO_SRP", "OPENSSL_NO_SRTP", "OPENSSL_NO_RFC3779", "OPENSSL_NO_SHA", "OPENSSL_NO_NEXTPROTONEG", "OPENSSL_NO_ENGINE", "OPENSSL_NO_BUF_FREELISTS", "OPENSSL_NO_RC2"))
+  cargo:rustc-check-cfg=cfg(openssl)
+  cargo:rustc-check-cfg=cfg(libressl)
+  cargo:rustc-check-cfg=cfg(boringssl)
+  cargo:rustc-check-cfg=cfg(awslc)
+  cargo:rustc-check-cfg=cfg(libressl250)
+  cargo:rustc-check-cfg=cfg(libressl251)
+  cargo:rustc-check-cfg=cfg(libressl252)
+  cargo:rustc-check-cfg=cfg(libressl261)
+  cargo:rustc-check-cfg=cfg(libressl270)
+  cargo:rustc-check-cfg=cfg(libressl271)
+  cargo:rustc-check-cfg=cfg(libressl273)
+  cargo:rustc-check-cfg=cfg(libressl280)
+  cargo:rustc-check-cfg=cfg(libressl281)
+  cargo:rustc-check-cfg=cfg(libressl291)
+  cargo:rustc-check-cfg=cfg(libressl310)
+  cargo:rustc-check-cfg=cfg(libressl321)
+  cargo:rustc-check-cfg=cfg(libressl332)
+  cargo:rustc-check-cfg=cfg(libressl340)
+  cargo:rustc-check-cfg=cfg(libressl350)
+  cargo:rustc-check-cfg=cfg(libressl360)
+  cargo:rustc-check-cfg=cfg(libressl361)
+  cargo:rustc-check-cfg=cfg(libressl370)
+  cargo:rustc-check-cfg=cfg(libressl380)
+  cargo:rustc-check-cfg=cfg(libressl381)
+  cargo:rustc-check-cfg=cfg(libressl382)
+  cargo:rustc-check-cfg=cfg(libressl390)
+  cargo:rustc-check-cfg=cfg(libressl400)
+  cargo:rustc-check-cfg=cfg(libressl410)
+  cargo:rustc-check-cfg=cfg(libressl420)
+  cargo:rustc-check-cfg=cfg(ossl101)
+  cargo:rustc-check-cfg=cfg(ossl102)
+  cargo:rustc-check-cfg=cfg(ossl102f)
+  cargo:rustc-check-cfg=cfg(ossl102h)
+  cargo:rustc-check-cfg=cfg(ossl110)
+  cargo:rustc-check-cfg=cfg(ossl110f)
+  cargo:rustc-check-cfg=cfg(ossl110g)
+  cargo:rustc-check-cfg=cfg(ossl110h)
+  cargo:rustc-check-cfg=cfg(ossl111)
+  cargo:rustc-check-cfg=cfg(ossl111b)
+  cargo:rustc-check-cfg=cfg(ossl111c)
+  cargo:rustc-check-cfg=cfg(ossl111d)
+  cargo:rustc-check-cfg=cfg(ossl300)
+  cargo:rustc-check-cfg=cfg(ossl310)
+  cargo:rustc-check-cfg=cfg(ossl320)
+  cargo:rustc-check-cfg=cfg(ossl330)
+  cargo:rustc-check-cfg=cfg(ossl340)
+  cargo:rerun-if-env-changed=X86_64_UNKNOWN_LINUX_GNU_OPENSSL_LIB_DIR
+  X86_64_UNKNOWN_LINUX_GNU_OPENSSL_LIB_DIR unset
+  cargo:rerun-if-env-changed=OPENSSL_LIB_DIR
+  OPENSSL_LIB_DIR unset
+  cargo:rerun-if-env-changed=X86_64_UNKNOWN_LINUX_GNU_OPENSSL_INCLUDE_DIR
+  X86_64_UNKNOWN_LINUX_GNU_OPENSSL_INCLUDE_DIR unset
+  cargo:rerun-if-env-changed=OPENSSL_INCLUDE_DIR
+  OPENSSL_INCLUDE_DIR unset
+  cargo:rerun-if-env-changed=X86_64_UNKNOWN_LINUX_GNU_OPENSSL_DIR
+  X86_64_UNKNOWN_LINUX_GNU_OPENSSL_DIR unset
+  cargo:rerun-if-env-changed=OPENSSL_DIR
+  OPENSSL_DIR unset
+  cargo:rerun-if-env-changed=OPENSSL_NO_PKG_CONFIG
+  cargo:rerun-if-env-changed=PKG_CONFIG_x86_64-unknown-linux-gnu
+  cargo:rerun-if-env-changed=PKG_CONFIG_x86_64_unknown_linux_gnu
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG
+  cargo:rerun-if-env-changed=PKG_CONFIG
+  cargo:rerun-if-env-changed=OPENSSL_STATIC
+  cargo:rerun-if-env-changed=OPENSSL_DYNAMIC
+  cargo:rerun-if-env-changed=PKG_CONFIG_ALL_STATIC
+  cargo:rerun-if-env-changed=PKG_CONFIG_ALL_DYNAMIC
+  cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64-unknown-linux-gnu
+  cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64_unknown_linux_gnu
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG_PATH
+  cargo:rerun-if-env-changed=PKG_CONFIG_PATH
+  cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64-unknown-linux-gnu
+  cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64_unknown_linux_gnu
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG_LIBDIR
+  cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR
+  cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64-unknown-linux-gnu
+  cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64_unknown_linux_gnu
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG_SYSROOT_DIR
+  cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR
+  cargo:rerun-if-env-changed=OPENSSL_STATIC
+  cargo:rerun-if-env-changed=OPENSSL_DYNAMIC
+  cargo:rerun-if-env-changed=PKG_CONFIG_ALL_STATIC
+  cargo:rerun-if-env-changed=PKG_CONFIG_ALL_DYNAMIC
+  cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64-unknown-linux-gnu
+  cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64_unknown_linux_gnu
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG_PATH
+  cargo:rerun-if-env-changed=PKG_CONFIG_PATH
+  cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64-unknown-linux-gnu
+  cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64_unknown_linux_gnu
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG_LIBDIR
+  cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR
+  cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64-unknown-linux-gnu
+  cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64_unknown_linux_gnu
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG_SYSROOT_DIR
+  cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 392 filtered out; finished in 0.03s
 
+  Could not find openssl via pkg-config:
+  Could not run `PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1 pkg-config --libs --cflags openssl`
+  The pkg-config command could not be found.
+
+  Most likely, you need to install a pkg-config package for your OS.
+  Try `apt install pkg-config`, or `yum install pkg-config`, or `brew install pkgconf`
+  or `pkg install pkg-config`, or `apk add pkgconfig` depending on your distribution.
+
+  If you've already installed it, ensure the pkg-config command is one of the
+  directories in the PATH environment variable.
+
+  If you did not expect this build to link to a pre-installed system library,
+  then check documentation of the openssl-sys crate for an option to
+  build the library from source, or disable features or dependencies
+  that require pkg-config.
+
+  cargo:warning=Could not find directory of OpenSSL installation, and this `-sys` crate cannot proceed without this knowledge. If OpenSSL is installed and this crate had trouble finding it,  you can set the `OPENSSL_DIR` environment variable for the compilation process. See stderr section below for further information.
+
+  --- stderr
+
+
+  Could not find directory of OpenSSL installation, and this `-sys` crate cannot
+  proceed without this knowledge. If OpenSSL is installed and this crate had
+  trouble finding it,  you can set the `OPENSSL_DIR` environment variable for the
+  compilation process.
+
+  Make sure you also have the development packages of openssl installed.
+  For example, `libssl-dev` on Ubuntu or `openssl-devel` on Fedora.
+
+  If you're in a situation where you think the directory *should* be found
+  automatically, please open a bug at https://github.com/rust-openssl/rust-openssl
+  and include information about your system as well as this message.
+
+  $HOST = x86_64-unknown-linux-gnu
+  $TARGET = x86_64-unknown-linux-gnu
+  openssl-sys = 0.9.111
+
+
+  It looks like you're compiling on Linux and also targeting Linux. Currently this
+  requires the `pkg-config` utility to find OpenSSL but unfortunately `pkg-config`
+  could not be found. If you have OpenSSL installed you can likely fix this by
+  installing `pkg-config`.
+
+
+warning: build failed, waiting for other jobs to finish...

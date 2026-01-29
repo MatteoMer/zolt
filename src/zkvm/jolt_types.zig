@@ -88,12 +88,10 @@ pub const SumcheckId = enum(u8) {
     RegistersValEvaluation = 17,
     BytecodeReadRaf = 18,
     Booleanity = 19,
-    AdviceClaimReductionCyclePhase = 20,
-    AdviceClaimReduction = 21,
-    IncClaimReduction = 22,
-    HammingWeightClaimReduction = 23,
+    IncClaimReduction = 20,
+    HammingWeightClaimReduction = 21,
 
-    pub const COUNT: usize = 24;
+    pub const COUNT: usize = 22;
 };
 
 // =============================================================================
@@ -844,7 +842,7 @@ const testing = std.testing;
 const BN254Scalar = @import("../field/mod.zig").BN254Scalar;
 
 test "SumcheckId count" {
-    try testing.expectEqual(@as(usize, 24), SumcheckId.COUNT);
+    try testing.expectEqual(@as(usize, 22), SumcheckId.COUNT);
 }
 
 test "OpeningId encoding bases" {

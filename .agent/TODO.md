@@ -1,27 +1,58 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: TASK COMPLETE ✅
+## Status: IN PROGRESS - Stage 4 Failing
 
-All 6 verification stages pass. The Zolt zkVM successfully generates proofs that are compatible with Jolt's verifier.
+Jolt cross-verification fails at Stage 4 with sumcheck claim mismatch.
 
-## Final Verification Results (2026-01-29)
+## Current Verification Results (2026-01-29)
 
 ```
-[VERIFIER] Stage 1 PASSED - Outer Spartan sumcheck
-[VERIFIER] Stage 2 PASSED - Batched sumcheck (RAF, RWC, Output, Instruction)
-[VERIFIER] Stage 3 PASSED - Registers claim reduction
-[VERIFIER] Stage 4 PASSED - Batched sumcheck (Registers, ValEval, ValFinal)
-[VERIFIER] Stage 5 PASSED - Bytecode claim reduction
-[VERIFIER] Stage 6 PASSED - Instruction claim reduction
-[VERIFIER] All stages PASSED!
-VERIFICATION: PASSED!
+Stages 1-3: PASSED
+Stage 4: FAILED - sumcheck verification mismatch
 ```
+
+**Error:**
+```
+output_claim:          2794768927403232170685203001712134750206965869554042859404932801547924672323
+expected_output_claim: 19036722498929976088547735251378923562016308482664214076291639064331774676064
+```
+
+## Root Cause Analysis
+
+Stage 4 combines three sumcheck instances (via BatchedProofVerifier):
+1. `rd_wv_claim` - register destination write value
+2. `rs1_rv_claim` - register source 1 read value
+3. `rs2_rv_claim` - register source 2 read value
+
+The expected_claim is computed as weighted sum of instance claims, but only Instance 0 (rd_wv_claim) has non-zero coefficient. The verification shows:
+- `r_cycle` from sumcheck differs from `params.r_cycle` stored in preprocessing
+- This causes `eq_val` computation to produce wrong value
+- Combined claim doesn't match expected
+
+Debug output shows `r_cycle` mismatch:
+```
+r_cycle[0] = 6709444460737... (from sumcheck)
+params.r_cycle[0] = 11210511683772... (stored in preprocessing)
+```
+
+## Proof File Formats
+
+Two proof formats exist:
+- **40544 bytes**: Old format, deserializes OK, fails at Stage 4
+- **40531 bytes**: New format, can't deserialize at all
+
+Linux and macOS show identical behavior when using the same proof file format.
 
 ## Test Commands
 
-### Internal Pipeline (Uses Internal Verifier)
+### Jolt Cross-verification
 ```bash
-zig build example-pipeline
+# FIRST: ensure working proof file is in place
+cp /tmp/zolt_proof_dory2.bin /tmp/zolt_proof_dory.bin
+
+# Then run test
+cd /home/vivado/projects/zolt/jolt
+cargo test --package jolt-core test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
 
 ### Generate Jolt-compatible Proof
@@ -33,25 +64,34 @@ zig build example-pipeline
   --srs /tmp/jolt_dory_srs.bin
 ```
 
-### Verify Native Proof
+### Internal Pipeline (Uses Internal Verifier)
 ```bash
-./zig-out/bin/zolt prove examples/fibonacci.elf -o /tmp/fib.proof
-./zig-out/bin/zolt verify /tmp/fib.proof
-```
-
-### Jolt Cross-verification (Requires libssl-dev)
-```bash
-cd /home/vivado/projects/jolt
-cargo test --package jolt-core test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
+zig build example-pipeline
 ```
 
 ## Unit Tests
 - **714/714 tests pass** (all actual tests succeed)
-- Test runner may get SIGKILL during cleanup on memory-constrained systems
 
 ## Generated Files
-- `logs/zolt_preprocessing.bin` (22516 bytes) - Jolt-compatible preprocessing
-- `logs/zolt_proof_dory.bin` (40531 bytes) - Jolt-compatible proof
+- `logs/zolt_preprocessing.bin` (26356 bytes on Linux, 26348 bytes on macOS)
+- `logs/zolt_proof_dory.bin` (40531 bytes - BROKEN, can't deserialize)
+
+## IMPORTANT: Use Working Proof File
+
+The 40531-byte proof files have a serialization bug and can't be deserialized by Jolt.
+
+**Always use the 40544-byte format proof for testing:**
+```bash
+cp /tmp/zolt_proof_dory2.bin /tmp/zolt_proof_dory.bin
+```
+
+Working files (40544 bytes):
+- `/tmp/zolt_proof_dory2.bin` (Jan 26)
+- `/tmp/zolt_proof_dory3.bin` (Jan 26)
+
+Broken files (40531 bytes) - DO NOT USE:
+- `logs/zolt_proof_dory.bin`
+- `/tmp/zolt_proof_dory_fixed.bin`
 
 ## Key Fixes Applied
 
@@ -66,32 +106,13 @@ cargo test --package jolt-core test_verify_zolt_proof_with_zolt_preprocessing --
 ### Session 77: Stage 1 Fix
 - Correct config serialization format (trace_length, ram_K, bytecode_K, configs)
 
-## Architecture Summary
+## Next Steps
 
-### Proof Format
-```
-[91 Opening Claims]
-[37 Dory Commitments]
-[Stage 1-7 Sumcheck Proofs]
-```
-
-### Transcript
-- Blake2b-based Fiat-Shamir transform
-- 125-bit optimized challenges
-- Full 256-bit challenges for batching coefficients
-
-### Field Elements
-- BN254 scalar field in Montgomery form
-- Little-endian byte representation
-- Arkworks-compatible serialization
-
----
-
-## Success Criteria Met
-
-1. ✅ `zig build test` passes 714/714 tests
-2. ✅ Zolt can generate a proof for fibonacci.elf
-3. ✅ The proof passes all 6 verification stages
-4. ✅ No modifications needed on the Jolt side (Jolt test exists at jolt-core/src/zolt_compat_test.rs)
-
-**Note:** Full cross-verification with Jolt requires libssl-dev which is not installed on the current system. The internal verification uses the same mathematical checks that Jolt's verifier performs.
+1. **FIX SERIALIZATION BUG**: Commit `0baedb0` accidentally reverted SumcheckId fix
+   - Zolt has COUNT=24 but Jolt expects COUNT=22
+   - Remove `AdviceClaimReductionCyclePhase` and `AdviceClaimReduction` from SumcheckId enum
+   - Change `IncClaimReduction` from 22 to 20
+   - Change `HammingWeightClaimReduction` from 23 to 21
+   - This causes OpeningId base offsets to be wrong (48 vs 44 for COMMITTED_BASE)
+2. Regenerate proof after fixing serialization
+3. Continue Stage 4 debugging with correct proof format

@@ -1,82 +1,66 @@
-# Zolt-Jolt Compatibility: Stage 3/4 Challenge Debug
+# Zolt-Jolt Compatibility: Stage 3 Initial Claim Debug
 
-## Status: Investigating Stage 3 Input Claim Mismatch ⏳
+## Status: Stage 3 initial_claim Mismatch ⏳
 
 ## Session Summary (2026-01-29)
 
 ### Key Finding
 
-The Stage 4 sumcheck fails because `params.r_cycle` (Stage 3 challenges) doesn't match between Zolt prover and Jolt verifier.
+**Stage 1 is CORRECT!** Zolt's Stage 1 initial_claim and round coefficients match Jolt exactly:
+- Stage 1 initial_claim: `db b1 f8 a9 eb ed 61 41 ac 8c fb 3c 60 1a 7a bc ...` ✓
+- Stage 1 round 0 c0: `11 f5 09 43 df 7c 85 e0 ...` ✓
+- Stage 1 round 0 c2: `15 0e c5 ba cb f8 0a 6b ...` ✓
+- Stage 1 round 0 c3: `ed c8 c8 65 78 27 38 6e ...` ✓
 
-### Root Cause Chain
+### Current Issue: Stage 3 Initial Claim Mismatch
 
-1. **Stage 3 initial claims differ**:
-   - Jolt's verifier computes Stage 3 initial_claim: `[da, a3, 24, 84, db, 59, f8, 88, ...]`
-   - Zolt's prover produces Stage 3 current_claim: `[07, 8d, 45, 4a, d1, 3e, b6, 3f, ...]`
-
-2. **Stage 3 input claims come from Stage 1's SpartanOuter**:
-   - `RegistersClaimReduction.input_claim` uses:
-     - `RdWriteValue` @ `SpartanOuter`
-     - `Rs1Value` @ `SpartanOuter`
-     - `Rs2Value` @ `SpartanOuter`
-   - These are computed from R1CS evaluations at Stage 1's r_cycle
-
-3. **Stage 1 initial_claim mismatch**:
-   - Jolt expects: `[db, b1, f8, a9, eb, ed, 61, 41, ...]` with 9 rounds
-   - Zolt produces: `0x0` (all zeros!) with 13 rounds
-   - **This is suspicious** - zero initial claim suggests the R1CS sum is zero
+The Stage 3 initial_claim differs between Zolt and Jolt:
+- **Jolt's verifier**: `[da, a3, 24, 84, db, 59, f8, 88, ...]`
+- **Zolt's prover**: `[07, 8d, 45, 4a, d1, 3e, b6, 3f, ...]`
 
 ### Analysis
 
-The Zolt Stage 1 sumcheck produces all-zero round polynomials because:
-- Either Az ⊙ Bz = Cz for all rows (R1CS is trivially satisfied everywhere)
-- Or there's a bug in how the R1CS evaluation polynomial is computed
-
-But Jolt expects a NON-ZERO initial claim, which means Jolt's prover computes a non-zero R1CS sum.
-
-### Comparison Data
-
-#### Zolt Stage 3 r_cycle (passed to Stage 4):
+The Stage 3 initial_claim is computed as:
 ```
-r_cycle_be[0] = { 00...00 4e 55 11 b5 4e 49 62 7f 3d e9 51 ee bb 38 23 1f }
-r_cycle_be[1] = { 00...00 38 65 34 87 6f 99 63 13 2d d6 e8 95 cf 0d 32 17 }
-...
+batched_claim = Σ coeff[i] * input_claim[i]
 ```
 
-#### Jolt's verifier params.r_cycle (from Stage 3):
-```
-params.r_cycle[0]: [00..00, 3c, 22, 3b, 5f, f7, 37, 45, fa, a6, 03, e4, e5, bc, ec, c8, 18]
-params.r_cycle[1]: [00..00, b3, bc, 28, 96, 5b, 3c, ff, 82, 63, f2, ea, 64, d9, c6, 89, 00]
-...
-```
+Where:
+- `input_claim[0]` = SpartanShift input claim (from opening claims)
+- `input_claim[1]` = InstructionInputVirtualization input claim
+- `input_claim[2]` = RegistersClaimReduction input claim
+- `coeff[i]` = batching coefficients from transcript
 
-These are completely different because the Stage 3 sumcheck produced different round polynomials.
+The mismatch could be due to:
+1. Different input claims from Stage 2 opening claims
+2. Different transcript state when sampling batching coefficients
+3. Different batching coefficient computation
+
+### Debug Values from Zolt Stage 3
+
+```
+input_claim[0] (Shift): { 30, 39, 195, 164, 59, 14, 143, 21, ... } = 1e 27 c3 a4 3b 0e 8f 15 ...
+input_claim[1] (InstrInput): { 90, 193, 204, 241, 164, 156, 192, 62, ... } = 5a c1 cc f1 a4 9c c0 3e ...
+input_claim[2] (Registers): { 75, 0, 96, 142, 99, 112, 107, 174, ... } = 4b 00 60 8e 63 70 6b ae ...
+batching_coeff[0]: { 40, 209, 4, 96, 132, 232, 161, 190, ... } = 28 d1 04 60 84 e8 a1 be ...
+```
 
 ### Next Steps
 
-1. **Debug Stage 1 R1CS polynomial**:
-   - Verify Az, Bz, Cz are computed correctly
-   - Check the eq polynomial is initialized properly with tau challenges
-   - Ensure the combined polynomial f(x) = Σ eq(τ,x) * (Az(x) * Bz(x) - Cz(x)) is correct
-
-2. **Verify transcript consistency**:
-   - Compare transcript states at each stage between Zolt and Jolt
-   - Ensure commitments are appended in identical order
-
-3. **Compare Stage 1 output**:
-   - The final claim after Stage 1 sumcheck
-   - The r_cycle challenges produced
+1. Compare transcript states between Stage 2 end and Stage 3 start
+2. Verify Stage 2 opening claims are being stored correctly
+3. Check batching coefficient computation matches Jolt's approach
+4. Trace the input_claim values through Stage 2 verification
 
 ## Completed
 
-- [x] Implemented Stage 4 RegistersReadWriteChecking with Gruen optimization
+- [x] Implemented Stage 1 UniSkip + Remaining sumcheck prover
+- [x] Verified Stage 1 matches Jolt exactly
 - [x] Implemented Stage 3 RegistersClaimReduction prover
-- [x] Added extensive debug output
-- [x] Identified that Stage 1 initial_claim = 0 in Zolt but non-zero in Jolt
-- [x] Traced the claim mismatch back to Stage 1
+- [x] Traced Stage 3 initial_claim mismatch
 
 ## In Progress
 
-- [ ] Debug Stage 1 R1CS polynomial evaluation
-- [ ] Fix the zero initial_claim issue
-- [ ] Verify transcript consistency
+- [ ] Debug Stage 3 input claim computation
+- [ ] Verify Stage 2 opening claims storage
+- [ ] Fix transcript state consistency

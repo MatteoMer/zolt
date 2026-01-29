@@ -1,5 +1,40 @@
 # Zolt-Jolt Cross-Verification Progress
 
+## Session 72 Summary - Stage 3 Sumcheck Verification (2026-01-29)
+
+### Key Findings
+
+#### Stage 3 Sumcheck is Mathematically Correct ✓
+
+All 8 rounds of Stage 3 sumcheck satisfy the constraint `p(0) + p(1) = claim`:
+- Round 0: p0+p1 = current_claim ✓
+- Round 1: p0+p1 = current_claim ✓
+- ...all rounds verified...
+
+This means the prover is producing a valid sumcheck proof for its chosen claims.
+
+#### Individual Instance Claims Match
+
+At each round, the batched claim correctly decomposes:
+- shift_p0+p1 = shift_claim ✓
+- instr_p0+p1 = instr_claim ✓
+- reg_p0+p1 = reg_claim ✓
+
+#### What This Means
+
+The sumcheck mechanics are correct. If Jolt's verifier rejects the proof, it must be because:
+1. The **initial input_claims** differ from what Jolt would compute
+2. The **opening claims** stored in the proof differ from what Jolt expects
+3. The **transcript state** differs, causing different challenge derivation
+
+### Next Steps
+
+1. Run Jolt verifier to see exact error message
+2. Compare the serialized opening claims in proof with what Jolt expects
+3. Verify transcript state at Stage 3 boundary matches Jolt exactly
+
+---
+
 ## Session 71 Summary - Stage 4 Batched Sumcheck Debug (2026-01-28)
 
 ### Key Findings

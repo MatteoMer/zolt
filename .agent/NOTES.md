@@ -1,5 +1,47 @@
 # Zolt-Jolt Cross-Verification Progress
 
+## Session 77 Summary - Config Format Fixed, Polynomial Mismatch Found (2026-01-29)
+
+### Major Progress
+
+1. **Config Serialization Fixed** - trace_length, ram_K, bytecode_K, ReadWriteConfig (4 u8s), OneHotConfig (2 u8s), DoryLayout (1 u8) now match Jolt format exactly.
+
+2. **Proof Deserialization Works** - 91 opening claims, 37 commitments parsed correctly.
+
+3. **Stage 1 Passes** - Outer Spartan sumcheck verification succeeds!
+
+4. **Stage 2 Fails** - `output_claim != expected_claim`
+
+### Stage 2 Analysis
+
+**What Matches:**
+- `initial_claim`: Zolt `fd 01 cb 55...` = Jolt `[fd, 01, cb, 55, ...]` ✓
+- `batching_coeff[0]`: Zolt `de 49 43 bd...` = Jolt `[de, 49, 43, bd, ...]` ✓
+- `input_claim[0]`: Zolt `86 a8 80 d3...` = Jolt `[86, a8, 80, d3, ...]` ✓
+
+**What Doesn't Match:**
+- Jolt `first round coeffs_except_linear[0]`: `[97, 3f, b6, 7c, c2, de, 38, c7, ...]`
+- Zolt `combined_evals[0]`: `[0e, 82, 58, f7, 16, 29, e4, 34, ...]` (different!)
+
+### Format Difference
+
+Jolt uses `CompressedPoly<F>` which stores `coeffs_except_linear` = [c0, c2, c3] (skipping c1).
+Zolt's Stage 2 outputs `combined_evals` = [s(0), s(1), s(2), s(3)] evaluations.
+
+The conversion from evaluations to compressed coefficients might be wrong, OR the evaluations themselves are computed incorrectly.
+
+### Key Issue Identified
+
+The round polynomial values differ at round 0. This cascades through all subsequent rounds, causing the final output_claim to mismatch.
+
+### Investigation Needed
+
+1. Verify `evalsToCompressed` conversion matches Jolt's format
+2. Check if ProductVirtualRemainder's `computeRoundPolynomial` produces correct values
+3. Verify the split_eq polynomial initialization
+
+---
+
 ## Session 75 Summary - Challenge Type Analysis (2026-01-29)
 
 ### Challenge Type Mapping Verified
@@ -23,21 +65,6 @@
 7. `BatchedSumcheck::verify` → append input_claims → `challenge_vector(5)` → batching_coeffs
 
 **Zolt uses matching functions for all of these ✓**
-
-### Remaining Hypothesis: Opening Claims Storage
-
-The verifier retrieves factor evaluations from opening_claims map using:
-- `(VirtualPolynomial::X, SumcheckId::SpartanProductVirtualization)`
-
-If Zolt stores these at incorrect keys or with wrong values, the expected formula will compute wrong.
-
-Factor polynomials checked (need values verification):
-- InstructionOutput @ SpartanProductVirtualization
-- IsRdNotZero @ SpartanProductVirtualization
-- WriteLookupOutputToRD @ SpartanProductVirtualization
-- Jump @ SpartanProductVirtualization
-- Branch @ SpartanProductVirtualization
-- NextIsNoop @ SpartanProductVirtualization
 
 ---
 
@@ -73,47 +100,6 @@ Where:
 - `fused_right = w[0]*r_inst + w[1]*wl_flag + w[2]*j_flag + w[3]*branch_flag + w[4]*(1-next_is_noop)`
 - `w[i]` = Lagrange weights at r0 over domain [-2,-1,0,1,2]
 
-### Verified Correct
-
-1. **OpeningId indices match** - SumcheckId enum has 22 values matching Jolt
-2. **Factor claim indices match**:
-   - InstructionFlags::IsRdNotZero = 6 ✓
-   - InstructionFlags::Branch = 4 ✓
-   - OpFlags::Jump = 5 ✓
-   - OpFlags::WriteLookupOutputToRD = 6 ✓
-3. **Claims stored at correct sumcheck_ids** - SpartanProductVirtualization for product factors
-
-### Suspected Root Cause: Transcript Divergence
-
-The transcript state before tau_high sampling determines what tau_high will be.
-- Zolt: `state before tau_high = { 37, 204, 55, 100, 179, 84, 234, 62 }`
-- Jolt: Unknown (needs verification)
-
-If these differ, tau_high differs, and all subsequent Stage 2 computations will be wrong.
-
-Transcript depends on:
-1. Initial preamble (polynomial commitments, bytecode hash)
-2. Stage 1 univariate skip
-3. Stage 1 sumcheck rounds
-4. Stage 1 cache_openings (36 R1CS input claims)
-
-### Blocking Issue
-
-Cannot run Jolt tests - missing system dependencies:
-```
-pkg-config: command not found
-openssl-sys build failed
-```
-
-### Instance Current Claims from Zolt
-
-All instances match internally:
-- inst0 prover.current_claim = `{ 27, 32, 238, 77, ... }` (ProductVirtual)
-- inst1 prover.current_claim = `{ 16, 16, 53, 226, ... }` (RamRaf)
-- inst2 prover.current_claim = `{ 26, 54, 142, 194, ... }` (RamRWC)
-- inst3 prover.current_claim = `{ 45, 42, 247, 142, ... }` (Output)
-- inst4 prover.current_claim = `{ 43, 14, 190, 152, ... }` (InstrLookups)
-
 ---
 
 ## Session 73 Summary - Deserialization Complete! (2026-01-29)
@@ -130,11 +116,6 @@ The extra values were:
 - `IncClaimReduction = 20`
 - `HammingWeightClaimReduction = 21`
 - `COUNT = 22`
-
-### Proof Serialization Fixes
-
-1. **Missing advice proofs**: Only had 1 (commitment), needed all 5
-2. **Configuration format**: Was writing mix of u8/usize, now 5 usizes
 
 ### Deserialization Result: COMPLETE SUCCESS
 
@@ -156,10 +137,3 @@ All 40544 bytes parse correctly.
 ### Session 70 (2026-01-28)
 - Stage 4 final claim mismatch found
 - Phase 2/3 from_evals_and_hint pattern applied
-
-### Session 69 (2026-01-28)
-- Internal sumcheck consistency failure
-- Fixed Phase 2/3 polynomial computation
-
-### Session 68 (2026-01-28)
-- Removed termination bit workaround from RWC prover

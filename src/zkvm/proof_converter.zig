@@ -3702,6 +3702,54 @@ pub fn ProofConverter(comptime F: type) type {
             std.debug.print("[ZOLT] FACTOR CLAIMS: fused_left = {any}\n", .{fused_left.toBytesBE()});
             std.debug.print("[ZOLT] FACTOR CLAIMS: fused_right = {any}\n", .{fused_right.toBytesBE()});
 
+            // Compute tau_high_bound_r0 and tau_bound_r_tail_rev for expected_output_claim debug
+            // tau_high_bound_r0 = LagrangeKernel(5, tau_high, r0)
+            const tau_high = tau[tau.len - 1];
+            const tau_high_bound_r0 = try LagrangePoly.lagrangeKernel(5, tau_high, r0_stage2, self.allocator);
+            std.debug.print("[ZOLT] FACTOR CLAIMS: tau_high = {any}\n", .{tau_high.toBytesBE()});
+            std.debug.print("[ZOLT] FACTOR CLAIMS: r0_stage2 = {any}\n", .{r0_stage2.toBytesBE()});
+            std.debug.print("[ZOLT] FACTOR CLAIMS: tau_high_bound_r0 = {any}\n", .{tau_high_bound_r0.toBytesBE()});
+
+            // tau_bound_r_tail_rev = eq(tau_low, r_cycle_reversed)
+            // tau_low = tau[0..n_cycle_vars]
+            // r_cycle_reversed = last n_cycle_vars challenges, reversed
+            // The challenges.items are the Stage 2 sumcheck challenges
+            // ProductVirtualRemainder starts at round (max_num_rounds - n_cycle_vars)
+            // Its challenges are the LAST n_cycle_vars of challenges.items
+            const product_start_round = max_num_rounds - n_cycle_vars;
+            std.debug.print("[ZOLT] FACTOR CLAIMS: product_start_round = {}, challenges.len = {}, n_cycle_vars = {}\n", .{ product_start_round, challenges.items.len, n_cycle_vars });
+
+            // Extract ProductVirtualRemainder challenges (last n_cycle_vars)
+            var product_challenges = try self.allocator.alloc(F, n_cycle_vars);
+            defer self.allocator.free(product_challenges);
+            for (0..n_cycle_vars) |i| {
+                if (product_start_round + i < challenges.items.len) {
+                    product_challenges[i] = challenges.items[product_start_round + i];
+                } else {
+                    product_challenges[i] = F.zero();
+                }
+            }
+
+            // Reverse the product challenges (r_cycle_reversed)
+            var r_cycle_reversed = try self.allocator.alloc(F, n_cycle_vars);
+            defer self.allocator.free(r_cycle_reversed);
+            for (0..n_cycle_vars) |i| {
+                r_cycle_reversed[i] = product_challenges[n_cycle_vars - 1 - i];
+            }
+
+            // Compute eq(tau_low, r_cycle_reversed)
+            const tau_low = tau[0..n_cycle_vars];
+            const EqPoly = poly_mod.EqPolynomial(F);
+            const tau_bound_r_tail_rev = EqPoly.mle(tau_low, r_cycle_reversed);
+
+            std.debug.print("[ZOLT] FACTOR CLAIMS: tau_low[0] = {any}\n", .{tau_low[0].toBytesBE()});
+            std.debug.print("[ZOLT] FACTOR CLAIMS: r_cycle_reversed[0] = {any}\n", .{r_cycle_reversed[0].toBytesBE()});
+            std.debug.print("[ZOLT] FACTOR CLAIMS: tau_bound_r_tail_rev = {any}\n", .{tau_bound_r_tail_rev.toBytesBE()});
+
+            // Compute expected_output_claim
+            const expected_output_claim = tau_high_bound_r0.mul(tau_bound_r_tail_rev).mul(fused_left).mul(fused_right);
+            std.debug.print("[ZOLT] FACTOR CLAIMS: expected_output_claim = {any}\n", .{expected_output_claim.toBytesBE()});
+
             // Copy challenges to return them
             const challenges_copy = try self.allocator.alloc(F, challenges.items.len);
             @memcpy(challenges_copy, challenges.items);

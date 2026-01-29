@@ -1,67 +1,64 @@
-# Zolt-Jolt Compatibility: Stage 3 Initial Claim Debug
+# Zolt-Jolt Compatibility: Current Status
 
-## Status: Stage 3 initial_claim Mismatch ⏳
+## Status: Debugging Stage 3 Initial Claim ⏳
 
 ## Session Summary (2026-01-29)
 
 ### Key Findings
 
-**Stage 1 is CORRECT!** Zolt's Stage 1 matches Jolt exactly:
-- Stage 1 initial_claim: `db b1 f8 a9 eb ed 61 41 ac 8c fb 3c 60 1a 7a bc ...` ✓
-- Stage 1 round 0 coefficients match ✓
-- UniSkip polynomial and challenges computed correctly ✓
+**714/714 Unit Tests Pass!** All Zolt unit tests are passing.
 
-### Current Issue: Stage 3 Initial Claim Mismatch
+**Stage 1 is CORRECT!** Verified in previous sessions.
 
-The Stage 3 initial_claim differs:
-- **Jolt's verifier**: `[da, a3, 24, 84, db, 59, f8, 88, ...]`
-- **Zolt's prover**: `[07, 8d, 45, 4a, d1, 3e, b6, 3f, ...]`
+**Stage 3 Flow Verified:**
+- Transcript state at Stage 3 boundary: `{ 218, 190, 38, 231, ... }` matches expected
+- Individual input_claim formulas match Jolt exactly:
+  - ShiftSumcheck: `NextUnexpandedPC + γ*NextPC + γ²*NextIsVirtual + γ³*NextIsFirst + γ⁴*(1-NextIsNoop)`
+  - InstructionInput: `(RightOuter + γ*LeftOuter) + γ²*(RightProduct + γ*LeftProduct)`
+  - RegistersClaimReduction: `RdWriteValue + γ*Rs1Value + γ²*Rs2Value`
+- Batching coefficient derivation matches Jolt (uses `challenge_scalar` = full 128-bit)
+- Opening claims are stored and retrieved correctly
 
-The batched initial_claim is computed as:
+### Current Investigation
+
+The Stage 3 initial_claim mismatch may be due to:
+1. **Outdated TODO notes** - The expected Jolt value `[da, a3, 24, 84, ...]` needs verification
+2. **r_cycle evaluation point** - Verify the MLE evaluation point matches what Jolt expects
+3. **Need Jolt verifier** - Without running Jolt's verifier, we can't confirm the actual error
+
+### Technical Details
+
+**Zolt Stage 3 Values:**
 ```
-batched_claim = Σ coeff[i] * input_claim[i]
+transcript_state: { 218, 190, 38, 231, 136, 156, 76, 190 }
+input_claim[0] (Shift): { 30, 39, 195, 164, 59, 14, 143, 21, ... }
+input_claim[1] (InstrInput): { 90, 193, 204, 241, 164, 156, 192, 62, ... }
+input_claim[2] (Registers): { 75, 0, 96, 142, 99, 112, 107, 174, ... }
+batching_coeff[0]: { 40, 209, 4, 96, 132, 232, 161, 190, ... }
+current_claim (ROUND_0): { 7, 141, 69, 74, 209, 62, 182, 63, ... }
 ```
 
-Where Stage 3 instances are:
-- `input_claim[0]` = SpartanShift (from SpartanOuter opening claims)
-- `input_claim[1]` = InstructionInputVirtualization (from SpartanOuter opening claims)
-- `input_claim[2]` = RegistersClaimReduction (from SpartanOuter opening claims)
-
-### Debug Data
-
-**Zolt Stage 3 Pre Values:**
-```
-transcript_state: { 218, 190, 38, 231, ... } = da be 26 e7 ...
-input_claim[0] (Shift): { 30, 39, 195, 164, ... } = 1e 27 c3 a4 ...
-input_claim[1] (InstrInput): { 90, 193, 204, 241, ... } = 5a c1 cc f1 ...
-input_claim[2] (Registers): { 75, 0, 96, 142, ... } = 4b 00 60 8e ...
-batching_coeff[0]: { 40, 209, 4, 96, ... } = 28 d1 04 60 ...
-```
-
-### Root Cause Hypothesis
-
-The mismatch could be due to:
-1. Different opening claims from Stage 2 (stored vs computed by verifier)
-2. Different transcript state when sampling Stage 3 batching coefficients
-3. Incorrect Stage 3 input_claim retrieval from opening claims
+**Individual instance verification (ROUND_0):**
+- shift_p0+p1 = shift_claim ✓
+- instr_p0+p1 = instr_claim ✓
+- reg_p0+p1 = reg_claim ✓
 
 ### Next Steps
 
-1. **Compare opening claims**: Add debug to show what Jolt reads from the proof vs what Zolt stored
-2. **Compare transcript states**: Verify transcript is identical at Stage 2 end / Stage 3 start
-3. **Verify input_claim formula**: Check that Stage 3 instances use correct opening claim lookups
-4. **Install dependencies**: Need pkg-config/libssl-dev to run Jolt verification tests
+1. **Install Dependencies**: Need pkg-config/libssl-dev to run Jolt verification
+2. **Run Jolt Verifier**: Get actual error message from Jolt
+3. **Compare with fresh Jolt run**: Generate a reference proof with Jolt and compare byte-by-byte
 
 ## Completed
 
 - [x] Implemented Stage 1 UniSkip + Remaining sumcheck prover
 - [x] Verified Stage 1 matches Jolt exactly
 - [x] Implemented Stage 3 RegistersClaimReduction prover
-- [x] Traced Stage 3 initial_claim mismatch
-- [x] Collected detailed debug data for Stage 3
+- [x] Verified Stage 3 input_claim formulas match Jolt
+- [x] Verified Stage 3 batching coefficient derivation matches Jolt
+- [x] All 714 unit tests passing
 
 ## In Progress
 
-- [ ] Debug Stage 3 input_claim computation
-- [ ] Compare what opening claims Jolt verifier reads
-- [ ] Verify transcript consistency at Stage 3 boundary
+- [ ] Run Jolt verifier to get actual error
+- [ ] Compare proof bytes with Jolt-generated reference

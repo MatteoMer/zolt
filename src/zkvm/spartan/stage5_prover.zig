@@ -260,12 +260,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     .allocator = self.allocator,
                 });
 
-                // Append polynomial to transcript and get challenge
-                transcript.appendMessage("UncompressedUniPoly_begin");
-                for (combined_poly) |coeff| {
-                    transcript.appendScalar(coeff);
-                }
-                transcript.appendMessage("UncompressedUniPoly_end");
+                // Append compressed polynomial to transcript and get challenge
+                // Must use compressed format (c0, c2, c3) to match Jolt's BatchedSumcheck
+                transcript.appendMessage("UniPoly_begin");
+                transcript.appendScalar(compressed[0]); // c0
+                transcript.appendScalar(compressed[1]); // c2
+                transcript.appendScalar(compressed[2]); // c3
+                transcript.appendMessage("UniPoly_end");
 
                 const challenge = transcript.challengeScalar();
                 challenges[round] = challenge;
@@ -593,12 +594,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     .allocator = self.allocator,
                 });
 
-                // Append to transcript and get challenge
-                transcript.appendMessage("UncompressedUniPoly_begin");
-                for (combined_poly) |coeff| {
-                    transcript.appendScalar(coeff);
-                }
-                transcript.appendMessage("UncompressedUniPoly_end");
+                // Append compressed polynomial to transcript and get challenge
+                // Must use compressed format (c0, c2, c3) to match Jolt's BatchedSumcheck
+                transcript.appendMessage("UniPoly_begin");
+                transcript.appendScalar(compressed[0]); // c0
+                transcript.appendScalar(compressed[1]); // c2
+                transcript.appendScalar(compressed[2]); // c3
+                transcript.appendMessage("UniPoly_end");
 
                 const challenge = transcript.challengeScalar();
                 challenges[round] = challenge;
@@ -619,9 +621,40 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             std.debug.print("[STAGE5] Final opening claims:\n", .{});
             std.debug.print("  regs_val_inc_claim = {any}\n", .{regs_val_inc_claim.toBytesBE()});
             std.debug.print("  regs_val_wa_claim = {any}\n", .{regs_val_wa_claim.toBytesBE()});
-            std.debug.print("  regs_val_lt_claim = {any}\n", .{regs_val_lt_claim.toBytesBE()});
+            std.debug.print("  regs_val_lt_claim (lt[0] after binding) = {any}\n", .{regs_val_lt_claim.toBytesBE()});
             std.debug.print("  regs_final_product (inc*wa*lt) = {any}\n", .{regs_final_product.toBytesBE()});
-            std.debug.print("  Expected from Jolt: Instance 0 expected = 1225620...462\n", .{});
+
+            // Compute what the verifier would compute for LT(r_normalized, r_cycle)
+            // r_normalized = reversed challenges (BIG_ENDIAN)
+            // The last 8 challenges are for RegistersValEvaluation
+            const regs_challenges = challenges[(max_num_rounds - regs_val_num_rounds)..];
+            std.debug.print("[STAGE5] Computing verifier's LT(r_normalized, r_cycle):\n", .{});
+            std.debug.print("  regs_challenges[0] = {any}\n", .{regs_challenges[0].toBytesBE()[0..8]});
+            std.debug.print("  regs_challenges[7] = {any}\n", .{regs_challenges[7].toBytesBE()[0..8]});
+            std.debug.print("  r_cycle_regs[0] = {any}\n", .{r_cycle_regs[0].toBytesBE()[0..8]});
+            std.debug.print("  r_cycle_regs[7] = {any}\n", .{r_cycle_regs[7].toBytesBE()[0..8]});
+
+            // Compute LT(r_normalized, r_cycle) like the verifier does
+            // r_normalized = [c7, c6, c5, c4, c3, c2, c1, c0] (reversed challenges)
+            // LT(x, y) = Σ_i (1 - x_i) · y_i · eq(x[i+1:], y[i+1:])
+            var lt_verifier = F.zero();
+            var eq_term = F.one();
+            for (0..n_cycle_vars) |i| {
+                // r_normalized[i] = challenges[n-1-i] (reversed)
+                const x_i = regs_challenges[n_cycle_vars - 1 - i];
+                const y_i = r_cycle_regs[i]; // r_cycle is already BIG_ENDIAN
+                const one_minus_x = F.one().sub(x_i);
+                lt_verifier = lt_verifier.add(one_minus_x.mul(y_i).mul(eq_term));
+                // eq_term *= (1 - x - y + 2*x*y)
+                const xy = x_i.mul(y_i);
+                eq_term = eq_term.mul(F.one().sub(x_i).sub(y_i).add(xy).add(xy));
+            }
+            std.debug.print("  LT_verifier (what verifier computes) = {any}\n", .{lt_verifier.toBytesBE()});
+
+            // The verifier expects: expected_output_claim = inc_claim * wa_claim * LT_verifier
+            const expected_product = regs_val_inc_claim.mul(regs_val_wa_claim).mul(lt_verifier);
+            std.debug.print("  expected_product (inc*wa*LT_verifier) = {any}\n", .{expected_product.toBytesBE()});
+            std.debug.print("  Match: {}\n", .{regs_final_product.eql(expected_product)});
 
             // Allocate opening claim arrays
             const num_lookup_tables: usize = 42;

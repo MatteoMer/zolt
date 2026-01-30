@@ -2731,6 +2731,10 @@ pub fn ProofConverter(comptime F: type) type {
             }
             defer stage5_result.deinit();
 
+            // Debug: Print Stage 5 claims for comparison with Jolt
+            std.debug.print("[STAGE5 CLAIMS] regs_val_inc_claim (LE) = {any}\n", .{stage5_result.regs_val_inc_claim.toBytes()});
+            std.debug.print("[STAGE5 CLAIMS] regs_val_wa_claim (LE) = {any}\n", .{stage5_result.regs_val_wa_claim.toBytes()});
+
             // RegistersValEvaluation claims
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .RdWa, .sumcheck_id = .RegistersValEvaluation } },

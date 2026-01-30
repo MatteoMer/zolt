@@ -1,88 +1,65 @@
 # Zolt-Jolt Cross-Verification Progress
 
-## Session 81 - All Stages Pass! (2026-01-29)
+## Session 82 - Stage 4 Sumcheck Investigation (2026-01-30)
 
 ### Summary
-All 6 verification stages pass:
+Stage 4 (RegistersReadWriteChecking) verification fails with sumcheck output mismatch. The root cause is that Zolt's Stage 4 sumcheck proof produces different round polynomials than what Jolt expects.
+
+### Key Findings
+
+1. **Stages 1-3 Pass:**
+   - Stage 1: Outer Spartan sumcheck ✅
+   - Stage 2: Batched sumcheck (RAF, RWC, Output, Instruction) ✅
+   - Stage 3: Registers claim reduction ✅
+   - Stage 4: **FAILS** ❌
+
+2. **Stage 4 Mismatch Details:**
+   - `output_claim` (from sumcheck proof verification): `2794768927403232170685203001712134750206965869554042859404932801547924672323`
+   - `expected_output_claim` (computed by verifier): `19036722498929976088547735251378923562016308482664214076291639064331774676064`
+   - Difference is orders of magnitude - not a small numerical error
+
+3. **Stage 4 Architecture:**
+   - 3 batched instances: RegistersRWC, ValEvaluation, ValFinal
+   - Instance 1 and 2 have zero claims (expected for fibonacci example)
+   - Instance 0 (RegistersRWC) carries all the weight
+
+4. **eq_val Computation:**
+   - `eq_val = eq(r_cycle_stage4, params.r_cycle_from_stage3)`
+   - r_cycle_stage4: Challenges from Stage 4 sumcheck rounds
+   - params.r_cycle: Stage 3's opening point (retrieved from accumulator)
+   - The eq polynomial evaluates how "equal" these two points are
+
+5. **Likely Issues:**
+   - Round polynomial computation in `stage4_gruen_prover.zig`
+   - Gruen optimization (`gruenPolyDeg3`) may have bugs
+   - Variable ordering in 3-phase structure may not match Jolt
+
+### Debug Data from Test Run
+
+**Jolt Verifier Stage 4 Output:**
+```
+[JOLT STAGE4 DEBUG]   eq_val = 14447182824539522361174030945338492588349944286339905486292912866657917375174
+[JOLT STAGE4 DEBUG]   combined = 20992970233233921422641107357873519633929136172040123830888410534632773245456
+[JOLT STAGE4 DEBUG]   expected = 17266308235761105456215483608498978797273351746775005780030669392838509233139
+```
+
+**r_cycle Values:**
+- Stage 4 sumcheck r_cycle[0]: `6709444460737048432665932647077461968217451116529630129102448257410915106816`
+- params.r_cycle[0] (from Stage 3): `11210511683772200605067092683842474276111331544071549587645049051967513427968`
+
+---
+
+## Session 81 - All Stages Pass (2026-01-29)
+
+### NOTE: This was with internal verification, NOT Jolt cross-verification
+
+All 6 verification stages pass with Zolt's internal verifier:
 - Stage 1: Outer Spartan sumcheck ✅
 - Stage 2: Batched sumcheck (RAF, RWC, Output, Instruction) ✅
 - Stage 3: Registers claim reduction ✅
 - Stage 4: Batched sumcheck (Registers, ValEval, ValFinal) ✅
 - Stage 5: Bytecode claim reduction ✅
 - Stage 6: Instruction claim reduction ✅
-
-### Test Results
-- Internal pipeline verification: PASSED
-- Unit tests: 714/714 pass
-- Proof generation: Works correctly
-- Proof verification: Works correctly
-
-### Key Implementation Details
-
-#### Transcript Protocol
-Zolt uses Blake2b transcript compatible with Jolt's implementation:
-- `challengeScalar()` - 125-bit challenge (optimized)
-- `challengeScalarFull()` - Full 256-bit challenge
-- `challengeScalarPowers(n)` - Powers: 1, γ, γ², ...
-
-#### Field Element Format
-- BN254 scalar field in Montgomery form
-- Little-endian byte representation
-- 32 bytes per element
-
-#### Polynomial Commitment
-- Dory commitment scheme
-- Arkworks-compatible serialization
-- Uncompressed G1/G2 points (96 bytes for G1, 192 bytes for G2)
-
----
-
-## Session 80 - Stage 4 Fix (2026-01-29)
-
-### Root Causes Fixed
-
-1. **rwc_val_claim for null RWC prover**
-   - Programs without user RAM operations have null rwc_prover
-   - Previously returned F.zero()
-   - Fix: Compute val_init(r_address) for correct input_claim
-
-2. **val_final_prover r_address endianness**
-   - WaPolynomial uses LE convention
-   - r[0] = LSB, matching sumcheck challenge order
-   - Fix: Use LE order (no reversal) for r_address
-
-3. **Synthetic termination writes**
-   - Jolt doesn't include termination/panic writes in trace
-   - These are set directly in final memory state
-   - Fix: Filter these addresses in IncPolynomial
-
----
-
-## Session 78 - Stage 2 Fix (2026-01-29)
-
-### Root Cause
-When input_claim = 0 for RAF or RWC instances:
-- Jolt expects zero polynomial proof
-- Zolt was computing non-zero polynomials due to termination write in trace
-
-### Fix
-Skip prover initialization when input_claim is zero:
-- Use zero polynomials for these instances
-- Matches Jolt's expectation
-
----
-
-## Session 77 - Stage 1 Fix (2026-01-29)
-
-### Root Cause
-Config serialization format mismatch:
-- trace_length, ram_K, bytecode_K needed as single bytes
-- ReadWriteConfig: 4 u8s
-- OneHotConfig: 2 u8s
-- DoryLayout: 1 u8
-
-### Fix
-Corrected serialization format to match Jolt's deserializer.
 
 ---
 
@@ -101,29 +78,19 @@ Corrected serialization format to match Jolt's deserializer.
 [Stage 7: Sumcheck (Dory opening)]
 ```
 
-### Preprocessing Format (Jolt-compatible)
-```
-[Verifier Setup]
-[Shared Memory Layout]
-[Bytecode Info]
-[RAM Parameters]
-```
-
-### Stage 2 Batched Sumcheck Structure
+### Stage 4 Batched Sumcheck Structure
 | Instance | Verifier | Rounds | Start |
 |----------|----------|--------|-------|
-| 0 | ProductVirtualRemainder | 8 | 16 |
-| 1 | RamRafEvaluation | 16 | 8 |
-| 2 | RamReadWriteChecking | 24 | 0 |
-| 3 | OutputSumcheck | 16 | 8 |
-| 4 | InstructionLookupsClaimReduction | 8 | 16 |
+| 0 | RegistersReadWriteChecking | 15 (LOG_K=7 + log_T=8) | 0 |
+| 1 | ValEvaluation | 24 (log_K=16 + log_T=8) | 0 |
+| 2 | ValFinal | 24 (log_K=16 + log_T=8) | 0 |
 
-### Stage 4 Batched Sumcheck Structure
-| Instance | Verifier | Description |
-|----------|----------|-------------|
-| 0 | RegistersRWC | Uses r_cycle from Stage 3 |
-| 1 | ValEvaluation | Uses r_address from Stage 2 |
-| 2 | ValFinal | Uses r_address from Stage 2 |
+Note: For fibonacci example, instances 1 and 2 have zero input_claims.
+
+### Stage 4 RegistersRWC 3-Phase Structure
+- **Phase 1** (rounds 0 to phase1-1): Bind first `phase1_num_rounds` cycle vars using Gruen
+- **Phase 2** (rounds phase1 to phase1+phase2-1): Bind address vars (eq NOT bound)
+- **Phase 3** (rounds phase1+phase2 to end): Bind remaining cycle vars via merged dense eq
 
 ---
 
@@ -131,9 +98,9 @@ Corrected serialization format to match Jolt's deserializer.
 
 ### Core Proof Generation
 - `src/zkvm/proof_converter.zig` - Main proof generation logic
+- `src/zkvm/spartan/stage4_gruen_prover.zig` - Stage 4 with Gruen optimization
 - `src/zkvm/ram/val_evaluation.zig` - ValEvaluation prover
-- `src/zkvm/ram/raf_checking.zig` - RAF prover
-- `src/zkvm/ram/read_write_checking.zig` - RWC prover
+- `src/zkvm/ram/val_final.zig` - ValFinal prover
 
 ### Serialization
 - Jolt-compatible format using arkworks conventions
@@ -142,7 +109,8 @@ Corrected serialization format to match Jolt's deserializer.
 
 ### Transcript
 - Blake2b-based Fiat-Shamir transform
-- Challenge generation matches Jolt exactly
+- Challenge generation matches Jolt exactly (for Stages 1-3)
+- Stage 4 may have transcript divergence
 
 ---
 
@@ -163,8 +131,8 @@ zig build example-pipeline
   --srs /tmp/jolt_dory_srs.bin
 ```
 
-### Verify with Jolt (requires libssl-dev)
+### Verify with Jolt
 ```bash
-cd /home/vivado/projects/jolt
+cd /home/vivado/projects/zolt/jolt
 cargo test --package jolt-core test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```

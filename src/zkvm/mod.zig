@@ -1492,9 +1492,12 @@ pub fn JoltProver(comptime F: type) type {
                 try serializer.writeDoryProof(&dory_proof);
             }
 
-            // Write untrusted_advice_commitment: Option<PCS::Commitment>
-            // Jolt's JoltProof only has this one advice-related field
-            try serializer.writeU8(0); // None
+            // Write advice proofs (all None) - must match JoltProof struct order
+            try serializer.writeU8(0); // trusted_advice_val_evaluation_proof: None
+            try serializer.writeU8(0); // trusted_advice_val_final_proof: None
+            try serializer.writeU8(0); // untrusted_advice_val_evaluation_proof: None
+            try serializer.writeU8(0); // untrusted_advice_val_final_proof: None
+            try serializer.writeU8(0); // untrusted_advice_commitment: None
 
             // Write configuration (matches Jolt's JoltProof struct exactly)
             // Fields in order: trace_length, ram_K, bytecode_K, log_k_chunk, lookups_ra_virtual_log_k_chunk

@@ -196,23 +196,18 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                 // Instance 0: RegistersValEvaluation
                 if (remaining_rounds > regs_val_num_rounds) {
-                    // Not started yet - constant polynomial where p(0) + p(1) = previous_claim
-                    // The previous claim for this instance is scaled by 2^(remaining - num_rounds)
-                    // At round r, remaining = max_rounds - r, so scale = remaining - num_rounds - 1
-                    // because we need p(0) + p(1) = 2^scale * input_claim (the current claim)
-                    // For a constant polynomial p(x) = c:
-                    //   p(0) = p(1) = p(2) = c = current_claim / 2
-                    //   p_inf = 0 (no x^3 term)
+                    // Not started yet - constant polynomial
+                    // Jolt's constant polynomial: p(x) = scaled_input_claim for all x
+                    // where scaled_input_claim = input_claim * 2^(remaining - num_rounds - 1)
+                    // This gives p(0) + p(1) = 2 * scaled_input_claim = input_claim * 2^(remaining - num_rounds)
                     const scale = remaining_rounds - regs_val_num_rounds - 1;
-                    var current_claim = regs_val_input;
-                    for (0..scale) |_| current_claim = current_claim.add(current_claim);
-                    // For sumcheck: p(0) + p(1) = current_claim, so p(x) = current_claim / 2
-                    const two_inv = F.fromU64(2).inverse().?;
-                    const half_claim = current_claim.mul(two_inv);
-                    combined_poly[0] = combined_poly[0].add(batch0.mul(half_claim));
-                    combined_poly[1] = combined_poly[1].add(batch0.mul(half_claim));
-                    combined_poly[2] = combined_poly[2].add(batch0.mul(half_claim));
-                    // evals[3] = p_inf = 0 for constant polynomial (don't add anything)
+                    var scaled_input_claim = regs_val_input;
+                    for (0..scale) |_| scaled_input_claim = scaled_input_claim.add(scaled_input_claim);
+                    // Constant polynomial p(x) = scaled_input_claim
+                    combined_poly[0] = combined_poly[0].add(batch0.mul(scaled_input_claim));
+                    combined_poly[1] = combined_poly[1].add(batch0.mul(scaled_input_claim));
+                    combined_poly[2] = combined_poly[2].add(batch0.mul(scaled_input_claim));
+                    // evals[3] = p_inf = 0 for constant polynomial
                 } else {
                     // Instance is active - for now, assume zero polynomial sum
                     // This is correct for programs where RegistersVal claim = 0
@@ -225,18 +220,14 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                 // Instance 1: RamRaClaimReduction
                 if (remaining_rounds > ram_ra_num_rounds) {
-                    // Same as instance 0 - constant polynomial with p(0) + p(1) = current_claim
-                    // For a constant polynomial p(x) = c:
-                    //   p(0) = p(1) = p(2) = c, p_inf = 0
+                    // Not started - constant polynomial (same logic as Instance 0)
                     const scale = remaining_rounds - ram_ra_num_rounds - 1;
-                    var current_claim = ram_ra_input;
-                    for (0..scale) |_| current_claim = current_claim.add(current_claim);
-                    const two_inv = F.fromU64(2).inverse().?;
-                    const half_claim = current_claim.mul(two_inv);
-                    combined_poly[0] = combined_poly[0].add(batch1.mul(half_claim));
-                    combined_poly[1] = combined_poly[1].add(batch1.mul(half_claim));
-                    combined_poly[2] = combined_poly[2].add(batch1.mul(half_claim));
-                    // evals[3] = p_inf = 0 for constant polynomial (don't add anything)
+                    var scaled_input_claim = ram_ra_input;
+                    for (0..scale) |_| scaled_input_claim = scaled_input_claim.add(scaled_input_claim);
+                    combined_poly[0] = combined_poly[0].add(batch1.mul(scaled_input_claim));
+                    combined_poly[1] = combined_poly[1].add(batch1.mul(scaled_input_claim));
+                    combined_poly[2] = combined_poly[2].add(batch1.mul(scaled_input_claim));
+                    // evals[3] = p_inf = 0 for constant polynomial
                 } else {
                     // Instance active - assume zero sum
                     const zero_poly = [_]F{ F.zero(), F.zero(), F.zero(), F.zero() };
@@ -540,6 +531,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             var challenges = try self.allocator.alloc(F, max_num_rounds);
             errdefer self.allocator.free(challenges);
 
+            // Track current batched claim (for verification)
+            var current_batched_claim = batched_claim;
+
             // Run the batched sumcheck
             for (0..max_num_rounds) |round| {
                 const remaining_rounds = max_num_rounds - round;
@@ -547,17 +541,18 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 var combined_poly = [_]F{ F.zero(), F.zero(), F.zero(), F.zero() };
 
                 // Instance 0: RegistersValEvaluation (8 rounds)
-                const two_inv = F.fromU64(2).inverse().?;
                 if (remaining_rounds > regs_val_num_rounds) {
-                    // Not started yet - constant polynomial where p(0) + p(1) = current_claim
-                    // For constant polynomial: p(0) = p(1) = p(2) = c, p_inf = 0
+                    // Not started yet - constant polynomial where p(0) + p(1) = scaled_claim
+                    // Jolt's constant polynomial: p(x) = scaled_input_claim for all x
+                    // where scaled_input_claim = input_claim * 2^(remaining - num_rounds - 1)
+                    // This gives p(0) + p(1) = 2 * scaled_input_claim = input_claim * 2^(remaining - num_rounds)
                     const scale = remaining_rounds - regs_val_num_rounds - 1;
-                    var current_claim = regs_val_input;
-                    for (0..scale) |_| current_claim = current_claim.add(current_claim);
-                    const half_claim = current_claim.mul(two_inv);
-                    combined_poly[0] = combined_poly[0].add(batch0.mul(half_claim));
-                    combined_poly[1] = combined_poly[1].add(batch0.mul(half_claim));
-                    combined_poly[2] = combined_poly[2].add(batch0.mul(half_claim));
+                    var scaled_input_claim = regs_val_input;
+                    for (0..scale) |_| scaled_input_claim = scaled_input_claim.add(scaled_input_claim);
+                    // Constant polynomial p(x) = scaled_input_claim
+                    combined_poly[0] = combined_poly[0].add(batch0.mul(scaled_input_claim));
+                    combined_poly[1] = combined_poly[1].add(batch0.mul(scaled_input_claim));
+                    combined_poly[2] = combined_poly[2].add(batch0.mul(scaled_input_claim));
                     // evals[3] = p_inf = 0 for constant polynomial
                 } else {
                     // Instance is active - compute actual round polynomial
@@ -571,23 +566,30 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                 // Instance 1: RamRaClaimReduction (24 rounds) - still zero for now
                 if (remaining_rounds > ram_ra_num_rounds) {
-                    // Not started - constant polynomial
-                    // For constant polynomial: p(0) = p(1) = p(2) = c, p_inf = 0
+                    // Not started - constant polynomial (same logic as Instance 0)
                     const scale = remaining_rounds - ram_ra_num_rounds - 1;
-                    var current_claim = ram_ra_input;
-                    for (0..scale) |_| current_claim = current_claim.add(current_claim);
-                    const half_claim = current_claim.mul(two_inv);
-                    combined_poly[0] = combined_poly[0].add(batch1.mul(half_claim));
-                    combined_poly[1] = combined_poly[1].add(batch1.mul(half_claim));
-                    combined_poly[2] = combined_poly[2].add(batch1.mul(half_claim));
+                    var scaled_input_claim = ram_ra_input;
+                    for (0..scale) |_| scaled_input_claim = scaled_input_claim.add(scaled_input_claim);
+                    combined_poly[0] = combined_poly[0].add(batch1.mul(scaled_input_claim));
+                    combined_poly[1] = combined_poly[1].add(batch1.mul(scaled_input_claim));
+                    combined_poly[2] = combined_poly[2].add(batch1.mul(scaled_input_claim));
                     // evals[3] = p_inf = 0 for constant polynomial
                 } else {
                     // Zero polynomial for now (TODO: implement RamRaClaimReduction)
                     // This is correct if ram_ra_input = 0
                 }
 
-                // Instance 2: LookupsReadRaf (136 rounds) - zero for now
-                // TODO: implement InstructionReadRaf
+                // Instance 2: LookupsReadRaf (136 rounds)
+                // Since lookups_num_rounds = max_num_rounds, this instance is always active
+                // For now, we send zero polynomials, which is only correct if lookups_input = 0
+                // TODO: implement InstructionReadRaf prover
+
+                // Debug: Show Instance 2 missing contribution (only once)
+                if (round == 0 and !lookups_input.eql(F.zero())) {
+                    std.debug.print("[STAGE5 WARNING] Instance 2 (LookupsReadRaf) not implemented!\n", .{});
+                    std.debug.print("  lookups_input is non-zero: {any}\n", .{lookups_input.toBytesBE()[0..16]});
+                    std.debug.print("  Verification will fail until LookupsReadRaf prover is implemented.\n", .{});
+                }
 
                 // Convert to compressed form using Toom-Cook encoding
                 // evals[3] is eval_at_infinity (leading coefficient), not eval_at_3
@@ -602,6 +604,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     .allocator = self.allocator,
                 });
 
+                // Verify p(0)+p(1) = current_batched_claim (disabled - verbose debug)
+                // const p01_sum = combined_poly[0].add(combined_poly[1]);
+                // const claim_matches = p01_sum.eql(current_batched_claim);
+
                 // Append compressed polynomial to transcript and get challenge
                 // Must use compressed format (c0, c2, c3) to match Jolt's BatchedSumcheck
                 transcript.appendMessage("UniPoly_begin");
@@ -613,12 +619,35 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 const challenge = transcript.challengeScalar();
                 challenges[round] = challenge;
 
+                // Update current_batched_claim by evaluating polynomial at challenge
+                // Use the same eval_from_hint logic as Jolt verifier
+                // p(r) = c0 + r*c1 + r^2*c2 + r^3*c3
+                // where c1 = batched_claim - c0 - c2 - c3 (recovered from hint)
+                const c0 = compressed[0];
+                const c2 = compressed[1];
+                const c3 = compressed[2];
+                const c1 = current_batched_claim.sub(c0).sub(c2).sub(c3); // hint recovery
+                const r2 = challenge.mul(challenge);
+                const r3 = r2.mul(challenge);
+                current_batched_claim = c0.add(challenge.mul(c1)).add(r2.mul(c2)).add(r3.mul(c3));
+
+                // Debug: print challenges for first 3 and last 3 rounds
+                if (round < 3 or round >= max_num_rounds - 3) {
+                    std.debug.print("[STAGE5 ROUND {}] challenge={x}\n", .{
+                        round,
+                        challenge.toBytesBE()[24..32].*,
+                    });
+                }
+
                 // Bind the challenge for RegistersValEvaluation if active
                 if (remaining_rounds <= regs_val_num_rounds) {
                     const regs_round = regs_val_num_rounds - remaining_rounds;
                     bindRegsValChallenge(inc_evals, wa_evals, lt_evals, regs_round, challenge);
                 }
             }
+
+            // Debug: print final batched claim (this is output_claim from verifier's perspective)
+            std.debug.print("[STAGE5] Final batched claim (output_claim) = {any}\n", .{current_batched_claim.toBytesBE()});
 
             // Get final opening claims from the folded polynomials
             const regs_val_inc_claim = inc_evals[0];

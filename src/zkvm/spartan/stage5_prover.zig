@@ -413,20 +413,33 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             const T = @as(usize, 1) << @intCast(n_cycle_vars);
             var inc_evals = try self.allocator.alloc(F, T);
             var wa_evals = try self.allocator.alloc(F, T);
-            var lt_evals = try self.allocator.alloc(F, T);
             defer self.allocator.free(inc_evals);
             defer self.allocator.free(wa_evals);
-            defer self.allocator.free(lt_evals);
 
             // Initialize all to zero
             @memset(inc_evals, F.zero());
             @memset(wa_evals, F.zero());
-            @memset(lt_evals, F.zero());
+
+            // Debug: print r_address and r_cycle from Stage 4
+            std.debug.print("[STAGE5] r_address_regs (len={}):\n", .{r_address_regs.len});
+            for (r_address_regs, 0..) |r, i| {
+                std.debug.print("  r_address[{}] = {any}\n", .{ i, r.toBytesBE()[0..8] });
+            }
+            std.debug.print("[STAGE5] r_cycle_regs (len={}):\n", .{r_cycle_regs.len});
+            for (r_cycle_regs, 0..) |r, i| {
+                std.debug.print("  r_cycle[{}] = {any}\n", .{ i, r.toBytesBE()[0..8] });
+            }
+
+            // Compute LT polynomial using efficient algorithm
+            // lt_evals[j] = LT(j, r_cycle) for all j in [0, T)
+            // r_cycle_regs is in BIG_ENDIAN order (MSB first) from Stage 4
+            const lt_evals = try computeAllLtEvals(self.allocator, r_cycle_regs);
+            defer self.allocator.free(lt_evals);
 
             // Track register values for inc computation
             var register_values: [32]u64 = [_]u64{0} ** 32;
 
-            // Populate from trace
+            // Populate inc and wa from trace
             const trace_len = trace.steps.items.len;
             for (trace.steps.items, 0..) |step, j| {
                 if (step.is_noop) continue;
@@ -452,16 +465,21 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // r_address has 7 bits, rd is 5 bits - extend rd to 7 bits
                     wa_evals[j] = computeEqAtIndex(r_address_regs, @as(usize, rd));
                 }
-
-                // Compute LT(r_cycle, j)
-                lt_evals[j] = computeLtAtIndex(r_cycle_regs, j);
+                // Note: lt_evals[j] is already computed for all j via computeAllLtEvals
             }
 
-            // Zero-fill LT for padding cycles (j >= trace_len don't count)
-            // LT(r_cycle, j) = 0 for all j in padding since they are >= trace_len
-            // which is larger than any actual r_cycle value we care about
-
+            // Verify the sum Σ_j inc(j) · wa(j) · lt(j) matches the input claim
+            var computed_sum = F.zero();
+            for (0..T) |j| {
+                computed_sum = computed_sum.add(inc_evals[j].mul(wa_evals[j]).mul(lt_evals[j]));
+            }
             std.debug.print("[STAGE5] Built polynomial tables: T={}, trace_len={}\n", .{ T, trace_len });
+            std.debug.print("[STAGE5] Sum check: computed_sum = {any}\n", .{computed_sum.toBytesBE()[0..16]});
+            std.debug.print("[STAGE5] Sum check: regs_val_input = {any}\n", .{regs_val_input.toBytesBE()[0..16]});
+            std.debug.print("[STAGE5] Sum check: match = {}\n", .{@as(bool, computed_sum.limbs[0] == regs_val_input.limbs[0] and
+                computed_sum.limbs[1] == regs_val_input.limbs[1] and
+                computed_sum.limbs[2] == regs_val_input.limbs[2] and
+                computed_sum.limbs[3] == regs_val_input.limbs[3])});
 
             // Compute scaling factors
             const regs_scale = max_num_rounds - regs_val_num_rounds;
@@ -604,18 +622,57 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             return result;
         }
 
-        /// Compute LT(j, r_cycle) for index j
-        /// LT(x, y) = 1 iff x < y as bitstrings (LE order)
+        /// Compute all LT(j, r) evaluations efficiently using Jolt's algorithm
+        /// Returns lt_evals where lt_evals[j] = LT(j, r) for all j in [0, 2^n)
+        /// r is in BIG_ENDIAN order (MSB first)
+        fn computeAllLtEvals(allocator: Allocator, r: []const F) ![]F {
+            const n = r.len;
+            const size = @as(usize, 1) << @intCast(n);
+            var evals = try allocator.alloc(F, size);
+            @memset(evals, F.zero());
+
+            // Jolt's lt_evals algorithm:
+            // for (i, r) in r.r.iter().rev().enumerate() {
+            //     let (evals_left, evals_right) = evals.split_at_mut(1 << i);
+            //     zip(evals_left, evals_right).for_each(|(x, y)| {
+            //         *y = *x * r;
+            //         *x += *r - *y;
+            //     });
+            // }
+            // Note: r.r.iter().rev() means we process from last element to first
+            // Since r is BIG_ENDIAN (MSB first), rev gives us LSB first
+
+            for (0..n) |i| {
+                const ri = r[n - 1 - i]; // Process from LSB to MSB
+                const half = @as(usize, 1) << @intCast(i);
+                for (0..half) |j| {
+                    const x = evals[j];
+                    const y = x.mul(ri);
+                    evals[half + j] = y;
+                    evals[j] = evals[j].add(ri.sub(y));
+                }
+            }
+
+            return evals;
+        }
+
+        /// Compute LT(j, r_cycle) for index j (legacy single-point version)
+        /// LT(x, y) = 1 iff x < y as bitstrings
+        /// x is boolean (index j), y is field elements (r_cycle)
         fn computeLtAtIndex(r_cycle: []const F, j: usize) F {
+            // LT(x, y) = Σ_i (1 - x_i) · y_i · eq(x[i+1:], y[i+1:])
+            // where sum runs from MSB to LSB
             var result = F.zero();
             const num_vars = r_cycle.len;
 
+            // Process from MSB (index 0 in BIG_ENDIAN) to LSB
             for (0..num_vars) |i| {
-                const ji = (j >> @intCast(i)) & 1;
-                if (ji == 0) {
-                    var contrib = r_cycle[i];
+                const ji = (j >> @intCast(num_vars - 1 - i)) & 1; // MSB first
+                if (ji == 0) { // (1 - x_i) = 1 only when x_i = 0
+                    var contrib = r_cycle[i]; // y_i
+                    // Multiply by eq(x[i+1:], y[i+1:])
                     for ((i + 1)..num_vars) |k| {
-                        const jk = (j >> @intCast(k)) & 1;
+                        const jk = (j >> @intCast(num_vars - 1 - k)) & 1;
                         const rk = r_cycle[k];
                         if (jk == 1) {
                             contrib = contrib.mul(rk);

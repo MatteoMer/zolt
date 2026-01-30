@@ -2699,7 +2699,11 @@ pub fn ProofConverter(comptime F: type) type {
             var stage5_result: spartan_mod.Stage5Result(F) = undefined;
 
             // Use trace-aware prover if we have trace data and Stage 4 opening point
+            std.debug.print("[STAGE5] Checking conditions: execution_trace={any}, r_address={any}, r_cycle={any}\n", .{
+                config.execution_trace != null, stage4_regs_r_address != null, stage4_regs_r_cycle != null,
+            });
             if (config.execution_trace != null and stage4_regs_r_address != null and stage4_regs_r_cycle != null) {
+                std.debug.print("[STAGE5] Using trace-aware prover\n", .{});
                 stage5_result = try stage5_prover_instance.generateStage5ProofWithTrace(
                     &jolt_proof.stage5_sumcheck_proof,
                     transcript,
@@ -2714,6 +2718,7 @@ pub fn ProofConverter(comptime F: type) type {
                 );
             } else {
                 // Fallback to zero prover for programs without trace
+                std.debug.print("[STAGE5] Using ZERO prover fallback (trace not available)\n", .{});
                 stage5_result = try stage5_prover_instance.generateStage5Proof(
                     &jolt_proof.stage5_sumcheck_proof,
                     transcript,

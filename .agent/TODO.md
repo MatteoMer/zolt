@@ -1,91 +1,59 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: IN PROGRESS - Stage 5 Sumcheck Implementation
+## Status: IN PROGRESS - Stage 5 Debugging
 
 ## Verified Stages
 - Stage 1: PASSED ✅
 - Stage 2: PASSED ✅
 - Stage 3: PASSED ✅
 - Stage 4: PASSED ✅
-- Stage 5: FAILED ❌ (current focus)
+- Stage 5: PARTIAL (sum check matches, final claim mismatch) 🔄
 - Stage 6: Not tested yet
 - Stage 7: Not tested yet
 
-## Stage 5 Root Cause Analysis (2026-01-30)
+## Current Session Progress
 
-### Problem Identified
-The Stage 5 batched sumcheck fails because:
-1. `output_claim = 17054937...` (from our sumcheck polynomials)
-2. `expected_output_claim = 18413512...` (from opening claims)
-3. Difference: ~1.3e75 (significant)
+### Fixed Issue
+- **computeEqAtIndex bit ordering** - Was using LSB-first extraction but Jolt uses MSB-first (big-endian) indexing
+  - Old: `ki = (k >> i) & 1` with `ri = r[n-1-i]`
+  - New: `bj = (k >> (n-1-j)) & 1` with `rj = r[j]`
 
-### Why It Fails
-- Instance 0 (RegistersValEvaluation) has non-zero expected_claim = 1225620...
-- Instance 1 (RamRaClaimReduction) has expected_claim = 0
-- Instance 2 (LookupsReadRaf) has expected_claim = 0
-
-The verifier computes:
+### Current Status
+Stage 5 RegistersValEvaluation sum check now passes:
 ```
-expected_output_claim = inc_claim * wa_claim * lt_eval
+[STAGE5] Sum check: computed_sum = { 44, 166, 232, 254, 202, 91, 155, 217, ... }
+[STAGE5] Sum check: regs_val_input = { 44, 166, 232, 254, 202, 91, 155, 217, ... }
+[STAGE5] Sum check: match = true
 ```
 
-Where `inc_claim` and `wa_claim` are read from our serialized opening claims.
-
-### Current Implementation Issues
-1. **RegistersValEvaluation** (8 rounds):
-   - Sumcheck polynomials are partially implemented
-   - But we're using zero polynomials for RamRa/Lookups which are active the whole time
-   - This affects transcript state divergence
-
-2. **RamRaClaimReduction** (24 rounds):
-   - Uses zero polynomials when active ❌
-   - Input claim is non-zero but expected_claim is 0 (correct for fibonacci)
-
-3. **LookupsReadRaf** (136 rounds):
-   - Uses zero polynomials when active ❌
-   - Input claim is non-zero but expected_claim is 0 (correct for fibonacci)
-
-### The Key Insight
-For fibonacci, RamRa and Lookups produce `expected_claim = 0` because:
-- The opening claims we provide for these are all zeros
-- `expected_output_claim = Σ (claim_i * prod_of_opening_factors) = 0`
-
-So **the polynomial sum should reduce to 0** but our zero polynomials don't correctly participate in the batched sumcheck:
-- When inactive: must produce `p(0) + p(1) = scaled_input_claim`
-- When active: must produce actual polynomial that sums to 0
-
-### Solution Path
-1. Keep using zero polynomials for RamRa and Lookups when active (since their contribution is 0)
-2. BUT ensure the inactive-to-active transition is correct
-3. The main issue is RegistersValEvaluation - need to correctly compute:
-   - Round polynomials that reduce input_claim to expected_output_claim
-   - Final opening claims `inc_claim` and `wa_claim` that make verifier happy
-
-### Batched Sumcheck Math
-For max_rounds = 136:
-- Rounds 0-111: Only LookupsReadRaf active (128 rounds)
-- Rounds 112-127: LookupsReadRaf + RamRaClaimReduction active (16+8 rounds)
-- Rounds 128-135: All three active (8 rounds each)
-
-Initial batched claim:
+But the final sumcheck output claim doesn't match verifier's expectation:
 ```
-batched_claim = batch0 * 2^128 * regs_input + batch1 * 2^112 * ram_ra_input + batch2 * lookups_input
+output_claim:          9634238360255972074564063771795547071448922862312878542074078713134022512917
+expected_output_claim: 12526348194846811955338446430006011584675142908683096698746245038486546873528
 ```
 
-## Next Steps (Priority Order)
+### Analysis
+The verifier computes `expected_output_claim = inc_claim * wa_claim * LT(r_normalized, r_cycle)`
 
-1. **Verify Stage 5 is using trace-aware prover**
-   - Check that config.execution_trace is not null
-   - Add debug output to confirm path taken
+Where:
+- `inc_claim` and `wa_claim` are retrieved from the proof (stored by prover's cache_openings)
+- `LT(r_normalized, r_cycle)` is computed independently by verifier
+- `r_normalized` = reversed sumcheck challenges (LITTLE_ENDIAN → BIG_ENDIAN)
 
-2. **Fix RegistersValEvaluation sumcheck**
-   - Compute LT polynomial correctly
-   - Ensure inc_evals and wa_evals are populated from trace
-   - Verify round polynomial p(0) + p(1) = current_claim
+The issue is likely in how the LT polynomial evaluates after binding. After binding with challenges
+in LowToHigh order, `lt[0]` should equal `LT(challenges_reversed, r_cycle)`.
 
-3. **Verify RamRa and Lookups zero polynomials**
-   - Since expected_claim = 0, zero polynomials should work
-   - But must ensure transcript appends match Jolt
+### Next Steps
+1. Add debug output to verify:
+   - What is `lt[0]` after all bindings?
+   - What does verifier compute for `LT(r_normalized, r_cycle)`?
+   - Are `inc_claim` and `wa_claim` correct?
+
+2. Verify the binding order matches Jolt exactly:
+   - Jolt binds variables LowToHigh (bit 0 = LSB first)
+   - After binding, the evaluation point is in reversed (BIG_ENDIAN) order
+
+3. Check if there's an off-by-one error in the batched sumcheck round handling
 
 ## Test Commands
 
@@ -94,9 +62,7 @@ batched_claim = batch0 * 2^128 * regs_input + batch1 * 2^112 * ram_ra_input + ba
 cd /home/vivado/projects/zolt
 ./zig-out/bin/zolt prove examples/fibonacci.elf \
   --jolt-format \
-  --export-preprocessing logs/zolt_preprocessing.bin \
-  -o logs/zolt_proof_dory.bin
-cp logs/*.bin /tmp/
+  -o /tmp/zolt_proof_dory.bin
 
 # Verify with Jolt
 cd /home/vivado/projects/zolt/jolt
@@ -104,6 +70,7 @@ cargo test --package jolt-core test_verify_zolt_proof_with_zolt_preprocessing --
 ```
 
 ## Key Files
-- `src/zkvm/spartan/stage5_prover.zig` - Stage 5 batched sumcheck prover
-- `src/zkvm/proof_converter.zig` - Main proof generation orchestration
-- `jolt-core/src/subprotocols/sumcheck.rs` - Jolt's batched sumcheck reference
+- `src/zkvm/spartan/stage5_prover.zig` - Stage 5 batched sumcheck
+- `src/zkvm/proof_converter.zig:2663-2686` - r_cycle/r_address extraction
+- `jolt-core/src/zkvm/registers/val_evaluation.rs` - Jolt's prover reference
+- `jolt-core/src/poly/lt_poly.rs` - LtPolynomial implementation

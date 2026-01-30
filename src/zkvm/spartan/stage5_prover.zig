@@ -436,10 +436,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             const lt_evals = try computeAllLtEvals(self.allocator, r_cycle_regs);
             defer self.allocator.free(lt_evals);
 
-            // Track register values for inc computation
-            var register_values: [32]u64 = [_]u64{0} ** 32;
-
             // Populate inc and wa from trace
+            // Use trace's rd_pre_value and rd_value directly (just like Jolt does)
             const trace_len = trace.steps.items.len;
             for (trace.steps.items, 0..) |step, j| {
                 if (step.is_noop) continue;
@@ -456,10 +454,18 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                 if (rd_used and rd != 0 and rd < 32) {
                     // Compute inc = rd_value - rd_pre_value
-                    const pre_value = register_values[rd];
-                    const post_value = step.rd_value;
-                    inc_evals[j] = F.fromU64(post_value).sub(F.fromU64(pre_value));
-                    register_values[rd] = post_value;
+                    // Use trace's pre/post values directly (Jolt uses cycle.rd_write())
+                    const pre_value: i128 = @intCast(step.rd_pre_value);
+                    const post_value: i128 = @intCast(step.rd_value);
+                    const increment = post_value - pre_value;
+
+                    // Convert signed increment to field element
+                    if (increment >= 0) {
+                        inc_evals[j] = F.fromU64(@intCast(increment));
+                    } else {
+                        // Negative: use field modular arithmetic
+                        inc_evals[j] = F.zero().sub(F.fromU64(@intCast(-increment)));
+                    }
 
                     // Compute wa = eq(r_address, rd)
                     // r_address has 7 bits, rd is 5 bits - extend rd to 7 bits
@@ -468,11 +474,37 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 // Note: lt_evals[j] is already computed for all j via computeAllLtEvals
             }
 
+            // Debug: Print first 10 polynomial values
+            std.debug.print("[STAGE5] First 10 polynomial values:\n", .{});
+            const debug_count = @min(trace_len, 10);
+            for (0..debug_count) |j| {
+                const step = trace.steps.items[j];
+                const instr = step.instruction;
+                const rd: u5 = @truncate((instr >> 7) & 0x1f);
+                std.debug.print("  j={}: rd={}, pre={}, post={}, inc={x}, wa={x}, lt={x}\n", .{
+                    j, rd, step.rd_pre_value, step.rd_value,
+                    inc_evals[j].toBytesBE()[24..32].*,
+                    wa_evals[j].toBytesBE()[24..32].*,
+                    lt_evals[j].toBytesBE()[24..32].*,
+                });
+            }
+
             // Verify the sum Σ_j inc(j) · wa(j) · lt(j) matches the input claim
             var computed_sum = F.zero();
+            var non_zero_terms: usize = 0;
             for (0..T) |j| {
-                computed_sum = computed_sum.add(inc_evals[j].mul(wa_evals[j]).mul(lt_evals[j]));
+                const term = inc_evals[j].mul(wa_evals[j]).mul(lt_evals[j]);
+                if (!term.eql(F.zero())) {
+                    non_zero_terms += 1;
+                    if (non_zero_terms <= 5) {
+                        std.debug.print("[STAGE5] Non-zero term at j={}: inc*wa*lt = {x}\n", .{
+                            j, term.toBytesBE()[24..32].*,
+                        });
+                    }
+                }
+                computed_sum = computed_sum.add(term);
             }
+            std.debug.print("[STAGE5] Total non-zero terms: {}\n", .{non_zero_terms});
             std.debug.print("[STAGE5] Built polynomial tables: T={}, trace_len={}\n", .{ T, trace_len });
             std.debug.print("[STAGE5] Sum check: computed_sum = {any}\n", .{computed_sum.toBytesBE()[0..16]});
             std.debug.print("[STAGE5] Sum check: regs_val_input = {any}\n", .{regs_val_input.toBytesBE()[0..16]});
@@ -581,10 +613,15 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // Get final opening claims from the folded polynomials
             const regs_val_inc_claim = inc_evals[0];
             const regs_val_wa_claim = wa_evals[0];
+            const regs_val_lt_claim = lt_evals[0];
+            const regs_final_product = regs_val_inc_claim.mul(regs_val_wa_claim).mul(regs_val_lt_claim);
 
             std.debug.print("[STAGE5] Final opening claims:\n", .{});
             std.debug.print("  regs_val_inc_claim = {any}\n", .{regs_val_inc_claim.toBytesBE()});
             std.debug.print("  regs_val_wa_claim = {any}\n", .{regs_val_wa_claim.toBytesBE()});
+            std.debug.print("  regs_val_lt_claim = {any}\n", .{regs_val_lt_claim.toBytesBE()});
+            std.debug.print("  regs_final_product (inc*wa*lt) = {any}\n", .{regs_final_product.toBytesBE()});
+            std.debug.print("  Expected from Jolt: Instance 0 expected = 1225620...462\n", .{});
 
             // Allocate opening claim arrays
             const num_lookup_tables: usize = 42;
@@ -608,15 +645,22 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             };
         }
 
-        /// Compute eq(r, k) for a specific index k (LE bit order, matching Jolt's r_address)
+        /// Compute eq(r, k) for a specific index k
+        /// r is in BIG_ENDIAN order (r[0] = MSB, r[n-1] = LSB)
+        /// k is interpreted as big-endian: k = b_0 * 2^(n-1) + b_1 * 2^(n-2) + ... + b_{n-1}
+        /// where b_j is the j-th bit (b_0 = MSB)
+        /// eq(k, r) = Π_j (b_j ? r[j] : (1-r[j]))
         fn computeEqAtIndex(r: []const F, k: usize) F {
+            const n = r.len;
             var result = F.one();
-            for (r, 0..) |ri, i| {
-                const ki = (k >> @intCast(i)) & 1;
-                if (ki == 1) {
-                    result = result.mul(ri);
+            for (0..n) |j| {
+                // Extract bit j of k (MSB-first): b_j = (k >> (n-1-j)) & 1
+                const bj: u1 = @truncate(k >> @intCast(n - 1 - j));
+                const rj = r[j]; // r[j] corresponds to bit j
+                if (bj == 1) {
+                    result = result.mul(rj);
                 } else {
-                    result = result.mul(F.one().sub(ri));
+                    result = result.mul(F.one().sub(rj));
                 }
             }
             return result;

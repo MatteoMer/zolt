@@ -1,49 +1,31 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: IN PROGRESS - Stage 5 Opening Point Issue
+## Status: IN PROGRESS - Stage 5 constant polynomial fix
 
 ## Verified Stages
 - Stage 1: PASSED ✅
 - Stage 2: PASSED ✅
 - Stage 3: PASSED ✅
 - Stage 4: PASSED ✅
-- Stage 5: FAILING ❌ (opening_point is all zeros)
+- Stage 5: TESTING (after constant polynomial fix)
 - Stage 6: Not tested yet
 - Stage 7: Not tested yet
 
 ## Current Session Progress
 
-### Fixed in This Session
-1. **Fixed Stage 5 Toom-Cook encoding** - Changed from evaluation at x=3 to evaluation at infinity for the degree-3 sumcheck polynomials. This matches Jolt's `UniPoly::from_evals_toom` format.
+### Fixed Issues
+
+1. **Debug Serialization Bug** - When debugging opening points, was serializing `F::Challenge` directly instead of converting to `F` first. This made values appear as zeros even though they were correct.
+
+2. **Stage 5 constant polynomial p_inf** - When `half == 0` (last round), the constant polynomial was incorrectly setting `p_inf = c` instead of `p_inf = 0`. For a constant polynomial, there is no x^3 term, so p_inf should be 0.
+
+### Previous Session Fixes (Still Applied)
+1. **Fixed Stage 5 Toom-Cook encoding** - Changed from evaluation at x=3 to evaluation at infinity for the degree-3 sumcheck polynomials.
    - Added `toomCookToCompressed()` function in `src/poly/mod.zig`
    - Updated `computeRegsValRoundPoly()` in stage5_prover.zig to compute eval_at_inf correctly
-   - Fixed constant polynomial handling (p_inf = 0 for constant polynomials)
 
-### Current Issue: Stage 5 Opening Point is All Zeros
-The Stage 5 verifier gets `r_cycle` = all zeros from the opening accumulator.
-
-**Root Cause Analysis:**
-1. Stage 4 verifier's `cache_openings()` is called
-2. It calls `normalize_opening_point(sumcheck_challenges)` to compute the opening point
-3. The `sumcheck_challenges` being passed are all zeros!
-4. This causes `opening_point` to be all zeros
-5. When Stage 5 retrieves `RegistersVal` opening, it gets zeros for r_cycle
-
-**Debug evidence:**
-- `[STAGE4 VERIFIER cache_openings] opening_point.len = 15`
-- All `opening_point[i] bytes = [00, 00, 00, 00, 00, 00, 00, 00]`
-- But Stage 4's computed r_cycle values are non-zero (printed earlier in the flow)
-
-**Hypothesis:**
-The batched sumcheck verifier may not be correctly passing the challenges to `cache_openings()`. There could be an issue with:
-1. How the batched sumcheck collects challenges across instances
-2. How the challenges are passed to the Registers instance's cache_openings
-3. A timing issue where cache_openings is called before challenges are populated
-
-### Next Steps
-1. Add debug output to the batched sumcheck verifier to see what challenges it passes
-2. Check if RegistersReadWriteCheckingVerifier receives the correct challenges
-3. Trace the challenge flow from transcript -> batched sumcheck -> instance cache_openings
+### Debug Investigation Summary
+The opening points ARE being stored correctly in the accumulator. The earlier "all zeros" debug output was caused by incorrect serialization of `F::Challenge` type directly instead of converting to `F` first.
 
 ## Test Commands
 
@@ -59,16 +41,10 @@ cd /home/vivado/projects/zolt/jolt
 cargo test --package jolt-core test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
 
-## Key Files
-- `src/zkvm/spartan/stage5_prover.zig` - Stage 5 batched sumcheck (FIXED Toom-Cook encoding)
-- `src/poly/mod.zig` - Added toomCookToCompressed() function
-- `jolt-core/src/zkvm/registers/read_write_checking.rs` - Stage 4 cache_openings (added debug)
-- `jolt-core/src/zkvm/registers/val_evaluation.rs` - Stage 5 verifier (added debug)
-
-## Commits Made
-- Previous session: "fix(stage5): correct eq polynomial bit ordering for Jolt compatibility"
-- Previous session: "fix(stage5): use compressed UniPoly transcript format"
-- This session: Toom-Cook encoding fix (needs commit)
+## Key Files Modified
+- `src/zkvm/spartan/stage5_prover.zig` - Fixed constant polynomial p_inf handling
+- `jolt-core/src/poly/opening_proof.rs` - Fixed debug serialization
+- `jolt-core/src/zkvm/registers/read_write_checking.rs` - Added debug output
 
 ## Technical Notes
 
@@ -82,4 +58,7 @@ For a constant polynomial `p(x) = c`:
 - `p(0) = p(1) = p(2) = c`
 - `p(inf) = 0` (no x^3 term)
 
-Previously Zolt was setting `p(3) = c` which is wrong for Toom-Cook.
+### Challenge vs Field Type Serialization
+`OpeningPoint.r` stores `Vec<F::Challenge>`. When debugging:
+- WRONG: `challenge.serialize_compressed()` - may give zeros
+- RIGHT: `Into::<F>::into(challenge).serialize_compressed()` - gives actual value

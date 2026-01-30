@@ -781,10 +781,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
             if (half == 0) {
                 if (n > 0) {
+                    // Constant polynomial: p(x) = c
+                    // For Toom-Cook: [p(0), p(1), p(2), p_inf] = [c, c, c, 0]
+                    // p_inf = 0 for constant polynomials (no x^3 term)
                     evals[0] = inc[0].mul(wa[0]).mul(lt[0]);
                     evals[1] = evals[0];
                     evals[2] = evals[0];
-                    evals[3] = evals[0];
+                    // evals[3] remains zero for constant polynomial
                 }
                 return evals;
             }

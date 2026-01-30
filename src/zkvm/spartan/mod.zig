@@ -51,6 +51,11 @@ pub const GruenSplitEqPolynomial = gruen_eq.GruenSplitEqPolynomial;
 pub const prefix_suffix = @import("prefix_suffix.zig");
 pub const Phase1Prover = prefix_suffix.Phase1Prover;
 
+// Stage 5 prover (RegistersValEvaluation, RamRaClaimReduction, LookupsReadRaf)
+pub const stage5_prover = @import("stage5_prover.zig");
+pub const Stage5BatchedProver = stage5_prover.Stage5BatchedProver;
+pub const Stage5Result = stage5_prover.Stage5Result;
+
 /// Spartan proof for R1CS
 pub fn R1CSProof(comptime F: type) type {
     return struct {

@@ -14329,3 +14329,32 @@ Cost: $17.4000
 Tokens: 0 in / 0 out
 Session ending: Ralph signaled SESSION_ENDING
 
+
+--- Iteration 1 ---
+Started: 2026-01-30T02:55:52.688992
+Ended: 2026-01-30T03:12:35.771486
+Turns: 78
+Cost: $5.8970
+Tokens: 0 in / 0 out
+Session ending: Ralph signaled SESSION_ENDING
+
+
+--- Iteration 1 ---
+Started: 2026-01-30T03:12:38.793756
+Ended: 2026-01-30T03:37:31.810613
+Turns: 0
+Cost: $0.0000
+Tokens: 0 in / 0 out
+Error: Command failed with exit code -9 (exit code: -9)
+Error output: Check stderr output for details
+
+
+--- Iteration 2 ---
+Started: 2026-01-30T03:37:33.813379
+Ended: 2026-01-30T04:11:58.794248
+Turns: 0
+Cost: $0.0000
+Tokens: 0 in / 0 out
+Error: Command failed with exit code -15 (exit code: -15)
+Error output: Check stderr output for details
+

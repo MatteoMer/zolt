@@ -44,6 +44,7 @@ const ram = @import("ram/mod.zig");
 const instruction = @import("instruction/mod.zig");
 const spartan_mod = @import("spartan/mod.zig");
 const Stage3Prover = spartan_mod.Stage3Prover;
+const Stage5BatchedProver = spartan_mod.Stage5BatchedProver;
 
 /// Convert Zolt's internal proof to Jolt-compatible format
 pub fn ProofConverter(comptime F: type) type {
@@ -1636,6 +1637,14 @@ pub fn ProofConverter(comptime F: type) type {
             for (transcript.state[0..8]) |b| std.debug.print("{x:0>2} ", .{b});
             std.debug.print("}}\n", .{});
 
+            // Variables to store Stage 4 opening point for Stage 5
+            var stage4_regs_r_address: ?[]F = null;
+            var stage4_regs_r_cycle: ?[]F = null;
+            defer {
+                if (stage4_regs_r_address) |arr| self.allocator.free(arr);
+                if (stage4_regs_r_cycle) |arr| self.allocator.free(arr);
+            }
+
             // Use Stage 4 prover if we have execution and memory trace data.
             stage4_block: {
                 const trace = config.execution_trace orelse {
@@ -2650,36 +2659,87 @@ pub fn ProofConverter(comptime F: type) type {
 
                 transcript.appendScalar(val_final_openings.inc_eval);
                 transcript.appendScalar(val_final_openings.wa_eval);
+
+                // Save Stage 4 RegistersRWC opening point for Stage 5
+                // For RegistersRWC:
+                // - Phase 1: 8 rounds (all cycle vars)
+                // - Phase 2: 7 rounds (all address vars)
+                // - Phase 3: 0 rounds
+                // r_address = reverse(phase2_challenges) = reverse(stage4_r_sumcheck[8..15])
+                // r_cycle = reverse(phase1_challenges) = reverse(stage4_r_sumcheck[0..8])
+                const regs_log_k: usize = 7; // LOG_REGISTER_COUNT
+                stage4_regs_r_address = try self.allocator.alloc(F, regs_log_k);
+                stage4_regs_r_cycle = try self.allocator.alloc(F, n_cycle_vars);
+
+                // r_address = reverse(phase2 challenges)
+                for (0..regs_log_k) |i| {
+                    stage4_regs_r_address.?[i] = stage4_r_sumcheck[n_cycle_vars + (regs_log_k - 1 - i)];
+                }
+                // r_cycle = reverse(phase1 challenges)
+                for (0..n_cycle_vars) |i| {
+                    stage4_regs_r_cycle.?[i] = stage4_r_sumcheck[n_cycle_vars - 1 - i];
+                }
+
+                std.debug.print("[STAGE4 -> STAGE5] Saved opening point for RegistersValEvaluation:\n", .{});
+                std.debug.print("  r_address[0] = {any}\n", .{stage4_regs_r_address.?[0].toBytesBE()[0..8]});
+                std.debug.print("  r_cycle[0] = {any}\n", .{stage4_regs_r_cycle.?[0].toBytesBE()[0..8]});
             } // end stage4_block
 
             // Stage 5: RegistersValEvaluation, RamRaClaimReduction, LookupsReadRaf
             // LookupsReadRaf has max rounds: LOG_K + log_T where LOG_K = XLEN * 2 = 128
             // For RV64: max_num_rounds = 128 + log_T = 128 + 8 = 136
             const lookups_log_k: usize = 128; // XLEN * 2 for RV64
-            const stage5_max_rounds = lookups_log_k + n_cycle_vars;
-            try self.generateZeroSumcheckProof(&jolt_proof.stage5_sumcheck_proof, stage5_max_rounds, 3);
+
+            // Get gamma for Stage 5 (used for batching RamRaClaimReduction and LookupsReadRaf claims)
+            const gamma_stage5 = transcript.challengeScalarFull();
+            std.debug.print("[STAGE5] gamma = {any}\n", .{gamma_stage5.toBytesBE()[0..8]});
+
+            // Generate Stage 5 proof using the batched sumcheck prover
+            var stage5_prover_instance = Stage5BatchedProver(F).init(self.allocator);
+            var stage5_result: spartan_mod.Stage5Result(F) = undefined;
+
+            // Use trace-aware prover if we have trace data and Stage 4 opening point
+            if (config.execution_trace != null and stage4_regs_r_address != null and stage4_regs_r_cycle != null) {
+                stage5_result = try stage5_prover_instance.generateStage5ProofWithTrace(
+                    &jolt_proof.stage5_sumcheck_proof,
+                    transcript,
+                    &jolt_proof.opening_claims,
+                    n_cycle_vars,
+                    log_ram_k,
+                    gamma_stage5,
+                    config.lookups_ra_virtual_log_k_chunk,
+                    config.execution_trace.?,
+                    stage4_regs_r_address.?,
+                    stage4_regs_r_cycle.?,
+                );
+            } else {
+                // Fallback to zero prover for programs without trace
+                stage5_result = try stage5_prover_instance.generateStage5Proof(
+                    &jolt_proof.stage5_sumcheck_proof,
+                    transcript,
+                    &jolt_proof.opening_claims,
+                    n_cycle_vars,
+                    log_ram_k,
+                    gamma_stage5,
+                    config.lookups_ra_virtual_log_k_chunk,
+                );
+            }
+            defer stage5_result.deinit();
 
             // RegistersValEvaluation claims
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .RdWa, .sumcheck_id = .RegistersValEvaluation } },
-                F.zero(),
+                stage5_result.regs_val_wa_claim,
             );
-            // RdInc claim for Stage 5 (needed by RegistersValEvaluation)
             try jolt_proof.opening_claims.insert(
                 .{ .Committed = .{ .poly = .RdInc, .sumcheck_id = .RegistersValEvaluation } },
-                F.zero(),
+                stage5_result.regs_val_inc_claim,
             );
 
             // RamRaClaimReduction claims
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamRaClaimReduction } },
-                F.zero(),
-            );
-
-            // RamRafEvaluation claims
-            try jolt_proof.opening_claims.insert(
-                .{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamRafEvaluation } },
-                F.zero(),
+                stage5_result.ram_ra_claim,
             );
 
             // LookupsReadRaf claims (Stage 5 - LookupsReadRafSumcheckVerifier)
@@ -2688,7 +2748,7 @@ pub fn ProofConverter(comptime F: type) type {
             for (0..num_lookup_tables) |i| {
                 try jolt_proof.opening_claims.insert(
                     .{ .Virtual = .{ .poly = .{ .LookupTableFlag = i }, .sumcheck_id = .InstructionReadRaf } },
-                    F.zero(),
+                    stage5_result.lookups_table_flags[i],
                 );
             }
 
@@ -2697,15 +2757,32 @@ pub fn ProofConverter(comptime F: type) type {
             for (0..lookups_ra_d) |i| {
                 try jolt_proof.opening_claims.insert(
                     .{ .Virtual = .{ .poly = .{ .InstructionRa = i }, .sumcheck_id = .InstructionReadRaf } },
-                    F.zero(),
+                    stage5_result.lookups_ra_chunks[i],
                 );
             }
 
             // InstructionRafFlag for LookupsReadRaf
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .InstructionRafFlag, .sumcheck_id = .InstructionReadRaf } },
-                F.zero(),
+                stage5_result.lookups_raf_flag,
             );
+
+            // Append Stage 5 cache openings to transcript
+            // Instance 0: RegistersValEvaluation (RdInc, RdWa)
+            transcript.appendScalar(stage5_result.regs_val_inc_claim);
+            transcript.appendScalar(stage5_result.regs_val_wa_claim);
+
+            // Instance 1: RamRaClaimReduction (RamRa)
+            transcript.appendScalar(stage5_result.ram_ra_claim);
+
+            // Instance 2: LookupsReadRaf (LookupTableFlag(0..42), InstructionRa(0..8), InstructionRafFlag)
+            for (stage5_result.lookups_table_flags) |flag| {
+                transcript.appendScalar(flag);
+            }
+            for (stage5_result.lookups_ra_chunks) |chunk| {
+                transcript.appendScalar(chunk);
+            }
+            transcript.appendScalar(stage5_result.lookups_raf_flag);
 
             // Stage 6: BytecodeReadRaf, RamHammingBooleanity, Booleanity, RamRaVirtual, LookupsRaVirtual, IncClaimReduction
             // BytecodeReadRaf has max rounds: bytecode_log_K + log_T = 16 + 8 = 24

@@ -90,21 +90,59 @@ cargo test --package jolt-core test_verify_zolt_proof_with_zolt_preprocessing --
 
 ## Next Steps
 
-1. **Implement Real Stage 5 Prover**
-   - RegistersValEvaluation: compute real claims from trace
-   - RamRaClaimReduction: compute real claims from trace
-   - LookupsReadRaf: compute real claims from trace
+### Immediate Priority: Stage 5 Implementation
 
-2. **Implement Real Stage 6 Prover**
+The core challenge is implementing a batched sumcheck prover that:
+1. Handles different round counts per instance (8, 24, 136)
+2. Computes actual round polynomials from witness data
+3. Produces opening claims that match the sumcheck reduction
+
+**Implementation Plan:**
+
+1. **Create BatchedSumcheckProver framework**
+   - Generic batched sumcheck that handles multiple instances
+   - Instance start/end based on remaining rounds
+   - Polynomial accumulation with batching coefficients
+
+2. **Implement RegistersValEvaluationProver** (partially done)
+   - Located at: `src/zkvm/registers/val_evaluation.zig`
+   - Need to integrate with proof_converter
+   - Need to extract rd_inc, rd_addresses from trace
+
+3. **Implement RamRaClaimReductionProver**
+   - 3-phase structure: PhaseAddress → PhaseCycle1 → PhaseCycle2
+   - Reference: jolt-core/src/zkvm/claim_reductions/ram_ra.rs
+   - Batches 4 RA claims into single opening
+
+4. **Implement LookupsReadRafProver**
+   - 136 rounds (128 address + 8 cycle)
+   - Instruction lookup verification
+   - Reference: jolt-core/src/zkvm/bytecode/read_raf_checking.rs
+
+### After Stage 5
+
+5. **Implement Stage 6 Provers**
    - BytecodeReadRaf
-   - RamHammingBooleanity
-   - Booleanity
-   - RamRaVirtual
-   - LookupsRaVirtual
+   - RamHammingBooleanity, Booleanity
+   - RamRaVirtual, LookupsRaVirtual
    - IncClaimReduction
 
-3. **Implement Real Stage 7 Prover**
+6. **Implement Stage 7 Prover**
    - HammingWeightClaimReduction
 
-4. **Final verification**
+7. **Final verification**
    - Once all stages generate correct proofs, full verification should pass
+
+## Technical Notes
+
+### Why Zero Sumcheck Doesn't Work
+
+Zero-coefficient round polynomials combined with hint-based reconstruction:
+```
+p(x) = H*x  (where H = previous claim)
+p(r) = H*r
+output_claim = input_claim * r1 * r2 * ... * rn ≠ 0
+```
+
+But expected_output_claim = 0 (if we provide zero opening claims).
+Hence verification fails.

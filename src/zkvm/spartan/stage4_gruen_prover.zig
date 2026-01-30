@@ -127,11 +127,14 @@ pub fn Stage4GruenProver(comptime F: type) type {
             stage3_claims: ?Stage3Claims(F),
             batching_coeff: F,
         ) !Self {
-            // Default phase config: phase1 = log_T / 2, phase2 = LOG_K
+            // CRITICAL: Must match Jolt's phase config exactly for verification compatibility
+            // Jolt uses: phase1 = T.log_2() (ALL cycle vars), phase2 = K.log_2() (ALL address vars)
+            // This means Phase 3 has 0 rounds - everything is bound in Phase 1 and 2.
+            // See jolt-core/src/zkvm/registers/read_write_checking.rs:200-207
             const T = std.math.ceilPowerOfTwo(usize, trace.steps.items.len) catch trace.steps.items.len;
             const log_T = @ctz(T);
-            const phase1_num_rounds = log_T / 2;
-            const phase2_num_rounds = LOG_K;
+            const phase1_num_rounds = log_T; // ALL cycle vars in Phase 1 (matches Jolt)
+            const phase2_num_rounds = LOG_K; // ALL address vars in Phase 2 (matches Jolt)
             return initWithPhaseConfig(allocator, trace, gamma, r_cycle, stage3_claims, batching_coeff, phase1_num_rounds, phase2_num_rounds);
         }
 

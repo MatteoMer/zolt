@@ -26,11 +26,22 @@ pub const ReadWriteConfig = struct {
     pub const LOG_REGISTER_COUNT: u8 = std.math.log2_int(u8, common.REGISTER_COUNT);
 
     pub fn default(log_t: u8, log_k: u8) ReadWriteConfig {
-        // Default: half of cycle variables in phase 1, rest in phase 2
-        const ram_phase1 = log_t / 2;
-        const ram_phase2 = log_k;
-        const reg_phase1 = log_t / 2;
-        const reg_phase2: u8 = LOG_REGISTER_COUNT;
+        // CRITICAL: Must match Jolt's phase configuration exactly!
+        // See jolt-core/src/zkvm/registers/read_write_checking.rs:200-207
+        //
+        // For RegistersReadWriteChecking:
+        //   phase1 = T.log_2() (ALL cycle vars)
+        //   phase2 = K.log_2() (ALL address vars)
+        //   phase3 = 0 rounds
+        //
+        // For RamReadWriteChecking (same pattern):
+        //   phase1 = T.log_2() (ALL cycle vars)
+        //   phase2 = K.log_2() (ALL address vars)
+        //   phase3 = 0 rounds
+        const ram_phase1 = log_t; // ALL cycle vars in phase 1
+        const ram_phase2 = log_k; // ALL address vars in phase 2
+        const reg_phase1 = log_t; // ALL cycle vars in phase 1 (matches Jolt)
+        const reg_phase2: u8 = LOG_REGISTER_COUNT; // ALL address vars in phase 2
 
         return .{
             .ram_rw_phase1_num_rounds = ram_phase1,

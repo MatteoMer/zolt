@@ -2986,8 +2986,9 @@ pub fn ProofConverter(comptime F: type) type {
                 // - Phase 1: phase1_num_rounds cycle vars
                 // - Phase 2: log_k address vars
                 // - Phase 3: remaining cycle vars
-                // Default phase1_num_rounds = log_t / 2, matching Jolt's ReadWriteConfig.default()
-                const phase1_num_rounds = n_cycle_vars / 2;
+                // MUST match Jolt's phase config: phase1 = T.log_2() (ALL cycle vars)
+                // See jolt-core/src/zkvm/ram/read_write_checking.rs:169-170
+                const phase1_num_rounds = n_cycle_vars; // ALL cycle vars in phase 1
                 var rwc_params = ram.RamReadWriteCheckingParams(F).initWithPhaseConfig(
                     self.allocator,
                     gamma_rwc,
@@ -3821,10 +3822,10 @@ pub fn ProofConverter(comptime F: type) type {
                 // We compute r_address from the Stage 2 challenges using normalize_opening_point logic.
                 if (config.initial_ram != null and config.memory_layout != null) {
                     // RWC uses 3-phase structure:
-                    // - Phase 1: phase1_num_rounds cycle vars
+                    // - Phase 1: phase1_num_rounds cycle vars (ALL cycle vars for Jolt compat)
                     // - Phase 2: log_k address vars
                     // - Phase 3: remaining cycle + address vars
-                    const phase1 = n_cycle_vars / 2; // default config
+                    const phase1 = n_cycle_vars; // ALL cycle vars in phase 1 (Jolt compat)
                     const phase2 = log_ram_k;
                     const phase3_cycle_len = n_cycle_vars - phase1;
                     const phase3_address_len = log_ram_k - phase2; // = 0 for default config

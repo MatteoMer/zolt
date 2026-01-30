@@ -1,31 +1,47 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: IN PROGRESS - Stage 5 constant polynomial fix
+## Status: IN PROGRESS - Stage 5 Sumcheck Mismatch
 
 ## Verified Stages
 - Stage 1: PASSED ✅
 - Stage 2: PASSED ✅
 - Stage 3: PASSED ✅
 - Stage 4: PASSED ✅
-- Stage 5: TESTING (after constant polynomial fix)
+- Stage 5: FAILING ❌ (output_claim != expected_output_claim)
 - Stage 6: Not tested yet
 - Stage 7: Not tested yet
 
-## Current Session Progress
+## Current Issue: Stage 5 Sumcheck Mismatch
 
-### Fixed Issues
+The Stage 5 sumcheck verification fails with:
+- `output_claim = 14207773099973851432316380405455832148939247972351308198786873286672527593212`
+- `expected_output_claim = 18244124058491777017643072331864832508434028736769776383365323382525894304545`
 
-1. **Debug Serialization Bug** - When debugging opening points, was serializing `F::Challenge` directly instead of converting to `F` first. This made values appear as zeros even though they were correct.
+### Investigation Summary
 
-2. **Stage 5 constant polynomial p_inf** - When `half == 0` (last round), the constant polynomial was incorrectly setting `p_inf = c` instead of `p_inf = 0`. For a constant polynomial, there is no x^3 term, so p_inf should be 0.
+1. **Opening points are stored correctly** - Debug confirmed that the `RegistersVal` opening point from Stage 4 is stored in the accumulator with correct values.
 
-### Previous Session Fixes (Still Applied)
-1. **Fixed Stage 5 Toom-Cook encoding** - Changed from evaluation at x=3 to evaluation at infinity for the degree-3 sumcheck polynomials.
-   - Added `toomCookToCompressed()` function in `src/poly/mod.zig`
-   - Updated `computeRegsValRoundPoly()` in stage5_prover.zig to compute eval_at_inf correctly
+2. **Serialization red herring** - Earlier debug showed zeros because `F::Challenge::serialize_compressed()` behaves differently than `F::serialize_compressed()`. The actual values are correct.
 
-### Debug Investigation Summary
-The opening points ARE being stored correctly in the accumulator. The earlier "all zeros" debug output was caused by incorrect serialization of `F::Challenge` type directly instead of converting to `F` first.
+3. **LT polynomial algorithm matches Jolt** - Both compute `evals[j] = x + r - x*r` and `evals[half+j] = x*r` iterating from LSB to MSB.
+
+4. **Binding order matches** - Both use `LowToHigh` binding: `Z_new[i] = (1-r)*Z[2i] + r*Z[2i+1]`
+
+5. **Toom-Cook encoding** - Zolt computes `[p(0), p(1), p(2), p_inf]` where `p_inf = (inc_1-inc_0)*(wa_1-wa_0)*(lt_1-lt_0)`. This matches Jolt.
+
+### Possible Remaining Issues
+
+1. **Input claim mismatch** - The Stage 5 input claim may not match what Jolt expects
+2. **WA polynomial** - The write-address polynomial may be computed differently
+3. **Inc polynomial** - The increment polynomial may be computed differently
+4. **Transcript divergence** - Though Stages 1-4 pass, there may be a subtle transcript difference
+
+### Next Steps
+
+1. Compare Stage 5 round 0 coefficients between Zolt and Jolt
+2. Verify inc/wa polynomial values at index 0
+3. Check if the batching coefficient is correct
+4. Verify the input_claim for Stage 5 matches exactly
 
 ## Test Commands
 
@@ -41,24 +57,10 @@ cd /home/vivado/projects/zolt/jolt
 cargo test --package jolt-core test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
 
-## Key Files Modified
-- `src/zkvm/spartan/stage5_prover.zig` - Fixed constant polynomial p_inf handling
-- `jolt-core/src/poly/opening_proof.rs` - Fixed debug serialization
-- `jolt-core/src/zkvm/registers/read_write_checking.rs` - Added debug output
+## Key Files
+- `src/zkvm/spartan/stage5_prover.zig` - Zolt Stage 5 prover
+- `jolt-core/src/zkvm/registers/val_evaluation.rs` - Jolt Stage 5 verifier
+- `jolt-core/src/poly/lt_poly.rs` - Jolt LT polynomial
 
-## Technical Notes
-
-### Toom-Cook Encoding for Degree-3 Sumcheck
-Jolt uses Toom-Cook style evaluation points: `[p(0), p(1), p(2), p(inf)]`
-- `p(inf)` = leading coefficient (c3 for cubic polynomial)
-- For product of linear polynomials: `f_inf = f_1 - f_0`
-
-### Constant Polynomial in Batched Sumcheck
-For a constant polynomial `p(x) = c`:
-- `p(0) = p(1) = p(2) = c`
-- `p(inf) = 0` (no x^3 term)
-
-### Challenge vs Field Type Serialization
-`OpeningPoint.r` stores `Vec<F::Challenge>`. When debugging:
-- WRONG: `challenge.serialize_compressed()` - may give zeros
-- RIGHT: `Into::<F>::into(challenge).serialize_compressed()` - gives actual value
+## Commits Made This Session
+- `85d485d` - fix(stage5): correct constant polynomial p_inf to be zero

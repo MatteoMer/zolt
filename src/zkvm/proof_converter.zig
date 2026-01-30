@@ -950,10 +950,14 @@ pub fn ProofConverter(comptime F: type) type {
             // Stages 3-7 (placeholder)
             // Stage 4 needs LOG_K + n_cycle_vars rounds where LOG_K = 7 (128 registers)
             const log_registers = 7;
+            const lookups_log_k: usize = 128; // XLEN * 2 for RV64 instruction lookups
+            const bytecode_log_k: usize = 16; // log2(65536) bytecode address space
             try self.generateZeroSumcheckProof(&jolt_proof.stage3_sumcheck_proof, n_cycle_vars, 3);
             try self.generateZeroSumcheckProof(&jolt_proof.stage4_sumcheck_proof, log_registers + n_cycle_vars, 3);
-            try self.generateZeroSumcheckProof(&jolt_proof.stage5_sumcheck_proof, n_cycle_vars, 3);
-            try self.generateZeroSumcheckProof(&jolt_proof.stage6_sumcheck_proof, n_cycle_vars, 3);
+            // Stage 5: max rounds from LookupsReadRaf = lookups_log_k + n_cycle_vars
+            try self.generateZeroSumcheckProof(&jolt_proof.stage5_sumcheck_proof, lookups_log_k + n_cycle_vars, 3);
+            // Stage 6: max rounds from BytecodeReadRaf = bytecode_log_k + n_cycle_vars
+            try self.generateZeroSumcheckProof(&jolt_proof.stage6_sumcheck_proof, bytecode_log_k + n_cycle_vars, 3);
             try self.generateZeroSumcheckProof(&jolt_proof.stage7_sumcheck_proof, n_cycle_vars, 3);
 
             return jolt_proof;
@@ -2648,8 +2652,12 @@ pub fn ProofConverter(comptime F: type) type {
                 transcript.appendScalar(val_final_openings.wa_eval);
             } // end stage4_block
 
-            // Stage 5: RegistersValEvaluation, RamRaClaimReduction, RamRafEvaluation
-            try self.generateZeroSumcheckProof(&jolt_proof.stage5_sumcheck_proof, n_cycle_vars, 3);
+            // Stage 5: RegistersValEvaluation, RamRaClaimReduction, LookupsReadRaf
+            // LookupsReadRaf has max rounds: LOG_K + log_T where LOG_K = XLEN * 2 = 128
+            // For RV64: max_num_rounds = 128 + log_T = 128 + 8 = 136
+            const lookups_log_k: usize = 128; // XLEN * 2 for RV64
+            const stage5_max_rounds = lookups_log_k + n_cycle_vars;
+            try self.generateZeroSumcheckProof(&jolt_proof.stage5_sumcheck_proof, stage5_max_rounds, 3);
 
             // RegistersValEvaluation claims
             try jolt_proof.opening_claims.insert(
@@ -2674,8 +2682,36 @@ pub fn ProofConverter(comptime F: type) type {
                 F.zero(),
             );
 
-            // Stage 6: RamHammingBooleanity, Booleanity, RamRaVirtualization, IncClaimReduction
-            try self.generateZeroSumcheckProof(&jolt_proof.stage6_sumcheck_proof, n_cycle_vars, 3);
+            // LookupsReadRaf claims (Stage 5 - LookupsReadRafSumcheckVerifier)
+            // LookupTableFlag(i) for each of the 42 lookup tables
+            const num_lookup_tables: usize = 42; // LookupTables::<XLEN>::COUNT
+            for (0..num_lookup_tables) |i| {
+                try jolt_proof.opening_claims.insert(
+                    .{ .Virtual = .{ .poly = .{ .LookupTableFlag = i }, .sumcheck_id = .InstructionReadRaf } },
+                    F.zero(),
+                );
+            }
+
+            // InstructionRa(i) chunks for LookupsReadRaf (LOG_K / ra_virtual_log_k_chunk = 128 / 16 = 8 chunks)
+            const lookups_ra_d: usize = lookups_log_k / config.lookups_ra_virtual_log_k_chunk;
+            for (0..lookups_ra_d) |i| {
+                try jolt_proof.opening_claims.insert(
+                    .{ .Virtual = .{ .poly = .{ .InstructionRa = i }, .sumcheck_id = .InstructionReadRaf } },
+                    F.zero(),
+                );
+            }
+
+            // InstructionRafFlag for LookupsReadRaf
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .InstructionRafFlag, .sumcheck_id = .InstructionReadRaf } },
+                F.zero(),
+            );
+
+            // Stage 6: BytecodeReadRaf, RamHammingBooleanity, Booleanity, RamRaVirtual, LookupsRaVirtual, IncClaimReduction
+            // BytecodeReadRaf has max rounds: bytecode_log_K + log_T = 16 + 8 = 24
+            const bytecode_log_k = std.math.log2_int(usize, config.bytecode_K);
+            const stage6_max_rounds = bytecode_log_k + n_cycle_vars;
+            try self.generateZeroSumcheckProof(&jolt_proof.stage6_sumcheck_proof, stage6_max_rounds, 3);
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .RamHammingWeight, .sumcheck_id = .Booleanity } },
                 F.zero(),

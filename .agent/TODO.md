@@ -1,6 +1,6 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: IN PROGRESS - Stage 5 Round Count Mismatch
+## Status: IN PROGRESS - Stage 5 Claim Value Mismatch
 
 ## Current Issue (2026-01-30)
 
@@ -8,43 +8,51 @@
 1. **Fixed: Missing `--jolt-format` flag** - The prover was not using the Jolt-compatible proof generation path
 2. **Fixed: Stage 4 Phase Configuration** - Changed phase1 from `log_t/2` to `log_t` to match Jolt
 3. **Stage 4 PASSES** - RegistersReadWriteChecking with 15 rounds works correctly!
+4. **Fixed: Stage 5 Round Count** - Changed from 8 to 136 rounds (LookupsReadRaf max)
+5. **Fixed: Stage 6 Round Count** - Changed from 8 to 24 rounds (BytecodeReadRaf max)
+6. **Fixed: Missing Claims** - Added LookupTableFlag(0-41), InstructionRa(0-7), InstructionRafFlag
 
 ### Current Error
 ```
-assertion `left == right` failed
-  left: 8
- right: 136
+=== SUMCHECK VERIFICATION FAILED ===
+output_claim:          9219502725919403917352040447078840562485657953396409742770278624303131450233
+expected_output_claim: 0
+r_sumcheck len: 136
 ```
-In `sumcheck.rs:335` - Stage 5 sumcheck proof has wrong number of rounds.
-
-### Root Cause
-Jolt's Stage 5 is a **batched sumcheck** with 3 instances:
-1. `RegistersValEvaluationSumcheckVerifier` (8 rounds = log_T)
-2. `RamRaClaimReductionSumcheckVerifier` (136 rounds!!)
-3. `LookupsReadRafSumcheckVerifier`
-
-Zolt generates Stage 5 with only 8 rounds (RegistersValEvaluation), not considering the other instances!
+Stage 5 sumcheck structure is correct (136 rounds pass) but the claims are zeros instead of real values.
 
 ### Verification Results
 - Stage 1: PASSED ✅
 - Stage 2: PASSED ✅
 - Stage 3: PASSED ✅
 - Stage 4: PASSED ✅ (15 rounds, RegistersReadWriteChecking)
-- Stage 5: FAILED ❌ (wrong round count)
+- Stage 5: FAILED ❌ (claims are zero - need to compute real values)
+- Stage 6: NOT YET REACHED
+- Stage 7: NOT YET REACHED
 
 ## Files Modified This Session
 
 ### `src/zkvm/proof_converter.zig`
-- Line 2990: Changed `phase1_num_rounds = n_cycle_vars / 2` to `phase1_num_rounds = n_cycle_vars`
-- Line 3828: Changed `phase1 = n_cycle_vars / 2` to `phase1 = n_cycle_vars`
+- Line ~2652: Changed Stage 5 from `n_cycle_vars` to `lookups_log_k + n_cycle_vars` (136 rounds)
+- Line ~2688: Changed Stage 6 from `n_cycle_vars` to `bytecode_log_k + n_cycle_vars` (24 rounds)
+- Added LookupTableFlag(0-41) claims for InstructionReadRaf
+- Added InstructionRa(0-7) claims for InstructionReadRaf
+- Added InstructionRafFlag claim for InstructionReadRaf
 
-### `src/zkvm/jolt_types.zig`
-- Line 41: Changed `ram_phase1 = log_t / 2` to `ram_phase1 = log_t`
-- Line 43: Changed `reg_phase1 = log_t / 2` to `reg_phase1 = log_t`
+### Key Architecture Notes
 
-### Key Discovery: --jolt-format flag
-The `--jolt-format` command line flag is REQUIRED to use the Jolt-compatible proof generation path!
-Without it, Zolt generates proofs with its internal format (different stage layout).
+### Jolt Stage 5 Structure
+Stage 5 is a **batched sumcheck** with 3 instances:
+1. `RegistersValEvaluationSumcheckVerifier` (8 rounds = log_T)
+2. `RamRaClaimReductionSumcheckVerifier` (24 rounds = log_K + log_T = 16 + 8)
+3. `LookupsReadRafSumcheckVerifier` (136 rounds = LOG_K + log_T = 128 + 8)
+
+Where:
+- `LOG_K` for lookups = XLEN * 2 = 64 * 2 = 128
+- `log_K` for RAM = 16 (from one_hot_params.ram_k)
+- `log_T` = 8 (trace length = 256)
+
+The batched sumcheck uses **max_num_rounds** = max(8, 24, 136) = 136 rounds!
 
 ## Test Commands
 
@@ -65,35 +73,21 @@ cargo test --package jolt-core test_verify_zolt_proof_with_zolt_preprocessing --
 
 ## Next Steps
 
-1. **Implement Stage 5 Batched Sumcheck**
-   - Add RamRaClaimReductionSumcheckProver
-   - Add LookupsReadRafSumcheckProver
-   - Batch all 3 instances together with correct round count (136 rounds)
+1. **Implement Real Stage 5 Prover**
+   - RegistersValEvaluation: compute real claims from trace
+   - RamRaClaimReduction: compute real claims from trace
+   - LookupsReadRaf: compute real claims from trace
 
-2. **Check Stage 6 and Stage 7**
-   - Stage 6: BytecodeReadRaf + RamHammingBooleanity + Booleanity
-   - Stage 7: HammingWeightClaimReduction
+2. **Implement Real Stage 6 Prover**
+   - BytecodeReadRaf
+   - RamHammingBooleanity
+   - Booleanity
+   - RamRaVirtual
+   - LookupsRaVirtual
+   - IncClaimReduction
 
-3. **Verify remaining stages**
+3. **Implement Real Stage 7 Prover**
+   - HammingWeightClaimReduction
+
+4. **Final verification**
    - Once all stages generate correct proofs, full verification should pass
-
-## Key Architecture Notes
-
-### Jolt Stage Layout (from verifier.rs)
-- Stage 1: SpartanOuter + UniSkip
-- Stage 2: Batched (multiple instances)
-- Stage 3: SpartanShift
-- Stage 4: RegistersReadWriteChecking + RamValEval + RamValFinal (batched)
-- Stage 5: RegistersValEval + RamRaReduction + LookupsReadRaf (batched)
-- Stage 6: BytecodeReadRaf + RamHammingBooleanity + Booleanity (batched)
-- Stage 7: HammingWeightClaimReduction
-- Stage 8: Dory batch opening
-
-### Zolt Internal Stage Layout (different!)
-- Stage 1-3: Similar
-- Stage 4: Value evaluation (8 rounds)
-- Stage 5: Register evaluation (8 rounds)
-- Stage 6: Booleanity (8 rounds)
-
-The mismatch is because Zolt's internal verifier has a different stage layout than Jolt!
-The proof_converter.zig is supposed to translate, but it's not generating the batched stages correctly.

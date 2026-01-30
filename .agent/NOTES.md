@@ -1,63 +1,54 @@
 # Zolt-Jolt Cross-Verification Progress
 
-## Session 84 - Stage 5 Debugging (2026-01-30)
+## Session 85 - Stage 5 Analysis Complete (2026-01-30)
 
 ### Key Finding
-Stage 5 RegistersValEvaluation fails because:
-```
-computed_sum = Σ_j inc(j) * wa(j) * LT(j, r_cycle)
-regs_val_input = RegistersVal @ RegistersReadWriteChecking (from Stage 4)
-computed_sum ≠ regs_val_input
-```
+Stage 5 requires implementing 3 instances:
+1. **RegistersValEvaluation** (8 rounds) - IMPLEMENTED ✅
+2. **RamRaClaimReduction** (24 rounds) - Zero OK (no RAM in Fibonacci)
+3. **LookupsReadRaf** (136 rounds) - NOT IMPLEMENTED ❌
 
-### Debug Output
+### Root Cause of Failure
 ```
-[STAGE5] Sum check: computed_sum = { 11, 81, 53, ... }
-[STAGE5] Sum check: regs_val_input = { 44, 166, 232, ... }
-[STAGE5] Sum check: match = false
+batched_claim - p(0)+p(1) = batch2 * lookups_input  (exactly!)
 ```
 
-### Analysis
-The prover computes `inc * wa * LT` over all trace cycles and sums them.
-But this sum doesn't equal the input claim from Stage 4.
+Instance 2 (LookupsReadRaf) has num_rounds = max_rounds = 136, so:
+- It never has a "constant phase" where we can scale input_claim
+- Every round is "active" and requires actual polynomial computation
+- We send zero polynomials, but lookups_input is non-zero
 
-Possible causes:
-1. **r_cycle is wrong** - The r_cycle from Stage 4 may not match what the verifier expects
-2. **r_address is wrong** - Similarly for r_address used in wa computation
-3. **inc computation is wrong** - rd_inc values from trace may be wrong
-4. **wa computation is wrong** - eq(r_address, rd) computation may be wrong
-5. **LT computation is wrong** - LT(j, r_cycle) computation may have bit order issues
+### Verification of RegistersValEvaluation
+1. ✅ Sum check: computed_sum = regs_val_input (match = true)
+2. ✅ LT polynomial: lt[0] matches LT_verifier
+3. ✅ Final product: inc*wa*lt matches expected_product
+4. ❌ Overall Stage 5 fails due to Instance 2
 
-### Stage 4 Architecture
-Stage 4 is a batched sumcheck with:
-- RegistersRWC: 15 rounds (7 address + 8 cycle, 3-phase Gruen)
-- ValEvaluation: 8 rounds (cycle only)
-- ValFinal: 8 rounds (cycle only)
-- max_rounds = 15
+### What LookupsReadRaf Needs
+From read_raf_checking.rs:
+```rust
+rv(r_reduction) + γ·left_op(r_reduction) + γ²·right_op(r_reduction)
+  = Σ_j Σ_k [ eq(j; r_reduction) · ra(k, j) · (Val_j(k) + γ · RafVal_j(k)) ]
+```
 
-Phase structure for RegistersRWC:
-- Phase 1 (rounds 0-7): Bind cycle vars (8 rounds)
-- Phase 2 (rounds 8-14): Bind address vars (7 rounds)
-- Phase 3: None (0 rounds)
+Requires:
+- Prefix/suffix decomposition for 128-bit address space
+- Lookup table MLE evaluations
+- RAF polynomial handling
+- Complex batching with γ
 
-So:
-- `r_cycle = reverse(challenges[0..8])` → BIG_ENDIAN
-- `r_address = reverse(challenges[8..15])` → BIG_ENDIAN
-
-### Next Steps
-1. Add debug to print first few inc/wa/lt evaluations
-2. Compare against what Jolt prover computes
-3. Verify r_cycle and r_address match between prover and verifier
-4. Check bit ordering in LT and eq computations
-
-### Key Files
-- `src/zkvm/spartan/stage5_prover.zig` - Stage 5 batched sumcheck prover
-- `src/zkvm/proof_converter.zig:2663-2686` - r_cycle/r_address extraction
-- `jolt-core/src/zkvm/registers/val_evaluation.rs` - Jolt's prover reference
+### Commits
+- 6b7de26: Stage 5 - Fix RegistersValEvaluation, document LookupsReadRaf missing
 
 ---
 
-## Session 83 Summary
+## Session 84 Summary
 - Identified Stage 5 failure: output_claim ≠ expected_output_claim
-- Expected claims: Instance 0 = non-zero, Instance 1 = 0, Instance 2 = 0
-- The issue is in RegistersValEvaluation polynomial computation
+- Fixed constant polynomial scaling (use scaled_input_claim, not half_claim)
+- Verified RegistersValEvaluation implementation is correct
+
+## Key Files
+- `src/zkvm/spartan/stage5_prover.zig` - Stage 5 batched sumcheck prover
+- `jolt-core/src/zkvm/registers/val_evaluation.rs` - Jolt's RegistersValEvaluation
+- `jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs` - LookupsReadRaf reference
+- `jolt-core/src/subprotocols/sumcheck.rs` - Batched sumcheck verifier

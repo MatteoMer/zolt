@@ -717,6 +717,33 @@ pub fn UniPoly(comptime F: type) type {
             // Compressed format: [c0, c2, c3] - Jolt omits c1 and recovers from hint
             return [3]F{ c0, c2, c3 };
         }
+
+        /// Create compressed coefficients from previous claim and degree-2 evaluations
+        ///
+        /// For a degree-2 polynomial p(x) = c0 + c1*x + c2*x^2:
+        /// - p(0) = c0 = eval_0
+        /// - p(1) = c0 + c1 + c2 = previous_claim - eval_0 (from sumcheck property p(0)+p(1)=claim)
+        /// - p(2) = c0 + 2*c1 + 4*c2 = eval_2
+        ///
+        /// Solving:
+        /// - c0 = eval_0
+        /// - c1 = previous_claim - eval_0 - c2 (recovered from hint)
+        /// - c2 = (eval_2 - 2*p(1) + eval_0) / 2
+        ///      = (eval_2 - 2*(previous_claim - eval_0) + eval_0) / 2
+        ///      = (eval_2 - 2*previous_claim + 3*eval_0) / 2
+        ///
+        /// Returns [c0, c2, 0] since degree is 2 (no cubic term)
+        pub fn fromEvalsAndHint(previous_claim: F, eval_0: F, eval_2: F) struct { coeffs: [3]F } {
+            const p1 = previous_claim.sub(eval_0); // p(1) from sumcheck property
+
+            // c2 = (eval_2 - 2*p(1) + eval_0) / 2
+            const two = F.fromU64(2);
+            const c2_num = eval_2.sub(two.mul(p1)).add(eval_0);
+            const c2 = c2_num.mul(two.inverse().?);
+
+            // Compressed format: [c0, c2, c3] where c3=0 for degree-2
+            return .{ .coeffs = [3]F{ eval_0, c2, F.zero() } };
+        }
     };
 }
 

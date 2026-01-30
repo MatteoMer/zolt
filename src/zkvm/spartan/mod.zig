@@ -56,6 +56,11 @@ pub const stage5_prover = @import("stage5_prover.zig");
 pub const Stage5BatchedProver = stage5_prover.Stage5BatchedProver;
 pub const Stage5Result = stage5_prover.Stage5Result;
 
+// InstructionReadRaf prover (simplified direct version)
+pub const instruction_read_raf = @import("instruction_read_raf.zig");
+pub const InstructionReadRafProver = instruction_read_raf.InstructionReadRafProver;
+pub const InstructionReadRafResult = instruction_read_raf.InstructionReadRafResult;
+
 /// Spartan proof for R1CS
 pub fn R1CSProof(comptime F: type) type {
     return struct {

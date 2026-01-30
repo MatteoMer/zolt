@@ -1460,31 +1460,37 @@ pub fn JoltProver(comptime F: type) type {
             std.debug.print("[SERIALIZE] Writing Stage 7: {} rounds\n", .{bundle.proof.stage7_sumcheck_proof.compressed_polys.items.len});
             try serializer.writeSumcheckInstanceProof(&bundle.proof.stage7_sumcheck_proof);
 
-            // Write joint opening proof
+            // Write joint opening proof (REQUIRED - not optional in Jolt)
             // Generate a Dory opening proof from the bundled polynomial evaluations
-            // Skip if no evaluations are available
-            if (bundle.bytecode_evals.len == 0) {
-                // Write empty Dory proof structure
-                try serializer.writeUsize(0); // empty proof marker
-            } else {
-                // The evaluation point should be the r_cycle challenges from the proof
+            {
+                // The evaluation point should be derived from the transcript
+                // For now, use deterministic values
                 const max_size = @max(@max(bundle.bytecode_evals.len, bundle.memory_evals.len), bundle.register_evals.len);
                 const log_size: u32 = if (max_size <= 1) 1 else @intCast(std.math.log2_int(usize, max_size) + 1);
                 var dory_srs = try Dory.DoryCommitmentScheme(F).setup(self.allocator, log_size);
                 defer dory_srs.deinit();
 
-                // Build the evaluation point from log_size random challenges
-                // In a real implementation, these would come from the sumcheck challenges
+                // Build the evaluation point from log_size deterministic challenges
                 const point = try self.allocator.alloc(F, log_size);
                 defer self.allocator.free(point);
                 for (0..log_size) |i| {
-                    // Use deterministic point based on position for reproducibility
                     point[i] = F.fromU64(@as(u64, i + 1)).mul(F.fromU64(12345));
                 }
 
+                // Use bytecode_evals if available, otherwise create empty polynomial
+                const evals = if (bundle.bytecode_evals.len > 0)
+                    bundle.bytecode_evals
+                else blk: {
+                    const empty = try self.allocator.alloc(F, 2);
+                    empty[0] = F.zero();
+                    empty[1] = F.zero();
+                    break :blk empty;
+                };
+                defer if (bundle.bytecode_evals.len == 0) self.allocator.free(evals);
+
                 var dory_proof = try Dory.DoryCommitmentScheme(F).open(
                     &dory_srs,
-                    bundle.bytecode_evals,
+                    evals,
                     point,
                     self.allocator,
                 );
@@ -1492,21 +1498,34 @@ pub fn JoltProver(comptime F: type) type {
                 try serializer.writeDoryProof(&dory_proof);
             }
 
-            // Write advice proofs (all None) - must match JoltProof struct order
-            try serializer.writeU8(0); // trusted_advice_val_evaluation_proof: None
-            try serializer.writeU8(0); // trusted_advice_val_final_proof: None
-            try serializer.writeU8(0); // untrusted_advice_val_evaluation_proof: None
-            try serializer.writeU8(0); // untrusted_advice_val_final_proof: None
+            // Write untrusted_advice_commitment: Option<Commitment>
+            // We don't have advice, so write None (0 byte)
             try serializer.writeU8(0); // untrusted_advice_commitment: None
 
             // Write configuration (matches Jolt's JoltProof struct exactly)
-            // Fields in order: trace_length, ram_K, bytecode_K, log_k_chunk, lookups_ra_virtual_log_k_chunk
-            // All 5 fields are usizes (8 bytes each)
+            // Fields in order:
+            // - trace_length: usize (8 bytes)
+            // - ram_K: usize (8 bytes)
+            // - bytecode_K: usize (8 bytes)
+            // - rw_config: ReadWriteConfig (4 * u8 = 4 bytes)
+            // - one_hot_config: OneHotConfig (2 * u8 = 2 bytes)
+            // - dory_layout: DoryLayout (u8 = 1 byte)
             try serializer.writeUsize(bundle.proof.trace_length);
             try serializer.writeUsize(bundle.proof.ram_K);
             try serializer.writeUsize(bundle.proof.bytecode_K);
-            try serializer.writeUsize(bundle.proof.log_k_chunk);
-            try serializer.writeUsize(bundle.proof.lookups_ra_virtual_log_k_chunk);
+
+            // ReadWriteConfig (4 bytes)
+            try serializer.writeU8(bundle.proof.rw_config.ram_rw_phase1_num_rounds);
+            try serializer.writeU8(bundle.proof.rw_config.ram_rw_phase2_num_rounds);
+            try serializer.writeU8(bundle.proof.rw_config.registers_rw_phase1_num_rounds);
+            try serializer.writeU8(bundle.proof.rw_config.registers_rw_phase2_num_rounds);
+
+            // OneHotConfig (2 bytes)
+            try serializer.writeU8(bundle.proof.one_hot_config.log_k_chunk);
+            try serializer.writeU8(bundle.proof.one_hot_config.lookups_ra_virtual_log_k_chunk);
+
+            // DoryLayout (1 byte)
+            try serializer.writeU8(bundle.proof.dory_layout);
 
             return serializer.toOwnedSlice();
         }

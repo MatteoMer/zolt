@@ -1,9 +1,44 @@
 # Zolt-Jolt Cross-Verification Progress
 
+## Session 83 - Stage 5 Sumcheck Analysis (2026-01-30)
+
+### Summary
+Stage 5 verification fails because input claims from Stage 4 are non-zero but we generate zero sumcheck round polynomials. The verifier computes expected_output_claim = 0 (from our zero opening claims) but output_claim != 0 due to hint-based polynomial reconstruction.
+
+### Root Cause
+Stage 5 is a batched sumcheck with 3 instances:
+1. RegistersValEvaluation (8 rounds) - input_claim = 20196670...
+2. RamRaClaimReduction (24 rounds) - input_claim = 16410442...
+3. LookupsReadRaf (136 rounds) - input_claim = 9299828...
+
+The input claims are NON-ZERO (correct behavior from Stage 4 accumulator), but our zero-coefficient round polynomials don't reduce them to zero. The `eval_from_hint` function reconstructs the linear term from the hint (previous claim), producing non-zero evaluations.
+
+### Implementation Started
+Created `src/zkvm/registers/val_evaluation.zig`:
+- RegistersValEvaluationParams: Parameters for the sumcheck
+- RegistersValEvaluationProver: Computes Σ_j inc(j) · wa(j) · LT(j, r_cycle)
+- Helper functions: computeEqAtPoint, computeLtAtIndex
+
+### Remaining Work
+1. Integrate RegistersValEvaluationProver into proof_converter.zig
+2. Implement RamRaClaimReduction prover (3-phase: address → cycle1 → cycle2)
+3. Implement LookupsReadRaf prover (136 rounds)
+4. Implement Stage 6 and 7 provers
+
+### Batched Sumcheck Mechanics
+For max_rounds = 136:
+- Rounds 0-111: Only LookupsReadRaf contributes actual polynomials
+- Rounds 112-127: LookupsReadRaf + RamRaClaimReduction contribute
+- Rounds 128-135: All three instances contribute
+
+Each instance that hasn't started yet contributes a scaled constant (input_claim * 2^(remaining - num_rounds)).
+
+---
+
 ## Session 82 - Stage 4 Sumcheck Investigation (2026-01-30)
 
 ### Summary
-Stage 4 (RegistersReadWriteChecking) verification fails with sumcheck output mismatch. The root cause is that Zolt's Stage 4 sumcheck proof produces different round polynomials than what Jolt expects.
+Stage 4 (RegistersReadWriteChecking) verification was failing but is now FIXED. Stage 4 PASSES.
 
 ### Key Findings
 

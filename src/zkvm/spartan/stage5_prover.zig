@@ -200,7 +200,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // The previous claim for this instance is scaled by 2^(remaining - num_rounds)
                     // At round r, remaining = max_rounds - r, so scale = remaining - num_rounds - 1
                     // because we need p(0) + p(1) = 2^scale * input_claim (the current claim)
-                    // We set p(0) = p(1) = p(2) = p(3) = current_claim / 2
+                    // For a constant polynomial p(x) = c:
+                    //   p(0) = p(1) = p(2) = c = current_claim / 2
+                    //   p_inf = 0 (no x^3 term)
                     const scale = remaining_rounds - regs_val_num_rounds - 1;
                     var current_claim = regs_val_input;
                     for (0..scale) |_| current_claim = current_claim.add(current_claim);
@@ -210,7 +212,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     combined_poly[0] = combined_poly[0].add(batch0.mul(half_claim));
                     combined_poly[1] = combined_poly[1].add(batch0.mul(half_claim));
                     combined_poly[2] = combined_poly[2].add(batch0.mul(half_claim));
-                    combined_poly[3] = combined_poly[3].add(batch0.mul(half_claim));
+                    // evals[3] = p_inf = 0 for constant polynomial (don't add anything)
                 } else {
                     // Instance is active - for now, assume zero polynomial sum
                     // This is correct for programs where RegistersVal claim = 0
@@ -224,6 +226,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 // Instance 1: RamRaClaimReduction
                 if (remaining_rounds > ram_ra_num_rounds) {
                     // Same as instance 0 - constant polynomial with p(0) + p(1) = current_claim
+                    // For a constant polynomial p(x) = c:
+                    //   p(0) = p(1) = p(2) = c, p_inf = 0
                     const scale = remaining_rounds - ram_ra_num_rounds - 1;
                     var current_claim = ram_ra_input;
                     for (0..scale) |_| current_claim = current_claim.add(current_claim);
@@ -232,7 +236,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     combined_poly[0] = combined_poly[0].add(batch1.mul(half_claim));
                     combined_poly[1] = combined_poly[1].add(batch1.mul(half_claim));
                     combined_poly[2] = combined_poly[2].add(batch1.mul(half_claim));
-                    combined_poly[3] = combined_poly[3].add(batch1.mul(half_claim));
+                    // evals[3] = p_inf = 0 for constant polynomial (don't add anything)
                 } else {
                     // Instance active - assume zero sum
                     const zero_poly = [_]F{ F.zero(), F.zero(), F.zero(), F.zero() };
@@ -248,8 +252,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     combined_poly[j] = combined_poly[j].add(batch2.mul(zero_poly[j]));
                 }
 
-                // Convert to compressed form and append to proof
-                const compressed = UniPoly(F).evalsToCompressed(combined_poly);
+                // Convert to compressed form using Toom-Cook encoding
+                // evals[3] is eval_at_infinity (leading coefficient), not eval_at_3
+                const compressed = UniPoly(F).toomCookToCompressed(combined_poly);
                 const coeffs = try self.allocator.alloc(F, 3);
                 coeffs[0] = compressed[0];
                 coeffs[1] = compressed[1];
@@ -545,6 +550,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 const two_inv = F.fromU64(2).inverse().?;
                 if (remaining_rounds > regs_val_num_rounds) {
                     // Not started yet - constant polynomial where p(0) + p(1) = current_claim
+                    // For constant polynomial: p(0) = p(1) = p(2) = c, p_inf = 0
                     const scale = remaining_rounds - regs_val_num_rounds - 1;
                     var current_claim = regs_val_input;
                     for (0..scale) |_| current_claim = current_claim.add(current_claim);
@@ -552,7 +558,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     combined_poly[0] = combined_poly[0].add(batch0.mul(half_claim));
                     combined_poly[1] = combined_poly[1].add(batch0.mul(half_claim));
                     combined_poly[2] = combined_poly[2].add(batch0.mul(half_claim));
-                    combined_poly[3] = combined_poly[3].add(batch0.mul(half_claim));
+                    // evals[3] = p_inf = 0 for constant polynomial
                 } else {
                     // Instance is active - compute actual round polynomial
                     const regs_round = regs_val_num_rounds - remaining_rounds;
@@ -566,6 +572,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 // Instance 1: RamRaClaimReduction (24 rounds) - still zero for now
                 if (remaining_rounds > ram_ra_num_rounds) {
                     // Not started - constant polynomial
+                    // For constant polynomial: p(0) = p(1) = p(2) = c, p_inf = 0
                     const scale = remaining_rounds - ram_ra_num_rounds - 1;
                     var current_claim = ram_ra_input;
                     for (0..scale) |_| current_claim = current_claim.add(current_claim);
@@ -573,7 +580,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     combined_poly[0] = combined_poly[0].add(batch1.mul(half_claim));
                     combined_poly[1] = combined_poly[1].add(batch1.mul(half_claim));
                     combined_poly[2] = combined_poly[2].add(batch1.mul(half_claim));
-                    combined_poly[3] = combined_poly[3].add(batch1.mul(half_claim));
+                    // evals[3] = p_inf = 0 for constant polynomial
                 } else {
                     // Zero polynomial for now (TODO: implement RamRaClaimReduction)
                     // This is correct if ram_ra_input = 0
@@ -582,8 +589,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 // Instance 2: LookupsReadRaf (136 rounds) - zero for now
                 // TODO: implement InstructionReadRaf
 
-                // Convert to compressed form
-                const compressed = UniPoly(F).evalsToCompressed(combined_poly);
+                // Convert to compressed form using Toom-Cook encoding
+                // evals[3] is eval_at_infinity (leading coefficient), not eval_at_3
+                const compressed = UniPoly(F).toomCookToCompressed(combined_poly);
                 const coeffs = try self.allocator.alloc(F, 3);
                 coeffs[0] = compressed[0];
                 coeffs[1] = compressed[1];
@@ -796,19 +804,21 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 // p(1): product at x = 1
                 evals[1] = evals[1].add(inc_1.mul(wa_1).mul(lt_1));
 
-                // Extrapolate for degree-3 polynomial
-                const two = F.fromU64(2);
-                const three = F.fromU64(3);
-
-                const inc_2 = two.mul(inc_1).sub(inc_0);
-                const wa_2 = two.mul(wa_1).sub(wa_0);
-                const lt_2 = two.mul(lt_1).sub(lt_0);
+                // Extrapolate for degree-3 polynomial using Toom-Cook encoding
+                // For a linear polynomial f(x) = f_0 + x*(f_1 - f_0):
+                //   f(2) = 2*f_1 - f_0
+                //   f_inf (leading coefficient) = f_1 - f_0
+                const inc_2 = inc_1.add(inc_1).sub(inc_0); // 2*inc_1 - inc_0
+                const wa_2 = wa_1.add(wa_1).sub(wa_0);
+                const lt_2 = lt_1.add(lt_1).sub(lt_0);
                 evals[2] = evals[2].add(inc_2.mul(wa_2).mul(lt_2));
 
-                const inc_3 = three.mul(inc_1).sub(two.mul(inc_0));
-                const wa_3 = three.mul(wa_1).sub(two.mul(wa_0));
-                const lt_3 = three.mul(lt_1).sub(two.mul(lt_0));
-                evals[3] = evals[3].add(inc_3.mul(wa_3).mul(lt_3));
+                // eval_at_inf = product of leading coefficients
+                // For Toom-Cook: evals[3] = eval_at_infinity
+                const inc_inf = inc_1.sub(inc_0);
+                const wa_inf = wa_1.sub(wa_0);
+                const lt_inf = lt_1.sub(lt_0);
+                evals[3] = evals[3].add(inc_inf.mul(wa_inf).mul(lt_inf));
             }
 
             return evals;

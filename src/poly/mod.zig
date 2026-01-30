@@ -683,6 +683,40 @@ pub fn UniPoly(comptime F: type) type {
             const coeffs = interpolateDegree3(evals);
             return [3]F{ coeffs[0], coeffs[2], coeffs[3] };
         }
+
+        /// Convert Toom-Cook style evaluations [p(0), p(1), p(2), p_inf] to Jolt's compressed format [c0, c2, c3]
+        ///
+        /// For a cubic polynomial p(x) = c0 + c1*x + c2*x^2 + c3*x^3:
+        /// - p(0) = c0
+        /// - p(1) = c0 + c1 + c2 + c3
+        /// - p(2) = c0 + 2*c1 + 4*c2 + 8*c3
+        /// - p_inf = c3 (leading coefficient)
+        ///
+        /// Solving for c2:
+        /// c2 = (p(2) - 2*p(1) + p(0) - 6*p_inf) / 2
+        pub fn toomCookToCompressed(evals: [4]F) [3]F {
+            const p0 = evals[0];
+            const p1 = evals[1];
+            const p2 = evals[2];
+            const p_inf = evals[3];
+
+            // c0 = p(0)
+            const c0 = p0;
+
+            // c3 = p_inf
+            const c3 = p_inf;
+
+            // c2 = (p(2) - 2*p(1) + p(0) - 6*p_inf) / 2
+            const two = F.fromU64(2);
+            const six = F.fromU64(6);
+            const inv2 = two.inverse().?;
+
+            const c2_num = p2.sub(two.mul(p1)).add(p0).sub(six.mul(p_inf));
+            const c2 = c2_num.mul(inv2);
+
+            // Compressed format: [c0, c2, c3] - Jolt omits c1 and recovers from hint
+            return [3]F{ c0, c2, c3 };
+        }
     };
 }
 

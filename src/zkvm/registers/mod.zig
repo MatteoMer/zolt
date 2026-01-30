@@ -9,6 +9,11 @@ const common = @import("../../common/mod.zig");
 const commitment_types = @import("../commitment_types.zig");
 const PolyCommitment = commitment_types.PolyCommitment;
 
+// Export register value evaluation prover
+pub const val_evaluation = @import("val_evaluation.zig");
+pub const RegistersValEvaluationParams = val_evaluation.RegistersValEvaluationParams;
+pub const RegistersValEvaluationProver = val_evaluation.RegistersValEvaluationProver;
+
 /// Register operation type
 pub const RegisterOp = enum {
     Read,

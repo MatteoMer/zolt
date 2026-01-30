@@ -1,6 +1,6 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: IN PROGRESS - Stage 5 Claim Value Mismatch
+## Status: IN PROGRESS - Stage 5 Sumcheck Implementation
 
 ## Current Issue (2026-01-30)
 
@@ -12,21 +12,38 @@
 5. **Fixed: Stage 6 Round Count** - Changed from 8 to 24 rounds (BytecodeReadRaf max)
 6. **Fixed: Missing Claims** - Added LookupTableFlag(0-41), InstructionRa(0-7), InstructionRafFlag
 
-### Current Error
-```
-=== SUMCHECK VERIFICATION FAILED ===
-output_claim:          9219502725919403917352040447078840562485657953396409742770278624303131450233
-expected_output_claim: 0
-r_sumcheck len: 136
-```
-Stage 5 sumcheck structure is correct (136 rounds pass) but the claims are zeros instead of real values.
+### Root Cause Analysis (2026-01-30)
+
+**The issue**: Stage 5 gets non-zero input claims from Stage 4's accumulator but we generate zero sumcheck round polynomials.
+
+- input_claim[0] (RegistersValEvaluation) = 20196670024706610341728276844931391924934592974175535367959454787282160553899
+- input_claim[1] (RamRaClaimReduction) = 16410442144988038954986615472772880745324464916492580913716405392685466979654
+- input_claim[2] (LookupsReadRaf) = 9299828901037110504125985581408576613022125108259561907120516744221579828954
+
+All three expected_output_claims are 0 (because we provide zero opening claims), but the zero sumcheck produces non-zero output_claim due to hint-based reconstruction.
+
+**Solution**: Implement actual Stage 5 provers that correctly compute sumcheck round polynomials to reduce the input claims.
+
+### Progress on Stage 5 Implementation
+
+1. **RegistersValEvaluationProver** - Created `src/zkvm/registers/val_evaluation.zig`
+   - Computes: Σ_j inc(j) · wa(j) · LT(j, r_cycle)
+   - Need to integrate into proof_converter
+
+2. **RamRaClaimReduction** - TODO
+   - 3-phase prover: address → cycle1 → cycle2
+   - Batches 4 RA claims from earlier stages
+
+3. **LookupsReadRaf** - TODO
+   - 128 + 8 = 136 rounds
+   - Instruction lookup RAF checking
 
 ### Verification Results
 - Stage 1: PASSED ✅
 - Stage 2: PASSED ✅
 - Stage 3: PASSED ✅
 - Stage 4: PASSED ✅ (15 rounds, RegistersReadWriteChecking)
-- Stage 5: FAILED ❌ (claims are zero - need to compute real values)
+- Stage 5: FAILED ❌ (need real prover implementation)
 - Stage 6: NOT YET REACHED
 - Stage 7: NOT YET REACHED
 

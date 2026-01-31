@@ -1640,10 +1640,20 @@ pub fn ProofConverter(comptime F: type) type {
             // Variables to store Stage 4 opening point for Stage 5
             var stage4_regs_r_address: ?[]F = null;
             var stage4_regs_r_cycle: ?[]F = null;
+            // r_reduction from Stage 3 InstructionClaimReduction (for LookupsReadRaf in Stage 5)
+            var r_reduction_be: ?[]F = null;
             defer {
                 if (stage4_regs_r_address) |arr| self.allocator.free(arr);
                 if (stage4_regs_r_cycle) |arr| self.allocator.free(arr);
+                if (r_reduction_be) |arr| self.allocator.free(arr);
             }
+
+            // Compute r_reduction_be from Stage 3 challenges (reverse to BIG_ENDIAN)
+            r_reduction_be = try self.allocator.alloc(F, stage3_result.challenges.len);
+            for (0..stage3_result.challenges.len) |i| {
+                r_reduction_be.?[i] = stage3_result.challenges[stage3_result.challenges.len - 1 - i];
+            }
+            std.debug.print("[STAGE5 PREP] r_reduction_be[0] = {any}\n", .{r_reduction_be.?[0].toBytesBE()[0..8]});
 
             // Use Stage 4 prover if we have execution and memory trace data.
             stage4_block: {
@@ -2690,9 +2700,14 @@ pub fn ProofConverter(comptime F: type) type {
             // For RV64: max_num_rounds = 128 + log_T = 128 + 8 = 136
             const lookups_log_k: usize = 128; // XLEN * 2 for RV64
 
-            // Get gamma for Stage 5 (used for batching RamRaClaimReduction and LookupsReadRaf claims)
-            const gamma_stage5 = transcript.challengeScalarFull();
-            std.debug.print("[STAGE5] gamma = {any}\n", .{gamma_stage5.toBytesBE()[0..8]});
+            // CRITICAL: Jolt samples TWO separate gammas for Stage 5 instances:
+            // 1. gamma_ram_ra for RamRaClaimReduction (via RaReductionParams::new)
+            // 2. gamma_lookups_raf for InstructionReadRaf (via InstructionReadRafSumcheckParams::new)
+            // These are sampled sequentially from the transcript, so we must do the same.
+            const gamma_ram_ra = transcript.challengeScalarFull();
+            const gamma_lookups_raf = transcript.challengeScalarFull();
+            std.debug.print("[STAGE5] gamma_ram_ra = {any}\n", .{gamma_ram_ra.toBytesBE()});
+            std.debug.print("[STAGE5] gamma_lookups_raf = {any}\n", .{gamma_lookups_raf.toBytesBE()});
 
             // Generate Stage 5 proof using the batched sumcheck prover
             var stage5_prover_instance = Stage5BatchedProver(F).init(self.allocator);
@@ -2702,7 +2717,7 @@ pub fn ProofConverter(comptime F: type) type {
             std.debug.print("[STAGE5] Checking conditions: execution_trace={any}, r_address={any}, r_cycle={any}\n", .{
                 config.execution_trace != null, stage4_regs_r_address != null, stage4_regs_r_cycle != null,
             });
-            if (config.execution_trace != null and stage4_regs_r_address != null and stage4_regs_r_cycle != null) {
+            if (config.execution_trace != null and stage4_regs_r_address != null and stage4_regs_r_cycle != null and r_reduction_be != null) {
                 std.debug.print("[STAGE5] Using trace-aware prover\n", .{});
                 stage5_result = try stage5_prover_instance.generateStage5ProofWithTrace(
                     &jolt_proof.stage5_sumcheck_proof,
@@ -2710,11 +2725,13 @@ pub fn ProofConverter(comptime F: type) type {
                     &jolt_proof.opening_claims,
                     n_cycle_vars,
                     log_ram_k,
-                    gamma_stage5,
+                    gamma_ram_ra,
+                    gamma_lookups_raf,
                     config.lookups_ra_virtual_log_k_chunk,
                     config.execution_trace.?,
                     stage4_regs_r_address.?,
                     stage4_regs_r_cycle.?,
+                    r_reduction_be.?, // Stage 3 challenges in BIG_ENDIAN for LookupsReadRaf eq computation
                 );
             } else {
                 // Fallback to zero prover for programs without trace
@@ -2725,7 +2742,8 @@ pub fn ProofConverter(comptime F: type) type {
                     &jolt_proof.opening_claims,
                     n_cycle_vars,
                     log_ram_k,
-                    gamma_stage5,
+                    gamma_ram_ra,
+                    gamma_lookups_raf,
                     config.lookups_ra_virtual_log_k_chunk,
                 );
             }

@@ -192,3 +192,32 @@ Key Jolt files for suffix implementation:
 ### Notes
 
 Updated .agent/NOTES.md with detailed analysis of the mathematical difference between approaches.
+
+### Progress This Session
+
+1. ✅ Created `suffixes.zig` with all 43 suffix types from Jolt
+2. ✅ Implemented suffix_mle for key suffixes (One, And, Or, Xor, LessThan, etc.)
+3. ✅ Added tableSuffixes() mapping tables to their suffix configurations
+4. ✅ Exported suffixes module from mod.zig
+5. ✅ Committed and pushed: `b8239f1`
+
+### Next Immediate Steps
+
+1. Add suffix polynomial Q structures to Stage 5 prover state
+2. Initialize Q polynomials from u_evals and lookup_indices
+3. Implement prover_msg_read_checking using P*Q products
+4. Test with a simple trace to verify polynomial values
+
+### Technical Note on Q Initialization
+
+The Q polynomial for each table and suffix is initialized as:
+```zig
+// For each cycle j with lookup index k[j]:
+//   (prefix_bits, suffix_bits) = split(k[j], suffix_len)
+//   Q[table][suffix][prefix_bits] += u_eval[j] * suffix_mle(suffix_bits)
+```
+
+Where:
+- `suffix_len = LOG_K - phase * log_m` (varies by phase)
+- `log_m = LOG_K / phases` (typically phases=8, so log_m=16)
+- `u_eval[j] = eq(r_reduction, j)` (already computed as lookups_eq_evals)

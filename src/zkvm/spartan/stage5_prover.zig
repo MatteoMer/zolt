@@ -648,47 +648,46 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                 switch (opcode) {
                     0x33 => {
-                        // R-type: ADD, SUB, AND, OR, XOR, SLT, SLTU, SLL, SRL, SRA
-                        const is_add = (funct3 == 0) and (funct7 == 0);
-                        const is_sub = (funct3 == 0) and (funct7 == 0x20);
+                        // R-type: R1CS uses AddOperands for all 0x33 (with special cases for MUL/SUB)
+                        // left_input = rs1, right_input = rs2
+                        const left_input = F.fromU64(step.rs1_value);
+                        const right_input = F.fromU64(step.rs2_value);
 
-                        if (is_add) {
-                            // ADD: AddOperands flag - left=0, right=rs1+rs2
+                        if (funct7 == 0x01) {
+                            // M-extension (MUL, etc.)
+                            if (funct3 == 0x0) { // MUL
+                                left_op = F.zero();
+                                right_op = left_input.mul(right_input); // Product
+                            } else {
+                                left_op = left_input;
+                                right_op = right_input;
+                            }
+                        } else if (funct7 == 0x20 and funct3 == 0x0) {
+                            // SUB: LeftLookup=0, RightLookup=left-right+2^64
+                            const two_pow_64 = F.fromBytes(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
                             left_op = F.zero();
-                            right_op = F.fromU64(step.rs1_value +% step.rs2_value);
-                            lookup_output = F.fromU64(step.rd_value);
-                        } else if (is_sub) {
-                            // SUB: SubtractOperands flag - uses interleaved, but we use (rs1, rs2)
-                            left_op = F.fromU64(step.rs1_value);
-                            right_op = F.fromU64(step.rs2_value);
-                            lookup_output = F.fromU64(step.rd_value);
+                            right_op = left_input.sub(right_input).add(two_pow_64);
                         } else {
-                            // AND, OR, XOR, SLT, SLTU, SLL, SRL, SRA - interleaved operands
-                            left_op = F.fromU64(step.rs1_value);
-                            right_op = F.fromU64(step.rs2_value);
-                            lookup_output = F.fromU64(step.rd_value);
+                            // ADD and others: LeftLookup=0, RightLookup=left+right
+                            left_op = F.zero();
+                            right_op = left_input.add(right_input);
                         }
+                        lookup_output = F.fromU64(step.rd_value);
                     },
                     0x13 => {
-                        // I-type: ADDI, ANDI, ORI, XORI, SLTI, SLTIU, SLLI, SRLI, SRAI
-                        // Extract 12-bit immediate
+                        // I-type: R1CS uses AddOperands for ALL 0x13
+                        // left_input = rs1, right_input = imm
                         const imm12_raw: u32 = @truncate(instr >> 20);
                         const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
                         const imm_u64: u64 = @bitCast(imm_signed);
 
-                        const is_addi = (funct3 == 0);
+                        const left_input = F.fromU64(step.rs1_value);
+                        const right_input = F.fromU64(imm_u64);
 
-                        if (is_addi) {
-                            // ADDI: AddOperands flag - left=0, right=rs1+imm
-                            left_op = F.zero();
-                            right_op = F.fromU64(step.rs1_value +% imm_u64);
-                            lookup_output = F.fromU64(step.rd_value);
-                        } else {
-                            // ANDI, ORI, XORI, SLTI, SLTIU, shifts - interleaved operands
-                            left_op = F.fromU64(step.rs1_value);
-                            right_op = F.fromU64(imm_u64);
-                            lookup_output = F.fromU64(step.rd_value);
-                        }
+                        // All I-type use AddOperands: left=0, right=left_input+right_input
+                        left_op = F.zero();
+                        right_op = left_input.add(right_input);
+                        lookup_output = F.fromU64(step.rd_value);
                     },
                     0x1b => {
                         // OP-IMM-32 (RV64): ADDIW, SLLIW, SRLIW, SRAIW
@@ -1369,6 +1368,14 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                     // Convert to compressed format [c0, c2, c3, ..., c10]
                     const final_compressed = try UniPoly(F).toCompressed(self.allocator, combined_coeffs);
+
+                    // Debug: print first 3 compressed coefficients (excluding linear term)
+                    if (round == LOOKUPS_LOG_K) { // Only for round 128
+                        std.debug.print("[STAGE5 CYCLE] Round {} compressed coeffs (first 3):\n", .{round});
+                        for (0..@min(3, final_compressed.len)) |k| {
+                            std.debug.print("  coeff[{}] = {any}\n", .{ k, final_compressed[k].toBytesBE() });
+                        }
+                    }
 
                     try proof.compressed_polys.append(self.allocator, .{
                         .coeffs_except_linear_term = final_compressed,

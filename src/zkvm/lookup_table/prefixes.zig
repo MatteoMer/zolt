@@ -1624,7 +1624,10 @@ fn rightShiftPrefixMle(
     const x_u32 = @as(u32, @truncate(uninterleaved.left));
     const y_u32 = @as(u32, @truncate(uninterleaved.right));
     result = result.mul(F.fromU64(@as(u64, 1) << @intCast(@clz(~y_u32))));
-    result = result.add(F.fromU64(@as(u64, x_u32 >> @intCast(@ctz(y_u32)))));
+    // Handle shift overflow: when y_u32 == 0, trailing_zeros = 32, so x >> 32 = 0
+    const trailing_zeros = @ctz(y_u32);
+    const shifted_x: u64 = if (trailing_zeros >= 32) 0 else @as(u64, x_u32 >> @intCast(trailing_zeros));
+    result = result.add(F.fromU64(shifted_x));
 
     return result;
 }
@@ -2220,7 +2223,10 @@ fn rightShiftWPrefixMle(
     const x_u32 = @as(u32, @truncate(uninterleaved.left));
     const y_u32 = @as(u32, @truncate(uninterleaved.right));
     result = result.mul(F.fromU64(@as(u64, 1) << @intCast(@clz(~y_u32))));
-    result = result.add(F.fromU64(@as(u64, x_u32 >> @intCast(@ctz(y_u32)))));
+    // Handle shift overflow: when y_u32 == 0, trailing_zeros = 32, so x >> 32 = 0
+    const trailing_zeros = @ctz(y_u32);
+    const shifted_x: u64 = if (trailing_zeros >= 32) 0 else @as(u64, x_u32 >> @intCast(trailing_zeros));
+    result = result.add(F.fromU64(shifted_x));
 
     return result;
 }

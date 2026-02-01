@@ -141,3 +141,54 @@ Sumcheck verification failed!
    - Created prefixes.zig with prefix MLE implementations
    - Created identity_poly.zig with Identity/Operand polynomials
    - Updated mod.zig with exports
+
+---
+
+## Session 97 Progress
+
+### Deep Analysis Complete
+
+Investigated the fundamental difference between Jolt's prefix-suffix decomposition and Zolt's bit-splitting approach.
+
+**Key Finding:** The mismatch is NOT just about polynomial degree format, but about how values are computed:
+
+1. **Jolt computes**: `eval_0 = Σ_tables Σ_b P(c=0, b) * Q[b]` where Q = Σ u_eval[j] * suffix_mle(suffix_bits[j])
+2. **Zolt computes**: `eval_0 = Σ_{j: bit=0} eq[j] * ra[j] * combined[j]` where combined = concrete output + γ*operands
+
+The suffix_mle is the critical missing piece - it evaluates the **table-specific MLE** on the suffix bits, not the concrete value.
+
+### Implementation Strategy
+
+**Phase 1: Suffix MLE Implementation**
+- Implement `suffix_mle()` for each suffix type in Jolt
+- Map cycles to tables using Jolt's table index ordering (0-40)
+
+**Phase 2: Q Polynomial Initialization**
+- For each table and suffix type: `Q[table][suffix][prefix] = Σ u[j] * suffix_mle(suffix_bits[j])`
+- u_evals[j] = eq(r_reduction, j) already computed
+
+**Phase 3: Address Round Computation**
+- Compute eval_0 and eval_2 via prefix-suffix decomposition
+- Use table.combine(prefixes, suffixes) for each table
+
+**Phase 4: RAF Integration**
+- Add RAF contribution via identity/operand prefix-suffix decompositions
+
+### Immediate Next Steps
+
+1. Implement suffix_mle for common suffix types (One, And, Or, Xor, LessThan)
+2. Create suffix enum matching Jolt's Suffixes
+3. Define which suffixes each table uses
+4. Build Q polynomial initialization loop
+5. Test single table (AND) end-to-end
+
+### Files Reference
+
+Key Jolt files for suffix implementation:
+- `/home/vivado/projects/jolt/jolt-core/src/zkvm/lookup_table/suffixes/mod.rs` - Suffixes enum
+- `/home/vivado/projects/jolt/jolt-core/src/zkvm/lookup_table/suffixes/and.rs` - AND suffix_mle
+- `/home/vivado/projects/jolt/jolt-core/src/zkvm/lookup_table/and.rs` - AND table suffixes() and combine()
+
+### Notes
+
+Updated .agent/NOTES.md with detailed analysis of the mathematical difference between approaches.

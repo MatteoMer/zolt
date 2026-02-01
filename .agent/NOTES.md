@@ -100,13 +100,68 @@ The mismatch occurs because:
 3. Which causes different intermediate claims
 4. Resulting in completely different final output claim
 
-### 8. Next Steps
+### 8. Session 97 Additional Analysis
+
+**Root Cause Deep Dive:**
+
+The degree-2 polynomial structure comes from how Jolt computes eval_0 and eval_2:
+
+1. **Jolt's Formula:**
+   ```
+   eval_0 = Σ_tables Σ_b table.combine(prefixes_c0, suffixes_left[b])
+   eval_2 = 2 * Σ_tables Σ_b table.combine(prefixes_c2, suffixes_right[b])
+          - Σ_tables Σ_b table.combine(prefixes_c2, suffixes_left[b])
+   ```
+
+2. **Key Difference:**
+   - Jolt evaluates prefix_mle at c=0 AND c=2 (not c=0 and c=1)
+   - The prefix MLE is linear in c: `prefix(c) = a + b*c`
+   - So `prefix(0) = a` and `prefix(2) = a + 2b`
+   - This creates genuinely different polynomial evaluations
+
+3. **Zolt's Formula:**
+   ```
+   p0 = Σ_{j: bit=0} contrib[j]
+   p1 = Σ_{j: bit=1} contrib[j]
+   eval_0 = p0
+   eval_2 = 2*p1 - p0
+   ```
+
+   - This assumes eval_1 = p1, which is correct for direct evaluation
+   - But Jolt computes prefix(2) * Q, which is NOT the same as prefix(1) * Q
+
+**Mathematical Insight:**
+
+The sumcheck computes evaluations of a univariate polynomial g(X) where X is the current bound variable.
+
+For Jolt: `g(X) = Σ_b prefix(X, b) * Q[b]`
+
+Since `prefix(X, b)` is linear in X: `prefix(X, b) = P0[b] + X * P1[b]`
+
+Then: `g(X) = Σ_b (P0[b] + X*P1[b]) * Q[b] = C + X*D` (also linear)
+
+So g(X) IS linear! But Jolt still uses the degree-2 format because it evaluates at X=0 and X=2, then uses `fromEvalsAndHint` to reconstruct.
+
+**The Real Issue:**
+
+If both are linear, why the mismatch? Let's trace:
+
+- Jolt: `eval_0 = Σ_b prefix(0, b) * Q[b]`
+- Zolt: `eval_0 = Σ_{j: bit=0} eq[j] * ra[j] * combined[j]`
+
+These compute **different things**:
+- Jolt's Q[b] = Σ_{j: prefix_bits[j] = b} u_eval[j] * suffix_mle(suffix_bits[j])
+- Zolt doesn't have suffix_mle - it uses raw combined_vals
+
+The suffix_mle is the table-specific MLE evaluation of the suffix portion!
+
+### 9. Implementation Plan
 
 This is a substantial implementation effort requiring:
 1. Porting all 45+ prefix implementations from Jolt
-2. Porting all suffix implementations
-3. Implementing PrefixSuffixDecomposition for all tables
-4. Implementing the RAF operand decompositions
+2. Porting all suffix implementations with suffix_mle functions
+3. Implementing PrefixSuffixDecomposition for all 41 tables
+4. Implementing the RAF operand decompositions (identity_ps, left_operand_ps, right_operand_ps)
 5. Testing each component against Jolt's reference implementation
 
 Estimated effort: Several days of focused implementation work.

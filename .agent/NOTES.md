@@ -1,54 +1,69 @@
-# Zolt-Jolt Cross-Verification Progress
+# Stage 5 Investigation Notes (Session 94)
 
-## Session 85 - Stage 5 Analysis Complete (2026-01-30)
+## Summary
 
-### Key Finding
-Stage 5 requires implementing 3 instances:
-1. **RegistersValEvaluation** (8 rounds) - IMPLEMENTED ✅
-2. **RamRaClaimReduction** (24 rounds) - Zero OK (no RAM in Fibonacci)
-3. **LookupsReadRaf** (136 rounds) - NOT IMPLEMENTED ❌
+The Stage 5 sumcheck verification fails because the polynomial coefficients don't match between Zolt and Jolt. Despite individual sums matching (`output_sum = rv_claim`, `left_sum = left_claim`, `right_sum = right_claim`), the round polynomial coefficients are completely different.
 
-### Root Cause of Failure
-```
-batched_claim - p(0)+p(1) = batch2 * lookups_input  (exactly!)
-```
+## Key Observations
 
-Instance 2 (LookupsReadRaf) has num_rounds = max_rounds = 136, so:
-- It never has a "constant phase" where we can scale input_claim
-- Every round is "active" and requires actual polynomial computation
-- We send zero polynomials, but lookups_input is non-zero
+### 1. Address Round Computation Difference
 
-### Verification of RegistersValEvaluation
-1. ✅ Sum check: computed_sum = regs_val_input (match = true)
-2. ✅ LT polynomial: lt[0] matches LT_verifier
-3. ✅ Final product: inc*wa*lt matches expected_product
-4. ❌ Overall Stage 5 fails due to Instance 2
+**Jolt uses prefix-suffix decomposition:**
+- `prover_msg_read_checking()`: Evaluates lookup table polynomials using MLE prefix/suffix structure
+- `prover_msg_raf()`: Evaluates RAF (left, right, identity) polynomials
+- Returns degree-2 polynomial evaluations at X∈{0, 2}
 
-### What LookupsReadRaf Needs
-From read_raf_checking.rs:
-```rust
-rv(r_reduction) + γ·left_op(r_reduction) + γ²·right_op(r_reduction)
-  = Σ_j Σ_k [ eq(j; r_reduction) · ra(k, j) · (Val_j(k) + γ · RafVal_j(k)) ]
-```
+**Zolt uses address bit splitting:**
+- Splits cycles by address bit: `p0 = Σ (eq * ra * combined) for bit=0`
+- Creates degree-1 polynomial
 
-Requires:
-- Prefix/suffix decomposition for 128-bit address space
-- Lookup table MLE evaluations
-- RAF polynomial handling
-- Complex batching with γ
+### 2. Cycle Round Computation Difference
 
-### Commits
-- 6b7de26: Stage 5 - Fix RegistersValEvaluation, document LookupsReadRaf missing
+**Jolt:**
+- After address rounds, materializes `combined_val_polynomial` in `init_log_t_rounds()`
+- Uses `combined_val.get_bound_coeff(2*j)` in cycle rounds
+- The materialized values use table MLE evaluations at r_address
 
----
+**Zolt:**
+- Uses raw per-cycle values `lookups_combined_vals[j]` throughout
+- Never materializes the bound combined value
 
-## Session 84 Summary
-- Identified Stage 5 failure: output_claim ≠ expected_output_claim
-- Fixed constant polynomial scaling (use scaled_input_claim, not half_claim)
-- Verified RegistersValEvaluation implementation is correct
+### 3. Round 128 Coefficient Comparison
 
-## Key Files
-- `src/zkvm/spartan/stage5_prover.zig` - Stage 5 batched sumcheck prover
-- `jolt-core/src/zkvm/registers/val_evaluation.rs` - Jolt's RegistersValEvaluation
-- `jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs` - LookupsReadRaf reference
-- `jolt-core/src/subprotocols/sumcheck.rs` - Batched sumcheck verifier
+- **Jolt coeff[0] (LE):** `[e2, ee, 6f, c7, e9, ff, ea, e2, ...]`
+- **Zolt coeff[0] (BE):** `{ 30, 94, f1, 94, 6b, a0, 75, f5, ... }`
+
+Completely different!
+
+## Open Questions
+
+1. **Is our address round approach valid?**
+   - We use `combined(lookup_index(j), j)` as a constant per cycle
+   - This relies on `ra(k, j) = 1` only when `k = lookup_index(j)`
+   - Should this produce the same result as Jolt's prefix-suffix approach?
+
+2. **Why do individual sums match but polynomial coefficients don't?**
+   - The sums are computed over all cycles
+   - The polynomial coefficients depend on how we split/evaluate during rounds
+   - Different splitting strategies could give same sum but different polynomials
+
+3. **Do we need to implement prefix-suffix decomposition?**
+   - This is a complex optimization in Jolt
+   - It might be necessary for correct polynomial computation
+
+## Possible Fixes
+
+### Option A: Implement Jolt's approach
+- Implement `PrefixSuffixDecomposition` for address rounds
+- Materialize `combined_val_polynomial` after address rounds
+- Use bound coefficients in cycle rounds
+
+### Option B: Debug current approach
+- Verify that our polynomial computation is mathematically equivalent
+- Check if there's a simpler bug (endianness, indexing, etc.)
+- Compare intermediate values during address rounds
+
+## Files
+
+- Jolt reference: `/home/vivado/projects/jolt/jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs`
+- Zolt Stage 5: `/home/vivado/projects/zolt/src/zkvm/spartan/stage5_prover.zig`

@@ -1186,10 +1186,14 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             defer suffix_polys.deinit();
             var prefix_checkpoints = PrefixCheckpointsState(F).init();
 
-            const num_phases: usize = 8;
-            const log_m = LOOKUPS_LOG_K / num_phases; // = 16
+            // Jolt uses 16 phases for log_T < 24 (traces < 2^24), 8 phases otherwise
+            // This matches config::get_instruction_sumcheck_phases() in Jolt
+            const INSTRUCTION_PHASES_THRESHOLD_LOG_T = 24;
+            const log_T = std.math.log2_int(usize, T);
+            const num_phases: usize = if (log_T < INSTRUCTION_PHASES_THRESHOLD_LOG_T) 16 else 8;
+            const log_m = LOOKUPS_LOG_K / num_phases; // = 8 for 16 phases, 16 for 8 phases
             var current_phase: usize = 0;
-            const initial_m = @as(usize, 1) << @intCast(log_m); // 2^16 = 65536
+            const initial_m = @as(usize, 1) << @intCast(log_m); // 2^8 = 256 or 2^16 = 65536
 
             // Initialize Q polynomials for read-checking
             try suffix_polys.initPhase(0, num_phases, lookups_eq_evals, lookup_indices_u128, cycle_table_indices);
@@ -1215,9 +1219,17 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
             // Initialize expanding tables for each phase (accumulate eq values during address rounds)
             // We need num_phases expanding tables, each of size 2^log_m
-            var expanding_tables: [8]ExpandingTable(F) = undefined;
+            // Use max of 16 phases (for small traces)
+            var expanding_tables: [16]ExpandingTable(F) = undefined;
+            var tables_initialized: usize = 0;
+            errdefer {
+                for (0..tables_initialized) |phase_idx| {
+                    expanding_tables[phase_idx].deinit();
+                }
+            }
             for (0..num_phases) |phase_idx| {
                 expanding_tables[phase_idx] = try ExpandingTable(F).init(self.allocator, initial_m);
+                tables_initialized = phase_idx + 1;
             }
             defer {
                 for (0..num_phases) |phase_idx| {
@@ -2350,60 +2362,68 @@ pub fn getBit128(lo: u64, hi: u64, bit_index: usize) u1 {
 
 /// Get the lookup table index for an instruction
 /// Returns -1 if no lookup table is used, otherwise returns table index 0-41
-/// Based on Jolt's LookupTables enum ordering
+/// Based on Jolt's LookupTables enum ordering:
+///   0: RangeCheck, 1: RangeCheckAligned, 2: And, 3: Andn, 4: Or, 5: Xor,
+///   6: Equal, 7: SignedGreaterThanEqual, 8: UnsignedGreaterThanEqual,
+///   9: NotEqual, 10: SignedLessThan, 11: UnsignedLessThan, 12: Movsign,
+///   13: UpperWord, 14: LessThanEqual, 15-17: Valid*Remainder/Div0,
+///   18-19: HalfwordAlignment/WordAlignment, 20-21: LowerHalfWord/SignExtendHalfWord,
+///   22-23: Pow2/Pow2W, 24: ShiftRightBitmask, 25: VirtualRev8W,
+///   26: VirtualSRL, 27: VirtualSRA, 28: VirtualROTR, 29: VirtualROTRW,
+///   30-31: VirtualChangeDivisor/W, 32: MulUNoOverflow, 33-40: VirtualXORROT*
 pub fn getLookupTableIndex(opcode: u32, funct3: u32, funct7: u32) i8 {
     return switch (opcode) {
         0x33 => blk: { // R-type
-            if (funct3 == 0 and funct7 == 0) break :blk 0; // ADD -> AddTable
-            if (funct3 == 0 and funct7 == 0x20) break :blk 1; // SUB -> SubTable
+            if (funct3 == 0 and funct7 == 0) break :blk 0; // ADD -> RangeCheckTable
+            if (funct3 == 0 and funct7 == 0x20) break :blk 0; // SUB -> RangeCheckTable
             if (funct3 == 7) break :blk 2; // AND -> AndTable
-            if (funct3 == 6) break :blk 3; // OR -> OrTable
-            if (funct3 == 4) break :blk 4; // XOR -> XorTable
-            if (funct3 == 1) break :blk 5; // SLL -> SllTable
-            if (funct3 == 5 and funct7 == 0) break :blk 6; // SRL -> SrlTable
-            if (funct3 == 5 and funct7 == 0x20) break :blk 7; // SRA -> SraTable
-            if (funct3 == 2) break :blk 8; // SLT -> SltTable
-            if (funct3 == 3) break :blk 9; // SLTU -> SltuTable
-            if (funct7 == 0x01 and funct3 == 0) break :blk 10; // MUL -> MulTable
-            if (funct7 == 0x01 and funct3 == 3) break :blk 11; // MULHU -> MulhuTable
+            if (funct3 == 6) break :blk 4; // OR -> OrTable
+            if (funct3 == 4) break :blk 5; // XOR -> XorTable
+            if (funct3 == 1) break :blk -1; // SLL -> uses virtual decomposition
+            if (funct3 == 5 and funct7 == 0) break :blk 26; // SRL -> VirtualSRLTable
+            if (funct3 == 5 and funct7 == 0x20) break :blk 27; // SRA -> VirtualSRATable
+            if (funct3 == 2) break :blk 10; // SLT -> SignedLessThanTable
+            if (funct3 == 3) break :blk 11; // SLTU -> UnsignedLessThanTable
+            if (funct7 == 0x01 and funct3 == 0) break :blk 0; // MUL -> RangeCheckTable
+            if (funct7 == 0x01 and funct3 == 3) break :blk 13; // MULHU -> UpperWordTable
             break :blk -1;
         },
         0x13 => blk: { // I-type
-            if (funct3 == 0) break :blk 0; // ADDI -> AddTable
+            if (funct3 == 0) break :blk 0; // ADDI -> RangeCheckTable
             if (funct3 == 7) break :blk 2; // ANDI -> AndTable
-            if (funct3 == 6) break :blk 3; // ORI -> OrTable
-            if (funct3 == 4) break :blk 4; // XORI -> XorTable
-            if (funct3 == 1) break :blk 5; // SLLI -> SllTable
-            if (funct3 == 5 and (funct7 & 0x40) == 0) break :blk 6; // SRLI -> SrlTable
-            if (funct3 == 5 and (funct7 & 0x40) != 0) break :blk 7; // SRAI -> SraTable
-            if (funct3 == 2) break :blk 8; // SLTI -> SltTable
-            if (funct3 == 3) break :blk 9; // SLTIU -> SltuTable
+            if (funct3 == 6) break :blk 4; // ORI -> OrTable
+            if (funct3 == 4) break :blk 5; // XORI -> XorTable
+            if (funct3 == 1) break :blk -1; // SLLI -> uses virtual decomposition
+            if (funct3 == 5 and (funct7 & 0x40) == 0) break :blk 26; // SRLI -> VirtualSRLTable
+            if (funct3 == 5 and (funct7 & 0x40) != 0) break :blk 27; // SRAI -> VirtualSRATable
+            if (funct3 == 2) break :blk 10; // SLTI -> SignedLessThanTable
+            if (funct3 == 3) break :blk 11; // SLTIU -> UnsignedLessThanTable
             break :blk -1;
         },
         0x1b => blk: { // OP-IMM-32
-            if (funct3 == 0) break :blk 0; // ADDIW -> AddTable
+            if (funct3 == 0) break :blk 0; // ADDIW -> RangeCheckTable
             break :blk -1;
         },
         0x3b => blk: { // OP-32
-            if (funct3 == 0 and funct7 == 0) break :blk 0; // ADDW -> AddTable
-            if (funct3 == 0 and funct7 == 0x20) break :blk 1; // SUBW -> SubTable
+            if (funct3 == 0 and funct7 == 0) break :blk 0; // ADDW -> RangeCheckTable
+            if (funct3 == 0 and funct7 == 0x20) break :blk 0; // SUBW -> RangeCheckTable
             break :blk -1;
         },
         0x63 => blk: { // B-type (branches)
-            if (funct3 == 0) break :blk 12; // BEQ -> BeqTable
-            if (funct3 == 1) break :blk 13; // BNE -> BneTable
-            if (funct3 == 4) break :blk 14; // BLT -> BltTable
-            if (funct3 == 5) break :blk 15; // BGE -> BgeTable
-            if (funct3 == 6) break :blk 16; // BLTU -> BltuTable
-            if (funct3 == 7) break :blk 17; // BGEU -> BgeuTable
+            if (funct3 == 0) break :blk 6; // BEQ -> EqualTable
+            if (funct3 == 1) break :blk 9; // BNE -> NotEqualTable
+            if (funct3 == 4) break :blk 10; // BLT -> SignedLessThanTable
+            if (funct3 == 5) break :blk 7; // BGE -> SignedGreaterThanEqualTable
+            if (funct3 == 6) break :blk 11; // BLTU -> UnsignedLessThanTable
+            if (funct3 == 7) break :blk 8; // BGEU -> UnsignedGreaterThanEqualTable
             break :blk -1;
         },
-        0x37 => 0, // LUI -> AddTable (just passes through)
-        0x17 => 0, // AUIPC -> AddTable
-        0x6f => 0, // JAL -> AddTable
-        0x67 => 0, // JALR -> AddTable
-        0x03 => 0, // Load -> AddTable (address computation)
-        0x23 => 0, // Store -> AddTable (address computation)
+        0x37 => 0, // LUI -> RangeCheckTable
+        0x17 => 0, // AUIPC -> RangeCheckTable
+        0x6f => 0, // JAL -> RangeCheckTable
+        0x67 => 1, // JALR -> RangeCheckAlignedTable
+        0x03 => -1, // Load -> None (no lookup table)
+        0x23 => -1, // Store -> None (no lookup table)
         else => -1,
     };
 }

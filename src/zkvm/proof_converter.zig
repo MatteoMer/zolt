@@ -1514,6 +1514,13 @@ pub fn ProofConverter(comptime F: type) type {
                 std.debug.print("}}\n", .{});
             }
 
+            // DEBUG: Check challenges immediately before claiming them
+            std.debug.print("[ZOLT STAGE3] challenges BEFORE inserting claims (both forms):\n", .{});
+            for (0..stage3_result.challenges.len) |i| {
+                const c = stage3_result.challenges[i];
+                std.debug.print("  challenges[{}] limbs = [{x:0>16}, {x:0>16}, {x:0>16}, {x:0>16}] -> BE = {x}\n", .{ i, c.limbs[0], c.limbs[1], c.limbs[2], c.limbs[3], c.toBytesBE()[16..32].* });
+            }
+
             // SpartanShift claims (from Stage 3 prover)
             try jolt_proof.opening_claims.insert(
                 .{ .Virtual = .{ .poly = .UnexpandedPC, .sumcheck_id = .SpartanShift } },
@@ -1640,7 +1647,9 @@ pub fn ProofConverter(comptime F: type) type {
             // Variables to store Stage 4 opening point for Stage 5
             var stage4_regs_r_address: ?[]F = null;
             var stage4_regs_r_cycle: ?[]F = null;
-            // r_reduction from Stage 3 InstructionClaimReduction (for LookupsReadRaf in Stage 5)
+            // r_reduction from Stage 2 InstructionClaimReduction (for LookupsReadRaf in Stage 5)
+            // CRITICAL: InstructionClaimReduction is in Stage 2, NOT Stage 3!
+            // The challenges are the last n_cycle_vars challenges from Stage 2 (Instance 4).
             var r_reduction_be: ?[]F = null;
             defer {
                 if (stage4_regs_r_address) |arr| self.allocator.free(arr);
@@ -1648,12 +1657,30 @@ pub fn ProofConverter(comptime F: type) type {
                 if (r_reduction_be) |arr| self.allocator.free(arr);
             }
 
-            // Compute r_reduction_be from Stage 3 challenges (reverse to BIG_ENDIAN)
-            r_reduction_be = try self.allocator.alloc(F, stage3_result.challenges.len);
-            for (0..stage3_result.challenges.len) |i| {
-                r_reduction_be.?[i] = stage3_result.challenges[stage3_result.challenges.len - 1 - i];
+            // Compute r_reduction_be from Stage 2 challenges (InstructionClaimReduction)
+            // Stage 2 has 5 instances with max_num_rounds = log_ram_k + n_cycle_vars
+            // Instance 4 (InstructionClaimReduction) uses the last n_cycle_vars rounds
+            // So its challenges are stage2_result.challenges[max_num_rounds - n_cycle_vars .. max_num_rounds]
+            const max_stage2_rounds = log_ram_k + n_cycle_vars;
+            const instr_start = max_stage2_rounds - n_cycle_vars;
+            std.debug.print("[STAGE5 PREP] Extracting InstructionClaimReduction challenges from Stage 2:\n", .{});
+            std.debug.print("[STAGE5 PREP]   max_stage2_rounds={}, n_cycle_vars={}, instr_start={}\n", .{ max_stage2_rounds, n_cycle_vars, instr_start });
+            std.debug.print("[STAGE5 PREP]   stage2_result.challenges.len={}\n", .{stage2_result.challenges.len});
+
+            // Extract and reverse the InstructionClaimReduction challenges to BIG_ENDIAN order
+            r_reduction_be = try self.allocator.alloc(F, n_cycle_vars);
+            for (0..n_cycle_vars) |i| {
+                const src_idx = instr_start + i;
+                // Reverse to BIG_ENDIAN: first challenge in LITTLE_ENDIAN becomes last in BIG_ENDIAN
+                const dest_idx = n_cycle_vars - 1 - i;
+                r_reduction_be.?[dest_idx] = stage2_result.challenges[src_idx];
             }
-            std.debug.print("[STAGE5 PREP] r_reduction_be[0] = {any}\n", .{r_reduction_be.?[0].toBytesBE()[0..8]});
+            std.debug.print("[STAGE5 PREP] r_reduction_be (from Stage 2 InstructionClaimReduction):\n", .{});
+            for (0..r_reduction_be.?.len) |i| {
+                const c = r_reduction_be.?[i];
+                std.debug.print("  r_reduction_be[{}] limbs = [{x:0>16}, {x:0>16}, {x:0>16}, {x:0>16}]\n", .{ i, c.limbs[0], c.limbs[1], c.limbs[2], c.limbs[3] });
+                std.debug.print("  r_reduction_be[{}] toBytesBE()[16..32] = {x}\n", .{ i, c.toBytesBE()[16..32].* });
+            }
 
             // Use Stage 4 prover if we have execution and memory trace data.
             stage4_block: {

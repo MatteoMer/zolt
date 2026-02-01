@@ -428,6 +428,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             const batch1 = transcript.challengeScalarFull();
             const batch2 = transcript.challengeScalarFull();
 
+            std.debug.print("[STAGE5] Batching coefficients:\n", .{});
+            std.debug.print("  batch0 = {x}\n", .{batch0.toBytesBE()[16..32].*});
+            std.debug.print("  batch1 = {x}\n", .{batch1.toBytesBE()[16..32].*});
+            std.debug.print("  batch2 = {x}\n", .{batch2.toBytesBE()[16..32].*});
+
             // Build RegistersValEvaluation polynomial tables
             const T = @as(usize, 1) << @intCast(n_cycle_vars);
             var inc_evals = try self.allocator.alloc(F, T);
@@ -1140,6 +1145,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     std.debug.print("  p(1) = {x}\n", .{p_at_1.toBytesBE()[24..32].*});
                     std.debug.print("  p(0)+p(1) = {x}, matches_claim = {}\n", .{ sum_check.toBytesBE()[24..32].*, sumcheck_ok });
                     std.debug.print("  full_coeffs len = {}\n", .{full_coeffs.len});
+                    // Print Instance 0+1 contribution
+                    std.debug.print("  combined_poly (Inst 0+1) = [{x}, {x}, {x}, {x}]\n", .{
+                        combined_poly[0].toBytesBE()[24..32].*,
+                        combined_poly[1].toBytesBE()[24..32].*,
+                        combined_poly[2].toBytesBE()[24..32].*,
+                        combined_poly[3].toBytesBE()[24..32].*,
+                    });
 
                     // For the batched sumcheck, we need to add Instance 2's polynomial to the combined polynomial
                     // The combined polynomial format depends on whether we're in a cycle round
@@ -1242,6 +1254,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             round,
                             challenge.toBytesBE()[24..32].*,
                         });
+                        std.debug.print("  new_batched_claim = {x}\n", .{current_batched_claim.toBytesBE()[16..32].*});
+                        std.debug.print("  new_lookups_claim = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
                     }
 
                     continue; // Skip the rest of the loop (we handled everything)
@@ -1471,10 +1485,16 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
             const eq_r_reduction = computeEqPolynomial(F, r_reduction, r_cycle_prime_be);
 
-            std.debug.print("  r_reduction[0] = {any}\n", .{r_reduction[0].toBytesBE()[0..8]});
-            std.debug.print("  r_cycle_prime_be[0] = {any}\n", .{r_cycle_prime_be[0].toBytesBE()[0..8]});
-            std.debug.print("  eq_r_reduction (verifier computes) = {any}\n", .{eq_r_reduction.toBytesBE()[0..8]});
-            std.debug.print("  eq_evals[0] (from sumcheck) = {any}\n", .{lookups_eq_evals[0].toBytesBE()[0..8]});
+            std.debug.print("  r_reduction[0..8] (8 elements):\n", .{});
+            for (0..n_cycle_vars) |i| {
+                std.debug.print("    r_reduction[{}] = {x}\n", .{ i, r_reduction[i].toBytesBE()[16..32].* });
+            }
+            std.debug.print("  r_cycle_prime_be[0..8] (8 elements):\n", .{});
+            for (0..n_cycle_vars) |i| {
+                std.debug.print("    r_cycle_prime_be[{}] = {x}\n", .{ i, r_cycle_prime_be[i].toBytesBE()[16..32].* });
+            }
+            std.debug.print("  eq_r_reduction (verifier computes) = {x}\n", .{eq_r_reduction.toBytesBE()[16..32].*});
+            std.debug.print("  eq_evals[0] (from sumcheck) = {x}\n", .{lookups_eq_evals[0].toBytesBE()[16..32].*});
 
             // Compute operand polynomial evaluations at r_address_prime
             const left_op_eval = evaluateLeftOperand(F, r_address_prime);

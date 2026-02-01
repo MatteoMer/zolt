@@ -684,6 +684,39 @@ pub fn UniPoly(comptime F: type) type {
             return [3]F{ coeffs[0], coeffs[2], coeffs[3] };
         }
 
+        /// Convert Toom-Cook style evaluations [p(0), p(1), p(2), p_inf] to full coefficients [c0, c1, c2, c3]
+        ///
+        /// For a cubic polynomial p(x) = c0 + c1*x + c2*x^2 + c3*x^3:
+        /// - p(0) = c0
+        /// - p(1) = c0 + c1 + c2 + c3
+        /// - p(2) = c0 + 2*c1 + 4*c2 + 8*c3
+        /// - p_inf = c3 (leading coefficient)
+        pub fn toomCookToCoeffs(evals: [4]F) [4]F {
+            const p0 = evals[0];
+            const p1 = evals[1];
+            const p2 = evals[2];
+            const p_inf = evals[3];
+
+            // c0 = p(0)
+            const c0 = p0;
+
+            // c3 = p_inf
+            const c3 = p_inf;
+
+            // c2 = (p(2) - 2*p(1) + p(0) - 6*p_inf) / 2
+            const two = F.fromU64(2);
+            const six = F.fromU64(6);
+            const inv2 = two.inverse().?;
+
+            const c2_num = p2.sub(two.mul(p1)).add(p0).sub(six.mul(p_inf));
+            const c2 = c2_num.mul(inv2);
+
+            // c1 = p(1) - c0 - c2 - c3
+            const c1 = p1.sub(c0).sub(c2).sub(c3);
+
+            return [4]F{ c0, c1, c2, c3 };
+        }
+
         /// Convert Toom-Cook style evaluations [p(0), p(1), p(2), p_inf] to Jolt's compressed format [c0, c2, c3]
         ///
         /// For a cubic polynomial p(x) = c0 + c1*x + c2*x^2 + c3*x^3:
@@ -743,6 +776,252 @@ pub fn UniPoly(comptime F: type) type {
 
             // Compressed format: [c0, c2, c3] where c3=0 for degree-2
             return .{ .coeffs = [3]F{ eval_0, c2, F.zero() } };
+        }
+
+        /// Interpolate a polynomial from evaluations at [0, 1, ..., d-1, ∞]
+        ///
+        /// Given evaluations [p(0), p(1), ..., p(d-1), p(∞)], where p(∞) is the leading coefficient,
+        /// returns all coefficients [c0, c1, ..., c_d].
+        ///
+        /// This matches Jolt's UniPoly::from_evals_toom() which uses Gaussian elimination
+        /// on an augmented Vandermonde matrix.
+        pub fn fromEvalsToom(allocator: Allocator, evals: []const F) ![]F {
+            const n = evals.len;
+            if (n == 0) {
+                return try allocator.alloc(F, 0);
+            }
+
+            // Build augmented Vandermonde matrix and solve via Gaussian elimination
+            // Matrix is n x (n+1): [Vandermonde | evals]
+            var matrix = try allocator.alloc([]F, n);
+            errdefer {
+                for (matrix) |row| {
+                    allocator.free(row);
+                }
+                allocator.free(matrix);
+            }
+
+            // Rows for finite x values (0, 1, ..., n-2)
+            for (0..n - 1) |i| {
+                matrix[i] = try allocator.alloc(F, n + 1);
+                matrix[i][0] = F.one();
+                const x = F.fromU64(@intCast(i));
+                for (1..n) |j| {
+                    matrix[i][j] = matrix[i][j - 1].mul(x);
+                }
+                matrix[i][n] = evals[i]; // RHS
+            }
+
+            // Row for x=infinity: coefficients are [0, 0, ..., 0, 1] and RHS is evals[n-1]
+            matrix[n - 1] = try allocator.alloc(F, n + 1);
+            for (0..n - 1) |j| {
+                matrix[n - 1][j] = F.zero();
+            }
+            matrix[n - 1][n - 1] = F.one(); // Leading coefficient position
+            matrix[n - 1][n] = evals[n - 1]; // p(∞) = leading coefficient
+
+            // Gaussian elimination with partial pivoting
+            for (0..n) |col| {
+                // Find pivot
+                var max_row = col;
+                for ((col + 1)..n) |row| {
+                    // Simple comparison - just use first non-zero as pivot
+                    if (!matrix[row][col].eql(F.zero()) and matrix[max_row][col].eql(F.zero())) {
+                        max_row = row;
+                    }
+                }
+
+                // Swap rows if needed
+                if (max_row != col) {
+                    const tmp = matrix[col];
+                    matrix[col] = matrix[max_row];
+                    matrix[max_row] = tmp;
+                }
+
+                // Check for zero pivot
+                if (matrix[col][col].eql(F.zero())) {
+                    // Skip if zero pivot (singular matrix case)
+                    continue;
+                }
+
+                // Eliminate column
+                const pivot_inv = matrix[col][col].inverse().?;
+                for ((col + 1)..n) |row| {
+                    if (!matrix[row][col].eql(F.zero())) {
+                        const factor = matrix[row][col].mul(pivot_inv);
+                        for (col..n + 1) |j| {
+                            matrix[row][j] = matrix[row][j].sub(factor.mul(matrix[col][j]));
+                        }
+                    }
+                }
+            }
+
+            // Back substitution
+            const coeffs = try allocator.alloc(F, n);
+            var i_plus_1 = n;
+            while (i_plus_1 > 0) {
+                const i = i_plus_1 - 1;
+                i_plus_1 -= 1;
+
+                var sum = matrix[i][n]; // RHS
+                for ((i + 1)..n) |j| {
+                    sum = sum.sub(matrix[i][j].mul(coeffs[j]));
+                }
+                if (!matrix[i][i].eql(F.zero())) {
+                    coeffs[i] = sum.mul(matrix[i][i].inverse().?);
+                } else {
+                    coeffs[i] = F.zero();
+                }
+            }
+
+            // Free matrix
+            for (matrix) |row| {
+                allocator.free(row);
+            }
+            allocator.free(matrix);
+
+            return coeffs;
+        }
+
+        /// Evaluate the product of 9 linear polynomials at points [1, 2, ..., 8, ∞]
+        ///
+        /// Given pairs [(p_j(0), p_j(1))] for j in 0..8, computes evaluations of
+        /// P(x) = Π_j p_j(x) at x = 1, 2, ..., 8, ∞.
+        ///
+        /// For a linear polynomial p_j(x) = p_j(0) + x*(p_j(1) - p_j(0)):
+        /// - p_j(k) = p_j(0) + k*(p_j(1) - p_j(0))
+        /// - p_j(∞) = leading coefficient = p_j(1) - p_j(0)
+        pub fn evalLinearProd9(pairs: [9][2]F) [9]F {
+            var result: [9]F = undefined;
+
+            // Compute product at each evaluation point
+            // Point ∞ is the product of leading coefficients (deltas)
+            inline for (0..9) |point_idx| {
+                var product = F.one();
+                inline for (0..9) |poly_idx| {
+                    const p0 = pairs[poly_idx][0];
+                    const p1 = pairs[poly_idx][1];
+                    const delta = p1.sub(p0);
+
+                    if (point_idx == 8) {
+                        // Point ∞: use leading coefficient (delta)
+                        product = product.mul(delta);
+                    } else {
+                        // Point k = point_idx + 1: p(k) = p0 + k*delta
+                        const k = F.fromU64(point_idx + 1);
+                        const val = p0.add(k.mul(delta));
+                        product = product.mul(val);
+                    }
+                }
+                result[point_idx] = product;
+            }
+
+            return result;
+        }
+
+        /// Evaluate product of 10 linear polynomials at points [1, 2, ..., 9, ∞]
+        ///
+        /// For a linear polynomial p_j(x) = p_j(0) + x*(p_j(1) - p_j(0)):
+        /// - p_j(k) = p_j(0) + k*(p_j(1) - p_j(0))
+        /// - p_j(∞) = leading coefficient = p_j(1) - p_j(0)
+        pub fn evalLinearProd10(pairs: [10][2]F) [10]F {
+            var result: [10]F = undefined;
+
+            // Compute product at each evaluation point
+            // Point ∞ is the product of leading coefficients (deltas)
+            inline for (0..10) |point_idx| {
+                var product = F.one();
+                inline for (0..10) |poly_idx| {
+                    const p0 = pairs[poly_idx][0];
+                    const p1 = pairs[poly_idx][1];
+                    const delta = p1.sub(p0);
+
+                    if (point_idx == 9) {
+                        // Point ∞: use leading coefficient (delta)
+                        product = product.mul(delta);
+                    } else {
+                        // Point k = point_idx + 1: p(k) = p0 + k*delta
+                        const k = F.fromU64(point_idx + 1);
+                        const val = p0.add(k.mul(delta));
+                        product = product.mul(val);
+                    }
+                }
+                result[point_idx] = product;
+            }
+
+            return result;
+        }
+
+        /// Finish MLE product sum computation from evaluations
+        ///
+        /// Given evaluations of q(X) / eq(X, r[round]) at [1, 2, ..., d-1, ∞],
+        /// recovers the full polynomial q(X) such that q(0) + q(1) = claim.
+        ///
+        /// This matches Jolt's finish_mles_product_sum_from_evals():
+        /// 1. Compute eval_at_0 from the claim and sum_evals[0]
+        /// 2. Interpolate the quotient polynomial from [eval_at_0, eval_at_1, ..., eval_at_{d-1}, eval_at_∞]
+        /// 3. Multiply by eq(X, r[round]) to get the final polynomial
+        ///
+        /// Returns coefficients [c0, c1, ..., c_{d+1}] where d = sum_evals.len
+        pub fn finishMlesProductSumFromEvals(allocator: Allocator, sum_evals: []const F, claim: F, r_round: F) ![]F {
+            // eq(X, r) = (1 - r) + (2r - 1)X = eq_at_0 + eq_slope * X
+            const eq_at_0 = F.one().sub(r_round);
+            const eq_at_1 = r_round;
+
+            // claim = q(0) + q(1) = eq_at_0 * quot(0) + eq_at_1 * quot(1)
+            // where quot(1) = sum_evals[0]
+            // So: eq_at_0 * quot(0) = claim - eq_at_1 * sum_evals[0]
+            //     quot(0) = (claim - eq_at_1 * sum_evals[0]) / eq_at_0
+            const eval_at_1 = sum_evals[0];
+            const eval_at_0 = if (eq_at_0.eql(F.zero()))
+                F.zero()
+            else
+                claim.sub(eq_at_1.mul(eval_at_1)).mul(eq_at_0.inverse().?);
+
+            // Build full toom evaluations: [eval_at_0, sum_evals[0..]]
+            const toom_evals = try allocator.alloc(F, sum_evals.len + 1);
+            defer allocator.free(toom_evals);
+            toom_evals[0] = eval_at_0;
+            @memcpy(toom_evals[1..], sum_evals);
+
+            // Interpolate quotient polynomial
+            const tmp_coeffs = try fromEvalsToom(allocator, toom_evals);
+            defer allocator.free(tmp_coeffs);
+
+            // Multiply by eq(X, r[round]) = (1 - r) + (2r - 1)X
+            // eq_c0 = 1 - r, eq_c1 = 2r - 1
+            const constant_coeff = F.one().sub(r_round);
+            const x_coeff = r_round.add(r_round).sub(F.one());
+
+            // Result is degree (d-1) * 1 + 1 = d where d = sum_evals.len (quotient degree d-1)
+            // So final degree = tmp_coeffs.len
+            const coeffs = try allocator.alloc(F, tmp_coeffs.len + 1);
+            @memset(coeffs, F.zero());
+
+            for (tmp_coeffs, 0..) |coeff, i| {
+                coeffs[i] = coeffs[i].add(coeff.mul(constant_coeff));
+                coeffs[i + 1] = coeffs[i + 1].add(coeff.mul(x_coeff));
+            }
+
+            return coeffs;
+        }
+
+        /// Convert polynomial coefficients to compressed format [c0, c2, c3, ..., c_d]
+        /// This skips c1 which is recovered from the hint (claim).
+        pub fn toCompressed(allocator: Allocator, coeffs: []const F) ![]F {
+            if (coeffs.len <= 1) {
+                const result = try allocator.alloc(F, coeffs.len);
+                if (coeffs.len > 0) result[0] = coeffs[0];
+                return result;
+            }
+
+            // compressed = [c0, c2, c3, ..., c_d] (skip c1)
+            const compressed = try allocator.alloc(F, coeffs.len - 1);
+            compressed[0] = coeffs[0]; // c0
+            for (2..coeffs.len) |i| {
+                compressed[i - 1] = coeffs[i]; // c2, c3, ..., c_d
+            }
+            return compressed;
         }
     };
 }

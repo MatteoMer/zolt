@@ -459,13 +459,53 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // For each cycle j, compute:
             //   - eq_reduction[j] = eq(j, r_reduction) - the eq polynomial at the reduction point
             //   - combined_vals[j] = lookup_output(j) + gamma*left(j) + gamma^2*right(j)
-            // The sumcheck proves: Σ_j eq_reduction[j] * combined_vals[j] = lookups_input
+            //   - lookup_indices[j] = interleave_bits(left_operand, right_operand)
+            //   - ra_weights[j] = accumulates eq(address_bits, r_address) during address rounds
+            // The sumcheck proves: Σ_j Σ_k eq(j, r_reduction) * ra(k, j) * combined(k, j) = lookups_input
+            // Since ra(k, j) = 1 only when k = lookup_index(j), this equals:
+            // Σ_j eq(j, r_reduction) * combined(lookup_index(j), j)
             var lookups_eq_evals = try self.allocator.alloc(F, T);
             var lookups_combined_vals = try self.allocator.alloc(F, T);
+            var lookups_ra_weights = try self.allocator.alloc(F, T); // Per-cycle total ra weight (product of chunks)
+            var lookups_indices_lo = try self.allocator.alloc(u64, T); // Lower 64 bits of lookup index
+            var lookups_indices_hi = try self.allocator.alloc(u64, T); // Upper 64 bits of lookup index
             defer self.allocator.free(lookups_eq_evals);
             defer self.allocator.free(lookups_combined_vals);
+            defer self.allocator.free(lookups_ra_weights);
+            defer self.allocator.free(lookups_indices_lo);
+            defer self.allocator.free(lookups_indices_hi);
             @memset(lookups_eq_evals, F.zero());
             @memset(lookups_combined_vals, F.zero());
+            @memset(lookups_ra_weights, F.one()); // Start with weight 1
+            @memset(lookups_indices_lo, 0);
+            @memset(lookups_indices_hi, 0);
+
+            // Track per-chunk ra weights for opening claims
+            // We have up to 8 chunks of 16 bits each (LOOKUPS_LOG_K=128, chunk_size=16)
+            // lookups_ra_virtual_log_k_chunk is typically 16, giving 8 chunks
+            const MAX_RA_CHUNKS = 8;
+            const ra_num_chunks = LOOKUPS_LOG_K / lookups_ra_virtual_log_k_chunk;
+            std.debug.assert(ra_num_chunks <= MAX_RA_CHUNKS);
+
+            var ra_chunk_weights: [MAX_RA_CHUNKS][]F = undefined;
+            for (0..ra_num_chunks) |chunk_idx| {
+                ra_chunk_weights[chunk_idx] = try self.allocator.alloc(F, T);
+                @memset(ra_chunk_weights[chunk_idx], F.one());
+            }
+            defer {
+                for (0..ra_num_chunks) |chunk_idx| {
+                    self.allocator.free(ra_chunk_weights[chunk_idx]);
+                }
+            }
+
+            // Track which cycles use which lookup table (for flag claims)
+            // and which use identity path (for raf_flag claim)
+            var cycle_table_indices = try self.allocator.alloc(i8, T);
+            var cycle_is_identity_path = try self.allocator.alloc(bool, T);
+            defer self.allocator.free(cycle_table_indices);
+            defer self.allocator.free(cycle_is_identity_path);
+            @memset(cycle_table_indices, -1); // -1 = no table
+            @memset(cycle_is_identity_path, false);
 
             // Build eq_reduction[j] = eq(j, r_reduction) for all cycles j
             // r_reduction is in BIG_ENDIAN order (MSB first)
@@ -763,6 +803,118 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 // combined = output + gamma*left + gamma^2*right
                 lookups_combined_vals[j] = lookup_output.add(gamma_raf.mul(left_op)).add(gamma_raf2.mul(right_op));
 
+                // Compute lookup index = interleave_bits(left_operand, right_operand)
+                // For AddOperands instructions: left=0, right=sum, so index = interleave(0, sum)
+                // For interleaved: left=rs1, right=rs2, so index = interleave(rs1, rs2)
+                // Note: We need the RAW operand values as u64, not field elements
+                const left_op_raw: u64 = blk: {
+                    const is_add_operands = switch (opcode) {
+                        0x33 => (funct3 == 0) and (funct7 == 0), // ADD
+                        0x13 => (funct3 == 0), // ADDI
+                        0x1b => (funct3 == 0), // ADDIW
+                        0x3b => (funct3 == 0) and (funct7 == 0), // ADDW
+                        0x37, 0x17, 0x6f, 0x67, 0x03, 0x23 => true, // LUI, AUIPC, JAL, JALR, Load, Store
+                        else => false,
+                    };
+                    if (is_add_operands) {
+                        break :blk 0;
+                    } else {
+                        break :blk step.rs1_value;
+                    }
+                };
+                const right_op_raw: u64 = blk: {
+                    const is_add_operands = switch (opcode) {
+                        0x33 => (funct3 == 0) and (funct7 == 0), // ADD
+                        0x3b => (funct3 == 0) and (funct7 == 0), // ADDW
+                        else => false,
+                    };
+                    if (is_add_operands) {
+                        // right = rs1 + rs2
+                        break :blk step.rs1_value +% step.rs2_value;
+                    }
+                    const is_imm_add = switch (opcode) {
+                        0x13 => (funct3 == 0), // ADDI
+                        0x1b => (funct3 == 0), // ADDIW
+                        0x37 => true, // LUI
+                        0x17 => true, // AUIPC
+                        0x6f => true, // JAL
+                        0x67 => true, // JALR
+                        0x03 => true, // Load
+                        0x23 => true, // Store
+                        else => false,
+                    };
+                    if (is_imm_add) {
+                        // Various immediate formats - for simplicity, use what we computed
+                        // This is the sum that goes into right_op
+                        break :blk switch (opcode) {
+                            0x13, 0x67 => blk2: {
+                                const imm12_raw: u32 = @truncate(instr >> 20);
+                                const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
+                                const imm_u64: u64 = @bitCast(imm_signed);
+                                break :blk2 step.rs1_value +% imm_u64;
+                            },
+                            0x1b => blk2: {
+                                const imm12_raw: u32 = @truncate(instr >> 20);
+                                const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
+                                const imm_u64: u64 = @bitCast(imm_signed);
+                                const rs1_32: u32 = @truncate(step.rs1_value);
+                                const imm_32: u32 = @truncate(imm_u64);
+                                break :blk2 @as(u64, rs1_32) +% @as(u64, imm_32);
+                            },
+                            0x37 => @as(u64, instr & 0xFFFFF000),
+                            0x17 => step.pc +% @as(u64, instr & 0xFFFFF000),
+                            0x6f => blk2: {
+                                const imm20: u32 = ((@as(u32, instr >> 31) & 1) << 19) |
+                                    ((@as(u32, instr >> 12) & 0xFF) << 11) |
+                                    ((@as(u32, instr >> 20) & 1) << 10) |
+                                    ((@as(u32, instr >> 21) & 0x3FF));
+                                const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm20 << 12)) >> 11);
+                                const imm_u64: u64 = @bitCast(imm_signed);
+                                break :blk2 step.pc +% imm_u64;
+                            },
+                            0x03 => blk2: {
+                                const imm12_raw: u32 = @truncate(instr >> 20);
+                                const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
+                                const imm_u64: u64 = @bitCast(imm_signed);
+                                break :blk2 step.rs1_value +% imm_u64;
+                            },
+                            0x23 => blk2: {
+                                const imm_lo: u32 = (instr >> 7) & 0x1F;
+                                const imm_hi: u32 = (instr >> 25) & 0x7F;
+                                const imm12: u32 = (imm_hi << 5) | imm_lo;
+                                const imm_signed: i64 = @as(i64, @as(i12, @bitCast(@as(u12, @truncate(imm12)))));
+                                const imm_u64: u64 = @bitCast(imm_signed);
+                                break :blk2 step.rs1_value +% imm_u64;
+                            },
+                            else => step.rs2_value,
+                        };
+                    }
+                    break :blk step.rs2_value;
+                };
+
+                // Compute interleaved lookup index
+                const lookup_idx = interleaveBits128(left_op_raw, right_op_raw);
+                lookups_indices_lo[j] = @truncate(lookup_idx);
+                lookups_indices_hi[j] = @truncate(lookup_idx >> 64);
+
+                // Track which lookup table this cycle uses (for flag claims)
+                // and whether it uses identity path (for raf_flag claim)
+                const table_idx = getLookupTableIndex(opcode, funct3, funct7);
+                cycle_table_indices[j] = table_idx;
+
+                // Identity path (not interleaved) = AddOperands instructions
+                // These are: ADD, ADDI, ADDIW, ADDW, LUI, AUIPC, JAL, JALR, Load, Store
+                const is_add_operands = switch (opcode) {
+                    0x33 => (funct3 == 0) and (funct7 == 0), // ADD
+                    0x13 => (funct3 == 0), // ADDI
+                    0x1b => (funct3 == 0), // ADDIW
+                    0x3b => (funct3 == 0) and (funct7 == 0), // ADDW
+                    0x37, 0x17, 0x6f, 0x67, 0x03, 0x23 => true, // LUI, AUIPC, JAL, JALR, Load, Store
+                    else => false,
+                };
+                // Identity path = NOT interleaved = is_add_operands (uses identity polynomial)
+                cycle_is_identity_path[j] = is_add_operands;
+
                 // Debug first 3 cycles
                 if (j < 3) {
                     std.debug.print("[STAGE5 LOOKUPS] j={}: opcode=0x{x}, funct3={}, funct7={}, pc=0x{x}\n", .{ j, opcode, funct3, funct7, step.pc });
@@ -774,6 +926,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     std.debug.print("  eq={x}, combined={x}\n", .{
                         lookups_eq_evals[j].toBytesBE()[24..32].*,
                         lookups_combined_vals[j].toBytesBE()[24..32].*,
+                    });
+                    std.debug.print("  lookup_index: lo=0x{x:0>16}, hi=0x{x:0>16}\n", .{
+                        lookups_indices_lo[j],
+                        lookups_indices_hi[j],
                     });
                 }
             }
@@ -866,28 +1022,241 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 // Instance 2: LookupsReadRaf (136 rounds)
                 // Since lookups_num_rounds = max_num_rounds, this instance is always active
                 //
+                // The sumcheck proves: Σ_j Σ_k eq(j, r_reduction) * ra(k, j) * combined(k, j) = input
+                // Since ra(k, j) = 1 only when k = lookup_index(j), this simplifies to:
+                // Σ_j eq(j, r_reduction) * combined(lookup_index(j), j)
+                //
                 // First 128 rounds (address variables):
-                //   The sum doesn't depend on address variables in our simplified model.
-                //   Use constant polynomial p(x) = claim/2 so p(0)+p(1) = claim.
+                //   For round i, we bind address bit i.
+                //   p(0) = sum over cycles j where bit i of lookup_index(j) = 0
+                //   p(1) = sum over cycles j where bit i of lookup_index(j) = 1
+                //   Each cycle contributes: eq_reduction[j] * ra_weights[j] * combined[j]
                 //
                 // Last 8 rounds (cycle variables):
-                //   Run actual sumcheck: Σ_j eq_reduction(j) * combined_vals(j)
-                //   Bind lookups_eq_evals and lookups_combined_vals each round.
+                //   Standard sumcheck over the remaining cycle polynomial.
                 if (round < LOOKUPS_LOG_K) {
-                    // Address rounds: constant polynomial that halves the claim
-                    const half_lookups = lookups_claim.mul(F.fromU64(2).inverse().?);
-                    combined_poly[0] = combined_poly[0].add(batch2.mul(half_lookups));
-                    combined_poly[1] = combined_poly[1].add(batch2.mul(half_lookups));
-                    combined_poly[2] = combined_poly[2].add(batch2.mul(half_lookups));
-                    // evals[3] = p_inf = 0 for constant polynomial
+                    // Address round: compute polynomial based on address bit `round`
+                    var p0 = F.zero();
+                    var p1 = F.zero();
+                    for (0..T) |j| {
+                        const bit = getBit128(lookups_indices_lo[j], lookups_indices_hi[j], round);
+                        const contrib = lookups_eq_evals[j].mul(lookups_ra_weights[j]).mul(lookups_combined_vals[j]);
+                        if (bit == 0) {
+                            p0 = p0.add(contrib);
+                        } else {
+                            p1 = p1.add(contrib);
+                        }
+                    }
+                    // For degree-1 polynomial (linear in the address variable):
+                    // p(x) = p0 + x*(p1 - p0)
+                    // p(0) = p0, p(1) = p1, p(2) = 2*p1 - p0
+                    // p_inf = p1 - p0 (leading coefficient)
+                    const p2 = p1.add(p1).sub(p0);
+                    const p_inf = p1.sub(p0);
+                    combined_poly[0] = combined_poly[0].add(batch2.mul(p0));
+                    combined_poly[1] = combined_poly[1].add(batch2.mul(p1));
+                    combined_poly[2] = combined_poly[2].add(batch2.mul(p2));
+                    combined_poly[3] = combined_poly[3].add(batch2.mul(p_inf));
                 } else {
-                    // Cycle rounds: actual sumcheck over eq_reduction * combined_vals
+                    // Cycle rounds: actual sumcheck over eq_reduction * Π_c ra_chunk[c] * combined_vals
+                    // IMPORTANT: We must compute the product of 9 linear factors (8 ra_chunks + 1 combined_val).
+                    //
+                    // Jolt's approach (read_raf_checking.rs:720-774):
+                    // 1. Build pairs [(p_j(0), p_j(1))] for each factor:
+                    //    - combined_val: (eq_in * v_at_0, eq_in * v_at_1) -- eq absorbed into first factor
+                    //    - ra_chunks[i]: (ra[i].get_bound_coeff(2*j), ra[i].get_bound_coeff(2*j+1))
+                    // 2. Evaluate product at [1, 2, ..., 8, ∞] using eval_linear_prod_accumulate
+                    // 3. Use finish_mles_product_sum_from_evals to recover full degree-10 polynomial
+                    //
+                    // The resulting polynomial has degree 10: 9 linear factors + eq(X, r_round).
                     const lookups_round = round - LOOKUPS_LOG_K;
-                    const lookups_poly = computeLookupsRoundPoly(lookups_eq_evals, lookups_combined_vals, lookups_round);
-                    combined_poly[0] = combined_poly[0].add(batch2.mul(lookups_poly[0]));
-                    combined_poly[1] = combined_poly[1].add(batch2.mul(lookups_poly[1]));
-                    combined_poly[2] = combined_poly[2].add(batch2.mul(lookups_poly[2]));
-                    combined_poly[3] = combined_poly[3].add(batch2.mul(lookups_poly[3]));
+                    const current_half_size = lookups_eq_evals.len >> @intCast(lookups_round + 1);
+
+                    // Accumulate sum over all j of: eq[j] * val[j] * Π_c ra_chunk[c][j]
+                    // We have 10 linear factors: 1 eq + 1 val + 8 ra_chunks = degree 10
+                    // Since we don't have the split-eq structure, we compute directly:
+                    var sum_evals: [10]F = [_]F{F.zero()} ** 10; // Evaluations at [1, 2, ..., 9, ∞]
+
+                    for (0..current_half_size) |j| {
+                        // Build the 10 linear polynomial pairs for this j
+                        // Each pair is (p(0), p(1)) for the linear polynomial
+                        var pairs: [10][2]F = undefined;
+
+                        // Factor 0: eq polynomial (linear in X)
+                        pairs[0][0] = lookups_eq_evals[2 * j];
+                        pairs[0][1] = lookups_eq_evals[2 * j + 1];
+
+                        // Factor 1: combined_val polynomial (linear in X)
+                        pairs[1][0] = lookups_combined_vals[2 * j];
+                        pairs[1][1] = lookups_combined_vals[2 * j + 1];
+
+                        // Factors 2-9: 8 ra_chunk polynomials (each linear in X)
+                        for (0..ra_num_chunks) |c| {
+                            pairs[c + 2][0] = ra_chunk_weights[c][2 * j];
+                            pairs[c + 2][1] = ra_chunk_weights[c][2 * j + 1];
+                        }
+
+                        // Evaluate product at [1, 2, ..., 9, ∞]
+                        const prod_evals = UniPoly(F).evalLinearProd10(pairs);
+
+                        // Accumulate into sum_evals
+                        for (0..10) |k| {
+                            sum_evals[k] = sum_evals[k].add(prod_evals[k]);
+                        }
+                    }
+
+                    // Get the current claim for this round
+                    // For cycle rounds, the claim is the current lookups_claim
+                    const cycle_claim = lookups_claim;
+
+                    // We've computed sum_evals = [g(1), g(2), ..., g(9), g(∞)] where
+                    // g(X) = Σ_j eq_r[2j+X] * val[2j+X] * Π_i ra_i[2j+X]
+                    // This is a degree-10 polynomial (product of 10 linear factors).
+                    //
+                    // We need to recover g(0) from the sumcheck property: g(0) + g(1) = claim
+                    // Then interpolate the full polynomial from [g(0), g(1), ..., g(9), g(∞)]
+                    const eval_at_1 = sum_evals[0];
+                    const eval_at_0 = cycle_claim.sub(eval_at_1);
+
+                    // Build toom evaluations: [g(0), g(1), ..., g(9), g(∞)]
+                    var toom_evals: [11]F = undefined;
+                    toom_evals[0] = eval_at_0;
+                    for (0..10) |i| {
+                        toom_evals[i + 1] = sum_evals[i];
+                    }
+
+                    // Interpolate degree-10 polynomial from 11 points [0, 1, ..., 9, ∞]
+                    const full_coeffs = try UniPoly(F).fromEvalsToom(self.allocator, &toom_evals);
+                    defer self.allocator.free(full_coeffs);
+
+                    // Convert to compressed format (skip c1)
+                    const lookups_compressed = try UniPoly(F).toCompressed(self.allocator, full_coeffs);
+                    defer self.allocator.free(lookups_compressed);
+
+                    // Verify sumcheck property: p(0) + p(1) = claim
+                    // p(x) = c0 + c1*x + c2*x^2 + ... + c10*x^10
+                    // p(0) = c0
+                    // p(1) = c0 + c1 + c2 + ... + c10
+                    var p_at_1 = F.zero();
+                    for (full_coeffs) |c| {
+                        p_at_1 = p_at_1.add(c);
+                    }
+                    const p_at_0 = full_coeffs[0];
+                    const sum_check = p_at_0.add(p_at_1);
+                    const sumcheck_ok = sum_check.eql(cycle_claim);
+
+                    // Debug: print polynomial info for all cycle rounds
+                    std.debug.print("[STAGE5 CYCLE] Round {} (cycle var {}):\n", .{ round, lookups_round });
+                    std.debug.print("  cycle_claim = {x}\n", .{cycle_claim.toBytesBE()[24..32].*});
+                    std.debug.print("  p(0) = {x}\n", .{p_at_0.toBytesBE()[24..32].*});
+                    std.debug.print("  p(1) = {x}\n", .{p_at_1.toBytesBE()[24..32].*});
+                    std.debug.print("  p(0)+p(1) = {x}, matches_claim = {}\n", .{ sum_check.toBytesBE()[24..32].*, sumcheck_ok });
+                    std.debug.print("  full_coeffs len = {}, lookups_compressed len = {}\n", .{ full_coeffs.len, lookups_compressed.len });
+
+                    // For the batched sumcheck, we need to add Instance 2's polynomial to the combined polynomial
+                    // The combined polynomial format depends on whether we're in a cycle round
+                    // For cycle rounds, Instance 2 has degree 10, so we need a different approach
+
+                    // Instance 0 and 1 contribute at most degree-3 (constant polynomials for most rounds)
+                    // Instance 2 contributes degree-10 for cycle rounds (product of 10 linear factors)
+                    // The batched polynomial degree is max(3, 10) = 10
+
+                    // Scale by batch coefficient and combine
+                    // For degree-10, we need 11 coefficients: [c0, c1, ..., c10]
+                    // combined_poly only has 4 slots, so we need to extend it
+
+                    // Create extended combined polynomial for degree-10
+                    var combined_coeffs = try self.allocator.alloc(F, 11);
+                    defer self.allocator.free(combined_coeffs);
+                    @memset(combined_coeffs, F.zero());
+
+                    // Add Instance 0 and 1 contributions (degree-3 or less)
+                    // These are already in combined_poly[0..4]
+                    const inst01_coeffs = UniPoly(F).toomCookToCoeffs(combined_poly);
+                    for (0..4) |i| {
+                        combined_coeffs[i] = combined_coeffs[i].add(inst01_coeffs[i]);
+                    }
+
+                    // Add Instance 2 contribution (degree-10)
+                    for (full_coeffs, 0..) |coeff, i| {
+                        if (i < combined_coeffs.len) {
+                            combined_coeffs[i] = combined_coeffs[i].add(batch2.mul(coeff));
+                        }
+                    }
+
+                    // Convert to compressed format [c0, c2, c3, ..., c10]
+                    const final_compressed = try UniPoly(F).toCompressed(self.allocator, combined_coeffs);
+
+                    try proof.compressed_polys.append(self.allocator, .{
+                        .coeffs_except_linear_term = final_compressed,
+                        .allocator = self.allocator,
+                    });
+
+                    // Append to transcript
+                    transcript.appendMessage("UniPoly_begin");
+                    for (final_compressed) |c| {
+                        transcript.appendScalar(c);
+                    }
+                    transcript.appendMessage("UniPoly_end");
+
+                    const challenge = transcript.challengeScalar();
+                    challenges[round] = challenge;
+
+                    // Update current_batched_claim by evaluating polynomial at challenge
+                    // p(r) = c0 + r*c1 + r^2*c2 + ... + r^d*c_d
+                    // c1 = hint - 2*c0 - c2 - c3 - ... - c_d
+                    var c1_sum = current_batched_claim.sub(combined_coeffs[0]).sub(combined_coeffs[0]); // hint - 2*c0
+                    for (2..combined_coeffs.len) |i| {
+                        c1_sum = c1_sum.sub(combined_coeffs[i]);
+                    }
+                    const c1_recovered = c1_sum;
+
+                    // Evaluate using Horner's method
+                    var eval_result = combined_coeffs[combined_coeffs.len - 1];
+                    var i_val = combined_coeffs.len - 1;
+                    while (i_val > 1) {
+                        i_val -= 1;
+                        if (i_val == 1) {
+                            eval_result = eval_result.mul(challenge).add(c1_recovered);
+                        } else {
+                            eval_result = eval_result.mul(challenge).add(combined_coeffs[i_val]);
+                        }
+                    }
+                    eval_result = eval_result.mul(challenge).add(combined_coeffs[0]);
+                    current_batched_claim = eval_result;
+
+                    // Skip the standard compression/serialization below
+                    // Bind the challenge for RegistersValEvaluation if active
+                    if (remaining_rounds <= regs_val_num_rounds) {
+                        const regs_round = regs_val_num_rounds - remaining_rounds;
+                        bindRegsValChallenge(inc_evals, wa_evals, lt_evals, regs_round, challenge);
+                    }
+
+                    // Bind cycle round challenge for lookups
+                    bindLookupsChallenge(lookups_eq_evals, lookups_combined_vals, lookups_round, challenge);
+
+                    // Bind the per-chunk ra weights
+                    for (0..ra_num_chunks) |chunk_idx| {
+                        bindSinglePolynomial(ra_chunk_weights[chunk_idx], lookups_round, challenge);
+                    }
+
+                    // Update lookups_claim: recompute ra_weights[0] from the bound chunks
+                    var final_ra = F.one();
+                    for (0..ra_num_chunks) |c| {
+                        final_ra = final_ra.mul(ra_chunk_weights[c][0]);
+                    }
+                    lookups_ra_weights[0] = final_ra;
+                    lookups_claim = lookups_eq_evals[0].mul(final_ra).mul(lookups_combined_vals[0]);
+
+                    // Debug: print challenges for first 3 and last 3 rounds
+                    if (round < 3 or round >= max_num_rounds - 3) {
+                        std.debug.print("[STAGE5 ROUND {}] challenge={x}\n", .{
+                            round,
+                            challenge.toBytesBE()[24..32].*,
+                        });
+                    }
+
+                    continue; // Skip the rest of the loop (we handled everything)
                 }
 
                 // Convert to compressed form using Toom-Cook encoding
@@ -944,17 +1313,74 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     bindRegsValChallenge(inc_evals, wa_evals, lt_evals, regs_round, challenge);
                 }
 
-                // Update lookups_claim and bind for cycle rounds
+                // Update lookups state for Instance 2
                 if (round < LOOKUPS_LOG_K) {
-                    // Address round: constant polynomial p(r) = claim/2
-                    lookups_claim = lookups_claim.mul(F.fromU64(2).inverse().?);
+                    // Address round: update ra_weights based on address bit
+                    // For each cycle j with lookup_index bit = b:
+                    //   weight[j] *= (1-r) if b=0, or r if b=1
+                    // This is equivalent to: weight[j] *= [(1-b)*(1-r) + b*r]
+                    const one_minus_r = F.one().sub(challenge);
+
+                    // Determine which chunk this round belongs to
+                    const chunk_idx = round / lookups_ra_virtual_log_k_chunk;
+
+                    for (0..T) |j| {
+                        const bit = getBit128(lookups_indices_lo[j], lookups_indices_hi[j], round);
+                        const factor = if (bit == 0) one_minus_r else challenge;
+                        lookups_ra_weights[j] = lookups_ra_weights[j].mul(factor);
+
+                        // Also update the per-chunk weight for this chunk
+                        if (chunk_idx < ra_num_chunks) {
+                            ra_chunk_weights[chunk_idx][j] = ra_chunk_weights[chunk_idx][j].mul(factor);
+                        }
+                    }
+                    // Update lookups_claim: p(r) = p0*(1-r) + p1*r = p0 + r*(p1-p0)
+                    // where p0 and p1 are from the polynomial we computed
+                    // This is tracked via ra_weights, so recompute the claim
+                    lookups_claim = F.zero();
+                    for (0..T) |j| {
+                        lookups_claim = lookups_claim.add(lookups_eq_evals[j].mul(lookups_ra_weights[j]).mul(lookups_combined_vals[j]));
+                    }
                 } else {
-                    // Cycle round: bind the challenge to eq_evals and combined_vals
+                    // Cycle round: bind the challenge to eq_evals, ra_weights, and combined_vals
                     const lookups_round = round - LOOKUPS_LOG_K;
+
+                    // At round 128 (first cycle round), verify the product invariant
+                    if (round == LOOKUPS_LOG_K) {
+                        std.debug.print("[STAGE5 CYCLE] Verifying ra invariant before cycle binding:\n", .{});
+                        var verified = true;
+                        for (0..@min(T, 3)) |j| {
+                            var product = F.one();
+                            for (0..ra_num_chunks) |c| {
+                                product = product.mul(ra_chunk_weights[c][j]);
+                            }
+                            const matches = product.eql(lookups_ra_weights[j]);
+                            if (!matches) verified = false;
+                            std.debug.print("  j={}: product={any}, ra_weights={any}, match={}\n", .{
+                                j,
+                                product.toBytesBE()[0..8],
+                                lookups_ra_weights[j].toBytesBE()[0..8],
+                                matches,
+                            });
+                        }
+                        std.debug.print("  All verified: {}\n", .{verified});
+                    }
+
+                    // Bind eq_evals and combined_vals (NOT ra_weights - we recompute from chunks)
                     bindLookupsChallenge(lookups_eq_evals, lookups_combined_vals, lookups_round, challenge);
-                    // Update lookups_claim by evaluating the round polynomial at challenge
-                    // For degree-2 polynomial from product of two linears, use proper evaluation
-                    lookups_claim = lookups_eq_evals[0].mul(lookups_combined_vals[0]);
+
+                    // Bind the per-chunk ra weights
+                    for (0..ra_num_chunks) |chunk_idx| {
+                        bindSinglePolynomial(ra_chunk_weights[chunk_idx], lookups_round, challenge);
+                    }
+
+                    // Update lookups_claim: recompute ra_weights[0] from the bound chunks
+                    var final_ra = F.one();
+                    for (0..ra_num_chunks) |c| {
+                        final_ra = final_ra.mul(ra_chunk_weights[c][0]);
+                    }
+                    lookups_ra_weights[0] = final_ra;
+                    lookups_claim = lookups_eq_evals[0].mul(final_ra).mul(lookups_combined_vals[0]);
                 }
             }
 
@@ -1072,66 +1498,99 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             std.debug.print("  identity_eval = {any}\n", .{identity_eval.toBytesBE()[0..8]});
             std.debug.print("  gamma_lookups_raf = {any}\n", .{gamma_lookups_raf.toBytesBE()[0..8]});
 
-            // Strategy: Set ra_claim = 1, val_claim = 0, and solve for raf_flag
+            // CORRECT APPROACH: Compute opening claims from the bound polynomials
             //
-            // We need: eq_r_reduction * 1 * (0 + gamma * raf_claim) = lookups_output_claim
-            //          gamma * raf_claim = lookups_output_claim / eq_r_reduction
-            //
-            // With raf_flag = f:
-            //   raf_claim = (1-f)*(left_op + gamma*right_op) + f*gamma*identity
-            //
-            // So: gamma * [(1-f)*(left_op + gamma*right_op) + f*gamma*identity] = lookups_output_claim / eq_r_reduction
-            //
-            // Let target = lookups_output_claim / (eq_r_reduction * gamma)
-            // Then: (1-f)*(left_op + gamma*right_op) + f*gamma*identity = target
-            //
-            // Let A = left_op + gamma*right_op, B = gamma*identity
-            // Then: (1-f)*A + f*B = target
-            //       A + f*(B - A) = target
-            //       f = (target - A) / (B - A)
+            // 1. InstructionRa(i) = ra_chunk_weights[i][0] after all binding
+            // 2. LookupTableFlag(i) = Σ_{j: table[j] == i} eq(r_cycle', j)
+            // 3. InstructionRafFlag = Σ_{j: identity_path} eq(r_cycle', j)
 
             // Allocate output arrays
             const table_flags = try self.allocator.alloc(F, num_lookup_tables);
-            @memset(table_flags, F.zero()); // val_claim = 0
+            @memset(table_flags, F.zero());
 
             const ra_chunks = try self.allocator.alloc(F, lookups_ra_d);
-            @memset(ra_chunks, F.one()); // ra_claim = 1^8 = 1
-
-            const A = left_op_eval.add(gamma_lookups_raf.mul(right_op_eval));
-            const B = gamma_lookups_raf.mul(identity_eval);
-
-            std.debug.print("  A (left_op + gamma*right_op) = {any}\n", .{A.toBytesBE()[0..8]});
-            std.debug.print("  B (gamma*identity) = {any}\n", .{B.toBytesBE()[0..8]});
-
-            const B_minus_A = B.sub(A);
-            std.debug.print("  B - A = {any}\n", .{B_minus_A.toBytesBE()[0..8]});
-
-            var computed_raf_flag = F.zero();
-            if (!eq_r_reduction.eql(F.zero()) and !gamma_lookups_raf.eql(F.zero()) and !B_minus_A.eql(F.zero())) {
-                // target = lookups_output_claim / (eq_r_reduction * gamma)
-                const target = lookups_output_claim.mul(eq_r_reduction.inverse().?).mul(gamma_lookups_raf.inverse().?);
-                std.debug.print("  target = {any}\n", .{target.toBytesBE()[0..8]});
-
-                // f = (target - A) / (B - A)
-                computed_raf_flag = target.sub(A).mul(B_minus_A.inverse().?);
-                std.debug.print("  Computed raf_flag = {any}\n", .{computed_raf_flag.toBytesBE()[0..8]});
-
-                // Verify: raf_claim should equal target
-                const verify_raf_claim = F.one().sub(computed_raf_flag).mul(A)
-                    .add(computed_raf_flag.mul(B));
-                std.debug.print("  Verify raf_claim = {any}\n", .{verify_raf_claim.toBytesBE()[0..8]});
-                std.debug.print("  target = {any}\n", .{target.toBytesBE()[0..8]});
-
-                // Verify full equation: eq * ra * gamma * raf_claim = output
-                const verify_expected = eq_r_reduction.mul(gamma_lookups_raf.mul(verify_raf_claim));
-                std.debug.print("  Verify expected = {any}\n", .{verify_expected.toBytesBE()[0..8]});
-                std.debug.print("  lookups_output_claim = {any}\n", .{lookups_output_claim.toBytesBE()[0..8]});
-                std.debug.print("  Expected match: {}\n", .{verify_expected.eql(lookups_output_claim)});
-            } else {
-                std.debug.print("  WARNING: Degenerate case, cannot solve for raf_flag\n", .{});
-                // Degenerate case - keep raf_flag = 0, val_claim = 0, ra_claim = 1
-                // This won't satisfy the verifier's equation, but there's no solution
+            for (0..lookups_ra_d) |i| {
+                ra_chunks[i] = ra_chunk_weights[i][0]; // Final value after all binding
             }
+
+            // Debug: print ra chunk claims
+            std.debug.print("[STAGE5 LOOKUPS] ra_chunk claims:\n", .{});
+            var ra_product = F.one();
+            for (0..lookups_ra_d) |i| {
+                std.debug.print("  ra_chunks[{}] = {any}\n", .{ i, ra_chunks[i].toBytesBE()[0..8] });
+                ra_product = ra_product.mul(ra_chunks[i]);
+            }
+            std.debug.print("  ra_product = {any}\n", .{ra_product.toBytesBE()[0..8]});
+            std.debug.print("  lookups_ra_weights[0] = {any}\n", .{lookups_ra_weights[0].toBytesBE()[0..8]});
+
+            // Verify ra_product == lookups_ra_weights[0]
+            const match_after = ra_product.eql(lookups_ra_weights[0]);
+            std.debug.print("  ra_product == lookups_ra_weights[0] (after all binding): {}\n", .{match_after});
+            if (!match_after) {
+                std.debug.print("  WARNING: ra_product and lookups_ra_weights[0] don't match after binding!\n", .{});
+                std.debug.print("  This is expected - binding the product != product of bindings\n", .{});
+                std.debug.print("  The correct ra_claim should be the PRODUCT of the bound chunk values.\n", .{});
+            }
+
+            // Compute eq(r_cycle', j) for all j and accumulate into table flags
+            // r_cycle_prime is LITTLE_ENDIAN from sumcheck (r_0, r_1, ..., r_7)
+            // We need to compute eq evaluations at this point
+            //
+            // Note: After binding n_cycle_vars rounds in the sumcheck, the eq polynomial
+            // lookups_eq_evals has been bound to the challenges. The final value eq_evals[0]
+            // equals eq(r_reduction, r_cycle'). But we need eq(r_cycle', j) for each original cycle j.
+            //
+            // We compute this by evaluating eq(r_cycle', j) for each j in [0, T)
+            // where r_cycle' = reversed challenges (to get BIG_ENDIAN for eq)
+            for (0..T) |j| {
+                if (j >= trace_len) continue;
+
+                // Compute eq(r_cycle', j) - note r_cycle_prime_be is already BIG_ENDIAN
+                const eq_j = computeEqAtIndex(r_cycle_prime_be, j);
+
+                // Accumulate into appropriate table flag
+                const table_idx = cycle_table_indices[j];
+                if (table_idx >= 0 and @as(usize, @intCast(table_idx)) < num_lookup_tables) {
+                    table_flags[@intCast(table_idx)] = table_flags[@intCast(table_idx)].add(eq_j);
+                }
+            }
+
+            // Debug: print non-zero table flags
+            std.debug.print("[STAGE5 LOOKUPS] Non-zero table flags:\n", .{});
+            for (0..num_lookup_tables) |i| {
+                if (!table_flags[i].eql(F.zero())) {
+                    std.debug.print("  table_flags[{}] = {any}\n", .{ i, table_flags[i].toBytesBE()[0..8] });
+                }
+            }
+
+            // Compute raf_flag = Σ_{j: identity_path} eq(r_cycle', j)
+            var computed_raf_flag = F.zero();
+            for (0..T) |j| {
+                if (j >= trace_len) continue;
+                if (cycle_is_identity_path[j]) {
+                    const eq_j = computeEqAtIndex(r_cycle_prime_be, j);
+                    computed_raf_flag = computed_raf_flag.add(eq_j);
+                }
+            }
+            std.debug.print("[STAGE5 LOOKUPS] raf_flag (identity path sum) = {any}\n", .{computed_raf_flag.toBytesBE()[0..8]});
+
+            // Verify the opening claims match the sumcheck output
+            // expected = eq_r_reduction * ra_product * (val_claim + gamma * raf_claim)
+            // where val_claim = Σ table_flags[i] * table_eval[i]
+            // and raf_claim = (1 - raf_flag)*(left_op + gamma*right_op) + raf_flag*gamma*identity
+            //
+            // Note: table_eval[i] would need lookup table MLE evaluation at r_address, which
+            // is complex. For now, we'll verify the structure is correct.
+
+            const raf_claim = F.one().sub(computed_raf_flag).mul(left_op_eval.add(gamma_lookups_raf.mul(right_op_eval)))
+                .add(computed_raf_flag.mul(gamma_lookups_raf).mul(identity_eval));
+            std.debug.print("  raf_claim (from formula) = {any}\n", .{raf_claim.toBytesBE()[0..8]});
+
+            // Compute what verifier would expect (without val_claim for now)
+            const expected_no_val = eq_r_reduction.mul(ra_product).mul(gamma_lookups_raf.mul(raf_claim));
+            std.debug.print("  expected_no_val (eq*ra*gamma*raf) = {any}\n", .{expected_no_val.toBytesBE()[0..8]});
+            std.debug.print("  lookups_output_claim = {any}\n", .{lookups_output_claim.toBytesBE()[0..8]});
+            std.debug.print("  current_batched_claim = {any}\n", .{current_batched_claim.toBytesBE()[0..8]});
 
             return Stage5Result(F){
                 .challenges = challenges,
@@ -1353,7 +1812,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             return evals;
         }
 
-        /// Bind challenge for LookupsReadRaf polynomials (cycle rounds)
+        /// Bind challenge for LookupsReadRaf polynomials (cycle rounds) - legacy version
         fn bindLookupsChallenge(eq_evals: []F, combined: []F, round: usize, r: F) void {
             const n = eq_evals.len >> @intCast(round);
             const half = n / 2;
@@ -1370,6 +1829,95 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             for (half..n) |i| {
                 eq_evals[i] = F.zero();
                 combined[i] = F.zero();
+            }
+        }
+
+        /// Compute round polynomial for LookupsReadRaf with ra_weights (cycle rounds)
+        /// This computes Σ_j eq(j) * ra(j) * combined(j)
+        /// Returns [p(0), p(1), p(2), p_inf] for degree-3 polynomial (product of 3 linears)
+        fn computeLookupsRoundPolyWithRa(eq_evals: []F, ra_weights: []F, combined: []F, round: usize) [4]F {
+            var evals = [_]F{ F.zero(), F.zero(), F.zero(), F.zero() };
+            const n = eq_evals.len >> @intCast(round);
+            const half = n / 2;
+
+            if (half == 0) {
+                if (n > 0) {
+                    // Constant polynomial
+                    const c = eq_evals[0].mul(ra_weights[0]).mul(combined[0]);
+                    evals[0] = c;
+                    evals[1] = c;
+                    evals[2] = c;
+                }
+                return evals;
+            }
+
+            for (0..half) |i| {
+                const eq_0 = eq_evals[2 * i];
+                const eq_1 = eq_evals[2 * i + 1];
+                const ra_0 = ra_weights[2 * i];
+                const ra_1 = ra_weights[2 * i + 1];
+                const c_0 = combined[2 * i];
+                const c_1 = combined[2 * i + 1];
+
+                // p(0) = eq_0 * ra_0 * c_0
+                evals[0] = evals[0].add(eq_0.mul(ra_0).mul(c_0));
+
+                // p(1) = eq_1 * ra_1 * c_1
+                evals[1] = evals[1].add(eq_1.mul(ra_1).mul(c_1));
+
+                // p(2) = (2*eq_1 - eq_0) * (2*ra_1 - ra_0) * (2*c_1 - c_0)
+                const eq_2 = eq_1.add(eq_1).sub(eq_0);
+                const ra_2 = ra_1.add(ra_1).sub(ra_0);
+                const c_2 = c_1.add(c_1).sub(c_0);
+                evals[2] = evals[2].add(eq_2.mul(ra_2).mul(c_2));
+
+                // p_inf = (eq_1 - eq_0) * (ra_1 - ra_0) * (c_1 - c_0)
+                const eq_inf = eq_1.sub(eq_0);
+                const ra_inf = ra_1.sub(ra_0);
+                const c_inf = c_1.sub(c_0);
+                evals[3] = evals[3].add(eq_inf.mul(ra_inf).mul(c_inf));
+            }
+
+            return evals;
+        }
+
+        /// Bind challenge for LookupsReadRaf polynomials with ra_weights (cycle rounds)
+        fn bindLookupsCycleChallengeWithRa(eq_evals: []F, ra_weights: []F, combined: []F, round: usize, r: F) void {
+            const n = eq_evals.len >> @intCast(round);
+            const half = n / 2;
+            if (half == 0) return;
+
+            const one_minus_r = F.one().sub(r);
+
+            for (0..half) |i| {
+                eq_evals[i] = one_minus_r.mul(eq_evals[2 * i]).add(r.mul(eq_evals[2 * i + 1]));
+                ra_weights[i] = one_minus_r.mul(ra_weights[2 * i]).add(r.mul(ra_weights[2 * i + 1]));
+                combined[i] = one_minus_r.mul(combined[2 * i]).add(r.mul(combined[2 * i + 1]));
+            }
+
+            // Zero out upper half
+            for (half..n) |i| {
+                eq_evals[i] = F.zero();
+                ra_weights[i] = F.zero();
+                combined[i] = F.zero();
+            }
+        }
+
+        /// Bind challenge for a single polynomial (used for per-chunk ra weights)
+        fn bindSinglePolynomial(poly: []F, round: usize, r: F) void {
+            const n = poly.len >> @intCast(round);
+            const half = n / 2;
+            if (half == 0) return;
+
+            const one_minus_r = F.one().sub(r);
+
+            for (0..half) |i| {
+                poly[i] = one_minus_r.mul(poly[2 * i]).add(r.mul(poly[2 * i + 1]));
+            }
+
+            // Zero out upper half
+            for (half..n) |i| {
+                poly[i] = F.zero();
             }
         }
     };
@@ -1440,6 +1988,90 @@ pub fn computeEqPolynomial(comptime F: type, r: []const F, s: []const F) F {
         result = result.mul(term);
     }
     return result;
+}
+
+/// Interleave bits of two 64-bit values into a 128-bit value
+/// Result: bit 2i comes from x[i], bit 2i+1 comes from y[i]
+/// This matches Jolt's interleave_bits function used for lookup indices
+pub fn interleaveBits128(x: u64, y: u64) u128 {
+    var result: u128 = 0;
+    for (0..64) |i| {
+        const xi: u128 = @as(u128, (x >> @intCast(i)) & 1);
+        const yi: u128 = @as(u128, (y >> @intCast(i)) & 1);
+        result |= xi << @intCast(2 * i);
+        result |= yi << @intCast(2 * i + 1);
+    }
+    return result;
+}
+
+/// Get bit `bit_index` from a 128-bit value stored as (lo, hi)
+/// bit_index 0 is LSB, bit_index 127 is MSB
+pub fn getBit128(lo: u64, hi: u64, bit_index: usize) u1 {
+    if (bit_index < 64) {
+        return @truncate(lo >> @intCast(bit_index));
+    } else {
+        return @truncate(hi >> @intCast(bit_index - 64));
+    }
+}
+
+/// Get the lookup table index for an instruction
+/// Returns -1 if no lookup table is used, otherwise returns table index 0-41
+/// Based on Jolt's LookupTables enum ordering
+pub fn getLookupTableIndex(opcode: u32, funct3: u32, funct7: u32) i8 {
+    return switch (opcode) {
+        0x33 => blk: { // R-type
+            if (funct3 == 0 and funct7 == 0) break :blk 0; // ADD -> AddTable
+            if (funct3 == 0 and funct7 == 0x20) break :blk 1; // SUB -> SubTable
+            if (funct3 == 7) break :blk 2; // AND -> AndTable
+            if (funct3 == 6) break :blk 3; // OR -> OrTable
+            if (funct3 == 4) break :blk 4; // XOR -> XorTable
+            if (funct3 == 1) break :blk 5; // SLL -> SllTable
+            if (funct3 == 5 and funct7 == 0) break :blk 6; // SRL -> SrlTable
+            if (funct3 == 5 and funct7 == 0x20) break :blk 7; // SRA -> SraTable
+            if (funct3 == 2) break :blk 8; // SLT -> SltTable
+            if (funct3 == 3) break :blk 9; // SLTU -> SltuTable
+            if (funct7 == 0x01 and funct3 == 0) break :blk 10; // MUL -> MulTable
+            if (funct7 == 0x01 and funct3 == 3) break :blk 11; // MULHU -> MulhuTable
+            break :blk -1;
+        },
+        0x13 => blk: { // I-type
+            if (funct3 == 0) break :blk 0; // ADDI -> AddTable
+            if (funct3 == 7) break :blk 2; // ANDI -> AndTable
+            if (funct3 == 6) break :blk 3; // ORI -> OrTable
+            if (funct3 == 4) break :blk 4; // XORI -> XorTable
+            if (funct3 == 1) break :blk 5; // SLLI -> SllTable
+            if (funct3 == 5 and (funct7 & 0x40) == 0) break :blk 6; // SRLI -> SrlTable
+            if (funct3 == 5 and (funct7 & 0x40) != 0) break :blk 7; // SRAI -> SraTable
+            if (funct3 == 2) break :blk 8; // SLTI -> SltTable
+            if (funct3 == 3) break :blk 9; // SLTIU -> SltuTable
+            break :blk -1;
+        },
+        0x1b => blk: { // OP-IMM-32
+            if (funct3 == 0) break :blk 0; // ADDIW -> AddTable
+            break :blk -1;
+        },
+        0x3b => blk: { // OP-32
+            if (funct3 == 0 and funct7 == 0) break :blk 0; // ADDW -> AddTable
+            if (funct3 == 0 and funct7 == 0x20) break :blk 1; // SUBW -> SubTable
+            break :blk -1;
+        },
+        0x63 => blk: { // B-type (branches)
+            if (funct3 == 0) break :blk 12; // BEQ -> BeqTable
+            if (funct3 == 1) break :blk 13; // BNE -> BneTable
+            if (funct3 == 4) break :blk 14; // BLT -> BltTable
+            if (funct3 == 5) break :blk 15; // BGE -> BgeTable
+            if (funct3 == 6) break :blk 16; // BLTU -> BltuTable
+            if (funct3 == 7) break :blk 17; // BGEU -> BgeuTable
+            break :blk -1;
+        },
+        0x37 => 0, // LUI -> AddTable (just passes through)
+        0x17 => 0, // AUIPC -> AddTable
+        0x6f => 0, // JAL -> AddTable
+        0x67 => 0, // JALR -> AddTable
+        0x03 => 0, // Load -> AddTable (address computation)
+        0x23 => 0, // Store -> AddTable (address computation)
+        else => -1,
+    };
 }
 
 test "stage5_prover compiles" {

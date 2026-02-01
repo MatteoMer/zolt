@@ -1,81 +1,66 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: IN PROGRESS - Stage 5 LookupsReadRaf Sumcheck Needed
+## Status: IN PROGRESS - Stage 5 Cycle Round Polynomial Computation Issue
 
-## Progress Summary
+## Current Session Progress (Session 88)
 
-### Completed
-- ✅ SumcheckId COUNT mismatch (22 → 24) - Added missing `AdviceClaimReductionCyclePhase` (20) and `AdviceClaimReduction` (21)
-- ✅ Config serialization format - Fixed to use proper u8 fields for ReadWriteConfig, OneHotConfig, DoryLayout
-- ✅ Claims deserialization works correctly
-- ✅ Stage 1-4 pass verification (confirmed via debug output)
-- ✅ RegistersValEvaluation sumcheck (Stage 5 Instance 0) implemented with trace data
-- ✅ RamRaClaimReduction (Stage 5 Instance 1) works (zero for Fibonacci without RAM)
+### What's Working
+- ✅ Stage 5 cycle rounds (128-135) produce degree-10 polynomials
+- ✅ `evalLinearProd10` correctly evaluates product of 10 linear factors at [1, 2, ..., 9, ∞]
+- ✅ `fromEvalsToom` correctly interpolates from Toom-Cook evaluations
+- ✅ Sumcheck property `p(0) + p(1) = claim` holds for all cycle rounds
+- ✅ Initial batched_claim for Stage 5 matches between Zolt and Jolt verifier
 
-### Current Issue: Stage 5 Instance 2 (LookupsReadRaf)
+### What's Not Working
+- ❌ Final output_claim doesn't match expected_claim after all 136 rounds
+- Output claim: `[db, d3, 94, 5e, a2, ae, d7, 0d, ...]`
+- Expected claim: `[2a, f2, 1c, 73, 3c, 5a, b3, 61, ...]`
 
-Stage 5 verification fails at sumcheck final claim check:
-```
-Sumcheck verification failed!
-  output_claim:   [0b, 9c, ac, 06, ...]
-  expected_claim: [d7, 15, 11, 32, ...]
-```
+### Key Observations
+1. Rounds 134 and 135 have `p(1) = 0`, meaning all evaluated products at X=1 are zero
+2. This might be correct (T=256 = 2^8, so after 6 rounds, we have only 4 cycles left, after 7 rounds only 2 cycles left)
+3. The sumcheck property still holds, so the polynomial computation is internally consistent
 
-The "constant polynomial" approach for LookupsReadRaf doesn't work because:
-1. Constant polynomials reduce `lookups_input` to a non-zero tiny value after 136 rounds
-2. The `expected_output_claim` formula computes a different value from opening claims
-3. These must match for verification to pass
+### Possible Issues to Investigate
+1. **Split-Eq vs Direct Eq**: My approach uses 10 linear factors directly (eq + val + 8 ra). Jolt uses:
+   - 9 linear factors (e_in absorbed into val + 8 ra)
+   - Then multiplies by e_out, current_scalar
+   - Then `finish_mles_product_sum_from_evals` adds eq(X, r_round) factor
 
-### What's Needed: Full LookupsReadRaf Implementation
+2. **r_round Indexing**: For cycle rounds, Jolt uses:
+   - r_round = r_reduction[current_index - 1] (LowToHigh)
+   - For cycle round 0: r_round = r_reduction[7]
+   - For cycle round 7: r_round = r_reduction[0]
 
-The LookupsReadRaf sumcheck proves:
-```
-rv(r_reduction) + γ·left_op(r_reduction) + γ²·right_op(r_reduction)
-= Σ_j Σ_k [ eq(j; r) · ra(k, j) · (Val(k) + γ · RafVal(k)) ]
-```
+3. **Variable Binding Order**: The eq polynomial uses BIG_ENDIAN (MSB first):
+   - Bit 0 (LSB) of cycle index corresponds to r_reduction[7]
+   - Bit 7 (MSB) of cycle index corresponds to r_reduction[0]
 
-Where:
-- `eq(j; r)` = equality polynomial over log_T cycle variables
-- `ra(k, j)` = selector (1 when cycle j's lookup key equals k)
-- `Val(k)` = lookup table value at address k
-- `RafVal(k)` = RAF operand contribution
-
-The sumcheck has 136 rounds (128 address + 8 cycle variables).
-
-Final opening claims must be computed:
-- `InstructionRa(0..7)` - 8 virtual RA polynomial chunks
-- `LookupTableFlag(0..41)` - 42 lookup table selectors
-- `InstructionRafFlag` - RAF operand flag
-
-### Simplified Approach for Fibonacci
-
-Since Fibonacci only uses a few instructions (LUI, ADDI, ADD, JAL, BNE, etc.):
-1. Most LookupTableFlag claims can be zero (unused tables)
-2. Only compute ra for the tables actually used
-3. Can batch operations over fewer actual lookups
+### Implementation Files
+- `/home/vivado/projects/zolt/src/zkvm/spartan/stage5_prover.zig` - Cycle round computation (lines 1060-1250)
+- `/home/vivado/projects/zolt/src/poly/mod.zig` - Added `evalLinearProd10`, `fromEvalsToom`, `toCompressed`
 
 ### Test Commands
-
 ```bash
-# Generate proof
-./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o /tmp/zolt_proof_dory.bin
+# Build
+zig build -Doptimize=ReleaseFast
 
-# Verify with Jolt (with debug output)
+# Generate proof
+./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format --export-preprocessing /tmp/zolt_preprocessing.bin -o /tmp/zolt_proof_dory.bin
+
+# Verify with Jolt
 cd /home/vivado/projects/jolt
 cargo test --package jolt-core --features zolt-debug test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
 
-### Key Files
-- `src/zkvm/spartan/stage5_prover.zig` - Stage 5 prover (needs LookupsReadRaf)
-- `src/zkvm/spartan/instruction_read_raf.zig` - Stub exists, needs implementation
-- `jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs` - Jolt reference implementation
+### Next Steps for Future Session
+1. Add debug output comparing individual cycle round polynomials between Zolt and Jolt prover
+2. Check if the expected_claim computation in Jolt verifier matches the sumcheck output
+3. Consider implementing `finishMlesProductSumFromEvals` approach instead of direct 10-factor product
+4. Verify the batch coefficient handling for Instance 2 during cycle rounds
 
-### Debug Findings
-
-From Jolt debug output:
-- Stage 4 RamValEvaluation shows `inc_claim = 0` (correct - Fibonacci has no RAM writes)
-- Stage 4 RamValFinal shows non-zero inc_claim (final termination write)
-- Stage 5 initial_claim is non-zero (lookups_input contributes)
-- After 136 rounds, output_claim ≠ expected_claim
-
-SESSION_ENDING - Context is running low. Next session should focus on implementing LookupsReadRaf sumcheck in `instruction_read_raf.zig`.
+## Previous Session Work (Session 87)
+- ✅ Per-chunk ra_weights tracking during address rounds
+- ✅ Proper cycle round binding: bind chunks separately, compute product after binding
+- ✅ ra_product == lookups_ra_weights[0] after all binding (invariant now holds)
+- ✅ Proper table_flags and raf_flag computation from eq(r_cycle', j) sums

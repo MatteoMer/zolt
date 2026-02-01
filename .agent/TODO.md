@@ -1,64 +1,114 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: IN PROGRESS - Stage 5 Prefix-Suffix Decomposition Required
+## Status: IN PROGRESS - Stage 5 Prefix-Suffix Integration Needed
 
-## Session 95 Summary
+## Session 96 Summary
 
-### Investigation Complete
-Thoroughly analyzed the root cause of Stage 5 sumcheck verification failure.
+### Infrastructure Complete
 
-### Root Cause
-Zolt uses a simplified bit-splitting approach for LookupsReadRaf address rounds that produces degree-1 polynomials, while Jolt uses prefix-suffix decomposition producing degree-2 polynomials with different value semantics.
+Created the prefix-suffix decomposition infrastructure required for Jolt compatibility:
 
-### Key Differences Documented
-1. **Polynomial Degree**: Jolt=2, Zolt=1 during address rounds
-2. **Value Computation**: Jolt uses table MLE evaluations, Zolt uses raw lookup results
-3. **RAF Computation**: Jolt evaluates LeftOperand/RightOperand/Identity polynomials at r_address, Zolt uses concrete operand values
+1. **prefixes.zig** - Implements all 45+ prefix types from Jolt:
+   - `Prefixes` enum with all prefix variants
+   - `PrefixCheckpoint` and `PrefixCheckpoints` types
+   - `LookupBits` for bit manipulation
+   - `prefixMle()` and `updatePrefixCheckpoint()` functions
+   - Implemented: Eq, LowerWord, UpperWord, And, Or, Xor, LessThan,
+     LeftOperandIsZero, RightOperandIsZero, LeftOperandMsb, RightOperandMsb
+   - Remaining prefixes return zero (placeholder)
 
-### Files Analyzed
-- Jolt read_raf_checking.rs: Main LookupsReadRaf implementation
-- Jolt lookup_table/mod.rs: 42 lookup table definitions
-- Jolt prefixes/mod.rs: 45+ prefix types
-- Jolt identity_poly.rs: Identity, OperandPolynomial implementations
-- Jolt suffixes/mod.rs: Suffix definitions
+2. **identity_poly.zig** - Implements RAF operand polynomials:
+   - `IdentityPolynomial`: Evaluates to binary index `Σ r_i * 2^(n-1-i)`
+   - `OperandPolynomial`: Left/Right operand from interleaved bits
+   - `BindingOrder` enum (LowToHigh, HighToLow)
+   - `sumcheckEvals()` for both polynomial types
 
-### Required Implementation
+3. **mod.zig** - Exports new modules and types
 
-To achieve Jolt compatibility, Zolt needs:
+### Key Technical Insight
 
-1. **Identity/Operand Polynomials** (simpler)
-   - `IdentityPolynomial`: `Σ r[i] * 2^(n-1-i)` evaluation
-   - `OperandPolynomial`: Left/Right operand evaluations
-   - These are used for RAF computation
+The critical difference between Jolt and Zolt's current approach:
 
-2. **Prefix-Suffix Decomposition** (complex)
-   - 45+ prefix types with MLE evaluation and checkpoint updates
-   - Suffix types for each lookup table
-   - `combine()` function for each table
+**Jolt (address rounds):**
+```rust
+// Compute [eval_0, eval_2] via prefix-suffix decomposition
+let eval_at_0 = read_checking[0] + raf[0];
+let eval_at_2 = read_checking[1] + raf[1];
+// Create degree-2 polynomial
+UniPoly::from_evals_and_hint(previous_claim, &[eval_at_0, eval_at_2])
+```
 
-3. **Address Round Polynomial Computation**
-   - Must match Jolt's `compute_prefix_suffix_prover_message()`
-   - Returns evaluations at X∈{0, 2} for degree-2 interpolation
+**Zolt (current, address rounds):**
+```zig
+// Simple bit-splitting produces degree-1
+if (bit == 0) p0 += contrib;
+else p1 += contrib;
+// Results in linear polynomial p(X) = p0 + X*(p1-p0)
+```
 
-4. **Cycle Round Polynomial Computation**
-   - After address rounds, materialize `combined_val_polynomial`
-   - Use table MLE evaluations, not raw lookup results
+The fundamental change needed: Use prefix-suffix decomposition to compute
+`[eval_0, eval_2]` and then use `fromEvalsAndHint(previous_claim, eval_0, eval_2)`
+to produce a degree-2 polynomial matching Jolt's format.
 
-### Incremental Approach
+### Remaining Implementation
 
-For Fibonacci program specifically:
-- Uses ADD, ADDI, ADDW, ADDIW, BNE, JAL, JALR, LUI instructions
-- All use "AddOperands" flag → identity RAF path (not interleaved)
-- Could potentially implement minimal subset first
+To complete Stage 5 prefix-suffix integration:
 
-### Files to Create
-- `src/zkvm/lookup_tables/mod.zig` - Table definitions
-- `src/zkvm/lookup_tables/prefixes/` - All 45+ prefix implementations
-- `src/zkvm/lookup_tables/suffixes/` - Suffix implementations
-- `src/zkvm/spartan/prefix_suffix.zig` - PrefixSuffixDecomposition
+1. **Initialize Suffix Polynomials** (per phase):
+   - For each lookup table, build suffix accumulators
+   - Suffix polynomial size = 2^(log_m) where log_m = LOG_K / phases
+   - Accumulate: suffix_poly[idx] += u_eval[j] * suffix_mle(suffix_bits)
 
-### Estimated Effort
-Several days of focused implementation work.
+2. **Initialize RAF Decompositions**:
+   - `identity_ps`: PrefixSuffixDecomposition for identity polynomial
+   - `left_operand_ps`: PrefixSuffixDecomposition for left operand
+   - `right_operand_ps`: PrefixSuffixDecomposition for right operand
+   - Each needs Q accumulators initialized from u_evals and lookup indices
+
+3. **Compute Address Round Message**:
+   ```zig
+   fn computePrefixSuffixProverMessage(round: usize, previous_claim: F) UniPoly {
+       // Read-checking: Σ over tables of P(c) * Q
+       const read_checking = proverMsgReadChecking(round);
+       // RAF: γ*left + γ²*(right + identity)
+       const raf = proverMsgRaf();
+
+       const eval_0 = read_checking[0] + raf[0];
+       const eval_2 = read_checking[1] + raf[1];
+
+       return UniPoly.fromEvalsAndHint(previous_claim, eval_0, eval_2);
+   }
+   ```
+
+4. **Bind and Update State After Each Round**:
+   - Bind challenge in suffix polynomials
+   - Bind challenge in RAF decompositions (identity_ps, left/right_operand_ps)
+   - Update prefix checkpoints every 2 rounds
+   - Initialize next phase when current phase completes
+
+5. **Transition to Cycle Rounds (after round 127)**:
+   - Call `init_log_t_rounds(gamma, gamma_sqr)` to materialize:
+     - `ra_polys`: Product of expanding table values
+     - `combined_val_polynomial`: table_mle(r_addr) + raf_val
+   - These are then used for the final 8 cycle rounds (existing code)
+
+### Files to Modify
+
+- `src/zkvm/spartan/stage5_prover.zig`:
+  - Import prefixes and identity_poly
+  - Add state for prefix_checkpoints, suffix_polys, v (expanding tables)
+  - Add identity_ps, left_operand_ps, right_operand_ps
+  - Replace address round bit-splitting with prefix-suffix computation
+  - Add phase management (init_phase, checkpoint updates)
+
+### Estimated Remaining Effort
+
+- Suffix polynomial initialization: 2-3 hours
+- RAF decomposition integration: 2-3 hours
+- Prover message computation: 2-3 hours
+- Phase management and binding: 2-3 hours
+- Testing and debugging: 4-6 hours
+- **Total: ~2-3 days of focused work**
 
 ### Test Commands
 
@@ -69,7 +119,7 @@ zig build -Doptimize=ReleaseFast
 # Generate proof
 ./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o /tmp/zolt_proof_dory.bin
 
-# Verify with Jolt (currently fails at Stage 5)
+# Verify with Jolt
 cd /home/vivado/projects/jolt
 cargo test --package jolt-core --features zolt-debug test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
@@ -82,9 +132,12 @@ Sumcheck verification failed!
   expected_claim: [bb, 2a, d3, 8c, 2c, 8c, 44, d3, ...]
 ```
 
-Stages 1-4: PASS
-Stage 5: FAIL (polynomial mismatch due to missing prefix-suffix decomposition)
+- Stages 1-4: PASS
+- Stage 5: FAIL (polynomial degree mismatch - need prefix-suffix for degree-2)
 
-### Session Notes
+### Commits This Session
 
-See `.agent/NOTES.md` for detailed technical analysis of the prefix-suffix decomposition requirements.
+1. `cef73b6` - feat: implement Jolt-compatible prefix-suffix decomposition
+   - Created prefixes.zig with prefix MLE implementations
+   - Created identity_poly.zig with Identity/Operand polynomials
+   - Updated mod.zig with exports

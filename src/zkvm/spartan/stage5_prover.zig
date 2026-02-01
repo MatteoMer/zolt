@@ -1166,6 +1166,39 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // Track lookups_claim separately (for Instance 2)
             var lookups_claim = lookups_input;
 
+            // ===================================================================
+            // Prefix-Suffix Decomposition Initialization for LookupsReadRaf
+            // ===================================================================
+            // Build u128 lookup indices array for prefix-suffix decomposition
+            var lookup_indices_u128 = try self.allocator.alloc(u128, T);
+            defer self.allocator.free(lookup_indices_u128);
+            for (0..T) |j| {
+                lookup_indices_u128[j] = (@as(u128, lookups_indices_hi[j]) << 64) | lookups_indices_lo[j];
+            }
+
+            // Initialize suffix polynomials for phase 0
+            var suffix_polys = AllSuffixPolys(F).init(self.allocator);
+            defer suffix_polys.deinit();
+            var prefix_checkpoints = PrefixCheckpointsState(F).init();
+
+            const num_phases: usize = 8;
+            const log_m = LOOKUPS_LOG_K / num_phases; // = 16
+            var current_phase: usize = 0;
+
+            // Initialize Q polynomials for phase 0
+            try suffix_polys.initPhase(0, num_phases, lookups_eq_evals, lookup_indices_u128, cycle_table_indices);
+
+            std.debug.print("[STAGE5 PREFIX-SUFFIX] Initialized phase 0, log_m={}, suffix_len={}\n", .{
+                log_m,
+                LOOKUPS_LOG_K - log_m,
+            });
+
+            // Will use suffix_polys, prefix_checkpoints, current_phase in address rounds
+            // Mark as used for now to allow incremental development
+            _ = &suffix_polys;
+            _ = &prefix_checkpoints;
+            _ = &current_phase;
+
             // Run the batched sumcheck
             for (0..max_num_rounds) |round| {
                 const remaining_rounds = max_num_rounds - round;

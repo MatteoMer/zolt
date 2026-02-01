@@ -1,69 +1,132 @@
-# Stage 5 Investigation Notes (Session 94)
+# Stage 5 Investigation Notes (Session 95)
 
 ## Summary
 
-The Stage 5 sumcheck verification fails because the polynomial coefficients don't match between Zolt and Jolt. Despite individual sums matching (`output_sum = rv_claim`, `left_sum = left_claim`, `right_sum = right_claim`), the round polynomial coefficients are completely different.
+The Stage 5 sumcheck verification fails because Zolt uses a fundamentally different approach for the LookupsReadRaf sumcheck than Jolt. Jolt uses prefix-suffix decomposition with 45+ prefix types, while Zolt uses a simpler bit-splitting approach.
 
-## Key Observations
+## Key Findings
 
-### 1. Address Round Computation Difference
+### 1. Polynomial Degree Difference
 
-**Jolt uses prefix-suffix decomposition:**
-- `prover_msg_read_checking()`: Evaluates lookup table polynomials using MLE prefix/suffix structure
-- `prover_msg_raf()`: Evaluates RAF (left, right, identity) polynomials
-- Returns degree-2 polynomial evaluations at X∈{0, 2}
+**Jolt Address Rounds (0-127):**
+- Uses prefix-suffix decomposition to compute degree-2 polynomials
+- The polynomial is computed via `from_evals_and_hint(previous_claim, [p(0), p(2)])`
+- This produces degree-2 polynomials from evaluations at X∈{0, 2}
 
-**Zolt uses address bit splitting:**
-- Splits cycles by address bit: `p0 = Σ (eq * ra * combined) for bit=0`
-- Creates degree-1 polynomial
+**Zolt Address Rounds (0-127):**
+- Uses bit-splitting: splits cycles by whether lookup_index bit = 0 or 1
+- Produces degree-1 linear polynomials: p(X) = p0 + X*(p1 - p0)
 
-### 2. Cycle Round Computation Difference
+### 2. Value Materialization Difference
 
-**Jolt:**
-- After address rounds, materializes `combined_val_polynomial` in `init_log_t_rounds()`
-- Uses `combined_val.get_bound_coeff(2*j)` in cycle rounds
-- The materialized values use table MLE evaluations at r_address
+**Jolt after address rounds:**
+- Calls `init_log_t_rounds()` which materializes:
+  - `ra_polys[i]`: Per-cycle values = product of expanding tables evaluated at r_address
+  - `combined_val_polynomial[j]` = table_values_at_r_addr[table(j)] + raf_val
+- Where `table_values_at_r_addr[t]` is the **MLE of table t evaluated at r_address**
+- And `raf_val` = gamma * left_prefix + gamma^2 * right_prefix (or identity version)
 
-**Zolt:**
-- Uses raw per-cycle values `lookups_combined_vals[j]` throughout
-- Never materializes the bound combined value
+**Zolt after address rounds:**
+- Uses raw per-cycle values `lookups_combined_vals[j] = output[j] + gamma*left[j] + gamma^2*right[j]`
+- This is the **concrete lookup result**, NOT the table MLE at r_address
 
-### 3. Round 128 Coefficient Comparison
+### 3. The Core Issue
 
-- **Jolt coeff[0] (LE):** `[e2, ee, 6f, c7, e9, ff, ea, e2, ...]`
-- **Zolt coeff[0] (BE):** `{ 30, 94, f1, 94, 6b, a0, 75, f5, ... }`
+The lookup output `f(x, y)` at concrete inputs `(x, y)` is **not the same** as `table_mle(r)` at random point `r`.
 
-Completely different!
+Example: AND table
+- `f(5, 3) = 5 & 3 = 1` (concrete evaluation)
+- `AND_mle(r_0, r_1, ..., r_127) = Σ_i 2^i * r_{2i} * r_{2i+1}` (MLE at random point)
 
-## Open Questions
+These are completely different values unless `r` happens to be exactly the binary encoding of `(5, 3)` (probability negligible).
 
-1. **Is our address round approach valid?**
-   - We use `combined(lookup_index(j), j)` as a constant per cycle
-   - This relies on `ra(k, j) = 1` only when `k = lookup_index(j)`
-   - Should this produce the same result as Jolt's prefix-suffix approach?
+### 4. Required Implementation
 
-2. **Why do individual sums match but polynomial coefficients don't?**
-   - The sums are computed over all cycles
-   - The polynomial coefficients depend on how we split/evaluate during rounds
-   - Different splitting strategies could give same sum but different polynomials
+To achieve Jolt compatibility, Zolt needs to implement:
 
-3. **Do we need to implement prefix-suffix decomposition?**
-   - This is a complex optimization in Jolt
-   - It might be necessary for correct polynomial computation
+1. **All 45+ Prefix Types** from Jolt:
+   - LowerWord, LowerHalfWord, UpperWord, Eq, And, Andn, Or, Xor, LessThan, etc.
+   - Each with `prefix_mle()` and `update_prefix_checkpoint()` methods
 
-## Possible Fixes
+2. **All Suffix Types** from Jolt:
+   - One, And, Or, Xor, LeftMsb, RightMsb, LessThan, etc.
 
-### Option A: Implement Jolt's approach
-- Implement `PrefixSuffixDecomposition` for address rounds
-- Materialize `combined_val_polynomial` after address rounds
-- Use bound coefficients in cycle rounds
+3. **PrefixSuffixDecomposition** for all 42 lookup tables:
+   - Each table defines which suffixes it uses and how to combine prefixes/suffixes
 
-### Option B: Debug current approach
-- Verify that our polynomial computation is mathematically equivalent
-- Check if there's a simpler bug (endianness, indexing, etc.)
-- Compare intermediate values during address rounds
+4. **Expanding Table Accumulator (v vector)**:
+   - Used to compute `ra_polys` after address rounds
 
-## Files
+5. **RAF Operand Polynomials**:
+   - LeftOperand, RightOperand, Identity prefix-suffix decompositions
+   - Used to compute raf_interleaved and raf_identity
 
-- Jolt reference: `/home/vivado/projects/jolt/jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs`
-- Zolt Stage 5: `/home/vivado/projects/zolt/src/zkvm/spartan/stage5_prover.zig`
+### 5. Jolt Files to Reference
+
+Main implementation:
+- `/home/vivado/projects/jolt/jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs`
+
+Lookup table trait:
+- `/home/vivado/projects/jolt/jolt-core/src/zkvm/lookup_table/mod.rs`
+
+Prefixes (45+ types):
+- `/home/vivado/projects/jolt/jolt-core/src/zkvm/lookup_table/prefixes/*.rs`
+
+Suffixes:
+- `/home/vivado/projects/jolt/jolt-core/src/zkvm/lookup_table/suffixes/*.rs`
+
+Prefix-Suffix Decomposition:
+- `/home/vivado/projects/jolt/jolt-core/src/poly/prefix_suffix.rs`
+
+### 6. Alternative Approaches Considered
+
+**Generalized-Lasso approach:**
+The Jolt paper mentions Generalized-Lasso which doesn't require prefix-suffix decomposition, instead using direct MLE evaluation. However, this would require modifications to both prover AND verifier - defeating the "verify by Jolt" goal.
+
+**Direct MLE evaluation after address rounds:**
+Even if we compute correct `table_values_at_r_addr` after address rounds, the address round polynomials themselves must match Jolt's for the transcript to stay in sync.
+
+### 7. Verification Output Analysis
+
+```
+Sumcheck verification failed!
+  output_claim:   [d9, 50, 6a, 6e, 69, 84, 32, f8, ...]
+  expected_claim: [bb, 2a, d3, 8c, 2c, 8c, 44, d3, ...]
+```
+
+The mismatch occurs because:
+1. Zolt's polynomial coefficients differ from Jolt's
+2. This causes different challenge values to be derived
+3. Which causes different intermediate claims
+4. Resulting in completely different final output claim
+
+### 8. Next Steps
+
+This is a substantial implementation effort requiring:
+1. Porting all 45+ prefix implementations from Jolt
+2. Porting all suffix implementations
+3. Implementing PrefixSuffixDecomposition for all tables
+4. Implementing the RAF operand decompositions
+5. Testing each component against Jolt's reference implementation
+
+Estimated effort: Several days of focused implementation work.
+
+### 9. Files Modified
+
+- `src/zkvm/spartan/stage5_prover.zig` - Stage 5 prover (current approach)
+- `.agent/TODO.md` - Updated with findings
+- `.agent/NOTES.md` - This file
+
+### 10. Test Commands
+
+```bash
+# Build Zolt
+zig build -Doptimize=ReleaseFast
+
+# Generate proof
+./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o /tmp/zolt_proof_dory.bin
+
+# Verify with Jolt (should fail currently)
+cd /home/vivado/projects/jolt
+cargo test --package jolt-core --features zolt-debug test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
+```

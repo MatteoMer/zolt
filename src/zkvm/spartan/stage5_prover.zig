@@ -25,6 +25,13 @@ const OpeningId = jolt_types.OpeningId;
 const tracer = @import("../../tracer/mod.zig");
 const ExecutionTrace = tracer.ExecutionTrace;
 
+// Import prefix-suffix decomposition modules
+const lookup_table_mod = @import("../lookup_table/mod.zig");
+const AllSuffixPolys = lookup_table_mod.AllSuffixPolys;
+const PrefixCheckpointsState = lookup_table_mod.PrefixCheckpointsState;
+const proverMsgReadChecking = lookup_table_mod.proverMsgReadChecking;
+const LookupBits = lookup_table_mod.LookupBits;
+
 /// Constants for Stage 5
 pub const LOOKUPS_LOG_K: usize = 128; // XLEN * 2 for RV64
 pub const RAM_LOG_K: usize = 16; // Default RAM address space
@@ -1222,6 +1229,14 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 if (round < LOOKUPS_LOG_K) {
                     // Address round: compute polynomial based on address bit
                     // Use HighToLow binding order: round 0 -> bit 127 (MSB), round 127 -> bit 0 (LSB)
+                    //
+                    // Jolt uses prefix-suffix decomposition which naturally produces degree-2 polynomials.
+                    // For compatibility, we compute eval_at_0 and eval_at_2 and use fromEvalsAndHint
+                    // to produce a degree-2 polynomial in Jolt's expected format.
+                    //
+                    // For a linear polynomial p(x) = p0 + x*(p1 - p0):
+                    //   eval_at_0 = p(0) = p0
+                    //   eval_at_2 = p(2) = 2*p1 - p0
                     const bit_index = LOOKUPS_LOG_K - 1 - round;
                     var p0 = F.zero();
                     var p1 = F.zero();
@@ -1234,16 +1249,84 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             p1 = p1.add(contrib);
                         }
                     }
-                    // For degree-1 polynomial (linear in the address variable):
-                    // p(x) = p0 + x*(p1 - p0)
-                    // p(0) = p0, p(1) = p1, p(2) = 2*p1 - p0
-                    // p_inf = p1 - p0 (leading coefficient)
-                    const p2 = p1.add(p1).sub(p0);
-                    const p_inf = p1.sub(p0);
-                    combined_poly[0] = combined_poly[0].add(batch2.mul(p0));
-                    combined_poly[1] = combined_poly[1].add(batch2.mul(p1));
-                    combined_poly[2] = combined_poly[2].add(batch2.mul(p2));
-                    combined_poly[3] = combined_poly[3].add(batch2.mul(p_inf));
+
+                    // Instance 2 evaluation points
+                    const eval_0_inst2 = p0;
+                    const eval_2_inst2 = p1.add(p1).sub(p0); // 2*p1 - p0
+
+                    // Combine Instance 2 with Instance 0 and 1 contributions
+                    // Instance 0 and 1 are already in combined_poly[0..4] as Toom-Cook format
+                    // We need to convert them to eval_0 and eval_2 format, then combine with Instance 2
+
+                    // For Instance 0 and 1 (constant or low-degree polynomials):
+                    // combined_poly = [p(0), p(1), p(2), p_inf] in Toom-Cook format
+                    // eval_at_0 = combined_poly[0] (p(0))
+                    // eval_at_2 = combined_poly[2] (p(2))
+                    const eval_0 = combined_poly[0].add(batch2.mul(eval_0_inst2));
+                    const eval_2 = combined_poly[2].add(batch2.mul(eval_2_inst2));
+
+                    // Use fromEvalsAndHint to get compressed polynomial in Jolt's format
+                    // This produces [c0, c2, 0] for degree-2 polynomial
+                    const uni_poly = UniPoly(F).fromEvalsAndHint(current_batched_claim, eval_0, eval_2);
+
+                    const coeffs = try self.allocator.alloc(F, 3);
+                    coeffs[0] = uni_poly.coeffs[0]; // c0
+                    coeffs[1] = uni_poly.coeffs[1]; // c2
+                    coeffs[2] = uni_poly.coeffs[2]; // c3 (= 0 for degree-2)
+
+                    try proof.compressed_polys.append(self.allocator, .{
+                        .coeffs_except_linear_term = coeffs,
+                        .allocator = self.allocator,
+                    });
+
+                    // Append to transcript
+                    transcript.appendMessage("UniPoly_begin");
+                    transcript.appendScalar(coeffs[0]);
+                    transcript.appendScalar(coeffs[1]);
+                    transcript.appendScalar(coeffs[2]);
+                    transcript.appendMessage("UniPoly_end");
+
+                    const challenge = transcript.challengeScalar();
+                    challenges[round] = challenge;
+
+                    // Update current_batched_claim by evaluating polynomial at challenge
+                    // p(r) = c0 + r*c1 + r^2*c2 where c1 = claim - c0 - c2
+                    const c0 = coeffs[0];
+                    const c2_val = coeffs[1];
+                    const c1 = current_batched_claim.sub(c0).sub(c2_val);
+                    const r2 = challenge.mul(challenge);
+                    current_batched_claim = c0.add(challenge.mul(c1)).add(r2.mul(c2_val));
+
+                    // Debug: print challenges for first 3 rounds
+                    if (round < 3) {
+                        std.debug.print("[STAGE5 ROUND {}] challenge={x}\n", .{
+                            round,
+                            challenge.toBytesBE()[24..32].*,
+                        });
+                    }
+
+                    // Update lookups state for Instance 2
+                    // Address round: update ra_weights based on address bit
+                    const one_minus_r = F.one().sub(challenge);
+                    const chunk_idx = round / lookups_ra_virtual_log_k_chunk;
+
+                    for (0..T) |j| {
+                        const bit = getBit128(lookups_indices_lo[j], lookups_indices_hi[j], bit_index);
+                        const factor = if (bit == 0) one_minus_r else challenge;
+                        lookups_ra_weights[j] = lookups_ra_weights[j].mul(factor);
+
+                        if (chunk_idx < ra_num_chunks) {
+                            ra_chunk_weights[chunk_idx][j] = ra_chunk_weights[chunk_idx][j].mul(factor);
+                        }
+                    }
+
+                    // Update lookups_claim
+                    lookups_claim = F.zero();
+                    for (0..T) |j| {
+                        lookups_claim = lookups_claim.add(lookups_eq_evals[j].mul(lookups_ra_weights[j]).mul(lookups_combined_vals[j]));
+                    }
+
+                    continue; // Skip the rest of the loop for address rounds
                 } else {
                     // Cycle rounds: actual sumcheck over eq_reduction * Π_c ra_chunk[c] * combined_vals
                     //
@@ -1449,134 +1532,6 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     }
 
                     continue; // Skip the rest of the loop (we handled everything)
-                }
-
-                // Convert to compressed form using Toom-Cook encoding
-                // evals[3] is eval_at_infinity (leading coefficient), not eval_at_3
-                const compressed = UniPoly(F).toomCookToCompressed(combined_poly);
-                const coeffs = try self.allocator.alloc(F, 3);
-                coeffs[0] = compressed[0];
-                coeffs[1] = compressed[1];
-                coeffs[2] = compressed[2];
-
-                try proof.compressed_polys.append(self.allocator, .{
-                    .coeffs_except_linear_term = coeffs,
-                    .allocator = self.allocator,
-                });
-
-                // Verify p(0)+p(1) = current_batched_claim (disabled - verbose debug)
-                // const p01_sum = combined_poly[0].add(combined_poly[1]);
-                // const claim_matches = p01_sum.eql(current_batched_claim);
-
-                // Append compressed polynomial to transcript and get challenge
-                // Must use compressed format (c0, c2, c3) to match Jolt's BatchedSumcheck
-                transcript.appendMessage("UniPoly_begin");
-                transcript.appendScalar(compressed[0]); // c0
-                transcript.appendScalar(compressed[1]); // c2
-                transcript.appendScalar(compressed[2]); // c3
-                transcript.appendMessage("UniPoly_end");
-
-                const challenge = transcript.challengeScalar();
-                challenges[round] = challenge;
-
-                // Update current_batched_claim by evaluating polynomial at challenge
-                // Use the same eval_from_hint logic as Jolt verifier
-                // p(r) = c0 + r*c1 + r^2*c2 + r^3*c3
-                // where c1 = batched_claim - c0 - c2 - c3 (recovered from hint)
-                const c0 = compressed[0];
-                const c2 = compressed[1];
-                const c3 = compressed[2];
-                const c1 = current_batched_claim.sub(c0).sub(c2).sub(c3); // hint recovery
-                const r2 = challenge.mul(challenge);
-                const r3 = r2.mul(challenge);
-                current_batched_claim = c0.add(challenge.mul(c1)).add(r2.mul(c2)).add(r3.mul(c3));
-
-                // Debug: print challenges for first 3 and last 3 rounds
-                if (round < 3 or round >= max_num_rounds - 3) {
-                    std.debug.print("[STAGE5 ROUND {}] challenge={x}\n", .{
-                        round,
-                        challenge.toBytesBE()[24..32].*,
-                    });
-                }
-
-                // Bind the challenge for RegistersValEvaluation if active
-                if (remaining_rounds <= regs_val_num_rounds) {
-                    const regs_round = regs_val_num_rounds - remaining_rounds;
-                    bindRegsValChallenge(inc_evals, wa_evals, lt_evals, regs_round, challenge);
-                }
-
-                // Update lookups state for Instance 2
-                if (round < LOOKUPS_LOG_K) {
-                    // Address round: update ra_weights based on address bit
-                    // For each cycle j with lookup_index bit = b:
-                    //   weight[j] *= (1-r) if b=0, or r if b=1
-                    // This is equivalent to: weight[j] *= [(1-b)*(1-r) + b*r]
-                    const one_minus_r = F.one().sub(challenge);
-
-                    // Determine which chunk this round belongs to
-                    // In Jolt, rounds bind from HIGH to LOW bits (BindingOrder::HighToLow)
-                    // Round 0 binds bit 127 (MSB), round 127 binds bit 0 (LSB)
-                    // So we need to reverse the bit index
-                    const chunk_idx = round / lookups_ra_virtual_log_k_chunk;
-                    const bit_index = LOOKUPS_LOG_K - 1 - round; // Reverse for HighToLow binding
-
-                    for (0..T) |j| {
-                        const bit = getBit128(lookups_indices_lo[j], lookups_indices_hi[j], bit_index);
-                        const factor = if (bit == 0) one_minus_r else challenge;
-                        lookups_ra_weights[j] = lookups_ra_weights[j].mul(factor);
-
-                        // Also update the per-chunk weight for this chunk
-                        if (chunk_idx < ra_num_chunks) {
-                            ra_chunk_weights[chunk_idx][j] = ra_chunk_weights[chunk_idx][j].mul(factor);
-                        }
-                    }
-                    // Update lookups_claim: p(r) = p0*(1-r) + p1*r = p0 + r*(p1-p0)
-                    // where p0 and p1 are from the polynomial we computed
-                    // This is tracked via ra_weights, so recompute the claim
-                    lookups_claim = F.zero();
-                    for (0..T) |j| {
-                        lookups_claim = lookups_claim.add(lookups_eq_evals[j].mul(lookups_ra_weights[j]).mul(lookups_combined_vals[j]));
-                    }
-                } else {
-                    // Cycle round: bind the challenge to eq_evals, ra_weights, and combined_vals
-                    const lookups_round = round - LOOKUPS_LOG_K;
-
-                    // At round 128 (first cycle round), verify the product invariant
-                    if (round == LOOKUPS_LOG_K) {
-                        std.debug.print("[STAGE5 CYCLE] Verifying ra invariant before cycle binding:\n", .{});
-                        var verified = true;
-                        for (0..@min(T, 3)) |j| {
-                            var product = F.one();
-                            for (0..ra_num_chunks) |c| {
-                                product = product.mul(ra_chunk_weights[c][j]);
-                            }
-                            const matches = product.eql(lookups_ra_weights[j]);
-                            if (!matches) verified = false;
-                            std.debug.print("  j={}: product={any}, ra_weights={any}, match={}\n", .{
-                                j,
-                                product.toBytesBE()[0..8],
-                                lookups_ra_weights[j].toBytesBE()[0..8],
-                                matches,
-                            });
-                        }
-                        std.debug.print("  All verified: {}\n", .{verified});
-                    }
-
-                    // Bind eq_evals and combined_vals (NOT ra_weights - we recompute from chunks)
-                    bindLookupsChallenge(lookups_eq_evals, lookups_combined_vals, lookups_round, challenge);
-
-                    // Bind the per-chunk ra weights
-                    for (0..ra_num_chunks) |chunk_idx| {
-                        bindSinglePolynomial(ra_chunk_weights[chunk_idx], lookups_round, challenge);
-                    }
-
-                    // Update lookups_claim: recompute ra_weights[0] from the bound chunks
-                    var final_ra = F.one();
-                    for (0..ra_num_chunks) |c| {
-                        final_ra = final_ra.mul(ra_chunk_weights[c][0]);
-                    }
-                    lookups_ra_weights[0] = final_ra;
-                    lookups_claim = lookups_eq_evals[0].mul(final_ra).mul(lookups_combined_vals[0]);
                 }
             }
 

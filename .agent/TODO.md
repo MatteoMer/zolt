@@ -239,3 +239,63 @@ Where:
 2. Replace address round bit-splitting with proverMsgReadChecking calls
 3. Add RAF contribution via identity/operand prefix-suffix decomposition
 4. Test end-to-end with Jolt verification
+
+### Integration Plan (for next session)
+
+To integrate prefix-suffix into Stage 5 `generateStage5ProofWithTrace`:
+
+**Step 1: Initialize (after line ~945, where cycle_table_indices is populated):**
+```zig
+// Import is already added at top of file
+// Initialize suffix polynomials and prefix checkpoints
+var suffix_polys = AllSuffixPolys(F).init(self.allocator);
+defer suffix_polys.deinit();
+
+var prefix_checkpoints = PrefixCheckpointsState(F).init();
+
+// Build lookup_indices as u128 array
+var lookup_indices_u128 = try self.allocator.alloc(u128, T);
+defer self.allocator.free(lookup_indices_u128);
+for (0..T) |j| {
+    lookup_indices_u128[j] = (@as(u128, lookups_indices_hi[j]) << 64) | lookups_indices_lo[j];
+}
+
+// Initialize Q polynomials for phase 0
+const num_phases = 8;
+try suffix_polys.initPhase(0, num_phases, lookups_eq_evals, lookup_indices_u128, cycle_table_indices);
+```
+
+**Step 2: Replace address round computation (lines 1240-1255):**
+```zig
+// Compute r_x for odd rounds (previous challenge)
+const r_x: ?F = if (round % 2 == 1) challenges[round - 1] else null;
+
+// Use prefix-suffix decomposition
+const read_checking = proverMsgReadChecking(F, round, &suffix_polys, &prefix_checkpoints, r_x);
+
+// TODO: Add RAF contribution (identity/operand prefix-suffix)
+const eval_0_inst2 = read_checking[0];
+const eval_2_inst2 = read_checking[1];
+```
+
+**Step 3: After address round update (around line 1320, before `continue`):**
+```zig
+// Bind challenge in suffix polynomials
+suffix_polys.bindAll(challenge);
+
+// Update prefix checkpoints every 2 rounds
+if (round % 2 == 1) {
+    const suffix_len = LOOKUPS_LOG_K - (round / 2 + 1);
+    prefix_checkpoints.update(challenges[round - 1], challenge, round, suffix_len);
+}
+
+// Phase transition every log_m rounds (log_m = 16 for 8 phases)
+const log_m = LOOKUPS_LOG_K / num_phases; // = 16
+const current_phase = round / log_m;
+const next_phase = (round + 1) / log_m;
+if (next_phase > current_phase and next_phase < num_phases) {
+    try suffix_polys.initPhase(next_phase, num_phases, lookups_eq_evals, lookup_indices_u128, cycle_table_indices);
+}
+```
+
+**Note:** The RAF contribution (γ*left + γ²*right) also needs prefix-suffix decomposition via OperandPolynomial. This is a separate integration step.

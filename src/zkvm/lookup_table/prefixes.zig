@@ -1734,9 +1734,15 @@ fn leftShiftPrefixMle(
 
     const uninterleaved = b.uninterleave();
     const x = uninterleaved.left & ~uninterleaved.right;
-    const y_leading_ones = @clz(~@as(u32, @truncate(uninterleaved.right)));
-    const shift = y_leading_ones + XLEN - 1 - j / 2 - b.len / 2;
-    result = result.add(F.fromU64(x << @intCast(shift)).mul(prod_one_plus_y));
+    const y_leading_ones: usize = @clz(~@as(u32, @truncate(uninterleaved.right)));
+    const y_len = b.len / 2;
+    // Handle potential underflow: if y_len > y_leading_ones + (XLEN - 1 - j/2), shift would be "negative"
+    const total = y_leading_ones + XLEN - 1 - j / 2;
+    const shifted: u64 = if (total >= y_len and total - y_len < 64)
+        (x << @intCast(total - y_len))
+    else
+        0;
+    result = result.add(F.fromU64(shifted).mul(prod_one_plus_y));
 
     return result;
 }
@@ -2294,10 +2300,14 @@ fn leftShiftWPrefixMle(
 
     const uninterleaved = b.uninterleave();
     const x = uninterleaved.left & ~uninterleaved.right;
-    const y_leading_ones = @clz(~@as(u32, @truncate(uninterleaved.right)));
+    const y_leading_ones: usize = @clz(~@as(u32, @truncate(uninterleaved.right)));
     const y_len = b.len / 2;
-    const shift = y_leading_ones + bit_index - y_len;
-    const shifted: u64 = if (shift < 64) (x << @intCast(shift)) else 0;
+    // Handle potential underflow: if y_len > y_leading_ones + bit_index, shift is "negative" (treat as large)
+    const total = y_leading_ones + bit_index;
+    const shifted: u64 = if (total >= y_len and total - y_len < 64)
+        (x << @intCast(total - y_len))
+    else
+        0;
     result = result.add(F.fromU64(shifted).mul(prod_one_plus_y));
 
     return result;

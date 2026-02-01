@@ -1,73 +1,62 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: IN PROGRESS - Stage 5 Prefix MLE Implementations
+## Status: IN PROGRESS - Stage 5 Prefix MLE Debugging
 
-## Session 99 Summary
+## Session 100 Summary
 
 ### Completed
 
-1. **RafDecomposition infrastructure** (`prefix_suffix_prover.zig`):
-   - `RafDecomposition` struct with Q accumulators for shift/operand suffixes
-   - `initQRaf` for fused initialization of left/right/identity Q arrays
-   - `proverMsgRaf` computing γ*left + γ²*(identity + right) evaluations
-   - `uninterleaveBitsLeft/Right` helpers for operand extraction
+1. **All 46 prefix MLEs implemented** (`prefixes.zig`):
+   - Implemented all remaining prefixes from Jolt's Rust code
+   - Fixed shift underflow bugs in `leftShiftPrefixMle` and `leftShiftWPrefixMle`
+   - Build succeeds, all tests pass (714/714)
 
-2. **Field support** (`field/mod.zig`):
-   - Added `fromU128` to BN254Scalar for 128-bit field element creation
-
-3. **Stage 5 integration** (`stage5_prover.zig`):
-   - Initialize RAF decompositions at phase 0
-   - Call `proverMsgReadChecking` + `proverMsgRaf` in address rounds
-   - Add `suffix_polys.bindAll` after each challenge
-   - Add prefix checkpoint updates every 2 rounds
-   - Add phase transitions every 16 rounds
+2. **Bug fixes**:
+   - Fixed segfault during proof generation (Phase 4 transition)
+   - Root cause: shift underflow when computing `total - y_len` in leftShift prefixes
+   - Fix: Added bounds checking before shift operations
 
 ### Current Status
 
 - **Stages 1-4: PASS**
 - **Stage 5: FAIL** - Sumcheck verification mismatch
+  - Proof generates successfully (no more segfault)
   - output_claim doesn't match expected_claim
-  - Root cause: Many prefix MLEs return F.zero() (placeholder)
+  - Root cause: Prefix MLE implementations may not match Jolt's exactly
 
-### What Needs to Be Done Next
+### Verification Output
 
-The primary blocker is that `prefixMle` returns zero for most prefix types:
-
-```zig
-// In prefixes.zig, line 163-164:
-// For prefixes not yet implemented, return zero
-else => F.zero(),
+```
+Sumcheck verification failed!
+  output_claim:   [eb, 1c, 1a, 7c, 50, c5, 1b, 64, dd, 58, 39, 41, a8, d8, 94, 28, ...]
+  expected_claim: [76, 19, 2f, 98, 45, 38, 7b, 09, b3, 3c, 7f, 8b, b0, ac, cd, b0, ...]
 ```
 
-**Priority: Implement all 46 prefix MLEs matching Jolt:**
+### What Needs Investigation
 
-1. **Already implemented** (need verification):
-   - `Eq` - eqPrefixMle
-   - `LowerWord` - lowerWordPrefixMle
-   - `UpperWord` - upperWordPrefixMle
-   - `And` - andPrefixMle
-   - `Or` - orPrefixMle
-   - `Xor` - xorPrefixMle
-   - `LessThan` - lessThanPrefixMle
-   - `LeftOperandIsZero` - leftIsZeroPrefixMle
-   - `RightOperandIsZero` - rightIsZeroPrefixMle
-   - `LeftOperandMsb` - leftMsbPrefixMle
-   - `RightOperandMsb` - rightMsbPrefixMle
+The prefix MLE implementations need to be verified against Jolt's reference:
 
-2. **Need implementation** (35 prefixes):
-   - `Andn`, `LowerHalfWord`, `UpperHalfWord`
-   - `Sll`, `Srl`, `Sra` (shift operations)
-   - `DivRemainder` variants
-   - `LeftShiftHalf`, `RightShiftHalf`
-   - `XorRot` variants (rotation operations)
-   - `Lsb`, `LowerWordSra`, `UpperWordSrl`
-   - etc.
+1. **Check each prefix MLE for correctness**:
+   - Compare Zig implementations to Rust implementations line-by-line
+   - Verify bit ordering (MSB vs LSB)
+   - Verify checkpoint updates match Jolt
 
-### Key Jolt References
+2. **Key areas to investigate**:
+   - `LowerWord` / `UpperWord` - operand extraction
+   - `LeftShift` / `RightShift` - shift computations
+   - `XorRot` variants - rotation logic
+   - `Eq` - equality MLE
+   - `LessThan` - comparison MLE
 
-- Prefix implementations: `/home/vivado/projects/jolt/jolt-core/src/zkvm/lookup_table/prefixes/*.rs`
-- Each prefix has `prefix_mle()` and `update_prefix_checkpoint()` methods
-- Prefixes are used in `prover_msg_read_checking()` at lines 999-1020
+3. **Debugging strategy**:
+   - Add debug output to Zolt's prefix computations
+   - Compare intermediate values with Jolt's debug output
+   - Focus on round-by-round comparison
+
+### Key Files
+
+- Zolt prefixes: `/home/vivado/projects/zolt/src/zkvm/lookup_table/prefixes.zig`
+- Jolt prefixes: `/home/vivado/projects/jolt/jolt-core/src/zkvm/lookup_table/prefixes/*.rs`
 
 ### Test Commands
 
@@ -83,16 +72,7 @@ cd /home/vivado/projects/jolt
 cargo test --package jolt-core --features zolt-debug test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
 
-### Current Verification Output
-
-```
-Sumcheck verification failed!
-  output_claim:   [eb, 1c, 1a, 7c, 50, c5, 1b, 64, ...]
-  expected_claim: [76, 19, 2f, 98, 45, 38, 7b, 09, ...]
-```
-
 ### Commits This Session
 
-- `1e105ff` - feat: add RafDecomposition and proverMsgRaf for prefix-suffix RAF computation
-- `1a84ddc` - feat: integrate prefix-suffix decomposition in stage5 address rounds
-- `dea2e7d` - docs: update TODO with Session 99 progress and debugging notes
+- `7c733d5` - feat: implement all 46 prefix MLEs for Jolt compatibility
+- (pending) - fix: shift underflow in leftShiftPrefixMle

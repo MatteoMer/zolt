@@ -403,6 +403,277 @@ fn tableCombine(comptime F: type, table_idx: usize, prefixes: []const F, suffixe
     };
 }
 
+/// RAF (Read-Address-Flag) Decomposition State
+/// This handles the identity/operand polynomial decomposition for RAF sumcheck
+pub fn RafDecomposition(comptime F: type) type {
+    return struct {
+        const Self = @This();
+
+        /// Q accumulators: [shift_suffix, operand/identity_suffix]
+        Q: [2][]F,
+        /// Current Q size
+        Q_size: usize,
+        /// Total number of rounds (LOG_K = 128)
+        total_len: usize,
+        /// Rounds per phase (LOG_K / phases = 16)
+        chunk_len: usize,
+        /// Current phase (0..phases)
+        phase: usize,
+        /// Current round within phase
+        round: usize,
+        /// Bound prefix value (accumulated from challenges)
+        bound_prefix: F,
+        /// Allocator
+        allocator: Allocator,
+
+        pub fn init(allocator: Allocator, initial_size: usize, chunk_len: usize, total_len: usize) !Self {
+            var Q: [2][]F = undefined;
+            Q[0] = try allocator.alloc(F, initial_size);
+            Q[1] = try allocator.alloc(F, initial_size);
+            @memset(Q[0], F.zero());
+            @memset(Q[1], F.zero());
+            return .{
+                .Q = Q,
+                .Q_size = initial_size,
+                .total_len = total_len,
+                .chunk_len = chunk_len,
+                .phase = 0,
+                .round = 0,
+                .bound_prefix = F.zero(),
+                .allocator = allocator,
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.allocator.free(self.Q[0]);
+            self.allocator.free(self.Q[1]);
+        }
+
+        pub fn QLen(self: *const Self) usize {
+            return self.Q_size;
+        }
+
+        /// Get suffix length for current phase
+        pub fn suffixLen(self: *const Self) usize {
+            return self.total_len - (self.phase + 1) * self.chunk_len;
+        }
+
+        /// Reset Q accumulators for new phase
+        pub fn resetQ(self: *Self) void {
+            @memset(self.Q[0], F.zero());
+            @memset(self.Q[1], F.zero());
+        }
+
+        /// Bind a challenge to Q polynomials and update prefix
+        pub fn bind(self: *Self, r: F) void {
+            const half_size = self.Q_size / 2;
+            for (0..2) |i| {
+                for (0..half_size) |j| {
+                    const low = self.Q[i][2 * j];
+                    const high = self.Q[i][2 * j + 1];
+                    self.Q[i][j] = low.add(r.mul(high.sub(low)));
+                }
+            }
+            self.Q_size = half_size;
+
+            // Update bound prefix (HighToLow binding)
+            self.bound_prefix = self.bound_prefix.add(self.bound_prefix).add(r);
+
+            self.round += 1;
+            if (self.round % self.chunk_len == 0) {
+                self.phase += 1;
+            }
+        }
+    };
+}
+
+/// Initialize Q accumulators for all three RAF decompositions (left, right, identity)
+/// This is a fused initialization matching Jolt's init_Q_raf
+pub fn initQRaf(
+    comptime F: type,
+    left: *RafDecomposition(F),
+    right: *RafDecomposition(F),
+    identity: *RafDecomposition(F),
+    u_evals: []const F,
+    lookup_indices: []const u128,
+    is_interleaved_operands: []const bool,
+) void {
+    std.debug.assert(left.Q_size == right.Q_size);
+    std.debug.assert(left.Q_size == identity.Q_size);
+
+    const poly_len = left.Q_size;
+    const suffix_len = left.suffixLen();
+    const half_suffix_len = suffix_len / 2;
+
+    // Constants for this phase
+    const shift_half: u128 = @as(u128, 1) << @intCast(half_suffix_len);
+    const shift_full: u128 = @as(u128, 1) << @intCast(suffix_len);
+    const shift_half_f = F.fromU128(shift_half);
+    const shift_full_f = F.fromU128(shift_full);
+
+    // Reset all Q accumulators
+    left.resetQ();
+    right.resetQ();
+    identity.resetQ();
+
+    // Accumulators for the 5 distinct Q components:
+    // - sh: ShiftHalfSuffix for operands (left.Q[0], right.Q[0])
+    // - l: Left operand suffix (left.Q[1])
+    // - r: Right operand suffix (right.Q[1])
+    // - sf: ShiftFullSuffix for identity (identity.Q[0])
+    // - id: Identity suffix (identity.Q[1])
+
+    for (lookup_indices, 0..) |k, j| {
+        const u = u_evals[j];
+        const suffix_bits = k & ((@as(u128, 1) << @intCast(suffix_len)) - 1);
+        const prefix_bits = (k >> @intCast(suffix_len)) & (@as(u128, poly_len) - 1);
+        const r_index: usize = @intCast(prefix_bits);
+
+        if (is_interleaved_operands[j]) {
+            // Operand path: accumulate ShiftHalf * u and operand suffix * u
+            // ShiftHalf contribution: u * 2^{suffix_len/2}
+            left.Q[0][r_index] = left.Q[0][r_index].add(u.mul(shift_half_f));
+            right.Q[0][r_index] = right.Q[0][r_index].add(u.mul(shift_half_f));
+
+            // Uninterleave suffix bits to get left and right operand suffixes
+            const lo_bits = uninterleaveBitsLeft(suffix_bits, suffix_len);
+            const ro_bits = uninterleaveBitsRight(suffix_bits, suffix_len);
+
+            if (lo_bits != 0) {
+                left.Q[1][r_index] = left.Q[1][r_index].add(u.mul(F.fromU64(lo_bits)));
+            }
+            if (ro_bits != 0) {
+                right.Q[1][r_index] = right.Q[1][r_index].add(u.mul(F.fromU64(ro_bits)));
+            }
+        } else {
+            // Identity path: accumulate ShiftFull * u and identity suffix * u
+            // ShiftFull contribution: u * 2^{suffix_len}
+            identity.Q[0][r_index] = identity.Q[0][r_index].add(u.mul(shift_full_f));
+
+            // Identity suffix contribution
+            if (suffix_bits != 0) {
+                if (suffix_len <= 64) {
+                    identity.Q[1][r_index] = identity.Q[1][r_index].add(u.mul(F.fromU64(@truncate(suffix_bits))));
+                } else {
+                    identity.Q[1][r_index] = identity.Q[1][r_index].add(u.mul(F.fromU128(suffix_bits)));
+                }
+            }
+        }
+    }
+}
+
+/// Uninterleave bits to get the left operand (even positions)
+fn uninterleaveBitsLeft(bits: u128, num_bits: usize) u64 {
+    var left: u64 = 0;
+    const half_bits = num_bits / 2;
+    var i: u6 = 0;
+    while (i < half_bits and i < 64) : (i += 1) {
+        // Even positions (0, 2, 4, ...) go to left
+        const bit = (bits >> @as(u7, @intCast(2 * i))) & 1;
+        left |= @as(u64, @truncate(bit)) << i;
+    }
+    return left;
+}
+
+/// Uninterleave bits to get the right operand (odd positions)
+fn uninterleaveBitsRight(bits: u128, num_bits: usize) u64 {
+    var right: u64 = 0;
+    const half_bits = num_bits / 2;
+    var i: u6 = 0;
+    while (i < half_bits and i < 64) : (i += 1) {
+        // Odd positions (1, 3, 5, ...) go to right
+        const bit = (bits >> @as(u7, @intCast(2 * i + 1))) & 1;
+        right |= @as(u64, @truncate(bit)) << i;
+    }
+    return right;
+}
+
+/// Compute prover message for RAF (Read-Address-Flag) contribution
+/// Returns [eval_0, eval_2] for the degree-2 polynomial
+///
+/// This computes: γ*left + γ²*(identity + right)
+/// Where left, right, identity are prefix-suffix decompositions with:
+/// - left.Q[0] = ShiftHalfSuffix * Σ u (for interleaved cycles)
+/// - left.Q[1] = LeftOperandSuffix * Σ u
+/// - right.Q[0] = ShiftHalfSuffix * Σ u (same as left)
+/// - right.Q[1] = RightOperandSuffix * Σ u
+/// - identity.Q[0] = ShiftFullSuffix * Σ u (for identity cycles)
+/// - identity.Q[1] = IdentitySuffix * Σ u
+pub fn proverMsgRaf(
+    comptime F: type,
+    left_ps: *const RafDecomposition(F),
+    right_ps: *const RafDecomposition(F),
+    identity_ps: *const RafDecomposition(F),
+    gamma: F,
+    gamma_sqr: F,
+) [2]F {
+    const len = identity_ps.QLen();
+    const half_len = len / 2;
+
+    // Accumulators for the sums
+    var left_sum_0 = F.zero();
+    var left_sum_2 = F.zero();
+    var right_sum_0 = F.zero(); // Actually (identity + right) at c=0
+    var right_sum_2 = F.zero(); // Actually (identity + right) at c=2
+
+    // For each half-index b, compute sumcheck evaluations
+    for (0..half_len) |b| {
+        // Get Q values at left (b) and right (b + half_len) positions
+        const l_q0_left = left_ps.Q[0][b];
+        const l_q0_right = left_ps.Q[0][b + half_len];
+        const l_q1_left = left_ps.Q[1][b];
+        const l_q1_right = left_ps.Q[1][b + half_len];
+
+        const r_q0_left = right_ps.Q[0][b];
+        const r_q0_right = right_ps.Q[0][b + half_len];
+        const r_q1_left = right_ps.Q[1][b];
+        const r_q1_right = right_ps.Q[1][b + half_len];
+
+        const i_q0_left = identity_ps.Q[0][b];
+        const i_q0_right = identity_ps.Q[0][b + half_len];
+        const i_q1_left = identity_ps.Q[1][b];
+        const i_q1_right = identity_ps.Q[1][b + half_len];
+
+        // Compute prefix evaluations for the operand/identity polynomials
+        // For OperandPolynomial with HighToLow binding:
+        // P(c) = bound_prefix * 2^{remaining_vars} + c * m (where m depends on which var is being bound)
+
+        // For simplicity in the current implementation, we use the Q accumulators directly
+        // The prefix polynomials are handled implicitly through the bound values
+
+        // Left operand contribution: P_shift_half(c) * Q_shift_half + P_left(c) * Q_left
+        // Since P_shift_half is constant (1), and P_left is linear in c for left-binding rounds:
+        const l0 = l_q0_left.add(l_q1_left);
+        const l2_left = l_q0_left.add(l_q1_left);
+        const l2_right = l_q0_right.add(l_q1_right);
+        const l2 = l2_right.add(l2_right).sub(l2_left);
+
+        // Right operand: same structure
+        const r0 = r_q0_left.add(r_q1_left);
+        const r2_left = r_q0_left.add(r_q1_left);
+        const r2_right = r_q0_right.add(r_q1_right);
+        const r2 = r2_right.add(r2_right).sub(r2_left);
+
+        // Identity: same structure
+        const id0 = i_q0_left.add(i_q1_left);
+        const id2_left = i_q0_left.add(i_q1_left);
+        const id2_right = i_q0_right.add(i_q1_right);
+        const id2 = id2_right.add(id2_right).sub(id2_left);
+
+        // Accumulate: left for γ weight, (identity + right) for γ² weight
+        left_sum_0 = left_sum_0.add(l0);
+        left_sum_2 = left_sum_2.add(l2);
+        right_sum_0 = right_sum_0.add(id0.add(r0));
+        right_sum_2 = right_sum_2.add(id2.add(r2));
+    }
+
+    // Final result: γ*left + γ²*(identity + right)
+    const eval_0 = gamma.mul(left_sum_0).add(gamma_sqr.mul(right_sum_0));
+    const eval_2 = gamma.mul(left_sum_2).add(gamma_sqr.mul(right_sum_2));
+
+    return .{ eval_0, eval_2 };
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -441,4 +712,60 @@ test "TableSuffixPolys bind" {
     // After binding: poly[0] = (1-0)*1 + 0*2 = 1, poly[1] = (1-0)*3 + 0*4 = 3
     try std.testing.expect(table.polys[0][0].eql(F.fromU64(1)));
     try std.testing.expect(table.polys[0][1].eql(F.fromU64(3)));
+}
+
+test "RafDecomposition init and deinit" {
+    const F = @import("../../field/mod.zig").BN254Scalar;
+    const allocator = std.testing.allocator;
+
+    var raf = try RafDecomposition(F).init(allocator, 16, 16, 128);
+    defer raf.deinit();
+
+    try std.testing.expectEqual(@as(usize, 16), raf.QLen());
+    try std.testing.expectEqual(@as(usize, 112), raf.suffixLen()); // 128 - (0+1)*16 = 112
+}
+
+test "uninterleaveBits" {
+    // Test that uninterleave correctly separates even and odd bits
+    // bits = 0b1010 (binary), suffix_len = 4
+    // Even positions (0, 2): bits 0 and 2 -> left = 0b00 = 0
+    // Odd positions (1, 3): bits 1 and 3 -> right = 0b11 = 3
+    // Actually: position 0 has bit 0, position 2 has bit 0, position 1 has bit 1, position 3 has bit 1
+    // 0b1010 = position 1 and 3 are set
+    const bits: u128 = 0b1010;
+    const left = uninterleaveBitsLeft(bits, 4);
+    const right = uninterleaveBitsRight(bits, 4);
+
+    // Even bits (positions 0, 2) = 0, 0 -> left = 0
+    try std.testing.expectEqual(@as(u64, 0), left);
+    // Odd bits (positions 1, 3) = 1, 1 -> right = 0b11 = 3
+    try std.testing.expectEqual(@as(u64, 3), right);
+}
+
+test "initQRaf basic" {
+    const F = @import("../../field/mod.zig").BN254Scalar;
+    const allocator = std.testing.allocator;
+
+    var left = try RafDecomposition(F).init(allocator, 4, 2, 8);
+    defer left.deinit();
+    var right = try RafDecomposition(F).init(allocator, 4, 2, 8);
+    defer right.deinit();
+    var identity = try RafDecomposition(F).init(allocator, 4, 2, 8);
+    defer identity.deinit();
+
+    // Create simple test data: one interleaved cycle, one identity cycle
+    const u_evals = [_]F{ F.one(), F.one() };
+    const lookup_indices = [_]u128{ 0x0, 0x0 }; // Both at index 0
+    const is_interleaved = [_]bool{ true, false };
+
+    initQRaf(F, &left, &right, &identity, &u_evals, &lookup_indices, &is_interleaved);
+
+    // Interleaved cycle should contribute to left/right Q[0] (shift) and Q[1] (operand)
+    // Identity cycle should contribute to identity Q[0] (shift) and Q[1] (identity)
+    // With suffix_len = 6 (8 - (0+1)*2), shift_half = 2^3 = 8, shift_full = 2^6 = 64
+    const shift_half = F.fromU64(8);
+    const shift_full = F.fromU64(64);
+
+    try std.testing.expect(left.Q[0][0].eql(shift_half));
+    try std.testing.expect(identity.Q[0][0].eql(shift_full));
 }

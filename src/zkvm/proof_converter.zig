@@ -1669,11 +1669,13 @@ pub fn ProofConverter(comptime F: type) type {
 
             // Extract and reverse the InstructionClaimReduction challenges to BIG_ENDIAN order
             r_reduction_be = try self.allocator.alloc(F, n_cycle_vars);
+            std.debug.print("[STAGE5 PREP] Stage 2 challenges[16..24] (raw, LE order):\n", .{});
             for (0..n_cycle_vars) |i| {
                 const src_idx = instr_start + i;
                 // Reverse to BIG_ENDIAN: first challenge in LITTLE_ENDIAN becomes last in BIG_ENDIAN
                 const dest_idx = n_cycle_vars - 1 - i;
                 r_reduction_be.?[dest_idx] = stage2_result.challenges[src_idx];
+                std.debug.print("  challenges[{}] = {x}\n", .{ src_idx, stage2_result.challenges[src_idx].toBytesBE()[16..32].* });
             }
             std.debug.print("[STAGE5 PREP] r_reduction_be (from Stage 2 InstructionClaimReduction):\n", .{});
             for (0..r_reduction_be.?.len) |i| {
@@ -3458,6 +3460,17 @@ pub fn ProofConverter(comptime F: type) type {
                                         lookup_outputs[wi] = w.values[R1CSInputIndex.LookupOutput.toIndex()];
                                         left_operands[wi] = w.values[R1CSInputIndex.LeftLookupOperand.toIndex()];
                                         right_operands[wi] = w.values[R1CSInputIndex.RightLookupOperand.toIndex()];
+                                    }
+                                    // Debug: print first few witness values
+                                    std.debug.print("[STAGE2 WITNESS DEBUG] First 5 cycles witness values:\n", .{});
+                                    var w_i: usize = 0;
+                                    while (w_i < @min(5, cycle_witnesses.len)) : (w_i += 1) {
+                                        std.debug.print("  j={}: output=0x{x}, left=0x{x}, right=0x{x}\n", .{
+                                            w_i,
+                                            lookup_outputs[w_i].toU64(),
+                                            left_operands[w_i].toU64(),
+                                            right_operands[w_i].toU64(),
+                                        });
                                     }
 
                                     instr_prover = InstrLookupsProver.init(

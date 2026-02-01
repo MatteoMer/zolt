@@ -518,6 +518,23 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 lookups_eq_evals[j] = computeEqAtIndex(r_reduction, j);
             }
 
+            // Debug: print first few eq values and verify sum = 1
+            std.debug.print("[STAGE5 EQ DEBUG] T={}, n_vars={}, First 5 eq_evals:\n", .{ T, n_cycle_vars });
+            var eq_sum = F.zero();
+            var j_idx: usize = 0;
+            while (j_idx < T) : (j_idx += 1) {
+                eq_sum = eq_sum.add(lookups_eq_evals[j_idx]);
+                if (j_idx < 5) {
+                    std.debug.print("  eq_evals[{}] = {x}\n", .{ j_idx, lookups_eq_evals[j_idx].toBytesBE()[16..32].* });
+                }
+            }
+            std.debug.print("[STAGE5 EQ DEBUG] Sum of all eq_evals = {x} (should be 1)\n", .{eq_sum.toBytesBE()[16..32].*});
+            std.debug.print("[STAGE5 EQ DEBUG] r_reduction (used for eq):\n", .{});
+            var r_idx: usize = 0;
+            while (r_idx < @min(3, r_reduction.len)) : (r_idx += 1) {
+                std.debug.print("  r_reduction[{}] = {x}\n", .{ r_idx, r_reduction[r_idx].toBytesBE()[16..32].* });
+            }
+
             // Populate inc and wa from trace
             // Use trace's rd_pre_value and rd_value directly (just like Jolt does)
             const trace_len = trace.steps.items.len;
@@ -920,6 +937,16 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 // Identity path = NOT interleaved = is_add_operands (uses identity polynomial)
                 cycle_is_identity_path[j] = is_add_operands;
 
+                // Debug first 5 cycles with full BE bytes
+                if (j < 5) {
+                    std.debug.print("[STAGE5 TRACE DEBUG] j={}: opcode=0x{x}, output={any}, left={any}, right={any}\n", .{
+                        j,
+                        opcode,
+                        lookup_output.toBytesBE()[0..8],
+                        left_op.toBytesBE()[0..8],
+                        right_op.toBytesBE()[0..8],
+                    });
+                }
                 // Debug first 3 cycles
                 if (j < 3) {
                     std.debug.print("[STAGE5 LOOKUPS] j={}: opcode=0x{x}, funct3={}, funct7={}, pc=0x{x}\n", .{ j, opcode, funct3, funct7, step.pc });
@@ -940,10 +967,93 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             }
 
             // Verify the sum matches lookups_input
+            // Compute individual sums for debugging
+            var output_sum = F.zero();
+            var left_sum = F.zero();
+            var right_sum = F.zero();
             var lookups_computed_sum = F.zero();
             for (0..T) |j| {
+                const step = trace.steps.items[j];
+                const instr = step.instruction;
+                const opcode = instr & 0x7f;
+                const funct3: u3 = @truncate((instr >> 12) & 0x7);
+
+                // Compute output/left/right the same way as lookups_combined_vals
+                var lookup_output: F = undefined;
+                var left_op: F = undefined;
+                var right_op: F = undefined;
+
+                if (step.is_noop) {
+                    lookup_output = F.zero();
+                    left_op = F.zero();
+                    right_op = F.zero();
+                } else {
+                    // Extract operands based on opcode (same logic as above)
+                    switch (opcode) {
+                        0x33 => { // R-type
+                            const funct7: u7 = @truncate(instr >> 25);
+                            if (funct3 == 0 and funct7 == 0) { // ADD
+                                left_op = F.zero();
+                                right_op = F.fromU64(step.rs1_value +% step.rs2_value);
+                            } else {
+                                left_op = F.fromU64(step.rs1_value);
+                                right_op = F.fromU64(step.rs2_value);
+                            }
+                            lookup_output = F.fromU64(step.rd_value);
+                        },
+                        0x37 => { // LUI
+                            left_op = F.zero();
+                            right_op = F.fromU64(instr & 0xFFFFF000);
+                            lookup_output = F.fromU64(step.rd_value);
+                        },
+                        0x6f => { // JAL
+                            const imm20 = ((@as(u32, instr >> 31) & 1) << 19) |
+                                ((@as(u32, instr >> 12) & 0xFF) << 11) |
+                                ((@as(u32, instr >> 20) & 1) << 10) |
+                                ((@as(u32, instr >> 21) & 0x3FF));
+                            const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm20 << 12)) >> 11);
+                            const imm_u64: u64 = @bitCast(imm_signed);
+                            left_op = F.zero();
+                            right_op = F.fromU64(step.pc +% imm_u64);
+                            lookup_output = F.fromU64(step.pc +% imm_u64);
+                        },
+                        0x63 => { // Branch
+                            left_op = F.fromU64(step.rs1_value);
+                            right_op = F.fromU64(step.rs2_value);
+                            const result: u64 = switch (funct3) {
+                                0x0 => if (step.rs1_value == step.rs2_value) 1 else 0,
+                                0x1 => if (step.rs1_value != step.rs2_value) 1 else 0,
+                                0x4 => if (@as(i64, @bitCast(step.rs1_value)) < @as(i64, @bitCast(step.rs2_value))) 1 else 0,
+                                0x5 => if (@as(i64, @bitCast(step.rs1_value)) >= @as(i64, @bitCast(step.rs2_value))) 1 else 0,
+                                0x6 => if (step.rs1_value < step.rs2_value) 1 else 0,
+                                0x7 => if (step.rs1_value >= step.rs2_value) 1 else 0,
+                                else => 0,
+                            };
+                            lookup_output = F.fromU64(result);
+                        },
+                        else => {
+                            left_op = F.fromU64(step.rs1_value);
+                            right_op = F.fromU64(step.rs2_value);
+                            lookup_output = F.fromU64(step.rd_value);
+                        },
+                    }
+                }
+
+                output_sum = output_sum.add(lookups_eq_evals[j].mul(lookup_output));
+                left_sum = left_sum.add(lookups_eq_evals[j].mul(left_op));
+                right_sum = right_sum.add(lookups_eq_evals[j].mul(right_op));
                 lookups_computed_sum = lookups_computed_sum.add(lookups_eq_evals[j].mul(lookups_combined_vals[j]));
             }
+            std.debug.print("[STAGE5 LOOKUPS] Individual sum verification:\n", .{});
+            std.debug.print("  output_sum (Σ eq*output) = {any}\n", .{output_sum.toBytesBE()[0..16]});
+            std.debug.print("  rv_claim (from Stage 2)  = {any}\n", .{rv_claim.toBytesBE()[0..16]});
+            std.debug.print("  output match = {}\n", .{output_sum.eql(rv_claim)});
+            std.debug.print("  left_sum (Σ eq*left)     = {any}\n", .{left_sum.toBytesBE()[0..16]});
+            std.debug.print("  left_op_claim (Stage 2)  = {any}\n", .{left_op_claim.toBytesBE()[0..16]});
+            std.debug.print("  left match = {}\n", .{left_sum.eql(left_op_claim)});
+            std.debug.print("  right_sum (Σ eq*right)   = {any}\n", .{right_sum.toBytesBE()[0..16]});
+            std.debug.print("  right_op_claim (Stage 2) = {any}\n", .{right_op_claim.toBytesBE()[0..16]});
+            std.debug.print("  right match = {}\n", .{right_sum.eql(right_op_claim)});
             std.debug.print("[STAGE5 LOOKUPS] Sum verification:\n", .{});
             std.debug.print("  computed_sum = {any}\n", .{lookups_computed_sum.toBytesBE()[0..8]});
             std.debug.print("  lookups_input = {any}\n", .{lookups_input.toBytesBE()[0..8]});
@@ -1040,11 +1150,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 // Last 8 rounds (cycle variables):
                 //   Standard sumcheck over the remaining cycle polynomial.
                 if (round < LOOKUPS_LOG_K) {
-                    // Address round: compute polynomial based on address bit `round`
+                    // Address round: compute polynomial based on address bit
+                    // Use HighToLow binding order: round 0 -> bit 127 (MSB), round 127 -> bit 0 (LSB)
+                    const bit_index = LOOKUPS_LOG_K - 1 - round;
                     var p0 = F.zero();
                     var p1 = F.zero();
                     for (0..T) |j| {
-                        const bit = getBit128(lookups_indices_lo[j], lookups_indices_hi[j], round);
+                        const bit = getBit128(lookups_indices_lo[j], lookups_indices_hi[j], bit_index);
                         const contrib = lookups_eq_evals[j].mul(lookups_ra_weights[j]).mul(lookups_combined_vals[j]);
                         if (bit == 0) {
                             p0 = p0.add(contrib);
@@ -1324,10 +1436,14 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     const one_minus_r = F.one().sub(challenge);
 
                     // Determine which chunk this round belongs to
+                    // In Jolt, rounds bind from HIGH to LOW bits (BindingOrder::HighToLow)
+                    // Round 0 binds bit 127 (MSB), round 127 binds bit 0 (LSB)
+                    // So we need to reverse the bit index
                     const chunk_idx = round / lookups_ra_virtual_log_k_chunk;
+                    const bit_index = LOOKUPS_LOG_K - 1 - round; // Reverse for HighToLow binding
 
                     for (0..T) |j| {
-                        const bit = getBit128(lookups_indices_lo[j], lookups_indices_hi[j], round);
+                        const bit = getBit128(lookups_indices_lo[j], lookups_indices_hi[j], bit_index);
                         const factor = if (bit == 0) one_minus_r else challenge;
                         lookups_ra_weights[j] = lookups_ra_weights[j].mul(factor);
 

@@ -1,72 +1,79 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: IN PROGRESS - Stage 5 Expected Output Claim Mismatch
+## Status: IN PROGRESS - Stage 5 LookupsReadRaf Sumcheck Mismatch
 
-## Current Session Progress (Session 91)
+## Current Session Progress (Session 92)
 
-### Key Fix Applied: r_reduction source corrected! ✓
+### Investigation Summary
 
-**BUG FOUND AND FIXED**: Zolt was using `stage3_result.challenges` for `r_reduction`, but the correct source is `stage2_result.challenges` (last n_cycle_vars = 8 challenges from Stage 2's InstructionClaimReduction).
+The Stage 5 LookupsReadRaf sumcheck has a mismatch between computed_sum and lookups_input:
+- `lookups_input = { 20, 143, 132, 65, 153, 197, 213, 8 }` (expected claim from Stage 2)
+- `computed_sum = { 22, 41, 182, 247, 67, 123, 60, 180 }` (actual computed)
 
-**Fix applied** in `proof_converter.zig`:
-- Changed `r_reduction_be` to be extracted from Stage 2 challenges (indices 16-23 for max_rounds=24, n_cycle_vars=8)
-- Commit: `d8b87bd fix(proof_converter): use Stage 2 challenges for r_reduction in Stage 5`
+### Verified Correct:
 
-### Verification: eq_r_reduction now matches! ✓
-- Zolt's eq_r_reduction: `8349e6eb71ecb0c07088c5aa7c4d7b5a` (BE)
-- Jolt's eq_eval_r_reduction: `[5a, 7b, 4d, 7c, aa, c5, 88, 70, c0, b0, ec, 71, eb, e6, 49, 83]` (LE)
-- These are the SAME value, just reversed endianness!
+1. **Witness Values**: Stage 2 and Stage 5 use the same witness values
+   - For LUI (j=0): output=0x8000, left=0x0, right=0x8000
+   - Both compute RightLookupOperand = imm = instr & 0xFFFFF000
 
-### Remaining Issue: Stage 5 expected_output_claim still doesn't match
+2. **r_reduction Extraction**: Stage 5 correctly extracts r_reduction from Stage 2 challenges[16..24]
+   - challenges[16..24] are the InstructionClaimReduction sumcheck binding challenges
+   - Reversed to BIG_ENDIAN order for eq polynomial computation
 
-The sumcheck rounds all pass (polynomial verification succeeds), but the final claim comparison fails:
-- `output_claim:   [bd, 7a, 64, 13, 7c, 97, 3f, 42, ...]`
-- `expected_claim: [b2, d7, 91, f3, d5, d1, 0e, 0e, ...]`
+3. **Field Arithmetic**: fromU64() and toBytesBE() work correctly
+   - Small values (like 0x8000) appear in the LOW bytes of a 32-byte big-endian representation
+   - Earlier debug output only showed first 8 bytes, which were zeros - this was a display issue
 
-### Analysis: Opening Claims Comparison
+### Individual Sum Analysis:
 
-Comparing Zolt and Jolt's opening claims for InstructionReadRaf:
+```
+output_sum (Σ eq*output) = { 21, 235, 230, 149, 140, 204, 118, 74, ... }
+rv_claim (from Stage 2)  = { 32, 124, 218, 9, 175, 211, 55, 216, ... }
 
-**ra_claims** (LE compressed bytes):
-- Jolt ra_claims[0]: `[c6, 9f, 23, 72, 31, a5, 93, 82, de, ad, 8c, 8b, 7a, a9, d5, 1f]`
-- Zolt ra_chunks[0] (BE first 8): `{ 31, 213, 169, 122, 139, 140, 173, 222 }` = `1f d5 a9 7a 8b 8c ad de`
-- The high 8 bytes match (reversed endian), but Jolt has non-zero low bytes `c6 9f 23 72...`
+left_sum (Σ eq*left)     = { 4, 15, 48, 43, 92, 191, 180, 111, ... }
+left_op_claim (Stage 2)  = { 10, 101, 186, 89, 71, 250, 14, 48, ... }
 
-**table_flags** (non-zero entries):
-- Jolt table_flag[0]: `[b9, c9, 4a, 6b, 36, b3, 7c, df, dc, 29, 98, b5, 86, 47, 13, 18]`
-- Zolt table_flags[0]: `{ 24, 19, 71, 134, 181, 152, 41, 220 }` (BE first 8 bytes)
-- Converting Zolt BE to LE: `dc 29 98 b5 86 47 13 18` - matches Jolt's high bytes!
+right_sum (Σ eq*right)   = { 19, 178, 103, 53, 33, 26, 181, 6, ... }
+right_op_claim (Stage 2) = { 17, 107, 3, 246, 180, 227, 72, 40, ... }
+```
 
-**raf_flag_claim**:
-- Jolt: `[82, 81, f4, 7a, b6, c5, 75, cf, d4, 75, d4, 59, c0, a2, 34, d8]`
-- Zolt: `{ 24, 19, 71, 134, 181, 152, 41, 220, ...}` - different!
+None of the three component sums match their Stage 2 claims!
 
-### Key Finding
+### Possible Causes (to investigate):
 
-The high bytes of the field elements match between Zolt and Jolt, but Jolt's values have additional non-zero LOW bytes (bytes 0-7 in LE). This suggests:
+1. **Eq polynomial computation**: computeEqAtIndex may be computing eq(j, r) incorrectly
+   - Check bit extraction order in computeEqAtIndex
+   - Verify r_reduction elements are in the right order
 
-1. Zolt is computing values with only 64-128 bits of entropy
-2. Jolt expects full 254-bit field element values
-3. The Montgomery conversion or field arithmetic might be truncating values
+2. **Sumcheck binding order mismatch**:
+   - InstructionLookupsProver uses LowToHigh binding (LSB first)
+   - Stage 5 expects BIG_ENDIAN (MSB first)
+   - The reversal should handle this, but there may be an off-by-one or indexing issue
 
-### Hypothesis
-
-The issue is in how Zolt computes the ra_chunk and table_flag values. The computation uses:
-- `ra_chunk_weights[i][0]` - final value after binding
-- The weights start as F.one() and get multiplied by factors
-
-If the factors or multiplication is losing precision in the high bits, that would explain the mismatch.
-
-### Next Steps
-1. Add full 32-byte debug output for ra_chunks and table_flags
-2. Compare Zolt's values after fromMontgomery() conversion
-3. Check if the field arithmetic is preserving all 254 bits
-4. Investigate ra_chunk_weights initialization and multiplication
+3. **Witness value computation differences**:
+   - Stage 2 uses fromTraceStep() → setFlagsFromInstruction()
+   - Stage 5 computes directly from trace step
+   - Need to verify they produce identical values for ALL instructions
 
 ### Files Changed This Session
-- `/home/vivado/projects/zolt/src/zkvm/proof_converter.zig`:
-  - Fixed r_reduction_be to use Stage 2 challenges (InstructionClaimReduction)
-  - Added debug output for r_reduction limbs
+- `/home/vivado/projects/zolt/src/zkvm/r1cs/constraints.zig`: Removed debug output
+- `/home/vivado/projects/zolt/src/field/mod.zig`: Removed debug output
+- `/home/vivado/projects/zolt/src/zkvm/proof_converter.zig`: Added debug for Stage 2 challenges extraction
+
+### Next Steps
+
+1. Add debug to compare actual eq polynomial values:
+   - Print eq_evals[0..5] from Stage 5
+   - Compute expected eq values manually and compare
+
+2. Verify MLE evaluation formula:
+   - Stage 2 claims are MLE(poly) evaluated at r_cycle
+   - Stage 5 computes Σ_j eq(j, r_cycle) * poly[j]
+   - These SHOULD be equivalent by MLE definition
+
+3. Check if there's a padding or indexing issue:
+   - Stage 2 may have padded witness to power of 2
+   - Stage 5 may be using different padding
 
 ### Test Commands
 ```bash

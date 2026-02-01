@@ -1236,8 +1236,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     lookups_ra_weights[0] = final_ra;
                     lookups_claim = lookups_eq_evals[0].mul(final_ra).mul(lookups_combined_vals[0]);
 
-                    // Debug: print challenges for first 3 and last 3 rounds
-                    if (round < 3 or round >= max_num_rounds - 3) {
+                    // Debug: print challenges for cycle rounds (128-135)
+                    if (round >= LOOKUPS_LOG_K) {
                         std.debug.print("[STAGE5 ROUND {}] challenge={x}\n", .{
                             round,
                             challenge.toBytesBE()[24..32].*,

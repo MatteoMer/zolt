@@ -1,42 +1,42 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: IN PROGRESS - Stage 5 Cycle Round Polynomial Computation Issue
+## Status: IN PROGRESS - Stage 5 Cycle Round Polynomial Computation
 
-## Current Session Progress (Session 88)
+## Current Session Progress (Session 89)
 
-### Latest Changes
-- Implemented `finishMlesProductSumFromEvals` approach matching Jolt's structure:
-  1. Absorb eq into val: `pairs[0] = (eq[2j] * val[2j], eq[2j+1] * val[2j+1])`
-  2. Compute product of 9 factors (absorbed_val + 8 ra_chunks)
-  3. Use `finishMlesProductSumFromEvals` with `r_round = r_reduction[n_cycle_vars - 1 - lookups_round]`
-- Added `evalLinearProd10` (used previously) and `evalLinearProd9` functions
-- Sumcheck property `p(0) + p(1) = claim` still holds for all cycle rounds
+### Key Findings
 
-### Current Status
-- ❌ Stage 5 verification still fails
-- The polynomial is internally consistent but doesn't match what Jolt verifier expects
-- The challenges produced during cycle rounds are different between Zolt and Jolt,
-  suggesting the polynomial coefficients being committed are different
+1. **Opening claims ARE being transmitted correctly**
+   - Verified ra_chunks match between Zolt and Jolt
+   - table_flags and raf_flag are stored correctly
+   - r_reduction from Stage 2 is passed correctly to Stage 5
 
-### Key Observations
-1. Zolt's r_reduction values don't seem to match Jolt's params.r_cycle
-   - Zolt: r_reduction[0] = 0x5543d98110dbbfda
-   - Jolt: params.r_cycle values are different
-2. The transcript state diverges at cycle rounds, causing different challenges
-3. The final output_claim from sumcheck doesn't match expected_claim
+2. **Sumcheck challenges match**
+   - Round 128-135 challenges are identical between Zolt prover and Jolt verifier
+   - This confirms the polynomial coefficients and transcript are synchronized
 
-### Debug Output
-Zolt cycle rounds show:
-- r_round values are being used from r_reduction
-- Sumcheck property holds: p(0) + p(1) = claim is true for all rounds
-- But Jolt verifier shows different challenges for the same rounds
+3. **The ISSUE: Final output_claim doesn't match expected_claim**
+   - Zolt's final batched claim (big-endian): `2e1261a71e90c9cb48db6fadd357eee783dca70b9327673139f69c9a18d595df`
+   - Jolt's output_claim (little-endian): `7ca6b67cbde8581df753e63ab4aba00389...`
+   - These are completely different!
 
-### Files Changed
+4. **Root Cause: Cycle round polynomial computation is wrong**
+   - The prover computes polynomials for rounds 128-135 (cycle variables)
+   - These polynomials should evaluate to values that, when summed across all cycles, give the correct claim
+   - But the verifier expects: `eq_eval_r_reduction * ra_claim * (val_claim + gamma * raf_claim)`
+   - The polynomial doesn't match this formula
+
+### Debug Output Summary
+- Jolt verifier expected Instance 2 claim: `[d8, ab, 4b, 5b, c9, 3e, db, 30, e7, a8, 71, e9, 21, ba, c9, f9, ...]`
+- Jolt verifier expected_claim (batched): `[ae, 77, e6, c2, 75, bd, 38, 88, ...]`
+- Jolt verifier output_claim (from sumcheck): `[7c, a6, b6, 7c, bd, e8, 58, 1d, ...]`
+- Output != Expected → Verification fails
+
+### Files Changed This Session
+- `/home/vivado/projects/jolt/jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs`
+  - Added debug for ra_chunk claims, table_flag claims, raf_flag_claim
 - `/home/vivado/projects/zolt/src/zkvm/spartan/stage5_prover.zig`
-  - Cycle round computation now uses finishMlesProductSumFromEvals
-  - Absorbs eq into val before computing product
-- `/home/vivado/projects/zolt/src/poly/mod.zig`
-  - Added evalLinearProd10, evalLinearProd9, fromEvalsToom, finishMlesProductSumFromEvals, toCompressed
+  - Updated debug print condition for cycle rounds
 
 ### Test Commands
 ```bash
@@ -52,9 +52,22 @@ cargo test --package jolt-core --features zolt-debug test_verify_zolt_proof_with
 ```
 
 ### Next Steps for Future Session
-1. Compare Zolt's r_reduction with Jolt's params.r_cycle - they should match
-2. Check if Stage 3's InstructionClaimReduction is producing correct r_reduction
-3. Trace the transcript state to find where divergence begins
-4. The polynomial coefficients should be compared directly between Zolt prover and Jolt prover
+1. **Investigate the cycle round polynomial formula in Zolt**
+   - Current implementation uses `finishMlesProductSumFromEvals` which may not match Jolt
+   - Need to verify the eq*ra*combined product computation
 
-SESSION_ENDING - Context running low, key findings documented above.
+2. **Compare Zolt's polynomial evaluations with Jolt's expected structure**
+   - Jolt's verifier expects: `eq(r_reduction, r_cycle') * ra * (val + gamma * raf)`
+   - Zolt's prover computes: `Σ eq(r_reduction, j) * Π_c ra_chunk_c(j) * combined(j)`
+   - These need to be equivalent
+
+3. **Check if the ra_chunk binding is correct during cycle rounds**
+   - The ra_chunks are bound during address rounds (0-127)
+   - During cycle rounds (128-135), the eq and combined_vals are bound
+   - The final ra_claim should be the PRODUCT of the bound chunk values
+
+4. **Verify the polynomial degree and Toom-Cook conversion**
+   - Cycle rounds should have degree 10 (product of 9 linear factors + eq)
+   - The compressed format must match Jolt's expectations
+
+SESSION_ENDING - Context getting long, key findings documented above.

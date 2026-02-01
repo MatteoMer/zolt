@@ -300,47 +300,106 @@ pub fn proverMsgReadChecking(
 
 /// Table-specific combine function
 /// Combines prefix and suffix evaluations according to each table's formula
+/// Reference: jolt-core/src/zkvm/lookup_table/*.rs for each table's combine() implementation
 fn tableCombine(comptime F: type, table_idx: usize, prefixes: []const F, suffixes: []const F) F {
-    // Each table has a specific combination formula
-    // Most tables: result = prefix[relevant] * suffixes[0] + suffixes[1]
-    // This matches Jolt's table.combine() implementations
-
     return switch (table_idx) {
-        // RangeCheck: prefixes[LowerWord] * One + LowerWord
+        // 0: RangeCheck: prefixes[LowerWord] * one + lower_word
         0 => prefixes[@intFromEnum(Prefixes.LowerWord)].mul(suffixes[0]).add(suffixes[1]),
-        // RangeCheckAligned: same as RangeCheck
-        1 => prefixes[@intFromEnum(Prefixes.LowerWord)].mul(suffixes[0]).add(suffixes[1]),
-        // And: prefixes[And] * One + And
+        // 1: RangeCheckAligned: (prefixes[LowerWord] * one + lower_word) - prefixes[Lsb] * lsb
+        1 => blk: {
+            const lower_word_contrib = prefixes[@intFromEnum(Prefixes.LowerWord)].mul(suffixes[0]).add(suffixes[1]);
+            if (suffixes.len >= 3) {
+                const lsb_contrib = prefixes[@intFromEnum(Prefixes.Lsb)].mul(suffixes[2]);
+                break :blk lower_word_contrib.sub(lsb_contrib);
+            }
+            break :blk lower_word_contrib;
+        },
+        // 2: And: prefixes[And] * one + and
         2 => prefixes[@intFromEnum(Prefixes.And)].mul(suffixes[0]).add(suffixes[1]),
-        // Andn: prefixes[Andn] * One + NotAnd
+        // 3: Andn: prefixes[Andn] * one + andn
         3 => prefixes[@intFromEnum(Prefixes.Andn)].mul(suffixes[0]).add(suffixes[1]),
-        // Or: prefixes[Or] * One + Or
+        // 4: Or: prefixes[Or] * one + or
         4 => prefixes[@intFromEnum(Prefixes.Or)].mul(suffixes[0]).add(suffixes[1]),
-        // Xor: prefixes[Xor] * One + Xor
+        // 5: Xor: prefixes[Xor] * one + xor
         5 => prefixes[@intFromEnum(Prefixes.Xor)].mul(suffixes[0]).add(suffixes[1]),
-        // Equal: prefixes[Eq] * One + Eq_suffix
-        6 => prefixes[@intFromEnum(Prefixes.Eq)].mul(suffixes[0]).add(suffixes[1]),
-        // SignedGreaterThanEqual: complex formula involving MSB prefixes
-        7 => {
+        // 6: Equal: prefixes[Eq] * eq
+        6 => prefixes[@intFromEnum(Prefixes.Eq)].mul(suffixes[0]),
+        // 7: SignedGreaterThanEqual: one + RightMsb*one - LeftMsb*one - LessThan*one - Eq*less_than
+        7 => blk: {
+            var result = suffixes[0]; // one
+            result = result.add(prefixes[@intFromEnum(Prefixes.RightOperandMsb)].mul(suffixes[0]));
+            result = result.sub(prefixes[@intFromEnum(Prefixes.LeftOperandMsb)].mul(suffixes[0]));
+            result = result.sub(prefixes[@intFromEnum(Prefixes.LessThan)].mul(suffixes[0]));
             if (suffixes.len >= 2) {
-                return prefixes[@intFromEnum(Prefixes.LessThan)].mul(suffixes[0]).add(suffixes[1]);
+                result = result.sub(prefixes[@intFromEnum(Prefixes.Eq)].mul(suffixes[1]));
             }
-            return suffixes[0];
+            break :blk result;
         },
-        // UnsignedGreaterThanEqual
-        8 => {
+        // 8: UnsignedGreaterThanEqual: one - LessThan*one - Eq*less_than
+        8 => blk: {
+            var result = suffixes[0]; // one
+            result = result.sub(prefixes[@intFromEnum(Prefixes.LessThan)].mul(suffixes[0]));
             if (suffixes.len >= 2) {
-                return prefixes[@intFromEnum(Prefixes.LessThan)].mul(suffixes[0]).add(suffixes[1]);
+                result = result.sub(prefixes[@intFromEnum(Prefixes.Eq)].mul(suffixes[1]));
             }
-            return suffixes[0];
+            break :blk result;
         },
-        // For other tables, use a simple combination
-        else => {
-            if (suffixes.len == 0) return F.zero();
-            if (suffixes.len == 1) return suffixes[0];
-            // Default: first prefix * first suffix + second suffix
-            return suffixes[0].add(suffixes[1]);
+        // 9: NotEqual: one - prefixes[Eq] * eq
+        9 => blk: {
+            if (suffixes.len >= 2) {
+                break :blk suffixes[0].sub(prefixes[@intFromEnum(Prefixes.Eq)].mul(suffixes[1]));
+            }
+            break :blk suffixes[0];
         },
+        // 10: SignedLessThan: LeftMsb*one - RightMsb*one + LessThan*one + Eq*less_than
+        10 => blk: {
+            var result = prefixes[@intFromEnum(Prefixes.LeftOperandMsb)].mul(suffixes[0]);
+            result = result.sub(prefixes[@intFromEnum(Prefixes.RightOperandMsb)].mul(suffixes[0]));
+            result = result.add(prefixes[@intFromEnum(Prefixes.LessThan)].mul(suffixes[0]));
+            if (suffixes.len >= 2) {
+                result = result.add(prefixes[@intFromEnum(Prefixes.Eq)].mul(suffixes[1]));
+            }
+            break :blk result;
+        },
+        // 11: UnsignedLessThan: LessThan*one + Eq*less_than
+        11 => blk: {
+            var result = prefixes[@intFromEnum(Prefixes.LessThan)].mul(suffixes[0]);
+            if (suffixes.len >= 2) {
+                result = result.add(prefixes[@intFromEnum(Prefixes.Eq)].mul(suffixes[1]));
+            }
+            break :blk result;
+        },
+        // 12: Movsign: (2^XLEN - 1) * LeftMsb * one
+        12 => blk: {
+            const ones: u64 = 0xFFFFFFFF_FFFFFFFF; // 2^64 - 1 for RV64
+            break :blk F.fromU64(ones).mul(prefixes[@intFromEnum(Prefixes.LeftOperandMsb)]).mul(suffixes[0]);
+        },
+        // 13: UpperWord: prefixes[UpperWord] * one + upper_word
+        13 => prefixes[@intFromEnum(Prefixes.UpperWord)].mul(suffixes[0]).add(suffixes[1]),
+        // 14: LessThanEqual (UnsignedLessThanEqual): LessThan*one + Eq*less_than + Eq*eq
+        14 => blk: {
+            var result = prefixes[@intFromEnum(Prefixes.LessThan)].mul(suffixes[0]);
+            if (suffixes.len >= 2) {
+                result = result.add(prefixes[@intFromEnum(Prefixes.Eq)].mul(suffixes[1]));
+            }
+            if (suffixes.len >= 3) {
+                result = result.add(prefixes[@intFromEnum(Prefixes.Eq)].mul(suffixes[2]));
+            }
+            break :blk result;
+        },
+        // 15-41: Other tables - use simplified patterns for now
+        // Most follow pattern: prefix[Type] * one + suffix_result
+        15...41 => blk: {
+            if (suffixes.len == 0) break :blk F.zero();
+            if (suffixes.len == 1) break :blk suffixes[0];
+            // Default pattern: sum of all suffixes
+            var result = suffixes[0];
+            for (suffixes[1..]) |s| {
+                result = result.add(s);
+            }
+            break :blk result;
+        },
+        else => F.zero(),
     };
 }
 

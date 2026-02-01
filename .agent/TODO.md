@@ -2,90 +2,63 @@
 
 ## Status: IN PROGRESS - Stage 5 Prefix-Suffix Decomposition Required
 
-## Current Session Progress (Session 95)
+## Session 95 Summary
 
-### Root Cause Analysis: Stage 5 Sumcheck Failure
+### Investigation Complete
+Thoroughly analyzed the root cause of Stage 5 sumcheck verification failure.
 
-The Stage 5 sumcheck verification fails because Zolt's LookupsReadRaf implementation uses a fundamentally different approach than Jolt.
+### Root Cause
+Zolt uses a simplified bit-splitting approach for LookupsReadRaf address rounds that produces degree-1 polynomials, while Jolt uses prefix-suffix decomposition producing degree-2 polynomials with different value semantics.
 
-**The Core Equation:**
-```
-Σ_j Σ_k eq(j, r_reduction) * ra(k, j) * (Val_j(k) + γ·RafVal_j(k)) = lookups_input
-```
+### Key Differences Documented
+1. **Polynomial Degree**: Jolt=2, Zolt=1 during address rounds
+2. **Value Computation**: Jolt uses table MLE evaluations, Zolt uses raw lookup results
+3. **RAF Computation**: Jolt evaluates LeftOperand/RightOperand/Identity polynomials at r_address, Zolt uses concrete operand values
 
-**Jolt's Approach:**
-1. Address rounds (0-127): Uses **prefix-suffix decomposition** to compute degree-2 polynomials
-   - Each lookup table has a prefix-suffix structure
-   - The polynomial is computed via `from_evals_and_hint(previous_claim, [p(0), p(2)])`
-   - This produces degree-2 polynomials
+### Files Analyzed
+- Jolt read_raf_checking.rs: Main LookupsReadRaf implementation
+- Jolt lookup_table/mod.rs: 42 lookup table definitions
+- Jolt prefixes/mod.rs: 45+ prefix types
+- Jolt identity_poly.rs: Identity, OperandPolynomial implementations
+- Jolt suffixes/mod.rs: Suffix definitions
 
-2. After address rounds: Calls `init_log_t_rounds()` which:
-   - Materializes `ra_polys` as polynomials over cycles
-   - Materializes `combined_val_polynomial[j] = table_values_at_r_addr[table(j)] + raf_val`
-   - Where `table_values_at_r_addr[t]` = **MLE of table t evaluated at r_address**
-   - And `raf_val` = gamma * left_prefix + gamma^2 * right_prefix
+### Required Implementation
 
-3. Cycle rounds (128-135): Uses the **materialized** polynomials with standard sumcheck
+To achieve Jolt compatibility, Zolt needs:
 
-**Zolt's Current Approach:**
-1. Address rounds: Uses **bit-splitting** with degree-1 polynomials
-   - Splits cycles by whether lookup_index bit = 0 or 1
-   - Produces degree-1 linear polynomials (NOT degree-2!)
+1. **Identity/Operand Polynomials** (simpler)
+   - `IdentityPolynomial`: `Σ r[i] * 2^(n-1-i)` evaluation
+   - `OperandPolynomial`: Left/Right operand evaluations
+   - These are used for RAF computation
 
-2. Never materializes `combined_val_polynomial`
-   - Uses raw per-cycle values `lookups_combined_vals[j] = output[j] + gamma*left[j] + gamma^2*right[j]`
-   - This is the **concrete lookup result**, not the table MLE at r_address
+2. **Prefix-Suffix Decomposition** (complex)
+   - 45+ prefix types with MLE evaluation and checkpoint updates
+   - Suffix types for each lookup table
+   - `combine()` function for each table
 
-3. Cycle rounds: Uses raw values instead of table MLE evaluations
+3. **Address Round Polynomial Computation**
+   - Must match Jolt's `compute_prefix_suffix_prover_message()`
+   - Returns evaluations at X∈{0, 2} for degree-2 interpolation
 
-### Why This Fails
+4. **Cycle Round Polynomial Computation**
+   - After address rounds, materialize `combined_val_polynomial`
+   - Use table MLE evaluations, not raw lookup results
 
-1. **Polynomial Degree Mismatch**: Jolt expects degree-2 polynomials in address rounds, Zolt outputs degree-1
+### Incremental Approach
 
-2. **Value Mismatch**: After address rounds:
-   - Jolt has `combined_val[j] = table_mle(r_address) + raf_prefix_eval`
-   - Zolt has `combined_val[j] = lookup_output[j] + gamma*left[j] + gamma^2*right[j]`
-   - These are fundamentally different values!
+For Fibonacci program specifically:
+- Uses ADD, ADDI, ADDW, ADDIW, BNE, JAL, JALR, LUI instructions
+- All use "AddOperands" flag → identity RAF path (not interleaved)
+- Could potentially implement minimal subset first
 
-3. **MLE vs Raw Values**: The lookup output `f(x, y)` at concrete inputs is NOT the same as `table_mle(r)` at random point `r`
+### Files to Create
+- `src/zkvm/lookup_tables/mod.zig` - Table definitions
+- `src/zkvm/lookup_tables/prefixes/` - All 45+ prefix implementations
+- `src/zkvm/lookup_tables/suffixes/` - Suffix implementations
+- `src/zkvm/spartan/prefix_suffix.zig` - PrefixSuffixDecomposition
 
-### What Needs to be Fixed
-
-To make Zolt compatible with Jolt's verifier, we need to implement:
-
-1. **Prefix-Suffix Decomposition for Address Rounds**
-   - Implement the prefix/suffix polynomial structures
-   - Compute degree-2 polynomials like Jolt does
-   - Track prefix checkpoints during address rounds
-
-2. **Table MLE Evaluation**
-   - After address rounds, compute `table_values_at_r_addr` for each of 42 tables
-   - Each table value is the MLE evaluated at the bound 128-bit random point
-   - This requires implementing `table.combine(prefixes, suffixes)` for each table
-
-3. **RAF Prefix Evaluation**
-   - Compute `left_prefix`, `right_prefix`, `identity_prefix` at r_address
-   - Create `raf_interleaved = gamma * left_prefix + gamma^2 * right_prefix`
-   - Create `raf_identity = gamma^2 * identity_prefix`
-
-4. **Materialize combined_val_polynomial**
-   - For each cycle j: `combined_val[j] = table_values_at_r_addr[table(j)] + raf_val`
-   - Use the appropriate raf_val based on cycle's interleave flag
-
-### Required Files to Implement
-
-1. `src/zkvm/lookup_tables/mod.zig` - Lookup table MLE definitions
-2. `src/zkvm/lookup_tables/prefixes.zig` - Prefix structures (LeftOperand, RightOperand, Identity)
-3. `src/zkvm/lookup_tables/suffixes.zig` - Suffix structures
-4. `src/zkvm/spartan/prefix_suffix.zig` - PrefixSuffixDecomposition implementation
-
-### Verification Results
-
-```
-Sumcheck verification failed!
-  output_claim:   [d9, 50, 6a, 6e, 69, 84, 32, f8, ...]
-  expected_claim: [bb, 2a, d3, 8c, 2c, 8c, 44, d3, ...]
-```
+### Estimated Effort
+Several days of focused implementation work.
 
 ### Test Commands
 
@@ -96,21 +69,22 @@ zig build -Doptimize=ReleaseFast
 # Generate proof
 ./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o /tmp/zolt_proof_dory.bin
 
-# Verify with Jolt
+# Verify with Jolt (currently fails at Stage 5)
 cd /home/vivado/projects/jolt
 cargo test --package jolt-core --features zolt-debug test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
 
-### Key Jolt Files for Reference
+### Current Verification Status
 
-- `/home/vivado/projects/jolt/jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs` - Main LookupsReadRaf implementation
-- `/home/vivado/projects/jolt/jolt-core/src/zkvm/lookup_table/mod.rs` - Lookup table trait definitions
-- `/home/vivado/projects/jolt/jolt-core/src/zkvm/lookup_table/prefixes/*.rs` - Prefix implementations
-- `/home/vivado/projects/jolt/jolt-core/src/poly/prefix_suffix.rs` - PrefixSuffixDecomposition
+```
+Sumcheck verification failed!
+  output_claim:   [d9, 50, 6a, 6e, 69, 84, 32, f8, ...]
+  expected_claim: [bb, 2a, d3, 8c, 2c, 8c, 44, d3, ...]
+```
 
-### Next Steps
+Stages 1-4: PASS
+Stage 5: FAIL (polynomial mismatch due to missing prefix-suffix decomposition)
 
-1. Study Jolt's lookup table MLE implementations in detail
-2. Understand the prefix-suffix decomposition structure
-3. Implement minimal set of tables needed for Fibonacci (ADD, ADDI, BNE, etc.)
-4. Test with simpler programs first
+### Session Notes
+
+See `.agent/NOTES.md` for detailed technical analysis of the prefix-suffix decomposition requirements.

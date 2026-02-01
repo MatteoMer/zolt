@@ -16,6 +16,20 @@ const Allocator = std.mem.Allocator;
 const field = @import("../../field/mod.zig");
 const BN254Scalar = field.BN254Scalar;
 
+// Export prefix-suffix decomposition modules
+pub const prefixes = @import("prefixes.zig");
+pub const identity_poly = @import("identity_poly.zig");
+
+// Re-export commonly used types
+pub const Prefixes = prefixes.Prefixes;
+pub const PrefixCheckpoint = prefixes.PrefixCheckpoint;
+pub const PrefixCheckpoints = prefixes.PrefixCheckpoints;
+pub const LookupBits = prefixes.LookupBits;
+pub const IdentityPolynomial = identity_poly.IdentityPolynomial;
+pub const OperandPolynomial = identity_poly.OperandPolynomial;
+pub const OperandSide = identity_poly.OperandSide;
+pub const BindingOrder = identity_poly.BindingOrder;
+
 /// Utility function to uninterleave bits from an interleaved index.
 /// For a 2*XLEN bit index where bits are interleaved as y[0], x[0], y[1], x[1], ...,
 /// returns (x, y) where each is an XLEN-bit value.

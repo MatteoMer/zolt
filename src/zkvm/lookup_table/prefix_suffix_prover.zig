@@ -1022,11 +1022,12 @@ pub fn initQRaf(
 fn uninterleaveBitsLeft(bits: u128, num_bits: usize) u64 {
     var left: u64 = 0;
     const half_bits = num_bits / 2;
-    var i: u6 = 0;
+    var i: usize = 0;
     while (i < half_bits and i < 64) : (i += 1) {
         // Even positions (0, 2, 4, ...) go to left
-        const bit = (bits >> @as(u7, @intCast(2 * i))) & 1;
-        left |= @as(u64, @truncate(bit)) << i;
+        const shift_amt: u7 = @intCast(@min(2 * i, 127));
+        const bit = (bits >> shift_amt) & 1;
+        left |= @as(u64, @truncate(bit)) << @as(u6, @intCast(i));
     }
     return left;
 }
@@ -1035,11 +1036,12 @@ fn uninterleaveBitsLeft(bits: u128, num_bits: usize) u64 {
 fn uninterleaveBitsRight(bits: u128, num_bits: usize) u64 {
     var right: u64 = 0;
     const half_bits = num_bits / 2;
-    var i: u6 = 0;
+    var i: usize = 0;
     while (i < half_bits and i < 64) : (i += 1) {
         // Odd positions (1, 3, 5, ...) go to right
-        const bit = (bits >> @as(u7, @intCast(2 * i + 1))) & 1;
-        right |= @as(u64, @truncate(bit)) << i;
+        const shift_amt: u7 = @intCast(@min(2 * i + 1, 127));
+        const bit = (bits >> shift_amt) & 1;
+        right |= @as(u64, @truncate(bit)) << @as(u6, @intCast(i));
     }
     return right;
 }

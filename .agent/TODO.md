@@ -228,17 +228,23 @@ Where:
 1. ✅ suffixes.zig - All 43 suffix types with suffix_mle implementations
 2. ✅ prefix_suffix_prover.zig - Q polynomial structures and proverMsgReadChecking
 3. ✅ Updated mod.zig with exports
+4. ✅ Added imports to stage5_prover.zig
+5. ✅ Initialized Q polynomials in Stage 5 prover (lookup_indices_u128, suffix_polys.initPhase)
 
 **Commits:**
 - `b8239f1` - feat: implement suffix MLE functions for prefix-suffix decomposition
 - `7cdfc90` - docs: update TODO with Session 97 progress
 - `222a5f4` - feat: implement prefix-suffix prover state and Q polynomial structures
+- `43acde6` - chore: add prefix-suffix prover imports and integration plan
+- `639eb1f` - docs: update TODO with Session 97 final status
+- `fcc19e8` - feat: initialize suffix polynomials in Stage 5 prover
 
 **Next Session:**
-1. Integrate AllSuffixPolys into Stage 5 generateStage5ProofWithTrace
-2. Replace address round bit-splitting with proverMsgReadChecking calls
-3. Add RAF contribution via identity/operand prefix-suffix decomposition
-4. Test end-to-end with Jolt verification
+1. Replace address round bit-splitting with proverMsgReadChecking calls (~lines 1270-1285)
+2. Add suffix_polys.bindAll(challenge) and prefix checkpoint updates after each round
+3. Add phase transitions (every 16 rounds for 8 phases)
+4. Add RAF contribution via identity/operand prefix-suffix decomposition
+5. Test end-to-end with Jolt verification
 
 ### Integration Plan (for next session)
 

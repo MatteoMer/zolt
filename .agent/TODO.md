@@ -16,13 +16,25 @@
    - Root cause: shift underflow when computing `total - y_len` in leftShift prefixes
    - Fix: Added bounds checking before shift operations
 
+3. **Binding order fix** (`prefix_suffix_prover.zig`):
+   - Fixed `bind()` function to use HighToLow order matching Jolt
+   - Changed from `poly[2*j]` and `poly[2*j+1]` (LowToHigh)
+   - To `poly[j]` and `poly[j + half_size]` (HighToLow)
+   - Applied to both TableSuffixPolys.bind() and RafDecomposition.bind()
+
+4. **r_x parameter fix** (`stage5_prover.zig`):
+   - Fixed `proverMsgReadChecking` to pass correct r_x value
+   - On odd rounds (j % 2 == 1): pass the last challenge
+   - On even rounds (j % 2 == 0): pass null
+   - This matches Jolt's behavior
+
 ### Current Status
 
 - **Stages 1-4: PASS**
 - **Stage 5: FAIL** - Sumcheck verification mismatch
   - Proof generates successfully (no more segfault)
+  - Round 1 challenge now differs (evidence of different polynomial values)
   - output_claim doesn't match expected_claim
-  - Root cause: Prefix MLE implementations may not match Jolt's exactly
 
 ### Verification Output
 
@@ -34,29 +46,28 @@ Sumcheck verification failed!
 
 ### What Needs Investigation
 
-The prefix MLE implementations need to be verified against Jolt's reference:
+The polynomial values at round 0 differ between Zolt and Jolt. Possible causes:
 
-1. **Check each prefix MLE for correctness**:
-   - Compare Zig implementations to Rust implementations line-by-line
-   - Verify bit ordering (MSB vs LSB)
-   - Verify checkpoint updates match Jolt
+1. **Suffix MLE implementations**:
+   - Some suffixes return 0 (placeholder) in `suffixes.zig` line 98-100
+   - Need to implement: ChangeDivisor, ChangeDivisorW, Rev8W, etc.
 
-2. **Key areas to investigate**:
-   - `LowerWord` / `UpperWord` - operand extraction
-   - `LeftShift` / `RightShift` - shift computations
-   - `XorRot` variants - rotation logic
-   - `Eq` - equality MLE
-   - `LessThan` - comparison MLE
+2. **tableSuffixes configuration**:
+   - Table-to-suffix mapping may not match Jolt exactly
+   - Many tables just return `{.One}` as placeholder
 
-3. **Debugging strategy**:
-   - Add debug output to Zolt's prefix computations
-   - Compare intermediate values with Jolt's debug output
-   - Focus on round-by-round comparison
+3. **tableCombine formulas**:
+   - Each table's combine formula needs to match Jolt
+   - Only first ~14 tables are implemented
 
-### Key Files
+4. **u_evals initialization**:
+   - The expanding table weights (v vector) may be missing/wrong
 
-- Zolt prefixes: `/home/vivado/projects/zolt/src/zkvm/lookup_table/prefixes.zig`
-- Jolt prefixes: `/home/vivado/projects/jolt/jolt-core/src/zkvm/lookup_table/prefixes/*.rs`
+### Key Files Modified This Session
+
+- `src/zkvm/lookup_table/prefixes.zig` - shift underflow fix
+- `src/zkvm/lookup_table/prefix_suffix_prover.zig` - HighToLow binding
+- `src/zkvm/spartan/stage5_prover.zig` - r_x parameter on odd rounds
 
 ### Test Commands
 
@@ -75,4 +86,5 @@ cargo test --package jolt-core --features zolt-debug test_verify_zolt_proof_with
 ### Commits This Session
 
 - `7c733d5` - feat: implement all 46 prefix MLEs for Jolt compatibility
-- (pending) - fix: shift underflow in leftShiftPrefixMle
+- `d585b53` - fix: prevent shift underflow in leftShift prefix MLE computations
+- (pending) - fix: HighToLow binding order and r_x parameter on odd rounds

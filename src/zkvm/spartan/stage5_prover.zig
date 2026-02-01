@@ -1285,8 +1285,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     //
                     // Jolt uses HighToLow binding: round 0 -> bit 127 (MSB), round 127 -> bit 0 (LSB)
 
+                    // On odd rounds, r_x is the last challenge (the X variable was just bound)
+                    // On even rounds, r_x is null (we're computing over the X variable)
+                    const r_x: ?F = if (round % 2 == 1) challenges[round - 1] else null;
+
                     // Compute read-checking contribution via prefix-suffix decomposition
-                    const read_checking_evals = proverMsgReadChecking(F, round, &suffix_polys, &prefix_checkpoints, null);
+                    const read_checking_evals = proverMsgReadChecking(F, round, &suffix_polys, &prefix_checkpoints, r_x);
 
                     // Compute RAF contribution via prefix-suffix decomposition
                     // gamma_raf = γ, gamma_raf2 = γ²
@@ -1362,11 +1366,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // Update prefix checkpoints every 2 rounds (after binding X and Y)
                     const round_in_phase = round % log_m;
                     if (round_in_phase % 2 == 1) {
-                        // We just bound Y, update prefix checkpoints with (r_x, r_y)
-                        const r_x = challenges[round - 1];
+                        // We just bound Y, update prefix checkpoints with (checkpoint_r_x, r_y)
+                        const checkpoint_r_x = challenges[round - 1];
                         const r_y = challenge;
                         const suffix_len = LOOKUPS_LOG_K - (current_phase + 1) * log_m;
-                        prefix_checkpoints.update(r_x, r_y, round, suffix_len);
+                        prefix_checkpoints.update(checkpoint_r_x, r_y, round, suffix_len);
                     }
 
                     // Check for phase transition (every log_m = 16 rounds)

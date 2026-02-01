@@ -73,12 +73,15 @@ pub fn TableSuffixPolys(comptime F: type) type {
         }
 
         /// Bind a challenge (halves the polynomial size)
+        /// Uses HighToLow binding order: new[i] = left[i] + r * (right[i] - left[i])
+        /// where left = poly[0..n], right = poly[n..2n]
         pub fn bind(self: *Self, r: F) void {
             for (self.polys) |poly| {
                 const half_size = poly.len / 2;
+                // HighToLow: left half [0..n], right half [n..2n]
                 for (0..half_size) |j| {
-                    const low = poly[2 * j];
-                    const high = poly[2 * j + 1];
+                    const low = poly[j];
+                    const high = poly[j + half_size];
                     poly[j] = low.add(r.mul(high.sub(low)));
                 }
             }
@@ -465,12 +468,14 @@ pub fn RafDecomposition(comptime F: type) type {
         }
 
         /// Bind a challenge to Q polynomials and update prefix
+        /// Uses HighToLow binding order: new[j] = Q[j] + r * (Q[j+half] - Q[j])
         pub fn bind(self: *Self, r: F) void {
             const half_size = self.Q_size / 2;
+            // HighToLow: left half [0..half_size], right half [half_size..Q_size]
             for (0..2) |i| {
                 for (0..half_size) |j| {
-                    const low = self.Q[i][2 * j];
-                    const high = self.Q[i][2 * j + 1];
+                    const low = self.Q[i][j];
+                    const high = self.Q[i][j + half_size];
                     self.Q[i][j] = low.add(r.mul(high.sub(low)));
                 }
             }

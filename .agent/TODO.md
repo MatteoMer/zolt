@@ -1,22 +1,55 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: IN PROGRESS - Stage 5 Prefix-Suffix Integration
+## Status: IN PROGRESS - Stage 5 Prefix-Suffix Debugging
 
-## Session 98 Progress
+## Session 99 Progress
 
-### Task: Replace bit-splitting with prefix-suffix decomposition in Stage 5
+### Task: Debug prefix-suffix decomposition Stage 5 verification failure
 
 ### Completed This Session
 
-1. **Analyzed Jolt's prefix-suffix decomposition** - Deep understanding of:
-   - How `prover_msg_read_checking` computes prefix MLE at c=0 and c=2
-   - How `table.combine()` combines prefix/suffix evaluations
-   - How RAF contribution is computed via identity/operand decompositions
+1. **Implemented RafDecomposition** (`prefix_suffix_prover.zig`):
+   - Created `RafDecomposition` struct with Q accumulators
+   - Implemented `initQRaf` for fused initialization of left/right/identity Q arrays
+   - Implemented `proverMsgRaf` computing γ*left + γ²*(identity + right) evaluations
+   - Added `uninterleaveBitsLeft/Right` helpers for operand extraction
 
-2. **Improved tableCombine function** (`prefix_suffix_prover.zig`):
-   - Added proper formulas for tables 0-14 matching Jolt exactly
-   - Implemented signed/unsigned comparison formulas with MSB prefix handling
-   - Tables 15-41 have placeholder (need to be completed)
+2. **Added fromU128 to BN254Scalar** (`field/mod.zig`):
+   - BN254Scalar now supports creating field elements from 128-bit values
+
+3. **Integrated prefix-suffix in stage5_prover.zig**:
+   - Initialize RAF decompositions for left/right/identity at phase 0
+   - Call `proverMsgReadChecking` + `proverMsgRaf` in address rounds
+   - Add `suffix_polys.bindAll` and RAF binding after each challenge
+   - Add prefix checkpoint updates every 2 rounds
+   - Add phase transitions every 16 rounds with Q reinitialization
+
+### Current Status
+
+- Stages 1-4: PASS
+- Stage 5: FAIL - Sumcheck verification failure
+  - output_claim doesn't match expected_claim
+  - The prover runs through all 136 rounds but produces wrong final claim
+
+### What Needs Investigation
+
+1. **proverMsgReadChecking evaluation logic** - May have bugs in:
+   - How prefix MLEs are computed at c=0 and c=2
+   - How suffixes are combined with prefixes
+   - The quadratic interpolation formula
+
+2. **proverMsgRaf evaluation logic** - May have bugs in:
+   - How Q accumulators are structured
+   - The summation over half-indices
+   - The γ*left + γ²*(right + identity) combination
+
+3. **Phase transition handling**:
+   - When Q arrays are reinitialized
+   - How u_evals should be updated through expanding tables
+
+4. **Prefix MLE implementations in prefixes.zig**:
+   - Many prefixes return F.zero() placeholder
+   - Need full implementations matching Jolt
 
 ### What Needs to Be Done
 

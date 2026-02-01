@@ -151,8 +151,10 @@ pub fn prefixMle(
     return switch (prefix) {
         .Eq => eqPrefixMle(F, checkpoints, r_x, c, b, j),
         .LowerWord => lowerWordPrefixMle(F, checkpoints, r_x, c, b, j),
+        .LowerHalfWord => lowerHalfWordPrefixMle(F, checkpoints, r_x, c, b, j),
         .UpperWord => upperWordPrefixMle(F, checkpoints, r_x, c, b, j),
         .And => andPrefixMle(F, checkpoints, r_x, c, b, j),
+        .Andn => andnPrefixMle(F, checkpoints, r_x, c, b, j),
         .Or => orPrefixMle(F, checkpoints, r_x, c, b, j),
         .Xor => xorPrefixMle(F, checkpoints, r_x, c, b, j),
         .LessThan => lessThanPrefixMle(F, checkpoints, r_x, c, b, j),
@@ -160,8 +162,39 @@ pub fn prefixMle(
         .RightOperandIsZero => rightIsZeroPrefixMle(F, checkpoints, r_x, c, b, j),
         .LeftOperandMsb => leftMsbPrefixMle(F, checkpoints, r_x, c, b, j),
         .RightOperandMsb => rightMsbPrefixMle(F, checkpoints, r_x, c, b, j),
-        // For prefixes not yet implemented, return zero
-        else => F.zero(),
+        .DivByZero => divByZeroPrefixMle(F, checkpoints, r_x, c, b, j),
+        .PositiveRemainderEqualsDivisor => positiveRemainderEqualsDivisorPrefixMle(F, checkpoints, r_x, c, b, j),
+        .PositiveRemainderLessThanDivisor => positiveRemainderLessThanDivisorPrefixMle(F, checkpoints, r_x, c, b, j),
+        .NegativeDivisorZeroRemainder => negativeDivisorZeroRemainderPrefixMle(F, checkpoints, r_x, c, b, j),
+        .NegativeDivisorEqualsRemainder => negativeDivisorEqualsRemainderPrefixMle(F, checkpoints, r_x, c, b, j),
+        .NegativeDivisorGreaterThanRemainder => negativeDivisorGreaterThanRemainderPrefixMle(F, checkpoints, r_x, c, b, j),
+        .Lsb => lsbPrefixMle(F, checkpoints, r_x, c, b, j),
+        .Pow2 => pow2PrefixMle(F, checkpoints, r_x, c, b, j),
+        .Pow2W => pow2WPrefixMle(F, checkpoints, r_x, c, b, j),
+        .Rev8W => rev8wPrefixMle(F, checkpoints, r_x, c, b, j),
+        .RightShift => rightShiftPrefixMle(F, checkpoints, r_x, c, b, j),
+        .SignExtension => signExtensionPrefixMle(F, checkpoints, r_x, c, b, j),
+        .LeftShift => leftShiftPrefixMle(F, checkpoints, r_x, c, b, j),
+        .LeftShiftHelper => leftShiftHelperPrefixMle(F, checkpoints, r_x, c, b, j),
+        .TwoLsb => twoLsbPrefixMle(F, checkpoints, r_x, c, b, j),
+        .SignExtensionUpperHalf => signExtensionUpperHalfPrefixMle(F, checkpoints, r_x, c, b, j),
+        .ChangeDivisor => changeDivisorPrefixMle(F, checkpoints, r_x, c, b, j),
+        .ChangeDivisorW => changeDivisorWPrefixMle(F, checkpoints, r_x, c, b, j),
+        .RightOperand => rightOperandPrefixMle(F, checkpoints, r_x, c, b, j),
+        .RightOperandW => rightOperandWPrefixMle(F, checkpoints, r_x, c, b, j),
+        .SignExtensionRightOperand => signExtensionRightOperandPrefixMle(F, checkpoints, r_x, c, b, j),
+        .RightShiftW => rightShiftWPrefixMle(F, checkpoints, r_x, c, b, j),
+        .LeftShiftWHelper => leftShiftWHelperPrefixMle(F, checkpoints, r_x, c, b, j),
+        .LeftShiftW => leftShiftWPrefixMle(F, checkpoints, r_x, c, b, j),
+        .OverflowBitsZero => overflowBitsZeroPrefixMle(F, checkpoints, r_x, c, b, j),
+        .XorRot16 => xorRotPrefixMle(F, 16, checkpoints, r_x, c, b, j),
+        .XorRot24 => xorRotPrefixMle(F, 24, checkpoints, r_x, c, b, j),
+        .XorRot32 => xorRotPrefixMle(F, 32, checkpoints, r_x, c, b, j),
+        .XorRot63 => xorRotPrefixMle(F, 63, checkpoints, r_x, c, b, j),
+        .XorRotW7 => xorRotWPrefixMle(F, 7, checkpoints, r_x, c, b, j),
+        .XorRotW8 => xorRotWPrefixMle(F, 8, checkpoints, r_x, c, b, j),
+        .XorRotW12 => xorRotWPrefixMle(F, 12, checkpoints, r_x, c, b, j),
+        .XorRotW16 => xorRotWPrefixMle(F, 16, checkpoints, r_x, c, b, j),
     };
 }
 
@@ -178,8 +211,10 @@ pub fn updatePrefixCheckpoint(
     return switch (prefix) {
         .Eq => eqUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
         .LowerWord => lowerWordUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
+        .LowerHalfWord => lowerHalfWordUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
         .UpperWord => upperWordUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
         .And => andUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
+        .Andn => andnUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
         .Or => orUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
         .Xor => xorUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
         .LessThan => lessThanUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
@@ -187,8 +222,39 @@ pub fn updatePrefixCheckpoint(
         .RightOperandIsZero => rightIsZeroUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
         .LeftOperandMsb => leftMsbUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
         .RightOperandMsb => rightMsbUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
-        // For prefixes not yet implemented, return null
-        else => null,
+        .DivByZero => divByZeroUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
+        .PositiveRemainderEqualsDivisor => positiveRemainderEqualsDivisorUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
+        .PositiveRemainderLessThanDivisor => positiveRemainderLessThanDivisorUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
+        .NegativeDivisorZeroRemainder => negativeDivisorZeroRemainderUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
+        .NegativeDivisorEqualsRemainder => negativeDivisorEqualsRemainderUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
+        .NegativeDivisorGreaterThanRemainder => negativeDivisorGreaterThanRemainderUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
+        .Lsb => lsbUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
+        .Pow2 => pow2UpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
+        .Pow2W => pow2WUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
+        .Rev8W => rev8wUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
+        .RightShift => rightShiftUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
+        .SignExtension => signExtensionUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
+        .LeftShift => leftShiftUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
+        .LeftShiftHelper => leftShiftHelperUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
+        .TwoLsb => twoLsbUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
+        .SignExtensionUpperHalf => signExtensionUpperHalfUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
+        .ChangeDivisor => changeDivisorUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
+        .ChangeDivisorW => changeDivisorWUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
+        .RightOperand => rightOperandUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
+        .RightOperandW => rightOperandWUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
+        .SignExtensionRightOperand => signExtensionRightOperandUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
+        .RightShiftW => rightShiftWUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
+        .LeftShiftWHelper => leftShiftWHelperUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
+        .LeftShiftW => leftShiftWUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
+        .OverflowBitsZero => overflowBitsZeroUpdateCheckpoint(F, checkpoints, r_x, r_y, j, suffix_len),
+        .XorRot16 => xorRotUpdateCheckpoint(F, 16, checkpoints, r_x, r_y, j, suffix_len),
+        .XorRot24 => xorRotUpdateCheckpoint(F, 24, checkpoints, r_x, r_y, j, suffix_len),
+        .XorRot32 => xorRotUpdateCheckpoint(F, 32, checkpoints, r_x, r_y, j, suffix_len),
+        .XorRot63 => xorRotUpdateCheckpoint(F, 63, checkpoints, r_x, r_y, j, suffix_len),
+        .XorRotW7 => xorRotWUpdateCheckpoint(F, 7, checkpoints, r_x, r_y, j, suffix_len),
+        .XorRotW8 => xorRotWUpdateCheckpoint(F, 8, checkpoints, r_x, r_y, j, suffix_len),
+        .XorRotW12 => xorRotWUpdateCheckpoint(F, 12, checkpoints, r_x, r_y, j, suffix_len),
+        .XorRotW16 => xorRotWUpdateCheckpoint(F, 16, checkpoints, r_x, r_y, j, suffix_len),
     };
 }
 
@@ -755,6 +821,1805 @@ fn rightMsbUpdateCheckpoint(
         return checkpoints[@intFromEnum(Prefixes.RightOperandMsb)];
     }
     return r_y;
+}
+
+// ============================================================================
+// Andn Prefix Implementation
+// ============================================================================
+
+fn andnPrefixMle(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: ?F,
+    c: u32,
+    b: *LookupBits(128),
+    j: usize,
+) F {
+    const suffix_len = LOG_K - j - b.len - 1;
+    var result = checkpoints[@intFromEnum(Prefixes.Andn)] orelse F.zero();
+
+    // ANDN high-order variables: x_i * (1 - y_i)
+    if (r_x) |rx| {
+        const y = F.fromU64(@as(u64, c));
+        const shift = XLEN - 1 - j / 2;
+        result = result.add(F.fromU64(@as(u64, 1) << @intCast(shift)).mul(rx).mul(F.one().sub(y)));
+    } else {
+        const y_msb = b.popMsb();
+        const shift = XLEN - 1 - j / 2;
+        // c * (1 - y_msb)
+        result = result.add(F.fromU64(@as(u64, c) * (1 - @as(u64, y_msb))).mul(F.fromU64(@as(u64, 1) << @intCast(shift))));
+    }
+
+    // ANDN remaining x and y bits
+    const uninterleaved = b.uninterleave();
+    result = result.add(F.fromU128(@as(u128, uninterleaved.left & ~uninterleaved.right) << @intCast(suffix_len / 2)));
+
+    return result;
+}
+
+fn andnUpdateCheckpoint(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: F,
+    r_y: F,
+    j: usize,
+    _: usize,
+) PrefixCheckpoint(F) {
+    const shift = XLEN - 1 - j / 2;
+    // checkpoint += 2^shift * r_x * (1 - r_y)
+    var updated = checkpoints[@intFromEnum(Prefixes.Andn)] orelse F.zero();
+    updated = updated.add(F.fromU64(@as(u64, 1) << @intCast(shift)).mul(r_x).mul(F.one().sub(r_y)));
+    return updated;
+}
+
+// ============================================================================
+// LowerHalfWord Prefix Implementation
+// ============================================================================
+
+fn lowerHalfWordPrefixMle(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: ?F,
+    c: u32,
+    b: *LookupBits(128),
+    j: usize,
+) F {
+    const suffix_len = LOG_K - j - b.len - 1;
+    const half_word_size = XLEN / 2;
+    // Ignore high-order variables (those above the half-word boundary)
+    if (j < XLEN + half_word_size) {
+        return F.zero();
+    }
+    var result = checkpoints[@intFromEnum(Prefixes.LowerHalfWord)] orelse F.zero();
+
+    if (r_x) |rx| {
+        const y = F.fromU64(@as(u64, c));
+        const x_shift = 2 * XLEN - j;
+        const y_shift = 2 * XLEN - j - 1;
+        result = result.add(F.fromU128(@as(u128, 1) << @intCast(x_shift)).mul(rx));
+        result = result.add(F.fromU128(@as(u128, 1) << @intCast(y_shift)).mul(y));
+    } else {
+        const x = F.fromU64(@as(u64, c));
+        const y_msb = b.popMsb();
+        const x_shift = 2 * XLEN - j - 1;
+        const y_shift = 2 * XLEN - j - 2;
+        result = result.add(F.fromU128(@as(u128, 1) << @intCast(x_shift)).mul(x));
+        result = result.add(F.fromU128(@as(u128, 1) << @intCast(y_shift)).mul(F.fromU64(@as(u64, y_msb))));
+    }
+
+    // Add in low-order bits from b
+    result = result.add(F.fromU128(b.value << @intCast(suffix_len)));
+
+    return result;
+}
+
+fn lowerHalfWordUpdateCheckpoint(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: F,
+    r_y: F,
+    j: usize,
+    _: usize,
+) PrefixCheckpoint(F) {
+    const half_word_size = XLEN / 2;
+    if (j < XLEN + half_word_size) {
+        return null;
+    }
+    const x_shift = 2 * XLEN - j;
+    const y_shift = 2 * XLEN - j - 1;
+    var updated = checkpoints[@intFromEnum(Prefixes.LowerHalfWord)] orelse F.zero();
+    updated = updated.add(F.fromU128(@as(u128, 1) << @intCast(x_shift)).mul(r_x));
+    updated = updated.add(F.fromU128(@as(u128, 1) << @intCast(y_shift)).mul(r_y));
+    return updated;
+}
+
+// ============================================================================
+// DivByZero Prefix Implementation
+// ============================================================================
+
+fn divByZeroPrefixMle(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: ?F,
+    c: u32,
+    b: *LookupBits(128),
+    _: usize,
+) F {
+    const uninterleaved = b.uninterleave();
+    // If low-order bits of divisor are not 0s or low-order bits of quotient are not
+    // 1s, short-circuit and return 0.
+    const quotient_len = b.len / 2;
+    if (uninterleaved.left != 0 or uninterleaved.right != (@as(u64, 1) << @intCast(quotient_len)) - 1) {
+        return F.zero();
+    }
+
+    var result = checkpoints[@intFromEnum(Prefixes.DivByZero)] orelse F.one();
+
+    if (r_x) |rx| {
+        const y = F.fromU64(@as(u64, c));
+        result = result.mul(F.one().sub(rx)).mul(y);
+    } else {
+        const x = F.fromU64(@as(u64, c));
+        const y = F.fromU64(@as(u64, b.popMsb()));
+        result = result.mul(F.one().sub(x)).mul(y);
+    }
+    return result;
+}
+
+fn divByZeroUpdateCheckpoint(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: F,
+    r_y: F,
+    _: usize,
+    _: usize,
+) PrefixCheckpoint(F) {
+    // checkpoint *= (1 - r_x) * r_y
+    var updated = checkpoints[@intFromEnum(Prefixes.DivByZero)] orelse F.one();
+    updated = updated.mul(F.one().sub(r_x)).mul(r_y);
+    return updated;
+}
+
+// ============================================================================
+// PositiveRemainderEqualsDivisor Prefix Implementation
+// ============================================================================
+
+fn positiveRemainderEqualsDivisorPrefixMle(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: ?F,
+    c: u32,
+    b: *LookupBits(128),
+    j: usize,
+) F {
+    if (j == 0) {
+        const divisor_sign = F.fromU64(@as(u64, b.popMsb()));
+        const uninterleaved = b.uninterleave();
+        if (uninterleaved.left != uninterleaved.right) {
+            return F.zero();
+        } else {
+            // c is the sign bit of the remainder
+            return F.one().sub(F.fromU64(@as(u64, c))).mul(F.one().sub(divisor_sign));
+        }
+    }
+    if (j == 1) {
+        const uninterleaved = b.uninterleave();
+        if (uninterleaved.left != uninterleaved.right) {
+            return F.zero();
+        } else {
+            // r_x is the sign bit of the remainder, c is sign bit of divisor
+            return F.one().sub(r_x.?).mul(F.one().sub(F.fromU64(@as(u64, c))));
+        }
+    }
+
+    const positive_remainder_equals_divisor = checkpoints[@intFromEnum(Prefixes.PositiveRemainderEqualsDivisor)].?;
+
+    if (r_x) |rx| {
+        const uninterleaved = b.uninterleave();
+        if (uninterleaved.left != uninterleaved.right) {
+            return F.zero();
+        }
+        const y = F.fromU64(@as(u64, c));
+        return positive_remainder_equals_divisor.mul(rx.mul(y).add(F.one().sub(rx).mul(F.one().sub(y))));
+    } else {
+        const y = F.fromU64(@as(u64, b.popMsb()));
+        const uninterleaved = b.uninterleave();
+        if (uninterleaved.left != uninterleaved.right) {
+            return F.zero();
+        }
+        const x = F.fromU64(@as(u64, c));
+        return positive_remainder_equals_divisor.mul(x.mul(y).add(F.one().sub(x).mul(F.one().sub(y))));
+    }
+}
+
+fn positiveRemainderEqualsDivisorUpdateCheckpoint(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: F,
+    r_y: F,
+    j: usize,
+    _: usize,
+) PrefixCheckpoint(F) {
+    if (j == 1) {
+        return F.one().sub(r_x).mul(F.one().sub(r_y));
+    }
+
+    var updated = checkpoints[@intFromEnum(Prefixes.PositiveRemainderEqualsDivisor)].?;
+    updated = updated.mul(r_x.mul(r_y).add(F.one().sub(r_x).mul(F.one().sub(r_y))));
+    return updated;
+}
+
+// ============================================================================
+// PositiveRemainderLessThanDivisor Prefix Implementation
+// ============================================================================
+
+fn positiveRemainderLessThanDivisorPrefixMle(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: ?F,
+    c: u32,
+    b: *LookupBits(128),
+    j: usize,
+) F {
+    if (j == 0) {
+        const divisor_sign = F.fromU64(@as(u64, b.popMsb()));
+        const uninterleaved = b.uninterleave();
+        if (uninterleaved.left >= uninterleaved.right) {
+            return F.zero();
+        } else {
+            return F.one().sub(F.fromU64(@as(u64, c))).mul(F.one().sub(divisor_sign));
+        }
+    }
+    if (j == 1) {
+        const uninterleaved = b.uninterleave();
+        if (uninterleaved.left >= uninterleaved.right) {
+            return F.zero();
+        } else {
+            return F.one().sub(r_x.?).mul(F.one().sub(F.fromU64(@as(u64, c))));
+        }
+    }
+
+    var lt = checkpoints[@intFromEnum(Prefixes.PositiveRemainderLessThanDivisor)].?;
+    var eq = checkpoints[@intFromEnum(Prefixes.PositiveRemainderEqualsDivisor)].?;
+
+    if (j == 2) {
+        const c_f = F.fromU64(@as(u64, c));
+        const y_msb = F.fromU64(@as(u64, b.popMsb()));
+        const uninterleaved = b.uninterleave();
+        lt = lt.mul(F.one().sub(c_f).mul(y_msb));
+        if (uninterleaved.left < uninterleaved.right) {
+            eq = eq.mul(c_f.mul(y_msb).add(F.one().sub(c_f).mul(F.one().sub(y_msb))));
+            lt = lt.add(eq);
+        }
+        return lt;
+    }
+    if (j == 3) {
+        const rx = r_x.?;
+        const c_f = F.fromU64(@as(u64, c));
+        const uninterleaved = b.uninterleave();
+        lt = lt.mul(F.one().sub(rx).mul(c_f));
+        if (uninterleaved.left < uninterleaved.right) {
+            eq = eq.mul(rx.mul(c_f).add(F.one().sub(rx).mul(F.one().sub(c_f))));
+            lt = lt.add(eq);
+        }
+        return lt;
+    }
+
+    if (r_x) |rx| {
+        const c_f = F.fromU64(@as(u64, c));
+        lt = lt.add(eq.mul(F.one().sub(rx)).mul(c_f));
+        const uninterleaved = b.uninterleave();
+        if (uninterleaved.left < uninterleaved.right) {
+            eq = eq.mul(rx.mul(c_f).add(F.one().sub(rx).mul(F.one().sub(c_f))));
+            lt = lt.add(eq);
+        }
+    } else {
+        const c_f = F.fromU64(@as(u64, c));
+        const y_msb = F.fromU64(@as(u64, b.popMsb()));
+        lt = lt.add(eq.mul(F.one().sub(c_f)).mul(y_msb));
+        const uninterleaved = b.uninterleave();
+        if (uninterleaved.left < uninterleaved.right) {
+            eq = eq.mul(c_f.mul(y_msb).add(F.one().sub(c_f).mul(F.one().sub(y_msb))));
+            lt = lt.add(eq);
+        }
+    }
+
+    return lt;
+}
+
+fn positiveRemainderLessThanDivisorUpdateCheckpoint(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: F,
+    r_y: F,
+    j: usize,
+    _: usize,
+) PrefixCheckpoint(F) {
+    if (j == 1) {
+        return F.one().sub(r_x).mul(F.one().sub(r_y));
+    }
+
+    const lt_checkpoint = checkpoints[@intFromEnum(Prefixes.PositiveRemainderLessThanDivisor)].?;
+    const eq_checkpoint = checkpoints[@intFromEnum(Prefixes.PositiveRemainderEqualsDivisor)].?;
+
+    if (j == 3) {
+        return lt_checkpoint.mul(F.one().sub(r_x)).mul(r_y);
+    }
+
+    return lt_checkpoint.add(eq_checkpoint.mul(F.one().sub(r_x)).mul(r_y));
+}
+
+// ============================================================================
+// NegativeDivisorZeroRemainder Prefix Implementation
+// ============================================================================
+
+fn negativeDivisorZeroRemainderPrefixMle(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: ?F,
+    c: u32,
+    b: *LookupBits(128),
+    j: usize,
+) F {
+    if (j == 0) {
+        const divisor_sign = F.fromU64(@as(u64, b.popMsb()));
+        const uninterleaved = b.uninterleave();
+        if (uninterleaved.left != 0) {
+            return F.zero();
+        } else {
+            return F.one().sub(F.fromU64(@as(u64, c))).mul(divisor_sign);
+        }
+    }
+    if (j == 1) {
+        const uninterleaved = b.uninterleave();
+        if (uninterleaved.left != 0) {
+            return F.zero();
+        } else {
+            return F.one().sub(r_x.?).mul(F.fromU64(@as(u64, c)));
+        }
+    }
+
+    const negative_divisor_zero_remainder = checkpoints[@intFromEnum(Prefixes.NegativeDivisorZeroRemainder)].?;
+
+    if (r_x) |rx| {
+        const uninterleaved = b.uninterleave();
+        if (uninterleaved.left != 0) {
+            return F.zero();
+        }
+        return negative_divisor_zero_remainder.mul(F.one().sub(rx));
+    } else {
+        _ = b.popMsb();
+        const uninterleaved = b.uninterleave();
+        if (uninterleaved.left != 0) {
+            return F.zero();
+        }
+        return negative_divisor_zero_remainder.mul(F.one().sub(F.fromU64(@as(u64, c))));
+    }
+}
+
+fn negativeDivisorZeroRemainderUpdateCheckpoint(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: F,
+    r_y: F,
+    j: usize,
+    _: usize,
+) PrefixCheckpoint(F) {
+    if (j == 1) {
+        return F.one().sub(r_x).mul(r_y);
+    }
+
+    var updated = checkpoints[@intFromEnum(Prefixes.NegativeDivisorZeroRemainder)].?;
+    updated = updated.mul(F.one().sub(r_x));
+    return updated;
+}
+
+// ============================================================================
+// NegativeDivisorEqualsRemainder Prefix Implementation
+// ============================================================================
+
+fn negativeDivisorEqualsRemainderPrefixMle(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: ?F,
+    c: u32,
+    b: *LookupBits(128),
+    j: usize,
+) F {
+    if (j == 0) {
+        const divisor_sign = F.fromU64(@as(u64, b.popMsb()));
+        const uninterleaved = b.uninterleave();
+        if (uninterleaved.left != uninterleaved.right) {
+            return F.zero();
+        } else {
+            return F.fromU64(@as(u64, c)).mul(divisor_sign);
+        }
+    }
+    if (j == 1) {
+        const uninterleaved = b.uninterleave();
+        if (uninterleaved.left != uninterleaved.right) {
+            return F.zero();
+        } else {
+            return r_x.?.mul(F.fromU64(@as(u64, c)));
+        }
+    }
+
+    const negative_divisor_equals_remainder = checkpoints[@intFromEnum(Prefixes.NegativeDivisorEqualsRemainder)].?;
+
+    if (r_x) |rx| {
+        const uninterleaved = b.uninterleave();
+        if (uninterleaved.left != uninterleaved.right) {
+            return F.zero();
+        }
+        const y = F.fromU64(@as(u64, c));
+        return negative_divisor_equals_remainder.mul(rx.mul(y).add(F.one().sub(rx).mul(F.one().sub(y))));
+    } else {
+        const y_msb = F.fromU64(@as(u64, b.popMsb()));
+        const uninterleaved = b.uninterleave();
+        if (uninterleaved.left != uninterleaved.right) {
+            return F.zero();
+        }
+        const x = F.fromU64(@as(u64, c));
+        return negative_divisor_equals_remainder.mul(x.mul(y_msb).add(F.one().sub(x).mul(F.one().sub(y_msb))));
+    }
+}
+
+fn negativeDivisorEqualsRemainderUpdateCheckpoint(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: F,
+    r_y: F,
+    j: usize,
+    _: usize,
+) PrefixCheckpoint(F) {
+    if (j == 1) {
+        return r_x.mul(r_y);
+    }
+
+    var updated = checkpoints[@intFromEnum(Prefixes.NegativeDivisorEqualsRemainder)].?;
+    updated = updated.mul(r_x.mul(r_y).add(F.one().sub(r_x).mul(F.one().sub(r_y))));
+    return updated;
+}
+
+// ============================================================================
+// NegativeDivisorGreaterThanRemainder Prefix Implementation
+// ============================================================================
+
+fn negativeDivisorGreaterThanRemainderPrefixMle(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: ?F,
+    c: u32,
+    b: *LookupBits(128),
+    j: usize,
+) F {
+    if (j == 0) {
+        const divisor_sign = F.fromU64(@as(u64, b.popMsb()));
+        const uninterleaved = b.uninterleave();
+        if (uninterleaved.left <= uninterleaved.right) {
+            return F.zero();
+        } else {
+            return F.fromU64(@as(u64, c)).mul(divisor_sign);
+        }
+    }
+    if (j == 1) {
+        const uninterleaved = b.uninterleave();
+        if (uninterleaved.left <= uninterleaved.right) {
+            return F.zero();
+        } else {
+            return r_x.?.mul(F.fromU64(@as(u64, c)));
+        }
+    }
+
+    var gt = checkpoints[@intFromEnum(Prefixes.NegativeDivisorGreaterThanRemainder)].?;
+    var eq = checkpoints[@intFromEnum(Prefixes.NegativeDivisorEqualsRemainder)].?;
+
+    if (j == 2) {
+        const c_f = F.fromU64(@as(u64, c));
+        const y_msb = F.fromU64(@as(u64, b.popMsb()));
+        const uninterleaved = b.uninterleave();
+        gt = gt.mul(c_f.mul(F.one().sub(y_msb)));
+        if (uninterleaved.left > uninterleaved.right) {
+            eq = eq.mul(c_f.mul(y_msb).add(F.one().sub(c_f).mul(F.one().sub(y_msb))));
+            gt = gt.add(eq);
+        }
+        return gt;
+    }
+    if (j == 3) {
+        const rx = r_x.?;
+        const c_f = F.fromU64(@as(u64, c));
+        const uninterleaved = b.uninterleave();
+        gt = gt.mul(rx.mul(F.one().sub(c_f)));
+        if (uninterleaved.left > uninterleaved.right) {
+            eq = eq.mul(rx.mul(c_f).add(F.one().sub(rx).mul(F.one().sub(c_f))));
+            gt = gt.add(eq);
+        }
+        return gt;
+    }
+
+    if (r_x) |rx| {
+        const c_f = F.fromU64(@as(u64, c));
+        gt = gt.add(eq.mul(rx).mul(F.one().sub(c_f)));
+        const uninterleaved = b.uninterleave();
+        if (uninterleaved.left > uninterleaved.right) {
+            eq = eq.mul(rx.mul(c_f).add(F.one().sub(rx).mul(F.one().sub(c_f))));
+            gt = gt.add(eq);
+        }
+    } else {
+        const c_f = F.fromU64(@as(u64, c));
+        const y_msb = F.fromU64(@as(u64, b.popMsb()));
+        gt = gt.add(eq.mul(c_f).mul(F.one().sub(y_msb)));
+        const uninterleaved = b.uninterleave();
+        if (uninterleaved.left > uninterleaved.right) {
+            eq = eq.mul(c_f.mul(y_msb).add(F.one().sub(c_f).mul(F.one().sub(y_msb))));
+            gt = gt.add(eq);
+        }
+    }
+
+    return gt;
+}
+
+fn negativeDivisorGreaterThanRemainderUpdateCheckpoint(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: F,
+    r_y: F,
+    j: usize,
+    _: usize,
+) PrefixCheckpoint(F) {
+    if (j == 1) {
+        return r_x.mul(r_y);
+    }
+
+    const gt_checkpoint = checkpoints[@intFromEnum(Prefixes.NegativeDivisorGreaterThanRemainder)].?;
+    const eq_checkpoint = checkpoints[@intFromEnum(Prefixes.NegativeDivisorEqualsRemainder)].?;
+
+    if (j == 3) {
+        return gt_checkpoint.mul(r_x).mul(F.one().sub(r_y));
+    }
+
+    return gt_checkpoint.add(eq_checkpoint.mul(r_x).mul(F.one().sub(r_y)));
+}
+
+// ============================================================================
+// Lsb Prefix Implementation
+// ============================================================================
+
+fn lsbPrefixMle(
+    comptime F: type,
+    _: *const PrefixCheckpoints(F),
+    _: ?F,
+    c: u32,
+    b: *LookupBits(128),
+    j: usize,
+) F {
+    const suffix_len = LOG_K - j - b.len - 1;
+    if (j == 2 * XLEN - 1) {
+        // In the log(K)th round, c corresponds to the LSB
+        return F.fromU64(@as(u64, c));
+    } else if (suffix_len == 0) {
+        // In the (log(K)-1)th round, the LSB of b is the LSB
+        return F.fromU64(@as(u64, @truncate(b.value)) & 1);
+    } else {
+        return F.one();
+    }
+}
+
+fn lsbUpdateCheckpoint(
+    comptime F: type,
+    _: *const PrefixCheckpoints(F),
+    _: F,
+    r_y: F,
+    j: usize,
+    _: usize,
+) PrefixCheckpoint(F) {
+    if (j == 2 * XLEN - 1) {
+        return r_y;
+    } else {
+        return F.one();
+    }
+}
+
+// ============================================================================
+// Pow2 Prefix Implementation
+// ============================================================================
+
+fn pow2PrefixMle(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: ?F,
+    c: u32,
+    b: *LookupBits(128),
+    j: usize,
+) F {
+    const suffix_len = LOG_K - j - b.len - 1;
+    if (suffix_len != 0) {
+        return F.one();
+    }
+
+    const log_xlen = @ctz(@as(usize, XLEN)); // log2(64) = 6
+    // Shift amount is the last XLEN bits of b
+    if (b.len >= log_xlen) {
+        const shift_amount = @as(u6, @intCast(b.value & (XLEN - 1)));
+        return F.fromU64(@as(u64, 1) << shift_amount);
+    }
+
+    const shift_amount = @as(u6, @intCast(b.value & (XLEN - 1)));
+    var result = F.fromU64(@as(u64, 1) << shift_amount);
+    var num_bits = b.len;
+    var shift: u64 = @as(u64, 1) << @as(u6, @intCast(@as(u64, 1) << @intCast(num_bits)));
+    result = result.mul(F.fromU64(1 + (shift - 1) * c));
+
+    // Shift amount is [c, b]
+    if (b.len == log_xlen - 1) {
+        return result;
+    }
+
+    // Shift amount is [(r, r_x), c, b]
+    num_bits += 1;
+    shift = @as(u64, 1) << @as(u6, @intCast(@as(u64, 1) << @intCast(num_bits)));
+    if (r_x) |rx| {
+        result = result.mul(F.one().add(F.fromU64(shift - 1).mul(rx)));
+    }
+
+    result = result.mul(checkpoints[@intFromEnum(Prefixes.Pow2)] orelse F.one());
+    return result;
+}
+
+fn pow2UpdateCheckpoint(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: F,
+    r_y: F,
+    j: usize,
+    suffix_len: usize,
+) PrefixCheckpoint(F) {
+    if (suffix_len != 0) {
+        return F.one();
+    }
+
+    const log_xlen = @ctz(@as(usize, XLEN)); // log2(64) = 6
+    // r_y is the highest bit of the shift amount
+    if (j == 2 * XLEN - log_xlen) {
+        const shift: u64 = @as(u64, 1) << @intCast(XLEN / 2);
+        return F.one().add(F.fromU64(shift - 1).mul(r_y));
+    }
+
+    // r_x and r_y are bits in the shift amount
+    if (2 * XLEN - j < log_xlen) {
+        var checkpoint = checkpoints[@intFromEnum(Prefixes.Pow2)].?;
+        const shift1: u64 = @as(u64, 1) << @as(u6, @intCast(@as(u64, 1) << @intCast(2 * XLEN - j)));
+        checkpoint = checkpoint.mul(F.one().add(F.fromU64(shift1 - 1).mul(r_x)));
+        const shift2: u64 = @as(u64, 1) << @as(u6, @intCast(@as(u64, 1) << @intCast(2 * XLEN - j - 1)));
+        checkpoint = checkpoint.mul(F.one().add(F.fromU64(shift2 - 1).mul(r_y)));
+        return checkpoint;
+    }
+
+    return F.one();
+}
+
+// ============================================================================
+// Pow2W Prefix Implementation
+// ============================================================================
+
+fn pow2WPrefixMle(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: ?F,
+    c: u32,
+    b: *LookupBits(128),
+    j: usize,
+) F {
+    const suffix_len = LOG_K - j - b.len - 1;
+    if (suffix_len != 0) {
+        return F.one();
+    }
+
+    // Shift amount is the last 5 bits of b (for modulo 32)
+    if (b.len >= 5) {
+        const shift_amount = @as(u5, @intCast(b.value & 0b11111));
+        return F.fromU64(@as(u64, 1) << shift_amount);
+    }
+
+    const shift_amount = @as(u5, @intCast(b.value & 0b11111));
+    var result = F.fromU64(@as(u64, 1) << shift_amount);
+    var num_bits = b.len;
+    var shift: u64 = @as(u64, 1) << @as(u6, @intCast(@as(u64, 1) << @intCast(num_bits)));
+    result = result.mul(F.fromU64(1 + (shift - 1) * c));
+
+    // Shift amount is [c, b]
+    if (b.len == 4) { // 5 - 1
+        return result;
+    }
+
+    // Shift amount is [(r, r_x), c, b]
+    num_bits += 1;
+    shift = @as(u64, 1) << @as(u6, @intCast(@as(u64, 1) << @intCast(num_bits)));
+    if (r_x) |rx| {
+        result = result.mul(F.one().add(F.fromU64(shift - 1).mul(rx)));
+    }
+
+    result = result.mul(checkpoints[@intFromEnum(Prefixes.Pow2W)] orelse F.one());
+    return result;
+}
+
+fn pow2WUpdateCheckpoint(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: F,
+    r_y: F,
+    j: usize,
+    suffix_len: usize,
+) PrefixCheckpoint(F) {
+    if (suffix_len != 0) {
+        return F.one();
+    }
+
+    // r_y is the highest bit of the shift amount
+    if (j == 2 * XLEN - 5) {
+        const shift: u64 = 1 << 16; // 2^(32/2)
+        return F.one().add(F.fromU64(shift - 1).mul(r_y));
+    }
+
+    // r_x and r_y are bits in the shift amount
+    if (2 * XLEN - j < 5) {
+        var checkpoint = checkpoints[@intFromEnum(Prefixes.Pow2W)].?;
+        const shift1: u64 = @as(u64, 1) << @as(u6, @intCast(@as(u64, 1) << @intCast(2 * XLEN - j)));
+        checkpoint = checkpoint.mul(F.one().add(F.fromU64(shift1 - 1).mul(r_x)));
+        const shift2: u64 = @as(u64, 1) << @as(u6, @intCast(@as(u64, 1) << @intCast(2 * XLEN - j - 1)));
+        checkpoint = checkpoint.mul(F.one().add(F.fromU64(shift2 - 1).mul(r_y)));
+        return checkpoint;
+    }
+
+    return F.one();
+}
+
+// ============================================================================
+// RightShift Prefix Implementation
+// ============================================================================
+
+fn rightShiftPrefixMle(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: ?F,
+    c: u32,
+    b: *LookupBits(128),
+    _: usize,
+) F {
+    var result = checkpoints[@intFromEnum(Prefixes.RightShift)] orelse F.zero();
+    if (r_x) |rx| {
+        result = result.mul(F.fromU64(1 + @as(u64, c)));
+        result = result.add(rx.mul(F.fromU64(@as(u64, c))));
+    } else {
+        const y_msb = b.popMsb();
+        result = result.mul(F.fromU64(1 + @as(u64, y_msb)));
+        result = result.add(F.fromU64(@as(u64, @as(u8, @intCast(c)) * y_msb)));
+    }
+    const uninterleaved = b.uninterleave();
+    const x_u32 = @as(u32, @truncate(uninterleaved.left));
+    const y_u32 = @as(u32, @truncate(uninterleaved.right));
+    result = result.mul(F.fromU64(@as(u64, 1) << @intCast(@clz(~y_u32))));
+    result = result.add(F.fromU64(@as(u64, x_u32 >> @intCast(@ctz(y_u32)))));
+
+    return result;
+}
+
+fn rightShiftUpdateCheckpoint(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: F,
+    r_y: F,
+    _: usize,
+    _: usize,
+) PrefixCheckpoint(F) {
+    var updated = checkpoints[@intFromEnum(Prefixes.RightShift)] orelse F.zero();
+    updated = updated.mul(F.one().add(r_y));
+    updated = updated.add(r_x.mul(r_y));
+    return updated;
+}
+
+// ============================================================================
+// SignExtension Prefix Implementation
+// ============================================================================
+
+fn signExtensionPrefixMle(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: ?F,
+    c: u32,
+    b: *LookupBits(128),
+    j: usize,
+) F {
+    if (j == 0) {
+        const sign_bit = F.fromU64(@as(u64, c));
+        if (sign_bit.eql(F.zero())) {
+            return F.zero();
+        }
+        _ = b.popMsb();
+        const y_val = b.uninterleave().right;
+        var result = F.zero();
+        var index: usize = 1;
+        const y_len = b.len / 2;
+        var i: usize = 0;
+        while (i < y_len) : (i += 1) {
+            const y_i = (y_val >> @intCast(y_len - 1 - i)) & 1;
+            result = result.add(F.fromU64((1 - y_i) << @intCast(index)));
+            index += 1;
+        }
+        return result.mul(sign_bit);
+    }
+    if (j == 1) {
+        const sign_bit = r_x.?;
+        const y_val = b.uninterleave().right;
+        var result = F.zero();
+        var index: usize = 1;
+        const y_len = b.len / 2;
+        var i: usize = 0;
+        while (i < y_len) : (i += 1) {
+            const y_i = (y_val >> @intCast(y_len - 1 - i)) & 1;
+            result = result.add(F.fromU64((1 - y_i) << @intCast(index)));
+            index += 1;
+        }
+        return result.mul(sign_bit);
+    }
+
+    const sign_bit = checkpoints[@intFromEnum(Prefixes.LeftOperandMsb)].?;
+    var result = checkpoints[@intFromEnum(Prefixes.SignExtension)] orelse F.zero();
+
+    if (r_x != null) {
+        result = result.add(F.fromU64(@as(u64, 1) << @intCast(j / 2)).mul(F.one().sub(F.fromU64(@as(u64, c)))));
+    } else {
+        const y_msb = b.popMsb();
+        if (y_msb == 0) {
+            result = result.add(F.fromU64(@as(u64, 1) << @intCast(j / 2)));
+        }
+    }
+    const y_val = b.uninterleave().right;
+    var index = j / 2;
+    const y_len = b.len / 2;
+    var i: usize = 0;
+    while (i < y_len) : (i += 1) {
+        index += 1;
+        const y_i = (y_val >> @intCast(y_len - 1 - i)) & 1;
+        if (y_i == 0) {
+            result = result.add(F.fromU64(@as(u64, 1) << @intCast(index)));
+        }
+    }
+
+    return result.mul(sign_bit);
+}
+
+fn signExtensionUpdateCheckpoint(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    _: F,
+    r_y: F,
+    j: usize,
+    _: usize,
+) PrefixCheckpoint(F) {
+    if (j == 1) {
+        return null;
+    }
+    var updated = checkpoints[@intFromEnum(Prefixes.SignExtension)] orelse F.zero();
+    updated = updated.add(F.fromU64(@as(u64, 1) << @intCast(j / 2)).mul(F.one().sub(r_y)));
+    if (j == 2 * XLEN - 1) {
+        updated = updated.mul(checkpoints[@intFromEnum(Prefixes.LeftOperandMsb)].?);
+    }
+    return updated;
+}
+
+// ============================================================================
+// LeftShift Prefix Implementation
+// ============================================================================
+
+fn leftShiftPrefixMle(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: ?F,
+    c: u32,
+    b: *LookupBits(128),
+    j: usize,
+) F {
+    var result = checkpoints[@intFromEnum(Prefixes.LeftShift)] orelse F.zero();
+    var prod_one_plus_y = checkpoints[@intFromEnum(Prefixes.LeftShiftHelper)] orelse F.one();
+
+    if (r_x) |rx| {
+        result = result.add(rx.mul(F.one().sub(F.fromU64(@as(u64, c)))).mul(prod_one_plus_y).mul(F.fromU64(@as(u64, 1) << @intCast(XLEN - 1 - j / 2))));
+        prod_one_plus_y = prod_one_plus_y.mul(F.fromU64(1 + @as(u64, c)));
+    } else {
+        const y_msb = b.popMsb();
+        result = result.add(F.fromU64(@as(u64, @as(u8, @intCast(c)) * (1 - y_msb))).mul(prod_one_plus_y).mul(F.fromU64(@as(u64, 1) << @intCast(XLEN - 1 - j / 2))));
+        prod_one_plus_y = prod_one_plus_y.mul(F.fromU64(1 + @as(u64, y_msb)));
+    }
+
+    const uninterleaved = b.uninterleave();
+    const x = uninterleaved.left & ~uninterleaved.right;
+    const y_leading_ones = @clz(~@as(u32, @truncate(uninterleaved.right)));
+    const shift = y_leading_ones + XLEN - 1 - j / 2 - b.len / 2;
+    result = result.add(F.fromU64(x << @intCast(shift)).mul(prod_one_plus_y));
+
+    return result;
+}
+
+fn leftShiftUpdateCheckpoint(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: F,
+    r_y: F,
+    j: usize,
+    _: usize,
+) PrefixCheckpoint(F) {
+    var updated = checkpoints[@intFromEnum(Prefixes.LeftShift)] orelse F.zero();
+    const prod_one_plus_y = checkpoints[@intFromEnum(Prefixes.LeftShiftHelper)] orelse F.one();
+    updated = updated.add(r_x.mul(F.one().sub(r_y)).mul(prod_one_plus_y).mul(F.fromU64(@as(u64, 1) << @intCast(XLEN - 1 - j / 2))));
+    return updated;
+}
+
+// ============================================================================
+// LeftShiftHelper Prefix Implementation
+// ============================================================================
+
+fn leftShiftHelperPrefixMle(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: ?F,
+    c: u32,
+    b: *LookupBits(128),
+    _: usize,
+) F {
+    var result = checkpoints[@intFromEnum(Prefixes.LeftShiftHelper)] orelse F.one();
+
+    if (r_x != null) {
+        result = result.mul(F.fromU64(1 + @as(u64, c)));
+    } else {
+        const y_msb = b.popMsb();
+        result = result.mul(F.fromU64(1 + @as(u64, y_msb)));
+    }
+
+    const y = @as(u32, @truncate(b.uninterleave().right));
+    result = result.mul(F.fromU64(@as(u64, 1) << @intCast(@clz(~y))));
+
+    return result;
+}
+
+fn leftShiftHelperUpdateCheckpoint(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    _: F,
+    r_y: F,
+    _: usize,
+    _: usize,
+) PrefixCheckpoint(F) {
+    var updated = checkpoints[@intFromEnum(Prefixes.LeftShiftHelper)] orelse F.one();
+    updated = updated.mul(F.one().add(r_y));
+    return updated;
+}
+
+// ============================================================================
+// TwoLsb Prefix Implementation
+// ============================================================================
+
+fn twoLsbPrefixMle(
+    comptime F: type,
+    _: *const PrefixCheckpoints(F),
+    r_x: ?F,
+    c: u32,
+    b: *LookupBits(128),
+    j: usize,
+) F {
+    const suffix_len = LOG_K - j - b.len - 1;
+    if (j == 2 * XLEN - 1) {
+        // In the log(K)th round, c corresponds to bit 0 and r_x to bit 1
+        return F.one().sub(F.fromU64(@as(u64, c))).mul(F.one().sub(r_x.?));
+    } else if (j == 2 * XLEN - 2) {
+        // In the (log(K)-1)th round, c corresponds to bit 1
+        const bit0 = @as(u32, @truncate(b.value)) & 1;
+        const bit1 = c;
+        return F.one().sub(F.fromU64(@as(u64, bit0))).mul(F.one().sub(F.fromU64(@as(u64, bit1))));
+    } else if (suffix_len == 0) {
+        // In the (log(K)-2)th round, the two LSBs of b are the two LSBs
+        if ((@as(u32, @truncate(b.value)) & 0b11) == 0) {
+            return F.one();
+        } else {
+            return F.zero();
+        }
+    } else {
+        return F.one();
+    }
+}
+
+fn twoLsbUpdateCheckpoint(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: F,
+    r_y: F,
+    j: usize,
+    _: usize,
+) PrefixCheckpoint(F) {
+    if (j == 2 * XLEN - 1) {
+        return F.one().sub(r_x).mul(F.one().sub(r_y));
+    } else {
+        return checkpoints[@intFromEnum(Prefixes.TwoLsb)];
+    }
+}
+
+// ============================================================================
+// SignExtensionUpperHalf Prefix Implementation
+// ============================================================================
+
+fn signExtensionUpperHalfPrefixMle(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: ?F,
+    c: u32,
+    _: *LookupBits(128),
+    j: usize,
+) F {
+    const suffix_len = LOG_K - j - 1; // b.len is effectively 0 when we don't use b
+    const half_word_size = XLEN / 2;
+
+    if (suffix_len >= half_word_size) {
+        return F.one();
+    }
+
+    if (j == XLEN + half_word_size) {
+        return F.fromU128(((@as(u128, 1) << half_word_size) - 1) << half_word_size).mul(F.fromU64(@as(u64, c)));
+    } else if (j == XLEN + half_word_size + 1) {
+        return F.fromU128(((@as(u128, 1) << half_word_size) - 1) << half_word_size).mul(r_x.?);
+    } else if (j > XLEN + half_word_size + 1) {
+        return checkpoints[@intFromEnum(Prefixes.SignExtensionUpperHalf)] orelse F.zero();
+    } else {
+        return F.zero(); // This case should never happen
+    }
+}
+
+fn signExtensionUpperHalfUpdateCheckpoint(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: F,
+    _: F,
+    j: usize,
+    _: usize,
+) PrefixCheckpoint(F) {
+    const half_word_size = XLEN / 2;
+
+    if (j == XLEN + half_word_size + 1) {
+        return F.fromU128(((@as(u128, 1) << half_word_size) - 1) << half_word_size).mul(r_x);
+    } else {
+        return checkpoints[@intFromEnum(Prefixes.SignExtensionUpperHalf)];
+    }
+}
+
+// ============================================================================
+// ChangeDivisor Prefix Implementation
+// ============================================================================
+
+fn changeDivisorPrefixMle(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: ?F,
+    c: u32,
+    b: *LookupBits(128),
+    j: usize,
+) F {
+    var result = checkpoints[@intFromEnum(Prefixes.ChangeDivisor)] orelse F.fromU64(2).sub(F.fromU128(@as(u128, 1) << XLEN));
+
+    if (j == 0) {
+        const x_msb = b.popMsb();
+        if (x_msb == 0) {
+            return F.zero();
+        }
+        const uninterleaved = b.uninterleave();
+        const y_len = b.len / 2;
+        if (uninterleaved.left != 0 or uninterleaved.right != (@as(u64, 1) << @intCast(y_len)) - 1) {
+            return F.zero();
+        }
+        return result.mul(F.fromU64(@as(u64, c)));
+    } else if (r_x) |rx| {
+        const uninterleaved = b.uninterleave();
+        const y_len = b.len / 2;
+        if (uninterleaved.left != 0 or uninterleaved.right != (@as(u64, 1) << @intCast(y_len)) - 1 or c == 0) {
+            return F.zero();
+        }
+        if (j == 1) {
+            return result.mul(rx).mul(F.fromU64(@as(u64, c)));
+        } else {
+            return result.mul(F.one().sub(rx)).mul(F.fromU64(@as(u64, c)));
+        }
+    } else {
+        const uninterleaved = b.uninterleave();
+        const y_len = b.len / 2;
+        if (b.len > 0 and (uninterleaved.left != 0 or uninterleaved.right != (@as(u64, 1) << @intCast(y_len)) - 1)) {
+            return F.zero();
+        }
+        return result.mul(F.one().sub(F.fromU64(@as(u64, c))));
+    }
+}
+
+fn changeDivisorUpdateCheckpoint(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: F,
+    r_y: F,
+    j: usize,
+    _: usize,
+) PrefixCheckpoint(F) {
+    const base = checkpoints[@intFromEnum(Prefixes.ChangeDivisor)] orelse F.fromU64(2).sub(F.fromU128(@as(u128, 1) << XLEN));
+    if (j == 1) {
+        return base.mul(r_x).mul(r_y);
+    } else {
+        return base.mul(F.one().sub(r_x)).mul(r_y);
+    }
+}
+
+// ============================================================================
+// ChangeDivisorW Prefix Implementation
+// ============================================================================
+
+fn changeDivisorWPrefixMle(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: ?F,
+    c: u32,
+    b: *LookupBits(128),
+    j: usize,
+) F {
+    if (j < XLEN) {
+        return F.zero();
+    }
+
+    var result = if (j == XLEN or j == XLEN + 1)
+        F.fromU64(2).sub(F.fromU128(@as(u128, 1) << XLEN))
+    else
+        checkpoints[@intFromEnum(Prefixes.ChangeDivisorW)].?;
+
+    if (j == XLEN) {
+        const x_msb = b.popMsb();
+        if (x_msb == 0) {
+            return F.zero();
+        }
+        const uninterleaved = b.uninterleave();
+        const y_len = b.len / 2;
+        if (uninterleaved.left != 0 or uninterleaved.right != (@as(u64, 1) << @intCast(y_len)) - 1) {
+            return F.zero();
+        }
+        return result.mul(F.fromU64(@as(u64, c)));
+    } else if (r_x) |rx| {
+        if (j > XLEN) {
+            const uninterleaved = b.uninterleave();
+            const y_len = b.len / 2;
+            if (uninterleaved.left != 0 or uninterleaved.right != (@as(u64, 1) << @intCast(y_len)) - 1 or c == 0) {
+                return F.zero();
+            }
+
+            if (j == XLEN + 1) {
+                return result.mul(rx).mul(F.fromU64(@as(u64, c)));
+            } else {
+                return result.mul(F.one().sub(rx)).mul(F.fromU64(@as(u64, c)));
+            }
+        }
+    } else if (j > XLEN) {
+        const uninterleaved = b.uninterleave();
+        const y_len = b.len / 2;
+        if (b.len > 0 and (uninterleaved.left != 0 or uninterleaved.right != (@as(u64, 1) << @intCast(y_len)) - 1)) {
+            return F.zero();
+        }
+        return result.mul(F.one().sub(F.fromU64(@as(u64, c))));
+    }
+    return result;
+}
+
+fn changeDivisorWUpdateCheckpoint(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: F,
+    r_y: F,
+    j: usize,
+    _: usize,
+) PrefixCheckpoint(F) {
+    if (j < XLEN) {
+        return F.zero();
+    }
+
+    if (j == XLEN + 1) {
+        return F.fromU64(2).sub(F.fromU128(@as(u128, 1) << XLEN)).mul(r_x).mul(r_y);
+    } else {
+        return checkpoints[@intFromEnum(Prefixes.ChangeDivisorW)].?.mul(F.one().sub(r_x).mul(r_y));
+    }
+}
+
+// ============================================================================
+// RightOperand Prefix Implementation
+// ============================================================================
+
+fn rightOperandPrefixMle(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    _: ?F,
+    c: u32,
+    b: *LookupBits(128),
+    j: usize,
+) F {
+    const suffix_len = LOG_K - j - b.len - 1;
+    var result = checkpoints[@intFromEnum(Prefixes.RightOperand)] orelse F.zero();
+
+    if (j % 2 == 1) {
+        // c is of the right operand
+        const shift = XLEN - 1 - j / 2;
+        result = result.add(F.fromU128(@as(u128, c) << @intCast(shift)));
+    }
+
+    const y = b.uninterleave().right;
+    result = result.add(F.fromU128(@as(u128, y) << @intCast(suffix_len / 2)));
+
+    return result;
+}
+
+fn rightOperandUpdateCheckpoint(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    _: F,
+    r_y: F,
+    j: usize,
+    _: usize,
+) PrefixCheckpoint(F) {
+    const shift = XLEN - 1 - j / 2;
+    var updated = checkpoints[@intFromEnum(Prefixes.RightOperand)] orelse F.zero();
+    updated = updated.add(F.fromU64(@as(u64, 1) << @intCast(shift)).mul(r_y));
+    return updated;
+}
+
+// ============================================================================
+// RightOperandW Prefix Implementation
+// ============================================================================
+
+fn rightOperandWPrefixMle(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    _: ?F,
+    c: u32,
+    b: *LookupBits(128),
+    j: usize,
+) F {
+    const suffix_len = LOG_K - j - b.len - 1;
+    var result = checkpoints[@intFromEnum(Prefixes.RightOperandW)] orelse F.zero();
+
+    if (j % 2 == 1 and j > XLEN) {
+        const shift = XLEN - 1 - j / 2;
+        result = result.add(F.fromU128(@as(u128, c) << @intCast(shift)));
+    }
+
+    if (suffix_len < XLEN) {
+        const y = b.uninterleave().right;
+        result = result.add(F.fromU128(@as(u128, y) << @intCast(suffix_len / 2)));
+    }
+
+    return result;
+}
+
+fn rightOperandWUpdateCheckpoint(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    _: F,
+    r_y: F,
+    j: usize,
+    _: usize,
+) PrefixCheckpoint(F) {
+    if (j > XLEN) {
+        const shift = XLEN - 1 - j / 2;
+        var updated = checkpoints[@intFromEnum(Prefixes.RightOperandW)] orelse F.zero();
+        updated = updated.add(F.fromU64(@as(u64, 1) << @intCast(shift)).mul(r_y));
+        return updated;
+    } else {
+        return checkpoints[@intFromEnum(Prefixes.RightOperandW)];
+    }
+}
+
+// ============================================================================
+// SignExtensionRightOperand Prefix Implementation
+// ============================================================================
+
+fn signExtensionRightOperandPrefixMle(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    _: ?F,
+    c: u32,
+    b: *LookupBits(128),
+    j: usize,
+) F {
+    const suffix_len = LOG_K - j - b.len - 1;
+
+    if (suffix_len >= XLEN) {
+        return F.one();
+    }
+
+    if (j == XLEN) {
+        const sign_bit = b.popMsb();
+        return F.fromU128((@as(u128, 1) << XLEN) - (@as(u128, 1) << (XLEN / 2))).mul(F.fromU64(@as(u64, sign_bit)));
+    } else if (j == XLEN + 1) {
+        return F.fromU128((@as(u128, 1) << XLEN) - (@as(u128, 1) << (XLEN / 2))).mul(F.fromU64(@as(u64, c)));
+    } else if (j >= XLEN + 2) {
+        return checkpoints[@intFromEnum(Prefixes.SignExtensionRightOperand)] orelse F.zero();
+    } else {
+        return F.zero();
+    }
+}
+
+fn signExtensionRightOperandUpdateCheckpoint(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    _: F,
+    r_y: F,
+    j: usize,
+    _: usize,
+) PrefixCheckpoint(F) {
+    if (j == XLEN + 1) {
+        return F.fromU128((@as(u128, 1) << XLEN) - (@as(u128, 1) << (XLEN / 2))).mul(r_y);
+    } else {
+        return checkpoints[@intFromEnum(Prefixes.SignExtensionRightOperand)];
+    }
+}
+
+// ============================================================================
+// RightShiftW Prefix Implementation
+// ============================================================================
+
+fn rightShiftWPrefixMle(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: ?F,
+    c: u32,
+    b: *LookupBits(128),
+    j: usize,
+) F {
+    if (j < XLEN) {
+        return F.zero();
+    }
+
+    var result = checkpoints[@intFromEnum(Prefixes.RightShiftW)] orelse F.zero();
+    if (r_x) |rx| {
+        result = result.mul(F.fromU64(1 + @as(u64, c)));
+        result = result.add(rx.mul(F.fromU64(@as(u64, c))));
+    } else {
+        const y_msb = b.popMsb();
+        result = result.mul(F.fromU64(1 + @as(u64, y_msb)));
+        result = result.add(F.fromU64(@as(u64, @as(u8, @intCast(c)) * y_msb)));
+    }
+    const uninterleaved = b.uninterleave();
+    const x_u32 = @as(u32, @truncate(uninterleaved.left));
+    const y_u32 = @as(u32, @truncate(uninterleaved.right));
+    result = result.mul(F.fromU64(@as(u64, 1) << @intCast(@clz(~y_u32))));
+    result = result.add(F.fromU64(@as(u64, x_u32 >> @intCast(@ctz(y_u32)))));
+
+    return result;
+}
+
+fn rightShiftWUpdateCheckpoint(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: F,
+    r_y: F,
+    j: usize,
+    _: usize,
+) PrefixCheckpoint(F) {
+    if (j >= XLEN) {
+        var updated = checkpoints[@intFromEnum(Prefixes.RightShiftW)] orelse F.zero();
+        updated = updated.mul(F.one().add(r_y));
+        updated = updated.add(r_x.mul(r_y));
+        return updated;
+    } else {
+        return F.zero();
+    }
+}
+
+// ============================================================================
+// LeftShiftWHelper Prefix Implementation
+// ============================================================================
+
+fn leftShiftWHelperPrefixMle(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: ?F,
+    c: u32,
+    b: *LookupBits(128),
+    j: usize,
+) F {
+    if (j < XLEN) {
+        return F.one();
+    }
+
+    var result = checkpoints[@intFromEnum(Prefixes.LeftShiftWHelper)] orelse F.one();
+
+    if (r_x != null) {
+        result = result.mul(F.fromU64(1 + @as(u64, c)));
+    } else {
+        const y_msb = b.popMsb();
+        result = result.mul(F.fromU64(1 + @as(u64, y_msb)));
+    }
+
+    const y = @as(u32, @truncate(b.uninterleave().right));
+    result = result.mul(F.fromU64(@as(u64, 1) << @intCast(@clz(~y))));
+
+    return result;
+}
+
+fn leftShiftWHelperUpdateCheckpoint(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    _: F,
+    r_y: F,
+    j: usize,
+    _: usize,
+) PrefixCheckpoint(F) {
+    if (j >= XLEN) {
+        var updated = checkpoints[@intFromEnum(Prefixes.LeftShiftWHelper)] orelse F.one();
+        updated = updated.mul(F.one().add(r_y));
+        return updated;
+    } else {
+        return F.one();
+    }
+}
+
+// ============================================================================
+// LeftShiftW Prefix Implementation
+// ============================================================================
+
+fn leftShiftWPrefixMle(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: ?F,
+    c: u32,
+    b: *LookupBits(128),
+    j: usize,
+) F {
+    if (j < XLEN) {
+        return F.zero();
+    }
+
+    var result = checkpoints[@intFromEnum(Prefixes.LeftShiftW)] orelse F.zero();
+    var prod_one_plus_y = checkpoints[@intFromEnum(Prefixes.LeftShiftWHelper)] orelse F.one();
+
+    const bit_index = XLEN - 1 - j / 2;
+
+    if (r_x) |rx| {
+        const shift_val: u64 = if (bit_index < 64) (@as(u64, 1) << @intCast(bit_index)) else 0;
+        result = result.add(rx.mul(F.one().sub(F.fromU64(@as(u64, c)))).mul(prod_one_plus_y).mul(F.fromU64(shift_val)));
+        prod_one_plus_y = prod_one_plus_y.mul(F.fromU64(1 + @as(u64, c)));
+    } else {
+        const y_msb = b.popMsb();
+        const shift_val: u64 = if (bit_index < 64) (@as(u64, 1) << @intCast(bit_index)) else 0;
+        result = result.add(F.fromU64(@as(u64, @as(u8, @intCast(c)) * (1 - y_msb))).mul(prod_one_plus_y).mul(F.fromU64(shift_val)));
+        prod_one_plus_y = prod_one_plus_y.mul(F.fromU64(1 + @as(u64, y_msb)));
+    }
+
+    const uninterleaved = b.uninterleave();
+    const x = uninterleaved.left & ~uninterleaved.right;
+    const y_leading_ones = @clz(~@as(u32, @truncate(uninterleaved.right)));
+    const y_len = b.len / 2;
+    const shift = y_leading_ones + bit_index - y_len;
+    const shifted: u64 = if (shift < 64) (x << @intCast(shift)) else 0;
+    result = result.add(F.fromU64(shifted).mul(prod_one_plus_y));
+
+    return result;
+}
+
+fn leftShiftWUpdateCheckpoint(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: F,
+    r_y: F,
+    j: usize,
+    _: usize,
+) PrefixCheckpoint(F) {
+    if (j >= XLEN) {
+        var updated = checkpoints[@intFromEnum(Prefixes.LeftShiftW)] orelse F.zero();
+        const prod_one_plus_y = checkpoints[@intFromEnum(Prefixes.LeftShiftWHelper)] orelse F.one();
+        const bit_index = XLEN - 1 - j / 2;
+        const shift_val: u64 = if (bit_index < 64) (@as(u64, 1) << @intCast(bit_index)) else 0;
+        updated = updated.add(r_x.mul(F.one().sub(r_y)).mul(prod_one_plus_y).mul(F.fromU64(shift_val)));
+        return updated;
+    } else {
+        return F.zero();
+    }
+}
+
+// ============================================================================
+// OverflowBitsZero Prefix Implementation
+// ============================================================================
+
+fn overflowBitsZeroPrefixMle(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: ?F,
+    c: u32,
+    b: *LookupBits(128),
+    j: usize,
+) F {
+    const suffix_len = LOG_K - j - b.len - 1;
+    if (j >= 128 - XLEN) {
+        return checkpoints[@intFromEnum(Prefixes.OverflowBitsZero)] orelse F.one();
+    }
+
+    var result = checkpoints[@intFromEnum(Prefixes.OverflowBitsZero)] orelse F.one();
+
+    if (r_x) |rx| {
+        const y = F.fromU64(@as(u64, c));
+        result = result.mul(F.one().sub(rx).mul(F.one().sub(y)));
+    } else {
+        const x = F.fromU64(@as(u64, c));
+        const y = F.fromU64(@as(u64, b.popMsb()));
+        result = result.mul(F.one().sub(x).mul(F.one().sub(y)));
+    }
+
+    const rest = b.value;
+    const shifted = rest << @intCast(suffix_len);
+    const is_zero: u64 = if ((shifted >> XLEN) == 0) 1 else 0;
+    result = result.mul(F.fromU64(is_zero));
+
+    return result;
+}
+
+fn overflowBitsZeroUpdateCheckpoint(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: F,
+    r_y: F,
+    j: usize,
+    _: usize,
+) PrefixCheckpoint(F) {
+    if (j >= 128 - XLEN) {
+        return checkpoints[@intFromEnum(Prefixes.OverflowBitsZero)];
+    }
+    var updated = checkpoints[@intFromEnum(Prefixes.OverflowBitsZero)] orelse F.one();
+    updated = updated.mul(F.one().sub(r_x).mul(F.one().sub(r_y)));
+    return updated;
+}
+
+// ============================================================================
+// XorRot Prefix Implementation (for 16, 24, 32, 63)
+// ============================================================================
+
+fn xorRotPrefixMle(
+    comptime F: type,
+    comptime rotation: u32,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: ?F,
+    c: u32,
+    b: *LookupBits(128),
+    j: usize,
+) F {
+    const suffix_len = LOG_K - j - b.len - 1;
+    const prefix_idx = switch (rotation) {
+        16 => Prefixes.XorRot16,
+        24 => Prefixes.XorRot24,
+        32 => Prefixes.XorRot32,
+        63 => Prefixes.XorRot63,
+        else => unreachable,
+    };
+    var result = checkpoints[@intFromEnum(prefix_idx)] orelse F.zero();
+
+    if (r_x) |rx| {
+        const y = F.fromU64(@as(u64, c));
+        const xor_bit = F.one().sub(rx).mul(y).add(rx.mul(F.one().sub(y)));
+
+        const original_pos = j / 2;
+        const rotated_pos = (original_pos + rotation) % XLEN;
+        const shift = XLEN - 1 - rotated_pos;
+
+        result = result.add(F.fromU64(@as(u64, 1) << @intCast(shift)).mul(xor_bit));
+    } else {
+        const x = F.fromU64(@as(u64, c));
+        const y_msb = F.fromU64(@as(u64, b.popMsb()));
+        const xor_bit = F.one().sub(x).mul(y_msb).add(x.mul(F.one().sub(y_msb)));
+
+        const original_pos = j / 2;
+        const rotated_pos = (original_pos + rotation) % XLEN;
+        const shift = XLEN - 1 - rotated_pos;
+
+        result = result.add(F.fromU64(@as(u64, 1) << @intCast(shift)).mul(xor_bit));
+    }
+
+    // Remaining x and y bits
+    const uninterleaved = b.uninterleave();
+    const xor_result = uninterleaved.left ^ uninterleaved.right;
+
+    const shift_i: i32 = @as(i32, @intCast(suffix_len / 2)) - @as(i32, rotation);
+    const shift: u6 = if (shift_i >= 0)
+        @intCast(shift_i)
+    else
+        @intCast(@as(i32, XLEN) + shift_i);
+
+    // Rotate left
+    const rotated = std.math.rotl(u64, xor_result, shift);
+    result = result.add(F.fromU64(rotated));
+    return result;
+}
+
+fn xorRotUpdateCheckpoint(
+    comptime F: type,
+    comptime rotation: u32,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: F,
+    r_y: F,
+    j: usize,
+    _: usize,
+) PrefixCheckpoint(F) {
+    const prefix_idx = switch (rotation) {
+        16 => Prefixes.XorRot16,
+        24 => Prefixes.XorRot24,
+        32 => Prefixes.XorRot32,
+        63 => Prefixes.XorRot63,
+        else => unreachable,
+    };
+    const original_pos = j / 2;
+    const rotated_pos = (original_pos + rotation) % XLEN;
+    const shift = XLEN - 1 - rotated_pos;
+    var updated = checkpoints[@intFromEnum(prefix_idx)] orelse F.zero();
+    updated = updated.add(F.fromU64(@as(u64, 1) << @intCast(shift)).mul(F.one().sub(r_x).mul(r_y).add(r_x.mul(F.one().sub(r_y)))));
+    return updated;
+}
+
+// ============================================================================
+// XorRotW Prefix Implementation (for 7, 8, 12, 16 - 32-bit word operations)
+// ============================================================================
+
+fn xorRotWPrefixMle(
+    comptime F: type,
+    comptime rotation: u32,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: ?F,
+    c: u32,
+    b: *LookupBits(128),
+    j: usize,
+) F {
+    const suffix_len = LOG_K - j - b.len - 1;
+    if (j < XLEN) {
+        return F.zero();
+    }
+
+    const prefix_idx = switch (rotation) {
+        7 => Prefixes.XorRotW7,
+        8 => Prefixes.XorRotW8,
+        12 => Prefixes.XorRotW12,
+        16 => Prefixes.XorRotW16,
+        else => unreachable,
+    };
+    var result = checkpoints[@intFromEnum(prefix_idx)] orelse F.zero();
+
+    if (r_x) |rx| {
+        const y = F.fromU64(@as(u64, c));
+        const xor_bit = F.one().sub(rx).mul(y).add(rx.mul(F.one().sub(y)));
+        const position = (j - XLEN) / 2;
+        var rotated_position = (position + rotation) % 32;
+        rotated_position = 32 - 1 - rotated_position;
+        result = result.add(F.fromU64(@as(u64, 1) << @intCast(rotated_position)).mul(xor_bit));
+    } else {
+        const x = F.fromU64(@as(u64, c));
+        const y_msb = F.fromU64(@as(u64, b.popMsb()));
+        const xor_bit = F.one().sub(x).mul(y_msb).add(x.mul(F.one().sub(y_msb)));
+        const position = (j - XLEN) / 2;
+        var rotated_position = (position + rotation) % 32;
+        rotated_position = 32 - 1 - rotated_position;
+        result = result.add(F.fromU64(@as(u64, 1) << @intCast(rotated_position)).mul(xor_bit));
+    }
+
+    // Remaining x and y bits
+    const uninterleaved = b.uninterleave();
+    const x_32 = @as(u32, @truncate(uninterleaved.left));
+    const y_32 = @as(u32, @truncate(uninterleaved.right));
+    const xor_result = x_32 ^ y_32;
+
+    const shift_i: i32 = @as(i32, @intCast(suffix_len / 2)) - @as(i32, rotation);
+    const shift: u5 = if (shift_i >= 0)
+        @intCast(shift_i)
+    else
+        @intCast(@as(i32, 32) + shift_i);
+
+    const rotated = std.math.rotl(u32, xor_result, shift);
+    result = result.add(F.fromU64(@as(u64, rotated)));
+    return result;
+}
+
+fn xorRotWUpdateCheckpoint(
+    comptime F: type,
+    comptime rotation: u32,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: F,
+    r_y: F,
+    j: usize,
+    _: usize,
+) PrefixCheckpoint(F) {
+    if (j >= XLEN) {
+        const prefix_idx = switch (rotation) {
+            7 => Prefixes.XorRotW7,
+            8 => Prefixes.XorRotW8,
+            12 => Prefixes.XorRotW12,
+            16 => Prefixes.XorRotW16,
+            else => unreachable,
+        };
+        const original_pos = (j - XLEN) / 2;
+        const rotated_pos = (original_pos + rotation) % 32;
+        const shift = 32 - 1 - rotated_pos;
+        var updated = checkpoints[@intFromEnum(prefix_idx)] orelse F.zero();
+        updated = updated.add(F.fromU64(@as(u64, 1) << @intCast(shift)).mul(F.one().sub(r_x).mul(r_y).add(r_x.mul(F.one().sub(r_y)))));
+        return updated;
+    } else {
+        return F.zero();
+    }
+}
+
+// ============================================================================
+// Rev8W Prefix Implementation
+// ============================================================================
+
+/// Byte-reverse a 32-bit word
+fn rev8w(x: u64) u64 {
+    const masked = x & 0xFFFFFFFF;
+    return @as(u64, @byteSwap(@as(u32, @truncate(masked))));
+}
+
+fn rev8wPrefixMle(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: ?F,
+    c: u32,
+    b: *LookupBits(128),
+    j: usize,
+) F {
+    const suffix_len = LOG_K - j - b.len - 1;
+    // The prefix-suffix MLE is only defined on the 64 LSBs.
+    if (suffix_len >= 64) {
+        return F.zero();
+    }
+
+    var eval = checkpoints[@intFromEnum(Prefixes.Rev8W)] orelse F.zero();
+
+    // Add c contribution
+    const c_bit_index = suffix_len + b.len;
+    if (c_bit_index < 64) {
+        const shift = @ctz(rev8w(@as(u64, 1) << @intCast(c_bit_index)));
+        eval = eval.add(F.fromU128(@as(u128, c) << @intCast(shift)));
+    }
+
+    // Add r_x contribution
+    const r_x_bit_index = c_bit_index + 1;
+    if (r_x_bit_index < 64) {
+        if (r_x) |rx| {
+            const rev_pow2 = rev8w(@as(u64, 1) << @intCast(r_x_bit_index));
+            eval = eval.add(rx.mul(F.fromU64(rev_pow2)));
+        }
+    }
+
+    // Add b contribution
+    const b_contribution = rev8w(@as(u64, @truncate(b.value)) << @intCast(suffix_len));
+    eval = eval.add(F.fromU64(b_contribution));
+
+    return eval;
+}
+
+fn rev8wUpdateCheckpoint(
+    comptime F: type,
+    checkpoints: *const PrefixCheckpoints(F),
+    r_x: F,
+    r_y: F,
+    j: usize,
+    _: usize,
+) PrefixCheckpoint(F) {
+    var res = checkpoints[@intFromEnum(Prefixes.Rev8W)] orelse F.zero();
+
+    const r_y_bit_index = 2 * XLEN - 1 - j;
+    if (r_y_bit_index < 64) {
+        const rev_pow2 = rev8w(@as(u64, 1) << @intCast(r_y_bit_index));
+        res = res.add(r_y.mul(F.fromU64(rev_pow2)));
+    }
+
+    const r_x_bit_index = r_y_bit_index + 1;
+    if (r_x_bit_index < 64) {
+        const rev_pow2 = rev8w(@as(u64, 1) << @intCast(r_x_bit_index));
+        res = res.add(r_x.mul(F.fromU64(rev_pow2)));
+    }
+
+    return res;
 }
 
 // ============================================================================

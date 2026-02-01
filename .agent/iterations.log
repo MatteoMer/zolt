@@ -14551,3 +14551,12 @@ Tokens: 0 in / 0 out
 Error: Command failed with exit code -9 (exit code: -9)
 Error output: Check stderr output for details
 
+
+--- Iteration 5 ---
+Started: 2026-02-01T21:36:19.895245
+Ended: 2026-02-01T22:02:49.927873
+Turns: 79
+Cost: $5.3086
+Tokens: 0 in / 0 out
+Session ending: Ralph signaled SESSION_ENDING
+

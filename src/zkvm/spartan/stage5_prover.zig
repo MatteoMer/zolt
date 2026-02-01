@@ -1358,6 +1358,19 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             coeffs[0].toBytesBE()[24..32].*,
                             coeffs[1].toBytesBE()[24..32].*,
                         });
+                        std.debug.print("[STAGE5 POLY DEBUG] round={}\n", .{round});
+                        std.debug.print("  read_checking: [0]={any}, [1]={any}\n", .{ read_checking_evals[0].toBytesBE(), read_checking_evals[1].toBytesBE() });
+                        std.debug.print("  raf:           [0]={any}, [1]={any}\n", .{ raf_evals[0].toBytesBE(), raf_evals[1].toBytesBE() });
+                        std.debug.print("  combined_poly: [0]={any}\n", .{combined_poly[0].toBytesBE()});
+                        std.debug.print("                 [2]={any}\n", .{combined_poly[2].toBytesBE()});
+                        std.debug.print("  batch2:        {any}\n", .{batch2.toBytesBE()});
+                        std.debug.print("  eval_0_inst2:  {any}\n", .{eval_0_inst2.toBytesBE()});
+                        std.debug.print("  eval_2_inst2:  {any}\n", .{eval_2_inst2.toBytesBE()});
+                        std.debug.print("  current_batched_claim: {any}\n", .{current_batched_claim.toBytesBE()});
+                        std.debug.print("  Final coeffs:\n", .{});
+                        std.debug.print("    c0 (BE)={any}\n", .{coeffs[0].toBytesBE()});
+                        std.debug.print("    c2 (BE)={any}\n", .{coeffs[1].toBytesBE()});
+                        std.debug.print("    c3 (BE)={any}\n", .{coeffs[2].toBytesBE()});
                     }
 
                     try proof.compressed_polys.append(self.allocator, .{

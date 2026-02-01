@@ -1,107 +1,73 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: IN PROGRESS - Stage 5 Prefix-Suffix Debugging
+## Status: IN PROGRESS - Stage 5 Prefix MLE Implementations
 
-## Session 99 Progress
+## Session 99 Summary
 
-### Task: Debug prefix-suffix decomposition Stage 5 verification failure
+### Completed
 
-### Completed This Session
+1. **RafDecomposition infrastructure** (`prefix_suffix_prover.zig`):
+   - `RafDecomposition` struct with Q accumulators for shift/operand suffixes
+   - `initQRaf` for fused initialization of left/right/identity Q arrays
+   - `proverMsgRaf` computing γ*left + γ²*(identity + right) evaluations
+   - `uninterleaveBitsLeft/Right` helpers for operand extraction
 
-1. **Implemented RafDecomposition** (`prefix_suffix_prover.zig`):
-   - Created `RafDecomposition` struct with Q accumulators
-   - Implemented `initQRaf` for fused initialization of left/right/identity Q arrays
-   - Implemented `proverMsgRaf` computing γ*left + γ²*(identity + right) evaluations
-   - Added `uninterleaveBitsLeft/Right` helpers for operand extraction
+2. **Field support** (`field/mod.zig`):
+   - Added `fromU128` to BN254Scalar for 128-bit field element creation
 
-2. **Added fromU128 to BN254Scalar** (`field/mod.zig`):
-   - BN254Scalar now supports creating field elements from 128-bit values
-
-3. **Integrated prefix-suffix in stage5_prover.zig**:
-   - Initialize RAF decompositions for left/right/identity at phase 0
+3. **Stage 5 integration** (`stage5_prover.zig`):
+   - Initialize RAF decompositions at phase 0
    - Call `proverMsgReadChecking` + `proverMsgRaf` in address rounds
-   - Add `suffix_polys.bindAll` and RAF binding after each challenge
+   - Add `suffix_polys.bindAll` after each challenge
    - Add prefix checkpoint updates every 2 rounds
-   - Add phase transitions every 16 rounds with Q reinitialization
+   - Add phase transitions every 16 rounds
 
 ### Current Status
 
-- Stages 1-4: PASS
-- Stage 5: FAIL - Sumcheck verification failure
+- **Stages 1-4: PASS**
+- **Stage 5: FAIL** - Sumcheck verification mismatch
   - output_claim doesn't match expected_claim
-  - The prover runs through all 136 rounds but produces wrong final claim
+  - Root cause: Many prefix MLEs return F.zero() (placeholder)
 
-### What Needs Investigation
+### What Needs to Be Done Next
 
-1. **proverMsgReadChecking evaluation logic** - May have bugs in:
-   - How prefix MLEs are computed at c=0 and c=2
-   - How suffixes are combined with prefixes
-   - The quadratic interpolation formula
+The primary blocker is that `prefixMle` returns zero for most prefix types:
 
-2. **proverMsgRaf evaluation logic** - May have bugs in:
-   - How Q accumulators are structured
-   - The summation over half-indices
-   - The γ*left + γ²*(right + identity) combination
-
-3. **Phase transition handling**:
-   - When Q arrays are reinitialized
-   - How u_evals should be updated through expanding tables
-
-4. **Prefix MLE implementations in prefixes.zig**:
-   - Many prefixes return F.zero() placeholder
-   - Need full implementations matching Jolt
-
-### What Needs to Be Done
-
-The core issue is that stage5_prover.zig address rounds use bit-splitting instead of prefix-suffix:
-
-**Current (wrong):**
 ```zig
-for (0..T) |j| {
-    const bit = getBit128(lookups_indices_lo[j], lookups_indices_hi[j], bit_index);
-    const contrib = lookups_eq_evals[j].mul(lookups_ra_weights[j]).mul(lookups_combined_vals[j]);
-    if (bit == 0) p0 = p0.add(contrib);
-    else p1 = p1.add(contrib);
-}
-const eval_0 = p0;
-const eval_2 = p1.add(p1).sub(p0);
+// In prefixes.zig, line 163-164:
+// For prefixes not yet implemented, return zero
+else => F.zero(),
 ```
 
-**Required (Jolt approach):**
-```zig
-const read_checking = proverMsgReadChecking(F, round, &suffix_polys, &prefix_checkpoints, r_x);
-const raf = proverMsgRaf(F, round, &identity_ps, &left_ps, &right_ps, gamma, gamma_sqr);
-const eval_0 = read_checking[0].add(raf[0]);
-const eval_2 = read_checking[1].add(raf[1]);
+**Priority: Implement all 46 prefix MLEs matching Jolt:**
 
-// After round:
-suffix_polys.bindAll(challenge);
-if (round % 2 == 1) {
-    prefix_checkpoints.update(challenges[round-1], challenge, round, suffix_len);
-}
-// Phase transition every 16 rounds
-```
+1. **Already implemented** (need verification):
+   - `Eq` - eqPrefixMle
+   - `LowerWord` - lowerWordPrefixMle
+   - `UpperWord` - upperWordPrefixMle
+   - `And` - andPrefixMle
+   - `Or` - orPrefixMle
+   - `Xor` - xorPrefixMle
+   - `LessThan` - lessThanPrefixMle
+   - `LeftOperandIsZero` - leftIsZeroPrefixMle
+   - `RightOperandIsZero` - rightIsZeroPrefixMle
+   - `LeftOperandMsb` - leftMsbPrefixMle
+   - `RightOperandMsb` - rightMsbPrefixMle
 
-### Remaining Implementation
+2. **Need implementation** (35 prefixes):
+   - `Andn`, `LowerHalfWord`, `UpperHalfWord`
+   - `Sll`, `Srl`, `Sra` (shift operations)
+   - `DivRemainder` variants
+   - `LeftShiftHalf`, `RightShiftHalf`
+   - `XorRot` variants (rotation operations)
+   - `Lsb`, `LowerWordSra`, `UpperWordSrl`
+   - etc.
 
-1. **proverMsgRaf function** - Not yet implemented. Needs:
-   - Identity polynomial prefix-suffix decomposition
-   - Left/Right operand prefix-suffix decompositions
-   - Computation: `γ*left + γ²*(right + identity)` via prefix-suffix
+### Key Jolt References
 
-2. **Stage 5 integration** (stage5_prover.zig lines 1262-1362):
-   - Replace bit-splitting with proverMsgReadChecking + proverMsgRaf
-   - Add suffix_polys.bindAll(challenge) after each round
-   - Add prefix checkpoint updates every 2 rounds
-   - Add phase transitions every 16 rounds
-   - Keep cycle rounds (128-135) as-is (already correct)
-
-3. **Complete prefix MLE implementations** (prefixes.zig):
-   - Many prefixes return F.zero() placeholder
-   - Need full implementations matching Jolt
-
-4. **Complete tableCombine for tables 15-41**:
-   - Need to add proper formulas for all remaining tables
+- Prefix implementations: `/home/vivado/projects/jolt/jolt-core/src/zkvm/lookup_table/prefixes/*.rs`
+- Each prefix has `prefix_mle()` and `update_prefix_checkpoint()` methods
+- Prefixes are used in `prover_msg_read_checking()` at lines 999-1020
 
 ### Test Commands
 
@@ -117,19 +83,16 @@ cd /home/vivado/projects/jolt
 cargo test --package jolt-core --features zolt-debug test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
 
-### Current Verification Status
+### Current Verification Output
 
-- Stages 1-4: PASS
-- Stage 5: FAIL (polynomial degree mismatch - need prefix-suffix for correct evaluations)
-
-### Key Files
-
-- `src/zkvm/spartan/stage5_prover.zig` - Main prover needing integration
-- `src/zkvm/lookup_table/prefix_suffix_prover.zig` - proverMsgReadChecking, tableCombine
-- `src/zkvm/lookup_table/prefixes.zig` - Prefix MLE implementations
-- `src/zkvm/lookup_table/suffixes.zig` - Suffix MLE implementations
-- `src/zkvm/lookup_table/identity_poly.zig` - Identity/Operand polynomials
+```
+Sumcheck verification failed!
+  output_claim:   [eb, 1c, 1a, 7c, 50, c5, 1b, 64, ...]
+  expected_claim: [76, 19, 2f, 98, 45, 38, 7b, 09, ...]
+```
 
 ### Commits This Session
 
-- `d7d3f51` - feat: improve tableCombine with comprehensive table formulas
+- `1e105ff` - feat: add RafDecomposition and proverMsgRaf for prefix-suffix RAF computation
+- `1a84ddc` - feat: integrate prefix-suffix decomposition in stage5 address rounds
+- `dea2e7d` - docs: update TODO with Session 99 progress and debugging notes

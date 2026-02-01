@@ -45,8 +45,16 @@ pub fn LookupBits(comptime max_bits: usize) type {
             return @intCast(self.value);
         }
 
-        /// Uninterleave bits: split interleaved (x_0, y_0, x_1, y_1, ...) into (x, y)
-        /// where even indices are x bits and odd indices are y bits
+        /// Uninterleave bits: split interleaved operands into (left_operand, right_operand)
+        ///
+        /// In Jolt's interleave format, operands are stored as:
+        ///   interleaved = (left_operand << 1) | right_operand
+        /// So left operand bits are at ODD positions (1, 3, 5, ...)
+        /// and right operand bits are at EVEN positions (0, 2, 4, ...)
+        ///
+        /// This matches Jolt's uninterleave_bits() which returns (x, y) where:
+        ///   x = bits from ODD positions = left operand
+        ///   y = bits from EVEN positions = right operand
         pub fn uninterleave(self: *const Self) struct { left: u64, right: u64 } {
             var left: u64 = 0;
             var right: u64 = 0;
@@ -55,13 +63,13 @@ pub fn LookupBits(comptime max_bits: usize) type {
             var i: usize = 0;
             while (i < half_len) : (i += 1) {
                 const bit_pos = 2 * i;
-                // x bits are at even positions (0, 2, 4, ...)
-                const x_bit = (self.value >> @intCast(bit_pos)) & 1;
-                // y bits are at odd positions (1, 3, 5, ...)
-                const y_bit = (self.value >> @intCast(bit_pos + 1)) & 1;
+                // right operand bits are at even positions (0, 2, 4, ...)
+                const right_bit = (self.value >> @intCast(bit_pos)) & 1;
+                // left operand bits are at odd positions (1, 3, 5, ...)
+                const left_bit = (self.value >> @intCast(bit_pos + 1)) & 1;
 
-                left |= @as(u64, @truncate(x_bit)) << @intCast(i);
-                right |= @as(u64, @truncate(y_bit)) << @intCast(i);
+                left |= @as(u64, @truncate(left_bit)) << @intCast(i);
+                right |= @as(u64, @truncate(right_bit)) << @intCast(i);
             }
 
             return .{ .left = left, .right = right };
@@ -2668,13 +2676,14 @@ fn rev8wUpdateCheckpoint(
 // ============================================================================
 
 test "LookupBits uninterleave" {
-    // Test interleaving: (x0, y0, x1, y1) = (1, 0, 1, 1) = 0b1011 = 11
+    // Test Jolt-compatible uninterleave: left operand at ODD positions, right operand at EVEN positions
+    // Value 0b1011 = 11 has: bit0=1, bit1=1, bit2=0, bit3=1
+    // right operand (even positions 0,2): bits 1,0 -> 0b01 = 1
+    // left operand (odd positions 1,3): bits 1,1 -> 0b11 = 3
     var bits = LookupBits(128).new(0b1011, 4);
     const result = bits.uninterleave();
-    // x = x0 + 2*x1 = 1 + 2*1 = 3
-    // y = y0 + 2*y1 = 0 + 2*1 = 2
     try std.testing.expectEqual(@as(u64, 3), result.left);
-    try std.testing.expectEqual(@as(u64, 2), result.right);
+    try std.testing.expectEqual(@as(u64, 1), result.right);
 }
 
 test "EqPrefix basic" {

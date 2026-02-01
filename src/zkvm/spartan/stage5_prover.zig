@@ -30,6 +30,9 @@ const lookup_table_mod = @import("../lookup_table/mod.zig");
 const AllSuffixPolys = lookup_table_mod.AllSuffixPolys;
 const PrefixCheckpointsState = lookup_table_mod.PrefixCheckpointsState;
 const proverMsgReadChecking = lookup_table_mod.proverMsgReadChecking;
+const RafDecomposition = lookup_table_mod.RafDecomposition;
+const initQRaf = lookup_table_mod.initQRaf;
+const proverMsgRaf = lookup_table_mod.proverMsgRaf;
 const LookupBits = lookup_table_mod.LookupBits;
 
 /// Constants for Stage 5
@@ -1184,20 +1187,35 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             const num_phases: usize = 8;
             const log_m = LOOKUPS_LOG_K / num_phases; // = 16
             var current_phase: usize = 0;
+            const initial_m = @as(usize, 1) << @intCast(log_m); // 2^16 = 65536
 
-            // Initialize Q polynomials for phase 0
+            // Initialize Q polynomials for read-checking
             try suffix_polys.initPhase(0, num_phases, lookups_eq_evals, lookup_indices_u128, cycle_table_indices);
 
-            std.debug.print("[STAGE5 PREFIX-SUFFIX] Initialized phase 0, log_m={}, suffix_len={}\n", .{
+            // Initialize RAF (Read-Address-Flag) decompositions for left/right/identity
+            // These compute: γ*left + γ²*(identity + right)
+            var left_raf = try RafDecomposition(F).init(self.allocator, initial_m, log_m, LOOKUPS_LOG_K);
+            defer left_raf.deinit();
+            var right_raf = try RafDecomposition(F).init(self.allocator, initial_m, log_m, LOOKUPS_LOG_K);
+            defer right_raf.deinit();
+            var identity_raf = try RafDecomposition(F).init(self.allocator, initial_m, log_m, LOOKUPS_LOG_K);
+            defer identity_raf.deinit();
+
+            // Create is_interleaved_operands array (inverse of cycle_is_identity_path)
+            var is_interleaved_operands = try self.allocator.alloc(bool, T);
+            defer self.allocator.free(is_interleaved_operands);
+            for (0..T) |j| {
+                is_interleaved_operands[j] = !cycle_is_identity_path[j];
+            }
+
+            // Initialize RAF Q accumulators for phase 0
+            initQRaf(F, &left_raf, &right_raf, &identity_raf, lookups_eq_evals, lookup_indices_u128, is_interleaved_operands);
+
+            std.debug.print("[STAGE5 PREFIX-SUFFIX] Initialized phase 0, log_m={}, suffix_len={}, initial_m={}\n", .{
                 log_m,
                 LOOKUPS_LOG_K - log_m,
+                initial_m,
             });
-
-            // Will use suffix_polys, prefix_checkpoints, current_phase in address rounds
-            // Mark as used for now to allow incremental development
-            _ = &suffix_polys;
-            _ = &prefix_checkpoints;
-            _ = &current_phase;
 
             // Run the batched sumcheck
             for (0..max_num_rounds) |round| {
@@ -1260,32 +1278,23 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 // Last 8 rounds (cycle variables):
                 //   Standard sumcheck over the remaining cycle polynomial.
                 if (round < LOOKUPS_LOG_K) {
-                    // Address round: compute polynomial based on address bit
-                    // Use HighToLow binding order: round 0 -> bit 127 (MSB), round 127 -> bit 0 (LSB)
+                    // Address round: use Jolt's prefix-suffix decomposition
+                    // The polynomial is split into:
+                    //   - Read-checking: Σ_tables Σ_b table.combine(prefix(c,b), Q_suffix[b])
+                    //   - RAF: γ*left + γ²*(identity + right)
                     //
-                    // Jolt uses prefix-suffix decomposition which naturally produces degree-2 polynomials.
-                    // For compatibility, we compute eval_at_0 and eval_at_2 and use fromEvalsAndHint
-                    // to produce a degree-2 polynomial in Jolt's expected format.
-                    //
-                    // For a linear polynomial p(x) = p0 + x*(p1 - p0):
-                    //   eval_at_0 = p(0) = p0
-                    //   eval_at_2 = p(2) = 2*p1 - p0
-                    const bit_index = LOOKUPS_LOG_K - 1 - round;
-                    var p0 = F.zero();
-                    var p1 = F.zero();
-                    for (0..T) |j| {
-                        const bit = getBit128(lookups_indices_lo[j], lookups_indices_hi[j], bit_index);
-                        const contrib = lookups_eq_evals[j].mul(lookups_ra_weights[j]).mul(lookups_combined_vals[j]);
-                        if (bit == 0) {
-                            p0 = p0.add(contrib);
-                        } else {
-                            p1 = p1.add(contrib);
-                        }
-                    }
+                    // Jolt uses HighToLow binding: round 0 -> bit 127 (MSB), round 127 -> bit 0 (LSB)
 
-                    // Instance 2 evaluation points
-                    const eval_0_inst2 = p0;
-                    const eval_2_inst2 = p1.add(p1).sub(p0); // 2*p1 - p0
+                    // Compute read-checking contribution via prefix-suffix decomposition
+                    const read_checking_evals = proverMsgReadChecking(F, round, &suffix_polys, &prefix_checkpoints, null);
+
+                    // Compute RAF contribution via prefix-suffix decomposition
+                    // gamma_raf = γ, gamma_raf2 = γ²
+                    const raf_evals = proverMsgRaf(F, &left_raf, &right_raf, &identity_raf, gamma_raf, gamma_raf2);
+
+                    // Combined: read_checking + raf
+                    const eval_0_inst2 = read_checking_evals[0].add(raf_evals[0]);
+                    const eval_2_inst2 = read_checking_evals[1].add(raf_evals[1]);
 
                     // Combine Instance 2 with Instance 0 and 1 contributions
                     // Instance 0 and 1 are already in combined_poly[0..4] as Toom-Cook format
@@ -1338,8 +1347,42 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         });
                     }
 
-                    // Update lookups state for Instance 2
-                    // Address round: update ra_weights based on address bit
+                    // ===================================================================
+                    // Update prefix-suffix decomposition state after receiving challenge
+                    // ===================================================================
+
+                    // Bind challenge to all suffix polynomials
+                    suffix_polys.bindAll(challenge);
+
+                    // Bind challenge to RAF decompositions
+                    left_raf.bind(challenge);
+                    right_raf.bind(challenge);
+                    identity_raf.bind(challenge);
+
+                    // Update prefix checkpoints every 2 rounds (after binding X and Y)
+                    const round_in_phase = round % log_m;
+                    if (round_in_phase % 2 == 1) {
+                        // We just bound Y, update prefix checkpoints with (r_x, r_y)
+                        const r_x = challenges[round - 1];
+                        const r_y = challenge;
+                        const suffix_len = LOOKUPS_LOG_K - (current_phase + 1) * log_m;
+                        prefix_checkpoints.update(r_x, r_y, round, suffix_len);
+                    }
+
+                    // Check for phase transition (every log_m = 16 rounds)
+                    if ((round + 1) % log_m == 0 and round + 1 < LOOKUPS_LOG_K) {
+                        current_phase += 1;
+                        std.debug.print("[STAGE5] Phase transition to phase {}\n", .{current_phase});
+
+                        // Re-initialize suffix polys and RAF for new phase
+                        // The u_evals need to be updated with the expanding table weights
+                        // For now, just reinitialize with current eq_evals
+                        try suffix_polys.initPhase(current_phase, num_phases, lookups_eq_evals, lookup_indices_u128, cycle_table_indices);
+                        initQRaf(F, &left_raf, &right_raf, &identity_raf, lookups_eq_evals, lookup_indices_u128, is_interleaved_operands);
+                    }
+
+                    // Also update legacy ra_weights for cycle rounds (needed for the last 8 rounds)
+                    const bit_index = LOOKUPS_LOG_K - 1 - round;
                     const one_minus_r = F.one().sub(challenge);
                     const chunk_idx = round / lookups_ra_virtual_log_k_chunk;
 

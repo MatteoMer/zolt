@@ -167,6 +167,25 @@ pub fn MontgomeryField(
             return result;
         }
 
+        /// Create from u128 (converts to Montgomery form)
+        pub fn fromU128(n: u128) Self {
+            const low: u64 = @truncate(n);
+            const high: u64 = @truncate(n >> 64);
+
+            var result = fromU64(low);
+            if (high != 0) {
+                // Add high * 2^64 contribution
+                const high_fe = fromU64(high);
+                // Compute 2^64 using repeated squaring
+                var two_64 = fromU64(1);
+                for (0..64) |_| {
+                    two_64 = two_64.add(two_64);
+                }
+                result = result.add(high_fe.mul(two_64));
+            }
+            return result;
+        }
+
         /// Create from bytes (little-endian, converts to Montgomery form)
         pub fn fromBytes(bytes: []const u8) Self {
             var limbs: [4]u64 = .{ 0, 0, 0, 0 };
@@ -618,6 +637,25 @@ pub const BN254Scalar = struct {
         var result = Self{ .limbs = .{ n, 0, 0, 0 } };
         // Convert to Montgomery form by multiplying by R^2 and reducing
         result = result.montgomeryMul(.{ .limbs = BN254_R2 });
+        return result;
+    }
+
+    /// Create from u128 (converts to Montgomery form)
+    pub fn fromU128(n: u128) Self {
+        const low: u64 = @truncate(n);
+        const high: u64 = @truncate(n >> 64);
+
+        var result = fromU64(low);
+        if (high != 0) {
+            // Add high * 2^64 contribution
+            const high_fe = fromU64(high);
+            // Compute 2^64 using repeated squaring
+            var two_64 = fromU64(1);
+            for (0..64) |_| {
+                two_64 = two_64.add(two_64);
+            }
+            result = result.add(high_fe.mul(two_64));
+        }
         return result;
     }
 

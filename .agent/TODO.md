@@ -221,3 +221,21 @@ Where:
 - `suffix_len = LOG_K - phase * log_m` (varies by phase)
 - `log_m = LOG_K / phases` (typically phases=8, so log_m=16)
 - `u_eval[j] = eq(r_reduction, j)` (already computed as lookups_eq_evals)
+
+### Session 97 Final Status
+
+**Completed:**
+1. ✅ suffixes.zig - All 43 suffix types with suffix_mle implementations
+2. ✅ prefix_suffix_prover.zig - Q polynomial structures and proverMsgReadChecking
+3. ✅ Updated mod.zig with exports
+
+**Commits:**
+- `b8239f1` - feat: implement suffix MLE functions for prefix-suffix decomposition
+- `7cdfc90` - docs: update TODO with Session 97 progress
+- `222a5f4` - feat: implement prefix-suffix prover state and Q polynomial structures
+
+**Next Session:**
+1. Integrate AllSuffixPolys into Stage 5 generateStage5ProofWithTrace
+2. Replace address round bit-splitting with proverMsgReadChecking calls
+3. Add RAF contribution via identity/operand prefix-suffix decomposition
+4. Test end-to-end with Jolt verification

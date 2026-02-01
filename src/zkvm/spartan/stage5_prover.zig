@@ -1059,74 +1059,64 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     combined_poly[3] = combined_poly[3].add(batch2.mul(p_inf));
                 } else {
                     // Cycle rounds: actual sumcheck over eq_reduction * Π_c ra_chunk[c] * combined_vals
-                    // IMPORTANT: We must compute the product of 9 linear factors (8 ra_chunks + 1 combined_val).
                     //
                     // Jolt's approach (read_raf_checking.rs:720-774):
-                    // 1. Build pairs [(p_j(0), p_j(1))] for each factor:
-                    //    - combined_val: (eq_in * v_at_0, eq_in * v_at_1) -- eq absorbed into first factor
-                    //    - ra_chunks[i]: (ra[i].get_bound_coeff(2*j), ra[i].get_bound_coeff(2*j+1))
-                    // 2. Evaluate product at [1, 2, ..., 8, ∞] using eval_linear_prod_accumulate
+                    // 1. Build pairs [(p_j(0), p_j(1))] for 9 factors:
+                    //    - combined_val with eq_in absorbed: (eq[2j] * v[2j], eq[2j+1] * v[2j+1])
+                    //    - ra_chunks[i]: (ra[i][2j], ra[i][2j+1])
+                    // 2. Evaluate product at [1, 2, ..., 8, ∞] using eval_linear_prod
                     // 3. Use finish_mles_product_sum_from_evals to recover full degree-10 polynomial
+                    //    by multiplying by eq(X, r_round) where r_round = r_reduction[n-1-cycle_round]
                     //
-                    // The resulting polynomial has degree 10: 9 linear factors + eq(X, r_round).
                     const lookups_round = round - LOOKUPS_LOG_K;
                     const current_half_size = lookups_eq_evals.len >> @intCast(lookups_round + 1);
 
-                    // Accumulate sum over all j of: eq[j] * val[j] * Π_c ra_chunk[c][j]
-                    // We have 10 linear factors: 1 eq + 1 val + 8 ra_chunks = degree 10
-                    // Since we don't have the split-eq structure, we compute directly:
-                    var sum_evals: [10]F = [_]F{F.zero()} ** 10; // Evaluations at [1, 2, ..., 9, ∞]
+                    // Get r_round for this cycle variable (LowToHigh binding: last element first)
+                    const r_round = r_reduction[n_cycle_vars - 1 - lookups_round];
+
+                    // Accumulate sum of 9-factor products (eq absorbed into val)
+                    var sum_evals: [9]F = [_]F{F.zero()} ** 9; // Evaluations at [1, 2, ..., 8, ∞]
 
                     for (0..current_half_size) |j| {
-                        // Build the 10 linear polynomial pairs for this j
+                        // Build the 9 linear polynomial pairs for this j
                         // Each pair is (p(0), p(1)) for the linear polynomial
-                        var pairs: [10][2]F = undefined;
+                        var pairs: [9][2]F = undefined;
 
-                        // Factor 0: eq polynomial (linear in X)
-                        pairs[0][0] = lookups_eq_evals[2 * j];
-                        pairs[0][1] = lookups_eq_evals[2 * j + 1];
+                        // Factor 0: eq absorbed into combined_val
+                        // (eq[2j] * val[2j], eq[2j+1] * val[2j+1])
+                        const eq_0 = lookups_eq_evals[2 * j];
+                        const eq_1 = lookups_eq_evals[2 * j + 1];
+                        pairs[0][0] = eq_0.mul(lookups_combined_vals[2 * j]);
+                        pairs[0][1] = eq_1.mul(lookups_combined_vals[2 * j + 1]);
 
-                        // Factor 1: combined_val polynomial (linear in X)
-                        pairs[1][0] = lookups_combined_vals[2 * j];
-                        pairs[1][1] = lookups_combined_vals[2 * j + 1];
-
-                        // Factors 2-9: 8 ra_chunk polynomials (each linear in X)
+                        // Factors 1-8: 8 ra_chunk polynomials
                         for (0..ra_num_chunks) |c| {
-                            pairs[c + 2][0] = ra_chunk_weights[c][2 * j];
-                            pairs[c + 2][1] = ra_chunk_weights[c][2 * j + 1];
+                            pairs[c + 1][0] = ra_chunk_weights[c][2 * j];
+                            pairs[c + 1][1] = ra_chunk_weights[c][2 * j + 1];
                         }
 
-                        // Evaluate product at [1, 2, ..., 9, ∞]
-                        const prod_evals = UniPoly(F).evalLinearProd10(pairs);
+                        // Evaluate product at [1, 2, ..., 8, ∞]
+                        const prod_evals = UniPoly(F).evalLinearProd9(pairs);
 
                         // Accumulate into sum_evals
-                        for (0..10) |k| {
+                        for (0..9) |k| {
                             sum_evals[k] = sum_evals[k].add(prod_evals[k]);
                         }
                     }
 
                     // Get the current claim for this round
-                    // For cycle rounds, the claim is the current lookups_claim
                     const cycle_claim = lookups_claim;
 
-                    // We've computed sum_evals = [g(1), g(2), ..., g(9), g(∞)] where
-                    // g(X) = Σ_j eq_r[2j+X] * val[2j+X] * Π_i ra_i[2j+X]
-                    // This is a degree-10 polynomial (product of 10 linear factors).
-                    //
-                    // We need to recover g(0) from the sumcheck property: g(0) + g(1) = claim
-                    // Then interpolate the full polynomial from [g(0), g(1), ..., g(9), g(∞)]
-                    const eval_at_1 = sum_evals[0];
-                    const eval_at_0 = cycle_claim.sub(eval_at_1);
-
-                    // Build toom evaluations: [g(0), g(1), ..., g(9), g(∞)]
-                    var toom_evals: [11]F = undefined;
-                    toom_evals[0] = eval_at_0;
-                    for (0..10) |i| {
-                        toom_evals[i + 1] = sum_evals[i];
-                    }
-
-                    // Interpolate degree-10 polynomial from 11 points [0, 1, ..., 9, ∞]
-                    const full_coeffs = try UniPoly(F).fromEvalsToom(self.allocator, &toom_evals);
+                    // Use finish_mles_product_sum_from_evals to recover degree-10 polynomial
+                    // This: 1) recovers eval_at_0 using the claim and eq factor
+                    //       2) interpolates degree-9 quotient
+                    //       3) multiplies by eq(X, r_round) to get degree-10
+                    const full_coeffs = try UniPoly(F).finishMlesProductSumFromEvals(
+                        self.allocator,
+                        &sum_evals,
+                        cycle_claim,
+                        r_round,
+                    );
                     defer self.allocator.free(full_coeffs);
 
                     // Convert to compressed format (skip c1)
@@ -1134,9 +1124,6 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     defer self.allocator.free(lookups_compressed);
 
                     // Verify sumcheck property: p(0) + p(1) = claim
-                    // p(x) = c0 + c1*x + c2*x^2 + ... + c10*x^10
-                    // p(0) = c0
-                    // p(1) = c0 + c1 + c2 + ... + c10
                     var p_at_1 = F.zero();
                     for (full_coeffs) |c| {
                         p_at_1 = p_at_1.add(c);
@@ -1147,11 +1134,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                     // Debug: print polynomial info for all cycle rounds
                     std.debug.print("[STAGE5 CYCLE] Round {} (cycle var {}):\n", .{ round, lookups_round });
+                    std.debug.print("  r_round = {x}\n", .{r_round.toBytesBE()[24..32].*});
                     std.debug.print("  cycle_claim = {x}\n", .{cycle_claim.toBytesBE()[24..32].*});
                     std.debug.print("  p(0) = {x}\n", .{p_at_0.toBytesBE()[24..32].*});
                     std.debug.print("  p(1) = {x}\n", .{p_at_1.toBytesBE()[24..32].*});
                     std.debug.print("  p(0)+p(1) = {x}, matches_claim = {}\n", .{ sum_check.toBytesBE()[24..32].*, sumcheck_ok });
-                    std.debug.print("  full_coeffs len = {}, lookups_compressed len = {}\n", .{ full_coeffs.len, lookups_compressed.len });
+                    std.debug.print("  full_coeffs len = {}\n", .{full_coeffs.len});
 
                     // For the batched sumcheck, we need to add Instance 2's polynomial to the combined polynomial
                     // The combined polynomial format depends on whether we're in a cycle round

@@ -4,41 +4,39 @@
 
 ## Current Session Progress (Session 88)
 
-### What's Working
-- ✅ Stage 5 cycle rounds (128-135) produce degree-10 polynomials
-- ✅ `evalLinearProd10` correctly evaluates product of 10 linear factors at [1, 2, ..., 9, ∞]
-- ✅ `fromEvalsToom` correctly interpolates from Toom-Cook evaluations
-- ✅ Sumcheck property `p(0) + p(1) = claim` holds for all cycle rounds
-- ✅ Initial batched_claim for Stage 5 matches between Zolt and Jolt verifier
+### Latest Changes
+- Implemented `finishMlesProductSumFromEvals` approach matching Jolt's structure:
+  1. Absorb eq into val: `pairs[0] = (eq[2j] * val[2j], eq[2j+1] * val[2j+1])`
+  2. Compute product of 9 factors (absorbed_val + 8 ra_chunks)
+  3. Use `finishMlesProductSumFromEvals` with `r_round = r_reduction[n_cycle_vars - 1 - lookups_round]`
+- Added `evalLinearProd10` (used previously) and `evalLinearProd9` functions
+- Sumcheck property `p(0) + p(1) = claim` still holds for all cycle rounds
 
-### What's Not Working
-- ❌ Final output_claim doesn't match expected_claim after all 136 rounds
-- Output claim: `[db, d3, 94, 5e, a2, ae, d7, 0d, ...]`
-- Expected claim: `[2a, f2, 1c, 73, 3c, 5a, b3, 61, ...]`
+### Current Status
+- ❌ Stage 5 verification still fails
+- The polynomial is internally consistent but doesn't match what Jolt verifier expects
+- The challenges produced during cycle rounds are different between Zolt and Jolt,
+  suggesting the polynomial coefficients being committed are different
 
 ### Key Observations
-1. Rounds 134 and 135 have `p(1) = 0`, meaning all evaluated products at X=1 are zero
-2. This might be correct (T=256 = 2^8, so after 6 rounds, we have only 4 cycles left, after 7 rounds only 2 cycles left)
-3. The sumcheck property still holds, so the polynomial computation is internally consistent
+1. Zolt's r_reduction values don't seem to match Jolt's params.r_cycle
+   - Zolt: r_reduction[0] = 0x5543d98110dbbfda
+   - Jolt: params.r_cycle values are different
+2. The transcript state diverges at cycle rounds, causing different challenges
+3. The final output_claim from sumcheck doesn't match expected_claim
 
-### Possible Issues to Investigate
-1. **Split-Eq vs Direct Eq**: My approach uses 10 linear factors directly (eq + val + 8 ra). Jolt uses:
-   - 9 linear factors (e_in absorbed into val + 8 ra)
-   - Then multiplies by e_out, current_scalar
-   - Then `finish_mles_product_sum_from_evals` adds eq(X, r_round) factor
+### Debug Output
+Zolt cycle rounds show:
+- r_round values are being used from r_reduction
+- Sumcheck property holds: p(0) + p(1) = claim is true for all rounds
+- But Jolt verifier shows different challenges for the same rounds
 
-2. **r_round Indexing**: For cycle rounds, Jolt uses:
-   - r_round = r_reduction[current_index - 1] (LowToHigh)
-   - For cycle round 0: r_round = r_reduction[7]
-   - For cycle round 7: r_round = r_reduction[0]
-
-3. **Variable Binding Order**: The eq polynomial uses BIG_ENDIAN (MSB first):
-   - Bit 0 (LSB) of cycle index corresponds to r_reduction[7]
-   - Bit 7 (MSB) of cycle index corresponds to r_reduction[0]
-
-### Implementation Files
-- `/home/vivado/projects/zolt/src/zkvm/spartan/stage5_prover.zig` - Cycle round computation (lines 1060-1250)
-- `/home/vivado/projects/zolt/src/poly/mod.zig` - Added `evalLinearProd10`, `fromEvalsToom`, `toCompressed`
+### Files Changed
+- `/home/vivado/projects/zolt/src/zkvm/spartan/stage5_prover.zig`
+  - Cycle round computation now uses finishMlesProductSumFromEvals
+  - Absorbs eq into val before computing product
+- `/home/vivado/projects/zolt/src/poly/mod.zig`
+  - Added evalLinearProd10, evalLinearProd9, fromEvalsToom, finishMlesProductSumFromEvals, toCompressed
 
 ### Test Commands
 ```bash
@@ -54,13 +52,9 @@ cargo test --package jolt-core --features zolt-debug test_verify_zolt_proof_with
 ```
 
 ### Next Steps for Future Session
-1. Add debug output comparing individual cycle round polynomials between Zolt and Jolt prover
-2. Check if the expected_claim computation in Jolt verifier matches the sumcheck output
-3. Consider implementing `finishMlesProductSumFromEvals` approach instead of direct 10-factor product
-4. Verify the batch coefficient handling for Instance 2 during cycle rounds
+1. Compare Zolt's r_reduction with Jolt's params.r_cycle - they should match
+2. Check if Stage 3's InstructionClaimReduction is producing correct r_reduction
+3. Trace the transcript state to find where divergence begins
+4. The polynomial coefficients should be compared directly between Zolt prover and Jolt prover
 
-## Previous Session Work (Session 87)
-- ✅ Per-chunk ra_weights tracking during address rounds
-- ✅ Proper cycle round binding: bind chunks separately, compute product after binding
-- ✅ ra_product == lookups_ra_weights[0] after all binding (invariant now holds)
-- ✅ Proper table_flags and raf_flag computation from eq(r_cycle', j) sums
+SESSION_ENDING - Context running low, key findings documented above.

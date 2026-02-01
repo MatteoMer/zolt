@@ -450,24 +450,93 @@ fn xorRotWSuffixMle(b: LookupBits(128), comptime rotation: u5) u64 {
 
 /// Define which suffixes each lookup table uses
 /// Returns an array of suffixes for the given table index
+///
+/// Reference: jolt-core/src/zkvm/lookup_table/*.rs - each table's suffixes() method
 pub fn tableSuffixes(table_idx: usize) []const Suffixes {
     return switch (table_idx) {
-        0 => &[_]Suffixes{ .One, .LowerWord }, // RangeCheck
-        1 => &[_]Suffixes{ .One, .LowerWord }, // RangeCheckAligned
-        2 => &[_]Suffixes{ .One, .And }, // And
-        3 => &[_]Suffixes{ .One, .NotAnd }, // Andn
-        4 => &[_]Suffixes{ .One, .Or }, // Or
-        5 => &[_]Suffixes{ .One, .Xor }, // Xor
-        6 => &[_]Suffixes{ .One, .Eq }, // Equal
-        7 => &[_]Suffixes{ .One, .LessThan }, // SignedGreaterThanEqual
-        8 => &[_]Suffixes{ .One, .LessThan }, // UnsignedGreaterThanEqual
-        9 => &[_]Suffixes{ .One, .Eq }, // NotEqual
-        10 => &[_]Suffixes{ .One, .LessThan }, // SignedLessThan
-        11 => &[_]Suffixes{ .One, .LessThan }, // UnsignedLessThan
-        12 => &[_]Suffixes{ .One, .RightOperand }, // Movsign
-        13 => &[_]Suffixes{ .One, .UpperWord }, // UpperWord
-        14 => &[_]Suffixes{ .One, .LessThan }, // LessThanEqual
-        // For tables not yet mapped, return just One
+        // 0: RangeCheck
+        0 => &[_]Suffixes{ .One, .LowerWord },
+        // 1: RangeCheckAligned
+        1 => &[_]Suffixes{ .One, .LowerWord, .Lsb },
+        // 2: And
+        2 => &[_]Suffixes{ .One, .And },
+        // 3: Andn
+        3 => &[_]Suffixes{ .One, .NotAnd },
+        // 4: Or
+        4 => &[_]Suffixes{ .One, .Or },
+        // 5: Xor
+        5 => &[_]Suffixes{ .One, .Xor },
+        // 6: Equal
+        6 => &[_]Suffixes{.Eq},
+        // 7: SignedGreaterThanEqual
+        7 => &[_]Suffixes{ .One, .LessThan },
+        // 8: UnsignedGreaterThanEqual
+        8 => &[_]Suffixes{ .One, .LessThan },
+        // 9: NotEqual
+        9 => &[_]Suffixes{ .One, .Eq },
+        // 10: SignedLessThan
+        10 => &[_]Suffixes{ .One, .LessThan },
+        // 11: UnsignedLessThan
+        11 => &[_]Suffixes{ .One, .LessThan },
+        // 12: Movsign
+        12 => &[_]Suffixes{.One},
+        // 13: UpperWord
+        13 => &[_]Suffixes{ .One, .UpperWord },
+        // 14: LessThanEqual (UnsignedLessThanEqual)
+        14 => &[_]Suffixes{ .One, .LessThan, .Eq },
+        // 15: ValidSignedRemainder
+        15 => &[_]Suffixes{ .One, .RightOperandIsZero, .LessThan, .LeftOperandIsZero, .GreaterThan },
+        // 16: ValidUnsignedRemainder
+        16 => &[_]Suffixes{ .One, .RightOperandIsZero, .LessThan },
+        // 17: ValidDiv0
+        17 => &[_]Suffixes{ .One, .LeftOperandIsZero, .DivByZero },
+        // 18: HalfwordAlignment
+        18 => &[_]Suffixes{ .One, .Lsb },
+        // 19: WordAlignment
+        19 => &[_]Suffixes{.TwoLsb},
+        // 20: LowerHalfWord
+        20 => &[_]Suffixes{ .One, .LowerHalfWord },
+        // 21: SignExtendHalfWord
+        21 => &[_]Suffixes{ .One, .LowerHalfWord, .SignExtensionUpperHalf },
+        // 22: Pow2
+        22 => &[_]Suffixes{.Pow2},
+        // 23: Pow2W
+        23 => &[_]Suffixes{.Pow2W},
+        // 24: ShiftRightBitmask
+        24 => &[_]Suffixes{ .One, .Pow2 },
+        // 25: VirtualRev8W
+        25 => &[_]Suffixes{ .One, .Rev8W },
+        // 26: VirtualSRL
+        26 => &[_]Suffixes{ .RightShiftHelper, .RightShift },
+        // 27: VirtualSRA
+        27 => &[_]Suffixes{ .RightShiftHelper, .RightShift, .SignExtension, .One },
+        // 28: VirtualROTR
+        28 => &[_]Suffixes{ .RightShiftHelper, .RightShift, .LeftShift, .One },
+        // 29: VirtualROTRW
+        29 => &[_]Suffixes{ .RightShiftWHelper, .RightShiftW, .LeftShiftW, .One },
+        // 30: VirtualChangeDivisor
+        30 => &[_]Suffixes{ .One, .RightOperand, .ChangeDivisor },
+        // 31: VirtualChangeDivisorW
+        31 => &[_]Suffixes{ .One, .RightOperandW, .ChangeDivisorW, .SignExtensionRightOperand },
+        // 32: MulUNoOverflow
+        32 => &[_]Suffixes{.OverflowBitsZero},
+        // 33: VirtualXORROT32
+        33 => &[_]Suffixes{ .One, .XorRot32 },
+        // 34: VirtualXORROT24
+        34 => &[_]Suffixes{ .One, .XorRot24 },
+        // 35: VirtualXORROT16
+        35 => &[_]Suffixes{ .One, .XorRot16 },
+        // 36: VirtualXORROT63
+        36 => &[_]Suffixes{ .One, .XorRot63 },
+        // 37: VirtualXORROTW16
+        37 => &[_]Suffixes{ .One, .XorRotW16 },
+        // 38: VirtualXORROTW12
+        38 => &[_]Suffixes{ .One, .XorRotW12 },
+        // 39: VirtualXORROTW8
+        39 => &[_]Suffixes{ .One, .XorRotW8 },
+        // 40: VirtualXORROTW7
+        40 => &[_]Suffixes{ .One, .XorRotW7 },
+        // Fallback
         else => &[_]Suffixes{.One},
     };
 }

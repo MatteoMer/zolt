@@ -390,24 +390,368 @@ fn tableCombine(comptime F: type, table_idx: usize, prefixes: []const F, suffixe
             }
             break :blk result;
         },
-        // 15-41: Other tables - use simplified patterns for now
-        // Most follow pattern: prefix[Type] * one + suffix_result
-        15...41 => blk: {
-            if (suffixes.len == 0) break :blk F.zero();
-            if (suffixes.len == 1) break :blk suffixes[0];
-            // Default pattern: sum of all suffixes
-            var result = suffixes[0];
-            for (suffixes[1..]) |s| {
-                result = result.add(s);
+        // 15: ValidSignedRemainder:
+        // RightOperandIsZero*right_is_zero + PositiveRemainderEqualsDivisor*less_than
+        // + PositiveRemainderLessThanDivisor*one + NegativeDivisorZeroRemainder*left_is_zero
+        // + NegativeDivisorEqualsRemainder*greater_than + NegativeDivisorGreaterThanRemainder*one
+        15 => blk: {
+            // Suffixes: [one, right_operand_is_zero, less_than, left_operand_is_zero, greater_than]
+            var result = F.zero();
+            if (suffixes.len >= 1) {
+                // PositiveRemainderLessThanDivisor*one + NegativeDivisorGreaterThanRemainder*one
+                result = result.add(prefixes[@intFromEnum(Prefixes.PositiveRemainderLessThanDivisor)].mul(suffixes[0]));
+                result = result.add(prefixes[@intFromEnum(Prefixes.NegativeDivisorGreaterThanRemainder)].mul(suffixes[0]));
+            }
+            if (suffixes.len >= 2) {
+                result = result.add(prefixes[@intFromEnum(Prefixes.RightOperandIsZero)].mul(suffixes[1]));
+            }
+            if (suffixes.len >= 3) {
+                result = result.add(prefixes[@intFromEnum(Prefixes.PositiveRemainderEqualsDivisor)].mul(suffixes[2]));
+            }
+            if (suffixes.len >= 4) {
+                result = result.add(prefixes[@intFromEnum(Prefixes.NegativeDivisorZeroRemainder)].mul(suffixes[3]));
+            }
+            if (suffixes.len >= 5) {
+                result = result.add(prefixes[@intFromEnum(Prefixes.NegativeDivisorEqualsRemainder)].mul(suffixes[4]));
             }
             break :blk result;
         },
+        // 16: ValidUnsignedRemainder: RightOperandIsZero*right_is_zero + LessThan*one + Eq*less_than
+        16 => blk: {
+            // Suffixes: [one, right_operand_is_zero, less_than]
+            var result = F.zero();
+            if (suffixes.len >= 1) {
+                result = result.add(prefixes[@intFromEnum(Prefixes.LessThan)].mul(suffixes[0]));
+            }
+            if (suffixes.len >= 2) {
+                result = result.add(prefixes[@intFromEnum(Prefixes.RightOperandIsZero)].mul(suffixes[1]));
+            }
+            if (suffixes.len >= 3) {
+                result = result.add(prefixes[@intFromEnum(Prefixes.Eq)].mul(suffixes[2]));
+            }
+            break :blk result;
+        },
+        // 17: ValidDiv0: one - LeftOperandIsZero*left_is_zero + DivByZero*div_by_zero
+        17 => blk: {
+            // Suffixes: [one, left_operand_is_zero, div_by_zero]
+            var result = F.zero();
+            if (suffixes.len >= 1) {
+                result = result.add(suffixes[0]); // one
+            }
+            if (suffixes.len >= 2) {
+                result = result.sub(prefixes[@intFromEnum(Prefixes.LeftOperandIsZero)].mul(suffixes[1]));
+            }
+            if (suffixes.len >= 3) {
+                result = result.add(prefixes[@intFromEnum(Prefixes.DivByZero)].mul(suffixes[2]));
+            }
+            break :blk result;
+        },
+        // 18: HalfwordAlignment: one - Lsb*lsb
+        18 => blk: {
+            // Suffixes: [one, lsb]
+            var result = F.zero();
+            if (suffixes.len >= 1) {
+                result = result.add(suffixes[0]); // one
+            }
+            if (suffixes.len >= 2) {
+                result = result.sub(prefixes[@intFromEnum(Prefixes.Lsb)].mul(suffixes[1]));
+            }
+            break :blk result;
+        },
+        // 19: WordAlignment: TwoLsb*two_lsb
+        19 => blk: {
+            // Suffixes: [two_lsb]
+            if (suffixes.len >= 1) {
+                break :blk prefixes[@intFromEnum(Prefixes.TwoLsb)].mul(suffixes[0]);
+            }
+            break :blk F.zero();
+        },
+        // 20: LowerHalfWord: LowerHalfWord*one + lower_half_word
+        20 => blk: {
+            // Suffixes: [one, lower_half_word]
+            var result = F.zero();
+            if (suffixes.len >= 1) {
+                result = prefixes[@intFromEnum(Prefixes.LowerHalfWord)].mul(suffixes[0]);
+            }
+            if (suffixes.len >= 2) {
+                result = result.add(suffixes[1]);
+            }
+            break :blk result;
+        },
+        // 21: SignExtendHalfWord: LowerHalfWord*one + lower_half_word + SignExtensionUpperHalf*sign_ext
+        21 => blk: {
+            // Suffixes: [one, lower_half_word, sign_extension_upper_half]
+            var result = F.zero();
+            if (suffixes.len >= 1) {
+                result = prefixes[@intFromEnum(Prefixes.LowerHalfWord)].mul(suffixes[0]);
+            }
+            if (suffixes.len >= 2) {
+                result = result.add(suffixes[1]);
+            }
+            if (suffixes.len >= 3) {
+                result = result.add(prefixes[@intFromEnum(Prefixes.SignExtensionUpperHalf)].mul(suffixes[2]));
+            }
+            break :blk result;
+        },
+        // 22: Pow2: Pow2*pow2
+        22 => blk: {
+            // Suffixes: [pow2]
+            if (suffixes.len >= 1) {
+                break :blk prefixes[@intFromEnum(Prefixes.Pow2)].mul(suffixes[0]);
+            }
+            break :blk F.zero();
+        },
+        // 23: Pow2W: Pow2W*pow2w
+        23 => blk: {
+            // Suffixes: [pow2w]
+            if (suffixes.len >= 1) {
+                break :blk prefixes[@intFromEnum(Prefixes.Pow2W)].mul(suffixes[0]);
+            }
+            break :blk F.zero();
+        },
+        // 24: ShiftRightBitmask: 2^XLEN * one - Pow2*pow2
+        24 => blk: {
+            // Suffixes: [one, pow2]
+            const two_pow_xlen = F.fromU64(1).add(F.fromU64(0xFFFFFFFF_FFFFFFFF)); // 2^64
+            var result = F.zero();
+            if (suffixes.len >= 1) {
+                result = two_pow_xlen.mul(suffixes[0]);
+            }
+            if (suffixes.len >= 2) {
+                result = result.sub(prefixes[@intFromEnum(Prefixes.Pow2)].mul(suffixes[1]));
+            }
+            break :blk result;
+        },
+        // 25: VirtualRev8W: Rev8W*one + rev8w
+        25 => blk: {
+            // Suffixes: [one, rev8w]
+            var result = F.zero();
+            if (suffixes.len >= 1) {
+                result = prefixes[@intFromEnum(Prefixes.Rev8W)].mul(suffixes[0]);
+            }
+            if (suffixes.len >= 2) {
+                result = result.add(suffixes[1]);
+            }
+            break :blk result;
+        },
+        // 26: VirtualSRL: RightShift*right_shift_helper + right_shift
+        26 => blk: {
+            // Suffixes: [right_shift_helper, right_shift]
+            var result = F.zero();
+            if (suffixes.len >= 1) {
+                result = prefixes[@intFromEnum(Prefixes.RightShift)].mul(suffixes[0]);
+            }
+            if (suffixes.len >= 2) {
+                result = result.add(suffixes[1]);
+            }
+            break :blk result;
+        },
+        // 27: VirtualSRA: RightShift*helper + right_shift + LeftOperandMsb*sign_ext + SignExtension*one
+        27 => blk: {
+            // Suffixes: [right_shift_helper, right_shift, sign_extension, one]
+            var result = F.zero();
+            if (suffixes.len >= 1) {
+                result = prefixes[@intFromEnum(Prefixes.RightShift)].mul(suffixes[0]);
+            }
+            if (suffixes.len >= 2) {
+                result = result.add(suffixes[1]);
+            }
+            if (suffixes.len >= 3) {
+                result = result.add(prefixes[@intFromEnum(Prefixes.LeftOperandMsb)].mul(suffixes[2]));
+            }
+            if (suffixes.len >= 4) {
+                result = result.add(prefixes[@intFromEnum(Prefixes.SignExtension)].mul(suffixes[3]));
+            }
+            break :blk result;
+        },
+        // 28: VirtualROTR: RightShift*helper + right_shift + LeftShiftHelper*left_shift + LeftShift*one
+        28 => blk: {
+            // Suffixes: [right_shift_helper, right_shift, left_shift, one]
+            var result = F.zero();
+            if (suffixes.len >= 1) {
+                result = prefixes[@intFromEnum(Prefixes.RightShift)].mul(suffixes[0]);
+            }
+            if (suffixes.len >= 2) {
+                result = result.add(suffixes[1]);
+            }
+            if (suffixes.len >= 3) {
+                result = result.add(prefixes[@intFromEnum(Prefixes.LeftShiftHelper)].mul(suffixes[2]));
+            }
+            if (suffixes.len >= 4) {
+                result = result.add(prefixes[@intFromEnum(Prefixes.LeftShift)].mul(suffixes[3]));
+            }
+            break :blk result;
+        },
+        // 29: VirtualROTRW: RightShiftW*helper + right_shift_w + LeftShiftWHelper*left_shift_w + LeftShiftW*one
+        29 => blk: {
+            // Suffixes: [right_shift_w_helper, right_shift_w, left_shift_w, one]
+            var result = F.zero();
+            if (suffixes.len >= 1) {
+                result = prefixes[@intFromEnum(Prefixes.RightShiftW)].mul(suffixes[0]);
+            }
+            if (suffixes.len >= 2) {
+                result = result.add(suffixes[1]);
+            }
+            if (suffixes.len >= 3) {
+                result = result.add(prefixes[@intFromEnum(Prefixes.LeftShiftWHelper)].mul(suffixes[2]));
+            }
+            if (suffixes.len >= 4) {
+                result = result.add(prefixes[@intFromEnum(Prefixes.LeftShiftW)].mul(suffixes[3]));
+            }
+            break :blk result;
+        },
+        // 30: VirtualChangeDivisor: RightOperand*one + right_operand + ChangeDivisor*change_divisor
+        30 => blk: {
+            // Suffixes: [one, right_operand, change_divisor]
+            var result = F.zero();
+            if (suffixes.len >= 1) {
+                result = prefixes[@intFromEnum(Prefixes.RightOperand)].mul(suffixes[0]);
+            }
+            if (suffixes.len >= 2) {
+                result = result.add(suffixes[1]);
+            }
+            if (suffixes.len >= 3) {
+                result = result.add(prefixes[@intFromEnum(Prefixes.ChangeDivisor)].mul(suffixes[2]));
+            }
+            break :blk result;
+        },
+        // 31: VirtualChangeDivisorW: RightOperandW*one + right_op_w + ChangeDivisorW*change + SignExtRightOp*sign_ext
+        31 => blk: {
+            // Suffixes: [one, right_operand_w, change_divisor_w, sign_extension]
+            var result = F.zero();
+            if (suffixes.len >= 1) {
+                result = prefixes[@intFromEnum(Prefixes.RightOperandW)].mul(suffixes[0]);
+            }
+            if (suffixes.len >= 2) {
+                result = result.add(suffixes[1]);
+            }
+            if (suffixes.len >= 3) {
+                result = result.add(prefixes[@intFromEnum(Prefixes.ChangeDivisorW)].mul(suffixes[2]));
+            }
+            if (suffixes.len >= 4) {
+                result = result.add(prefixes[@intFromEnum(Prefixes.SignExtensionRightOperand)].mul(suffixes[3]));
+            }
+            break :blk result;
+        },
+        // 32: MulUNoOverflow: OverflowBitsZero*overflow_bits_zero
+        32 => blk: {
+            // Suffixes: [overflow_bits_zero]
+            if (suffixes.len >= 1) {
+                break :blk prefixes[@intFromEnum(Prefixes.OverflowBitsZero)].mul(suffixes[0]);
+            }
+            break :blk F.zero();
+        },
+        // 33: VirtualXORROT32: XorRot32*one + xor_rot
+        33 => blk: {
+            // Suffixes: [one, xor_rot]
+            var result = F.zero();
+            if (suffixes.len >= 1) {
+                result = prefixes[@intFromEnum(Prefixes.XorRot32)].mul(suffixes[0]);
+            }
+            if (suffixes.len >= 2) {
+                result = result.add(suffixes[1]);
+            }
+            break :blk result;
+        },
+        // 34: VirtualXORROT24: XorRot24*one + xor_rot
+        34 => blk: {
+            var result = F.zero();
+            if (suffixes.len >= 1) {
+                result = prefixes[@intFromEnum(Prefixes.XorRot24)].mul(suffixes[0]);
+            }
+            if (suffixes.len >= 2) {
+                result = result.add(suffixes[1]);
+            }
+            break :blk result;
+        },
+        // 35: VirtualXORROT16: XorRot16*one + xor_rot
+        35 => blk: {
+            var result = F.zero();
+            if (suffixes.len >= 1) {
+                result = prefixes[@intFromEnum(Prefixes.XorRot16)].mul(suffixes[0]);
+            }
+            if (suffixes.len >= 2) {
+                result = result.add(suffixes[1]);
+            }
+            break :blk result;
+        },
+        // 36: VirtualXORROT63: XorRot63*one + xor_rot
+        36 => blk: {
+            var result = F.zero();
+            if (suffixes.len >= 1) {
+                result = prefixes[@intFromEnum(Prefixes.XorRot63)].mul(suffixes[0]);
+            }
+            if (suffixes.len >= 2) {
+                result = result.add(suffixes[1]);
+            }
+            break :blk result;
+        },
+        // 37: VirtualXORROTW16: XorRotW16*one + xor_rot
+        37 => blk: {
+            var result = F.zero();
+            if (suffixes.len >= 1) {
+                result = prefixes[@intFromEnum(Prefixes.XorRotW16)].mul(suffixes[0]);
+            }
+            if (suffixes.len >= 2) {
+                result = result.add(suffixes[1]);
+            }
+            break :blk result;
+        },
+        // 38: VirtualXORROTW12: XorRotW12*one + xor_rot
+        38 => blk: {
+            var result = F.zero();
+            if (suffixes.len >= 1) {
+                result = prefixes[@intFromEnum(Prefixes.XorRotW12)].mul(suffixes[0]);
+            }
+            if (suffixes.len >= 2) {
+                result = result.add(suffixes[1]);
+            }
+            break :blk result;
+        },
+        // 39: VirtualXORROTW8: XorRotW8*one + xor_rot
+        39 => blk: {
+            var result = F.zero();
+            if (suffixes.len >= 1) {
+                result = prefixes[@intFromEnum(Prefixes.XorRotW8)].mul(suffixes[0]);
+            }
+            if (suffixes.len >= 2) {
+                result = result.add(suffixes[1]);
+            }
+            break :blk result;
+        },
+        // 40: VirtualXORROTW7: XorRotW7*one + xor_rot
+        40 => blk: {
+            var result = F.zero();
+            if (suffixes.len >= 1) {
+                result = prefixes[@intFromEnum(Prefixes.XorRotW7)].mul(suffixes[0]);
+            }
+            if (suffixes.len >= 2) {
+                result = result.add(suffixes[1]);
+            }
+            break :blk result;
+        },
+        // Fallback for any undefined tables
         else => F.zero(),
     };
 }
 
 /// RAF (Read-Address-Flag) Decomposition State
+/// RAF Polynomial Type - determines binding behavior
+pub const RafPolyType = enum {
+    LeftOperand,
+    RightOperand,
+    Identity,
+};
+
 /// This handles the identity/operand polynomial decomposition for RAF sumcheck
+/// Tracks bound_value for proper prefix polynomial evaluation.
+///
+/// For OperandPolynomial:
+/// - Left binds on even rounds (0, 2, 4, ...): bound_value = 2*bound_value + r
+/// - Right binds on odd rounds (1, 3, 5, ...): bound_value = 2*bound_value + r
+///
+/// For IdentityPolynomial:
+/// - Always binds: bound_value = 2*bound_value + r
 pub fn RafDecomposition(comptime F: type) type {
     return struct {
         const Self = @This();
@@ -422,14 +766,18 @@ pub fn RafDecomposition(comptime F: type) type {
         chunk_len: usize,
         /// Current phase (0..phases)
         phase: usize,
-        /// Current round within phase
+        /// Current round (global, 0..LOG_K)
         round: usize,
-        /// Bound prefix value (accumulated from challenges)
-        bound_prefix: F,
+        /// Number of bound variables
+        num_bound_vars: usize,
+        /// Bound value (accumulated from challenges)
+        bound_value: F,
+        /// Type of RAF polynomial (determines binding behavior)
+        poly_type: RafPolyType,
         /// Allocator
         allocator: Allocator,
 
-        pub fn init(allocator: Allocator, initial_size: usize, chunk_len: usize, total_len: usize) !Self {
+        pub fn init(allocator: Allocator, initial_size: usize, chunk_len: usize, total_len: usize, poly_type: RafPolyType) !Self {
             var Q: [2][]F = undefined;
             Q[0] = try allocator.alloc(F, initial_size);
             Q[1] = try allocator.alloc(F, initial_size);
@@ -442,7 +790,9 @@ pub fn RafDecomposition(comptime F: type) type {
                 .chunk_len = chunk_len,
                 .phase = 0,
                 .round = 0,
-                .bound_prefix = F.zero(),
+                .num_bound_vars = 0,
+                .bound_value = F.zero(),
+                .poly_type = poly_type,
                 .allocator = allocator,
             };
         }
@@ -467,7 +817,17 @@ pub fn RafDecomposition(comptime F: type) type {
             @memset(self.Q[1], F.zero());
         }
 
-        /// Bind a challenge to Q polynomials and update prefix
+        /// Should this polynomial bind on the current round?
+        fn shouldBind(self: *const Self) bool {
+            const is_even = (self.num_bound_vars % 2 == 0);
+            return switch (self.poly_type) {
+                .LeftOperand => is_even, // Left binds on even rounds
+                .RightOperand => !is_even, // Right binds on odd rounds
+                .Identity => true, // Identity always binds
+            };
+        }
+
+        /// Bind a challenge to Q polynomials and update bound_value
         /// Uses HighToLow binding order: new[j] = Q[j] + r * (Q[j+half] - Q[j])
         pub fn bind(self: *Self, r: F) void {
             const half_size = self.Q_size / 2;
@@ -481,12 +841,103 @@ pub fn RafDecomposition(comptime F: type) type {
             }
             self.Q_size = half_size;
 
-            // Update bound prefix (HighToLow binding)
-            self.bound_prefix = self.bound_prefix.add(self.bound_prefix).add(r);
+            // Update bound_value based on polynomial type
+            // Jolt's binding rule:
+            // - OperandPolynomial: binds when round parity matches side
+            // - IdentityPolynomial: always binds
+            if (self.shouldBind()) {
+                self.bound_value = self.bound_value.add(self.bound_value).add(r);
+            }
 
+            self.num_bound_vars += 1;
             self.round += 1;
             if (self.round % self.chunk_len == 0) {
                 self.phase += 1;
+            }
+        }
+
+        /// Compute sumcheck evaluations at index b
+        /// Returns (P(0), P(2)) where P is the prefix polynomial
+        ///
+        /// For OperandPolynomial:
+        ///   If binding this round:
+        ///     P(c) = bound_value * 2^unbound_pairs + operand_bits(b) + c * m
+        ///   Else:
+        ///     P(c) = bound_value * 2^unbound_pairs + operand_bits(b) (constant in c)
+        ///
+        /// For IdentityPolynomial:
+        ///   P(c) = bound_value * 2^remaining + b + c * m (always linear)
+        pub fn prefixEvals(self: *const Self, b: usize) [2]F {
+            const num_vars = self.total_len;
+            const remaining = num_vars - self.num_bound_vars;
+
+            return switch (self.poly_type) {
+                .LeftOperand => self.operandPrefixEvals(b, remaining, true),
+                .RightOperand => self.operandPrefixEvals(b, remaining, false),
+                .Identity => self.identityPrefixEvals(b, remaining),
+            };
+        }
+
+        fn operandPrefixEvals(self: *const Self, b: usize, remaining: usize, is_left: bool) [2]F {
+            // Uninterleave b to get the operand bits
+            // For LOG_K bits interleaved: even positions -> left, odd positions -> right
+            const half_bits = remaining / 2;
+            var operand_bits: u64 = 0;
+            if (half_bits > 0) {
+                if (is_left) {
+                    // Extract even positions
+                    for (0..@min(half_bits, 32)) |i| {
+                        const bit: u64 = @truncate((b >> @intCast(2 * i)) & 1);
+                        operand_bits |= bit << @intCast(i);
+                    }
+                } else {
+                    // Extract odd positions
+                    for (0..@min(half_bits, 32)) |i| {
+                        const bit: u64 = @truncate((b >> @intCast(2 * i + 1)) & 1);
+                        operand_bits |= bit << @intCast(i);
+                    }
+                }
+            }
+
+            const is_even = (self.num_bound_vars % 2 == 0);
+            const is_binding_round = if (is_left) is_even else !is_even;
+
+            if (is_binding_round and half_bits > 0) {
+                // Linear polynomial: P(c) = base + c * m
+                // where base = bound_value * 2^unbound_pairs + operand_bits
+                // and m = 2^(unbound_pairs - 1)
+                const unbound_pairs = remaining / 2;
+                const scale = @as(u64, 1) << @intCast(unbound_pairs);
+                const m = @as(u64, 1) << @intCast(unbound_pairs - 1);
+
+                const base = self.bound_value.mul(F.fromU64(scale)).add(F.fromU64(operand_bits));
+                const eval_0 = base;
+                const eval_2 = base.add(F.fromU64(2 * m));
+                return .{ eval_0, eval_2 };
+            } else {
+                // Constant polynomial (not binding or remaining=0)
+                const unbound_pairs = remaining / 2;
+                const scale = if (unbound_pairs > 0) @as(u64, 1) << @intCast(unbound_pairs) else 1;
+                const base = self.bound_value.mul(F.fromU64(scale)).add(F.fromU64(operand_bits));
+                return .{ base, base }; // P(0) = P(2) = base
+            }
+        }
+
+        fn identityPrefixEvals(self: *const Self, b: usize, remaining: usize) [2]F {
+            // Identity polynomial always binds
+            // P(c) = bound_value * 2^remaining + b + c * m
+            // where m = 2^(remaining - 1)
+            if (remaining > 0) {
+                const scale = @as(u64, 1) << @intCast(remaining);
+                const m = @as(u64, 1) << @intCast(remaining - 1);
+                const base = self.bound_value.mul(F.fromU64(scale)).add(F.fromU64(b));
+                const eval_0 = base;
+                const eval_2 = base.add(F.fromU64(2 * m));
+                return .{ eval_0, eval_2 };
+            } else {
+                // All variables bound
+                const base = self.bound_value.add(F.fromU64(b));
+                return .{ base, base };
             }
         }
     };
@@ -597,13 +1048,21 @@ fn uninterleaveBitsRight(bits: u128, num_bits: usize) u64 {
 /// Returns [eval_0, eval_2] for the degree-2 polynomial
 ///
 /// This computes: γ*left + γ²*(identity + right)
-/// Where left, right, identity are prefix-suffix decompositions with:
-/// - left.Q[0] = ShiftHalfSuffix * Σ u (for interleaved cycles)
-/// - left.Q[1] = LeftOperandSuffix * Σ u
-/// - right.Q[0] = ShiftHalfSuffix * Σ u (same as left)
-/// - right.Q[1] = RightOperandSuffix * Σ u
-/// - identity.Q[0] = ShiftFullSuffix * Σ u (for identity cycles)
-/// - identity.Q[1] = IdentitySuffix * Σ u
+/// Where left, right, identity are prefix-suffix decompositions.
+///
+/// Jolt's formula (per index b):
+///   For each (P, Q) pair in decomposition:
+///     p_evals = P.sumcheck_evals(b)  // (P(0), P(2))
+///     eval_0 += p_evals.0 * Q[b]
+///     eval_2_left += p_evals.1 * Q[b]
+///     eval_2_right += p_evals.1 * Q[b + half_len]
+///   final: (eval_0, 2*eval_2_right - eval_2_left)
+///
+/// For RAF, each decomposition has 2 (P, Q) pairs:
+/// - (ShiftSuffix prefix=1, Q[0]) - prefix is constant 1
+/// - (OperandSuffix prefix P, Q[1]) - prefix depends on bound_value and round
+///
+/// Reference: jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs:932
 pub fn proverMsgRaf(
     comptime F: type,
     left_ps: *const RafDecomposition(F),
@@ -617,13 +1076,17 @@ pub fn proverMsgRaf(
 
     // Accumulators for the sums
     var left_sum_0 = F.zero();
-    var left_sum_2 = F.zero();
-    var right_sum_0 = F.zero(); // Actually (identity + right) at c=0
-    var right_sum_2 = F.zero(); // Actually (identity + right) at c=2
+    var left_sum_2_left = F.zero();
+    var left_sum_2_right = F.zero();
+    var right_sum_0 = F.zero();
+    var right_sum_2_left = F.zero();
+    var right_sum_2_right = F.zero();
 
     // For each half-index b, compute sumcheck evaluations
     for (0..half_len) |b| {
         // Get Q values at left (b) and right (b + half_len) positions
+        // Q[0] = shift*u accumulator (prefix = constant 1)
+        // Q[1] = suffix*u accumulator (prefix = OperandPolynomial/IdentityPolynomial)
         const l_q0_left = left_ps.Q[0][b];
         const l_q0_right = left_ps.Q[0][b + half_len];
         const l_q1_left = left_ps.Q[1][b];
@@ -639,38 +1102,62 @@ pub fn proverMsgRaf(
         const i_q1_left = identity_ps.Q[1][b];
         const i_q1_right = identity_ps.Q[1][b + half_len];
 
-        // Compute prefix evaluations for the operand/identity polynomials
-        // For OperandPolynomial with HighToLow binding:
-        // P(c) = bound_prefix * 2^{remaining_vars} + c * m (where m depends on which var is being bound)
+        // Compute prefix evaluations at c=0 and c=2
+        // For shift suffix (Q[0]): prefix is constant 1
+        const shift_p0 = F.one();
+        const shift_p2 = F.one();
 
-        // For simplicity in the current implementation, we use the Q accumulators directly
-        // The prefix polynomials are handled implicitly through the bound values
+        // For operand/identity suffix (Q[1]): use proper prefix evaluation
+        const l_prefix = left_ps.prefixEvals(b);
+        const r_prefix = right_ps.prefixEvals(b);
+        const i_prefix = identity_ps.prefixEvals(b);
 
-        // Left operand contribution: P_shift_half(c) * Q_shift_half + P_left(c) * Q_left
-        // Since P_shift_half is constant (1), and P_left is linear in c for left-binding rounds:
-        const l0 = l_q0_left.add(l_q1_left);
-        const l2_left = l_q0_left.add(l_q1_left);
-        const l2_right = l_q0_right.add(l_q1_right);
-        const l2 = l2_right.add(l2_right).sub(l2_left);
+        // Left operand contribution: sum of (shift, Q[0]) and (operand, Q[1]) pairs
+        // eval_0 = P(0)*Q[left], eval_2_left = P(2)*Q[left], eval_2_right = P(2)*Q[right]
+        const l_shift_0 = shift_p0.mul(l_q0_left);
+        const l_shift_2_left = shift_p2.mul(l_q0_left);
+        const l_shift_2_right = shift_p2.mul(l_q0_right);
 
-        // Right operand: same structure
-        const r0 = r_q0_left.add(r_q1_left);
-        const r2_left = r_q0_left.add(r_q1_left);
-        const r2_right = r_q0_right.add(r_q1_right);
-        const r2 = r2_right.add(r2_right).sub(r2_left);
+        const l_op_0 = l_prefix[0].mul(l_q1_left);
+        const l_op_2_left = l_prefix[1].mul(l_q1_left);
+        const l_op_2_right = l_prefix[1].mul(l_q1_right);
 
-        // Identity: same structure
-        const id0 = i_q0_left.add(i_q1_left);
-        const id2_left = i_q0_left.add(i_q1_left);
-        const id2_right = i_q0_right.add(i_q1_right);
-        const id2 = id2_right.add(id2_right).sub(id2_left);
+        // Right operand contribution
+        const r_shift_0 = shift_p0.mul(r_q0_left);
+        const r_shift_2_left = shift_p2.mul(r_q0_left);
+        const r_shift_2_right = shift_p2.mul(r_q0_right);
 
-        // Accumulate: left for γ weight, (identity + right) for γ² weight
-        left_sum_0 = left_sum_0.add(l0);
-        left_sum_2 = left_sum_2.add(l2);
-        right_sum_0 = right_sum_0.add(id0.add(r0));
-        right_sum_2 = right_sum_2.add(id2.add(r2));
+        const r_op_0 = r_prefix[0].mul(r_q1_left);
+        const r_op_2_left = r_prefix[1].mul(r_q1_left);
+        const r_op_2_right = r_prefix[1].mul(r_q1_right);
+
+        // Identity contribution
+        const i_shift_0 = shift_p0.mul(i_q0_left);
+        const i_shift_2_left = shift_p2.mul(i_q0_left);
+        const i_shift_2_right = shift_p2.mul(i_q0_right);
+
+        const i_op_0 = i_prefix[0].mul(i_q1_left);
+        const i_op_2_left = i_prefix[1].mul(i_q1_left);
+        const i_op_2_right = i_prefix[1].mul(i_q1_right);
+
+        // Accumulate left operand totals
+        left_sum_0 = left_sum_0.add(l_shift_0).add(l_op_0);
+        left_sum_2_left = left_sum_2_left.add(l_shift_2_left).add(l_op_2_left);
+        left_sum_2_right = left_sum_2_right.add(l_shift_2_right).add(l_op_2_right);
+
+        // Accumulate (identity + right) totals
+        const combo_0 = i_shift_0.add(i_op_0).add(r_shift_0).add(r_op_0);
+        const combo_2_left = i_shift_2_left.add(i_op_2_left).add(r_shift_2_left).add(r_op_2_left);
+        const combo_2_right = i_shift_2_right.add(i_op_2_right).add(r_shift_2_right).add(r_op_2_right);
+
+        right_sum_0 = right_sum_0.add(combo_0);
+        right_sum_2_left = right_sum_2_left.add(combo_2_left);
+        right_sum_2_right = right_sum_2_right.add(combo_2_right);
     }
+
+    // Apply quadratic interpolation: eval_2 = 2*eval_2_right - eval_2_left
+    const left_sum_2 = left_sum_2_right.add(left_sum_2_right).sub(left_sum_2_left);
+    const right_sum_2 = right_sum_2_right.add(right_sum_2_right).sub(right_sum_2_left);
 
     // Final result: γ*left + γ²*(identity + right)
     const eval_0 = gamma.mul(left_sum_0).add(gamma_sqr.mul(right_sum_0));
@@ -680,8 +1167,168 @@ pub fn proverMsgRaf(
 }
 
 // ============================================================================
+// Expanding Table for Address-Binding Condensation
+// ============================================================================
+
+/// Expanding Table: accumulates EQ(x_1, ..., x_j, r_1, ..., r_j) as challenges come in.
+/// Used to track the per-address eq weights during address rounds.
+///
+/// At each phase transition, u_evals are multiplied by the appropriate expanding table
+/// entries to "condense" the prior phase's eq contributions.
+///
+/// Reference: jolt-core/src/utils/expanding_table.rs
+pub fn ExpandingTable(comptime F: type) type {
+    return struct {
+        const Self = @This();
+
+        /// The accumulated eq values (length doubles with each update)
+        values: []F,
+        /// Current length (starts at 1)
+        len: usize,
+        /// Scratch space for HighToLow binding
+        scratch: []F,
+        /// Allocator
+        allocator: Allocator,
+
+        /// Initialize with given capacity (should be max size = 2^log_m)
+        pub fn init(allocator: Allocator, capacity: usize) !Self {
+            const values = try allocator.alloc(F, capacity);
+            const scratch = try allocator.alloc(F, capacity);
+            @memset(values, F.zero());
+            @memset(scratch, F.zero());
+            return .{
+                .values = values,
+                .len = 0,
+                .scratch = scratch,
+                .allocator = allocator,
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.allocator.free(self.values);
+            self.allocator.free(self.scratch);
+        }
+
+        /// Reset to length 1 containing the given value (typically F.one())
+        pub fn reset(self: *Self, value: F) void {
+            self.values[0] = value;
+            self.len = 1;
+        }
+
+        /// Get current length
+        pub fn getLen(self: *const Self) usize {
+            return self.len;
+        }
+
+        /// Get value at index
+        pub fn get(self: *const Self, index: usize) F {
+            std.debug.assert(index < self.len);
+            return self.values[index];
+        }
+
+        /// Update the table (doubles length) with new challenge r_j.
+        /// Uses HighToLow binding:
+        ///   For each existing entry v[i]:
+        ///     new[2*i] = v[i] * (1 - r_j) = v[i] - v[i]*r_j
+        ///     new[2*i + 1] = v[i] * r_j
+        pub fn update(self: *Self, r_j: F) void {
+            // HighToLow: expand each entry into two
+            for (0..self.len) |i| {
+                const v_i = self.values[i];
+                const eval_1 = r_j.mul(v_i); // v[i] * r
+                self.scratch[2 * i] = v_i.sub(eval_1); // v[i] * (1 - r)
+                self.scratch[2 * i + 1] = eval_1; // v[i] * r
+            }
+
+            // Swap values and scratch
+            const tmp = self.values;
+            self.values = self.scratch;
+            self.scratch = tmp;
+
+            self.len *= 2;
+        }
+
+        /// Clone the current values into a new slice
+        pub fn cloneValues(self: *const Self, allocator: Allocator) ![]F {
+            const result = try allocator.alloc(F, self.len);
+            @memcpy(result, self.values[0..self.len]);
+            return result;
+        }
+    };
+}
+
+/// Condense u_evals using the expanding table values from the previous phase.
+///
+/// For each cycle j:
+///   - Extract the bound prefix bits from lookup_index
+///   - Multiply u_evals[j] by v[k_bound] where k_bound = prefix & m_mask
+///
+/// This accumulates the eq contributions from the previous phase into u_evals.
+///
+/// Args:
+///   u_evals: Per-cycle eq(j, r_reduction) values to be condensed
+///   v: Expanding table from previous phase
+///   lookup_indices: Per-cycle lookup indices
+///   phase: Current phase number (1-indexed when condensing)
+///   phases: Total number of phases (typically 8)
+pub fn condenseUEvals(
+    comptime F: type,
+    u_evals: []F,
+    v: *const ExpandingTable(F),
+    lookup_indices: []const u128,
+    phase: usize,
+    phases: usize,
+) void {
+    const log_m = LOG_K / phases;
+    const m_mask: u128 = (@as(u128, 1) << @intCast(log_m)) - 1;
+
+    // Number of suffix bits remaining after this phase
+    const suffix_bits = (phases - phase) * log_m;
+
+    var max_k_bound: u128 = 0;
+    for (lookup_indices, 0..) |k, j| {
+        // Extract the bound prefix (the bits that have been bound in previous phases)
+        const prefix = k >> @intCast(suffix_bits);
+        const k_bound = prefix & m_mask;
+
+        if (k_bound > max_k_bound) max_k_bound = k_bound;
+
+        // Multiply by the expanding table value
+        if (k_bound >= v.getLen()) {
+            std.debug.print("[CONDENSE] ERROR: k_bound={} >= v.len={} at j={}, phase={}, suffix_bits={}, k=0x{x:0>32}\n", .{ k_bound, v.getLen(), j, phase, suffix_bits, k });
+            @panic("k_bound out of range");
+        }
+        u_evals[j] = u_evals[j].mul(v.get(@intCast(k_bound)));
+    }
+    std.debug.print("[CONDENSE] phase={}, suffix_bits={}, max_k_bound={}\n", .{ phase, suffix_bits, max_k_bound });
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
+
+test "ExpandingTable basic operations" {
+    const F = @import("../../field/mod.zig").BN254Scalar;
+    const allocator = std.testing.allocator;
+
+    var table = try ExpandingTable(F).init(allocator, 16);
+    defer table.deinit();
+
+    // Reset to 1
+    table.reset(F.one());
+    try std.testing.expectEqual(@as(usize, 1), table.getLen());
+    try std.testing.expect(table.get(0).eql(F.one()));
+
+    // Update with r = 0.5 (approx) - just test with a simple value
+    const r = F.fromU64(123456789);
+    table.update(r);
+
+    try std.testing.expectEqual(@as(usize, 2), table.getLen());
+    // After update: values[0] = 1 - r, values[1] = r
+    const one_minus_r = F.one().sub(r);
+    try std.testing.expect(table.get(0).eql(one_minus_r));
+    try std.testing.expect(table.get(1).eql(r));
+}
 
 test "AllSuffixPolys init and deinit" {
     const F = @import("../../field/mod.zig").BN254Scalar;
@@ -723,7 +1370,7 @@ test "RafDecomposition init and deinit" {
     const F = @import("../../field/mod.zig").BN254Scalar;
     const allocator = std.testing.allocator;
 
-    var raf = try RafDecomposition(F).init(allocator, 16, 16, 128);
+    var raf = try RafDecomposition(F).init(allocator, 16, 16, 128, .LeftOperand);
     defer raf.deinit();
 
     try std.testing.expectEqual(@as(usize, 16), raf.QLen());
@@ -751,11 +1398,11 @@ test "initQRaf basic" {
     const F = @import("../../field/mod.zig").BN254Scalar;
     const allocator = std.testing.allocator;
 
-    var left = try RafDecomposition(F).init(allocator, 4, 2, 8);
+    var left = try RafDecomposition(F).init(allocator, 4, 2, 8, .LeftOperand);
     defer left.deinit();
-    var right = try RafDecomposition(F).init(allocator, 4, 2, 8);
+    var right = try RafDecomposition(F).init(allocator, 4, 2, 8, .RightOperand);
     defer right.deinit();
-    var identity = try RafDecomposition(F).init(allocator, 4, 2, 8);
+    var identity = try RafDecomposition(F).init(allocator, 4, 2, 8, .Identity);
     defer identity.deinit();
 
     // Create simple test data: one interleaved cycle, one identity cycle

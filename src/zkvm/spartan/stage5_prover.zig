@@ -34,6 +34,8 @@ const RafDecomposition = lookup_table_mod.RafDecomposition;
 const initQRaf = lookup_table_mod.initQRaf;
 const proverMsgRaf = lookup_table_mod.proverMsgRaf;
 const LookupBits = lookup_table_mod.LookupBits;
+const ExpandingTable = lookup_table_mod.ExpandingTable;
+const condenseUEvals = lookup_table_mod.condenseUEvals;
 
 /// Constants for Stage 5
 pub const LOOKUPS_LOG_K: usize = 128; // XLEN * 2 for RV64
@@ -1194,11 +1196,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
             // Initialize RAF (Read-Address-Flag) decompositions for left/right/identity
             // These compute: γ*left + γ²*(identity + right)
-            var left_raf = try RafDecomposition(F).init(self.allocator, initial_m, log_m, LOOKUPS_LOG_K);
+            var left_raf = try RafDecomposition(F).init(self.allocator, initial_m, log_m, LOOKUPS_LOG_K, .LeftOperand);
             defer left_raf.deinit();
-            var right_raf = try RafDecomposition(F).init(self.allocator, initial_m, log_m, LOOKUPS_LOG_K);
+            var right_raf = try RafDecomposition(F).init(self.allocator, initial_m, log_m, LOOKUPS_LOG_K, .RightOperand);
             defer right_raf.deinit();
-            var identity_raf = try RafDecomposition(F).init(self.allocator, initial_m, log_m, LOOKUPS_LOG_K);
+            var identity_raf = try RafDecomposition(F).init(self.allocator, initial_m, log_m, LOOKUPS_LOG_K, .Identity);
             defer identity_raf.deinit();
 
             // Create is_interleaved_operands array (inverse of cycle_is_identity_path)
@@ -1210,6 +1212,21 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
             // Initialize RAF Q accumulators for phase 0
             initQRaf(F, &left_raf, &right_raf, &identity_raf, lookups_eq_evals, lookup_indices_u128, is_interleaved_operands);
+
+            // Initialize expanding tables for each phase (accumulate eq values during address rounds)
+            // We need num_phases expanding tables, each of size 2^log_m
+            var expanding_tables: [8]ExpandingTable(F) = undefined;
+            for (0..num_phases) |phase_idx| {
+                expanding_tables[phase_idx] = try ExpandingTable(F).init(self.allocator, initial_m);
+            }
+            defer {
+                for (0..num_phases) |phase_idx| {
+                    expanding_tables[phase_idx].deinit();
+                }
+            }
+
+            // Reset phase 0's expanding table to 1
+            expanding_tables[0].reset(F.one());
 
             std.debug.print("[STAGE5 PREFIX-SUFFIX] Initialized phase 0, log_m={}, suffix_len={}, initial_m={}\n", .{
                 log_m,
@@ -1320,6 +1337,17 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     coeffs[1] = uni_poly.coeffs[1]; // c2
                     coeffs[2] = uni_poly.coeffs[2]; // c3 (= 0 for degree-2)
 
+                    // Debug: print first few round polynomials
+                    if (round < 3 or round == 16 or round == 17) {
+                        std.debug.print("[STAGE5 POLY] round={}, eval_0={x:0>16}, eval_2={x:0>16}, c0={x:0>16}, c2={x:0>16}\n", .{
+                            round,
+                            eval_0.toBytesBE()[24..32].*,
+                            eval_2.toBytesBE()[24..32].*,
+                            coeffs[0].toBytesBE()[24..32].*,
+                            coeffs[1].toBytesBE()[24..32].*,
+                        });
+                    }
+
                     try proof.compressed_polys.append(self.allocator, .{
                         .coeffs_except_linear_term = coeffs,
                         .allocator = self.allocator,
@@ -1363,6 +1391,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     right_raf.bind(challenge);
                     identity_raf.bind(challenge);
 
+                    // Update the current phase's expanding table with this challenge
+                    expanding_tables[current_phase].update(challenge);
+
                     // Update prefix checkpoints every 2 rounds (after binding X and Y)
                     const round_in_phase = round % log_m;
                     if (round_in_phase % 2 == 1) {
@@ -1375,14 +1406,23 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                     // Check for phase transition (every log_m = 16 rounds)
                     if ((round + 1) % log_m == 0 and round + 1 < LOOKUPS_LOG_K) {
+                        const prev_phase = current_phase;
                         current_phase += 1;
-                        std.debug.print("[STAGE5] Phase transition to phase {}\n", .{current_phase});
+                        std.debug.print("[STAGE5] Phase transition to phase {}, prev_table_len={}\n", .{ current_phase, expanding_tables[prev_phase].getLen() });
 
-                        // Re-initialize suffix polys and RAF for new phase
-                        // The u_evals need to be updated with the expanding table weights
-                        // For now, just reinitialize with current eq_evals
+                        // Condense u_evals (lookups_eq_evals) using the expanding table from the previous phase
+                        // This is the CRITICAL step that was missing!
+                        // u_evals[j] *= v[prev_phase][k_bound] where k_bound = prefix & m_mask
+                        condenseUEvals(F, lookups_eq_evals, &expanding_tables[prev_phase], lookup_indices_u128, current_phase, num_phases);
+
+                        // Re-initialize suffix polys and RAF for new phase with condensed u_evals
                         try suffix_polys.initPhase(current_phase, num_phases, lookups_eq_evals, lookup_indices_u128, cycle_table_indices);
                         initQRaf(F, &left_raf, &right_raf, &identity_raf, lookups_eq_evals, lookup_indices_u128, is_interleaved_operands);
+
+                        // Reset the new phase's expanding table to 1
+                        expanding_tables[current_phase].reset(F.one());
+
+                        std.debug.print("[STAGE5] Condensed u_evals with expanding table, reset phase {} table\n", .{current_phase});
                     }
 
                     // Also update legacy ra_weights for cycle rounds (needed for the last 8 rounds)

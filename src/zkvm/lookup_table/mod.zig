@@ -20,6 +20,7 @@ const BN254Scalar = field.BN254Scalar;
 pub const prefixes = @import("prefixes.zig");
 pub const identity_poly = @import("identity_poly.zig");
 pub const suffixes = @import("suffixes.zig");
+pub const prefix_suffix_prover = @import("prefix_suffix_prover.zig");
 
 // Re-export commonly used types
 pub const Prefixes = prefixes.Prefixes;
@@ -33,6 +34,9 @@ pub const BindingOrder = identity_poly.BindingOrder;
 pub const Suffixes = suffixes.Suffixes;
 pub const suffixMle = suffixes.suffixMle;
 pub const tableSuffixes = suffixes.tableSuffixes;
+pub const AllSuffixPolys = prefix_suffix_prover.AllSuffixPolys;
+pub const PrefixCheckpointsState = prefix_suffix_prover.PrefixCheckpointsState;
+pub const proverMsgReadChecking = prefix_suffix_prover.proverMsgReadChecking;
 
 /// Utility function to uninterleave bits from an interleaved index.
 /// For a 2*XLEN bit index where bits are interleaved as y[0], x[0], y[1], x[1], ...,

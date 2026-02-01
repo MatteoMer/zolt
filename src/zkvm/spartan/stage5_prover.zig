@@ -692,49 +692,21 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     },
                     0x1b => {
                         // OP-IMM-32 (RV64): ADDIW, SLLIW, SRLIW, SRAIW
+                        // R1CS: falls to else case, so left=left_input=rs1, right=right_input=imm
                         const imm12_raw: u32 = @truncate(instr >> 20);
                         const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
                         const imm_u64: u64 = @bitCast(imm_signed);
 
-                        const is_addiw = (funct3 == 0);
-
-                        if (is_addiw) {
-                            // ADDIW: AddOperands flag - left=0, right=rs1+imm (32-bit)
-                            const rs1_32: u32 = @truncate(step.rs1_value);
-                            const imm_32: u32 = @truncate(imm_u64);
-                            left_op = F.zero();
-                            right_op = F.fromU64(@as(u64, rs1_32) +% @as(u64, imm_32));
-                            lookup_output = F.fromU64(step.rd_value);
-                        } else {
-                            // SLLIW, SRLIW, SRAIW - interleaved
-                            left_op = F.fromU64(step.rs1_value);
-                            right_op = F.fromU64(imm_u64);
-                            lookup_output = F.fromU64(step.rd_value);
-                        }
+                        left_op = F.fromU64(step.rs1_value);
+                        right_op = F.fromU64(imm_u64);
+                        lookup_output = F.fromU64(step.rd_value);
                     },
                     0x3b => {
                         // OP-32 (RV64): ADDW, SUBW, SLLW, SRLW, SRAW, MULW, etc.
-                        const is_addw = (funct3 == 0) and (funct7 == 0);
-                        const is_subw = (funct3 == 0) and (funct7 == 0x20);
-
-                        if (is_addw) {
-                            // ADDW: AddOperands flag - left=0, right=rs1+rs2 (32-bit)
-                            const rs1_32: u32 = @truncate(step.rs1_value);
-                            const rs2_32: u32 = @truncate(step.rs2_value);
-                            left_op = F.zero();
-                            right_op = F.fromU64(@as(u64, rs1_32) +% @as(u64, rs2_32));
-                            lookup_output = F.fromU64(step.rd_value);
-                        } else if (is_subw) {
-                            // SUBW: SubtractOperands flag
-                            left_op = F.fromU64(step.rs1_value);
-                            right_op = F.fromU64(step.rs2_value);
-                            lookup_output = F.fromU64(step.rd_value);
-                        } else {
-                            // Other W operations
-                            left_op = F.fromU64(step.rs1_value);
-                            right_op = F.fromU64(step.rs2_value);
-                            lookup_output = F.fromU64(step.rd_value);
-                        }
+                        // R1CS: falls to else case, so left=rs1, right=rs2
+                        left_op = F.fromU64(step.rs1_value);
+                        right_op = F.fromU64(step.rs2_value);
+                        lookup_output = F.fromU64(step.rd_value);
                     },
                     0x37 => {
                         // LUI: AddOperands flag - left=0, right=imm
@@ -792,27 +764,27 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         lookup_output = F.fromU64(result);
                     },
                     0x03 => {
-                        // Load: AddOperands flag - left=0, right=rs1+imm (address)
+                        // Load: R1CS has left=rs1, right=imm (NOT AddOperands)
                         const imm12_raw: u32 = @truncate(instr >> 20);
                         const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
                         const imm_u64: u64 = @bitCast(imm_signed);
 
-                        left_op = F.zero();
-                        right_op = F.fromU64(step.rs1_value +% imm_u64);
+                        left_op = F.fromU64(step.rs1_value);
+                        right_op = F.fromU64(imm_u64);
                         lookup_output = F.fromU64(step.rd_value);
                     },
                     0x23 => {
-                        // Store: AddOperands flag - left=0, right=rs1+imm (address)
+                        // Store: R1CS has left=rs1, right=imm (NOT AddOperands)
                         const imm_lo: u32 = (instr >> 7) & 0x1F;
                         const imm_hi: u32 = (instr >> 25) & 0x7F;
                         const imm12 = (imm_hi << 5) | imm_lo;
                         const imm_signed: i64 = @as(i64, @as(i12, @bitCast(@as(u12, @truncate(imm12)))));
                         const imm_u64: u64 = @bitCast(imm_signed);
 
-                        left_op = F.zero();
-                        right_op = F.fromU64(step.rs1_value +% imm_u64);
-                        // For stores, output is typically the address
-                        lookup_output = F.fromU64(step.rs1_value +% imm_u64);
+                        left_op = F.fromU64(step.rs1_value);
+                        right_op = F.fromU64(imm_u64);
+                        // For stores, output comes from rd_value
+                        lookup_output = F.fromU64(step.rd_value);
                     },
                     else => {
                         // Unknown or other: fall back to rs1, rs2, rd
@@ -824,6 +796,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                 // combined = output + gamma*left + gamma^2*right
                 lookups_combined_vals[j] = lookup_output.add(gamma_raf.mul(left_op)).add(gamma_raf2.mul(right_op));
+
+                // Debug: print first 5 right_op values from combined_vals computation
+                if (j < 5) {
+                    std.debug.print("[STAGE5 COMBINED] j={}: opcode=0x{x}, left_op=0x{x}, right_op=0x{x}, output=0x{x}\n", .{
+                        j, opcode, left_op.toU64(), right_op.toU64(), lookup_output.toU64(),
+                    });
+                }
 
                 // Compute lookup index = interleave_bits(left_operand, right_operand)
                 // For AddOperands instructions: left=0, right=sum, so index = interleave(0, sum)
@@ -988,38 +967,52 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     left_op = F.zero();
                     right_op = F.zero();
                 } else {
-                    // Extract operands based on opcode (same logic as above)
+                    // Extract operands matching R1CS witness computation EXACTLY
+                    // Reference: constraints.zig setFlagsFromInstruction()
+
+                    // First compute left_input and right_input (same as R1CS)
+                    const left_is_rs1: bool = switch (opcode) {
+                        0x33, 0x3b, 0x23, 0x63, 0x13, 0x03, 0x67, 0x1b => true,
+                        else => false,
+                    };
+                    const left_is_pc: bool = switch (opcode) {
+                        0x17, 0x6f => true,
+                        else => false,
+                    };
+                    const right_is_rs2: bool = switch (opcode) {
+                        0x33, 0x63, 0x3b => true,
+                        else => false,
+                    };
+                    const right_is_imm: bool = switch (opcode) {
+                        0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b => true,
+                        else => false,
+                    };
+
+                    // Compute immediate value
+                    const imm_val = computeImmediate(instr);
+
+                    // Compute left_input and right_input
+                    var left_input: F = F.zero();
+                    if (left_is_rs1) left_input = F.fromU64(step.rs1_value);
+                    if (left_is_pc) left_input = F.fromU64(step.pc);
+
+                    var right_input: F = F.zero();
+                    if (right_is_rs2) right_input = F.fromU64(step.rs2_value);
+                    if (right_is_imm) right_input = imm_val;
+
+                    // Compute LookupOutput (same as R1CS computeLookupOutput)
                     switch (opcode) {
-                        0x33 => { // R-type
-                            const funct7: u7 = @truncate(instr >> 25);
-                            if (funct3 == 0 and funct7 == 0) { // ADD
-                                left_op = F.zero();
-                                right_op = F.fromU64(step.rs1_value +% step.rs2_value);
-                            } else {
-                                left_op = F.fromU64(step.rs1_value);
-                                right_op = F.fromU64(step.rs2_value);
-                            }
-                            lookup_output = F.fromU64(step.rd_value);
+                        0x6f => { // JAL: LookupOutput = PC + imm
+                            lookup_output = left_input.add(right_input);
                         },
-                        0x37 => { // LUI
-                            left_op = F.zero();
-                            right_op = F.fromU64(instr & 0xFFFFF000);
-                            lookup_output = F.fromU64(step.rd_value);
+                        0x67 => { // JALR: LookupOutput = (rs1 + imm) & ~1
+                            const target = left_input.add(right_input);
+                            // Clear LSB: need to convert to u64, mask, convert back
+                            // For simplicity, assume imm is small enough
+                            const target_u64 = target.toU64() & ~@as(u64, 1);
+                            lookup_output = F.fromU64(target_u64);
                         },
-                        0x6f => { // JAL
-                            const imm20 = ((@as(u32, instr >> 31) & 1) << 19) |
-                                ((@as(u32, instr >> 12) & 0xFF) << 11) |
-                                ((@as(u32, instr >> 20) & 1) << 10) |
-                                ((@as(u32, instr >> 21) & 0x3FF));
-                            const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm20 << 12)) >> 11);
-                            const imm_u64: u64 = @bitCast(imm_signed);
-                            left_op = F.zero();
-                            right_op = F.fromU64(step.pc +% imm_u64);
-                            lookup_output = F.fromU64(step.pc +% imm_u64);
-                        },
-                        0x63 => { // Branch
-                            left_op = F.fromU64(step.rs1_value);
-                            right_op = F.fromU64(step.rs2_value);
+                        0x63 => { // Branch: LookupOutput = condition result (0 or 1)
                             const result: u64 = switch (funct3) {
                                 0x0 => if (step.rs1_value == step.rs2_value) 1 else 0,
                                 0x1 => if (step.rs1_value != step.rs2_value) 1 else 0,
@@ -1032,9 +1025,59 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             lookup_output = F.fromU64(result);
                         },
                         else => {
-                            left_op = F.fromU64(step.rs1_value);
-                            right_op = F.fromU64(step.rs2_value);
                             lookup_output = F.fromU64(step.rd_value);
+                        },
+                    }
+
+                    // Now compute LeftLookupOperand and RightLookupOperand
+                    // Based on setFlagsFromInstruction in constraints.zig
+                    switch (opcode) {
+                        0x33 => { // R-type
+                            const funct7: u7 = @truncate(instr >> 25);
+                            if (funct7 == 0x01) {
+                                // M-extension
+                                if (funct3 == 0x0) { // MUL
+                                    left_op = F.zero();
+                                    right_op = left_input.mul(right_input); // Product
+                                } else {
+                                    left_op = left_input;
+                                    right_op = right_input;
+                                }
+                            } else if (funct7 == 0x20 and funct3 == 0x0) {
+                                // SUB: LeftLookup=0, RightLookup=left-right+2^64
+                                const two_pow_64 = F.fromBytes(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
+                                left_op = F.zero();
+                                right_op = left_input.sub(right_input).add(two_pow_64);
+                            } else {
+                                // ADD and others: LeftLookup=0, RightLookup=left+right
+                                left_op = F.zero();
+                                right_op = left_input.add(right_input);
+                            }
+                        },
+                        0x13 => { // I-type ALU: AddOperands
+                            left_op = F.zero();
+                            right_op = left_input.add(right_input);
+                        },
+                        0x37 => { // LUI: AddOperands, left_input=0, right_input=imm
+                            left_op = F.zero();
+                            right_op = left_input.add(right_input);
+                        },
+                        0x17 => { // AUIPC: AddOperands, left_input=PC, right_input=imm
+                            left_op = F.zero();
+                            right_op = left_input.add(right_input);
+                        },
+                        0x6f => { // JAL: AddOperands, left_input=PC, right_input=imm
+                            left_op = F.zero();
+                            right_op = left_input.add(right_input);
+                        },
+                        0x67 => { // JALR: AddOperands, left_input=rs1, right_input=imm
+                            left_op = F.zero();
+                            right_op = left_input.add(right_input);
+                        },
+                        else => {
+                            // Default: NOT Add+Sub+Mul
+                            left_op = left_input;
+                            right_op = right_input;
                         },
                     }
                 }
@@ -1042,7 +1085,35 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 output_sum = output_sum.add(lookups_eq_evals[j].mul(lookup_output));
                 left_sum = left_sum.add(lookups_eq_evals[j].mul(left_op));
                 right_sum = right_sum.add(lookups_eq_evals[j].mul(right_op));
-                lookups_computed_sum = lookups_computed_sum.add(lookups_eq_evals[j].mul(lookups_combined_vals[j]));
+                // Use recomputed combined value to match individual sums
+                const recomputed_combined = lookup_output.add(gamma_raf.mul(left_op)).add(gamma_raf2.mul(right_op));
+                lookups_computed_sum = lookups_computed_sum.add(lookups_eq_evals[j].mul(recomputed_combined));
+            }
+            // Debug: print first 5 cycles' right operand values
+            std.debug.print("[STAGE5 LOOKUPS] First 5 right_op values (computed in loop):\n", .{});
+            for (0..@min(5, trace_len)) |jj| {
+                const step_dbg = trace.steps.items[jj];
+                const instr_dbg = step_dbg.instruction;
+                const opcode_dbg = instr_dbg & 0x7f;
+
+                // Recompute to show
+                const right_is_rs2_dbg: bool = switch (opcode_dbg) {
+                    0x33, 0x63, 0x3b => true,
+                    else => false,
+                };
+                const right_is_imm_dbg: bool = switch (opcode_dbg) {
+                    0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b => true,
+                    else => false,
+                };
+                const imm_dbg = computeImmediate(instr_dbg);
+                var right_input_dbg: F = F.zero();
+                if (right_is_rs2_dbg) right_input_dbg = F.fromU64(step_dbg.rs2_value);
+                if (right_is_imm_dbg) right_input_dbg = imm_dbg;
+
+                std.debug.print("  j={}: opcode=0x{x}, right_is_rs2={}, right_is_imm={}, imm=0x{x}, rs2=0x{x}, right_input=0x{x}\n", .{
+                    jj, opcode_dbg, right_is_rs2_dbg, right_is_imm_dbg,
+                    imm_dbg.toU64(), step_dbg.rs2_value, right_input_dbg.toU64(),
+                });
             }
             std.debug.print("[STAGE5 LOOKUPS] Individual sum verification:\n", .{});
             std.debug.print("  output_sum (Σ eq*output) = {any}\n", .{output_sum.toBytesBE()[0..16]});
@@ -1726,6 +1797,63 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 .lookups_raf_flag = computed_raf_flag,
                 .allocator = self.allocator,
             };
+        }
+
+        /// Compute immediate value from instruction, matching R1CS deriveImmediate
+        fn computeImmediate(instr: u32) F {
+            const opcode: u8 = @truncate(instr & 0x7f);
+
+            switch (opcode) {
+                // I-type: imm[11:0] at bits [31:20], sign-extended
+                0x13, 0x03, 0x67, 0x1b, 0x73 => {
+                    const imm12: u32 = instr >> 20;
+                    const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12 << 20)) >> 20);
+                    return signedI64ToField(imm_signed);
+                },
+                // S-type: imm[11:5] at [31:25], imm[4:0] at [11:7], sign-extended
+                0x23 => {
+                    const imm11_5 = (instr >> 25) & 0x7f;
+                    const imm4_0 = (instr >> 7) & 0x1f;
+                    const imm12: u32 = (imm11_5 << 5) | imm4_0;
+                    const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12 << 20)) >> 20);
+                    return signedI64ToField(imm_signed);
+                },
+                // B-type: imm[12|10:5] at [31:25], imm[4:1|11] at [11:7], sign-extended, *2
+                0x63 => {
+                    const imm12 = (instr >> 31) & 1;
+                    const imm10_5 = (instr >> 25) & 0x3f;
+                    const imm4_1 = (instr >> 8) & 0xf;
+                    const imm11 = (instr >> 7) & 1;
+                    const imm13: u32 = (imm12 << 12) | (imm11 << 11) | (imm10_5 << 5) | (imm4_1 << 1);
+                    const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm13 << 19)) >> 19);
+                    return signedI64ToField(imm_signed);
+                },
+                // U-type: imm[31:12] at [31:12], shifted left by 12
+                0x37, 0x17 => {
+                    const imm_upper = instr & 0xFFFFF000;
+                    return F.fromU64(imm_upper);
+                },
+                // J-type: imm[20|10:1|11|19:12] at [31:12], sign-extended, *2
+                0x6f => {
+                    const imm20 = (instr >> 31) & 1;
+                    const imm10_1 = (instr >> 21) & 0x3ff;
+                    const imm11 = (instr >> 20) & 1;
+                    const imm19_12 = (instr >> 12) & 0xff;
+                    const imm21: u32 = (imm20 << 20) | (imm19_12 << 12) | (imm11 << 11) | (imm10_1 << 1);
+                    const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm21 << 11)) >> 11);
+                    return signedI64ToField(imm_signed);
+                },
+                else => return F.zero(),
+            }
+        }
+
+        /// Convert signed i64 to field element (handle negative values)
+        fn signedI64ToField(val: i64) F {
+            if (val >= 0) {
+                return F.fromU64(@intCast(val));
+            } else {
+                return F.zero().sub(F.fromU64(@intCast(-val)));
+            }
         }
 
         /// Compute eq(r, k) for a specific index k

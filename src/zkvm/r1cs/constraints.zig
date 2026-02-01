@@ -1228,7 +1228,7 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             _ = self;
             const opcode = instr & 0x7F;
             switch (opcode) {
-                0x13, 0x03, 0x67 => { // I-type: ADDI, LOAD, JALR
+                0x13, 0x03, 0x67, 0x1b => { // I-type: ADDI, LOAD, JALR, ADDIW
                     const imm = instr >> 20;
                     // Sign extend from 12 bits
                     if (imm & 0x800 != 0) {

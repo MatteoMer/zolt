@@ -14493,3 +14493,21 @@ Tokens: 0 in / 0 out
 Error: Command failed with exit code -15 (exit code: -15)
 Error output: Check stderr output for details
 
+
+--- Iteration 2 ---
+Started: 2026-02-01T17:35:06.627118
+Ended: 2026-02-01T18:13:51.336016
+Turns: 142
+Cost: $9.5028
+Tokens: 0 in / 0 out
+Session ending: Ralph signaled SESSION_ENDING
+
+
+--- Iteration 1 ---
+Started: 2026-02-01T18:13:54.353978
+Ended: 2026-02-01T18:57:02.571332
+Turns: 191
+Cost: $12.8787
+Tokens: 0 in / 0 out
+Session ending: Ralph signaled SESSION_ENDING
+

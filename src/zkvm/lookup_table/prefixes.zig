@@ -66,6 +66,31 @@ pub fn LookupBits(comptime max_bits: usize) type {
 
             return .{ .left = left, .right = right };
         }
+
+        /// Split into (prefix, suffix) where suffix.len == suffix_len
+        pub fn split(self: *const Self, suffix_len: usize) struct { prefix: Self, suffix: Self } {
+            const suffix_bits = self.value & ((@as(u128, 1) << @intCast(suffix_len)) - 1);
+            const prefix_bits = self.value >> @intCast(suffix_len);
+            return .{
+                .prefix = Self.new(prefix_bits, self.len - suffix_len),
+                .suffix = Self.new(suffix_bits, suffix_len),
+            };
+        }
+
+        /// Count trailing zeros, clamped to len
+        pub fn trailingZeros(self: *const Self) u32 {
+            if (self.value == 0) return @intCast(self.len);
+            const tz = @ctz(self.value);
+            return @min(tz, @as(u32, @intCast(self.len)));
+        }
+
+        /// Count leading ones (from MSB position self.len-1 down)
+        pub fn leadingOnes(self: *const Self) u32 {
+            if (self.len == 0) return 0;
+            // Shift value so MSB of the value is at bit 127
+            const shifted = self.value << @intCast(128 - self.len);
+            return @clz(~shifted);
+        }
     };
 }
 

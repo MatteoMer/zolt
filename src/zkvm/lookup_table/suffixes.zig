@@ -95,8 +95,26 @@ pub fn suffixMle(suffix: Suffixes, b: LookupBits(128)) u64 {
         .LeftShift => leftShiftSuffixMle(b),
         .RightShift => rightShiftSuffixMle(b),
         .TwoLsb => twoLsbSuffixMle(b),
-        // Remaining suffixes - return 0 for now (placeholder)
-        else => 0,
+        .ChangeDivisor => changeDivisorSuffixMle(b),
+        .ChangeDivisorW => changeDivisorWSuffixMle(b),
+        .Rev8W => rev8WSuffixMle(b),
+        .RightShiftPadding => rightShiftPaddingSuffixMle(b),
+        .RightShiftHelper => rightShiftHelperSuffixMle(b),
+        .SignExtensionUpperHalf => signExtensionUpperHalfSuffixMle(b),
+        .SignExtensionRightOperand => signExtensionRightOperandSuffixMle(b),
+        .RightShiftW => rightShiftWSuffixMle(b),
+        .RightShiftWHelper => rightShiftWHelperSuffixMle(b),
+        .LeftShiftWHelper => leftShiftWHelperSuffixMle(b),
+        .LeftShiftW => leftShiftWSuffixMle(b),
+        .OverflowBitsZero => overflowBitsZeroSuffixMle(b),
+        .XorRot16 => xorRotSuffixMle(b, 16),
+        .XorRot24 => xorRotSuffixMle(b, 24),
+        .XorRot32 => xorRotSuffixMle(b, 32),
+        .XorRot63 => xorRotSuffixMle(b, 63),
+        .XorRotW16 => xorRotWSuffixMle(b, 16),
+        .XorRotW12 => xorRotWSuffixMle(b, 12),
+        .XorRotW8 => xorRotWSuffixMle(b, 8),
+        .XorRotW7 => xorRotWSuffixMle(b, 7),
     };
 }
 
@@ -238,24 +256,192 @@ fn signExtensionSuffixMle(b: LookupBits(128)) u64 {
     return byte_val;
 }
 
-/// LeftShift suffix: returns x << (y & 63)
+/// LeftShift suffix: left-shifts x according to bitmask y
+/// Removes bits of x that have 1 in y, then shifts by leading_ones(y)
 fn leftShiftSuffixMle(b: LookupBits(128)) u64 {
     const parts = b.uninterleave();
-    const shift = parts.right & 0x3F;
-    return parts.left << @intCast(shift);
+    const y_bits = LookupBits(128).new(parts.right, b.len / 2);
+    // Remove bits of x that have 1 in y
+    const x = parts.left & ~parts.right;
+    const leading = y_bits.leadingOnes();
+    if (leading >= 64) return 0;
+    return x << @intCast(leading);
 }
 
-/// RightShift suffix: returns x >> (y & 63)
+/// RightShift suffix: right-aligns the masked bits of x
+/// Shifts x right by trailing_zeros(y)
 fn rightShiftSuffixMle(b: LookupBits(128)) u64 {
     const parts = b.uninterleave();
-    const shift = parts.right & 0x3F;
-    return parts.left >> @intCast(shift);
+    const y_bits = LookupBits(128).new(parts.right, b.len / 2);
+    const tz = y_bits.trailingZeros();
+    if (tz >= 64) return 0;
+    return parts.left >> @intCast(tz);
 }
 
 /// TwoLsb suffix: returns the two least significant bits of y
 fn twoLsbSuffixMle(b: LookupBits(128)) u64 {
     const parts = b.uninterleave();
     return parts.right & 0x3;
+}
+
+/// ChangeDivisor suffix: returns 1 if y is all 1s and x is 0
+/// Used for detecting when to change divisor in division
+fn changeDivisorSuffixMle(b: LookupBits(128)) u64 {
+    const parts = b.uninterleave();
+    const y_len = b.len / 2;
+    if (y_len >= 64) {
+        // For 64-bit values, check if y == 0xFFFFFFFFFFFFFFFF and x == 0
+        return if (parts.right == 0xFFFFFFFFFFFFFFFF and parts.left == 0) 1 else 0;
+    }
+    const all_ones: u64 = (@as(u64, 1) << @intCast(y_len)) - 1;
+    return if (parts.right == all_ones and parts.left == 0) 1 else 0;
+}
+
+/// ChangeDivisorW suffix: 32-bit version of ChangeDivisor
+fn changeDivisorWSuffixMle(b: LookupBits(128)) u64 {
+    const parts = b.uninterleave();
+    const y_len = @min(b.len / 2, XLEN / 2);
+    const x: u64 = @as(u32, @truncate(parts.left));
+    const y: u64 = @as(u32, @truncate(parts.right));
+    const all_ones: u64 = (@as(u64, 1) << @intCast(y_len)) - 1;
+    return if (y == all_ones and x == 0) 1 else 0;
+}
+
+/// Rev8W suffix: reverses bytes in each 32-bit word
+fn rev8WSuffixMle(b: LookupBits(128)) u64 {
+    const val: u64 = @truncate(b.value);
+    const lo: u32 = @truncate(val);
+    const hi: u32 = @truncate(val >> 32);
+    const lo_rev = @byteSwap(lo);
+    const hi_rev = @byteSwap(hi);
+    return @as(u64, lo_rev) + (@as(u64, hi_rev) << 32);
+}
+
+/// RightShiftPadding suffix: computes 2^(XLEN-1-shift) for arithmetic right shift padding
+fn rightShiftPaddingSuffixMle(b: LookupBits(128)) u64 {
+    if (b.len == 0) {
+        // Handled by prefix
+        return 1;
+    }
+    const log_xlen = 6; // log2(64) = 6
+    const split_result = b.split(log_xlen);
+    const shift: u64 = @truncate(split_result.suffix.value);
+    // Subtract 1 to avoid overflow; prefix compensates with factor of 2
+    if (XLEN - 1 < shift) return 1;
+    return @as(u64, 1) << @intCast(XLEN - 1 - shift);
+}
+
+/// RightShiftHelper suffix: returns 2^(y.leading_ones())
+fn rightShiftHelperSuffixMle(b: LookupBits(128)) u64 {
+    const parts = b.uninterleave();
+    const y_bits = LookupBits(128).new(parts.right, b.len / 2);
+    const leading = y_bits.leadingOnes();
+    if (leading >= 64) return 0; // overflow protection
+    return @as(u64, 1) << @intCast(leading);
+}
+
+/// SignExtensionUpperHalf suffix: handles sign extension for upper half of word
+fn signExtensionUpperHalfSuffixMle(b: LookupBits(128)) u64 {
+    const half_word_size = XLEN / 2;
+    if (b.len >= half_word_size) {
+        // Extract bit at position (half_word_size - 1), which is the sign bit
+        const bits = b.value;
+        const sign_bit_position = half_word_size - 1;
+        const sign_bit = (bits >> @intCast(sign_bit_position)) & 1;
+        if (sign_bit == 1) {
+            // Return all 1s in the upper half
+            return ((@as(u64, 1) << @intCast(half_word_size)) - 1) << @intCast(half_word_size);
+        } else {
+            return 0;
+        }
+    } else {
+        // Suffix too small, return 1 (prefix handles)
+        return 1;
+    }
+}
+
+/// SignExtensionRightOperand suffix: sign extension based on right operand
+fn signExtensionRightOperandSuffixMle(b: LookupBits(128)) u64 {
+    if (b.len >= XLEN) {
+        const bits = b.value;
+        const sign_bit_position = XLEN - 2;
+        const sign_bit = (bits >> @intCast(sign_bit_position)) & 1;
+        if (sign_bit == 1) {
+            // Return all 1s in the upper half (for 64-bit: 0xFFFFFFFF00000000)
+            // This is ((1 << XLEN) - (1 << XLEN/2)) but we can compute it as:
+            // 0xFFFFFFFFFFFFFFFF ^ 0x00000000FFFFFFFF = 0xFFFFFFFF00000000
+            return 0xFFFFFFFF00000000;
+        } else {
+            return 0;
+        }
+    } else {
+        // Suffix too small, return 1 (prefix handles)
+        return 1;
+    }
+}
+
+/// RightShiftW suffix: right shift for 32-bit W variant
+fn rightShiftWSuffixMle(b: LookupBits(128)) u64 {
+    const parts = b.uninterleave();
+    const x: u32 = @truncate(parts.left);
+    const y_bits = LookupBits(128).new(parts.right, @min(b.len / 2, XLEN / 2));
+    const tz = y_bits.trailingZeros();
+    if (tz >= 32) return 0;
+    return @as(u64, x >> @intCast(tz));
+}
+
+/// RightShiftWHelper suffix: helper for 32-bit right shift
+fn rightShiftWHelperSuffixMle(b: LookupBits(128)) u64 {
+    const parts = b.uninterleave();
+    const y_bits = LookupBits(128).new(parts.right, @min(b.len / 2, XLEN / 2));
+    const leading = y_bits.leadingOnes();
+    if (leading >= 64) return 0;
+    return @as(u64, 1) << @intCast(leading);
+}
+
+/// LeftShiftWHelper suffix: helper for 32-bit left shift
+fn leftShiftWHelperSuffixMle(b: LookupBits(128)) u64 {
+    const parts = b.uninterleave();
+    const y_bits = LookupBits(128).new(parts.right, b.len / 2);
+    const leading = y_bits.leadingOnes();
+    // Truncate to 32 bits
+    const result: u64 = @as(u64, 1) << @intCast(@min(leading, 31));
+    return @as(u32, @truncate(result));
+}
+
+/// LeftShiftW suffix: left shift for 32-bit W variant
+fn leftShiftWSuffixMle(b: LookupBits(128)) u64 {
+    const parts = b.uninterleave();
+    const y_bits = LookupBits(128).new(parts.right, @min(b.len / 2, XLEN / 2));
+    const x: u32 = @truncate(parts.left);
+    const y_u: u32 = @truncate(parts.right);
+    // Remove bits of x that have 1 in y
+    const masked_x = x & ~y_u;
+    const leading = y_bits.leadingOnes();
+    if (leading >= 32) return 0;
+    return @as(u64, masked_x << @intCast(leading));
+}
+
+/// OverflowBitsZero suffix: returns 1 if upper bits are all zero (no overflow)
+fn overflowBitsZeroSuffixMle(b: LookupBits(128)) u64 {
+    const upper_bits = b.value >> @intCast(XLEN);
+    return if (upper_bits == 0) 1 else 0;
+}
+
+/// XorRot suffix: XOR operands and rotate right by constant
+fn xorRotSuffixMle(b: LookupBits(128), comptime rotation: u6) u64 {
+    const parts = b.uninterleave();
+    const xor_result = parts.left ^ parts.right;
+    return std.math.rotr(u64, xor_result, rotation);
+}
+
+/// XorRotW suffix: 32-bit XOR and rotate right by constant
+fn xorRotWSuffixMle(b: LookupBits(128), comptime rotation: u5) u64 {
+    const parts = b.uninterleave();
+    const x_32: u32 = @truncate(parts.left);
+    const y_32: u32 = @truncate(parts.right);
+    const xor_result = x_32 ^ y_32;
+    return std.math.rotr(u32, xor_result, rotation);
 }
 
 // ============================================================================

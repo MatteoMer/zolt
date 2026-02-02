@@ -1,61 +1,64 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: IN PROGRESS - ra_claims Values Mismatch
+## Status: IN PROGRESS - Stage 5 Expected Claim Mismatch
 
-## Session 128 Summary
+## Session 129 Summary
 
-### Key Findings
+### Progress Made
 
-1. **Polynomial coefficients MATCH** - The batched sumcheck polynomial for round 0 matches between Zolt prover and Jolt verifier
+1. **ra_claims NOW MATCH** - After all binding rounds, the InstructionRa chunks are correct:
+   - Zolt: `InstructionRa(0) = 119b26350ef30d2127138e6672c75ea5` (matches Jolt!)
+   - The initial value `90fa96e6...` transforms to `119b2635...` after 8 binding rounds
 
-2. **Round 128 challenge MATCHES** - Verified that `f79e052f4a48e5103da274f0c5d379ef` matches between both
+2. **Instance 0 (RegistersValEvaluation) CORRECT**:
+   - `expected_product = inc_claim * wa_claim * lt_eval` matches
+   - Zolt: `2e133a8eb83ed52d70c91f47fe5c8d8c118ac4a7969d53212f19f47fa1b9a265`
+   - Jolt: `2e133a8eb83ed52d70c91f47fe5c8d8c118ac4a7969d53212f19f47fa1b9a265` ✓
 
-3. **Operand evaluations MATCH** - left_operand_eval, right_operand_eval, identity_eval all match:
-   - `left_op_eval = b2450f205a45b0cf95a97f152808af6f` (Zolt BE)
-   - `left_operand_eval = [6f, af, 08, 28, ...]` (Jolt LE) → matches when converted
+3. **Instance 1 (RamRaClaimReduction) ra_claim_reduced MATCHES**:
+   - Zolt ram_ra_claim: `0956072d38428d511d5342e39c916fe33a948b3e88eff3755eb97c124ab471ff`
+   - Jolt ra_claim_reduced: matches (same value)
+   - But eq_combined * ra_claim computation needs verification
 
-4. **ra_claims DO NOT MATCH**:
-   - Zolt: `ra_chunks[0] = 90fa96e636b607e1e46f2c8bff8e00be`
-   - Jolt: `ra_claims[0] = [a5, 5e, c7, 72, 66, 8e, 13, 27, ...]` → `119b26350ef30d2127138e6672c75ea5` in BE
+4. **Instance 2 (InstructionReadRaf) final_result MATCHES**:
+   - Jolt final_result: `[b1, 30, 62, bc, a8, dd, 8c, d2, 53, f9, 1f, 69, f5, 7b, e1, 72]`
+   - This matches Instance 2's claim in the debug output
 
-### The Core Issue
+### The Remaining Issue
 
-The ra_claims are the final sumcheck claims for the virtual ra polynomials after all 8 cycle binding rounds. Even though:
-- Initial materialization appears correct
-- Binding challenges appear correct
+The sumcheck output_claim doesn't match expected_claim:
+```
+output_claim:   [43, 99, b3, 5d, b4, 2d, 6b, ae, bf, 91, 7b, dd, d4, 96, ac, ce, ...]
+expected_claim: [a5, 06, a9, 32, b6, e9, 68, 44, 5c, f2, 37, 59, df, fa, 57, c6, ...]
+```
 
-The final values don't match.
+But:
+- Zolt's final batched claim matches output_claim
+- All three instance claims individually appear correct
 
-### Possible Root Causes
+This suggests the issue is either:
+1. The sumcheck polynomial coefficients in some round
+2. A challenge mismatch between prover and verifier
+3. Different round offsets or slicing
 
-1. **Binding logic issue during cycle rounds** - The polynomial binding might differ
-2. **Challenge order/endianness** - How challenges are applied to polynomials
-3. **Off-by-one in polynomial access** - Accessing wrong indices after binding
+### Debug Data
 
-### Debug Information
+**Instance Claims (all appear correct):**
+- Instance 0 claim: `[65, a2, b9, a1, 7f, f4, 19, 2f, ...]`
+- Instance 1 claim: `[1b, bf, d3, c0, 17, 46, 79, 99, ...]`
+- Instance 2 claim: `[b1, 30, 62, bc, a8, dd, 8c, d2, ...]`
 
-**Zolt ra_chunk_weights after materialization (cycle 0, chunk 0):**
-- v0_p0 = `408e25165ab4e1eaa3ad60d7db172356`
-- v0_p1 = `45df4a65017fd3a782c45b7dc305c1cb`
-- product = `90fa96e636b607e1e46f2c8bff8e00be` (initial ra_chunk[0][0])
-
-After 8 binding rounds, all cycles had the same value (constant polynomial) so:
-- final ra_chunks[0] = `90fa96e636b607e1e46f2c8bff8e00be` (unchanged)
-
-But Jolt expects: `119b26350ef30d2127138e6672c75ea5`
+**Batch Coefficients:**
+- Instance 0 coeff: `[04, 97, 3d, 64, ...]`
+- Instance 1 coeff: `[50, 2a, 19, a0, ...]`
+- Instance 2 coeff: `[45, 50, 75, e2, ...]`
 
 ### Next Steps
 
-1. **Add debug to Jolt** to print ra_polys values immediately after init_log_t_rounds() materialization
-2. **Compare expanding table values** between Zolt and Jolt at round 128
-3. **Verify challenge application order** in cycle round binding
-
-### Files Modified This Session
-
-- `src/zkvm/spartan/stage5_prover.zig`:
-  - Removed bit-reversal in ra_chunk_weights materialization
-  - Added detailed debug output for ra computation
-  - Added r_address_prime debug prints
+1. Compare sumcheck polynomial coefficients for each round between Zolt and Jolt
+2. Verify the round offset calculations are correct
+3. Check if batching coefficients match between prover and verifier
+4. Trace a few specific rounds to identify where the divergence happens
 
 ### Test Commands
 

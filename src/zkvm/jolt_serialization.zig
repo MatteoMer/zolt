@@ -274,6 +274,16 @@ pub fn ArkworksSerializer(comptime F: type) type {
                                 }
                                 std.debug.print("[SERIALIZE] Claim {d:03}: Virtual(LookupTableFlag({}), {s}) = [{x:0>2},{x:0>2},{x:0>2},{x:0>2}...]\n", .{ i, flag_idx, @tagName(v.sumcheck_id), buf[0], buf[1], buf[2], buf[3] });
                             },
+                            .InstructionRa => |ra_idx| {
+                                // Print InstructionRa claim value
+                                const le_bytes = entry.claim.toBytes();
+                                const be_bytes = entry.claim.toBytesBE();
+                                std.debug.print("[SERIALIZE] Claim {d:02}: Virtual(InstructionRa({}), {s}) = LE[{x:0>2},{x:0>2},...] BE[{x:0>2}{x:0>2}...]\n", .{
+                                    i, ra_idx, @tagName(v.sumcheck_id),
+                                    le_bytes[0], le_bytes[1],
+                                    be_bytes[0], be_bytes[1],
+                                });
+                            },
                             else => {
                                 std.debug.print("[SERIALIZE] Claim {d:02}: Virtual({s}, {s})\n", .{ i, @tagName(v.poly), @tagName(v.sumcheck_id) });
                             },

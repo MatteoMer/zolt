@@ -2847,6 +2847,7 @@ pub fn ProofConverter(comptime F: type) type {
             // InstructionRa(i) chunks for LookupsReadRaf (LOG_K / ra_virtual_log_k_chunk = 128 / 16 = 8 chunks)
             const lookups_ra_d: usize = lookups_log_k / config.lookups_ra_virtual_log_k_chunk;
             for (0..lookups_ra_d) |i| {
+                std.debug.print("[OPENING_CLAIMS] Inserting InstructionRa({}) for InstructionReadRaf = {any}\n", .{ i, stage5_result.lookups_ra_chunks[i].toBytesBE() });
                 try jolt_proof.opening_claims.insert(
                     .{ .Virtual = .{ .poly = .{ .InstructionRa = i }, .sumcheck_id = .InstructionReadRaf } },
                     stage5_result.lookups_ra_chunks[i],

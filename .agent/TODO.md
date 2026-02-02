@@ -1,102 +1,72 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: IN PROGRESS - Stage 5 Polynomial Degree Mismatch
+## Status: IN PROGRESS - Stage 5 Expected Output Claim Mismatch
 
-## Session 126 Summary (Final)
+## Session 127 Summary
 
-### ROOT CAUSE IDENTIFIED: Polynomial Degree Mismatch
+### Progress Made
 
-**Critical Finding:** Zolt's Stage 5 produces degree-2 polynomials for address rounds, but Jolt expects degree-3.
+1. **Fixed polynomial degree mismatch for address rounds:**
+   - Instance 2's `eval_1` was not being added to `combined_poly`
+   - Now computes `eval_1_inst2 = lookups_claim - eval_0_inst2` from sumcheck property
+   - Uses `toomCookToCompressed()` instead of `fromEvalsAndHint()` for proper degree-3 encoding
 
-**Evidence:**
-1. Jolt's Stage 5 Round 0 debug shows: `Round 0 (degree 3):`
-2. Zolt's code explicitly uses degree-2: `// This produces [c0, c2, 0] for degree-2 polynomial`
-3. The polynomial coefficients don't match:
-   - Jolt coeff[0]: `d5d3057cdadc59f4...`
-   - Zolt c0: `8693777e9c24e8b0...`
+2. **Fixed claim update formula for degree-3 polynomials:**
+   - Was: `c1 = claim - c0 - c2 - c3` (WRONG)
+   - Now: `c1 = claim - 2*c0 - c2 - c3` (correct, from p(0)+p(1)=claim property)
 
-**Why degree matters:**
-- The sumcheck protocol requires prover and verifier to agree on polynomial degrees
-- Polynomial coefficients are appended to transcript to derive challenges
-- Different coefficients → different transcript state → different challenges
-- Different challenges → verification failure
+### Current Status
 
-### Stage 5 Architecture
+**What's Working:**
+- Stage 5 transcript progresses through all 136 rounds correctly
+- Polynomial coefficients match between Zolt and Jolt for round 0
+- Challenges match between prover and verifier
+- Sumcheck output_claim matches after all rounds complete
 
-The batched sumcheck in Stage 5 combines 3 instances:
-1. **Instance 0: RegistersValEvaluation** - degree depends on polynomial structure
-2. **Instance 1: RamRaClaimReduction** - degree depends on phase
-3. **Instance 2: InstructionReadRaf** - degree varies (2 for address, 10 for cycle)
+**What's Failing:**
+- Expected output claim doesn't match the sumcheck output claim
+- The verifier computes expected_claim from instance evaluations:
+  - Instance 0 (RegistersValEvaluation): `expected_claim_0 * batch0`
+  - Instance 1 (RamRaClaimReduction): `expected_claim_1 * batch1`
+  - Instance 2 (InstructionReadRaf): `expected_claim_2 * batch2`
+  - Sum should equal the sumcheck output_claim
 
-The batched polynomial degree = `max(instance_degrees)` for each round.
-
-**For address rounds (0-127):**
-- Instance 0: degree 3 (product of 3 linear polynomials: inc, wa, lt)
-- Instance 1: degree 2-3 (depends on phase)
-- Instance 2: degree 2 (prefix-suffix decomposition)
-- **Batched degree: 3**
-
-**For cycle rounds (128-135):**
-- Instance 0: degree 3
-- Instance 1: degree 2-3
-- Instance 2: degree 10 (product of 10 factors: 8 ra_chunks + eq + combined_val)
-- **Batched degree: 10**
-
-### What Verified Working
-
-1. **Initial claim matches:** ✓
-   ```
-   Jolt: 990578d0e96c66a0a2c80e472d900a1cb2dac0db537eaae82e1b48bc1760fb00
-   Zolt: 990578d0e96c66a0a2c80e472d900a1cb2dac0db537eaae82e1b48bc1760fb00
-   ```
-
-2. **Gamma matches:** ✓
-   ```
-   Both: 5ab9a012f2c4742080476c8d0fc0accb
-   ```
-
-3. **Transcript state at Stage 5 start:** ✓
-
-4. **Polynomial coefficients DON'T match:** ✗
-   - This causes transcript divergence after round 0
-   - All subsequent challenges are wrong, including those used for ra_chunk
-
-### Fix Required
-
-Zolt's Stage 5 address rounds must use degree-3 polynomials:
-1. Compute eval_0, eval_1, eval_2, eval_3 (or eval_inf) instead of just eval_0, eval_2
-2. Use the correct Toom-Cook format `[p(0), p(1), p(2), p_inf]`
-3. Convert to compressed format `[c0, c2, c3]` for degree-3
-
-### Key Code Location
-
-**Zolt:** `src/zkvm/spartan/stage5_prover.zig` lines 2080-2095
-
-```zig
-// Current (WRONG):
-// This produces [c0, c2, 0] for degree-2 polynomial
-const uni_poly = UniPoly(F).fromEvalsAndHint(current_batched_claim, eval_0, eval_2);
-
-// Need to change to degree-3 by using all four Toom-Cook evals
-// and computing c3 properly
+**Error Details:**
 ```
+output_claim:   [46, 98, ab, 10, 06, ee, 18, b1, 5d, ba, c5, b6, 19, fc, e0, 15, ...]
+expected_claim: [fb, cc, 05, 3a, fa, 11, 16, ac, bb, a3, f1, ed, 45, 66, a0, 3b, ...]
+```
+
+### Root Cause Analysis
+
+The expected_claim is computed by evaluating the bound polynomials at the sumcheck challenges. This means one of the following is incorrect in Zolt's prover:
+
+1. **Instance 0 (RegistersValEvaluation) polynomial binding:**
+   - The `inc_evals`, `wa_evals`, `lt_evals` arrays are bound each round
+   - Final claim should be `inc[0] * wa[0] * lt[0]` at the reduced point
+
+2. **Instance 1 (RamRaClaimReduction) polynomial binding:**
+   - B_1, B_2 arrays are bound during address rounds
+   - eq_raf/rw/val_bound evolve during cycle rounds
+   - Final claim should be sparse sum over RAM accesses
+
+3. **Instance 2 (InstructionReadRaf) polynomial binding:**
+   - `lookups_eq_evals`, `ra_chunk_weights`, `lookups_combined_vals` are bound
+   - Final claim should match `eq_eval * ra_eval * combined_val`
 
 ### Next Steps
 
-1. **Fix degree-3 polynomial computation for address rounds**
-   - Modify `stage5_prover.zig` to compute full Toom-Cook evals [p(0), p(1), p(2), p_inf]
-   - Update polynomial combination logic for all three instances
-   - Ensure Instance 0 (RegistersValEvaluation) contributes degree-3 terms
+1. **Debug Instance 0 binding:**
+   - Add debug output for `inc_evals[0]`, `wa_evals[0]`, `lt_evals[0]` after each round
+   - Compare final values with Jolt's expected values
 
-2. **Verify each instance's degree computation**
-   - Instance 0: Must produce degree-3 (product of inc, wa, lt)
-   - Instance 1: Verify RamRaClaimReduction produces correct degree
-   - Instance 2: Keep degree-2 for prefix-suffix
+2. **Debug Instance 1 binding:**
+   - Verify B_1, B_2 binding produces correct final values
+   - Check eq_raf_bound, eq_rw_bound, eq_val_bound computation
 
-3. **Test incrementally**
-   - First fix round 0 coefficients to match Jolt
-   - Verify transcript state matches after round 0
-   - Continue until all 136 rounds pass
+3. **Debug Instance 2 binding:**
+   - Verify ra_chunk_weights binding produces correct final ra_claim
+   - Check lookups_eq_evals final evaluation
 
 ### Key Files
 
@@ -104,8 +74,10 @@ const uni_poly = UniPoly(F).fromEvalsAndHint(current_batched_claim, eval_0, eval
 - `src/zkvm/spartan/stage5_prover.zig` - Stage 5 batched sumcheck prover
 
 **Jolt:**
-- `jolt-core/src/subprotocols/sumcheck.rs` - Batched sumcheck implementation
-- `jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs` - InstructionReadRaf
+- `jolt-core/src/subprotocols/sumcheck.rs` - Batched sumcheck verify (expected_output_claim computation)
+- `jolt-core/src/zkvm/registers/val_evaluation.rs` - Instance 0 expected claim
+- `jolt-core/src/zkvm/claim_reductions/ram_ra.rs` - Instance 1 expected claim
+- `jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs` - Instance 2 expected claim
 
 ### Test Commands
 
@@ -114,12 +86,10 @@ const uni_poly = UniPoly(F).fromEvalsAndHint(current_batched_claim, eval_0, eval
 zig build -Doptimize=ReleaseFast
 
 # Generate proof with debug
-./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format --export-preprocessing logs/zolt_preprocessing.bin -o logs/zolt_proof_dory.bin 2>&1 | grep "STAGE5 COEFF"
+./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format --export-preprocessing logs/zolt_preprocessing.bin -o logs/zolt_proof_dory.bin 2>&1 | grep -E "STAGE5"
 
 # Copy and verify
 cp logs/zolt_*.bin /tmp/
 cd /home/vivado/projects/jolt
 cargo test --package jolt-core --features zolt-debug test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
-
-SESSION_ENDING: Context is getting long. The root cause is identified - polynomial degree mismatch in Stage 5 address rounds. Next session should fix the degree computation in `stage5_prover.zig` to use degree-3 polynomials for address rounds.

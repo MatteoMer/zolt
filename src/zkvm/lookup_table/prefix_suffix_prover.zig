@@ -182,12 +182,16 @@ pub fn AllSuffixPolys(comptime F: type) type {
             }
 
             // Accumulate contributions from each cycle
+            var cycles_processed: usize = 0;
+            var non_zero_suffix_mle: usize = 0;
             for (0..u_evals.len) |j| {
                 const table_idx = cycle_table_indices[j];
                 if (table_idx < 0) continue; // No table for this cycle
 
                 const t_idx: usize = @intCast(table_idx);
                 if (t_idx >= NUM_TABLES) continue;
+
+                cycles_processed += 1;
 
                 const k = lookup_indices[j];
                 const prefix_bits = (k >> @intCast(suffix_len)) & m_mask;
@@ -197,10 +201,18 @@ pub fn AllSuffixPolys(comptime F: type) type {
                 const u = u_evals[j];
                 const table_suffixes = tableSuffixes(t_idx);
 
+                // Debug: print first few cycles in phase 0
+                if (phase == 0 and cycles_processed <= 5) {
+                    std.debug.print("[SUFFIX INIT] cycle j={} t_idx={} k=0x{x:0>32} prefix_bits={} suffix_len={}\n", .{
+                        j, t_idx, k, prefix_bits, suffix_len,
+                    });
+                }
+
                 // Accumulate for each suffix type
                 for (table_suffixes, 0..) |suffix, s_idx| {
                     const t = suffixMle(suffix, suffix_bits);
                     if (t != 0) {
+                        non_zero_suffix_mle += 1;
                         const q_poly = self.tables[t_idx].?.polys[s_idx];
                         const idx: usize = @intCast(prefix_bits);
                         if (suffixes_mod.is01Valued(suffix)) {
@@ -210,8 +222,17 @@ pub fn AllSuffixPolys(comptime F: type) type {
                             // General suffix: multiply by t
                             q_poly[idx] = q_poly[idx].add(u.mul(F.fromU64(t)));
                         }
+                        // Debug: print which suffix types contribute
+                        if (phase == 0 and cycles_processed <= 5) {
+                            std.debug.print("  suffix[{}]={s} t={} idx={}\n", .{ s_idx, @tagName(suffix), t, idx });
+                        }
                     }
                 }
+            }
+            if (phase == 0) {
+                std.debug.print("[SUFFIX INIT] phase={}: cycles_processed={}, non_zero_suffix_mle={}\n", .{
+                    phase, cycles_processed, non_zero_suffix_mle,
+                });
             }
         }
 
@@ -279,6 +300,43 @@ pub fn proverMsgReadChecking(
         break :blk 1; // Fallback
     };
 
+    // Debug: count non-zero Q values for round 0
+    if (round == 0) {
+        var total_non_zero: usize = 0;
+        var non_zero_tables: usize = 0;
+        for (0..NUM_TABLES) |table_idx| {
+            if (suffix_polys.tables[table_idx]) |table| {
+                var table_non_zero: usize = 0;
+                for (table.polys) |poly| {
+                    for (poly) |v| {
+                        if (!v.eql(F.zero())) table_non_zero += 1;
+                    }
+                }
+                if (table_non_zero > 0) {
+                    non_zero_tables += 1;
+                    total_non_zero += table_non_zero;
+                    std.debug.print("[READ_CHECK ROUND 0] table {} has {} non-zero Q values\n", .{ table_idx, table_non_zero });
+
+                    // Print actual Q values for table 0 (RangeCheck)
+                    if (table_idx == 0) {
+                        const suffixes_list = tableSuffixes(0);
+                        std.debug.print("[READ_CHECK ROUND 0] Table 0 Q values:\n", .{});
+                        for (table.polys, 0..) |poly, s_idx| {
+                            for (poly, 0..) |v, idx| {
+                                if (!v.eql(F.zero())) {
+                                    std.debug.print("  Q[{s}][{}] = {x}\n", .{ @tagName(suffixes_list[s_idx]), idx, v.toBytesBE()[24..32].* });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        std.debug.print("[READ_CHECK ROUND 0] Q poly stats: total_non_zero={}, non_zero_tables={}, len={}\n", .{
+            total_non_zero, non_zero_tables, len,
+        });
+    }
+
     const log_len = @ctz(len);
     const half_len = len / 2;
 
@@ -331,6 +389,17 @@ pub fn proverMsgReadChecking(
 
     // Quadratic interpolation: eval_2 = 2*eval_2_right - eval_2_left
     const eval_2 = eval_2_right.add(eval_2_right).sub(eval_2_left);
+
+    if (round == 0) {
+        std.debug.print("[READ_CHECK ROUND 0] Final: eval_0={x}, eval_2={x}\n", .{
+            eval_0.toBytesBE()[24..32].*,
+            eval_2.toBytesBE()[24..32].*,
+        });
+        std.debug.print("[READ_CHECK ROUND 0]   eval_2_left={x}, eval_2_right={x}\n", .{
+            eval_2_left.toBytesBE()[24..32].*,
+            eval_2_right.toBytesBE()[24..32].*,
+        });
+    }
 
     return .{ eval_0, eval_2 };
 }

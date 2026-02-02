@@ -1,90 +1,111 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: IN PROGRESS - Stage 5 ra_chunk Mismatch
+## Status: IN PROGRESS - Stage 5 Polynomial Degree Mismatch
 
-## Session 126 Summary
+## Session 126 Summary (Final)
 
-### Progress Made
+### ROOT CAUSE IDENTIFIED: Polynomial Degree Mismatch
 
-1. **Verified transcript produces correct challenges**
-   - Transcript outputs `masked_value=0x15b2ebced7ca0d488e1f5913aabdd05a` which matches Jolt's r[0]
-   - The challenge stored has limbs `[0, 0, 0x8e1f5913aabdd05a, 0x15b2ebced7ca0d48]`
-   - Debug output shows `toBytesBE()` converts from Montgomery form correctly
-   - **The arithmetic representation is correct - both use MontU128Challenge format**
+**Critical Finding:** Zolt's Stage 5 produces degree-2 polynomials for address rounds, but Jolt expects degree-3.
 
-2. **Understood ra_claim computation flow**
-   - Jolt: `ra_polys` initialized with `eq_evals[x] = eq(x, r_address_chunk)`, then bound over cycle rounds
-   - Zolt: `ra_chunk_weights` computed bit-by-bit during address rounds, then bound over cycle rounds
-   - Both should produce the same result mathematically
+**Evidence:**
+1. Jolt's Stage 5 Round 0 debug shows: `Round 0 (degree 3):`
+2. Zolt's code explicitly uses degree-2: `// This produces [c0, c2, 0] for degree-2 polynomial`
+3. The polynomial coefficients don't match:
+   - Jolt coeff[0]: `d5d3057cdadc59f4...`
+   - Zolt c0: `8693777e9c24e8b0...`
 
-3. **Found key difference: challenge ordering in Jolt**
-   - Jolt's `normalize_opening_point()` REVERSES the cycle challenges:
-     ```rust
-     let r_cycle_prime = r_cycle_prime.iter().copied().rev().collect::<Vec<_>>();
-     ```
-   - This is for converting from LowToHigh binding order to BIG_ENDIAN opening point
-   - Need to verify Zolt handles this correctly
+**Why degree matters:**
+- The sumcheck protocol requires prover and verifier to agree on polynomial degrees
+- Polynomial coefficients are appended to transcript to derive challenges
+- Different coefficients → different transcript state → different challenges
+- Different challenges → verification failure
 
-### Current Issue
+### Stage 5 Architecture
 
-**ra_chunk values don't match between Zolt and Jolt**
+The batched sumcheck in Stage 5 combines 3 instances:
+1. **Instance 0: RegistersValEvaluation** - degree depends on polynomial structure
+2. **Instance 1: RamRaClaimReduction** - degree depends on phase
+3. **Instance 2: InstructionReadRaf** - degree varies (2 for address, 10 for cycle)
 
+The batched polynomial degree = `max(instance_degrees)` for each round.
+
+**For address rounds (0-127):**
+- Instance 0: degree 3 (product of 3 linear polynomials: inc, wa, lt)
+- Instance 1: degree 2-3 (depends on phase)
+- Instance 2: degree 2 (prefix-suffix decomposition)
+- **Batched degree: 3**
+
+**For cycle rounds (128-135):**
+- Instance 0: degree 3
+- Instance 1: degree 2-3
+- Instance 2: degree 10 (product of 10 factors: 8 ra_chunks + eq + combined_val)
+- **Batched degree: 10**
+
+### What Verified Working
+
+1. **Initial claim matches:** ✓
+   ```
+   Jolt: 990578d0e96c66a0a2c80e472d900a1cb2dac0db537eaae82e1b48bc1760fb00
+   Zolt: 990578d0e96c66a0a2c80e472d900a1cb2dac0db537eaae82e1b48bc1760fb00
+   ```
+
+2. **Gamma matches:** ✓
+   ```
+   Both: 5ab9a012f2c4742080476c8d0fc0accb
+   ```
+
+3. **Transcript state at Stage 5 start:** ✓
+
+4. **Polynomial coefficients DON'T match:** ✗
+   - This causes transcript divergence after round 0
+   - All subsequent challenges are wrong, including those used for ra_chunk
+
+### Fix Required
+
+Zolt's Stage 5 address rounds must use degree-3 polynomials:
+1. Compute eval_0, eval_1, eval_2, eval_3 (or eval_inf) instead of just eval_0, eval_2
+2. Use the correct Toom-Cook format `[p(0), p(1), p(2), p_inf]`
+3. Convert to compressed format `[c0, c2, c3]` for degree-3
+
+### Key Code Location
+
+**Zolt:** `src/zkvm/spartan/stage5_prover.zig` lines 2080-2095
+
+```zig
+// Current (WRONG):
+// This produces [c0, c2, 0] for degree-2 polynomial
+const uni_poly = UniPoly(F).fromEvalsAndHint(current_batched_claim, eval_0, eval_2);
+
+// Need to change to degree-3 by using all four Toom-Cook evals
+// and computing c3 properly
 ```
-Zolt ra_chunks[0] = 72c54fffc84783cff5628ecc74b37775
-Jolt ra_claims[0] = 12109e5de8bae83db5b8fca2612309a8 (LE)
-```
-
-### Key Insight About ra_claim
-
-The `ra_claim[i]` written by the prover is:
-```
-Σ_j eq(j, r_cycle_prime) × eq(lookup_index_chunk_i[j], r_address_chunk_i)
-```
-
-Where:
-- `r_cycle_prime` = reversed cycle challenges (from sumcheck rounds 128-135)
-- `r_address_chunk_i` = challenges for chunk i (rounds i*16 to (i+1)*16-1)
-- `lookup_index_chunk_i[j]` = bits [128-16*i-1 : 128-16*(i+1)] of `lookup_index[j]`
-
-### Possible Root Causes
-
-1. **Challenge ordering mismatch during cycle binding**
-   - Jolt binds ra_polys with LowToHigh order but stores opening with reversed cycle challenges
-   - Zolt may not be reversing or may be reversing in wrong place
-
-2. **Bit extraction order for lookup_index chunks**
-   - Zolt extracts MSB first during address rounds
-   - Need to verify this matches how Jolt computes `lookup_index_chunk`
-
-3. **eq polynomial evaluation order**
-   - Jolt uses `EqPolynomial::evals(&r_address_chunk)` which uses specific bit ordering
-   - Zolt computes eq bit-by-bit which should be equivalent but may differ
 
 ### Next Steps
 
-1. **Add detailed debug to compare Zolt and Jolt challenge sequences**
-   - Print all 128 address challenges from Zolt
-   - Compare with Jolt's r_address_prime
+1. **Fix degree-3 polynomial computation for address rounds**
+   - Modify `stage5_prover.zig` to compute full Toom-Cook evals [p(0), p(1), p(2), p_inf]
+   - Update polynomial combination logic for all three instances
+   - Ensure Instance 0 (RegistersValEvaluation) contributes degree-3 terms
 
-2. **Verify lookup_index_chunk extraction**
-   - Check that Zolt's bit extraction matches Jolt's `lookup_index_chunk()`
-   - For chunk 0: should be bits [127:112] = high 16 bits
-   - For chunk 7: should be bits [15:0] = low 16 bits
+2. **Verify each instance's degree computation**
+   - Instance 0: Must produce degree-3 (product of inc, wa, lt)
+   - Instance 1: Verify RamRaClaimReduction produces correct degree
+   - Instance 2: Keep degree-2 for prefix-suffix
 
-3. **Test eq polynomial equivalence**
-   - Compute eq(index_chunk, r_chunk) directly in Zolt
-   - Compare with bit-by-bit accumulated value
+3. **Test incrementally**
+   - First fix round 0 coefficients to match Jolt
+   - Verify transcript state matches after round 0
+   - Continue until all 136 rounds pass
 
 ### Key Files
 
 **Zolt:**
 - `src/zkvm/spartan/stage5_prover.zig` - Stage 5 batched sumcheck prover
-- `src/zkvm/proof_converter.zig` - Proof generation orchestration
 
 **Jolt:**
-- `jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs` - InstructionReadRaf sumcheck
-- `jolt-core/src/zkvm/instruction_lookups/ra_virtual.rs` - RaPolynomial and virtualization
-- `jolt-core/src/zkvm/config.rs` - OneHotParams::compute_r_address_chunks
+- `jolt-core/src/subprotocols/sumcheck.rs` - Batched sumcheck implementation
+- `jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs` - InstructionReadRaf
 
 ### Test Commands
 
@@ -92,45 +113,13 @@ Where:
 # Build Zolt
 zig build -Doptimize=ReleaseFast
 
-# Generate proof
-./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format --export-preprocessing logs/zolt_preprocessing.bin -o logs/zolt_proof_dory.bin
+# Generate proof with debug
+./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format --export-preprocessing logs/zolt_preprocessing.bin -o logs/zolt_proof_dory.bin 2>&1 | grep "STAGE5 COEFF"
 
-# Copy to /tmp for Jolt test
+# Copy and verify
 cp logs/zolt_*.bin /tmp/
-
-# Verify with Jolt
 cd /home/vivado/projects/jolt
 cargo test --package jolt-core --features zolt-debug test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
 
-## Architecture Understanding
-
-### Stage 5 (LookupsReadRaf) Sumcheck
-
-The sumcheck proves:
-```
-Σ_j eq(j, r_cycle) × ra(j) × (combined_val(j) + γ×raf_val(j))
-```
-
-Where:
-- j ranges over cycles [0, T)
-- `ra(j) = Π_{chunk} eq(lookup_index_chunk[j], r_address_chunk)`
-- `combined_val(j)` = table value + RAF contribution
-- `raf_val(j)` = left + γ×right or γ×identity
-
-### Address Rounds (0-127)
-
-During address rounds, the prover uses prefix-suffix decomposition to compute:
-- read_checking: Σ_j eq × ra × table_value
-- raf: Σ_j eq × ra × raf_value
-
-The `ra` is implicitly computed through the decomposition.
-
-### Cycle Rounds (128-135)
-
-During cycle rounds, the `ra_polys` (or `ra_chunk_weights`) are explicitly bound with cycle challenges.
-
-After all rounds, the final claims are:
-- `ra_chunks[i]`: The bound ra polynomial value
-- `table_flag[t]`: Which table was used
-- `raf_flag`: RAF path indicator
+SESSION_ENDING: Context is getting long. The root cause is identified - polynomial degree mismatch in Stage 5 address rounds. Next session should fix the degree computation in `stage5_prover.zig` to use degree-3 polynomials for address rounds.

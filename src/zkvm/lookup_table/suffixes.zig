@@ -220,7 +220,12 @@ fn rightOperandIsZeroSuffixMle(b: LookupBits(128)) u64 {
 }
 
 /// LSB suffix: returns the least significant bit of y
+/// When the suffix has 0 bits (all bound), returns 1 to match Jolt's behavior
 fn lsbSuffixMle(b: LookupBits(128)) u64 {
+    if (b.len == 0) {
+        // Match Jolt: when all bits are bound, return 1
+        return 1;
+    }
     const parts = b.uninterleave();
     return parts.right & 1;
 }
@@ -232,17 +237,27 @@ fn divByZeroSuffixMle(b: LookupBits(128)) u64 {
 }
 
 /// Pow2 suffix: returns 2^y for y in [0, 63]
+/// When the suffix has 0 bits (all bound), returns 1 to match Jolt's behavior
 fn pow2SuffixMle(b: LookupBits(128)) u64 {
-    const parts = b.uninterleave();
-    const y = parts.right & 0x3F; // Mask to 6 bits for shift amount
-    return @as(u64, 1) << @intCast(y);
+    if (b.len == 0) {
+        return 1;
+    }
+    const log_xlen = 6; // log2(64) = 6
+    const split_result = b.split(log_xlen);
+    const shift: u64 = @truncate(split_result.suffix.value);
+    return @as(u64, 1) << @intCast(shift);
 }
 
 /// Pow2W suffix: returns 2^y for y in [0, 31] (32-bit version)
+/// When the suffix has 0 bits (all bound), returns 1 to match Jolt's behavior
 fn pow2WSuffixMle(b: LookupBits(128)) u64 {
-    const parts = b.uninterleave();
-    const y = parts.right & 0x1F; // Mask to 5 bits for shift amount
-    return @as(u64, 1) << @intCast(y);
+    if (b.len == 0) {
+        return 1;
+    }
+    // Always extract 5 bits for modulo 32
+    const split_result = b.split(5);
+    const shift: u64 = @truncate(split_result.suffix.value);
+    return @as(u64, 1) << @intCast(shift);
 }
 
 /// SignExtension suffix: sign-extends from bit position based on operand
@@ -278,10 +293,15 @@ fn rightShiftSuffixMle(b: LookupBits(128)) u64 {
     return parts.left >> @intCast(tz);
 }
 
-/// TwoLsb suffix: returns the two least significant bits of y
+/// TwoLsb suffix: returns 1 if the two LSBs are 0 (for alignment check), 0 otherwise
+/// When the suffix has 0 bits (all bound), returns 1 to match Jolt's behavior
 fn twoLsbSuffixMle(b: LookupBits(128)) u64 {
-    const parts = b.uninterleave();
-    return parts.right & 0x3;
+    // Returns 1 if the two least significant bits are 0
+    // and 0 otherwise. Returns 1 by default when len == 0.
+    if (b.len == 0 or (b.value & 0b11) == 0) {
+        return 1;
+    }
+    return 0;
 }
 
 /// ChangeDivisor suffix: returns 1 if y is all 1s and x is 0

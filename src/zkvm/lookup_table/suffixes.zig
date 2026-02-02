@@ -171,22 +171,25 @@ fn rightOperandWSuffixMle(b: LookupBits(128)) u64 {
     return parts.right & 0xFFFFFFFF;
 }
 
-/// UpperWord suffix: returns the upper 32 bits of the right operand
+/// UpperWord suffix: returns the upper XLEN bits of the raw bitvector
+/// For XLEN=64, this is b >> 64
 fn upperWordSuffixMle(b: LookupBits(128)) u64 {
-    const parts = b.uninterleave();
-    return parts.right >> 32;
+    // Return upper 64 bits of the raw bitvector (shift right by XLEN)
+    return @truncate(b.value >> 64);
 }
 
-/// LowerWord suffix: returns the lower 32 bits of the right operand
+/// LowerWord suffix: returns the lower XLEN bits of the raw bitvector
+/// For XLEN=64, this is b % 2^64
 fn lowerWordSuffixMle(b: LookupBits(128)) u64 {
-    const parts = b.uninterleave();
-    return parts.right & 0xFFFFFFFF;
+    // Return lower 64 bits of the raw bitvector
+    return @truncate(b.value);
 }
 
-/// LowerHalfWord suffix: returns the lower 16 bits of the right operand
+/// LowerHalfWord suffix: returns the lower XLEN/2 bits of the raw bitvector
+/// For XLEN=64, this is b % 2^32
 fn lowerHalfWordSuffixMle(b: LookupBits(128)) u64 {
-    const parts = b.uninterleave();
-    return parts.right & 0xFFFF;
+    // Return lower 32 bits of the raw bitvector (XLEN/2 = 32)
+    return @truncate(b.value & 0xFFFFFFFF);
 }
 
 /// LessThan suffix: returns 1 if x < y (unsigned), 0 otherwise

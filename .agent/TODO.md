@@ -4,61 +4,70 @@
 
 ## Session 129 Summary
 
-### Progress Made
+### MAJOR BREAKTHROUGH: ra_claims NOW MATCH!
 
-1. **ra_claims NOW MATCH** - After all binding rounds, the InstructionRa chunks are correct:
-   - Zolt: `InstructionRa(0) = 119b26350ef30d2127138e6672c75ea5` (matches Jolt!)
-   - The initial value `90fa96e6...` transforms to `119b2635...` after 8 binding rounds
+After extensive debugging, the InstructionRa chunks are now correctly computed:
+- Zolt: `InstructionRa(0) = 119b26350ef30d2127138e6672c75ea5`
+- Jolt: `ra_claims[0] = [a5, 5e, c7, 72, 66, 8e, 13, 27, ...]` (LE) → same value!
 
-2. **Instance 0 (RegistersValEvaluation) CORRECT**:
-   - `expected_product = inc_claim * wa_claim * lt_eval` matches
-   - Zolt: `2e133a8eb83ed52d70c91f47fe5c8d8c118ac4a7969d53212f19f47fa1b9a265`
-   - Jolt: `2e133a8eb83ed52d70c91f47fe5c8d8c118ac4a7969d53212f19f47fa1b9a265` ✓
+The fix was understanding that binding transforms the initial value.
 
-3. **Instance 1 (RamRaClaimReduction) ra_claim_reduced MATCHES**:
-   - Zolt ram_ra_claim: `0956072d38428d511d5342e39c916fe33a948b3e88eff3755eb97c124ab471ff`
-   - Jolt ra_claim_reduced: matches (same value)
-   - But eq_combined * ra_claim computation needs verification
+### All Individual Components MATCH:
 
-4. **Instance 2 (InstructionReadRaf) final_result MATCHES**:
-   - Jolt final_result: `[b1, 30, 62, bc, a8, dd, 8c, d2, 53, f9, 1f, 69, f5, 7b, e1, 72]`
-   - This matches Instance 2's claim in the debug output
+1. **Instance 0 (RegistersValEvaluation)**: ✓
+   - `inc_claim * wa_claim * lt_eval` matches verifier's expected computation
+   - Value: `2e133a8eb83ed52d70c91f47fe5c8d8c118ac4a7969d53212f19f47fa1b9a265`
+
+2. **Instance 1 (RamRaClaimReduction)**: ✓
+   - `ra_claim_reduced` matches: `0956072d38428d511d5342e39c916fe33a948b3e88eff3755eb97c124ab471ff`
+
+3. **Instance 2 (InstructionReadRaf)**: ✓
+   - Final result matches: `[b1, 30, 62, bc, a8, dd, 8c, d2, 53, f9, 1f, 69, f5, 7b, e1, 72]`
+
+4. **Batching coefficients**: ✓
+   - `batch0 = d123dc2a0dee8c5ade56bfc5643d9704`
+   - `batch1 = 149a2e91d4267f14003f2da6a0192a50`
+   - `batch2 = 313aa709c6314e254d58c99ee2755045`
+
+5. **Initial claim**: ✓
+   - `00fb6017bc481b2ee8aa7e53dbc0dab21c0a902d470ec8a2a0666ce9d0780599`
+
+6. **Polynomial coefficients (Round 0)**: ✓
+   - `c0 = 0227ff26f6fc2e8d99f99d71df1d9008`
+   - `c2 = 154d5f5a181d7a180ac943e18f7e3417`
 
 ### The Remaining Issue
 
-The sumcheck output_claim doesn't match expected_claim:
+Despite all components matching individually, the verification fails:
 ```
 output_claim:   [43, 99, b3, 5d, b4, 2d, 6b, ae, bf, 91, 7b, dd, d4, 96, ac, ce, ...]
 expected_claim: [a5, 06, a9, 32, b6, e9, 68, 44, 5c, f2, 37, 59, df, fa, 57, c6, ...]
 ```
 
-But:
-- Zolt's final batched claim matches output_claim
-- All three instance claims individually appear correct
+Where:
+- `output_claim` = final sumcheck polynomial evaluation at challenges (computed by verifier from proof)
+- `expected_claim` = sum of instance claims weighted by batching coefficients (computed by verifier from opening claims)
 
-This suggests the issue is either:
-1. The sumcheck polynomial coefficients in some round
-2. A challenge mismatch between prover and verifier
-3. Different round offsets or slicing
+### Hypothesis
 
-### Debug Data
-
-**Instance Claims (all appear correct):**
-- Instance 0 claim: `[65, a2, b9, a1, 7f, f4, 19, 2f, ...]`
-- Instance 1 claim: `[1b, bf, d3, c0, 17, 46, 79, 99, ...]`
-- Instance 2 claim: `[b1, 30, 62, bc, a8, dd, 8c, d2, ...]`
-
-**Batch Coefficients:**
-- Instance 0 coeff: `[04, 97, 3d, 64, ...]`
-- Instance 1 coeff: `[50, 2a, 19, a0, ...]`
-- Instance 2 coeff: `[45, 50, 75, e2, ...]`
+The issue may be:
+1. Challenge computation differs slightly at some intermediate round
+2. Polynomial coefficient compression/decompression has a subtle bug
+3. Round offset handling in the batched sumcheck
 
 ### Next Steps
 
-1. Compare sumcheck polynomial coefficients for each round between Zolt and Jolt
-2. Verify the round offset calculations are correct
-3. Check if batching coefficients match between prover and verifier
-4. Trace a few specific rounds to identify where the divergence happens
+1. Add per-round verification: compare `e` value after each round
+2. Check if polynomial `eval_from_hint` gives correct results
+3. Verify compressed polynomial format matches between Zolt and Jolt
+4. Compare intermediate claims during the 136-round sumcheck
+
+### Files Modified
+
+- `src/zkvm/proof_converter.zig`: Added debug for InstructionRa insertion
+- `src/zkvm/jolt_serialization.zig`: Added serialization debug
+- `jolt-core/src/zkvm/claim_reductions/ram_ra.rs`: Added eq_combined debug
+- `jolt-core/src/subprotocols/sumcheck.rs`: Fixed Stage 5 batching coeff label
 
 ### Test Commands
 
@@ -66,10 +75,10 @@ This suggests the issue is either:
 # Build Zolt
 zig build -Doptimize=ReleaseFast
 
-# Generate proof with debug
+# Generate proof
 ./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format --export-preprocessing logs/zolt_preprocessing.bin -o logs/zolt_proof_dory.bin
 
-# Copy and verify
+# Verify
 cp logs/zolt_*.bin /tmp/
 cd /home/vivado/projects/jolt
 cargo test --package jolt-core --features zolt-debug test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture

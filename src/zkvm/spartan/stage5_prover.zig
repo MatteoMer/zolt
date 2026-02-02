@@ -174,10 +174,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             const batch1 = transcript.challengeScalarFull();
             const batch2 = transcript.challengeScalarFull();
 
-            std.debug.print("[STAGE5] Batching coefficients:\n", .{});
-            std.debug.print("  batch0 = {any}\n", .{batch0.toBytesBE()[0..8]});
-            std.debug.print("  batch1 = {any}\n", .{batch1.toBytesBE()[0..8]});
-            std.debug.print("  batch2 = {any}\n", .{batch2.toBytesBE()[0..8]});
+            std.debug.print("[STAGE5] Batching coefficients (LE for Jolt comparison):\n", .{});
+            std.debug.print("  batch0 (LE) = {any}\n", .{batch0.toBytes()});
+            std.debug.print("  batch1 (LE) = {any}\n", .{batch1.toBytes()});
+            std.debug.print("  batch2 (LE) = {any}\n", .{batch2.toBytes()});
 
             // Compute scaled input claims
             // Instance i with num_rounds[i] is scaled by 2^(max_num_rounds - num_rounds[i])
@@ -3021,6 +3021,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                     const challenge = transcript.challengeScalar();
                     challenges[round] = challenge;
+
+                    // Debug: print challenge for comparison with Jolt
+                    if (round < 4 or round >= 128) {
+                        std.debug.print("[STAGE5 CHALLENGE] Round {}: LE = {any}\n", .{round, challenge.toBytes()[0..16].*});
+                    }
 
                     // Update current_batched_claim by evaluating polynomial at challenge
                     // p(r) = c0 + r*c1 + r^2*c2 + ... + r^d*c_d

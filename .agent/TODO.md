@@ -1,78 +1,79 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: IN PROGRESS - Stage 5 Transcript Divergence
+## Status: IN PROGRESS - Stage 5 ra_chunk Mismatch
 
-## Session 125 Summary
+## Session 126 Summary
 
 ### Progress Made
 
-1. **Fixed combined_vals rematerialization bug**
-   - Cycles without lookup tables were getting `combined_val = 0`
-   - Jolt ALWAYS adds RAF contribution regardless of table
-   - Fixed: Now cycles without tables get `raf_interleaved` or `raf_identity`
+1. **Verified transcript produces correct challenges**
+   - Transcript outputs `masked_value=0x15b2ebced7ca0d488e1f5913aabdd05a` which matches Jolt's r[0]
+   - The challenge stored has limbs `[0, 0, 0x8e1f5913aabdd05a, 0x15b2ebced7ca0d48]`
+   - Debug output shows `toBytesBE()` converts from Montgomery form correctly
+   - **The arithmetic representation is correct - both use MontU128Challenge format**
 
-2. **Verified eq_evals match**
-   - After eq_evals reinitialization fix, `eq_evals[0] == eq_eval_r_reduction` ✓
-   - The eq polynomial is now correct after all bindings
+2. **Understood ra_claim computation flow**
+   - Jolt: `ra_polys` initialized with `eq_evals[x] = eq(x, r_address_chunk)`, then bound over cycle rounds
+   - Zolt: `ra_chunk_weights` computed bit-by-bit during address rounds, then bound over cycle rounds
+   - Both should produce the same result mathematically
 
-3. **Verified ra_chunk computation logic is correct**
-   - Bit extraction: `bit_index = LOOKUPS_LOG_K - 1 - round` correctly processes MSB first
-   - Chunk assignment: `chunk_idx = round / 16` correctly groups 16 rounds per chunk
-   - Factor computation: `eq(bit, challenge) = (1-r) if bit=0 else r` is correct
-   - For cycles with all-zero high bits, ra_chunks 0-3 are uniform (expected behavior)
+3. **Found key difference: challenge ordering in Jolt**
+   - Jolt's `normalize_opening_point()` REVERSES the cycle challenges:
+     ```rust
+     let r_cycle_prime = r_cycle_prime.iter().copied().rev().collect::<Vec<_>>();
+     ```
+   - This is for converting from LowToHigh binding order to BIG_ENDIAN opening point
+   - Need to verify Zolt handles this correctly
 
 ### Current Issue
 
-**Transcript divergence causes different challenges between Zolt and Jolt**
+**ra_chunk values don't match between Zolt and Jolt**
 
-Debug shows Stage 5 Round 0 challenges are different:
-```
-Zolt Round 0: 1a4f09881ff874890d8d8d3810780e797ca25a17c12902cb92c0d5878c3b73da
-Jolt r[0]:    15b2ebced7ca0d488e1f5913aabdd05a
-```
-
-This causes all subsequent rounds to diverge, leading to wrong ra_chunk values.
-
-### Root Cause Analysis
-
-The transcript state must have diverged before Stage 5 Round 0. Possible causes:
-
-1. **Earlier stage polynomials are different**
-   - Stages 1-4 append polynomial coefficients to transcript
-   - If any coefficient differs, transcript state changes
-
-2. **Instance 0 or 1 polynomials are different**
-   - Stage 5 is a batched sumcheck with 3 instances
-   - Instances 0 (RegistersValEvaluation) and 1 (RamRaClaimReduction) run first
-   - If their polynomials differ, challenges for Instance 2 diverge
-
-3. **Polynomial compression format mismatch**
-   - Jolt uses specific compressed format `[c0, c2, c3, ..., cd]` (skipping c1)
-   - Any format difference changes transcript
-
-### Key Observation
-
-The ra_chunk values after all bindings are completely different:
 ```
 Zolt ra_chunks[0] = 72c54fffc84783cff5628ecc74b37775
-Jolt ra_claims[0] = 12109e5de8bae83db5b8fca2612309a8
+Jolt ra_claims[0] = 12109e5de8bae83db5b8fca2612309a8 (LE)
 ```
 
-But the ra_chunk computation LOGIC is verified correct. The difference comes from using different challenges during address rounds.
+### Key Insight About ra_claim
+
+The `ra_claim[i]` written by the prover is:
+```
+Σ_j eq(j, r_cycle_prime) × eq(lookup_index_chunk_i[j], r_address_chunk_i)
+```
+
+Where:
+- `r_cycle_prime` = reversed cycle challenges (from sumcheck rounds 128-135)
+- `r_address_chunk_i` = challenges for chunk i (rounds i*16 to (i+1)*16-1)
+- `lookup_index_chunk_i[j]` = bits [128-16*i-1 : 128-16*(i+1)] of `lookup_index[j]`
+
+### Possible Root Causes
+
+1. **Challenge ordering mismatch during cycle binding**
+   - Jolt binds ra_polys with LowToHigh order but stores opening with reversed cycle challenges
+   - Zolt may not be reversing or may be reversing in wrong place
+
+2. **Bit extraction order for lookup_index chunks**
+   - Zolt extracts MSB first during address rounds
+   - Need to verify this matches how Jolt computes `lookup_index_chunk`
+
+3. **eq polynomial evaluation order**
+   - Jolt uses `EqPolynomial::evals(&r_address_chunk)` which uses specific bit ordering
+   - Zolt computes eq bit-by-bit which should be equivalent but may differ
 
 ### Next Steps
 
-1. **Trace transcript state at Stage 5 start**
-   - Compare transcript hash/state between Zolt and Jolt
-   - Identify which previous message caused divergence
+1. **Add detailed debug to compare Zolt and Jolt challenge sequences**
+   - Print all 128 address challenges from Zolt
+   - Compare with Jolt's r_address_prime
 
-2. **Verify Instance 0 and 1 polynomials match**
-   - RegistersValEvaluation: check inc_evals, wa_evals, lt_evals
-   - RamRaClaimReduction: check the PhaseCycle polynomial computation
+2. **Verify lookup_index_chunk extraction**
+   - Check that Zolt's bit extraction matches Jolt's `lookup_index_chunk()`
+   - For chunk 0: should be bits [127:112] = high 16 bits
+   - For chunk 7: should be bits [15:0] = low 16 bits
 
-3. **Check polynomial format**
-   - Verify compressed format matches exactly
-   - Check byte order of coefficients
+3. **Test eq polynomial equivalence**
+   - Compute eq(index_chunk, r_chunk) directly in Zolt
+   - Compare with bit-by-bit accumulated value
 
 ### Key Files
 
@@ -82,6 +83,8 @@ But the ra_chunk computation LOGIC is verified correct. The difference comes fro
 
 **Jolt:**
 - `jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs` - InstructionReadRaf sumcheck
+- `jolt-core/src/zkvm/instruction_lookups/ra_virtual.rs` - RaPolynomial and virtualization
+- `jolt-core/src/zkvm/config.rs` - OneHotParams::compute_r_address_chunks
 
 ### Test Commands
 
@@ -99,3 +102,35 @@ cp logs/zolt_*.bin /tmp/
 cd /home/vivado/projects/jolt
 cargo test --package jolt-core --features zolt-debug test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
+
+## Architecture Understanding
+
+### Stage 5 (LookupsReadRaf) Sumcheck
+
+The sumcheck proves:
+```
+Σ_j eq(j, r_cycle) × ra(j) × (combined_val(j) + γ×raf_val(j))
+```
+
+Where:
+- j ranges over cycles [0, T)
+- `ra(j) = Π_{chunk} eq(lookup_index_chunk[j], r_address_chunk)`
+- `combined_val(j)` = table value + RAF contribution
+- `raf_val(j)` = left + γ×right or γ×identity
+
+### Address Rounds (0-127)
+
+During address rounds, the prover uses prefix-suffix decomposition to compute:
+- read_checking: Σ_j eq × ra × table_value
+- raf: Σ_j eq × ra × raf_value
+
+The `ra` is implicitly computed through the decomposition.
+
+### Cycle Rounds (128-135)
+
+During cycle rounds, the `ra_polys` (or `ra_chunk_weights`) are explicitly bound with cycle challenges.
+
+After all rounds, the final claims are:
+- `ra_chunks[i]`: The bound ra polynomial value
+- `table_flag[t]`: Which table was used
+- `raf_flag`: RAF path indicator

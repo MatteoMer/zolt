@@ -2537,38 +2537,50 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                         // Rematerialize combined_vals using the correct formula
                         // combined_val[j] = table_values_at_r_addr[table(j)] + raf_val
+                        //
+                        // IMPORTANT: Jolt always adds the RAF contribution regardless of whether
+                        // there's a lookup table. The table value is only added IF there's a table.
+                        // See: jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs:682-698
                         for (0..T) |j| {
-                            if (j >= trace_len) continue;
-
-                            // Get the table index for this cycle (-1 = no table)
-                            const table_idx = cycle_table_indices[j];
-                            if (table_idx < 0) {
+                            if (j >= trace_len) {
                                 lookups_combined_vals[j] = F.zero();
                                 continue;
                             }
 
-                            // Get the table MLE value at r_address
-                            const t_idx: usize = @intCast(table_idx);
-                            const table_val = if (t_idx < NUM_TABLES) table_values[t_idx] else F.zero();
+                            // Start with zero
+                            var combined_val = F.zero();
 
-                            // Determine if this cycle uses interleaved operands
-                            const is_interleaved = !cycle_is_identity_path[j];
-
-                            // combined_val = table_val + raf_val
-                            if (is_interleaved) {
-                                lookups_combined_vals[j] = table_val.add(raf_interleaved);
-                            } else {
-                                lookups_combined_vals[j] = table_val.add(raf_identity);
+                            // Add lookup table value if this cycle has a table
+                            const table_idx = cycle_table_indices[j];
+                            if (table_idx >= 0) {
+                                const t_idx: usize = @intCast(table_idx);
+                                if (t_idx < NUM_TABLES) {
+                                    combined_val = combined_val.add(table_values[t_idx]);
+                                }
                             }
+
+                            // ALWAYS add RAF contribution (regardless of table)
+                            const is_interleaved = !cycle_is_identity_path[j];
+                            if (is_interleaved) {
+                                combined_val = combined_val.add(raf_interleaved);
+                            } else {
+                                combined_val = combined_val.add(raf_identity);
+                            }
+
+                            lookups_combined_vals[j] = combined_val;
                         }
 
                         // Debug: print first 5 rematerialized values
                         std.debug.print("[STAGE5 REMATERIALIZE] First 5 combined_vals after rematerialization:\n", .{});
                         for (0..@min(5, trace_len)) |j| {
-                            std.debug.print("  j={}: combined_val={x}, is_identity_path={}\n", .{
+                            const table_idx_dbg = cycle_table_indices[j];
+                            const table_val_dbg = if (table_idx_dbg >= 0 and @as(usize, @intCast(table_idx_dbg)) < NUM_TABLES) table_values[@intCast(table_idx_dbg)] else F.zero();
+                            std.debug.print("  j={}: combined_val={x}, is_identity_path={}, table_idx={}, table_val={x}\n", .{
                                 j,
                                 lookups_combined_vals[j].toBytesBE()[24..32].*,
                                 cycle_is_identity_path[j],
+                                table_idx_dbg,
+                                table_val_dbg.toBytesBE()[24..32].*,
                             });
                         }
 
@@ -2667,6 +2679,27 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     std.debug.print("  p(1) = {x}\n", .{p_at_1.toBytesBE()[24..32].*});
                     std.debug.print("  p(0)+p(1) = {x}, matches_claim = {}\n", .{ sum_check.toBytesBE()[24..32].*, sumcheck_ok });
                     std.debug.print("  full_coeffs len = {}\n", .{full_coeffs.len});
+                    // Print sum_evals to debug
+                    std.debug.print("  sum_evals = [\n", .{});
+                    for (0..9) |k| {
+                        std.debug.print("    [{d}] = {x}\n", .{ k, sum_evals[k].toBytesBE()[24..32].* });
+                    }
+                    std.debug.print("  ]\n", .{});
+                    // Debug: print eq and combined values for last round
+                    if (lookups_round == n_cycle_vars - 1) {
+                        std.debug.print("  [LAST ROUND] eq[0]={x}, eq[1]={x}\n", .{
+                            lookups_eq_evals[0].toBytesBE()[16..32].*,
+                            lookups_eq_evals[1].toBytesBE()[16..32].*,
+                        });
+                        std.debug.print("  [LAST ROUND] val[0]={x}, val[1]={x}\n", .{
+                            lookups_combined_vals[0].toBytesBE()[16..32].*,
+                            lookups_combined_vals[1].toBytesBE()[16..32].*,
+                        });
+                        std.debug.print("  [LAST ROUND] ra_chunk[0]: [{x}, {x}]\n", .{
+                            ra_chunk_weights[0][0].toBytesBE()[16..32].*,
+                            ra_chunk_weights[0][1].toBytesBE()[16..32].*,
+                        });
+                    }
                     // Print Instance 0+1 contribution
                     std.debug.print("  combined_poly (Inst 0+1) = [{x}, {x}, {x}, {x}]\n", .{
                         combined_poly[0].toBytesBE()[24..32].*,
@@ -2828,6 +2861,19 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     for (0..ra_num_chunks) |chunk_idx| {
                         bindSinglePolynomial(ra_chunk_weights[chunk_idx], lookups_round, challenge);
                     }
+                    // Debug: show ra_chunk values before/after binding
+                    if (lookups_round == 0) {
+                        std.debug.print("[STAGE5 CYCLE] ra_chunks before first binding (round=128):\n", .{});
+                        for (0..@min(4, ra_num_chunks)) |c| {
+                            std.debug.print("  ra_chunk[{}][0:4] = [{x}, {x}, {x}, {x}]\n", .{
+                                c,
+                                ra_chunk_weights[c][0].toBytesBE()[16..32].*,
+                                ra_chunk_weights[c][1].toBytesBE()[16..32].*,
+                                ra_chunk_weights[c][2].toBytesBE()[16..32].*,
+                                ra_chunk_weights[c][3].toBytesBE()[16..32].*,
+                            });
+                        }
+                    }
 
                     // Update lookups_claim: recompute ra_weights[0] from the bound chunks
                     var final_ra = F.one();
@@ -2841,10 +2887,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     if (round >= LOOKUPS_LOG_K) {
                         std.debug.print("[STAGE5 ROUND {}] challenge={x}\n", .{
                             round,
-                            challenge.toBytesBE()[24..32].*,
+                            challenge.toBytesBE()[16..32].*,
                         });
                         std.debug.print("  new_batched_claim = {x}\n", .{current_batched_claim.toBytesBE()[16..32].*});
                         std.debug.print("  new_lookups_claim = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+                        // Debug: print eq_evals[0] after binding
+                        std.debug.print("  eq_evals[0] after bind = {x}\n", .{lookups_eq_evals[0].toBytesBE()[16..32].*});
                     }
 
                     continue; // Skip the rest of the loop (we handled everything)
@@ -2990,7 +3038,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             std.debug.print("[STAGE5 LOOKUPS] ra_chunk claims:\n", .{});
             var ra_product = F.one();
             for (0..lookups_ra_d) |i| {
-                std.debug.print("  ra_chunks[{}] = {any}\n", .{ i, ra_chunks[i].toBytesBE()[0..8] });
+                std.debug.print("  ra_chunks[{}] = {x}\n", .{ i, ra_chunks[i].toBytesBE()[16..32].* });
                 ra_product = ra_product.mul(ra_chunks[i]);
             }
             std.debug.print("  ra_product = {any}\n", .{ra_product.toBytesBE()[0..8]});

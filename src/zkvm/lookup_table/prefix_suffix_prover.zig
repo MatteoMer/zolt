@@ -1463,9 +1463,12 @@ pub fn computeTableValuesAtRAddress(
 
     // Convert prefix checkpoints to an array of F values (using 0 for None)
     var prefix_values: [Prefixes.COUNT]F = undefined;
+    var non_zero_prefixes: usize = 0;
     for (0..Prefixes.COUNT) |i| {
         prefix_values[i] = prefix_checkpoints.checkpoints[i] orelse F.zero();
+        if (!prefix_values[i].eql(F.zero())) non_zero_prefixes += 1;
     }
+    std.debug.print("[computeTableValuesAtRAddress] non_zero_prefixes={}/{}\n", .{ non_zero_prefixes, Prefixes.COUNT });
 
     // Compute MLE value for each table
     for (0..NUM_TABLES) |table_idx| {
@@ -1481,6 +1484,15 @@ pub fn computeTableValuesAtRAddress(
 
         // Combine using the table-specific formula
         result[table_idx] = tableCombine(F, table_idx, &prefix_values, suffix_evals[0..table_suff.len]);
+
+        // Debug: print first few non-zero table values
+        if (table_idx < 5 or !result[table_idx].eql(F.zero())) {
+            std.debug.print("[computeTableValuesAtRAddress] table[{}]: num_suffixes={}, combined={x}\n", .{
+                table_idx,
+                table_suff.len,
+                result[table_idx].toBytesBE()[24..32].*,
+            });
+        }
     }
 
     return result;

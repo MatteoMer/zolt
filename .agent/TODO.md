@@ -1,72 +1,79 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: IN PROGRESS - Stage 5 InstructionReadRaf Sumcheck Debug
+## Status: IN PROGRESS - Stage 5 InstructionReadRaf ra_chunk Mismatch
 
-## Session 124 Summary
+## Session 125 Summary
+
+### Progress Made
+
+1. **Fixed combined_vals rematerialization bug**
+   - Cycles without lookup tables were getting `combined_val = 0`
+   - Jolt ALWAYS adds RAF contribution regardless of table
+   - Fixed: Now cycles without tables get `raf_interleaved` or `raf_identity`
+
+2. **Verified eq_evals match**
+   - After eq_evals reinitialization fix, `eq_evals[0] == eq_eval_r_reduction` ✓
+   - The eq polynomial is now correct after all bindings
 
 ### Current Issue
 
-**Stage 5 sumcheck verification fails** for Instance 2 (InstructionReadRaf).
+**ra_chunk values don't match between Zolt and Jolt**
 
-The debug output shows:
+Debug output shows:
 ```
-Sumcheck verification failed!
-  output_claim:   [8a, 08, 54, 0f, ...]
-  expected_claim: [02, c5, 72, ac, ...]
+Zolt ra_chunks[0] = 72c54fffc84783cff5628ecc74b37775
+Jolt ra_claims[0] = 12109e5de8bae83db5b8fca2612309a8
 ```
+
+These are completely different!
 
 ### Analysis
 
-1. **Structure**: Stage 5 is a batched sumcheck with 3 instances:
-   - Instance 0: RegistersValEvaluation (8 rounds)
-   - Instance 1: RamRaClaimReduction (24 rounds)
-   - Instance 2: LookupsReadRaf (136 rounds) - 128 address + 8 cycle
+1. **ra_chunk_weights computation** (Zolt):
+   - Initialized to 1 for all cycles
+   - During address rounds, multiplied by `eq(bit[j][round], challenge[round])`
+   - Formula: `ra_chunk[chunk][j] = Π_{round ∈ chunk} eq(bit[j][round], challenge[round])`
 
-2. **Key Equation** being proved for Instance 2:
-   ```
-   rv(r_reduction) + γ·left_op(r_reduction) + γ²·right_op(r_reduction)
-   = Σ_{j=0}^{T-1} Σ_{k=0}^{K-1} [ eq(j; r_reduction) · ra(k, j) · (Val_j(k) + γ · RafVal_j(k)) ]
-   ```
+2. **ra_poly computation** (Jolt):
+   - Created from expanding tables after all address rounds
+   - `ra_poly[chunk][j] = Π_{phase ∈ chunk} v[phase][lookup_index_chunk[j][phase]]`
+   - Where `v[phase][k] = eq(k, challenges_in_phase)`
 
-3. **Verifier's expected output claim** (Jolt line 1267):
-   ```rust
-   let eq_eval_r_reduction = EqPolynomial::<F>::mle(&r_reduction, &r_cycle_prime.r);
-   eq_eval_r_reduction * ra_claim * (val_claim + gamma * raf_claim)
-   ```
+3. **Theoretical equivalence**:
+   - Both should compute `eq(lookup_index_chunk[j], challenges_in_chunk)`
+   - But they're giving different results!
 
-   Where:
-   - `r_reduction` is from Stage 3 (InstructionClaimReduction)
-   - `r_cycle_prime` is the last 8 challenges from Stage 5
-
-4. **Zolt's prover** (after sumcheck):
+4. **Observation**: All ra_chunk values are IDENTICAL across cycles 0-255:
    ```
-   lookups_eq_evals[0] * lookups_ra_weights[0] * lookups_combined_vals[0]
+   ra_chunk[0][0:4] = [72c54fff..., 72c54fff..., 72c54fff..., 72c54fff...]
    ```
+   This is suspicious because lookup_indices DO differ between cycles.
 
 ### Potential Root Causes
 
-1. **Address round prefix-suffix decomposition mismatch**
-   - Zolt uses a complex prefix-suffix decomposition ported from Jolt
-   - Any bug in prefix/suffix computation would cause polynomial mismatch
+1. **Bit extraction order mismatch**
+   - Zolt: `bit_index = LOOKUPS_LOG_K - 1 - round` → processes MSB first
+   - Need to verify this matches Jolt's expanding table approach
 
-2. **Cycle round polynomial formula mismatch**
-   - Jolt uses `GruenSplitEqPolynomial` for the eq factor
-   - Zolt uses direct eq_evals array binding
-   - The product structure (eq * val * ra_chunks) may differ
+2. **Chunk assignment difference**
+   - Zolt: `chunk_idx = round / chunk_size`
+   - Jolt: Groups phases by chunk differently
 
-3. **combined_val rematerialization**
-   - After address rounds, Jolt rematerializes combined_val using table MLEs at r_address
-   - Zolt does this at line 2538-2563 but may have formula differences
+3. **Phase vs Round confusion**
+   - Jolt uses phases with `log_m` bits each (typically 16)
+   - Zolt uses individual rounds
+   - The grouping might not align
 
-4. **Transcript/coefficient format mismatch**
-   - The compressed polynomial format must match exactly for transcript alignment
+4. **Lookup index storage order**
+   - lookup_indices are stored as (lo, hi) u64 pairs
+   - Need to verify bit extraction is correct
 
 ### Debug Areas
 
-1. Check `eq_eval_r_reduction` computation in Zolt vs Jolt
-2. Check that `lookups_eq_evals[0]` after binding equals `eq(r_reduction, r_cycle_prime)`
-3. Verify `combined_vals[0]` matches verifier's `val_claim + gamma * raf_claim`
-4. Verify `ra_chunks` product matches verifier's `ra_claim`
+1. Print exact bit patterns from lookup_indices for first few cycles
+2. Print which bits are being accessed in each round
+3. Compare with Jolt's expanding table bit access pattern
+4. Verify chunk boundaries match
 
 ### Key Files
 
@@ -96,14 +103,7 @@ cargo test --package jolt-core --features zolt-debug test_verify_zolt_proof_with
 
 ### Next Steps
 
-1. Add debug output comparing:
-   - Zolt's `lookups_eq_evals[0]` vs verifier's `eq_eval_r_reduction`
-   - Zolt's `lookups_combined_vals[0]` vs verifier's computed value
-   - Each ra_chunk vs verifier's ra_claims
-
-2. If values differ, trace back to find where mismatch occurs
-
-3. Likely fix areas:
-   - Combined_val rematerialization formula
-   - eq binding during cycle rounds
-   - ra_chunk computation from expanding tables
+1. Add detailed debug to show exact bit values being accumulated
+2. Compare Jolt's expanding table `v[phase][k]` values with Zolt's per-round `eq(bit, challenge)` values
+3. Verify the ra_chunk values at intermediate points during address rounds
+4. Check if there's an off-by-one or endianness issue in bit extraction

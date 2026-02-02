@@ -947,10 +947,13 @@ pub fn RafDecomposition(comptime F: type) type {
             }
 
             // In Jolt's format: even positions = right operand, odd positions = left operand
-            // When num_bound_vars is even, we're binding an even position (right operand)
-            // When num_bound_vars is odd, we're binding an odd position (left operand)
+            // From Jolt's OperandPolynomial::sumcheck_evals():
+            // - When num_bound_vars is even, LeftOperand binds (produces linear poly)
+            // - When num_bound_vars is odd, RightOperand binds (produces linear poly)
+            // LeftOperand uses even-indexed challenges (r[0], r[2], r[4], ...)
+            // RightOperand uses odd-indexed challenges (r[1], r[3], r[5], ...)
             const is_even_round = (self.num_bound_vars % 2 == 0);
-            const is_binding_round = if (is_left) !is_even_round else is_even_round;
+            const is_binding_round = if (is_left) is_even_round else !is_even_round;
 
             if (is_binding_round and half_bits > 0) {
                 // Linear polynomial: P(c) = base + c * m

@@ -427,14 +427,16 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 .add(gamma_raf2.mul(right_op_claim));
 
             std.debug.print("[STAGE5] Input claims (with trace):\n", .{});
-            std.debug.print("  regs_val_input = {any}\n", .{regs_val_input.toBytesBE()[0..8]});
-            std.debug.print("  ram_ra_input = {any}\n", .{ram_ra_input.toBytesBE()[0..8]});
-            std.debug.print("  lookups_input = {any}\n", .{lookups_input.toBytesBE()[0..8]});
+            std.debug.print("  regs_val_input = {any}\n", .{regs_val_input.toBytesBE()});
+            std.debug.print("  ram_ra_input = {any}\n", .{ram_ra_input.toBytesBE()});
+            std.debug.print("  lookups_input = {any}\n", .{lookups_input.toBytesBE()});
+            std.debug.print("[STAGE5] Transcript state BEFORE appending input claims: {any}\n", .{transcript.state[0..8]});
 
             // Append input claims to transcript and get batching coefficients
             transcript.appendScalar(regs_val_input);
             transcript.appendScalar(ram_ra_input);
             transcript.appendScalar(lookups_input);
+            std.debug.print("[STAGE5] Transcript state AFTER appending input claims: {any}\n", .{transcript.state[0..8]});
 
             const batch0 = transcript.challengeScalarFull();
             const batch1 = transcript.challengeScalarFull();

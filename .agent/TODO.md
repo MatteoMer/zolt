@@ -1,12 +1,22 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: IN PROGRESS - Stage 5 Sumcheck Mismatch
+## Status: IN PROGRESS - Stage 5 Sumcheck Formula Mismatch
 
 ## Session 116 Summary
 
 ### Fixed
 1. **File path issue**: Test was reading `/tmp/zolt_proof_dory.bin` (old file) instead of `logs/` (current file). Copied correct files to /tmp.
-2. **Table flag claims**: Now deserialize correctly - tables 0, 1, 9 are non-zero as expected for Fibonacci.
+2. **Table flag claims**: Now deserialize correctly - tables 0, 1, 9 are non-zero for Fibonacci.
+
+### Verified Correct
+All three tables ARE correctly used in Fibonacci execution:
+- Table 0 (RangeCheck): Used by ADD, ADDI, LUI, JAL, etc.
+- Table 1 (RangeCheckAligned): Used by JALR at cycle 52
+- Table 9 (NotEqual): Used by BNE branches
+
+```
+52 | 0x80000064 | 0x00008067 | JALR x0, 0(x1)  <- Uses table 1 (RangeCheckAligned)
+```
 
 ### Current Issue
 Stage 5 sumcheck verification fails:
@@ -15,81 +25,60 @@ output_claim:   [9d, 3d, dd, d4...]
 expected_claim: [1b, 43, f0, ba...]
 ```
 
-### Deep Analysis of the Formula
+### Table Evaluations (from Jolt debug)
+```
+table_eval[0] (RangeCheck)        = [fb, 9d, 83, 09...]
+table_eval[1] (RangeCheckAligned) = [9b, 3c, 87, 4b...]
+table_eval[9] (NotEqual)          = [f9, b0, 80, b7...]
 
-#### Jolt Verifier Formula (read_raf_checking.rs:1285-1321)
-```rust
-// For each table i, get table_flag[i] from opening claims
-let table_flag_claims: Vec<F> = (0..42).map(|i|
-    accumulator.get_virtual_polynomial_opening(LookupTableFlag(i), InstructionReadRaf)
-).collect();
+table_flag[0] = [34, 2b, b2, 5c...]
+table_flag[1] = [aa, b9, 54, f9...]
+table_flag[9] = [dd, 0d, 07, c1...]
+```
 
-// Evaluate each table's MLE at the address point
-let val_evals: Vec<_> = LookupTables::iter()
-    .map(|table| table.evaluate_mle(&r_address_prime.r))
-    .collect();
+### Formula Analysis
 
-// val_claim = Σ (table_MLE[i](r_address) * table_flag[i])
-let val_claim = val_evals.into_iter()
-    .zip(table_flag_claims)
-    .map(|(eval, flag)| eval * flag)
-    .sum();
+The verifier computes:
+```
+val_claim = Σ table_MLE[i](r_address) * table_flag[i]
+          = table_eval[0]*table_flag[0] + table_eval[1]*table_flag[1] + table_eval[9]*table_flag[9]
 
-// raf_claim formula
-let raf_claim = (1 - raf_flag) * (left_op + gamma*right_op)
-              + raf_flag * gamma * identity;
+raf_claim = (1 - raf_flag) * (left_op + gamma*right_op) + raf_flag * gamma * identity
 
-// Expected output
 expected = eq_eval * ra_claim * (val_claim + gamma * raf_claim)
 ```
 
-#### Mathematical Interpretation
-The sumcheck is over:
+### Likely Root Cause
+
+Zolt computes `combined_vals[j]` differently from what Jolt expects:
+
+**Zolt (stage5_prover.zig:811)**:
+```zig
+combined_vals[j] = lookup_output + gamma*left + gamma^2*right
 ```
-Σ_j Σ_k eq(j, r_reduction) * ra(k, j) * (table_func[t(j)](k) + gamma * raf(k, j))
+
+**Jolt expects**:
+```
+combined = val + gamma * raf
+where raf = (1-raf_flag)*(left + gamma*right) + raf_flag*gamma*identity
 ```
 
-After all rounds:
-- `table_flag[i]` = Σ_{j: t(j)=i} eq(r_cycle_prime, j) - this is what prover provides
-- `val_claim` = Σ_i table_MLE[i](r_address) * table_flag[i]
-  - This reconstructs the weighted sum of table evaluations
-
-The KEY insight: The verifier doesn't know which table was used at each cycle. Instead:
-1. Prover provides `table_flag[i]` for each table i
-2. Verifier evaluates `table_MLE[i](r_address)` for each table
-3. Verifier computes `val_claim = Σ_i table_MLE[i](r_address) * table_flag[i]`
-
-This works because if cycle j uses table t(j), then:
-- `table_flag[t(j)]` includes `eq(r_cycle_prime, j)`
-- The contribution becomes `table_MLE[t(j)](r_address) * eq(r_cycle_prime, j)`
+Key differences:
+1. Zolt uses `gamma^2 * right`, but Jolt uses `gamma * (left + gamma*right)` in raf_claim
+2. Identity path handling may differ for AddOperands instructions
 
 ### Implementation Status
+- Added `evaluateTableMLE(table_index, r)` function in lookup_table/mod.zig
+- Table flag computation is correct (matches which tables are used)
 
-Added `evaluateTableMLE(table_index, r)` function in lookup_table/mod.zig to evaluate any of the 42 tables by index.
-
-### Next Steps
-
-1. The prover sumcheck polynomials must be computed consistently with this formula
-2. Check if Zolt's combined_vals computation matches what the verifier expects
-3. The prover should compute:
-   - For each round: contribution = eq(j) * ra(j) * (table_output(j) + gamma * raf(j))
-4. After all rounds, output_claim should equal verifier's expected_claim
-
-### Possible Issue
-
-Zolt computes `combined_vals[j] = lookup_output + gamma*left + gamma^2*right` where:
-- `lookup_output = step.rd_value` (actual instruction output)
-
-But the formula should be:
-- `val = table_func[t(j)](address(j))` (table MLE evaluated at cycle's address)
-- `raf = (1-is_identity)*(left + gamma*right) + is_identity*gamma*identity`
-- `combined = val + gamma * raf`
-
-The `lookup_output` should match `table_func[t(j)](address(j))` for correct execution, but there may be a formula mismatch in how `raf` is computed.
+### Files Modified This Session
+- `/home/vivado/projects/zolt/src/zkvm/lookup_table/mod.zig`: Added `evaluateTableMLE()`
+- `/home/vivado/projects/jolt/jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs`: Added table_eval debug
+- `/home/vivado/projects/jolt/jolt-core/src/zkvm/proof_serialization.rs`: Added byte offset tracking
 
 ### Test Commands
 ```bash
-# Build
+# Build Zolt
 zig build -Doptimize=ReleaseFast
 
 # Generate proof
@@ -102,3 +91,11 @@ cp logs/zolt_*.bin /tmp/
 cd /home/vivado/projects/jolt
 cargo test --package jolt-core --features zolt-debug test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
+
+### Next Steps
+1. **Fix combined_vals formula** in stage5_prover.zig to match Jolt's expected formula
+2. **Check identity path handling** - AddOperands instructions (ADD, ADDI, etc.) use identity path
+3. **Verify gamma usage** - ensure gamma powers match between prover and verifier
+4. Add more debug to trace exact computation differences
+
+SESSION_ENDING - Progress saved to TODO.md

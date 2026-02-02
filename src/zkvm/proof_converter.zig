@@ -2647,10 +2647,22 @@ pub fn ProofConverter(comptime F: type) type {
                 std.debug.print("[END VERIFY CHECK]\n\n", .{});
 
                 // RegistersReadWriteChecking claims.
+                std.debug.print("[STAGE4 INSERT] RegistersVal@RegistersReadWriteChecking:\n", .{});
+                std.debug.print("  val_claim LE bytes = {any}\n", .{regs_claims.val_claim.toBytes()});
+                std.debug.print("  val_claim BE bytes = {any}\n", .{regs_claims.val_claim.toBytesBE()});
                 try jolt_proof.opening_claims.insert(
                     .{ .Virtual = .{ .poly = .RegistersVal, .sumcheck_id = .RegistersReadWriteChecking } },
                     regs_claims.val_claim,
                 );
+
+                // Verify the insertion
+                const verify_val = jolt_proof.opening_claims.get(
+                    .{ .Virtual = .{ .poly = .RegistersVal, .sumcheck_id = .RegistersReadWriteChecking } },
+                ) orelse F.zero();
+                std.debug.print("[STAGE4 VERIFY] After insert, get returns:\n", .{});
+                std.debug.print("  LE bytes = {any}\n", .{verify_val.toBytes()});
+                std.debug.print("  Match? {}\n", .{verify_val.eql(regs_claims.val_claim)});
+
                 try jolt_proof.opening_claims.insert(
                     .{ .Virtual = .{ .poly = .Rs1Ra, .sumcheck_id = .RegistersReadWriteChecking } },
                     regs_claims.rs1_ra_claim,

@@ -389,6 +389,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 .{ .Virtual = .{ .poly = .RegistersVal, .sumcheck_id = .RegistersReadWriteChecking } },
             ) orelse F.zero();
 
+            // DEBUG: Print the exact value read from opening_claims
+            std.debug.print("[STAGE5 GET] RegistersVal@RegistersReadWriteChecking (trace-aware path):\n", .{});
+            std.debug.print("  LE bytes = {any}\n", .{regs_val_input.toBytes()});
+            std.debug.print("  BE bytes = {any}\n", .{regs_val_input.toBytesBE()});
+
             const claim_raf = opening_claims.get(
                 .{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamRafEvaluation } },
             ) orelse F.zero();
@@ -3297,7 +3302,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 std.debug.print("  ra_chunks[{}] = {x}\n", .{ i, ra_chunks[i].toBytesBE()[16..32].* });
                 ra_product = ra_product.mul(ra_chunks[i]);
             }
-            std.debug.print("  ra_product = {any}\n", .{ra_product.toBytesBE()[0..8]});
+            std.debug.print("  ra_product FULL BE = {any}\n", .{ra_product.toBytesBE()});
+            std.debug.print("  ra_product FULL LE = {any}\n", .{ra_product.toBytes()});
             std.debug.print("  lookups_ra_weights[0] = {any}\n", .{lookups_ra_weights[0].toBytesBE()[0..8]});
 
             // Verify ra_product == lookups_ra_weights[0]
@@ -3333,10 +3339,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             }
 
             // Debug: print non-zero table flags
-            std.debug.print("[STAGE5 LOOKUPS] Non-zero table flags:\n", .{});
+            std.debug.print("[STAGE5 LOOKUPS] Non-zero table flags (FULL LE):\n", .{});
             for (0..num_lookup_tables) |i| {
                 if (!table_flags[i].eql(F.zero())) {
-                    std.debug.print("  table_flags[{}] = {any}\n", .{ i, table_flags[i].toBytesBE()[0..8] });
+                    std.debug.print("  table_flags[{}] = {any}\n", .{ i, table_flags[i].toBytes() });
                 }
             }
 
@@ -3361,7 +3367,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
             const raf_claim = F.one().sub(computed_raf_flag).mul(left_op_eval.add(gamma_lookups_raf.mul(right_op_eval)))
                 .add(computed_raf_flag.mul(gamma_lookups_raf).mul(identity_eval));
-            std.debug.print("  raf_claim (from formula) = {any}\n", .{raf_claim.toBytesBE()[0..8]});
+            std.debug.print("  raf_claim (from formula) FULL LE = {any}\n", .{raf_claim.toBytes()});
 
             // Compute what verifier would expect (without val_claim for now)
             const expected_no_val = eq_r_reduction.mul(ra_product).mul(gamma_lookups_raf.mul(raf_claim));

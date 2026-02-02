@@ -312,6 +312,16 @@ pub fn ArkworksSerializer(comptime F: type) type {
                                 le_bytes[4], le_bytes[5], le_bytes[6], le_bytes[7],
                             });
                         }
+                        // Debug RegistersVal specifically (Stage 5 input)
+                        if (v.poly == .RegistersVal and v.sumcheck_id == .RegistersReadWriteChecking) {
+                            const le_bytes = entry.claim.toBytes();
+                            std.debug.print("[SERIALIZE] RegistersVal@RegsRWCheck FULL (LE): [{x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}]\n", .{
+                                le_bytes[0], le_bytes[1], le_bytes[2], le_bytes[3],
+                                le_bytes[4], le_bytes[5], le_bytes[6], le_bytes[7],
+                                le_bytes[8], le_bytes[9], le_bytes[10], le_bytes[11],
+                                le_bytes[12], le_bytes[13], le_bytes[14], le_bytes[15],
+                            });
+                        }
                         // Debug LeftInstructionInput at SpartanProductVirtualization
                         if (v.poly == .LeftInstructionInput and v.sumcheck_id == .SpartanProductVirtualization) {
                             std.debug.print("[SERIALIZE] LeftInstructionInput@ProdVirt = {any}\n", .{entry.claim.toBytesBE()});

@@ -1,51 +1,55 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: IN PROGRESS - ra_chunks Mismatch
+## Status: IN PROGRESS - Stage 5 Verification Mismatch
 
 ## Current Issue
 
-The Stage 5 InstructionRa claims from Zolt don't match what Jolt expects.
+Stage 5 sumcheck fails: output_claim from proof doesn't match expected_claim computed by verifier.
 
-### Debug Evidence
+### Evidence
 
-1. **Suffix MLEs fixed** - LsbSuffix, Pow2Suffix, Pow2WSuffix, TwoLsbSuffix now return 1 for len==0
-2. **Table values now match** - table[0] != table[1] in both Zolt and Jolt (fixed by suffix changes)
-3. **Cycle challenges match** - Round 128-135 challenges identical between Zolt and Jolt
-4. **Prefix values match** - left_op, right_op, identity prefixes all match
-
-### ra_chunks Mismatch
-
-**Zolt produces:**
+**Sumcheck verification failed:**
 ```
-ra_chunks[0] = 90fa96e636b607e1e46f2c8bff8e00be → [be, 00, 8e, ff, ...]
-ra_chunks[1] = e0d59b8773d1c294f6f9472abb40ea58 → [58, ea, 40, bb, ...]
-...
+output_claim:   [ce, b6, 9e, 59, 52, e3, 16, ed, 32, a4, 41, 28, 30, 87, d9, 5c, ...]
+expected_claim: [b7, c0, 2e, 8e, c4, 3e, bd, 5d, 3a, 49, 78, 90, c1, e8, b8, ed, ...]
 ```
 
-**Jolt expects:**
-```
-ra_claims[0] = [a5, 5e, c7, 72, 66, 8e, 13, 27, 21, 0d, f3, 0e, 35, 26, 9b, 11]
-ra_claims[1] = [8c, 4c, 83, cb, e9, 16, 6c, a3, 90, 82, 4c, d4, 71, d3, f2, 2b]
-...
-```
+### Verified Components (All Match Between Zolt and Jolt)
 
-### Root Cause Analysis
+1. **InstructionRa claims** ✓ - All 8 chunks match
+2. **ra_product** ✓ - Product of InstructionRa chunks matches
+3. **LookupTableFlag claims** ✓ - All 42 flags match (only 0, 1, 9 are non-zero for Fibonacci)
+4. **raf_claim** ✓ - Formula `(1-raf_flag)*(left+gamma*right) + raf_flag*gamma*identity` matches
+5. **eq_eval_r_reduction** ✓ - Matches between Zolt and Jolt
+6. **left/right/identity prefix evaluations** ✓ - Match between Zolt and Jolt
+7. **batching coefficients** ✓ - batch0, batch1, batch2 all match
+8. **input_claims** ✓ - RegistersVal and other Stage 5 inputs now match
 
-The ra_chunks are computed by:
-1. At round 128, materialize ra_chunk_weights[i][j] = ∏_{phase in chunk_i} expanding_table[phase][k_phase(j)]
-2. Bind through cycle rounds 128-135
-3. Final ra_chunks[i] = ra_chunk_weights[i][0]
+### Suspected Issue
 
-Potential issues:
-1. expanding_tables may have different values than Jolt's at round 128
-2. The bit extraction for k_phase might use wrong bit ordering
-3. The phase-to-chunk mapping might be incorrect
+The sumcheck polynomial evaluations at each round might be producing incorrect round polynomials, leading to a different final output_claim even though all the final opening claims are correct.
 
-### Investigation Required
+The expected_output_claim for each instance is:
+1. Instance 0 (RegistersValEvaluation): `inc_claim * wa_claim * lt_claim`
+2. Instance 1 (RamRaClaimReduction): `eq_combined * ra_claim * ...`
+3. Instance 2 (InstructionReadRaf): `eq_r_reduction * ra_claim * (val_claim + gamma * raf_claim)`
 
-1. Compare expanding_table[phase][k] values between Zolt and Jolt at round 128
-2. Verify the EQ polynomial construction during address rounds 0-127
-3. Check if Zolt's HighToLow vs LowToHigh binding order matches Jolt
+The prover needs to compute round polynomials such that:
+- At each round r, p_r(X) has degree ≤ degree_bound
+- p_r(0) + p_r(1) = previous_claim (or input_claim for r=0)
+- The final evaluation matches expected_output_claim
+
+### Next Steps
+
+1. Add debug output to compare round polynomial coefficients between Zolt prover and Jolt verifier
+2. Check if the polynomial degree or structure differs
+3. Verify the sumcheck polynomial construction in stage5_prover.zig
+
+### Key Files
+
+- `/home/vivado/projects/zolt/src/zkvm/spartan/stage5_prover.zig` - Stage 5 prover
+- `/home/vivado/projects/jolt/jolt-core/src/subprotocols/sumcheck.rs` - Jolt sumcheck verifier
+- `/home/vivado/projects/jolt/jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs` - InstructionReadRaf verifier
 
 ## Test Commands
 
@@ -62,8 +66,10 @@ cd /home/vivado/projects/jolt
 cargo test --package jolt-core --features zolt-debug test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
 
-## Key Files
+## Previous Session Findings
 
-- `/home/vivado/projects/zolt/src/zkvm/spartan/stage5_prover.zig` - Stage 5 prover
-- `/home/vivado/projects/zolt/src/zkvm/lookup_table/suffixes.zig` - Suffix MLEs (FIXED)
-- `/home/vivado/projects/jolt/jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs` - Jolt's InstructionReadRaf
+1. Fixed suffix MLEs (LsbSuffix, Pow2Suffix, etc.) to return 1 when len==0
+2. Fixed Stage 5 input claim reading - now correctly reads from opening_claims
+3. Verified expanding table implementations are identical between Zolt and Jolt
+4. Confirmed phase structure matches (16 phases, 8 chunks for small traces)
+5. Verified Stages 1-4 pass verification

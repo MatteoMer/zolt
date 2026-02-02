@@ -1,60 +1,62 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 13 - Fixed Prefix Overflow
+## Status: Session 14 - Stage 5 Verification Failing
 
-## Session 13 Progress
+## Session 14 Investigation
 
-### Critical Fix Applied
+### Current Issue
 
-Fixed integer overflow in `prefixes.zig` at late rounds (j > 120). The issue was:
-- `suffix_len = LOG_K - j - b.len - 1` would overflow when `j + b.len + 1 > 128`
-- Added `safeSuffixLen()` helper function that returns null on overflow
-- Updated all 18 occurrences to use the safe version
+Stage 5 sumcheck verification fails:
+- `output_claim: [63, 47, 60, 9d, ...]` (from Zolt's sumcheck polynomial)
+- `expected_claim: [a9, 4a, 89, dd, ...]` (computed by Jolt's verifier)
 
-### Also Fixed
+### Debug Analysis
 
-1. **leftMsbUpdateCheckpoint**: Fixed to set checkpoint at j=1 (first update round) instead of only at j=0
-   - Updates happen at odd rounds (1, 3, 5...), not round 0
-   - At j=1, r_x is challenges[0] which is the left operand MSB
+Jolt's verifier computes expected_claim as sum of three instances:
+1. Instance 0: RegistersValEvaluation
+2. Instance 1: RamRaClaimReduction
+3. Instance 2: InstructionReadRaf
 
-### Verification Results
+For Instance 2 (InstructionReadRaf), Jolt's formula:
+```
+eq_eval_r_reduction * ra_claim * (val_claim + gamma * raf_claim)
+```
 
-1. **Internal Verification**: All 6 stages PASSED including Stage 5!
-   ```
-   [VERIFIER] Stage 5 PASSED
-   [VERIFIER] All stages PASSED!
-   ```
+Where:
+- raf_claim = (1 - raf_flag) * (left_op + gamma * right_op) + raf_flag * gamma * identity
 
-2. **Standard Proof Generation**: Working (45 seconds in debug mode)
-   - SRS generation takes ~35 seconds (1280 points)
-   - Proof generation completes successfully
+Jolt's computed values:
+- left_operand_eval:  [23, bd, 14, a1, ...]
+- right_operand_eval: [2b, 88, fa, 0a, ...]
+- identity_poly_eval: [24, 1e, 72, 5d, ...]
+- final_result: [b6, fd, fb, 64, ...]
 
-3. **Jolt-Format Proof**: In progress
-   - Takes longer due to Dory commitments
-   - Currently running in background
+### Key Findings
 
-### Files Modified
+1. **Operand evaluation functions match Jolt**:
+   - Left: `r[2*i] * 2^(n/2-1-i)` (even indices)
+   - Right: `r[2*i+1] * 2^(n/2-1-i)` (odd indices)
+   - Identity: `r[i] * 2^(n-1-i)`
 
-- `src/zkvm/lookup_table/prefixes.zig`:
-  - Added `safeSuffixLen()` helper function
-  - Fixed `leftMsbUpdateCheckpoint` for j=1 case
-  - Updated all suffix_len computations to use safe version
+2. **Challenge normalization**:
+   - Jolt's `normalize_opening_point` reverses r_cycle but NOT r_address
+   - Need to verify Zolt does the same
 
-- `src/main.zig`: Added debug output for preprocessing
-- `src/host/mod.zig`: Added debug output for SRS generation
-- `src/poly/commitment/mod.zig`: Added debug output for HyperKZG setup
+3. **ra_chunk claims need verification**:
+   - Jolt expects specific ra_claims[0..7] values
+   - Zolt computes ra_chunks[i] = ra_chunk_weights[i][0] after binding
 
 ### Next Steps
 
-1. Wait for Jolt-format proof generation to complete
-2. Run Jolt cross-verification:
-   ```bash
-   cp logs/zolt_proof_dory.bin /tmp/ && cp logs/zolt_preprocessing.bin /tmp/
-   cd ../jolt && cargo test -p jolt-core --lib test_verify_zolt_proof_with_zolt_preprocessing --features zolt-debug -- --ignored --nocapture
-   ```
-3. If Stage 5 verification fails, debug the operand evaluation mismatch:
-   - right_op_eval: Zolt vs Jolt byte difference at position 5
-   - identity_eval: Zolt vs Jolt byte difference at position 6
+1. Add debug output to Zolt's Stage 5 to print:
+   - left_op_eval, right_op_eval, identity_eval at final point
+   - ra_chunks[i] for i=0..7
+   - eq_r_reduction
+   - val_claim and raf_claim
+
+2. Compare these values with Jolt's expectations
+
+3. Identify which component(s) differ
 
 ### Commands
 
@@ -76,4 +78,4 @@ cd ../jolt && cargo test -p jolt-core --lib test_verify_zolt_proof_with_zolt_pre
 - Session 10: Cross-verification debugging, input claims match, polynomial mismatch
 - Session 11: Deep investigation - all components match but expected_claim still differs
 - Session 12: Verified r_address_prime values match. Added operand eval debug
-- Session 13: Fixed suffix_len overflow, fixed leftMsbUpdateCheckpoint
+- Session 13: Fixed suffix_len overflow, fixed leftMsbUpdateCheckpoint, Stage 5 PASSED internally

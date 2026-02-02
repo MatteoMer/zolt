@@ -1133,6 +1133,62 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
         /// ValidSignedRemainder: Validates signed remainder semantics
         /// Returns 1 if: divisor == 0 OR remainder == 0 OR
         ///              (|remainder| < |divisor| AND sign(remainder) == sign(divisor))
+        /// Number of lookup tables in Jolt
+        pub const NUM_TABLES: usize = 42;
+
+        /// Evaluate the MLE of any table by index
+        /// This matches Jolt's LookupTables enum ordering:
+        /// 0: RangeCheck, 1: RangeCheckAligned, 2: And, 3: Andn, 4: Or, 5: Xor,
+        /// 6: Equal, 7: SignedGreaterThanEqual, 8: UnsignedGreaterThanEqual, 9: NotEqual,
+        /// 10: SignedLessThan, 11: UnsignedLessThan, 12: Movsign, ...
+        pub fn evaluateTableMLE(table_index: usize, r: []const F) F {
+            return switch (table_index) {
+                0 => RangeCheck.evaluateMLE(r),
+                1 => F.zero(), // RangeCheckAligned - TODO
+                2 => And.evaluateMLE(r),
+                3 => Andn.evaluateMLE(r),
+                4 => Or.evaluateMLE(r),
+                5 => Xor.evaluateMLE(r),
+                6 => Equal.evaluateMLE(r),
+                7 => SignedGreaterThanEqual.evaluateMLE(r),
+                8 => UnsignedGreaterThanEqual.evaluateMLE(r),
+                9 => NotEqual.evaluateMLE(r),
+                10 => SignedLessThan.evaluateMLE(r),
+                11 => UnsignedLessThan.evaluateMLE(r),
+                12 => Movsign.evaluateMLE(r),
+                13 => F.zero(), // UpperWord - TODO
+                14 => UnsignedLessThanEqual.evaluateMLE(r),
+                15 => ValidSignedRemainder.evaluateMLE(r),
+                16 => ValidUnsignedRemainder.evaluateMLE(r),
+                17 => ValidDiv0.evaluateMLE(r),
+                18 => F.zero(), // HalfwordAlignment - TODO
+                19 => F.zero(), // WordAlignment - TODO
+                20 => F.zero(), // LowerHalfWord - TODO
+                21 => F.zero(), // SignExtendHalfWord - TODO
+                22 => Pow2.evaluateMLE(r),
+                23 => F.zero(), // Pow2W - TODO
+                24 => F.zero(), // ShiftRightBitmask - TODO
+                25 => F.zero(), // VirtualRev8W - TODO
+                26 => F.zero(), // VirtualSRL - TODO
+                27 => F.zero(), // VirtualSRA - TODO
+                28 => F.zero(), // VirtualROTR - TODO
+                29 => F.zero(), // VirtualROTRW - TODO
+                30 => F.zero(), // VirtualChangeDivisor - TODO
+                31 => F.zero(), // VirtualChangeDivisorW - TODO
+                32 => F.zero(), // MulUNoOverflow - TODO
+                33 => F.zero(), // VirtualXORROT32 - TODO
+                34 => F.zero(), // VirtualXORROT24 - TODO
+                35 => F.zero(), // VirtualXORROT16 - TODO
+                36 => F.zero(), // VirtualXORROT63 - TODO
+                37 => F.zero(), // VirtualXORROTW16 - TODO
+                38 => F.zero(), // VirtualXORROTW12 - TODO
+                39 => F.zero(), // VirtualXORROTW8 - TODO
+                40 => F.zero(), // VirtualXORROTW7 - TODO
+                41 => F.zero(), // Unused
+                else => F.zero(),
+            };
+        }
+
         pub const ValidSignedRemainder = struct {
             /// Materialize the entry at the given index
             /// Index format: interleaved(remainder, divisor)

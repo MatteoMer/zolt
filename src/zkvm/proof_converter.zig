@@ -2801,12 +2801,24 @@ pub fn ProofConverter(comptime F: type) type {
             // LookupsReadRaf claims (Stage 5 - LookupsReadRafSumcheckVerifier)
             // LookupTableFlag(i) for each of the 42 lookup tables
             const num_lookup_tables: usize = 42; // LookupTables::<XLEN>::COUNT
+            std.debug.print("[SERIALIZE DEBUG] Inserting LookupTableFlag claims:\n", .{});
             for (0..num_lookup_tables) |i| {
+                const flag_value = stage5_result.lookups_table_flags[i];
+                if (!flag_value.eql(F.zero())) {
+                    // Convert to standard form for printing (same as serialization)
+                    const standard = flag_value.fromMontgomery();
+                    var buf: [32]u8 = undefined;
+                    for (0..4) |j| {
+                        std.mem.writeInt(u64, buf[j * 8 ..][0..8], standard.limbs[j], .little);
+                    }
+                    std.debug.print("  LookupTableFlag({}) = {any}\n", .{ i, buf });
+                }
                 try jolt_proof.opening_claims.insert(
                     .{ .Virtual = .{ .poly = .{ .LookupTableFlag = i }, .sumcheck_id = .InstructionReadRaf } },
-                    stage5_result.lookups_table_flags[i],
+                    flag_value,
                 );
             }
+            std.debug.print("[SERIALIZE DEBUG] After inserting all LookupTableFlag claims, total entries = {}\n", .{jolt_proof.opening_claims.len()});
 
             // InstructionRa(i) chunks for LookupsReadRaf (LOG_K / ra_virtual_log_k_chunk = 128 / 16 = 8 chunks)
             const lookups_ra_d: usize = lookups_log_k / config.lookups_ra_virtual_log_k_chunk;

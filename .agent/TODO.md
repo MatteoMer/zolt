@@ -1,95 +1,91 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: IN PROGRESS - Stage 5 Formula Mismatch
+## Status: IN PROGRESS - Stage 5 Sumcheck Mismatch
 
 ## Session 116 Summary
 
-### Fixed: File Path Issue
-The Jolt test was reading `/tmp/zolt_proof_dory.bin` (old file from Feb 1) instead of `logs/zolt_proof_dory.bin` (current file from Feb 2). Copied the correct file to /tmp.
+### Fixed
+1. **File path issue**: Test was reading `/tmp/zolt_proof_dory.bin` (old file) instead of `logs/` (current file). Copied correct files to /tmp.
+2. **Table flag claims**: Now deserialize correctly - tables 0, 1, 9 are non-zero as expected for Fibonacci.
 
-After this fix, the table_flag claims now deserialize correctly:
-- LookupTableFlag(0) = non-zero ✓
-- LookupTableFlag(1) = non-zero ✓
-- LookupTableFlag(9) = non-zero ✓ (for NotEqual table)
-- All others = zero ✓
-
-### Current Issue: Stage 5 Formula Mismatch
-
-Stage 5 sumcheck verification still fails:
+### Current Issue
+Stage 5 sumcheck verification fails:
 ```
 output_claim:   [9d, 3d, dd, d4...]
 expected_claim: [1b, 43, f0, ba...]
 ```
 
-The root cause is that **Zolt's sumcheck polynomial computation differs from Jolt's formula**.
+### Deep Analysis of the Formula
 
-### Formula Analysis
-
-Jolt's `expected_output_claim` formula (read_raf_checking.rs:1285-1321):
+#### Jolt Verifier Formula (read_raf_checking.rs:1285-1321)
 ```rust
-val_claim = Σ (table_MLE[i](r_address_prime) * table_flag[i])  // <-- KEY DIFFERENCE
-raf_claim = (1 - raf_flag) * (left_op + gamma*right_op) + raf_flag * gamma * identity
+// For each table i, get table_flag[i] from opening claims
+let table_flag_claims: Vec<F> = (0..42).map(|i|
+    accumulator.get_virtual_polynomial_opening(LookupTableFlag(i), InstructionReadRaf)
+).collect();
+
+// Evaluate each table's MLE at the address point
+let val_evals: Vec<_> = LookupTables::iter()
+    .map(|table| table.evaluate_mle(&r_address_prime.r))
+    .collect();
+
+// val_claim = Σ (table_MLE[i](r_address) * table_flag[i])
+let val_claim = val_evals.into_iter()
+    .zip(table_flag_claims)
+    .map(|(eval, flag)| eval * flag)
+    .sum();
+
+// raf_claim formula
+let raf_claim = (1 - raf_flag) * (left_op + gamma*right_op)
+              + raf_flag * gamma * identity;
+
+// Expected output
 expected = eq_eval * ra_claim * (val_claim + gamma * raf_claim)
 ```
 
-Zolt's computation (stage5_prover.zig:811):
-```zig
-lookups_combined_vals[j] = lookup_output.add(gamma_raf.mul(left_op)).add(gamma_raf2.mul(right_op));
-// Where lookup_output = step.rd_value (actual instruction output)
+#### Mathematical Interpretation
+The sumcheck is over:
+```
+Σ_j Σ_k eq(j, r_reduction) * ra(k, j) * (table_func[t(j)](k) + gamma * raf(k, j))
 ```
 
-### Key Difference
+After all rounds:
+- `table_flag[i]` = Σ_{j: t(j)=i} eq(r_cycle_prime, j) - this is what prover provides
+- `val_claim` = Σ_i table_MLE[i](r_address) * table_flag[i]
+  - This reconstructs the weighted sum of table evaluations
 
-1. **Jolt**: `val_claim = Σ table_MLE[i](r_address) * table_flag[i]`
-   - Each `table_MLE[i]` is the multilinear extension of lookup table i
-   - Evaluated at the address point `r_address_prime`
-   - This requires implementing table MLE evaluation using prefix-suffix decomposition
+The KEY insight: The verifier doesn't know which table was used at each cycle. Instead:
+1. Prover provides `table_flag[i]` for each table i
+2. Verifier evaluates `table_MLE[i](r_address)` for each table
+3. Verifier computes `val_claim = Σ_i table_MLE[i](r_address) * table_flag[i]`
 
-2. **Zolt**: Uses `lookup_output = step.rd_value`
-   - This is the actual output value from the execution trace
-   - NOT the table MLE evaluated at the opening point
+This works because if cycle j uses table t(j), then:
+- `table_flag[t(j)]` includes `eq(r_cycle_prime, j)`
+- The contribution becomes `table_MLE[t(j)](r_address) * eq(r_cycle_prime, j)`
 
-### What Needs to be Fixed
+### Implementation Status
 
-Zolt needs to implement the lookup table MLE evaluation for all 42 tables:
-- Table 0: RangeCheck (used by Fibonacci)
-- Table 9: NotEqual (used by Fibonacci branches)
-- Tables 1-8, 10-41: Other instruction lookup tables
-
-The `evaluate_mle` function for each table takes `r_address` (128 bits) and returns the table MLE evaluated at that point.
-
-For example, in Jolt (andn.rs:18-32):
-```rust
-fn evaluate_mle<F, C>(&self, r: &[C]) -> F {
-    let mut result = F::zero();
-    for i in 0..XLEN {
-        let x_i = r[2 * i];
-        let y_i = r[2 * i + 1];
-        result += F::from_u64(1u64 << (XLEN - 1 - i)) * x_i * (F::one() - y_i);
-    }
-    result
-}
-```
-
-### Implementation Options
-
-1. **Full Prefix-Suffix Decomposition**: Implement Jolt's optimization with prefix checkpoints and suffix polynomials. Complex but efficient.
-
-2. **Direct MLE Evaluation**: For each of the 42 tables, implement `evaluate_mle(r_address)` and multiply by the corresponding `table_flag`.
-
-Option 2 is simpler to implement but may be slower for large traces.
-
-### Files to Modify
-
-- `src/zkvm/spartan/stage5_prover.zig`: Implement table MLE evaluations
-- `src/zkvm/lookup_table/`: Add evaluate_mle for each table type
+Added `evaluateTableMLE(table_index, r)` function in lookup_table/mod.zig to evaluate any of the 42 tables by index.
 
 ### Next Steps
 
-1. Understand all 42 lookup table formulas from Jolt
-2. Implement evaluate_mle for each table in Zolt
-3. Modify Stage 5 prover to use `Σ table_MLE[i](r_address) * table_flag[i]` formula
-4. Test verification
+1. The prover sumcheck polynomials must be computed consistently with this formula
+2. Check if Zolt's combined_vals computation matches what the verifier expects
+3. The prover should compute:
+   - For each round: contribution = eq(j) * ra(j) * (table_output(j) + gamma * raf(j))
+4. After all rounds, output_claim should equal verifier's expected_claim
+
+### Possible Issue
+
+Zolt computes `combined_vals[j] = lookup_output + gamma*left + gamma^2*right` where:
+- `lookup_output = step.rd_value` (actual instruction output)
+
+But the formula should be:
+- `val = table_func[t(j)](address(j))` (table MLE evaluated at cycle's address)
+- `raf = (1-is_identity)*(left + gamma*right) + is_identity*gamma*identity`
+- `combined = val + gamma * raf`
+
+The `lookup_output` should match `table_func[t(j)](address(j))` for correct execution, but there may be a formula mismatch in how `raf` is computed.
 
 ### Test Commands
 ```bash

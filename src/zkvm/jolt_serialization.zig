@@ -263,7 +263,21 @@ pub fn ArkworksSerializer(comptime F: type) type {
                 // Debug: print ALL claims
                 switch (entry.id) {
                     .Virtual => |v| {
-                        std.debug.print("[SERIALIZE] Claim {d:02}: Virtual({s}, {s})\n", .{ i, @tagName(v.poly), @tagName(v.sumcheck_id) });
+                        // Print LookupTableFlag with its index
+                        switch (v.poly) {
+                            .LookupTableFlag => |flag_idx| {
+                                // Print claim value too
+                                const standard = entry.claim.fromMontgomery();
+                                var buf: [32]u8 = undefined;
+                                for (0..4) |j| {
+                                    std.mem.writeInt(u64, buf[j * 8 ..][0..8], standard.limbs[j], .little);
+                                }
+                                std.debug.print("[SERIALIZE] Claim {d:03}: Virtual(LookupTableFlag({}), {s}) = [{x:0>2},{x:0>2},{x:0>2},{x:0>2}...]\n", .{ i, flag_idx, @tagName(v.sumcheck_id), buf[0], buf[1], buf[2], buf[3] });
+                            },
+                            else => {
+                                std.debug.print("[SERIALIZE] Claim {d:02}: Virtual({s}, {s})\n", .{ i, @tagName(v.poly), @tagName(v.sumcheck_id) });
+                            },
+                        }
                         // Debug RamValFinal specifically
                         if (v.poly == .RamValFinal and v.sumcheck_id == .RamOutputCheck) {
                             const le_bytes = entry.claim.toBytes();

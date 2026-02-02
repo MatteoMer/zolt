@@ -655,7 +655,25 @@ pub fn OpeningClaims(comptime F: type) type {
             // Write number of entries
             try writer.writeInt(u64, self.entries.items.len, .little);
             // Write each (key, claim) pair
+            std.debug.print("[SERIALIZE ORDER] Total entries = {}\n", .{self.entries.items.len});
             for (self.entries.items, 0..) |entry, idx| {
+                // Debug: print all entries with their keys
+                switch (entry.id) {
+                    .Virtual => |v| {
+                        switch (v.poly) {
+                            .LookupTableFlag => |flag_idx| {
+                                std.debug.print("[SERIALIZE ORDER] Entry {} = Virtual(LookupTableFlag({}), {})\n", .{idx, flag_idx, v.sumcheck_id});
+                            },
+                            .InstructionFlags => |flags| {
+                                std.debug.print("[SERIALIZE ORDER] Entry {} = Virtual(InstructionFlags({}), {})\n", .{idx, flags, v.sumcheck_id});
+                            },
+                            else => if (idx >= 90 and idx <= 150) {
+                                std.debug.print("[SERIALIZE ORDER] Entry {} = Virtual({any}, {})\n", .{idx, v.poly, v.sumcheck_id});
+                            },
+                        }
+                    },
+                    else => {},
+                }
                 try entry.id.serialize(writer);
                 // Write claim as 32-byte LE in standard form
                 // This matches arkworks' serialize_compressed behavior

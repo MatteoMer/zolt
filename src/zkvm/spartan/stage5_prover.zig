@@ -3209,14 +3209,20 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             std.debug.print("  eq_r_reduction (verifier computes) = {x}\n", .{eq_r_reduction.toBytesBE()[16..32].*});
             std.debug.print("  eq_evals[0] (from sumcheck) = {x}\n", .{lookups_eq_evals[0].toBytesBE()[16..32].*});
 
+            // Debug: print first few r_address_prime values
+            std.debug.print("[STAGE5 FINAL] r_address_prime[0..4] (sumcheck challenges 0-3):\n", .{});
+            for (0..4) |i| {
+                std.debug.print("  r_address_prime[{}] = {x}\n", .{ i, r_address_prime[i].toBytesBE()[16..32].* });
+            }
+
             // Compute operand polynomial evaluations at r_address_prime
             const left_op_eval = evaluateLeftOperand(F, r_address_prime);
             const right_op_eval = evaluateRightOperand(F, r_address_prime);
             const identity_eval = evaluateIdentity(F, r_address_prime);
 
-            std.debug.print("  left_op_eval = {any}\n", .{left_op_eval.toBytesBE()[0..8]});
-            std.debug.print("  right_op_eval = {any}\n", .{right_op_eval.toBytesBE()[0..8]});
-            std.debug.print("  identity_eval = {any}\n", .{identity_eval.toBytesBE()[0..8]});
+            std.debug.print("  left_op_eval (full) = {x}\n", .{left_op_eval.toBytesBE()[16..32].*});
+            std.debug.print("  right_op_eval (full) = {x}\n", .{right_op_eval.toBytesBE()[16..32].*});
+            std.debug.print("  identity_eval (full) = {x}\n", .{identity_eval.toBytesBE()[16..32].*});
             std.debug.print("  gamma_lookups_raf = {any}\n", .{gamma_lookups_raf.toBytesBE()[0..8]});
 
             // CORRECT APPROACH: Compute opening claims from the bound polynomials

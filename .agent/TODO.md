@@ -1,72 +1,61 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: IN PROGRESS - Challenges Mismatch Discovered
+## Status: IN PROGRESS - ra_claims Values Mismatch
 
 ## Session 128 Summary
 
-### Progress Made
+### Key Findings
 
-1. **Fixed bit-reversal issue in ra_polys materialization:**
-   - Removed unnecessary bit-reversal since expanding tables use HighToLow binding
-   - Verified that the expanding table values are computed correctly
+1. **Polynomial coefficients MATCH** - The batched sumcheck polynomial for round 0 matches between Zolt prover and Jolt verifier
 
-2. **Added detailed debug output:**
-   - Print exact lookup indices for each cycle
-   - Print expanding table values at round 128
-   - Trace ra_chunk computation step by step
+2. **Round 128 challenge MATCHES** - Verified that `f79e052f4a48e5103da274f0c5d379ef` matches between both
 
-### KEY FINDING: Challenges Mismatch
+3. **Operand evaluations MATCH** - left_operand_eval, right_operand_eval, identity_eval all match:
+   - `left_op_eval = b2450f205a45b0cf95a97f152808af6f` (Zolt BE)
+   - `left_operand_eval = [6f, af, 08, 28, ...]` (Jolt LE) → matches when converted
 
-**The address round challenges are DIFFERENT between Zolt and Jolt!**
+4. **ra_claims DO NOT MATCH**:
+   - Zolt: `ra_chunks[0] = 90fa96e636b607e1e46f2c8bff8e00be`
+   - Jolt: `ra_claims[0] = [a5, 5e, c7, 72, 66, 8e, 13, 27, ...]` → `119b26350ef30d2127138e6672c75ea5` in BE
 
-Zolt's Round 0 challenge (in hex, lower 16 bytes):
-```
-7c a2 5a 17 c1 29 02 cb 92 c0 d5 87 8c 3b 73 da
-```
+### The Core Issue
 
-Jolt's r_address_prime r[0] (serialized):
-```
-[5a, d0, bd, aa, 13, 59, 1f, 8e, 48, 0d, ca, d7, ce, eb, b2, 15]
-```
+The ra_claims are the final sumcheck claims for the virtual ra polynomials after all 8 cycle binding rounds. Even though:
+- Initial materialization appears correct
+- Binding challenges appear correct
 
-**These are completely different values!**
+The final values don't match.
 
-This means the transcript diverged BEFORE the address rounds (round 0), which causes:
-1. Different challenges during sumcheck
-2. Different expanding table values
-3. Different ra_polys materialization
-4. Different final ra_claims
-5. Different expected_output_claim
+### Possible Root Causes
 
-### Root Cause Analysis
+1. **Binding logic issue during cycle rounds** - The polynomial binding might differ
+2. **Challenge order/endianness** - How challenges are applied to polynomials
+3. **Off-by-one in polynomial access** - Accessing wrong indices after binding
 
-The transcript state must diverge in one of these places:
-1. Initial transcript state
-2. Polynomial commitments appended to transcript
-3. Batch coefficients appended to transcript
-4. Previous stage challenges
+### Debug Information
+
+**Zolt ra_chunk_weights after materialization (cycle 0, chunk 0):**
+- v0_p0 = `408e25165ab4e1eaa3ad60d7db172356`
+- v0_p1 = `45df4a65017fd3a782c45b7dc305c1cb`
+- product = `90fa96e636b607e1e46f2c8bff8e00be` (initial ra_chunk[0][0])
+
+After 8 binding rounds, all cycles had the same value (constant polynomial) so:
+- final ra_chunks[0] = `90fa96e636b607e1e46f2c8bff8e00be` (unchanged)
+
+But Jolt expects: `119b26350ef30d2127138e6672c75ea5`
 
 ### Next Steps
 
-1. **Debug transcript state at Stage 5 start:**
-   - Compare transcript state between Zolt and Jolt at the beginning of Stage 5
-   - Check what was appended to transcript in Stage 4
+1. **Add debug to Jolt** to print ra_polys values immediately after init_log_t_rounds() materialization
+2. **Compare expanding table values** between Zolt and Jolt at round 128
+3. **Verify challenge application order** in cycle round binding
 
-2. **Verify input claims match:**
-   - The three input claims (regs_val, ram_ra, lookups) are appended at Stage 5 start
-   - Verify these match between Zolt and Jolt
+### Files Modified This Session
 
-3. **Check batch coefficients:**
-   - batch0, batch1, batch2 are derived from transcript
-   - These affect how the three instances are combined
-
-### Key Files
-
-**Zolt:**
-- `src/zkvm/spartan/stage5_prover.zig` - Stage 5 batched sumcheck prover
-
-**Jolt:**
-- `jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs` - InstructionReadRaf implementation
+- `src/zkvm/spartan/stage5_prover.zig`:
+  - Removed bit-reversal in ra_chunk_weights materialization
+  - Added detailed debug output for ra computation
+  - Added r_address_prime debug prints
 
 ### Test Commands
 
@@ -75,7 +64,7 @@ The transcript state must diverge in one of these places:
 zig build -Doptimize=ReleaseFast
 
 # Generate proof with debug
-./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format --export-preprocessing logs/zolt_preprocessing.bin -o logs/zolt_proof_dory.bin 2>&1 | grep -E "STAGE5"
+./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format --export-preprocessing logs/zolt_preprocessing.bin -o logs/zolt_proof_dory.bin
 
 # Copy and verify
 cp logs/zolt_*.bin /tmp/

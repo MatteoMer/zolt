@@ -2086,11 +2086,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     coeffs[1] = compressed[1]; // c2
                     coeffs[2] = compressed[2]; // c3
 
-                    // Debug: print coefficients for first round
+                    // Debug: print coefficients for first 3 rounds (compare with Jolt)
+                    if (round < 3) {
+                        std.debug.print("[STAGE5 COEFF ROUND {}] c0 (LE) = {any}\n", .{ round, coeffs[0].toBytes() });
+                        std.debug.print("[STAGE5 COEFF ROUND {}] c2 (LE) = {any}\n", .{ round, coeffs[1].toBytes() });
+                        std.debug.print("[STAGE5 COEFF ROUND {}] c3 (LE) = {any}\n", .{ round, coeffs[2].toBytes() });
+                    }
                     if (round == 0) {
-                        std.debug.print("[STAGE5 COEFF ROUND 0] c0 = {x}\n", .{coeffs[0].toBytesBE()});
-                        std.debug.print("[STAGE5 COEFF ROUND 0] c2 = {x}\n", .{coeffs[1].toBytesBE()});
-                        std.debug.print("[STAGE5 COEFF ROUND 0] c3 = {x}\n", .{coeffs[2].toBytesBE()});
                         std.debug.print("[STAGE5 COEFF ROUND 0] claim = {x}\n", .{current_batched_claim.toBytesBE()});
                         std.debug.print("[STAGE5 COEFF ROUND 0] combined_poly[0] (p0) = {x}\n", .{combined_poly[0].toBytesBE()});
                         std.debug.print("[STAGE5 COEFF ROUND 0] combined_poly[1] (p1) = {x}\n", .{combined_poly[1].toBytesBE()});

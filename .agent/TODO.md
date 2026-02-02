@@ -2,69 +2,71 @@
 
 ## Status: IN PROGRESS - Stage 5 Sumcheck Mismatch
 
-## Session 131 Summary
+## Session 131 Final Summary
 
-### Key Finding: The eq_prefix Fix is Mathematically Correct
+### Completed Analysis
 
-After extensive analysis, I confirmed that:
-
-1. **Jolt's EqPolynomial::evals convention**: bit (n-1-j) of index k ↔ r[j]
-   - Example: for n=2, k=1 (binary 01):
-     - j=0: bit 1 = 0 → (1-r[0])
-     - j=1: bit 0 = 1 → r[1]
-     - Result: (1-r[0]) * r[1]
-   - This matches Zolt's MSB-first convention (no change needed)
-
-2. **eq_prefix decomposition**: For the pair (2j, 2j+1):
+1. **eq_prefix decomposition is mathematically correct**:
    - eq(2j, r) = eq_prefix(j) * (1 - r[-1])
    - eq(2j+1, r) = eq_prefix(j) * r[-1]
-   - eq_prefix = eq(2j, r) / (1 - r[-1]) = eq(j, r[:-1])
+   - eq_prefix = eq(2j, r) / (1 - r[-1])
 
-3. **Jolt's GruenSplitEqPolynomial structure**:
-   - E_out * E_in gives partial eq WITHOUT the current round variable (w_last)
-   - current_scalar accumulates eq factors from ALREADY-BOUND variables
-   - After current_scalar multiplication, sum_evals = partial_eq * current_scalar
+2. **Jolt's EqPolynomial::evals convention matches Zolt**:
+   - bit (n-1-j) of index k ↔ r[j]
+   - No change needed to computeEqAtIndex
 
-4. **Zolt's bound eq values**:
-   - After binding round k with challenge c_k:
-     - lookups_eq_evals[j] = eq_partial(j) * accumulated_eq
-   - The accumulated_eq is automatically included through the binding process
+3. **r_round values match between Zolt and Jolt**:
+   - Zolt: r_reduction[n_cycle_vars - 1 - lookups_round]
+   - Jolt: eq_poly.get_current_w() which returns w[current_index - 1]
+   - Both produce the same sequence of values
 
-### Why It Still Fails
+4. **Binding logic is correct**:
+   - lookups_eq_evals[j] after k bindings includes accumulated eq scalars
+   - This automatically matches Jolt's current_scalar behavior
 
-The sumcheck polynomial coefficients are computed correctly in terms of the eq_prefix structure, but there must be some other subtle difference:
+5. **finishMlesProductSumFromEvals matches Jolt**:
+   - Same formula for computing eval_at_0 from claim
+   - Same interpolation and eq multiplication
 
-1. Possibly the binding order or how challenges are indexed
-2. Possibly something in finishMlesProductSumFromEvals
-3. Possibly how the claim is computed at each round
+### Current Implementation
 
-### Debug Information
+The cycle round polynomial computation in stage5_prover.zig:
+1. Computes eq_prefix = eq_0 / (1 - r_round)
+2. Sets pairs[0] = (eq_prefix * val[2j], eq_prefix * val[2j+1])
+3. Sets pairs[1..9] = ra_chunk pairs
+4. Evaluates product at [1, 2, ..., 8, ∞]
+5. Calls finishMlesProductSumFromEvals to recover polynomial
+6. Combines with instances 0, 1 using batch coefficients
 
-From verification output:
+### Verification Still Fails
+
 ```
 output_claim:   [84, 83, e6, 0a, 81, 4f, 33, 12, ...]
 expected_claim: [c6, 19, df, ae, 44, 5b, ac, 2e, ...]
 ```
 
-Individual instances match but batched sumcheck fails.
+Individual instance claims match but batched sumcheck fails.
 
-### Files Modified
+### Remaining Possibilities
 
-1. `/home/vivado/projects/zolt/src/zkvm/spartan/stage5_prover.zig`:
-   - Added eq_prefix computation for cycle rounds (lines 2816-2848)
-   - Factors out eq(X, r_round) from pairs[0] to match Jolt's convention
+1. **Transcript synchronization**: Maybe challenges differ between Zolt and Jolt?
+2. **Combined polynomial encoding**: The batched polynomial might use a different format
+3. **Instance 0/1 contribution**: The RegistersValEvaluation or RamRaClaimReduction polynomials might be wrong
+4. **Numerical precision**: Some edge case in field arithmetic?
 
 ### Next Steps
 
-1. Add detailed debug output comparing:
-   - Zolt's eq_prefix values vs Jolt's E_out * E_in * current_scalar
-   - sum_evals at each cycle round
-   - The full polynomial coefficients before compression
+1. Add detailed debug output at each cycle round:
+   - Print eq_prefix, sum_evals, full_coeffs
+   - Compare with Jolt's values (needs Jolt debugging enabled)
 
-2. Check if there's an issue with:
-   - The claim value passed to finishMlesProductSumFromEvals
-   - The r_round value used in the function
-   - The interpolation or multiplication step
+2. Verify transcript matches:
+   - Print all challenges from Stage 5
+   - Ensure Zolt and Jolt use same challenge sequence
+
+3. Check Instance 0 and 1:
+   - Their contribution might be wrong during cycle rounds
+   - Verify combined_poly format
 
 ### Test Commands
 

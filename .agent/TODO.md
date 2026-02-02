@@ -1,149 +1,94 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: CRITICAL FIX IDENTIFIED - Challenge multiplication mismatch
+## Status: MontU128Challenge multiplication fix APPLIED and TESTED
 
-## Session 8 Progress (Current)
+## Session 9 Progress (Current)
 
-### Root Cause Found!
+### Summary
 
-Jolt uses an **intentionally inconsistent** interpretation for MontU128Challenge:
+Successfully applied and tested the MontU128Challenge multiplication fix. Zolt now uses
+`mulHiBigIntU128` for all `F * Challenge` multiplications to match Jolt's behavior.
 
-1. **For Addition/Subtraction** (`F + challenge`, `F - challenge`):
-   - Uses `Into<F>::into(challenge)` first
-   - This calls `from_bigint_unchecked([0,0,L,H])`
-   - Stores `[0,0,L,H]` as Montgomery form → field value = `(L*2^128 + H*2^192) / R`
+**Key Result**: Zolt proof generation and internal verification PASSED!
 
-2. **For Multiplication** (`F * challenge`):
-   - Uses `mul_by_hi_2limbs(L, H)` directly
-   - Treats `(L, H)` as raw integer → field value = `L*2^128 + H*2^192`
-   - NO division by R!
+```
+[VERIFIER] ========================================
+[VERIFIER] All stages PASSED!
+[VERIFIER] ========================================
 
-### Why This Matters
-
-When computing `eq(r, s) = Π_i (r[i]*s[i] + (1-r[i])*(1-s[i]))`:
-
-Jolt computes:
-- `r[i] * s[i]` using `mul_by_hi_2limbs` → `(L_r*2^128 + H_r*2^192) * (L_s*2^128 + H_s*2^192)`
-- `1 - r[i]` using standard subtraction → `1 - (L_r*2^128 + H_r*2^192) / R`
-
-But Zolt was computing:
-- `r[i] * s[i]` using standard Montgomery mul → `((L_r*2^128 + H_r*2^192)/R) * ((L_s*2^128 + H_s*2^192)/R)`
-- This gives DIFFERENT results!
-
-### The Fix
-
-Zolt needs to match Jolt's EXACT behavior:
-
-1. **Challenge storage**: Store as `[0, 0, L, H]` directly (✓ already done)
-
-2. **Challenge multiplication**: Use `mulHiBigIntU128(challenge.limbs)` instead of `mul(challenge)`
-   - Applies to: `computeEqAtIndex`, `split_eq.zig`, expanding table updates, etc.
-
-3. **Challenge subtraction** (`F.one() - challenge`):
-   - The current Zolt code does `F.one().sub(challenge)` which treats challenge as Montgomery form
-   - But since multiplication uses the raw interpretation, the subtraction should ALSO use raw interpretation?
-   - Actually NO - Jolt's subtraction DOES convert first, so both differ by factor R
-   - This is INTENTIONAL in Jolt and creates a non-standard eq polynomial!
-
-### Key Files to Modify
-
-1. `src/zkvm/spartan/stage5_prover.zig`:
-   - `computeEqAtIndex()` at line 3565: Change `result.mul(rj)` to `result.mulHiBigIntU128(rj.limbs)`
-
-2. `src/poly/split_eq.zig`:
-   - Lines 143-144, 166-167: Change `prev[i].mul(tau_k)` and `prev[i].mul(one_minus_tau_k)`
-   - Need to use `mulHiBigIntU128` for challenge multiplications
-
-3. `src/utils/expanding_table.zig`:
-   - Any challenge multiplication there
-
-4. All sumcheck provers that multiply with challenges
-
-### Verification Steps
-
-1. After fix, rebuild: `zig build -Doptimize=ReleaseFast`
-2. Generate proof: `./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format --export-preprocessing /tmp/zolt_preprocessing.bin -o /tmp/zolt_proof_dory.bin`
-3. Copy and verify: `cp /tmp/zolt_*.bin /home/vivado/projects/jolt/ && cd /home/vivado/projects/jolt && cargo test --package jolt-core --features zolt-debug test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture`
-
-### Wait - Re-Analysis Needed!
-
-Looking more carefully at Jolt's eq_poly.rs evals_serial:
-```rust
-for i in (0..size).rev().step_by(2) {
-    let scalar = evals[i / 2];
-    evals[i] = scalar * r[j];      // F * Challenge → uses mul_by_hi_2limbs
-    evals[i - 1] = scalar - evals[i];  // F - F → standard field subtraction!
-}
+  Verification: PASSED
+  Time: 314.76 ms
 ```
 
-So the computation is:
-- `scalar * r[j]` = `scalar * (L*2^128 + H*2^192)` (using mul_by_hi_2limbs, treats r[j] as raw int)
-- `scalar - (scalar * r[j])` = `scalar * (1 - (L*2^128 + H*2^192))`
+### Fixes Applied
 
-NOT `scalar * (1 - r[j])` where r[j] is converted first!
+All challenge multiplication sites have been updated to use `mulHiBigIntU128`:
 
-This means the eq polynomial Jolt computes is:
-- For challenge r[j] with raw value c = L*2^128 + H*2^192:
-- eq factor = b*c + (1-b)*(1-c) when b=1 or b=0
-- But this is NOT standard eq polynomial because c is NOT in [0,1]!
+1. **stage5_prover.zig**:
+   - `computeEqAtIndex`: Fixed (previous session)
+   - `computeAllLtEvals`: Fixed F * Challenge multiplication
+   - `computeLtAtIndex`: Fixed F * Challenge multiplication
+   - Horner evaluation: Fixed `eval_result.mulHiBigIntU128(challenge.limbs)`
+   - Polynomial binding: Fixed `X.mulHiBigIntU128(challenge.limbs)` for B_1, B_2, P_*, Q_*, H_prime, eq_*_hi
 
-Actually, this IS valid because we're working in a field where c is a random field element.
-The eq polynomial is: eq(r, b) = Π_i (b_i * r_i + (1-b_i)*(1-r_i))
+2. **split_eq.zig**:
+   - `init()` eq table building: Fixed `prev[i].mulHiBigIntU128(tau_k.limbs)`
+   - `getFullTable()`: Fixed
+   - `computeRoundPoly()`: Fixed `current_scalar.mulHiBigIntU128(tau_curr.limbs)`
+   - `getEq01()`: Fixed
+   - `getActiveEqTable()`: Fixed
 
-When b_i = 1: factor = r_i
-When b_i = 0: factor = 1 - r_i
+3. **expanding_table.zig** (both utils/ and zkvm/lasso/):
+   - `bind()`: Fixed `v.mulHiBigIntU128(r.limbs)`
+   - `bindWithPair()`: Fixed
+   - `update()`: Fixed `old_val.mulHiBigIntU128(r_j.limbs)`
 
-In Jolt's implementation with challenges:
-- b_i = 1: factor = mul_by_hi_2limbs result = raw_challenge_value
-- b_i = 0: factor = scalar - (scalar * challenge) = scalar * (1 - raw_challenge_value)
+4. **prefix_suffix.zig**:
+   - `bind()`: Fixed `high.mulHiBigIntU128(challenge.limbs)`
+   - `evaluate()`: Fixed `term.mulHiBigIntU128(point[j].limbs)`
 
-This IS consistent! The subtraction `scalar - (scalar * r[j])` equals `scalar * (1 - r[j])` where r[j] is the RAW value.
+5. **field/mod.zig**:
+   - Added `mulHiBigIntU128` to non-generic `BN254Scalar` struct (was missing)
 
-So the eq polynomial uses raw_challenge_value, not the Montgomery-converted value.
+### Key Understanding
 
-### Conclusion
+Jolt's MontU128Challenge intentionally uses different interpretations:
 
-Zolt must use `mulHiBigIntU128` for ALL challenge multiplications in eq polynomial computation.
-The "field value" of a challenge is `L*2^128 + H*2^192` (NOT divided by R).
+| Operation | Jolt Behavior | Effect |
+|-----------|---------------|--------|
+| F * Challenge | `mul_by_hi_2limbs(L, H)` | Treats [0,0,L,H] as raw integer |
+| Challenge * F | Delegates to F * Challenge | Same as above |
+| Challenge * Challenge | Both convert to Fr, then F * F | Standard Montgomery |
+| F + Challenge | Convert challenge to Fr first | Standard Montgomery |
+| F - Challenge | Convert challenge to Fr first | Standard Montgomery |
 
-But wait - this contradicts the `Into<F>` implementation which DOES use `from_bigint_unchecked`!
+The key insight: `mul_by_hi_2limbs` multiplies the field element by the sparse
+integer `L*2^128 + H*2^192` directly, without treating it as Montgomery form.
 
-Let me check if `Into<F>` is ever actually called in the hot path...
+### Next Steps
 
-Actually, looking at the macro again:
-- `F - Challenge` uses `self - Into::<$f>::into(rhs)` (line 218)
-- But in eq_poly.rs, the subtraction is `scalar - evals[i]` which is `F - F`, not `F - Challenge`!
+1. **Cross-verification with Jolt**: Setup proper Jolt environment to verify Zolt proofs
+   - Need to generate Jolt verifier preprocessing
+   - Need compatible ELF binaries
+   - Test files: `/tmp/jolt_verifier_preprocessing.dat`, `/tmp/zolt_proof_dory.bin`, `/tmp/fib_io_device.bin`
 
-So the flow is:
-1. `scalar * r[j]` → Challenge → F via mul_by_hi_2limbs → stored in evals[i]
-2. `scalar - evals[i]` → F - F → standard subtraction
+2. **Additional testing**: Test with more complex programs
 
-The Challenge is NEVER subtracted directly from F in the eq computation! It's always multiplied first, then the result is subtracted.
+### Commits
 
-This makes sense and is consistent!
+- `785a5b6`: Fix MontU128Challenge multiplication to match Jolt
 
-### Final Fix Plan
+## Previous Sessions Summary
 
-In Zolt:
-- Change all `field.mul(challenge)` to `field.mulHiBigIntU128(challenge.limbs)`
-- Do NOT change subtraction handling
-- The eq polynomial will then match Jolt's interpretation
+- Session 1-7: Initial implementation, discovered suffix MLEs, transcript ordering
+- Session 8: Identified MontU128Challenge multiplication mismatch as root cause
+- Session 9: Applied fixes to all challenge multiplication sites, verified internally
 
-## Files Changed This Session
+## Files Modified This Session
 
-(none yet - analysis complete, implementation next)
-
-## Test Commands
-
-```bash
-# Build Zolt
-zig build -Doptimize=ReleaseFast
-
-# Generate proof
-./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format --export-preprocessing /tmp/zolt_preprocessing.bin -o /tmp/zolt_proof_dory.bin
-
-# Verify with Jolt
-cp /tmp/zolt_*.bin /home/vivado/projects/jolt/
-cd /home/vivado/projects/jolt
-cargo test --package jolt-core --features zolt-debug test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
-```
+- `src/field/mod.zig` - Added mulHiBigIntU128 to BN254Scalar
+- `src/poly/split_eq.zig` - Fixed eq table building
+- `src/utils/expanding_table.zig` - Fixed update function
+- `src/zkvm/lasso/expanding_table.zig` - Fixed bind functions
+- `src/zkvm/lasso/prefix_suffix.zig` - Fixed bind and evaluate
+- `src/zkvm/spartan/stage5_prover.zig` - Fixed lt_evals, Horner eval, bindings

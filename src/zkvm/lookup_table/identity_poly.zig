@@ -12,9 +12,10 @@
 //!
 //! ## OperandPolynomial
 //!
-//! Evaluates to either the left or right operand extracted from interleaved bits:
-//! - Left: sum_{i=0}^{n/2-1} r[2i] * 2^(n/2-1-i)  (even positions)
-//! - Right: sum_{i=0}^{n/2-1} r[2i+1] * 2^(n/2-1-i) (odd positions)
+//! Evaluates to either the left or right operand extracted from interleaved bits.
+//! In Jolt's interleave format: interleaved = (left << 1) | right
+//! - Left: sum_{i=0}^{n/2-1} r[2i+1] * 2^(n/2-1-i)  (odd positions)
+//! - Right: sum_{i=0}^{n/2-1} r[2i] * 2^(n/2-1-i) (even positions)
 //!
 //! Reference: jolt-core/src/poly/identity_poly.rs
 
@@ -146,9 +147,9 @@ pub fn OperandPolynomial(comptime F: type) type {
             std.debug.assert(self.num_bound_vars < self.num_vars);
 
             // Only update bound_value when binding the relevant operand variable
-            // For interleaved bits: even positions are left, odd are right
-            const is_left_var = self.num_bound_vars % 2 == 0;
-            const is_right_var = self.num_bound_vars % 2 == 1;
+            // In Jolt's interleave format: odd positions are left, even positions are right
+            const is_left_var = self.num_bound_vars % 2 == 1;
+            const is_right_var = self.num_bound_vars % 2 == 0;
 
             if ((is_left_var and self.side == .Left) or
                 (is_right_var and self.side == .Right))
@@ -176,17 +177,17 @@ pub fn OperandPolynomial(comptime F: type) type {
 
             switch (self.side) {
                 .Left => {
-                    // Sum over even positions
-                    for (0..half_len) |i| {
-                        const shift = @as(u128, 1) << @intCast(half_len - 1 - i);
-                        result = result.add(r[2 * i].mul(F.fromU128(shift)));
-                    }
-                },
-                .Right => {
-                    // Sum over odd positions
+                    // Sum over odd positions (left operand in Jolt's format)
                     for (0..half_len) |i| {
                         const shift = @as(u128, 1) << @intCast(half_len - 1 - i);
                         result = result.add(r[2 * i + 1].mul(F.fromU128(shift)));
+                    }
+                },
+                .Right => {
+                    // Sum over even positions (right operand in Jolt's format)
+                    for (0..half_len) |i| {
+                        const shift = @as(u128, 1) << @intCast(half_len - 1 - i);
+                        result = result.add(r[2 * i].mul(F.fromU128(shift)));
                     }
                 },
             }
@@ -194,16 +195,19 @@ pub fn OperandPolynomial(comptime F: type) type {
             return result;
         }
 
-        /// Uninterleave bits to get left and right values
+        /// Uninterleave bits to get left and right operand values
+        /// In Jolt's interleave format: interleaved = (left << 1) | right
+        /// So left operand bits are at ODD positions (1, 3, 5, ...)
+        /// and right operand bits are at EVEN positions (0, 2, 4, ...)
         fn uninterleaveBits(index: u128) struct { left: u64, right: u64 } {
             var left: u64 = 0;
             var right: u64 = 0;
             var i: u6 = 0;
             while (i < 64) : (i += 1) {
-                // Even bits go to left
-                const left_bit = (index >> @as(u7, @intCast(2 * i))) & 1;
-                // Odd bits go to right
-                const right_bit = (index >> @as(u7, @intCast(2 * i + 1))) & 1;
+                // Left operand at odd positions (1, 3, 5, ...)
+                const left_bit = (index >> @as(u7, @intCast(2 * i + 1))) & 1;
+                // Right operand at even positions (0, 2, 4, ...)
+                const right_bit = (index >> @as(u7, @intCast(2 * i))) & 1;
                 left |= @as(u64, @truncate(left_bit)) << i;
                 right |= @as(u64, @truncate(right_bit)) << i;
             }

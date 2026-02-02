@@ -552,18 +552,13 @@ test "suffix_mle One" {
 }
 
 test "suffix_mle And" {
-    // Create bits where x = 0x5 and y = 0x3 (interleaved)
-    // x bits: 0101, y bits: 0011
-    // Interleaved: x0y0 x1y1 x2y2 x3y3 = 01 00 11 11 = 0x3F (in reverse bit order)
-    // Actually, uninterleave extracts: even positions -> left, odd positions -> right
-    // So for value 0xF with 8 bits: bits are [0,1,2,3,4,5,6,7]
-    // left = bits 0,2,4,6, right = bits 1,3,5,7
-    // 0xF = 0b00001111 = bits 0-3 set
-    // left = bits 0,2 = 0b0101 = 5, right = bits 1,3 = 0b0101 = 5
-    // AND = 5 & 5 = 5
+    // In Jolt's interleave format: left at ODD positions, right at EVEN positions
+    // For 0xF = 0b00001111 with 8 bits (positions 0-7):
+    // - left (odd positions 1,3,5,7): bits 1,3 set, 5,7 clear = 0b0011 = 3
+    // - right (even positions 0,2,4,6): bits 0,2 set, 4,6 clear = 0b0011 = 3
+    // AND = 3 & 3 = 3
     const b = LookupBits(128).new(0xF, 8);
     const result = suffixMle(.And, b);
-    // Need to verify uninterleave behavior
     const parts = b.uninterleave();
     try std.testing.expectEqual(parts.left & parts.right, result);
 }

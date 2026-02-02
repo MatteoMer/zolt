@@ -1247,6 +1247,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             });
 
             // Run the batched sumcheck
+            std.debug.print("[STAGE5] Entering main sumcheck loop, max_num_rounds={}\n", .{max_num_rounds});
             for (0..max_num_rounds) |round| {
                 const remaining_rounds = max_num_rounds - round;
 
@@ -1345,33 +1346,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     const uni_poly = UniPoly(F).fromEvalsAndHint(current_batched_claim, eval_0, eval_2);
 
                     const coeffs = try self.allocator.alloc(F, 3);
+
                     coeffs[0] = uni_poly.coeffs[0]; // c0
                     coeffs[1] = uni_poly.coeffs[1]; // c2
                     coeffs[2] = uni_poly.coeffs[2]; // c3 (= 0 for degree-2)
-
-                    // Debug: print first few round polynomials
-                    if (round < 3 or round == 16 or round == 17) {
-                        std.debug.print("[STAGE5 POLY] round={}, eval_0={x:0>16}, eval_2={x:0>16}, c0={x:0>16}, c2={x:0>16}\n", .{
-                            round,
-                            eval_0.toBytesBE()[24..32].*,
-                            eval_2.toBytesBE()[24..32].*,
-                            coeffs[0].toBytesBE()[24..32].*,
-                            coeffs[1].toBytesBE()[24..32].*,
-                        });
-                        std.debug.print("[STAGE5 POLY DEBUG] round={}\n", .{round});
-                        std.debug.print("  read_checking: [0]={any}, [1]={any}\n", .{ read_checking_evals[0].toBytesBE(), read_checking_evals[1].toBytesBE() });
-                        std.debug.print("  raf:           [0]={any}, [1]={any}\n", .{ raf_evals[0].toBytesBE(), raf_evals[1].toBytesBE() });
-                        std.debug.print("  combined_poly: [0]={any}\n", .{combined_poly[0].toBytesBE()});
-                        std.debug.print("                 [2]={any}\n", .{combined_poly[2].toBytesBE()});
-                        std.debug.print("  batch2:        {any}\n", .{batch2.toBytesBE()});
-                        std.debug.print("  eval_0_inst2:  {any}\n", .{eval_0_inst2.toBytesBE()});
-                        std.debug.print("  eval_2_inst2:  {any}\n", .{eval_2_inst2.toBytesBE()});
-                        std.debug.print("  current_batched_claim: {any}\n", .{current_batched_claim.toBytesBE()});
-                        std.debug.print("  Final coeffs:\n", .{});
-                        std.debug.print("    c0 (BE)={any}\n", .{coeffs[0].toBytesBE()});
-                        std.debug.print("    c2 (BE)={any}\n", .{coeffs[1].toBytesBE()});
-                        std.debug.print("    c3 (BE)={any}\n", .{coeffs[2].toBytesBE()});
-                    }
 
                     try proof.compressed_polys.append(self.allocator, .{
                         .coeffs_except_linear_term = coeffs,
@@ -1469,6 +1447,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     lookups_claim = F.zero();
                     for (0..T) |j| {
                         lookups_claim = lookups_claim.add(lookups_eq_evals[j].mul(lookups_ra_weights[j]).mul(lookups_combined_vals[j]));
+                    }
+
+                    if (round % 8 == 7) {
+                        std.debug.print("[STAGE5] Completed rounds 0-{}\n", .{round});
                     }
 
                     continue; // Skip the rest of the loop for address rounds

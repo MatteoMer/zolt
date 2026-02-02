@@ -880,27 +880,30 @@ pub fn RafDecomposition(comptime F: type) type {
 
         fn operandPrefixEvals(self: *const Self, b: usize, remaining: usize, is_left: bool) [2]F {
             // Uninterleave b to get the operand bits
-            // For LOG_K bits interleaved: even positions -> left, odd positions -> right
+            // In Jolt's interleave format: odd positions -> left, even positions -> right
             const half_bits = remaining / 2;
             var operand_bits: u64 = 0;
             if (half_bits > 0) {
                 if (is_left) {
-                    // Extract even positions
+                    // Left operand: extract odd positions (1, 3, 5, ...)
                     for (0..@min(half_bits, 32)) |i| {
-                        const bit: u64 = @truncate((b >> @intCast(2 * i)) & 1);
+                        const bit: u64 = @truncate((b >> @intCast(2 * i + 1)) & 1);
                         operand_bits |= bit << @intCast(i);
                     }
                 } else {
-                    // Extract odd positions
+                    // Right operand: extract even positions (0, 2, 4, ...)
                     for (0..@min(half_bits, 32)) |i| {
-                        const bit: u64 = @truncate((b >> @intCast(2 * i + 1)) & 1);
+                        const bit: u64 = @truncate((b >> @intCast(2 * i)) & 1);
                         operand_bits |= bit << @intCast(i);
                     }
                 }
             }
 
-            const is_even = (self.num_bound_vars % 2 == 0);
-            const is_binding_round = if (is_left) is_even else !is_even;
+            // In Jolt's format: even positions = right operand, odd positions = left operand
+            // When num_bound_vars is even, we're binding an even position (right operand)
+            // When num_bound_vars is odd, we're binding an odd position (left operand)
+            const is_even_round = (self.num_bound_vars % 2 == 0);
+            const is_binding_round = if (is_left) !is_even_round else is_even_round;
 
             if (is_binding_round and half_bits > 0) {
                 // Linear polynomial: P(c) = base + c * m
@@ -1018,28 +1021,32 @@ pub fn initQRaf(
     }
 }
 
-/// Uninterleave bits to get the left operand (even positions)
+/// Uninterleave bits to get the left operand
+/// In Jolt's interleave format: interleaved = (left << 1) | right
+/// So left operand bits are at ODD positions (1, 3, 5, ...)
 fn uninterleaveBitsLeft(bits: u128, num_bits: usize) u64 {
     var left: u64 = 0;
     const half_bits = num_bits / 2;
     var i: usize = 0;
     while (i < half_bits and i < 64) : (i += 1) {
-        // Even positions (0, 2, 4, ...) go to left
-        const shift_amt: u7 = @intCast(@min(2 * i, 127));
+        // Left operand at ODD positions (1, 3, 5, ...)
+        const shift_amt: u7 = @intCast(@min(2 * i + 1, 127));
         const bit = (bits >> shift_amt) & 1;
         left |= @as(u64, @truncate(bit)) << @as(u6, @intCast(i));
     }
     return left;
 }
 
-/// Uninterleave bits to get the right operand (odd positions)
+/// Uninterleave bits to get the right operand
+/// In Jolt's interleave format: interleaved = (left << 1) | right
+/// So right operand bits are at EVEN positions (0, 2, 4, ...)
 fn uninterleaveBitsRight(bits: u128, num_bits: usize) u64 {
     var right: u64 = 0;
     const half_bits = num_bits / 2;
     var i: usize = 0;
     while (i < half_bits and i < 64) : (i += 1) {
-        // Odd positions (1, 3, 5, ...) go to right
-        const shift_amt: u7 = @intCast(@min(2 * i + 1, 127));
+        // Right operand at EVEN positions (0, 2, 4, ...)
+        const shift_amt: u7 = @intCast(@min(2 * i, 127));
         const bit = (bits >> shift_amt) & 1;
         right |= @as(u64, @truncate(bit)) << @as(u6, @intCast(i));
     }
@@ -1380,20 +1387,22 @@ test "RafDecomposition init and deinit" {
 }
 
 test "uninterleaveBits" {
-    // Test that uninterleave correctly separates even and odd bits
-    // bits = 0b1010 (binary), suffix_len = 4
-    // Even positions (0, 2): bits 0 and 2 -> left = 0b00 = 0
-    // Odd positions (1, 3): bits 1 and 3 -> right = 0b11 = 3
-    // Actually: position 0 has bit 0, position 2 has bit 0, position 1 has bit 1, position 3 has bit 1
-    // 0b1010 = position 1 and 3 are set
+    // Test that uninterleave correctly separates bits per Jolt's format
+    // In Jolt: interleaved = (left << 1) | right
+    // So left operand is at ODD positions, right operand is at EVEN positions
+    //
+    // bits = 0b1010 = 10
+    // Binary: bit3=1, bit2=0, bit1=1, bit0=0
+    // Odd positions (1, 3): bits 1 and 1 -> left = 0b11 = 3
+    // Even positions (0, 2): bits 0 and 0 -> right = 0b00 = 0
     const bits: u128 = 0b1010;
     const left = uninterleaveBitsLeft(bits, 4);
     const right = uninterleaveBitsRight(bits, 4);
 
-    // Even bits (positions 0, 2) = 0, 0 -> left = 0
-    try std.testing.expectEqual(@as(u64, 0), left);
-    // Odd bits (positions 1, 3) = 1, 1 -> right = 0b11 = 3
-    try std.testing.expectEqual(@as(u64, 3), right);
+    // Left from odd bits (positions 1, 3) = 1, 1 -> 0b11 = 3
+    try std.testing.expectEqual(@as(u64, 3), left);
+    // Right from even bits (positions 0, 2) = 0, 0 -> 0b00 = 0
+    try std.testing.expectEqual(@as(u64, 0), right);
 }
 
 test "initQRaf basic" {

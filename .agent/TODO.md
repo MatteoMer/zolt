@@ -1,72 +1,77 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: IN PROGRESS - Stage 5 Sumcheck Mismatch
+## Status: IN PROGRESS - Stage 5 ra_claim Mismatch
 
-## Session 131 Final Summary
+## Session 134 Progress
 
-### Completed Analysis
+### Key Finding: ra_chunks values don't match!
 
-1. **eq_prefix decomposition is mathematically correct**:
-   - eq(2j, r) = eq_prefix(j) * (1 - r[-1])
-   - eq(2j+1, r) = eq_prefix(j) * r[-1]
-   - eq_prefix = eq(2j, r) / (1 - r[-1])
+After extensive debugging, confirmed that:
 
-2. **Jolt's EqPolynomial::evals convention matches Zolt**:
-   - bit (n-1-j) of index k ↔ r[j]
-   - No change needed to computeEqAtIndex
+1. **Challenges match exactly between Zolt and Jolt** ✓
+2. **LowerWord prefix checkpoint computation matches** ✓
+3. **Table MLE values match** ✓
+4. **table_flag claims match** ✓
+5. **BUT ra_claims DON'T MATCH!** ✗
 
-3. **r_round values match between Zolt and Jolt**:
-   - Zolt: r_reduction[n_cycle_vars - 1 - lookups_round]
-   - Jolt: eq_poly.get_current_w() which returns w[current_index - 1]
-   - Both produce the same sequence of values
+### Debug Evidence
 
-4. **Binding logic is correct**:
-   - lookups_eq_evals[j] after k bindings includes accumulated eq scalars
-   - This automatically matches Jolt's current_scalar behavior
-
-5. **finishMlesProductSumFromEvals matches Jolt**:
-   - Same formula for computing eval_at_0 from claim
-   - Same interpolation and eq multiplication
-
-### Current Implementation
-
-The cycle round polynomial computation in stage5_prover.zig:
-1. Computes eq_prefix = eq_0 / (1 - r_round)
-2. Sets pairs[0] = (eq_prefix * val[2j], eq_prefix * val[2j+1])
-3. Sets pairs[1..9] = ra_chunk pairs
-4. Evaluates product at [1, 2, ..., 8, ∞]
-5. Calls finishMlesProductSumFromEvals to recover polynomial
-6. Combines with instances 0, 1 using batch coefficients
-
-### Verification Still Fails
-
+**Jolt's ra_claims[0]** (from verifier reading proof):
 ```
-output_claim:   [84, 83, e6, 0a, 81, 4f, 33, 12, ...]
-expected_claim: [c6, 19, df, ae, 44, 5b, ac, 2e, ...]
+[a5, 5e, c7, 72, 66, 8e, 13, 27, 21, 0d, f3, 0e, 35, 26, 9b, 11]
 ```
 
-Individual instance claims match but batched sumcheck fails.
+**Zolt's InstructionRa(0)** (serialized to proof):
+```
+bytes[16..32] = [90 fa 96 e6 36 b6 07 e1 e4 6f 2c 8b ff 8e 00 be]
+```
 
-### Remaining Possibilities
+These are COMPLETELY different values!
 
-1. **Transcript synchronization**: Maybe challenges differ between Zolt and Jolt?
-2. **Combined polynomial encoding**: The batched polynomial might use a different format
-3. **Instance 0/1 contribution**: The RegistersValEvaluation or RamRaClaimReduction polynomials might be wrong
-4. **Numerical precision**: Some edge case in field arithmetic?
+### Root Cause Analysis
+
+The ra_chunk values are computed by accumulating `eq(lookup_index, challenge)` factors.
+
+In Zolt:
+```zig
+const bit = getBit128(lookups_indices_lo[j], lookups_indices_hi[j], bit_index);
+const factor = if (bit == 0) one_minus_r else challenge;
+ra_chunk_weights[chunk_idx][j] = ra_chunk_weights[chunk_idx][j].mul(factor);
+```
+
+This formula is correct! But something else must be wrong:
+1. The bit_index mapping might be wrong
+2. The lookup_indices might be wrong
+3. The challenge values might be used in wrong order
+
+### Jolt's Approach
+
+Jolt computes ra_polys using expanding tables in `init_log_t_rounds`:
+```rust
+let first_idx = ((v >> shift) as usize) & m_mask;
+let mut acc = first[first_idx];
+for table in iter {
+    shift -= log_m;
+    let idx = ((v >> shift) as usize) & m_mask;
+    acc *= table[idx];
+}
+```
+
+The expanding table stores products of eq factors accumulated during address rounds.
 
 ### Next Steps
 
-1. Add detailed debug output at each cycle round:
-   - Print eq_prefix, sum_evals, full_coeffs
-   - Compare with Jolt's values (needs Jolt debugging enabled)
+1. **Debug lookup_index values**
+   - Print first few lookup indices from Zolt
+   - Compare with what Jolt would expect for same trace
 
-2. Verify transcript matches:
-   - Print all challenges from Stage 5
-   - Ensure Zolt and Jolt use same challenge sequence
+2. **Verify bit_index ordering**
+   - Check if Zolt processes bits in same order as Jolt
+   - Round 0 = bit 127 or bit 0?
 
-3. Check Instance 0 and 1:
-   - Their contribution might be wrong during cycle rounds
-   - Verify combined_poly format
+3. **Trace expanding table vs direct computation**
+   - Add debug to compare Jolt's expanding table values
+   - Verify Zolt's direct eq computation gives same result
 
 ### Test Commands
 
@@ -82,3 +87,13 @@ cp /tmp/zolt_*.bin /home/vivado/projects/jolt/
 cd /home/vivado/projects/jolt
 cargo test --package jolt-core --features zolt-debug test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
+
+## Previous Sessions Summary
+
+- Session 133: Confirmed challenges match, identified table MLE mismatch
+- Session 134: Confirmed table MLEs match, identified ra_claims mismatch
+
+## Files Modified This Session
+
+- `/home/vivado/projects/zolt/src/zkvm/lookup_table/prefixes.zig` - Added detailed debug for LowerWord updates
+- `/home/vivado/projects/jolt/jolt-core/src/zkvm/lookup_table/prefixes/lower_word.rs` - Added debug for comparison

@@ -451,19 +451,41 @@ fn lowerWordUpdateCheckpoint(
     const y_shift = 2 * XLEN - j - 1;
     var updated = checkpoints[@intFromEnum(Prefixes.LowerWord)] orelse F.zero();
 
-    // Debug: print first and last updates
+    // Compute contributions
+    const coeff_x = F.fromU128(@as(u128, 1) << @intCast(x_shift));
+    const coeff_y = F.fromU128(@as(u128, 1) << @intCast(y_shift));
+    const contrib_x = coeff_x.mul(r_x);
+    const contrib_y = coeff_y.mul(r_y);
+
+    // Debug: print first and last updates with full details
     if (j == 65 or j == 127) {
         std.debug.print("[LOWERWORD UPDATE] j={}, x_shift={}, y_shift={}\n", .{ j, x_shift, y_shift });
-        std.debug.print("  r_x = {x}\n", .{r_x.toBytesBE()[16..32].*});
-        std.debug.print("  r_y = {x}\n", .{r_y.toBytesBE()[16..32].*});
-        std.debug.print("  prev = {x}\n", .{updated.toBytesBE()[16..32].*});
+        std.debug.print("  r_x (limbs)      = [0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}]\n", .{
+            r_x.limbs[0], r_x.limbs[1], r_x.limbs[2], r_x.limbs[3],
+        });
+        std.debug.print("  r_y (limbs)      = [0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}]\n", .{
+            r_y.limbs[0], r_y.limbs[1], r_y.limbs[2], r_y.limbs[3],
+        });
+        std.debug.print("  coeff_x (limbs)  = [0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}]\n", .{
+            coeff_x.limbs[0], coeff_x.limbs[1], coeff_x.limbs[2], coeff_x.limbs[3],
+        });
+        std.debug.print("  contrib_x (limbs)= [0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}]\n", .{
+            contrib_x.limbs[0], contrib_x.limbs[1], contrib_x.limbs[2], contrib_x.limbs[3],
+        });
+        std.debug.print("  contrib_y (limbs)= [0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}]\n", .{
+            contrib_y.limbs[0], contrib_y.limbs[1], contrib_y.limbs[2], contrib_y.limbs[3],
+        });
+        std.debug.print("  prev (BE bytes)  = {x}\n", .{updated.toBytesBE()[16..32].*});
     }
 
-    updated = updated.add(F.fromU128(@as(u128, 1) << @intCast(x_shift)).mul(r_x));
-    updated = updated.add(F.fromU128(@as(u128, 1) << @intCast(y_shift)).mul(r_y));
+    updated = updated.add(contrib_x);
+    updated = updated.add(contrib_y);
 
     if (j == 65 or j == 127) {
-        std.debug.print("  new  = {x}\n", .{updated.toBytesBE()[16..32].*});
+        std.debug.print("  new  (BE bytes)  = {x}\n", .{updated.toBytesBE()[16..32].*});
+        std.debug.print("  new  (limbs)     = [0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}]\n", .{
+            updated.limbs[0], updated.limbs[1], updated.limbs[2], updated.limbs[3],
+        });
     }
 
     return updated;

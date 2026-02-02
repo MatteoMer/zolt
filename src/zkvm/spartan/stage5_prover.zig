@@ -2350,8 +2350,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     const one_minus_r = F.one().sub(challenge);
                     const chunk_idx = round / lookups_ra_virtual_log_k_chunk;
 
-                    // Debug: print round info for rounds 0-3
-                    if (round < 4) {
+                    // Debug: print round info for rounds 0-3 and 63-65
+                    if (round < 4 or (round >= 63 and round <= 65)) {
                         std.debug.print("[STAGE5 ADDR] Round {} challenge (full) = {any}\n", .{
                             round,
                             challenge.toBytesBE(),
@@ -2549,6 +2549,56 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                         // Compute table_values_at_r_addr using bound prefix checkpoints
                         const table_values = computeTableValuesAtRAddress(F, &prefix_checkpoints);
+
+                        // ============================================================
+                        // DEBUG: Direct MLE computation for comparison
+                        // ============================================================
+                        // Jolt's verifier uses table.evaluate_mle(&r_address_prime)
+                        // which is a direct formula. Let's compute RangeCheck MLE directly
+                        // to verify our prefix-suffix decomposition is correct.
+                        //
+                        // RangeCheck MLE formula (Jolt):
+                        //   Σ_{i=0}^{63} 2^(63-i) * r[64+i]
+                        //
+                        // This means: r_address_prime[64] has coeff 2^63, r[65] has 2^62, etc.
+                        std.debug.print("[STAGE5 DEBUG] Direct MLE computation for RangeCheck:\n", .{});
+                        // Debug: print challenges[64], [65], and [127] for comparison with Jolt (FULL 32 bytes)
+                        const ch64_bytes = challenges[64].toBytesBE();
+                        std.debug.print("[STAGE5 DEBUG] challenges[64] (FULL 32) = ", .{});
+                        for (ch64_bytes) |b| std.debug.print("{x:0>2}", .{b});
+                        std.debug.print("\n", .{});
+                        const ch65_bytes = challenges[65].toBytesBE();
+                        std.debug.print("[STAGE5 DEBUG] challenges[65] (FULL 32) = ", .{});
+                        for (ch65_bytes) |b| std.debug.print("{x:0>2}", .{b});
+                        std.debug.print("\n", .{});
+                        const ch127_bytes = challenges[127].toBytesBE();
+                        std.debug.print("[STAGE5 DEBUG] challenges[127] (FULL 32) = ", .{});
+                        for (ch127_bytes) |b| std.debug.print("{x:0>2}", .{b});
+                        std.debug.print("\n", .{});
+                        var direct_range_check_mle = F.zero();
+                        for (0..64) |i| {
+                            // challenges are in HighToLow order: challenge[0] binds bit 127
+                            // So challenge[64] corresponds to bit 63 (the MSB of the lower word)
+                            // and challenge[127] corresponds to bit 0 (the LSB of the lower word)
+                            const r_i = challenges[64 + i];
+                            const shift = 63 - i;
+                            const coeff = if (shift < 64) F.fromU64(@as(u64, 1) << @intCast(shift)) else F.zero();
+                            direct_range_check_mle = direct_range_check_mle.add(coeff.mul(r_i));
+                            if (i < 3 or i >= 61) {
+                                std.debug.print("  i={}, shift={}, coeff=2^{}, r={x}\n", .{
+                                    i, shift, shift, r_i.toBytesBE()[28..32].*,
+                                });
+                            }
+                        }
+                        std.debug.print("[STAGE5 DEBUG] Direct RangeCheck MLE result: {x}\n", .{
+                            direct_range_check_mle.toBytesBE()[16..32].*,
+                        });
+                        std.debug.print("[STAGE5 DEBUG] Prefix-suffix result (table[0]): {x}\n", .{
+                            table_values[0].toBytesBE()[16..32].*,
+                        });
+                        std.debug.print("[STAGE5 DEBUG] Match: {}\n", .{
+                            direct_range_check_mle.eql(table_values[0]),
+                        });
 
                         // Debug: print key prefix checkpoint values
                         std.debug.print("[STAGE5 REMATERIALIZE] Key prefix checkpoints:\n", .{});

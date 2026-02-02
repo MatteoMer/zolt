@@ -2775,6 +2775,7 @@ pub fn ProofConverter(comptime F: type) type {
                     config.lookups_ra_virtual_log_k_chunk,
                     config.execution_trace.?,
                     config.memory_trace, // RAM trace for ram_ra_claim computation
+                    config.memory_layout, // Memory layout for address remapping
                     stage4_regs_r_address.?,
                     stage4_regs_r_cycle.?,
                     r_reduction_be.?, // Stage 3 challenges in BIG_ENDIAN for LookupsReadRaf eq computation

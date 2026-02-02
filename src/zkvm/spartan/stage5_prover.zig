@@ -2571,6 +2571,30 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 cycle_is_identity_path[j],
                             });
                         }
+
+                        // ============================================================
+                        // CRITICAL FIX: Reset eq_evals to fresh values for cycle rounds
+                        // ============================================================
+                        // During address rounds, lookups_eq_evals was modified by the
+                        // condensation process (multiplied by expanding table values).
+                        // For cycle rounds, we need fresh eq(j, r_reduction) values
+                        // that haven't been modified.
+                        //
+                        // Jolt does this by using a separate GruenSplitEqPolynomial
+                        // (eq_r_reduction) for cycle rounds, initialized with r_reduction.
+                        // See: jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs:354-356
+                        //
+                        // We reinitialize lookups_eq_evals here.
+                        std.debug.print("[STAGE5 CYCLE] Reinitializing lookups_eq_evals for cycle rounds\n", .{});
+                        for (0..T) |j| {
+                            lookups_eq_evals[j] = computeEqAtIndex(r_reduction, j);
+                        }
+                        // Debug: verify sum = 1
+                        var eq_sum_verify = F.zero();
+                        for (0..T) |j| {
+                            eq_sum_verify = eq_sum_verify.add(lookups_eq_evals[j]);
+                        }
+                        std.debug.print("[STAGE5 CYCLE] eq_sum after reinit = {x} (should be 1)\n", .{eq_sum_verify.toBytesBE()[16..32].*});
                     }
                     const current_half_size = lookups_eq_evals.len >> @intCast(lookups_round + 1);
 

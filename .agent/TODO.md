@@ -1,65 +1,84 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: IN PROGRESS - RamRaClaimReduction PhaseCycle Fix
+## Status: IN PROGRESS - Stage 5 InstructionReadRaf Sumcheck Debug
 
-## Session 123 Summary
+## Session 124 Summary
 
-### Progress Made
-1. **Implemented P*Q Decomposition for PhaseCycle**
-   - Added P_raf, P_rw, P_val arrays for prefix eq evaluations
-   - Added Q_raf, Q_rw, Q_val arrays for suffix-weighted sums
-   - Added H_prime array for PhaseCycle2
-   - Implemented PhaseCycle1 polynomial computation using P*Q products
-   - Implemented PhaseCycle2 polynomial computation using H'*eq_hi products
-   - Implemented proper binding for both phases
+### Current Issue
 
-2. **Build and Test Results**
-   - Code compiles successfully
-   - Stage 5 sumcheck verification still failing
-   - The output_claim doesn't match expected_claim
+**Stage 5 sumcheck verification fails** for Instance 2 (InstructionReadRaf).
 
-### Current Analysis
-
-The verifier computes expected_output_claim as:
+The debug output shows:
 ```
-eq_combined * ra_claim_reduced
-
-where:
-eq_combined = eq_addr_1 * eq_cycle_A + γ² * eq_addr_2 * eq_cycle_B
-eq_cycle_A = eq(r_cycle_raf, r_cycle_reduced) + γ * eq(r_cycle_val, r_cycle_reduced)
-eq_cycle_B = eq(r_cycle_rw, r_cycle_reduced) + γ * eq(r_cycle_val, r_cycle_reduced)
+Sumcheck verification failed!
+  output_claim:   [8a, 08, 54, 0f, ...]
+  expected_claim: [02, c5, 72, ac, ...]
 ```
 
-Key insight: The verifier uses `eq(r_cycle_*, r_cycle_reduced)` where r_cycle_reduced
-are the sumcheck challenges from the 8 cycle rounds.
+### Analysis
 
-My P*Q decomposition:
-- P_x[c_lo] = eq(r_cycle_x_lo, c_lo)
-- Q_x[c_lo] = Σ_{c_hi} H[c_lo,c_hi] * eq(r_cycle_x_hi, c_hi)
+1. **Structure**: Stage 5 is a batched sumcheck with 3 instances:
+   - Instance 0: RegistersValEvaluation (8 rounds)
+   - Instance 1: RamRaClaimReduction (24 rounds)
+   - Instance 2: LookupsReadRaf (136 rounds) - 128 address + 8 cycle
 
-The polynomial contribution is: Σ_j coeff * P_x[j] * Q_x[j]
+2. **Key Equation** being proved for Instance 2:
+   ```
+   rv(r_reduction) + γ·left_op(r_reduction) + γ²·right_op(r_reduction)
+   = Σ_{j=0}^{T-1} Σ_{k=0}^{K-1} [ eq(j; r_reduction) · ra(k, j) · (Val_j(k) + γ · RafVal_j(k)) ]
+   ```
 
-After binding prefix bits (first prefix_n_vars rounds), P reduces to:
-P[0] = eq(r_cycle_x_lo, prefix_challenges)
+3. **Verifier's expected output claim** (Jolt line 1267):
+   ```rust
+   let eq_eval_r_reduction = EqPolynomial::<F>::mle(&r_reduction, &r_cycle_prime.r);
+   eq_eval_r_reduction * ra_claim * (val_claim + gamma * raf_claim)
+   ```
 
-After binding suffix bits (last suffix_n_vars rounds), we should get:
-eq(r_cycle_x, r_cycle_reduced) = eq(r_cycle_x_lo, prefix_challenges) * eq(r_cycle_x_hi, suffix_challenges)
+   Where:
+   - `r_reduction` is from Stage 3 (InstructionClaimReduction)
+   - `r_cycle_prime` is the last 8 challenges from Stage 5
 
-But Q already contains H[c] and eq_hi, so there might be a mismatch.
+4. **Zolt's prover** (after sumcheck):
+   ```
+   lookups_eq_evals[0] * lookups_ra_weights[0] * lookups_combined_vals[0]
+   ```
 
-### Possible Issues
+### Potential Root Causes
 
-1. **Order of eq polynomial indices**: Need to verify that BIG_ENDIAN vs LowToHigh ordering is correct
-2. **Suffix vs Prefix split**: Jolt splits r_cycle into [high bits | low bits], need to match this
-3. **H[c] vs F_values**: H[c] = F_values[address[c]] is correct, but need to verify address indexing
+1. **Address round prefix-suffix decomposition mismatch**
+   - Zolt uses a complex prefix-suffix decomposition ported from Jolt
+   - Any bug in prefix/suffix computation would cause polynomial mismatch
 
-### Next Steps
+2. **Cycle round polynomial formula mismatch**
+   - Jolt uses `GruenSplitEqPolynomial` for the eq factor
+   - Zolt uses direct eq_evals array binding
+   - The product structure (eq * val * ra_chunks) may differ
 
-1. Add more debug output to trace P*Q values during cycle rounds
-2. Compare intermediate values with Jolt's expected values
-3. Consider if we need to track ra_claim_reduced separately
+3. **combined_val rematerialization**
+   - After address rounds, Jolt rematerializes combined_val using table MLEs at r_address
+   - Zolt does this at line 2538-2563 but may have formula differences
 
-## Test Commands
+4. **Transcript/coefficient format mismatch**
+   - The compressed polynomial format must match exactly for transcript alignment
+
+### Debug Areas
+
+1. Check `eq_eval_r_reduction` computation in Zolt vs Jolt
+2. Check that `lookups_eq_evals[0]` after binding equals `eq(r_reduction, r_cycle_prime)`
+3. Verify `combined_vals[0]` matches verifier's `val_claim + gamma * raf_claim`
+4. Verify `ra_chunks` product matches verifier's `ra_claim`
+
+### Key Files
+
+**Zolt:**
+- `src/zkvm/spartan/stage5_prover.zig` - Stage 5 batched sumcheck prover
+- `src/zkvm/lookup_table/prefix_suffix_prover.zig` - Prefix-suffix decomposition
+
+**Jolt:**
+- `jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs` - InstructionReadRaf sumcheck
+
+### Test Commands
+
 ```bash
 # Build Zolt
 zig build -Doptimize=ReleaseFast
@@ -75,14 +94,16 @@ cd /home/vivado/projects/jolt
 cargo test --package jolt-core --features zolt-debug test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
 
-### Files Modified This Session
-- `/home/vivado/projects/zolt/src/zkvm/spartan/stage5_prover.zig`
-  - Added P*Q decomposition arrays (P_raf, P_rw, P_val, Q_raf, Q_rw, Q_val)
-  - Added H_prime, eq_hi arrays
-  - Added cycle_challenges tracking
-  - Updated PhaseCycle polynomial computation for PhaseCycle1 and PhaseCycle2
-  - Updated binding code for both phases
+### Next Steps
 
-## SESSION_ENDING
+1. Add debug output comparing:
+   - Zolt's `lookups_eq_evals[0]` vs verifier's `eq_eval_r_reduction`
+   - Zolt's `lookups_combined_vals[0]` vs verifier's computed value
+   - Each ra_chunk vs verifier's ra_claims
 
-Progress saved. Implemented P*Q decomposition but verification still failing. Need to debug the exact values being computed vs expected.
+2. If values differ, trace back to find where mismatch occurs
+
+3. Likely fix areas:
+   - Combined_val rematerialization formula
+   - eq binding during cycle rounds
+   - ra_chunk computation from expanding tables

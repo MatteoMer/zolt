@@ -1,187 +1,46 @@
-# Stage 5 Investigation Notes (Session 95)
+# Session Notes - Stage 5 ra_chunks Investigation
 
 ## Summary
 
-The Stage 5 sumcheck verification fails because Zolt uses a fundamentally different approach for the LookupsReadRaf sumcheck than Jolt. Jolt uses prefix-suffix decomposition with 45+ prefix types, while Zolt uses a simpler bit-splitting approach.
+Fixed suffix MLEs (LsbSuffix, Pow2Suffix, Pow2WSuffix, TwoLsbSuffix) to return 1 when len==0.
+This fixed the table[0] != table[1] issue.
+
+However, ra_chunks still don't match between Zolt and Jolt.
 
 ## Key Findings
 
-### 1. Polynomial Degree Difference
+### Expanding Tables
+- Both Zolt and Jolt use HighToLow binding order for expanding tables
+- Both reset to F::one() at phase start
+- Both update with `update(challenge)` pattern
 
-**Jolt Address Rounds (0-127):**
-- Uses prefix-suffix decomposition to compute degree-2 polynomials
-- The polynomial is computed via `from_evals_and_hint(previous_claim, [p(0), p(2)])`
-- This produces degree-2 polynomials from evaluations at X∈{0, 2}
+### ra_polys Structure
+- Jolt: `ra_polys[chunk_i][j] = ∏_{phase in chunk_i} expanding_table[phase][k_phase(j)]`
+- Zolt: `ra_chunk_weights[chunk_i][j] = ∏_{phase in chunk_i} expanding_table[phase][k_phase(j)]`
 
-**Zolt Address Rounds (0-127):**
-- Uses bit-splitting: splits cycles by whether lookup_index bit = 0 or 1
-- Produces degree-1 linear polynomials: p(X) = p0 + X*(p1 - p0)
+### Potential Issues to Investigate
 
-### 2. Value Materialization Difference
+1. **Phase-to-chunk mapping**: Verify that the mapping from phases to chunks is correct
+   - Jolt: `chunk_size = v.len() / n = phases / 8`
+   - Zolt: `phases_per_chunk = num_phases / ra_num_chunks = 16 / 8 = 2`
 
-**Jolt after address rounds:**
-- Calls `init_log_t_rounds()` which materializes:
-  - `ra_polys[i]`: Per-cycle values = product of expanding tables evaluated at r_address
-  - `combined_val_polynomial[j]` = table_values_at_r_addr[table(j)] + raf_val
-- Where `table_values_at_r_addr[t]` is the **MLE of table t evaluated at r_address**
-- And `raf_val` = gamma * left_prefix + gamma^2 * right_prefix (or identity version)
+2. **Bit extraction for k_phase**: The formula uses:
+   - `shift = (phases - 1 - phase) * log_m`
+   - This extracts address bits for each phase
 
-**Zolt after address rounds:**
-- Uses raw per-cycle values `lookups_combined_vals[j] = output[j] + gamma*left[j] + gamma^2*right[j]`
-- This is the **concrete lookup result**, NOT the table MLE at r_address
+3. **Expanding table values**: Need to compare actual v[phase][k] values at round 128
 
-### 3. The Core Issue
+4. **Challenge accumulation**: The challenges during address rounds 0-127 must match
+   between Zolt and Jolt for the expanding tables to produce identical values
 
-The lookup output `f(x, y)` at concrete inputs `(x, y)` is **not the same** as `table_mle(r)` at random point `r`.
+## Next Steps
 
-Example: AND table
-- `f(5, 3) = 5 & 3 = 1` (concrete evaluation)
-- `AND_mle(r_0, r_1, ..., r_127) = Σ_i 2^i * r_{2i} * r_{2i+1}` (MLE at random point)
+1. Add debug output to Jolt to print expanding_table[phase][k] values at round 128
+2. Compare with Zolt's values
+3. If they differ, trace back to find where the divergence starts
 
-These are completely different values unless `r` happens to be exactly the binary encoding of `(5, 3)` (probability negligible).
+## Code References
 
-### 4. Required Implementation
-
-To achieve Jolt compatibility, Zolt needs to implement:
-
-1. **All 45+ Prefix Types** from Jolt:
-   - LowerWord, LowerHalfWord, UpperWord, Eq, And, Andn, Or, Xor, LessThan, etc.
-   - Each with `prefix_mle()` and `update_prefix_checkpoint()` methods
-
-2. **All Suffix Types** from Jolt:
-   - One, And, Or, Xor, LeftMsb, RightMsb, LessThan, etc.
-
-3. **PrefixSuffixDecomposition** for all 42 lookup tables:
-   - Each table defines which suffixes it uses and how to combine prefixes/suffixes
-
-4. **Expanding Table Accumulator (v vector)**:
-   - Used to compute `ra_polys` after address rounds
-
-5. **RAF Operand Polynomials**:
-   - LeftOperand, RightOperand, Identity prefix-suffix decompositions
-   - Used to compute raf_interleaved and raf_identity
-
-### 5. Jolt Files to Reference
-
-Main implementation:
-- `/home/vivado/projects/jolt/jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs`
-
-Lookup table trait:
-- `/home/vivado/projects/jolt/jolt-core/src/zkvm/lookup_table/mod.rs`
-
-Prefixes (45+ types):
-- `/home/vivado/projects/jolt/jolt-core/src/zkvm/lookup_table/prefixes/*.rs`
-
-Suffixes:
-- `/home/vivado/projects/jolt/jolt-core/src/zkvm/lookup_table/suffixes/*.rs`
-
-Prefix-Suffix Decomposition:
-- `/home/vivado/projects/jolt/jolt-core/src/poly/prefix_suffix.rs`
-
-### 6. Alternative Approaches Considered
-
-**Generalized-Lasso approach:**
-The Jolt paper mentions Generalized-Lasso which doesn't require prefix-suffix decomposition, instead using direct MLE evaluation. However, this would require modifications to both prover AND verifier - defeating the "verify by Jolt" goal.
-
-**Direct MLE evaluation after address rounds:**
-Even if we compute correct `table_values_at_r_addr` after address rounds, the address round polynomials themselves must match Jolt's for the transcript to stay in sync.
-
-### 7. Verification Output Analysis
-
-```
-Sumcheck verification failed!
-  output_claim:   [d9, 50, 6a, 6e, 69, 84, 32, f8, ...]
-  expected_claim: [bb, 2a, d3, 8c, 2c, 8c, 44, d3, ...]
-```
-
-The mismatch occurs because:
-1. Zolt's polynomial coefficients differ from Jolt's
-2. This causes different challenge values to be derived
-3. Which causes different intermediate claims
-4. Resulting in completely different final output claim
-
-### 8. Session 97 Additional Analysis
-
-**Root Cause Deep Dive:**
-
-The degree-2 polynomial structure comes from how Jolt computes eval_0 and eval_2:
-
-1. **Jolt's Formula:**
-   ```
-   eval_0 = Σ_tables Σ_b table.combine(prefixes_c0, suffixes_left[b])
-   eval_2 = 2 * Σ_tables Σ_b table.combine(prefixes_c2, suffixes_right[b])
-          - Σ_tables Σ_b table.combine(prefixes_c2, suffixes_left[b])
-   ```
-
-2. **Key Difference:**
-   - Jolt evaluates prefix_mle at c=0 AND c=2 (not c=0 and c=1)
-   - The prefix MLE is linear in c: `prefix(c) = a + b*c`
-   - So `prefix(0) = a` and `prefix(2) = a + 2b`
-   - This creates genuinely different polynomial evaluations
-
-3. **Zolt's Formula:**
-   ```
-   p0 = Σ_{j: bit=0} contrib[j]
-   p1 = Σ_{j: bit=1} contrib[j]
-   eval_0 = p0
-   eval_2 = 2*p1 - p0
-   ```
-
-   - This assumes eval_1 = p1, which is correct for direct evaluation
-   - But Jolt computes prefix(2) * Q, which is NOT the same as prefix(1) * Q
-
-**Mathematical Insight:**
-
-The sumcheck computes evaluations of a univariate polynomial g(X) where X is the current bound variable.
-
-For Jolt: `g(X) = Σ_b prefix(X, b) * Q[b]`
-
-Since `prefix(X, b)` is linear in X: `prefix(X, b) = P0[b] + X * P1[b]`
-
-Then: `g(X) = Σ_b (P0[b] + X*P1[b]) * Q[b] = C + X*D` (also linear)
-
-So g(X) IS linear! But Jolt still uses the degree-2 format because it evaluates at X=0 and X=2, then uses `fromEvalsAndHint` to reconstruct.
-
-**The Real Issue:**
-
-If both are linear, why the mismatch? Let's trace:
-
-- Jolt: `eval_0 = Σ_b prefix(0, b) * Q[b]`
-- Zolt: `eval_0 = Σ_{j: bit=0} eq[j] * ra[j] * combined[j]`
-
-These compute **different things**:
-- Jolt's Q[b] = Σ_{j: prefix_bits[j] = b} u_eval[j] * suffix_mle(suffix_bits[j])
-- Zolt doesn't have suffix_mle - it uses raw combined_vals
-
-The suffix_mle is the table-specific MLE evaluation of the suffix portion!
-
-### 9. Implementation Plan
-
-This is a substantial implementation effort requiring:
-1. Porting all 45+ prefix implementations from Jolt
-2. Porting all suffix implementations with suffix_mle functions
-3. Implementing PrefixSuffixDecomposition for all 41 tables
-4. Implementing the RAF operand decompositions (identity_ps, left_operand_ps, right_operand_ps)
-5. Testing each component against Jolt's reference implementation
-
-Estimated effort: Several days of focused implementation work.
-
-### 9. Files Modified
-
-- `src/zkvm/spartan/stage5_prover.zig` - Stage 5 prover (current approach)
-- `.agent/TODO.md` - Updated with findings
-- `.agent/NOTES.md` - This file
-
-### 10. Test Commands
-
-```bash
-# Build Zolt
-zig build -Doptimize=ReleaseFast
-
-# Generate proof
-./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o /tmp/zolt_proof_dory.bin
-
-# Verify with Jolt (should fail currently)
-cd /home/vivado/projects/jolt
-cargo test --package jolt-core --features zolt-debug test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
-```
+- Zolt ra materialization: `stage5_prover.zig` lines 2748-2814
+- Jolt ra materialization: `read_raf_checking.rs` lines 626-694
+- Expanding table update: `expanding_table.rs` (Jolt), `prefix_suffix_prover.zig` (Zolt)

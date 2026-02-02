@@ -1,73 +1,70 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: IN PROGRESS - Stage 5 Expected Claim Mismatch
+## Status: IN PROGRESS - Stage 5 Sumcheck Mismatch
 
-## Session 129 Summary
+## Session 131 Summary
 
-### MAJOR BREAKTHROUGH: ra_claims NOW MATCH!
+### Key Finding: The eq_prefix Fix is Mathematically Correct
 
-After extensive debugging, the InstructionRa chunks are now correctly computed:
-- Zolt: `InstructionRa(0) = 119b26350ef30d2127138e6672c75ea5`
-- Jolt: `ra_claims[0] = [a5, 5e, c7, 72, 66, 8e, 13, 27, ...]` (LE) → same value!
+After extensive analysis, I confirmed that:
 
-The fix was understanding that binding transforms the initial value.
+1. **Jolt's EqPolynomial::evals convention**: bit (n-1-j) of index k ↔ r[j]
+   - Example: for n=2, k=1 (binary 01):
+     - j=0: bit 1 = 0 → (1-r[0])
+     - j=1: bit 0 = 1 → r[1]
+     - Result: (1-r[0]) * r[1]
+   - This matches Zolt's MSB-first convention (no change needed)
 
-### All Individual Components MATCH:
+2. **eq_prefix decomposition**: For the pair (2j, 2j+1):
+   - eq(2j, r) = eq_prefix(j) * (1 - r[-1])
+   - eq(2j+1, r) = eq_prefix(j) * r[-1]
+   - eq_prefix = eq(2j, r) / (1 - r[-1]) = eq(j, r[:-1])
 
-1. **Instance 0 (RegistersValEvaluation)**: ✓
-   - `inc_claim * wa_claim * lt_eval` matches verifier's expected computation
-   - Value: `2e133a8eb83ed52d70c91f47fe5c8d8c118ac4a7969d53212f19f47fa1b9a265`
+3. **Jolt's GruenSplitEqPolynomial structure**:
+   - E_out * E_in gives partial eq WITHOUT the current round variable (w_last)
+   - current_scalar accumulates eq factors from ALREADY-BOUND variables
+   - After current_scalar multiplication, sum_evals = partial_eq * current_scalar
 
-2. **Instance 1 (RamRaClaimReduction)**: ✓
-   - `ra_claim_reduced` matches: `0956072d38428d511d5342e39c916fe33a948b3e88eff3755eb97c124ab471ff`
+4. **Zolt's bound eq values**:
+   - After binding round k with challenge c_k:
+     - lookups_eq_evals[j] = eq_partial(j) * accumulated_eq
+   - The accumulated_eq is automatically included through the binding process
 
-3. **Instance 2 (InstructionReadRaf)**: ✓
-   - Final result matches: `[b1, 30, 62, bc, a8, dd, 8c, d2, 53, f9, 1f, 69, f5, 7b, e1, 72]`
+### Why It Still Fails
 
-4. **Batching coefficients**: ✓
-   - `batch0 = d123dc2a0dee8c5ade56bfc5643d9704`
-   - `batch1 = 149a2e91d4267f14003f2da6a0192a50`
-   - `batch2 = 313aa709c6314e254d58c99ee2755045`
+The sumcheck polynomial coefficients are computed correctly in terms of the eq_prefix structure, but there must be some other subtle difference:
 
-5. **Initial claim**: ✓
-   - `00fb6017bc481b2ee8aa7e53dbc0dab21c0a902d470ec8a2a0666ce9d0780599`
+1. Possibly the binding order or how challenges are indexed
+2. Possibly something in finishMlesProductSumFromEvals
+3. Possibly how the claim is computed at each round
 
-6. **Polynomial coefficients (Round 0)**: ✓
-   - `c0 = 0227ff26f6fc2e8d99f99d71df1d9008`
-   - `c2 = 154d5f5a181d7a180ac943e18f7e3417`
+### Debug Information
 
-### The Remaining Issue
-
-Despite all components matching individually, the verification fails:
+From verification output:
 ```
-output_claim:   [43, 99, b3, 5d, b4, 2d, 6b, ae, bf, 91, 7b, dd, d4, 96, ac, ce, ...]
-expected_claim: [a5, 06, a9, 32, b6, e9, 68, 44, 5c, f2, 37, 59, df, fa, 57, c6, ...]
+output_claim:   [84, 83, e6, 0a, 81, 4f, 33, 12, ...]
+expected_claim: [c6, 19, df, ae, 44, 5b, ac, 2e, ...]
 ```
 
-Where:
-- `output_claim` = final sumcheck polynomial evaluation at challenges (computed by verifier from proof)
-- `expected_claim` = sum of instance claims weighted by batching coefficients (computed by verifier from opening claims)
-
-### Hypothesis
-
-The issue may be:
-1. Challenge computation differs slightly at some intermediate round
-2. Polynomial coefficient compression/decompression has a subtle bug
-3. Round offset handling in the batched sumcheck
-
-### Next Steps
-
-1. Add per-round verification: compare `e` value after each round
-2. Check if polynomial `eval_from_hint` gives correct results
-3. Verify compressed polynomial format matches between Zolt and Jolt
-4. Compare intermediate claims during the 136-round sumcheck
+Individual instances match but batched sumcheck fails.
 
 ### Files Modified
 
-- `src/zkvm/proof_converter.zig`: Added debug for InstructionRa insertion
-- `src/zkvm/jolt_serialization.zig`: Added serialization debug
-- `jolt-core/src/zkvm/claim_reductions/ram_ra.rs`: Added eq_combined debug
-- `jolt-core/src/subprotocols/sumcheck.rs`: Fixed Stage 5 batching coeff label
+1. `/home/vivado/projects/zolt/src/zkvm/spartan/stage5_prover.zig`:
+   - Added eq_prefix computation for cycle rounds (lines 2816-2848)
+   - Factors out eq(X, r_round) from pairs[0] to match Jolt's convention
+
+### Next Steps
+
+1. Add detailed debug output comparing:
+   - Zolt's eq_prefix values vs Jolt's E_out * E_in * current_scalar
+   - sum_evals at each cycle round
+   - The full polynomial coefficients before compression
+
+2. Check if there's an issue with:
+   - The claim value passed to finishMlesProductSumFromEvals
+   - The r_round value used in the function
+   - The interpolation or multiplication step
 
 ### Test Commands
 
@@ -76,10 +73,10 @@ The issue may be:
 zig build -Doptimize=ReleaseFast
 
 # Generate proof
-./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format --export-preprocessing logs/zolt_preprocessing.bin -o logs/zolt_proof_dory.bin
+./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format --export-preprocessing /tmp/zolt_preprocessing.bin -o /tmp/zolt_proof_dory.bin
 
-# Verify
-cp logs/zolt_*.bin /tmp/
+# Verify with Jolt
+cp /tmp/zolt_*.bin /home/vivado/projects/jolt/
 cd /home/vivado/projects/jolt
 cargo test --package jolt-core --features zolt-debug test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```

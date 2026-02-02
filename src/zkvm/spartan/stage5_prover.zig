@@ -2813,20 +2813,38 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // Get r_round for this cycle variable (LowToHigh binding: last element first)
                     const r_round = r_reduction[n_cycle_vars - 1 - lookups_round];
 
-                    // Accumulate sum of 9-factor products (eq absorbed into val)
+                    // Accumulate sum of 9-factor products
+                    // IMPORTANT: sum_evals should be g(X) / eq(X, r_round) as per Jolt's
+                    // finish_mles_product_sum_from_evals contract. That function will then
+                    // multiply by eq(X, r_round) to recover the full polynomial.
+                    //
+                    // The eq factor decomposes as:
+                    //   eq(2*j, r) = eq_prefix(j) * (1 - r_round)
+                    //   eq(2*j+1, r) = eq_prefix(j) * r_round
+                    // where eq_prefix(j) = eq(j, r_reduction[:-1]) is the eq factor WITHOUT
+                    // the current round's variable.
+                    //
+                    // Since pairs[0] = (eq_0 * val_0, eq_1 * val_1) uses full eq values,
+                    // we need to factor out eq(bit, r_round). We do this by computing
+                    // eq_prefix and using that instead.
                     var sum_evals: [9]F = [_]F{F.zero()} ** 9; // Evaluations at [1, 2, ..., 8, ∞]
+
+                    // Precompute 1/(1-r) for extracting eq_prefix from eq_0
+                    // eq_prefix = eq_0 / (1 - r_round) = eq_1 / r_round
+                    const one_minus_r_round = F.one().sub(r_round);
+                    const inv_one_minus_r_round = if (one_minus_r_round.eql(F.zero())) F.zero() else one_minus_r_round.inverse().?;
 
                     for (0..current_half_size) |j| {
                         // Build the 9 linear polynomial pairs for this j
                         // Each pair is (p(0), p(1)) for the linear polynomial
                         var pairs: [9][2]F = undefined;
 
-                        // Factor 0: eq absorbed into combined_val
-                        // (eq[2j] * val[2j], eq[2j+1] * val[2j+1])
+                        // Factor 0: eq_prefix * combined_val (WITHOUT current round's eq factor)
+                        // eq_prefix(j) = eq(2*j, r) / (1 - r_round) = eq(2*j+1, r) / r_round
                         const eq_0 = lookups_eq_evals[2 * j];
-                        const eq_1 = lookups_eq_evals[2 * j + 1];
-                        pairs[0][0] = eq_0.mul(lookups_combined_vals[2 * j]);
-                        pairs[0][1] = eq_1.mul(lookups_combined_vals[2 * j + 1]);
+                        const eq_prefix = eq_0.mul(inv_one_minus_r_round);
+                        pairs[0][0] = eq_prefix.mul(lookups_combined_vals[2 * j]);
+                        pairs[0][1] = eq_prefix.mul(lookups_combined_vals[2 * j + 1]);
 
                         // Factors 1-8: 8 ra_chunk polynomials
                         for (0..ra_num_chunks) |c| {
@@ -3464,17 +3482,23 @@ pub fn Stage5BatchedProver(comptime F: type) type {
         }
 
         /// Compute eq(r, k) for a specific index k
-        /// r is in BIG_ENDIAN order (r[0] = MSB, r[n-1] = LSB)
-        /// k is interpreted as big-endian: k = b_0 * 2^(n-1) + b_1 * 2^(n-2) + ... + b_{n-1}
-        /// where b_j is the j-th bit (b_0 = MSB)
-        /// eq(k, r) = Π_j (b_j ? r[j] : (1-r[j]))
+        /// Compute eq(k, r) where r is in BIG_ENDIAN order.
+        ///
+        /// This matches Jolt's EqPolynomial::evals convention:
+        /// - evals[k] = Π_j (bit_{n-1-j}(k) ? r[j] : (1-r[j]))
+        /// - Equivalently: bit j of k ↔ r[n-1-j]
+        ///
+        /// Example for n=2, k=1 (binary 01):
+        /// - j=0: bit 1 of k = 0 → (1-r[0])
+        /// - j=1: bit 0 of k = 1 → r[1]
+        /// - Result: (1-r[0]) * r[1]
         fn computeEqAtIndex(r: []const F, k: usize) F {
             const n = r.len;
             var result = F.one();
             for (0..n) |j| {
-                // Extract bit j of k (MSB-first): b_j = (k >> (n-1-j)) & 1
+                // Extract bit (n-1-j) of k: b_j = (k >> (n-1-j)) & 1
                 const bj: u1 = @truncate(k >> @intCast(n - 1 - j));
-                const rj = r[j]; // r[j] corresponds to bit j
+                const rj = r[j]; // r[j] corresponds to bit (n-1-j) of k
                 if (bj == 1) {
                     result = result.mul(rj);
                 } else {
@@ -3849,18 +3873,18 @@ pub fn computeEqPolynomial(comptime F: type, r: []const F, s: []const F) F {
     return result;
 }
 
-/// Compute eq(r, k) for a specific point k (integer)
-/// r is in BIG_ENDIAN order (r[0] = MSB, r[n-1] = LSB)
-/// k is interpreted as big-endian: k = b_0 * 2^(n-1) + b_1 * 2^(n-2) + ... + b_{n-1}
-/// where b_j is the j-th bit (b_0 = MSB)
-/// eq(k, r) = Π_j (b_j ? r[j] : (1-r[j]))
+/// Compute eq(k, r) where r is in BIG_ENDIAN order.
+///
+/// This matches Jolt's EqPolynomial::evals convention:
+/// - evals[k] = Π_j (bit_{n-1-j}(k) ? r[j] : (1-r[j]))
+/// - Equivalently: bit j of k ↔ r[n-1-j]
 pub fn computeEqAtPoint(comptime F: type, r: []const F, k: u64) F {
     const n = r.len;
     var result = F.one();
     for (0..n) |j| {
-        // Extract bit j of k (MSB-first): b_j = (k >> (n-1-j)) & 1
+        // Extract bit (n-1-j) of k: b_j = (k >> (n-1-j)) & 1
         const bj: u1 = @truncate(k >> @intCast(n - 1 - j));
-        const rj = r[j]; // r[j] corresponds to bit j
+        const rj = r[j]; // r[j] corresponds to bit (n-1-j) of k
         if (bj == 1) {
             result = result.mul(rj);
         } else {

@@ -1,65 +1,65 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: IN PROGRESS - RamRaClaimReduction Cycle Rounds Implementation
+## Status: IN PROGRESS - RamRaClaimReduction PhaseCycle Fix
 
-## Session 121 Summary
+## Session 123 Summary
 
 ### Progress Made
-1. **Implemented RamRaClaimReduction PhaseAddress sumcheck**
-   - Added sparse state tracking: ram_addresses, ram_cycles, ram_G_A, ram_G_B
-   - Precompute G_A[i] = eq_raf(c_i) + γ·eq_val(c_i), G_B[i] = eq_rw(c_i) + γ·eq_val(c_i)
-   - Initialize B_1 = eq(r_address_raf, k), B_2 = eq(r_address_rw, k) polynomials
-   - Initialize ram_ra_F expanding table for tracking eq(r_addr_reduced, k)
+1. **Implemented P*Q Decomposition for PhaseCycle**
+   - Added P_raf, P_rw, P_val arrays for prefix eq evaluations
+   - Added Q_raf, Q_rw, Q_val arrays for suffix-weighted sums
+   - Added H_prime array for PhaseCycle2
+   - Implemented PhaseCycle1 polynomial computation using P*Q products
+   - Implemented PhaseCycle2 polynomial computation using H'*eq_hi products
+   - Implemented proper binding for both phases
 
-2. **PhaseAddress rounds (0-15 of RamRaClaimReduction = rounds 112-127)**
-   - For each round, iterate over RAM accesses
-   - Compute polynomial evals based on address bit being bound
-   - Bind B_1, B_2 and update ram_ra_F after each challenge
+2. **Build and Test Results**
+   - Code compiles successfully
+   - Stage 5 sumcheck verification still failing
+   - The output_claim doesn't match expected_claim
 
-3. **Added helper function `computeEqAtPoint`**
-   - Computes eq(r, k) for a specific point k given r in BIG_ENDIAN order
+### Current Analysis
 
-### Remaining Issue
-**PhaseCycle implementation is incorrect**
+The verifier computes expected_output_claim as:
+```
+eq_combined * ra_claim_reduced
 
-The cycle round implementation (rounds 128-135) is using precomputed G_A/G_B which have FULL cycle eq values baked in. However, during the sumcheck, we need to bind the eq polynomials incrementally.
+where:
+eq_combined = eq_addr_1 * eq_cycle_A + γ² * eq_addr_2 * eq_cycle_B
+eq_cycle_A = eq(r_cycle_raf, r_cycle_reduced) + γ * eq(r_cycle_val, r_cycle_reduced)
+eq_cycle_B = eq(r_cycle_rw, r_cycle_reduced) + γ * eq(r_cycle_val, r_cycle_reduced)
+```
 
-For Fibonacci:
-- claim_raf = 0, claim_rw = 0
-- claim_val_final ≠ 0, claim_val_eval ≠ 0
-- ram_ra_input = γ*claim_val_final + γ³*claim_val_eval
+Key insight: The verifier uses `eq(r_cycle_*, r_cycle_reduced)` where r_cycle_reduced
+are the sumcheck challenges from the 8 cycle rounds.
 
-The verifier reports:
-- Instance 1 expected claim mismatch (Stage 5 sumcheck fails)
-
-### Proper Cycle Round Algorithm
-Looking at Jolt's ram_ra.rs:
-
-**PhaseCycle1** (first log_T/2 cycle rounds):
-- Uses P/Q buffer structure for prefix-suffix optimization
+My P*Q decomposition:
 - P_x[c_lo] = eq(r_cycle_x_lo, c_lo)
-- Q_x[c_lo] = Σ_{c_hi} H[c_lo, c_hi] · eq_x_hi(c_hi)
-- Polynomial: coeff_raf * P_raf * Q_raf + coeff_rw * P_rw * Q_rw + coeff_val * P_val * Q_val
+- Q_x[c_lo] = Σ_{c_hi} H[c_lo,c_hi] * eq(r_cycle_x_hi, c_hi)
 
-**PhaseCycle2** (last log_T/2 cycle rounds):
-- Dense sumcheck over H_prime[c_hi] = Σ_{c_lo} H[c_lo,c_hi] · eq(r_prefix, c_lo)
-- Uses eq_raf_hi, eq_rw_hi, eq_val_hi polynomials
+The polynomial contribution is: Σ_j coeff * P_x[j] * Q_x[j]
 
-For sparse implementation, we need to:
-1. Track α_combined for each access after PhaseAddress completes
-2. Track eq_cycle contributions that need to be bound during cycle rounds
-3. Properly compute polynomial at each cycle round
+After binding prefix bits (first prefix_n_vars rounds), P reduces to:
+P[0] = eq(r_cycle_x_lo, prefix_challenges)
 
-### Files Modified This Session
-- `/home/vivado/projects/zolt/src/zkvm/spartan/stage5_prover.zig`
-  - Added RamRaClaimReduction state initialization (ram_addresses, ram_cycles, ram_G_A, ram_G_B)
-  - Added B_1, B_2 eq polynomials for address rounds
-  - Added ram_ra_F expanding table
-  - Implemented PhaseAddress polynomial computation
-  - Added state binding after each challenge
-  - Added `computeEqAtPoint` helper function
+After binding suffix bits (last suffix_n_vars rounds), we should get:
+eq(r_cycle_x, r_cycle_reduced) = eq(r_cycle_x_lo, prefix_challenges) * eq(r_cycle_x_hi, suffix_challenges)
 
-### Test Commands
+But Q already contains H[c] and eq_hi, so there might be a mismatch.
+
+### Possible Issues
+
+1. **Order of eq polynomial indices**: Need to verify that BIG_ENDIAN vs LowToHigh ordering is correct
+2. **Suffix vs Prefix split**: Jolt splits r_cycle into [high bits | low bits], need to match this
+3. **H[c] vs F_values**: H[c] = F_values[address[c]] is correct, but need to verify address indexing
+
+### Next Steps
+
+1. Add more debug output to trace P*Q values during cycle rounds
+2. Compare intermediate values with Jolt's expected values
+3. Consider if we need to track ra_claim_reduced separately
+
+## Test Commands
 ```bash
 # Build Zolt
 zig build -Doptimize=ReleaseFast
@@ -75,19 +75,14 @@ cd /home/vivado/projects/jolt
 cargo test --package jolt-core --features zolt-debug test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
 
-## Next Steps
-1. Fix PhaseCycle implementation:
-   - Option A: Implement proper P/Q buffer structure for cycle rounds
-   - Option B: For sparse traces, compute polynomial directly from bound challenges
-
-2. The key insight for sparse implementation:
-   - After PhaseAddress, compute α_combined[i] = α₁·scale_raf + γ²·α₂·scale_rw (per access)
-   - Track which cycle eq factors need binding during cycle rounds
-   - eq_cycle_raf, eq_cycle_rw, eq_cycle_val need separate tracking
-
-3. Test with Jolt verifier
+### Files Modified This Session
+- `/home/vivado/projects/zolt/src/zkvm/spartan/stage5_prover.zig`
+  - Added P*Q decomposition arrays (P_raf, P_rw, P_val, Q_raf, Q_rw, Q_val)
+  - Added H_prime, eq_hi arrays
+  - Added cycle_challenges tracking
+  - Updated PhaseCycle polynomial computation for PhaseCycle1 and PhaseCycle2
+  - Updated binding code for both phases
 
 ## SESSION_ENDING
 
-Progress saved. PhaseAddress implemented correctly but PhaseCycle needs proper eq binding. Next session should fix the cycle round polynomial computation.
-
+Progress saved. Implemented P*Q decomposition but verification still failing. Need to debug the exact values being computed vs expected.

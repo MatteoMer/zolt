@@ -25,6 +25,7 @@ const OpeningId = jolt_types.OpeningId;
 const tracer = @import("../../tracer/mod.zig");
 const ExecutionTrace = tracer.ExecutionTrace;
 const ram = @import("../ram/mod.zig");
+const jolt_device = @import("../jolt_device.zig");
 
 // Import prefix-suffix decomposition modules
 const lookup_table_mod = @import("../lookup_table/mod.zig");
@@ -368,6 +369,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             lookups_ra_virtual_log_k_chunk: usize,
             trace: *const ExecutionTrace,
             memory_trace: ?*const ram.MemoryTrace, // RAM trace for ram_ra_claim computation
+            memory_layout: ?*const jolt_device.MemoryLayout, // Memory layout for address remapping
             r_address_regs: []const F, // LOG_K=7 elements from Stage 4 RegistersRWC
             r_cycle_regs: []const F, // n_cycle_vars elements from Stage 4 RegistersRWC
             r_reduction: []const F, // n_cycle_vars elements from Stage 3 InstructionClaimReduction (BIG_ENDIAN)
@@ -1229,6 +1231,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // Then during PhaseAddress, for each access:
             //   contribution = eq(r_addr_1, k)·G_A + γ²·eq(r_addr_2, k)·G_B
 
+            // K = 2^log_ram_k is the RAM domain size
+            const K = @as(usize, 1) << @intCast(log_ram_k);
+
             // Build sparse RAM access list and precompute G_A, G_B for each access
             const ram_access_count = if (memory_trace) |mt| mt.accesses.items.len else 0;
             std.debug.print("[STAGE5 RAM_RA] Initializing with {} RAM accesses\n", .{ram_access_count});
@@ -1246,9 +1251,18 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // Precompute G_A and G_B for each RAM access
             // G_A[i] = eq(r_cycle_raf, c_i) + γ · eq(r_cycle_val, c_i)
             // G_B[i] = eq(r_cycle_rw, c_i) + γ · eq(r_cycle_val, c_i)
+            //
+            // Remap addresses to polynomial index space using memory_layout
+            // In Jolt, remap_address(address, memory_layout) = (address - lowest_address) / 8
             if (memory_trace) |mt| {
                 for (mt.accesses.items, 0..) |access, i| {
-                    ram_addresses[i] = access.address;
+                    // Use memory_layout.remapAddress if available, otherwise mask
+                    const remapped_addr: u64 = if (memory_layout) |ml|
+                        ml.remapAddress(access.address) orelse 0
+                    else
+                        access.address & (@as(u64, K) - 1);
+
+                    ram_addresses[i] = remapped_addr;
                     ram_cycles[i] = access.timestamp;
 
                     // Compute eq(r_cycle_x, cycle) for each cycle point
@@ -1263,7 +1277,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     ram_G_A[i] = eq_raf_c.add(gamma.mul(eq_val_c));
                     ram_G_B[i] = eq_rw_c.add(gamma.mul(eq_val_c));
 
-                    std.debug.print("[STAGE5 RAM_RA] Access {}: addr=0x{x}, cycle={}\n", .{ i, access.address, cycle });
+                    std.debug.print("[STAGE5 RAM_RA] Access {}: raw_addr=0x{x}, remapped_addr={}, cycle={}\n", .{ i, access.address, remapped_addr, cycle });
                     std.debug.print("  eq_raf_c={any}, eq_rw_c={any}, eq_val_c={any}\n", .{
                         eq_raf_c.toBytesBE()[16..32].*,
                         eq_rw_c.toBytesBE()[16..32].*,
@@ -1280,7 +1294,6 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // B_1 = eq(r_address_raf, k) - this is bound during address rounds
             // B_2 = eq(r_address_rw, k) - this is bound during address rounds
             // These are multilinear polynomials over log_ram_k variables
-            const K = @as(usize, 1) << @intCast(log_ram_k);
             var B_1 = try self.allocator.alloc(F, K);
             defer self.allocator.free(B_1);
             var B_2 = try self.allocator.alloc(F, K);
@@ -1318,6 +1331,164 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             var ram_ra_bound_challenges = try self.allocator.alloc(F, log_ram_k);
             defer self.allocator.free(ram_ra_bound_challenges);
             @memset(ram_ra_bound_challenges, F.zero());
+
+            // Track per-access eq_cycle_bound factor during cycle rounds
+            // eq_cycle_bound[i] = product of eq terms for bound cycle bits
+            // Initially 1.0, then after binding bit m with challenge r:
+            //   eq_cycle_bound[i] *= (c_m == 0) ? (1 - r) : r
+            var eq_cycle_bound = try self.allocator.alloc(F, ram_access_count);
+            defer self.allocator.free(eq_cycle_bound);
+            for (0..ram_access_count) |i| {
+                eq_cycle_bound[i] = F.one();
+            }
+
+            // ===================================================================
+            // Separate eq tracking for PhaseCycle correction
+            // ===================================================================
+            // The verifier expects eq(r_cycle_*, r_cycle_reduced) where r_cycle_reduced
+            // is the sumcheck challenges. But G_A/G_B have eq(r_cycle_*, c_i) where c_i
+            // is the access's cycle.
+            //
+            // We need to track:
+            // - eq_*_bound: product of eq_bit(r_cycle_*[j], r_j) for bound bits j < m
+            // - eq_*_remaining[i]: product of eq_bit(r_cycle_*[j], c_i[j]) for remaining bits j >= m
+            //
+            // The contribution should be eq_*_bound * eq_*_remaining * eq_bit(r_cycle_*[m], c_i[m])
+            // instead of eq(r_cycle_*, c_i).
+
+            // Per-access individual eq values (for computing remaining factors)
+            var eq_raf_access = try self.allocator.alloc(F, ram_access_count);
+            defer self.allocator.free(eq_raf_access);
+            var eq_rw_access = try self.allocator.alloc(F, ram_access_count);
+            defer self.allocator.free(eq_rw_access);
+            var eq_val_access = try self.allocator.alloc(F, ram_access_count);
+            defer self.allocator.free(eq_val_access);
+
+            // Precompute individual eq values for each access
+            if (memory_trace) |mt| {
+                for (mt.accesses.items, 0..) |access, i| {
+                    const cycle = access.timestamp;
+                    eq_raf_access[i] = computeEqAtPoint(F, r_cycle_raf, cycle);
+                    eq_rw_access[i] = computeEqAtPoint(F, r_cycle_rw, cycle);
+                    eq_val_access[i] = computeEqAtPoint(F, r_cycle_val, cycle);
+                }
+            }
+
+            // Bound factors (shared for all accesses) - eq(r_cycle_*, r_cycle_reduced_so_far)
+            // These track the product of eq_bit(r_cycle_*[j], r_j) for j < current_round
+            var eq_raf_bound: F = F.one();
+            var eq_rw_bound: F = F.one();
+            var eq_val_bound: F = F.one();
+
+            // Remaining factors (per-access) - product of eq_bit(r_cycle_*[j], c_i[j]) for j >= current_round
+            // Initially equals the full eq values, then we divide out bound bits as they're processed
+            var eq_raf_remaining = try self.allocator.alloc(F, ram_access_count);
+            defer self.allocator.free(eq_raf_remaining);
+            var eq_rw_remaining = try self.allocator.alloc(F, ram_access_count);
+            defer self.allocator.free(eq_rw_remaining);
+            var eq_val_remaining = try self.allocator.alloc(F, ram_access_count);
+            defer self.allocator.free(eq_val_remaining);
+
+            // Initialize remaining factors to full eq values
+            for (0..ram_access_count) |i| {
+                eq_raf_remaining[i] = eq_raf_access[i];
+                eq_rw_remaining[i] = eq_rw_access[i];
+                eq_val_remaining[i] = eq_val_access[i];
+            }
+
+            // ===================================================================
+            // P*Q Decomposition for PhaseCycle (Jolt's approach)
+            // ===================================================================
+            // For cycle sumcheck, we use prefix-suffix decomposition:
+            //   P_x[c_lo] = eq(r_cycle_x_lo, c_lo)  -- eq evaluations for prefix bits
+            //   Q_x[c_lo] = Σ_{c_hi} H[c_lo,c_hi] · eq(r_cycle_x_hi, c_hi)  -- suffix sums
+            // where H[c] = F_values[address[c]] = eq(r_addr_reduced, address[c])
+            //
+            // The polynomial contribution is: Σ_j coeff * P_x[j] * Q_x[j]
+            // This correctly captures binding: P gets bound during sumcheck, Q contains
+            // the already-computed suffix weights.
+            //
+            // Split: log_T = prefix_n_vars + suffix_n_vars
+            // In Jolt: prefix_n_vars = log_T / 2, suffix_n_vars = log_T - prefix_n_vars
+
+            const prefix_n_vars = n_cycle_vars / 2;
+            const suffix_n_vars = n_cycle_vars - prefix_n_vars;
+            const prefix_size = @as(usize, 1) << @intCast(prefix_n_vars);
+            const suffix_size = @as(usize, 1) << @intCast(suffix_n_vars);
+
+            std.debug.print("[STAGE5 PQ] PhaseCycle P*Q setup: n_cycle={}, prefix={}, suffix={}\n", .{
+                n_cycle_vars, prefix_n_vars, suffix_n_vars,
+            });
+            std.debug.print("[STAGE5 PQ] prefix_size={}, suffix_size={}\n", .{ prefix_size, suffix_size });
+
+            // P arrays: eq evaluations for prefix (low) bits
+            // P_x[c_lo] = eq(r_cycle_x_lo, c_lo)
+            // r_cycle vectors are BIG_ENDIAN: first suffix_n_vars are high bits, last prefix_n_vars are low
+            var P_raf = try self.allocator.alloc(F, prefix_size);
+            defer self.allocator.free(P_raf);
+            var P_rw = try self.allocator.alloc(F, prefix_size);
+            defer self.allocator.free(P_rw);
+            var P_val = try self.allocator.alloc(F, prefix_size);
+            defer self.allocator.free(P_val);
+
+            // Q arrays: suffix-weighted sums
+            // Q_x[c_lo] = Σ_{c_hi} H[c_lo,c_hi] · eq(r_cycle_x_hi, c_hi)
+            var Q_raf = try self.allocator.alloc(F, prefix_size);
+            defer self.allocator.free(Q_raf);
+            var Q_rw = try self.allocator.alloc(F, prefix_size);
+            defer self.allocator.free(Q_rw);
+            var Q_val = try self.allocator.alloc(F, prefix_size);
+            defer self.allocator.free(Q_val);
+
+            // Precompute eq evaluations for suffix (high) bits: eq(r_cycle_x_hi, c_hi)
+            // r_cycle_*[0..suffix_n_vars] are the high bits (BIG_ENDIAN)
+            var eq_raf_hi = try self.allocator.alloc(F, suffix_size);
+            defer self.allocator.free(eq_raf_hi);
+            var eq_rw_hi = try self.allocator.alloc(F, suffix_size);
+            defer self.allocator.free(eq_rw_hi);
+            var eq_val_hi = try self.allocator.alloc(F, suffix_size);
+            defer self.allocator.free(eq_val_hi);
+
+            // Compute eq_x_hi for all c_hi values
+            // r_cycle_*[0..suffix_n_vars] contains the HIGH bits
+            for (0..suffix_size) |c_hi| {
+                eq_raf_hi[c_hi] = computeEqAtPoint(F, r_cycle_raf[0..suffix_n_vars], c_hi);
+                eq_rw_hi[c_hi] = computeEqAtPoint(F, r_cycle_rw[0..suffix_n_vars], c_hi);
+                eq_val_hi[c_hi] = computeEqAtPoint(F, r_cycle_val[0..suffix_n_vars], c_hi);
+            }
+
+            // Initialize P arrays from prefix bits: P_x[c_lo] = eq(r_cycle_x_lo, c_lo)
+            // r_cycle_*[suffix_n_vars..] contains the LOW bits
+            for (0..prefix_size) |c_lo| {
+                P_raf[c_lo] = computeEqAtPoint(F, r_cycle_raf[suffix_n_vars..], c_lo);
+                P_rw[c_lo] = computeEqAtPoint(F, r_cycle_rw[suffix_n_vars..], c_lo);
+                P_val[c_lo] = computeEqAtPoint(F, r_cycle_val[suffix_n_vars..], c_lo);
+            }
+
+            // Initialize Q arrays to zero
+            @memset(Q_raf, F.zero());
+            @memset(Q_rw, F.zero());
+            @memset(Q_val, F.zero());
+
+            // Note: Q arrays will be computed at the start of PhaseCycle when we have
+            // the F_values from PhaseAddress (ram_ra_F after all address rounds).
+            // This is deferred because F_values evolve during address rounds.
+
+            // Flag to track if Q has been initialized
+            var phase_cycle_q_initialized = false;
+
+            // For PhaseCycle2: H'[c_hi] = Σ_{c_lo} H[c_lo,c_hi] * eq_prefix[c_lo]
+            var H_prime = try self.allocator.alloc(F, suffix_size);
+            defer self.allocator.free(H_prime);
+            @memset(H_prime, F.zero());
+
+            // Track cycle sumcheck challenges for computing eq_prefix during PhaseCycle2 transition
+            var cycle_challenges = try self.allocator.alloc(F, n_cycle_vars);
+            defer self.allocator.free(cycle_challenges);
+            @memset(cycle_challenges, F.zero());
+
+            // Flag to track if H_prime has been initialized (for PhaseCycle2)
+            var phase_cycle2_initialized = false;
 
             // ===================================================================
             // Prefix-Suffix Decomposition Initialization for LookupsReadRaf
@@ -1545,82 +1716,308 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         // α_1 = B_1.final_claim() = eq(r_addr_1, r_addr_reduced)
                         // α_2 = B_2.final_claim() = eq(r_addr_2, r_addr_reduced)
                         //
-                        // For cycle round c_round (0 to n_cycle_vars-1):
-                        // We bind over the H polynomial where H[c] = Σ_{accesses at cycle c} F_values[addr]
-                        // and compute: α_1 * (eq_raf + γ*eq_val) + γ² * α_2 * (eq_rw + γ*eq_val)
+                        // The sumcheck now needs to bind cycle variables. For sparse traces,
+                        // we iterate over accesses and compute contributions based on the cycle bit.
+                        //
+                        // The eq contribution for each access has THREE components:
+                        //   eq_raf(c) = eq(r_cycle_raf, c)
+                        //   eq_rw(c) = eq(r_cycle_rw, c)
+                        //   eq_val(c) = eq(r_cycle_val, c)
+                        //
+                        // During cycle sumcheck, these get bound incrementally. But since we
+                        // precomputed G_A[i] = eq_raf(c) + γ*eq_val(c) with FULL eq values,
+                        // we can't use them directly for the sumcheck polynomial.
+                        //
+                        // The correct approach:
+                        // For each cycle round m, split the contribution based on bit m.
+                        // ============================================================
+                        // P*Q Decomposition PhaseCycle (Jolt's approach)
+                        // ============================================================
+                        // Using prefix-suffix decomposition:
+                        //   P_x[c_lo] = eq(r_cycle_x_lo, c_lo)  -- prefix eq evaluations
+                        //   Q_x[c_lo] = Σ_{c_hi} H[c_lo,c_hi] · eq(r_cycle_x_hi, c_hi)  -- suffix sums
+                        //
+                        // PhaseCycle1: rounds 0 to prefix_n_vars-1 (bind prefix bits using P*Q)
+                        // PhaseCycle2: rounds prefix_n_vars to n_cycle_vars-1 (bind suffix using H'*eq_hi)
 
                         const cycle_round = ram_ra_round - log_ram_k; // 0 to n_cycle_vars-1
 
                         // Get α_1 and α_2 from final B_1, B_2 claims
-                        // After all address rounds, B_1 and B_2 are single values
                         const alpha_1 = B_1[0];
                         const alpha_2 = B_2[0];
 
-                        if (cycle_round == 0) {
+                        // Initialize Q arrays at the start of PhaseCycle
+                        if (!phase_cycle_q_initialized) {
+                            phase_cycle_q_initialized = true;
+
                             std.debug.print("[STAGE5 RAM_RA] PhaseCycle starting: alpha_1={x}, alpha_2={x}\n", .{
                                 alpha_1.toBytesBE()[16..32].*,
                                 alpha_2.toBytesBE()[16..32].*,
                             });
-                        }
+                            std.debug.print("[STAGE5 PQ] prefix_n_vars={}, suffix_n_vars={}\n", .{
+                                prefix_n_vars, suffix_n_vars,
+                            });
 
-                        // For sparse traces, iterate over accesses and compute polynomial
-                        // The cycle variable is being bound using LowToHigh order
-                        _ = @as(usize, 1) << @intCast(cycle_round); // cycle_inner_len (unused)
+                            // Compute Q arrays: Q_x[c_lo] = Σ_{c_hi} H[c_lo,c_hi] · eq_x_hi(c_hi)
+                            // where H[c] = F_values[address[c]] = eq(r_addr_reduced, address[c])
+                            @memset(Q_raf, F.zero());
+                            @memset(Q_rw, F.zero());
+                            @memset(Q_val, F.zero());
 
-                        var eval_0 = F.zero();
-                        var eval_1 = F.zero();
+                            for (0..ram_access_count) |access_idx| {
+                                const cycle = ram_cycles[access_idx];
+                                const cycle_usize: usize = @intCast(cycle);
+                                const addr = ram_addresses[access_idx];
+                                const addr_usize: usize = @intCast(addr);
 
-                        for (0..ram_access_count) |access_idx| {
-                            const cycle = ram_cycles[access_idx];
-                            const cycle_usize: usize = @intCast(cycle);
-                            const addr = ram_addresses[access_idx];
+                                // H[c] = F_values[address[c]] = eq(r_addr_reduced, addr)
+                                const H_c = ram_ra_F.get(addr_usize & (K - 1));
 
-                            // Get F_values[addr] = eq(r_addr_reduced, addr)
-                            const addr_usize: usize = @intCast(addr);
-                            const F_addr = ram_ra_F.get(addr_usize & (K - 1));
+                                // Split cycle into c_lo (prefix) and c_hi (suffix)
+                                const c_lo = cycle_usize & (prefix_size - 1);
+                                const c_hi = cycle_usize >> @intCast(prefix_n_vars);
 
-                            // Get the cycle bit being bound
-                            const c_m: u1 = @truncate(cycle_usize >> @intCast(cycle_round));
+                                // Q_x[c_lo] += H[c] * eq_x_hi(c_hi)
+                                Q_raf[c_lo] = Q_raf[c_lo].add(H_c.mul(eq_raf_hi[c_hi]));
+                                Q_rw[c_lo] = Q_rw[c_lo].add(H_c.mul(eq_rw_hi[c_hi]));
+                                Q_val[c_lo] = Q_val[c_lo].add(H_c.mul(eq_val_hi[c_hi]));
+                            }
 
-                            // Cycle eq contribution for this access
-                            // We need to track eq(r_cycle_raf, c), eq(r_cycle_rw, c), eq(r_cycle_val, c)
-                            // as we bind cycle variables.
-                            //
-                            // For simplicity in sparse case, recompute from bound challenges
-                            // This is O(accesses * n_cycle_vars) which is fine for sparse traces
-
-                            // Get precomputed G_A and G_B which contain the full cycle eq products
-                            // But we need to bind them as we go. For now, use precomputed values
-                            // since they already incorporate the cycle randomness.
-                            //
-                            // Actually, G_A and G_B are fixed (computed from r_cycle vectors).
-                            // What changes is F_addr and the cycle binding.
-
-                            const G_A_i = ram_G_A[access_idx];
-                            const G_B_i = ram_G_B[access_idx];
-
-                            // Contribution: α_1 * G_A + γ² * α_2 * G_B (scaled by F_addr)
-                            const contrib = alpha_1.mul(G_A_i).add(gamma2.mul(alpha_2.mul(G_B_i))).mul(F_addr);
-
-                            if (c_m == 0) {
-                                eval_0 = eval_0.add(contrib);
-                            } else {
-                                eval_1 = eval_1.add(contrib);
+                            std.debug.print("[STAGE5 PQ] Q arrays initialized with {} accesses\n", .{ram_access_count});
+                            if (prefix_size > 0) {
+                                std.debug.print("[STAGE5 PQ] Q_raf[0]={x}, Q_rw[0]={x}, Q_val[0]={x}\n", .{
+                                    Q_raf[0].toBytesBE()[16..32].*,
+                                    Q_rw[0].toBytesBE()[16..32].*,
+                                    Q_val[0].toBytesBE()[16..32].*,
+                                });
                             }
                         }
 
-                        // Compute eval_2 = 2*eval_1 - eval_0
-                        const eval_2 = eval_1.add(eval_1).sub(eval_0);
+                        // Compute polynomial using P * Q products
+                        // Coefficients: α_1, γ²·α_2, (γ·α_1 + γ³·α_2)
+                        // Note: gamma3 = gamma^3 is already defined at higher scope
+                        const coeff_raf = alpha_1;
+                        const coeff_rw = gamma2.mul(alpha_2);
+                        const coeff_val = gamma.mul(alpha_1).add(gamma3.mul(alpha_2));
 
-                        combined_poly[0] = combined_poly[0].add(batch1.mul(eval_0));
-                        combined_poly[1] = combined_poly[1].add(batch1.mul(eval_1));
-                        combined_poly[2] = combined_poly[2].add(batch1.mul(eval_2));
+                        // Current P polynomial length (P_raf initially has prefix_size elements)
+                        // After cycle_round bindings, effective length is prefix_size >> cycle_round
+                        const current_P_len = prefix_size >> @intCast(cycle_round);
+                        const half_len = current_P_len / 2;
 
-                        std.debug.print("[STAGE5 RAM_RA] PhaseCycle round {}: eval_0={x}, eval_1={x}\n", .{
-                            cycle_round,
-                            eval_0.toBytesBE()[16..32].*,
-                            eval_1.toBytesBE()[16..32].*,
-                        });
+                        if (cycle_round < prefix_n_vars and half_len > 0) {
+                            // PhaseCycle1: Bind prefix bits using P*Q decomposition
+                            var eval_0 = F.zero();
+                            var eval_1 = F.zero();
+
+                            // Compute sumcheck polynomial using P * Q products
+                            // For LowToHigh binding, evaluate at j and j+half_len
+                            for (0..half_len) |j| {
+                                // P values at j and j + half_len (LowToHigh binding)
+                                const p_raf_0 = P_raf[2 * j];
+                                const p_raf_1 = P_raf[2 * j + 1];
+                                const p_rw_0 = P_rw[2 * j];
+                                const p_rw_1 = P_rw[2 * j + 1];
+                                const p_val_0 = P_val[2 * j];
+                                const p_val_1 = P_val[2 * j + 1];
+
+                                // Q values at j and j + half_len
+                                const q_raf_0 = Q_raf[2 * j];
+                                const q_raf_1 = Q_raf[2 * j + 1];
+                                const q_rw_0 = Q_rw[2 * j];
+                                const q_rw_1 = Q_rw[2 * j + 1];
+                                const q_val_0 = Q_val[2 * j];
+                                const q_val_1 = Q_val[2 * j + 1];
+
+                                // eval_0 contribution: P[2j] * Q[2j]
+                                const contrib_0 = coeff_raf.mul(p_raf_0.mul(q_raf_0))
+                                    .add(coeff_rw.mul(p_rw_0.mul(q_rw_0)))
+                                    .add(coeff_val.mul(p_val_0.mul(q_val_0)));
+                                eval_0 = eval_0.add(contrib_0);
+
+                                // eval_1 contribution: P[2j+1] * Q[2j+1]
+                                const contrib_1 = coeff_raf.mul(p_raf_1.mul(q_raf_1))
+                                    .add(coeff_rw.mul(p_rw_1.mul(q_rw_1)))
+                                    .add(coeff_val.mul(p_val_1.mul(q_val_1)));
+                                eval_1 = eval_1.add(contrib_1);
+                            }
+
+                            // Compute eval_2 = p(2) for degree-2 polynomial
+                            var eval_2 = F.zero();
+                            for (0..half_len) |j| {
+                                const p_raf_at_2 = P_raf[2 * j + 1].add(P_raf[2 * j + 1]).sub(P_raf[2 * j]);
+                                const q_raf_at_2 = Q_raf[2 * j + 1].add(Q_raf[2 * j + 1]).sub(Q_raf[2 * j]);
+                                const p_rw_at_2 = P_rw[2 * j + 1].add(P_rw[2 * j + 1]).sub(P_rw[2 * j]);
+                                const q_rw_at_2 = Q_rw[2 * j + 1].add(Q_rw[2 * j + 1]).sub(Q_rw[2 * j]);
+                                const p_val_at_2 = P_val[2 * j + 1].add(P_val[2 * j + 1]).sub(P_val[2 * j]);
+                                const q_val_at_2 = Q_val[2 * j + 1].add(Q_val[2 * j + 1]).sub(Q_val[2 * j]);
+
+                                const contrib_2 = coeff_raf.mul(p_raf_at_2.mul(q_raf_at_2))
+                                    .add(coeff_rw.mul(p_rw_at_2.mul(q_rw_at_2)))
+                                    .add(coeff_val.mul(p_val_at_2.mul(q_val_at_2)));
+                                eval_2 = eval_2.add(contrib_2);
+                            }
+
+                            combined_poly[0] = combined_poly[0].add(batch1.mul(eval_0));
+                            combined_poly[1] = combined_poly[1].add(batch1.mul(eval_1));
+                            combined_poly[2] = combined_poly[2].add(batch1.mul(eval_2));
+
+                            std.debug.print("[STAGE5 RAM_RA] PhaseCycle1 round {}: eval_0={x}, eval_1={x}, eval_2={x}\n", .{
+                                cycle_round,
+                                eval_0.toBytesBE()[16..32].*,
+                                eval_1.toBytesBE()[16..32].*,
+                                eval_2.toBytesBE()[16..32].*,
+                            });
+                        } else {
+                            // PhaseCycle2: After prefix rounds, use H' * eq_hi for suffix
+                            const suffix_round = cycle_round - prefix_n_vars;
+
+                            // Initialize H_prime at the start of PhaseCycle2
+                            if (!phase_cycle2_initialized) {
+                                phase_cycle2_initialized = true;
+
+                                // Compute eq_prefix[c_lo] = eq(r_cycle_prefix_challenges, c_lo)
+                                // The prefix challenges are cycle_challenges[0..prefix_n_vars]
+                                var eq_prefix = try self.allocator.alloc(F, prefix_size);
+                                defer self.allocator.free(eq_prefix);
+
+                                for (0..prefix_size) |c_lo| {
+                                    // eq_prefix[c_lo] = Π_j eq_bit(r_j, c_lo_j)
+                                    // cycle_challenges are in LowToHigh order (challenge[0] = LSB)
+                                    var eq_val_local = F.one();
+                                    var c_lo_var = c_lo;
+                                    for (0..prefix_n_vars) |j| {
+                                        const bit: u1 = @truncate(c_lo_var);
+                                        c_lo_var >>= 1;
+                                        const r_j = cycle_challenges[j];
+                                        // eq_bit(r, b) = (1-r) if b=0, else r
+                                        const eq_bit_val = if (bit == 0) F.one().sub(r_j) else r_j;
+                                        eq_val_local = eq_val_local.mul(eq_bit_val);
+                                    }
+                                    eq_prefix[c_lo] = eq_val_local;
+                                }
+
+                                // Compute H_prime[c_hi] = Σ_{c_lo} H[c_lo,c_hi] * eq_prefix[c_lo]
+                                // where H[c] = F_values[address[c]] = eq(r_addr_reduced, address[c])
+                                @memset(H_prime, F.zero());
+                                for (0..ram_access_count) |access_idx| {
+                                    const cycle = ram_cycles[access_idx];
+                                    const cycle_usize: usize = @intCast(cycle);
+                                    const addr = ram_addresses[access_idx];
+                                    const addr_usize: usize = @intCast(addr);
+
+                                    const H_c = ram_ra_F.get(addr_usize & (K - 1));
+                                    const c_lo = cycle_usize & (prefix_size - 1);
+                                    const c_hi = cycle_usize >> @intCast(prefix_n_vars);
+
+                                    H_prime[c_hi] = H_prime[c_hi].add(H_c.mul(eq_prefix[c_lo]));
+                                }
+
+                                // Compute scaling factors: eq(r_cycle_x_lo, r_cycle_prefix_reduced)
+                                // r_cycle_*[suffix_n_vars..] are the LOW bits (BIG_ENDIAN)
+                                // cycle_challenges[0..prefix_n_vars] are the prefix challenges (LowToHigh)
+                                var scale_raf = F.one();
+                                var scale_rw = F.one();
+                                var scale_val = F.one();
+                                for (0..prefix_n_vars) |j| {
+                                    // r_cycle_* is BIG_ENDIAN: index suffix_n_vars + j corresponds to prefix bit j
+                                    const r_raf_j = r_cycle_raf[suffix_n_vars + prefix_n_vars - 1 - j];
+                                    const r_rw_j = r_cycle_rw[suffix_n_vars + prefix_n_vars - 1 - j];
+                                    const r_val_j = r_cycle_val[suffix_n_vars + prefix_n_vars - 1 - j];
+                                    const chal_j = cycle_challenges[j];
+                                    // eq_bit(r, chal) = (1-r)(1-chal) + r*chal
+                                    scale_raf = scale_raf.mul(F.one().sub(r_raf_j).mul(F.one().sub(chal_j)).add(r_raf_j.mul(chal_j)));
+                                    scale_rw = scale_rw.mul(F.one().sub(r_rw_j).mul(F.one().sub(chal_j)).add(r_rw_j.mul(chal_j)));
+                                    scale_val = scale_val.mul(F.one().sub(r_val_j).mul(F.one().sub(chal_j)).add(r_val_j.mul(chal_j)));
+                                }
+
+                                // Update coefficients with scaling factors
+                                // coeff_* already include alpha values, now multiply by scale factors
+                                // Note: We need to recompute coeff_* with the scales
+                                // coeff_raf_scaled = alpha_1 * scale_raf
+                                // coeff_rw_scaled = gamma2 * alpha_2 * scale_rw
+                                // coeff_val_scaled = (gamma * alpha_1 + gamma3 * alpha_2) * scale_val
+
+                                std.debug.print("[STAGE5 RAM_RA] PhaseCycle2 starting at suffix_round={}\n", .{suffix_round});
+                                std.debug.print("  scale_raf={x}, scale_rw={x}, scale_val={x}\n", .{
+                                    scale_raf.toBytesBE()[16..32].*,
+                                    scale_rw.toBytesBE()[16..32].*,
+                                    scale_val.toBytesBE()[16..32].*,
+                                });
+                                if (suffix_size > 0) {
+                                    std.debug.print("  H_prime[0]={x}\n", .{H_prime[0].toBytesBE()[16..32].*});
+                                }
+                            }
+
+                            // Compute polynomial using H_prime * eq_hi products
+                            const current_len = suffix_size >> @intCast(suffix_round);
+                            const half_len_suffix = current_len / 2;
+
+                            // Scaled coefficients
+                            const coeff_raf_scaled = alpha_1;
+                            const coeff_rw_scaled = gamma2.mul(alpha_2);
+                            const coeff_val_scaled = gamma.mul(alpha_1).add(gamma3.mul(alpha_2));
+
+                            var eval_0 = F.zero();
+                            var eval_1 = F.zero();
+
+                            for (0..half_len_suffix) |j| {
+                                // H_prime values
+                                const h_0 = H_prime[2 * j];
+                                const h_1 = H_prime[2 * j + 1];
+
+                                // eq_hi values
+                                const eq_raf_0 = eq_raf_hi[2 * j];
+                                const eq_raf_1 = eq_raf_hi[2 * j + 1];
+                                const eq_rw_0 = eq_rw_hi[2 * j];
+                                const eq_rw_1 = eq_rw_hi[2 * j + 1];
+                                const eq_val_0 = eq_val_hi[2 * j];
+                                const eq_val_1 = eq_val_hi[2 * j + 1];
+
+                                // Contribution for X=0
+                                const contrib_0 = h_0.mul(
+                                    coeff_raf_scaled.mul(eq_raf_0)
+                                        .add(coeff_rw_scaled.mul(eq_rw_0))
+                                        .add(coeff_val_scaled.mul(eq_val_0)),
+                                );
+                                eval_0 = eval_0.add(contrib_0);
+
+                                // Contribution for X=1
+                                const contrib_1 = h_1.mul(
+                                    coeff_raf_scaled.mul(eq_raf_1)
+                                        .add(coeff_rw_scaled.mul(eq_rw_1))
+                                        .add(coeff_val_scaled.mul(eq_val_1)),
+                                );
+                                eval_1 = eval_1.add(contrib_1);
+                            }
+
+                            // Compute eval_2 = p(2)
+                            var eval_2 = F.zero();
+                            for (0..half_len_suffix) |j| {
+                                const h_at_2 = H_prime[2 * j + 1].add(H_prime[2 * j + 1]).sub(H_prime[2 * j]);
+                                const eq_raf_at_2 = eq_raf_hi[2 * j + 1].add(eq_raf_hi[2 * j + 1]).sub(eq_raf_hi[2 * j]);
+                                const eq_rw_at_2 = eq_rw_hi[2 * j + 1].add(eq_rw_hi[2 * j + 1]).sub(eq_rw_hi[2 * j]);
+                                const eq_val_at_2 = eq_val_hi[2 * j + 1].add(eq_val_hi[2 * j + 1]).sub(eq_val_hi[2 * j]);
+
+                                const contrib_2 = h_at_2.mul(
+                                    coeff_raf_scaled.mul(eq_raf_at_2)
+                                        .add(coeff_rw_scaled.mul(eq_rw_at_2))
+                                        .add(coeff_val_scaled.mul(eq_val_at_2)),
+                                );
+                                eval_2 = eval_2.add(contrib_2);
+                            }
+
+                            combined_poly[0] = combined_poly[0].add(batch1.mul(eval_0));
+                            combined_poly[1] = combined_poly[1].add(batch1.mul(eval_1));
+                            combined_poly[2] = combined_poly[2].add(batch1.mul(eval_2));
+
+                            std.debug.print("[STAGE5 RAM_RA] PhaseCycle2 round {}: eval_0={x}, eval_1={x}, eval_2={x}\n", .{
+                                cycle_round,
+                                eval_0.toBytesBE()[16..32].*,
+                                eval_1.toBytesBE()[16..32].*,
+                                eval_2.toBytesBE()[16..32].*,
+                            });
+                        }
                     }
                 }
 
@@ -1746,8 +2143,27 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // Update RamRaClaimReduction state after receiving challenge
                     // ===================================================================
                     // RamRaClaimReduction is active in rounds 112-135 (remaining_rounds <= 24)
+                    // NOTE: We use (remaining_rounds - 1) because we already computed the polynomial
+                    // for this round and are now handling the challenge binding for it
+                    if (round >= 126 and round <= 131) {
+                        std.debug.print("[DEBUG BINDING R{}] remaining={}, ram_ra_num_rounds={}, check={}\n", .{
+                            round,
+                            remaining_rounds,
+                            ram_ra_num_rounds,
+                            remaining_rounds <= ram_ra_num_rounds,
+                        });
+                    }
                     if (remaining_rounds <= ram_ra_num_rounds) {
                         const ram_ra_round = ram_ra_num_rounds - remaining_rounds;
+
+                        if (round >= 126 and round <= 130) {
+                            std.debug.print("[DEBUG R{} IN] ram_ra_round={}, log_ram_k={}, is_phase_cycle={}\n", .{
+                                round,
+                                ram_ra_round,
+                                log_ram_k,
+                                ram_ra_round >= log_ram_k,
+                            });
+                        }
 
                         if (ram_ra_round < log_ram_k) {
                             // PhaseAddress: bind B_1, B_2 and update ram_ra_F
@@ -1784,15 +2200,75 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 });
                             }
                         } else {
-                            // PhaseCycle: bind cycle variables
-                            // For sparse implementation, we don't need to track dense cycle polynomials
-                            // Just update the claim based on the bound polynomial
+                            // PhaseCycle: bind polynomials
                             const cycle_round = ram_ra_round - log_ram_k;
-                            if (cycle_round < 3) {
-                                std.debug.print("[STAGE5 RAM_RA] Bound cycle round {}: challenge={x}\n", .{
+                            const one_minus_r = F.one().sub(challenge);
+
+                            // Store cycle challenge for PhaseCycle2 eq_prefix computation
+                            cycle_challenges[cycle_round] = challenge;
+
+                            if (cycle_round < prefix_n_vars) {
+                                // PhaseCycle1: bind P and Q polynomials
+                                const current_len = prefix_size >> @intCast(cycle_round);
+                                const half_len = current_len / 2;
+
+                                // Bind P arrays: P'[j] = (1-r)*P[2j] + r*P[2j+1]
+                                for (0..half_len) |j| {
+                                    P_raf[j] = one_minus_r.mul(P_raf[2 * j]).add(challenge.mul(P_raf[2 * j + 1]));
+                                    P_rw[j] = one_minus_r.mul(P_rw[2 * j]).add(challenge.mul(P_rw[2 * j + 1]));
+                                    P_val[j] = one_minus_r.mul(P_val[2 * j]).add(challenge.mul(P_val[2 * j + 1]));
+                                }
+
+                                // Bind Q arrays: Q'[j] = (1-r)*Q[2j] + r*Q[2j+1]
+                                for (0..half_len) |j| {
+                                    Q_raf[j] = one_minus_r.mul(Q_raf[2 * j]).add(challenge.mul(Q_raf[2 * j + 1]));
+                                    Q_rw[j] = one_minus_r.mul(Q_rw[2 * j]).add(challenge.mul(Q_rw[2 * j + 1]));
+                                    Q_val[j] = one_minus_r.mul(Q_val[2 * j]).add(challenge.mul(Q_val[2 * j + 1]));
+                                }
+
+                                if (cycle_round < 3) {
+                                    std.debug.print("[STAGE5 RAM_RA] Bound PhaseCycle1 round {}: challenge={x}, new_len={}\n", .{
+                                        cycle_round,
+                                        challenge.toBytesBE()[16..32].*,
+                                        half_len,
+                                    });
+                                    if (half_len > 0) {
+                                        std.debug.print("  P_raf[0]={x}, Q_raf[0]={x}\n", .{
+                                            P_raf[0].toBytesBE()[16..32].*,
+                                            Q_raf[0].toBytesBE()[16..32].*,
+                                        });
+                                    }
+                                }
+                            } else {
+                                // PhaseCycle2: bind H_prime and eq_hi arrays
+                                const suffix_round = cycle_round - prefix_n_vars;
+                                const current_len = suffix_size >> @intCast(suffix_round);
+                                const half_len = current_len / 2;
+
+                                // Bind H_prime: H'[j] = (1-r)*H[2j] + r*H[2j+1]
+                                for (0..half_len) |j| {
+                                    H_prime[j] = one_minus_r.mul(H_prime[2 * j]).add(challenge.mul(H_prime[2 * j + 1]));
+                                }
+
+                                // Bind eq_hi arrays
+                                for (0..half_len) |j| {
+                                    eq_raf_hi[j] = one_minus_r.mul(eq_raf_hi[2 * j]).add(challenge.mul(eq_raf_hi[2 * j + 1]));
+                                    eq_rw_hi[j] = one_minus_r.mul(eq_rw_hi[2 * j]).add(challenge.mul(eq_rw_hi[2 * j + 1]));
+                                    eq_val_hi[j] = one_minus_r.mul(eq_val_hi[2 * j]).add(challenge.mul(eq_val_hi[2 * j + 1]));
+                                }
+
+                                std.debug.print("[STAGE5 RAM_RA] Bound PhaseCycle2 round {} (suffix {}): challenge={x}, new_len={}\n", .{
                                     cycle_round,
+                                    suffix_round,
                                     challenge.toBytesBE()[16..32].*,
+                                    half_len,
                                 });
+                                if (half_len > 0) {
+                                    std.debug.print("  H_prime[0]={x}, eq_raf_hi[0]={x}\n", .{
+                                        H_prime[0].toBytesBE()[16..32].*,
+                                        eq_raf_hi[0].toBytesBE()[16..32].*,
+                                    });
+                                }
                             }
                         }
 
@@ -2262,6 +2738,65 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         bindRegsValChallenge(inc_evals, wa_evals, lt_evals, regs_round, challenge);
                     }
 
+                    // Bind the challenge for RamRaClaimReduction cycle rounds
+                    // (This is the PhaseCycle binding that was previously only in address rounds)
+                    if (remaining_rounds <= ram_ra_num_rounds) {
+                        const ram_ra_round = ram_ra_num_rounds - remaining_rounds;
+                        if (ram_ra_round >= log_ram_k) {
+                            // PhaseCycle: bind cycle variables
+                            const cycle_round = ram_ra_round - log_ram_k;
+                            const one_minus_r = F.one().sub(challenge);
+
+                            // Get r_cycle_* values for this bit (LowToHigh order)
+                            const r_raf_bit = r_cycle_raf[n_cycle_vars - 1 - cycle_round];
+                            const r_rw_bit = r_cycle_rw[n_cycle_vars - 1 - cycle_round];
+                            const r_val_bit = r_cycle_val[n_cycle_vars - 1 - cycle_round];
+
+                            // Update eq_*_bound with eq_bit(r_*[m], r_m)
+                            const eq_raf_update = F.one().sub(r_raf_bit).sub(challenge).add(r_raf_bit.mul(challenge).add(r_raf_bit.mul(challenge)));
+                            const eq_rw_update = F.one().sub(r_rw_bit).sub(challenge).add(r_rw_bit.mul(challenge).add(r_rw_bit.mul(challenge)));
+                            const eq_val_update = F.one().sub(r_val_bit).sub(challenge).add(r_val_bit.mul(challenge).add(r_val_bit.mul(challenge)));
+                            eq_raf_bound = eq_raf_bound.mul(eq_raf_update);
+                            eq_rw_bound = eq_rw_bound.mul(eq_rw_update);
+                            eq_val_bound = eq_val_bound.mul(eq_val_update);
+
+                            for (0..ram_access_count) |access_idx| {
+                                const cycle = ram_cycles[access_idx];
+                                const cycle_usize: usize = @intCast(cycle);
+                                // Get the cycle bit that was just bound
+                                const c_m: u1 = @truncate(cycle_usize >> @intCast(cycle_round));
+                                // Multiply eq_cycle_bound by the binding factor
+                                const factor = if (c_m == 0) one_minus_r else challenge;
+                                eq_cycle_bound[access_idx] = eq_cycle_bound[access_idx].mul(factor);
+
+                                // Update eq_*_remaining by dividing out eq_bit(r_*[m], c_m)
+                                const eq_raf_bit_at_c = if (c_m == 0) F.one().sub(r_raf_bit) else r_raf_bit;
+                                const eq_rw_bit_at_c = if (c_m == 0) F.one().sub(r_rw_bit) else r_rw_bit;
+                                const eq_val_bit_at_c = if (c_m == 0) F.one().sub(r_val_bit) else r_val_bit;
+
+                                if (!eq_raf_bit_at_c.eql(F.zero())) {
+                                    eq_raf_remaining[access_idx] = eq_raf_remaining[access_idx].mul(eq_raf_bit_at_c.inverse().?);
+                                }
+                                if (!eq_rw_bit_at_c.eql(F.zero())) {
+                                    eq_rw_remaining[access_idx] = eq_rw_remaining[access_idx].mul(eq_rw_bit_at_c.inverse().?);
+                                }
+                                if (!eq_val_bit_at_c.eql(F.zero())) {
+                                    eq_val_remaining[access_idx] = eq_val_remaining[access_idx].mul(eq_val_bit_at_c.inverse().?);
+                                }
+                            }
+
+                            std.debug.print("[STAGE5 CYCLE BIND R{}] cycle_round={}, challenge={x}\n", .{
+                                round,
+                                cycle_round,
+                                challenge.toBytesBE()[16..32].*,
+                            });
+                            std.debug.print("  eq_raf_bound={x}\n", .{eq_raf_bound.toBytesBE()[16..32].*});
+                            if (ram_access_count > 0) {
+                                std.debug.print("  eq_cycle_bound[0]={x}\n", .{eq_cycle_bound[0].toBytesBE()[16..32].*});
+                            }
+                        }
+                    }
+
                     // Bind cycle round challenge for lookups
                     bindLookupsChallenge(lookups_eq_evals, lookups_combined_vals, lookups_round, challenge);
 
@@ -2548,8 +3083,14 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // Only consider WRITE operations for ra claim
                     // (Jolt's RAM trace records both reads and writes, but ra represents where values changed)
                     if (access.op == .Write) {
-                        const addr = access.address;
+                        const raw_addr = access.address;
                         const cycle = access.timestamp;
+
+                        // Remap address to polynomial index space using memory_layout
+                        const addr: u64 = if (memory_layout) |ml|
+                            ml.remapAddress(raw_addr) orelse 0
+                        else
+                            raw_addr & (@as(u64, K) - 1);
 
                         // Compute eq(addr, r_ram_addr_be) for the address
                         // Address is log_ram_k bits (16 bits = 65536 addresses)
@@ -2561,7 +3102,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         // Accumulate: ra(k,c) = 1 for this (addr, cycle) pair
                         ram_ra_claim = ram_ra_claim.add(eq_addr.mul(eq_cycle));
 
-                        std.debug.print("[STAGE5 RAM_RA] WRITE addr=0x{x}, cycle={}, eq_addr={x}, eq_cycle={x}\n", .{
+                        std.debug.print("[STAGE5 RAM_RA] WRITE raw_addr=0x{x}, remapped_addr={}, cycle={}, eq_addr={x}, eq_cycle={x}\n", .{
+                            raw_addr,
                             addr,
                             cycle,
                             eq_addr.toBytesBE()[24..32].*,

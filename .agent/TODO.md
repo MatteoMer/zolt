@@ -1,45 +1,63 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: IN PROGRESS - Opening Claims Mismatch
+## Status: IN PROGRESS - Opening Claims Expected Output
 
 ## Session 138 Progress
 
 ### Fixed: Polynomial Evaluation Bug
 
-The Stage 5 sumcheck was using incorrect Lagrange interpolation that treated `p_inf` as `p(3)`.
-Fixed by using `UniPoly.evaluateToomCookAt()` which correctly converts Toom-Cook evaluations
-to coefficients and uses Horner's method.
+The Stage 5 sumcheck was using incorrect Lagrange interpolation. Fixed by using Horner's method.
 
-### Current Issue: Opening Claims Expected Output
+### Current Status
 
-The sumcheck now produces the correct `output_claim`, but it doesn't match `expected_claim`.
+The sumcheck produces matching output_claim between Zolt and Jolt:
+- output_claim: `[84, 83, e6, 0a, ...]` (matches)
+- expected_claim: `[c6, 19, df, ae, ...]` (computed from opening claims - MISMATCH)
+
+### Verified Components
+
+1. **Polynomial evaluation** - Fixed, sumcheck output matches
+2. **Opening claims serialization** - Correct (LookupTableFlag, InstructionRa match)
+3. **Table MLE evaluations** - Correct (table[0], table[1], table[9] match between Zolt and Jolt)
+4. **Challenge serialization** - Values appear to be serialized/deserialized correctly
+
+### Remaining Issue
+
+The expected_output_claim computation in Jolt's verifier produces a different result than
+what the sumcheck proves. Since individual components match, the issue might be in:
+
+1. How components are combined in expected_output_claim
+2. The gamma/batching coefficient computation
+3. The EQ polynomial evaluation (r_reduction, r_cycle_prime)
+
+### Debug Output Analysis
 
 From Jolt verification:
 ```
-output_claim:   [84, 83, e6, 0a, 81, 4f, 33, 12, ...]  <- matches Zolt's final batched claim!
-expected_claim: [c6, 19, df, ae, 44, 5b, ac, 2e, ...]  <- computed from opening claims
+Stage 5 Instance 2 expected_output_claim:
+  claim: [15, 9b, 8f, 56, ...]
+  final_result: [15, 9b, 8f, 56, 56, fe, 8f, 9a, 46, 83, ff, 8b, a2, 52, 61, 10]
+
+InstructionReadRaf expected_output_claim debug:
+  left_operand_eval:  [6f, af, 08, 28, ...]
+  right_operand_eval: [c1, 8f, 3e, c0, ...]
+  identity_poly_eval: [7b, 1d, 43, db, ...]
+  gamma:              [5a, b9, a0, 12, ...]
+  eq_eval_r_reduction: [e0, 9c, 4e, 2a, ...]
+  ra_claim:           [a9, c2, 35, c8, ...]
+  raf_flag_claim:     [e0, af, 49, 51, ...]
+  raf_claim:          [5b, 62, ca, 7d, ...]
+  val_claim:          [75, 20, 72, 98, ...]
 ```
 
-The output_claim is computed correctly by the sumcheck (Zolt and Jolt agree).
-The expected_claim is computed by Jolt's verifier from the opening claims.
-
-This means either:
-1. The opening claims Zolt is putting in the proof are incorrect
-2. The challenges used to evaluate the opening claims differ between prover and verifier
-
-### Evidence
-
-Opening claims (like LookupTableFlag) match between Zolt's proof and Jolt's reading:
-- Zolt: `LookupTableFlag(0) = { 79, 32, 121, 16, ..., 98, 243, 35, 204, 159, 229, 92, 67, 252, 30, 69, 248, 51, 37, 28, 11 }`
-- Jolt: `table_flag[0] = [62, f3, 23, cc, 9f, e5, 5c, 43, fc, 1e, 45, f8, 33, 25, 1c, 0b]`
-
-The last 16 bytes match exactly, confirming serialization is correct.
+These values come from Jolt reading Zolt's proof. Need to compare what Zolt computes for
+these components during proof generation.
 
 ### Next Steps
 
-1. Check if the challenge values used for evaluating opening claims match between prover and verifier
-2. Look at how `expected_output_claim()` is computed for each Stage 5 instance
-3. Verify the ra_claim computation in InstructionReadRaf
+1. Add debug output in Zolt to print these same values during proof generation
+2. Compare each component to find the mismatch
+3. Focus on: gamma, eq_eval_r_reduction, raf_claim, val_claim
 
 ### Test Commands
 
@@ -55,13 +73,6 @@ cp /tmp/zolt_*.bin /home/vivado/projects/jolt/
 cd /home/vivado/projects/jolt
 cargo test --package jolt-core --features zolt-debug test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
-
-## Previous Sessions Summary
-
-- Session 133-137: Various debugging and fixes
-- Session 138:
-  - Fixed polynomial evaluation bug (using Horner's method)
-  - Identified opening claims mismatch as next issue
 
 ## Key Files
 

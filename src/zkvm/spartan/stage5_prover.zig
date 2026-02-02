@@ -2657,6 +2657,156 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             eq_sum_verify = eq_sum_verify.add(lookups_eq_evals[j]);
                         }
                         std.debug.print("[STAGE5 CYCLE] eq_sum after reinit = {x} (should be 1)\n", .{eq_sum_verify.toBytesBE()[16..32].*});
+
+                        // ============================================================
+                        // CRITICAL FIX: Materialize ra_chunk_weights from expanding tables
+                        // ============================================================
+                        // At the start of cycle rounds (round 128), we need to compute
+                        // ra_polys[chunk][j] = ∏_{phase in chunk} expanding_tables[phase][k_phase]
+                        // where k_phase is the bits of lookup_index[j] for that phase.
+                        //
+                        // This matches Jolt's init_log_t_rounds() implementation.
+                        // See: jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs:586-643
+                        //
+                        // Each chunk covers (phases_per_chunk) phases, where:
+                        //   phases_per_chunk = num_phases / ra_num_chunks = 8 / 8 = 1
+                        //   chunk_i handles phases [chunk_i * phases_per_chunk, (chunk_i+1) * phases_per_chunk)
+                        std.debug.print("[STAGE5 CYCLE] Materializing ra_chunk_weights from expanding tables\n", .{});
+                        const phases_per_chunk = num_phases / ra_num_chunks;
+                        std.debug.print("  num_phases={}, ra_num_chunks={}, phases_per_chunk={}\n", .{ num_phases, ra_num_chunks, phases_per_chunk });
+
+                        // Debug: print expanding table sizes and first few values
+                        std.debug.print("  Expanding table state at round 128:\n", .{});
+                        const v0_p0 = expanding_tables[0].get(0);
+                        const v0_p1 = expanding_tables[1].get(0);
+                        const product_check = v0_p0.mul(v0_p1);
+                        std.debug.print("    phase[0] v[0] (full) = {x}\n", .{v0_p0.toBytesBE()[16..32].*});
+                        std.debug.print("    phase[1] v[0] (full) = {x}\n", .{v0_p1.toBytesBE()[16..32].*});
+                        std.debug.print("    product v0_p0 * v0_p1 = {x}\n", .{product_check.toBytesBE()[16..32].*});
+                        for (0..@min(4, num_phases)) |phase| {
+                            std.debug.print("    phase[{}]: len={}, first_vals=[{x}, {x}, {x}, {x}]\n", .{
+                                phase,
+                                expanding_tables[phase].getLen(),
+                                expanding_tables[phase].get(0).toBytesBE()[28..32].*,
+                                expanding_tables[phase].get(1).toBytesBE()[28..32].*,
+                                expanding_tables[phase].get(2).toBytesBE()[28..32].*,
+                                expanding_tables[phase].get(3).toBytesBE()[28..32].*,
+                            });
+                        }
+
+                        for (0..T) |j| {
+                            if (j >= trace_len) {
+                                // Padding cycles: ra_weight = 1
+                                for (0..ra_num_chunks) |c| {
+                                    ra_chunk_weights[c][j] = F.one();
+                                }
+                                continue;
+                            }
+
+                            // Get lookup index for this cycle
+                            const k_lo = lookups_indices_lo[j];
+                            const k_hi = lookups_indices_hi[j];
+
+                            // Debug: print lookup index for first cycle
+                            if (j == 0) {
+                                std.debug.print("[STAGE5 RA_DEBUG] Cycle 0 lookup_index: k_hi=0x{x:0>16}, k_lo=0x{x:0>16}\n", .{ k_hi, k_lo });
+                            }
+
+                            // For each chunk, compute the product of expanding table lookups
+                            for (0..ra_num_chunks) |chunk_idx| {
+                                var ra_val = F.one();
+                                const phase_start = chunk_idx * phases_per_chunk;
+                                const phase_end = @min((chunk_idx + 1) * phases_per_chunk, num_phases);
+
+                                for (phase_start..phase_end) |phase| {
+                                    // Compute which bits of k correspond to this phase
+                                    // Phase 0 handles the MSB bits (127:112), phase (num_phases-1) handles LSB bits
+                                    // Each phase handles log_m bits (16 bits for LOG_K=128, phases=8)
+                                    //
+                                    // The expanding table uses HighToLow binding order:
+                                    // - v[k] = EQ(k, r) where k bits directly correspond to round challenges
+                                    // - No bit reversal needed
+                                    //
+                                    // For phase p, rounds are: p*log_m to (p+1)*log_m - 1
+                                    // These bind address bits: (127 - p*log_m) down to (128 - (p+1)*log_m)
+                                    //
+                                    // Jolt formula: shift = (phases - 1 - phase) * log_m
+                                    // This extracts the appropriate bits from the 128-bit address
+                                    const shift = (num_phases - 1 - phase) * log_m;
+
+                                    // Extract the log_m bits from k at this position (address bits shift+log_m-1 : shift)
+                                    var k_phase: usize = undefined;
+                                    if (shift >= 64) {
+                                        // Bits are in the upper 64 bits
+                                        k_phase = @truncate(k_hi >> @intCast(shift - 64));
+                                    } else if (shift + log_m <= 64) {
+                                        // Bits are in the lower 64 bits
+                                        k_phase = @truncate(k_lo >> @intCast(shift));
+                                    } else {
+                                        // Bits span both halves
+                                        const lo_bits = k_lo >> @intCast(shift);
+                                        const hi_bits = k_hi << @intCast(64 - shift);
+                                        k_phase = @truncate(lo_bits | hi_bits);
+                                    }
+                                    k_phase &= (@as(usize, 1) << @intCast(log_m)) - 1; // Mask to log_m bits
+
+                                    // Look up in expanding table (HighToLow binding - no bit reversal needed)
+                                    // With HighToLow binding, v[k] = EQ(k, r) where k bits correspond directly
+                                    // to round indices: bit 0 = round 0's challenge, etc.
+                                    const table_val = expanding_tables[phase].get(k_phase);
+
+                                    // Debug: print detailed info for first cycle
+                                    if (j == 0 and chunk_idx < 2) {
+                                        std.debug.print("[STAGE5 RA_DEBUG] j=0, chunk={}, phase={}: shift={}, k_phase=0x{x}, table_val={x}\n", .{
+                                            chunk_idx,
+                                            phase,
+                                            shift,
+                                            k_phase,
+                                            table_val.toBytesBE()[28..32].*,
+                                        });
+                                    }
+
+                                    ra_val = ra_val.mul(table_val);
+                                }
+
+                                ra_chunk_weights[chunk_idx][j] = ra_val;
+
+                                // Debug: print final ra_val for first cycle, first 2 chunks
+                                if (j == 0 and chunk_idx < 2) {
+                                    std.debug.print("[STAGE5 RA_DEBUG] j=0, chunk={}: final ra_val={x}\n", .{
+                                        chunk_idx,
+                                        ra_val.toBytesBE()[16..32].*,
+                                    });
+                                }
+                            }
+                        }
+
+                        // Debug: print first few ra_chunk_weights after materialization
+                        std.debug.print("[STAGE5 CYCLE] ra_chunk_weights after materialization (first 4 cycles):\n", .{});
+                        for (0..@min(4, T)) |j| {
+                            std.debug.print("  j={}: ra_chunks=[", .{j});
+                            for (0..ra_num_chunks) |c| {
+                                if (c > 0) std.debug.print(", ", .{});
+                                std.debug.print("{x}", .{ra_chunk_weights[c][j].toBytesBE()[24..32].*});
+                            }
+                            std.debug.print("]\n", .{});
+                        }
+
+                        // Update lookups_ra_weights[j] to be the product of all chunks
+                        for (0..T) |j| {
+                            var ra_prod = F.one();
+                            for (0..ra_num_chunks) |c| {
+                                ra_prod = ra_prod.mul(ra_chunk_weights[c][j]);
+                            }
+                            lookups_ra_weights[j] = ra_prod;
+                        }
+
+                        // Recompute lookups_claim with the new ra_weights
+                        lookups_claim = F.zero();
+                        for (0..T) |j| {
+                            lookups_claim = lookups_claim.add(lookups_eq_evals[j].mul(lookups_ra_weights[j]).mul(lookups_combined_vals[j]));
+                        }
+                        std.debug.print("[STAGE5 CYCLE] lookups_claim after ra materialization = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
                     }
                     const current_half_size = lookups_eq_evals.len >> @intCast(lookups_round + 1);
 

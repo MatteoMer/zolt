@@ -1,58 +1,45 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: IN PROGRESS - Found Polynomial Evaluation Bug
+## Status: IN PROGRESS - Opening Claims Mismatch
 
 ## Session 138 Progress
 
-### ROOT CAUSE IDENTIFIED: Lagrange Interpolation Bug
+### Fixed: Polynomial Evaluation Bug
 
-**The Stage 5 sumcheck mismatch is caused by incorrect polynomial evaluation in Zolt.**
+The Stage 5 sumcheck was using incorrect Lagrange interpolation that treated `p_inf` as `p(3)`.
+Fixed by using `UniPoly.evaluateToomCookAt()` which correctly converts Toom-Cook evaluations
+to coefficients and uses Horner's method.
 
-In `stage5_prover.zig`, the code computes round polynomials with evaluations `[p(0), p(1), p(2), p_inf]`
-where `p_inf = c3` is the leading coefficient (evaluation at infinity).
+### Current Issue: Opening Claims Expected Output
 
-However, the Lagrange interpolation at lines 300-320 treats these as `[p(0), p(1), p(2), p(3)]`:
+The sumcheck now produces the correct `output_claim`, but it doesn't match `expected_claim`.
 
-```zig
-const L3 = r.mul(r_1).mul(r_2).mul(six.inverse().?);  // Lagrange basis for x=3
-current_batched_claim = p0.mul(L0).add(p1.mul(L1)).add(p2.mul(L2)).add(p3.mul(L3));
+From Jolt verification:
+```
+output_claim:   [84, 83, e6, 0a, 81, 4f, 33, 12, ...]  <- matches Zolt's final batched claim!
+expected_claim: [c6, 19, df, ae, 44, 5b, ac, 2e, ...]  <- computed from opening claims
 ```
 
-**This is wrong!** `combined_poly[3]` is `p_inf = c3`, NOT `p(3)`!
+The output_claim is computed correctly by the sumcheck (Zolt and Jolt agree).
+The expected_claim is computed by Jolt's verifier from the opening claims.
 
-### The Fix
+This means either:
+1. The opening claims Zolt is putting in the proof are incorrect
+2. The challenges used to evaluate the opening claims differ between prover and verifier
 
-Option A: Use Horner's method on coefficients (matching Jolt's prover):
-1. Convert Toom-Cook evaluations `[p(0), p(1), p(2), p_inf]` to coefficients `[c0, c1, c2, c3]`
-2. Evaluate at challenge using Horner's method: `c0 + r*(c1 + r*(c2 + r*c3))`
+### Evidence
 
-Option B: Convert to proper evaluation points first:
-1. Compute `p(3) = c0 + 3*c1 + 9*c2 + 27*c3` from coefficients
-2. Then use Lagrange interpolation with `[p(0), p(1), p(2), p(3)]`
+Opening claims (like LookupTableFlag) match between Zolt's proof and Jolt's reading:
+- Zolt: `LookupTableFlag(0) = { 79, 32, 121, 16, ..., 98, 243, 35, 204, 159, 229, 92, 67, 252, 30, 69, 248, 51, 37, 28, 11 }`
+- Jolt: `table_flag[0] = [62, f3, 23, cc, 9f, e5, 5c, 43, fc, 1e, 45, f8, 33, 25, 1c, 0b]`
 
-Option A is preferred as it matches Jolt's approach.
+The last 16 bytes match exactly, confirming serialization is correct.
 
-### How Jolt Does It
+### Next Steps
 
-In `sumcheck.rs` line 117:
-```rust
-individual_claims.iter_mut().zip(univariate_polys.into_iter())
-    .for_each(|(claim, poly)| *claim = poly.evaluate(&r_j));
-```
-
-Where `poly.evaluate()` uses Horner's method on coefficients (see `unipoly.rs` lines 175-192).
-
-### Challenge Format (Already Correct)
-
-Zolt's `challengeScalar128Bits()` already produces the correct format:
-- Returns `F{ .limbs = .{ 0, 0, masked_low, masked_high } }`
-- WITHOUT calling `toMontgomery()` (matches Jolt's `from_bigint_unchecked`)
-
-The challenge format is NOT the issue - the polynomial evaluation is.
-
-### Key Files to Modify
-
-1. `/home/vivado/projects/zolt/src/zkvm/spartan/stage5_prover.zig` - Fix polynomial evaluation
+1. Check if the challenge values used for evaluating opening claims match between prover and verifier
+2. Look at how `expected_output_claim()` is computed for each Stage 5 instance
+3. Verify the ra_claim computation in InstructionReadRaf
 
 ### Test Commands
 
@@ -71,16 +58,14 @@ cargo test --package jolt-core --features zolt-debug test_verify_zolt_proof_with
 
 ## Previous Sessions Summary
 
-- Session 133: Confirmed challenges match, identified table MLE mismatch
-- Session 134: Confirmed table MLEs match at basic level, identified ra_claims mismatch
-- Session 135: Confirmed ra_claims serialization is correct, issue is sumcheck polynomial values
-- Session 136: Identified prefix-suffix decomposition as potential issue
-- Session 137: Identified challenge format as potential issue (but actually correct)
-- Session 138: **Found root cause: Lagrange interpolation bug treating p_inf as p(3)**
+- Session 133-137: Various debugging and fixes
+- Session 138:
+  - Fixed polynomial evaluation bug (using Horner's method)
+  - Identified opening claims mismatch as next issue
 
 ## Key Files
 
-- `/home/vivado/projects/zolt/src/zkvm/spartan/stage5_prover.zig` - Stage 5 prover (contains bug)
-- `/home/vivado/projects/zolt/src/poly/mod.zig` - UniPoly with interpolation functions
-- `/home/vivado/projects/jolt/jolt-core/src/poly/unipoly.rs` - Jolt's polynomial evaluation
-- `/home/vivado/projects/jolt/jolt-core/src/subprotocols/sumcheck.rs` - Jolt's sumcheck prover
+- `/home/vivado/projects/zolt/src/zkvm/spartan/stage5_prover.zig` - Stage 5 prover
+- `/home/vivado/projects/zolt/src/poly/mod.zig` - UniPoly with evaluateToomCookAt
+- `/home/vivado/projects/jolt/jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs` - Instance 2 verification
+- `/home/vivado/projects/jolt/jolt-core/src/subprotocols/sumcheck.rs` - Sumcheck verifier

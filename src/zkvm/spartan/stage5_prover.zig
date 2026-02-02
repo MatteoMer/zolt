@@ -2338,6 +2338,34 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     const one_minus_r = F.one().sub(challenge);
                     const chunk_idx = round / lookups_ra_virtual_log_k_chunk;
 
+                    // Debug: print round info for rounds 0-3
+                    if (round < 4) {
+                        std.debug.print("[STAGE5 ADDR] Round {} challenge (full) = {any}\n", .{
+                            round,
+                            challenge.toBytesBE(),
+                        });
+                    }
+
+                    // Debug: print round info for first round of each chunk
+                    if (round % lookups_ra_virtual_log_k_chunk == 0 and (round < 64 or round >= 64)) {
+                        std.debug.print("[STAGE5 RA_CHUNK] Starting chunk {} (rounds {}-{})\n", .{
+                            chunk_idx,
+                            round,
+                            round + lookups_ra_virtual_log_k_chunk - 1,
+                        });
+                        std.debug.print("  bit_index = {} (bit {} of lookup_index)\n", .{ bit_index, bit_index });
+                        std.debug.print("  challenge = {x}\n", .{challenge.toBytesBE()[16..32].*});
+                        // Print lookup_indices for first 4 cycles
+                        for (0..@min(4, T)) |jj| {
+                            const idx_lo = lookups_indices_lo[jj];
+                            const idx_hi = lookups_indices_hi[jj];
+                            const bit_val = getBit128(idx_lo, idx_hi, bit_index);
+                            std.debug.print("  cycle[{}]: lookup_idx=({x:016},{x:016}), bit[{}]={}\n", .{
+                                jj, idx_hi, idx_lo, bit_index, bit_val,
+                            });
+                        }
+                    }
+
                     for (0..T) |j| {
                         const bit = getBit128(lookups_indices_lo[j], lookups_indices_hi[j], bit_index);
                         const factor = if (bit == 0) one_minus_r else challenge;
@@ -2345,6 +2373,16 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                         if (chunk_idx < ra_num_chunks) {
                             ra_chunk_weights[chunk_idx][j] = ra_chunk_weights[chunk_idx][j].mul(factor);
+                        }
+                    }
+
+                    // Debug: print ra_chunk values after last round of each chunk
+                    if ((round + 1) % lookups_ra_virtual_log_k_chunk == 0) {
+                        std.debug.print("[STAGE5 RA_CHUNK] Finished chunk {} after round {}\n", .{ chunk_idx, round });
+                        for (0..@min(4, T)) |jj| {
+                            std.debug.print("  ra_chunk[{}][{}] = {x}\n", .{
+                                chunk_idx, jj, ra_chunk_weights[chunk_idx][jj].toBytesBE()[16..32].*,
+                            });
                         }
                     }
 

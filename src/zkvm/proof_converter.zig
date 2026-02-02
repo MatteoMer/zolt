@@ -3027,8 +3027,11 @@ pub fn ProofConverter(comptime F: type) type {
             // 2. OutputSumcheck samples r_address (log_ram_k challenges via challenge_vector_optimized)
             // challenge_vector_optimized uses challenge_scalar_optimized which HAS 125-bit masking
             // So we use challengeScalar() here
-            const r_address = try self.allocator.alloc(F, log_ram_k);
-            for (r_address) |*r| {
+            // NOTE: This r_address is used only for OutputSumcheck's eq polynomial.
+            // It is NOT the r_address_raf for RamRafEvaluation's opening point (see fix below).
+            const r_address_presampled = try self.allocator.alloc(F, log_ram_k);
+            defer self.allocator.free(r_address_presampled);
+            for (r_address_presampled) |*r| {
                 r.* = transcript.challengeScalar();
             }
 
@@ -3166,7 +3169,7 @@ pub fn ProofConverter(comptime F: type) type {
                     self.allocator,
                     config.initial_ram.?,
                     config.final_ram.?,
-                    r_address,
+                    r_address_presampled,
                     config.memory_layout.?,
                     config.program_inputs,
                     config.program_outputs,
@@ -4165,6 +4168,48 @@ pub fn ProofConverter(comptime F: type) type {
             std.debug.print("[ZOLT] STAGE2: r_address_rw (BIG_ENDIAN) computed, len={}\n", .{r_address_rw.len});
             std.debug.print("[ZOLT] STAGE2: r_cycle_rw (BIG_ENDIAN) computed, len={}\n", .{r_cycle_rw.len});
 
+            // CRITICAL FIX: r_address_raf should be computed from sumcheck challenges, NOT the pre-sampled r_address!
+            //
+            // In Jolt's Stage 2 batched sumcheck:
+            // - RamRafEvaluation has 16 rounds, offset = 8, gets challenges[8..24]
+            // - RamReadWriteChecking has 24 rounds, offset = 0, gets challenges[0..24]
+            //   - Phase 1 (cycle): challenges[0..8]
+            //   - Phase 2 (address): challenges[8..24]
+            //
+            // Both instances' r_address = reverse(challenges[8..24]).
+            // So r_address_raf = r_address_rw!
+            //
+            // The pre-sampled r_address is used only for OutputSumcheck's eq polynomial,
+            // NOT for RamRafEvaluation's opening point.
+            //
+            // Compute r_address_raf from sumcheck challenges the same way as r_address_rw:
+            const r_address_raf = try self.allocator.alloc(F, log_ram_k);
+            for (0..phase2_rounds) |i| {
+                const src_idx = phase1_rounds + i;
+                if (src_idx < challenges.items.len) {
+                    r_address_raf[phase2_rounds - 1 - i] = challenges.items[src_idx];
+                } else {
+                    r_address_raf[phase2_rounds - 1 - i] = F.zero();
+                }
+            }
+
+            // Debug: compare r_address_raf and r_address_rw (they should now be identical)
+            std.debug.print("[ZOLT] STAGE2: r_address_raf[0..4] (BE from sumcheck) = ", .{});
+            for (0..@min(4, r_address_raf.len)) |i| {
+                std.debug.print("{x} ", .{r_address_raf[i].toBytesBE()[24..32].*});
+            }
+            std.debug.print("\n", .{});
+            std.debug.print("[ZOLT] STAGE2: r_address_rw[0..4] (BE from sumcheck) = ", .{});
+            for (0..@min(4, r_address_rw.len)) |i| {
+                std.debug.print("{x} ", .{r_address_rw[i].toBytesBE()[24..32].*});
+            }
+            std.debug.print("\n", .{});
+
+            // Free the pre-sampled r_address since we don't need it anymore for raf
+            // (it's still used for OutputSumcheck's eq polynomial, but we already passed it there)
+            // Note: The pre-sampled r_address is owned by the OutputSumcheck prover already
+            // We keep it allocated as r_address for other uses (OutputSumcheck eq)
+
             return Stage2Result{
                 .factor_evals = factor_evals,
                 .challenges = challenges_copy,
@@ -4174,7 +4219,7 @@ pub fn ProofConverter(comptime F: type) type {
                 .instr_final_claim = instr_claim,
                 .output_val_final_claim = output_val_final,
                 .output_val_init_claim = output_val_init,
-                .r_address_raf = r_address,
+                .r_address_raf = r_address_raf,
                 .r_address_rw = r_address_rw,
                 .r_cycle_rw = r_cycle_rw,
                 .rwc_ra_claim = rwc_ra_claim,

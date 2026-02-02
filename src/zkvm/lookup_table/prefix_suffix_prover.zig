@@ -1434,6 +1434,59 @@ pub fn condenseUEvals(
 }
 
 // ============================================================================
+// Table MLE Computation at r_address (for cycle rounds)
+// ============================================================================
+
+/// Compute table_values_at_r_addr for all 41 tables after address rounds complete.
+///
+/// At this point:
+/// - All 128 address variables have been bound via prefix-suffix decomposition
+/// - The suffix variable set is empty (suffix_len = 0)
+/// - Each suffix MLE is evaluated on an empty bitstring
+///
+/// For each table t:
+///   table_values_at_r_addr[t] = table.combine(&prefixes, &suffix_evals)
+///
+/// where:
+///   - prefixes are the bound prefix checkpoint values
+///   - suffix_evals[s] = F::from_u64(suffix.suffix_mle(empty_bits))
+///
+/// Reference: jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs:641-671
+pub fn computeTableValuesAtRAddress(
+    comptime F: type,
+    prefix_checkpoints: *const PrefixCheckpointsState(F),
+) [NUM_TABLES]F {
+    var result: [NUM_TABLES]F = undefined;
+
+    // Empty suffix bits (0 bits)
+    const empty_suffix_bits = LookupBits(128).new(0, 0);
+
+    // Convert prefix checkpoints to an array of F values (using 0 for None)
+    var prefix_values: [Prefixes.COUNT]F = undefined;
+    for (0..Prefixes.COUNT) |i| {
+        prefix_values[i] = prefix_checkpoints.checkpoints[i] orelse F.zero();
+    }
+
+    // Compute MLE value for each table
+    for (0..NUM_TABLES) |table_idx| {
+        // Get the suffixes for this table
+        const table_suff = tableSuffixes(table_idx);
+
+        // Evaluate each suffix MLE at empty bits and convert to field element
+        var suffix_evals: [MAX_SUFFIXES_PER_TABLE]F = undefined;
+        for (table_suff, 0..) |suff, s_idx| {
+            const mle_val = suffixMle(suff, empty_suffix_bits);
+            suffix_evals[s_idx] = F.fromU64(mle_val);
+        }
+
+        // Combine using the table-specific formula
+        result[table_idx] = tableCombine(F, table_idx, &prefix_values, suffix_evals[0..table_suff.len]);
+    }
+
+    return result;
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

@@ -36,6 +36,8 @@ const proverMsgRaf = lookup_table_mod.proverMsgRaf;
 const LookupBits = lookup_table_mod.LookupBits;
 const ExpandingTable = lookup_table_mod.ExpandingTable;
 const condenseUEvals = lookup_table_mod.condenseUEvals;
+const computeTableValuesAtRAddress = lookup_table_mod.computeTableValuesAtRAddress;
+const NUM_TABLES = lookup_table_mod.NUM_TABLES;
 
 /// Constants for Stage 5
 pub const LOOKUPS_LOG_K: usize = 128; // XLEN * 2 for RV64
@@ -406,6 +408,14 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 .add(gamma.mul(claim_val_final))
                 .add(gamma2.mul(claim_rw))
                 .add(gamma3.mul(claim_val_eval));
+
+            // Debug: print the four claims that make up ram_ra_input
+            std.debug.print("[STAGE5] RamRaClaimReduction input components:\n", .{});
+            std.debug.print("  claim_raf (RamRafEvaluation) = {any}\n", .{claim_raf.toBytesBE()[16..32].*});
+            std.debug.print("  claim_val_final (RamValFinalEvaluation) = {any}\n", .{claim_val_final.toBytesBE()[16..32].*});
+            std.debug.print("  claim_rw (RamReadWriteChecking) = {any}\n", .{claim_rw.toBytesBE()[16..32].*});
+            std.debug.print("  claim_val_eval (RamValEvaluation) = {any}\n", .{claim_val_eval.toBytesBE()[16..32].*});
+            std.debug.print("  gamma = {any}\n", .{gamma.toBytesBE()[16..32].*});
 
             // LookupsReadRaf uses gamma_lookups_raf
             const gamma_raf = gamma_lookups_raf;
@@ -1623,71 +1633,81 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             raf_identity.toBytesBE()[16..32].*,
                         });
 
-                        // Rematerialize combined_vals using the correct RAF values per cycle
-                        // NOTE: We use the lookup_output values that were already computed,
-                        // but replace the RAF contribution based on cycle type
+                        // ============================================================
+                        // CRITICAL FIX: Use table MLE at r_address, NOT raw lookup output
+                        // ============================================================
+                        // Jolt's init_log_t_rounds computes table_values_at_r_addr:
+                        //   table_values_at_r_addr[t] = table.combine(&prefixes, &suffix_evals)
+                        // where suffix_evals are the suffix MLEs at empty bits (since all
+                        // suffix variables have been bound during address rounds).
+                        //
+                        // The raw lookup_output (e.g., rs1 & rs2 for AND) is NOT the same as
+                        // the table MLE evaluated at the random point r_address!
+                        //
+                        // Reference: jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs:641-671
+
+                        // Compute table_values_at_r_addr using bound prefix checkpoints
+                        const table_values = computeTableValuesAtRAddress(F, &prefix_checkpoints);
+
+                        // Debug: print key prefix checkpoint values
+                        std.debug.print("[STAGE5 REMATERIALIZE] Key prefix checkpoints:\n", .{});
+                        const lw_idx = @intFromEnum(lookup_table_mod.Prefixes.LowerWord);
+                        const eq_idx = @intFromEnum(lookup_table_mod.Prefixes.Eq);
+                        const lt_idx = @intFromEnum(lookup_table_mod.Prefixes.LessThan);
+                        const lsb_idx = @intFromEnum(lookup_table_mod.Prefixes.Lsb);
+                        if (prefix_checkpoints.checkpoints[lw_idx]) |v| {
+                            std.debug.print("  LowerWord = {x}\n", .{v.toBytesBE()[16..32].*});
+                        } else {
+                            std.debug.print("  LowerWord = NULL\n", .{});
+                        }
+                        if (prefix_checkpoints.checkpoints[eq_idx]) |v| {
+                            std.debug.print("  Eq = {x}\n", .{v.toBytesBE()[16..32].*});
+                        } else {
+                            std.debug.print("  Eq = NULL\n", .{});
+                        }
+                        if (prefix_checkpoints.checkpoints[lt_idx]) |v| {
+                            std.debug.print("  LessThan = {x}\n", .{v.toBytesBE()[16..32].*});
+                        } else {
+                            std.debug.print("  LessThan = NULL\n", .{});
+                        }
+                        if (prefix_checkpoints.checkpoints[lsb_idx]) |v| {
+                            std.debug.print("  Lsb = {x}\n", .{v.toBytesBE()[16..32].*});
+                        } else {
+                            std.debug.print("  Lsb = NULL\n", .{});
+                        }
+
+                        // Debug: print table values
+                        std.debug.print("[STAGE5 REMATERIALIZE] table_values_at_r_addr:\n", .{});
+                        for (0..NUM_TABLES) |t_idx| {
+                            if (!table_values[t_idx].eql(F.zero())) {
+                                std.debug.print("  table[{}] = {x}\n", .{ t_idx, table_values[t_idx].toBytesBE()[16..32].* });
+                            }
+                        }
+
+                        // Rematerialize combined_vals using the correct formula
+                        // combined_val[j] = table_values_at_r_addr[table(j)] + raf_val
                         for (0..T) |j| {
                             if (j >= trace_len) continue;
 
-                            const step = trace.steps.items[j];
-                            if (step.is_noop) continue;
-
-                            const instr = step.instruction;
-                            const opcode = instr & 0x7f;
-                            const funct3: u3 = @truncate((instr >> 12) & 0x7);
-                            const funct7: u7 = @truncate(instr >> 25);
-
-                            // Compute lookup_output (same as before)
-                            var lookup_output: F = F.zero();
-                            switch (opcode) {
-                                0x6f => { // JAL
-                                    const imm20 = ((@as(u32, instr >> 31) & 1) << 19) |
-                                        ((@as(u32, instr >> 12) & 0xFF) << 11) |
-                                        ((@as(u32, instr >> 20) & 1) << 10) |
-                                        ((@as(u32, instr >> 21) & 0x3FF));
-                                    const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm20 << 12)) >> 11);
-                                    const imm_u64: u64 = @bitCast(imm_signed);
-                                    lookup_output = F.fromU64(step.pc +% imm_u64);
-                                },
-                                0x67 => { // JALR
-                                    const imm12_raw: u32 = @truncate(instr >> 20);
-                                    const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                                    const imm_u64: u64 = @bitCast(imm_signed);
-                                    lookup_output = F.fromU64((step.rs1_value +% imm_u64) & ~@as(u64, 1));
-                                },
-                                0x63 => { // Branch
-                                    const result: u64 = switch (funct3) {
-                                        0x0 => if (step.rs1_value == step.rs2_value) 1 else 0,
-                                        0x1 => if (step.rs1_value != step.rs2_value) 1 else 0,
-                                        0x4 => if (@as(i64, @bitCast(step.rs1_value)) < @as(i64, @bitCast(step.rs2_value))) 1 else 0,
-                                        0x5 => if (@as(i64, @bitCast(step.rs1_value)) >= @as(i64, @bitCast(step.rs2_value))) 1 else 0,
-                                        0x6 => if (step.rs1_value < step.rs2_value) 1 else 0,
-                                        0x7 => if (step.rs1_value >= step.rs2_value) 1 else 0,
-                                        else => 0,
-                                    };
-                                    lookup_output = F.fromU64(result);
-                                },
-                                else => {
-                                    lookup_output = F.fromU64(step.rd_value);
-                                },
+                            // Get the table index for this cycle (-1 = no table)
+                            const table_idx = cycle_table_indices[j];
+                            if (table_idx < 0) {
+                                lookups_combined_vals[j] = F.zero();
+                                continue;
                             }
 
-                            // Determine if this cycle uses interleaved operands
-                            const is_add_operands: bool = switch (opcode) {
-                                0x33 => (funct3 == 0) and (funct7 == 0), // ADD
-                                0x13 => (funct3 == 0), // ADDI
-                                0x1b => (funct3 == 0), // ADDIW
-                                0x3b => (funct3 == 0) and (funct7 == 0), // ADDW
-                                0x37, 0x17, 0x6f, 0x67, 0x03, 0x23 => true, // LUI, AUIPC, JAL, JALR, Load, Store
-                                else => false,
-                            };
-                            const is_interleaved = !is_add_operands;
+                            // Get the table MLE value at r_address
+                            const t_idx: usize = @intCast(table_idx);
+                            const table_val = if (t_idx < NUM_TABLES) table_values[t_idx] else F.zero();
 
-                            // Rematerialize combined_val with correct RAF contribution
+                            // Determine if this cycle uses interleaved operands
+                            const is_interleaved = !cycle_is_identity_path[j];
+
+                            // combined_val = table_val + raf_val
                             if (is_interleaved) {
-                                lookups_combined_vals[j] = lookup_output.add(raf_interleaved);
+                                lookups_combined_vals[j] = table_val.add(raf_interleaved);
                             } else {
-                                lookups_combined_vals[j] = lookup_output.add(raf_identity);
+                                lookups_combined_vals[j] = table_val.add(raf_identity);
                             }
                         }
 

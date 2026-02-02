@@ -450,8 +450,22 @@ fn lowerWordUpdateCheckpoint(
     const x_shift = 2 * XLEN - j;
     const y_shift = 2 * XLEN - j - 1;
     var updated = checkpoints[@intFromEnum(Prefixes.LowerWord)] orelse F.zero();
+
+    // Debug: print first and last updates
+    if (j == 65 or j == 127) {
+        std.debug.print("[LOWERWORD UPDATE] j={}, x_shift={}, y_shift={}\n", .{ j, x_shift, y_shift });
+        std.debug.print("  r_x = {x}\n", .{r_x.toBytesBE()[16..32].*});
+        std.debug.print("  r_y = {x}\n", .{r_y.toBytesBE()[16..32].*});
+        std.debug.print("  prev = {x}\n", .{updated.toBytesBE()[16..32].*});
+    }
+
     updated = updated.add(F.fromU128(@as(u128, 1) << @intCast(x_shift)).mul(r_x));
     updated = updated.add(F.fromU128(@as(u128, 1) << @intCast(y_shift)).mul(r_y));
+
+    if (j == 65 or j == 127) {
+        std.debug.print("  new  = {x}\n", .{updated.toBytesBE()[16..32].*});
+    }
+
     return updated;
 }
 

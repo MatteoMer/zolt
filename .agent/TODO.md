@@ -1,80 +1,85 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: IN PROGRESS - Stage 5 Sumcheck Formula Mismatch
+## Status: IN PROGRESS - Stage 5 RamRaClaimReduction Implementation Needed
 
-## Session 116 Summary
+## Session 118 Summary
 
-### Fixed
-1. **File path issue**: Test was reading `/tmp/zolt_proof_dory.bin` (old file) instead of `logs/` (current file). Copied correct files to /tmp.
-2. **Table flag claims**: Now deserialize correctly - tables 0, 1, 9 are non-zero for Fibonacci.
+### Root Cause Identified
+The Stage 5 verification fails because:
 
-### Verified Correct
-All three tables ARE correctly used in Fibonacci execution:
-- Table 0 (RangeCheck): Used by ADD, ADDI, LUI, JAL, etc.
-- Table 1 (RangeCheckAligned): Used by JALR at cycle 52
-- Table 9 (NotEqual): Used by BNE branches
+1. **Instance 1 (RamRaClaimReduction) is NOT implemented** for active rounds!
+   - In `stage5_prover.zig` lines 1301-1304, when Instance 1 becomes active:
+   ```zig
+   } else {
+       // Zero polynomial for now (TODO: implement RamRaClaimReduction)
+       // This is correct if ram_ra_input = 0
+   }
+   ```
+   - This outputs ZERO contribution when the instance becomes active (rounds 112-135)
 
+2. **But ram_ra_input is NOT zero!** Debug shows:
+   - `claim_raf (RamRafEvaluation) = 0`
+   - `claim_val_final (RamValFinalEvaluation) = non-zero`
+   - `claim_rw (RamReadWriteChecking) = 0`
+   - `claim_val_eval (RamValEvaluation) = non-zero` (same as val_final!)
+   - `ram_ra_input = γ*claim_val_final + γ³*claim_val_eval ≠ 0`
+
+3. **ram_ra_claim is hardcoded to F.zero()** at line 2130:
+   ```zig
+   .ram_ra_claim = F.zero(),
+   ```
+   This should be the final reduced claim from the RamRaClaimReduction sumcheck.
+
+### Verification Failure
 ```
-52 | 0x80000064 | 0x00008067 | JALR x0, 0(x1)  <- Uses table 1 (RangeCheckAligned)
-```
+output_claim:   [42, f3, 7b, 3a, c3, 1b, 09, f8, ...]  <- from polynomial evaluations
+expected_claim: [44, 17, 5e, 31, f5, bc, 6f, 87, ...]  <- from expected output claims
 
-### Current Issue
-Stage 5 sumcheck verification fails:
-```
-output_claim:   [9d, 3d, dd, d4...]
-expected_claim: [1b, 43, f0, ba...]
-```
-
-### Table Evaluations (from Jolt debug)
-```
-table_eval[0] (RangeCheck)        = [fb, 9d, 83, 09...]
-table_eval[1] (RangeCheckAligned) = [9b, 3c, 87, 4b...]
-table_eval[9] (NotEqual)          = [f9, b0, 80, b7...]
-
-table_flag[0] = [34, 2b, b2, 5c...]
-table_flag[1] = [aa, b9, 54, f9...]
-table_flag[9] = [dd, 0d, 07, c1...]
-```
-
-### Formula Analysis
-
-The verifier computes:
-```
-val_claim = Σ table_MLE[i](r_address) * table_flag[i]
-          = table_eval[0]*table_flag[0] + table_eval[1]*table_flag[1] + table_eval[9]*table_flag[9]
-
-raf_claim = (1 - raf_flag) * (left_op + gamma*right_op) + raf_flag * gamma * identity
-
-expected = eq_eval * ra_claim * (val_claim + gamma * raf_claim)
+Instance contributions to expected_claim:
+- Instance 0 (RegistersValEvaluation): claim * batch0
+- Instance 1 (RamRaClaimReduction): 0 * batch1 = 0 (WRONG - ram_ra_claim=0)
+- Instance 2 (LookupsReadRaf): claim * batch2
 ```
 
-### Likely Root Cause
+### RamRaClaimReduction Sumcheck Details (from Jolt)
+Proves: `Σ_{k,c} eq_combined(k, c) · ra(k, c) = input_claim`
 
-Zolt computes `combined_vals[j]` differently from what Jolt expects:
+Where:
+- `eq_combined(k, c) = eq(r_addr_1, k)·(eq_raf(c) + γ·eq_val(c)) + γ²·eq(r_addr_2, k)·(eq_rw(c) + γ·eq_val(c))`
+- `input_claim = claim_raf + γ·claim_val_final + γ²·claim_rw + γ³·claim_val_eval`
 
-**Zolt (stage5_prover.zig:811)**:
-```zig
-combined_vals[j] = lookup_output + gamma*left + gamma^2*right
-```
+Three phases:
+- **PhaseAddress**: First 16 rounds binding address variables (log_K rounds)
+- **PhaseCycle1**: First 4 cycle rounds using prefix-suffix optimization (log_T/2 rounds)
+- **PhaseCycle2**: Last 4 cycle rounds using dense sumcheck (log_T/2 rounds)
 
-**Jolt expects**:
-```
-combined = val + gamma * raf
-where raf = (1-raf_flag)*(left + gamma*right) + raf_flag*gamma*identity
-```
-
-Key differences:
-1. Zolt uses `gamma^2 * right`, but Jolt uses `gamma * (left + gamma*right)` in raf_claim
-2. Identity path handling may differ for AddOperands instructions
-
-### Implementation Status
-- Added `evaluateTableMLE(table_index, r)` function in lookup_table/mod.zig
-- Table flag computation is correct (matches which tables are used)
+For Fibonacci: 16 + 8 = 24 rounds total, active during Stage 5 rounds 112-135.
 
 ### Files Modified This Session
-- `/home/vivado/projects/zolt/src/zkvm/lookup_table/mod.zig`: Added `evaluateTableMLE()`
-- `/home/vivado/projects/jolt/jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs`: Added table_eval debug
-- `/home/vivado/projects/jolt/jolt-core/src/zkvm/proof_serialization.rs`: Added byte offset tracking
+- `/home/vivado/projects/zolt/src/zkvm/spartan/stage5_prover.zig`: Added debug for ram_ra_input components
+- `/home/vivado/projects/zolt/.agent/TODO.md`: Updated with findings
+
+### Verified Components
+1. Batching coefficients match between Zolt and Jolt ✓
+2. Input claims match ✓
+3. Challenges match during cycle rounds (128-135) ✓
+4. Transcript synchronization works ✓
+5. Instance 0 and Instance 2 polynomial contributions appear correct ✓
+
+### What Needs to Be Done
+1. **Implement RamRaClaimReduction sumcheck polynomial computation** for rounds 112-135
+   - PhaseAddress: Dense sumcheck over eq_combined * ra where ra is the RAM address polynomial
+   - PhaseCycle1/2: Prefix-suffix then dense sumcheck over cycle variables
+
+2. **Compute actual ram_ra_claim** - This is `H_prime.final_sumcheck_claim()` from Jolt's PhaseCycle2State
+
+### Alternative: Skip RamRaClaimReduction for No-RAM Programs?
+For Fibonacci which has no RAM operations, we might be able to:
+1. Check if trace has no RAM ops
+2. Set ram_ra_input = 0 artificially
+3. Output zero polynomials for Instance 1
+
+But this is a workaround, not a fix. The proper fix is implementing RamRaClaimReduction.
 
 ### Test Commands
 ```bash
@@ -92,10 +97,6 @@ cd /home/vivado/projects/jolt
 cargo test --package jolt-core --features zolt-debug test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
 
-### Next Steps
-1. **Fix combined_vals formula** in stage5_prover.zig to match Jolt's expected formula
-2. **Check identity path handling** - AddOperands instructions (ADD, ADDI, etc.) use identity path
-3. **Verify gamma usage** - ensure gamma powers match between prover and verifier
-4. Add more debug to trace exact computation differences
+## SESSION_ENDING - Context Running Low
 
-SESSION_ENDING - Progress saved to TODO.md
+Progress saved to TODO.md. The main finding is that RamRaClaimReduction sumcheck (Instance 1 of Stage 5) is not implemented for active rounds, causing verification failure when ram_ra_input ≠ 0.

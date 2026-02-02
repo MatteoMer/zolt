@@ -43,6 +43,8 @@ pub const initQRaf = prefix_suffix_prover.initQRaf;
 pub const proverMsgRaf = prefix_suffix_prover.proverMsgRaf;
 pub const ExpandingTable = prefix_suffix_prover.ExpandingTable;
 pub const condenseUEvals = prefix_suffix_prover.condenseUEvals;
+pub const computeTableValuesAtRAddress = prefix_suffix_prover.computeTableValuesAtRAddress;
+pub const NUM_TABLES = prefix_suffix_prover.NUM_TABLES;
 
 /// Utility function to uninterleave bits from an interleaved index.
 /// For a 2*XLEN bit index where bits are interleaved as y[0], x[0], y[1], x[1], ...,

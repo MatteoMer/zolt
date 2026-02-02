@@ -366,12 +366,16 @@ pub fn Preprocessing(comptime F: type) type {
             program: *const Program,
         ) !struct { pk: ProvingKey, vk: VerifyingKey } {
             // Create shared preprocessing for prover
+            std.debug.print("    [preprocess] Creating shared_pk...\n", .{});
             const shared_pk = try SharedPreprocessing(F).init(self.allocator, program);
             errdefer shared_pk.deinit();
+            std.debug.print("    [preprocess] shared_pk created\n", .{});
 
             // Create shared preprocessing for verifier (copy)
+            std.debug.print("    [preprocess] Creating shared_vk...\n", .{});
             const shared_vk = try SharedPreprocessing(F).init(self.allocator, program);
             errdefer shared_vk.deinit();
+            std.debug.print("    [preprocess] shared_vk created\n", .{});
 
             // Compute SRS size: need enough powers of tau for the trace
             // log_chunk typically 8, so we need 2^(log_chunk + log_T) powers
@@ -384,7 +388,9 @@ pub fn Preprocessing(comptime F: type) type {
             const srs_size = (@as(usize, 1) << log_chunk) + padded_trace_length;
 
             // Generate SRS
+            std.debug.print("    [preprocess] Generating SRS (size={})...\n", .{srs_size});
             const srs = try HyperKZG.setup(self.allocator, srs_size);
+            std.debug.print("    [preprocess] SRS generated!\n", .{});
 
             // Create proving key
             const pk = ProvingKey{

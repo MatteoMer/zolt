@@ -172,16 +172,19 @@ pub fn HyperKZG(comptime F: type) type {
         /// you need a proper trusted setup ceremony (powers of tau).
         /// The tau value is deterministically derived (INSECURE for production).
         pub fn setup(allocator: Allocator, max_degree: usize) !SetupParams {
+            std.debug.print("      [HyperKZG.setup] Allocating {} points...\n", .{max_degree});
             // In a real implementation, this would be generated from a trusted setup
             // ceremony. Here we create a deterministic SRS for testing.
             //
             // WARNING: Using a known tau value is INSECURE for production.
             // This is only for testing and development.
             const powers = try allocator.alloc(Point, max_degree);
+            std.debug.print("      [HyperKZG.setup] Allocated, getting generators...\n", .{});
 
             // Use generators (G1 in base field Fp)
             const g1 = Point.generator();
             const g2 = G2Point.generator();
+            std.debug.print("      [HyperKZG.setup] Got generators, computing powers of tau...\n", .{});
 
             // Use a deterministic "tau" for testing (INSECURE!)
             // In production, tau must be unknown to everyone.
@@ -191,12 +194,18 @@ pub fn HyperKZG(comptime F: type) type {
             // Compute powers of tau in G1: [1, tau, tau^2, ..., tau^{n-1}]_1
             // Scalars (tau^i) are in Fr, points are in Fp
             var tau_power = F.one();
+            var progress: usize = 0;
             for (powers) |*p| {
                 // p = tau^i * G1
                 // Use MSM(F, Fp) for Fr scalars with Fp point coordinates
                 p.* = msm.MSM(F, Fp).scalarMul(g1, tau_power).toAffine();
                 tau_power = tau_power.mul(tau);
+                progress += 1;
+                if (progress % 100 == 0) {
+                    std.debug.print("      [HyperKZG.setup] Progress: {}/{}\n", .{progress, max_degree});
+                }
             }
+            std.debug.print("      [HyperKZG.setup] Done with powers of tau\n", .{});
 
             // Compute [tau]_2 = tau * G2 (needed for pairing verification)
             // G2 scalar multiplication takes Fr scalar (BN254Scalar)

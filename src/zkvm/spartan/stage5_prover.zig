@@ -3918,9 +3918,19 @@ pub fn evaluateRightOperand(comptime F: type, r: []const F) F {
     var i: usize = n / 2;
     while (i > 0) {
         i -= 1;
-        result = result.add(r[2 * i + 1].mul(power));
+        const idx = 2 * i + 1;
+        const term = r[idx].mul(power);
+        result = result.add(term);
+        // Debug: print first few and last few iterations
+        if (n == 128 and (i < 3 or i >= 61)) {
+            std.debug.print("[RIGHT_OP_DEBUG] i={d}: r[{d}]={x}, power={x}, term={x}, result={x}\n", .{
+                i, idx, r[idx].toBytesBE()[16..32].*, power.toBytesBE()[16..32].*,
+                term.toBytesBE()[16..32].*, result.toBytesBE()[16..32].*,
+            });
+        }
         power = power.add(power); // power *= 2
     }
+    std.debug.print("[RIGHT_OP_DEBUG] final result = {x}\n", .{result.toBytesBE()[16..32].*});
     return result;
 }
 
@@ -3935,9 +3945,18 @@ pub fn evaluateIdentity(comptime F: type, r: []const F) F {
     var i: usize = n;
     while (i > 0) {
         i -= 1;
-        result = result.add(r[i].mul(power));
+        const term = r[i].mul(power);
+        result = result.add(term);
+        // Debug: print first few and last few iterations
+        if (n == 128 and (i < 4 or i >= 124)) {
+            std.debug.print("[IDENTITY_DEBUG] i={d}: r[{d}]={x}, power={x}, term={x}, result={x}\n", .{
+                i, i, r[i].toBytesBE()[16..32].*, power.toBytesBE()[16..32].*,
+                term.toBytesBE()[16..32].*, result.toBytesBE()[16..32].*,
+            });
+        }
         power = power.add(power); // power *= 2
     }
+    std.debug.print("[IDENTITY_DEBUG] final result = {x}\n", .{result.toBytesBE()[16..32].*});
     return result;
 }
 

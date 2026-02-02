@@ -1,77 +1,63 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: IN PROGRESS - RamRaClaimReduction Sumcheck Polynomial Implementation
+## Status: IN PROGRESS - RamRaClaimReduction Cycle Rounds Implementation
 
-## Session 120 Summary
+## Session 121 Summary
 
 ### Progress Made
-1. **Added opening point tracking for RamRaClaimReduction**
-   - Added `r_address_rw` and `r_cycle_rw` to Stage2Result (computed from RWC challenges)
-   - Added `stage4_r_cycle_val` for ValEvaluation cycle challenges
-   - Updated Stage 5 function signature to accept all 5 opening point vectors:
-     - `r_address_raf` (from RamRafEvaluation)
-     - `r_address_rw` (from RamReadWriteChecking)
-     - `r_cycle_raf` (from SpartanOuter)
-     - `r_cycle_rw` (from RamReadWriteChecking)
-     - `r_cycle_val` (from RamValEvaluation)
+1. **Implemented RamRaClaimReduction PhaseAddress sumcheck**
+   - Added sparse state tracking: ram_addresses, ram_cycles, ram_G_A, ram_G_B
+   - Precompute G_A[i] = eq_raf(c_i) + γ·eq_val(c_i), G_B[i] = eq_rw(c_i) + γ·eq_val(c_i)
+   - Initialize B_1 = eq(r_address_raf, k), B_2 = eq(r_address_rw, k) polynomials
+   - Initialize ram_ra_F expanding table for tracking eq(r_addr_reduced, k)
 
-2. **Fixed Stage 2 opening point computation**
-   - `r_address_rw` = reverse(RWC phase 2 challenges)
-   - `r_cycle_rw` = reverse(RWC phase 1 challenges)
+2. **PhaseAddress rounds (0-15 of RamRaClaimReduction = rounds 112-127)**
+   - For each round, iterate over RAM accesses
+   - Compute polynomial evals based on address bit being bound
+   - Bind B_1, B_2 and update ram_ra_F after each challenge
 
-3. **Fixed Stage 4 opening point computation**
-   - `r_cycle_val` = reverse(challenges[7..15]) for ValEvaluation
+3. **Added helper function `computeEqAtPoint`**
+   - Computes eq(r, k) for a specific point k given r in BIG_ENDIAN order
 
 ### Remaining Issue
-The RamRaClaimReduction sumcheck polynomial computation (rounds 112-135) still outputs zeros.
+**PhaseCycle implementation is incorrect**
+
+The cycle round implementation (rounds 128-135) is using precomputed G_A/G_B which have FULL cycle eq values baked in. However, during the sumcheck, we need to bind the eq polynomials incrementally.
 
 For Fibonacci:
-- `claim_raf = 0`, `claim_rw = 0`
-- `claim_val_final ≠ 0`, `claim_val_eval ≠ 0`
-- `ram_ra_input = γ*claim_val_final + γ³*claim_val_eval`
+- claim_raf = 0, claim_rw = 0
+- claim_val_final ≠ 0, claim_val_eval ≠ 0
+- ram_ra_input = γ*claim_val_final + γ³*claim_val_eval
 
-The sumcheck proves: `Σ_{k,c} eq_combined(k,c) · ra(k,c) = input_claim`
+The verifier reports:
+- Instance 1 expected claim mismatch (Stage 5 sumcheck fails)
 
-Where for Fibonacci (with claim_raf=0 and claim_rw=0):
-```
-eq_combined(k, c) = γ·eq_val(c)·[eq(r_addr_1, k) + γ²·eq(r_addr_2, k)]
-```
+### Proper Cycle Round Algorithm
+Looking at Jolt's ram_ra.rs:
 
-### Implementation Plan for RamRaClaimReduction Sumcheck
+**PhaseCycle1** (first log_T/2 cycle rounds):
+- Uses P/Q buffer structure for prefix-suffix optimization
+- P_x[c_lo] = eq(r_cycle_x_lo, c_lo)
+- Q_x[c_lo] = Σ_{c_hi} H[c_lo, c_hi] · eq_x_hi(c_hi)
+- Polynomial: coeff_raf * P_raf * Q_raf + coeff_rw * P_rw * Q_rw + coeff_val * P_val * Q_val
 
-#### Phase 1: Address Rounds (16 rounds)
-For round i in [0, 15], we bind address variable k_i:
+**PhaseCycle2** (last log_T/2 cycle rounds):
+- Dense sumcheck over H_prime[c_hi] = Σ_{c_lo} H[c_lo,c_hi] · eq(r_prefix, c_lo)
+- Uses eq_raf_hi, eq_rw_hi, eq_val_hi polynomials
 
-1. Compute `B_1_evals[0], B_1_evals[1]` = sumcheck evals of eq(r_addr_1, k) for binding k_i
-2. Compute `B_2_evals[0], B_2_evals[1]` = sumcheck evals of eq(r_addr_2, k) for binding k_i
-3. For each RAM access (addr, cycle):
-   - Check bit k_i of addr to determine which sum (p(0) or p(1)) gets the contribution
-   - Contribution = F_k * G_access where:
-     - F_k = eq(r_addr_reduced_so_far, addr_bits_bound_so_far)
-     - G_access = precomputed cycle contribution
-
-#### Phase 2: Cycle Rounds (8 rounds)
-For round i in [16, 23], we bind cycle variable c_i:
-
-1. At phase transition, compute:
-   - α_1 = eq(r_addr_1, r_addr_reduced) from final B_1
-   - α_2 = eq(r_addr_2, r_addr_reduced) from final B_2
-2. For each round, use P/Q buffer structure or dense sumcheck
-
-#### Sparse Optimization (for Fibonacci)
-Since Fibonacci has only 1 RAM access (termination write):
-- In each round, only one of p(0) or p(1) is non-zero
-- Can compute analytically from the single (addr, cycle) pair
+For sparse implementation, we need to:
+1. Track α_combined for each access after PhaseAddress completes
+2. Track eq_cycle contributions that need to be bound during cycle rounds
+3. Properly compute polynomial at each cycle round
 
 ### Files Modified This Session
-- `/home/vivado/projects/zolt/src/zkvm/proof_converter.zig`
-  - Added `r_address_rw`, `r_cycle_rw` to Stage2Result
-  - Added computation of these from RWC challenges
-  - Added `stage4_r_cycle_val` tracking
-  - Updated Stage 5 call with all 5 opening points
 - `/home/vivado/projects/zolt/src/zkvm/spartan/stage5_prover.zig`
-  - Added 5 new parameters for RamRaClaimReduction opening points
-  - Added debug prints for these parameters
+  - Added RamRaClaimReduction state initialization (ram_addresses, ram_cycles, ram_G_A, ram_G_B)
+  - Added B_1, B_2 eq polynomials for address rounds
+  - Added ram_ra_F expanding table
+  - Implemented PhaseAddress polynomial computation
+  - Added state binding after each challenge
+  - Added `computeEqAtPoint` helper function
 
 ### Test Commands
 ```bash
@@ -90,11 +76,18 @@ cargo test --package jolt-core --features zolt-debug test_verify_zolt_proof_with
 ```
 
 ## Next Steps
-1. Implement RamRaClaimReduction sumcheck polynomial computation in stage5_prover.zig
-2. For sparse optimization: compute polynomial from single RAM access
-3. Track bound challenges to update eq polynomials
-4. Test with Jolt verifier
+1. Fix PhaseCycle implementation:
+   - Option A: Implement proper P/Q buffer structure for cycle rounds
+   - Option B: For sparse traces, compute polynomial directly from bound challenges
+
+2. The key insight for sparse implementation:
+   - After PhaseAddress, compute α_combined[i] = α₁·scale_raf + γ²·α₂·scale_rw (per access)
+   - Track which cycle eq factors need binding during cycle rounds
+   - eq_cycle_raf, eq_cycle_rw, eq_cycle_val need separate tracking
+
+3. Test with Jolt verifier
 
 ## SESSION_ENDING
 
-Progress saved. Opened points now tracked correctly. Next session should implement the actual sumcheck polynomial computation for RamRaClaimReduction rounds 112-135.
+Progress saved. PhaseAddress implemented correctly but PhaseCycle needs proper eq binding. Next session should fix the cycle round polynomial computation.
+

@@ -1417,10 +1417,17 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         // This is the CRITICAL step that was missing!
                         // u_evals[j] *= v[prev_phase][k_bound] where k_bound = prefix & m_mask
                         condenseUEvals(F, lookups_eq_evals, &expanding_tables[prev_phase], lookup_indices_u128, current_phase, num_phases);
+                        std.debug.print("[STAGE5] Phase {} condense done, now calling initPhase...\n", .{current_phase});
 
                         // Re-initialize suffix polys and RAF for new phase with condensed u_evals
                         try suffix_polys.initPhase(current_phase, num_phases, lookups_eq_evals, lookup_indices_u128, cycle_table_indices);
+                        std.debug.print("[STAGE5] Phase {} initPhase done, now calling initQRaf...\n", .{current_phase});
+                        // Reset RAF decompositions for new phase (restore Q_size to initial_m=256)
+                        left_raf.resetForPhase(current_phase, initial_m);
+                        right_raf.resetForPhase(current_phase, initial_m);
+                        identity_raf.resetForPhase(current_phase, initial_m);
                         initQRaf(F, &left_raf, &right_raf, &identity_raf, lookups_eq_evals, lookup_indices_u128, is_interleaved_operands);
+                        std.debug.print("[STAGE5] Phase {} initQRaf done\n", .{current_phase});
 
                         // Reset the new phase's expanding table to 1
                         expanding_tables[current_phase].reset(F.one());
@@ -1466,6 +1473,197 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     //    by multiplying by eq(X, r_round) where r_round = r_reduction[n-1-cycle_round]
                     //
                     const lookups_round = round - LOOKUPS_LOG_K;
+
+                    // ============================================================
+                    // Rematerialization at start of cycle rounds (round 128 only)
+                    // ============================================================
+                    // Jolt's init_log_t_rounds() (lines 641-692) materializes the
+                    // combined_val polynomial using the bound prefix checkpoint values.
+                    //
+                    // raf_interleaved = γ * left_prefix + γ² * right_prefix
+                    // raf_identity = γ² * identity_prefix
+                    //
+                    // For each cycle j:
+                    //   if is_interleaved_operands[j]:
+                    //     combined_val[j] = table_eval[j] + raf_interleaved
+                    //   else:
+                    //     combined_val[j] = table_eval[j] + raf_identity
+                    if (lookups_round == 0) {
+                        // Get bound prefix values from RAF decompositions
+                        const left_prefix = left_raf.bound_value;
+                        const right_prefix = right_raf.bound_value;
+                        const identity_prefix = identity_raf.bound_value;
+
+                        // Also compute identity_poly_eval directly from challenges for verification
+                        var computed_identity = F.zero();
+                        for (0..LOOKUPS_LOG_K) |i| {
+                            const r_i = challenges[i];
+                            // identity_poly_eval = Σᵢ rᵢ · 2^(LOG_K-1-i)
+                            // Use field pow2 to avoid overflow
+                            const power = LOOKUPS_LOG_K - 1 - i;
+                            const two_power = if (power < 64) F.fromU64(@as(u64, 1) << @intCast(power)) else blk: {
+                                // Handle power >= 64
+                                const two_pow_64 = F.fromBytes(&[_]u8{
+                                    0, 0, 0, 0, 0, 0, 0, 0,
+                                    1, 0, 0, 0, 0, 0, 0, 0,
+                                    0, 0, 0, 0, 0, 0, 0, 0,
+                                    0, 0, 0, 0, 0, 0, 0, 0,
+                                });
+                                var result = two_pow_64;
+                                var remaining = power - 64;
+                                while (remaining >= 64) {
+                                    result = result.mul(two_pow_64);
+                                    remaining -= 64;
+                                }
+                                if (remaining > 0) {
+                                    result = result.mul(F.fromU64(@as(u64, 1) << @intCast(remaining)));
+                                }
+                                break :blk result;
+                            };
+                            computed_identity = computed_identity.add(r_i.mul(two_power));
+                        }
+
+                        // Also compute left/right operand evals directly from challenges for verification
+                        var computed_left = F.zero();
+                        var computed_right = F.zero();
+                        // left_operand = Σ r_{2i} · 2^(LOG_K/2-1-i) for i=0..LOG_K/2-1
+                        // right_operand = Σ r_{2i+1} · 2^(LOG_K/2-1-i) for i=0..LOG_K/2-1
+                        const half_k = LOOKUPS_LOG_K / 2;
+                        for (0..half_k) |i| {
+                            const r_left = challenges[2 * i]; // even indices
+                            const r_right = challenges[2 * i + 1]; // odd indices
+                            const power = half_k - 1 - i;
+                            const two_power = if (power < 64) F.fromU64(@as(u64, 1) << @intCast(power)) else blk: {
+                                const two_pow_64 = F.fromBytes(&[_]u8{
+                                    0, 0, 0, 0, 0, 0, 0, 0,
+                                    1, 0, 0, 0, 0, 0, 0, 0,
+                                    0, 0, 0, 0, 0, 0, 0, 0,
+                                    0, 0, 0, 0, 0, 0, 0, 0,
+                                });
+                                var result = two_pow_64;
+                                var remaining = power - 64;
+                                while (remaining >= 64) {
+                                    result = result.mul(two_pow_64);
+                                    remaining -= 64;
+                                }
+                                if (remaining > 0) {
+                                    result = result.mul(F.fromU64(@as(u64, 1) << @intCast(remaining)));
+                                }
+                                break :blk result;
+                            };
+                            computed_left = computed_left.add(r_left.mul(two_power));
+                            computed_right = computed_right.add(r_right.mul(two_power));
+                        }
+
+                        std.debug.print("[STAGE5 REMATERIALIZE] Verification:\n", .{});
+                        std.debug.print("  computed_identity (from challenges) = {x}\n", .{computed_identity.toBytesBE()[16..32].*});
+                        std.debug.print("  identity_prefix (from bound_value) = {x}\n", .{identity_prefix.toBytesBE()[16..32].*});
+                        std.debug.print("  identity match = {}\n", .{computed_identity.eql(identity_prefix)});
+                        std.debug.print("  computed_left (from challenges) = {x}\n", .{computed_left.toBytesBE()[16..32].*});
+                        std.debug.print("  left_prefix (from bound_value) = {x}\n", .{left_prefix.toBytesBE()[16..32].*});
+                        std.debug.print("  left match = {}\n", .{computed_left.eql(left_prefix)});
+                        std.debug.print("  computed_right (from challenges) = {x}\n", .{computed_right.toBytesBE()[16..32].*});
+                        std.debug.print("  right_prefix (from bound_value) = {x}\n", .{right_prefix.toBytesBE()[16..32].*});
+                        std.debug.print("  right match = {}\n", .{computed_right.eql(right_prefix)});
+
+                        // Print first few challenges to compare with Jolt
+                        std.debug.print("  First 4 challenges (to compare with Jolt):\n", .{});
+                        for (0..4) |i| {
+                            std.debug.print("    challenges[{}] = {x}\n", .{ i, challenges[i].toBytesBE()[16..32].* });
+                        }
+
+                        // Compute RAF scalar values
+                        const raf_interleaved = gamma_raf.mul(left_prefix).add(gamma_raf2.mul(right_prefix));
+                        const raf_identity = gamma_raf2.mul(identity_prefix);
+
+                        std.debug.print("[STAGE5 REMATERIALIZE] round=128, left_prefix={x}, right_prefix={x}, identity_prefix={x}\n", .{
+                            left_prefix.toBytesBE()[16..32].*,
+                            right_prefix.toBytesBE()[16..32].*,
+                            identity_prefix.toBytesBE()[16..32].*,
+                        });
+                        std.debug.print("[STAGE5 REMATERIALIZE] raf_interleaved={x}, raf_identity={x}\n", .{
+                            raf_interleaved.toBytesBE()[16..32].*,
+                            raf_identity.toBytesBE()[16..32].*,
+                        });
+
+                        // Rematerialize combined_vals using the correct RAF values per cycle
+                        // NOTE: We use the lookup_output values that were already computed,
+                        // but replace the RAF contribution based on cycle type
+                        for (0..T) |j| {
+                            if (j >= trace_len) continue;
+
+                            const step = trace.steps.items[j];
+                            if (step.is_noop) continue;
+
+                            const instr = step.instruction;
+                            const opcode = instr & 0x7f;
+                            const funct3: u3 = @truncate((instr >> 12) & 0x7);
+                            const funct7: u7 = @truncate(instr >> 25);
+
+                            // Compute lookup_output (same as before)
+                            var lookup_output: F = F.zero();
+                            switch (opcode) {
+                                0x6f => { // JAL
+                                    const imm20 = ((@as(u32, instr >> 31) & 1) << 19) |
+                                        ((@as(u32, instr >> 12) & 0xFF) << 11) |
+                                        ((@as(u32, instr >> 20) & 1) << 10) |
+                                        ((@as(u32, instr >> 21) & 0x3FF));
+                                    const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm20 << 12)) >> 11);
+                                    const imm_u64: u64 = @bitCast(imm_signed);
+                                    lookup_output = F.fromU64(step.pc +% imm_u64);
+                                },
+                                0x67 => { // JALR
+                                    const imm12_raw: u32 = @truncate(instr >> 20);
+                                    const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
+                                    const imm_u64: u64 = @bitCast(imm_signed);
+                                    lookup_output = F.fromU64((step.rs1_value +% imm_u64) & ~@as(u64, 1));
+                                },
+                                0x63 => { // Branch
+                                    const result: u64 = switch (funct3) {
+                                        0x0 => if (step.rs1_value == step.rs2_value) 1 else 0,
+                                        0x1 => if (step.rs1_value != step.rs2_value) 1 else 0,
+                                        0x4 => if (@as(i64, @bitCast(step.rs1_value)) < @as(i64, @bitCast(step.rs2_value))) 1 else 0,
+                                        0x5 => if (@as(i64, @bitCast(step.rs1_value)) >= @as(i64, @bitCast(step.rs2_value))) 1 else 0,
+                                        0x6 => if (step.rs1_value < step.rs2_value) 1 else 0,
+                                        0x7 => if (step.rs1_value >= step.rs2_value) 1 else 0,
+                                        else => 0,
+                                    };
+                                    lookup_output = F.fromU64(result);
+                                },
+                                else => {
+                                    lookup_output = F.fromU64(step.rd_value);
+                                },
+                            }
+
+                            // Determine if this cycle uses interleaved operands
+                            const is_add_operands: bool = switch (opcode) {
+                                0x33 => (funct3 == 0) and (funct7 == 0), // ADD
+                                0x13 => (funct3 == 0), // ADDI
+                                0x1b => (funct3 == 0), // ADDIW
+                                0x3b => (funct3 == 0) and (funct7 == 0), // ADDW
+                                0x37, 0x17, 0x6f, 0x67, 0x03, 0x23 => true, // LUI, AUIPC, JAL, JALR, Load, Store
+                                else => false,
+                            };
+                            const is_interleaved = !is_add_operands;
+
+                            // Rematerialize combined_val with correct RAF contribution
+                            if (is_interleaved) {
+                                lookups_combined_vals[j] = lookup_output.add(raf_interleaved);
+                            } else {
+                                lookups_combined_vals[j] = lookup_output.add(raf_identity);
+                            }
+                        }
+
+                        // Debug: print first 5 rematerialized values
+                        std.debug.print("[STAGE5 REMATERIALIZE] First 5 combined_vals after rematerialization:\n", .{});
+                        for (0..@min(5, trace_len)) |j| {
+                            std.debug.print("  j={}: combined_val={x}, is_identity_path={}\n", .{
+                                j,
+                                lookups_combined_vals[j].toBytesBE()[24..32].*,
+                                cycle_is_identity_path[j],
+                            });
+                        }
+                    }
                     const current_half_size = lookups_eq_evals.len >> @intCast(lookups_round + 1);
 
                     // Get r_round for this cycle variable (LowToHigh binding: last element first)

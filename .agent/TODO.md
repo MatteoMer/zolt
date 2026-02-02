@@ -1,43 +1,91 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: IN PROGRESS - Stage 5 Sumcheck Output Claim Mismatch
+## Status: IN PROGRESS - Stage 5 RAF/Operand Evaluation Mismatch
 
-## Session 109 Summary
+## Session 111 Summary
 
 ### Progress Made
-The Stage 5 sumcheck loop now completes all 136 rounds! The proof generation finishes successfully but verification still fails.
+
+1. **Fixed integer overflow issues in prefix MLE functions:**
+   - Added `fieldPow2` function to handle 2^exp where exp >= 64
+   - Updated `operandPrefixEvals`, `identityPrefixEvals` in prefix_suffix_prover.zig
+   - Updated `signExtensionPrefixMle` and `signExtensionUpdateCheckpoint` in prefixes.zig
+
+2. **Fixed RafDecomposition phase transition bug:**
+   - Added `resetForPhase` method to restore Q_size to initial value (256)
+   - Q_size was shrinking to 1 after each phase (8 rounds of binding)
+   - This caused crashes at phase 9 when initQRaf tried to access Q arrays
+
+3. **Proof generation now completes successfully:**
+   - All 16 phases complete
+   - All 128 address rounds + 8 cycle rounds complete
+   - Proof serialization works
+
+4. **Verified RAF bound_value computation is correct:**
+   - Added debug output comparing computed operand/identity evals from challenges
+   - `left_prefix`, `right_prefix`, `identity_prefix` all match computed values from challenges
+   - Formula: `left = Σᵢ r[2i] · 2^(63-i)` for i=0..63
 
 ### Current Issue
-Stage 5 sumcheck verification fails because the output_claim doesn't match the expected_claim:
+
+**Stage 5 sumcheck output_claim doesn't match expected_claim.**
+
+From Jolt verification:
 ```
-output_claim:   [eb, 1c, 1a, 7c, 50, c5, 1b, 64, dd, 58, 39, 41, a8, d8, 94, 28, ...]
-expected_claim: [76, 19, 2f, 98, 45, 38, 7b, 09, b3, 3c, 7f, 8b, b0, ac, cd, b0, ...]
+output_claim:   [eb, 1c, 1a, 7c, ...]
+expected_claim: [76, 19, 2f, 98, ...]
 ```
 
-The expected_claim is computed by Jolt's verifier using:
+The expected_claim formula is:
 ```
-expected = batch0*inst0_claim + batch1*inst1_claim + batch2*inst2_claim
-
-where inst2_claim (InstructionReadRaf) =
-    eq(r_reduction, r_cycle_prime) × Π_i ra_claim[i] × (val_claim + γ × raf_claim)
+expected = eq_eval * ra_claim * (val_claim + γ * raf_claim)
+where raf_claim = (1-raf_flag)*(left_op + γ*right_op) + raf_flag*γ*identity
 ```
 
-### Debug Values from Jolt Verification
+**Key Finding:** The operand/identity polynomial evaluations differ between Zolt and Jolt:
+- Zolt's `left_prefix`: `7287e555d5caa2d03f9e811705385608`
+- Jolt's `left_operand_eval`: `1bd2a26586...` (completely different)
+
+**Root Cause Analysis:**
+The operand polynomial evaluations are computed from the Stage 5 sumcheck challenges:
 ```
-Instance 2 (InstructionReadRaf):
-  left_operand_eval:  [1b, d2, a2, 65, ...]
-  right_operand_eval: [82, 6f, 6c, 13, ...]
-  identity_poly_eval: [c7, 09, e1, 93, ...]
-  gamma:              [5a, b9, a0, 12, ...]
-  eq_eval_r_reduction: [03, c3, dc, 21, ...]
-  ra_claim:           [66, f1, ef, 21, ...]
-  raf_flag_claim:     [b9, e9, 0d, 00, ...]
-  raf_claim:          [35, 15, 48, 0b, ...]
-  val_claim:          [ed, 65, fd, 2d, ...]
-  final_result:       [59, 7c, c0, 15, ...]
+left_operand_eval = Σᵢ challenges[2i] · 2^(63-i)
 ```
 
-### Key Components Implemented
+Both Zolt and Jolt use the same formula, but the **challenges are different**.
+
+This means the transcript states have diverged somewhere before Stage 5. The sumcheck verification passes for all 136 rounds because p(0)+p(1)=claim holds, but the underlying challenges are different because the polynomial coefficients we send don't match what Jolt expects.
+
+### Debug Output
+
+Zolt's first 4 challenges:
+```
+challenges[0] = a5d819c34e687fc91d6178237b565315
+challenges[1] = db0ab34a3cbd5d94d904ca0182db69f4
+challenges[2] = ba3c74f02f939d8fb9aab3d15183396d
+challenges[3] = d7e1bec3e58b449a822ec1fb513857a1
+```
+
+### Next Steps
+
+1. **Debug transcript divergence:**
+   - Add more detailed transcript state logging
+   - Compare transcript states at the START of Stage 5 between Zolt and Jolt
+   - Identify exactly where the transcripts diverge
+
+2. **Check polynomial coefficient output:**
+   - Verify the sumcheck polynomial coefficients sent during address rounds
+   - The coefficients determine the transcript state and thus the challenges
+
+3. **Verify suffix MLE values:**
+   - The address round polynomials use suffix MLE values
+   - If these are wrong, the coefficients will be wrong
+
+4. **Check table value computation:**
+   - The `val_claim` contribution comes from lookup table evaluations
+   - Verify the table MLE values are computed correctly
+
+### Key Components
 
 1. **Prefix-Suffix Decomposition** (`src/zkvm/lookup_table/`)
    - All 46 prefix types implemented in `prefixes.zig`
@@ -53,26 +101,6 @@ Instance 2 (InstructionReadRaf):
    - Phase transitions every 8 rounds (16 phases total)
    - Expanding table condensation working
 
-### Investigation Areas
-
-The polynomial produced by Zolt's sumcheck doesn't sum to the correct value. Possible issues:
-
-1. **Prefix MLE computation errors**
-   - The prefix checkpoint updates may not match Jolt's formula
-   - The prefix_mle evaluation at c=0 and c=2 may differ
-
-2. **Suffix polynomial initialization**
-   - The Q[suffix_idx][prefix_idx] accumulation may use wrong bits
-   - Suffix MLE values may be computed incorrectly
-
-3. **Phase transition logic**
-   - The condenseUEvals function may not correctly extract k_bound
-   - The expanding table multiplication may be wrong
-
-4. **RAF decomposition**
-   - The left/right operand interleaving may differ from Jolt
-   - The identity path vs operand path split may be incorrect
-
 ### Test Commands
 ```bash
 # Build
@@ -85,19 +113,3 @@ timeout 600 ./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o log
 cd /home/vivado/projects/jolt
 cargo test --package jolt-core --features zolt-debug test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
-
-### Next Steps
-
-1. **Add round-by-round comparison logging**
-   - Export each round's polynomial coefficients from Zolt
-   - Compare with Jolt's expected round polynomials
-
-2. **Verify prefix MLE implementations one by one**
-   - Start with the simple prefixes (Eq, LowerWord) used by fibonacci
-   - Add unit tests comparing Zolt vs Jolt prefix evaluations
-
-3. **Verify suffix MLE implementations**
-   - Check that suffix_mle values match for the same lookup indices
-
-4. **Debug the opening claims computation**
-   - The InstructionRa, LookupTableFlag, InstructionRafFlag claims

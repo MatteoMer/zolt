@@ -29,6 +29,40 @@ pub const NUM_TABLES: usize = 41;
 /// Maximum number of suffixes any table can have (ValidSignedRemainderTable has 5)
 pub const MAX_SUFFIXES_PER_TABLE: usize = 5;
 
+/// Compute 2^exp as a field element
+/// Handles large exponents (up to 128) that don't fit in u64
+fn fieldPow2(comptime F: type, exp: usize) F {
+    if (exp == 0) return F.one();
+
+    // For small exponents, use direct computation
+    if (exp < 64) {
+        return F.fromU64(@as(u64, 1) << @intCast(exp));
+    }
+
+    // For large exponents, use repeated squaring
+    // 2^exp = 2^64 * 2^(exp-64)
+    const two_pow_64 = F.fromU64(1).sub(F.fromU64(1)).add(F.fromBytes(&[_]u8{
+        0, 0, 0, 0, 0, 0, 0, 0, // Lower 8 bytes = 0
+        1, 0, 0, 0, 0, 0, 0, 0, // 2^64 in little-endian
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+    }));
+
+    var result = two_pow_64;
+    var remaining = exp - 64;
+
+    while (remaining >= 64) {
+        result = result.mul(two_pow_64);
+        remaining -= 64;
+    }
+
+    if (remaining > 0) {
+        result = result.mul(F.fromU64(@as(u64, 1) << @intCast(remaining)));
+    }
+
+    return result;
+}
+
 /// LOG_K = 128 for RV64 (2*XLEN for interleaved operands)
 pub const LOG_K: usize = 128;
 
@@ -817,6 +851,19 @@ pub fn RafDecomposition(comptime F: type) type {
             @memset(self.Q[1], F.zero());
         }
 
+        /// Reset for a new phase: restore Q_size to initial and reset accumulators
+        /// Call this at phase transitions before calling initQRaf
+        /// NOTE: Preserves num_bound_vars, round, and bound_value which track the prefix state
+        pub fn resetForPhase(self: *Self, new_phase: usize, initial_size: usize) void {
+            self.Q_size = initial_size;
+            self.phase = new_phase;
+            // Zero out all allocated elements, not just Q_size
+            @memset(self.Q[0][0..initial_size], F.zero());
+            @memset(self.Q[1][0..initial_size], F.zero());
+            // NOTE: Do NOT reset num_bound_vars, round, or bound_value!
+            // These track the accumulated prefix state across phases.
+        }
+
         /// Should this polynomial bind on the current round?
         fn shouldBind(self: *const Self) bool {
             const is_even = (self.num_bound_vars % 2 == 0);
@@ -910,18 +957,19 @@ pub fn RafDecomposition(comptime F: type) type {
                 // where base = bound_value * 2^unbound_pairs + operand_bits
                 // and m = 2^(unbound_pairs - 1)
                 const unbound_pairs = remaining / 2;
-                const scale = @as(u64, 1) << @intCast(unbound_pairs);
-                const m = @as(u64, 1) << @intCast(unbound_pairs - 1);
+                // Use field element arithmetic to handle large scales (unbound_pairs can be up to 64)
+                const scale = fieldPow2(F, unbound_pairs);
+                const m = fieldPow2(F, unbound_pairs - 1);
 
-                const base = self.bound_value.mul(F.fromU64(scale)).add(F.fromU64(operand_bits));
+                const base = self.bound_value.mul(scale).add(F.fromU64(operand_bits));
                 const eval_0 = base;
-                const eval_2 = base.add(F.fromU64(2 * m));
+                const eval_2 = base.add(m.add(m)); // 2 * m using field arithmetic
                 return .{ eval_0, eval_2 };
             } else {
                 // Constant polynomial (not binding or remaining=0)
                 const unbound_pairs = remaining / 2;
-                const scale = if (unbound_pairs > 0) @as(u64, 1) << @intCast(unbound_pairs) else 1;
-                const base = self.bound_value.mul(F.fromU64(scale)).add(F.fromU64(operand_bits));
+                const scale = if (unbound_pairs > 0) fieldPow2(F, unbound_pairs) else F.one();
+                const base = self.bound_value.mul(scale).add(F.fromU64(operand_bits));
                 return .{ base, base }; // P(0) = P(2) = base
             }
         }
@@ -931,15 +979,16 @@ pub fn RafDecomposition(comptime F: type) type {
             // P(c) = bound_value * 2^remaining + b + c * m
             // where m = 2^(remaining - 1)
             if (remaining > 0) {
-                const scale = @as(u64, 1) << @intCast(remaining);
-                const m = @as(u64, 1) << @intCast(remaining - 1);
-                const base = self.bound_value.mul(F.fromU64(scale)).add(F.fromU64(b));
+                // Use field element arithmetic to handle large scales (remaining can be up to 128)
+                const scale = fieldPow2(F, remaining);
+                const m = fieldPow2(F, remaining - 1);
+                const base = self.bound_value.mul(scale).add(F.fromU64(@intCast(b)));
                 const eval_0 = base;
-                const eval_2 = base.add(F.fromU64(2 * m));
+                const eval_2 = base.add(m.add(m)); // 2 * m using field arithmetic
                 return .{ eval_0, eval_2 };
             } else {
                 // All variables bound
-                const base = self.bound_value.add(F.fromU64(b));
+                const base = self.bound_value.add(F.fromU64(@intCast(b)));
                 return .{ base, base };
             }
         }

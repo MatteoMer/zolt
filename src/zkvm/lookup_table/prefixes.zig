@@ -15,6 +15,40 @@ const Allocator = std.mem.Allocator;
 
 /// LOG_K = 128 for RV64 (2*XLEN for interleaved operands)
 pub const LOG_K: usize = 128;
+
+/// Compute 2^exp as a field element
+/// Handles large exponents (up to 128) that don't fit in u64
+fn fieldPow2(comptime F: type, exp: usize) F {
+    if (exp == 0) return F.one();
+
+    // For small exponents, use direct computation
+    if (exp < 64) {
+        return F.fromU64(@as(u64, 1) << @intCast(exp));
+    }
+
+    // For large exponents, use repeated squaring
+    // 2^exp = 2^64 * 2^(exp-64)
+    const two_pow_64 = F.fromBytes(&[_]u8{
+        0, 0, 0, 0, 0, 0, 0, 0, // Lower 8 bytes = 0
+        1, 0, 0, 0, 0, 0, 0, 0, // 2^64 in little-endian
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+    });
+
+    var result = two_pow_64;
+    var remaining = exp - 64;
+
+    while (remaining >= 64) {
+        result = result.mul(two_pow_64);
+        remaining -= 64;
+    }
+
+    if (remaining > 0) {
+        result = result.mul(F.fromU64(@as(u64, 1) << @intCast(remaining)));
+    }
+
+    return result;
+}
 /// XLEN = 64 for RV64
 pub const XLEN: usize = 64;
 
@@ -1679,7 +1713,9 @@ fn signExtensionPrefixMle(
         var i: usize = 0;
         while (i < y_len) : (i += 1) {
             const y_i = (y_val >> @intCast(y_len - 1 - i)) & 1;
-            result = result.add(F.fromU64((1 - y_i) << @intCast(index)));
+            if (y_i == 0) {
+                result = result.add(fieldPow2(F, index));
+            }
             index += 1;
         }
         return result.mul(sign_bit);
@@ -1693,7 +1729,9 @@ fn signExtensionPrefixMle(
         var i: usize = 0;
         while (i < y_len) : (i += 1) {
             const y_i = (y_val >> @intCast(y_len - 1 - i)) & 1;
-            result = result.add(F.fromU64((1 - y_i) << @intCast(index)));
+            if (y_i == 0) {
+                result = result.add(fieldPow2(F, index));
+            }
             index += 1;
         }
         return result.mul(sign_bit);
@@ -1703,11 +1741,11 @@ fn signExtensionPrefixMle(
     var result = checkpoints[@intFromEnum(Prefixes.SignExtension)] orelse F.zero();
 
     if (r_x != null) {
-        result = result.add(F.fromU64(@as(u64, 1) << @intCast(j / 2)).mul(F.one().sub(F.fromU64(@as(u64, c)))));
+        result = result.add(fieldPow2(F, j / 2).mul(F.one().sub(F.fromU64(@as(u64, c)))));
     } else {
         const y_msb = b.popMsb();
         if (y_msb == 0) {
-            result = result.add(F.fromU64(@as(u64, 1) << @intCast(j / 2)));
+            result = result.add(fieldPow2(F, j / 2));
         }
     }
     const y_val = b.uninterleave().right;
@@ -1718,7 +1756,7 @@ fn signExtensionPrefixMle(
         index += 1;
         const y_i = (y_val >> @intCast(y_len - 1 - i)) & 1;
         if (y_i == 0) {
-            result = result.add(F.fromU64(@as(u64, 1) << @intCast(index)));
+            result = result.add(fieldPow2(F, index));
         }
     }
 
@@ -1737,7 +1775,7 @@ fn signExtensionUpdateCheckpoint(
         return null;
     }
     var updated = checkpoints[@intFromEnum(Prefixes.SignExtension)] orelse F.zero();
-    updated = updated.add(F.fromU64(@as(u64, 1) << @intCast(j / 2)).mul(F.one().sub(r_y)));
+    updated = updated.add(fieldPow2(F, j / 2).mul(F.one().sub(r_y)));
     if (j == 2 * XLEN - 1) {
         updated = updated.mul(checkpoints[@intFromEnum(Prefixes.LeftOperandMsb)].?);
     }

@@ -24,6 +24,7 @@ const OpeningClaims = jolt_types.OpeningClaims;
 const OpeningId = jolt_types.OpeningId;
 const tracer = @import("../../tracer/mod.zig");
 const ExecutionTrace = tracer.ExecutionTrace;
+const ram = @import("../ram/mod.zig");
 
 // Import prefix-suffix decomposition modules
 const lookup_table_mod = @import("../lookup_table/mod.zig");
@@ -366,9 +367,16 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             gamma_lookups_raf: F, // gamma for LookupsReadRaf (Instance 2)
             lookups_ra_virtual_log_k_chunk: usize,
             trace: *const ExecutionTrace,
+            memory_trace: ?*const ram.MemoryTrace, // RAM trace for ram_ra_claim computation
             r_address_regs: []const F, // LOG_K=7 elements from Stage 4 RegistersRWC
             r_cycle_regs: []const F, // n_cycle_vars elements from Stage 4 RegistersRWC
             r_reduction: []const F, // n_cycle_vars elements from Stage 3 InstructionClaimReduction (BIG_ENDIAN)
+            // RamRaClaimReduction opening points (all BIG_ENDIAN):
+            r_address_raf: []const F, // r_address_1 from RamRafEvaluation (log_ram_k elements)
+            r_address_rw: []const F, // r_address_2 from RamReadWriteChecking (log_ram_k elements)
+            r_cycle_raf: []const F, // r_cycle_raf from SpartanOuter (n_cycle_vars elements)
+            r_cycle_rw: []const F, // r_cycle_rw from RamReadWriteChecking (n_cycle_vars elements)
+            r_cycle_val: []const F, // r_cycle_val from RamValEvaluation (n_cycle_vars elements)
         ) !Stage5Result(F) {
             const regs_val_num_rounds = n_cycle_vars;
             const ram_ra_num_rounds = log_ram_k + n_cycle_vars;
@@ -381,6 +389,15 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
             std.debug.print("[STAGE5] Configuration with trace: regs={}, ram_ra={}, lookups={}, max={}\n", .{
                 regs_val_num_rounds, ram_ra_num_rounds, lookups_num_rounds, max_num_rounds,
+            });
+
+            // Debug: print RamRaClaimReduction opening points (use the params to suppress warnings)
+            std.debug.print("[STAGE5] RamRaClaimReduction opening points:\n", .{});
+            std.debug.print("  r_address_raf.len = {}, r_address_rw.len = {}\n", .{ r_address_raf.len, r_address_rw.len });
+            std.debug.print("  r_cycle_raf.len = {}, r_cycle_rw.len = {}, r_cycle_val.len = {}\n", .{
+                r_cycle_raf.len,
+                r_cycle_rw.len,
+                r_cycle_val.len,
             });
 
             // Get input claims from accumulator
@@ -2131,11 +2148,79 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             std.debug.print("  lookups_output_claim = {any}\n", .{lookups_output_claim.toBytesBE()[0..8]});
             std.debug.print("  current_batched_claim = {any}\n", .{current_batched_claim.toBytesBE()[0..8]});
 
+            // ============================================================
+            // COMPUTE ram_ra_claim FROM RAM TRACE
+            // ============================================================
+            // The RamRaClaimReduction sumcheck proves:
+            //   Σ_{k,c} eq_combined(k,c) * ra(k,c) = input_claim
+            // where ra(k,c) = 1 iff address at cycle c equals k.
+            //
+            // After the sumcheck binds all variables, we get:
+            //   ram_ra_claim = ra(r_address_reduced, r_cycle_reduced)
+            // This equals the sum of eq(addr, r_addr) * eq(cycle, r_cycle)
+            // over all (addr, cycle) pairs in the RAM trace.
+            //
+            // For RamRaClaimReduction (Instance 1, 24 rounds = 16 address + 8 cycle):
+            // - Address challenges: challenges[112..127] (16 values)
+            // - Cycle challenges: challenges[128..135] (8 values)
+            // These are reversed to get big-endian order for eq computation.
+            const ram_ra_start = max_num_rounds - ram_ra_num_rounds; // 136 - 24 = 112
+            const ram_addr_challenges = challenges[ram_ra_start .. ram_ra_start + log_ram_k];
+            const ram_cycle_challenges = challenges[ram_ra_start + log_ram_k .. ram_ra_start + ram_ra_num_rounds];
+
+            // Reverse to get big-endian order
+            var r_ram_addr_be = try self.allocator.alloc(F, log_ram_k);
+            defer self.allocator.free(r_ram_addr_be);
+            for (0..log_ram_k) |i| {
+                r_ram_addr_be[i] = ram_addr_challenges[log_ram_k - 1 - i];
+            }
+
+            var r_ram_cycle_be = try self.allocator.alloc(F, n_cycle_vars);
+            defer self.allocator.free(r_ram_cycle_be);
+            for (0..n_cycle_vars) |i| {
+                r_ram_cycle_be[i] = ram_cycle_challenges[n_cycle_vars - 1 - i];
+            }
+
+            // Compute ram_ra_claim = Σ_{(addr, cycle) in RAM_trace} eq(addr, r_addr) * eq(cycle, r_cycle)
+            // Use the dedicated MemoryTrace which tracks actual RAM accesses (including synthetic termination writes)
+            var ram_ra_claim = F.zero();
+            if (memory_trace) |mem_trace| {
+                std.debug.print("[STAGE5 RAM_RA] Using MemoryTrace with {} accesses\n", .{mem_trace.accesses.items.len});
+                for (mem_trace.accesses.items) |access| {
+                    // Only consider WRITE operations for ra claim
+                    // (Jolt's RAM trace records both reads and writes, but ra represents where values changed)
+                    if (access.op == .Write) {
+                        const addr = access.address;
+                        const cycle = access.timestamp;
+
+                        // Compute eq(addr, r_ram_addr_be) for the address
+                        // Address is log_ram_k bits (16 bits = 65536 addresses)
+                        const eq_addr = computeEqAtIndex(r_ram_addr_be, @intCast(addr));
+
+                        // Compute eq(cycle, r_ram_cycle_be) for the cycle
+                        const eq_cycle = computeEqAtIndex(r_ram_cycle_be, @intCast(cycle));
+
+                        // Accumulate: ra(k,c) = 1 for this (addr, cycle) pair
+                        ram_ra_claim = ram_ra_claim.add(eq_addr.mul(eq_cycle));
+
+                        std.debug.print("[STAGE5 RAM_RA] WRITE addr=0x{x}, cycle={}, eq_addr={x}, eq_cycle={x}\n", .{
+                            addr,
+                            cycle,
+                            eq_addr.toBytesBE()[24..32].*,
+                            eq_cycle.toBytesBE()[24..32].*,
+                        });
+                    }
+                }
+            } else {
+                std.debug.print("[STAGE5 RAM_RA] No memory_trace available, ram_ra_claim = 0\n", .{});
+            }
+            std.debug.print("[STAGE5 RAM_RA] Computed ram_ra_claim = {x}\n", .{ram_ra_claim.toBytesBE()});
+
             return Stage5Result(F){
                 .challenges = challenges,
                 .regs_val_inc_claim = regs_val_inc_claim,
                 .regs_val_wa_claim = regs_val_wa_claim,
-                .ram_ra_claim = F.zero(),
+                .ram_ra_claim = ram_ra_claim,
                 .lookups_table_flags = table_flags,
                 .lookups_ra_chunks = ra_chunks,
                 .lookups_raf_flag = computed_raf_flag,

@@ -1647,6 +1647,7 @@ pub fn ProofConverter(comptime F: type) type {
             // Variables to store Stage 4 opening point for Stage 5
             var stage4_regs_r_address: ?[]F = null;
             var stage4_regs_r_cycle: ?[]F = null;
+            var stage4_r_cycle_val: ?[]F = null; // r_cycle_val from RamValEvaluation (for RamRaClaimReduction)
             // r_reduction from Stage 2 InstructionClaimReduction (for LookupsReadRaf in Stage 5)
             // CRITICAL: InstructionClaimReduction is in Stage 2, NOT Stage 3!
             // The challenges are the last n_cycle_vars challenges from Stage 2 (Instance 4).
@@ -1654,6 +1655,7 @@ pub fn ProofConverter(comptime F: type) type {
             defer {
                 if (stage4_regs_r_address) |arr| self.allocator.free(arr);
                 if (stage4_regs_r_cycle) |arr| self.allocator.free(arr);
+                if (stage4_r_cycle_val) |arr| self.allocator.free(arr);
                 if (r_reduction_be) |arr| self.allocator.free(arr);
             }
 
@@ -2722,6 +2724,20 @@ pub fn ProofConverter(comptime F: type) type {
                 std.debug.print("[STAGE4 -> STAGE5] Saved opening point for RegistersValEvaluation:\n", .{});
                 std.debug.print("  r_address[0] = {any}\n", .{stage4_regs_r_address.?[0].toBytesBE()[0..8]});
                 std.debug.print("  r_cycle[0] = {any}\n", .{stage4_regs_r_cycle.?[0].toBytesBE()[0..8]});
+
+                // Also save r_cycle_val for RamRaClaimReduction (ValEvaluation starts at round 7)
+                // r_cycle_val = reverse(challenges[7..15]) for BIG_ENDIAN order
+                stage4_r_cycle_val = try self.allocator.alloc(F, n_cycle_vars);
+                const val_eval_start: usize = 7; // ValEvaluation starts at round 7
+                for (0..n_cycle_vars) |i| {
+                    const src_idx = val_eval_start + i;
+                    if (src_idx < stage4_r_sumcheck.len) {
+                        stage4_r_cycle_val.?[n_cycle_vars - 1 - i] = stage4_r_sumcheck[src_idx];
+                    } else {
+                        stage4_r_cycle_val.?[n_cycle_vars - 1 - i] = F.zero();
+                    }
+                }
+                std.debug.print("[STAGE4 -> STAGE5] Saved r_cycle_val for RamRaClaimReduction\n", .{});
             } // end stage4_block
 
             // Stage 5: RegistersValEvaluation, RamRaClaimReduction, LookupsReadRaf
@@ -2758,9 +2774,16 @@ pub fn ProofConverter(comptime F: type) type {
                     gamma_lookups_raf,
                     config.lookups_ra_virtual_log_k_chunk,
                     config.execution_trace.?,
+                    config.memory_trace, // RAM trace for ram_ra_claim computation
                     stage4_regs_r_address.?,
                     stage4_regs_r_cycle.?,
                     r_reduction_be.?, // Stage 3 challenges in BIG_ENDIAN for LookupsReadRaf eq computation
+                    // RamRaClaimReduction opening points:
+                    stage2_result.r_address_raf, // r_address_1 from RamRafEvaluation
+                    stage2_result.r_address_rw, // r_address_2 from RamReadWriteChecking
+                    r_spartan_original, // r_cycle_raf from SpartanOuter (Stage 1)
+                    stage2_result.r_cycle_rw, // r_cycle_rw from RamReadWriteChecking
+                    stage4_r_cycle_val.?, // r_cycle_val from RamValEvaluation (Stage 4)
                 );
             } else {
                 // Fallback to zero prover for programs without trace
@@ -2908,6 +2931,10 @@ pub fn ProofConverter(comptime F: type) type {
             output_val_init_claim: F, // Val_init(r') for RamValInit opening
             /// OutputSumcheck's r_address challenges (big-endian order)
             r_address_raf: []F,
+            /// RWC's r_address challenges (big-endian order) - for RamRaClaimReduction
+            r_address_rw: []F,
+            /// RWC's r_cycle challenges (big-endian order) - for RamRaClaimReduction
+            r_cycle_rw: []F,
             /// Individual RWC opening claims (ra, val, inc)
             rwc_ra_claim: F,
             rwc_val_claim: F,
@@ -2921,6 +2948,8 @@ pub fn ProofConverter(comptime F: type) type {
             pub fn deinit(self: *Stage2Result) void {
                 self.allocator.free(self.challenges);
                 self.allocator.free(self.r_address_raf);
+                self.allocator.free(self.r_address_rw);
+                self.allocator.free(self.r_cycle_rw);
             }
         };
 
@@ -4086,6 +4115,42 @@ pub fn ProofConverter(comptime F: type) type {
             std.debug.print("[ZOLT] STAGE2: output_val_final_claim (from prover) = {any}\n", .{output_val_final.toBytesBE()});
             std.debug.print("[ZOLT] STAGE2: output_val_init_claim (from prover) = {any}\n", .{output_val_init.toBytesBE()});
 
+            // Compute r_address_rw and r_cycle_rw from RWC challenges for RamRaClaimReduction
+            // RWC uses 3-phase structure:
+            // - Phase 1: n_cycle_vars cycle variables
+            // - Phase 2: log_ram_k address variables
+            // - Phase 3: 0 remaining variables (for default config)
+            // Opening point = [r_address, r_cycle] in BIG_ENDIAN
+            const phase1_rounds = n_cycle_vars;
+            const phase2_rounds = log_ram_k;
+
+            const r_address_rw = try self.allocator.alloc(F, log_ram_k);
+            const r_cycle_rw = try self.allocator.alloc(F, n_cycle_vars);
+
+            // r_address from phase 2 challenges, reversed to BIG_ENDIAN
+            // Phase 2 challenges are at indices [phase1..phase1+phase2)
+            for (0..phase2_rounds) |i| {
+                const src_idx = phase1_rounds + i;
+                if (src_idx < challenges.items.len) {
+                    r_address_rw[phase2_rounds - 1 - i] = challenges.items[src_idx];
+                } else {
+                    r_address_rw[phase2_rounds - 1 - i] = F.zero();
+                }
+            }
+
+            // r_cycle from phase 1 challenges, reversed to BIG_ENDIAN
+            // Phase 1 challenges are at indices [0..phase1)
+            for (0..phase1_rounds) |i| {
+                if (i < challenges.items.len) {
+                    r_cycle_rw[phase1_rounds - 1 - i] = challenges.items[i];
+                } else {
+                    r_cycle_rw[phase1_rounds - 1 - i] = F.zero();
+                }
+            }
+
+            std.debug.print("[ZOLT] STAGE2: r_address_rw (BIG_ENDIAN) computed, len={}\n", .{r_address_rw.len});
+            std.debug.print("[ZOLT] STAGE2: r_cycle_rw (BIG_ENDIAN) computed, len={}\n", .{r_cycle_rw.len});
+
             return Stage2Result{
                 .factor_evals = factor_evals,
                 .challenges = challenges_copy,
@@ -4096,6 +4161,8 @@ pub fn ProofConverter(comptime F: type) type {
                 .output_val_final_claim = output_val_final,
                 .output_val_init_claim = output_val_init,
                 .r_address_raf = r_address,
+                .r_address_rw = r_address_rw,
+                .r_cycle_rw = r_cycle_rw,
                 .rwc_ra_claim = rwc_ra_claim,
                 .rwc_val_claim = rwc_val_claim,
                 .rwc_inc_claim = rwc_inc_claim,

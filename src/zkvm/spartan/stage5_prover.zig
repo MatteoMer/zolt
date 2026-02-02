@@ -1200,6 +1200,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // Initialize Q polynomials for read-checking
             try suffix_polys.initPhase(0, num_phases, lookups_eq_evals, lookup_indices_u128, cycle_table_indices);
 
+            // Debug: count how many cycles have lookup tables assigned
+            var cycles_with_tables: usize = 0;
+            for (0..T) |jj| {
+                if (cycle_table_indices[jj] >= 0) cycles_with_tables += 1;
+            }
+            std.debug.print("[STAGE5] Cycles with lookup tables: {}/{}\n", .{ cycles_with_tables, T });
+
             // Initialize RAF (Read-Address-Flag) decompositions for left/right/identity
             // These compute: γ*left + γ²*(identity + right)
             var left_raf = try RafDecomposition(F).init(self.allocator, initial_m, log_m, LOOKUPS_LOG_K, .LeftOperand);
@@ -1328,6 +1335,20 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // gamma_raf = γ, gamma_raf2 = γ²
                     const raf_evals = proverMsgRaf(F, &left_raf, &right_raf, &identity_raf, gamma_raf, gamma_raf2);
 
+                    // Debug: print evaluations for first 3 rounds
+                    if (round < 3) {
+                        std.debug.print("[STAGE5 ROUND {} DEBUG] read_checking=[{x}, {x}]\n", .{
+                            round,
+                            read_checking_evals[0].toBytesBE()[16..32].*,
+                            read_checking_evals[1].toBytesBE()[16..32].*,
+                        });
+                        std.debug.print("[STAGE5 ROUND {} DEBUG] raf_evals=[{x}, {x}]\n", .{
+                            round,
+                            raf_evals[0].toBytesBE()[16..32].*,
+                            raf_evals[1].toBytesBE()[16..32].*,
+                        });
+                    }
+
                     // Combined: read_checking + raf
                     const eval_0_inst2 = read_checking_evals[0].add(raf_evals[0]);
                     const eval_2_inst2 = read_checking_evals[1].add(raf_evals[1]);
@@ -1352,6 +1373,20 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     coeffs[0] = uni_poly.coeffs[0]; // c0
                     coeffs[1] = uni_poly.coeffs[1]; // c2
                     coeffs[2] = uni_poly.coeffs[2]; // c3 (= 0 for degree-2)
+
+                    // Debug: print coefficients for first round
+                    if (round == 0) {
+                        std.debug.print("[STAGE5 COEFF ROUND 0] c0 = {x}\n", .{coeffs[0].toBytesBE()});
+                        std.debug.print("[STAGE5 COEFF ROUND 0] c2 = {x}\n", .{coeffs[1].toBytesBE()});
+                        std.debug.print("[STAGE5 COEFF ROUND 0] claim = {x}\n", .{current_batched_claim.toBytesBE()});
+                        std.debug.print("[STAGE5 COEFF ROUND 0] eval_0 = {x}\n", .{eval_0.toBytesBE()});
+                        std.debug.print("[STAGE5 COEFF ROUND 0] eval_2 = {x}\n", .{eval_2.toBytesBE()});
+                        std.debug.print("[STAGE5 COEFF ROUND 0] inst01_p0 = {x}\n", .{combined_poly[0].toBytesBE()});
+                        std.debug.print("[STAGE5 COEFF ROUND 0] inst01_p2 = {x}\n", .{combined_poly[2].toBytesBE()});
+                        std.debug.print("[STAGE5 COEFF ROUND 0] inst2_eval0 = {x}\n", .{eval_0_inst2.toBytesBE()});
+                        std.debug.print("[STAGE5 COEFF ROUND 0] inst2_eval2 = {x}\n", .{eval_2_inst2.toBytesBE()});
+                        std.debug.print("[STAGE5 COEFF ROUND 0] batch2 = {x}\n", .{batch2.toBytesBE()});
+                    }
 
                     try proof.compressed_polys.append(self.allocator, .{
                         .coeffs_except_linear_term = coeffs,
@@ -2532,15 +2567,18 @@ pub fn computeEqPolynomial(comptime F: type, r: []const F, s: []const F) F {
 }
 
 /// Interleave bits of two 64-bit values into a 128-bit value
-/// Result: bit 2i comes from x[i], bit 2i+1 comes from y[i]
-/// This matches Jolt's interleave_bits function used for lookup indices
+/// Matches Jolt's interleave_bits(even_bits, odd_bits):
+///   - x (even_bits) goes to ODD positions (1, 3, 5, ...)
+///   - y (odd_bits) goes to EVEN positions (0, 2, 4, ...)
+/// In Jolt: `interleave_bits(x, y)` returns `(spread(x) << 1) | spread(y)`
 pub fn interleaveBits128(x: u64, y: u64) u128 {
     var result: u128 = 0;
     for (0..64) |i| {
         const xi: u128 = @as(u128, (x >> @intCast(i)) & 1);
         const yi: u128 = @as(u128, (y >> @intCast(i)) & 1);
-        result |= xi << @intCast(2 * i);
-        result |= yi << @intCast(2 * i + 1);
+        // x at odd positions (2i+1), y at even positions (2i) - matches Jolt
+        result |= xi << @intCast(2 * i + 1);
+        result |= yi << @intCast(2 * i);
     }
     return result;
 }

@@ -1,81 +1,82 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: IN PROGRESS - Stage 5 RAF/Operand Evaluation Mismatch
+## Status: IN PROGRESS - Stage 5 Prefix-Suffix Decomposition Mismatch
 
-## Session 112 Summary
+## Session 113 Summary
 
 ### Progress Made
 
-1. **Fixed OperandPolynomial binding parity bug in `operandPrefixEvals`:**
-   - Line 953 was inverted: `if (is_left) !is_even_round else is_even_round`
-   - Should be: `if (is_left) is_even_round else !is_even_round`
-   - This matches Jolt's OperandPolynomial::bind() logic:
-     - LeftOperand binds when num_bound_vars is EVEN
-     - RightOperand binds when num_bound_vars is ODD
+1. **Fixed `interleaveBits128` to match Jolt's convention:**
+   - OLD: x at even positions (0, 2, 4, ...), y at odd positions (1, 3, 5, ...)
+   - NEW: x (left) at ODD positions, y (right) at EVEN positions
+   - This matches Jolt's `interleave_bits(even_bits, odd_bits)` which does `(spread(x) << 1) | spread(y)`
 
-2. **Verified understanding of Jolt's operand evaluation formulas:**
-   - `identity_poly_eval = Σ(i=0 to 127) r_address[i] * 2^(127-i)`
-   - `left_operand_eval = Σ(i=0 to 63) r_address[2i] * 2^(63-i)` (even indices)
-   - `right_operand_eval = Σ(i=0 to 63) r_address[2i+1] * 2^(63-i)` (odd indices)
+2. **Verified suffix_len calculation is correct:**
+   - Phase 0: suffix_len = 128 - (0+1)*8 = 120
+   - This matches Jolt's `k.split((phases - 1 - phase) * log_m)` = k.split(120)
 
-### Current Issue
+3. **Verified initial claims match:**
+   - Zolt Stage 5 initial batched claim: `990578d0e96c66a0a2c80e472d900a1cb2dac0db537eaae82e1b48bc1760fb00`
+   - Jolt Stage 5 initial claim: same value
+   - Claims are identical, so the issue is in polynomial computation
 
-**Stage 5 sumcheck verification still fails after the binding parity fix.**
+4. **Identified that polynomial coefficients still differ:**
+   - Jolt expects c0: [e2, ee, 6f, c7, ...]
+   - Zolt produces c0: [02, 27, ff, 26, ...]
 
-The polynomial coefficients Zolt produces are different from what Jolt expects:
-- Jolt reads: `[e2, ee, 6f, c7, ...]` for c0 in round 0
-- Zolt produces: `[25, f7, 18, 0c, ...]` (different values)
+### Current Investigation
 
-This causes different challenges to be derived, leading to different operand evaluations.
+The suffix polynomial initialization and prefix MLE computation appear to follow the same logic as Jolt, but the resulting polynomial coefficients are different. The issue is somewhere in:
 
-The fix I made only affects how bound_value accumulates during cycle rounds (128-135), not the polynomial coefficients during address rounds (0-127).
+1. **Suffix MLE evaluation** - How we compute suffix_mle(suffix_bits) for each suffix type
+2. **Prefix MLE evaluation** - How we compute prefix_mle(checkpoints, r_x, c, b, round)
+3. **Table combine functions** - How we combine prefix and suffix evaluations
 
-### Root Cause Analysis
+Key observation from debug output:
+```
+[SUFFIX INIT] cycle j=0 t_idx=0 k=0x00000000000000000000000040000000 prefix_bits=0 suffix_len=120
+  suffix[0]=One t=1 idx=0
+  suffix[1]=LowerWord t=32768 idx=0
+```
 
-The Stage 5 address rounds use prefix-suffix decomposition. The computed polynomials depend on:
-1. **Suffix polynomials (Q)** - accumulated from `u_evals[j] * suffix_mle(suffix_bits[j])`
-2. **Prefix polynomials** - depend on checkpoint values and current round
+The LowerWord suffix at `k=0x40000000` returns 32768 (0x8000). Let me verify this is correct:
+- k = 0x40000000 = bit 30 set
+- After uninterleaving: right operand = bits at even positions
+- Bit 30 at position 30 (even) → right operand bit 15 set
+- right & 0xFFFFFFFF = 0x8000 = 32768 ✓
 
-The mismatch suggests either:
-1. The suffix polynomial initialization is wrong
-2. The prefix MLE evaluation is wrong
-3. The table combine functions are wrong
-4. The Q binding is wrong
+This seems correct!
 
 ### Next Steps
 
-1. **Debug suffix polynomial initialization:**
-   - Verify `AllSuffixPolys.initPhase()` correctly computes Q[b]
-   - Check that cycle_table_indices maps cycles to correct tables
-   - Verify suffix_mle returns correct values
-
-2. **Debug prefix MLE evaluation:**
-   - Verify each prefix type's prefixMle function matches Jolt's
-   - Check checkpoint initialization and updates
-
-3. **Add detailed debug output:**
-   - Print Q values after initialization
-   - Print prefix evaluations for round 0
+1. **Add detailed debug to compare prefix MLE evaluations:**
+   - Print prefixes_c0 and prefixes_c2 for round 0, b=0
    - Compare with expected values from Jolt
 
-4. **Consider simplification:**
-   - Test with a simpler program that uses only one table type
-   - Verify the basic prefix-suffix machinery works for that case
+2. **Verify the tableCombine functions:**
+   - Check that RangeCheck combine is: `prefixes[LowerWord] * one + lower_word`
+   - Verify the multiplication and addition order
+
+3. **Check the LowerWord prefix evaluation:**
+   - In round 0 (j=0), LowerWord should return 0 (ignores first XLEN rounds)
+   - The contribution should come only from the suffix
+
+4. **Consider adding a test case:**
+   - Create a minimal test that computes one read_checking round
+   - Compare output with Jolt's expected values
 
 ### Key Components
 
 1. **Prefix-Suffix Decomposition** (`src/zkvm/lookup_table/`)
-   - All 46 prefix types implemented in `prefixes.zig`
-   - All 43 suffix types implemented in `suffixes.zig`
-   - Table-specific combine functions in `prefix_suffix_prover.zig`
-   - RAF decomposition for left/right/identity operands
+   - `prefixes.zig` - All 46 prefix types with MLE implementations
+   - `suffixes.zig` - All suffix types with MLE implementations
+   - `prefix_suffix_prover.zig` - Q polynomial accumulation and proverMsg functions
 
 2. **Stage 5 Prover** (`src/zkvm/spartan/stage5_prover.zig`)
-   - Three-instance batched sumcheck
+   - Three-instance batched sumcheck (136 rounds)
    - Instance 0: RegistersValEvaluation (8 rounds)
-   - Instance 1: RamRaClaimReduction (24 rounds) - simplified for fibonacci
-   - Instance 2: LookupsReadRaf (136 rounds) with prefix-suffix decomposition
-   - Phase transitions every 8 rounds (16 phases total)
+   - Instance 1: RamRaClaimReduction (24 rounds)
+   - Instance 2: LookupsReadRaf (136 rounds) - prefix-suffix decomposition
 
 ### Test Commands
 ```bash
@@ -89,3 +90,15 @@ timeout 600 ./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o log
 cd /home/vivado/projects/jolt
 cargo test --package jolt-core --features zolt-debug test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
+
+### Debug Output Analysis
+
+From Zolt proof generation (round 0):
+```
+[STAGE5 COEFF ROUND 0] c0 = 0227ff26f6fc2e8d99f99d71df1d9008927616895c839a61b0e8249c7e779386
+[STAGE5 COEFF ROUND 0] claim = 00fb6017bc481b2ee8aa7e53dbc0dab21c0a902d470ec8a2a0666ce9d0780599
+[STAGE5 COEFF ROUND 0] inst01_p0 = 24e9f37c8fe20a5bcca11f8a09893313f0cae1922f47764faf4b569bfd3067ae
+[STAGE5 COEFF ROUND 0] inst2_eval0 = 1f31af1cf6c3199f163b7a1eca41ff90d4d10aa7489b7bb3642a41bb48bf9a99
+```
+
+The issue is likely in `inst2_eval0` (Instance 2's read_checking + RAF contribution).

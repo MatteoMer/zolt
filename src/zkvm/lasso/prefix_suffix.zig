@@ -183,7 +183,9 @@ pub fn PrefixPolynomial(comptime F: type) type {
             for (0..new_size) |i| {
                 const low = self.evaluations[i];
                 const high = self.evaluations[i + new_size];
-                new_evals[i] = low.mul(one_minus_c).add(high.mul(challenge));
+                // CRITICAL: Use mulHiBigIntU128 for F * Challenge
+                // one_minus_c is proper Fr from subtraction, standard mul is correct
+                new_evals[i] = low.mul(one_minus_c).add(high.mulHiBigIntU128(challenge.limbs));
             }
 
             return Self{
@@ -195,6 +197,7 @@ pub fn PrefixPolynomial(comptime F: type) type {
         }
 
         /// Evaluate the prefix polynomial at a point
+        /// Note: point values may be challenge scalars [0,0,L,H] - must use mulHiBigIntU128
         pub fn evaluate(self: *const Self, point: []const F) F {
             std.debug.assert(point.len == self.num_vars);
 
@@ -204,8 +207,10 @@ pub fn PrefixPolynomial(comptime F: type) type {
                 for (0..self.num_vars) |j| {
                     const bit = (i >> @intCast(j)) & 1;
                     if (bit == 1) {
-                        term = term.mul(point[j]);
+                        // CRITICAL: Use mulHiBigIntU128 for F * Challenge
+                        term = term.mulHiBigIntU128(point[j].limbs);
                     } else {
+                        // one_minus_point[j] is proper Fr from subtraction
                         term = term.mul(F.one().sub(point[j]));
                     }
                 }

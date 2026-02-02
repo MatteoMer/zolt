@@ -86,11 +86,13 @@ pub fn ExpandingTable(comptime F: type) type {
             const new_size = self.values.len * 2;
             const new_values = try self.allocator.alloc(F, new_size);
 
+            // one_minus_r is proper Fr from subtraction
             const one_minus_r = F.one().sub(r);
 
             for (self.values, 0..) |v, i| {
                 new_values[2 * i] = v.mul(one_minus_r);
-                new_values[2 * i + 1] = v.mul(r);
+                // CRITICAL: Use mulHiBigIntU128 for F * Challenge
+                new_values[2 * i + 1] = v.mulHiBigIntU128(r.limbs);
             }
 
             self.allocator.free(self.values);
@@ -100,6 +102,7 @@ pub fn ExpandingTable(comptime F: type) type {
 
         /// Bind variable with a precomputed pair (1-r, r)
         /// This is slightly more efficient when the pair is already computed
+        /// Note: one_minus_r should be a proper Fr, r may be a challenge scalar
         pub fn bindWithPair(self: *Self, one_minus_r: F, r: F) !void {
             std.debug.assert(self.round < self.max_rounds);
 
@@ -107,8 +110,10 @@ pub fn ExpandingTable(comptime F: type) type {
             const new_values = try self.allocator.alloc(F, new_size);
 
             for (self.values, 0..) |v, i| {
+                // one_minus_r is proper Fr (from subtraction), standard mul
                 new_values[2 * i] = v.mul(one_minus_r);
-                new_values[2 * i + 1] = v.mul(r);
+                // CRITICAL: r may be a challenge scalar, use mulHiBigIntU128
+                new_values[2 * i + 1] = v.mulHiBigIntU128(r.limbs);
             }
 
             self.allocator.free(self.values);

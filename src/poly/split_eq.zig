@@ -129,6 +129,7 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
                 const next = try allocator.alloc(F, new_size);
 
                 const tau_k = tau_copy[k]; // w_out uses tau[0..m]
+                // one_minus_tau_k: subtraction is correct (converts challenge [0,0,L,H] to Fr first)
                 const one_minus_tau_k = F.one().sub(tau_k);
 
                 // Jolt's big-endian ordering: iterate backwards, doubling indices
@@ -139,9 +140,14 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
                 // Equivalently in forward iteration:
                 //   next[2*i] = prev[i] * (1-τ[k])   (even index, appended 0)
                 //   next[2*i+1] = prev[i] * τ[k]    (odd index, appended 1)
+                //
+                // CRITICAL: Use mulHiBigIntU128 for tau_k multiplication to match Jolt's
+                // MontU128Challenge F * Challenge behavior (uses mul_by_hi_2limbs)
                 for (0..prev_size) |i| {
+                    // one_minus_tau_k is a proper Fr from subtraction, use standard mul
                     next[2 * i] = prev[i].mul(one_minus_tau_k);
-                    next[2 * i + 1] = prev[i].mul(tau_k);
+                    // tau_k is challenge [0,0,L,H], use optimized multiplication
+                    next[2 * i + 1] = prev[i].mulHiBigIntU128(tau_k.limbs);
                 }
 
                 try E_out_vec.append(allocator, next);
@@ -159,12 +165,14 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
                 const next = try allocator.alloc(F, new_size);
 
                 const tau_k = tau_copy[m + k]; // w_in uses tau[m..tau.len-1]
+                // one_minus_tau_k: subtraction is correct (converts challenge [0,0,L,H] to Fr first)
                 const one_minus_tau_k = F.one().sub(tau_k);
 
                 // Big-endian: append new bit as LSB
+                // CRITICAL: Use mulHiBigIntU128 for tau_k multiplication to match Jolt
                 for (0..prev_size) |i| {
                     next[2 * i] = prev[i].mul(one_minus_tau_k);
-                    next[2 * i + 1] = prev[i].mul(tau_k);
+                    next[2 * i + 1] = prev[i].mulHiBigIntU128(tau_k.limbs);
                 }
 
                 try E_in_vec.append(allocator, next);
@@ -275,7 +283,9 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
                     // Big-endian: new bit is appended as LSB
                     // Index 2*i (even, bit=0) gets (1-τ)
                     // Index 2*i+1 (odd, bit=1) gets τ
-                    result[2 * i + 1] = scalar.mul(tau_k);
+                    // CRITICAL: Use mulHiBigIntU128 for F * Challenge (tau_k)
+                    result[2 * i + 1] = scalar.mulHiBigIntU128(tau_k.limbs);
+                    // one_minus_tau_k is proper Fr from subtraction, standard mul is correct
                     result[2 * i] = scalar.mul(one_minus_tau_k);
                 }
                 current_size *= 2;
@@ -365,9 +375,11 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
             const tau_curr = self.tau[self.current_index - 1];
 
             // eq(0) for current variable: current_scalar * (1 - τ_curr)
+            // one_minus_tau_curr is proper Fr from subtraction, standard mul is correct
             const eq_0 = self.current_scalar.mul(F.one().sub(tau_curr));
             // eq(1) for current variable: current_scalar * τ_curr
-            const eq_1 = self.current_scalar.mul(tau_curr);
+            // CRITICAL: Use mulHiBigIntU128 for F * Challenge (tau_curr)
+            const eq_1 = self.current_scalar.mulHiBigIntU128(tau_curr.limbs);
 
             // l(X) = eq_0 + (eq_1 - eq_0) * X
             const l_slope = eq_1.sub(eq_0);
@@ -444,8 +456,10 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
             }
 
             const tau_curr = self.tau[self.current_index - 1];
+            // one_minus_tau_curr is proper Fr from subtraction, standard mul is correct
             const eq_0 = self.current_scalar.mul(F.one().sub(tau_curr));
-            const eq_1 = self.current_scalar.mul(tau_curr);
+            // CRITICAL: Use mulHiBigIntU128 for F * Challenge (tau_curr)
+            const eq_1 = self.current_scalar.mulHiBigIntU128(tau_curr.limbs);
 
             return .{ .eq_0 = eq_0, .eq_1 = eq_1 };
         }
@@ -504,7 +518,9 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
                     i -= 1;
                     const scalar = result[i];
                     // Big-endian: new bit is appended as LSB
-                    result[2 * i + 1] = scalar.mul(tau_k);
+                    // CRITICAL: Use mulHiBigIntU128 for F * Challenge (tau_k)
+                    result[2 * i + 1] = scalar.mulHiBigIntU128(tau_k.limbs);
+                    // one_minus_tau_k is proper Fr from subtraction, standard mul is correct
                     result[2 * i] = scalar.mul(one_minus_tau_k);
                 }
                 current_size *= 2;

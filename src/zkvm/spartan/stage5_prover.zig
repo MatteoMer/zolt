@@ -2128,9 +2128,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     const c2_val = coeffs[1];
                     const c3_val = coeffs[2];
                     const c1 = current_batched_claim.sub(c0).sub(c0).sub(c2_val).sub(c3_val);
+                    // Challenge * Challenge: both convert to Fr, standard mul
                     const r2 = challenge.mul(challenge);
                     const r3 = r2.mul(challenge);
-                    current_batched_claim = c0.add(challenge.mul(c1)).add(r2.mul(c2_val)).add(r3.mul(c3_val));
+                    // CRITICAL: Challenge * F uses mulHiBigIntU128 (Jolt delegates to F * Challenge)
+                    current_batched_claim = c0.add(c1.mulHiBigIntU128(challenge.limbs)).add(c2_val.mul(r2)).add(c3_val.mul(r3));
 
                     // Debug: print challenges for first 3 rounds
                     if (round < 3) {
@@ -2176,9 +2178,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 const one_minus_r = F.one().sub(challenge);
 
                                 // Bind B_1 and B_2 polynomials (LowToHigh order)
+                                // CRITICAL: Use mulHiBigIntU128 for F * Challenge
                                 for (0..half_b) |i| {
-                                    B_1[i] = one_minus_r.mul(B_1[2 * i]).add(challenge.mul(B_1[2 * i + 1]));
-                                    B_2[i] = one_minus_r.mul(B_2[2 * i]).add(challenge.mul(B_2[2 * i + 1]));
+                                    B_1[i] = one_minus_r.mul(B_1[2 * i]).add(B_1[2 * i + 1].mulHiBigIntU128(challenge.limbs));
+                                    B_2[i] = one_minus_r.mul(B_2[2 * i]).add(B_2[2 * i + 1].mulHiBigIntU128(challenge.limbs));
                                 }
                                 // Zero out upper half
                                 for (half_b..n_b) |i| {
@@ -2214,17 +2217,19 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 const half_len = current_len / 2;
 
                                 // Bind P arrays: P'[j] = (1-r)*P[2j] + r*P[2j+1]
+                                // CRITICAL: Use mulHiBigIntU128 for F * Challenge
                                 for (0..half_len) |j| {
-                                    P_raf[j] = one_minus_r.mul(P_raf[2 * j]).add(challenge.mul(P_raf[2 * j + 1]));
-                                    P_rw[j] = one_minus_r.mul(P_rw[2 * j]).add(challenge.mul(P_rw[2 * j + 1]));
-                                    P_val[j] = one_minus_r.mul(P_val[2 * j]).add(challenge.mul(P_val[2 * j + 1]));
+                                    P_raf[j] = one_minus_r.mul(P_raf[2 * j]).add(P_raf[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                    P_rw[j] = one_minus_r.mul(P_rw[2 * j]).add(P_rw[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                    P_val[j] = one_minus_r.mul(P_val[2 * j]).add(P_val[2 * j + 1].mulHiBigIntU128(challenge.limbs));
                                 }
 
                                 // Bind Q arrays: Q'[j] = (1-r)*Q[2j] + r*Q[2j+1]
+                                // CRITICAL: Use mulHiBigIntU128 for F * Challenge
                                 for (0..half_len) |j| {
-                                    Q_raf[j] = one_minus_r.mul(Q_raf[2 * j]).add(challenge.mul(Q_raf[2 * j + 1]));
-                                    Q_rw[j] = one_minus_r.mul(Q_rw[2 * j]).add(challenge.mul(Q_rw[2 * j + 1]));
-                                    Q_val[j] = one_minus_r.mul(Q_val[2 * j]).add(challenge.mul(Q_val[2 * j + 1]));
+                                    Q_raf[j] = one_minus_r.mul(Q_raf[2 * j]).add(Q_raf[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                    Q_rw[j] = one_minus_r.mul(Q_rw[2 * j]).add(Q_rw[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                    Q_val[j] = one_minus_r.mul(Q_val[2 * j]).add(Q_val[2 * j + 1].mulHiBigIntU128(challenge.limbs));
                                 }
 
                                 if (cycle_round < 3) {
@@ -2247,15 +2252,17 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 const half_len = current_len / 2;
 
                                 // Bind H_prime: H'[j] = (1-r)*H[2j] + r*H[2j+1]
+                                // CRITICAL: Use mulHiBigIntU128 for F * Challenge
                                 for (0..half_len) |j| {
-                                    H_prime[j] = one_minus_r.mul(H_prime[2 * j]).add(challenge.mul(H_prime[2 * j + 1]));
+                                    H_prime[j] = one_minus_r.mul(H_prime[2 * j]).add(H_prime[2 * j + 1].mulHiBigIntU128(challenge.limbs));
                                 }
 
                                 // Bind eq_hi arrays
+                                // CRITICAL: Use mulHiBigIntU128 for F * Challenge
                                 for (0..half_len) |j| {
-                                    eq_raf_hi[j] = one_minus_r.mul(eq_raf_hi[2 * j]).add(challenge.mul(eq_raf_hi[2 * j + 1]));
-                                    eq_rw_hi[j] = one_minus_r.mul(eq_rw_hi[2 * j]).add(challenge.mul(eq_rw_hi[2 * j + 1]));
-                                    eq_val_hi[j] = one_minus_r.mul(eq_val_hi[2 * j]).add(challenge.mul(eq_val_hi[2 * j + 1]));
+                                    eq_raf_hi[j] = one_minus_r.mul(eq_raf_hi[2 * j]).add(eq_raf_hi[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                    eq_rw_hi[j] = one_minus_r.mul(eq_rw_hi[2 * j]).add(eq_rw_hi[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                    eq_val_hi[j] = one_minus_r.mul(eq_val_hi[2 * j]).add(eq_val_hi[2 * j + 1].mulHiBigIntU128(challenge.limbs));
                                 }
 
                                 std.debug.print("[STAGE5 RAM_RA] Bound PhaseCycle2 round {} (suffix {}): challenge={x}, new_len={}\n", .{
@@ -3039,17 +3046,18 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     const c1_recovered = c1_sum;
 
                     // Evaluate using Horner's method
+                    // CRITICAL: Use mulHiBigIntU128 for F * Challenge
                     var eval_result = combined_coeffs[combined_coeffs.len - 1];
                     var i_val = combined_coeffs.len - 1;
                     while (i_val > 1) {
                         i_val -= 1;
                         if (i_val == 1) {
-                            eval_result = eval_result.mul(challenge).add(c1_recovered);
+                            eval_result = eval_result.mulHiBigIntU128(challenge.limbs).add(c1_recovered);
                         } else {
-                            eval_result = eval_result.mul(challenge).add(combined_coeffs[i_val]);
+                            eval_result = eval_result.mulHiBigIntU128(challenge.limbs).add(combined_coeffs[i_val]);
                         }
                     }
-                    eval_result = eval_result.mul(challenge).add(combined_coeffs[0]);
+                    eval_result = eval_result.mulHiBigIntU128(challenge.limbs).add(combined_coeffs[0]);
                     current_batched_claim = eval_result;
 
                     // Skip the standard compression/serialization below
@@ -3562,9 +3570,14 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 const bj: u1 = @truncate(k >> @intCast(n - 1 - j));
                 const rj = r[j]; // r[j] corresponds to bit (n-1-j) of k
                 if (bj == 1) {
-                    result = result.mul(rj);
+                    // CRITICAL: Use mulHiBigIntU128 to match Jolt's MontU128Challenge multiplication
+                    // Jolt treats challenges as raw [0,0,L,H] integers in multiplication
+                    result = result.mulHiBigIntU128(rj.limbs);
                 } else {
-                    result = result.mul(F.one().sub(rj));
+                    // For (1 - r[j]): subtraction converts challenge to Montgomery form first (matches Jolt)
+                    // Then multiply the result (F * F is standard Montgomery multiplication)
+                    const one_minus_rj = F.one().sub(rj);
+                    result = result.mul(one_minus_rj);
                 }
             }
             return result;
@@ -3595,8 +3608,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 const half = @as(usize, 1) << @intCast(i);
                 for (0..half) |j| {
                     const x = evals[j];
-                    const y = x.mul(ri);
+                    // CRITICAL: Use mulHiBigIntU128 to match Jolt's F * Challenge behavior
+                    // Jolt's MontU128Challenge uses mul_by_hi_2limbs for multiplication
+                    const y = x.mulHiBigIntU128(ri.limbs);
                     evals[half + j] = y;
+                    // ri.sub(y) is correct: Challenge - F converts challenge to Fr first
+                    // (via from_bigint_unchecked which stores same Montgomery form)
                     evals[j] = evals[j].add(ri.sub(y));
                 }
             }
@@ -3623,8 +3640,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         const jk = (j >> @intCast(num_vars - 1 - k)) & 1;
                         const rk = r_cycle[k];
                         if (jk == 1) {
-                            contrib = contrib.mul(rk);
+                            // CRITICAL: Use mulHiBigIntU128 for challenge multiplication
+                            contrib = contrib.mulHiBigIntU128(rk.limbs);
                         } else {
+                            // (1 - rk) requires converting rk to proper Fr first
+                            // Since rk already has [0,0,L,H] Montgomery form, sub is correct
                             contrib = contrib.mul(F.one().sub(rk));
                         }
                     }

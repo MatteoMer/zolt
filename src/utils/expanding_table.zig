@@ -91,7 +91,8 @@ pub fn ExpandingTable(comptime F: type) type {
                     var i: usize = 0;
                     while (i < old_len) : (i += 1) {
                         const old_val = self.values[i];
-                        const r_times_old = r_j.mul(old_val);
+                        // CRITICAL: Use mulHiBigIntU128 for F * Challenge (r_j)
+                        const r_times_old = old_val.mulHiBigIntU128(r_j.limbs);
                         // values[i] = (1 - r_j) * old = old - r_j * old
                         self.values[i] = old_val.sub(r_times_old);
                         // values[i + len] = r_j * old
@@ -107,7 +108,8 @@ pub fn ExpandingTable(comptime F: type) type {
                     var i: usize = 0;
                     while (i < old_len) : (i += 1) {
                         const old_val = self.values[i];
-                        const r_times_old = r_j.mul(old_val);
+                        // CRITICAL: Use mulHiBigIntU128 for F * Challenge (r_j)
+                        const r_times_old = old_val.mulHiBigIntU128(r_j.limbs);
                         self.values[new_len] = old_val.sub(r_times_old);
                         self.values[new_len + 1] = r_times_old;
                         new_len += 2;

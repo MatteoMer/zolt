@@ -3298,17 +3298,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             @memset(table_flags, F.zero());
 
             const ra_chunks = try self.allocator.alloc(F, lookups_ra_d);
-            // ra_claims[i] = Σ_j eq(r_cycle', j) * ra_chunk_weights[i][j]
-            // This is the final sumcheck claim for each ra chunk polynomial
+            // ra_claims[i] = ra_chunk_weights[i][0] after all n_cycle_vars bindings
+            // The binding process reduces the polynomial to a single value at index 0,
+            // which equals the MLE evaluation at the bound point (r_cycle_prime).
+            // This matches Jolt's ra_poly.final_sumcheck_claim()
             for (0..lookups_ra_d) |i| {
-                var claim = F.zero();
-                for (0..T) |j| {
-                    if (j >= trace_len) continue;
-                    // eq(r_cycle', j) computed at the reduced cycle point
-                    const eq_j = computeEqAtIndex(r_cycle_prime_be, j);
-                    claim = claim.add(eq_j.mul(ra_chunk_weights[i][j]));
-                }
-                ra_chunks[i] = claim;
+                ra_chunks[i] = ra_chunk_weights[i][0];
             }
 
             // Debug: print ra chunk claims

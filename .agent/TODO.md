@@ -1,57 +1,95 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: IN PROGRESS - Stage 5 Batched Sumcheck Debugging
+## Status: IN PROGRESS - Stage 5 Formula Mismatch
 
-## Session 113 Summary (continued)
+## Session 116 Summary
 
-### Key Discovery
+### Fixed: File Path Issue
+The Jolt test was reading `/tmp/zolt_proof_dory.bin` (old file from Feb 1) instead of `logs/zolt_proof_dory.bin` (current file from Feb 2). Copied the correct file to /tmp.
 
-Found that Jolt's BatchedSumcheck uses a specific pattern for inactive instances:
-1. Initial individual claims are scaled by 2^(max_rounds - instance_rounds)
-2. Each inactive round, the polynomial is CONSTANT with value `previous_claim / 2`
-3. This results in claims being halved each round until the instance becomes active
+After this fix, the table_flag claims now deserialize correctly:
+- LookupTableFlag(0) = non-zero ✓
+- LookupTableFlag(1) = non-zero ✓
+- LookupTableFlag(9) = non-zero ✓ (for NotEqual table)
+- All others = zero ✓
 
-### Current Analysis
+### Current Issue: Stage 5 Formula Mismatch
 
-For round 0 with Instance 0 (RegistersValEvaluation, 8 rounds):
-- max_rounds = 136, instance_rounds = 8
-- offset = 128 (instance starts at round 128)
-- Round 0 is inactive (round < offset)
-- Initial claim = input_claim * 2^128
-- Polynomial = constant with value (input_claim * 2^128) / 2 = input_claim * 2^127
-- This matches my `scale = remaining_rounds - num_rounds - 1 = 127`
+Stage 5 sumcheck verification still fails:
+```
+output_claim:   [9d, 3d, dd, d4...]
+expected_claim: [1b, 43, f0, ba...]
+```
 
-So the scaling formula is correct!
+The root cause is that **Zolt's sumcheck polynomial computation differs from Jolt's formula**.
 
-### Remaining Issues
+### Formula Analysis
 
-1. **Polynomial coefficients still differ** - even though the logic seems correct, the output doesn't match
+Jolt's `expected_output_claim` formula (read_raf_checking.rs:1285-1321):
+```rust
+val_claim = Σ (table_MLE[i](r_address_prime) * table_flag[i])  // <-- KEY DIFFERENCE
+raf_claim = (1 - raf_flag) * (left_op + gamma*right_op) + raf_flag * gamma * identity
+expected = eq_eval * ra_claim * (val_claim + gamma * raf_claim)
+```
 
-2. **Need to verify:**
-   - Batch coefficients (batch0, batch1, batch2) are derived from transcript correctly
-   - Instance input claims match what Jolt expects
-   - The polynomial combination formula is correct
+Zolt's computation (stage5_prover.zig:811):
+```zig
+lookups_combined_vals[j] = lookup_output.add(gamma_raf.mul(left_op)).add(gamma_raf2.mul(right_op));
+// Where lookup_output = step.rd_value (actual instruction output)
+```
 
-3. **Debug output shows:**
-   ```
-   [STAGE5 COEFF ROUND 0] c0 = 0227ff26f6fc2e8d99f99d71df1d9008927616895c839a61b0e8249c7e779386
-   [STAGE5 COEFF ROUND 0] inst01_p0 = 24e9f37c8fe20a5bcca11f8a09893313f0cae1922f47764faf4b569bfd3067ae
-   [STAGE5 COEFF ROUND 0] inst2_eval0 = 1f31af1cf6c3199f163b7a1eca41ff90d4d10aa7489b7bb3642a41bb48bf9a99
-   ```
+### Key Difference
 
-   inst01_p0 and inst01_p2 should be equal (constant polynomial), and they are based on scaled claims.
+1. **Jolt**: `val_claim = Σ table_MLE[i](r_address) * table_flag[i]`
+   - Each `table_MLE[i]` is the multilinear extension of lookup table i
+   - Evaluated at the address point `r_address_prime`
+   - This requires implementing table MLE evaluation using prefix-suffix decomposition
+
+2. **Zolt**: Uses `lookup_output = step.rd_value`
+   - This is the actual output value from the execution trace
+   - NOT the table MLE evaluated at the opening point
+
+### What Needs to be Fixed
+
+Zolt needs to implement the lookup table MLE evaluation for all 42 tables:
+- Table 0: RangeCheck (used by Fibonacci)
+- Table 9: NotEqual (used by Fibonacci branches)
+- Tables 1-8, 10-41: Other instruction lookup tables
+
+The `evaluate_mle` function for each table takes `r_address` (128 bits) and returns the table MLE evaluated at that point.
+
+For example, in Jolt (andn.rs:18-32):
+```rust
+fn evaluate_mle<F, C>(&self, r: &[C]) -> F {
+    let mut result = F::zero();
+    for i in 0..XLEN {
+        let x_i = r[2 * i];
+        let y_i = r[2 * i + 1];
+        result += F::from_u64(1u64 << (XLEN - 1 - i)) * x_i * (F::one() - y_i);
+    }
+    result
+}
+```
+
+### Implementation Options
+
+1. **Full Prefix-Suffix Decomposition**: Implement Jolt's optimization with prefix checkpoints and suffix polynomials. Complex but efficient.
+
+2. **Direct MLE Evaluation**: For each of the 42 tables, implement `evaluate_mle(r_address)` and multiply by the corresponding `table_flag`.
+
+Option 2 is simpler to implement but may be slower for large traces.
+
+### Files to Modify
+
+- `src/zkvm/spartan/stage5_prover.zig`: Implement table MLE evaluations
+- `src/zkvm/lookup_table/`: Add evaluate_mle for each table type
 
 ### Next Steps
 
-1. **Compare transcript state** - verify batch coefficients match Jolt
-2. **Compare instance input claims** - check that regs_val_input matches Jolt
-3. **Add Jolt-side debug** - print the actual polynomial values Jolt computes for round 0
-4. **Check if interleave fix cascaded** - the interleave fix might affect how lookup indices are computed, which affects Q polynomial initialization
-
-### Files Modified This Session
-
-- `src/zkvm/spartan/stage5_prover.zig` - Fixed interleaveBits128, added debug
-- `src/zkvm/lookup_table/prefix_suffix_prover.zig` - Added Q value debug
+1. Understand all 42 lookup table formulas from Jolt
+2. Implement evaluate_mle for each table in Zolt
+3. Modify Stage 5 prover to use `Σ table_MLE[i](r_address) * table_flag[i]` formula
+4. Test verification
 
 ### Test Commands
 ```bash
@@ -59,36 +97,12 @@ So the scaling formula is correct!
 zig build -Doptimize=ReleaseFast
 
 # Generate proof
-timeout 600 ./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o logs/zolt_proof_dory.bin
+./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format --export-preprocessing logs/zolt_preprocessing.bin -o logs/zolt_proof_dory.bin
+
+# Copy to /tmp for Jolt test
+cp logs/zolt_*.bin /tmp/
 
 # Verify with Jolt
 cd /home/vivado/projects/jolt
 cargo test --package jolt-core --features zolt-debug test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
-
-## Key Formula Reference
-
-### Jolt's Interleave Format
-```
-interleave_bits(x, y) = (spread(x) << 1) | spread(y)
-```
-- x (left operand) → ODD bit positions (1, 3, 5, ...)
-- y (right operand) → EVEN bit positions (0, 2, 4, ...)
-
-### Inactive Instance Polynomial
-For round k where instance hasn't started (k < offset):
-- current_claim[k] = input_claim * 2^(max_rounds - instance_rounds) / 2^k
-- polynomial = constant with value current_claim[k] / 2
-- p(0) = p(1) = p(2) = current_claim[k] / 2
-- scale_exponent = max_rounds - instance_rounds - 1 - k
-
-### RangeCheck Table Combine
-```
-combine(prefixes, suffixes) = prefixes[LowerWord] * one + lower_word
-```
-Where:
-- one = Q[One][b_idx] (suffix polynomial for Suffixes::One)
-- lower_word = Q[LowerWord][b_idx] (suffix polynomial for Suffixes::LowerWord)
-- prefixes[LowerWord] = 0 for j < XLEN (first 64 rounds)
-
-SESSION_ENDING - saved progress to TODO.md

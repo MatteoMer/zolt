@@ -1,77 +1,58 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: IN PROGRESS - Stage 5 ra_claim Mismatch
+## Status: IN PROGRESS - Found Polynomial Evaluation Bug
 
-## Session 134 Progress
+## Session 138 Progress
 
-### Key Finding: ra_chunks values don't match!
+### ROOT CAUSE IDENTIFIED: Lagrange Interpolation Bug
 
-After extensive debugging, confirmed that:
+**The Stage 5 sumcheck mismatch is caused by incorrect polynomial evaluation in Zolt.**
 
-1. **Challenges match exactly between Zolt and Jolt** ✓
-2. **LowerWord prefix checkpoint computation matches** ✓
-3. **Table MLE values match** ✓
-4. **table_flag claims match** ✓
-5. **BUT ra_claims DON'T MATCH!** ✗
+In `stage5_prover.zig`, the code computes round polynomials with evaluations `[p(0), p(1), p(2), p_inf]`
+where `p_inf = c3` is the leading coefficient (evaluation at infinity).
 
-### Debug Evidence
+However, the Lagrange interpolation at lines 300-320 treats these as `[p(0), p(1), p(2), p(3)]`:
 
-**Jolt's ra_claims[0]** (from verifier reading proof):
-```
-[a5, 5e, c7, 72, 66, 8e, 13, 27, 21, 0d, f3, 0e, 35, 26, 9b, 11]
-```
-
-**Zolt's InstructionRa(0)** (serialized to proof):
-```
-bytes[16..32] = [90 fa 96 e6 36 b6 07 e1 e4 6f 2c 8b ff 8e 00 be]
-```
-
-These are COMPLETELY different values!
-
-### Root Cause Analysis
-
-The ra_chunk values are computed by accumulating `eq(lookup_index, challenge)` factors.
-
-In Zolt:
 ```zig
-const bit = getBit128(lookups_indices_lo[j], lookups_indices_hi[j], bit_index);
-const factor = if (bit == 0) one_minus_r else challenge;
-ra_chunk_weights[chunk_idx][j] = ra_chunk_weights[chunk_idx][j].mul(factor);
+const L3 = r.mul(r_1).mul(r_2).mul(six.inverse().?);  // Lagrange basis for x=3
+current_batched_claim = p0.mul(L0).add(p1.mul(L1)).add(p2.mul(L2)).add(p3.mul(L3));
 ```
 
-This formula is correct! But something else must be wrong:
-1. The bit_index mapping might be wrong
-2. The lookup_indices might be wrong
-3. The challenge values might be used in wrong order
+**This is wrong!** `combined_poly[3]` is `p_inf = c3`, NOT `p(3)`!
 
-### Jolt's Approach
+### The Fix
 
-Jolt computes ra_polys using expanding tables in `init_log_t_rounds`:
+Option A: Use Horner's method on coefficients (matching Jolt's prover):
+1. Convert Toom-Cook evaluations `[p(0), p(1), p(2), p_inf]` to coefficients `[c0, c1, c2, c3]`
+2. Evaluate at challenge using Horner's method: `c0 + r*(c1 + r*(c2 + r*c3))`
+
+Option B: Convert to proper evaluation points first:
+1. Compute `p(3) = c0 + 3*c1 + 9*c2 + 27*c3` from coefficients
+2. Then use Lagrange interpolation with `[p(0), p(1), p(2), p(3)]`
+
+Option A is preferred as it matches Jolt's approach.
+
+### How Jolt Does It
+
+In `sumcheck.rs` line 117:
 ```rust
-let first_idx = ((v >> shift) as usize) & m_mask;
-let mut acc = first[first_idx];
-for table in iter {
-    shift -= log_m;
-    let idx = ((v >> shift) as usize) & m_mask;
-    acc *= table[idx];
-}
+individual_claims.iter_mut().zip(univariate_polys.into_iter())
+    .for_each(|(claim, poly)| *claim = poly.evaluate(&r_j));
 ```
 
-The expanding table stores products of eq factors accumulated during address rounds.
+Where `poly.evaluate()` uses Horner's method on coefficients (see `unipoly.rs` lines 175-192).
 
-### Next Steps
+### Challenge Format (Already Correct)
 
-1. **Debug lookup_index values**
-   - Print first few lookup indices from Zolt
-   - Compare with what Jolt would expect for same trace
+Zolt's `challengeScalar128Bits()` already produces the correct format:
+- Returns `F{ .limbs = .{ 0, 0, masked_low, masked_high } }`
+- WITHOUT calling `toMontgomery()` (matches Jolt's `from_bigint_unchecked`)
 
-2. **Verify bit_index ordering**
-   - Check if Zolt processes bits in same order as Jolt
-   - Round 0 = bit 127 or bit 0?
+The challenge format is NOT the issue - the polynomial evaluation is.
 
-3. **Trace expanding table vs direct computation**
-   - Add debug to compare Jolt's expanding table values
-   - Verify Zolt's direct eq computation gives same result
+### Key Files to Modify
+
+1. `/home/vivado/projects/zolt/src/zkvm/spartan/stage5_prover.zig` - Fix polynomial evaluation
 
 ### Test Commands
 
@@ -91,9 +72,15 @@ cargo test --package jolt-core --features zolt-debug test_verify_zolt_proof_with
 ## Previous Sessions Summary
 
 - Session 133: Confirmed challenges match, identified table MLE mismatch
-- Session 134: Confirmed table MLEs match, identified ra_claims mismatch
+- Session 134: Confirmed table MLEs match at basic level, identified ra_claims mismatch
+- Session 135: Confirmed ra_claims serialization is correct, issue is sumcheck polynomial values
+- Session 136: Identified prefix-suffix decomposition as potential issue
+- Session 137: Identified challenge format as potential issue (but actually correct)
+- Session 138: **Found root cause: Lagrange interpolation bug treating p_inf as p(3)**
 
-## Files Modified This Session
+## Key Files
 
-- `/home/vivado/projects/zolt/src/zkvm/lookup_table/prefixes.zig` - Added detailed debug for LowerWord updates
-- `/home/vivado/projects/jolt/jolt-core/src/zkvm/lookup_table/prefixes/lower_word.rs` - Added debug for comparison
+- `/home/vivado/projects/zolt/src/zkvm/spartan/stage5_prover.zig` - Stage 5 prover (contains bug)
+- `/home/vivado/projects/zolt/src/poly/mod.zig` - UniPoly with interpolation functions
+- `/home/vivado/projects/jolt/jolt-core/src/poly/unipoly.rs` - Jolt's polynomial evaluation
+- `/home/vivado/projects/jolt/jolt-core/src/subprotocols/sumcheck.rs` - Jolt's sumcheck prover

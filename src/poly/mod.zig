@@ -751,6 +751,22 @@ pub fn UniPoly(comptime F: type) type {
             return [3]F{ c0, c2, c3 };
         }
 
+        /// Evaluate a cubic polynomial at a point given Toom-Cook style evaluations [p(0), p(1), p(2), p_inf]
+        ///
+        /// First converts to coefficients [c0, c1, c2, c3], then evaluates at x using Horner's method.
+        /// This matches how Jolt's prover evaluates round polynomials.
+        pub fn evaluateToomCookAt(evals: [4]F, x: F) F {
+            // Convert to coefficients
+            const coeffs = toomCookToCoeffs(evals);
+
+            // Evaluate using Horner's method: c0 + x*(c1 + x*(c2 + x*c3))
+            var result = coeffs[3]; // c3
+            result = result.mul(x).add(coeffs[2]); // c3*x + c2
+            result = result.mul(x).add(coeffs[1]); // (c3*x + c2)*x + c1
+            result = result.mul(x).add(coeffs[0]); // ((c3*x + c2)*x + c1)*x + c0
+            return result;
+        }
+
         /// Create compressed coefficients from previous claim and degree-2 evaluations
         ///
         /// For a degree-2 polynomial p(x) = c0 + c1*x + c2*x^2:

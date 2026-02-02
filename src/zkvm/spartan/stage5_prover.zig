@@ -292,32 +292,14 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 const challenge = transcript.challengeScalar();
                 challenges[round] = challenge;
 
-                // Update individual claims via Lagrange interpolation
-                // For a constant polynomial, p(r) = constant
-                // For a zero polynomial, p(r) = 0
-
-                // Update batched claim
-                const p0 = combined_poly[0];
-                const p1 = combined_poly[1];
-                const p2 = combined_poly[2];
-                const p3 = combined_poly[3];
-
-                // Cubic Lagrange interpolation at challenge r
-                const two = F.fromU64(2);
-                const three = F.fromU64(3);
-                const six = F.fromU64(6);
-
-                const r = challenge;
-                const r_1 = r.sub(F.one());
-                const r_2 = r.sub(two);
-                const r_3 = r.sub(three);
-
-                const L0 = r_1.mul(r_2).mul(r_3).mul(six.neg().inverse().?);
-                const L1 = r.mul(r_2).mul(r_3).mul(two.inverse().?);
-                const L2 = r.mul(r_1).mul(r_3).mul(two.neg().inverse().?);
-                const L3 = r.mul(r_1).mul(r_2).mul(six.inverse().?);
-
-                current_batched_claim = p0.mul(L0).add(p1.mul(L1)).add(p2.mul(L2)).add(p3.mul(L3));
+                // Evaluate the round polynomial at the challenge point using Horner's method
+                // combined_poly contains Toom-Cook style evaluations [p(0), p(1), p(2), p_inf]
+                // where p_inf = c3 is the leading coefficient (NOT p(3)!)
+                //
+                // Previous code incorrectly used Lagrange interpolation assuming [p(0), p(1), p(2), p(3)].
+                // This now correctly converts to coefficients and evaluates using Horner's method,
+                // matching how Jolt's prover evaluates round polynomials.
+                current_batched_claim = UniPoly(F).evaluateToomCookAt(combined_poly, challenge);
 
                 // Update individual instance claims
                 // For simplicity, just track they become 0 after their rounds complete

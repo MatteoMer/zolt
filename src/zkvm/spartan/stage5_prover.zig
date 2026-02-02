@@ -2074,37 +2074,45 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     const eval_2_inst2 = read_checking_evals[1].add(raf_evals[1]);
 
                     // Combine Instance 2 with Instance 0 and 1 contributions
-                    // Instance 0 and 1 are already in combined_poly[0..4] as Toom-Cook format
-                    // We need to convert them to eval_0 and eval_2 format, then combine with Instance 2
+                    // Instance 0 and 1 are already in combined_poly[0..4] as Toom-Cook format [p(0), p(1), p(2), p_inf]
+                    //
+                    // For Instance 2 (LookupsReadRaf, degree-2):
+                    // - p_2(0) = eval_0_inst2
+                    // - p_2(1) = lookups_claim - eval_0_inst2 (from sumcheck property p(0) + p(1) = claim)
+                    // - p_2(2) = eval_2_inst2
+                    // - p_2(inf) = 0 (degree-2, no cubic term)
+                    const eval_1_inst2 = lookups_claim.sub(eval_0_inst2);
 
-                    // For Instance 0 and 1 (constant or low-degree polynomials):
-                    // combined_poly = [p(0), p(1), p(2), p_inf] in Toom-Cook format
-                    // eval_at_0 = combined_poly[0] (p(0))
-                    // eval_at_2 = combined_poly[2] (p(2))
-                    const eval_0 = combined_poly[0].add(batch2.mul(eval_0_inst2));
-                    const eval_2 = combined_poly[2].add(batch2.mul(eval_2_inst2));
+                    // Add Instance 2's full Toom-Cook contribution to combined_poly
+                    combined_poly[0] = combined_poly[0].add(batch2.mul(eval_0_inst2));
+                    combined_poly[1] = combined_poly[1].add(batch2.mul(eval_1_inst2));
+                    combined_poly[2] = combined_poly[2].add(batch2.mul(eval_2_inst2));
+                    // combined_poly[3] += 0 (Instance 2 is degree-2, no cubic term)
 
-                    // Use fromEvalsAndHint to get compressed polynomial in Jolt's format
-                    // This produces [c0, c2, 0] for degree-2 polynomial
-                    const uni_poly = UniPoly(F).fromEvalsAndHint(current_batched_claim, eval_0, eval_2);
+                    // Convert to compressed format [c0, c2, c3] using Toom-Cook encoding
+                    // This produces a degree-3 polynomial since Instance 0 (RegistersValEvaluation)
+                    // is a product of 3 linear polynomials (inc, wa, lt)
+                    const compressed = UniPoly(F).toomCookToCompressed(combined_poly);
 
                     const coeffs = try self.allocator.alloc(F, 3);
-
-                    coeffs[0] = uni_poly.coeffs[0]; // c0
-                    coeffs[1] = uni_poly.coeffs[1]; // c2
-                    coeffs[2] = uni_poly.coeffs[2]; // c3 (= 0 for degree-2)
+                    coeffs[0] = compressed[0]; // c0
+                    coeffs[1] = compressed[1]; // c2
+                    coeffs[2] = compressed[2]; // c3
 
                     // Debug: print coefficients for first round
                     if (round == 0) {
                         std.debug.print("[STAGE5 COEFF ROUND 0] c0 = {x}\n", .{coeffs[0].toBytesBE()});
                         std.debug.print("[STAGE5 COEFF ROUND 0] c2 = {x}\n", .{coeffs[1].toBytesBE()});
+                        std.debug.print("[STAGE5 COEFF ROUND 0] c3 = {x}\n", .{coeffs[2].toBytesBE()});
                         std.debug.print("[STAGE5 COEFF ROUND 0] claim = {x}\n", .{current_batched_claim.toBytesBE()});
-                        std.debug.print("[STAGE5 COEFF ROUND 0] eval_0 = {x}\n", .{eval_0.toBytesBE()});
-                        std.debug.print("[STAGE5 COEFF ROUND 0] eval_2 = {x}\n", .{eval_2.toBytesBE()});
-                        std.debug.print("[STAGE5 COEFF ROUND 0] inst01_p0 = {x}\n", .{combined_poly[0].toBytesBE()});
-                        std.debug.print("[STAGE5 COEFF ROUND 0] inst01_p2 = {x}\n", .{combined_poly[2].toBytesBE()});
+                        std.debug.print("[STAGE5 COEFF ROUND 0] combined_poly[0] (p0) = {x}\n", .{combined_poly[0].toBytesBE()});
+                        std.debug.print("[STAGE5 COEFF ROUND 0] combined_poly[1] (p1) = {x}\n", .{combined_poly[1].toBytesBE()});
+                        std.debug.print("[STAGE5 COEFF ROUND 0] combined_poly[2] (p2) = {x}\n", .{combined_poly[2].toBytesBE()});
+                        std.debug.print("[STAGE5 COEFF ROUND 0] combined_poly[3] (p_inf) = {x}\n", .{combined_poly[3].toBytesBE()});
                         std.debug.print("[STAGE5 COEFF ROUND 0] inst2_eval0 = {x}\n", .{eval_0_inst2.toBytesBE()});
+                        std.debug.print("[STAGE5 COEFF ROUND 0] inst2_eval1 = {x}\n", .{eval_1_inst2.toBytesBE()});
                         std.debug.print("[STAGE5 COEFF ROUND 0] inst2_eval2 = {x}\n", .{eval_2_inst2.toBytesBE()});
+                        std.debug.print("[STAGE5 COEFF ROUND 0] lookups_claim = {x}\n", .{lookups_claim.toBytesBE()});
                         std.debug.print("[STAGE5 COEFF ROUND 0] batch2 = {x}\n", .{batch2.toBytesBE()});
                     }
 
@@ -2124,12 +2132,16 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     challenges[round] = challenge;
 
                     // Update current_batched_claim by evaluating polynomial at challenge
-                    // p(r) = c0 + r*c1 + r^2*c2 where c1 = claim - c0 - c2
+                    // For degree-3: p(r) = c0 + r*c1 + r^2*c2 + r^3*c3
+                    // where c1 = claim - 2*c0 - c2 - c3 (from sumcheck property p(0)+p(1) = claim)
+                    // Since p(0) = c0 and p(1) = c0 + c1 + c2 + c3
                     const c0 = coeffs[0];
                     const c2_val = coeffs[1];
-                    const c1 = current_batched_claim.sub(c0).sub(c2_val);
+                    const c3_val = coeffs[2];
+                    const c1 = current_batched_claim.sub(c0).sub(c0).sub(c2_val).sub(c3_val);
                     const r2 = challenge.mul(challenge);
-                    current_batched_claim = c0.add(challenge.mul(c1)).add(r2.mul(c2_val));
+                    const r3 = r2.mul(challenge);
+                    current_batched_claim = c0.add(challenge.mul(c1)).add(r2.mul(c2_val)).add(r3.mul(c3_val));
 
                     // Debug: print challenges for first 3 rounds
                     if (round < 3) {

@@ -2,60 +2,76 @@
 
 ## Status: IN PROGRESS - Stage 5 sumcheck output doesn't match expected
 
-## Session 6 Progress
+## Session 6 Progress (Continuation)
 
-### Fixed Issues
-1. **ra_chunks computation**: Changed from recomputing claims using eq(r_cycle', j) * ra_chunk_weights[i][j]
-   to using ra_chunk_weights[i][0] after binding (matching Jolt's final_sumcheck_claim())
+### Root Cause Identified!
 
-### Current Issue: Sumcheck output_claim doesn't match expected_claim
+**The `r_reduction` values from Stage 3 (InstructionClaimReduction) don't match between Zolt and Jolt!**
 
-The verification failure shows:
+This is the actual root cause of the Stage 5 verification failure.
+
+### Evidence
+
+Jolt's `r_reduction[0]` (bytes 16-31 LE):
 ```
-output_claim:   [c8, d4, 1b, fc, ...]  <- What the sumcheck polynomial chain produces
-expected_claim: [e5, b7, 3b, 32, ...]  <- Computed from eq * ra_claim * (val + gamma * raf)
-```
-
-The expected_claim formula is:
-```
-eq_eval_r_reduction * ra_claim * (val_claim + gamma * raf_claim)
+0d 8d 89 b0 c0 ef 00 b0 84 a4 8a 1b 0b 14 34 07
 ```
 
-### What's Working
-- ra_chunks claims are correctly serialized and match what Jolt receives
-- Sumcheck property p(0)+p(1)=claim holds for all 8 cycle rounds
-- Table flags, raf_flag claims appear to match
-
-### What's Still Wrong
-- The polynomial coefficients themselves must be wrong (even though p(0)+p(1)=claim)
-- This means the polynomial p(X) has wrong shape - different from what Jolt expects
-
-### Key Hypothesis
-
-The issue is likely in how the polynomial is computed during cycle rounds:
-1. The eq_prefix extraction via dividing by (1-r_round) might not match Jolt's split-eq approach
-2. The product polynomial structure might be different
-
-### Investigation Needed
-
-1. Compare first cycle round (128) polynomial coefficients between Zolt and Jolt
-2. Verify the eq_prefix computation matches the expected structure
-3. Check if combined_vals rematerialization is correct
-4. Compare the claim update chain: how claim evolves through rounds
-
-### Debug Values Comparison
-
-Jolt's ra_claims (LE, first 16 bytes):
+Zolt's `r_reduction[0]` (toBytesBE()[16..32]):
 ```
-ra_claims[0] = [a5, 5e, c7, 72, 66, 8e, 13, 27, 21, 0d, f3, 0e, 35, 26, 9b, 11]
+a2 70 af 2a 26 b8 57 9a 38 19 e3 4d 5f 35 02 0d
 ```
 
-Zolt's ra_chunks (BE, first 16 bytes):
+These are COMPLETELY DIFFERENT values!
+
+### What We Verified As Matching
+
+1. **Polynomial coefficients at round 128**: MATCH ✓
+2. **Challenges for rounds 128-135**: ALL MATCH ✓
+3. **ra_claims (InstructionRa)**: MATCH ✓
+4. **table_flags (LookupTableFlag)**: MATCH ✓
+5. **raf_flag (InstructionRafFlag)**: MATCH ✓
+6. **Instance 0 (RegistersValEvaluation) claims**: MATCH ✓
+7. **Instance 1 (RamRaClaimReduction) claims**: MATCH ✓
+8. **Stage 5 input claims**: MATCH ✓
+
+### Why This Causes Failure
+
+The expected_claim for Instance 2 (InstructionReadRaf) is:
 ```
-ra_chunks[0] = [17, 9b, 26, 35, 0e, f3, 0d, 21, 27, 13, 8e, 66, 72, c7, 5e, a5]
+expected = eq(r_reduction, r_cycle') * ra_claim * (val_claim + gamma * raf_claim)
 ```
 
-These are the SAME values (endianness reversed) - serialization is correct!
+The `eq(r_reduction, r_cycle')` term uses `r_reduction` from Stage 3. If Zolt's `r_reduction` differs from what Jolt computes, then:
+1. The eq polynomial in the sumcheck uses different values
+2. The expected_claim formula uses Jolt's computed r_reduction
+3. These don't match → verification fails
+
+### What This Means
+
+The polynomial coefficients match because Zolt computes the sumcheck correctly using ITS r_reduction values. The challenges match because they're derived from matching coefficients via transcript.
+
+But the expected_claim uses Jolt's RECOMPUTED r_reduction from the transcript. Since Zolt's Stage 3 coefficients must differ from what Jolt expects, Jolt's verifier derives different r_reduction values than what Zolt used to compute the Stage 5 polynomial.
+
+### Next Steps
+
+1. **Investigate Stage 3 (InstructionClaimReduction) sumcheck**
+   - Compare polynomial coefficients at each round
+   - Find where the divergence starts
+   - This sumcheck has 8 rounds (n_cycle_vars)
+
+2. **Check what feeds into Stage 3**
+   - The input claim for InstructionClaimReduction
+   - The polynomial structure
+
+3. **Trace the transcript state**
+   - Compare transcript state before Stage 3 between Zolt and Jolt
+   - Any earlier mismatch will cause all subsequent challenges to differ
+
+### Key Files for Stage 3 Investigation
+
+- `/home/vivado/projects/zolt/src/zkvm/claim_reductions/instruction_lookups.zig`
+- `/home/vivado/projects/jolt/jolt-core/src/zkvm/instruction_lookups/claim_reduction.rs`
 
 ### Test Commands
 
@@ -71,10 +87,3 @@ cp /tmp/zolt_*.bin /home/vivado/projects/jolt/
 cd /home/vivado/projects/jolt
 cargo test --package jolt-core --features zolt-debug test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
-
-### Key Files
-
-- `/home/vivado/projects/zolt/src/zkvm/spartan/stage5_prover.zig` - Stage 5 prover
-- `/home/vivado/projects/zolt/src/poly/mod.zig` - UniPoly with finishMlesProductSumFromEvals
-- `/home/vivado/projects/jolt/jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs` - InstructionReadRaf prover/verifier
-- `/home/vivado/projects/jolt/jolt-core/src/subprotocols/mles_product_sum.rs` - Jolt's finish function

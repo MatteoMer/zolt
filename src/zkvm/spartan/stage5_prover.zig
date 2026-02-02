@@ -2999,12 +2999,14 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // Convert to compressed format [c0, c2, c3, ..., c10]
                     const final_compressed = try UniPoly(F).toCompressed(self.allocator, combined_coeffs);
 
-                    // Debug: print first 3 compressed coefficients (excluding linear term)
+                    // Debug: print first 3 compressed coefficients (excluding linear term) in LE format
                     if (round == LOOKUPS_LOG_K) { // Only for round 128
-                        std.debug.print("[STAGE5 CYCLE] Round {} compressed coeffs (first 3):\n", .{round});
-                        for (0..@min(3, final_compressed.len)) |k| {
-                            std.debug.print("  coeff[{}] = {any}\n", .{ k, final_compressed[k].toBytesBE() });
+                        std.debug.print("[STAGE5 CYCLE ZOLT] Round {} compressed coeffs (LE, comparing to Jolt):\n", .{round});
+                        for (0..@min(4, final_compressed.len)) |k| {
+                            // Jolt displays LE bytes from arkworks serialization
+                            std.debug.print("  coeff[{}] = {any}\n", .{ k, final_compressed[k].toBytes() });
                         }
+                        std.debug.print("  current_batched_claim (LE) = {any}\n", .{current_batched_claim.toBytes()});
                     }
 
                     try proof.compressed_polys.append(self.allocator, .{
@@ -3137,13 +3139,24 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         }
                     }
 
-                    // Update lookups_claim: recompute ra_weights[0] from the bound chunks
+                    // Update lookups_claim: recompute the full sum after binding
+                    // The claim for the next round is: Σ_j eq[j] * Π_c ra_c[j] * val[j]
+                    // where the sum is over all remaining j indices after binding
+                    const half_size = T >> @intCast(lookups_round + 1);
+                    lookups_claim = F.zero();
+                    for (0..half_size) |j| {
+                        var ra_prod = F.one();
+                        for (0..ra_num_chunks) |c| {
+                            ra_prod = ra_prod.mul(ra_chunk_weights[c][j]);
+                        }
+                        lookups_claim = lookups_claim.add(lookups_eq_evals[j].mul(ra_prod).mul(lookups_combined_vals[j]));
+                    }
+                    // Also update lookups_ra_weights for convenience
                     var final_ra = F.one();
                     for (0..ra_num_chunks) |c| {
                         final_ra = final_ra.mul(ra_chunk_weights[c][0]);
                     }
                     lookups_ra_weights[0] = final_ra;
-                    lookups_claim = lookups_eq_evals[0].mul(final_ra).mul(lookups_combined_vals[0]);
 
                     // Debug: print challenges for cycle rounds (128-135)
                     if (round >= LOOKUPS_LOG_K) {

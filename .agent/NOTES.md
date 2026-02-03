@@ -1,58 +1,116 @@
-# Session 18 Notes - Stage 5 Deep Dive
+# Session 24 Notes - Stage 5 MontU128Challenge Analysis
 
 ## Summary
 
-Investigated the Stage 5 sumcheck polynomial mismatch. The output_claim from sumcheck doesn't match expected_claim from opening claims.
+Deep investigation of how MontU128Challenge values are serialized and used in the Stage 5 verification process. The key finding is that opening claims match but the sumcheck polynomial computation produces wrong values.
 
-## Key Findings
+## MontU128Challenge Format (Critical)
 
-### 1. Code Structure
-- Stage 5 has 136 rounds: 128 address + 8 cycle
-- Three instances batched: RegistersValEvaluation, RamRaClaimReduction, LookupsReadRaf
-- Cycle rounds use `evalLinearProd9` for 9-factor products
+Jolt's `MontU128Challenge<F>` stores a 125-bit value in two u64 limbs:
+- `low`: bits 0-63
+- `high`: bits 64-124 (top 3 bits always zero)
 
-### 2. Polynomial Degree
-- 9 linear factors → product polynomial is degree 9
-- `finishMlesProductSumFromEvals` multiplies by eq(X, r) → degree 10
-- 11 coefficients total, which is correct
-
-### 3. combined_val Construction
-At rematerialization (start of cycle rounds):
+### Serialization
+When serialized via `CanonicalSerialize`:
+```rust
+fn to_bigint_array(&self) -> [u64; 4] {
+    [0, 0, self.low, self.high]
+}
 ```
-combined_val[j] = table_values_at_r_addr[table(j)] + raf_val(j)
+This becomes 32 bytes: 16 zeros + 8 bytes for low (LE) + 8 bytes for high (LE)
+
+### Conversion to Fr
+```rust
+impl From<MontU128Challenge<F>> for F {
+    fn from(challenge: MontU128Challenge<F>) -> F {
+        Fr::from_bigint_unchecked(BigInt::new([0, 0, low, high])).unwrap()
+    }
+}
 ```
-where:
-- `table_values_at_r_addr` = table MLE at bound r_address
-- `raf_val(j)` = γ*left + γ²*right (interleaved) or γ²*identity
+**IMPORTANT**: `from_bigint_unchecked` does NOT do Montgomery conversion! The limbs become the internal representation directly.
 
-### 4. Opening Claims vs Sumcheck Output
-
-The verifier expects:
+### Zolt Equivalent
+`challengeScalar128Bits()` produces:
+```zig
+const result = F{ .limbs = .{ 0, 0, masked_low, masked_high } };
 ```
-expected = eq_r_reduction * ra_claim * (val_claim + γ * raf_claim)
+This matches Jolt's format.
+
+## r_reduction Source
+
+The `r_reduction` values come from Stage 2 InstructionClaimReduction sumcheck:
+
+1. **Stage 2** has 5 instances, Instance 4 is InstructionClaimReduction with 8 rounds
+2. **Sumcheck challenges** are `F::Challenge` (MontU128Challenge)
+3. **cache_openings** stores them in `OpeningPoint<BIG_ENDIAN, F>` via `normalize_opening_point`:
+   ```rust
+   OpeningPoint::<LITTLE_ENDIAN, F>::new(challenges.to_vec()).match_endianness()
+   ```
+4. **Stage 5 verifier** retrieves via:
+   ```rust
+   let r_reduction = accumulator.get_virtual_polynomial_opening(
+       VirtualPolynomial::LookupOutput,
+       SumcheckId::InstructionClaimReduction,
+   ).0.r;
+   ```
+
+### Jolt Debug Values
+```
+sumcheck_challenges[7] (as F): [0d, 02, 35, 5f, 4d, e3, 19, 38, ...]
+opening_point.r[0] (Challenge): [00, 00, ..., 0d, 8d, 89, b0, c0, ef, 00, b0, 84, a4, 8a, 1b, 0b, 14, 34, 07]
 ```
 
-The sumcheck computes:
+Note: sumcheck_challenges[7] becomes r[0] after reversal (LE to BE).
+
+## Stage 5 Instance Breakdown
+
+Stage 5 has 3 instances:
+1. **RegistersValEvaluation** (Instance 0)
+   - expected_claim = `[74, f7, 8e, 8c, ...]`
+2. **RamRaClaimReduction** (Instance 1)
+   - expected_claim = `[c9, 1b, b9, ac, ...]`
+3. **InstructionReadRaf** (Instance 2)
+   - expected_claim = `[02, ad, 67, 08, ...]`
+
+## InstructionReadRaf expected_output_claim Formula
+
+```rust
+eq_eval_r_reduction * ra_claim * (val_claim + gamma * raf_claim)
 ```
-output = Σ_j eq(r_reduction, j) * ra(j) * combined_val(j)
+
+Where:
+- `eq_eval_r_reduction` = eq(r_reduction, r_cycle_prime)
+- `ra_claim` = product of InstructionRa(i) claims
+- `val_claim` = sum of table_flag_claims[i] * table_evals[i]
+- `raf_claim` = (1 - raf_flag) * (left + gamma * right) + raf_flag * gamma * identity
+
+## The Mismatch
+
+- **output_claim** (from Zolt sumcheck): `[ed, a5, f6, bf, ...]`
+- **expected_claim** (from Jolt verifier): `[b2, 8f, 91, 24, ...]`
+
+Since opening claims (ra_claims, table_flags, etc.) match between proof and verifier, the issue must be in the sumcheck polynomial computation itself.
+
+## Round 128-135 Debug (Cycle Rounds)
+
+From Jolt verification debug:
+```
+Stage5 Round 128 (cycle var 0): challenge: [c5, 4c, 6c, 55, ...]
+Stage5 Round 128 coeffs:
+  [0]: [05, b5, df, f2, d3, 49, ca, d8, ...]
+  [1]: [54, c2, 7c, f5, aa, 45, 65, 80, ...]
+  [2]: [49, 36, 44, b5, 9d, f1, de, 64, ...]
 ```
 
-After binding, these should equal if combined_val is correct.
+These are the coefficients from Zolt's proof that the verifier is using. The question is whether Zolt computed them correctly.
 
-## Potential Issues to Investigate
+## Next Steps
 
-1. **raf_val formula**: Is `γ*left + γ²*right` correct for interleaved operands?
-   - Jolt might use a different batching formula
+1. Add debug to Zolt's Stage 5 cycle rounds to print:
+   - `eq_evals` values at each round
+   - `combined_vals` values at each round
+   - `ra_chunk_weights` after binding
 
-2. **eq_prefix computation**: The extraction `eq_0 / (1 - r_round)` assumes a specific eq structure
+2. Compare with Jolt's internal values during prover execution
 
-3. **ra_chunk_weights materialization**: Need to verify expanding table product matches Jolt
-
-4. **Transcript ordering**: Any subtle difference in coefficient serialization
-
-## Next Session Tasks
-
-1. Add debugging to print exact coefficients for rounds 128-135
-2. Compare byte-by-byte with Jolt's debug output
-3. Verify raf_val formula matches Jolt's implementation
-4. Check if combined_val properly incorporates all terms
+3. Focus on the `evalLinearProd9` and `finishMlesProductSumFromEvals` functions

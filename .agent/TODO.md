@@ -1,53 +1,65 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 20 - Config Serialization Fix
+## Status: Session 21 - Dory Proof Serialization Issue
 
 ## Current Progress
 
-### Session 20 Fix
-Fixed proof config serialization format. Jolt expects:
-1. trace_length (usize - 8 bytes)
-2. ram_K (usize - 8 bytes)
-3. bytecode_K (usize - 8 bytes)
-4. ReadWriteConfig (4 x u8 = 4 bytes)
-5. OneHotConfig (2 x u8 = 2 bytes)
-6. DoryLayout (1 x u8 = 1 byte)
+### Session 21 Fixes
+1. **SumcheckId**: Fixed to 22 variants to match Jolt (committed)
+   - UNTRUSTED_ADVICE_BASE = 0
+   - TRUSTED_ADVICE_BASE = 22
+   - COMMITTED_BASE = 44
+   - VIRTUAL_BASE = 66
 
-**Total config: 31 bytes**
+2. **Proof Config**: All 5 config fields are usize (8 bytes each)
 
-Zolt was incorrectly writing:
-- trace_length, ram_K, bytecode_K (correct)
-- log_k_chunk as usize (8 bytes) - WRONG (should be u8)
-- lookups_ra_virtual_log_k_chunk as usize (8 bytes) - WRONG (should be u8)
-- Missing rw_config entirely
-- Missing dory_layout
+### Current Issue: Dory Proof at Position 45183
 
-This caused Jolt to read garbage values like trace_length=1099511627776 (2^40).
+The stepwise deserialization test shows all components pass until the Dory opening proof:
+- Claims: OK (142 claims)
+- Commitments: OK
+- Stage 1-7 sumchecks: OK
+- Dory opening proof: FAILS with memory allocation error (tries to allocate 508GB!)
 
-### Completed
-1. Fixed serialization format in jolt_serialization.zig
-2. Now writes ReadWriteConfig, OneHotConfig as u8 arrays
-3. Added dory_layout field
+**Root Cause Analysis**:
+- Position 45183 should be the start of the Dory proof
+- Bytes at 45183: `9592160e8cd56e98...` - doesn't look like a GT element
+- Bytes before 45183: all zeros (suspicious!)
+- The first 8 bytes are being interpreted as num_rounds = 10983951338711716501
 
-### Pending
-1. Regenerate proof with new serialization
-2. Test with Jolt verifier
-3. Debug Stage 5 sumcheck if still failing
+**Expected Dory proof format (from dory-pcs crate ark_serde.rs)**:
+1. VMV message: c (GT=384 bytes), d2 (GT=384 bytes), e1 (G1=32 compressed)
+2. num_rounds (u32)
+3. First messages per round: d1_left, d1_right, d2_left, d2_right (all GT), e1_beta (G1), e2_beta (G2)
+4. Second messages per round: c_plus, c_minus (GT), e1_plus, e1_minus (G1), e2_plus, e2_minus (G2)
+5. Final message: e1 (G1), e2 (G2)
+6. nu (u32), sigma (u32)
 
-## Previous Sessions
-- Session 19: Fixed SumcheckId mismatch, proof deserialization
-- Session 18: Investigated Stage 5 output_claim mismatch
-- Session 17: Verified opening claims match
-- Session 16: Fixed suffix MLE issues
-- Sessions 1-15: Initial implementation and debugging
+**Investigation needed**:
+- Is `serializeJoltProofWithDory` (mod.zig line 1464-1499) actually writing the Dory proof?
+- Check if `writeDoryProof` is being called
+- Compare proof file size before/after the fix
+
+### Verified Working
+- Claims parsing: All 142 claims deserialize successfully
+- Commitments: Vec<GT> deserializes correctly
+- All 7 stage sumchecks: Deserialize correctly
+- UniSkip proofs: Deserialize correctly
+
+### Next Steps
+1. Add debug print to verify Dory proof is written
+2. Check if the serialization code path is correct
+3. May need to check `jolt_serialization.zig` writeDoryProof function
+
+## Key Files
+- Zolt Dory serialization: `src/zkvm/jolt_serialization.zig` lines 148-185
+- Zolt proof serialization: `src/zkvm/mod.zig` lines 1464-1499
+- Jolt Dory format: dory-pcs crate `ark_serde.rs` lines 252-295
 
 ## Test Commands
-
 ```bash
-# Generate proof
-./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format --export-preprocessing logs/zolt_preprocessing.bin -o logs/zolt_proof_dory.bin
-
-# Cross-verify
-cp logs/zolt_proof_dory.bin /tmp/ && cp logs/zolt_preprocessing.bin /tmp/
-cd ../jolt && cargo test -p jolt-core --lib test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
+# Generate proof and test
+./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o logs/zolt_proof_dory.bin
+cp logs/zolt_proof_dory.bin /tmp/
+cd jolt && cargo test -p jolt-core --lib test_stepwise_deserialize -- --ignored --nocapture
 ```

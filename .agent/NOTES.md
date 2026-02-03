@@ -1,4 +1,4 @@
-# Session 25 Notes - Stage 5 Polynomial Coefficient Analysis
+# Session 25/26 Notes - Stage 5 Polynomial Coefficient Analysis
 
 ## Summary
 
@@ -80,6 +80,52 @@ Differences:
 - Divides by `(1 - r_round)` to extract eq_prefix
 - No separate E_in/E_out/current_scalar structure
 
+## Session 26 Analysis
+
+### Mathematical Equivalence Investigation
+
+Traced through the eq_prefix computation:
+
+**For cycle round 0:**
+- Zolt: `eq_prefix[j] = eq_evals[2*j] / (1 - r_round)` where `r_round = r_reduction[7]`
+- This extracts `eq(j, r_reduction[0:7])` - the eq factor without the current variable
+
+**For Jolt:**
+- `current_scalar = 1` (no bound variables at start)
+- `E_in * E_out` covers all 8 cycle variables in split form
+- Total eq = `current_scalar * E_out[j_out] * E_in[j_in]` = `eq(j, r_reduction)`
+
+After factoring out the current round's eq factor, these should be equivalent.
+
+### Key Insight: r_round Source
+
+Both Jolt and Zolt use `r_reduction` (from Stage 3 claim reduction) for the eq polynomial, NOT the sumcheck challenges. This is correct because:
+- `r_reduction` is the "target" point the prover is proving evaluation at
+- Sumcheck challenges are different - they determine WHERE to evaluate each round's polynomial
+
+### Binding vs Current Scalar
+
+**Jolt's bind() method:**
+- Multiplies `current_scalar *= eq(w[i], r)`
+- Decrements `current_index`
+- Pops E_in or E_out tables
+
+**Zolt's bindLookupsChallenge:**
+- `eq_evals[i] = (1-r) * eq_evals[2*i] + r * eq_evals[2*i+1]`
+- Standard multilinear binding
+
+These are mathematically equivalent but structured differently.
+
+### The Core Question
+
+Why does `sum_evals` differ between Zolt and Jolt?
+
+Possibilities:
+1. `eq_prefix` computation error (division by zero? wrong r_round?)
+2. `combined_val` rematerialization error
+3. `ra_chunk_weights` computation error
+4. Structural difference in how sums are accumulated (E_in/E_out vs flat loop)
+
 ## MontU128Challenge Arithmetic
 
 Verified that both Jolt and Zolt handle MontU128Challenge the same way:
@@ -106,26 +152,24 @@ If Zolt's polynomial differs from what Jolt would compute:
 - But p(challenge) produces a DIFFERENT next claim
 - After 136 rounds, the accumulated difference becomes the mismatch
 
-## Likely Root Causes
-
-1. **eq_prefix computation**: The division approach may not match Jolt's split eq structure
-
-2. **combined_val rematerialization**: At cycle round start, Zolt rematerializes combined_vals. This might differ from Jolt's `init_log_t_rounds()`.
-
-3. **ra_chunk_weights**: The expanding table lookup for RA polynomial chunks might have issues.
-
-4. **Binding order**: Although both claim LowToHigh, the details of how variables are bound might differ.
-
 ## Next Steps
 
-1. Add debug to print Jolt prover's polynomial coefficients during cycle rounds
-2. Run a test that exercises Jolt's prover (not just verifier)
-3. Compare eq_prefix values between Zolt and Jolt
-4. Check combined_val values at cycle round start
-5. Verify ra_chunk_weights match between implementations
+1. Add debug to Zolt to print `sum_evals` at cycle round 0
+2. Run Jolt prover to capture expected `sum_evals`
+3. Compare value-by-value to find the divergence point
+4. Focus on `combined_val` and `ra_chunk_weights` as likely sources of error
 
 ## Files to Study
 
 - Jolt: `jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs` lines 600-836
 - Jolt: `jolt-core/src/poly/split_eq_poly.rs` (GruenSplitEqPolynomial)
 - Zolt: `src/zkvm/spartan/stage5_prover.zig` lines 2700-3000
+
+## Test Commands
+
+```bash
+# Jolt verification with debug
+cd jolt && cargo test -p jolt-core --features zolt-debug --lib test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
+
+# NOTE: Zolt tests OOM on this machine - use Jolt verification for debugging
+```

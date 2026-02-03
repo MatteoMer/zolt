@@ -1,112 +1,61 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 25 - Stage 5 Polynomial Coefficient Investigation
+## Status: Session 26 - Stage 5 Deep Analysis
 
 ## Current Issue
 
 Stage 5 verification fails - sumcheck output_claim doesn't match expected_claim.
 
-**From Jolt test (Session 25):**
+**From Jolt test:**
 - output_claim (from sumcheck): `[ed, a5, f6, bf, 30, c4, 10, f8, 59, ce, db, ef, ee, 23, 2f, 96, ...]`
 - expected_claim (verifier computed): `[b2, 8f, 91, 24, 33, 0c, b4, 56, b9, 08, 89, 4c, fd, af, 54, 11, ...]`
 
-**Expected claims per instance:**
-- Instance 0 (RegistersValEvaluation): `[74, f7, 8e, 8c, ...]`
-- Instance 1 (RamRaClaimReduction): `[c9, 1b, b9, ac, ...]`
-- Instance 2 (InstructionReadRaf): `[02, ad, 67, 08, ...]`
+## Key Analysis This Session
 
-**Batching coefficients:**
-- coeff[0]: `[04, 97, 3d, 64, ...]`
-- coeff[1]: `[50, 2a, 19, a0, ...]`
-- coeff[2]: `[45, 50, 75, e2, ...]`
+### Mathematical Verification
 
-## Key Findings This Session
+Traced through the cycle round polynomial computation in both Jolt and Zolt:
 
-### 1. MontU128Challenge Arithmetic Verified
+1. **Jolt's GruenSplitEqPolynomial**:
+   - Uses `E_in_current()`, `E_out_current()`, `current_scalar`
+   - Nested loop structure: inner loop accumulates with E_in, outer multiplies by E_out
+   - Finally multiplies by `current_scalar`
 
-When Jolt does `F::one() - r_round` where r_round is Challenge:
-- The `-` operator converts Challenge to F via `Into::<F>::into()`
-- This uses `from_bigint_unchecked([0, 0, low, high])` - no Montgomery conversion
-- The result is a proper F value
+2. **Zolt's approach**:
+   - Uses flat `lookups_eq_evals[]` array
+   - Computes `eq_prefix = eq_0 / (1 - r_round)` to extract prefix without current variable
+   - Single loop over all indices
 
-When Jolt does `F * Challenge`:
-- Uses `mul_by_hi_2limbs(Challenge.low, Challenge.high)`
-- This is the optimized multiplication
+3. **Mathematical equivalence**:
+   - Should be equivalent: `eq_prefix[j] = current_scalar * E_out[j_out] * E_in[j_in]`
+   - Both use `r_reduction` (from Stage 3) for the eq polynomial
+   - Both bind polynomials with sumcheck challenges
 
-Zolt's implementation matches this:
-- `F.one().sub(rj)` for (1 - r)
-- `result.mulHiBigIntU128(rj.limbs)` for multiplication
+### Verified Components
 
-### 2. GruenSplitEqPolynomial Structure
+- MontU128Challenge arithmetic matches between Jolt and Zolt
+- `raf_interleaved` and `raf_identity` formulas match
+- Binding operations are mathematically equivalent
 
-Jolt uses a sophisticated split eq polynomial that maintains:
-- `E_in_vec`: precomputed eq tables for inner variables
-- `E_out_vec`: precomputed eq tables for outer variables
-- `current_scalar`: accumulated eq for already-bound variables
+### Suspected Remaining Issues
 
-The cycle round computation (lines 790-834 in read_raf_checking.rs):
-```rust
-for (j_out, e_out) in self.eq_r_reduction.E_out_current() {
-    for (j_in, e_in) in self.eq_r_reduction.E_in_current() {
-        // Use e_in directly in pairs
-        *val_pair = (*e_in * v_at_0, *e_in * v_at_1);
-    }
-    // Multiply by e_out at the end
-    result *= e_out;
-}
-// Then multiply by current_scalar
-sum_evals *= current_scalar;
-finish_mles_product_sum_from_evals(...)
-```
+1. **combined_val rematerialization** - The lookup table values at r_addr might differ
+2. **ra_chunk_weights** - The expanding table lookups might have subtle issues
+3. **Structural difference** - The nested E_in/E_out loop vs flat loop might not be equivalent after binding
 
-### 3. Zolt's Simplified Approach
+## Next Steps (Priority Order)
 
-Zolt uses a simpler approach:
-- `lookups_eq_evals[]` contains full eq evaluations for all cycles
-- For each round, extracts `eq_prefix = eq_0 / (1 - r_round)`
-- Uses `eq_prefix * combined_val` in the polynomial
-
-This SHOULD be mathematically equivalent but the structure differs.
-
-### 4. Sumcheck Passes But Final Claim Differs
-
-All 136 sumcheck rounds verify correctly (the verifier doesn't fail early).
-This means the polynomial coefficients are **self-consistent** (p(0) + p(1) = claim).
-But the final claim after all rounds differs from what Jolt expects.
-
-This indicates the issue is in **how Zolt computes the polynomial during the sumcheck**,
-not in the verification of those coefficients.
-
-## Likely Root Cause
-
-The polynomial computation for Instance 2 (InstructionReadRaf) during cycle rounds
-produces different coefficients than Jolt. The candidates are:
-
-1. **eq_prefix computation** - The division `eq_0 / (1 - r_round)` might not match
-   Jolt's split eq polynomial structure.
-
-2. **combined_val rematerialization** - At the start of cycle rounds, combined_vals
-   are rematerialized. This might differ from Jolt's approach.
-
-3. **ra_chunk_weights materialization** - The expanding table lookup for RA chunks
-   might be computing wrong values.
-
-4. **Batching formula** - The way Instance 2's degree-10 polynomial is batched with
-   Instance 0 and 1's degree-3 polynomials.
-
-## Next Steps
-
-1. Add debug to compare Zolt's cycle round polynomial coefficients with Jolt prover
-2. Compare eq_prefix values with Jolt's E_in_current() values
-3. Verify combined_val rematerialization matches Jolt's init_log_t_rounds()
-4. Check if the ra_chunk_weights from expanding tables are correct
+1. [IN PROGRESS] Add detailed debug to Zolt to print `sum_evals` at cycle round 0
+2. [PENDING] Run Jolt prover to capture expected `sum_evals` for comparison
+3. [PENDING] Compare `combined_val` values between Zolt and Jolt
+4. [PENDING] Verify `ra_chunk_weights` from expanding tables match
 
 ## Test Commands
 ```bash
 # Jolt verification with debug
-cd jolt && cargo test -p jolt-core --features zolt-debug --lib test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture 2>&1 | grep -E "Stage5|output_claim|expected_claim"
+cd jolt && cargo test -p jolt-core --features zolt-debug --lib test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 
-# NOTE: Zolt test OOMs on this machine - use Jolt verification for debugging
+# NOTE: Zolt tests OOM on this machine - use Jolt verification for debugging
 ```
 
 ## Key Files
@@ -114,3 +63,13 @@ cd jolt && cargo test -p jolt-core --features zolt-debug --lib test_verify_zolt_
 - Jolt InstructionReadRaf: `jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs` (lines 775-836)
 - Jolt split eq poly: `jolt-core/src/poly/split_eq_poly.rs` (lines 473-501 for gruen_poly_from_evals)
 - Jolt mles_product_sum: `jolt-core/src/subprotocols/mles_product_sum.rs` (lines 235-269)
+
+## Debug Locations in Code
+
+### Jolt (already has zolt-debug feature)
+- `read_raf_checking.rs:835-864` - prints sum_evals, current_scalar, r_round
+- `read_raf_checking.rs:868-878` - prints polynomial coefficients
+
+### Zolt (needs more debug)
+- `stage5_prover.zig:2950-2963` - basic cycle round debug
+- Need to add: sum_evals values, eq_prefix for first few j, combined_val for first few j

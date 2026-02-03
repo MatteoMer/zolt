@@ -2536,12 +2536,13 @@ pub fn ProofConverter(comptime F: type) type {
                 //     lt_eval += (1-x) * y * eq_term
                 //     eq_term *= (1-x-y+2xy) = eq(x, y)
 
-                // Extract ValEvaluation challenges (last 8 rounds of Stage 4)
+                // Extract ValEvaluation challenges (last n_cycle_vars rounds of Stage 4)
                 const val_eval_offset = 7; // ValEvaluation starts at round 7
-                var val_eval_r_be: [8]F = undefined; // Normalized to BE (reversed)
-                for (0..8) |i| {
-                    // Reverse: r_be[0] = challenge[7], r_be[1] = challenge[6], ...
-                    val_eval_r_be[i] = stage4_r_sumcheck[val_eval_offset + 7 - i];
+                var val_eval_r_be = try self.allocator.alloc(F, n_cycle_vars); // Normalized to BE (reversed)
+                defer self.allocator.free(val_eval_r_be);
+                for (0..n_cycle_vars) |i| {
+                    // Reverse: r_be[0] = challenge[n_cycle_vars-1], r_be[1] = challenge[n_cycle_vars-2], ...
+                    val_eval_r_be[i] = stage4_r_sumcheck[val_eval_offset + n_cycle_vars - 1 - i];
                 }
 
                 // r_cycle for ValEvaluation comes from RamVal @ RamReadWriteChecking (Stage 2)

@@ -1,92 +1,74 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 32 - Stage 5 InstructionReadRaf Verification Analysis
+## Status: Session 33 - Serialization Format Fix
 
-## KEY DISCOVERY - DIFFERENT RUNS PRODUCED DIFFERENT VALUES
+## CRITICAL BUG FIXED - Proof Config Serialization
 
-The log files `/tmp/zolt_debug.log` (16:34) and `logs/jolt_verify.log` (13:49) are from DIFFERENT proof generations. This explains why individual InstructionRa claims appeared to mismatch - they were comparing different runs.
+Fixed a critical serialization bug where `one_hot_config` and `rw_config` were being written as `usize` (8 bytes each) instead of `u8` (1 byte each).
 
-## CRITICAL FINDING
+### Changes Made
+1. `src/zkvm/mod.zig` lines 1390-1410: Fixed `serializeJoltProofWithDory()` to write:
+   - `trace_length`, `ram_K`, `bytecode_K` as usize (8 bytes each)
+   - `rw_config` as 4 u8 fields (4 bytes total)
+   - `one_hot_config` as 2 u8 fields (2 bytes total)
+   - `dory_layout` as u8 (1 byte)
 
-**Stage 5 sumcheck verification fails** at Instance 2 (InstructionReadRaf) with output_claim mismatch:
+2. `src/zkvm/mod.zig` lines 1385-1397: Fixed first serialization path with same fix
+
+3. `src/zkvm/proof_converter.zig` line 2541: Fixed array size bug - `val_eval_r_be` now uses `n_cycle_vars` instead of hardcoded 8
+
+## Current Issue
+
+Jolt deserialization now fails with:
 ```
-output_claim:   [ed, a5, f6, bf, 30, c4, 10, f8, 59, ce, db, ef, ee, 23, 2f, 96]... (LE)
-expected_claim: [b2, 8f, 91, 24, 33, 0c, b4, 56, b9, 08, 89, 4c, fd, af, 54, 11]... (LE)
-```
-
-## Analysis Summary
-
-### What's Working
-1. **Polynomial coefficients match** - Rounds 0, 1, 2 sumcheck polynomials are identical
-2. **InstructionRa claims serialize correctly** - When comparing same run, high 16 bytes match
-3. **Serialization format is correct** - LE field element encoding matches arkworks
-
-### What's NOT Working
-1. **ra_claim product differs** between Zolt's computed product and what Jolt expects
-2. The `expected_output_claim` computation uses the wrong ra_claim value
-
-### Expected Output Claim Formula
-```
-expected_output_claim = eq_eval_r_reduction * ra_claim * (val_claim + gamma * raf_claim)
+Failed to deserialize proof: the input buffer contained invalid data
 ```
 
-Where:
-- `ra_claim = Π_{i=0}^{7} InstructionRa(i)` (product of 8 RA chunk claims)
-- `val_claim = Σ_{i=0}^{41} LookupTableFlag(i) * table_i_eval`
-- `raf_claim = (1 - raf_flag) * (left_op + gamma * right_op) + raf_flag * gamma * identity`
+The claims deserialize successfully (142 claims), but something after that fails.
 
-## Current State
+## Hypothesis
 
-- Fresh proof generation started at 19:53, still running
-- Need to wait for it to complete, then run Jolt verifier immediately
-- Compare InstructionRa claims from the SAME proof run
+The Jolt proof deserialization expects fields in this order:
+1. opening_claims ✓
+2. commitments - ???
+3. stage sumcheck proofs
+4. ...
+5. config fields at the end
+
+The issue is likely that Zolt is writing commitments or sumcheck proofs in a different format than Jolt expects.
 
 ## Next Steps
 
-1. [ ] Wait for fresh proof generation to complete
-2. [ ] Run Jolt verifier immediately on the fresh proof
-3. [ ] Compare InstructionRa claims from same run (full 32 bytes)
-4. [ ] Identify which claim(s) differ and why
-5. [ ] Fix the ra_chunk_weights computation if needed
+1. [ ] Debug Jolt's proof deserialization to see exactly where it fails
+2. [ ] Compare Zolt's commitment serialization with Jolt's expected format
+3. [ ] Verify sumcheck proof serialization format matches
+4. [ ] Check Option<T> serialization format (for untrusted_advice_commitment)
 
 ## Test Commands
 
 ```bash
-# Wait for fresh proof to complete, then:
-cp /tmp/fresh_proof.bin logs/zolt_proof_dory.bin
-cp /tmp/fresh_preprocessing.bin logs/zolt_preprocessing.bin
+# Generate Zolt proof using Jolt's fibonacci guest
+./zig-out/bin/zolt prove /tmp/jolt-guest-targets/fibonacci-guest-fib/riscv64imac-unknown-none-elf/release/fibonacci-guest --jolt-format -o /tmp/zolt_proof_dory.bin --trace-length 1024 --input-hex 32
 
-# Verify with Jolt
-cd jolt && cargo test -p jolt-core --features zolt-debug --lib test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture 2>&1 | tee /tmp/fresh_jolt.log
-
-# Compare ra_claims
-grep "ra_chunks" /tmp/fresh_zolt.log
-grep "ra_claims" /tmp/fresh_jolt.log
+# Run Jolt verifier
+cd jolt && cargo test -p jolt-core --features zolt-debug --lib test_verify_zolt_proof -- --ignored --nocapture
 ```
 
 ## Files Modified This Session
 
-- `/home/vivado/projects/jolt/jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs` - Added full 32-byte debug for ra_claims
-- `/home/vivado/projects/zolt/src/zkvm/spartan/stage5_prover.zig` - Added full LE debug for ra_chunks
+- `src/zkvm/mod.zig` - Fixed serialization of config structs
+- `src/zkvm/proof_converter.zig` - Fixed array size bug in debug code
 
-## Background Process
+## Key Discoveries
 
-Zolt proof generation running as PID 489770:
-```
-./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o /tmp/fresh_proof.bin --export-preprocessing /tmp/fresh_preprocessing.bin
-```
+1. Jolt's `OneHotConfig` has u8 fields, but Zolt was writing them as usize
+2. Jolt's `ReadWriteConfig` has 4 u8 fields that need to be written
+3. Jolt's `DoryLayout` is a u8 enum
+4. Proof size changed from 64152 to 64143 bytes after the fix (9 bytes less)
 
-## Session Progress
+## Background
 
-- [x] Identify Stage 5 verification failure at Instance 2
-- [x] Confirmed polynomial coefficients match
-- [x] Verified InstructionRa high 16 bytes match (same run)
-- [x] Analyzed expected_output_claim formula
-- [x] Identified logs were from different runs
-- [x] Started fresh proof generation
-- [ ] Complete fresh proof generation
-- [ ] Run Jolt verifier on fresh proof
-- [ ] Debug full 32-byte InstructionRa claims (same run)
-- [ ] Fix Stage 5 opening claims
-
-SESSION_ENDING - Waiting for fresh proof generation to complete (PID 489770)
+- Using Jolt's fibonacci guest binary for testing
+- Jolt preprocessing at `/tmp/jolt_verifier_preprocessing.dat` (generated by `cargo run --example fibonacci -- --save`)
+- Jolt I/O at `/tmp/fib_io_device.bin`
+- Zolt proof at `/tmp/zolt_proof_dory.bin`

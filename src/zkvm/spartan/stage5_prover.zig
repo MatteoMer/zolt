@@ -542,6 +542,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             @memset(cycle_table_indices, -1); // -1 = no table
             @memset(cycle_is_identity_path, false);
 
+            // Store table MLE evaluations at r_address (populated during rematerialization)
+            // These are used for computing val_claim = Σ table_flags[i] * table_values[i]
+            // Note: Jolt has 42 tables but our prefix-suffix only covers 41
+            const MAX_LOOKUP_TABLES: usize = 42;
+            var stored_table_values: [MAX_LOOKUP_TABLES]F = [_]F{F.zero()} ** MAX_LOOKUP_TABLES;
+
             // Build eq_reduction[j] = eq(j, r_reduction) for all cycles j
             // r_reduction is in BIG_ENDIAN order (MSB first)
             for (0..T) |j| {
@@ -2546,6 +2552,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         // Compute table_values_at_r_addr using bound prefix checkpoints
                         const table_values = computeTableValuesAtRAddress(F, &prefix_checkpoints);
 
+                        // Store for later use in val_claim computation
+                        // table_values has NUM_TABLES (41) entries, copy into stored_table_values
+                        for (0..NUM_TABLES) |ti| {
+                            stored_table_values[ti] = table_values[ti];
+                        }
+
                         // ============================================================
                         // DEBUG: Direct MLE computation for comparison
                         // ============================================================
@@ -3393,19 +3405,33 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // expected = eq_r_reduction * ra_product * (val_claim + gamma * raf_claim)
             // where val_claim = Σ table_flags[i] * table_eval[i]
             // and raf_claim = (1 - raf_flag)*(left_op + gamma*right_op) + raf_flag*gamma*identity
-            //
-            // Note: table_eval[i] would need lookup table MLE evaluation at r_address, which
-            // is complex. For now, we'll verify the structure is correct.
 
             const raf_claim = F.one().sub(computed_raf_flag).mul(left_op_eval.add(gamma_lookups_raf.mul(right_op_eval)))
                 .add(computed_raf_flag.mul(gamma_lookups_raf).mul(identity_eval));
             std.debug.print("  raf_claim (from formula) FULL LE = {any}\n", .{raf_claim.toBytes()});
 
-            // Compute what verifier would expect (without val_claim for now)
-            const expected_no_val = eq_r_reduction.mul(ra_product).mul(gamma_lookups_raf.mul(raf_claim));
-            std.debug.print("  expected_no_val (eq*ra*gamma*raf) = {any}\n", .{expected_no_val.toBytesBE()[0..8]});
+            // Compute val_claim = Σ table_flags[i] * stored_table_values[i]
+            // This matches the verifier's formula: Σ val_evals[i] * table_flag_claims[i]
+            var val_claim = F.zero();
+            for (0..num_lookup_tables) |i| {
+                val_claim = val_claim.add(table_flags[i].mul(stored_table_values[i]));
+            }
+            std.debug.print("  val_claim (from formula) FULL LE = {any}\n", .{val_claim.toBytes()});
+            std.debug.print("  val_claim last 16 LE = ", .{});
+            for (val_claim.toBytes()[16..32]) |b| std.debug.print("{x:0>2} ", .{b});
+            std.debug.print("\n", .{});
+
+            // Compute expected output: eq_r_reduction * ra_product * (val_claim + gamma * raf_claim)
+            const expected_output = eq_r_reduction.mul(ra_product).mul(val_claim.add(gamma_lookups_raf.mul(raf_claim)));
+            std.debug.print("  expected_output (eq*ra*(val+gamma*raf)) FULL LE = {any}\n", .{expected_output.toBytes()});
+            std.debug.print("  expected_output last 16 LE = ", .{});
+            for (expected_output.toBytes()[16..32]) |b| std.debug.print("{x:0>2} ", .{b});
+            std.debug.print("\n", .{});
             std.debug.print("  lookups_output_claim = {any}\n", .{lookups_output_claim.toBytesBE()[0..8]});
             std.debug.print("  current_batched_claim = {any}\n", .{current_batched_claim.toBytesBE()[0..8]});
+
+            // Check if expected matches the sumcheck output
+            std.debug.print("  expected_output == lookups_output_claim: {}\n", .{expected_output.eql(lookups_output_claim)});
 
             // ============================================================
             // COMPUTE ram_ra_claim FROM RAM TRACE

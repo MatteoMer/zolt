@@ -4096,6 +4096,20 @@ pub fn ProofConverter(comptime F: type) type {
                         }
                     }
 
+                    // Debug: print r_address_be values
+                    std.debug.print("[ZOLT] STAGE2 RWC: r_addr_be (from challenges[{}..{}]):\n", .{ phase2_start, phase2_start + phase2 });
+                    for (0..@min(4, log_ram_k)) |i| {
+                        std.debug.print("[ZOLT] STAGE2 RWC:   r_addr_be[{}] = {x}\n", .{ i, r_addr_be[i].toBytesBE()[16..32].* });
+                    }
+                    // Also print the source challenges
+                    std.debug.print("[ZOLT] STAGE2 RWC: Source challenges:\n", .{});
+                    for (0..@min(4, phase2)) |i| {
+                        const src_idx = phase2_start + i;
+                        if (src_idx < challenges.items.len) {
+                            std.debug.print("[ZOLT] STAGE2 RWC:   challenges[{}] = {x}\n", .{ src_idx, challenges.items[src_idx].toBytesBE()[16..32].* });
+                        }
+                    }
+
                     // Compute val_init(r_address_be)
                     rwc_val_claim = computeInitialRamEval(config.initial_ram.?, config.memory_layout.?, r_addr_be, log_ram_k);
                     std.debug.print("[ZOLT] STAGE2 RWC: computed rwc_val_claim = val_init(r_address) = {any}\n", .{rwc_val_claim.toBytesBE()});

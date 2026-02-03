@@ -1,0 +1,1394 @@
+warning: unused import: `ark_serialize::CanonicalSerialize`
+   --> jolt-core/src/zkvm/spartan/product.rs:814:21
+    |
+814 |                 use ark_serialize::CanonicalSerialize;
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+   --> jolt-core/src/zkvm/spartan/product.rs:826:21
+    |
+826 |                 use ark_serialize::CanonicalSerialize;
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+   --> jolt-core/src/zkvm/spartan/product.rs:729:17
+    |
+729 |             use ark_serialize::CanonicalSerialize;
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+   --> jolt-core/src/zkvm/spartan/product.rs:765:17
+    |
+765 |             use ark_serialize::CanonicalSerialize;
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+   --> jolt-core/src/zkvm/spartan/product.rs:786:17
+    |
+786 |             use ark_serialize::CanonicalSerialize;
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+   --> jolt-core/src/subprotocols/sumcheck.rs:208:21
+    |
+208 |                 use ark_serialize::CanonicalSerialize;
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+   --> jolt-core/src/subprotocols/sumcheck.rs:222:21
+    |
+222 |                 use ark_serialize::CanonicalSerialize;
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+   --> jolt-core/src/subprotocols/sumcheck.rs:250:17
+    |
+250 |             use ark_serialize::CanonicalSerialize;
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+   --> jolt-core/src/subprotocols/sumcheck.rs:306:25
+    |
+306 |                     use ark_serialize::CanonicalSerialize;
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+   --> jolt-core/src/subprotocols/sumcheck.rs:324:25
+    |
+324 |                     use ark_serialize::CanonicalSerialize;
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+   --> jolt-core/src/subprotocols/sumcheck.rs:346:21
+    |
+346 |                 use ark_serialize::CanonicalSerialize;
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+   --> jolt-core/src/subprotocols/sumcheck.rs:424:21
+    |
+424 |                 use ark_serialize::CanonicalSerialize;
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+   --> jolt-core/src/transcripts/blake2b.rs:238:17
+    |
+238 |             use ark_serialize::CanonicalSerialize;
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+   --> jolt-core/src/zkvm/claim_reductions/instruction_lookups.rs:500:17
+    |
+500 |             use ark_serialize::CanonicalSerialize;
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+   --> jolt-core/src/zkvm/claim_reductions/ram_ra.rs:975:17
+    |
+975 |             use ark_serialize::CanonicalSerialize;
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+    --> jolt-core/src/zkvm/claim_reductions/ram_ra.rs:1093:17
+     |
+1093 |             use ark_serialize::CanonicalSerialize;
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::io::Read`
+   --> jolt-core/src/zkvm/proof_serialization.rs:144:21
+    |
+144 |                 use std::io::Read;
+    |                     ^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+   --> jolt-core/src/zkvm/ram/val_final.rs:369:17
+    |
+369 |             use ark_serialize::CanonicalSerialize;
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+   --> jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs:127:17
+    |
+127 |             use ark_serialize::CanonicalSerialize;
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+   --> jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs:615:29
+    |
+615 |                         use ark_serialize::CanonicalSerialize;
+    |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+   --> jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs:659:37
+    |
+659 | ...                   use ark_serialize::CanonicalSerialize;
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+   --> jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs:673:41
+    |
+673 | ...                   use ark_serialize::CanonicalSerialize;
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+   --> jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs:683:37
+    |
+683 | ...                   use ark_serialize::CanonicalSerialize;
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+   --> jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs:870:21
+    |
+870 |                 use ark_serialize::CanonicalSerialize;
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+    --> jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs:1314:17
+     |
+1314 |             use ark_serialize::CanonicalSerialize;
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+    --> jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs:1329:17
+     |
+1329 |             use ark_serialize::CanonicalSerialize;
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+    --> jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs:1431:17
+     |
+1431 |             use ark_serialize::CanonicalSerialize;
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+    --> jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs:1453:17
+     |
+1453 |             use ark_serialize::CanonicalSerialize;
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+    --> jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs:1472:17
+     |
+1472 |             use ark_serialize::CanonicalSerialize;
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+   --> jolt-core/src/zkvm/ram/val_evaluation.rs:402:17
+    |
+402 |             use ark_serialize::CanonicalSerialize;
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+   --> jolt-core/src/zkvm/proof_serialization.rs:185:21
+    |
+185 |                 use ark_serialize::CanonicalSerialize;
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+   --> jolt-core/src/zkvm/proof_serialization.rs:177:21
+    |
+177 |                 use ark_serialize::CanonicalSerialize;
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+   --> jolt-core/src/zkvm/ram/read_write_checking.rs:746:17
+    |
+746 |             use ark_serialize::CanonicalSerialize;
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+  --> jolt-core/src/zkvm/lookup_table/prefixes/lower_word.rs:74:17
+   |
+74 |             use ark_serialize::CanonicalSerialize;
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+   --> jolt-core/src/zkvm/lookup_table/prefixes/lower_word.rs:103:17
+    |
+103 |             use ark_serialize::CanonicalSerialize;
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+   --> jolt-core/src/zkvm/ram/raf_evaluation.rs:343:17
+    |
+343 |             use ark_serialize::CanonicalSerialize;
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ark_serialize::CanonicalSerialize`
+   --> jolt-core/src/zkvm/proof_serialization.rs:156:29
+    |
+156 |                         use ark_serialize::CanonicalSerialize;
+    |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `claims`
+   --> jolt-core/src/zolt_compat_test.rs:311:13
+    |
+311 |         let claims: Claims<Fr> = match Claims::deserialize_compressed(&mut cursor) {
+    |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_claims`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `commitments`
+   --> jolt-core/src/zolt_compat_test.rs:325:13
+    |
+325 |         let commitments: Vec<DoryCommitment> = match Vec::deserialize_compressed(&mut cursor) {
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_commitments`
+
+warning: unused variable: `stage1_uniskip`
+   --> jolt-core/src/zolt_compat_test.rs:341:13
+    |
+341 | ...   let stage1_uniskip: UniSkipFirstRoundProof<Fr, Blake2bTranscript> = match UniSkipFirstRoundProof::deserialize_compressed(&mut curso...
+    |           ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_stage1_uniskip`
+
+warning: unused variable: `stage1_sumcheck`
+   --> jolt-core/src/zolt_compat_test.rs:355:13
+    |
+355 | ...   let stage1_sumcheck: SumcheckInstanceProof<Fr, Blake2bTranscript> = match SumcheckInstanceProof::deserialize_compressed(&mut cursor) {
+    |           ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_stage1_sumcheck`
+
+warning: unused variable: `poly`
+   --> jolt-core/src/zolt_compat_test.rs:766:13
+    |
+766 |         let poly: MultilinearPolynomial<Fr> = coeffs.into();
+    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_poly`
+
+warning: unused variable: `verifier`
+    --> jolt-core/src/zolt_compat_test.rs:1041:13
+     |
+1041 |         let verifier = RV64IMACVerifier::new(
+     |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_verifier`
+
+warning: type alias `Fr` is never used
+   --> jolt-core/src/zolt_compat_test.rs:986:14
+    |
+986 |         type Fr = ark_bn254::Fr;
+    |              ^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: `jolt-core` (lib test) generated 44 warnings
+    Finished `test` profile [optimized + debuginfo] target(s) in 1.46s
+     Running unittests src/lib.rs (target/debug/deps/jolt_core-021ffcc8fe08aa78)
+
+running 1 test
+Using logs_dir: /tmp
+Proof path: /tmp/zolt_proof_dory.bin
+Proof bytes: 59083 bytes
+First 100 bytes (hex): 8e 00 00 00 00 00 00 00 40 00 44 97 3e cd 61 e1 ec 32 12 99 46 63 f7 a1 8a cf 46 8f a3 64 be 80 b5 ba ca 77 b9 11 f6 b3 07 27 41 00 39 22 ab 81 4a 6b 66 b2 30 63 c8 5d a3 01 19 dd 81 46 f5 41 08 43 83 8b 5e d8 09 a5 64 05 ad 25 46 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+
+=== Parsing Opening Claims ===
+Bytes at 0xd74: [f2, e4, 3f, 5d, d8, 22, 9c, e3, c1, aa, ee, 38, 88, 67, 3f, 34, 37, 8c, 58, f7, ee, 63, f2, b7, 7b, 63, 84, bc, 30, 71, 31, 1d]
+[Claims::deserialize] size = 142
+[Claims::deserialize] claim 0 key = Polynomial(Committed(RdInc), RegistersReadWriteChecking)
+[Claims::deserialize] claim 1 key = Polynomial(Committed(RdInc), RegistersValEvaluation)
+[Claims::deserialize] claim 2 key = Polynomial(Committed(RdInc), IncClaimReduction)
+[Claims::deserialize] claim 3 key = Polynomial(Committed(RamInc), RamReadWriteChecking)
+[Claims::deserialize] claim 4 key = Polynomial(Committed(RamInc), RamValEvaluation)
+[Claims::deserialize] claim 5 key = Polynomial(Committed(RamInc), RamValFinalEvaluation)
+[Claims::deserialize] claim 6 key = Polynomial(Committed(RamInc), IncClaimReduction)
+[Claims::deserialize] claim 7 key = Polynomial(Virtual(PC), SpartanOuter)
+[Claims::deserialize] claim 8 key = Polynomial(Virtual(PC), SpartanShift)
+[Claims::deserialize] claim 9 key = Polynomial(Virtual(UnexpandedPC), SpartanOuter)
+[Claims::deserialize] claim 10 key = Polynomial(Virtual(UnexpandedPC), SpartanShift)
+[Claims::deserialize] claim 11 key = Polynomial(Virtual(UnexpandedPC), InstructionInputVirtualization)
+[Claims::deserialize] claim 12 key = Polynomial(Virtual(NextPC), SpartanOuter)
+[Claims::deserialize] claim 13 key = Polynomial(Virtual(NextUnexpandedPC), SpartanOuter)
+[Claims::deserialize] claim 14 key = Polynomial(Virtual(NextIsNoop), SpartanProductVirtualization)
+[Claims::deserialize] claim 15 key = Polynomial(Virtual(NextIsVirtual), SpartanOuter)
+[Claims::deserialize] claim 16 key = Polynomial(Virtual(NextIsFirstInSequence), SpartanOuter)
+[Claims::deserialize] claim 17 key = Polynomial(Virtual(LeftLookupOperand), SpartanOuter)
+[Claims::deserialize] claim 18 key = Polynomial(Virtual(LeftLookupOperand), InstructionClaimReduction)
+[Claims::deserialize] claim 19 key = Polynomial(Virtual(RightLookupOperand), SpartanOuter)
+[Claims::deserialize] claim 20 key = Polynomial(Virtual(RightLookupOperand), InstructionClaimReduction)
+[Claims::deserialize] claim 21 key = Polynomial(Virtual(LeftInstructionInput), SpartanOuter)
+[Claims::deserialize] claim 22 key = Polynomial(Virtual(LeftInstructionInput), SpartanProductVirtualization)
+[Claims::deserialize] claim 23 key = Polynomial(Virtual(RightInstructionInput), SpartanOuter)
+[Claims::deserialize] claim 24 key = Polynomial(Virtual(RightInstructionInput), SpartanProductVirtualization)
+[Claims::deserialize] claim 25 key = Polynomial(Virtual(Product), SpartanOuter)
+[Claims::deserialize] claim 26 key = Polynomial(Virtual(ShouldJump), SpartanOuter)
+[Claims::deserialize] claim 27 key = Polynomial(Virtual(ShouldBranch), SpartanOuter)
+[Claims::deserialize] claim 28 key = Polynomial(Virtual(WritePCtoRD), SpartanOuter)
+[Claims::deserialize] claim 29 key = Polynomial(Virtual(WriteLookupOutputToRD), SpartanOuter)
+[Claims::deserialize] claim 30 key = Polynomial(Virtual(Imm), SpartanOuter)
+[Claims::deserialize] claim 31 key = Polynomial(Virtual(Imm), InstructionInputVirtualization)
+[Claims::deserialize] claim 32 key = Polynomial(Virtual(Rs1Value), SpartanOuter)
+[Claims::deserialize] claim 33 key = Polynomial(Virtual(Rs1Value), InstructionInputVirtualization)
+[Claims::deserialize] claim 34 key = Polynomial(Virtual(Rs1Value), RegistersClaimReduction)
+[Claims::deserialize] claim 35 key = Polynomial(Virtual(Rs2Value), SpartanOuter)
+[Claims::deserialize] claim 36 key = Polynomial(Virtual(Rs2Value), InstructionInputVirtualization)
+[Claims::deserialize] claim 37 key = Polynomial(Virtual(Rs2Value), RegistersClaimReduction)
+[Claims::deserialize] claim 38 key = Polynomial(Virtual(RdWriteValue), SpartanOuter)
+[Claims::deserialize] claim 39 key = Polynomial(Virtual(RdWriteValue), RegistersClaimReduction)
+[Claims::deserialize] claim 40 key = Polynomial(Virtual(Rs1Ra), RegistersReadWriteChecking)
+[Claims::deserialize] claim 41 key = Polynomial(Virtual(Rs2Ra), RegistersReadWriteChecking)
+[Claims::deserialize] claim 42 key = Polynomial(Virtual(RdWa), RegistersReadWriteChecking)
+[Claims::deserialize] claim 43 key = Polynomial(Virtual(RdWa), RegistersValEvaluation)
+[Claims::deserialize] claim 44 key = Polynomial(Virtual(LookupOutput), SpartanOuter)
+[Claims::deserialize] claim 45 key = Polynomial(Virtual(LookupOutput), SpartanProductVirtualization)
+[Claims::deserialize] claim 46 key = Polynomial(Virtual(LookupOutput), InstructionClaimReduction)
+[Claims::deserialize] claim 47 key = Polynomial(Virtual(InstructionRafFlag), InstructionReadRaf)
+[Claims::deserialize] claim 48 key = Polynomial(Virtual(InstructionRafFlag), BytecodeReadRaf)
+[Claims::deserialize] claim 49 key = Polynomial(Virtual(InstructionRa(0)), InstructionReadRaf)
+[Claims::deserialize] InstructionRa(0) InstructionReadRaf claim = [18, d1, 65, 32, 94, 21, 95, 0a, 35, fb, 24, fd, bc, 79, 55, 19]
+[Claims::deserialize] claim 50 key = Polynomial(Virtual(InstructionRa(0)), BytecodeReadRaf)
+[Claims::deserialize] InstructionRa(0) BytecodeReadRaf claim = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] claim 51 key = Polynomial(Virtual(InstructionRa(1)), InstructionReadRaf)
+[Claims::deserialize] InstructionRa(1) InstructionReadRaf claim = [c4, 2c, b0, 4d, 2b, 6d, a0, 74, 70, 75, 5a, 16, 1e, 10, 10, 1f]
+[Claims::deserialize] claim 52 key = Polynomial(Virtual(InstructionRa(2)), InstructionReadRaf)
+[Claims::deserialize] InstructionRa(2) InstructionReadRaf claim = [40, 1f, b9, 2a, d1, 23, 36, 7e, 30, 5f, 2e, 01, fe, 16, 79, 2c]
+[Claims::deserialize] claim 53 key = Polynomial(Virtual(InstructionRa(3)), InstructionReadRaf)
+[Claims::deserialize] InstructionRa(3) InstructionReadRaf claim = [37, 96, d1, 8f, 87, d6, ca, fd, e7, 88, ba, c7, 6a, a9, 00, 0b]
+[Claims::deserialize] claim 54 key = Polynomial(Virtual(InstructionRa(4)), InstructionReadRaf)
+[Claims::deserialize] InstructionRa(4) InstructionReadRaf claim = [55, 0e, bc, 0b, af, cd, bd, 6e, 81, 59, 41, db, a1, f4, be, 2f]
+[Claims::deserialize] claim 55 key = Polynomial(Virtual(InstructionRa(5)), InstructionReadRaf)
+[Claims::deserialize] InstructionRa(5) InstructionReadRaf claim = [49, 31, 9a, 89, 4d, b5, 27, e7, c7, a5, 1c, d7, cf, 1d, d4, 26]
+[Claims::deserialize] claim 56 key = Polynomial(Virtual(InstructionRa(6)), InstructionReadRaf)
+[Claims::deserialize] InstructionRa(6) InstructionReadRaf claim = [4b, ac, 04, ff, f0, 4e, 56, 0a, 77, 35, 96, 33, 72, 62, 6d, 04]
+[Claims::deserialize] claim 57 key = Polynomial(Virtual(InstructionRa(7)), InstructionReadRaf)
+[Claims::deserialize] InstructionRa(7) InstructionReadRaf claim = [09, b5, af, db, 4b, e3, 2b, 24, 01, 57, af, 81, 96, 29, 83, 22]
+[Claims::deserialize] claim 58 key = Polynomial(Virtual(RegistersVal), RegistersReadWriteChecking)
+[Claims::deserialize] RegistersVal RegistersReadWriteChecking claim (LE) = [69, 61, 59, 1f, 70, 5c, 5f, 9a, 4d, 52, 8f, 7d, f4, 41, 9c, 3c, bf, 9e, ae, b6, 66, 0b, 10, 33, 33, a0, c8, 64, 9f, a1, bc, 11]
+[Claims::deserialize] claim 59 key = Polynomial(Virtual(RamAddress), SpartanOuter)
+[Claims::deserialize] claim 60 key = Polynomial(Virtual(RamRa), RamReadWriteChecking)
+[Claims::deserialize] claim 61 key = Polynomial(Virtual(RamRa), RamRafEvaluation)
+[Claims::deserialize] claim 62 key = Polynomial(Virtual(RamRa), RamValEvaluation)
+[Claims::deserialize] claim 63 key = Polynomial(Virtual(RamRa), RamValFinalEvaluation)
+[Claims::deserialize] claim 64 key = Polynomial(Virtual(RamRa), RamRaClaimReduction)
+[Claims::deserialize] claim 65 key = Polynomial(Virtual(RamRa), IncClaimReduction)
+[Claims::deserialize] claim 66 key = Polynomial(Virtual(RamReadValue), SpartanOuter)
+[Claims::deserialize] claim 67 key = Polynomial(Virtual(RamWriteValue), SpartanOuter)
+[Claims::deserialize] claim 68 key = Polynomial(Virtual(RamVal), RamReadWriteChecking)
+[Claims::deserialize] claim 69 key = Polynomial(Virtual(RamValInit), RamOutputCheck)
+[Claims::deserialize] claim 70 key = Polynomial(Virtual(RamValFinal), RamOutputCheck)
+[Claims::deserialize] claim 71 key = Polynomial(Virtual(RamHammingWeight), RamHammingBooleanity)
+[Claims::deserialize] claim 72 key = Polynomial(Virtual(RamHammingWeight), Booleanity)
+[Claims::deserialize] claim 73 key = Polynomial(Virtual(RamHammingWeight), HammingWeightClaimReduction)
+[Claims::deserialize] claim 74 key = Polynomial(Virtual(UnivariateSkip), SpartanOuter)
+[Claims::deserialize] claim 75 key = Polynomial(Virtual(UnivariateSkip), SpartanProductVirtualization)
+[Claims::deserialize] claim 76 key = Polynomial(Virtual(OpFlags(AddOperands)), SpartanOuter)
+[Claims::deserialize] claim 77 key = Polynomial(Virtual(OpFlags(SubtractOperands)), SpartanOuter)
+[Claims::deserialize] claim 78 key = Polynomial(Virtual(OpFlags(MultiplyOperands)), SpartanOuter)
+[Claims::deserialize] claim 79 key = Polynomial(Virtual(OpFlags(Load)), SpartanOuter)
+[Claims::deserialize] claim 80 key = Polynomial(Virtual(OpFlags(Store)), SpartanOuter)
+[Claims::deserialize] claim 81 key = Polynomial(Virtual(OpFlags(Jump)), SpartanOuter)
+[Claims::deserialize] claim 82 key = Polynomial(Virtual(OpFlags(Jump)), SpartanProductVirtualization)
+[Claims::deserialize] claim 83 key = Polynomial(Virtual(OpFlags(WriteLookupOutputToRD)), SpartanOuter)
+[Claims::deserialize] claim 84 key = Polynomial(Virtual(OpFlags(WriteLookupOutputToRD)), SpartanProductVirtualization)
+[Claims::deserialize] claim 85 key = Polynomial(Virtual(OpFlags(VirtualInstruction)), SpartanOuter)
+[Claims::deserialize] claim 86 key = Polynomial(Virtual(OpFlags(VirtualInstruction)), SpartanShift)
+[Claims::deserialize] claim 87 key = Polynomial(Virtual(OpFlags(Assert)), SpartanOuter)
+[Claims::deserialize] claim 88 key = Polynomial(Virtual(OpFlags(DoNotUpdateUnexpandedPC)), SpartanOuter)
+[Claims::deserialize] claim 89 key = Polynomial(Virtual(OpFlags(Advice)), SpartanOuter)
+[Claims::deserialize] claim 90 key = Polynomial(Virtual(OpFlags(IsCompressed)), SpartanOuter)
+[Claims::deserialize] claim 91 key = Polynomial(Virtual(OpFlags(IsFirstInSequence)), SpartanOuter)
+[Claims::deserialize] claim 92 key = Polynomial(Virtual(OpFlags(IsFirstInSequence)), SpartanShift)
+[Claims::deserialize] claim 93 key = Polynomial(Virtual(InstructionFlags(LeftOperandIsPC)), InstructionInputVirtualization)
+[Claims::deserialize] claim 94 key = Polynomial(Virtual(InstructionFlags(RightOperandIsImm)), InstructionInputVirtualization)
+[Claims::deserialize] claim 95 key = Polynomial(Virtual(InstructionFlags(LeftOperandIsRs1Value)), InstructionInputVirtualization)
+[Claims::deserialize] claim 96 key = Polynomial(Virtual(InstructionFlags(RightOperandIsRs2Value)), InstructionInputVirtualization)
+[Claims::deserialize] claim 97 key = Polynomial(Virtual(InstructionFlags(Branch)), SpartanProductVirtualization)
+[Claims::deserialize] claim 98 key = Polynomial(Virtual(InstructionFlags(IsNoop)), SpartanShift)
+[Claims::deserialize] claim 99 key = Polynomial(Virtual(InstructionFlags(IsRdNotZero)), SpartanProductVirtualization)
+[Claims::deserialize] LookupTableFlag(0) key_offset=0xd71 value_offset=0xd74
+[Claims::deserialize PRE] LookupTableFlag(0) claim_idx=100 raw bytes = [f2, e4, 3f, 5d, d8, 22, 9c, e3, c1, aa, ee, 38, 88, 67, 3f, 34, 37, 8c, 58, f7, ee, 63, f2, b7, 7b, 63, 84, bc, 30, 71, 31, 1d]
+[Claims::deserialize POST] LookupTableFlag(0) serialized = [f2, e4, 3f, 5d, d8, 22, 9c, e3, c1, aa, ee, 38, 88, 67, 3f, 34, 37, 8c, 58, f7, ee, 63, f2, b7, 7b, 63, 84, bc, 30, 71, 31, 1d]
+[Claims::deserialize] LookupTableFlag(1) key_offset=0xd94 value_offset=0xd97
+[Claims::deserialize PRE] LookupTableFlag(1) claim_idx=101 raw bytes = [d3, 1e, 55, 98, d2, 97, 8d, ca, 9b, f0, 3a, bf, c2, 3d, f7, 09, c0, 9e, 22, 7d, 80, 46, cd, ec, 30, 44, 22, aa, 26, 1a, 9f, 18]
+[Claims::deserialize POST] LookupTableFlag(1) serialized = [d3, 1e, 55, 98, d2, 97, 8d, ca, 9b, f0, 3a, bf, c2, 3d, f7, 09, c0, 9e, 22, 7d, 80, 46, cd, ec, 30, 44, 22, aa, 26, 1a, 9f, 18]
+[Claims::deserialize] LookupTableFlag(2) key_offset=0xdb7 value_offset=0xdba
+[Claims::deserialize PRE] LookupTableFlag(2) claim_idx=102 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(3) key_offset=0xdda value_offset=0xddd
+[Claims::deserialize PRE] LookupTableFlag(3) claim_idx=103 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(4) key_offset=0xdfd value_offset=0xe00
+[Claims::deserialize PRE] LookupTableFlag(4) claim_idx=104 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(5) key_offset=0xe20 value_offset=0xe23
+[Claims::deserialize PRE] LookupTableFlag(5) claim_idx=105 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(6) key_offset=0xe43 value_offset=0xe46
+[Claims::deserialize PRE] LookupTableFlag(6) claim_idx=106 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(7) key_offset=0xe66 value_offset=0xe69
+[Claims::deserialize PRE] LookupTableFlag(7) claim_idx=107 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(8) key_offset=0xe89 value_offset=0xe8c
+[Claims::deserialize PRE] LookupTableFlag(8) claim_idx=108 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(9) key_offset=0xeac value_offset=0xeaf
+[Claims::deserialize PRE] LookupTableFlag(9) claim_idx=109 raw bytes = [08, 55, 9f, 97, 19, 45, de, 9e, 48, 6b, 2f, be, 52, 0c, 25, 85, 99, 17, c7, 34, 81, 61, 0f, 8d, d0, bc, 59, 79, 72, 99, 62, 0c]
+[Claims::deserialize POST] LookupTableFlag(9) serialized = [08, 55, 9f, 97, 19, 45, de, 9e, 48, 6b, 2f, be, 52, 0c, 25, 85, 99, 17, c7, 34, 81, 61, 0f, 8d, d0, bc, 59, 79, 72, 99, 62, 0c]
+[Claims::deserialize] LookupTableFlag(10) key_offset=0xecf value_offset=0xed2
+[Claims::deserialize PRE] LookupTableFlag(10) claim_idx=110 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(11) key_offset=0xef2 value_offset=0xef5
+[Claims::deserialize PRE] LookupTableFlag(11) claim_idx=111 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(12) key_offset=0xf15 value_offset=0xf18
+[Claims::deserialize PRE] LookupTableFlag(12) claim_idx=112 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(13) key_offset=0xf38 value_offset=0xf3b
+[Claims::deserialize PRE] LookupTableFlag(13) claim_idx=113 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(14) key_offset=0xf5b value_offset=0xf5e
+[Claims::deserialize PRE] LookupTableFlag(14) claim_idx=114 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(15) key_offset=0xf7e value_offset=0xf81
+[Claims::deserialize PRE] LookupTableFlag(15) claim_idx=115 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(16) key_offset=0xfa1 value_offset=0xfa4
+[Claims::deserialize PRE] LookupTableFlag(16) claim_idx=116 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(17) key_offset=0xfc4 value_offset=0xfc7
+[Claims::deserialize PRE] LookupTableFlag(17) claim_idx=117 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(18) key_offset=0xfe7 value_offset=0xfea
+[Claims::deserialize PRE] LookupTableFlag(18) claim_idx=118 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(19) key_offset=0x100a value_offset=0x100d
+[Claims::deserialize PRE] LookupTableFlag(19) claim_idx=119 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(20) key_offset=0x102d value_offset=0x1030
+[Claims::deserialize PRE] LookupTableFlag(20) claim_idx=120 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(21) key_offset=0x1050 value_offset=0x1053
+[Claims::deserialize PRE] LookupTableFlag(21) claim_idx=121 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(22) key_offset=0x1073 value_offset=0x1076
+[Claims::deserialize PRE] LookupTableFlag(22) claim_idx=122 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(23) key_offset=0x1096 value_offset=0x1099
+[Claims::deserialize PRE] LookupTableFlag(23) claim_idx=123 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(24) key_offset=0x10b9 value_offset=0x10bc
+[Claims::deserialize PRE] LookupTableFlag(24) claim_idx=124 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(25) key_offset=0x10dc value_offset=0x10df
+[Claims::deserialize PRE] LookupTableFlag(25) claim_idx=125 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(26) key_offset=0x10ff value_offset=0x1102
+[Claims::deserialize PRE] LookupTableFlag(26) claim_idx=126 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(27) key_offset=0x1122 value_offset=0x1125
+[Claims::deserialize PRE] LookupTableFlag(27) claim_idx=127 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(28) key_offset=0x1145 value_offset=0x1148
+[Claims::deserialize PRE] LookupTableFlag(28) claim_idx=128 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(29) key_offset=0x1168 value_offset=0x116b
+[Claims::deserialize PRE] LookupTableFlag(29) claim_idx=129 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(30) key_offset=0x118b value_offset=0x118e
+[Claims::deserialize PRE] LookupTableFlag(30) claim_idx=130 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(31) key_offset=0x11ae value_offset=0x11b1
+[Claims::deserialize PRE] LookupTableFlag(31) claim_idx=131 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(32) key_offset=0x11d1 value_offset=0x11d4
+[Claims::deserialize PRE] LookupTableFlag(32) claim_idx=132 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(33) key_offset=0x11f4 value_offset=0x11f7
+[Claims::deserialize PRE] LookupTableFlag(33) claim_idx=133 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(34) key_offset=0x1217 value_offset=0x121a
+[Claims::deserialize PRE] LookupTableFlag(34) claim_idx=134 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(35) key_offset=0x123a value_offset=0x123d
+[Claims::deserialize PRE] LookupTableFlag(35) claim_idx=135 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(36) key_offset=0x125d value_offset=0x1260
+[Claims::deserialize PRE] LookupTableFlag(36) claim_idx=136 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(37) key_offset=0x1280 value_offset=0x1283
+[Claims::deserialize PRE] LookupTableFlag(37) claim_idx=137 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(38) key_offset=0x12a3 value_offset=0x12a6
+[Claims::deserialize PRE] LookupTableFlag(38) claim_idx=138 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(39) key_offset=0x12c6 value_offset=0x12c9
+[Claims::deserialize PRE] LookupTableFlag(39) claim_idx=139 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(40) key_offset=0x12e9 value_offset=0x12ec
+[Claims::deserialize PRE] LookupTableFlag(40) claim_idx=140 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(41) key_offset=0x130c value_offset=0x130f
+[Claims::deserialize PRE] LookupTableFlag(41) claim_idx=141 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+Successfully parsed 142 opening claims
+
+=== Parsing Commitments ===
+Starting at byte: 4911
+Successfully parsed 37 commitments
+
+=== Parsing Stage 1 UniSkip ===
+Starting at byte: 19127
+Successfully parsed stage1 uniskip
+
+=== Parsing Stage 1 Sumcheck ===
+Starting at byte: 20031
+Successfully parsed stage1 sumcheck with 9 rounds
+[Claims::deserialize] size = 142
+[Claims::deserialize] claim 0 key = Polynomial(Committed(RdInc), RegistersReadWriteChecking)
+[Claims::deserialize] claim 1 key = Polynomial(Committed(RdInc), RegistersValEvaluation)
+[Claims::deserialize] claim 2 key = Polynomial(Committed(RdInc), IncClaimReduction)
+[Claims::deserialize] claim 3 key = Polynomial(Committed(RamInc), RamReadWriteChecking)
+[Claims::deserialize] claim 4 key = Polynomial(Committed(RamInc), RamValEvaluation)
+[Claims::deserialize] claim 5 key = Polynomial(Committed(RamInc), RamValFinalEvaluation)
+[Claims::deserialize] claim 6 key = Polynomial(Committed(RamInc), IncClaimReduction)
+[Claims::deserialize] claim 7 key = Polynomial(Virtual(PC), SpartanOuter)
+[Claims::deserialize] claim 8 key = Polynomial(Virtual(PC), SpartanShift)
+[Claims::deserialize] claim 9 key = Polynomial(Virtual(UnexpandedPC), SpartanOuter)
+[Claims::deserialize] claim 10 key = Polynomial(Virtual(UnexpandedPC), SpartanShift)
+[Claims::deserialize] claim 11 key = Polynomial(Virtual(UnexpandedPC), InstructionInputVirtualization)
+[Claims::deserialize] claim 12 key = Polynomial(Virtual(NextPC), SpartanOuter)
+[Claims::deserialize] claim 13 key = Polynomial(Virtual(NextUnexpandedPC), SpartanOuter)
+[Claims::deserialize] claim 14 key = Polynomial(Virtual(NextIsNoop), SpartanProductVirtualization)
+[Claims::deserialize] claim 15 key = Polynomial(Virtual(NextIsVirtual), SpartanOuter)
+[Claims::deserialize] claim 16 key = Polynomial(Virtual(NextIsFirstInSequence), SpartanOuter)
+[Claims::deserialize] claim 17 key = Polynomial(Virtual(LeftLookupOperand), SpartanOuter)
+[Claims::deserialize] claim 18 key = Polynomial(Virtual(LeftLookupOperand), InstructionClaimReduction)
+[Claims::deserialize] claim 19 key = Polynomial(Virtual(RightLookupOperand), SpartanOuter)
+[Claims::deserialize] claim 20 key = Polynomial(Virtual(RightLookupOperand), InstructionClaimReduction)
+[Claims::deserialize] claim 21 key = Polynomial(Virtual(LeftInstructionInput), SpartanOuter)
+[Claims::deserialize] claim 22 key = Polynomial(Virtual(LeftInstructionInput), SpartanProductVirtualization)
+[Claims::deserialize] claim 23 key = Polynomial(Virtual(RightInstructionInput), SpartanOuter)
+[Claims::deserialize] claim 24 key = Polynomial(Virtual(RightInstructionInput), SpartanProductVirtualization)
+[Claims::deserialize] claim 25 key = Polynomial(Virtual(Product), SpartanOuter)
+[Claims::deserialize] claim 26 key = Polynomial(Virtual(ShouldJump), SpartanOuter)
+[Claims::deserialize] claim 27 key = Polynomial(Virtual(ShouldBranch), SpartanOuter)
+[Claims::deserialize] claim 28 key = Polynomial(Virtual(WritePCtoRD), SpartanOuter)
+[Claims::deserialize] claim 29 key = Polynomial(Virtual(WriteLookupOutputToRD), SpartanOuter)
+[Claims::deserialize] claim 30 key = Polynomial(Virtual(Imm), SpartanOuter)
+[Claims::deserialize] claim 31 key = Polynomial(Virtual(Imm), InstructionInputVirtualization)
+[Claims::deserialize] claim 32 key = Polynomial(Virtual(Rs1Value), SpartanOuter)
+[Claims::deserialize] claim 33 key = Polynomial(Virtual(Rs1Value), InstructionInputVirtualization)
+[Claims::deserialize] claim 34 key = Polynomial(Virtual(Rs1Value), RegistersClaimReduction)
+[Claims::deserialize] claim 35 key = Polynomial(Virtual(Rs2Value), SpartanOuter)
+[Claims::deserialize] claim 36 key = Polynomial(Virtual(Rs2Value), InstructionInputVirtualization)
+[Claims::deserialize] claim 37 key = Polynomial(Virtual(Rs2Value), RegistersClaimReduction)
+[Claims::deserialize] claim 38 key = Polynomial(Virtual(RdWriteValue), SpartanOuter)
+[Claims::deserialize] claim 39 key = Polynomial(Virtual(RdWriteValue), RegistersClaimReduction)
+[Claims::deserialize] claim 40 key = Polynomial(Virtual(Rs1Ra), RegistersReadWriteChecking)
+[Claims::deserialize] claim 41 key = Polynomial(Virtual(Rs2Ra), RegistersReadWriteChecking)
+[Claims::deserialize] claim 42 key = Polynomial(Virtual(RdWa), RegistersReadWriteChecking)
+[Claims::deserialize] claim 43 key = Polynomial(Virtual(RdWa), RegistersValEvaluation)
+[Claims::deserialize] claim 44 key = Polynomial(Virtual(LookupOutput), SpartanOuter)
+[Claims::deserialize] claim 45 key = Polynomial(Virtual(LookupOutput), SpartanProductVirtualization)
+[Claims::deserialize] claim 46 key = Polynomial(Virtual(LookupOutput), InstructionClaimReduction)
+[Claims::deserialize] claim 47 key = Polynomial(Virtual(InstructionRafFlag), InstructionReadRaf)
+[Claims::deserialize] claim 48 key = Polynomial(Virtual(InstructionRafFlag), BytecodeReadRaf)
+[Claims::deserialize] claim 49 key = Polynomial(Virtual(InstructionRa(0)), InstructionReadRaf)
+[Claims::deserialize] InstructionRa(0) InstructionReadRaf claim = [18, d1, 65, 32, 94, 21, 95, 0a, 35, fb, 24, fd, bc, 79, 55, 19]
+[Claims::deserialize] claim 50 key = Polynomial(Virtual(InstructionRa(0)), BytecodeReadRaf)
+[Claims::deserialize] InstructionRa(0) BytecodeReadRaf claim = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] claim 51 key = Polynomial(Virtual(InstructionRa(1)), InstructionReadRaf)
+[Claims::deserialize] InstructionRa(1) InstructionReadRaf claim = [c4, 2c, b0, 4d, 2b, 6d, a0, 74, 70, 75, 5a, 16, 1e, 10, 10, 1f]
+[Claims::deserialize] claim 52 key = Polynomial(Virtual(InstructionRa(2)), InstructionReadRaf)
+[Claims::deserialize] InstructionRa(2) InstructionReadRaf claim = [40, 1f, b9, 2a, d1, 23, 36, 7e, 30, 5f, 2e, 01, fe, 16, 79, 2c]
+[Claims::deserialize] claim 53 key = Polynomial(Virtual(InstructionRa(3)), InstructionReadRaf)
+[Claims::deserialize] InstructionRa(3) InstructionReadRaf claim = [37, 96, d1, 8f, 87, d6, ca, fd, e7, 88, ba, c7, 6a, a9, 00, 0b]
+[Claims::deserialize] claim 54 key = Polynomial(Virtual(InstructionRa(4)), InstructionReadRaf)
+[Claims::deserialize] InstructionRa(4) InstructionReadRaf claim = [55, 0e, bc, 0b, af, cd, bd, 6e, 81, 59, 41, db, a1, f4, be, 2f]
+[Claims::deserialize] claim 55 key = Polynomial(Virtual(InstructionRa(5)), InstructionReadRaf)
+[Claims::deserialize] InstructionRa(5) InstructionReadRaf claim = [49, 31, 9a, 89, 4d, b5, 27, e7, c7, a5, 1c, d7, cf, 1d, d4, 26]
+[Claims::deserialize] claim 56 key = Polynomial(Virtual(InstructionRa(6)), InstructionReadRaf)
+[Claims::deserialize] InstructionRa(6) InstructionReadRaf claim = [4b, ac, 04, ff, f0, 4e, 56, 0a, 77, 35, 96, 33, 72, 62, 6d, 04]
+[Claims::deserialize] claim 57 key = Polynomial(Virtual(InstructionRa(7)), InstructionReadRaf)
+[Claims::deserialize] InstructionRa(7) InstructionReadRaf claim = [09, b5, af, db, 4b, e3, 2b, 24, 01, 57, af, 81, 96, 29, 83, 22]
+[Claims::deserialize] claim 58 key = Polynomial(Virtual(RegistersVal), RegistersReadWriteChecking)
+[Claims::deserialize] RegistersVal RegistersReadWriteChecking claim (LE) = [69, 61, 59, 1f, 70, 5c, 5f, 9a, 4d, 52, 8f, 7d, f4, 41, 9c, 3c, bf, 9e, ae, b6, 66, 0b, 10, 33, 33, a0, c8, 64, 9f, a1, bc, 11]
+[Claims::deserialize] claim 59 key = Polynomial(Virtual(RamAddress), SpartanOuter)
+[Claims::deserialize] claim 60 key = Polynomial(Virtual(RamRa), RamReadWriteChecking)
+[Claims::deserialize] claim 61 key = Polynomial(Virtual(RamRa), RamRafEvaluation)
+[Claims::deserialize] claim 62 key = Polynomial(Virtual(RamRa), RamValEvaluation)
+[Claims::deserialize] claim 63 key = Polynomial(Virtual(RamRa), RamValFinalEvaluation)
+[Claims::deserialize] claim 64 key = Polynomial(Virtual(RamRa), RamRaClaimReduction)
+[Claims::deserialize] claim 65 key = Polynomial(Virtual(RamRa), IncClaimReduction)
+[Claims::deserialize] claim 66 key = Polynomial(Virtual(RamReadValue), SpartanOuter)
+[Claims::deserialize] claim 67 key = Polynomial(Virtual(RamWriteValue), SpartanOuter)
+[Claims::deserialize] claim 68 key = Polynomial(Virtual(RamVal), RamReadWriteChecking)
+[Claims::deserialize] claim 69 key = Polynomial(Virtual(RamValInit), RamOutputCheck)
+[Claims::deserialize] claim 70 key = Polynomial(Virtual(RamValFinal), RamOutputCheck)
+[Claims::deserialize] claim 71 key = Polynomial(Virtual(RamHammingWeight), RamHammingBooleanity)
+[Claims::deserialize] claim 72 key = Polynomial(Virtual(RamHammingWeight), Booleanity)
+[Claims::deserialize] claim 73 key = Polynomial(Virtual(RamHammingWeight), HammingWeightClaimReduction)
+[Claims::deserialize] claim 74 key = Polynomial(Virtual(UnivariateSkip), SpartanOuter)
+[Claims::deserialize] claim 75 key = Polynomial(Virtual(UnivariateSkip), SpartanProductVirtualization)
+[Claims::deserialize] claim 76 key = Polynomial(Virtual(OpFlags(AddOperands)), SpartanOuter)
+[Claims::deserialize] claim 77 key = Polynomial(Virtual(OpFlags(SubtractOperands)), SpartanOuter)
+[Claims::deserialize] claim 78 key = Polynomial(Virtual(OpFlags(MultiplyOperands)), SpartanOuter)
+[Claims::deserialize] claim 79 key = Polynomial(Virtual(OpFlags(Load)), SpartanOuter)
+[Claims::deserialize] claim 80 key = Polynomial(Virtual(OpFlags(Store)), SpartanOuter)
+[Claims::deserialize] claim 81 key = Polynomial(Virtual(OpFlags(Jump)), SpartanOuter)
+[Claims::deserialize] claim 82 key = Polynomial(Virtual(OpFlags(Jump)), SpartanProductVirtualization)
+[Claims::deserialize] claim 83 key = Polynomial(Virtual(OpFlags(WriteLookupOutputToRD)), SpartanOuter)
+[Claims::deserialize] claim 84 key = Polynomial(Virtual(OpFlags(WriteLookupOutputToRD)), SpartanProductVirtualization)
+[Claims::deserialize] claim 85 key = Polynomial(Virtual(OpFlags(VirtualInstruction)), SpartanOuter)
+[Claims::deserialize] claim 86 key = Polynomial(Virtual(OpFlags(VirtualInstruction)), SpartanShift)
+[Claims::deserialize] claim 87 key = Polynomial(Virtual(OpFlags(Assert)), SpartanOuter)
+[Claims::deserialize] claim 88 key = Polynomial(Virtual(OpFlags(DoNotUpdateUnexpandedPC)), SpartanOuter)
+[Claims::deserialize] claim 89 key = Polynomial(Virtual(OpFlags(Advice)), SpartanOuter)
+[Claims::deserialize] claim 90 key = Polynomial(Virtual(OpFlags(IsCompressed)), SpartanOuter)
+[Claims::deserialize] claim 91 key = Polynomial(Virtual(OpFlags(IsFirstInSequence)), SpartanOuter)
+[Claims::deserialize] claim 92 key = Polynomial(Virtual(OpFlags(IsFirstInSequence)), SpartanShift)
+[Claims::deserialize] claim 93 key = Polynomial(Virtual(InstructionFlags(LeftOperandIsPC)), InstructionInputVirtualization)
+[Claims::deserialize] claim 94 key = Polynomial(Virtual(InstructionFlags(RightOperandIsImm)), InstructionInputVirtualization)
+[Claims::deserialize] claim 95 key = Polynomial(Virtual(InstructionFlags(LeftOperandIsRs1Value)), InstructionInputVirtualization)
+[Claims::deserialize] claim 96 key = Polynomial(Virtual(InstructionFlags(RightOperandIsRs2Value)), InstructionInputVirtualization)
+[Claims::deserialize] claim 97 key = Polynomial(Virtual(InstructionFlags(Branch)), SpartanProductVirtualization)
+[Claims::deserialize] claim 98 key = Polynomial(Virtual(InstructionFlags(IsNoop)), SpartanShift)
+[Claims::deserialize] claim 99 key = Polynomial(Virtual(InstructionFlags(IsRdNotZero)), SpartanProductVirtualization)
+[Claims::deserialize] LookupTableFlag(0) key_offset=0xd71 value_offset=0xd74
+[Claims::deserialize PRE] LookupTableFlag(0) claim_idx=100 raw bytes = [f2, e4, 3f, 5d, d8, 22, 9c, e3, c1, aa, ee, 38, 88, 67, 3f, 34, 37, 8c, 58, f7, ee, 63, f2, b7, 7b, 63, 84, bc, 30, 71, 31, 1d]
+[Claims::deserialize POST] LookupTableFlag(0) serialized = [f2, e4, 3f, 5d, d8, 22, 9c, e3, c1, aa, ee, 38, 88, 67, 3f, 34, 37, 8c, 58, f7, ee, 63, f2, b7, 7b, 63, 84, bc, 30, 71, 31, 1d]
+[Claims::deserialize] LookupTableFlag(1) key_offset=0xd94 value_offset=0xd97
+[Claims::deserialize PRE] LookupTableFlag(1) claim_idx=101 raw bytes = [d3, 1e, 55, 98, d2, 97, 8d, ca, 9b, f0, 3a, bf, c2, 3d, f7, 09, c0, 9e, 22, 7d, 80, 46, cd, ec, 30, 44, 22, aa, 26, 1a, 9f, 18]
+[Claims::deserialize POST] LookupTableFlag(1) serialized = [d3, 1e, 55, 98, d2, 97, 8d, ca, 9b, f0, 3a, bf, c2, 3d, f7, 09, c0, 9e, 22, 7d, 80, 46, cd, ec, 30, 44, 22, aa, 26, 1a, 9f, 18]
+[Claims::deserialize] LookupTableFlag(2) key_offset=0xdb7 value_offset=0xdba
+[Claims::deserialize PRE] LookupTableFlag(2) claim_idx=102 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(3) key_offset=0xdda value_offset=0xddd
+[Claims::deserialize PRE] LookupTableFlag(3) claim_idx=103 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(4) key_offset=0xdfd value_offset=0xe00
+[Claims::deserialize PRE] LookupTableFlag(4) claim_idx=104 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(5) key_offset=0xe20 value_offset=0xe23
+[Claims::deserialize PRE] LookupTableFlag(5) claim_idx=105 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(6) key_offset=0xe43 value_offset=0xe46
+[Claims::deserialize PRE] LookupTableFlag(6) claim_idx=106 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(7) key_offset=0xe66 value_offset=0xe69
+[Claims::deserialize PRE] LookupTableFlag(7) claim_idx=107 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(8) key_offset=0xe89 value_offset=0xe8c
+[Claims::deserialize PRE] LookupTableFlag(8) claim_idx=108 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(9) key_offset=0xeac value_offset=0xeaf
+[Claims::deserialize PRE] LookupTableFlag(9) claim_idx=109 raw bytes = [08, 55, 9f, 97, 19, 45, de, 9e, 48, 6b, 2f, be, 52, 0c, 25, 85, 99, 17, c7, 34, 81, 61, 0f, 8d, d0, bc, 59, 79, 72, 99, 62, 0c]
+[Claims::deserialize POST] LookupTableFlag(9) serialized = [08, 55, 9f, 97, 19, 45, de, 9e, 48, 6b, 2f, be, 52, 0c, 25, 85, 99, 17, c7, 34, 81, 61, 0f, 8d, d0, bc, 59, 79, 72, 99, 62, 0c]
+[Claims::deserialize] LookupTableFlag(10) key_offset=0xecf value_offset=0xed2
+[Claims::deserialize PRE] LookupTableFlag(10) claim_idx=110 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(11) key_offset=0xef2 value_offset=0xef5
+[Claims::deserialize PRE] LookupTableFlag(11) claim_idx=111 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(12) key_offset=0xf15 value_offset=0xf18
+[Claims::deserialize PRE] LookupTableFlag(12) claim_idx=112 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(13) key_offset=0xf38 value_offset=0xf3b
+[Claims::deserialize PRE] LookupTableFlag(13) claim_idx=113 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(14) key_offset=0xf5b value_offset=0xf5e
+[Claims::deserialize PRE] LookupTableFlag(14) claim_idx=114 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(15) key_offset=0xf7e value_offset=0xf81
+[Claims::deserialize PRE] LookupTableFlag(15) claim_idx=115 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(16) key_offset=0xfa1 value_offset=0xfa4
+[Claims::deserialize PRE] LookupTableFlag(16) claim_idx=116 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(17) key_offset=0xfc4 value_offset=0xfc7
+[Claims::deserialize PRE] LookupTableFlag(17) claim_idx=117 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(18) key_offset=0xfe7 value_offset=0xfea
+[Claims::deserialize PRE] LookupTableFlag(18) claim_idx=118 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(19) key_offset=0x100a value_offset=0x100d
+[Claims::deserialize PRE] LookupTableFlag(19) claim_idx=119 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(20) key_offset=0x102d value_offset=0x1030
+[Claims::deserialize PRE] LookupTableFlag(20) claim_idx=120 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(21) key_offset=0x1050 value_offset=0x1053
+[Claims::deserialize PRE] LookupTableFlag(21) claim_idx=121 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(22) key_offset=0x1073 value_offset=0x1076
+[Claims::deserialize PRE] LookupTableFlag(22) claim_idx=122 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(23) key_offset=0x1096 value_offset=0x1099
+[Claims::deserialize PRE] LookupTableFlag(23) claim_idx=123 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(24) key_offset=0x10b9 value_offset=0x10bc
+[Claims::deserialize PRE] LookupTableFlag(24) claim_idx=124 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(25) key_offset=0x10dc value_offset=0x10df
+[Claims::deserialize PRE] LookupTableFlag(25) claim_idx=125 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(26) key_offset=0x10ff value_offset=0x1102
+[Claims::deserialize PRE] LookupTableFlag(26) claim_idx=126 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(27) key_offset=0x1122 value_offset=0x1125
+[Claims::deserialize PRE] LookupTableFlag(27) claim_idx=127 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(28) key_offset=0x1145 value_offset=0x1148
+[Claims::deserialize PRE] LookupTableFlag(28) claim_idx=128 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(29) key_offset=0x1168 value_offset=0x116b
+[Claims::deserialize PRE] LookupTableFlag(29) claim_idx=129 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(30) key_offset=0x118b value_offset=0x118e
+[Claims::deserialize PRE] LookupTableFlag(30) claim_idx=130 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(31) key_offset=0x11ae value_offset=0x11b1
+[Claims::deserialize PRE] LookupTableFlag(31) claim_idx=131 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(32) key_offset=0x11d1 value_offset=0x11d4
+[Claims::deserialize PRE] LookupTableFlag(32) claim_idx=132 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(33) key_offset=0x11f4 value_offset=0x11f7
+[Claims::deserialize PRE] LookupTableFlag(33) claim_idx=133 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(34) key_offset=0x1217 value_offset=0x121a
+[Claims::deserialize PRE] LookupTableFlag(34) claim_idx=134 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(35) key_offset=0x123a value_offset=0x123d
+[Claims::deserialize PRE] LookupTableFlag(35) claim_idx=135 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(36) key_offset=0x125d value_offset=0x1260
+[Claims::deserialize PRE] LookupTableFlag(36) claim_idx=136 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(37) key_offset=0x1280 value_offset=0x1283
+[Claims::deserialize PRE] LookupTableFlag(37) claim_idx=137 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(38) key_offset=0x12a3 value_offset=0x12a6
+[Claims::deserialize PRE] LookupTableFlag(38) claim_idx=138 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(39) key_offset=0x12c6 value_offset=0x12c9
+[Claims::deserialize PRE] LookupTableFlag(39) claim_idx=139 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(40) key_offset=0x12e9 value_offset=0x12ec
+[Claims::deserialize PRE] LookupTableFlag(40) claim_idx=140 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[Claims::deserialize] LookupTableFlag(41) key_offset=0x130c value_offset=0x130f
+[Claims::deserialize PRE] LookupTableFlag(41) claim_idx=141 raw bytes = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+Loaded all files:
+  Preprocessing: 26356 bytes
+  Proof: 59083 bytes
+  Trace length: 256
+  ram_K: 65536 (log2 = 16)
+  bytecode_K: 65536 (log2 = 16)
+  Commitments: 37
+Verifier created, running verification...
+Sumcheck starting (max_rounds=9):
+  initial_claim: [fe, 2a, b0, 04, e1, 36, c9, 17, bb, fa, b0, 9c, 2f, 96, c6, dc, 1b, 69, 45, 37, 21, 95, f0, c7, a7, 51, 5d, c7, d8, da, 5f, 19]
+  max_num_rounds: 9
+  max_degree: 3
+  first round coeffs_except_linear:
+    [0]: [d5, d3, 05, 7c, da, dc, 59, f4, 9d, 99, bc, 3e, 4d, 6e, 6c, 54, 4c, bf, 15, ed, d2, 7a, 8a, f7, 31, 0b, 3c, fe, f8, 0b, a1, 21]
+    [1]: [f1, 82, 28, 98, 18, ec, b0, d2, 48, 1a, 94, e4, 02, ee, 7c, aa, 78, 30, 25, 99, 7c, b1, 8e, be, 06, 42, 0b, d6, fa, dd, 00, 19]
+    [2]: [ed, 1d, 80, 25, 54, e7, d6, 34, 37, 89, 50, e7, c2, 54, 86, a9, 4c, 62, 7f, 66, 4f, 63, 96, 53, b4, 43, 5a, 83, 5b, 51, 62, 1f]
+Stage 2 verifier - appending input claims (max_num_rounds=24):
+  instance[0] input_claim: [26, b1, 87, 56, 3a, 28, 6e, 29, 56, 6a, 50, 85, 0e, 1d, 3e, 30, 91, a4, 9d, 5c, a6, bc, 96, 06, 80, b0, 21, 60, a8, 3a, 0f, 11]
+  instance[1] input_claim: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  instance[2] input_claim: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  instance[3] input_claim: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  instance[4] input_claim: [36, f0, 5b, 5e, 44, ed, 15, 7c, 8d, 2c, 6b, 99, 88, 0a, a5, 8a, cf, db, f1, ef, 4f, aa, 64, 50, c0, 8f, a5, 1e, 1e, fc, 6b, 04]
+Stage 2 verifier - batching coeffs:
+  coeff[0]: [95, 7d, 21, 75, 52, 2c, e0, 93, 5d, 26, 73, 8f, 2e, 45, 16, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  coeff[1]: [6f, dc, cf, a4, e3, 51, 6e, 6f, fd, 93, ee, 66, 20, 8c, 02, c6, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  coeff[2]: [3a, 04, 93, 02, df, 49, 2a, d0, 44, 07, 16, c2, 30, fd, 5b, 40, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  coeff[3]: [29, 83, 22, eb, 62, 96, f8, d9, b2, b8, ce, 3d, 1e, 42, 02, 33, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  coeff[4]: [f3, c1, b1, 3e, 64, 8d, 83, 65, 04, 09, bf, 56, 8f, ef, de, 16, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+Sumcheck starting (max_rounds=24):
+  initial_claim: [fc, 94, d4, bc, c6, b1, a2, 26, 2b, 87, 4f, 3b, 42, e8, c1, 8d, 33, 3f, f9, ba, 35, 1b, 67, 76, fd, 18, fa, ee, 5a, 09, c3, 06]
+  max_num_rounds: 24
+  max_degree: 3
+  first round coeffs_except_linear:
+    [0]: [7e, 4a, 6a, 5e, e3, 58, 51, 93, 95, c3, a7, 1d, 21, f4, e0, c6, 99, 9f, 7c, dd, 9a, 8d, 33, bb, 7e, 0c, 7d, 77, ad, 84, 61, 03]
+    [1]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+    [2]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  Stage2 Round 16 challenge: [e5, 14, 65, ea, 14, 9a, ca, 3d, 85, 2e, f0, 8a, 3a, db, 23, dd, 04, 5f, 60, 72, ec, 7e, 51, 0f, 43, 99, 5b, 5a, f6, b8, 6c, 05]
+  Stage2 Round 17 challenge: [50, 21, 47, 5e, 14, e4, 87, c8, e0, 61, f4, 85, 0e, d2, dd, e9, 25, 57, 1b, 69, 7a, 62, c7, 12, a6, 19, 71, 24, 55, 8d, ac, 06]
+  Stage2 Round 18 challenge: [c3, 33, 26, df, c7, 75, ff, 21, b2, b8, 1a, 19, 4e, d1, 63, cc, 8f, 11, b2, e1, 05, da, 8b, f4, 76, 4a, 63, 59, 8d, aa, 8a, 1d]
+  Stage2 Round 19 challenge: [ac, ca, e1, b6, df, 33, 92, f1, 4f, ec, 75, 80, 93, 8e, 1c, c0, 9b, 2b, 95, 92, 7f, 07, 80, 13, e2, e4, 53, d3, e3, 0f, f5, 1d]
+  Stage2 Round 20 challenge: [ff, ae, 95, dc, 20, ee, b9, 5d, 0a, be, 06, d7, e8, ff, cc, 68, 6c, 1f, 2a, 98, e9, f1, 0c, 9b, e5, e2, 0a, 94, 53, 0f, a0, 29]
+  Stage2 Round 21 challenge: [19, fc, 9b, 5c, 0b, 7a, 94, ff, 03, 35, a3, 47, 41, a3, 09, 3c, f9, bf, c3, 40, 67, ce, 25, ae, f9, 69, 76, fc, f2, df, 93, 29]
+  Stage2 Round 22 challenge: [9c, 97, c7, f7, 52, 58, b9, 0f, d5, 2a, 70, 53, 3d, 79, 44, b9, 6f, e7, 00, 78, e8, 40, 57, d3, 36, c5, 96, c2, 68, 0d, 18, 2b]
+  Stage2 Round 23 challenge: [0d, 02, 35, 5f, 4d, e3, 19, 38, 9a, 57, b8, 26, 2a, af, 70, a2, e4, 6f, ff, 58, ee, ca, a1, fc, a9, 8c, 9a, bd, 9d, 5b, 74, 12]
+[JOLT] ProductVirtualRemainder cache_openings:
+  sumcheck_challenges.len = 8
+  sumcheck_challenges[0]: [e5, 14, 65, ea, 14, 9a, ca, 3d, 85, 2e, f0, 8a, 3a, db, 23, dd]
+  sumcheck_challenges[1]: [50, 21, 47, 5e, 14, e4, 87, c8, e0, 61, f4, 85, 0e, d2, dd, e9]
+  sumcheck_challenges[2]: [c3, 33, 26, df, c7, 75, ff, 21, b2, b8, 1a, 19, 4e, d1, 63, cc]
+  sumcheck_challenges[3]: [ac, ca, e1, b6, df, 33, 92, f1, 4f, ec, 75, 80, 93, 8e, 1c, c0]
+  sumcheck_challenges[4]: [ff, ae, 95, dc, 20, ee, b9, 5d, 0a, be, 06, d7, e8, ff, cc, 68]
+  sumcheck_challenges[5]: [19, fc, 9b, 5c, 0b, 7a, 94, ff, 03, 35, a3, 47, 41, a3, 09, 3c]
+  sumcheck_challenges[6]: [9c, 97, c7, f7, 52, 58, b9, 0f, d5, 2a, 70, 53, 3d, 79, 44, b9]
+  sumcheck_challenges[7]: [0d, 02, 35, 5f, 4d, e3, 19, 38, 9a, 57, b8, 26, 2a, af, 70, a2]
+  opening_point.len = 8
+  opening_point[0]: [0d, 02, 35, 5f, 4d, e3, 19, 38, 9a, 57, b8, 26, 2a, af, 70, a2]
+  opening_point[1]: [9c, 97, c7, f7, 52, 58, b9, 0f, d5, 2a, 70, 53, 3d, 79, 44, b9]
+  opening_point[2]: [19, fc, 9b, 5c, 0b, 7a, 94, ff, 03, 35, a3, 47, 41, a3, 09, 3c]
+  opening_point[3]: [ff, ae, 95, dc, 20, ee, b9, 5d, 0a, be, 06, d7, e8, ff, cc, 68]
+  opening_point[4]: [ac, ca, e1, b6, df, 33, 92, f1, 4f, ec, 75, 80, 93, 8e, 1c, c0]
+  opening_point[5]: [c3, 33, 26, df, c7, 75, ff, 21, b2, b8, 1a, 19, 4e, d1, 63, cc]
+  opening_point[6]: [50, 21, 47, 5e, 14, e4, 87, c8, e0, 61, f4, 85, 0e, d2, dd, e9]
+  opening_point[7]: [e5, 14, 65, ea, 14, 9a, ca, 3d, 85, 2e, f0, 8a, 3a, db, 23, dd]
+[JOLT] ProductVirtualRemainder expected_output_claim:
+  l_inst: [db, ef, db, d0, cc, 42, d2, a0, b7, 3f, 2b, 8d, 46, 42, e0, f2]
+  r_inst: [1a, af, 6d, a8, ba, 6b, 7e, 9b, 03, ee, 9a, c2, e4, 40, b3, f4]
+  is_rd_not_zero: [6a, c6, d7, 70, 9b, 91, 6f, 2b, 23, 37, 13, 8a, 24, d2, 07, b0]
+  wl_flag: [7d, 7a, fb, 04, 65, e2, 2a, c8, a3, 10, 0e, b1, 39, 2a, 3a, ce]
+  j_flag: [6d, 02, 50, d2, 68, c1, 03, 53, 0f, 8b, c6, 94, c9, 73, b1, 2d]
+  lookup_out: [37, 1a, a5, db, 7e, a3, 94, 99, b2, 5e, aa, 35, 1c, e4, 16, 9d]
+  branch_flag: [e3, e1, 1b, cf, 6e, 33, 7c, f8, 91, 2e, 23, 5d, 82, e4, 53, 24]
+  next_is_noop: [03, 7d, 27, 17, 8f, f1, 01, 2d, ca, 79, 59, ab, 0e, 23, 60, 5d]
+[JOLT] ProductVirtualRemainder tau_high: [63, 71, 68, fe, 34, 26, a7, c4, 81, f4, 09, f4, 2c, 35, 24, 79]
+[JOLT] ProductVirtualRemainder r0: [de, 6e, 0c, ff, 9d, a2, ae, 36, 38, b0, 33, 23, 70, 05, c6, bd]
+[JOLT] ProductVirtualRemainder tau.len = 9
+[JOLT] ProductVirtualRemainder fused_left: [94, 68, a9, 03, 62, 9b, 87, 64, fe, c6, ef, eb, 63, cd, 18, 50]
+[JOLT] ProductVirtualRemainder fused_right: [3f, 1c, 42, fc, 2a, 2a, d4, a4, 02, 7e, 36, 15, 27, 23, 61, c0]
+[JOLT] ProductVirtualRemainder tau_high_bound_r0: [0c, 81, 41, c0, e0, 4f, 1e, 3a, b2, 56, f5, ab, 72, cb, dd, 7c]
+[JOLT] ProductVirtualRemainder tau_bound_r_tail_rev: [27, 33, 80, f9, de, dc, 47, 61, ab, 04, 4e, 6a, 8e, 76, c4, 5b]
+[JOLT] ProductVirtualRemainder expected_output_claim: [10, 4f, c8, 32, 79, 06, 49, ad, 40, 25, af, 7c, d0, 10, 6c, ea]
+Stage 2 Instance 0 expected_output_claim:
+  claim: [10, 4f, c8, 32, 79, 06, 49, ad, 40, 25, af, 7c, d0, 10, 6c, ea, 63, 91, b1, 13, 08, 87, 3b, 5e, 42, 44, f9, 96, 5b, 8a, 9e, 0c]
+  coeff: [95, 7d, 21, 75, 52, 2c, e0, 93, 5d, 26, 73, 8f, 2e, 45, 16, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  claim*coeff: [f0, 52, 35, c0, b0, 42, 6a, 78, ef, 99, af, 35, 90, c8, 56, d5, d0, 0e, 3f, 5c, 96, e7, b1, c0, 20, ee, 40, 65, f5, 27, 23, 16]
+RamRafEvaluationVerifier::cache_openings debug:
+  sumcheck_challenges.len() = 16
+  params.log_K = 16
+  sumcheck_challenges[0]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 04, 90, 8b, 0d, ee, 48, 85, f0, 26, 5f, c2, 1c, 6c, 93, ce, 05]
+  sumcheck_challenges[1]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 54, 83, 81, 1b, db, 29, 1d, e8, 1c, ec, ce, 8d, fc, aa, 50, 1d]
+  sumcheck_challenges[2]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, b0, 5b, b2, de, 74, fe, 90, 41, d2, 63, bf, 3a, 42, 7e, dc, 1f]
+  sumcheck_challenges[3]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 34, 22, 31, 79, 9b, 79, 6a, bf, 6c, ab, 71, 0e, 49, 97, 60, 13]
+  sumcheck_challenges[4]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 85, 9b, aa, e2, 4f, 91, c0, bc, 6b, a9, d2, 41, a3, ed, 7d, 0b]
+  sumcheck_challenges[5]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 87, d0, 9f, ee, a0, f7, 82, fc, a7, 8e, e3, 80, 12, 42, 37, 0e]
+  sumcheck_challenges[6]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 07, 49, 82, 43, ee, 73, 49, 6f, 4a, 38, 44, dd, 14, 30, 51, 00]
+  sumcheck_challenges[7]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, d3, 2b, 52, 39, 92, ba, ea, c0, b9, d1, 67, ed, 4f, de, 10, 03]
+  sumcheck_challenges[8]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 41, 9e, 1e, ff, f9, d6, df, 8e, 6d, 56, 26, 2e, ba, 1a, c1, 03]
+  sumcheck_challenges[9]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, c6, 87, 89, 79, 11, 88, cf, 4c, 63, 36, b5, 88, d8, d4, d7, 1b]
+  sumcheck_challenges[10]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 0c, 09, d1, ac, 4b, 30, 6e, e2, b3, 82, 9e, ad, af, 59, 24, 1c]
+  sumcheck_challenges[11]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 88, ad, 1a, 56, ff, 58, 75, 23, 01, 7f, 9f, 1d, 93, 98, 62, 03]
+  sumcheck_challenges[12]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 91, dc, a9, 74, 0e, 40, 27, 58, 9c, d0, 8f, 1b, 61, da, 74, 07]
+  sumcheck_challenges[13]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 1b, e3, 90, 2b, 71, 44, fd, 28, 94, 78, a6, 13, b5, 47, 2e, 09]
+  sumcheck_challenges[14]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, d7, 21, ff, 79, 67, ef, cb, cf, c5, e2, c4, ec, 72, 93, 8f, 06]
+  sumcheck_challenges[15]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 0d, 8d, 89, b0, c0, ef, 00, b0, 84, a4, 8a, 1b, 0b, 14, 34, 07]
+  r_address (after normalize_opening_point):
+    r_address[0]: [0d, 02, 35, 5f, 4d, e3, 19, 38, 9a, 57, b8, 26, 2a, af, 70, a2, e4, 6f, ff, 58, ee, ca, a1, fc, a9, 8c, 9a, bd, 9d, 5b, 74, 12]
+    r_address[1]: [9c, 97, c7, f7, 52, 58, b9, 0f, d5, 2a, 70, 53, 3d, 79, 44, b9, 6f, e7, 00, 78, e8, 40, 57, d3, 36, c5, 96, c2, 68, 0d, 18, 2b]
+    r_address[2]: [19, fc, 9b, 5c, 0b, 7a, 94, ff, 03, 35, a3, 47, 41, a3, 09, 3c, f9, bf, c3, 40, 67, ce, 25, ae, f9, 69, 76, fc, f2, df, 93, 29]
+    r_address[3]: [ff, ae, 95, dc, 20, ee, b9, 5d, 0a, be, 06, d7, e8, ff, cc, 68, 6c, 1f, 2a, 98, e9, f1, 0c, 9b, e5, e2, 0a, 94, 53, 0f, a0, 29]
+Stage 2 Instance 1 expected_output_claim:
+  claim: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  coeff: [6f, dc, cf, a4, e3, 51, 6e, 6f, fd, 93, ee, 66, 20, 8c, 02, c6, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  claim*coeff: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+RamReadWriteCheckingVerifier::cache_openings debug:
+  sumcheck_challenges.len() = 24
+  params.phase1_num_rounds = 8
+  params.phase2_num_rounds = 16
+  params.K = 65536, params.T = 256
+  sumcheck_challenges[0]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 46, 73, 3e, 5d, b3, e2, eb, 58, f7, 88, 14, 8b, 67, d8, 60, 1d]
+  sumcheck_challenges[1]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 99, fc, 42, 90, 6a, 5a, fd, 16, 13, c7, 0a, 8a, 48, 0b, 9a, 1b]
+  sumcheck_challenges[2]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 22, ab, de, 63, a9, 3c, f2, 9d, f9, a1, 18, cd, 4c, 49, 05, 05]
+  sumcheck_challenges[3]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, f9, 9b, cb, 08, 91, c1, 2a, 41, 3a, 29, 71, 83, 03, a0, 16, 15]
+  sumcheck_challenges[4]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 28, 46, 7d, 38, d3, 50, b4, c7, 33, 29, 1e, b2, 62, a5, 15, 18]
+  sumcheck_challenges[5]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, cc, 8d, 63, 99, f6, 40, 68, de, b7, 44, a6, 13, af, 3f, ee, 0e]
+  sumcheck_challenges[6]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 8e, 15, 93, 18, 51, 06, 40, 7e, cc, 71, e0, 22, c2, 05, 84, 05]
+  sumcheck_challenges[7]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 1a, fd, 75, fd, f7, ea, 12, c7, ec, 26, 9a, 70, 05, c5, 4a, 14]
+  sumcheck_challenges[8]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 04, 90, 8b, 0d, ee, 48, 85, f0, 26, 5f, c2, 1c, 6c, 93, ce, 05]
+  sumcheck_challenges[9]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 54, 83, 81, 1b, db, 29, 1d, e8, 1c, ec, ce, 8d, fc, aa, 50, 1d]
+  sumcheck_challenges[10]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, b0, 5b, b2, de, 74, fe, 90, 41, d2, 63, bf, 3a, 42, 7e, dc, 1f]
+  sumcheck_challenges[11]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 34, 22, 31, 79, 9b, 79, 6a, bf, 6c, ab, 71, 0e, 49, 97, 60, 13]
+  sumcheck_challenges[12]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 85, 9b, aa, e2, 4f, 91, c0, bc, 6b, a9, d2, 41, a3, ed, 7d, 0b]
+  sumcheck_challenges[13]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 87, d0, 9f, ee, a0, f7, 82, fc, a7, 8e, e3, 80, 12, 42, 37, 0e]
+  sumcheck_challenges[14]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 07, 49, 82, 43, ee, 73, 49, 6f, 4a, 38, 44, dd, 14, 30, 51, 00]
+  sumcheck_challenges[15]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, d3, 2b, 52, 39, 92, ba, ea, c0, b9, d1, 67, ed, 4f, de, 10, 03]
+  sumcheck_challenges[16]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 41, 9e, 1e, ff, f9, d6, df, 8e, 6d, 56, 26, 2e, ba, 1a, c1, 03]
+  sumcheck_challenges[17]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, c6, 87, 89, 79, 11, 88, cf, 4c, 63, 36, b5, 88, d8, d4, d7, 1b]
+  sumcheck_challenges[18]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 0c, 09, d1, ac, 4b, 30, 6e, e2, b3, 82, 9e, ad, af, 59, 24, 1c]
+  sumcheck_challenges[19]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 88, ad, 1a, 56, ff, 58, 75, 23, 01, 7f, 9f, 1d, 93, 98, 62, 03]
+  sumcheck_challenges[20]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 91, dc, a9, 74, 0e, 40, 27, 58, 9c, d0, 8f, 1b, 61, da, 74, 07]
+  sumcheck_challenges[21]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 1b, e3, 90, 2b, 71, 44, fd, 28, 94, 78, a6, 13, b5, 47, 2e, 09]
+  sumcheck_challenges[22]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, d7, 21, ff, 79, 67, ef, cb, cf, c5, e2, c4, ec, 72, 93, 8f, 06]
+  sumcheck_challenges[23]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 0d, 8d, 89, b0, c0, ef, 00, b0, 84, a4, 8a, 1b, 0b, 14, 34, 07]
+  r_address (after normalize_opening_point for RWC):
+    r_address[0]: [0d, 02, 35, 5f, 4d, e3, 19, 38, 9a, 57, b8, 26, 2a, af, 70, a2, e4, 6f, ff, 58, ee, ca, a1, fc, a9, 8c, 9a, bd, 9d, 5b, 74, 12]
+    r_address[1]: [9c, 97, c7, f7, 52, 58, b9, 0f, d5, 2a, 70, 53, 3d, 79, 44, b9, 6f, e7, 00, 78, e8, 40, 57, d3, 36, c5, 96, c2, 68, 0d, 18, 2b]
+    r_address[2]: [19, fc, 9b, 5c, 0b, 7a, 94, ff, 03, 35, a3, 47, 41, a3, 09, 3c, f9, bf, c3, 40, 67, ce, 25, ae, f9, 69, 76, fc, f2, df, 93, 29]
+    r_address[3]: [ff, ae, 95, dc, 20, ee, b9, 5d, 0a, be, 06, d7, e8, ff, cc, 68, 6c, 1f, 2a, 98, e9, f1, 0c, 9b, e5, e2, 0a, 94, 53, 0f, a0, 29]
+Stage 2 Instance 2 expected_output_claim:
+  claim: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  coeff: [3a, 04, 93, 02, df, 49, 2a, d0, 44, 07, 16, c2, 30, fd, 5b, 40, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  claim*coeff: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+Stage 2 Instance 3 expected_output_claim:
+  claim: [54, fa, 47, c0, a8, 90, ac, 0c, b8, 49, 9a, fc, 77, ee, 2d, 66, bd, 51, 9c, a2, 92, e6, c1, cc, 7a, c9, 3f, 77, a4, e5, e7, 05]
+  coeff: [29, 83, 22, eb, 62, 96, f8, d9, b2, b8, ce, 3d, 1e, 42, 02, 33, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  claim*coeff: [d0, 26, 4b, 19, de, 62, c2, 39, e3, 26, 43, b3, 59, d8, 90, 5d, 79, c9, 43, 26, 88, fa, 4e, d8, d8, 74, 6b, d1, 77, 25, 58, 07]
+[InstructionClaimReduction] cache_openings: sumcheck_challenges.len = 8
+  sumcheck_challenges[0] = [e5, 14, 65, ea, 14, 9a, ca, 3d, 85, 2e, f0, 8a, 3a, db, 23, dd, 04, 5f, 60, 72, ec, 7e, 51, 0f, 43, 99, 5b, 5a, f6, b8, 6c, 05]
+  sumcheck_challenges[1] = [50, 21, 47, 5e, 14, e4, 87, c8, e0, 61, f4, 85, 0e, d2, dd, e9, 25, 57, 1b, 69, 7a, 62, c7, 12, a6, 19, 71, 24, 55, 8d, ac, 06]
+  sumcheck_challenges[2] = [c3, 33, 26, df, c7, 75, ff, 21, b2, b8, 1a, 19, 4e, d1, 63, cc, 8f, 11, b2, e1, 05, da, 8b, f4, 76, 4a, 63, 59, 8d, aa, 8a, 1d]
+  sumcheck_challenges[5] = [19, fc, 9b, 5c, 0b, 7a, 94, ff, 03, 35, a3, 47, 41, a3, 09, 3c, f9, bf, c3, 40, 67, ce, 25, ae, f9, 69, 76, fc, f2, df, 93, 29]
+  sumcheck_challenges[6] = [9c, 97, c7, f7, 52, 58, b9, 0f, d5, 2a, 70, 53, 3d, 79, 44, b9, 6f, e7, 00, 78, e8, 40, 57, d3, 36, c5, 96, c2, 68, 0d, 18, 2b]
+  sumcheck_challenges[7] = [0d, 02, 35, 5f, 4d, e3, 19, 38, 9a, 57, b8, 26, 2a, af, 70, a2, e4, 6f, ff, 58, ee, ca, a1, fc, a9, 8c, 9a, bd, 9d, 5b, 74, 12]
+[InstructionClaimReduction] After normalize_opening_point:
+  opening_point.r[0] = [0d, 8d, 89, b0, c0, ef, 00, b0, 84, a4, 8a, 1b, 0b, 14, 34, 07]
+  opening_point.r[1] = [d7, 21, ff, 79, 67, ef, cb, cf, c5, e2, c4, ec, 72, 93, 8f, 06]
+  opening_point.r[2] = [1b, e3, 90, 2b, 71, 44, fd, 28, 94, 78, a6, 13, b5, 47, 2e, 09]
+  opening_point.r[3] = [91, dc, a9, 74, 0e, 40, 27, 58, 9c, d0, 8f, 1b, 61, da, 74, 07]
+  opening_point.r[4] = [88, ad, 1a, 56, ff, 58, 75, 23, 01, 7f, 9f, 1d, 93, 98, 62, 03]
+  opening_point.r[5] = [0c, 09, d1, ac, 4b, 30, 6e, e2, b3, 82, 9e, ad, af, 59, 24, 1c]
+  opening_point.r[6] = [c6, 87, 89, 79, 11, 88, cf, 4c, 63, 36, b5, 88, d8, d4, d7, 1b]
+  opening_point.r[7] = [41, 9e, 1e, ff, f9, d6, df, 8e, 6d, 56, 26, 2e, ba, 1a, c1, 03]
+append_virtual: LookupOutput InstructionClaimReduction
+  opening_point.r.len() = 8
+  opening_point.r[0] = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 0d, 8d, 89, b0, c0, ef, 00, b0, 84, a4, 8a, 1b, 0b, 14, 34, 07]
+  opening_point.r[1] = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, d7, 21, ff, 79, 67, ef, cb, cf, c5, e2, c4, ec, 72, 93, 8f, 06]
+  opening_point.r[2] = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 1b, e3, 90, 2b, 71, 44, fd, 28, 94, 78, a6, 13, b5, 47, 2e, 09]
+append_virtual: LeftLookupOperand InstructionClaimReduction
+  opening_point.r.len() = 8
+  opening_point.r[0] = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 0d, 8d, 89, b0, c0, ef, 00, b0, 84, a4, 8a, 1b, 0b, 14, 34, 07]
+  opening_point.r[1] = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, d7, 21, ff, 79, 67, ef, cb, cf, c5, e2, c4, ec, 72, 93, 8f, 06]
+  opening_point.r[2] = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 1b, e3, 90, 2b, 71, 44, fd, 28, 94, 78, a6, 13, b5, 47, 2e, 09]
+append_virtual: RightLookupOperand InstructionClaimReduction
+  opening_point.r.len() = 8
+  opening_point.r[0] = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 0d, 8d, 89, b0, c0, ef, 00, b0, 84, a4, 8a, 1b, 0b, 14, 34, 07]
+  opening_point.r[1] = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, d7, 21, ff, 79, 67, ef, cb, cf, c5, e2, c4, ec, 72, 93, 8f, 06]
+  opening_point.r[2] = [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 1b, e3, 90, 2b, 71, 44, fd, 28, 94, 78, a6, 13, b5, 47, 2e, 09]
+Stage 2 Instance 4 expected_output_claim:
+  claim: [a2, 5e, a0, 60, 68, 73, b4, 07, 05, 83, 83, 44, b3, 3f, 25, 5a, b5, f9, 0d, 3a, 69, 05, 81, 00, b7, ac, 54, 23, a9, 0d, db, 00]
+  coeff: [f3, c1, b1, 3e, 64, 8d, 83, 65, 04, 09, bf, 56, 8f, ef, de, 16, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  claim*coeff: [8b, b9, 77, 7e, 0f, 2f, 24, 76, c3, 35, ae, c0, 75, a8, fd, 66, 35, 13, e0, 0b, 7e, b4, b4, 4f, a3, 77, 21, 72, b4, 16, 6a, 1e]
+[JOLT TRANSCRIPT] challenge_scalar_powers(5) state BEFORE: [5f, c0, b8, b8, 89, ca, 46, 83, 66, 09, 99, 45, 8e, 97, a5, 10]
+[JOLT TRANSCRIPT] n_rounds BEFORE: 386
+[JOLT TRANSCRIPT] challenge_scalar_powers(5) gamma (LE full): [66, 56, 18, 21, a6, e0, c6, 4e, 5a, 0b, 64, 34, c0, 26, d3, 9e, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[JOLT TRANSCRIPT]   gamma low bytes (0..16): [66, 56, 18, 21, a6, e0, c6, 4e, 5a, 0b, 64, 34, c0, 26, d3, 9e]
+Stage 3 verifier - appending input claims (max_num_rounds=8):
+  instance[0] input_claim: [d2, b6, d1, df, 5b, 46, f7, 48, 14, d6, 89, 78, ac, 4e, 56, b6, 5c, ce, 9d, 32, 9c, 0f, 01, be, 09, f4, 74, 61, a4, da, 21, 1a]
+  instance[1] input_claim: [5e, 7f, a7, f9, 8b, d2, e7, 75, b2, c4, 01, 5c, 3b, dd, a5, 70, 0e, c8, c3, 57, 34, f5, 20, 9d, 01, a8, de, 20, 27, 06, f5, 2d]
+  instance[2] input_claim: [06, 37, 8c, 17, bd, fe, 8a, 35, 43, 42, fc, 17, 04, 4e, d1, 22, e1, bd, 01, dc, dd, 0a, b5, 57, 12, 0f, 50, c5, b7, 49, d0, 2a]
+Stage 3 verifier - batching coeffs:
+  coeff[0]: [96, 13, 46, c2, 56, 2c, f5, 95, 75, 16, 3d, c9, 4c, eb, dd, 4d, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  coeff[1]: [97, fd, f8, 2c, af, 24, fc, da, aa, a1, 4c, a9, ab, 89, 75, 71, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  coeff[2]: [a2, cd, 73, 76, db, f0, 87, d3, c4, 91, 70, ca, 3d, 13, eb, 42, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+Sumcheck starting (max_rounds=8):
+  initial_claim: [f1, a7, 0d, 6c, 18, 0c, ac, 53, 4f, 94, e4, b8, 57, 37, 16, 94, 62, c3, 64, c8, 18, 09, 5d, 69, 93, a1, 2b, c6, 9f, d0, 8e, 01]
+  max_num_rounds: 8
+  max_degree: 3
+  Stage3 round 0 coeffs_except_linear:
+    [0]: [e4, fa, 3b, 38, ae, 6a, d0, 09, 5a, e1, e1, c3, cb, ee, 61, a6, 1c, b6, be, 5d, ce, 18, 85, f1, 24, 8f, 69, b7, cb, cf, b2, 0b]
+    [1]: [ae, 91, fa, 36, 78, 97, 6d, e9, 15, a3, db, ad, 57, 88, 04, 4d, 04, ac, 30, 20, 4a, 43, 73, 0b, 99, c9, aa, 7e, d8, 57, 71, 09]
+    [2]: [69, b9, f2, 35, 7d, 81, a4, fc, 0e, c9, b9, c8, dc, 98, fe, 51, 14, 5c, c0, d1, 5a, 43, 9f, 07, 40, cf, e6, cf, a4, 58, 24, 15]
+  Stage3 round 1 coeffs_except_linear:
+    [0]: [6c, 73, 8d, dd, 1e, 13, ef, 9d, 84, 29, 48, 1c, f7, 26, 00, c2, 26, 5d, 5d, f6, 29, 56, 86, 7d, 53, 9e, fb, a9, bf, 96, 7d, 22]
+    [1]: [3f, 70, fe, ce, f8, 30, 63, c7, ed, 6c, 8a, d3, 5d, 01, dc, 5e, 7d, d4, 44, bf, a4, 2a, b1, 30, 73, e4, ee, cf, 84, b5, 65, 14]
+    [2]: [25, b2, 2e, 34, 47, 0d, 85, a8, 9f, 75, f9, 00, fe, b4, 58, 04, 58, 1a, 0c, cb, 36, 98, 3c, 52, a9, 94, d5, 77, 8b, d5, 5f, 23]
+  Stage3 round 2 coeffs_except_linear:
+    [0]: [8f, a8, 99, 48, 8f, 2d, 37, d3, 3c, 45, 09, 20, a1, 3d, 0c, 7c, bb, d1, 19, 75, 9c, 29, 5d, 23, bb, a3, fe, 05, ff, 5c, 39, 2c]
+    [1]: [96, 42, 17, bc, 41, 88, b5, c9, 6a, ef, aa, a0, b9, 01, d6, d0, 32, 21, c3, 40, c5, c5, f1, 67, 91, bb, 20, 7e, 85, b1, 4a, 30]
+    [2]: [52, eb, 98, 3d, f2, 7b, 1d, 62, 0c, 98, 3c, 16, bf, b3, cc, 50, 77, d2, 9b, 1a, f8, 72, 21, f6, 2f, 8f, 43, cc, 1f, 16, 7d, 2f]
+  first round coeffs_except_linear:
+    [0]: [e4, fa, 3b, 38, ae, 6a, d0, 09, 5a, e1, e1, c3, cb, ee, 61, a6, 1c, b6, be, 5d, ce, 18, 85, f1, 24, 8f, 69, b7, cb, cf, b2, 0b]
+    [1]: [ae, 91, fa, 36, 78, 97, 6d, e9, 15, a3, db, ad, 57, 88, 04, 4d, 04, ac, 30, 20, 4a, 43, 73, 0b, 99, c9, aa, 7e, d8, 57, 71, 09]
+    [2]: [69, b9, f2, 35, 7d, 81, a4, fc, 0e, c9, b9, c8, dc, 98, fe, 51, 14, 5c, c0, d1, 5a, 43, 9f, 07, 40, cf, e6, cf, a4, 58, 24, 15]
+  Stage3 Round 0 challenge: [dc, b1, f1, 16, 18, 4b, 8a, c2, 09, 06, 71, 86, c1, b4, a7, d7]
+  Stage3 Round 1 challenge: [de, d8, 45, 49, 4e, 77, b5, 66, 8e, d6, ed, da, eb, 2a, fc, c3]
+  Stage3 Round 2 challenge: [b0, ff, 7e, 16, e9, c3, ea, 1d, 47, 29, ce, 82, 79, b5, 0f, e4]
+RegistersClaimReduction cache_openings:
+  sumcheck_challenges.len() = 8
+  challenges[0] as Challenge: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 4e, 12, 12, c4, 9e, b8, 61, df, 3a, b9, b4, db, c1, 24, 59, 1f]
+  challenges[0] as F:         [dc, b1, f1, 16, 18, 4b, 8a, c2, 09, 06, 71, 86, c1, b4, a7, d7, 2e, 51, c4, 68, 86, 74, ae, 08, c9, 00, 03, 5b, 24, 21, ce, 2d]
+  challenges[1] as Challenge: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 52, dc, 02, b9, cc, 9b, 90, ce, e3, 16, d5, c5, f2, 06, 62, 1e]
+  challenges[1] as F:         [de, d8, 45, 49, 4e, 77, b5, 66, 8e, d6, ed, da, eb, 2a, fc, c3, fd, 02, bb, fe, de, 4e, 1b, 94, a2, 49, 09, 14, 3b, 3b, 80, 29]
+  challenges[2] as Challenge: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 20, 63, 9f, 41, e0, 77, 56, 07, 34, 4a, bd, 32, 2f, 7c, b4, 05]
+  challenges[2] as F:         [b0, ff, 7e, 16, e9, c3, ea, 1d, 47, 29, ce, 82, 79, b5, 0f, e4, 69, ca, 3f, 0c, 6a, df, a5, ca, 49, fb, f4, 3e, d9, 6d, c2, 2d]
+  challenges[3] as Challenge: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 1f, a6, ed, a6, 0d, d7, e9, 5d, 9a, 61, 04, da, b0, 4e, e7, 18]
+  challenges[3] as F:         [6b, b8, 01, 73, b9, 5c, 96, f6, 87, 30, 74, f4, d1, e3, 45, 8a, e5, 40, 92, 4f, 74, 3f, 3f, 55, 88, 98, b0, c1, 9b, da, fe, 25]
+  challenges[4] as Challenge: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, bd, 37, b7, f1, 7d, b2, f1, 16, 7d, 4e, cf, 4b, 66, 11, bf, 08]
+  challenges[4] as F:         [3d, 77, 70, c8, 4d, ec, dc, 03, 09, cf, 6a, 95, fe, 11, b9, 43, c9, 61, aa, 7d, a8, 45, 89, cc, 91, b4, 3f, f7, 5e, 88, 52, 23]
+  challenges[5] as Challenge: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 43, fe, c9, aa, ed, 7a, bf, e3, 70, 62, 3c, a2, 49, 36, 0d, 1e]
+  challenges[5] as F:         [c7, 59, fa, 47, 76, ce, 11, 21, e4, 05, 1d, 2f, a0, 83, 37, 53, 90, 47, 82, 30, 00, b4, 94, 4b, 5e, 2f, af, b5, 4e, 1a, cf, 07]
+  challenges[6] as Challenge: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 5c, 7a, 18, 39, 0d, 32, e0, da, 96, bc, c0, e4, 84, a1, 8b, 04]
+  challenges[6] as F:         [3f, d4, 9b, d2, 48, 86, 9b, fc, ec, af, b8, 65, e7, d1, ef, af, cb, 8a, 60, c9, c2, 5f, 4c, ed, 8a, 27, 92, 77, 04, 67, d9, 22]
+  challenges[7] as Challenge: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, b8, 79, 98, ad, 83, 13, f0, 03, eb, b2, e6, 20, f8, 96, 89, 1f]
+  challenges[7] as F:         [ce, bf, e5, 0a, 6f, d1, e7, 0b, fb, ef, 84, 39, e9, 81, 41, 7b, f5, c6, 1e, 39, ee, 7c, 7a, 53, dc, 9e, c5, a4, 62, 09, 2b, 0e]
+  opening_point.len() = 8
+  opening_point[0]:            [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, b8, 79, 98, ad, 83, 13, f0, 03, eb, b2, e6, 20, f8, 96, 89, 1f]
+  opening_point[1]:            [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 5c, 7a, 18, 39, 0d, 32, e0, da, 96, bc, c0, e4, 84, a1, 8b, 04]
+  opening_point[2]:            [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 43, fe, c9, aa, ed, 7a, bf, e3, 70, 62, 3c, a2, 49, 36, 0d, 1e]
+  opening_point[3]:            [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, bd, 37, b7, f1, 7d, b2, f1, 16, 7d, 4e, cf, 4b, 66, 11, bf, 08]
+  opening_point[4]:            [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 1f, a6, ed, a6, 0d, d7, e9, 5d, 9a, 61, 04, da, b0, 4e, e7, 18]
+  opening_point[5]:            [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 20, 63, 9f, 41, e0, 77, 56, 07, 34, 4a, bd, 32, 2f, 7c, b4, 05]
+  opening_point[6]:            [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 52, dc, 02, b9, cc, 9b, 90, ce, e3, 16, d5, c5, f2, 06, 62, 1e]
+  opening_point[7]:            [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 4e, 12, 12, c4, 9e, b8, 61, df, 3a, b9, b4, db, c1, 24, 59, 1f]
+Stage 3 verification passed, r_stage3.len() = 8
+  r_stage3[0]: [4e, 12, 12, c4, 9e, b8, 61, df, 3a, b9, b4, db, c1, 24, 59, 1f]
+  r_stage3[1]: [52, dc, 02, b9, cc, 9b, 90, ce, e3, 16, d5, c5, f2, 06, 62, 1e]
+  r_stage3[2]: [20, 63, 9f, 41, e0, 77, 56, 07, 34, 4a, bd, 32, 2f, 7c, b4, 05]
+  r_stage3[3]: [1f, a6, ed, a6, 0d, d7, e9, 5d, 9a, 61, 04, da, b0, 4e, e7, 18]
+  r_stage3[4]: [bd, 37, b7, f1, 7d, b2, f1, 16, 7d, 4e, cf, 4b, 66, 11, bf, 08]
+  r_stage3[5]: [43, fe, c9, aa, ed, 7a, bf, e3, 70, 62, 3c, a2, 49, 36, 0d, 1e]
+  r_stage3[6]: [5c, 7a, 18, 39, 0d, 32, e0, da, 96, bc, c0, e4, 84, a1, 8b, 04]
+  r_stage3[7]: [b8, 79, 98, ad, 83, 13, f0, 03, eb, b2, e6, 20, f8, 96, 89, 1f]
+RegistersReadWriteCheckingParams::new debug:
+  T (trace_length) = 256
+  phase1_num_rounds = 8
+  phase2_num_rounds = 7
+  LOG_K = 7
+  num_rounds = 7 + 8 = 15
+  r_cycle.len() = 8
+ValEvaluationSumcheckParams::new_from_verifier debug:
+  r_address.r.len() = 16
+  r_address[0]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 0d, 8d, 89, b0, c0, ef, 00, b0, 84, a4, 8a, 1b, 0b, 14, 34, 07]
+  r_address[1]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, d7, 21, ff, 79, 67, ef, cb, cf, c5, e2, c4, ec, 72, 93, 8f, 06]
+  r_address[2]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 1b, e3, 90, 2b, 71, 44, fd, 28, 94, 78, a6, 13, b5, 47, 2e, 09]
+  r_address[3]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 91, dc, a9, 74, 0e, 40, 27, 58, 9c, d0, 8f, 1b, 61, da, 74, 07]
+  r_address[4]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 88, ad, 1a, 56, ff, 58, 75, 23, 01, 7f, 9f, 1d, 93, 98, 62, 03]
+  r_address[5]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 0c, 09, d1, ac, 4b, 30, 6e, e2, b3, 82, 9e, ad, af, 59, 24, 1c]
+  r_address[6]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, c6, 87, 89, 79, 11, 88, cf, 4c, 63, 36, b5, 88, d8, d4, d7, 1b]
+  r_address[7]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 41, 9e, 1e, ff, f9, d6, df, 8e, 6d, 56, 26, 2e, ba, 1a, c1, 03]
+  r_address[8]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, d3, 2b, 52, 39, 92, ba, ea, c0, b9, d1, 67, ed, 4f, de, 10, 03]
+  r_address[9]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 07, 49, 82, 43, ee, 73, 49, 6f, 4a, 38, 44, dd, 14, 30, 51, 00]
+  r_address[10]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 87, d0, 9f, ee, a0, f7, 82, fc, a7, 8e, e3, 80, 12, 42, 37, 0e]
+  r_address[11]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 85, 9b, aa, e2, 4f, 91, c0, bc, 6b, a9, d2, 41, a3, ed, 7d, 0b]
+  r_address[12]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 34, 22, 31, 79, 9b, 79, 6a, bf, 6c, ab, 71, 0e, 49, 97, 60, 13]
+  r_address[13]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, b0, 5b, b2, de, 74, fe, 90, 41, d2, 63, bf, 3a, 42, 7e, dc, 1f]
+  r_address[14]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 54, 83, 81, 1b, db, 29, 1d, e8, 1c, ec, ce, 8d, fc, aa, 50, 1d]
+  r_address[15]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 04, 90, 8b, 0d, ee, 48, 85, f0, 26, 5f, c2, 1c, 6c, 93, ce, 05]
+  init_eval: [60, c4, 26, 18, 13, 21, b6, eb, 8a, 65, f8, b4, 7a, 3c, c8, 2e, ba, 79, 65, 6f, f5, d4, 26, a4, 72, 56, b5, 2e, 9c, f8, f5, 1d]
+  val_init_public_eval: [60, c4, 26, 18, 13, 21, b6, eb, 8a, 65, f8, b4, 7a, 3c, c8, 2e, ba, 79, 65, 6f, f5, d4, 26, a4, 72, 56, b5, 2e, 9c, f8, f5, 1d]
+ValFinalSumcheckParams::new_from_verifier debug:
+  r_address.len() = 16
+  r_address[0]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 0d, 8d, 89, b0, c0, ef, 00, b0, 84, a4, 8a, 1b, 0b, 14, 34, 07]
+  r_address[1]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, d7, 21, ff, 79, 67, ef, cb, cf, c5, e2, c4, ec, 72, 93, 8f, 06]
+  r_address[2]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 1b, e3, 90, 2b, 71, 44, fd, 28, 94, 78, a6, 13, b5, 47, 2e, 09]
+  r_address[3]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 91, dc, a9, 74, 0e, 40, 27, 58, 9c, d0, 8f, 1b, 61, da, 74, 07]
+  val_init_eval: [60, c4, 26, 18, 13, 21, b6, eb, 8a, 65, f8, b4, 7a, 3c, c8, 2e, ba, 79, 65, 6f, f5, d4, 26, a4, 72, 56, b5, 2e, 9c, f8, f5, 1d]
+  val_init_public_eval: [60, c4, 26, 18, 13, 21, b6, eb, 8a, 65, f8, b4, 7a, 3c, c8, 2e, ba, 79, 65, 6f, f5, d4, 26, a4, 72, 56, b5, 2e, 9c, f8, f5, 1d]
+Stage 4 verifier - appending input claims:
+  instance[0] input_claim: [e6, a9, fb, a5, 63, e1, e5, 4d, 54, ce, c9, d7, 00, a0, c7, d9, f4, 63, 6a, 9f, d0, 4e, 48, c4, b9, 0c, 7d, 15, c2, b4, 57, 2f]
+  instance[1] input_claim: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  instance[2] input_claim: [4e, e5, 52, 92, 8e, 09, c7, 1e, 38, 6a, 5f, bf, 44, 54, eb, d9, b7, 48, b7, 82, da, c7, d6, 49, 86, 8f, 93, ee, 2e, 9d, f3, 06]
+Stage 4 verifier - batching coeffs:
+  coeff[0]: [53, dd, 21, 20, 91, cb, 83, 8c, d1, 52, 88, 20, cb, cc, 5d, 28, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  coeff[1]: [04, 51, 2d, 9c, 68, c8, ca, 8f, 92, 97, 5a, 67, f1, 48, 9c, 0a, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  coeff[2]: [aa, f0, cd, bf, 82, c5, 4f, f4, 9b, a6, 57, bd, fc, fd, fb, 82, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+Sumcheck starting (max_rounds=15):
+  initial_claim: [69, 37, 93, 80, c1, f5, 62, a7, 24, 14, 6e, 7a, 23, 66, 28, ba, df, 83, 86, bd, d5, a3, 8f, c7, ca, e6, dd, 42, d8, 49, d4, 09]
+  max_num_rounds: 15
+  max_degree: 3
+  first round coeffs_except_linear:
+    [0]: [ec, 68, 6f, d8, 09, 44, 79, a0, 75, f5, 4a, 31, e5, 14, 6f, bf, 2c, 8e, e5, 6f, 4d, 01, c2, 7c, c1, 88, 18, fa, 47, 08, a8, 00]
+    [1]: [86, 92, 72, bc, 2f, 71, 3a, 66, 57, 1f, d4, 21, d6, 03, 4c, 5d, 41, 27, 24, bf, a5, 44, e9, 63, 70, 2a, 4d, 59, 28, 0c, bd, 04]
+    [2]: [bc, f7, 1a, 87, 42, 21, 5e, 2c, c3, 6b, 1f, 24, 4c, bd, ec, ed, 1c, d2, 95, e6, b9, 5f, 70, fc, 2b, 2a, 5f, c5, f3, a4, d9, 1f]
+  Round 0 coeffs:
+    [0]: [ec, 68, 6f, d8, 09, 44, 79, a0, 75, f5, 4a, 31, e5, 14, 6f, bf]
+    [1]: [86, 92, 72, bc, 2f, 71, 3a, 66, 57, 1f, d4, 21, d6, 03, 4c, 5d]
+    [2]: [bc, f7, 1a, 87, 42, 21, 5e, 2c, c3, 6b, 1f, 24, 4c, bd, ec, ed]
+  Round 0 challenge: [66, f4, 5b, 80, 9c, 53, cc, 90, 1b, 03, d2, 38, f3, 8c, 73, b0, 15, 10, 7a, 69, 5c, 82, bb, 6a, a5, 89, 1f, f8, f5, c4, f8, 0d]
+  Round 0 new_claim: [62, 38, ce, ba, 78, 04, ae, bb, 35, d5, 89, 6e, 50, ba, c3, 3c, 01, 60, c5, d4, b1, 93, ae, 7b, d6, af, 75, 6f, b7, 12, 03, 2b]
+  Round 1 coeffs:
+    [0]: [30, e0, dd, 4c, ae, db, af, ff, 06, 16, 47, 73, 4f, 5a, 21, 6f]
+    [1]: [a6, 5d, ce, dd, 9d, 1f, 5b, 80, 02, 15, 40, 58, db, f7, c1, ed]
+    [2]: [f9, 7c, fe, a5, a1, db, 0f, 51, f0, 4d, 51, bf, 80, 23, 57, 32]
+  Round 1 challenge: [ca, b4, 90, 06, 3d, 66, 3a, cc, 07, fe, 74, 66, 42, 34, f7, f9, 09, bb, 26, 25, ea, a9, ec, 80, b0, 62, 26, 1c, ba, dd, 4d, 1f]
+  Round 1 new_claim: [e6, bf, 9a, 46, 80, 43, 5a, 7e, e7, 8d, 94, 94, ac, bd, d0, 57, 3c, 2a, 5e, 8f, d4, 57, a3, 5a, 47, 9e, dd, 13, 4f, 52, 51, 1e]
+  Round 2 coeffs:
+    [0]: [c4, aa, 8a, b4, 0b, f5, af, bc, 3c, 3c, 78, d9, ed, 32, cf, e2]
+    [1]: [e5, 25, 0b, 2f, b1, 1a, 60, 63, 8c, 00, 32, 76, 75, ca, 85, 30]
+    [2]: [b9, bc, ac, 14, ff, ab, 63, 69, 44, a8, 75, 9f, 95, 42, 02, 52]
+  Round 2 challenge: [d8, cf, eb, fc, 9c, 2b, dd, 6a, 63, cb, d3, fa, 76, 60, 8a, e5, cf, bc, 05, 8e, 19, d4, 4b, e8, 96, b9, b0, 6f, 9b, 60, 71, 03]
+  Round 2 new_claim: [19, 26, 95, 72, c5, a6, 94, 00, f7, dd, ab, 83, dc, ce, 44, 14, 7d, e3, 1a, d4, ef, 92, 4a, e0, e1, ed, 7c, 0b, ab, 63, 7c, 13]
+  Round 3 coeffs:
+    [0]: [03, fe, 77, c5, 0a, c8, 86, 48, 39, f1, a8, ce, 93, 60, 19, 2c]
+    [1]: [17, f9, 95, 8d, 95, 3c, bd, 84, 13, 67, 7d, da, 09, 9e, 12, 47]
+    [2]: [4a, 0a, 1f, b7, f7, 96, cc, 01, 3e, 02, 93, c4, 43, 64, b3, 76]
+  Round 3 challenge: [5c, 93, 01, b2, 54, 5d, 53, aa, a1, a6, 2f, 2b, 49, 25, 79, 1e, 8f, 02, d0, 94, 76, 71, a9, f4, 65, 8f, 8c, 0d, c3, 23, 27, 16]
+  Round 3 new_claim: [13, 79, cf, 62, e0, d1, 34, cf, fe, ef, 62, d9, 4b, 2a, a6, a2, 62, 43, cb, 42, d4, cb, e8, 4a, 84, 89, ca, a7, 79, a2, 4a, 2c]
+  Round 4 coeffs:
+    [0]: [0b, 1f, 0e, a3, d5, db, e4, 43, 18, 6a, ee, 09, 71, 90, 68, 89]
+    [1]: [01, 01, 29, 3e, ae, 3d, 7f, 1a, c9, 8c, bc, ca, a2, fa, f6, d2]
+    [2]: [63, bb, a2, 4d, d3, af, 7e, a9, f4, bd, 5d, cb, 6d, 64, 15, 57]
+  Round 4 challenge: [c0, aa, b2, 76, 3c, f4, 9f, 49, 03, 34, 5e, 34, 85, 2b, 05, 0d, 79, 80, cc, 2a, 6c, cf, 0c, 1c, b7, ff, 04, b2, 61, ff, f6, 05]
+  Round 4 new_claim: [ff, 86, 6a, bd, db, fe, 16, 26, 79, 67, f5, 99, d2, 8a, df, ad, 93, b5, 8b, ff, ba, d8, 8f, de, fc, 14, e9, d2, 63, 93, b8, 04]
+  Round 5 coeffs:
+    [0]: [d3, 4c, d6, 4d, da, ef, a9, e7, 6c, 4c, c4, 36, 49, d9, 45, df]
+    [1]: [23, a9, 43, 7e, 90, 21, 86, 83, 21, ce, 6a, 71, f8, cc, 13, f5]
+    [2]: [a4, 31, 52, d2, 6d, 06, ac, fb, b3, 6b, ac, a5, d4, 47, bd, 0a]
+  Round 5 challenge: [14, 53, 34, 6f, 42, 83, 4e, e9, 88, 26, e7, 94, b7, 33, 0f, 47, 9f, 29, 81, 1b, 30, ba, f2, 0b, cd, 04, 85, 86, ad, 55, d5, 2c]
+  Round 5 new_claim: [c6, 5e, 1e, dc, 7b, d3, c6, 3e, b0, 21, 5c, 6d, 37, a3, 85, 02, 16, b2, b1, f1, 39, 2b, 8b, 5d, 77, 82, 4f, bc, c6, 15, 47, 0a]
+  Round 6 coeffs:
+    [0]: [9f, 83, 58, c9, f9, 81, 30, c5, 52, 8a, ec, 1d, b6, 88, e4, 16]
+    [1]: [6f, 1b, b6, d8, fc, 4d, 84, 10, c7, 60, cf, 13, b5, dd, 44, 04]
+    [2]: [0d, 32, 3e, 85, 64, 79, 2f, 7c, 5d, 4e, 05, 9e, 46, 42, 83, af]
+  Round 6 challenge: [77, a5, 3c, 49, 0d, fe, 7f, d7, 03, c6, f0, ff, 10, 8d, 14, 4d, 3a, a9, b2, 55, d4, 0b, 7d, ca, a2, cd, 8b, f4, 33, 9e, 76, 1a]
+  Round 6 new_claim: [52, 16, 3b, 93, 18, b7, 1b, 1c, 58, e4, 2a, 31, a2, 02, 50, 70, 35, 63, 1d, b5, e4, 86, 54, 6b, 0d, 09, a0, 66, 14, d6, df, 26]
+  Round 7 coeffs:
+    [0]: [52, 16, 3b, 93, 18, b7, 1b, 1c, 58, e4, 2a, 31, a2, 02, 50, 70]
+    [1]: [f2, 77, 6f, 77, 14, 5e, 34, 9f, ed, 8a, f8, 76, 4c, 3c, 31, 86]
+    [2]: [59, 3c, 3d, 0b, 16, 81, 20, c8, 2a, 31, 18, 9c, 95, c5, 14, e5]
+  Round 7 challenge: [9e, b7, 1c, 7b, 7e, ac, ae, 6b, aa, e0, 36, af, 2a, d6, a8, f7, 61, cf, 87, 53, df, da, 54, f7, ba, c6, 85, 7c, 7a, 1b, 15, 29]
+  Round 7 new_claim: [b0, ad, 92, 17, 3c, 5c, 4a, c3, 68, 90, 4a, ce, 1a, fa, 99, 99, 62, d2, 58, 03, 5b, e9, a4, 01, 74, fd, b0, 7b, 4b, 00, 4a, 0c]
+  Round 8 coeffs:
+    [0]: [4d, 9c, 4c, c0, 6a, 33, 1a, 90, f5, dd, 14, 67, 64, 18, 8c, 64]
+    [1]: [8a, db, 00, 31, ff, 2e, bc, ee, c4, c4, 0c, 17, 36, 2a, f3, 87]
+    [2]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  Round 8 challenge: [30, f3, 12, f8, b3, ff, 2e, e3, 02, 23, 26, c6, f1, 9c, 43, 9a, 68, 39, 71, af, bb, 88, 7f, 06, cc, 31, 7b, 7b, bb, 0f, b5, 0f]
+  Round 8 new_claim: [1f, 3f, 90, 81, b8, 8f, a4, fc, 5f, 96, 87, 45, 3a, 34, 1e, e5, 70, 1f, 08, 76, 34, 62, 55, 1c, a1, 19, 62, 27, 48, ba, 81, 0f]
+  Round 9 coeffs:
+    [0]: [47, 89, 72, b5, 68, cb, 3c, e4, 95, 5c, de, a3, f9, d6, 80, b8]
+    [1]: [b6, 9b, ce, 6b, c8, f3, e4, d7, 5c, 22, 9f, 4c, ce, 98, f6, c4]
+    [2]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  Round 9 challenge: [50, 35, 9d, 9d, 0a, 1e, 32, 58, b7, 53, 49, ed, b7, 71, ba, ab, 7f, d6, a7, 75, f0, 11, f9, 05, db, 04, 13, 22, f6, 6c, 1b, 2b]
+  Round 9 new_claim: [6f, 81, aa, 30, f7, 3b, 71, 15, 9f, 0c, 71, f8, 5e, b4, 78, 5e, 8d, 37, f5, c7, 05, e5, 38, f2, 70, 76, 6a, 95, 1d, df, 9e, 11]
+  Round 10 coeffs:
+    [0]: [09, b8, 4d, 7f, f8, ba, 72, 84, 43, bc, 6a, de, a9, 67, 6b, d5]
+    [1]: [01, 40, cd, cf, 1c, f9, ab, 72, 9e, 0e, b8, ed, 10, e8, a3, b6]
+    [2]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  Round 10 challenge: [f2, bc, cf, 0a, 7c, 5a, 8a, d7, 7a, fc, b0, 0c, 98, 86, 0b, ce, 38, 8e, 66, 33, 88, 38, d1, bd, 69, bd, 9d, fc, 8f, dc, 20, 0e]
+  Round 10 new_claim: [2b, 58, 43, 59, 8b, 0a, 73, 7f, b4, ea, f5, 33, ce, de, b6, e7, 02, 7b, b2, 4a, c7, 8d, bd, b4, 50, 00, fd, 47, 74, 2d, 87, 18]
+  Round 11 coeffs:
+    [0]: [22, 93, 59, 93, d9, b5, a6, b7, f7, b5, ee, 60, 34, 17, 52, 6b]
+    [1]: [f8, 3f, 3d, 96, 23, 0f, eb, 31, f3, 0f, bc, 7e, eb, fc, cc, 5d]
+    [2]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  Round 11 challenge: [c6, 3a, a4, ed, 65, 70, 74, 18, e6, b1, 7c, 43, d7, 77, 63, f9, 47, d5, 01, 7b, 7f, 9e, 67, df, 32, 19, fb, 0b, 50, ad, 5b, 2a]
+  Round 11 new_claim: [83, 20, 52, 8a, 07, 19, d7, 67, 69, 1b, d2, e2, 6d, 9b, 69, 6c, 2d, 9a, ff, 94, a0, be, 6c, ea, 33, 6c, 31, 70, 95, 96, 96, 26]
+  Round 12 coeffs:
+    [0]: [34, 77, ab, 06, f7, 3f, a9, cd, eb, 6a, b5, 47, c5, 7a, 51, 5a]
+    [1]: [0d, 0e, 2a, bf, 01, e3, 55, e8, a1, fc, 3d, 81, a3, 24, 21, 87]
+    [2]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  Round 12 challenge: [72, d9, bb, 4a, d1, 6a, e2, b9, e9, f7, 43, 90, c2, c4, 67, 43, 14, 53, 71, 48, 02, 0e, dd, 73, 2a, df, 4b, 6f, 1c, 53, 24, 2a]
+  Round 12 new_claim: [72, da, 21, b3, f4, 39, 1d, 70, 49, fc, 96, 0e, 2d, 03, b8, 7e, bb, 1d, 6e, 6e, 29, 9e, 95, bb, 9f, 74, 0f, d6, 29, 0d, 6d, 01]
+  Round 13 coeffs:
+    [0]: [72, da, 21, b3, f4, 39, 1d, 70, 49, fc, 96, 0e, 2d, 03, b8, 7e]
+    [1]: [f2, 14, 4f, 1f, be, 81, c3, 4d, 76, 9f, 17, 67, c9, 8e, c8, af]
+    [2]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  Round 13 challenge: [0d, 4b, 7c, b8, 94, 8b, b2, 1a, ed, 44, 76, 6c, 12, d0, db, dc, d2, e8, 95, 24, 54, d6, 5f, ef, 74, dd, 63, aa, 6b, c0, b0, 1d]
+  Round 13 new_claim: [22, 7f, 50, e6, 40, 94, 71, 39, 3d, b1, 0a, 86, 5d, 64, e6, a0, 91, a7, f3, 91, 0f, c2, b8, 51, 0a, 59, 45, 0d, 54, 5c, 5b, 14]
+  Round 14 coeffs:
+    [0]: [22, 7f, 50, e6, 40, 94, 71, 39, 3d, b1, 0a, 86, 5d, 64, e6, a0]
+    [1]: [ce, 5e, ef, 06, 36, 07, 5d, 30, 29, 18, 32, cf, ae, 8f, a1, 1e]
+    [2]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  Round 14 challenge: [6c, 0e, 77, 7b, 03, 3e, 49, 97, 56, 66, fd, d7, 04, 9b, 64, 09, 7a, 0f, 22, c0, dc, d8, 00, ca, 11, bd, 61, 73, ea, 73, 4b, 2c]
+  Round 14 new_claim: [a1, b9, d3, 85, 63, 31, d1, 5a, 44, 34, 45, 49, 54, e4, 35, b7, 9d, 99, 85, 28, f8, 6a, 5f, e6, 54, 41, 39, ea, c7, 17, 42, 00]
+RegistersRWC normalize_opening_point debug:
+  total challenges = 15
+  phase1_num_rounds = 8
+  phase2_num_rounds = 7
+  phase3_cycle_len = 0 (T.log_2=8 - phase1=8)
+  phase3_address_len = 0
+  phase1_challenges.len() = 8
+  phase2_challenges.len() = 7
+  r_cycle.len() = 8
+  r_address.len() = 7
+RegistersRWC normalize_opening_point debug:
+  total challenges = 15
+  phase1_num_rounds = 8
+  phase2_num_rounds = 7
+  phase3_cycle_len = 0 (T.log_2=8 - phase1=8)
+  phase3_address_len = 0
+  phase1_challenges.len() = 8
+  phase2_challenges.len() = 7
+  r_cycle.len() = 8
+  r_address.len() = 7
+RegistersRWC expected_output_claim:
+  val_claim:    [69, 61, 59, 1f, 70, 5c, 5f, 9a, 4d, 52, 8f, 7d, f4, 41, 9c, 3c, bf, 9e, ae, b6, 66, 0b, 10, 33, 33, a0, c8, 64, 9f, a1, bc, 11]
+  rs1_ra_claim: [81, 88, 79, 0c, 29, c1, fa, f1, 06, 1a, cc, fc, c3, 6e, 7f, 54, 8f, 0d, 44, 9a, ae, ec, e9, 1d, 25, 57, ae, 98, 96, 97, ff, 18]
+  rs2_ra_claim: [95, e7, 8d, 17, d7, 72, df, 81, e9, bf, 1a, 69, b4, b8, f7, 47, 56, 70, 31, f6, 8a, f6, 7d, a3, 52, fd, 6d, 67, 40, a4, 4f, 16]
+  rd_wa_claim:  [4a, e9, df, 32, 45, 60, 7f, 42, cf, 39, 31, 7f, d4, 3a, 2a, e0, 24, 91, 90, bf, 41, a5, c4, 2d, 1f, 76, 9e, a7, 1f, 9e, 36, 1f]
+  inc_claim:    [44, 97, 3e, cd, 61, e1, ec, 32, 12, 99, 46, 63, f7, a1, 8a, cf, 46, 8f, a3, 64, be, 80, b5, ba, ca, 77, b9, 11, f6, b3, 07, 27]
+  eq_eval:      [ed, f6, 51, bf, 2f, e9, cd, ca, 5a, 12, ed, e7, 38, 0a, ad, a6, d7, 79, b5, 7d, ac, 95, c5, 27, 12, b6, 24, d4, e3, 99, 3a, 0c]
+  combined:     [ce, 37, 1a, f4, 35, d5, b5, 74, 71, 9d, 6f, 58, 47, 7b, ee, 16, 44, 76, 97, de, a6, 0b, 77, 86, ae, 04, f5, 2a, a0, f1, 4b, 2f]
+  r_cycle (from sumcheck): 8 elements
+    r_cycle[0]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, e3, 4c, 78, 60, b7, 4e, 83, 46, cf, 51, 80, a4, 1c, e5, ad, 08]
+    r_cycle[1]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 81, 57, 8e, dc, c3, 99, 1e, a3, e0, 2a, cf, ed, 92, 09, 71, 0f]
+    r_cycle[2]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 0a, 51, 2e, 61, 00, 49, bf, af, db, 31, 5f, 0f, a0, 60, b5, 15]
+    r_cycle[3]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, aa, 23, e6, b8, 1f, f3, 30, eb, 2d, 0e, 50, 5c, 63, 98, 77, 1e]
+    r_cycle[4]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 13, a9, e5, b0, 4d, 3f, d2, c9, a2, c0, 07, 97, ef, d7, 8c, 1d]
+    r_cycle[5]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 6a, 14, fe, b6, 0a, 9d, f1, f7, 1d, 73, 7d, 17, 68, 42, f2, 10]
+    r_cycle[6]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, c1, 75, 27, 2d, 2a, d1, d7, dd, 5b, a9, e4, d7, 4c, 52, c1, 17]
+    r_cycle[7]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, eb, 5d, 02, 3b, 1e, 4a, 9f, 41, 4a, e2, 33, d2, f3, a5, 95, 0c]
+  params.r_cycle (from Stage 3): 8 elements
+    params.r_cycle[0]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, b8, 79, 98, ad, 83, 13, f0, 03, eb, b2, e6, 20, f8, 96, 89, 1f]
+    params.r_cycle[1]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 5c, 7a, 18, 39, 0d, 32, e0, da, 96, bc, c0, e4, 84, a1, 8b, 04]
+    params.r_cycle[2]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 43, fe, c9, aa, ed, 7a, bf, e3, 70, 62, 3c, a2, 49, 36, 0d, 1e]
+    params.r_cycle[3]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, bd, 37, b7, f1, 7d, b2, f1, 16, 7d, 4e, cf, 4b, 66, 11, bf, 08]
+    params.r_cycle[4]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 1f, a6, ed, a6, 0d, d7, e9, 5d, 9a, 61, 04, da, b0, 4e, e7, 18]
+    params.r_cycle[5]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 20, 63, 9f, 41, e0, 77, 56, 07, 34, 4a, bd, 32, 2f, 7c, b4, 05]
+    params.r_cycle[6]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 52, dc, 02, b9, cc, 9b, 90, ce, e3, 16, d5, c5, f2, 06, 62, 1e]
+    params.r_cycle[7]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 4e, 12, 12, c4, 9e, b8, 61, df, 3a, b9, b4, db, c1, 24, 59, 1f]
+Stage 4 Instance 0 expected_output_claim:
+  claim: [9b, e2, c0, 68, dc, aa, 20, 4c, 72, f5, 60, 2a, d3, c6, 07, 3e, 70, 9d, b5, bb, b3, 43, c6, ea, d4, 67, 9a, a9, c6, e7, 97, 2f]
+  coeff: [53, dd, 21, 20, 91, cb, 83, 8c, d1, 52, 88, 20, cb, cc, 5d, 28, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  claim*coeff: [fb, e6, 6d, e2, 39, 0c, 4b, e9, a3, 01, 9b, bf, 45, ba, 73, 91, b2, 00, c4, 77, ce, a2, 14, bc, e1, 17, 20, ab, ee, a9, 12, 29]
+ValEvaluation expected_output_claim debug:
+  inc_claim: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  wa_claim: [8c, b3, 3e, 36, 73, e6, 13, 1f, 82, c1, f9, 62, 5c, 41, 5f, a7, 85, a9, 5d, a3, 28, 8b, 55, 78, 60, 69, eb, a0, 16, 93, fb, 20]
+  lt_eval: [31, 0e, 8c, c4, d1, 56, 56, d7, 53, d4, ca, 56, 7f, 34, 71, 26, c4, 42, ce, a2, 75, 2a, 85, 7a, 2b, 55, d4, 11, d9, 1a, 15, 1c]
+  result (inc*wa*lt): [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+Stage 4 Instance 1 expected_output_claim:
+  claim: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  coeff: [04, 51, 2d, 9c, 68, c8, ca, 8f, 92, 97, 5a, 67, f1, 48, 9c, 0a, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  claim*coeff: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+ValFinal expected_output_claim debug:
+  inc_claim: [ec, 26, a4, 0f, fc, 57, da, 50, d2, 8c, 3b, b1, 62, 17, 66, a4, 18, b7, 53, 59, 03, 6a, e9, bb, 6c, ab, 55, 5e, eb, 0c, e1, 1f]
+  wa_claim: [8c, b3, 3e, 36, 73, e6, 13, 1f, 82, c1, f9, 62, 5c, 41, 5f, a7, 85, a9, 5d, a3, 28, 8b, 55, 78, 60, 69, eb, a0, 16, 93, fb, 20]
+  result (inc*wa): [00, 89, cb, 52, 45, f7, 27, 1e, 3e, c1, 95, d5, 1e, de, 09, 76, b8, 7b, de, e3, 1a, 08, 27, 77, 5e, b8, 79, 62, e7, 6d, 4f, 0f]
+Stage 4 Instance 2 expected_output_claim:
+  claim: [00, 89, cb, 52, 45, f7, 27, 1e, 3e, c1, 95, d5, 1e, de, 09, 76, b8, 7b, de, e3, 1a, 08, 27, 77, 5e, b8, 79, 62, e7, 6d, 4f, 0f]
+  coeff: [aa, f0, cd, bf, 82, c5, 4f, f4, 9b, a6, 57, bd, fc, fd, fb, 82, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  claim*coeff: [a7, d2, 65, 93, bd, 1a, 68, b5, 31, a3, 63, 03, 57, 12, f6, 4d, 48, f1, 42, 32, e0, 0d, 9b, e2, 9c, c9, 4a, 20, 4c, bc, 93, 07]
+[STAGE5] gamma_ram_ra = [fd, 56, f4, c7, 62, cf, 57, bd, 52, 36, 49, 4d, 75, 48, a1, 4e, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[STAGE5] gamma_lookups_raf = [5a, b9, a0, 12, f2, c4, 74, 20, 80, 47, 6c, 8d, 0f, c0, ac, cb, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+Stage 5 verifier - appending input claims (max_num_rounds=136):
+  instance[0] input_claim: [69, 61, 59, 1f, 70, 5c, 5f, 9a, 4d, 52, 8f, 7d, f4, 41, 9c, 3c, bf, 9e, ae, b6, 66, 0b, 10, 33, 33, a0, c8, 64, 9f, a1, bc, 11]
+  instance[1] input_claim: [46, e7, 49, 8a, 3d, 55, 33, 9f, 5d, a7, 5e, 5c, 81, 3f, 00, a0, 56, 63, 67, 7e, 0e, 91, b3, 3d, 1a, 10, ec, ed, f0, 12, 65, 06]
+  instance[2] input_claim: [c3, b1, b5, 4f, ce, e2, 13, 8e, 21, a8, 36, 93, b0, e8, 1d, ca, 64, d7, 34, a8, c7, 41, 49, 82, e3, 15, 93, be, 60, 18, ab, 09]
+Stage 5 verifier - batching coeffs:
+  coeff[0]: [04, 97, 3d, 64, c5, bf, 56, de, 5a, 8c, ee, 0d, 2a, dc, 23, d1, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  coeff[1]: [50, 2a, 19, a0, a6, 2d, 3f, 00, 14, 7f, 26, d4, 91, 2e, 9a, 14, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  coeff[2]: [45, 50, 75, e2, 9e, c9, 58, 4d, 25, 4e, 31, c6, 09, a7, 3a, 31, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+Sumcheck starting (max_rounds=136):
+  initial_claim: [99, 05, 78, d0, e9, 6c, 66, a0, a2, c8, 0e, 47, 2d, 90, 0a, 1c, b2, da, c0, db, 53, 7e, aa, e8, 2e, 1b, 48, bc, 17, 60, fb, 00]
+  max_num_rounds: 136
+  max_degree: 10
+  first round coeffs_except_linear:
+    [0]: [1c, c1, 5a, e1, b2, 6e, 62, 27, 24, 04, 1b, 9b, ce, b8, 3c, 12, 24, 9d, a1, b9, 93, 16, ab, 04, 76, 2e, a2, c4, d1, 51, 86, 11]
+    [1]: [ea, 59, 91, de, 50, e6, 15, bd, 99, ce, c1, 16, 4c, 6d, 2f, 99, 32, 41, 02, 6a, 03, bd, 7a, 75, 00, 7a, c3, e5, 04, b2, ab, 24]
+    [2]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+[STAGE5 DEBUG] First 3 rounds' coefficients:
+  Round 0 (degree 3):
+    coeff[0]: [24, 9d, a1, b9, 93, 16, ab, 04, 76, 2e, a2, c4, d1, 51, 86, 11]
+    coeff[1]: [32, 41, 02, 6a, 03, bd, 7a, 75, 00, 7a, c3, e5, 04, b2, ab, 24]
+    coeff[2]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  Round 1 (degree 3):
+    coeff[0]: [47, db, 16, 60, 42, 6b, ed, b3, 84, 94, 48, 8d, 5b, c7, 73, 07]
+    coeff[1]: [e9, 43, 21, f1, f5, 3e, 7d, 87, 05, 3d, 0b, 68, a4, 20, 7d, 0c]
+    coeff[2]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  Round 2 (degree 3):
+    coeff[0]: [c1, d2, 70, f7, 74, 0e, 3e, 6e, 33, 95, e3, 21, d0, dd, 8c, 02]
+    coeff[1]: [d7, 39, 2f, 9d, 1d, 65, 06, b9, 66, 32, 1a, 76, 87, 34, 88, 07]
+    coeff[2]: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  Stage5 Round 0 (addr var 0): challenge: [2b, 4d, 1d, 73, 49, f6, 0a, 21, e5, c8, ff, 41, 75, 02, e1, c8]
+  Stage5 Round 0 new_claim: [97, c1, 73, 43, 07, 96, a8, 7c, 12, b0, eb, a8, d6, 6b, bd, 18]
+  Stage5 Round 1 (addr var 1): challenge: [f0, c3, 84, 57, 9a, 59, ff, f4, 9e, c0, bd, 97, da, cc, 72, d5]
+  Stage5 Round 1 new_claim: [ed, c8, f9, 79, b9, 58, dd, e1, ee, 4c, 70, 57, 81, e1, 7b, 57]
+  Stage5 Round 2 (addr var 2): challenge: [37, 90, 29, 55, 55, 64, 23, b8, 14, bc, 08, d5, b9, f4, ad, 29]
+  Stage5 Round 2 new_claim: [aa, c4, 96, 88, ac, ca, f3, 84, d0, 8a, 4a, bb, 1d, 62, fe, ac]
+  Stage5 Round 3 (addr var 3): challenge: [a2, 5e, df, 22, cf, 28, 2f, 5d, a6, 4a, e8, 55, fe, 32, 2c, 10]
+  Stage5 Round 3 new_claim: [0a, 49, 9d, ce, c7, 1c, af, 75, a4, 29, 1e, 95, 07, c4, db, ab]
+  Stage5 Round 63 (addr var 63): challenge: [6b, ed, 9f, 5b, fe, c7, 67, d3, fb, bc, fe, 7c, e4, ac, 00, 16]
+  Stage5 Round 63 new_claim: [b4, 7c, 0b, b4, 40, 8e, b2, 67, fc, 91, 71, 20, 71, b3, fa, a4]
+  Stage5 Round 64 (addr var 64): challenge: [24, ba, bb, 0b, f0, 35, 44, 35, 5f, 31, dd, 7f, 48, a4, 99, 35]
+  Stage5 Round 64 new_claim: [80, c4, 42, 6b, 15, 83, 2a, 5b, bd, 97, 44, dc, 27, 20, c2, ae]
+  Stage5 Round 65 (addr var 65): challenge: [97, 34, d2, ea, 87, f1, 36, cc, 8d, 67, 61, 8b, 0f, a2, 26, e9]
+  Stage5 Round 65 new_claim: [ea, ca, 94, e4, 07, 50, a2, b5, a2, be, be, 65, 34, b9, 4c, 11]
+  Stage5 Round 128 (cycle var 0): challenge lo16: [c5, 4c, 6c, 55, 2a, 50, 0c, 4e, 5a, 3f, 77, 05, 32, 7c, 49, f2]
+  Stage5 Round 128 (cycle var 0): challenge hi16: [97, 3a, 8e, 19, e7, c9, af, 16, ac, 52, 5c, 5e, f7, 8d, 2a, 2a]
+  Stage5 Round 128 new_claim: [9a, 6d, b1, 74, ec, 75, 88, f4, 94, 21, f3, 17, d7, 4a, be, 77]
+    coeffs (first 3):
+      [0]: [05, b5, df, f2, d3, 49, ca, d8, 8b, 50, ea, 3c, 50, 6c, 52, 5f, b4, a3, 13, cf, f6, e7, 32, b7, e1, ed, ec, be, fa, 0a, 2a, 2a]
+      [1]: [54, c2, 7c, f5, aa, 45, 65, 80, ad, 33, b7, 8e, 1f, ce, fe, cd, 27, 7c, d8, 0b, fd, d0, 61, c7, 2d, 4a, c8, 00, 51, 32, 43, 0e]
+      [2]: [49, 36, 44, b5, 9d, f1, de, 64, b9, 1c, 1f, cb, 99, 29, d3, 6c, d0, a0, e2, cf, 78, e6, d9, 0d, 82, fc, ef, d6, 18, 7a, ae, 04]
+  Stage5 Round 129 (cycle var 1): challenge lo16: [49, 0a, f5, e7, d1, 05, 23, 41, e1, b5, 62, c1, 5c, b1, eb, 61]
+  Stage5 Round 129 (cycle var 1): challenge hi16: [73, 09, 95, e2, df, f3, c2, a6, 32, ca, a3, 09, 15, d6, 46, 2e]
+  Stage5 Round 129 new_claim: [25, 35, f7, 40, dd, d3, d5, 71, 43, 79, e3, 33, 18, c8, ff, dd]
+    coeffs (first 3):
+      [0]: [ca, 46, b3, 41, ce, 2f, 78, d3, ed, cc, 27, 13, ff, eb, 02, 1f, 4e, 99, a1, e4, d5, d7, 40, 5d, 3b, 28, 07, e2, 5c, ba, a1, 11]
+      [1]: [f1, 5e, 7c, 10, 54, 88, bc, 7f, 18, 30, 73, 01, ab, 56, 4b, c3, 4e, c7, 0d, 1e, 4f, d4, 6e, 2c, ad, e6, 37, 4e, a0, 25, 92, 0c]
+      [2]: [a2, 07, 43, a6, cc, 97, 0f, 83, c7, 42, 45, 16, ef, 4e, 93, 31, 3f, 27, 6f, f9, 81, 0e, 68, 6f, 16, 27, 34, 54, ce, 24, 55, 09]
+  Stage5 Round 130 (cycle var 2): challenge lo16: [0f, e0, 6b, 39, ad, 5f, a0, 86, 55, 21, 75, 4a, f6, 52, 68, b0]
+  Stage5 Round 130 (cycle var 2): challenge hi16: [d9, 8b, a4, b5, 2b, 85, e4, 76, f4, 86, ef, 22, 12, ff, ad, 14]
+  Stage5 Round 130 new_claim: [b7, 07, 42, 51, 3f, 4a, 2c, d7, 32, 11, 36, 24, 6c, 97, 3f, 69]
+    coeffs (first 3):
+      [0]: [df, 96, 4c, 4b, 9c, ff, 9d, e7, 4d, 5e, 14, 4d, c6, e4, 37, 55, 40, 18, 8b, ac, 70, f8, 9b, 94, 31, 1b, f8, 82, 0e, ff, 5b, 1d]
+      [1]: [d2, f8, c7, 61, 70, c9, f7, 7f, 0e, 27, 2c, 31, aa, e4, c1, 64, 26, 4e, 94, dc, 44, 6b, 39, 9a, a5, 3f, e7, 0a, 60, 3e, 5a, 0a]
+      [2]: [6d, 90, 61, 2c, 44, d5, 5f, e3, 53, 03, 67, e4, 0b, 7c, de, b4, 6f, dc, 10, dc, 01, a7, 21, d7, 6a, 41, b6, 09, cd, 33, 12, 11]
+  Stage5 Round 131 (cycle var 3): challenge lo16: [60, 34, d5, 56, 4c, fd, 6c, 85, d0, f9, 83, 86, 51, f1, 73, 88]
+  Stage5 Round 131 (cycle var 3): challenge hi16: [08, 40, a4, 7b, 6e, 25, 7f, 40, 09, 88, 3a, a1, 98, 50, 84, 14]
+  Stage5 Round 131 new_claim: [c2, ec, 5a, 77, a0, aa, c3, 15, 9b, a4, 85, 8c, cb, ad, 75, 2f]
+    coeffs (first 3):
+      [0]: [88, 76, 77, c2, 92, 55, e2, d7, 7a, a7, 39, b2, a7, 18, 54, d1, 5e, 81, 6c, f0, b3, 20, cd, 97, 9b, 92, 29, 4b, de, ab, 16, 1f]
+      [1]: [3f, bc, d4, 06, ea, 49, db, 30, 7e, be, 71, c9, ea, a6, f9, ff, 5a, af, cc, 16, 69, 91, 08, 40, 92, 7b, 02, 28, 58, 65, 70, 26]
+      [2]: [1b, 89, ba, 90, ff, 74, c6, 42, b5, 1c, 23, 6d, 72, 0e, cd, 40, 04, a4, 5c, be, 4a, a0, 4f, 9a, b8, 5e, 8c, c7, e8, 2b, 37, 1b]
+  Stage5 Round 132 (cycle var 4): challenge lo16: [e0, a5, a1, 7b, 2d, 48, 69, 44, 6b, b4, 2a, 45, a4, 1a, b1, 03]
+  Stage5 Round 132 (cycle var 4): challenge hi16: [46, ae, e6, 02, 0d, 24, 1f, 3c, 0b, 1b, c9, cf, 42, 79, 98, 20]
+  Stage5 Round 132 new_claim: [bc, e2, c9, 1f, 1f, 93, 81, 15, 4c, cb, 4c, c8, ce, 06, 6b, 36]
+    coeffs (first 3):
+      [0]: [ce, 1a, 3f, cf, d4, 57, c6, 52, 7a, 3a, 58, d7, d3, 5d, ce, ab, 82, a9, db, 8a, 03, f1, 82, c1, 1a, 09, d3, 1a, ae, f2, 3e, 21]
+      [1]: [05, 7c, b2, 7e, 81, 66, d3, bd, 2d, 9f, 13, 2d, 28, 05, 10, 8d, 3f, a3, ad, 97, 71, 9b, d6, 8d, d0, d1, 8e, 8a, c0, a2, d1, 25]
+      [2]: [65, 76, a6, de, 33, e3, 90, 35, 0e, 5b, 38, ac, 07, 88, c1, 6a, 96, d6, 6b, 5d, 45, 0c, 02, 07, b6, 16, a6, 60, 1a, 36, 39, 14]
+  Stage5 Round 133 (cycle var 5): challenge lo16: [67, 86, 8d, d4, 1e, 84, 46, 23, 98, d5, 8a, c6, 6b, 4e, ea, 55]
+  Stage5 Round 133 (cycle var 5): challenge hi16: [c0, b5, 8a, 4c, 5a, 6a, 08, fc, 6f, 67, cd, 15, 58, e3, a8, 24]
+  Stage5 Round 133 new_claim: [19, cb, 33, 29, 94, 14, 0b, a9, a9, 59, f8, 5e, c6, bc, 3d, b8]
+    coeffs (first 3):
+      [0]: [45, 5d, e5, dd, 0f, 0c, cb, 81, 56, 2f, ae, 13, aa, af, f1, 45, be, f3, 38, 85, f4, 1c, 1f, 9c, 36, 3d, 00, f0, 31, 9a, 1a, 12]
+      [1]: [a3, 05, 24, ca, 20, 91, 28, 1c, 05, 08, d6, a3, 5b, bb, bd, f8, 5b, 9b, bf, ac, 39, 92, b7, 5f, 13, bc, e3, a5, 93, 62, b6, 19]
+      [2]: [09, 5a, 92, e6, f7, 37, 46, 5b, f4, 3e, 53, d9, 79, 2e, 14, 35, 0c, f8, 93, 2c, e8, ed, c3, f6, 63, 79, f6, e4, a6, d2, 2d, 0c]
+  Stage5 Round 134 (cycle var 6): challenge lo16: [b6, a1, 5e, c5, 17, 50, 05, 76, a9, 01, c6, cd, 02, 9b, 16, 8d]
+  Stage5 Round 134 (cycle var 6): challenge hi16: [8c, ba, 83, e5, e6, ac, 97, 2e, ee, ba, 99, 31, 1f, 80, f8, 1a]
+  Stage5 Round 134 new_claim: [8f, fb, ea, 89, 63, a4, 7c, f2, 17, 47, 97, 10, 7a, e7, 5e, 12]
+    coeffs (first 3):
+      [0]: [bf, 94, 2f, 2a, bd, 70, 17, 53, 1e, 1d, d7, 57, 92, f3, 3c, 45, f1, b3, f1, e2, 74, 7e, 52, ad, 74, cb, d5, 7b, 38, a4, cd, 06]
+      [1]: [67, 2f, c5, 09, e9, 5e, 15, 3d, cf, a1, 14, cc, 9d, e0, 4b, 29, cf, 7e, 66, 3d, e9, 1d, 26, 69, e5, e9, c1, 75, 08, 2f, 05, 04]
+      [2]: [f6, ba, 5c, 55, 50, da, 0a, 83, 9a, 02, 20, 60, bc, 43, d5, 9f, 42, a8, 8e, 75, be, 73, 03, 0a, 71, 40, c9, c0, b4, 5e, c5, 01]
+  Stage5 Round 135 (cycle var 7): challenge lo16: [84, 5f, 53, 76, fb, 88, b6, ee, ac, fa, 4c, 40, 3f, d7, f6, f9]
+  Stage5 Round 135 (cycle var 7): challenge hi16: [dc, 30, cb, 8f, e7, e8, f9, e8, 9e, 63, c4, 70, c6, 12, cf, 0d]
+  Stage5 Round 135 new_claim: [ed, a5, f6, bf, 30, c4, 10, f8, 59, ce, db, ef, ee, 23, 2f, 96]
+    coeffs (first 3):
+      [0]: [b8, 2a, a2, ec, 37, 45, c5, 3d, 43, 2d, bc, d6, 8d, 74, 12, c9, 5f, a4, 46, d5, f8, f3, 8c, d9, 2e, ac, 7c, 8d, d1, 98, 09, 2d]
+      [1]: [e2, c9, 1b, e7, f7, bc, 06, 7e, dc, 3c, 09, 5e, 89, 71, 32, 37, d0, a2, e9, 35, 49, 1e, 52, ab, a2, 34, 8c, 33, c8, f6, 06, 21]
+      [2]: [52, 8d, 94, 63, 14, 9c, 08, 6e, ef, 25, 65, 17, 91, 15, 21, 46, 16, 68, 1f, 4f, ca, 17, a7, a5, 2a, fd, 6b, c3, 56, 9d, e2, 23]
+[RegistersValEvaluation] expected_output_claim debug:
+  inc_claim: [39, 22, ab, 81, 4a, 6b, 66, b2, 30, 63, c8, 5d, a3, 01, 19, dd]
+  wa_claim:  [1f, 1c, 42, 45, 2c, 0a, ba, 19, b9, 8d, 8d, 4f, f7, b5, be, c4]
+  lt_eval:   [f4, 1f, 17, b4, d5, fe, b1, 29, b9, f6, b5, f1, 5b, 79, 69, a3]
+  result:    [74, f7, 8e, 8c, aa, 92, 4f, 95, 20, ab, 0a, 34, be, 38, ab, 74]
+Stage 5 Instance 0 expected_output_claim:
+  claim: [74, f7, 8e, 8c, aa, 92, 4f, 95, 20, ab, 0a, 34, be, 38, ab, 74, 73, e0, b9, c9, 54, bd, 97, 4b, 24, 77, 88, 49, 87, 74, 66, 12]
+  coeff: [04, 97, 3d, 64, c5, bf, 56, de, 5a, 8c, ee, 0d, 2a, dc, 23, d1, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  claim*coeff: [f2, 1e, ae, a8, 07, b2, 78, bb, 65, 45, ff, 44, 06, 4d, 4c, 2d, 88, 07, 4b, 3f, df, b3, 2e, 9f, ac, d1, 98, 8a, 6b, 14, a1, 2e]
+[RamRaClaimReduction] expected_output_claim debug:
+  r_address_1 (first 4):
+    [0]: [e4, 6f, ff, 58, ee, ca, a1, fc, a9, 8c, 9a, bd, 9d, 5b, 74, 12]
+    [1]: [6f, e7, 00, 78, e8, 40, 57, d3, 36, c5, 96, c2, 68, 0d, 18, 2b]
+    [2]: [f9, bf, c3, 40, 67, ce, 25, ae, f9, 69, 76, fc, f2, df, 93, 29]
+    [3]: [6c, 1f, 2a, 98, e9, f1, 0c, 9b, e5, e2, 0a, 94, 53, 0f, a0, 29]
+  r_address_2 (first 4):
+    [0]: [e4, 6f, ff, 58, ee, ca, a1, fc, a9, 8c, 9a, bd, 9d, 5b, 74, 12]
+    [1]: [6f, e7, 00, 78, e8, 40, 57, d3, 36, c5, 96, c2, 68, 0d, 18, 2b]
+    [2]: [f9, bf, c3, 40, 67, ce, 25, ae, f9, 69, 76, fc, f2, df, 93, 29]
+    [3]: [6c, 1f, 2a, 98, e9, f1, 0c, 9b, e5, e2, 0a, 94, 53, 0f, a0, 29]
+  eq_addr_1: [ae, c4, 06, 26, ff, be, 0c, 83, 27, df, d7, 59, 31, 72, 45, 77]
+  eq_addr_2: [ae, c4, 06, 26, ff, be, 0c, 83, 27, df, d7, 59, 31, 72, 45, 77]
+  eq_cycle_raf: [d3, 8c, b3, 6a, 61, 08, b0, 6b, 46, c7, 85, d6, 5b, 0f, b4, cf]
+  eq_cycle_rw: [73, 4c, 0e, 2a, 7b, d8, 8e, 07, a2, 9b, b2, f0, e5, f2, a3, 6e]
+  eq_cycle_val: [32, 3e, 2f, 24, 97, 6d, 84, 42, 0f, 34, 22, 0b, 6b, ec, 9d, 0b]
+  eq_combined: [76, 04, 93, 38, 41, bd, d7, 2d, 03, 8c, f1, 92, d1, ee, aa, 81]
+  ra_claim_reduced (LE full): [ef, 55, 4a, 31, c5, f9, 3f, 24, af, f7, 1f, dc, 43, 6b, 66, 83, 7a, 1b, 63, 0a, 89, c1, 08, 6b, 3b, a0, ba, da, e6, ed, 49, 1f]
+  expected_output_claim: [c9, 1b, b9, ac, ed, 2b, 98, 66, d6, a9, b7, 2d, 41, 73, df, aa]
+Stage 5 Instance 1 expected_output_claim:
+  claim: [c9, 1b, b9, ac, ed, 2b, 98, 66, d6, a9, b7, 2d, 41, 73, df, aa, db, 63, 75, ae, 49, 21, 34, 46, e5, 48, 70, 08, 9c, 5c, 73, 15]
+  coeff: [50, 2a, 19, a0, a6, 2d, 3f, 00, 14, 7f, 26, d4, 91, 2e, 9a, 14, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  claim*coeff: [c3, 3a, cb, a7, d8, 90, a1, 9c, b0, 81, 83, 71, 2e, e1, d0, 32, 43, c5, e1, c8, 27, ec, 05, f3, d0, 7d, a3, 1e, ee, 04, cc, 10]
+[Stage5 Instance 2] r_slice len = 136
+[Stage5 Instance 2] r_slice[64] (as F) FULL = [24, ba, bb, 0b, f0, 35, 44, 35, 5f, 31, dd, 7f, 48, a4, 99, 35, 6c, de, a0, 53, a8, a9, d2, c7, f5, 6c, 1e, fa, 58, fd, ed, 2f]
+[Stage5 Instance 2] r_slice[127] (as F) FULL = [2f, 7e, ce, f5, 26, 97, f7, b9, 86, b5, d7, b0, 4e, 6c, 48, f6, 5b, 1c, 03, d7, b4, b4, 56, 4b, 43, 9a, 9f, cd, b4, 68, d7, 0f]
+[InstructionReadRaf expected_output_claim] sumcheck_challenges.len=136
+  sumcheck_challenges[128] hi16: [97, 3a, 8e, 19, e7, c9, af, 16, ac, 52, 5c, 5e, f7, 8d, 2a, 2a]
+  sumcheck_challenges[129] hi16: [73, 09, 95, e2, df, f3, c2, a6, 32, ca, a3, 09, 15, d6, 46, 2e]
+  sumcheck_challenges[130] hi16: [d9, 8b, a4, b5, 2b, 85, e4, 76, f4, 86, ef, 22, 12, ff, ad, 14]
+  sumcheck_challenges[131] hi16: [08, 40, a4, 7b, 6e, 25, 7f, 40, 09, 88, 3a, a1, 98, 50, 84, 14]
+  sumcheck_challenges[132] hi16: [46, ae, e6, 02, 0d, 24, 1f, 3c, 0b, 1b, c9, cf, 42, 79, 98, 20]
+  sumcheck_challenges[133] hi16: [c0, b5, 8a, 4c, 5a, 6a, 08, fc, 6f, 67, cd, 15, 58, e3, a8, 24]
+  sumcheck_challenges[134] hi16: [8c, ba, 83, e5, e6, ac, 97, 2e, ee, ba, 99, 31, 1f, 80, f8, 1a]
+  sumcheck_challenges[135] hi16: [dc, 30, cb, 8f, e7, e8, f9, e8, 9e, 63, c4, 70, c6, 12, cf, 0d]
+[InstructionReadRaf expected_output_claim] after split:
+  r_cycle_prime.len = 8
+  r_cycle_prime[0] hi16: [dc, 30, cb, 8f, e7, e8, f9, e8, 9e, 63, c4, 70, c6, 12, cf, 0d]
+  r_cycle_prime[1] hi16: [8c, ba, 83, e5, e6, ac, 97, 2e, ee, ba, 99, 31, 1f, 80, f8, 1a]
+  r_cycle_prime[2] hi16: [c0, b5, 8a, 4c, 5a, 6a, 08, fc, 6f, 67, cd, 15, 58, e3, a8, 24]
+  r_cycle_prime[3] hi16: [46, ae, e6, 02, 0d, 24, 1f, 3c, 0b, 1b, c9, cf, 42, 79, 98, 20]
+  r_cycle_prime[4] hi16: [08, 40, a4, 7b, 6e, 25, 7f, 40, 09, 88, 3a, a1, 98, 50, 84, 14]
+  r_cycle_prime[5] hi16: [d9, 8b, a4, b5, 2b, 85, e4, 76, f4, 86, ef, 22, 12, ff, ad, 14]
+  r_cycle_prime[6] hi16: [73, 09, 95, e2, df, f3, c2, a6, 32, ca, a3, 09, 15, d6, 46, 2e]
+  r_cycle_prime[7] hi16: [97, 3a, 8e, 19, e7, c9, af, 16, ac, 52, 5c, 5e, f7, 8d, 2a, 2a]
+[InstructionReadRaf] r_address_prime challenges (first 4 and last 4):
+  r[0] = [5c, 06, 7d, 40, 51, 27, 36, e8, 21, ff, 75, 95, 1e, 69, e6, 19]
+  r[1] = [9c, 83, 0f, 16, d7, e3, df, a2, fa, 39, b2, f3, 26, 5c, fe, 1d]
+  r[2] = [2a, b7, d5, 71, 9c, 39, c7, c1, 79, f1, 34, 5f, 5b, dd, e7, 16]
+  r[3] = [cf, 77, f7, 1c, 7d, dd, ee, 38, f6, d5, 8a, d0, 2c, ed, 16, 0f]
+  r[124] = [b3, e3, f8, 9e, 20, d7, 51, d6, b1, c4, 1d, 0a, bb, e9, 4e, 10]
+  r[125] = [65, 51, cf, 8a, f1, 4d, 00, b6, 7b, 07, 13, a4, bd, de, b7, 0a]
+  r[126] = [14, e1, a0, 6a, 4d, cd, 80, ad, 27, e3, eb, cb, 4e, b0, 20, 15]
+  r[127] = [05, ac, db, 8d, 74, e8, 30, 0c, c1, 1c, 7c, a8, 49, 5d, 6a, 18]
+[InstructionReadRaf] r[64] and r[65] (first LowerWord update):
+  r[64] = [12, 59, 39, 07, 57, bb, eb, a8, 58, 5e, 88, f9, a2, 2a, de, 00]
+  r[65] = [63, 7e, 2f, c7, ca, 4c, c7, aa, dd, d1, c4, db, 33, 24, 88, 04]
+  sumcheck_challenges[64] (as F) = [6c, de, a0, 53, a8, a9, d2, c7, f5, 6c, 1e, fa, 58, fd, ed, 2f]
+  r_address_prime.r[64] (as F) = [6c, de, a0, 53, a8, a9, d2, c7, f5, 6c, 1e, fa, 58, fd, ed, 2f]
+[InstructionReadRaf] Table MLE evaluations at r_address_prime:
+  table_eval[0] (FULL 32) = [b4, a6, d0, 82, 9e, 85, ed, 94, 51, bb, 6f, a9, 40, 20, d8, df, 9d, 29, 7c, 94, 4a, ad, 94, e9, 7d, fc, 3c, c3, 9f, b0, cc, 2b]
+  table_eval[1] (FULL 32) = [85, 28, 02, 8d, 77, ee, f5, da, ca, 05, 98, f8, f1, b3, 8f, e9, 41, 0d, 79, bd, 95, f8, 3d, 9e, 3a, 62, 9d, f5, ea, 47, f5, 1b]
+  table_eval[9] (FULL 32) = [2b, 7b, 7f, b7, e6, 6c, 79, 63, 3d, 70, 76, 6f, de, 69, ef, 40, 77, 61, 08, 85, 3f, 6a, 31, ea, 3b, f8, 0d, de, be, 30, 24, 05]
+[InstructionReadRaf] r_reduction (all 8 elements):
+  r_reduction[0] = [0d, 8d, 89, b0, c0, ef, 00, b0, 84, a4, 8a, 1b, 0b, 14, 34, 07]
+  r_reduction[1] = [d7, 21, ff, 79, 67, ef, cb, cf, c5, e2, c4, ec, 72, 93, 8f, 06]
+  r_reduction[2] = [1b, e3, 90, 2b, 71, 44, fd, 28, 94, 78, a6, 13, b5, 47, 2e, 09]
+  r_reduction[3] = [91, dc, a9, 74, 0e, 40, 27, 58, 9c, d0, 8f, 1b, 61, da, 74, 07]
+  r_reduction[4] = [88, ad, 1a, 56, ff, 58, 75, 23, 01, 7f, 9f, 1d, 93, 98, 62, 03]
+  r_reduction[5] = [0c, 09, d1, ac, 4b, 30, 6e, e2, b3, 82, 9e, ad, af, 59, 24, 1c]
+  r_reduction[6] = [c6, 87, 89, 79, 11, 88, cf, 4c, 63, 36, b5, 88, d8, d4, d7, 1b]
+  r_reduction[7] = [41, 9e, 1e, ff, f9, d6, df, 8e, 6d, 56, 26, 2e, ba, 1a, c1, 03]
+[InstructionReadRaf] r_cycle_prime (all 8 elements):
+  r_cycle_prime[0] = [e5, c4, 09, 47, 70, 71, 26, 19, 0f, 5b, 4d, c9, 1d, ca, e8, 11]
+  r_cycle_prime[1] = [0e, 55, 4d, 3f, 29, 7e, b4, 4a, 90, 84, 70, 00, 08, 6a, 70, 04]
+  r_cycle_prime[2] = [d0, 87, 53, c8, 0d, a5, 34, fb, bf, 25, 47, 9d, 86, 46, ed, 01]
+  r_cycle_prime[3] = [87, 67, 38, 6f, 55, eb, b0, dc, a4, cb, eb, ae, 97, df, c1, 0f]
+  r_cycle_prime[4] = [3b, c8, fa, ae, 30, d7, 04, e6, 65, 87, fd, 0d, 90, b6, 5c, 01]
+  r_cycle_prime[5] = [80, 14, 87, 08, b9, f8, 92, 74, 3f, 43, dc, ec, a1, 71, 9e, 07]
+  r_cycle_prime[6] = [6a, cb, 79, db, 7c, e4, dd, 39, a2, 06, 3a, a7, 94, 3e, 66, 0e]
+  r_cycle_prime[7] = [09, f1, fd, df, 71, 7c, 7b, a6, e8, 3e, 7b, ef, 5b, 92, 26, 19]
+[InstructionReadRaf] ra_chunk claims:
+  ra_claims[0] = [18, d1, 65, 32, 94, 21, 95, 0a, 35, fb, 24, fd, bc, 79, 55, 19]
+  ra_claims[1] = [c4, 2c, b0, 4d, 2b, 6d, a0, 74, 70, 75, 5a, 16, 1e, 10, 10, 1f]
+  ra_claims[2] = [40, 1f, b9, 2a, d1, 23, 36, 7e, 30, 5f, 2e, 01, fe, 16, 79, 2c]
+  ra_claims[3] = [37, 96, d1, 8f, 87, d6, ca, fd, e7, 88, ba, c7, 6a, a9, 00, 0b]
+  ra_claims[4] = [55, 0e, bc, 0b, af, cd, bd, 6e, 81, 59, 41, db, a1, f4, be, 2f]
+  ra_claims[5] = [49, 31, 9a, 89, 4d, b5, 27, e7, c7, a5, 1c, d7, cf, 1d, d4, 26]
+  ra_claims[6] = [4b, ac, 04, ff, f0, 4e, 56, 0a, 77, 35, 96, 33, 72, 62, 6d, 04]
+  ra_claims[7] = [09, b5, af, db, 4b, e3, 2b, 24, 01, 57, af, 81, 96, 29, 83, 22]
+[InstructionReadRaf] Non-zero table_flag claims:
+  table_flag[0] = [37, 8c, 58, f7, ee, 63, f2, b7, 7b, 63, 84, bc, 30, 71, 31, 1d]
+  table_flag[1] = [c0, 9e, 22, 7d, 80, 46, cd, ec, 30, 44, 22, aa, 26, 1a, 9f, 18]
+  table_flag[9] = [99, 17, c7, 34, 81, 61, 0f, 8d, d0, bc, 59, 79, 72, 99, 62, 0c]
+[InstructionReadRaf] raf_flag_claim = [c4, 03, 95, 05, 17, c5, 47, 6a, cc, 2a, 70, 7e, 02, bd, 02, 16, 9a, d2, f9, f2, b8, 64, 6f, ec, 82, 07, 75, 85, e4, 3c, 6c, 05]
+InstructionReadRaf expected_output_claim debug:
+  left_operand_eval:  [91, 45, f5, 32, 40, cb, 36, d7, 6e, 5e, ff, 48, 9b, 38, 61, 9d]
+  right_operand_eval: [33, af, 0b, 3b, 9e, 3e, 6e, 3a, da, ec, ff, a8, 62, c4, 45, bf]
+  identity_poly_eval: [c9, 9a, 51, e7, 05, b2, d0, 24, 24, 50, dd, f9, cd, e3, a9, 5f]
+  gamma:              [5a, b9, a0, 12, f2, c4, 74, 20, 80, 47, 6c, 8d, 0f, c0, ac, cb]
+  eq_eval_r_reduction: [8c, 9f, a7, ab, ab, 39, e7, 5c, c9, 2d, 12, 14, e2, d7, e4, 61]
+  ra_claim:           [01, 93, 87, 0f, d1, f4, 08, b0, 6c, 71, 28, a5, 7d, 64, 9d, f1]
+  raf_flag_claim:     [c4, 03, 95, 05, 17, c5, 47, 6a, cc, 2a, 70, 7e, 02, bd, 02, 16]
+  raf_claim:          [f8, ba, c7, 54, fc, 04, 64, 66, 95, 24, 34, 34, 52, c7, db, 1c]
+  val_claim:          [84, 82, 1e, 53, 14, 41, d2, 0b, cf, 2f, 23, e9, 45, d5, 2b, 44]
+  r_reduction[0]:     [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 0d, 8d, 89, b0, c0, ef, 00, b0, 84, a4, 8a, 1b, 0b, 14, 34, 07]
+  r_cycle_prime[0]:   [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, e5, c4, 09, 47, 70, 71, 26, 19, 0f, 5b, 4d, c9, 1d, ca, e8, 11]
+  r_reduction.len():  8
+  r_cycle_prime.len():8
+  final_result:       [02, ad, 67, 08, 80, 3a, d4, c4, aa, 95, 69, ee, ee, da, 3a, ee]
+Stage 5 Instance 2 expected_output_claim:
+  claim: [02, ad, 67, 08, 80, 3a, d4, c4, aa, 95, 69, ee, ee, da, 3a, ee, ee, a0, df, 88, 54, d9, df, 2b, 9b, 26, e4, 7f, 58, 4e, 8f, 0b]
+  coeff: [45, 50, 75, e2, 9e, c9, 58, 4d, 25, 4e, 31, c6, 09, a7, 3a, 31, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
+  claim*coeff: [fe, 35, 18, c4, e6, be, 7b, 42, 34, b2, bf, 0f, 11, 6a, 6b, d9, 80, 45, dc, 6a, ee, 5c, fd, e8, 84, 85, ef, 37, 1a, a7, e9, 0b]
+Sumcheck verification failed!
+  output_claim:   [ed, a5, f6, bf, 30, c4, 10, f8, 59, ce, db, ef, ee, 23, 2f, 96, 07, 8d, b7, 2b, a8, 31, 24, f6, 80, 14, c9, c2, 8e, f1, 5b, 0a]
+  expected_claim: [b2, 8f, 91, 24, 33, 0c, b4, 56, b9, 08, 89, 4c, fd, af, 54, 11, ef, b9, 87, f1, 3e, b7, e1, c2, d8, 34, fa, ff, 00, 72, f2, 1a]
+Verification failed: Stage 5
+
+Caused by:
+    Sumcheck verification failed
+test zolt_compat_test::tests::test_verify_zolt_proof_with_zolt_preprocessing ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 408 filtered out; finished in 0.11s
+

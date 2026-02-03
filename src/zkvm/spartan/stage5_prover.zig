@@ -3469,15 +3469,16 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 ra_chunks[i] = ra_chunk_weights[i][0];
             }
 
-            // Debug: print ra chunk claims
-            std.debug.print("[STAGE5 LOOKUPS] ra_chunk claims:\n", .{});
+            // Debug: print ra chunk claims (FULL 32 bytes for comparison with Jolt)
+            std.debug.print("[STAGE5 LOOKUPS] ra_chunk claims (FULL 32 bytes LE for Jolt comparison):\n", .{});
             var ra_product = F.one();
             for (0..lookups_ra_d) |i| {
-                std.debug.print("  ra_chunks[{}] = {x}\n", .{ i, ra_chunks[i].toBytesBE()[16..32].* });
+                const le_bytes = ra_chunks[i].toBytes();
+                std.debug.print("  ra_chunks[{}] LE = {any}\n", .{ i, le_bytes });
                 ra_product = ra_product.mul(ra_chunks[i]);
             }
-            std.debug.print("  ra_product FULL BE = {any}\n", .{ra_product.toBytesBE()});
-            std.debug.print("  ra_product FULL LE = {any}\n", .{ra_product.toBytes()});
+            const ra_product_le = ra_product.toBytes();
+            std.debug.print("  ra_product FULL LE = {any}\n", .{ra_product_le});
             std.debug.print("  lookups_ra_weights[0] = {any}\n", .{lookups_ra_weights[0].toBytesBE()[0..8]});
 
             // Verify ra_product == lookups_ra_weights[0]

@@ -1,68 +1,65 @@
-# Session 28 Notes - Round 129 Polynomial Investigation
+# Session 29 Notes - Instance 1 PhaseCycle1 Investigation
 
 ## Summary
 
-Deep investigation into why Stage 5 sumcheck Round 129 polynomial differs between Zolt and Jolt.
+Identified that Instance 1 (RamRaClaimReduction) has `eval_1 = 0` for Round 129, which is causing the Round 129 polynomial mismatch.
 
-## Key Finding: Round 129 Polynomial Differs
+## Key Finding
 
-Round 128 polynomial coefficients MATCH between Zolt and Jolt.
-Round 128 challenge MATCHES.
-Round 128 new_claim MATCHES.
+The PhaseCycle1 loop computes:
+- `eval_0 = Σ coeff_raf * P_raf[2j] * Q_raf[2j] + coeff_rw * P_rw[2j] * Q_rw[2j] + coeff_val * P_val[2j] * Q_val[2j]`
+- `eval_1 = Σ coeff_raf * P_raf[2j+1] * Q_raf[2j+1] + ...`
 
-But Round 129 polynomial coefficients DIFFER!
+For Round 129 (cycle_round=1):
+- `eval_0` is non-zero
+- `eval_1` is ZERO (suspicious!)
+- `eval_2` is non-zero
 
-**Zolt Round 129 coeff[0] committed (BE):**
-`first_8_bytes={ 15 95 34 bc 21 be 6b 10 }`
+This means all the products at odd indices (2j+1) sum to zero.
 
-**Jolt Round 129 coeff[0] (LE):**
-`[ca, 46, b3, 41, ce, 2f, 78, d3, ed, cc, 27, 13, ff, eb, 02, 1f, 4e, 99, a1, e4, d5, d7, 40, 5d, 3b, 28, 07, e2, 5c, ba, a1, 11]`
+## Possible Causes
 
-These are completely different values!
+1. **P arrays at odd indices are zero**: After binding from Round 128, the P_raf/P_rw/P_val arrays might have zeros at odd indices.
 
-## Transcript Verification
+2. **Q arrays at odd indices are zero**: The Q_raf/Q_rw/Q_val arrays might have zeros at odd indices.
 
-Verified that Zolt's appendScalar correctly reverses LE to BE for EVM compatibility (matches Jolt's behavior).
+3. **Binding logic issue**: The binding at the end of Round 128 might be incorrectly zeroing out values.
 
-Verified that Round 128 coefficients committed to transcript match Jolt's expected values.
+4. **Indexing issue**: The P and Q arrays might be indexed differently than expected.
 
-## Analysis
+## Debug Added
 
-The polynomial for Round 129 depends on:
-1. Instance 0 (RegistersValEvaluation) bound polynomial
-2. Instance 1 (RamRaClaimReduction) bound polynomial
-3. Instance 2 (LookupsReadRaf) bound polynomial
-4. Batch coefficients (batch0, batch1, batch2)
-
-Since Round 128 works and Round 129 doesn't, the issue is in how Round 129's polynomial values are computed after binding Round 128's challenge.
-
-## Hypothesis
-
-The polynomial binding for cycle rounds might be incorrect. Specifically:
-1. The eq polynomial binding might be wrong
-2. The data polynomial binding might be wrong
-3. The order of operations might differ from Jolt
+Added debug to print P and Q array values in PhaseCycle1 for cycle_round=1:
+```zig
+if (cycle_round == 1 and round == LOOKUPS_LOG_K + 1) {
+    std.debug.print("[INST1 PQ DEBUG] Round {} (cycle_round={}): half_len={}\n", .{ round, cycle_round, half_len });
+    for (0..@min(8, current_P_len)) |j| {
+        std.debug.print("  P_raf[{}]={x}, Q_raf[{}]={x}\n", .{
+            j, P_raf[j].toBytesBE()[24..32].*,
+            j, Q_raf[j].toBytesBE()[24..32].*,
+        });
+    }
+}
+```
 
 ## Next Steps
 
-1. Add debug to print Instance 2's polynomial evaluations (sum_evals) for Round 129
-2. Compare with what Jolt would compute
-3. Check the eq polynomial binding logic in cycle rounds
-4. Verify the prefix-suffix decomposition is working correctly
+1. Run Zolt and capture the P/Q debug output
+2. Analyze which arrays have zeros
+3. Check the binding logic at end of Round 128
+4. Compare with Jolt's PhaseCycle implementation
 
-## Files to Investigate
+## Files Modified
 
-- `/home/vivado/projects/zolt/src/zkvm/spartan/stage5_prover.zig`:
-  - Lines 2900-3100: Cycle round polynomial computation
-  - Check how `sum_evals` is computed for each evaluation point
-  - Check how `full_coeffs` is computed via `finishMlesProductSumFromEvals`
+- `src/zkvm/spartan/stage5_prover.zig`: Added debug for Instance 0/1 coefficients and P/Q arrays
+- `jolt/jolt-core/src/subprotocols/sumcheck.rs`: Added debug for individual instance polynomials
 
 ## Test Commands
 
 ```bash
-# Zolt proof generation with debug
-./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o logs/zolt_proof_dory.bin --export-preprocessing logs/zolt_preprocessing.bin 2>&1 | tee /tmp/zolt_debug.log
+# Run Zolt and capture P/Q debug
+./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o logs/zolt_proof_dory.bin --export-preprocessing logs/zolt_preprocessing.bin 2>&1 | grep "INST1 PQ DEBUG" -A 20
 
-# Jolt verification
+# Verify with Jolt
 cd jolt && cargo test -p jolt-core --features zolt-debug --lib test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```

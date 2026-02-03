@@ -404,17 +404,37 @@ pub fn ArkworksSerializer(comptime F: type) type {
                 try self.writeU8(0);
             }
 
-            // 12-16. Configuration (matches Jolt's JoltProof struct order)
-            // All are usize (serialized as u64 LE in arkworks)
-            std.debug.print("[SERIALIZE CONFIG] trace_length={}, ram_K={}, bytecode_K={}, log_k_chunk={}, lookups_ra_virtual_log_k_chunk={}\n", .{
+            // 12-18. Configuration (matches Jolt's JoltProof struct order)
+            // Order in Jolt: trace_length, ram_K, bytecode_K, rw_config, one_hot_config, dory_layout
+            std.debug.print("[SERIALIZE CONFIG] trace_length={}, ram_K={}, bytecode_K={}\n", .{
                 proof.trace_length, proof.ram_K, proof.bytecode_K,
+            });
+            std.debug.print("[SERIALIZE CONFIG] rw_config: phase1_ram={}, phase2_ram={}, phase1_regs={}, phase2_regs={}\n", .{
+                proof.rw_config.ram_rw_phase1_num_rounds, proof.rw_config.ram_rw_phase2_num_rounds,
+                proof.rw_config.registers_rw_phase1_num_rounds, proof.rw_config.registers_rw_phase2_num_rounds,
+            });
+            std.debug.print("[SERIALIZE CONFIG] one_hot: log_k_chunk={}, lookups_ra_virtual_log_k_chunk={}\n", .{
                 proof.one_hot_config.log_k_chunk, proof.one_hot_config.lookups_ra_virtual_log_k_chunk,
             });
+            std.debug.print("[SERIALIZE CONFIG] dory_layout={}\n", .{proof.dory_layout});
+
+            // trace_length, ram_K, bytecode_K are usize (serialized as u64 LE)
             try self.writeUsize(proof.trace_length);
             try self.writeUsize(proof.ram_K);
             try self.writeUsize(proof.bytecode_K);
-            try self.writeUsize(proof.one_hot_config.log_k_chunk);
-            try self.writeUsize(proof.one_hot_config.lookups_ra_virtual_log_k_chunk);
+
+            // rw_config: 4 u8 fields (4 bytes total)
+            try self.writeU8(proof.rw_config.ram_rw_phase1_num_rounds);
+            try self.writeU8(proof.rw_config.ram_rw_phase2_num_rounds);
+            try self.writeU8(proof.rw_config.registers_rw_phase1_num_rounds);
+            try self.writeU8(proof.rw_config.registers_rw_phase2_num_rounds);
+
+            // one_hot_config: 2 u8 fields (2 bytes total)
+            try self.writeU8(proof.one_hot_config.log_k_chunk);
+            try self.writeU8(proof.one_hot_config.lookups_ra_virtual_log_k_chunk);
+
+            // dory_layout: u8 (1 byte)
+            try self.writeU8(proof.dory_layout);
         }
 
         /// Write a JoltProof using Dory commitments (GT elements)

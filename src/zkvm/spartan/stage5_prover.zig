@@ -1601,6 +1601,21 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     combined_poly[1] = combined_poly[1].add(batch0.mul(poly_evals[1]));
                     combined_poly[2] = combined_poly[2].add(batch0.mul(poly_evals[2]));
                     combined_poly[3] = combined_poly[3].add(batch0.mul(poly_evals[3]));
+
+                    // Debug: Print Instance 0 contribution for cycle rounds
+                    if (round >= LOOKUPS_LOG_K and round <= LOOKUPS_LOG_K + 1) {
+                        const inst0_coeffs = UniPoly(F).toomCookToCoeffs(poly_evals);
+                        std.debug.print("[ZOLT INST0] Round {}: regs_round={}\n", .{ round, regs_round });
+                        std.debug.print("  poly_evals (Toom) = [{any}, {any}, {any}, {any}]\n", .{
+                            poly_evals[0].toBytes(), poly_evals[1].toBytes(),
+                            poly_evals[2].toBytes(), poly_evals[3].toBytes(),
+                        });
+                        std.debug.print("  inst0_coeffs (coeffs) = [{any}, {any}, {any}, {any}]\n", .{
+                            inst0_coeffs[0].toBytes(), inst0_coeffs[1].toBytes(),
+                            inst0_coeffs[2].toBytes(), inst0_coeffs[3].toBytes(),
+                        });
+                        std.debug.print("  batch0 = {any}\n", .{batch0.toBytes()});
+                    }
                 }
 
                 // Instance 1: RamRaClaimReduction (24 rounds)
@@ -1868,6 +1883,22 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 eval_1.toBytesBE()[16..32].*,
                                 eval_2.toBytesBE()[16..32].*,
                             });
+
+                            // Debug: Print Instance 1 contribution for Round 128-129
+                            if (round >= LOOKUPS_LOG_K and round <= LOOKUPS_LOG_K + 1) {
+                                const inst1_evals = [4]F{ eval_0, eval_1, eval_2, F.zero() };
+                                const inst1_coeffs = UniPoly(F).toomCookToCoeffs(inst1_evals);
+                                std.debug.print("[ZOLT INST1] Round {}: ram_ra_round={}, cycle_round={}\n", .{ round, ram_ra_round, cycle_round });
+                                std.debug.print("  inst1_evals (Toom) = [{any}, {any}, {any}, {any}]\n", .{
+                                    inst1_evals[0].toBytes(), inst1_evals[1].toBytes(),
+                                    inst1_evals[2].toBytes(), inst1_evals[3].toBytes(),
+                                });
+                                std.debug.print("  inst1_coeffs (coeffs) = [{any}, {any}, {any}, {any}]\n", .{
+                                    inst1_coeffs[0].toBytes(), inst1_coeffs[1].toBytes(),
+                                    inst1_coeffs[2].toBytes(), inst1_coeffs[3].toBytes(),
+                                });
+                                std.debug.print("  batch1 = {any}\n", .{batch1.toBytes()});
+                            }
                         } else {
                             // PhaseCycle2: After prefix rounds, use H' * eq_hi for suffix
                             const suffix_round = cycle_round - prefix_n_vars;
@@ -3052,13 +3083,26 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     const final_compressed = try UniPoly(F).toCompressed(self.allocator, combined_coeffs);
 
                     // Debug: print first 3 compressed coefficients (excluding linear term) in LE format
-                    if (round == LOOKUPS_LOG_K) { // Only for round 128
+                    if (round >= LOOKUPS_LOG_K and round <= LOOKUPS_LOG_K + 1) { // Rounds 128 and 129
                         std.debug.print("[STAGE5 CYCLE ZOLT] Round {} compressed coeffs (LE, comparing to Jolt):\n", .{round});
                         for (0..@min(4, final_compressed.len)) |k| {
                             // Jolt displays LE bytes from arkworks serialization
                             std.debug.print("  coeff[{}] = {any}\n", .{ k, final_compressed[k].toBytes() });
                         }
                         std.debug.print("  current_batched_claim (LE) = {any}\n", .{current_batched_claim.toBytes()});
+                        // Also print combined_coeffs before compression
+                        std.debug.print("  combined_coeffs[0] (c0) = {any}\n", .{combined_coeffs[0].toBytes()});
+                        std.debug.print("  combined_coeffs[1] (c1) = {any}\n", .{combined_coeffs[1].toBytes()});
+                        std.debug.print("  combined_coeffs[2] (c2) = {any}\n", .{combined_coeffs[2].toBytes()});
+                        // Print Instance 0+1 contribution details
+                        std.debug.print("  inst01_coeffs[0..4] = [{any}, {any}, {any}, {any}]\n", .{
+                            inst01_coeffs[0].toBytes(), inst01_coeffs[1].toBytes(),
+                            inst01_coeffs[2].toBytes(), inst01_coeffs[3].toBytes(),
+                        });
+                        // Print full_coeffs (Instance 2)
+                        std.debug.print("  full_coeffs[0..3] = [{any}, {any}, {any}]\n", .{
+                            full_coeffs[0].toBytes(), full_coeffs[1].toBytes(), full_coeffs[2].toBytes(),
+                        });
                     }
 
                     try proof.compressed_polys.append(self.allocator, .{

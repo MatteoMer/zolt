@@ -1499,35 +1499,46 @@ pub fn JoltProver(comptime F: type) type {
                 try serializer.writeDoryProof(&dory_proof);
             }
 
-            // Write advice proofs (4 Option<PCS::Proof> fields, all None)
-            // Jolt expects these in order:
-            // - trusted_advice_val_evaluation_proof: Option<PCS::Proof>
-            // - trusted_advice_val_final_proof: Option<PCS::Proof>
-            // - untrusted_advice_val_evaluation_proof: Option<PCS::Proof>
-            // - untrusted_advice_val_final_proof: Option<PCS::Proof>
-            try serializer.writeU8(0); // trusted_advice_val_evaluation_proof: None
-            try serializer.writeU8(0); // trusted_advice_val_final_proof: None
-            try serializer.writeU8(0); // untrusted_advice_val_evaluation_proof: None
-            try serializer.writeU8(0); // untrusted_advice_val_final_proof: None
-
             // Write untrusted_advice_commitment: Option<Commitment>
             // We don't have advice, so write None (0 byte)
             try serializer.writeU8(0); // untrusted_advice_commitment: None
 
             // Write configuration (matches Jolt's JoltProof struct exactly)
-            // All fields are usize (serialized as u64 LE)
-            std.debug.print("[SERIALIZE CONFIG] trace_length={}, ram_K={}, bytecode_K={}, log_k_chunk={}, lookups_ra_virtual_log_k_chunk={}\n", .{
+            // Fields in order: trace_length (usize), ram_K (usize), bytecode_K (usize),
+            // rw_config (4 u8), one_hot_config (2 u8), dory_layout (1 u8)
+            std.debug.print("[SERIALIZE CONFIG] trace_length={}, ram_K={}, bytecode_K={}\n", .{
                 bundle.proof.trace_length,
                 bundle.proof.ram_K,
                 bundle.proof.bytecode_K,
+            });
+            std.debug.print("[SERIALIZE CONFIG] rw_config: ram_p1={}, ram_p2={}, reg_p1={}, reg_p2={}\n", .{
+                bundle.proof.rw_config.ram_rw_phase1_num_rounds,
+                bundle.proof.rw_config.ram_rw_phase2_num_rounds,
+                bundle.proof.rw_config.registers_rw_phase1_num_rounds,
+                bundle.proof.rw_config.registers_rw_phase2_num_rounds,
+            });
+            std.debug.print("[SERIALIZE CONFIG] one_hot: log_k_chunk={}, lookups_ra_virtual={}\n", .{
                 bundle.proof.one_hot_config.log_k_chunk,
                 bundle.proof.one_hot_config.lookups_ra_virtual_log_k_chunk,
             });
+
+            // trace_length, ram_K, bytecode_K as usize (u64 LE)
             try serializer.writeUsize(bundle.proof.trace_length);
             try serializer.writeUsize(bundle.proof.ram_K);
             try serializer.writeUsize(bundle.proof.bytecode_K);
-            try serializer.writeUsize(bundle.proof.one_hot_config.log_k_chunk);
-            try serializer.writeUsize(bundle.proof.one_hot_config.lookups_ra_virtual_log_k_chunk);
+
+            // rw_config: 4 u8 fields
+            try serializer.writeU8(bundle.proof.rw_config.ram_rw_phase1_num_rounds);
+            try serializer.writeU8(bundle.proof.rw_config.ram_rw_phase2_num_rounds);
+            try serializer.writeU8(bundle.proof.rw_config.registers_rw_phase1_num_rounds);
+            try serializer.writeU8(bundle.proof.rw_config.registers_rw_phase2_num_rounds);
+
+            // one_hot_config: 2 u8 fields
+            try serializer.writeU8(bundle.proof.one_hot_config.log_k_chunk);
+            try serializer.writeU8(bundle.proof.one_hot_config.lookups_ra_virtual_log_k_chunk);
+
+            // dory_layout: 1 u8 (Wide = 0, Tall = 1)
+            try serializer.writeU8(0); // Wide layout
 
             return serializer.toOwnedSlice();
         }

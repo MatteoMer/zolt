@@ -1,86 +1,68 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 18 - Stage 5 Cycle Round Polynomial Investigation
+## Status: Session 19 - Stage 5 Sumcheck Debug (SESSION_ENDING)
 
-## Current Issue
+## Current Progress
+
+### Completed
+1. ✅ Fixed SumcheckId mismatch (22 variants, not 24)
+2. ✅ Fixed proof serialization format:
+   - Added 4 advice proof option bytes
+   - Fixed config to use 5 usize values (trace_length, ram_K, bytecode_K, log_k_chunk, lookups_ra_virtual_log_k_chunk)
+   - Removed rw_config and dory_layout
+3. ✅ Fixed proof deserialization (uses compressed format)
+4. ✅ Proof now loads and verification runs!
+
+### Current Issue: Stage 5 Sumcheck
 
 Stage 5 verification fails with output_claim != expected_claim:
 ```
-output_claim:   [ed, a5, f6, bf, 30, c4, 10, f8, ...]  (from sumcheck round 135)
-expected_claim: [b2, 8f, 91, 24, 33, 0c, b4, 56, ...]  (from opening claims)
+output_claim:          4685578738422804254959705568336941759457054412197980855802774129638288827885
+expected_output_claim: 12188497878882392561462773456725953651449308138029928163257319185678381191090
 ```
 
-## Session 18 Findings
+From debug output:
+- Instance 2 expected_claim = 5228641186838112443815018829560347135294696928443125671497986510902740364546
+- Instance 2 coeff = 65436712948050808574557213493451640901
+- Instance 2 weighted = 5388269998998530687089403994657448571284391738532206803112685224477058414078
 
-### Code Structure Understanding
+The expected_output_claim is: `sum(instance_i.expected_claim * batch_coeff_i)`
 
-The Stage 5 sumcheck has 136 rounds:
-- **Rounds 0-127**: Address rounds (prefix-suffix decomposition)
-- **Rounds 128-135**: Cycle rounds (standard sumcheck over bound polynomials)
+The output_claim comes from sumcheck polynomial evaluation at the challenges.
 
-Three instances are batched:
-1. **Instance 0 (RegistersValEvaluation)**: Active for 8 cycle rounds, degree-3 polynomial
-2. **Instance 1 (RamRaClaimReduction)**: Active for 24 rounds (16 address + 8 cycle), degree-2 polynomial
-3. **Instance 2 (LookupsReadRaf)**: Active all 136 rounds, degree-9 polynomial during cycle rounds
+## Stage 5 Architecture
 
-### Cycle Round Polynomial Computation (Round >= 128)
+Stage 5 is a batched sumcheck with 3 instances:
+1. **Instance 0 (RegistersValEvaluation)**: 8 rounds (cycle only), degree-3
+   - Uses: RdInc, RdWa claims
+   - r_cycle from RegistersReadWriteChecking
 
-For each cycle round:
-1. Instance 0+1 compute polynomials via existing code (lines 1575-2015)
-2. Instance 2 computes 9-factor product: eq * (8 ra_chunks) * combined_val
-3. Polynomials are combined into `combined_coeffs` (degree-10)
-4. Compressed coefficients [c0, c2, c3, ...] are serialized
+2. **Instance 1 (RamRaClaimReduction)**: 24 rounds (16 address + 8 cycle), degree-2
+   - Uses: RamRa(i) claims for all chunks
+   - r_cycle from RamRaClaimReduction
 
-### Jolt's Cycle Round Coefficients (from test output)
+3. **Instance 2 (LookupsReadRaf)**: 136 rounds (128 address + 8 cycle), degree-10 during cycle
+   - Uses: InstructionRa(i), LookupTableFlag(i), InstructionRafFlag claims
+   - r_reduction from InstructionClaimReduction
 
-Round 128:
-```
-c0: [05, b5, df, f2, d3, 49, ca, d8, ...]
-c2: [54, c2, 7c, f5, aa, 45, 65, 80, ...]
-c3: [49, 36, 44, b5, 9d, f1, de, 64, ...]
-```
+## Likely Root Causes
 
-### Key Insight: Degree Mismatch Comment
+1. **Opening claims mismatch**: The values computed by Zolt for the opening claims might not match what Jolt expects
+2. **Challenge ordering**: The r_reduction/r_cycle points might be in wrong endianness
+3. **Polynomial computation**: The cycle round polynomial might have incorrect eq_prefix or ra_chunk computation
 
-Line 2991 has a misleading comment:
-```
-// Instance 0 and 1 contribute at most degree-3 (constant polynomials for most rounds)
-```
+## Next Session Tasks
 
-This is INCORRECT for cycle rounds. During cycle rounds:
-- Instance 0 is degree-3 (product of 3 linear factors)
-- Instance 1 is degree-2 (PhaseCycle2)
-- Instance 2 is degree-9 (product of 9 linear factors)
+1. Add debug output comparing:
+   - Zolt's Instance 2 expected_claim computation
+   - Jolt's Instance 2 expected_claim from opening claims
 
-Total combined polynomial degree = max(3, 9) = 9, not 10.
+2. Verify opening claims match:
+   - InstructionRa(i) for i in 0..8 at the correct evaluation points
+   - LookupTableFlag(i) for all tables
+   - InstructionRafFlag
 
-Wait - Jolt says degree = ra_polys.len() = 8+1 = 9, but the code creates `combined_coeffs` with 11 elements (degree-10). This might be the bug!
-
-### POSSIBLE BUG: Degree Calculation
-
-Zolt allocates 11 coefficients (degree-10):
-```zig
-var combined_coeffs = try self.allocator.alloc(F, 11);  // line 3000
-```
-
-But the actual degree should be:
-- eq factor: degree-1
-- ra factors: 8 factors of degree-1 each = degree-8 contribution
-- combined_val: degree-0 (already evaluated)
-- Total: degree-9
-
-The polynomial has degree 9, requiring only 10 coefficients, not 11!
-
-### Hypothesis
-
-The extra coefficient is causing the polynomial to not match Jolt's structure. Zolt might be producing degree-10 polynomials when Jolt expects degree-9.
-
-## Next Steps
-
-1. **Verify degree**: Check `full_coeffs.len` after `finishMlesProductSumFromEvals` - should be 10 (degree-9)
-2. **Check Jolt's degree**: In read_raf_checking.rs, verify n_evals = ra_polys.len() + 1 = 9, giving degree 9
-3. **Fix allocation**: If confirmed, change `combined_coeffs` to 10 elements
-4. **Test**: Generate new proof and cross-verify
+3. Check r_reduction ordering - is it BigEndian or LowToHigh?
 
 ## Test Commands
 
@@ -90,7 +72,7 @@ The extra coefficient is causing the polynomial to not match Jolt's structure. Z
 
 # Cross-verify
 cp logs/zolt_proof_dory.bin /tmp/ && cp logs/zolt_preprocessing.bin /tmp/
-cd ../jolt && cargo test -p jolt-core --lib test_verify_zolt_proof_with_zolt_preprocessing --features zolt-debug -- --ignored --nocapture
+cd jolt && cargo test -p jolt-core --lib test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
 
 ## Session History
@@ -104,4 +86,5 @@ cd ../jolt && cargo test -p jolt-core --lib test_verify_zolt_proof_with_zolt_pre
 - Session 15: Confirmed opening claims match
 - Session 16: Fixed LowerWord/UpperWord/LowerHalfWord suffix MLEs
 - Session 17: Verified all opening claims match
-- Session 18: **Discovered potential degree mismatch** (degree-10 vs degree-9)
+- Session 18: Discovered potential degree mismatch
+- Session 19: **Fixed serialization, proof loads, Stage 5 sumcheck fails**

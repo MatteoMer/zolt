@@ -152,12 +152,49 @@ If Zolt's polynomial differs from what Jolt would compute:
 - But p(challenge) produces a DIFFERENT next claim
 - After 136 rounds, the accumulated difference becomes the mismatch
 
+## ROOT CAUSE FOUND - Session 26 (Late)
+
+### The Bug: eq_evals Binding
+
+**Zolt incorrectly binds `eq_evals` with sumcheck challenges, while Jolt does NOT.**
+
+In Jolt's GruenSplitEqPolynomial:
+- `E_in_vec` and `E_out_vec` are computed from `r_reduction` (original challenges)
+- `bind(r_j)` only updates `current_scalar`, NOT E_in/E_out
+- `current_scalar` accumulates `eq(w[i], r_j)` where w is original, r_j is sumcheck challenge
+- Total eq contribution = `current_scalar * E_out[j_out] * E_in[j_in]`
+
+In Zolt:
+- `eq_evals[j]` starts as `eq(j, r_reduction)`
+- `bindLookupsChallenge` modifies eq_evals: `eq[i] = (1-c)*eq[2*i] + c*eq[2*i+1]`
+- This MIXES original r_reduction with sumcheck challenge c
+- Result: eq_prefix no longer represents eq(j, r_reduction[remaining])
+
+### Why This Causes the Bug
+
+After round 0 binding with challenge c_0:
+- **Jolt**: `current_scalar = eq(r_reduction[n-1], c_0)`, E_in/E_out unchanged
+- **Zolt**: `eq_evals` contains mixed values, NOT pure eq(j, r_reduction)
+
+For round 1 polynomial:
+- **Jolt**: uses `current_scalar * eq(j, r_reduction[0:n-2])` - correct
+- **Zolt**: uses `eq_prefix` derived from mixed eq_evals - WRONG
+
+### The Fix
+
+Zolt needs to:
+1. NOT bind `eq_evals` with sumcheck challenges for polynomial computation
+2. Instead, maintain `current_scalar` that accumulates `eq(r_reduction[i], challenge_i)`
+3. Use `current_scalar * eq_prefix` in polynomial computation
+4. Still bind eq_evals for CLAIM computation (to verify p(0)+p(1)=claim)
+
+Alternatively, restructure to match Jolt's GruenSplitEqPolynomial approach exactly.
+
 ## Next Steps
 
-1. Add debug to Zolt to print `sum_evals` at cycle round 0
-2. Run Jolt prover to capture expected `sum_evals`
-3. Compare value-by-value to find the divergence point
-4. Focus on `combined_val` and `ra_chunk_weights` as likely sources of error
+1. Implement `current_scalar` accumulation in Zolt's cycle round computation
+2. Modify eq_prefix usage to include current_scalar factor
+3. Test fix with Jolt verification
 
 ## Files to Study
 

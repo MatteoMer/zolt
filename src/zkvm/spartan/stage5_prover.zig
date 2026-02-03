@@ -1567,6 +1567,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
             // Run the batched sumcheck
             std.debug.print("[STAGE5] Entering main sumcheck loop, max_num_rounds={}\n", .{max_num_rounds});
+
+            // Track accumulated eq factor for bound cycle variables
+            // This matches Jolt's current_scalar in GruenSplitEqPolynomial
+            // Formula: current_scalar *= eq(w[i], challenge_i) = 1 - w[i] - c + 2*w[i]*c
+            // where w[i] = r_reduction[n-1-i] (original challenge) and c = sumcheck challenge
+            var lookups_current_scalar = F.one();
+
             for (0..max_num_rounds) |round| {
                 const remaining_rounds = max_num_rounds - round;
 
@@ -2866,31 +2873,18 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         }
                         std.debug.print("[STAGE5 CYCLE] lookups_claim after ra materialization = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
                     }
-                    const current_half_size = lookups_eq_evals.len >> @intCast(lookups_round + 1);
+                    // CRITICAL: current_half_size is the number of pairs we iterate over
+                    // At round k, we have T/2^(k+1) pairs to process
+                    const current_half_size = T >> @intCast(lookups_round + 1);
 
                     // Get r_round for this cycle variable (LowToHigh binding: last element first)
                     const r_round = r_reduction[n_cycle_vars - 1 - lookups_round];
 
                     // Accumulate sum of 9-factor products
-                    // IMPORTANT: sum_evals should be g(X) / eq(X, r_round) as per Jolt's
-                    // finish_mles_product_sum_from_evals contract. That function will then
-                    // multiply by eq(X, r_round) to recover the full polynomial.
-                    //
-                    // The eq factor decomposes as:
-                    //   eq(2*j, r) = eq_prefix(j) * (1 - r_round)
-                    //   eq(2*j+1, r) = eq_prefix(j) * r_round
-                    // where eq_prefix(j) = eq(j, r_reduction[:-1]) is the eq factor WITHOUT
-                    // the current round's variable.
-                    //
-                    // Since pairs[0] = (eq_0 * val_0, eq_1 * val_1) uses full eq values,
-                    // we need to factor out eq(bit, r_round). We do this by computing
-                    // eq_prefix and using that instead.
-                    var sum_evals: [9]F = [_]F{F.zero()} ** 9; // Evaluations at [1, 2, ..., 8, ∞]
-
-                    // Precompute 1/(1-r) for extracting eq_prefix from eq_0
-                    // eq_prefix = eq_0 / (1 - r_round) = eq_1 / r_round
-                    const one_minus_r_round = F.one().sub(r_round);
-                    const inv_one_minus_r_round = if (one_minus_r_round.eql(F.zero())) F.zero() else one_minus_r_round.inverse().?;
+                    // sum_evals contains g(1), g(2), ..., g(8), g(∞) where g(X) is the polynomial
+                    // BEFORE multiplying by eq(X, r_round). finishMlesProductSumFromEvals will
+                    // recover g(0) using the claim, then multiply by eq(X, r_round).
+                    var sum_evals: [9]F = [_]F{F.zero()} ** 9;
 
                     for (0..current_half_size) |j| {
                         // Build the 9 linear polynomial pairs for this j
@@ -2898,13 +2892,43 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         var pairs: [9][2]F = undefined;
 
                         // Factor 0: eq_prefix * combined_val (WITHOUT current round's eq factor)
-                        // eq_prefix(j) = eq(2*j, r) / (1 - r_round) = eq(2*j+1, r) / r_round
-                        const eq_0 = lookups_eq_evals[2 * j];
-                        const eq_prefix = eq_0.mul(inv_one_minus_r_round);
+                        //
+                        // CRITICAL FIX: Compute eq_prefix directly from r_reduction, excluding
+                        // the current round's variable. This avoids the stride indexing issues.
+                        //
+                        // eq_prefix(j) = eq(j, r_reduction[0:n-1-lookups_round])
+                        // where r_reduction[0:n-1-k] means all variables EXCEPT the last k+1.
+                        //
+                        // For LowToHigh binding with n=8 cycle vars:
+                        // - Round 0: use r_reduction[0..7] (all 8 vars), current = r_reduction[7]
+                        // - Round 1: use r_reduction[0..6] (first 7 vars), current = r_reduction[6]
+                        // - Round k: use r_reduction[0..n-1-k], current = r_reduction[n-1-k]
+                        //
+                        // The remaining_vars after round k is: n - k - 1
+                        // eq_prefix(j) for j in 0..current_half_size uses bits of j in [0, remaining_vars)
+                        const remaining_vars = n_cycle_vars - lookups_round - 1;
+                        const eq_prefix = computeEqAtIndexPartial(r_reduction, j, remaining_vars);
+
+                        // Debug: for first cycle round, first few j values
+                        if (lookups_round == 0 and j < 3) {
+                            std.debug.print("[CYCLE R0 DEBUG] j={}, remaining_vars={}, eq_prefix={x}\n", .{
+                                j,
+                                remaining_vars,
+                                eq_prefix.toBytesBE()[16..32].*,
+                            });
+                            std.debug.print("  combined_vals[{}]={x}, combined_vals[{}]={x}\n", .{
+                                2 * j,
+                                lookups_combined_vals[2 * j].toBytesBE()[16..32].*,
+                                2 * j + 1,
+                                lookups_combined_vals[2 * j + 1].toBytesBE()[16..32].*,
+                            });
+                        }
+
+                        // combined_vals IS bound (standard MLE binding), so use sequential access
                         pairs[0][0] = eq_prefix.mul(lookups_combined_vals[2 * j]);
                         pairs[0][1] = eq_prefix.mul(lookups_combined_vals[2 * j + 1]);
 
-                        // Factors 1-8: 8 ra_chunk polynomials
+                        // Factors 1-8: 8 ra_chunk polynomials (also bound, sequential access)
                         for (0..ra_num_chunks) |c| {
                             pairs[c + 1][0] = ra_chunk_weights[c][2 * j];
                             pairs[c + 1][1] = ra_chunk_weights[c][2 * j + 1];
@@ -2917,6 +2941,14 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         for (0..9) |k| {
                             sum_evals[k] = sum_evals[k].add(prod_evals[k]);
                         }
+                    }
+
+                    // CRITICAL FIX: Multiply sum_evals by lookups_current_scalar
+                    // This matches Jolt's GruenSplitEqPolynomial behavior where current_scalar
+                    // accumulates eq(w[bound_vars], r_bound_challenges) and is multiplied at the end.
+                    // Without this, we incorrectly mix original r_reduction with sumcheck challenges.
+                    for (&sum_evals) |*eval| {
+                        eval.* = eval.*.mul(lookups_current_scalar);
                     }
 
                     // Get the current claim for this round
@@ -2950,6 +2982,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // Debug: print polynomial info for all cycle rounds
                     std.debug.print("[STAGE5 CYCLE] Round {} (cycle var {}):\n", .{ round, lookups_round });
                     std.debug.print("  r_round = {x}\n", .{r_round.toBytesBE()[24..32].*});
+                    std.debug.print("  lookups_current_scalar = {x}\n", .{lookups_current_scalar.toBytesBE()[24..32].*});
                     std.debug.print("  cycle_claim = {x}\n", .{cycle_claim.toBytesBE()[24..32].*});
                     std.debug.print("  p(0) = {x}\n", .{p_at_0.toBytesBE()[24..32].*});
                     std.debug.print("  p(1) = {x}\n", .{p_at_1.toBytesBE()[24..32].*});
@@ -3139,7 +3172,40 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     }
 
                     // Bind cycle round challenge for lookups
-                    bindLookupsChallenge(lookups_eq_evals, lookups_combined_vals, lookups_round, challenge);
+                    // CRITICAL: Do NOT bind eq_evals - keep them as original eq(j, r_reduction)
+                    // Only bind combined_vals (standard MLE binding)
+                    // This matches Jolt's GruenSplitEqPolynomial where E_in/E_out are not modified
+                    bindSinglePolynomial(lookups_combined_vals, lookups_round, challenge);
+
+                    // CRITICAL FIX: Update lookups_current_scalar with eq(w_i, challenge)
+                    // This matches Jolt's GruenSplitEqPolynomial.bind() which accumulates:
+                    //   current_scalar *= eq(w[current_index-1], r)
+                    // where w is the original r_reduction (NOT modified by sumcheck challenges)
+                    // and r is the sumcheck challenge.
+                    //
+                    // Formula: eq(w, r) = 1 - w - r + 2*w*r
+                    //
+                    // For MontU128Challenge arithmetic:
+                    // - F.one().sub(challenge) gives (1 - r) as F
+                    // - w_i.mulHiBigIntU128(challenge.limbs) gives w*r as F
+                    const w_i = r_reduction[n_cycle_vars - 1 - lookups_round];
+                    const prod_w_r = w_i.mulHiBigIntU128(challenge.limbs); // w * r
+                    // eq(w, r) = 1 - w - r + 2*w*r = (1 - r) - w + 2*w*r = (1 - r) + w*(2r - 1)
+                    // But simpler: eq(w, r) = 1 - w - r + 2*w*r
+                    const one_minus_r_scalar = F.one().sub(challenge); // (1 - r) as F
+                    const eq_factor = one_minus_r_scalar.sub(w_i).add(prod_w_r).add(prod_w_r); // 1 - r - w + 2*w*r
+                    lookups_current_scalar = lookups_current_scalar.mul(eq_factor);
+
+                    // Debug: print current_scalar update
+                    if (lookups_round < 3) {
+                        std.debug.print("[STAGE5 CYCLE] round={}, lookups_round={}, w_i={x}, eq_factor={x}, current_scalar={x}\n", .{
+                            round,
+                            lookups_round,
+                            w_i.toBytesBE()[16..32].*,
+                            eq_factor.toBytesBE()[16..32].*,
+                            lookups_current_scalar.toBytesBE()[16..32].*,
+                        });
+                    }
 
                     // Bind the per-chunk ra weights
                     for (0..ra_num_chunks) |chunk_idx| {
@@ -3159,18 +3225,31 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         }
                     }
 
-                    // Update lookups_claim: recompute the full sum after binding
-                    // The claim for the next round is: Σ_j eq[j] * Π_c ra_c[j] * val[j]
-                    // where the sum is over all remaining j indices after binding
+                    // Update lookups_claim: the claim is the polynomial evaluated at the challenge
+                    // After binding, the new claim should match p(challenge) where p was the round polynomial.
+                    //
+                    // For the NEXT round (lookups_round + 1), we need:
+                    //   claim = current_scalar * Σ_j eq_prefix(j) * Π_c ra_c[j] * val[j]
+                    //
+                    // where eq_prefix(j) = eq(j, r_reduction[0:remaining_vars])
+                    // remaining_vars = n - (lookups_round + 1) - 1 = n - lookups_round - 2
+                    //
+                    // At the END of round (n-1), remaining_vars = 0, eq_prefix(0) = 1
                     const half_size = T >> @intCast(lookups_round + 1);
-                    lookups_claim = F.zero();
+                    const next_remaining_vars = if (lookups_round + 1 >= n_cycle_vars) 0 else n_cycle_vars - lookups_round - 2;
+
+                    var sum = F.zero();
                     for (0..half_size) |j| {
                         var ra_prod = F.one();
                         for (0..ra_num_chunks) |c| {
                             ra_prod = ra_prod.mul(ra_chunk_weights[c][j]);
                         }
-                        lookups_claim = lookups_claim.add(lookups_eq_evals[j].mul(ra_prod).mul(lookups_combined_vals[j]));
+                        // Compute eq_prefix directly using the partial eq function
+                        const eq_val = if (next_remaining_vars == 0) F.one() else computeEqAtIndexPartial(r_reduction, j, next_remaining_vars);
+                        sum = sum.add(eq_val.mul(ra_prod).mul(lookups_combined_vals[j]));
                     }
+                    // CRITICAL: Include current_scalar in the claim
+                    lookups_claim = sum.mul(lookups_current_scalar);
                     // Also update lookups_ra_weights for convenience
                     var final_ra = F.one();
                     for (0..ra_num_chunks) |c| {
@@ -3269,8 +3348,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             const r_cycle_prime = challenges[LOOKUPS_LOG_K..];
 
             // The actual lookups output claim from the sumcheck
-            // After binding all cycle variables, this is eq_evals[0] * combined[0]
-            const lookups_output_claim = lookups_eq_evals[0].mul(lookups_combined_vals[0]);
+            // After binding all cycle variables with the stride-based approach:
+            // - lookups_current_scalar = eq(r_reduction, challenges)
+            // - ra_weights[0] is the bound ra polynomial at single point
+            // - combined_vals[0] is the bound combined polynomial at single point
+            // The output claim is: current_scalar * ra_weights[0] * combined_vals[0]
+            // Note: eq_evals[0] / cumulative_divisor = 1 after normalizing away the bound eq factors
+            const lookups_output_claim = lookups_current_scalar.mul(lookups_ra_weights[0]).mul(lookups_combined_vals[0]);
 
             std.debug.print("[STAGE5 LOOKUPS] Computing opening claims:\n", .{});
             std.debug.print("  lookups_input = {any}\n", .{lookups_input.toBytesBE()[0..8]});
@@ -3303,6 +3387,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             }
             std.debug.print("  eq_r_reduction (verifier computes) = {x}\n", .{eq_r_reduction.toBytesBE()[16..32].*});
             std.debug.print("  eq_evals[0] (from sumcheck) = {x}\n", .{lookups_eq_evals[0].toBytesBE()[16..32].*});
+            std.debug.print("  lookups_current_scalar (should equal eq_r_reduction) = {x}\n", .{lookups_current_scalar.toBytesBE()[16..32].*});
 
             // Debug: print first few r_address_prime values
             std.debug.print("[STAGE5 FINAL] r_address_prime[0..4] (sumcheck challenges 0-3):\n", .{});
@@ -3602,6 +3687,34 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 } else {
                     // For (1 - r[j]): subtraction converts challenge to Montgomery form first (matches Jolt)
                     // Then multiply the result (F * F is standard Montgomery multiplication)
+                    const one_minus_rj = F.one().sub(rj);
+                    result = result.mul(one_minus_rj);
+                }
+            }
+            return result;
+        }
+
+        /// Compute eq(k, r[0:num_vars]) - partial eq polynomial over first num_vars variables.
+        /// This is used in cycle rounds where some variables have been bound.
+        ///
+        /// r is in BIG_ENDIAN order: r[0] is MSB, r[n-1] is LSB.
+        /// For LowToHigh binding of cycle variables:
+        /// - After binding k LSB variables, we use r[0:n-k] (the MSB portion)
+        /// - k uses bits from the remaining (n-k) variables
+        ///
+        /// Example with n=8, num_vars=6 (after binding 2 LSB vars):
+        /// - k in [0, 2^6) uses bits [0, 6) which correspond to r[0:6]
+        /// - bit j of k corresponds to r[5-j] (since r[5] is bit 0, r[0] is bit 5)
+        fn computeEqAtIndexPartial(r: []const F, k: usize, num_vars: usize) F {
+            if (num_vars == 0) return F.one();
+            var result = F.one();
+            for (0..num_vars) |j| {
+                // Extract bit (num_vars-1-j) of k: this is the j-th MSB of k
+                const bj: u1 = @truncate(k >> @intCast(num_vars - 1 - j));
+                const rj = r[j]; // r[j] corresponds to bit (num_vars-1-j) of k
+                if (bj == 1) {
+                    result = result.mulHiBigIntU128(rj.limbs);
+                } else {
                     const one_minus_rj = F.one().sub(rj);
                     result = result.mul(one_minus_rj);
                 }

@@ -1,46 +1,58 @@
-# Session Notes - Stage 5 ra_chunks Investigation
+# Session 18 Notes - Stage 5 Deep Dive
 
 ## Summary
 
-Fixed suffix MLEs (LsbSuffix, Pow2Suffix, Pow2WSuffix, TwoLsbSuffix) to return 1 when len==0.
-This fixed the table[0] != table[1] issue.
-
-However, ra_chunks still don't match between Zolt and Jolt.
+Investigated the Stage 5 sumcheck polynomial mismatch. The output_claim from sumcheck doesn't match expected_claim from opening claims.
 
 ## Key Findings
 
-### Expanding Tables
-- Both Zolt and Jolt use HighToLow binding order for expanding tables
-- Both reset to F::one() at phase start
-- Both update with `update(challenge)` pattern
+### 1. Code Structure
+- Stage 5 has 136 rounds: 128 address + 8 cycle
+- Three instances batched: RegistersValEvaluation, RamRaClaimReduction, LookupsReadRaf
+- Cycle rounds use `evalLinearProd9` for 9-factor products
 
-### ra_polys Structure
-- Jolt: `ra_polys[chunk_i][j] = ∏_{phase in chunk_i} expanding_table[phase][k_phase(j)]`
-- Zolt: `ra_chunk_weights[chunk_i][j] = ∏_{phase in chunk_i} expanding_table[phase][k_phase(j)]`
+### 2. Polynomial Degree
+- 9 linear factors → product polynomial is degree 9
+- `finishMlesProductSumFromEvals` multiplies by eq(X, r) → degree 10
+- 11 coefficients total, which is correct
 
-### Potential Issues to Investigate
+### 3. combined_val Construction
+At rematerialization (start of cycle rounds):
+```
+combined_val[j] = table_values_at_r_addr[table(j)] + raf_val(j)
+```
+where:
+- `table_values_at_r_addr` = table MLE at bound r_address
+- `raf_val(j)` = γ*left + γ²*right (interleaved) or γ²*identity
 
-1. **Phase-to-chunk mapping**: Verify that the mapping from phases to chunks is correct
-   - Jolt: `chunk_size = v.len() / n = phases / 8`
-   - Zolt: `phases_per_chunk = num_phases / ra_num_chunks = 16 / 8 = 2`
+### 4. Opening Claims vs Sumcheck Output
 
-2. **Bit extraction for k_phase**: The formula uses:
-   - `shift = (phases - 1 - phase) * log_m`
-   - This extracts address bits for each phase
+The verifier expects:
+```
+expected = eq_r_reduction * ra_claim * (val_claim + γ * raf_claim)
+```
 
-3. **Expanding table values**: Need to compare actual v[phase][k] values at round 128
+The sumcheck computes:
+```
+output = Σ_j eq(r_reduction, j) * ra(j) * combined_val(j)
+```
 
-4. **Challenge accumulation**: The challenges during address rounds 0-127 must match
-   between Zolt and Jolt for the expanding tables to produce identical values
+After binding, these should equal if combined_val is correct.
 
-## Next Steps
+## Potential Issues to Investigate
 
-1. Add debug output to Jolt to print expanding_table[phase][k] values at round 128
-2. Compare with Zolt's values
-3. If they differ, trace back to find where the divergence starts
+1. **raf_val formula**: Is `γ*left + γ²*right` correct for interleaved operands?
+   - Jolt might use a different batching formula
 
-## Code References
+2. **eq_prefix computation**: The extraction `eq_0 / (1 - r_round)` assumes a specific eq structure
 
-- Zolt ra materialization: `stage5_prover.zig` lines 2748-2814
-- Jolt ra materialization: `read_raf_checking.rs` lines 626-694
-- Expanding table update: `expanding_table.rs` (Jolt), `prefix_suffix_prover.zig` (Zolt)
+3. **ra_chunk_weights materialization**: Need to verify expanding table product matches Jolt
+
+4. **Transcript ordering**: Any subtle difference in coefficient serialization
+
+## Next Session Tasks
+
+1. Add debugging to print exact coefficients for rounds 128-135
+2. Compare byte-by-byte with Jolt's debug output
+3. Verify raf_val formula matches Jolt's implementation
+4. Check if combined_val properly incorporates all terms

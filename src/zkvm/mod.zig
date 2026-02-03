@@ -1380,11 +1380,8 @@ pub fn JoltProver(comptime F: type) type {
             defer dory_proof.deinit();
             try serializer.writeDoryProof(&dory_proof);
 
-            // Write advice proofs (all None)
-            try serializer.writeU8(0); // trusted_advice_val_evaluation_proof: None
-            try serializer.writeU8(0); // trusted_advice_val_final_proof: None
-            try serializer.writeU8(0); // untrusted_advice_val_evaluation_proof: None
-            try serializer.writeU8(0); // untrusted_advice_val_final_proof: None
+            // Write untrusted_advice_commitment: Option<PCS::Commitment>
+            // This is the ONLY optional field in JoltProof
             try serializer.writeU8(0); // untrusted_advice_commitment: None
 
             // Write configuration (matches Jolt's JoltProof struct)
@@ -1510,15 +1507,9 @@ pub fn JoltProver(comptime F: type) type {
                 try serializer.writeDoryProof(&dory_proof);
             }
 
-            // Write advice-related optional proofs and commitment
-            // All set to None since Zolt doesn't use advice polynomials
-            // Order: trusted_advice_val_evaluation_proof, trusted_advice_val_final_proof,
-            //        untrusted_advice_val_evaluation_proof, untrusted_advice_val_final_proof,
-            //        untrusted_advice_commitment
-            try serializer.writeU8(0); // trusted_advice_val_evaluation_proof: None
-            try serializer.writeU8(0); // trusted_advice_val_final_proof: None
-            try serializer.writeU8(0); // untrusted_advice_val_evaluation_proof: None
-            try serializer.writeU8(0); // untrusted_advice_val_final_proof: None
+            // Write untrusted_advice_commitment: Option<PCS::Commitment>
+            // This is the ONLY optional field in JoltProof (the advice eval proofs
+            // are part of the opening proof, not separate fields)
             try serializer.writeU8(0); // untrusted_advice_commitment: None
 
             // Write configuration (matches Jolt's JoltProof struct exactly)

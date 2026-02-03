@@ -1,48 +1,40 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 33 - Serialization Format Fix
+## Status: Session 34 - Serialization Format Fixed, Stage 1 Sumcheck Debug
 
-## CRITICAL BUG FIXED - Proof Config Serialization
+## MAJOR MILESTONE - Proof Deserialization Working!
 
-Fixed a critical serialization bug where `one_hot_config` and `rw_config` were being written as `usize` (8 bytes each) instead of `u8` (1 byte each).
+Fixed all serialization format issues. The Zolt proof now deserializes correctly in Jolt and verification begins!
 
-### Changes Made
-1. `src/zkvm/mod.zig` lines 1390-1410: Fixed `serializeJoltProofWithDory()` to write:
-   - `trace_length`, `ram_K`, `bytecode_K` as usize (8 bytes each)
-   - `rw_config` as 4 u8 fields (4 bytes total)
-   - `one_hot_config` as 2 u8 fields (2 bytes total)
-   - `dory_layout` as u8 (1 byte)
+### Serialization Fixes This Session
 
-2. `src/zkvm/mod.zig` lines 1385-1397: Fixed first serialization path with same fix
+1. **Config field types** (Session 33): Fixed `one_hot_config` and `rw_config` to write as u8 instead of usize
 
-3. `src/zkvm/proof_converter.zig` line 2541: Fixed array size bug - `val_eval_r_be` now uses `n_cycle_vars` instead of hardcoded 8
+2. **Option field count** (Session 34): Removed 4 extra Option bytes
+   - JoltProof has ONLY `untrusted_advice_commitment: Option<PCS::Commitment>`
+   - Zolt was incorrectly writing 5 Option bytes (for non-existent advice proof fields)
+   - Fixed to write only 1 Option byte for `untrusted_advice_commitment`
+   - Proof size: 64143 -> 64139 bytes (-4 bytes)
 
-## Current Issue
+### Current Status
 
-Jolt deserialization now fails with:
-```
-Failed to deserialize proof: the input buffer contained invalid data
-```
-
-The claims deserialize successfully (142 claims), but something after that fails.
-
-## Hypothesis
-
-The Jolt proof deserialization expects fields in this order:
-1. opening_claims ✓
-2. commitments - ???
-3. stage sumcheck proofs
-4. ...
-5. config fields at the end
-
-The issue is likely that Zolt is writing commitments or sumcheck proofs in a different format than Jolt expects.
+- Proof file deserializes completely
+- All 142 opening claims parsed
+- All 39 commitments parsed
+- All 7 stage sumcheck proofs parsed
+- Joint opening proof parsed
+- Config fields (trace_length, ram_K, bytecode_K, rw_config, one_hot_config, dory_layout) parsed
+- Verifier created successfully
+- **Verification fails at Stage 1: "Sumcheck verification failed"**
 
 ## Next Steps
 
-1. [ ] Debug Jolt's proof deserialization to see exactly where it fails
-2. [ ] Compare Zolt's commitment serialization with Jolt's expected format
-3. [ ] Verify sumcheck proof serialization format matches
-4. [ ] Check Option<T> serialization format (for untrusted_advice_commitment)
+1. [ ] Debug Stage 1 sumcheck verification failure
+   - Compare Zolt's Stage 1 sumcheck polynomial coefficients with Jolt's expected values
+   - Verify transcript state matches between Zolt and Jolt
+   - Check if commitment contributions to transcript are correct
+
+2. [ ] Once Stage 1 passes, continue to Stage 2-7
 
 ## Test Commands
 
@@ -50,25 +42,46 @@ The issue is likely that Zolt is writing commitments or sumcheck proofs in a dif
 # Generate Zolt proof using Jolt's fibonacci guest
 ./zig-out/bin/zolt prove /tmp/jolt-guest-targets/fibonacci-guest-fib/riscv64imac-unknown-none-elf/release/fibonacci-guest --jolt-format -o /tmp/zolt_proof_dory.bin --trace-length 1024 --input-hex 32
 
+# Use Jolt's preprocessing (critical - don't use Zolt's export yet)
+cp /tmp/jolt_verifier_preprocessing.dat /tmp/zolt_preprocessing.bin
+
 # Run Jolt verifier
-cd jolt && cargo test -p jolt-core --features zolt-debug --lib test_verify_zolt_proof -- --ignored --nocapture
+cd /home/vivado/projects/jolt && cargo test -p jolt-core --lib test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
 
 ## Files Modified This Session
 
-- `src/zkvm/mod.zig` - Fixed serialization of config structs
-- `src/zkvm/proof_converter.zig` - Fixed array size bug in debug code
+- `src/zkvm/mod.zig` - Removed extra Option bytes in both serialization paths
 
 ## Key Discoveries
 
-1. Jolt's `OneHotConfig` has u8 fields, but Zolt was writing them as usize
-2. Jolt's `ReadWriteConfig` has 4 u8 fields that need to be written
-3. Jolt's `DoryLayout` is a u8 enum
-4. Proof size changed from 64152 to 64143 bytes after the fix (9 bytes less)
+1. JoltProof has only ONE optional field: `untrusted_advice_commitment`
+2. The 4 "advice proof" fields mentioned in code comments don't exist in JoltProof struct
+3. Jolt's Instruction type uses JSON serialization inside arkworks CanonicalSerialize
+4. Preprocessing export needs to match Jolt's format exactly (use Jolt's preprocessing for now)
 
-## Background
+## Proof Structure (Working)
 
-- Using Jolt's fibonacci guest binary for testing
-- Jolt preprocessing at `/tmp/jolt_verifier_preprocessing.dat` (generated by `cargo run --example fibonacci -- --save`)
-- Jolt I/O at `/tmp/fib_io_device.bin`
-- Zolt proof at `/tmp/zolt_proof_dory.bin`
+```
+Opening Claims: 142 claims
+Commitments: 39 GT elements (384 bytes each)
+Stage 1 UniSkip: 28 coeffs
+Stage 1 Sumcheck: 11 rounds
+Stage 2 UniSkip: 13 coeffs
+Stage 2 Sumcheck: 26 rounds
+Stage 3 Sumcheck: 10 rounds
+Stage 4 Sumcheck: 17 rounds
+Stage 5 Sumcheck: 138 rounds
+Stage 6 Sumcheck: 26 rounds
+Stage 7 Sumcheck: 4 rounds
+Joint Opening Proof: Dory proof
+untrusted_advice_commitment: None (1 byte)
+trace_length: 1024 (8 bytes)
+ram_K: 65536 (8 bytes)
+bytecode_K: 65536 (8 bytes)
+rw_config: 4 u8 fields
+one_hot_config: 2 u8 fields
+dory_layout: 1 u8
+```
+
+Total: 64139 bytes

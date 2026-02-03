@@ -1388,26 +1388,12 @@ pub fn JoltProver(comptime F: type) type {
             try serializer.writeU8(0); // untrusted_advice_commitment: None
 
             // Write configuration (matches Jolt's JoltProof struct)
-            // trace_length, ram_K, bytecode_K as usize (8 bytes each)
-            // rw_config: 4 x u8
-            // one_hot_config: 2 x u8
-            // dory_layout: 1 x u8
+            // All fields are usize (serialized as u64 LE)
             try serializer.writeUsize(jolt_proof_ptr.trace_length);
             try serializer.writeUsize(jolt_proof_ptr.ram_K);
             try serializer.writeUsize(jolt_proof_ptr.bytecode_K);
-
-            // ReadWriteConfig: 4 u8 values
-            try serializer.writeU8(jolt_proof_ptr.rw_config.ram_rw_phase1_num_rounds);
-            try serializer.writeU8(jolt_proof_ptr.rw_config.ram_rw_phase2_num_rounds);
-            try serializer.writeU8(jolt_proof_ptr.rw_config.registers_rw_phase1_num_rounds);
-            try serializer.writeU8(jolt_proof_ptr.rw_config.registers_rw_phase2_num_rounds);
-
-            // OneHotConfig: 2 u8 values
-            try serializer.writeU8(@intCast(jolt_proof_ptr.one_hot_config.log_k_chunk));
-            try serializer.writeU8(@intCast(jolt_proof_ptr.one_hot_config.lookups_ra_virtual_log_k_chunk));
-
-            // DoryLayout: 1 u8 value (0 = Wide, 1 = Tall)
-            try serializer.writeU8(jolt_proof_ptr.dory_layout);
+            try serializer.writeUsize(jolt_proof_ptr.one_hot_config.log_k_chunk);
+            try serializer.writeUsize(jolt_proof_ptr.one_hot_config.lookups_ra_virtual_log_k_chunk);
 
             return serializer.toOwnedSlice();
         }
@@ -1529,41 +1515,19 @@ pub fn JoltProver(comptime F: type) type {
             try serializer.writeU8(0); // untrusted_advice_commitment: None
 
             // Write configuration (matches Jolt's JoltProof struct exactly)
-            // Jolt expects:
-            //   trace_length: usize (8 bytes)
-            //   ram_K: usize (8 bytes)
-            //   bytecode_K: usize (8 bytes)
-            //   rw_config: ReadWriteConfig (4 x u8 = 4 bytes)
-            //   one_hot_config: OneHotConfig (2 x u8 = 2 bytes)
-            //   dory_layout: DoryLayout (1 x u8 = 1 byte)
-            std.debug.print("[SERIALIZE CONFIG] trace_length={}, ram_K={}, bytecode_K={}, rw_config=({},{},{},{}), one_hot_config=({},{}), dory_layout={}\n", .{
+            // All fields are usize (serialized as u64 LE)
+            std.debug.print("[SERIALIZE CONFIG] trace_length={}, ram_K={}, bytecode_K={}, log_k_chunk={}, lookups_ra_virtual_log_k_chunk={}\n", .{
                 bundle.proof.trace_length,
                 bundle.proof.ram_K,
                 bundle.proof.bytecode_K,
-                bundle.proof.rw_config.ram_rw_phase1_num_rounds,
-                bundle.proof.rw_config.ram_rw_phase2_num_rounds,
-                bundle.proof.rw_config.registers_rw_phase1_num_rounds,
-                bundle.proof.rw_config.registers_rw_phase2_num_rounds,
                 bundle.proof.one_hot_config.log_k_chunk,
                 bundle.proof.one_hot_config.lookups_ra_virtual_log_k_chunk,
-                bundle.proof.dory_layout,
             });
             try serializer.writeUsize(bundle.proof.trace_length);
             try serializer.writeUsize(bundle.proof.ram_K);
             try serializer.writeUsize(bundle.proof.bytecode_K);
-
-            // ReadWriteConfig: 4 u8 values
-            try serializer.writeU8(bundle.proof.rw_config.ram_rw_phase1_num_rounds);
-            try serializer.writeU8(bundle.proof.rw_config.ram_rw_phase2_num_rounds);
-            try serializer.writeU8(bundle.proof.rw_config.registers_rw_phase1_num_rounds);
-            try serializer.writeU8(bundle.proof.rw_config.registers_rw_phase2_num_rounds);
-
-            // OneHotConfig: 2 u8 values
-            try serializer.writeU8(@intCast(bundle.proof.one_hot_config.log_k_chunk));
-            try serializer.writeU8(@intCast(bundle.proof.one_hot_config.lookups_ra_virtual_log_k_chunk));
-
-            // DoryLayout: 1 u8 value (0 = Wide, 1 = Tall)
-            try serializer.writeU8(bundle.proof.dory_layout);
+            try serializer.writeUsize(bundle.proof.one_hot_config.log_k_chunk);
+            try serializer.writeUsize(bundle.proof.one_hot_config.lookups_ra_virtual_log_k_chunk);
 
             return serializer.toOwnedSlice();
         }

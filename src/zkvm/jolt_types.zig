@@ -76,7 +76,7 @@ pub const DoryLayout = enum(u8) {
 // SumcheckId - Identifies which sumcheck a claim belongs to
 // =============================================================================
 
-/// Matches Jolt's SumcheckId enum (24 variants)
+/// Matches Jolt's SumcheckId enum (22 variants)
 /// Reference: jolt-core/src/poly/opening_proof.rs
 pub const SumcheckId = enum(u8) {
     SpartanOuter = 0,
@@ -99,12 +99,10 @@ pub const SumcheckId = enum(u8) {
     RegistersValEvaluation = 17,
     BytecodeReadRaf = 18,
     Booleanity = 19,
-    AdviceClaimReductionCyclePhase = 20,
-    AdviceClaimReduction = 21,
-    IncClaimReduction = 22,
-    HammingWeightClaimReduction = 23,
+    IncClaimReduction = 20,
+    HammingWeightClaimReduction = 21,
 
-    pub const COUNT: u8 = 24;
+    pub const COUNT: u8 = 22;
 };
 
 // =============================================================================

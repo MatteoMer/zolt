@@ -1,77 +1,63 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 22 - Stage 5 Sumcheck Mismatch Identified
+## Status: Session 23 - Stage 5 Deep Analysis
 
-## Progress This Session
+## Current Issue
 
-### Fixes Implemented
-1. **SumcheckId**: Fixed to 24 variants (added AdviceClaimReductionCyclePhase, AdviceClaimReduction)
-2. **Proof Config**: Fixed serialization (rw_config, one_hot_config as u8 fields, dory_layout)
-3. **All proof components deserialize correctly** ✓
+Stage 5 verification fails - sumcheck output_claim doesn't match expected_claim.
 
-### Stage 5 Sumcheck Debug Analysis
+**From Jolt debug:**
+- Sumcheck output_claim: `[ed, a5, f6, bf, ...]`
+- Expected_claim: `[b2, 8f, 91, 24, ...]`
 
-Using `--features zolt-debug`, got detailed comparison:
+## Deep Analysis Findings
 
-**Mismatch Found:**
-- Zolt prover `output_claim`: `[ed, a5, f6, bf, 30, c4, 10, f8, ...]`
-- Jolt verifier `expected_claim`: `[b2, 8f, 91, 24, 33, 0c, b4, 56, ...]`
+### Verified Correct:
+1. **Batched sumcheck structure**: 3 instances (RegistersValEval, RamRaClaimReduction, InstructionReadRaf)
+2. **LowToHigh binding order**: Matches Jolt
+3. **eq decomposition formula**: `eq_prefix = eq_0 / (1 - r_round)` is correct
+4. **r_round source**: Using `r_reduction[n_cycle_vars - 1 - lookups_round]` which is the w value (correct)
+5. **computeEqAtIndex**: BIG_ENDIAN handling is correct
+6. **Product of 9 factors**: `eq_prefix * combined * ra_chunk[0..7]` structure is correct
 
-**Stage 5 has 3 sumcheck instances:**
-1. `RegistersValEvaluation`
-2. `RamRaClaimReduction`
-3. `InstructionReadRaf`
+### Potential Issues to Investigate:
+1. **Transcript synchronization**: Do the polynomial coefficients from Zolt match Jolt's expectations?
+2. **Opening claims vs polynomial evaluation**: The stored claims may not match what the polynomial actually evaluates to
+3. **Challenge multiplication**: Using `mulHiBigIntU128` for F * Challenge - is this correct?
 
-**Verifier's expected output claims (batched with coefficients):**
-- Instance 0 claim*coeff: `[f2, 1e, ae, a8, ...]`
-- Instance 1 claim*coeff: `[c3, 3a, cb, a7, ...]`
-- Instance 2 claim*coeff: `[fe, 35, 18, c4, ...]`
+### Key Formula for Instance 2 (InstructionReadRaf):
+**Prover computes** (per cycle round):
+```
+p(X) = Σ_j eq(X, w[round]) * eq_prefix(j) * combined[j] * Π_c ra_chunk[c][j]
+```
 
-## Root Cause Investigation
+**Verifier expects**:
+```
+expected = eq(r_reduction, r_cycle') * ra_claim * (val_claim + gamma * raf_claim)
+```
 
-The issue is in how Zolt's Stage 5 prover computes the polynomial evaluations. Key areas to check:
+where:
+- `ra_claim = Π_c ra_chunks[c]` (product of stored claims)
+- `val_claim = Σ_i table_flag[i] * table_eval[i]`
+- `raf_claim` = computed from raf_flag, operand evals, identity eval
 
-### 1. RegistersValEvaluation
-- `inc_claim`: `[39, 22, ab, 81, ...]`
-- `wa_claim`: `[1f, 1c, 42, 45, ...]`
-- `lt_eval`: `[f4, 1f, 17, b4, ...]`
-- `result`: `[74, f7, 8e, 8c, ...]`
+## Next Steps
 
-### 2. RamRaClaimReduction
-- `ra_claim_reduced`: `[ef, 55, 4a, 31, ...]`
-- `expected_output_claim`: `[c9, 1b, b9, ac, ...]`
-
-### 3. InstructionReadRaf
-- `ra_claim`: `[01, 93, 87, 0f, ...]`
-- `raf_flag_claim`: `[c4, 03, 95, 05, ...]`
-- `final_result`: `[02, ad, 67, 08, ...]`
-
-## Next Steps for Next Session
-
-1. **Add debug logging to Zolt prover** for Stage 5 instance evaluations
-2. **Compare polynomial coefficient encoding** - check Montgomery form conversion
-3. **Verify eq polynomial evaluation** - this is used in all 3 instances
-4. **Check batching coefficient computation** - might differ from Jolt
-
-## Key Files
-- Zolt Stage 5 prover: `src/zkvm/proof_converter.zig` lines 2400+
-- Jolt Stage 5 verifier: `jolt-core/src/zkvm/verifier.rs` verify_stage5()
-- Jolt Stage 5 debug output: enabled with `--features zolt-debug`
+1. **Compare polynomial coefficients**: Run Zolt and capture first few round coefficients, compare with Jolt
+2. **Trace lookups_claim evolution**: Verify claim updates correctly through all 8 cycle rounds
+3. **Verify opening claim storage**: Check that ra_chunks[i] = ra_chunk_weights[i][0] after binding matches Jolt's ra_poly.final_sumcheck_claim()
+4. **Check combined_vals rematerialization**: Verify table_values_at_r_addr computation matches Jolt
 
 ## Test Commands
 ```bash
-# Run with debug output
+# Jolt verification with debug
 cd jolt && cargo test -p jolt-core --features zolt-debug --lib test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
+
+# Zolt proof generation
+cd zolt && zig build test
 ```
 
-## Files
-- `logs/zolt_proof_dory.bin`: 59,083 bytes
-- `logs/zolt_preprocessing.bin`: 26,356 bytes
-
-## Test Results
-- 714/714 Zolt tests pass ✓
-- Proof deserializes in Jolt ✓
-- Stages 1-4 verification: pass (no error until Stage 5)
-- **Stage 5: FAIL** - sumcheck output claim mismatch
-
-SESSION_ENDING - Good progress made. Deserialization fully working, verification reaches Stage 5 with clear debug output showing the mismatch.
+## Key Files
+- Zolt Stage 5: `src/zkvm/spartan/stage5_prover.zig`
+- Jolt Stage 5 verifier: `jolt-core/src/zkvm/verifier.rs`
+- Jolt InstructionReadRaf: `jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs`

@@ -565,9 +565,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 }
             }
             std.debug.print("[STAGE5 EQ DEBUG] Sum of all eq_evals = {x} (should be 1)\n", .{eq_sum.toBytesBE()[16..32].*});
-            std.debug.print("[STAGE5 EQ DEBUG] r_reduction (used for eq):\n", .{});
+            std.debug.print("[STAGE5 EQ DEBUG] r_reduction (ALL {} elements, used for eq):\n", .{r_reduction.len});
             var r_idx: usize = 0;
-            while (r_idx < @min(3, r_reduction.len)) : (r_idx += 1) {
+            while (r_idx < r_reduction.len) : (r_idx += 1) {
                 std.debug.print("  r_reduction[{}] = {x}\n", .{ r_idx, r_reduction[r_idx].toBytesBE()[16..32].* });
             }
 
@@ -3197,14 +3197,14 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     lookups_current_scalar = lookups_current_scalar.mul(eq_factor);
 
                     // Debug: print current_scalar update
-                    if (lookups_round < 3) {
-                        std.debug.print("[STAGE5 CYCLE] round={}, lookups_round={}, w_i={x}, eq_factor={x}, current_scalar={x}\n", .{
-                            round,
-                            lookups_round,
-                            w_i.toBytesBE()[16..32].*,
-                            eq_factor.toBytesBE()[16..32].*,
-                            lookups_current_scalar.toBytesBE()[16..32].*,
-                        });
+                    if (lookups_round < 3 or lookups_round >= n_cycle_vars - 1) {
+                        std.debug.print("[STAGE5 CYCLE] round={}, lookups_round={}\n", .{ round, lookups_round });
+                        std.debug.print("  w_i (r_reduction[{}]) = {x}\n", .{ n_cycle_vars - 1 - lookups_round, w_i.toBytesBE()[16..32].* });
+                        std.debug.print("  challenge limbs[2..4] = {x:0>16}{x:0>16}\n", .{ challenge.limbs[2], challenge.limbs[3] });
+                        std.debug.print("  prod_w_r = {x}\n", .{ prod_w_r.toBytesBE()[16..32].* });
+                        std.debug.print("  one_minus_r = {x}\n", .{ one_minus_r_scalar.toBytesBE()[16..32].* });
+                        std.debug.print("  eq_factor = {x}\n", .{ eq_factor.toBytesBE()[16..32].* });
+                        std.debug.print("  current_scalar = {x}\n", .{ lookups_current_scalar.toBytesBE()[16..32].* });
                     }
 
                     // Bind the per-chunk ra weights
@@ -3275,6 +3275,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
             // Debug: print final batched claim (this is output_claim from verifier's perspective)
             std.debug.print("[STAGE5] Final batched claim (output_claim) = {any}\n", .{current_batched_claim.toBytesBE()});
+            std.debug.print("[STAGE5] Final lookups_current_scalar (should = eq_eval_r_reduction) = {x}\n", .{lookups_current_scalar.toBytesBE()[16..32].*});
 
             // Get final opening claims from the folded polynomials
             const regs_val_inc_claim = inc_evals[0];

@@ -1,116 +1,131 @@
-# Session 24 Notes - Stage 5 MontU128Challenge Analysis
+# Session 25 Notes - Stage 5 Polynomial Coefficient Analysis
 
 ## Summary
 
-Deep investigation of how MontU128Challenge values are serialized and used in the Stage 5 verification process. The key finding is that opening claims match but the sumcheck polynomial computation produces wrong values.
-
-## MontU128Challenge Format (Critical)
-
-Jolt's `MontU128Challenge<F>` stores a 125-bit value in two u64 limbs:
-- `low`: bits 0-63
-- `high`: bits 64-124 (top 3 bits always zero)
-
-### Serialization
-When serialized via `CanonicalSerialize`:
-```rust
-fn to_bigint_array(&self) -> [u64; 4] {
-    [0, 0, self.low, self.high]
-}
-```
-This becomes 32 bytes: 16 zeros + 8 bytes for low (LE) + 8 bytes for high (LE)
-
-### Conversion to Fr
-```rust
-impl From<MontU128Challenge<F>> for F {
-    fn from(challenge: MontU128Challenge<F>) -> F {
-        Fr::from_bigint_unchecked(BigInt::new([0, 0, low, high])).unwrap()
-    }
-}
-```
-**IMPORTANT**: `from_bigint_unchecked` does NOT do Montgomery conversion! The limbs become the internal representation directly.
-
-### Zolt Equivalent
-`challengeScalar128Bits()` produces:
-```zig
-const result = F{ .limbs = .{ 0, 0, masked_low, masked_high } };
-```
-This matches Jolt's format.
-
-## r_reduction Source
-
-The `r_reduction` values come from Stage 2 InstructionClaimReduction sumcheck:
-
-1. **Stage 2** has 5 instances, Instance 4 is InstructionClaimReduction with 8 rounds
-2. **Sumcheck challenges** are `F::Challenge` (MontU128Challenge)
-3. **cache_openings** stores them in `OpeningPoint<BIG_ENDIAN, F>` via `normalize_opening_point`:
-   ```rust
-   OpeningPoint::<LITTLE_ENDIAN, F>::new(challenges.to_vec()).match_endianness()
-   ```
-4. **Stage 5 verifier** retrieves via:
-   ```rust
-   let r_reduction = accumulator.get_virtual_polynomial_opening(
-       VirtualPolynomial::LookupOutput,
-       SumcheckId::InstructionClaimReduction,
-   ).0.r;
-   ```
-
-### Jolt Debug Values
-```
-sumcheck_challenges[7] (as F): [0d, 02, 35, 5f, 4d, e3, 19, 38, ...]
-opening_point.r[0] (Challenge): [00, 00, ..., 0d, 8d, 89, b0, c0, ef, 00, b0, 84, a4, 8a, 1b, 0b, 14, 34, 07]
-```
-
-Note: sumcheck_challenges[7] becomes r[0] after reversal (LE to BE).
-
-## Stage 5 Instance Breakdown
-
-Stage 5 has 3 instances:
-1. **RegistersValEvaluation** (Instance 0)
-   - expected_claim = `[74, f7, 8e, 8c, ...]`
-2. **RamRaClaimReduction** (Instance 1)
-   - expected_claim = `[c9, 1b, b9, ac, ...]`
-3. **InstructionReadRaf** (Instance 2)
-   - expected_claim = `[02, ad, 67, 08, ...]`
-
-## InstructionReadRaf expected_output_claim Formula
-
-```rust
-eq_eval_r_reduction * ra_claim * (val_claim + gamma * raf_claim)
-```
-
-Where:
-- `eq_eval_r_reduction` = eq(r_reduction, r_cycle_prime)
-- `ra_claim` = product of InstructionRa(i) claims
-- `val_claim` = sum of table_flag_claims[i] * table_evals[i]
-- `raf_claim` = (1 - raf_flag) * (left + gamma * right) + raf_flag * gamma * identity
+Deep investigation of why Stage 5 sumcheck fails. The key finding is that all round verifications pass (polynomial is self-consistent), but the final output_claim differs from the expected_claim.
 
 ## The Mismatch
 
-- **output_claim** (from Zolt sumcheck): `[ed, a5, f6, bf, ...]`
-- **expected_claim** (from Jolt verifier): `[b2, 8f, 91, 24, ...]`
-
-Since opening claims (ra_claims, table_flags, etc.) match between proof and verifier, the issue must be in the sumcheck polynomial computation itself.
-
-## Round 128-135 Debug (Cycle Rounds)
-
-From Jolt verification debug:
+**Output claim (from Zolt sumcheck):**
 ```
-Stage5 Round 128 (cycle var 0): challenge: [c5, 4c, 6c, 55, ...]
-Stage5 Round 128 coeffs:
-  [0]: [05, b5, df, f2, d3, 49, ca, d8, ...]
-  [1]: [54, c2, 7c, f5, aa, 45, 65, 80, ...]
-  [2]: [49, 36, 44, b5, 9d, f1, de, 64, ...]
+[ed, a5, f6, bf, 30, c4, 10, f8, 59, ce, db, ef, ee, 23, 2f, 96, ...]
 ```
 
-These are the coefficients from Zolt's proof that the verifier is using. The question is whether Zolt computed them correctly.
+**Expected claim (from Jolt verifier):**
+```
+[b2, 8f, 91, 24, 33, 0c, b4, 56, b9, 08, 89, 4c, fd, af, 54, 11, ...]
+```
+
+## Individual Instance Expected Claims
+
+The verifier computes expected claims per instance:
+- Instance 0 (RegistersValEvaluation): `[74, f7, 8e, 8c, ...]`
+- Instance 1 (RamRaClaimReduction): `[c9, 1b, b9, ac, ...]`
+- Instance 2 (InstructionReadRaf): `[02, ad, 67, 08, ...]`
+
+Then batches them:
+```
+expected = coeff[0] * inst0 + coeff[1] * inst1 + coeff[2] * inst2
+```
+
+With coefficients:
+- coeff[0]: `[04, 97, 3d, 64, ...]`
+- coeff[1]: `[50, 2a, 19, a0, ...]`
+- coeff[2]: `[45, 50, 75, e2, ...]`
+
+## Key Technical Finding: GruenSplitEqPolynomial
+
+Jolt uses a sophisticated split eq polynomial for cycle rounds:
+
+```rust
+// Jolt's approach (read_raf_checking.rs lines 790-834)
+for (j_out, e_out) in eq_r_reduction.E_out_current() {
+    for (j_in, e_in) in eq_r_reduction.E_in_current() {
+        let j = group_index(j_out, j_in);
+        // e_in is the eq factor for inner unbound variables
+        val_pair = (e_in * v_at_0, e_in * v_at_1);
+        // ... ra_pairs ...
+        eval_linear_prod_accumulate(&pairs, &mut evals_acc);
+    }
+    // Multiply accumulated result by e_out
+    result.iter_mut().for_each(|v| *v *= e_out);
+}
+// Then multiply everything by current_scalar
+sum_evals.iter_mut().for_each(|v| *v *= current_scalar);
+finish_mles_product_sum_from_evals(&sum_evals, claim, &eq_r_reduction)
+```
+
+Key components:
+- `E_in_current()`: eq values for inner unbound variables
+- `E_out_current()`: eq values for outer unbound variables
+- `current_scalar`: accumulated eq for already-bound variables (from bind())
+
+## Zolt's Approach
+
+Zolt uses a simpler approach:
+
+```zig
+// Zolt's approach (stage5_prover.zig lines 2890-2920)
+const eq_0 = lookups_eq_evals[2 * j];
+const eq_prefix = eq_0.mul(inv_one_minus_r_round);  // eq_0 / (1 - r_round)
+pairs[0][0] = eq_prefix.mul(lookups_combined_vals[2 * j]);
+pairs[0][1] = eq_prefix.mul(lookups_combined_vals[2 * j + 1]);
+// ... ra_chunk_weights ...
+const prod_evals = UniPoly(F).evalLinearProd9(pairs);
+sum_evals[k] = sum_evals[k].add(prod_evals[k]);
+```
+
+Differences:
+- Zolt keeps full eq evaluations in `lookups_eq_evals[]`
+- Divides by `(1 - r_round)` to extract eq_prefix
+- No separate E_in/E_out/current_scalar structure
+
+## MontU128Challenge Arithmetic
+
+Verified that both Jolt and Zolt handle MontU128Challenge the same way:
+
+1. **Storage**: `[0, 0, low, high]` as Montgomery representation
+2. **Subtraction**: `F::one() - Challenge` converts Challenge to F first
+3. **Multiplication**: `F * Challenge` uses `mul_by_hi_2limbs(low, high)`
+
+Zolt's implementation matches:
+- `F.one().sub(rj)` for (1 - r)
+- `result.mulHiBigIntU128(rj.limbs)` for multiplication
+
+## Why Sumcheck "Passes" But Claim Differs
+
+The sumcheck verification at each round checks:
+```
+p(0) + p(1) == claim
+```
+
+If Zolt computes polynomial p(X) such that this holds for the current claim, verification passes. But the NEXT claim becomes `p(challenge)`.
+
+If Zolt's polynomial differs from what Jolt would compute:
+- Each round still satisfies p(0) + p(1) = claim
+- But p(challenge) produces a DIFFERENT next claim
+- After 136 rounds, the accumulated difference becomes the mismatch
+
+## Likely Root Causes
+
+1. **eq_prefix computation**: The division approach may not match Jolt's split eq structure
+
+2. **combined_val rematerialization**: At cycle round start, Zolt rematerializes combined_vals. This might differ from Jolt's `init_log_t_rounds()`.
+
+3. **ra_chunk_weights**: The expanding table lookup for RA polynomial chunks might have issues.
+
+4. **Binding order**: Although both claim LowToHigh, the details of how variables are bound might differ.
 
 ## Next Steps
 
-1. Add debug to Zolt's Stage 5 cycle rounds to print:
-   - `eq_evals` values at each round
-   - `combined_vals` values at each round
-   - `ra_chunk_weights` after binding
+1. Add debug to print Jolt prover's polynomial coefficients during cycle rounds
+2. Run a test that exercises Jolt's prover (not just verifier)
+3. Compare eq_prefix values between Zolt and Jolt
+4. Check combined_val values at cycle round start
+5. Verify ra_chunk_weights match between implementations
 
-2. Compare with Jolt's internal values during prover execution
+## Files to Study
 
-3. Focus on the `evalLinearProd9` and `finishMlesProductSumFromEvals` functions
+- Jolt: `jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs` lines 600-836
+- Jolt: `jolt-core/src/poly/split_eq_poly.rs` (GruenSplitEqPolynomial)
+- Zolt: `src/zkvm/spartan/stage5_prover.zig` lines 2700-3000

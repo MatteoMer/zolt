@@ -1,68 +1,77 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 22 - Verification Reaches Stage 5!
+## Status: Session 22 - Stage 5 Sumcheck Mismatch Identified
 
-## Major Progress This Session
+## Progress This Session
 
-### Deserialization Fixes (COMPLETE)
-1. **SumcheckId**: Fixed to 24 variants to match Jolt
-2. **Proof Config**: Fixed serialization format
+### Fixes Implemented
+1. **SumcheckId**: Fixed to 24 variants (added AdviceClaimReductionCyclePhase, AdviceClaimReduction)
+2. **Proof Config**: Fixed serialization (rw_config, one_hot_config as u8 fields, dory_layout)
 3. **All proof components deserialize correctly** ✓
 
-### Verification Progress
-- Proof deserialization: WORKING ✓
-- Preprocessing loading: WORKING ✓
-- Verifier creation: WORKING ✓
-- Stage 1-4: Passing (implicitly, no error until Stage 5)
-- **Stage 5: FAILING - "Sumcheck verification failed"**
+### Stage 5 Sumcheck Debug Analysis
 
-## Current Issue: Stage 5 Sumcheck Mismatch
+Using `--features zolt-debug`, got detailed comparison:
 
-The verifier reaches Stage 5 and fails with sumcheck verification error.
+**Mismatch Found:**
+- Zolt prover `output_claim`: `[ed, a5, f6, bf, 30, c4, 10, f8, ...]`
+- Jolt verifier `expected_claim`: `[b2, 8f, 91, 24, 33, 0c, b4, 56, ...]`
 
-### Stage 5 Context
-Stage 5 is `RegistersReadWriteChecking` - it verifies register read/write operations.
-- 136 rounds: 128 address + 8 cycle
-- Three instances batched: RegistersValEvaluation, RamRaClaimReduction, LookupsReadRaf
+**Stage 5 has 3 sumcheck instances:**
+1. `RegistersValEvaluation`
+2. `RamRaClaimReduction`
+3. `InstructionReadRaf`
 
-### Likely Causes
-1. **Transcript challenge mismatch** - Different challenge values between Zolt prover and Jolt verifier
-2. **Polynomial coefficient encoding** - Montgomery form vs standard form issues
-3. **Phase boundary handling** - Different phase1/phase2 round distributions
-4. **Opening claim values** - Incorrect claim computation
+**Verifier's expected output claims (batched with coefficients):**
+- Instance 0 claim*coeff: `[f2, 1e, ae, a8, ...]`
+- Instance 1 claim*coeff: `[c3, 3a, cb, a7, ...]`
+- Instance 2 claim*coeff: `[fe, 35, 18, c4, ...]`
 
-### Debug Strategy
-1. Add transcript state logging in Zolt to compare challenge values
-2. Compare first few round polynomials byte-by-byte
-3. Verify rw_config values match expected phase boundaries
+## Root Cause Investigation
+
+The issue is in how Zolt's Stage 5 prover computes the polynomial evaluations. Key areas to check:
+
+### 1. RegistersValEvaluation
+- `inc_claim`: `[39, 22, ab, 81, ...]`
+- `wa_claim`: `[1f, 1c, 42, 45, ...]`
+- `lt_eval`: `[f4, 1f, 17, b4, ...]`
+- `result`: `[74, f7, 8e, 8c, ...]`
+
+### 2. RamRaClaimReduction
+- `ra_claim_reduced`: `[ef, 55, 4a, 31, ...]`
+- `expected_output_claim`: `[c9, 1b, b9, ac, ...]`
+
+### 3. InstructionReadRaf
+- `ra_claim`: `[01, 93, 87, 0f, ...]`
+- `raf_flag_claim`: `[c4, 03, 95, 05, ...]`
+- `final_result`: `[02, ad, 67, 08, ...]`
+
+## Next Steps for Next Session
+
+1. **Add debug logging to Zolt prover** for Stage 5 instance evaluations
+2. **Compare polynomial coefficient encoding** - check Montgomery form conversion
+3. **Verify eq polynomial evaluation** - this is used in all 3 instances
+4. **Check batching coefficient computation** - might differ from Jolt
+
+## Key Files
+- Zolt Stage 5 prover: `src/zkvm/proof_converter.zig` lines 2400+
+- Jolt Stage 5 verifier: `jolt-core/src/zkvm/verifier.rs` verify_stage5()
+- Jolt Stage 5 debug output: enabled with `--features zolt-debug`
+
+## Test Commands
+```bash
+# Run with debug output
+cd jolt && cargo test -p jolt-core --features zolt-debug --lib test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
+```
+
+## Files
+- `logs/zolt_proof_dory.bin`: 59,083 bytes
+- `logs/zolt_preprocessing.bin`: 26,356 bytes
 
 ## Test Results
 - 714/714 Zolt tests pass ✓
 - Proof deserializes in Jolt ✓
-- Config values correct ✓
-- **Verification: Stage 5 fail**
+- Stages 1-4 verification: pass (no error until Stage 5)
+- **Stage 5: FAIL** - sumcheck output claim mismatch
 
-## Files Generated
-- `logs/zolt_proof_dory.bin`: 59,083 bytes
-- `logs/zolt_preprocessing.bin`: 26,356 bytes
-
-## Test Commands
-```bash
-# Full verification test
-cd jolt && cargo test -p jolt-core --lib test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
-```
-
-## Key Files
-- Zolt Stage 5 prover: `src/zkvm/proof_converter.zig` around line 2400
-- Jolt Stage 5 verifier: `jolt-core/src/zkvm/verifier.rs`
-- ReadWriteConfig: Controls phase boundaries for Stage 5
-
-## Next Steps
-1. Add debug logging to Zolt prover to capture:
-   - Transcript state before Stage 5
-   - Round polynomial coefficients for first few rounds
-   - Opening claim values for RegistersVal
-
-2. Compare with Jolt verifier's expected values
-
-3. Fix any transcript/encoding mismatches
+SESSION_ENDING - Good progress made. Deserialization fully working, verification reaches Stage 5 with clear debug output showing the mismatch.

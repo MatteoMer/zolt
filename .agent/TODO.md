@@ -1,10 +1,10 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 34 - Serialization Format Fixed, Stage 1 Sumcheck Debug
+## Status: Session 34 - Serialization Complete, Stage 1 Sumcheck Mismatch
 
 ## MAJOR MILESTONE - Proof Deserialization Working!
 
-Fixed all serialization format issues. The Zolt proof now deserializes correctly in Jolt and verification begins!
+All serialization format issues are fixed. The Zolt proof now deserializes correctly in Jolt and verification begins.
 
 ### Serialization Fixes This Session
 
@@ -18,23 +18,33 @@ Fixed all serialization format issues. The Zolt proof now deserializes correctly
 
 ### Current Status
 
-- Proof file deserializes completely
-- All 142 opening claims parsed
-- All 39 commitments parsed
-- All 7 stage sumcheck proofs parsed
-- Joint opening proof parsed
-- Config fields (trace_length, ram_K, bytecode_K, rw_config, one_hot_config, dory_layout) parsed
-- Verifier created successfully
-- **Verification fails at Stage 1: "Sumcheck verification failed"**
+- **Serialization: COMPLETE**
+- **Proof deserialization: WORKING**
+- **Verifier creation: WORKING**
+- **Stage 1 verification: FAILING (sumcheck mismatch)**
+
+### Stage 1 Sumcheck Verification Analysis
+
+The verifier outputs:
+```
+initial_claim: [f2, 98, aa, 2d, ...]  (from transcript state)
+first round coeffs: [56, cb, ...], [9e, d4, ...], [aa, 70, ...]
+
+After 11 rounds:
+  output_claim:   [22, 3d, 0b, 1d, ...]  (computed from proof)
+  expected_claim: [73, 61, e4, f4, ...]  (from verifier instances)
+```
+
+The mismatch indicates one of:
+1. Zolt's sumcheck polynomial coefficients are incorrect
+2. Zolt's transcript state differs from Jolt's
+3. Commitment contributions to transcript don't match
 
 ## Next Steps
 
-1. [ ] Debug Stage 1 sumcheck verification failure
-   - Compare Zolt's Stage 1 sumcheck polynomial coefficients with Jolt's expected values
-   - Verify transcript state matches between Zolt and Jolt
-   - Check if commitment contributions to transcript are correct
-
-2. [ ] Once Stage 1 passes, continue to Stage 2-7
+1. [ ] **Compare transcript states** - Add debug to both Zolt and Jolt to compare transcript state at Stage 1 start
+2. [ ] **Verify commitment order** - Ensure Zolt appends commitments to transcript in same order as Jolt
+3. [ ] **Compare sumcheck polynomial computation** - Verify Zolt computes Stage 1 sumcheck polys correctly
 
 ## Test Commands
 
@@ -42,23 +52,23 @@ Fixed all serialization format issues. The Zolt proof now deserializes correctly
 # Generate Zolt proof using Jolt's fibonacci guest
 ./zig-out/bin/zolt prove /tmp/jolt-guest-targets/fibonacci-guest-fib/riscv64imac-unknown-none-elf/release/fibonacci-guest --jolt-format -o /tmp/zolt_proof_dory.bin --trace-length 1024 --input-hex 32
 
-# Use Jolt's preprocessing (critical - don't use Zolt's export yet)
+# Use Jolt's preprocessing (critical)
 cp /tmp/jolt_verifier_preprocessing.dat /tmp/zolt_preprocessing.bin
 
-# Run Jolt verifier
-cd /home/vivado/projects/jolt && cargo test -p jolt-core --lib test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
+# Run Jolt verifier with debug output
+cd /home/vivado/projects/jolt && cargo test -p jolt-core --features zolt-debug --lib test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
 
 ## Files Modified This Session
 
-- `src/zkvm/mod.zig` - Removed extra Option bytes in both serialization paths
+- `src/zkvm/mod.zig` - Removed extra Option bytes in both serialization paths (COMMITTED)
 
 ## Key Discoveries
 
 1. JoltProof has only ONE optional field: `untrusted_advice_commitment`
 2. The 4 "advice proof" fields mentioned in code comments don't exist in JoltProof struct
 3. Jolt's Instruction type uses JSON serialization inside arkworks CanonicalSerialize
-4. Preprocessing export needs to match Jolt's format exactly (use Jolt's preprocessing for now)
+4. Stage 1 is "SpartanOuter" - the outer sumcheck for the Spartan R1CS proof
 
 ## Proof Structure (Working)
 

@@ -1498,34 +1498,40 @@ pub fn JoltProver(comptime F: type) type {
                 try serializer.writeDoryProof(&dory_proof);
             }
 
+            // Write advice proofs (4 Option<PCS::Proof> fields, all None)
+            // Jolt expects these in order:
+            // - trusted_advice_val_evaluation_proof: Option<PCS::Proof>
+            // - trusted_advice_val_final_proof: Option<PCS::Proof>
+            // - untrusted_advice_val_evaluation_proof: Option<PCS::Proof>
+            // - untrusted_advice_val_final_proof: Option<PCS::Proof>
+            try serializer.writeU8(0); // trusted_advice_val_evaluation_proof: None
+            try serializer.writeU8(0); // trusted_advice_val_final_proof: None
+            try serializer.writeU8(0); // untrusted_advice_val_evaluation_proof: None
+            try serializer.writeU8(0); // untrusted_advice_val_final_proof: None
+
             // Write untrusted_advice_commitment: Option<Commitment>
             // We don't have advice, so write None (0 byte)
             try serializer.writeU8(0); // untrusted_advice_commitment: None
 
             // Write configuration (matches Jolt's JoltProof struct exactly)
-            // Fields in order:
+            // Fields in order (all usize, serialized as u64 LE):
             // - trace_length: usize (8 bytes)
             // - ram_K: usize (8 bytes)
             // - bytecode_K: usize (8 bytes)
-            // - rw_config: ReadWriteConfig (4 * u8 = 4 bytes)
-            // - one_hot_config: OneHotConfig (2 * u8 = 2 bytes)
-            // - dory_layout: DoryLayout (u8 = 1 byte)
+            // - log_k_chunk: usize (8 bytes)
+            // - lookups_ra_virtual_log_k_chunk: usize (8 bytes)
+            std.debug.print("[SERIALIZE CONFIG] trace_length={}, ram_K={}, bytecode_K={}, log_k_chunk={}, lookups_ra_virtual_log_k_chunk={}\n", .{
+                bundle.proof.trace_length,
+                bundle.proof.ram_K,
+                bundle.proof.bytecode_K,
+                bundle.proof.one_hot_config.log_k_chunk,
+                bundle.proof.one_hot_config.lookups_ra_virtual_log_k_chunk,
+            });
             try serializer.writeUsize(bundle.proof.trace_length);
             try serializer.writeUsize(bundle.proof.ram_K);
             try serializer.writeUsize(bundle.proof.bytecode_K);
-
-            // ReadWriteConfig (4 bytes)
-            try serializer.writeU8(bundle.proof.rw_config.ram_rw_phase1_num_rounds);
-            try serializer.writeU8(bundle.proof.rw_config.ram_rw_phase2_num_rounds);
-            try serializer.writeU8(bundle.proof.rw_config.registers_rw_phase1_num_rounds);
-            try serializer.writeU8(bundle.proof.rw_config.registers_rw_phase2_num_rounds);
-
-            // OneHotConfig (2 bytes)
-            try serializer.writeU8(bundle.proof.one_hot_config.log_k_chunk);
-            try serializer.writeU8(bundle.proof.one_hot_config.lookups_ra_virtual_log_k_chunk);
-
-            // DoryLayout (1 byte)
-            try serializer.writeU8(bundle.proof.dory_layout);
+            try serializer.writeUsize(bundle.proof.one_hot_config.log_k_chunk);
+            try serializer.writeUsize(bundle.proof.one_hot_config.lookups_ra_virtual_log_k_chunk);
 
             return serializer.toOwnedSlice();
         }

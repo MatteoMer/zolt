@@ -17127,3 +17127,13 @@ Cost: $17.0396
 Tokens: 0 in / 0 out
 Session ending: Ralph signaled SESSION_ENDING
 
+
+--- Iteration 1 ---
+Started: 2026-02-03T21:43:47.361844
+Ended: 2026-02-03T23:29:49.544889
+Turns: 0
+Cost: $0.0000
+Tokens: 0 in / 0 out
+Error: Command failed with exit code -15 (exit code: -15)
+Error output: Check stderr output for details
+

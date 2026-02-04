@@ -192,9 +192,15 @@ pub fn OutputSumcheckProver(comptime F: type) type {
             }
             const termination_index = remapAddress(memory_layout.termination, memory_layout) orelse 0;
             if (!is_panicking and termination_index < K) {
+                // Set termination bit in val_final to match Jolt's convention.
+                // This is required for OutputSumcheck because Jolt's verifier computes
+                // val_io_eval with termination = 1 via eval_io_mle.
+                //
+                // For ValFinal sumcheck, we need val_final_claim - val_init_eval = 0.
+                // This is achieved by storing the SAME value for both RamValFinal and
+                // RamValInit claims at RamOutputCheck opening point.
                 val_final[termination_index] = F.one();
-                // val_init[termination_index] stays at 0 (or whatever initial_ram contained)
-                std.debug.print("[ZOLT] OutputSumcheck: val_final[{}] = 1 (termination bit), val_init[{}] = {} (from initial_ram)\n", .{ termination_index, termination_index, val_init[termination_index].toU64() });
+                std.debug.print("[ZOLT] OutputSumcheck: val_final[{}] = 1 (termination bit)\n", .{termination_index});
             }
 
             // Compute IO region bounds (matches Jolt's ProgramIOPolynomial)

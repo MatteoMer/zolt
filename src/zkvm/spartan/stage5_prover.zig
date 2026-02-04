@@ -3216,6 +3216,60 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             if (ram_access_count > 0) {
                                 std.debug.print("  eq_cycle_bound[0]={x}\n", .{eq_cycle_bound[0].toBytesBE()[16..32].*});
                             }
+
+                            // CRITICAL FIX: Bind P/Q arrays for Instance 1 PhaseCycle
+                            // This was missing - P/Q arrays need to be bound after each cycle round
+                            // to match the address rounds behavior
+
+                            // Store cycle challenge for PhaseCycle2 eq_prefix computation
+                            cycle_challenges[cycle_round] = challenge;
+
+                            if (cycle_round < prefix_n_vars) {
+                                // PhaseCycle1: bind P and Q polynomials
+                                const current_len = prefix_size >> @intCast(cycle_round);
+                                const half_len = current_len / 2;
+
+                                // Bind P arrays: P'[j] = (1-r)*P[2j] + r*P[2j+1]
+                                for (0..half_len) |j| {
+                                    P_raf[j] = one_minus_r.mul(P_raf[2 * j]).add(P_raf[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                    P_rw[j] = one_minus_r.mul(P_rw[2 * j]).add(P_rw[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                    P_val[j] = one_minus_r.mul(P_val[2 * j]).add(P_val[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                }
+
+                                // Bind Q arrays: Q'[j] = (1-r)*Q[2j] + r*Q[2j+1]
+                                for (0..half_len) |j| {
+                                    Q_raf[j] = one_minus_r.mul(Q_raf[2 * j]).add(Q_raf[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                    Q_rw[j] = one_minus_r.mul(Q_rw[2 * j]).add(Q_rw[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                    Q_val[j] = one_minus_r.mul(Q_val[2 * j]).add(Q_val[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                }
+
+                                std.debug.print("[STAGE5 CYCLE BIND R{}] Bound P/Q arrays: half_len={}\n", .{
+                                    round,
+                                    half_len,
+                                });
+                            } else {
+                                // PhaseCycle2: bind H_prime and eq_hi arrays
+                                const suffix_round = cycle_round - prefix_n_vars;
+                                const current_len = suffix_size >> @intCast(suffix_round);
+                                const half_len = current_len / 2;
+
+                                // Bind H_prime: H'[j] = (1-r)*H[2j] + r*H[2j+1]
+                                for (0..half_len) |j| {
+                                    H_prime[j] = one_minus_r.mul(H_prime[2 * j]).add(H_prime[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                }
+
+                                // Bind eq_hi arrays
+                                for (0..half_len) |j| {
+                                    eq_raf_hi[j] = one_minus_r.mul(eq_raf_hi[2 * j]).add(eq_raf_hi[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                    eq_rw_hi[j] = one_minus_r.mul(eq_rw_hi[2 * j]).add(eq_rw_hi[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                    eq_val_hi[j] = one_minus_r.mul(eq_val_hi[2 * j]).add(eq_val_hi[2 * j + 1].mulHiBigIntU128(challenge.limbs));
+                                }
+
+                                std.debug.print("[STAGE5 CYCLE BIND R{}] Bound H'/eq_hi arrays: half_len={}\n", .{
+                                    round,
+                                    half_len,
+                                });
+                            }
                         }
                     }
 

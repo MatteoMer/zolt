@@ -372,17 +372,25 @@ pub const Emulator = struct {
     ///
     /// For programs that don't explicitly write to the termination address (e.g., programs
     /// compiled without Jolt SDK), we inject this write synthetically.
+    ///
+    /// DISABLED: This synthetic write breaks compatibility with Jolt's verifier because:
+    /// 1. The R1CS witnesses don't know about this write (no Store instruction)
+    /// 2. RamAddress@SpartanOuter = 0 but RAF claim expects non-zero
+    /// Programs without termination writes should still be provable as they have no RAM ops.
     fn recordTerminationWrite(self: *Emulator) !void {
-        const termination_addr = self.device.memory_layout.termination;
-        const current_cycle = self.state.cycle;
-
-        // Record the write: pre_value = 0, post_value = 1
-        try self.ram.trace.recordWrite(termination_addr, 0, 1, current_cycle);
-
-        std.debug.print("[TRACE] Recorded synthetic termination write: addr=0x{x:0>16}, cycle={}, pre=0, post=1\n", .{
-            termination_addr,
-            current_cycle,
-        });
+        _ = self;
+        // DISABLED: synthetic termination writes break Jolt compatibility
+        // const termination_addr = self.device.memory_layout.termination;
+        // const current_cycle = self.state.cycle;
+        //
+        // // Record the write: pre_value = 0, post_value = 1
+        // try self.ram.trace.recordWrite(termination_addr, 0, 1, current_cycle);
+        //
+        // std.debug.print("[TRACE] Recorded synthetic termination write: addr=0x{x:0>16}, cycle={}, pre=0, post=1\n", .{
+        //     termination_addr,
+        //     current_cycle,
+        // });
+        std.debug.print("[TRACE] Skipping synthetic termination write (disabled for Jolt compatibility)\n", .{});
     }
 
     /// Fetch instruction from memory, handling compressed instructions

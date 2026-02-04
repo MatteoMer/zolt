@@ -1407,8 +1407,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             std.debug.print("[STAGE5] Corrected batched claim = {any}\n", .{batched_claim_corrected.toBytesBE()});
             std.debug.print("[STAGE5] Original batched claim  = {any}\n", .{batched_claim.toBytesBE()});
 
-            // Override current_batched_claim with the corrected value
-            current_batched_claim = batched_claim_corrected;
+            // DISABLED: Do NOT override current_batched_claim.
+            // The correction was needed when synthetic termination writes were added to the RAM trace
+            // but not reflected in the R1CS witnesses. Now that synthetic writes are disabled,
+            // the original batched_claim from opening_claims should be consistent with the trace.
+            // current_batched_claim = batched_claim_corrected;
 
             // Expanding table to track eq(r_addr_reduced_so_far, k_bound_bits)
             // This accumulates the eq value as we bind address bits
@@ -2312,6 +2315,27 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // Challenge * Challenge: both convert to Fr, standard mul
                     const r2 = challenge.mul(challenge);
                     const r3 = r2.mul(challenge);
+
+                    // Debug: print c1 computation for round 0
+                    if (round == 0) {
+                        std.debug.print("[STAGE5 R0 EVAL] claim = {any}\n", .{current_batched_claim.toBytes()});
+                        std.debug.print("[STAGE5 R0 EVAL] c0 = {any}\n", .{c0.toBytes()});
+                        std.debug.print("[STAGE5 R0 EVAL] c2 = {any}\n", .{c2_val.toBytes()});
+                        std.debug.print("[STAGE5 R0 EVAL] c3 = {any}\n", .{c3_val.toBytes()});
+                        const claim_minus_c0 = current_batched_claim.sub(c0);
+                        std.debug.print("[STAGE5 R0 EVAL] claim - c0 = {any}\n", .{claim_minus_c0.toBytes()});
+                        const claim_minus_2c0 = claim_minus_c0.sub(c0);
+                        std.debug.print("[STAGE5 R0 EVAL] claim - 2*c0 = {any}\n", .{claim_minus_2c0.toBytes()});
+                        const claim_minus_2c0_minus_c2 = claim_minus_2c0.sub(c2_val);
+                        std.debug.print("[STAGE5 R0 EVAL] claim - 2*c0 - c2 = {any}\n", .{claim_minus_2c0_minus_c2.toBytes()});
+                        std.debug.print("[STAGE5 R0 EVAL] c1 = claim - 2*c0 - c2 - c3 = {any}\n", .{c1.toBytes()});
+                        std.debug.print("[STAGE5 R0 EVAL] challenge (LE bytes) = {any}\n", .{challenge.toBytes()});
+                        const c1_times_r = c1.mulHiBigIntU128(challenge.limbs);
+                        std.debug.print("[STAGE5 R0 EVAL] c1 * r (mulHiBigIntU128) = {any}\n", .{c1_times_r.toBytes()});
+                        std.debug.print("[STAGE5 R0 EVAL] c2 * r^2 = {any}\n", .{c2_val.mul(r2).toBytes()});
+                        std.debug.print("[STAGE5 R0 EVAL] c3 * r^3 = {any}\n", .{c3_val.mul(r3).toBytes()});
+                    }
+
                     // CRITICAL: Challenge * F uses mulHiBigIntU128 (Jolt delegates to F * Challenge)
                     current_batched_claim = c0.add(c1.mulHiBigIntU128(challenge.limbs)).add(c2_val.mul(r2)).add(c3_val.mul(r3));
 

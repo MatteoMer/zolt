@@ -1,71 +1,66 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 40 - Stage 5 Sumcheck Verification Debugging
+## Status: Session 41 - Stage 5 P/Q Binding Fix + Opening Claims Investigation
 
 ## Major Progress!
 
-**Stage 4 passes!** Stage 5 (InstructionReadRaf) fails with sumcheck verification error.
+**Fixed Instance 1 P/Q binding during cycle rounds!**
+- Added P_raf, P_rw, P_val, Q_raf, Q_rw, Q_val binding in cycle rounds path
+- Round polynomial coefficients for rounds 129+ now match Jolt
+- Transcript challenges now match Jolt
+- output_claim now matches Jolt (when accounting for endianness)
 
-## Current Failure: Stage 5 (InstructionReadRaf)
+## Current Issue: Opening Claims Mismatch
 
-### Key Findings This Session
+The sumcheck polynomial evaluation (output_claim) matches, but expected_claim doesn't.
+This means the opening claims are being computed incorrectly.
 
-**Confirmed Matching Values:**
-1. ✓ Initial batched claim
-2. ✓ Batching coefficients (batch0, batch1, batch2)
-3. ✓ All 136 sumcheck challenges
-4. ✓ Round polynomial coefficients (verified rounds 0-3, 128-129)
-5. ✓ Intermediate claims after each round (output_claim matches at round 135)
-6. ✓ Instance 0 opening claims (inc_claim, wa_claim)
-7. ✓ Instance 1 opening claims (ram_ra_claim)
-8. ✓ Instance 2 opening claims (ra_chunks, table_flags, raf_flag)
-9. ✓ Instance 2 components (eq_eval_r_reduction, ra_product, val_claim, raf_claim)
-10. ✓ All individual instance expected_output_claim values
+### Debug Findings
 
-**The Mystery:**
-- The sumcheck polynomial evaluations are ALL CORRECT
-- All opening claims match between Zolt and Jolt
-- BUT: output_claim ≠ expected_claim
+1. **Polynomial coefficients**: ✓ Match between Zolt and Jolt
+2. **Challenges**: ✓ Match between Zolt and Jolt
+3. **output_claim**: ✓ Match (after endianness conversion)
+4. **expected_claim**: ✗ Doesn't match
 
-**Output claim (what sumcheck produces):**
-`[af, 51, 7b, 30, ff, 29, 91, 26, ...]`
+### Expected Claim Formula
 
-**Expected claim (sum of instance expected_outputs * coeffs):**
-`[f0, c1, c7, e7, 7e, fd, c3, 3b, ...]`
+```
+expected_claim = batch0 * inst0_claim + batch1 * inst1_claim + batch2 * inst2_claim
+```
 
-**Individual instance claim*coeff contributions (from Jolt):**
-- Instance 0: `[36, 6f, 00, 34, 01, 26, 50, 93, ...]`
-- Instance 1: `[48, d9, da, ee, a3, 74, 88, ae, ...]`
-- Instance 2: `[73, 79, ec, b4, 6d, 58, cd, 3d, ...]`
+Where:
+- inst0_claim = inc_claim * wa_claim * lt_eval (Instance 0: RegistersValEvaluation)
+- inst1_claim = eq_combined * ra_claim (Instance 1: RamRaClaimReduction)
+- inst2_claim = eq * ra * (val + gamma * raf) (Instance 2: InstructionReadRaf)
 
-The sum should equal expected_claim. This is verified by Jolt.
+### Hypothesis: H_prime Initialization Issue
 
-### Hypothesis
+Looking at PhaseCycle2 initialization in Zolt:
+- H_prime is computed from cycle_challenges[0..prefix_n_vars]
+- cycle_challenges are set AFTER the polynomial computation
+- This might cause H_prime to be initialized with wrong values
 
-The sumcheck output_claim equals batch0*poly0(r0) + batch1*poly1(r1) + batch2*poly2(r2).
+### Key Code Locations
 
-The expected_claim equals batch0*exp0 + batch1*exp1 + batch2*exp2.
+**Instance 1 (RamRaClaimReduction):**
+- PhaseCycle polynomial: lines 1823-1901 (PhaseCycle1) and 1902-2053 (PhaseCycle2)
+- H_prime initialization: lines 1907-1945
+- Binding code (my fix): lines 3163-3273
 
-For these to match, we need poly_i(r_i) = exp_i for each instance.
-
-Since all opening claims match AND all expected_output formulas seem correct, there might be:
-1. A subtle bug in the polynomial evaluation during cycle rounds
-2. A mismatch in how the polynomial is defined vs what the verifier expects
-3. A byte order issue in the sum computation
+**ra_claim computation:**
+- Zolt: line 3704, returns `ram_ra_claim` from computeEqAtIndex sum
+- Jolt: Uses `H_prime.final_sumcheck_claim()` which should be H_prime[0] after binding
 
 ### Next Steps
 
-1. **Trace polynomial evaluation more carefully:**
-   - Verify that poly_i(r_i) actually equals exp_i for each instance
-   - Print these values side by side at the end of the sumcheck
+1. **Verify H_prime[0] after final binding**
+   - Print H_prime[0] after round 135
+   - Compare with Jolt's ra_claim_reduced
 
-2. **Verify the batched sum:**
-   - Check if batch0*exp0 + batch1*exp1 + batch2*exp2 = expected_claim
-   - Check if batch0*poly0 + batch1*poly1 + batch2*poly2 = output_claim
+2. **Check if cycle_challenges timing is correct**
+   - Verify cycle_challenges[0..3] are set before PhaseCycle2 init
 
-3. **Check for off-by-one or endianness issues:**
-   - The challenges might be indexed differently
-   - The opening points might have different orderings
+3. **Consider using H_prime[0] instead of computeEqAtIndex sum for ra_claim**
 
 ### Working Commands
 
@@ -82,11 +77,9 @@ cd /home/vivado/projects/jolt && cargo test -p jolt-core --features zolt-debug -
 
 ### Session Summary
 
-- Verified all individual components match between Zolt and Jolt
-- The sumcheck polynomial coefficients and evaluations are correct
-- The opening claims are correct
-- The expected_output_claim formulas give correct results
-- BUT the final sums don't match
-- Need to trace the actual polynomial values vs expected values at the evaluation point
+- Fixed Instance 1 P/Q binding during cycle rounds (commit 2c97a1a)
+- Verified polynomial coefficients and challenges now match
+- Identified that opening claims (specifically ra_claim) might be wrong
+- H_prime[0] appears to be 0, which shouldn't be the case
 
-SESSION_ENDING - Deep investigation of Stage 5. All individual components match but the final sums don't. Need to trace polynomial evaluation vs expected output for each instance.
+SESSION_ENDING - Fixed P/Q binding. Need to investigate H_prime initialization and ra_claim computation for Instance 1.

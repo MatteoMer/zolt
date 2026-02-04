@@ -1,55 +1,55 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 58 - Polynomial Format Consistency Fixed
+## Status: Session 58 - Investigating Opening Claims Endianness
 
 ## Progress This Session
 
 ### Key Fixes Applied
 
-1. **Fixed val_evaluation.zig** - Changed polynomial format from 4-point evaluation `[p(0), p(1), p(2), p(3)]` to Toom-Cook format `[p(0), p(1), p(2), p_inf]`
-   - Updated `computeRoundPolynomial()` to compute `p_inf = c3` (product of slopes for degree-3 polynomial)
+1. **Fixed val_evaluation.zig** - Changed polynomial format from 4-point evaluation to Toom-Cook format
+   - Updated `computeRoundPolynomial()` to compute `p_inf = c3`
    - Updated `bindChallengeWithPoly()` to use `toomCookToCoeffs()` for claim evaluation
 
-2. **Fixed val_final.zig** - Changed polynomial format to Toom-Cook format `[p(0), p(1), p(2), p_inf]`
-   - Updated `computeRoundPolynomial()` to compute `p_inf = c2` (product of slopes for degree-2 polynomial)
+2. **Fixed val_final.zig** - Changed polynomial format to Toom-Cook format
+   - Updated `computeRoundPolynomial()` to compute `p_inf = c2`
    - Updated `bindChallengeWithPoly()` to use `toomCookToCoeffs()` for claim evaluation
-   - Fixed `getFinalClaim()` to return `current_claim` instead of `inc_evals[0] * wa_evals[0]`
+   - Fixed `getFinalClaim()` to return `current_claim`
 
 ### Results After Fix
-- Stage 4 sumcheck now passes internal consistency check:
+- Stage 4 sumcheck passes internal consistency check:
   - `val_eval claims match? true`
   - `val_final claims match? true`
   - `prover_expected == batched_claim? true`
-- However, Jolt verifier still rejects because **opening claims don't match**
 
-### Current Issue: Opening Claims Mismatch
+### Current Issue: Byte Order Mismatch
 
-Zolt's inc_claim (BE): `d3 a5 02 7f 3a d0 0b 9d ...`
-Jolt's expected: `9e da 3f 0c e7 c9 73 54 ...`
+The opening claims appear to have correct VALUES but incorrect BYTE ORDER:
 
-The verifier computes `expected_output_claim = inc_claim * wa_claim * lt_eval` at the final sumcheck point, but Zolt produces different values.
+**Zolt's inc_eval (via toBytesBE):** `04 07 11 3e 1e 94 48 24 ...`
+**Jolt expects:** `9e da 3f 0c e7 c9 73 54 ...`
 
-Possible causes:
-1. The final sumcheck point `r_sumcheck` is different between prover and verifier
-2. The polynomial evaluation at the final point differs
-3. The opening claims are extracted from wrong positions
+These are REVERSED! If we reverse Zolt's output, it matches Jolt's expectation.
 
-### Files Modified This Session
+**Investigation needed:**
+- The `toBytesBE()` function in field/mod.zig appears correct
+- But the actual output is in little-endian order
+- Need to debug why bytes are reversed
 
-- `/home/vivado/projects/zolt/src/zkvm/ram/val_evaluation.zig`:
-  - `computeRoundPolynomial()` - returns Toom-Cook format now
-  - `bindChallengeWithPoly()` - uses toomCookToCoeffs for evaluation
+### Potential Fix
+Either:
+1. Fix `toBytesBE()` to actually output big-endian
+2. Or adjust how opening claims are serialized to proof format
 
-- `/home/vivado/projects/zolt/src/zkvm/ram/val_final.zig`:
-  - `computeRoundPolynomial()` - returns Toom-Cook format now
-  - `bindChallengeWithPoly()` - uses toomCookToCoeffs for evaluation
-  - `getFinalClaim()` - returns current_claim
+## Files Modified This Session
+
+- `/home/vivado/projects/zolt/src/zkvm/ram/val_evaluation.zig`
+- `/home/vivado/projects/zolt/src/zkvm/ram/val_final.zig`
 
 ## Next Steps
 
-1. **Debug opening claim computation** - Compare r_sumcheck points between Zolt and Jolt
-2. **Verify evaluation point** - Check that inc/wa/lt are evaluated at the correct final point
-3. **Check endianness** - Ensure all opening claims use consistent byte ordering
+1. **Debug `toBytesBE()` function** - Add detailed tracing to understand byte order
+2. **Fix byte ordering** - Ensure opening claims are serialized in correct endianness
+3. **Re-test with Jolt verifier** - Verify Stage 4 passes after fix
 
 ### Test Commands
 
@@ -64,8 +64,10 @@ zig build -Doptimize=ReleaseFast
 cd /home/vivado/projects/jolt && cargo test -p jolt-core --features zolt-debug --lib test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
 
-### Key Files
+## SESSION_ENDING
 
-- `/home/vivado/projects/zolt/src/zkvm/proof_converter.zig` - Stage 4 batched sumcheck
-- `/home/vivado/projects/zolt/src/zkvm/ram/val_evaluation.zig` - ValEval prover
-- `/home/vivado/projects/zolt/src/zkvm/ram/val_final.zig` - ValFinal prover
+Ending session due to context length. Key progress:
+- Polynomial format consistency fixed (Toom-Cook format for all instances)
+- Internal sumcheck verification passes
+- Identified byte order mismatch in opening claims
+- Next: Debug and fix `toBytesBE()` function

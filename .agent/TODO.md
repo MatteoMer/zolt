@@ -1,77 +1,78 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 67 - Instance 1 Hint Mechanism Fix (In Progress)
+## Status: Session 67 - R1CS vs Memory Trace Inconsistency (Analysis Complete)
 
-## Current Issue
+## Root Cause Analysis COMPLETE
 
-Stage 5 sumcheck verification fails. The combined polynomial doesn't satisfy `p(0) + p(1) = current_batched_claim`.
+Stage 5 sumcheck fails due to fundamental inconsistency between R1CS trace and memory trace.
 
-**Root cause identified**: The batched claim tracking is inconsistent with individual instance claims.
+### The Core Issue
 
-## Progress Made This Session
+1. **R1CS RamAddress polynomial**: Only includes addresses from Load/Store instructions
+   - For fibonacci (no Load/Store), this is ALL ZEROS
+   - Stage 1 (SpartanOuter) produces RamAddress claim = 0
 
-### 1. Identified the Batched Claim Mismatch
-- Debug shows `current_batched_claim matches expected: false` for round 128
-- The `expected_batched` (from individual claims) matches `hint_expected` (from polynomial)
-- But `current_batched_claim` (the hint) doesn't match
+2. **Memory trace**: Includes ALL memory accesses
+   - Includes init/terminate writes (e.g., termination write at cycle 54)
+   - Stage 5 uses this to compute RA claims
 
-### 2. Fixes Implemented
-1. **Scaled claim initialization**: Changed `regs_val_current_claim` and `ram_ra_current_claim` to use SCALED values at initialization
-2. **Individual claim tracking for address rounds**: Added halving for inactive instances during address rounds (0-127)
-3. **PhaseAddress claim update**: Added `ram_ra_current_claim` update after PhaseAddress binding (rounds 112-127)
-4. **Batched claim recomputation**: Moved to after RamRaClaimReduction binding in address rounds
+3. **RAF Evaluation (Stage 2 Instance 1)**:
+   - Input claim = RamAddress from SpartanOuter = 0
+   - Should prove: Σ ra(k) * unmap(k) = 0
+   - But ra(k) computed from memory trace is non-zero!
+   - INCONSISTENCY between contract and computation
 
-### 3. Current State
-- Rounds 129-135: `current_batched_claim matches expected: true` ✓
-- Round 128: `current_batched_claim matches expected: false` ✗
+### Current Behavior
+```
+[ZOLT] STAGE2: raf_final_claim = { 0, 0, 0, 0, 0, 0, ... }
+[STAGE5] Computed RamRa claims from trace:
+  computed_claim_raf = 8b69890fb81b05ffe27e42b69e38b121
+```
 
-The issue is that the batched claim at round 128 START was set at the END of round 127 (address round), but there's still a mismatch.
+Stage 2 correctly outputs zero (matching R1CS contract), but Stage 5 computes non-zero from memory trace.
 
-## Next Steps
+### Investigation Needed
 
-1. **Debug round 127**: Add explicit debug to see what values are being used to compute `current_batched_claim` at the end of round 127
+1. **Check Jolt's termination write handling**: Does Jolt exclude termination writes from RAF evaluation?
+2. **Verify the contract**: What should the RAF polynomial contain vs R1CS RamAddress?
+3. **Option A**: Exclude termination writes from Stage 5's RA computation
+4. **Option B**: Include termination writes in R1CS RamAddress (if that's what Jolt does)
 
-2. **Verify Instance 1 claim evolution**: Trace `ram_ra_current_claim` through PhaseAddress rounds 112-127 to ensure it's being updated correctly
+## Progress This Session
 
-3. **Check code path**: Round 127 is the last address round. Verify that the batched claim recomputation is using the UPDATED `ram_ra_current_claim` value
+1. ✅ Fixed batched claim tracking for cycle rounds 128-135
+2. ✅ All cycle rounds: `current_batched_claim matches expected: true`
+3. ✅ Identified root cause: R1CS vs memory trace inconsistency
+4. ❌ Stage 5 verification still fails
+5. 🔄 Need to investigate Jolt's termination write handling
 
-## Analysis
+## Key Debug Output
 
-At round 128 start, the debug shows:
-- `regs_val_current_claim = 3c9c41f47d8f524d9a5f5c701f596169` (unscaled, after 128 halvings)
-- `ram_ra_current_claim = 1199386937d5c9ad1891fe9b6031d657` (after PhaseAddress rounds)
-- `lookups_claim = f47fe430cf070d741a203164625e7bab` (after address rounds)
+```
+[TRACE] Detected infinite loop at PC 0x80000010, cycle 54
+[TRACE] Recorded termination write: addr=0x000000007fffc008, cycle=54
+[STAGE5 RAM_RA] Initializing with 1 RAM accesses
+[STAGE5 RAM_RA] Access 0: raw_addr=0x7fffc008, remapped_addr=2049, cycle=54
+```
 
-Expected batched claim: `{ 220, 42, 164, 10, ...}` = batch0*c0 + batch1*c1 + batch2*c2
-Actual batched claim: `{ 34, 28, 172, 85, ...}` ≠ expected
-
-This suggests the batched claim wasn't correctly computed at the end of round 127.
-
-## Files Modified
-
-- `src/zkvm/spartan/stage5_prover.zig`:
-  - Line 1199: Changed `regs_val_current_claim = regs_scaled` (was `regs_val_input`)
-  - Line 1408: Changed `ram_ra_current_claim = ram_ra_scaled_corrected`
-  - Lines 2412-2425: Added individual claim updates for address rounds
-  - Line 2517-2524: Added PhaseAddress claim update
-  - Line 2604-2609: Moved batched claim recomputation to after RamRaClaimReduction binding
+The fibonacci program has NO Load/Store instructions but HAS termination writes in memory trace.
 
 ## Test Commands
 
 ```bash
-# Build Zolt
 zig build -Doptimize=ReleaseFast
-
-# Generate proof
 ./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o /tmp/zolt_proof_dory.bin --export-preprocessing /tmp/zolt_preprocessing.bin --trace-length 64
-
-# Verify with Jolt
 cd /home/vivado/projects/jolt && cargo test -p jolt-core --features zolt-debug --lib test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
 
-## Previous Progress
+## Files Modified This Session
 
-- Stage 1-4: WORKING
-- Stage 5 address rounds (0-127): Sumcheck passes individually
-- Stage 5 cycle rounds (128-135): Batched claim consistency achieved for rounds 129-135
-- Round 128 transition: Still has batched claim mismatch
+- `src/zkvm/spartan/stage5_prover.zig`:
+  - Fixed scaled claim initialization
+  - Added batched claim recomputation after RA materialization
+
+## SESSION_ENDING
+
+Context is getting long. Key findings saved. Next session should:
+1. Investigate how Jolt handles termination writes vs RAF evaluation
+2. Check if Stage 5's RA computation should exclude non-Load/Store accesses

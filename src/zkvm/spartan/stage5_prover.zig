@@ -2605,6 +2605,20 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         .add(batch1.mul(ram_ra_current_claim))
                         .add(batch2.mul(lookups_claim));
 
+                    // Debug: print claim tracking for rounds 126-128
+                    if (round >= 126 and round <= 128) {
+                        std.debug.print("[ADDR CLAIM TRACK] Round {}: regs_val={x}, ram_ra={x}, lookups={x}\n", .{
+                            round,
+                            regs_val_current_claim.toBytesBE()[16..32].*,
+                            ram_ra_current_claim.toBytesBE()[16..32].*,
+                            lookups_claim.toBytesBE()[16..32].*,
+                        });
+                        std.debug.print("[ADDR CLAIM TRACK] Round {}: batched_claim={x}\n", .{
+                            round,
+                            current_batched_claim.toBytesBE()[16..32].*,
+                        });
+                    }
+
                     // ===================================================================
                     // Update prefix-suffix decomposition state after receiving challenge
                     // ===================================================================
@@ -3174,6 +3188,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             lookups_claim = lookups_claim.add(lookups_eq_evals[j].mul(lookups_ra_weights[j]).mul(lookups_combined_vals[j]));
                         }
                         std.debug.print("[STAGE5 CYCLE] lookups_claim after ra materialization = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+
+                        // CRITICAL: Recompute batched claim with the newly materialized lookups_claim
+                        // This is necessary because lookups_claim changed from the address round value
+                        current_batched_claim = batch0.mul(regs_val_current_claim)
+                            .add(batch1.mul(ram_ra_current_claim))
+                            .add(batch2.mul(lookups_claim));
+                        std.debug.print("[STAGE5 CYCLE] batched_claim after materialization = {x}\n", .{current_batched_claim.toBytesBE()[16..32].*});
                     }
                     // CRITICAL: current_half_size is the number of pairs we iterate over
                     // At round k, we have T/2^(k+1) pairs to process

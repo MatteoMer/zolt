@@ -710,26 +710,95 @@ pub fn Stage3Prover(comptime F: type) type {
 
             // Append opening claims to transcript (cache_openings)
             // ShiftSumcheck: 5 claims
+            std.debug.print("\n[ZOLT cache_openings] ShiftSumcheck claims appended to transcript:\n", .{});
+            std.debug.print("  [0] unexpanded_pc LE = {{ ", .{});
+            for (shift_claims.unexpanded_pc.toBytes()) |b| std.debug.print("{x:0>2}, ", .{b});
+            std.debug.print("}}\n", .{});
             transcript.appendScalar(shift_claims.unexpanded_pc);
+
+            std.debug.print("  [1] pc LE = {{ ", .{});
+            for (shift_claims.pc.toBytes()) |b| std.debug.print("{x:0>2}, ", .{b});
+            std.debug.print("}}\n", .{});
             transcript.appendScalar(shift_claims.pc);
+
+            std.debug.print("  [2] is_virtual LE = {{ ", .{});
+            for (shift_claims.is_virtual.toBytes()) |b| std.debug.print("{x:0>2}, ", .{b});
+            std.debug.print("}}\n", .{});
             transcript.appendScalar(shift_claims.is_virtual);
+
+            std.debug.print("  [3] is_first_in_sequence LE = {{ ", .{});
+            for (shift_claims.is_first_in_sequence.toBytes()) |b| std.debug.print("{x:0>2}, ", .{b});
+            std.debug.print("}}\n", .{});
             transcript.appendScalar(shift_claims.is_first_in_sequence);
+
+            std.debug.print("  [4] is_noop LE = {{ ", .{});
+            for (shift_claims.is_noop.toBytes()) |b| std.debug.print("{x:0>2}, ", .{b});
+            std.debug.print("}}\n", .{});
             transcript.appendScalar(shift_claims.is_noop);
 
             // InstructionInputSumcheck: 8 claims
+            std.debug.print("[ZOLT cache_openings] InstructionInputVirtualization claims:\n", .{});
+            std.debug.print("  [5] left_is_rs1 LE = {{ ", .{});
+            for (instr_claims.left_is_rs1.toBytes()) |b| std.debug.print("{x:0>2}, ", .{b});
+            std.debug.print("}}\n", .{});
             transcript.appendScalar(instr_claims.left_is_rs1);
+
+            std.debug.print("  [6] rs1_value LE = {{ ", .{});
+            for (instr_claims.rs1_value.toBytes()) |b| std.debug.print("{x:0>2}, ", .{b});
+            std.debug.print("}}\n", .{});
             transcript.appendScalar(instr_claims.rs1_value);
+
+            std.debug.print("  [7] left_is_pc LE = {{ ", .{});
+            for (instr_claims.left_is_pc.toBytes()) |b| std.debug.print("{x:0>2}, ", .{b});
+            std.debug.print("}}\n", .{});
             transcript.appendScalar(instr_claims.left_is_pc);
+
+            std.debug.print("  [8] unexpanded_pc LE = {{ ", .{});
+            for (instr_claims.unexpanded_pc.toBytes()) |b| std.debug.print("{x:0>2}, ", .{b});
+            std.debug.print("}}\n", .{});
             transcript.appendScalar(instr_claims.unexpanded_pc);
+
+            std.debug.print("  [9] right_is_rs2 LE = {{ ", .{});
+            for (instr_claims.right_is_rs2.toBytes()) |b| std.debug.print("{x:0>2}, ", .{b});
+            std.debug.print("}}\n", .{});
             transcript.appendScalar(instr_claims.right_is_rs2);
+
+            std.debug.print("  [10] rs2_value LE = {{ ", .{});
+            for (instr_claims.rs2_value.toBytes()) |b| std.debug.print("{x:0>2}, ", .{b});
+            std.debug.print("}}\n", .{});
             transcript.appendScalar(instr_claims.rs2_value);
+
+            std.debug.print("  [11] right_is_imm LE = {{ ", .{});
+            for (instr_claims.right_is_imm.toBytes()) |b| std.debug.print("{x:0>2}, ", .{b});
+            std.debug.print("}}\n", .{});
             transcript.appendScalar(instr_claims.right_is_imm);
+
+            std.debug.print("  [12] imm LE = {{ ", .{});
+            for (instr_claims.imm.toBytes()) |b| std.debug.print("{x:0>2}, ", .{b});
+            std.debug.print("}}\n", .{});
             transcript.appendScalar(instr_claims.imm);
 
             // RegistersClaimReduction: 3 claims
+            std.debug.print("[ZOLT cache_openings] RegistersClaimReduction claims:\n", .{});
+            std.debug.print("  [13] rd_write_value LE = {{ ", .{});
+            for (reg_claims.rd_write_value.toBytes()) |b| std.debug.print("{x:0>2}, ", .{b});
+            std.debug.print("}}\n", .{});
             transcript.appendScalar(reg_claims.rd_write_value);
+
+            std.debug.print("  [14] rs1_value LE = {{ ", .{});
+            for (reg_claims.rs1_value.toBytes()) |b| std.debug.print("{x:0>2}, ", .{b});
+            std.debug.print("}}\n", .{});
             transcript.appendScalar(reg_claims.rs1_value);
+
+            std.debug.print("  [15] rs2_value LE = {{ ", .{});
+            for (reg_claims.rs2_value.toBytes()) |b| std.debug.print("{x:0>2}, ", .{b});
+            std.debug.print("}}\n", .{});
             transcript.appendScalar(reg_claims.rs2_value);
+
+            // Print transcript state after cache_openings
+            std.debug.print("[ZOLT cache_openings] Transcript state AFTER all 16 claims: {{ ", .{});
+            for (transcript.state[0..8]) |b| std.debug.print("{x:0>2} ", .{b});
+            std.debug.print("}}\n", .{});
 
             return Stage3Result(F){
                 .challenges = challenges,

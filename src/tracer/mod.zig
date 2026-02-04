@@ -366,27 +366,24 @@ pub const Emulator = struct {
 
     /// Record a synthetic termination write to the termination address.
     ///
-    /// In Jolt, the guest program writes to the termination address via a SB instruction,
-    /// which gets recorded in the RAM trace. This enables the ValFinal sumcheck to verify:
-    ///   val_final(r) - val_init(r) = Σ_j inc(j) * wa(r, j)
+    /// This function injects a FULL trace cycle (not just RAM entry) for the termination write.
+    /// This ensures consistency between:
+    /// - R1CS: Store flag set, RamAddress = termination_addr (via Rs1Value + Imm = termination_addr + 0)
+    /// - RAM trace: Write to termination address
+    /// - RAF claim: Includes termination address
     ///
-    /// For programs that don't explicitly write to the termination address (e.g., programs
-    /// compiled without Jolt SDK), we inject this write synthetically.
+    /// The R1CS constraint requires: if Load/Store => RamAddress == Rs1Value + Imm
+    /// We satisfy this by setting Rs1Value = termination_addr and Imm = 0.
     ///
-    /// Record the termination write to the termination address.
+    /// The synthetic instruction is an SB (Store Byte) with:
+    /// - opcode = 0x23 (Store)
+    /// - funct3 = 0x0 (SB)
+    /// - rs1 = x0 (but rs1_value = termination_addr in trace step)
+    /// - rs2 = x0 (but rs2_value = 1 in trace step)
+    /// - imm = 0 (no offset needed since rs1_value has the full address)
     ///
-    /// In Jolt, the guest program writes to the termination address via `core::ptr::write_volatile`,
-    /// which gets recorded in the RAM trace as a normal store instruction. This enables the
-    /// ValFinal sumcheck to verify:
-    ///   val_final(r) - val_init(r) = Σ_j inc(j) * wa(r, j)
-    ///
-    /// For Zolt programs (e.g., bare-metal Fibonacci that don't use Jolt SDK), we inject
-    /// this termination write so that the Inc polynomial has the correct termination increment.
-    ///
-    /// NOTE: This write is recorded in the RAM trace but NOT in the R1CS trace (no Store instruction).
-    /// This is acceptable because:
-    /// - The R1CS doesn't verify RAM operations directly (that's done via memory checking)
-    /// - The termination write is only needed for the RAM polynomial consistency check
+    /// In Jolt, the SDK generates: `core::ptr::write_volatile(termination_bit as *mut u8, 1)`
+    /// which becomes an SB instruction in the trace. We mimic this behavior for bare-metal programs.
     fn recordTerminationWrite(self: *Emulator) !void {
         const termination_addr = self.device.memory_layout.termination;
         const current_cycle = self.state.cycle;
@@ -395,16 +392,68 @@ pub const Emulator = struct {
         const pre_value = self.ram.memory.get(termination_addr) orelse 0;
         const post_value: u64 = 1;
 
-        // Record the write: pre_value -> 1
+        // Construct a synthetic SB instruction that writes to termination address
+        //
+        // The R1CS constraint for Load/Store is: RamAddress == Rs1Value + Imm
+        // We need RamAddress = termination_addr.
+        //
+        // To satisfy this, we set:
+        // - Rs1Value = termination_addr (base register contains the full address)
+        // - Imm = 0 (no offset)
+        // - Then: RamAddress = termination_addr + 0 = termination_addr ✓
+        //
+        // The synthetic instruction is: SB x0, 0(rs1) where rs1 is conceptually
+        // loaded with termination_addr. We encode this as SB x0, 0(x0) = 0x00000023
+        // but override rs1_value in the trace step.
+        //
+        // Note: In real execution, no register would contain termination_addr.
+        // This is a synthetic cycle that mimics what Jolt SDK does via
+        // `core::ptr::write_volatile(termination_bit as *mut u8, 1)`
+        const synthetic_instr: u32 = 0x00000023; // SB x0, 0(x0)
+
+        // Get the last PC from the trace (or use 0 if empty)
+        const last_pc = if (self.trace.steps.items.len > 0)
+            self.trace.steps.items[self.trace.steps.items.len - 1].pc
+        else
+            0;
+
+        // Create a synthetic trace step for the termination write
+        // Key: rs1_value = termination_addr to satisfy RamAddress = Rs1+Imm constraint
+        const termination_step = TraceStep{
+            .cycle = current_cycle,
+            .pc = last_pc, // Use last PC (this cycle won't advance PC)
+            .unexpanded_pc = last_pc,
+            .instruction = synthetic_instr,
+            .rs1_value = termination_addr, // Key: Rs1 = termination_addr so RamAddress = Rs1 + 0
+            .rs2_value = 1, // Value to write (1 for termination)
+            .rd_pre_value = 0,
+            .rd_value = 0, // SB doesn't write to rd
+            .memory_addr = termination_addr,
+            .memory_pre_value = pre_value,
+            .memory_value = post_value,
+            .is_memory_write = true,
+            .next_pc = last_pc, // Stay at same PC (infinite loop detection will trigger)
+            .is_compressed = false,
+            .is_noop = false,
+        };
+
+        // Add to execution trace
+        try self.trace.steps.append(self.allocator, termination_step);
+
+        // Record the write in RAM trace
         try self.ram.trace.recordWrite(termination_addr, pre_value, post_value, current_cycle);
 
-        // Also update the memory state
+        // Update the memory state
         try self.ram.memory.put(self.allocator, termination_addr, post_value);
 
-        std.debug.print("[TRACE] Recorded termination write: addr=0x{x:0>16}, cycle={}, pre={}, post=1\n", .{
+        // Increment cycle counter
+        self.state.cycle += 1;
+
+        std.debug.print("[TRACE] Recorded termination cycle: addr=0x{x:0>16}, cycle={}, pre={}, post=1, instr=0x{x:0>8}\n", .{
             termination_addr,
             current_cycle,
             pre_value,
+            synthetic_instr,
         });
     }
 

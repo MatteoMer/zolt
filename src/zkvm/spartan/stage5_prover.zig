@@ -1700,13 +1700,20 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             const contrib_0 = B_1_0.mul(G_A_i).add(gamma2.mul(B_2_0.mul(G_B_i))).mul(F_k);
                             const contrib_1 = B_1_1.mul(G_A_i).add(gamma2.mul(B_2_1.mul(G_B_i))).mul(F_k);
 
+                            // CRITICAL FIX: Each access contributes to exactly ONE of eval_0 or eval_1
+                            // based on its address bit k_m.
+                            //
+                            // When k_m=0: the access is at address 2*k_prime, which corresponds to X=0
+                            //   So: eval_0 += B_0 * G (contrib_0)
+                            //
+                            // When k_m=1: the access is at address 2*k_prime+1, which corresponds to X=1
+                            //   So: eval_1 += B_1 * G (contrib_1)
                             if (k_m == 0) {
                                 eval_0 = eval_0.add(contrib_0);
-                                eval_1 = eval_1.add(contrib_1);
+                                // eval_1 gets nothing from this access
                             } else {
-                                // When k_m=1, the roles swap for the polynomial variable
-                                eval_0 = eval_0.add(contrib_1);
-                                eval_1 = eval_1.add(contrib_0);
+                                eval_1 = eval_1.add(contrib_1);
+                                // eval_0 gets nothing from this access
                             }
                         }
 
@@ -1718,12 +1725,41 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         combined_poly[2] = combined_poly[2].add(batch1.mul(eval_2));
                         // evals[3] = 0 for degree-2 polynomial
 
+                        // Debug for first few rounds and verification
                         if (ram_ra_round < 3) {
-                            std.debug.print("[STAGE5 RAM_RA] PhaseAddress round {}: eval_0={x}, eval_1={x}\n", .{
+                            const inst1_sum = eval_0.add(eval_1);
+                            // For round 0 (ram_ra_round=0, global round=112), sum should equal ram_ra_input
+                            std.debug.print("[STAGE5 RAM_RA] PhaseAddress round {} (global {}): eval_0={x}, eval_1={x}\n", .{
                                 ram_ra_round,
+                                round,
                                 eval_0.toBytesBE()[16..32].*,
                                 eval_1.toBytesBE()[16..32].*,
                             });
+                            std.debug.print("  eval_0+eval_1={x}, ram_ra_input={x}, match={}\n", .{
+                                inst1_sum.toBytesBE()[16..32].*,
+                                ram_ra_input.toBytesBE()[16..32].*,
+                                inst1_sum.eql(ram_ra_input),
+                            });
+
+                            // Extra debug for round 0: verify the formula
+                            if (ram_ra_round == 0 and ram_access_count > 0) {
+                                const addr = ram_addresses[0];
+                                const addr_usize: usize = @intCast(addr);
+                                const k_prime = addr_usize >> 1;
+                                const k_m: u1 = @truncate(addr_usize);
+                                const B_1_access = if (k_m == 0) B_1[2 * k_prime] else B_1[2 * k_prime + 1];
+                                const B_2_access = if (k_m == 0) B_2[2 * k_prime] else B_2[2 * k_prime + 1];
+                                const G_A_0 = ram_G_A[0];
+                                const G_B_0 = ram_G_B[0];
+                                const F_k = ram_ra_F.get(0);
+                                const expected_contrib = B_1_access.mul(G_A_0).add(gamma2.mul(B_2_access.mul(G_B_0))).mul(F_k);
+                                std.debug.print("  [DEBUG R0] addr={}, k_prime={}, k_m={}\n", .{ addr, k_prime, k_m });
+                                std.debug.print("  [DEBUG R0] B_1_access={x}, B_2_access={x}\n", .{ B_1_access.toBytesBE()[16..32].*, B_2_access.toBytesBE()[16..32].* });
+                                std.debug.print("  [DEBUG R0] G_A={x}, G_B={x}\n", .{ G_A_0.toBytesBE()[16..32].*, G_B_0.toBytesBE()[16..32].* });
+                                std.debug.print("  [DEBUG R0] F_k={x}\n", .{F_k.toBytesBE()[16..32].*});
+                                std.debug.print("  [DEBUG R0] gamma2={x}\n", .{gamma2.toBytesBE()[16..32].*});
+                                std.debug.print("  [DEBUG R0] expected_contrib={x}\n", .{expected_contrib.toBytesBE()[16..32].*});
+                            }
                         }
                     } else {
                         // PhaseCycle: bind cycle bits
@@ -2136,6 +2172,18 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         std.debug.print("[STAGE5 COEFF ROUND {}] c2 (LE) = {any}\n", .{ round, coeffs[1].toBytes() });
                         std.debug.print("[STAGE5 COEFF ROUND {}] c3 (LE) = {any}\n", .{ round, coeffs[2].toBytes() });
                     }
+                    // CRITICAL VERIFICATION: p(0) + p(1) should equal current_batched_claim
+                    const poly_sum = combined_poly[0].add(combined_poly[1]);
+                    const sumcheck_ok_addr = poly_sum.eql(current_batched_claim);
+                    if (!sumcheck_ok_addr or round < 3 or round == 127) {
+                        std.debug.print("[STAGE5 VERIFY R{}] p(0)+p(1)={x}, claim={x}, match={}\n", .{
+                            round,
+                            poly_sum.toBytesBE()[16..32].*,
+                            current_batched_claim.toBytesBE()[16..32].*,
+                            sumcheck_ok_addr,
+                        });
+                    }
+
                     if (round == 0) {
                         std.debug.print("[STAGE5 COEFF ROUND 0] claim = {x}\n", .{current_batched_claim.toBytesBE()});
                         std.debug.print("[STAGE5 COEFF ROUND 0] combined_poly[0] (p0) = {x}\n", .{combined_poly[0].toBytesBE()});
@@ -2177,6 +2225,35 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     const r3 = r2.mul(challenge);
                     // CRITICAL: Challenge * F uses mulHiBigIntU128 (Jolt delegates to F * Challenge)
                     current_batched_claim = c0.add(c1.mulHiBigIntU128(challenge.limbs)).add(c2_val.mul(r2)).add(c3_val.mul(r3));
+
+                    // =====================================================================
+                    // CRITICAL FIX: Update lookups_claim to match polynomial evaluation
+                    // =====================================================================
+                    // The lookups_claim must evolve as p_inst2(r) where p_inst2 is Instance 2's polynomial.
+                    // For degree-2 polynomial with evals at 0, 1, 2:
+                    //   p(0) = eval_0_inst2
+                    //   p(1) = eval_1_inst2 = lookups_claim - eval_0_inst2 (sumcheck property)
+                    //   p(2) = eval_2_inst2
+                    // Coefficients:
+                    //   c0 = p(0)
+                    //   c2 = (p(2) - 2*p(1) + p(0)) / 2
+                    //   c1 = p(1) - p(0) - c2 = lookups_claim - eval_0_inst2 - eval_0_inst2 - c2
+                    //
+                    // p(r) = c0 + r*c1 + r²*c2
+                    const inst2_c0 = eval_0_inst2;
+                    const inst2_c2 = eval_2_inst2.sub(eval_1_inst2).sub(eval_1_inst2).add(eval_0_inst2).mul(F.fromU64(2).inverse().?);
+                    const inst2_c1 = eval_1_inst2.sub(eval_0_inst2).sub(inst2_c2);
+                    const inst2_at_r = inst2_c0.add(inst2_c1.mulHiBigIntU128(challenge.limbs)).add(inst2_c2.mul(r2));
+                    lookups_claim = inst2_at_r;
+
+                    // Debug: verify lookups_claim update
+                    if (round < 3) {
+                        std.debug.print("[STAGE5 R{}] Updated lookups_claim = {x} (was {x})\n", .{
+                            round,
+                            lookups_claim.toBytesBE()[16..32].*,
+                            eval_1_inst2.add(eval_0_inst2).toBytesBE()[16..32].*, // old claim was p(0)+p(1)
+                        });
+                    }
 
                     // Debug: print challenges for first 4 rounds
                     if (round < 4) {
@@ -2442,11 +2519,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         }
                     }
 
-                    // Update lookups_claim
-                    lookups_claim = F.zero();
-                    for (0..T) |j| {
-                        lookups_claim = lookups_claim.add(lookups_eq_evals[j].mul(lookups_ra_weights[j]).mul(lookups_combined_vals[j]));
-                    }
+                    // NOTE: lookups_claim is already updated above by evaluating Instance 2's polynomial at challenge.
+                    // The recomputation from raw arrays is WRONG because eq_evals hasn't been bound yet.
+                    // The correct value is p_inst2(r) which we computed earlier.
 
                     if (round % 8 == 7) {
                         std.debug.print("[STAGE5] Completed rounds 0-{}\n", .{round});
@@ -3087,9 +3162,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     const final_compressed = try UniPoly(F).toCompressed(self.allocator, combined_coeffs);
 
                     // Debug: print first 3 compressed coefficients (excluding linear term) in LE format
-                    if (round >= LOOKUPS_LOG_K and round <= LOOKUPS_LOG_K + 1) { // Rounds 128 and 129
+                    if (round == 135) { // Only Round 135
                         std.debug.print("[STAGE5 CYCLE ZOLT] Round {} compressed coeffs (LE, comparing to Jolt):\n", .{round});
-                        for (0..@min(4, final_compressed.len)) |k| {
+                        std.debug.print("  final_compressed.len = {}\n", .{final_compressed.len});
+                        for (0..final_compressed.len) |k| {
                             // Jolt displays LE bytes from arkworks serialization
                             std.debug.print("  coeff[{}] = {any}\n", .{ k, final_compressed[k].toBytes() });
                         }
@@ -3130,27 +3206,53 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     }
 
                     // Update current_batched_claim by evaluating polynomial at challenge
-                    // p(r) = c0 + r*c1 + r^2*c2 + ... + r^d*c_d
-                    // c1 = hint - 2*c0 - c2 - c3 - ... - c_d
-                    var c1_sum = current_batched_claim.sub(combined_coeffs[0]).sub(combined_coeffs[0]); // hint - 2*c0
-                    for (2..combined_coeffs.len) |i| {
-                        c1_sum = c1_sum.sub(combined_coeffs[i]);
-                    }
-                    const c1_recovered = c1_sum;
+                    // The VERIFIER uses eval_from_hint which:
+                    // 1. Has compressed coeffs [c0, c2, c3, ...] and hint = current_claim
+                    // 2. Recovers c1 = hint - 2*c0 - c2 - c3 - ...
+                    // 3. Evaluates p(r) = c0 + r*c1 + r²*c2 + ...
+                    //
+                    // So we MUST update our claim using the same formula as the verifier.
 
-                    // Evaluate using Horner's method
-                    // CRITICAL: Use mulHiBigIntU128 for F * Challenge
-                    var eval_result = combined_coeffs[combined_coeffs.len - 1];
+                    // Compute c1_recovered from the hint (current_batched_claim)
+                    // c1 = hint - 2*c0 - c2 - c3 - ... - c_d
+                    var c1_recovered = current_batched_claim.sub(combined_coeffs[0]).sub(combined_coeffs[0]); // hint - 2*c0
+                    for (2..combined_coeffs.len) |i| {
+                        c1_recovered = c1_recovered.sub(combined_coeffs[i]);
+                    }
+
+                    // Debug: compare c1_direct vs c1_recovered
+                    if (round >= 128) {
+                        std.debug.print("[STAGE5 C1 DEBUG] Round {}:\n", .{round});
+                        std.debug.print("  c1_direct (combined_coeffs[1]) = {any}\n", .{combined_coeffs[1].toBytes()});
+                        std.debug.print("  c1_recovered (from hint)       = {any}\n", .{c1_recovered.toBytes()});
+                        std.debug.print("  hint (current_batched_claim)   = {any}\n", .{current_batched_claim.toBytes()});
+                        std.debug.print("  c1_direct == c1_recovered: {}\n", .{combined_coeffs[1].eql(c1_recovered)});
+
+                        // Compute what the hint SHOULD be if coefficients are correct:
+                        // hint_expected = p(0) + p(1) = 2*c0 + c1 + c2 + ... + c_d
+                        var hint_expected = combined_coeffs[0].add(combined_coeffs[0]); // 2*c0
+                        for (1..combined_coeffs.len) |i| {
+                            hint_expected = hint_expected.add(combined_coeffs[i]);
+                        }
+                        std.debug.print("  hint_expected (2*c0+c1+c2+...) = {any}\n", .{hint_expected.toBytes()});
+                        std.debug.print("  hint == hint_expected: {}\n", .{current_batched_claim.eql(hint_expected)});
+                    }
+
+                    // Evaluate using Horner's method with c1_recovered (matching verifier)
+                    // p(r) = c0 + r*c1 + r²*c2 + ...
+                    // = c0 + r*(c1 + r*(c2 + r*(c3 + ...)))
+                    var eval_result = combined_coeffs[combined_coeffs.len - 1]; // c_d (highest coeff)
                     var i_val = combined_coeffs.len - 1;
                     while (i_val > 1) {
                         i_val -= 1;
+                        // For index 1, use c1_recovered
                         if (i_val == 1) {
                             eval_result = eval_result.mulHiBigIntU128(challenge.limbs).add(c1_recovered);
                         } else {
                             eval_result = eval_result.mulHiBigIntU128(challenge.limbs).add(combined_coeffs[i_val]);
                         }
                     }
-                    eval_result = eval_result.mulHiBigIntU128(challenge.limbs).add(combined_coeffs[0]);
+                    eval_result = eval_result.mulHiBigIntU128(challenge.limbs).add(combined_coeffs[0]); // add c0
                     current_batched_claim = eval_result;
 
                     // Skip the standard compression/serialization below

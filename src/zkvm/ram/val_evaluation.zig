@@ -157,14 +157,14 @@ pub fn IncPolynomial(comptime F: type) type {
                     continue;
                 }
 
-                // CRITICAL: Skip writes to termination/panic addresses (synthetic writes).
-                // Jolt does NOT include these in the trace - they are set directly in final memory.
-                if (memory_layout) |ml| {
-                    if (access.address == ml.termination or access.address == ml.panic) {
-                        std.debug.print("[IncPolynomial] Skipping SYNTHETIC write at 0x{X:0>16}: termination/panic address\n", .{access.address});
-                        continue;
-                    }
-                }
+                // NOTE: Jolt DOES include termination/panic writes in the trace.
+                // The guest program writes to the termination address via `core::ptr::write_volatile`,
+                // which is captured by the tracer as a normal RAM access. The Inc polynomial must
+                // include this write's increment (0 -> 1 = 1) for the ValFinal sumcheck to verify:
+                //   val_final(r) - val_init(r) = Σ_j inc(j) * wa(r, j)
+                //
+                // Previously we filtered these out, but that was incorrect - Jolt includes them.
+                _ = memory_layout; // unused after removing the filter
 
                 const idx = (access.address - start_address) / 8;
                 if (idx >= k) {

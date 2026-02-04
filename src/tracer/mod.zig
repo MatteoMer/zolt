@@ -373,24 +373,39 @@ pub const Emulator = struct {
     /// For programs that don't explicitly write to the termination address (e.g., programs
     /// compiled without Jolt SDK), we inject this write synthetically.
     ///
-    /// DISABLED: This synthetic write breaks compatibility with Jolt's verifier because:
-    /// 1. The R1CS witnesses don't know about this write (no Store instruction)
-    /// 2. RamAddress@SpartanOuter = 0 but RAF claim expects non-zero
-    /// Programs without termination writes should still be provable as they have no RAM ops.
+    /// Record the termination write to the termination address.
+    ///
+    /// In Jolt, the guest program writes to the termination address via `core::ptr::write_volatile`,
+    /// which gets recorded in the RAM trace as a normal store instruction. This enables the
+    /// ValFinal sumcheck to verify:
+    ///   val_final(r) - val_init(r) = Σ_j inc(j) * wa(r, j)
+    ///
+    /// For Zolt programs (e.g., bare-metal Fibonacci that don't use Jolt SDK), we inject
+    /// this termination write so that the Inc polynomial has the correct termination increment.
+    ///
+    /// NOTE: This write is recorded in the RAM trace but NOT in the R1CS trace (no Store instruction).
+    /// This is acceptable because:
+    /// - The R1CS doesn't verify RAM operations directly (that's done via memory checking)
+    /// - The termination write is only needed for the RAM polynomial consistency check
     fn recordTerminationWrite(self: *Emulator) !void {
-        _ = self;
-        // DISABLED: synthetic termination writes break Jolt compatibility
-        // const termination_addr = self.device.memory_layout.termination;
-        // const current_cycle = self.state.cycle;
-        //
-        // // Record the write: pre_value = 0, post_value = 1
-        // try self.ram.trace.recordWrite(termination_addr, 0, 1, current_cycle);
-        //
-        // std.debug.print("[TRACE] Recorded synthetic termination write: addr=0x{x:0>16}, cycle={}, pre=0, post=1\n", .{
-        //     termination_addr,
-        //     current_cycle,
-        // });
-        std.debug.print("[TRACE] Skipping synthetic termination write (disabled for Jolt compatibility)\n", .{});
+        const termination_addr = self.device.memory_layout.termination;
+        const current_cycle = self.state.cycle;
+
+        // Get the current value at termination address (should be 0 for initial state)
+        const pre_value = self.ram.memory.get(termination_addr) orelse 0;
+        const post_value: u64 = 1;
+
+        // Record the write: pre_value -> 1
+        try self.ram.trace.recordWrite(termination_addr, pre_value, post_value, current_cycle);
+
+        // Also update the memory state
+        try self.ram.memory.put(self.allocator, termination_addr, post_value);
+
+        std.debug.print("[TRACE] Recorded termination write: addr=0x{x:0>16}, cycle={}, pre={}, post=1\n", .{
+            termination_addr,
+            current_cycle,
+            pre_value,
+        });
     }
 
     /// Fetch instruction from memory, handling compressed instructions

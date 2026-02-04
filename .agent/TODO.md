@@ -1,51 +1,50 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 51+ - Stage 4 Transcript Divergence
+## Status: Session 51+ - Transcript Divergence Investigation
 
 ## Current Investigation - Stage 4 Verification Failure
 
-### What We Know
+### Key Finding: Transcript Diverges Early
 
-1. **Stage 3 passes** - The r_cycle values from Stage 3 match correctly
-2. **evaluateCubicAtChallengeFromEvals FIXED** - Now uses toomCookToCoeffs instead of wrong Lagrange points
-3. **Round polynomial coefficients MATCH** - Zolt's c0, c2, c3 match what Jolt reads for Round 0
-4. **But challenges DIVERGE** - Zolt computes different challenge from same coefficients
+The root cause of Stage 4 failure is that the transcript diverges much earlier than Stage 4:
 
-### The Root Cause
+1. **Stage 3 challenges don't match**:
+   - Jolt Stage 3 Round 0: `[dc, b1, f1, 16, ...]`
+   - Zolt Stage 3 Round 0: `[11, 90, 20, c3, ...]` (completely different!)
 
-The transcript state at Stage 4 start is different between Zolt and Jolt:
-- Jolt Stage 4 batching coeff[0]: `[53, dd, 21, 20, ...]`
-- Zolt Stage 4 batching coeff[0]: `[4b, fe, 92, ...]` (different!)
+2. **Stage 1 challenges are different** (need to verify)
 
-This means the transcript diverged BEFORE Stage 4's first round polynomial was appended.
+3. **Stage 4 batching coefficients don't match** (consequence of earlier divergence):
+   - Jolt: `[53, dd, 21, 20, ...]`
+   - Zolt: different
 
-### Possible Sources of Divergence
+### What Was Fixed This Session
 
-1. **Stage 3 sumcheck round polynomials** - might have different coefficients
-2. **Stage 3 final claims** - might be different
-3. **Input claims for Stage 4** - Already verified they match for RegistersRWC input
+1. **`evaluateCubicAtChallengeFromEvals`** - Was using Lagrange interpolation for points {0, 1, 2, 3}, but input is in Toom-Cook format `[p(0), p(1), p(2), p_inf]`. Now correctly converts to coefficients using `toomCookToCoeffs` first.
 
-### Key Finding: Coefficients Match But Transcript Diverges
+2. **Stage 4 Round 0 coefficients** - Verified that Zolt's c0, c2, c3 values MATCH what Jolt reads. The polynomial computation itself is correct.
 
-Looking at Jolt's Stage 4 Round 0 coefficients:
+### Root Cause Analysis
+
+The transcript includes all proof data from all stages. If any earlier stage produces different polynomial coefficients, the transcript state diverges and all subsequent challenges differ.
+
+**Likely sources of divergence:**
+1. Stage 1 (R1CS sumcheck) - polynomial coefficients might differ
+2. Stage 2 (Product virtualization) - polynomial coefficients might differ
+3. Stage 3 (Lasso lookup) - polynomial coefficients might differ
+4. Or earlier: preprocessing data, initial commitments, etc.
+
+### How to Debug
+
+Need to compare Zolt and Jolt round polynomial coefficients starting from Stage 1 Round 0:
+
+```bash
+# Get Zolt's Stage 1 Round 0 coefficients
+./zig-out/bin/zolt prove ... 2>&1 | grep "STAGE1_ROUND_0"
+
+# Compare with what Jolt verifier reads from proof
+# (need to add debug output in Jolt's sumcheck verifier for Stage 1)
 ```
-[0]: [2d, 33, 27, 97, 4c, 65, 6f, 11, ...] = c0
-[1]: [c4, 63, ef, aa, 26, a1, 4c, 9f, ...] = c2
-[2]: [bf, 56, 16, 45, 1d, c8, e6, e3, ...] = c3
-```
-
-Zolt's coefficients (from full_coeffs):
-- c0 = [2d, 33, 27, 97, ...] ✓ MATCHES
-- c2 = [c4, 63, ef, aa, ...] ✓ MATCHES
-
-But the challenges differ because the transcript state BEFORE appending these coefficients is already different.
-
-### Next Steps
-
-1. Check Stage 3's round polynomial coefficients - do they match?
-2. Check Stage 3's output claims - do they match?
-3. Find where transcript diverges between Zolt and Jolt
-4. Fix the divergence source
 
 ### Test Commands
 
@@ -60,12 +59,23 @@ zig build -Doptimize=ReleaseFast
 cd /home/vivado/projects/jolt && cargo test -p jolt-core --features zolt-debug --lib test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
 
-## Completed This Session
+### Key Files
 
-1. Fixed `evaluateCubicAtChallengeFromEvals` - was using wrong Lagrange interpolation points (0,1,2,3) instead of Toom-Cook format (p(0), p(1), p(2), p_inf)
-2. Verified Stage 4 Round 0 coefficients match what Jolt expects
-3. Identified that transcript divergence happens BEFORE Stage 4 Round 0
+- `/home/vivado/projects/zolt/src/zkvm/proof_converter.zig` - All stage proof generation
+- `/home/vivado/projects/zolt/src/zkvm/spartan/stage4_gruen_prover.zig` - Stage 4 sumcheck
+- `/home/vivado/projects/jolt/jolt-core/src/subprotocols/sumcheck.rs` - Jolt sumcheck verifier
+
+## Next Session Should Focus On
+
+1. Add debug output to compare Stage 1 Round 0 coefficients between Zolt and Jolt
+2. Find the first round where coefficients diverge
+3. Fix that stage's polynomial computation
+4. Repeat until all stages match
 
 ## SESSION_ENDING
 
-Context running low. The key finding is that the round polynomial coefficients themselves are correct, but the transcript state has already diverged before Stage 4 starts. Next session should focus on finding where the transcript divergence originates (likely in Stage 3).
+Substantial progress made:
+- Fixed evaluateCubicAtChallengeFromEvals bug
+- Confirmed Stage 4 polynomial coefficients are correct
+- Identified that transcript diverges before Stage 4 (likely Stage 1, 2, or 3)
+- Next step is to find which stage first produces wrong coefficients

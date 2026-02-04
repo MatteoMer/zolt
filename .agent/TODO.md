@@ -1,50 +1,47 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 63 - Fixed ValFinal start_address, now debugging expected_output_claim
+## Status: Session 65 - Stage 4 FIXED, Stage 5 failing
 
 ## Current Issue
 
-Stage 4 sumcheck verification still fails with output_claim vs expected_claim mismatch.
+Stage 5 (InstructionReadRaf) sumcheck verification fails with output_claim vs expected_claim mismatch.
 
-### Progress This Session
+## Session 65 Progress
 
-**FIXED: ValFinal start_address mismatch**
-- Problem: ValFinal prover was using `RAM_START_ADDRESS` (0x80000000)
-- But Jolt's ValFinal uses `getLowestAddress()` (0x7FFF8000) to include termination bit
-- Fix: Changed ValFinal to use `getLowestAddress()` via memory_layout
-- Result: `Match val_final? true` - prover's initial claim now matches input_claim
+### Stage 4 Fix (COMPLETED)
 
-**VERIFIED: ValEvaluation working correctly**
-- `Match val_eval? true`
-- inc_claim = 0, wa_claim = 0, lt_eval computed correctly (no RAM operations)
+Fixed several critical issues in Stage 4 sumcheck:
 
-**CURRENT ISSUE: ValFinal expected_output_claim mismatch**
-- Zolt's ValFinal inc*wa = `{ 17, 181, 185, 137, ... }` (first 8 bytes)
-- Jolt's ValFinal inc*wa = `[dc, e8, fd, 7c, ...]`
-- These don't match!
+1. **ValEvaluation hint mechanism**: Changed from `p(1) = claim - p(0)` to `p(0) = claim - p(1)` to match Jolt's convention. Jolt computes `eval_at_0 = previous_claim - eval_at_1` in val_evaluation.rs.
 
-The root cause appears to be that the `inc_eval` and `wa_eval` values after Stage 4 sumcheck binding are different between Zolt and Jolt.
+2. **ValFinal polynomial evaluation**:
+   - Changed from Toom-Cook formula (expecting c3) to Lagrange interpolation through 3 points
+   - ValFinal is degree-2 (quadratic), so uses [p(0), p(1), p(2)] not [p(0), p(1), p(2), c3]
+   - Implemented `evaluateQuadraticAtChallengeFromEvals` using Lagrange basis polynomials
 
-### Analysis
+3. **ValFinal hint mechanism**: Keep actual p(2) unchanged when applying hint to p(1)
+   - Jolt's `from_evals_and_hint` takes [p(0), p(2)] and computes p(1) = claim - p(0)
+   - Then interpolates through all 3 points via Vandermonde
+   - The actual p(2) is kept, only p(1) is modified by the hint
 
-The ValFinal sumcheck proves: `Σ_j inc(j) * wa(r_address, j) = val_final(r_address) - val_init(r_address)`
+4. **ValFinal combined polynomial contribution**:
+   - ValFinal is degree-2, so c3 = 0 (no cubic term)
+   - Fixed to not add c2 (ValFinal's evals[3]) to combined_evals[3] (which expects c3)
+   - Only add weighted [p(0), p(1), p(2), 0] to combined_evals
 
-After binding through Stage 4 sumcheck challenges:
-- `inc_eval = inc(r_cycle_prime)` - inc polynomial at Stage 4's opening point
-- `wa_eval = wa(r_address, r_cycle_prime)` - wa polynomial at combined point
+### Key Files Modified
 
-The issue is that the final polynomial openings don't match what Jolt expects.
+1. `/home/vivado/projects/zolt/src/zkvm/proof_converter.zig`:
+   - Added `evaluateQuadraticAtChallengeFromEvals` function for degree-2 polynomial evaluation
+   - Fixed ValEvaluation hint: `p(0)_hint = claim - p(1)_actual`
+   - Fixed ValFinal hint: keep actual p(2), only modify p(1)
+   - Fixed ValFinal combined_evals contribution: don't add c2 to c3 slot
 
-Possible causes:
-1. Different opening point construction (r_address, r_cycle_prime)
-2. Different polynomial initialization (trace data, start_address)
-3. Different binding order or formula
+2. `/home/vivado/projects/zolt/src/zkvm/ram/val_final.zig`:
+   - Previous fix: compute actual sum after binding in `bindChallengeWithPoly`
 
-### Key Files
-
-1. `/home/vivado/projects/zolt/src/zkvm/ram/val_final.zig` - ValFinal prover
-2. `/home/vivado/projects/zolt/src/zkvm/proof_converter.zig` - Stage 4 prover, ValFinal init
-3. `/home/vivado/projects/jolt/jolt-core/src/zkvm/ram/val_final.rs` - Jolt's ValFinal expected_output_claim
+3. `/home/vivado/projects/zolt/src/zkvm/ram/val_evaluation.zig`:
+   - Previous fix: compute actual sum after binding in `bindChallengeWithPoly`
 
 ### Test Commands
 
@@ -59,16 +56,26 @@ zig build -Doptimize=ReleaseFast
 cd /home/vivado/projects/jolt && cargo test -p jolt-core --features zolt-debug --lib test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
 
-## Session 63 Summary
-
-1. Fixed ValFinal prover to use `getLowestAddress()` instead of `RAM_START_ADDRESS`
-2. ValFinal now includes termination bit contribution (at 0x7FFFC008)
-3. `Match val_final? true` - input_claim matches prover's initial claim
-4. Remaining issue: ValFinal's final polynomial openings (inc_eval, wa_eval) don't match Jolt's expected values
-
 ## Next Steps
 
-1. Debug why ValFinal's inc_eval and wa_eval after binding don't match Jolt's expectations
-2. Verify the opening point construction is correct (r_address from Stage 2, r_cycle_prime from Stage 4)
-3. Compare polynomial binding order with Jolt (LowToHigh)
-4. Test the complete fix with Jolt verification
+1. Investigate Stage 5 (InstructionReadRaf) sumcheck failure
+2. Stage 5 has 3 instances with complex polynomial structures
+3. May have similar degree/hint issues to Stage 4
+
+## Technical Notes
+
+### Polynomial Degree Issues
+- Stage 4 has mixed-degree instances: RegistersRWC (degree-3), ValEvaluation (degree-3), ValFinal (degree-2)
+- When combining, must handle different leading coefficient slots correctly
+- Degree-2 contributes 0 to c3 (cubic coefficient)
+- Degree-3 contributes actual c3 value
+
+### Hint Mechanism Variations
+- Different sumcheck instances use different hint conventions:
+  - Most use `p(1) = claim - p(0)` (hint on p(1), keep actual p(0))
+  - ValEvaluation uses `p(0) = claim - p(1)` (hint on p(0), keep actual p(1))
+  - Both satisfy sumcheck invariant `p(0) + p(1) = claim`
+
+### Polynomial Evaluation
+- Cubic (degree-3): Use Toom-Cook to coefficients, then Horner's method
+- Quadratic (degree-2): Use Lagrange interpolation through 3 points

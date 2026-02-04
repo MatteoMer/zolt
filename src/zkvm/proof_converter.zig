@@ -2284,30 +2284,29 @@ pub fn ProofConverter(comptime F: type) type {
                         // p_inf (combined_evals[3]) stays 0 for constant polynomial
                     } else {
                         // Active: use the "hint" mechanism like Jolt does
-                        // Prover computes p(0) from actual polynomial, but p(1) = claim - p(0)
+                        // CRITICAL: Jolt's ValEvaluation applies hint to p(0), NOT p(1)!
+                        // Jolt computes: eval_at_0 = previous_claim - eval_at_1
+                        // Then passes [eval_at_0, eval_at_1, eval_at_2, eval_at_inf] to from_evals_toom
                         var evals = val_eval_prover_early.computeRoundPolynomial();
+                        // evals = [p(0)_actual, p(1)_actual, p(2)_actual, p_inf_actual]
 
-                        // Apply the hint mechanism: p(1) = individual_claim - p(0)
+                        // Apply the hint mechanism: p(0) = individual_claim - p(1)
                         // This ensures p(0) + p(1) = individual_claim[1] for this instance
-                        const hint_p1 = individual_claims[1].sub(evals[0]);
-                        evals[1] = hint_p1;
+                        // Keep p(1), p(2), and p_inf from the actual polynomial
+                        const hint_p0 = individual_claims[1].sub(evals[1]);
+                        evals[0] = hint_p0;
 
-                        // Recompute p(2) to be consistent with the new p(1)
-                        // For degree-2 polynomial: p(x) = c0 + c1*x + c2*x^2
-                        // p(0) = c0, p(1) = c0 + c1 + c2, p(2) = c0 + 2*c1 + 4*c2
-                        // c1 = p(1) - p(0) - c2
-                        // p(2) = p(0) + 2*(p(1) - p(0) - c2) + 4*c2 = 2*p(1) - p(0) + 2*c2
-                        // where c2 = p_inf = evals[3]
-                        const two = F.fromU64(2);
-                        evals[2] = two.mul(hint_p1).sub(evals[0]).add(two.mul(evals[3]));
+                        // IMPORTANT: We keep evals[1], evals[2], evals[3] unchanged!
+                        // Jolt's from_evals_toom interpolates through [p(0)_hint, p(1), p(2), p_inf]
+                        // This is a degree-3 polynomial, so 4 points uniquely determine it.
 
                         val_eval_evals_opt = evals;
                         // DEBUG: Check if val_eval is contributing non-zero
                         if (round_idx == val_eval_offset) {
                             std.debug.print("[ZOLT STAGE4 DEBUG] Round {}: val_eval ACTIVATES (offset={})\n", .{round_idx, val_eval_offset});
                             std.debug.print("[ZOLT STAGE4 DEBUG]   individual_claims[1] = {any}\n", .{individual_claims[1].toBytes()[0..8]});
-                            std.debug.print("[ZOLT STAGE4 DEBUG]   val_eval_evals[0] (actual) = {any}\n", .{evals[0].toBytes()[0..8]});
-                            std.debug.print("[ZOLT STAGE4 DEBUG]   val_eval_evals[1] (hint) = {any}\n", .{hint_p1.toBytes()[0..8]});
+                            std.debug.print("[ZOLT STAGE4 DEBUG]   val_eval_evals[0] (hint) = {any}\n", .{evals[0].toBytes()[0..8]});
+                            std.debug.print("[ZOLT STAGE4 DEBUG]   val_eval_evals[1] (actual p1) = {any}\n", .{evals[1].toBytes()[0..8]});
                             const contribution = evals[0].mul(batching_coeffs[1]);
                             std.debug.print("[ZOLT STAGE4 DEBUG]   val_eval contribution p(0)*coeff = {any}\n", .{contribution.toBytes()[0..8]});
                         }
@@ -2328,21 +2327,54 @@ pub fn ProofConverter(comptime F: type) type {
                         // p_inf (combined_evals[3]) stays 0 for constant polynomial
                     } else {
                         // Active: use the "hint" mechanism like Jolt does
-                        // Prover computes p(0) from actual polynomial, but p(1) = claim - p(0)
-                        var evals = val_final_prover_early.computeRoundPolynomial();
+                        // Jolt's ValFinal sends [p(0), p(2)] and uses from_evals_and_hint which:
+                        //   - Computes p(1) = claim - p(0)
+                        //   - Interpolates through [p(0), p(1)_hinted, p(2)] via Vandermonde
+                        // This means p(2) stays the same (actual value), only p(1) is modified!
+                        const original_evals = val_final_prover_early.computeRoundPolynomial();
+                        var evals = original_evals; // Copy for modification
+                        // original_evals = [p(0)_actual, p(1)_actual, p(2)_actual, c2]
 
                         // Apply the hint mechanism: p(1) = individual_claim - p(0)
                         // This ensures p(0) + p(1) = individual_claim[2] for this instance
                         const hint_p1 = individual_claims[2].sub(evals[0]);
                         evals[1] = hint_p1;
 
-                        // Recompute p(2) to be consistent with the new p(1)
-                        // For degree-2 polynomial: p(2) = 2*p(1) - p(0) + 2*c2
-                        // where c2 = p_inf = evals[3]
-                        const two = F.fromU64(2);
-                        evals[2] = two.mul(hint_p1).sub(evals[0]).add(two.mul(evals[3]));
+                        // CRITICAL: Keep p(2) unchanged (evals[2] stays as original_evals[2])!
+                        // Jolt interpolates through [p(0), p(1)_hinted, p(2)_actual] using Vandermonde.
+                        // For degree-2, 3 points uniquely determine the polynomial.
+                        // We keep evals[2] = p(2)_actual from original computation.
+
+                        // evals[3] = c2 is no longer used in the same way, but we keep it for compatibility.
+                        // The evaluation will use the 3-point interpolation formula instead.
 
                         val_final_evals_opt = evals;
+
+                        // DEBUG: Check sumcheck invariant EVERY round
+                        const sum_01 = original_evals[0].add(original_evals[1]);
+                        const is_invariant_satisfied = sum_01.eql(individual_claims[2]);
+
+                        // Also check prover's internal claim
+                        const prover_claim = val_final_prover_early.computeInitialClaim();
+                        const prover_matches_individual = prover_claim.eql(individual_claims[2]);
+
+                        // CRITICAL DEBUG: Check if prover's sum matches its claim
+                        var prover_sum = F.zero();
+                        const eff_len = val_final_prover_early.effectiveLen();
+                        for (0..eff_len) |j| {
+                            prover_sum = prover_sum.add(val_final_prover_early.inc_evals[j].mul(val_final_prover_early.wa_evals[j]));
+                        }
+                        const sum_matches = prover_sum.eql(prover_claim);
+
+                        if (!is_invariant_satisfied or !prover_matches_individual or !sum_matches) {
+                            std.debug.print("[DEBUG] ValFinal round {}: invariant={}, prover_matches={}, sum_matches={}\n", .{round_idx, is_invariant_satisfied, prover_matches_individual, sum_matches});
+                            std.debug.print("  H(0)+H(1) (from orig evals) = {any}\n", .{sum_01.toBytes()[0..8]});
+                            std.debug.print("  prover_sum (Σ inc*wa) = {any}\n", .{prover_sum.toBytes()[0..8]});
+                            std.debug.print("  individual_claims[2] = {any}\n", .{individual_claims[2].toBytes()[0..8]});
+                            std.debug.print("  prover.current_claim = {any}\n", .{prover_claim.toBytes()[0..8]});
+                            std.debug.print("  effectiveLen = {}\n", .{eff_len});
+                        }
+
                         // DEBUG: Check if val_final is contributing non-zero
                         if (round_idx == val_final_offset) {
                             std.debug.print("[ZOLT STAGE4 DEBUG] Round {}: val_final ACTIVATES (offset={})\n", .{round_idx, val_final_offset});
@@ -2352,9 +2384,22 @@ pub fn ProofConverter(comptime F: type) type {
                             const contribution = evals[0].mul(batching_coeffs[2]);
                             std.debug.print("[ZOLT STAGE4 DEBUG]   val_final contribution p(0)*coeff = {any}\n", .{contribution.toBytes()[0..8]});
                         }
-                        for (0..4) |j| {
-                            combined_evals[j] = combined_evals[j].add(evals[j].mul(batching_coeffs[2]));
-                        }
+
+                        // ValFinal is degree-2, so for combined_evals format:
+                        // combined_evals = [p(0), p(1), p(2), c3]
+                        // For ValFinal: c3 = 0 (no cubic term!)
+                        // evals = [p(0), p(1), p(2), c2] where c2 is the quadratic coefficient
+                        //
+                        // We need to convert ValFinal's format to the combined format.
+                        // For quadratic p(x) = c0 + c1*x + c2*x^2:
+                        // To express in combined Toom-Cook format [p(0), p(1), p(2), p_inf]:
+                        // p_inf = c3 = 0 (no cubic term)
+                        // So we add 0 to combined_evals[3], not evals[3] which is c2
+                        const weighted_coeff = batching_coeffs[2];
+                        combined_evals[0] = combined_evals[0].add(evals[0].mul(weighted_coeff));
+                        combined_evals[1] = combined_evals[1].add(evals[1].mul(weighted_coeff));
+                        combined_evals[2] = combined_evals[2].add(evals[2].mul(weighted_coeff));
+                        // combined_evals[3] += 0 for ValFinal (degree-2 has no cubic term)
                     }
 
                     // Get FULL coefficients [c0, c1, c2, c3] from Toom-Cook format evals
@@ -2456,7 +2501,7 @@ pub fn ProofConverter(comptime F: type) type {
 
                     // For instance 1 (val_eval): if inactive, claim' = claim / 2
                     if (val_eval_evals_opt) |evals| {
-                        // Active: evaluate the polynomial at challenge
+                        // Active: evaluate the HINTED polynomial at challenge to get new claim
                         individual_claims[1] = evaluateCubicAtChallengeFromEvals(evals, challenge);
                         const var_idx = round_idx - val_eval_offset;
                         if (round_idx == val_eval_offset or round_idx == val_eval_offset + val_eval_rounds - 1) {
@@ -2477,8 +2522,13 @@ pub fn ProofConverter(comptime F: type) type {
 
                     // For instance 2 (val_final): if inactive, claim' = claim / 2
                     if (val_final_evals_opt) |evals| {
-                        // Active: evaluate the polynomial at challenge
-                        individual_claims[2] = evaluateCubicAtChallengeFromEvals(evals, challenge);
+                        // Active: evaluate the HINTED polynomial at challenge to get new claim
+                        // The hinted polynomial satisfies H(0) + H(1) = claim, and after evaluation
+                        // at r, we get H(r) which becomes the next claim.
+                        //
+                        // CRITICAL: ValFinal is degree-2 (quadratic), so evals[3] contains c2 (not c3)!
+                        // Use evaluateQuadraticAtChallengeFromEvals instead of evaluateCubicAtChallengeFromEvals.
+                        individual_claims[2] = evaluateQuadraticAtChallengeFromEvals(evals, challenge);
                         val_final_prover_early.bindChallengeWithPoly(challenge, evals);
                     } else {
                         // Inactive: new_claim = old_claim/2
@@ -2746,16 +2796,31 @@ pub fn ProofConverter(comptime F: type) type {
                 std.debug.print("  Match LE? {}\n\n", .{lt_eval_le.eql(val_eval_openings.lt_eval)});
 
                 const weighted_expected_0 = expected_output.mul(batching_coeffs[0]);
+                std.debug.print("[DEBUG] weighted_expected_0 (LE FULL) = {any}\n", .{weighted_expected_0.toBytes()});
                 const expected_1 = val_eval_openings.inc_eval.mul(val_eval_openings.wa_eval).mul(val_eval_openings.lt_eval);
                 const weighted_expected_1 = expected_1.mul(batching_coeffs[1]);
+                std.debug.print("[DEBUG] weighted_expected_1 (LE FULL) = {any}\n", .{weighted_expected_1.toBytes()});
                 const expected_2 = val_final_openings.inc_eval.mul(val_final_openings.wa_eval);
                 const weighted_expected_2 = expected_2.mul(batching_coeffs[2]);
+                std.debug.print("[DEBUG] weighted_expected_2 (LE FULL) = {any}\n", .{weighted_expected_2.toBytes()});
 
                 // Debug: Print individual openings for Instance 2 (ValFinal)
                 std.debug.print("\n[ZOLT STAGE4 VALFINAL DEBUG]\n", .{});
                 std.debug.print("  val_final_openings.inc_eval = {any}\n", .{val_final_openings.inc_eval.toBytesBE()});
                 std.debug.print("  val_final_openings.wa_eval = {any}\n", .{val_final_openings.wa_eval.toBytesBE()});
                 const total_expected = weighted_expected_0.add(weighted_expected_1).add(weighted_expected_2);
+                std.debug.print("[DEBUG] total_expected (LE FULL) = {any}\n", .{total_expected.toBytes()});
+
+                // Also print as hex for direct comparison with Jolt
+                const total_le = total_expected.toBytes();
+                std.debug.print("[DEBUG] total_expected HEX (LE): ", .{});
+                for (total_le) |b| std.debug.print("{x:0>2} ", .{b});
+                std.debug.print("\n", .{});
+
+                std.debug.print("[DEBUG] batched_claim HEX (LE): ", .{});
+                const batched_le = batched_claim.toBytes();
+                for (batched_le) |b| std.debug.print("{x:0>2} ", .{b});
+                std.debug.print("\n", .{});
 
                 std.debug.print("\n[ZOLT STAGE4 VERIFY CHECK]\n", .{});
                 std.debug.print("  batched_claim (sumcheck output) = {any}\n", .{batched_claim.toBytesBE()});
@@ -4752,7 +4817,7 @@ pub fn ProofConverter(comptime F: type) type {
         }
 
         /// Evaluate cubic polynomial at a challenge point from Toom-Cook evaluations
-        /// Input: evals = [p(0), p(1), p(2), p_inf] where p_inf is the leading coefficient
+        /// Input: evals = [p(0), p(1), p(2), p_inf] where p_inf is the leading coefficient c3
         fn evaluateCubicAtChallengeFromEvals(evals: [4]F, x: F) F {
             // Convert Toom-Cook format to coefficients first
             // evals = [p(0), p(1), p(2), p_inf] where p_inf = c3
@@ -4764,6 +4829,44 @@ pub fn ProofConverter(comptime F: type) type {
             result = result.mul(x).add(coeffs[1]);
             result = result.mul(x).add(coeffs[0]);
             return result;
+        }
+
+        /// Evaluate quadratic polynomial at a challenge point using Lagrange interpolation
+        /// Input: evals = [p(0), p(1), p(2), _] where only the first 3 are used
+        ///
+        /// For ValFinal (degree-2 polynomial), we use Lagrange interpolation through 3 points
+        /// [p(0), p(1), p(2)] at x = 0, 1, 2. This matches Jolt's from_evals_and_hint which
+        /// uses Vandermonde interpolation through 3 points.
+        ///
+        /// Lagrange basis polynomials for points 0, 1, 2:
+        /// L_0(x) = (x-1)(x-2) / ((0-1)(0-2)) = (x-1)(x-2) / 2
+        /// L_1(x) = (x-0)(x-2) / ((1-0)(1-2)) = x(x-2) / (-1) = x(2-x)
+        /// L_2(x) = (x-0)(x-1) / ((2-0)(2-1)) = x(x-1) / 2
+        ///
+        /// p(x) = p(0)*L_0(x) + p(1)*L_1(x) + p(2)*L_2(x)
+        fn evaluateQuadraticAtChallengeFromEvals(evals: [4]F, x: F) F {
+            const p0 = evals[0];
+            const p1 = evals[1];
+            const p2 = evals[2];
+
+            const one = F.one();
+            const two = F.fromU64(2);
+            const inv2 = two.inverse().?;
+
+            // L_0(x) = (x-1)(x-2) / 2
+            const x_minus_1 = x.sub(one);
+            const x_minus_2 = x.sub(two);
+            const L_0 = x_minus_1.mul(x_minus_2).mul(inv2);
+
+            // L_1(x) = x(2-x) = x(2-x)
+            const two_minus_x = two.sub(x);
+            const L_1 = x.mul(two_minus_x);
+
+            // L_2(x) = x(x-1) / 2
+            const L_2 = x.mul(x_minus_1).mul(inv2);
+
+            // p(x) = p(0)*L_0(x) + p(1)*L_1(x) + p(2)*L_2(x)
+            return p0.mul(L_0).add(p1.mul(L_1)).add(p2.mul(L_2));
         }
 
         /// Create a UniSkipFirstRoundProof for Stage 2 (degree-12 polynomial)

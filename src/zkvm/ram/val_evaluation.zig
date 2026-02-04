@@ -695,20 +695,21 @@ pub fn ValEvaluationProver(comptime F: type) type {
                 self.lt_evals[i] = F.zero();
             }
 
-            // Update current claim by evaluating the polynomial at r
-            // round_poly is in Toom-Cook format: [p(0), p(1), p(2), p_inf] where p_inf = c3
-            // Convert to coefficients and evaluate at r
-            const poly_mod = @import("../../poly/mod.zig");
-            const coeffs = poly_mod.UniPoly(F).toomCookToCoeffs(round_poly);
-
-            // Evaluate p(r) = c0 + c1*r + c2*r^2 + c3*r^3 using Horner's method
-            var result = coeffs[3];
-            result = result.mul(r).add(coeffs[2]);
-            result = result.mul(r).add(coeffs[1]);
-            result = result.mul(r).add(coeffs[0]);
-            self.current_claim = result;
+            _ = round_poly; // The round_poly is only used for the transcript, not for internal claim tracking
 
             self.round += 1;
+
+            // CRITICAL FIX: After binding, the new claim is the actual sum of products over the bound arrays.
+            // The round_poly parameter contains the hinted polynomial (for the transcript), but the
+            // prover's internal claim must track the actual polynomial sum: Σ inc[j]*wa[j]*lt[j]
+            // This is because the hint mechanism modifies H(1) = claim - H(0) for the sumcheck invariant,
+            // but the actual polynomial arrays are independent of this hint.
+            var new_claim = F.zero();
+            const new_len = self.effectiveLen();
+            for (0..new_len) |j| {
+                new_claim = new_claim.add(self.inc_evals[j].mul(self.wa_evals[j]).mul(self.lt_evals[j]));
+            }
+            self.current_claim = new_claim;
         }
 
         /// Bind the current variable to challenge r (DEPRECATED - use bindChallengeWithPoly)

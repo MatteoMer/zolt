@@ -1995,13 +1995,17 @@ pub fn ProofConverter(comptime F: type) type {
 
                 // Initialize val_eval prover to get its polynomial sum
                 const trace_len = trace.steps.items.len;
+                // CRITICAL FIX: Use r_cycle_be for the LT polynomial, not r_cycle_le!
+                // Jolt's verifier computes LT(r, r_cycle) where both are in BIG_ENDIAN.
+                // The r_cycle comes from the RamVal opening point which is stored in BE.
+                // Using r_cycle_le produces a different LT value because LT is not symmetric.
                 const val_eval_params_early = try ram.ValEvaluationParams(F).init(
                     self.allocator,
                     init_eval_for_val_eval, // Use the correct init_eval computed at RWC r_address
                     trace_len,
                     ram_K,
-                    r_address_le,
-                    r_cycle_le,
+                    r_address_le, // r_address uses LE for eq polynomial (symmetric)
+                    r_cycle_be, // FIXED: Use BE for LT polynomial (not symmetric)
                 );
                 // CRITICAL: Use initWithLayout to filter out synthetic termination/panic writes.
                 // This matches Jolt's behavior where these bits are set directly in final memory

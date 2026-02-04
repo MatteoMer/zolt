@@ -1,55 +1,67 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 58 - Investigating Opening Claims Endianness
+## Status: Session 60 - Fixed LT Polynomial, Investigating r_cycle Mismatch
 
-## Progress This Session
+## Current Issue
 
-### Key Fixes Applied
+Stage 4 sumcheck verification fails. After fixing the LT polynomial to use BE formula, the lt_eval values still don't match between Zolt and Jolt.
 
-1. **Fixed val_evaluation.zig** - Changed polynomial format from 4-point evaluation to Toom-Cook format
-   - Updated `computeRoundPolynomial()` to compute `p_inf = c3`
-   - Updated `bindChallengeWithPoly()` to use `toomCookToCoeffs()` for claim evaluation
+### Changes Made This Session
 
-2. **Fixed val_final.zig** - Changed polynomial format to Toom-Cook format
-   - Updated `computeRoundPolynomial()` to compute `p_inf = c2`
-   - Updated `bindChallengeWithPoly()` to use `toomCookToCoeffs()` for claim evaluation
-   - Fixed `getFinalClaim()` to return `current_claim`
+1. **Fixed LT polynomial to use BIG_ENDIAN formula** (val_evaluation.zig):
+   - Rewrote `LtPolynomial` to precompute evaluations using Jolt's algorithm
+   - Changed `init` to take r_cycle in BE order
+   - Updated `evaluateAtIndex` to use the precomputed evals table
 
-### Results After Fix
-- Stage 4 sumcheck passes internal consistency check:
-  - `val_eval claims match? true`
-  - `val_final claims match? true`
-  - `prover_expected == batched_claim? true`
+2. **Changed r_cycle passed to ValEvaluation** (proof_converter.zig):
+   - Now passes `r_cycle_be` instead of `r_cycle_le`
+   - This should match Jolt's verifier which uses BE for LT computation
 
-### Current Issue: Byte Order Mismatch
+### Debug Output Analysis
 
-The opening claims appear to have correct VALUES but incorrect BYTE ORDER:
+**What MATCHES:**
+1. Zolt's lt_eval_computed using Jolt formula matches lt_eval_prover (from binding)
+2. Stage 2 challenges appear to produce correct r_cycle_be values
 
-**Zolt's inc_eval (via toBytesBE):** `04 07 11 3e 1e 94 48 24 ...`
-**Jolt expects:** `9e da 3f 0c e7 c9 73 54 ...`
+**What DOESN'T MATCH:**
+1. Jolt's opening_point for RamVal @ RamReadWriteChecking:
+   - Jolt shows point.r[0] = [00...00, 0d, 8d, 89, b0, c0, ef, 00, b0, 84, a4, 8a, 1b, 0b, 14, 34, 07]
+   - Zolt's Stage 2 Round 7: { 118, 202, 103, 155, ...} = { 0x76, 0xCA, 0x67, 0x9B, ...}
+   - These are DIFFERENT!
 
-These are REVERSED! If we reverse Zolt's output, it matches Jolt's expectation.
+2. ValEvaluation's lt_eval:
+   - Jolt verifier: [2e, 62, dc, c0, ...]
+   - Zolt prover: { 32, 215, 253, 66, ...} = { 0x20, 0xD7, 0xFD, 0x42, ...}
+   - These are DIFFERENT!
 
-**Investigation needed:**
-- The `toBytesBE()` function in field/mod.zig appears correct
-- But the actual output is in little-endian order
-- Need to debug why bytes are reversed
+### Root Cause Hypothesis
 
-### Potential Fix
-Either:
-1. Fix `toBytesBE()` to actually output big-endian
-2. Or adjust how opening claims are serialized to proof format
+The opening_point stored in the verifier's accumulator for RamVal @ RamReadWriteChecking has different values than what Zolt computed from Stage 2 challenges. This affects:
+1. The r_cycle used by ValEvaluation's verifier for LT computation
+2. The r_address used for various eq polynomial computations
 
-## Files Modified This Session
+### Puzzling Observation
 
-- `/home/vivado/projects/zolt/src/zkvm/ram/val_evaluation.zig`
-- `/home/vivado/projects/zolt/src/zkvm/ram/val_final.zig`
+If the Stage 2 challenges were different between Zolt and Jolt, the sumcheck verification would fail at Stage 2. But it fails at Stage 4, meaning Stages 1-3 passed.
 
-## Next Steps
+Possible explanations:
+1. The opening_point is reconstructed from a different source than the sumcheck challenges
+2. There's additional processing that differs between prover and verifier
+3. The debug output is misleading in some way
 
-1. **Debug `toBytesBE()` function** - Add detailed tracing to understand byte order
-2. **Fix byte ordering** - Ensure opening claims are serialized in correct endianness
-3. **Re-test with Jolt verifier** - Verify Stage 4 passes after fix
+### Next Steps
+
+1. **Add more debug to Jolt** to see what r_cycle the verifier uses in ValEvaluation's expected_output_claim
+2. **Compare Stage 2 challenges byte-by-byte** between Zolt and Jolt
+3. **Check if opening_points are stored/retrieved correctly** in the accumulator
+4. **Verify the normalize_opening_point logic** matches between Zolt and Jolt
+
+### Key Files
+
+1. `/home/vivado/projects/zolt/src/zkvm/ram/val_evaluation.zig` - Fixed LT polynomial
+2. `/home/vivado/projects/zolt/src/zkvm/proof_converter.zig` - Stage 4 prover, r_cycle handling
+3. `/home/vivado/projects/jolt/jolt-core/src/zkvm/ram/val_evaluation.rs` - Jolt's expected_output_claim
+4. `/home/vivado/projects/jolt/jolt-core/src/zkvm/ram/read_write_checking.rs` - normalize_opening_point
 
 ### Test Commands
 
@@ -64,10 +76,8 @@ zig build -Doptimize=ReleaseFast
 cd /home/vivado/projects/jolt && cargo test -p jolt-core --features zolt-debug --lib test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
 
-## SESSION_ENDING
+## Session 60 Summary
 
-Ending session due to context length. Key progress:
-- Polynomial format consistency fixed (Toom-Cook format for all instances)
-- Internal sumcheck verification passes
-- Identified byte order mismatch in opening claims
-- Next: Debug and fix `toBytesBE()` function
+Fixed the LT polynomial implementation to use Jolt's BE formula with precomputed evaluations. Changed ValEvaluation prover to use r_cycle_be instead of r_cycle_le.
+
+The lt_eval values still don't match because the r_cycle used by Jolt's verifier (from the stored opening_point) differs from what Zolt computes from Stage 2 challenges. Need to investigate why the opening_points differ.

@@ -315,104 +315,100 @@ pub fn WaPolynomial(comptime F: type) type {
 }
 
 /// Less-Than polynomial: LT(j, r_cycle) = 1 iff j < r_cycle as bitstrings
+///
+/// CRITICAL: r_cycle must be in BIG_ENDIAN order (r_cycle[0] = MSB coefficient).
+/// This matches Jolt's convention where LT is defined with MSB-first comparison.
+///
+/// The MLE is: LT(x, y) = Σ_i (1 - x_i) · y_i · eq(x[i+1:], y[i+1:])
+/// where i runs from MSB to LSB.
 pub fn LtPolynomial(comptime F: type) type {
     return struct {
         const Self = @This();
 
-        /// Target point r_cycle
-        r_cycle: []const F,
+        /// Target point r_cycle in BIG_ENDIAN order (r_cycle[0] = MSB)
+        r_cycle_be: []const F,
+        /// Precomputed evaluations LT(j, r_cycle_be) for all j from 0 to 2^n - 1
+        /// This matches Jolt's lt_evals construction
+        evals: []F,
         /// Number of cycle variables
         num_vars: usize,
         allocator: Allocator,
 
-        pub fn init(allocator: Allocator, r_cycle: []const F) !Self {
-            const r_copy = try allocator.alloc(F, r_cycle.len);
-            @memcpy(r_copy, r_cycle);
+        /// Initialize with r_cycle in BIG_ENDIAN order (r_cycle[0] = MSB)
+        /// This precomputes all LT(j, r_cycle) values using Jolt's algorithm.
+        pub fn init(allocator: Allocator, r_cycle_be: []const F) !Self {
+            const n = r_cycle_be.len;
+            const size = @as(usize, 1) << @intCast(n);
+
+            const r_copy = try allocator.alloc(F, n);
+            @memcpy(r_copy, r_cycle_be);
+
+            const evals = try allocator.alloc(F, size);
+
+            // Initialize all evals to zero
+            for (evals) |*e| {
+                e.* = F.zero();
+            }
+
+            // Build LT evaluations using Jolt's algorithm:
+            // for (i, r) in r.r.iter().rev().enumerate() {
+            //     let (evals_left, evals_right) = evals.split_at_mut(1 << i);
+            //     zip(evals_left, evals_right).for_each(|(x, y)| {
+            //         *y = *x * r;
+            //         *x += *r - *y;
+            //     });
+            // }
+            //
+            // r.r.iter().rev() means we iterate from r_cycle_be[n-1] (LSB) to r_cycle_be[0] (MSB)
+            // i=0 corresponds to r_cycle_be[n-1], i=1 to r_cycle_be[n-2], etc.
+            for (0..n) |i| {
+                // r_cycle_be is BE, so r_cycle_be[n-1-i] is the coefficient for bit position i (LSB=0)
+                const r = r_cycle_be[n - 1 - i];
+                const half = @as(usize, 1) << @intCast(i);
+
+                // Split evals at position 'half' and process pairs
+                var idx: usize = 0;
+                while (idx < half) : (idx += 1) {
+                    const left_idx = idx;
+                    const right_idx = idx + half;
+
+                    const old_x = evals[left_idx];
+                    // y = old_x * r
+                    evals[right_idx] = old_x.mul(r);
+                    // x = old_x + r - y = old_x + r - old_x * r = old_x * (1 - r) + r
+                    evals[left_idx] = old_x.add(r).sub(evals[right_idx]);
+                }
+            }
 
             return Self{
-                .r_cycle = r_copy,
-                .num_vars = r_cycle.len,
+                .r_cycle_be = r_copy,
+                .evals = evals,
+                .num_vars = n,
                 .allocator = allocator,
             };
         }
 
         pub fn deinit(self: *Self) void {
-            self.allocator.free(self.r_cycle);
+            self.allocator.free(self.r_cycle_be);
+            self.allocator.free(self.evals);
         }
 
-        /// Evaluate LT(j, r_cycle)
-        /// LT(x, y) = 1 iff x < y, computed as MLE over bit comparisons
+        /// Get LT(j, r_cycle) from precomputed table
         pub fn evaluateAtIndex(self: *const Self, j: usize) F {
-            // LT(j, r) = Σ_{i} (1-j_i) * r_i * Π_{k>i} eq(j_k, r_k)
-            // where j_i is bit i of j (LSB = bit 0)
-            var result = F.zero();
-
-            for (0..self.num_vars) |i| {
-                // Check if bit i of j is 0 and r[i] contributes
-                const ji = (j >> @intCast(i)) & 1;
-                if (ji == 0) {
-                    // Contribution: r[i] * Π_{k>i} eq(j_k, r_k)
-                    var contrib = self.r_cycle[i];
-
-                    // Multiply by eq for higher bits (more significant than position i)
-                    for ((i + 1)..self.num_vars) |k| {
-                        const jk = (j >> @intCast(k)) & 1;
-                        const rk = self.r_cycle[k];
-                        if (jk == 1) {
-                            contrib = contrib.mul(rk);
-                        } else {
-                            contrib = contrib.mul(F.one().sub(rk));
-                        }
-                    }
-
-                    result = result.add(contrib);
-                }
-            }
-
-            return result;
+            if (j >= self.evals.len) return F.zero();
+            return self.evals[j];
         }
 
         /// Debug: evaluate LT and print intermediate values
+        /// Uses the old formula for comparison - not used in production
         pub fn evaluateAtIndexDebug(self: *const Self, j: usize) F {
-            var result = F.zero();
-            std.debug.print("[LT DEBUG] evaluateAtIndex(j={}) num_vars={}\n", .{ j, self.num_vars });
-
-            for (0..self.num_vars) |i| {
-                const ji = (j >> @intCast(i)) & 1;
-                std.debug.print("  bit[{}] of j = {}\n", .{ i, ji });
-                if (ji == 0) {
-                    var contrib = self.r_cycle[i];
-                    std.debug.print("  i={}: r_cycle[{}] = {any}\n", .{ i, i, self.r_cycle[i].toBytes()[0..8] });
-
-                    for ((i + 1)..self.num_vars) |k| {
-                        const jk = (j >> @intCast(k)) & 1;
-                        const rk = self.r_cycle[k];
-                        const eq_factor = if (jk == 1) rk else F.one().sub(rk);
-                        std.debug.print("    k={}: j_k={}, r_cycle[k]={any}, eq_factor={any}\n", .{ k, jk, rk.toBytes()[0..8], eq_factor.toBytes()[0..8] });
-                        contrib = contrib.mul(eq_factor);
-                    }
-
-                    std.debug.print("  i={}: contribution = {any}\n", .{ i, contrib.toBytes()[0..8] });
-                    result = result.add(contrib);
-                }
-            }
-
-            std.debug.print("[LT DEBUG] final result = {any}\n", .{result.toBytes()[0..8]});
+            const result = self.evaluateAtIndex(j);
+            std.debug.print("[LT DEBUG] evaluateAtIndex(j={}) num_vars={} result={any}\n", .{
+                j,
+                self.num_vars,
+                result.toBytes()[0..8],
+            });
             return result;
-        }
-
-        /// Compute LT polynomial evaluations for sumcheck
-        /// Returns [LT(j, r_cycle) for j with first variable bound to each of 0,1,2,...]
-        pub fn sumcheckEvals(self: *const Self, base_index: usize, degree: usize) []F {
-            _ = degree;
-            const result: [4]F = undefined;
-
-            for (0..4) |d| {
-                const idx = base_index + d * (self.evals.len / 2);
-                result[d] = self.evaluateAtIndex(idx);
-            }
-
-            return result[0..4];
         }
     };
 }
@@ -519,7 +515,8 @@ pub fn ValEvaluationProver(comptime F: type) type {
             }
 
             // Debug: print r_address used by this prover (first and last 4)
-            std.debug.print("[VALEVAL_INIT] r_address from params, len={} (LE):\n", .{params.r_address.len});
+            // Note: r_address uses LE for eq polynomial (symmetric, order doesn't matter)
+            std.debug.print("[VALEVAL_INIT] r_address from params, len={}:\n", .{params.r_address.len});
             for (0..@min(4, params.r_address.len)) |i| {
                 std.debug.print("  r_address[{}] = {any}\n", .{ i, params.r_address[i].toBytes()[0..8] });
             }
@@ -535,23 +532,31 @@ pub fn ValEvaluationProver(comptime F: type) type {
             std.debug.print("  lt_evals[0] = {any}\n", .{lt_evals[0].toBytes()[0..8]});
             std.debug.print("  lt_evals[1] = {any}\n", .{lt_evals[1].toBytes()[0..8]});
             std.debug.print("  lt_evals[128] = {any}\n", .{if (n > 128) lt_evals[128].toBytes()[0..8] else lt_evals[0].toBytes()[0..8]});
-            std.debug.print("  r_cycle values (from params):\n", .{});
+            std.debug.print("  r_cycle values (from params, BIG_ENDIAN - r[0]=MSB):\n", .{});
             for (0..@min(3, params.r_cycle.len)) |i| {
-                std.debug.print("    r_cycle[{}] = {any}\n", .{ i, params.r_cycle[i].toBytes()[0..8] });
+                std.debug.print("    r_cycle_be[{}] = {any}\n", .{ i, params.r_cycle[i].toBytes()[0..8] });
             }
-            // Verify LT(0, r_cycle) computation
-            // For j=0: LT(0, r) = r[0]*(1-r[1])*(1-r[2])*...*(1-r[n-1]) + r[1]*(1-r[2])*...*(1-r[n-1]) + ...
-            // Actually just print the formula computation:
-            std.debug.print("  Verifying LT(0, r_cycle) directly:\n", .{});
+            // Verify LT(0, r_cycle_be) using Jolt's verifier formula:
+            // LT(0, r) = Σ_i (1 - 0_i) · r_i · eq(0[i+1:], r[i+1:])
+            //          = Σ_i r_i · (1-r[i+1]) · (1-r[i+2]) · ... · (1-r[n-1])
+            // where i runs from MSB (index 0 in BE) to LSB
+            std.debug.print("  Verifying LT(0, r_cycle_be) directly (BE formula):\n", .{});
             var lt_0_direct = F.zero();
-            for (0..num_vars) |i| {
-                var contrib = params.r_cycle[i];
-                for ((i + 1)..num_vars) |k| {
-                    contrib = contrib.mul(F.one().sub(params.r_cycle[k]));
-                }
-                lt_0_direct = lt_0_direct.add(contrib);
+            var eq_suffix = F.one();
+            // Iterate from MSB (index 0) to LSB (index n-1)
+            // But we need eq(0[i+1:], r[i+1:]) which is the product for indices > i
+            // So we iterate backwards to compute the running product
+            var i: usize = num_vars;
+            while (i > 0) {
+                i -= 1;
+                // At position i (BE: 0=MSB), contribution is r[i] * eq_suffix
+                // For j=0, all bits are 0, so (1 - j_i) = 1
+                lt_0_direct = lt_0_direct.add(params.r_cycle[i].mul(eq_suffix));
+                // Update eq_suffix for next iteration (which is position i-1)
+                // eq_suffix *= eq(0, r[i]) = (1-r[i])
+                eq_suffix = eq_suffix.mul(F.one().sub(params.r_cycle[i]));
             }
-            std.debug.print("    LT(0, r_cycle) direct = {any}\n", .{lt_0_direct.toBytes()[0..8]});
+            std.debug.print("    LT(0, r_cycle_be) direct = {any}\n", .{lt_0_direct.toBytes()[0..8]});
             std.debug.print("    lt_evals[0] = {any}\n", .{lt_evals[0].toBytes()[0..8]});
             std.debug.print("    Match? {}\n", .{lt_0_direct.eql(lt_evals[0])});
 

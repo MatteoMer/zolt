@@ -595,11 +595,13 @@ pub fn ValEvaluationProver(comptime F: type) type {
             return self.current_claim;
         }
 
-        /// Compute round polynomial [p(0), p(1), p(2), p(3)]
-        /// For degree-3 sumcheck (product of 3 multilinear), we need 4 evaluations:
+        /// Compute round polynomial in Toom-Cook format [p(0), p(1), p(2), p_inf]
+        /// For degree-3 sumcheck (product of 3 multilinear), p_inf = c3 (leading coefficient).
         ///   p(x) = Σ_{j} inc(x,j) · wa(x,j) · lt(x,j)
         /// where the current variable takes value x and we sum over remaining indices.
         /// Uses LowToHigh indexing: x=0 at index 2*i, x=1 at index 2*i+1
+        ///
+        /// This matches Jolt's ValEval which uses from_evals_toom(&[eval_0, eval_1, eval_2, eval_inf]).
         pub fn computeRoundPolynomial(self: *Self) [4]F {
             var evals: [4]F = .{ F.zero(), F.zero(), F.zero(), F.zero() };
             const n = self.effectiveLen();
@@ -632,21 +634,21 @@ pub fn ValEvaluationProver(comptime F: type) type {
 
                 // For multilinear polynomial: f(x) = (1-x)*f(0) + x*f(1)
                 // f(2) = -f(0) + 2*f(1) = 2*f(1) - f(0)
-                // f(3) = -2*f(0) + 3*f(1) = 3*f(1) - 2*f(0)
                 const two = F.fromU64(2);
-                const three = F.fromU64(3);
 
-                // p(2): extrapolate each polynomial, then multiply
+                // p(2): extrapolate each polynomial to x=2, then multiply
                 const inc_2 = two.mul(inc_1).sub(inc_0);
                 const wa_2 = two.mul(wa_1).sub(wa_0);
                 const lt_2 = two.mul(lt_1).sub(lt_0);
                 evals[2] = evals[2].add(inc_2.mul(wa_2).mul(lt_2));
 
-                // p(3): extrapolate to x=3
-                const inc_3 = three.mul(inc_1).sub(two.mul(inc_0));
-                const wa_3 = three.mul(wa_1).sub(two.mul(wa_0));
-                const lt_3 = three.mul(lt_1).sub(two.mul(lt_0));
-                evals[3] = evals[3].add(inc_3.mul(wa_3).mul(lt_3));
+                // p_inf = c3 (leading coefficient) for degree-3 polynomial
+                // For product of 3 multilinears, c3 = product of slopes
+                // slope = f(1) - f(0) for each multilinear
+                const inc_slope = inc_1.sub(inc_0);
+                const wa_slope = wa_1.sub(wa_0);
+                const lt_slope = lt_1.sub(lt_0);
+                evals[3] = evals[3].add(inc_slope.mul(wa_slope).mul(lt_slope));
             }
 
             return evals;
@@ -688,26 +690,18 @@ pub fn ValEvaluationProver(comptime F: type) type {
                 self.lt_evals[i] = F.zero();
             }
 
-            // Update current claim using cubic Lagrange interpolation from 4 points
-            // For degree-3 polynomial, we need p(0), p(1), p(2), p(3) to exactly recover p(r)
-            const two = F.fromU64(2);
-            const three = F.fromU64(3);
-            const six = F.fromU64(6);
+            // Update current claim by evaluating the polynomial at r
+            // round_poly is in Toom-Cook format: [p(0), p(1), p(2), p_inf] where p_inf = c3
+            // Convert to coefficients and evaluate at r
+            const poly_mod = @import("../../poly/mod.zig");
+            const coeffs = poly_mod.UniPoly(F).toomCookToCoeffs(round_poly);
 
-            const r_minus_1 = r.sub(F.one());
-            const r_minus_2 = r.sub(two);
-            const r_minus_3 = r.sub(three);
-
-            // L0(r) = (r-1)(r-2)(r-3) / (-6)
-            const L0 = r_minus_1.mul(r_minus_2).mul(r_minus_3).mul(six.neg().inverse().?);
-            // L1(r) = r(r-2)(r-3) / 2
-            const L1 = r.mul(r_minus_2).mul(r_minus_3).mul(two.inverse().?);
-            // L2(r) = r(r-1)(r-3) / (-2)
-            const L2 = r.mul(r_minus_1).mul(r_minus_3).mul(two.neg().inverse().?);
-            // L3(r) = r(r-1)(r-2) / 6
-            const L3 = r.mul(r_minus_1).mul(r_minus_2).mul(six.inverse().?);
-
-            self.current_claim = round_poly[0].mul(L0).add(round_poly[1].mul(L1)).add(round_poly[2].mul(L2)).add(round_poly[3].mul(L3));
+            // Evaluate p(r) = c0 + c1*r + c2*r^2 + c3*r^3 using Horner's method
+            var result = coeffs[3];
+            result = result.mul(r).add(coeffs[2]);
+            result = result.mul(r).add(coeffs[1]);
+            result = result.mul(r).add(coeffs[0]);
+            self.current_claim = result;
 
             self.round += 1;
         }

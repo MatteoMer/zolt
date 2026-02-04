@@ -145,7 +145,7 @@ pub fn ValFinalProver(comptime F: type) type {
         }
 
         /// Compute round polynomial in Toom-Cook format: [p(0), p(1), p(2), p_inf]
-        /// where p_inf is the leading coefficient c2 (for degree-2 polynomial).
+        /// For degree-2 polynomial (product of 2 multilinears), p_inf = c2 (leading coefficient).
         /// Uses LowToHigh indexing: x=0 at index 2*i, x=1 at index 2*i+1
         pub fn computeRoundPolynomial(self: *Self) [4]F {
             var evals: [4]F = .{ F.zero(), F.zero(), F.zero(), F.zero() };
@@ -174,12 +174,13 @@ pub fn ValFinalProver(comptime F: type) type {
                 evals[1] = evals[1].add(inc_1.mul(wa_1));
 
                 // Extrapolate to x=2 for each polynomial, then multiply
+                // For multilinear: f(2) = 2*f(1) - f(0)
                 const inc_2 = two.mul(inc_1).sub(inc_0);
                 const wa_2 = two.mul(wa_1).sub(wa_0);
                 evals[2] = evals[2].add(inc_2.mul(wa_2));
 
-                // For Toom-Cook format, evals[3] = p_inf = c2 (leading coefficient)
-                // For product of 2 multilinear polynomials, c2 = product of slopes
+                // p_inf = c2 (leading coefficient) for degree-2 polynomial
+                // For product of 2 multilinears, c2 = product of slopes
                 // slope = f(1) - f(0) for each multilinear
                 const inc_slope = inc_1.sub(inc_0);
                 const wa_slope = wa_1.sub(wa_0);
@@ -208,24 +209,19 @@ pub fn ValFinalProver(comptime F: type) type {
                 self.wa_evals[i] = F.zero();
             }
 
-            // Update current claim using cubic interpolation (degree <= 2 is safe).
-            const two = F.fromU64(2);
-            const three = F.fromU64(3);
-            const six = F.fromU64(6);
+            // Update current claim by evaluating the polynomial at r
+            // round_poly is in Toom-Cook format: [p(0), p(1), p(2), p_inf] where p_inf = c2
+            // Convert to coefficients and evaluate at r
+            const poly_mod = @import("../../poly/mod.zig");
+            const coeffs = poly_mod.UniPoly(F).toomCookToCoeffs(round_poly);
 
-            const r_minus_1 = r.sub(F.one());
-            const r_minus_2 = r.sub(two);
-            const r_minus_3 = r.sub(three);
-
-            const L0 = r_minus_1.mul(r_minus_2).mul(r_minus_3).mul(six.neg().inverse().?);
-            const L1 = r.mul(r_minus_2).mul(r_minus_3).mul(two.inverse().?);
-            const L2 = r.mul(r_minus_1).mul(r_minus_3).mul(two.neg().inverse().?);
-            const L3 = r.mul(r_minus_1).mul(r_minus_2).mul(six.inverse().?);
-
-            self.current_claim = round_poly[0].mul(L0)
-                .add(round_poly[1].mul(L1))
-                .add(round_poly[2].mul(L2))
-                .add(round_poly[3].mul(L3));
+            // Evaluate p(r) = c0 + c1*r + c2*r^2 + c3*r^3 using Horner's method
+            // Note: For degree-2 polynomial, c3 should be 0
+            var result = coeffs[3];
+            result = result.mul(r).add(coeffs[2]);
+            result = result.mul(r).add(coeffs[1]);
+            result = result.mul(r).add(coeffs[0]);
+            self.current_claim = result;
 
             self.round += 1;
         }
@@ -236,8 +232,7 @@ pub fn ValFinalProver(comptime F: type) type {
         }
 
         pub fn getFinalClaim(self: *const Self) F {
-            if (self.inc_evals.len == 0) return F.zero();
-            return self.inc_evals[0].mul(self.wa_evals[0]);
+            return self.current_claim;
         }
 
         pub fn getFinalOpenings(self: *const Self) struct { inc_eval: F, wa_eval: F } {

@@ -2258,14 +2258,31 @@ pub fn ProofConverter(comptime F: type) type {
                         }
                         // p_inf (combined_evals[3]) stays 0 for constant polynomial
                     } else {
-                        const evals = val_eval_prover_early.computeRoundPolynomial();
+                        // Active: use the "hint" mechanism like Jolt does
+                        // Prover computes p(0) from actual polynomial, but p(1) = claim - p(0)
+                        var evals = val_eval_prover_early.computeRoundPolynomial();
+
+                        // Apply the hint mechanism: p(1) = individual_claim - p(0)
+                        // This ensures p(0) + p(1) = individual_claim[1] for this instance
+                        const hint_p1 = individual_claims[1].sub(evals[0]);
+                        evals[1] = hint_p1;
+
+                        // Recompute p(2) to be consistent with the new p(1)
+                        // For degree-2 polynomial: p(x) = c0 + c1*x + c2*x^2
+                        // p(0) = c0, p(1) = c0 + c1 + c2, p(2) = c0 + 2*c1 + 4*c2
+                        // c1 = p(1) - p(0) - c2
+                        // p(2) = p(0) + 2*(p(1) - p(0) - c2) + 4*c2 = 2*p(1) - p(0) + 2*c2
+                        // where c2 = p_inf = evals[3]
+                        const two = F.fromU64(2);
+                        evals[2] = two.mul(hint_p1).sub(evals[0]).add(two.mul(evals[3]));
+
                         val_eval_evals_opt = evals;
                         // DEBUG: Check if val_eval is contributing non-zero
                         if (round_idx == val_eval_offset) {
                             std.debug.print("[ZOLT STAGE4 DEBUG] Round {}: val_eval ACTIVATES (offset={})\n", .{round_idx, val_eval_offset});
                             std.debug.print("[ZOLT STAGE4 DEBUG]   individual_claims[1] = {any}\n", .{individual_claims[1].toBytes()[0..8]});
-                            std.debug.print("[ZOLT STAGE4 DEBUG]   val_eval_evals[0] = {any}\n", .{evals[0].toBytes()[0..8]});
-                            std.debug.print("[ZOLT STAGE4 DEBUG]   val_eval_evals[1] = {any}\n", .{evals[1].toBytes()[0..8]});
+                            std.debug.print("[ZOLT STAGE4 DEBUG]   val_eval_evals[0] (actual) = {any}\n", .{evals[0].toBytes()[0..8]});
+                            std.debug.print("[ZOLT STAGE4 DEBUG]   val_eval_evals[1] (hint) = {any}\n", .{hint_p1.toBytes()[0..8]});
                             const contribution = evals[0].mul(batching_coeffs[1]);
                             std.debug.print("[ZOLT STAGE4 DEBUG]   val_eval contribution p(0)*coeff = {any}\n", .{contribution.toBytes()[0..8]});
                         }
@@ -2285,14 +2302,28 @@ pub fn ProofConverter(comptime F: type) type {
                         }
                         // p_inf (combined_evals[3]) stays 0 for constant polynomial
                     } else {
-                        const evals = val_final_prover_early.computeRoundPolynomial();
+                        // Active: use the "hint" mechanism like Jolt does
+                        // Prover computes p(0) from actual polynomial, but p(1) = claim - p(0)
+                        var evals = val_final_prover_early.computeRoundPolynomial();
+
+                        // Apply the hint mechanism: p(1) = individual_claim - p(0)
+                        // This ensures p(0) + p(1) = individual_claim[2] for this instance
+                        const hint_p1 = individual_claims[2].sub(evals[0]);
+                        evals[1] = hint_p1;
+
+                        // Recompute p(2) to be consistent with the new p(1)
+                        // For degree-2 polynomial: p(2) = 2*p(1) - p(0) + 2*c2
+                        // where c2 = p_inf = evals[3]
+                        const two = F.fromU64(2);
+                        evals[2] = two.mul(hint_p1).sub(evals[0]).add(two.mul(evals[3]));
+
                         val_final_evals_opt = evals;
                         // DEBUG: Check if val_final is contributing non-zero
                         if (round_idx == val_final_offset) {
                             std.debug.print("[ZOLT STAGE4 DEBUG] Round {}: val_final ACTIVATES (offset={})\n", .{round_idx, val_final_offset});
                             std.debug.print("[ZOLT STAGE4 DEBUG]   individual_claims[2] = {any}\n", .{individual_claims[2].toBytes()[0..8]});
-                            std.debug.print("[ZOLT STAGE4 DEBUG]   val_final_evals[0] = {any}\n", .{evals[0].toBytes()[0..8]});
-                            std.debug.print("[ZOLT STAGE4 DEBUG]   val_final_evals[1] = {any}\n", .{evals[1].toBytes()[0..8]});
+                            std.debug.print("[ZOLT STAGE4 DEBUG]   val_final_evals[0] (actual) = {any}\n", .{evals[0].toBytes()[0..8]});
+                            std.debug.print("[ZOLT STAGE4 DEBUG]   val_final_evals[1] (hint) = {any}\n", .{hint_p1.toBytes()[0..8]});
                             const contribution = evals[0].mul(batching_coeffs[2]);
                             std.debug.print("[ZOLT STAGE4 DEBUG]   val_final contribution p(0)*coeff = {any}\n", .{contribution.toBytes()[0..8]});
                         }
@@ -2428,14 +2459,34 @@ pub fn ProofConverter(comptime F: type) type {
                         // Inactive: new_claim = old_claim/2
                         individual_claims[2] = individual_claims[2].mul(two_inv_local);
                     }
+
+                    // DEBUG: Check invariant at each round
+                    {
+                        const check_sum = batching_coeffs[0].mul(individual_claims[0])
+                            .add(batching_coeffs[1].mul(individual_claims[1]))
+                            .add(batching_coeffs[2].mul(individual_claims[2]));
+                        if (!check_sum.eql(batched_claim)) {
+                            std.debug.print("[INVARIANT BROKEN] Round {}: sum(coeff*claim) != batched_claim\n", .{round_idx});
+                            std.debug.print("[INVARIANT BROKEN]   individual_claims[0] = {any}\n", .{individual_claims[0].toBytes()[0..8]});
+                            std.debug.print("[INVARIANT BROKEN]   individual_claims[1] = {any}\n", .{individual_claims[1].toBytes()[0..8]});
+                            std.debug.print("[INVARIANT BROKEN]   individual_claims[2] = {any}\n", .{individual_claims[2].toBytes()[0..8]});
+                            std.debug.print("[INVARIANT BROKEN]   check_sum = {any}\n", .{check_sum.toBytes()[0..8]});
+                            std.debug.print("[INVARIANT BROKEN]   batched_claim = {any}\n", .{batched_claim.toBytes()[0..8]});
+                        }
+                    }
                 }
 
                 std.debug.print("[ZOLT STAGE4] Final batched_claim = {any}\n", .{batched_claim.toBytesBE()});
 
                 // DEBUG: Compare final claims
                 std.debug.print("[ZOLT STAGE4 FINAL DEBUG] regs_current_claim (poly_0 final) = {any}\n", .{regs_current_claim.toBytes()});
-                std.debug.print("[ZOLT STAGE4 FINAL DEBUG] val_eval_current_claim (poly_1 final) = {any}\n", .{val_eval_prover_early.getCurrentClaim().toBytes()});
-                std.debug.print("[ZOLT STAGE4 FINAL DEBUG] val_final_current_claim (poly_2 final) = {any}\n", .{val_final_prover_early.getFinalClaim().toBytes()});
+                std.debug.print("[ZOLT STAGE4 FINAL DEBUG] individual_claims[0] = {any}\n", .{individual_claims[0].toBytes()});
+                std.debug.print("[ZOLT STAGE4 FINAL DEBUG] val_eval_prover.getCurrentClaim() = {any}\n", .{val_eval_prover_early.getCurrentClaim().toBytes()});
+                std.debug.print("[ZOLT STAGE4 FINAL DEBUG] individual_claims[1] = {any}\n", .{individual_claims[1].toBytes()});
+                std.debug.print("[ZOLT STAGE4 FINAL DEBUG] val_eval claims match? {}\n", .{val_eval_prover_early.getCurrentClaim().eql(individual_claims[1])});
+                std.debug.print("[ZOLT STAGE4 FINAL DEBUG] val_final_prover.getFinalClaim() = {any}\n", .{val_final_prover_early.getFinalClaim().toBytes()});
+                std.debug.print("[ZOLT STAGE4 FINAL DEBUG] individual_claims[2] = {any}\n", .{individual_claims[2].toBytes()});
+                std.debug.print("[ZOLT STAGE4 FINAL DEBUG] val_final claims match? {}\n", .{val_final_prover_early.getFinalClaim().eql(individual_claims[2])});
 
                 // Compute expected sum from prover tracking
                 const prover_expected = batching_coeffs[0].mul(regs_current_claim)

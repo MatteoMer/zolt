@@ -1378,6 +1378,25 @@ pub fn ExpandingTable(comptime F: type) type {
             self.len *= 2;
         }
 
+        /// Update the table (doubles length) with new challenge r_j.
+        /// Uses LowToHigh binding:
+        ///   values[i] becomes values[i] * (1 - r_j) (contribution when NEW bit = 0)
+        ///   values[i + old_len] becomes values[i] * r_j (contribution when NEW bit = 1)
+        /// This places the OLDEST bound bit in the LSB of the index.
+        pub fn updateLowToHigh(self: *Self, r_j: F) void {
+            // LowToHigh: for each existing entry v[i]:
+            //   new[i] = v[i] * (1 - r_j)
+            //   new[i + len] = v[i] * r_j
+            const old_len = self.len;
+            for (0..old_len) |i| {
+                const v_i = self.values[i];
+                const eval_1 = r_j.mul(v_i); // v[i] * r
+                self.values[i + old_len] = eval_1; // new entry when new bit = 1
+                self.values[i] = v_i.sub(eval_1); // old entry becomes v[i] * (1-r)
+            }
+            self.len *= 2;
+        }
+
         /// Clone the current values into a new slice
         pub fn cloneValues(self: *const Self, allocator: Allocator) ![]F {
             const result = try allocator.alloc(F, self.len);

@@ -1,58 +1,71 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 38 - Stage 4 PASSES! Stage 5 Investigation
+## Status: Session 40 - Stage 5 Sumcheck Verification Debugging
 
 ## Major Progress!
 
-**Stage 4 is now passing!** Verification progresses to Stage 5 (InstructionReadRaf), which fails.
+**Stage 4 passes!** Stage 5 (InstructionReadRaf) fails with sumcheck verification error.
 
 ## Current Failure: Stage 5 (InstructionReadRaf)
 
-### Verification Details
-```
-Sumcheck verification failed!
-  output_claim:   [af, 51, 7b, 30, ff, 29, 91, 26, 92, 26, 11, 23, ...]
-  expected_claim: [f0, c1, c7, e7, 7e, fd, c3, 3b, f3, 7e, 52, 31, ...]
-Verification failed: Stage 5
-```
+### Key Findings This Session
 
-### Good News: r_reduction and ra_claims MATCH!
+**Confirmed Matching Values:**
+1. ✓ Initial batched claim
+2. ✓ Batching coefficients (batch0, batch1, batch2)
+3. ✓ All 136 sumcheck challenges
+4. ✓ Round polynomial coefficients (verified rounds 0-3, 128-129)
+5. ✓ Intermediate claims after each round (output_claim matches at round 135)
+6. ✓ Instance 0 opening claims (inc_claim, wa_claim)
+7. ✓ Instance 1 opening claims (ram_ra_claim)
+8. ✓ Instance 2 opening claims (ra_chunks, table_flags, raf_flag)
+9. ✓ Instance 2 components (eq_eval_r_reduction, ra_product, val_claim, raf_claim)
+10. ✓ All individual instance expected_output_claim values
 
-Confirmed matching values between Zolt and Jolt:
+**The Mystery:**
+- The sumcheck polynomial evaluations are ALL CORRECT
+- All opening claims match between Zolt and Jolt
+- BUT: output_claim ≠ expected_claim
 
-**r_reduction[0]** (from Stage 2 InstructionClaimReduction):
-- Jolt: `[0d, 8d, 89, b0, c0, ef, 00, b0, 84, a4, 8a, 1b, 0b, 14, 34, 07]`
-- Zolt: `limbs = [b000efc0b0898d0d, 0734140b1b8aa484]` → Same bytes! ✓
+**Output claim (what sumcheck produces):**
+`[af, 51, 7b, 30, ff, 29, 91, 26, ...]`
 
-**ra_claims[0]** (InstructionRa(0) at InstructionReadRaf):
-- Both: `[69, 16, 50, 9b, b0, 0d, 7a, 4e, 25, 9d, b6, 8b, 53, 6e, 2b, 3d, ...]` ✓
+**Expected claim (sum of instance expected_outputs * coeffs):**
+`[f0, c1, c7, e7, 7e, fd, c3, 3b, ...]`
 
-### Stage 5 Instance Details
+**Individual instance claim*coeff contributions (from Jolt):**
+- Instance 0: `[36, 6f, 00, 34, 01, 26, 50, 93, ...]`
+- Instance 1: `[48, d9, da, ee, a3, 74, 88, ae, ...]`
+- Instance 2: `[73, 79, ec, b4, 6d, 58, cd, 3d, ...]`
 
-The expected_claim is computed as sum of:
-- **Instance 0** (RegistersValEvaluation): `36 6f 00 34 ...` * coeff[0]
-- **Instance 1** (RamRaClaimReduction): `48 d9 da ee ...` * coeff[1]
-- **Instance 2** (InstructionReadRaf): `73 79 ec b4 ...` * coeff[2]
+The sum should equal expected_claim. This is verified by Jolt.
 
-### Remaining Issue
+### Hypothesis
 
-The **output_claim** (from evaluating sumcheck polynomials at challenges) doesn't match **expected_claim** (from computing individual instance claims).
+The sumcheck output_claim equals batch0*poly0(r0) + batch1*poly1(r1) + batch2*poly2(r2).
 
-This suggests either:
-1. Round polynomial coefficients differ between prover/verifier
-2. Challenge values diverge at some round
+The expected_claim equals batch0*exp0 + batch1*exp1 + batch2*exp2.
 
-### Next Investigation Steps
+For these to match, we need poly_i(r_i) = exp_i for each instance.
 
-1. **Compare Stage 5 round 0 polynomial**
-   - Zolt: What coefficients are generated?
-   - Jolt: What coefficients are read from proof?
+Since all opening claims match AND all expected_output formulas seem correct, there might be:
+1. A subtle bug in the polynomial evaluation during cycle rounds
+2. A mismatch in how the polynomial is defined vs what the verifier expects
+3. A byte order issue in the sum computation
 
-2. **Check transcript state at Stage 5 start**
-   - Both should have identical state after Stage 4 claims are appended
+### Next Steps
 
-3. **Compare challenges at rounds 128-135** (cycle variables)
-   - These determine r_cycle_prime for InstructionReadRaf
+1. **Trace polynomial evaluation more carefully:**
+   - Verify that poly_i(r_i) actually equals exp_i for each instance
+   - Print these values side by side at the end of the sumcheck
+
+2. **Verify the batched sum:**
+   - Check if batch0*exp0 + batch1*exp1 + batch2*exp2 = expected_claim
+   - Check if batch0*poly0 + batch1*poly1 + batch2*poly2 = output_claim
+
+3. **Check for off-by-one or endianness issues:**
+   - The challenges might be indexed differently
+   - The opening points might have different orderings
 
 ### Working Commands
 
@@ -69,10 +82,11 @@ cd /home/vivado/projects/jolt && cargo test -p jolt-core --features zolt-debug -
 
 ### Session Summary
 
-- **Stage 4 now passes!** (RegistersRWC, RamValEvaluation, ValFinal)
-- Stage 5 fails at final sumcheck claim verification
-- Confirmed r_reduction and ra_claims match between Zolt and Jolt
-- Issue is output_claim vs expected_claim mismatch
-- Next: Debug round polynomial coefficients and challenge derivation
+- Verified all individual components match between Zolt and Jolt
+- The sumcheck polynomial coefficients and evaluations are correct
+- The opening claims are correct
+- The expected_output_claim formulas give correct results
+- BUT the final sums don't match
+- Need to trace the actual polynomial values vs expected values at the evaluation point
 
-SESSION_ENDING - Stage 4 passes! Stage 5 r_reduction/ra_claims verified matching. Output vs expected claim mismatch remains.
+SESSION_ENDING - Deep investigation of Stage 5. All individual components match but the final sums don't. Need to trace polynomial evaluation vs expected output for each instance.

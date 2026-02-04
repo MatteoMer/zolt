@@ -2178,11 +2178,15 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // CRITICAL: Challenge * F uses mulHiBigIntU128 (Jolt delegates to F * Challenge)
                     current_batched_claim = c0.add(c1.mulHiBigIntU128(challenge.limbs)).add(c2_val.mul(r2)).add(c3_val.mul(r3));
 
-                    // Debug: print challenges for first 3 rounds
-                    if (round < 3) {
-                        std.debug.print("[STAGE5 ROUND {}] challenge={x}\n", .{
+                    // Debug: print challenges for first 4 rounds
+                    if (round < 4) {
+                        std.debug.print("[STAGE5 ROUND {}] challenge (LE) = {any}\n", .{
                             round,
-                            challenge.toBytesBE()[24..32].*,
+                            challenge.toBytes(),
+                        });
+                        std.debug.print("[STAGE5 ROUND {}] new_claim (LE) = {any}\n", .{
+                            round,
+                            current_batched_claim.toBytes(),
                         });
                     }
 

@@ -1858,14 +1858,13 @@ pub fn ProofConverter(comptime F: type) type {
                     r_address_le[i] = r_address_be[log_ram_k - 1 - i];
                 }
 
-                const start_address: u64 = if (config.memory_layout) |ml| blk: {
-                    const lowest = ml.getLowestAddress();
-                    std.debug.print("[ZOLT STAGE4] Using memory_layout.getLowestAddress() = 0x{X:0>16}\n", .{lowest});
-                    break :blk lowest;
-                } else blk: {
-                    std.debug.print("[ZOLT STAGE4] No memory_layout, using RAM_START_ADDRESS = 0x{X:0>16}\n", .{constants.RAM_START_ADDRESS});
-                    break :blk constants.RAM_START_ADDRESS;
-                };
+                // CRITICAL FIX: ValEvaluation should use RAM_START_ADDRESS, NOT getLowestAddress()!
+                // The RWC sumcheck only tracks RAM operations (addresses >= 0x80000000).
+                // Termination/panic writes are to addresses in the I/O region (< 0x80000000)
+                // and are NOT included in the RWC val polynomial.
+                // Therefore ValEvaluation must use the same address range to match.
+                const start_address: u64 = constants.RAM_START_ADDRESS;
+                std.debug.print("[ZOLT STAGE4] Using RAM_START_ADDRESS for ValEvaluation = 0x{X:0>16}\n", .{start_address});
 
                 // CRITICAL FIX: ValEvaluation and ValFinal use DIFFERENT r_address points!
                 //

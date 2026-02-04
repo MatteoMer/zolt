@@ -1,97 +1,78 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 38 - PROGRESS! Stage 4 Now Passes, Stage 5 Fails
+## Status: Session 38 - Stage 4 PASSES! Stage 5 Investigation
 
-## Major Progress This Session!
+## Major Progress!
 
-**Stage 4 is now passing!** The verification has progressed to **Stage 5** (InstructionReadRaf), which now fails.
+**Stage 4 is now passing!** Verification progresses to Stage 5 (InstructionReadRaf), which fails.
 
 ## Current Failure: Stage 5 (InstructionReadRaf)
 
-### Error Details
+### Verification Details
 ```
 Sumcheck verification failed!
-  output_claim:   [af, 51, 7b, 30, ff, 29, 91, 26, ...]
-  expected_claim: [f0, c1, c7, e7, 7e, fd, c3, 3b, ...]
+  output_claim:   [af, 51, 7b, 30, ff, 29, 91, 26, 92, 26, 11, 23, ...]
+  expected_claim: [f0, c1, c7, e7, 7e, fd, c3, 3b, f3, 7e, 52, 31, ...]
 Verification failed: Stage 5
 ```
 
-### Stage 5 Architecture
-Stage 5 batches THREE sumcheck instances:
+### Good News: r_reduction and ra_claims MATCH!
 
-1. **RegistersValEvaluation** (8 rounds)
-   - Degree: 3
-   - Proves register value consistency
+Confirmed matching values between Zolt and Jolt:
 
-2. **RamRaClaimReduction** (16 rounds = log_K + log_T)
-   - Degree: 2
-   - Consolidates four RAM RA claims
+**r_reduction[0]** (from Stage 2 InstructionClaimReduction):
+- Jolt: `[0d, 8d, 89, b0, c0, ef, 00, b0, 84, a4, 8a, 1b, 0b, 14, 34, 07]`
+- Zolt: `limbs = [b000efc0b0898d0d, 0734140b1b8aa484]` → Same bytes! ✓
 
-3. **InstructionReadRaf** (136 rounds = LOG_K + log_T = 128 + 8)
-   - Degree: 10 (8 virtual RA polynomials + 2)
-   - Main instruction lookups sumcheck
-   - LOG_K = XLEN * 2 = 128 for 64-bit instructions
-   - **This is the component that's failing**
+**ra_claims[0]** (InstructionRa(0) at InstructionReadRaf):
+- Both: `[69, 16, 50, 9b, b0, 0d, 7a, 4e, 25, 9d, b6, 8b, 53, 6e, 2b, 3d, ...]` ✓
 
-### Key Variables in InstructionReadRaf
-- **r_reduction**: Original cycle evaluation point from InstructionClaimReduction (Stage 2)
-- **r_cycle_prime**: Last 8 challenges from InstructionReadRaf sumcheck (reversed)
-- **eq_eval_r_reduction**: `EqPolynomial::mle(r_reduction, r_cycle_prime)` - bridges Stage 2 to Stage 5
+### Stage 5 Instance Details
 
-### Potential Causes of Mismatch
-1. **Transcript divergence from earlier stage**
-2. **r_reduction from Stage 2 not matching**
-3. **Virtual polynomial claims mismatch (ra_claims, table_flag_claims)**
-4. **Challenge normalization/reversal issues**
+The expected_claim is computed as sum of:
+- **Instance 0** (RegistersValEvaluation): `36 6f 00 34 ...` * coeff[0]
+- **Instance 1** (RamRaClaimReduction): `48 d9 da ee ...` * coeff[1]
+- **Instance 2** (InstructionReadRaf): `73 79 ec b4 ...` * coeff[2]
 
-### Working Test Commands
+### Remaining Issue
+
+The **output_claim** (from evaluating sumcheck polynomials at challenges) doesn't match **expected_claim** (from computing individual instance claims).
+
+This suggests either:
+1. Round polynomial coefficients differ between prover/verifier
+2. Challenge values diverge at some round
+
+### Next Investigation Steps
+
+1. **Compare Stage 5 round 0 polynomial**
+   - Zolt: What coefficients are generated?
+   - Jolt: What coefficients are read from proof?
+
+2. **Check transcript state at Stage 5 start**
+   - Both should have identical state after Stage 4 claims are appended
+
+3. **Compare challenges at rounds 128-135** (cycle variables)
+   - These determine r_cycle_prime for InstructionReadRaf
+
+### Working Commands
 
 ```bash
-# Build optimized (MUCH faster!)
+# Build optimized (~13 sec proof generation)
 zig build -Doptimize=ReleaseFast
 
-# Generate proof (~13 seconds with optimization)
+# Generate proof
 ./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o /tmp/zolt_proof_dory.bin --export-preprocessing /tmp/zolt_preprocessing.bin --trace-length 64
 
-# Verify with Jolt
+# Verify
 cd /home/vivado/projects/jolt && cargo test -p jolt-core --features zolt-debug --lib test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
 
-### Next Steps for Next Session
-
-1. **Compare r_reduction values** between Zolt and Jolt
-   - Zolt stores this in Stage 2 (InstructionClaimReduction)
-   - Jolt retrieves it from opening_accumulator
-
-2. **Compare ra_claims product**
-   - Check each ra_claim[0..7] matches
-   - Verify the product computation
-
-3. **Check table_flag_claims**
-   - Non-zero for tables 0, 1, 9 based on instruction usage
-   - Verify table MLE evaluations match
-
-4. **Debug eq_eval_r_reduction**
-   - Compare r_reduction (8 elements)
-   - Compare r_cycle_prime (8 elements)
-   - Verify eq polynomial evaluation matches
-
-### Key Files
-
-**Zolt Stage 5:**
-- `src/zkvm/spartan/stage5_prover.zig` (LOOKUPS_LOG_K=128 at line 45)
-- `src/zkvm/proof_converter.zig` (Stage 5 around line 2780)
-
-**Jolt Stage 5:**
-- `jolt-core/src/zkvm/verifier.rs` (lines 383-413)
-- `jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs` (expected_output_claim at lines 1326-1476)
-
 ### Session Summary
 
-- Built optimized Zolt binary (22MB vs 48MB, 10x faster proof generation)
-- Generated fresh proof + preprocessing files
 - **Stage 4 now passes!** (RegistersRWC, RamValEvaluation, ValFinal)
-- Stage 5 fails at InstructionReadRaf sumcheck
-- Root cause likely in r_reduction or virtual polynomial claims
+- Stage 5 fails at final sumcheck claim verification
+- Confirmed r_reduction and ra_claims match between Zolt and Jolt
+- Issue is output_claim vs expected_claim mismatch
+- Next: Debug round polynomial coefficients and challenge derivation
 
-SESSION_ENDING - Major progress: Stage 4 passes! Stage 5 (InstructionReadRaf) now fails. Next session: debug r_reduction and virtual polynomial claims comparison.
+SESSION_ENDING - Stage 4 passes! Stage 5 r_reduction/ra_claims verified matching. Output vs expected claim mismatch remains.

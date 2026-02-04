@@ -547,6 +547,17 @@ pub fn StreamingOuterProver(comptime F: type) type {
             const E_in = try self.buildEqTable(self.full_tau[m .. self.full_tau.len - 1]);
             defer self.allocator.free(E_in);
 
+            // DEBUG: Print split parameters
+            std.debug.print("[STREAMING_OUTER UNISKIP] tau.len={d}, m={d}, wprime_len={d}\n", .{self.full_tau.len, m, wprime_len});
+            std.debug.print("[STREAMING_OUTER UNISKIP] num_x_out_bits={d}, num_x_in_bits={d}, num_x_in_prime_bits={d}\n", .{num_x_out_bits, num_x_in_bits, num_x_in_prime_bits});
+            std.debug.print("[STREAMING_OUTER UNISKIP] E_out.len={d}, E_in.len={d}\n", .{E_out.len, E_in.len});
+            if (E_out.len > 0) {
+                std.debug.print("[STREAMING_OUTER UNISKIP] E_out[0] = {any}\n", .{E_out[0].toBytesBE()});
+            }
+            if (E_in.len > 0) {
+                std.debug.print("[STREAMING_OUTER UNISKIP] E_in[0] = {any}\n", .{E_in[0].toBytesBE()});
+            }
+
             // Compute extended_evals at each of the 9 target points
             for (targets, 0..) |target_y, target_idx| {
                 var sum = F.zero();
@@ -574,7 +585,22 @@ pub fn StreamingOuterProver(comptime F: type) type {
                     }
                 }
 
-                extended_evals[target_idx] = sum;
+                // DEBUG: Print extended_eval BEFORE R^2 scaling
+                if (target_idx < 3) {
+                    std.debug.print("[STREAMING_OUTER UNISKIP] BEFORE R^2: extended_evals[{d}] (target_y={d}) = {any}\n", .{target_idx, target_y, sum.toBytesBE()});
+                }
+
+                // Multiply by R^2 to match Jolt's Montgomery scaling.
+                // Jolt uses GruenSplitEqPolynomial with Some(F::MONTGOMERY_R_SQUARE) as scaling,
+                // and multiplies the final result by outer_scale = R^2.
+                // We apply this multiplication here to get matching extended_evals.
+                const r_squared = F.rSquared();
+                extended_evals[target_idx] = sum.mul(r_squared);
+
+                // DEBUG: Print extended_eval AFTER R^2 scaling
+                if (target_idx < 3) {
+                    std.debug.print("[STREAMING_OUTER UNISKIP] AFTER R^2:  extended_evals[{d}] (target_y={d}) = {any}\n", .{target_idx, target_y, extended_evals[target_idx].toBytesBE()});
+                }
             }
 
             // Step 2: Build t1_vals array (19 entries)

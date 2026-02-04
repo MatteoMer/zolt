@@ -671,7 +671,11 @@ pub fn computeProductVirtualExtendedEvals(
         // Pad contributions (padded cycles have zero factors, so eq*0*0 = 0)
         // No explicit handling needed
 
-        extended_evals[j] = sum;
+        // Multiply by R^2 to match Jolt's Montgomery scaling.
+        // Jolt uses GruenSplitEqPolynomial with Some(F::MONTGOMERY_R_SQUARE) as scaling,
+        // and multiplies the final result by outer_scale = R^2.
+        const r_squared = F.rSquared();
+        extended_evals[j] = sum.mul(r_squared);
     }
 
     return extended_evals;

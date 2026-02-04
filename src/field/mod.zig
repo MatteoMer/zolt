@@ -614,6 +614,18 @@ pub const BN254Scalar = struct {
         return .{ .limbs = BN254_R };
     }
 
+    /// R^2 as a field element (in Montgomery form = R^2 * R = R^3 mod p)
+    /// This is used for compatibility with Jolt's Montgomery R^2 scaling.
+    /// To get R^2 as a value in Montgomery form, we take the raw R^2 bytes
+    /// and convert them to Montgomery form.
+    pub fn rSquared() Self {
+        // BN254_R2 is the raw R^2 mod p value (not in Montgomery form)
+        // To represent R^2 as a field element in Montgomery form,
+        // we convert it: rSquared = R^2 * R (Montgomery form of R^2)
+        const raw = Self{ .limbs = BN254_R2 };
+        return raw.toMontgomery();
+    }
+
     /// Check if zero
     pub fn isZero(self: Self) bool {
         return self.limbs[0] == 0 and self.limbs[1] == 0 and

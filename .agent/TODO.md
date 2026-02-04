@@ -1,108 +1,124 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 71 - Stage 1 Sumcheck Investigation
+## Status: Session 73 - Montgomery R^2 Scaling Applied
 
-## Current Issue: Stage 1 Sumcheck Verification Failure
+## Current Issue: Stage 1 Sumcheck Output Claim Mismatch (After R^2 Fix)
 
-### Root Cause Analysis (DEEP DIVE)
+### Problem Summary
 
-The prover's output_claim doesn't match the verifier's expected_claim:
-- **output_claim**: `[8f, 49, 4e, 9d, ...]` (from prover's sumcheck)
-- **expected_claim**: `[f5, 77, db, ef, ...]` (verifier's computation)
+The Jolt verifier still fails to verify the Stage 1 sumcheck proof:
 
-Both use the **same eq_factor**: `[f7, be, 45, d2, b1, 33, ...]` ✅
-
-The mismatch is in Az*Bz:
-- **Prover's implied Az*Bz**: `[ad, ed, 4d, d6, 9a, ...]` (final_claim / eq_factor)
-- **Verifier's Az*Bz**: `[6e, d1, 32, 0b, 4a, ...]` (from inner_sum_prod)
-
-### Understanding the Protocol
-
-Stage 1 proves:
 ```
-Σ_{x_constr, x_cycle} eq(τ, x) * Az(x_constr, x_cycle) * Bz(x_constr, x_cycle) = 0
+Sumcheck verification failed!
+  output_claim:   [99, 9c, b9, b6, 17, 1c, d1, c6, ...]
+  expected_claim: [b9, 9d, d3, 21, 0b, 82, 30, e4, ...]
 ```
 
-The sumcheck has two phases:
-1. **UniSkip round**: Handles constraint dimension via degree-27 polynomial over domain {-4,...,5}
-2. **Streaming round**: Binds r_stream to blend first/second constraint groups
-3. **Cycle rounds**: Bind r_cycle to the cycle dimension (8 rounds for 256 cycles)
+### Changes Made This Session
 
-After binding:
-- `r_constr = (r_stream, r0)`
-- `r_cycle = (r_1, ..., r_8)`
+1. **Added `F.rSquared()` constant to BN254Scalar** (src/field/mod.zig):
+   - Returns R^2 as a field element in Montgomery form
+   - Computed as: raw R^2 bytes converted to Montgomery form
 
-Expected output claim:
+2. **Applied R^2 scaling to Stage 1 UniSkip extended_evals** (streaming_outer.zig):
+   - After computing sum = Σ eq_val * Az*Bz, multiply by R^2
+   - This matches Jolt's `* outer_scale` at line 226 of outer.rs
+
+3. **Applied R^2 scaling to Stage 2 ProductVirtual extended_evals** (univariate_skip.zig):
+   - Same R^2 multiplication applied to extended_evals
+
+### Debug Output Comparison
+
+**Zolt BEFORE R^2 scaling:**
 ```
-eq(τ, r) * Az(r) * Bz(r)
-```
-
-### Verifier's Computation
-
-```rust
-// Lagrange weights at r0 for constraint groups
-w = LagrangePolynomial::evals(r0);
-
-// z = R1CS input MLE evaluations at r_cycle
-z = r1cs_input_evals;  // 36 values
-
-// First group Az/Bz using Lagrange blend
-az_g0 = Σ_i w[i] * lc_a[i].dot_product(z)
-bz_g0 = Σ_i w[i] * lc_b[i].dot_product(z)
-
-// Second group Az/Bz
-az_g1 = Σ_i w[i] * lc_a[i].dot_product(z)
-bz_g1 = Σ_i w[i] * lc_b[i].dot_product(z)
-
-// Blend with r_stream
-az_final = az_g0 + r_stream * (az_g1 - az_g0)
-bz_final = bz_g0 + r_stream * (bz_g1 - bz_g0)
-
-return az_final * bz_final
+extended_evals[0] (target_y=-5) = { 4, 136, 82, 238, 142, 127, 178, 244, ... }
 ```
 
-Key insight: `lc_a[i].dot_product(z)` computes the constraint Az using MLE-evaluated R1CS inputs.
+**Zolt AFTER R^2 scaling:**
+```
+extended_evals[0] (target_y=-5) = { 26, 148, 234, 222, 178, 10, 191, 9, ... }
+```
 
-### Prover's Current Implementation
+### Root Cause Analysis (Ongoing)
 
-Looking at `JoltSpartanInterface`:
-1. Computes Az[constraint_idx] and Bz[constraint_idx] for all (cycle, constraint) pairs
-2. Creates `combined_poly[x] = eq(tau,x) * Az[x] * Bz[x]`
-3. Does standard sumcheck on combined_poly
+The R^2 scaling is applied but the sumcheck still fails. Possible remaining issues:
 
-This is correct for the sumcheck structure. The issue must be in how the challenges are used.
+1. **Eq Table Computation Difference**:
+   - Jolt uses `GruenSplitEqPolynomial` which builds E_out and E_in in a specific way
+   - Zolt uses `buildEqTable` which might index differently
 
-### Hypothesis: Challenge Ordering or Binding Issue
+2. **Constraint Evaluation Difference**:
+   - Jolt's `extended_azbz_product_first_group` uses i32/S128/S192 accumulation
+   - Zolt evaluates Az and Bz as field elements and multiplies
+   - These SHOULD be equivalent for correct witnesses but might have precision differences
 
-The debug output shows:
-- Prover's rounds match expected behavior (p(0)+p(1) = claim)
-- Challenge values are derived correctly
-- eq_factor matches between prover and verifier
+3. **Lagrange Coefficient Order**:
+   - COEFFS_PER_J might be computed differently
+   - TARGET_SHIFTS might differ
 
-BUT the final implied Az*Bz doesn't match what the verifier computes from R1CS input evals.
+4. **Group Interleaving**:
+   - Jolt interleaves FIRST_GROUP and SECOND_GROUP via x_in LSB
+   - Zolt does the same but might have different ordering
 
-This suggests the prover's sumcheck polynomial structure differs from what the verifier expects.
+### Next Steps to Fix
 
-### Possible Issues
+1. **Add debug to Jolt prover to print extended_evals**:
+   - Need to run Jolt's prover (not just verifier) with debug
+   - Compare byte-for-byte with Zolt's extended_evals
 
-1. **Index ordering**: Zolt might use different bit ordering (high-to-low vs low-to-high) than Jolt
-2. **Constraint grouping**: The UniSkip interleaves constraint groups, but cycle rounds might not handle this correctly
-3. **R1CS input ordering**: Zolt's witness structure might differ from Jolt's expectations
+2. **Verify E_out and E_in tables match**:
+   - Print E_out[0] and E_in[0] from both implementations
+   - Check tau splits are identical
 
-### Next Steps
+3. **Verify Lagrange coefficient calculation**:
+   - Print COEFFS_PER_J[0] from both
+   - Verify TARGET_SHIFTS match
 
-1. Add debug to print prover's Az/Bz at the final challenge point
-2. Compare with verifier's az_g0, bz_g0, az_g1, bz_g1
-3. Check if the constraint-to-cycle indexing matches between prover and verifier
+4. **Check constraint evaluation at cycle 0**:
+   - For cycle 0, print individual Az and Bz values for each constraint
+   - Compare with Jolt's R1CSCycleInputs
 
-### Test Commands
+### Files Modified This Session
+
+- `src/field/mod.zig`: Added `rSquared()` method
+- `src/zkvm/spartan/streaming_outer.zig`: Added R^2 scaling to extended_evals
+- `src/zkvm/r1cs/univariate_skip.zig`: Added R^2 scaling to ProductVirtual extended_evals
+- `/home/vivado/projects/jolt/jolt-core/src/zkvm/spartan/outer.rs`: Added debug output for extended_evals
+
+### Debug Commands
 
 ```bash
+# Build Zolt
 zig build -Doptimize=ReleaseFast
-./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o /tmp/zolt_proof_dory.bin --export-preprocessing /tmp/zolt_preprocessing.bin --trace-length 64
+
+# Generate proof with debug
+./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o /tmp/zolt_proof_dory.bin --export-preprocessing /tmp/zolt_preprocessing.bin --trace-length 64 2>&1 | grep -E "(UNISKIP|extended_evals|BEFORE|AFTER)" | head -30
+
+# Verify with Jolt
 cd /home/vivado/projects/jolt && cargo test -p jolt-core --features zolt-debug --lib test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
 
-## Files Modified This Session
+## Investigation History
 
-- `.agent/TODO.md`: Updated with deep analysis
+### Session 71
+- Discovered challenge value mismatch between Zolt prover and Jolt verifier
+- r_stream and r0 values completely different
+
+### Session 72
+- Traced issue to UniSkip extended_evals differing
+- Found Montgomery R^2 scaling difference
+- Found constraint evaluation approach difference
+- Verified split parameters match
+
+### Session 73
+- Implemented R^2 scaling for Stage 1 and Stage 2 UniSkip
+- Verification still fails - need deeper investigation
+
+## Verified Working Components
+
+- ✅ Blake2b transcript matches between Zolt and Jolt
+- ✅ Initial transcript state matches
+- ✅ Scalar serialization format (32-byte LE)
+- ✅ Tau challenges generated correctly
+- ✅ Split eq parameters (m, num_x_out_bits, num_x_in_bits) match
+- ✅ R^2 scaling now applied to extended_evals

@@ -709,6 +709,8 @@ pub fn ProofConverter(comptime F: type) type {
             r_cycle: []const F,
             uni_skip_claim: F,
             transcript: *Blake2bTranscript(F),
+            r_stream: F,
+            r0: F,
         ) !void {
             // Compute MLE evaluations at r_cycle
             const R1CSInputEvaluator = r1cs.R1CSInputEvaluator(F);
@@ -740,6 +742,95 @@ pub fn ProofConverter(comptime F: type) type {
             std.debug.print("[ZOLT] OPENING_CLAIMS: r1cs_input_evals[0] (LeftInstructionInput) = {any}\n", .{input_evals[0].toBytes()});
             std.debug.print("[ZOLT] OPENING_CLAIMS: r1cs_input_evals[1] (RightInstructionInput) = {any}\n", .{input_evals[1].toBytes()});
             std.debug.print("[ZOLT] OPENING_CLAIMS: r1cs_input_evals[2] (Product) = {any}\n", .{input_evals[2].toBytes()});
+
+            // DEBUG: Compute inner_sum_prod using Jolt's formula to compare with prover
+            std.debug.print("[ZOLT] INNER_SUM_PROD: r_stream = {any}\n", .{r_stream.toBytesBE()});
+            std.debug.print("[ZOLT] INNER_SUM_PROD: r0 = {any}\n", .{r0.toBytesBE()});
+
+            // Compute Lagrange weights at r0
+            const FIRST_GROUP_SIZE = 10;
+            const SECOND_GROUP_SIZE = 9;
+            var lagrange_weights: [FIRST_GROUP_SIZE]F = undefined;
+            const base_left: i64 = -@as(i64, (FIRST_GROUP_SIZE - 1) / 2); // = -4
+
+            for (0..FIRST_GROUP_SIZE) |i| {
+                var numer = F.one();
+                var denom = F.one();
+
+                for (0..FIRST_GROUP_SIZE) |j| {
+                    if (i != j) {
+                        const x_j: i64 = base_left + @as(i64, @intCast(j));
+                        const x_j_field = if (x_j >= 0)
+                            F.fromU64(@intCast(x_j))
+                        else
+                            F.zero().sub(F.fromU64(@intCast(-x_j)));
+                        numer = numer.mul(r0.sub(x_j_field));
+
+                        const diff: i64 = @as(i64, @intCast(i)) - @as(i64, @intCast(j));
+                        if (diff > 0) {
+                            denom = denom.mul(F.fromU64(@intCast(diff)));
+                        } else {
+                            denom = denom.mul(F.zero().sub(F.fromU64(@intCast(-diff))));
+                        }
+                    }
+                }
+
+                lagrange_weights[i] = if (!denom.eql(F.zero()))
+                    numer.mul(denom.inverse().?)
+                else
+                    F.zero();
+            }
+
+            // Build z vector with trailing 1 (like Jolt)
+            var z: [r1cs.R1CSInputIndex.NUM_INPUTS + 1]F = undefined;
+            @memcpy(z[0..r1cs.R1CSInputIndex.NUM_INPUTS], &input_evals);
+            z[r1cs.R1CSInputIndex.NUM_INPUTS] = F.one(); // constant column
+
+            // Compute az_g0, bz_g0 from first group
+            var az_g0 = F.zero();
+            var bz_g0 = F.zero();
+            for (0..FIRST_GROUP_SIZE) |i| {
+                const constraint_idx = r1cs.FIRST_GROUP_INDICES[i];
+                const constraint = r1cs.UNIFORM_CONSTRAINTS[constraint_idx];
+
+                // az_contrib = condition.dot_product(z)
+                const az_contrib = constraint.condition.evaluateWithConstant(F, &z);
+                // bz_contrib = (left - right).dot_product(z)
+                const bz_contrib = constraint.left.evaluateWithConstant(F, &z)
+                    .sub(constraint.right.evaluateWithConstant(F, &z));
+
+                az_g0 = az_g0.add(lagrange_weights[i].mul(az_contrib));
+                bz_g0 = bz_g0.add(lagrange_weights[i].mul(bz_contrib));
+            }
+
+            // Compute az_g1, bz_g1 from second group
+            var az_g1 = F.zero();
+            var bz_g1 = F.zero();
+            const g1_len = @min(SECOND_GROUP_SIZE, FIRST_GROUP_SIZE);
+            for (0..g1_len) |i| {
+                const constraint_idx = r1cs.SECOND_GROUP_INDICES[i];
+                const constraint = r1cs.UNIFORM_CONSTRAINTS[constraint_idx];
+
+                const az_contrib = constraint.condition.evaluateWithConstant(F, &z);
+                const bz_contrib = constraint.left.evaluateWithConstant(F, &z)
+                    .sub(constraint.right.evaluateWithConstant(F, &z));
+
+                az_g1 = az_g1.add(lagrange_weights[i].mul(az_contrib));
+                bz_g1 = bz_g1.add(lagrange_weights[i].mul(bz_contrib));
+            }
+
+            // Blend with r_stream
+            const az_final = az_g0.add(r_stream.mul(az_g1.sub(az_g0)));
+            const bz_final = bz_g0.add(r_stream.mul(bz_g1.sub(bz_g0)));
+            const inner_sum_prod = az_final.mul(bz_final);
+
+            std.debug.print("[ZOLT] INNER_SUM_PROD: az_g0 = {any}\n", .{az_g0.toBytesBE()});
+            std.debug.print("[ZOLT] INNER_SUM_PROD: bz_g0 = {any}\n", .{bz_g0.toBytesBE()});
+            std.debug.print("[ZOLT] INNER_SUM_PROD: az_g1 = {any}\n", .{az_g1.toBytesBE()});
+            std.debug.print("[ZOLT] INNER_SUM_PROD: bz_g1 = {any}\n", .{bz_g1.toBytesBE()});
+            std.debug.print("[ZOLT] INNER_SUM_PROD: az_final = {any}\n", .{az_final.toBytesBE()});
+            std.debug.print("[ZOLT] INNER_SUM_PROD: bz_final = {any}\n", .{bz_final.toBytesBE()});
+            std.debug.print("[ZOLT] INNER_SUM_PROD: inner_sum_prod = {any}\n", .{inner_sum_prod.toBytesBE()});
 
             // Add R1CS inputs for SpartanOuter with computed evaluations
             // AND append each claim to transcript in Jolt's order (for Fiat-Shamir)
@@ -1084,12 +1175,17 @@ pub fn ProofConverter(comptime F: type) type {
                     r_cycle_big_endian[i] = cycle_challenges[cycle_challenges.len - 1 - i];
                 }
 
+                // Get r_stream (first challenge) and r0 from Stage 1 result
+                const r_stream = if (all_challenges.len > 0) all_challenges[0] else F.zero();
+
                 try self.addSpartanOuterOpeningClaimsWithEvaluations(
                     &jolt_proof.opening_claims,
                     cycle_witnesses,
                     r_cycle_big_endian,
                     result.uni_skip_claim,
                     transcript,
+                    r_stream,
+                    result.r0,
                 );
             } else {
                 // Fallback to zero claims

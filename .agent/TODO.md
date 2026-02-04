@@ -1,81 +1,101 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 70 - Stage 1 Sumcheck Investigation - ROOT CAUSE FOUND
-
-## Previous Issue: R1CS vs Memory Trace Inconsistency
-FIXED by injecting a full synthetic trace cycle for termination writes.
+## Status: Session 71 - Stage 1 Sumcheck Investigation
 
 ## Current Issue: Stage 1 Sumcheck Verification Failure
 
-### ROOT CAUSE IDENTIFIED
+### Root Cause Analysis (DEEP DIVE)
 
-**The sumcheck polynomial chain is CORRECT** - prover's claim tracking matches verifier exactly.
+The prover's output_claim doesn't match the verifier's expected_claim:
+- **output_claim**: `[8f, 49, 4e, 9d, ...]` (from prover's sumcheck)
+- **expected_claim**: `[f5, 77, db, ef, ...]` (verifier's computation)
 
-**The issue is the constraint polynomial Az*Bz computation!**
+Both use the **same eq_factor**: `[f7, be, 45, d2, b1, 33, ...]` ✅
 
-### Detailed Comparison
+The mismatch is in Az*Bz:
+- **Prover's implied Az*Bz**: `[ad, ed, 4d, d6, 9a, ...]` (final_claim / eq_factor)
+- **Verifier's Az*Bz**: `[6e, d1, 32, 0b, 4a, ...]` (from inner_sum_prod)
 
-| Component | Prover (Zolt) | Verifier (Jolt) | Status |
-|-----------|---------------|-----------------|--------|
-| eq_factor | [f7, be, 45, d2, b1, 33, ...] | [f7, be, 45, d2, b1, 33, ...] | ✅ MATCH |
-| final_claim | [be, 81, 99, 16, ...] | N/A (derived) | N/A |
-| output_claim | [8f, 49, 4e, 9d, ...] | [8f, 49, 4e, 9d, ...] | ✅ MATCH |
-| implied Az*Bz | [ad, ed, 4d, d6, 9a, ...] | [6e, d1, 32, 0b, 4a, ...] | ❌ MISMATCH |
+### Understanding the Protocol
 
-### The Mismatch
-
-Prover's implied `Az*Bz = final_claim / eq_factor`:
-- `[ad, ed, 4d, d6, 9a, 9a, fb, 64, ...]`
-
-Verifier's `inner_sum_prod` from R1CS evaluation:
-- `[6e, d1, 32, 0b, 4a, 61, ec, ac, ...]`
-
-### Jolt's inner_sum_prod Components
-
-From debug output:
+Stage 1 proves:
 ```
-rx_constr: r_stream=[95, b7, 17, cd, ...], r0=[94, 4b, dd, 50, ...]
-az_g0 = [55, 82, 0a, 57, ...]
-bz_g0 = [60, bc, ff, e5, ...]
-az_g1 = [77, 55, 35, 64, ...]
-bz_g1 = [43, 8b, cd, af, ...]
-az_final = az_g0 + r_stream * (az_g1 - az_g0) = [4d, 13, d1, af, ...]
-bz_final = bz_g0 + r_stream * (bz_g1 - bz_g0) = [37, d9, 37, 60, ...]
-inner_sum_prod = az_final * bz_final = [6e, d1, 32, 0b, ...]
+Σ_{x_constr, x_cycle} eq(τ, x) * Az(x_constr, x_cycle) * Bz(x_constr, x_cycle) = 0
 ```
 
-### What's Different
+The sumcheck has two phases:
+1. **UniSkip round**: Handles constraint dimension via degree-27 polynomial over domain {-4,...,5}
+2. **Streaming round**: Binds r_stream to blend first/second constraint groups
+3. **Cycle rounds**: Bind r_cycle to the cycle dimension (8 rounds for 256 cycles)
 
-The prover's sumcheck polynomial evaluates to a different Az*Bz than what the verifier recomputes using:
-1. R1CS input evaluations (from opening claims)
-2. Lagrange weights at r0
-3. r_stream blending
+After binding:
+- `r_constr = (r_stream, r0)`
+- `r_cycle = (r_1, ..., r_8)`
 
-This means either:
-1. The prover's constraint matrices (FIRST_GROUP, SECOND_GROUP) differ from verifier
-2. The prover's witness MLE evaluations at r_cycle differ from opening claims
-3. The Lagrange basis weights computation differs
-4. The r_stream blending formula differs
+Expected output claim:
+```
+eq(τ, r) * Az(r) * Bz(r)
+```
 
-### Next Steps (Session 71)
+### Verifier's Computation
 
-1. Add debug to Zolt's prover to print az_g0, bz_g0, az_g1, bz_g1 after all rounds
-2. Compare Lagrange weight computation between Zolt and Jolt
-3. Verify R1CS input evaluations match what's in opening claims
-4. Check if FIRST_GROUP_INDICES and SECOND_GROUP_INDICES match Jolt exactly
+```rust
+// Lagrange weights at r0 for constraint groups
+w = LagrangePolynomial::evals(r0);
 
-### Key Code Locations
+// z = R1CS input MLE evaluations at r_cycle
+z = r1cs_input_evals;  // 36 values
 
-**Zolt:**
-- `src/zkvm/spartan/streaming_outer.zig`: Az/Bz computation
-- `src/zkvm/r1cs/constraints.zig`: FIRST_GROUP_INDICES, SECOND_GROUP_INDICES
-- `src/zkvm/r1cs/evaluation.zig`: R1CS evaluation
+// First group Az/Bz using Lagrange blend
+az_g0 = Σ_i w[i] * lc_a[i].dot_product(z)
+bz_g0 = Σ_i w[i] * lc_b[i].dot_product(z)
 
-**Jolt:**
-- `jolt-core/src/zkvm/r1cs/key.rs`: evaluate_inner_sum_product_at_point
-- `jolt-core/src/zkvm/r1cs/constraints.rs`: R1CS_CONSTRAINTS_FIRST_GROUP, R1CS_CONSTRAINTS_SECOND_GROUP
+// Second group Az/Bz
+az_g1 = Σ_i w[i] * lc_a[i].dot_product(z)
+bz_g1 = Σ_i w[i] * lc_b[i].dot_product(z)
 
-## Test Commands
+// Blend with r_stream
+az_final = az_g0 + r_stream * (az_g1 - az_g0)
+bz_final = bz_g0 + r_stream * (bz_g1 - bz_g0)
+
+return az_final * bz_final
+```
+
+Key insight: `lc_a[i].dot_product(z)` computes the constraint Az using MLE-evaluated R1CS inputs.
+
+### Prover's Current Implementation
+
+Looking at `JoltSpartanInterface`:
+1. Computes Az[constraint_idx] and Bz[constraint_idx] for all (cycle, constraint) pairs
+2. Creates `combined_poly[x] = eq(tau,x) * Az[x] * Bz[x]`
+3. Does standard sumcheck on combined_poly
+
+This is correct for the sumcheck structure. The issue must be in how the challenges are used.
+
+### Hypothesis: Challenge Ordering or Binding Issue
+
+The debug output shows:
+- Prover's rounds match expected behavior (p(0)+p(1) = claim)
+- Challenge values are derived correctly
+- eq_factor matches between prover and verifier
+
+BUT the final implied Az*Bz doesn't match what the verifier computes from R1CS input evals.
+
+This suggests the prover's sumcheck polynomial structure differs from what the verifier expects.
+
+### Possible Issues
+
+1. **Index ordering**: Zolt might use different bit ordering (high-to-low vs low-to-high) than Jolt
+2. **Constraint grouping**: The UniSkip interleaves constraint groups, but cycle rounds might not handle this correctly
+3. **R1CS input ordering**: Zolt's witness structure might differ from Jolt's expectations
+
+### Next Steps
+
+1. Add debug to print prover's Az/Bz at the final challenge point
+2. Compare with verifier's az_g0, bz_g0, az_g1, bz_g1
+3. Check if the constraint-to-cycle indexing matches between prover and verifier
+
+### Test Commands
 
 ```bash
 zig build -Doptimize=ReleaseFast
@@ -85,7 +105,4 @@ cd /home/vivado/projects/jolt && cargo test -p jolt-core --features zolt-debug -
 
 ## Files Modified This Session
 
-- `src/zkvm/proof_converter.zig`: Added debug for lagrange_tau_r0, final_claim, implied Az*Bz
-- `/home/vivado/projects/jolt/jolt-core/src/zkvm/r1cs/key.rs`: Added inner_sum_prod component debug
-- `/home/vivado/projects/jolt/jolt-core/src/zkvm/spartan/outer.rs`: Added eq_factor product debug
-- `.agent/TODO.md`: Updated with root cause analysis
+- `.agent/TODO.md`: Updated with deep analysis

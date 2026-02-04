@@ -1,99 +1,79 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 70 - Stage 1 Sumcheck Deep Investigation (Continued)
+## Status: Session 70 - Stage 1 Sumcheck Investigation - ROOT CAUSE FOUND
 
 ## Previous Issue: R1CS vs Memory Trace Inconsistency
-
-Stage 5 sumcheck was failing due to fundamental inconsistency between R1CS trace and memory trace.
-This has been FIXED by injecting a full synthetic trace cycle for termination writes.
+FIXED by injecting a full synthetic trace cycle for termination writes.
 
 ## Current Issue: Stage 1 Sumcheck Verification Failure
 
-### Symptoms
+### ROOT CAUSE IDENTIFIED
 
-Stage 1 (Spartan Outer) sumcheck verification fails with:
+**The sumcheck polynomial chain is CORRECT** - prover's claim tracking matches verifier exactly.
+
+**The issue is the constraint polynomial Az*Bz computation!**
+
+### Detailed Comparison
+
+| Component | Prover (Zolt) | Verifier (Jolt) | Status |
+|-----------|---------------|-----------------|--------|
+| eq_factor | [f7, be, 45, d2, b1, 33, ...] | [f7, be, 45, d2, b1, 33, ...] | ✅ MATCH |
+| final_claim | [be, 81, 99, 16, ...] | N/A (derived) | N/A |
+| output_claim | [8f, 49, 4e, 9d, ...] | [8f, 49, 4e, 9d, ...] | ✅ MATCH |
+| implied Az*Bz | [ad, ed, 4d, d6, 9a, ...] | [6e, d1, 32, 0b, 4a, ...] | ❌ MISMATCH |
+
+### The Mismatch
+
+Prover's implied `Az*Bz = final_claim / eq_factor`:
+- `[ad, ed, 4d, d6, 9a, 9a, fb, 64, ...]`
+
+Verifier's `inner_sum_prod` from R1CS evaluation:
+- `[6e, d1, 32, 0b, 4a, 61, ec, ac, ...]`
+
+### Jolt's inner_sum_prod Components
+
+From debug output:
 ```
-output_claim:   [8f, 49, 4e, 9d, ca, 22, 84, a0, ...]
-expected_claim: [f5, 77, db, ef, 9d, 38, 62, 52, ...]
-```
-
-### KEY FINDING (This Session)
-
-**The sumcheck polynomial chain is CORRECT!**
-
-1. Prover's `final_claim * batching_coeff` = [8f, 49, 4e, 9d, ...]
-2. Verifier's `output_claim` = [8f, 49, 4e, 9d, ...] (MATCHES!)
-
-This confirms:
-- Initial claims MATCH
-- Round polynomial coefficients MATCH
-- Challenges MATCH
-- Claim tracking through sumcheck is CORRECT
-
-**The issue is in the expected_output_claim oracle computation!**
-
-The verifier computes:
-```
-expected_claim = inner_sum_prod * tau_high_bound_r0 * tau_bound_r_tail_reversed * batching_coeff
-```
-
-Where:
-- `inner_sum_prod = Az_final * Bz_final` (R1CS constraint evaluation)
-- `tau_high_bound_r0 = [0b, d4, 56, 27, ...]` = Prover's `lagrange_tau_r0` (MATCHES!)
-- `tau_bound_r_tail_reversed = eq(tau_low, challenges_reversed)`
-
-### Eq Factor Analysis
-
-Prover's eq_factor:
-- Initial: `lagrange_tau_r0 = [0b, d4, 56, 27, ...]`
-- After all bindings: `[f7, be, 45, d2, ...]`
-
-Verifier's tau factors:
-- `tau_high_bound_r0 = [0b, d4, 56, 27, ...]` ✓ MATCHES
-- `tau_bound_r_tail_reversed = [99, 31, d1, 65, ...]`
-
-The binding order in Zolt matches Jolt:
-- Zolt binds tau[n-1] with first challenge, tau[n-2] with second, ..., tau[0] with last
-- Jolt reverses challenges and computes eq(tau_low, challenges_reversed)
-- These produce the SAME result (multiplication is commutative)
-
-### Root Cause Hypothesis
-
-The issue is likely in `inner_sum_prod`:
-- The R1CS input evaluations in the opening claims may not satisfy the R1CS constraints
-- Or the constraint evaluation formula differs between prover and verifier
-
-The prover's polynomial sums:
-```
-Σ Az(x) * Bz(x) * eq(tau, x)
+rx_constr: r_stream=[95, b7, 17, cd, ...], r0=[94, 4b, dd, 50, ...]
+az_g0 = [55, 82, 0a, 57, ...]
+bz_g0 = [60, bc, ff, e5, ...]
+az_g1 = [77, 55, 35, 64, ...]
+bz_g1 = [43, 8b, cd, af, ...]
+az_final = az_g0 + r_stream * (az_g1 - az_g0) = [4d, 13, d1, af, ...]
+bz_final = bz_g0 + r_stream * (bz_g1 - bz_g0) = [37, d9, 37, 60, ...]
+inner_sum_prod = az_final * bz_final = [6e, d1, 32, 0b, ...]
 ```
 
-The verifier expects this sum to equal:
-```
-inner_sum_prod * eq_factor
-```
+### What's Different
 
-If these don't match, it means:
-```
-prover's Az(r) * Bz(r) ≠ verifier's inner_sum_prod
-```
+The prover's sumcheck polynomial evaluates to a different Az*Bz than what the verifier recomputes using:
+1. R1CS input evaluations (from opening claims)
+2. Lagrange weights at r0
+3. r_stream blending
 
-### Next Steps
+This means either:
+1. The prover's constraint matrices (FIRST_GROUP, SECOND_GROUP) differ from verifier
+2. The prover's witness MLE evaluations at r_cycle differ from opening claims
+3. The Lagrange basis weights computation differs
+4. The r_stream blending formula differs
 
-1. Add debug to print Zolt's Az_final and Bz_final at the constraint point
-2. Compare with Jolt's inner_sum_prod components (az_g0, bz_g0, az_g1, bz_g1)
-3. Verify the R1CS input evaluations are being computed correctly
-4. Check if the witness MLE evaluations at r_cycle match between prover and verifier
+### Next Steps (Session 71)
 
-### Verified Items
+1. Add debug to Zolt's prover to print az_g0, bz_g0, az_g1, bz_g1 after all rounds
+2. Compare Lagrange weight computation between Zolt and Jolt
+3. Verify R1CS input evaluations match what's in opening claims
+4. Check if FIRST_GROUP_INDICES and SECOND_GROUP_INDICES match Jolt exactly
 
-- [x] Initial claims MATCH
-- [x] Round polynomial coefficients MATCH
-- [x] Challenges MATCH
-- [x] Batching coefficients MATCH
-- [x] lagrange_tau_r0 MATCHES tau_high_bound_r0
-- [x] Eq polynomial binding order is consistent
-- [ ] Inner sum product computation
+### Key Code Locations
+
+**Zolt:**
+- `src/zkvm/spartan/streaming_outer.zig`: Az/Bz computation
+- `src/zkvm/r1cs/constraints.zig`: FIRST_GROUP_INDICES, SECOND_GROUP_INDICES
+- `src/zkvm/r1cs/evaluation.zig`: R1CS evaluation
+
+**Jolt:**
+- `jolt-core/src/zkvm/r1cs/key.rs`: evaluate_inner_sum_product_at_point
+- `jolt-core/src/zkvm/r1cs/constraints.rs`: R1CS_CONSTRAINTS_FIRST_GROUP, R1CS_CONSTRAINTS_SECOND_GROUP
 
 ## Test Commands
 
@@ -105,39 +85,7 @@ cd /home/vivado/projects/jolt && cargo test -p jolt-core --features zolt-debug -
 
 ## Files Modified This Session
 
-- `src/zkvm/proof_converter.zig`: Added debug for lagrange_tau_r0 and final_claim
-- `.agent/TODO.md`: Updated with investigation findings
-
-## Debug Output Summary
-
-### Zolt Prover Output (Stage 1)
-```
-lagrange_tau_r0 = [0b, d4, 56, 27, ...]
-prover final_claim = [be, 81, 99, 16, ...]
-prover final_claim * batching_coeff = [8f, 49, 4e, 9d, ...]
-prover eq_factor = [f7, be, 45, d2, ...]
-```
-
-### Jolt Verifier Output (Stage 1)
-```
-inner_sum_prod = [6e, d1, 32, 0b, ...]
-tau_high_bound_r0 = [0b, d4, 56, 27, ...]
-tau_bound_r_tail_reversed = [99, 31, d1, 65, ...]
-expected result (no batching) = [31, 4a, 3a, 6f, ...]
-expected_claim (with batching) = [f5, 77, db, ef, ...]
-output_claim = [8f, 49, 4e, 9d, ...]  (from sumcheck chain)
-```
-
-### Analysis
-
-The sumcheck output_claim is correct and matches prover's claim chain.
-The expected_claim differs because inner_sum_prod * eq_factors differs from what the prover computed.
-
-This means the constraint polynomial Az*Bz*eq being summed by the prover
-produces a different final evaluation than what the verifier recomputes.
-
-Likely causes:
-1. Different witness values being used
-2. Different constraint grouping or indexing
-3. Different Lagrange basis weights
-4. Different r_stream blending formula
+- `src/zkvm/proof_converter.zig`: Added debug for lagrange_tau_r0, final_claim, implied Az*Bz
+- `/home/vivado/projects/jolt/jolt-core/src/zkvm/r1cs/key.rs`: Added inner_sum_prod component debug
+- `/home/vivado/projects/jolt/jolt-core/src/zkvm/spartan/outer.rs`: Added eq_factor product debug
+- `.agent/TODO.md`: Updated with root cause analysis

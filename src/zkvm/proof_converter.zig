@@ -544,6 +544,12 @@ pub fn ProofConverter(comptime F: type) type {
             std.debug.print("[ZOLT] STAGE1_FINAL: prover final_claim = {any}\n", .{prover_final_claim.toBytes()});
             std.debug.print("[ZOLT] STAGE1_FINAL: prover final_claim * batching_coeff = {any}\n", .{prover_final_claim.mul(batching_coeff).toBytes()});
 
+            // Compute implied Az*Bz = final_claim / eq_factor
+            if (!prover_eq_factor.eql(F.zero())) {
+                const implied_az_bz = prover_final_claim.mul(prover_eq_factor.inverse().?);
+                std.debug.print("[ZOLT] STAGE1_FINAL: implied Az*Bz (final_claim/eq_factor) = {any}\n", .{implied_az_bz.toBytes()});
+            }
+
             return Stage1Result{ .challenges = challenges, .r0 = r0, .uni_skip_claim = uni_skip_claim, .allocator = self.allocator };
         }
 

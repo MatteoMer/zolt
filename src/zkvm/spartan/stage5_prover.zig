@@ -1192,10 +1192,14 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // Track current batched claim (for verification)
             var current_batched_claim = batched_claim;
 
-            // Track individual instance claims
-            var ram_ra_current_claim = ram_ra_input; // Instance 1: RamRaClaimReduction
-            var lookups_claim = lookups_input; // Instance 2: LookupsReadRaf
-            _ = &ram_ra_current_claim; // TODO: Track claim evolution for debugging
+            // Track individual instance claims - MUST use SCALED values!
+            // Each instance's claim starts at input * 2^(max_rounds - instance_rounds)
+            // During inactive rounds, the claim halves each round.
+            // By the time the instance becomes active, claim = unscaled input.
+            var regs_val_current_claim = regs_scaled; // Instance 0: RegistersValEvaluation (scaled by 2^128)
+            // Instance 1: RamRaClaimReduction - initialized later after computed_ram_ra_input is computed
+            var ram_ra_current_claim: F = undefined;
+            var lookups_claim = lookups_input; // Instance 2: LookupsReadRaf (no scaling, active from round 0)
 
             // ===================================================================
             // RamRaClaimReduction State Initialization
@@ -1400,6 +1404,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             var ram_ra_scaled_corrected = computed_ram_ra_input;
             for (0..ram_ra_scale) |_| ram_ra_scaled_corrected = ram_ra_scaled_corrected.add(ram_ra_scaled_corrected);
 
+            // CRITICAL: Initialize Instance 1 claim tracking with SCALED value (matches batched_claim computation)
+            ram_ra_current_claim = ram_ra_scaled_corrected;
+
             const batched_claim_corrected = batch0.mul(regs_scaled)
                 .add(batch1.mul(ram_ra_scaled_corrected))
                 .add(batch2.mul(lookups_scaled));
@@ -1407,11 +1414,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             std.debug.print("[STAGE5] Corrected batched claim = {any}\n", .{batched_claim_corrected.toBytesBE()});
             std.debug.print("[STAGE5] Original batched claim  = {any}\n", .{batched_claim.toBytesBE()});
 
-            // DISABLED: Do NOT override current_batched_claim.
-            // The correction was needed when synthetic termination writes were added to the RAM trace
-            // but not reflected in the R1CS witnesses. Now that synthetic writes are disabled,
-            // the original batched_claim from opening_claims should be consistent with the trace.
-            // current_batched_claim = batched_claim_corrected;
+            // CRITICAL FIX: Use corrected batched_claim to match polynomial computation.
+            // The polynomial computation uses computed_ram_ra_input (from trace), so the batched_claim
+            // must also use computed_ram_ra_input instead of ram_ra_input (from opening_claims).
+            current_batched_claim = batched_claim_corrected;
 
             // Expanding table to track eq(r_addr_reduced_so_far, k_bound_bits)
             // This accumulates the eq value as we bind address bits
@@ -1582,6 +1588,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // Flag to track if H_prime has been initialized (for PhaseCycle2)
             var phase_cycle2_initialized = false;
 
+            // Store Instance 1 polynomial evaluations for claim update after challenge
+            // These are set in the polynomial computation section and used in the binding section
+            var inst1_eval_0: F = F.zero();
+            var inst1_eval_1: F = F.zero();
+            var inst1_eval_2: F = F.zero();
+
             // ===================================================================
             // Prefix-Suffix Decomposition Initialization for LookupsReadRaf
             // ===================================================================
@@ -1701,6 +1713,18 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     combined_poly[2] = combined_poly[2].add(batch0.mul(poly_evals[2]));
                     combined_poly[3] = combined_poly[3].add(batch0.mul(poly_evals[3]));
 
+                    // CRITICAL DEBUG: Check if p0(0) + p0(1) = claim0
+                    const inst0_sum = poly_evals[0].add(poly_evals[1]);
+                    const inst0_sum_matches = inst0_sum.eql(regs_val_current_claim);
+                    if (round >= LOOKUPS_LOG_K) {
+                        std.debug.print("[INST0 SUMCHECK] Round {}: p(0)+p(1) = {x}, claim0 = {x}, match = {}\n", .{
+                            round,
+                            inst0_sum.toBytesBE()[16..32].*,
+                            regs_val_current_claim.toBytesBE()[16..32].*,
+                            inst0_sum_matches,
+                        });
+                    }
+
                     // Debug: Print Instance 0 contribution for cycle rounds
                     if (round >= LOOKUPS_LOG_K and round <= LOOKUPS_LOG_K + 1) {
                         const inst0_coeffs = UniPoly(F).toomCookToCoeffs(poly_evals);
@@ -1816,6 +1840,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         combined_poly[1] = combined_poly[1].add(batch1.mul(eval_1));
                         combined_poly[2] = combined_poly[2].add(batch1.mul(eval_2));
                         // evals[3] = 0 for degree-2 polynomial
+
+                        // Store evaluations for claim update after binding
+                        inst1_eval_0 = eval_0;
+                        inst1_eval_1 = eval_1;
+                        inst1_eval_2 = eval_2;
 
                         // Debug for first few rounds and verification
                         if (ram_ra_round < 3) {
@@ -1950,33 +1979,29 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                         if (cycle_round < prefix_n_vars and half_len > 0) {
                             // PhaseCycle1: Bind prefix bits using P*Q decomposition
-                            var eval_0 = F.zero();
+                            // CRITICAL: Use hint mechanism - only compute eval_1 and eval_2 directly
+                            // Then derive eval_0 = claim - eval_1 to guarantee sumcheck property
+
+                            // DEBUG: Print claim at start of polynomial computation
+                            std.debug.print("[INST1 HINT DEBUG] Round {}: ram_ra_current_claim at poly start = {x}\n", .{
+                                round,
+                                ram_ra_current_claim.toBytesBE()[16..32].*,
+                            });
+
                             var eval_1 = F.zero();
 
                             // Compute sumcheck polynomial using P * Q products
-                            // For LowToHigh binding, evaluate at j and j+half_len
+                            // Only compute eval_1 (sum over odd indices P[2j+1] * Q[2j+1])
                             for (0..half_len) |j| {
-                                // P values at j and j + half_len (LowToHigh binding)
-                                const p_raf_0 = P_raf[2 * j];
+                                // P values at odd indices
                                 const p_raf_1 = P_raf[2 * j + 1];
-                                const p_rw_0 = P_rw[2 * j];
                                 const p_rw_1 = P_rw[2 * j + 1];
-                                const p_val_0 = P_val[2 * j];
                                 const p_val_1 = P_val[2 * j + 1];
 
-                                // Q values at j and j + half_len
-                                const q_raf_0 = Q_raf[2 * j];
+                                // Q values at odd indices
                                 const q_raf_1 = Q_raf[2 * j + 1];
-                                const q_rw_0 = Q_rw[2 * j];
                                 const q_rw_1 = Q_rw[2 * j + 1];
-                                const q_val_0 = Q_val[2 * j];
                                 const q_val_1 = Q_val[2 * j + 1];
-
-                                // eval_0 contribution: P[2j] * Q[2j]
-                                const contrib_0 = coeff_raf.mul(p_raf_0.mul(q_raf_0))
-                                    .add(coeff_rw.mul(p_rw_0.mul(q_rw_0)))
-                                    .add(coeff_val.mul(p_val_0.mul(q_val_0)));
-                                eval_0 = eval_0.add(contrib_0);
 
                                 // eval_1 contribution: P[2j+1] * Q[2j+1]
                                 const contrib_1 = coeff_raf.mul(p_raf_1.mul(q_raf_1))
@@ -1984,6 +2009,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                     .add(coeff_val.mul(p_val_1.mul(q_val_1)));
                                 eval_1 = eval_1.add(contrib_1);
                             }
+
+                            // HINT MECHANISM: derive eval_0 from claim
+                            // p(0) + p(1) = claim => p(0) = claim - p(1)
+                            const eval_0 = ram_ra_current_claim.sub(eval_1);
 
                             // Compute eval_2 = p(2) for degree-2 polynomial
                             var eval_2 = F.zero();
@@ -2004,6 +2033,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             combined_poly[0] = combined_poly[0].add(batch1.mul(eval_0));
                             combined_poly[1] = combined_poly[1].add(batch1.mul(eval_1));
                             combined_poly[2] = combined_poly[2].add(batch1.mul(eval_2));
+
+                            // Store evaluations for claim update after challenge is generated
+                            inst1_eval_0 = eval_0;
+                            inst1_eval_1 = eval_1;
+                            inst1_eval_2 = eval_2;
 
                             std.debug.print("[STAGE5 RAM_RA] PhaseCycle1 round {}: eval_0={x}, eval_1={x}, eval_2={x}\n", .{
                                 cycle_round,
@@ -2117,29 +2151,18 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             const coeff_rw_scaled = gamma2.mul(alpha_2);
                             const coeff_val_scaled = gamma.mul(alpha_1).add(gamma3.mul(alpha_2));
 
-                            var eval_0 = F.zero();
+                            // CRITICAL: Use hint mechanism - only compute eval_1 directly
+                            // Then derive eval_0 = claim - eval_1 to guarantee sumcheck property
                             var eval_1 = F.zero();
 
                             for (0..half_len_suffix) |j| {
-                                // H_prime values
-                                const h_0 = H_prime[2 * j];
+                                // H_prime values (only need odd indices for eval_1)
                                 const h_1 = H_prime[2 * j + 1];
 
-                                // eq_hi values
-                                const eq_raf_0 = eq_raf_hi[2 * j];
+                                // eq_hi values (only need odd indices for eval_1)
                                 const eq_raf_1 = eq_raf_hi[2 * j + 1];
-                                const eq_rw_0 = eq_rw_hi[2 * j];
                                 const eq_rw_1 = eq_rw_hi[2 * j + 1];
-                                const eq_val_0 = eq_val_hi[2 * j];
                                 const eq_val_1 = eq_val_hi[2 * j + 1];
-
-                                // Contribution for X=0
-                                const contrib_0 = h_0.mul(
-                                    coeff_raf_scaled.mul(eq_raf_0)
-                                        .add(coeff_rw_scaled.mul(eq_rw_0))
-                                        .add(coeff_val_scaled.mul(eq_val_0)),
-                                );
-                                eval_0 = eval_0.add(contrib_0);
 
                                 // Contribution for X=1
                                 const contrib_1 = h_1.mul(
@@ -2149,6 +2172,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 );
                                 eval_1 = eval_1.add(contrib_1);
                             }
+
+                            // HINT MECHANISM: derive eval_0 from claim
+                            // p(0) + p(1) = claim => p(0) = claim - p(1)
+                            const eval_0 = ram_ra_current_claim.sub(eval_1);
 
                             // Compute eval_2 = p(2)
                             var eval_2 = F.zero();
@@ -2169,6 +2196,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             combined_poly[0] = combined_poly[0].add(batch1.mul(eval_0));
                             combined_poly[1] = combined_poly[1].add(batch1.mul(eval_1));
                             combined_poly[2] = combined_poly[2].add(batch1.mul(eval_2));
+
+                            // Store evaluations for claim update after challenge is generated
+                            inst1_eval_0 = eval_0;
+                            inst1_eval_1 = eval_1;
+                            inst1_eval_2 = eval_2;
 
                             std.debug.print("[STAGE5 RAM_RA] PhaseCycle2 round {}: eval_0={x}, eval_1={x}, eval_2={x}\n", .{
                                 cycle_round,
@@ -2359,6 +2391,42 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     const inst2_at_r = inst2_c0.add(inst2_c1.mulHiBigIntU128(challenge.limbs)).add(inst2_c2.mul(r2));
                     lookups_claim = inst2_at_r;
 
+                    // =====================================================================
+                    // CRITICAL FIX: Update Instance 0 and Instance 1 claims during address rounds
+                    // =====================================================================
+                    // Instance 0 (RegistersValEvaluation) is inactive for all address rounds (0-127)
+                    // Its polynomial is constant, so p(r) = claim/2 for degree-0 constant poly
+                    // Actually for inactive instance: polynomial is CONSTANT with value = scaled_claim
+                    // and claim is doubled each round (because p(0) + p(1) = 2 * constant = claim)
+                    // So after evaluating at r, we get: constant = claim/2, then new_claim = constant = claim/2... wait
+                    // Let me think: if claim = 2*C (where C is the constant poly value)
+                    // then p(x) = C for all x, so p(0) + p(1) = 2*C = claim (satisfies sumcheck)
+                    // and p(r) = C = claim/2
+                    // So the new claim is claim/2, not doubled!
+                    //
+                    // But wait, the Toom-Cook format has [p(0), p(1), p(2), p_inf]
+                    // For constant poly: [C, C, C, 0]
+                    // This gives coeffs [C, 0, 0, 0] (constant term only)
+                    // So p(r) = C
+                    // And if claim = 2*C, then new_claim = C = claim/2
+                    //
+                    // Hmm, but the code uses combined_poly which adds batch0 * scaled_claim for inactive instance
+                    // Let me check...
+                    //
+                    // For now, update claims by halving (since p(r) = claim/2 for inactive constant poly)
+                    if (remaining_rounds > regs_val_num_rounds) {
+                        // Instance 0 is inactive - claim halves
+                        regs_val_current_claim = regs_val_current_claim.mul(F.fromU64(2).inverse().?);
+                    }
+
+                    if (remaining_rounds > ram_ra_num_rounds) {
+                        // Instance 1 is inactive - claim halves
+                        ram_ra_current_claim = ram_ra_current_claim.mul(F.fromU64(2).inverse().?);
+                    }
+                    // NOTE: Instance 1 active case (address rounds 112-127) is handled below after
+                    // the RamRaClaimReduction binding section, where ram_ra_current_claim is updated.
+                    // The batched claim recomputation is also moved to after the RamRaClaimReduction binding.
+
                     // Debug: verify lookups_claim update
                     if (round < 3) {
                         std.debug.print("[STAGE5 R{}] Updated lookups_claim = {x} (was {x})\n", .{
@@ -2442,6 +2510,14 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                     B_2[0].toBytesBE()[16..32].*,
                                 });
                             }
+
+                            // CRITICAL: Update Instance 1 claim for PhaseAddress rounds
+                            // p(r) = c0 + r*c1 + r²*c2 for degree-2 polynomial
+                            const c2_inst1_pa = inst1_eval_2.sub(inst1_eval_1).sub(inst1_eval_1).add(inst1_eval_0).mul(F.fromU64(2).inverse().?);
+                            const c1_inst1_pa = inst1_eval_1.sub(inst1_eval_0).sub(c2_inst1_pa);
+                            const c0_inst1_pa = inst1_eval_0;
+                            const r2_pa = challenge.mul(challenge);
+                            ram_ra_current_claim = c0_inst1_pa.add(c1_inst1_pa.mulHiBigIntU128(challenge.limbs)).add(c2_inst1_pa.mul(r2_pa));
                         } else {
                             // PhaseCycle: bind polynomials
                             const cycle_round = ram_ra_round - log_ram_k;
@@ -2519,13 +2595,15 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             }
                         }
 
-                        // Update ram_ra_current_claim by evaluating polynomial at challenge
-                        // For degree-2: p(r) = p(0) + r*(p(1)-p(0)) + r²*((p(2)-2*p(1)+p(0))/2)
-                        // But we stored eval_0, eval_1, eval_2 directly
-                        // Actually, the combined_poly already has the contribution, so just recompute
-                        // the individual claim from the polynomial coefficients
-                        // TODO: Track this properly if needed for verification
+                        // NOTE: ram_ra_current_claim is now updated in the PhaseAddress binding section above
                     }
+
+                    // CRITICAL FIX: Recompute current_batched_claim from individual instance claims
+                    // This must be done AFTER all individual claims are updated (including ram_ra_current_claim)
+                    // This ensures consistency: claim = batch0*c0 + batch1*c1 + batch2*c2
+                    current_batched_claim = batch0.mul(regs_val_current_claim)
+                        .add(batch1.mul(ram_ra_current_claim))
+                        .add(batch2.mul(lookups_claim));
 
                     // ===================================================================
                     // Update prefix-suffix decomposition state after receiving challenge
@@ -3342,6 +3420,20 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         std.debug.print("  hint (current_batched_claim)   = {any}\n", .{current_batched_claim.toBytes()});
                         std.debug.print("  c1_direct == c1_recovered: {}\n", .{combined_coeffs[1].eql(c1_recovered)});
 
+                        // CRITICAL DEBUG: Check if current_batched_claim = sum of scaled instance claims
+                        // Expected: batch0*claim0 + batch1*claim1 + batch2*claim2
+                        const expected_batched = batch0.mul(regs_val_current_claim)
+                            .add(batch1.mul(ram_ra_current_claim))
+                            .add(batch2.mul(lookups_claim));
+                        std.debug.print("  expected_batched (batch0*c0+batch1*c1+batch2*c2) = {any}\n", .{expected_batched.toBytes()});
+                        std.debug.print("  current_batched_claim matches expected: {}\n", .{current_batched_claim.eql(expected_batched)});
+                        std.debug.print("    batch0*claim0 = {any}\n", .{batch0.mul(regs_val_current_claim).toBytes()});
+                        std.debug.print("    batch1*claim1 = {any}\n", .{batch1.mul(ram_ra_current_claim).toBytes()});
+                        std.debug.print("    batch2*claim2 = {any}\n", .{batch2.mul(lookups_claim).toBytes()});
+                        std.debug.print("    regs_val_current_claim = {x}\n", .{regs_val_current_claim.toBytesBE()[16..32].*});
+                        std.debug.print("    ram_ra_current_claim   = {x}\n", .{ram_ra_current_claim.toBytesBE()[16..32].*});
+                        std.debug.print("    lookups_claim          = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+
                         // Compute what the hint SHOULD be if coefficients are correct:
                         // hint_expected = p(0) + p(1) = 2*c0 + c1 + c2 + ... + c_d
                         var hint_expected = combined_coeffs[0].add(combined_coeffs[0]); // 2*c0
@@ -3352,27 +3444,27 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         std.debug.print("  hint == hint_expected: {}\n", .{current_batched_claim.eql(hint_expected)});
                     }
 
-                    // Evaluate using Horner's method with c1_recovered (matching verifier)
-                    // p(r) = c0 + r*c1 + r²*c2 + ...
-                    // = c0 + r*(c1 + r*(c2 + r*(c3 + ...)))
-                    var eval_result = combined_coeffs[combined_coeffs.len - 1]; // c_d (highest coeff)
-                    var i_val = combined_coeffs.len - 1;
-                    while (i_val > 1) {
-                        i_val -= 1;
-                        // For index 1, use c1_recovered
-                        if (i_val == 1) {
-                            eval_result = eval_result.mulHiBigIntU128(challenge.limbs).add(c1_recovered);
-                        } else {
-                            eval_result = eval_result.mulHiBigIntU128(challenge.limbs).add(combined_coeffs[i_val]);
-                        }
-                    }
-                    eval_result = eval_result.mulHiBigIntU128(challenge.limbs).add(combined_coeffs[0]); // add c0
-                    current_batched_claim = eval_result;
+                    // NOTE: We do NOT update current_batched_claim here using hint-recovered evaluation.
+                    // Instead, we will recompute it AFTER all individual instance claims are updated below.
+                    // This ensures current_batched_claim = batch0*claim0 + batch1*claim1 + batch2*claim2
+                    // which is necessary for the sumcheck invariant to hold.
 
                     // Skip the standard compression/serialization below
                     // Bind the challenge for RegistersValEvaluation if active
                     if (remaining_rounds <= regs_val_num_rounds) {
                         const regs_round = regs_val_num_rounds - remaining_rounds;
+
+                        // Update Instance 0 claim: new_claim = p0(challenge)
+                        // Get the polynomial coefficients from Toom-Cook evaluations
+                        const poly_evals = computeRegsValRoundPoly(inc_evals, wa_evals, lt_evals, regs_round);
+                        const inst0_coeffs = UniPoly(F).toomCookToCoeffs(poly_evals);
+                        // Evaluate at challenge using Horner's method
+                        var p0_at_r = inst0_coeffs[3]; // c3 (highest)
+                        p0_at_r = p0_at_r.mulHiBigIntU128(challenge.limbs).add(inst0_coeffs[2]); // c2
+                        p0_at_r = p0_at_r.mulHiBigIntU128(challenge.limbs).add(inst0_coeffs[1]); // c1
+                        p0_at_r = p0_at_r.mulHiBigIntU128(challenge.limbs).add(inst0_coeffs[0]); // c0
+                        regs_val_current_claim = p0_at_r;
+
                         bindRegsValChallenge(inc_evals, wa_evals, lt_evals, regs_round, challenge);
                     }
 
@@ -3486,6 +3578,26 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                     half_len,
                                 });
                             }
+
+                            // CRITICAL: Update Instance 1 claim after binding
+                            // p(r) = c0 + r*c1 + r²*c2 for degree-2 polynomial
+                            // where c0 = eval_0, c1 = eval_1 - eval_0 - c2, c2 = (eval_2 - 2*eval_1 + eval_0) / 2
+                            // Since we use hint: eval_0 = claim - eval_1, we have p(0) + p(1) = claim
+                            // Compute p(r) using Lagrange interpolation:
+                            // p(r) = eval_0 * L0(r) + eval_1 * L1(r) + eval_2 * L2(r)
+                            // where L0(r) = (r-1)(r-2)/2, L1(r) = -r(r-2), L2(r) = r(r-1)/2
+                            // Simpler: convert to coefficients and use Horner
+                            const c2_inst1 = inst1_eval_2.sub(inst1_eval_1).sub(inst1_eval_1).add(inst1_eval_0).mul(F.fromU64(2).inverse().?);
+                            const c1_inst1 = inst1_eval_1.sub(inst1_eval_0).sub(c2_inst1);
+                            const c0_inst1 = inst1_eval_0;
+                            // p(r) = c0 + r*c1 + r²*c2
+                            const r2 = challenge.mul(challenge);
+                            ram_ra_current_claim = c0_inst1.add(c1_inst1.mulHiBigIntU128(challenge.limbs)).add(c2_inst1.mul(r2));
+
+                            std.debug.print("[STAGE5 INST1 CLAIM] Round {}: new_claim={x}\n", .{
+                                round,
+                                ram_ra_current_claim.toBytesBE()[16..32].*,
+                            });
                         }
                     }
 
@@ -3574,6 +3686,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         final_ra = final_ra.mul(ra_chunk_weights[c][0]);
                     }
                     lookups_ra_weights[0] = final_ra;
+
+                    // CRITICAL FIX: Recompute current_batched_claim from updated instance claims
+                    // This ensures the sumcheck invariant: claim = batch0*c0 + batch1*c1 + batch2*c2
+                    current_batched_claim = batch0.mul(regs_val_current_claim)
+                        .add(batch1.mul(ram_ra_current_claim))
+                        .add(batch2.mul(lookups_claim));
 
                     // Debug: print challenges for cycle rounds (128-135)
                     if (round >= LOOKUPS_LOG_K) {

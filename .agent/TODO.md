@@ -1,54 +1,62 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 65 - Stage 4 FIXED, Stage 5 investigation started
+## Status: Session 67 - Instance 1 Hint Mechanism Fix (In Progress)
 
 ## Current Issue
 
-Stage 5 (InstructionReadRaf) sumcheck verification fails with output_claim vs expected_claim mismatch.
+Stage 5 sumcheck verification fails. The combined polynomial doesn't satisfy `p(0) + p(1) = current_batched_claim`.
 
-## Session 65 Progress
+**Root cause identified**: The batched claim tracking is inconsistent with individual instance claims.
 
-### Stage 4 Fix (COMPLETED)
+## Progress Made This Session
 
-Fixed several critical issues in Stage 4 sumcheck:
+### 1. Identified the Batched Claim Mismatch
+- Debug shows `current_batched_claim matches expected: false` for round 128
+- The `expected_batched` (from individual claims) matches `hint_expected` (from polynomial)
+- But `current_batched_claim` (the hint) doesn't match
 
-1. **ValEvaluation hint mechanism**: Changed from `p(1) = claim - p(0)` to `p(0) = claim - p(1)` to match Jolt's convention.
+### 2. Fixes Implemented
+1. **Scaled claim initialization**: Changed `regs_val_current_claim` and `ram_ra_current_claim` to use SCALED values at initialization
+2. **Individual claim tracking for address rounds**: Added halving for inactive instances during address rounds (0-127)
+3. **PhaseAddress claim update**: Added `ram_ra_current_claim` update after PhaseAddress binding (rounds 112-127)
+4. **Batched claim recomputation**: Moved to after RamRaClaimReduction binding in address rounds
 
-2. **ValFinal polynomial evaluation**: Changed from Toom-Cook to Lagrange interpolation (degree-2).
+### 3. Current State
+- Rounds 129-135: `current_batched_claim matches expected: true` ✓
+- Round 128: `current_batched_claim matches expected: false` ✗
 
-3. **ValFinal hint mechanism**: Keep actual p(2) unchanged when applying hint to p(1).
+The issue is that the batched claim at round 128 START was set at the END of round 127 (address round), but there's still a mismatch.
 
-4. **ValFinal combined polynomial contribution**: Don't add c2 to c3 slot (degree-2 has no cubic term).
+## Next Steps
 
-### Stage 5 Investigation (STARTED)
+1. **Debug round 127**: Add explicit debug to see what values are being used to compute `current_batched_claim` at the end of round 127
 
-Stage 5 (InstructionReadRaf) is a complex batched sumcheck with:
-- Total 136 rounds: 128 address + 8 cycle rounds
-- Degree: 10 (with default config: 8 virtual RA polys + 2)
+2. **Verify Instance 1 claim evolution**: Trace `ram_ra_current_claim` through PhaseAddress rounds 112-127 to ensure it's being updated correctly
 
-Two phases:
-1. **Address rounds (0-127)**: Uses `from_evals_and_hint` with [p(0), p(2)] - degree-2
-2. **Cycle rounds (128-135)**: Uses `finish_mles_product_sum_from_evals` with Gruen-split EQ optimization
+3. **Check code path**: Round 127 is the last address round. Verify that the batched claim recomputation is using the UPDATED `ram_ra_current_claim` value
 
-The cycle rounds use a different hint mechanism:
-- Input `sum_evals` contains evaluations on `[1, 2, ..., d-1, ∞]` (NOT including 0!)
-- Uses hint to compute `eval_at_0 = (claim - eq_eval_at_1 * eval_at_1) / eq_eval_at_0`
-- Then interpolates with `from_evals_toom`
-- Multiplies result by EQ factor
+## Analysis
 
-This is more complex than Stage 4 - need to analyze Zolt's Stage 5 prover to find mismatches.
+At round 128 start, the debug shows:
+- `regs_val_current_claim = 3c9c41f47d8f524d9a5f5c701f596169` (unscaled, after 128 halvings)
+- `ram_ra_current_claim = 1199386937d5c9ad1891fe9b6031d657` (after PhaseAddress rounds)
+- `lookups_claim = f47fe430cf070d741a203164625e7bab` (after address rounds)
 
-### Key Files
+Expected batched claim: `{ 220, 42, 164, 10, ...}` = batch0*c0 + batch1*c1 + batch2*c2
+Actual batched claim: `{ 34, 28, 172, 85, ...}` ≠ expected
 
-**Jolt Stage 5**:
-- `/home/vivado/projects/jolt/jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs`
-- `/home/vivado/projects/jolt/jolt-core/src/subprotocols/mles_product_sum.rs` - `finish_mles_product_sum_from_evals`
+This suggests the batched claim wasn't correctly computed at the end of round 127.
 
-**Zolt Stage 5**:
-- `/home/vivado/projects/zolt/src/zkvm/spartan/stage5_prover.zig`
-- `/home/vivado/projects/zolt/src/zkvm/spartan/instruction_read_raf.zig`
+## Files Modified
 
-### Test Commands
+- `src/zkvm/spartan/stage5_prover.zig`:
+  - Line 1199: Changed `regs_val_current_claim = regs_scaled` (was `regs_val_input`)
+  - Line 1408: Changed `ram_ra_current_claim = ram_ra_scaled_corrected`
+  - Lines 2412-2425: Added individual claim updates for address rounds
+  - Line 2517-2524: Added PhaseAddress claim update
+  - Line 2604-2609: Moved batched claim recomputation to after RamRaClaimReduction binding
+
+## Test Commands
 
 ```bash
 # Build Zolt
@@ -61,31 +69,9 @@ zig build -Doptimize=ReleaseFast
 cd /home/vivado/projects/jolt && cargo test -p jolt-core --features zolt-debug --lib test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
 
-## Next Steps
+## Previous Progress
 
-1. Compare Zolt's Stage 5 prover with Jolt's read_raf_checking.rs
-2. Focus on:
-   - How cycle rounds compute evaluations
-   - How the EQ polynomial (Gruen-split) is handled
-   - The hint mechanism in `finish_mles_product_sum_from_evals`
-3. May need to implement similar Gruen-split EQ handling in Zolt
-
-## Technical Notes
-
-### Hint Mechanisms by Stage
-
-**Stage 4**:
-- ValFinal (degree-2): `p(1) = claim - p(0)`, keep actual p(0) and p(2)
-- ValEvaluation (degree-3): `p(0) = claim - p(1)`, keep actual p(1), p(2), c3
-- Registers (degree-3): standard `p(1) = claim - p(0)`
-
-**Stage 5** (InstructionReadRaf):
-- Address rounds: `from_evals_and_hint` with [p(0), p(2)]
-- Cycle rounds: `finish_mles_product_sum_from_evals` with special EQ handling
-  - `eval_at_0 = (claim - eq(1,r) * eval_at_1) / eq(0,r)`
-  - where `eq(0,r) = 1-r` and `eq(1,r) = r`
-
-### Polynomial Degrees
-
-- Stage 4: Mixed (3, 3, 2) → combined degree 3
-- Stage 5: Mixed (variable) → combined degree 10+ for cycle rounds
+- Stage 1-4: WORKING
+- Stage 5 address rounds (0-127): Sumcheck passes individually
+- Stage 5 cycle rounds (128-135): Batched claim consistency achieved for rounds 129-135
+- Round 128 transition: Still has batched claim mismatch

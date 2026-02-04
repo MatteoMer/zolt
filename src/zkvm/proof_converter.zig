@@ -4636,27 +4636,19 @@ pub fn ProofConverter(comptime F: type) type {
             return result;
         }
 
-        /// Evaluate cubic polynomial at a challenge point from evaluations
+        /// Evaluate cubic polynomial at a challenge point from Toom-Cook evaluations
+        /// Input: evals = [p(0), p(1), p(2), p_inf] where p_inf is the leading coefficient
         fn evaluateCubicAtChallengeFromEvals(evals: [4]F, x: F) F {
-            // Lagrange interpolation at points 0, 1, 2, 3
-            const x_minus_0 = x;
-            const x_minus_1 = x.sub(F.one());
-            const x_minus_2 = x.sub(F.fromU64(2));
-            const x_minus_3 = x.sub(F.fromU64(3));
+            // Convert Toom-Cook format to coefficients first
+            // evals = [p(0), p(1), p(2), p_inf] where p_inf = c3
+            const coeffs = poly_mod.UniPoly(F).toomCookToCoeffs(evals);
 
-            // L_0(x) = (x-1)(x-2)(x-3) / (-6)
-            const L0 = x_minus_1.mul(x_minus_2).mul(x_minus_3).mul(F.fromU64(6).neg().inverse().?);
-            // L_1(x) = x(x-2)(x-3) / 2
-            const L1 = x_minus_0.mul(x_minus_2).mul(x_minus_3).mul(F.fromU64(2).inverse().?);
-            // L_2(x) = x(x-1)(x-3) / (-2)
-            const L2 = x_minus_0.mul(x_minus_1).mul(x_minus_3).mul(F.fromU64(2).neg().inverse().?);
-            // L_3(x) = x(x-1)(x-2) / 6
-            const L3 = x_minus_0.mul(x_minus_1).mul(x_minus_2).mul(F.fromU64(6).inverse().?);
-
-            return evals[0].mul(L0)
-                .add(evals[1].mul(L1))
-                .add(evals[2].mul(L2))
-                .add(evals[3].mul(L3));
+            // Evaluate p(x) = c0 + c1*x + c2*x^2 + c3*x^3 using Horner's method
+            var result = coeffs[3];
+            result = result.mul(x).add(coeffs[2]);
+            result = result.mul(x).add(coeffs[1]);
+            result = result.mul(x).add(coeffs[0]);
+            return result;
         }
 
         /// Create a UniSkipFirstRoundProof for Stage 2 (degree-12 polynomial)

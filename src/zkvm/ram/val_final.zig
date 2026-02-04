@@ -144,7 +144,8 @@ pub fn ValFinalProver(comptime F: type) type {
             return self.current_claim;
         }
 
-        /// Compute round polynomial [p(0), p(1), p(2), p(3)]
+        /// Compute round polynomial in Toom-Cook format: [p(0), p(1), p(2), p_inf]
+        /// where p_inf is the leading coefficient c2 (for degree-2 polynomial).
         /// Uses LowToHigh indexing: x=0 at index 2*i, x=1 at index 2*i+1
         pub fn computeRoundPolynomial(self: *Self) [4]F {
             var evals: [4]F = .{ F.zero(), F.zero(), F.zero(), F.zero() };
@@ -159,7 +160,6 @@ pub fn ValFinalProver(comptime F: type) type {
             }
 
             const two = F.fromU64(2);
-            const three = F.fromU64(3);
 
             for (0..half) |i| {
                 // For LowToHigh binding, x=0 is at index 2*i (bit 0 = 0)
@@ -173,14 +173,17 @@ pub fn ValFinalProver(comptime F: type) type {
                 evals[0] = evals[0].add(inc_0.mul(wa_0));
                 evals[1] = evals[1].add(inc_1.mul(wa_1));
 
-                // Extrapolate to x=2,3 for each polynomial, then multiply
+                // Extrapolate to x=2 for each polynomial, then multiply
                 const inc_2 = two.mul(inc_1).sub(inc_0);
                 const wa_2 = two.mul(wa_1).sub(wa_0);
                 evals[2] = evals[2].add(inc_2.mul(wa_2));
 
-                const inc_3 = three.mul(inc_1).sub(two.mul(inc_0));
-                const wa_3 = three.mul(wa_1).sub(two.mul(wa_0));
-                evals[3] = evals[3].add(inc_3.mul(wa_3));
+                // For Toom-Cook format, evals[3] = p_inf = c2 (leading coefficient)
+                // For product of 2 multilinear polynomials, c2 = product of slopes
+                // slope = f(1) - f(0) for each multilinear
+                const inc_slope = inc_1.sub(inc_0);
+                const wa_slope = wa_1.sub(wa_0);
+                evals[3] = evals[3].add(inc_slope.mul(wa_slope));
             }
 
             return evals;

@@ -1163,20 +1163,21 @@ pub fn Stage4GruenProver(comptime F: type) type {
             }
         }
 
-        /// Compute round polynomial evaluations at 0, 1, 2, 3
-        /// Compatible with the existing proof_converter interface
+        /// Compute round polynomial evaluations in Toom-Cook format: [p(0), p(1), p(2), p_inf]
+        /// where p_inf is the leading coefficient c3 (evaluation at infinity).
+        /// This matches Jolt's format for compressed polynomials.
         pub fn computeRoundEvals(self: *Self, round: usize, current_claim: F) [4]F {
             const round_poly = self.computeRoundPolynomialGruen(round, current_claim);
-            // Convert coefficients back to evaluations
+            // Convert coefficients to Toom-Cook evaluations:
             // p(0) = c0
             // p(1) = c0 + c1 + c2 + c3
             // p(2) = c0 + 2*c1 + 4*c2 + 8*c3
-            // p(3) = c0 + 3*c1 + 9*c2 + 27*c3
+            // p_inf = c3 (leading coefficient)
             const c = round_poly.coeffs;
             const p0 = c[0];
             const p1 = c[0].add(c[1]).add(c[2]).add(c[3]);
             const p2 = c[0].add(c[1].mul(F.fromU64(2))).add(c[2].mul(F.fromU64(4))).add(c[3].mul(F.fromU64(8)));
-            const p3 = c[0].add(c[1].mul(F.fromU64(3))).add(c[2].mul(F.fromU64(9))).add(c[3].mul(F.fromU64(27)));
+            const p_inf = c[3]; // Leading coefficient (Toom-Cook format)
 
             // Debug: Verify sumcheck constraint p(0)+p(1) = current_claim
             const sum01 = p0.add(p1);
@@ -1188,7 +1189,7 @@ pub fn Stage4GruenProver(comptime F: type) type {
                 std.debug.print("  current_claim = {any}\n", .{current_claim.toBytes()[0..8]});
             }
 
-            return .{ p0, p1, p2, p3 };
+            return .{ p0, p1, p2, p_inf };
         }
 
         /// Bind challenge after getting round evaluations (compatible with existing interface)

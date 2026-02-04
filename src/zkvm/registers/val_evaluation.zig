@@ -212,9 +212,8 @@ pub fn RegistersValEvaluationProver(comptime F: type) type {
                 // p(1): product at x = 1
                 evals[1] = evals[1].add(inc_1.mul(wa_1).mul(lt_1));
 
-                // Extrapolate to x=2 and x=3 for degree-3 polynomial
+                // Extrapolate to x=2 for degree-3 polynomial
                 const two = F.fromU64(2);
-                const three = F.fromU64(3);
 
                 // f(2) = 2*f(1) - f(0) for multilinear
                 const inc_2 = two.mul(inc_1).sub(inc_0);
@@ -222,11 +221,13 @@ pub fn RegistersValEvaluationProver(comptime F: type) type {
                 const lt_2 = two.mul(lt_1).sub(lt_0);
                 evals[2] = evals[2].add(inc_2.mul(wa_2).mul(lt_2));
 
-                // f(3) = 3*f(1) - 2*f(0) for multilinear
-                const inc_3 = three.mul(inc_1).sub(two.mul(inc_0));
-                const wa_3 = three.mul(wa_1).sub(two.mul(wa_0));
-                const lt_3 = three.mul(lt_1).sub(two.mul(lt_0));
-                evals[3] = evals[3].add(inc_3.mul(wa_3).mul(lt_3));
+                // For Toom-Cook format, evals[3] = p_inf = c3 (leading coefficient)
+                // For product of 3 multilinear polynomials, c3 = product of slopes
+                // slope = f(1) - f(0) for each multilinear
+                const inc_slope = inc_1.sub(inc_0);
+                const wa_slope = wa_1.sub(wa_0);
+                const lt_slope = lt_1.sub(lt_0);
+                evals[3] = evals[3].add(inc_slope.mul(wa_slope).mul(lt_slope));
             }
 
             return evals;

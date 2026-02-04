@@ -1883,16 +1883,21 @@ pub fn ProofConverter(comptime F: type) type {
 
                 // Compute init_eval for ValEvaluation at the RWC r_address
                 const init_eval_for_val_eval = blk: {
-                    if (config.initial_ram) |ir| {
-                        if (config.memory_layout) |ml| {
-                            const result = computeInitialRamEval(ir, ml, r_address_be, log_ram_k);
-                            std.debug.print("[ZOLT STAGE4 FIX] Computed init_eval_for_val_eval at RWC r_address:\n", .{});
-                            std.debug.print("[ZOLT STAGE4 FIX]   init_eval_for_val_eval = {any}\n", .{result.toBytesBE()});
-                            break :blk result;
-                        }
+                    if (config.memory_layout) |ml| {
+                        const result = computeInitialRamEval(
+                            config.bytecode_words,
+                            config.min_bytecode_address,
+                            ml,
+                            r_address_be,
+                            log_ram_k,
+                            config.program_inputs,
+                        );
+                        std.debug.print("[ZOLT STAGE4 FIX] Computed init_eval_for_val_eval at RWC r_address:\n", .{});
+                        std.debug.print("[ZOLT STAGE4 FIX]   init_eval_for_val_eval = {any}\n", .{result.toBytesBE()});
+                        break :blk result;
                     }
-                    // No RAM -> init_eval = 0
-                    std.debug.print("[ZOLT STAGE4 FIX] No initial_ram/memory_layout, using zero for init_eval_for_val_eval\n", .{});
+                    // No memory layout -> init_eval = 0
+                    std.debug.print("[ZOLT STAGE4 FIX] No memory_layout, using zero for init_eval_for_val_eval\n", .{});
                     break :blk F.zero();
                 };
 
@@ -1936,16 +1941,21 @@ pub fn ProofConverter(comptime F: type) type {
                 std.debug.print("[ZOLT STAGE4 FIX] Output sumcheck challenge indices: {} to {}\n", .{ output_sumcheck_start, max_num_rounds_stage2 });
 
                 const init_eval_for_val_final = blk: {
-                    if (config.initial_ram) |ir| {
-                        if (config.memory_layout) |ml| {
-                            const result = computeInitialRamEval(ir, ml, r_address_output_sumcheck, log_ram_k);
-                            std.debug.print("[ZOLT STAGE4 FIX] Computed init_eval_for_val_final at OutputSumcheck challenges:\n", .{});
-                            std.debug.print("[ZOLT STAGE4 FIX]   init_eval_for_val_final = {any}\n", .{result.toBytesBE()});
-                            break :blk result;
-                        }
+                    if (config.memory_layout) |ml| {
+                        const result = computeInitialRamEval(
+                            config.bytecode_words,
+                            config.min_bytecode_address,
+                            ml,
+                            r_address_output_sumcheck,
+                            log_ram_k,
+                            config.program_inputs,
+                        );
+                        std.debug.print("[ZOLT STAGE4 FIX] Computed init_eval_for_val_final at OutputSumcheck challenges:\n", .{});
+                        std.debug.print("[ZOLT STAGE4 FIX]   init_eval_for_val_final = {any}\n", .{result.toBytesBE()});
+                        break :blk result;
                     }
-                    // No RAM -> init_eval = 0
-                    std.debug.print("[ZOLT STAGE4 FIX] No initial_ram/memory_layout, using zero for init_eval_for_val_final\n", .{});
+                    // No memory layout -> init_eval = 0
+                    std.debug.print("[ZOLT STAGE4 FIX] No memory_layout, using zero for init_eval_for_val_final\n", .{});
                     break :blk F.zero();
                 };
 
@@ -4110,8 +4120,15 @@ pub fn ProofConverter(comptime F: type) type {
                         }
                     }
 
-                    // Compute val_init(r_address_be)
-                    rwc_val_claim = computeInitialRamEval(config.initial_ram.?, config.memory_layout.?, r_addr_be, log_ram_k);
+                    // Compute val_init(r_address_be) using bytecode_words (like Jolt does)
+                    rwc_val_claim = computeInitialRamEval(
+                        config.bytecode_words,
+                        config.min_bytecode_address,
+                        config.memory_layout.?,
+                        r_addr_be,
+                        log_ram_k,
+                        config.program_inputs,
+                    );
                     std.debug.print("[ZOLT] STAGE2 RWC: computed rwc_val_claim = val_init(r_address) = {any}\n", .{rwc_val_claim.toBytesBE()});
                 }
             }
@@ -4524,46 +4541,91 @@ pub fn ProofConverter(comptime F: type) type {
         }
 
         /// Evaluate the initial RAM polynomial at r_address (BIG_ENDIAN).
+        ///
+        /// This matches Jolt's `eval_initial_ram_mle` which evaluates:
+        ///   sum_k bytecode_words[k] * eq(r_address, bytecode_start + k)
+        /// where bytecode_start = remap_address(min_bytecode_address)
+        ///
+        /// NOTE: Unlike the old implementation that used initial_ram hashmap (stack data),
+        /// this now uses bytecode_words (program bytecode) like Jolt does.
         fn computeInitialRamEval(
-            initial_ram: *const std.AutoHashMapUnmanaged(u64, u64),
+            bytecode_words: ?[]const u64,
+            min_bytecode_address: u64,
             memory_layout: *const jolt_device.MemoryLayout,
             r_address_be: []const F,
             log_ram_k: usize,
+            program_inputs: ?[]const u8,
         ) F {
             std.debug.print("[COMPUTE_INIT_RAM_EVAL] Computing with log_ram_k={}\n", .{log_ram_k});
             std.debug.print("[COMPUTE_INIT_RAM_EVAL] r_address_be.len = {}\n", .{r_address_be.len});
-            std.debug.print("[COMPUTE_INIT_RAM_EVAL] Full r_address_be array (all {} elements):\n", .{r_address_be.len});
-            for (0..r_address_be.len) |i| {
-                std.debug.print("[COMPUTE_INIT_RAM_EVAL]   r_address_be[{}] (BE) = {any}\n", .{ i, r_address_be[i].toBytesBE() });
-            }
-            std.debug.print("[COMPUTE_INIT_RAM_EVAL] initial_ram.count() = {}\n", .{initial_ram.count()});
+            std.debug.print("[COMPUTE_INIT_RAM_EVAL] min_bytecode_address = 0x{x:0>16}\n", .{min_bytecode_address});
+
+            const lowest_address = memory_layout.getLowestAddress();
+            std.debug.print("[COMPUTE_INIT_RAM_EVAL] lowest_address = 0x{x:0>16}\n", .{lowest_address});
 
             var result = F.zero();
-            const start_address = memory_layout.getLowestAddress();
-            std.debug.print("[COMPUTE_INIT_RAM_EVAL] start_address = 0x{x:0>16}\n", .{start_address});
             const max_idx: usize = @as(usize, 1) << @intCast(log_ram_k);
 
-            var processed_count: usize = 0;
+            // Evaluate bytecode region (like Jolt's eval_initial_ram_mle)
+            if (bytecode_words) |words| {
+                if (words.len > 0) {
+                    // bytecode_start = remap_address(min_bytecode_address)
+                    // remap_address = (address - lowest_address) / 8
+                    const bytecode_start: usize = @intCast((min_bytecode_address - lowest_address) / 8);
+                    std.debug.print("[COMPUTE_INIT_RAM_EVAL] bytecode_start (remapped) = {}\n", .{bytecode_start});
+                    std.debug.print("[COMPUTE_INIT_RAM_EVAL] bytecode_words.len = {}\n", .{words.len});
+                    if (words.len > 0) {
+                        std.debug.print("[COMPUTE_INIT_RAM_EVAL] bytecode_words first 3: ", .{});
+                        for (0..@min(3, words.len)) |i| {
+                            std.debug.print("0x{x:0>16} ", .{words[i]});
+                        }
+                        std.debug.print("\n", .{});
+                    }
 
-            std.debug.print("[COMPUTE_INIT_RAM_EVAL] Processing initial_ram entries:\n", .{});
-            var iter = initial_ram.iterator();
-            while (iter.next()) |entry| {
-                const addr = entry.key_ptr.*;
-                if (addr < start_address) continue;
+                    // Sum: bytecode_words[k] * eq(r_address, bytecode_start + k)
+                    for (words, 0..) |word, k| {
+                        const idx = bytecode_start + k;
+                        if (idx >= max_idx) break;
 
-                const idx = @as(usize, @intCast((addr - start_address) / 8));
-                if (idx >= max_idx) continue;
-
-                const eq_val = computeEqAtPointBigEndian(r_address_be, idx);
-                const val = F.fromU64(entry.value_ptr.*);
-                result = result.add(eq_val.mul(val));
-                if (processed_count < 5) {
-                    std.debug.print("[COMPUTE_INIT_RAM_EVAL]   addr=0x{x:0>16}, idx={}, val={}, eq_val={any}\n", .{ addr, idx, entry.value_ptr.*, eq_val.toBytes()[0..8] });
+                        const eq_val = computeEqAtPointBigEndian(r_address_be, idx);
+                        const val = F.fromU64(word);
+                        result = result.add(eq_val.mul(val));
+                    }
+                    std.debug.print("[COMPUTE_INIT_RAM_EVAL] Processed {} bytecode words\n", .{words.len});
                 }
-                processed_count += 1;
             }
 
-            std.debug.print("[COMPUTE_INIT_RAM_EVAL] Processed {} entries\n", .{processed_count});
+            // Also add inputs region (like Jolt does)
+            if (program_inputs) |inputs| {
+                if (inputs.len > 0) {
+                    // input_start = remap_address(memory_layout.input_start)
+                    const input_start: usize = @intCast((memory_layout.input_start - lowest_address) / 8);
+                    std.debug.print("[COMPUTE_INIT_RAM_EVAL] input_start (remapped) = {}\n", .{input_start});
+                    std.debug.print("[COMPUTE_INIT_RAM_EVAL] inputs.len = {}\n", .{inputs.len});
+
+                    // Pack inputs into u64 words (little-endian)
+                    var idx = input_start;
+                    var off: usize = 0;
+                    while (off < inputs.len) {
+                        if (idx >= max_idx) break;
+
+                        var word: u64 = 0;
+                        const chunk_end = @min(off + 8, inputs.len);
+                        for (off..chunk_end) |i| {
+                            const byte_pos = i - off;
+                            word |= @as(u64, inputs[i]) << @intCast(byte_pos * 8);
+                        }
+
+                        const eq_val = computeEqAtPointBigEndian(r_address_be, idx);
+                        const val = F.fromU64(word);
+                        result = result.add(eq_val.mul(val));
+
+                        idx += 1;
+                        off = chunk_end;
+                    }
+                }
+            }
+
             std.debug.print("[COMPUTE_INIT_RAM_EVAL] result = {any}\n", .{result.toBytes()[0..8]});
             return result;
         }
@@ -4807,6 +4869,12 @@ pub const ConversionConfig = struct {
     /// Execution trace for Stage 4 RegistersReadWriteChecking
     /// If null, Stage 4 uses zero-polynomial approach (which fails verification)
     execution_trace: ?*const tracer.ExecutionTrace = null,
+    /// Bytecode words for initial RAM MLE evaluation (packed into 8-byte words)
+    /// This is required for Stage 4 to compute the correct init_eval for RamValEvaluation
+    bytecode_words: ?[]const u64 = null,
+    /// Minimum bytecode address (word-aligned: actual_min_address / 8 * 8)
+    /// Used to compute the remapped bytecode_start index
+    min_bytecode_address: u64 = 0,
 };
 
 // =============================================================================

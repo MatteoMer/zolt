@@ -1,92 +1,97 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 37 - Transcript Divergence Investigation
+## Status: Session 38 - PROGRESS! Stage 4 Now Passes, Stage 5 Fails
 
-## Critical Finding: Challenge Mismatch
+## Major Progress This Session!
 
-The Stage 4 verification fails because Zolt's prover and Jolt's verifier compute different sumcheck challenges from Stage 2. This causes:
+**Stage 4 is now passing!** The verification has progressed to **Stage 5** (InstructionReadRaf), which now fails.
 
-1. Different `r_address` points after normalize_opening_point()
-2. Different `val_init(r_address)` evaluations
-3. Non-zero `input_claim = rwc_val_claim - init_eval` when it should be zero
+## Current Failure: Stage 5 (InstructionReadRaf)
 
-### Key Values (from debug)
-
-**Zolt's rwc_val_claim (BE):**
+### Error Details
 ```
-[1d, f5, f8, 9c, 2e, b5, 56, 72, a4, 26, d4, f5, 6f, 65, 79, ba, 2e, c8, 3c, 7a, b4, f8, 65, 8a, eb, b6, 21, 13, 18, 26, c4, 60]
-```
-
-**Jolt's init_eval (LE):**
-```
-[ad, 81, 92, 5b, 94, d8, 3d, 01, 60, 8c, 94, f3, ef, e0, 65, 7d, 5c, 4a, e7, fa, ba, 9e, 3d, c6, 87, a7, f9, b1, 02, da, e4, 14]
+Sumcheck verification failed!
+  output_claim:   [af, 51, 7b, 30, ff, 29, 91, 26, ...]
+  expected_claim: [f0, c1, c7, e7, 7e, fd, c3, 3b, ...]
+Verification failed: Stage 5
 ```
 
-These are completely different field values.
+### Stage 5 Architecture
+Stage 5 batches THREE sumcheck instances:
 
-### Root Cause Theory
+1. **RegistersValEvaluation** (8 rounds)
+   - Degree: 3
+   - Proves register value consistency
 
-The sumcheck verifier recomputes challenges by:
-1. Reading round polynomial from proof
-2. Appending to transcript
-3. Deriving challenge
+2. **RamRaClaimReduction** (16 rounds = log_K + log_T)
+   - Degree: 2
+   - Consolidates four RAM RA claims
 
-If the transcript state diverges at any point, all subsequent challenges differ.
+3. **InstructionReadRaf** (136 rounds = LOG_K + log_T = 128 + 8)
+   - Degree: 10 (8 virtual RA polynomials + 2)
+   - Main instruction lookups sumcheck
+   - LOG_K = XLEN * 2 = 128 for 64-bit instructions
+   - **This is the component that's failing**
 
-### Transcript Format Understanding
+### Key Variables in InstructionReadRaf
+- **r_reduction**: Original cycle evaluation point from InstructionClaimReduction (Stage 2)
+- **r_cycle_prime**: Last 8 challenges from InstructionReadRaf sumcheck (reversed)
+- **eq_eval_r_reduction**: `EqPolynomial::mle(r_reduction, r_cycle_prime)` - bridges Stage 2 to Stage 5
 
-Both Zolt and Jolt use the same format for appending round polynomials:
+### Potential Causes of Mismatch
+1. **Transcript divergence from earlier stage**
+2. **r_reduction from Stage 2 not matching**
+3. **Virtual polynomial claims mismatch (ra_claims, table_flag_claims)**
+4. **Challenge normalization/reversal issues**
+
+### Working Test Commands
+
+```bash
+# Build optimized (MUCH faster!)
+zig build -Doptimize=ReleaseFast
+
+# Generate proof (~13 seconds with optimization)
+./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o /tmp/zolt_proof_dory.bin --export-preprocessing /tmp/zolt_preprocessing.bin --trace-length 64
+
+# Verify with Jolt
+cd /home/vivado/projects/jolt && cargo test -p jolt-core --features zolt-debug --lib test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
-append_message("UniPoly_begin")
-for each coefficient:
-    append_scalar(coefficient)
-append_message("UniPoly_end")
-```
-
-### Challenge Format Understanding
-
-Both use MontU128Challenge with `[0, 0, low, high]` format:
-- `from_bigint_unchecked([0, 0, low, high])` treats input as Montgomery form
-- Serialization converts to standard form: `[0, 0, low, high] * R^(-1) mod p`
 
 ### Next Steps for Next Session
 
-1. **Add byte-level transcript comparison**
-   - Print exact bytes appended to transcript in both Zolt and Jolt
-   - Compare at each stage boundary
+1. **Compare r_reduction values** between Zolt and Jolt
+   - Zolt stores this in Stage 2 (InstructionClaimReduction)
+   - Jolt retrieves it from opening_accumulator
 
-2. **Compare Stage 2 round polynomial coefficients**
-   - Print coefficients from Zolt's proof
-   - Print coefficients read by Jolt's verifier
-   - Verify they match byte-for-byte
+2. **Compare ra_claims product**
+   - Check each ra_claim[0..7] matches
+   - Verify the product computation
 
-3. **Trace transcript state divergence point**
-   - Start from Stage 2 beginning
-   - Compare state after each operation
-   - Identify exact point where states diverge
+3. **Check table_flag_claims**
+   - Non-zero for tables 0, 1, 9 based on instruction usage
+   - Verify table MLE evaluations match
 
-### Test Commands
-
-```bash
-# Generate Zolt proof with debug
-./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o /tmp/zolt_proof_dory.bin --trace-length 1024 2>&1 | tee /tmp/zolt_debug.log
-
-# Verify with Jolt debug
-cd /home/vivado/projects/jolt && cargo test -p jolt-core --features zolt-debug --lib test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture 2>&1 | tee /tmp/jolt_debug.log
-```
+4. **Debug eq_eval_r_reduction**
+   - Compare r_reduction (8 elements)
+   - Compare r_cycle_prime (8 elements)
+   - Verify eq polynomial evaluation matches
 
 ### Key Files
 
-- Zolt transcript: `src/transcripts/blake2b.zig`
-- Zolt proof converter: `src/zkvm/proof_converter.zig` (Stage 2 at line 2984)
-- Jolt transcript: `jolt/jolt-core/src/transcripts/blake2b.rs`
-- Jolt sumcheck: `jolt/jolt-core/src/subprotocols/sumcheck.rs`
-- Jolt UniPoly: `jolt/jolt-core/src/poly/unipoly.rs` (append_to_transcript at line 479)
+**Zolt Stage 5:**
+- `src/zkvm/spartan/stage5_prover.zig` (LOOKUPS_LOG_K=128 at line 45)
+- `src/zkvm/proof_converter.zig` (Stage 5 around line 2780)
 
-### Previous Session Findings
+**Jolt Stage 5:**
+- `jolt-core/src/zkvm/verifier.rs` (lines 383-413)
+- `jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs` (expected_output_claim at lines 1326-1476)
 
-- Session 36: Found MontU128Challenge format `[0, 0, low, high]`
-- Session 35: Stage 4 instance analysis (RegistersRWC, RamValEvaluation, RamValFinal)
-- Jolt native tests pass (`fib_e2e_dory`)
+### Session Summary
 
-SESSION_ENDING - Made significant progress understanding the transcript divergence issue. Next session should add detailed byte-level comparison between Zolt prover and Jolt verifier transcript operations.
+- Built optimized Zolt binary (22MB vs 48MB, 10x faster proof generation)
+- Generated fresh proof + preprocessing files
+- **Stage 4 now passes!** (RegistersRWC, RamValEvaluation, ValFinal)
+- Stage 5 fails at InstructionReadRaf sumcheck
+- Root cause likely in r_reduction or virtual polynomial claims
+
+SESSION_ENDING - Major progress: Stage 4 passes! Stage 5 (InstructionReadRaf) now fails. Next session: debug r_reduction and virtual polynomial claims comparison.

@@ -119,6 +119,54 @@ fn writeBytesToRamMap(
     }
 }
 
+/// Build bytecode_words from program bytecode and base address.
+/// This matches Jolt's RAMPreprocessing::preprocess behavior.
+///
+/// Returns: (bytecode_words slice, min_bytecode_address)
+/// The caller owns the bytecode_words memory and must free it.
+fn buildBytecodeWords(
+    allocator: Allocator,
+    program_bytecode: []const u8,
+    base_address: u64,
+) !struct { words: []u64, min_bytecode_address: u64 } {
+    if (program_bytecode.len == 0) {
+        return .{ .words = &[_]u64{}, .min_bytecode_address = 0 };
+    }
+
+    // Compute word-aligned range like Jolt does
+    const min_addr = base_address;
+    const max_addr = base_address + program_bytecode.len - 1;
+
+    const min_word = min_addr / 8;
+    const max_word = (max_addr + 7) / 8;
+    const num_words = max_word - min_word + 1;
+
+    const min_bytecode_address = min_word * 8;
+
+    // Allocate words
+    const words = try allocator.alloc(u64, num_words);
+    @memset(words, 0);
+
+    // Fill in bytes (like Jolt's RAMPreprocessing::preprocess)
+    for (program_bytecode, 0..) |byte, i| {
+        const addr = base_address + i;
+        const word_idx = (addr / 8) - min_word;
+        const byte_offset: u6 = @intCast(addr % 8);
+        words[word_idx] |= @as(u64, byte) << (byte_offset * 8);
+    }
+
+    std.debug.print("[BUILD_BYTECODE_WORDS] base_address=0x{x}, len={}, min_bytecode_address=0x{x}, num_words={}\n", .{ base_address, program_bytecode.len, min_bytecode_address, num_words });
+    if (num_words > 0) {
+        std.debug.print("[BUILD_BYTECODE_WORDS] First 3 words: ", .{});
+        for (0..@min(3, num_words)) |i| {
+            std.debug.print("0x{x:0>16} ", .{words[i]});
+        }
+        std.debug.print("\n", .{});
+    }
+
+    return .{ .words = words, .min_bytecode_address = min_bytecode_address };
+}
+
 fn buildInitialRamMap(
     allocator: Allocator,
     program_bytecode: []const u8,
@@ -658,6 +706,14 @@ pub fn JoltProver(comptime F: type) type {
             );
             defer initial_ram.deinit(self.allocator);
 
+            // Build bytecode_words for init_eval computation (like Jolt's RAMPreprocessing)
+            const bytecode_info = try buildBytecodeWords(
+                self.allocator,
+                program_bytecode,
+                common.constants.RAM_START_ADDRESS,
+            );
+            defer if (bytecode_info.words.len > 0) self.allocator.free(bytecode_info.words);
+
             // Create config as named variable to ensure pointer validity
             const init_ram_ptr: ?*const std.AutoHashMapUnmanaged(u64, u64) = &initial_ram;
             const final_ram_ptr: ?*const std.AutoHashMapUnmanaged(u64, u64) = &emulator.ram.memory;
@@ -685,6 +741,9 @@ pub fn JoltProver(comptime F: type) type {
                 .is_panicking = device.panic,
                 // Execution trace for Stage 4 RegistersReadWriteChecking
                 .execution_trace = &emulator.trace,
+                // Bytecode preprocessing for init_eval computation (like Jolt's RAMPreprocessing)
+                .bytecode_words = if (bytecode_info.words.len > 0) bytecode_info.words else null,
+                .min_bytecode_address = bytecode_info.min_bytecode_address,
             };
 
             // Convert to Jolt-compatible format with transcript integration
@@ -990,6 +1049,14 @@ pub fn JoltProver(comptime F: type) type {
             const init_ram_dory: ?*const std.AutoHashMapUnmanaged(u64, u64) = &initial_ram_dory;
             const final_ram_dory: ?*const std.AutoHashMapUnmanaged(u64, u64) = &emulator.ram.memory;
 
+            // Build bytecode_words for init_eval computation (like Jolt's RAMPreprocessing)
+            const bytecode_info_dory = try buildBytecodeWords(
+                self.allocator,
+                program_bytecode,
+                base_address,
+            );
+            defer if (bytecode_info_dory.words.len > 0) self.allocator.free(bytecode_info_dory.words);
+
             // Get memory trace for RAF evaluation sumcheck
             const memory_trace_ptr: *const ram.MemoryTrace = &emulator.ram.trace;
 
@@ -1013,6 +1080,9 @@ pub fn JoltProver(comptime F: type) type {
                     .program_outputs = device.outputs,
                     .is_panicking = device.panic,
                     .execution_trace = &emulator.trace,
+                    // Bytecode preprocessing for init_eval computation (like Jolt's RAMPreprocessing)
+                    .bytecode_words = if (bytecode_info_dory.words.len > 0) bytecode_info_dory.words else null,
+                    .min_bytecode_address = bytecode_info_dory.min_bytecode_address,
                 },
                 cycle_witnesses,
                 tau,

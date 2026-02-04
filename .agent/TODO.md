@@ -1,6 +1,6 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 65 - Stage 4 FIXED, Stage 5 failing
+## Status: Session 65 - Stage 4 FIXED, Stage 5 investigation started
 
 ## Current Issue
 
@@ -12,36 +12,41 @@ Stage 5 (InstructionReadRaf) sumcheck verification fails with output_claim vs ex
 
 Fixed several critical issues in Stage 4 sumcheck:
 
-1. **ValEvaluation hint mechanism**: Changed from `p(1) = claim - p(0)` to `p(0) = claim - p(1)` to match Jolt's convention. Jolt computes `eval_at_0 = previous_claim - eval_at_1` in val_evaluation.rs.
+1. **ValEvaluation hint mechanism**: Changed from `p(1) = claim - p(0)` to `p(0) = claim - p(1)` to match Jolt's convention.
 
-2. **ValFinal polynomial evaluation**:
-   - Changed from Toom-Cook formula (expecting c3) to Lagrange interpolation through 3 points
-   - ValFinal is degree-2 (quadratic), so uses [p(0), p(1), p(2)] not [p(0), p(1), p(2), c3]
-   - Implemented `evaluateQuadraticAtChallengeFromEvals` using Lagrange basis polynomials
+2. **ValFinal polynomial evaluation**: Changed from Toom-Cook to Lagrange interpolation (degree-2).
 
-3. **ValFinal hint mechanism**: Keep actual p(2) unchanged when applying hint to p(1)
-   - Jolt's `from_evals_and_hint` takes [p(0), p(2)] and computes p(1) = claim - p(0)
-   - Then interpolates through all 3 points via Vandermonde
-   - The actual p(2) is kept, only p(1) is modified by the hint
+3. **ValFinal hint mechanism**: Keep actual p(2) unchanged when applying hint to p(1).
 
-4. **ValFinal combined polynomial contribution**:
-   - ValFinal is degree-2, so c3 = 0 (no cubic term)
-   - Fixed to not add c2 (ValFinal's evals[3]) to combined_evals[3] (which expects c3)
-   - Only add weighted [p(0), p(1), p(2), 0] to combined_evals
+4. **ValFinal combined polynomial contribution**: Don't add c2 to c3 slot (degree-2 has no cubic term).
 
-### Key Files Modified
+### Stage 5 Investigation (STARTED)
 
-1. `/home/vivado/projects/zolt/src/zkvm/proof_converter.zig`:
-   - Added `evaluateQuadraticAtChallengeFromEvals` function for degree-2 polynomial evaluation
-   - Fixed ValEvaluation hint: `p(0)_hint = claim - p(1)_actual`
-   - Fixed ValFinal hint: keep actual p(2), only modify p(1)
-   - Fixed ValFinal combined_evals contribution: don't add c2 to c3 slot
+Stage 5 (InstructionReadRaf) is a complex batched sumcheck with:
+- Total 136 rounds: 128 address + 8 cycle rounds
+- Degree: 10 (with default config: 8 virtual RA polys + 2)
 
-2. `/home/vivado/projects/zolt/src/zkvm/ram/val_final.zig`:
-   - Previous fix: compute actual sum after binding in `bindChallengeWithPoly`
+Two phases:
+1. **Address rounds (0-127)**: Uses `from_evals_and_hint` with [p(0), p(2)] - degree-2
+2. **Cycle rounds (128-135)**: Uses `finish_mles_product_sum_from_evals` with Gruen-split EQ optimization
 
-3. `/home/vivado/projects/zolt/src/zkvm/ram/val_evaluation.zig`:
-   - Previous fix: compute actual sum after binding in `bindChallengeWithPoly`
+The cycle rounds use a different hint mechanism:
+- Input `sum_evals` contains evaluations on `[1, 2, ..., d-1, ∞]` (NOT including 0!)
+- Uses hint to compute `eval_at_0 = (claim - eq_eval_at_1 * eval_at_1) / eq_eval_at_0`
+- Then interpolates with `from_evals_toom`
+- Multiplies result by EQ factor
+
+This is more complex than Stage 4 - need to analyze Zolt's Stage 5 prover to find mismatches.
+
+### Key Files
+
+**Jolt Stage 5**:
+- `/home/vivado/projects/jolt/jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs`
+- `/home/vivado/projects/jolt/jolt-core/src/subprotocols/mles_product_sum.rs` - `finish_mles_product_sum_from_evals`
+
+**Zolt Stage 5**:
+- `/home/vivado/projects/zolt/src/zkvm/spartan/stage5_prover.zig`
+- `/home/vivado/projects/zolt/src/zkvm/spartan/instruction_read_raf.zig`
 
 ### Test Commands
 
@@ -58,24 +63,29 @@ cd /home/vivado/projects/jolt && cargo test -p jolt-core --features zolt-debug -
 
 ## Next Steps
 
-1. Investigate Stage 5 (InstructionReadRaf) sumcheck failure
-2. Stage 5 has 3 instances with complex polynomial structures
-3. May have similar degree/hint issues to Stage 4
+1. Compare Zolt's Stage 5 prover with Jolt's read_raf_checking.rs
+2. Focus on:
+   - How cycle rounds compute evaluations
+   - How the EQ polynomial (Gruen-split) is handled
+   - The hint mechanism in `finish_mles_product_sum_from_evals`
+3. May need to implement similar Gruen-split EQ handling in Zolt
 
 ## Technical Notes
 
-### Polynomial Degree Issues
-- Stage 4 has mixed-degree instances: RegistersRWC (degree-3), ValEvaluation (degree-3), ValFinal (degree-2)
-- When combining, must handle different leading coefficient slots correctly
-- Degree-2 contributes 0 to c3 (cubic coefficient)
-- Degree-3 contributes actual c3 value
+### Hint Mechanisms by Stage
 
-### Hint Mechanism Variations
-- Different sumcheck instances use different hint conventions:
-  - Most use `p(1) = claim - p(0)` (hint on p(1), keep actual p(0))
-  - ValEvaluation uses `p(0) = claim - p(1)` (hint on p(0), keep actual p(1))
-  - Both satisfy sumcheck invariant `p(0) + p(1) = claim`
+**Stage 4**:
+- ValFinal (degree-2): `p(1) = claim - p(0)`, keep actual p(0) and p(2)
+- ValEvaluation (degree-3): `p(0) = claim - p(1)`, keep actual p(1), p(2), c3
+- Registers (degree-3): standard `p(1) = claim - p(0)`
 
-### Polynomial Evaluation
-- Cubic (degree-3): Use Toom-Cook to coefficients, then Horner's method
-- Quadratic (degree-2): Use Lagrange interpolation through 3 points
+**Stage 5** (InstructionReadRaf):
+- Address rounds: `from_evals_and_hint` with [p(0), p(2)]
+- Cycle rounds: `finish_mles_product_sum_from_evals` with special EQ handling
+  - `eval_at_0 = (claim - eq(1,r) * eval_at_1) / eq(0,r)`
+  - where `eq(0,r) = 1-r` and `eq(1,r) = r`
+
+### Polynomial Degrees
+
+- Stage 4: Mixed (3, 3, 2) → combined degree 3
+- Stage 5: Mixed (variable) → combined degree 10+ for cycle rounds

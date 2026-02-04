@@ -2062,18 +2062,16 @@ pub fn ProofConverter(comptime F: type) type {
                 // We use init_eval_for_val_eval which was computed at the RWC r_address.
                 const input_claim_val_eval = stage2_result.rwc_val_claim.sub(init_eval_for_val_eval);
 
-                // CRITICAL: RamValFinalEvaluation's input_claim must equal the prover's polynomial sum.
-                // The ValFinal sumcheck proves: Σ_j inc(j) * wa(j) = input_claim
+                // CRITICAL FIX: RamValFinalEvaluation's input_claim must match Jolt's verifier computation:
+                //   input_claim = val_final_claim - val_init_eval
+                // where:
+                //   - val_final_claim = RamValFinal @ RamOutputCheck (from Stage 2 OutputSumcheck)
+                //   - val_init_eval = MLE of initial RAM at the OutputSumcheck opening point
                 //
-                // For programs without RAM writes (like Fibonacci), inc = 0 everywhere, so:
-                //   Σ_j inc(j) * wa(j) = 0
-                //
-                // The input_claim must therefore be 0 for consistency.
-                //
-                // Jolt's formula (val_final_claim - val_init_eval) would give a non-zero result
-                // because val_final includes the termination bit while val_init doesn't.
-                // But the prover's polynomial sum is 0, so we use the prover's claim.
-                const input_claim_val_final = val_final_prover_early.computeInitialClaim();
+                // Even for programs without RAM writes (like Fibonacci), Jolt computes this as
+                // a non-zero value because val_final includes the termination bit.
+                // We MUST use the same formula for transcript consistency!
+                const input_claim_val_final = stage2_result.output_val_final_claim.sub(init_eval_for_val_final);
 
                 std.debug.print("[ZOLT STAGE4] input_claim_val_eval (derived from accumulator): {any}\n", .{input_claim_val_eval.toBytesBE()});
                 std.debug.print("[ZOLT STAGE4] input_claim_val_final (derived from accumulator): {any}\n", .{input_claim_val_final.toBytesBE()});
@@ -2137,7 +2135,7 @@ pub fn ProofConverter(comptime F: type) type {
                 std.debug.print("[ZOLT STAGE4] batching_coeff[2]_BE = {any}\n", .{batch2.toBytesBE()});
 
                 const batching_coeffs = [3]F{ batch0, batch1, batch2 };
-                const input_claims = [3]F{ input_claim_registers, input_claim_val_eval, input_claim_val_final };
+                _ = .{ input_claim_registers, input_claim_val_eval, input_claim_val_final }; // Used in individual_claims init
 
                 // Now initialize regs prover with actual batch0
                 // CRITICAL FIX: Stage 3's sumcheck binds variables in the order challenges are sampled.
@@ -2179,16 +2177,28 @@ pub fn ProofConverter(comptime F: type) type {
                 const val_final_rounds = val_final_prover_early.numRounds();
                 const rounds_per_instance = [3]usize{ stage4_max_rounds, val_eval_rounds, val_final_rounds };
 
+                // Track individual claims for each instance (Jolt's approach)
+                // For inactive instances, the claim evolves as: claim' = (claim/2) * (1 + r)
+                // This is equivalent to evaluating the constant polynomial at the challenge.
+                var individual_claims = [3]F{
+                    input_claim_registers,
+                    input_claim_val_eval,
+                    input_claim_val_final,
+                };
+
+                // Scale initial claims by 2^(max_rounds - instance_rounds) for proper batching
+                for (0..3) |i| {
+                    const scale_power = stage4_max_rounds - rounds_per_instance[i];
+                    for (0..scale_power) |_| {
+                        individual_claims[i] = individual_claims[i].add(individual_claims[i]);
+                    }
+                    std.debug.print("[ZOLT STAGE4] Instance {} initial scaled claim = {any}\n", .{ i, individual_claims[i].toBytesBE() });
+                }
+
                 // Initial batched claim.
                 var batched_claim = F.zero();
                 for (0..3) |i| {
-                    const scale_power = stage4_max_rounds - rounds_per_instance[i];
-                    var scaled = input_claims[i];
-                    for (0..scale_power) |_| {
-                        scaled = scaled.add(scaled);
-                    }
-                    const weighted = scaled.mul(batching_coeffs[i]);
-                    std.debug.print("[ZOLT STAGE4] Instance {} scale_power={}, scaled = {any}\n", .{ i, scale_power, scaled.toBytesBE() });
+                    const weighted = individual_claims[i].mul(batching_coeffs[i]);
                     std.debug.print("[ZOLT STAGE4] Instance {} weighted contribution (LE) = {any}\n", .{ i, weighted.toBytes() });
                     batched_claim = batched_claim.add(weighted);
                 }
@@ -2196,13 +2206,12 @@ pub fn ProofConverter(comptime F: type) type {
                 std.debug.print("[ZOLT STAGE4] Initial batched_claim (BE) = {any}\n", .{batched_claim.toBytesBE()});
                 std.debug.print("[ZOLT STAGE4] rounds: regs={}, val_eval={}, val_final={}, max={}\n", .{ stage4_max_rounds, val_eval_rounds, val_final_rounds, stage4_max_rounds });
 
-                var regs_current_claim = input_claim_registers;
+                var regs_current_claim = individual_claims[0];
 
                 var stage4_r_sumcheck = try self.allocator.alloc(F, stage4_max_rounds);
                 defer self.allocator.free(stage4_r_sumcheck);
 
                 for (0..stage4_max_rounds) |round_idx| {
-                    const remaining_rounds = stage4_max_rounds - round_idx;
                     var combined_evals = [4]F{ F.zero(), F.zero(), F.zero(), F.zero() };
 
                     const regs_evals = regs_prover.computeRoundEvals(round_idx, regs_current_claim);
@@ -2225,23 +2234,36 @@ pub fn ProofConverter(comptime F: type) type {
                         combined_evals[j] = combined_evals[j].add(regs_evals[j].mul(batching_coeffs[0]));
                     }
 
+                    // For inactive instances (before their offset round), the polynomial is constant:
+                    // H(X) = claim/2, so H(0) = H(1) = claim/2.
+                    // We add this constant to all evaluation points.
+                    //
+                    // For active instances (at or after their offset round), we use the real
+                    // sumcheck polynomial from the prover.
+                    const val_eval_offset = stage4_max_rounds - val_eval_rounds;
+                    const val_final_offset = stage4_max_rounds - val_final_rounds;
+
+                    // Compute 1/2 in the field
+                    const two_inv_local = F.fromU64(2).inverse() orelse F.one();
+
                     var val_eval_evals_opt: ?[4]F = null;
-                    if (remaining_rounds > val_eval_rounds) {
-                        const scale_power = remaining_rounds - val_eval_rounds - 1;
-                        var scaled = input_claim_val_eval;
-                        for (0..scale_power) |_| {
-                            scaled = scaled.add(scaled);
-                        }
-                        const weighted = scaled.mul(batching_coeffs[1]);
-                        for (0..4) |j| {
+                    const val_eval_active = round_idx >= val_eval_offset;
+                    if (!val_eval_active) {
+                        // Inactive: constant polynomial H(X) = claim/2
+                        // In Toom-Cook format, this adds claim/2 to p(0), p(1), p(2) and 0 to p_inf
+                        const half_claim = individual_claims[1].mul(two_inv_local);
+                        const weighted = half_claim.mul(batching_coeffs[1]);
+                        for (0..3) |j| {
                             combined_evals[j] = combined_evals[j].add(weighted);
                         }
+                        // p_inf (combined_evals[3]) stays 0 for constant polynomial
                     } else {
                         const evals = val_eval_prover_early.computeRoundPolynomial();
                         val_eval_evals_opt = evals;
                         // DEBUG: Check if val_eval is contributing non-zero
-                        if (round_idx == val_eval_rounds or round_idx == stage4_max_rounds - val_eval_rounds) {
-                            std.debug.print("[ZOLT STAGE4 DEBUG] Round {}: val_eval starts/first active round\n", .{round_idx});
+                        if (round_idx == val_eval_offset) {
+                            std.debug.print("[ZOLT STAGE4 DEBUG] Round {}: val_eval ACTIVATES (offset={})\n", .{round_idx, val_eval_offset});
+                            std.debug.print("[ZOLT STAGE4 DEBUG]   individual_claims[1] = {any}\n", .{individual_claims[1].toBytes()[0..8]});
                             std.debug.print("[ZOLT STAGE4 DEBUG]   val_eval_evals[0] = {any}\n", .{evals[0].toBytes()[0..8]});
                             std.debug.print("[ZOLT STAGE4 DEBUG]   val_eval_evals[1] = {any}\n", .{evals[1].toBytes()[0..8]});
                             const contribution = evals[0].mul(batching_coeffs[1]);
@@ -2253,22 +2275,22 @@ pub fn ProofConverter(comptime F: type) type {
                     }
 
                     var val_final_evals_opt: ?[4]F = null;
-                    if (remaining_rounds > val_final_rounds) {
-                        const scale_power = remaining_rounds - val_final_rounds - 1;
-                        var scaled = input_claim_val_final;
-                        for (0..scale_power) |_| {
-                            scaled = scaled.add(scaled);
-                        }
-                        const weighted = scaled.mul(batching_coeffs[2]);
-                        for (0..4) |j| {
+                    const val_final_active = round_idx >= val_final_offset;
+                    if (!val_final_active) {
+                        // Inactive: constant polynomial H(X) = claim/2
+                        const half_claim = individual_claims[2].mul(two_inv_local);
+                        const weighted = half_claim.mul(batching_coeffs[2]);
+                        for (0..3) |j| {
                             combined_evals[j] = combined_evals[j].add(weighted);
                         }
+                        // p_inf (combined_evals[3]) stays 0 for constant polynomial
                     } else {
                         const evals = val_final_prover_early.computeRoundPolynomial();
                         val_final_evals_opt = evals;
                         // DEBUG: Check if val_final is contributing non-zero
-                        if (round_idx == val_final_rounds or round_idx == stage4_max_rounds - val_final_rounds) {
-                            std.debug.print("[ZOLT STAGE4 DEBUG] Round {}: val_final starts/first active round\n", .{round_idx});
+                        if (round_idx == val_final_offset) {
+                            std.debug.print("[ZOLT STAGE4 DEBUG] Round {}: val_final ACTIVATES (offset={})\n", .{round_idx, val_final_offset});
+                            std.debug.print("[ZOLT STAGE4 DEBUG]   individual_claims[2] = {any}\n", .{individual_claims[2].toBytes()[0..8]});
                             std.debug.print("[ZOLT STAGE4 DEBUG]   val_final_evals[0] = {any}\n", .{evals[0].toBytes()[0..8]});
                             std.debug.print("[ZOLT STAGE4 DEBUG]   val_final_evals[1] = {any}\n", .{evals[1].toBytes()[0..8]});
                             const contribution = evals[0].mul(batching_coeffs[2]);
@@ -2370,24 +2392,41 @@ pub fn ProofConverter(comptime F: type) type {
                     std.debug.print("[ZOLT STAGE4] Round {}: challenge (LE) = {any}\n", .{ round_idx, challenge.toBytes() });
                     std.debug.print("[ZOLT STAGE4] Round {}: new batched_claim (LE) = {any}\n", .{ round_idx, batched_claim.toBytes() });
 
+                    // Update individual claims for each instance
+                    // For instance 0 (regs): always active, evaluate polynomial at challenge
                     regs_current_claim = evaluateCubicAtChallengeFromEvals(regs_evals, challenge);
+                    individual_claims[0] = regs_current_claim;
                     regs_prover.bindChallenge(round_idx, challenge);
 
+                    // For instance 1 (val_eval): if inactive, claim' = claim / 2
                     if (val_eval_evals_opt) |evals| {
-                        const var_idx = round_idx - 7; // Which variable we're binding (0-7)
-                        if (round_idx == 7 or round_idx == 14) {
-                            std.debug.print("[ZOLT BIND DEBUG] Round {}: binding var {} with challenge (BE)={any}\n", .{ round_idx, var_idx, challenge.toBytesBE() });
+                        // Active: evaluate the polynomial at challenge
+                        individual_claims[1] = evaluateCubicAtChallengeFromEvals(evals, challenge);
+                        const var_idx = round_idx - val_eval_offset;
+                        if (round_idx == val_eval_offset or round_idx == val_eval_offset + val_eval_rounds - 1) {
+                            std.debug.print("[ZOLT BIND DEBUG] Round {}: val_eval binding var {} with challenge (BE)={any}\n", .{ round_idx, var_idx, challenge.toBytesBE() });
                             std.debug.print("[ZOLT BIND DEBUG]   BEFORE: lt_evals[0] (BE)={any}\n", .{val_eval_prover_early.lt_evals[0].toBytesBE()});
                             std.debug.print("[ZOLT BIND DEBUG]   BEFORE: lt_evals[1] (BE)={any}\n", .{val_eval_prover_early.lt_evals[1].toBytesBE()});
                             std.debug.print("[ZOLT BIND DEBUG]   effectiveLen={}\n", .{val_eval_prover_early.effectiveLen()});
                         }
                         val_eval_prover_early.bindChallengeWithPoly(challenge, evals);
-                        if (round_idx == 7 or round_idx == 14) {
+                        if (round_idx == val_eval_offset or round_idx == val_eval_offset + val_eval_rounds - 1) {
                             std.debug.print("[ZOLT BIND DEBUG]   AFTER: lt_evals[0] (BE)={any}\n", .{val_eval_prover_early.lt_evals[0].toBytesBE()});
                         }
+                    } else {
+                        // Inactive: the constant polynomial H(X) = claim/2 evaluates to claim/2 at any point
+                        // So the new claim for next round is claim/2
+                        individual_claims[1] = individual_claims[1].mul(two_inv_local);
                     }
+
+                    // For instance 2 (val_final): if inactive, claim' = claim / 2
                     if (val_final_evals_opt) |evals| {
+                        // Active: evaluate the polynomial at challenge
+                        individual_claims[2] = evaluateCubicAtChallengeFromEvals(evals, challenge);
                         val_final_prover_early.bindChallengeWithPoly(challenge, evals);
+                    } else {
+                        // Inactive: new_claim = old_claim/2
+                        individual_claims[2] = individual_claims[2].mul(two_inv_local);
                     }
                 }
 

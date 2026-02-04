@@ -408,6 +408,7 @@ pub fn ProofConverter(comptime F: type) type {
                 tau_high,
                 self.allocator,
             );
+            std.debug.print("[ZOLT] STAGE1: lagrange_tau_r0 (initial eq scaling) = {any}\n", .{lagrange_tau_r0.toBytes()});
 
             // Initialize the streaming prover with full tau and Lagrange kernel scaling
             // The prover internally extracts:
@@ -524,6 +525,8 @@ pub fn ProofConverter(comptime F: type) type {
                 std.debug.print("[ZOLT] STAGE1_ROUND_{}: challenge = {any}\n", .{ round_idx, challenge.toBytes() });
 
                 // Bind challenge and update claim
+                // Use raw_evals for internal claim tracking (matches Jolt's prover behavior)
+                // The proof contains scaled polynomials, but the prover tracks unscaled internally
                 outer_prover.bindRemainingRoundChallenge(challenge) catch {};
                 outer_prover.updateClaim(raw_evals, challenge);
             }
@@ -535,6 +538,11 @@ pub fn ProofConverter(comptime F: type) type {
             std.debug.print("[ZOLT] STAGE1_FINAL: prover eq_factor limbs = [{x}, {x}, {x}, {x}]\n", .{
                 prover_eq_factor.limbs[0], prover_eq_factor.limbs[1], prover_eq_factor.limbs[2], prover_eq_factor.limbs[3],
             });
+
+            // Print final claim from prover
+            const prover_final_claim = outer_prover.current_claim;
+            std.debug.print("[ZOLT] STAGE1_FINAL: prover final_claim = {any}\n", .{prover_final_claim.toBytes()});
+            std.debug.print("[ZOLT] STAGE1_FINAL: prover final_claim * batching_coeff = {any}\n", .{prover_final_claim.mul(batching_coeff).toBytes()});
 
             return Stage1Result{ .challenges = challenges, .r0 = r0, .uni_skip_claim = uni_skip_claim, .allocator = self.allocator };
         }

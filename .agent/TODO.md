@@ -1,47 +1,50 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 62 - Fixed ValEvaluation, now debugging Registers RWC
+## Status: Session 63 - Fixed ValFinal start_address, now debugging expected_output_claim
 
 ## Current Issue
 
-Stage 4 sumcheck verification fails with output_claim vs expected_claim mismatch.
+Stage 4 sumcheck verification still fails with output_claim vs expected_claim mismatch.
 
 ### Progress This Session
 
-**FIXED: ValEvaluation start_address mismatch**
-- Problem: ValEvaluation prover was using `memory_layout.getLowestAddress() = 0x7FFF8000`
-- But RWC only tracks RAM region (0x80000000+)
-- Fix: Changed ValEvaluation to use `constants.RAM_START_ADDRESS`
-- Result: `Match val_eval? true` - prover's initial claim now matches input_claim
+**FIXED: ValFinal start_address mismatch**
+- Problem: ValFinal prover was using `RAM_START_ADDRESS` (0x80000000)
+- But Jolt's ValFinal uses `getLowestAddress()` (0x7FFF8000) to include termination bit
+- Fix: Changed ValFinal to use `getLowestAddress()` via memory_layout
+- Result: `Match val_final? true` - prover's initial claim now matches input_claim
 
-**VERIFIED: LT polynomial and r_cycle values match between Zolt and Jolt**
-- Stage 2 challenges match perfectly
-- r_cycle values derived from challenges also match
-- lt_eval computed by Zolt (after binding) matches Jolt's expected value (just byte ordering difference in debug output)
+**VERIFIED: ValEvaluation working correctly**
+- `Match val_eval? true`
+- inc_claim = 0, wa_claim = 0, lt_eval computed correctly (no RAM operations)
 
-### Current Issue: Stage 4 Instance 0 (Registers RWC)
+**CURRENT ISSUE: ValFinal expected_output_claim mismatch**
+- Zolt's ValFinal inc*wa = `{ 17, 181, 185, 137, ... }` (first 8 bytes)
+- Jolt's ValFinal inc*wa = `[dc, e8, fd, 7c, ...]`
+- These don't match!
 
-The sumcheck final claim doesn't match Jolt's expected claim for Instance 0:
-```
-output_claim:   [14, 98, cf, e7, c2, ee, 31, 57, de, 0a, c1, 6e, 89, 0a, c6, 61, ...]
-expected_claim: [2a, 83, f2, 6d, 32, 1a, db, 6d, 4f, 3b, 1c, da, fd, 8a, 76, 36, ...]
-```
+The root cause appears to be that the `inc_eval` and `wa_eval` values after Stage 4 sumcheck binding are different between Zolt and Jolt.
 
-Instance 0 expected_output_claim:
-- `claim: [e7, d0, 3d, c6, ...]`
-- `coeff: [53, dd, 21, 20, ...]`
-- `claim*coeff: [2a, 83, f2, 6d, ...]` (this is expected_claim for Instance 0)
+### Analysis
 
-ValEvaluation and ValFinal now have:
-- `inc_claim = 0`
-- `wa_claim = 0`
-- `result = 0` (correct since no RAM operations in tracked region)
+The ValFinal sumcheck proves: `Σ_j inc(j) * wa(r_address, j) = val_final(r_address) - val_init(r_address)`
+
+After binding through Stage 4 sumcheck challenges:
+- `inc_eval = inc(r_cycle_prime)` - inc polynomial at Stage 4's opening point
+- `wa_eval = wa(r_address, r_cycle_prime)` - wa polynomial at combined point
+
+The issue is that the final polynomial openings don't match what Jolt expects.
+
+Possible causes:
+1. Different opening point construction (r_address, r_cycle_prime)
+2. Different polynomial initialization (trace data, start_address)
+3. Different binding order or formula
 
 ### Key Files
 
-1. `/home/vivado/projects/zolt/src/zkvm/ram/val_evaluation.zig` - LT polynomial
-2. `/home/vivado/projects/zolt/src/zkvm/proof_converter.zig` - Stage 4 prover, start_address fix
-3. `/home/vivado/projects/jolt/jolt-core/src/zkvm/ram/val_evaluation.rs` - Jolt's expected_output_claim
+1. `/home/vivado/projects/zolt/src/zkvm/ram/val_final.zig` - ValFinal prover
+2. `/home/vivado/projects/zolt/src/zkvm/proof_converter.zig` - Stage 4 prover, ValFinal init
+3. `/home/vivado/projects/jolt/jolt-core/src/zkvm/ram/val_final.rs` - Jolt's ValFinal expected_output_claim
 
 ### Test Commands
 
@@ -56,16 +59,16 @@ zig build -Doptimize=ReleaseFast
 cd /home/vivado/projects/jolt && cargo test -p jolt-core --features zolt-debug --lib test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
 
-## Session 62 Summary
+## Session 63 Summary
 
-1. Identified that ValEvaluation prover was using wrong start_address (0x7FFF8000 vs 0x80000000)
-2. Fixed by using `constants.RAM_START_ADDRESS` for ValEvaluation
-3. ValEvaluation now works correctly (Match val_eval? true)
-4. Remaining issue: Registers RWC (Stage 4 Instance 0) expected_output_claim mismatch
+1. Fixed ValFinal prover to use `getLowestAddress()` instead of `RAM_START_ADDRESS`
+2. ValFinal now includes termination bit contribution (at 0x7FFFC008)
+3. `Match val_final? true` - input_claim matches prover's initial claim
+4. Remaining issue: ValFinal's final polynomial openings (inc_eval, wa_eval) don't match Jolt's expected values
 
 ## Next Steps
 
-1. Debug why Registers RWC expected_output_claim doesn't match
-2. Compare Zolt's Registers RWC prover output with Jolt's expectations
-3. Check if the polynomial round values are being computed correctly
-
+1. Debug why ValFinal's inc_eval and wa_eval after binding don't match Jolt's expectations
+2. Verify the opening point construction is correct (r_address from Stage 2, r_cycle_prime from Stage 4)
+3. Compare polynomial binding order with Jolt (LowToHigh)
+4. Test the complete fix with Jolt verification

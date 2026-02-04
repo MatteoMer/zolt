@@ -2049,12 +2049,34 @@ pub fn ProofConverter(comptime F: type) type {
                     trace_len,
                     r_address_for_val_final_early,
                 );
+
+                // CRITICAL FIX: ValFinal uses getLowestAddress(), NOT RAM_START_ADDRESS!
+                // This is because ValFinal sums over ALL cycles (no LT filter), and includes
+                // writes to the I/O region (like the termination bit at 0x7FFFC008).
+                // The termination write MUST be included in val_final to match Jolt.
+                //
+                // ValEvaluation uses RAM_START_ADDRESS because:
+                // - The LT polynomial filters to j < r_cycle
+                // - For typical random r_cycle, termination (at end of trace) doesn't contribute
+                // - The input_claim comes from RWC which tracks RAM region only
+                //
+                // ValFinal uses getLowestAddress() because:
+                // - No LT filter, sums ALL cycles including termination
+                // - val_final(r) - val_init(r) includes the termination bit contribution
+                // - This must match the output_val_final_claim from OutputSumcheck
+                const start_address_for_val_final: u64 = if (config.memory_layout) |ml|
+                    ml.getLowestAddress()
+                else
+                    constants.RAM_START_ADDRESS;
+
+                std.debug.print("[ZOLT STAGE4] Using getLowestAddress for ValFinal = 0x{X:0>16}\n", .{start_address_for_val_final});
+
                 var val_final_prover_early = try ram.ValFinalProver(F).init(
                     self.allocator,
                     memory_trace,
                     config.initial_ram,
                     val_final_params_early,
-                    start_address,
+                    start_address_for_val_final,
                 );
                 defer val_final_prover_early.deinit();
 

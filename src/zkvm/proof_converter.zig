@@ -2654,12 +2654,54 @@ pub fn ProofConverter(comptime F: type) type {
 
                 std.debug.print("[ZOLT STAGE4] Using getLowestAddress for ValFinal = 0x{X:0>16}\n", .{start_address_for_val_final});
 
-                var val_final_prover_early = try ram.ValFinalProver(F).init(
+                // Build synthetic writes for ValFinal prover.
+                // The termination bit is set in OutputSumcheck's val_final but is NOT in
+                // the memory trace (because R1CS treats the termination step as NoOp).
+                // The ValFinal sumcheck needs to prove:
+                //   val_final(r) - val_init(r) = Σ inc(j) * wa(r, j)
+                // So we inject a synthetic write for the termination bit.
+                const ValFinalProverType = ram.ValFinalProver(F);
+                var synthetic_writes_buf: [2]ValFinalProverType.SyntheticWrite = undefined;
+                var n_synthetic_writes: usize = 0;
+
+                if (config.memory_layout) |ml| {
+                    if (!config.is_panicking) {
+                        // Find the termination cycle by scanning the execution trace
+                        const termination_addr = ml.termination;
+                        var termination_cycle: ?usize = null;
+                        for (trace.steps.items, 0..) |step, idx| {
+                            if (step.memory_addr) |addr| {
+                                if (addr == termination_addr and step.is_memory_write) {
+                                    termination_cycle = idx;
+                                    break;
+                                }
+                            }
+                        }
+                        if (termination_cycle) |tc| {
+                            synthetic_writes_buf[n_synthetic_writes] = .{
+                                .cycle = tc,
+                                .address = termination_addr,
+                                .old_value = 0,
+                                .new_value = 1,
+                            };
+                            n_synthetic_writes += 1;
+                            std.debug.print("[ZOLT STAGE4] Injecting synthetic termination write: cycle={}, addr=0x{X}\n", .{ tc, termination_addr });
+                        } else {
+                            std.debug.print("[ZOLT STAGE4] WARNING: Could not find termination cycle in trace!\n", .{});
+                        }
+                    }
+                }
+
+                const synthetic_writes_slice: ?[]const ValFinalProverType.SyntheticWrite =
+                    if (n_synthetic_writes > 0) synthetic_writes_buf[0..n_synthetic_writes] else null;
+
+                var val_final_prover_early = try ValFinalProverType.initWithSyntheticWrites(
                     self.allocator,
                     memory_trace,
                     config.initial_ram,
                     val_final_params_early,
                     start_address_for_val_final,
+                    synthetic_writes_slice,
                 );
                 defer val_final_prover_early.deinit();
 

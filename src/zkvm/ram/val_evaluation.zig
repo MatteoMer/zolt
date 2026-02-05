@@ -836,7 +836,7 @@ pub fn ValEvaluationVerifier(comptime F: type) type {
 // ============================================================================
 
 /// Compute eq(r, k) for a specific index k
-fn computeEqAtPoint(comptime F: type, r: []const F, k: anytype) F {
+pub fn computeEqAtPoint(comptime F: type, r: []const F, k: anytype) F {
     const k_val: usize = @intCast(k);
     var result = F.one();
     for (r, 0..) |ri, i| {

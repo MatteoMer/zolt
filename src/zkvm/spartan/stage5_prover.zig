@@ -1390,34 +1390,16 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             std.debug.print("  computed_ram_ra_input = {x}\n", .{computed_ram_ra_input.toBytesBE()[16..32].*});
             std.debug.print("  original ram_ra_input = {x}\n", .{ram_ra_input.toBytesBE()[16..32].*});
 
-            // CRITICAL FIX: Recompute batched_claim using the correct RamRa claims
-            // The original batched_claim used placeholder values (F.zero()) for the RamRa claims.
-            // We need to recompute it with the correct values from the trace.
-            //
-            // NOTE: This changes the claim but NOT the transcript! The batch coefficients
-            // (batch0, batch1, batch2) were derived from a transcript that included the
-            // placeholder claims. For full correctness, the proof_converter should compute
-            // the correct claims BEFORE running Stage 5.
-            //
-            // For now, this fix allows the polynomial computation to match the claim,
-            // which is necessary for the sumcheck verification to pass.
-            var ram_ra_scaled_corrected = computed_ram_ra_input;
-            for (0..ram_ra_scale) |_| ram_ra_scaled_corrected = ram_ra_scaled_corrected.add(ram_ra_scaled_corrected);
+            // Initialize Instance 1 claim tracking with SCALED value (matches batched_claim computation)
+            // NOTE: We use the ORIGINAL ram_ra_input (from opening_claims), NOT computed_ram_ra_input.
+            // The verifier computes its initial claim from opening_claims, so the prover MUST match.
+            // If computed_ram_ra_input differs from ram_ra_input, the polynomial computation must
+            // be adjusted to match the opening_claims, not the other way around.
+            ram_ra_current_claim = ram_ra_scaled;
 
-            // CRITICAL: Initialize Instance 1 claim tracking with SCALED value (matches batched_claim computation)
-            ram_ra_current_claim = ram_ra_scaled_corrected;
-
-            const batched_claim_corrected = batch0.mul(regs_scaled)
-                .add(batch1.mul(ram_ra_scaled_corrected))
-                .add(batch2.mul(lookups_scaled));
-
-            std.debug.print("[STAGE5] Corrected batched claim = {any}\n", .{batched_claim_corrected.toBytesBE()});
-            std.debug.print("[STAGE5] Original batched claim  = {any}\n", .{batched_claim.toBytesBE()});
-
-            // CRITICAL FIX: Use corrected batched_claim to match polynomial computation.
-            // The polynomial computation uses computed_ram_ra_input (from trace), so the batched_claim
-            // must also use computed_ram_ra_input instead of ram_ra_input (from opening_claims).
-            current_batched_claim = batched_claim_corrected;
+            std.debug.print("[STAGE5] Using original batched claim = {any}\n", .{batched_claim.toBytesBE()});
+            std.debug.print("[STAGE5] computed_ram_ra_input = {x}\n", .{computed_ram_ra_input.toBytesBE()[16..32].*});
+            std.debug.print("[STAGE5] original ram_ra_input = {x}\n", .{ram_ra_input.toBytesBE()[16..32].*});
 
             // Expanding table to track eq(r_addr_reduced_so_far, k_bound_bits)
             // This accumulates the eq value as we bind address bits
@@ -1746,11 +1728,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 // where ra(k,c) = 1 iff there's a RAM access at (address=k, cycle=c)
                 if (remaining_rounds > ram_ra_num_rounds) {
                     // Not started - constant polynomial (same logic as Instance 0)
-                    // CRITICAL: Use computed_ram_ra_input (computed from trace) instead of ram_ra_input
-                    // (which has placeholder claims). This ensures the polynomial contribution matches
-                    // the corrected batched_claim.
+                    // Use ram_ra_input from opening_claims (corrected in proof_converter before Stage 5)
                     const scale = remaining_rounds - ram_ra_num_rounds - 1;
-                    var scaled_input_claim = computed_ram_ra_input;
+                    var scaled_input_claim = ram_ra_input;
                     for (0..scale) |_| scaled_input_claim = scaled_input_claim.add(scaled_input_claim);
                     combined_poly[0] = combined_poly[0].add(batch1.mul(scaled_input_claim));
                     combined_poly[1] = combined_poly[1].add(batch1.mul(scaled_input_claim));
@@ -2598,12 +2578,14 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         // NOTE: ram_ra_current_claim is now updated in the PhaseAddress binding section above
                     }
 
-                    // CRITICAL FIX: Recompute current_batched_claim from individual instance claims
-                    // This must be done AFTER all individual claims are updated (including ram_ra_current_claim)
-                    // This ensures consistency: claim = batch0*c0 + batch1*c1 + batch2*c2
-                    current_batched_claim = batch0.mul(regs_val_current_claim)
-                        .add(batch1.mul(ram_ra_current_claim))
-                        .add(batch2.mul(lookups_claim));
+                    // NOTE: current_batched_claim was already correctly set at the polynomial
+                    // evaluation step above (c0 + c1*r + c2*r² + c3*r³). The verifier uses
+                    // eval_from_hint which recovers c1 from the hint (previous claim) and
+                    // evaluates the polynomial - so the prover's claim must be exactly that
+                    // polynomial evaluation, NOT a recomputation from individual instance claims.
+                    // Jolt's prover does NOT recompute the batched claim from instances.
+                    // Individual instance claims are tracked separately for computing future
+                    // round polynomials but do NOT override the batched claim.
 
                     // Debug: print claim tracking for rounds 126-128
                     if (round >= 126 and round <= 128) {
@@ -3465,10 +3447,24 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         std.debug.print("  hint == hint_expected: {}\n", .{current_batched_claim.eql(hint_expected)});
                     }
 
-                    // NOTE: We do NOT update current_batched_claim here using hint-recovered evaluation.
-                    // Instead, we will recompute it AFTER all individual instance claims are updated below.
-                    // This ensures current_batched_claim = batch0*claim0 + batch1*claim1 + batch2*claim2
-                    // which is necessary for the sumcheck invariant to hold.
+                    // CRITICAL: Update current_batched_claim by evaluating the batched polynomial
+                    // at the challenge, using the same formula as Jolt's eval_from_hint.
+                    // This ensures the prover's claim matches what the verifier will compute.
+                    // The verifier uses: c1 = hint - 2*c0 - c2 - ..., then p(r) = c0 + r*c1 + r²*c2 + ...
+                    {
+                        // combined_coeffs[0] = c0, combined_coeffs[1] = c1, combined_coeffs[2] = c2, etc.
+                        // Evaluate p(r) = c0 + r*c1 + r²*c2 + r³*c3 + ...
+                        // Use c1_recovered from hint (to match verifier exactly)
+                        var eval_result = combined_coeffs[0].add(c1_recovered.mulHiBigIntU128(challenge.limbs));
+                        var r_power = challenge.mul(challenge); // r²
+                        for (2..combined_coeffs.len) |ci| {
+                            eval_result = eval_result.add(combined_coeffs[ci].mul(r_power));
+                            if (ci + 1 < combined_coeffs.len) {
+                                r_power = r_power.mul(challenge);
+                            }
+                        }
+                        current_batched_claim = eval_result;
+                    }
 
                     // Skip the standard compression/serialization below
                     // Bind the challenge for RegistersValEvaluation if active
@@ -3708,11 +3704,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     }
                     lookups_ra_weights[0] = final_ra;
 
-                    // CRITICAL FIX: Recompute current_batched_claim from updated instance claims
-                    // This ensures the sumcheck invariant: claim = batch0*c0 + batch1*c1 + batch2*c2
-                    current_batched_claim = batch0.mul(regs_val_current_claim)
-                        .add(batch1.mul(ram_ra_current_claim))
-                        .add(batch2.mul(lookups_claim));
+                    // NOTE: current_batched_claim was already correctly set by polynomial
+                    // evaluation above. The verifier uses eval_from_hint which evaluates
+                    // the batched polynomial at the challenge. Do NOT override with
+                    // batch0*claim0 + batch1*claim1 + batch2*claim2 as Jolt never does this.
 
                     // Debug: print challenges for cycle rounds (128-135)
                     if (round >= LOOKUPS_LOG_K) {

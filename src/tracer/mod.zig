@@ -436,11 +436,23 @@ pub const Emulator = struct {
         // Add to execution trace
         try self.trace.steps.append(self.allocator, termination_step);
 
-        // Record the write in RAM trace
-        try self.ram.trace.recordWrite(termination_addr, pre_value, post_value, current_cycle);
-
-        // Update the memory state
-        try self.ram.memory.put(self.allocator, termination_addr, post_value);
+        // NOTE: We do NOT record the write in the RAM trace and do NOT update the
+        // memory state because the R1CS witness treats this step as a NoOp
+        // (RamAddress=0, Store=0). Recording the RAM write or updating memory
+        // would create inconsistencies between:
+        //   - R1CS witness (no RAM op) and RAM argument (has access)
+        //   - val_final (with termination write) and RAM trace (without)
+        //
+        // In Jolt's real system, the termination write IS a real SB instruction with
+        // Store=1 and RamAddress=termination_addr, but Zolt's single-step-per-instruction
+        // model can't represent virtual instruction sequences, so we mark it as NoOp.
+        //
+        // The termination/panic detection is handled through other means (checking
+        // if the trace detected an infinite loop).
+        //
+        // Previously:
+        //   try self.ram.trace.recordWrite(termination_addr, pre_value, post_value, current_cycle);
+        //   try self.ram.memory.put(self.allocator, termination_addr, post_value);
 
         // Increment cycle counter
         self.state.cycle += 1;

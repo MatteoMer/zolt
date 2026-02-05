@@ -73,12 +73,43 @@ pub fn ValFinalProver(comptime F: type) type {
         params: ValFinalParams(F),
         allocator: Allocator,
 
+        /// Synthetic write descriptor for injecting virtual writes (e.g., termination bit)
+        /// that are not in the memory trace but must be accounted for in ValFinal.
+        pub const SyntheticWrite = struct {
+            /// Cycle index at which the synthetic write occurs
+            cycle: usize,
+            /// Memory address of the write
+            address: u64,
+            /// Value before write
+            old_value: u64,
+            /// Value after write
+            new_value: u64,
+        };
+
         pub fn init(
             allocator: Allocator,
             trace: *const MemoryTrace,
             initial_ram: ?*const std.AutoHashMapUnmanaged(u64, u64),
             params: ValFinalParams(F),
             start_address: u64,
+        ) !Self {
+            return initWithSyntheticWrites(allocator, trace, initial_ram, params, start_address, null);
+        }
+
+        /// Initialize with optional synthetic writes that are injected into the inc/wa polynomials.
+        ///
+        /// This is needed for the termination bit: Zolt treats the termination step as a NoOp
+        /// in R1CS (so it's not in the RAM trace), but the OutputSumcheck sets
+        /// val_final[termination_index] = 1. The ValFinal sumcheck must prove:
+        ///   val_final(r) - val_init(r) = Σ inc(j) * wa(r, j)
+        /// So we need inc(termination_cycle) = 1 and wa(r, termination_cycle) = eq(r, term_addr).
+        pub fn initWithSyntheticWrites(
+            allocator: Allocator,
+            trace: *const MemoryTrace,
+            initial_ram: ?*const std.AutoHashMapUnmanaged(u64, u64),
+            params: ValFinalParams(F),
+            start_address: u64,
+            synthetic_writes: ?[]const SyntheticWrite,
         ) !Self {
             const k = @as(usize, 1) << @intCast(params.r_address.len);
 
@@ -117,11 +148,51 @@ pub fn ValFinalProver(comptime F: type) type {
                 wa_evals[j] = wa_poly.evaluateAtCycle(j);
             }
 
+            // Inject synthetic writes into inc and wa polynomials
+            if (synthetic_writes) |writes| {
+                for (writes) |sw| {
+                    if (sw.cycle >= n) {
+                        std.debug.print("[ValFinal] WARNING: synthetic write cycle {} >= n {}, skipping\n", .{ sw.cycle, n });
+                        continue;
+                    }
+                    if (sw.address < start_address) {
+                        std.debug.print("[ValFinal] WARNING: synthetic write address 0x{X} < start_address 0x{X}, skipping\n", .{ sw.address, start_address });
+                        continue;
+                    }
+                    const remapped = (sw.address - start_address) / 8;
+                    if (remapped >= k) {
+                        std.debug.print("[ValFinal] WARNING: synthetic write remapped address {} >= k {}, skipping\n", .{ remapped, k });
+                        continue;
+                    }
+
+                    // Compute inc = new_value - old_value
+                    const inc_val = if (sw.new_value >= sw.old_value)
+                        F.fromU64(sw.new_value - sw.old_value)
+                    else
+                        F.zero().sub(F.fromU64(sw.old_value - sw.new_value));
+
+                    // Compute wa = eq(r_address, remapped_address)
+                    const wa_val = val_evaluation.computeEqAtPoint(F, params.r_address, remapped);
+
+                    std.debug.print("[ValFinal] Injecting synthetic write: cycle={}, addr=0x{X}, remapped={}, inc={}, wa={any}\n", .{
+                        sw.cycle, sw.address, remapped,
+                        if (sw.new_value >= sw.old_value) sw.new_value - sw.old_value else 0,
+                        wa_val.toBytesBE(),
+                    });
+
+                    // Add to the polynomial evaluations at this cycle
+                    inc_evals[sw.cycle] = inc_evals[sw.cycle].add(inc_val);
+                    wa_evals[sw.cycle] = wa_val; // Override (should be zero from trace since not in trace)
+                }
+            }
+
             // Compute initial claim
             var initial_claim = F.zero();
             for (0..n) |j| {
                 initial_claim = initial_claim.add(inc_evals[j].mul(wa_evals[j]));
             }
+
+            std.debug.print("[ValFinal] initial_claim = {any}\n", .{initial_claim.toBytesBE()});
 
             return Self{
                 .inc_evals = inc_evals,

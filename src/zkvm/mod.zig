@@ -689,7 +689,8 @@ pub fn JoltProver(comptime F: type) type {
 
             // Derive tau from transcript after preamble and commitments
             // num_rows_bits = num_cycle_vars + 2 (for univariate skip: 1 for constraint dim, 1 for streaming)
-            const num_cycle_vars = std.math.log2_int(usize, @max(1, cycle_witnesses.len));
+            // CRITICAL: Must use trace_length (padded, power-of-2) not cycle_witnesses.len (actual count)
+            const num_cycle_vars = std.math.log2_int(usize, @max(1, trace_length));
             const num_rows_bits = num_cycle_vars + 2;
             var tau = try self.allocator.alloc(F, num_rows_bits);
             defer self.allocator.free(tau);
@@ -1028,9 +1029,11 @@ pub fn JoltProver(comptime F: type) type {
             std.debug.print("[ZOLT PROVE] === Done Appending Commitments ===\n\n", .{});
 
             // Derive tau from transcript after preamble and commitments
-            const num_cycle_vars = std.math.log2_int(usize, @max(1, cycle_witnesses.len));
+            // CRITICAL: Must use trace_length (padded, power-of-2) not cycle_witnesses.len (actual count)
+            // Jolt uses: num_steps.next_power_of_two().log_2() where num_steps = trace_length
+            const num_cycle_vars = std.math.log2_int(usize, @max(1, trace_length));
             const num_rows_bits = num_cycle_vars + 2;
-            std.debug.print("[ZOLT PROVE] Deriving tau: num_cycle_vars={d}, num_rows_bits={d}\n", .{ num_cycle_vars, num_rows_bits });
+            std.debug.print("[ZOLT PROVE] Deriving tau: num_cycle_vars={d}, num_rows_bits={d} (trace_length={d}, cycle_witnesses.len={d})\n", .{ num_cycle_vars, num_rows_bits, trace_length, cycle_witnesses.len });
             var tau = try self.allocator.alloc(F, num_rows_bits);
             defer self.allocator.free(tau);
             for (0..num_rows_bits) |i| {
@@ -1259,7 +1262,8 @@ pub fn JoltProver(comptime F: type) type {
             }
 
             // Derive tau from transcript after preamble and commitments
-            const num_cycle_vars = std.math.log2_int(usize, @max(1, cycle_witnesses.len));
+            // CRITICAL: Must use trace_length (padded, power-of-2) not cycle_witnesses.len (actual count)
+            const num_cycle_vars = std.math.log2_int(usize, @max(1, trace_length));
             const num_rows_bits = num_cycle_vars + 2;
             var tau = try self.allocator.alloc(F, num_rows_bits);
             defer self.allocator.free(tau);

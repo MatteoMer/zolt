@@ -406,35 +406,31 @@ pub const Emulator = struct {
         // loaded with termination_addr. We encode this as SB x0, 0(x0) = 0x00000023
         // but override rs1_value in the trace step.
         //
-        // Note: In real execution, no register would contain termination_addr.
-        // This is a synthetic cycle that mimics what Jolt SDK does via
-        // `core::ptr::write_volatile(termination_bit as *mut u8, 1)`
-        const synthetic_instr: u32 = 0x00000023; // SB x0, 0(x0)
-
-        // Get the last PC from the trace (or use 0 if empty)
-        const last_pc = if (self.trace.steps.items.len > 0)
-            self.trace.steps.items[self.trace.steps.items.len - 1].pc
-        else
-            0;
-
-        // Create a synthetic trace step for the termination write
-        // Key: rs1_value = termination_addr to satisfy RamAddress = Rs1+Imm constraint
+        // Mark the termination step as a NoOp so the R1CS witness is a valid
+        // NoOp witness (all zeros + DoNotUpdateUnexpandedPC=1 + IsNoop=1).
+        //
+        // In Jolt, the last real instruction before NoOp padding is the infinite
+        // loop jump (e.g., JAL x0, 0), which has FlagJump=1 and disables
+        // constraint 16 (NextUnexpPCUpdateOtherwise). Marking the synthetic
+        // termination step as a NoOp avoids violating this constraint.
+        //
+        // The RAM write is still recorded separately in the RAM trace below.
         const termination_step = TraceStep{
             .cycle = current_cycle,
-            .pc = last_pc, // Use last PC (this cycle won't advance PC)
-            .unexpanded_pc = last_pc,
-            .instruction = synthetic_instr,
-            .rs1_value = termination_addr, // Key: Rs1 = termination_addr so RamAddress = Rs1 + 0
-            .rs2_value = 1, // Value to write (1 for termination)
+            .pc = 0, // NoOp: all zero
+            .unexpanded_pc = 0,
+            .instruction = 0, // NoOp instruction
+            .rs1_value = 0,
+            .rs2_value = 0,
             .rd_pre_value = 0,
-            .rd_value = 0, // SB doesn't write to rd
-            .memory_addr = termination_addr,
+            .rd_value = 0,
+            .memory_addr = termination_addr, // Keep for RAM trace consistency
             .memory_pre_value = pre_value,
             .memory_value = post_value,
-            .is_memory_write = true,
-            .next_pc = last_pc, // Stay at same PC (infinite loop detection will trigger)
+            .is_memory_write = true, // RAM write still happens
+            .next_pc = 0,
             .is_compressed = false,
-            .is_noop = false,
+            .is_noop = true, // Mark as NoOp so R1CS uses createNoopWitness()
         };
 
         // Add to execution trace
@@ -449,11 +445,10 @@ pub const Emulator = struct {
         // Increment cycle counter
         self.state.cycle += 1;
 
-        std.debug.print("[TRACE] Recorded termination cycle: addr=0x{x:0>16}, cycle={}, pre={}, post=1, instr=0x{x:0>8}\n", .{
+        std.debug.print("[TRACE] Recorded termination cycle (NoOp): addr=0x{x:0>16}, cycle={}, pre={}, post=1\n", .{
             termination_addr,
             current_cycle,
             pre_value,
-            synthetic_instr,
         });
     }
 

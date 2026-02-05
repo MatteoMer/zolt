@@ -432,6 +432,360 @@ pub fn ProofConverter(comptime F: type) type {
             const uni_skip_claim = evaluatePolyAtChallenge(uniskip_proof.uni_poly, r0);
             std.debug.print("[ZOLT] STAGE1: uni_skip_claim@SpartanOuter = {any}\n", .{uni_skip_claim.toBytesBE()});
 
+            // DEBUG: Decompose s1(r0) = L(tau_high, r0) * t1(r0) and compare
+            {
+                std.debug.print("[DECOMP] r0 = {any}\n", .{r0.toBytesBE()});
+                std.debug.print("[DECOMP] lagrange_tau_r0 = {any}\n", .{lagrange_tau_r0.toBytesBE()});
+                const inv_L = lagrange_tau_r0.inverse();
+                if (inv_L) |il| {
+                    const t1_r0_from_s1 = uni_skip_claim.mul(il);
+                    std.debug.print("[DECOMP] t1(r0) = s1(r0)/L = {any}\n", .{t1_r0_from_s1.toBytesBE()});
+
+                    // Now compute t1(r0) directly by evaluating the direct sum
+                    // using the witnesses and lagrange evals at r0
+                    // Build eq tables from the SAME full_tau
+                    const tau_len = tau.len;
+                    const m_d = tau_len / 2;
+                    const n_x_in_bits_d = if (tau_len > 1) tau_len - 1 - m_d else 0;
+                    const n_x_in_prime_bits_d = if (n_x_in_bits_d > 0) n_x_in_bits_d - 1 else 0;
+                    const n_x_out_d: usize = @as(usize, 1) << @intCast(m_d);
+                    const n_x_in_d: usize = @as(usize, 1) << @intCast(n_x_in_bits_d);
+
+                    // Build eq tables (same logic as streaming_outer.buildEqTable)
+                    const E_out_d = try self.allocator.alloc(F, n_x_out_d);
+                    defer self.allocator.free(E_out_d);
+                    E_out_d[0] = F.one();
+                    var cs_d: usize = 1;
+                    for (0..m_d) |kd| {
+                        const t_k = tau[kd];
+                        const omt_k = F.one().sub(t_k);
+                        var id: usize = cs_d;
+                        while (id > 0) {
+                            id -= 1;
+                            E_out_d[2 * id + 1] = E_out_d[id].mul(t_k);
+                            E_out_d[2 * id] = E_out_d[id].mul(omt_k);
+                        }
+                        cs_d *= 2;
+                    }
+
+                    const E_in_d = try self.allocator.alloc(F, n_x_in_d);
+                    defer self.allocator.free(E_in_d);
+                    E_in_d[0] = F.one();
+                    var cs_d2: usize = 1;
+                    for (0..n_x_in_bits_d) |kd2| {
+                        const t_k2 = tau[m_d + kd2];
+                        const omt_k2 = F.one().sub(t_k2);
+                        var id2: usize = cs_d2;
+                        while (id2 > 0) {
+                            id2 -= 1;
+                            E_in_d[2 * id2 + 1] = E_in_d[id2].mul(t_k2);
+                            E_in_d[2 * id2] = E_in_d[id2].mul(omt_k2);
+                        }
+                        cs_d2 *= 2;
+                    }
+
+                    // Compute Lagrange evals at r0
+                    const StreamProver = streaming_outer.StreamingOuterProver(F);
+                    const FGSZ = StreamProver.FIRST_GROUP_SIZE;
+                    const SGSZ = StreamProver.SECOND_GROUP_SIZE;
+                    const c_mod = r1cs.constraints;
+                    var lags: [FGSZ]F = undefined;
+                    {
+                        const lag_start: i64 = -@as(i64, (FGSZ - 1) / 2);
+                        for (0..FGSZ) |li| {
+                            var lnum = F.one();
+                            var lden = F.one();
+                            for (0..FGSZ) |lj| {
+                                if (li != lj) {
+                                    const lxj: i64 = lag_start + @as(i64, @intCast(lj));
+                                    const lxjf = if (lxj >= 0) F.fromU64(@intCast(lxj)) else F.zero().sub(F.fromU64(@intCast(-lxj)));
+                                    lnum = lnum.mul(r0.sub(lxjf));
+                                    const ldiff: i64 = @as(i64, @intCast(li)) - @as(i64, @intCast(lj));
+                                    const ldifff = if (ldiff > 0) F.fromU64(@intCast(ldiff)) else F.zero().sub(F.fromU64(@intCast(-ldiff)));
+                                    lden = lden.mul(ldifff);
+                                }
+                            }
+                            lags[li] = lnum.mul(lden.inverse().?);
+                        }
+                    }
+
+                    // Compute direct sum
+                    var direct_t1_r0 = F.zero();
+                    for (0..n_x_out_d) |xod| {
+                        for (0..n_x_in_d) |xid| {
+                            const eq_d = E_out_d[xod].mul(E_in_d[xid]);
+                            const xipd = xid >> 1;
+                            const cycd = (xod << @intCast(n_x_in_prime_bits_d)) | xipd;
+                            const grpd: usize = xid & 1;
+
+                            if (cycd < cycle_witnesses.len) {
+                                const gsz_d: usize = if (grpd == 0) FGSZ else SGSZ;
+                                const gid_d = if (grpd == 0) &c_mod.FIRST_GROUP_INDICES else &c_mod.SECOND_GROUP_INDICES;
+                                const wd = &cycle_witnesses[cycd];
+                                var azd = F.zero();
+                                var bzd = F.zero();
+                                for (0..gsz_d) |kkd| {
+                                    const ccd = c_mod.UNIFORM_CONSTRAINTS[gid_d[kkd]];
+                                    const cvd = ccd.condition.evaluate(F, wd.asSlice());
+                                    const mvd = ccd.left.evaluate(F, wd.asSlice()).sub(ccd.right.evaluate(F, wd.asSlice()));
+                                    azd = azd.add(lags[kkd].mul(cvd));
+                                    bzd = bzd.add(lags[kkd].mul(mvd));
+                                }
+                                direct_t1_r0 = direct_t1_r0.add(eq_d.mul(azd.mul(bzd)));
+                            }
+                        }
+                    }
+                    std.debug.print("[DECOMP] t1(r0) direct sum = {any}\n", .{direct_t1_r0.toBytesBE()});
+                    std.debug.print("[DECOMP] t1(r0) from s1 match direct? {}\n", .{t1_r0_from_s1.eql(direct_t1_r0)});
+
+                    // Also: compute s1(r0) = L(tau_high,r0) * direct_t1_r0 and compare
+                    const s1_direct = lagrange_tau_r0.mul(direct_t1_r0);
+                    std.debug.print("[DECOMP] s1_direct = L * direct_t1 = {any}\n", .{s1_direct.toBytesBE()});
+                    std.debug.print("[DECOMP] s1_direct == uni_skip_claim? {}\n", .{s1_direct.eql(uni_skip_claim)});
+
+                    // Now compute t1 at Y=-5 (first extended target) using the SAME
+                    // Lagrange eval approach (not COEFFS_PER_J) and compare with
+                    // what evaluateAzBzAtTargetY gives
+                    const neg5_field = F.zero().sub(F.fromU64(5));
+                    var lag_neg5: [FGSZ]F = undefined;
+                    {
+                        const lag_start_n5: i64 = -@as(i64, (FGSZ - 1) / 2);
+                        for (0..FGSZ) |li| {
+                            var lnum2 = F.one();
+                            var lden2 = F.one();
+                            for (0..FGSZ) |lj| {
+                                if (li != lj) {
+                                    const lxj2: i64 = lag_start_n5 + @as(i64, @intCast(lj));
+                                    const lxjf2 = if (lxj2 >= 0) F.fromU64(@intCast(lxj2)) else F.zero().sub(F.fromU64(@intCast(-lxj2)));
+                                    lnum2 = lnum2.mul(neg5_field.sub(lxjf2));
+                                    const ldiff2: i64 = @as(i64, @intCast(li)) - @as(i64, @intCast(lj));
+                                    const ldifff2 = if (ldiff2 > 0) F.fromU64(@intCast(ldiff2)) else F.zero().sub(F.fromU64(@intCast(-ldiff2)));
+                                    lden2 = lden2.mul(ldifff2);
+                                }
+                            }
+                            lag_neg5[li] = lnum2.mul(lden2.inverse().?);
+                        }
+                    }
+
+                    // Compute direct sum at Y=-5 using Lagrange evals at -5
+                    var direct_t1_neg5 = F.zero();
+                    for (0..n_x_out_d) |xod2| {
+                        for (0..n_x_in_d) |xid2| {
+                            const eq_d2 = E_out_d[xod2].mul(E_in_d[xid2]);
+                            const xipd2 = xid2 >> 1;
+                            const cycd2 = (xod2 << @intCast(n_x_in_prime_bits_d)) | xipd2;
+                            const grpd2: usize = xid2 & 1;
+
+                            if (cycd2 < cycle_witnesses.len) {
+                                const gsz_d2: usize = if (grpd2 == 0) FGSZ else SGSZ;
+                                const gid_d2 = if (grpd2 == 0) &c_mod.FIRST_GROUP_INDICES else &c_mod.SECOND_GROUP_INDICES;
+                                const wd2 = &cycle_witnesses[cycd2];
+                                var azd2 = F.zero();
+                                var bzd2 = F.zero();
+                                for (0..gsz_d2) |kkd2| {
+                                    const ccd2 = c_mod.UNIFORM_CONSTRAINTS[gid_d2[kkd2]];
+                                    const cvd2 = ccd2.condition.evaluate(F, wd2.asSlice());
+                                    const mvd2 = ccd2.left.evaluate(F, wd2.asSlice()).sub(ccd2.right.evaluate(F, wd2.asSlice()));
+                                    azd2 = azd2.add(lag_neg5[kkd2].mul(cvd2));
+                                    bzd2 = bzd2.add(lag_neg5[kkd2].mul(mvd2));
+                                }
+                                direct_t1_neg5 = direct_t1_neg5.add(eq_d2.mul(azd2.mul(bzd2)));
+                            }
+                        }
+                    }
+                    std.debug.print("[DECOMP] t1(-5) direct Lagrange = {any}\n", .{direct_t1_neg5.toBytesBE()});
+
+                    // Now compute using COEFFS_PER_J (same as evaluateAzBzAtTargetY)
+                    const unskip = r1cs.univariate_skip;
+                    var coeffs_t1_neg5 = F.zero();
+                    for (0..n_x_out_d) |xod3| {
+                        for (0..n_x_in_d) |xid3| {
+                            const eq_d3 = E_out_d[xod3].mul(E_in_d[xid3]);
+                            const xipd3 = xid3 >> 1;
+                            const cycd3 = (xod3 << @intCast(n_x_in_prime_bits_d)) | xipd3;
+                            const grpd3: usize = xid3 & 1;
+
+                            if (cycd3 < cycle_witnesses.len) {
+                                const gsz_d3: usize = if (grpd3 == 0) FGSZ else SGSZ;
+                                const gid_d3 = if (grpd3 == 0) &c_mod.FIRST_GROUP_INDICES else &c_mod.SECOND_GROUP_INDICES;
+                                const wd3 = &cycle_witnesses[cycd3];
+                                // Evaluate using COEFFS_PER_J[0] (target Y=-5 is index 0)
+                                const coeffs_j = unskip.COEFFS_PER_J[0]; // target -5
+                                var azd3 = F.zero();
+                                var bzd3 = F.zero();
+                                for (0..gsz_d3) |kkd3| {
+                                    const ccd3 = c_mod.UNIFORM_CONSTRAINTS[gid_d3[kkd3]];
+                                    const cvd3 = ccd3.condition.evaluate(F, wd3.asSlice());
+                                    const mvd3 = ccd3.left.evaluate(F, wd3.asSlice()).sub(ccd3.right.evaluate(F, wd3.asSlice()));
+                                    const cf3 = coeffs_j[kkd3];
+                                    const cf3f = if (cf3 > 0) F.fromU64(@intCast(cf3)) else F.zero().sub(F.fromU64(@intCast(-cf3)));
+                                    azd3 = azd3.add(cf3f.mul(cvd3));
+                                    bzd3 = bzd3.add(cf3f.mul(mvd3));
+                                }
+                                coeffs_t1_neg5 = coeffs_t1_neg5.add(eq_d3.mul(azd3.mul(bzd3)));
+                            }
+                        }
+                    }
+                    std.debug.print("[DECOMP] t1(-5) COEFFS_PER_J = {any}\n", .{coeffs_t1_neg5.toBytesBE()});
+                    std.debug.print("[DECOMP] t1(-5) Lagrange == COEFFS_PER_J? {}\n", .{direct_t1_neg5.eql(coeffs_t1_neg5)});
+
+                    // Compute t1 at ALL 19 domain points {-9,...,9} using direct Lagrange
+                    // and compare with what the polynomial gives
+                    var domain_mismatches: usize = 0;
+                    for (0..19) |dpidx| {
+                        const dpy: i64 = @as(i64, @intCast(dpidx)) - 9;
+                        const dpy_field = if (dpy >= 0) F.fromU64(@intCast(dpy)) else F.zero().sub(F.fromU64(@intCast(-dpy)));
+
+                        // Compute Lagrange evals at this Y on 10-point domain
+                        var lag_y: [FGSZ]F = undefined;
+                        {
+                            const lag_start_y: i64 = -@as(i64, (FGSZ - 1) / 2);
+                            for (0..FGSZ) |liy| {
+                                var lnumy = F.one();
+                                var ldeny = F.one();
+                                for (0..FGSZ) |ljy| {
+                                    if (liy != ljy) {
+                                        const lxjy: i64 = lag_start_y + @as(i64, @intCast(ljy));
+                                        const lxjfy = if (lxjy >= 0) F.fromU64(@intCast(lxjy)) else F.zero().sub(F.fromU64(@intCast(-lxjy)));
+                                        lnumy = lnumy.mul(dpy_field.sub(lxjfy));
+                                        const ldiffy: i64 = @as(i64, @intCast(liy)) - @as(i64, @intCast(ljy));
+                                        const ldiffyf = if (ldiffy > 0) F.fromU64(@intCast(ldiffy)) else F.zero().sub(F.fromU64(@intCast(-ldiffy)));
+                                        ldeny = ldeny.mul(ldiffyf);
+                                    }
+                                }
+                                lag_y[liy] = lnumy.mul(ldeny.inverse().?);
+                            }
+                        }
+
+                        // Compute direct t1(dpy) sum
+                        var t1_dpy = F.zero();
+                        for (0..n_x_out_d) |xody| {
+                            for (0..n_x_in_d) |xidy| {
+                                const eq_dy = E_out_d[xody].mul(E_in_d[xidy]);
+                                const xipdy = xidy >> 1;
+                                const cycdy = (xody << @intCast(n_x_in_prime_bits_d)) | xipdy;
+                                const grpdy: usize = xidy & 1;
+                                if (cycdy < cycle_witnesses.len) {
+                                    const gsz_dy: usize = if (grpdy == 0) FGSZ else SGSZ;
+                                    const gid_dy = if (grpdy == 0) &c_mod.FIRST_GROUP_INDICES else &c_mod.SECOND_GROUP_INDICES;
+                                    const wdy = &cycle_witnesses[cycdy];
+                                    var azdy = F.zero();
+                                    var bzdy = F.zero();
+                                    for (0..gsz_dy) |kkdy| {
+                                        const ccdy = c_mod.UNIFORM_CONSTRAINTS[gid_dy[kkdy]];
+                                        const cvdy = ccdy.condition.evaluate(F, wdy.asSlice());
+                                        const mvdy = ccdy.left.evaluate(F, wdy.asSlice()).sub(ccdy.right.evaluate(F, wdy.asSlice()));
+                                        azdy = azdy.add(lag_y[kkdy].mul(cvdy));
+                                        bzdy = bzdy.add(lag_y[kkdy].mul(mvdy));
+                                    }
+                                    t1_dpy = t1_dpy.add(eq_dy.mul(azdy.mul(bzdy)));
+                                }
+                            }
+                        }
+
+                        // (placeholder for polynomial evaluation at dpy)
+
+                        // For base points, the direct sum should be 0 (correct witness)
+                        const is_base = (dpy >= -4 and dpy <= 5);
+                        if (!t1_dpy.eql(F.zero()) and is_base) {
+                            std.debug.print("[DOMCHK] Y={d}: t1 NON-ZERO at base point! val={any}\n", .{ dpy, t1_dpy.toBytesBE() });
+                            domain_mismatches += 1;
+
+                            // Find which cycles contribute non-zero AzBz at this base point
+                            var cnt_nz: usize = 0;
+                            for (0..n_x_out_d) |xodz| {
+                                for (0..n_x_in_d) |xidz| {
+                                    const xipz = xidz >> 1;
+                                    const cycz = (xodz << @intCast(n_x_in_prime_bits_d)) | xipz;
+                                    const grpz: usize = xidz & 1;
+                                    if (cycz < cycle_witnesses.len) {
+                                        const gsz_z: usize = if (grpz == 0) FGSZ else SGSZ;
+                                        const gid_z = if (grpz == 0) &c_mod.FIRST_GROUP_INDICES else &c_mod.SECOND_GROUP_INDICES;
+                                        const wdz = &cycle_witnesses[cycz];
+                                        var azz = F.zero();
+                                        var bzz = F.zero();
+                                        for (0..gsz_z) |kkz| {
+                                            const ccz = c_mod.UNIFORM_CONSTRAINTS[gid_z[kkz]];
+                                            const cvz = ccz.condition.evaluate(F, wdz.asSlice());
+                                            const mvz = ccz.left.evaluate(F, wdz.asSlice()).sub(ccz.right.evaluate(F, wdz.asSlice()));
+                                            azz = azz.add(lag_y[kkz].mul(cvz));
+                                            bzz = bzz.add(lag_y[kkz].mul(mvz));
+                                        }
+                                        const abz = azz.mul(bzz);
+                                        if (!abz.eql(F.zero())) {
+                                            cnt_nz += 1;
+                                            if (cnt_nz <= 3) {
+                                                std.debug.print("[DOMCHK]   cycle={d} grp={d}: Az*Bz={any}\n", .{ cycz, grpz, abz.toBytesBE() });
+                                                // Also print individual Az, Bz
+                                                std.debug.print("[DOMCHK]     Az={any} Bz={any}\n", .{ azz.toBytesBE(), bzz.toBytesBE() });
+                                                // And Lagrange evals used
+                                                for (0..@min(3, gsz_z)) |qk| {
+                                                    std.debug.print("[DOMCHK]     lag[{d}]={any}\n", .{ qk, lag_y[qk].toBytesBE() });
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            std.debug.print("[DOMCHK]   total non-zero AzBz: {d}\n", .{cnt_nz});
+                        } else if (!is_base) {
+                            std.debug.print("[DOMCHK] Y={d}: t1_direct={any}\n", .{ dpy, t1_dpy.toBytesBE() });
+                        }
+                    }
+                    std.debug.print("[DOMCHK] domain check: {d} base point violations\n", .{domain_mismatches});
+
+                    // Check ALL constraints at ALL cycles for violations
+                    var total_violations: usize = 0;
+                    for (0..cycle_witnesses.len) |cv| {
+                        const wcv = &cycle_witnesses[cv];
+                        for (0..c_mod.UNIFORM_CONSTRAINTS.len) |ci| {
+                            const cc = c_mod.UNIFORM_CONSTRAINTS[ci];
+                            const cond_v = cc.condition.evaluate(F, wcv.asSlice());
+                            const left_v = cc.left.evaluate(F, wcv.asSlice());
+                            const right_v = cc.right.evaluate(F, wcv.asSlice());
+                            const diff_v = left_v.sub(right_v);
+                            const prod_v = cond_v.mul(diff_v);
+                            if (!prod_v.eql(F.zero())) {
+                                total_violations += 1;
+                                if (total_violations <= 20) {
+                                    std.debug.print("[VIOLATION] cycle={d} constraint={d}: cond={any} left={any} right={any} diff={any}\n", .{
+                                        cv, ci,
+                                        cond_v.toBytesBE(),
+                                        left_v.toBytesBE(),
+                                        right_v.toBytesBE(),
+                                        diff_v.toBytesBE(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    std.debug.print("[VIOLATION] total constraint violations: {d} across {d} cycles x {d} constraints\n", .{
+                        total_violations, cycle_witnesses.len, c_mod.UNIFORM_CONSTRAINTS.len,
+                    });
+
+                    // Print key witness values for violated cycles
+                    if (total_violations > 0 and cycle_witnesses.len > 54) {
+                        const w54s = cycle_witnesses[54].asSlice();
+                        std.debug.print("[CYCLE54] UnexpandedPC   = {any}\n", .{w54s[c_mod.R1CSInputIndex.UnexpandedPC.toIndex()].toBytesBE()});
+                        std.debug.print("[CYCLE54] NextUnexpPC    = {any}\n", .{w54s[c_mod.R1CSInputIndex.NextUnexpandedPC.toIndex()].toBytesBE()});
+                        std.debug.print("[CYCLE54] ShouldBranch   = {any}\n", .{w54s[c_mod.R1CSInputIndex.ShouldBranch.toIndex()].toBytesBE()});
+                        std.debug.print("[CYCLE54] FlagJump       = {any}\n", .{w54s[c_mod.R1CSInputIndex.FlagJump.toIndex()].toBytesBE()});
+                        std.debug.print("[CYCLE54] DoNotUpdateUPC = {any}\n", .{w54s[c_mod.R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()].toBytesBE()});
+                        std.debug.print("[CYCLE54] IsCompressed   = {any}\n", .{w54s[c_mod.R1CSInputIndex.FlagIsCompressed.toIndex()].toBytesBE()});
+                        std.debug.print("[CYCLE54] PC             = {any}\n", .{w54s[c_mod.R1CSInputIndex.PC.toIndex()].toBytesBE()});
+                        std.debug.print("[CYCLE54] NextPC         = {any}\n", .{w54s[c_mod.R1CSInputIndex.NextPC.toIndex()].toBytesBE()});
+                        std.debug.print("[CYCLE54] FlagIsNoop     = {any}\n", .{w54s[c_mod.R1CSInputIndex.FlagIsNoop.toIndex()].toBytesBE()});
+                        // Also print cycle 55
+                        if (cycle_witnesses.len > 55) {
+                            const w55s = cycle_witnesses[55].asSlice();
+                            std.debug.print("[CYCLE55] UnexpandedPC   = {any}\n", .{w55s[c_mod.R1CSInputIndex.UnexpandedPC.toIndex()].toBytesBE()});
+                            std.debug.print("[CYCLE55] FlagIsNoop     = {any}\n", .{w55s[c_mod.R1CSInputIndex.FlagIsNoop.toIndex()].toBytesBE()});
+                            std.debug.print("[CYCLE55] PC             = {any}\n", .{w55s[c_mod.R1CSInputIndex.PC.toIndex()].toBytesBE()});
+                        }
+                    }
+                }
+            }
+
             // Bind the first-round challenge from transcript with the uni_skip_claim
             outer_prover.bindFirstRoundChallenge(r0, uni_skip_claim) catch {};
 
@@ -548,6 +902,97 @@ pub fn ProofConverter(comptime F: type) type {
             if (!prover_eq_factor.eql(F.zero())) {
                 const implied_az_bz = prover_final_claim.mul(prover_eq_factor.inverse().?);
                 std.debug.print("[ZOLT] STAGE1_FINAL: implied Az*Bz (final_claim/eq_factor) = {any}\n", .{implied_az_bz.toBytes()});
+            }
+
+            // CROSS-CHECK: Compute the "correct" final_claim directly from witnesses
+            // This is what the verifier expects: eq_factor * Az(r_stream, r0, r_cycle) * Bz(r_stream, r0, r_cycle)
+            // where r_cycle is the full set of bound challenges reversed
+            {
+                const all_chal = challenges.items;
+                const r_stream_check = if (all_chal.len > 0) all_chal[0] else F.zero();
+                const r0_check = r0;
+
+                // Get the cycle challenges (skip r_stream)
+                const cycle_chal = if (all_chal.len > 1) all_chal[1..] else all_chal[0..0];
+
+                // Compute MLE evaluations of R1CS inputs at r_cycle (reversed)
+                const r_cycle_be = try self.allocator.alloc(F, cycle_chal.len);
+                defer self.allocator.free(r_cycle_be);
+                for (0..cycle_chal.len) |idx| {
+                    r_cycle_be[idx] = cycle_chal[cycle_chal.len - 1 - idx];
+                }
+
+                const R1CSInputEval = r1cs.R1CSInputEvaluator(F);
+                const check_evals = try R1CSInputEval.computeClaimedInputs(
+                    self.allocator,
+                    cycle_witnesses,
+                    r_cycle_be,
+                );
+
+                // Compute Lagrange weights at r0
+                const FGSZ = 10;
+                const SGSZ = 9;
+                var w_check: [FGSZ]F = undefined;
+                const start: i64 = -4;
+                for (0..FGSZ) |ii| {
+                    var numer = F.one();
+                    var denom = F.one();
+                    for (0..FGSZ) |jj| {
+                        if (ii != jj) {
+                            const x_j: i64 = start + @as(i64, @intCast(jj));
+                            const x_j_f = if (x_j >= 0)
+                                F.fromU64(@intCast(x_j))
+                            else
+                                F.zero().sub(F.fromU64(@intCast(-x_j)));
+                            numer = numer.mul(r0_check.sub(x_j_f));
+                            const d: i64 = @as(i64, @intCast(ii)) - @as(i64, @intCast(jj));
+                            if (d > 0) {
+                                denom = denom.mul(F.fromU64(@intCast(d)));
+                            } else {
+                                denom = denom.mul(F.zero().sub(F.fromU64(@intCast(-d))));
+                            }
+                        }
+                    }
+                    w_check[ii] = if (!denom.eql(F.zero())) numer.mul(denom.inverse().?) else F.zero();
+                }
+
+                // Build z vector
+                var z_check: [r1cs.R1CSInputIndex.NUM_INPUTS + 1]F = undefined;
+                @memcpy(z_check[0..r1cs.R1CSInputIndex.NUM_INPUTS], &check_evals);
+                z_check[r1cs.R1CSInputIndex.NUM_INPUTS] = F.one();
+
+                // Compute az_g0, bz_g0
+                var az_g0_c = F.zero();
+                var bz_g0_c = F.zero();
+                for (0..FGSZ) |ii| {
+                    const cidx = r1cs.FIRST_GROUP_INDICES[ii];
+                    const cons = r1cs.UNIFORM_CONSTRAINTS[cidx];
+                    const az_c = cons.condition.evaluateWithConstant(F, &z_check);
+                    const bz_c = cons.left.evaluateWithConstant(F, &z_check).sub(cons.right.evaluateWithConstant(F, &z_check));
+                    az_g0_c = az_g0_c.add(w_check[ii].mul(az_c));
+                    bz_g0_c = bz_g0_c.add(w_check[ii].mul(bz_c));
+                }
+
+                var az_g1_c = F.zero();
+                var bz_g1_c = F.zero();
+                for (0..SGSZ) |ii| {
+                    const cidx = r1cs.SECOND_GROUP_INDICES[ii];
+                    const cons = r1cs.UNIFORM_CONSTRAINTS[cidx];
+                    const az_c = cons.condition.evaluateWithConstant(F, &z_check);
+                    const bz_c = cons.left.evaluateWithConstant(F, &z_check).sub(cons.right.evaluateWithConstant(F, &z_check));
+                    az_g1_c = az_g1_c.add(w_check[ii].mul(az_c));
+                    bz_g1_c = bz_g1_c.add(w_check[ii].mul(bz_c));
+                }
+
+                const az_f_c = az_g0_c.add(r_stream_check.mul(az_g1_c.sub(az_g0_c)));
+                const bz_f_c = bz_g0_c.add(r_stream_check.mul(bz_g1_c.sub(bz_g0_c)));
+                const inner_sp = az_f_c.mul(bz_f_c);
+                const expected_final = inner_sp.mul(prover_eq_factor);
+
+                std.debug.print("[ZOLT] STAGE1_CROSSCHECK: inner_sum_prod = {any}\n", .{inner_sp.toBytes()});
+                std.debug.print("[ZOLT] STAGE1_CROSSCHECK: expected_final (inner_sp * eq_factor) = {any}\n", .{expected_final.toBytes()});
+                std.debug.print("[ZOLT] STAGE1_CROSSCHECK: prover_final = {any}\n", .{prover_final_claim.toBytes()});
+                std.debug.print("[ZOLT] STAGE1_CROSSCHECK: match = {}\n", .{expected_final.eql(prover_final_claim)});
             }
 
             return Stage1Result{ .challenges = challenges, .r0 = r0, .uni_skip_claim = uni_skip_claim, .allocator = self.allocator };

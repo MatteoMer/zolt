@@ -1,89 +1,64 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 73 - Montgomery R^2 Scaling Applied
+## Status: Session 75 - Tau Vector Length Fix + R^2 Scaling Removal
 
-## Current Issue: Stage 1 Sumcheck Output Claim Mismatch (After R^2 Fix)
+## Current Issue: Stage 1 Sumcheck Output/Expected Claim Mismatch
 
-### Problem Summary
+### Root Causes Found & Fixed This Session
 
-The Jolt verifier still fails to verify the Stage 1 sumcheck proof:
+1. **FIXED: Synthetic termination step constraint violation**
+   - Changed `recordTerminationWrite` in tracer/mod.zig to mark termination step as NoOp
+   - Result: 0 constraint violations across 55 cycles × 19 constraints ✅
 
-```
-Sumcheck verification failed!
-  output_claim:   [99, 9c, b9, b6, 17, 1c, d1, c6, ...]
-  expected_claim: [b9, 9d, d3, 21, 0b, 82, 30, e4, ...]
-```
+2. **FIXED: R^2 scaling was mathematically wrong for Zolt**
+   - Removed R^2 scaling from both streaming_outer.zig and univariate_skip.zig
+   - Jolt's R^2 compensates for its integer/Montgomery mixed pipeline; Zolt's pure field arithmetic already correct
+   - Result: extended_evals now computed without extra R^2 multiplication ✅
 
-### Changes Made This Session
+3. **FIXED: num_cycle_vars computed from actual cycle count (55) instead of trace_length (64)**
+   - Zolt: `log2_int(55) = 5`, giving `num_rows_bits = 7`, tau.len = 7
+   - Jolt: `log2(64) = 6`, giving `num_rows_bits = 8`, tau.len = 8
+   - Fix: Use `trace_length` instead of `cycle_witnesses.len` for computing num_cycle_vars
+   - Fixed in all 3 places in mod.zig (lines 692, 1031, 1265)
+   - Result: Transcript state now matches at UncompressedUniPoly_begin ✅
+   - Result: r0 values match between Zolt prover and Jolt verifier ✅
 
-1. **Added `F.rSquared()` constant to BN254Scalar** (src/field/mod.zig):
-   - Returns R^2 as a field element in Montgomery form
-   - Computed as: raw R^2 bytes converted to Montgomery form
+### Remaining Issue
 
-2. **Applied R^2 scaling to Stage 1 UniSkip extended_evals** (streaming_outer.zig):
-   - After computing sum = Σ eq_val * Az*Bz, multiply by R^2
-   - This matches Jolt's `* outer_scale` at line 226 of outer.rs
+Stage 1 sumcheck still fails with output_claim ≠ expected_claim:
+- output_claim matches Zolt's prover computation (sumcheck proof is internally consistent)
+- expected_claim is computed by Jolt verifier from R1CS input evaluations (opening claims)
+- The opening claims in the proof may not correctly represent the polynomial evaluations
 
-3. **Applied R^2 scaling to Stage 2 ProductVirtual extended_evals** (univariate_skip.zig):
-   - Same R^2 multiplication applied to extended_evals
+### Theory for Remaining Issue
 
-### Debug Output Comparison
+The committed polynomials (R1CS inputs like PC, RS1, RS2, etc.) might not be padded to 64 cycles
+in Zolt, while Jolt expects them to be. When the verifier evaluates these polynomials at the
+sumcheck challenge point, it gets different values than what the prover used.
 
-**Zolt BEFORE R^2 scaling:**
-```
-extended_evals[0] (target_y=-5) = { 4, 136, 82, 238, 142, 127, 178, 244, ... }
-```
+### Next Steps
 
-**Zolt AFTER R^2 scaling:**
-```
-extended_evals[0] (target_y=-5) = { 26, 148, 234, 222, 178, 10, 191, 9, ... }
-```
+1. **Check committed polynomial padding**: Verify that R1CS input polynomials are padded to
+   `trace_length` (64 cycles) with NoOp witness values for cycles 55-63.
 
-### Root Cause Analysis (Ongoing)
+2. **Compare opening claims**: Check the opening claims in the proof against what the verifier
+   expects.
 
-The R^2 scaling is applied but the sumcheck still fails. Possible remaining issues:
-
-1. **Eq Table Computation Difference**:
-   - Jolt uses `GruenSplitEqPolynomial` which builds E_out and E_in in a specific way
-   - Zolt uses `buildEqTable` which might index differently
-
-2. **Constraint Evaluation Difference**:
-   - Jolt's `extended_azbz_product_first_group` uses i32/S128/S192 accumulation
-   - Zolt evaluates Az and Bz as field elements and multiplies
-   - These SHOULD be equivalent for correct witnesses but might have precision differences
-
-3. **Lagrange Coefficient Order**:
-   - COEFFS_PER_J might be computed differently
-   - TARGET_SHIFTS might differ
-
-4. **Group Interleaving**:
-   - Jolt interleaves FIRST_GROUP and SECOND_GROUP via x_in LSB
-   - Zolt does the same but might have different ordering
-
-### Next Steps to Fix
-
-1. **Add debug to Jolt prover to print extended_evals**:
-   - Need to run Jolt's prover (not just verifier) with debug
-   - Compare byte-for-byte with Zolt's extended_evals
-
-2. **Verify E_out and E_in tables match**:
-   - Print E_out[0] and E_in[0] from both implementations
-   - Check tau splits are identical
-
-3. **Verify Lagrange coefficient calculation**:
-   - Print COEFFS_PER_J[0] from both
-   - Verify TARGET_SHIFTS match
-
-4. **Check constraint evaluation at cycle 0**:
-   - For cycle 0, print individual Az and Bz values for each constraint
-   - Compare with Jolt's R1CSCycleInputs
+3. **Verify inner_sum_product computation**: The verifier's `evaluate_inner_sum_product_at_point`
+   uses the opening claims. Trace through this computation.
 
 ### Files Modified This Session
 
-- `src/field/mod.zig`: Added `rSquared()` method
-- `src/zkvm/spartan/streaming_outer.zig`: Added R^2 scaling to extended_evals
-- `src/zkvm/r1cs/univariate_skip.zig`: Added R^2 scaling to ProductVirtual extended_evals
-- `/home/vivado/projects/jolt/jolt-core/src/zkvm/spartan/outer.rs`: Added debug output for extended_evals
+- `src/tracer/mod.zig`: Changed `recordTerminationWrite` to mark termination step as NoOp
+- `src/zkvm/mod.zig`: Fixed num_cycle_vars to use trace_length (3 places)
+- `src/zkvm/spartan/streaming_outer.zig`: Removed R^2 scaling from extended_evals
+- `src/zkvm/r1cs/univariate_skip.zig`: Removed R^2 scaling from ProductVirtual extended_evals
+- `src/zkvm/proof_converter.zig`: Added comprehensive constraint violation checker
+
+### Jolt Files Modified (Debug Only)
+
+- `jolt-core/src/subprotocols/univariate_skip.rs`: Added UniSkip verification debug
+- `jolt-core/src/transcripts/blake2b.rs`: Extended transcript debug to UncompressedUniPoly
 
 ### Debug Commands
 
@@ -91,34 +66,25 @@ The R^2 scaling is applied but the sumcheck still fails. Possible remaining issu
 # Build Zolt
 zig build -Doptimize=ReleaseFast
 
-# Generate proof with debug
-./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o /tmp/zolt_proof_dory.bin --export-preprocessing /tmp/zolt_preprocessing.bin --trace-length 64 2>&1 | grep -E "(UNISKIP|extended_evals|BEFORE|AFTER)" | head -30
+# Generate proof
+./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o /tmp/zolt_proof_dory.bin --export-preprocessing /tmp/zolt_preprocessing.bin --trace-length 64
 
 # Verify with Jolt
 cd /home/vivado/projects/jolt && cargo test -p jolt-core --features zolt-debug --lib test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
-
-## Investigation History
-
-### Session 71
-- Discovered challenge value mismatch between Zolt prover and Jolt verifier
-- r_stream and r0 values completely different
-
-### Session 72
-- Traced issue to UniSkip extended_evals differing
-- Found Montgomery R^2 scaling difference
-- Found constraint evaluation approach difference
-- Verified split parameters match
-
-### Session 73
-- Implemented R^2 scaling for Stage 1 and Stage 2 UniSkip
-- Verification still fails - need deeper investigation
 
 ## Verified Working Components
 
 - ✅ Blake2b transcript matches between Zolt and Jolt
 - ✅ Initial transcript state matches
 - ✅ Scalar serialization format (32-byte LE)
-- ✅ Tau challenges generated correctly
-- ✅ Split eq parameters (m, num_x_out_bits, num_x_in_bits) match
-- ✅ R^2 scaling now applied to extended_evals
+- ✅ Tau challenges generated correctly (now with correct count)
+- ✅ Split eq parameters match
+- ✅ Guard-routing pattern applied to evaluateAzBzAtTargetY
+- ✅ Zero constraint violations (after NoOp termination fix)
+- ✅ Zero base domain violations
+- ✅ UncompressedUniPoly_begin transcript state matches
+- ✅ r0 values match between Zolt prover and Jolt verifier
+- ✅ UniSkip check_sum_evals passes
+- ✅ No R^2 scaling (correctly removed)
+- ❌ Stage 1 remaining sumcheck output_claim ≠ expected_claim

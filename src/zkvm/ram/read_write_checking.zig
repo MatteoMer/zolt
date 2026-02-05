@@ -115,11 +115,13 @@ pub fn CycleMajorEntry(comptime F: type) type {
                 std.debug.assert(e.cycle % 2 == 0);
                 std.debug.assert(o.cycle % 2 == 1);
                 std.debug.assert(e.address == o.address);
+                const new_val = e.val_coeff.add(r.mul(o.val_coeff.sub(e.val_coeff)));
+                std.debug.print("[BIND CYCLE] BOTH: even_cycle={}, even_val={any}, odd_val={any}, r={any}, result_val={any}\n", .{ e.cycle, e.val_coeff.toBytesBE()[0..8], o.val_coeff.toBytesBE()[0..8], r.toBytesBE()[0..8], new_val.toBytesBE()[0..8] });
                 return Self{
                     .cycle = e.cycle / 2,
                     .address = e.address,
                     .ra_coeff = e.ra_coeff.add(r.mul(o.ra_coeff.sub(e.ra_coeff))),
-                    .val_coeff = e.val_coeff.add(r.mul(o.val_coeff.sub(e.val_coeff))),
+                    .val_coeff = new_val,
                     .prev_val = e.prev_val,
                     .next_val = o.next_val,
                 };
@@ -127,11 +129,13 @@ pub fn CycleMajorEntry(comptime F: type) type {
                 // Only even entry exists - odd is implicit
                 const e = even.?.*;
                 const odd_val_coeff = F.fromU64(e.next_val);
+                const new_val = e.val_coeff.add(r.mul(odd_val_coeff.sub(e.val_coeff)));
+                std.debug.print("[BIND CYCLE] EVEN_ONLY: even_cycle={}, even_val={any}, odd_implicit_val=F({})={any}, r={any}, result_val={any}\n", .{ e.cycle, e.val_coeff.toBytesBE()[0..8], e.next_val, odd_val_coeff.toBytesBE()[0..8], r.toBytesBE()[0..8], new_val.toBytesBE()[0..8] });
                 return Self{
                     .cycle = e.cycle / 2,
                     .address = e.address,
                     .ra_coeff = F.one().sub(r).mul(e.ra_coeff),
-                    .val_coeff = e.val_coeff.add(r.mul(odd_val_coeff.sub(e.val_coeff))),
+                    .val_coeff = new_val,
                     .prev_val = e.prev_val,
                     .next_val = e.next_val,
                 };
@@ -139,11 +143,13 @@ pub fn CycleMajorEntry(comptime F: type) type {
                 // Only odd entry exists - even is implicit
                 const o = odd.?.*;
                 const even_val_coeff = F.fromU64(o.prev_val);
+                const new_val = even_val_coeff.add(r.mul(o.val_coeff.sub(even_val_coeff)));
+                std.debug.print("[BIND CYCLE] ODD_ONLY: odd_cycle={}, even_implicit_val=F({})={any}, odd_val={any}, r={any}, result_val={any}\n", .{ o.cycle, o.prev_val, even_val_coeff.toBytesBE()[0..8], o.val_coeff.toBytesBE()[0..8], r.toBytesBE()[0..8], new_val.toBytesBE()[0..8] });
                 return Self{
                     .cycle = o.cycle / 2,
                     .address = o.address,
                     .ra_coeff = r.mul(o.ra_coeff),
-                    .val_coeff = even_val_coeff.add(r.mul(o.val_coeff.sub(even_val_coeff))),
+                    .val_coeff = new_val,
                     .prev_val = o.prev_val,
                     .next_val = o.next_val,
                 };
@@ -360,6 +366,46 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 }
             }
 
+            // VERIFY: Check initial sum = Σ eq[j] * ra(k,j) * (val(k,j) + gamma*(val(k,j) + inc[j]))
+            {
+                var verify_init_sum = F.zero();
+                for (entries.items) |ve| {
+                    const eq_j = if (ve.cycle < T) eq_evals[ve.cycle] else F.zero();
+                    const inc_j = if (ve.cycle < T) inc[ve.cycle] else F.zero();
+                    const inner = ve.val_coeff.add(params.gamma.mul(ve.val_coeff.add(inc_j)));
+                    verify_init_sum = verify_init_sum.add(eq_j.mul(ve.ra_coeff).mul(inner));
+                }
+                std.debug.print("[RWC INIT VERIFY] initial_claim = {any}\n", .{initial_claim.toBytesBE()});
+                std.debug.print("[RWC INIT VERIFY] sum_of_entries = {any}\n", .{verify_init_sum.toBytesBE()});
+                std.debug.print("[RWC INIT VERIFY] match = {}\n", .{verify_init_sum.eql(initial_claim)});
+                // Also compute rv_claim and wv_claim separately
+                var rv_sum = F.zero();
+                var wv_sum = F.zero();
+                for (entries.items) |ve| {
+                    const eq_j = if (ve.cycle < T) eq_evals[ve.cycle] else F.zero();
+                    const inc_j = if (ve.cycle < T) inc[ve.cycle] else F.zero();
+                    // rv = Σ eq * ra * val
+                    rv_sum = rv_sum.add(eq_j.mul(ve.ra_coeff).mul(ve.val_coeff));
+                    // wv = Σ eq * ra * (val + inc)
+                    wv_sum = wv_sum.add(eq_j.mul(ve.ra_coeff).mul(ve.val_coeff.add(inc_j)));
+                }
+                std.debug.print("[RWC INIT VERIFY] rv_sum = {any}\n", .{rv_sum.toBytesBE()});
+                std.debug.print("[RWC INIT VERIFY] wv_sum = {any}\n", .{wv_sum.toBytesBE()});
+                std.debug.print("[RWC INIT VERIFY] rv + gamma*wv = {any}\n", .{rv_sum.add(params.gamma.mul(wv_sum)).toBytesBE()});
+                // Also compute what initial_claim SHOULD be using a different eq convention
+                // Try LITTLE_ENDIAN eq
+                const poly_mod = @import("../../poly/mod.zig");
+                const EqPoly = poly_mod.EqPolynomial(F);
+                const eq_le_evals = try EqPoly.evalsSliceWithScaling(F, allocator, params.r_cycle, null);
+                defer allocator.free(eq_le_evals);
+                const eq_le_54 = if (54 < eq_le_evals.len) eq_le_evals[54] else F.zero();
+                std.debug.print("[RWC INIT VERIFY] eq_BE[54] = {any}\n", .{eq_evals[54].toBytesBE()});
+                std.debug.print("[RWC INIT VERIFY] eq_LE[54] (EqPoly) = {any}\n", .{eq_le_54.toBytesBE()});
+                // Compute with LE eq
+                const sum_le = eq_le_54.mul(params.gamma); // rv=0, wv=eq*1, total=gamma*eq
+                std.debug.print("[RWC INIT VERIFY] gamma*eq_LE[54] = {any}\n", .{sum_le.toBytesBE()});
+            }
+
             return Self{
                 .params = params,
                 .current_claim = initial_claim,
@@ -572,6 +618,20 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                         e.val_coeff.toBytesBE()[0..8],
                     });
                 }
+                // VERIFICATION: At start of Phase 2, compute the actual sum of all entries
+                // and check it matches current_claim.
+                // Sum = eq_cycle * Σ_k ra(k) * (val(k) + gamma*(val(k) + inc))
+                const eq_s = self.eq_evals[0];
+                const inc_s = self.inc[0];
+                const gamma_s = self.params.gamma;
+                var verify_sum = F.zero();
+                for (self.entries.items) |ve| {
+                    const inner = ve.val_coeff.add(gamma_s.mul(ve.val_coeff.add(inc_s)));
+                    verify_sum = verify_sum.add(eq_s.mul(ve.ra_coeff).mul(inner));
+                }
+                std.debug.print("[RWC PHASE2 VERIFY] Sum of entries = {any}\n", .{verify_sum.toBytesBE()});
+                std.debug.print("[RWC PHASE2 VERIFY] current_claim = {any}\n", .{self.current_claim.toBytesBE()});
+                std.debug.print("[RWC PHASE2 VERIFY] match = {}\n", .{verify_sum.eql(self.current_claim)});
             }
 
             // After all cycle variables are bound:
@@ -596,7 +656,10 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 const entry = self.entries.items[entry_idx];
 
                 // Determine column pair for this entry
-                const col = entry.address >> @intCast(addr_round);
+                // CRITICAL FIX: entry.address has ALREADY been divided by 2 at each previous round
+                // (in bindAddressMajorOddOnly/EvenOnly/Pair). So entry.address IS the current
+                // column index in the bound space. Do NOT shift by addr_round again!
+                const col = entry.address;
                 const col_pair = col / 2;
                 const even_col_idx = col_pair * 2;
                 const odd_col_idx = even_col_idx + 1;
@@ -617,7 +680,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 var pair_end = entry_idx;
                 while (pair_end < self.entries.items.len) {
                     const e = self.entries.items[pair_end];
-                    const e_col = e.address >> @intCast(addr_round);
+                    const e_col = e.address;
                     const e_pair = e_col / 2;
                     if (e_pair != col_pair) break;
                     pair_end += 1;
@@ -630,7 +693,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 var odd_start_idx = pair_start;
                 while (odd_start_idx < pair_end) {
                     const e = self.entries.items[odd_start_idx];
-                    const e_col = e.address >> @intCast(addr_round);
+                    const e_col = e.address;
                     if (e_col % 2 == 1) break;
                     odd_start_idx += 1;
                 }
@@ -768,6 +831,9 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
         }
 
         /// Compute [s(0), s(2)] contribution for both even and odd entries at same row
+        /// In Jolt's Phase 2, the eq factor is ONLY eq(r_cycle, row) from the bound eq polynomial.
+        /// There is NO separate eq_addr factor - the address dimension is handled purely
+        /// through the entry pairing structure (even/odd with checkpoints).
         fn computePhase2Evals(
             even_entry: *const Entry,
             odd_entry: *const Entry,
@@ -782,20 +848,11 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
         ) [2]F {
             _ = even_checkpoint;
             _ = odd_checkpoint;
+            _ = addr_round;
+            _ = phase1_end;
+            _ = challenges;
 
-            // Compute eq over bound address variables
-            var eq_addr = F.one();
-            for (0..addr_round) |i| {
-                const bit_i: u1 = @truncate(even_entry.address >> @intCast(i));
-                const r_i = challenges[phase1_end + i];
-                if (bit_i == 1) {
-                    eq_addr = eq_addr.mul(r_i);
-                } else {
-                    eq_addr = eq_addr.mul(F.one().sub(r_i));
-                }
-            }
-            const eq_partial = eq_eval.mul(eq_addr);
-
+            // Following Jolt exactly: eq_eval is the only eq factor (from Phase 1 cycle binding)
             // ra_evals = [ra_even, 2*ra_odd - ra_even]
             const ra_0 = even_entry.ra_coeff;
             const ra_2 = odd_entry.ra_coeff.add(odd_entry.ra_coeff).sub(even_entry.ra_coeff);
@@ -805,8 +862,8 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             const val_2 = odd_entry.val_coeff.add(odd_entry.val_coeff).sub(even_entry.val_coeff);
 
             const one_plus_gamma = F.one().add(gamma);
-            const s0_contrib = eq_partial.mul(ra_0).mul(val_0.mul(one_plus_gamma).add(gamma.mul(inc_eval)));
-            const s2_contrib = eq_partial.mul(ra_2).mul(val_2.mul(one_plus_gamma).add(gamma.mul(inc_eval)));
+            const s0_contrib = eq_eval.mul(ra_0).mul(val_0.mul(one_plus_gamma).add(gamma.mul(inc_eval)));
+            const s2_contrib = eq_eval.mul(ra_2).mul(val_2.mul(one_plus_gamma).add(gamma.mul(inc_eval)));
 
             return [2]F{ s0_contrib, s2_contrib };
         }
@@ -824,19 +881,9 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             challenges: []const F,
         ) [2]F {
             _ = even_checkpoint;
-
-            // Compute eq over bound address variables
-            var eq_addr = F.one();
-            for (0..addr_round) |i| {
-                const bit_i: u1 = @truncate(even_entry.address >> @intCast(i));
-                const r_i = challenges[phase1_end + i];
-                if (bit_i == 1) {
-                    eq_addr = eq_addr.mul(r_i);
-                } else {
-                    eq_addr = eq_addr.mul(F.one().sub(r_i));
-                }
-            }
-            const eq_partial = eq_eval.mul(eq_addr);
+            _ = addr_round;
+            _ = phase1_end;
+            _ = challenges;
 
             // Implicit odd entry has ra=0, val=odd_checkpoint
             // ra_evals = [ra_even, -ra_even] (since odd ra = 0)
@@ -848,8 +895,8 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             const val_2 = odd_checkpoint.add(odd_checkpoint).sub(even_entry.val_coeff);
 
             const one_plus_gamma = F.one().add(gamma);
-            const s0_contrib = eq_partial.mul(ra_0).mul(val_0.mul(one_plus_gamma).add(gamma.mul(inc_eval)));
-            const s2_contrib = eq_partial.mul(ra_2).mul(val_2.mul(one_plus_gamma).add(gamma.mul(inc_eval)));
+            const s0_contrib = eq_eval.mul(ra_0).mul(val_0.mul(one_plus_gamma).add(gamma.mul(inc_eval)));
+            const s2_contrib = eq_eval.mul(ra_2).mul(val_2.mul(one_plus_gamma).add(gamma.mul(inc_eval)));
 
             return [2]F{ s0_contrib, s2_contrib };
         }
@@ -867,19 +914,9 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             challenges: []const F,
         ) [2]F {
             _ = odd_checkpoint;
-
-            // Compute eq over bound address variables
-            var eq_addr = F.one();
-            for (0..addr_round) |i| {
-                const bit_i: u1 = @truncate(odd_entry.address >> @intCast(i));
-                const r_i = challenges[phase1_end + i];
-                if (bit_i == 1) {
-                    eq_addr = eq_addr.mul(r_i);
-                } else {
-                    eq_addr = eq_addr.mul(F.one().sub(r_i));
-                }
-            }
-            const eq_partial = eq_eval.mul(eq_addr);
+            _ = addr_round;
+            _ = phase1_end;
+            _ = challenges;
 
             // Implicit even entry has ra=0, val=even_checkpoint
             // ra_evals = [0, 2*ra_odd] (since even ra = 0)
@@ -892,8 +929,8 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
 
             const one_plus_gamma = F.one().add(gamma);
             // s(0) = 0 since ra(0) = 0
-            const s0_contrib = eq_partial.mul(ra_0).mul(val_0.mul(one_plus_gamma).add(gamma.mul(inc_eval)));
-            const s2_contrib = eq_partial.mul(ra_2).mul(val_2.mul(one_plus_gamma).add(gamma.mul(inc_eval)));
+            const s0_contrib = eq_eval.mul(ra_0).mul(val_0.mul(one_plus_gamma).add(gamma.mul(inc_eval)));
+            const s2_contrib = eq_eval.mul(ra_2).mul(val_2.mul(one_plus_gamma).add(gamma.mul(inc_eval)));
 
             return [2]F{ s0_contrib, s2_contrib };
         }
@@ -943,13 +980,37 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 // Bind entries: group by (row/2, col), create bound entries
                 // This matches Jolt's ReadWriteMatrixCycleMajor::bind
                 try self.bindEntries(challenge);
+
+                // VERIFY: After binding, check if sum of entries matches current_claim
+                // Sum should be: Σ_k Σ_j eq_eval[j] * ra_coeff(k,j) * (val_coeff(k,j) + gamma*(val_coeff(k,j) + inc[j]))
+                if (self.round < 3 or self.round == phase1_end - 1) {
+                    const verify_gamma = self.params.gamma;
+                    var verify_sum_phase1 = F.zero();
+                    for (self.entries.items) |ve| {
+                        const eq_j = if (ve.cycle < self.eq_size) self.eq_evals[ve.cycle] else F.zero();
+                        const inc_j = if (ve.cycle < self.eq_size) self.inc[ve.cycle] else F.zero();
+                        const inner = ve.val_coeff.add(verify_gamma.mul(ve.val_coeff.add(inc_j)));
+                        verify_sum_phase1 = verify_sum_phase1.add(eq_j.mul(ve.ra_coeff).mul(inner));
+                    }
+                    std.debug.print("[RWC PHASE1 VERIFY] round={}, sum={any}\n", .{ self.round, verify_sum_phase1.toBytesBE()[0..8] });
+                    std.debug.print("[RWC PHASE1 VERIFY] round={}, claim={any}\n", .{ self.round, self.current_claim.toBytesBE()[0..8] });
+                    std.debug.print("[RWC PHASE1 VERIFY] round={}, match={}\n", .{ self.round, verify_sum_phase1.eql(self.current_claim) });
+                }
             }
 
-            // Fold val_init in Phase 2 (address binding phase)
-            // This matches Jolt's val_init.bind_parallel(r, BindingOrder::LowToHigh)
+            // Phase 2: Address binding phase
+            // CRITICAL: Jolt binds entries FIRST (using current val_init for checkpoints),
+            // then binds val_init LAST. We must follow the same order.
             const in_phase2 = self.round >= phase1_end and self.round < phase2_end;
             if (in_phase2) {
                 const addr_round = self.round - phase1_end;
+
+                // Bind entries in AddressMajor format (by column pairs)
+                // This uses val_init for checkpoints, so must happen BEFORE val_init binding
+                try self.bindEntriesAddressMajor(challenge, addr_round);
+
+                // NOW bind val_init (after entries have used the unbound checkpoints)
+                // This matches Jolt's val_init.bind_parallel(r, BindingOrder::LowToHigh)
                 const K = @as(usize, 1) << @intCast(self.params.log_k);
                 const current_size = K >> @intCast(addr_round);
                 if (current_size > 1) {
@@ -961,8 +1022,27 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                     }
                 }
 
-                // Bind entries in AddressMajor format (by column pairs)
-                try self.bindEntriesAddressMajor(challenge, addr_round);
+                // PHASE 2 DIAGNOSTIC: Check val_coeff consistency after binding
+                if (addr_round < 3 or addr_round == 15) {
+                    const gamma_v = self.params.gamma;
+                    const eq_v = self.eq_evals[0];
+                    const inc_v = self.inc[0];
+                    var ra_v: F = F.zero();
+                    var val_v: F = F.zero();
+                    for (self.entries.items) |entry| {
+                        ra_v = ra_v.add(entry.ra_coeff);
+                        val_v = val_v.add(entry.val_coeff);
+                    }
+                    if (self.entries.items.len == 0) val_v = self.val_init[0];
+                    const expected_v = eq_v.mul(ra_v).mul(val_v.add(gamma_v.mul(val_v.add(inc_v))));
+                    std.debug.print("[RWC PHASE2 BIND CHECK] addr_round={}, match={}\n", .{ addr_round, expected_v.eql(self.current_claim) });
+                    if (addr_round < 3) {
+                        std.debug.print("[RWC PHASE2 BIND CHECK]   val_coeff={any}\n", .{val_v.toBytesBE()[0..8]});
+                        std.debug.print("[RWC PHASE2 BIND CHECK]   ra_coeff={any}\n", .{ra_v.toBytesBE()[0..8]});
+                        std.debug.print("[RWC PHASE2 BIND CHECK]   current_claim={any}\n", .{self.current_claim.toBytesBE()[0..8]});
+                        std.debug.print("[RWC PHASE2 BIND CHECK]   expected={any}\n", .{expected_v.toBytesBE()[0..8]});
+                    }
+                }
             }
 
             self.round += 1;
@@ -981,7 +1061,9 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 const entry = self.entries.items[entry_idx];
 
                 // Determine column pair for this entry
-                const col = entry.address >> @intCast(addr_round);
+                // CRITICAL FIX: entry.address has ALREADY been divided by 2 at each previous round
+                // So entry.address IS the current column. Do NOT shift by addr_round!
+                const col = entry.address;
                 const col_pair = col / 2;
                 const even_col_idx = col_pair * 2;
                 const odd_col_idx = even_col_idx + 1;
@@ -1000,7 +1082,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 var pair_end = entry_idx;
                 while (pair_end < self.entries.items.len) {
                     const e = self.entries.items[pair_end];
-                    const e_col = e.address >> @intCast(addr_round);
+                    const e_col = e.address;
                     const e_pair = e_col / 2;
                     if (e_pair != col_pair) break;
                     pair_end += 1;
@@ -1010,7 +1092,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 var j = entry_idx;
                 while (j < pair_end) {
                     const e = self.entries.items[j];
-                    const e_col = e.address >> @intCast(addr_round);
+                    const e_col = e.address;
                     if (e_col % 2 == 1) break;
                     j += 1;
                 }
@@ -1109,11 +1191,13 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             // Matching Jolt's (Some(even), None) case
             // Implicit odd has ra=0, val=odd_checkpoint
             const one_minus_r = F.one().sub(r);
+            const new_val = even.val_coeff.add(r.mul(odd_checkpoint.sub(even.val_coeff)));
+            std.debug.print("[BIND ADDR] EVEN_ONLY: addr={}, even_val={any}, odd_chkpt={any}, r={any}, result_val={any}\n", .{ even.address, even.val_coeff.toBytesBE()[0..8], odd_checkpoint.toBytesBE()[0..8], r.toBytesBE()[0..8], new_val.toBytesBE()[0..8] });
             return Entry{
                 .cycle = even.cycle,
                 .address = even.address / 2,
                 .ra_coeff = one_minus_r.mul(even.ra_coeff), // (1-r)*ra_even + r*0
-                .val_coeff = even.val_coeff.add(r.mul(odd_checkpoint.sub(even.val_coeff))),
+                .val_coeff = new_val,
                 .prev_val = even.prev_val, // Keep tracking
                 .next_val = even.next_val,
             };
@@ -1125,11 +1209,13 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
 
             // Matching Jolt's (None, Some(odd)) case
             // Implicit even has ra=0, val=even_checkpoint
+            const new_val = even_checkpoint.add(r.mul(odd.val_coeff.sub(even_checkpoint)));
+            std.debug.print("[BIND ADDR] ODD_ONLY: addr={}, even_chkpt={any}, odd_val={any}, r={any}, result_val={any}\n", .{ odd.address, even_checkpoint.toBytesBE()[0..8], odd.val_coeff.toBytesBE()[0..8], r.toBytesBE()[0..8], new_val.toBytesBE()[0..8] });
             return Entry{
                 .cycle = odd.cycle,
                 .address = odd.address / 2,
                 .ra_coeff = r.mul(odd.ra_coeff), // (1-r)*0 + r*ra_odd
-                .val_coeff = even_checkpoint.add(r.mul(odd.val_coeff.sub(even_checkpoint))),
+                .val_coeff = new_val,
                 .prev_val = odd.prev_val,
                 .next_val = odd.next_val,
             };
@@ -1179,7 +1265,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             std.debug.print("[RWC BIND] round={}, entries.len after bind={}\n", .{ self.round, self.entries.items.len });
             if (self.entries.items.len > 0) {
                 const e = self.entries.items[0];
-                std.debug.print("[RWC BIND]   entry[0]: cycle={}, addr={}, ra_coeff={any}\n", .{ e.cycle, e.address, e.ra_coeff.toBytesBE()[0..8] });
+                std.debug.print("[RWC BIND]   entry[0]: cycle={}, addr={}, ra_coeff={any}, val_coeff={any}, prev_val={}, next_val={}\n", .{ e.cycle, e.address, e.ra_coeff.toBytesBE()[0..8], e.val_coeff.toBytesBE()[0..8], e.prev_val, e.next_val });
             }
         }
 
@@ -1262,7 +1348,21 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             // is initialized as a sparse matrix and then materialized and bound.
             // After all binding: val.final_sumcheck_claim() = val[0] = val(r_addr, r_cycle).
 
-            // Simple approach: ra_claim = sum of bound entry ra_coeffs
+            // After all sumcheck rounds, all variables are bound:
+            // - ra: entries' ra_coeff has been bound through Phase 1 (cycle) and Phase 2 (address)
+            // - val: entries' val_coeff has been bound independently (not multiplied by ra)
+            //   During Phase 1, implicit entries use prev_val/next_val for interpolation.
+            //   During Phase 2, implicit entries use val_init checkpoints.
+            //   After full binding, entry.val_coeff = val(r_addr, r_cycle) = true polynomial evaluation.
+            // - inc: bound through Phase 1 into inc[0]
+            // - val_init: bound through Phase 2 into val_init[0]
+            //
+            // Following Jolt: val.final_sumcheck_claim() returns the single remaining coefficient
+            // after all binding. In our sparse representation:
+            // - If entries remain: entry.val_coeff IS the val evaluation (includes val_init via checkpoints)
+            // - If no entries: val_claim = val_init[0] (the bound initial state)
+
+            // ra_claim = sum of bound entry ra_coeffs (= ra(r_addr, r_cycle))
             var ra_claim = F.zero();
             for (self.entries.items) |entry| {
                 ra_claim = ra_claim.add(entry.ra_coeff);
@@ -1271,68 +1371,90 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             // inc_claim = bound inc[0] (after Phase 1 binding)
             const inc_claim = self.inc[0];
 
-            // val_claim: needs to be val(r_addr, r_cycle) = val_init(r_addr) + delta_contributions
-            // val_init(r_addr) = val_init[0] after binding
-            // Delta contributions are bound in entries' val_coeff
-            // BUT: entries' val_coeff was bound TOGETHER with ra_coeff and eq,
-            // so entry.val_coeff is NOT the isolated val evaluation.
-            //
-            // In Jolt, val is tracked as a separate dense polynomial that gets bound independently.
-            // In Zolt's sparse approach, the entries encode the products, not individual factors.
-            //
-            // The bound entry has:
-            //   ra_coeff = bound version of (original ra_coeff which was 1) → this IS ra(r_addr, r_cycle)
-            //   val_coeff = bound version of original val_coeff
-            //
-            // But wait - the binding in Phase 1 pairs entries by cycle, and the binding formula
-            // for pairs is: bound_val = (1-r)*val_even + r*val_odd. So after binding,
-            // val_coeff IS the independently bound val value (not multiplied by ra).
-            //
-            // So val_claim = val_init[0] + Σ (entry.val_coeff - bound_delta)
-            //
-            // Actually, this is getting complicated. Let me check what the entry val_coeff
-            // represents after binding. Looking at bindAddressMajorPair:
-            //   bound_val = (1-r)*even.val_coeff + r*odd.val_coeff
-            // And in Phase 1 bindEntries:
-            //   bound_val = (1-r)*even_val + r*odd_val
-            //
-            // So entry.val_coeff after all binding IS the independent MLE evaluation of the
-            // sparse val polynomial. But the sparse val only has non-zero entries where
-            // there are accesses. The full val is val_init + sparse_delta.
-            //
-            // For the sparse_delta (val at access points minus val_init at those addresses):
-            //   sparse_delta(r) = Σ entries bound(val_coeff - val_init[addr])
-            //
-            // But val_init[addr] also gets bound during Phase 2. After Phase 2, the
-            // entry's val_coeff has been modified but not with respect to the bound val_init.
-            //
-            // This is getting really messy. Let me use a different approach:
-            // Compute val_claim = (current_claim / (eq_eval * ra_claim)) - gamma * inc_claim) / (1 + gamma)
-            // This derives val_claim algebraically from the known quantities.
+            // Following Jolt: val.final_sumcheck_claim() returns val.Z[0]
+            // After full binding of all variables, the sparse entry's val_coeff
+            // should be the evaluation val(r_addr, r_cycle).
             const eq_eval = self.eq_evals[0];
             const gamma = self.params.gamma;
 
-            // current_claim = eq * ra * (val + gamma * (val + inc))
-            //               = eq * ra * val * (1 + gamma) + eq * ra * gamma * inc
-            // So: val = (current_claim / (eq * ra) - gamma * inc) / (1 + gamma)
-            //
-            // But we need to handle the case where eq * ra = 0
-            const eq_ra = eq_eval.mul(ra_claim);
-            var val_claim: F = undefined;
-            if (eq_ra.eql(F.zero())) {
-                // No RAM operations at this point, val = val_init(r_addr)
-                val_claim = self.val_init[0];
-            } else {
-                const one_plus_gamma = F.one().add(gamma);
-                const quotient = self.current_claim.mul(eq_ra.inverse().?);
-                val_claim = quotient.sub(gamma.mul(inc_claim)).mul(one_plus_gamma.inverse().?);
+            // val_claim: Use entry.val_coeff (the direct polynomial evaluation)
+            // For entries with accesses, the checkpoint mechanism in Phase 2 binding
+            // ensures val_coeff absorbs val_init contributions.
+            // For addresses without accesses, val_init[0] is the evaluation.
+            var val_claim: F = self.val_init[0]; // Default: no entries → val = val_init(r_addr)
+            if (self.entries.items.len > 0) {
+                val_claim = F.zero();
+                for (self.entries.items) |entry| {
+                    val_claim = val_claim.add(entry.val_coeff);
+                }
             }
 
+            // Verify: current_claim should equal eq * ra * (val + gamma * (val + inc))
+            const expected_claim = eq_eval.mul(ra_claim).mul(
+                val_claim.add(gamma.mul(val_claim.add(inc_claim))),
+            );
+
             std.debug.print("[RWC GET_OPENING] ra_claim = {any}\n", .{ra_claim.toBytesBE()});
-            std.debug.print("[RWC GET_OPENING] val_claim = {any}\n", .{val_claim.toBytesBE()});
+            std.debug.print("[RWC GET_OPENING] val_claim (entry) = {any}\n", .{val_claim.toBytesBE()});
             std.debug.print("[RWC GET_OPENING] inc_claim = {any}\n", .{inc_claim.toBytesBE()});
             std.debug.print("[RWC GET_OPENING] eq_eval = {any}\n", .{eq_eval.toBytesBE()});
             std.debug.print("[RWC GET_OPENING] gamma = {any}\n", .{gamma.toBytesBE()});
+            std.debug.print("[RWC GET_OPENING] val_init[0] = {any}\n", .{self.val_init[0].toBytesBE()});
+            std.debug.print("[RWC GET_OPENING] current_claim = {any}\n", .{self.current_claim.toBytesBE()});
+            std.debug.print("[RWC GET_OPENING] expected = eq*ra*(v+g*(v+i)) = {any}\n", .{expected_claim.toBytesBE()});
+            std.debug.print("[RWC GET_OPENING] MATCH = {}\n", .{expected_claim.eql(self.current_claim)});
+
+            // DENSE VERIFICATION: Compute val(r_addr, r_cycle) independently
+            // The challenges stored are: [phase1_challenges..., phase2_challenges...]
+            // Phase 1 challenges bind cycle vars (low-to-high)
+            // Phase 2 challenges bind address vars (low-to-high)
+            {
+                const phase1_end_v = self.params.phase1_num_rounds;
+                const r_cycle_le = self.challenges.items[0..phase1_end_v]; // Phase 1 challenges = r_cycle (LE)
+                const r_addr_le = self.challenges.items[phase1_end_v..]; // Phase 2 challenges = r_addr (LE)
+                std.debug.print("[RWC GET_OPENING] r_cycle_le len={}, r_addr_le len={}\n", .{ r_cycle_le.len, r_addr_le.len });
+
+                // Compute eq(r_addr_le, 2049) where 2049 = 0b100000000001 (16-bit)
+                // eq(r, k) = prod_i ( r[i]*k_i + (1-r[i])*(1-k_i) )
+                var eq_addr_2049 = F.one();
+                for (0..r_addr_le.len) |i| {
+                    const bit: u1 = @truncate(@as(usize, 2049) >> @intCast(i));
+                    if (bit == 1) {
+                        eq_addr_2049 = eq_addr_2049.mul(r_addr_le[i]);
+                    } else {
+                        eq_addr_2049 = eq_addr_2049.mul(F.one().sub(r_addr_le[i]));
+                    }
+                }
+
+                // Compute LT(54, r_cycle_le) = sum_{j=55}^{T-1} eq(r_cycle_le, j)
+                const T_v = @as(usize, 1) << @intCast(r_cycle_le.len);
+                var lt_54 = F.zero();
+                for (55..T_v) |j| {
+                    var eq_j = F.one();
+                    for (0..r_cycle_le.len) |i| {
+                        const bit: u1 = @truncate(j >> @intCast(i));
+                        if (bit == 1) {
+                            eq_j = eq_j.mul(r_cycle_le[i]);
+                        } else {
+                            eq_j = eq_j.mul(F.one().sub(r_cycle_le[i]));
+                        }
+                    }
+                    lt_54 = lt_54.add(eq_j);
+                }
+
+                const dense_val_claim = self.val_init[0].add(eq_addr_2049.mul(lt_54));
+                std.debug.print("[RWC GET_OPENING] DENSE val(r_addr,r_cycle) = {any}\n", .{dense_val_claim.toBytesBE()});
+                std.debug.print("[RWC GET_OPENING] sparse val_claim              = {any}\n", .{val_claim.toBytesBE()});
+                std.debug.print("[RWC GET_OPENING] DENSE matches sparse? {}\n", .{dense_val_claim.eql(val_claim)});
+                std.debug.print("[RWC GET_OPENING] eq(r_addr, 2049) = {any}\n", .{eq_addr_2049.toBytesBE()});
+                std.debug.print("[RWC GET_OPENING] LT(54, r_cycle) = {any}\n", .{lt_54.toBytesBE()});
+                std.debug.print("[RWC GET_OPENING] val_init[0] = {any}\n", .{self.val_init[0].toBytesBE()});
+                // Decompose: sparse = val_init_contrib + eq * LT ?
+                const sparse_delta = val_claim.sub(eq_addr_2049.mul(lt_54));
+                std.debug.print("[RWC GET_OPENING] sparse - eq*LT = {any}\n", .{sparse_delta.toBytesBE()});
+                std.debug.print("[RWC GET_OPENING] val_init[0]    = {any}\n", .{self.val_init[0].toBytesBE()});
+                std.debug.print("[RWC GET_OPENING] sparse_delta == val_init[0]? {}\n", .{sparse_delta.eql(self.val_init[0])});
+            }
 
             return OpeningClaims(F){
                 .ra_claim = ra_claim,

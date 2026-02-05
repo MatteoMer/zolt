@@ -309,6 +309,12 @@ pub fn Stage3Prover(comptime F: type) type {
             for (0..num_rounds) |round| {
                 std.debug.print("\n[ZOLT] STAGE3_ROUND_{}: current_claim = {{ {any} }}\n", .{ round, combined_claim.toBytes() });
 
+                // Print current shift/reg claims at phase transitions
+                if (round == 3) {
+                    std.debug.print("[ZOLT] PHASE2_START_CLAIM: current_shift_claim = {{ {any} }}\n", .{current_shift_claim.toBytes()});
+                    std.debug.print("[ZOLT] PHASE2_START_CLAIM: current_reg_claim = {{ {any} }}\n", .{current_reg_claim.toBytes()});
+                }
+
                 // Compute round polynomial for each instance
                 // ShiftSumcheck: degree 2
                 const shift_evals = shift_prover.computeRoundEvals(current_shift_claim);
@@ -398,14 +404,15 @@ pub fn Stage3Prover(comptime F: type) type {
                     std.debug.print("[ZOLT] LAST_ROUND: right_1 = {{ {any} }}\n", .{right_1.toBytes()[0..8]});
                 }
 
-                // Debug: Check individual prover invariants
-                if (round < 3) {
+                // Debug: Check individual prover invariants (ALL rounds)
+                {
                     const shift_sum = shift_evals[0].add(shift_evals[1]);
                     const instr_sum = instr_evals[0].add(instr_evals[1]);
                     const reg_sum = reg_evals[0].add(reg_evals[1]);
                     std.debug.print("[ZOLT] STAGE3_ROUND_{}: shift_p0+p1 = {{ {any} }}, shift_claim = {{ {any} }}, match={}\n", .{ round, shift_sum.toBytes()[0..8], current_shift_claim.toBytes()[0..8], shift_sum.eql(current_shift_claim) });
                     std.debug.print("[ZOLT] STAGE3_ROUND_{}: instr_p0+p1 = {{ {any} }}, instr_claim = {{ {any} }}, match={}\n", .{ round, instr_sum.toBytes()[0..8], current_instr_claim.toBytes()[0..8], instr_sum.eql(current_instr_claim) });
                     std.debug.print("[ZOLT] STAGE3_ROUND_{}: reg_p0+p1 = {{ {any} }}, reg_claim = {{ {any} }}, match={}\n", .{ round, reg_sum.toBytes()[0..8], current_reg_claim.toBytes()[0..8], reg_sum.eql(current_reg_claim) });
+                    std.debug.print("[ZOLT] STAGE3_ROUND_{}: shift_phase = {s}, reg_phase = {s}\n", .{ round, if (shift_prover.in_phase2) "PHASE2" else "PHASE1", if (reg_prover.in_phase2) "PHASE2" else "PHASE1" });
                 }
                 std.debug.print("[ZOLT] STAGE3_ROUND_{}: shift_p0 = {{ {any} }}\n", .{ round, shift_evals[0].toBytes() });
                 std.debug.print("[ZOLT] STAGE3_ROUND_{}: shift_p1 = {{ {any} }}\n", .{ round, shift_evals[1].toBytes() });
@@ -520,6 +527,29 @@ pub fn Stage3Prover(comptime F: type) type {
                 shift_prover.bind(r_j);
                 instr_prover.bind(r_j);
                 reg_prover.bind(r_j);
+
+                // DEBUG: Verify shift prover's accumulated claim after each Phase 2 bind
+                if (shift_prover.in_phase2 and round < num_rounds - 1) {
+                    const shift_ws = shift_prover.current_witness_size;
+                    var shift_total = F.zero();
+                    for (0..shift_ws) |j| {
+                        const eq_out = shift_prover.phase2_eq_plus_one_outer.?[j];
+                        const eq_prod_val = shift_prover.phase2_eq_plus_one_prod.?[j];
+                        const upc = shift_prover.unexpanded_pc[j];
+                        const pc_val = shift_prover.pc[j];
+                        const virt = shift_prover.is_virtual[j];
+                        const first = shift_prover.is_first_in_sequence[j];
+                        const noop = shift_prover.is_noop[j];
+                        const val = upc.add(shift_prover.gamma_powers[1].mul(pc_val))
+                            .add(shift_prover.gamma_powers[2].mul(virt))
+                            .add(shift_prover.gamma_powers[3].mul(first));
+                        const term1 = eq_out.mul(val);
+                        const term2 = shift_prover.gamma_powers[4].mul(F.one().sub(noop)).mul(eq_prod_val);
+                        shift_total = shift_total.add(term1).add(term2);
+                    }
+                    const shift_verify_match = shift_total.eql(current_shift_claim);
+                    std.debug.print("[ZOLT] SHIFT_PHASE2_VERIFY_ROUND_{}: total_sum = {{ {any} }}, claim = {{ {any} }}, match={}\n", .{ round, shift_total.toBytes()[0..8], current_shift_claim.toBytes()[0..8], shift_verify_match });
+                }
 
                 // DEBUG: Track nonzero count and verify sumcheck invariant after each bind
                 {
@@ -1469,9 +1499,25 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             // Phase2: Use materialized eq+1 polynomials with witness MLEs
             const eq_outer = self.phase2_eq_plus_one_outer.?;
             const eq_prod = self.phase2_eq_plus_one_prod.?;
-            const half = eq_outer.len / 2;
+            // CRITICAL FIX: Use current_witness_size, NOT eq_outer.len!
+            // eq_outer.len is the original suffix_size allocation, but current_witness_size
+            // shrinks after each bindPhase2 call.
+            const half = self.current_witness_size / 2;
 
             var evals: [2]F = .{ F.zero(), F.zero() };
+
+            // Debug: Print arrays when they're size 2 (last Phase 2 round)
+            if (self.current_witness_size == 2) {
+                std.debug.print("[ZOLT] SHIFT_LAST_ROUND: eq_outer[0] = {{ {any} }}\n", .{eq_outer[0].toBytes()});
+                std.debug.print("[ZOLT] SHIFT_LAST_ROUND: eq_outer[1] = {{ {any} }}\n", .{eq_outer[1].toBytes()});
+                std.debug.print("[ZOLT] SHIFT_LAST_ROUND: eq_prod[0] = {{ {any} }}\n", .{eq_prod[0].toBytes()});
+                std.debug.print("[ZOLT] SHIFT_LAST_ROUND: eq_prod[1] = {{ {any} }}\n", .{eq_prod[1].toBytes()});
+                std.debug.print("[ZOLT] SHIFT_LAST_ROUND: upc[0] = {{ {any} }}\n", .{self.unexpanded_pc[0].toBytes()});
+                std.debug.print("[ZOLT] SHIFT_LAST_ROUND: upc[1] = {{ {any} }}\n", .{self.unexpanded_pc[1].toBytes()});
+                std.debug.print("[ZOLT] SHIFT_LAST_ROUND: noop[0] = {{ {any} }}\n", .{self.is_noop[0].toBytes()});
+                std.debug.print("[ZOLT] SHIFT_LAST_ROUND: noop[1] = {{ {any} }}\n", .{self.is_noop[1].toBytes()});
+                std.debug.print("[ZOLT] SHIFT_LAST_ROUND: previous_claim = {{ {any} }}\n", .{previous_claim.toBytes()});
+            }
 
             for (0..half) |j| {
                 const eq_out_0 = eq_outer[2 * j];
@@ -1517,6 +1563,26 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
 
                 evals[0] = evals[0].add(f_0);
                 evals[1] = evals[1].add(f_2);
+
+                // Debug: last round details
+                if (eq_outer.len == 2) {
+                    std.debug.print("[ZOLT] SHIFT_LAST_ROUND: f(0) = {{ {any} }}\n", .{f_0.toBytes()});
+                    std.debug.print("[ZOLT] SHIFT_LAST_ROUND: f(2) = {{ {any} }}\n", .{f_2.toBytes()});
+
+                    // Compute f(1) = eq_out_1 * val_1 + γ⁴*(1-noop_1)*eq_prod_1
+                    const val_1 = upc_1.add(self.gamma_powers[1].mul(pc_1))
+                        .add(self.gamma_powers[2].mul(virt_1))
+                        .add(self.gamma_powers[3].mul(first_1));
+                    const actual_f1 = eq_out_1.mul(val_1)
+                        .add(self.gamma_powers[4].mul(F.one().sub(noop_1)).mul(eq_prod_1));
+                    const derived_f1 = previous_claim.sub(f_0);
+                    std.debug.print("[ZOLT] SHIFT_LAST_ROUND: actual_f(1) = {{ {any} }}\n", .{actual_f1.toBytes()});
+                    std.debug.print("[ZOLT] SHIFT_LAST_ROUND: derived_f(1) = {{ {any} }}\n", .{derived_f1.toBytes()});
+                    std.debug.print("[ZOLT] SHIFT_LAST_ROUND: f(1) match = {}\n", .{actual_f1.eql(derived_f1)});
+                    std.debug.print("[ZOLT] SHIFT_LAST_ROUND: f(0)+actual_f(1) = {{ {any} }}\n", .{f_0.add(actual_f1).toBytes()});
+                    std.debug.print("[ZOLT] SHIFT_LAST_ROUND: claim = {{ {any} }}\n", .{previous_claim.toBytes()});
+                    std.debug.print("[ZOLT] SHIFT_LAST_ROUND: f(0)+actual_f(1)==claim: {}\n", .{f_0.add(actual_f1).eql(previous_claim)});
+                }
             }
 
             const p_1 = previous_claim.sub(evals[0]);
@@ -1638,10 +1704,12 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             prefix_1_outer[0] = is_max_outer;
 
             // Evaluate prefix polynomials at r_prefix
-            // NOTE: evaluateMle expects LITTLE_ENDIAN order (point[0] binds LSB)
-            // r_prefix_le (original from sumcheck_challenges) is already in little-endian order
-            // r_prefix_be is the big-endian version we created above by reversing
-            // For MLE evaluation, we need little-endian, so use r_prefix_le directly
+            // NOTE: evaluateMle binds point[0] to the LSB of the table index.
+            // The prefix table is in BIG_ENDIAN order (computeEqPlusOneEvals uses BIG_ENDIAN bits).
+            // So evaluateMle(table, [r_0, r_1, r_2]) binds r_0→LSB, r_1→mid, r_2→MSB.
+            // This matches Jolt's MultilinearPolynomial::evaluate(r_prefix_BE) which also
+            // evaluates Σ table[i] * Eq(r_prefix_BE, i_BE), since eq_evals uses BIG_ENDIAN.
+            // r_prefix_le = [r_0, r_1, r_2] (LowToHigh: LSB challenge first)
             const prefix_0_eval_outer = evaluateMle(prefix_0_outer, r_prefix_le);
             const prefix_1_eval_outer = evaluateMle(prefix_1_outer, r_prefix_le);
 
@@ -1685,7 +1753,7 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
             }
             prefix_1_prod[0] = is_max_prod;
 
-            // Use r_prefix_le for MLE evaluation (little-endian for evaluateMle)
+            // Use r_prefix_le for MLE evaluation (LSB challenge first to match evaluateMle convention)
             const prefix_0_eval_prod = evaluateMle(prefix_0_prod, r_prefix_le);
             const prefix_1_eval_prod = evaluateMle(prefix_1_prod, r_prefix_le);
 
@@ -1777,6 +1845,30 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
 
             std.debug.print("[ZOLT] SHIFT_PHASE2_START: eq+1_outer[0] = {{ {any} }}\n", .{self.phase2_eq_plus_one_outer.?[0].toBytes()[0..8]});
             std.debug.print("[ZOLT] SHIFT_PHASE2_START: unexpanded_pc[0] = {{ {any} }}\n", .{self.unexpanded_pc[0].toBytes()[0..8]});
+
+            // CRITICAL VERIFICATION: Compute Σ_j f(j) using Phase 2 data
+            // This should equal the current_shift_claim at the start of Phase 2
+            {
+                var phase2_total_sum = F.zero();
+                for (0..suffix_size) |j| {
+                    const eq_out = self.phase2_eq_plus_one_outer.?[j];
+                    const eq_prod = self.phase2_eq_plus_one_prod.?[j];
+                    const upc = self.unexpanded_pc[j];
+                    const pc_val = self.pc[j];
+                    const virt = self.is_virtual[j];
+                    const first = self.is_first_in_sequence[j];
+                    const noop = self.is_noop[j];
+
+                    const val = upc.add(self.gamma_powers[1].mul(pc_val))
+                        .add(self.gamma_powers[2].mul(virt))
+                        .add(self.gamma_powers[3].mul(first));
+                    const term1 = eq_out.mul(val);
+                    const term2 = self.gamma_powers[4].mul(F.one().sub(noop)).mul(eq_prod);
+                    phase2_total_sum = phase2_total_sum.add(term1).add(term2);
+                }
+                std.debug.print("[ZOLT] SHIFT_PHASE2_VERIFY: phase2_total_sum = {{ {any} }}\n", .{phase2_total_sum.toBytes()});
+                std.debug.print("[ZOLT] SHIFT_PHASE2_VERIFY: (compare with current_shift_claim at Phase2 start)\n", .{});
+            }
 
             // DEBUG: Verify eq+1_outer initialization by direct evaluation
             {
@@ -2424,7 +2516,10 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
 
         fn computeRoundEvalsPhase2(self: *Self, previous_claim: F) [3]F {
             const eq = self.phase2_eq.?;
-            const half = eq.len / 2;
+            // CRITICAL FIX: Use current_witness_size, NOT eq.len!
+            // eq.len is the original suffix_size allocation, but current_witness_size
+            // shrinks after each bindPhase2 call.
+            const half = self.current_witness_size / 2;
             var evals: [2]F = .{ F.zero(), F.zero() };
 
             for (0..half) |j| {

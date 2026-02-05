@@ -118,6 +118,9 @@ pub fn Stage4GruenProver(comptime F: type) type {
         /// Merged eq polynomial for Phase 3 (after Gruen eq is fully bound)
         merged_eq: ?[]F,
 
+        /// Trace reference for debugging
+        trace_ref: ?*const ExecutionTrace,
+
         /// Alias for compatibility with existing code (uses default phase config)
         pub fn initWithClaims(
             allocator: Allocator,
@@ -193,6 +196,10 @@ pub fn Stage4GruenProver(comptime F: type) type {
                     val_poly[k * T + cycle] = F.zero();
                 }
 
+                // Skip pure NoOp padding cycles.
+                // Termination store steps with is_noop=false (LUI, ADDI, SB) are processed
+                // normally below using their real register indices (x30, x31).
+                // The noop step (is_noop=true, is_termination_store=true) is also skipped.
                 if (step.is_noop) continue;
 
                 const instr = step.instruction;
@@ -207,12 +214,6 @@ pub fn Stage4GruenProver(comptime F: type) type {
                     else => false,
                 };
                 if (reads_rs1 and rs1 < 32) {
-                    // CRITICAL: Verify tracked value matches trace value
-                    if (cycle < 5 and register_values[rs1] != step.rs1_value) {
-                        std.debug.print("[VAL_MISMATCH] cycle={}, rs1={}: tracked={}, trace={}\n", .{
-                            cycle, rs1, register_values[rs1], step.rs1_value,
-                        });
-                    }
                     rs1_ra_poly[@as(usize, rs1) * T + cycle] = F.one();
                     ra_poly[@as(usize, rs1) * T + cycle] = ra_poly[@as(usize, rs1) * T + cycle].add(gamma);
                 }
@@ -223,12 +224,6 @@ pub fn Stage4GruenProver(comptime F: type) type {
                     else => false,
                 };
                 if (reads_rs2 and rs2 < 32) {
-                    // CRITICAL: Verify tracked value matches trace value
-                    if (cycle < 5 and register_values[rs2] != step.rs2_value) {
-                        std.debug.print("[VAL_MISMATCH] cycle={}, rs2={}: tracked={}, trace={}\n", .{
-                            cycle, rs2, register_values[rs2], step.rs2_value,
-                        });
-                    }
                     rs2_ra_poly[@as(usize, rs2) * T + cycle] = F.one();
                     ra_poly[@as(usize, rs2) * T + cycle] = ra_poly[@as(usize, rs2) * T + cycle].add(gamma_sq);
                 }
@@ -343,6 +338,297 @@ pub fn Stage4GruenProver(comptime F: type) type {
                 log_T - phase1_num_rounds,
             });
 
+            // CRITICAL DIAGNOSTIC: Compute polynomial sum using brute-force eq(r_cycle, j)
+            // This does NOT use Gruen decomposition - direct eq table computation
+            {
+                const eq_tbl = allocator.alloc(F, T) catch unreachable;
+                defer allocator.free(eq_tbl);
+                eq_tbl[0] = F.one();
+                var eq_sz: usize = 1;
+                // CRITICAL: For LowToHigh binding, r_cycle[0] must bind bit 0 (LSB) of j.
+                // The backward-loop construction assigns the FIRST processed challenge to MSB.
+                // So we must process challenges in REVERSE order (r_cycle[n-1] first)
+                // to get r_cycle[0] → LSB.
+                var bit_i: usize = r_cycle.len;
+                while (bit_i > 0) {
+                    bit_i -= 1;
+                    const ri = r_cycle[bit_i];
+                    const one_m_r = F.one().sub(ri);
+                    var ii: usize = eq_sz;
+                    while (ii > 0) {
+                        ii -= 1;
+                        eq_tbl[2 * ii + 1] = eq_tbl[ii].mul(ri);
+                        eq_tbl[2 * ii] = eq_tbl[ii].mul(one_m_r);
+                    }
+                    eq_sz *= 2;
+                }
+
+                // Compute: Σ_j Σ_k eq(r_cycle, j) * [ra(k,j)*val(k,j) + wa(k,j)*(val(k,j)+inc(j))]
+                var brute_sum = F.zero();
+                var rd_write_sum = F.zero();
+                var rs1_read_sum = F.zero();
+                var rs2_read_sum = F.zero();
+                for (0..K) |kk| {
+                    for (0..T) |jj| {
+                        const pidx = kk * T + jj;
+                        const v = val_poly[pidx];
+                        const ra_v = ra_poly[pidx];
+                        const wa_v = rd_wa_poly[pidx];
+                        const inc_v = inc_poly[jj];
+                        const body = ra_v.mul(v).add(wa_v.mul(v.add(inc_v)));
+                        brute_sum = brute_sum.add(eq_tbl[jj].mul(body));
+
+                        // Component breakdown
+                        rd_write_sum = rd_write_sum.add(eq_tbl[jj].mul(wa_v.mul(v.add(inc_v))));
+                        rs1_read_sum = rs1_read_sum.add(eq_tbl[jj].mul(rs1_ra_poly[pidx].mul(v)));
+                        rs2_read_sum = rs2_read_sum.add(eq_tbl[jj].mul(rs2_ra_poly[pidx].mul(v)));
+                    }
+                }
+
+                // Compute Stage 3 claim
+                var s3_claim = F.zero();
+                if (stage3_claims) |claims| {
+                    s3_claim = claims.rd_write_value.add(
+                        gamma.mul(claims.rs1_value.add(gamma.mul(claims.rs2_value))),
+                    );
+                }
+
+                // Also compute sum using raw trace values (independent of Stage 4 polynomial construction)
+                var direct_rd_sum = F.zero();
+                var direct_rs1_sum = F.zero();
+                var direct_rs2_sum = F.zero();
+                for (0..T) |jj| {
+                    if (jj < trace.steps.items.len) {
+                        const step = trace.steps.items[jj];
+                        if (!step.is_noop or step.is_termination_store) {
+                            const op = step.instruction & 0x7f;
+                            const rd_reg: u5 = @truncate((step.instruction >> 7) & 0x1f);
+                            const writes_rd = switch (op) {
+                                0x23, 0x63 => false,
+                                else => true,
+                            };
+                            if (writes_rd and rd_reg != 0) {
+                                direct_rd_sum = direct_rd_sum.add(eq_tbl[jj].mul(F.fromU64(step.rd_value)));
+                            }
+                            const reads_rs1_dir = switch (op) {
+                                0x13, 0x03, 0x67, 0x1b, 0x33, 0x3b, 0x23, 0x63 => true,
+                                else => false,
+                            };
+                            if (reads_rs1_dir) {
+                                direct_rs1_sum = direct_rs1_sum.add(eq_tbl[jj].mul(F.fromU64(step.rs1_value)));
+                            }
+                            const reads_rs2_dir = switch (op) {
+                                0x33, 0x3b, 0x23, 0x63 => true,
+                                else => false,
+                            };
+                            if (reads_rs2_dir) {
+                                direct_rs2_sum = direct_rs2_sum.add(eq_tbl[jj].mul(F.fromU64(step.rs2_value)));
+                            }
+                        }
+                    }
+                }
+
+                std.debug.print("\n[STAGE4 INIT BRUTE FORCE]\n", .{});
+                std.debug.print("[STAGE4 INIT]   brute_sum     = {any}\n", .{brute_sum.toBytes()});
+                std.debug.print("[STAGE4 INIT]   stage3_claim  = {any}\n", .{s3_claim.toBytes()});
+                std.debug.print("[STAGE4 INIT]   direct_rd_sum = {any}\n", .{direct_rd_sum.toBytes()});
+                std.debug.print("[STAGE4 INIT]   MATCH? {}\n", .{brute_sum.eql(s3_claim)});
+                std.debug.print("[STAGE4 INIT]   direct_rd==s3.rd_wv? {}\n", .{direct_rd_sum.eql(if (stage3_claims) |c| c.rd_write_value else F.zero())});
+                std.debug.print("[STAGE4 INIT]   direct_rd==stage4_rd? {}\n", .{direct_rd_sum.eql(rd_write_sum)});
+                std.debug.print("[STAGE4 INIT]   direct_rs1==s3.rs1_v? {}\n", .{direct_rs1_sum.eql(if (stage3_claims) |c| c.rs1_value else F.zero())});
+                std.debug.print("[STAGE4 INIT]   direct_rs1==stage4_rs1? {}\n", .{direct_rs1_sum.eql(rs1_read_sum)});
+                std.debug.print("[STAGE4 INIT]   direct_rs2==s3.rs2_v? {}\n", .{direct_rs2_sum.eql(if (stage3_claims) |c| c.rs2_value else F.zero())});
+                std.debug.print("[STAGE4 INIT]   direct_rs2==stage4_rs2? {}\n", .{direct_rs2_sum.eql(rs2_read_sum)});
+                std.debug.print("[STAGE4 INIT]   direct_rs1_sum = {any}\n", .{direct_rs1_sum.toBytes()});
+                std.debug.print("[STAGE4 INIT]   direct_rs2_sum = {any}\n", .{direct_rs2_sum.toBytes()});
+                // Print first few non-zero rs1 direct contributions
+                {
+                    var rs1_ccount: usize = 0;
+                    var rs1_nz_count: usize = 0;
+                    for (0..T) |jj| {
+                        if (jj < trace.steps.items.len and (!trace.steps.items[jj].is_noop or trace.steps.items[jj].is_termination_store)) {
+                            const step = trace.steps.items[jj];
+                            const op_c = step.instruction & 0x7f;
+                            const reads_rs1_c = switch (op_c) {
+                                0x13, 0x03, 0x67, 0x1b, 0x33, 0x3b, 0x23, 0x63 => true,
+                                else => false,
+                            };
+                            if (reads_rs1_c) {
+                                const rs1_f = F.fromU64(step.rs1_value);
+                                if (!rs1_f.eql(F.zero())) {
+                                    rs1_nz_count += 1;
+                                    if (rs1_ccount < 8) {
+                                        const contrib = eq_tbl[jj].mul(rs1_f);
+                                        std.debug.print("[STAGE4 INIT]   rs1_contrib[{}]: val={any}, eq={any}, contrib={any}\n", .{
+                                            jj, rs1_f.toBytes()[0..8], eq_tbl[jj].toBytes()[0..8], contrib.toBytes()[0..8],
+                                        });
+                                        rs1_ccount += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    std.debug.print("[STAGE4 INIT]   total rs1 nonzero entries: {}\n", .{rs1_nz_count});
+                    // Check cycle 54 specifically
+                    if (54 < trace.steps.items.len) {
+                        const step54 = trace.steps.items[54];
+                        const rs1_54: u5 = @truncate((step54.instruction >> 15) & 0x1f);
+                        const rs2_54: u5 = @truncate((step54.instruction >> 20) & 0x1f);
+                        std.debug.print("[STAGE4 INIT] CYCLE 54: is_noop={}, is_term_store={}, opcode=0x{x:0>2}, rs1_reg={}, rs2_reg={}, rs1_value={}, rs2_value={}\n", .{
+                            step54.is_noop, step54.is_termination_store, step54.instruction & 0x7f,
+                            rs1_54, rs2_54, step54.rs1_value, step54.rs2_value,
+                        });
+                        // Check polynomial values at cycle 54 for rs1 register
+                        const val_at_rs1 = val_poly[@as(usize, rs1_54) * T + 54];
+                        const ra_at_rs1 = rs1_ra_poly[@as(usize, rs1_54) * T + 54];
+                        const val_at_rs2 = val_poly[@as(usize, rs2_54) * T + 54];
+                        const ra_at_rs2 = rs2_ra_poly[@as(usize, rs2_54) * T + 54];
+                        std.debug.print("[STAGE4 INIT] CYCLE 54: val[rs1={},54]={any}, rs1_ra[rs1,54]={any}\n", .{
+                            rs1_54, val_at_rs1.toBytes()[0..8], ra_at_rs1.toBytes()[0..8],
+                        });
+                        std.debug.print("[STAGE4 INIT] CYCLE 54: val[rs2={},54]={any}, rs2_ra[rs2,54]={any}\n", .{
+                            rs2_54, val_at_rs2.toBytes()[0..8], ra_at_rs2.toBytes()[0..8],
+                        });
+                    }
+                    // Print ALL non-zero rs1 contributions
+                    var rs1_all_c: usize = 0;
+                    for (0..T) |jj| {
+                        if (jj < trace.steps.items.len) {
+                            const step_a = trace.steps.items[jj];
+                            if (!step_a.is_noop or step_a.is_termination_store) {
+                                const op_a = step_a.instruction & 0x7f;
+                                const reads_rs1_a = switch (op_a) {
+                                    0x13, 0x03, 0x67, 0x1b, 0x33, 0x3b, 0x23, 0x63 => true,
+                                    else => false,
+                                };
+                                if (reads_rs1_a) {
+                                    const rs1_fa = F.fromU64(step_a.rs1_value);
+                                    if (!rs1_fa.eql(F.zero())) {
+                                        rs1_all_c += 1;
+                                        std.debug.print("[STAGE4 INIT]   rs1_all[{}/cycle={}]: val={any}\n", .{
+                                            rs1_all_c, jj, rs1_fa.toBytes()[0..8],
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Print first 10 trace rs1/rd values for comparison with Stage 3 witnesses
+                for (0..@min(10, trace.steps.items.len)) |jj| {
+                    const step = trace.steps.items[jj];
+                    if (!step.is_noop or step.is_termination_store) {
+                        const op = step.instruction & 0x7f;
+                        const reads_rs1_p = switch (op) {
+                            0x13, 0x03, 0x67, 0x1b, 0x33, 0x3b, 0x23, 0x63 => true,
+                            else => false,
+                        };
+                        const rs1_f = if (reads_rs1_p) F.fromU64(step.rs1_value) else F.zero();
+                        const writes_rd_p = switch (op) {
+                            0x23, 0x63 => false,
+                            else => true,
+                        };
+                        const rd_reg: u5 = @truncate((step.instruction >> 7) & 0x1f);
+                        const rd_f = if (writes_rd_p and rd_reg != 0) F.fromU64(step.rd_value) else F.zero();
+                        if (!rs1_f.eql(F.zero()) or !rd_f.eql(F.zero())) {
+                            std.debug.print("[STAGE4 INIT]   trace[{}]: rd={any}, rs1={any}\n", .{
+                                jj, rd_f.toBytes()[0..8], rs1_f.toBytes()[0..8],
+                            });
+                        }
+                    }
+                }
+                // Print eq_tbl at a few key indices
+                std.debug.print("[STAGE4 INIT]   eq_tbl[0]     = {any}\n", .{eq_tbl[0].toBytes()[0..8]});
+                std.debug.print("[STAGE4 INIT]   eq_tbl[1]     = {any}\n", .{eq_tbl[1].toBytes()[0..8]});
+                std.debug.print("[STAGE4 INIT]   eq_tbl[63]    = {any}\n", .{eq_tbl[63].toBytes()[0..8]});
+                std.debug.print("[STAGE4 INIT]   eq_tbl[64]    = {any}\n", .{eq_tbl[64].toBytes()[0..8]});
+                std.debug.print("[STAGE4 INIT]   r_cycle[0]    = {any}\n", .{r_cycle[0].toBytes()[0..8]});
+                std.debug.print("[STAGE4 INIT]   r_cycle[7]    = {any}\n", .{r_cycle[7].toBytes()[0..8]});
+
+                if (!brute_sum.eql(s3_claim)) {
+                    std.debug.print("[STAGE4 INIT]   rd_write_sum  = {any}\n", .{rd_write_sum.toBytes()});
+                    std.debug.print("[STAGE4 INIT]   rs1_read_sum  = {any}\n", .{rs1_read_sum.toBytes()});
+                    std.debug.print("[STAGE4 INIT]   rs2_read_sum  = {any}\n", .{rs2_read_sum.toBytes()});
+
+                    // Debug: Check per-cycle values at first few active cycles
+                    // AND compare with raw trace values
+                    var all_rs1_match = true;
+                    var all_rs2_match = true;
+                    for (0..T) |jj| {
+                        var rd_wv_j = F.zero();
+                        var rs1_v_j = F.zero();
+                        var rs2_v_j = F.zero();
+                        for (0..K) |kk| {
+                            const pidx = kk * T + jj;
+                            const v = val_poly[pidx];
+                            const wa_v = rd_wa_poly[pidx];
+                            const inc_v = inc_poly[jj];
+                            const rs1_v = rs1_ra_poly[pidx];
+                            const rs2_v = rs2_ra_poly[pidx];
+                            rd_wv_j = rd_wv_j.add(wa_v.mul(v.add(inc_v)));
+                            rs1_v_j = rs1_v_j.add(rs1_v.mul(v));
+                            rs2_v_j = rs2_v_j.add(rs2_v.mul(v));
+                        }
+                        // Compare with trace values
+                        if (jj < trace.steps.items.len and (!trace.steps.items[jj].is_noop or trace.steps.items[jj].is_termination_store)) {
+                            const step = trace.steps.items[jj];
+                            const op = step.instruction & 0x7f;
+                            const reads_rs1_cmp = switch (op) {
+                                0x13, 0x03, 0x67, 0x1b, 0x33, 0x3b, 0x23, 0x63 => true,
+                                else => false,
+                            };
+                            const expected_rs1 = if (reads_rs1_cmp) F.fromU64(step.rs1_value) else F.zero();
+                            if (!rs1_v_j.eql(expected_rs1)) {
+                                all_rs1_match = false;
+                                if (jj < 60) {
+                                    std.debug.print("[STAGE4 INIT]   RS1 MISMATCH cycle {}: poly={any}, trace={any}\n", .{
+                                        jj, rs1_v_j.toBytes()[0..8], expected_rs1.toBytes()[0..8],
+                                    });
+                                }
+                            }
+                            const reads_rs2_cmp = switch (op) {
+                                0x33, 0x3b, 0x23, 0x63 => true,
+                                else => false,
+                            };
+                            const expected_rs2 = if (reads_rs2_cmp) F.fromU64(step.rs2_value) else F.zero();
+                            if (!rs2_v_j.eql(expected_rs2)) {
+                                all_rs2_match = false;
+                                if (jj < 60) {
+                                    std.debug.print("[STAGE4 INIT]   RS2 MISMATCH cycle {}: poly={any}, trace={any}\n", .{
+                                        jj, rs2_v_j.toBytes()[0..8], expected_rs2.toBytes()[0..8],
+                                    });
+                                }
+                            }
+                        }
+                        // Only print non-zero cycles (first 8)
+                        if (jj < 8 and (!rd_wv_j.eql(F.zero()) or !rs1_v_j.eql(F.zero()) or !rs2_v_j.eql(F.zero()))) {
+                            std.debug.print("[STAGE4 INIT]   cycle {}: rd_wv={any}, rs1_v={any}, rs2_v={any}\n", .{
+                                jj, rd_wv_j.toBytes()[0..8], rs1_v_j.toBytes()[0..8], rs2_v_j.toBytes()[0..8],
+                            });
+                        }
+                    }
+                    std.debug.print("[STAGE4 INIT]   all_rs1_per_cycle_match? {}\n", .{all_rs1_match});
+                    std.debug.print("[STAGE4 INIT]   all_rs2_per_cycle_match? {}\n", .{all_rs2_match});
+                    if (stage3_claims) |claims| {
+                        std.debug.print("[STAGE4 INIT]   s3.rd_wv      = {any}\n", .{claims.rd_write_value.toBytes()});
+                        std.debug.print("[STAGE4 INIT]   s3.rs1_v      = {any}\n", .{claims.rs1_value.toBytes()});
+                        std.debug.print("[STAGE4 INIT]   s3.rs2_v      = {any}\n", .{claims.rs2_value.toBytes()});
+
+                        // Check: combined_brute = rd_write + gamma*rs1 + gamma^2*rs2
+                        const combined_brute = rd_write_sum.add(
+                            gamma.mul(rs1_read_sum)).add(
+                            gamma_sq.mul(rs2_read_sum));
+                        std.debug.print("[STAGE4 INIT]   combined_brute = {any}\n", .{combined_brute.toBytes()});
+                        std.debug.print("[STAGE4 INIT]   combined==brute_sum? {}\n", .{combined_brute.eql(brute_sum)});
+
+                        // Per-component match check
+                        std.debug.print("[STAGE4 INIT]   rd_write MATCH? {}\n", .{rd_write_sum.eql(claims.rd_write_value)});
+                        std.debug.print("[STAGE4 INIT]   rs1_read MATCH? {}\n", .{rs1_read_sum.eql(claims.rs1_value)});
+                        std.debug.print("[STAGE4 INIT]   rs2_read MATCH? {}\n", .{rs2_read_sum.eql(claims.rs2_value)});
+                    }
+                }
+            }
+
             return Self{
                 .allocator = allocator,
                 .T = T,
@@ -365,6 +651,7 @@ pub fn Stage4GruenProver(comptime F: type) type {
                 .phase1_num_rounds = phase1_num_rounds,
                 .phase2_num_rounds = phase2_num_rounds,
                 .merged_eq = null,
+                .trace_ref = trace,
             };
         }
 
@@ -441,8 +728,108 @@ pub fn Stage4GruenProver(comptime F: type) type {
             var current_claim = input_claim.mul(self.batching_coeff);
 
             std.debug.print("[STAGE4_GRUEN] Starting with {} rounds, T={}, K={}\n", .{ self.num_rounds, self.T, K });
-            std.debug.print("[STAGE4_GRUEN] Input claim = {any}\n", .{input_claim.toBytes()[0..8]});
+            std.debug.print("[STAGE4_GRUEN] Input claim (from stage3) = {any}\n", .{input_claim.toBytes()[0..8]});
             std.debug.print("[STAGE4_GRUEN] Batched claim = {any}\n", .{current_claim.toBytes()[0..8]});
+
+            // CRITICAL DIAGNOSTIC: Compute polynomial sum using brute-force eq(r_cycle, j)
+            // This does NOT use Gruen decomposition - it computes eq directly from r_cycle
+            {
+                // Build standard eq(r_cycle, j) table
+                const eq_table = self.allocator.alloc(F, self.T) catch unreachable;
+                defer self.allocator.free(eq_table);
+                eq_table[0] = F.one();
+                var eq_len: usize = 1;
+                // r_cycle is in LE order: r_cycle[0] = LSB, binds bit 0 of j
+                for (0..self.r_cycle.len) |bit_idx| {
+                    const r_i = self.r_cycle[bit_idx];
+                    const one_minus_r = F.one().sub(r_i);
+                    // Expand: for each existing entry, split into (entry*(1-r), entry*r)
+                    var idx: usize = eq_len;
+                    while (idx > 0) {
+                        idx -= 1;
+                        eq_table[2 * idx + 1] = eq_table[idx].mul(r_i);
+                        eq_table[2 * idx] = eq_table[idx].mul(one_minus_r);
+                    }
+                    eq_len *= 2;
+                }
+
+                // Now compute Σ_j Σ_k eq(r_cycle, j) * body(k, j)
+                var brute_claim = F.zero();
+                for (0..K) |k| {
+                    for (0..self.T) |j| {
+                        const poly_idx = k * self.T + j;
+                        const val_v = self.val_poly[poly_idx];
+                        const ra_v = self.ra_poly[poly_idx];
+                        const wa_v = self.rd_wa_poly[poly_idx];
+                        const inc_v = self.inc_poly[j];
+                        const body = ra_v.mul(val_v).add(wa_v.mul(val_v.add(inc_v)));
+                        brute_claim = brute_claim.add(eq_table[j].mul(body));
+                    }
+                }
+
+                std.debug.print("[STAGE4_GRUEN] BRUTE FORCE poly sum   = {any}\n", .{brute_claim.toBytes()[0..8]});
+                std.debug.print("[STAGE4_GRUEN] Stage 3 input_claim    = {any}\n", .{input_claim.toBytes()[0..8]});
+                if (!brute_claim.eql(input_claim)) {
+                    std.debug.print("[STAGE4_GRUEN] *** MISMATCH: poly arrays don't match stage3 claim! ***\n", .{});
+
+                    // Break down by component
+                    var rd_write_sum = F.zero();
+                    var rs1_read_sum = F.zero();
+                    var rs2_read_sum = F.zero();
+                    for (0..K) |k| {
+                        for (0..self.T) |j| {
+                            const poly_idx = k * self.T + j;
+                            const val_v = self.val_poly[poly_idx];
+                            const wa_v = self.rd_wa_poly[poly_idx];
+                            const inc_v = self.inc_poly[j];
+                            const rs1_ra_v = self.rs1_ra_poly[poly_idx];
+                            const rs2_ra_v = self.rs2_ra_poly[poly_idx];
+
+                            // rd write: wa * (val + inc)
+                            rd_write_sum = rd_write_sum.add(eq_table[j].mul(wa_v.mul(val_v.add(inc_v))));
+                            // rs1 read: rs1_ra * val
+                            rs1_read_sum = rs1_read_sum.add(eq_table[j].mul(rs1_ra_v.mul(val_v)));
+                            // rs2 read: rs2_ra * val
+                            rs2_read_sum = rs2_read_sum.add(eq_table[j].mul(rs2_ra_v.mul(val_v)));
+                        }
+                    }
+                    std.debug.print("[STAGE4_GRUEN]   rd_write_sum  = {any}\n", .{rd_write_sum.toBytes()[0..8]});
+                    std.debug.print("[STAGE4_GRUEN]   rs1_read_sum  = {any}\n", .{rs1_read_sum.toBytes()[0..8]});
+                    std.debug.print("[STAGE4_GRUEN]   rs2_read_sum  = {any}\n", .{rs2_read_sum.toBytes()[0..8]});
+
+                    // Compare with Stage 3 claims
+                    if (self.stage3_claims) |claims| {
+                        std.debug.print("[STAGE4_GRUEN]   stage3 rd_wv  = {any}\n", .{claims.rd_write_value.toBytes()[0..8]});
+                        std.debug.print("[STAGE4_GRUEN]   stage3 rs1_v  = {any}\n", .{claims.rs1_value.toBytes()[0..8]});
+                        std.debug.print("[STAGE4_GRUEN]   stage3 rs2_v  = {any}\n", .{claims.rs2_value.toBytes()[0..8]});
+
+                        // Check combined: rd_wv + gamma*rs1_v + gamma^2*rs2_v
+                        const combined_brute = rd_write_sum.add(
+                            self.gamma.mul(rs1_read_sum)).add(
+                            self.gamma_sq.mul(rs2_read_sum));
+                        std.debug.print("[STAGE4_GRUEN]   combined_brute = {any}\n", .{combined_brute.toBytes()[0..8]});
+
+                        // Check: does rd_write_sum == stage3.rd_write_value ?
+                        if (rd_write_sum.eql(claims.rd_write_value)) {
+                            std.debug.print("[STAGE4_GRUEN]   rd_write MATCHES stage3 ✓\n", .{});
+                        } else {
+                            std.debug.print("[STAGE4_GRUEN]   rd_write DIFFERS from stage3 ✗\n", .{});
+                        }
+                        if (rs1_read_sum.eql(claims.rs1_value)) {
+                            std.debug.print("[STAGE4_GRUEN]   rs1_read MATCHES stage3 ✓\n", .{});
+                        } else {
+                            std.debug.print("[STAGE4_GRUEN]   rs1_read DIFFERS from stage3 ✗\n", .{});
+                        }
+                        if (rs2_read_sum.eql(claims.rs2_value)) {
+                            std.debug.print("[STAGE4_GRUEN]   rs2_read MATCHES stage3 ✓\n", .{});
+                        } else {
+                            std.debug.print("[STAGE4_GRUEN]   rs2_read DIFFERS from stage3 ✗\n", .{});
+                        }
+                    }
+                } else {
+                    std.debug.print("[STAGE4_GRUEN] ✓ Brute force poly sum MATCHES stage3 claim\n", .{});
+                }
+            }
 
             for (0..self.num_rounds) |round| {
                 const round_poly = self.computeRoundPolynomialGruen(round, current_claim);
@@ -470,6 +857,118 @@ pub fn Stage4GruenProver(comptime F: type) type {
 
                 // Store UNBATCHED polynomial (batching is only for transcript/challenge)
                 round_polys[round] = round_poly;
+            }
+
+            // BRUTE FORCE CHECK: Verify val_poly[0] matches MLE evaluation
+            // The sumcheck challenges define the evaluation point.
+            // Phase 1 challenges (0..phase1) bind cycle vars LSB first
+            // Phase 2 challenges (phase1..phase1+phase2) bind address vars LSB first
+            // Phase 3 challenges (phase1+phase2..) bind remaining cycle vars
+            //
+            // For default config: phase1=8 (all cycle), phase2=7 (all address), phase3=0
+            // So r_cycle = challenges[0..8] (LSB first), r_address = challenges[8..15] (LSB first)
+            //
+            // MLE evaluation: val(r_address, r_cycle) = Σ_{k,j} eq(r_address,k)*eq(r_cycle,j)*val_orig(k,j)
+            // But val_poly has been modified by binding! So we can't do this check directly.
+            //
+            // Instead, check that the ORIGINAL val_poly (before binding) would give the same answer
+            // as the folded val_poly[0]. We rebuild from trace.
+            {
+                // Rebuild val_poly from scratch
+                var brute_regs: [32]u64 = [_]u64{0} ** 32;
+                var brute_val_claim = F.zero();
+
+                // Compute eq tables for the opening point
+                // Phase 1 challenges bind cycle LSB first: challenges[0] = cycle bit 0 (LSB)
+                // Phase 2 challenges bind address LSB first: challenges[phase1] = address bit 0 (LSB)
+                // After normalize_opening_point: r_cycle = reversed(phase3_cycle) ++ reversed(phase1)
+                // For phase3=0: r_cycle_be = reversed(challenges[0..8]) = [c7,c6,...,c0] (BIG_ENDIAN)
+                // r_address_be = reversed(challenges[8..15]) = [c14,c13,...,c8] (BIG_ENDIAN)
+
+                // Build eq_cycle table (BIG_ENDIAN: r[0]=MSB)
+                var r_cycle_be2: [8]F = undefined;
+                for (0..self.phase1_num_rounds) |i| {
+                    r_cycle_be2[i] = challenges[self.phase1_num_rounds - 1 - i];
+                }
+                var eq_cycle2 = try self.allocator.alloc(F, self.T);
+                defer self.allocator.free(eq_cycle2);
+                // Use same algorithm as Stage 5's computeEqAtIndex but for all j
+                for (0..self.T) |j| {
+                    var eq_val = F.one();
+                    for (0..self.phase1_num_rounds) |bit_idx| {
+                        const bj: u1 = @truncate(j >> @intCast(self.phase1_num_rounds - 1 - bit_idx));
+                        const rj = r_cycle_be2[bit_idx];
+                        if (bj == 1) {
+                            eq_val = eq_val.mulHiBigIntU128(rj.limbs);
+                        } else {
+                            eq_val = eq_val.mul(F.one().sub(rj));
+                        }
+                    }
+                    eq_cycle2[j] = eq_val;
+                }
+
+                // Build eq_addr table
+                const addr_bits = self.phase2_num_rounds;
+                var r_addr_be2: [7]F = undefined;
+                for (0..addr_bits) |i| {
+                    r_addr_be2[i] = challenges[self.phase1_num_rounds + addr_bits - 1 - i];
+                }
+                var eq_addr2: [128]F = undefined;
+                for (0..K) |k| {
+                    var eq_val = F.one();
+                    for (0..addr_bits) |bit_idx| {
+                        const bk: u1 = @truncate(k >> @intCast(addr_bits - 1 - bit_idx));
+                        const rk = r_addr_be2[bit_idx];
+                        if (bk == 1) {
+                            eq_val = eq_val.mulHiBigIntU128(rk.limbs);
+                        } else {
+                            eq_val = eq_val.mul(F.one().sub(rk));
+                        }
+                    }
+                    eq_addr2[k] = eq_val;
+                }
+
+                // Compute val(r_address, r_cycle) = Σ_{k,j} eq_addr(k) * eq_cycle(j) * val_orig(k,j)
+                const trace_items = self.trace_ref.?.steps.items;
+                for (trace_items, 0..) |_, j| {
+                    for (0..32) |k| {
+                        if (!eq_addr2[k].eql(F.zero()) and !eq_cycle2[j].eql(F.zero())) {
+                            brute_val_claim = brute_val_claim.add(
+                                eq_addr2[k].mul(eq_cycle2[j]).mul(F.fromU64(brute_regs[k]))
+                            );
+                        }
+                    }
+                    // Update registers
+                    const step2 = trace_items[j];
+                    if (!step2.is_noop or step2.is_termination_store) {
+                        if (!step2.is_termination_store) {
+                            const instr2 = step2.instruction;
+                            const rd2: u5 = @truncate((instr2 >> 7) & 0x1f);
+                            const opcode2 = instr2 & 0x7f;
+                            const rd_used2 = switch (opcode2) {
+                                0x23, 0x63 => false,
+                                else => true,
+                            };
+                            if (rd_used2 and rd2 != 0 and rd2 < 32) {
+                                brute_regs[rd2] = step2.rd_value;
+                            }
+                        }
+                    }
+                }
+                // Add padding cycles
+                for (trace_items.len..self.T) |j| {
+                    for (0..32) |k| {
+                        if (!eq_addr2[k].eql(F.zero()) and !eq_cycle2[j].eql(F.zero())) {
+                            brute_val_claim = brute_val_claim.add(
+                                eq_addr2[k].mul(eq_cycle2[j]).mul(F.fromU64(brute_regs[k]))
+                            );
+                        }
+                    }
+                }
+
+                std.debug.print("\n[STAGE4 BRUTE] val_poly[0] after folding = {any}\n", .{self.val_poly[0].toBytesBE()[0..16]});
+                std.debug.print("[STAGE4 BRUTE] brute force val(r_addr,r_cycle) = {any}\n", .{brute_val_claim.toBytesBE()[0..16]});
+                std.debug.print("[STAGE4 BRUTE] match? {}\n", .{self.val_poly[0].eql(brute_val_claim)});
             }
 
             // Final claims after all rounds
@@ -728,6 +1227,43 @@ pub fn Stage4GruenProver(comptime F: type) type {
                 }
             }
 
+            // Compute ACTUAL q(1) for diagnostic
+            var q_1_actual = F.zero();
+            for (0..half_T) |ia| {
+                const j_odd_a = 2 * ia + 1;
+                const x_in_a = if (num_x_in_bits > 0) (ia & x_bitmask) else 0;
+                const x_out_a = if (num_x_in_bits < 64) (ia >> @as(u6, @intCast(num_x_in_bits))) else 0;
+                const E_in_a = if (x_in_a < E_in_len) E_in[x_in_a] else F.one();
+                const E_out_a = if (x_out_a < E_out.len) E_out[x_out_a] else F.one();
+                const E_comb_a = E_out_a.mul(E_in_a);
+                const inc_a = self.inc_poly[j_odd_a];
+                for (0..self.current_K) |ka| {
+                    const idx_a = ka * self.T + j_odd_a;
+                    const ra_a = self.ra_poly[idx_a];
+                    const wa_a = self.rd_wa_poly[idx_a];
+                    const val_a = self.val_poly[idx_a];
+                    const body_a = ra_a.mul(val_a).add(wa_a.mul(val_a.add(inc_a)));
+                    q_1_actual = q_1_actual.add(E_comb_a.mul(body_a));
+                }
+            }
+            // Now check: s(0) + s(1)_actual should equal previous_claim
+            {
+                const g = &self.gruen_eq.?;
+                const w_curr = g.w[g.current_index - 1];
+                const eq_1 = g.current_scalar.mul(w_curr);
+                const eq_0 = g.current_scalar.sub(eq_1);
+                const s0 = eq_0.mul(q_0);
+                const s1_actual = eq_1.mul(q_1_actual);
+                const actual_sum = s0.add(s1_actual);
+                if (!actual_sum.eql(previous_claim)) {
+                    std.debug.print("[PHASE1 ACTUAL MISMATCH] Round: current_T={}\n", .{self.current_T});
+                    std.debug.print("  s(0) = {any}\n", .{s0.toBytes()[0..8]});
+                    std.debug.print("  s(1)_actual = {any}\n", .{s1_actual.toBytes()[0..8]});
+                    std.debug.print("  s(0)+s(1)_actual = {any}\n", .{actual_sum.toBytes()[0..8]});
+                    std.debug.print("  previous_claim = {any}\n", .{previous_claim.toBytes()[0..8]});
+                }
+            }
+
             // Debug: Print q_0 and q_X2 for first round (full 32 bytes)
             if (self.current_T >= self.T / 2) {
                 std.debug.print("[ZOLT PHASE1 q_0] = {any}\n", .{q_0.toBytes()});
@@ -811,6 +1347,32 @@ pub fn Stage4GruenProver(comptime F: type) type {
                 }
             }
 
+            // Compute ACTUAL p(1) for debugging (before hint)
+            var eval_1_actual = F.zero();
+            for (0..half_K) |ii| {
+                const k_even2 = 2 * ii;
+                const k_odd2 = k_even2 + 1;
+                for (0..self.current_T) |jj| {
+                    const idx_odd2 = k_odd2 * self.T + jj;
+                    const inc_jj = self.inc_poly[jj];
+                    const eq_jj = merged_eq[jj];
+                    const ra_odd2 = self.ra_poly[idx_odd2];
+                    const wa_odd2 = self.rd_wa_poly[idx_odd2];
+                    const val_odd2 = self.val_poly[idx_odd2];
+                    const combined_1 = ra_odd2.mul(val_odd2).add(wa_odd2.mul(val_odd2.add(inc_jj)));
+                    eval_1_actual = eval_1_actual.add(eq_jj.mul(combined_1));
+                }
+            }
+
+            const actual_sum = eval_0.add(eval_1_actual);
+            const hint_needed = !actual_sum.eql(previous_claim);
+            if (hint_needed) {
+                std.debug.print("[STAGE4 PHASE2 HINT WARNING] Round {}: actual p(0)+p(1) != previous_claim!\n", .{round});
+                std.debug.print("  actual p(0)+p(1) = {any}\n", .{actual_sum.toBytes()[0..8]});
+                std.debug.print("  previous_claim = {any}\n", .{previous_claim.toBytes()[0..8]});
+                std.debug.print("  diff = {any}\n", .{previous_claim.sub(actual_sum).toBytes()[0..8]});
+            }
+
             // Recover p(1) using the hint: p(1) = previous_claim - p(0)
             const eval_1 = previous_claim.sub(eval_0);
 
@@ -821,10 +1383,11 @@ pub fn Stage4GruenProver(comptime F: type) type {
                     eval_1.toBytes()[0..8],
                     eval_2.toBytes()[0..8],
                 });
-                std.debug.print("[STAGE4 PHASE2] p(0)+p(1)={any}, previous_claim={any}, match={}\n", .{
-                    eval_0.add(eval_1).toBytes()[0..8],
+                std.debug.print("[STAGE4 PHASE2] actual p(1) = {any}\n", .{eval_1_actual.toBytes()[0..8]});
+                std.debug.print("[STAGE4 PHASE2] p(0)+p(1)_actual={any}, previous_claim={any}, match={}\n", .{
+                    actual_sum.toBytes()[0..8],
                     previous_claim.toBytes()[0..8],
-                    eval_0.add(eval_1).eql(previous_claim),
+                    actual_sum.eql(previous_claim),
                 });
             }
 
@@ -1099,6 +1662,23 @@ pub fn Stage4GruenProver(comptime F: type) type {
                     if (merged.len > 0) {
                         std.debug.print("[STAGE4 BIND]   merged_eq[0] = {any}\n", .{merged[0].toBytes()[0..8]});
                     }
+
+                    // CRITICAL DEBUG: Compute actual claim from bound arrays at Phase 1->2 transition
+                    var check_claim = F.zero();
+                    for (0..self.current_K) |kk| {
+                        for (0..self.current_T) |jj| {
+                            const idx = kk * self.T + jj;
+                            const ra_val = self.ra_poly[idx];
+                            const wa_val = self.rd_wa_poly[idx];
+                            const val_val = self.val_poly[idx];
+                            const inc_val = self.inc_poly[jj];
+                            const eq_val = merged[jj];
+                            const body = ra_val.mul(val_val).add(wa_val.mul(val_val.add(inc_val)));
+                            check_claim = check_claim.add(eq_val.mul(body));
+                        }
+                    }
+                    std.debug.print("[STAGE4 BIND] TRANSITION CHECK: computed_claim = {any}\n", .{check_claim.toBytes()[0..8]});
+                    std.debug.print("[STAGE4 BIND] TRANSITION CHECK: current_T = {}, current_K = {}\n", .{ self.current_T, self.current_K });
                 }
             } else if (round < phase2_end) {
                 // Phase 2: Bind address variable (eq NOT bound)

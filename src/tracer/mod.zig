@@ -42,6 +42,10 @@ pub const TraceStep = struct {
     is_compressed: bool,
     /// Whether this is a NoOp padding cycle (not a real execution step)
     is_noop: bool = false,
+    /// Whether this is a synthetic termination Store instruction.
+    /// When true, the R1CS witness uses createTerminationStoreWitness() instead of
+    /// fromTraceStep(), which sets FlagStore=1 AND FlagDoNotUpdateUnexpandedPC=1.
+    is_termination_store: bool = false,
 };
 
 /// Full execution trace
@@ -82,9 +86,13 @@ pub const ExecutionTrace = struct {
     pub fn padWithNoop(self: *ExecutionTrace) !void {
         const unpadded_len = self.steps.items.len;
 
-        // Skip if already padded (check if last step is NoOp)
-        if (unpadded_len > 0 and self.steps.items[unpadded_len - 1].is_noop) {
-            return; // Already padded
+        // Skip if already padded (check if last step is a real NoOp padding cycle,
+        // not a termination Store which also has is_noop=true)
+        if (unpadded_len > 0) {
+            const last = self.steps.items[unpadded_len - 1];
+            if (last.is_noop and !last.is_termination_store) {
+                return; // Already padded
+            }
         }
 
         const padded_len = if (unpadded_len < 256)
@@ -350,11 +358,32 @@ pub const Emulator = struct {
             if (!running) {
                 // Program terminated via infinite loop detection
                 std.debug.print("[TRACE] Terminated via infinite loop at PC 0x{x}, cycle {d}\n", .{ self.state.pc, self.state.cycle });
+                // Print last N trace steps to understand termination sequence
+                const trace_len = self.trace.steps.items.len;
+                const start = if (trace_len > 8) trace_len - 8 else 0;
+                std.debug.print("[TRACE] Last {} trace steps (of {} total):\n", .{ trace_len - start, trace_len });
+                var i_debug = start;
+                while (i_debug < trace_len) : (i_debug += 1) {
+                    const s = self.trace.steps.items[i_debug];
+                    const rs1_idx = (s.instruction >> 15) & 0x1f;
+                    const rs2_idx = (s.instruction >> 20) & 0x1f;
+                    const opcode = s.instruction & 0x7f;
+                    const ma: u64 = s.memory_addr orelse 0;
+                    std.debug.print("[TRACE]   [{d}] PC=0x{x:0>8} instr=0x{x:0>8} opcode=0x{x:0>2} rs1=x{d} rs2=x{d} rs1v=0x{x} rs2v=0x{x} rdv=0x{x} memw={} maddr=0x{x}\n", .{
+                        i_debug, s.pc, s.instruction, opcode, rs1_idx, rs2_idx,
+                        s.rs1_value, s.rs2_value, s.rd_value,
+                        s.is_memory_write, ma,
+                    });
+                }
                 // Print last instruction to verify it's a jump
                 if (self.trace.steps.items.len > 0) {
                     const last_step = self.trace.steps.items[self.trace.steps.items.len - 1];
                     std.debug.print("[TRACE] Last instruction: 0x{x:0>8} at PC 0x{x}\n", .{ last_step.instruction, last_step.pc });
                 }
+                // Also check if termination address was already written
+                const termination_addr = self.device.memory_layout.termination;
+                const term_val = self.ram.memory.get(termination_addr) orelse 0;
+                std.debug.print("[TRACE] Termination addr 0x{x:0>16} current value = {}\n", .{ termination_addr, term_val });
                 // Record the termination write to match Jolt's behavior.
                 self.recordTerminationWrite() catch |term_err| {
                     std.debug.print("[TRACE] Warning: failed to record termination write: {any}\n", .{term_err});
@@ -366,101 +395,156 @@ pub const Emulator = struct {
 
     /// Record a synthetic termination write to the termination address.
     ///
-    /// This function injects a FULL trace cycle (not just RAM entry) for the termination write.
-    /// This ensures consistency between:
-    /// - R1CS: Store flag set, RamAddress = termination_addr (via Rs1Value + Imm = termination_addr + 0)
-    /// - RAM trace: Write to termination address
-    /// - RAF claim: Includes termination address
+    /// This injects a sequence of 4 synthetic trace steps to properly write
+    /// the termination bit (value 1) to the termination address:
     ///
-    /// The R1CS constraint requires: if Load/Store => RamAddress == Rs1Value + Imm
-    /// We satisfy this by setting Rs1Value = termination_addr and Imm = 0.
+    ///   Cycle N:   NoOp (satisfies previous j.'s NextIsNoop=1)
+    ///   Cycle N+1: LUI x31, upper20(addr)    — sets x31 = addr & ~0xFFF
+    ///   Cycle N+2: ADDI x30, x0, 1           — sets x30 = 1
+    ///   Cycle N+3: SB x30, lower12(addr)(x31) — stores 1 at termination_addr
     ///
-    /// The synthetic instruction is an SB (Store Byte) with:
-    /// - opcode = 0x23 (Store)
-    /// - funct3 = 0x0 (SB)
-    /// - rs1 = x0 (but rs1_value = termination_addr in trace step)
-    /// - rs2 = x0 (but rs2_value = 1 in trace step)
-    /// - imm = 0 (no offset needed since rs1_value has the full address)
+    /// Using REAL register values (x31 and x30) ensures consistency across ALL
+    /// proof stages. Previously we used SB x0, 0(x0) with overridden values and
+    /// virtual register slots k=32,33, but this broke the ValEvaluation identity
+    /// (Stage 5) because val_poly entries at virtual slots had no corresponding
+    /// write increments (no rd_wa, no inc).
     ///
-    /// In Jolt, the SDK generates: `core::ptr::write_volatile(termination_bit as *mut u8, 1)`
-    /// which becomes an SB instruction in the trace. We mimic this behavior for bare-metal programs.
+    /// All synthetic steps have is_termination_store=true, which causes the R1CS
+    /// witness generator to use createTerminationStoreWitness() adding:
+    ///   FlagDoNotUpdateUnexpandedPC=1 (satisfies constraint 16: NextUPC = 0+4-4 = 0)
+    ///   FlagIsNoop=1 (for Stage 2 product virtualization NextIsNoop factor)
+    ///
+    /// The LUI and ADDI steps have is_noop=false so Stage 4 processes their register
+    /// writes properly (rd_wa and inc entries), ensuring the register polynomials
+    /// are consistent with the R1CS witness values.
     fn recordTerminationWrite(self: *Emulator) !void {
         const termination_addr = self.device.memory_layout.termination;
-        const current_cycle = self.state.cycle;
+        var cycle = self.state.cycle;
 
         // Get the current value at termination address (should be 0 for initial state)
         const pre_value = self.ram.memory.get(termination_addr) orelse 0;
         const post_value: u64 = 1;
 
-        // Construct a synthetic SB instruction that writes to termination address
-        //
-        // The R1CS constraint for Load/Store is: RamAddress == Rs1Value + Imm
-        // We need RamAddress = termination_addr.
-        //
-        // To satisfy this, we set:
-        // - Rs1Value = termination_addr (base register contains the full address)
-        // - Imm = 0 (no offset)
-        // - Then: RamAddress = termination_addr + 0 = termination_addr ✓
-        //
-        // The synthetic instruction is: SB x0, 0(rs1) where rs1 is conceptually
-        // loaded with termination_addr. We encode this as SB x0, 0(x0) = 0x00000023
-        // but override rs1_value in the trace step.
-        //
-        // Mark the termination step as a NoOp so the R1CS witness is a valid
-        // NoOp witness (all zeros + DoNotUpdateUnexpandedPC=1 + IsNoop=1).
-        //
-        // In Jolt, the last real instruction before NoOp padding is the infinite
-        // loop jump (e.g., JAL x0, 0), which has FlagJump=1 and disables
-        // constraint 16 (NextUnexpPCUpdateOtherwise). Marking the synthetic
-        // termination step as a NoOp avoids violating this constraint.
-        //
-        // The RAM write is still recorded separately in the RAM trace below.
-        const termination_step = TraceStep{
-            .cycle = current_cycle,
-            .pc = 0, // NoOp: all zero
+        // Decompose termination_addr for instruction encoding
+        // LUI loads upper 20 bits, SB immediate provides lower 12 bits
+        const upper20: u32 = @truncate(termination_addr >> 12);
+        const lower12: u32 = @truncate(termination_addr & 0xFFF);
+
+        // Get current register values for x30 and x31 (pre-values for inc computation)
+        const x31_pre = try self.registers.read(31);
+        const x30_pre = try self.registers.read(30);
+
+        // LUI result: sign-extend the 32-bit value on RV64
+        // LUI places imm[31:12] in the destination, zeros bits [11:0]
+        const lui_result: u64 = @bitCast(@as(i64, @as(i32, @bitCast(upper20 << 12))));
+
+        // --- Step 1: NoOp (satisfies previous j.'s NextIsNoop=1) ---
+        try self.trace.steps.append(self.allocator, TraceStep{
+            .cycle = cycle,
+            .pc = 0,
             .unexpanded_pc = 0,
-            .instruction = 0, // NoOp instruction
+            .instruction = 0,
             .rs1_value = 0,
             .rs2_value = 0,
             .rd_pre_value = 0,
             .rd_value = 0,
-            .memory_addr = termination_addr, // Keep for RAM trace consistency
-            .memory_pre_value = pre_value,
-            .memory_value = post_value,
-            .is_memory_write = true, // RAM write still happens
+            .memory_addr = null,
+            .memory_pre_value = null,
+            .memory_value = null,
+            .is_memory_write = false,
             .next_pc = 0,
             .is_compressed = false,
-            .is_noop = true, // Mark as NoOp so R1CS uses createNoopWitness()
-        };
+            .is_noop = true,
+            .is_termination_store = true, // DoNotUpdateUPC=1 in R1CS
+        });
+        cycle += 1;
 
-        // Add to execution trace
-        try self.trace.steps.append(self.allocator, termination_step);
+        // --- Step 2: LUI x31, upper20(termination_addr) ---
+        // Encoding: imm[31:12] | rd[11:7] | opcode[6:0]
+        const lui_instr: u32 = (upper20 << 12) | (31 << 7) | 0x37;
+        try self.trace.steps.append(self.allocator, TraceStep{
+            .cycle = cycle,
+            .pc = 0,
+            .unexpanded_pc = 0,
+            .instruction = lui_instr,
+            .rs1_value = 0, // LUI doesn't read rs1
+            .rs2_value = 0, // LUI doesn't read rs2
+            .rd_pre_value = x31_pre,
+            .rd_value = lui_result,
+            .memory_addr = null,
+            .memory_pre_value = null,
+            .memory_value = null,
+            .is_memory_write = false,
+            .next_pc = 0,
+            .is_compressed = false,
+            .is_noop = false, // NOT noop — Stage 4 must process rd write
+            .is_termination_store = true, // DoNotUpdateUPC=1, FlagIsNoop=1 in R1CS
+        });
+        // Update register file so subsequent reads see the correct value
+        try self.registers.write(31, lui_result);
+        cycle += 1;
 
-        // NOTE: We do NOT record the write in the RAM trace and do NOT update the
-        // memory state because the R1CS witness treats this step as a NoOp
-        // (RamAddress=0, Store=0). Recording the RAM write or updating memory
-        // would create inconsistencies between:
-        //   - R1CS witness (no RAM op) and RAM argument (has access)
-        //   - val_final (with termination write) and RAM trace (without)
-        //
-        // In Jolt's real system, the termination write IS a real SB instruction with
-        // Store=1 and RamAddress=termination_addr, but Zolt's single-step-per-instruction
-        // model can't represent virtual instruction sequences, so we mark it as NoOp.
-        //
-        // The termination/panic detection is handled through other means (checking
-        // if the trace detected an infinite loop).
-        //
-        // Previously:
-        //   try self.ram.trace.recordWrite(termination_addr, pre_value, post_value, current_cycle);
-        //   try self.ram.memory.put(self.allocator, termination_addr, post_value);
+        // --- Step 3: ADDI x30, x0, 1 ---
+        // Encoding: imm[11:0] | rs1[19:15] | funct3[14:12] | rd[11:7] | opcode[6:0]
+        const addi_instr: u32 = (1 << 20) | (0 << 15) | (0 << 12) | (30 << 7) | 0x13;
+        try self.trace.steps.append(self.allocator, TraceStep{
+            .cycle = cycle,
+            .pc = 0,
+            .unexpanded_pc = 0,
+            .instruction = addi_instr,
+            .rs1_value = 0, // Reading x0 = 0
+            .rs2_value = 0, // ADDI doesn't read rs2
+            .rd_pre_value = x30_pre,
+            .rd_value = 1, // x30 = 0 + 1 = 1
+            .memory_addr = null,
+            .memory_pre_value = null,
+            .memory_value = null,
+            .is_memory_write = false,
+            .next_pc = 0,
+            .is_compressed = false,
+            .is_noop = false, // NOT noop — Stage 4 must process rd write
+            .is_termination_store = true, // DoNotUpdateUPC=1, FlagIsNoop=1 in R1CS
+        });
+        try self.registers.write(30, 1);
+        cycle += 1;
 
-        // Increment cycle counter
-        self.state.cycle += 1;
+        // --- Step 4: SB x30, lower12(x31) ---
+        // S-type encoding: imm[11:5] | rs2[24:20] | rs1[19:15] | funct3[14:12] | imm[4:0] | opcode[6:0]
+        const imm_upper7: u32 = (lower12 >> 5) & 0x7F;
+        const imm_lower5: u32 = lower12 & 0x1F;
+        const sb_instr: u32 = (imm_upper7 << 25) | (30 << 20) | (31 << 15) | (0 << 12) | (imm_lower5 << 7) | 0x23;
+        try self.trace.steps.append(self.allocator, TraceStep{
+            .cycle = cycle,
+            .pc = 0,
+            .unexpanded_pc = 0,
+            .instruction = sb_instr,
+            .rs1_value = lui_result, // x31 = addr base
+            .rs2_value = 1, // x30 = value to store
+            .rd_pre_value = 0, // Stores don't write to rd
+            .rd_value = 0,
+            .memory_addr = termination_addr,
+            .memory_pre_value = pre_value,
+            .memory_value = post_value,
+            .is_memory_write = true,
+            .next_pc = 0,
+            .is_compressed = false,
+            .is_noop = false, // NOT noop — Stage 4 must process register reads
+            .is_termination_store = true, // DoNotUpdateUPC=1, FlagIsNoop=1 in R1CS
+        });
 
-        std.debug.print("[TRACE] Recorded termination cycle (NoOp): addr=0x{x:0>16}, cycle={}, pre={}, post=1\n", .{
+        // Record the write in the RAM trace at the SB cycle
+        try self.ram.trace.recordWrite(termination_addr, pre_value, post_value, cycle);
+
+        // Update memory state so final_ram includes the termination bit
+        try self.ram.memory.put(self.allocator, termination_addr, post_value);
+
+        cycle += 1;
+        self.state.cycle = cycle;
+
+        std.debug.print("[TRACE] Recorded termination sequence: 4 steps (noop + LUI x31 + ADDI x30 + SB), addr=0x{x:0>16}, cycles {}-{}\n", .{
             termination_addr,
-            current_cycle,
-            pre_value,
+            cycle - 4,
+            cycle - 1,
         });
     }
 

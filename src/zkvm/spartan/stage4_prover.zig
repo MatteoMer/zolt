@@ -320,6 +320,7 @@ pub fn Stage4Prover(comptime F: type) type {
             // Stage 3 uses: witness[R1CSInputIndex.Rs1Value] and witness[R1CSInputIndex.Rs2Value]
             // These are step.rs1_value and step.rs2_value from trace
             for (trace.steps.items, 0..) |step, cycle| {
+                // Skip pure NoOp padding but NOT termination stores
                 if (step.is_noop) continue;
                 const instr = step.instruction;
                 const rd: u5 = @truncate((instr >> 7) & 0x1f);

@@ -2654,54 +2654,14 @@ pub fn ProofConverter(comptime F: type) type {
 
                 std.debug.print("[ZOLT STAGE4] Using getLowestAddress for ValFinal = 0x{X:0>16}\n", .{start_address_for_val_final});
 
-                // Build synthetic writes for ValFinal prover.
-                // The termination bit is set in OutputSumcheck's val_final but is NOT in
-                // the memory trace (because R1CS treats the termination step as NoOp).
-                // The ValFinal sumcheck needs to prove:
-                //   val_final(r) - val_init(r) = Σ inc(j) * wa(r, j)
-                // So we inject a synthetic write for the termination bit.
-                const ValFinalProverType = ram.ValFinalProver(F);
-                var synthetic_writes_buf: [2]ValFinalProverType.SyntheticWrite = undefined;
-                var n_synthetic_writes: usize = 0;
-
-                if (config.memory_layout) |ml| {
-                    if (!config.is_panicking) {
-                        // Find the termination cycle by scanning the execution trace
-                        const termination_addr = ml.termination;
-                        var termination_cycle: ?usize = null;
-                        for (trace.steps.items, 0..) |step, idx| {
-                            if (step.memory_addr) |addr| {
-                                if (addr == termination_addr and step.is_memory_write) {
-                                    termination_cycle = idx;
-                                    break;
-                                }
-                            }
-                        }
-                        if (termination_cycle) |tc| {
-                            synthetic_writes_buf[n_synthetic_writes] = .{
-                                .cycle = tc,
-                                .address = termination_addr,
-                                .old_value = 0,
-                                .new_value = 1,
-                            };
-                            n_synthetic_writes += 1;
-                            std.debug.print("[ZOLT STAGE4] Injecting synthetic termination write: cycle={}, addr=0x{X}\n", .{ tc, termination_addr });
-                        } else {
-                            std.debug.print("[ZOLT STAGE4] WARNING: Could not find termination cycle in trace!\n", .{});
-                        }
-                    }
-                }
-
-                const synthetic_writes_slice: ?[]const ValFinalProverType.SyntheticWrite =
-                    if (n_synthetic_writes > 0) synthetic_writes_buf[0..n_synthetic_writes] else null;
-
-                var val_final_prover_early = try ValFinalProverType.initWithSyntheticWrites(
+                // The termination write is now a real Store instruction in the trace,
+                // so the RAM trace naturally includes it. No synthetic write injection needed.
+                var val_final_prover_early = try ram.ValFinalProver(F).init(
                     self.allocator,
                     memory_trace,
                     config.initial_ram,
                     val_final_params_early,
                     start_address_for_val_final,
-                    synthetic_writes_slice,
                 );
                 defer val_final_prover_early.deinit();
 
@@ -4231,8 +4191,20 @@ pub fn ProofConverter(comptime F: type) type {
                                 };
                                 // Note: If prover init succeeds, prover owns params and will deinit them
                                 // The prover's deinit should handle params cleanup
-                                if (raf_prover != null) {
+                                if (raf_prover) |*rp| {
                                     std.debug.print("[ZOLT] RAF: Prover initialized\n", .{});
+                                    // Verify initial claim = Σ_k ra(k) * unmap(k)
+                                    const computed_initial = rp.computeInitialClaim();
+                                    std.debug.print("[ZOLT] RAF: initial_claim (from SpartanOuter) = {any}\n", .{raf_initial_claim.toBytesBE()});
+                                    std.debug.print("[ZOLT] RAF: computed initial (Σ ra*unmap) = {any}\n", .{computed_initial.toBytesBE()});
+                                    std.debug.print("[ZOLT] RAF: initial claims match = {}\n", .{raf_initial_claim.eql(computed_initial)});
+                                    std.debug.print("[ZOLT] RAF: ra polynomial size = {}\n", .{rp.ra.evals.len});
+                                    // Count non-zero ra entries
+                                    var nonzero_ra: usize = 0;
+                                    for (rp.ra.evals) |v| {
+                                        if (!v.eql(F.zero())) nonzero_ra += 1;
+                                    }
+                                    std.debug.print("[ZOLT] RAF: non-zero ra entries = {}\n", .{nonzero_ra});
                                 }
                             }
 
@@ -4844,6 +4816,89 @@ pub fn ProofConverter(comptime F: type) type {
             const expected_output_claim = tau_high_bound_r0.mul(tau_bound_r_tail_rev).mul(fused_left).mul(fused_right);
             std.debug.print("[ZOLT] FACTOR CLAIMS: expected_output_claim = {any}\n", .{expected_output_claim.toBytesBE()});
 
+            // --- DIAGNOSTIC: Recompute verifier's expected_claim for each instance ---
+            // Compare prover's polynomial evaluation with verifier's expected claim formula
+            {
+                // Instance 0: ProductVirtualRemainder
+                // Verifier computes: tau_high_bound_r0 * tau_bound_r_tail_rev * fused_left * fused_right
+                // This is already computed as expected_output_claim above
+                const inst0_prover = if (product_prover) |pp| pp.current_claim else F.zero();
+                const inst0_verifier = expected_output_claim;
+                std.debug.print("[ZOLT DIAG] Instance 0 (Product): prover={any}\n", .{inst0_prover.toBytesBE()});
+                std.debug.print("[ZOLT DIAG] Instance 0 (Product): verifier={any}\n", .{inst0_verifier.toBytesBE()});
+                std.debug.print("[ZOLT DIAG] Instance 0 MATCH: {}\n", .{inst0_prover.eql(inst0_verifier)});
+
+                // Instance 1: RamRafEvaluation
+                // Verifier computes: unmap_eval * ra_input_claim
+                // ra_input_claim = raf_prover.getFinalClaim() = ra.finalClaim()
+                // unmap_eval = start_address + 8 * identity(r_address)
+                const inst1_prover_claim = if (raf_prover) |rp| rp.current_claim else F.zero();
+                const inst1_ra_claim = if (raf_prover) |rp| rp.getFinalClaim() else F.zero();
+                std.debug.print("[ZOLT DIAG] Instance 1 (RAF): prover current_claim = {any}\n", .{inst1_prover_claim.toBytesBE()});
+                std.debug.print("[ZOLT DIAG] Instance 1 (RAF): ra.finalClaim = {any}\n", .{inst1_ra_claim.toBytesBE()});
+
+                // Compute unmap(r) at the RAF opening point (r_address)
+                // RAF challenges are challenges[start_round_1..start_round_1 + log_ram_k]
+                // normalized (reversed) to BIG_ENDIAN
+                {
+                    const start_round_1 = max_num_rounds - log_ram_k;
+                    var r_addr_raf = try self.allocator.alloc(F, log_ram_k);
+                    defer self.allocator.free(r_addr_raf);
+                    for (0..log_ram_k) |ii| {
+                        if (start_round_1 + ii < challenges.items.len) {
+                            r_addr_raf[log_ram_k - 1 - ii] = challenges.items[start_round_1 + ii];
+                        } else {
+                            r_addr_raf[log_ram_k - 1 - ii] = F.zero();
+                        }
+                    }
+
+                    // Compute unmap_eval = start_address + 8 * identity(r_addr_raf)
+                    const start_addr: u64 = if (config.memory_layout) |ml| ml.getLowestAddress() else 0x80000000;
+                    // identity(r) = r[n-1]*1 + r[n-2]*2 + ... (in BIG_ENDIAN, r[n-1] is LSB)
+                    var identity_val = F.zero();
+                    var pow: u64 = 1;
+                    var iii: usize = log_ram_k;
+                    while (iii > 0) {
+                        iii -= 1;
+                        identity_val = identity_val.add(r_addr_raf[iii].mul(F.fromU64(pow)));
+                        pow *= 2;
+                    }
+                    const unmap_eval = identity_val.mul(F.fromU64(8)).add(F.fromU64(start_addr));
+                    std.debug.print("[ZOLT DIAG] Instance 1 (RAF): unmap(r) = {any}\n", .{unmap_eval.toBytesBE()});
+                    std.debug.print("[ZOLT DIAG] Instance 1 (RAF): unmap * ra = {any}\n", .{unmap_eval.mul(inst1_ra_claim).toBytesBE()});
+                    std.debug.print("[ZOLT DIAG] Instance 1 (RAF): current_claim == unmap*ra? {}\n", .{inst1_prover_claim.eql(unmap_eval.mul(inst1_ra_claim))});
+                }
+
+                // Instance 2: RamReadWriteChecking
+                // Verifier computes: eq_eval_cycle * ra_claim * (val_claim + gamma * (val_claim + inc_claim))
+                // But wait - the verifier uses the OPENING CLAIMS from the proof (rwc_ra_claim, rwc_val_claim, rwc_inc_claim)
+                // The prover's current_claim should equal this formula
+                const inst2_prover_claim = if (rwc_prover) |rp| rp.current_claim else F.zero();
+                std.debug.print("[ZOLT DIAG] Instance 2 (RWC): prover current_claim = {any}\n", .{inst2_prover_claim.toBytesBE()});
+
+                // Instance 3: OutputSumcheck
+                const inst3_prover_claim = if (output_prover) |op| op.current_claim else F.zero();
+                std.debug.print("[ZOLT DIAG] Instance 3 (Output): prover current_claim = {any}\n", .{inst3_prover_claim.toBytesBE()});
+
+                // Instance 4: InstructionLookups
+                const inst4_prover_claim = if (instr_prover) |*ip| ip.current_claim else F.zero();
+                std.debug.print("[ZOLT DIAG] Instance 4 (Instr): prover current_claim = {any}\n", .{inst4_prover_claim.toBytesBE()});
+
+                // Now compute what the verifier expects from the formula, starting with inst1
+                // For inst1 (RAF), verifier computes: unmap_eval * ra_input_claim
+                // ra_input_claim = raf_final_claim = the prover's raf.getFinalClaim()
+                // unmap_eval depends on memory layout. Let's see if inst1_prover_claim / raf_final equals unmap_eval
+                // Actually, let me just see if all instances' prover claims sum correctly
+                const total_verifier_expected = inst0_verifier.mul(batching_coeffs[0])
+                    .add(inst1_prover_claim.mul(batching_coeffs[1]))
+                    .add(inst2_prover_claim.mul(batching_coeffs[2]))
+                    .add(inst3_prover_claim.mul(batching_coeffs[3]))
+                    .add(inst4_prover_claim.mul(batching_coeffs[4]));
+                std.debug.print("[ZOLT DIAG] Sum of prover claims * coeffs = {any}\n", .{total_verifier_expected.toBytesBE()});
+                std.debug.print("[ZOLT DIAG] Actual batched_claim = {any}\n", .{batched_claim.toBytesBE()});
+                std.debug.print("[ZOLT DIAG] These should match = {}\n", .{total_verifier_expected.eql(batched_claim)});
+            }
+
             // Copy challenges to return them
             const challenges_copy = try self.allocator.alloc(F, challenges.items.len);
             @memcpy(challenges_copy, challenges.items);
@@ -4872,6 +4927,18 @@ pub fn ProofConverter(comptime F: type) type {
                 std.debug.print("[ZOLT] STAGE2 RWC: ra_claim = {any}\n", .{rwc_ra_claim.toBytesBE()});
                 std.debug.print("[ZOLT] STAGE2 RWC: val_claim = {any}\n", .{rwc_val_claim.toBytesBE()});
                 std.debug.print("[ZOLT] STAGE2 RWC: inc_claim = {any}\n", .{rwc_inc_claim.toBytesBE()});
+
+                // Verify: current_claim should equal eq_cycle * ra * (val + gamma * (val + inc))
+                const eq_cycle_scalar = rp.eq_evals[0];
+                const rwc_gamma = rp.params.gamma;
+                const expected_rwc = eq_cycle_scalar.mul(rwc_ra_claim).mul(
+                    rwc_val_claim.add(rwc_gamma.mul(rwc_val_claim.add(rwc_inc_claim))),
+                );
+                std.debug.print("[ZOLT] STAGE2 RWC VERIFY: eq_cycle = {any}\n", .{eq_cycle_scalar.toBytesBE()});
+                std.debug.print("[ZOLT] STAGE2 RWC VERIFY: gamma = {any}\n", .{rwc_gamma.toBytesBE()});
+                std.debug.print("[ZOLT] STAGE2 RWC VERIFY: expected = eq*ra*(val+gamma*(val+inc)) = {any}\n", .{expected_rwc.toBytesBE()});
+                std.debug.print("[ZOLT] STAGE2 RWC VERIFY: prover current_claim = {any}\n", .{rp.current_claim.toBytesBE()});
+                std.debug.print("[ZOLT] STAGE2 RWC VERIFY: match = {}\n", .{expected_rwc.eql(rp.current_claim)});
             } else {
                 std.debug.print("[ZOLT] STAGE2 RWC: prover is null, computing val_init(r_address) for rwc_val_claim\n", .{});
                 // When rwc_prover is null (no RAM operations), the val polynomial equals val_init

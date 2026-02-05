@@ -1,60 +1,74 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 79 - Stage 3 FIXED! Stage 5 Now Fails
+## Status: Session 81 - Termination Store Implemented, Stage 2 Fails
 
-## Current Issue: Stage 5 Sumcheck Output/Expected Claim Mismatch
+## Current Issue: Stage 2 Sumcheck Output/Expected Claim Mismatch
 
-### Stage 5 Details
-Stage 5 consists of 3 batched sumcheck instances:
-1. **RegistersValEvaluation** - Register value evaluation (degree 3, ~6 rounds)
-2. **RamRaClaimReduction** - RAM read address claim reduction (degree 2, log_K + log_T rounds)
-3. **InstructionReadRafSumcheck** - Instruction lookups read+RAF checking (128 + 6 = 134 rounds)
+### Changes Made This Session
+1. **Termination step changed from NoOp to real Store instruction**
+   - `src/tracer/mod.zig`: `recordTerminationWrite` now creates a real Store trace step
+     - instruction=0x00000023 (SB), rs1_value=termination_addr, rs2_value=1
+     - is_noop=true (so previous JAL sees NextIsNoop=1, making ShouldJump=0)
+     - is_termination_store=true (new field, so generateWitness uses Store witness)
+   - RAM trace entry and memory state update restored
+   - TraceStep struct: added `is_termination_store` field (default false)
+   - padWithNoop: fixed to not skip padding when last step is termination_store
 
-Max num_rounds = 134 (InstructionReadRafSumcheck dominates)
+2. **R1CS witness for termination Store**
+   - `src/zkvm/r1cs/constraints.zig`: Added `createTerminationStoreWitness()`
+     - Calls fromTraceStep() then overrides:
+       - FlagDoNotUpdateUnexpandedPC = 1 (constraint 16: 0 = 0+4-4 = 0)
+       - FlagIsNoop = 1 (for product factor NextIsNoop consistency)
+   - `generateWitness`: checks is_termination_store BEFORE is_noop
+   - `src/zkvm/r1cs/jolt_r1cs.zig`: Same ordering fix
 
-### Error
-```
-Sumcheck verification failed!
-  output_claim:   [d8, e4, b0, e7, 00, aa, 9b, d6, ...]
-  expected_claim: [eb, 4e, 32, 94, 8e, 12, 6a, 42, ...]
-Verification failed: Stage 5
-```
+3. **Removed synthetic write injection from val_final prover**
+   - `src/zkvm/proof_converter.zig`: Replaced `initWithSyntheticWrites` with simple `init()`
+   - RAM trace now naturally includes the termination write
+
+4. **Stage 5 prover updated**
+   - `src/zkvm/spartan/stage5_prover.zig`: Changed `is_noop` checks to `is_noop and !is_termination_store`
+   - This ensures the termination Store is processed (not skipped) in the combined_vals computation
+
+### Results
+- Zero R1CS constraint violations
+- Stage 1: PASSES ✅
+- Stage 2: FAILS ❌ (output_claim ≠ expected_claim)
+- Stages 3-7: Not yet reached
+
+### Stage 2 Failure Analysis
+Stage 2 fails at the expected_output_claim check after all sumcheck rounds.
+The 5 instances:
+- Instance 0: ProductVirtualRemainder
+- Instance 1: RamRafEvaluation
+- Instance 2: RamReadWriteChecking
+- Instance 3: OutputSumcheck
+- Instance 4: InstructionClaimReduction
+
+The termination Store witness has:
+- FlagStore=1, FlagIsNoop=1, FlagDoNotUpdateUPC=1
+- Rs1Value=termination_addr, Rs2Value=1
+- RamAddress=termination_addr, RamWriteValue=1
+- LeftInstructionInput=termination_addr (from left_is_rs1=1)
+- LeftLookupOperand=termination_addr
+- These non-zero values affect the MLE evaluations used in Stage 2
+
+### Known Issue (Not Blocking Stage 2)
+Zolt has a general bug where Store/Load instructions use non-zero instruction inputs:
+- Zolt: left_is_rs1=1 for Store → LeftInstructionInput = rs1_value
+- Jolt: left_is_rs1=0 for Store → LeftInstructionInput = 0
+This doesn't break stages because it's internally consistent (R1CS + Stage 5 both use same wrong values).
+But it could be relevant if the termination Store interacts differently.
+
+### Possible Causes for Stage 2 Failure
+1. The termination Store's FlagStore=1 might affect the product virtualization remainder differently
+2. The R1CS polynomial MLE at the random point might not be consistent between prover and verifier
+3. The `base_evals` for the product sumcheck might not correctly include the Store circuit flags
 
 ### Next Steps
-1. Add debug output to Stage 5 to identify which instance(s) fail
-2. Check if there's a similar Phase 2 bug in the Stage 5 prover
-3. Verify Stage 5 round polynomials match between Zolt and Jolt
-
-## Fix Applied This Session (Session 79)
-
-### CRITICAL FIX: Phase 2 computeRoundEvalsPhase2 used wrong array length
-- **Bug**: Both ShiftSumcheck and RegistersClaimReduction used `eq_outer.len / 2` (or `eq.len / 2`)
-  as the loop bound in `computeRoundEvalsPhase2`. This is the original allocation size (suffix_size),
-  which never changes after allocation.
-- **Correct**: Should use `self.current_witness_size / 2`, which tracks the active size that shrinks
-  after each `bindPhase2` call.
-- **Symptom**: After the first Phase 2 bind (round 3→4), the loop iterated over stale data in array
-  positions beyond the active range, producing incorrect round polynomial evaluations.
-- **Detection**: Per-round Phase 2 verification showed `match=false` at ROUND_4 (after round 4 bind).
-- **Files fixed**: `src/zkvm/spartan/stage3_prover.zig` (both ShiftSumcheck and RegistersClaimReduction)
-
-### Result: Stage 1 ✅, Stage 2 ✅, Stage 3 ✅, Stage 4 ✅, Stage 5 ❌
-
-## Verified Working Components
-
-- ✅ Blake2b transcript matches between Zolt and Jolt
-- ✅ Tau challenges generated correctly (count = 8)
-- ✅ UncompressedUniPoly_begin transcript state matches
-- ✅ r0 values match between Zolt prover and Jolt verifier
-- ✅ UniSkip check_sum_evals passes
-- ✅ No R^2 scaling (correctly removed)
-- ✅ Zero constraint violations
-- ✅ Stage 1 sumcheck verification PASSES
-- ✅ Stage 2 sumcheck verification PASSES
-- ✅ Opening claims (R1CS input MLE evaluations) match
-- ✅ Stage 3 sumcheck verification PASSES (shift, instr, reg all match)
-- ✅ Stage 4 implicitly passes (Stage 5 error occurs after it)
-- ❌ Stage 5 sumcheck output_claim ≠ expected_claim
+1. Debug Stage 2 by comparing prover and verifier claims for each instance
+2. Check if the issue is in the product virtualization (Instance 0)
+3. Consider if FlagStore needs to be 0 for the termination step
 
 ## Debug Commands
 

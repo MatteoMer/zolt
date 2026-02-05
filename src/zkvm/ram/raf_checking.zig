@@ -24,6 +24,8 @@ const MemoryOp = mod.MemoryOp;
 const MemoryAccess = mod.MemoryAccess;
 const MemoryTrace = mod.MemoryTrace;
 
+const poly_mod = @import("../../poly/mod.zig");
+
 /// Parameters for RAF evaluation sumcheck
 pub fn RafEvaluationParams(comptime F: type) type {
     return struct {
@@ -98,22 +100,51 @@ pub fn RaPolynomial(comptime F: type) type {
                 e.* = F.zero();
             }
 
-            // Pre-compute eq(r_cycle, j) for all cycles j in the trace
             const trace_len = trace.accesses.items.len;
-            const log_t = if (trace_len == 0) 0 else std.math.log2_int_ceil(usize, trace_len);
-            const eq_evals = try computeEqEvals(allocator, F, r_cycle, log_t);
+            const n_cycle_vars = r_cycle.len;
+
+            // Pre-compute eq(r_cycle, j) for all cycles j in [0, 2^n_cycle_vars)
+            // using BIG-ENDIAN convention to match EqPolynomial used in SpartanOuter.
+            // Jolt builds ra(k) = Σ_j eq(r_cycle, j) * 1[address(j) = k] where j ranges
+            // over all cycles and address(j) is the RamAddress from the R1CS witness.
+            // In Zolt, the memory trace has entries with timestamps (cycle numbers).
+            // We use the timestamp to look up eq(r_cycle, timestamp) for the correct weight.
+            //
+            // CRITICAL: Must use EqPolynomial (big-endian) NOT computeEqEvals (little-endian)
+            // because the SpartanOuter's claim was computed with EqPolynomial.evals().
+            const EqPoly = poly_mod.EqPolynomial(F);
+            const eq_size: usize = @as(usize, 1) << @intCast(n_cycle_vars);
+            const eq_evals = try EqPoly.evalsSliceWithScaling(F, allocator, r_cycle, null);
             defer allocator.free(eq_evals);
 
-            // Accumulate ra(k) for each access
-            for (trace.accesses.items, 0..) |access, j| {
-                // Remap address to slot k
-                if (access.address >= start_address) {
-                    const k = (access.address - start_address) / 8;
-                    if (k < k_size) {
-                        // Add eq(r_cycle, j) to ra(k)
-                        const eq_val = if (j < eq_evals.len) eq_evals[j] else F.zero();
-                        evals[@intCast(k)] = evals[@intCast(k)].add(eq_val);
-                    }
+            std.debug.print("[RA INIT] trace_len={}, n_cycle_vars={}, eq_size={}, start_address=0x{x}\n", .{ trace_len, n_cycle_vars, eq_size, start_address });
+            // Print first few trace entries
+            for (0..@min(5, trace_len)) |ti| {
+                const acc = trace.accesses.items[ti];
+                std.debug.print("[RA INIT]   trace[{}]: addr=0x{x}, val={}, op={s}, ts={}\n", .{
+                    ti,
+                    acc.address,
+                    acc.value,
+                    if (acc.op == .Read) "Read" else "Write",
+                    acc.timestamp,
+                });
+            }
+            if (trace_len > 5) {
+                std.debug.print("[RA INIT]   ... {} more trace entries\n", .{trace_len - 5});
+            }
+
+            // Accumulate ra(k) for each access using timestamp as cycle index
+            for (trace.accesses.items) |access| {
+                // Skip addresses that don't remap (like Jolt's remap_address returning None for addr=0)
+                if (access.address < start_address) continue;
+
+                const k = (access.address - start_address) / 8;
+                if (k < k_size) {
+                    // Use timestamp (cycle number) as the index into eq_evals
+                    const cycle_idx = access.timestamp;
+                    const eq_val = if (cycle_idx < eq_size) eq_evals[@intCast(cycle_idx)] else F.zero();
+                    evals[@intCast(k)] = evals[@intCast(k)].add(eq_val);
+                    std.debug.print("[RA INIT]   Accumulating: k={}, cycle={}, eq_val={any}\n", .{ k, cycle_idx, eq_val.toBytesBE() });
                 }
             }
 

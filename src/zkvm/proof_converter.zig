@@ -1559,6 +1559,32 @@ pub fn ProofConverter(comptime F: type) type {
             const n_cycle_vars = std.math.log2_int(usize, trace_length);
             const log_ram_k = std.math.log2_int(usize, ram_K);
 
+            // CRITICAL: Pad cycle_witnesses to trace_length with NoOp witness values.
+            // In Jolt, padded cycles are Cycle::NoOp which has:
+            //   - FlagIsNoop = 1
+            //   - FlagDoNotUpdateUnexpandedPC = 1
+            //   - All other R1CS inputs = 0
+            // The prover must use padded witnesses because:
+            //   1. The streaming outer sumcheck materializes Az/Bz over all trace_length cycles
+            //   2. Even though Az*Bz = 0 for NoOp cycles, the individual Az values at NoOp
+            //      cycles are non-zero (some conditions evaluate to 1)
+            //   3. The verifier evaluates Az(r)*Bz(r) using MLE openings that include NoOp
+            //      contributions, so the prover's MLE must match
+            const padded_witnesses = try self.allocator.alloc(r1cs.R1CSCycleInputs(F), trace_length);
+            defer self.allocator.free(padded_witnesses);
+
+            // Copy actual witness data
+            @memcpy(padded_witnesses[0..cycle_witnesses.len], cycle_witnesses);
+
+            // Fill padded cycles with NoOp witness values
+            for (cycle_witnesses.len..trace_length) |i| {
+                padded_witnesses[i] = r1cs.R1CSCycleInputs(F).init(); // All zeros
+                padded_witnesses[i].values[r1cs.R1CSInputIndex.FlagIsNoop.toIndex()] = F.one();
+                padded_witnesses[i].values[r1cs.R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();
+            }
+
+            std.debug.print("[PROOF_CONV] Padded cycle_witnesses from {} to {} (NoOp padding: FlagIsNoop=1, FlagDoNotUpdateUnexpandedPC=1)\n", .{ cycle_witnesses.len, trace_length });
+
             // Copy commitments and append to transcript
             for (commitments) |c| {
                 try jolt_proof.commitments.append(self.allocator, c);
@@ -1573,18 +1599,20 @@ pub fn ProofConverter(comptime F: type) type {
             jolt_proof.joint_opening_proof = joint_opening_proof;
 
             // Create UniSkip proof for Stage 1 with actual constraint evaluations
+            // Use padded witnesses so that NoOp cycles are included in the polynomial evaluation
             jolt_proof.stage1_uni_skip_first_round_proof = try self.createUniSkipProofStage1FromWitnesses(
-                cycle_witnesses,
+                padded_witnesses,
                 tau,
             );
 
             // Stage 1: Outer Spartan Remaining - use streaming prover with transcript
+            // Use padded witnesses so Az/Bz MLE evaluations match the verifier's computation
             var stage1_result: ?Stage1Result = null;
             if (jolt_proof.stage1_uni_skip_first_round_proof) |*uniskip| {
                 stage1_result = try self.generateStreamingOuterSumcheckProofWithTranscript(
                     &jolt_proof.stage1_sumcheck_proof,
                     uniskip,
-                    cycle_witnesses,
+                    padded_witnesses,
                     tau,
                     transcript,
                 );
@@ -1625,7 +1653,7 @@ pub fn ProofConverter(comptime F: type) type {
 
                 try self.addSpartanOuterOpeningClaimsWithEvaluations(
                     &jolt_proof.opening_claims,
-                    cycle_witnesses,
+                    padded_witnesses,
                     r_cycle_big_endian,
                     result.uni_skip_claim,
                     transcript,
@@ -1700,7 +1728,7 @@ pub fn ProofConverter(comptime F: type) type {
             jolt_proof.stage2_uni_skip_first_round_proof = try self.createUniSkipProofStage2WithClaims(
                 &base_evals_stage2,
                 tau_high_stage2,
-                cycle_witnesses,
+                padded_witnesses,
                 tau_stage2_early,
             );
 
@@ -1838,7 +1866,7 @@ pub fn ProofConverter(comptime F: type) type {
                 uni_skip_claim_stage2,
                 tau_stage2,
                 r_spartan_original,
-                cycle_witnesses,
+                padded_witnesses,
                 n_cycle_vars,
                 log_ram_k,
                 &jolt_proof.opening_claims,
@@ -2041,7 +2069,7 @@ pub fn ProofConverter(comptime F: type) type {
                 &jolt_proof.stage3_sumcheck_proof,
                 transcript,
                 &jolt_proof.opening_claims,
-                cycle_witnesses,
+                padded_witnesses,
                 n_cycle_vars,
                 r_spartan_original, // r_outer in BIG_ENDIAN
                 r_product, // r_product in BIG_ENDIAN

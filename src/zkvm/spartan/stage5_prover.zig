@@ -798,7 +798,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                 var left_input: F = F.zero();
                 if (left_is_rs1) left_input = F.fromU64(step.rs1_value);
-                if (left_is_pc) left_input = F.fromU64(step.pc);
+                // FIX: Use unexpanded_pc (raw RISC-V address) not pc (expanded bytecode index)
+                // This matches R1CS constraints.zig and Jolt's instruction_input.rs
+                if (left_is_pc) left_input = F.fromU64(step.unexpanded_pc);
 
                 var right_input: F = F.zero();
                 if (right_is_rs2) right_input = F.fromU64(step.rs2_value);
@@ -864,16 +866,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         }
                     },
                     0x13 => { // I-type ALU
-                        // Only ADDI (funct3=0) uses AddOperands; others use interleaved
-                        if (funct3 == 0) {
-                            // ADDI: AddOperands, left=0, right=rs1+imm
-                            left_op = F.zero();
-                            right_op = left_input.add(right_input);
-                        } else {
-                            // SLTI, SLTIU, XORI, ORI, ANDI, SLLI, SRLI, SRAI: interleaved
-                            left_op = left_input;
-                            right_op = right_input;
-                        }
+                        // FIX: Match R1CS constraints.zig which treats ALL 0x13 as AddOperands
+                        // This is needed for Stage 5 to match Stage 2 claims
+                        // (Note: Jolt expands SLLI/etc to virtual instructions, but Zolt doesn't)
+                        left_op = F.zero();
+                        right_op = left_input.add(right_input);
                     },
                     0x37 => { // LUI: AddOperands, left_input=0, right_input=imm
                         left_op = F.zero();
@@ -1254,7 +1251,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // Compute left_input and right_input
                     var left_input: F = F.zero();
                     if (left_is_rs1) left_input = F.fromU64(step.rs1_value);
-                    if (left_is_pc) left_input = F.fromU64(step.pc);
+                    // FIX: Use unexpanded_pc (raw RISC-V address) not pc (expanded bytecode index)
+                    // This matches R1CS constraints.zig and Jolt's instruction_input.rs
+                    if (left_is_pc) left_input = F.fromU64(step.unexpanded_pc);
 
                     var right_input: F = F.zero();
                     if (right_is_rs2) right_input = F.fromU64(step.rs2_value);

@@ -1,60 +1,68 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 94 - Found root cause of Stage 5 failure
+## Status: Session 95 - Fixed UpperWord prefix, continuing Stage 5 debugging
 
 ## Current Issue: Stage 5 sumcheck verification fails
 
-### Root Cause (Session 94 Finding)
+### Fixes Applied in This Session
 
-**The prefix-suffix decomposition is computing incorrect polynomial evaluations.**
+1. **Fixed UpperWord prefix shift formulas**
+   - Bug: UpperWord was using `2*XLEN - j` instead of `XLEN - j`
+   - This caused overflow at j=0 (trying to shift by 128 bits)
+   - Also fixed the suffix handling to match Jolt's upper word extraction
+
+2. **Previously fixed suffix_len bug** (Session 94)
+   - 9 prefix functions were computing suffix_len AFTER popMsb() instead of BEFORE
+
+### Root Cause Analysis
 
 At round 0 of the address binding:
-- Brute-force `bf_val_eval_0` = `136276d9c9f325b23b5bbcc2806aaa88`
-- Prefix-suffix `read_checking[0]` = `986acce18b14b46fcb6e1544d9c065f1`
-- **MISMATCH!**
 
-And for RAF:
-- Brute-force `bf_raf_eval_0` = `9bac6bba3a49394b7c88153904b17e3d`
-- Prefix-suffix `raf_evals[0]` = `8d6b9084167d72aef843768ce0e84c94`
-- **MISMATCH!**
+- **Brute-force computation** (correct):
+  - `bf_val_eval_0 = 136276d9...`
+  - `bf_raf_eval_0 = 9bac6bba...`
+  - `bf_val + bf_raf = af0ee294...` (matches lookups_claim)
 
-The divergence starts at round 0 and accumulates throughout the 128 address rounds. By round 128, the polynomial chain has completely diverged from the correct values.
+- **Prefix-suffix decomposition** (incorrect):
+  - `read_checking[0] = 986acce1...`
+  - `raf_evals[0] = 8d6b9084...`
+  - `ps_val + ps_raf = fda2751d...` (DOES NOT MATCH!)
 
-### What's Working
+The per-table values match between brute-force and prefix-suffix:
+- `bf_val_per_table[0] = 821c547e...` = `eval_0_per_table[0]`
 
-1. **Transcript handling**: Challenges match between Zolt prover and Jolt verifier
-2. **Opening claims**: All virtual claims (ra_chunks, table_flags) serialize correctly
-3. **Sumcheck polynomial property**: p(0) + p(1) = claim holds for all rounds
-4. **Final claim components match Jolt's expected values**:
-   - `ra_product` matches
-   - `val_claim` matches
-   - `raf_claim` matches
-   - `eq_r_reduction` matches
+This suggests the tableCombine is working correctly but there's an issue with how the Q polynomials are being accumulated or bound.
 
-### What's Broken
+### Hypothesis
 
-The `proverMsgReadChecking` and `proverMsgRaf` functions return incorrect polynomial evaluations. This causes the polynomial chain to evolve incorrectly, even though it maintains the sumcheck property internally.
+The issue is that at round 0 with small lookup indices:
+1. All cycles have `prefix_bits = 0` (since k values are < 2^120)
+2. All Q values accumulate at index 0, Q[1..255] = 0
+3. At c=1, the suffix interpolation uses Q[b + half_len] which is all zeros
+4. So eval_1_indep = 0, and we rely on sumcheck property for eval_1
+
+This should be mathematically correct, but the prefix MLEs might not be computing the right values at c=0.
 
 ### Next Steps
 
-1. **Fix `proverMsgReadChecking`**:
-   - Compare Zolt's implementation with Jolt's `prover_msg_read_checking`
-   - Check the prefix MLE evaluation formula
-   - Check the suffix Q polynomial indexing
+1. **Debug prefix_mle at round 0**:
+   - For c=0, b=0 at round 0, trace through each prefix type
+   - Verify the returned values match Jolt's expected behavior
+   - Check if the checkpoints are correctly initialized
 
-2. **Fix `proverMsgRaf`**:
-   - Compare with Jolt's RAF decomposition
-   - Verify the operand polynomial formulas (left, right, identity)
+2. **Verify Q polynomial accumulation**:
+   - Check that suffix_mle values are being computed correctly
+   - Verify the tableCombine formula matches Jolt for each table
 
-3. **Test with simpler case**:
-   - Add unit tests for prefix-suffix decomposition
-   - Compare step-by-step with Jolt's values
+3. **Compare with Jolt's prover output**:
+   - Run Jolt prover with same trace and compare Q sums
+   - Check if the initialization of suffix polys matches
 
 ### Key Files
 
-- `src/zkvm/lookup_table/prefix_suffix_prover.zig`: Contains `proverMsgReadChecking` and `proverMsgRaf`
-- `src/zkvm/lookup_table/prefixes.zig`: Contains `prefixMle` function
-- `jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs`: Jolt's reference implementation
+- `src/zkvm/lookup_table/prefixes.zig`: Prefix MLE implementations
+- `src/zkvm/lookup_table/prefix_suffix_prover.zig`: Q polynomial init and proverMsgReadChecking
+- `src/zkvm/lookup_table/suffixes.zig`: Suffix MLE implementations
 
 ### Test Commands
 
@@ -71,5 +79,5 @@ cd /home/vivado/projects/jolt && cargo test -p jolt-core --features zolt-debug -
 - Stage 2: PASSES ✅
 - Stage 3: PASSES ✅
 - Stage 4: PASSES ✅
-- Stage 5: FAILS ❌ (prefix-suffix decomposition bug)
+- Stage 5: FAILS ❌ (prefix-suffix decomposition produces wrong eval_0)
 - Stages 6-7: Not reached

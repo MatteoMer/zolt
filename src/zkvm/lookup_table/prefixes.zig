@@ -376,6 +376,11 @@ fn lowerWordPrefixMle(
     b: *LookupBits(128),
     j: usize,
 ) F {
+    // Compute suffix_len BEFORE any popMsb, matching Jolt's order
+    // suffix_len = LOG_K - j - b.len - 1
+    const original_b_len = b.len;
+    const suffix_len_opt = safeSuffixLen(j, original_b_len);
+
     // Ignore high-order variables (first XLEN rounds)
     if (j < XLEN) {
         return F.zero();
@@ -395,18 +400,8 @@ fn lowerWordPrefixMle(
         result = result.add(F.fromU128(@as(u128, 1) << @intCast(x_shift)).mul(x));
         result = result.add(F.fromU128(@as(u128, 1) << @intCast(y_shift)).mul(F.fromU64(@as(u64, y_msb))));
     }
-    // Add in low-order bits from b
-    // suffix_len = LOG_K - j - b.len - 1
-    // At round j with b.len remaining bits, there are suffix_len bits below
-    // Guard against overflow: if j + b.len + 1 > LOG_K, suffix_len should be 0
-    if (j + b.len + 1 > LOG_K) {
-        // This shouldn't happen in normal operation
-        // But if b is already exhausted or we're past where this prefix matters,
-        // just return the accumulated result
-        std.debug.print("[LOWERWORD] Overflow guard: j={}, b.len={}, LOG_K={}\n", .{ j, b.len, LOG_K });
-        return result;
-    }
-    const suffix_len = safeSuffixLen(j, b.len) orelse return result;
+    // Add in low-order bits from b using suffix_len computed with ORIGINAL b.len
+    const suffix_len = suffix_len_opt orelse return result;
     result = result.add(F.fromU128(b.value << @intCast(suffix_len)));
     return result;
 }
@@ -470,28 +465,49 @@ fn upperWordPrefixMle(
     b: *LookupBits(128),
     j: usize,
 ) F {
-    // Only active during upper XLEN variables
-    if (j >= XLEN) {
-        return F.zero();
-    }
+    // Compute suffix_len BEFORE any popMsb, matching Jolt's order
+    const original_b_len = b.len;
+    const suffix_len_opt = safeSuffixLen(j, original_b_len);
+
     var result = checkpoints[@intFromEnum(Prefixes.UpperWord)] orelse F.zero();
+
+    // Ignore low-order variables (only active during upper XLEN rounds)
+    if (j >= XLEN) {
+        return result;
+    }
+
     if (r_x) |rx| {
         const y = F.fromU64(@as(u64, c));
-        const x_shift = 2 * XLEN - j;
-        const y_shift = 2 * XLEN - j - 1;
-        result = result.add(F.fromU128(@as(u128, 1) << @intCast(x_shift)).mul(rx));
-        result = result.add(F.fromU128(@as(u128, 1) << @intCast(y_shift)).mul(y));
+        // UpperWord uses XLEN - j (not 2*XLEN - j like LowerWord)
+        const x_shift = XLEN - j;
+        const y_shift = XLEN - j - 1;
+        result = result.add(F.fromU64(@as(u64, 1) << @intCast(x_shift)).mul(rx));
+        result = result.add(F.fromU64(@as(u64, 1) << @intCast(y_shift)).mul(y));
     } else {
         const x = F.fromU64(@as(u64, c));
         const y_msb = b.popMsb();
-        const x_shift = 2 * XLEN - j - 1;
-        const y_shift = 2 * XLEN - j - 2;
-        result = result.add(F.fromU128(@as(u128, 1) << @intCast(x_shift)).mul(x));
-        result = result.add(F.fromU128(@as(u128, 1) << @intCast(y_shift)).mul(F.fromU64(@as(u64, y_msb))));
+        // UpperWord uses XLEN - j (not 2*XLEN - j like LowerWord)
+        const x_shift = XLEN - j - 1;
+        const y_shift = XLEN - j - 2;
+        result = result.add(F.fromU64(@as(u64, 1) << @intCast(x_shift)).mul(x));
+        result = result.add(F.fromU64(@as(u64, 1) << @intCast(y_shift)).mul(F.fromU64(@as(u64, y_msb))));
     }
-    // Add in low-order bits from b
-    const suffix_len = safeSuffixLen(j, b.len) orelse return result;
-    result = result.add(F.fromU128(b.value << @intCast(suffix_len)));
+
+    // Add in bits of `b` that fall in upper word
+    // This is different from LowerWord - we need to extract only the upper word bits
+    const suffix_len = suffix_len_opt orelse return result;
+    if (suffix_len > XLEN) {
+        // All remaining bits fit in upper word
+        result = result.add(F.fromU64(@truncate(b.value << @intCast(suffix_len - XLEN))));
+    } else {
+        // Need to extract only the high bits that fall in upper word
+        // Split b into (b_high, b_low) where b_low has (XLEN - suffix_len) bits
+        const split_bits = XLEN - suffix_len;
+        if (split_bits < b.len) {
+            const b_high = b.value >> @intCast(split_bits);
+            result = result.add(F.fromU64(@truncate(b_high)));
+        }
+    }
     return result;
 }
 fn upperWordUpdateCheckpoint(
@@ -503,13 +519,15 @@ fn upperWordUpdateCheckpoint(
     _: usize,
 ) PrefixCheckpoint(F) {
     if (j >= XLEN) {
-        return null;
+        // Once we're past upper word rounds, just preserve checkpoint
+        return checkpoints[@intFromEnum(Prefixes.UpperWord)];
     }
-    const x_shift = 2 * XLEN - j;
-    const y_shift = 2 * XLEN - j - 1;
+    // UpperWord uses XLEN - j (not 2*XLEN - j like LowerWord)
+    const x_shift = XLEN - j;
+    const y_shift = XLEN - j - 1;
     var updated = checkpoints[@intFromEnum(Prefixes.UpperWord)] orelse F.zero();
-    updated = updated.add(F.fromU128(@as(u128, 1) << @intCast(x_shift)).mul(r_x));
-    updated = updated.add(F.fromU128(@as(u128, 1) << @intCast(y_shift)).mul(r_y));
+    updated = updated.add(F.fromU64(@as(u64, 1) << @intCast(x_shift)).mul(r_x));
+    updated = updated.add(F.fromU64(@as(u64, 1) << @intCast(y_shift)).mul(r_y));
     return updated;
 }
 // ============================================================================
@@ -523,6 +541,10 @@ fn andPrefixMle(
     b: *LookupBits(128),
     j: usize,
 ) F {
+    // Compute suffix_len BEFORE any popMsb, matching Jolt's order
+    const original_b_len = b.len;
+    const suffix_len_opt = safeSuffixLen(j, original_b_len);
+
     var result = checkpoints[@intFromEnum(Prefixes.And)] orelse F.zero();
     if (r_x) |rx| {
         const y = F.fromU64(@as(u64, c));
@@ -538,8 +560,8 @@ fn andPrefixMle(
         const and_contrib = F.fromU128(@as(u128, 1) << @intCast(x_shift)).mul(x.mul(F.fromU64(@as(u64, y_msb))));
         result = result.add(and_contrib);
     }
-    // Process remaining bits in b
-    const suffix_len = safeSuffixLen(j, b.len) orelse return result;
+    // Process remaining bits in b using suffix_len computed with ORIGINAL b.len
+    const suffix_len = suffix_len_opt orelse return result;
     const uninterleaved = b.uninterleave();
     const and_suffix = uninterleaved.left & uninterleaved.right;
     result = result.add(F.fromU128(@as(u128, and_suffix) << @intCast(suffix_len / 2)));
@@ -569,6 +591,10 @@ fn orPrefixMle(
     b: *LookupBits(128),
     j: usize,
 ) F {
+    // Compute suffix_len BEFORE any popMsb, matching Jolt's order
+    const original_b_len = b.len;
+    const suffix_len_opt = safeSuffixLen(j, original_b_len);
+
     var result = checkpoints[@intFromEnum(Prefixes.Or)] orelse F.zero();
     if (r_x) |rx| {
         const y = F.fromU64(@as(u64, c));
@@ -584,8 +610,8 @@ fn orPrefixMle(
         const or_contrib = x.add(y_msb_val).sub(x.mul(y_msb_val));
         result = result.add(F.fromU128(@as(u128, 1) << @intCast(x_shift)).mul(or_contrib));
     }
-    // Process remaining bits
-    const suffix_len = safeSuffixLen(j, b.len) orelse return result;
+    // Process remaining bits using suffix_len computed with ORIGINAL b.len
+    const suffix_len = suffix_len_opt orelse return result;
     const uninterleaved = b.uninterleave();
     const or_suffix = uninterleaved.left | uninterleaved.right;
     result = result.add(F.fromU128(@as(u128, or_suffix) << @intCast(suffix_len / 2)));
@@ -616,6 +642,10 @@ fn xorPrefixMle(
     b: *LookupBits(128),
     j: usize,
 ) F {
+    // Compute suffix_len BEFORE any popMsb, matching Jolt's order
+    const original_b_len = b.len;
+    const suffix_len_opt = safeSuffixLen(j, original_b_len);
+
     var result = checkpoints[@intFromEnum(Prefixes.Xor)] orelse F.zero();
     if (r_x) |rx| {
         const y = F.fromU64(@as(u64, c));
@@ -633,8 +663,8 @@ fn xorPrefixMle(
         const xor_contrib = x.add(y_msb_val).sub(two.mul(x.mul(y_msb_val)));
         result = result.add(F.fromU128(@as(u128, 1) << @intCast(x_shift)).mul(xor_contrib));
     }
-    // Process remaining bits
-    const suffix_len = safeSuffixLen(j, b.len) orelse return result;
+    // Process remaining bits using suffix_len computed with ORIGINAL b.len
+    const suffix_len = suffix_len_opt orelse return result;
     const uninterleaved = b.uninterleave();
     const xor_suffix = uninterleaved.left ^ uninterleaved.right;
     result = result.add(F.fromU128(@as(u128, xor_suffix) << @intCast(suffix_len / 2)));
@@ -860,6 +890,10 @@ fn andnPrefixMle(
     b: *LookupBits(128),
     j: usize,
 ) F {
+    // Compute suffix_len BEFORE any popMsb, matching Jolt's order
+    const original_b_len = b.len;
+    const suffix_len_opt = safeSuffixLen(j, original_b_len);
+
     var result = checkpoints[@intFromEnum(Prefixes.Andn)] orelse F.zero();
     // ANDN high-order variables: x_i * (1 - y_i)
     if (r_x) |rx| {
@@ -872,9 +906,9 @@ fn andnPrefixMle(
         // c * (1 - y_msb)
         result = result.add(F.fromU64(@as(u64, c) * (1 - @as(u64, y_msb))).mul(F.fromU64(@as(u64, 1) << @intCast(shift))));
     }
-    // ANDN remaining x and y bits
+    // ANDN remaining x and y bits using suffix_len computed with ORIGINAL b.len
     const uninterleaved = b.uninterleave();
-    const suffix_len = safeSuffixLen(j, b.len) orelse return result;
+    const suffix_len = suffix_len_opt orelse return result;
     result = result.add(F.fromU128(@as(u128, uninterleaved.left & ~uninterleaved.right) << @intCast(suffix_len / 2)));
     return result;
 }
@@ -903,6 +937,10 @@ fn lowerHalfWordPrefixMle(
     b: *LookupBits(128),
     j: usize,
 ) F {
+    // Compute suffix_len BEFORE any popMsb, matching Jolt's order
+    const original_b_len = b.len;
+    const suffix_len_opt = safeSuffixLen(j, original_b_len);
+
     const half_word_size = XLEN / 2;
     // Ignore high-order variables (those above the half-word boundary)
     if (j < XLEN + half_word_size) {
@@ -923,8 +961,8 @@ fn lowerHalfWordPrefixMle(
         result = result.add(F.fromU128(@as(u128, 1) << @intCast(x_shift)).mul(x));
         result = result.add(F.fromU128(@as(u128, 1) << @intCast(y_shift)).mul(F.fromU64(@as(u64, y_msb))));
     }
-    // Add in low-order bits from b
-    const suffix_len = safeSuffixLen(j, b.len) orelse return result;
+    // Add in low-order bits from b using suffix_len computed with ORIGINAL b.len
+    const suffix_len = suffix_len_opt orelse return result;
     result = result.add(F.fromU128(b.value << @intCast(suffix_len)));
     return result;
 }
@@ -2221,6 +2259,10 @@ fn overflowBitsZeroPrefixMle(
     b: *LookupBits(128),
     j: usize,
 ) F {
+    // Compute suffix_len BEFORE any popMsb, matching Jolt's order
+    const original_b_len = b.len;
+    const suffix_len_opt = safeSuffixLen(j, original_b_len);
+
     if (j >= 128 - XLEN) {
         return checkpoints[@intFromEnum(Prefixes.OverflowBitsZero)] orelse F.one();
     }
@@ -2234,7 +2276,7 @@ fn overflowBitsZeroPrefixMle(
         result = result.mul(F.one().sub(x).mul(F.one().sub(y)));
     }
     const rest = b.value;
-    const suffix_len = safeSuffixLen(j, b.len) orelse return result;
+    const suffix_len = suffix_len_opt orelse return result;
     const shifted = rest << @intCast(suffix_len);
     const is_zero: u64 = if ((shifted >> XLEN) == 0) 1 else 0;
     result = result.mul(F.fromU64(is_zero));
@@ -2267,6 +2309,10 @@ fn xorRotPrefixMle(
     b: *LookupBits(128),
     j: usize,
 ) F {
+    // Compute suffix_len BEFORE any popMsb, matching Jolt's order
+    const original_b_len = b.len;
+    const suffix_len_opt = safeSuffixLen(j, original_b_len);
+
     const prefix_idx = switch (rotation) {
         16 => Prefixes.XorRot16,
         24 => Prefixes.XorRot24,
@@ -2291,10 +2337,10 @@ fn xorRotPrefixMle(
         const shift = XLEN - 1 - rotated_pos;
         result = result.add(F.fromU64(@as(u64, 1) << @intCast(shift)).mul(xor_bit));
     }
-    // Remaining x and y bits
+    // Remaining x and y bits using suffix_len computed with ORIGINAL b.len
     const uninterleaved = b.uninterleave();
     const xor_result = uninterleaved.left ^ uninterleaved.right;
-    const suffix_len = safeSuffixLen(j, b.len) orelse return result;
+    const suffix_len = suffix_len_opt orelse return result;
     const shift_i: i32 = @as(i32, @intCast(suffix_len / 2)) - @as(i32, rotation);
     const shift: u6 = if (shift_i >= 0)
         @intCast(shift_i)
@@ -2340,6 +2386,10 @@ fn xorRotWPrefixMle(
     b: *LookupBits(128),
     j: usize,
 ) F {
+    // Compute suffix_len BEFORE any popMsb, matching Jolt's order
+    const original_b_len = b.len;
+    const suffix_len_opt = safeSuffixLen(j, original_b_len);
+
     if (j < XLEN) {
         return F.zero();
     }
@@ -2367,12 +2417,12 @@ fn xorRotWPrefixMle(
         rotated_position = 32 - 1 - rotated_position;
         result = result.add(F.fromU64(@as(u64, 1) << @intCast(rotated_position)).mul(xor_bit));
     }
-    // Remaining x and y bits
+    // Remaining x and y bits using suffix_len computed with ORIGINAL b.len
     const uninterleaved = b.uninterleave();
     const x_32 = @as(u32, @truncate(uninterleaved.left));
     const y_32 = @as(u32, @truncate(uninterleaved.right));
     const xor_result = x_32 ^ y_32;
-    const suffix_len = safeSuffixLen(j, b.len) orelse return result;
+    const suffix_len = suffix_len_opt orelse return result;
     const shift_i: i32 = @as(i32, @intCast(suffix_len / 2)) - @as(i32, rotation);
     const shift: u5 = if (shift_i >= 0)
         @intCast(shift_i)

@@ -863,9 +863,17 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             right_op = left_input.add(right_input);
                         }
                     },
-                    0x13 => { // I-type ALU: AddOperands
-                        left_op = F.zero();
-                        right_op = left_input.add(right_input);
+                    0x13 => { // I-type ALU
+                        // Only ADDI (funct3=0) uses AddOperands; others use interleaved
+                        if (funct3 == 0) {
+                            // ADDI: AddOperands, left=0, right=rs1+imm
+                            left_op = F.zero();
+                            right_op = left_input.add(right_input);
+                        } else {
+                            // SLTI, SLTIU, XORI, ORI, ANDI, SLLI, SRLI, SRAI: interleaved
+                            left_op = left_input;
+                            right_op = right_input;
+                        }
                     },
                     0x37 => { // LUI: AddOperands, left_input=0, right_input=imm
                         left_op = F.zero();
@@ -883,11 +891,17 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         left_op = F.zero();
                         right_op = left_input.add(right_input);
                     },
-                    0x1b => { // ADDIW: AddOperands (matches Jolt's ADDI step of decomposition)
-                        // In Jolt, ADDIW decomposes to ADDI+VirtualSignExtendWord, both with AddOperands.
-                        // For Zolt's single-cycle model, we use identity format matching ADDI.
-                        left_op = F.zero();
-                        right_op = left_input.add(right_input);
+                    0x1b => { // I-type word ALU (ADDIW, SLLIW, SRLIW, SRAIW)
+                        // Only ADDIW (funct3=0) uses AddOperands; others use interleaved
+                        if (funct3 == 0) {
+                            // ADDIW: AddOperands, left=0, right=rs1+imm
+                            left_op = F.zero();
+                            right_op = left_input.add(right_input);
+                        } else {
+                            // SLLIW, SRLIW, SRAIW: interleaved
+                            left_op = left_input;
+                            right_op = right_input;
+                        }
                     },
                     0x3b => { // ADDW/SUBW: AddOperands/SubtractOperands
                         // In Jolt, ADDW decomposes to ADD+VirtualSEW, SUBW to SUB+VirtualSEW.
@@ -907,8 +921,16 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             right_op = right_input;
                         }
                     },
+                    0x03 => { // Load: AddOperands, left=0, right=rs1+imm (address)
+                        left_op = F.zero();
+                        right_op = left_input.add(right_input);
+                    },
+                    0x23 => { // Store: AddOperands, left=0, right=rs1+imm (address)
+                        left_op = F.zero();
+                        right_op = left_input.add(right_input);
+                    },
                     else => {
-                        // Default: NOT Add+Sub+Mul (includes 0x03, 0x23, 0x63)
+                        // Default: NOT Add+Sub+Mul (includes 0x63 Branch)
                         left_op = left_input;
                         right_op = right_input;
                     },
@@ -2702,6 +2724,14 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         var bf_val_eval_0 = F.zero();
                         var bf_raf_eval_0 = F.zero();
                         var bf_val_per_table: [NUM_TABLES]F = [_]F{F.zero()} ** NUM_TABLES;
+                        var bf_left_sum = F.zero();
+                        var bf_right_sum = F.zero();
+                        var bf_identity_sum = F.zero();
+                        var bf_raf_cycle_count: usize = 0;
+                        var bf_identity_cycle_count: usize = 0;
+                        var bf_interleaved_cycle_count: usize = 0;
+                        // Alternative: compute RAF directly from operands
+                        var bf_raf_from_operands = F.zero();
                         for (0..T) |jj| {
                             const u_j = lookups_eq_evals[jj];
                             const combined_j = lookups_combined_vals[jj];
@@ -2714,6 +2744,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                             if (bit_val == 0) {
                                 direct_eval_0 = direct_eval_0.add(contrib);
+                                const step_check = trace.steps.items[jj];
+                                if (step_check.is_noop and !step_check.is_termination_store and round == 0 and !lookups_combined_vals[jj].eql(F.zero())) {
+                                    std.debug.print("[BRUTE R0] NOOP cycle {} with bit_val=0, NONZERO combined={x}\n", .{
+                                        jj, lookups_combined_vals[jj].toBytesBE()[16..32].*,
+                                    });
+                                }
                                 // Decompose: output_part = u*output, raf_part = u*(γ*left + γ²*right)
                                 // We need the lookup output value for this cycle
                                 // For table-0 identity-path: output = lower64(lookup_index)
@@ -2763,6 +2799,109 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                     }
                                     bf_val_eval_0 = bf_val_eval_0.add(u_j.mul(lo_bf));
                                     bf_raf_eval_0 = bf_raf_eval_0.add(u_j.mul(lookups_combined_vals[jj].sub(lo_bf)));
+                                    bf_raf_cycle_count += 1;
+
+                                    // Compute left/right/identity contributions from lookup_index
+                                    const k_lo = lookups_indices_lo[jj];
+                                    const k_hi = lookups_indices_hi[jj];
+
+                                    // Debug: for cycles 0-10 or 56-58, print the contribution and running sum
+                                    if ((jj < 10 or (jj >= 56 and jj <= 58)) and round == 0) {
+                                        const raf_from_combined = lookups_combined_vals[jj].sub(lo_bf);
+                                        const gamma_raf_sqr_dbg2 = gamma_lookups_raf.mul(gamma_lookups_raf);
+                                        const raf_from_operands_cycle = if (cycle_is_identity_path[jj])
+                                            gamma_raf_sqr_dbg2.mul(F.fromU128((@as(u128, k_hi) << 64) | @as(u128, k_lo)))
+                                        else blk: {
+                                            var lb: u64 = 0;
+                                            var rb: u64 = 0;
+                                            inline for (0..32) |i| {
+                                                const bit_lo = (k_lo >> @intCast(2 * i)) & 1;
+                                                const bit_hi = (k_lo >> @intCast(2 * i + 1)) & 1;
+                                                rb |= @as(u64, @truncate(bit_lo)) << @intCast(i);
+                                                lb |= @as(u64, @truncate(bit_hi)) << @intCast(i);
+                                            }
+                                            break :blk gamma_lookups_raf.mul(F.fromU64(lb)).add(gamma_raf_sqr_dbg2.mul(F.fromU64(rb)));
+                                        };
+                                        std.debug.print("[BRUTE R0 CYCLE{}] k_lo=0x{x}, is_identity={}\n", .{ jj, k_lo, cycle_is_identity_path[jj] });
+                                        std.debug.print("[BRUTE R0 CYCLE{}] lo_bf=0x{x}\n", .{ jj, lo_bf.toU64() });
+                                        std.debug.print("[BRUTE R0 CYCLE{}] combined-output={x}\n", .{ jj, raf_from_combined.toBytesBE()[16..32].* });
+                                        std.debug.print("[BRUTE R0 CYCLE{}] from_operands={x}\n", .{ jj, raf_from_operands_cycle.toBytesBE()[16..32].* });
+                                        const cycle_match = raf_from_combined.eql(raf_from_operands_cycle);
+                                        std.debug.print("[BRUTE R0 CYCLE{}] MATCH={}\n", .{ jj, cycle_match });
+                                    }
+
+                                    if (!cycle_is_identity_path[jj]) {
+                                        // Interleaved: compute left and right operands
+                                        // uninterleave: left = odd bits, right = even bits
+                                        var left_bits: u64 = 0;
+                                        var right_bits: u64 = 0;
+                                        inline for (0..32) |i| {
+                                            const bit_lo = (k_lo >> @intCast(2 * i)) & 1;
+                                            const bit_hi = (k_lo >> @intCast(2 * i + 1)) & 1;
+                                            right_bits |= @as(u64, @truncate(bit_lo)) << @intCast(i);
+                                            left_bits |= @as(u64, @truncate(bit_hi)) << @intCast(i);
+                                        }
+                                        // Also handle k_hi for larger indices
+                                        if (k_hi != 0) {
+                                            inline for (0..32) |i| {
+                                                const bit_lo = (k_hi >> @intCast(2 * i)) & 1;
+                                                const bit_hi = (k_hi >> @intCast(2 * i + 1)) & 1;
+                                                right_bits |= @as(u64, @truncate(bit_lo)) << @intCast(32 + i);
+                                                left_bits |= @as(u64, @truncate(bit_hi)) << @intCast(32 + i);
+                                            }
+                                        }
+
+                                        bf_left_sum = bf_left_sum.add(u_j.mul(F.fromU64(left_bits)));
+                                        bf_right_sum = bf_right_sum.add(u_j.mul(F.fromU64(right_bits)));
+                                        bf_interleaved_cycle_count += 1;
+                                        // Compute RAF contribution directly
+                                        const gamma_raf_sqr_op = gamma_lookups_raf.mul(gamma_lookups_raf);
+                                        const raf_contrib = u_j.mul(gamma_lookups_raf.mul(F.fromU64(left_bits)).add(gamma_raf_sqr_op.mul(F.fromU64(right_bits))));
+                                        bf_raf_from_operands = bf_raf_from_operands.add(raf_contrib);
+                                        // Debug: compare running sums
+                                        if (round == 0 and jj < 60) {
+                                            std.debug.print("[BRUTE R0 CYCLE{}] INTERLEAVED: bf_raf_eval_0={x}, bf_raf_from_op={x}, match={}\n", .{
+                                                jj, bf_raf_eval_0.toBytesBE()[16..32].*, bf_raf_from_operands.toBytesBE()[16..32].*,
+                                                bf_raf_eval_0.eql(bf_raf_from_operands),
+                                            });
+                                        }
+
+                                        // Debug: print interleaved cycle values
+                                        if (round == 0) {
+                                            // Compute what combined_vals should have
+                                            const gamma_raf_sqr_dbg = gamma_lookups_raf.mul(gamma_lookups_raf);
+                                            const raf_from_bits = gamma_lookups_raf.mul(F.fromU64(left_bits)).add(gamma_raf_sqr_dbg.mul(F.fromU64(right_bits)));
+                                            std.debug.print("[BRUTE R0 CYCLE{}] left_bits=0x{x}, right_bits=0x{x}\n", .{ jj, left_bits, right_bits });
+                                            std.debug.print("[BRUTE R0 CYCLE{}] γ*left + γ²*right={x}\n", .{ jj, raf_from_bits.toBytesBE()[16..32].* });
+                                            std.debug.print("[BRUTE R0 CYCLE{}] AFTER running bf_left_sum={x}\n", .{ jj, bf_left_sum.toBytesBE()[16..32].* });
+                                            std.debug.print("[BRUTE R0 CYCLE{}] AFTER running bf_right_sum={x}\n", .{ jj, bf_right_sum.toBytesBE()[16..32].* });
+                                        }
+                                    } else {
+                                        // Identity path: identity = full lookup_index
+                                        // For 128-bit, use lo and hi
+                                        const id_val = F.fromU128((@as(u128, k_hi) << 64) | @as(u128, k_lo));
+                                        bf_identity_sum = bf_identity_sum.add(u_j.mul(id_val));
+                                        bf_identity_cycle_count += 1;
+                                        // Compute RAF contribution directly
+                                        const gamma_raf_sqr_id = gamma_lookups_raf.mul(gamma_lookups_raf);
+                                        bf_raf_from_operands = bf_raf_from_operands.add(u_j.mul(gamma_raf_sqr_id.mul(id_val)));
+                                        // Debug: compare running sums
+                                        if (round == 0 and jj < 60) {
+                                            std.debug.print("[BRUTE R0 CYCLE{}] IDENTITY: bf_raf_eval_0={x}, bf_raf_from_op={x}, match={}\n", .{
+                                                jj, bf_raf_eval_0.toBytesBE()[16..32].*, bf_raf_from_operands.toBytesBE()[16..32].*,
+                                                bf_raf_eval_0.eql(bf_raf_from_operands),
+                                            });
+                                        }
+
+                                        // Debug: print identity contribution for first 5 cycles
+                                        if (jj < 5 and round == 0) {
+                                            const gamma_raf_sqr_dbg = gamma_lookups_raf.mul(gamma_lookups_raf);
+                                            const id_val_scaled = gamma_raf_sqr_dbg.mul(id_val);
+                                            std.debug.print("[BRUTE R0 CYCLE{}] identity_val=0x{x}, γ²*id={x}\n", .{ jj, k_lo, id_val_scaled.toBytesBE()[16..32].* });
+                                            std.debug.print("[BRUTE R0 CYCLE{}] running bf_identity_sum={x}\n", .{ jj, bf_identity_sum.toBytesBE()[16..32].* });
+                                        }
+                                    }
+
                                     // Per-table tracking
                                     const t_idx_bf = cycle_table_indices[jj];
                                     if (t_idx_bf >= 0 and @as(usize, @intCast(t_idx_bf)) < NUM_TABLES) {
@@ -2778,6 +2917,45 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         std.debug.print("[BRUTE R{}] direct_eval_1={x}\n", .{ round, direct_eval_1.toBytesBE()[16..32].* });
                         std.debug.print("[BRUTE R{}] bf_val_eval_0={x} (should match read_checking)\n", .{ round, bf_val_eval_0.toBytesBE()[16..32].* });
                         std.debug.print("[BRUTE R{}] bf_raf_eval_0={x} (should match raf_evals)\n", .{ round, bf_raf_eval_0.toBytesBE()[16..32].* });
+                        if (round == 0) {
+                            std.debug.print("[BRUTE R0] bf_raf_cycle_count={}, identity={}, interleaved={}\n", .{bf_raf_cycle_count, bf_identity_cycle_count, bf_interleaved_cycle_count});
+                            std.debug.print("[BRUTE R0] bf_left_sum={x}\n", .{bf_left_sum.toBytesBE()[16..32].*});
+                            std.debug.print("[BRUTE R0] bf_right_sum={x}\n", .{bf_right_sum.toBytesBE()[16..32].*});
+                            std.debug.print("[BRUTE R0] bf_identity_sum={x}\n", .{bf_identity_sum.toBytesBE()[16..32].*});
+                            // Compute what RAF should be from left/right/identity
+                            const gamma_raf_sqr = gamma_lookups_raf.mul(gamma_lookups_raf);
+                            const bf_raf_reconstructed = gamma_lookups_raf.mul(bf_left_sum).add(gamma_raf_sqr.mul(bf_right_sum.add(bf_identity_sum)));
+                            std.debug.print("[BRUTE R0] bf_raf_reconstructed (γ*l + γ²*(r+i))={x}\n", .{bf_raf_reconstructed.toBytesBE()[16..32].*});
+
+                            // Also compute RAF using the "combined - output" formula for verification
+                            // combined = output + γ*left + γ²*right
+                            // So combined - output = γ*left + γ²*right
+                            // But bf_raf_eval_0 is computed from u*(combined-output), and bf_raf_reconstructed from u*operands
+                            // The difference might be in how identity-path cycles contribute
+                            // For identity path: combined - output = γ*0 + γ²*right_op = γ²*right_op
+                            // But bf_raf_reconstructed uses γ²*identity
+                            // Let's also compute: γ*bf_left + γ²*bf_right (without identity)
+                            const bf_raf_no_identity = gamma_lookups_raf.mul(bf_left_sum).add(gamma_raf_sqr.mul(bf_right_sum));
+                            std.debug.print("[BRUTE R0] bf_raf_no_identity (γ*l + γ²*r)={x}\n", .{bf_raf_no_identity.toBytesBE()[16..32].*});
+                            std.debug.print("[BRUTE R0] γ²*bf_identity_sum={x}\n", .{gamma_raf_sqr.mul(bf_identity_sum).toBytesBE()[16..32].*});
+                            // Compute difference
+                            const diff = bf_raf_eval_0.sub(bf_raf_reconstructed);
+                            std.debug.print("[BRUTE R0] DIFF (bf_raf_eval_0 - bf_raf_reconstructed)={x}\n", .{diff.toBytesBE()[16..32].*});
+
+                            // Also compute: γ * bf_left + γ² * bf_right + γ² * bf_identity
+                            // This is equivalent to bf_raf_reconstructed but computed differently
+                            const alt_reconstructed = gamma_lookups_raf.mul(bf_left_sum)
+                                .add(gamma_raf_sqr.mul(bf_right_sum))
+                                .add(gamma_raf_sqr.mul(bf_identity_sum));
+                            std.debug.print("[BRUTE R0] alt_reconstructed (γ*l + γ²*r + γ²*i)={x}\n", .{alt_reconstructed.toBytesBE()[16..32].*});
+                            std.debug.print("[BRUTE R0] alt==bf_raf_reconstructed: {}\n", .{alt_reconstructed.eql(bf_raf_reconstructed)});
+                            std.debug.print("[BRUTE R0] bf_raf_from_operands={x}\n", .{bf_raf_from_operands.toBytesBE()[16..32].*});
+                            std.debug.print("[BRUTE R0] from_operands==bf_raf_eval_0: {}\n", .{bf_raf_from_operands.eql(bf_raf_eval_0)});
+                        }
+                        const bf_total = bf_val_eval_0.add(bf_raf_eval_0);
+                        std.debug.print("[BRUTE R{}] bf_val+bf_raf={x}\n", .{ round, bf_total.toBytesBE()[16..32].* });
+                        const ps_total = read_checking_evals[0].add(raf_evals[0]);
+                        std.debug.print("[BRUTE R{}] ps_val+ps_raf={x}\n", .{ round, ps_total.toBytesBE()[16..32].* });
                         if (round == 0) {
                             for (0..NUM_TABLES) |t_check| {
                                 if (!bf_val_per_table[t_check].eql(F.zero())) {

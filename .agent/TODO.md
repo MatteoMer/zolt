@@ -1,68 +1,54 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 95 - Fixed UpperWord prefix, continuing Stage 5 debugging
+## Status: Session 96 - Fixed Load/Store operands, debugging read_checking sum
 
 ## Current Issue: Stage 5 sumcheck verification fails
 
 ### Fixes Applied in This Session
 
-1. **Fixed UpperWord prefix shift formulas**
-   - Bug: UpperWord was using `2*XLEN - j` instead of `XLEN - j`
-   - This caused overflow at j=0 (trying to shift by 128 bits)
-   - Also fixed the suffix handling to match Jolt's upper word extraction
+1. **Fixed Load/Store operand computation** (lines 924-930)
+   - Bug: Load (0x03) and Store (0x23) were falling through to `else` branch
+   - This caused left_op=left_input, right_op=right_input (interleaved format)
+   - But Load/Store use identity path with left=0, right=address
+   - Fixed: Added explicit cases for 0x03 and 0x23 with `left_op = F.zero()` and `right_op = left_input.add(right_input)`
 
-2. **Previously fixed suffix_len bug** (Session 94)
-   - 9 prefix functions were computing suffix_len AFTER popMsb() instead of BEFORE
+2. **Previously fixed I-type ALU/W-type ALU handling** (Session 95)
+   - Only ADDI/ADDIW (funct3=0) use identity path
+   - Other I-type like SLLI use interleaved path
 
 ### Root Cause Analysis
 
-At round 0 of the address binding:
+After the Load/Store fix, the brute-force RAF computation now matches:
+- `bf_raf_eval_0 = 8d6b9084...`
+- `bf_raf_reconstructed = 8d6b9084...`
+- `bf_raf_from_operands = 8d6b9084...`
 
-- **Brute-force computation** (correct):
-  - `bf_val_eval_0 = 136276d9...`
-  - `bf_raf_eval_0 = 9bac6bba...`
-  - `bf_val + bf_raf = af0ee294...` (matches lookups_claim)
+But the read_checking (val) component still doesn't match:
+- `bf_val_eval_0 = 136276d9...` (brute-force)
+- `read_checking_evals[0] = 986acce1...` (prefix-suffix)
 
-- **Prefix-suffix decomposition** (incorrect):
-  - `read_checking[0] = 986acce1...`
-  - `raf_evals[0] = 8d6b9084...`
-  - `ps_val + ps_raf = fda2751d...` (DOES NOT MATCH!)
-
-The per-table values match between brute-force and prefix-suffix:
+The per-table values DO match:
 - `bf_val_per_table[0] = 821c547e...` = `eval_0_per_table[0]`
-
-This suggests the tableCombine is working correctly but there's an issue with how the Q polynomials are being accumulated or bound.
-
-### Hypothesis
-
-The issue is that at round 0 with small lookup indices:
-1. All cycles have `prefix_bits = 0` (since k values are < 2^120)
-2. All Q values accumulate at index 0, Q[1..255] = 0
-3. At c=1, the suffix interpolation uses Q[b + half_len] which is all zeros
-4. So eval_1_indep = 0, and we rely on sumcheck property for eval_1
-
-This should be mathematically correct, but the prefix MLEs might not be computing the right values at c=0.
+- `bf_val_per_table[1] = 92544e9d...` = `eval_0_per_table[1]`
+- `bf_val_per_table[9] = ac2e120d...` = `eval_0_per_table[9]`
 
 ### Next Steps
 
-1. **Debug prefix_mle at round 0**:
-   - For c=0, b=0 at round 0, trace through each prefix type
-   - Verify the returned values match Jolt's expected behavior
-   - Check if the checkpoints are correctly initialized
+1. **Debug why eval_0 != sum of eval_0_per_table**
+   - In proverMsgReadChecking, both should accumulate the same values
+   - Need to add debug output to verify
 
-2. **Verify Q polynomial accumulation**:
-   - Check that suffix_mle values are being computed correctly
-   - Verify the tableCombine formula matches Jolt for each table
+2. **Check tableCombine formula**
+   - May be an issue with how prefix*suffix values are combined
 
-3. **Compare with Jolt's prover output**:
-   - Run Jolt prover with same trace and compare Q sums
-   - Check if the initialization of suffix polys matches
+3. **Verify the debugging approach**
+   - The mismatch might be in how we're printing/comparing values
+   - Full 32-byte comparison needed
 
 ### Key Files
 
-- `src/zkvm/lookup_table/prefixes.zig`: Prefix MLE implementations
-- `src/zkvm/lookup_table/prefix_suffix_prover.zig`: Q polynomial init and proverMsgReadChecking
-- `src/zkvm/lookup_table/suffixes.zig`: Suffix MLE implementations
+- `src/zkvm/spartan/stage5_prover.zig`: Stage 5 prover with Load/Store fix at lines 924-930
+- `src/zkvm/lookup_table/prefix_suffix_prover.zig`: proverMsgReadChecking at line 284
 
 ### Test Commands
 
@@ -79,5 +65,5 @@ cd /home/vivado/projects/jolt && cargo test -p jolt-core --features zolt-debug -
 - Stage 2: PASSES ✅
 - Stage 3: PASSES ✅
 - Stage 4: PASSES ✅
-- Stage 5: FAILS ❌ (prefix-suffix decomposition produces wrong eval_0)
+- Stage 5: FAILS ❌ (read_checking total doesn't match brute-force)
 - Stages 6-7: Not reached

@@ -865,12 +865,18 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             right_op = left_input.add(right_input);
                         }
                     },
-                    0x13 => { // I-type ALU
-                        // FIX: Match R1CS constraints.zig which treats ALL 0x13 as AddOperands
-                        // This is needed for Stage 5 to match Stage 2 claims
-                        // (Note: Jolt expands SLLI/etc to virtual instructions, but Zolt doesn't)
-                        left_op = F.zero();
-                        right_op = left_input.add(right_input);
+                    0x13 => { // I-type ALU: only ADDI (funct3=0) uses AddOperands
+                        // Other I-type ALU instructions (SLLI, SLTI, etc.) use interleaved operands
+                        // Note: Jolt expands SLLI/etc to virtual instructions, but Zolt handles them directly
+                        if (funct3 == 0) {
+                            // ADDI: AddOperands
+                            left_op = F.zero();
+                            right_op = left_input.add(right_input);
+                        } else {
+                            // SLLI, SLTI, SLTIU, XORI, SRLI, SRAI, ORI, ANDI: interleaved
+                            left_op = left_input;
+                            right_op = right_input;
+                        }
                     },
                     0x37 => { // LUI: AddOperands, left_input=0, right_input=imm
                         left_op = F.zero();
@@ -1313,9 +1319,16 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 right_op = left_input.add(right_input);
                             }
                         },
-                        0x13 => { // I-type ALU: AddOperands
-                            left_op = F.zero();
-                            right_op = left_input.add(right_input);
+                        0x13 => { // I-type ALU: only ADDI (funct3=0) uses AddOperands
+                            if (funct3 == 0) {
+                                // ADDI: AddOperands
+                                left_op = F.zero();
+                                right_op = left_input.add(right_input);
+                            } else {
+                                // SLLI, SLTI, SLTIU, XORI, SRLI, SRAI, ORI, ANDI: interleaved
+                                left_op = left_input;
+                                right_op = right_input;
+                            }
                         },
                         0x37 => { // LUI: AddOperands, left_input=0, right_input=imm
                             left_op = F.zero();
@@ -1332,6 +1345,35 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         0x67 => { // JALR: AddOperands, left_input=rs1, right_input=imm
                             left_op = F.zero();
                             right_op = left_input.add(right_input);
+                        },
+                        0x1b => { // I-type word ALU (ADDIW, SLLIW, SRLIW, SRAIW)
+                            // Only ADDIW (funct3=0) uses AddOperands; others use interleaved
+                            if (funct3 == 0) {
+                                // ADDIW: AddOperands, left=0, right=rs1+imm
+                                left_op = F.zero();
+                                right_op = left_input.add(right_input);
+                            } else {
+                                // SLLIW, SRLIW, SRAIW: interleaved
+                                left_op = left_input;
+                                right_op = right_input;
+                            }
+                        },
+                        0x3b => { // ADDW/SUBW: AddOperands/SubtractOperands
+                            const funct7: u7 = @truncate(instr >> 25);
+                            if (funct3 == 0 and funct7 == 0) {
+                                // ADDW: AddOperands, left=0, right=rs1+rs2
+                                left_op = F.zero();
+                                right_op = left_input.add(right_input);
+                            } else if (funct3 == 0 and funct7 == 0x20) {
+                                // SUBW: SubtractOperands, left=0, right=rs1-rs2+2^64
+                                const two_pow_64 = F.fromBytes(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
+                                left_op = F.zero();
+                                right_op = left_input.sub(right_input).add(two_pow_64);
+                            } else {
+                                // Other 0x3b variants (not AddOperands/SubtractOperands)
+                                left_op = left_input;
+                                right_op = right_input;
+                            }
                         },
                         else => {
                             // Default: NOT Add+Sub+Mul
@@ -1397,6 +1439,76 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             std.debug.print("  right_sum (Σ eq*right)   = {any}\n", .{right_sum.toBytesBE()[0..16]});
             std.debug.print("  right_op_claim (Stage 2) = {any}\n", .{right_op_claim.toBytesBE()[0..16]});
             std.debug.print("  right match = {}\n", .{right_sum.eql(right_op_claim)});
+            // Debug: print first few eq_evals values
+            std.debug.print("  Stage5 eq_evals[0..3]: {x}, {x}, {x}\n", .{
+                lookups_eq_evals[0].toBytesBE()[16..32].*,
+                lookups_eq_evals[1].toBytesBE()[16..32].*,
+                lookups_eq_evals[2].toBytesBE()[16..32].*,
+            });
+            // Verify individual terms
+            for (0..5) |jj| {
+                const step_v = trace.steps.items[jj];
+                const instr_v = step_v.instruction;
+                const opcode_v = instr_v & 0x7f;
+                // Recompute left_op, right_op, output using same logic as above
+                const left_is_rs1_v: bool = switch (opcode_v) {
+                    0x33, 0x3b, 0x23, 0x63, 0x13, 0x03, 0x67, 0x1b => true,
+                    else => false,
+                };
+                const left_is_pc_v: bool = switch (opcode_v) {
+                    0x17, 0x6f => true,
+                    else => false,
+                };
+                const right_is_rs2_v: bool = switch (opcode_v) {
+                    0x33, 0x63, 0x3b => true,
+                    else => false,
+                };
+                const right_is_imm_v: bool = switch (opcode_v) {
+                    0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b => true,
+                    else => false,
+                };
+                const imm_v = computeImmediate(instr_v);
+                var left_input_v: F = F.zero();
+                if (left_is_rs1_v) left_input_v = F.fromU64(step_v.rs1_value);
+                if (left_is_pc_v) left_input_v = F.fromU64(step_v.unexpanded_pc);
+                var right_input_v: F = F.zero();
+                if (right_is_rs2_v) right_input_v = F.fromU64(step_v.rs2_value);
+                if (right_is_imm_v) right_input_v = imm_v;
+                // Compute lookup operands
+                const funct3_v: u3 = @truncate((instr_v >> 12) & 0x7);
+                const funct7_v: u7 = @truncate(instr_v >> 25);
+                const is_add_type = switch (opcode_v) {
+                    0x13, 0x37, 0x17, 0x6f, 0x67 => true,
+                    0x1b => (funct3_v == 0), // ADDIW (funct3=0) uses AddOperands
+                    0x33 => !(funct7_v == 0x01 and funct3_v != 0x0) and !(funct7_v == 0x20),
+                    0x3b => (funct3_v == 0 and funct7_v == 0) or (funct3_v == 0 and funct7_v == 0x20), // ADDW/SUBW
+                    else => false,
+                };
+                const is_sub_type = (opcode_v == 0x33 and funct3_v == 0 and funct7_v == 0x20) or
+                    (opcode_v == 0x3b and funct3_v == 0 and funct7_v == 0x20); // SUB or SUBW
+                var left_op_v: F = undefined;
+                var right_op_v: F = undefined;
+                if (is_sub_type) {
+                    const two_pow_64_v = F.fromBytes(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
+                    left_op_v = F.zero();
+                    right_op_v = left_input_v.sub(right_input_v).add(two_pow_64_v);
+                } else if (is_add_type) {
+                    left_op_v = F.zero();
+                    right_op_v = left_input_v.add(right_input_v);
+                } else {
+                    left_op_v = left_input_v;
+                    right_op_v = right_input_v;
+                }
+                const output_v = F.fromU64(step_v.rd_value); // Simplified, ignores JAL/JALR/Branch
+
+                std.debug.print("  [VERIFY j={}] eq={x}, left={x}, right={x}, out={x}\n", .{
+                    jj,
+                    lookups_eq_evals[jj].toBytesBE()[24..32].*,
+                    left_op_v.toBytesBE()[24..32].*,
+                    right_op_v.toBytesBE()[24..32].*,
+                    output_v.toBytesBE()[24..32].*,
+                });
+            }
             std.debug.print("[STAGE5 LOOKUPS] Sum verification:\n", .{});
             std.debug.print("  computed_sum = {any}\n", .{lookups_computed_sum.toBytesBE()[0..8]});
             std.debug.print("  lookups_input = {any}\n", .{lookups_input.toBytesBE()[0..8]});
@@ -5079,12 +5191,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 const bj: u1 = @truncate(k >> @intCast(n - 1 - j));
                 const rj = r[j]; // r[j] corresponds to bit (n-1-j) of k
                 if (bj == 1) {
-                    // CRITICAL: Use mulHiBigIntU128 to match Jolt's MontU128Challenge multiplication
-                    // Jolt treats challenges as raw [0,0,L,H] integers in multiplication
-                    result = result.mulHiBigIntU128(rj.limbs);
+                    // Use standard F multiplication for full field elements
+                    // This matches Stage 2's InstrLookupsProver which also uses F.mul
+                    result = result.mul(rj);
                 } else {
-                    // For (1 - r[j]): subtraction converts challenge to Montgomery form first (matches Jolt)
-                    // Then multiply the result (F * F is standard Montgomery multiplication)
                     const one_minus_rj = F.one().sub(rj);
                     result = result.mul(one_minus_rj);
                 }
@@ -5111,7 +5221,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 const bj: u1 = @truncate(k >> @intCast(num_vars - 1 - j));
                 const rj = r[j]; // r[j] corresponds to bit (num_vars-1-j) of k
                 if (bj == 1) {
-                    result = result.mulHiBigIntU128(rj.limbs);
+                    // Use standard F multiplication for full field elements
+                    result = result.mul(rj);
                 } else {
                     const one_minus_rj = F.one().sub(rj);
                     result = result.mul(one_minus_rj);

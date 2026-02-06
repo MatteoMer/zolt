@@ -1345,14 +1345,21 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                     }
                     self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
                 },
-                0x13 => { // I-type (ADDI, etc.)
-                    self.values[R1CSInputIndex.FlagAddOperands.toIndex()] = F.one();
-                    // For I-type, the "right input" comes from immediate
-                    // Constraint 5: LeftLookup == 0 for Add
-                    self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
-                    // Constraint 7: RightLookup == RightInput + LeftInput for Add
-                    // For ADDI, right_input should be the immediate
-                    self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input.add(left_input);
+                0x13 => { // I-type ALU
+                    const funct3_13: u3 = @truncate((instr >> 12) & 0x7);
+                    if (funct3_13 == 0) {
+                        // ADDI: AddOperands
+                        self.values[R1CSInputIndex.FlagAddOperands.toIndex()] = F.one();
+                        // Constraint 5: LeftLookup == 0 for Add
+                        self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
+                        // Constraint 7: RightLookup == RightInput + LeftInput for Add
+                        self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input.add(left_input);
+                    } else {
+                        // SLLI, SLTI, SLTIU, XORI, SRLI, SRAI, ORI, ANDI: interleaved
+                        // These use raw operands (left=rs1, right=imm)
+                        self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
+                        self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input;
+                    }
                     self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
                 },
                 0x6F => { // JAL

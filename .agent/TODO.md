@@ -1,60 +1,54 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 101 - Diagnosing Challenge Point Mismatch
+## Status: Session 103 - Fixed Per-Cycle Claims, Sumcheck Polynomial Still Mismatch
 
-### Current Issue
+### Progress Made
 
-Stage 5 sumcheck verification fails because Instance 2 (LookupsReadRaf) prover polynomial chain evaluation differs from verifier's expected formula.
+1. **Fixed eq polynomial multiplication** - Changed `mulHiBigIntU128` to standard `mul()` for F field elements
+2. **Fixed opcode handling for 0x13 (I-type ALU)**:
+   - Only funct3=0 (ADDI) uses AddOperands
+   - Other I-type ALU (SLLI, SLTI, etc.) use interleaved operands
+3. **Fixed 0x1b and 0x3b handling** in both switches in Stage 5
+4. **Updated R1CS constraints.zig** to match Stage 5's opcode handling
 
-**Root Cause Identified:**
-The `left_op_claim` and `right_op_claim` are computed at `r_spartan` (Stage 2 challenges), but Stage 5 uses `r_reduction` (Stage 3 challenges) for the eq polynomial. These are DIFFERENT challenge vectors!
+### Current Status
 
-- `r_spartan_for_instr[0] = { 43, 70, 202, 83...` (hex 0x2b, 0x46...)
-- `r_reduction_be[0] = ...a2e00e6d3d591508...` (completely different)
+Per-cycle MLE claims NOW MATCH between Stage 2 and Stage 5:
+- `output_sum` = `rv_claim` ✓
+- `left_sum` = `left_op_claim` ✓
+- `right_sum` = `right_op_claim` ✓
 
-### Fixes Applied This Session
+### Remaining Issue
 
-1. **unexpanded_pc fix**: Changed Stage 5 to use `step.unexpanded_pc` instead of `step.pc` for left_input when `left_is_pc = true`. This matches R1CS constraints.zig.
+Stage 5 sumcheck verification still fails:
+- `output_claim` (prover): `9b66e75f29b6733f22cb13e2d582630c...`
+- `expected_claim` (verifier): `ce7ef7a72c81030ea8e899fcc2d52002...`
 
-2. **0x13 opcode fix**: Changed Stage 5 to treat ALL 0x13 opcodes (I-type ALU) as AddOperands, matching R1CS constraints.zig. Previously, only ADDI (funct3=0) was treated as AddOperands.
+The sumcheck polynomial values don't produce the correct expected output. This means the sumcheck polynomial coefficients are being computed incorrectly somewhere.
 
-### What's Verified Working
+### Investigation Points
 
-- Per-cycle witness values now MATCH between Stage 2 and Stage 5
-  - j=0: left=0, right=0x8000 ✓
-  - j=1: left=0, right=0x8001 ✓
-  - j=2: left=0, right=0x8011 ✓ (was 0x10 before fix)
-  - j=3: left=0, right=0x80000044 ✓
-  - j=4: left=0, right=0x9 ✓
+1. **Sumcheck polynomial computation**: The prover's round polynomials might not be correct
+2. **Batching coefficients**: The three instances are batched together, batching might be wrong
+3. **Scaling factors**: Each instance has different number of variables, scaling might be off
+4. **Challenge extraction**: The challenges from transcript might not match Jolt's expectations
 
-- `output_sum (Σ eq*output)` MATCHES `rv_claim` ✓
+### Debug Evidence
 
-### What's Still Broken
+From Jolt verifier output:
+```
+[SUM DEBUG] expected_output_claim (sum of all): [ce, 7e, f7, a7, ...]
+[SUM DEBUG] manual f0+f1+f2: [73, b1, a9, 6a, ...]  <- Different from expected!
+```
 
-- `left_sum (Σ eq*left)` ≠ `left_op_claim`
-- `right_sum (Σ eq*right)` ≠ `right_op_claim`
-- This causes `computed_sum` ≠ `lookups_input`
-
-### Why The Mismatch Exists
-
-In Jolt's architecture:
-1. Stage 2 (Batched Sumcheck): InstructionLookupsClaimReduction computes claims at its own sumcheck challenges
-2. Stage 3 (InstructionClaimReduction): A SEPARATE sumcheck that takes Stage 2's output claims
-3. Stage 5 (InstructionReadRaf): Uses `r_reduction` from InstructionClaimReduction (Stage 3)
-
-The claims are stored with `SumcheckId::InstructionClaimReduction`, meaning they should be evaluated at the InstructionClaimReduction point.
-
-**The Question:** What exactly IS `r_reduction`?
-- It should be the InstructionClaimReduction sumcheck challenges
-- But in Zolt, it's coming from Stage 3, while the claims are computed in Stage 2
+The `manual f0+f1+f2` (sum of individual instance claims) doesn't match `expected_output_claim`. This suggests the individual instance claims computed by Jolt's verifier don't add up correctly, OR the prover's batched sum is wrong.
 
 ### Next Steps
 
-1. Understand exactly where `r_reduction` should come from
-2. Either:
-   a. Make the claims be computed at `r_reduction` point, OR
-   b. Use `r_spartan` in Stage 5 instead of `r_reduction`
-3. Check how Jolt's InstructionReadRafSumcheckProver gets its params.r_reduction
+1. Compare Stage 5 sumcheck polynomial coefficients round-by-round with Jolt expectations
+2. Verify the batching coefficient computation matches Jolt
+3. Check if the scaling factors for shorter instances are correct
+4. Debug the first few sumcheck rounds to find where divergence starts
 
 ### Test Commands
 

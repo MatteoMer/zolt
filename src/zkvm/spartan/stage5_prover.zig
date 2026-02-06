@@ -921,13 +921,15 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             right_op = right_input;
                         }
                     },
-                    0x03 => { // Load: AddOperands, left=0, right=rs1+imm (address)
-                        left_op = F.zero();
-                        right_op = left_input.add(right_input);
+                    0x03 => { // Load: NOT AddOperands, left=rs1, right=imm
+                        // R1CS witness sets: LeftLookupOperand=left_input, RightLookupOperand=right_input
+                        left_op = left_input;
+                        right_op = right_input;
                     },
-                    0x23 => { // Store: AddOperands, left=0, right=rs1+imm (address)
-                        left_op = F.zero();
-                        right_op = left_input.add(right_input);
+                    0x23 => { // Store: NOT AddOperands, left=rs1, right=imm
+                        // R1CS witness sets: LeftLookupOperand=left_input, RightLookupOperand=right_input
+                        left_op = left_input;
+                        right_op = right_input;
                     },
                     else => {
                         // Default: NOT Add+Sub+Mul (includes 0x63 Branch)
@@ -975,8 +977,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     0x17 => true, // AUIPC (AddOperands)
                     0x6f => true, // JAL (AddOperands)
                     0x67 => true, // JALR (AddOperands)
-                    0x03 => true, // Load (AddOperands - though no lookup table)
-                    0x23 => true, // Store (AddOperands - though no lookup table)
+                    0x03 => false, // Load: uses (rs1, imm) format, NOT identity path
+                    0x23 => false, // Store: uses (rs1, imm) format, NOT identity path
                     else => false,
                 };
                 cycle_is_identity_path[j] = is_identity_path;
@@ -2957,11 +2959,16 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         const ps_total = read_checking_evals[0].add(raf_evals[0]);
                         std.debug.print("[BRUTE R{}] ps_val+ps_raf={x}\n", .{ round, ps_total.toBytesBE()[16..32].* });
                         if (round == 0) {
+                            var bf_val_sum_per_table = F.zero();
                             for (0..NUM_TABLES) |t_check| {
                                 if (!bf_val_per_table[t_check].eql(F.zero())) {
                                     std.debug.print("[BRUTE R0] bf_val_per_table[{}]={x}\n", .{ t_check, bf_val_per_table[t_check].toBytesBE()[16..32].* });
+                                    bf_val_sum_per_table = bf_val_sum_per_table.add(bf_val_per_table[t_check]);
                                 }
                             }
+                            std.debug.print("[BRUTE R0] bf_val_sum_per_table={x}\n", .{bf_val_sum_per_table.toBytesBE()[16..32].*});
+                            std.debug.print("[BRUTE R0] bf_val_eval_0={x}\n", .{bf_val_eval_0.toBytesBE()[16..32].*});
+                            std.debug.print("[BRUTE R0] sum==bf_val_eval_0: {}\n", .{bf_val_sum_per_table.eql(bf_val_eval_0)});
                         }
                         std.debug.print("[BRUTE R{}] direct_sum={x}, lookups_claim={x}\n", .{
                             round,

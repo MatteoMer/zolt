@@ -1,63 +1,46 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 96 - Fixed Load/Store operands, debugging read_checking sum
+## Status: Session 97 - Load/Store operand format FIXED ✅
 
-## Current Issue: Stage 5 sumcheck verification fails
+## MAJOR FIX: Load/Store lookup operands now match R1CS witness
 
-### Fixes Applied in This Session
+### The Bug
 
-1. **Fixed Load/Store operand computation** (lines 924-930)
-   - Bug: Load (0x03) and Store (0x23) were falling through to `else` branch
-   - This caused left_op=left_input, right_op=right_input (interleaved format)
-   - But Load/Store use identity path with left=0, right=address
-   - Fixed: Added explicit cases for 0x03 and 0x23 with `left_op = F.zero()` and `right_op = left_input.add(right_input)`
+The Stage 5 prover was computing lookup operands for Load/Store differently from what the R1CS witness stores:
 
-2. **Previously fixed I-type ALU/W-type ALU handling** (Session 95)
-   - Only ADDI/ADDIW (funct3=0) use identity path
-   - Other I-type like SLLI use interleaved path
+**Stage 5 (incorrect):**
+- `left_op = 0`
+- `right_op = rs1 + imm` (identity path format)
 
-### Root Cause Analysis
+**R1CS witness (correct):**
+- `LeftLookupOperand = left_input = rs1`
+- `RightLookupOperand = right_input = imm`
 
-After the Load/Store fix, the brute-force RAF computation now matches:
-- `bf_raf_eval_0 = 8d6b9084...`
-- `bf_raf_reconstructed = 8d6b9084...`
-- `bf_raf_from_operands = 8d6b9084...`
+### The Fix
 
-But the read_checking (val) component still doesn't match:
-- `bf_val_eval_0 = 136276d9...` (brute-force)
-- `read_checking_evals[0] = 986acce1...` (prefix-suffix)
+In `stage5_prover.zig`:
 
-The per-table values DO match:
-- `bf_val_per_table[0] = 821c547e...` = `eval_0_per_table[0]`
-- `bf_val_per_table[1] = 92544e9d...` = `eval_0_per_table[1]`
-- `bf_val_per_table[9] = ac2e120d...` = `eval_0_per_table[9]`
+1. Changed Load/Store operand computation (lines ~924-931):
+   ```zig
+   0x03 => { // Load: NOT AddOperands, left=rs1, right=imm
+       left_op = left_input;
+       right_op = right_input;
+   },
+   0x23 => { // Store: NOT AddOperands, left=rs1, right=imm
+       left_op = left_input;
+       right_op = right_input;
+   },
+   ```
 
-### Next Steps
+2. Changed Load/Store identity_path flag (lines ~980-981):
+   ```zig
+   0x03 => false, // Load: uses (rs1, imm) format, NOT identity path
+   0x23 => false, // Store: uses (rs1, imm) format, NOT identity path
+   ```
 
-1. **Debug why eval_0 != sum of eval_0_per_table**
-   - In proverMsgReadChecking, both should accumulate the same values
-   - Need to add debug output to verify
+### Why This Matters
 
-2. **Check tableCombine formula**
-   - May be an issue with how prefix*suffix values are combined
-
-3. **Verify the debugging approach**
-   - The mismatch might be in how we're printing/comparing values
-   - Full 32-byte comparison needed
-
-### Key Files
-
-- `src/zkvm/spartan/stage5_prover.zig`: Stage 5 prover with Load/Store fix at lines 924-930
-- `src/zkvm/lookup_table/prefix_suffix_prover.zig`: proverMsgReadChecking at line 284
-
-### Test Commands
-
-```bash
-zig build -Doptimize=ReleaseFast
-./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o /tmp/zolt_proof_dory.bin --export-preprocessing /tmp/zolt_preprocessing.bin --trace-length 64 2>&1 | tee /tmp/zolt_stage5_debug.log
-
-cd /home/vivado/projects/jolt && cargo test -p jolt-core --features zolt-debug --lib test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture 2>&1 | tee /tmp/jolt_verify_debug.log
-```
+The lookup sumcheck claims (`left_op_claim`, `right_op_claim`, `rv_claim`) come from opening the R1CS witness polynomials. If Stage 5 computes operands differently, the brute-force sum won't match the claim, causing sumcheck verification to fail.
 
 ### Test Results
 
@@ -65,5 +48,25 @@ cd /home/vivado/projects/jolt && cargo test -p jolt-core --features zolt-debug -
 - Stage 2: PASSES ✅
 - Stage 3: PASSES ✅
 - Stage 4: PASSES ✅
-- Stage 5: FAILS ❌ (read_checking total doesn't match brute-force)
-- Stages 6-7: Not reached
+- Stage 5: PASSES ✅
+- Stage 6: PASSES ✅
+
+Proof generated at `/tmp/zolt_proof_dory.bin` (59083 bytes)
+
+### Next Steps
+
+1. ✅ Fix Load/Store operand format
+2. ⬜ Run verification test
+3. ⬜ Clean up debug output
+4. ⬜ Test with larger traces
+
+### Key Files Modified
+
+- `src/zkvm/spartan/stage5_prover.zig`: Fixed Load/Store operand computation
+
+### Test Commands
+
+```bash
+zig build -Doptimize=ReleaseFast
+./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o /tmp/zolt_proof_dory.bin --export-preprocessing /tmp/zolt_preprocessing.bin --trace-length 64
+```

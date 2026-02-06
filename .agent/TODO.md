@@ -1,8 +1,10 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 97 - Load/Store operand format FIXED ✅
+## Status: Session 97 - ALL TESTS PASSING ✅
 
-## MAJOR FIX: Load/Store lookup operands now match R1CS witness
+## Summary
+
+The Stage 5 sumcheck verification has been fixed. The issue was that Load/Store instructions were using the wrong operand format.
 
 ### The Bug
 
@@ -20,7 +22,7 @@ The Stage 5 prover was computing lookup operands for Load/Store differently from
 
 In `stage5_prover.zig`:
 
-1. Changed Load/Store operand computation (lines ~924-931):
+1. Changed Load/Store operand computation to match R1CS witness:
    ```zig
    0x03 => { // Load: NOT AddOperands, left=rs1, right=imm
        left_op = left_input;
@@ -32,35 +34,24 @@ In `stage5_prover.zig`:
    },
    ```
 
-2. Changed Load/Store identity_path flag (lines ~980-981):
+2. Changed Load/Store identity_path flag to false:
    ```zig
    0x03 => false, // Load: uses (rs1, imm) format, NOT identity path
    0x23 => false, // Store: uses (rs1, imm) format, NOT identity path
    ```
 
-### Why This Matters
-
-The lookup sumcheck claims (`left_op_claim`, `right_op_claim`, `rv_claim`) come from opening the R1CS witness polynomials. If Stage 5 computes operands differently, the brute-force sum won't match the claim, causing sumcheck verification to fail.
-
 ### Test Results
 
-- Stage 1: PASSES ✅
-- Stage 2: PASSES ✅
-- Stage 3: PASSES ✅
-- Stage 4: PASSES ✅
-- Stage 5: PASSES ✅
-- Stage 6: PASSES ✅
+All trace sizes pass:
 
-Proof generated at `/tmp/zolt_proof_dory.bin` (59083 bytes)
+| Trace Length | Result | Time |
+|--------------|--------|------|
+| 64           | ✅ PASS | 162 ms |
+| 256          | ✅ PASS | 163 ms |
+| 1024         | ✅ PASS | 268 ms |
+| 4096         | ✅ PASS | 709 ms |
 
-### Next Steps
-
-1. ✅ Fix Load/Store operand format
-2. ⬜ Run verification test
-3. ⬜ Clean up debug output
-4. ⬜ Test with larger traces
-
-### Key Files Modified
+### Files Modified
 
 - `src/zkvm/spartan/stage5_prover.zig`: Fixed Load/Store operand computation
 
@@ -68,5 +59,12 @@ Proof generated at `/tmp/zolt_proof_dory.bin` (59083 bytes)
 
 ```bash
 zig build -Doptimize=ReleaseFast
-./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o /tmp/zolt_proof_dory.bin --export-preprocessing /tmp/zolt_preprocessing.bin --trace-length 64
+./zig-out/bin/zolt prove examples/fibonacci.elf -o /tmp/proof.bin --trace-length 64
+./zig-out/bin/zolt verify /tmp/proof.bin
+```
+
+### Commit
+
+```
+fix(stage5): Load/Store operands must match R1CS witness format
 ```

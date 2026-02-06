@@ -1,6 +1,6 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 103 - Fixed Per-Cycle Claims, Sumcheck Polynomial Still Mismatch
+## Status: Session 103 - Transcript Mismatch Identified
 
 ### Progress Made
 
@@ -18,37 +18,25 @@ Per-cycle MLE claims NOW MATCH between Stage 2 and Stage 5:
 - `left_sum` = `left_op_claim` ✓
 - `right_sum` = `right_op_claim` ✓
 
-### Remaining Issue
+### Root Cause Identified
 
-Stage 5 sumcheck verification still fails:
-- `output_claim` (prover): `9b66e75f29b6733f22cb13e2d582630c...`
-- `expected_claim` (verifier): `ce7ef7a72c81030ea8e899fcc2d52002...`
+**Transcript state mismatch** between Zolt prover and Jolt verifier:
 
-The sumcheck polynomial values don't produce the correct expected output. This means the sumcheck polynomial coefficients are being computed incorrectly somewhere.
+Zolt Stage 5 initial:
+- `initial_claim (e before R0)`: `ef4e08c8d908a611f3ff0d6ba1d0006d`
+- `R0 challenge`: `09163a82425a60648d548c6fa78078c8`
 
-### Investigation Points
+Jolt verifier Stage 5:
+- `initial_claim (e before R0)`: `640a52f2652442d88a418a8306be965f`
+- `R0 challenge`: `f396588313f3313ed1bbe85d2dcd973a`
 
-1. **Sumcheck polynomial computation**: The prover's round polynomials might not be correct
-2. **Batching coefficients**: The three instances are batched together, batching might be wrong
-3. **Scaling factors**: Each instance has different number of variables, scaling might be off
-4. **Challenge extraction**: The challenges from transcript might not match Jolt's expectations
+The values are completely different! This means the transcript states diverged BEFORE Stage 5 started. The transcript accumulates hashes of all prover messages, so if earlier stages have different polynomial coefficients or different serialization, the transcript will diverge.
 
-### Debug Evidence
+### Investigation Required
 
-From Jolt verifier output:
-```
-[SUM DEBUG] expected_output_claim (sum of all): [ce, 7e, f7, a7, ...]
-[SUM DEBUG] manual f0+f1+f2: [73, b1, a9, 6a, ...]  <- Different from expected!
-```
-
-The `manual f0+f1+f2` (sum of individual instance claims) doesn't match `expected_output_claim`. This suggests the individual instance claims computed by Jolt's verifier don't add up correctly, OR the prover's batched sum is wrong.
-
-### Next Steps
-
-1. Compare Stage 5 sumcheck polynomial coefficients round-by-round with Jolt expectations
-2. Verify the batching coefficient computation matches Jolt
-3. Check if the scaling factors for shorter instances are correct
-4. Debug the first few sumcheck rounds to find where divergence starts
+1. Compare Stage 1-4 polynomial coefficients between Zolt and expected Jolt values
+2. Check commitment serialization
+3. Verify the order of transcript operations matches Jolt exactly
 
 ### Test Commands
 
@@ -61,3 +49,11 @@ zig build -Doptimize=ReleaseFast
 cd /home/vivado/projects/jolt
 cargo test -p jolt-core test_verify_zolt_proof_with_zolt_preprocessing --release --features zolt-debug -- --ignored --nocapture 2>&1 | tail -100
 ```
+
+### Session Summary
+
+This session fixed the per-cycle witness computation to match between Stage 2 and Stage 5. The opcode handling for 0x13, 0x1b, and 0x3b now correctly determines which instructions use AddOperands vs interleaved operands.
+
+However, Stage 5 sumcheck still fails because the transcript states are different. The prover and verifier compute different initial claims and challenges for Stage 5, indicating that something in the earlier stages (or their serialization) doesn't match.
+
+Next step: Debug the transcript state divergence by comparing Stage 1-4 outputs.

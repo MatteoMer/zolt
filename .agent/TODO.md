@@ -1,70 +1,62 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 106 - r_cycle mismatch identified in ValEvaluation
+## Status: Session 107 - Found transcript divergence in Stage 2
 
-### Key Finding
+### Critical Finding
 
-Challenge representation is CORRECT! We verified:
-1. Challenge limbs `[0, 0, low, high]` match Jolt exactly
-2. Arithmetic operations (sub, mul) produce identical results
-3. The "quasi-Montgomery" representation is correct
+**The transcript state diverges between Zolt prover and Jolt verifier starting at Stage 2, Round 0.**
 
-### Current Issue: Stage 4 Verification Failure
-
-The Stage 4 (Gruen prover) verification fails because `expected_output_claim` doesn't match.
-
-**Root cause appears to be in ValEvaluation**: The verifier's ValEvaluation computes input_claim using r_cycle from Stage 2's RamReadWriteChecking opening, but there's a mismatch:
-
-From Jolt debug output:
+Jolt verifier's Stage 2 challenge[0] (derived from verifying proof):
 ```
-r_cycle (from Stage 2 RamVal opening):
-  r_cycle[0]: [56, 18, 3f, 29, b6, 41, 44, 9a, cc, 27, 7d, c1, 4d, 21, ea, 2b]
-
-r (from Stage 4 sumcheck challenges, normalized):
-  r[0]: [d8, c9, 49, 15, 0d, ea, 97, 30, ff, 2a, 0e, 6b, ed, 64, c8, 0d]
+[00, 00, ..., ca, e3, 15, 54, c5, e0, 25, 42, 7d, 85, 67, cf, 78, d9, 73, 1e]
 ```
 
-These are completely different! The ValEvaluation gets r_address/r_cycle from the RamVal@RamReadWriteChecking opening, which is:
-- Computed by the verifier using `normalize_opening_point(stage2_challenges)`
-- Stored in `VerifierOpeningAccumulator` during Stage 2 verification
-- Retrieved by ValEvaluation via `get_virtual_polynomial_opening`
-
-### Hypothesis
-
-The issue might be that Zolt's Stage 4 is computing r_address/r_cycle differently than how Jolt's verifier expects. The verifier re-computes these from the Stage 2 challenges during verification, not from the proof data.
-
-Key insight from Jolt's `cache_openings`:
-```rust
-let opening_point = self.params.normalize_opening_point(sumcheck_challenges);
-accumulator.append_virtual(transcript, VirtualPolynomial::RamVal, SumcheckId::RamReadWriteChecking, opening_point.clone(), claim);
+Zolt prover's Stage 2 challenge[0] (used during proving):
+```
+{ 119, 212, 208, 55, ... }  = 77, d4, d0, 37, ...
 ```
 
-The verifier calls this during `verify_claims` to store the opening point. So the opening point is derived from the Stage 2 sumcheck challenges.
+These are completely different! This means the transcript state at the end of Stage 1 is different.
 
-### Investigation Needed
+### Root Cause
 
-1. Check if Zolt's Stage 4 uses the SAME challenges that the verifier uses for `normalize_opening_point`
-2. The verifier's `cache_openings` is called after Stage 2 sumcheck verification
-3. Zolt may be using different challenge indices or order
+The Jolt verifier re-derives ALL challenges by hashing the proof's round polynomials. If Zolt's serialized proof produces different transcript hashes, challenges diverge.
 
-### Files to Check
+Possible causes:
+1. **Stage 1 round polynomial mismatch**: The coefficients Zolt SENDS don't match what it USED internally
+2. **Serialization format mismatch**: Field elements serialized differently than Jolt expects
+3. **Missing transcript data**: UniSkip proof or other data not matching
+4. **Coefficient order**: Coefficients might be in wrong order
 
-- `/home/vivado/projects/jolt/jolt-core/src/zkvm/ram/read_write_checking.rs` - cache_openings, normalize_opening_point
-- `/home/vivado/projects/zolt/src/zkvm/proof_converter.zig` - Stage 4 Gruen prover r_address computation
+### Stage 4 Failure Explained
+
+Stage 4 fails as a CONSEQUENCE of Stage 2 divergence:
+1. Jolt verifier derives different Stage 2 challenges than Zolt used
+2. `cache_openings` stores wrong r_cycle in accumulator
+3. Stage 4's ValEvaluation retrieves wrong r_cycle
+4. `LT(r, r_cycle)` computes wrong value → sumcheck mismatch
+
+### Next Steps
+
+1. Compare Stage 1 round polynomial coefficients between:
+   - What Zolt serializes to the proof
+   - What Jolt reads from the proof
+2. Check transcript state after commitments are added (before Stage 1)
+3. Verify UniSkip first round proof handling matches
 
 ### Test Commands
 
 ```bash
 # Generate proof
-zig build run -Doptimize=ReleaseFast -- prove examples/fibonacci.elf --jolt-format -o /tmp/zolt_proof.bin --srs /tmp/jolt_dory_srs.bin
+./zig-out/bin/zolt prove examples/fibonacci.elf --trace-length 64 -o /tmp/zolt_proof.bin --jolt-format 2>&1 | head -200
 
-# Verify with debug output
-cd ../jolt && cargo run --release --features zolt-debug --manifest-path examples/fibonacci/Cargo.toml -- --verify-zolt-proof /tmp/zolt_proof.bin 2>&1 | tail -300
+# Verify with Jolt
+cd ../jolt && cargo run --release --features zolt-debug --manifest-path examples/fibonacci/Cargo.toml -- --verify-zolt-proof /tmp/zolt_proof.bin 2>&1 | grep -E "Stage.*1.*Round.*0|coeff" | head -20
 ```
 
-## Previous Sessions
+### Previous Sessions
 
-- Session 106: Verified challenge representation is correct; identified r_cycle mismatch in ValEvaluation
+- Session 107: Found transcript divergence at Stage 2, Round 0
+- Session 106: Verified challenge representation is correct
 - Session 105: Identified ValEval/ValFinal input_claim mismatch
 - Session 104: Fixed proof serialization format (--jolt-format flag)
-- Session 103-101: Various Stage 5 fixes

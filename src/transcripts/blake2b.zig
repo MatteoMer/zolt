@@ -947,3 +947,29 @@ test "jolt compatibility: test vector 4 - vector append" {
     // Challenge is non-zero - exact value depends on Montgomery conversion
     try testing.expect(!challenge.eql(BN254Scalar.zero()));
 }
+
+test "jolt compatibility: challenge limbs verification" {
+    const Transcript = Blake2bTranscript(BN254Scalar);
+
+    // Same label and message as Jolt test
+    var t = Transcript.init("zolt_compat_test");
+    t.appendMessage("test_data");
+
+    const challenge = t.challengeScalar128Bits();
+
+    // Expected from Jolt:
+    // MontU128Challenge limbs: [0, 0, 0x5207e9d28bcca994, 0x0737345c88127af8]
+    const expected_low: u64 = 0x5207e9d28bcca994;
+    const expected_high: u64 = 0x0737345c88127af8;
+
+    // Print actual values for debugging
+    std.debug.print("\n=== ZOLT CHALLENGE LIMBS TEST ===\n", .{});
+    std.debug.print("Limbs: [0x{x}, 0x{x}, 0x{x}, 0x{x}]\n", .{ challenge.limbs[0], challenge.limbs[1], challenge.limbs[2], challenge.limbs[3] });
+    std.debug.print("Expected: [0, 0, 0x{x}, 0x{x}]\n", .{ expected_low, expected_high });
+    std.debug.print("=== END ZOLT TEST ===\n", .{});
+
+    try testing.expectEqual(@as(u64, 0), challenge.limbs[0]);
+    try testing.expectEqual(@as(u64, 0), challenge.limbs[1]);
+    try testing.expectEqual(expected_low, challenge.limbs[2]);
+    try testing.expectEqual(expected_high, challenge.limbs[3]);
+}

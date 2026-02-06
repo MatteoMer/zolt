@@ -1,83 +1,75 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 93 - Stage 5 RAF drift investigation (SESSION_ENDING)
+## Status: Session 94 - Found root cause of Stage 5 failure
 
 ## Current Issue: Stage 5 sumcheck verification fails
 
-### Root Cause Analysis (Session 93 - Final Summary)
+### Root Cause (Session 94 Finding)
 
-**Key Finding**: The polynomial evaluation chain (`lookups_claim`) is internally consistent throughout address rounds, but diverges from the materialized sum at cycle round start.
+**The prefix-suffix decomposition is computing incorrect polynomial evaluations.**
 
-**Polynomial chain verification**:
-- Round 0: `p(0) + p(1) = claim` ✓
-- ...
-- Round 127: `p(0) + p(1) = claim` ✓
-- `lookups_claim` at R127 end: `f21f2ce546c92b0f7c9ad5e065cec05a`
+At round 0 of the address binding:
+- Brute-force `bf_val_eval_0` = `136276d9c9f325b23b5bbcc2806aaa88`
+- Prefix-suffix `read_checking[0]` = `986acce18b14b46fcb6e1544d9c065f1`
+- **MISMATCH!**
 
-**Materialized sum at cycle start**:
-- `materialized_sum (WITH ra)` = `e728cffa1af93851e97fbac6cb36aca0`
-- `sum_no_ra (WITHOUT ra)` = `39edfd2288a73b78ae89c459d4ef76a9`
-- Neither matches `lookups_claim`!
+And for RAF:
+- Brute-force `bf_raf_eval_0` = `9bac6bba3a49394b7c88153904b17e3d`
+- Prefix-suffix `raf_evals[0]` = `8d6b9084167d72aef843768ce0e84c94`
+- **MISMATCH!**
 
-**The formula being verified**:
-```
-Σ_j eq(j, r_red) * eq(k[j], r_addr) * combined_val[j]
-```
-Where:
-- `eq(j, r_red)` = `lookups_eq_evals[j]` (reinitialized for cycle rounds)
-- `eq(k[j], r_addr)` = `lookups_ra_weights[j]` = `Π_chunk ra_chunk[j]`
-- `combined_val[j]` = rematerialized `table_mle(r_addr) + raf(r_addr)`
+The divergence starts at round 0 and accumulates throughout the 128 address rounds. By round 128, the polynomial chain has completely diverged from the correct values.
 
-**Probable causes** (to investigate next session):
-1. **ra_weights indexing**: The k_bound extraction `k >> suffix_bits & m_mask` might differ from Jolt
-2. **combined_vals formula**: The `table_values_at_r_addr` or `raf_interleaved/raf_identity` computation might differ
-3. **Phase counting**: With 16 phases (small trace), the expanding table structure differs from 8-phase case
+### What's Working
 
-### Next Steps (Priority)
+1. **Transcript handling**: Challenges match between Zolt prover and Jolt verifier
+2. **Opening claims**: All virtual claims (ra_chunks, table_flags) serialize correctly
+3. **Sumcheck polynomial property**: p(0) + p(1) = claim holds for all rounds
+4. **Final claim components match Jolt's expected values**:
+   - `ra_product` matches
+   - `val_claim` matches
+   - `raf_claim` matches
+   - `eq_r_reduction` matches
 
-1. **Add debug to Jolt prover** to print `ra_polys[chunk][j]` and `combined_val[j]` for first 5 cycles at cycle round start
-2. **Compare values** between Zolt and Jolt:
-   - `ra_chunk_weights[chunk][j]` vs `ra_polys[chunk][j]`
-   - `lookups_combined_vals[j]` vs `combined_val_poly[j]`
-   - `table_values_at_r_addr[t]` vs Jolt's table values
-   - `raf_interleaved` and `raf_identity` vs Jolt's values
-3. **Trace expanding table** through phases to verify indexing
+### What's Broken
 
-### Debug Data Captured
+The `proverMsgReadChecking` and `proverMsgRaf` functions return incorrect polynomial evaluations. This causes the polynomial chain to evolve incorrectly, even though it maintains the sumcheck property internally.
 
-**ra_chunk_weights (first 4 cycles)**:
-```
-j=0: [0080c722ae1a53de, 7d4fae9bcda84b1d, b7cf95c59c9b0de3, 4908ed2da0be0001, 1eb60dd5d30480d3, 287f540f8a24c69c, 24094594c9ac3db4, 36d19bb46c67d36f]
-j=1: [...same first 7...]                                                                                                                            ff9d94cfd387853f]
-j=2: [...same first 6...]                                                                                     fecf1e5eb19835e5, b945d6aa245225e7]
-j=3: [...same first 6...]                                                                                     fecf1e5eb19835e5, 75760263c6faf21a]
-```
+### Next Steps
 
-**combined_vals (first 5 cycles)**:
-```
-j=0: 091decbe7fa1960c (identity path, table 0)
-j=1: 091decbe7fa1960c (identity path, table 0)
-j=2: 507c0b0cdf461a11 (interleaved, no table)
-j=3: 091decbe7fa1960c (identity path, table 0)
-j=4: 091decbe7fa1960c (identity path, table 0)
+1. **Fix `proverMsgReadChecking`**:
+   - Compare Zolt's implementation with Jolt's `prover_msg_read_checking`
+   - Check the prefix MLE evaluation formula
+   - Check the suffix Q polynomial indexing
+
+2. **Fix `proverMsgRaf`**:
+   - Compare with Jolt's RAF decomposition
+   - Verify the operand polynomial formulas (left, right, identity)
+
+3. **Test with simpler case**:
+   - Add unit tests for prefix-suffix decomposition
+   - Compare step-by-step with Jolt's values
+
+### Key Files
+
+- `src/zkvm/lookup_table/prefix_suffix_prover.zig`: Contains `proverMsgReadChecking` and `proverMsgRaf`
+- `src/zkvm/lookup_table/prefixes.zig`: Contains `prefixMle` function
+- `jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs`: Jolt's reference implementation
+
+### Test Commands
+
+```bash
+zig build -Doptimize=ReleaseFast
+./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o /tmp/zolt_proof_dory.bin --export-preprocessing /tmp/zolt_preprocessing.bin --trace-length 64 2>&1 | tee /tmp/zolt_stage5_debug.log
+
+cd /home/vivado/projects/jolt && cargo test -p jolt-core --features zolt-debug --lib test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture 2>&1 | tee /tmp/jolt_verify_debug.log
 ```
 
 ### Test Results
+
 - Stage 1: PASSES ✅
 - Stage 2: PASSES ✅
 - Stage 3: PASSES ✅
 - Stage 4: PASSES ✅
-- Stage 5: FAILS ❌ (RAF polynomial drift)
+- Stage 5: FAILS ❌ (prefix-suffix decomposition bug)
 - Stages 6-7: Not reached
-
-### Files Modified This Session
-- `src/zkvm/spartan/stage5_prover.zig`: Added drift checks and CLAIM_CHAIN debug
-- `.agent/NOTES.md`: Updated with session findings
-- `jolt/jolt-core/src/poly/prefix_suffix.rs`: Added `debug_Q()` accessor
-
-### Build/Test Commands
-```bash
-zig build -Doptimize=ReleaseFast
-./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o /tmp/zolt_proof_dory.bin --export-preprocessing /tmp/zolt_preprocessing.bin --trace-length 64
-cd /home/vivado/projects/jolt && cargo test -p jolt-core --features zolt-debug --lib test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
-```

@@ -1,102 +1,116 @@
-# Session 93 Notes - Stage 5 RAF Polynomial Drift Deep Dive
+# Session 94 Notes - Root Cause of Stage 5 Failure Found
 
 ## Summary
 
-Continuing investigation of Stage 5 sumcheck verification failure. The issue is drift between `lookups_claim` (polynomial evaluation chain) and `materialized_sum` (direct computation) at the transition from address rounds to cycle rounds.
+Identified that the prefix-suffix decomposition in `proverMsgReadChecking` produces incorrect polynomial evaluations from round 0. The brute-force computation gives different values than the prefix-suffix decomposition.
 
-## Key Findings
+## Key Finding
 
-### 1. Initial Claim Matches
-At round 0:
-- `total_sum(eq*combined_vals) = lookups_claim = af0ee294043c5efdb7e3d1fb851c28c5`
-- Match: TRUE
+At round 0 of address binding:
 
-### 2. Sumcheck Property Holds Throughout
-- For all 128 rounds: `p(0) + p(1) = claim` ✓
-- The sumcheck polynomial is internally consistent
-
-### 3. Drift at Cycle Round Transition (Round 128)
 ```
-materialized_sum (direct) = e728cffa1af93851e97fbac6cb36aca0
-lookups_claim (poly chain) = f21f2ce546c92b0f7c9ad5e065cec05a
+Brute-force (bf_val_eval_0) = 136276d9c9f325b23b5bbcc2806aaa88
+Prefix-suffix (read_checking[0]) = 986acce18b14b46fcb6e1544d9c065f1
+MISMATCH!
+
+Brute-force (bf_raf_eval_0) = 9bac6bba3a49394b7c88153904b17e3d
+Prefix-suffix (raf_evals[0]) = 8d6b9084167d72aef843768ce0e84c94
 MISMATCH!
 ```
 
-### 4. Jolt Verification Expected vs Zolt Output
-- Zolt's output_claim after 136 rounds: `ad4ede5afd49bd1a1a104b8c7d8f2da0...`
-- Jolt's expected_claim (sum of instances): `09f9ba2becbd9928e9433175d5401c41...`
+This divergence starts at round 0 and accumulates through all 128 address rounds.
 
-## Technical Analysis
+## What's Working
 
-### The Address Round Formula
-During address rounds 0-127:
-- The polynomial is computed via prefix-suffix decomposition (Q arrays)
-- `proverMsgRaf` computes `eval_0` and `eval_2` from Q arrays
-- `eval_1 = claim - eval_0` (sumcheck property)
-- `inst2_at_r = p(challenge)` becomes the new `lookups_claim`
+1. **Total sum at round 0 is correct**: `total_sum(eq*combined_vals) = lookups_claim` ✓
+2. **All virtual claims match Jolt's expected values**:
+   - ra_claims[0..7] match exactly
+   - table_flag[0,1,9] match exactly
+   - val_claim, raf_claim, eq_r_reduction all match
+3. **Transcript/challenge handling is correct**: All challenges match between Zolt prover and Jolt verifier
 
-### The Cycle Round Transition (Round 128)
-Jolt's `init_log_t_rounds()`:
-1. Materializes `ra_polys` from expanding tables
-2. Materializes `combined_val_polynomial` from prefix checkpoints
-3. Sets up multilinear polynomials over (address, cycle) variables
+## What's Broken
 
-Zolt's equivalent:
-1. Rematerializes `lookups_combined_vals` using prefix checkpoints
-2. Reinitializes `lookups_eq_evals` for cycle rounds
-3. Materializes `ra_chunk_weights` from expanding tables
+The `proverMsgReadChecking` function computes `eval_0` using prefix-suffix decomposition:
+1. For each `b` in 0..half_len:
+   - Compute `prefixes_c0[i]` for all prefix types
+   - Compute `prefixes_c2[i]` for all prefix types
+   - For each table, combine with suffix Q values
+2. Sum up contributions to get `eval_0`, `eval_2_left`, `eval_2_right`
 
-### The Cycle Round Sum Formula
+The problem is that this produces `eval_0 = 986a...` but brute-force gives `eval_0 = 1362...`.
+
+## Possible Issues
+
+1. **Q polynomial initialization**: The suffix Q polynomials might not be correctly initialized from the trace data.
+
+2. **Prefix MLE evaluation**: The `prefixMle` functions might be evaluated with wrong parameters.
+
+3. **Table combine**: The `tableCombine` function might have an issue.
+
+4. **Bit ordering**: The b-index iteration might use wrong bit ordering.
+
+## Comparison: Jolt vs Zolt
+
+### proverMsgReadChecking structure
+
+**Jolt**:
+```rust
+let [eval_0, eval_2_left, eval_2_right] = (0..len/2)
+    .into_par_iter()
+    .flat_map_iter(|b| {
+        let b = LookupBits::new(b, log_len - 1);
+        let prefixes_c0: Vec<_> = Prefixes::iter()
+            .map(|prefix| prefix.prefix_mle(&checkpoints, r_x, 0, b, j))
+            .collect();
+        // ...
+        lookup_tables.iter().zip(suffix_polys.iter())
+            .map(|(table, suffixes)| {
+                let suffixes_left = suffixes[b];
+                let suffixes_right = suffixes[b + len/2];
+                [
+                    table.combine(&prefixes_c0, &suffixes_left),
+                    table.combine(&prefixes_c2, &suffixes_left),
+                    table.combine(&prefixes_c2, &suffixes_right),
+                ]
+            })
+    })
+    .fold_with(zeros).reduce(...);
 ```
-Σ_j eq_cycle(j, r_red) * combined_val[j] * eq_addr(k[j], r_addr)
+
+**Zolt**:
+```zig
+for (0..half_len) |b_idx| {
+    const b = LookupBits(128).new(b_idx, log_len - 1);
+    // Compute prefixes_c0[i] and prefixes_c2[i]
+    for (0..NUM_TABLES) |table_idx| {
+        if (suffix_polys.tables[table_idx]) |table| {
+            const suffixes_left = table.polys[s_idx][b_idx];
+            const suffixes_right = table.polys[s_idx][b_idx + half_len];
+            // Combine...
+        }
+    }
+}
 ```
-Where:
-- `eq_addr(k[j], r_addr)` = `∏_chunk ra[chunk][j]` = `lookups_ra_weights[j]`
 
-## Possible Causes of Drift
-
-1. **Expanding table values differ** - The eq accumulation might compute differently
-
-2. **condenseUEvals issue** - The u_evals condensation at phase boundaries might differ
-
-3. **Polynomial evaluation chain divergence** - The `inst2_at_r` computation from Q arrays might accumulate differently than the materialized sum
-
-4. **Phase counting** - With small traces (T=64), we have 16 phases of 8 rounds each, not 8 phases of 16 rounds
-
-## Debug Data
-
-### Phase Configuration (T=64)
-- num_phases = 16 (since log_T < 24)
-- log_m = 128 / 16 = 8 rounds per phase
-- Phase transitions occur after rounds 7, 15, 23, ..., 119, 127
-
-### Expanding Table Values at Round 128
-```
-phase[0] v[0] = e63db0efdf987b32171fd744f8155e63
-phase[1] v[0] = 671556bc65446d21a443335978dab0b8
-phase[2] v[0] = b26e52c2...
-phase[3] v[0] = 2ea9ff4b...
-```
+The structure looks similar. The issue is likely in:
+- How suffix_polys is initialized
+- How tableCombine works
+- How the prefix checkpoints are updated
 
 ## Next Steps
 
-1. Add debug to Jolt's prover to print expanding table values at round 128
-2. Compare the polynomial evaluation chain step-by-step with Jolt
-3. Check if the Q array binding produces the same running claim
-4. Verify that condenseUEvals produces the same u_evals as Jolt
-
-## Files Modified This Session
-
-- `/home/vivado/projects/jolt/jolt-core/src/poly/prefix_suffix.rs`: Added `debug_Q()` accessor for Q arrays
-- `/home/vivado/projects/jolt/jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs`: Updated debug to use `debug_Q()` accessor
+1. Add unit test that compares prefix-suffix output with brute-force for a simple case
+2. Debug the Q polynomial initialization to verify values
+3. Step through tableCombine for table 0 (RangeCheck) with known values
 
 ## Test Commands
 
 ```bash
-# Build and run Zolt
+# Build and run
 zig build -Doptimize=ReleaseFast
-./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o /tmp/zolt_proof_dory.bin --export-preprocessing /tmp/zolt_preprocessing.bin --trace-length 64 2>&1 | tee /tmp/zolt_stage5_debug.log
+./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o /tmp/zolt_proof_dory.bin --export-preprocessing /tmp/zolt_preprocessing.bin --trace-length 64
 
-# Run Jolt verification
-cd /home/vivado/projects/jolt && cargo test -p jolt-core --features zolt-debug --lib test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture 2>&1 | tee /tmp/jolt_verify_debug.log
+# Verify with Jolt
+cd /home/vivado/projects/jolt && cargo test -p jolt-core --features zolt-debug --lib test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```

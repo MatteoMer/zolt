@@ -1272,15 +1272,48 @@ pub fn proverMsgRaf(
     const len = identity_ps.QLen();
     const half_len = len / 2;
 
-    // Debug: show state at round 1
-    if (left_ps.round == 1) {
-        std.debug.print("[RAF_DEBUG R1] Q_size={}, bound_value_left={x}\n", .{
+    // Debug: show state at round 0 and 1
+    if (left_ps.round == 0 or left_ps.round == 1) {
+        std.debug.print("[RAF_DEBUG R{}] Q_size={}, bound_value_left={x}\n", .{
+            left_ps.round,
             len,
             left_ps.bound_value.toBytesBE()[16..32].*,
         });
-        std.debug.print("[RAF_DEBUG R1] bound_value_right={x}, bound_value_identity={x}\n", .{
+        std.debug.print("[RAF_DEBUG R{}] bound_value_right={x}, bound_value_identity={x}\n", .{
+            left_ps.round,
             right_ps.bound_value.toBytesBE()[16..32].*,
             identity_ps.bound_value.toBytesBE()[16..32].*,
+        });
+
+        // Print Q array sums for comparison with Jolt
+        var left_q0_sum = F.zero();
+        var left_q1_sum = F.zero();
+        var right_q0_sum = F.zero();
+        var right_q1_sum = F.zero();
+        var identity_q0_sum = F.zero();
+        var identity_q1_sum = F.zero();
+        for (0..len) |b| {
+            left_q0_sum = left_q0_sum.add(left_ps.Q[0][b]);
+            left_q1_sum = left_q1_sum.add(left_ps.Q[1][b]);
+            right_q0_sum = right_q0_sum.add(right_ps.Q[0][b]);
+            right_q1_sum = right_q1_sum.add(right_ps.Q[1][b]);
+            identity_q0_sum = identity_q0_sum.add(identity_ps.Q[0][b]);
+            identity_q1_sum = identity_q1_sum.add(identity_ps.Q[1][b]);
+        }
+        std.debug.print("[RAF_DEBUG R{}] Q_SUM: left[0]={x}, left[1]={x}\n", .{
+            left_ps.round,
+            left_q0_sum.toBytesBE()[16..32].*,
+            left_q1_sum.toBytesBE()[16..32].*,
+        });
+        std.debug.print("[RAF_DEBUG R{}] Q_SUM: right[0]={x}, right[1]={x}\n", .{
+            left_ps.round,
+            right_q0_sum.toBytesBE()[16..32].*,
+            right_q1_sum.toBytesBE()[16..32].*,
+        });
+        std.debug.print("[RAF_DEBUG R{}] Q_SUM: identity[0]={x}, identity[1]={x}\n", .{
+            left_ps.round,
+            identity_q0_sum.toBytesBE()[16..32].*,
+            identity_q1_sum.toBytesBE()[16..32].*,
         });
 
         // Compute explicit sum to verify
@@ -1301,7 +1334,8 @@ pub fn proverMsgRaf(
             explicit_right_sum_0 = explicit_right_sum_0.add(r_contrib).add(i_contrib);
         }
         const explicit_raf_0 = gamma.mul(explicit_left_sum_0).add(gamma_sqr.mul(explicit_right_sum_0));
-        std.debug.print("[RAF_DEBUG R1] explicit_raf_0={x} (should match raf_evals[0])\n", .{
+        std.debug.print("[RAF_DEBUG R{}] explicit_raf_0={x} (should match raf_evals[0])\n", .{
+            left_ps.round,
             explicit_raf_0.toBytesBE()[16..32].*,
         });
     }
@@ -1562,12 +1596,9 @@ pub fn condenseUEvals(
         const prefix = k >> @intCast(suffix_bits);
         const k_prefix_raw = prefix & m_mask;
 
-        // CRITICAL FIX: Reverse the bit order to match HighToLow expanding table indexing
-        // The expanding table was updated with r[0], r[1], ..., r[log_m-1] in HighToLow order
-        // So v[i] has bit 0 corresponding to r[0] (which bound k[MSB])
-        // But k_prefix_raw has bit 0 = k[suffix_bits] (the lowest of the recently bound bits)
-        // and bit log_m-1 = k[127] (the MSB of k, which was bound first by r[0])
-        const k_bound = reverseBits(k_prefix_raw, log_m);
+        // NOTE: Jolt uses the prefix bits directly without reversal
+        // The expanding table indexing in Jolt appears to match this convention
+        const k_bound = k_prefix_raw;
 
         if (k_bound > max_k_bound) max_k_bound = k_bound;
 

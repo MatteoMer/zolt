@@ -2984,8 +2984,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     const inst2_c1 = eval_1_inst2.sub(eval_0_inst2).sub(inst2_c2);
                     const inst2_at_r = inst2_c0.add(inst2_c1.mulHiBigIntU128(challenge.limbs)).add(inst2_c2.mul(r2));
 
-                    // Debug: show claim chain for first 3 rounds
-                    if (round < 3) {
+                    // Debug: show claim chain for first 3 rounds and last 3 address rounds
+                    if (round < 3 or (round >= 125 and round < 128)) {
                         std.debug.print("[CLAIM_CHAIN R{}] before_claim={x}\n", .{ round, lookups_claim.toBytesBE()[16..32].* });
                         std.debug.print("[CLAIM_CHAIN R{}] eval_0={x}, eval_1={x}, eval_2={x}\n", .{
                             round,

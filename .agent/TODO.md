@@ -1,78 +1,79 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 93 - Stage 5 RAF drift investigation
+## Status: Session 93 - Stage 5 RAF drift investigation (SESSION_ENDING)
 
 ## Current Issue: Stage 5 sumcheck verification fails
 
-### Root Cause Analysis (Session 93)
+### Root Cause Analysis (Session 93 - Final Summary)
 
-The drift occurs because `lookups_claim` (polynomial evaluation chain) diverges from the materialized sum.
+**Key Finding**: The polynomial evaluation chain (`lookups_claim`) is internally consistent throughout address rounds, but diverges from the materialized sum at cycle round start.
 
-**Key discovery**: At cycle round start, the formula is:
-```
-Σ_j eq(j, r_red) * combined_val[j] * Π_chunk ra_chunk[j]
-```
+**Polynomial chain verification**:
+- Round 0: `p(0) + p(1) = claim` ✓
+- ...
+- Round 127: `p(0) + p(1) = claim` ✓
+- `lookups_claim` at R127 end: `f21f2ce546c92b0f7c9ad5e065cec05a`
 
-Where:
-- `eq(j, r_red)` = eq polynomial over cycle variables
-- `combined_val[j]` = table_mle(r_addr) + raf(r_addr) = SCALAR per cycle
-- `ra_chunk[j]` = `eq(k[j][chunk_bits], r_addr[chunk_bits])` = expanding table evaluation
-
-This SHOULD equal `lookups_claim` at the end of address rounds, but it doesn't:
+**Materialized sum at cycle start**:
 - `materialized_sum (WITH ra)` = `e728cffa1af93851e97fbac6cb36aca0`
-- `lookups_claim` = `f21f2ce546c92b0f7c9ad5e065cec05a`
+- `sum_no_ra (WITHOUT ra)` = `39edfd2288a73b78ae89c459d4ef76a9`
+- Neither matches `lookups_claim`!
 
-**Possible causes**:
-1. **ra_weights wrong**: The expanding table values or indexing differs from Jolt
-2. **combined_vals wrong**: The rematerialization (table + raf) differs from Jolt
-3. **lookups_claim wrong**: The polynomial evaluation chain through address rounds is incorrect
-
-### Debug Results
-
-**Initial claim (round 0)**: MATCHES
+**The formula being verified**:
 ```
-total_sum(eq*combined_vals) = lookups_claim = af0ee294043c5efdb7e3d1fb851c28c5
+Σ_j eq(j, r_red) * eq(k[j], r_addr) * combined_val[j]
+```
+Where:
+- `eq(j, r_red)` = `lookups_eq_evals[j]` (reinitialized for cycle rounds)
+- `eq(k[j], r_addr)` = `lookups_ra_weights[j]` = `Π_chunk ra_chunk[j]`
+- `combined_val[j]` = rematerialized `table_mle(r_addr) + raf(r_addr)`
+
+**Probable causes** (to investigate next session):
+1. **ra_weights indexing**: The k_bound extraction `k >> suffix_bits & m_mask` might differ from Jolt
+2. **combined_vals formula**: The `table_values_at_r_addr` or `raf_interleaved/raf_identity` computation might differ
+3. **Phase counting**: With 16 phases (small trace), the expanding table structure differs from 8-phase case
+
+### Next Steps (Priority)
+
+1. **Add debug to Jolt prover** to print `ra_polys[chunk][j]` and `combined_val[j]` for first 5 cycles at cycle round start
+2. **Compare values** between Zolt and Jolt:
+   - `ra_chunk_weights[chunk][j]` vs `ra_polys[chunk][j]`
+   - `lookups_combined_vals[j]` vs `combined_val_poly[j]`
+   - `table_values_at_r_addr[t]` vs Jolt's table values
+   - `raf_interleaved` and `raf_identity` vs Jolt's values
+3. **Trace expanding table** through phases to verify indexing
+
+### Debug Data Captured
+
+**ra_chunk_weights (first 4 cycles)**:
+```
+j=0: [0080c722ae1a53de, 7d4fae9bcda84b1d, b7cf95c59c9b0de3, 4908ed2da0be0001, 1eb60dd5d30480d3, 287f540f8a24c69c, 24094594c9ac3db4, 36d19bb46c67d36f]
+j=1: [...same first 7...]                                                                                                                            ff9d94cfd387853f]
+j=2: [...same first 6...]                                                                                     fecf1e5eb19835e5, b945d6aa245225e7]
+j=3: [...same first 6...]                                                                                     fecf1e5eb19835e5, 75760263c6faf21a]
 ```
 
-**Phase transitions**: DRIFT IMMEDIATELY
+**combined_vals (first 5 cycles)**:
 ```
-Phase 1: brute_sum = 51d640..., lookups_claim = 8c6b57...
-```
-
-**Key insight**: The brute_sum uses ORIGINAL combined_vals, but lookups_claim evolves through polynomial evaluation. During address rounds, the claim should track:
-```
-Σ_j condensed_eq[j] * prefix_eval * suffix_eval
-```
-
-NOT:
-```
-Σ_j condensed_eq[j] * original_combined_vals[j]
+j=0: 091decbe7fa1960c (identity path, table 0)
+j=1: 091decbe7fa1960c (identity path, table 0)
+j=2: 507c0b0cdf461a11 (interleaved, no table)
+j=3: 091decbe7fa1960c (identity path, table 0)
+j=4: 091decbe7fa1960c (identity path, table 0)
 ```
 
-The prefix-suffix decomposition handles the polynomial evolution internally through Q arrays.
-
-### Next Steps (Priority Order)
-
-1. **Compare ra_weights with Jolt**
-   - Add debug to Jolt's prover to print `ra_polys[chunk][j]` for first few cycles
-   - Compare with Zolt's `ra_chunk_weights[chunk][j]`
-
-2. **Compare combined_vals rematerialization**
-   - Print Jolt's `combined_val_poly[j]` for first few cycles
-   - Verify table_values_at_r_addr match
-   - Verify raf_interleaved and raf_identity match
-
-3. **Verify expanding table indexing**
-   - The k_bound extraction: `k >> suffix_bits & m_mask`
-   - The phase counting: 16 phases with log_m=8 for small traces
-
-### Results
+### Test Results
 - Stage 1: PASSES ✅
 - Stage 2: PASSES ✅
 - Stage 3: PASSES ✅
 - Stage 4: PASSES ✅
-- Stage 5: FAILS ❌ (RAF polynomial mismatch after 128 rounds)
+- Stage 5: FAILS ❌ (RAF polynomial drift)
 - Stages 6-7: Not reached
+
+### Files Modified This Session
+- `src/zkvm/spartan/stage5_prover.zig`: Added drift checks and CLAIM_CHAIN debug
+- `.agent/NOTES.md`: Updated with session findings
+- `jolt/jolt-core/src/poly/prefix_suffix.rs`: Added `debug_Q()` accessor
 
 ### Build/Test Commands
 ```bash

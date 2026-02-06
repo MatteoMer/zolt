@@ -391,11 +391,16 @@ pub fn proverMsgReadChecking(
 
     // Debug: print per-table eval_0 at round 0
     if (round == 0) {
+        var sum_per_table = F.zero();
         for (0..NUM_TABLES) |t_idx| {
             if (!eval_0_per_table[t_idx].eql(F.zero())) {
                 std.debug.print("[READ_CHECK R0] eval_0_per_table[{}]={x}\n", .{ t_idx, eval_0_per_table[t_idx].toBytesBE()[16..32].* });
+                sum_per_table = sum_per_table.add(eval_0_per_table[t_idx]);
             }
         }
+        std.debug.print("[READ_CHECK R0] sum_per_table={x}\n", .{sum_per_table.toBytesBE()[16..32].*});
+        std.debug.print("[READ_CHECK R0] eval_0={x}\n", .{eval_0.toBytesBE()[16..32].*});
+        std.debug.print("[READ_CHECK R0] sum==eval_0: {}\n", .{sum_per_table.eql(eval_0)});
     }
 
     // Quadratic interpolation: eval_2 = 2*eval_2_right - eval_2_left
@@ -1314,6 +1319,39 @@ pub fn proverMsgRaf(
             left_ps.round,
             identity_q0_sum.toBytesBE()[16..32].*,
             identity_q1_sum.toBytesBE()[16..32].*,
+        });
+
+        // Print Q values at index 0 specifically
+        std.debug.print("[RAF_DEBUG R{}] Q_AT_0: left_Q0[0]={x}, left_Q1[0]={x}\n", .{
+            left_ps.round,
+            left_ps.Q[0][0].toBytesBE()[16..32].*,
+            left_ps.Q[1][0].toBytesBE()[16..32].*,
+        });
+        std.debug.print("[RAF_DEBUG R{}] Q_AT_0: right_Q1[0]={x}, identity_Q0[0]={x}, identity_Q1[0]={x}\n", .{
+            left_ps.round,
+            right_ps.Q[1][0].toBytesBE()[16..32].*,
+            identity_ps.Q[0][0].toBytesBE()[16..32].*,
+            identity_ps.Q[1][0].toBytesBE()[16..32].*,
+        });
+
+        // Print prefix evals at b=0
+        const l_pf_0 = left_ps.prefixEvals(0);
+        const r_pf_0 = right_ps.prefixEvals(0);
+        const i_pf_0 = identity_ps.prefixEvals(0);
+        std.debug.print("[RAF_DEBUG R{}] prefix_evals(0): left=({x}, {x})\n", .{
+            left_ps.round,
+            l_pf_0[0].toBytesBE()[16..32].*,
+            l_pf_0[1].toBytesBE()[16..32].*,
+        });
+        std.debug.print("[RAF_DEBUG R{}] prefix_evals(0): right=({x}, {x})\n", .{
+            left_ps.round,
+            r_pf_0[0].toBytesBE()[16..32].*,
+            r_pf_0[1].toBytesBE()[16..32].*,
+        });
+        std.debug.print("[RAF_DEBUG R{}] prefix_evals(0): identity=({x}, {x})\n", .{
+            left_ps.round,
+            i_pf_0[0].toBytesBE()[16..32].*,
+            i_pf_0[1].toBytesBE()[16..32].*,
         });
 
         // Compute explicit sum to verify

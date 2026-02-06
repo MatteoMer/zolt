@@ -1,47 +1,78 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: Session 91 - Stage 5 RAF prefix-suffix drift investigation
+## Status: Session 93 - Stage 5 RAF drift investigation
 
-## Current Issue: lookups_claim drifts from materialized_sum over 128 address rounds
+## Current Issue: Stage 5 sumcheck verification fails
 
-### Key Finding (Session 91)
-The RAF polynomial evaluations are **internally consistent** (eval_0 + eval_1 = claim at each round), but
-they don't match what Jolt expects. After 128 address rounds:
-- `materialized_sum` (computed directly from trace) = `e728cffa1af93851e97fbac6cb36aca0`
-- `lookups_claim` (evolved through polynomial chain) = `f21f2ce546c92b0f7c9ad5e065cec05a`
+### Root Cause Analysis (Session 93)
 
-### Verified Correct
-1. Round 0 RAF evaluation matches brute force ✅
-2. Prefix polynomial computation is correct (verified `8 * r[0]` formula) ✅
-3. Q array binding formula is correct: `new[j] = Q[j] + r*(Q[j+half] - Q[j])` ✅
-4. `proverMsgRaf` result matches explicit sum over (prefix, Q) pairs ✅
-5. Claim chain is self-consistent: `eval_0 + eval_1 = before_claim` at each round ✅
+The drift occurs because `lookups_claim` (polynomial evaluation chain) diverges from the materialized sum.
 
-### Suspected Issues
-1. The **eq weighting** from prior challenges may not be correctly incorporated
-2. The brute force doesn't account for eq(k[bound_bits], r[bound_challenges])
-3. Something in the **phase transition logic** (`condenseUEvals`) may be wrong
-4. The **suffix_len** calculation might affect Q initialization
+**Key discovery**: At cycle round start, the formula is:
+```
+Σ_j eq(j, r_red) * combined_val[j] * Π_chunk ra_chunk[j]
+```
 
-### Architecture Reminder
-- 16 phases, each handling 8 address bits (chunk_len = 8, total_len = 128)
-- Q arrays: size 256 at phase start, bound to 128, 64, 32, 16, 8, 4, 2, 1 over 8 rounds
-- Prefix polynomial: analytically computed from bound_value and remaining bits
-- Suffix: fixed for each phase (suffix_len = 128 - (phase+1)*8)
+Where:
+- `eq(j, r_red)` = eq polynomial over cycle variables
+- `combined_val[j]` = table_mle(r_addr) + raf(r_addr) = SCALAR per cycle
+- `ra_chunk[j]` = `eq(k[j][chunk_bits], r_addr[chunk_bits])` = expanding table evaluation
 
-### Next Steps
-1. Add debug at phase transitions to verify `condenseUEvals` is correct
-2. Check if the issue is in RAF polynomial only or also in read_checking
-3. Compare Jolt's exact Q values at round 0 and round 1 against Zolt's
-4. Verify that the `is_interleaved_operands` flag is set correctly
+This SHOULD equal `lookups_claim` at the end of address rounds, but it doesn't:
+- `materialized_sum (WITH ra)` = `e728cffa1af93851e97fbac6cb36aca0`
+- `lookups_claim` = `f21f2ce546c92b0f7c9ad5e065cec05a`
 
-### Results After Fix
+**Possible causes**:
+1. **ra_weights wrong**: The expanding table values or indexing differs from Jolt
+2. **combined_vals wrong**: The rematerialization (table + raf) differs from Jolt
+3. **lookups_claim wrong**: The polynomial evaluation chain through address rounds is incorrect
+
+### Debug Results
+
+**Initial claim (round 0)**: MATCHES
+```
+total_sum(eq*combined_vals) = lookups_claim = af0ee294043c5efdb7e3d1fb851c28c5
+```
+
+**Phase transitions**: DRIFT IMMEDIATELY
+```
+Phase 1: brute_sum = 51d640..., lookups_claim = 8c6b57...
+```
+
+**Key insight**: The brute_sum uses ORIGINAL combined_vals, but lookups_claim evolves through polynomial evaluation. During address rounds, the claim should track:
+```
+Σ_j condensed_eq[j] * prefix_eval * suffix_eval
+```
+
+NOT:
+```
+Σ_j condensed_eq[j] * original_combined_vals[j]
+```
+
+The prefix-suffix decomposition handles the polynomial evolution internally through Q arrays.
+
+### Next Steps (Priority Order)
+
+1. **Compare ra_weights with Jolt**
+   - Add debug to Jolt's prover to print `ra_polys[chunk][j]` for first few cycles
+   - Compare with Zolt's `ra_chunk_weights[chunk][j]`
+
+2. **Compare combined_vals rematerialization**
+   - Print Jolt's `combined_val_poly[j]` for first few cycles
+   - Verify table_values_at_r_addr match
+   - Verify raf_interleaved and raf_identity match
+
+3. **Verify expanding table indexing**
+   - The k_bound extraction: `k >> suffix_bits & m_mask`
+   - The phase counting: 16 phases with log_m=8 for small traces
+
+### Results
 - Stage 1: PASSES ✅
 - Stage 2: PASSES ✅
 - Stage 3: PASSES ✅
 - Stage 4: PASSES ✅
-- Stage 5: FAILS ❌ (RAF drift over 128 rounds)
-- Stages 6-7: Not yet reached
+- Stage 5: FAILS ❌ (RAF polynomial mismatch after 128 rounds)
+- Stages 6-7: Not reached
 
 ### Build/Test Commands
 ```bash

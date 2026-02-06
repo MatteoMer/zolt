@@ -3267,6 +3267,19 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         condenseUEvals(F, lookups_eq_evals, &expanding_tables[prev_phase], lookup_indices_u128, current_phase, num_phases);
                         std.debug.print("[STAGE5] Phase {} condense done, now calling initPhase...\n", .{current_phase});
 
+                        // DRIFT DEBUG: Compute direct sum after condensation to compare with lookups_claim
+                        // At this point, lookups_eq_evals[j] has been condensed to include the expanding table contribution
+                        // The sum should match lookups_claim (after polynomial evolution through previous round)
+                        if (current_phase == 1 or current_phase == 8 or current_phase == 15) {
+                            var brute_sum = F.zero();
+                            for (0..T) |jj| {
+                                brute_sum = brute_sum.add(lookups_eq_evals[jj].mul(lookups_combined_vals[jj]));
+                            }
+                            std.debug.print("[DRIFT_CHECK Phase {}] brute_sum(eq*combined) = {x}\n", .{ current_phase, brute_sum.toBytesBE()[16..32].* });
+                            std.debug.print("[DRIFT_CHECK Phase {}] lookups_claim (poly chain) = {x}\n", .{ current_phase, lookups_claim.toBytesBE()[16..32].* });
+                            std.debug.print("[DRIFT_CHECK Phase {}] match = {}\n", .{ current_phase, brute_sum.eql(lookups_claim) });
+                        }
+
                         // Re-initialize suffix polys and RAF for new phase with condensed u_evals
                         try suffix_polys.initPhase(current_phase, num_phases, lookups_eq_evals, lookup_indices_u128, cycle_table_indices);
                         std.debug.print("[STAGE5] Phase {} initPhase done, now calling initQRaf...\n", .{current_phase});
@@ -3373,6 +3386,15 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     //   else:
                     //     combined_val[j] = table_eval[j] + raf_identity
                     if (lookups_round == 0) {
+                        // DEBUG: Check sum BEFORE rematerialization
+                        var pre_remat_sum = F.zero();
+                        for (0..T) |jj| {
+                            pre_remat_sum = pre_remat_sum.add(lookups_eq_evals[jj].mul(lookups_combined_vals[jj]));
+                        }
+                        std.debug.print("[PRE-REMAT] sum(eq*combined_vals) = {x}\n", .{pre_remat_sum.toBytesBE()[16..32].*});
+                        std.debug.print("[PRE-REMAT] lookups_claim (poly chain) = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+                        std.debug.print("[PRE-REMAT] match = {}\n", .{pre_remat_sum.eql(lookups_claim)});
+
                         // Get bound prefix values from RAF decompositions
                         const left_prefix = left_raf.bound_value;
                         const right_prefix = right_raf.bound_value;
@@ -3800,13 +3822,20 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         // finishMlesProductSumFromEvals uses the current lookups_claim (from
                         // polynomial evaluation chain) to back-compute eval_at_0.
                         {
+                            // Compute sum WITH ra_weights (for cycle round polynomial)
                             var materialized_sum = F.zero();
                             for (0..T) |j| {
                                 materialized_sum = materialized_sum.add(lookups_eq_evals[j].mul(lookups_ra_weights[j]).mul(lookups_combined_vals[j]));
                             }
-                            std.debug.print("[STAGE5 CYCLE] materialized_sum (direct) = {x}\n", .{materialized_sum.toBytesBE()[16..32].*});
+                            // Compute sum WITHOUT ra_weights (should match lookups_claim at end of address rounds)
+                            var sum_no_ra = F.zero();
+                            for (0..T) |j| {
+                                sum_no_ra = sum_no_ra.add(lookups_eq_evals[j].mul(lookups_combined_vals[j]));
+                            }
+                            std.debug.print("[STAGE5 CYCLE] materialized_sum (WITH ra_weights) = {x}\n", .{materialized_sum.toBytesBE()[16..32].*});
+                            std.debug.print("[STAGE5 CYCLE] sum_no_ra (WITHOUT ra_weights) = {x}\n", .{sum_no_ra.toBytesBE()[16..32].*});
                             std.debug.print("[STAGE5 CYCLE] lookups_claim (from poly eval chain) = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
-                            std.debug.print("[STAGE5 CYCLE] materialized == poly_chain: {}\n", .{materialized_sum.eql(lookups_claim)});
+                            std.debug.print("[STAGE5 CYCLE] sum_no_ra == lookups_claim: {}\n", .{sum_no_ra.eql(lookups_claim)});
                             std.debug.print("[STAGE5 CYCLE] current_batched_claim (NOT overridden) = {x}\n", .{current_batched_claim.toBytesBE()[16..32].*});
 
                             // NOTE: In Jolt, claims are NEVER overridden. The polynomial chain

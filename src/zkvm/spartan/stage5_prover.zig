@@ -941,19 +941,29 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     },
                 }
 
+                // Track which lookup table this cycle uses (for flag claims)
+                const table_idx = getLookupTableIndex(opcode, funct3, funct7);
+                cycle_table_indices[j] = table_idx;
+
+                // CRITICAL FIX: Instructions without a lookup table (Load, Store, SLL, etc.)
+                // should have combined_val = 0, matching Jolt where these instructions return
+                // to_lookup_output() = 0 and to_instruction_inputs() = (0, 0).
+                // The instruction lookup sumcheck only checks instructions that HAVE lookup tables.
+                if (table_idx < 0) {
+                    lookup_output = F.zero();
+                    left_op = F.zero();
+                    right_op = F.zero();
+                }
+
                 // combined = output + gamma*left + gamma^2*right
                 lookups_combined_vals[j] = lookup_output.add(gamma_raf.mul(left_op)).add(gamma_raf2.mul(right_op));
 
                 // Debug: print first 5 right_op values from combined_vals computation
                 if (j < 5) {
-                    std.debug.print("[STAGE5 COMBINED] j={}: opcode=0x{x}, left_op=0x{x}, right_op=0x{x}, output=0x{x}\n", .{
-                        j, opcode, left_op.toU64(), right_op.toU64(), lookup_output.toU64(),
+                    std.debug.print("[STAGE5 COMBINED] j={}: opcode=0x{x}, left_op=0x{x}, right_op=0x{x}, output=0x{x}, table_idx={}\n", .{
+                        j, opcode, left_op.toU64(), right_op.toU64(), lookup_output.toU64(), table_idx,
                     });
                 }
-
-                // Track which lookup table this cycle uses (for flag claims)
-                const table_idx = getLookupTableIndex(opcode, funct3, funct7);
-                cycle_table_indices[j] = table_idx;
 
                 // Determine identity path (not interleaved) based on Jolt's flags:
                 //   - AddOperands: ADD, ADDI, ADDIW, ADDW, LUI, AUIPC, JAL, JALR, Load, Store
@@ -1119,6 +1129,14 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 lookups_indices_lo[j] = @truncate(lookup_idx);
                 lookups_indices_hi[j] = @truncate(lookup_idx >> 64);
 
+                // CRITICAL FIX: Instructions without a lookup table should have
+                // lookup_index = 0, matching Jolt where to_instruction_inputs() = (0, 0)
+                // and interleave(0, 0) = 0.
+                if (table_idx < 0) {
+                    lookups_indices_lo[j] = 0;
+                    lookups_indices_hi[j] = 0;
+                }
+
                 // Override lookup_output for ADDIW/ADDW/SUBW to match table MLE output.
                 // For identity-path with RangeCheck table: materialize_entry(index) = lower64(index).
                 // This replaces the rd_value-based output set earlier.
@@ -1130,6 +1148,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         // ADDW/SUBW: output = lower64(lookup_index) from RangeCheck table
                         lookup_output = F.fromU64(lookups_indices_lo[j]);
                     }
+                }
+
+                // CRITICAL FIX: Override for instructions without lookup tables (same as first block)
+                if (table_idx < 0) {
+                    lookup_output = F.zero();
+                    left_op = F.zero();
+                    right_op = F.zero();
                 }
 
                 // Re-compute combined_vals with the corrected lookup_output
@@ -4111,6 +4136,66 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             lookups_ra_weights[j] = ra_prod;
                         }
 
+                        // DEBUG: Verify RA computation directly
+                        // Compute eq(lookup_index(0), r_addr) directly from challenges
+                        // and compare with Π_c ra_chunk_c(0)
+                        {
+                            const k_lo_0 = lookups_indices_lo[0];
+                            const k_hi_0 = lookups_indices_hi[0];
+                            var direct_eq = F.one();
+                            for (0..LOOKUPS_LOG_K) |bit_idx| {
+                                // HighToLow: challenge[0] binds the MSB (bit 127)
+                                // challenge[bit_idx] binds bit (127 - bit_idx)
+                                const bit_pos = LOOKUPS_LOG_K - 1 - bit_idx;
+                                const k_bit: u1 = if (bit_pos >= 64) @truncate(k_hi_0 >> @intCast(bit_pos - 64)) else @truncate(k_lo_0 >> @intCast(bit_pos));
+                                const r_i = challenges[bit_idx];
+                                // eq_bit(k_bit, r_i) = k_bit * r_i + (1 - k_bit) * (1 - r_i)
+                                const eq_bit = if (k_bit == 1) r_i else F.one().sub(r_i);
+                                direct_eq = direct_eq.mul(eq_bit);
+                            }
+                            std.debug.print("[STAGE5 RA_VERIFY] Direct eq(K(0), r_addr) = {x}\n", .{direct_eq.toBytesBE()[16..32].*});
+                            std.debug.print("[STAGE5 RA_VERIFY] Product of ra_chunks(0) = {x}\n", .{lookups_ra_weights[0].toBytesBE()[16..32].*});
+                            std.debug.print("[STAGE5 RA_VERIFY] Match = {}\n", .{direct_eq.eql(lookups_ra_weights[0])});
+                        }
+
+                        // DEBUG: Compute combined_val(0) directly from table MLE
+                        // combined_val(0) should be table_value(r_addr) + raf(r_addr)
+                        // where raf(r_addr) depends on identity/interleaved path
+                        {
+                            // For cycle 0: what table is it?
+                            const t_idx_0 = cycle_table_indices[0];
+                            const is_id_0 = cycle_is_identity_path[0];
+                            std.debug.print("[STAGE5 CV_VERIFY] Cycle 0: table_idx={}, is_identity={}\n", .{t_idx_0, is_id_0});
+                            std.debug.print("[STAGE5 CV_VERIFY] combined_vals[0] = {x}\n", .{lookups_combined_vals[0].toBytesBE()[16..32].*});
+                            if (t_idx_0 >= 0) {
+                                std.debug.print("[STAGE5 CV_VERIFY] table_val = {x}\n", .{stored_table_values[@intCast(t_idx_0)].toBytesBE()[16..32].*});
+                            }
+                            if (is_id_0) {
+                                std.debug.print("[STAGE5 CV_VERIFY] raf_identity = {x}\n", .{raf_identity.toBytesBE()[16..32].*});
+                            } else {
+                                std.debug.print("[STAGE5 CV_VERIFY] raf_interleaved = {x}\n", .{raf_interleaved.toBytesBE()[16..32].*});
+                            }
+
+                            // Also verify: sum over j of eq(j) * eq(K(j), r_addr) * cv(j)
+                            // by doing it cycle by cycle for first 5 active cycles
+                            var direct_sum_5 = F.zero();
+                            for (0..@min(5, trace_len)) |jj| {
+                                const eq_j = lookups_eq_evals[jj];
+                                const ra_j = lookups_ra_weights[jj];
+                                const cv_j = lookups_combined_vals[jj];
+                                const contrib_j = eq_j.mul(ra_j).mul(cv_j);
+                                direct_sum_5 = direct_sum_5.add(contrib_j);
+                                std.debug.print("[STAGE5 CYCLE_SUM] j={}: eq={x}, ra={x}, cv={x}, contrib={x}, running={x}\n", .{
+                                    jj,
+                                    eq_j.toBytesBE()[24..32].*,
+                                    ra_j.toBytesBE()[24..32].*,
+                                    cv_j.toBytesBE()[24..32].*,
+                                    contrib_j.toBytesBE()[24..32].*,
+                                    direct_sum_5.toBytesBE()[24..32].*,
+                                });
+                            }
+                        }
+
                         // DEBUG: Compute materialized sum for comparison (NOT used as claim)
                         // In Jolt, the claim is NEVER overridden at this transition. It evolves
                         // purely through polynomial evaluation at each round's challenge.
@@ -4134,11 +4219,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             std.debug.print("[STAGE5 CYCLE] sum_no_ra == lookups_claim: {}\n", .{sum_no_ra.eql(lookups_claim)});
                             std.debug.print("[STAGE5 CYCLE] current_batched_claim (NOT overridden) = {x}\n", .{current_batched_claim.toBytesBE()[16..32].*});
 
-                            // NOTE: In Jolt, claims are NEVER overridden. The polynomial chain
-                            // evolves continuously. The materialized arrays must match the claim.
-                            // If they don't, the address-round polynomial tracking is wrong.
+                            // The materialized_sum should equal lookups_claim.
+                            // If it doesn't, there's a bug in the prefix-suffix chain.
                             if (!materialized_sum.eql(lookups_claim)) {
-                                std.debug.print("[STAGE5 CYCLE] WARNING: materialized_sum != lookups_claim (address-round tracking error)\n", .{});
+                                std.debug.print("[STAGE5 CYCLE] WARNING: materialized_sum != lookups_claim\n", .{});
+                                std.debug.print("[STAGE5 CYCLE]   lookups_claim     = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+                                std.debug.print("[STAGE5 CYCLE]   materialized_sum  = {x}\n", .{materialized_sum.toBytesBE()[16..32].*});
                             }
                         }
                     }

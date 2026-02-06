@@ -599,6 +599,19 @@ fn isNoopInstruction(step_opt: ?tracer.TraceStep) bool {
 /// For other instructions: rd_value (the result written to rd)
 fn computeLookupOutput(comptime FieldType: type, step: tracer.TraceStep) FieldType {
     const opcode: u8 = @truncate(step.instruction & 0x7F);
+    const funct3: u3 = @truncate((step.instruction >> 12) & 0x7);
+    const funct7: u7 = @truncate(step.instruction >> 25);
+
+    // CRITICAL: Instructions without a lookup table return 0 for lookup_output.
+    // In Jolt, these instructions have to_lookup_output() = 0.
+    // This includes: Load, Store, SLL, SLLI, and any instruction where
+    // getLookupTableIndex() returns -1.
+    //
+    // Check if this instruction has a lookup table. If not, return 0.
+    const has_table = hasLookupTable(opcode, funct3, funct7);
+    if (!has_table) {
+        return FieldType.zero();
+    }
 
     switch (opcode) {
         0x6F => { // JAL
@@ -618,7 +631,6 @@ fn computeLookupOutput(comptime FieldType: type, step: tracer.TraceStep) FieldTy
             return FieldType.fromU64(target);
         },
         0x63 => { // Branch - LookupOutput = branch condition result (0 or 1)
-            const funct3: u3 = @truncate((step.instruction >> 12) & 0x7);
             const rs1 = step.rs1_value;
             const rs2 = step.rs2_value;
             const taken: bool = switch (funct3) {
@@ -633,10 +645,58 @@ fn computeLookupOutput(comptime FieldType: type, step: tracer.TraceStep) FieldTy
             return if (taken) FieldType.one() else FieldType.zero();
         },
         else => {
-            // For other instructions, use rd_value
+            // For other instructions with a lookup table, use rd_value
             return FieldType.fromU64(step.rd_value);
         },
     }
+}
+
+/// Check if an instruction has a lookup table assignment.
+/// Returns false for Load, Store, SLL, SLLI, and other instructions
+/// that don't use lookup tables (matching Jolt's lookup_table() = None).
+fn hasLookupTable(opcode: u8, funct3: u3, funct7: u7) bool {
+    return switch (opcode) {
+        0x33 => blk: { // R-type
+            if (funct3 == 0 and funct7 == 0) break :blk true; // ADD
+            if (funct3 == 0 and funct7 == 0x20) break :blk true; // SUB
+            if (funct3 == 7) break :blk true; // AND
+            if (funct3 == 6) break :blk true; // OR
+            if (funct3 == 4) break :blk true; // XOR
+            if (funct3 == 1) break :blk false; // SLL - no table
+            if (funct3 == 5 and funct7 == 0) break :blk true; // SRL
+            if (funct3 == 5 and funct7 == 0x20) break :blk true; // SRA
+            if (funct3 == 2) break :blk true; // SLT
+            if (funct3 == 3) break :blk true; // SLTU
+            if (funct7 == 0x01 and funct3 == 0) break :blk true; // MUL
+            if (funct7 == 0x01 and funct3 == 3) break :blk true; // MULHU
+            break :blk false;
+        },
+        0x13 => blk: { // I-type
+            if (funct3 == 0) break :blk true; // ADDI
+            if (funct3 == 7) break :blk true; // ANDI
+            if (funct3 == 6) break :blk true; // ORI
+            if (funct3 == 4) break :blk true; // XORI
+            if (funct3 == 1) break :blk false; // SLLI - no table
+            if (funct3 == 5) break :blk true; // SRLI/SRAI
+            if (funct3 == 2) break :blk true; // SLTI
+            if (funct3 == 3) break :blk true; // SLTIU
+            break :blk false;
+        },
+        0x1b => (funct3 == 0), // ADDIW
+        0x3b => blk: { // OP-32
+            if (funct3 == 0 and funct7 == 0) break :blk true; // ADDW
+            if (funct3 == 0 and funct7 == 0x20) break :blk true; // SUBW
+            break :blk false;
+        },
+        0x63 => true, // All branches have tables
+        0x37 => true, // LUI
+        0x17 => true, // AUIPC
+        0x6f => true, // JAL
+        0x67 => true, // JALR
+        0x03 => false, // Load - no table
+        0x23 => false, // Store - no table
+        else => false,
+    };
 }
 
 /// Decode J-type immediate (for JAL)
@@ -1062,10 +1122,19 @@ pub fn R1CSCycleInputs(comptime F: type) type {
 
             // First, compute the operand flags based on opcode
             const instr_opcode = opcode; // Already computed above
-            const left_is_rs1: F = switch (instr_opcode) {
+            const funct3_bits: u3 = @truncate((step.instruction >> 12) & 0x7);
+            const funct7_bits: u7 = @truncate(step.instruction >> 25);
+            const has_lookup_table = hasLookupTable(instr_opcode, funct3_bits, funct7_bits);
+
+            // CRITICAL: Instructions without a lookup table (Load, Store, SLL, SLLI, etc.)
+            // must have ALL instruction input flags = 0. In Jolt, these instructions decompose
+            // into virtual sequences and never appear as raw cycles, so their R1CS witness has
+            // LeftInstructionInput = 0, RightInstructionInput = 0, LookupOutput = 0.
+            // This ensures the Stage 3/4 claims (left_op_claim, right_op_claim) are consistent
+            // with Stage 5's combined_val = 0 for these cycles.
+            const left_is_rs1: F = if (!has_lookup_table) F.zero() else switch (instr_opcode) {
                 0x33 => F.one(), // R-type: left = rs1
-                0x13, 0x03, 0x67 => F.one(), // I-type: left = rs1
-                0x23 => F.one(), // S-type: left = rs1 (for address)
+                0x13, 0x67 => F.one(), // I-type: left = rs1
                 0x63 => F.one(), // B-type: left = rs1
                 0x37 => F.zero(), // LUI: no operand
                 0x17 => F.zero(), // AUIPC: left = PC
@@ -1076,20 +1145,19 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                 0x0F => F.zero(), // FENCE: no operand
                 else => F.zero(),
             };
-            const left_is_pc: F = switch (instr_opcode) {
+            const left_is_pc: F = if (!has_lookup_table) F.zero() else switch (instr_opcode) {
                 0x17 => F.one(), // AUIPC: left = PC
                 0x6F => F.one(), // JAL: left = PC
                 else => F.zero(),
             };
-            const right_is_rs2: F = switch (instr_opcode) {
+            const right_is_rs2: F = if (!has_lookup_table) F.zero() else switch (instr_opcode) {
                 0x33 => F.one(), // R-type: right = rs2
                 0x63 => F.one(), // B-type: right = rs2 (for comparison)
                 0x3B => F.one(), // OP-32: right = rs2 (ADDW, SUBW, etc.)
                 else => F.zero(),
             };
-            const right_is_imm: F = switch (instr_opcode) {
-                0x13, 0x03, 0x67 => F.one(), // I-type: right = imm
-                0x23 => F.one(), // S-type: right = imm (for address offset)
+            const right_is_imm: F = if (!has_lookup_table) F.zero() else switch (instr_opcode) {
+                0x13, 0x67 => F.one(), // I-type: right = imm
                 0x37 => F.one(), // LUI: right = imm (upper bits)
                 0x17 => F.one(), // AUIPC: right = imm
                 0x6F => F.one(), // JAL: right = imm (offset)
@@ -1293,24 +1361,30 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             const funct3 = (instr >> 12) & 0x7;
             const funct7 = (instr >> 25) & 0x7F;
 
+            // CRITICAL: Check if this instruction has a lookup table.
+            // Instructions without lookup tables (Load, Store, SLL, SLLI, etc.)
+            // should have NO circuit flags set (no Add/Sub/Mul/WriteLookupOutputToRD).
+            // Their LeftInstructionInput and RightInstructionInput are already 0,
+            // so constraint 6 and 10 will enforce LeftLookupOperand=0 and RightLookupOperand=0.
+            const funct3_u3: u3 = @truncate(funct3);
+            const funct7_u7: u7 = @truncate(funct7);
+            if (!hasLookupTable(opcode, funct3_u3, funct7_u7)) {
+                // No lookup table: set lookup operands to 0 (matching LeftInstructionInput=0)
+                // and don't set any circuit flags (no Add/Sub/Mul/WriteLookupOutput).
+                // FlagLoad/FlagStore are already set in fromTraceStep.
+                self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
+                self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = F.zero();
+                return;
+            }
+
             // Get input values for lookup operand computation
             const left_input = self.values[R1CSInputIndex.LeftInstructionInput.toIndex()];
             const right_input = self.values[R1CSInputIndex.RightInstructionInput.toIndex()];
             const product = self.values[R1CSInputIndex.Product.toIndex()];
 
             switch (opcode) {
-                0x03 => { // LOAD
-                    // FlagLoad already set in fromTraceStep
-                    // Lookups: NOT Add+Sub+Mul, so LeftLookup == LeftInput, RightLookup == RightInput
-                    self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
-                    self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input;
-                },
-                0x23 => { // STORE
-                    // FlagStore already set in fromTraceStep
-                    self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
-                    self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input;
-                },
                 0x33 => { // R-type (ADD, SUB, MUL, etc.)
+                    // Note: SLL (funct3=1) already handled above by hasLookupTable check
                     // Determine specific operation
                     if (funct7 == 0x01) {
                         // M-extension: MUL, MULH, MULHSU, MULHU, DIV, DIVU, REM, REMU
@@ -1321,7 +1395,7 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                             // Constraint 9: RightLookup == Product for Mul
                             self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = product;
                         } else {
-                            // Other M-extension ops (DIV, etc.)
+                            // Other M-extension ops (MULHU, etc.)
                             self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
                             self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input;
                         }
@@ -1336,7 +1410,7 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                         const two_pow_64 = F.fromBytes(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0 });
                         self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = left_input.sub(right_input).add(two_pow_64);
                     } else {
-                        // ADD and other R-type
+                        // ADD and other R-type (SRL, SRA, AND, OR, XOR, SLT, SLTU)
                         self.values[R1CSInputIndex.FlagAddOperands.toIndex()] = F.one();
                         // Constraint 5: LeftLookup == 0 for Add
                         self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
@@ -1346,6 +1420,7 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                     self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
                 },
                 0x13 => { // I-type ALU
+                    // Note: SLLI (funct3=1) already handled above by hasLookupTable check
                     const funct3_13: u3 = @truncate((instr >> 12) & 0x7);
                     if (funct3_13 == 0) {
                         // ADDI: AddOperands
@@ -1355,7 +1430,7 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                         // Constraint 7: RightLookup == RightInput + LeftInput for Add
                         self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input.add(left_input);
                     } else {
-                        // SLLI, SLTI, SLTIU, XORI, SRLI, SRAI, ORI, ANDI: interleaved
+                        // SLTI, SLTIU, XORI, SRLI, SRAI, ORI, ANDI: interleaved
                         // These use raw operands (left=rs1, right=imm)
                         self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
                         self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input;

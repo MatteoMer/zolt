@@ -32,6 +32,11 @@ The proof:
 ### Next Steps
 
 1. Debug Stage 4 sumcheck verification failure
+   - Stage 4 involves 3 instances: registers_read_write_checking, ram_val_evaluation, ram_val_final
+   - Check if Zolt's Stage 4 prover produces compatible polynomial coefficients
+   - The failure is "Sumcheck verification failed" which means either:
+     - Initial claim doesn't match p(0) + p(1)
+     - Or polynomial degrees/coefficients are wrong
 2. Add debug output to identify which polynomial coefficients differ
 3. Check transcript state matches between Zolt prover and Jolt verifier
 

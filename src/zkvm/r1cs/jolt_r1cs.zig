@@ -86,7 +86,14 @@ pub fn JoltR1CS(comptime F: type) type {
             for (0..num_cycles) |i| {
                 const step = trace.steps.items[i];
 
-                if (step.is_noop) {
+                if (step.is_termination_store) {
+                    // Termination Store: real Store witness + DoNotUpdateUPC=1 + IsNoop=1
+                    const next_step: ?tracer.TraceStep = if (i + 1 < num_cycles)
+                        trace.steps.items[i + 1]
+                    else
+                        null;
+                    cycle_witnesses[i] = R1CSCycleInputs(F).createTerminationStoreWitness(step, next_step);
+                } else if (step.is_noop) {
                     // NoOp padding cycle: all zeros with IsNoop=1
                     cycle_witnesses[i] = R1CSCycleInputs(F).createNoopWitness();
                 } else {

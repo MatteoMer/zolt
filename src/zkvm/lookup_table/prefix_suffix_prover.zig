@@ -203,8 +203,8 @@ pub fn AllSuffixPolys(comptime F: type) type {
 
                 // Debug: print first few cycles in phase 0
                 if (phase == 0 and cycles_processed <= 5) {
-                    std.debug.print("[SUFFIX INIT] cycle j={} t_idx={} k=0x{x:0>32} prefix_bits={} suffix_len={}\n", .{
-                        j, t_idx, k, prefix_bits, suffix_len,
+                    std.debug.print("[SUFFIX INIT] cycle j={} t_idx={} k=0x{x:0>32} prefix_bits={} suffix_len={} suffix_raw=0x{x:0>32}\n", .{
+                        j, t_idx, k, prefix_bits, suffix_len, suffix_bits_raw,
                     });
                 }
 
@@ -343,6 +343,7 @@ pub fn proverMsgReadChecking(
     var eval_0 = F.zero();
     var eval_2_left = F.zero();
     var eval_2_right = F.zero();
+    var eval_0_per_table: [NUM_TABLES]F = [_]F{F.zero()} ** NUM_TABLES;
 
     // Sum over all remaining bits b
     for (0..half_len) |b_idx| {
@@ -381,8 +382,18 @@ pub fn proverMsgReadChecking(
                 const combined_2_right = tableCombine(F, table_idx, &prefixes_c2, suffixes_right[0..table_suffixes.len]);
 
                 eval_0 = eval_0.add(combined_0);
+                eval_0_per_table[table_idx] = eval_0_per_table[table_idx].add(combined_0);
                 eval_2_left = eval_2_left.add(combined_2_left);
                 eval_2_right = eval_2_right.add(combined_2_right);
+            }
+        }
+    }
+
+    // Debug: print per-table eval_0 at round 0
+    if (round == 0) {
+        for (0..NUM_TABLES) |t_idx| {
+            if (!eval_0_per_table[t_idx].eql(F.zero())) {
+                std.debug.print("[READ_CHECK R0] eval_0_per_table[{}]={x}\n", .{ t_idx, eval_0_per_table[t_idx].toBytesBE()[16..32].* });
             }
         }
     }
@@ -391,14 +402,39 @@ pub fn proverMsgReadChecking(
     const eval_2 = eval_2_right.add(eval_2_right).sub(eval_2_left);
 
     if (round == 0) {
-        std.debug.print("[READ_CHECK ROUND 0] Final: eval_0={x}, eval_2={x}\n", .{
-            eval_0.toBytesBE()[24..32].*,
-            eval_2.toBytesBE()[24..32].*,
-        });
-        std.debug.print("[READ_CHECK ROUND 0]   eval_2_left={x}, eval_2_right={x}\n", .{
-            eval_2_left.toBytesBE()[24..32].*,
-            eval_2_right.toBytesBE()[24..32].*,
-        });
+        // Also compute eval_1 independently to verify the total sum
+        var eval_1_indep = F.zero();
+        for (0..half_len) |b_idx2| {
+            const b2 = LookupBits(128).new(@as(u128, b_idx2), log_len - 1);
+            var prefixes_c1: [Prefixes.COUNT]F = undefined;
+            for (0..Prefixes.COUNT) |i| {
+                const prefix2: Prefixes = @enumFromInt(i);
+                var b_copy2 = b2;
+                prefixes_c1[i] = prefixes_mod.prefixMle(F, prefix2, &prefix_checkpoints.checkpoints, r_x, 1, &b_copy2, round);
+            }
+            for (0..NUM_TABLES) |table_idx2| {
+                if (suffix_polys.tables[table_idx2]) |table2| {
+                    const ts2 = tableSuffixes(table_idx2);
+                    var suf_l2: [MAX_SUFFIXES_PER_TABLE]F = undefined;
+                    var suf_r2: [MAX_SUFFIXES_PER_TABLE]F = undefined;
+                    for (ts2, 0..) |_, s_idx2| {
+                        suf_l2[s_idx2] = table2.polys[s_idx2][b_idx2];
+                        suf_r2[s_idx2] = table2.polys[s_idx2][b_idx2 + half_len];
+                    }
+                    // At c=1, suffix value is: Q_left * (1-1) + Q_right * 1 = Q_right  -- wait no
+                    // Actually at c=1, the linear interpolation is: Q[b_idx] * (1 - 1) + Q[b_idx + half_len] * 1 = Q_right
+                    // But that's only if binding convention is: new[i] = old[i]*(1-r) + old[i+half]*r
+                    // At c=1: new[i] = old[i+half] = Q_right
+                    const combined_1 = tableCombine(F, table_idx2, &prefixes_c1, suf_r2[0..ts2.len]);
+                    eval_1_indep = eval_1_indep.add(combined_1);
+                }
+            }
+        }
+        const total_read_check = eval_0.add(eval_1_indep);
+        std.debug.print("[READ_CHECK ROUND 0] eval_0={x}\n", .{eval_0.toBytesBE()[16..32].*});
+        std.debug.print("[READ_CHECK ROUND 0] eval_1_indep={x}\n", .{eval_1_indep.toBytesBE()[16..32].*});
+        std.debug.print("[READ_CHECK ROUND 0] eval_0+eval_1={x}\n", .{total_read_check.toBytesBE()[16..32].*});
+        std.debug.print("[READ_CHECK ROUND 0] eval_2={x}\n", .{eval_2.toBytesBE()[16..32].*});
     }
 
     return .{ eval_0, eval_2 };
@@ -975,6 +1011,12 @@ pub fn RafDecomposition(comptime F: type) type {
         /// Compute sumcheck evaluations at index b
         /// Returns (P(0), P(2)) where P is the prefix polynomial
         ///
+        /// IMPORTANT: The prefix polynomial operates on chunk_len variables,
+        /// not total_len variables. At each phase boundary, a new prefix MLE
+        /// is conceptually created with chunk_len bits. Within a phase,
+        /// variables are bound one at a time. The "remaining" count here
+        /// refers to the remaining variables within the current chunk.
+        ///
         /// For OperandPolynomial:
         ///   If binding this round:
         ///     P(c) = bound_value * 2^unbound_pairs + operand_bits(b) + c * m
@@ -984,8 +1026,10 @@ pub fn RafDecomposition(comptime F: type) type {
         /// For IdentityPolynomial:
         ///   P(c) = bound_value * 2^remaining + b + c * m (always linear)
         pub fn prefixEvals(self: *const Self, b: usize) [2]F {
-            const num_vars = self.total_len;
-            const remaining = num_vars - self.num_bound_vars;
+            // The prefix polynomial has chunk_len variables at phase start.
+            // Within the chunk, num_bound_vars % chunk_len have been bound.
+            const vars_bound_in_chunk = self.num_bound_vars % self.chunk_len;
+            const remaining = self.chunk_len - vars_bound_in_chunk;
 
             return switch (self.poly_type) {
                 .LeftOperand => self.operandPrefixEvals(b, remaining, true),
@@ -1015,6 +1059,16 @@ pub fn RafDecomposition(comptime F: type) type {
                 }
             }
 
+            // Debug: show computation at round 1, b=0
+            if (self.round == 1 and b == 0) {
+                std.debug.print("[PREFIX_DEBUG] operandPrefixEvals: is_left={}, round={}, remaining={}, half_bits={}\n", .{
+                    is_left, self.round, remaining, half_bits,
+                });
+                std.debug.print("[PREFIX_DEBUG] bound_value={x}, operand_bits={}\n", .{
+                    self.bound_value.toBytesBE()[16..32].*, operand_bits,
+                });
+            }
+
             // In Jolt's format: even positions = right operand, odd positions = left operand
             // From Jolt's OperandPolynomial::sumcheck_evals():
             // - When num_bound_vars is even, LeftOperand binds (produces linear poly)
@@ -1042,6 +1096,20 @@ pub fn RafDecomposition(comptime F: type) type {
                 const unbound_pairs = remaining / 2;
                 const scale = if (unbound_pairs > 0) fieldPow2(F, unbound_pairs) else F.one();
                 const base = self.bound_value.mul(scale).add(F.fromU64(operand_bits));
+
+                // Debug: verify computation at round 1, b=0
+                if (self.round == 1 and b == 0 and is_left) {
+                    std.debug.print("[PREFIX_VERIFY] is_left={}, unbound_pairs={}, scale=2^{}={x}\n", .{
+                        is_left, unbound_pairs, unbound_pairs, scale.toBytesBE()[16..32].*,
+                    });
+                    std.debug.print("[PREFIX_VERIFY] bound_value * scale = {x}\n", .{
+                        self.bound_value.mul(scale).toBytesBE()[16..32].*,
+                    });
+                    std.debug.print("[PREFIX_VERIFY] base = {x}\n", .{
+                        base.toBytesBE()[16..32].*,
+                    });
+                }
+
                 return .{ base, base }; // P(0) = P(2) = base
             }
         }
@@ -1189,8 +1257,8 @@ fn uninterleaveBitsRight(bits: u128, num_bits: usize) u64 {
 ///   final: (eval_0, 2*eval_2_right - eval_2_left)
 ///
 /// For RAF, each decomposition has 2 (P, Q) pairs:
-/// - (ShiftSuffix prefix=1, Q[0]) - prefix is constant 1
-/// - (OperandSuffix prefix P, Q[1]) - prefix depends on bound_value and round
+/// - (Operand/Identity prefix P, Q[0]) - prefix depends on bound_value and round
+/// - (None=constant 1, Q[1]) - prefix is constant 1
 ///
 /// Reference: jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs:932
 pub fn proverMsgRaf(
@@ -1203,6 +1271,40 @@ pub fn proverMsgRaf(
 ) [2]F {
     const len = identity_ps.QLen();
     const half_len = len / 2;
+
+    // Debug: show state at round 1
+    if (left_ps.round == 1) {
+        std.debug.print("[RAF_DEBUG R1] Q_size={}, bound_value_left={x}\n", .{
+            len,
+            left_ps.bound_value.toBytesBE()[16..32].*,
+        });
+        std.debug.print("[RAF_DEBUG R1] bound_value_right={x}, bound_value_identity={x}\n", .{
+            right_ps.bound_value.toBytesBE()[16..32].*,
+            identity_ps.bound_value.toBytesBE()[16..32].*,
+        });
+
+        // Compute explicit sum to verify
+        var explicit_left_sum_0 = F.zero();
+        var explicit_right_sum_0 = F.zero();
+        for (0..half_len) |b| {
+            const l_prefix_b = left_ps.prefixEvals(b);
+            const r_prefix_b = right_ps.prefixEvals(b);
+            const i_prefix_b = identity_ps.prefixEvals(b);
+
+            // left contribution: prefix * Q0 + 1 * Q1
+            const l_contrib = l_prefix_b[0].mul(left_ps.Q[0][b]).add(left_ps.Q[1][b]);
+            explicit_left_sum_0 = explicit_left_sum_0.add(l_contrib);
+
+            // right+identity contribution
+            const r_contrib = r_prefix_b[0].mul(right_ps.Q[0][b]).add(right_ps.Q[1][b]);
+            const i_contrib = i_prefix_b[0].mul(identity_ps.Q[0][b]).add(identity_ps.Q[1][b]);
+            explicit_right_sum_0 = explicit_right_sum_0.add(r_contrib).add(i_contrib);
+        }
+        const explicit_raf_0 = gamma.mul(explicit_left_sum_0).add(gamma_sqr.mul(explicit_right_sum_0));
+        std.debug.print("[RAF_DEBUG R1] explicit_raf_0={x} (should match raf_evals[0])\n", .{
+            explicit_raf_0.toBytesBE()[16..32].*,
+        });
+    }
 
     // Accumulators for the sums
     var left_sum_0 = F.zero();
@@ -1233,52 +1335,53 @@ pub fn proverMsgRaf(
         const i_q1_right = identity_ps.Q[1][b + half_len];
 
         // Compute prefix evaluations at c=0 and c=2
-        // For shift suffix (Q[0]): prefix is constant 1
-        const shift_p0 = F.one();
-        const shift_p2 = F.one();
-
-        // For operand/identity suffix (Q[1]): use proper prefix evaluation
+        // In Jolt's PrefixSuffixDecomposition with ORDER=2:
+        //   P[0] = Some(prefix polynomial), Q[0] = shift suffix accumulator
+        //   P[1] = None (constant 1),       Q[1] = operand/identity suffix accumulator
+        // So prefix evals multiply Q[0], and constant 1 multiplies Q[1].
         const l_prefix = left_ps.prefixEvals(b);
         const r_prefix = right_ps.prefixEvals(b);
         const i_prefix = identity_ps.prefixEvals(b);
 
-        // Left operand contribution: sum of (shift, Q[0]) and (operand, Q[1]) pairs
-        // eval_0 = P(0)*Q[left], eval_2_left = P(2)*Q[left], eval_2_right = P(2)*Q[right]
-        const l_shift_0 = shift_p0.mul(l_q0_left);
-        const l_shift_2_left = shift_p2.mul(l_q0_left);
-        const l_shift_2_right = shift_p2.mul(l_q0_right);
-
-        const l_op_0 = l_prefix[0].mul(l_q1_left);
-        const l_op_2_left = l_prefix[1].mul(l_q1_left);
-        const l_op_2_right = l_prefix[1].mul(l_q1_right);
+        // Left operand contribution: sum of (prefix, Q[0]) and (1, Q[1]) pairs
+        // Pair 0: P = LeftOperand prefix, Q = Q[0] (shift half accumulator)
+        const l_pair0_0 = l_prefix[0].mul(l_q0_left);
+        const l_pair0_2_left = l_prefix[1].mul(l_q0_left);
+        const l_pair0_2_right = l_prefix[1].mul(l_q0_right);
+        // Pair 1: P = constant 1, Q = Q[1] (operand suffix accumulator)
+        const l_pair1_0 = l_q1_left;
+        const l_pair1_2_left = l_q1_left;
+        const l_pair1_2_right = l_q1_right;
 
         // Right operand contribution
-        const r_shift_0 = shift_p0.mul(r_q0_left);
-        const r_shift_2_left = shift_p2.mul(r_q0_left);
-        const r_shift_2_right = shift_p2.mul(r_q0_right);
-
-        const r_op_0 = r_prefix[0].mul(r_q1_left);
-        const r_op_2_left = r_prefix[1].mul(r_q1_left);
-        const r_op_2_right = r_prefix[1].mul(r_q1_right);
+        // Pair 0: P = RightOperand prefix, Q = Q[0] (shift half accumulator)
+        const r_pair0_0 = r_prefix[0].mul(r_q0_left);
+        const r_pair0_2_left = r_prefix[1].mul(r_q0_left);
+        const r_pair0_2_right = r_prefix[1].mul(r_q0_right);
+        // Pair 1: P = constant 1, Q = Q[1] (operand suffix accumulator)
+        const r_pair1_0 = r_q1_left;
+        const r_pair1_2_left = r_q1_left;
+        const r_pair1_2_right = r_q1_right;
 
         // Identity contribution
-        const i_shift_0 = shift_p0.mul(i_q0_left);
-        const i_shift_2_left = shift_p2.mul(i_q0_left);
-        const i_shift_2_right = shift_p2.mul(i_q0_right);
-
-        const i_op_0 = i_prefix[0].mul(i_q1_left);
-        const i_op_2_left = i_prefix[1].mul(i_q1_left);
-        const i_op_2_right = i_prefix[1].mul(i_q1_right);
+        // Pair 0: P = Identity prefix, Q = Q[0] (shift full accumulator)
+        const i_pair0_0 = i_prefix[0].mul(i_q0_left);
+        const i_pair0_2_left = i_prefix[1].mul(i_q0_left);
+        const i_pair0_2_right = i_prefix[1].mul(i_q0_right);
+        // Pair 1: P = constant 1, Q = Q[1] (identity suffix accumulator)
+        const i_pair1_0 = i_q1_left;
+        const i_pair1_2_left = i_q1_left;
+        const i_pair1_2_right = i_q1_right;
 
         // Accumulate left operand totals
-        left_sum_0 = left_sum_0.add(l_shift_0).add(l_op_0);
-        left_sum_2_left = left_sum_2_left.add(l_shift_2_left).add(l_op_2_left);
-        left_sum_2_right = left_sum_2_right.add(l_shift_2_right).add(l_op_2_right);
+        left_sum_0 = left_sum_0.add(l_pair0_0).add(l_pair1_0);
+        left_sum_2_left = left_sum_2_left.add(l_pair0_2_left).add(l_pair1_2_left);
+        left_sum_2_right = left_sum_2_right.add(l_pair0_2_right).add(l_pair1_2_right);
 
         // Accumulate (identity + right) totals
-        const combo_0 = i_shift_0.add(i_op_0).add(r_shift_0).add(r_op_0);
-        const combo_2_left = i_shift_2_left.add(i_op_2_left).add(r_shift_2_left).add(r_op_2_left);
-        const combo_2_right = i_shift_2_right.add(i_op_2_right).add(r_shift_2_right).add(r_op_2_right);
+        const combo_0 = i_pair0_0.add(i_pair1_0).add(r_pair0_0).add(r_pair1_0);
+        const combo_2_left = i_pair0_2_left.add(i_pair1_2_left).add(r_pair0_2_left).add(r_pair1_2_left);
+        const combo_2_right = i_pair0_2_right.add(i_pair1_2_right).add(r_pair0_2_right).add(r_pair1_2_right);
 
         right_sum_0 = right_sum_0.add(combo_0);
         right_sum_2_left = right_sum_2_left.add(combo_2_left);
@@ -1406,13 +1509,32 @@ pub fn ExpandingTable(comptime F: type) type {
     };
 }
 
+/// Reverse the bits in a value (up to num_bits bits)
+fn reverseBits(value: u128, num_bits: usize) u128 {
+    var result: u128 = 0;
+    var i: usize = 0;
+    while (i < num_bits) : (i += 1) {
+        const bit = (value >> @intCast(i)) & 1;
+        result |= bit << @intCast(num_bits - 1 - i);
+    }
+    return result;
+}
+
 /// Condense u_evals using the expanding table values from the previous phase.
 ///
 /// For each cycle j:
 ///   - Extract the bound prefix bits from lookup_index
-///   - Multiply u_evals[j] by v[k_bound] where k_bound = prefix & m_mask
+///   - Multiply u_evals[j] by v[k_bound] where k_bound = prefix with bits reversed
 ///
 /// This accumulates the eq contributions from the previous phase into u_evals.
+///
+/// IMPORTANT: The expanding table uses HighToLow binding, so:
+///   - v[i] where i[0]=1 means k[MSB]=1 (first bound variable matched r[0])
+///   - v[i] where i[1]=1 means k[MSB-1]=1 (second bound variable matched r[1])
+/// But the prefix bits extracted from k are in the opposite order:
+///   - prefix[0] = k[suffix_bits] (the lowest of the bound bits)
+///   - prefix[log_m-1] = k[127] (the highest bound bit)
+/// So we need to REVERSE the bit order of the prefix to get the correct v index.
 ///
 /// Args:
 ///   u_evals: Per-cycle eq(j, r_reduction) values to be condensed
@@ -1438,7 +1560,14 @@ pub fn condenseUEvals(
     for (lookup_indices, 0..) |k, j| {
         // Extract the bound prefix (the bits that have been bound in previous phases)
         const prefix = k >> @intCast(suffix_bits);
-        const k_bound = prefix & m_mask;
+        const k_prefix_raw = prefix & m_mask;
+
+        // CRITICAL FIX: Reverse the bit order to match HighToLow expanding table indexing
+        // The expanding table was updated with r[0], r[1], ..., r[log_m-1] in HighToLow order
+        // So v[i] has bit 0 corresponding to r[0] (which bound k[MSB])
+        // But k_prefix_raw has bit 0 = k[suffix_bits] (the lowest of the recently bound bits)
+        // and bit log_m-1 = k[127] (the MSB of k, which was bound first by r[0])
+        const k_bound = reverseBits(k_prefix_raw, log_m);
 
         if (k_bound > max_k_bound) max_k_bound = k_bound;
 

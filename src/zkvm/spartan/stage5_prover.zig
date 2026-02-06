@@ -575,7 +575,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // Use trace's rd_pre_value and rd_value directly (just like Jolt does)
             const trace_len = trace.steps.items.len;
             for (trace.steps.items, 0..) |step, j| {
-                if (step.is_noop) continue;
+                if (step.is_noop and !step.is_termination_store) continue;
 
                 const instr = step.instruction;
                 const rd: u5 = @truncate((instr >> 7) & 0x1f);
@@ -624,6 +624,98 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 });
             }
 
+            // BRUTE FORCE: Compute val(r_address, r_cycle) directly from register state
+            // val(k, j) = value of register k at START of cycle j
+            // val(r_address, r_cycle) = Σ_{k,j} eq(r_address, k) * eq(r_cycle, j) * register_value(k, j)
+            {
+                var register_vals: [32]u64 = [_]u64{0} ** 32;
+                var brute_val = F.zero();
+                // Precompute eq(r_cycle, j) for all j
+                var eq_cycle_evals = try self.allocator.alloc(F, T);
+                defer self.allocator.free(eq_cycle_evals);
+                for (0..T) |j| {
+                    eq_cycle_evals[j] = computeEqAtIndex(r_cycle_regs, j);
+                }
+                // Precompute eq(r_address, k) for all k
+                var eq_addr_evals: [32]F = undefined;
+                for (0..32) |k| {
+                    eq_addr_evals[k] = computeEqAtIndex(r_address_regs, k);
+                }
+                // Compute Σ_{k,j} eq_addr(k) * eq_cycle(j) * register_value(k, j)
+                for (trace.steps.items, 0..) |step, j| {
+                    // val(k, j) = register_vals[k] (value before this cycle)
+                    for (0..32) |k| {
+                        if (!eq_addr_evals[k].eql(F.zero()) and !eq_cycle_evals[j].eql(F.zero())) {
+                            brute_val = brute_val.add(eq_addr_evals[k].mul(eq_cycle_evals[j]).mul(F.fromU64(register_vals[k])));
+                        }
+                    }
+                    // Update register state
+                    if (!step.is_noop or step.is_termination_store) {
+                        const instr2 = step.instruction;
+                        const rd2: u5 = @truncate((instr2 >> 7) & 0x1f);
+                        const opcode2 = instr2 & 0x7f;
+                        const rd_used2 = switch (opcode2) {
+                            0x23, 0x63 => false,
+                            else => true,
+                        };
+                        if (rd_used2 and rd2 != 0 and rd2 < 32) {
+                            register_vals[rd2] = step.rd_value;
+                        }
+                    }
+                }
+                // Also add padding cycles (trace_len..T) with final register values
+                for (trace_len..T) |j| {
+                    for (0..32) |k| {
+                        if (!eq_addr_evals[k].eql(F.zero()) and !eq_cycle_evals[j].eql(F.zero())) {
+                            brute_val = brute_val.add(eq_addr_evals[k].mul(eq_cycle_evals[j]).mul(F.fromU64(register_vals[k])));
+                        }
+                    }
+                }
+                std.debug.print("[STAGE5 BRUTE] val(r_addr, r_cycle) from running regs = {any}\n", .{brute_val.toBytesBE()[0..16]});
+                std.debug.print("[STAGE5 BRUTE] regs_val_input (from Stage 4)          = {any}\n", .{regs_val_input.toBytesBE()[0..16]});
+                std.debug.print("[STAGE5 BRUTE] match? {}\n", .{brute_val.eql(regs_val_input)});
+            }
+
+            // Also verify inc values match between Stage 4 style and trace
+            {
+                var reg_vals2: [32]u64 = [_]u64{0} ** 32;
+                var inc_mismatches: usize = 0;
+                for (trace.steps.items, 0..) |step, j| {
+                    if (step.is_noop and !step.is_termination_store) continue;
+                    const instr2 = step.instruction;
+                    const rd2: u5 = @truncate((instr2 >> 7) & 0x1f);
+                    const opcode2 = instr2 & 0x7f;
+                    const rd_used2 = switch (opcode2) {
+                        0x23, 0x63 => false,
+                        else => true,
+                    };
+                    if (rd_used2 and rd2 != 0 and rd2 < 32) {
+                        // Stage 4 style: inc = rd_value - register_vals[rd]
+                        const s4_pre = reg_vals2[rd2];
+                        const s4_post = step.rd_value;
+                        const s4_inc_i128: i128 = @as(i128, @intCast(s4_post)) - @as(i128, @intCast(s4_pre));
+                        var s4_inc: F = undefined;
+                        if (s4_inc_i128 >= 0) {
+                            s4_inc = F.fromU64(@intCast(s4_inc_i128));
+                        } else {
+                            s4_inc = F.zero().sub(F.fromU64(@intCast(-s4_inc_i128)));
+                        }
+                        // Stage 5 style: from trace
+                        const s5_inc = inc_evals[j];
+                        if (!s4_inc.eql(s5_inc)) {
+                            if (inc_mismatches < 3) {
+                                std.debug.print("[STAGE5 INC MISMATCH] j={}: rd={}, s4_pre={}, s5_pre={}, rd_value={}\n", .{
+                                    j, rd2, s4_pre, step.rd_pre_value, step.rd_value,
+                                });
+                            }
+                            inc_mismatches += 1;
+                        }
+                        reg_vals2[rd2] = step.rd_value;
+                    }
+                }
+                std.debug.print("[STAGE5 INC CHECK] Total mismatches: {}\n", .{inc_mismatches});
+            }
+
             // Verify the sum Σ_j inc(j) · wa(j) · lt(j) matches the input claim
             var computed_sum = F.zero();
             var non_zero_terms: usize = 0;
@@ -670,27 +762,89 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             //   lookup_output = result of operation
             //
             for (trace.steps.items, 0..) |step, j| {
-                if (step.is_noop) continue;
+                if (step.is_noop and !step.is_termination_store) continue;
 
                 const instr = step.instruction;
                 const opcode = instr & 0x7f;
-                const funct3 = (instr >> 12) & 0x7;
-                const funct7 = (instr >> 25) & 0x7f;
+                const funct3: u3 = @truncate((instr >> 12) & 0x7);
+                const funct7: u7 = @truncate(instr >> 25);
 
-                // Determine left_op, right_op, and lookup_output based on instruction type
+                // Determine left_op, right_op, and lookup_output based on instruction type.
+                // This MUST match the verification loop / R1CS witness exactly.
+                // Use field arithmetic with signedI64ToField for signed immediates.
                 var left_op: F = undefined;
                 var right_op: F = undefined;
                 var lookup_output: F = undefined;
 
-                switch (opcode) {
-                    0x33 => {
-                        // R-type: R1CS uses AddOperands for all 0x33 (with special cases for MUL/SUB)
-                        // left_input = rs1, right_input = rs2
-                        const left_input = F.fromU64(step.rs1_value);
-                        const right_input = F.fromU64(step.rs2_value);
+                // First compute left_input and right_input (same as R1CS)
+                const left_is_rs1: bool = switch (opcode) {
+                    0x33, 0x3b, 0x23, 0x63, 0x13, 0x03, 0x67, 0x1b => true,
+                    else => false,
+                };
+                const left_is_pc: bool = switch (opcode) {
+                    0x17, 0x6f => true,
+                    else => false,
+                };
+                const right_is_rs2: bool = switch (opcode) {
+                    0x33, 0x63, 0x3b => true,
+                    else => false,
+                };
+                const right_is_imm: bool = switch (opcode) {
+                    0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b => true,
+                    else => false,
+                };
 
+                const imm_val = computeImmediate(instr);
+
+                var left_input: F = F.zero();
+                if (left_is_rs1) left_input = F.fromU64(step.rs1_value);
+                if (left_is_pc) left_input = F.fromU64(step.pc);
+
+                var right_input: F = F.zero();
+                if (right_is_rs2) right_input = F.fromU64(step.rs2_value);
+                if (right_is_imm) right_input = imm_val;
+
+                // Compute LookupOutput = materialize_entry(lookup_index) for the instruction's table.
+                // For identity-path (AddOperands/SubtractOperands/MultiplyOperands):
+                //   lookup_output = materialize_entry(right_op_raw) = F.fromU64(right_op_raw) for RangeCheck.
+                // For interleaved path:
+                //   lookup_output = materialize_entry(interleave(left, right)) from the assigned table.
+                // Special cases: JAL, JALR, Branch have their own formulas.
+                //
+                // NOTE: This is computed AFTER the lookup index section below, but we set a
+                // preliminary value here and may override it.
+                switch (opcode) {
+                    0x6f => { // JAL: LookupOutput = PC + imm
+                        lookup_output = left_input.add(right_input);
+                    },
+                    0x67 => { // JALR: LookupOutput = (rs1 + imm) & ~1
+                        const target = left_input.add(right_input);
+                        const target_u64 = target.toU64() & ~@as(u64, 1);
+                        lookup_output = F.fromU64(target_u64);
+                    },
+                    0x63 => { // Branch: LookupOutput = condition result (0 or 1)
+                        const result: u64 = switch (funct3) {
+                            0x0 => if (step.rs1_value == step.rs2_value) 1 else 0,
+                            0x1 => if (step.rs1_value != step.rs2_value) 1 else 0,
+                            0x4 => if (@as(i64, @bitCast(step.rs1_value)) < @as(i64, @bitCast(step.rs2_value))) 1 else 0,
+                            0x5 => if (@as(i64, @bitCast(step.rs1_value)) >= @as(i64, @bitCast(step.rs2_value))) 1 else 0,
+                            0x6 => if (step.rs1_value < step.rs2_value) 1 else 0,
+                            0x7 => if (step.rs1_value >= step.rs2_value) 1 else 0,
+                            else => 0,
+                        };
+                        lookup_output = F.fromU64(result);
+                    },
+                    else => {
+                        // Default: rd_value (will be overridden for ADDIW/ADDW/SUBW below)
+                        lookup_output = F.fromU64(step.rd_value);
+                    },
+                }
+
+                // Compute LeftLookupOperand and RightLookupOperand
+                switch (opcode) {
+                    0x33 => { // R-type
                         if (funct7 == 0x01) {
-                            // M-extension (MUL, etc.)
+                            // M-extension
                             if (funct3 == 0x0) { // MUL
                                 left_op = F.zero();
                                 right_op = left_input.mul(right_input); // Product
@@ -708,124 +862,55 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             left_op = F.zero();
                             right_op = left_input.add(right_input);
                         }
-                        lookup_output = F.fromU64(step.rd_value);
                     },
-                    0x13 => {
-                        // I-type: R1CS uses AddOperands for ALL 0x13
-                        // left_input = rs1, right_input = imm
-                        const imm12_raw: u32 = @truncate(instr >> 20);
-                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                        const imm_u64: u64 = @bitCast(imm_signed);
-
-                        const left_input = F.fromU64(step.rs1_value);
-                        const right_input = F.fromU64(imm_u64);
-
-                        // All I-type use AddOperands: left=0, right=left_input+right_input
+                    0x13 => { // I-type ALU: AddOperands
                         left_op = F.zero();
                         right_op = left_input.add(right_input);
-                        lookup_output = F.fromU64(step.rd_value);
                     },
-                    0x1b => {
-                        // OP-IMM-32 (RV64): ADDIW, SLLIW, SRLIW, SRAIW
-                        // R1CS: falls to else case, so left=left_input=rs1, right=right_input=imm
-                        const imm12_raw: u32 = @truncate(instr >> 20);
-                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                        const imm_u64: u64 = @bitCast(imm_signed);
-
-                        left_op = F.fromU64(step.rs1_value);
-                        right_op = F.fromU64(imm_u64);
-                        lookup_output = F.fromU64(step.rd_value);
-                    },
-                    0x3b => {
-                        // OP-32 (RV64): ADDW, SUBW, SLLW, SRLW, SRAW, MULW, etc.
-                        // R1CS: falls to else case, so left=rs1, right=rs2
-                        left_op = F.fromU64(step.rs1_value);
-                        right_op = F.fromU64(step.rs2_value);
-                        lookup_output = F.fromU64(step.rd_value);
-                    },
-                    0x37 => {
-                        // LUI: AddOperands flag - left=0, right=imm
+                    0x37 => { // LUI: AddOperands, left_input=0, right_input=imm
                         left_op = F.zero();
-                        const imm20: u64 = @as(u64, instr & 0xFFFFF000);
-                        right_op = F.fromU64(imm20);
-                        lookup_output = F.fromU64(step.rd_value);
+                        right_op = left_input.add(right_input);
                     },
-                    0x17 => {
-                        // AUIPC: AddOperands flag - left=0, right=PC+imm
+                    0x17 => { // AUIPC: AddOperands, left_input=PC, right_input=imm
                         left_op = F.zero();
-                        const imm20: u64 = @as(u64, instr & 0xFFFFF000);
-                        right_op = F.fromU64(step.pc +% imm20);
-                        lookup_output = F.fromU64(step.rd_value);
+                        right_op = left_input.add(right_input);
                     },
-                    0x6f => {
-                        // JAL: AddOperands flag - left=0, right=PC+imm
-                        // Extract J-type immediate
-                        const imm20 = ((@as(u32, instr >> 31) & 1) << 19) |
-                            ((@as(u32, instr >> 12) & 0xFF) << 11) |
-                            ((@as(u32, instr >> 20) & 1) << 10) |
-                            ((@as(u32, instr >> 21) & 0x3FF));
-                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm20 << 12)) >> 11);
-                        const imm_u64: u64 = @bitCast(imm_signed);
-
+                    0x6f => { // JAL: AddOperands, left_input=PC, right_input=imm
                         left_op = F.zero();
-                        right_op = F.fromU64(step.pc +% imm_u64);
-                        lookup_output = F.fromU64(step.pc +% imm_u64); // PC + imm, NOT rd
+                        right_op = left_input.add(right_input);
                     },
-                    0x67 => {
-                        // JALR: AddOperands flag - left=0, right=rs1+imm
-                        const imm12_raw: u32 = @truncate(instr >> 20);
-                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                        const imm_u64: u64 = @bitCast(imm_signed);
-
+                    0x67 => { // JALR: AddOperands, left_input=rs1, right_input=imm
                         left_op = F.zero();
-                        right_op = F.fromU64(step.rs1_value +% imm_u64);
-                        // Output is (rs1 + imm) & ~1 for JALR
-                        lookup_output = F.fromU64((step.rs1_value +% imm_u64) & ~@as(u64, 1));
+                        right_op = left_input.add(right_input);
                     },
-                    0x63 => {
-                        // B-type: BEQ, BNE, BLT, BGE, BLTU, BGEU
-                        // These use interleaved operands (not AddOperands)
-                        left_op = F.fromU64(step.rs1_value);
-                        right_op = F.fromU64(step.rs2_value);
-                        const result: u64 = switch (funct3) {
-                            0x0 => if (step.rs1_value == step.rs2_value) 1 else 0, // BEQ
-                            0x1 => if (step.rs1_value != step.rs2_value) 1 else 0, // BNE
-                            0x4 => if (@as(i64, @bitCast(step.rs1_value)) < @as(i64, @bitCast(step.rs2_value))) 1 else 0, // BLT
-                            0x5 => if (@as(i64, @bitCast(step.rs1_value)) >= @as(i64, @bitCast(step.rs2_value))) 1 else 0, // BGE
-                            0x6 => if (step.rs1_value < step.rs2_value) 1 else 0, // BLTU
-                            0x7 => if (step.rs1_value >= step.rs2_value) 1 else 0, // BGEU
-                            else => 0,
-                        };
-                        lookup_output = F.fromU64(result);
+                    0x1b => { // ADDIW: AddOperands (matches Jolt's ADDI step of decomposition)
+                        // In Jolt, ADDIW decomposes to ADDI+VirtualSignExtendWord, both with AddOperands.
+                        // For Zolt's single-cycle model, we use identity format matching ADDI.
+                        left_op = F.zero();
+                        right_op = left_input.add(right_input);
                     },
-                    0x03 => {
-                        // Load: R1CS has left=rs1, right=imm (NOT AddOperands)
-                        const imm12_raw: u32 = @truncate(instr >> 20);
-                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                        const imm_u64: u64 = @bitCast(imm_signed);
-
-                        left_op = F.fromU64(step.rs1_value);
-                        right_op = F.fromU64(imm_u64);
-                        lookup_output = F.fromU64(step.rd_value);
-                    },
-                    0x23 => {
-                        // Store: R1CS has left=rs1, right=imm (NOT AddOperands)
-                        const imm_lo: u32 = (instr >> 7) & 0x1F;
-                        const imm_hi: u32 = (instr >> 25) & 0x7F;
-                        const imm12 = (imm_hi << 5) | imm_lo;
-                        const imm_signed: i64 = @as(i64, @as(i12, @bitCast(@as(u12, @truncate(imm12)))));
-                        const imm_u64: u64 = @bitCast(imm_signed);
-
-                        left_op = F.fromU64(step.rs1_value);
-                        right_op = F.fromU64(imm_u64);
-                        // For stores, output comes from rd_value
-                        lookup_output = F.fromU64(step.rd_value);
+                    0x3b => { // ADDW/SUBW: AddOperands/SubtractOperands
+                        // In Jolt, ADDW decomposes to ADD+VirtualSEW, SUBW to SUB+VirtualSEW.
+                        // For Zolt's single-cycle model, match the first step's format.
+                        if (funct3 == 0 and funct7 == 0) {
+                            // ADDW: AddOperands, left=0, right=rs1+rs2
+                            left_op = F.zero();
+                            right_op = left_input.add(right_input);
+                        } else if (funct3 == 0 and funct7 == 0x20) {
+                            // SUBW: SubtractOperands, left=0, right=rs1-rs2+2^64
+                            const two_pow_64 = F.fromBytes(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
+                            left_op = F.zero();
+                            right_op = left_input.sub(right_input).add(two_pow_64);
+                        } else {
+                            // Other 0x3b variants (not AddOperands/SubtractOperands)
+                            left_op = left_input;
+                            right_op = right_input;
+                        }
                     },
                     else => {
-                        // Unknown or other: fall back to rs1, rs2, rd
-                        left_op = F.fromU64(step.rs1_value);
-                        right_op = F.fromU64(step.rs2_value);
-                        lookup_output = F.fromU64(step.rd_value);
+                        // Default: NOT Add+Sub+Mul (includes 0x03, 0x23, 0x63)
+                        left_op = left_input;
+                        right_op = right_input;
                     },
                 }
 
@@ -839,117 +924,189 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     });
                 }
 
-                // Compute lookup index = interleave_bits(left_operand, right_operand)
-                // For AddOperands instructions: left=0, right=sum, so index = interleave(0, sum)
-                // For interleaved: left=rs1, right=rs2, so index = interleave(rs1, rs2)
-                // Note: We need the RAW operand values as u64, not field elements
-                const left_op_raw: u64 = blk: {
-                    const is_add_operands = switch (opcode) {
-                        0x33 => (funct3 == 0) and (funct7 == 0), // ADD
-                        0x13 => (funct3 == 0), // ADDI
-                        0x1b => (funct3 == 0), // ADDIW
-                        0x3b => (funct3 == 0) and (funct7 == 0), // ADDW
-                        0x37, 0x17, 0x6f, 0x67, 0x03, 0x23 => true, // LUI, AUIPC, JAL, JALR, Load, Store
-                        else => false,
-                    };
-                    if (is_add_operands) {
-                        break :blk 0;
-                    } else {
-                        break :blk step.rs1_value;
-                    }
-                };
-                const right_op_raw: u64 = blk: {
-                    const is_add_operands = switch (opcode) {
-                        0x33 => (funct3 == 0) and (funct7 == 0), // ADD
-                        0x3b => (funct3 == 0) and (funct7 == 0), // ADDW
-                        else => false,
-                    };
-                    if (is_add_operands) {
-                        // right = rs1 + rs2
-                        break :blk step.rs1_value +% step.rs2_value;
-                    }
-                    const is_imm_add = switch (opcode) {
-                        0x13 => (funct3 == 0), // ADDI
-                        0x1b => (funct3 == 0), // ADDIW
-                        0x37 => true, // LUI
-                        0x17 => true, // AUIPC
-                        0x6f => true, // JAL
-                        0x67 => true, // JALR
-                        0x03 => true, // Load
-                        0x23 => true, // Store
-                        else => false,
-                    };
-                    if (is_imm_add) {
-                        // Various immediate formats - for simplicity, use what we computed
-                        // This is the sum that goes into right_op
-                        break :blk switch (opcode) {
-                            0x13, 0x67 => blk2: {
-                                const imm12_raw: u32 = @truncate(instr >> 20);
-                                const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                                const imm_u64: u64 = @bitCast(imm_signed);
-                                break :blk2 step.rs1_value +% imm_u64;
-                            },
-                            0x1b => blk2: {
-                                const imm12_raw: u32 = @truncate(instr >> 20);
-                                const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                                const imm_u64: u64 = @bitCast(imm_signed);
-                                const rs1_32: u32 = @truncate(step.rs1_value);
-                                const imm_32: u32 = @truncate(imm_u64);
-                                break :blk2 @as(u64, rs1_32) +% @as(u64, imm_32);
-                            },
-                            0x37 => @as(u64, instr & 0xFFFFF000),
-                            0x17 => step.pc +% @as(u64, instr & 0xFFFFF000),
-                            0x6f => blk2: {
-                                const imm20: u32 = ((@as(u32, instr >> 31) & 1) << 19) |
-                                    ((@as(u32, instr >> 12) & 0xFF) << 11) |
-                                    ((@as(u32, instr >> 20) & 1) << 10) |
-                                    ((@as(u32, instr >> 21) & 0x3FF));
-                                const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm20 << 12)) >> 11);
-                                const imm_u64: u64 = @bitCast(imm_signed);
-                                break :blk2 step.pc +% imm_u64;
-                            },
-                            0x03 => blk2: {
-                                const imm12_raw: u32 = @truncate(instr >> 20);
-                                const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                                const imm_u64: u64 = @bitCast(imm_signed);
-                                break :blk2 step.rs1_value +% imm_u64;
-                            },
-                            0x23 => blk2: {
-                                const imm_lo: u32 = (instr >> 7) & 0x1F;
-                                const imm_hi: u32 = (instr >> 25) & 0x7F;
-                                const imm12: u32 = (imm_hi << 5) | imm_lo;
-                                const imm_signed: i64 = @as(i64, @as(i12, @bitCast(@as(u12, @truncate(imm12)))));
-                                const imm_u64: u64 = @bitCast(imm_signed);
-                                break :blk2 step.rs1_value +% imm_u64;
-                            },
-                            else => step.rs2_value,
-                        };
-                    }
-                    break :blk step.rs2_value;
-                };
-
-                // Compute interleaved lookup index
-                const lookup_idx = interleaveBits128(left_op_raw, right_op_raw);
-                lookups_indices_lo[j] = @truncate(lookup_idx);
-                lookups_indices_hi[j] = @truncate(lookup_idx >> 64);
-
                 // Track which lookup table this cycle uses (for flag claims)
-                // and whether it uses identity path (for raf_flag claim)
                 const table_idx = getLookupTableIndex(opcode, funct3, funct7);
                 cycle_table_indices[j] = table_idx;
 
-                // Identity path (not interleaved) = AddOperands instructions
-                // These are: ADD, ADDI, ADDIW, ADDW, LUI, AUIPC, JAL, JALR, Load, Store
-                const is_add_operands = switch (opcode) {
-                    0x33 => (funct3 == 0) and (funct7 == 0), // ADD
-                    0x13 => (funct3 == 0), // ADDI
-                    0x1b => (funct3 == 0), // ADDIW
-                    0x3b => (funct3 == 0) and (funct7 == 0), // ADDW
-                    0x37, 0x17, 0x6f, 0x67, 0x03, 0x23 => true, // LUI, AUIPC, JAL, JALR, Load, Store
+                // Determine identity path (not interleaved) based on Jolt's flags:
+                //   - AddOperands: ADD, ADDI, ADDIW, ADDW, LUI, AUIPC, JAL, JALR, Load, Store
+                //   - SubtractOperands: SUB, SUBW
+                //   - MultiplyOperands: MUL, MULHU
+                // Identity path instructions use raw operand value as lookup index (NOT interleaved).
+                // Interleaved path instructions use interleave_bits(left, right) as lookup index.
+                const is_identity_path: bool = switch (opcode) {
+                    0x33 => blk: {
+                        if (funct3 == 0 and funct7 == 0) break :blk true; // ADD (AddOperands)
+                        if (funct3 == 0 and funct7 == 0x20) break :blk true; // SUB (SubtractOperands)
+                        if (funct7 == 0x01 and funct3 == 0) break :blk true; // MUL (MultiplyOperands)
+                        if (funct7 == 0x01 and funct3 == 3) break :blk true; // MULHU (MultiplyOperands)
+                        break :blk false;
+                    },
+                    0x13 => (funct3 == 0), // ADDI (AddOperands)
+                    0x1b => (funct3 == 0), // ADDIW (AddOperands)
+                    0x3b => blk: {
+                        if (funct3 == 0 and funct7 == 0) break :blk true; // ADDW (AddOperands)
+                        if (funct3 == 0 and funct7 == 0x20) break :blk true; // SUBW (SubtractOperands)
+                        break :blk false;
+                    },
+                    0x37 => true, // LUI (AddOperands)
+                    0x17 => true, // AUIPC (AddOperands)
+                    0x6f => true, // JAL (AddOperands)
+                    0x67 => true, // JALR (AddOperands)
+                    0x03 => true, // Load (AddOperands - though no lookup table)
+                    0x23 => true, // Store (AddOperands - though no lookup table)
                     else => false,
                 };
-                // Identity path = NOT interleaved = is_add_operands (uses identity polynomial)
-                cycle_is_identity_path[j] = is_add_operands;
+                cycle_is_identity_path[j] = is_identity_path;
+
+                // Compute lookup operands and index matching Jolt's to_lookup_operands/to_lookup_index.
+                // For identity-path: left_op_raw=0, right_op_raw=computed_value, index=right_op_raw
+                // For interleaved-path: left_op_raw=rs1, right_op_raw=rs2, index=interleave(left,right)
+                var left_op_raw: u64 = undefined;
+                var right_op_raw: u64 = undefined;
+
+                if (is_identity_path) {
+                    left_op_raw = 0;
+                    right_op_raw = switch (opcode) {
+                        // ADD: (0, rs1 + rs2)
+                        0x33 => blk: {
+                            if (funct3 == 0 and funct7 == 0) {
+                                break :blk step.rs1_value +% step.rs2_value;
+                            }
+                            // SUB: (0, rs1 + 2^64 - rs2)
+                            if (funct3 == 0 and funct7 == 0x20) {
+                                break :blk step.rs1_value +% (0 -% step.rs2_value);
+                            }
+                            // MUL: (0, rs1 * rs2)
+                            if (funct7 == 0x01 and funct3 == 0) {
+                                break :blk step.rs1_value *% step.rs2_value;
+                            }
+                            // MULHU: (0, rs1 * rs2) as u128, but lookup index = full product
+                            if (funct7 == 0x01 and funct3 == 3) {
+                                // MULHU uses the full 128-bit product. But since right_op_raw is u64,
+                                // we handle this with the u128 lookup_idx below
+                                break :blk 0; // placeholder, handled separately
+                            }
+                            break :blk 0;
+                        },
+                        // ADDW/SUBW: use same computation as ADD/SUB
+                        // In Jolt, ADDW decomposes to ADD+VirtualSignExtendWord.
+                        // The ADD step uses lookup_index = rs1 + rs2 (wrapping u64).
+                        // The SUB step uses lookup_index = rs1 + (0 -% rs2) (two's complement).
+                        0x3b => blk: {
+                            if (funct3 == 0 and funct7 == 0) {
+                                // ADDW: same as ADD
+                                break :blk step.rs1_value +% step.rs2_value;
+                            }
+                            if (funct3 == 0 and funct7 == 0x20) {
+                                // SUBW: same as SUB
+                                break :blk step.rs1_value +% (0 -% step.rs2_value);
+                            }
+                            break :blk 0;
+                        },
+                        // ADDI: (0, rs1 + sign_ext(imm))
+                        0x13 => blk: {
+                            const imm12_raw: u32 = @truncate(instr >> 20);
+                            const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
+                            const imm_u64: u64 = @bitCast(imm_signed);
+                            break :blk step.rs1_value +% imm_u64;
+                        },
+                        // ADDIW: use same computation as ADDI (rs1 + sign_ext(imm))
+                        // In Jolt, ADDIW decomposes to ADDI+VirtualSignExtendWord.
+                        // The ADDI step uses lookup_index = rs1 + imm (wrapping u64).
+                        0x1b => blk: {
+                            const imm12_raw_w: u32 = @truncate(instr >> 20);
+                            const imm_signed_w: i64 = @as(i64, @as(i32, @bitCast(imm12_raw_w << 20)) >> 20);
+                            const imm_u64_w: u64 = @bitCast(imm_signed_w);
+                            break :blk step.rs1_value +% imm_u64_w;
+                        },
+                        // LUI: (0, imm) where imm = upper 20 bits shifted left by 12
+                        0x37 => @as(u64, instr & 0xFFFFF000),
+                        // AUIPC: (0, pc + imm)
+                        0x17 => step.pc +% @as(u64, instr & 0xFFFFF000),
+                        // JAL: (0, pc + sign_ext(imm))
+                        0x6f => blk: {
+                            const imm20: u32 = ((@as(u32, instr >> 31) & 1) << 19) |
+                                ((@as(u32, instr >> 12) & 0xFF) << 11) |
+                                ((@as(u32, instr >> 20) & 1) << 10) |
+                                ((@as(u32, instr >> 21) & 0x3FF));
+                            const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm20 << 12)) >> 11);
+                            const imm_u64: u64 = @bitCast(imm_signed);
+                            break :blk step.pc +% imm_u64;
+                        },
+                        // JALR: (0, rs1 + sign_ext(imm))
+                        0x67 => blk: {
+                            const imm12_raw: u32 = @truncate(instr >> 20);
+                            const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
+                            const imm_u64: u64 = @bitCast(imm_signed);
+                            break :blk step.rs1_value +% imm_u64;
+                        },
+                        // Load: (0, rs1 + sign_ext(imm))
+                        0x03 => blk: {
+                            const imm12_raw: u32 = @truncate(instr >> 20);
+                            const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
+                            const imm_u64: u64 = @bitCast(imm_signed);
+                            break :blk step.rs1_value +% imm_u64;
+                        },
+                        // Store: (0, rs1 + sign_ext(imm))
+                        0x23 => blk: {
+                            const imm_lo: u32 = (instr >> 7) & 0x1F;
+                            const imm_hi: u32 = (instr >> 25) & 0x7F;
+                            const imm12: u32 = (imm_hi << 5) | imm_lo;
+                            const imm_signed: i64 = @as(i64, @as(i12, @bitCast(@as(u12, @truncate(imm12)))));
+                            const imm_u64: u64 = @bitCast(imm_signed);
+                            break :blk step.rs1_value +% imm_u64;
+                        },
+                        else => 0,
+                    };
+                } else {
+                    // Interleaved path: left=rs1, right=rs2 (or imm for I-type)
+                    left_op_raw = step.rs1_value;
+                    right_op_raw = switch (opcode) {
+                        0x33, 0x3b, 0x63 => step.rs2_value,
+                        0x13 => blk: {
+                            // I-type: right operand is sign-extended immediate (as u64)
+                            const imm12_raw: u32 = @truncate(instr >> 20);
+                            const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
+                            break :blk @as(u64, @bitCast(imm_signed));
+                        },
+                        else => step.rs2_value,
+                    };
+                }
+
+                // Compute lookup index:
+                // - Identity path: index = right_op_raw (plain value)
+                //   Exception: MULHU needs 128-bit product
+                // - Interleaved path: index = interleave_bits(left, right)
+                const lookup_idx: u128 = blk_idx: {
+                    if (is_identity_path) {
+                        // Special case: MULHU needs full 128-bit product
+                        if (opcode == 0x33 and funct7 == 0x01 and funct3 == 3) {
+                            break :blk_idx @as(u128, step.rs1_value) *% @as(u128, step.rs2_value);
+                        }
+                        break :blk_idx @as(u128, right_op_raw);
+                    } else {
+                        break :blk_idx interleaveBits128(left_op_raw, right_op_raw);
+                    }
+                };
+                lookups_indices_lo[j] = @truncate(lookup_idx);
+                lookups_indices_hi[j] = @truncate(lookup_idx >> 64);
+
+                // Override lookup_output for ADDIW/ADDW/SUBW to match table MLE output.
+                // For identity-path with RangeCheck table: materialize_entry(index) = lower64(index).
+                // This replaces the rd_value-based output set earlier.
+                if (opcode == 0x1b and funct3 == 0) {
+                    // ADDIW: output = lower64(rs1 + imm) from RangeCheck table
+                    lookup_output = F.fromU64(lookups_indices_lo[j]);
+                } else if (opcode == 0x3b) {
+                    if (funct3 == 0 and (funct7 == 0 or funct7 == 0x20)) {
+                        // ADDW/SUBW: output = lower64(lookup_index) from RangeCheck table
+                        lookup_output = F.fromU64(lookups_indices_lo[j]);
+                    }
+                }
+
+                // Re-compute combined_vals with the corrected lookup_output
+                lookups_combined_vals[j] = lookup_output.add(gamma_raf.mul(left_op)).add(gamma_raf2.mul(right_op));
 
                 // Debug first 5 cycles with full BE bytes
                 if (j < 5) {
@@ -959,6 +1116,14 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         lookup_output.toBytesBE()[0..8],
                         left_op.toBytesBE()[0..8],
                         right_op.toBytesBE()[0..8],
+                    });
+                    std.debug.print("[STAGE5 INDEX] j={}: is_identity={}, left_raw=0x{x}, right_raw=0x{x}, idx=0x{x:0>32}\n", .{
+                        j, is_identity_path, left_op_raw, right_op_raw, lookup_idx,
+                    });
+                    // Also compute what the OLD interleaved index would have been
+                    const old_idx = interleaveBits128(left_op_raw, right_op_raw);
+                    std.debug.print("[STAGE5 INDEX] j={}: old_interleaved=0x{x:0>32}, changed={}\n", .{
+                        j, old_idx, old_idx != lookup_idx,
                     });
                 }
                 // Debug first 3 cycles
@@ -980,6 +1145,42 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 }
             }
 
+            // Debug: count instructions by opcode to see what we have
+            {
+                var opcode_counts: [128]u32 = [_]u32{0} ** 128;
+                var identity_count: u32 = 0;
+                var interleaved_count: u32 = 0;
+                for (trace.steps.items, 0..) |step_d, j_d| {
+                    if (step_d.is_noop and !step_d.is_termination_store) continue;
+                    const opc = step_d.instruction & 0x7f;
+                    opcode_counts[opc] += 1;
+                    if (cycle_is_identity_path[j_d]) identity_count += 1 else interleaved_count += 1;
+                }
+                std.debug.print("[STAGE5 OPCODE COUNTS] identity={}, interleaved={}\n", .{identity_count, interleaved_count});
+                for (opcode_counts, 0..) |cnt, opc| {
+                    if (cnt > 0) {
+                        std.debug.print("  opcode 0x{x:0>2}: {} cycles\n", .{opc, cnt});
+                    }
+                }
+
+                // Per-cycle check: does lower64(lookup_index) == rd_value for table 0?
+                var mismatch_count: u32 = 0;
+                for (trace.steps.items, 0..) |step_d, j_d| {
+                    if (step_d.is_noop and !step_d.is_termination_store) continue;
+                    if (cycle_table_indices[j_d] != 0) continue; // Only table 0
+                    const lower64 = lookups_indices_lo[j_d];
+                    if (lower64 != step_d.rd_value) {
+                        mismatch_count += 1;
+                        if (mismatch_count <= 5) {
+                            std.debug.print("[STAGE5 MISMATCH] j={}: opcode=0x{x}, idx_lo=0x{x}, idx_hi=0x{x}, rd_value=0x{x}\n", .{
+                                j_d, step_d.instruction & 0x7f, lower64, lookups_indices_hi[j_d], step_d.rd_value,
+                            });
+                        }
+                    }
+                }
+                std.debug.print("[STAGE5 MISMATCH] Total table-0 cycles with lower64(idx) != rd_value: {}\n", .{mismatch_count});
+            }
+
             // Verify the sum matches lookups_input
             // Compute individual sums for debugging
             var output_sum = F.zero();
@@ -997,7 +1198,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 var left_op: F = undefined;
                 var right_op: F = undefined;
 
-                if (step.is_noop) {
+                if (step.is_noop and !step.is_termination_store) {
                     lookup_output = F.zero();
                     left_op = F.zero();
                     right_op = F.zero();
@@ -1123,6 +1324,19 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 // Use recomputed combined value to match individual sums
                 const recomputed_combined = lookup_output.add(gamma_raf.mul(left_op)).add(gamma_raf2.mul(right_op));
                 lookups_computed_sum = lookups_computed_sum.add(lookups_eq_evals[j].mul(recomputed_combined));
+                // Compare against lookups_combined_vals
+                if (!recomputed_combined.eql(lookups_combined_vals[j])) {
+                    const step_dbg2 = trace.steps.items[j];
+                    std.debug.print("[COMBINED MISMATCH] j={}: opcode=0x{x}, noop={}, term={}\n", .{
+                        j, step_dbg2.instruction & 0x7f, step_dbg2.is_noop, step_dbg2.is_termination_store,
+                    });
+                    std.debug.print("  recomputed = {x}\n", .{recomputed_combined.toBytesBE()[16..32].*});
+                    std.debug.print("  combined_v = {x}\n", .{lookups_combined_vals[j].toBytesBE()[16..32].*});
+                    std.debug.print("  output: recomp=0x{x}, rs1={}, rs2={}, rd={}, pc=0x{x}\n", .{
+                        lookup_output.toU64(), step_dbg2.rs1_value, step_dbg2.rs2_value,
+                        step_dbg2.rd_value, step_dbg2.pc,
+                    });
+                }
             }
             // Debug: print first 5 cycles' right operand values
             std.debug.print("[STAGE5 LOOKUPS] First 5 right_op values (computed in loop):\n", .{});
@@ -1185,6 +1399,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 .add(batch2.mul(lookups_scaled));
 
             std.debug.print("[STAGE5] Initial batched claim = {any}\n", .{batched_claim.toBytesBE()});
+            std.debug.print("  [S5P] initial_claim (e before R0): {x}\n", .{batched_claim.toBytes()[0..16].*});
 
             var challenges = try self.allocator.alloc(F, max_num_rounds);
             errdefer self.allocator.free(challenges);
@@ -1292,6 +1507,23 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     });
                 }
             }
+
+            // Full-size G_A and G_B arrays (size K, mostly zeros)
+            // G_A_full[k] = G_A for the access at address k, or 0 if no access at k
+            // G_B_full[k] = G_B for the access at address k, or 0 if no access at k
+            // This allows us to iterate densely over all K addresses (like Jolt does)
+            var G_A_full = try self.allocator.alloc(F, K);
+            defer self.allocator.free(G_A_full);
+            var G_B_full = try self.allocator.alloc(F, K);
+            defer self.allocator.free(G_B_full);
+            @memset(G_A_full, F.zero());
+            @memset(G_B_full, F.zero());
+            for (0..ram_access_count) |i| {
+                const addr_usize: usize = @intCast(ram_addresses[i]);
+                G_A_full[addr_usize] = ram_G_A[i];
+                G_B_full[addr_usize] = ram_G_B[i];
+            }
+            std.debug.print("[STAGE5 RAM_RA] Created full-size G_A/G_B arrays (K={}), {} non-zero entries\n", .{ K, ram_access_count });
 
             // Initialize B_1 and B_2 polynomials for address rounds
             // B_1 = eq(r_address_raf, k) - this is bound during address rounds
@@ -1569,6 +1801,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
             // Flag to track if H_prime has been initialized (for PhaseCycle2)
             var phase_cycle2_initialized = false;
+            // Scale factors for PhaseCycle2: eq(r_cycle_x_lo, r_cycle_prefix_reduced)
+            // These are computed during PhaseCycle2 initialization and used in every PhaseCycle2 round
+            var scale_raf: F = F.one();
+            var scale_rw: F = F.one();
+            var scale_val: F = F.one();
 
             // Store Instance 1 polynomial evaluations for claim update after challenge
             // These are set in the polynomial computation section and used in the binding section
@@ -1584,6 +1821,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             defer self.allocator.free(lookup_indices_u128);
             for (0..T) |j| {
                 lookup_indices_u128[j] = (@as(u128, lookups_indices_hi[j]) << 64) | lookups_indices_lo[j];
+            }
+            // Print first 5 lookup indices (VERIFY FIX APPLIED)
+            for (0..@min(5, T)) |j| {
+                std.debug.print("[LOOKUP IDX] j={}: idx=0x{x:0>32}, lo=0x{x:0>16}, hi=0x{x:0>16}\n", .{
+                    j, lookup_indices_u128[j], lookups_indices_lo[j], lookups_indices_hi[j],
+                });
             }
 
             // Initialize suffix polynomials for phase 0
@@ -1657,6 +1900,121 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 LOOKUPS_LOG_K - log_m,
                 initial_m,
             });
+
+            // ==========================================================================
+            // DIAGNOSTIC: Verify the total sum from Q polynomials matches brute force
+            // After initPhase, Q[table][suffix][prefix_idx] = Σ_{j: table_j==t, prefix==prefix_idx} u[j] * suffixMle(suffix_bits_j)
+            //
+            // The read_checking total sum should equal: Σ_j u[j] * table_t(k_j)
+            // = Σ_j u[j] * tableCombine_t(prefix_value(k_j), suffix_values(k_j))
+            //
+            // We can verify this by computing:
+            //   Σ_{b=0}^{m-1} tableCombine(actual_prefix_value(b), Q[b])
+            //
+            // But the prefix value at the concrete index b is just: the formula applied to integer b
+            // For LowerWord: it accumulates 2^(shift) * bit_value for each bit position
+            //
+            // Simpler approach: Compute brute-force rv_claim from trace data and compare
+            // ==========================================================================
+            {
+                // Brute-force rv_claim = Σ_j u[j] * output_j
+                // Brute-force left_claim = Σ_j u[j] * left_operand_j
+                // Brute-force right_claim = Σ_j u[j] * right_operand_j
+                var bf_combined = F.zero();
+                for (trace.steps.items, 0..) |step, jj| {
+                    if (step.is_noop and !step.is_termination_store) continue;
+                    const u_j = lookups_eq_evals[jj];
+                    // Decompose combined_vals back
+                    // combined = output + γ*left + γ²*right
+                    // We stored the combined value, but we can also recompute the individual parts
+                    bf_combined = bf_combined.add(u_j.mul(lookups_combined_vals[jj]));
+                }
+
+                // Verify combined matches lookups_claim
+                std.debug.print("[DIAG INIT] bf_combined = {x}\n", .{bf_combined.toBytesBE()[16..32].*});
+                std.debug.print("[DIAG INIT] lookups_claim = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+                std.debug.print("[DIAG INIT] combined == claim: {}\n", .{bf_combined.eql(lookups_claim)});
+
+                // Now compute total from Q polynomials directly
+                // For each table that has non-zero Q, sum Q values across all entries
+                var q_total_raw = F.zero();
+                for (0..NUM_TABLES) |t_idx| {
+                    if (suffix_polys.tables[t_idx]) |table| {
+                        for (table.polys, 0..) |poly, s_idx| {
+                            var poly_sum = F.zero();
+                            for (poly) |v| {
+                                poly_sum = poly_sum.add(v);
+                            }
+                            if (!poly_sum.eql(F.zero())) {
+                                std.debug.print("[DIAG INIT] Q_total[table={},suffix={}] = {x}\n", .{
+                                    t_idx, s_idx, poly_sum.toBytesBE()[16..32].*,
+                                });
+                            }
+                            q_total_raw = q_total_raw.add(poly_sum);
+                        }
+                    }
+                }
+                std.debug.print("[DIAG INIT] Total raw Q sum = {x}\n", .{q_total_raw.toBytesBE()[16..32].*});
+
+                // Also verify: Q[128..255] should be all zero if all addresses have MSB=0
+                var right_half_nonzero: usize = 0;
+                for (0..NUM_TABLES) |t_idx| {
+                    if (suffix_polys.tables[t_idx]) |table| {
+                        for (table.polys) |poly| {
+                            for (128..poly.len) |idx| {
+                                if (!poly[idx].eql(F.zero())) {
+                                    right_half_nonzero += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                std.debug.print("[DIAG INIT] Right half (Q[128..255]) non-zero entries: {}\n", .{right_half_nonzero});
+
+                // Also check RAF Q arrays
+                var raf_right_half_nonzero: usize = 0;
+                for (0..2) |qi| {
+                    for (128..initial_m) |idx| {
+                        if (!left_raf.Q[qi][idx].eql(F.zero())) raf_right_half_nonzero += 1;
+                        if (!right_raf.Q[qi][idx].eql(F.zero())) raf_right_half_nonzero += 1;
+                        if (!identity_raf.Q[qi][idx].eql(F.zero())) raf_right_half_nonzero += 1;
+                    }
+                }
+                std.debug.print("[DIAG INIT] RAF right half non-zero entries: {}\n", .{raf_right_half_nonzero});
+
+                // Compute total from prefix-suffix at phase 0 (no challenges bound yet)
+                // For each index b (0..255), evaluate the full prefix and combine with Q
+                // At phase 0, round 0, before any variable binding:
+                //   Each full index b represents 8 bits of the address (bits 120..127)
+                //   The suffix is 120 bits long
+                //   tableCombine(prefix_at_b, Q[b]) gives the contribution of entries at prefix b
+                //
+                // The total = Σ_b tableCombine(prefix(integer b), Q[b])
+                //
+                // For table 0 (RangeCheck): combine = LowerWord * one + lower_word_suffix
+                //   At phase 0 with j=0..7 (first 8 rounds), LowerWord prefix = 0 (since j < XLEN)
+                //   So combine = 0 * Q_one[b] + Q_lower_word[b] = Q_lower_word[b]
+                //   Total = Σ_b Q_lower_word[b]
+                //
+                // This is exactly what we computed as Q_total[table=0, suffix=1]!
+                // But the issue is: this should equal Σ_{j: table_j==0} u[j] * output_j
+                // Let's verify:
+                var bf_table0_output = F.zero();
+                var bf_table0_lookup_output = F.zero();
+                for (trace.steps.items, 0..) |_, jj| {
+                    if (cycle_table_indices[jj] == 0) {
+                        bf_table0_output = bf_table0_output.add(lookups_eq_evals[jj].mul(F.fromU64(trace.steps.items[jj].rd_value)));
+                        // Use lookup_index lower 64 bits (= materialize_entry for RangeCheck)
+                        bf_table0_lookup_output = bf_table0_lookup_output.add(lookups_eq_evals[jj].mul(F.fromU64(lookups_indices_lo[jj])));
+                    }
+                }
+                std.debug.print("[DIAG INIT] bf_table0_output (Σu*rd_value for table 0) = {x}\n", .{
+                    bf_table0_output.toBytesBE()[16..32].*,
+                });
+                std.debug.print("[DIAG INIT] bf_table0_lookup (Σu*lookup_lo for table 0) = {x}\n", .{
+                    bf_table0_lookup_output.toBytesBE()[16..32].*,
+                });
+            }
 
             // Run the batched sumcheck
             std.debug.print("[STAGE5] Entering main sumcheck loop, max_num_rounds={}\n", .{max_num_rounds});
@@ -1764,57 +2122,93 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         // p(1) = Σ_{accesses where k_m=0} F_k * (B_1[k_prime][1] * G_A + γ² * B_2[k_prime][1] * G_B)
                         // where k_prime = k >> (m+1), and F_k = eq(r_addr_reduced_so_far, k & ((1<<m)-1))
 
+                        // ===================================================================
+                        // PhaseAddress polynomial (matching Jolt's dense approach exactly)
+                        // ===================================================================
+                        // Jolt's formula:
+                        //   For each k_prime in [0, half_K):
+                        //     B_1_evals = [B_1[2*k'], linear_extrap_to_c2(B_1[2*k'], B_1[2*k'+1])]
+                        //     B_2_evals = [B_2[2*k'], linear_extrap_to_c2(B_2[2*k'], B_2[2*k'+1])]
+                        //     For k in [k_prime << m, (k_prime+1) << m):
+                        //       split by k_m = (k >> (m-1)) & 1
+                        //       sum_A_0/1 += G_A_full[k] * F[k & mask]
+                        //       sum_B_0/1 += G_B_full[k] * F[k & mask]
+                        //     inner_A_0 = sum_A_0, inner_A_c2 = 2*sum_A_1 - sum_A_0
+                        //     eval_0 += B_1[0]*inner_A_0 + γ²*B_2[0]*inner_B_0
+                        //     eval_c2 += B_1_c2*inner_A_c2 + γ²*B_2_c2*inner_B_c2
+                        //
+                        // NOTE: Jolt uses m = round + 1 (1-indexed), we use m = ram_ra_round (0-indexed)
+                        // The bit extracted is (k >> (m-1)) & 1 in Jolt = (k >> m) & 1 when m is 0-indexed
+                        // Actually Jolt: m = round + 1, k_m = (k >> (m-1)) & 1 = (k >> round) & 1
+                        // So with m = ram_ra_round: k_m = (k >> m) & 1
                         const m = ram_ra_round;
-                        const inner_len = @as(usize, 1) << @intCast(m);
-                        const f_index_mask = inner_len - 1;
-                        const half_K = K >> @intCast(m + 1);
+                        // inner_len = 1 << (m+1) in Jolt's terms = 1 << (round+1) = 2^(m+1)
+                        // This is the range of k values per k_prime
+                        const inner_len = @as(usize, 1) << @intCast(m + 1);
+                        // f_index_mask: F uses the lower m bits = (1 << m) - 1
+                        const f_index_mask = (@as(usize, 1) << @intCast(m)) - 1;
+                        // half_K = K / 2 after binding = B_1.len / 2 at this point
+                        const current_B_len = K >> @intCast(m);
+                        const half_K = current_B_len / 2;
 
-                        var eval_0 = F.zero();
-                        var eval_1 = F.zero();
+                        var eval_0_acc = F.zero();
+                        var eval_c2_acc = F.zero();
 
-                        // Iterate over RAM accesses (sparse!)
-                        for (0..ram_access_count) |access_idx| {
-                            const addr = ram_addresses[access_idx];
-                            const addr_usize: usize = @intCast(addr);
+                        for (0..half_K) |k_prime| {
+                            // B_1 evals at X=0 and linear extrapolation to X=2
+                            const B_1_at_0 = B_1[2 * k_prime];
+                            const B_1_at_1 = B_1[2 * k_prime + 1];
+                            const B_1_at_c2 = B_1_at_1.add(B_1_at_1).sub(B_1_at_0);
+                            const B_2_at_0 = B_2[2 * k_prime];
+                            const B_2_at_1 = B_2[2 * k_prime + 1];
+                            const B_2_at_c2 = B_2_at_1.add(B_2_at_1).sub(B_2_at_0);
 
-                            // Get the bit being bound: k_m = (addr >> m) & 1
-                            const k_m: u1 = @truncate(addr_usize >> @intCast(m));
+                            // Inner sum: iterate over k in [k_prime << (m+1), (k_prime+1) << (m+1))
+                            const k_start = k_prime * inner_len;
+                            const k_end = k_start + inner_len;
+                            var sum_A_0 = F.zero();
+                            var sum_A_1 = F.zero();
+                            var sum_B_0 = F.zero();
+                            var sum_B_1 = F.zero();
 
-                            // k_prime = addr >> (m + 1)
-                            const k_prime = addr_usize >> @intCast(m + 1);
-                            if (k_prime >= half_K) continue; // Addr out of range
+                            for (k_start..k_end) |k| {
+                                const k_m = (k >> @intCast(m)) & 1;
+                                const F_k = ram_ra_F.get(k & f_index_mask);
+                                const G_A_k = G_A_full[k];
+                                const G_B_k = G_B_full[k];
 
-                            // F_k = eq(r_addr_reduced_so_far, k & f_index_mask)
-                            // This is tracked by ram_ra_F expanding table
-                            const F_k = ram_ra_F.get(addr_usize & f_index_mask);
+                                // Skip zero entries (sparse optimization)
+                                const is_zero_A = G_A_k.eql(F.zero());
+                                const is_zero_B = G_B_k.eql(F.zero());
+                                if (is_zero_A and is_zero_B) continue;
 
-                            // SPARSE TRACE FIX: Use ORIGINAL eq values, not bound B_1/B_2 arrays
-                            // The bound B_1/B_2 arrays contain interpolated values which are
-                            // correct for dense sumcheck but NOT for sparse traces.
-                            //
-                            // For sparse traces, the contribution is:
-                            //   (eq_original(r_addr_1, addr) * G_A + γ² * eq_original(r_addr_2, addr) * G_B) * F_k
-                            // And this contributes to eval_0 or eval_1 based on the current bit.
-                            const B_1_original_i = ram_B1_original[access_idx];
-                            const B_2_original_i = ram_B2_original[access_idx];
-                            const G_A_i = ram_G_A[access_idx];
-                            const G_B_i = ram_G_B[access_idx];
+                                const contrib_A = G_A_k.mul(F_k);
+                                const contrib_B = G_B_k.mul(F_k);
 
-                            // Full contribution from this access
-                            const contrib = B_1_original_i.mul(G_A_i).add(gamma2.mul(B_2_original_i.mul(G_B_i))).mul(F_k);
-
-                            // CRITICAL: The contribution goes to eval_X where X is the current bit value
-                            // When k_m=0: this access contributes to the X=0 evaluation
-                            // When k_m=1: this access contributes to the X=1 evaluation
-                            if (k_m == 0) {
-                                eval_0 = eval_0.add(contrib);
-                            } else {
-                                eval_1 = eval_1.add(contrib);
+                                if (k_m == 0) {
+                                    sum_A_0 = sum_A_0.add(contrib_A);
+                                    sum_B_0 = sum_B_0.add(contrib_B);
+                                } else {
+                                    sum_A_1 = sum_A_1.add(contrib_A);
+                                    sum_B_1 = sum_B_1.add(contrib_B);
+                                }
                             }
+
+                            // Linear extrapolation of inner sums to c=2
+                            const inner_A_0 = sum_A_0;
+                            const inner_A_c2 = sum_A_1.add(sum_A_1).sub(sum_A_0);
+                            const inner_B_0 = sum_B_0;
+                            const inner_B_c2 = sum_B_1.add(sum_B_1).sub(sum_B_0);
+
+                            // Combine: eval_0 += B_1[0]*inner_A_0 + γ²*B_2[0]*inner_B_0
+                            eval_0_acc = eval_0_acc.add(B_1_at_0.mul(inner_A_0).add(gamma2.mul(B_2_at_0.mul(inner_B_0))));
+                            eval_c2_acc = eval_c2_acc.add(B_1_at_c2.mul(inner_A_c2).add(gamma2.mul(B_2_at_c2.mul(inner_B_c2))));
                         }
 
-                        // Compute eval_2 = 2*eval_1 - eval_0 (extrapolation for degree-2)
-                        const eval_2 = eval_1.add(eval_1).sub(eval_0);
+                        // Derive eval_1 from sumcheck property: p(0) + p(1) = claim
+                        const eval_0 = eval_0_acc;
+                        const eval_1 = ram_ra_current_claim.sub(eval_0_acc);
+                        const eval_2 = eval_c2_acc;
 
                         combined_poly[0] = combined_poly[0].add(batch1.mul(eval_0));
                         combined_poly[1] = combined_poly[1].add(batch1.mul(eval_1));
@@ -1826,21 +2220,23 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         inst1_eval_1 = eval_1;
                         inst1_eval_2 = eval_2;
 
-                        // Debug for first few rounds and verification
-                        if (ram_ra_round < 3) {
+                        // Debug for all PhaseAddress rounds: check p(0)+p(1)=claim
+                        {
                             const inst1_sum = eval_0.add(eval_1);
-                            // For round 0 (ram_ra_round=0, global round=112), sum should equal ram_ra_input
-                            std.debug.print("[STAGE5 RAM_RA] PhaseAddress round {} (global {}): eval_0={x}, eval_1={x}\n", .{
-                                ram_ra_round,
-                                round,
-                                eval_0.toBytesBE()[16..32].*,
-                                eval_1.toBytesBE()[16..32].*,
-                            });
-                            std.debug.print("  eval_0+eval_1={x}, ram_ra_input={x}, match={}\n", .{
-                                inst1_sum.toBytesBE()[16..32].*,
-                                ram_ra_input.toBytesBE()[16..32].*,
-                                inst1_sum.eql(ram_ra_input),
-                            });
+                            const sum_matches = inst1_sum.eql(ram_ra_current_claim);
+                            if (!sum_matches or ram_ra_round < 3 or ram_ra_round == log_ram_k - 1) {
+                                std.debug.print("[STAGE5 RAM_RA] PhaseAddress round {} (global {}): eval_0={x}, eval_1={x}\n", .{
+                                    ram_ra_round,
+                                    round,
+                                    eval_0.toBytesBE()[16..32].*,
+                                    eval_1.toBytesBE()[16..32].*,
+                                });
+                                std.debug.print("  eval_0+eval_1={x}, current_claim={x}, match={}\n", .{
+                                    inst1_sum.toBytesBE()[16..32].*,
+                                    ram_ra_current_claim.toBytesBE()[16..32].*,
+                                    sum_matches,
+                                });
+                            }
 
                             // Extra debug for round 0: verify the formula
                             if (ram_ra_round == 0 and ram_access_count > 0) {
@@ -1936,11 +2332,43 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             }
 
                             std.debug.print("[STAGE5 PQ] Q arrays initialized with {} accesses\n", .{ram_access_count});
-                            if (prefix_size > 0) {
-                                std.debug.print("[STAGE5 PQ] Q_raf[0]={x}, Q_rw[0]={x}, Q_val[0]={x}\n", .{
-                                    Q_raf[0].toBytesBE()[16..32].*,
-                                    Q_rw[0].toBytesBE()[16..32].*,
-                                    Q_val[0].toBytesBE()[16..32].*,
+                            // Print all non-zero Q values
+                            for (0..prefix_size) |qi| {
+                                if (!Q_raf[qi].eql(F.zero()) or !Q_rw[qi].eql(F.zero()) or !Q_val[qi].eql(F.zero())) {
+                                    std.debug.print("[STAGE5 PQ] Q_raf[{}]={x}, Q_rw[{}]={x}, Q_val[{}]={x}\n", .{
+                                        qi, Q_raf[qi].toBytesBE()[16..32].*,
+                                        qi, Q_rw[qi].toBytesBE()[16..32].*,
+                                        qi, Q_val[qi].toBytesBE()[16..32].*,
+                                    });
+                                }
+                            }
+                            // Print corresponding P values at same indices
+                            for (0..prefix_size) |qi| {
+                                if (!Q_raf[qi].eql(F.zero()) or !Q_rw[qi].eql(F.zero()) or !Q_val[qi].eql(F.zero())) {
+                                    std.debug.print("[STAGE5 PQ] P_raf[{}]={x}, P_rw[{}]={x}, P_val[{}]={x}\n", .{
+                                        qi, P_raf[qi].toBytesBE()[16..32].*,
+                                        qi, P_rw[qi].toBytesBE()[16..32].*,
+                                        qi, P_val[qi].toBytesBE()[16..32].*,
+                                    });
+                                }
+                            }
+                            // Print H_c for the access
+                            if (ram_access_count > 0) {
+                                const dbg_addr: usize = @intCast(ram_addresses[0]);
+                                const dbg_H_c = ram_ra_F.get(dbg_addr & (K - 1));
+                                std.debug.print("[STAGE5 PQ] H_c (eq(r_addr_reduced, addr={})) = {x}\n", .{
+                                    dbg_addr, dbg_H_c.toBytesBE()[16..32].*,
+                                });
+                                const dbg_cycle: usize = @intCast(ram_cycles[0]);
+                                const dbg_c_lo = dbg_cycle & (prefix_size - 1);
+                                const dbg_c_hi = dbg_cycle >> @intCast(prefix_n_vars);
+                                std.debug.print("[STAGE5 PQ] cycle={}, c_lo={}, c_hi={}\n", .{
+                                    dbg_cycle, dbg_c_lo, dbg_c_hi,
+                                });
+                                std.debug.print("[STAGE5 PQ] eq_raf_hi[{}]={x}, eq_rw_hi[{}]={x}, eq_val_hi[{}]={x}\n", .{
+                                    dbg_c_hi, eq_raf_hi[dbg_c_hi].toBytesBE()[16..32].*,
+                                    dbg_c_hi, eq_rw_hi[dbg_c_hi].toBytesBE()[16..32].*,
+                                    dbg_c_hi, eq_val_hi[dbg_c_hi].toBytesBE()[16..32].*,
                                 });
                             }
                         }
@@ -2089,9 +2517,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 // Compute scaling factors: eq(r_cycle_x_lo, r_cycle_prefix_reduced)
                                 // r_cycle_*[suffix_n_vars..] are the LOW bits (BIG_ENDIAN)
                                 // cycle_challenges[0..prefix_n_vars] are the prefix challenges (LowToHigh)
-                                var scale_raf = F.one();
-                                var scale_rw = F.one();
-                                var scale_val = F.one();
+                                scale_raf = F.one();
+                                scale_rw = F.one();
+                                scale_val = F.one();
                                 for (0..prefix_n_vars) |j| {
                                     // r_cycle_* is BIG_ENDIAN: index suffix_n_vars + j corresponds to prefix bit j
                                     const r_raf_j = r_cycle_raf[suffix_n_vars + prefix_n_vars - 1 - j];
@@ -2126,10 +2554,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             const current_len = suffix_size >> @intCast(suffix_round);
                             const half_len_suffix = current_len / 2;
 
-                            // Scaled coefficients
-                            const coeff_raf_scaled = alpha_1;
-                            const coeff_rw_scaled = gamma2.mul(alpha_2);
-                            const coeff_val_scaled = gamma.mul(alpha_1).add(gamma3.mul(alpha_2));
+                            // Scaled coefficients (include scale factors from eq(r_cycle_lo, prefix_challenges))
+                            const coeff_raf_scaled = alpha_1.mul(scale_raf);
+                            const coeff_rw_scaled = gamma2.mul(alpha_2).mul(scale_rw);
+                            const coeff_val_scaled = gamma.mul(alpha_1).add(gamma3.mul(alpha_2)).mul(scale_val);
 
                             // CRITICAL: Use hint mechanism - only compute eval_1 directly
                             // Then derive eval_0 = claim - eval_1 to guarantee sumcheck property
@@ -2244,6 +2672,185 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     const eval_0_inst2 = read_checking_evals[0].add(raf_evals[0]);
                     const eval_2_inst2 = read_checking_evals[1].add(raf_evals[1]);
 
+                    // BRUTE FORCE VERIFICATION: At round 0, compute the Instance 2 eval_0
+                    // directly from the trace data. eval_0 = sum of all u_evals[j] * combined[j]
+                    // where bit round (HighToLow) of lookup_index[j] is 0.
+                    // eval_1 = sum where that bit is 1.
+                    // eval_0 + eval_1 should equal lookups_claim.
+                    if (round == 0) {
+                        // At round 0, verify that combined_vals matches trace
+                        var total_sum_cv = F.zero();
+                        for (0..T) |jj| {
+                            total_sum_cv = total_sum_cv.add(lookups_eq_evals[jj].mul(lookups_combined_vals[jj]));
+                        }
+                        std.debug.print("[BRUTE R0 CHECK] total_sum(eq*combined_vals) = {x}\n", .{total_sum_cv.toBytesBE()[16..32].*});
+                        std.debug.print("[BRUTE R0 CHECK] lookups_claim = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+                        std.debug.print("[BRUTE R0 CHECK] match: {}\n", .{total_sum_cv.eql(lookups_claim)});
+                        // Also check: does combined_vals sum match computed_sum from earlier?
+                        // Print first 5 combined_vals
+                        for (0..@min(5, T)) |jj| {
+                            if (!lookups_combined_vals[jj].eql(F.zero())) {
+                                std.debug.print("[BRUTE R0 CHECK] combined_vals[{}] = {x}\n", .{jj, lookups_combined_vals[jj].toBytesBE()[16..32].*});
+                                std.debug.print("[BRUTE R0 CHECK] eq_evals[{}] = {x}\n", .{jj, lookups_eq_evals[jj].toBytesBE()[16..32].*});
+                            }
+                        }
+                    }
+                    if (round < 3 or round == 7 or round == 15 or round == 127) {
+                        const bit_pos = LOOKUPS_LOG_K - 1 - round;
+                        var direct_eval_0 = F.zero();
+                        var direct_eval_1 = F.zero();
+                        var bf_val_eval_0 = F.zero();
+                        var bf_raf_eval_0 = F.zero();
+                        var bf_val_per_table: [NUM_TABLES]F = [_]F{F.zero()} ** NUM_TABLES;
+                        for (0..T) |jj| {
+                            const u_j = lookups_eq_evals[jj];
+                            const combined_j = lookups_combined_vals[jj];
+                            const contrib = u_j.mul(combined_j);
+
+                            // Get bit at bit_pos from lookup_index
+                            const k_lo_bf = lookups_indices_lo[jj];
+                            const k_hi_bf = lookups_indices_hi[jj];
+                            const bit_val: u1 = if (bit_pos >= 64) @truncate(k_hi_bf >> @intCast(bit_pos - 64)) else @truncate(k_lo_bf >> @intCast(bit_pos));
+
+                            if (bit_val == 0) {
+                                direct_eval_0 = direct_eval_0.add(contrib);
+                                // Decompose: output_part = u*output, raf_part = u*(γ*left + γ²*right)
+                                // We need the lookup output value for this cycle
+                                // For table-0 identity-path: output = lower64(lookup_index)
+                                // For other: use lookup_output from combined_vals computation
+                                _ = lookups_indices_lo[jj];
+                                // Actually this isn't right for all tables. Let's just use:
+                                // raf_part = combined - output = γ*left + γ²*right
+                                // But we don't have output stored separately.
+                                // Instead, compute from trace:
+                                const step_bf = trace.steps.items[jj];
+                                if (!step_bf.is_noop or step_bf.is_termination_store) {
+                                    // Recompute lookup_output same as combined_vals
+                                    const instr_bf = step_bf.instruction;
+                                    const opc_bf = instr_bf & 0x7f;
+                                    const funct3_bf: u3 = @truncate((instr_bf >> 12) & 0x7);
+                                    _ = funct3_bf;
+                                    var lo_bf: F = undefined;
+                                    switch (opc_bf) {
+                                        0x6f => lo_bf = F.fromU64(step_bf.pc +% blk_jal: {
+                                            const imm20_bf: u32 = ((@as(u32, instr_bf >> 31) & 1) << 19) |
+                                                ((@as(u32, instr_bf >> 12) & 0xFF) << 11) |
+                                                ((@as(u32, instr_bf >> 20) & 1) << 10) |
+                                                ((@as(u32, instr_bf >> 21) & 0x3FF));
+                                            const imm_signed_bf: i64 = @as(i64, @as(i32, @bitCast(imm20_bf << 12)) >> 11);
+                                            break :blk_jal @as(u64, @bitCast(imm_signed_bf));
+                                        }),
+                                        0x67 => lo_bf = blk_jalr: {
+                                            const imm12_raw_bf: u32 = @truncate(instr_bf >> 20);
+                                            const imm_signed_bf: i64 = @as(i64, @as(i32, @bitCast(imm12_raw_bf << 20)) >> 20);
+                                            const imm_u64_bf: u64 = @bitCast(imm_signed_bf);
+                                            break :blk_jalr F.fromU64((step_bf.rs1_value +% imm_u64_bf) & ~@as(u64, 1));
+                                        },
+                                        0x63 => lo_bf = blk_br: {
+                                            const f3: u3 = @truncate((instr_bf >> 12) & 0x7);
+                                            const result_bf: u64 = switch (f3) {
+                                                0x0 => if (step_bf.rs1_value == step_bf.rs2_value) 1 else 0,
+                                                0x1 => if (step_bf.rs1_value != step_bf.rs2_value) 1 else 0,
+                                                0x4 => if (@as(i64, @bitCast(step_bf.rs1_value)) < @as(i64, @bitCast(step_bf.rs2_value))) 1 else 0,
+                                                0x5 => if (@as(i64, @bitCast(step_bf.rs1_value)) >= @as(i64, @bitCast(step_bf.rs2_value))) 1 else 0,
+                                                0x6 => if (step_bf.rs1_value < step_bf.rs2_value) 1 else 0,
+                                                0x7 => if (step_bf.rs1_value >= step_bf.rs2_value) 1 else 0,
+                                                else => 0,
+                                            };
+                                            break :blk_br F.fromU64(result_bf);
+                                        },
+                                        else => lo_bf = F.fromU64(step_bf.rd_value),
+                                    }
+                                    bf_val_eval_0 = bf_val_eval_0.add(u_j.mul(lo_bf));
+                                    bf_raf_eval_0 = bf_raf_eval_0.add(u_j.mul(lookups_combined_vals[jj].sub(lo_bf)));
+                                    // Per-table tracking
+                                    const t_idx_bf = cycle_table_indices[jj];
+                                    if (t_idx_bf >= 0 and @as(usize, @intCast(t_idx_bf)) < NUM_TABLES) {
+                                        bf_val_per_table[@intCast(t_idx_bf)] = bf_val_per_table[@intCast(t_idx_bf)].add(u_j.mul(lo_bf));
+                                    }
+                                }
+                            } else {
+                                direct_eval_1 = direct_eval_1.add(contrib);
+                            }
+                        }
+                        const direct_sum = direct_eval_0.add(direct_eval_1);
+                        std.debug.print("[BRUTE R{}] direct_eval_0={x}\n", .{ round, direct_eval_0.toBytesBE()[16..32].* });
+                        std.debug.print("[BRUTE R{}] direct_eval_1={x}\n", .{ round, direct_eval_1.toBytesBE()[16..32].* });
+                        std.debug.print("[BRUTE R{}] bf_val_eval_0={x} (should match read_checking)\n", .{ round, bf_val_eval_0.toBytesBE()[16..32].* });
+                        std.debug.print("[BRUTE R{}] bf_raf_eval_0={x} (should match raf_evals)\n", .{ round, bf_raf_eval_0.toBytesBE()[16..32].* });
+                        if (round == 0) {
+                            for (0..NUM_TABLES) |t_check| {
+                                if (!bf_val_per_table[t_check].eql(F.zero())) {
+                                    std.debug.print("[BRUTE R0] bf_val_per_table[{}]={x}\n", .{ t_check, bf_val_per_table[t_check].toBytesBE()[16..32].* });
+                                }
+                            }
+                        }
+                        std.debug.print("[BRUTE R{}] direct_sum={x}, lookups_claim={x}\n", .{
+                            round,
+                            direct_sum.toBytesBE()[16..32].*,
+                            lookups_claim.toBytesBE()[16..32].*,
+                        });
+                        std.debug.print("[BRUTE R{}] sum==claim: {}, eval0_match: {}\n", .{
+                            round,
+                            direct_sum.eql(lookups_claim),
+                            direct_eval_0.eql(eval_0_inst2),
+                        });
+                        std.debug.print("[BRUTE R{}] prefix_suffix_eval_0={x}\n", .{ round, eval_0_inst2.toBytesBE()[16..32].* });
+                        std.debug.print("[BRUTE R{}] prefix_suffix_eval_2={x}\n", .{ round, eval_2_inst2.toBytesBE()[16..32].* });
+
+                        // CORRECT RAF brute force: use identity/operand path properly
+                        // Check at intermediate rounds to find where drift starts
+                        const check_rounds = [_]usize{ 0, 1, 7, 15, 31, 63, 127 };
+                        const should_check = for (check_rounds) |cr| {
+                            if (round == cr) break true;
+                        } else false;
+                        if (should_check) {
+                            var correct_raf_eval_0 = F.zero();
+                            for (0..T) |jc| {
+                                const u_jc = lookups_eq_evals[jc];
+                                if (u_jc.eql(F.zero())) continue;
+
+                                const k_lo_c = lookups_indices_lo[jc];
+                                const k_hi_c = lookups_indices_hi[jc];
+                                const bit_val_c: u1 = if (bit_pos >= 64) @truncate(k_hi_c >> @intCast(bit_pos - 64)) else @truncate(k_lo_c >> @intCast(bit_pos));
+                                if (bit_val_c != 0) continue; // Only eval_0 (bit = 0)
+
+                                if (!cycle_is_identity_path[jc]) {
+                                    // Interleaved: RAF = γ * left_operand(k) + γ² * right_operand(k)
+                                    // Left(k) = k[127]*2^63 + k[125]*2^62 + ... + k[1]*2^0 (odd bit positions, MSB first)
+                                    // Right(k) = k[126]*2^63 + k[124]*2^62 + ... + k[0]*2^0 (even bit positions, MSB first)
+                                    const k_128: u128 = @as(u128, k_hi_c) << 64 | k_lo_c;
+                                    var left_bits: u64 = 0;
+                                    var right_bits: u64 = 0;
+                                    for (0..64) |bi| {
+                                        // i-th contribution: r[2i] (variable 2i, bit position 127-2i) with coeff 2^{63-i}
+                                        // For Left (odd positions): bit at position 127 - 2*i contributes 2^{63-i}
+                                        // But 127 - 2*i is odd, which matches "odd positions"
+                                        // Actually, let's just use the formula directly:
+                                        // Left = Σ_i k[127 - 2*i] * 2^{63-i} = Σ_i k[odd] * 2^{power}
+                                        // At i=0: k[127] * 2^63, at i=1: k[125] * 2^62, ...
+                                        const odd_pos = 127 - 2 * bi;
+                                        const even_pos = 126 - 2 * bi;
+                                        const left_bit: u64 = @truncate((k_128 >> @intCast(odd_pos)) & 1);
+                                        const right_bit: u64 = @truncate((k_128 >> @intCast(even_pos)) & 1);
+                                        left_bits |= left_bit << @intCast(63 - bi);
+                                        right_bits |= right_bit << @intCast(63 - bi);
+                                    }
+                                    const left_f = F.fromU64(left_bits);
+                                    const right_f = F.fromU64(right_bits);
+                                    correct_raf_eval_0 = correct_raf_eval_0.add(u_jc.mul(gamma_raf.mul(left_f).add(gamma_raf2.mul(right_f))));
+                                } else {
+                                    // Identity: RAF = γ² * identity(k) where identity(k) = k
+                                    const k_128i: u128 = @as(u128, k_hi_c) << 64 | k_lo_c;
+                                    const identity_f = F.fromU128(k_128i);
+                                    correct_raf_eval_0 = correct_raf_eval_0.add(u_jc.mul(gamma_raf2.mul(identity_f)));
+                                }
+                            }
+                            std.debug.print("[CORRECT_RAF R{}] eval_0={x}\n", .{ round, correct_raf_eval_0.toBytesBE()[16..32].* });
+                            std.debug.print("[CORRECT_RAF R{}] matches raf_evals[0]: {}\n", .{ round, correct_raf_eval_0.eql(raf_evals[0]) });
+                        }
+                    }
+
                     // Combine Instance 2 with Instance 0 and 1 contributions
                     // Instance 0 and 1 are already in combined_poly[0..4] as Toom-Cook format [p(0), p(1), p(2), p_inf]
                     //
@@ -2270,8 +2877,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     coeffs[1] = compressed[1]; // c2
                     coeffs[2] = compressed[2]; // c3
 
-                    // Debug: print coefficients for first 3 rounds (compare with Jolt)
-                    if (round < 3) {
+                    // Debug: print coefficients for first 3 rounds and rounds 110+ (compare with Jolt)
+                    if (round < 3 or round >= 110) {
                         std.debug.print("[STAGE5 COEFF ROUND {}] c0 (LE) = {any}\n", .{ round, coeffs[0].toBytes() });
                         std.debug.print("[STAGE5 COEFF ROUND {}] c2 (LE) = {any}\n", .{ round, coeffs[1].toBytes() });
                         std.debug.print("[STAGE5 COEFF ROUND {}] c3 (LE) = {any}\n", .{ round, coeffs[2].toBytes() });
@@ -2351,6 +2958,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // CRITICAL: Challenge * F uses mulHiBigIntU128 (Jolt delegates to F * Challenge)
                     current_batched_claim = c0.add(c1.mulHiBigIntU128(challenge.limbs)).add(c2_val.mul(r2)).add(c3_val.mul(r3));
 
+                    // Per-round tracking (matches Jolt verifier's [S5V] output)
+                    std.debug.print("  [S5P] R{} challenge={x} new_e={x} degree=3\n", .{
+                        round,
+                        challenge.toBytes()[0..16].*,
+                        current_batched_claim.toBytes()[0..16].*,
+                    });
+
                     // =====================================================================
                     // CRITICAL FIX: Update lookups_claim to match polynomial evaluation
                     // =====================================================================
@@ -2369,6 +2983,23 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     const inst2_c2 = eval_2_inst2.sub(eval_1_inst2).sub(eval_1_inst2).add(eval_0_inst2).mul(F.fromU64(2).inverse().?);
                     const inst2_c1 = eval_1_inst2.sub(eval_0_inst2).sub(inst2_c2);
                     const inst2_at_r = inst2_c0.add(inst2_c1.mulHiBigIntU128(challenge.limbs)).add(inst2_c2.mul(r2));
+
+                    // Debug: show claim chain for first 3 rounds
+                    if (round < 3) {
+                        std.debug.print("[CLAIM_CHAIN R{}] before_claim={x}\n", .{ round, lookups_claim.toBytesBE()[16..32].* });
+                        std.debug.print("[CLAIM_CHAIN R{}] eval_0={x}, eval_1={x}, eval_2={x}\n", .{
+                            round,
+                            eval_0_inst2.toBytesBE()[16..32].*,
+                            eval_1_inst2.toBytesBE()[16..32].*,
+                            eval_2_inst2.toBytesBE()[16..32].*,
+                        });
+                        std.debug.print("[CLAIM_CHAIN R{}] sum_check: eval_0+eval_1={x} (should == before_claim)\n", .{
+                            round,
+                            eval_0_inst2.add(eval_1_inst2).toBytesBE()[16..32].*,
+                        });
+                        std.debug.print("[CLAIM_CHAIN R{}] p(r)={x} -> new_claim\n", .{ round, inst2_at_r.toBytesBE()[16..32].* });
+                    }
+
                     lookups_claim = inst2_at_r;
 
                     // =====================================================================
@@ -2407,26 +3038,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // the RamRaClaimReduction binding section, where ram_ra_current_claim is updated.
                     // The batched claim recomputation is also moved to after the RamRaClaimReduction binding.
 
-                    // Debug: verify lookups_claim update
-                    if (round < 3) {
-                        std.debug.print("[STAGE5 R{}] Updated lookups_claim = {x} (was {x})\n", .{
-                            round,
-                            lookups_claim.toBytesBE()[16..32].*,
-                            eval_1_inst2.add(eval_0_inst2).toBytesBE()[16..32].*, // old claim was p(0)+p(1)
-                        });
-                    }
-
-                    // Debug: print challenges for first 4 rounds
-                    if (round < 4) {
-                        std.debug.print("[STAGE5 ROUND {}] challenge (LE) = {any}\n", .{
-                            round,
-                            challenge.toBytes(),
-                        });
-                        std.debug.print("[STAGE5 ROUND {}] new_claim (LE) = {any}\n", .{
-                            round,
-                            current_batched_claim.toBytes(),
-                        });
-                    }
+                    // NOTE: Consistency check moved to after Instance 1 claim update (below)
 
                     // ===================================================================
                     // Update RamRaClaimReduction state after receiving challenge
@@ -2576,6 +3188,23 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         }
 
                         // NOTE: ram_ra_current_claim is now updated in the PhaseAddress binding section above
+                    }
+
+                    // CONSISTENCY CHECK: batch0*inst0 + batch1*inst1 + batch2*inst2 == batched_claim
+                    // (placed AFTER Instance 1 claim update)
+                    {
+                        const recon = batch0.mul(regs_val_current_claim).add(batch1.mul(ram_ra_current_claim)).add(batch2.mul(lookups_claim));
+                        const matches = recon.eql(current_batched_claim);
+                        if (!matches or round < 3 or (round >= 110 and round <= 114) or round == 127) {
+                            std.debug.print("[CONSISTENCY R{}] batch0*inst0+batch1*inst1+batch2*inst2 == batched: {}\n", .{ round, matches });
+                            if (!matches) {
+                                std.debug.print("  recon = {x}\n", .{recon.toBytesBE()[16..32].*});
+                                std.debug.print("  batched = {x}\n", .{current_batched_claim.toBytesBE()[16..32].*});
+                                std.debug.print("  inst0 (regs) = {x}\n", .{regs_val_current_claim.toBytesBE()[16..32].*});
+                                std.debug.print("  inst1 (ram_ra) = {x}\n", .{ram_ra_current_claim.toBytesBE()[16..32].*});
+                                std.debug.print("  inst2 (lookups) = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+                            }
+                        }
                     }
 
                     // NOTE: current_batched_claim was already correctly set at the polynomial
@@ -3164,19 +3793,29 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             lookups_ra_weights[j] = ra_prod;
                         }
 
-                        // Recompute lookups_claim with the new ra_weights
-                        lookups_claim = F.zero();
-                        for (0..T) |j| {
-                            lookups_claim = lookups_claim.add(lookups_eq_evals[j].mul(lookups_ra_weights[j]).mul(lookups_combined_vals[j]));
-                        }
-                        std.debug.print("[STAGE5 CYCLE] lookups_claim after ra materialization = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+                        // DEBUG: Compute materialized sum for comparison (NOT used as claim)
+                        // In Jolt, the claim is NEVER overridden at this transition. It evolves
+                        // purely through polynomial evaluation at each round's challenge.
+                        // The arrays are materialized for computing the polynomial, but
+                        // finishMlesProductSumFromEvals uses the current lookups_claim (from
+                        // polynomial evaluation chain) to back-compute eval_at_0.
+                        {
+                            var materialized_sum = F.zero();
+                            for (0..T) |j| {
+                                materialized_sum = materialized_sum.add(lookups_eq_evals[j].mul(lookups_ra_weights[j]).mul(lookups_combined_vals[j]));
+                            }
+                            std.debug.print("[STAGE5 CYCLE] materialized_sum (direct) = {x}\n", .{materialized_sum.toBytesBE()[16..32].*});
+                            std.debug.print("[STAGE5 CYCLE] lookups_claim (from poly eval chain) = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+                            std.debug.print("[STAGE5 CYCLE] materialized == poly_chain: {}\n", .{materialized_sum.eql(lookups_claim)});
+                            std.debug.print("[STAGE5 CYCLE] current_batched_claim (NOT overridden) = {x}\n", .{current_batched_claim.toBytesBE()[16..32].*});
 
-                        // CRITICAL: Recompute batched claim with the newly materialized lookups_claim
-                        // This is necessary because lookups_claim changed from the address round value
-                        current_batched_claim = batch0.mul(regs_val_current_claim)
-                            .add(batch1.mul(ram_ra_current_claim))
-                            .add(batch2.mul(lookups_claim));
-                        std.debug.print("[STAGE5 CYCLE] batched_claim after materialization = {x}\n", .{current_batched_claim.toBytesBE()[16..32].*});
+                            // NOTE: In Jolt, claims are NEVER overridden. The polynomial chain
+                            // evolves continuously. The materialized arrays must match the claim.
+                            // If they don't, the address-round polynomial tracking is wrong.
+                            if (!materialized_sum.eql(lookups_claim)) {
+                                std.debug.print("[STAGE5 CYCLE] WARNING: materialized_sum != lookups_claim (address-round tracking error)\n", .{});
+                            }
+                        }
                     }
                     // CRITICAL: current_half_size is the number of pairs we iterate over
                     // At round k, we have T/2^(k+1) pairs to process
@@ -3466,6 +4105,14 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         current_batched_claim = eval_result;
                     }
 
+                    // Per-round tracking (matches Jolt verifier's [S5V] output)
+                    std.debug.print("  [S5P] R{} challenge={x} new_e={x} degree={}\n", .{
+                        round,
+                        challenge.toBytes()[0..16].*,
+                        current_batched_claim.toBytes()[0..16].*,
+                        combined_coeffs.len - 1,
+                    });
+
                     // Skip the standard compression/serialization below
                     // Bind the challenge for RegistersValEvaluation if active
                     if (remaining_rounds <= regs_val_num_rounds) {
@@ -3672,37 +4319,24 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         }
                     }
 
-                    // Update lookups_claim: the claim is the polynomial evaluated at the challenge
-                    // After binding, the new claim should match p(challenge) where p was the round polynomial.
+                    // CRITICAL FIX: Update lookups_claim by evaluating the Instance 2
+                    // polynomial at the challenge, NOT by recomputing from raw arrays.
                     //
-                    // For the NEXT round (lookups_round + 1), we need:
-                    //   claim = current_scalar * Σ_j eq_prefix(j) * Π_c ra_c[j] * val[j]
-                    //
-                    // where eq_prefix(j) = eq(j, r_reduction[0:remaining_vars])
-                    // remaining_vars = n - (lookups_round + 1) - 1 = n - lookups_round - 2
-                    //
-                    // At the END of round (n-1), remaining_vars = 0, eq_prefix(0) = 1
-                    const half_size = T >> @intCast(lookups_round + 1);
-                    const next_remaining_vars = if (lookups_round + 1 >= n_cycle_vars) 0 else n_cycle_vars - lookups_round - 2;
-
-                    var sum = F.zero();
-                    for (0..half_size) |j| {
-                        var ra_prod = F.one();
-                        for (0..ra_num_chunks) |c| {
-                            ra_prod = ra_prod.mul(ra_chunk_weights[c][j]);
+                    // The polynomial p2(X) = full_coeffs[0] + full_coeffs[1]*X + ... + full_coeffs[d]*X^d
+                    // was constructed by finishMlesProductSumFromEvals which includes the
+                    // eq(X, r_round) factor. Evaluating at the challenge gives the correct
+                    // new claim. Direct recomputation from bound arrays gives a different
+                    // result because it doesn't account for the eq factor correctly.
+                    {
+                        // Evaluate p2(challenge) using Horner's method
+                        var p2_at_r = full_coeffs[full_coeffs.len - 1];
+                        var idx = full_coeffs.len - 1;
+                        while (idx > 0) {
+                            idx -= 1;
+                            p2_at_r = p2_at_r.mulHiBigIntU128(challenge.limbs).add(full_coeffs[idx]);
                         }
-                        // Compute eq_prefix directly using the partial eq function
-                        const eq_val = if (next_remaining_vars == 0) F.one() else computeEqAtIndexPartial(r_reduction, j, next_remaining_vars);
-                        sum = sum.add(eq_val.mul(ra_prod).mul(lookups_combined_vals[j]));
+                        lookups_claim = p2_at_r;
                     }
-                    // CRITICAL: Include current_scalar in the claim
-                    lookups_claim = sum.mul(lookups_current_scalar);
-                    // Also update lookups_ra_weights for convenience
-                    var final_ra = F.one();
-                    for (0..ra_num_chunks) |c| {
-                        final_ra = final_ra.mul(ra_chunk_weights[c][0]);
-                    }
-                    lookups_ra_weights[0] = final_ra;
 
                     // NOTE: current_batched_claim was already correctly set by polynomial
                     // evaluation above. The verifier uses eval_from_hint which evaluates
@@ -3728,6 +4362,88 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // Debug: print final batched claim (this is output_claim from verifier's perspective)
             std.debug.print("[STAGE5] Final batched claim (output_claim) = {any}\n", .{current_batched_claim.toBytesBE()});
             std.debug.print("[STAGE5] Final lookups_current_scalar (should = eq_eval_r_reduction) = {x}\n", .{lookups_current_scalar.toBytesBE()[16..32].*});
+
+            // DEBUG: Print each instance's final claim value
+            // The verifier computes expected = batch0*inst0_eval + batch1*inst1_eval + batch2*inst2_eval
+            // The prover's output_claim should equal this.
+            std.debug.print("[STAGE5 FINAL CLAIMS] Individual instance final values:\n", .{});
+            std.debug.print("  regs_val_current_claim (Instance 0) = {any}\n", .{regs_val_current_claim.toBytes()});
+            std.debug.print("  ram_ra_current_claim (Instance 1) = {any}\n", .{ram_ra_current_claim.toBytes()});
+            std.debug.print("  lookups_claim (Instance 2) = {any}\n", .{lookups_claim.toBytes()});
+            std.debug.print("  batch0*inst0 (LE) = {any}\n", .{batch0.mul(regs_val_current_claim).toBytes()});
+            std.debug.print("  batch1*inst1 (LE) = {any}\n", .{batch1.mul(ram_ra_current_claim).toBytes()});
+            std.debug.print("  batch2*inst2 (LE) = {any}\n", .{batch2.mul(lookups_claim).toBytes()});
+            const recon = batch0.mul(regs_val_current_claim).add(batch1.mul(ram_ra_current_claim)).add(batch2.mul(lookups_claim));
+            std.debug.print("  batch0*inst0 + batch1*inst1 + batch2*inst2 = {any}\n", .{recon.toBytes()});
+            std.debug.print("  current_batched_claim = {any}\n", .{current_batched_claim.toBytes()});
+            std.debug.print("  reconstruction matches output_claim: {}\n", .{recon.eql(current_batched_claim)});
+
+            // =================================================================
+            // BRUTE FORCE Instance 1 expected output claim
+            // Verifier computes: eq_combined * ra_claim_reduced
+            // eq_combined = eq(r_addr_1, r_addr_reduced)*(eq_raf+γ*eq_val)
+            //             + γ²*eq(r_addr_2, r_addr_reduced)*(eq_rw+γ*eq_val)
+            // ra_claim_reduced = Σ_{(addr,cycle)} eq(addr, r_addr_reduced) * eq(cycle, r_cycle_reduced)
+            // =================================================================
+            {
+                const inst1_start = max_num_rounds - ram_ra_num_rounds; // 112
+                const addr_challenges = challenges[inst1_start .. inst1_start + log_ram_k]; // 16 challenges
+                const cycle_chal = challenges[inst1_start + log_ram_k .. inst1_start + ram_ra_num_rounds]; // 8 challenges
+
+                // Convert to BIG_ENDIAN for eq computation
+                // Sumcheck challenges are in LowToHigh order, eq computation expects BIG_ENDIAN
+                var r_addr_reduced_be: [16]F = undefined;
+                for (0..log_ram_k) |i| {
+                    r_addr_reduced_be[i] = addr_challenges[log_ram_k - 1 - i];
+                }
+                var r_cycle_reduced_be: [8]F = undefined;
+                for (0..n_cycle_vars) |i| {
+                    r_cycle_reduced_be[i] = cycle_chal[n_cycle_vars - 1 - i];
+                }
+
+                // Compute eq(r_addr_1, r_addr_reduced)
+                const eq_addr_1 = computeEqPolynomial(F, r_address_raf, r_addr_reduced_be[0..log_ram_k]);
+                const eq_addr_2 = computeEqPolynomial(F, r_address_rw, r_addr_reduced_be[0..log_ram_k]);
+
+                // Compute eq(r_cycle_x, r_cycle_reduced)
+                const eq_cycle_raf_red = computeEqPolynomial(F, r_cycle_raf, r_cycle_reduced_be[0..n_cycle_vars]);
+                const eq_cycle_rw_red = computeEqPolynomial(F, r_cycle_rw, r_cycle_reduced_be[0..n_cycle_vars]);
+                const eq_cycle_val_red = computeEqPolynomial(F, r_cycle_val, r_cycle_reduced_be[0..n_cycle_vars]);
+
+                // eq_combined
+                const eq_cycle_A = eq_cycle_raf_red.add(gamma.mul(eq_cycle_val_red));
+                const eq_cycle_B = eq_cycle_rw_red.add(gamma.mul(eq_cycle_val_red));
+                const bf_eq_combined = eq_addr_1.mul(eq_cycle_A).add(gamma2.mul(eq_addr_2.mul(eq_cycle_B)));
+
+                // ra_claim_reduced = Σ eq(addr, r_addr_reduced) * eq(cycle, r_cycle_reduced)
+                var bf_ra_claim = F.zero();
+                if (memory_trace) |mt| {
+                    for (mt.accesses.items, 0..) |access, i| {
+                        const addr = ram_addresses[i];
+                        const cycle = access.timestamp;
+                        const eq_a = computeEqAtPoint(F, r_addr_reduced_be[0..log_ram_k], addr);
+                        const eq_c = computeEqAtPoint(F, r_cycle_reduced_be[0..n_cycle_vars], cycle);
+                        bf_ra_claim = bf_ra_claim.add(eq_a.mul(eq_c));
+                    }
+                }
+
+                const bf_expected_inst1 = bf_eq_combined.mul(bf_ra_claim);
+
+                std.debug.print("[BRUTE FORCE INST1] eq_addr_1 = {x}\n", .{eq_addr_1.toBytesBE()[16..32].*});
+                std.debug.print("[BRUTE FORCE INST1] eq_addr_2 = {x}\n", .{eq_addr_2.toBytesBE()[16..32].*});
+                std.debug.print("[BRUTE FORCE INST1] eq_cycle_raf = {x}\n", .{eq_cycle_raf_red.toBytesBE()[16..32].*});
+                std.debug.print("[BRUTE FORCE INST1] eq_cycle_rw = {x}\n", .{eq_cycle_rw_red.toBytesBE()[16..32].*});
+                std.debug.print("[BRUTE FORCE INST1] eq_cycle_val = {x}\n", .{eq_cycle_val_red.toBytesBE()[16..32].*});
+                std.debug.print("[BRUTE FORCE INST1] eq_combined = {x}\n", .{bf_eq_combined.toBytesBE()[16..32].*});
+                std.debug.print("[BRUTE FORCE INST1] ra_claim_reduced = {x}\n", .{bf_ra_claim.toBytesBE()[16..32].*});
+                std.debug.print("[BRUTE FORCE INST1] expected (eq_combined * ra_reduced) = {any}\n", .{bf_expected_inst1.toBytes()});
+                std.debug.print("[BRUTE FORCE INST1] prover tracked ram_ra_current_claim = {any}\n", .{ram_ra_current_claim.toBytes()});
+                std.debug.print("[BRUTE FORCE INST1] match: {}\n", .{bf_expected_inst1.eql(ram_ra_current_claim)});
+
+                // Also compute what the verifier would get for batch1*inst1 using brute force
+                const bf_batch1_inst1 = batch1.mul(bf_expected_inst1);
+                std.debug.print("[BRUTE FORCE INST1] batch1 * expected = {any}\n", .{bf_batch1_inst1.toBytes()});
+            }
 
             // Get final opening claims from the folded polynomials
             const regs_val_inc_claim = inc_evals[0];
@@ -3801,18 +4517,27 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             const r_cycle_prime = challenges[LOOKUPS_LOG_K..];
 
             // The actual lookups output claim from the sumcheck
-            // After binding all cycle variables with the stride-based approach:
+            // After binding all cycle variables:
             // - lookups_current_scalar = eq(r_reduction, challenges)
-            // - ra_weights[0] is the bound ra polynomial at single point
+            // - ra_chunk_weights[i][0] is the bound ra polynomial for chunk i at single point
             // - combined_vals[0] is the bound combined polynomial at single point
-            // The output claim is: current_scalar * ra_weights[0] * combined_vals[0]
-            // Note: eq_evals[0] / cumulative_divisor = 1 after normalizing away the bound eq factors
-            const lookups_output_claim = lookups_current_scalar.mul(lookups_ra_weights[0]).mul(lookups_combined_vals[0]);
+            // The output claim is: current_scalar * Π_i(ra_chunks[i][0]) * combined_vals[0]
+            //
+            // NOTE: We use ra_chunk_weights[i][0] (individual chunks bound during cycle rounds)
+            // NOT lookups_ra_weights[0] (which was materialized at round 128 and never re-bound)
+            var lookups_ra_product_bound = F.one();
+            for (0..ra_num_chunks) |i| {
+                lookups_ra_product_bound = lookups_ra_product_bound.mul(ra_chunk_weights[i][0]);
+            }
+            const lookups_output_claim = lookups_current_scalar.mul(lookups_ra_product_bound).mul(lookups_combined_vals[0]);
 
             std.debug.print("[STAGE5 LOOKUPS] Computing opening claims:\n", .{});
             std.debug.print("  lookups_input = {any}\n", .{lookups_input.toBytesBE()[0..8]});
-            std.debug.print("  lookups_output_claim (eq*combined) = {any}\n", .{lookups_output_claim.toBytesBE()[0..8]});
+            std.debug.print("  lookups_output_claim (eq*ra_w0*combined) = {any}\n", .{lookups_output_claim.toBytesBE()});
+            std.debug.print("  lookups_claim (tracked Instance 2) = {any}\n", .{lookups_claim.toBytes()});
             std.debug.print("  lookups_eq_evals[0] = {any}\n", .{lookups_eq_evals[0].toBytesBE()[0..8]});
+            std.debug.print("  lookups_combined_vals[0] = {any}\n", .{lookups_combined_vals[0].toBytes()});
+            std.debug.print("  lookups_current_scalar = {any}\n", .{lookups_current_scalar.toBytes()});
             std.debug.print("  lookups_combined_vals[0] = {any}\n", .{lookups_combined_vals[0].toBytesBE()[0..8]});
 
             // Compute eq(r_reduction, r_cycle_prime)
@@ -3888,6 +4613,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             const ra_product_le = ra_product.toBytes();
             std.debug.print("  ra_product FULL LE = {any}\n", .{ra_product_le});
             std.debug.print("  lookups_ra_weights[0] = {any}\n", .{lookups_ra_weights[0].toBytesBE()[0..8]});
+
+            // Check lookups_current_scalar * ra_product * combined_vals[0]
+            const scalar_ra_combined = lookups_current_scalar.mul(ra_product).mul(lookups_combined_vals[0]);
+            std.debug.print("  scalar*ra_product*combined = {any}\n", .{scalar_ra_combined.toBytes()});
+            std.debug.print("  lookups_claim (tracked)    = {any}\n", .{lookups_claim.toBytes()});
+            std.debug.print("  scalar*ra_product*combined == lookups_claim: {}\n", .{scalar_ra_combined.eql(lookups_claim)});
 
             // Verify ra_product == lookups_ra_weights[0]
             const match_after = ra_product.eql(lookups_ra_weights[0]);

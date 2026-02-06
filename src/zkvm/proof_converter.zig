@@ -2441,13 +2441,19 @@ pub fn ProofConverter(comptime F: type) type {
                     r_address_le[i] = r_address_be[log_ram_k - 1 - i];
                 }
 
-                // CRITICAL FIX: ValEvaluation should use RAM_START_ADDRESS, NOT getLowestAddress()!
-                // The RWC sumcheck only tracks RAM operations (addresses >= 0x80000000).
-                // Termination/panic writes are to addresses in the I/O region (< 0x80000000)
-                // and are NOT included in the RWC val polynomial.
-                // Therefore ValEvaluation must use the same address range to match.
-                const start_address: u64 = constants.RAM_START_ADDRESS;
-                std.debug.print("[ZOLT STAGE4] Using RAM_START_ADDRESS for ValEvaluation = 0x{X:0>16}\n", .{start_address});
+                // CRITICAL FIX: ValEvaluation MUST use getLowestAddress() to match Jolt.
+                // Jolt's RamReadWriteChecking includes ALL memory accesses (including I/O region),
+                // using remap_address(addr, memory_layout) which starts at get_lowest_address().
+                // ValEvaluation must use the same address range because:
+                //   - val_claim comes from RWC which uses get_lowest_address()
+                //   - init_eval is computed at the RWC r_address
+                //   - The wa polynomial in ValEvaluation must include I/O writes (e.g., termination)
+                //   - Otherwise input_claim = val_claim - init_eval ≠ actual polynomial sum
+                const start_address: u64 = if (config.memory_layout) |ml|
+                    ml.getLowestAddress()
+                else
+                    constants.RAM_START_ADDRESS;
+                std.debug.print("[ZOLT STAGE4] Using getLowestAddress for ValEvaluation = 0x{X:0>16}\n", .{start_address});
 
                 // CRITICAL FIX: ValEvaluation and ValFinal use DIFFERENT r_address points!
                 //
@@ -2692,6 +2698,25 @@ pub fn ProofConverter(comptime F: type) type {
                 std.debug.print("  input_claim_val_eval (from accumulator) = {any}\n", .{input_claim_val_eval.toBytes()});
                 std.debug.print("  val_eval_prover initial_claim = {any}\n", .{val_eval_prover_early.computeInitialClaim().toBytes()});
                 std.debug.print("  Match val_eval? {}\n", .{input_claim_val_eval.eql(val_eval_prover_early.computeInitialClaim())});
+                // Direct computation: eq(r_addr_le, 2049) * LT(54, r_cycle_be)
+                {
+                    const val_eval_mod = @import("ram/val_evaluation.zig");
+                    const eq_val = val_eval_mod.computeEqAtPoint(F, r_address_le, @as(usize, 2049));
+                    std.debug.print("  eq(r_addr_le, 2049) = {any}\n", .{eq_val.toBytes()[0..8]});
+                    // LT(54, r_cycle_be) from prover
+                    if (val_eval_prover_early.lt_evals.len > 54) {
+                        const lt_val = val_eval_prover_early.lt_evals[54];
+                        std.debug.print("  LT(54, r_cycle_be) = {any}\n", .{lt_val.toBytes()[0..8]});
+                        const product = eq_val.mul(lt_val);
+                        std.debug.print("  eq * LT = {any}\n", .{product.toBytes()[0..8]});
+                        std.debug.print("  input_claim_val_eval = {any}\n", .{input_claim_val_eval.toBytes()[0..8]});
+                        std.debug.print("  prover initial_claim = {any}\n", .{val_eval_prover_early.computeInitialClaim().toBytes()[0..8]});
+                        const correct_val = init_eval_for_val_eval.add(val_eval_prover_early.computeInitialClaim());
+                        std.debug.print("  correct val = init_eval + prover_sum = {any}\n", .{correct_val.toBytesBE()[0..8]});
+                        std.debug.print("  rwc val_claim = {any}\n", .{stage2_result.rwc_val_claim.toBytesBE()[0..8]});
+                        std.debug.print("  Match? {}\n", .{correct_val.eql(stage2_result.rwc_val_claim)});
+                    }
+                }
 
                 // CRITICAL DEBUG: Check val_final too!
                 std.debug.print("  input_claim_val_final (from accumulator) = {any}\n", .{input_claim_val_final.toBytes()});
@@ -3163,6 +3188,286 @@ pub fn ProofConverter(comptime F: type) type {
                 const regs_claims = regs_prover.getFinalClaims();
                 const val_eval_openings = val_eval_prover_early.getFinalOpenings();
                 const val_final_openings = val_final_prover_early.getFinalOpenings();
+
+                // BRUTE FORCE: Compare val_poly[0] after binding with the initial val_poly
+                // accessed directly at the binding point
+                {
+                    // Get the raw initial polynomial values from the prover for a small check.
+                    // After all 15 rounds of binding with challenges c0..c14:
+                    //   Phases: c0..c7 bind cycle (LSB first), c8..c14 bind address (LSB first)
+                    //   val_poly[0] should = Σ_{k,j} eq_cycle(c0..c7, j) * eq_addr(c8..c14, k) * val_orig[k,j]
+                    //
+                    // Instead of recomputing from scratch, access the prover's internal state
+                    // to compare val_poly[0] vs the original polynomial evaluated by eq.
+                    //
+                    // Simple cross-check: print raw val_claim alongside a computation that uses
+                    // the BE-converted opening point (same as Stage 5's brute force)
+                    const T_brute = @as(usize, 1) << @intCast(n_cycle_vars);
+                    const trace_steps = trace.steps.items;
+
+                    // Use the SAME opening point as Stage 5 (BIG_ENDIAN, reversed challenges)
+                    // r_cycle_BE = [c7, c6, ..., c0]  (reversed phase 1)
+                    // r_addr_BE = [c14, c13, ..., c8]  (reversed phase 2)
+                    // But since we're summing over ALL j and k, the eq function value is the same
+                    // regardless of bit ordering - it's just which INDEX gets which value.
+                    //
+                    // KEY INSIGHT: The standard eq expansion builds eq[j] = Π_i (r_i·j_i + (1-r_i)·(1-j_i))
+                    // where j_i is the i-th bit of j (LSB first). This means:
+                    //   eq[j] with r = [c0,c1,...,c7] gives:
+                    //   eq[j] = Π_i (c_i·j_i + (1-c_i)·(1-j_i)) where j_i = bit i of j
+                    //
+                    // This is the SAME as the binding: binding j LSB-first with c0 first means
+                    // val_poly[0] = Σ_j eq[j]*val_orig[0,j] for k=0 after Phase 1.
+                    //
+                    // Let's verify by computing the MLE directly and comparing.
+
+                    // Build eq_cycle via expansion (same as binding order)
+                    var eq_cycle_brute = try self.allocator.alloc(F, T_brute);
+                    defer self.allocator.free(eq_cycle_brute);
+                    eq_cycle_brute[0] = F.one();
+                    var eq_len: usize = 1;
+                    for (0..n_cycle_vars) |bit_idx| {
+                        const r_i = stage4_r_sumcheck[bit_idx];
+                        const one_minus_r = F.one().sub(r_i);
+                        var idx: usize = eq_len;
+                        while (idx > 0) {
+                            idx -= 1;
+                            eq_cycle_brute[2 * idx + 1] = eq_cycle_brute[idx].mul(r_i);
+                            eq_cycle_brute[2 * idx] = eq_cycle_brute[idx].mul(one_minus_r);
+                        }
+                        eq_len *= 2;
+                    }
+
+                    // Build eq_addr via expansion
+                    const addr_bits: usize = 7;
+                    var eq_addr_brute: [128]F = undefined;
+                    eq_addr_brute[0] = F.one();
+                    var eq_a_len: usize = 1;
+                    for (0..addr_bits) |bit_idx| {
+                        const r_i = stage4_r_sumcheck[n_cycle_vars + bit_idx];
+                        const one_minus_r = F.one().sub(r_i);
+                        var a_idx: usize = eq_a_len;
+                        while (a_idx > 0) {
+                            a_idx -= 1;
+                            eq_addr_brute[2 * a_idx + 1] = eq_addr_brute[a_idx].mul(r_i);
+                            eq_addr_brute[2 * a_idx] = eq_addr_brute[a_idx].mul(one_minus_r);
+                        }
+                        eq_a_len *= 2;
+                    }
+
+                    // Access the prover's ORIGINAL val_poly to verify
+                    // Since the prover has already been bound, we can't access the original.
+                    // Instead, reconstruct from trace.
+                    var brute_val_claim = F.zero();
+                    var brute_regs: [32]u64 = [_]u64{0} ** 32;
+
+                    for (0..T_brute) |j| {
+                        if (j < trace_steps.len) {
+                            for (0..32) |k| {
+                                if (!eq_addr_brute[k].eql(F.zero()) and !eq_cycle_brute[j].eql(F.zero())) {
+                                    brute_val_claim = brute_val_claim.add(
+                                        eq_addr_brute[k].mul(eq_cycle_brute[j]).mul(F.fromU64(brute_regs[k])),
+                                    );
+                                }
+                            }
+                            const step_b = trace_steps[j];
+                            if (step_b.is_termination_store) {
+                                brute_val_claim = brute_val_claim.add(
+                                    eq_addr_brute[32].mul(eq_cycle_brute[j]).mul(F.fromU64(step_b.rs1_value)),
+                                );
+                                brute_val_claim = brute_val_claim.add(
+                                    eq_addr_brute[33].mul(eq_cycle_brute[j]).mul(F.fromU64(step_b.rs2_value)),
+                                );
+                            }
+                            if (!step_b.is_noop or step_b.is_termination_store) {
+                                if (!step_b.is_termination_store) {
+                                    const instr_b = step_b.instruction;
+                                    const rd_b: u5 = @truncate((instr_b >> 7) & 0x1f);
+                                    const opcode_b = instr_b & 0x7f;
+                                    const rd_used_b = switch (opcode_b) {
+                                        0x23, 0x63 => false,
+                                        else => true,
+                                    };
+                                    if (rd_used_b and rd_b != 0 and rd_b < 32) {
+                                        brute_regs[rd_b] = step_b.rd_value;
+                                    }
+                                }
+                            }
+                        } else {
+                            for (0..32) |k| {
+                                if (!eq_addr_brute[k].eql(F.zero()) and !eq_cycle_brute[j].eql(F.zero())) {
+                                    brute_val_claim = brute_val_claim.add(
+                                        eq_addr_brute[k].mul(eq_cycle_brute[j]).mul(F.fromU64(brute_regs[k])),
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    std.debug.print("\n[STAGE4 BRUTE VAL] val_claim from prover (val_poly[0]) = {any}\n", .{regs_claims.val_claim.toBytesBE()[0..16]});
+                    std.debug.print("[STAGE4 BRUTE VAL] brute force val(r_addr,r_cycle)    = {any}\n", .{brute_val_claim.toBytesBE()[0..16]});
+                    std.debug.print("[STAGE4 BRUTE VAL] match? {}\n", .{regs_claims.val_claim.eql(brute_val_claim)});
+
+                    // Also: compute val using the prover's internal getValAt function to directly
+                    // read from the BOUND polynomial. After binding, val_poly[0] should be the answer.
+                    // If brute_val != val_poly[0], the binding has a bug.
+                    // If brute_val == val_poly[0] but != stage5_brute_val, then the opening point is wrong.
+
+                    // Inc check
+                    var brute_inc_claim = F.zero();
+                    var brute_regs2: [32]u64 = [_]u64{0} ** 32;
+                    for (0..T_brute) |j| {
+                        if (j < trace_steps.len) {
+                            const step_b = trace_steps[j];
+                            if (!step_b.is_noop or step_b.is_termination_store) {
+                                if (!step_b.is_termination_store) {
+                                    const instr_b = step_b.instruction;
+                                    const rd_b: u5 = @truncate((instr_b >> 7) & 0x1f);
+                                    const opcode_b = instr_b & 0x7f;
+                                    const rd_used_b = switch (opcode_b) {
+                                        0x23, 0x63 => false,
+                                        else => true,
+                                    };
+                                    if (rd_used_b and rd_b != 0 and rd_b < 32) {
+                                        const inc_val = F.fromU64(step_b.rd_value).sub(F.fromU64(brute_regs2[rd_b]));
+                                        brute_inc_claim = brute_inc_claim.add(eq_cycle_brute[j].mul(inc_val));
+                                        brute_regs2[rd_b] = step_b.rd_value;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    std.debug.print("[STAGE4 BRUTE INC] inc_claim from prover = {any}\n", .{regs_claims.inc_claim.toBytesBE()[0..16]});
+                    std.debug.print("[STAGE4 BRUTE INC] brute force inc_claim = {any}\n", .{brute_inc_claim.toBytesBE()[0..16]});
+                    std.debug.print("[STAGE4 BRUTE INC] match? {}\n", .{regs_claims.inc_claim.eql(brute_inc_claim)});
+
+                    // CRITICAL: Also verify that Stage 5's brute force (BIG_ENDIAN) would give the same
+                    // as our LSB-first brute force. Build eq with reversed challenges:
+                    var eq_cycle_be = try self.allocator.alloc(F, T_brute);
+                    defer self.allocator.free(eq_cycle_be);
+                    eq_cycle_be[0] = F.one();
+                    var eq_be_len: usize = 1;
+                    for (0..n_cycle_vars) |bit_idx| {
+                        // Reversed: use c7 first, then c6, etc. (BIG_ENDIAN = MSB first)
+                        const r_i = stage4_r_sumcheck[n_cycle_vars - 1 - bit_idx];
+                        const one_minus_r = F.one().sub(r_i);
+                        var be_idx: usize = eq_be_len;
+                        while (be_idx > 0) {
+                            be_idx -= 1;
+                            eq_cycle_be[2 * be_idx + 1] = eq_cycle_be[be_idx].mul(r_i);
+                            eq_cycle_be[2 * be_idx] = eq_cycle_be[be_idx].mul(one_minus_r);
+                        }
+                        eq_be_len *= 2;
+                    }
+                    var eq_addr_be: [128]F = undefined;
+                    eq_addr_be[0] = F.one();
+                    var eq_abe_len: usize = 1;
+                    for (0..addr_bits) |bit_idx| {
+                        const r_i = stage4_r_sumcheck[n_cycle_vars + addr_bits - 1 - bit_idx];
+                        const one_minus_r = F.one().sub(r_i);
+                        var abe_idx: usize = eq_abe_len;
+                        while (abe_idx > 0) {
+                            abe_idx -= 1;
+                            eq_addr_be[2 * abe_idx + 1] = eq_addr_be[abe_idx].mul(r_i);
+                            eq_addr_be[2 * abe_idx] = eq_addr_be[abe_idx].mul(one_minus_r);
+                        }
+                        eq_abe_len *= 2;
+                    }
+                    var brute_val_be = F.zero();
+                    var brute_regs3: [32]u64 = [_]u64{0} ** 32;
+                    for (0..T_brute) |j| {
+                        if (j < trace_steps.len) {
+                            for (0..32) |k| {
+                                if (!eq_addr_be[k].eql(F.zero()) and !eq_cycle_be[j].eql(F.zero())) {
+                                    brute_val_be = brute_val_be.add(
+                                        eq_addr_be[k].mul(eq_cycle_be[j]).mul(F.fromU64(brute_regs3[k])),
+                                    );
+                                }
+                            }
+                            const step_b = trace_steps[j];
+                            if (step_b.is_termination_store) {
+                                brute_val_be = brute_val_be.add(
+                                    eq_addr_be[32].mul(eq_cycle_be[j]).mul(F.fromU64(step_b.rs1_value)),
+                                );
+                                brute_val_be = brute_val_be.add(
+                                    eq_addr_be[33].mul(eq_cycle_be[j]).mul(F.fromU64(step_b.rs2_value)),
+                                );
+                            }
+                            if (!step_b.is_noop or step_b.is_termination_store) {
+                                if (!step_b.is_termination_store) {
+                                    const instr_b = step_b.instruction;
+                                    const rd_b: u5 = @truncate((instr_b >> 7) & 0x1f);
+                                    const opcode_b = instr_b & 0x7f;
+                                    const rd_used_b = switch (opcode_b) {
+                                        0x23, 0x63 => false,
+                                        else => true,
+                                    };
+                                    if (rd_used_b and rd_b != 0 and rd_b < 32) {
+                                        brute_regs3[rd_b] = step_b.rd_value;
+                                    }
+                                }
+                            }
+                        } else {
+                            for (0..32) |k| {
+                                if (!eq_addr_be[k].eql(F.zero()) and !eq_cycle_be[j].eql(F.zero())) {
+                                    brute_val_be = brute_val_be.add(
+                                        eq_addr_be[k].mul(eq_cycle_be[j]).mul(F.fromU64(brute_regs3[k])),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    std.debug.print("[STAGE4 BRUTE VAL BE] brute val (BE ordering) = {any}\n", .{brute_val_be.toBytesBE()[0..16]});
+                    std.debug.print("[STAGE4 BRUTE VAL BE] should match Stage 5 brute\n", .{});
+                    std.debug.print("[STAGE4 BRUTE VAL] LSB val = BE val? {}\n", .{brute_val_claim.eql(brute_val_be)});
+
+                    // Compute eq(r_cycle_be, 5) using both methods for j=5
+                    // Build r_cycle_be from stage4_r_sumcheck directly (reversed phase1)
+                    {
+                        const test_j: usize = 5;
+                        const n_vars = n_cycle_vars;
+                        // r_cycle_be = [c7, c6, c5, c4, c3, c2, c1, c0]
+                        var r_cycle_local: [8]F = undefined;
+                        for (0..n_vars) |i| {
+                            r_cycle_local[i] = stage4_r_sumcheck[n_vars - 1 - i];
+                        }
+
+                        // Stage 5 method: computeEqAtIndex with r_cycle_be (BE)
+                        // r[j] pairs with bit (n-1-j) of test_j
+                        var eq_stage5 = F.one();
+                        for (0..n_vars) |bit_i| {
+                            const bj: u1 = @truncate(test_j >> @intCast(n_vars - 1 - bit_i));
+                            const rj = r_cycle_local[bit_i];
+                            if (bj == 1) {
+                                eq_stage5 = eq_stage5.mulHiBigIntU128(rj.limbs);
+                            } else {
+                                eq_stage5 = eq_stage5.mul(F.one().sub(rj));
+                            }
+                        }
+
+                        // Table expansion method (BE reversed challenges)
+                        const eq_table_val = eq_cycle_be[test_j];
+
+                        // Direct mul method
+                        var eq_mul_only = F.one();
+                        for (0..n_vars) |bit_i| {
+                            const bj: u1 = @truncate(test_j >> @intCast(n_vars - 1 - bit_i));
+                            const rj = r_cycle_local[bit_i];
+                            if (bj == 1) {
+                                eq_mul_only = eq_mul_only.mul(rj);
+                            } else {
+                                eq_mul_only = eq_mul_only.mul(F.one().sub(rj));
+                            }
+                        }
+
+                        std.debug.print("\n[EQ TEST j=5] computeEqAtIndex (mulHi) = {any}\n", .{eq_stage5.toBytesBE()[0..16]});
+                        std.debug.print("[EQ TEST j=5] eq_cycle_be table       = {any}\n", .{eq_table_val.toBytesBE()[0..16]});
+                        std.debug.print("[EQ TEST j=5] direct mul only         = {any}\n", .{eq_mul_only.toBytesBE()[0..16]});
+                        std.debug.print("[EQ TEST j=5] stage5==table? {}, stage5==mul? {}, table==mul? {}\n", .{
+                            eq_stage5.eql(eq_table_val), eq_stage5.eql(eq_mul_only), eq_table_val.eql(eq_mul_only),
+                        });
+                    }
+                }
 
                 // DEBUG: Print the final LT value from prover
                 std.debug.print("[ZOLT LT FINAL] val_eval_openings.lt_eval (from prover binding) = {any}\n", .{val_eval_openings.lt_eval.toBytesBE()});

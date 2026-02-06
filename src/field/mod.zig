@@ -1642,3 +1642,4 @@ test {
     // Run pairing tests
     _ = pairing;
 }
+

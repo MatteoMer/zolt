@@ -1031,12 +1031,15 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                 inputs.values[R1CSInputIndex.RdWriteValue.toIndex()] = mem_val_f;
             } else if (is_store) {
                 // For stores:
-                // - RamReadValue = pre-value (value before write) = step.memory_value
+                // - RamReadValue = pre-value (value before write) = step.memory_pre_value
                 // - RamWriteValue = post-value (value being written) = step.rs2_value
+                // CRITICAL: memory_value for Store is the POST-value (written value).
+                // We must use memory_pre_value for the RamReadValue (like Jolt's w.pre_value).
                 // Constraint 4: Rs2Value == RamWriteValue (for Store)
                 // CRITICAL: Stores don't write to rd, so RdWriteValue = 0
-                inputs.values[R1CSInputIndex.RamReadValue.toIndex()] = mem_val_f; // pre-value
-                inputs.values[R1CSInputIndex.RamWriteValue.toIndex()] = F.fromU64(step.rs2_value); // post-value
+                const pre_val = step.memory_pre_value orelse 0;
+                inputs.values[R1CSInputIndex.RamReadValue.toIndex()] = F.fromU64(pre_val); // pre-value (before write)
+                inputs.values[R1CSInputIndex.RamWriteValue.toIndex()] = F.fromU64(step.rs2_value); // post-value (written value)
                 inputs.values[R1CSInputIndex.RdWriteValue.toIndex()] = F.zero();
             } else {
                 // Non-memory instructions
@@ -1396,6 +1399,37 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                     // Constraint 7: RightLookup == left + right = PC + imm
                     self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = left_input.add(right_input);
                 },
+                0x1b => { // ADDIW (OP-IMM-32): AddOperands
+                    // In Jolt, ADDIW decomposes to ADDI+VirtualSignExtendWord.
+                    // ADDI uses AddOperands: LeftLookup=0, RightLookup=rs1+imm
+                    // For Zolt's single-cycle model, we match the ADDI step.
+                    self.values[R1CSInputIndex.FlagAddOperands.toIndex()] = F.one();
+                    self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
+                    self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
+                    self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = left_input.add(right_input);
+                },
+                0x3b => { // OP-32: ADDW, SUBW
+                    const funct3_r = (instr >> 12) & 0x7;
+                    const funct7_r = (instr >> 25) & 0x7F;
+                    if (funct3_r == 0 and funct7_r == 0) {
+                        // ADDW: AddOperands (matches Jolt's ADD step of decomposition)
+                        self.values[R1CSInputIndex.FlagAddOperands.toIndex()] = F.one();
+                        self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
+                        self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
+                        self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = left_input.add(right_input);
+                    } else if (funct3_r == 0 and funct7_r == 0x20) {
+                        // SUBW: SubtractOperands (matches Jolt's SUB step of decomposition)
+                        self.values[R1CSInputIndex.FlagSubtractOperands.toIndex()] = F.one();
+                        self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
+                        self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
+                        const two_pow_64 = F.fromBytes(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0 });
+                        self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = left_input.sub(right_input).add(two_pow_64);
+                    } else {
+                        // Other 0x3b variants: default
+                        self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
+                        self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input;
+                    }
+                },
                 else => {
                     // Default: NOT Add+Sub+Mul, so use constraint 6 and 10
                     self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
@@ -1422,6 +1456,43 @@ pub fn R1CSCycleInputs(comptime F: type) type {
         /// - FlagIsNoop = 1
         ///
         /// Reference: jolt-core/src/zkvm/instruction/mod.rs (Instruction::NoOp flags)
+        /// Create witness values for the synthetic termination Store instruction.
+        ///
+        /// This is used for the termination step that writes 1 to the termination address.
+        /// It's a real Store instruction (FlagStore=1) but also needs
+        /// FlagDoNotUpdateUnexpandedPC=1 to satisfy constraint 16:
+        ///   NextUPC = UPC + 4 - 4*DoNotUpdateUPC = 0 + 4 - 4 = 0
+        /// (since both UPC and NextUPC are 0 for the synthetic step).
+        ///
+        /// We build the witness using fromTraceStep() for correctness (it handles all
+        /// the Store-specific values: RamAddress, RamRead/WriteValue, lookup operands,
+        /// instruction input flags, etc.) and then override the DoNotUpdateUPC flag.
+        pub fn createTerminationStoreWitness(
+            step: tracer.TraceStep,
+            next_step: ?tracer.TraceStep,
+        ) Self {
+            // Build the base witness using the normal Store path
+            var inputs = fromTraceStep(step, next_step);
+
+            // Override: set DoNotUpdateUnexpandedPC=1 for the termination step
+            // This is needed because:
+            // - UnexpandedPC = 0 (synthetic step)
+            // - NextUnexpandedPC = 0 (next is NoOp padding)
+            // - Without this flag: constraint 16 would require NextUPC = 0 + 4 = 4 ≠ 0
+            // - With this flag: constraint 16 requires NextUPC = 0 + 4 - 4 = 0 ✓
+            inputs.values[R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();
+
+            // Override: set FlagIsNoop=1 so the product virtualization factor NextIsNoop
+            // (factor_evals[7]) is consistent with the ShouldJump computation.
+            // The trace step has is_noop=true (so the previous JAL sees NextIsNoop=1
+            // and computes ShouldJump=0), and the R1CS witness also needs FlagIsNoop=1
+            // so the Stage 2 product factor picks up NextIsNoop=1 for the JAL cycle.
+            // No R1CS uniform constraint references FlagIsNoop, so this is safe.
+            inputs.values[R1CSInputIndex.FlagIsNoop.toIndex()] = F.one();
+
+            return inputs;
+        }
+
         pub fn createNoopWitness() Self {
             var inputs = Self{
                 .values = [_]F{F.zero()} ** R1CSInputIndex.NUM_INPUTS,
@@ -1480,7 +1551,13 @@ pub fn R1CSWitnessGenerator(comptime F: type) type {
             for (0..num_cycles) |i| {
                 const step = trace.steps.items[i];
 
-                if (step.is_noop) {
+                if (step.is_termination_store) {
+                    // Termination Store: real Store witness + DoNotUpdateUnexpandedPC=1
+                    // MUST be checked before is_noop because termination_store has is_noop=true
+                    // (for the PREVIOUS step's NextIsNoop check) but uses Store witness.
+                    const next_step = trace.steps.items[i + 1];
+                    witnesses[i] = R1CSCycleInputs(F).createTerminationStoreWitness(step, next_step);
+                } else if (step.is_noop) {
                     // NoOp padding cycle: all zeros with IsNoop=1
                     witnesses[i] = R1CSCycleInputs(F).createNoopWitness();
                 } else {

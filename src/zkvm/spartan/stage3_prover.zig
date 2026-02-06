@@ -732,6 +732,122 @@ pub fn Stage3Prover(comptime F: type) type {
             const instr_claims = instr_prover.finalClaims();
             const reg_claims = reg_prover.finalClaims();
 
+            // CRITICAL DIAGNOSTIC: Verify reg_claims match MLE at challenges
+            {
+                // Build eq(challenges, j) table
+                const eq_check = self.allocator.alloc(F, trace_len) catch unreachable;
+                defer self.allocator.free(eq_check);
+                eq_check[0] = F.one();
+                var eq_check_sz: usize = 1;
+                // Process challenges in REVERSE order so that challenges[0] binds LSB
+                var ri_rev: usize = num_rounds;
+                while (ri_rev > 0) {
+                    ri_rev -= 1;
+                    const c_i = challenges[ri_rev];
+                    const one_m_c = F.one().sub(c_i);
+                    var idx: usize = eq_check_sz;
+                    while (idx > 0) {
+                        idx -= 1;
+                        eq_check[2 * idx + 1] = eq_check[idx].mul(c_i);
+                        eq_check[2 * idx] = eq_check[idx].mul(one_m_c);
+                    }
+                    eq_check_sz *= 2;
+                }
+
+                // Print eq_check entries for comparison with Stage 4
+                std.debug.print("[STAGE3]   eq_check[0] = {any}\n", .{eq_check[0].toBytes()[0..8]});
+                std.debug.print("[STAGE3]   eq_check[1] = {any}\n", .{eq_check[1].toBytes()[0..8]});
+                std.debug.print("[STAGE3]   eq_check[63] = {any}\n", .{eq_check[63].toBytes()[0..8]});
+                std.debug.print("[STAGE3]   eq_check[64] = {any}\n", .{eq_check[64].toBytes()[0..8]});
+                std.debug.print("[STAGE3]   challenges[0] = {any}\n", .{challenges[0].toBytes()[0..8]});
+                std.debug.print("[STAGE3]   challenges[7] = {any}\n", .{challenges[7].toBytes()[0..8]});
+                std.debug.print("[STAGE3]   num_rounds = {}\n", .{num_rounds});
+                std.debug.print("[STAGE3]   trace_len = {}\n", .{trace_len});
+                // Print first few non-zero rs1 witness contributions with their eq weight
+                var rs1_partial_contributions: usize = 0;
+                var rs1_nonzero_count: usize = 0;
+                for (0..trace_len) |jj| {
+                    if (jj < cycle_witnesses.len) {
+                        const rs1_val = cycle_witnesses[jj].values[R1CSInputIndex.Rs1Value.toIndex()];
+                        if (!rs1_val.eql(F.zero())) {
+                            rs1_nonzero_count += 1;
+                            if (rs1_partial_contributions < 8) {
+                                const contrib = eq_check[jj].mul(rs1_val);
+                                std.debug.print("[STAGE3]   rs1_contrib[{}]: val={any}, eq={any}, contrib={any}\n", .{
+                                    jj, rs1_val.toBytes()[0..8], eq_check[jj].toBytes()[0..8], contrib.toBytes()[0..8],
+                                });
+                                rs1_partial_contributions += 1;
+                            }
+                        }
+                    }
+                }
+                std.debug.print("[STAGE3]   total rs1 nonzero entries: {}\n", .{rs1_nonzero_count});
+                // Print ALL non-zero rs1 entries with their cycle index
+                var rs1_all_count: usize = 0;
+                for (0..trace_len) |jj| {
+                    if (jj < cycle_witnesses.len) {
+                        const rs1_val = cycle_witnesses[jj].values[R1CSInputIndex.Rs1Value.toIndex()];
+                        if (!rs1_val.eql(F.zero())) {
+                            rs1_all_count += 1;
+                            std.debug.print("[STAGE3]   rs1_all[{}/cycle={}]: val={any}\n", .{
+                                rs1_all_count, jj, rs1_val.toBytes()[0..8],
+                            });
+                        }
+                    }
+                }
+
+                // Compute MLE of rd_write_value at challenges point
+                // We need the ORIGINAL (unbound) witness, but it's been modified by binding.
+                // Instead, build from the R1CS witnesses directly.
+                var rd_mle_sum = F.zero();
+                var rs1_mle_sum = F.zero();
+                var rs2_mle_sum = F.zero();
+                for (0..trace_len) |jj| {
+                    if (jj < cycle_witnesses.len) {
+                        const rd_val = cycle_witnesses[jj].values[R1CSInputIndex.RdWriteValue.toIndex()];
+                        const rs1_val = cycle_witnesses[jj].values[R1CSInputIndex.Rs1Value.toIndex()];
+                        const rs2_val = cycle_witnesses[jj].values[R1CSInputIndex.Rs2Value.toIndex()];
+                        rd_mle_sum = rd_mle_sum.add(eq_check[jj].mul(rd_val));
+                        rs1_mle_sum = rs1_mle_sum.add(eq_check[jj].mul(rs1_val));
+                        rs2_mle_sum = rs2_mle_sum.add(eq_check[jj].mul(rs2_val));
+                    }
+                }
+
+                // Also compute MLE by manual binding (to check the binding logic)
+                var manual_rd = self.allocator.alloc(F, trace_len) catch unreachable;
+                defer self.allocator.free(manual_rd);
+                for (0..trace_len) |jj| {
+                    if (jj < cycle_witnesses.len) {
+                        manual_rd[jj] = cycle_witnesses[jj].values[R1CSInputIndex.RdWriteValue.toIndex()];
+                    } else {
+                        manual_rd[jj] = F.zero();
+                    }
+                }
+                var manual_sz: usize = trace_len;
+                for (0..num_rounds) |ri| {
+                    const c_i = challenges[ri];
+                    const new_sz = manual_sz / 2;
+                    for (0..new_sz) |idx| {
+                        manual_rd[idx] = manual_rd[2 * idx].add(c_i.mul(manual_rd[2 * idx + 1].sub(manual_rd[2 * idx])));
+                    }
+                    manual_sz = new_sz;
+                }
+
+                std.debug.print("\n[STAGE3 MLE CHECK]\n", .{});
+                std.debug.print("[STAGE3]   rd_mle_sum  = {any}\n", .{rd_mle_sum.toBytes()});
+                std.debug.print("[STAGE3]   manual_bind = {any}\n", .{manual_rd[0].toBytes()});
+                std.debug.print("[STAGE3]   reg_claim   = {any}\n", .{reg_claims.rd_write_value.toBytes()});
+                std.debug.print("[STAGE3]   rd MATCH? {}\n", .{rd_mle_sum.eql(reg_claims.rd_write_value)});
+                std.debug.print("[STAGE3]   manual==mle? {}\n", .{manual_rd[0].eql(rd_mle_sum)});
+                std.debug.print("[STAGE3]   manual==claim? {}\n", .{manual_rd[0].eql(reg_claims.rd_write_value)});
+                std.debug.print("[STAGE3]   rs1_mle_sum = {any}\n", .{rs1_mle_sum.toBytes()});
+                std.debug.print("[STAGE3]   rs1_claim   = {any}\n", .{reg_claims.rs1_value.toBytes()});
+                std.debug.print("[STAGE3]   rs1 MATCH? {}\n", .{rs1_mle_sum.eql(reg_claims.rs1_value)});
+                std.debug.print("[STAGE3]   rs2_mle_sum = {any}\n", .{rs2_mle_sum.toBytes()});
+                std.debug.print("[STAGE3]   rs2_claim   = {any}\n", .{reg_claims.rs2_value.toBytes()});
+                std.debug.print("[STAGE3]   rs2 MATCH? {}\n", .{rs2_mle_sum.eql(reg_claims.rs2_value)});
+            }
+
             // DEBUG: Print opening claims
             std.debug.print("\n[ZOLT] STAGE3_OPENING: Shift sumcheck claims:\n", .{});
             std.debug.print("[ZOLT] STAGE3_OPENING: unexpanded_pc = {{ {any} }}\n", .{shift_claims.unexpanded_pc.toBytes()});
@@ -2382,17 +2498,26 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
             const suffix_evals = try eq_hi.evals(allocator);
             defer allocator.free(suffix_evals);
 
-            // Allocate witness MLEs
-            const rd_write_value = try allocator.alloc(F, trace_len);
-            const rs1_value = try allocator.alloc(F, trace_len);
-            const rs2_value = try allocator.alloc(F, trace_len);
+            // Allocate witness MLEs - MUST be padded to full T = prefix_size * suffix_size
+            // to match Jolt's behavior where the trace is physically padded to T with NoOp cycles.
+            // NoOp cycles have rd_write_value = 0, rs1_value = 0, rs2_value = 0.
+            // Without this padding, the MLE evaluation at the sumcheck challenges would be wrong
+            // because binding a 64-entry array 8 times is NOT the same as binding a 256-entry
+            // zero-padded array 8 times.
+            const padded_size = prefix_size * suffix_size; // = 2^n_vars = T
+            const rd_write_value = try allocator.alloc(F, padded_size);
+            const rs1_value = try allocator.alloc(F, padded_size);
+            const rs2_value = try allocator.alloc(F, padded_size);
+            @memset(rd_write_value, F.zero());
+            @memset(rs1_value, F.zero());
+            @memset(rs2_value, F.zero());
 
             // Initialize Q buffer and fill witness MLEs
             const Q = try allocator.alloc(F, prefix_size);
             @memset(Q, F.zero());
 
             // Debug: Print first few R1CS witness values
-            std.debug.print("[STAGE3] RegistersClaimReduction: trace_len={}, prefix_size={}, suffix_size={}\n", .{ trace_len, prefix_size, suffix_size });
+            std.debug.print("[STAGE3] RegistersClaimReduction: trace_len={}, prefix_size={}, suffix_size={}, padded_size={}\n", .{ trace_len, prefix_size, suffix_size, padded_size });
 
             for (0..prefix_size) |x_lo| {
                 var q_acc = F.zero();
@@ -2464,7 +2589,7 @@ fn RegistersPrefixSuffixProver(comptime F: type) type {
                 .gamma_sqr = gamma_sqr,
                 .prefix_n_vars = prefix_n_vars,
                 .current_prefix_size = prefix_size,
-                .current_witness_size = trace_len,
+                .current_witness_size = padded_size, // Must be T (padded), not trace_len
                 .in_phase2 = false,
                 .phase2_eq = null,
                 .r_hi = r_hi,

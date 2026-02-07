@@ -945,10 +945,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 const table_idx = getLookupTableIndex(opcode, funct3, funct7);
                 cycle_table_indices[j] = table_idx;
 
-                // CRITICAL FIX: Instructions without a lookup table (Load, Store, SLL, etc.)
-                // should have combined_val = 0, matching Jolt where these instructions return
-                // to_lookup_output() = 0 and to_instruction_inputs() = (0, 0).
-                // The instruction lookup sumcheck only checks instructions that HAVE lookup tables.
+                // For instructions without a lookup table (Load, Store, SLL, etc.):
+                // All three must be zeroed to match the R1CS witness, which sets:
+                //   LeftLookupOperand = 0, RightLookupOperand = 0, LookupOutput = 0
+                // In Jolt, these instructions decompose into virtual sequences and never
+                // appear as raw cycles, so the R1CS witness has all zeros for their operands.
+                // The RAF contribution is handled by the global prefix-suffix polynomials
+                // during address rounds, NOT by per-cycle combined_vals.
                 if (table_idx < 0) {
                     lookup_output = F.zero();
                     left_op = F.zero();
@@ -1150,7 +1153,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     }
                 }
 
-                // CRITICAL FIX: Override for instructions without lookup tables (same as first block)
+                // For no-table instructions: zero ALL operands to match R1CS witness
                 if (table_idx < 0) {
                     lookup_output = F.zero();
                     left_op = F.zero();
@@ -2032,6 +2035,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // Initialize RAF Q accumulators for phase 0
             initQRaf(F, &left_raf, &right_raf, &identity_raf, lookups_eq_evals, lookup_indices_u128, is_interleaved_operands);
 
+            // Materialize prefix MLE tables for phase 0
+            left_raf.initPrefix();
+            right_raf.initPrefix();
+            identity_raf.initPrefix();
+
             // Initialize expanding tables for each phase (accumulate eq values during address rounds)
             // We need num_phases expanding tables, each of size 2^log_m
             // Use max of 16 phases (for small traces)
@@ -2814,23 +2822,44 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // gamma_raf = γ, gamma_raf2 = γ²
                     const raf_evals = proverMsgRaf(F, &left_raf, &right_raf, &identity_raf, gamma_raf, gamma_raf2);
 
-                    // Debug: print evaluations for first 3 rounds
-                    if (round < 3) {
-                        std.debug.print("[STAGE5 ROUND {} DEBUG] read_checking=[{x}, {x}]\n", .{
-                            round,
-                            read_checking_evals[0].toBytesBE()[16..32].*,
-                            read_checking_evals[1].toBytesBE()[16..32].*,
-                        });
-                        std.debug.print("[STAGE5 ROUND {} DEBUG] raf_evals=[{x}, {x}]\n", .{
-                            round,
-                            raf_evals[0].toBytesBE()[16..32].*,
-                            raf_evals[1].toBytesBE()[16..32].*,
-                        });
-                    }
-
                     // Combined: read_checking + raf
                     const eval_0_inst2 = read_checking_evals[0].add(raf_evals[0]);
                     const eval_2_inst2 = read_checking_evals[1].add(raf_evals[1]);
+
+                    // CRITICAL MULTILINEAR CHECK: For any multilinear polynomial,
+                    // p(2) = 2*p(1) - p(0). If the prefix-suffix decomposition
+                    // gives a different eval_2, it's computing the WRONG polynomial.
+                    const eval_1_inst2 = lookups_claim.sub(eval_0_inst2);
+                    const expected_eval_2 = eval_1_inst2.add(eval_1_inst2).sub(eval_0_inst2);
+                    const eval_2_matches_ml = eval_2_inst2.eql(expected_eval_2);
+                    if (!eval_2_matches_ml) {
+                        std.debug.print("[MULTILINEAR BUG R{}] eval_2_inst2 != 2*eval_1 - eval_0!\n", .{round});
+                        std.debug.print("  actual eval_2   = {x}\n", .{eval_2_inst2.toBytesBE()});
+                        std.debug.print("  expected (2e1-e0) = {x}\n", .{expected_eval_2.toBytesBE()});
+                        std.debug.print("  eval_0 = {x}\n", .{eval_0_inst2.toBytesBE()});
+                        std.debug.print("  eval_1 = {x}\n", .{eval_1_inst2.toBytesBE()});
+                        std.debug.print("  claim  = {x}\n", .{lookups_claim.toBytesBE()});
+                        // Check read_checking and raf separately for multilinearity
+                        // Each should independently satisfy: eval_2 = 2*eval_1 - eval_0
+                        // For RC: eval_1 = (total_eval_1) - raf_eval_0... no, they're separate sums
+                        // Actually we can't easily get separate eval_1 for RC and RAF from the combined claim
+                        // But we CAN check if the prefix formula gives the right answer by computing
+                        // expected_rc_e2 = rc_e0 (since all are in left half, if RC is ML then e2=-e0)
+                        // Wait - need separate claims for that. Just print the values:
+                        std.debug.print("  read_checking[0] (e0) = {x}\n", .{read_checking_evals[0].toBytesBE()});
+                        std.debug.print("  read_checking[1] (e2) = {x}\n", .{read_checking_evals[1].toBytesBE()});
+                        std.debug.print("  raf[0] (e0) = {x}\n", .{raf_evals[0].toBytesBE()});
+                        std.debug.print("  raf[1] (e2) = {x}\n", .{raf_evals[1].toBytesBE()});
+                    } else if (round < 3 or round == 7 or round == 15 or round == 127) {
+                        std.debug.print("[MULTILINEAR OK R{}] eval_2 matches 2*eval_1 - eval_0\n", .{round});
+                    }
+                    // Debug: print evaluations for select rounds
+                    if (round < 3 or round == 7 or round == 15 or round == 127) {
+                        std.debug.print("[ZOLT INST2 R{}] previous_claim = {any}\n", .{ round, lookups_claim.toBytes()[0..16].* });
+                        std.debug.print("[ZOLT INST2 R{}] eval_at_0 = {any}\n", .{ round, eval_0_inst2.toBytes()[0..16].* });
+                        std.debug.print("[ZOLT INST2 R{}] eval_at_1 = {any}\n", .{ round, eval_1_inst2.toBytes()[0..16].* });
+                        std.debug.print("[ZOLT INST2 R{}] eval_at_2 = {any}\n", .{ round, eval_2_inst2.toBytes()[0..16].* });
+                    }
 
                     // BRUTE FORCE VERIFICATION: At round 0, compute the Instance 2 eval_0
                     // directly from the trace data. eval_0 = sum of all u_evals[j] * combined[j]
@@ -2839,21 +2868,30 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // eval_0 + eval_1 should equal lookups_claim.
                     if (round == 0) {
                         // At round 0, verify that combined_vals matches trace
-                        var total_sum_cv = F.zero();
+                        const bit_pos_r0 = LOOKUPS_LOG_K - 1; // bit 127 for round 0
+                        var bf_eval_0_r0 = F.zero();
+                        var bf_eval_1_r0 = F.zero();
                         for (0..T) |jj| {
-                            total_sum_cv = total_sum_cv.add(lookups_eq_evals[jj].mul(lookups_combined_vals[jj]));
-                        }
-                        std.debug.print("[BRUTE R0 CHECK] total_sum(eq*combined_vals) = {x}\n", .{total_sum_cv.toBytesBE()[16..32].*});
-                        std.debug.print("[BRUTE R0 CHECK] lookups_claim = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
-                        std.debug.print("[BRUTE R0 CHECK] match: {}\n", .{total_sum_cv.eql(lookups_claim)});
-                        // Also check: does combined_vals sum match computed_sum from earlier?
-                        // Print first 5 combined_vals
-                        for (0..@min(5, T)) |jj| {
-                            if (!lookups_combined_vals[jj].eql(F.zero())) {
-                                std.debug.print("[BRUTE R0 CHECK] combined_vals[{}] = {x}\n", .{jj, lookups_combined_vals[jj].toBytesBE()[16..32].*});
-                                std.debug.print("[BRUTE R0 CHECK] eq_evals[{}] = {x}\n", .{jj, lookups_eq_evals[jj].toBytesBE()[16..32].*});
+                            const u_j = lookups_eq_evals[jj];
+                            const cv_j = lookups_combined_vals[jj];
+                            const contrib = u_j.mul(cv_j);
+                            const k_lo = lookups_indices_lo[jj];
+                            const k_hi = lookups_indices_hi[jj];
+                            const bit_val: u1 = if (bit_pos_r0 >= 64) @truncate(k_hi >> @intCast(bit_pos_r0 - 64)) else @truncate(k_lo >> @intCast(bit_pos_r0));
+                            if (bit_val == 0) {
+                                bf_eval_0_r0 = bf_eval_0_r0.add(contrib);
+                            } else {
+                                bf_eval_1_r0 = bf_eval_1_r0.add(contrib);
                             }
                         }
+                        const bf_eval_2_r0 = bf_eval_1_r0.add(bf_eval_1_r0).sub(bf_eval_0_r0);
+                        std.debug.print("[BRUTE R0] eval_0 = {x}\n", .{bf_eval_0_r0.toBytesBE()});
+                        std.debug.print("[BRUTE R0] eval_1 = {x}\n", .{bf_eval_1_r0.toBytesBE()});
+                        std.debug.print("[BRUTE R0] eval_2 (2*e1-e0) = {x}\n", .{bf_eval_2_r0.toBytesBE()});
+                        std.debug.print("[BRUTE R0] prefix-suffix e0 = {x}\n", .{eval_0_inst2.toBytesBE()});
+                        std.debug.print("[BRUTE R0] prefix-suffix e2 = {x}\n", .{eval_2_inst2.toBytesBE()});
+                        std.debug.print("[BRUTE R0] e0 match: {}\n", .{bf_eval_0_r0.eql(eval_0_inst2)});
+                        std.debug.print("[BRUTE R0] e2 match: {}\n", .{bf_eval_2_r0.eql(eval_2_inst2)});
                     }
                     if (round < 3 or round == 7 or round == 15 or round == 127) {
                         const bit_pos = LOOKUPS_LOG_K - 1 - round;
@@ -3119,6 +3157,34 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         std.debug.print("[BRUTE R{}] prefix_suffix_eval_0={x}\n", .{ round, eval_0_inst2.toBytesBE()[16..32].* });
                         std.debug.print("[BRUTE R{}] prefix_suffix_eval_2={x}\n", .{ round, eval_2_inst2.toBytesBE()[16..32].* });
 
+                        // BRUTE FORCE eval_2: p(2) = Σ_j u[j] * combined[j] * coeff_2(bit)
+                        // where coeff_2(bit) = 2*bit + (1-2)*(1-bit) = 3*bit - 1
+                        // If bit=0: -1, if bit=1: 2
+                        if (round == 0) {
+                            var bf_eval_2 = F.zero();
+                            for (0..T) |jj2| {
+                                const u_j2 = lookups_eq_evals[jj2];
+                                const combined_j2 = lookups_combined_vals[jj2];
+                                const contrib2 = u_j2.mul(combined_j2);
+                                const k_lo_2 = lookups_indices_lo[jj2];
+                                const k_hi_2 = lookups_indices_hi[jj2];
+                                const bit_val_2: u1 = if (bit_pos >= 64) @truncate(k_hi_2 >> @intCast(bit_pos - 64)) else @truncate(k_lo_2 >> @intCast(bit_pos));
+                                // coeff_2 = 3*bit - 1 = -1 if bit=0, 2 if bit=1
+                                if (bit_val_2 == 0) {
+                                    bf_eval_2 = bf_eval_2.sub(contrib2);
+                                } else {
+                                    bf_eval_2 = bf_eval_2.add(contrib2.add(contrib2));
+                                }
+                            }
+                            std.debug.print("[BRUTE R0 EVAL2] bf_eval_2 (brute force) = {x}\n", .{bf_eval_2.toBytesBE()[16..32].*});
+                            std.debug.print("[BRUTE R0 EVAL2] ps_eval_2 (prefix-suffix) = {x}\n", .{eval_2_inst2.toBytesBE()[16..32].*});
+                            std.debug.print("[BRUTE R0 EVAL2] match = {}\n", .{bf_eval_2.eql(eval_2_inst2)});
+                            // Also check: bf_eval_2 should equal -claim (since all bits are 0)
+                            const neg_lc = F.zero().sub(lookups_claim);
+                            std.debug.print("[BRUTE R0 EVAL2] -claim = {x}\n", .{neg_lc.toBytesBE()[16..32].*});
+                            std.debug.print("[BRUTE R0 EVAL2] bf_eval_2 == -claim: {}\n", .{bf_eval_2.eql(neg_lc)});
+                        }
+
                         // CORRECT RAF brute force: use identity/operand path properly
                         // Check at intermediate rounds to find where drift starts
                         const check_rounds = [_]usize{ 0, 1, 7, 15, 31, 63, 127 };
@@ -3180,7 +3246,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // - p_2(1) = lookups_claim - eval_0_inst2 (from sumcheck property p(0) + p(1) = claim)
                     // - p_2(2) = eval_2_inst2
                     // - p_2(inf) = 0 (degree-2, no cubic term)
-                    const eval_1_inst2 = lookups_claim.sub(eval_0_inst2);
+                    // eval_1_inst2 already computed above
 
                     // Add Instance 2's full Toom-Cook contribution to combined_poly
                     combined_poly[0] = combined_poly[0].add(batch2.mul(eval_0_inst2));
@@ -3321,7 +3387,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         std.debug.print("[CLAIM_CHAIN R{}] p(r)={x} -> new_claim\n", .{ round, inst2_at_r.toBytesBE()[16..32].* });
                     }
 
-                    lookups_claim = inst2_at_r;
+                    // NOTE: lookups_claim will be updated AFTER inst0/inst1 claims,
+                    // by deriving it from the batched claim. See below.
+                    const lookups_claim_from_poly = inst2_at_r;
+                    _ = lookups_claim_from_poly;
 
                     // =====================================================================
                     // CRITICAL FIX: Update Instance 0 and Instance 1 claims during address rounds
@@ -3511,20 +3580,64 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         // NOTE: ram_ra_current_claim is now updated in the PhaseAddress binding section above
                     }
 
+                    // Update lookups_claim from the polynomial chain
+                    // p(r) = c0 + r*c1 + r²*c2 where c0=eval_0, c1=eval_1-eval_0-c2
+                    lookups_claim = inst2_at_r;
+
+                    // Print Instance 2 claim at EVERY round (matches Jolt's [S5 INST2 CLAIM R{}])
+                    std.debug.print("[S5 INST2 CLAIM R{}] {any}\n", .{ round, lookups_claim.toBytes()[0..16].* });
+
+                    // BRUTE FORCE CHAIN CHECK: Compute the expected claim directly
+                    // After binding rounds 0..round with challenges, the claim should be:
+                    // Σ_t u[t] * Π_{j=0}^{round} eq_bit(challenges[j], K(t)_{127-j}) * cv[t]
+                    // where cv[t] = table(K(t)) + γ*raf(K(t), t) (the INITIAL combined value)
+                    if (round < 16) {
+                        var bf_chain_sum = F.zero();
+                        for (0..T) |jj| {
+                            const u_j = lookups_eq_evals[jj]; // eq(j, r_reduction) at round 0, but CONDENSED after phase transitions
+                            const cv_j = lookups_combined_vals[jj]; // initial combined value
+                            // Compute eq_address factor: Π_{j=0}^{round} eq_bit(challenge[j], K(t)_{127-j})
+                            var eq_addr = F.one();
+                            for (0..round + 1) |rr| {
+                                const bit_pos = LOOKUPS_LOG_K - 1 - rr;
+                                const k_lo = lookups_indices_lo[jj];
+                                const k_hi = lookups_indices_hi[jj];
+                                const bit_val: u1 = if (bit_pos >= 64) @truncate(k_hi >> @intCast(bit_pos - 64)) else @truncate(k_lo >> @intCast(bit_pos));
+                                const r_val = challenges[rr];
+                                const eq_bit = if (bit_val == 1) r_val else F.one().sub(r_val);
+                                eq_addr = eq_addr.mul(eq_bit);
+                            }
+                            bf_chain_sum = bf_chain_sum.add(u_j.mul(eq_addr).mul(cv_j));
+                        }
+                        std.debug.print("[BF_CHAIN R{}] bf_sum={x}, chain={x}, match={}\n", .{
+                            round,
+                            bf_chain_sum.toBytesBE()[16..32].*,
+                            lookups_claim.toBytesBE()[16..32].*,
+                            bf_chain_sum.eql(lookups_claim),
+                        });
+                    }
+
                     // CONSISTENCY CHECK: batch0*inst0 + batch1*inst1 + batch2*inst2 == batched_claim
-                    // (placed AFTER Instance 1 claim update)
+                    // (placed AFTER Instance 1 claim update and lookups_claim derivation)
+                    // Run at EVERY round to detect divergence
                     {
                         const recon = batch0.mul(regs_val_current_claim).add(batch1.mul(ram_ra_current_claim)).add(batch2.mul(lookups_claim));
                         const matches = recon.eql(current_batched_claim);
-                        if (!matches or round < 3 or (round >= 110 and round <= 114) or round == 127) {
+                        if (!matches or round < 3 or round == 127) {
                             std.debug.print("[CONSISTENCY R{}] batch0*inst0+batch1*inst1+batch2*inst2 == batched: {}\n", .{ round, matches });
-                            if (!matches) {
-                                std.debug.print("  recon = {x}\n", .{recon.toBytesBE()[16..32].*});
-                                std.debug.print("  batched = {x}\n", .{current_batched_claim.toBytesBE()[16..32].*});
-                                std.debug.print("  inst0 (regs) = {x}\n", .{regs_val_current_claim.toBytesBE()[16..32].*});
-                                std.debug.print("  inst1 (ram_ra) = {x}\n", .{ram_ra_current_claim.toBytesBE()[16..32].*});
-                                std.debug.print("  inst2 (lookups) = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
-                            }
+                        }
+                        if (!matches) {
+                            std.debug.print("[CONSISTENCY R{}] MISMATCH! recon={x}, batched={x}\n", .{
+                                round,
+                                recon.toBytesBE()[16..32].*,
+                                current_batched_claim.toBytesBE()[16..32].*,
+                            });
+                            std.debug.print("[CONSISTENCY R{}]   inst0={x}, inst1={x}, inst2={x}\n", .{
+                                round,
+                                regs_val_current_claim.toBytesBE()[16..32].*,
+                                ram_ra_current_claim.toBytesBE()[16..32].*,
+                                lookups_claim.toBytesBE()[16..32].*,
+                            });
                         }
                     }
 
@@ -3582,6 +3695,65 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         current_phase += 1;
                         std.debug.print("[STAGE5] Phase transition to phase {}, prev_table_len={}\n", .{ current_phase, expanding_tables[prev_phase].getLen() });
 
+                        // DRIFT DEBUG BEFORE CONDENSATION:
+                        // Verify the expanding table matches direct EQ computation
+                        if (current_phase == 1) {
+                            // At phase 0→1 transition (round 7 just completed):
+                            // expanding_tables[0] should contain EQ(k, [r_0, r_1, ..., r_7]) for k in 0..255
+                            // Verify entry 0: EQ(0, r) = Π_{i=0}^{7} (1 - r_i)
+                            var direct_eq_0 = F.one();
+                            for (0..log_m) |i| {
+                                direct_eq_0 = direct_eq_0.mul(F.one().sub(challenges[prev_phase * log_m + i]));
+                            }
+                            const table_eq_0 = expanding_tables[prev_phase].get(0);
+                            std.debug.print("[PHASE_VERIFY] expanding_table[0] = {x}\n", .{table_eq_0.toBytesBE()[16..32].*});
+                            std.debug.print("[PHASE_VERIFY] direct_eq(0, r) = {x}\n", .{direct_eq_0.toBytesBE()[16..32].*});
+                            std.debug.print("[PHASE_VERIFY] match = {}\n", .{table_eq_0.eql(direct_eq_0)});
+
+                            // Verify entry 1: EQ(1, r) - bit 0 = 1, rest = 0
+                            // With HighToLow binding: bit 0 of k corresponds to round (log_m-1) = round 7
+                            // So EQ(1, r) = r_7 * Π_{i=0}^{6} (1 - r_i)
+                            var direct_eq_1 = challenges[prev_phase * log_m + log_m - 1];
+                            for (0..log_m - 1) |i| {
+                                direct_eq_1 = direct_eq_1.mul(F.one().sub(challenges[prev_phase * log_m + i]));
+                            }
+                            const table_eq_1 = expanding_tables[prev_phase].get(1);
+                            std.debug.print("[PHASE_VERIFY] expanding_table[1] = {x}\n", .{table_eq_1.toBytesBE()[16..32].*});
+                            std.debug.print("[PHASE_VERIFY] direct_eq(1, r) = {x}\n", .{direct_eq_1.toBytesBE()[16..32].*});
+                            std.debug.print("[PHASE_VERIFY] match = {}\n", .{table_eq_1.eql(direct_eq_1)});
+
+                            // Compute brute sum BEFORE condensation (should be original claim)
+                            var pre_condense_sum = F.zero();
+                            for (0..T) |jj| {
+                                pre_condense_sum = pre_condense_sum.add(lookups_eq_evals[jj].mul(lookups_combined_vals[jj]));
+                            }
+                            std.debug.print("[PHASE_VERIFY] pre_condense_sum = {x}\n", .{pre_condense_sum.toBytesBE()[16..32].*});
+
+                            // Compute "what the condensed sum SHOULD be" by multiplying each term
+                            // by the appropriate expanding table entry
+                            var expected_condensed_sum = F.zero();
+                            const suffix_bits = (num_phases - current_phase) * log_m;
+                            const m_mask: u128 = (@as(u128, 1) << @intCast(log_m)) - 1;
+                            for (0..T) |jj| {
+                                const k = lookup_indices_u128[jj];
+                                const prefix = k >> @intCast(suffix_bits);
+                                const k_bound: usize = @intCast(prefix & m_mask);
+                                const v_val = expanding_tables[prev_phase].get(k_bound);
+                                expected_condensed_sum = expected_condensed_sum.add(lookups_eq_evals[jj].mul(v_val).mul(lookups_combined_vals[jj]));
+                                if (jj < 5) {
+                                    std.debug.print("[PHASE_VERIFY] j={}: k_bound={}, v_val={x}, eq={x}, cv={x}\n", .{
+                                        jj, k_bound,
+                                        v_val.toBytesBE()[24..32].*,
+                                        lookups_eq_evals[jj].toBytesBE()[24..32].*,
+                                        lookups_combined_vals[jj].toBytesBE()[24..32].*,
+                                    });
+                                }
+                            }
+                            std.debug.print("[PHASE_VERIFY] expected_condensed_sum = {x}\n", .{expected_condensed_sum.toBytesBE()[16..32].*});
+                            std.debug.print("[PHASE_VERIFY] lookups_claim (poly chain) = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+                            std.debug.print("[PHASE_VERIFY] match = {}\n", .{expected_condensed_sum.eql(lookups_claim)});
+                        }
+
                         // Condense u_evals (lookups_eq_evals) using the expanding table from the previous phase
                         // This is the CRITICAL step that was missing!
                         // u_evals[j] *= v[prev_phase][k_bound] where k_bound = prefix & m_mask
@@ -3604,12 +3776,23 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         // Re-initialize suffix polys and RAF for new phase with condensed u_evals
                         try suffix_polys.initPhase(current_phase, num_phases, lookups_eq_evals, lookup_indices_u128, cycle_table_indices);
                         std.debug.print("[STAGE5] Phase {} initPhase done, now calling initQRaf...\n", .{current_phase});
+                        // Save prefix checkpoints before resetting RAF decompositions
+                        // After chunk_len rounds, the prefix MLE has been bound down to a single value
+                        left_raf.updateCheckpoint();
+                        right_raf.updateCheckpoint();
+                        identity_raf.updateCheckpoint();
+
                         // Reset RAF decompositions for new phase (restore Q_size to initial_m=256)
                         left_raf.resetForPhase(current_phase, initial_m);
                         right_raf.resetForPhase(current_phase, initial_m);
                         identity_raf.resetForPhase(current_phase, initial_m);
                         initQRaf(F, &left_raf, &right_raf, &identity_raf, lookups_eq_evals, lookup_indices_u128, is_interleaved_operands);
-                        std.debug.print("[STAGE5] Phase {} initQRaf done\n", .{current_phase});
+
+                        // Materialize prefix MLE tables for new phase
+                        left_raf.initPrefix();
+                        right_raf.initPrefix();
+                        identity_raf.initPrefix();
+                        std.debug.print("[STAGE5] Phase {} initQRaf + initPrefix done\n", .{current_phase});
 
                         // Reset the new phase's expanding table to 1
                         expanding_tables[current_phase].reset(F.one());
@@ -3717,6 +3900,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         std.debug.print("[PRE-REMAT] match = {}\n", .{pre_remat_sum.eql(lookups_claim)});
 
                         // Get bound prefix values from RAF decompositions
+                        // After 128 address rounds, the prefix MLE has been bound to a single value.
+                        // Use updateCheckpoint to save the final prefix MLE value into bound_value.
+                        left_raf.updateCheckpoint();
+                        right_raf.updateCheckpoint();
+                        identity_raf.updateCheckpoint();
                         const left_prefix = left_raf.bound_value;
                         const right_prefix = right_raf.bound_value;
                         const identity_prefix = identity_raf.bound_value;
@@ -3885,6 +4073,44 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             direct_range_check_mle.eql(table_values[0]),
                         });
 
+                        // Verify AND table (index 2): Σ 2^(63-i) * r[2*i] * r[2*i+1]
+                        var direct_and_mle = F.zero();
+                        for (0..64) |i| {
+                            const x_i = challenges[2 * i];
+                            const y_i = challenges[2 * i + 1];
+                            const shift_and: u6 = @intCast(63 - i);
+                            direct_and_mle = direct_and_mle.add(F.fromU64(@as(u64, 1) << shift_and).mul(x_i.mul(y_i)));
+                        }
+                        std.debug.print("[TABLE_VERIFY] AND direct = {x}\n", .{direct_and_mle.toBytesBE()[16..32].*});
+                        std.debug.print("[TABLE_VERIFY] AND prefix-suffix = {x}\n", .{table_values[2].toBytesBE()[16..32].*});
+                        std.debug.print("[TABLE_VERIFY] AND match: {}\n", .{direct_and_mle.eql(table_values[2])});
+
+                        // Verify XOR table (index 5): Σ 2^(63-i) * ((1-x)*y + x*(1-y))
+                        var direct_xor_mle = F.zero();
+                        for (0..64) |i| {
+                            const x_i = challenges[2 * i];
+                            const y_i = challenges[2 * i + 1];
+                            const shift_xor: u6 = @intCast(63 - i);
+                            const xor_val = F.one().sub(x_i).mul(y_i).add(x_i.mul(F.one().sub(y_i)));
+                            direct_xor_mle = direct_xor_mle.add(F.fromU64(@as(u64, 1) << shift_xor).mul(xor_val));
+                        }
+                        std.debug.print("[TABLE_VERIFY] XOR direct = {x}\n", .{direct_xor_mle.toBytesBE()[16..32].*});
+                        std.debug.print("[TABLE_VERIFY] XOR prefix-suffix = {x}\n", .{table_values[5].toBytesBE()[16..32].*});
+                        std.debug.print("[TABLE_VERIFY] XOR match: {}\n", .{direct_xor_mle.eql(table_values[5])});
+
+                        // Verify OR table (index 4): Σ 2^(63-i) * (x + y - x*y)
+                        var direct_or_mle = F.zero();
+                        for (0..64) |i| {
+                            const x_i = challenges[2 * i];
+                            const y_i = challenges[2 * i + 1];
+                            const shift_or: u6 = @intCast(63 - i);
+                            const or_val = x_i.add(y_i).sub(x_i.mul(y_i));
+                            direct_or_mle = direct_or_mle.add(F.fromU64(@as(u64, 1) << shift_or).mul(or_val));
+                        }
+                        std.debug.print("[TABLE_VERIFY] OR direct = {x}\n", .{direct_or_mle.toBytesBE()[16..32].*});
+                        std.debug.print("[TABLE_VERIFY] OR prefix-suffix = {x}\n", .{table_values[4].toBytesBE()[16..32].*});
+                        std.debug.print("[TABLE_VERIFY] OR match: {}\n", .{direct_or_mle.eql(table_values[4])});
+
                         // Debug: print key prefix checkpoint values
                         std.debug.print("[STAGE5 REMATERIALIZE] Key prefix checkpoints:\n", .{});
                         const lw_idx = @intFromEnum(lookup_table_mod.Prefixes.LowerWord);
@@ -3920,6 +4146,22 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             }
                         }
 
+                        // DIAGNOSTIC: Check sum with ORIGINAL combined_vals before rematerialization
+                        {
+                            var sum_with_original = F.zero();
+                            for (0..T) |fj| {
+                                const fj_eq = computeEqAtIndex(r_reduction, fj);
+                                var fj_ra = F.one();
+                                for (0..ra_num_chunks) |fc| {
+                                    fj_ra = fj_ra.mul(ra_chunk_weights[fc][fj]);
+                                }
+                                sum_with_original = sum_with_original.add(fj_eq.mul(fj_ra).mul(lookups_combined_vals[fj]));
+                            }
+                            std.debug.print("[PRE_REMAT_SUM] sum_with_ORIGINAL_cv = {x}\n", .{sum_with_original.toBytesBE()[16..32].*});
+                            std.debug.print("[PRE_REMAT_SUM] lookups_claim         = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+                            std.debug.print("[PRE_REMAT_SUM] MATCH: {}\n", .{sum_with_original.eql(lookups_claim)});
+                        }
+
                         // Rematerialize combined_vals using the correct formula
                         // combined_val[j] = table_values_at_r_addr[table(j)] + raf_val
                         //
@@ -3927,15 +4169,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         // there's a lookup table. The table value is only added IF there's a table.
                         // See: jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs:682-698
                         for (0..T) |j| {
-                            if (j >= trace_len) {
-                                lookups_combined_vals[j] = F.zero();
-                                continue;
-                            }
-
                             // Start with zero
                             var combined_val = F.zero();
 
                             // Add lookup table value if this cycle has a table
+                            // (padding cycles have table_idx < 0, so no table contribution)
                             const table_idx = cycle_table_indices[j];
                             if (table_idx >= 0) {
                                 const t_idx: usize = @intCast(table_idx);
@@ -3945,6 +4183,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             }
 
                             // ALWAYS add RAF contribution (regardless of table)
+                            // This applies to ALL cycles including padding (NoOp) cycles.
+                            // In Jolt, NoOp cycles have is_interleaved_operands = true and
+                            // receive raf_interleaved. Padding cycles in Zolt have
+                            // cycle_is_identity_path = false (interleaved), matching Jolt.
                             const is_interleaved = !cycle_is_identity_path[j];
                             if (is_interleaved) {
                                 combined_val = combined_val.add(raf_interleaved);
@@ -3982,6 +4224,82 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         // See: jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs:354-356
                         //
                         // We reinitialize lookups_eq_evals here.
+                        // DIAGNOSTIC: Compute sum using condensed u_evals BEFORE reinitializing
+                        // condensed_u_eval(j) should equal eq(j, r_reduction) * eq(K(j), r_addr)
+                        // So Σ condensed_u_eval(j) * cv_remat(j) should equal lookups_claim
+                        {
+                            var condensed_sum = F.zero();
+                            for (0..T) |jj| {
+                                condensed_sum = condensed_sum.add(lookups_eq_evals[jj].mul(lookups_combined_vals[jj]));
+                            }
+                            std.debug.print("[CONDENSED_DIAG] Σ condensed_eq * cv_remat = {x}\n", .{condensed_sum.toBytesBE()[16..32].*});
+                            std.debug.print("[CONDENSED_DIAG] lookups_claim = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+                            std.debug.print("[CONDENSED_DIAG] match = {}\n", .{condensed_sum.eql(lookups_claim)});
+
+                            // Also check: condensed_u_eval[0] vs eq_fresh(0) * ra(0)
+                            const fresh_eq_0 = computeEqAtIndex(r_reduction, 0);
+                            std.debug.print("[CONDENSED_DIAG] condensed_eq[0] = {x}\n", .{lookups_eq_evals[0].toBytesBE()[16..32].*});
+                            std.debug.print("[CONDENSED_DIAG] fresh_eq(0) = {x}\n", .{fresh_eq_0.toBytesBE()[16..32].*});
+                            std.debug.print("[CONDENSED_DIAG] ra_weights[0] = {x}\n", .{lookups_ra_weights[0].toBytesBE()[16..32].*});
+                            const expected_condensed_0 = fresh_eq_0.mul(lookups_ra_weights[0]);
+                            std.debug.print("[CONDENSED_DIAG] fresh_eq(0) * ra(0) = {x}\n", .{expected_condensed_0.toBytesBE()[16..32].*});
+                            std.debug.print("[CONDENSED_DIAG] condensed_eq[0] == fresh*ra: {}\n", .{lookups_eq_evals[0].eql(expected_condensed_0)});
+
+                            // Check if the missing factor is v[7][k_bound_7]
+                            // For cycle 0: k = 0x8000, phase 7 shift = 0, k_bound_7 = 0x8000
+                            const k_lo_0_diag = lookups_indices_lo[0];
+                            const k_hi_0_diag = lookups_indices_hi[0];
+                            const shift_7 = 0; // (8-1-7) * 16
+                            const k_bound_7: usize = @truncate(k_lo_0_diag >> @intCast(shift_7));
+                            const k_bound_7_masked = k_bound_7 & ((@as(usize, 1) << @intCast(log_m)) - 1);
+                            const v7_val = expanding_tables[num_phases - 1].get(k_bound_7_masked);
+                            const expected_with_v7 = expected_condensed_0.mul(v7_val);
+                            _ = k_hi_0_diag;
+                            std.debug.print("[CONDENSED_DIAG] k_lo_0=0x{x}, k_bound_7=0x{x}, k_bound_7_masked=0x{x}\n", .{k_lo_0_diag, k_bound_7, k_bound_7_masked});
+                            std.debug.print("[CONDENSED_DIAG] v[7][0x{x}] = {x}\n", .{k_bound_7_masked, v7_val.toBytesBE()[16..32].*});
+                            std.debug.print("[CONDENSED_DIAG] fresh*ra_partial(0..6) = {x}\n", .{expected_condensed_0.toBytesBE()[16..32].*});
+                            std.debug.print("[CONDENSED_DIAG] fresh*ra_partial * v7 = {x}\n", .{expected_with_v7.toBytesBE()[16..32].*});
+
+                            // Also compute ra_partial = Π_{p=0}^{6} v[p][k_p(0)]
+                            var ra_partial = F.one();
+                            for (0..num_phases - 1) |pp| {
+                                const shift_pp = (num_phases - 1 - pp) * log_m;
+                                var k_pp: usize = undefined;
+                                if (shift_pp >= 64) {
+                                    k_pp = @truncate(lookups_indices_hi[0] >> @intCast(shift_pp - 64));
+                                } else {
+                                    k_pp = @truncate(lookups_indices_lo[0] >> @intCast(shift_pp));
+                                }
+                                k_pp &= (@as(usize, 1) << @intCast(log_m)) - 1;
+                                ra_partial = ra_partial.mul(expanding_tables[pp].get(k_pp));
+                            }
+                            const fresh_ra_partial = fresh_eq_0.mul(ra_partial);
+                            std.debug.print("[CONDENSED_DIAG] ra_partial (phases 0-6) = {x}\n", .{ra_partial.toBytesBE()[16..32].*});
+                            std.debug.print("[CONDENSED_DIAG] fresh*ra_partial (phases 0-6) = {x}\n", .{fresh_ra_partial.toBytesBE()[16..32].*});
+                            std.debug.print("[CONDENSED_DIAG] condensed_eq[0] == fresh*ra_partial: {}\n", .{lookups_eq_evals[0].eql(fresh_ra_partial)});
+
+                            // Now compute Σ condensed_eq(j) * v[15][k_15(j)] * cv_remat(j)
+                            // This should equal the claim
+                            var sum_with_last_phase = F.zero();
+                            const last_phase = num_phases - 1;
+                            const last_log_m = log_m;
+                            const last_m_mask = (@as(usize, 1) << @intCast(last_log_m)) - 1;
+                            const last_shift: u7 = 0; // last phase handles LSB bits
+                            for (0..T) |jj| {
+                                // Extract k_bound for last phase
+                                const k_lo_jj = lookups_indices_lo[jj];
+                                const k_bound_last: usize = @truncate(k_lo_jj >> @intCast(last_shift));
+                                const k_masked = k_bound_last & last_m_mask;
+                                const v_last = expanding_tables[last_phase].get(k_masked);
+                                sum_with_last_phase = sum_with_last_phase.add(
+                                    lookups_eq_evals[jj].mul(v_last).mul(lookups_combined_vals[jj])
+                                );
+                            }
+                            std.debug.print("[CONDENSED_DIAG] Σ condensed * v[15] * cv_remat = {x}\n", .{sum_with_last_phase.toBytesBE()[16..32].*});
+                            std.debug.print("[CONDENSED_DIAG] lookups_claim (poly chain) = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+                            std.debug.print("[CONDENSED_DIAG] FINAL match = {}\n", .{sum_with_last_phase.eql(lookups_claim)});
+                        }
+
                         std.debug.print("[STAGE5 CYCLE] Reinitializing lookups_eq_evals for cycle rounds\n", .{});
                         for (0..T) |j| {
                             lookups_eq_evals[j] = computeEqAtIndex(r_reduction, j);
@@ -3992,6 +4310,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             eq_sum_verify = eq_sum_verify.add(lookups_eq_evals[j]);
                         }
                         std.debug.print("[STAGE5 CYCLE] eq_sum after reinit = {x} (should be 1)\n", .{eq_sum_verify.toBytesBE()[16..32].*});
+                        std.debug.print("[STAGE5 CYCLE] reinit eq_evals[0] = {x}\n", .{lookups_eq_evals[0].toBytesBE()[16..32].*});
+                        std.debug.print("[STAGE5 CYCLE] reinit eq_evals[1] = {x}\n", .{lookups_eq_evals[1].toBytesBE()[16..32].*});
 
                         // ============================================================
                         // CRITICAL FIX: Materialize ra_chunk_weights from expanding tables
@@ -4029,14 +4349,17 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             });
                         }
 
+                        // DIAGNOSTIC: Compare accumulated ra_chunk_weights with materialized values
+                        // Save accumulated values for the first few cycles before overwriting
+                        var accum_ra_debug: [8]F = undefined;
+                        for (0..@min(ra_num_chunks, 8)) |c| {
+                            accum_ra_debug[c] = ra_chunk_weights[c][0];
+                        }
+
                         for (0..T) |j| {
-                            if (j >= trace_len) {
-                                // Padding cycles: ra_weight = 1
-                                for (0..ra_num_chunks) |c| {
-                                    ra_chunk_weights[c][j] = F.one();
-                                }
-                                continue;
-                            }
+                            // ALL cycles (including padding) get proper RA values.
+                            // Padding cycles have K(j) = 0, so ra = eq(0, r_addr) = Π(1-r_i).
+                            // In Jolt, ra_polys are computed for ALL T cycles uniformly.
 
                             // Get lookup index for this cycle
                             const k_lo = lookups_indices_lo[j];
@@ -4127,6 +4450,35 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             std.debug.print("]\n", .{});
                         }
 
+                        // DIAGNOSTIC: Compare accumulated vs materialized for cycle 0
+                        std.debug.print("[RA_ACCUM_VS_MATERIAL] Comparing for cycle 0:\n", .{});
+                        for (0..@min(ra_num_chunks, 8)) |c| {
+                            const materialized = ra_chunk_weights[c][0];
+                            const accumulated = accum_ra_debug[c];
+                            const match_val = materialized.eql(accumulated);
+                            std.debug.print("  chunk[{}]: accum={x}, material={x}, match={}\n", .{
+                                c,
+                                accumulated.toBytesBE()[16..32].*,
+                                materialized.toBytesBE()[16..32].*,
+                                match_val,
+                            });
+                        }
+
+                        // Also compute the FULL sum with both: using accumulated ra and using materialized ra
+                        // This tells us which one is correct
+                        var sum_with_material = F.zero();
+                        for (0..T) |j| {
+                            const eq_j = computeEqAtIndex(r_reduction, j);
+                            var ra_material = F.one();
+                            for (0..ra_num_chunks) |c| {
+                                ra_material = ra_material.mul(ra_chunk_weights[c][j]);
+                            }
+                            sum_with_material = sum_with_material.add(eq_j.mul(ra_material).mul(lookups_combined_vals[j]));
+                        }
+                        std.debug.print("[RA_COMPARE] sum_with_material = {x}\n", .{sum_with_material.toBytesBE()[16..32].*});
+                        std.debug.print("[RA_COMPARE] lookups_claim     = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+                        std.debug.print("[RA_COMPARE] material==claim: {}\n", .{sum_with_material.eql(lookups_claim)});
+
                         // Update lookups_ra_weights[j] to be the product of all chunks
                         for (0..T) |j| {
                             var ra_prod = F.one();
@@ -4196,38 +4548,183 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             }
                         }
 
-                        // DEBUG: Compute materialized sum for comparison (NOT used as claim)
-                        // In Jolt, the claim is NEVER overridden at this transition. It evolves
-                        // purely through polynomial evaluation at each round's challenge.
-                        // The arrays are materialized for computing the polynomial, but
-                        // finishMlesProductSumFromEvals uses the current lookups_claim (from
-                        // polynomial evaluation chain) to back-compute eval_at_0.
+                        // DEBUG: DIRECT brute-force claim computation
+                        // Compute Σ_j eq(j, r_red) * eq(K(j), r_addr) * cv_remat(j)
+                        // using per-bit eq computation (NOT expanding tables)
                         {
-                            // Compute sum WITH ra_weights (for cycle round polynomial)
-                            var materialized_sum = F.zero();
+                            var direct_bf_sum = F.zero();
+                            // We don't store initial cv, so skip that check
+                            var mismatch_count: usize = 0;
                             for (0..T) |j| {
-                                materialized_sum = materialized_sum.add(lookups_eq_evals[j].mul(lookups_ra_weights[j]).mul(lookups_combined_vals[j]));
-                            }
-                            // Compute sum WITHOUT ra_weights (should match lookups_claim at end of address rounds)
-                            var sum_no_ra = F.zero();
-                            for (0..T) |j| {
-                                sum_no_ra = sum_no_ra.add(lookups_eq_evals[j].mul(lookups_combined_vals[j]));
-                            }
-                            std.debug.print("[STAGE5 CYCLE] materialized_sum (WITH ra_weights) = {x}\n", .{materialized_sum.toBytesBE()[16..32].*});
-                            std.debug.print("[STAGE5 CYCLE] sum_no_ra (WITHOUT ra_weights) = {x}\n", .{sum_no_ra.toBytesBE()[16..32].*});
-                            std.debug.print("[STAGE5 CYCLE] lookups_claim (from poly eval chain) = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
-                            std.debug.print("[STAGE5 CYCLE] sum_no_ra == lookups_claim: {}\n", .{sum_no_ra.eql(lookups_claim)});
-                            std.debug.print("[STAGE5 CYCLE] current_batched_claim (NOT overridden) = {x}\n", .{current_batched_claim.toBytesBE()[16..32].*});
+                                // eq(j, r_reduction) - freshly computed
+                                const eq_j = lookups_eq_evals[j]; // Already fresh
 
-                            // The materialized_sum should equal lookups_claim.
-                            // If it doesn't, there's a bug in the prefix-suffix chain.
-                            if (!materialized_sum.eql(lookups_claim)) {
-                                std.debug.print("[STAGE5 CYCLE] WARNING: materialized_sum != lookups_claim\n", .{});
-                                std.debug.print("[STAGE5 CYCLE]   lookups_claim     = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
-                                std.debug.print("[STAGE5 CYCLE]   materialized_sum  = {x}\n", .{materialized_sum.toBytesBE()[16..32].*});
+                                // eq(K(j), r_addr) - compute directly from challenges
+                                var direct_ra = F.one();
+                                const k_lo_j = lookups_indices_lo[j];
+                                const k_hi_j = lookups_indices_hi[j];
+                                for (0..LOOKUPS_LOG_K) |bit_idx| {
+                                    const bit_pos = LOOKUPS_LOG_K - 1 - bit_idx;
+                                    const k_bit: u1 = if (bit_pos >= 64) @truncate(k_hi_j >> @intCast(bit_pos - 64)) else @truncate(k_lo_j >> @intCast(bit_pos));
+                                    const r_i = challenges[bit_idx];
+                                    const eq_bit = if (k_bit == 1) r_i else F.one().sub(r_i);
+                                    direct_ra = direct_ra.mul(eq_bit);
+                                }
+
+                                // Check: direct_ra vs ra_weights
+                                if (!direct_ra.eql(lookups_ra_weights[j])) {
+                                    if (mismatch_count < 3) {
+                                        std.debug.print("[DIRECT_BF] ra MISMATCH at j={}: direct={x}, ra_weights={x}\n", .{
+                                            j, direct_ra.toBytesBE()[24..32].*, lookups_ra_weights[j].toBytesBE()[24..32].*,
+                                        });
+                                    }
+                                    mismatch_count += 1;
+                                }
+
+                                const cv_j = lookups_combined_vals[j];
+                                direct_bf_sum = direct_bf_sum.add(eq_j.mul(direct_ra).mul(cv_j));
+
+                                // Also compute using INITIAL cv (before rematerialization)
+                                // initial_cv[j] = table(K(j)) + raf(K(j)) (point evaluation)
+                                // After binding, the correct cv should be table_MLE(r_addr) + raf_MLE(r_addr)
+                                // So initial_cv * eq(K(j), r_addr) should NOT give the right answer
+                                // (because table(K(j)) ≠ table_MLE(r_addr) in general)
                             }
+                            // Also compute materialized_sum using ra_weights
+                            var mat_sum_check = F.zero();
+                            for (0..T) |j2| {
+                                mat_sum_check = mat_sum_check.add(lookups_eq_evals[j2].mul(lookups_ra_weights[j2]).mul(lookups_combined_vals[j2]));
+                            }
+                            std.debug.print("[DIRECT_BF] ra_weights mismatches: {}/{}\n", .{mismatch_count, T});
+                            std.debug.print("[DIRECT_BF] Σ eq*direct_ra*cv_remat = {x}\n", .{direct_bf_sum.toBytesBE()[16..32].*});
+                            std.debug.print("[DIRECT_BF] materialized_sum (ra_weights) = {x}\n", .{mat_sum_check.toBytesBE()[16..32].*});
+                            std.debug.print("[DIRECT_BF] lookups_claim (poly chain) = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+                            std.debug.print("[DIRECT_BF] direct_bf == materialized: {}\n", .{direct_bf_sum.eql(mat_sum_check)});
+                            std.debug.print("[DIRECT_BF] direct_bf == lookups_claim: {}\n", .{direct_bf_sum.eql(lookups_claim)});
+
+                            // KEY TEST: The claim should equal materialized_sum.
+                            // If direct_bf matches materialized but not claim, then
+                            // the MATERIALIZATION is consistent but the claim is wrong.
+                            // But we PROVED the claim is correct (S5P==S5V + CONSISTENCY).
+                            // So if they don't match, the materialization must be wrong.
+                            //
+                            // But WHAT could be wrong if all components individually check out?
+                            // Let's check: is the INITIAL claim correct?
+                            // initial_claim = Σ_j eq(j, r_red) * initial_cv(j)
+                            // = Σ_j eq(j, r_red) * (table(K(j)) + γ*left(K(j)) + γ²*right(K(j)))
+                            //
+                            // After binding, claim_128 = Σ_j eq(j) * eq(K(j), r_addr) * table_MLE(r_addr) + raf...
+                            //
+                            // But is there a MISSING FACTOR? What if the initial sum was NOT
+                            // Σ_j eq(j) * cv_j but rather something different?
+                            //
+                            // Let me check the initial claim structure more carefully.
+                            // Print lookups_input for reference
+                            std.debug.print("[DIRECT_BF] lookups_input (initial claim) = {x}\n", .{lookups_input.toBytesBE()[16..32].*});
+
+                            // SPLIT TEST: Compute sum with table-only (no RAF) and RAF-only (no table)
+                            var table_only_sum = F.zero();
+                            var raf_only_sum = F.zero();
+                            for (0..T) |jj| {
+                                const eq_jj = lookups_eq_evals[jj];
+                                const ra_jj = lookups_ra_weights[jj];
+                                const eq_ra = eq_jj.mul(ra_jj);
+
+                                // Table-only contribution
+                                const t_idx_jj = cycle_table_indices[jj];
+                                if (t_idx_jj >= 0) {
+                                    const ti: usize = @intCast(t_idx_jj);
+                                    if (ti < NUM_TABLES) {
+                                        table_only_sum = table_only_sum.add(eq_ra.mul(stored_table_values[ti]));
+                                    }
+                                }
+
+                                // RAF-only contribution
+                                const is_interleaved_jj = !cycle_is_identity_path[jj];
+                                if (is_interleaved_jj) {
+                                    raf_only_sum = raf_only_sum.add(eq_ra.mul(raf_interleaved));
+                                } else {
+                                    raf_only_sum = raf_only_sum.add(eq_ra.mul(raf_identity));
+                                }
+                            }
+                            std.debug.print("[SPLIT_TEST] table_only_sum = {x}\n", .{table_only_sum.toBytesBE()[16..32].*});
+                            std.debug.print("[SPLIT_TEST] raf_only_sum = {x}\n", .{raf_only_sum.toBytesBE()[16..32].*});
+                            std.debug.print("[SPLIT_TEST] table+raf = {x}\n", .{table_only_sum.add(raf_only_sum).toBytesBE()[16..32].*});
+                            std.debug.print("[SPLIT_TEST] materialized = {x}\n", .{mat_sum_check.toBytesBE()[16..32].*});
+                            std.debug.print("[SPLIT_TEST] split matches materialized: {}\n", .{table_only_sum.add(raf_only_sum).eql(mat_sum_check)});
+
+                            // Now compute what the initial sum SHOULD be after binding
+                            // Initial: Σ_j eq(j,r) * [table(K(j)) + γ*raf(K(j))]
+                            // After binding: Σ_j eq(j,r) * eq(K(j), r_addr) * [table_mle_j(r_addr) + γ*raf_mle(r_addr)]
+                            // The RAF contribution with binding should be:
+                            // Σ_j eq(j,r) * eq(K(j), r_addr) * [γ*left_mle(r_addr) + γ²*(right_mle(r_addr) + identity_mle(r_addr))]
+                            // for interleaved, or γ²*identity_mle(r_addr) for identity path
+                            // = Σ eq*ra * raf_interleaved (for interleaved) or raf_identity (for identity)
+                            // which is what we compute above as raf_only_sum
+                            //
+                            // So the claim should be table_only_sum + raf_only_sum
+                            // And this should equal lookups_claim
+                            std.debug.print("[SPLIT_TEST] lookups_claim = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
                         }
                     }
+                    // Verify full sum at the start of cycle rounds
+                    if (lookups_round == 0) {
+                        // Before any cycle binding, check: lookups_claim == Σ_j eq(j, r_reduction) * Π_c ra_c[j] * cv[j]
+                        var full_sum_check = F.zero();
+                        for (0..T) |fj| {
+                            const fj_eq = computeEqAtIndex(r_reduction, fj);
+                            var fj_ra = F.one();
+                            for (0..ra_num_chunks) |fc| {
+                                fj_ra = fj_ra.mul(ra_chunk_weights[fc][fj]);
+                            }
+                            full_sum_check = full_sum_check.add(fj_eq.mul(fj_ra).mul(lookups_combined_vals[fj]));
+                        }
+                        std.debug.print("[CYCLE_START_CHECK] Full sum = {x}\n", .{full_sum_check.toBytesBE()[16..32].*});
+                        std.debug.print("[CYCLE_START_CHECK] lookups_claim = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+                        std.debug.print("[CYCLE_START_CHECK] MATCH: {}\n", .{full_sum_check.eql(lookups_claim)});
+
+                        // Also check: what does the sum give for cv ONLY (without ra)?
+                        var cv_only_sum = F.zero();
+                        for (0..T) |fj| {
+                            const fj_eq = computeEqAtIndex(r_reduction, fj);
+                            cv_only_sum = cv_only_sum.add(fj_eq.mul(lookups_combined_vals[fj]));
+                        }
+                        std.debug.print("[CYCLE_START_CHECK] cv_only_sum (no ra) = {x}\n", .{cv_only_sum.toBytesBE()[16..32].*});
+
+                        // Check ra products - all should be 1 if address rounds are correct
+                        var all_ra_one = true;
+                        var non_one_count: usize = 0;
+                        for (0..T) |fj| {
+                            var fj_ra = F.one();
+                            for (0..ra_num_chunks) |fc| {
+                                fj_ra = fj_ra.mul(ra_chunk_weights[fc][fj]);
+                            }
+                            if (!fj_ra.eql(F.one())) {
+                                all_ra_one = false;
+                                non_one_count += 1;
+                                if (non_one_count <= 3) {
+                                    std.debug.print("[CYCLE_START_CHECK] ra_product[{}] != 1: {x}\n", .{fj, fj_ra.toBytesBE()[16..32].*});
+                                }
+                            }
+                        }
+                        std.debug.print("[CYCLE_START_CHECK] all_ra_one={}, non_one_count={}\n", .{all_ra_one, non_one_count});
+
+                        // Also check: does sum_evals[0] (g(1)) match what we expect?
+                        // g(1) = Σ_j eq_prefix(j) * Π_c ra_c[2j+1] * cv[2j+1]
+                        // (because lin(1) = val_at_1 for all linear polys)
+                        var g1_brute = F.zero();
+                        const half_T = T >> 1;
+                        for (0..half_T) |fj| {
+                            const fj_eq = computeEqAtIndexPartial(r_reduction, fj, n_cycle_vars - 1);
+                            var fj_ra = F.one();
+                            for (0..ra_num_chunks) |fc| {
+                                fj_ra = fj_ra.mul(ra_chunk_weights[fc][2 * fj + 1]);
+                            }
+                            g1_brute = g1_brute.add(fj_eq.mul(fj_ra).mul(lookups_combined_vals[2 * fj + 1]));
+                        }
+                        std.debug.print("[CYCLE_START_CHECK] g(1)_brute = {x}\n", .{g1_brute.toBytesBE()[16..32].*});
+                    }
+
                     // CRITICAL: current_half_size is the number of pairs we iterate over
                     // At round k, we have T/2^(k+1) pairs to process
                     const current_half_size = T >> @intCast(lookups_round + 1);
@@ -4730,14 +5227,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         }
                     }
 
-                    // CRITICAL FIX: Update lookups_claim by evaluating the Instance 2
-                    // polynomial at the challenge, NOT by recomputing from raw arrays.
-                    //
-                    // The polynomial p2(X) = full_coeffs[0] + full_coeffs[1]*X + ... + full_coeffs[d]*X^d
-                    // was constructed by finishMlesProductSumFromEvals which includes the
-                    // eq(X, r_round) factor. Evaluating at the challenge gives the correct
-                    // new claim. Direct recomputation from bound arrays gives a different
-                    // result because it doesn't account for the eq factor correctly.
+                    // Update lookups_claim by evaluating the Instance 2 polynomial at the challenge.
+                    // The polynomial p2(X) was constructed by finishMlesProductSumFromEvals.
                     {
                         // Evaluate p2(challenge) using Horner's method
                         var p2_at_r = full_coeffs[full_coeffs.len - 1];
@@ -4764,6 +5255,25 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         std.debug.print("  new_lookups_claim = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
                         // Debug: print eq_evals[0] after binding
                         std.debug.print("  eq_evals[0] after bind = {x}\n", .{lookups_eq_evals[0].toBytesBE()[16..32].*});
+
+                        // CRITICAL DIAGNOSTIC: Compare lookups_claim with bound array computation
+                        // After binding, compute: current_scalar * Σ_j (eq_prefix(j) * Π_c ra_c[j] * cv[j])
+                        // where the sum is over remaining (unbound) elements
+                        const bound_half_size = T >> @intCast(lookups_round + 1);
+                        const bound_remaining = n_cycle_vars - lookups_round - 1;
+                        var bound_array_sum = F.zero();
+                        for (0..bound_half_size) |bj| {
+                            const bj_eq = computeEqAtIndexPartial(r_reduction, bj, bound_remaining);
+                            var bj_ra = F.one();
+                            for (0..ra_num_chunks) |bc| {
+                                bj_ra = bj_ra.mul(ra_chunk_weights[bc][bj]);
+                            }
+                            bound_array_sum = bound_array_sum.add(bj_eq.mul(bj_ra).mul(lookups_combined_vals[bj]));
+                        }
+                        bound_array_sum = bound_array_sum.mul(lookups_current_scalar);
+                        std.debug.print("  BOUND_ARRAY_SUM = {x}\n", .{bound_array_sum.toBytesBE()[16..32].*});
+                        std.debug.print("  lookups_claim   = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+                        std.debug.print("  BOUND==CLAIM: {}\n", .{bound_array_sum.eql(lookups_claim)});
                     }
 
                     continue; // Skip the rest of the loop (we handled everything)
@@ -4788,6 +5298,15 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             std.debug.print("  batch0*inst0 + batch1*inst1 + batch2*inst2 = {any}\n", .{recon.toBytes()});
             std.debug.print("  current_batched_claim = {any}\n", .{current_batched_claim.toBytes()});
             std.debug.print("  reconstruction matches output_claim: {}\n", .{recon.eql(current_batched_claim)});
+
+            // CRITICAL: Derive correct Instance 2 claim from batched output
+            // The batched output_claim is CORRECT (S5P==S5V). Individual claims for
+            // inst0 and inst1 are also correct. So we can derive the TRUE inst2 claim.
+            const batch2_inv = batch2.inverse().?;
+            const correct_inst2_from_batched = current_batched_claim.sub(batch0.mul(regs_val_current_claim)).sub(batch1.mul(ram_ra_current_claim)).mul(batch2_inv);
+            std.debug.print("  [DRIFT CHECK] lookups_claim (tracked)     = {any}\n", .{lookups_claim.toBytes()});
+            std.debug.print("  [DRIFT CHECK] correct_inst2 (from batch)  = {any}\n", .{correct_inst2_from_batched.toBytes()});
+            std.debug.print("  [DRIFT CHECK] drift detected: {}\n", .{!lookups_claim.eql(correct_inst2_from_batched)});
 
             // =================================================================
             // BRUTE FORCE Instance 1 expected output claim
@@ -5102,6 +5621,50 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             for (val_claim.toBytes()[16..32]) |b| std.debug.print("{x:0>2} ", .{b});
             std.debug.print("\n", .{});
 
+            // CRITICAL DIAGNOSTIC: Compare combined_vals[0] with val_claim + gamma * raf_claim
+            // The prover's combined_val polynomial should encode: table_val + gamma * raf_val
+            // After all cycle round binding, combined_vals[0] should equal val_claim + gamma * raf_claim
+            const verifier_combined = val_claim.add(gamma_lookups_raf.mul(raf_claim));
+            std.debug.print("\n  === CRITICAL COMPARISON ===\n", .{});
+            std.debug.print("  combined_vals[0] (bound polynomial) FULL LE = {any}\n", .{lookups_combined_vals[0].toBytes()});
+            std.debug.print("  val+gamma*raf   (from opening claims) FULL LE = {any}\n", .{verifier_combined.toBytes()});
+            std.debug.print("  combined_vals[0] == val+gamma*raf: {}\n", .{lookups_combined_vals[0].eql(verifier_combined)});
+            if (!lookups_combined_vals[0].eql(verifier_combined)) {
+                // They differ! This means the bound polynomial disagrees with opening claims.
+                // Try other hypotheses:
+                // 1. Maybe combined_vals includes ra_product already?
+                const cv_div_ra = if (!ra_product.eql(F.zero())) lookups_combined_vals[0].mul(ra_product.inverse().?) else F.zero();
+                std.debug.print("  combined_vals[0] / ra_product = {any}\n", .{cv_div_ra.toBytes()});
+                std.debug.print("  cv/ra == val+gamma*raf: {}\n", .{cv_div_ra.eql(verifier_combined)});
+
+                // 2. Maybe combined_vals = ra_product * (val + gamma * raf)?
+                const ra_times_combined = ra_product.mul(verifier_combined);
+                std.debug.print("  ra_product * (val+gamma*raf) = {any}\n", .{ra_times_combined.toBytes()});
+                std.debug.print("  ra*(val+gamma*raf) == combined_vals[0]: {}\n", .{ra_times_combined.eql(lookups_combined_vals[0])});
+
+                // 3. Compute what correct_inst2 / (eq_r_reduction * ra_product) gives
+                // This should be combined_vals[0] if lookups_output_claim = eq*ra*cv
+                if (!eq_r_reduction.eql(F.zero()) and !ra_product.eql(F.zero())) {
+                    const implied_cv = correct_inst2_from_batched.mul(eq_r_reduction.inverse().?).mul(ra_product.inverse().?);
+                    std.debug.print("  correct_inst2 / (eq*ra) = {any}\n", .{implied_cv.toBytes()});
+                    std.debug.print("  implied_cv == combined_vals[0]: {}\n", .{implied_cv.eql(lookups_combined_vals[0])});
+                    std.debug.print("  implied_cv == val+gamma*raf: {}\n", .{implied_cv.eql(verifier_combined)});
+                }
+
+                // 4. Compute correct_inst2 / (lookups_current_scalar * ra_product)
+                // This might be the true combined_val if current_scalar != eq_r_reduction
+                if (!lookups_current_scalar.eql(F.zero()) and !ra_product.eql(F.zero())) {
+                    const implied_cv2 = correct_inst2_from_batched.mul(lookups_current_scalar.inverse().?).mul(ra_product.inverse().?);
+                    std.debug.print("  correct_inst2 / (scalar*ra) = {any}\n", .{implied_cv2.toBytes()});
+                    std.debug.print("  implied_cv2 == combined_vals[0]: {}\n", .{implied_cv2.eql(lookups_combined_vals[0])});
+                    std.debug.print("  implied_cv2 == val+gamma*raf: {}\n", .{implied_cv2.eql(verifier_combined)});
+                }
+
+                // 5. Check if eq_r_reduction == lookups_current_scalar
+                std.debug.print("  eq_r_reduction == lookups_current_scalar: {}\n", .{eq_r_reduction.eql(lookups_current_scalar)});
+            }
+            std.debug.print("  === END CRITICAL COMPARISON ===\n\n", .{});
+
             // Compute expected output: eq_r_reduction * ra_product * (val_claim + gamma * raf_claim)
             const expected_output = eq_r_reduction.mul(ra_product).mul(val_claim.add(gamma_lookups_raf.mul(raf_claim)));
             std.debug.print("  expected_output (eq*ra*(val+gamma*raf)) FULL LE = {any}\n", .{expected_output.toBytes()});
@@ -5113,6 +5676,68 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
             // Check if expected matches the sumcheck output
             std.debug.print("  expected_output == lookups_output_claim: {}\n", .{expected_output.eql(lookups_output_claim)});
+
+            // Check if the correct inst2 from batched matches the opening claims
+            std.debug.print("  correct_inst2_from_batched == lookups_output_claim: {}\n", .{correct_inst2_from_batched.eql(lookups_output_claim)});
+            if (!correct_inst2_from_batched.eql(lookups_output_claim)) {
+                std.debug.print("  ERROR: correct_inst2_from_batched != lookups_output_claim!\n", .{});
+                std.debug.print("  correct_inst2 = {any}\n", .{correct_inst2_from_batched.toBytes()});
+                std.debug.print("  lookups_output = {any}\n", .{lookups_output_claim.toBytes()});
+                // Compute ratio for debugging
+                if (!lookups_output_claim.eql(F.zero())) {
+                    const ratio = correct_inst2_from_batched.mul(lookups_output_claim.inverse().?);
+                    std.debug.print("  ratio (correct/output) = {any}\n", .{ratio.toBytes()});
+                }
+
+                // BRUTE FORCE: Compute true Instance 2 output by summing over trace
+                // inst2_output = Σ_j eq(j, r_reduction) * eq(j, r_cycle') * ra(r_addr, K(j)) * cv(r_addr, j)
+                // where cv(r_addr, j) = table_val(r_addr, table(j)) + γ*raf(r_addr, j)
+                var bf_inst2_output = F.zero();
+                for (0..T) |j| {
+                    if (j >= trace_len) continue;
+
+                    // eq(j, r_reduction) * eq(j, r_cycle')
+                    const eq_red_j = computeEqAtIndex(r_reduction, j);
+                    const eq_cyc_j = computeEqAtIndex(r_cycle_prime_be, j);
+
+                    // ra(r_addr, K(j)) = product over all chunks of expanding_tables[phase][k_phase]
+                    var ra_j = F.one();
+                    const k_full = lookup_indices_u128[j];
+                    for (0..num_phases) |phase| {
+                        const shift = (num_phases - 1 - phase) * log_m;
+                        const k_phase: usize = @intCast((k_full >> @intCast(shift)) & ((@as(u128, 1) << @intCast(log_m)) - 1));
+                        ra_j = ra_j.mul(expanding_tables[phase].get(k_phase));
+                    }
+
+                    // cv(r_addr, j) = table_values_at_r_addr[table(j)] + raf_val
+                    var cv_j = F.zero();
+                    const table_idx_j = cycle_table_indices[j];
+                    if (table_idx_j >= 0) {
+                        const t_idx: usize = @intCast(table_idx_j);
+                        if (t_idx < NUM_TABLES) {
+                            cv_j = cv_j.add(stored_table_values[t_idx]);
+                        }
+                    }
+                    // Add RAF
+                    const is_interleaved_j = !cycle_is_identity_path[j];
+                    const raf_interleaved_j = gamma_lookups_raf.mul(left_op_eval).add(gamma_raf2.mul(right_op_eval));
+                    const raf_identity_j = gamma_raf2.mul(identity_eval);
+                    if (is_interleaved_j) {
+                        cv_j = cv_j.add(raf_interleaved_j);
+                    } else {
+                        cv_j = cv_j.add(raf_identity_j);
+                    }
+
+                    bf_inst2_output = bf_inst2_output.add(eq_red_j.mul(eq_cyc_j).mul(ra_j).mul(cv_j));
+                }
+                std.debug.print("  BF inst2_output = {any}\n", .{bf_inst2_output.toBytes()});
+                std.debug.print("  BF == lookups_output_claim: {}\n", .{bf_inst2_output.eql(lookups_output_claim)});
+                std.debug.print("  BF == correct_inst2: {}\n", .{bf_inst2_output.eql(correct_inst2_from_batched)});
+            } else {
+                std.debug.print("  GOOD: correct_inst2_from_batched == lookups_output_claim\n", .{});
+                std.debug.print("  The opening claims are CORRECT. The fix is to use correct_inst2_from_batched\n", .{});
+                std.debug.print("  as the Instance 2 claim when computing the batched expected output.\n", .{});
+            }
 
             // ============================================================
             // COMPUTE ram_ra_claim FROM RAM TRACE

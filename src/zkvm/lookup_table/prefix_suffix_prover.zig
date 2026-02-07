@@ -79,6 +79,9 @@ pub fn TableSuffixPolys(comptime F: type) type {
         polys: [][]F,
         /// Number of suffixes for this table
         num_suffixes: usize,
+        /// Effective length of each polynomial (halves on each bind)
+        /// This tracks the "active" portion of the polynomial after binding.
+        effective_len: usize,
         allocator: Allocator,
 
         pub fn init(allocator: Allocator, num_suffixes: usize, poly_size: usize) !Self {
@@ -90,6 +93,7 @@ pub fn TableSuffixPolys(comptime F: type) type {
             return .{
                 .polys = polys,
                 .num_suffixes = num_suffixes,
+                .effective_len = poly_size,
                 .allocator = allocator,
             };
         }
@@ -106,19 +110,30 @@ pub fn TableSuffixPolys(comptime F: type) type {
             return self.polys[suffix_idx];
         }
 
-        /// Bind a challenge (halves the polynomial size)
+        /// Get the effective length of the polynomial (may be smaller than allocated)
+        pub fn getEffectiveLen(self: *const Self) usize {
+            return self.effective_len;
+        }
+
+        /// Reset the effective length (used after re-initialization at phase transitions)
+        pub fn resetEffectiveLen(self: *Self, new_len: usize) void {
+            self.effective_len = new_len;
+        }
+
+        /// Bind a challenge (halves the effective polynomial size)
         /// Uses HighToLow binding order: new[i] = left[i] + r * (right[i] - left[i])
         /// where left = poly[0..n], right = poly[n..2n]
         pub fn bind(self: *Self, r: F) void {
+            const half_size = self.effective_len / 2;
             for (self.polys) |poly| {
-                const half_size = poly.len / 2;
-                // HighToLow: left half [0..n], right half [n..2n]
+                // HighToLow: left half [0..half_size], right half [half_size..effective_len]
                 for (0..half_size) |j| {
                     const low = poly[j];
                     const high = poly[j + half_size];
                     poly[j] = low.add(r.mul(high.sub(low)));
                 }
             }
+            self.effective_len = half_size;
         }
     };
 }
@@ -174,10 +189,11 @@ pub fn AllSuffixPolys(comptime F: type) type {
                         m,
                     );
                 } else {
-                    // Reset existing polynomials
+                    // Reset existing polynomials and restore effective length
                     for (self.tables[table_idx].?.polys) |poly| {
-                        @memset(poly, F.zero());
+                        @memset(poly[0..m], F.zero());
                     }
+                    self.tables[table_idx].?.resetEffectiveLen(m);
                 }
             }
 
@@ -289,11 +305,12 @@ pub fn proverMsgReadChecking(
     r_x: ?F,
 ) [2]F {
     const len = blk: {
-        // Find the current Q length from any initialized table
+        // Find the current EFFECTIVE Q length from any initialized table
+        // This reflects the length after binding (halves each round)
         for (suffix_polys.tables) |maybe_table| {
             if (maybe_table) |table| {
-                if (table.polys.len > 0 and table.polys[0].len > 0) {
-                    break :blk table.polys[0].len;
+                if (table.effective_len > 0) {
+                    break :blk table.effective_len;
                 }
             }
         }
@@ -317,16 +334,25 @@ pub fn proverMsgReadChecking(
                     total_non_zero += table_non_zero;
                     std.debug.print("[READ_CHECK ROUND 0] table {} has {} non-zero Q values\n", .{ table_idx, table_non_zero });
 
-                    // Print actual Q values for table 0 (RangeCheck)
-                    if (table_idx == 0) {
-                        const suffixes_list = tableSuffixes(0);
-                        std.debug.print("[READ_CHECK ROUND 0] Table 0 Q values:\n", .{});
+                    // Print ALL non-zero Q values with indices
+                    {
+                        const suffixes_list = tableSuffixes(table_idx);
+                        var right_half_nonzero: usize = 0;
                         for (table.polys, 0..) |poly, s_idx| {
-                            for (poly, 0..) |v, idx| {
-                                if (!v.eql(F.zero())) {
-                                    std.debug.print("  Q[{s}][{}] = {x}\n", .{ @tagName(suffixes_list[s_idx]), idx, v.toBytesBE()[24..32].* });
+                            for (0..len) |idx| {
+                                if (!poly[idx].eql(F.zero())) {
+                                    const in_right = idx >= len / 2;
+                                    if (in_right) right_half_nonzero += 1;
+                                    std.debug.print("  T{}:Q[{s}][{}] = {x} {s}\n", .{
+                                        table_idx, @tagName(suffixes_list[s_idx]), idx,
+                                        poly[idx].toBytesBE()[24..32].*,
+                                        if (in_right) "RIGHT_HALF!" else "",
+                                    });
                                 }
                             }
+                        }
+                        if (right_half_nonzero > 0) {
+                            std.debug.print("[READ_CHECK ROUND 0] TABLE {} HAS {} RIGHT-HALF ENTRIES!\n", .{ table_idx, right_half_nonzero });
                         }
                     }
                 }
@@ -335,6 +361,10 @@ pub fn proverMsgReadChecking(
         std.debug.print("[READ_CHECK ROUND 0] Q poly stats: total_non_zero={}, non_zero_tables={}, len={}\n", .{
             total_non_zero, non_zero_tables, len,
         });
+    }
+
+    if (round < 3) {
+        std.debug.print("[READ_CHECK R{}] effective_len={}\n", .{ round, len });
     }
 
     const log_len = @ctz(len);
@@ -407,6 +437,9 @@ pub fn proverMsgReadChecking(
     const eval_2 = eval_2_right.add(eval_2_right).sub(eval_2_left);
 
     if (round == 0) {
+        std.debug.print("[READ_CHECK R0] eval_2_left={x}\n", .{eval_2_left.toBytesBE()[16..32].*});
+        std.debug.print("[READ_CHECK R0] eval_2_right={x}\n", .{eval_2_right.toBytesBE()[16..32].*});
+        std.debug.print("[READ_CHECK R0] eval_2_right==0: {}\n", .{eval_2_right.eql(F.zero())});
         // Also compute eval_1 independently to verify the total sum
         var eval_1_indep = F.zero();
         for (0..half_len) |b_idx2| {
@@ -912,14 +945,20 @@ pub fn RafDecomposition(comptime F: type) type {
         phase: usize,
         /// Current round (global, 0..LOG_K)
         round: usize,
-        /// Number of bound variables
+        /// Number of bound variables (global, across all phases)
         num_bound_vars: usize,
-        /// Bound value (accumulated from challenges)
+        /// Bound value (accumulated from challenges, used as checkpoint for prefix)
         bound_value: F,
         /// Type of RAF polynomial (determines binding behavior)
         poly_type: RafPolyType,
         /// Allocator
         allocator: Allocator,
+        /// Materialized prefix MLE table (size = 2^chunk_len at phase start, halves each round)
+        prefix_mle: []F,
+        /// Current prefix MLE size (halves each round within a phase)
+        prefix_mle_size: usize,
+        /// Maximum prefix MLE size (2^chunk_len, allocated once)
+        prefix_mle_max_size: usize,
 
         pub fn init(allocator: Allocator, initial_size: usize, chunk_len: usize, total_len: usize, poly_type: RafPolyType) !Self {
             var Q: [2][]F = undefined;
@@ -927,6 +966,12 @@ pub fn RafDecomposition(comptime F: type) type {
             Q[1] = try allocator.alloc(F, initial_size);
             @memset(Q[0], F.zero());
             @memset(Q[1], F.zero());
+
+            // Allocate prefix MLE table: 2^chunk_len entries
+            const prefix_max = @as(usize, 1) << @intCast(chunk_len);
+            const prefix_mle = try allocator.alloc(F, prefix_max);
+            @memset(prefix_mle, F.zero());
+
             return .{
                 .Q = Q,
                 .Q_size = initial_size,
@@ -938,12 +983,16 @@ pub fn RafDecomposition(comptime F: type) type {
                 .bound_value = F.zero(),
                 .poly_type = poly_type,
                 .allocator = allocator,
+                .prefix_mle = prefix_mle,
+                .prefix_mle_size = prefix_max,
+                .prefix_mle_max_size = prefix_max,
             };
         }
 
         pub fn deinit(self: *Self) void {
             self.allocator.free(self.Q[0]);
             self.allocator.free(self.Q[1]);
+            self.allocator.free(self.prefix_mle);
         }
 
         pub fn QLen(self: *const Self) usize {
@@ -984,11 +1033,67 @@ pub fn RafDecomposition(comptime F: type) type {
             };
         }
 
-        /// Bind a challenge to Q polynomials and update bound_value
-        /// Uses HighToLow binding order: new[j] = Q[j] + r * (Q[j+half] - Q[j])
+        /// Materialize the prefix MLE table at the start of a new phase.
+        /// This creates a full evaluation table of 2^chunk_len entries matching
+        /// Jolt's CachedPolynomial / prefix_polynomial approach.
+        ///
+        /// For OperandPolynomial:
+        ///   P[i] = bound_value * 2^(chunk_len/2) + uninterleave(i, side)
+        /// For IdentityPolynomial:
+        ///   P[i] = bound_value * 2^chunk_len + i
+        pub fn initPrefix(self: *Self) void {
+            const size = self.prefix_mle_max_size; // 2^chunk_len
+            self.prefix_mle_size = size;
+
+            switch (self.poly_type) {
+                .LeftOperand, .RightOperand => {
+                    const is_left = (self.poly_type == .LeftOperand);
+                    const half_chunk = self.chunk_len / 2;
+                    const scale = fieldPow2(F, half_chunk); // 2^(chunk_len/2)
+                    const base = self.bound_value.mul(scale);
+
+                    for (0..size) |i| {
+                        // Uninterleave to get operand bits
+                        // Left uses odd positions (1,3,5,...), Right uses even positions (0,2,4,...)
+                        var operand_val: u64 = 0;
+                        for (0..@min(half_chunk, 32)) |bit_idx| {
+                            if (is_left) {
+                                const bit: u64 = @truncate((i >> @intCast(2 * bit_idx + 1)) & 1);
+                                operand_val |= bit << @intCast(bit_idx);
+                            } else {
+                                const bit: u64 = @truncate((i >> @intCast(2 * bit_idx)) & 1);
+                                operand_val |= bit << @intCast(bit_idx);
+                            }
+                        }
+                        self.prefix_mle[i] = base.add(F.fromU64(operand_val));
+                    }
+                },
+                .Identity => {
+                    const scale = fieldPow2(F, self.chunk_len); // 2^chunk_len
+                    const base = self.bound_value.mul(scale);
+
+                    for (0..size) |i| {
+                        self.prefix_mle[i] = base.add(F.fromU64(@intCast(i)));
+                    }
+                },
+            }
+        }
+
+        /// Save the prefix checkpoint (final single value after all chunk_len rounds)
+        /// and update bound_value for the next phase.
+        /// Call this at phase boundaries after all rounds in the chunk are done.
+        pub fn updateCheckpoint(self: *Self) void {
+            // After chunk_len rounds of binding, prefix_mle_size should be 1
+            // The single remaining value IS the checkpoint
+            std.debug.assert(self.prefix_mle_size == 1);
+            self.bound_value = self.prefix_mle[0];
+        }
+
+        /// Bind a challenge to Q polynomials AND prefix MLE table
+        /// Uses HighToLow binding order: new[j] = old[j] + r * (old[j+half] - old[j])
         pub fn bind(self: *Self, r: F) void {
+            // Bind Q polynomials
             const half_size = self.Q_size / 2;
-            // HighToLow: left half [0..half_size], right half [half_size..Q_size]
             for (0..2) |i| {
                 for (0..half_size) |j| {
                     const low = self.Q[i][j];
@@ -998,13 +1103,14 @@ pub fn RafDecomposition(comptime F: type) type {
             }
             self.Q_size = half_size;
 
-            // Update bound_value based on polynomial type
-            // Jolt's binding rule:
-            // - OperandPolynomial: binds when round parity matches side
-            // - IdentityPolynomial: always binds
-            if (self.shouldBind()) {
-                self.bound_value = self.bound_value.add(self.bound_value).add(r);
+            // Bind prefix MLE table (HighToLow)
+            const prefix_half = self.prefix_mle_size / 2;
+            for (0..prefix_half) |j| {
+                const low = self.prefix_mle[j];
+                const high = self.prefix_mle[j + prefix_half];
+                self.prefix_mle[j] = low.add(r.mul(high.sub(low)));
             }
+            self.prefix_mle_size = prefix_half;
 
             self.num_bound_vars += 1;
             self.round += 1;
@@ -1013,129 +1119,21 @@ pub fn RafDecomposition(comptime F: type) type {
             }
         }
 
-        /// Compute sumcheck evaluations at index b
-        /// Returns (P(0), P(2)) where P is the prefix polynomial
+        /// Compute sumcheck evaluations at index b using the materialized prefix MLE table.
+        /// Returns (P(0), P(2)) where P is the prefix polynomial.
         ///
-        /// IMPORTANT: The prefix polynomial operates on chunk_len variables,
-        /// not total_len variables. At each phase boundary, a new prefix MLE
-        /// is conceptually created with chunk_len bits. Within a phase,
-        /// variables are bound one at a time. The "remaining" count here
-        /// refers to the remaining variables within the current chunk.
-        ///
-        /// For OperandPolynomial:
-        ///   If binding this round:
-        ///     P(c) = bound_value * 2^unbound_pairs + operand_bits(b) + c * m
-        ///   Else:
-        ///     P(c) = bound_value * 2^unbound_pairs + operand_bits(b) (constant in c)
-        ///
-        /// For IdentityPolynomial:
-        ///   P(c) = bound_value * 2^remaining + b + c * m (always linear)
+        /// Uses standard MLE sumcheck_evals (table lookup + linear interpolation):
+        ///   P(0) = prefix_mle[b]
+        ///   P(1) = prefix_mle[b + half_len]
+        ///   m = P(1) - P(0)
+        ///   P(2) = P(1) + m = 2*P(1) - P(0)
         pub fn prefixEvals(self: *const Self, b: usize) [2]F {
-            // The prefix polynomial has chunk_len variables at phase start.
-            // Within the chunk, num_bound_vars % chunk_len have been bound.
-            const vars_bound_in_chunk = self.num_bound_vars % self.chunk_len;
-            const remaining = self.chunk_len - vars_bound_in_chunk;
-
-            return switch (self.poly_type) {
-                .LeftOperand => self.operandPrefixEvals(b, remaining, true),
-                .RightOperand => self.operandPrefixEvals(b, remaining, false),
-                .Identity => self.identityPrefixEvals(b, remaining),
-            };
-        }
-
-        fn operandPrefixEvals(self: *const Self, b: usize, remaining: usize, is_left: bool) [2]F {
-            // Uninterleave b to get the operand bits
-            // In Jolt's interleave format: odd positions -> left, even positions -> right
-            const half_bits = remaining / 2;
-            var operand_bits: u64 = 0;
-            if (half_bits > 0) {
-                if (is_left) {
-                    // Left operand: extract odd positions (1, 3, 5, ...)
-                    for (0..@min(half_bits, 32)) |i| {
-                        const bit: u64 = @truncate((b >> @intCast(2 * i + 1)) & 1);
-                        operand_bits |= bit << @intCast(i);
-                    }
-                } else {
-                    // Right operand: extract even positions (0, 2, 4, ...)
-                    for (0..@min(half_bits, 32)) |i| {
-                        const bit: u64 = @truncate((b >> @intCast(2 * i)) & 1);
-                        operand_bits |= bit << @intCast(i);
-                    }
-                }
-            }
-
-            // Debug: show computation at round 1, b=0
-            if (self.round == 1 and b == 0) {
-                std.debug.print("[PREFIX_DEBUG] operandPrefixEvals: is_left={}, round={}, remaining={}, half_bits={}\n", .{
-                    is_left, self.round, remaining, half_bits,
-                });
-                std.debug.print("[PREFIX_DEBUG] bound_value={x}, operand_bits={}\n", .{
-                    self.bound_value.toBytesBE()[16..32].*, operand_bits,
-                });
-            }
-
-            // In Jolt's format: even positions = right operand, odd positions = left operand
-            // From Jolt's OperandPolynomial::sumcheck_evals():
-            // - When num_bound_vars is even, LeftOperand binds (produces linear poly)
-            // - When num_bound_vars is odd, RightOperand binds (produces linear poly)
-            // LeftOperand uses even-indexed challenges (r[0], r[2], r[4], ...)
-            // RightOperand uses odd-indexed challenges (r[1], r[3], r[5], ...)
-            const is_even_round = (self.num_bound_vars % 2 == 0);
-            const is_binding_round = if (is_left) is_even_round else !is_even_round;
-
-            if (is_binding_round and half_bits > 0) {
-                // Linear polynomial: P(c) = base + c * m
-                // where base = bound_value * 2^unbound_pairs + operand_bits
-                // and m = 2^(unbound_pairs - 1)
-                const unbound_pairs = remaining / 2;
-                // Use field element arithmetic to handle large scales (unbound_pairs can be up to 64)
-                const scale = fieldPow2(F, unbound_pairs);
-                const m = fieldPow2(F, unbound_pairs - 1);
-
-                const base = self.bound_value.mul(scale).add(F.fromU64(operand_bits));
-                const eval_0 = base;
-                const eval_2 = base.add(m.add(m)); // 2 * m using field arithmetic
-                return .{ eval_0, eval_2 };
-            } else {
-                // Constant polynomial (not binding or remaining=0)
-                const unbound_pairs = remaining / 2;
-                const scale = if (unbound_pairs > 0) fieldPow2(F, unbound_pairs) else F.one();
-                const base = self.bound_value.mul(scale).add(F.fromU64(operand_bits));
-
-                // Debug: verify computation at round 1, b=0
-                if (self.round == 1 and b == 0 and is_left) {
-                    std.debug.print("[PREFIX_VERIFY] is_left={}, unbound_pairs={}, scale=2^{}={x}\n", .{
-                        is_left, unbound_pairs, unbound_pairs, scale.toBytesBE()[16..32].*,
-                    });
-                    std.debug.print("[PREFIX_VERIFY] bound_value * scale = {x}\n", .{
-                        self.bound_value.mul(scale).toBytesBE()[16..32].*,
-                    });
-                    std.debug.print("[PREFIX_VERIFY] base = {x}\n", .{
-                        base.toBytesBE()[16..32].*,
-                    });
-                }
-
-                return .{ base, base }; // P(0) = P(2) = base
-            }
-        }
-
-        fn identityPrefixEvals(self: *const Self, b: usize, remaining: usize) [2]F {
-            // Identity polynomial always binds
-            // P(c) = bound_value * 2^remaining + b + c * m
-            // where m = 2^(remaining - 1)
-            if (remaining > 0) {
-                // Use field element arithmetic to handle large scales (remaining can be up to 128)
-                const scale = fieldPow2(F, remaining);
-                const m = fieldPow2(F, remaining - 1);
-                const base = self.bound_value.mul(scale).add(F.fromU64(@intCast(b)));
-                const eval_0 = base;
-                const eval_2 = base.add(m.add(m)); // 2 * m using field arithmetic
-                return .{ eval_0, eval_2 };
-            } else {
-                // All variables bound
-                const base = self.bound_value.add(F.fromU64(@intCast(b)));
-                return .{ base, base };
-            }
+            const half_len = self.prefix_mle_size / 2;
+            const eval_0 = self.prefix_mle[b];
+            const eval_1 = self.prefix_mle[b + half_len];
+            // Linear extrapolation: P(2) = P(1) + (P(1) - P(0)) = 2*P(1) - P(0)
+            const eval_2 = eval_1.add(eval_1).sub(eval_0);
+            return .{ eval_0, eval_2 };
         }
     };
 }
@@ -1333,6 +1331,34 @@ pub fn proverMsgRaf(
             identity_ps.Q[0][0].toBytesBE()[16..32].*,
             identity_ps.Q[1][0].toBytesBE()[16..32].*,
         });
+
+        // Print prefix MLE values for debugging
+        std.debug.print("[RAF_DEBUG R{}] left prefix_mle_size={}, prefix_mle[0]={x}\n", .{
+            left_ps.round,
+            left_ps.prefix_mle_size,
+            left_ps.prefix_mle[0].toBytesBE()[16..32].*,
+        });
+        if (left_ps.prefix_mle_size >= 2) {
+            const lhalf = left_ps.prefix_mle_size / 2;
+            std.debug.print("[RAF_DEBUG R{}] left prefix_mle[half={d}]={x}\n", .{
+                left_ps.round,
+                lhalf,
+                left_ps.prefix_mle[lhalf].toBytesBE()[16..32].*,
+            });
+        }
+        std.debug.print("[RAF_DEBUG R{}] identity prefix_mle_size={}, prefix_mle[0]={x}\n", .{
+            left_ps.round,
+            identity_ps.prefix_mle_size,
+            identity_ps.prefix_mle[0].toBytesBE()[16..32].*,
+        });
+        if (identity_ps.prefix_mle_size >= 2) {
+            const ihalf = identity_ps.prefix_mle_size / 2;
+            std.debug.print("[RAF_DEBUG R{}] identity prefix_mle[half={d}]={x}\n", .{
+                left_ps.round,
+                ihalf,
+                identity_ps.prefix_mle[ihalf].toBytesBE()[16..32].*,
+            });
+        }
 
         // Print prefix evals at b=0
         const l_pf_0 = left_ps.prefixEvals(0);

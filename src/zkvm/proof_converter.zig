@@ -4001,6 +4001,56 @@ pub fn ProofConverter(comptime F: type) type {
                 F.zero(),
             );
 
+            // Compute d values for one-hot decomposition (must match Jolt's OneHotParams::from_config)
+            const ram_log_k = std.math.log2_int(usize, ram_K);
+            const instruction_d: usize = (lookups_log_k + config.log_k_chunk - 1) / config.log_k_chunk;
+            const bytecode_d_val: usize = (bytecode_log_k + config.log_k_chunk - 1) / config.log_k_chunk;
+            const ram_d_val: usize = (ram_log_k + config.log_k_chunk - 1) / config.log_k_chunk;
+
+            // BytecodeReadRaf cache_openings: CommittedPolynomial::BytecodeRa(i) for i in 0..bytecode_d
+            for (0..bytecode_d_val) |i| {
+                try jolt_proof.opening_claims.insert(
+                    .{ .Committed = .{ .poly = .{ .BytecodeRa = i }, .sumcheck_id = .BytecodeReadRaf } },
+                    F.zero(),
+                );
+            }
+
+            // Booleanity cache_openings: all InstructionRa, BytecodeRa, RamRa
+            for (0..instruction_d) |i| {
+                try jolt_proof.opening_claims.insert(
+                    .{ .Committed = .{ .poly = .{ .InstructionRa = i }, .sumcheck_id = .Booleanity } },
+                    F.zero(),
+                );
+            }
+            for (0..bytecode_d_val) |i| {
+                try jolt_proof.opening_claims.insert(
+                    .{ .Committed = .{ .poly = .{ .BytecodeRa = i }, .sumcheck_id = .Booleanity } },
+                    F.zero(),
+                );
+            }
+            for (0..ram_d_val) |i| {
+                try jolt_proof.opening_claims.insert(
+                    .{ .Committed = .{ .poly = .{ .RamRa = i }, .sumcheck_id = .Booleanity } },
+                    F.zero(),
+                );
+            }
+
+            // RamRaVirtualization cache_openings: CommittedPolynomial::RamRa(i) for i in 0..ram_d
+            for (0..ram_d_val) |i| {
+                try jolt_proof.opening_claims.insert(
+                    .{ .Committed = .{ .poly = .{ .RamRa = i }, .sumcheck_id = .RamRaVirtualization } },
+                    F.zero(),
+                );
+            }
+
+            // InstructionRaVirtualization cache_openings: CommittedPolynomial::InstructionRa(i) for i in 0..instruction_d
+            for (0..instruction_d) |i| {
+                try jolt_proof.opening_claims.insert(
+                    .{ .Committed = .{ .poly = .{ .InstructionRa = i }, .sumcheck_id = .InstructionRaVirtualization } },
+                    F.zero(),
+                );
+            }
+
             // Stage 7: HammingWeightClaimReduction
             try self.generateZeroSumcheckProof(&jolt_proof.stage7_sumcheck_proof, config.log_k_chunk, 3);
             try jolt_proof.opening_claims.insert(
@@ -6057,8 +6107,9 @@ fn extractProductFactors(
 const tracer = @import("../tracer/mod.zig");
 
 pub const ConversionConfig = struct {
-    /// Bytecode address space size (K)
-    bytecode_K: usize = 1 << 16,
+    /// Bytecode address space size (K) - must match Jolt's BytecodePreprocessing.code_size
+    /// Use computeBytecodeCodeSize() in mod.zig to compute from raw program bytes
+    bytecode_K: usize = 2048,
     /// Log of chunk size for one-hot encoding (must be <= 8, Jolt uses 4 for small traces)
     log_k_chunk: usize = 4,
     /// Log of chunk size for lookups RA virtualization (LOG_K / 8 = 128 / 8 = 16 for small traces)

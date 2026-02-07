@@ -504,6 +504,11 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, trace_length_op
                     // Write MemoryLayout
                     try preprocessing.serializeMemoryLayout(&device.memory_layout, ram_writer);
 
+                    // Write bytecode code_size (u64) - this is bytecode_K for the proof
+                    // Must match what's used in ConversionConfig.bytecode_K
+                    try ram_writer.writeInt(u64, @intCast(bytecode_prep.code_size), .little);
+                    std.debug.print("  bytecode code_size (bytecode_K): {}\n", .{bytecode_prep.code_size});
+
                     // Write to file with .ram extension
                     const ram_path = try std.fmt.allocPrint(allocator, "{s}.ram", .{pp_path});
                     defer allocator.free(ram_path);

@@ -167,6 +167,39 @@ fn buildBytecodeWords(
     return .{ .words = words, .min_bytecode_address = min_bytecode_address };
 }
 
+/// Compute bytecode code_size from raw program bytes, matching Jolt's BytecodePreprocessing.
+/// Jolt decodes instructions (4 bytes each, or 2 for compressed RVC), prepends a NoOp,
+/// then pads to next power of 2 with minimum 2.
+/// This value is used as bytecode_K in the proof and must match Jolt's preprocessing.
+fn computeBytecodeCodeSize(program_bytecode: []const u8) usize {
+    // Count decoded instructions by iterating byte stream
+    var num_instructions: usize = 0;
+    var offset: usize = 0;
+    while (offset < program_bytecode.len) {
+        // Check if compressed (RVC): lowest 2 bits != 0b11
+        if (offset + 2 <= program_bytecode.len) {
+            const first_halfword = std.mem.readInt(u16, program_bytecode[offset..][0..2], .little);
+            const is_compressed = (first_halfword & 0x3) != 0x3;
+            if (is_compressed) {
+                offset += 2;
+            } else {
+                if (offset + 4 > program_bytecode.len) break;
+                offset += 4;
+            }
+            num_instructions += 1;
+        } else {
+            break;
+        }
+    }
+
+    // +1 for prepended NoOp (Jolt always prepends one)
+    const total = num_instructions + 1;
+
+    // Pad to next power of 2, minimum 2
+    if (total < 2) return 2;
+    return std.math.ceilPowerOfTwo(usize, total) catch total;
+}
+
 fn buildInitialRamMap(
     allocator: Allocator,
     program_bytecode: []const u8,
@@ -726,8 +759,12 @@ pub fn JoltProver(comptime F: type) type {
             // Get memory trace for RAF evaluation sumcheck
             const memory_trace_ptr1: *const ram.MemoryTrace = &emulator.ram.trace;
 
+            // Compute bytecode_K to match Jolt's BytecodePreprocessing.code_size
+            const bytecode_code_size = computeBytecodeCodeSize(program_bytecode);
+            std.debug.print("[ZOLT] bytecode_code_size (computed from decoded instructions): {}\n", .{bytecode_code_size});
+
             const convert_config = proof_converter.ConversionConfig{
-                .bytecode_K = 1 << 16,
+                .bytecode_K = bytecode_code_size,
                 // Must match Jolt's config.rs: log_k_chunk <= 8
                 .log_k_chunk = 4,
                 // Jolt uses LOG_K / 8 = 128 / 8 = 16 for small traces
@@ -1063,6 +1100,10 @@ pub fn JoltProver(comptime F: type) type {
             // Get memory trace for RAF evaluation sumcheck
             const memory_trace_ptr: *const ram.MemoryTrace = &emulator.ram.trace;
 
+            // Compute bytecode_K to match Jolt's BytecodePreprocessing.code_size
+            const bytecode_code_size_dory = computeBytecodeCodeSize(program_bytecode);
+            std.debug.print("[ZOLT] bytecode_code_size (Dory path): {}\n", .{bytecode_code_size_dory});
+
             // Convert to Jolt-compatible format with transcript integration
             result.proof = try converter.convertWithTranscript(
                 commitment_types.PolyCommitment,
@@ -1071,7 +1112,7 @@ pub fn JoltProver(comptime F: type) type {
                 commitments.items,
                 null,
                 proof_converter.ConversionConfig{
-                    .bytecode_K = 1 << 16,
+                    .bytecode_K = bytecode_code_size_dory,
                     .log_k_chunk = 4,
                     .lookups_ra_virtual_log_k_chunk = 16,
                     .memory_layout = &device.memory_layout, // Pass memory layout for OutputSumcheck
@@ -1285,6 +1326,9 @@ pub fn JoltProver(comptime F: type) type {
             // Get memory trace for RAF evaluation sumcheck
             const memory_trace_ptr2: *const ram.MemoryTrace = &emulator.ram.trace;
 
+            // Compute bytecode_K to match Jolt's BytecodePreprocessing.code_size
+            const bytecode_code_size_device = computeBytecodeCodeSize(program_bytecode);
+
             // Convert to Jolt-compatible format with transcript integration
             return converter.convertWithTranscript(
                 commitment_types.PolyCommitment,
@@ -1293,7 +1337,7 @@ pub fn JoltProver(comptime F: type) type {
                 commitments.items,
                 null,
                 proof_converter.ConversionConfig{
-                    .bytecode_K = 1 << 16,
+                    .bytecode_K = bytecode_code_size_device,
                     .log_k_chunk = 4,
                     .lookups_ra_virtual_log_k_chunk = 16,
                     .memory_layout = &device.memory_layout, // Pass memory layout for OutputSumcheck

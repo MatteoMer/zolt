@@ -490,6 +490,28 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, trace_length_op
 
                 std.debug.print("  Preprocessing exported successfully! ({} bytes)\n", .{buffer.items.len});
                 std.debug.print("  This file can be loaded by Jolt for cross-verification.\n", .{});
+
+                // Also write a simple RAM-only preprocessing file for easy loading
+                // Format: min_bytecode_address (u64) | bytecode_words_len (u64) | bytecode_words... | memory_layout fields
+                {
+                    var ram_buffer = std.ArrayListUnmanaged(u8){};
+                    defer ram_buffer.deinit(allocator);
+                    const ram_writer = ram_buffer.writer(allocator);
+
+                    // Write RAMPreprocessing
+                    try ram_prep.serialize(ram_writer);
+
+                    // Write MemoryLayout
+                    try preprocessing.serializeMemoryLayout(&device.memory_layout, ram_writer);
+
+                    // Write to file with .ram extension
+                    const ram_path = try std.fmt.allocPrint(allocator, "{s}.ram", .{pp_path});
+                    defer allocator.free(ram_path);
+                    const ram_file = try std.fs.cwd().createFile(ram_path, .{});
+                    defer ram_file.close();
+                    try ram_file.writeAll(ram_buffer.items);
+                    std.debug.print("  RAM preprocessing exported to: {s} ({} bytes)\n", .{ ram_path, ram_buffer.items.len });
+                }
             }
 
             const total_time = timer.read();

@@ -460,7 +460,7 @@ pub const JoltSharedPreprocessing = struct {
 };
 
 /// Serialize MemoryLayout to arkworks format
-fn serializeMemoryLayout(layout: *const MemoryLayout, writer: anytype) !void {
+pub fn serializeMemoryLayout(layout: *const MemoryLayout, writer: anytype) !void {
     try writer.writeInt(u64, layout.program_size, .little);
     try writer.writeInt(u64, layout.max_trusted_advice_size, .little);
     try writer.writeInt(u64, layout.trusted_advice_start, .little);

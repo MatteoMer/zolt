@@ -1277,6 +1277,60 @@ test "bn254 scalar power" {
     try std.testing.expect(pow1.eql(two));
 }
 
+test "mulHiBigIntU128 vs montgomeryMul equivalence" {
+    // Test that a.mulHiBigIntU128(b.limbs) == a.mul(b) when b has zero low limbs
+    // This is critical for sumcheck challenge evaluation
+    const F = BN254Scalar;
+
+    // Create a "challenge" with zero low limbs [0, 0, L, H]
+    const challenge = F{ .limbs = .{ 0, 0, 0x123456789abcdef0, 0x0fedcba987654321 } };
+
+    // Create various field elements to test with
+    const a1 = F.fromU64(42);
+    const a2 = F{ .limbs = .{ 0xdeadbeefcafebabe, 0x1234567890abcdef, 0xfedcba9876543210, 0x0111111111111111 } };
+    const a3 = F.one();
+
+    // Test 1: a1.mulHiBigIntU128(challenge.limbs) == a1.mul(challenge)
+    const result1a = a1.mulHiBigIntU128(challenge.limbs);
+    const result1b = a1.mul(challenge);
+    try std.testing.expect(result1a.eql(result1b));
+
+    // Test 2: a2.mulHiBigIntU128(challenge.limbs) == a2.mul(challenge)
+    const result2a = a2.mulHiBigIntU128(challenge.limbs);
+    const result2b = a2.mul(challenge);
+    try std.testing.expect(result2a.eql(result2b));
+
+    // Test 3: a3.mulHiBigIntU128(challenge.limbs) == a3.mul(challenge)
+    const result3a = a3.mulHiBigIntU128(challenge.limbs);
+    const result3b = a3.mul(challenge);
+    try std.testing.expect(result3a.eql(result3b));
+
+    // Test 4: challenge.mul(challenge) == challenge.mulHiBigIntU128(challenge.limbs)?
+    // This tests r^2 computation equivalence
+    const r2_full = challenge.mul(challenge);
+    const r2_hi = challenge.mulHiBigIntU128(challenge.limbs);
+    try std.testing.expect(r2_full.eql(r2_hi));
+
+    // Test 5: Now test the full eval_from_hint scenario:
+    // p(r) = c0 + c1*r + c2*r^2
+    // In Jolt: c1*r uses mulHiBigIntU128, c2*r^2 uses standard mul (running_point is F type)
+    // In Zolt: c1*r uses mulHiBigIntU128, c2*r^2 uses standard mul with r2=challenge.mul(challenge)
+    const c0 = F.fromU64(100);
+    const c1 = F.fromU64(200);
+    const c2 = F.fromU64(300);
+
+    // Jolt way: running_point = challenge_to_F, then running_point = running_point * challenge (mulHiBigIntU128)
+    const running_point = challenge; // (*x).into() just wraps limbs directly
+    const r2_jolt = running_point.mulHiBigIntU128(challenge.limbs);
+    const p_jolt = c0.add(c1.mulHiBigIntU128(challenge.limbs)).add(c2.mul(r2_jolt));
+
+    // Zolt way: r2 = challenge.mul(challenge), then c2.mul(r2)
+    const r2_zolt = challenge.mul(challenge);
+    const p_zolt = c0.add(c1.mulHiBigIntU128(challenge.limbs)).add(c2.mul(r2_zolt));
+
+    try std.testing.expect(p_jolt.eql(p_zolt));
+}
+
 test "bn254 scalar toBytes/fromBytes roundtrip" {
     // Test a small value
     const a = BN254Scalar.fromU64(12345678901234567890);

@@ -80,9 +80,22 @@ then run standard sumcheck to produce correct round polynomials.
 5. LookupsRaVirtual (degree 5) - similar structure
 6. BytecodeReadRaf (degree 3) - most complex
 
+## Fix Stage 6 Val Polynomial Mismatch
+
+### Problem
+Jolt's `Flags` trait implementations compute different circuit_flags/instruction_flags than Zolt's prover.
+- LUI: Jolt sets AddOperands=true, Zolt does NOT
+- JAL: Jolt sets AddOperands=true/WriteLookupOutputToRD=false, Zolt does opposite
+- SLLI: Jolt sets WriteLookupOutputToRD=true, Zolt sets all circuit_flags=false
+
+### Solution: Export per-bytecode-entry flags from Zolt preprocessing
+1. Zolt main.zig: Append flags after ELF bytes (21 bytes per entry)
+2. Jolt main.rs: Read flags
+3. Jolt read_raf_checking.rs: Add compute_val_polys_from_flags
+
 ## Test Commands
 ```bash
-zig build -Doptimize=ReleaseFast
+cd /home/vivado/projects/zolt && zig build -Doptimize=ReleaseFast
 ./zig-out/bin/zolt prove examples/fibonacci.elf --trace-length 64 -o /tmp/zolt_proof.bin --jolt-format --export-preprocessing /tmp/zolt_preprocessing.bin
 cd /home/vivado/projects/jolt && RAYON_NUM_THREADS=1 cargo run --release --features zolt-debug --manifest-path examples/fibonacci/Cargo.toml -- --verify-zolt-proof /tmp/zolt_proof.bin --zolt-preprocessing /tmp/zolt_preprocessing.bin.ram
 ```

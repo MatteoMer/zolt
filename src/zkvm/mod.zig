@@ -586,11 +586,16 @@ pub fn JoltProver(comptime F: type) type {
             const Blake2bTranscript = transcripts.Blake2bTranscript(F);
             var transcript = Blake2bTranscript.init("Jolt");
 
+            // Build BytecodePreprocessing for PC mapping (ELF address → bytecode index)
+            const preproc_compat = @import("preprocessing.zig");
+            var bytecode_prep_compat = try preproc_compat.BytecodePreprocessing.preprocess(self.allocator, program_bytecode, common.constants.RAM_START_ADDRESS);
+            defer bytecode_prep_compat.deinit();
+
             // Generate R1CS cycle witnesses from execution trace
             var constraint_gen = r1cs.R1CSConstraintGenerator(F).init(self.allocator);
             defer constraint_gen.deinit();
 
-            const cycle_witnesses = try constraint_gen.generateWitness(&emulator.trace);
+            const cycle_witnesses = try constraint_gen.generateWitnessWithPCMap(&emulator.trace, &bytecode_prep_compat.pc_map);
             defer self.allocator.free(cycle_witnesses);
 
             // Generate Zolt internal proof first
@@ -763,6 +768,11 @@ pub fn JoltProver(comptime F: type) type {
             const bytecode_code_size = computeBytecodeCodeSize(program_bytecode);
             std.debug.print("[ZOLT] bytecode_code_size (computed from decoded instructions): {}\n", .{bytecode_code_size});
 
+            // Build BytecodePreprocessing for PC mapping
+            const preproc = @import("preprocessing.zig");
+            var bytecode_prep_1 = try preproc.BytecodePreprocessing.preprocess(self.allocator, program_bytecode, common.constants.RAM_START_ADDRESS);
+            defer bytecode_prep_1.deinit();
+
             const convert_config = proof_converter.ConversionConfig{
                 .bytecode_K = bytecode_code_size,
                 // Must match Jolt's config.rs: log_k_chunk <= 8
@@ -782,6 +792,11 @@ pub fn JoltProver(comptime F: type) type {
                 // Bytecode preprocessing for init_eval computation (like Jolt's RAMPreprocessing)
                 .bytecode_words = if (bytecode_info.words.len > 0) bytecode_info.words else null,
                 .min_bytecode_address = bytecode_info.min_bytecode_address,
+                // PC mapper for Stage 6 BytecodeReadRaf
+                .bytecode_pc_map = &bytecode_prep_1.pc_map,
+                // Static ELF code bytes for Stage 6 bytecode entry population
+                .program_code_bytes = program_bytecode,
+                .code_base_address = common.constants.RAM_START_ADDRESS,
             };
 
             // Convert to Jolt-compatible format with transcript integration
@@ -873,11 +888,17 @@ pub fn JoltProver(comptime F: type) type {
             const Blake2bTranscript = transcripts.Blake2bTranscript(F);
             var transcript = Blake2bTranscript.init("Jolt");
 
+            // Build BytecodePreprocessing for PC mapping (ELF address → bytecode index)
+            // Needed for R1CS witness generation: PC must be bytecode index, not ELF address
+            const preproc_for_witness = @import("preprocessing.zig");
+            var bytecode_prep_witness = try preproc_for_witness.BytecodePreprocessing.preprocess(self.allocator, program_bytecode, base_address);
+            defer bytecode_prep_witness.deinit();
+
             // Generate R1CS cycle witnesses from execution trace
             var constraint_gen = r1cs.R1CSConstraintGenerator(F).init(self.allocator);
             defer constraint_gen.deinit();
 
-            const cycle_witnesses = try constraint_gen.generateWitness(&emulator.trace);
+            const cycle_witnesses = try constraint_gen.generateWitnessWithPCMap(&emulator.trace, &bytecode_prep_witness.pc_map);
             defer self.allocator.free(cycle_witnesses);
 
             // Generate Zolt internal proof first
@@ -1045,11 +1066,15 @@ pub fn JoltProver(comptime F: type) type {
             }
 
             // BytecodeRa[0..bytecode_d-1]: bytecode read address chunks
+            // Build BytecodePreprocessing for PC mapping (ELF address → bytecode index)
+            var bytecode_prep_for_ra = try preprocessing.BytecodePreprocessing.preprocess(self.allocator, program_bytecode, base_address);
+            defer bytecode_prep_for_ra.deinit();
+
             idx = 0;
             while (idx < bytecode_d) : (idx += 1) {
                 // Compute shift for this chunk: log_k_chunk * (bytecode_d - 1 - idx)
                 const shift = log_k_chunk * (bytecode_d - 1 - idx);
-                const bytecode_ra_poly = try self.buildBytecodeRaPolynomial(&emulator.trace, bytecode_poly_size, log_k_chunk, shift);
+                const bytecode_ra_poly = try self.buildBytecodeRaPolynomial(&emulator.trace, bytecode_poly_size, log_k_chunk, shift, &bytecode_prep_for_ra.pc_map);
                 defer self.allocator.free(bytecode_ra_poly);
                 try all_commitments.append(self.allocator, DoryScheme.commit(&dory_srs, bytecode_ra_poly));
             }
@@ -1104,6 +1129,11 @@ pub fn JoltProver(comptime F: type) type {
             const bytecode_code_size_dory = computeBytecodeCodeSize(program_bytecode);
             std.debug.print("[ZOLT] bytecode_code_size (Dory path): {}\n", .{bytecode_code_size_dory});
 
+            // Build BytecodePreprocessing for PC mapping (ELF address → bytecode index)
+            const preproc = @import("preprocessing.zig");
+            var bytecode_prep_dory = try preproc.BytecodePreprocessing.preprocess(self.allocator, program_bytecode, base_address);
+            defer bytecode_prep_dory.deinit();
+
             // Convert to Jolt-compatible format with transcript integration
             result.proof = try converter.convertWithTranscript(
                 commitment_types.PolyCommitment,
@@ -1127,6 +1157,11 @@ pub fn JoltProver(comptime F: type) type {
                     // Bytecode preprocessing for init_eval computation (like Jolt's RAMPreprocessing)
                     .bytecode_words = if (bytecode_info_dory.words.len > 0) bytecode_info_dory.words else null,
                     .min_bytecode_address = bytecode_info_dory.min_bytecode_address,
+                    // PC mapper for Stage 6 BytecodeReadRaf
+                    .bytecode_pc_map = &bytecode_prep_dory.pc_map,
+                    // Static ELF code bytes for Stage 6 bytecode entry population
+                    .program_code_bytes = program_bytecode,
+                    .code_base_address = common.constants.RAM_START_ADDRESS,
                 },
                 cycle_witnesses,
                 tau,
@@ -1169,11 +1204,16 @@ pub fn JoltProver(comptime F: type) type {
             const Blake2bTranscript = transcripts.Blake2bTranscript(F);
             var transcript = Blake2bTranscript.init("Jolt");
 
+            // Build BytecodePreprocessing for PC mapping (ELF address → bytecode index)
+            const preproc_dev = @import("preprocessing.zig");
+            var bytecode_prep_dev = try preproc_dev.BytecodePreprocessing.preprocess(self.allocator, program_bytecode, common.constants.RAM_START_ADDRESS);
+            defer bytecode_prep_dev.deinit();
+
             // Generate R1CS cycle witnesses from execution trace
             var constraint_gen = r1cs.R1CSConstraintGenerator(F).init(self.allocator);
             defer constraint_gen.deinit();
 
-            const cycle_witnesses = try constraint_gen.generateWitness(&emulator.trace);
+            const cycle_witnesses = try constraint_gen.generateWitnessWithPCMap(&emulator.trace, &bytecode_prep_dev.pc_map);
             defer self.allocator.free(cycle_witnesses);
 
             // Generate Zolt internal proof first
@@ -1329,6 +1369,11 @@ pub fn JoltProver(comptime F: type) type {
             // Compute bytecode_K to match Jolt's BytecodePreprocessing.code_size
             const bytecode_code_size_device = computeBytecodeCodeSize(program_bytecode);
 
+            // Build BytecodePreprocessing for PC mapping
+            const preproc = @import("preprocessing.zig");
+            var bytecode_prep_device = try preproc.BytecodePreprocessing.preprocess(self.allocator, program_bytecode, common.constants.RAM_START_ADDRESS);
+            defer bytecode_prep_device.deinit();
+
             // Convert to Jolt-compatible format with transcript integration
             return converter.convertWithTranscript(
                 commitment_types.PolyCommitment,
@@ -1345,6 +1390,10 @@ pub fn JoltProver(comptime F: type) type {
                     .final_ram = final_ram_device,
                     .memory_trace = memory_trace_ptr2, // Pass memory trace for RAF sumcheck
                     .execution_trace = &emulator.trace,
+                    .bytecode_pc_map = &bytecode_prep_device.pc_map,
+                    // Static ELF code bytes for Stage 6 bytecode entry population
+                    .program_code_bytes = program_bytecode,
+                    .code_base_address = common.constants.RAM_START_ADDRESS,
                 },
                 cycle_witnesses,
                 tau,
@@ -1914,6 +1963,7 @@ pub fn JoltProver(comptime F: type) type {
             poly_size: usize,
             log_k_chunk: usize,
             shift: usize,
+            pc_map: *const preprocessing.BytecodePCMapper,
         ) ![]F {
             const poly = try self.allocator.alloc(F, poly_size);
             errdefer self.allocator.free(poly);
@@ -1922,11 +1972,13 @@ pub fn JoltProver(comptime F: type) type {
             const k_chunk: u64 = @as(u64, 1) << @intCast(log_k_chunk);
             const mask: u64 = k_chunk - 1;
 
-            // Extract chunks from PCs
+            // Extract chunks from bytecode indices (NOT raw ELF addresses)
             for (trace.steps.items, 0..) |step, i| {
                 if (i >= poly_size) break;
 
-                const chunk: u64 = (step.pc >> @intCast(shift)) & mask;
+                // Convert ELF address to bytecode array index
+                const bc_idx: u64 = if (step.is_noop) 0 else @intCast(pc_map.getPC(step.pc, 0));
+                const chunk: u64 = (bc_idx >> @intCast(shift)) & mask;
                 poly[i] = F.fromU64(chunk);
             }
 

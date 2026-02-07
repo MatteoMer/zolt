@@ -26,6 +26,442 @@ const tracer = @import("../../tracer/mod.zig");
 const ExecutionTrace = tracer.ExecutionTrace;
 const ram = @import("../ram/mod.zig");
 const jolt_device = @import("../jolt_device.zig");
+const instruction_mod = @import("../instruction/mod.zig");
+const CircuitFlags = instruction_mod.CircuitFlags;
+const InstructionFlags = instruction_mod.InstructionFlags;
+const preprocessing = @import("../preprocessing.zig");
+const BytecodePCMapper = preprocessing.BytecodePCMapper;
+
+/// Bytecode entry properties needed for BytecodeReadRaf Val polynomial computation.
+/// One entry per bytecode address k. Indexed by the expanded PC (bytecode array index).
+pub const BytecodeEntry = struct {
+    /// ELF address of this instruction (unexpanded_pc)
+    address: u64,
+    /// Immediate value (field element representation)
+    imm: i64,
+    /// Register indices (5-bit)
+    rd: u8,
+    rs1: u8,
+    rs2: u8,
+    /// Circuit flags (13 flags, matches CircuitFlags enum)
+    circuit_flags: [13]bool,
+    /// Instruction flags (7 flags, matches InstructionFlags enum)
+    instruction_flags: [7]bool,
+    /// Lookup table index (0..41, or 255 for no lookup table)
+    lookup_table_index: u8,
+    /// Whether operands are interleaved (not combined arithmetically)
+    is_interleaved: bool,
+    /// Virtual sequence remaining count
+    virtual_sequence_remaining: ?u16,
+    /// Whether this is the first in a virtual sequence
+    is_first_in_sequence: bool,
+};
+
+/// Populate a BytecodeEntry from a raw 32-bit instruction word and ELF address.
+/// This sets all static properties (flags, registers, immediates, lookup table)
+/// from the instruction encoding alone, without any trace-specific data.
+fn populateEntryFromInstruction(entry: *BytecodeEntry, instr: u32, elf_address: u64) void {
+    const decoded = instruction_mod.DecodedInstruction.decode(instr);
+
+    entry.address = elf_address;
+    entry.rd = decoded.rd;
+    entry.rs1 = decoded.rs1;
+    entry.rs2 = decoded.rs2;
+    entry.imm = @intCast(decoded.imm);
+
+    const opcode: u8 = @truncate(instr & 0x7F);
+    const funct3: u3 = @truncate((instr >> 12) & 0x7);
+    const funct7: u7 = @truncate(instr >> 25);
+
+    // Circuit flags
+    var cf = &entry.circuit_flags;
+
+    // Load/Store
+    if (opcode == 0x03) cf[@intFromEnum(CircuitFlags.Load)] = true;
+    if (opcode == 0x23) cf[@intFromEnum(CircuitFlags.Store)] = true;
+
+    // Jump
+    if (opcode == 0x6F or opcode == 0x67) cf[@intFromEnum(CircuitFlags.Jump)] = true;
+
+    // WriteLookupOutputToRD
+    const has_lookup = hasLookupTable(opcode, funct3, funct7);
+    if (has_lookup) {
+        if (opcode != 0x63) { // Not BRANCH
+            cf[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)] = true;
+        }
+    }
+
+    // AddOperands, SubtractOperands, MultiplyOperands
+    if (has_lookup) {
+        switch (opcode) {
+            0x33 => { // R-type
+                if (funct3 == 0 and funct7 == 0) cf[@intFromEnum(CircuitFlags.AddOperands)] = true; // ADD
+                if (funct3 == 0 and funct7 == 0x20) cf[@intFromEnum(CircuitFlags.SubtractOperands)] = true; // SUB
+                if (funct7 == 0x01 and funct3 == 0) cf[@intFromEnum(CircuitFlags.MultiplyOperands)] = true; // MUL
+                if (funct7 == 0x01 and funct3 == 3) cf[@intFromEnum(CircuitFlags.MultiplyOperands)] = true; // MULHU
+            },
+            0x13 => { // I-type
+                if (funct3 == 0) cf[@intFromEnum(CircuitFlags.AddOperands)] = true; // ADDI
+            },
+            0x67 => { // JALR
+                cf[@intFromEnum(CircuitFlags.AddOperands)] = true;
+            },
+            0x1b => { // OP-IMM-32
+                if (funct3 == 0) cf[@intFromEnum(CircuitFlags.AddOperands)] = true; // ADDIW
+            },
+            0x3b => { // OP-32
+                if (funct3 == 0 and funct7 == 0) cf[@intFromEnum(CircuitFlags.AddOperands)] = true; // ADDW
+                if (funct3 == 0 and funct7 == 0x20) cf[@intFromEnum(CircuitFlags.SubtractOperands)] = true; // SUBW
+            },
+            else => {},
+        }
+    }
+
+    // Instruction flags
+    var inf = &entry.instruction_flags;
+
+    // LeftOperandIsPC
+    if (has_lookup and (opcode == 0x17 or opcode == 0x6F)) {
+        inf[@intFromEnum(InstructionFlags.LeftOperandIsPC)] = true;
+    }
+
+    // LeftOperandIsRs1Value
+    if (has_lookup) {
+        switch (opcode) {
+            0x33, 0x13, 0x67, 0x63, 0x1B, 0x3B => {
+                inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+            },
+            else => {},
+        }
+    }
+
+    // RightOperandIsImm
+    if (has_lookup) {
+        switch (opcode) {
+            0x13, 0x67, 0x37, 0x17, 0x6F, 0x1B => {
+                inf[@intFromEnum(InstructionFlags.RightOperandIsImm)] = true;
+            },
+            else => {},
+        }
+    }
+
+    // RightOperandIsRs2Value
+    if (has_lookup) {
+        switch (opcode) {
+            0x33, 0x63, 0x3B => {
+                inf[@intFromEnum(InstructionFlags.RightOperandIsRs2Value)] = true;
+            },
+            else => {},
+        }
+    }
+
+    // Branch
+    if (opcode == 0x63) {
+        inf[@intFromEnum(InstructionFlags.Branch)] = true;
+    }
+
+    // IsRdNotZero
+    if (decoded.rd != 0 and opcode != 0x23 and opcode != 0x63) {
+        inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
+    }
+
+    // Lookup table index and interleaving
+    entry.lookup_table_index = getLookupTableIndex(opcode, funct3, funct7);
+    entry.is_interleaved = !cf[@intFromEnum(CircuitFlags.AddOperands)] and
+        !cf[@intFromEnum(CircuitFlags.SubtractOperands)] and
+        !cf[@intFromEnum(CircuitFlags.MultiplyOperands)] and
+        !cf[@intFromEnum(CircuitFlags.Advice)];
+}
+
+/// Build bytecode entry table from static ELF bytecode + execution trace overlay.
+///
+/// Phase 1: Populate ALL entries from the static ELF code bytes. This ensures
+/// every instruction in the program (including unexecuted ones) has correct
+/// properties, matching what the Jolt verifier computes from its bytecode array.
+///
+/// Phase 2: Overlay trace-specific properties (termination stores) from the
+/// execution trace. Termination stores at k=0 accumulate flags from multiple
+/// virtual instructions (LUI + ADDI + SB) that overwrite the same entry.
+///
+/// pc_map converts ELF addresses to bytecode array indices.
+pub fn buildBytecodeEntries(
+    allocator: Allocator,
+    trace: *const tracer.ExecutionTrace,
+    bytecode_K: usize,
+    pc_map: *const BytecodePCMapper,
+    program_code_bytes: ?[]const u8,
+    code_base_address: u64,
+) ![]BytecodeEntry {
+    const entries = try allocator.alloc(BytecodeEntry, bytecode_K);
+
+    // Initialize all entries as NoOps (zeros)
+    for (0..bytecode_K) |k| {
+        entries[k] = BytecodeEntry{
+            .address = 0,
+            .imm = 0,
+            .rd = 0,
+            .rs1 = 0,
+            .rs2 = 0,
+            .circuit_flags = [_]bool{false} ** 13,
+            .instruction_flags = [_]bool{false} ** 7,
+            .lookup_table_index = 255,
+            .is_interleaved = false,
+            .virtual_sequence_remaining = null,
+            .is_first_in_sequence = false,
+        };
+    }
+
+    // ================================================================
+    // Phase 1: Populate from static ELF code bytes
+    // ================================================================
+    // This fills in ALL instructions from the program, including those
+    // that are never executed in a particular trace. The bytecode array
+    // is: [NoOp at k=0] [instruction at addr0] [instruction at addr1] ...
+    // Index 0 is always the NoOp/padding entry.
+    if (program_code_bytes) |code_bytes| {
+        var offset: usize = 0;
+        while (offset < code_bytes.len) {
+            const addr = code_base_address + offset;
+
+            // Check if compressed (RVC)
+            if (offset + 2 > code_bytes.len) break;
+            const first_halfword: u16 = std.mem.readInt(u16, code_bytes[offset..][0..2], .little);
+            const is_compressed = (first_halfword & 0x3) != 0x3;
+
+            var instr_word: u32 = undefined;
+            var instr_size: usize = undefined;
+
+            if (is_compressed) {
+                // 16-bit compressed instruction - expand it
+                instr_word = instruction_mod.uncompressInstruction(@as(u32, first_halfword), .Bit64);
+                instr_size = 2;
+            } else {
+                // 32-bit instruction
+                if (offset + 4 > code_bytes.len) break;
+                instr_word = std.mem.readInt(u32, code_bytes[offset..][0..4], .little);
+                instr_size = 4;
+            }
+
+            // Map ELF address to bytecode array index
+            const k = pc_map.getPC(addr, 0);
+            if (k > 0 and k < bytecode_K) {
+                populateEntryFromInstruction(&entries[k], instr_word, addr);
+
+                // Mark compressed instructions
+                if (is_compressed) {
+                    entries[k].circuit_flags[@intFromEnum(CircuitFlags.IsCompressed)] = true;
+                }
+            }
+
+            offset += instr_size;
+        }
+    }
+
+    // ================================================================
+    // Phase 2: Overlay trace-specific properties (termination stores)
+    // ================================================================
+    // Termination stores are virtual instructions that write the final
+    // output to memory. They overwrite k=0 and accumulate flags across
+    // multiple instructions (LUI + ADDI + SB). This matches Jolt's
+    // behavior where the termination sequence overwrites the bytecode
+    // entry at index 0.
+    for (trace.steps.items) |step| {
+        if (step.is_noop) continue;
+        if (!step.is_termination_store) continue;
+
+        // Termination stores all map to k=0 (pc=0)
+        const k = pc_map.getPC(step.pc, 0);
+        if (k >= bytecode_K) continue;
+
+        const instr = step.instruction;
+        const decoded = instruction_mod.DecodedInstruction.decode(instr);
+
+        const opcode: u8 = @truncate(instr & 0x7F);
+        const funct3: u3 = @truncate((instr >> 12) & 0x7);
+        const funct7: u7 = @truncate(instr >> 25);
+        const has_lookup = hasLookupTable(opcode, funct3, funct7);
+
+        // Overwrite basic fields (last writer wins for registers/address/imm)
+        entries[k].address = step.unexpanded_pc;
+        entries[k].rd = decoded.rd;
+        entries[k].rs1 = decoded.rs1;
+        entries[k].rs2 = decoded.rs2;
+        entries[k].imm = @intCast(decoded.imm);
+
+        // ACCUMULATE circuit flags (never clear - flags OR together across overwrites)
+        var cf = &entries[k].circuit_flags;
+        if (opcode == 0x03) cf[@intFromEnum(CircuitFlags.Load)] = true;
+        if (opcode == 0x23) cf[@intFromEnum(CircuitFlags.Store)] = true;
+        if (opcode == 0x6F or opcode == 0x67) cf[@intFromEnum(CircuitFlags.Jump)] = true;
+        if (has_lookup and opcode != 0x63) {
+            cf[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)] = true;
+        }
+        if (has_lookup) {
+            switch (opcode) {
+                0x33 => {
+                    if (funct3 == 0 and funct7 == 0) cf[@intFromEnum(CircuitFlags.AddOperands)] = true;
+                    if (funct3 == 0 and funct7 == 0x20) cf[@intFromEnum(CircuitFlags.SubtractOperands)] = true;
+                    if (funct7 == 0x01 and funct3 == 0) cf[@intFromEnum(CircuitFlags.MultiplyOperands)] = true;
+                    if (funct7 == 0x01 and funct3 == 3) cf[@intFromEnum(CircuitFlags.MultiplyOperands)] = true;
+                },
+                0x13 => {
+                    if (funct3 == 0) cf[@intFromEnum(CircuitFlags.AddOperands)] = true;
+                },
+                0x67 => {
+                    cf[@intFromEnum(CircuitFlags.AddOperands)] = true;
+                },
+                0x1b => {
+                    if (funct3 == 0) cf[@intFromEnum(CircuitFlags.AddOperands)] = true;
+                },
+                0x3b => {
+                    if (funct3 == 0 and funct7 == 0) cf[@intFromEnum(CircuitFlags.AddOperands)] = true;
+                    if (funct3 == 0 and funct7 == 0x20) cf[@intFromEnum(CircuitFlags.SubtractOperands)] = true;
+                },
+                else => {},
+            }
+        }
+        // Termination stores always set these
+        cf[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+        cf[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+
+        // ACCUMULATE instruction flags
+        var inf = &entries[k].instruction_flags;
+        if (has_lookup and (opcode == 0x17 or opcode == 0x6F)) {
+            inf[@intFromEnum(InstructionFlags.LeftOperandIsPC)] = true;
+        }
+        if (has_lookup) {
+            switch (opcode) {
+                0x33, 0x13, 0x67, 0x63, 0x1B, 0x3B => {
+                    inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+                },
+                else => {},
+            }
+        }
+        if (has_lookup) {
+            switch (opcode) {
+                0x13, 0x67, 0x37, 0x17, 0x6F, 0x1B => {
+                    inf[@intFromEnum(InstructionFlags.RightOperandIsImm)] = true;
+                },
+                else => {},
+            }
+        }
+        if (has_lookup) {
+            switch (opcode) {
+                0x33, 0x63, 0x3B => {
+                    inf[@intFromEnum(InstructionFlags.RightOperandIsRs2Value)] = true;
+                },
+                else => {},
+            }
+        }
+        if (opcode == 0x63) {
+            inf[@intFromEnum(InstructionFlags.Branch)] = true;
+        }
+        if (decoded.rd != 0 and opcode != 0x23 and opcode != 0x63) {
+            inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
+        }
+
+        // Update lookup/interleaving based on accumulated flags
+        const lt_idx = getLookupTableIndex(opcode, funct3, funct7);
+        if (lt_idx != 255) {
+            entries[k].lookup_table_index = lt_idx;
+        }
+        entries[k].is_interleaved = !cf[@intFromEnum(CircuitFlags.AddOperands)] and
+            !cf[@intFromEnum(CircuitFlags.SubtractOperands)] and
+            !cf[@intFromEnum(CircuitFlags.MultiplyOperands)] and
+            !cf[@intFromEnum(CircuitFlags.Advice)];
+    }
+
+    // Debug: dump first entries
+    std.debug.print("\n[ZOLT BYTECODE ENTRIES] bytecode_K={}\n", .{bytecode_K});
+    for (0..@min(bytecode_K, 28)) |k| {
+        const e = entries[k];
+        // Compute a compact representation: cf_bits, if_bits
+        var cf_bits: u16 = 0;
+        for (0..13) |i| {
+            if (e.circuit_flags[i]) cf_bits |= @as(u16, 1) << @intCast(i);
+        }
+        var if_bits: u8 = 0;
+        for (0..7) |i| {
+            if (e.instruction_flags[i]) if_bits |= @as(u8, 1) << @intCast(i);
+        }
+        std.debug.print("  entry[{d:2}]: addr=0x{x:0>8} rd={d:2} rs1={d:2} rs2={d:2} imm={d:6} cf=0x{x:04} if=0x{x:02} lt={d:3} interl={}\n", .{
+            k, e.address, e.rd, e.rs1, e.rs2, e.imm, cf_bits, if_bits, e.lookup_table_index, @intFromBool(e.is_interleaved),
+        });
+    }
+    std.debug.print("\n", .{});
+
+    return entries;
+}
+
+/// Map a RISC-V instruction to its lookup table index (0..40).
+/// Returns 255 if no lookup table is used.
+/// Must match Jolt's LookupTables enum discriminant ordering:
+///   0=RangeCheck, 1=RangeCheckAligned, 2=And, 3=Andn, 4=Or, 5=Xor,
+///   6=Equal, 7=SignedGTE, 8=UnsignedGTE, 9=NotEqual, 10=SignedLT,
+///   11=UnsignedLT, 12=Movsign, 13=UpperWord, 14=UnsignedLTE,
+///   15=ValidSignedRemainder, 16=ValidUnsignedRemainder, 17=ValidDiv0,
+///   18=HalfwordAlignment, 19=WordAlignment, 20=LowerHalfWord,
+///   21=SignExtendHalfWord, 22=Pow2, 23=Pow2W, 24=ShiftRightBitmask,
+///   25=VirtualRev8W, 26=VirtualSRL, 27=VirtualSRA, 28=VirtualROTR,
+///   29=VirtualROTRW, 30=VirtualChangeDivisor, 31=VirtualChangeDivisorW,
+///   32=MulUNoOverflow, 33-40=VirtualXORROT variants
+fn getLookupTableIndex(opcode: u8, funct3: u3, funct7: u7) u8 {
+    return switch (opcode) {
+        0x33 => switch (funct3) { // R-type
+            0 => if (funct7 == 0) @as(u8, 0) // ADD → RangeCheck
+            else if (funct7 == 0x20) 0 // SUB → RangeCheck
+            else if (funct7 == 0x01) 0 // MUL → RangeCheck
+            else 255,
+            7 => if (funct7 == 0) @as(u8, 2) // AND → And
+            else if (funct7 == 0x01) 13 // MULHU → UpperWord
+            else 255,
+            6 => if (funct7 == 0) @as(u8, 4) // OR → Or
+            else 255,
+            4 => if (funct7 == 0) @as(u8, 5) // XOR → Xor
+            else 255,
+            1 => 255, // SLL - decomposed to virtual instructions
+            5 => 255, // SRL/SRA - decomposed to virtual instructions
+            2 => 10, // SLT → SignedLessThan
+            3 => 11, // SLTU → UnsignedLessThan
+        },
+        0x13 => switch (funct3) { // I-type ALU
+            0 => 0, // ADDI → RangeCheck
+            7 => 2, // ANDI → And
+            6 => 4, // ORI → Or
+            4 => 5, // XORI → Xor
+            1 => 255, // SLLI - decomposed to virtual instructions
+            5 => 255, // SRLI/SRAI - decomposed to virtual instructions
+            2 => 10, // SLTI → SignedLessThan
+            3 => 11, // SLTIU → UnsignedLessThan
+        },
+        0x63 => switch (funct3) { // Branches
+            0 => 6, // BEQ → Equal
+            1 => 9, // BNE → NotEqual
+            4 => 10, // BLT → SignedLessThan
+            5 => 7, // BGE → SignedGreaterThanEqual
+            6 => 11, // BLTU → UnsignedLessThan
+            7 => 8, // BGEU → UnsignedGreaterThanEqual
+            2, 3 => 255, // unused branch funct3 values
+        },
+        0x37 => 0, // LUI → RangeCheck
+        0x17 => 0, // AUIPC → RangeCheck
+        0x6F => 0, // JAL → RangeCheck
+        0x67 => 1, // JALR → RangeCheckAligned
+        0x1b => if (funct3 == 0) @as(u8, 0) else 255, // ADDIW → RangeCheck
+        0x3b => switch (funct3) { // OP-32
+            0 => if (funct7 == 0) @as(u8, 0) // ADDW → RangeCheck
+            else if (funct7 == 0x20) 0 // SUBW → RangeCheck
+            else 255,
+            else => 255,
+        },
+        else => 255, // Load, Store, ECALL, FENCE - no lookup table
+    };
+}
+
+/// Check if an instruction has a lookup table assignment
+fn hasLookupTable(opcode: u8, funct3: u3, funct7: u7) bool {
+    return getLookupTableIndex(opcode, funct3, funct7) != 255;
+}
 
 /// Result of Stage 6 sumcheck
 pub fn Stage6Result(comptime F: type) type {
@@ -663,6 +1099,7 @@ fn BytecodeReadRafProver(comptime F: type) type {
 
         /// Data needed for phase transition
         trace: *const ExecutionTrace,
+        pc_map: *const BytecodePCMapper,
         stage_r_cycles: [5][]const F,
         gamma_powers: [7]F,
         /// Val polynomials per stage: val_polys[s][k]
@@ -675,6 +1112,7 @@ fn BytecodeReadRafProver(comptime F: type) type {
         pub fn init(
             allocator: Allocator,
             trace: *const ExecutionTrace,
+            pc_map: *const BytecodePCMapper,
             val_polys: [5][]F, // Val_s(k) for each stage, length bytecode_K each
             bytecode_log_k: usize,
             n_cycle_vars: usize,
@@ -702,7 +1140,8 @@ fn BytecodeReadRafProver(comptime F: type) type {
 
                 for (0..T) |c| {
                     const step = trace.steps.items[c];
-                    const pc = step.pc;
+                    // Convert ELF address to bytecode array index
+                    const pc = if (step.is_noop) @as(usize, 0) else pc_map.getPC(step.pc, 0);
                     if (pc < bytecode_K) {
                         F_s[pc] = F_s[pc].add(eq_table[c]);
                     }
@@ -713,14 +1152,76 @@ fn BytecodeReadRafProver(comptime F: type) type {
 
                     var val_plus_raf = if (val_polys[s].len > k) val_polys[s][k] else F.zero();
 
-                    // RAF terms: Stage 0 gets gamma^5 * Identity(k), Stage 2 gets gamma^6 * Identity(k)
+                    // RAF terms: total coefficient for Stage 0 RAF = gamma^5, for Stage 2 RAF = gamma^6
+                    // Since we multiply by gamma_powers[s] at the outer level:
+                    //   Stage 0: gamma^0 * (gamma^5 * Int) = gamma^5 * Int => use gamma_powers[5]
+                    //   Stage 2: gamma^2 * (gamma^4 * Int) = gamma^6 * Int => use gamma_powers[4]
                     if (s == 0) {
                         val_plus_raf = val_plus_raf.add(gamma_powers[5].mul(int_poly[k]));
                     } else if (s == 2) {
-                        val_plus_raf = val_plus_raf.add(gamma_powers[6].mul(int_poly[k]));
+                        val_plus_raf = val_plus_raf.add(gamma_powers[4].mul(int_poly[k]));
                     }
 
                     combined_arr[k] = combined_arr[k].add(gamma_powers[s].mul(val_plus_raf).mul(F_s[k]));
+                }
+            }
+
+            // Debug: print per-stage contribution to combined array
+            {
+                var total_sum = F.zero();
+                for (0..bytecode_K) |k| {
+                    total_sum = total_sum.add(combined_arr[k]);
+                }
+                std.debug.print("[BCRAF] Sum_k combined[k] = {any}\n", .{total_sum.toBytesBE()[0..8]});
+            }
+
+            // Recompute per-stage to see contributions
+            for (0..5) |s| {
+                const dbg_eq_table = try computeEqTable(F, allocator, stage_r_cycles[s], n_cycle_vars);
+                defer allocator.free(dbg_eq_table);
+
+                var rv_s = F.zero(); // Sum_c Val_s(PC(c)) * eq(r_s, c)
+                var raf_s = F.zero(); // Sum_c Int(PC(c)) * eq(r_s, c)
+                for (0..T) |c| {
+                    const step = trace.steps.items[c];
+                    // Convert ELF address to bytecode array index
+                    const pc = if (step.is_noop) @as(usize, 0) else pc_map.getPC(step.pc, 0);
+                    if (pc < bytecode_K) {
+                        const v = if (val_polys[s].len > pc) val_polys[s][pc] else F.zero();
+                        rv_s = rv_s.add(v.mul(dbg_eq_table[c]));
+                        raf_s = raf_s.add(int_poly[pc].mul(dbg_eq_table[c]));
+                    }
+                }
+                std.debug.print("[BCRAF] Stage {} rv={any} raf={any}\n", .{
+                    s, rv_s.toBytesBE()[0..8], raf_s.toBytesBE()[0..8],
+                });
+                // Print non-noop cycles count and sum of eq values for stage 0
+                if (s == 0) {
+                    var noop_count: usize = 0;
+                    var real_count: usize = 0;
+                    var eq_sum = F.zero();
+                    for (0..T) |c| {
+                        const step = trace.steps.items[c];
+                        if (step.is_noop) {
+                            noop_count += 1;
+                        } else {
+                            real_count += 1;
+                            eq_sum = eq_sum.add(dbg_eq_table[c]);
+                        }
+                    }
+                    std.debug.print("[BCRAF] Real cycles: {}, Noop cycles: {}, eq_sum_real={any}\n", .{
+                        real_count, noop_count, eq_sum.toBytesBE()[0..8],
+                    });
+                    // Print first few trace entries with pc_map conversion
+                    for (0..@min(5, T)) |c| {
+                        const step = trace.steps.items[c];
+                        const bc_idx = if (step.is_noop) @as(usize, 0) else pc_map.getPC(step.pc, 0);
+                        std.debug.print("[BCRAF] cycle {} elf_pc=0x{x} bc_idx={} noop={} instr=0x{x:0>8}\n", .{ c, step.pc, bc_idx, step.is_noop, step.instruction });
+                    }
+                    // Check int_poly values
+                    for (0..@min(8, bytecode_K)) |k| {
+                        std.debug.print("[BCRAF] int_poly[{}] = {any}\n", .{ k, int_poly[k].toBytesBE()[0..8] });
+                    }
                 }
             }
 
@@ -736,6 +1237,7 @@ fn BytecodeReadRafProver(comptime F: type) type {
                 .current_len = bytecode_K,
                 .addr_rounds_done = 0,
                 .trace = trace,
+                .pc_map = pc_map,
                 .stage_r_cycles = stage_r_cycles,
                 .gamma_powers = gamma_powers,
                 .val_polys = val_polys,
@@ -811,21 +1313,20 @@ fn BytecodeReadRafProver(comptime F: type) type {
                     val_eval = val_eval.add(self.val_polys[s][k].mul(eq_addr[k]));
                 }
 
-                // Add RAF terms
+                // Add RAF terms (inner powers, multiplied by gamma_powers[s] at outer level)
+                // Total RAF coeff: Stage 0 = gamma^5 (inner=5), Stage 2 = gamma^6 (inner=4, outer=2)
                 if (s == 0) {
-                    // Stage 0 RAF: gamma^5 * Identity(r_address)
                     var identity_eval = F.zero();
                     for (0..bytecode_K) |k| {
                         identity_eval = identity_eval.add(self.int_poly[k].mul(eq_addr[k]));
                     }
                     val_eval = val_eval.add(self.gamma_powers[5].mul(identity_eval));
                 } else if (s == 2) {
-                    // Stage 2 RAF: gamma^6 * Identity(r_address)
                     var identity_eval = F.zero();
                     for (0..bytecode_K) |k| {
                         identity_eval = identity_eval.add(self.int_poly[k].mul(eq_addr[k]));
                     }
-                    val_eval = val_eval.add(self.gamma_powers[6].mul(identity_eval));
+                    val_eval = val_eval.add(self.gamma_powers[4].mul(identity_eval));
                 }
 
                 bound_vals[s] = self.gamma_powers[s].mul(val_eval);
@@ -849,7 +1350,8 @@ fn BytecodeReadRafProver(comptime F: type) type {
 
                 for (0..T) |c| {
                     const step = self.trace.steps.items[c];
-                    const pc = step.pc;
+                    // Convert ELF address to bytecode array index
+                    const pc = if (step.is_noop) @as(usize, 0) else self.pc_map.getPC(step.pc, 0);
                     if (pc < bytecode_K) {
                         // Extract chunk using MSB-first ordering
                         const chunk_val = extractChunkMSB(pc, i, self.bytecode_d, self.log_k_chunk);
@@ -982,20 +1484,26 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             lookups_ra_virtual_log_k_chunk: usize,
             // Execution trace
             trace: *const ExecutionTrace,
-            // Opening points from previous stages (all BIG_ENDIAN)
-            r_cycle_stage1: []const F,
-            r_cycle_stage2_rw: []const F,
-            r_cycle_stage4_val: []const F,
-            r_cycle_stage4_regs: []const F,
-            r_cycle_stage5_regs_val: []const F,
+            // Opening points for BytecodeReadRaf (all BIG_ENDIAN)
+            r_cycle_bc1_spartan_outer: []const F,
+            r_cycle_bc2_product_virt: []const F,
+            r_cycle_bc3_spartan_shift: []const F,
+            r_cycle_bc4_regs_rwc: []const F,
+            r_cycle_bc5_regs_val: []const F,
+            // Opening points for IncClaimReduction (all BIG_ENDIAN)
+            r_cycle_inc_ram_rwc: []const F, // RamReadWriteChecking
+            r_cycle_inc_ram_val: []const F, // RamValEvaluation
             // Stage 5 challenges for deriving LookupsRaVirtual and RamRaVirtual points
             stage5_challenges: []const F,
             // Memory layout for address remapping
             memory_layout: *const jolt_device.MemoryLayout,
-            // Bytecode Val polynomials for BytecodeReadRaf
-            bytecode_val_polys: [5][]F,
-            // Identity polynomial for BytecodeReadRaf
-            bytecode_int_poly: []F,
+            // Bytecode entry table for Val polynomial computation
+            bytecode_entries: []const BytecodeEntry,
+            // Register address opening points for Stages 4 and 5 (BIG_ENDIAN)
+            r_register_4: []const F, // From RegistersReadWriteChecking (address portion)
+            r_register_5: []const F, // From RegistersValEvaluation (address portion)
+            // BytecodePCMapper for converting ELF addresses to bytecode array indices
+            pc_map: *const BytecodePCMapper,
         ) !Stage6Result(F) {
             // Instance round counts
             const bytecodeReadRaf_rounds = bytecode_log_k + n_cycle_vars;
@@ -1192,16 +1700,17 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             // ====================================================================
 
             // Instance 5: IncClaimReduction (degree 2)
+            // IncClaimReduction uses RAM r_cycles (not BytecodeReadRaf r_cycles)
             var inc_prover = try IncClaimReductionProver(F).init(
                 self.allocator, trace, inc_gamma,
-                r_cycle_stage2_rw, r_cycle_stage4_val,
-                r_cycle_stage4_regs, r_cycle_stage5_regs_val,
+                r_cycle_inc_ram_rwc, r_cycle_inc_ram_val,
+                r_cycle_bc4_regs_rwc, r_cycle_bc5_regs_val,
             );
             defer inc_prover.deinit();
 
             // Instance 1: HammingBooleanity (degree 3)
             var hamming_prover = try HammingBooleanityProver(F).init(
-                self.allocator, trace, r_cycle_stage1,
+                self.allocator, trace, r_cycle_bc1_spartan_outer,
             );
             defer hamming_prover.deinit();
 
@@ -1222,20 +1731,149 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             defer lookups_ra_prover.deinit();
 
             // Instance 0: BytecodeReadRaf (degree bytecode_d+1)
+            // Compute Val polynomials from bytecode entries and stage gammas
+            const bytecode_K: usize = @as(usize, 1) << @intCast(bytecode_log_k);
+            var bytecode_val_polys: [5][]F = undefined;
+
+            // Precompute eq tables for Stages 4 and 5 register addresses
+            // r_register_4 and r_register_5 are the address portions from
+            // RegistersReadWriteChecking and RegistersValEvaluation opening points
+            const REGISTER_COUNT_LOG2: usize = 5; // log2(32 registers)
+            const eq_table_4 = try computeEqTable(F, self.allocator, r_register_4, REGISTER_COUNT_LOG2);
+            defer self.allocator.free(eq_table_4);
+            const eq_table_5 = try computeEqTable(F, self.allocator, r_register_5, REGISTER_COUNT_LOG2);
+            defer self.allocator.free(eq_table_5);
+
+            for (0..5) |s| {
+                bytecode_val_polys[s] = try self.allocator.alloc(F, bytecode_K);
+                @memset(bytecode_val_polys[s], F.zero());
+            }
+
+            for (0..bytecode_K) |k| {
+                if (k >= bytecode_entries.len) break;
+                const entry = bytecode_entries[k];
+
+                // Stage 1: unexpanded_pc + γ₁¹·imm + Σ γ₁^(2+i)·circuit_flag_i
+                var val1 = stage1_gammas[0].mul(F.fromU64(entry.address));
+                val1 = val1.add(stage1_gammas[1].mul(fieldFromI128(F, @intCast(entry.imm))));
+                for (0..13) |i| {
+                    if (entry.circuit_flags[i]) {
+                        val1 = val1.add(stage1_gammas[2 + i]);
+                    }
+                }
+                bytecode_val_polys[0][k] = val1;
+
+                // Stage 2: γ₂⁰·jump + γ₂¹·branch + γ₂²·is_rd_not_zero + γ₂³·write_lookup_to_rd
+                var val2 = F.zero();
+                if (entry.circuit_flags[@intFromEnum(CircuitFlags.Jump)]) {
+                    val2 = val2.add(stage2_gammas[0]);
+                }
+                if (entry.instruction_flags[@intFromEnum(InstructionFlags.Branch)]) {
+                    val2 = val2.add(stage2_gammas[1]);
+                }
+                if (entry.instruction_flags[@intFromEnum(InstructionFlags.IsRdNotZero)]) {
+                    val2 = val2.add(stage2_gammas[2]);
+                }
+                if (entry.circuit_flags[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)]) {
+                    val2 = val2.add(stage2_gammas[3]);
+                }
+                bytecode_val_polys[1][k] = val2;
+
+                // Stage 3: γ₃⁰·imm + γ₃¹·unexpanded_pc + γ₃²·L_is_rs1 + γ₃³·L_is_pc
+                //         + γ₃⁴·R_is_rs2 + γ₃⁵·R_is_imm + γ₃⁶·is_noop
+                //         + γ₃⁷·virtual_instruction + γ₃⁸·is_first_in_sequence
+                var val3 = stage3_gammas[0].mul(fieldFromI128(F, @intCast(entry.imm)));
+                val3 = val3.add(stage3_gammas[1].mul(F.fromU64(entry.address)));
+                if (entry.instruction_flags[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)]) {
+                    val3 = val3.add(stage3_gammas[2]);
+                }
+                if (entry.instruction_flags[@intFromEnum(InstructionFlags.LeftOperandIsPC)]) {
+                    val3 = val3.add(stage3_gammas[3]);
+                }
+                if (entry.instruction_flags[@intFromEnum(InstructionFlags.RightOperandIsRs2Value)]) {
+                    val3 = val3.add(stage3_gammas[4]);
+                }
+                if (entry.instruction_flags[@intFromEnum(InstructionFlags.RightOperandIsImm)]) {
+                    val3 = val3.add(stage3_gammas[5]);
+                }
+                if (entry.instruction_flags[@intFromEnum(InstructionFlags.IsNoop)]) {
+                    val3 = val3.add(stage3_gammas[6]);
+                }
+                if (entry.circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)]) {
+                    val3 = val3.add(stage3_gammas[7]);
+                }
+                if (entry.is_first_in_sequence) {
+                    val3 = val3.add(stage3_gammas[8]);
+                }
+                bytecode_val_polys[2][k] = val3;
+
+                // Stage 4: γ₄⁰·eq(rd, r_reg4) + γ₄¹·eq(rs1, r_reg4) + γ₄²·eq(rs2, r_reg4)
+                var val4 = F.zero();
+                if (entry.rd < 32) {
+                    val4 = val4.add(stage4_gammas[0].mul(eq_table_4[entry.rd]));
+                }
+                if (entry.rs1 < 32) {
+                    val4 = val4.add(stage4_gammas[1].mul(eq_table_4[entry.rs1]));
+                }
+                if (entry.rs2 < 32) {
+                    val4 = val4.add(stage4_gammas[2].mul(eq_table_4[entry.rs2]));
+                }
+                bytecode_val_polys[3][k] = val4;
+
+                // Stage 5: γ₅⁰·eq(rd, r_reg5) + γ₅¹·!is_interleaved + Σ γ₅^(2+i)·table_flag_i
+                var val5 = F.zero();
+                if (entry.rd < 32) {
+                    val5 = val5.add(stage5_gammas[0].mul(eq_table_5[entry.rd]));
+                }
+                if (!entry.is_interleaved) {
+                    val5 = val5.add(stage5_gammas[1]);
+                }
+                if (entry.lookup_table_index < 41) {
+                    val5 = val5.add(stage5_gammas[2 + @as(usize, entry.lookup_table_index)]);
+                }
+                bytecode_val_polys[4][k] = val5;
+            }
+
+            std.debug.print("[STAGE6] Computed Val polynomials from bytecode entries\n", .{});
+            std.debug.print("[STAGE6] Val[0][0] = {any}\n", .{bytecode_val_polys[0][0].toBytesBE()[0..8]});
+            std.debug.print("[STAGE6] Val[1][0] = {any}\n", .{bytecode_val_polys[1][0].toBytesBE()[0..8]});
+
+            // Dump first few bytecode entries for debugging
+            for (0..@min(bytecode_K, 20)) |k| {
+                const entry = bytecode_entries[k];
+                std.debug.print("[STAGE6] entry[{}]: addr=0x{x:0>8} rd={} rs1={} rs2={} imm={} cf=[", .{k, entry.address, entry.rd, entry.rs1, entry.rs2, entry.imm});
+                for (0..13) |i| {
+                    if (i > 0) std.debug.print(",", .{});
+                    if (entry.circuit_flags[i]) std.debug.print("1", .{}) else std.debug.print("0", .{});
+                }
+                std.debug.print("] if=[", .{});
+                for (0..7) |i| {
+                    if (i > 0) std.debug.print(",", .{});
+                    if (entry.instruction_flags[i]) std.debug.print("1", .{}) else std.debug.print("0", .{});
+                }
+                std.debug.print("] lt={} interleaved={}\n", .{entry.lookup_table_index, @intFromBool(entry.is_interleaved)});
+            }
+
+            // Build identity polynomial
+            var bytecode_int_poly = try self.allocator.alloc(F, bytecode_K);
+            for (0..bytecode_K) |k| {
+                bytecode_int_poly[k] = F.fromU64(@intCast(k));
+            }
+
             var bytecode_gamma_arr: [7]F = undefined;
             for (0..7) |i| {
                 bytecode_gamma_arr[i] = bytecode_raf_gamma_powers[i];
             }
             var bytecode_prover = try BytecodeReadRafProver(F).init(
-                self.allocator, trace, bytecode_val_polys,
+                self.allocator, trace, pc_map, bytecode_val_polys,
                 bytecode_log_k, n_cycle_vars, bytecode_d, log_k_chunk,
                 bytecode_gamma_arr,
                 [5][]const F{
-                    r_cycle_stage1,
-                    r_cycle_stage2_rw,
-                    r_cycle_stage4_val, // This is stage3 r_cycle (SpartanShift)
-                    r_cycle_stage4_regs,
-                    r_cycle_stage5_regs_val,
+                    r_cycle_bc1_spartan_outer,
+                    r_cycle_bc2_product_virt,
+                    r_cycle_bc3_spartan_shift,
+                    r_cycle_bc4_regs_rwc,
+                    r_cycle_bc5_regs_val,
                 },
                 bytecode_int_poly,
             );
@@ -1338,6 +1976,16 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                             // Phase 1: address binding (linear poly)
                             const polys = bytecode_prover.computeRoundPolyPhase1();
                             cached_bc_phase1 = polys;
+                            if (round < 2) {
+                                const bc_sum = polys[0].add(polys[1]);
+                                std.debug.print("  [S6P] R{} BC_Phase1 p(0)={any} p(1)={any} sum={any} input={any}\n", .{
+                                    round,
+                                    polys[0].toBytesBE()[0..8],
+                                    polys[1].toBytesBE()[0..8],
+                                    bc_sum.toBytesBE()[0..8],
+                                    input_claims[0].toBytesBE()[0..8],
+                                });
+                            }
                             combined_evals[0] = combined_evals[0].add(batch[inst].mul(polys[0]));
                             combined_evals[1] = combined_evals[1].add(batch[inst].mul(polys[1]));
                             const slope = polys[1].sub(polys[0]);
@@ -1473,6 +2121,28 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     }
                 }
 
+                // Debug: print combined evals for this round
+                if (round < 3) {
+                    std.debug.print("  [S6P] R{} combined: p(0)={any} p(1)={any}\n", .{
+                        round,
+                        combined_evals[0].toBytesBE()[0..8],
+                        combined_evals[1].toBytesBE()[0..8],
+                    });
+                    var p01_sum = combined_evals[0].add(combined_evals[1]);
+                    std.debug.print("  [S6P] R{} p(0)+p(1)={any} claim={any} match={}\n", .{
+                        round,
+                        p01_sum.toBytesBE()[0..8],
+                        current_batched_claim.toBytesBE()[0..8],
+                        @as(u8, if (std.mem.eql(u8, &p01_sum.toBytesBE(), &current_batched_claim.toBytesBE())) 1 else 0),
+                    });
+                    // Print active instances
+                    for (0..6) |ii| {
+                        std.debug.print("  [S6P] R{} inst[{}] active={} claim={any}\n", .{
+                            round, ii, inst_active[ii], instance_claims[ii].toBytesBE()[0..8],
+                        });
+                    }
+                }
+
                 // Compress and append to transcript
                 const compressed = try UniPoly(F).toomCookToCompressedGeneral(self.allocator, combined_evals);
                 defer self.allocator.free(compressed);
@@ -1498,6 +2168,12 @@ pub fn Stage6BatchedProver(comptime F: type) type {
 
                 // Evaluate combined polynomial at challenge
                 current_batched_claim = try UniPoly(F).evaluateToomCookGeneralAt(self.allocator, combined_evals, challenge);
+
+                std.debug.print("  [S6P] R{} challenge={any} new_claim={any}\n", .{
+                    round,
+                    challenge.toBytesBE()[0..8],
+                    current_batched_claim.toBytesBE()[0..8],
+                });
 
                 // Update per-instance claims from CACHED round polys and bind challenge
                 // Instance 0: BytecodeReadRaf

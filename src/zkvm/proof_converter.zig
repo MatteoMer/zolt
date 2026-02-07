@@ -46,6 +46,7 @@ const spartan_mod = @import("spartan/mod.zig");
 const Stage3Prover = spartan_mod.Stage3Prover;
 const Stage5BatchedProver = spartan_mod.Stage5BatchedProver;
 const Stage6BatchedProver = spartan_mod.Stage6BatchedProver;
+const preprocessing = @import("preprocessing.zig");
 
 /// Convert Zolt's internal proof to Jolt-compatible format
 pub fn ProofConverter(comptime F: type) type {
@@ -4004,21 +4005,6 @@ pub fn ProofConverter(comptime F: type) type {
                 s_cycle_stage5[n_cycle_vars - 1 - i] = stage5_result.challenges[stage5_idx];
             }
 
-            // Build bytecode Val polynomials and identity polynomial for BytecodeReadRaf
-            // Val_s(k) encodes instruction properties per stage
-            // For now, compute from execution trace (TODO: use proper bytecode preprocessing)
-            const bytecode_K_val: usize = @as(usize, 1) << @intCast(bytecode_log_k);
-            var bytecode_val_polys: [5][]F = undefined;
-            for (0..5) |s| {
-                bytecode_val_polys[s] = try self.allocator.alloc(F, bytecode_K_val);
-                @memset(bytecode_val_polys[s], F.zero());
-            }
-            // Build identity polynomial: int_poly[k] = k as field element
-            var bytecode_int_poly = try self.allocator.alloc(F, bytecode_K_val);
-            for (0..bytecode_K_val) |k| {
-                bytecode_int_poly[k] = F.fromU64(@intCast(k));
-            }
-
             // Generate Stage 6 proof using the batched sumcheck prover
             const the_trace = config.execution_trace orelse return error.ExecutionTraceRequired;
             const the_memory_layout = config.memory_layout orelse return error.MemoryLayoutRequired;
@@ -4029,6 +4015,23 @@ pub fn ProofConverter(comptime F: type) type {
             for (0..stage3_result.challenges.len) |i| {
                 r_cycle_shift_be[i] = stage3_result.challenges[stage3_result.challenges.len - 1 - i];
             }
+
+            // Build bytecode entry table from static ELF + execution trace overlay
+            const bytecode_K_val: usize = @as(usize, 1) << @intCast(bytecode_log_k);
+            const stage6_mod = @import("spartan/stage6_prover.zig");
+            // Get pc_map for converting ELF addresses to bytecode array indices
+            const pc_map_ptr = config.bytecode_pc_map orelse return error.MissingBytecodepcMap;
+            const bytecode_entries = try stage6_mod.buildBytecodeEntries(self.allocator, the_trace, bytecode_K_val, pc_map_ptr, config.program_code_bytes, config.code_base_address);
+            defer self.allocator.free(bytecode_entries);
+
+            // Get register address opening points for Stages 4 and 5
+            // Stage 4: from RegistersReadWriteChecking (address portion)
+            const r_register_4 = stage4_regs_r_address orelse &[_]F{};
+            // Stage 5: use same as Stage 4 (both address 32 registers)
+            // In Jolt, this comes from RegistersValEvaluation's opening point split,
+            // but the address variables are the SAME as Stage 4's since they share
+            // the same register address space.
+            const r_register_5 = stage4_regs_r_address orelse &[_]F{};
 
             var stage6_prover_instance = Stage6BatchedProver(F).init(self.allocator);
             var stage6_result = try stage6_prover_instance.generateStage6Proof(
@@ -4044,21 +4047,26 @@ pub fn ProofConverter(comptime F: type) type {
                 config.lookups_ra_virtual_log_k_chunk,
                 // Execution trace
                 the_trace,
-                // Opening points from previous stages (all BIG_ENDIAN)
-                // BytecodeReadRaf r_cycles must match Jolt's 5 stages:
-                r_spartan_original, // r_cycle_1: SpartanOuter
-                stage2_result.r_cycle_product, // r_cycle_2: SpartanProductVirtualization
-                r_cycle_shift_be, // r_cycle_3: SpartanShift
-                if (stage4_regs_r_cycle) |v| v else s_cycle_stage5, // r_cycle_4: RegistersReadWriteChecking
-                s_cycle_stage5, // r_cycle_5: RegistersValEvaluation
+                // BytecodeReadRaf r_cycles (all BIG_ENDIAN)
+                r_spartan_original, // r_cycle_bc1: SpartanOuter
+                stage2_result.r_cycle_product, // r_cycle_bc2: SpartanProductVirtualization
+                r_cycle_shift_be, // r_cycle_bc3: SpartanShift
+                if (stage4_regs_r_cycle) |v| v else s_cycle_stage5, // r_cycle_bc4: RegistersReadWriteChecking
+                s_cycle_stage5, // r_cycle_bc5: RegistersValEvaluation
+                // IncClaimReduction r_cycles (all BIG_ENDIAN)
+                stage2_result.r_cycle_rw, // r_cycle_inc: RamReadWriteChecking
+                if (stage4_r_cycle_val) |v| v else s_cycle_stage5, // r_cycle_inc: RamValEvaluation
                 // Stage 5 challenges for deriving LookupsRaVirtual and RamRaVirtual points
                 stage5_result.challenges,
                 // Memory layout for address remapping
                 the_memory_layout,
-                // Bytecode Val polynomials (TODO: compute from bytecode preprocessing)
-                bytecode_val_polys,
-                // Identity polynomial
-                bytecode_int_poly,
+                // Bytecode entries for Val polynomial computation
+                bytecode_entries,
+                // Register address opening points
+                r_register_4,
+                r_register_5,
+                // BytecodePCMapper for converting ELF addresses to bytecode array indices
+                pc_map_ptr,
             );
             defer stage6_result.deinit();
 
@@ -6235,6 +6243,14 @@ pub const ConversionConfig = struct {
     /// Minimum bytecode address (word-aligned: actual_min_address / 8 * 8)
     /// Used to compute the remapped bytecode_start index
     min_bytecode_address: u64 = 0,
+    /// BytecodePCMapper for converting ELF addresses to bytecode array indices
+    /// Required for Stage 6 BytecodeReadRaf to correctly map cycle PCs to bytecode rows
+    bytecode_pc_map: ?*const preprocessing.BytecodePCMapper = null,
+    /// Raw ELF code bytes (text section) for populating static bytecode entries in Stage 6
+    /// Required so buildBytecodeEntries can fill entries for ALL instructions, not just executed ones
+    program_code_bytes: ?[]const u8 = null,
+    /// Base address of the code section (typically 0x80000000)
+    code_base_address: u64 = 0x80000000,
 };
 
 // =============================================================================

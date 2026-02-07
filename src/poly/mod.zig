@@ -899,6 +899,49 @@ pub fn UniPoly(comptime F: type) type {
             return coeffs;
         }
 
+        /// Convert Toom-Cook evaluations [p(0), p(1), ..., p(d-1), p_inf] to compressed format [c0, c2, c3, ..., c_d]
+        ///
+        /// For a degree-d polynomial, given d+1 evaluations (d finite points + point at infinity),
+        /// this computes all coefficients via Gaussian elimination, then returns the compressed
+        /// format: all coefficients except c1 (linear term).
+        ///
+        /// The compressed format has d elements: [c0, c2, c3, ..., c_d]
+        /// The verifier recovers c1 = hint - 2*c0 - c2 - c3 - ... - c_d
+        pub fn toomCookToCompressedGeneral(allocator: Allocator, evals: []const F) ![]F {
+            const n = evals.len; // n = d + 1 (number of evaluation points)
+            if (n == 0) return try allocator.alloc(F, 0);
+
+            // Get all coefficients via interpolation
+            const coeffs = try fromEvalsToom(allocator, evals);
+            defer allocator.free(coeffs);
+
+            // Compressed format: [c0, c2, c3, ..., c_d] (skip c1)
+            // Size = n - 1 (all coefficients except linear term)
+            const compressed = try allocator.alloc(F, n - 1);
+            compressed[0] = coeffs[0]; // c0
+            for (1..n - 1) |i| {
+                compressed[i] = coeffs[i + 1]; // c2, c3, ..., c_d
+            }
+            return compressed;
+        }
+
+        /// Evaluate a general-degree polynomial at a point given Toom-Cook evaluations
+        ///
+        /// Given [p(0), p(1), ..., p(d-1), p_inf], interpolates coefficients and evaluates at x.
+        pub fn evaluateToomCookGeneralAt(allocator: Allocator, evals: []const F, x: F) !F {
+            const coeffs = try fromEvalsToom(allocator, evals);
+            defer allocator.free(coeffs);
+
+            // Evaluate using Horner's method: c0 + x*(c1 + x*(c2 + ... + x*c_d))
+            var result = coeffs[coeffs.len - 1];
+            var i = coeffs.len - 1;
+            while (i > 0) {
+                i -= 1;
+                result = result.mul(x).add(coeffs[i]);
+            }
+            return result;
+        }
+
         /// Evaluate the product of 9 linear polynomials at points [1, 2, ..., 8, ∞]
         ///
         /// Given pairs [(p_j(0), p_j(1))] for j in 0..8, computes evaluations of

@@ -45,6 +45,7 @@ const instruction = @import("instruction/mod.zig");
 const spartan_mod = @import("spartan/mod.zig");
 const Stage3Prover = spartan_mod.Stage3Prover;
 const Stage5BatchedProver = spartan_mod.Stage5BatchedProver;
+const Stage6BatchedProver = spartan_mod.Stage6BatchedProver;
 
 /// Convert Zolt's internal proof to Jolt-compatible format
 pub fn ProofConverter(comptime F: type) type {
@@ -3978,76 +3979,123 @@ pub fn ProofConverter(comptime F: type) type {
             transcript.appendScalar(stage5_result.lookups_raf_flag);
 
             // Stage 6: BytecodeReadRaf, RamHammingBooleanity, Booleanity, RamRaVirtual, LookupsRaVirtual, IncClaimReduction
-            // BytecodeReadRaf has max rounds: bytecode_log_K + log_T = 16 + 8 = 24
             const bytecode_log_k = std.math.log2_int(usize, config.bytecode_K);
-            const stage6_max_rounds = bytecode_log_k + n_cycle_vars;
-            try self.generateZeroSumcheckProof(&jolt_proof.stage6_sumcheck_proof, stage6_max_rounds, 3);
-            try jolt_proof.opening_claims.insert(
-                .{ .Virtual = .{ .poly = .RamHammingWeight, .sumcheck_id = .Booleanity } },
-                F.zero(),
-            );
-            try jolt_proof.opening_claims.insert(
-                .{ .Virtual = .{ .poly = .RamHammingWeight, .sumcheck_id = .RamHammingBooleanity } },
-                F.zero(),
-            );
-            // IncClaimReduction claims (Stage 6) - these reduce RdInc and RamInc to a single point
-            // Required for Stage 8 batch opening
-            try jolt_proof.opening_claims.insert(
-                .{ .Committed = .{ .poly = .RdInc, .sumcheck_id = .IncClaimReduction } },
-                F.zero(),
-            );
-            try jolt_proof.opening_claims.insert(
-                .{ .Committed = .{ .poly = .RamInc, .sumcheck_id = .IncClaimReduction } },
-                F.zero(),
-            );
-
-            // Compute d values for one-hot decomposition (must match Jolt's OneHotParams::from_config)
             const ram_log_k = std.math.log2_int(usize, ram_K);
             const instruction_d: usize = (lookups_log_k + config.log_k_chunk - 1) / config.log_k_chunk;
             const bytecode_d_val: usize = (bytecode_log_k + config.log_k_chunk - 1) / config.log_k_chunk;
             const ram_d_val: usize = (ram_log_k + config.log_k_chunk - 1) / config.log_k_chunk;
 
-            // BytecodeReadRaf cache_openings: CommittedPolynomial::BytecodeRa(i) for i in 0..bytecode_d
+            std.debug.print("[STAGE6] Parameters: bytecode_log_k={}, ram_log_k={}, instruction_d={}, bytecode_d={}, ram_d={}\n", .{
+                bytecode_log_k, ram_log_k, instruction_d, bytecode_d_val, ram_d_val,
+            });
+
+            // Compute Stage 5 RegistersValEvaluation opening point (s_cycle_stage5)
+            // Stage 5 max_rounds = 136 (128 address + 8 cycle for RV64)
+            // RegistersValEvaluation runs in the last n_cycle_vars rounds
+            // Opening point = challenges[128..136] reversed (LE → BE)
+            const stage5_lookups_num_rounds = lookups_log_k + n_cycle_vars; // 136
+            const stage5_regs_val_num_rounds = n_cycle_vars; // 8
+            var s_cycle_stage5 = try self.allocator.alloc(F, n_cycle_vars);
+            defer self.allocator.free(s_cycle_stage5);
+            for (0..n_cycle_vars) |i| {
+                // RegistersValEvaluation challenges are the last n_cycle_vars of Stage 5
+                const stage5_idx = stage5_lookups_num_rounds - stage5_regs_val_num_rounds + i;
+                // Reverse for BIG_ENDIAN
+                s_cycle_stage5[n_cycle_vars - 1 - i] = stage5_result.challenges[stage5_idx];
+            }
+
+            // Generate Stage 6 proof using the batched sumcheck prover
+            var stage6_prover_instance = Stage6BatchedProver(F).init(self.allocator);
+            var stage6_result = try stage6_prover_instance.generateStage6Proof(
+                &jolt_proof.stage6_sumcheck_proof,
+                transcript,
+                &jolt_proof.opening_claims,
+                n_cycle_vars,
+                bytecode_log_k,
+                config.log_k_chunk,
+                bytecode_d_val,
+                ram_d_val,
+                instruction_d,
+                config.lookups_ra_virtual_log_k_chunk,
+                // Execution trace
+                config.execution_trace orelse return error.ExecutionTraceRequired,
+                // Opening points from previous stages (all BIG_ENDIAN)
+                r_spartan_original, // r_cycle_stage1 (SpartanOuter)
+                stage2_result.r_cycle_rw, // r_cycle_stage2_rw (RamReadWriteChecking)
+                if (stage4_r_cycle_val) |v| v else s_cycle_stage5, // r_cycle_stage4_val (RamValEvaluation) - fallback to zeros
+                if (stage4_regs_r_cycle) |v| v else s_cycle_stage5, // r_cycle_stage4_regs (RegistersRWC) - fallback
+                s_cycle_stage5, // r_cycle_stage5_regs_val (RegistersValEvaluation)
+            );
+            defer stage6_result.deinit();
+
+            // Insert Stage 6 opening claims into accumulator
+
+            // HammingBooleanity: virtual RamHammingWeight
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .RamHammingWeight, .sumcheck_id = .Booleanity } },
+                stage6_result.hamming_weight_claim,
+            );
+            try jolt_proof.opening_claims.insert(
+                .{ .Virtual = .{ .poly = .RamHammingWeight, .sumcheck_id = .RamHammingBooleanity } },
+                stage6_result.hamming_weight_claim,
+            );
+
+            // IncClaimReduction: committed RamInc, RdInc
+            try jolt_proof.opening_claims.insert(
+                .{ .Committed = .{ .poly = .RamInc, .sumcheck_id = .IncClaimReduction } },
+                stage6_result.ram_inc_claim,
+            );
+            try jolt_proof.opening_claims.insert(
+                .{ .Committed = .{ .poly = .RdInc, .sumcheck_id = .IncClaimReduction } },
+                stage6_result.rd_inc_claim,
+            );
+
+            // BytecodeReadRaf cache_openings: BytecodeRa(i)
             for (0..bytecode_d_val) |i| {
                 try jolt_proof.opening_claims.insert(
                     .{ .Committed = .{ .poly = .{ .BytecodeRa = i }, .sumcheck_id = .BytecodeReadRaf } },
-                    F.zero(),
+                    stage6_result.bytecode_ra_claims[i],
                 );
             }
 
-            // Booleanity cache_openings: all InstructionRa, BytecodeRa, RamRa
+            // Booleanity cache_openings: all RA polys
+            // Order: InstructionRa(0..instruction_d), BytecodeRa(0..bytecode_d), RamRa(0..ram_d)
+            var bool_idx: usize = 0;
             for (0..instruction_d) |i| {
                 try jolt_proof.opening_claims.insert(
                     .{ .Committed = .{ .poly = .{ .InstructionRa = i }, .sumcheck_id = .Booleanity } },
-                    F.zero(),
+                    stage6_result.booleanity_ra_claims[bool_idx],
                 );
+                bool_idx += 1;
             }
             for (0..bytecode_d_val) |i| {
                 try jolt_proof.opening_claims.insert(
                     .{ .Committed = .{ .poly = .{ .BytecodeRa = i }, .sumcheck_id = .Booleanity } },
-                    F.zero(),
+                    stage6_result.booleanity_ra_claims[bool_idx],
                 );
+                bool_idx += 1;
             }
             for (0..ram_d_val) |i| {
                 try jolt_proof.opening_claims.insert(
                     .{ .Committed = .{ .poly = .{ .RamRa = i }, .sumcheck_id = .Booleanity } },
-                    F.zero(),
+                    stage6_result.booleanity_ra_claims[bool_idx],
                 );
+                bool_idx += 1;
             }
 
-            // RamRaVirtualization cache_openings: CommittedPolynomial::RamRa(i) for i in 0..ram_d
+            // RamRaVirtualization cache_openings: RamRa(i)
             for (0..ram_d_val) |i| {
                 try jolt_proof.opening_claims.insert(
                     .{ .Committed = .{ .poly = .{ .RamRa = i }, .sumcheck_id = .RamRaVirtualization } },
-                    F.zero(),
+                    stage6_result.ram_ra_virtual_claims[i],
                 );
             }
 
-            // InstructionRaVirtualization cache_openings: CommittedPolynomial::InstructionRa(i) for i in 0..instruction_d
+            // InstructionRaVirtualization cache_openings: InstructionRa(i)
             for (0..instruction_d) |i| {
                 try jolt_proof.opening_claims.insert(
                     .{ .Committed = .{ .poly = .{ .InstructionRa = i }, .sumcheck_id = .InstructionRaVirtualization } },
-                    F.zero(),
+                    stage6_result.instruction_ra_virtual_claims[i],
                 );
             }
 

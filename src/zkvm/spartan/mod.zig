@@ -56,6 +56,11 @@ pub const stage5_prover = @import("stage5_prover.zig");
 pub const Stage5BatchedProver = stage5_prover.Stage5BatchedProver;
 pub const Stage5Result = stage5_prover.Stage5Result;
 
+// Stage 6 prover (BytecodeReadRaf, HammingBooleanity, Booleanity, RamRaVirtual, LookupsRaVirtual, IncClaimReduction)
+pub const stage6_prover = @import("stage6_prover.zig");
+pub const Stage6BatchedProver = stage6_prover.Stage6BatchedProver;
+pub const Stage6Result = stage6_prover.Stage6Result;
+
 // InstructionReadRaf prover (simplified direct version)
 pub const instruction_read_raf = @import("instruction_read_raf.zig");
 pub const InstructionReadRafProver = instruction_read_raf.InstructionReadRafProver;

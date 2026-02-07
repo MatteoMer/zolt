@@ -17442,3 +17442,11 @@ Tokens: 0 in / 0 out
 Error: Command failed with exit code -15 (exit code: -15)
 Error output: Check stderr output for details
 
+
+--- Iteration 1 ---
+Started: 2026-02-06T10:56:18.176664
+Ended: 2026-02-07T11:22:56.236943
+Turns: 3943
+Cost: $417.0826
+Tokens: 0 in / 0 out
+

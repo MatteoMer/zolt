@@ -1,41 +1,76 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: STAGE 5 VERIFICATION PASSES ✅ - Fixing remaining issues
+## Status: STAGES 1-5 PASS ✅ — Stage 6 needs real sumcheck proofs
 
-### Major Bug Fixes Applied:
+### Completed
+1. ✅ Fix polynomial chain divergence in Stage 5 (RAF prefix MLE materialization)
+2. ✅ Fix bytecode_K mismatch (hardcoded 65536 → computed from decoded instructions)
+3. ✅ Add missing Stage 6 opening claims (BytecodeRa, InstructionRa, RamRa)
+4. ✅ Export bytecode code_size in preprocessing for Jolt verifier override
 
-#### 1. And/Or/Xor prefix shift off-by-one (commit c672bb8)
-- Bug: Used `XLEN - (j/2)` instead of `XLEN - 1 - (j/2)` on odd rounds
-- Fixed in 6 locations in prefixes.zig
+### Current Issue: Stage 6 Sumcheck
 
-#### 2. RAF prefix MLE materialization (THIS SESSION)
-- **ROOT CAUSE**: RAF decomposition used formula-based prefix evaluation (`operandPrefixEvals`, `identityPrefixEvals`) instead of materialized MLE tables
-- In Jolt, RAF prefix polynomials (OperandPolynomial, IdentityPolynomial) are:
-  1. Materialized into full MLE tables at each phase start (2^chunk_len entries)
-  2. Bound using standard MLE bind (`new[i] = old[i] + r*(old[i+half]-old[i])`) each round
-  3. Queried using standard MLE sumcheck_evals (linear interpolation from table)
-  4. Checkpoint saved at phase boundaries
-- The formula-based approach was CORRECT at round 0 but gave wrong results after binding
-  (due to interleaved bit structure of OperandPolynomial)
-- **Fix**: Added `prefix_mle` field to `RafDecomposition`, `initPrefix()` to materialize,
-  standard MLE bind in `bind()`, table-lookup in `prefixEvals()`, `updateCheckpoint()` at boundaries
-- **Result**: Stage 5 output_claim now matches expected_output_claim! ✅
+Stage 6 is a batched sumcheck with 6 instances. Currently generates zero proofs.
+The initial_claim is NON-ZERO because instances 0 (BytecodeReadRaf), 3 (RamRaVirtual),
+4 (LookupsRaVirtual), and 5 (IncClaimReduction) have non-zero input_claims from
+the opening accumulator (set by Stages 1-5).
 
-### Current Issue:
-- Stage 2 `cache_openings` panics (opening_proof.rs:603 unwrap on None)
-- This is UNRELATED to Stage 5 — happens during polynomial opening verification
-- Need to investigate what's different about the opening claims
+**Instance input_claims:**
+- Instance 0 (BytecodeReadRaf): NON-ZERO (0x2e3ea1...) — RLC of virtual poly openings from stages 1-5
+- Instance 1 (HammingBooleanity): ZERO — zero-check
+- Instance 2 (Booleanity): ZERO — zero-check
+- Instance 3 (RamRaVirtual): NON-ZERO (0x2388a2...) — from Stage 5 RamRaClaimReduction
+- Instance 4 (LookupsRaVirtual): NON-ZERO (0x1a73e2...) — RLC of InstructionRa openings from Stage 5
+- Instance 5 (IncClaimReduction): NON-ZERO (0x1a20f4...) — combines RamInc/RdInc from stages 2,4,5
+
+**Parameters (fibonacci, bytecode_K=32, T=256):**
+- stage6_max_rounds = 13 (5 + 8)
+- max_degree = 5
+- bytecode_d = 2, ram_d = 4, instruction_d = 32
+
+### Implementation Needed
+
+To generate correct Stage 6 proofs, need to implement:
+
+1. **BytecodeReadRafSumcheckProver** (13 rounds, degree 3)
+   - Polynomial: Σ_i γ^i · [Val_i(addr) + RAF_i] · eq(r_cycle_i, x) · ∏ ra_j
+   - Needs: bytecode val polynomials, eq evaluations, RA chunks
+
+2. **HammingBooleanitySumcheckProver** (8 rounds, degree 3)
+   - Polynomial: eq(r_cycle, x) · (H(x)² - H(x))
+   - Zero for valid traces, but still needs proper eq factors
+
+3. **BooleanitySumcheckProver** (12 rounds, degree 3)
+   - Polynomial: eq(r_addr||r_cycle, x) · Σ γ^{2i} · (ra_i² - ra_i)
+   - Zero for valid traces, but still needs proper eq factors
+
+4. **RamRaVirtualSumcheckProver** (8 rounds, degree 5)
+   - Polynomial: eq(r_cycle, x) · ∏ ra_i(x)
+   - Needs: RAM address chunks, eq evaluation
+
+5. **LookupsRaVirtualSumcheckProver** (8 rounds, degree 5)
+   - Polynomial: eq(r_cycle, x) · Σ γ^i · ∏_j ra_{i·M+j}(x)
+   - Needs: instruction address chunks, eq evaluation
+
+6. **IncClaimReductionSumcheckProver** (8 rounds, degree 2)
+   - Polynomial: RamInc(x) · eq_combined + γ² · RdInc(x) · eq_combined
+   - Needs: RamInc/RdInc values, eq evaluations from stages 2,4,5
+
+### Architecture Decision
+These provers need to be implemented in proof_converter.zig as part of the
+`convertWithTranscript` function. Each prover materializes its polynomial
+evaluations over the trace, then runs the standard sumcheck protocol.
 
 ### Test Commands
 ```bash
 zig build -Doptimize=ReleaseFast
 ./zig-out/bin/zolt prove examples/fibonacci.elf --trace-length 64 -o /tmp/zolt_proof.bin --jolt-format --export-preprocessing /tmp/zolt_preprocessing.bin
-cd /home/vivado/projects/jolt && cargo run --release --features zolt-debug --manifest-path examples/fibonacci/Cargo.toml -- --verify-zolt-proof /tmp/zolt_proof.bin --zolt-preprocessing /tmp/zolt_preprocessing.bin.ram
+cd /home/vivado/projects/jolt && RAYON_NUM_THREADS=1 cargo run --release --features zolt-debug --manifest-path examples/fibonacci/Cargo.toml -- --verify-zolt-proof /tmp/zolt_proof.bin --zolt-preprocessing /tmp/zolt_preprocessing.bin.ram
 ```
 
 ### Remaining Tasks
-1. [COMPLETED] Fix polynomial chain divergence in stage 5 ✅
-2. [IN PROGRESS] Fix Stage 2 cache_openings panic
+1. [IN PROGRESS] Implement Stage 6 batched sumcheck provers
+2. [PENDING] Implement Stage 7 (HammingWeightClaimReduction)
 3. [PENDING] Clean up debug prints
 4. [PENDING] Verify end-to-end proof generation (all stages pass)
 5. [PENDING] Run full test suite (578+ tests)

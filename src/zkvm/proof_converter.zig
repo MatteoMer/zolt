@@ -4004,7 +4004,25 @@ pub fn ProofConverter(comptime F: type) type {
                 s_cycle_stage5[n_cycle_vars - 1 - i] = stage5_result.challenges[stage5_idx];
             }
 
+            // Build bytecode Val polynomials and identity polynomial for BytecodeReadRaf
+            // Val_s(k) encodes instruction properties per stage
+            // For now, compute from execution trace (TODO: use proper bytecode preprocessing)
+            const bytecode_K_val: usize = @as(usize, 1) << @intCast(bytecode_log_k);
+            var bytecode_val_polys: [5][]F = undefined;
+            for (0..5) |s| {
+                bytecode_val_polys[s] = try self.allocator.alloc(F, bytecode_K_val);
+                @memset(bytecode_val_polys[s], F.zero());
+            }
+            // Build identity polynomial: int_poly[k] = k as field element
+            var bytecode_int_poly = try self.allocator.alloc(F, bytecode_K_val);
+            for (0..bytecode_K_val) |k| {
+                bytecode_int_poly[k] = F.fromU64(@intCast(k));
+            }
+
             // Generate Stage 6 proof using the batched sumcheck prover
+            const the_trace = config.execution_trace orelse return error.ExecutionTraceRequired;
+            const the_memory_layout = config.memory_layout orelse return error.MemoryLayoutRequired;
+
             var stage6_prover_instance = Stage6BatchedProver(F).init(self.allocator);
             var stage6_result = try stage6_prover_instance.generateStage6Proof(
                 &jolt_proof.stage6_sumcheck_proof,
@@ -4018,13 +4036,21 @@ pub fn ProofConverter(comptime F: type) type {
                 instruction_d,
                 config.lookups_ra_virtual_log_k_chunk,
                 // Execution trace
-                config.execution_trace orelse return error.ExecutionTraceRequired,
+                the_trace,
                 // Opening points from previous stages (all BIG_ENDIAN)
                 r_spartan_original, // r_cycle_stage1 (SpartanOuter)
                 stage2_result.r_cycle_rw, // r_cycle_stage2_rw (RamReadWriteChecking)
-                if (stage4_r_cycle_val) |v| v else s_cycle_stage5, // r_cycle_stage4_val (RamValEvaluation) - fallback to zeros
-                if (stage4_regs_r_cycle) |v| v else s_cycle_stage5, // r_cycle_stage4_regs (RegistersRWC) - fallback
+                if (stage4_r_cycle_val) |v| v else s_cycle_stage5, // r_cycle_stage4_val (RamValEvaluation)
+                if (stage4_regs_r_cycle) |v| v else s_cycle_stage5, // r_cycle_stage4_regs (RegistersRWC)
                 s_cycle_stage5, // r_cycle_stage5_regs_val (RegistersValEvaluation)
+                // Stage 5 challenges for deriving LookupsRaVirtual and RamRaVirtual points
+                stage5_result.challenges,
+                // Memory layout for address remapping
+                the_memory_layout,
+                // Bytecode Val polynomials (TODO: compute from bytecode preprocessing)
+                bytecode_val_polys,
+                // Identity polynomial
+                bytecode_int_poly,
             );
             defer stage6_result.deinit();
 

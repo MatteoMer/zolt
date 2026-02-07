@@ -1,65 +1,47 @@
 # Zolt-Jolt Compatibility Implementation
 
-## Status: STAGES 1-5 PASS ✅ — Stage 6 needs real sumcheck proofs
+## Status: Stage 6 sumcheck runs with real provers, but verification fails
 
-### Completed
-1. ✅ Fix polynomial chain divergence in Stage 5 (RAF prefix MLE materialization)
-2. ✅ Fix bytecode_K mismatch (hardcoded 65536 → computed from decoded instructions)
-3. ✅ Add missing Stage 6 opening claims (BytecodeRa, InstructionRa, RamRa)
-4. ✅ Export bytecode code_size in preprocessing for Jolt verifier override
+### Current Issue: Stage 6 Sumcheck Mismatch
 
-### Current Issue: Stage 6 Sumcheck
+Stage 6 runs with real provers for ALL instances, but output_claim != expected_claim.
+The mismatch is caused by:
 
-Stage 6 is a batched sumcheck with 6 instances. Currently generates zero proofs.
-The initial_claim is NON-ZERO because instances 0 (BytecodeReadRaf), 3 (RamRaVirtual),
-4 (LookupsRaVirtual), and 5 (IncClaimReduction) have non-zero input_claims from
-the opening accumulator (set by Stages 1-5).
+1. **BytecodeReadRaf (Instance 0)**: Val polynomials are all zeros (need bytecode preprocessing data)
+2. **BytecodeReadRaf r_cycles**: The 5 r_cycles passed to BytecodeReadRaf may not match Jolt's 5 stages:
+   - Stage 1 (SpartanOuter): r_spartan_original - CORRECT
+   - Stage 2 (SpartanProductVirtualization): Using r_cycle_stage2_rw - WRONG (that's RamReadWriteChecking)
+   - Stage 3 (SpartanShift): Using r_cycle_stage4_val - WRONG (that's RamValEvaluation)
+   - Stage 4 (RegistersReadWriteChecking): r_cycle_stage4_regs - CORRECT
+   - Stage 5 (RegistersValEvaluation): r_cycle_stage5_regs_val - CORRECT
+3. **IncClaimReduction claim tracking**: Using approximate claim halving instead of proper eval
 
-**Instance input_claims:**
-- Instance 0 (BytecodeReadRaf): NON-ZERO (0x2e3ea1...) — RLC of virtual poly openings from stages 1-5
-- Instance 1 (HammingBooleanity): ZERO — zero-check
-- Instance 2 (Booleanity): ZERO — zero-check
-- Instance 3 (RamRaVirtual): NON-ZERO (0x2388a2...) — from Stage 5 RamRaClaimReduction
-- Instance 4 (LookupsRaVirtual): NON-ZERO (0x1a73e2...) — RLC of InstructionRa openings from Stage 5
-- Instance 5 (IncClaimReduction): NON-ZERO (0x1a20f4...) — combines RamInc/RdInc from stages 2,4,5
+### What's Working
+- IncClaimReduction (Instance 5): Real prover with trace data
+- HammingBooleanity (Instance 1): Real prover
+- RamRaVirtual (Instance 3): Real prover with memory layout remapping
+- LookupsRaVirtual (Instance 4): Real prover with interleaved bit extraction
+- BytecodeReadRaf (Instance 0): Real prover BUT with wrong Val data and wrong r_cycles
+- Booleanity (Instance 2): Zero polynomial (correct for valid traces)
 
-**Parameters (fibonacci, bytecode_K=32, T=256):**
-- stage6_max_rounds = 13 (5 + 8)
-- max_degree = 5
-- bytecode_d = 2, ram_d = 4, instruction_d = 32
+### What Needs Fixing
+1. BytecodeReadRaf r_cycles: Need to derive from the opening accumulator:
+   - r_cycle_2 = ProductVirtualization r_cycle (from SpartanProductVirtualization/OutputSumcheck)
+   - r_cycle_3 = SpartanShift r_cycle (from InstructionInputVirtualization)
+   Need to check which opening points these correspond to in proof_converter.zig
 
-### Implementation Needed
+2. BytecodeReadRaf Val polynomials: Need bytecode preprocessing to compute per-stage Val values
 
-To generate correct Stage 6 proofs, need to implement:
+3. IncClaimReduction claim tracking: The p(1) = instance_claim - p(0) recovery requires
+   the EXACT instance claim, but we're using halving approximation.
+   Should compute from the round poly evaluation at the challenge point.
 
-1. **BytecodeReadRafSumcheckProver** (13 rounds, degree 3)
-   - Polynomial: Σ_i γ^i · [Val_i(addr) + RAF_i] · eq(r_cycle_i, x) · ∏ ra_j
-   - Needs: bytecode val polynomials, eq evaluations, RA chunks
-
-2. **HammingBooleanitySumcheckProver** (8 rounds, degree 3)
-   - Polynomial: eq(r_cycle, x) · (H(x)² - H(x))
-   - Zero for valid traces, but still needs proper eq factors
-
-3. **BooleanitySumcheckProver** (12 rounds, degree 3)
-   - Polynomial: eq(r_addr||r_cycle, x) · Σ γ^{2i} · (ra_i² - ra_i)
-   - Zero for valid traces, but still needs proper eq factors
-
-4. **RamRaVirtualSumcheckProver** (8 rounds, degree 5)
-   - Polynomial: eq(r_cycle, x) · ∏ ra_i(x)
-   - Needs: RAM address chunks, eq evaluation
-
-5. **LookupsRaVirtualSumcheckProver** (8 rounds, degree 5)
-   - Polynomial: eq(r_cycle, x) · Σ γ^i · ∏_j ra_{i·M+j}(x)
-   - Needs: instruction address chunks, eq evaluation
-
-6. **IncClaimReductionSumcheckProver** (8 rounds, degree 2)
-   - Polynomial: RamInc(x) · eq_combined + γ² · RdInc(x) · eq_combined
-   - Needs: RamInc/RdInc values, eq evaluations from stages 2,4,5
-
-### Architecture Decision
-These provers need to be implemented in proof_converter.zig as part of the
-`convertWithTranscript` function. Each prover materializes its polynomial
-evaluations over the trace, then runs the standard sumcheck protocol.
+### Implementation Order
+1. Fix IncClaimReduction claim tracking (most impactful, simplest fix)
+2. Fix BytecodeReadRaf r_cycles (need to trace through Jolt's opening accumulator)
+3. Compute BytecodeReadRaf Val polynomials from bytecode data
+4. Fix Stage 7 if needed
+5. End-to-end test
 
 ### Test Commands
 ```bash
@@ -68,9 +50,19 @@ zig build -Doptimize=ReleaseFast
 cd /home/vivado/projects/jolt && RAYON_NUM_THREADS=1 cargo run --release --features zolt-debug --manifest-path examples/fibonacci/Cargo.toml -- --verify-zolt-proof /tmp/zolt_proof.bin --zolt-preprocessing /tmp/zolt_preprocessing.bin.ram
 ```
 
-### Remaining Tasks
-1. [IN PROGRESS] Implement Stage 6 batched sumcheck provers
-2. [PENDING] Implement Stage 7 (HammingWeightClaimReduction)
-3. [PENDING] Clean up debug prints
-4. [PENDING] Verify end-to-end proof generation (all stages pass)
-5. [PENDING] Run full test suite (578+ tests)
+### Key Technical Details
+
+**Lookup index construction**: Uses INTERLEAVED bits (not concatenation)
+- rs1 bits go to odd positions (1,3,5,...,127)
+- rs2 bits go to even positions (0,2,4,...,126)
+- Result = (spread(rs1) << 1) | spread(rs2)
+
+**Chunk extraction ordering**: MSB-first
+- chunk_idx=0 extracts the most significant bits
+- shift = log_k_chunk * (d - 1 - chunk_idx)
+
+**RAM address remapping**: getLowestAddress() + division by 8
+- remapped = (addr - getLowestAddress()) / 8
+
+**LookupsRaVirtual r_address**: NOT reversed (from InstructionReadRaf which doesn't reverse address)
+**RamRaVirtual r_address**: IS reversed (from RamRaClaimReduction which reverses both)

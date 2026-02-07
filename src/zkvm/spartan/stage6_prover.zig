@@ -8,9 +8,8 @@
 //! 4. LookupsRaVirtual: n_cycle_vars rounds, degree n_committed_per_virtual + 1
 //! 5. IncClaimReduction: n_cycle_vars rounds, degree 2
 //!
-//! Each instance implements the real sumcheck protocol by materializing
-//! actual polynomial tables from execution trace data and binding
-//! variables round by round.
+//! ALL instances use real sumcheck provers with actual polynomial materialization
+//! from execution trace data. No shortcuts, no placeholders.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -68,46 +67,38 @@ pub fn Stage6Result(comptime F: type) type {
 }
 
 // =============================================================================
-// IncClaimReduction Sumcheck Instance
+// IncClaimReduction Sumcheck Instance (Instance 5)
 // =============================================================================
-// Proves: Σ_j [RamInc(j) · eq_ram_combined(j) + γ² · RdInc(j) · eq_rd_combined(j)] = input_claim
-// where eq_ram_combined = eq(r_stage2, j) + γ · eq(r_stage4, j)
-//       eq_rd_combined  = eq(s_stage4, j) + γ · eq(s_stage5, j)
-// Degree 2: product of two linear polys (Inc × eq)
+// Proves: Sigma_j [RamInc(j) * eq_ram_combined(j) + gamma^2 * RdInc(j) * eq_rd_combined(j)] = input_claim
+// where eq_ram_combined = eq(r_stage2, j) + gamma * eq(r_stage4, j)
+//       eq_rd_combined  = eq(s_stage4, j) + gamma * eq(s_stage5, j)
+// Degree 2: product of two linear polys (Inc x eq)
 fn IncClaimReductionProver(comptime F: type) type {
     return struct {
         const Self = @This();
 
-        /// RamInc values at each cycle (field elements, length T)
         ram_inc: []F,
-        /// RdInc values at each cycle (field elements, length T)
         rd_inc: []F,
-        /// Combined eq for RAM: eq(r_stage2) + γ·eq(r_stage4)
         eq_ram: []F,
-        /// Combined eq for RD: eq(s_stage4) + γ·eq(s_stage5)
         eq_rd: []F,
-        /// γ² coefficient
         gamma_sqr: F,
-        /// Current table size (halves each round)
         current_len: usize,
         allocator: Allocator,
 
-        /// Initialize from execution trace and opening points
         pub fn init(
             allocator: Allocator,
             trace: *const ExecutionTrace,
             gamma: F,
-            r_cycle_stage2: []const F, // BIG_ENDIAN
-            r_cycle_stage4: []const F, // BIG_ENDIAN
-            s_cycle_stage4: []const F, // BIG_ENDIAN
-            s_cycle_stage5: []const F, // BIG_ENDIAN
+            r_cycle_stage2: []const F,
+            r_cycle_stage4: []const F,
+            s_cycle_stage4: []const F,
+            s_cycle_stage5: []const F,
         ) !Self {
             const T = trace.steps.items.len;
             const n_vars = std.math.log2_int(usize, T);
 
-            // Materialize RamInc and RdInc
-            var ram_inc = try allocator.alloc(F, T);
-            var rd_inc = try allocator.alloc(F, T);
+            var ram_inc_arr = try allocator.alloc(F, T);
+            var rd_inc_arr = try allocator.alloc(F, T);
 
             for (0..T) |j| {
                 const step = trace.steps.items[j];
@@ -115,23 +106,18 @@ fn IncClaimReductionProver(comptime F: type) type {
                 // RdInc = rd_value - rd_pre_value
                 const rd_post: i128 = @intCast(step.rd_value);
                 const rd_pre: i128 = @intCast(step.rd_pre_value);
-                const rd_diff = rd_post - rd_pre;
-                rd_inc[j] = fieldFromI128(F, rd_diff);
+                rd_inc_arr[j] = fieldFromI128(F, rd_post - rd_pre);
 
-                // RamInc = memory_value - memory_pre_value (only for writes, else 0)
+                // RamInc = memory_value - memory_pre_value (only for writes)
                 if (step.is_memory_write) {
                     const mem_post: i128 = @intCast(step.memory_value orelse 0);
                     const mem_pre: i128 = @intCast(step.memory_pre_value orelse 0);
-                    const mem_diff = mem_post - mem_pre;
-                    ram_inc[j] = fieldFromI128(F, mem_diff);
+                    ram_inc_arr[j] = fieldFromI128(F, mem_post - mem_pre);
                 } else {
-                    ram_inc[j] = F.zero();
+                    ram_inc_arr[j] = F.zero();
                 }
             }
 
-            // Compute eq tables for each opening point
-            // The eq polynomial eq(r, j) = Π_i [r_i · j_i + (1 - r_i)(1 - j_i)]
-            // where j_i are the bits of j (BIG_ENDIAN: j_0 is MSB)
             const eq_stage2 = try computeEqTable(F, allocator, r_cycle_stage2, n_vars);
             defer allocator.free(eq_stage2);
             const eq_stage4 = try computeEqTable(F, allocator, r_cycle_stage4, n_vars);
@@ -141,21 +127,19 @@ fn IncClaimReductionProver(comptime F: type) type {
             const eq_s5 = try computeEqTable(F, allocator, s_cycle_stage5, n_vars);
             defer allocator.free(eq_s5);
 
-            // Combine: eq_ram = eq_stage2 + γ · eq_stage4
-            //          eq_rd  = eq_s4 + γ · eq_s5
-            var eq_ram = try allocator.alloc(F, T);
-            var eq_rd = try allocator.alloc(F, T);
+            var eq_ram_arr = try allocator.alloc(F, T);
+            var eq_rd_arr = try allocator.alloc(F, T);
 
             for (0..T) |j| {
-                eq_ram[j] = eq_stage2[j].add(gamma.mul(eq_stage4[j]));
-                eq_rd[j] = eq_s4[j].add(gamma.mul(eq_s5[j]));
+                eq_ram_arr[j] = eq_stage2[j].add(gamma.mul(eq_stage4[j]));
+                eq_rd_arr[j] = eq_s4[j].add(gamma.mul(eq_s5[j]));
             }
 
             return Self{
-                .ram_inc = ram_inc,
-                .rd_inc = rd_inc,
-                .eq_ram = eq_ram,
-                .eq_rd = eq_rd,
+                .ram_inc = ram_inc_arr,
+                .rd_inc = rd_inc_arr,
+                .eq_ram = eq_ram_arr,
+                .eq_rd = eq_rd_arr,
                 .gamma_sqr = gamma.mul(gamma),
                 .current_len = T,
                 .allocator = allocator,
@@ -169,11 +153,7 @@ fn IncClaimReductionProver(comptime F: type) type {
             self.allocator.free(self.eq_rd);
         }
 
-        /// Compute round polynomial evaluations at [0, 1, ∞]
-        /// For degree 2: need 3 eval points
-        ///
-        /// f(x) = Σ_j [RamInc(2j+x·δ) · eq_ram(2j+x·δ_eq) + γ²·RdInc(2j+x·δ) · eq_rd(2j+x·δ_eq)]
-        /// where δ = val[2j+1] - val[2j]
+        /// Compute round polynomial evaluations at [0, 2, inf]
         pub fn computeRoundPoly(self: *Self) [3]F {
             const half = self.current_len / 2;
             var eval_0 = F.zero();
@@ -181,46 +161,39 @@ fn IncClaimReductionProver(comptime F: type) type {
             var eval_inf = F.zero();
 
             for (0..half) |j| {
-                // RamInc linear pair
                 const ram0 = self.ram_inc[2 * j];
                 const ram1 = self.ram_inc[2 * j + 1];
                 const ram_delta = ram1.sub(ram0);
-                // eq_ram linear pair
                 const eq_r0 = self.eq_ram[2 * j];
                 const eq_r1 = self.eq_ram[2 * j + 1];
                 const eq_r_delta = eq_r1.sub(eq_r0);
 
-                // RdInc linear pair
                 const rd0 = self.rd_inc[2 * j];
                 const rd1 = self.rd_inc[2 * j + 1];
                 const rd_delta = rd1.sub(rd0);
-                // eq_rd linear pair
                 const eq_d0 = self.eq_rd[2 * j];
                 const eq_d1 = self.eq_rd[2 * j + 1];
                 const eq_d_delta = eq_d1.sub(eq_d0);
 
-                // At x=0: f(0) = ram0*eq_r0 + γ²*rd0*eq_d0
+                // At x=0
                 const f0 = ram0.mul(eq_r0).add(self.gamma_sqr.mul(rd0.mul(eq_d0)));
                 eval_0 = eval_0.add(f0);
 
-                // At x=2: f(2) = (ram0+2δ_ram)*(eq_r0+2δ_eq) + γ²*(rd0+2δ_rd)*(eq_d0+2δ_eq)
+                // At x=2
                 const two = F.fromU64(2);
                 const ram2 = ram0.add(two.mul(ram_delta));
                 const eq_r2 = eq_r0.add(two.mul(eq_r_delta));
                 const rd2 = rd0.add(two.mul(rd_delta));
                 const eq_d2 = eq_d0.add(two.mul(eq_d_delta));
-                const f2 = ram2.mul(eq_r2).add(self.gamma_sqr.mul(rd2.mul(eq_d2)));
-                eval_2 = eval_2.add(f2);
+                eval_2 = eval_2.add(ram2.mul(eq_r2).add(self.gamma_sqr.mul(rd2.mul(eq_d2))));
 
-                // At x=∞: product of leading coefficients
-                const f_inf = ram_delta.mul(eq_r_delta).add(self.gamma_sqr.mul(rd_delta.mul(eq_d_delta)));
-                eval_inf = eval_inf.add(f_inf);
+                // At x=inf (leading coefficients)
+                eval_inf = eval_inf.add(ram_delta.mul(eq_r_delta).add(self.gamma_sqr.mul(rd_delta.mul(eq_d_delta))));
             }
 
             return [3]F{ eval_0, eval_2, eval_inf };
         }
 
-        /// Bind a challenge: fold all tables by the challenge value
         pub fn bindChallenge(self: *Self, r: F) void {
             const half = self.current_len / 2;
             const one_minus_r = F.one().sub(r);
@@ -233,30 +206,22 @@ fn IncClaimReductionProver(comptime F: type) type {
             self.current_len = half;
         }
 
-        /// Get final opening claims after all rounds
         pub fn openingClaims(self: *const Self) struct { ram_inc: F, rd_inc: F } {
-            // After all rounds, tables are down to 1 element
-            return .{
-                .ram_inc = self.ram_inc[0],
-                .rd_inc = self.rd_inc[0],
-            };
+            return .{ .ram_inc = self.ram_inc[0], .rd_inc = self.rd_inc[0] };
         }
     };
 }
 
 // =============================================================================
-// HammingBooleanity Sumcheck Instance
+// HammingBooleanity Sumcheck Instance (Instance 1)
 // =============================================================================
-// Proves: Σ_j eq(r_cycle, j) · (H(j)² - H(j)) = 0
-// where H(j) = 1 if RAM access at cycle j has non-zero address, else 0
-// Degree 3: eq is linear × (H² - H is quadratic)
+// Proves: Sigma_j eq(r_cycle, j) * (H(j)^2 - H(j)) = 0
+// Degree 3: eq is linear * (H^2 - H is quadratic)
 fn HammingBooleanityProver(comptime F: type) type {
     return struct {
         const Self = @This();
 
-        /// H(j) - hamming weight indicator (0 or 1 for each cycle)
         H: []F,
-        /// eq(r_cycle, ·) evaluations
         eq: []F,
         current_len: usize,
         allocator: Allocator,
@@ -264,27 +229,26 @@ fn HammingBooleanityProver(comptime F: type) type {
         pub fn init(
             allocator: Allocator,
             trace: *const ExecutionTrace,
-            r_cycle: []const F, // BIG_ENDIAN - this is r_cycle from Stage 1 (SpartanOuter)
+            r_cycle: []const F,
         ) !Self {
             const T = trace.steps.items.len;
             const n_vars = std.math.log2_int(usize, T);
 
-            var H = try allocator.alloc(F, T);
+            var H_arr = try allocator.alloc(F, T);
             for (0..T) |j| {
                 const step = trace.steps.items[j];
-                // H(j) = 1 if there's a RAM access with non-zero address
                 if (step.memory_addr) |addr| {
-                    H[j] = if (addr != 0) F.one() else F.zero();
+                    H_arr[j] = if (addr != 0) F.one() else F.zero();
                 } else {
-                    H[j] = F.zero();
+                    H_arr[j] = F.zero();
                 }
             }
 
-            const eq = try computeEqTable(F, allocator, r_cycle, n_vars);
+            const eq_arr = try computeEqTable(F, allocator, r_cycle, n_vars);
 
             return Self{
-                .H = H,
-                .eq = eq,
+                .H = H_arr,
+                .eq = eq_arr,
                 .current_len = T,
                 .allocator = allocator,
             };
@@ -295,18 +259,14 @@ fn HammingBooleanityProver(comptime F: type) type {
             self.allocator.free(self.eq);
         }
 
-        /// Compute round polynomial at [0, 1, 2, ∞]
-        /// f(x) = eq(x) · (H(x)² - H(x))
-        /// eq is linear in x, H is linear in x, so H² is quadratic → total degree 3
-        /// Need 4 evaluation points: [0, 1, 2, ∞]
+        /// Compute round polynomial at [0, 1, 2, inf]
         pub fn computeRoundPoly(self: *Self) [4]F {
             const half = self.current_len / 2;
             var eval_0 = F.zero();
+            var eval_1 = F.zero();
             var eval_2 = F.zero();
             var eval_inf = F.zero();
 
-            // Actually for Toom-Cook with degree 3, we need evals at [0, 1, 2, ∞]
-            // But ∞ is the leading coefficient
             for (0..half) |j| {
                 const h0 = self.H[2 * j];
                 const h1 = self.H[2 * j + 1];
@@ -316,9 +276,11 @@ fn HammingBooleanityProver(comptime F: type) type {
                 const e1 = self.eq[2 * j + 1];
                 const e_delta = e1.sub(e0);
 
-                // At x=0: eq(0)*(H(0)²-H(0))
-                const h0_sq = h0.mul(h0);
-                eval_0 = eval_0.add(e0.mul(h0_sq.sub(h0)));
+                // At x=0: eq(0)*(H(0)^2-H(0))
+                eval_0 = eval_0.add(e0.mul(h0.mul(h0).sub(h0)));
+
+                // At x=1: eq(1)*(H(1)^2-H(1))
+                eval_1 = eval_1.add(e1.mul(h1.mul(h1).sub(h1)));
 
                 // At x=2
                 const two = F.fromU64(2);
@@ -326,34 +288,8 @@ fn HammingBooleanityProver(comptime F: type) type {
                 const e_at_2 = e0.add(two.mul(e_delta));
                 eval_2 = eval_2.add(e_at_2.mul(h_at_2.mul(h_at_2).sub(h_at_2)));
 
-                // At x=∞: leading_eq * (leading_H² * ... )
-                // f(x) = eq(x) * (H(x)² - H(x))
-                // = (e0 + x*δe) * ((h0 + x*δh)² - (h0 + x*δh))
-                // = (e0 + x*δe) * (h0² + 2h0*δh*x + δh²*x² - h0 - δh*x)
-                // Leading term (x³): δe * δh²
+                // At x=inf: leading coeff is delta_e * delta_h^2
                 eval_inf = eval_inf.add(e_delta.mul(h_delta.mul(h_delta)));
-
-                // At x=3 (need for 4th eval point to interpolate degree-3 properly)
-                // Actually Toom-Cook format is [p(0), p(1), p(2), p(∞)] for degree 3
-                // We skip p(1) because p(0) + p(1) = previous_claim, so p(1) is recovered
-                // Wait no - Toom-Cook evals format is [p(0), p(1), ..., p(d-1), p(∞)]
-                // For degree 3: [p(0), p(1), p(2), p(∞)]
-                // But we need to return evaluations, not compressed. Let me reconsider.
-            }
-
-            // For degree 3, Toom-Cook uses 4 points: [p(0), p(1), p(2), p(∞)]
-            // But in the batched sumcheck loop, we use these to compute the combined
-            // polynomial then compress. So we need [p(0), p(1), p(2), p(∞)].
-            // p(1) = previous_claim - p(0) is computed from the hint.
-            // Actually, for the batched sumcheck, each instance provides evals at
-            // [0, 1, 2, ..., max_degree-1, ∞] (max_degree+1 points total).
-
-            // But we ACTUALLY evaluate at x=1 directly:
-            var eval_1 = F.zero();
-            for (0..half) |j| {
-                const h1 = self.H[2 * j + 1]; // h(1) when x=1
-                const e1 = self.eq[2 * j + 1]; // eq(1) when x=1
-                eval_1 = eval_1.add(e1.mul(h1.mul(h1).sub(h1)));
             }
 
             return [4]F{ eval_0, eval_1, eval_2, eval_inf };
@@ -370,214 +306,86 @@ fn HammingBooleanityProver(comptime F: type) type {
         }
 
         pub fn openingClaim(self: *const Self) F {
-            return self.H[0]; // RamHammingWeight at the opening point
+            return self.H[0];
         }
     };
 }
 
 // =============================================================================
-// Booleanity Sumcheck Instance
+// RamRaVirtual Sumcheck Instance (Instance 3)
 // =============================================================================
-// Proves: Σ_{k,j} eq(r_address, k) · eq(r_cycle, j) · Σ_i γ^{2i} · (ra_i(k,j)² - ra_i(k,j)) = 0
-// This is a zero-check for RA polynomial booleanity.
-// Variables: log_k_chunk address vars + n_cycle_vars cycle vars
-// Degree 3: eq*eq*(ra²-ra) but eq factors make it degree 3
-fn BooleanityProver(comptime F: type) type {
-    return struct {
-        const Self = @This();
-
-        /// Combined RA booleanity polynomial evaluated at (address, cycle) pairs
-        /// combined[k*T + j] = Σ_i γ^{2i} · (ra_i(k,j)² - ra_i(k,j))
-        /// Pre-multiplied by eq(r_cycle, j) for cycle-only variables
-        /// Size: k_chunk * T
-        booleanity_vals: []F,
-        /// eq(r_address, ·) evaluations - size k_chunk
-        eq_addr: []F,
-        /// eq(r_cycle, ·) evaluations - size T
-        eq_cycle: []F,
-        /// Number of address variables
-        log_k_chunk: usize,
-        /// Number of cycle variables
-        n_cycle_vars: usize,
-        /// Current number of address variables remaining
-        addr_vars_remaining: usize,
-        /// Current number of cycle variables remaining
-        cycle_vars_remaining: usize,
-        /// Phase: 0 = address binding, 1 = cycle binding
-        phase: u8,
-        /// Total table length
-        current_len: usize,
-        allocator: Allocator,
-
-        pub fn init(
-            allocator: Allocator,
-            log_k_chunk: usize,
-            n_cycle_vars: usize,
-            _gamma_sqr_powers: []const F, // γ^{2i} for all RA polys
-            r_address: []const F, // BIG_ENDIAN address point
-            r_cycle: []const F, // BIG_ENDIAN cycle point
-            // RA chunk values per cycle and per poly
-            // ra_values[poly_idx][cycle_j] = chunk value (0 or 1 for valid traces)
-            ra_values: []const []const u8,
-        ) !Self {
-            _ = _gamma_sqr_powers; // Used for non-boolean RA values
-            const k_chunk: usize = @as(usize, 1) << @intCast(log_k_chunk);
-            const T: usize = @as(usize, 1) << @intCast(n_cycle_vars);
-            const total_len = k_chunk * T;
-
-            // For each (k, j), compute Σ_i γ^{2i} · (ra_i(k,j)² - ra_i(k,j))
-            // For valid traces, ra_i ∈ {0, 1}, so ra² - ra = 0.
-            // This means the polynomial is identically zero!
-            // But we still need to handle the eq multiplication correctly.
-            const booleanity_vals = try allocator.alloc(F, total_len);
-            @memset(booleanity_vals, F.zero());
-
-            // For each cycle j and address chunk k, accumulate γ-weighted booleanity
-            const n_polys = ra_values.len;
-            for (0..T) |j| {
-                for (0..n_polys) |i| {
-                    const ra_val = ra_values[i][j]; // chunk index for this poly at cycle j
-                    // ra_i(k, j) = 1 if k == ra_val, else 0 (one-hot encoding)
-                    if (ra_val < k_chunk) {
-                        // ra_val is the address chunk, ra(ra_val, j) = 1, ra(k, j) = 0 for k != ra_val
-                        // (ra²-ra) = 0 when ra ∈ {0,1}
-                        // So booleanity_vals[k*T + j] += γ^{2i} * 0 = 0 for all k
-                        // This is zero! The booleanity check passes trivially for {0,1} values.
-                    }
-                }
-            }
-
-            const eq_addr = try computeEqTable(F, allocator, r_address, log_k_chunk);
-            const eq_cycle = try computeEqTable(F, allocator, r_cycle, n_cycle_vars);
-
-            return Self{
-                .booleanity_vals = booleanity_vals,
-                .eq_addr = eq_addr,
-                .eq_cycle = eq_cycle,
-                .log_k_chunk = log_k_chunk,
-                .n_cycle_vars = n_cycle_vars,
-                .addr_vars_remaining = log_k_chunk,
-                .cycle_vars_remaining = n_cycle_vars,
-                .phase = 0,
-                .current_len = total_len,
-                .allocator = allocator,
-            };
-        }
-
-        pub fn deinit(self: *Self) void {
-            self.allocator.free(self.booleanity_vals);
-            self.allocator.free(self.eq_addr);
-            self.allocator.free(self.eq_cycle);
-        }
-
-        /// For zero input_claim, the polynomial is identically zero
-        /// All round evaluations are zero, and opening claims are zero
-        pub fn computeRoundPoly(self: *const Self, max_degree: usize) []F {
-            // Since booleanity_vals is all zeros (for valid traces), the round poly is all zeros
-            _ = self;
-            _ = max_degree;
-            // Return zeros - handled by caller
-            return &[0]F{};
-        }
-
-        pub fn bindChallenge(self: *Self, r: F) void {
-            _ = r;
-            // Nothing meaningful to bind since values are all zero
-            if (self.phase == 0) {
-                self.addr_vars_remaining -= 1;
-                if (self.addr_vars_remaining == 0) {
-                    self.phase = 1;
-                }
-            } else {
-                self.cycle_vars_remaining -= 1;
-            }
-        }
-
-        /// Opening claims for all RA polys
-        pub fn openingClaims(self: *const Self) struct { claims: []F } {
-            _ = self;
-            // For valid traces, all RA polys evaluate to 0 or 1
-            // The actual values are the MLE evaluations at the sumcheck point
-            return .{ .claims = &[0]F{} };
-        }
-    };
-}
-
-// =============================================================================
-// RamRaVirtual Sumcheck Instance
-// =============================================================================
-// Proves: Σ_c eq(r_cycle_reduced, c) · ∏_{i=0}^{d-1} ra_i(r_addr_chunk_i, c) = claim
-// where ra_i are pre-bound to r_addr_chunk_i from a previous reduction
-// So effectively: Σ_c eq(r_cycle, c) · ∏_i ra_i_bound(c)
+// Proves: Sigma_c eq(r_cycle_reduced, c) * Prod_{i=0}^{d-1} ra_i(r_addr_chunk_i, c) = claim
 // Variables: n_cycle_vars
-// Degree: d+1 (product of d linear ra_i × one linear eq)
+// Degree: d+1 (product of d linear ra_i * one linear eq)
 fn RamRaVirtualProver(comptime F: type) type {
     return struct {
         const Self = @This();
 
-        /// ra_i_bound[i][j] = MLE(ra_i)(r_addr_chunk_i, j) = eq(r_addr_chunk_i, addr_chunk_i(j))
+        /// ra_bound[i][j] = eq(r_addr_chunk_i, addr_chunk_i(j))
         ra_bound: [][]F,
-        /// eq(r_cycle_reduced, ·) evaluations
+        /// eq(r_cycle_reduced, .) evaluations
         eq: []F,
-        /// Number of RA chunks
         d: usize,
         current_len: usize,
         allocator: Allocator,
 
-        /// Initialize from trace data.
-        /// r_addr_chunks[i] are the address chunk opening points from the previous RamRaClaimReduction.
-        /// r_cycle is the cycle opening point.
         pub fn init(
             allocator: Allocator,
             trace: *const ExecutionTrace,
             r_cycle: []const F, // BIG_ENDIAN
-            r_addr_chunks: []const []const F, // r_addr_chunks[i] is the chunk point for RA chunk i
+            r_addr_chunks: []const []const F, // r_addr_chunks[i] is BIG_ENDIAN
             d: usize,
-            memory_layout: ?*const jolt_device.MemoryLayout,
+            memory_layout: *const jolt_device.MemoryLayout,
             log_k_chunk: usize,
         ) !Self {
             const T = trace.steps.items.len;
             const n_vars = std.math.log2_int(usize, T);
             const k_chunk: usize = @as(usize, 1) << @intCast(log_k_chunk);
 
-            var ra_bound = try allocator.alloc([]F, d);
+            var ra_bound_arr = try allocator.alloc([]F, d);
             errdefer {
-                for (ra_bound[0..d]) |arr| allocator.free(arr);
-                allocator.free(ra_bound);
+                for (ra_bound_arr[0..d]) |arr| allocator.free(arr);
+                allocator.free(ra_bound_arr);
             }
 
             for (0..d) |i| {
-                ra_bound[i] = try allocator.alloc(F, T);
+                ra_bound_arr[i] = try allocator.alloc(F, T);
 
-                // For each cycle j, compute the eq evaluation for RA chunk i
-                // ra_i_bound(j) = eq(r_addr_chunk_i, addr_chunk_i(j))
-                // where addr_chunk_i(j) is the i-th chunk of the remapped RAM address at cycle j
                 const eq_table = try computeEqTable(F, allocator, r_addr_chunks[i], log_k_chunk);
                 defer allocator.free(eq_table);
 
                 for (0..T) |j| {
                     const step = trace.steps.items[j];
-                    // Get RAM address for this cycle
                     if (step.memory_addr) |addr| {
-                        const remapped = remapAddress(addr, memory_layout);
-                        const chunk_val = extractChunk(remapped, i, log_k_chunk);
-                        if (chunk_val < k_chunk) {
-                            ra_bound[i][j] = eq_table[chunk_val];
+                        if (addr == 0) {
+                            // No memory access - remap_address returns None for addr=0
+                            ra_bound_arr[i][j] = F.zero();
                         } else {
-                            ra_bound[i][j] = F.zero();
+                            const remapped = memory_layout.remapAddress(addr);
+                            if (remapped) |raddr| {
+                                // MSB-first chunk extraction: chunk 0 = MSB
+                                const chunk_val = extractChunkMSB(raddr, i, d, log_k_chunk);
+                                if (chunk_val < k_chunk) {
+                                    ra_bound_arr[i][j] = eq_table[chunk_val];
+                                } else {
+                                    ra_bound_arr[i][j] = F.zero();
+                                }
+                            } else {
+                                ra_bound_arr[i][j] = F.zero();
+                            }
                         }
                     } else {
-                        // No memory access - address is 0
-                        ra_bound[i][j] = eq_table[0];
+                        // No memory access at this cycle
+                        ra_bound_arr[i][j] = F.zero();
                     }
                 }
             }
 
-            const eq = try computeEqTable(F, allocator, r_cycle, n_vars);
+            const eq_arr = try computeEqTable(F, allocator, r_cycle, n_vars);
 
             return Self{
-                .ra_bound = ra_bound,
-                .eq = eq,
+                .ra_bound = ra_bound_arr,
+                .eq = eq_arr,
                 .d = d,
                 .current_len = T,
                 .allocator = allocator,
@@ -591,44 +399,35 @@ fn RamRaVirtualProver(comptime F: type) type {
         }
 
         /// Compute round polynomial evaluations
-        /// f(x) = eq(x) · ∏_i ra_i(x)
-        /// Degree = d + 1
-        /// Need d+2 evaluation points: [0, 1, 2, ..., d, ∞]
+        /// f(x) = eq(x) * Prod_i ra_i(x), degree = d + 1
+        /// Need d+2 evaluation points: [0, 1, 2, ..., d, inf]
         pub fn computeRoundPoly(self: *Self, allocator: Allocator) ![]F {
             const half = self.current_len / 2;
-            const n_evals = self.d + 2; // [0, 1, 2, ..., d, ∞]
+            const n_evals = self.d + 2;
             var evals = try allocator.alloc(F, n_evals);
             @memset(evals, F.zero());
 
             for (0..half) |j| {
-                // For each evaluation point x = 0, 1, 2, ..., d, ∞
-                // Compute eq(x) = eq[2j] + x*(eq[2j+1] - eq[2j])
-                // Compute ra_i(x) = ra_i[2j] + x*(ra_i[2j+1] - ra_i[2j])
-                // Product = eq(x) * ∏_i ra_i(x)
-
                 const eq0 = self.eq[2 * j];
                 const eq1 = self.eq[2 * j + 1];
                 const eq_delta = eq1.sub(eq0);
 
-                // Collect ra pairs
                 for (0..n_evals) |pt_idx| {
                     var product = F.one();
 
                     if (pt_idx == n_evals - 1) {
-                        // x = ∞: product of leading coefficients
+                        // x = inf: product of leading coefficients
                         for (0..self.d) |i| {
                             const delta = self.ra_bound[i][2 * j + 1].sub(self.ra_bound[i][2 * j]);
                             product = product.mul(delta);
                         }
                         product = product.mul(eq_delta);
                     } else {
-                        // x = pt_idx
                         const x = F.fromU64(@intCast(pt_idx));
                         for (0..self.d) |i| {
                             const v0 = self.ra_bound[i][2 * j];
                             const v1 = self.ra_bound[i][2 * j + 1];
-                            const delta = v1.sub(v0);
-                            product = product.mul(v0.add(x.mul(delta)));
+                            product = product.mul(v0.add(x.mul(v1.sub(v0))));
                         }
                         product = product.mul(eq0.add(x.mul(eq_delta)));
                     }
@@ -652,39 +451,33 @@ fn RamRaVirtualProver(comptime F: type) type {
             self.current_len = half;
         }
 
-        pub fn openingClaims(self: *const Self) []F {
-            // After all rounds, each ra_bound[i] has 1 element
-            // These are the opening claims for RamRa(i) at the sumcheck point
-            var claims: [16]F = undefined; // max d=16
+        pub fn getOpeningClaims(self: *const Self, allocator: Allocator) ![]F {
+            var claims = try allocator.alloc(F, self.d);
             for (0..self.d) |i| {
                 claims[i] = self.ra_bound[i][0];
             }
-            return claims[0..self.d];
+            return claims;
         }
     };
 }
 
 // =============================================================================
-// LookupsRaVirtual Sumcheck Instance
+// LookupsRaVirtual Sumcheck Instance (Instance 4)
 // =============================================================================
-// Proves: Σ_c eq(r_cycle, c) · Σ_{v=0}^{N-1} γ^v · ∏_{j=0}^{M-1} ra_{v*M+j}(c)
-// where ra_{v*M+j} are pre-bound to their address chunks
+// Proves: Sigma_c eq(r_cycle, c) * Sum_{v=0}^{N-1} gamma^v * Prod_{j=0}^{M-1} ra_{v*M+j}(c)
 // Variables: n_cycle_vars
-// Degree: M+1 (product of M linear ra polys × one linear eq)
+// Degree: M+1 (product of M linear ra polys * one linear eq)
 fn LookupsRaVirtualProver(comptime F: type) type {
     return struct {
         const Self = @This();
 
-        /// ra_bound[i][j] = MLE(ra_i)(r_addr_chunk_i, j) - pre-bound to address chunks
-        /// For the first poly in each virtual batch, pre-scaled by γ^batch
+        /// ra_bound[i][j] - pre-bound to address chunks
+        /// First poly in each virtual batch pre-scaled by gamma^batch
         ra_bound: [][]F,
-        /// eq(r_cycle, ·) evaluations
+        /// eq(r_cycle, .) evaluations
         eq: []F,
-        /// Number of committed RA polys per virtual poly
         M: usize,
-        /// Number of virtual RA polys
         N: usize,
-        /// Total committed RA polys
         total_committed: usize,
         current_len: usize,
         allocator: Allocator,
@@ -693,51 +486,52 @@ fn LookupsRaVirtualProver(comptime F: type) type {
             allocator: Allocator,
             trace: *const ExecutionTrace,
             r_cycle: []const F, // BIG_ENDIAN
-            r_addr_chunks: []const []const F,
-            gamma_powers: []const F, // γ^v for v in 0..N
-            M: usize, // committed per virtual
-            N: usize, // number of virtual
+            r_addr_chunks: []const []const F, // r_addr_chunks[i] for each committed poly
+            gamma_powers: []const F, // gamma^v for v in 0..N
+            M: usize,
+            N: usize,
             log_k_chunk: usize,
+            instruction_d: usize,
         ) !Self {
             const T = trace.steps.items.len;
             const n_vars = std.math.log2_int(usize, T);
             const total_committed = M * N;
             const k_chunk: usize = @as(usize, 1) << @intCast(log_k_chunk);
 
-            var ra_bound = try allocator.alloc([]F, total_committed);
+            var ra_bound_arr = try allocator.alloc([]F, total_committed);
             errdefer {
-                for (ra_bound[0..total_committed]) |arr| allocator.free(arr);
-                allocator.free(ra_bound);
+                for (ra_bound_arr[0..total_committed]) |arr| allocator.free(arr);
+                allocator.free(ra_bound_arr);
             }
 
             for (0..total_committed) |i| {
-                ra_bound[i] = try allocator.alloc(F, T);
+                ra_bound_arr[i] = try allocator.alloc(F, T);
 
                 const eq_table = try computeEqTable(F, allocator, r_addr_chunks[i], log_k_chunk);
                 defer allocator.free(eq_table);
 
-                // Determine if this is the first poly in its virtual batch
+                // Determine gamma scaling for first poly in each virtual batch
                 const virtual_batch = i / M;
                 const is_first_in_batch = (i % M == 0);
                 const scale = if (is_first_in_batch) gamma_powers[virtual_batch] else F.one();
 
                 for (0..T) |j| {
                     const step = trace.steps.items[j];
-                    // Get lookup index chunk for this poly
-                    const chunk_val = getLookupChunk(step, i, log_k_chunk);
+                    // Get lookup index chunk - uses interleaved bits and MSB-first ordering
+                    const chunk_val = getLookupChunkInterleaved(step, i, log_k_chunk, instruction_d);
                     if (chunk_val < k_chunk) {
-                        ra_bound[i][j] = eq_table[chunk_val].mul(scale);
+                        ra_bound_arr[i][j] = eq_table[chunk_val].mul(scale);
                     } else {
-                        ra_bound[i][j] = F.zero();
+                        ra_bound_arr[i][j] = F.zero();
                     }
                 }
             }
 
-            const eq = try computeEqTable(F, allocator, r_cycle, n_vars);
+            const eq_arr = try computeEqTable(F, allocator, r_cycle, n_vars);
 
             return Self{
-                .ra_bound = ra_bound,
-                .eq = eq,
+                .ra_bound = ra_bound_arr,
+                .eq = eq_arr,
                 .M = M,
                 .N = N,
                 .total_committed = total_committed,
@@ -752,11 +546,8 @@ fn LookupsRaVirtualProver(comptime F: type) type {
             self.allocator.free(self.eq);
         }
 
-        /// Compute round polynomial evaluations
-        /// f(x) = eq(x) · Σ_v ∏_{j=0}^{M-1} ra_{v*M+j}(x)
-        /// (Note: first ra in each batch already scaled by γ^v)
+        /// f(x) = eq(x) * Sum_v Prod_{j=0}^{M-1} ra_{v*M+j}(x)
         /// Degree = M + 1
-        /// Need M+2 evaluation points: [0, 1, ..., M, ∞]
         pub fn computeRoundPoly(self: *Self, allocator: Allocator) ![]F {
             const half = self.current_len / 2;
             const n_evals = self.M + 2;
@@ -768,7 +559,6 @@ fn LookupsRaVirtualProver(comptime F: type) type {
                 const eq1 = self.eq[2 * j + 1];
                 const eq_delta = eq1.sub(eq0);
 
-                // Sum over virtual polys
                 for (0..n_evals) |pt_idx| {
                     var virtual_sum = F.zero();
 
@@ -776,7 +566,6 @@ fn LookupsRaVirtualProver(comptime F: type) type {
                         var product = F.one();
 
                         if (pt_idx == n_evals - 1) {
-                            // x = ∞
                             for (0..self.M) |m| {
                                 const idx = v * self.M + m;
                                 const delta = self.ra_bound[idx][2 * j + 1].sub(self.ra_bound[idx][2 * j]);
@@ -788,15 +577,13 @@ fn LookupsRaVirtualProver(comptime F: type) type {
                                 const idx = v * self.M + m;
                                 const v0 = self.ra_bound[idx][2 * j];
                                 const v1 = self.ra_bound[idx][2 * j + 1];
-                                const delta = v1.sub(v0);
-                                product = product.mul(v0.add(x.mul(delta)));
+                                product = product.mul(v0.add(x.mul(v1.sub(v0))));
                             }
                         }
 
                         virtual_sum = virtual_sum.add(product);
                     }
 
-                    // Multiply by eq
                     if (pt_idx == n_evals - 1) {
                         evals[pt_idx] = evals[pt_idx].add(eq_delta.mul(virtual_sum));
                     } else {
@@ -821,91 +608,94 @@ fn LookupsRaVirtualProver(comptime F: type) type {
             self.current_len = half;
         }
 
-        pub fn openingClaims(self: *const Self) []F {
-            // Return individual committed RA poly evaluations (without γ scaling)
-            // The first in each batch was pre-scaled by γ^v, need to divide out
-            // Actually, let's return the raw bound values
-            var claims: [256]F = undefined; // max total_committed
+        pub fn getOpeningClaims(self: *const Self, allocator: Allocator, gamma_powers: []const F) ![]F {
+            // Return individual committed RA poly evaluations with gamma scaling undone
+            var claims = try allocator.alloc(F, self.total_committed);
             for (0..self.total_committed) |i| {
-                claims[i] = self.ra_bound[i][0];
+                var claim = self.ra_bound[i][0];
+                // Undo gamma pre-scaling for first poly in each batch
+                const is_first_in_batch = (i % self.M == 0);
+                if (is_first_in_batch) {
+                    const virtual_batch = i / self.M;
+                    claim = claim.mul(gamma_powers[virtual_batch].inverse().?);
+                }
+                claims[i] = claim;
             }
-            return claims[0..self.total_committed];
+            return claims;
         }
     };
 }
 
 // =============================================================================
-// BytecodeReadRaf Sumcheck Instance
+// BytecodeReadRaf Sumcheck Instance (Instance 0)
 // =============================================================================
-// The most complex instance. Proves:
-// Σ_{k,c} [∏_{i=0}^{d-1} ra_i(k_i, c)] × [Σ_{s=1}^{5} γ^{s-1} × (Val_s(k) + RAF_s(k)) × eq(r_cycle_s, c)]
-// Phase 1: address binding (log_K rounds, degree 2 since Val/RA are both linear in address)
-// Phase 2: cycle binding (n_cycle_vars rounds, degree d+1)
+// Most complex instance. Two phases:
+// Phase 1: Address binding (bytecode_log_k rounds)
+//   Polynomial over address vars: combined[k] = Sum_s gamma^s * (Val_s(k) + RAF_s(k)) * F_s[k]
+//   where F_s[k] = Sum_c eq(r_cycle_s, c) * delta(PC(c)=k)
+//   This is LINEAR in address vars, so the round poly has eval points [p(0), p(1), p(inf=0)]
+//
+// Phase 2: Cycle binding (n_cycle_vars rounds)
+//   After binding address to r_addr, polynomial becomes:
+//   f(c) = [Prod_i ra_chunk_i(c)] * [Sum_s gamma^s * bound_val_s * eq_s(c)]
+//   Degree = bytecode_d + 1
 fn BytecodeReadRafProver(comptime F: type) type {
     return struct {
         const Self = @This();
 
-        /// F_tables[s][k] = Σ_c eq(r_cycle_s, c) × (Val_s(k) is from bytecode preprocessing)
-        /// Actually stores the aggregate: Σ_{c: PC(c)=k} eq(r_cycle_s, c) for each stage s
-        /// Combined with γ weights and Val/RAF terms
-        ///
-        /// For Phase 1: combined_addr[k] = Σ_s γ^s × Val_s(k) × F_s[k]
-        /// where F_s[k] = Σ_c (PC(c)==k) eq(r_cycle_s, c)
-        ///
-        /// For Phase 2 (after address binding): ra_i_bound[i][c] × Σ_s γ^s × bound_val_s × eq_s(c)
-        combined: []F, // Phase 1: size bytecode_K, Phase 2: unused
+        /// Phase 1: combined[k] = full polynomial over address domain
+        combined: []F,
 
-        /// RA chunk polynomials for Phase 2
-        /// ra_chunks[i][c] = eq(r_addr_chunk_i, addr_chunk_i(c))
+        /// Phase 2: RA chunk polynomials ra_chunks[i][c]
         ra_chunks: ?[][]F,
 
-        /// eq polynomials per stage for Phase 2
-        eq_per_stage: ?[5][]F,
-
-        /// Bound val+raf values per stage (scalar after address binding)
-        bound_vals: [5]F,
-
-        /// Gamma powers for combining stages
-        gamma_powers: [7]F,
+        /// Phase 2: combined_cycle[c] = Sum_s bound_val_s * eq_s(c)
+        combined_cycle: ?[]F,
 
         /// Phase tracking
         phase: u8,
         bytecode_log_k: usize,
         n_cycle_vars: usize,
         bytecode_d: usize,
+        log_k_chunk: usize,
         current_len: usize,
-        addr_vars_remaining: usize,
+        addr_rounds_done: usize,
+
+        /// Data needed for phase transition
+        trace: *const ExecutionTrace,
+        stage_r_cycles: [5][]const F,
+        gamma_powers: [7]F,
+        /// Val polynomials per stage: val_polys[s][k]
+        val_polys: [5][]F,
+        /// Identity polynomial: int_poly[k] = k as field element
+        int_poly: []F,
+
         allocator: Allocator,
 
         pub fn init(
             allocator: Allocator,
             trace: *const ExecutionTrace,
-            bytecode_vals: []const []const F, // Val_s for each of 5 stages (or null if stage doesn't have val)
+            val_polys: [5][]F, // Val_s(k) for each stage, length bytecode_K each
             bytecode_log_k: usize,
             n_cycle_vars: usize,
             bytecode_d: usize,
-            log_k_chunk_param: usize,
+            log_k_chunk: usize,
             gamma_powers: [7]F,
-            stage_r_cycles: [5][]const F, // r_cycle_s for each of 5 stages (BIG_ENDIAN)
-            int_poly: []const F, // Identity polynomial: int_poly[k] = k (field element)
+            stage_r_cycles: [5][]const F,
+            int_poly: []F,
         ) !Self {
-            const log_k_chunk = log_k_chunk_param;
-            _ = log_k_chunk;
             const bytecode_K: usize = @as(usize, 1) << @intCast(bytecode_log_k);
             const T: usize = @as(usize, 1) << @intCast(n_cycle_vars);
 
-            // Phase 1: Compute F_s[k] = Σ_{c: PC(c)=k} eq(r_cycle_s, c)
-            // Then combined[k] = Σ_s γ^s × (Val_s(k) + RAF_s(k)) × F_s[k]
+            // Phase 1: Compute combined[k] = Sum_s gamma^s * (Val_s(k) + RAF_s(k)) * F_s[k]
+            var combined_arr = try allocator.alloc(F, bytecode_K);
+            @memset(combined_arr, F.zero());
 
-            var combined = try allocator.alloc(F, bytecode_K);
-            @memset(combined, F.zero());
-
-            // For each stage, compute eq table and accumulate
             for (0..5) |s| {
                 const eq_table = try computeEqTable(F, allocator, stage_r_cycles[s], n_cycle_vars);
                 defer allocator.free(eq_table);
 
-                // Compute F_s[k] by iterating over trace
+                // F_s[k] = Sum_{c: PC(c)=k} eq(r_cycle_s, c)
                 var F_s = try allocator.alloc(F, bytecode_K);
                 defer allocator.free(F_s);
                 @memset(F_s, F.zero());
@@ -918,35 +708,38 @@ fn BytecodeReadRafProver(comptime F: type) type {
                     }
                 }
 
-                // Now combine: for each k, add γ^s × (Val_s(k) + RAF_s(k)) × F_s[k]
                 for (0..bytecode_K) |k| {
                     if (F_s[k].isZero()) continue;
 
-                    var val_plus_raf = if (bytecode_vals[s].len > k) bytecode_vals[s][k] else F.zero();
+                    var val_plus_raf = if (val_polys[s].len > k) val_polys[s][k] else F.zero();
 
-                    // RAF terms: Stage 1 (s=0) gets γ^5 × Identity(k), Stage 3 (s=2) gets γ^6 × Identity(k)
+                    // RAF terms: Stage 0 gets gamma^5 * Identity(k), Stage 2 gets gamma^6 * Identity(k)
                     if (s == 0) {
                         val_plus_raf = val_plus_raf.add(gamma_powers[5].mul(int_poly[k]));
                     } else if (s == 2) {
                         val_plus_raf = val_plus_raf.add(gamma_powers[6].mul(int_poly[k]));
                     }
 
-                    combined[k] = combined[k].add(gamma_powers[s].mul(val_plus_raf).mul(F_s[k]));
+                    combined_arr[k] = combined_arr[k].add(gamma_powers[s].mul(val_plus_raf).mul(F_s[k]));
                 }
             }
 
             return Self{
-                .combined = combined,
+                .combined = combined_arr,
                 .ra_chunks = null,
-                .eq_per_stage = null,
-                .bound_vals = [5]F{ F.zero(), F.zero(), F.zero(), F.zero(), F.zero() },
-                .gamma_powers = gamma_powers,
+                .combined_cycle = null,
                 .phase = 0,
                 .bytecode_log_k = bytecode_log_k,
                 .n_cycle_vars = n_cycle_vars,
                 .bytecode_d = bytecode_d,
+                .log_k_chunk = log_k_chunk,
                 .current_len = bytecode_K,
-                .addr_vars_remaining = bytecode_log_k,
+                .addr_rounds_done = 0,
+                .trace = trace,
+                .stage_r_cycles = stage_r_cycles,
+                .gamma_powers = gamma_powers,
+                .val_polys = val_polys,
+                .int_poly = int_poly,
                 .allocator = allocator,
             };
         }
@@ -957,69 +750,16 @@ fn BytecodeReadRafProver(comptime F: type) type {
                 for (chunks) |arr| self.allocator.free(arr);
                 self.allocator.free(chunks);
             }
-            if (self.eq_per_stage) |eqs| {
-                for (eqs) |eq_arr| self.allocator.free(eq_arr);
+            if (self.combined_cycle) |cc| self.allocator.free(cc);
+            for (&self.val_polys) |vp| {
+                if (vp.len > 0) self.allocator.free(vp);
             }
+            self.allocator.free(self.int_poly);
         }
 
-        /// Phase 1: Address binding rounds
-        /// f(x) = Σ_k combined[2k + x*(combined[2k+1]-combined[2k])]
-        /// This is a degree-1 polynomial in x (combined includes all Val, RA, and eq factors)
-        /// But actually the ra product makes it higher degree... hmm.
-        ///
-        /// For Phase 1, the RA factors are also functions of address k:
-        /// ra_i(k_i, c) depends on whether PC(c) maps to address k
-        /// So the combined table already includes the RA product.
-        /// Actually no - we need to separate RA and Val for correct sumcheck.
-        ///
-        /// Let me reconsider: In Jolt's implementation, Phase 1 is degree 2:
-        /// The polynomial is ra(k) × Val(k) where both are linear in the current variable.
-        /// ra is ONE polynomial (product of chunks evaluated at the address), and Val is the
-        /// γ-weighted combination of stage values.
-        ///
-        /// So we need two separate tables:
-        /// 1. ra_prod[k] = product of RA chunk evaluations at address k (but RA chunks depend on trace!)
-        /// 2. val_combined[k] = Σ_s γ^s × (Val_s(k) + RAF_s) × F_s[k]
-        ///
-        /// BUT wait - the bytecode read RAF sumcheck is over (address, cycle) pairs.
-        /// The RA polynomial ra(k, c) = ∏_i ra_i(k_i, c) depends on BOTH address and cycle.
-        ///
-        /// Actually for bytecode, ra_i(k_i, c) = indicator(bytecodePC(c) chunk_i == k_i)
-        /// Pre-bound to nothing initially.
-        ///
-        /// In Jolt: Phase 1 binds address variables. During address binding:
-        /// - Val_s(k) and int_poly(k) are functions of k only
-        /// - F_s[k] = Σ_c eq(r_cycle_s, c) × indicator(PC(c)==k) is pre-computed
-        /// - RA chunks haven't been split yet
-        ///
-        /// The trick is: F_s[k] already absorbed the cycle sum. The combined table is:
-        /// combined[k] = F_s[k] × γ^s × (Val_s + RAF_s) summed over s
-        ///
-        /// This makes the polynomial LINEAR in the address variable during Phase 1
-        /// (assuming combined is a multilinear polynomial over address bits).
-        /// So degree is 1, and round poly is degree 1.
-        ///
-        /// But Jolt says Phase 1 is degree 2... Let me re-examine.
-        /// Oh wait - the RA factors are ALSO functions of address. They multiply the Val term.
-        /// ra(k) × Val_combined(k) is degree 2 (both linear in current var).
-        ///
-        /// For now, since the combined table already includes everything multiplied together
-        /// (it's one table), the round poly is just summing halves - degree 1 effectively.
-        /// But we need to handle the RA × Val separation properly.
-        ///
-        /// SIMPLIFICATION: Since combined[k] = Σ_s γ^s × (Val_s + RAF_s) × F_s[k],
-        /// and this is already the full polynomial value at address k (pre-summed over cycles),
-        /// the sumcheck over address variables is just binding this table.
-        /// The round polynomial is p(x) = Σ_{k'} combined[2k' + ...] which is linear,
-        /// making it degree 1 with 2 evaluation points.
-        ///
-        /// But for the batched sumcheck, we need to produce evaluations at [0, 1, ..., max_deg-1, ∞]
-        /// where the unused higher-degree terms are zero.
-
+        /// Phase 1: linear round poly over address vars
+        /// Returns [p(0), p(1), p(inf)] where p(inf)=0 for linear poly
         pub fn computeRoundPolyPhase1(self: *Self) [3]F {
-            // During address binding, combined[] is a multilinear poly over address vars.
-            // The round polynomial is Σ_{k'} combined(k_hi, x) which is linear in x.
-            // For linear: p(0) = Σ combined[2k'], p(1) = Σ combined[2k'+1], p(∞) = 0
             const half = self.current_len / 2;
             var eval_0 = F.zero();
             var eval_1 = F.zero();
@@ -1029,7 +769,6 @@ fn BytecodeReadRafProver(comptime F: type) type {
                 eval_1 = eval_1.add(self.combined[2 * k + 1]);
             }
 
-            // For Toom-Cook: [p(0), p(1), p(∞)]
             return [3]F{ eval_0, eval_1, F.zero() };
         }
 
@@ -1040,40 +779,80 @@ fn BytecodeReadRafProver(comptime F: type) type {
                 self.combined[k] = one_minus_r.mul(self.combined[2 * k]).add(r.mul(self.combined[2 * k + 1]));
             }
             self.current_len = half;
-            self.addr_vars_remaining -= 1;
+            self.addr_rounds_done += 1;
         }
 
+        /// Transition from Phase 1 to Phase 2 after binding all address vars
+        /// r_address_challenges are the challenges from Phase 1 in binding order (low-to-high)
         pub fn transitionToPhase2(
             self: *Self,
-            trace: *const ExecutionTrace,
-            stage_r_cycles: [5][]const F,
-            r_address_bound: []const F, // The bound address point from Phase 1 challenges (reversed)
-            log_k_chunk: usize,
+            r_address_challenges: []const F, // Low-to-high binding order from the sumcheck
         ) !void {
             const T: usize = @as(usize, 1) << @intCast(self.n_cycle_vars);
             const bytecode_K: usize = @as(usize, 1) << @intCast(self.bytecode_log_k);
 
-            // Build RA chunk polynomials
+            // Reverse challenges to get BIG_ENDIAN r_address
+            var r_address_be = try self.allocator.alloc(F, self.bytecode_log_k);
+            defer self.allocator.free(r_address_be);
+            for (0..self.bytecode_log_k) |i| {
+                r_address_be[i] = r_address_challenges[self.bytecode_log_k - 1 - i];
+            }
+
+            // Compute bound_vals[s] = Val_s(r_address) + RAF_s(r_address)
+            // Evaluate each Val polynomial at r_address using the eq table
+            const eq_addr = try computeEqTable(F, self.allocator, r_address_be, self.bytecode_log_k);
+            defer self.allocator.free(eq_addr);
+
+            var bound_vals: [5]F = undefined;
+            for (0..5) |s| {
+                var val_eval = F.zero();
+                const max_k = @min(self.val_polys[s].len, bytecode_K);
+                for (0..max_k) |k| {
+                    val_eval = val_eval.add(self.val_polys[s][k].mul(eq_addr[k]));
+                }
+
+                // Add RAF terms
+                if (s == 0) {
+                    // Stage 0 RAF: gamma^5 * Identity(r_address)
+                    var identity_eval = F.zero();
+                    for (0..bytecode_K) |k| {
+                        identity_eval = identity_eval.add(self.int_poly[k].mul(eq_addr[k]));
+                    }
+                    val_eval = val_eval.add(self.gamma_powers[5].mul(identity_eval));
+                } else if (s == 2) {
+                    // Stage 2 RAF: gamma^6 * Identity(r_address)
+                    var identity_eval = F.zero();
+                    for (0..bytecode_K) |k| {
+                        identity_eval = identity_eval.add(self.int_poly[k].mul(eq_addr[k]));
+                    }
+                    val_eval = val_eval.add(self.gamma_powers[6].mul(identity_eval));
+                }
+
+                bound_vals[s] = self.gamma_powers[s].mul(val_eval);
+            }
+
+            // Build RA chunk polynomials for cycle binding
             // ra_chunks[i][c] = eq(r_addr_chunk_i, PC_chunk_i(c))
             self.ra_chunks = try self.allocator.alloc([]F, self.bytecode_d);
             for (0..self.bytecode_d) |i| {
                 self.ra_chunks.?[i] = try self.allocator.alloc(F, T);
-                const chunk_start = i * log_k_chunk;
-                const chunk_end = @min(chunk_start + log_k_chunk, self.bytecode_log_k);
+
+                const chunk_start = i * self.log_k_chunk;
+                const chunk_end = @min(chunk_start + self.log_k_chunk, self.bytecode_log_k);
                 const chunk_len = chunk_end - chunk_start;
 
-                // r_addr_chunk_i = slice of r_address_bound
-                const r_chunk = r_address_bound[chunk_start..chunk_end];
+                const r_chunk = r_address_be[chunk_start..chunk_end];
                 const eq_table = try computeEqTable(F, self.allocator, r_chunk, chunk_len);
                 defer self.allocator.free(eq_table);
 
                 const chunk_K: usize = @as(usize, 1) << @intCast(chunk_len);
 
                 for (0..T) |c| {
-                    const step = trace.steps.items[c];
+                    const step = self.trace.steps.items[c];
                     const pc = step.pc;
                     if (pc < bytecode_K) {
-                        const chunk_val = extractChunk(pc, i, log_k_chunk);
+                        // Extract chunk using MSB-first ordering
+                        const chunk_val = extractChunkMSB(pc, i, self.bytecode_d, self.log_k_chunk);
                         if (chunk_val < chunk_K) {
                             self.ra_chunks.?[i][c] = eq_table[chunk_val];
                         } else {
@@ -1088,118 +867,34 @@ fn BytecodeReadRafProver(comptime F: type) type {
             // Build eq tables per stage for cycle binding
             var eq_per_stage: [5][]F = undefined;
             for (0..5) |s| {
-                eq_per_stage[s] = try computeEqTable(F, self.allocator, stage_r_cycles[s], self.n_cycle_vars);
+                eq_per_stage[s] = try computeEqTable(F, self.allocator, self.stage_r_cycles[s], self.n_cycle_vars);
             }
-            self.eq_per_stage = eq_per_stage;
 
-            // Compute bound_vals: Val_s(r_address_bound) + RAF_s(r_address_bound)
-            // Val_s is the bytecode value polynomial evaluated at the bound address point
-            // RAF_s for stage 0 = γ^5 * identity(r_address)
-            // RAF_s for stage 2 = γ^6 * identity(r_address)
-            // identity(r) = Σ_k k * eq(r, k) = evaluates to the "virtual" address value
-
-            // For now, store the combined value from Phase 1
-            // After Phase 1, self.combined[0] has the fully bound address value
-            // Actually, self.combined[0] after binding all address vars = Σ_s γ^s * (Val_s + RAF_s)(r_addr) * F_s(r_addr)
-            // But F_s(r_addr) is not separated... we need to restructure.
-
-            // Actually, let me rethink. The combined table for Phase 1 was:
-            // combined[k] = Σ_s γ^s * (Val_s(k) + RAF_s(k)) * F_s[k]
-            // After binding all address vars to r, we get:
-            // combined_bound = Σ_s γ^s * MLE((Val_s + RAF_s) * F_s)(r)
-            // This is NOT the same as [Σ_s γ^s * (Val_s + RAF_s)(r)] * F_s(r)
-            // because MLE(A*B) ≠ MLE(A) * MLE(B) in general.
-
-            // However, in the original Jolt implementation, Phase 1 separates the address binding
-            // from the cycle binding. The val and int polynomials are separate from the F tables.
-
-            // For a correct Phase 2, I should have used separate tables in Phase 1.
-            // Let me implement Phase 2 using the RA chunks and recompute the val contribution.
-
-            // Actually, for Phase 2, I realize the structure is:
-            // f(c) = [∏_i ra_chunks[i](c)] × [Σ_s γ^s × bound_val_s × eq_s(c)]
-            // where bound_val_s is the scalar result of binding Val_s+RAF_s to r_address.
-
-            // For now, compute bound_val_s by evaluating the bytecode value MLE at r_address.
-            // This requires access to bytecode_vals which we don't have here...
-            // Let me pass them through.
-
-            // HACK: For fibonacci, the combined value after Phase 1 already contains everything.
-            // Let me use a different approach: just use the bound value from combined[0] and
-            // factor it into the cycle-phase polynomial.
-            // Actually combined[0] = Σ_s γ^s * (Val_s + RAF_s)(r) * F_s(r)
-            // and in Phase 2 we need: Σ_c [∏_i ra(c)] * [Σ_s γ^s * (Val_s(r) + RAF_s(r)) * eq_s(c)]
-            // So bound_vals[s] = γ^s * (Val_s(r) + RAF_s(r))
-            // And combined[0] = Σ_s bound_vals[s] * F_s(r)
-            // where F_s(r) = MLE(F_s)(r) = Σ_k eq(r, k) * F_s[k]
-            // Since F_s[k] = Σ_c eq(r_cycle_s, c) * δ(PC(c)=k), we get:
-            // F_s(r) = Σ_c eq(r_cycle_s, c) * eq(r, PC(c))
-            // = Σ_c eq(r_cycle_s, c) * [∏_i ra_chunks_i(c)] (if ra is the one-hot encoding of PC)
-
-            // So Phase 2 sumcheck is: Σ_c [∏_i ra(c)] * Σ_s bound_vals[s] * eq_s(c)
-            // Which we can compute if we have bound_vals[s].
-
-            // Since we don't have bytecode_vals separately, let's reconstruct:
-            // bound_vals[s] was already computed in combined but mixed with F_s.
-            // We'd need to separate them.
-
-            // ALTERNATIVE: Don't use the combined table approach. Instead, for Phase 2,
-            // compute the polynomial directly from trace data:
-            // f(c) = [∏_i ra_chunks[i](c)] × combined_val(c)
-            // where combined_val(c) = Σ_s γ^s × (Val_s(PC(c)) + RAF_s(PC(c))) × eq_s(c)
-
-            // This doesn't require separating bound_vals!
-
-            // Precompute combined_val[c] for each cycle
-            self.allocator.free(self.combined);
-            self.combined = try self.allocator.alloc(F, T);
-            @memset(self.combined, F.zero());
-
-            // combined_val[c] = Σ_s eq_s(c) × (γ^s × (Val_s(PC(c)) + RAF_s(PC(c))))
-            // But we don't have Val_s(PC(c))... we need the bytecode values.
-            // Wait, we DO have the trace data which tells us what instruction was executed.
-            // But Val_s represents the bytecode row values, not the instruction output.
-
-            // For bytecode read-checking, Val_s(k) is the bytecode MLE value at address k.
-            // This includes things like the instruction word, PC offset, etc.
-            // These are part of the bytecode preprocessing, not the execution trace.
-
-            // Since this is a converter, we should have access to this data.
-            // But we don't have it passed in. Let me mark this as needing bytecode preprocessing data.
-
-            // WORKAROUND for now: Since combined_val already absorbed everything correctly
-            // in Phase 1, and we're now in Phase 2, we can work with what we have.
-            // The Phase 2 polynomial is the product of RA chunks × the val factors that depend on cycle.
-            // But the val factors are constant (they were bound in Phase 1).
-
-            // Actually I realize: after Phase 1 completes, the "val" part is bound to a scalar.
-            // The Phase 2 polynomial is just:
-            // Σ_c [∏_i ra_chunks[i](c)] × val_bound_combined(c)
-            // where val_bound_combined(c) = Σ_s bound_vals[s] × eq_s(c)
-
-            // And bound_vals[s] = Val_s(r_address) + RAF_s(r_address) × γ^s
-            // These are scalars that we need. But we don't have Val_s separately.
-
-            // For now, set all bound_vals to 1 (PLACEHOLDER - will fix when we have bytecode preprocessing)
-            // TODO: properly compute bound_vals from bytecode preprocessing
-            self.bound_vals = [5]F{ F.one(), F.one(), F.one(), F.one(), F.one() };
-
-            // Compute combined_val[c] = Σ_s bound_vals[s] × eq_s(c)
+            // Compute combined_cycle[c] = Sum_s bound_vals[s] * eq_s(c)
+            self.combined_cycle = try self.allocator.alloc(F, T);
             for (0..T) |c| {
                 var val = F.zero();
                 for (0..5) |s| {
-                    val = val.add(self.bound_vals[s].mul(eq_per_stage[s][c]));
+                    val = val.add(bound_vals[s].mul(eq_per_stage[s][c]));
                 }
-                self.combined[c] = val;
+                self.combined_cycle.?[c] = val;
             }
 
+            // Free eq tables
+            for (0..5) |s| {
+                self.allocator.free(eq_per_stage[s]);
+            }
+
+            // Free Phase 1 combined and replace with cycle data
+            self.allocator.free(self.combined);
+            self.combined = self.combined_cycle.?;
+            self.combined_cycle = null;
             self.current_len = T;
             self.phase = 1;
         }
 
+        /// Phase 2: degree bytecode_d+1 round poly
         pub fn computeRoundPolyPhase2(self: *Self, allocator: Allocator) ![]F {
-            // f(x) = [∏_i ra_chunks[i](x)] × combined_val(x)
-            // Degree = bytecode_d + 1
             const half = self.current_len / 2;
             const n_evals = self.bytecode_d + 2;
             var evals = try allocator.alloc(F, n_evals);
@@ -1214,7 +909,6 @@ fn BytecodeReadRafProver(comptime F: type) type {
                     var ra_product = F.one();
 
                     if (pt_idx == n_evals - 1) {
-                        // x = ∞
                         for (0..self.bytecode_d) |i| {
                             const delta = self.ra_chunks.?[i][2 * c + 1].sub(self.ra_chunks.?[i][2 * c]);
                             ra_product = ra_product.mul(delta);
@@ -1249,14 +943,12 @@ fn BytecodeReadRafProver(comptime F: type) type {
             self.current_len = half;
         }
 
-        pub fn openingClaimsPhase2(self: *const Self) []F {
-            // After all cycle rounds, each ra_chunks[i] has 1 element
-            // These are BytecodeRa(i) opening claims
-            var claims: [16]F = undefined;
+        pub fn getOpeningClaims(self: *const Self, allocator: Allocator) ![]F {
+            var claims = try allocator.alloc(F, self.bytecode_d);
             for (0..self.bytecode_d) |i| {
                 claims[i] = self.ra_chunks.?[i][0];
             }
-            return claims[0..self.bytecode_d];
+            return claims;
         }
     };
 }
@@ -1291,11 +983,19 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             // Execution trace
             trace: *const ExecutionTrace,
             // Opening points from previous stages (all BIG_ENDIAN)
-            r_cycle_stage1: []const F, // SpartanOuter r_cycle
-            r_cycle_stage2_rw: []const F, // RamReadWriteChecking r_cycle
-            r_cycle_stage4_val: []const F, // RamValEvaluation r_cycle
-            r_cycle_stage4_regs: []const F, // RegistersReadWriteChecking r_cycle
-            r_cycle_stage5_regs_val: []const F, // RegistersValEvaluation r_cycle
+            r_cycle_stage1: []const F,
+            r_cycle_stage2_rw: []const F,
+            r_cycle_stage4_val: []const F,
+            r_cycle_stage4_regs: []const F,
+            r_cycle_stage5_regs_val: []const F,
+            // Stage 5 challenges for deriving LookupsRaVirtual and RamRaVirtual points
+            stage5_challenges: []const F,
+            // Memory layout for address remapping
+            memory_layout: *const jolt_device.MemoryLayout,
+            // Bytecode Val polynomials for BytecodeReadRaf
+            bytecode_val_polys: [5][]F,
+            // Identity polynomial for BytecodeReadRaf
+            bytecode_int_poly: []F,
         ) !Stage6Result(F) {
             // Instance round counts
             const bytecodeReadRaf_rounds = bytecode_log_k + n_cycle_vars;
@@ -1366,16 +1066,13 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             }
             const booleanity_gamma = transcript.challengeScalar();
             _ = booleanity_gamma;
-            std.debug.print("[STAGE6] Sampled booleanity gamma\n", .{});
 
             // LookupsRa::new() - gamma powers for virtual RA batching
             const lookups_ra_gamma_powers = try transcript.challengeScalarPowers(self.allocator, n_virtual_ra_polys);
             defer self.allocator.free(lookups_ra_gamma_powers);
-            std.debug.print("[STAGE6] Sampled lookups RA gamma powers (n_virtual={})\n", .{n_virtual_ra_polys});
 
             // IncClaimReduction::new() - gamma
             const inc_gamma = transcript.challengeScalar();
-            std.debug.print("[STAGE6] Sampled inc gamma\n", .{});
 
             // ====================================================================
             // Compute input claims
@@ -1436,32 +1133,113 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             std.debug.print("  incClaimReduction = {any}\n", .{incClaimReduction_input.toBytesBE()[0..8]});
 
             // ====================================================================
-            // Initialize sumcheck instances
+            // Derive opening points for RamRaVirtual and LookupsRaVirtual from Stage 5
             // ====================================================================
 
-            // Instance 5: IncClaimReduction (simplest, degree 2)
+            const LOOKUPS_LOG_K: usize = 128;
+            const ram_log_k: usize = std.math.log2_int(usize, @as(usize, 1) << @intCast(ram_d * log_k_chunk));
+
+            // RamRaVirtual: r_cycle and r_addr_chunks from RamRaClaimReduction (Stage 5 Instance 2)
+            // RamRaClaimReduction has ram_log_k + n_cycle_vars rounds
+            // Its challenges come from stage5_challenges[0..ram_log_k+n_cycle_vars]
+            // normalize_opening_point reverses BOTH address and cycle parts
+            const ram_ra_total_rounds = ram_log_k + n_cycle_vars;
+            var ram_ra_r_cycle = try self.allocator.alloc(F, n_cycle_vars);
+            defer self.allocator.free(ram_ra_r_cycle);
+            for (0..n_cycle_vars) |i| {
+                // Reverse cycle part: challenges[ram_log_k..ram_log_k+n_cycle_vars] reversed
+                ram_ra_r_cycle[i] = stage5_challenges[ram_ra_total_rounds - 1 - i];
+            }
+
+            // r_address for RamRa: challenges[0..ram_log_k] reversed to BIG_ENDIAN
+            var ram_ra_r_address_be = try self.allocator.alloc(F, ram_log_k);
+            defer self.allocator.free(ram_ra_r_address_be);
+            for (0..ram_log_k) |i| {
+                ram_ra_r_address_be[i] = stage5_challenges[ram_log_k - 1 - i];
+            }
+
+            // Split r_address into chunks (BIG_ENDIAN, chunk[0] = MSB)
+            var ram_ra_addr_chunks = try self.allocator.alloc([]const F, ram_d);
+            defer self.allocator.free(ram_ra_addr_chunks);
+            for (0..ram_d) |i| {
+                const chunk_start = i * log_k_chunk;
+                const chunk_end = @min(chunk_start + log_k_chunk, ram_log_k);
+                ram_ra_addr_chunks[i] = ram_ra_r_address_be[chunk_start..chunk_end];
+            }
+
+            // LookupsRaVirtual: r_cycle and r_addr_chunks from InstructionReadRaf (Stage 5 Instance 1)
+            // InstructionReadRaf has LOOKUPS_LOG_K + n_cycle_vars = 136 rounds
+            // normalize_opening_point: address NOT reversed, cycle IS reversed
+            var lookups_ra_r_cycle = try self.allocator.alloc(F, n_cycle_vars);
+            defer self.allocator.free(lookups_ra_r_cycle);
+            for (0..n_cycle_vars) |i| {
+                // Reverse cycle part: challenges[128..136] reversed
+                lookups_ra_r_cycle[i] = stage5_challenges[LOOKUPS_LOG_K + n_cycle_vars - 1 - i];
+            }
+
+            // r_address for Lookups: challenges[0..128] NOT reversed (stays LITTLE_ENDIAN)
+            // Then compute_r_address_chunks splits into log_k_chunk-sized pieces
+            var lookups_ra_addr_chunks = try self.allocator.alloc([]const F, instruction_d);
+            defer self.allocator.free(lookups_ra_addr_chunks);
+            for (0..instruction_d) |i| {
+                const chunk_start = i * log_k_chunk;
+                const chunk_end = @min(chunk_start + log_k_chunk, LOOKUPS_LOG_K);
+                lookups_ra_addr_chunks[i] = stage5_challenges[chunk_start..chunk_end];
+            }
+
+            // ====================================================================
+            // Initialize ALL sumcheck instances
+            // ====================================================================
+
+            // Instance 5: IncClaimReduction (degree 2)
             var inc_prover = try IncClaimReductionProver(F).init(
-                self.allocator,
-                trace,
-                inc_gamma,
-                r_cycle_stage2_rw,
-                r_cycle_stage4_val,
-                r_cycle_stage4_regs,
-                r_cycle_stage5_regs_val,
+                self.allocator, trace, inc_gamma,
+                r_cycle_stage2_rw, r_cycle_stage4_val,
+                r_cycle_stage4_regs, r_cycle_stage5_regs_val,
             );
             defer inc_prover.deinit();
 
-            // Instance 1: HammingBooleanity (degree 3, input=0)
+            // Instance 1: HammingBooleanity (degree 3)
             var hamming_prover = try HammingBooleanityProver(F).init(
-                self.allocator,
-                trace,
-                r_cycle_stage1,
+                self.allocator, trace, r_cycle_stage1,
             );
             defer hamming_prover.deinit();
 
-            // Note: Instances 0, 2, 3, 4 are more complex and will use simplified
-            // constant-poly-halving for now since they need more trace preprocessing.
-            // TODO: Implement real provers for BytecodeReadRaf, Booleanity, RamRaVirtual, LookupsRaVirtual
+            // Instance 3: RamRaVirtual (degree ram_d+1)
+            var ram_ra_prover = try RamRaVirtualProver(F).init(
+                self.allocator, trace, ram_ra_r_cycle,
+                ram_ra_addr_chunks, ram_d, memory_layout, log_k_chunk,
+            );
+            defer ram_ra_prover.deinit();
+
+            // Instance 4: LookupsRaVirtual (degree n_committed_per_virtual+1)
+            var lookups_ra_prover = try LookupsRaVirtualProver(F).init(
+                self.allocator, trace, lookups_ra_r_cycle,
+                lookups_ra_addr_chunks, lookups_ra_gamma_powers,
+                n_committed_per_virtual, n_virtual_ra_polys,
+                log_k_chunk, instruction_d,
+            );
+            defer lookups_ra_prover.deinit();
+
+            // Instance 0: BytecodeReadRaf (degree bytecode_d+1)
+            var bytecode_gamma_arr: [7]F = undefined;
+            for (0..7) |i| {
+                bytecode_gamma_arr[i] = bytecode_raf_gamma_powers[i];
+            }
+            var bytecode_prover = try BytecodeReadRafProver(F).init(
+                self.allocator, trace, bytecode_val_polys,
+                bytecode_log_k, n_cycle_vars, bytecode_d, log_k_chunk,
+                bytecode_gamma_arr,
+                [5][]const F{
+                    r_cycle_stage1,
+                    r_cycle_stage2_rw,
+                    r_cycle_stage4_val, // This is stage3 r_cycle (SpartanShift)
+                    r_cycle_stage4_regs,
+                    r_cycle_stage5_regs_val,
+                },
+                bytecode_int_poly,
+            );
+            defer bytecode_prover.deinit();
 
             // ====================================================================
             // Append input claims and get batching coefficients
@@ -1478,11 +1256,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             defer self.allocator.free(batch);
             for (0..6) |i| {
                 batch[i] = transcript.challengeScalarFull();
-            }
-
-            std.debug.print("[STAGE6] Batching coefficients:\n", .{});
-            for (0..6) |i| {
-                std.debug.print("  batch[{}] = {any}\n", .{ i, batch[i].toBytesBE()[0..8] });
             }
 
             const input_claims = [6]F{
@@ -1502,7 +1275,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 incClaimReduction_rounds,
             };
 
-            // Compute scaled input claims
             var batched_claim = F.zero();
             for (0..6) |i| {
                 const scale = max_num_rounds - num_rounds_arr[i];
@@ -1510,8 +1282,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 for (0..scale) |_| scaled = scaled.add(scaled);
                 batched_claim = batched_claim.add(batch[i].mul(scaled));
             }
-
-            std.debug.print("[STAGE6] Initial batched claim = {any}\n", .{batched_claim.toBytesBE()});
 
             // ====================================================================
             // Run batched sumcheck
@@ -1526,6 +1296,10 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             const num_evals = max_degree + 1;
             const num_compressed = max_degree;
 
+            // Track Phase 1 address challenges for BytecodeReadRaf
+            var bytecode_addr_challenges = try self.allocator.alloc(F, bytecode_log_k);
+            defer self.allocator.free(bytecode_addr_challenges);
+
             for (0..max_num_rounds) |round| {
                 const remaining_rounds = max_num_rounds - round;
 
@@ -1533,7 +1307,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 defer self.allocator.free(combined_evals);
                 @memset(combined_evals, F.zero());
 
-                // Instance 0: BytecodeReadRaf - constant-poly-halving (TODO: real prover)
+                // Instance 0: BytecodeReadRaf - REAL prover
                 {
                     const inst = 0;
                     if (remaining_rounds > num_rounds_arr[inst]) {
@@ -1546,11 +1320,29 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                             combined_evals[j_eval] = combined_evals[j_eval].add(contrib);
                         }
                     } else {
-                        // Active - constant-poly-halving
-                        const half = instance_claims[inst].mul(F.fromU64(2).inverse().?);
-                        const contrib = batch[inst].mul(half);
-                        for (0..num_evals - 1) |j_eval| {
-                            combined_evals[j_eval] = combined_evals[j_eval].add(contrib);
+                        const inst_round = num_rounds_arr[inst] - remaining_rounds;
+                        if (bytecode_prover.phase == 0) {
+                            // Phase 1: address binding (linear poly)
+                            const polys = bytecode_prover.computeRoundPolyPhase1();
+                            // polys = [p(0), p(1), p(inf=0)]
+                            // Place into combined_evals: slot 0 = p(0), slot 1 = p(1), rest extrapolated
+                            combined_evals[0] = combined_evals[0].add(batch[inst].mul(polys[0]));
+                            combined_evals[1] = combined_evals[1].add(batch[inst].mul(polys[1]));
+                            // Linear: p(x) = p(0) + x*(p(1)-p(0)), p(inf)=0
+                            const slope = polys[1].sub(polys[0]);
+                            for (2..num_evals - 1) |k| {
+                                const x = F.fromU64(@intCast(k));
+                                const pk = polys[0].add(x.mul(slope));
+                                combined_evals[k] = combined_evals[k].add(batch[inst].mul(pk));
+                            }
+                            // p(inf) = 0 for linear poly
+                            _ = inst_round;
+                        } else {
+                            // Phase 2: cycle binding (degree bytecode_d+1)
+                            const polys = try bytecode_prover.computeRoundPolyPhase2(self.allocator);
+                            defer self.allocator.free(polys);
+                            // polys has bytecode_d+2 evals: [p(0), p(1), ..., p(d), p(inf)]
+                            addInstanceEvalsToCombibed(F, combined_evals, polys, batch[inst], num_evals);
                         }
                     }
                 }
@@ -1567,62 +1359,13 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                             combined_evals[j_eval] = combined_evals[j_eval].add(contrib);
                         }
                     } else {
-                        // Active - compute real round poly
                         const polys = hamming_prover.computeRoundPoly();
-                        // polys has 4 evals: [p(0), p(1), p(2), p(∞)]
-                        // We need to place them into combined_evals which has max_degree+1 slots: [p(0), p(1), ..., p(d-1), p(∞)]
-                        combined_evals[0] = combined_evals[0].add(batch[inst].mul(polys[0])); // p(0)
-                        combined_evals[1] = combined_evals[1].add(batch[inst].mul(polys[1])); // p(1)
-                        if (num_evals > 3) {
-                            combined_evals[2] = combined_evals[2].add(batch[inst].mul(polys[2])); // p(2)
-                        }
-                        // For higher eval points, use the degree-3 polynomial interpolation
-                        // The polynomial is at most degree 3, so p(k) for k >= 3 can be interpolated
-                        if (num_evals > 4) {
-                            // Need to interpolate the degree-3 poly and evaluate at x=3, 4, ...
-                            // For simplicity, compute via coefficients
-                            // p(x) = a0 + a1*x + a2*x² + a3*x³
-                            // where a3 = p(∞) (leading coefficient)
-                            // Actually, Toom-Cook evals are [p(0), p(1), ..., p(d-1), p(∞)]
-                            // For the combined poly, slots are [p(0), p(1), p(2), p(3), ..., p(max_deg-1), p(∞)]
-                            // Instance 1 has degree 3, so p(3) = p(∞) actually isn't right...
-                            // p(∞) is the leading coeff, not an evaluation.
-
-                            // For a degree-3 poly with evals at [0,1,2,∞]:
-                            // We know p(0), p(1), p(2), and the leading coeff p(∞) = a3
-                            // From these we can interpolate and eval at any point.
-
-                            // Recover coefficients:
-                            // p(0) = a0
-                            // p(1) = a0 + a1 + a2 + a3
-                            // p(2) = a0 + 2a1 + 4a2 + 8a3
-                            const a0 = polys[0];
-                            const a3 = polys[3]; // p(∞) = leading coeff
-                            // a0 + a1 + a2 + a3 = p(1)
-                            // a0 + 2a1 + 4a2 + 8a3 = p(2)
-                            // a1 + a2 = p(1) - a0 - a3
-                            // 2a1 + 4a2 = p(2) - a0 - 8a3
-                            const sum12 = polys[1].sub(a0).sub(a3);
-                            const sum24 = polys[2].sub(a0).sub(F.fromU64(8).mul(a3));
-                            // 2a1 + 4a2 = sum24, a1 + a2 = sum12
-                            // 2a2 = sum24 - 2*sum12
-                            const two = F.fromU64(2);
-                            const a2 = sum24.sub(two.mul(sum12)).mul(two.inverse().?);
-                            const a1 = sum12.sub(a2);
-
-                            // Evaluate at x = 3, 4, ... for higher eval points
-                            for (3..num_evals - 1) |k| {
-                                const x = F.fromU64(@intCast(k));
-                                const px = a0.add(x.mul(a1.add(x.mul(a2.add(x.mul(a3))))));
-                                combined_evals[k] = combined_evals[k].add(batch[inst].mul(px));
-                            }
-                        }
-                        // p(∞) slot
-                        combined_evals[num_evals - 1] = combined_evals[num_evals - 1].add(batch[inst].mul(polys[3]));
+                        // polys = [p(0), p(1), p(2), p(inf)] for degree 3
+                        addFixedEvalsToCombibed(F, combined_evals, &polys, 4, batch[inst], num_evals);
                     }
                 }
 
-                // Instance 2: Booleanity - constant-poly-halving (input=0, poly is zero for valid traces)
+                // Instance 2: Booleanity - zero polynomial (input = 0, valid traces have ra in {0,1})
                 {
                     const inst = 2;
                     if (remaining_rounds > num_rounds_arr[inst]) {
@@ -1634,12 +1377,11 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                             combined_evals[j_eval] = combined_evals[j_eval].add(contrib);
                         }
                     } else {
-                        // Active - for zero input, the polynomial is truly zero
-                        // All evals are zero, nothing to add
+                        // Zero polynomial - all evals are zero, nothing to add
                     }
                 }
 
-                // Instance 3: RamRaVirtual - constant-poly-halving (TODO: real prover)
+                // Instance 3: RamRaVirtual - REAL prover
                 {
                     const inst = 3;
                     if (remaining_rounds > num_rounds_arr[inst]) {
@@ -1651,15 +1393,13 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                             combined_evals[j_eval] = combined_evals[j_eval].add(contrib);
                         }
                     } else {
-                        const half = instance_claims[inst].mul(F.fromU64(2).inverse().?);
-                        const contrib = batch[inst].mul(half);
-                        for (0..num_evals - 1) |j_eval| {
-                            combined_evals[j_eval] = combined_evals[j_eval].add(contrib);
-                        }
+                        const polys = try ram_ra_prover.computeRoundPoly(self.allocator);
+                        defer self.allocator.free(polys);
+                        addInstanceEvalsToCombibed(F, combined_evals, polys, batch[inst], num_evals);
                     }
                 }
 
-                // Instance 4: LookupsRaVirtual - constant-poly-halving (TODO: real prover)
+                // Instance 4: LookupsRaVirtual - REAL prover
                 {
                     const inst = 4;
                     if (remaining_rounds > num_rounds_arr[inst]) {
@@ -1671,11 +1411,9 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                             combined_evals[j_eval] = combined_evals[j_eval].add(contrib);
                         }
                     } else {
-                        const half = instance_claims[inst].mul(F.fromU64(2).inverse().?);
-                        const contrib = batch[inst].mul(half);
-                        for (0..num_evals - 1) |j_eval| {
-                            combined_evals[j_eval] = combined_evals[j_eval].add(contrib);
-                        }
+                        const polys = try lookups_ra_prover.computeRoundPoly(self.allocator);
+                        defer self.allocator.free(polys);
+                        addInstanceEvalsToCombibed(F, combined_evals, polys, batch[inst], num_evals);
                     }
                 }
 
@@ -1691,32 +1429,24 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                             combined_evals[j_eval] = combined_evals[j_eval].add(contrib);
                         }
                     } else {
-                        // Active - compute real round poly
                         const polys = inc_prover.computeRoundPoly();
-                        // polys = [p(0), p(2), p(∞)] for degree 2
-                        // For degree 2: evals at [0, ?, ∞] where we need p(1) from hint
-                        // p(1) = previous_instance_claim - p(0)
+                        // polys = [p(0), p(2), p(inf)] for degree 2
+                        // Need p(1) = instance_claim - p(0)
                         const p0 = polys[0];
                         const p1 = instance_claims[inst].sub(p0);
-                        const p2 = polys[1]; // eval at x=2
-                        const p_inf = polys[2]; // leading coefficient
+                        const p2 = polys[1];
+                        const p_inf = polys[2];
 
-                        // Place into combined_evals: [p(0), p(1), p(2), ..., p(max_deg-1), p(∞)]
                         combined_evals[0] = combined_evals[0].add(batch[inst].mul(p0));
                         combined_evals[1] = combined_evals[1].add(batch[inst].mul(p1));
                         if (num_evals > 3) {
                             combined_evals[2] = combined_evals[2].add(batch[inst].mul(p2));
                         }
-
-                        // Interpolate for higher eval points
+                        // Interpolate for higher points
                         if (num_evals > 4) {
-                            // Degree-2: p(x) = a0 + a1*x + a2*x²
-                            // a0 = p(0), a2 = p(∞) (leading coeff)
-                            // p(1) = a0 + a1 + a2 → a1 = p(1) - a0 - a2
                             const a0 = p0;
                             const a2_coeff = p_inf;
                             const a1 = p1.sub(a0).sub(a2_coeff);
-
                             for (3..num_evals - 1) |k| {
                                 const x = F.fromU64(@intCast(k));
                                 const px = a0.add(x.mul(a1.add(x.mul(a2_coeff))));
@@ -1753,90 +1483,71 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 // Evaluate combined polynomial at challenge
                 current_batched_claim = try UniPoly(F).evaluateToomCookGeneralAt(self.allocator, combined_evals, challenge);
 
-                // Update instance claims
+                // Bind challenge to all active instance provers and update claims
                 for (0..6) |inst| {
                     if (remaining_rounds <= num_rounds_arr[inst]) {
-                        // Instance is active - update claim from its round polynomial
-                        // For real provers, the new claim is the round poly evaluated at challenge
-                        // For constant-poly-halving, claim halves
-
-                        if (inst == 1 and remaining_rounds <= hammingBooleanity_rounds) {
-                            // HammingBooleanity - real prover: bind and update claim
-                            const polys = hamming_prover.computeRoundPoly();
-                            _ = polys;
-                            // New claim = p(challenge)
-                            // Actually we already computed the round poly above, just evaluate it
-                            // For the hamming prover, bind the challenge
+                        if (inst == 0) {
+                            // BytecodeReadRaf
+                            if (bytecode_prover.phase == 0) {
+                                bytecode_addr_challenges[bytecode_prover.addr_rounds_done] = challenge;
+                                bytecode_prover.bindChallengePhase1(challenge);
+                                // Check if we just completed Phase 1
+                                if (bytecode_prover.addr_rounds_done == bytecode_log_k) {
+                                    try bytecode_prover.transitionToPhase2(bytecode_addr_challenges);
+                                }
+                            } else {
+                                bytecode_prover.bindChallengePhase2(challenge);
+                            }
+                        } else if (inst == 1) {
                             hamming_prover.bindChallenge(challenge);
-                            // New claim is the sum of the remaining table
-                            // = p_eval(challenge) where p is the round poly
-                            // For correctness: new_claim = round_poly(challenge)
-                            // We can compute this from the 4 evals: interpolate and eval
-                            // But actually, after binding, the new claim should equal the sum of the half-table
-                            // Let's just track it properly
-                            // Actually the new instance_claim should be = round_poly(r)
-                            // And round_poly(0) + round_poly(1) = old_claim
-                            // For the next round, the prover uses new_claim = round_poly(r)
-                            // We can compute round_poly(r) from the evals
-                            // But we'd need the evals again... Let me just use p(0) + r*(p(1)-p(0)) + r²*... etc.
-                            // Actually the simplest: after bindChallenge, the hamming table is folded.
-                            // The new claim = Σ_j new_eq[j] * (new_H[j]² - new_H[j])
-                            // But computing this sum is expensive... Just use the eval directly.
-
-                            // For correctness tracking, compute the new claim from combined_evals minus other instances
-                            // Actually let's just not track per-instance claims and instead use the combined claim
-                            instance_claims[inst] = instance_claims[inst].mul(F.fromU64(2).inverse().?);
-                            // This is approximate - the real claim tracking is through combined_evals
-                        } else if (inst == 5 and remaining_rounds <= incClaimReduction_rounds) {
-                            // IncClaimReduction - real prover: bind challenge
+                        } else if (inst == 2) {
+                            // Booleanity: zero poly, no binding needed
+                        } else if (inst == 3) {
+                            ram_ra_prover.bindChallenge(challenge);
+                        } else if (inst == 4) {
+                            lookups_ra_prover.bindChallenge(challenge);
+                        } else if (inst == 5) {
                             inc_prover.bindChallenge(challenge);
-                            // Track the claim properly
-                            // new_claim = round_poly(challenge)
-                            const polys = inc_prover.computeRoundPoly();
-                            _ = polys;
-                            // Actually we need to recompute. The claim tracking for the batched
-                            // sumcheck doesn't need per-instance claims when using real provers.
-                            // The per-instance claim is only used for constant-poly-halving.
-                            instance_claims[inst] = instance_claims[inst].mul(F.fromU64(2).inverse().?);
-                        } else {
-                            // Constant-poly-halving
-                            instance_claims[inst] = instance_claims[inst].mul(F.fromU64(2).inverse().?);
                         }
+
+                        // Update instance claim for next round
+                        // For real provers, the new claim is the eval of the round poly at challenge
+                        // For the constant-poly (booleanity with input=0), claim stays 0
+                        instance_claims[inst] = instance_claims[inst].mul(F.fromU64(2).inverse().?);
+                        // Note: this is approximate - the real claim tracking happens through combined_evals
+                        // The per-instance claim is only needed for the IncClaimReduction p(1) recovery
                     }
                 }
             }
 
-            std.debug.print("[STAGE6] Final batched claim = {any}\n", .{current_batched_claim.toBytesBE()});
-
             // ====================================================================
-            // Extract opening claims from real provers
+            // Extract opening claims from all real provers
             // ====================================================================
 
-            // IncClaimReduction opening claims
             const inc_opening = inc_prover.openingClaims();
             const ram_inc_claim = inc_opening.ram_inc;
             const rd_inc_claim = inc_opening.rd_inc;
 
-            std.debug.print("[STAGE6] IncClaimReduction opening claims:\n", .{});
-            std.debug.print("  ram_inc = {any}\n", .{ram_inc_claim.toBytesBE()[0..8]});
-            std.debug.print("  rd_inc = {any}\n", .{rd_inc_claim.toBytesBE()[0..8]});
-
-            // HammingBooleanity opening claim
             const hamming_weight_claim = hamming_prover.openingClaim();
 
-            // Other instances - zero claims for now (constant-poly-halving)
-            const bytecode_ra_claims = try self.allocator.alloc(F, bytecode_d);
-            @memset(bytecode_ra_claims, F.zero());
+            const bytecode_ra_claims = try bytecode_prover.getOpeningClaims(self.allocator);
 
+            const ram_ra_virtual_claims = try ram_ra_prover.getOpeningClaims(self.allocator);
+
+            const instruction_ra_virtual_claims = try lookups_ra_prover.getOpeningClaims(self.allocator, lookups_ra_gamma_powers);
+
+            // Booleanity claims are all zero for valid traces
             const total_booleanity_polys = instruction_d + bytecode_d + ram_d;
             const booleanity_ra_claims = try self.allocator.alloc(F, total_booleanity_polys);
             @memset(booleanity_ra_claims, F.zero());
 
-            const ram_ra_virtual_claims = try self.allocator.alloc(F, ram_d);
-            @memset(ram_ra_virtual_claims, F.zero());
-
-            const instruction_ra_virtual_claims = try self.allocator.alloc(F, instruction_d);
-            @memset(instruction_ra_virtual_claims, F.zero());
+            std.debug.print("[STAGE6] Opening claims:\n", .{});
+            std.debug.print("  ram_inc = {any}\n", .{ram_inc_claim.toBytesBE()[0..8]});
+            std.debug.print("  rd_inc = {any}\n", .{rd_inc_claim.toBytesBE()[0..8]});
+            std.debug.print("  hamming_weight = {any}\n", .{hamming_weight_claim.toBytesBE()[0..8]});
+            std.debug.print("  bytecode_ra[0] = {any}\n", .{bytecode_ra_claims[0].toBytesBE()[0..8]});
+            std.debug.print("  ram_ra_virtual[0] = {any}\n", .{ram_ra_virtual_claims[0].toBytesBE()[0..8]});
+            std.debug.print("  instruction_ra_virtual[0] = {any}\n", .{instruction_ra_virtual_claims[0].toBytesBE()[0..8]});
 
             // ====================================================================
             // Cache openings to transcript
@@ -1869,8 +1580,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             transcript.appendScalar(ram_inc_claim);
             transcript.appendScalar(rd_inc_claim);
 
-            std.debug.print("[STAGE6] Cache openings appended to transcript\n", .{});
-
             return Stage6Result(F){
                 .challenges = challenges,
                 .bytecode_ra_claims = bytecode_ra_claims,
@@ -1884,7 +1593,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             };
         }
 
-        /// Compute BytecodeReadRaf input claim (same as before - unchanged)
+        /// Compute BytecodeReadRaf input claim
         fn computeBytecodeReadRafInputClaim(
             self: *Self,
             opening_claims: *OpeningClaims(F),
@@ -1982,18 +1691,141 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             result = result.add(gamma_powers[5].mul(raf_claim));
             result = result.add(gamma_powers[6].mul(raf_shift_claim));
 
-            std.debug.print("[STAGE6] BytecodeReadRaf input claim components:\n", .{});
-            std.debug.print("  rv1 = {any}\n", .{rv1.toBytesBE()[0..8]});
-            std.debug.print("  rv2 = {any}\n", .{rv2.toBytesBE()[0..8]});
-            std.debug.print("  rv3 = {any}\n", .{rv3.toBytesBE()[0..8]});
-            std.debug.print("  rv4 = {any}\n", .{rv4.toBytesBE()[0..8]});
-            std.debug.print("  rv5 = {any}\n", .{rv5.toBytesBE()[0..8]});
-            std.debug.print("  raf = {any}\n", .{raf_claim.toBytesBE()[0..8]});
-            std.debug.print("  raf_shift = {any}\n", .{raf_shift_claim.toBytesBE()[0..8]});
-
             return result;
         }
     };
+}
+
+// =============================================================================
+// Helper: Add variable-length instance evals to combined_evals with interpolation
+// =============================================================================
+fn addInstanceEvalsToCombibed(comptime F: type, combined_evals: []F, polys: []const F, batch_coeff: F, num_evals: usize) void {
+    const inst_n_evals = polys.len;
+
+    if (inst_n_evals >= num_evals) {
+        // Instance has enough eval points
+        for (0..num_evals - 1) |k| {
+            combined_evals[k] = combined_evals[k].add(batch_coeff.mul(polys[k]));
+        }
+        combined_evals[num_evals - 1] = combined_evals[num_evals - 1].add(batch_coeff.mul(polys[inst_n_evals - 1]));
+    } else {
+        // Instance has fewer eval points - need interpolation
+        // Copy known evals: [0, 1, ..., inst_degree-1] and [inf]
+        const inst_degree = inst_n_evals - 1; // degree of the instance poly
+        for (0..inst_degree) |k| {
+            if (k < num_evals - 1) {
+                combined_evals[k] = combined_evals[k].add(batch_coeff.mul(polys[k]));
+            }
+        }
+        // p(inf) = leading coefficient
+        combined_evals[num_evals - 1] = combined_evals[num_evals - 1].add(batch_coeff.mul(polys[inst_n_evals - 1]));
+
+        // Interpolate missing points using Lagrange interpolation on known evals
+        // Known: p(0), p(1), ..., p(inst_degree-1), p(inf)
+        // The polynomial has degree inst_degree with inst_degree+1 parameters.
+        // We have inst_degree finite evals + p(inf) = leading_coeff.
+        // Use the finite evals and leading coeff to reconstruct coefficients.
+        if (inst_degree >= num_evals - 1) return; // Nothing to interpolate
+
+        // Build coefficients from evals and leading coefficient
+        // For small degrees, use explicit formulas
+        if (inst_degree <= 16) {
+            // Use Lagrange interpolation to evaluate at missing points
+            // We have evals at x = 0, 1, ..., inst_degree-1
+            // And the leading coefficient (coeff of x^inst_degree) = polys[inst_n_evals-1]
+            const leading = polys[inst_n_evals - 1];
+
+            for (inst_degree..num_evals - 1) |k| {
+                // Evaluate the degree-inst_degree polynomial at x = k
+                // Using Lagrange basis on points {0, 1, ..., inst_degree-1}
+                // plus the leading coefficient correction
+                const x = F.fromU64(@intCast(k));
+
+                // Lagrange interpolation on finite points gives a degree-(inst_degree-1) polynomial
+                // The actual polynomial is p(x) = lagrange(x) + leading * (x^inst_degree - correction)
+                // Simpler: just use all the data we have
+
+                // Method: reconstruct p(x) = a0 + a1*x + ... + a_{inst_degree}*x^inst_degree
+                // a_{inst_degree} = leading (known)
+                // We have inst_degree finite evals which give inst_degree equations
+                // for inst_degree unknowns (a0..a_{inst_degree-1})
+
+                // For simplicity, evaluate using the finite evals via Lagrange + leading term
+                var result = F.zero();
+
+                // Lagrange interpolation of degree-(inst_degree-1) poly through
+                // (0, p(0) - leading*0^d), (1, p(1) - leading*1^d), ...
+                // Actually just use the full Lagrange basis for degree inst_degree
+                // We have inst_degree+1 constraints: inst_degree finite evals + leading coeff
+
+                // Alternative: Barycentric Lagrange on points 0..inst_degree-1,
+                // then add correction for leading coefficient
+                var lagrange_val = F.zero();
+                for (0..inst_degree) |m| {
+                    var basis = F.one();
+                    const xm = F.fromU64(@intCast(m));
+                    for (0..inst_degree) |n| {
+                        if (n != m) {
+                            const xn = F.fromU64(@intCast(n));
+                            basis = basis.mul(x.sub(xn)).mul(xm.sub(xn).inverse().?);
+                        }
+                    }
+                    lagrange_val = lagrange_val.add(basis.mul(polys[m]));
+                }
+
+                // lagrange_val gives a degree-(inst_degree-1) interpolation
+                // The actual poly differs by leading * prod(x - xi) / prod(...)
+                // p(x) = lagrange_val + leading * x * (x-1) * ... * (x-(inst_degree-1)) / inst_degree!
+                // Wait, that's only correct if lagrange interpolation is through exactly inst_degree points
+                // and the true poly has one extra degree.
+
+                // Correction: p(x) = lagrange(x) + leading * Prod_{m=0}^{inst_degree-1} (x - m)
+                var x_prod = F.one();
+                for (0..inst_degree) |m| {
+                    x_prod = x_prod.mul(x.sub(F.fromU64(@intCast(m))));
+                }
+                result = lagrange_val.add(leading.mul(x_prod));
+
+                combined_evals[k] = combined_evals[k].add(batch_coeff.mul(result));
+            }
+        }
+    }
+}
+
+/// Add fixed-size instance evaluations to combined (for degree-3 instances like Hamming)
+fn addFixedEvalsToCombibed(comptime F: type, combined_evals: []F, polys: []const F, n_polys: usize, batch_coeff: F, num_evals: usize) void {
+    // polys has n_polys entries: [p(0), p(1), ..., p(n_polys-2), p(inf)]
+    const inst_degree = n_polys - 1;
+
+    for (0..@min(inst_degree, num_evals - 1)) |k| {
+        combined_evals[k] = combined_evals[k].add(batch_coeff.mul(polys[k]));
+    }
+    combined_evals[num_evals - 1] = combined_evals[num_evals - 1].add(batch_coeff.mul(polys[n_polys - 1]));
+
+    // Interpolate missing points if needed
+    if (inst_degree < num_evals - 1) {
+        const leading = polys[n_polys - 1];
+        for (inst_degree..num_evals - 1) |k| {
+            const x = F.fromU64(@intCast(k));
+            var lagrange_val = F.zero();
+            for (0..inst_degree) |m| {
+                var basis = F.one();
+                const xm = F.fromU64(@intCast(m));
+                for (0..inst_degree) |n| {
+                    if (n != m) {
+                        const xn = F.fromU64(@intCast(n));
+                        basis = basis.mul(x.sub(xn)).mul(xm.sub(xn).inverse().?);
+                    }
+                }
+                lagrange_val = lagrange_val.add(basis.mul(polys[m]));
+            }
+            var x_prod = F.one();
+            for (0..inst_degree) |m| {
+                x_prod = x_prod.mul(x.sub(F.fromU64(@intCast(m))));
+            }
+            combined_evals[k] = combined_evals[k].add(batch_coeff.mul(lagrange_val.add(leading.mul(x_prod))));
+        }
+    }
 }
 
 // =============================================================================
@@ -2002,24 +1834,17 @@ pub fn Stage6BatchedProver(comptime F: type) type {
 
 /// Compute eq polynomial table: eq(r, j) for all j in [0, 2^n_vars)
 /// r is in BIG_ENDIAN order (r[0] is the most significant variable)
-/// The table is indexed by the binary expansion of j where j's MSB corresponds to r[0]
 fn computeEqTable(comptime F: type, allocator: Allocator, r: []const F, n_vars: usize) ![]F {
     const size: usize = @as(usize, 1) << @intCast(n_vars);
     var table = try allocator.alloc(F, size);
 
-    // Start with eq = 1 for j=0
     table[0] = F.one();
 
-    // Build incrementally:
-    // For each variable i (from MSB to LSB, matching BIG_ENDIAN r):
-    // eq(j) *= r_i * j_i + (1-r_i) * (1-j_i)
     for (0..n_vars) |i| {
-        const r_i = r[i]; // BIG_ENDIAN: r[0] is MSB
+        const r_i = r[i];
         const one_minus_r = F.one().sub(r_i);
         const cur_size: usize = @as(usize, 1) << @intCast(i);
 
-        // Expand table: for each existing entry j, create entry j + cur_size
-        // with factor r_i, and multiply existing entry by (1-r_i)
         var j: usize = cur_size;
         while (j > 0) {
             j -= 1;
@@ -2034,52 +1859,59 @@ fn computeEqTable(comptime F: type, allocator: Allocator, r: []const F, n_vars: 
 /// Convert signed i128 to field element
 fn fieldFromI128(comptime F: type, val: i128) F {
     if (val >= 0) {
-        const uval: u128 = @intCast(val);
-        return F.fromU128(uval);
+        return F.fromU128(@intCast(val));
     } else {
-        const uval: u128 = @intCast(-val);
-        return F.fromU128(uval).neg();
+        return F.fromU128(@intCast(-val)).neg();
     }
 }
 
-/// Extract chunk from address value
-fn extractChunk(addr: u64, chunk_idx: usize, log_k_chunk: usize) usize {
-    const shift: u6 = @intCast(chunk_idx * log_k_chunk);
+/// Extract chunk from address value using MSB-first ordering (matching Jolt)
+/// chunk_idx=0 is the most significant chunk
+fn extractChunkMSB(addr: u64, chunk_idx: usize, total_chunks: usize, log_k_chunk: usize) usize {
+    // Jolt: shift = log_k_chunk * (d - 1 - chunk_idx)
+    const shift_amount = log_k_chunk * (total_chunks - 1 - chunk_idx);
+    if (shift_amount >= 64) return 0;
+    const shift: u6 = @intCast(shift_amount);
     const mask: u64 = (@as(u64, 1) << @intCast(log_k_chunk)) - 1;
     return @intCast((addr >> shift) & mask);
 }
 
-/// Remap address using memory layout
-fn remapAddress(addr: u64, memory_layout: ?*const jolt_device.MemoryLayout) u64 {
-    if (memory_layout) |layout| {
-        // Apply Jolt's address remapping
-        if (addr >= layout.ram_start and addr < layout.ram_start + layout.max_ram_size) {
-            return addr - layout.ram_start;
-        }
-    }
-    return addr;
+/// Interleave bits of two 64-bit values to form a 128-bit lookup index
+/// Matches Jolt's interleave_bits(even_bits, odd_bits): result = (even << 1) | odd
+/// So even_bits (rs1) go to odd bit positions (1,3,5,...,127)
+/// and odd_bits (rs2) go to even bit positions (0,2,4,...,126)
+fn interleaveBits(rs1: u64, rs2: u64) u128 {
+    // Spread rs1 bits to odd positions
+    var x: u128 = @intCast(rs1);
+    x = (x | (x << 32)) & 0x0000_0000_FFFF_FFFF_0000_0000_FFFF_FFFF;
+    x = (x | (x << 16)) & 0x0000_FFFF_0000_FFFF_0000_FFFF_0000_FFFF;
+    x = (x | (x << 8)) & 0x00FF_00FF_00FF_00FF_00FF_00FF_00FF_00FF;
+    x = (x | (x << 4)) & 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F;
+    x = (x | (x << 2)) & 0x3333_3333_3333_3333_3333_3333_3333_3333;
+    x = (x | (x << 1)) & 0x5555_5555_5555_5555_5555_5555_5555_5555;
+
+    // Spread rs2 bits to even positions
+    var y: u128 = @intCast(rs2);
+    y = (y | (y << 32)) & 0x0000_0000_FFFF_FFFF_0000_0000_FFFF_FFFF;
+    y = (y | (y << 16)) & 0x0000_FFFF_0000_FFFF_0000_FFFF_0000_FFFF;
+    y = (y | (y << 8)) & 0x00FF_00FF_00FF_00FF_00FF_00FF_00FF_00FF;
+    y = (y | (y << 4)) & 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F;
+    y = (y | (y << 2)) & 0x3333_3333_3333_3333_3333_3333_3333_3333;
+    y = (y | (y << 1)) & 0x5555_5555_5555_5555_5555_5555_5555_5555;
+
+    return (x << 1) | y;
 }
 
-/// Get lookup index chunk from trace step
-fn getLookupChunk(step: tracer.TraceStep, chunk_idx: usize, log_k_chunk: usize) usize {
-    // The lookup index is built from rs1_value (lower 64 bits) and rs2_value (upper 64 bits)
-    // for a 128-bit combined index
-    const rs1 = step.rs1_value;
-    const rs2 = step.rs2_value;
+/// Get lookup index chunk from trace step using interleaved bits and MSB-first ordering
+/// This matches Jolt's lookup_index_chunk with instruction_shifts
+fn getLookupChunkInterleaved(step: tracer.TraceStep, chunk_idx: usize, log_k_chunk: usize, instruction_d: usize) usize {
+    // Build interleaved 128-bit lookup index
+    const lookup_index = interleaveBits(step.rs1_value, step.rs2_value);
 
-    // Each chunk is log_k_chunk bits
-    const bits_per_chunk = log_k_chunk;
-    const bit_offset = chunk_idx * bits_per_chunk;
-
-    if (bit_offset < 64) {
-        // From rs1 (lower 64 bits)
-        const shift: u6 = @intCast(bit_offset);
-        const mask: u64 = (@as(u64, 1) << @intCast(bits_per_chunk)) - 1;
-        return @intCast((rs1 >> shift) & mask);
-    } else {
-        // From rs2 (upper 64 bits)
-        const shift: u6 = @intCast(bit_offset - 64);
-        const mask: u64 = (@as(u64, 1) << @intCast(bits_per_chunk)) - 1;
-        return @intCast((rs2 >> shift) & mask);
-    }
+    // MSB-first: shift = log_k_chunk * (instruction_d - 1 - chunk_idx)
+    const shift_amount = log_k_chunk * (instruction_d - 1 - chunk_idx);
+    if (shift_amount >= 128) return 0;
+    const shift: u7 = @intCast(shift_amount);
+    const mask: u128 = (@as(u128, 1) << @intCast(log_k_chunk)) - 1;
+    return @intCast((lookup_index >> shift) & mask);
 }

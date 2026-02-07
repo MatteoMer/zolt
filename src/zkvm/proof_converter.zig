@@ -4023,6 +4023,13 @@ pub fn ProofConverter(comptime F: type) type {
             const the_trace = config.execution_trace orelse return error.ExecutionTraceRequired;
             const the_memory_layout = config.memory_layout orelse return error.MemoryLayoutRequired;
 
+            // Compute SpartanShift r_cycle in BIG_ENDIAN from Stage 3 challenges (reversed)
+            const r_cycle_shift_be = try self.allocator.alloc(F, stage3_result.challenges.len);
+            defer self.allocator.free(r_cycle_shift_be);
+            for (0..stage3_result.challenges.len) |i| {
+                r_cycle_shift_be[i] = stage3_result.challenges[stage3_result.challenges.len - 1 - i];
+            }
+
             var stage6_prover_instance = Stage6BatchedProver(F).init(self.allocator);
             var stage6_result = try stage6_prover_instance.generateStage6Proof(
                 &jolt_proof.stage6_sumcheck_proof,
@@ -4038,11 +4045,12 @@ pub fn ProofConverter(comptime F: type) type {
                 // Execution trace
                 the_trace,
                 // Opening points from previous stages (all BIG_ENDIAN)
-                r_spartan_original, // r_cycle_stage1 (SpartanOuter)
-                stage2_result.r_cycle_rw, // r_cycle_stage2_rw (RamReadWriteChecking)
-                if (stage4_r_cycle_val) |v| v else s_cycle_stage5, // r_cycle_stage4_val (RamValEvaluation)
-                if (stage4_regs_r_cycle) |v| v else s_cycle_stage5, // r_cycle_stage4_regs (RegistersRWC)
-                s_cycle_stage5, // r_cycle_stage5_regs_val (RegistersValEvaluation)
+                // BytecodeReadRaf r_cycles must match Jolt's 5 stages:
+                r_spartan_original, // r_cycle_1: SpartanOuter
+                stage2_result.r_cycle_product, // r_cycle_2: SpartanProductVirtualization
+                r_cycle_shift_be, // r_cycle_3: SpartanShift
+                if (stage4_regs_r_cycle) |v| v else s_cycle_stage5, // r_cycle_4: RegistersReadWriteChecking
+                s_cycle_stage5, // r_cycle_5: RegistersValEvaluation
                 // Stage 5 challenges for deriving LookupsRaVirtual and RamRaVirtual points
                 stage5_result.challenges,
                 // Memory layout for address remapping
@@ -4160,6 +4168,8 @@ pub fn ProofConverter(comptime F: type) type {
             r_address_rw: []F,
             /// RWC's r_cycle challenges (big-endian order) - for RamRaClaimReduction
             r_cycle_rw: []F,
+            /// ProductVirtualRemainder's r_cycle challenges (big-endian order) - for BytecodeReadRaf
+            r_cycle_product: []F,
             /// Individual RWC opening claims (ra, val, inc)
             rwc_ra_claim: F,
             rwc_val_claim: F,
@@ -4175,6 +4185,7 @@ pub fn ProofConverter(comptime F: type) type {
                 self.allocator.free(self.r_address_raf);
                 self.allocator.free(self.r_address_rw);
                 self.allocator.free(self.r_cycle_rw);
+                self.allocator.free(self.r_cycle_product);
             }
         };
 
@@ -5544,10 +5555,20 @@ pub fn ProofConverter(comptime F: type) type {
             }
             std.debug.print("\n", .{});
 
-            // Free the pre-sampled r_address since we don't need it anymore for raf
-            // (it's still used for OutputSumcheck's eq polynomial, but we already passed it there)
-            // Note: The pre-sampled r_address is owned by the OutputSumcheck prover already
-            // We keep it allocated as r_address for other uses (OutputSumcheck eq)
+            // Compute ProductVirtualRemainder r_cycle from Stage 2 challenges
+            // ProductVirtualRemainder starts at round (max_num_rounds - n_cycle_vars)
+            // and runs for n_cycle_vars rounds. Reversed to BIG_ENDIAN.
+            const product_start = max_num_rounds - n_cycle_vars;
+            const r_cycle_product = try self.allocator.alloc(F, n_cycle_vars);
+            for (0..n_cycle_vars) |i| {
+                const src_idx = product_start + i;
+                if (src_idx < challenges.items.len) {
+                    r_cycle_product[n_cycle_vars - 1 - i] = challenges.items[src_idx];
+                } else {
+                    r_cycle_product[n_cycle_vars - 1 - i] = F.zero();
+                }
+            }
+            std.debug.print("[ZOLT] STAGE2: r_cycle_product (BIG_ENDIAN) computed, len={}\n", .{r_cycle_product.len});
 
             return Stage2Result{
                 .factor_evals = factor_evals,
@@ -5561,6 +5582,7 @@ pub fn ProofConverter(comptime F: type) type {
                 .r_address_raf = r_address_raf,
                 .r_address_rw = r_address_rw,
                 .r_cycle_rw = r_cycle_rw,
+                .r_cycle_product = r_cycle_product,
                 .rwc_ra_claim = rwc_ra_claim,
                 .rwc_val_claim = rwc_val_claim,
                 .rwc_inc_claim = rwc_inc_claim,

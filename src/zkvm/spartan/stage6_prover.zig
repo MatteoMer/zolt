@@ -1307,6 +1307,19 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 defer self.allocator.free(combined_evals);
                 @memset(combined_evals, F.zero());
 
+                // Per-instance cached round poly evals for claim tracking
+                // We cache each instance's round poly so we don't recompute after challenge
+                var cached_bc_phase1: [3]F = undefined; // [p(0), p(1), p(inf)]
+                var cached_bc_phase2: ?[]F = null;
+                var cached_hamming: [4]F = undefined;
+                var cached_ram_ra: ?[]F = null;
+                var cached_lookups_ra: ?[]F = null;
+                var cached_inc: [3]F = undefined; // [p(0), p(2), p(inf)]
+                var cached_inc_p1: F = F.zero(); // recovered p(1)
+
+                // Track which instances are active this round
+                var inst_active: [6]bool = .{ false, false, false, false, false, false };
+
                 // Instance 0: BytecodeReadRaf - REAL prover
                 {
                     const inst = 0;
@@ -1320,15 +1333,13 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                             combined_evals[j_eval] = combined_evals[j_eval].add(contrib);
                         }
                     } else {
-                        const inst_round = num_rounds_arr[inst] - remaining_rounds;
+                        inst_active[inst] = true;
                         if (bytecode_prover.phase == 0) {
                             // Phase 1: address binding (linear poly)
                             const polys = bytecode_prover.computeRoundPolyPhase1();
-                            // polys = [p(0), p(1), p(inf=0)]
-                            // Place into combined_evals: slot 0 = p(0), slot 1 = p(1), rest extrapolated
+                            cached_bc_phase1 = polys;
                             combined_evals[0] = combined_evals[0].add(batch[inst].mul(polys[0]));
                             combined_evals[1] = combined_evals[1].add(batch[inst].mul(polys[1]));
-                            // Linear: p(x) = p(0) + x*(p(1)-p(0)), p(inf)=0
                             const slope = polys[1].sub(polys[0]);
                             for (2..num_evals - 1) |k| {
                                 const x = F.fromU64(@intCast(k));
@@ -1336,12 +1347,10 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                                 combined_evals[k] = combined_evals[k].add(batch[inst].mul(pk));
                             }
                             // p(inf) = 0 for linear poly
-                            _ = inst_round;
                         } else {
                             // Phase 2: cycle binding (degree bytecode_d+1)
                             const polys = try bytecode_prover.computeRoundPolyPhase2(self.allocator);
-                            defer self.allocator.free(polys);
-                            // polys has bytecode_d+2 evals: [p(0), p(1), ..., p(d), p(inf)]
+                            cached_bc_phase2 = polys;
                             addInstanceEvalsToCombibed(F, combined_evals, polys, batch[inst], num_evals);
                         }
                     }
@@ -1359,8 +1368,9 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                             combined_evals[j_eval] = combined_evals[j_eval].add(contrib);
                         }
                     } else {
+                        inst_active[inst] = true;
                         const polys = hamming_prover.computeRoundPoly();
-                        // polys = [p(0), p(1), p(2), p(inf)] for degree 3
+                        cached_hamming = polys;
                         addFixedEvalsToCombibed(F, combined_evals, &polys, 4, batch[inst], num_evals);
                     }
                 }
@@ -1377,6 +1387,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                             combined_evals[j_eval] = combined_evals[j_eval].add(contrib);
                         }
                     } else {
+                        inst_active[inst] = true;
                         // Zero polynomial - all evals are zero, nothing to add
                     }
                 }
@@ -1393,8 +1404,9 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                             combined_evals[j_eval] = combined_evals[j_eval].add(contrib);
                         }
                     } else {
+                        inst_active[inst] = true;
                         const polys = try ram_ra_prover.computeRoundPoly(self.allocator);
-                        defer self.allocator.free(polys);
+                        cached_ram_ra = polys;
                         addInstanceEvalsToCombibed(F, combined_evals, polys, batch[inst], num_evals);
                     }
                 }
@@ -1411,8 +1423,9 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                             combined_evals[j_eval] = combined_evals[j_eval].add(contrib);
                         }
                     } else {
+                        inst_active[inst] = true;
                         const polys = try lookups_ra_prover.computeRoundPoly(self.allocator);
-                        defer self.allocator.free(polys);
+                        cached_lookups_ra = polys;
                         addInstanceEvalsToCombibed(F, combined_evals, polys, batch[inst], num_evals);
                     }
                 }
@@ -1429,11 +1442,14 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                             combined_evals[j_eval] = combined_evals[j_eval].add(contrib);
                         }
                     } else {
+                        inst_active[inst] = true;
                         const polys = inc_prover.computeRoundPoly();
+                        cached_inc = polys;
                         // polys = [p(0), p(2), p(inf)] for degree 2
                         // Need p(1) = instance_claim - p(0)
                         const p0 = polys[0];
                         const p1 = instance_claims[inst].sub(p0);
+                        cached_inc_p1 = p1;
                         const p2 = polys[1];
                         const p_inf = polys[2];
 
@@ -1483,40 +1499,64 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 // Evaluate combined polynomial at challenge
                 current_batched_claim = try UniPoly(F).evaluateToomCookGeneralAt(self.allocator, combined_evals, challenge);
 
-                // Bind challenge to all active instance provers and update claims
-                for (0..6) |inst| {
-                    if (remaining_rounds <= num_rounds_arr[inst]) {
-                        if (inst == 0) {
-                            // BytecodeReadRaf
-                            if (bytecode_prover.phase == 0) {
-                                bytecode_addr_challenges[bytecode_prover.addr_rounds_done] = challenge;
-                                bytecode_prover.bindChallengePhase1(challenge);
-                                // Check if we just completed Phase 1
-                                if (bytecode_prover.addr_rounds_done == bytecode_log_k) {
-                                    try bytecode_prover.transitionToPhase2(bytecode_addr_challenges);
-                                }
-                            } else {
-                                bytecode_prover.bindChallengePhase2(challenge);
-                            }
-                        } else if (inst == 1) {
-                            hamming_prover.bindChallenge(challenge);
-                        } else if (inst == 2) {
-                            // Booleanity: zero poly, no binding needed
-                        } else if (inst == 3) {
-                            ram_ra_prover.bindChallenge(challenge);
-                        } else if (inst == 4) {
-                            lookups_ra_prover.bindChallenge(challenge);
-                        } else if (inst == 5) {
-                            inc_prover.bindChallenge(challenge);
+                // Update per-instance claims from CACHED round polys and bind challenge
+                // Instance 0: BytecodeReadRaf
+                if (inst_active[0]) {
+                    if (bytecode_prover.phase == 0) {
+                        // Phase 1: linear poly, p(r) = p(0) + r*(p(1)-p(0))
+                        instance_claims[0] = cached_bc_phase1[0].add(challenge.mul(cached_bc_phase1[1].sub(cached_bc_phase1[0])));
+                        bytecode_addr_challenges[bytecode_prover.addr_rounds_done] = challenge;
+                        bytecode_prover.bindChallengePhase1(challenge);
+                        if (bytecode_prover.addr_rounds_done == bytecode_log_k) {
+                            try bytecode_prover.transitionToPhase2(bytecode_addr_challenges);
                         }
-
-                        // Update instance claim for next round
-                        // For real provers, the new claim is the eval of the round poly at challenge
-                        // For the constant-poly (booleanity with input=0), claim stays 0
-                        instance_claims[inst] = instance_claims[inst].mul(F.fromU64(2).inverse().?);
-                        // Note: this is approximate - the real claim tracking happens through combined_evals
-                        // The per-instance claim is only needed for the IncClaimReduction p(1) recovery
+                    } else {
+                        // Phase 2: evaluate from cached evals using Lagrange interpolation
+                        instance_claims[0] = evaluatePolyFromEvals(F, cached_bc_phase2.?, challenge);
+                        self.allocator.free(cached_bc_phase2.?);
+                        cached_bc_phase2 = null;
+                        bytecode_prover.bindChallengePhase2(challenge);
                     }
+                }
+
+                // Instance 1: HammingBooleanity
+                if (inst_active[1]) {
+                    instance_claims[1] = evaluateDeg3FromEvals(F, cached_hamming, challenge);
+                    hamming_prover.bindChallenge(challenge);
+                }
+
+                // Instance 2: Booleanity (zero poly, claim stays 0)
+                if (inst_active[2]) {
+                    instance_claims[2] = F.zero();
+                }
+
+                // Instance 3: RamRaVirtual
+                if (inst_active[3]) {
+                    instance_claims[3] = evaluatePolyFromEvals(F, cached_ram_ra.?, challenge);
+                    self.allocator.free(cached_ram_ra.?);
+                    cached_ram_ra = null;
+                    ram_ra_prover.bindChallenge(challenge);
+                }
+
+                // Instance 4: LookupsRaVirtual
+                if (inst_active[4]) {
+                    instance_claims[4] = evaluatePolyFromEvals(F, cached_lookups_ra.?, challenge);
+                    self.allocator.free(cached_lookups_ra.?);
+                    cached_lookups_ra = null;
+                    lookups_ra_prover.bindChallenge(challenge);
+                }
+
+                // Instance 5: IncClaimReduction
+                if (inst_active[5]) {
+                    const p0 = cached_inc[0];
+                    const p1_val = cached_inc_p1;
+                    const p_inf = cached_inc[2];
+                    // p(x) = a0 + a1*x + a2*x^2 where a2 = p(inf)
+                    const a0 = p0;
+                    const a2 = p_inf;
+                    const a1 = p1_val.sub(a0).sub(a2);
+                    instance_claims[5] = a0.add(challenge.mul(a1.add(challenge.mul(a2))));
+                    inc_prover.bindChallenge(challenge);
                 }
             }
 
@@ -1914,4 +1954,68 @@ fn getLookupChunkInterleaved(step: tracer.TraceStep, chunk_idx: usize, log_k_chu
     const shift: u7 = @intCast(shift_amount);
     const mask: u128 = (@as(u128, 1) << @intCast(log_k_chunk)) - 1;
     return @intCast((lookup_index >> shift) & mask);
+}
+
+/// Evaluate a polynomial at a point given its Toom-Cook evals format:
+/// evals = [p(0), p(1), ..., p(d-1), p(inf)]
+/// where p(inf) is the leading coefficient (coefficient of x^d).
+/// The polynomial has degree d where d = evals.len - 1.
+/// Uses Lagrange interpolation on the d finite points {0, 1, ..., d-1}
+/// plus the leading coefficient correction.
+fn evaluatePolyFromEvals(comptime F: type, evals: []const F, challenge: F) F {
+    const n_evals = evals.len;
+    const deg = n_evals - 1; // polynomial degree
+    const leading = evals[n_evals - 1]; // p(inf) = leading coefficient
+
+    // Lagrange interpolation through (0, p(0)), (1, p(1)), ..., (d-1, p(d-1))
+    // gives a degree-(d-1) polynomial. Add leading * prod(x - i) to get degree-d.
+    var lagrange_val = F.zero();
+    for (0..deg) |m| {
+        var basis = F.one();
+        const xm = F.fromU64(@intCast(m));
+        for (0..deg) |n| {
+            if (n != m) {
+                const xn = F.fromU64(@intCast(n));
+                basis = basis.mul(challenge.sub(xn)).mul(xm.sub(xn).inverse().?);
+            }
+        }
+        lagrange_val = lagrange_val.add(basis.mul(evals[m]));
+    }
+
+    // Correction: add leading * prod_{i=0}^{d-1} (challenge - i)
+    var x_prod = F.one();
+    for (0..deg) |m| {
+        x_prod = x_prod.mul(challenge.sub(F.fromU64(@intCast(m))));
+    }
+
+    return lagrange_val.add(leading.mul(x_prod));
+}
+
+/// Evaluate a degree-3 polynomial from evals [p(0), p(1), p(2), p(inf)]
+/// p(inf) is the leading coefficient (coefficient of x^3).
+/// Specialized version for degree 3 for slightly better perf (avoids loops).
+fn evaluateDeg3FromEvals(comptime F: type, evals: [4]F, challenge: F) F {
+    const p0 = evals[0];
+    const p1 = evals[1];
+    const p2 = evals[2];
+    const leading = evals[3]; // coefficient of x^3
+
+    // Lagrange interpolation through (0, p0), (1, p1), (2, p2) gives degree-2 poly
+    // L_0(x) = (x-1)(x-2)/((0-1)(0-2)) = (x-1)(x-2)/2
+    // L_1(x) = (x-0)(x-2)/((1-0)(1-2)) = x(x-2)/(-1) = -x(x-2)
+    // L_2(x) = (x-0)(x-1)/((2-0)(2-1)) = x(x-1)/2
+    const x = challenge;
+    const two_inv = F.fromU64(2).inverse().?;
+    const xm1 = x.sub(F.one());
+    const xm2 = x.sub(F.fromU64(2));
+
+    const l0 = xm1.mul(xm2).mul(two_inv);
+    const l1 = x.mul(xm2).neg();
+    const l2 = x.mul(xm1).mul(two_inv);
+
+    const lagrange_val = l0.mul(p0).add(l1.mul(p1)).add(l2.mul(p2));
+
+    // Add leading * x * (x-1) * (x-2)
+    const x_prod = x.mul(xm1).mul(xm2);
+    return lagrange_val.add(leading.mul(x_prod));
 }

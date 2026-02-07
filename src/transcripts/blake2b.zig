@@ -389,18 +389,22 @@ pub fn Blake2bTranscript(comptime F: type) type {
 
         /// Get multiple challenge scalars
         /// Matches Jolt's `fn challenge_vector<F: JoltField>(&mut self, len: usize) -> Vec<F>`
+        /// NOTE: Jolt's challenge_vector uses challenge_scalar() which is the FULL
+        /// 128-bit from_le_bytes_mod_order version, NOT the 125-bit optimized version.
         pub fn challengeVector(self: *Self, allocator: std.mem.Allocator, len: usize) ![]F {
             const challenges = try allocator.alloc(F, len);
             for (0..len) |i| {
-                challenges[i] = self.challengeScalar();
+                challenges[i] = self.challengeScalarFull();
             }
             return challenges;
         }
 
         /// Compute powers of a challenge scalar
         /// Matches Jolt's `fn challenge_scalar_powers<F: JoltField>(&mut self, len: usize) -> Vec<F>`
+        /// NOTE: Jolt's challenge_scalar_powers uses challenge_scalar() which is the FULL
+        /// 128-bit from_le_bytes_mod_order version, NOT the 125-bit optimized version.
         pub fn challengeScalarPowers(self: *Self, allocator: std.mem.Allocator, len: usize) ![]F {
-            const q = self.challengeScalar();
+            const q = self.challengeScalarFull();
             const q_powers = try allocator.alloc(F, len);
             q_powers[0] = F.one();
             for (1..len) |i| {

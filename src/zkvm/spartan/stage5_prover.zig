@@ -59,7 +59,7 @@ pub fn Stage5Result(comptime F: type) type {
         /// RamRaClaimReduction opening claim
         ram_ra_claim: F, // RamRa at reduced point
         /// LookupsReadRaf opening claims
-        lookups_table_flags: []F, // LookupTableFlag(i) for i in 0..42
+        lookups_table_flags: []F, // LookupTableFlag(i) for i in 0..41
         lookups_ra_chunks: []F, // InstructionRa(i) for i in 0..8
         lookups_raf_flag: F, // InstructionRafFlag
         allocator: Allocator,
@@ -316,7 +316,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             std.debug.print("[STAGE5] Final batched claim = {any}\n", .{current_batched_claim.toBytesBE()});
 
             // Allocate opening claim arrays
-            const num_lookup_tables: usize = 42;
+            const num_lookup_tables: usize = 41;
             const lookups_ra_d = LOOKUPS_LOG_K / lookups_ra_virtual_log_k_chunk;
 
             const table_flags = try self.allocator.alloc(F, num_lookup_tables);
@@ -544,8 +544,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
             // Store table MLE evaluations at r_address (populated during rematerialization)
             // These are used for computing val_claim = Σ table_flags[i] * table_values[i]
-            // Note: Jolt has 42 tables but our prefix-suffix only covers 41
-            const MAX_LOOKUP_TABLES: usize = 42;
+            // Note: Jolt has 41 tables (LookupTables::COUNT = 41)
+            const MAX_LOOKUP_TABLES: usize = 41;
             var stored_table_values: [MAX_LOOKUP_TABLES]F = [_]F{F.zero()} ** MAX_LOOKUP_TABLES;
 
             // Build eq_reduction[j] = eq(j, r_reduction) for all cycles j
@@ -5439,7 +5439,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // We need to find ra_claim, val_claim, raf_claim such that:
             //   eq_r_reduction * ra_claim * (val_claim + gamma * raf_claim) = lookups_output_claim
 
-            const num_lookup_tables: usize = 42;
+            const num_lookup_tables: usize = 41;
             const lookups_ra_d = LOOKUPS_LOG_K / lookups_ra_virtual_log_k_chunk;
 
             // Extract r_address (first 128 challenges) and r_cycle' (last 8 challenges)

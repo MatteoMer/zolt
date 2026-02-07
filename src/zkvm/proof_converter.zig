@@ -1609,6 +1609,11 @@ pub fn ProofConverter(comptime F: type) type {
 
             // Stage 1: Outer Spartan Remaining - use streaming prover with transcript
             // Use padded witnesses so Az/Bz MLE evaluations match the verifier's computation
+            {
+                std.debug.print("[ZOLT] Transcript before Stage 1: ", .{});
+                for (transcript.state[0..8]) |b| std.debug.print("{x:0>2} ", .{b});
+                std.debug.print(" round={}\n", .{transcript.n_rounds});
+            }
             var stage1_result: ?Stage1Result = null;
             if (jolt_proof.stage1_uni_skip_first_round_proof) |*uniskip| {
                 stage1_result = try self.generateStreamingOuterSumcheckProofWithTranscript(
@@ -1855,6 +1860,11 @@ pub fn ProofConverter(comptime F: type) type {
             // Append tau_high_stage2 as the last element
             tau_stage2[n_cycle_vars] = tau_high_stage2;
 
+            {
+                std.debug.print("[ZOLT] Transcript before Stage 2: ", .{});
+                for (transcript.state[0..8]) |b| std.debug.print("{x:0>2} ", .{b});
+                std.debug.print(" round={}\n", .{transcript.n_rounds});
+            }
             std.debug.print("[ZOLT] STAGE2: tau_stage2.len = {}\n", .{tau_stage2.len});
             if (tau_stage2.len > 0) {
                 std.debug.print("[ZOLT] STAGE2: tau_stage2[0] = {any}\n", .{tau_stage2[0].toBytesBE()});
@@ -2043,6 +2053,11 @@ pub fn ProofConverter(comptime F: type) type {
             std.debug.print("[ZOLT] Stage 2 transcript state after cache_openings = {any}\n", .{transcript.state[0..8]});
 
             // Stage 3: SpartanShift, InstructionInput, RegistersClaimReduction
+            {
+                std.debug.print("[ZOLT] Transcript before Stage 3: ", .{});
+                for (transcript.state[0..8]) |b| std.debug.print("{x:0>2} ", .{b});
+                std.debug.print(" round={}\n", .{transcript.n_rounds});
+            }
             // Extract r_product from Stage 2 challenges (last n_cycle_vars in BIG_ENDIAN)
             var r_product = try self.allocator.alloc(F, n_cycle_vars);
             defer self.allocator.free(r_product);
@@ -2200,6 +2215,11 @@ pub fn ProofConverter(comptime F: type) type {
             // LookupOutput at InstructionClaimReduction was already added in Stage 2
 
             // Stage 4: RegistersReadWriteChecking, RamValEvaluation, RamValFinalEvaluation
+            {
+                std.debug.print("[ZOLT] Transcript before Stage 4: ", .{});
+                for (transcript.state[0..8]) |b| std.debug.print("{x:0>2} ", .{b});
+                std.debug.print(" round={}\n", .{transcript.n_rounds});
+            }
             // RegistersReadWriteChecking has LOG_K + log2(T) rounds where LOG_K = log2(REGISTER_COUNT)
             // REGISTER_COUNT = 32 (RISCV) + 96 (Virtual) = 128, so LOG_K = 7
             const log_registers = 7; // log2(128) = 7
@@ -3842,6 +3862,11 @@ pub fn ProofConverter(comptime F: type) type {
             } // end stage4_block
 
             // Stage 5: RegistersValEvaluation, RamRaClaimReduction, LookupsReadRaf
+            {
+                std.debug.print("[ZOLT] Transcript before Stage 5: ", .{});
+                for (transcript.state[0..8]) |b| std.debug.print("{x:0>2} ", .{b});
+                std.debug.print(" round={}\n", .{transcript.n_rounds});
+            }
             // LookupsReadRaf has max rounds: LOG_K + log_T where LOG_K = XLEN * 2 = 128
             // For RV64: max_num_rounds = 128 + log_T = 128 + 8 = 136
             const lookups_log_k: usize = 128; // XLEN * 2 for RV64
@@ -3924,8 +3949,8 @@ pub fn ProofConverter(comptime F: type) type {
             );
 
             // LookupsReadRaf claims (Stage 5 - LookupsReadRafSumcheckVerifier)
-            // LookupTableFlag(i) for each of the 42 lookup tables
-            const num_lookup_tables: usize = 42; // LookupTables::<XLEN>::COUNT
+            // LookupTableFlag(i) for each of the 41 lookup tables
+            const num_lookup_tables: usize = 41; // LookupTables::<XLEN>::COUNT (41 variants)
             std.debug.print("[SERIALIZE DEBUG] Inserting LookupTableFlag claims:\n", .{});
             for (0..num_lookup_tables) |i| {
                 const flag_value = stage5_result.lookups_table_flags[i];
@@ -3970,7 +3995,7 @@ pub fn ProofConverter(comptime F: type) type {
             // Instance 1: RamRaClaimReduction (RamRa)
             transcript.appendScalar(stage5_result.ram_ra_claim);
 
-            // Instance 2: LookupsReadRaf (LookupTableFlag(0..42), InstructionRa(0..8), InstructionRafFlag)
+            // Instance 2: LookupsReadRaf (LookupTableFlag(0..41), InstructionRa(0..8), InstructionRafFlag)
             for (stage5_result.lookups_table_flags) |flag| {
                 transcript.appendScalar(flag);
             }
@@ -3978,6 +4003,12 @@ pub fn ProofConverter(comptime F: type) type {
                 transcript.appendScalar(chunk);
             }
             transcript.appendScalar(stage5_result.lookups_raf_flag);
+
+            {
+                std.debug.print("[ZOLT] Transcript AFTER Stage 5 cache_openings: ", .{});
+                for (transcript.state[0..8]) |b| std.debug.print("{x:0>2} ", .{b});
+                std.debug.print(" round={}\n", .{transcript.n_rounds});
+            }
 
             // Stage 6: BytecodeReadRaf, RamHammingBooleanity, Booleanity, RamRaVirtual, LookupsRaVirtual, IncClaimReduction
             const bytecode_log_k = std.math.log2_int(usize, config.bytecode_K);

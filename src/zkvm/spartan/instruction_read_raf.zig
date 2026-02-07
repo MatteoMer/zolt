@@ -30,8 +30,8 @@ const OpeningId = jolt_types.OpeningId;
 /// LOG_K for instruction lookups = XLEN * 2 = 128 for RV64
 pub const LOG_K: usize = 128;
 
-/// Number of lookup tables in Jolt
-pub const NUM_LOOKUP_TABLES: usize = 42;
+/// Number of lookup tables in Jolt (LookupTables::COUNT = 41)
+pub const NUM_LOOKUP_TABLES: usize = 41;
 
 /// Result from InstructionReadRaf sumcheck
 pub fn InstructionReadRafResult(comptime F: type) type {

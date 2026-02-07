@@ -1543,8 +1543,21 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             // Sample gammas (must match Jolt verifier)
             // ====================================================================
 
+            // Debug: dump transcript state at Stage 6 entry
+            std.debug.print("[STAGE6] Transcript state at entry: {{ ", .{});
+            for (transcript.state) |b| std.debug.print("{x:0>2} ", .{b});
+            std.debug.print("}}, round={}\n", .{transcript.n_rounds});
+
             const bytecode_raf_gamma_powers = try transcript.challengeScalarPowers(self.allocator, 7);
             defer self.allocator.free(bytecode_raf_gamma_powers);
+
+            // Debug: print first gamma to verify transcript sync
+            {
+                const g0_be = bytecode_raf_gamma_powers[1].toBytesBE(); // [1] is gamma itself
+                std.debug.print("[STAGE6] bytecodeRaf_gamma = [{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                    g0_be[31], g0_be[30], g0_be[29], g0_be[28], g0_be[27], g0_be[26], g0_be[25], g0_be[24],
+                });
+            }
 
             const NUM_CIRCUIT_FLAGS: usize = 13;
             const stage1_gammas = try transcript.challengeScalarPowers(self.allocator, 2 + NUM_CIRCUIT_FLAGS);
@@ -1580,7 +1593,8 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             defer self.allocator.free(lookups_ra_gamma_powers);
 
             // IncClaimReduction::new() - gamma
-            const inc_gamma = transcript.challengeScalar();
+            // Jolt uses challenge_scalar() (FULL 128-bit) for inc gamma, not optimized
+            const inc_gamma = transcript.challengeScalarFull();
 
             // ====================================================================
             // Compute input claims
@@ -1627,18 +1641,81 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 .{ .Committed = .{ .poly = .RdInc, .sumcheck_id = .RegistersValEvaluation } },
             ) orelse F.zero();
 
+            // Debug: dump inc_gamma and individual claims
+            {
+                const ig_be = inc_gamma.toBytesBE();
+                const v1_be = v1_claim.toBytesBE();
+                const v2_be = v2_claim.toBytesBE();
+                const w1_be = w1_claim.toBytesBE();
+                const w2_be = w2_claim.toBytesBE();
+                std.debug.print("[STAGE6] inc_gamma = [{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                    ig_be[31], ig_be[30], ig_be[29], ig_be[28], ig_be[27], ig_be[26], ig_be[25], ig_be[24],
+                });
+                std.debug.print("[STAGE6] IncClaim v1(RamInc@RamRWC) = [{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                    v1_be[31], v1_be[30], v1_be[29], v1_be[28], v1_be[27], v1_be[26], v1_be[25], v1_be[24],
+                });
+                std.debug.print("[STAGE6] IncClaim v2(RamInc@RamVal) = [{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                    v2_be[31], v2_be[30], v2_be[29], v2_be[28], v2_be[27], v2_be[26], v2_be[25], v2_be[24],
+                });
+                std.debug.print("[STAGE6] IncClaim w1(RdInc@RegsRWC) = [{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                    w1_be[31], w1_be[30], w1_be[29], w1_be[28], w1_be[27], w1_be[26], w1_be[25], w1_be[24],
+                });
+                std.debug.print("[STAGE6] IncClaim w2(RdInc@RegsVal) = [{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                    w2_be[31], w2_be[30], w2_be[29], w2_be[28], w2_be[27], w2_be[26], w2_be[25], w2_be[24],
+                });
+            }
+
             const incClaimReduction_input = v1_claim
                 .add(inc_gamma.mul(v2_claim))
                 .add(inc_gamma2.mul(w1_claim))
                 .add(inc_gamma3.mul(w2_claim));
 
-            std.debug.print("[STAGE6] Input claims:\n", .{});
-            std.debug.print("  bytecodeReadRaf = {any}\n", .{bytecodeReadRaf_input.toBytesBE()[0..8]});
-            std.debug.print("  hammingBooleanity = {any}\n", .{hammingBooleanity_input.toBytesBE()[0..8]});
-            std.debug.print("  booleanity = {any}\n", .{booleanity_input.toBytesBE()[0..8]});
-            std.debug.print("  ramRaVirtual = {any}\n", .{ramRaVirtual_input.toBytesBE()[0..8]});
-            std.debug.print("  lookupsRaVirtual = {any}\n", .{lookupsRaVirtual_input.toBytesBE()[0..8]});
-            std.debug.print("  incClaimReduction = {any}\n", .{incClaimReduction_input.toBytesBE()[0..8]});
+            std.debug.print("[STAGE6] Input claims (LE first 8):\n", .{});
+            // Print components for IncClaimReduction
+            {
+                const v1_be = v1_claim.toBytesBE();
+                const v2_be = v2_claim.toBytesBE();
+                const w1_be = w1_claim.toBytesBE();
+                const w2_be = w2_claim.toBytesBE();
+                std.debug.print("  IncClaim components: v1=[{x:0>2},{x:0>2},...] v2=[{x:0>2},{x:0>2},...] w1=[{x:0>2},{x:0>2},...] w2=[{x:0>2},{x:0>2},...]\n", .{
+                    v1_be[31], v1_be[30], v2_be[31], v2_be[30], w1_be[31], w1_be[30], w2_be[31], w2_be[30],
+                });
+            }
+            // Print LookupsRa claims
+            for (0..@min(n_virtual_ra_polys, 4)) |i| {
+                const ra_c = opening_claims.get(
+                    .{ .Virtual = .{ .poly = .{ .InstructionRa = i }, .sumcheck_id = .InstructionReadRaf } },
+                ) orelse F.zero();
+                const ra_be = ra_c.toBytesBE();
+                std.debug.print("  InstructionRa[{}] = [{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                    i, ra_be[31], ra_be[30], ra_be[29], ra_be[28], ra_be[27], ra_be[26], ra_be[25], ra_be[24],
+                });
+            }
+            // Print BytecodeReadRaf components
+            {
+                const bc_be = bytecodeReadRaf_input.toBytesBE();
+                std.debug.print("  bytecodeReadRaf_input = [{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                    bc_be[31], bc_be[30], bc_be[29], bc_be[28], bc_be[27], bc_be[26], bc_be[25], bc_be[24],
+                });
+            }
+            {
+                const ram_be = ramRaVirtual_input.toBytesBE();
+                std.debug.print("  ramRaVirtual_input = [{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                    ram_be[31], ram_be[30], ram_be[29], ram_be[28], ram_be[27], ram_be[26], ram_be[25], ram_be[24],
+                });
+            }
+            {
+                const look_be = lookupsRaVirtual_input.toBytesBE();
+                std.debug.print("  lookupsRaVirtual_input = [{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                    look_be[31], look_be[30], look_be[29], look_be[28], look_be[27], look_be[26], look_be[25], look_be[24],
+                });
+            }
+            {
+                const inc_be = incClaimReduction_input.toBytesBE();
+                std.debug.print("  incClaimReduction_input = [{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                    inc_be[31], inc_be[30], inc_be[29], inc_be[28], inc_be[27], inc_be[26], inc_be[25], inc_be[24],
+                });
+            }
 
             // ====================================================================
             // Derive opening points for RamRaVirtual and LookupsRaVirtual from Stage 5
@@ -1920,6 +1997,23 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 for (0..scale) |_| scaled = scaled.add(scaled);
                 batched_claim = batched_claim.add(batch[i].mul(scaled));
             }
+
+            std.debug.print("\n[S6P] Input claims and batching (LE = last8 of BE):\n", .{});
+            for (0..6) |i| {
+                const ic_be = input_claims[i].toBytesBE();
+                const ba_be = batch[i].toBytesBE();
+                // Show last 8 bytes of BE format (= first 8 LE bytes = least significant)
+                std.debug.print("  instance[{}]: input_claim=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] batch=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] rounds={}\n", .{
+                    i,
+                    ic_be[31], ic_be[30], ic_be[29], ic_be[28], ic_be[27], ic_be[26], ic_be[25], ic_be[24],
+                    ba_be[31], ba_be[30], ba_be[29], ba_be[28], ba_be[27], ba_be[26], ba_be[25], ba_be[24],
+                    num_rounds_arr[i],
+                });
+            }
+            const bc_be = batched_claim.toBytesBE();
+            std.debug.print("  batched_claim=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                bc_be[31], bc_be[30], bc_be[29], bc_be[28], bc_be[27], bc_be[26], bc_be[25], bc_be[24],
+            });
 
             // ====================================================================
             // Run batched sumcheck
@@ -2235,6 +2329,13 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     inc_prover.bindChallenge(challenge);
                 }
             }
+
+            // Debug: print final instance claims after sumcheck
+            std.debug.print("\n[S6P] Final instance claims after sumcheck:\n", .{});
+            for (0..6) |i| {
+                std.debug.print("  instance[{}] final_claim={any}\n", .{i, instance_claims[i].toBytesBE()[0..8]});
+            }
+            std.debug.print("  current_batched_claim={any}\n", .{current_batched_claim.toBytesBE()[0..8]});
 
             // ====================================================================
             // Extract opening claims from all real provers

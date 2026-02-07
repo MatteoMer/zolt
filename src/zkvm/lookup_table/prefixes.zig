@@ -548,14 +548,14 @@ fn andPrefixMle(
     var result = checkpoints[@intFromEnum(Prefixes.And)] orelse F.zero();
     if (r_x) |rx| {
         const y = F.fromU64(@as(u64, c));
-        const x_shift = XLEN - (j / 2);
+        const x_shift = XLEN - 1 - (j / 2);
         // AND(r_x, c) = r_x * c
         const and_contrib = F.fromU128(@as(u128, 1) << @intCast(x_shift)).mul(rx.mul(y));
         result = result.add(and_contrib);
     } else {
         const x = F.fromU64(@as(u64, c));
         const y_msb = b.popMsb();
-        const x_shift = XLEN - (j / 2) - 1;
+        const x_shift = XLEN - 1 - (j / 2);
         // AND(c, y_msb) = c * y_msb
         const and_contrib = F.fromU128(@as(u128, 1) << @intCast(x_shift)).mul(x.mul(F.fromU64(@as(u64, y_msb))));
         result = result.add(and_contrib);
@@ -575,7 +575,7 @@ fn andUpdateCheckpoint(
     j: usize,
     _: usize,
 ) PrefixCheckpoint(F) {
-    const x_shift = XLEN - (j / 2);
+    const x_shift = XLEN - 1 - (j / 2);
     var updated = checkpoints[@intFromEnum(Prefixes.And)] orelse F.zero();
     updated = updated.add(F.fromU128(@as(u128, 1) << @intCast(x_shift)).mul(r_x.mul(r_y)));
     return updated;
@@ -598,14 +598,14 @@ fn orPrefixMle(
     var result = checkpoints[@intFromEnum(Prefixes.Or)] orelse F.zero();
     if (r_x) |rx| {
         const y = F.fromU64(@as(u64, c));
-        const x_shift = XLEN - (j / 2);
+        const x_shift = XLEN - 1 - (j / 2);
         // OR(r_x, c) = r_x + c - r_x * c
         const or_contrib = rx.add(y).sub(rx.mul(y));
         result = result.add(F.fromU128(@as(u128, 1) << @intCast(x_shift)).mul(or_contrib));
     } else {
         const x = F.fromU64(@as(u64, c));
         const y_msb_val = F.fromU64(@as(u64, b.popMsb()));
-        const x_shift = XLEN - (j / 2) - 1;
+        const x_shift = XLEN - 1 - (j / 2);
         // OR(c, y_msb) = c + y_msb - c * y_msb
         const or_contrib = x.add(y_msb_val).sub(x.mul(y_msb_val));
         result = result.add(F.fromU128(@as(u128, 1) << @intCast(x_shift)).mul(or_contrib));
@@ -625,7 +625,7 @@ fn orUpdateCheckpoint(
     j: usize,
     _: usize,
 ) PrefixCheckpoint(F) {
-    const x_shift = XLEN - (j / 2);
+    const x_shift = XLEN - 1 - (j / 2);
     var updated = checkpoints[@intFromEnum(Prefixes.Or)] orelse F.zero();
     // OR(r_x, r_y) = r_x + r_y - r_x * r_y
     updated = updated.add(F.fromU128(@as(u128, 1) << @intCast(x_shift)).mul(r_x.add(r_y).sub(r_x.mul(r_y))));
@@ -649,7 +649,7 @@ fn xorPrefixMle(
     var result = checkpoints[@intFromEnum(Prefixes.Xor)] orelse F.zero();
     if (r_x) |rx| {
         const y = F.fromU64(@as(u64, c));
-        const x_shift = XLEN - (j / 2);
+        const x_shift = XLEN - 1 - (j / 2);
         // XOR(r_x, c) = r_x + c - 2 * r_x * c
         const two = F.fromU64(2);
         const xor_contrib = rx.add(y).sub(two.mul(rx.mul(y)));
@@ -657,7 +657,7 @@ fn xorPrefixMle(
     } else {
         const x = F.fromU64(@as(u64, c));
         const y_msb_val = F.fromU64(@as(u64, b.popMsb()));
-        const x_shift = XLEN - (j / 2) - 1;
+        const x_shift = XLEN - 1 - (j / 2);
         // XOR(c, y_msb) = c + y_msb - 2 * c * y_msb
         const two = F.fromU64(2);
         const xor_contrib = x.add(y_msb_val).sub(two.mul(x.mul(y_msb_val)));
@@ -678,7 +678,7 @@ fn xorUpdateCheckpoint(
     j: usize,
     _: usize,
 ) PrefixCheckpoint(F) {
-    const x_shift = XLEN - (j / 2);
+    const x_shift = XLEN - 1 - (j / 2);
     var updated = checkpoints[@intFromEnum(Prefixes.Xor)] orelse F.zero();
     // XOR(r_x, r_y) = r_x + r_y - 2 * r_x * r_y
     const two = F.fromU64(2);

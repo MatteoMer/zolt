@@ -1,66 +1,58 @@
-# Zolt-Jolt Compatibility Implementation
+# Zolt → Jolt Verification Progress
 
-## Status: Stage 6 BytecodeReadRaf Phase 1 polynomial structure mismatch
+## Current Status
+Stages 1-2 PASS, Stage 3 FAILS (Spartan Shift + InstructionInput + RegistersClaim)
 
-### Recent Fixes (this session)
-- [x] Fixed NUM_LOOKUP_TABLES 42→41 (transcript sync issue)
-- [x] Fixed challengeScalarPowers to use challengeScalarFull (128-bit) instead of challengeScalar (125-bit)
-- [x] Fixed inc_gamma to use challengeScalarFull
-- [x] Fixed challengeVector to use challengeScalarFull
-- Input claims and batching coefficients now match perfectly between Zolt and Jolt
+## Completed
+- [x] Store Imm as unsigned u64 for identity-path AddOperands instructions
+- [x] Verify Stage 1 R1CS constraint 7 passes
+- [x] Verify Stage 5 output_claim matches
+- [x] Fix IncClaimReduction w1/w2 mismatch (RdInc polynomial)
+- [x] Fix BytecodeReadRaf - update raw_words export for 3 termination entries
+- [x] Fix BytecodeReadRaf - update Jolt verifier for 3 termination entries
+- [x] Fix bytecode entry k=0 flags (DoNotUpdateUnexpandedPC + IsNoop)
+- [x] Fix termination R1CS witness flags (VirtualInstruction for LUI/ADDI only, not SB)
+- [x] Fix `populateEntryFromInstruction` to reset flags (clear NoOp defaults)
 
-### Current Issue: BytecodeReadRaf Phase 1 Polynomial Degree Mismatch
+## In Progress
+- [ ] Debug Stage 3 failure after termination flag fixes
 
-The Stage 6 sumcheck fails because the round polynomials diverge from Round 0.
+## Key Changes Made This Session
 
-**Root Cause**: BytecodeReadRaf has a two-phase structure:
-- Phase 1: Address binding (log_K rounds)
-- Phase 2: Cycle binding (log_T rounds)
+### 1. Bytecode entry initialization (stage6_prover.zig)
+- All entries initialized with `DoNotUpdateUnexpandedPC=true, IsNoop=true` (matching Jolt's NoOp)
+- `populateEntryFromInstruction` now resets all flags before setting instruction-specific ones
 
-In **Jolt**, Phase 1 produces **degree 2** polynomials because:
-- H(k,j) = ra(k,j) · [Σ_s γ^s · Val_s(k) · eq_s(j)]
-- Both `ra(k)` (frequency) and `Val(k)` are linear in the bound address variable
-- Their product gives degree 2
+### 2. Termination bytecode entries (stage6_prover.zig)
+- LUI (vsr=2): VirtualInstruction=true, DoNotUpdateUnexpandedPC=true
+- ADDI (vsr=1): VirtualInstruction=true, DoNotUpdateUnexpandedPC=true
+- SB (vsr=0): DoNotUpdateUnexpandedPC=true ONLY (no VirtualInstruction - would violate constraint 17)
 
-In **Zolt**, Phase 1 produces **degree 1** (linear) polynomials because:
-- combined[k] = Σ_s γ^s · (Val_s(k) + RAF_s(k)) · F_s[k]
-- F_s[k] = Σ_{c:PC(c)=k} eq(r_cycle_s, c) — cycle already pre-summed
-- The RA frequency factor is NOT included in Phase 1
-- This means Phase 1 is just linear: eval_0 + eval_1 = input_claim
+### 3. Termination R1CS witness (constraints.zig)
+- Dummy noop: DoNotUpdateUnexpandedPC=1, FlagIsNoop=1 (unchanged, matches k=0 NoOp entry)
+- LUI/ADDI (vsr>0): DoNotUpdateUnexpandedPC=1, FlagVirtualInstruction=1, FlagIsNoop=0
+- SB (vsr=0): DoNotUpdateUnexpandedPC=1, FlagVirtualInstruction=0, FlagIsNoop=0
 
-**Fix Required**: Need to restructure BytecodeReadRaf Phase 1 to match Jolt's approach:
-1. Keep Val and RA (F_s) as SEPARATE arrays over address domain
-2. In Phase 1, compute degree-2 round poly: product of two linear polys
-3. After Phase 1 transition, bind Val and RA to get bound_vals and RA chunks
-4. Phase 2 then uses bound_vals and product of RA chunk polynomials
+### 4. Jolt verifier (read_raf_checking.rs)
+- `noop()` now sets DoNotUpdateUnexpandedPC=true, IsNoop=true
+- `termination_entry_virtual()` for LUI/ADDI (VirtualInstruction + DoNotUpdateUnexpandedPC)
+- `termination_entry_anchor()` for SB (DoNotUpdateUnexpandedPC only)
 
-### Jolt Phase 1 Details (for reference)
-In Jolt's compute_message for Phase 1:
-```
-for each pair (k_even, k_odd):
-    ra_evals[s] = [F_s[k_even], F_s[k_odd]]  // frequency at even/odd
-    val_evals[s] = [Val_s(k_even) + RAF_s(k_even), Val_s(k_odd) + RAF_s(k_odd)]
-    product_evals[s] = [ra_evals * val_evals pointwise]
+## Stage 3 Investigation
+- Stage 3 = Spartan Shift + Instruction Input + Registers Claim Reduction
+- 3 batched instances, 8 rounds
+- output_claim != expected_claim after final round
+- R1CS constraints all satisfied (0 violations)
+- Need to investigate: is there a mismatch in shift/instruction/register polynomial evaluations?
+- Possible cause: the FlagIsNoop change for LUI/ADDI/SB affects the shift sumcheck's
+  is_noop polynomial, which was previously 1 for these cycles and is now 0.
+  This changes the shift sumcheck claim and the opening claims flowing forward.
 
-eval_at_0 = sum over k_even of product[0]
-eval_at_2 = sum over k_even of product[2]  (extrapolated)
-eval_at_1 = claim_s - eval_at_0
+## Pending
+- [ ] Implement Stage 7 (HammingWeightClaimReduction)
+- [ ] End-to-end verification test
 
-round_poly = from_evals([eval_at_0, eval_at_1, eval_at_2])
-agg_round_poly += gamma^s * round_poly
-```
-
-### What's Working
-- Stages 1-5 PASS
-- Stage 6 input claims and batching coefficients match
-- Stage 6 transcript state synchronized
-
-### What Needs Fixing
-1. **[IN PROGRESS]** BytecodeReadRaf Phase 1 degree 2 polynomial
-2. Stage 7 (HammingWeightClaimReduction) not yet implemented
-3. End-to-end verification test
-
-### Test Commands
+## Test Commands
 ```bash
 cd /home/vivado/projects/zolt && zig build -Doptimize=ReleaseFast
 ./zig-out/bin/zolt prove examples/fibonacci.elf --trace-length 64 -o /tmp/zolt_proof.bin --jolt-format --export-preprocessing /tmp/zolt_preprocessing.bin

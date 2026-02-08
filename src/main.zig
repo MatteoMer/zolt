@@ -509,6 +509,17 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, trace_length_op
                     try ram_writer.writeInt(u64, @intCast(bytecode_prep.code_size), .little);
                     std.debug.print("  bytecode code_size (bytecode_K): {}\n", .{bytecode_prep.code_size});
 
+                    // Write raw ELF program bytes so verifier can re-decode bytecode
+                    // Format: base_address (u64) | program_len (u64) | raw_bytes...
+                    try ram_writer.writeInt(u64, program.entry_point, .little);
+                    try ram_writer.writeInt(u64, @intCast(program.bytecode.len), .little);
+                    try ram_writer.writeAll(program.bytecode);
+                    std.debug.print("  Exported {} raw program bytes (base=0x{x})\n", .{ program.bytecode.len, program.entry_point });
+
+                    // Write termination_base_pc (u64) - bytecode index where LUI/ADDI/SB entries start
+                    try ram_writer.writeInt(u64, @intCast(bytecode_prep.pc_map.termination_base_pc), .little);
+                    std.debug.print("  termination_base_pc: {}\n", .{bytecode_prep.pc_map.termination_base_pc});
+
                     // Write to file with .ram extension
                     const ram_path = try std.fmt.allocPrint(allocator, "{s}.ram", .{pp_path});
                     defer allocator.free(ram_path);

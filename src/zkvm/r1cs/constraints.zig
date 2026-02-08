@@ -990,6 +990,16 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             step: tracer.TraceStep,
             next_step: ?tracer.TraceStep,
         ) Self {
+            return fromTraceStepWithPCMap(step, next_step, null);
+        }
+
+        /// Create cycle inputs from an execution trace step with optional PC mapper
+        /// When pc_map is provided, PC values are converted from ELF addresses to bytecode indices
+        pub fn fromTraceStepWithPCMap(
+            step: tracer.TraceStep,
+            next_step: ?tracer.TraceStep,
+            pc_map: ?*const @import("../preprocessing.zig").BytecodePCMapper,
+        ) Self {
             var inputs = Self{
                 .values = [_]F{F.zero()} ** R1CSInputIndex.NUM_INPUTS,
             };
@@ -1013,7 +1023,30 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             }
 
             // Immediate - derive from instruction
-            const imm = inputs.deriveImmediate(step.instruction);
+            // For identity-path AddOperands instructions (ADDI, ADDIW, JAL, JALR),
+            // store Imm as the UNSIGNED u64 representation of the sign-extended immediate.
+            // This ensures consistency between:
+            //   - R1CS constraint 7: RightLookup == LeftInput + RightInput (field arithmetic)
+            //   - Stage 5 RAF: identity(k) where k = x + y_unsigned (u128)
+            //
+            // For Load/Store/Branch, Imm stays as the signed field value.
+            // This is safe because constraints 0 and 15 (which use Imm) only fire
+            // for Load/Store and Branch respectively, never for ADDI/ADDIW/JAL/JALR.
+            const imm = blk_imm: {
+                const is_identity_add = switch (opcode) {
+                    0x13 => (step.instruction >> 12) & 0x7 == 0, // ADDI
+                    0x1b => (step.instruction >> 12) & 0x7 == 0, // ADDIW
+                    0x6f => true, // JAL
+                    0x67 => true, // JALR
+                    else => false,
+                };
+                if (is_identity_add) {
+                    // Compute unsigned u64 representation of sign-extended immediate
+                    const unsigned_imm = computeUnsignedImmediate(step.instruction);
+                    break :blk_imm F.fromU64(unsigned_imm);
+                }
+                break :blk_imm inputs.deriveImmediate(step.instruction);
+            };
             inputs.values[R1CSInputIndex.Imm.toIndex()] = imm;
 
             // Register values - only set for instructions that actually read the registers
@@ -1200,10 +1233,17 @@ pub fn R1CSCycleInputs(comptime F: type) type {
 
             // =================================================================
             // PC values
-            // PC = expanded PC (bytecode array index)
-            // UnexpandedPC = raw RISC-V address (for now same as pc, will differ with virtual sequences)
+            // PC = bytecode array index (converted from ELF address via BytecodePCMapper)
+            // UnexpandedPC = raw RISC-V address (ELF address)
+            //
+            // In Jolt, PC is the bytecode array index (0 = NoOp, 1+ = real instructions),
+            // while UnexpandedPC is the actual ELF address (0x80000000+).
             // =================================================================
-            inputs.values[R1CSInputIndex.PC.toIndex()] = F.fromU64(step.pc);
+            const pc_as_bytecode_idx: u64 = if (pc_map) |pm|
+                @intCast(pm.getPCForStep(step))
+            else
+                step.pc; // Fallback: use ELF address if no pc_map
+            inputs.values[R1CSInputIndex.PC.toIndex()] = F.fromU64(pc_as_bytecode_idx);
             inputs.values[R1CSInputIndex.UnexpandedPC.toIndex()] = F.fromU64(step.unexpanded_pc);
 
             // Use next step's values if available
@@ -1223,8 +1263,12 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                     inputs.values[R1CSInputIndex.NextPC.toIndex()] = F.zero();
                     inputs.values[R1CSInputIndex.NextUnexpandedPC.toIndex()] = F.zero();
                 } else {
-                    // Next is a real step: use its PC values
-                    inputs.values[R1CSInputIndex.NextPC.toIndex()] = F.fromU64(ns.pc);
+                    // Next is a real step: use its PC values (bytecode index for NextPC)
+                    const next_pc_idx: u64 = if (pc_map) |pm|
+                        @intCast(pm.getPCForStep(ns))
+                    else
+                        ns.pc;
+                    inputs.values[R1CSInputIndex.NextPC.toIndex()] = F.fromU64(next_pc_idx);
                     inputs.values[R1CSInputIndex.NextUnexpandedPC.toIndex()] = F.fromU64(ns.unexpanded_pc);
                 }
                 // NextIsVirtual and NextIsFirstInSequence are always 0
@@ -1241,8 +1285,7 @@ pub fn R1CSCycleInputs(comptime F: type) type {
 
             // =================================================================
             // Set remaining flags based on instruction opcode
-            // =================================================================
-            inputs.setFlagsFromInstruction(step.instruction);
+            inputs.setFlagsFromInstruction(step.instruction, step);
 
             // =================================================================
             // ShouldJump = FlagJump * (1 - NextIsNoop)
@@ -1294,7 +1337,36 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             return inputs;
         }
 
+        /// Compute signed immediate as unsigned u64 (two's complement representation).
+        /// This matches Jolt's `y as u64` in to_lookup_operands() where y is the
+        /// signed i128 immediate from to_instruction_inputs().
         /// Derive immediate value from instruction
+        /// Compute the sign-extended immediate as an UNSIGNED u64 (two's complement).
+        /// For example, imm=-1 → 0xFFFFFFFFFFFFFFFF, imm=-4 → 0xFFFFFFFFFFFFFFFC.
+        /// This is used for identity-path AddOperands instructions where the u128
+        /// lookup index is computed as: x as u128 + y as u64 as u128.
+        fn computeUnsignedImmediate(instr: u32) u64 {
+            const opcode = instr & 0x7F;
+            switch (opcode) {
+                0x13, 0x03, 0x67, 0x1b => { // I-type
+                    const imm12: u32 = instr >> 20;
+                    const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12 << 20)) >> 20);
+                    return @bitCast(imm_signed);
+                },
+                0x6F => { // J-type (JAL)
+                    const imm20 = (instr >> 31) & 0x1;
+                    const imm10_1 = (instr >> 21) & 0x3FF;
+                    const imm11 = (instr >> 20) & 0x1;
+                    const imm19_12 = (instr >> 12) & 0xFF;
+                    const raw = (imm20 << 20) | (imm19_12 << 12) | (imm11 << 11) | (imm10_1 << 1);
+                    const imm_signed: i64 = @as(i64, @as(i32, @bitCast(raw << 11)) >> 11);
+                    return @bitCast(imm_signed);
+                },
+                else => return 0,
+            }
+        }
+
+        /// Derive immediate value from instruction (as signed field element)
         fn deriveImmediate(self: *Self, instr: u32) F {
             _ = self;
             const opcode = instr & 0x7F;
@@ -1346,166 +1418,215 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             }
         }
 
+        /// Compute the u128 lookup index for identity-path instructions.
+        /// This matches Jolt's to_lookup_operands() which returns u128 results.
+        /// For AddOperands: x as u128 + y as u64 as u128 (where y is the signed imm reinterpreted as u64)
+        /// For SubtractOperands: x as u128 + 2^64 - y as u128
+        /// For MultiplyOperands: x as u128 * y as u128
+        fn computeU128LookupOperand(instr: u32, step: tracer.TraceStep) F {
+            const opcode: u8 = @truncate(instr & 0x7F);
+            const funct3 = (instr >> 12) & 0x7;
+            const funct7 = (instr >> 25) & 0x7F;
+
+            switch (opcode) {
+                0x33 => { // R-type
+                    if (funct7 == 0x01) {
+                        if (funct3 == 0x0) {
+                            // MUL: x * y as u128
+                            const result = @as(u128, step.rs1_value) * @as(u128, step.rs2_value);
+                            return F.fromU128(result);
+                        }
+                        if (funct3 == 3) {
+                            // MULHU: x * y as u128
+                            const result = @as(u128, step.rs1_value) * @as(u128, step.rs2_value);
+                            return F.fromU128(result);
+                        }
+                        return F.zero();
+                    }
+                    if (funct7 == 0x20 and funct3 == 0x0) {
+                        // SUB: x + 2^64 - y
+                        const result = @as(u128, step.rs1_value) + (@as(u128, 1) << 64) - @as(u128, step.rs2_value);
+                        return F.fromU128(result);
+                    }
+                    // ADD: x + y
+                    const result = @as(u128, step.rs1_value) + @as(u128, step.rs2_value);
+                    return F.fromU128(result);
+                },
+                0x13 => { // ADDI
+                    if (funct3 == 0) {
+                        const imm12_raw: u32 = @truncate(instr >> 20);
+                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
+                        const imm_u64: u64 = @bitCast(imm_signed);
+                        return F.fromU128(@as(u128, step.rs1_value) + @as(u128, imm_u64));
+                    }
+                    return F.zero();
+                },
+                0x1b => { // ADDIW
+                    if (funct3 == 0) {
+                        const imm12_raw: u32 = @truncate(instr >> 20);
+                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
+                        const imm_u64: u64 = @bitCast(imm_signed);
+                        return F.fromU128(@as(u128, step.rs1_value) + @as(u128, imm_u64));
+                    }
+                    return F.zero();
+                },
+                0x37 => { // LUI: (0, imm)
+                    return F.fromU64(instr & 0xFFFFF000);
+                },
+                0x17 => { // AUIPC: (0, PC + imm)
+                    return F.fromU128(@as(u128, step.unexpanded_pc) + @as(u128, instr & 0xFFFFF000));
+                },
+                0x6f => { // JAL: (0, PC + imm)
+                    const imm20: u32 = ((@as(u32, instr >> 31) & 1) << 19) |
+                        ((@as(u32, instr >> 12) & 0xFF) << 11) |
+                        ((@as(u32, instr >> 20) & 1) << 10) |
+                        ((@as(u32, instr >> 21) & 0x3FF));
+                    const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm20 << 12)) >> 11);
+                    const imm_u64: u64 = @bitCast(imm_signed);
+                    return F.fromU128(@as(u128, step.unexpanded_pc) + @as(u128, imm_u64));
+                },
+                0x67 => { // JALR: (0, rs1 + imm)
+                    const imm12_raw: u32 = @truncate(instr >> 20);
+                    const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
+                    const imm_u64: u64 = @bitCast(imm_signed);
+                    return F.fromU128(@as(u128, step.rs1_value) + @as(u128, imm_u64));
+                },
+                0x3b => { // ADDW/SUBW
+                    if (funct3 == 0 and funct7 == 0) {
+                        // ADDW: x + y
+                        return F.fromU128(@as(u128, step.rs1_value) + @as(u128, step.rs2_value));
+                    }
+                    if (funct3 == 0 and funct7 == 0x20) {
+                        // SUBW: x + 2^64 - y
+                        return F.fromU128(@as(u128, step.rs1_value) + (@as(u128, 1) << 64) - @as(u128, step.rs2_value));
+                    }
+                    return F.zero();
+                },
+                else => return F.zero(),
+            }
+        }
+
         /// Set circuit flags and lookup operands based on instruction
         ///
-        /// This satisfies lookup-related constraints (5-11):
-        /// - Constraint 5: if Add+Sub+Mul => LeftLookupOperand == 0
-        /// - Constraint 6: if NOT Add+Sub+Mul => LeftLookupOperand == LeftInstructionInput
-        /// - Constraint 7: if Add => RightLookupOperand == RightInput+LeftInput
-        /// - Constraint 8: if Sub => RightLookupOperand == RightInput-LeftInput
-        /// - Constraint 9: if Mul => RightLookupOperand == Product
-        /// - Constraint 10: if NOT Add+Sub+Mul => RightLookupOperand == RightInput
-        /// - Constraint 11: if Assert => LookupOutput == 1
-        fn setFlagsFromInstruction(self: *Self, instr: u32) void {
+        /// RightLookupOperand uses u128 arithmetic (matching Jolt's to_lookup_operands):
+        /// - AddOperands: RightLookup = F(x as u128 + y as u64 as u128)
+        /// - SubtractOperands: RightLookup = F(x as u128 + 2^64 - y as u128)
+        /// - MultiplyOperands: RightLookup = F(x as u128 * y as u128)
+        /// - Others: RightLookup = RightInstructionInput
+        ///
+        /// Note: This means R1CS constraint 7 (RightLookup == LeftInput + RightInput)
+        /// may not hold when the u128 result differs from field arithmetic. This matches
+        /// Jolt's behavior where to_lookup_operands() returns u128 values.
+        fn setFlagsFromInstruction(self: *Self, instr: u32, step: tracer.TraceStep) void {
             const opcode: u8 = @truncate(instr & 0x7F);
             const funct3 = (instr >> 12) & 0x7;
             const funct7 = (instr >> 25) & 0x7F;
 
             // CRITICAL: Check if this instruction has a lookup table.
-            // Instructions without lookup tables (Load, Store, SLL, SLLI, etc.)
-            // should have NO circuit flags set (no Add/Sub/Mul/WriteLookupOutputToRD).
-            // Their LeftInstructionInput and RightInstructionInput are already 0,
-            // so constraint 6 and 10 will enforce LeftLookupOperand=0 and RightLookupOperand=0.
             const funct3_u3: u3 = @truncate(funct3);
             const funct7_u7: u7 = @truncate(funct7);
             if (!hasLookupTable(opcode, funct3_u3, funct7_u7)) {
-                // No lookup table: set lookup operands to 0 (matching LeftInstructionInput=0)
-                // and don't set any circuit flags (no Add/Sub/Mul/WriteLookupOutput).
-                // FlagLoad/FlagStore are already set in fromTraceStep.
                 self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
                 self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = F.zero();
                 return;
             }
 
-            // Get input values for lookup operand computation
+            // Get input values for lookup operand computation (used for non-identity-path)
             const left_input = self.values[R1CSInputIndex.LeftInstructionInput.toIndex()];
             const right_input = self.values[R1CSInputIndex.RightInstructionInput.toIndex()];
-            const product = self.values[R1CSInputIndex.Product.toIndex()];
+
+            // Compute u128 lookup operand for identity-path instructions
+            // This matches Jolt's to_lookup_operands() which returns u128 results
+            const u128_right_lookup = computeU128LookupOperand(instr, step);
 
             switch (opcode) {
                 0x33 => { // R-type (ADD, SUB, MUL, etc.)
-                    // Note: SLL (funct3=1) already handled above by hasLookupTable check
-                    // Determine specific operation
                     if (funct7 == 0x01) {
-                        // M-extension: MUL, MULH, MULHSU, MULHU, DIV, DIVU, REM, REMU
+                        // M-extension
                         if (funct3 == 0x0) { // MUL
                             self.values[R1CSInputIndex.FlagMultiplyOperands.toIndex()] = F.one();
-                            // Constraint 5: LeftLookup == 0 for Mul
                             self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
-                            // Constraint 9: RightLookup == Product for Mul
-                            self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = product;
+                            self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = u128_right_lookup;
                         } else {
-                            // Other M-extension ops (MULHU, etc.)
                             self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
                             self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input;
                         }
                     } else if (funct7 == 0x20 and funct3 == 0x0) {
                         // SUB
                         self.values[R1CSInputIndex.FlagSubtractOperands.toIndex()] = F.one();
-                        // Constraint 5: LeftLookup == 0 for Sub
                         self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
-                        // Constraint 8: RightLookup == LeftInput - RightInput + 2^64 for Sub
-                        // The 2^64 offset converts to two's complement representation
-                        // 2^64 = 0x10000000000000000 represented as bytes
-                        const two_pow_64 = F.fromBytes(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0 });
-                        self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = left_input.sub(right_input).add(two_pow_64);
+                        self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = u128_right_lookup;
                     } else {
-                        // ADD and other R-type (SRL, SRA, AND, OR, XOR, SLT, SLTU)
+                        // ADD and other R-type
                         self.values[R1CSInputIndex.FlagAddOperands.toIndex()] = F.one();
-                        // Constraint 5: LeftLookup == 0 for Add
                         self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
-                        // Constraint 7: RightLookup == RightInput + LeftInput for Add
-                        self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input.add(left_input);
+                        self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = u128_right_lookup;
                     }
                     self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
                 },
                 0x13 => { // I-type ALU
-                    // Note: SLLI (funct3=1) already handled above by hasLookupTable check
                     const funct3_13: u3 = @truncate((instr >> 12) & 0x7);
                     if (funct3_13 == 0) {
-                        // ADDI: AddOperands
+                        // ADDI: AddOperands, u128 right lookup
                         self.values[R1CSInputIndex.FlagAddOperands.toIndex()] = F.one();
-                        // Constraint 5: LeftLookup == 0 for Add
                         self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
-                        // Constraint 7: RightLookup == RightInput + LeftInput for Add
-                        self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input.add(left_input);
+                        self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = u128_right_lookup;
                     } else {
                         // SLTI, SLTIU, XORI, SRLI, SRAI, ORI, ANDI: interleaved
-                        // These use raw operands (left=rs1, right=imm)
                         self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
                         self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input;
                     }
                     self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
                 },
-                0x6F => { // JAL
+                0x6F => { // JAL: AddOperands
                     self.values[R1CSInputIndex.FlagJump.toIndex()] = F.one();
-                    // Note: ShouldJump and WritePCtoRD are computed as field products in fromTraceStep
-                    // JAL uses AddOperands: lookup_operands = (0, PC + imm)
                     self.values[R1CSInputIndex.FlagAddOperands.toIndex()] = F.one();
-                    // Constraint 5: LeftLookup == 0 for Add
                     self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
-                    // Constraint 7: RightLookup == LeftInput + RightInput = PC + imm
-                    self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = left_input.add(right_input);
+                    self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = u128_right_lookup;
                 },
-                0x67 => { // JALR
+                0x67 => { // JALR: AddOperands
                     self.values[R1CSInputIndex.FlagJump.toIndex()] = F.one();
-                    // Note: ShouldJump and WritePCtoRD are computed as field products in fromTraceStep
-                    // JALR uses AddOperands: lookup_operands = (0, rs1 + imm)
                     self.values[R1CSInputIndex.FlagAddOperands.toIndex()] = F.one();
-                    // Constraint 5: LeftLookup == 0 for Add
                     self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
-                    // Constraint 7: RightLookup == LeftInput + RightInput = rs1 + imm
-                    self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = left_input.add(right_input);
+                    self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = u128_right_lookup;
                 },
-                0x63 => { // Branch
-                    // NOT Add+Sub+Mul
+                0x63 => { // Branch: NOT Add+Sub+Mul
                     self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
                     self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input;
-                    // ShouldBranch depends on branch condition evaluation
                 },
-                0x37 => { // LUI
-                    // LUI uses AddOperands: lookup_operands = (0, 0 + imm) = (0, imm)
-                    self.values[R1CSInputIndex.FlagAddOperands.toIndex()] = F.one();
-                    self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
-                    // Constraint 5: LeftLookup == 0 for Add
-                    self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
-                    // Constraint 7: RightLookup == left + right = 0 + imm = imm
-                    self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = left_input.add(right_input);
-                },
-                0x17 => { // AUIPC
-                    // AUIPC uses AddOperands: lookup_operands = (0, PC + imm)
-                    self.values[R1CSInputIndex.FlagAddOperands.toIndex()] = F.one();
-                    self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
-                    // Constraint 5: LeftLookup == 0 for Add
-                    self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
-                    // Constraint 7: RightLookup == left + right = PC + imm
-                    self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = left_input.add(right_input);
-                },
-                0x1b => { // ADDIW (OP-IMM-32): AddOperands
-                    // In Jolt, ADDIW decomposes to ADDI+VirtualSignExtendWord.
-                    // ADDI uses AddOperands: LeftLookup=0, RightLookup=rs1+imm
-                    // For Zolt's single-cycle model, we match the ADDI step.
+                0x37 => { // LUI: AddOperands
                     self.values[R1CSInputIndex.FlagAddOperands.toIndex()] = F.one();
                     self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
                     self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
-                    self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = left_input.add(right_input);
+                    self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = u128_right_lookup;
+                },
+                0x17 => { // AUIPC: AddOperands
+                    self.values[R1CSInputIndex.FlagAddOperands.toIndex()] = F.one();
+                    self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
+                    self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
+                    self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = u128_right_lookup;
+                },
+                0x1b => { // ADDIW: AddOperands (u128)
+                    self.values[R1CSInputIndex.FlagAddOperands.toIndex()] = F.one();
+                    self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
+                    self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
+                    self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = u128_right_lookup;
                 },
                 0x3b => { // OP-32: ADDW, SUBW
                     const funct3_r = (instr >> 12) & 0x7;
                     const funct7_r = (instr >> 25) & 0x7F;
                     if (funct3_r == 0 and funct7_r == 0) {
-                        // ADDW: AddOperands (matches Jolt's ADD step of decomposition)
+                        // ADDW: AddOperands (u128)
                         self.values[R1CSInputIndex.FlagAddOperands.toIndex()] = F.one();
                         self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
                         self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
-                        self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = left_input.add(right_input);
+                        self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = u128_right_lookup;
                     } else if (funct3_r == 0 and funct7_r == 0x20) {
-                        // SUBW: SubtractOperands (matches Jolt's SUB step of decomposition)
+                        // SUBW: SubtractOperands (u128)
                         self.values[R1CSInputIndex.FlagSubtractOperands.toIndex()] = F.one();
                         self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
                         self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
-                        const two_pow_64 = F.fromBytes(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0 });
-                        self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = left_input.sub(right_input).add(two_pow_64);
+                        self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = u128_right_lookup;
                     } else {
                         // Other 0x3b variants: default
                         self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
@@ -1552,11 +1673,12 @@ pub fn R1CSCycleInputs(comptime F: type) type {
         pub fn createTerminationStoreWitness(
             step: tracer.TraceStep,
             next_step: ?tracer.TraceStep,
+            pc_map: ?*const @import("../preprocessing.zig").BytecodePCMapper,
         ) Self {
-            // Build the base witness using the normal Store path
-            var inputs = fromTraceStep(step, next_step);
+            // Build the base witness using the normal instruction path
+            var inputs = fromTraceStepWithPCMap(step, next_step, pc_map);
 
-            // Override: set DoNotUpdateUnexpandedPC=1 for the termination step
+            // Override: set DoNotUpdateUnexpandedPC=1 for all termination steps.
             // This is needed because:
             // - UnexpandedPC = 0 (synthetic step)
             // - NextUnexpandedPC = 0 (next is NoOp padding)
@@ -1564,13 +1686,30 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             // - With this flag: constraint 16 requires NextUPC = 0 + 4 - 4 = 0 ✓
             inputs.values[R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();
 
-            // Override: set FlagIsNoop=1 so the product virtualization factor NextIsNoop
-            // (factor_evals[7]) is consistent with the ShouldJump computation.
-            // The trace step has is_noop=true (so the previous JAL sees NextIsNoop=1
-            // and computes ShouldJump=0), and the R1CS witness also needs FlagIsNoop=1
-            // so the Stage 2 product factor picks up NextIsNoop=1 for the JAL cycle.
-            // No R1CS uniform constraint references FlagIsNoop, so this is safe.
-            inputs.values[R1CSInputIndex.FlagIsNoop.toIndex()] = F.one();
+            if (step.is_noop) {
+                // Dummy noop termination step: maps to bytecode k=0 (NoOp entry).
+                // Bytecode entry at k=0 has:
+                //   circuit_flags[DoNotUpdateUnexpandedPC] = true
+                //   instruction_flags[IsNoop] = true
+                // R1CS witness must match, so set FlagIsNoop=1.
+                // This also ensures product virtualization picks up NextIsNoop=1
+                // for the preceding JAL cycle (JAL's ShouldJump = Jump*(1-NextIsNoop) = 0).
+                inputs.values[R1CSInputIndex.FlagIsNoop.toIndex()] = F.one();
+            } else if (step.virtual_sequence_remaining > 0) {
+                // Non-anchor termination instruction (LUI vsr=2, ADDI vsr=1):
+                // Bytecode entry has VirtualInstruction=true, DoNotUpdateUnexpandedPC=true.
+                // R1CS constraint 17 (if VirtualInstruction then NextPC==PC+1) holds
+                // because LUI→ADDI and ADDI→SB have consecutive PCs.
+                // IsNoop stays 0 (these are real instructions, not noops).
+                inputs.values[R1CSInputIndex.FlagVirtualInstruction.toIndex()] = F.one();
+            }
+            // else: SB anchor (vsr=0) - no VirtualInstruction flag.
+            // SB is the last real cycle before NoOp padding, so NextPC=0.
+            // R1CS constraint 17 would require NextPC=PC+1 if VirtualInstruction=true,
+            // which would fail. So VirtualInstruction stays 0 (default).
+            // The bytecode entry at k=termination_base_pc+2 also has VirtualInstruction=false
+            // to maintain consistency between committed and val polynomials.
+            // DoNotUpdateUnexpandedPC=true is still set (above) for constraint 16.
 
             return inputs;
         }
@@ -1612,7 +1751,7 @@ pub fn R1CSWitnessGenerator(comptime F: type) type {
             // No resources to free - this is just a wrapper
         }
 
-        /// Generate witness for all cycles in trace.
+        /// Generate witness for all cycles in trace (without PC mapping).
         ///
         /// The trace must be pre-padded with NoOp cycles (via padWithNoop).
         /// - NoOp padding cycles use createNoopWitness() (all zeros with IsNoop=1)
@@ -1622,6 +1761,18 @@ pub fn R1CSWitnessGenerator(comptime F: type) type {
         pub fn generateWitness(
             self: *Self,
             trace: *const tracer.ExecutionTrace,
+        ) ![]R1CSCycleInputs(F) {
+            return self.generateWitnessWithPCMap(trace, null);
+        }
+
+        /// Generate witness for all cycles in trace with optional PC mapping.
+        ///
+        /// When pc_map is provided, PC values are converted from ELF addresses
+        /// to bytecode array indices (matching Jolt's convention where PC = bytecode index).
+        pub fn generateWitnessWithPCMap(
+            self: *Self,
+            trace: *const tracer.ExecutionTrace,
+            pc_map: ?*const @import("../preprocessing.zig").BytecodePCMapper,
         ) ![]R1CSCycleInputs(F) {
             const num_cycles = trace.steps.items.len;
             if (num_cycles == 0) {
@@ -1638,14 +1789,14 @@ pub fn R1CSWitnessGenerator(comptime F: type) type {
                     // MUST be checked before is_noop because termination_store has is_noop=true
                     // (for the PREVIOUS step's NextIsNoop check) but uses Store witness.
                     const next_step = trace.steps.items[i + 1];
-                    witnesses[i] = R1CSCycleInputs(F).createTerminationStoreWitness(step, next_step);
+                    witnesses[i] = R1CSCycleInputs(F).createTerminationStoreWitness(step, next_step, pc_map);
                 } else if (step.is_noop) {
                     // NoOp padding cycle: all zeros with IsNoop=1
                     witnesses[i] = R1CSCycleInputs(F).createNoopWitness();
                 } else {
                     // Real cycle: next step always exists after padding
                     const next_step = trace.steps.items[i + 1];
-                    witnesses[i] = R1CSCycleInputs(F).fromTraceStep(step, next_step);
+                    witnesses[i] = R1CSCycleInputs(F).fromTraceStepWithPCMap(step, next_step, pc_map);
                 }
             }
 

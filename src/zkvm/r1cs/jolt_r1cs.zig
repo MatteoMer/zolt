@@ -92,7 +92,7 @@ pub fn JoltR1CS(comptime F: type) type {
                         trace.steps.items[i + 1]
                     else
                         null;
-                    cycle_witnesses[i] = R1CSCycleInputs(F).createTerminationStoreWitness(step, next_step);
+                    cycle_witnesses[i] = R1CSCycleInputs(F).createTerminationStoreWitness(step, next_step, null);
                 } else if (step.is_noop) {
                     // NoOp padding cycle: all zeros with IsNoop=1
                     cycle_witnesses[i] = R1CSCycleInputs(F).createNoopWitness();

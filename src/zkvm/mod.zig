@@ -193,7 +193,8 @@ fn computeBytecodeCodeSize(program_bytecode: []const u8) usize {
     }
 
     // +1 for prepended NoOp (Jolt always prepends one)
-    const total = num_instructions + 1;
+    // +3 for termination store virtual sequence (LUI, ADDI, SB) at the end
+    const total = num_instructions + 1 + 3;
 
     // Pad to next power of 2, minimum 2
     if (total < 2) return 2;
@@ -1831,32 +1832,36 @@ pub fn JoltProver(comptime F: type) type {
             errdefer self.allocator.free(poly);
             @memset(poly, F.zero());
 
-            // Iterate through trace and compute increments from pre/post values
-            // This matches Jolt's approach: post_value - pre_value
+            // Track register values across cycles (matching Jolt's rd_write().unwrap_or_default())
+            // This approach tracks actual register state rather than relying on trace's rd_pre_value,
+            // which for BRANCH/STORE instructions reads a register at the "rd" bit position that
+            // is actually part of the immediate encoding (not a destination register).
             // See: jolt-core/src/zkvm/witness.rs:69-77
+            var register_values: [32]u64 = [_]u64{0} ** 32;
+
             for (trace.steps.items, 0..) |step, i| {
                 if (i >= poly_size) break;
 
-                // Decode instruction to get rd
-                const decoded = instruction.DecodedInstruction.decode(step.instruction);
-                const rd = decoded.rd;
+                if (step.is_noop) continue; // NOP → RdInc = 0 (already zeroed)
 
-                // For register writes (rd != 0), compute increment using trace's pre/post values
-                // TraceStep now stores both rd_pre_value and rd_value (post), just like Jolt's Cycle
-                if (rd != 0) {
-                    const pre_value: i128 = @intCast(step.rd_pre_value);
-                    const post_value: i128 = @intCast(step.rd_value);
-                    const increment = post_value - pre_value;
+                const instr = step.instruction;
+                const rd: u5 = @truncate((instr >> 7) & 0x1f);
+                const opcode = instr & 0x7f;
 
-                    // Store increment as field element (handle negative numbers)
-                    poly[i] = if (increment >= 0)
-                        F.fromU64(@intCast(increment))
-                    else
-                        F.fromU64(@intCast(-increment)).neg();
-                } else {
-                    // No write to rd (or rd=x0 which is always 0)
-                    poly[i] = F.zero();
+                // BRANCH (0x63) and STORE (0x23) don't write to rd → RdInc = 0
+                // This matches Jolt where rd_write() returns None for these formats.
+                const rd_used = switch (opcode) {
+                    0x23, 0x63 => false,
+                    else => true,
+                };
+
+                if (rd_used and rd != 0 and rd < 32) {
+                    const pre_value = register_values[rd];
+                    const post_value = step.rd_value;
+                    poly[i] = F.fromU64(post_value).sub(F.fromU64(pre_value));
+                    register_values[rd] = post_value;
                 }
+                // else: RdInc = 0 (already zeroed by @memset)
             }
 
             return poly;
@@ -1977,7 +1982,7 @@ pub fn JoltProver(comptime F: type) type {
                 if (i >= poly_size) break;
 
                 // Convert ELF address to bytecode array index
-                const bc_idx: u64 = if (step.is_noop) 0 else @intCast(pc_map.getPC(step.pc, 0));
+                const bc_idx: u64 = @intCast(pc_map.getPCForStep(step));
                 const chunk: u64 = (bc_idx >> @intCast(shift)) & mask;
                 poly[i] = F.fromU64(chunk);
             }

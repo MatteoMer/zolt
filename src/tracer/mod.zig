@@ -46,6 +46,11 @@ pub const TraceStep = struct {
     /// When true, the R1CS witness uses createTerminationStoreWitness() instead of
     /// fromTraceStep(), which sets FlagStore=1 AND FlagDoNotUpdateUnexpandedPC=1.
     is_termination_store: bool = false,
+    /// For virtual instruction sequences (e.g., termination stores: LUI+ADDI+SB),
+    /// counts down from (sequence_length - 1) to 0. Used by BytecodePCMapper to
+    /// assign each virtual instruction its own bytecode index k.
+    /// Default 0 means this is the last (or only) instruction in its sequence.
+    virtual_sequence_remaining: u16 = 0,
 };
 
 /// Full execution trace
@@ -479,6 +484,7 @@ pub const Emulator = struct {
             .is_compressed = false,
             .is_noop = false, // NOT noop — Stage 4 must process rd write
             .is_termination_store = true, // DoNotUpdateUPC=1, FlagIsNoop=1 in R1CS
+            .virtual_sequence_remaining = 2, // 3-instruction sequence: LUI(2), ADDI(1), SB(0)
         });
         // Update register file so subsequent reads see the correct value
         try self.registers.write(31, lui_result);
@@ -504,6 +510,7 @@ pub const Emulator = struct {
             .is_compressed = false,
             .is_noop = false, // NOT noop — Stage 4 must process rd write
             .is_termination_store = true, // DoNotUpdateUPC=1, FlagIsNoop=1 in R1CS
+            .virtual_sequence_remaining = 1, // 3-instruction sequence: LUI(2), ADDI(1), SB(0)
         });
         try self.registers.write(30, 1);
         cycle += 1;
@@ -530,6 +537,7 @@ pub const Emulator = struct {
             .is_compressed = false,
             .is_noop = false, // NOT noop — Stage 4 must process register reads
             .is_termination_store = true, // DoNotUpdateUPC=1, FlagIsNoop=1 in R1CS
+            .virtual_sequence_remaining = 0, // 3-instruction sequence: LUI(2), ADDI(1), SB(0)
         });
 
         // Record the write in the RAM trace at the SB cycle

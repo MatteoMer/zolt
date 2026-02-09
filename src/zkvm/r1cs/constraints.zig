@@ -1257,13 +1257,14 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             // - RISC-V programs typically end with ECALL or jump at termination
             // - The tracer stops at infinite loop detection (before the loop instruction)
             if (next_step) |ns| {
-                if (ns.is_noop) {
+                if (ns.is_noop and !ns.is_termination_store) {
                     // Next is NoOp padding: set all Next* values to 0 (matching Jolt)
                     // In Jolt: NoOp.normalize().address = 0 and get_pc(NoOp) = 0
                     inputs.values[R1CSInputIndex.NextPC.toIndex()] = F.zero();
                     inputs.values[R1CSInputIndex.NextUnexpandedPC.toIndex()] = F.zero();
                 } else {
-                    // Next is a real step: use its PC values (bytecode index for NextPC)
+                    // Next is a real step (or termination store dummy noop):
+                    // use its PC values (bytecode index for NextPC)
                     const next_pc_idx: u64 = if (pc_map) |pm|
                         @intCast(pm.getPCForStep(ns))
                     else
@@ -1271,9 +1272,18 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                     inputs.values[R1CSInputIndex.NextPC.toIndex()] = F.fromU64(next_pc_idx);
                     inputs.values[R1CSInputIndex.NextUnexpandedPC.toIndex()] = F.fromU64(ns.unexpanded_pc);
                 }
-                // NextIsVirtual and NextIsFirstInSequence are always 0
-                // (no virtual sequences in our RISC-V trace)
-                inputs.values[R1CSInputIndex.NextIsVirtual.toIndex()] = F.zero();
+
+                // NextIsVirtual: 1 if the next step has FlagVirtualInstruction=1.
+                // This is required for the shift sumcheck identity:
+                //   VirtualInstr[j+1] must equal NextIsVirtual[j]
+                // Termination store instructions with vsr>0 have VirtualInstruction=1.
+                const next_is_virtual = ns.is_termination_store and !ns.is_noop and ns.virtual_sequence_remaining > 0;
+                inputs.values[R1CSInputIndex.NextIsVirtual.toIndex()] = if (next_is_virtual) F.one() else F.zero();
+
+                // NextIsFirstInSequence: 1 if the next step is the first in a virtual sequence.
+                // For termination stores, the first real instruction (LUI, vsr=2) is the first.
+                // Currently we don't set IsFirstInSequence on the current step, so this stays 0.
+                // TODO: if Jolt uses IsFirstInSequence for termination, update this.
                 inputs.values[R1CSInputIndex.NextIsFirstInSequence.toIndex()] = F.zero();
             } else {
                 // No next step: all Next* values are 0 (matching Jolt)
@@ -1303,7 +1313,12 @@ pub fn R1CSCycleInputs(comptime F: type) type {
 
             // IsRdNotZero: check if destination register != x0
             // Note: rd was already extracted above for RdWriteValue computation
-            const is_rd_not_zero = if (rd != 0) F.one() else F.zero();
+            // CRITICAL: Store (0x23) and Branch (0x63) instructions don't write to rd,
+            // so IsRdNotZero must be false regardless of the raw rd bits (which encode
+            // immediate values for these formats). This matches Jolt where branch/store
+            // instructions have operands.rd = None and IsRdNotZero is never set.
+            // Reuse is_store (line ~1010) and is_branch (line ~1115) from above.
+            const is_rd_not_zero = if (rd != 0 and !is_store and !is_branch) F.one() else F.zero();
 
             // BranchFlag: 1 if this is a branch instruction (opcode 0x63)
             // Note: instr_opcode is already defined above for instruction inputs

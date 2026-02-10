@@ -969,8 +969,12 @@ pub fn JoltProver(comptime F: type) type {
             const memory_poly_size = if (memory_trace_len < 2) 2 else std.math.ceilPowerOfTwo(usize, memory_trace_len) catch memory_trace_len;
             const reg_trace_len = emulator.trace.steps.items.len;
             const reg_poly_size = if (reg_trace_len < 2) 2 else std.math.ceilPowerOfTwo(usize, reg_trace_len) catch reg_trace_len;
-            const max_poly_size = @max(@max(bytecode_poly_size, memory_poly_size), reg_poly_size);
-            const log_size: u32 = if (max_poly_size <= 1) 1 else @intCast(std.math.log2_int(usize, max_poly_size) + 1);
+            // The SRS must be large enough for the Stage 8 joint polynomial.
+            // The joint polynomial is k_chunk * trace_length entries (one-hot expanded sparse polys).
+            // k_chunk = 16 (2^log_k_chunk where log_k_chunk=4), so joint_poly_size = 16 * trace_length.
+            const stage8_joint_poly_size: usize = 16 * trace_length; // k_chunk * T
+            const max_poly_size = @max(@max(@max(bytecode_poly_size, memory_poly_size), reg_poly_size), stage8_joint_poly_size);
+            const log_size: u32 = if (max_poly_size <= 1) 1 else @intCast(std.math.log2_int(usize, max_poly_size));
 
             // Load SRS from file if path provided (for Jolt compatibility)
             // Otherwise generate SRS deterministically (may not match Jolt exactly)
@@ -1038,55 +1042,132 @@ pub fn JoltProver(comptime F: type) type {
 
             // Build commitment polynomials and compute Dory commitments
             // Order: RdInc, RamInc, InstructionRa[0..instruction_d-1], RamRa[0..ram_d-1], BytecodeRa[0..bytecode_d-1]
-            // IMPORTANT: All committed polynomials must use trace_length as their size,
-            // matching Jolt's padded_trace_len. Each has one entry per cycle.
+            //
+            // CRITICAL: Sparse one-hot polynomials (InstructionRa, RamRa, BytecodeRa) must be
+            // expanded to K*T size in CycleMajor layout: poly[addr * T + cycle] = 1 if chunk==addr, else 0.
+            // Dense polynomials (RdInc, RamInc) stay at trace_length size.
             const GT = Dory.GT;
+            const k_chunk: usize = @as(usize, 1) << @intCast(log_k_chunk);
+            const total_committed = 2 + instruction_d + ram_d + bytecode_d;
             var all_commitments: std.ArrayListUnmanaged(GT) = .{};
             defer all_commitments.deinit(self.allocator);
 
-            // RdInc: register destination increment polynomial
-            const rd_inc_poly = try self.buildRdIncPolynomial(&emulator.trace, trace_length);
-            defer self.allocator.free(rd_inc_poly);
-            try all_commitments.append(self.allocator, DoryScheme.commit(&dory_srs, rd_inc_poly));
+            // Store witness polynomials for Stage 8 opening proof
+            var witness_polys = try self.allocator.alloc([]F, total_committed);
+            errdefer {
+                for (witness_polys) |p| self.allocator.free(p);
+                self.allocator.free(witness_polys);
+            }
+            var witness_idx: usize = 0;
 
-            // RamInc: RAM increment polynomial
+            // RdInc: dense polynomial, trace_length entries
+            const rd_inc_poly = try self.buildRdIncPolynomial(&emulator.trace, trace_length);
+            witness_polys[witness_idx] = rd_inc_poly;
+            witness_idx += 1;
+            const rd_inc_comm = DoryScheme.commit(&dory_srs, rd_inc_poly);
+            try all_commitments.append(self.allocator, rd_inc_comm);
+            {
+                // Debug: print first commitment bytes
+                const comm_bytes = rd_inc_comm.toBytes();
+                std.debug.print("[STAGE8_DEBUG] RdInc commitment first 32 bytes: ", .{});
+                for (comm_bytes[0..32]) |b| std.debug.print("{x:0>2}", .{b});
+                std.debug.print("\n", .{});
+            }
+
+            // RamInc: dense polynomial, trace_length entries
             const ram_inc_poly = try self.buildRamIncPolynomial(&emulator.trace, trace_length);
-            defer self.allocator.free(ram_inc_poly);
+            witness_polys[witness_idx] = ram_inc_poly;
+            witness_idx += 1;
             try all_commitments.append(self.allocator, DoryScheme.commit(&dory_srs, ram_inc_poly));
 
-            // InstructionRa[0..instruction_d-1]: instruction read address chunks
+            // InstructionRa[0..instruction_d-1]: one-hot expanded to k_chunk * T
             var idx: usize = 0;
             while (idx < instruction_d) : (idx += 1) {
-                // Compute shift for this chunk: log_k_chunk * (instruction_d - 1 - idx)
                 const shift = log_k_chunk * (instruction_d - 1 - idx);
-                const instruction_ra_poly = try self.buildInstructionRaPolynomial(&emulator.lookup_trace, trace_length, log_k_chunk, shift);
-                defer self.allocator.free(instruction_ra_poly);
-                try all_commitments.append(self.allocator, DoryScheme.commit(&dory_srs, instruction_ra_poly));
+                const chunk_values = try self.buildInstructionRaPolynomial(&emulator.trace, trace_length, log_k_chunk, shift);
+                defer self.allocator.free(chunk_values);
+                // Expand to one-hot: CycleMajor layout: poly[addr * T + cycle] = 1 if chunk==addr
+                const onehot_poly = try self.allocator.alloc(F, k_chunk * trace_length);
+                @memset(onehot_poly, F.zero());
+                for (0..trace_length) |cycle| {
+                    const addr = chunk_values[cycle].toU64();
+                    if (addr < k_chunk) {
+                        onehot_poly[addr * trace_length + cycle] = F.one();
+                    }
+                }
+                witness_polys[witness_idx] = onehot_poly;
+                witness_idx += 1;
+                try all_commitments.append(self.allocator, DoryScheme.commit(&dory_srs, onehot_poly));
             }
 
-            // RamRa[0..ram_d-1]: RAM read address chunks
+            // RamRa[0..ram_d-1]: one-hot expanded to k_chunk * T
             idx = 0;
             while (idx < ram_d) : (idx += 1) {
-                // Compute shift for this chunk: log_k_chunk * (ram_d - 1 - idx)
                 const shift = log_k_chunk * (ram_d - 1 - idx);
-                const ram_ra_poly = try self.buildRamRaPolynomial(&emulator.trace, trace_length, log_k_chunk, shift);
-                defer self.allocator.free(ram_ra_poly);
-                try all_commitments.append(self.allocator, DoryScheme.commit(&dory_srs, ram_ra_poly));
+                const chunk_values = try self.buildRamRaPolynomial(&emulator.trace, trace_length, log_k_chunk, shift, &device.memory_layout);
+                defer self.allocator.free(chunk_values);
+                const onehot_poly = try self.allocator.alloc(F, k_chunk * trace_length);
+                @memset(onehot_poly, F.zero());
+                for (0..trace_length) |cycle| {
+                    const addr = chunk_values[cycle].toU64();
+                    if (addr < k_chunk) {
+                        onehot_poly[addr * trace_length + cycle] = F.one();
+                    }
+                }
+                // Debug: print first few cycles' chunk values for RamRa(0)
+                if (idx == 0) {
+                    std.debug.print("[RAMRA-DBG] RamRa(0) shift={d}, log_k_chunk={d}, ram_d={d}\n", .{ shift, log_k_chunk, ram_d });
+                    var nonzero_count: usize = 0;
+                    for (0..@min(trace_length, 20)) |c| {
+                        const step = emulator.trace.steps.items[c];
+                        const raw_addr = step.memory_addr orelse 0;
+                        const raddr: u64 = if (raw_addr != 0)
+                            (device.memory_layout.remapAddress(raw_addr) orelse 0)
+                        else
+                            0;
+                        const cv = chunk_values[c].toU64();
+                        if (cv != 0 or raw_addr != 0) {
+                            std.debug.print("[RAMRA-DBG] cycle={d} raw=0x{x:0>16} remap={d} chunk={d} is_noop={}\n", .{ c, raw_addr, raddr, cv, step.is_noop });
+                        }
+                    }
+                    for (0..trace_length) |c| {
+                        if (!chunk_values[c].eql(F.zero())) nonzero_count += 1;
+                    }
+                    std.debug.print("[RAMRA-DBG] RamRa(0) total nonzero chunk values: {d}/{d}\n", .{ nonzero_count, trace_length });
+                }
+                witness_polys[witness_idx] = onehot_poly;
+                witness_idx += 1;
+                try all_commitments.append(self.allocator, DoryScheme.commit(&dory_srs, onehot_poly));
             }
 
-            // BytecodeRa[0..bytecode_d-1]: bytecode read address chunks
-            // Build BytecodePreprocessing for PC mapping (ELF address → bytecode index)
+            // BytecodeRa[0..bytecode_d-1]: one-hot expanded to k_chunk * T
             var bytecode_prep_for_ra = try preprocessing.BytecodePreprocessing.preprocess(self.allocator, program_bytecode, base_address);
             defer bytecode_prep_for_ra.deinit();
 
             idx = 0;
             while (idx < bytecode_d) : (idx += 1) {
-                // Compute shift for this chunk: log_k_chunk * (bytecode_d - 1 - idx)
                 const shift = log_k_chunk * (bytecode_d - 1 - idx);
-                const bytecode_ra_poly = try self.buildBytecodeRaPolynomial(&emulator.trace, trace_length, log_k_chunk, shift, &bytecode_prep_for_ra.pc_map);
-                defer self.allocator.free(bytecode_ra_poly);
-                try all_commitments.append(self.allocator, DoryScheme.commit(&dory_srs, bytecode_ra_poly));
+                const chunk_values = try self.buildBytecodeRaPolynomial(&emulator.trace, trace_length, log_k_chunk, shift, &bytecode_prep_for_ra.pc_map);
+                defer self.allocator.free(chunk_values);
+                const onehot_poly = try self.allocator.alloc(F, k_chunk * trace_length);
+                @memset(onehot_poly, F.zero());
+                for (0..trace_length) |cycle| {
+                    const addr = chunk_values[cycle].toU64();
+                    if (addr < k_chunk) {
+                        onehot_poly[addr * trace_length + cycle] = F.one();
+                    }
+                }
+                witness_polys[witness_idx] = onehot_poly;
+                witness_idx += 1;
+                try all_commitments.append(self.allocator, DoryScheme.commit(&dory_srs, onehot_poly));
             }
+
+            // Store witness polynomials and one-hot params in result
+            result.witness_polys = witness_polys;
+            result.instruction_d = instruction_d;
+            result.bytecode_d = bytecode_d;
+            result.ram_d = ram_d;
+            result.log_k_chunk = log_k_chunk;
 
             // Store commitments in result
             result.dory_commitments = try all_commitments.toOwnedSlice(self.allocator);
@@ -1176,6 +1257,415 @@ pub fn JoltProver(comptime F: type) type {
                 tau,
                 &transcript,
             );
+
+            // ================================================================
+            // Stage 8: Dory Opening Proof Generation
+            // ================================================================
+            // This generates the batched polynomial commitment opening proof.
+            // The Jolt verifier collects all committed polynomial claims, computes
+            // an RLC (random linear combination), and verifies a single Dory opening.
+            //
+            // Steps:
+            // 1. Collect claims in Jolt's order: RamInc, RdInc (with Lagrange factor),
+            //    then InstructionRa, BytecodeRa, RamRa (from HammingWeightClaimReduction)
+            // 2. Append claims to transcript
+            // 3. Sample gamma powers via challenge_scalar_powers
+            // 4. Build joint polynomial: Σ γ^i * poly_i
+            // 5. Generate Dory opening proof for joint polynomial at opening_point
+            {
+                std.debug.print("\n[STAGE8] === Generating Dory Opening Proof ===\n", .{});
+
+                const opening_point = result.proof.opening_point;
+                std.debug.print("[STAGE8] opening_point len = {} (log_k_chunk={}, n_cycle_vars={})\n", .{
+                    opening_point.len, log_k_chunk, opening_point.len - log_k_chunk,
+                });
+
+                // 1. Collect claims in Jolt's exact order
+                // Jolt verify_stage8 does:
+                //   polynomial_claims.push(RamInc, ram_inc_claim * lagrange_factor)
+                //   polynomial_claims.push(RdInc, rd_inc_claim * lagrange_factor)
+                //   for i in 0..instruction_d: polynomial_claims.push(InstructionRa(i), claim)
+                //   for i in 0..bytecode_d: polynomial_claims.push(BytecodeRa(i), claim)
+                //   for i in 0..ram_d: polynomial_claims.push(RamRa(i), claim)
+
+                // Compute Lagrange factor: ∏(1 - r_address[i]) for i in 0..log_k_chunk
+                // r_address = opening_point[0..log_k_chunk] (BE order)
+                var lagrange_factor = F.one();
+                for (0..log_k_chunk) |i| {
+                    lagrange_factor = lagrange_factor.mul(F.one().sub(opening_point[i]));
+                }
+                {
+                    const lf_be = lagrange_factor.toBytesBE();
+                    std.debug.print("[STAGE8] lagrange_factor_LE=[", .{});
+                    for (0..8) |bi| std.debug.print("{x:0>2}", .{lf_be[31 - bi]});
+                    std.debug.print("]\n", .{});
+                }
+
+                // Get claims from IncClaimReduction (Stage 6 output)
+                const ram_inc_claim = result.proof.opening_claims.get(
+                    .{ .Committed = .{ .poly = .RamInc, .sumcheck_id = .IncClaimReduction } },
+                ) orelse F.zero();
+                const rd_inc_claim = result.proof.opening_claims.get(
+                    .{ .Committed = .{ .poly = .RdInc, .sumcheck_id = .IncClaimReduction } },
+                ) orelse F.zero();
+
+                const num_claims = 2 + instruction_d + bytecode_d + ram_d;
+                var claims_ordered = try self.allocator.alloc(F, num_claims);
+                defer self.allocator.free(claims_ordered);
+
+                // RamInc and RdInc with Lagrange factor
+                claims_ordered[0] = ram_inc_claim.mul(lagrange_factor);
+                claims_ordered[1] = rd_inc_claim.mul(lagrange_factor);
+
+                // InstructionRa claims from HammingWeightClaimReduction
+                for (0..instruction_d) |i| {
+                    const claim = result.proof.opening_claims.get(
+                        .{ .Committed = .{ .poly = .{ .InstructionRa = i }, .sumcheck_id = .HammingWeightClaimReduction } },
+                    ) orelse F.zero();
+                    claims_ordered[2 + i] = claim;
+                }
+
+                // BytecodeRa claims from HammingWeightClaimReduction
+                for (0..bytecode_d) |i| {
+                    const claim = result.proof.opening_claims.get(
+                        .{ .Committed = .{ .poly = .{ .BytecodeRa = i }, .sumcheck_id = .HammingWeightClaimReduction } },
+                    ) orelse F.zero();
+                    claims_ordered[2 + instruction_d + i] = claim;
+                }
+
+                // RamRa claims from HammingWeightClaimReduction
+                for (0..ram_d) |i| {
+                    const claim = result.proof.opening_claims.get(
+                        .{ .Committed = .{ .poly = .{ .RamRa = i }, .sumcheck_id = .HammingWeightClaimReduction } },
+                    ) orelse F.zero();
+                    claims_ordered[2 + instruction_d + bytecode_d + i] = claim;
+                }
+
+                std.debug.print("[STAGE8] num_claims = {}\n", .{num_claims});
+                for (0..@min(5, num_claims)) |i| {
+                    const c_be = claims_ordered[i].toBytesBE();
+                    std.debug.print("[STAGE8] claim[{}]_LE=[", .{i});
+                    for (0..8) |bi| std.debug.print("{x:0>2}", .{c_be[31 - bi]});
+                    std.debug.print("]\n", .{});
+                }
+
+                // 2. Append all claims to transcript
+                // CRITICAL: Must use appendScalars (not individual appendScalar calls)
+                // because Jolt's append_scalars wraps with "begin_append_vector"/"end_append_vector"
+                transcript.appendScalars(claims_ordered);
+
+                // 3. Sample gamma powers: [1, γ, γ², ..., γ^(n-1)]
+                const gamma_powers = try transcript.challengeScalarPowers(self.allocator, num_claims);
+                defer self.allocator.free(gamma_powers);
+                {
+                    const g_be = gamma_powers[1].toBytesBE();
+                    std.debug.print("[STAGE8] gamma_LE=[", .{});
+                    for (0..8) |bi| std.debug.print("{x:0>2}", .{g_be[31 - bi]});
+                    std.debug.print("]\n", .{});
+                }
+
+                // 4. Build joint polynomial: Σ γ^i * poly_i
+                // All witness polynomials need to be evaluated at the same point.
+                // Dense polys (RdInc, RamInc) are trace_length-sized and need to be
+                // embedded into k_chunk * trace_length space (padded with zeros at
+                // address > 0). This is equivalent to multiplying the evaluation by
+                // the Lagrange factor, which we already did for the claims.
+                //
+                // For the joint polynomial, we need to physically embed dense polys
+                // into the larger k_chunk*T space so they can be combined with sparse polys.
+                //
+                // The witness_polys order is: RdInc, RamInc, InstructionRa[0..inst_d], RamRa[0..ram_d], BytecodeRa[0..bc_d]
+                // But Jolt Stage 8 collects: RamInc, RdInc, InstructionRa[0..inst_d], BytecodeRa[0..bc_d], RamRa[0..ram_d]
+                // These orderings differ! The gamma powers map to the Jolt ordering, but witness_polys uses Zolt ordering.
+
+                // Determine the total polynomial size: k_chunk * trace_length for the sparse polys
+                const total_poly_size = k_chunk * trace_length;
+                var joint_poly = try self.allocator.alloc(F, total_poly_size);
+                defer self.allocator.free(joint_poly);
+                @memset(joint_poly, F.zero());
+
+                // Map each claim's gamma to the corresponding witness polynomial
+                // witness_polys order: [0]=RdInc, [1]=RamInc, [2..2+inst_d]=InstructionRa, [2+inst_d..2+inst_d+ram_d]=RamRa, [2+inst_d+ram_d..]=BytecodeRa
+                // Jolt Stage 8 order: [0]=RamInc, [1]=RdInc, [2..2+inst_d]=InstructionRa, [2+inst_d..2+inst_d+bc_d]=BytecodeRa, [2+inst_d+bc_d..]=RamRa
+                //
+                // We need to accumulate: joint_poly += gamma_powers[jolt_idx] * witness_polys[zolt_idx]
+
+                // RamInc: gamma_powers[0] maps to witness_polys[1] (RamInc)
+                // Dense poly: embed into address=0 region of k_chunk*T space
+                {
+                    const ram_inc_wp = witness_polys[1]; // witness RamInc
+                    const gamma = gamma_powers[0]; // Jolt order: RamInc is first
+                    for (0..@min(ram_inc_wp.len, trace_length)) |j| {
+                        // In CycleMajor layout, address=0 spans [0..T)
+                        joint_poly[j] = joint_poly[j].add(ram_inc_wp[j].mul(gamma));
+                    }
+                }
+
+                // RdInc: gamma_powers[1] maps to witness_polys[0] (RdInc)
+                {
+                    const rd_inc_wp = witness_polys[0]; // witness RdInc
+                    const gamma = gamma_powers[1]; // Jolt order: RdInc is second
+                    for (0..@min(rd_inc_wp.len, trace_length)) |j| {
+                        joint_poly[j] = joint_poly[j].add(rd_inc_wp[j].mul(gamma));
+                    }
+                }
+
+                // InstructionRa[0..instruction_d]: gamma_powers[2..2+inst_d] maps to witness_polys[2..2+inst_d]
+                for (0..instruction_d) |i| {
+                    const wp_idx = 2 + i;
+                    const gamma_idx = 2 + i;
+                    const wp = witness_polys[wp_idx];
+                    const gamma = gamma_powers[gamma_idx];
+                    for (0..@min(wp.len, total_poly_size)) |j| {
+                        joint_poly[j] = joint_poly[j].add(wp[j].mul(gamma));
+                    }
+                }
+
+                // BytecodeRa[0..bytecode_d]: gamma_powers[2+inst_d..2+inst_d+bc_d]
+                // maps to witness_polys[2+inst_d+ram_d..2+inst_d+ram_d+bc_d]
+                for (0..bytecode_d) |i| {
+                    const wp_idx = 2 + instruction_d + ram_d + i; // Zolt order: BytecodeRa after RamRa
+                    const gamma_idx = 2 + instruction_d + i; // Jolt order: BytecodeRa before RamRa
+                    const wp = witness_polys[wp_idx];
+                    const gamma = gamma_powers[gamma_idx];
+                    for (0..@min(wp.len, total_poly_size)) |j| {
+                        joint_poly[j] = joint_poly[j].add(wp[j].mul(gamma));
+                    }
+                }
+
+                // RamRa[0..ram_d]: gamma_powers[2+inst_d+bc_d..2+inst_d+bc_d+ram_d]
+                // maps to witness_polys[2+inst_d..2+inst_d+ram_d]
+                for (0..ram_d) |i| {
+                    const wp_idx = 2 + instruction_d + i; // Zolt order: RamRa before BytecodeRa
+                    const gamma_idx = 2 + instruction_d + bytecode_d + i; // Jolt order: RamRa after BytecodeRa
+                    const wp = witness_polys[wp_idx];
+                    const gamma = gamma_powers[gamma_idx];
+                    for (0..@min(wp.len, total_poly_size)) |j| {
+                        joint_poly[j] = joint_poly[j].add(wp[j].mul(gamma));
+                    }
+                }
+
+                // 5. Generate Dory opening proof
+                // The opening point must be in LE order for Dory (Jolt reverses BE→LE)
+                // opening_point is in BE: [r_address_BE || r_cycle_BE]
+                // For CycleMajor layout (default), no reordering needed, just reverse to LE
+                const dory_point = try self.allocator.alloc(F, opening_point.len);
+                defer self.allocator.free(dory_point);
+                for (0..opening_point.len) |i| {
+                    dory_point[i] = opening_point[opening_point.len - 1 - i];
+                }
+
+                std.debug.print("[STAGE8] joint_poly size = {}, dory_point size = {}\n", .{ total_poly_size, dory_point.len });
+
+                // Verify: MLE(joint_poly, dory_point) should equal joint_claim
+                {
+                    // Compute joint_claim = Σ γ^i * claim_i
+                    var expected_joint_claim = F.zero();
+                    for (0..num_claims) |i| {
+                        expected_joint_claim = expected_joint_claim.add(gamma_powers[i].mul(claims_ordered[i]));
+                    }
+                    const ejc_be = expected_joint_claim.toBytesBE();
+                    std.debug.print("[STAGE8] expected_joint_claim_LE=[", .{});
+                    for (0..8) |bi| std.debug.print("{x:0>2}", .{ejc_be[31 - bi]});
+                    std.debug.print("]\n", .{});
+
+                    // Evaluate MLE of joint_poly at dory_point
+                    var mle_eval = F.zero();
+                    const num_vars = dory_point.len;
+                    for (0..joint_poly.len) |i| {
+                        if (joint_poly[i].eql(F.zero())) continue;
+                        var basis = F.one();
+                        for (0..num_vars) |j| {
+                            if ((i >> @intCast(j)) & 1 == 1) {
+                                basis = basis.mul(dory_point[j]);
+                            } else {
+                                basis = basis.mul(F.one().sub(dory_point[j]));
+                            }
+                        }
+                        mle_eval = mle_eval.add(joint_poly[i].mul(basis));
+                    }
+                    const me_be = mle_eval.toBytesBE();
+                    std.debug.print("[STAGE8] MLE(joint_poly, dory_point)_LE=[", .{});
+                    for (0..8) |bi| std.debug.print("{x:0>2}", .{me_be[31 - bi]});
+                    std.debug.print("]\n", .{});
+
+                    if (mle_eval.eql(expected_joint_claim)) {
+                        std.debug.print("[STAGE8] ✓ MLE evaluation matches joint_claim!\n", .{});
+                    } else {
+                        std.debug.print("[STAGE8] ✗ MLE evaluation DOES NOT match joint_claim!\n", .{});
+
+                        // Compute Σ γ^k * MLE(witness_poly_k, dory_point) individually
+                        // to verify which polynomial contribution is off
+                        var sum_individual_mle = F.zero();
+                        // RamInc (gamma_idx=0, wp_idx=1)
+                        {
+                            const wp = witness_polys[1];
+                            var wp_mle = F.zero();
+                            for (0..wp.len) |ii| {
+                                if (wp[ii].eql(F.zero())) continue;
+                                var bb = F.one();
+                                for (0..num_vars) |jj| {
+                                    if ((ii >> @intCast(jj)) & 1 == 1) {
+                                        bb = bb.mul(dory_point[jj]);
+                                    } else {
+                                        bb = bb.mul(F.one().sub(dory_point[jj]));
+                                    }
+                                }
+                                wp_mle = wp_mle.add(wp[ii].mul(bb));
+                            }
+                            const contribution = gamma_powers[0].mul(wp_mle);
+                            sum_individual_mle = sum_individual_mle.add(contribution);
+                            const wp_be = wp_mle.toBytesBE();
+                            const cl_be = claims_ordered[0].toBytesBE();
+                            std.debug.print("[STAGE8-DBG] RamInc: MLE_LE=[", .{});
+                            for (0..8) |bi| std.debug.print("{x:0>2}", .{wp_be[31 - bi]});
+                            std.debug.print("] claim_LE=[", .{});
+                            for (0..8) |bi| std.debug.print("{x:0>2}", .{cl_be[31 - bi]});
+                            std.debug.print("] wp.len={d}{s}\n", .{ wp.len, if (wp_mle.eql(claims_ordered[0])) " ✓" else " ✗" });
+                        }
+                        // RdInc (gamma_idx=1, wp_idx=0)
+                        {
+                            const wp = witness_polys[0];
+                            var wp_mle = F.zero();
+                            for (0..wp.len) |ii| {
+                                if (wp[ii].eql(F.zero())) continue;
+                                var bb = F.one();
+                                for (0..num_vars) |jj| {
+                                    if ((ii >> @intCast(jj)) & 1 == 1) {
+                                        bb = bb.mul(dory_point[jj]);
+                                    } else {
+                                        bb = bb.mul(F.one().sub(dory_point[jj]));
+                                    }
+                                }
+                                wp_mle = wp_mle.add(wp[ii].mul(bb));
+                            }
+                            const contribution = gamma_powers[1].mul(wp_mle);
+                            sum_individual_mle = sum_individual_mle.add(contribution);
+                            const wp_be = wp_mle.toBytesBE();
+                            const cl_be = claims_ordered[1].toBytesBE();
+                            std.debug.print("[STAGE8-DBG] RdInc: MLE_LE=[", .{});
+                            for (0..8) |bi| std.debug.print("{x:0>2}", .{wp_be[31 - bi]});
+                            std.debug.print("] claim_LE=[", .{});
+                            for (0..8) |bi| std.debug.print("{x:0>2}", .{cl_be[31 - bi]});
+                            std.debug.print("] wp.len={d}{s}\n", .{ wp.len, if (wp_mle.eql(claims_ordered[1])) " ✓" else " ✗" });
+                        }
+                        // InstructionRa
+                        for (0..instruction_d) |i| {
+                            const wp = witness_polys[2 + i];
+                            var wp_mle = F.zero();
+                            for (0..@min(wp.len, total_poly_size)) |ii| {
+                                if (wp[ii].eql(F.zero())) continue;
+                                var bb = F.one();
+                                for (0..num_vars) |jj| {
+                                    if ((ii >> @intCast(jj)) & 1 == 1) {
+                                        bb = bb.mul(dory_point[jj]);
+                                    } else {
+                                        bb = bb.mul(F.one().sub(dory_point[jj]));
+                                    }
+                                }
+                                wp_mle = wp_mle.add(wp[ii].mul(bb));
+                            }
+                            const gamma_idx = 2 + i;
+                            const contribution = gamma_powers[gamma_idx].mul(wp_mle);
+                            sum_individual_mle = sum_individual_mle.add(contribution);
+                            if (i < 3 or !wp_mle.eql(claims_ordered[gamma_idx])) {
+                                const c_be = wp_mle.toBytesBE();
+                                const e_be = claims_ordered[gamma_idx].toBytesBE();
+                                std.debug.print("[STAGE8-DBG] InstrRa({d}): MLE_LE=[", .{i});
+                                for (0..8) |bi| std.debug.print("{x:0>2}", .{c_be[31 - bi]});
+                                std.debug.print("] claim_LE=[", .{});
+                                for (0..8) |bi| std.debug.print("{x:0>2}", .{e_be[31 - bi]});
+                                std.debug.print("]{s}\n", .{ if (wp_mle.eql(claims_ordered[gamma_idx])) " ✓" else " ✗" });
+                            }
+                        }
+                        // BytecodeRa
+                        for (0..bytecode_d) |i| {
+                            const wp_idx = 2 + instruction_d + ram_d + i;
+                            const gamma_idx = 2 + instruction_d + i;
+                            const wp = witness_polys[wp_idx];
+                            var wp_mle = F.zero();
+                            for (0..@min(wp.len, total_poly_size)) |ii| {
+                                if (wp[ii].eql(F.zero())) continue;
+                                var bb = F.one();
+                                for (0..num_vars) |jj| {
+                                    if ((ii >> @intCast(jj)) & 1 == 1) {
+                                        bb = bb.mul(dory_point[jj]);
+                                    } else {
+                                        bb = bb.mul(F.one().sub(dory_point[jj]));
+                                    }
+                                }
+                                wp_mle = wp_mle.add(wp[ii].mul(bb));
+                            }
+                            const contribution = gamma_powers[gamma_idx].mul(wp_mle);
+                            sum_individual_mle = sum_individual_mle.add(contribution);
+                            const c_be = wp_mle.toBytesBE();
+                            const e_be = claims_ordered[gamma_idx].toBytesBE();
+                            std.debug.print("[STAGE8-DBG] BytecodeRa({d}): wp_idx={d} gamma_idx={d} MLE_LE=[", .{ i, wp_idx, gamma_idx });
+                            for (0..8) |bi| std.debug.print("{x:0>2}", .{c_be[31 - bi]});
+                            std.debug.print("] claim_LE=[", .{});
+                            for (0..8) |bi| std.debug.print("{x:0>2}", .{e_be[31 - bi]});
+                            std.debug.print("]{s}\n", .{ if (wp_mle.eql(claims_ordered[gamma_idx])) " ✓" else " ✗" });
+                        }
+                        // RamRa
+                        for (0..ram_d) |i| {
+                            const wp_idx = 2 + instruction_d + i;
+                            const gamma_idx = 2 + instruction_d + bytecode_d + i;
+                            const wp = witness_polys[wp_idx];
+                            var wp_mle = F.zero();
+                            for (0..@min(wp.len, total_poly_size)) |ii| {
+                                if (wp[ii].eql(F.zero())) continue;
+                                var bb = F.one();
+                                for (0..num_vars) |jj| {
+                                    if ((ii >> @intCast(jj)) & 1 == 1) {
+                                        bb = bb.mul(dory_point[jj]);
+                                    } else {
+                                        bb = bb.mul(F.one().sub(dory_point[jj]));
+                                    }
+                                }
+                                wp_mle = wp_mle.add(wp[ii].mul(bb));
+                            }
+                            const contribution = gamma_powers[gamma_idx].mul(wp_mle);
+                            sum_individual_mle = sum_individual_mle.add(contribution);
+                            const c_be = wp_mle.toBytesBE();
+                            const e_be = claims_ordered[gamma_idx].toBytesBE();
+                            std.debug.print("[STAGE8-DBG] RamRa({d}): wp_idx={d} gamma_idx={d} MLE_LE=[", .{ i, wp_idx, gamma_idx });
+                            for (0..8) |bi| std.debug.print("{x:0>2}", .{c_be[31 - bi]});
+                            std.debug.print("] claim_LE=[", .{});
+                            for (0..8) |bi| std.debug.print("{x:0>2}", .{e_be[31 - bi]});
+                            std.debug.print("]{s}\n", .{ if (wp_mle.eql(claims_ordered[gamma_idx])) " ✓" else " ✗" });
+                        }
+
+                        const sim_be = sum_individual_mle.toBytesBE();
+                        std.debug.print("[STAGE8-DBG] Σ γ^k*MLE(wp_k, dp)_LE=[", .{});
+                        for (0..8) |bi| std.debug.print("{x:0>2}", .{sim_be[31 - bi]});
+                        std.debug.print("]\n", .{});
+                        std.debug.print("[STAGE8-DBG] sum_individual matches joint_poly_mle? {}\n", .{sum_individual_mle.eql(mle_eval)});
+                        std.debug.print("[STAGE8-DBG] sum_individual matches expected_joint_claim? {}\n", .{sum_individual_mle.eql(expected_joint_claim)});
+                    }
+                }
+
+                // Use the same SRS that was used for commitments (loaded from file for Jolt compatibility)
+                // CRITICAL: Must use openWithTranscript to integrate with Fiat-Shamir.
+                // The Jolt verifier uses JoltToDoryTranscript which bridges the Jolt transcript
+                // to Dory's internal transcript. The prover must use the same transcript state
+                // so the Dory protocol's internal challenges match between prover and verifier.
+                const dory_proof = try DoryScheme.openWithTranscript(
+                    &dory_srs,
+                    joint_poly,
+                    dory_point,
+                    null, // row commitments will be computed internally
+                    &transcript,
+                    self.allocator,
+                );
+                result.dory_opening_proof = dory_proof;
+                result.opening_point = opening_point; // Already stored by convertWithTranscript
+
+                std.debug.print("[STAGE8] === Dory Opening Proof Generated ===\n", .{});
+                std.debug.print("[STAGE8] nu={}, sigma={}, first_messages={}, second_messages={}\n", .{
+                    dory_proof.nu, dory_proof.sigma,
+                    dory_proof.first_messages.len, dory_proof.second_messages.len,
+                });
+            }
 
             return result;
         }
@@ -1646,37 +2136,23 @@ pub fn JoltProver(comptime F: type) type {
             try serializer.writeSumcheckInstanceProof(&bundle.proof.stage7_sumcheck_proof);
 
             // Write joint opening proof (REQUIRED - not optional in Jolt)
-            // Generate a Dory opening proof from the bundled polynomial evaluations
-            {
-                // The evaluation point should be derived from the transcript
-                // For now, use deterministic values
-                const max_size = @max(@max(bundle.bytecode_evals.len, bundle.memory_evals.len), bundle.register_evals.len);
-                const log_size: u32 = if (max_size <= 1) 1 else @intCast(std.math.log2_int(usize, max_size) + 1);
-                var dory_srs = try Dory.DoryCommitmentScheme(F).setup(self.allocator, log_size);
-                defer dory_srs.deinit();
-
-                // Build the evaluation point from log_size deterministic challenges
-                const point = try self.allocator.alloc(F, log_size);
-                defer self.allocator.free(point);
-                for (0..log_size) |i| {
-                    point[i] = F.fromU64(@as(u64, i + 1)).mul(F.fromU64(12345));
-                }
-
-                // Use bytecode_evals if available, otherwise create empty polynomial
-                const evals = if (bundle.bytecode_evals.len > 0)
-                    bundle.bytecode_evals
-                else blk: {
-                    const empty = try self.allocator.alloc(F, 2);
-                    empty[0] = F.zero();
-                    empty[1] = F.zero();
-                    break :blk empty;
-                };
-                defer if (bundle.bytecode_evals.len == 0) self.allocator.free(evals);
-
+            // Use the pre-computed Dory opening proof from Stage 8
+            if (bundle.dory_opening_proof) |*dory_proof| {
+                std.debug.print("[SERIALIZE] Writing pre-computed Dory opening proof\n", .{});
+                try serializer.writeDoryProof(dory_proof);
+            } else {
+                // Fallback: generate a dummy proof (should not happen in correct flow)
+                std.debug.print("[SERIALIZE] WARNING: No pre-computed Dory proof, generating dummy\n", .{});
+                const dummy_poly = try self.allocator.alloc(F, 2);
+                defer self.allocator.free(dummy_poly);
+                dummy_poly[0] = F.zero();
+                dummy_poly[1] = F.zero();
+                var dummy_srs = try Dory.DoryCommitmentScheme(F).setup(self.allocator, 1);
+                defer dummy_srs.deinit();
                 var dory_proof = try Dory.DoryCommitmentScheme(F).open(
-                    &dory_srs,
-                    evals,
-                    point,
+                    &dummy_srs,
+                    dummy_poly,
+                    &[_]F{F.zero()},
                     self.allocator,
                 );
                 defer dory_proof.deinit();
@@ -1914,9 +2390,135 @@ pub fn JoltProver(comptime F: type) type {
         }
 
         /// Build InstructionRa polynomial: extract chunk idx from lookup indices
+        /// Compute the 128-bit lookup index for a given execution step.
+        /// This must exactly match the proof converter's Stage 7 lookup index computation.
+        fn computeLookupIndex(step: tracer.TraceStep) u128 {
+            if (step.is_noop) return 0;
+
+            const instr = step.instruction;
+            const opcode_7: u8 = @truncate(instr & 0x7F);
+            const funct3_3: u3 = @truncate((instr >> 12) & 0x7);
+            const funct7_7: u7 = @truncate(instr >> 25);
+
+            // Determine identity path
+            const is_identity_path: bool = switch (opcode_7) {
+                0x33 => (funct3_3 == 0 and (funct7_7 == 0 or funct7_7 == 0x20)) or
+                    (funct7_7 == 0x01 and (funct3_3 == 0 or funct3_3 == 3)),
+                0x13 => (funct3_3 == 0),
+                0x1b => (funct3_3 == 0),
+                0x3b => (funct3_3 == 0 and (funct7_7 == 0 or funct7_7 == 0x20)),
+                0x37 => true,
+                0x17 => true,
+                0x6f => true,
+                0x67 => true,
+                else => false,
+            };
+
+            const stage6_mod = @import("spartan/stage6_prover.zig");
+            var lookup_idx: u128 = 0;
+
+            if (is_identity_path) {
+                lookup_idx = switch (opcode_7) {
+                    0x33 => blk128: {
+                        if (funct3_3 == 0 and funct7_7 == 0) {
+                            break :blk128 @as(u128, step.rs1_value) + @as(u128, step.rs2_value);
+                        }
+                        if (funct3_3 == 0 and funct7_7 == 0x20) {
+                            break :blk128 @as(u128, step.rs1_value) + (@as(u128, 1) << 64) - @as(u128, step.rs2_value);
+                        }
+                        if (funct7_7 == 0x01 and funct3_3 == 0) {
+                            break :blk128 @as(u128, step.rs1_value) * @as(u128, step.rs2_value);
+                        }
+                        if (funct7_7 == 0x01 and funct3_3 == 3) {
+                            break :blk128 @as(u128, step.rs1_value) * @as(u128, step.rs2_value);
+                        }
+                        break :blk128 0;
+                    },
+                    0x3b => blk128: {
+                        if (funct3_3 == 0 and funct7_7 == 0) {
+                            break :blk128 @as(u128, step.rs1_value) + @as(u128, step.rs2_value);
+                        }
+                        if (funct3_3 == 0 and funct7_7 == 0x20) {
+                            break :blk128 @as(u128, step.rs1_value) + (@as(u128, 1) << 64) - @as(u128, step.rs2_value);
+                        }
+                        break :blk128 0;
+                    },
+                    0x13 => blk128: {
+                        const imm12_raw: u32 = @truncate(@as(u32, step.instruction) >> 20);
+                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
+                        const imm_u64: u64 = @bitCast(imm_signed);
+                        break :blk128 @as(u128, step.rs1_value) + @as(u128, imm_u64);
+                    },
+                    0x1b => blk128: {
+                        const imm12_raw: u32 = @truncate(@as(u32, step.instruction) >> 20);
+                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
+                        const imm_u64: u64 = @bitCast(imm_signed);
+                        break :blk128 @as(u128, step.rs1_value) + @as(u128, imm_u64);
+                    },
+                    0x37 => @as(u128, step.instruction & 0xFFFFF000),
+                    0x17 => @as(u128, step.unexpanded_pc) + @as(u128, step.instruction & 0xFFFFF000),
+                    0x6f => blk128: {
+                        const instr32 = step.instruction;
+                        const imm20: u32 = ((@as(u32, instr32 >> 31) & 1) << 19) |
+                            ((@as(u32, instr32 >> 12) & 0xFF) << 11) |
+                            ((@as(u32, instr32 >> 20) & 1) << 10) |
+                            ((@as(u32, instr32 >> 21) & 0x3FF));
+                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm20 << 12)) >> 11);
+                        const imm_u64: u64 = @bitCast(imm_signed);
+                        break :blk128 @as(u128, step.unexpanded_pc) + @as(u128, imm_u64);
+                    },
+                    0x67 => blk128: {
+                        const imm12_raw: u32 = @truncate(@as(u32, step.instruction) >> 20);
+                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
+                        const imm_u64: u64 = @bitCast(imm_signed);
+                        break :blk128 @as(u128, step.rs1_value) + @as(u128, imm_u64);
+                    },
+                    else => 0,
+                };
+            } else {
+                // Interleaved path: index = interleave(rs1, rs2)
+                const left_op: u64 = step.rs1_value;
+                const right_op: u64 = switch (opcode_7) {
+                    0x33, 0x3b, 0x63 => step.rs2_value,
+                    0x13 => blk_rop: {
+                        const imm12_raw: u32 = @truncate(@as(u32, step.instruction) >> 20);
+                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
+                        break :blk_rop @as(u64, @bitCast(imm_signed));
+                    },
+                    0x03 => blk_rop: {
+                        const imm12_raw: u32 = @truncate(@as(u32, step.instruction) >> 20);
+                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
+                        break :blk_rop @as(u64, @bitCast(imm_signed));
+                    },
+                    0x23 => blk_rop: {
+                        const imm_lo: u32 = (step.instruction >> 7) & 0x1F;
+                        const imm_hi: u32 = (step.instruction >> 25) & 0x7F;
+                        const imm12_raw: u32 = (imm_hi << 5) | imm_lo;
+                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
+                        break :blk_rop @as(u64, @bitCast(imm_signed));
+                    },
+                    else => step.rs2_value,
+                };
+                lookup_idx = stage6_mod.interleaveBits(left_op, right_op);
+            }
+
+            // Instructions without a lookup table (Load, Store, SLL, SLLI, etc.)
+            // have to_instruction_inputs() = (0, 0) in Jolt, so lookup_idx = 0
+            const stage5_mod = @import("spartan/stage5_prover.zig");
+            const table_idx = stage5_mod.getLookupTableIndex(@as(u32, opcode_7), @as(u32, funct3_3), @as(u32, funct7_7));
+            if (table_idx < 0) {
+                lookup_idx = 0;
+            }
+
+            return lookup_idx;
+        }
+
+        /// Build InstructionRa chunk value polynomial from execution trace.
+        /// Uses the exact same lookup index computation as the proof converter's Stage 7,
+        /// iterating over ALL cycles (not just lookup trace entries).
         fn buildInstructionRaPolynomial(
             self: *Self,
-            lookup_trace: *const instruction.LookupTraceCollector(64),
+            trace: *const tracer.ExecutionTrace,
             poly_size: usize,
             log_k_chunk: usize,
             shift: usize,
@@ -1928,41 +2530,50 @@ pub fn JoltProver(comptime F: type) type {
             const k_chunk: u128 = @as(u128, 1) << @intCast(log_k_chunk);
             const mask: u128 = k_chunk - 1;
 
-            // Extract chunks from lookup indices
-            for (lookup_trace.entries.items, 0..) |entry, i| {
+            // Iterate over ALL cycles (not just lookup entries)
+            for (trace.steps.items, 0..) |step, i| {
                 if (i >= poly_size) break;
 
-                const chunk: u128 = (entry.index >> @intCast(shift)) & mask;
+                const lookup_idx = computeLookupIndex(step);
+                const chunk: u128 = (lookup_idx >> @intCast(shift)) & mask;
                 poly[i] = F.fromU64(@intCast(chunk));
             }
 
             return poly;
         }
 
-        /// Build RamRa polynomial: extract chunk idx from RAM addresses
+        /// Build RamRa chunk value polynomial from execution trace.
+        /// Returns chunk values for each cycle, or null (represented as k_chunk, i.e. out of range)
+        /// for cycles without memory access. This matches the proof converter's G table construction
+        /// which only counts memory-access cycles.
         fn buildRamRaPolynomial(
             self: *Self,
             trace: *const tracer.ExecutionTrace,
             poly_size: usize,
             log_k_chunk: usize,
             shift: usize,
+            memory_layout: *const jolt_device.MemoryLayout,
         ) ![]F {
-            const poly = try self.allocator.alloc(F, poly_size);
-            errdefer self.allocator.free(poly);
-            @memset(poly, F.zero());
-
             const k_chunk: u64 = @as(u64, 1) << @intCast(log_k_chunk);
             const mask: u64 = k_chunk - 1;
 
-            // Extract chunks from RAM addresses
+            const poly = try self.allocator.alloc(F, poly_size);
+            errdefer self.allocator.free(poly);
+            // Default to k_chunk (out of range) for non-memory cycles
+            // This ensures they won't generate any one-hot entry
+            for (poly) |*p| p.* = F.fromU64(k_chunk);
+
+            // Extract chunks from REMAPPED RAM addresses (must match proof converter)
             for (trace.steps.items, 0..) |step, i| {
                 if (i >= poly_size) break;
 
                 if (step.memory_addr) |addr| {
-                    const chunk: u64 = (addr >> @intCast(shift)) & mask;
-                    poly[i] = F.fromU64(chunk);
-                } else {
-                    poly[i] = F.zero();
+                    if (addr != 0) {
+                        if (memory_layout.remapAddress(addr)) |raddr| {
+                            const chunk: u64 = (raddr >> @intCast(shift)) & mask;
+                            poly[i] = F.fromU64(chunk);
+                        }
+                    }
                 }
             }
 

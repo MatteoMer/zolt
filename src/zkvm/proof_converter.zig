@@ -4758,6 +4758,10 @@ pub fn ProofConverter(comptime F: type) type {
                 const num_rounds = s6_log_k_chunk;
                 const degree_bound: usize = 2;
 
+                // Collect Stage 7 sumcheck challenges for opening point construction
+                var stage7_challenges = try self.allocator.alloc(F, num_rounds);
+                defer self.allocator.free(stage7_challenges);
+
                 // Track current polynomial size (halves each round)
                 var poly_size: usize = k_chunk;
 
@@ -4849,6 +4853,7 @@ pub fn ProofConverter(comptime F: type) type {
                     transcript.appendMessage("UniPoly_end");
 
                     const challenge = transcript.challengeScalar();
+                    stage7_challenges[round] = challenge;
 
                     // Evaluate p(challenge) = a0 + a1*challenge + a2*challenge^2
                     // a1 = p(1) - a0 - a2
@@ -4960,6 +4965,29 @@ pub fn ProofConverter(comptime F: type) type {
                     const cc_be = current_claim.toBytesBE();
                     std.debug.print("[STAGE7] sumcheck output_claim_LE=[", .{});
                     for (0..8) |bi| std.debug.print("{x:0>2}", .{cc_be[31 - bi]});
+                    std.debug.print("]\n", .{});
+                }
+
+                // Construct the unified opening point: [r_address_stage7_BE || r_cycle_BE]
+                // r_address = reversed stage7_challenges (LE → BE, like Jolt's match_endianness)
+                // r_cycle = r_cycle_be (already BE from Stage 6 booleanity)
+                const opening_point_len = s6_log_k_chunk + s6_n_cycle_vars;
+                var opening_point_storage = try self.allocator.alloc(F, opening_point_len);
+                // r_address_be: reverse the stage7_challenges
+                for (0..s6_log_k_chunk) |i| {
+                    opening_point_storage[i] = stage7_challenges[s6_log_k_chunk - 1 - i];
+                }
+                // r_cycle_be
+                for (0..s6_n_cycle_vars) |i| {
+                    opening_point_storage[s6_log_k_chunk + i] = r_cycle_be[i];
+                }
+                jolt_proof.opening_point = opening_point_storage;
+
+                std.debug.print("[STAGE7] Stored opening_point ({} dims = {} addr + {} cycle)\n", .{ opening_point_len, s6_log_k_chunk, s6_n_cycle_vars });
+                for (0..opening_point_len) |i| {
+                    const op_be = opening_point_storage[i].toBytesBE();
+                    std.debug.print("[STAGE7] opening_point[{d}] LE=[", .{i});
+                    for (0..8) |bi| std.debug.print("{x:0>2}", .{op_be[31 - bi]});
                     std.debug.print("]\n", .{});
                 }
             }

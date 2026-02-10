@@ -735,6 +735,10 @@ pub fn JoltProof(comptime F: type, comptime Commitment: type, comptime Proof: ty
         /// Joint opening proof (PCS batched opening)
         joint_opening_proof: ?Proof,
 
+        /// Stage 8 opening point: [r_address_stage7_BE || r_cycle_BE]
+        /// Used by Dory opening proof generation. Set by proof converter.
+        opening_point: []F,
+
         /// Advice opening proofs
         trusted_advice_val_evaluation_proof: ?Proof,
         trusted_advice_val_final_proof: ?Proof,
@@ -771,6 +775,7 @@ pub fn JoltProof(comptime F: type, comptime Commitment: type, comptime Proof: ty
                 .stage6_sumcheck_proof = SumcheckInstanceProof(F).init(allocator),
                 .stage7_sumcheck_proof = SumcheckInstanceProof(F).init(allocator),
                 .joint_opening_proof = null,
+                .opening_point = &[_]F{},
                 .trusted_advice_val_evaluation_proof = null,
                 .trusted_advice_val_final_proof = null,
                 .untrusted_advice_val_evaluation_proof = null,
@@ -803,6 +808,8 @@ pub fn JoltProof(comptime F: type, comptime Commitment: type, comptime Proof: ty
             self.stage5_sumcheck_proof.deinit();
             self.stage6_sumcheck_proof.deinit();
             self.stage7_sumcheck_proof.deinit();
+
+            if (self.opening_point.len > 0) self.allocator.free(self.opening_point);
         }
     };
 }
@@ -838,6 +845,27 @@ pub fn JoltProofWithDory(comptime F: type, comptime Commitment: type, comptime P
         register_evals: []F,
         register_final_evals: []F,
 
+        /// Witness polynomials for all committed polynomials (for Stage 8 opening proof)
+        /// Order: RdInc, RamInc, InstructionRa[0..instruction_d-1], RamRa[0..ram_d-1], BytecodeRa[0..bytecode_d-1]
+        /// Dense polys (RdInc, RamInc) have trace_length entries
+        /// Sparse one-hot polys have k_chunk * trace_length entries (CycleMajor layout)
+        witness_polys: [][]F,
+
+        /// OneHot parameters for the committed polynomials
+        instruction_d: usize,
+        bytecode_d: usize,
+        ram_d: usize,
+        log_k_chunk: usize,
+
+        /// Stage 8 opening point: [r_address_stage7 || r_cycle_stage6] in BE
+        /// This is the unified evaluation point for all committed polynomials.
+        /// Set by convertWithTranscript, used for generating the opening proof.
+        opening_point: []F,
+
+        /// Dory opening proof (computed in Stage 8)
+        /// null if not yet computed
+        dory_opening_proof: ?Dory.DoryProof,
+
         allocator: Allocator,
 
         pub fn init(allocator: Allocator) Self {
@@ -849,6 +877,13 @@ pub fn JoltProofWithDory(comptime F: type, comptime Commitment: type, comptime P
                 .memory_final_evals = &[_]F{},
                 .register_evals = &[_]F{},
                 .register_final_evals = &[_]F{},
+                .witness_polys = &[_][]F{},
+                .instruction_d = 0,
+                .bytecode_d = 0,
+                .ram_d = 0,
+                .log_k_chunk = 0,
+                .opening_point = &[_]F{},
+                .dory_opening_proof = null,
                 .allocator = allocator,
             };
         }
@@ -861,6 +896,10 @@ pub fn JoltProofWithDory(comptime F: type, comptime Commitment: type, comptime P
             if (self.memory_final_evals.len > 0) self.allocator.free(self.memory_final_evals);
             if (self.register_evals.len > 0) self.allocator.free(self.register_evals);
             if (self.register_final_evals.len > 0) self.allocator.free(self.register_final_evals);
+            for (self.witness_polys) |poly| self.allocator.free(poly);
+            if (self.witness_polys.len > 0) self.allocator.free(self.witness_polys);
+            if (self.opening_point.len > 0) self.allocator.free(self.opening_point);
+            if (self.dory_opening_proof) |*p| p.deinit();
         }
     };
 }

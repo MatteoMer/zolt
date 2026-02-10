@@ -1048,11 +1048,9 @@ pub const DoryVerifierSetup = struct {
             try delta_2l.append(allocator, item);
         }
 
-        // Use first generators, and compute h1, h2, ht
-        // Note: Jolt generates h1, h2 from the RNG too, but we'll use first generators for simplicity
-        // In production, these should match Jolt's exact values
-        const h1 = srs.g1_vec[0];
-        const h2 = srs.g2_vec[0];
+        // Use h1, h2 from the SRS (these are separate blinding generators)
+        const h1 = srs.h1;
+        const h2 = srs.h2;
         const h1_fp = pairing.G1PointFp{
             .x = g1PointXToFp(h1),
             .y = g1PointYToFp(h1),

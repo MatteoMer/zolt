@@ -46,6 +46,31 @@ pub const G1Flags = enum(u8) {
     YIsNegative = 0x80, // bit 7
 };
 
+/// Append a GT element to the transcript for Dory protocol.
+/// Dory uses JoltToDoryTranscript which calls transcript.append_bytes() directly
+/// with serialize_compressed output, WITHOUT byte reversal.
+/// This differs from appendGT which reverses bytes for the main Jolt transcript.
+fn doryAppendGT(transcript: anytype, gt: GT) void {
+    const bytes = gt.toBytes();
+    // For Fp12, serialize_compressed == serialize_uncompressed (384 bytes)
+    // No reversal - Dory's JoltToDoryTranscript uses append_bytes directly
+    transcript.appendBytes(&bytes);
+}
+
+/// Append a G1 point to the transcript for Dory protocol.
+/// Uses compressed serialization (32 bytes), no reversal.
+fn doryAppendG1(transcript: anytype, point: G1Point) void {
+    const bytes = compressG1(point);
+    transcript.appendBytes(&bytes);
+}
+
+/// Append a G2 point to the transcript for Dory protocol.
+/// Uses compressed serialization (64 bytes), no reversal.
+fn doryAppendG2(transcript: anytype, point: G2Point) void {
+    const bytes = compressG2(point);
+    transcript.appendBytes(&bytes);
+}
+
 /// Compress a G1 point to 32 bytes (arkworks format)
 /// Format: x-coordinate with flags in top 2 bits of last byte
 pub fn compressG1(point: G1Point) [32]u8 {
@@ -643,8 +668,7 @@ fn computeVectorMatrixProduct(comptime F: type, evals: []const F, left_vec: []co
 }
 
 /// Compute row commitments for a polynomial
-fn computeRowCommitments(comptime F: type, params: anytype, evals: []const F, allocator: Allocator) ![]G1Point {
-    const num_cols = params.num_columns;
+fn computeRowCommitmentsWithCols(comptime F: type, params: anytype, evals: []const F, num_cols: usize, allocator: Allocator) ![]G1Point {
     const num_rows = (evals.len + num_cols - 1) / num_cols;
 
     const row_commitments = try allocator.alloc(G1Point, num_rows);
@@ -717,6 +741,10 @@ pub const DorySRS = struct {
     sigma: u32,
     /// Log2 of rows (nu)
     nu: u32,
+    /// Blinding generator in G1 (used in Dory IPA final message)
+    h1: G1Point,
+    /// Blinding generator in G2 (used in Dory IPA VMV + final message)
+    h2: G2Point,
     allocator: Allocator,
 
     pub fn deinit(self: *DorySRS) void {
@@ -806,9 +834,14 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 g2.* = parseG2Uncompressed(&buf);
             }
 
-            // Skip blinding generators (h1, h2) for now
-            var skip_buf: [64 + 128]u8 = undefined;
-            _ = try file.readAll(&skip_buf);
+            // Read blinding generators h1 (G1, 64 bytes) and h2 (G2, 128 bytes)
+            var h1_buf: [64]u8 = undefined;
+            _ = try file.readAll(&h1_buf);
+            const h1 = parseG1Uncompressed(&h1_buf);
+
+            var h2_buf: [128]u8 = undefined;
+            _ = try file.readAll(&h2_buf);
+            const h2 = parseG2Uncompressed(&h2_buf);
 
             return SetupParams{
                 .g1_vec = g1_vec,
@@ -817,6 +850,8 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 .num_rows = @intCast(g2_count),
                 .sigma = sigma,
                 .nu = nu,
+                .h1 = h1,
+                .h2 = h2,
                 .allocator = allocator,
             };
         }
@@ -974,6 +1009,8 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 .num_rows = num_rows,
                 .sigma = sigma,
                 .nu = nu,
+                .h1 = G1Point.generator(),
+                .h2 = G2Point.generator(),
                 .allocator = allocator,
             };
         }
@@ -1066,8 +1103,11 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             row_commitments_opt: ?[]const G1Point,
             allocator: Allocator,
         ) !Proof {
-            const nu = params.nu;
-            const sigma = params.sigma;
+            // Compute nu/sigma from the polynomial's actual size, not from SRS params.
+            // This matches Jolt's balanced_sigma_nu: sigma = ceil(num_vars/2), nu = num_vars - sigma
+            const num_vars: u32 = @intCast(point.len);
+            const sigma: u32 = (num_vars + 1) / 2;
+            const nu: u32 = num_vars - sigma;
             const num_rounds = @max(nu, sigma);
 
             // Step 1: Get or compute row commitments
@@ -1076,7 +1116,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 @memcpy(owned, rc);
                 break :blk owned;
             } else blk: {
-                break :blk try computeRowCommitments(F, params, evals, allocator);
+                break :blk try computeRowCommitmentsWithCols(F, params, evals, @as(usize, 1) << @intCast(sigma), allocator);
             };
             defer allocator.free(row_commitments);
 
@@ -1409,8 +1449,11 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             transcript: anytype,
             allocator: Allocator,
         ) !Proof {
-            const nu = params.nu;
-            const sigma = params.sigma;
+            // Compute nu/sigma from the polynomial's actual size, not from SRS params.
+            // This matches Jolt's balanced_sigma_nu: sigma = ceil(num_vars/2), nu = num_vars - sigma
+            const num_vars: u32 = @intCast(point.len);
+            const sigma: u32 = (num_vars + 1) / 2;
+            const nu: u32 = num_vars - sigma;
             const num_rounds = @max(nu, sigma);
 
             // Step 1: Get or compute row commitments
@@ -1419,7 +1462,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 @memcpy(owned, rc);
                 break :blk owned;
             } else blk: {
-                break :blk try computeRowCommitments(F, params, evals, allocator);
+                break :blk try computeRowCommitmentsWithCols(F, params, evals, @as(usize, 1) << @intCast(sigma), allocator);
             };
             defer allocator.free(row_commitments);
 
@@ -1454,21 +1497,24 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             defer allocator.free(padded_row_commitments);
 
             // Step 4: Compute VMV message
+            // C = e(MSM(row_comms, v_vec), h₂)
             const t_vec_v = msm.MSM(F, Fp).compute(padded_row_commitments, v_vec);
             const t_vec_v_fp = G1PointFp{
                 .x = t_vec_v.x,
                 .y = t_vec_v.y,
                 .infinity = t_vec_v.infinity,
             };
-            const c = pairing.pairingFp(t_vec_v_fp, params.g2_vec[0]);
+            const c = pairing.pairingFp(t_vec_v_fp, params.h2);
 
-            const gamma1_v = msm.MSM(F, Fp).compute(params.g1_vec[0..v_vec.len], v_vec);
+            // D₂ = e(MSM(Γ₁[..sigma], v_vec), h₂)
+            const num_cols = @as(usize, 1) << @intCast(sigma);
+            const gamma1_v = msm.MSM(F, Fp).compute(params.g1_vec[0..num_cols], v_vec[0..num_cols]);
             const gamma1_v_fp = G1PointFp{
                 .x = gamma1_v.x,
                 .y = gamma1_v.y,
                 .infinity = gamma1_v.infinity,
             };
-            const d2 = pairing.pairingFp(gamma1_v_fp, params.g2_vec[0]);
+            const d2 = pairing.pairingFp(gamma1_v_fp, params.h2);
 
             // e1 = MSM(row_commitments, left_vec)
             // row_commitments may have different length than left_vec (2^nu)
@@ -1494,10 +1540,31 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 .e1 = e1,
             };
 
+            // Debug: print VMV message values
+            {
+                const d2_bytes = vmv_message.d2.toBytes();
+                std.debug.print("[DORY PROVE] VMV d2 first 32 bytes: ", .{});
+                for (d2_bytes[0..32]) |b| std.debug.print("{x:0>2}", .{b});
+                std.debug.print("\n", .{});
+                const e1_bytes = compressG1(vmv_message.e1);
+                std.debug.print("[DORY PROVE] VMV e1 compressed: ", .{});
+                for (e1_bytes[0..32]) |b| std.debug.print("{x:0>2}", .{b});
+                std.debug.print("\n", .{});
+                // Also print h2 to verify
+                const h2_bytes = compressG2(params.h2);
+                std.debug.print("[DORY PROVE] h2 compressed first 32: ", .{});
+                for (h2_bytes[0..32]) |b| std.debug.print("{x:0>2}", .{b});
+                std.debug.print("\n", .{});
+            }
+
             // Append VMV message to transcript
-            transcript.appendGT(vmv_message.c);
-            transcript.appendGT(vmv_message.d2);
-            transcript.appendG1Compressed(vmv_message.e1);
+            // NOTE: Dory uses JoltToDoryTranscript which calls transcript.append_bytes()
+            // directly (no reversal), unlike appendGT/appendG1Compressed which reverse.
+            // We must match this: serialize_compressed → append_bytes (no reversal).
+            doryAppendGT(transcript, vmv_message.c);
+            doryAppendGT(transcript, vmv_message.d2);
+            doryAppendG1(transcript, vmv_message.e1);
+
 
             // Initialize working arrays
             const vec_len = @as(usize, 1) << @intCast(sigma);
@@ -1508,11 +1575,12 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 v1_work[i] = G1Point.identity();
             }
 
+            // v2 = v_vec * h₂ (each entry is v_vec[i] * h₂)
             const v2_work = try allocator.alloc(G2Point, vec_len);
             defer allocator.free(v2_work);
             for (0..vec_len) |i| {
                 if (i < v_vec.len) {
-                    v2_work[i] = params.g2_vec[0].scalarMul(v_vec[i]);
+                    v2_work[i] = params.h2.scalarMul(v_vec[i]);
                 } else {
                     v2_work[i] = G2Point.identity();
                 }
@@ -1562,13 +1630,13 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                     .e2_beta = e2_beta,
                 };
 
-                // Append first message to transcript
-                transcript.appendGT(d1_left);
-                transcript.appendGT(d1_right);
-                transcript.appendGT(d2_left);
-                transcript.appendGT(d2_right);
-                transcript.appendG1Compressed(e1_beta);
-                transcript.appendG2Compressed(e2_beta);
+                // Append first message to transcript (Dory format: no reversal)
+                doryAppendGT(transcript, d1_left);
+                doryAppendGT(transcript, d1_right);
+                doryAppendGT(transcript, d2_left);
+                doryAppendGT(transcript, d2_right);
+                doryAppendG1(transcript, e1_beta);
+                doryAppendG2(transcript, e2_beta);
 
                 // Get beta challenge from transcript
                 const beta = transcript.challengeScalar();
@@ -1600,13 +1668,13 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                     .e2_minus = e2_minus,
                 };
 
-                // Append second message to transcript
-                transcript.appendGT(c_plus);
-                transcript.appendGT(c_minus);
-                transcript.appendG1Compressed(e1_plus);
-                transcript.appendG1Compressed(e1_minus);
-                transcript.appendG2Compressed(e2_plus);
-                transcript.appendG2Compressed(e2_minus);
+                // Append second message to transcript (Dory format: no reversal)
+                doryAppendGT(transcript, c_plus);
+                doryAppendGT(transcript, c_minus);
+                doryAppendG1(transcript, e1_plus);
+                doryAppendG1(transcript, e1_minus);
+                doryAppendG2(transcript, e2_plus);
+                doryAppendG2(transcript, e2_minus);
 
                 // Get alpha challenge from transcript
                 const alpha = transcript.challengeScalar();
@@ -1638,15 +1706,13 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             const gamma = transcript.challengeScalar();
             const gamma_inv = gamma.inverse() orelse F.one();
 
-            // Compute final message
+            // Compute final message: E₁ = v₁ + γ·s₁·h₁, E₂ = v₂ + γ⁻¹·s₂·h₂
             const gamma_s1 = gamma.mul(s1_work[0]);
-            const h1 = G1Point.generator();
-            const scaled_h1 = msm.MSM(F, Fp).scalarMul(h1, gamma_s1).toAffine();
+            const scaled_h1 = msm.MSM(F, Fp).scalarMul(params.h1, gamma_s1).toAffine();
             const final_e1 = v1_work[0].add(scaled_h1);
 
             const gamma_inv_s2 = gamma_inv.mul(s2_work[0]);
-            const h2 = G2Point.generator();
-            const scaled_h2 = h2.scalarMul(gamma_inv_s2);
+            const scaled_h2 = params.h2.scalarMul(gamma_inv_s2);
             const final_e2 = v2_work[0].add(scaled_h2);
 
             const final_message = ScalarProductMessage{

@@ -6012,17 +6012,38 @@ pub fn Stage5BatchedProver(comptime F: type) type {
         }
 
         /// Compute immediate value from instruction, matching R1CS deriveImmediate
+        /// Compute the immediate value as a field element, matching Jolt's per-format encoding.
+        ///
+        /// CRITICAL: The encoding depends on the RISC-V format type:
+        ///   - I-type (FormatI): u64 sign-extended from 12-bit, then u64→i128 zero-extension
+        ///     → F.fromU64(sign_extended_u64). This includes 0x13, 0x03, 0x67, 0x1b, 0x73.
+        ///   - U-type (FormatU): raw upper 20 bits as u64 → F.fromU64(u32_value)
+        ///   - J-type (FormatJ): u64 sign-extended from 21-bit, then u64→i128 zero-extension
+        ///     → F.fromU64(sign_extended_u64)
+        ///   - S-type (FormatS): i64 sign-extended from 12-bit → i64 as i128 (signed)
+        ///     → fieldFromI128(signed_value)
+        ///   - B-type (FormatB): i128 sign-extended from 13-bit → signed
+        ///     → fieldFromI128(signed_value)
+        ///
+        /// The reason for the asymmetry: Jolt's FormatI/FormatJ/FormatU store imm as u64,
+        /// while FormatS stores imm as i64 and FormatB stores imm as i128. The conversion
+        /// to NormalizedOperands.imm (i128) uses `u64 as i128` (zero-extension) for the
+        /// unsigned formats, but `i64 as i128` (sign-extension) for the signed formats.
+        /// Then `F::from_i128()` is called on the result.
         fn computeImmediate(instr: u32) F {
             const opcode: u8 = @truncate(instr & 0x7f);
 
             switch (opcode) {
-                // I-type: imm[11:0] at bits [31:20], sign-extended
+                // I-type: imm[11:0] at bits [31:20], sign-extended to i64, then treat as u64
+                // Jolt: FormatI.imm is u64, NormalizedOperands.imm = u64 as i128 (zero-ext)
                 0x13, 0x03, 0x67, 0x1b, 0x73 => {
                     const imm12: u32 = instr >> 20;
                     const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12 << 20)) >> 20);
-                    return signedI64ToField(imm_signed);
+                    // Treat as unsigned u64 (same bit pattern), matching Jolt's u64 as i128
+                    return F.fromU64(@as(u64, @bitCast(imm_signed)));
                 },
                 // S-type: imm[11:5] at [31:25], imm[4:0] at [11:7], sign-extended
+                // Jolt: FormatS.imm is i64, NormalizedOperands.imm = i64 as i128 (sign-ext)
                 0x23 => {
                     const imm11_5 = (instr >> 25) & 0x7f;
                     const imm4_0 = (instr >> 7) & 0x1f;
@@ -6031,6 +6052,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     return signedI64ToField(imm_signed);
                 },
                 // B-type: imm[12|10:5] at [31:25], imm[4:1|11] at [11:7], sign-extended, *2
+                // Jolt: FormatB.imm is i128, NormalizedOperands.imm = i128 directly (signed)
                 0x63 => {
                     const imm12 = (instr >> 31) & 1;
                     const imm10_5 = (instr >> 25) & 0x3f;
@@ -6041,11 +6063,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     return signedI64ToField(imm_signed);
                 },
                 // U-type: imm[31:12] at [31:12], shifted left by 12
+                // Jolt: FormatU.imm is u64, NormalizedOperands.imm = u64 as i128 (zero-ext)
                 0x37, 0x17 => {
                     const imm_upper = instr & 0xFFFFF000;
                     return F.fromU64(imm_upper);
                 },
-                // J-type: imm[20|10:1|11|19:12] at [31:12], sign-extended, *2
+                // J-type: imm[20|10:1|11|19:12] at [31:12], sign-extended to i64, then treat as u64
+                // Jolt: FormatJ.imm is u64, NormalizedOperands.imm = u64 as i128 (zero-ext)
                 0x6f => {
                     const imm20 = (instr >> 31) & 1;
                     const imm10_1 = (instr >> 21) & 0x3ff;
@@ -6053,7 +6077,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     const imm19_12 = (instr >> 12) & 0xff;
                     const imm21: u32 = (imm20 << 20) | (imm19_12 << 12) | (imm11 << 11) | (imm10_1 << 1);
                     const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm21 << 11)) >> 11);
-                    return signedI64ToField(imm_signed);
+                    // Treat as unsigned u64 (same bit pattern), matching Jolt's u64 as i128
+                    return F.fromU64(@as(u64, @bitCast(imm_signed)));
                 },
                 else => return F.zero(),
             }

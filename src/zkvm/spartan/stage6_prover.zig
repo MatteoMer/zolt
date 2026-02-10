@@ -86,7 +86,7 @@ fn populateVirtualMULIEntry(
     const multiplier: u64 = @as(u64, 1) << shamt;
     entry.imm = @intCast(multiplier);
 
-    entry.rd = if (rd == 0) 255 else rd;
+    entry.rd = rd; // Keep rd=0 as 0, not 255 — Jolt normalizes rd=Some(0) for virtual instrs
     entry.rs1 = rs1;
     entry.rs2 = 255; // VirtualMULI is I-type: no rs2
 
@@ -142,7 +142,7 @@ fn populateVirtualSignExtendWordEntry(
     entry.address = elf_address;
     entry.imm = 0; // VirtualSignExtendWord always has imm=0
 
-    entry.rd = if (rd == 0) 255 else rd;
+    entry.rd = rd; // Keep rd=0 as 0 — Jolt normalizes rd=Some(0)
     entry.rs1 = rd; // Sign-extend reads from rd
     entry.rs2 = 255; // I-type: no rs2
 
@@ -195,11 +195,13 @@ fn populateEntryFromInstruction(entry: *BytecodeEntry, instr: u32, elf_address: 
     // We use 255 as sentinel for "not present" so that `entry.X < REGISTER_COUNT`
     // yields false, giving zero contribution in val poly.
     //
-    // rd:  sentinel for S-format (0x23), B-format (0x63), and rd==0 (x0 never written;
-    //      Zolt's register write matrix checks `rd != 0 and rd < 32`)
+    // rd:  sentinel ONLY for S-format (0x23) and B-format (0x63) which have no rd.
+    //      NOTE: rd=x0 is NOT treated as "no rd". Jolt's NormalizedOperands always
+    //      produces rd=Some(0) for instructions that have an rd field, even when rd=x0.
+    //      The eq(0, r_register) contribution must be included in Val4/Val5.
     // rs1: sentinel for U-type (LUI 0x37, AUIPC 0x17) and J-type (JAL 0x6f)
     // rs2: sentinel for I-type (0x13, 0x03, 0x67, 0x1b), U-type (0x37, 0x17), J-type (0x6f)
-    entry.rd = if (opcode == 0x23 or opcode == 0x63 or decoded.rd == 0) 255 else decoded.rd;
+    entry.rd = if (opcode == 0x23 or opcode == 0x63) 255 else decoded.rd;
     entry.rs1 = switch (opcode) {
         0x37, 0x17, 0x6f => 255, // U-type, J-type: no rs1
         else => decoded.rs1,
@@ -350,9 +352,8 @@ fn populateEntryFromInstruction(entry: *BytecodeEntry, instr: u32, elf_address: 
 /// every instruction in the program (including unexecuted ones) has correct
 /// properties, matching what the Jolt verifier computes from its bytecode array.
 ///
-/// Phase 2: Overlay trace-specific properties (termination stores) from the
-/// execution trace. Termination stores at k=0 accumulate flags from multiple
-/// virtual instructions (LUI + ADDI + SB) that overwrite the same entry.
+/// Phase 2: DISABLED for vanilla Jolt compatibility. Jolt's bytecode does
+/// not include termination store instructions.
 ///
 /// pc_map converts ELF addresses to bytecode array indices.
 pub fn buildBytecodeEntries(
@@ -363,6 +364,7 @@ pub fn buildBytecodeEntries(
     program_code_bytes: ?[]const u8,
     code_base_address: u64,
 ) ![]BytecodeEntry {
+    _ = trace; // Phase 2 (termination stores) disabled for vanilla Jolt compatibility
     const entries = try allocator.alloc(BytecodeEntry, bytecode_K);
 
     // Initialize all entries as NoOps matching Jolt's Instruction::NoOp flags:
@@ -517,39 +519,12 @@ pub fn buildBytecodeEntries(
         }
     }
 
-    // ================================================================
-    // Phase 2: Create separate entries for termination store instructions
-    // ================================================================
-    // Each termination store instruction (LUI, ADDI, SB) gets its OWN
-    // bytecode entry at a dedicated index (termination_base_pc + offset).
-    // This matches Jolt's approach where each virtual instruction in a
-    // sequence has its own bytecode entry with its own field values.
-    for (trace.steps.items) |step| {
-        if (step.is_noop) continue;
-        if (!step.is_termination_store) continue;
-
-        // Each termination instruction gets its own bytecode index
-        const k = pc_map.getTerminationPC(step.virtual_sequence_remaining);
-        if (k >= bytecode_K) continue;
-
-        // Populate this entry as a fresh entry for this single instruction
-        populateEntryFromInstruction(&entries[k], step.instruction, step.unexpanded_pc);
-
-        // All termination stores need DoNotUpdateUnexpandedPC=true because
-        // UPC=0 and NextUPC=0, and constraint 16 would require NextUPC=4 without it.
-        entries[k].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
-
-        // VirtualInstruction=true only for non-anchor instructions (vsr > 0).
-        // The anchor (vsr=0, which is SB) CANNOT have VirtualInstruction=true because:
-        //   R1CS constraint 17: if VirtualInstruction then NextPC == PC + 1
-        //   For SB (last cycle before NoOp padding): NextPC=0 ≠ PC+1
-        // In Jolt, vsr=0 always has VirtualInstruction=true because there's a next
-        // real instruction. But in Zolt's termination sequence, SB is the last real
-        // cycle, so NextPC=0 and we can't set VirtualInstruction without violating R1CS.
-        if (step.virtual_sequence_remaining > 0) {
-            entries[k].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
-        }
-    }
+    // NOTE: Phase 2 (termination store bytecode entries) is DISABLED for vanilla Jolt
+    // compatibility. Jolt's vanilla bytecode does NOT include termination store
+    // instructions — those entries remain as default-initialized NoOps (padding).
+    // The termination store sequence (LUI+ADDI+SB) is Zolt-specific and is NOT
+    // part of Jolt's static bytecode. Trace cycles that reference termination
+    // store entries will map to the default NoOp padding entries, matching Jolt.
 
     // Debug: dump first entries
     std.debug.print("\n[ZOLT BYTECODE ENTRIES] bytecode_K={}\n", .{bytecode_K});
@@ -3707,35 +3682,28 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 const entry = bytecode_entries[k];
 
                 // Stage 1: unexpanded_pc + γ₁¹·imm + Σ γ₁^(2+i)·circuit_flag_i
-                // CRITICAL: The Imm encoding must match the R1CS witness exactly.
-                // Three categories based on opcode (matching constraints.zig):
-                //   1. ADDI(funct3=0)/ADDIW(funct3=0)/JAL/JALR: F.fromU64(unsigned_u64_bitcast)
-                //      These use computeUnsignedImmediate in the R1CS witness.
-                //   2. LUI/AUIPC: F.fromU64(u32(instr & 0xFFFFF000))
-                //      These use deriveImmediate which returns the raw upper bits as u32.
-                //   3. Everything else (Load, Store, Branch, other ALU): signed field value
-                //      These use deriveImmediate which returns p-|imm| for negative.
+                // CRITICAL: The Imm encoding must match Jolt's vanilla verifier exactly.
+                // Jolt's NormalizedOperands.imm is i128, but how it gets there depends
+                // on the instruction FORMAT type:
+                //   FormatI (I-type): u64 as i128 → zero-extended (always positive)
+                //   FormatU (U-type): u64 as i128 → zero-extended (always positive)
+                //   FormatJ (J-type): u64 as i128 → zero-extended (always positive)
+                //   FormatB (B-type): i128 directly → signed
+                //   FormatS (S-type): i64 as i128 → sign-extended (signed)
+                //   Virtual (0x0B, 0x2B): u64 as i128 (from emit_i helper)
+                // Then Jolt calls from_i128(operands.imm) to get the field element.
                 const imm_field: F = blk: {
-                    const is_identity_add = switch (entry.opcode) {
-                        0x13 => entry.funct3 == 0, // ADDI
-                        0x1b => entry.funct3 == 0, // ADDIW
-                        0x6f => true, // JAL
-                        0x67 => true, // JALR
-                        else => false,
-                    };
-                    if (is_identity_add) {
-                        // Unsigned u64 bitcast of sign-extended i64 immediate
+                    const opcode_for_imm = entry.opcode;
+                    const is_signed_format = (opcode_for_imm == 0x63) or // B-type (branches)
+                        (opcode_for_imm == 0x23); // S-type (stores)
+                    if (is_signed_format) {
+                        // B-type and S-type: signed i64 → sign-extended to i128
+                        break :blk fieldFromI128(F, @as(i128, entry.imm));
+                    } else {
+                        // I-type, U-type, J-type, Virtual: u64 zero-extended
+                        // Reinterpret the i64 bit pattern as u64 (same bits)
                         break :blk F.fromU64(@as(u64, @bitCast(entry.imm)));
                     }
-                    const is_u_type = (entry.opcode == 0x37 or entry.opcode == 0x17);
-                    if (is_u_type) {
-                        // LUI/AUIPC: recover the raw u32 value (instr & 0xFFFFF000)
-                        // entry.imm is sign-extended i64 of i32(@bitCast(instr & 0xFFFFF000))
-                        // Truncating the u64 bitcast back to u32 recovers the original value.
-                        break :blk F.fromU64(@as(u32, @truncate(@as(u64, @bitCast(entry.imm)))));
-                    }
-                    // Everything else: signed field encoding
-                    break :blk fieldFromI128(F, @intCast(entry.imm));
                 };
                 var val1 = stage1_gammas[0].mul(F.fromU64(entry.address));
                 val1 = val1.add(stage1_gammas[1].mul(imm_field));
@@ -3765,7 +3733,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 // Stage 3: γ₃⁰·imm + γ₃¹·unexpanded_pc + γ₃²·L_is_rs1 + γ₃³·L_is_pc
                 //         + γ₃⁴·R_is_rs2 + γ₃⁵·R_is_imm + γ₃⁶·is_noop
                 //         + γ₃⁷·virtual_instruction + γ₃⁸·is_first_in_sequence
-                // Use same Imm encoding as R1CS witness (see Stage 1 comment above)
+                // Uses same signed Imm encoding as Stage 1 (see comment above)
                 var val3 = stage3_gammas[0].mul(imm_field);
                 val3 = val3.add(stage3_gammas[1].mul(F.fromU64(entry.address)));
                 if (entry.instruction_flags[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)]) {
@@ -3830,7 +3798,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             }
 
             // Dump first few bytecode entries for debugging
-            for (0..@min(bytecode_K, 32)) |k| {
+            for (0..@min(bytecode_K, 64)) |k| {
                 const entry = bytecode_entries[k];
                 std.debug.print("[STAGE6] entry[{}]: addr=0x{x:0>8} rd={} rs1={} rs2={} imm={} cf=[", .{k, entry.address, entry.rd, entry.rs1, entry.rs2, entry.imm});
                 for (0..13) |i| {
@@ -3887,7 +3855,11 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     if (k >= bytecode_entries.len) break;
                     const entry = bytecode_entries[k];
                     bc_addr_sum = bc_addr_sum.add(F_s_s1[k].mul(F.fromU64(entry.address)));
-                    bc_imm_sum = bc_imm_sum.add(F_s_s1[k].mul(fieldFromI128(F, @intCast(entry.imm))));
+                    const debug_imm_field: F = if (entry.opcode == 0x63 or entry.opcode == 0x23)
+                        fieldFromI128(F, @as(i128, entry.imm))
+                    else
+                        F.fromU64(@as(u64, @bitCast(entry.imm)));
+                    bc_imm_sum = bc_imm_sum.add(F_s_s1[k].mul(debug_imm_field));
                     for (0..13) |fi| {
                         if (entry.circuit_flags[fi]) {
                             bc_cf_sums[fi] = bc_cf_sums[fi].add(F_s_s1[k]);

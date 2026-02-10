@@ -1,75 +1,37 @@
 # Zolt → Jolt Verification Progress
 
 ## Current Status
-**🔧 IN PROGRESS — Goal: verify Zolt proofs against vanilla (unmodified) Jolt**
+**🔧 IN PROGRESS — Stage 6 sumcheck fails despite matching Val polynomials**
 
-The current proof passes against a modified Jolt fork. The project is NOT complete until verification works against an unmodified upstream Jolt.
+Stages 1-5 pass. Stage 6 BytecodeReadRaf+Booleanity+IncClaimReduction batched sumcheck fails: `output_claim != expected_claim`.
 
-## Goal
-Zolt-generated proofs must verify against a **vanilla Jolt verifier** with zero modifications to Jolt's code. Any incompatibility must be fixed on the Zolt side.
+### What's been fixed this session:
+1. **Val poly imm encoding**: Format-aware encoding matching Jolt conventions:
+   - I-type, J-type: unsigned u64 (zero-extended via `F.fromU64(@bitCast(imm_signed))`)
+   - S-type, B-type: signed (via `fieldFromI128`)
+   - U-type: unsigned u64
+2. **Val poly rd=0 handling**: rd=0 is NOT treated as "no rd" for I/R/U/J-type instructions
+3. **Termination store bytecode entries disabled**: Phase 2 removed for vanilla Jolt compatibility
+4. **R1CS witness imm encoding**: `computeImmediate` updated to match Val poly format-aware encoding
 
-## Resources
-- Upstream Jolt: `./jolt` (git submodule)
-- Arkworks: `./arkworks` (local copy for reference)
+### Current investigation:
+- All 320 Val polynomial values match exactly (0 diff between Zolt and Jolt)
+- Stage 6 sumcheck output_claim (from proof round polys) doesn't match expected_claim (from Val poly evaluation + other instance claims)
+- The mismatch is NOT in the Val polys — it's in the sumcheck round polynomials
 
-## Current Jolt Modifications That Must Be Eliminated
-These are changes currently in our Jolt fork that we need to remove by fixing Zolt instead:
+### Hypotheses for remaining Stage 6 failure:
+1. **Booleanity instance**: The Booleanity sumcheck might have wrong polynomials due to termination store trace cycles referencing NoOp bytecode entries
+2. **IncClaimReduction instance**: Ram/Rd increment claims might not match
+3. **Transcript/batching divergence**: The batching coefficients for the 3 instances might not match between prover and verifier
+4. **Opening claims**: The opening claims from Stages 1-5 feed into Stage 6's expected output. If these are inconsistent with the proof, Stage 6 fails.
 
-1. **Debug prints**: ~35 files with `eprintln!` behind `#[cfg(feature = "zolt-debug")]`
-2. **Test harness**: `examples/fibonacci/src/main.rs` with `--verify-zolt-proof` CLI mode
-3. **Test module**: `zolt_compat_test.rs` (behind `#[cfg(test)]`)
-4. **New instructions**: ADDIW, ADDW, SLLI - ISA extensions added for RV64I programs
-
-### Analysis Needed
-- Which of these modifications are load-bearing for verification vs. just debug/test infrastructure?
-- Can the test harness be written as a standalone Rust binary that links against vanilla Jolt as a library?
-- Do the new ISA instructions (ADDIW, ADDW, SLLI) affect verification, or only proof generation?
-
-## TODO
-- [ ] Inventory all Jolt-side changes and classify as: verification-affecting vs. debug/test-only
-- [ ] Build a standalone verifier binary that links against vanilla Jolt (no modifications)
-- [ ] Fix any Zolt proof generation issues that arise from removing Jolt modifications
-- [ ] Verify Zolt proof against vanilla Jolt — all 8 stages must pass
-- [ ] Ensure `zig build test` still passes all tests
-
-## Historical Fixes (for reference)
-These are all the fixes that were made to Zolt to get verification working against the modified Jolt fork. They remain relevant context.
-
-### Stage 1: Transcript & Challenge Alignment
-- Blake2b transcript initialization matching Jolt's format
-- Challenge scalar byte ordering (LE representation)
-- Field element serialization in arkworks-compatible format
-
-### Stage 2: Spartan/R1CS Sumcheck
-- R1CS witness generation for all instruction types
-- Proper handling of instructions without lookup tables (Load, Store, SLL, SLLI)
-
-### Stage 3: Instruction Lookup Sumcheck
-- And/Or/Xor prefix MLE shift off-by-one fix
-- RAF prefix MLE materialization (tables instead of formula-based evaluation)
-
-### Stage 4: Read-Address-Flag (RAF) Decomposition
-- UpperWord prefix formula fix (XLEN-j instead of 2*XLEN-j)
-
-### Stage 5: Bytecode Verification
-- BuildBytecodeEntries populated from static ELF bytecode
-- Termination store bytecode entry flags alignment
-- NoOp bytecode entry is_interleaved flag matching
-
-### Stage 6: Claim Reduction (Registers/RAM)
-- Real sumcheck provers for ALL instances (IncClaimReduction, HammingBooleanity)
-- Claim tracking with cached round polynomials
-- Booleanity Phase 1→Phase 2 transition using consistent eq_cycle table
-- NUM_LOOKUP_TABLES count alignment
-
-### Stage 7: Dory Commitment Verification
-- Bytecode_K computation from decoded instruction count
-
-### Stage 8: Dory Opening Proof
-- Dense polynomial padding to k_chunk*trace_length for DoryGlobals matrix layout
-- Dory transcript challenge type: full 128-bit (challengeScalarFull) not 125-bit masked
-- DoryVerifierSetup.fromSRS using correct SRS parameters (h2, max_num_vars=20)
-- Joint polynomial gamma power ordering: RamInc, RdInc, InstructionRa, BytecodeRa, RamRa
+### Key file: `computeImmediate` encoding convention
+Jolt's NormalizedOperands.imm encoding depends on instruction format:
+- FormatI.imm: u64 → `u64 as i128` (zero-extension, always positive)
+- FormatB.imm: i128 → signed
+- FormatS.imm: i64 → `i64 as i128` (sign-extension, signed)
+- FormatJ.imm: u64 → `u64 as i128` (zero-extension, always positive)
+- FormatU.imm: u64 → `u64 as i128` (zero-extension, always positive)
 
 ## Test Commands
 ```bash
@@ -79,10 +41,7 @@ cd /home/vivado/projects/zolt && zig build -Doptimize=ReleaseFast
 # Generate proof
 ./zig-out/bin/zolt prove examples/fibonacci.elf --trace-length 64 -o /tmp/zolt_proof.bin --jolt-format --export-preprocessing /tmp/zolt_preprocessing.bin --srs /tmp/jolt_dory_srs.bin
 
-# Verify with vanilla Jolt (TARGET — not yet working)
-# TODO: build standalone verifier against unmodified Jolt
-
-# Verify with modified Jolt (current — to be replaced)
+# Verify with Jolt (debug mode)
 cd /home/vivado/projects/jolt && RAYON_NUM_THREADS=1 cargo run --release --features zolt-debug --manifest-path examples/fibonacci/Cargo.toml -- --verify-zolt-proof /tmp/zolt_proof.bin --zolt-preprocessing /tmp/zolt_preprocessing.bin.ram
 
 # Run Zig tests

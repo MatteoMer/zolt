@@ -112,6 +112,7 @@ pub const JoltInstruction = struct {
         VirtualADVICE,
         VirtualSignExtendWord,
         VirtualZeroExtendWord,
+        VirtualMULI,
     };
 
     /// Instruction operands - different formats store different fields
@@ -506,6 +507,61 @@ pub const BytecodePreprocessing = struct {
                         .FormatR => |r| r.rd,
                         else => 0,
                     };
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualSignExtendWord,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = rd, .rs1 = rd, .imm = 0 } },
+                        .virtual_sequence_remaining = 0,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                },
+                .SLLI => {
+                    // SLLI rd, rs1, imm → VirtualMULI rd, rs1, (1 << imm)
+                    // Single virtual instruction (not a 2-step sequence)
+                    const shift_amount = switch (jolt_instr.operands) {
+                        .FormatI => |i| i.imm,
+                        else => 0,
+                    };
+                    const rd = switch (jolt_instr.operands) {
+                        .FormatI => |i| i.rd,
+                        else => 0,
+                    };
+                    const rs1 = switch (jolt_instr.operands) {
+                        .FormatI => |i| i.rs1,
+                        else => 0,
+                    };
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualMULI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = rd, .rs1 = rs1, .imm = @as(u64, 1) << @intCast(shift_amount) } },
+                        .virtual_sequence_remaining = null,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                },
+                .SLLIW => {
+                    // SLLIW rd, rs1, imm → VirtualMULI rd, rs1, (1 << imm) + VirtualSignExtendWord(rd, rd, 0)
+                    const shift_amount = switch (jolt_instr.operands) {
+                        .FormatI => |i| i.imm,
+                        else => 0,
+                    };
+                    const rd = switch (jolt_instr.operands) {
+                        .FormatI => |i| i.rd,
+                        else => 0,
+                    };
+                    const rs1 = switch (jolt_instr.operands) {
+                        .FormatI => |i| i.rs1,
+                        else => 0,
+                    };
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualMULI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = rd, .rs1 = rs1, .imm = @as(u64, 1) << @intCast(shift_amount) } },
+                        .virtual_sequence_remaining = 1,
+                        .is_first_in_sequence = true,
+                        .is_compressed = is_compressed,
+                    });
                     try self.bytecode.append(allocator, .{
                         .variant = .VirtualSignExtendWord,
                         .address = addr,

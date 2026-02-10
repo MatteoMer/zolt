@@ -210,7 +210,7 @@ pub fn Stage4GruenProver(comptime F: type) type {
 
                 // rs1_ra: gamma coefficient for rs1 reads
                 const reads_rs1 = switch (opcode) {
-                    0x13, 0x03, 0x67, 0x1b, 0x33, 0x3b, 0x23, 0x63, 0x0B => true,
+                    0x13, 0x03, 0x67, 0x1b, 0x33, 0x3b, 0x23, 0x63, 0x0B, 0x2B => true,
                     else => false,
                 };
                 if (reads_rs1 and rs1 < 32) {

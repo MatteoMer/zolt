@@ -444,6 +444,8 @@ fn getLookupTableIndex(opcode: u8, funct3: u3, funct7: u7) u8 {
             else 255,
             else => 255,
         },
+        0x0B => 21, // VirtualSignExtendWord → SignExtendHalfWord
+        0x2B => 0, // VirtualMULI → RangeCheck
         else => 255, // Load, Store, ECALL, FENCE - no lookup table
     };
 }

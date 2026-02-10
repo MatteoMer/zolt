@@ -838,6 +838,47 @@ pub fn LookupEntry(comptime XLEN: comptime_int) type {
                 .instruction = instruction,
             };
         }
+
+        /// Create lookup entry for VirtualMULI instruction.
+        ///
+        /// VirtualMULI is used for SLLI decomposition (SLLI → VirtualMULI) and as
+        /// the base step of SLLIW decomposition (SLLIW → VirtualMULI + VirtualSignExtendWord).
+        ///
+        /// Key properties:
+        /// - Lookup table: RangeCheck (identity)
+        /// - Lookup operands: (0, rs1 * imm)
+        /// - Circuit flags: MultiplyOperands, WriteLookupOutputToRD, VirtualInstruction (when vsr.is_some()),
+        ///   DoNotUpdateUnexpandedPC (when vsr!=0), IsFirstInSequence, IsCompressed
+        /// - Instruction flags: LeftOperandIsRs1Value, RightOperandIsImm, IsRdNotZero
+        ///
+        /// Reference: jolt-core/src/zkvm/instruction/virtual_muli.rs
+        pub fn fromVirtualMULI(
+            cycle: usize,
+            pc: u64,
+            instruction: u32,
+            rs1_val: u64,
+            imm_val: u64,
+            is_virtual: bool,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+            is_rd_not_zero: bool,
+        ) Self {
+            const VmuliLookup = lookups.VirtualMULILookup(XLEN);
+            const vmuli = VmuliLookup.init(rs1_val, imm_val, is_virtual, do_not_update_pc, is_first_in_sequence, is_compressed, is_rd_not_zero);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = VmuliLookup.lookupTable(),
+                .index = vmuli.toLookupIndex(),
+                .result = vmuli.computeResult(),
+                .left_operand = rs1_val,
+                .right_operand = imm_val,
+                .circuit_flags = vmuli.circuitFlags(),
+                .instruction_flags = vmuli.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
     };
 }
 
@@ -1089,6 +1130,39 @@ pub fn LookupTraceCollector(comptime XLEN: comptime_int) type {
                 rd != 0, // is_rd_not_zero
             );
             _ = sign_extended_result; // Result is computed by the lookup
+            try self.entries.append(self.allocator, entry);
+        }
+
+        /// Record lookup for a VirtualMULI instruction
+        /// Used for SLLI decomposition (standalone) and SLLIW base step (virtual sequence)
+        pub fn recordVirtualMULI(
+            self: *Self,
+            cycle: usize,
+            pc: u64,
+            instruction: u32,
+            rs1_val: u64,
+            imm_val: u64,
+            is_virtual: bool,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+        ) !void {
+            if (!self.enabled) return;
+
+            const rd: u8 = @truncate((instruction >> 7) & 0x1f);
+
+            const entry = Entry.fromVirtualMULI(
+                cycle,
+                pc,
+                instruction,
+                rs1_val,
+                imm_val,
+                is_virtual,
+                do_not_update_pc,
+                is_first_in_sequence,
+                is_compressed,
+                rd != 0, // is_rd_not_zero
+            );
             try self.entries.append(self.allocator, entry);
         }
 

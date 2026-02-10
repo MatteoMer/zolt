@@ -4120,6 +4120,127 @@ pub fn VirtualSignExtendWordLookup(comptime XLEN: comptime_int) type {
     };
 }
 
+/// VirtualMULI (Virtual Multiply Immediate) instruction lookup
+/// Used for SLLI decomposition: SLLI rd, rs1, shamt → VirtualMULI rd, rs1, (1 << shamt)
+/// Also used as the base step of SLLIW decomposition.
+///
+/// VirtualMULI is like MUL but with an immediate operand instead of rs2.
+/// It uses the RangeCheck table (identity) to verify the result.
+///
+/// Reference: jolt-core/src/zkvm/instruction/virtual_muli.rs
+pub fn VirtualMULILookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        /// rs1 register value
+        rs1_val: u64,
+        /// Immediate value (the multiplier, e.g., 1 << shamt for SLLI)
+        imm_val: u64,
+        /// Whether this instruction is part of a virtual sequence (vsr.is_some())
+        is_virtual: bool,
+        /// Whether this instruction should not update the unexpanded PC (vsr != 0)
+        do_not_update_pc: bool,
+        /// Whether this is the first instruction in the sequence
+        is_first_in_sequence: bool,
+        /// Whether the original instruction was compressed
+        is_compressed: bool,
+        /// Whether the rd register is not x0
+        is_rd_not_zero: bool,
+
+        pub fn init(
+            rs1_val: u64,
+            imm_val: u64,
+            is_virtual: bool,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+            is_rd_not_zero: bool,
+        ) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .imm_val = imm_val,
+                .is_virtual = is_virtual,
+                .do_not_update_pc = do_not_update_pc,
+                .is_first_in_sequence = is_first_in_sequence,
+                .is_compressed = is_compressed,
+                .is_rd_not_zero = is_rd_not_zero,
+            };
+        }
+
+        /// VirtualMULI uses RangeCheck table (identity table)
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .RangeCheck;
+        }
+
+        /// Lookup index = product (rs1 * imm), used as RangeCheck identity
+        /// In Jolt: to_lookup_operands returns (0, x as u128 * y as u64 as u128)
+        pub fn toLookupIndex(self: Self) u128 {
+            return @as(u128, self.rs1_val) * @as(u128, self.imm_val);
+        }
+
+        /// Compute the result: wrapping multiply of rs1 and imm
+        /// For XLEN=64: (rs1 as i64).wrapping_mul(imm as i64) as u64
+        pub fn computeResult(self: Self) u64 {
+            return self.rs1_val *% self.imm_val;
+        }
+
+        /// Circuit flags for VirtualMULI
+        /// Reference: virtual_muli.rs circuit_flags()
+        pub fn circuitFlags(self: Self) CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.MultiplyOperands);
+            flags.set(.WriteLookupOutputToRD);
+            if (self.is_virtual) flags.set(.VirtualInstruction);
+            if (self.do_not_update_pc) flags.set(.DoNotUpdateUnexpandedPC);
+            if (self.is_first_in_sequence) flags.set(.IsFirstInSequence);
+            if (self.is_compressed) flags.set(.IsCompressed);
+            return flags;
+        }
+
+        /// Instruction flags for VirtualMULI
+        /// Reference: virtual_muli.rs instruction_flags()
+        pub fn instructionFlags(self: Self) InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsImm);
+            if (self.is_rd_not_zero) flags.set(.IsRdNotZero);
+            return flags;
+        }
+    };
+}
+
+test "virtual muli lookup" {
+    // SLLI x2, x2, 16 → VirtualMULI x2, x2, 65536
+    const vmuli1 = VirtualMULILookup(64).init(5, 65536, false, false, false, false, true);
+    try std.testing.expectEqual(@as(u64, 5 * 65536), vmuli1.computeResult());
+    try std.testing.expectEqual(@as(u128, 5 * 65536), vmuli1.toLookupIndex());
+
+    // Test wrapping multiply (SLLI x1, x1, 63 on large value)
+    const vmuli2 = VirtualMULILookup(64).init(3, @as(u64, 1) << 63, false, false, false, false, true);
+    try std.testing.expectEqual(@as(u64, 3 *% (@as(u64, 1) << 63)), vmuli2.computeResult());
+
+    // Test circuit flags (non-virtual, standalone SLLI)
+    const flags1 = vmuli1.circuitFlags();
+    try std.testing.expect(flags1.get(.MultiplyOperands));
+    try std.testing.expect(flags1.get(.WriteLookupOutputToRD));
+    try std.testing.expect(!flags1.get(.VirtualInstruction));
+
+    // Test circuit flags (virtual, SLLIW base step)
+    const vmuli3 = VirtualMULILookup(64).init(5, 4, true, true, true, false, true);
+    const flags3 = vmuli3.circuitFlags();
+    try std.testing.expect(flags3.get(.MultiplyOperands));
+    try std.testing.expect(flags3.get(.WriteLookupOutputToRD));
+    try std.testing.expect(flags3.get(.VirtualInstruction));
+    try std.testing.expect(flags3.get(.DoNotUpdateUnexpandedPC));
+    try std.testing.expect(flags3.get(.IsFirstInSequence));
+
+    // Test instruction flags
+    const inst_flags = vmuli1.instructionFlags();
+    try std.testing.expect(inst_flags.get(.LeftOperandIsRs1Value));
+    try std.testing.expect(inst_flags.get(.RightOperandIsImm));
+    try std.testing.expect(inst_flags.get(.IsRdNotZero));
+}
+
 test "virtual sign extend word lookup" {
     // Test positive value (no sign extension needed)
     const vsew1 = VirtualSignExtendWordLookup(64).init(42, true, false, false, false, true);

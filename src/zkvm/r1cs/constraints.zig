@@ -694,6 +694,7 @@ fn hasLookupTable(opcode: u8, funct3: u3, funct7: u7) bool {
         0x6f => true, // JAL
         0x67 => true, // JALR
         0x0B => true, // VirtualSignExtendWord - uses SignExtendHalfWord table
+        0x2B => true, // VirtualMULI - uses RangeCheck table
         0x03 => false, // Load - no table
         0x23 => false, // Store - no table
         else => false,
@@ -870,6 +871,20 @@ fn computeInstructionInputs(comptime F: type, step: tracer.TraceStep) Instructio
                 .right_i128 = @as(i128, step.rs2_value),
             };
         },
+        // VirtualMULI (SLLI decomposition): left = rs1, right = multiplier (1 << shamt)
+        0x2B => {
+            // The instruction encoding stores the shift amount in the I-type imm field.
+            // We compute the multiplier (1 << shamt) from it.
+            const shamt_raw: u32 = step.instruction >> 20;
+            const shamt: u6 = @truncate(shamt_raw & 0x3F);
+            const multiplier: u64 = @as(u64, 1) << shamt;
+            return .{
+                .left = F.fromU64(step.rs1_value),
+                .right = F.fromU64(multiplier),
+                .right_is_signed = false,
+                .right_i128 = @as(i128, multiplier),
+            };
+        },
         // SYSTEM: ECALL, EBREAK (opcode 0x73)
         0x73 => {
             // No instruction inputs for system calls
@@ -1034,6 +1049,14 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             // This is safe because constraints 0 and 15 (which use Imm) only fire
             // for Load/Store and Branch respectively, never for ADDI/ADDIW/JAL/JALR.
             const imm = blk_imm: {
+                // VirtualMULI (0x2B): IMM = multiplier = 1 << shamt
+                // The instruction encoding stores the shift amount in the I-type imm field.
+                if (opcode == 0x2B) {
+                    const shamt_raw: u32 = step.instruction >> 20;
+                    const shamt: u6 = @truncate(shamt_raw & 0x3F);
+                    const multiplier: u64 = @as(u64, 1) << shamt;
+                    break :blk_imm F.fromU64(multiplier);
+                }
                 const is_identity_add = switch (opcode) {
                     0x13 => (step.instruction >> 12) & 0x7 == 0, // ADDI
                     0x1b => (step.instruction >> 12) & 0x7 == 0, // ADDIW
@@ -1063,7 +1086,7 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             //   U-type: 0x37 (LUI), 0x17 (AUIPC)
             //   J-type: 0x6f (JAL)
             const reads_rs1 = switch (opcode) {
-                0x13, 0x03, 0x67, 0x1b, 0x33, 0x3b, 0x23, 0x63, 0x0B => true,
+                0x13, 0x03, 0x67, 0x1b, 0x33, 0x3b, 0x23, 0x63, 0x0B, 0x2B => true,
                 else => false,
             };
             if (reads_rs1) {
@@ -1176,6 +1199,7 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                 0x1B => F.one(), // OP-IMM-32: left = rs1
                 0x3B => F.one(), // OP-32: left = rs1
                 0x0B => F.one(), // VirtualSignExtendWord: left = rs1 (LeftOperandIsRs1Value)
+                0x2B => F.one(), // VirtualMULI: left = rs1 (LeftOperandIsRs1Value)
                 0x73 => F.zero(), // SYSTEM (ECALL/EBREAK): no operand
                 0x0F => F.zero(), // FENCE: no operand
                 else => F.zero(),
@@ -1197,6 +1221,7 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                 0x17 => F.one(), // AUIPC: right = imm
                 0x6F => F.one(), // JAL: right = imm (offset)
                 0x1B => F.one(), // OP-IMM-32: right = imm (ADDIW, etc.)
+                0x2B => F.one(), // VirtualMULI: right = imm (multiplier, RightOperandIsImm)
                 else => F.zero(),
             };
 
@@ -1536,6 +1561,13 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                     // to_lookup_operands returns (0, rs1 + 0) = (0, rs1)
                     return F.fromU128(@as(u128, step.rs1_value));
                 },
+                0x2B => { // VirtualMULI: lookup index = rs1 * multiplier
+                    // to_lookup_operands returns (0, rs1 * imm)
+                    const shamt_raw: u32 = instr >> 20;
+                    const shamt: u6 = @truncate(shamt_raw & 0x3F);
+                    const multiplier: u64 = @as(u64, 1) << shamt;
+                    return F.fromU128(@as(u128, step.rs1_value) * @as(u128, multiplier));
+                },
                 0x3b => { // ADDW/SUBW - should no longer appear in traces after W-ext decomposition
                     if (funct3 == 0 and funct7 == 0) {
                         // ADDW: x + y
@@ -1663,6 +1695,22 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                     self.values[R1CSInputIndex.FlagVirtualInstruction.toIndex()] = F.one();
                     // DoNotUpdateUnexpandedPC: false for VirtualSignExtendWord (vsr=0, 0!=0 is false)
                     // IsFirstInSequence: false for VirtualSignExtendWord (it's the second in sequence)
+                },
+                0x2B => { // VirtualMULI: MultiplyOperands, WriteLookupOutputToRD
+                    // VirtualMULI uses MultiplyOperands with u128 lookup
+                    // Lookup operands: (0, rs1 * imm)
+                    self.values[R1CSInputIndex.FlagMultiplyOperands.toIndex()] = F.one();
+                    self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
+                    self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
+                    self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = u128_right_lookup;
+                    // VirtualInstruction: true when vsr.is_some()
+                    // For standalone SLLI (vsr=None), this is false
+                    // For SLLIW base step (vsr=Some(1)), this is true
+                    if (step.virtual_sequence_remaining > 0) {
+                        self.values[R1CSInputIndex.FlagVirtualInstruction.toIndex()] = F.one();
+                        // DoNotUpdateUnexpandedPC: true when vsr != 0
+                        self.values[R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();
+                    }
                 },
                 else => {
                     // Default: NOT Add+Sub+Mul, so use constraint 6 and 10

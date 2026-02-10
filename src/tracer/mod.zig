@@ -258,6 +258,25 @@ pub const Emulator = struct {
     /// Encoding: I-type: imm[11:0] | rs1[19:15] | funct3[14:12] | rd[11:7] | opcode[6:0]
     pub const VIRTUAL_SIGN_EXTEND_WORD_OPCODE: u7 = 0x0B;
 
+    /// Synthetic instruction encoding for VirtualMULI.
+    /// Uses RISC-V custom-1 opcode (0x2B) with funct3=0.
+    /// Encoding: I-type: imm[11:0] | rs1[19:15] | funct3[14:12] | rd[11:7] | opcode[6:0]
+    /// The imm field stores the SHIFT AMOUNT (0-63), NOT the multiplier (1 << shamt).
+    /// This ensures the value always fits in 12 bits. The R1CS witness and lookup
+    /// compute the multiplier as (1 << shamt) from this field.
+    pub const VIRTUAL_MULI_OPCODE: u7 = 0x2B;
+
+    /// Build a synthetic VirtualMULI instruction word.
+    /// shamt: shift amount (0-63) stored in the I-type immediate field.
+    /// The actual multiplier (1 << shamt) is computed by R1CS witness/lookup code.
+    fn buildVirtualMULIInstr(rd: u8, rs1: u8, shamt: u6) u32 {
+        return (@as(u32, shamt) << 20) |
+            (@as(u32, rs1) << 15) |
+            (0 << 12) | // funct3 = 0
+            (@as(u32, rd) << 7) |
+            @as(u32, VIRTUAL_MULI_OPCODE);
+    }
+
     /// Build a synthetic VirtualSignExtendWord instruction word
     fn buildVirtualSignExtendWordInstr(rd: u8, rs1: u8) u32 {
         return @as(u32, 0) | // imm = 0
@@ -267,13 +286,14 @@ pub const Emulator = struct {
             @as(u32, VIRTUAL_SIGN_EXTEND_WORD_OPCODE);
     }
 
-    const WExtType = enum { ADDIW, ADDW, SUBW, MULW };
+    const WExtType = enum { ADDIW, ADDW, SUBW, MULW, SLLIW };
 
     /// Check if an instruction is a W-extension instruction that needs decomposition
     fn isWExtension(decoded: zkvm.instruction.DecodedInstruction) ?WExtType {
         switch (decoded.opcode) {
             .OP_IMM_32 => {
                 if (decoded.funct3 == 0) return .ADDIW;
+                if (decoded.funct3 == 1) return .SLLIW;
                 return null;
             },
             .OP_32 => {
@@ -307,7 +327,18 @@ pub const Emulator = struct {
             .ADDW => (0x00 << 25) | (rs2 << 20) | (rs1 << 15) | (0b000 << 12) | (rd << 7) | 0x33, // ADD
             .SUBW => (0x20 << 25) | (rs2 << 20) | (rs1 << 15) | (0b000 << 12) | (rd << 7) | 0x33, // SUB
             .MULW => (0x01 << 25) | (rs2 << 20) | (rs1 << 15) | (0b000 << 12) | (rd << 7) | 0x33, // MUL
+            .SLLIW => blk: {
+                // SLLIW → VirtualMULI(rd, rs1, shamt)
+                // Store shift amount in imm field; multiplier = 1 << shamt
+                const shamt: u5 = @truncate(rs2); // shamt in bits [24:20]
+                break :blk buildVirtualMULIInstr(@truncate(rd), @truncate(rs1), @as(u6, shamt));
+            },
         };
+    }
+
+    /// Check if instruction is SLLI (which decomposes to a single VirtualMULI step)
+    fn isSLLI(decoded: zkvm.instruction.DecodedInstruction) bool {
+        return decoded.opcode == .OP_IMM and decoded.funct3 == 0b001;
     }
 
     pub fn step(self: *Emulator) !bool {
@@ -334,6 +365,11 @@ pub const Emulator = struct {
         if (w_ext) |w_type| {
             // W-extension decomposition: generate 2 trace steps
             return try self.stepWExtension(instruction, decoded, w_type);
+        }
+
+        // Check if this is SLLI (decomposes to single VirtualMULI)
+        if (isSLLI(decoded)) {
+            return try self.stepSLLI(instruction, decoded);
         }
 
         // Standard (non-W-extension) instruction execution
@@ -408,8 +444,83 @@ pub const Emulator = struct {
         return true;
     }
 
+    /// Execute SLLI as a single VirtualMULI trace step.
+    /// SLLI rd, rs1, shamt → VirtualMULI rd, rs1, (1 << shamt)
+    /// This is NOT a virtual sequence - it's a standalone single-step decomposition.
+    fn stepSLLI(
+        self: *Emulator,
+        _: u32, // original SLLI instruction (not used - we build VirtualMULI encoding)
+        decoded: zkvm.instruction.DecodedInstruction,
+    ) !bool {
+        const rs1_value = try self.registers.read(decoded.rs1);
+        const rs2_value = try self.registers.read(decoded.rs2);
+        const rd_pre_value = try self.registers.read(decoded.rd);
+        const pc_increment: u64 = if (self.is_compressed) 2 else 4;
+
+        // Compute shift amount and multiplier
+        const imm_u32: u32 = @bitCast(@as(i32, @truncate(decoded.imm)));
+        const shamt: u6 = @intCast(imm_u32 & 0x3F);
+        const multiplier: u64 = @as(u64, 1) << shamt;
+
+        // Compute result: rs1 << shamt = rs1 * (1 << shamt)
+        const result_val: u64 = rs1_value *% multiplier;
+
+        // Build synthetic VirtualMULI instruction encoding
+        // The imm field stores the shift amount (not the multiplier).
+        // The R1CS witness computes multiplier = 1 << shamt from this field.
+        const rd_u8: u8 = decoded.rd;
+        const rs1_u8: u8 = decoded.rs1;
+        const vmuli_instr = buildVirtualMULIInstr(rd_u8, rs1_u8, shamt);
+
+        // Record lookup trace for VirtualMULI
+        // SLLI → single VirtualMULI, NOT part of a virtual sequence
+        // virtual_sequence_remaining = None in Jolt (not Some(0))
+        try self.lookup_trace.recordVirtualMULI(
+            @intCast(self.state.cycle),
+            self.state.pc,
+            vmuli_instr,
+            rs1_value,
+            multiplier,
+            false, // is_virtual: false (standalone, vsr = None)
+            false, // do_not_update_pc: false (not in a sequence)
+            false, // is_first_in_sequence: false
+            self.is_compressed, // is_compressed
+        );
+
+        // Write result to register
+        try self.registers.write(decoded.rd, result_val);
+
+        // Record trace step (as VirtualMULI, NOT SLLI)
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle,
+            .pc = self.state.pc,
+            .unexpanded_pc = self.state.pc,
+            .instruction = vmuli_instr,
+            .rs1_value = rs1_value,
+            .rs2_value = rs2_value, // rs2 field value (not used by VirtualMULI but must be consistent)
+            .rd_pre_value = rd_pre_value,
+            .rd_value = result_val,
+            .memory_addr = null,
+            .memory_pre_value = null,
+            .memory_value = null,
+            .is_memory_write = false,
+            .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed,
+        });
+
+        // Update prev_pc for infinite loop detection
+        self.prev_pc = self.state.pc;
+
+        // Update state
+        self.state.pc = self.state.pc + pc_increment;
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        return true;
+    }
+
     /// Execute a W-extension instruction as 2 decomposed trace steps:
-    /// Step 1: Base instruction (ADDI/ADD/SUB/MUL) with full 64-bit result
+    /// Step 1: Base instruction (ADDI/ADD/SUB/MUL/VirtualMULI) with full 64-bit result
     /// Step 2: VirtualSignExtendWord - sign-extend lower 32 bits to 64 bits
     fn stepWExtension(
         self: *Emulator,
@@ -429,27 +540,54 @@ pub const Emulator = struct {
             .ADDW => rs1_value +% rs2_value,
             .SUBW => rs1_value -% rs2_value,
             .MULW => rs1_value *% rs2_value,
+            .SLLIW => blk: {
+                const imm_u32: u32 = @bitCast(@as(i32, @truncate(decoded.imm)));
+                const shamt: u6 = @intCast(imm_u32 & 0x3F);
+                const multiplier: u64 = @as(u64, 1) << shamt;
+                break :blk rs1_value *% multiplier;
+            },
         };
 
-        // Build the synthetic base instruction (ADDI/ADD/SUB/MUL encoding)
+        // Build the synthetic base instruction (ADDI/ADD/SUB/MUL/VirtualMULI encoding)
         const base_instr = buildBaseInstruction(instruction, w_type);
-        const base_decoded = zkvm.instruction.DecodedInstruction.decode(base_instr);
 
-        // Determine the right operand value for the base instruction
-        const base_rs2_value: u64 = switch (w_type) {
-            .ADDIW => @as(u64, @bitCast(@as(i64, decoded.imm))), // imm as rs2 for ADDI
-            .ADDW, .SUBW, .MULW => rs2_value,
-        };
+        if (w_type == .SLLIW) {
+            // SLLIW base step: VirtualMULI (uses recordVirtualMULI, not recordInstruction)
+            const imm_u32: u32 = @bitCast(@as(i32, @truncate(decoded.imm)));
+            const shamt: u6 = @intCast(imm_u32 & 0x3F);
+            const multiplier: u64 = @as(u64, 1) << shamt;
 
-        // Record lookup trace for base instruction
-        try self.lookup_trace.recordInstruction(
-            @intCast(self.state.cycle),
-            self.state.pc,
-            base_instr,
-            base_decoded,
-            rs1_value,
-            base_rs2_value,
-        );
+            try self.lookup_trace.recordVirtualMULI(
+                @intCast(self.state.cycle),
+                self.state.pc,
+                base_instr,
+                rs1_value,
+                multiplier,
+                true, // is_virtual: part of SLLIW virtual sequence (vsr=Some(1))
+                true, // do_not_update_pc: vsr=1, 1!=0 so true
+                true, // is_first_in_sequence: first in SLLIW decomposition
+                self.is_compressed, // is_compressed
+            );
+        } else {
+            const base_decoded = zkvm.instruction.DecodedInstruction.decode(base_instr);
+
+            // Determine the right operand value for the base instruction
+            const base_rs2_value: u64 = switch (w_type) {
+                .ADDIW => @as(u64, @bitCast(@as(i64, decoded.imm))), // imm as rs2 for ADDI
+                .ADDW, .SUBW, .MULW => rs2_value,
+                .SLLIW => unreachable, // Handled above
+            };
+
+            // Record lookup trace for base instruction
+            try self.lookup_trace.recordInstruction(
+                @intCast(self.state.cycle),
+                self.state.pc,
+                base_instr,
+                base_decoded,
+                rs1_value,
+                base_rs2_value,
+            );
+        }
 
         // Write base result to register
         try self.registers.write(decoded.rd, base_result);
@@ -462,7 +600,7 @@ pub const Emulator = struct {
             .instruction = base_instr,
             .rs1_value = rs1_value,
             .rs2_value = switch (w_type) {
-                .ADDIW => 0, // ADDI: rs2 field is not used (imm is in instruction)
+                .ADDIW, .SLLIW => 0, // I-type: rs2 field is not used (imm is in instruction)
                 .ADDW, .SUBW, .MULW => rs2_value,
             },
             .rd_pre_value = rd_pre_value,

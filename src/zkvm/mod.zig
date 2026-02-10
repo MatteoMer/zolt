@@ -199,18 +199,22 @@ fn computeBytecodeCodeSize(program_bytecode: []const u8) usize {
             const funct3: u3 = @truncate((instr_word >> 12) & 0x7);
             const funct7: u7 = @truncate((instr_word >> 25) & 0x7F);
 
-            const is_w_ext = switch (opcode) {
-                0x1b => funct3 == 0, // ADDIW
+            const is_w_ext_2 = switch (opcode) {
+                0x1b => switch (funct3) {
+                    0 => true, // ADDIW
+                    1 => true, // SLLIW → VirtualMULI + VirtualSignExtendWord (2 entries)
+                    else => false,
+                },
                 0x3b => (funct3 == 0 and funct7 == 0x00) or // ADDW
                     (funct3 == 0 and funct7 == 0x20) or // SUBW
                     (funct3 == 0 and funct7 == 0x01), // MULW
                 else => false,
             };
 
-            if (is_w_ext) {
-                num_entries += 2; // Base instruction + VirtualSignExtendWord
+            if (is_w_ext_2) {
+                num_entries += 2; // Base instruction + virtual step
             } else {
-                num_entries += 1;
+                num_entries += 1; // SLLI → VirtualMULI is still 1 entry
             }
         } else {
             break;

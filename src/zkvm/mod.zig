@@ -1018,10 +1018,16 @@ pub fn JoltProver(comptime F: type) type {
             @memcpy(result.register_final_evals, result.register_evals);
 
             // Calculate OneHot parameters using Jolt's formula: d = ceil(log_k / log_k_chunk)
+            // CRITICAL: Must use ram_K and bytecode_K (from proof config), NOT memory_poly_size/bytecode_poly_size.
+            // The Jolt verifier computes ram_d = log2(proof.ram_K).div_ceil(log_k_chunk)
+            // and bytecode_d = log2(proof.bytecode_K).div_ceil(log_k_chunk).
+            // Using memory_poly_size (trace-dependent) gives wrong d values since ram_K = 2^16 >> trace size.
             const log_k_chunk: usize = 4; // Must match convert_config below
             const LOG_K_INSTRUCTION: usize = 128; // XLEN * 2 = 64 * 2
-            const log_bytecode_k = if (bytecode_poly_size <= 1) 0 else std.math.log2_int(usize, bytecode_poly_size);
-            const log_ram_k = if (memory_poly_size <= 1) 0 else std.math.log2_int(usize, memory_poly_size);
+            // Compute bytecode_K early so we can use it for bytecode_d
+            const bytecode_K_for_onehot = computeBytecodeCodeSize(program_bytecode);
+            const log_bytecode_k: usize = if (bytecode_K_for_onehot <= 1) 0 else std.math.log2_int(usize, bytecode_K_for_onehot);
+            const log_ram_k: usize = @intCast(stage_proofs.log_k); // ram_K = 2^log_k
 
             const instruction_d = (LOG_K_INSTRUCTION + log_k_chunk - 1) / log_k_chunk; // ceil division
             const bytecode_d = if (log_bytecode_k == 0) 1 else (log_bytecode_k + log_k_chunk - 1) / log_k_chunk;
@@ -1032,17 +1038,19 @@ pub fn JoltProver(comptime F: type) type {
 
             // Build commitment polynomials and compute Dory commitments
             // Order: RdInc, RamInc, InstructionRa[0..instruction_d-1], RamRa[0..ram_d-1], BytecodeRa[0..bytecode_d-1]
+            // IMPORTANT: All committed polynomials must use trace_length as their size,
+            // matching Jolt's padded_trace_len. Each has one entry per cycle.
             const GT = Dory.GT;
             var all_commitments: std.ArrayListUnmanaged(GT) = .{};
             defer all_commitments.deinit(self.allocator);
 
             // RdInc: register destination increment polynomial
-            const rd_inc_poly = try self.buildRdIncPolynomial(&emulator.trace, reg_poly_size);
+            const rd_inc_poly = try self.buildRdIncPolynomial(&emulator.trace, trace_length);
             defer self.allocator.free(rd_inc_poly);
             try all_commitments.append(self.allocator, DoryScheme.commit(&dory_srs, rd_inc_poly));
 
             // RamInc: RAM increment polynomial
-            const ram_inc_poly = try self.buildRamIncPolynomial(&emulator.trace, memory_poly_size);
+            const ram_inc_poly = try self.buildRamIncPolynomial(&emulator.trace, trace_length);
             defer self.allocator.free(ram_inc_poly);
             try all_commitments.append(self.allocator, DoryScheme.commit(&dory_srs, ram_inc_poly));
 
@@ -1051,7 +1059,7 @@ pub fn JoltProver(comptime F: type) type {
             while (idx < instruction_d) : (idx += 1) {
                 // Compute shift for this chunk: log_k_chunk * (instruction_d - 1 - idx)
                 const shift = log_k_chunk * (instruction_d - 1 - idx);
-                const instruction_ra_poly = try self.buildInstructionRaPolynomial(&emulator.lookup_trace, reg_poly_size, log_k_chunk, shift);
+                const instruction_ra_poly = try self.buildInstructionRaPolynomial(&emulator.lookup_trace, trace_length, log_k_chunk, shift);
                 defer self.allocator.free(instruction_ra_poly);
                 try all_commitments.append(self.allocator, DoryScheme.commit(&dory_srs, instruction_ra_poly));
             }
@@ -1061,7 +1069,7 @@ pub fn JoltProver(comptime F: type) type {
             while (idx < ram_d) : (idx += 1) {
                 // Compute shift for this chunk: log_k_chunk * (ram_d - 1 - idx)
                 const shift = log_k_chunk * (ram_d - 1 - idx);
-                const ram_ra_poly = try self.buildRamRaPolynomial(&emulator.trace, memory_poly_size, log_k_chunk, shift);
+                const ram_ra_poly = try self.buildRamRaPolynomial(&emulator.trace, trace_length, log_k_chunk, shift);
                 defer self.allocator.free(ram_ra_poly);
                 try all_commitments.append(self.allocator, DoryScheme.commit(&dory_srs, ram_ra_poly));
             }
@@ -1075,7 +1083,7 @@ pub fn JoltProver(comptime F: type) type {
             while (idx < bytecode_d) : (idx += 1) {
                 // Compute shift for this chunk: log_k_chunk * (bytecode_d - 1 - idx)
                 const shift = log_k_chunk * (bytecode_d - 1 - idx);
-                const bytecode_ra_poly = try self.buildBytecodeRaPolynomial(&emulator.trace, bytecode_poly_size, log_k_chunk, shift, &bytecode_prep_for_ra.pc_map);
+                const bytecode_ra_poly = try self.buildBytecodeRaPolynomial(&emulator.trace, trace_length, log_k_chunk, shift, &bytecode_prep_for_ra.pc_map);
                 defer self.allocator.free(bytecode_ra_poly);
                 try all_commitments.append(self.allocator, DoryScheme.commit(&dory_srs, bytecode_ra_poly));
             }

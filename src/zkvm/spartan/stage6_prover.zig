@@ -1451,13 +1451,51 @@ fn BooleanityProver(comptime F: type) type {
                     const is_noop = (step.instruction == 0 or step.instruction == 0x00000013);
 
                     if (!is_noop) {
-                        const is_identity = (opcode_7 == 0x37 or opcode_7 == 0x17 or
-                            opcode_7 == 0x6f or opcode_7 == 0x67 or
-                            (opcode_7 == 0x13 and funct3_3 == 0) or
-                            (opcode_7 == 0x1b and funct3_3 == 0));
+                        // Identity path: instructions where lookup_idx = direct computation result
+                        // Must match Stage 7 (proof_converter.zig) and Jolt's AddOperands/SubtractOperands/MultiplyOperands flags
+                        const is_identity: bool = switch (opcode_7) {
+                            0x33 => (funct3_3 == 0 and (funct7_7 == 0 or funct7_7 == 0x20)) or
+                                (funct7_7 == 0x01 and (funct3_3 == 0 or funct3_3 == 3)),
+                            0x3b => (funct3_3 == 0 and (funct7_7 == 0 or funct7_7 == 0x20)),
+                            0x13 => (funct3_3 == 0),
+                            0x1b => (funct3_3 == 0),
+                            0x37 => true,
+                            0x17 => true,
+                            0x6f => true,
+                            0x67 => true,
+                            else => false,
+                        };
 
                         if (is_identity) {
                             lookup_idx = switch (opcode_7) {
+                                // ADD: rs1 + rs2 (u128)
+                                // SUB: rs1 + (2^64 - rs2) (u128)
+                                // MUL/MULHU: rs1 * rs2 (u128)
+                                0x33 => blk128: {
+                                    if (funct3_3 == 0 and funct7_7 == 0) {
+                                        break :blk128 @as(u128, step.rs1_value) + @as(u128, step.rs2_value);
+                                    }
+                                    if (funct3_3 == 0 and funct7_7 == 0x20) {
+                                        break :blk128 @as(u128, step.rs1_value) + (@as(u128, 1) << 64) - @as(u128, step.rs2_value);
+                                    }
+                                    if (funct7_7 == 0x01 and funct3_3 == 0) {
+                                        break :blk128 @as(u128, step.rs1_value) * @as(u128, step.rs2_value);
+                                    }
+                                    if (funct7_7 == 0x01 and funct3_3 == 3) {
+                                        break :blk128 @as(u128, step.rs1_value) * @as(u128, step.rs2_value);
+                                    }
+                                    break :blk128 0;
+                                },
+                                // ADDW/SUBW
+                                0x3b => blk128: {
+                                    if (funct3_3 == 0 and funct7_7 == 0) {
+                                        break :blk128 @as(u128, step.rs1_value) + @as(u128, step.rs2_value);
+                                    }
+                                    if (funct3_3 == 0 and funct7_7 == 0x20) {
+                                        break :blk128 @as(u128, step.rs1_value) + (@as(u128, 1) << 64) - @as(u128, step.rs2_value);
+                                    }
+                                    break :blk128 0;
+                                },
                                 0x13, 0x1b => blk128: {
                                     const imm12_raw: u32 = @truncate(@as(u32, step.instruction) >> 20);
                                     const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
@@ -3199,13 +3237,46 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         const is_noop = (step.instruction == 0 or step.instruction == 0x00000013);
 
                         if (!is_noop) {
-                            const is_identity = (opcode_7 == 0x37 or opcode_7 == 0x17 or
-                                opcode_7 == 0x6f or opcode_7 == 0x67 or
-                                (opcode_7 == 0x13 and funct3_3 == 0) or
-                                (opcode_7 == 0x1b and funct3_3 == 0));
+                            // Identity path: must match transitionToPhase2 and Stage 7
+                            const is_identity: bool = switch (opcode_7) {
+                                0x33 => (funct3_3 == 0 and (funct7_7 == 0 or funct7_7 == 0x20)) or
+                                    (funct7_7 == 0x01 and (funct3_3 == 0 or funct3_3 == 3)),
+                                0x3b => (funct3_3 == 0 and (funct7_7 == 0 or funct7_7 == 0x20)),
+                                0x13 => (funct3_3 == 0),
+                                0x1b => (funct3_3 == 0),
+                                0x37 => true,
+                                0x17 => true,
+                                0x6f => true,
+                                0x67 => true,
+                                else => false,
+                            };
 
                             if (is_identity) {
                                 lookup_idx = switch (opcode_7) {
+                                    0x33 => blk128: {
+                                        if (funct3_3 == 0 and funct7_7 == 0) {
+                                            break :blk128 @as(u128, step.rs1_value) + @as(u128, step.rs2_value);
+                                        }
+                                        if (funct3_3 == 0 and funct7_7 == 0x20) {
+                                            break :blk128 @as(u128, step.rs1_value) + (@as(u128, 1) << 64) - @as(u128, step.rs2_value);
+                                        }
+                                        if (funct7_7 == 0x01 and funct3_3 == 0) {
+                                            break :blk128 @as(u128, step.rs1_value) * @as(u128, step.rs2_value);
+                                        }
+                                        if (funct7_7 == 0x01 and funct3_3 == 3) {
+                                            break :blk128 @as(u128, step.rs1_value) * @as(u128, step.rs2_value);
+                                        }
+                                        break :blk128 0;
+                                    },
+                                    0x3b => blk128: {
+                                        if (funct3_3 == 0 and funct7_7 == 0) {
+                                            break :blk128 @as(u128, step.rs1_value) + @as(u128, step.rs2_value);
+                                        }
+                                        if (funct3_3 == 0 and funct7_7 == 0x20) {
+                                            break :blk128 @as(u128, step.rs1_value) + (@as(u128, 1) << 64) - @as(u128, step.rs2_value);
+                                        }
+                                        break :blk128 0;
+                                    },
                                     0x13, 0x1b => blk128: {
                                         const imm12_raw: u32 = @truncate(@as(u32, step.instruction) >> 20);
                                         const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);

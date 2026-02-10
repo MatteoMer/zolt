@@ -171,22 +171,47 @@ fn buildBytecodeWords(
 /// Jolt decodes instructions (4 bytes each, or 2 for compressed RVC), prepends a NoOp,
 /// then pads to next power of 2 with minimum 2.
 /// This value is used as bytecode_K in the proof and must match Jolt's preprocessing.
+/// Must account for W-extension decomposition: each W-ext instruction becomes 2 bytecode entries.
 fn computeBytecodeCodeSize(program_bytecode: []const u8) usize {
-    // Count decoded instructions by iterating byte stream
-    var num_instructions: usize = 0;
+    const zkvm_instruction = @import("instruction/mod.zig");
+
+    // Count bytecode entries, accounting for W-extension decomposition
+    var num_entries: usize = 0;
     var offset: usize = 0;
     while (offset < program_bytecode.len) {
         // Check if compressed (RVC): lowest 2 bits != 0b11
         if (offset + 2 <= program_bytecode.len) {
             const first_halfword = std.mem.readInt(u16, program_bytecode[offset..][0..2], .little);
             const is_compressed = (first_halfword & 0x3) != 0x3;
+
+            var instr_word: u32 = undefined;
             if (is_compressed) {
+                instr_word = zkvm_instruction.uncompressInstruction(first_halfword, .Bit64);
                 offset += 2;
             } else {
                 if (offset + 4 > program_bytecode.len) break;
+                instr_word = std.mem.readInt(u32, program_bytecode[offset..][0..4], .little);
                 offset += 4;
             }
-            num_instructions += 1;
+
+            // Check if this is a W-extension instruction that gets decomposed into 2 entries
+            const opcode: u7 = @truncate(instr_word & 0x7F);
+            const funct3: u3 = @truncate((instr_word >> 12) & 0x7);
+            const funct7: u7 = @truncate((instr_word >> 25) & 0x7F);
+
+            const is_w_ext = switch (opcode) {
+                0x1b => funct3 == 0, // ADDIW
+                0x3b => (funct3 == 0 and funct7 == 0x00) or // ADDW
+                    (funct3 == 0 and funct7 == 0x20) or // SUBW
+                    (funct3 == 0 and funct7 == 0x01), // MULW
+                else => false,
+            };
+
+            if (is_w_ext) {
+                num_entries += 2; // Base instruction + VirtualSignExtendWord
+            } else {
+                num_entries += 1;
+            }
         } else {
             break;
         }
@@ -194,7 +219,7 @@ fn computeBytecodeCodeSize(program_bytecode: []const u8) usize {
 
     // +1 for prepended NoOp (Jolt always prepends one)
     // +3 for termination store virtual sequence (LUI, ADDI, SB) at the end
-    const total = num_instructions + 1 + 3;
+    const total = num_entries + 1 + 3;
 
     // Pad to next power of 2, minimum 2
     if (total < 2) return 2;

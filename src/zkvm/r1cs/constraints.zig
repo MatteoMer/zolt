@@ -1063,7 +1063,7 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             //   U-type: 0x37 (LUI), 0x17 (AUIPC)
             //   J-type: 0x6f (JAL)
             const reads_rs1 = switch (opcode) {
-                0x13, 0x03, 0x67, 0x1b, 0x33, 0x3b, 0x23, 0x63 => true,
+                0x13, 0x03, 0x67, 0x1b, 0x33, 0x3b, 0x23, 0x63, 0x0B => true,
                 else => false,
             };
             if (reads_rs1) {
@@ -1175,6 +1175,7 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                 0x6F => F.zero(), // JAL: left = PC
                 0x1B => F.one(), // OP-IMM-32: left = rs1
                 0x3B => F.one(), // OP-32: left = rs1
+                0x0B => F.one(), // VirtualSignExtendWord: left = rs1 (LeftOperandIsRs1Value)
                 0x73 => F.zero(), // SYSTEM (ECALL/EBREAK): no operand
                 0x0F => F.zero(), // FENCE: no operand
                 else => F.zero(),

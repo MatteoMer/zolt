@@ -480,6 +480,14 @@ pub fn Stage6Result(comptime F: type) type {
         ram_inc_claim: F,
         rd_inc_claim: F,
 
+        /// Stage 6 configuration for Stage 7 opening point extraction
+        bytecode_log_k: usize,
+        log_k_chunk: usize,
+        n_cycle_vars: usize,
+        bytecode_d: usize,
+        ram_d: usize,
+        instruction_d: usize,
+
         allocator: Allocator,
 
         pub fn deinit(self: *Self) void {
@@ -925,6 +933,768 @@ fn RamRaVirtualProver(comptime F: type) type {
             var claims = try allocator.alloc(F, self.d);
             for (0..self.d) |i| {
                 claims[i] = self.ra_bound[i][0];
+            }
+            return claims;
+        }
+    };
+}
+
+// =============================================================================
+// Booleanity Sumcheck Instance (Instance 2) - REAL prover
+// =============================================================================
+// Proves: 0 = Σ_{k,j} eq(r_addr, k) · eq(r_cycle, j) · Σ_i γ^{2i} · (ra_i(k,j)² - ra_i(k,j))
+//
+// Phase 1: log_k_chunk address rounds (degree 3)
+//   Uses G tables (full size K, never halved), expanding table F, and split-eq B.
+//   At round m: G stays full, F has size 2^m, B tracks eq(r_addr_fixed, ...).
+//   p(X_m) = l(X) * q(X) where l = eq linear part, q = Σ γ^{2i} * G*F*(G*F-1)
+//
+// Phase 2: n_cycle_vars cycle rounds (degree 3)
+//   Uses H tables (initialized from F at transition, halved each round) and eq_cycle D.
+//   H[i][j] = eq(r_addr_bound, chunk_i(j)), scaled by eq_r_r.
+//
+// r_addr and r_cycle are FIXED reference points from Stage 5 InstructionReadRaf.
+// G_i[k] = Σ_j eq(r_cycle_fixed, j) * [chunk_i(j) == k]  (pushforward)
+fn BooleanityProver(comptime F: type) type {
+    return struct {
+        const Self = @This();
+
+        /// G_i tables (pushforward): G_i[k] = Σ_j eq(r_cycle, j) * [chunk_i(j) == k]
+        /// Stays at FULL size K throughout Phase 1 (never halved).
+        G: [][]F,
+        /// Expanding table F: F[k] = eq(r_bound_so_far, k). Starts size 1, doubles each round.
+        F_table: []F,
+        /// Current size of F_table
+        F_size: usize,
+        /// r_address (LE, LowToHigh order) - fixed reference point
+        r_address_le: []F,
+        /// B_scalar: accumulated eq(r_addr_fixed[bound_vars], r_challenges[bound_vars])
+        B_scalar: F,
+        /// eq(r_cycle, j) table for Phase 2 - halves each round
+        eq_cycle: []F,
+        /// γ^{2i} powers for batching
+        gamma_powers_sq: []F,
+        /// Number of RA polynomials
+        N: usize,
+        /// K = 2^log_k_chunk (address table size)
+        K: usize,
+        /// log_k_chunk (address rounds)
+        log_k_chunk: usize,
+        /// n_cycle_vars (cycle rounds)
+        n_cycle_vars: usize,
+        /// Current round number (0-indexed)
+        round: usize,
+        /// eq(r_addr_fixed, r_addr_bound) - set at Phase 1→2 transition
+        eq_r_r: F,
+        /// H tables for Phase 2: H[i][j] = eq(r_addr_bound, chunk_i(j))
+        /// Initialized at Phase 1→2 transition. Halved each Phase 2 round.
+        H: ?[][]F,
+        /// Current table length for Phase 2 (T, then T/2, etc.)
+        phase2_len: usize,
+        /// Trace reference for building H tables at transition
+        trace: *const ExecutionTrace,
+        /// Parameters needed for H table construction
+        instruction_d: usize,
+        bytecode_d: usize,
+        ram_d: usize,
+        memory_layout: *const jolt_device.MemoryLayout,
+        pc_map: *const BytecodePCMapper,
+        allocator: std.mem.Allocator,
+
+        pub fn init(
+            allocator: std.mem.Allocator,
+            G_tables: [][]F,
+            r_addr_le: []F,
+            eq_cycle_table: []F,
+            gamma_sq: []F,
+            N_val: usize,
+            log_k: usize,
+            n_cycle: usize,
+            trace: *const ExecutionTrace,
+            instr_d: usize,
+            bc_d: usize,
+            ram_d_val: usize,
+            mem_layout: *const jolt_device.MemoryLayout,
+            pc_mapper: *const BytecodePCMapper,
+        ) !Self {
+            const K_val = @as(usize, 1) << @intCast(log_k);
+            // Initialize expanding table F with F[0] = 1
+            const f_table = try allocator.alloc(F, K_val);
+            @memset(f_table, F.zero());
+            f_table[0] = F.one();
+
+            // Reverse r_addr_le to match Jolt's binding order (MSB first).
+            // Jolt's GruenSplitEqPolynomial binds variables from high index to low:
+            //   round 0 binds w[n-1] (MSB), round 1 binds w[n-2], ..., round n-1 binds w[0] (LSB).
+            // The G table inner loop uses bit m of k at round m, paired with the
+            // eq factor from w[n-1-m]. By reversing, r_addr[m] = w[n-1-m].
+            // Debug: print BEFORE reversal
+            {
+                for (0..log_k) |dbg_i| {
+                    const dbg_b = r_addr_le[dbg_i].toBytesBE();
+                    std.debug.print("[BOOL_INIT] r_addr_BEFORE[{}] LE=[{x:0>2}{x:0>2}{x:0>2}{x:0>2}]\n", .{
+                        dbg_i, dbg_b[31], dbg_b[30], dbg_b[29], dbg_b[28],
+                    });
+                }
+            }
+
+            std.mem.reverse(F, r_addr_le);
+
+            // Debug: print AFTER reversal
+            {
+                for (0..log_k) |dbg_i| {
+                    const dbg_b = r_addr_le[dbg_i].toBytesBE();
+                    std.debug.print("[BOOL_INIT] r_addr_AFTER[{}] LE=[{x:0>2}{x:0>2}{x:0>2}{x:0>2}]\n", .{
+                        dbg_i, dbg_b[31], dbg_b[30], dbg_b[29], dbg_b[28],
+                    });
+                }
+            }
+
+            return Self{
+                .G = G_tables,
+                .F_table = f_table,
+                .F_size = 1,
+                .r_address_le = r_addr_le,
+                .B_scalar = F.one(),
+                .eq_cycle = eq_cycle_table,
+                .gamma_powers_sq = gamma_sq,
+                .N = N_val,
+                .K = K_val,
+                .log_k_chunk = log_k,
+                .n_cycle_vars = n_cycle,
+                .round = 0,
+                .eq_r_r = F.zero(),
+                .H = null,
+                .phase2_len = 0,
+                .trace = trace,
+                .instruction_d = instr_d,
+                .bytecode_d = bc_d,
+                .ram_d = ram_d_val,
+                .memory_layout = mem_layout,
+                .pc_map = pc_mapper,
+                .allocator = allocator,
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            for (self.G) |g| self.allocator.free(g);
+            self.allocator.free(self.G);
+            self.allocator.free(self.F_table);
+            self.allocator.free(self.r_address_le);
+            self.allocator.free(self.eq_cycle);
+            self.allocator.free(self.gamma_powers_sq);
+            if (self.H) |ht| {
+                for (ht) |h| self.allocator.free(h);
+                self.allocator.free(ht);
+            }
+        }
+
+        /// Get the opening claims from the final H state after all sumcheck rounds.
+        /// H[i][0] gives ra_i(ρ_addr, ρ_cycle) after all bindings.
+        pub fn getBooleanityClaims(self: *const Self, allocator: std.mem.Allocator) ![]F {
+            const claims = try allocator.alloc(F, self.N);
+            std.debug.print("[BOOL_CLAIMS] phase2_len={}, round={}, N={}\n", .{ self.phase2_len, self.round, self.N });
+            if (self.H) |ht| {
+                var all_same_claims = true;
+                for (0..self.N) |i| {
+                    claims[i] = ht[i][0];
+                    if (i < 5 or i >= self.N - 5 or (i >= 28 and i < 34)) {
+                        const hbe = ht[i][0].toBytesBE();
+                        std.debug.print("[BOOL_CLAIMS] H[{}][0]_LE=[{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}]\n", .{
+                            i, hbe[31], hbe[30], hbe[29], hbe[28], hbe[27], hbe[26], hbe[25], hbe[24],
+                        });
+                    }
+                    if (i > 0 and !claims[i].eql(claims[0])) all_same_claims = false;
+                }
+                std.debug.print("[BOOL_CLAIMS] all_same={}\n", .{@intFromBool(all_same_claims)});
+            } else {
+                @memset(claims, F.zero());
+            }
+            return claims;
+        }
+
+        /// Compute round polynomial evaluations: [s(0), s(1), s(2), s(3)]
+        /// Returns 4 evaluation points (NOT [s(0), s(1), s(2), p_inf]).
+        /// Phase 1 uses gruen_poly_deg_3 approach (derive Q(1) from previous_claim).
+        pub fn computeRoundPoly(self: *Self, allocator: std.mem.Allocator, claim: F) ![]F {
+            const evals = try allocator.alloc(F, 4);
+            @memset(evals, F.zero());
+
+            if (self.round < self.log_k_chunk) {
+                self.computePhase1Poly(evals, claim);
+            } else {
+                self.computePhase2Poly(evals, claim);
+            }
+
+            return evals;
+        }
+
+        fn computePhase1Poly(self: *Self, evals: []F, previous_claim: F) void {
+            // Gruen poly deg 3 approach (matching Jolt's gruen_poly_deg_3):
+            //
+            // Compute c = Q(0) (constant of quadratic Q) and e (X² coeff of Q).
+            // Derive Q(1) from previous_claim to guarantee s(0)+s(1) = claim.
+            // Extrapolate Q(2), compute s(2) and p_inf.
+            // Return [s(0), s(1), s(2), p_inf] (Toom-Cook format).
+
+            const m = self.round;
+            const f_mask = if (m == 0) 0 else (@as(usize, 1) << @intCast(m)) - 1;
+            const upper_bits = self.log_k_chunk - m - 1;
+
+            // Build eq_upper table for the head (unbound, non-summed) address variables.
+            // In Jolt's LowToHigh convention, the unbound variables at round m are
+            // w[0..n-m-1] in LE order. The head = w[0..n-m-2], Gruen = w[n-m-1].
+            // After reversal, r_address_le[i] = w[n-1-i], so:
+            //   w[0] = r_address_le[n-1], w[1] = r_address_le[n-2], ..., w[n-m-2] = r_address_le[m+1]
+            // We process from w[0] (MSB of eq_upper index) to w[n-m-2] (LSB),
+            // i.e., from r_address_le[n-1] down to r_address_le[m+1].
+            var eq_upper: [16]F = undefined;
+            if (upper_bits == 0) {
+                eq_upper[0] = F.one();
+            } else {
+                eq_upper[0] = F.one();
+                var eq_upper_len: usize = 1;
+                // Process in DESCENDING order: r_address_le[log_k-1] down to r_address_le[m+1]
+                var bit: usize = self.log_k_chunk - 1;
+                while (bit >= m + 1) : (bit -= 1) {
+                    const w = self.r_address_le[bit];
+                    const one_minus_w = F.one().sub(w);
+                    var idx: usize = eq_upper_len;
+                    while (idx > 0) {
+                        idx -= 1;
+                        eq_upper[2 * idx + 1] = eq_upper[idx].mul(w);
+                        eq_upper[2 * idx] = eq_upper[idx].mul(one_minus_w);
+                    }
+                    eq_upper_len *= 2;
+                    if (bit == 0) break;  // prevent underflow on usize
+                }
+            }
+
+            // Inner loop: compute c (=Q(0), constant of Q) and e (X² coeff of Q)
+            // c = Σ_{k:k_m=0} eu * Σ_i γ^{2i} * G*F*(F-1)
+            // e = Σ_{all k} eu * Σ_i γ^{2i} * G*F²
+            var c = F.zero();
+            var e = F.zero();
+
+            for (0..self.K) |k| {
+                const k_m = (k >> @intCast(m)) & 1;
+                const k_bound = k & f_mask;
+                const k_upper = k >> @intCast(m + 1);
+                const f_k = if (m == 0) F.one() else self.F_table[k_bound];
+                const eu = eq_upper[k_upper];
+                const f_sq = f_k.mul(f_k);
+
+                var gamma_G_sum = F.zero();
+                for (0..self.N) |i| {
+                    gamma_G_sum = gamma_G_sum.add(self.gamma_powers_sq[i].mul(self.G[i][k]));
+                }
+
+                // e contribution (all k): eu * Σ_i γ^{2i} * G * F²
+                e = e.add(eu.mul(gamma_G_sum).mul(f_sq));
+
+                // c contribution (k_m=0 only): eu * Σ_i γ^{2i} * G*F*(F-1)
+                if (k_m == 0) {
+                    const G_times_F = gamma_G_sum.mul(f_k);
+                    c = c.add(eu.mul(G_times_F.mul(f_k).sub(G_times_F)));
+                }
+            }
+
+            // Linear eq evaluations: l(X) = eq_0 + b*X where b = eq_slope
+            const w_m = self.r_address_le[m];
+            const eq_eval_1 = self.B_scalar.mul(w_m);
+            const eq_eval_0 = self.B_scalar.sub(eq_eval_1);
+            const eq_slope = eq_eval_1.sub(eq_eval_0);
+            const eq_eval_2 = eq_eval_1.add(eq_slope);
+
+            // Derive Q(1) from previous_claim (Jolt's gruen_poly_deg_3 approach):
+            // s(0) = eq_eval_0 * Q(0) = eq_eval_0 * c
+            // s(1) = previous_claim - s(0)
+            // Q(1) = s(1) / eq_eval_1
+            const s0 = eq_eval_0.mul(c);
+            const s1 = previous_claim.sub(s0);
+            const q1 = if (eq_eval_1.eql(F.zero())) F.zero() else s1.mul(eq_eval_1.inverse().?);
+
+            // Extrapolate: Q(2) = 2*Q(1) - Q(0) + 2*e
+            const e_times_2 = e.add(e);
+            const q2 = q1.add(q1).sub(c).add(e_times_2);
+
+            // p_inf = X³ coefficient of s(X) = l(X)*Q(X) = eq_slope * e
+            const p_inf = eq_slope.mul(e);
+
+            // Return [s(0), s(1), s(2), p_inf]
+            evals[0] = s0;
+            evals[1] = s1;
+            evals[2] = eq_eval_2.mul(q2);
+            evals[3] = p_inf;
+
+            // Debug: brute force check
+            if (true) {
+                var bf_Q0 = F.zero();
+                var bf_Q1 = F.zero();
+                for (0..self.K) |k| {
+                    const k_m_bf = (k >> @intCast(m)) & 1;
+                    const k_bound_bf = k & f_mask;
+                    const k_upper_bf = k >> @intCast(m + 1);
+                    const f_k_bf = if (m == 0) F.one() else self.F_table[k_bound_bf];
+                    const eu_bf = eq_upper[k_upper_bf];
+                    var gsum_bf = F.zero();
+                    for (0..self.N) |i| {
+                        gsum_bf = gsum_bf.add(self.gamma_powers_sq[i].mul(self.G[i][k]));
+                    }
+                    const qval_bf = eu_bf.mul(gsum_bf.mul(f_k_bf)).mul(f_k_bf.sub(F.one()));
+                    if (k_m_bf == 0) { bf_Q0 = bf_Q0.add(qval_bf); }
+                    else { bf_Q1 = bf_Q1.add(qval_bf); }
+                }
+                const bf_s0 = eq_eval_0.mul(bf_Q0);
+                const bf_s1 = eq_eval_1.mul(bf_Q1);
+                const bf_sum = bf_s0.add(bf_s1);
+                const c_ok: u8 = if (c.eql(bf_Q0)) 1 else 0;
+                const sum_ok: u8 = if (bf_sum.eql(previous_claim)) 1 else 0;
+                // Also compute e and the expected sum from the polynomial theory
+                var bf_e2 = F.zero();
+                for (0..self.K) |k| {
+                    const k_bound_bf = k & f_mask;
+                    const k_upper_bf = k >> @intCast(m + 1);
+                    const f_k_bf = if (m == 0) F.one() else self.F_table[k_bound_bf];
+                    const eu_bf = eq_upper[k_upper_bf];
+                    var gsum_bf = F.zero();
+                    for (0..self.N) |i| {
+                        gsum_bf = gsum_bf.add(self.gamma_powers_sq[i].mul(self.G[i][k]));
+                    }
+                    bf_e2 = bf_e2.add(eu_bf.mul(gsum_bf).mul(f_k_bf.mul(f_k_bf)));
+                }
+                const e_ok: u8 = if (e.eql(bf_e2)) 1 else 0;
+                std.debug.print("  [BOOL_PH1] m={} c_ok={} e_ok={} sum_ok={}\n", .{ m, c_ok, e_ok, sum_ok });
+                if (sum_ok == 0) {
+                    // Print what previous_claim should be
+                    // The actual claim should be s(r) from the PREVIOUS round
+                    // which equals eq(w_m, r) * Q(r) where Q is the quadratic
+                    // But we don't have easy access to the challenge here.
+                    // Instead, just print the values for inspection.
+                    const pc = previous_claim.toBytesBE();
+                    const bs = bf_sum.toBytesBE();
+                    std.debug.print("  [BOOL_PH1]   prev_claim_BE={x:0>2}{x:0>2}{x:0>2}{x:0>2}\n", .{ pc[0], pc[1], pc[2], pc[3] });
+                    std.debug.print("  [BOOL_PH1]   bf_sum_BE    ={x:0>2}{x:0>2}{x:0>2}{x:0>2}\n", .{ bs[0], bs[1], bs[2], bs[3] });
+                    // Diagnose: compute from the polynomial at round m=0
+                    // If m=1, the claim comes from round 0's polynomial at the challenge.
+                    // Round 0's polynomial: s_0(X) = eq(w_0,X) * e_prev * X * (X-1)
+                    // where e_prev = e at round 0.
+                    // But we don't store e from previous rounds.
+                    // Instead, let's check a simpler invariant:
+                    // The claim at round m should equal B_scalar * [something].
+                    // Print B_scalar for inspection.
+                    const bsb = self.B_scalar.toBytesBE();
+                    std.debug.print("  [BOOL_PH1]   B_scalar_BE  ={x:0>2}{x:0>2}{x:0>2}{x:0>2}\n", .{ bsb[0], bsb[1], bsb[2], bsb[3] });
+                }
+            }
+        }
+
+        fn computePhase2Poly(self: *Self, evals: []F, previous_claim: F) void {
+            // Phase 2: Gruen poly deg 3 approach (matching Jolt's compute_phase2_message)
+            //
+            // The polynomial is:
+            //   p(X) = eq_r_r * Σ_j d_j(X) * Q_j(X)
+            // where d_j(X) is the linear eq_cycle factor, Q_j(X) = Σ_i γ^{2i} * h_i(X)*(h_i(X)-1)
+            //
+            // The D polynomial (eq_cycle) plays the role of the Gruen split-eq.
+            // We compute c = Q_weighted(0) and e (X² coeff of Q_weighted), then use gruen approach.
+
+            const ht = self.H orelse return;
+            const half = self.phase2_len / 2;
+
+            // Compute c (constant of quadratic, weighted by eq_cycle) and e (X² coeff)
+            // c = Σ_j d0_j * Σ_i γ²ⁱ * h0_i*(h0_i-1)
+            // e = Σ_j Σ_i γ²ⁱ * (h1_i-h0_i)²  (X² coefficient, NOT weighted by eq_cycle slope)
+            //
+            // Wait - the D.gruen_poly_deg_3 in Jolt uses par_fold_out_in_unreduced which weights
+            // both c and e by the E_out * E_in tables. So both c and e ARE weighted by eq_cycle.
+            //
+            // Actually no: Jolt uses the split-eq D for the cycle direction. The per_g_values
+            // closure returns [c_per_j_prime, e_per_j_prime] and then fold_out_in multiplies
+            // by e_out * e_in. So c and e are both weighted by the outer eq factors.
+            // The gruen_poly_deg_3 then uses the current linear eq factor (innermost) to build
+            // the cubic s(X) = l(X) * Q(X).
+            //
+            // But in our simplified approach (no Gruen split-eq, just halving eq_cycle),
+            // we can compute c and e using the full eq_cycle halving:
+            // The eq_cycle has entries for j = 0..phase2_len-1, paired as (d0, d1).
+            // The linear factor is l_j(X) = d0_j + (d1_j - d0_j)*X for each pair j.
+            //
+            // The sumcheck variable is the FIRST bit, so:
+            //   For pair j: j_pair_index = j, d0 = eq_cycle[2j], d1 = eq_cycle[2j+1]
+            //   Q_j(X) = Σ_i γ²ⁱ * h_i_j(X) * (h_i_j(X) - 1)
+            //   h_i_j(X) = ht[i][2j] + (ht[i][2j+1] - ht[i][2j]) * X
+            //
+            // Total: s(X) = eq_r_r * Σ_j l_j(X) * Q_j(X)
+            //
+            // For the gruen approach, we need to express this as s(X) = eq_r_r * [sum of l*Q].
+            // But each j pair has a different l_j. This is NOT a simple l*Q factorization.
+            //
+            // In Jolt, the D split-eq handles this by having E_out and E_in weight the j_prime
+            // groups, and the current variable's eq factor is handled by gruen_poly_deg_3.
+            //
+            // For our approach (direct halving), we compute s(0), s(1), s(2) directly and
+            // also compute p_inf (X³ coefficient). Then s(0)+s(1) should equal claim.
+            // Let's keep the direct computation approach but verify against claim.
+
+            for (0..half) |j| {
+                const d0 = self.eq_cycle[2 * j];
+                const d1 = self.eq_cycle[2 * j + 1];
+
+                inline for (0..3) |pt| {
+                    const x_val = comptime pt;
+                    var q_val = F.zero();
+                    for (0..self.N) |i| {
+                        const h0 = ht[i][2 * j];
+                        const h1 = ht[i][2 * j + 1];
+                        const h_x = if (x_val == 0) h0 else if (x_val == 1) h1 else h0.add(F.fromU64(x_val).mul(h1.sub(h0)));
+                        q_val = q_val.add(self.gamma_powers_sq[i].mul(h_x.mul(h_x).sub(h_x)));
+                    }
+                    const d_x = if (x_val == 0) d0 else if (x_val == 1) d1 else d0.add(F.fromU64(x_val).mul(d1.sub(d0)));
+                    evals[pt] = evals[pt].add(d_x.mul(q_val));
+                }
+
+                // Leading coefficient of X^3: slope_d * Σ γ^{2i} * slope_h_i^2
+                {
+                    var q_lead = F.zero();
+                    for (0..self.N) |i| {
+                        const d = ht[i][2 * j + 1].sub(ht[i][2 * j]);
+                        q_lead = q_lead.add(self.gamma_powers_sq[i].mul(d.mul(d)));
+                    }
+                    evals[3] = evals[3].add(d1.sub(d0).mul(q_lead));
+                }
+            }
+
+            // Scale by eq_r_r
+            for (0..4) |k| {
+                evals[k] = evals[k].mul(self.eq_r_r);
+            }
+
+            // Debug: check s(0)+s(1) vs previous_claim
+            if (true) {
+                const sum = evals[0].add(evals[1]);
+                const ok: u8 = if (sum.eql(previous_claim)) 1 else 0;
+                std.debug.print("  [BOOL_PH2] p(0)+p(1)=claim? {} phase2_round={}\n", .{ ok, self.round - self.log_k_chunk });
+            }
+        }
+
+        pub fn bindChallenge(self: *Self, r: F) !void {
+            if (self.round < self.log_k_chunk) {
+                // Phase 1: update B_scalar and F_table
+                const w_m = self.r_address_le[self.round];
+                // B_scalar *= eq(w_m, r) = w_m*r + (1-w_m)*(1-r) = 1 - w_m - r + 2*w_m*r
+                const prod = w_m.mul(r);
+                self.B_scalar = self.B_scalar.mul(F.one().sub(w_m).sub(r).add(prod.add(prod)));
+
+                // Update F: double size from 2^m to 2^(m+1)
+                // Match Jolt's LowToHigh ExpandingTable: new entries go in the UPPER half.
+                // This ensures bit j of the F index corresponds to sumcheck challenge r_j.
+                // Jolt: F[i+len] = F[i]*r, F[i] = F[i]*(1-r)  (for i in 0..len)
+                for (0..self.F_size) |idx| {
+                    self.F_table[idx + self.F_size] = self.F_table[idx].mul(r);
+                    self.F_table[idx] = self.F_table[idx].sub(self.F_table[idx + self.F_size]);
+                }
+                self.F_size *= 2;
+
+                // Phase 1→2 transition after last address round
+                if (self.round == self.log_k_chunk - 1) {
+                    self.eq_r_r = self.B_scalar; // eq(r_addr_fixed, r_addr_bound)
+                    try self.transitionToPhase2();
+                }
+            } else {
+                // Phase 2: bind cycle variable, halve H tables and eq_cycle
+                const half = self.phase2_len / 2;
+                const one_minus_r = F.one().sub(r);
+                if (self.H) |ht| {
+                    for (0..self.N) |i| {
+                        for (0..half) |j| {
+                            ht[i][j] = one_minus_r.mul(ht[i][2 * j]).add(r.mul(ht[i][2 * j + 1]));
+                        }
+                    }
+                }
+                for (0..half) |j| {
+                    self.eq_cycle[j] = one_minus_r.mul(self.eq_cycle[2 * j]).add(r.mul(self.eq_cycle[2 * j + 1]));
+                }
+                self.phase2_len = half;
+            }
+            self.round += 1;
+        }
+
+        fn transitionToPhase2(self: *Self) !void {
+            // F_table now has K entries: F[k] = eq(r_challenges, k) for k ∈ [0, K)
+            // Build H tables: for each cycle j, H[i][j] = F[chunk_i(j)] = eq(r_addr_bound, chunk_i(j))
+            const T_val = @as(usize, 1) << @intCast(self.n_cycle_vars);
+            const trace = self.trace;
+            const instr_d = self.instruction_d;
+            const bc_d = self.bytecode_d;
+            const ram_d_val = self.ram_d;
+            const K = self.K;
+
+            var ht = try self.allocator.alloc([]F, self.N);
+            for (0..self.N) |i| {
+                ht[i] = try self.allocator.alloc(F, T_val);
+                @memset(ht[i], F.zero());
+            }
+
+            const stage5_mod = @import("stage5_prover.zig");
+
+            var dbg_nonzero_chunks: usize = 0;
+            for (0..T_val) |j| {
+                const step = trace.steps.items[j];
+
+                // InstructionRa chunks
+                {
+                    var lookup_idx: u128 = 0;
+                    const opcode_7: u32 = step.instruction & 0x7F;
+                    const funct3_3: u32 = (step.instruction >> 12) & 0x7;
+                    const funct7_7: u32 = (step.instruction >> 25) & 0x7F;
+                    const is_noop = (step.instruction == 0 or step.instruction == 0x00000013);
+
+                    if (!is_noop) {
+                        const is_identity = (opcode_7 == 0x37 or opcode_7 == 0x17 or
+                            opcode_7 == 0x6f or opcode_7 == 0x67 or
+                            (opcode_7 == 0x13 and funct3_3 == 0) or
+                            (opcode_7 == 0x1b and funct3_3 == 0));
+
+                        if (is_identity) {
+                            lookup_idx = switch (opcode_7) {
+                                0x13, 0x1b => blk128: {
+                                    const imm12_raw: u32 = @truncate(@as(u32, step.instruction) >> 20);
+                                    const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
+                                    const imm_u64: u64 = @bitCast(imm_signed);
+                                    break :blk128 @as(u128, step.rs1_value) + @as(u128, imm_u64);
+                                },
+                                0x37 => @as(u128, step.instruction & 0xFFFFF000),
+                                0x17 => @as(u128, step.unexpanded_pc) + @as(u128, step.instruction & 0xFFFFF000),
+                                0x6f => blk128: {
+                                    const instr32 = step.instruction;
+                                    const imm20: u32 = ((@as(u32, instr32 >> 31) & 1) << 19) |
+                                        ((@as(u32, instr32 >> 12) & 0xFF) << 11) |
+                                        ((@as(u32, instr32 >> 20) & 1) << 10) |
+                                        ((@as(u32, instr32 >> 21) & 0x3FF));
+                                    const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm20 << 12)) >> 11);
+                                    const imm_u64: u64 = @bitCast(imm_signed);
+                                    break :blk128 @as(u128, step.unexpanded_pc) + @as(u128, imm_u64);
+                                },
+                                0x67 => blk128: {
+                                    const imm12_raw: u32 = @truncate(@as(u32, step.instruction) >> 20);
+                                    const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
+                                    const imm_u64: u64 = @bitCast(imm_signed);
+                                    break :blk128 @as(u128, step.rs1_value) + @as(u128, imm_u64);
+                                },
+                                else => 0,
+                            };
+                        } else {
+                            const left_op: u64 = step.rs1_value;
+                            const right_op: u64 = switch (opcode_7) {
+                                0x33, 0x3b, 0x63 => step.rs2_value,
+                                0x13 => blk_rop: {
+                                    const imm12_raw: u32 = @truncate(@as(u32, step.instruction) >> 20);
+                                    const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
+                                    break :blk_rop @as(u64, @bitCast(imm_signed));
+                                },
+                                0x03 => blk_rop: {
+                                    const imm12_raw: u32 = @truncate(@as(u32, step.instruction) >> 20);
+                                    const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
+                                    break :blk_rop @as(u64, @bitCast(imm_signed));
+                                },
+                                0x23 => blk_rop: {
+                                    const imm_lo: u32 = (step.instruction >> 7) & 0x1F;
+                                    const imm_hi: u32 = (step.instruction >> 25) & 0x7F;
+                                    const imm12_raw: u32 = (imm_hi << 5) | imm_lo;
+                                    const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
+                                    break :blk_rop @as(u64, @bitCast(imm_signed));
+                                },
+                                else => step.rs2_value,
+                            };
+                            lookup_idx = interleaveBits(left_op, right_op);
+                        }
+
+                        const table_idx = stage5_mod.getLookupTableIndex(@as(u32, opcode_7), @as(u32, funct3_3), @as(u32, funct7_7));
+                        if (table_idx < 0) {
+                            lookup_idx = 0;
+                        }
+                    }
+                    for (0..instr_d) |i| {
+                        const shift = self.log_k_chunk * (instr_d - 1 - i);
+                        const mask: u128 = (@as(u128, 1) << @intCast(self.log_k_chunk)) - 1;
+                        const chunk_val: usize = @intCast((lookup_idx >> @intCast(shift)) & mask);
+                        if (chunk_val < K) {
+                            ht[i][j] = self.F_table[chunk_val];
+                            if (chunk_val != 0 and i == 0) dbg_nonzero_chunks += 1;
+                        }
+                    }
+                    if (j < 3) {
+                        const dbg_mask: u128 = (@as(u128, 1) << @intCast(self.log_k_chunk)) - 1;
+                        std.debug.print("[BOOL_H_TRANS] j={} instr=0x{x:0>8} is_noop={} lookup_idx=0x{x:0>16}", .{
+                            j, step.instruction, @intFromBool(is_noop), @as(u64, @truncate(lookup_idx)),
+                        });
+                        // Print chunks for last 4 positions (LSB end)
+                        std.debug.print(" chunks[28..31]=", .{});
+                        for (28..32) |ci| {
+                            if (ci < instr_d) {
+                                const shift2 = self.log_k_chunk * (instr_d - 1 - ci);
+                                const cv: u64 = @truncate((lookup_idx >> @intCast(shift2)) & dbg_mask);
+                                std.debug.print("{}", .{cv});
+                                if (ci < 31) std.debug.print(",", .{});
+                            }
+                        }
+                        std.debug.print("\n", .{});
+                    }
+                }
+
+                // BytecodeRa chunks
+                {
+                    const pc_idx: u64 = @intCast(self.pc_map.getPCForStep(step));
+                    for (0..bc_d) |i| {
+                        const chunk_val = extractChunkMSB(pc_idx, i, bc_d, self.log_k_chunk);
+                        if (chunk_val < K) {
+                            ht[instr_d + i][j] = self.F_table[chunk_val];
+                        }
+                    }
+                }
+
+                // RamRa chunks
+                {
+                    if (step.memory_addr) |addr| {
+                        if (addr != 0) {
+                            if (self.memory_layout.remapAddress(addr)) |raddr| {
+                                for (0..ram_d_val) |i| {
+                                    const chunk_val = extractChunkMSB(raddr, i, ram_d_val, self.log_k_chunk);
+                                    if (chunk_val < K) {
+                                        ht[instr_d + bc_d + i][j] = self.F_table[chunk_val];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            self.H = ht;
+            self.phase2_len = T_val;
+
+            // Debug: check if all H tables are identical
+            {
+                var all_same = true;
+                for (1..self.N) |i| {
+                    if (!std.mem.eql(u8, &ht[0][0].toBytesBE(), &ht[i][0].toBytesBE())) {
+                        all_same = false;
+                        break;
+                    }
+                }
+                std.debug.print("[BOOL_H_INIT] T={}, all_H[i][0]_same={}, dbg_nonzero_chunks={}\n", .{ T_val, @intFromBool(all_same), dbg_nonzero_chunks });
+                // Print first few H entries for different i at interesting cycles
+                // Check that H tables differ across polynomials at non-noop cycles
+                {
+                    var first_nontrivial_j: usize = 0;
+                    for (0..T_val) |jj| {
+                        if (!ht[0][jj].eql(ht[0][0])) {
+                            first_nontrivial_j = jj;
+                            break;
+                        }
+                    }
+                    std.debug.print("[BOOL_H_INIT] first non-trivial j={}\n", .{first_nontrivial_j});
+                    // Print H[i][j] at this cycle for first few polynomials
+                    for (0..@min(4, self.N)) |i| {
+                        const hj = ht[i][first_nontrivial_j].toBytesBE();
+                        const h0 = ht[i][0].toBytesBE();
+                        std.debug.print("[BOOL_H_INIT] H[{}][0]_LE=[{x:0>2}{x:0>2}{x:0>2}{x:0>2}] H[{}][{}]_LE=[{x:0>2}{x:0>2}{x:0>2}{x:0>2}]\n", .{
+                            i, h0[31], h0[30], h0[29], h0[28],
+                            i, first_nontrivial_j, hj[31], hj[30], hj[29], hj[28],
+                        });
+                    }
+                    // Count how many cycles have non-F[0] values for each poly
+                    // Check MSB chunks (0..4) AND LSB chunks (instr_d-4..instr_d) AND bytecode/ram
+                    const check_indices = [_]usize{ 0, 1, 2, 3, instr_d - 4, instr_d - 3, instr_d - 2, instr_d - 1, instr_d, instr_d + 1, instr_d + bc_d, instr_d + bc_d + 1 };
+                    for (check_indices) |i| {
+                        if (i >= self.N) continue;
+                        var nontrivial: usize = 0;
+                        var nonzero: usize = 0;
+                        for (0..T_val) |jj| {
+                            if (!ht[i][jj].eql(F.zero())) nonzero += 1;
+                            if (!ht[i][jj].eql(F.zero()) and !ht[i][jj].eql(self.F_table[0])) {
+                                nontrivial += 1;
+                            }
+                        }
+                        std.debug.print("[BOOL_H_INIT] poly {} nontrivial_cycles={} nonzero={}\n", .{ i, nontrivial, nonzero });
+                    }
+                    // Also show distinct values for poly instr_d-1 (LSB chunk)
+                    {
+                        const lsb_i = instr_d - 1;
+                        if (lsb_i < self.N) {
+                            std.debug.print("[BOOL_H_INIT] LSB poly {} first 8 values:", .{lsb_i});
+                            for (0..@min(8, T_val)) |jj| {
+                                const hv = ht[lsb_i][jj].toBytesBE();
+                                std.debug.print(" [{x:0>2}{x:0>2}{x:0>2}{x:0>2}]", .{ hv[31], hv[30], hv[29], hv[28] });
+                            }
+                            std.debug.print("\n", .{});
+                        }
+                    }
+                }
+                // Check F_table state
+                std.debug.print("[BOOL_H_INIT] F_size={}\n", .{ self.F_size });
+                for (0..@min(self.F_size, 8)) |fi| {
+                    const fb = self.F_table[fi].toBytesBE();
+                    std.debug.print("[BOOL_H_INIT] F[{}]_LE=[{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}]\n", .{
+                        fi, fb[31], fb[30], fb[29], fb[28], fb[27], fb[26], fb[25], fb[24],
+                    });
+                }
+            }
+
+            // Debug: compute Phase 2 full sum and compare with what the claim should be
+            {
+                var phase2_sum = F.zero();
+                for (0..T_val) |jj| {
+                    var q_j = F.zero();
+                    for (0..self.N) |i| {
+                        const h_val = ht[i][jj];
+                        q_j = q_j.add(self.gamma_powers_sq[i].mul(h_val.mul(h_val).sub(h_val)));
+                    }
+                    phase2_sum = phase2_sum.add(self.eq_cycle[jj].mul(q_j));
+                }
+                phase2_sum = phase2_sum.mul(self.eq_r_r);
+                const ps_be = phase2_sum.toBytesBE();
+                std.debug.print("[BOOL_TRANSITION] phase2_full_sum LE=[{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}]\n", .{
+                    ps_be[31], ps_be[30], ps_be[29], ps_be[28], ps_be[27], ps_be[26], ps_be[25], ps_be[24],
+                });
+
+                // Also compute Phase 1 full sum (using F_table directly)
+                var phase1_sum = F.zero();
+                for (0..T_val) |jj| {
+                    var q_j_ph1 = F.zero();
+                    for (0..self.N) |i| {
+                        // H[i][jj] = F_table[chunk_i(jj)] which should equal the raw value
+                        const h_val_ph1 = ht[i][jj]; // Same as F_table[chunk_i(j)]
+                        q_j_ph1 = q_j_ph1.add(self.gamma_powers_sq[i].mul(h_val_ph1.mul(h_val_ph1).sub(h_val_ph1)));
+                    }
+                    phase1_sum = phase1_sum.add(self.eq_cycle[jj].mul(q_j_ph1));
+                }
+                phase1_sum = phase1_sum.mul(self.eq_r_r);
+                // This should be the same as phase2_sum
+            }
+
+            std.debug.print("[BOOL_PROVER] Phase 1→2 transition: eq_r_r=", .{});
+            const err_be = self.eq_r_r.toBytesBE();
+            for (0..8) |bi| std.debug.print("{x:0>2}", .{err_be[31 - bi]});
+            std.debug.print(", H[0][0..3]=", .{});
+            for (0..@min(3, T_val)) |jj| {
+                const hv = ht[0][jj].toBytesBE();
+                std.debug.print("[{x:0>2}{x:0>2}{x:0>2}{x:0>2}]", .{ hv[31], hv[30], hv[29], hv[28] });
+            }
+            std.debug.print("\n", .{});
+        }
+
+        /// Get opening claims: ra_i(r_addr_bound, r_cycle_bound)
+        /// After all rounds, H[i][0] = eq(r_addr_bound, chunk_i(r_cycle_bound)) = ra_i(r_addr_bound, r_cycle_bound).
+        pub fn getOpeningClaims(self: *const Self, allocator: std.mem.Allocator) ![]F {
+            const claims = try allocator.alloc(F, self.N);
+            if (self.H) |ht| {
+                for (0..self.N) |i| {
+                    claims[i] = ht[i][0];
+                }
+            } else {
+                @memset(claims, F.zero());
             }
             return claims;
         }
@@ -2030,7 +2800,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 }
             }
             const booleanity_gamma = transcript.challengeScalar();
-            _ = booleanity_gamma;
 
             // LookupsRa::new() - gamma powers for virtual RA batching
             const lookups_ra_gamma_powers = try transcript.challengeScalarPowers(self.allocator, n_virtual_ra_polys);
@@ -2223,6 +2992,13 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 // Reverse cycle part: challenges[128..136] reversed
                 lookups_ra_r_cycle[i] = stage5_challenges[LOOKUPS_LOG_K + n_cycle_vars - 1 - i];
             }
+            // Debug: print lookups_ra_r_cycle to compare with Jolt's r_cycle
+            for (0..n_cycle_vars) |dbg_i| {
+                const dbg_b = lookups_ra_r_cycle[dbg_i].toBytesBE();
+                std.debug.print("[S6_RCYCLE] lookups_ra_r_cycle[{}] LE=[", .{dbg_i});
+                for (0..8) |bi| std.debug.print("{x:0>2}", .{dbg_b[31 - bi]});
+                std.debug.print("]\n", .{});
+            }
 
             // r_address for Lookups: challenges[0..128] NOT reversed (stays LITTLE_ENDIAN)
             // Then compute_r_address_chunks splits into log_k_chunk-sized pieces
@@ -2333,6 +3109,262 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 log_k_chunk, instruction_d,
             );
             defer lookups_ra_prover.deinit();
+
+            // Instance 2: Booleanity (degree 3, two-phase)
+            // Build BooleanityProver with G tables and eq tables from Stage 5 opening point.
+            //
+            // In Jolt, r_address for booleanity = last log_k_chunk elements of Stage 5
+            // InstructionReadRaf address (reversed to LE). Stage 5 address uses HighToLow
+            // binding, so stage5_challenges[0]=MSB. After reverse to LE: [ch[127],...,ch[0]].
+            // Last log_k_chunk elements = [ch[3],ch[2],ch[1],ch[0]] = MSB bits in LE.
+            //
+            // r_cycle for booleanity = same as InstructionReadRaf cycle (LE) = lookups_ra_r_cycle
+            //
+            // Binding order: LowToHigh for both Phase 1 (address) and Phase 2 (cycle)
+            var booleanity_prover = blk_bool: {
+                const total_bool_polys = instruction_d + bytecode_d + ram_d;
+
+                // r_address_bool: last log_k_chunk of Stage 5 address in LE
+                // Stage 5 address in BE: stage5_challenges[0..128] (MSB first since HighToLow binding)
+                // Reverse to LE: [ch[127], ch[126], ..., ch[0]]
+                // Last log_k_chunk: [ch[log_k_chunk-1], ..., ch[0]] = MSB bits in LE
+                var r_address_bool_le = try self.allocator.alloc(F, log_k_chunk);
+                // No defer free - BooleanityProver takes ownership of r_address_bool_le
+                for (0..log_k_chunk) |i| {
+                    // In LE, element i corresponds to Stage5 address challenge (LOOKUPS_LOG_K - 1 - (LOOKUPS_LOG_K - log_k_chunk + i))
+                    // = log_k_chunk - 1 - i
+                    r_address_bool_le[i] = stage5_challenges[log_k_chunk - 1 - i];
+                }
+
+                // r_cycle_bool_le: same as lookups_ra_r_cycle (already LE)
+                // lookups_ra_r_cycle[i] = stage5_challenges[LOOKUPS_LOG_K + n_cycle_vars - 1 - i]
+
+                // Build eq_addr table for Phase 1 (LowToHigh binding)
+                // computeEqTable expects BE input (MSB-first) for its internal convention.
+                // Since r_address_bool_le is LE and we want LowToHigh binding,
+                // the eq table should be indexed such that eq_addr[k] = eq(r_addr_le, k)
+                // where bit 0 of k is the LSB, bound first.
+                // Jolt's LowToHigh EqPolynomial: eq(r, k) = Π_i (r[i]*k_i + (1-r[i])*(1-k_i))
+                // where r[0] corresponds to the LSB of k.
+                // For computeEqTable: it expects r in "BE" (MSB first), so reverse LE to BE.
+                var r_addr_bool_be_for_eq = try self.allocator.alloc(F, log_k_chunk);
+                defer self.allocator.free(r_addr_bool_be_for_eq);
+                for (0..log_k_chunk) |i| {
+                    r_addr_bool_be_for_eq[i] = r_address_bool_le[log_k_chunk - 1 - i];
+                }
+                const eq_addr_bool_phase1 = try computeEqTable(F, self.allocator, r_addr_bool_be_for_eq, log_k_chunk);
+                defer self.allocator.free(eq_addr_bool_phase1); // Only used for debug verification below
+
+                // Build a SINGLE eq_cycle table used for BOTH G construction AND Phase 2 halving.
+                //
+                // The table ordering must match Jolt's evals_parallel which iterates .rev():
+                //   bit 0 of index j → r_cycle[n-1] (MSB)
+                // For our computeEqTable (forward iteration), input[0] must be MSB = lookups[0].
+                // So input = lookups_ra_r_cycle directly (BE, MSB first).
+                //
+                // Using the SAME table for G construction and Phase 2 ensures consistency:
+                // Phase 1 reduces address variables with G tables weighted by eq_cycle[j],
+                // and Phase 2 halves the same eq_cycle[j] table. The running claim from Phase 1
+                // equals the initial Phase 2 polynomial sum, satisfying the transition.
+                //
+                // After Phase 2 halving with LowToHigh binding, the final eq value equals
+                // eq(challenges, r_cycle_BE) = eq(challenges, rev(r_cycle_LE)), matching
+                // Jolt's verifier which computes combined_r_cycle = rev(r_cycle_LE).
+                const eq_cycle_bool_phase2 = try computeEqTable(F, self.allocator, lookups_ra_r_cycle, n_cycle_vars);
+                // eq_cycle_bool_phase2 is NOT deferred - shared with BooleanityProver
+
+                // Build G tables: G_i[k] = Σ_j eq(r_cycle_fixed, j) * [chunk_i(j) == k]
+                const T_val: usize = @as(usize, 1) << @intCast(n_cycle_vars);
+                const K_val: usize = @as(usize, 1) << @intCast(log_k_chunk);
+                var G_tables = try self.allocator.alloc([]F, total_bool_polys);
+                for (0..total_bool_polys) |i| {
+                    G_tables[i] = try self.allocator.alloc(F, K_val);
+                    @memset(G_tables[i], F.zero());
+                }
+
+                const stage5_mod = @import("stage5_prover.zig");
+
+                for (0..T_val) |j| {
+                    const eq_j = eq_cycle_bool_phase2[j]; // eq(r_cycle_fixed, j) - same table as Phase 2
+                    if (eq_j.eql(F.zero())) continue;
+
+                    const step = trace.steps.items[j];
+
+                    // InstructionRa chunks
+                    {
+                        var lookup_idx: u128 = 0;
+                        const opcode_7: u32 = step.instruction & 0x7F;
+                        const funct3_3: u32 = (step.instruction >> 12) & 0x7;
+                        const funct7_7: u32 = (step.instruction >> 25) & 0x7F;
+                        const is_noop = (step.instruction == 0 or step.instruction == 0x00000013);
+
+                        if (!is_noop) {
+                            const is_identity = (opcode_7 == 0x37 or opcode_7 == 0x17 or
+                                opcode_7 == 0x6f or opcode_7 == 0x67 or
+                                (opcode_7 == 0x13 and funct3_3 == 0) or
+                                (opcode_7 == 0x1b and funct3_3 == 0));
+
+                            if (is_identity) {
+                                lookup_idx = switch (opcode_7) {
+                                    0x13, 0x1b => blk128: {
+                                        const imm12_raw: u32 = @truncate(@as(u32, step.instruction) >> 20);
+                                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
+                                        const imm_u64: u64 = @bitCast(imm_signed);
+                                        break :blk128 @as(u128, step.rs1_value) + @as(u128, imm_u64);
+                                    },
+                                    0x37 => @as(u128, step.instruction & 0xFFFFF000),
+                                    0x17 => @as(u128, step.unexpanded_pc) + @as(u128, step.instruction & 0xFFFFF000),
+                                    0x6f => blk128: {
+                                        const instr32 = step.instruction;
+                                        const imm20: u32 = ((@as(u32, instr32 >> 31) & 1) << 19) |
+                                            ((@as(u32, instr32 >> 12) & 0xFF) << 11) |
+                                            ((@as(u32, instr32 >> 20) & 1) << 10) |
+                                            ((@as(u32, instr32 >> 21) & 0x3FF));
+                                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm20 << 12)) >> 11);
+                                        const imm_u64: u64 = @bitCast(imm_signed);
+                                        break :blk128 @as(u128, step.unexpanded_pc) + @as(u128, imm_u64);
+                                    },
+                                    0x67 => blk128: {
+                                        const imm12_raw: u32 = @truncate(@as(u32, step.instruction) >> 20);
+                                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
+                                        const imm_u64: u64 = @bitCast(imm_signed);
+                                        break :blk128 @as(u128, step.rs1_value) + @as(u128, imm_u64);
+                                    },
+                                    else => 0,
+                                };
+                            } else {
+                                const left_op: u64 = step.rs1_value;
+                                const right_op: u64 = switch (opcode_7) {
+                                    0x33, 0x3b, 0x63 => step.rs2_value,
+                                    0x13 => blk_rop: {
+                                        const imm12_raw: u32 = @truncate(@as(u32, step.instruction) >> 20);
+                                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
+                                        break :blk_rop @as(u64, @bitCast(imm_signed));
+                                    },
+                                    0x03 => blk_rop: {
+                                        const imm12_raw: u32 = @truncate(@as(u32, step.instruction) >> 20);
+                                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
+                                        break :blk_rop @as(u64, @bitCast(imm_signed));
+                                    },
+                                    0x23 => blk_rop: {
+                                        const imm_lo: u32 = (step.instruction >> 7) & 0x1F;
+                                        const imm_hi: u32 = (step.instruction >> 25) & 0x7F;
+                                        const imm12_raw: u32 = (imm_hi << 5) | imm_lo;
+                                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
+                                        break :blk_rop @as(u64, @bitCast(imm_signed));
+                                    },
+                                    else => step.rs2_value,
+                                };
+                                lookup_idx = interleaveBits(left_op, right_op);
+                            }
+
+                            const table_idx = stage5_mod.getLookupTableIndex(@as(u32, opcode_7), @as(u32, funct3_3), @as(u32, funct7_7));
+                            if (table_idx < 0) {
+                                lookup_idx = 0;
+                            }
+                        }
+                        for (0..instruction_d) |i| {
+                            const shift = log_k_chunk * (instruction_d - 1 - i);
+                            const mask: u128 = (@as(u128, 1) << @intCast(log_k_chunk)) - 1;
+                            const chunk_val: usize = @intCast((lookup_idx >> @intCast(shift)) & mask);
+                            if (chunk_val < K_val) {
+                                G_tables[i][chunk_val] = G_tables[i][chunk_val].add(eq_j);
+                            }
+                        }
+                    }
+
+                    // BytecodeRa chunks
+                    {
+                        const pc_idx: u64 = @intCast(pc_map.getPCForStep(step));
+                        for (0..bytecode_d) |i| {
+                            const chunk_val = extractChunkMSB(pc_idx, i, bytecode_d, log_k_chunk);
+                            if (chunk_val < K_val) {
+                                G_tables[instruction_d + i][chunk_val] = G_tables[instruction_d + i][chunk_val].add(eq_j);
+                            }
+                        }
+                    }
+
+                    // RamRa chunks
+                    {
+                        if (step.memory_addr) |addr| {
+                            if (addr != 0) {
+                                if (memory_layout.remapAddress(addr)) |raddr| {
+                                    for (0..ram_d) |i| {
+                                        const chunk_val = extractChunkMSB(raddr, i, ram_d, log_k_chunk);
+                                        if (chunk_val < K_val) {
+                                            G_tables[instruction_d + bytecode_d + i][chunk_val] = G_tables[instruction_d + bytecode_d + i][chunk_val].add(eq_j);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Build γ^{2i} powers
+                var gamma_sq = try self.allocator.alloc(F, total_bool_polys);
+                {
+                    var gamma_power = F.one(); // γ^0 = 1
+                    const gamma_sq_base = booleanity_gamma.mul(booleanity_gamma); // γ^2
+                    for (0..total_bool_polys) |i| {
+                        gamma_sq[i] = gamma_power;
+                        gamma_power = gamma_power.mul(gamma_sq_base);
+                    }
+                }
+
+                // Verify G tables: Σ_k G_i[k] should equal Σ_j eq(r_cycle, j) = 1
+                // Actually Σ_k G_i[k] = Σ_j eq(r_cycle, j) * Σ_k [chunk_i(j)==k]
+                //                     = Σ_j eq(r_cycle, j) * 1 = 1 (since chunk_i(j) always hits exactly one k)
+                // Wait no: only if all j have valid chunks. Noop steps may have chunk_val=0 added.
+                // Let's just print the first few G tables for debug.
+                std.debug.print("[BOOL_PROVER] G tables built: N={}, K={}, T={}\n", .{ total_bool_polys, K_val, T_val });
+                for (0..@min(3, total_bool_polys)) |i| {
+                    var g_sum = F.zero();
+                    for (0..K_val) |k| g_sum = g_sum.add(G_tables[i][k]);
+                    const gs_be = g_sum.toBytesBE();
+                    std.debug.print("  G[{}] sum_LE=[{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}]\n", .{
+                        i, gs_be[31], gs_be[30], gs_be[29], gs_be[28], gs_be[27], gs_be[26], gs_be[25], gs_be[24],
+                    });
+                }
+
+                // Initial claim verification: Σ_k eq_addr[k] * Σ_i γ^{2i} * (G_i[k]^2 - G_i[k])
+                // This should be zero since ra_i(k,j) is binary.
+                // Actually that's the FULL sum; at random r it won't be zero for individual terms.
+                // But the initial claim IS zero.
+                {
+                    var init_sum = F.zero();
+                    for (0..K_val) |k| {
+                        var q_val = F.zero();
+                        for (0..total_bool_polys) |i| {
+                            const g_k = G_tables[i][k];
+                            q_val = q_val.add(gamma_sq[i].mul(g_k.mul(g_k).sub(g_k)));
+                        }
+                        init_sum = init_sum.add(eq_addr_bool_phase1[k].mul(q_val));
+                    }
+                    const is_be = init_sum.toBytesBE();
+                    std.debug.print("[BOOL_PROVER] Initial sum (should be ~0) LE=[{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}]\n", .{
+                        is_be[31], is_be[30], is_be[29], is_be[28], is_be[27], is_be[26], is_be[25], is_be[24],
+                    });
+                }
+
+                break :blk_bool try BooleanityProver(F).init(
+                    self.allocator,
+                    G_tables,
+                    r_address_bool_le,
+                    eq_cycle_bool_phase2,
+                    gamma_sq,
+                    total_bool_polys,
+                    log_k_chunk,
+                    n_cycle_vars,
+                    trace,
+                    instruction_d,
+                    bytecode_d,
+                    ram_d,
+                    memory_layout,
+                    pc_map,
+                );
+            };
+            defer booleanity_prover.deinit();
 
             // Instance 0: BytecodeReadRaf (degree bytecode_d+1)
             // Compute Val polynomials from bytecode entries and stage gammas
@@ -3345,7 +4377,8 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     });
                 }
 
-                // Instance 2: Booleanity - zero polynomial (input = 0, valid traces have ra in {0,1})
+                // Instance 2: Booleanity - REAL prover (degree 3)
+                var cached_booleanity: ?[]F = null;
                 {
                     const inst = 2;
                     if (remaining_rounds > num_rounds_arr[inst]) {
@@ -3358,7 +4391,20 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         }
                     } else {
                         inst_active[inst] = true;
-                        // Zero polynomial - all evals are zero, nothing to add
+                        const polys = try booleanity_prover.computeRoundPoly(self.allocator, instance_claims[inst]);
+                        cached_booleanity = polys;
+                        {
+                            const p01 = polys[0].add(polys[1]);
+                            const p01_ok: u8 = if (std.mem.eql(u8, &p01.toBytesBE(), &instance_claims[inst].toBytesBE())) 1 else 0;
+                            const p0b = polys[0].toBytesBE();
+                            const p1b = polys[1].toBytesBE();
+                            std.debug.print("  [S6P] R{} Bool p(0)+p(1)=claim? {} phase={} p0=[{x:0>2}{x:0>2}{x:0>2}{x:0>2}] p1=[{x:0>2}{x:0>2}{x:0>2}{x:0>2}]\n", .{
+                                round, p01_ok, if (booleanity_prover.round < booleanity_prover.log_k_chunk) @as(u8, 1) else 2,
+                                p0b[31], p0b[30], p0b[29], p0b[28],
+                                p1b[31], p1b[30], p1b[29], p1b[28],
+                            });
+                        }
+                        addFixedEvalsToCombibed(F, combined_evals, polys, 4, batch[inst], num_evals);
                     }
                 }
 
@@ -3746,9 +4792,23 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     hamming_prover.bindChallenge(challenge);
                 }
 
-                // Instance 2: Booleanity (zero poly, claim stays 0)
+                // Instance 2: Booleanity (real prover)
                 if (inst_active[2]) {
-                    instance_claims[2] = F.zero();
+                    if (cached_booleanity) |polys| {
+                        // Evaluate degree-3 poly at challenge from [p(0), p(1), p(2), p_inf]
+                        const evals_arr = [4]F{ polys[0], polys[1], polys[2], polys[3] };
+                        instance_claims[2] = evaluateDeg3FromEvals(F, evals_arr, challenge);
+                        self.allocator.free(polys);
+                        cached_booleanity = null;
+                    }
+                    try booleanity_prover.bindChallenge(challenge);
+                    // Debug: print claim after Phase 1→2 transition
+                    if (booleanity_prover.round == booleanity_prover.log_k_chunk) {
+                        const ic2_be = instance_claims[2].toBytesBE();
+                        std.debug.print("[BOOL_TRANSITION] inst_claim[2] after Ph1 LE=[{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}]\n", .{
+                            ic2_be[31], ic2_be[30], ic2_be[29], ic2_be[28], ic2_be[27], ic2_be[26], ic2_be[25], ic2_be[24],
+                        });
+                    }
                 }
 
                 // Instance 3: RamRaVirtual
@@ -3906,10 +4966,163 @@ pub fn Stage6BatchedProver(comptime F: type) type {
 
             const instruction_ra_virtual_claims = try lookups_ra_prover.getOpeningClaims(self.allocator, lookups_ra_gamma_powers);
 
-            // Booleanity claims are all zero for valid traces
-            const total_booleanity_polys = instruction_d + bytecode_d + ram_d;
-            const booleanity_ra_claims = try self.allocator.alloc(F, total_booleanity_polys);
-            @memset(booleanity_ra_claims, F.zero());
+            // Get booleanity claims directly from the prover's final H state.
+            // After all Phase 2 rounds, H[i][0] = ra_i(ρ_addr, ρ_cycle).
+            const booleanity_ra_claims = try booleanity_prover.getBooleanityClaims(self.allocator);
+            {
+                const total_booleanity_polys = instruction_d + bytecode_d + ram_d;
+                std.debug.print("[STAGE6] Booleanity claims from H final state:\n", .{});
+                for (0..@min(5, total_booleanity_polys)) |i| {
+                    const brc_be = booleanity_ra_claims[i].toBytesBE();
+                    std.debug.print("  bool_claim[{}]_LE=[", .{i});
+                    for (0..8) |bi| std.debug.print("{x:0>2}", .{brc_be[31 - bi]});
+                    std.debug.print("]\n", .{});
+                }
+            }
+
+            // Debug: compute what the verifier would compute for Instance 2 (Booleanity)
+            // expected = eq(challenges, combined_r) * Σ gamma^{2i} * (ra_i^2 - ra_i)
+            // combined_r = r_address.reversed ++ r_cycle.reversed
+            // In Jolt: r_address reversed means the original r_address (from params) reversed.
+            // The booleanity params store r_address in LE format. "reversed" in Jolt means
+            // going from LE to reversed-LE. But actually Jolt stores r_address and r_cycle in a
+            // specific order from BooleanitySumcheckParams::new, and then reverses them.
+            {
+                const total_booleanity_polys = instruction_d + bytecode_d + ram_d;
+                // Jolt's BooleanitySumcheckParams stores r_address and r_cycle from Stage 5.
+                // r_address = last log_k_chunk challenges from the InstructionReadRaf address.
+                // r_cycle = cycle challenges from InstructionReadRaf.
+                // The verifier reverses both: combined_r = rev(r_address) ++ rev(r_cycle).
+                //
+                // In our code:
+                // r_address_bool_le = [ch[log_k-1], ch[log_k-2], ..., ch[0]] (from stage5 MSB-first)
+                // But the Jolt params store them in a specific order based on Stage 5's binding.
+                // Jolt's BooleanitySumcheckParams::new extracts r_address from the accumulator
+                // which stores them in the binding order from Stage 5 InstructionReadRaf.
+                //
+                // For now, let me compute the expected claim using the data I have:
+                // The sumcheck challenges for booleanity rounds are challenges[0..log_k+n_cycle].
+                // Booleanity uses rounds 0..log_k for address, log_k..log_k+n_cycle for cycle.
+                //
+                // The actual output_claim from the sumcheck should be:
+                //   eq_r_r * eq_cycle_final * Σ gamma^{2i} * (H[i][0]^2 - H[i][0])
+                // where eq_cycle_final is what eq_cycle[0] becomes after all Phase 2 bindings.
+                //
+                // Let me just compute Σ gamma^{2i} * (ra_i^2 - ra_i) and the eq parts.
+                var sum_gamma_ra = F.zero();
+                for (0..total_booleanity_polys) |i| {
+                    const ra = booleanity_ra_claims[i];
+                    sum_gamma_ra = sum_gamma_ra.add(booleanity_prover.gamma_powers_sq[i].mul(ra.mul(ra).sub(ra)));
+                }
+                // Also, get the actual eq values from the prover
+                const bp_eq_r_r = booleanity_prover.eq_r_r;
+                const bp_eq_cycle_final = booleanity_prover.eq_cycle[0];
+                const actual_output = bp_eq_r_r.mul(bp_eq_cycle_final).mul(sum_gamma_ra);
+
+                const sg_be = sum_gamma_ra.toBytesBE();
+                const err_be = bp_eq_r_r.toBytesBE();
+                const ecf_be = bp_eq_cycle_final.toBytesBE();
+                const ao_be = actual_output.toBytesBE();
+                std.debug.print("[BOOL_VERIFY] sum_gamma_ra_LE=[", .{});
+                for (0..8) |bi| std.debug.print("{x:0>2}", .{sg_be[31 - bi]});
+                std.debug.print("]\n", .{});
+                std.debug.print("[BOOL_VERIFY] eq_r_r_LE=[", .{});
+                for (0..8) |bi| std.debug.print("{x:0>2}", .{err_be[31 - bi]});
+                std.debug.print("]\n", .{});
+                std.debug.print("[BOOL_VERIFY] eq_cycle_final_LE=[", .{});
+                for (0..8) |bi| std.debug.print("{x:0>2}", .{ecf_be[31 - bi]});
+                std.debug.print("]\n", .{});
+                std.debug.print("[BOOL_VERIFY] actual_output_LE=[", .{});
+                for (0..8) |bi| std.debug.print("{x:0>2}", .{ao_be[31 - bi]});
+                std.debug.print("]\n", .{});
+
+                // Compare with instance_claims[2] (the sumcheck output claim for booleanity)
+                const ic2_be = instance_claims[2].toBytesBE();
+                std.debug.print("[BOOL_VERIFY] instance_claims[2]_LE=[", .{});
+                for (0..8) |bi| std.debug.print("{x:0>2}", .{ic2_be[31 - bi]});
+                std.debug.print("]\n", .{});
+                std.debug.print("[BOOL_VERIFY] match={}\n", .{@intFromBool(actual_output.eql(instance_claims[2]))});
+
+                // Now compute eq(challenges, combined_r) directly, the way the verifier does.
+                // combined_r = rev(r_address_LE) ++ rev(r_cycle_LE)
+                // r_address_LE (in Jolt) = last log_k_chunk elements of Stage5 addr reversed to LE
+                // In our code: the ORIGINAL r_address_bool_le (before reversal in init) is the LE version.
+                // After init() reversed it, booleanity_prover.r_address_le[m] = MSB at m=0.
+                // To get Jolt's LE r_address, we need to reverse it back.
+                // Then rev(r_address_LE) = booleanity_prover.r_address_le (as-is, since it was reversed to BE)
+                //
+                // combined_r_addr[m] = r_address_LE[log_k-1-m] = booleanity_prover.r_address_le[m]
+                // combined_r_cycle[m] = r_cycle_LE[n_cycle-1-m]
+                //
+                // r_cycle_LE = lookups_ra_r_cycle (the original, before computeEqTable)
+                // combined_r_cycle[m] = lookups_ra_r_cycle[n_cycle-1-m]
+                //
+                // eq(ch[m], combined_r[m]) for m < log_k:
+                //   = eq(ch[m], booleanity_prover.r_address_le[m])
+                // eq(ch[log_k+m], combined_r[log_k+m]) for m < n_cycle:
+                //   = eq(ch[log_k+m], lookups_ra_r_cycle[n_cycle-1-m])
+                {
+                    const bool_start_round = max_num_rounds - num_rounds_arr[2];
+                    std.debug.print("[BOOL_VERIFY] bool_start_round={}, log_k={}, n_cycle={}\n", .{
+                        bool_start_round, log_k_chunk, n_cycle_vars,
+                    });
+
+                    // Print ALL eq factors matching Jolt's format
+                    // Jolt: combined_r = rev(r_address_LE) ++ rev(r_cycle_LE)
+                    // Zolt: r_address_le[m] = MSB at 0 (reversed in init) = rev(r_address_LE)[m]
+                    // Zolt: combined_r_cycle[m] = r_cycle_LE[n_cycle-1-m] = lookups_ra_r_cycle[n_cycle-1-m]
+                    var eq_direct = F.one();
+                    for (0..log_k_chunk) |m| {
+                        const ch_val = challenges[bool_start_round + m];
+                        const w_val = booleanity_prover.r_address_le[m];
+                        const prod = ch_val.mul(w_val);
+                        const eq_factor = F.one().sub(ch_val).sub(w_val).add(prod.add(prod));
+                        eq_direct = eq_direct.mul(eq_factor);
+
+                        const ch_be = ch_val.toBytesBE();
+                        const w_be = w_val.toBytesBE();
+                        const ef_be = eq_factor.toBytesBE();
+                        std.debug.print("[BOOL_EQ_ZOLT] idx={} sc=[", .{m});
+                        for (0..8) |bi| std.debug.print("{x:0>2}", .{ch_be[31 - bi]});
+                        std.debug.print("] cr=[", .{});
+                        for (0..8) |bi| std.debug.print("{x:0>2}", .{w_be[31 - bi]});
+                        std.debug.print("] eq_i=[", .{});
+                        for (0..8) |bi| std.debug.print("{x:0>2}", .{ef_be[31 - bi]});
+                        std.debug.print("]\n", .{});
+                    }
+                    for (0..n_cycle_vars) |m| {
+                        const ch_val = challenges[bool_start_round + log_k_chunk + m];
+                        // Jolt: combined_r_cycle[m] = rev(r_cycle_LE)[m] = r_cycle_LE[n-1-m]
+                        // Since lookups_ra_r_cycle is BE (MSB at 0), and Jolt r_cycle_LE[n-1-m] = lookups[m]
+                        const w_val = lookups_ra_r_cycle[m]; // direct index, no reversal
+                        const prod = ch_val.mul(w_val);
+                        const eq_factor = F.one().sub(ch_val).sub(w_val).add(prod.add(prod));
+                        eq_direct = eq_direct.mul(eq_factor);
+
+                        const ch_be = ch_val.toBytesBE();
+                        const w_be = w_val.toBytesBE();
+                        const ef_be = eq_factor.toBytesBE();
+                        std.debug.print("[BOOL_EQ_ZOLT] idx={} sc=[", .{log_k_chunk + m});
+                        for (0..8) |bi| std.debug.print("{x:0>2}", .{ch_be[31 - bi]});
+                        std.debug.print("] cr=[", .{});
+                        for (0..8) |bi| std.debug.print("{x:0>2}", .{w_be[31 - bi]});
+                        std.debug.print("] eq_i=[", .{});
+                        for (0..8) |bi| std.debug.print("{x:0>2}", .{ef_be[31 - bi]});
+                        std.debug.print("]\n", .{});
+                    }
+
+                    const eq_from_prover = bp_eq_r_r.mul(bp_eq_cycle_final);
+                    const ed_be = eq_direct.toBytesBE();
+                    const ep_be = eq_from_prover.toBytesBE();
+                    std.debug.print("[BOOL_VERIFY] eq_direct_LE=[", .{});
+                    for (0..8) |bi| std.debug.print("{x:0>2}", .{ed_be[31 - bi]});
+                    std.debug.print("]\n", .{});
+                    std.debug.print("[BOOL_VERIFY] eq_from_prover_LE=[", .{});
+                    for (0..8) |bi| std.debug.print("{x:0>2}", .{ep_be[31 - bi]});
+                    std.debug.print("]\n", .{});
+                    std.debug.print("[BOOL_VERIFY] eq_match={}\n", .{@intFromBool(eq_direct.eql(eq_from_prover))});
+                }
+            }
 
             std.debug.print("[STAGE6] Opening claims:\n", .{});
             std.debug.print("  ram_inc = {any}\n", .{ram_inc_claim.toBytesBE()[0..8]});
@@ -4083,6 +5296,12 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 .instruction_ra_virtual_claims = instruction_ra_virtual_claims,
                 .ram_inc_claim = ram_inc_claim,
                 .rd_inc_claim = rd_inc_claim,
+                .bytecode_log_k = bytecode_log_k,
+                .log_k_chunk = log_k_chunk,
+                .n_cycle_vars = n_cycle_vars,
+                .bytecode_d = bytecode_d,
+                .ram_d = ram_d,
+                .instruction_d = instruction_d,
                 .allocator = self.allocator,
             };
         }
@@ -4366,7 +5585,7 @@ fn addFixedEvalsToCombibed(comptime F: type, combined_evals: []F, polys: []const
 
 /// Compute eq polynomial table: eq(r, j) for all j in [0, 2^n_vars)
 /// r is in BIG_ENDIAN order (r[0] is the most significant variable)
-fn computeEqTable(comptime F: type, allocator: Allocator, r: []const F, n_vars: usize) ![]F {
+pub fn computeEqTable(comptime F: type, allocator: Allocator, r: []const F, n_vars: usize) ![]F {
     const size: usize = @as(usize, 1) << @intCast(n_vars);
     var table = try allocator.alloc(F, size);
 
@@ -4399,7 +5618,7 @@ fn fieldFromI128(comptime F: type, val: i128) F {
 
 /// Extract chunk from address value using MSB-first ordering (matching Jolt)
 /// chunk_idx=0 is the most significant chunk
-fn extractChunkMSB(addr: u64, chunk_idx: usize, total_chunks: usize, log_k_chunk: usize) usize {
+pub fn extractChunkMSB(addr: u64, chunk_idx: usize, total_chunks: usize, log_k_chunk: usize) usize {
     // Jolt: shift = log_k_chunk * (d - 1 - chunk_idx)
     const shift_amount = log_k_chunk * (total_chunks - 1 - chunk_idx);
     if (shift_amount >= 64) return 0;
@@ -4412,7 +5631,7 @@ fn extractChunkMSB(addr: u64, chunk_idx: usize, total_chunks: usize, log_k_chunk
 /// Matches Jolt's interleave_bits(even_bits, odd_bits): result = (even << 1) | odd
 /// So even_bits (rs1) go to odd bit positions (1,3,5,...,127)
 /// and odd_bits (rs2) go to even bit positions (0,2,4,...,126)
-fn interleaveBits(rs1: u64, rs2: u64) u128 {
+pub fn interleaveBits(rs1: u64, rs2: u64) u128 {
     // Spread rs1 bits to odd positions
     var x: u128 = @intCast(rs1);
     x = (x | (x << 32)) & 0x0000_0000_FFFF_FFFF_0000_0000_FFFF_FFFF;

@@ -1,46 +1,34 @@
 # Zolt → Jolt Verification Progress
 
 ## Current Status
-**ALL 8 STAGES PASS!** ✅ Verification succeeded!
+**ALL 8 STAGES PASS!** Verification succeeded!
 
-## Key Fixes Applied
+## Summary of All Fixes
 
-### 1. Dense Polynomial Commitment Matrix Dimensions (LATEST FIX)
-**Root Cause**: Zolt was committing dense polynomials (RdInc, RamInc) with their natural size
-(trace_length entries), which results in a different Dory matrix layout than what Jolt uses.
+### Stage 8 Fixes (Dory Polynomial Commitment Opening)
 
-Jolt initializes DoryGlobals with K=k_chunk, T=trace_length, making ALL polynomials
-(including dense ones) use the same K*T-sized matrix layout. Dense polys are committed
-in this larger matrix with zeros for unused rows.
+1. **Dense Polynomial Commitment Matrix Dimensions**
+   - Root cause: Zolt committed RdInc/RamInc with their natural size (trace_length), but Jolt
+     uses K*T matrix layout for ALL polynomials via DoryGlobals
+   - Fix: Pad RdInc/RamInc to k_chunk*trace_length before committing
 
-**Fix**: Pad RdInc and RamInc to k_chunk*trace_length before committing, so they use the
-same matrix dimensions as the one-hot polynomials.
+2. **Dory Transcript Challenge Type**
+   - Root cause: Dory needs full 128-bit challenges (challengeScalarFull), not 125-bit masked
+   - Fix: Changed 4x challengeScalar() → challengeScalarFull() in dory.zig
 
-### 2. Dory Transcript Challenge Type (challengeScalarFull)
-**Root Cause**: Dory protocol needs full 128-bit challenges with proper Montgomery conversion,
-not the 125-bit masked version used for sumcheck.
+3. **h2 Mismatch (SRS max_num_vars=20)**
+   - Fixed DoryVerifierSetup.fromSRS to use correct SRS parameters
 
-**Fix**: Changed all 4 transcript.challengeScalar() to transcript.challengeScalarFull() in dory.zig
+4. **Joint Polynomial MLE Mismatch**
+   - Fixed gamma power ordering between Zolt (RdInc, RamInc, InstructionRa, RamRa, BytecodeRa)
+     and Jolt (RamInc, RdInc, InstructionRa, BytecodeRa, RamRa)
 
-### 3. h2 Mismatch (SRS max_num_vars=20)
-Fixed DoryVerifierSetup to use correct SRS parameters.
-
-### 4. Joint Polynomial MLE Mismatch
-Fixed the ordering of gamma powers and polynomial mapping between Zolt and Jolt conventions.
-
-## Completed
+## Completed Tasks
 - [x] Stages 1-7 all pass
-- [x] Fix h2 mismatch (SRS max_num_vars=20)
-- [x] Fix DoryVerifierSetup.fromSRS using wrong h1/h2
-- [x] Fix transcript challenge type (challengeScalarFull for Dory)
-- [x] Fix MLE mismatch in joint polynomial
-- [x] Fix dense polynomial commitment matrix dimensions (pad to k_chunk*T)
-- [x] **Stage 8 PASSES!** All 8 stages verified successfully!
-
-## Next Steps
-- [ ] Clean up debug prints from dory.zig, mod.zig, evaluation_proof.rs, etc.
-- [ ] Commit the fixes
-- [ ] Run tests with different trace lengths
+- [x] Stage 8 Dory opening proof generation
+- [x] All 8 stages verified successfully
+- [x] Debug prints cleaned up
+- [x] All fixes committed and pushed
 
 ## Test Commands
 ```bash

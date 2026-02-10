@@ -1037,8 +1037,7 @@ pub fn JoltProver(comptime F: type) type {
             const bytecode_d = if (log_bytecode_k == 0) 1 else (log_bytecode_k + log_k_chunk - 1) / log_k_chunk;
             const ram_d = if (log_ram_k == 0) 1 else (log_ram_k + log_k_chunk - 1) / log_k_chunk;
 
-            std.debug.print("\n[ZOLT] OneHot params: instruction_d={}, bytecode_d={}, ram_d={}\n", .{ instruction_d, bytecode_d, ram_d });
-            std.debug.print("[ZOLT] Total commitments = 2 + {} + {} + {} = {}\n", .{ instruction_d, ram_d, bytecode_d, 2 + instruction_d + ram_d + bytecode_d });
+            std.debug.print("[ZOLT] OneHot params: instruction_d={}, bytecode_d={}, ram_d={}\n", .{ instruction_d, bytecode_d, ram_d });
 
             // Build commitment polynomials and compute Dory commitments
             // Order: RdInc, RamInc, InstructionRa[0..instruction_d-1], RamRa[0..ram_d-1], BytecodeRa[0..bytecode_d-1]
@@ -1073,13 +1072,6 @@ pub fn JoltProver(comptime F: type) type {
             witness_idx += 1;
             const rd_inc_comm = DoryScheme.commit(&dory_srs, rd_inc_poly);
             try all_commitments.append(self.allocator, rd_inc_comm);
-            {
-                // Debug: print first commitment bytes
-                const comm_bytes = rd_inc_comm.toBytes();
-                std.debug.print("[STAGE8_DEBUG] RdInc commitment first 32 bytes: ", .{});
-                for (comm_bytes[0..32]) |b| std.debug.print("{x:0>2}", .{b});
-                std.debug.print("\n", .{});
-            }
 
             // RamInc: dense polynomial, trace_length entries
             // CRITICAL: Must pad to k_chunk*trace_length (same as RdInc)
@@ -1126,27 +1118,6 @@ pub fn JoltProver(comptime F: type) type {
                         onehot_poly[addr * trace_length + cycle] = F.one();
                     }
                 }
-                // Debug: print first few cycles' chunk values for RamRa(0)
-                if (idx == 0) {
-                    std.debug.print("[RAMRA-DBG] RamRa(0) shift={d}, log_k_chunk={d}, ram_d={d}\n", .{ shift, log_k_chunk, ram_d });
-                    var nonzero_count: usize = 0;
-                    for (0..@min(trace_length, 20)) |c| {
-                        const step = emulator.trace.steps.items[c];
-                        const raw_addr = step.memory_addr orelse 0;
-                        const raddr: u64 = if (raw_addr != 0)
-                            (device.memory_layout.remapAddress(raw_addr) orelse 0)
-                        else
-                            0;
-                        const cv = chunk_values[c].toU64();
-                        if (cv != 0 or raw_addr != 0) {
-                            std.debug.print("[RAMRA-DBG] cycle={d} raw=0x{x:0>16} remap={d} chunk={d} is_noop={}\n", .{ c, raw_addr, raddr, cv, step.is_noop });
-                        }
-                    }
-                    for (0..trace_length) |c| {
-                        if (!chunk_values[c].eql(F.zero())) nonzero_count += 1;
-                    }
-                    std.debug.print("[RAMRA-DBG] RamRa(0) total nonzero chunk values: {d}/{d}\n", .{ nonzero_count, trace_length });
-                }
                 witness_polys[witness_idx] = onehot_poly;
                 witness_idx += 1;
                 try all_commitments.append(self.allocator, DoryScheme.commit(&dory_srs, onehot_poly));
@@ -1185,23 +1156,18 @@ pub fn JoltProver(comptime F: type) type {
             result.dory_commitments = try all_commitments.toOwnedSlice(self.allocator);
 
             // Append Dory commitments (GT elements) to transcript
-            std.debug.print("\n[ZOLT PROVE] === Appending Dory Commitments ===\n", .{});
-            for (result.dory_commitments, 0..) |comm, comm_idx| {
-                std.debug.print("[ZOLT PROVE] Appending Dory commitment {}/{}\n", .{ comm_idx + 1, result.dory_commitments.len });
+            for (result.dory_commitments) |comm| {
                 transcript.appendGT(comm);
             }
-            std.debug.print("[ZOLT PROVE] === Done Appending Commitments ===\n\n", .{});
 
             // Derive tau from transcript after preamble and commitments
             // CRITICAL: Must use trace_length (padded, power-of-2) not cycle_witnesses.len (actual count)
             // Jolt uses: num_steps.next_power_of_two().log_2() where num_steps = trace_length
             const num_cycle_vars = std.math.log2_int(usize, @max(1, trace_length));
             const num_rows_bits = num_cycle_vars + 2;
-            std.debug.print("[ZOLT PROVE] Deriving tau: num_cycle_vars={d}, num_rows_bits={d} (trace_length={d}, cycle_witnesses.len={d})\n", .{ num_cycle_vars, num_rows_bits, trace_length, cycle_witnesses.len });
             var tau = try self.allocator.alloc(F, num_rows_bits);
             defer self.allocator.free(tau);
             for (0..num_rows_bits) |i| {
-                std.debug.print("[ZOLT PROVE] tau[{d}] = challengeScalar()\n", .{i});
                 tau[i] = transcript.challengeScalar();
             }
 
@@ -1353,14 +1319,6 @@ pub fn JoltProver(comptime F: type) type {
                     claims_ordered[2 + instruction_d + bytecode_d + i] = claim;
                 }
 
-                std.debug.print("[STAGE8] num_claims = {}\n", .{num_claims});
-                for (0..@min(5, num_claims)) |i| {
-                    const c_be = claims_ordered[i].toBytesBE();
-                    std.debug.print("[STAGE8] claim[{}]_LE=[", .{i});
-                    for (0..8) |bi| std.debug.print("{x:0>2}", .{c_be[31 - bi]});
-                    std.debug.print("]\n", .{});
-                }
-
                 // 2. Append all claims to transcript
                 // CRITICAL: Must use appendScalars (not individual appendScalar calls)
                 // because Jolt's append_scalars wraps with "begin_append_vector"/"end_append_vector"
@@ -1369,12 +1327,6 @@ pub fn JoltProver(comptime F: type) type {
                 // 3. Sample gamma powers: [1, γ, γ², ..., γ^(n-1)]
                 const gamma_powers = try transcript.challengeScalarPowers(self.allocator, num_claims);
                 defer self.allocator.free(gamma_powers);
-                {
-                    const g_be = gamma_powers[1].toBytesBE();
-                    std.debug.print("[STAGE8] gamma_LE=[", .{});
-                    for (0..8) |bi| std.debug.print("{x:0>2}", .{g_be[31 - bi]});
-                    std.debug.print("]\n", .{});
-                }
 
                 // 4. Build joint polynomial: Σ γ^i * poly_i
                 // All witness polynomials need to be evaluated at the same point.
@@ -1470,10 +1422,8 @@ pub fn JoltProver(comptime F: type) type {
                     dory_point[i] = opening_point[opening_point.len - 1 - i];
                 }
 
-                std.debug.print("[STAGE8] joint_poly size = {}, dory_point size = {}\n", .{ total_poly_size, dory_point.len });
-
-                // Verify: MLE(joint_poly, dory_point) should equal joint_claim
-                {
+                // Debug: verify MLE consistency (expensive, only for debugging)
+                if (false) {
                     // Compute joint_claim = Σ γ^i * claim_i
                     var expected_joint_claim = F.zero();
                     for (0..num_claims) |i| {
@@ -1659,34 +1609,6 @@ pub fn JoltProver(comptime F: type) type {
                     }
                 }
 
-                // Debug: print transcript state before Dory protocol
-                {
-                    const tr_state = transcript.debugState();
-                    std.debug.print("[STAGE8] transcript state BEFORE dory: ", .{});
-                    for (tr_state[0..16]) |b| std.debug.print("{x:0>2}", .{b});
-                    std.debug.print(" n_rounds={}\n", .{transcript.n_rounds});
-                }
-
-                // DEBUG: Compute actual Dory commitment of joint_poly
-                {
-                    const actual_joint_comm = DoryScheme.commit(&dory_srs, joint_poly);
-                    const actual_bytes = actual_joint_comm.toBytes();
-                    std.debug.print("[STAGE8-COMM] actual Dory(joint_poly) first 32: ", .{});
-                    for (actual_bytes[0..32]) |b| std.debug.print("{x:0>2}", .{b});
-                    std.debug.print("\n", .{});
-                    std.debug.print("[STAGE8-COMM] actual Dory(joint_poly) last 32: ", .{});
-                    for (actual_bytes[352..384]) |b| std.debug.print("{x:0>2}", .{b});
-                    std.debug.print("\n", .{});
-
-                    // Print individual commitment bytes for comparison with Jolt
-                    for (0..@min(result.dory_commitments.len, 3)) |ci| {
-                        const cb = result.dory_commitments[ci].toBytes();
-                        std.debug.print("[STAGE8-COMM] commitment[{d}] first 32: ", .{ci});
-                        for (cb[0..32]) |b| std.debug.print("{x:0>2}", .{b});
-                        std.debug.print("\n", .{});
-                    }
-                }
-
                 // Use the same SRS that was used for commitments (loaded from file for Jolt compatibility)
                 // CRITICAL: Must use openWithTranscript to integrate with Fiat-Shamir.
                 // The Jolt verifier uses JoltToDoryTranscript which bridges the Jolt transcript
@@ -1701,10 +1623,9 @@ pub fn JoltProver(comptime F: type) type {
                     self.allocator,
                 );
                 result.dory_opening_proof = dory_proof;
-                result.opening_point = opening_point; // Already stored by convertWithTranscript
+                result.opening_point = opening_point;
 
-                std.debug.print("[STAGE8] === Dory Opening Proof Generated ===\n", .{});
-                std.debug.print("[STAGE8] nu={}, sigma={}, first_messages={}, second_messages={}\n", .{
+                std.debug.print("[STAGE8] Dory proof: nu={}, sigma={}, first_messages={}, second_messages={}\n", .{
                     dory_proof.nu, dory_proof.sigma,
                     dory_proof.first_messages.len, dory_proof.second_messages.len,
                 });

@@ -1061,7 +1061,14 @@ pub fn JoltProver(comptime F: type) type {
             var witness_idx: usize = 0;
 
             // RdInc: dense polynomial, trace_length entries
-            const rd_inc_poly = try self.buildRdIncPolynomial(&emulator.trace, trace_length);
+            // CRITICAL: Must pad to k_chunk*trace_length for Dory commitment
+            // Jolt commits ALL polynomials using the same matrix layout (K*T sized),
+            // so dense polys must be padded to match the one-hot poly dimensions.
+            const rd_inc_poly_raw = try self.buildRdIncPolynomial(&emulator.trace, trace_length);
+            defer self.allocator.free(rd_inc_poly_raw);
+            const rd_inc_poly = try self.allocator.alloc(F, k_chunk * trace_length);
+            @memset(rd_inc_poly, F.zero());
+            @memcpy(rd_inc_poly[0..rd_inc_poly_raw.len], rd_inc_poly_raw);
             witness_polys[witness_idx] = rd_inc_poly;
             witness_idx += 1;
             const rd_inc_comm = DoryScheme.commit(&dory_srs, rd_inc_poly);
@@ -1075,7 +1082,12 @@ pub fn JoltProver(comptime F: type) type {
             }
 
             // RamInc: dense polynomial, trace_length entries
-            const ram_inc_poly = try self.buildRamIncPolynomial(&emulator.trace, trace_length);
+            // CRITICAL: Must pad to k_chunk*trace_length (same as RdInc)
+            const ram_inc_poly_raw = try self.buildRamIncPolynomial(&emulator.trace, trace_length);
+            defer self.allocator.free(ram_inc_poly_raw);
+            const ram_inc_poly = try self.allocator.alloc(F, k_chunk * trace_length);
+            @memset(ram_inc_poly, F.zero());
+            @memcpy(ram_inc_poly[0..ram_inc_poly_raw.len], ram_inc_poly_raw);
             witness_polys[witness_idx] = ram_inc_poly;
             witness_idx += 1;
             try all_commitments.append(self.allocator, DoryScheme.commit(&dory_srs, ram_inc_poly));
@@ -1391,22 +1403,25 @@ pub fn JoltProver(comptime F: type) type {
                 // We need to accumulate: joint_poly += gamma_powers[jolt_idx] * witness_polys[zolt_idx]
 
                 // RamInc: gamma_powers[0] maps to witness_polys[1] (RamInc)
-                // Dense poly: embed into address=0 region of k_chunk*T space
+                // Dense polys are now padded to k_chunk*T, same as sparse polys
                 {
-                    const ram_inc_wp = witness_polys[1]; // witness RamInc
+                    const ram_inc_wp = witness_polys[1]; // witness RamInc (padded to k_chunk*T)
                     const gamma = gamma_powers[0]; // Jolt order: RamInc is first
-                    for (0..@min(ram_inc_wp.len, trace_length)) |j| {
-                        // In CycleMajor layout, address=0 spans [0..T)
-                        joint_poly[j] = joint_poly[j].add(ram_inc_wp[j].mul(gamma));
+                    for (0..@min(ram_inc_wp.len, total_poly_size)) |j| {
+                        if (!ram_inc_wp[j].eql(F.zero())) {
+                            joint_poly[j] = joint_poly[j].add(ram_inc_wp[j].mul(gamma));
+                        }
                     }
                 }
 
                 // RdInc: gamma_powers[1] maps to witness_polys[0] (RdInc)
                 {
-                    const rd_inc_wp = witness_polys[0]; // witness RdInc
+                    const rd_inc_wp = witness_polys[0]; // witness RdInc (padded to k_chunk*T)
                     const gamma = gamma_powers[1]; // Jolt order: RdInc is second
-                    for (0..@min(rd_inc_wp.len, trace_length)) |j| {
-                        joint_poly[j] = joint_poly[j].add(rd_inc_wp[j].mul(gamma));
+                    for (0..@min(rd_inc_wp.len, total_poly_size)) |j| {
+                        if (!rd_inc_wp[j].eql(F.zero())) {
+                            joint_poly[j] = joint_poly[j].add(rd_inc_wp[j].mul(gamma));
+                        }
                     }
                 }
 
@@ -1641,6 +1656,34 @@ pub fn JoltProver(comptime F: type) type {
                         std.debug.print("]\n", .{});
                         std.debug.print("[STAGE8-DBG] sum_individual matches joint_poly_mle? {}\n", .{sum_individual_mle.eql(mle_eval)});
                         std.debug.print("[STAGE8-DBG] sum_individual matches expected_joint_claim? {}\n", .{sum_individual_mle.eql(expected_joint_claim)});
+                    }
+                }
+
+                // Debug: print transcript state before Dory protocol
+                {
+                    const tr_state = transcript.debugState();
+                    std.debug.print("[STAGE8] transcript state BEFORE dory: ", .{});
+                    for (tr_state[0..16]) |b| std.debug.print("{x:0>2}", .{b});
+                    std.debug.print(" n_rounds={}\n", .{transcript.n_rounds});
+                }
+
+                // DEBUG: Compute actual Dory commitment of joint_poly
+                {
+                    const actual_joint_comm = DoryScheme.commit(&dory_srs, joint_poly);
+                    const actual_bytes = actual_joint_comm.toBytes();
+                    std.debug.print("[STAGE8-COMM] actual Dory(joint_poly) first 32: ", .{});
+                    for (actual_bytes[0..32]) |b| std.debug.print("{x:0>2}", .{b});
+                    std.debug.print("\n", .{});
+                    std.debug.print("[STAGE8-COMM] actual Dory(joint_poly) last 32: ", .{});
+                    for (actual_bytes[352..384]) |b| std.debug.print("{x:0>2}", .{b});
+                    std.debug.print("\n", .{});
+
+                    // Print individual commitment bytes for comparison with Jolt
+                    for (0..@min(result.dory_commitments.len, 3)) |ci| {
+                        const cb = result.dory_commitments[ci].toBytes();
+                        std.debug.print("[STAGE8-COMM] commitment[{d}] first 32: ", .{ci});
+                        for (cb[0..32]) |b| std.debug.print("{x:0>2}", .{b});
+                        std.debug.print("\n", .{});
                     }
                 }
 

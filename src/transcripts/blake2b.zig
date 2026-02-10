@@ -537,6 +537,11 @@ pub fn Blake2bTranscript(comptime F: type) type {
             self.appendBytes(&bytes);
         }
 
+        /// Debug helper: return current transcript state
+        pub fn debugState(self: *const Self) [32]u8 {
+            return self.state;
+        }
+
         /// Append a G2 point to the transcript (compressed format)
         /// For Dory compatibility - appends the compressed serialized point
         pub fn appendG2Compressed(self: *Self, point: anytype) void {

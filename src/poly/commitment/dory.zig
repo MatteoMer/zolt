@@ -54,6 +54,11 @@ fn doryAppendGT(transcript: anytype, gt: GT) void {
     const bytes = gt.toBytes();
     // For Fp12, serialize_compressed == serialize_uncompressed (384 bytes)
     // No reversal - Dory's JoltToDoryTranscript uses append_bytes directly
+    std.debug.print("[ZOLT DORY TR] appendGT len=384 first8=", .{});
+    for (bytes[0..8]) |b| std.debug.print("{x:0>2}", .{b});
+    std.debug.print(" last8=", .{});
+    for (bytes[376..384]) |b| std.debug.print("{x:0>2}", .{b});
+    std.debug.print("\n", .{});
     transcript.appendBytes(&bytes);
 }
 
@@ -61,6 +66,11 @@ fn doryAppendGT(transcript: anytype, gt: GT) void {
 /// Uses compressed serialization (32 bytes), no reversal.
 fn doryAppendG1(transcript: anytype, point: G1Point) void {
     const bytes = compressG1(point);
+    std.debug.print("[ZOLT DORY TR] appendG1 len=32 first8=", .{});
+    for (bytes[0..8]) |b| std.debug.print("{x:0>2}", .{b});
+    std.debug.print(" last8=", .{});
+    for (bytes[24..32]) |b| std.debug.print("{x:0>2}", .{b});
+    std.debug.print("\n", .{});
     transcript.appendBytes(&bytes);
 }
 
@@ -68,6 +78,11 @@ fn doryAppendG1(transcript: anytype, point: G1Point) void {
 /// Uses compressed serialization (64 bytes), no reversal.
 fn doryAppendG2(transcript: anytype, point: G2Point) void {
     const bytes = compressG2(point);
+    std.debug.print("[ZOLT DORY TR] appendG2 len=64 first8=", .{});
+    for (bytes[0..8]) |b| std.debug.print("{x:0>2}", .{b});
+    std.debug.print(" last8=", .{});
+    for (bytes[56..64]) |b| std.debug.print("{x:0>2}", .{b});
+    std.debug.print("\n", .{});
     transcript.appendBytes(&bytes);
 }
 
@@ -1630,6 +1645,22 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                     .e2_beta = e2_beta,
                 };
 
+                // Debug: print first round's messages
+                if (round < 2) {
+                    const d1l_bytes = d1_left.toBytes();
+                    std.debug.print("[DORY PROVE] round {} d1_left first 16: ", .{round});
+                    for (d1l_bytes[0..16]) |b| std.debug.print("{x:0>2}", .{b});
+                    std.debug.print("\n", .{});
+                    const e1b_bytes = compressG1(e1_beta);
+                    std.debug.print("[DORY PROVE] round {} e1_beta compressed: ", .{round});
+                    for (e1b_bytes[0..32]) |b| std.debug.print("{x:0>2}", .{b});
+                    std.debug.print("\n", .{});
+                    const e2b_bytes = compressG2(e2_beta);
+                    std.debug.print("[DORY PROVE] round {} e2_beta compressed first 32: ", .{round});
+                    for (e2b_bytes[0..32]) |b| std.debug.print("{x:0>2}", .{b});
+                    std.debug.print("\n", .{});
+                }
+
                 // Append first message to transcript (Dory format: no reversal)
                 doryAppendGT(transcript, d1_left);
                 doryAppendGT(transcript, d1_right);
@@ -1639,8 +1670,15 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 doryAppendG2(transcript, e2_beta);
 
                 // Get beta challenge from transcript
-                const beta = transcript.challengeScalar();
+                const beta = transcript.challengeScalarFull();
                 const beta_inv = beta.inverse() orelse F.one();
+
+                if (round < 2) {
+                    const beta_bytes = beta.toBytes();
+                    std.debug.print("[DORY PROVE] round {} beta: ", .{round});
+                    for (0..16) |bi| std.debug.print("{x:0>2}", .{beta_bytes[bi]});
+                    std.debug.print("\n", .{});
+                }
 
                 // Apply first challenge
                 for (0..current_len) |i| {
@@ -1677,8 +1715,15 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 doryAppendG2(transcript, e2_minus);
 
                 // Get alpha challenge from transcript
-                const alpha = transcript.challengeScalar();
+                const alpha = transcript.challengeScalarFull();
                 const alpha_inv = alpha.inverse() orelse F.one();
+
+                if (round < 2) {
+                    const alpha_bytes = alpha.toBytes();
+                    std.debug.print("[DORY PROVE] round {} alpha: ", .{round});
+                    for (0..16) |bi| std.debug.print("{x:0>2}", .{alpha_bytes[bi]});
+                    std.debug.print("\n", .{});
+                }
 
                 // Fold vectors
                 for (0..n2) |i| {
@@ -1703,8 +1748,15 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             }
 
             // Get gamma challenge
-            const gamma = transcript.challengeScalar();
+            const gamma = transcript.challengeScalarFull();
             const gamma_inv = gamma.inverse() orelse F.one();
+
+            {
+                const gamma_bytes = gamma.toBytes();
+                std.debug.print("[DORY PROVE] gamma: ", .{});
+                for (0..16) |bi| std.debug.print("{x:0>2}", .{gamma_bytes[bi]});
+                std.debug.print("\n", .{});
+            }
 
             // Compute final message: E₁ = v₁ + γ·s₁·h₁, E₂ = v₂ + γ⁻¹·s₂·h₂
             const gamma_s1 = gamma.mul(s1_work[0]);
@@ -1720,8 +1772,20 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 .e2 = final_e2,
             };
 
+            // Debug: print final message
+            {
+                const e1_bytes = compressG1(final_e1);
+                std.debug.print("[DORY PROVE] final e1 compressed: ", .{});
+                for (e1_bytes[0..32]) |b| std.debug.print("{x:0>2}", .{b});
+                std.debug.print("\n", .{});
+                const e2_bytes = compressG2(final_e2);
+                std.debug.print("[DORY PROVE] final e2 compressed first 32: ", .{});
+                for (e2_bytes[0..32]) |b| std.debug.print("{x:0>2}", .{b});
+                std.debug.print("\n", .{});
+            }
+
             // Get final d challenge to keep transcript in sync
-            _ = transcript.challengeScalar();
+            _ = transcript.challengeScalarFull();
 
             return Proof{
                 .vmv_message = vmv_message,

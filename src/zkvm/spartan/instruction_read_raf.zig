@@ -141,6 +141,8 @@ pub fn InstructionReadRafProver(comptime F: type) type {
                     0x03, // Load
                     0x23, // Store
                     => true,
+                    0x0B, // VirtualSignExtendWord - NOT interleaved (uses AddOperands)
+                    => false,
                     else => false,
                 };
 
@@ -148,7 +150,9 @@ pub fn InstructionReadRafProver(comptime F: type) type {
                 // For interleaved: left = rs1, right = rs2
                 // For non-interleaved (identity): use rs1+rs2 combination
                 const left = F.fromU64(rs1);
-                const right: F = if (opcode == 0x13)
+                const right: F = if (opcode == 0x0B)
+                    F.fromU64(rs2) // VirtualSignExtendWord: right operand is 0
+                else if (opcode == 0x13)
                     F.fromU64(@intCast(@as(i64, @bitCast(@as(u64, step.instruction >> 20) | if ((step.instruction >> 31) != 0) 0xFFFFFFFF_FFF00000 else 0)))) // Sign-extended immediate
                 else
                     F.fromU64(rs2);
@@ -159,7 +163,12 @@ pub fn InstructionReadRafProver(comptime F: type) type {
                 raf_flags[j] = !is_interleaved;
 
                 // Compute lookup index (interleaved bits of operands)
-                lookup_indices[j] = interleaveBits(rs1, if (opcode == 0x13) @truncate(@as(u64, @bitCast(@as(i64, @intCast(@as(i32, @bitCast(@as(u32, @truncate(step.instruction >> 20))))))))) else rs2);
+                if (opcode == 0x0B) {
+                    // VirtualSignExtendWord: lookup index = rs1_val (not interleaved)
+                    lookup_indices[j] = @as(u128, rs1);
+                } else {
+                    lookup_indices[j] = interleaveBits(rs1, if (opcode == 0x13) @truncate(@as(u64, @bitCast(@as(i64, @intCast(@as(i32, @bitCast(@as(u32, @truncate(step.instruction >> 20))))))))) else rs2);
+                }
 
                 // Determine which lookup table is used
                 table_indices[j] = getTableIndex(step.instruction);
@@ -380,6 +389,7 @@ fn getTableIndex(instruction: u32) ?usize {
             0x7 => @as(?usize, 21), // BGEU
             else => null,
         },
+        0x0B => @as(?usize, 22), // VirtualSignExtendWord
         else => null,
     };
 }

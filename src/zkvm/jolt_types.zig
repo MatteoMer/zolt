@@ -99,12 +99,10 @@ pub const SumcheckId = enum(u8) {
     RegistersValEvaluation = 17,
     BytecodeReadRaf = 18,
     Booleanity = 19,
-    AdviceClaimReductionCyclePhase = 20,
-    AdviceClaimReduction = 21,
-    IncClaimReduction = 22,
-    HammingWeightClaimReduction = 23,
+    IncClaimReduction = 20,
+    HammingWeightClaimReduction = 21,
 
-    pub const COUNT: u8 = 24;
+    pub const COUNT: u8 = 22;
 };
 
 // =============================================================================

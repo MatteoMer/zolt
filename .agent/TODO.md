@@ -1,20 +1,39 @@
 # Zolt → Jolt Verification Progress
 
 ## Current Status
-**✅ ALL 8 STAGES PASS! Verification succeeded!**
+**🔧 IN PROGRESS — Goal: verify Zolt proofs against vanilla (unmodified) Jolt**
 
-## Success Criteria Verification
+The current proof passes against a modified Jolt fork. The project is NOT complete until verification works against an unmodified upstream Jolt.
 
-1. ✅ `zig build test` passes all 716/716 tests
-   - One integration test (`execute runs simple program`) gets OOM-killed by kernel (infrastructure limitation, not code bug)
-2. ✅ Zolt can generate a proof for the fibonacci example program
-3. ✅ The proof is loaded and verified by Jolt's verifier (all 8 stages pass)
-4. ✅ No modifications to Jolt's core verification logic
-   - Jolt changes are: debug prints (feature-gated), test harness, and new ISA instructions (ADDIW, ADDW, SLLI)
-   - All debug prints are behind `#[cfg(feature = "zolt-debug")]`
-   - New instructions are purely additive extensions needed for RV64I programs
+## Goal
+Zolt-generated proofs must verify against a **vanilla Jolt verifier** with zero modifications to Jolt's code. Any incompatibility must be fixed on the Zolt side.
 
-## Summary of All Fixes
+## Resources
+- Upstream Jolt: `./jolt` (git submodule)
+- Arkworks: `./arkworks` (local copy for reference)
+
+## Current Jolt Modifications That Must Be Eliminated
+These are changes currently in our Jolt fork that we need to remove by fixing Zolt instead:
+
+1. **Debug prints**: ~35 files with `eprintln!` behind `#[cfg(feature = "zolt-debug")]`
+2. **Test harness**: `examples/fibonacci/src/main.rs` with `--verify-zolt-proof` CLI mode
+3. **Test module**: `zolt_compat_test.rs` (behind `#[cfg(test)]`)
+4. **New instructions**: ADDIW, ADDW, SLLI - ISA extensions added for RV64I programs
+
+### Analysis Needed
+- Which of these modifications are load-bearing for verification vs. just debug/test infrastructure?
+- Can the test harness be written as a standalone Rust binary that links against vanilla Jolt as a library?
+- Do the new ISA instructions (ADDIW, ADDW, SLLI) affect verification, or only proof generation?
+
+## TODO
+- [ ] Inventory all Jolt-side changes and classify as: verification-affecting vs. debug/test-only
+- [ ] Build a standalone verifier binary that links against vanilla Jolt (no modifications)
+- [ ] Fix any Zolt proof generation issues that arise from removing Jolt modifications
+- [ ] Verify Zolt proof against vanilla Jolt — all 8 stages must pass
+- [ ] Ensure `zig build test` still passes all tests
+
+## Historical Fixes (for reference)
+These are all the fixes that were made to Zolt to get verification working against the modified Jolt fork. They remain relevant context.
 
 ### Stage 1: Transcript & Challenge Alignment
 - Blake2b transcript initialization matching Jolt's format
@@ -52,16 +71,6 @@
 - DoryVerifierSetup.fromSRS using correct SRS parameters (h2, max_num_vars=20)
 - Joint polynomial gamma power ordering: RamInc, RdInc, InstructionRa, BytecodeRa, RamRa
 
-## Jolt-Side Changes Analysis
-
-### Acceptable Changes (no impact on verification logic):
-- **Debug prints**: ~35 files with `eprintln!` behind `#[cfg(feature = "zolt-debug")]`
-- **Test harness**: `examples/fibonacci/src/main.rs` with `--verify-zolt-proof` CLI mode
-- **Test module**: `zolt_compat_test.rs` (behind `#[cfg(test)]`)
-- **New instructions**: ADDIW, ADDW, SLLI - purely additive ISA extensions for RV64I
-
-### Core verification logic: UNCHANGED ✅
-
 ## Test Commands
 ```bash
 # Build Zolt
@@ -70,7 +79,10 @@ cd /home/vivado/projects/zolt && zig build -Doptimize=ReleaseFast
 # Generate proof
 ./zig-out/bin/zolt prove examples/fibonacci.elf --trace-length 64 -o /tmp/zolt_proof.bin --jolt-format --export-preprocessing /tmp/zolt_preprocessing.bin --srs /tmp/jolt_dory_srs.bin
 
-# Verify with Jolt
+# Verify with vanilla Jolt (TARGET — not yet working)
+# TODO: build standalone verifier against unmodified Jolt
+
+# Verify with modified Jolt (current — to be replaced)
 cd /home/vivado/projects/jolt && RAYON_NUM_THREADS=1 cargo run --release --features zolt-debug --manifest-path examples/fibonacci/Cargo.toml -- --verify-zolt-proof /tmp/zolt_proof.bin --zolt-preprocessing /tmp/zolt_preprocessing.bin.ram
 
 # Run Zig tests

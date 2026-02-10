@@ -253,6 +253,63 @@ pub const Emulator = struct {
     }
 
     /// Execute a single instruction
+    /// Synthetic instruction encoding for VirtualSignExtendWord.
+    /// Uses RISC-V custom-0 opcode (0x0B) with funct3=0.
+    /// Encoding: I-type: imm[11:0] | rs1[19:15] | funct3[14:12] | rd[11:7] | opcode[6:0]
+    pub const VIRTUAL_SIGN_EXTEND_WORD_OPCODE: u7 = 0x0B;
+
+    /// Build a synthetic VirtualSignExtendWord instruction word
+    fn buildVirtualSignExtendWordInstr(rd: u8, rs1: u8) u32 {
+        return @as(u32, 0) | // imm = 0
+            (@as(u32, rs1) << 15) |
+            (0 << 12) | // funct3 = 0
+            (@as(u32, rd) << 7) |
+            @as(u32, VIRTUAL_SIGN_EXTEND_WORD_OPCODE);
+    }
+
+    const WExtType = enum { ADDIW, ADDW, SUBW, MULW };
+
+    /// Check if an instruction is a W-extension instruction that needs decomposition
+    fn isWExtension(decoded: zkvm.instruction.DecodedInstruction) ?WExtType {
+        switch (decoded.opcode) {
+            .OP_IMM_32 => {
+                if (decoded.funct3 == 0) return .ADDIW;
+                return null;
+            },
+            .OP_32 => {
+                if (decoded.funct7 == 0x01) {
+                    if (decoded.funct3 == 0) return .MULW;
+                    return null; // DIVW, REMW etc. have complex decompositions
+                }
+                if (decoded.funct3 == 0) {
+                    if ((decoded.funct7 & 0x20) != 0) return .SUBW;
+                    return .ADDW;
+                }
+                return null; // SLLW, SRLW, SRAW have complex decompositions
+            },
+            else => return null,
+        }
+    }
+
+    /// Build a synthetic base instruction for W-extension decomposition.
+    /// ADDIW → ADDI (same operands): opcode=0x13, same rd/rs1/imm
+    /// ADDW → ADD (same operands): opcode=0x33, funct7=0, same rd/rs1/rs2
+    /// SUBW → SUB (same operands): opcode=0x33, funct7=0x20, same rd/rs1/rs2
+    /// MULW → MUL (same operands): opcode=0x33, funct7=0x01, same rd/rs1/rs2
+    fn buildBaseInstruction(original: u32, w_type: WExtType) u32 {
+        const rd: u32 = (original >> 7) & 0x1f;
+        const rs1: u32 = (original >> 15) & 0x1f;
+        const rs2: u32 = (original >> 20) & 0x1f;
+        const imm_bits: u32 = original & 0xFFF00000; // upper 12 bits for I-type
+
+        return switch (w_type) {
+            .ADDIW => imm_bits | (rs1 << 15) | (0b000 << 12) | (rd << 7) | 0x13, // ADDI
+            .ADDW => (0x00 << 25) | (rs2 << 20) | (rs1 << 15) | (0b000 << 12) | (rd << 7) | 0x33, // ADD
+            .SUBW => (0x20 << 25) | (rs2 << 20) | (rs1 << 15) | (0b000 << 12) | (rd << 7) | 0x33, // SUB
+            .MULW => (0x01 << 25) | (rs2 << 20) | (rs1 << 15) | (0b000 << 12) | (rd << 7) | 0x33, // MUL
+        };
+    }
+
     pub fn step(self: *Emulator) !bool {
         // Infinite loop detection (matching Jolt's termination heuristic)
         // If PC hasn't changed since last step, the program has terminated
@@ -268,11 +325,23 @@ pub const Emulator = struct {
         const instruction = try self.fetchInstruction();
         self.state.instruction = instruction;
 
-        // Debug removed for now - too noisy
-
         // Decode
         const decoded = zkvm.instruction.DecodedInstruction.decode(instruction);
 
+        // Check if this is a W-extension instruction that needs decomposition
+        const w_ext = isWExtension(decoded);
+
+        if (w_ext) |w_type| {
+            // W-extension decomposition: generate 2 trace steps
+            return try self.stepWExtension(instruction, decoded, w_type);
+        }
+
+        // Standard (non-W-extension) instruction execution
+        return try self.stepNormal(instruction, decoded);
+    }
+
+    /// Execute a standard (non-W-extension) instruction as a single trace step
+    fn stepNormal(self: *Emulator, instruction: u32, decoded: zkvm.instruction.DecodedInstruction) !bool {
         // Record pre-execution state
         const rs1_value = try self.registers.read(decoded.rs1);
         const rs2_value = try self.registers.read(decoded.rs2);
@@ -314,8 +383,6 @@ pub const Emulator = struct {
         try self.trace.addStep(.{
             .cycle = self.state.cycle,
             .pc = self.state.pc,
-            // For now without virtual sequences, unexpanded_pc = pc
-            // When virtual sequences are implemented, this would be the raw RISC-V address
             .unexpanded_pc = self.state.pc,
             .instruction = instruction,
             .rs1_value = rs1_value,
@@ -323,7 +390,7 @@ pub const Emulator = struct {
             .rd_pre_value = rd_pre_value,
             .rd_value = result.rd_value,
             .memory_addr = result.memory_addr,
-            .memory_pre_value = memory_pre_value, // Populated from RAM trace
+            .memory_pre_value = memory_pre_value,
             .memory_value = result.memory_value,
             .is_memory_write = result.is_memory_write,
             .next_pc = result.next_pc,
@@ -335,6 +402,129 @@ pub const Emulator = struct {
 
         // Update state
         self.state.pc = result.next_pc;
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        return true;
+    }
+
+    /// Execute a W-extension instruction as 2 decomposed trace steps:
+    /// Step 1: Base instruction (ADDI/ADD/SUB/MUL) with full 64-bit result
+    /// Step 2: VirtualSignExtendWord - sign-extend lower 32 bits to 64 bits
+    fn stepWExtension(
+        self: *Emulator,
+        instruction: u32,
+        decoded: zkvm.instruction.DecodedInstruction,
+        w_type: WExtType,
+    ) !bool {
+        const rs1_value = try self.registers.read(decoded.rs1);
+        const rs2_value = try self.registers.read(decoded.rs2);
+        const rd_pre_value = try self.registers.read(decoded.rd);
+        const pc_increment: u64 = if (self.is_compressed) 2 else 4;
+
+        // --- Step 1: Base instruction with full 64-bit semantics ---
+        // Compute the FULL 64-bit result (not truncated to 32 bits)
+        const base_result: u64 = switch (w_type) {
+            .ADDIW => rs1_value +% @as(u64, @bitCast(@as(i64, decoded.imm))),
+            .ADDW => rs1_value +% rs2_value,
+            .SUBW => rs1_value -% rs2_value,
+            .MULW => rs1_value *% rs2_value,
+        };
+
+        // Build the synthetic base instruction (ADDI/ADD/SUB/MUL encoding)
+        const base_instr = buildBaseInstruction(instruction, w_type);
+        const base_decoded = zkvm.instruction.DecodedInstruction.decode(base_instr);
+
+        // Determine the right operand value for the base instruction
+        const base_rs2_value: u64 = switch (w_type) {
+            .ADDIW => @as(u64, @bitCast(@as(i64, decoded.imm))), // imm as rs2 for ADDI
+            .ADDW, .SUBW, .MULW => rs2_value,
+        };
+
+        // Record lookup trace for base instruction
+        try self.lookup_trace.recordInstruction(
+            @intCast(self.state.cycle),
+            self.state.pc,
+            base_instr,
+            base_decoded,
+            rs1_value,
+            base_rs2_value,
+        );
+
+        // Write base result to register
+        try self.registers.write(decoded.rd, base_result);
+
+        // Record trace step 1 (base instruction)
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle,
+            .pc = self.state.pc,
+            .unexpanded_pc = self.state.pc,
+            .instruction = base_instr,
+            .rs1_value = rs1_value,
+            .rs2_value = switch (w_type) {
+                .ADDIW => 0, // ADDI: rs2 field is not used (imm is in instruction)
+                .ADDW, .SUBW, .MULW => rs2_value,
+            },
+            .rd_pre_value = rd_pre_value,
+            .rd_value = base_result,
+            .memory_addr = null,
+            .memory_pre_value = null,
+            .memory_value = null,
+            .is_memory_write = false,
+            .next_pc = self.state.pc + pc_increment, // Next PC is the same address for virtual seq
+            .is_compressed = self.is_compressed,
+            .virtual_sequence_remaining = 1, // 2-instruction sequence: base(1), VirtualSignExtendWord(0)
+        });
+
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // --- Step 2: VirtualSignExtendWord ---
+        // Sign-extend lower 32 bits of the base result
+        const sign_extended: u64 = @bitCast(@as(i64, @as(i32, @truncate(@as(i64, @bitCast(base_result))))));
+
+        // Build synthetic VirtualSignExtendWord instruction
+        const vsew_instr = buildVirtualSignExtendWordInstr(decoded.rd, decoded.rd);
+
+        // The rd pre-value for step 2 is the base_result from step 1
+        const rd_pre_value_step2 = base_result;
+
+        // Record lookup trace for VirtualSignExtendWord
+        try self.lookup_trace.recordVirtualSignExtendWord(
+            @intCast(self.state.cycle),
+            self.state.pc,
+            vsew_instr,
+            base_result,
+            sign_extended,
+        );
+
+        // Write sign-extended result to register
+        try self.registers.write(decoded.rd, sign_extended);
+
+        // Record trace step 2 (VirtualSignExtendWord)
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle,
+            .pc = self.state.pc,
+            .unexpanded_pc = self.state.pc,
+            .instruction = vsew_instr,
+            .rs1_value = base_result, // VirtualSignExtendWord reads rd (which has base_result)
+            .rs2_value = 0,
+            .rd_pre_value = rd_pre_value_step2,
+            .rd_value = sign_extended,
+            .memory_addr = null,
+            .memory_pre_value = null,
+            .memory_value = null,
+            .is_memory_write = false,
+            .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed,
+            .virtual_sequence_remaining = 0, // Last in 2-instruction sequence
+        });
+
+        // Update prev_pc for infinite loop detection
+        self.prev_pc = self.state.pc;
+
+        // Update state - PC advances by instruction size (NOT doubled)
+        self.state.pc = self.state.pc + pc_increment;
         self.state.cycle += 1;
         self.registers.tick();
 

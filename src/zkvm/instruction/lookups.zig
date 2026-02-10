@@ -4023,3 +4023,128 @@ test "sraiw lookup (arithmetic shift right immediate word)" {
     // -1 >> 31 = -1 (all bits stay 1)
     try std.testing.expectEqual(@as(u64, @bitCast(@as(i64, -1))), sraiw3.computeResult());
 }
+
+// ============================================================================
+// Virtual Instructions
+// ============================================================================
+
+/// VirtualSignExtendWord instruction lookup
+/// Sign-extends the lower XLEN/2 bits of the input to full XLEN bits.
+/// Used as the second step in W-extension instruction decomposition:
+///   ADDIW → ADDI + VirtualSignExtendWord
+///   ADDW  → ADD  + VirtualSignExtendWord
+///   SUBW  → SUB  + VirtualSignExtendWord
+///   MULW  → MUL  + VirtualSignExtendWord
+///
+/// In Jolt, this maps to SignExtendHalfWordTable (table index 21).
+/// The lookup operand is (0, rs1_val as u128), and the result is the sign-extended value.
+///
+/// Reference: jolt-core/src/zkvm/instruction/virtual_sign_extend_word.rs
+pub fn VirtualSignExtendWordLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        /// The value to sign-extend (rs1 value from the base instruction's result)
+        rs1_val: u64,
+        /// Whether this instruction is part of a virtual sequence (vsr > 0)
+        is_virtual: bool,
+        /// Whether this instruction should not update the unexpanded PC
+        do_not_update_pc: bool,
+        /// Whether this is the first instruction in the sequence
+        is_first_in_sequence: bool,
+        /// Whether the original instruction was compressed
+        is_compressed: bool,
+        /// Whether the rd register is not x0
+        is_rd_not_zero: bool,
+
+        pub fn init(rs1_val: u64, is_virtual: bool, do_not_update_pc: bool, is_first_in_sequence: bool, is_compressed: bool, is_rd_not_zero: bool) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .is_virtual = is_virtual,
+                .do_not_update_pc = do_not_update_pc,
+                .is_first_in_sequence = is_first_in_sequence,
+                .is_compressed = is_compressed,
+                .is_rd_not_zero = is_rd_not_zero,
+            };
+        }
+
+        /// VirtualSignExtendWord uses SignExtendHalfWord table (Jolt table index 21)
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .SignExtendHalfWord;
+        }
+
+        /// Lookup index is the rs1 value (the value to sign-extend)
+        /// In Jolt: to_lookup_operands returns (0, x as u128 + y as u64 as u128)
+        /// where (x, y) = (rs1, 0), so index = rs1
+        pub fn toLookupIndex(self: Self) u128 {
+            return @as(u128, self.rs1_val);
+        }
+
+        /// Compute the sign-extended result
+        /// Sign-extends lower XLEN/2 bits to full XLEN bits
+        pub fn computeResult(self: Self) u64 {
+            const half_word_size = XLEN / 2;
+            const lower_half: u64 = self.rs1_val & ((1 << half_word_size) - 1);
+            const sign_bit: u64 = (lower_half >> (half_word_size - 1)) & 1;
+
+            if (sign_bit == 1) {
+                // Sign extend with 1s
+                return lower_half | (((1 << half_word_size) - 1) << half_word_size);
+            } else {
+                // Sign extend with 0s
+                return lower_half;
+            }
+        }
+
+        /// Circuit flags for VirtualSignExtendWord
+        /// Reference: virtual_sign_extend_word.rs circuit_flags()
+        pub fn circuitFlags(self: Self) CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.WriteLookupOutputToRD);
+            flags.set(.AddOperands);
+            if (self.is_virtual) flags.set(.VirtualInstruction);
+            if (self.do_not_update_pc) flags.set(.DoNotUpdateUnexpandedPC);
+            if (self.is_first_in_sequence) flags.set(.IsFirstInSequence);
+            if (self.is_compressed) flags.set(.IsCompressed);
+            return flags;
+        }
+
+        /// Instruction flags for VirtualSignExtendWord
+        /// Reference: virtual_sign_extend_word.rs instruction_flags()
+        pub fn instructionFlags(self: Self) InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            if (self.is_rd_not_zero) flags.set(.IsRdNotZero);
+            return flags;
+        }
+    };
+}
+
+test "virtual sign extend word lookup" {
+    // Test positive value (no sign extension needed)
+    const vsew1 = VirtualSignExtendWordLookup(64).init(42, true, false, false, false, true);
+    try std.testing.expectEqual(@as(u64, 42), vsew1.computeResult());
+
+    // Test negative value (sign extension)
+    const vsew2 = VirtualSignExtendWordLookup(64).init(0x00000000FFFFFFFF, true, false, false, false, true);
+    try std.testing.expectEqual(@as(u64, 0xFFFFFFFFFFFFFFFF), vsew2.computeResult());
+
+    // Test 0x80000000 (negative in 32-bit)
+    const vsew3 = VirtualSignExtendWordLookup(64).init(0x80000000, true, false, false, false, true);
+    try std.testing.expectEqual(@as(u64, 0xFFFFFFFF80000000), vsew3.computeResult());
+
+    // Test 0x7FFFFFFF (positive in 32-bit)
+    const vsew4 = VirtualSignExtendWordLookup(64).init(0x7FFFFFFF, true, false, false, false, true);
+    try std.testing.expectEqual(@as(u64, 0x7FFFFFFF), vsew4.computeResult());
+
+    // Test circuit flags
+    const flags = vsew1.circuitFlags();
+    try std.testing.expect(flags.get(.WriteLookupOutputToRD));
+    try std.testing.expect(flags.get(.AddOperands));
+    try std.testing.expect(flags.get(.VirtualInstruction));
+
+    // Test instruction flags
+    const inst_flags = vsew1.instructionFlags();
+    try std.testing.expect(inst_flags.get(.LeftOperandIsRs1Value));
+    try std.testing.expect(inst_flags.get(.IsRdNotZero));
+}

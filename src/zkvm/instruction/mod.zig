@@ -187,6 +187,7 @@ pub fn LookupTables(comptime XLEN: comptime_int) type {
         SignExtend8,
         SignExtend16,
         SignExtend32,
+        SignExtendHalfWord,
         // Division/remainder validation
         ValidDiv0,
         ValidUnsignedRemainder,
@@ -219,6 +220,18 @@ pub fn LookupTables(comptime XLEN: comptime_int) type {
                 .SignExtend8 => Table.SignExtend8.materializeEntry(index),
                 .SignExtend16 => Table.SignExtend16.materializeEntry(index),
                 .SignExtend32 => Table.SignExtend32.materializeEntry(index),
+                .SignExtendHalfWord => blk: {
+                    // SignExtendHalfWord: sign-extend lower XLEN/2 bits to full XLEN
+                    // Same as SignExtend32 for XLEN=64
+                    const half_word_size = XLEN / 2;
+                    const lower_half: u64 = @truncate(index & ((@as(u128, 1) << half_word_size) - 1));
+                    const sign_bit: u64 = (lower_half >> (half_word_size - 1)) & 1;
+                    if (sign_bit == 1) {
+                        break :blk lower_half | (((@as(u64, 1) << half_word_size) - 1) << half_word_size);
+                    } else {
+                        break :blk lower_half;
+                    }
+                },
                 .ValidDiv0 => Table.ValidDiv0.materializeEntry(index),
                 .ValidUnsignedRemainder => Table.ValidUnsignedRemainder.materializeEntry(index),
                 .ValidSignedRemainder => Table.ValidSignedRemainder.materializeEntry(index),

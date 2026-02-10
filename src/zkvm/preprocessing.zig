@@ -110,6 +110,8 @@ pub const JoltInstruction = struct {
         VirtualASSERT_EQ,
         VirtualASSERT_LTE,
         VirtualADVICE,
+        VirtualSignExtendWord,
+        VirtualZeroExtendWord,
     };
 
     /// Instruction operands - different formats store different fields
@@ -412,9 +414,112 @@ pub const BytecodePreprocessing = struct {
                 instr_size = 4;
             }
 
-            // Decode and add
+            // Decode and decompose W-extension instructions into virtual sequences
             const jolt_instr = try decodeToJoltInstruction(instruction, addr, is_compressed);
-            try self.bytecode.append(allocator, jolt_instr);
+
+            // Check if this is a W-extension instruction that needs decomposition
+            switch (jolt_instr.variant) {
+                .ADDIW => {
+                    // ADDIW → ADDI + VirtualSignExtendWord (2-instruction sequence)
+                    // Step 1: ADDI(rd, rs1, imm) with virtual_sequence_remaining=1, is_first_in_sequence=true
+                    try self.bytecode.append(allocator, .{
+                        .variant = .ADDI,
+                        .address = addr,
+                        .operands = jolt_instr.operands, // Same FormatI operands
+                        .virtual_sequence_remaining = 1,
+                        .is_first_in_sequence = true,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 2: VirtualSignExtendWord(rd, rd, 0) with virtual_sequence_remaining=0
+                    const rd = switch (jolt_instr.operands) {
+                        .FormatI => |i| i.rd,
+                        else => 0,
+                    };
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualSignExtendWord,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = rd, .rs1 = rd, .imm = 0 } },
+                        .virtual_sequence_remaining = 0,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                },
+                .ADDW => {
+                    // ADDW → ADD + VirtualSignExtendWord (2-instruction sequence)
+                    // Step 1: ADD(rd, rs1, rs2)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .ADD,
+                        .address = addr,
+                        .operands = jolt_instr.operands, // Same FormatR operands
+                        .virtual_sequence_remaining = 1,
+                        .is_first_in_sequence = true,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 2: VirtualSignExtendWord(rd, rd, 0)
+                    const rd = switch (jolt_instr.operands) {
+                        .FormatR => |r| r.rd,
+                        else => 0,
+                    };
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualSignExtendWord,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = rd, .rs1 = rd, .imm = 0 } },
+                        .virtual_sequence_remaining = 0,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                },
+                .SUBW => {
+                    // SUBW → SUB + VirtualSignExtendWord (2-instruction sequence)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .SUB,
+                        .address = addr,
+                        .operands = jolt_instr.operands,
+                        .virtual_sequence_remaining = 1,
+                        .is_first_in_sequence = true,
+                        .is_compressed = is_compressed,
+                    });
+                    const rd = switch (jolt_instr.operands) {
+                        .FormatR => |r| r.rd,
+                        else => 0,
+                    };
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualSignExtendWord,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = rd, .rs1 = rd, .imm = 0 } },
+                        .virtual_sequence_remaining = 0,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                },
+                .MULW => {
+                    // MULW → MUL + VirtualSignExtendWord (2-instruction sequence)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .MUL,
+                        .address = addr,
+                        .operands = jolt_instr.operands,
+                        .virtual_sequence_remaining = 1,
+                        .is_first_in_sequence = true,
+                        .is_compressed = is_compressed,
+                    });
+                    const rd = switch (jolt_instr.operands) {
+                        .FormatR => |r| r.rd,
+                        else => 0,
+                    };
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualSignExtendWord,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = rd, .rs1 = rd, .imm = 0 } },
+                        .virtual_sequence_remaining = 0,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                },
+                else => {
+                    // Non-W-extension instructions: append as-is
+                    try self.bytecode.append(allocator, jolt_instr);
+                },
+            }
 
             offset += instr_size;
         }

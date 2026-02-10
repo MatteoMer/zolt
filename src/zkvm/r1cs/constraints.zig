@@ -693,6 +693,7 @@ fn hasLookupTable(opcode: u8, funct3: u3, funct7: u7) bool {
         0x17 => true, // AUIPC
         0x6f => true, // JAL
         0x67 => true, // JALR
+        0x0B => true, // VirtualSignExtendWord - uses SignExtendHalfWord table
         0x03 => false, // Load - no table
         0x23 => false, // Store - no table
         else => false,
@@ -1276,15 +1277,21 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                 // NextIsVirtual: 1 if the next step has FlagVirtualInstruction=1.
                 // This is required for the shift sumcheck identity:
                 //   VirtualInstr[j+1] must equal NextIsVirtual[j]
-                // Termination store instructions with vsr>0 have VirtualInstruction=1.
-                const next_is_virtual = ns.is_termination_store and !ns.is_noop and ns.virtual_sequence_remaining > 0;
+                // A step is virtual if:
+                //   - It has virtual_sequence_remaining > 0 (first in a W-ext decomposition, or termination store with vsr>0)
+                //   - It is a VirtualSignExtendWord instruction (opcode 0x0B, which has vsr=0 but is still virtual)
+                //   - It is a termination store with vsr>0
+                const next_opcode: u8 = @truncate(ns.instruction & 0x7F);
+                const next_is_virtual = (!ns.is_noop and ns.virtual_sequence_remaining > 0) or
+                    (next_opcode == 0x0B); // VirtualSignExtendWord is always virtual (vsr=Some(0))
                 inputs.values[R1CSInputIndex.NextIsVirtual.toIndex()] = if (next_is_virtual) F.one() else F.zero();
 
                 // NextIsFirstInSequence: 1 if the next step is the first in a virtual sequence.
-                // For termination stores, the first real instruction (LUI, vsr=2) is the first.
-                // Currently we don't set IsFirstInSequence on the current step, so this stays 0.
-                // TODO: if Jolt uses IsFirstInSequence for termination, update this.
-                inputs.values[R1CSInputIndex.NextIsFirstInSequence.toIndex()] = F.zero();
+                // For W-extension decomposition: the first step (ADDI/ADD/SUB/MUL with vsr=1) has IsFirstInSequence=true.
+                // We detect this by checking if the next step has vsr > 0 AND is not a termination store
+                // (termination stores handle IsFirstInSequence separately).
+                const next_is_first = !ns.is_noop and !ns.is_termination_store and ns.virtual_sequence_remaining > 0;
+                inputs.values[R1CSInputIndex.NextIsFirstInSequence.toIndex()] = if (next_is_first) F.one() else F.zero();
             } else {
                 // No next step: all Next* values are 0 (matching Jolt)
                 inputs.values[R1CSInputIndex.NextPC.toIndex()] = F.zero();
@@ -1296,6 +1303,24 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             // =================================================================
             // Set remaining flags based on instruction opcode
             inputs.setFlagsFromInstruction(step.instruction, step);
+
+            // =================================================================
+            // Virtual sequence flags from trace step
+            // In Jolt, virtual_sequence_remaining on an instruction determines:
+            //   VirtualInstruction = (vsr != null), i.e., the instruction is part of a virtual sequence
+            //   DoNotUpdateUnexpandedPC = (vsr > 0), i.e., PC should not advance for this step
+            //   IsFirstInSequence = true for the first instruction in the sequence
+            // This applies to both the base instruction (e.g., ADDI with vsr=1)
+            // and the virtual instruction (e.g., VirtualSignExtendWord with vsr=0).
+            // =================================================================
+            if (step.virtual_sequence_remaining > 0 and !step.is_termination_store) {
+                // This is the FIRST instruction in a W-extension virtual sequence
+                // (e.g., ADDI from ADDIW decomposition, with vsr=1)
+                // In Jolt: vsr=Some(1), so VirtualInstruction=true, DoNotUpdateUnexpandedPC=true
+                inputs.values[R1CSInputIndex.FlagVirtualInstruction.toIndex()] = F.one();
+                inputs.values[R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();
+                inputs.values[R1CSInputIndex.FlagIsFirstInSequence.toIndex()] = F.one();
+            }
 
             // =================================================================
             // ShouldJump = FlagJump * (1 - NextIsNoop)
@@ -1506,7 +1531,11 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                     const imm_u64: u64 = @bitCast(imm_signed);
                     return F.fromU128(@as(u128, step.rs1_value) + @as(u128, imm_u64));
                 },
-                0x3b => { // ADDW/SUBW
+                0x0B => { // VirtualSignExtendWord: lookup index = rs1_val
+                    // to_lookup_operands returns (0, rs1 + 0) = (0, rs1)
+                    return F.fromU128(@as(u128, step.rs1_value));
+                },
+                0x3b => { // ADDW/SUBW - should no longer appear in traces after W-ext decomposition
                     if (funct3 == 0 and funct7 == 0) {
                         // ADDW: x + y
                         return F.fromU128(@as(u128, step.rs1_value) + @as(u128, step.rs2_value));
@@ -1621,32 +1650,18 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                     self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
                     self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = u128_right_lookup;
                 },
-                0x1b => { // ADDIW: AddOperands (u128)
+                0x0B => { // VirtualSignExtendWord: AddOperands, WriteLookupOutputToRD
+                    // VirtualSignExtendWord uses AddOperands with u128 lookup
+                    // Lookup operands: (0, rs1_val) - the value to sign-extend
                     self.values[R1CSInputIndex.FlagAddOperands.toIndex()] = F.one();
                     self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
                     self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
                     self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = u128_right_lookup;
-                },
-                0x3b => { // OP-32: ADDW, SUBW
-                    const funct3_r = (instr >> 12) & 0x7;
-                    const funct7_r = (instr >> 25) & 0x7F;
-                    if (funct3_r == 0 and funct7_r == 0) {
-                        // ADDW: AddOperands (u128)
-                        self.values[R1CSInputIndex.FlagAddOperands.toIndex()] = F.one();
-                        self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
-                        self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
-                        self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = u128_right_lookup;
-                    } else if (funct3_r == 0 and funct7_r == 0x20) {
-                        // SUBW: SubtractOperands (u128)
-                        self.values[R1CSInputIndex.FlagSubtractOperands.toIndex()] = F.one();
-                        self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
-                        self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
-                        self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = u128_right_lookup;
-                    } else {
-                        // Other 0x3b variants: default
-                        self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
-                        self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input;
-                    }
+                    // VirtualInstruction flag: always true for VirtualSignExtendWord
+                    // (virtual_sequence_remaining is Some(0), which means is_some() = true)
+                    self.values[R1CSInputIndex.FlagVirtualInstruction.toIndex()] = F.one();
+                    // DoNotUpdateUnexpandedPC: false for VirtualSignExtendWord (vsr=0, 0!=0 is false)
+                    // IsFirstInSequence: false for VirtualSignExtendWord (it's the second in sequence)
                 },
                 else => {
                     // Default: NOT Add+Sub+Mul, so use constraint 6 and 10

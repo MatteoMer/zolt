@@ -778,7 +778,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                 // First compute left_input and right_input (same as R1CS)
                 const left_is_rs1: bool = switch (opcode) {
-                    0x33, 0x3b, 0x23, 0x63, 0x13, 0x03, 0x67, 0x1b => true,
+                    0x33, 0x3b, 0x23, 0x63, 0x13, 0x03, 0x67, 0x1b, 0x0B => true,
                     else => false,
                 };
                 const left_is_pc: bool = switch (opcode) {
@@ -790,16 +790,17 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     else => false,
                 };
                 const right_is_imm: bool = switch (opcode) {
-                    0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b => true,
+                    0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b, 0x0B => true,
                     else => false,
                 };
 
-                // For identity-path AddOperands instructions (ADDI, ADDIW, JAL, JALR),
+                // For identity-path AddOperands instructions (ADDI, ADDIW, JAL, JALR, VirtualSignExtendWord),
                 // use UNSIGNED u64 immediate to match Jolt's to_lookup_operands() u128 arithmetic.
                 // This ensures RightInstructionInput matches between R1CS, Stage 3, and Stage 5.
                 const is_identity_add_imm: bool = switch (opcode) {
                     0x13 => funct3 == 0, // ADDI
                     0x1b => funct3 == 0, // ADDIW
+                    0x0B => true, // VirtualSignExtendWord
                     0x6f => true, // JAL
                     0x67 => true, // JALR
                     else => false,
@@ -938,6 +939,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             right_op = right_input;
                         }
                     },
+                    0x0B => { // VirtualSignExtendWord: AddOperands, left=0, right=rs1
+                        // Lookup operands: (0, rs1_val + 0) = (0, rs1_val)
+                        left_op = F.zero();
+                        right_op = left_input.add(right_input); // rs1 + 0 = rs1
+                    },
                     0x03 => { // Load: NOT AddOperands, left=rs1, right=imm
                         // R1CS witness sets: LeftLookupOperand=left_input, RightLookupOperand=right_input
                         left_op = left_input;
@@ -997,6 +1003,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         break :blk false;
                     },
                     0x13 => (funct3 == 0), // ADDI (AddOperands)
+                    0x0B => true, // VirtualSignExtendWord (AddOperands)
                     0x1b => (funct3 == 0), // ADDIW (AddOperands)
                     0x3b => blk: {
                         if (funct3 == 0 and funct7 == 0) break :blk true; // ADDW (AddOperands)
@@ -1094,6 +1101,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             const imm_u64: u64 = @bitCast(imm_signed);
                             break :blk128 @as(u128, step.rs1_value) + @as(u128, imm_u64);
                         },
+                        // VirtualSignExtendWord: index = rs1 (the value to sign-extend)
+                        0x0B => @as(u128, step.rs1_value),
                         else => 0,
                     };
                     // right_op_raw is the lower 64 bits of the lookup index (for R1CS witness compatibility)
@@ -1259,7 +1268,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                     // First compute left_input and right_input (same as R1CS)
                     const left_is_rs1: bool = switch (opcode) {
-                        0x33, 0x3b, 0x23, 0x63, 0x13, 0x03, 0x67, 0x1b => true,
+                        0x33, 0x3b, 0x23, 0x63, 0x13, 0x03, 0x67, 0x1b, 0x0B => true,
                         else => false,
                     };
                     const left_is_pc: bool = switch (opcode) {
@@ -1271,7 +1280,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         else => false,
                     };
                     const right_is_imm: bool = switch (opcode) {
-                        0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b => true,
+                        0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b, 0x0B => true,
                         else => false,
                     };
 
@@ -1279,6 +1288,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     const is_identity_add_imm2: bool = switch (opcode) {
                         0x13 => funct3 == 0,
                         0x1b => funct3 == 0,
+                        0x0B => true, // VirtualSignExtendWord
                         0x6f => true,
                         0x67 => true,
                         else => false,
@@ -1377,6 +1387,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             left_op = F.zero();
                             right_op = left_input.add(right_input);
                         },
+                        0x0B => { // VirtualSignExtendWord: AddOperands, left=0, right=rs1
+                            left_op = F.zero();
+                            right_op = left_input.add(right_input);
+                        },
                         0x1b => { // I-type word ALU (ADDIW, SLLIW, SRLIW, SRAIW)
                             // Only ADDIW (funct3=0) uses AddOperands; others use interleaved
                             if (funct3 == 0) {
@@ -1447,7 +1461,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     else => false,
                 };
                 const right_is_imm_dbg: bool = switch (opcode_dbg) {
-                    0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b => true,
+                    0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b, 0x0B => true,
                     else => false,
                 };
                 const imm_dbg = computeImmediate(instr_dbg);
@@ -1483,7 +1497,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 const opcode_v = instr_v & 0x7f;
                 // Recompute left_op, right_op, output using same logic as above
                 const left_is_rs1_v: bool = switch (opcode_v) {
-                    0x33, 0x3b, 0x23, 0x63, 0x13, 0x03, 0x67, 0x1b => true,
+                    0x33, 0x3b, 0x23, 0x63, 0x13, 0x03, 0x67, 0x1b, 0x0B => true,
                     else => false,
                 };
                 const left_is_pc_v: bool = switch (opcode_v) {
@@ -1495,7 +1509,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     else => false,
                 };
                 const right_is_imm_v: bool = switch (opcode_v) {
-                    0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b => true,
+                    0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b, 0x0B => true,
                     else => false,
                 };
                 const imm_v = computeImmediate(instr_v);
@@ -1509,7 +1523,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 const funct3_v: u3 = @truncate((instr_v >> 12) & 0x7);
                 const funct7_v: u7 = @truncate(instr_v >> 25);
                 const is_add_type = switch (opcode_v) {
-                    0x13, 0x37, 0x17, 0x6f, 0x67 => true,
+                    0x13, 0x37, 0x17, 0x6f, 0x67, 0x0B => true, // 0x0B = VirtualSignExtendWord
                     0x1b => (funct3_v == 0), // ADDIW (funct3=0) uses AddOperands
                     0x33 => !(funct7_v == 0x01 and funct3_v != 0x0) and !(funct7_v == 0x20),
                     0x3b => (funct3_v == 0 and funct7_v == 0) or (funct3_v == 0 and funct7_v == 0x20), // ADDW/SUBW
@@ -2155,7 +2169,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                         // Recompute using FIELD arithmetic (R1CS style)
                         const r1cs_left_is_rs1: bool = switch (opcode_d) {
-                            0x33, 0x3b, 0x23, 0x63, 0x13, 0x03, 0x67, 0x1b => true,
+                            0x33, 0x3b, 0x23, 0x63, 0x13, 0x03, 0x67, 0x1b, 0x0B => true,
                             else => false,
                         };
                         const r1cs_left_is_pc: bool = switch (opcode_d) {
@@ -2167,7 +2181,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             else => false,
                         };
                         const r1cs_right_is_imm: bool = switch (opcode_d) {
-                            0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b => true,
+                            0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b, 0x0B => true,
                             else => false,
                         };
                         var r1cs_left_input = F.zero();
@@ -2183,6 +2197,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         const r1cs_is_add = switch (opcode_d) {
                             0x33 => (funct3_d == 0 and funct7_d == 0), // ADD
                             0x13 => (funct3_d == 0), // ADDI
+                            0x0B => true, // VirtualSignExtendWord
                             0x37, 0x17, 0x6f, 0x67 => true, // LUI, AUIPC, JAL, JALR
                             0x1b => (funct3_d == 0), // ADDIW
                             0x3b => (funct3_d == 0 and funct7_d == 0), // ADDW
@@ -6586,6 +6601,7 @@ pub fn getLookupTableIndex(opcode: u32, funct3: u32, funct7: u32) i8 {
             if (funct3 == 7) break :blk 8; // BGEU -> UnsignedGreaterThanEqualTable
             break :blk -1;
         },
+        0x0B => 21, // VirtualSignExtendWord -> SignExtendHalfWordTable
         0x37 => 0, // LUI -> RangeCheckTable
         0x17 => 0, // AUIPC -> RangeCheckTable
         0x6f => 0, // JAL -> RangeCheckTable

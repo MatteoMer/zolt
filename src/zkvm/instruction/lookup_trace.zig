@@ -794,6 +794,50 @@ pub fn LookupEntry(comptime XLEN: comptime_int) type {
                 .instruction = instruction,
             };
         }
+
+        // ========================================================================
+        // Virtual Instructions
+        // ========================================================================
+
+        /// Create entry for VirtualSignExtendWord
+        /// Sign-extends lower XLEN/2 bits to full XLEN bits.
+        /// Used as the second step of W-extension instruction decomposition.
+        ///
+        /// In Jolt:
+        /// - Lookup table: SignExtendHalfWord (table index 21)
+        /// - Operands: (0, rs1_val) where rs1_val is the full 64-bit result from the base instruction
+        /// - Result: sign-extended lower 32 bits
+        /// - Circuit flags: WriteLookupOutputToRD, AddOperands, VirtualInstruction (when vsr>0),
+        ///   DoNotUpdateUnexpandedPC (when vsr!=0), IsFirstInSequence, IsCompressed
+        /// - Instruction flags: LeftOperandIsRs1Value, IsRdNotZero
+        ///
+        /// Reference: jolt-core/src/zkvm/instruction/virtual_sign_extend_word.rs
+        pub fn fromVirtualSignExtendWord(
+            cycle: usize,
+            pc: u64,
+            instruction: u32,
+            rs1_val: u64,
+            is_virtual: bool,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+            is_rd_not_zero: bool,
+        ) Self {
+            const VsewLookup = lookups.VirtualSignExtendWordLookup(XLEN);
+            const vsew = VsewLookup.init(rs1_val, is_virtual, do_not_update_pc, is_first_in_sequence, is_compressed, is_rd_not_zero);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = VsewLookup.lookupTable(),
+                .index = vsew.toLookupIndex(),
+                .result = vsew.computeResult(),
+                .left_operand = rs1_val,
+                .right_operand = 0,
+                .circuit_flags = vsew.circuitFlags(),
+                .instruction_flags = vsew.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
     };
 }
 
@@ -1016,6 +1060,36 @@ pub fn LookupTraceCollector(comptime XLEN: comptime_int) type {
                     // LOAD, STORE - memory operations handled separately
                 },
             }
+        }
+
+        /// Record lookup for a VirtualSignExtendWord instruction
+        /// This is the second step in W-extension decomposition (ADDIW, ADDW, SUBW, MULW)
+        pub fn recordVirtualSignExtendWord(
+            self: *Self,
+            cycle: usize,
+            pc: u64,
+            instruction: u32,
+            rs1_val: u64,
+            sign_extended_result: u64,
+        ) !void {
+            if (!self.enabled) return;
+
+            // Determine rd from the synthetic instruction encoding
+            const rd: u8 = @truncate((instruction >> 7) & 0x1f);
+
+            const entry = Entry.fromVirtualSignExtendWord(
+                cycle,
+                pc,
+                instruction,
+                rs1_val,
+                true, // is_virtual: VirtualSignExtendWord is always virtual when vsr > 0
+                false, // do_not_update_pc: vsr=0 for VirtualSignExtendWord (last in sequence)
+                false, // is_first_in_sequence: false for VirtualSignExtendWord
+                false, // is_compressed: inherited, but VirtualSignExtendWord is synthetic
+                rd != 0, // is_rd_not_zero
+            );
+            _ = sign_extended_result; // Result is computed by the lookup
+            try self.entries.append(self.allocator, entry);
         }
 
         /// Get the number of lookup entries

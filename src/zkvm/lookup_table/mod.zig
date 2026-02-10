@@ -1135,6 +1135,54 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
         /// ValidSignedRemainder: Validates signed remainder semantics
         /// Returns 1 if: divisor == 0 OR remainder == 0 OR
         ///              (|remainder| < |divisor| AND sign(remainder) == sign(divisor))
+        /// SignExtendHalfWord: sign-extends the lower XLEN/2 bits to full XLEN
+        /// For XLEN=64, this sign-extends a 32-bit value to 64-bit
+        /// Uses identity (non-interleaved) addressing: r[0..XLEN] = upper bits, r[XLEN..2*XLEN] = lower bits
+        pub const SignExtendHalfWord = struct {
+            /// Evaluate the MLE at point r
+            /// Matches Jolt's sign_extend_half_word.rs evaluate_mle exactly.
+            ///
+            /// For identity-path tables, r is split as:
+            ///   r[0..XLEN] = "left operand" bits (upper word, MSB first)
+            ///   r[XLEN..2*XLEN] = "right operand" bits (the value, MSB first)
+            ///
+            /// The input value's lower half is in r[XLEN+half_word_size..2*XLEN]
+            /// The sign bit is r[XLEN+half_word_size] (MSB of lower half)
+            /// Output = lower_half + upper_half * 2^half_word_size
+            /// where upper_half has all bits equal to the sign bit.
+            pub fn evaluateMLE(r: []const F) F {
+                std.debug.assert(r.len == 2 * XLEN);
+                const half_word_size = XLEN / 2;
+
+                // Sum for lower half bits (from the second operand, starting at XLEN)
+                // r[XLEN + half_word_size + i] for i in 0..half_word_size
+                var lower_half = F.zero();
+                inline for (0..half_word_size) |i| {
+                    const shift: u6 = half_word_size - 1 - i;
+                    const coeff = F.fromU64(@as(u64, 1) << shift);
+                    lower_half = lower_half.add(coeff.mul(r[XLEN + half_word_size + i]));
+                }
+
+                // Sign bit is the MSB of the lower half
+                const sign_bit = r[XLEN + half_word_size];
+
+                // Upper half: all bits equal to sign bit
+                // sum_{i=0}^{half_word_size-1} 2^{half_word_size-1-i} * sign_bit
+                // = sign_bit * (2^0 + 2^1 + ... + 2^{half_word_size-1})
+                // = sign_bit * (2^half_word_size - 1)
+                var upper_half = F.zero();
+                inline for (0..half_word_size) |i| {
+                    const shift: u6 = half_word_size - 1 - i;
+                    const coeff = F.fromU64(@as(u64, 1) << shift);
+                    upper_half = upper_half.add(coeff.mul(sign_bit));
+                }
+
+                // Result = lower_half + upper_half * 2^half_word_size
+                const upper_shift = F.fromU64(@as(u64, 1) << half_word_size);
+                return lower_half.add(upper_half.mul(upper_shift));
+            }
+        };
+
         /// Number of lookup tables in Jolt
         pub const NUM_TABLES: usize = 42;
 
@@ -1166,7 +1214,7 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                 18 => F.zero(), // HalfwordAlignment - TODO
                 19 => F.zero(), // WordAlignment - TODO
                 20 => F.zero(), // LowerHalfWord - TODO
-                21 => F.zero(), // SignExtendHalfWord - TODO
+                21 => SignExtendHalfWord.evaluateMLE(r),
                 22 => Pow2.evaluateMLE(r),
                 23 => F.zero(), // Pow2W - TODO
                 24 => F.zero(), // ShiftRightBitmask - TODO

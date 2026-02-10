@@ -65,6 +65,121 @@ pub const BytecodeEntry = struct {
     funct3: u3,
 };
 
+/// Populate a BytecodeEntry for a VirtualMULI instruction (SLLI decomposition).
+/// VirtualMULI has opcode 0x2B with: MultiplyOperands, WriteLookupOutputToRD,
+/// LeftOperandIsRs1Value, RightOperandIsImm, lookup table = RangeCheck (0).
+fn populateVirtualMULIEntry(
+    entry: *BytecodeEntry,
+    rd: u8,
+    rs1: u8,
+    elf_address: u64,
+    shamt: u6,
+    /// virtual_sequence_remaining: null if standalone, Some(N) if part of a sequence.
+    /// For standalone SLLI: 0 (it's the only instruction, so vsr=0).
+    /// For SLLIW first entry: 1 (one instruction remaining after this).
+    virtual_sequence_remaining: ?u16,
+    is_first_in_sequence: bool,
+) void {
+    entry.address = elf_address;
+    // The immediate in the bytecode entry is the multiplier (1 << shamt),
+    // matching what preprocessing.zig stores in the FormatI operands.
+    const multiplier: u64 = @as(u64, 1) << shamt;
+    entry.imm = @intCast(multiplier);
+
+    entry.rd = if (rd == 0) 255 else rd;
+    entry.rs1 = rs1;
+    entry.rs2 = 255; // VirtualMULI is I-type: no rs2
+
+    entry.opcode = 0x2B;
+    entry.funct3 = 0;
+
+    entry.circuit_flags = [_]bool{false} ** 13;
+    entry.instruction_flags = [_]bool{false} ** 7;
+
+    var cf = &entry.circuit_flags;
+    cf[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)] = true;
+    cf[@intFromEnum(CircuitFlags.MultiplyOperands)] = true;
+    // VirtualInstruction = true when virtual_sequence_remaining.is_some()
+    // This applies to ALL virtual instructions, even standalone SLLI (which has vsr=Some(0))
+    if (virtual_sequence_remaining != null) {
+        cf[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+    }
+    // DoNotUpdateUnexpandedPC = true when vsr > 0 (not the last in sequence)
+    if (virtual_sequence_remaining) |vsr| {
+        if (vsr != 0) {
+            cf[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+        }
+    }
+    // IsFirstInSequence flag in circuit_flags must match the entry field
+    if (is_first_in_sequence) {
+        cf[@intFromEnum(CircuitFlags.IsFirstInSequence)] = true;
+    }
+
+    var inf = &entry.instruction_flags;
+    inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+    inf[@intFromEnum(InstructionFlags.RightOperandIsImm)] = true;
+    if (rd != 0) {
+        inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
+    }
+
+    entry.lookup_table_index = 0; // RangeCheck
+    // MultiplyOperands is set, so is_interleaved = false (not interleaved)
+    entry.is_interleaved = false;
+    entry.virtual_sequence_remaining = virtual_sequence_remaining;
+    entry.is_first_in_sequence = is_first_in_sequence;
+}
+
+/// Populate a BytecodeEntry for a VirtualSignExtendWord instruction.
+/// VirtualSignExtendWord has opcode 0x0B with: AddOperands, WriteLookupOutputToRD,
+/// LeftOperandIsRs1Value, RightOperandIsImm, lookup table = SignExtendHalfWord (21).
+fn populateVirtualSignExtendWordEntry(
+    entry: *BytecodeEntry,
+    rd: u8,
+    elf_address: u64,
+    /// is_compressed: only set on the LAST instruction in a virtual sequence per Jolt's finalize()
+    is_compressed: bool,
+) void {
+    entry.address = elf_address;
+    entry.imm = 0; // VirtualSignExtendWord always has imm=0
+
+    entry.rd = if (rd == 0) 255 else rd;
+    entry.rs1 = rd; // Sign-extend reads from rd
+    entry.rs2 = 255; // I-type: no rs2
+
+    entry.opcode = 0x0B;
+    entry.funct3 = 0;
+
+    entry.circuit_flags = [_]bool{false} ** 13;
+    entry.instruction_flags = [_]bool{false} ** 7;
+
+    var cf = &entry.circuit_flags;
+    cf[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)] = true;
+    cf[@intFromEnum(CircuitFlags.AddOperands)] = true;
+    // VirtualSignExtendWord always has virtual_sequence_remaining=Some(0),
+    // so VirtualInstruction=true, DoNotUpdateUnexpandedPC=false
+    cf[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+    // is_compressed is inherited from the original instruction (only on last entry)
+    if (is_compressed) {
+        cf[@intFromEnum(CircuitFlags.IsCompressed)] = true;
+    }
+
+    var inf = &entry.instruction_flags;
+    inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+    // NOTE: VirtualSignExtendWord does NOT set RightOperandIsImm!
+    // This is confirmed in Jolt's virtual_sign_extend_word.rs instruction_flags()
+    if (rd != 0) {
+        inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
+    }
+
+    entry.lookup_table_index = 21; // SignExtendHalfWord
+    // AddOperands is set, so is_interleaved = false
+    entry.is_interleaved = false;
+    // VirtualSignExtendWord is always the last in a sequence: vsr=Some(0)
+    entry.virtual_sequence_remaining = 0;
+    // Never the first in a sequence (always the 2nd entry)
+    entry.is_first_in_sequence = false;
+}
+
 /// Populate a BytecodeEntry from a raw 32-bit instruction word and ELF address.
 /// This sets all static properties (flags, registers, immediates, lookup table)
 /// from the instruction encoding alone, without any trace-specific data.
@@ -90,7 +205,7 @@ fn populateEntryFromInstruction(entry: *BytecodeEntry, instr: u32, elf_address: 
         else => decoded.rs1,
     };
     entry.rs2 = switch (opcode) {
-        0x13, 0x03, 0x67, 0x1b, 0x37, 0x17, 0x6f => 255, // I-type, U-type, J-type: no rs2
+        0x13, 0x03, 0x67, 0x1b, 0x37, 0x17, 0x6f, 0x0B, 0x2B => 255, // I-type, U-type, J-type, Virtual: no rs2
         else => decoded.rs2,
     };
     const funct3: u3 = @truncate((instr >> 12) & 0x7);
@@ -163,6 +278,12 @@ fn populateEntryFromInstruction(entry: *BytecodeEntry, instr: u32, elf_address: 
                 if (funct3 == 0 and funct7 == 0) cf[@intFromEnum(CircuitFlags.AddOperands)] = true; // ADDW
                 if (funct3 == 0 and funct7 == 0x20) cf[@intFromEnum(CircuitFlags.SubtractOperands)] = true; // SUBW
             },
+            0x0B => { // VirtualSignExtendWord
+                cf[@intFromEnum(CircuitFlags.AddOperands)] = true;
+            },
+            0x2B => { // VirtualMULI
+                cf[@intFromEnum(CircuitFlags.MultiplyOperands)] = true;
+            },
             else => {},
         }
     }
@@ -178,7 +299,7 @@ fn populateEntryFromInstruction(entry: *BytecodeEntry, instr: u32, elf_address: 
     // LeftOperandIsRs1Value
     if (has_lookup) {
         switch (opcode) {
-            0x33, 0x13, 0x67, 0x63, 0x1B, 0x3B => {
+            0x33, 0x13, 0x67, 0x63, 0x1B, 0x3B, 0x0B, 0x2B => {
                 inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
             },
             else => {},
@@ -188,7 +309,7 @@ fn populateEntryFromInstruction(entry: *BytecodeEntry, instr: u32, elf_address: 
     // RightOperandIsImm
     if (has_lookup) {
         switch (opcode) {
-            0x13, 0x67, 0x37, 0x17, 0x6F, 0x1B => {
+            0x13, 0x67, 0x37, 0x17, 0x6F, 0x1B, 0x0B, 0x2B => {
                 inf[@intFromEnum(InstructionFlags.RightOperandIsImm)] = true;
             },
             else => {},
@@ -315,11 +436,80 @@ pub fn buildBytecodeEntries(
             // Map ELF address to bytecode array index
             const k = pc_map.getPC(addr, 0);
             if (k > 0 and k < bytecode_K) {
-                populateEntryFromInstruction(&entries[k], instr_word, addr);
+                // Detect SLLI/SLLIW instructions and decompose them to virtual instruction entries,
+                // matching the preprocessing decomposition in preprocessing.zig.
+                // Without this, the bytecode entries would have SLLI flags (no lookup table)
+                // while the execution trace uses VirtualMULI (lookup table = RangeCheck).
+                const raw_opcode: u8 = @truncate(instr_word & 0x7F);
+                const raw_funct3: u3 = @truncate((instr_word >> 12) & 0x7);
+                const raw_rd: u8 = @truncate((instr_word >> 7) & 0x1F);
+                const raw_rs1: u8 = @truncate((instr_word >> 15) & 0x1F);
 
-                // Mark compressed instructions
-                if (is_compressed) {
-                    entries[k].circuit_flags[@intFromEnum(CircuitFlags.IsCompressed)] = true;
+                if (raw_opcode == 0x13 and raw_funct3 == 1) {
+                    // SLLI → VirtualMULI (single entry, standalone virtual sequence)
+                    // In Jolt, standalone SLLI becomes a 1-instruction virtual sequence:
+                    //   VirtualMULI with vsr=Some(0), is_first_in_sequence=true
+                    // VirtualInstruction=true (vsr.is_some()), DoNotUpdateUnexpandedPC=false (vsr=0)
+                    const shamt: u6 = @truncate((instr_word >> 20) & 0x3F);
+                    populateVirtualMULIEntry(&entries[k], raw_rd, raw_rs1, addr, shamt, 0, true);
+                    // is_compressed: only set on last (=only) instruction in sequence
+                    if (is_compressed) {
+                        entries[k].circuit_flags[@intFromEnum(CircuitFlags.IsCompressed)] = true;
+                    }
+                } else if (raw_opcode == 0x1b and raw_funct3 == 1) {
+                    // SLLIW → VirtualMULI + VirtualSignExtendWord (2 entries)
+                    // pc_map for 2-entry sequences has max_inline_seq=1.
+                    // getPC(addr, 0) returns base_pc+1 (the VirtualSignExtendWord entry).
+                    // So k = base_pc+1. The VirtualMULI entry is at k-1.
+                    const shamt: u6 = @truncate((instr_word >> 20) & 0x1F); // SLLIW uses 5-bit shamt
+                    // Populate VirtualSignExtendWord at k (= base_pc+1, last in sequence)
+                    // is_compressed: only on last instruction in sequence (per Jolt finalize)
+                    populateVirtualSignExtendWordEntry(&entries[k], raw_rd, addr, is_compressed);
+                    // Populate VirtualMULI at k-1 (= base_pc, first in sequence)
+                    // vsr=Some(1): 1 instruction remaining after this
+                    // is_first_in_sequence=true: it's the first entry
+                    // is_compressed: NOT set on non-last instructions (Jolt only sets on last)
+                    if (k >= 1) {
+                        populateVirtualMULIEntry(&entries[k - 1], raw_rd, raw_rs1, addr, shamt, 1, true);
+                    }
+                } else if (isWExtensionWith2EntryDecomposition(raw_opcode, raw_funct3, @truncate(instr_word >> 25))) {
+                    // W-extension instructions that decompose to base + VirtualSignExtendWord:
+                    // ADDIW (0x1b/f3=0), ADDW (0x3b/f3=0/f7=0), SUBW (0x3b/f3=0/f7=0x20),
+                    // MULW (0x3b/f3=0/f7=1), SLLW (0x3b/f3=1/f7=0), etc.
+                    // pc_map has max_inline_seq=1, so k = base_pc+1.
+                    // k is the VirtualSignExtendWord position; k-1 is the base instruction.
+                    //
+                    // Populate VirtualSignExtendWord at k (= base_pc+1, last in sequence)
+                    // is_compressed: only on last instruction per Jolt finalize
+                    populateVirtualSignExtendWordEntry(&entries[k], raw_rd, addr, is_compressed);
+                    // Populate the base instruction at k-1 (= base_pc, first in sequence)
+                    // The base instruction is the W-extension's non-W equivalent:
+                    // ADDIW → ADDI, ADDW → ADD, SUBW → SUB, MULW → MUL
+                    if (k >= 1) {
+                        // Build the base instruction word by mapping the opcode:
+                        // 0x1b (OP-IMM-32) → 0x13 (OP-IMM), 0x3b (OP-32) → 0x33 (OP)
+                        const base_opcode: u8 = if (raw_opcode == 0x1b) 0x13 else 0x33;
+                        const base_instr = (instr_word & ~@as(u32, 0x7F)) | @as(u32, base_opcode);
+                        populateEntryFromInstruction(&entries[k - 1], base_instr, addr);
+                        // Set virtual sequence flags for the base (first) instruction:
+                        // vsr=Some(1): 1 instruction remaining
+                        // VirtualInstruction=true (vsr.is_some())
+                        // DoNotUpdateUnexpandedPC=true (vsr=1 != 0)
+                        // IsFirstInSequence=true (first in sequence)
+                        entries[k - 1].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                        entries[k - 1].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+                        entries[k - 1].circuit_flags[@intFromEnum(CircuitFlags.IsFirstInSequence)] = true;
+                        entries[k - 1].virtual_sequence_remaining = 1;
+                        entries[k - 1].is_first_in_sequence = true;
+                        // is_compressed: NOT set on non-last instructions (Jolt only sets on last)
+                    }
+                } else {
+                    populateEntryFromInstruction(&entries[k], instr_word, addr);
+
+                    // Mark compressed instructions
+                    if (is_compressed) {
+                        entries[k].circuit_flags[@intFromEnum(CircuitFlags.IsCompressed)] = true;
+                    }
                 }
             }
 
@@ -381,6 +571,20 @@ pub fn buildBytecodeEntries(
     std.debug.print("\n", .{});
 
     return entries;
+}
+
+/// Check if a raw instruction is a W-extension that decomposes into 2 entries:
+/// base_instruction + VirtualSignExtendWord. This includes ADDIW, ADDW, SUBW, MULW.
+/// Excludes SLLIW (handled separately with VirtualMULI decomposition).
+fn isWExtensionWith2EntryDecomposition(opcode: u8, funct3: u3, funct7: u7) bool {
+    return switch (opcode) {
+        0x1b => funct3 == 0, // ADDIW (funct3=0); SLLIW (funct3=1) excluded
+        0x3b => switch (funct3) {
+            0 => (funct7 == 0 or funct7 == 0x20 or funct7 == 0x01), // ADDW, SUBW, MULW
+            else => false,
+        },
+        else => false,
+    };
 }
 
 /// Map a RISC-V instruction to its lookup table index (0..40).

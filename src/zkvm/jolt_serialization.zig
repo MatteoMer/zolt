@@ -384,18 +384,10 @@ pub fn ArkworksSerializer(comptime F: type) type {
                 try writeProof(self, p);
             }
 
-            // 7-10. Advice opening proofs (all Option<PCS::Proof> - None for now)
-            // These come after joint_opening_proof in JoltProof struct:
-            // - trusted_advice_val_evaluation_proof: Option<PCS::Proof>
-            // - trusted_advice_val_final_proof: Option<PCS::Proof>
-            // - untrusted_advice_val_evaluation_proof: Option<PCS::Proof>
-            // - untrusted_advice_val_final_proof: Option<PCS::Proof>
-            try self.writeU8(0); // trusted_advice_val_evaluation_proof: None
-            try self.writeU8(0); // trusted_advice_val_final_proof: None
-            try self.writeU8(0); // untrusted_advice_val_evaluation_proof: None
-            try self.writeU8(0); // untrusted_advice_val_final_proof: None
-
-            // 11. Untrusted advice commitment (Option<Commitment>)
+            // 7. Untrusted advice commitment (Option<Commitment>)
+            // This is the ONLY field after joint_opening_proof before config.
+            // Note: JoltProof struct does NOT have advice proof fields - only
+            // untrusted_advice_commitment.
             // Note: Jolt uses Option encoding: 1 byte flag + commitment if present
             if (proof.untrusted_advice_commitment) |c| {
                 try self.writeU8(1);
@@ -404,25 +396,40 @@ pub fn ArkworksSerializer(comptime F: type) type {
                 try self.writeU8(0);
             }
 
-            // 12. Configuration fields (matches Jolt's JoltProof struct exactly)
-            // Jolt's struct fields are all `usize` serialized as u64 LE:
-            //   trace_length: usize
-            //   ram_K: usize
-            //   bytecode_K: usize
-            //   log_k_chunk: usize
-            //   lookups_ra_virtual_log_k_chunk: usize
+            // 12. Configuration fields - must match Jolt's #[derive(CanonicalSerialize)]
+            // on JoltProof struct. Field order:
+            //   trace_length: usize (8 bytes, LE)
+            //   ram_K: usize (8 bytes, LE)
+            //   bytecode_K: usize (8 bytes, LE)
+            //   rw_config: ReadWriteConfig (4 x u8 = 4 bytes)
+            //   one_hot_config: OneHotConfig (2 x u8 = 2 bytes)
+            //   dory_layout: DoryLayout (1 x u8 = 1 byte)
             std.debug.print("[SERIALIZE CONFIG] trace_length={}, ram_K={}, bytecode_K={}\n", .{
                 proof.trace_length, proof.ram_K, proof.bytecode_K,
             });
-            std.debug.print("[SERIALIZE CONFIG] log_k_chunk={}, lookups_ra_virtual_log_k_chunk={}\n", .{
-                proof.one_hot_config.log_k_chunk, proof.one_hot_config.lookups_ra_virtual_log_k_chunk,
+            std.debug.print("[SERIALIZE CONFIG] rw_config=({},{},{},{}), one_hot=({},{}), dory_layout={}\n", .{
+                proof.rw_config.ram_rw_phase1_num_rounds,
+                proof.rw_config.ram_rw_phase2_num_rounds,
+                proof.rw_config.registers_rw_phase1_num_rounds,
+                proof.rw_config.registers_rw_phase2_num_rounds,
+                proof.one_hot_config.log_k_chunk,
+                proof.one_hot_config.lookups_ra_virtual_log_k_chunk,
+                proof.dory_layout,
             });
 
             try self.writeUsize(proof.trace_length);
             try self.writeUsize(proof.ram_K);
             try self.writeUsize(proof.bytecode_K);
-            try self.writeUsize(@as(usize, proof.one_hot_config.log_k_chunk));
-            try self.writeUsize(@as(usize, proof.one_hot_config.lookups_ra_virtual_log_k_chunk));
+            // ReadWriteConfig: 4 x u8 (canonical serialization of the struct)
+            try self.writeU8(proof.rw_config.ram_rw_phase1_num_rounds);
+            try self.writeU8(proof.rw_config.ram_rw_phase2_num_rounds);
+            try self.writeU8(proof.rw_config.registers_rw_phase1_num_rounds);
+            try self.writeU8(proof.rw_config.registers_rw_phase2_num_rounds);
+            // OneHotConfig: 2 x u8
+            try self.writeU8(proof.one_hot_config.log_k_chunk);
+            try self.writeU8(proof.one_hot_config.lookups_ra_virtual_log_k_chunk);
+            // DoryLayout: 1 x u8 (0 = Wide, 1 = Tall)
+            try self.writeU8(proof.dory_layout);
         }
 
         /// Write a JoltProof using Dory commitments (GT elements)

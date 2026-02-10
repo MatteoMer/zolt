@@ -2152,42 +2152,48 @@ pub fn JoltProver(comptime F: type) type {
                 try serializer.writeDoryProof(&dory_proof);
             }
 
-            // Write 4 optional advice opening proofs (all None)
-            // Matches Jolt's JoltProof struct:
-            //   trusted_advice_val_evaluation_proof: Option<PCS::Proof>
-            //   trusted_advice_val_final_proof: Option<PCS::Proof>
-            //   untrusted_advice_val_evaluation_proof: Option<PCS::Proof>
-            //   untrusted_advice_val_final_proof: Option<PCS::Proof>
-            try serializer.writeU8(0); // trusted_advice_val_evaluation_proof: None
-            try serializer.writeU8(0); // trusted_advice_val_final_proof: None
-            try serializer.writeU8(0); // untrusted_advice_val_evaluation_proof: None
-            try serializer.writeU8(0); // untrusted_advice_val_final_proof: None
-
             // Write untrusted_advice_commitment: Option<PCS::Commitment>
+            // This is the ONLY optional field after joint_opening_proof in JoltProof
+            // Note: There are NO advice proof fields (trusted_advice_val_evaluation_proof etc.)
+            // in JoltProof - those were removed from the struct.
             try serializer.writeU8(0); // untrusted_advice_commitment: None
 
-            // Write configuration fields (matches Jolt's JoltProof struct exactly)
-            // All fields are `usize` serialized as u64 LE:
-            //   trace_length: usize
-            //   ram_K: usize
-            //   bytecode_K: usize
-            //   log_k_chunk: usize
-            //   lookups_ra_virtual_log_k_chunk: usize
+            // Write configuration fields - must match Jolt's #[derive(CanonicalSerialize)]
+            // on JoltProof struct. Field order:
+            //   trace_length: usize (8 bytes, LE)
+            //   ram_K: usize (8 bytes, LE)
+            //   bytecode_K: usize (8 bytes, LE)
+            //   rw_config: ReadWriteConfig (4 x u8 = 4 bytes)
+            //   one_hot_config: OneHotConfig (2 x u8 = 2 bytes)
+            //   dory_layout: DoryLayout (1 x u8 = 1 byte)
             std.debug.print("[SERIALIZE CONFIG] trace_length={}, ram_K={}, bytecode_K={}\n", .{
                 bundle.proof.trace_length,
                 bundle.proof.ram_K,
                 bundle.proof.bytecode_K,
             });
-            std.debug.print("[SERIALIZE CONFIG] log_k_chunk={}, lookups_ra_virtual_log_k_chunk={}\n", .{
+            std.debug.print("[SERIALIZE CONFIG] rw_config=({},{},{},{}), one_hot=({},{}), dory_layout={}\n", .{
+                bundle.proof.rw_config.ram_rw_phase1_num_rounds,
+                bundle.proof.rw_config.ram_rw_phase2_num_rounds,
+                bundle.proof.rw_config.registers_rw_phase1_num_rounds,
+                bundle.proof.rw_config.registers_rw_phase2_num_rounds,
                 bundle.proof.one_hot_config.log_k_chunk,
                 bundle.proof.one_hot_config.lookups_ra_virtual_log_k_chunk,
+                bundle.proof.dory_layout,
             });
 
             try serializer.writeUsize(bundle.proof.trace_length);
             try serializer.writeUsize(bundle.proof.ram_K);
             try serializer.writeUsize(bundle.proof.bytecode_K);
-            try serializer.writeUsize(@as(usize, bundle.proof.one_hot_config.log_k_chunk));
-            try serializer.writeUsize(@as(usize, bundle.proof.one_hot_config.lookups_ra_virtual_log_k_chunk));
+            // ReadWriteConfig: 4 x u8 (canonical serialization of the struct)
+            try serializer.writeU8(bundle.proof.rw_config.ram_rw_phase1_num_rounds);
+            try serializer.writeU8(bundle.proof.rw_config.ram_rw_phase2_num_rounds);
+            try serializer.writeU8(bundle.proof.rw_config.registers_rw_phase1_num_rounds);
+            try serializer.writeU8(bundle.proof.rw_config.registers_rw_phase2_num_rounds);
+            // OneHotConfig: 2 x u8
+            try serializer.writeU8(bundle.proof.one_hot_config.log_k_chunk);
+            try serializer.writeU8(bundle.proof.one_hot_config.lookups_ra_virtual_log_k_chunk);
+            // DoryLayout: 1 x u8 (0 = Wide, 1 = Tall)
+            try serializer.writeU8(bundle.proof.dory_layout);
 
             return serializer.toOwnedSlice();
         }

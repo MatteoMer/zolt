@@ -705,6 +705,9 @@ pub const Emulator = struct {
         const step1_shamt: u6 = 32;
         const vmuli_instr = buildVirtualMULIInstr(v_rs1, rs1_u8, step1_shamt);
 
+        // Read virtual register pre-value (0 initially, may be non-zero if SRLIW executed before)
+        const v_rs1_pre_value = try self.registers.read(v_rs1);
+
         try self.lookup_trace.recordVirtualMULI(
             @intCast(self.state.cycle),
             self.state.pc,
@@ -728,7 +731,7 @@ pub const Emulator = struct {
             .instruction = vmuli_instr,
             .rs1_value = rs1_value,
             .rs2_value = 0,
-            .rd_pre_value = 0, // Virtual register starts at 0
+            .rd_pre_value = v_rs1_pre_value, // Virtual register's current value
             .rd_value = step1_result,
             .rd_index = v_rs1, // virtual register 32
             .rs1_index = rs1_u8,

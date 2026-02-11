@@ -1305,18 +1305,24 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                 //   VirtualInstr[j+1] must equal NextIsVirtual[j]
                 // A step is virtual if:
                 //   - It has virtual_sequence_remaining > 0 (first in a W-ext decomposition, or termination store with vsr>0)
-                //   - It is a VirtualSignExtendWord instruction (opcode 0x0B, which has vsr=0 but is still virtual)
-                //   - It is a termination store with vsr>0
+                //   - It is a VirtualSignExtendWord instruction (opcode 0x0B, which has vsr=Some(0) but is still virtual)
+                //   - It is a VirtualMULI instruction (opcode 0x2B, which has vsr=Some(0) for standalone SLLI)
                 const next_opcode: u8 = @truncate(ns.instruction & 0x7F);
                 const next_is_virtual = (!ns.is_noop and ns.virtual_sequence_remaining > 0) or
-                    (next_opcode == 0x0B); // VirtualSignExtendWord is always virtual (vsr=Some(0))
+                    (next_opcode == 0x0B) or // VirtualSignExtendWord is always virtual (vsr=Some(0))
+                    (next_opcode == 0x2B); // VirtualMULI is always virtual (standalone SLLI has vsr=Some(0))
                 inputs.values[R1CSInputIndex.NextIsVirtual.toIndex()] = if (next_is_virtual) F.one() else F.zero();
 
                 // NextIsFirstInSequence: 1 if the next step is the first in a virtual sequence.
                 // For W-extension decomposition: the first step (ADDI/ADD/SUB/MUL with vsr=1) has IsFirstInSequence=true.
-                // We detect this by checking if the next step has vsr > 0 AND is not a termination store
-                // (termination stores handle IsFirstInSequence separately).
-                const next_is_first = !ns.is_noop and !ns.is_termination_store and ns.virtual_sequence_remaining > 0;
+                // For standalone virtual instructions (SLLI→VirtualMULI with vsr=0): IsFirstInSequence=true.
+                // We detect this by checking:
+                //   - vsr > 0 AND not a termination store (W-ext first step)
+                //   - opcode == 0x2B AND vsr == 0 (standalone VirtualMULI from SLLI)
+                const next_is_first = !ns.is_noop and (
+                    (!ns.is_termination_store and ns.virtual_sequence_remaining > 0) or
+                    (next_opcode == 0x2B and ns.virtual_sequence_remaining == 0)
+                );
                 inputs.values[R1CSInputIndex.NextIsFirstInSequence.toIndex()] = if (next_is_first) F.one() else F.zero();
             } else {
                 // No next step: all Next* values are 0 (matching Jolt)
@@ -1703,12 +1709,22 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                     self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
                     self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
                     self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = u128_right_lookup;
-                    // VirtualInstruction: true when vsr.is_some()
-                    // For standalone SLLI (vsr=None), this is false
-                    // For SLLIW base step (vsr=Some(1)), this is true
-                    if (step.virtual_sequence_remaining > 0) {
-                        self.values[R1CSInputIndex.FlagVirtualInstruction.toIndex()] = F.one();
-                        // DoNotUpdateUnexpandedPC: true when vsr != 0
+                    // VirtualInstruction: ALWAYS true for VirtualMULI.
+                    // In Jolt, opcode 0x2B always has virtual_sequence_remaining=Some(...),
+                    // so VirtualInstruction = is_some() = true unconditionally.
+                    // Cases:
+                    //   Standalone SLLI: vsr=Some(0), VirtInstr=true, IsFirst=true, DoNotUpdateUPC=false
+                    //   SLLIW first step: vsr=Some(1), VirtInstr=true, IsFirst=true, DoNotUpdateUPC=true
+                    // The SLLIW case is already handled by the vsr>0 block at line 1342.
+                    // Here we handle the standalone SLLI case (vsr=0):
+                    self.values[R1CSInputIndex.FlagVirtualInstruction.toIndex()] = F.one();
+                    if (step.virtual_sequence_remaining == 0) {
+                        // Standalone VirtualMULI (from SLLI): first and only step in sequence.
+                        // IsFirstInSequence = true, DoNotUpdateUnexpandedPC = false (default).
+                        self.values[R1CSInputIndex.FlagIsFirstInSequence.toIndex()] = F.one();
+                    } else {
+                        // SLLIW first step (vsr>0): DoNotUpdateUnexpandedPC = true.
+                        // VirtualInstruction and IsFirstInSequence already set by vsr>0 block above.
                         self.values[R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();
                     }
                 },

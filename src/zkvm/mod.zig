@@ -1571,6 +1571,69 @@ pub fn JoltProver(comptime F: type) type {
                                 for (0..8) |bi| std.debug.print("{x:0>2}", .{e_be[31 - bi]});
                                 std.debug.print("]{s}\n", .{ if (wp_mle.eql(claims_ordered[gamma_idx])) " ✓" else " ✗" });
                             }
+                            // For failing chunks, do detailed comparison
+                            if (i >= 24 and !wp_mle.eql(claims_ordered[gamma_idx])) {
+                                // Compute G_i from the witness polynomial
+                                // G_i(k) = Σ_cycle eq(r_cycle_LE, cycle) * [wp[k*T+cycle] == 1]
+                                // Then G_i(ρ) = Σ_k eq(ρ, k) * G_i(k)
+                                const log_T = num_vars - log_k_chunk;
+                                const T_check: usize = @as(usize, 1) << @intCast(log_T);
+                                // Compute eq_cycle table from dory_point[0..log_T]
+                                const eq_cyc_len = T_check;
+                                var eq_cyc = try self.allocator.alloc(F, eq_cyc_len);
+                                defer self.allocator.free(eq_cyc);
+                                eq_cyc[0] = F.one();
+                                for (0..log_T) |bit| {
+                                    const half_b = @as(usize, 1) << @intCast(bit);
+                                    var jj2 = half_b;
+                                    while (jj2 > 0) : (jj2 -= 1) {
+                                        eq_cyc[jj2 - 1 + half_b] = eq_cyc[jj2 - 1].mul(dory_point[bit]);
+                                        eq_cyc[jj2 - 1] = eq_cyc[jj2 - 1].mul(F.one().sub(dory_point[bit]));
+                                    }
+                                }
+                                // Compute eq_addr table from dory_point[log_T..log_T+log_K]
+                                const K_check = k_chunk;
+                                var eq_addr = try self.allocator.alloc(F, K_check);
+                                defer self.allocator.free(eq_addr);
+                                eq_addr[0] = F.one();
+                                for (0..log_k_chunk) |bit| {
+                                    const half_b = @as(usize, 1) << @intCast(bit);
+                                    var jj2 = half_b;
+                                    while (jj2 > 0) : (jj2 -= 1) {
+                                        eq_addr[jj2 - 1 + half_b] = eq_addr[jj2 - 1].mul(dory_point[log_T + bit]);
+                                        eq_addr[jj2 - 1] = eq_addr[jj2 - 1].mul(F.one().sub(dory_point[log_T + bit]));
+                                    }
+                                }
+                                // Compute G_i(k) from witness poly
+                                var G_check = try self.allocator.alloc(F, K_check);
+                                defer self.allocator.free(G_check);
+                                @memset(G_check, F.zero());
+                                for (0..K_check) |k| {
+                                    for (0..T_check) |cycle| {
+                                        if (!wp[k * T_check + cycle].eql(F.zero())) {
+                                            G_check[k] = G_check[k].add(eq_cyc[cycle]);
+                                        }
+                                    }
+                                }
+                                // Compute G_i(ρ) = Σ_k eq(ρ, k) * G_check(k)
+                                var g_rho = F.zero();
+                                for (0..K_check) |k| {
+                                    g_rho = g_rho.add(eq_addr[k].mul(G_check[k]));
+                                }
+                                const gr_be = g_rho.toBytesBE();
+                                std.debug.print("[STAGE8-DBG] InstrRa({d}): G_from_wp(ρ)_LE=[", .{i});
+                                for (0..8) |bi| std.debug.print("{x:0>2}", .{gr_be[31 - bi]});
+                                std.debug.print("] G_check:", .{});
+                                for (0..K_check) |k| {
+                                    if (!G_check[k].eql(F.zero())) {
+                                        const gk_be = G_check[k].toBytesBE();
+                                        std.debug.print(" [{d}]=[", .{k});
+                                        for (0..8) |bi| std.debug.print("{x:0>2}", .{gk_be[31 - bi]});
+                                        std.debug.print("]", .{});
+                                    }
+                                }
+                                std.debug.print("\n", .{});
+                            }
                         }
                         // BytecodeRa
                         for (0..bytecode_d) |i| {
@@ -2389,133 +2452,11 @@ pub fn JoltProver(comptime F: type) type {
             return poly;
         }
 
-        /// Build InstructionRa polynomial: extract chunk idx from lookup indices
-        /// Compute the 128-bit lookup index for a given execution step.
-        /// This must exactly match the proof converter's Stage 7 lookup index computation.
-        fn computeLookupIndex(step: tracer.TraceStep) u128 {
-            if (step.is_noop) return 0;
-
-            const instr = step.instruction;
-            const opcode_7: u8 = @truncate(instr & 0x7F);
-            const funct3_3: u3 = @truncate((instr >> 12) & 0x7);
-            const funct7_7: u7 = @truncate(instr >> 25);
-
-            // Determine identity path
-            const is_identity_path: bool = switch (opcode_7) {
-                0x33 => (funct3_3 == 0 and (funct7_7 == 0 or funct7_7 == 0x20)) or
-                    (funct7_7 == 0x01 and (funct3_3 == 0 or funct3_3 == 3)),
-                0x13 => (funct3_3 == 0),
-                0x1b => (funct3_3 == 0),
-                0x3b => (funct3_3 == 0 and (funct7_7 == 0 or funct7_7 == 0x20)),
-                0x37 => true,
-                0x17 => true,
-                0x6f => true,
-                0x67 => true,
-                else => false,
-            };
-
-            const stage6_mod = @import("spartan/stage6_prover.zig");
-            var lookup_idx: u128 = 0;
-
-            if (is_identity_path) {
-                lookup_idx = switch (opcode_7) {
-                    0x33 => blk128: {
-                        if (funct3_3 == 0 and funct7_7 == 0) {
-                            break :blk128 @as(u128, step.rs1_value) + @as(u128, step.rs2_value);
-                        }
-                        if (funct3_3 == 0 and funct7_7 == 0x20) {
-                            break :blk128 @as(u128, step.rs1_value) + (@as(u128, 1) << 64) - @as(u128, step.rs2_value);
-                        }
-                        if (funct7_7 == 0x01 and funct3_3 == 0) {
-                            break :blk128 @as(u128, step.rs1_value) * @as(u128, step.rs2_value);
-                        }
-                        if (funct7_7 == 0x01 and funct3_3 == 3) {
-                            break :blk128 @as(u128, step.rs1_value) * @as(u128, step.rs2_value);
-                        }
-                        break :blk128 0;
-                    },
-                    0x3b => blk128: {
-                        if (funct3_3 == 0 and funct7_7 == 0) {
-                            break :blk128 @as(u128, step.rs1_value) + @as(u128, step.rs2_value);
-                        }
-                        if (funct3_3 == 0 and funct7_7 == 0x20) {
-                            break :blk128 @as(u128, step.rs1_value) + (@as(u128, 1) << 64) - @as(u128, step.rs2_value);
-                        }
-                        break :blk128 0;
-                    },
-                    0x13 => blk128: {
-                        const imm12_raw: u32 = @truncate(@as(u32, step.instruction) >> 20);
-                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                        const imm_u64: u64 = @bitCast(imm_signed);
-                        break :blk128 @as(u128, step.rs1_value) + @as(u128, imm_u64);
-                    },
-                    0x1b => blk128: {
-                        const imm12_raw: u32 = @truncate(@as(u32, step.instruction) >> 20);
-                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                        const imm_u64: u64 = @bitCast(imm_signed);
-                        break :blk128 @as(u128, step.rs1_value) + @as(u128, imm_u64);
-                    },
-                    0x37 => @as(u128, step.instruction & 0xFFFFF000),
-                    0x17 => @as(u128, step.unexpanded_pc) + @as(u128, step.instruction & 0xFFFFF000),
-                    0x6f => blk128: {
-                        const instr32 = step.instruction;
-                        const imm20: u32 = ((@as(u32, instr32 >> 31) & 1) << 19) |
-                            ((@as(u32, instr32 >> 12) & 0xFF) << 11) |
-                            ((@as(u32, instr32 >> 20) & 1) << 10) |
-                            ((@as(u32, instr32 >> 21) & 0x3FF));
-                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm20 << 12)) >> 11);
-                        const imm_u64: u64 = @bitCast(imm_signed);
-                        break :blk128 @as(u128, step.unexpanded_pc) + @as(u128, imm_u64);
-                    },
-                    0x67 => blk128: {
-                        const imm12_raw: u32 = @truncate(@as(u32, step.instruction) >> 20);
-                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                        const imm_u64: u64 = @bitCast(imm_signed);
-                        break :blk128 @as(u128, step.rs1_value) + @as(u128, imm_u64);
-                    },
-                    else => 0,
-                };
-            } else {
-                // Interleaved path: index = interleave(rs1, rs2)
-                const left_op: u64 = step.rs1_value;
-                const right_op: u64 = switch (opcode_7) {
-                    0x33, 0x3b, 0x63 => step.rs2_value,
-                    0x13 => blk_rop: {
-                        const imm12_raw: u32 = @truncate(@as(u32, step.instruction) >> 20);
-                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                        break :blk_rop @as(u64, @bitCast(imm_signed));
-                    },
-                    0x03 => blk_rop: {
-                        const imm12_raw: u32 = @truncate(@as(u32, step.instruction) >> 20);
-                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                        break :blk_rop @as(u64, @bitCast(imm_signed));
-                    },
-                    0x23 => blk_rop: {
-                        const imm_lo: u32 = (step.instruction >> 7) & 0x1F;
-                        const imm_hi: u32 = (step.instruction >> 25) & 0x7F;
-                        const imm12_raw: u32 = (imm_hi << 5) | imm_lo;
-                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                        break :blk_rop @as(u64, @bitCast(imm_signed));
-                    },
-                    else => step.rs2_value,
-                };
-                lookup_idx = stage6_mod.interleaveBits(left_op, right_op);
-            }
-
-            // Instructions without a lookup table (Load, Store, SLL, SLLI, etc.)
-            // have to_instruction_inputs() = (0, 0) in Jolt, so lookup_idx = 0
-            const stage5_mod = @import("spartan/stage5_prover.zig");
-            const table_idx = stage5_mod.getLookupTableIndex(@as(u32, opcode_7), @as(u32, funct3_3), @as(u32, funct7_7));
-            if (table_idx < 0) {
-                lookup_idx = 0;
-            }
-
-            return lookup_idx;
-        }
-
         /// Build InstructionRa chunk value polynomial from execution trace.
         /// Uses the exact same lookup index computation as the proof converter's Stage 7,
         /// iterating over ALL cycles (not just lookup trace entries).
+        /// CRITICAL: Must use the centralized computeLookupIndex from stage6_prover.zig
+        /// to handle virtual opcodes (0x0B, 0x2B) correctly.
         fn buildInstructionRaPolynomial(
             self: *Self,
             trace: *const tracer.ExecutionTrace,
@@ -2523,6 +2464,7 @@ pub fn JoltProver(comptime F: type) type {
             log_k_chunk: usize,
             shift: usize,
         ) ![]F {
+            const stage6_mod = @import("spartan/stage6_prover.zig");
             const poly = try self.allocator.alloc(F, poly_size);
             errdefer self.allocator.free(poly);
             @memset(poly, F.zero());
@@ -2534,7 +2476,7 @@ pub fn JoltProver(comptime F: type) type {
             for (trace.steps.items, 0..) |step, i| {
                 if (i >= poly_size) break;
 
-                const lookup_idx = computeLookupIndex(step);
+                const lookup_idx = stage6_mod.computeLookupIndex(step);
                 const chunk: u128 = (lookup_idx >> @intCast(shift)) & mask;
                 poly[i] = F.fromU64(@intCast(chunk));
             }

@@ -942,6 +942,126 @@ pub fn UniPoly(comptime F: type) type {
             return result;
         }
 
+        /// Vandermonde interpolation: given evaluations at [0, 1, ..., n-1], compute
+        /// polynomial coefficients [c0, c1, ..., c_{n-1}] using Gaussian elimination.
+        ///
+        /// This matches Jolt's UniPoly::vandermonde_interpolation / from_evals.
+        pub fn fromEvalsVandermonde(allocator: Allocator, evals: []const F) ![]F {
+            const n = evals.len;
+            if (n == 0) return try allocator.alloc(F, 0);
+
+            // Build augmented Vandermonde matrix [V | evals]
+            // Row i: [1, i, i², ..., i^{n-1}, evals[i]]
+            var matrix = try allocator.alloc([]F, n);
+            errdefer {
+                for (matrix) |row| allocator.free(row);
+                allocator.free(matrix);
+            }
+
+            for (0..n) |i| {
+                matrix[i] = try allocator.alloc(F, n + 1);
+                matrix[i][0] = F.one();
+                const x = F.fromU64(@intCast(i));
+                for (1..n) |j| {
+                    matrix[i][j] = matrix[i][j - 1].mul(x);
+                }
+                matrix[i][n] = evals[i]; // RHS
+            }
+
+            // Gaussian elimination with partial pivoting
+            for (0..n) |col| {
+                // Find pivot
+                var max_row = col;
+                for ((col + 1)..n) |row| {
+                    if (!matrix[row][col].eql(F.zero()) and matrix[max_row][col].eql(F.zero())) {
+                        max_row = row;
+                    }
+                }
+
+                if (max_row != col) {
+                    const tmp = matrix[col];
+                    matrix[col] = matrix[max_row];
+                    matrix[max_row] = tmp;
+                }
+
+                if (matrix[col][col].eql(F.zero())) continue;
+
+                const pivot_inv = matrix[col][col].inverse().?;
+                for ((col + 1)..n) |row| {
+                    if (!matrix[row][col].eql(F.zero())) {
+                        const factor = matrix[row][col].mul(pivot_inv);
+                        for (col..n + 1) |j| {
+                            matrix[row][j] = matrix[row][j].sub(factor.mul(matrix[col][j]));
+                        }
+                    }
+                }
+            }
+
+            // Back substitution
+            const coeffs = try allocator.alloc(F, n);
+            var i_plus_1 = n;
+            while (i_plus_1 > 0) {
+                const i = i_plus_1 - 1;
+                i_plus_1 -= 1;
+
+                var sum = matrix[i][n]; // RHS
+                for ((i + 1)..n) |j| {
+                    sum = sum.sub(matrix[i][j].mul(coeffs[j]));
+                }
+                if (!matrix[i][i].eql(F.zero())) {
+                    coeffs[i] = sum.mul(matrix[i][i].inverse().?);
+                } else {
+                    coeffs[i] = F.zero();
+                }
+            }
+
+            for (matrix) |row| allocator.free(row);
+            allocator.free(matrix);
+
+            return coeffs;
+        }
+
+        /// Convert Vandermonde evaluations [p(0), p(1), ..., p(d)] to compressed format [c0, c2, c3, ..., c_d]
+        ///
+        /// For a degree-d polynomial, given d+1 evaluations at consecutive integer points,
+        /// this computes all coefficients via Vandermonde interpolation, then returns the
+        /// compressed format: all coefficients except c1 (linear term).
+        ///
+        /// The compressed format has d elements: [c0, c2, c3, ..., c_d]
+        /// The verifier recovers c1 = hint - 2*c0 - c2 - c3 - ... - c_d
+        pub fn vandermondeToCompressed(allocator: Allocator, evals: []const F) ![]F {
+            const n = evals.len; // n = d + 1 (number of evaluation points)
+            if (n == 0) return try allocator.alloc(F, 0);
+
+            const coeffs = try fromEvalsVandermonde(allocator, evals);
+            defer allocator.free(coeffs);
+
+            // Compressed format: [c0, c2, c3, ..., c_d] (skip c1)
+            const compressed = try allocator.alloc(F, n - 1);
+            compressed[0] = coeffs[0]; // c0
+            for (1..n - 1) |i| {
+                compressed[i] = coeffs[i + 1]; // c2, c3, ..., c_d
+            }
+            return compressed;
+        }
+
+        /// Evaluate a general-degree polynomial at a point given Vandermonde evaluations
+        ///
+        /// Given [p(0), p(1), ..., p(d)], interpolates coefficients and evaluates at x.
+        pub fn evaluateVandermondeAt(allocator: Allocator, evals: []const F, x: F) !F {
+            const coeffs = try fromEvalsVandermonde(allocator, evals);
+            defer allocator.free(coeffs);
+
+            // Evaluate using Horner's method: c0 + x*(c1 + x*(c2 + ... + x*c_d))
+            var result = coeffs[coeffs.len - 1];
+            var i = coeffs.len - 1;
+            while (i > 0) {
+                i -= 1;
+                result = result.mul(x).add(coeffs[i]);
+            }
+            return result;
+        }
+
         /// Evaluate the product of 9 linear polynomials at points [1, 2, ..., 8, ∞]
         ///
         /// Given pairs [(p_j(0), p_j(1))] for j in 0..8, computes evaluations of

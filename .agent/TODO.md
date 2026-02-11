@@ -1,37 +1,42 @@
 # Zolt → Jolt Verification Progress
 
 ## Current Status
-**🔧 IN PROGRESS — Stage 6 sumcheck fails despite matching Val polynomials**
+**🔧 IN PROGRESS — Stages 1-7 ALL PASS, Stage 8 (Dory final check) fails**
 
-Stages 1-5 pass. Stage 6 BytecodeReadRaf+Booleanity+IncClaimReduction batched sumcheck fails: `output_claim != expected_claim`.
+### What's been fixed:
+1. **VirtualMULI R1CS flags** (constraints.zig):
+   - VirtualInstruction ALWAYS true for opcode 0x2B (Jolt: vsr.is_some()=true)
+   - IsFirstInSequence=true when vsr=0 (standalone SLLI)
+   - NextIsVirtual includes opcode 0x2B
+   - NextIsFirstInSequence includes standalone VirtualMULI case
 
-### What's been fixed this session:
-1. **Val poly imm encoding**: Format-aware encoding matching Jolt conventions:
-   - I-type, J-type: unsigned u64 (zero-extended via `F.fromU64(@bitCast(imm_signed))`)
-   - S-type, B-type: signed (via `fieldFromI128`)
-   - U-type: unsigned u64
-2. **Val poly rd=0 handling**: rd=0 is NOT treated as "no rd" for I/R/U/J-type instructions
-3. **Termination store bytecode entries disabled**: Phase 2 removed for vanilla Jolt compatibility
-4. **R1CS witness imm encoding**: `computeImmediate` updated to match Val poly format-aware encoding
+2. **Lookup index consistency** (proof_converter.zig + stage6_prover.zig):
+   - All lookup index computations now use centralized `computeLookupIndex()`
+   - Stage 6 Booleanity G tables (Phase 1 init)
+   - Stage 6 Booleanity transitionToPhase2 (Phase 2 H tables)
+   - Stage 6 LookupsRaVirtual init
+   - Stage 7 G table builder
+   - Witness polynomial builder (buildInstructionRaPolynomial)
+   - Root cause: virtual opcodes 0x0B/0x2B were handled differently in each copy
 
-### Current investigation:
-- All 320 Val polynomial values match exactly (0 diff between Zolt and Jolt)
-- Stage 6 sumcheck output_claim (from proof round polys) doesn't match expected_claim (from Val poly evaluation + other instance claims)
-- The mismatch is NOT in the Val polys — it's in the sumcheck round polynomials
+3. **Virtual opcode handling in computeLookupIndex**:
+   - 0x0B (VirtualSignExtendWord): lookup_index = rs1_value (AddOperands)
+   - 0x2B (VirtualMULI): lookup_index = rs1_value * (1 << shamt) (MultiplyOperands)
 
-### Hypotheses for remaining Stage 6 failure:
-1. **Booleanity instance**: The Booleanity sumcheck might have wrong polynomials due to termination store trace cycles referencing NoOp bytecode entries
-2. **IncClaimReduction instance**: Ram/Rd increment claims might not match
-3. **Transcript/batching divergence**: The batching coefficients for the 3 instances might not match between prover and verifier
-4. **Opening claims**: The opening claims from Stages 1-5 feed into Stage 6's expected output. If these are inconsistent with the proof, Stage 6 fails.
+4. All previous fixes (Val poly encoding, rd=0, Vandermonde format, etc.)
 
-### Key file: `computeImmediate` encoding convention
-Jolt's NormalizedOperands.imm encoding depends on instruction format:
-- FormatI.imm: u64 → `u64 as i128` (zero-extension, always positive)
-- FormatB.imm: i128 → signed
-- FormatS.imm: i64 → `i64 as i128` (sign-extension, signed)
-- FormatJ.imm: u64 → `u64 as i128` (zero-extension, always positive)
-- FormatU.imm: u64 → `u64 as i128` (zero-extension, always positive)
+### Current state:
+- Stages 1-5: PASS ✅
+- Stage 6 (Batched Sumcheck): PASS ✅
+- Stage 7 (HammingWeightClaimReduction): PASS ✅
+- Stage 8 (Dory commitment opening): VMV D2 check passes, final check FAILS ❌
+
+### Next step:
+- Debug Stage 8 Dory final check failure
+- This is likely a pre-existing Dory issue (was never reached before since Stage 6 was failing)
+- VMV D2 passes → initial setup is OK
+- Final check fails → reduction rounds or final scalar product message may have issues
+- Need to compare Dory transcript state between Zolt and Jolt
 
 ## Test Commands
 ```bash

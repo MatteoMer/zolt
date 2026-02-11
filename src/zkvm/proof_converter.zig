@@ -4052,7 +4052,7 @@ pub fn ProofConverter(comptime F: type) type {
             const stage6_mod = @import("spartan/stage6_prover.zig");
             // Get pc_map for converting ELF addresses to bytecode array indices
             const pc_map_ptr = config.bytecode_pc_map orelse return error.MissingBytecodepcMap;
-            const bytecode_entries = try stage6_mod.buildBytecodeEntries(self.allocator, the_trace, bytecode_K_val, pc_map_ptr, config.program_code_bytes, config.code_base_address);
+            const bytecode_entries = try stage6_mod.buildBytecodeEntries(self.allocator, the_trace, bytecode_K_val, pc_map_ptr, config.program_code_bytes, config.code_base_address, the_memory_layout.termination);
             defer self.allocator.free(bytecode_entries);
 
             // Get register address opening points for Stages 4 and 5
@@ -4394,152 +4394,21 @@ pub fn ProofConverter(comptime F: type) type {
 
                 // Iterate over all cycles to populate G_i
                 // G_i(k) = Σ_j eq(r_cycle, j) · [addr_chunk_i(j) == k]
-                const interleaveBits128 = stage6_mod.interleaveBits;
                 for (0..T_val) |j| {
                     const step = the_trace.steps.items[j];
                     const eq_j = eq_cycle[j];
 
                     // InstructionRa: compute 128-bit lookup index, split into chunks
+                    // Use the same computeLookupIndex as Stage 6 LookupsRaVirtualProver
+                    // to ensure G tables are consistent with the virt_claims.
                     {
-                        var lookup_idx: u128 = 0;
-                        if (!step.is_noop) {
-                            // Compute lookup index from instruction (mirrors Stage 5 logic)
-                            const instr = step.instruction;
-                            const opcode_7: u8 = @truncate(instr & 0x7F);
-                            const funct3_3: u3 = @truncate((instr >> 12) & 0x7);
-                            const funct7_7: u7 = @truncate(instr >> 25);
-
-                            // Determine identity path
-                            const is_identity_path: bool = switch (opcode_7) {
-                                0x33 => (funct3_3 == 0 and (funct7_7 == 0 or funct7_7 == 0x20)) or
-                                    (funct7_7 == 0x01 and (funct3_3 == 0 or funct3_3 == 3)),
-                                0x13 => (funct3_3 == 0),
-                                0x1b => (funct3_3 == 0),
-                                0x3b => (funct3_3 == 0 and (funct7_7 == 0 or funct7_7 == 0x20)),
-                                0x37 => true,
-                                0x17 => true,
-                                0x6f => true,
-                                0x67 => true,
-                                else => false,
-                            };
-
-                            if (is_identity_path) {
-                                // Identity path: compute raw u128 result (NOT wrapped rd_value!)
-                                // Must match Jolt's to_lookup_index() exactly.
-                                lookup_idx = switch (opcode_7) {
-                                    // ADD: rs1 + rs2 (u128)
-                                    // SUB: rs1 + (2^64 - rs2) (u128)
-                                    // MUL/MULHU: rs1 * rs2 (u128)
-                                    0x33 => blk128: {
-                                        if (funct3_3 == 0 and funct7_7 == 0) {
-                                            break :blk128 @as(u128, step.rs1_value) + @as(u128, step.rs2_value);
-                                        }
-                                        if (funct3_3 == 0 and funct7_7 == 0x20) {
-                                            break :blk128 @as(u128, step.rs1_value) + (@as(u128, 1) << 64) - @as(u128, step.rs2_value);
-                                        }
-                                        if (funct7_7 == 0x01 and funct3_3 == 0) {
-                                            break :blk128 @as(u128, step.rs1_value) * @as(u128, step.rs2_value);
-                                        }
-                                        if (funct7_7 == 0x01 and funct3_3 == 3) {
-                                            break :blk128 @as(u128, step.rs1_value) * @as(u128, step.rs2_value);
-                                        }
-                                        break :blk128 0;
-                                    },
-                                    // ADDW/SUBW
-                                    0x3b => blk128: {
-                                        if (funct3_3 == 0 and funct7_7 == 0) {
-                                            break :blk128 @as(u128, step.rs1_value) + @as(u128, step.rs2_value);
-                                        }
-                                        if (funct3_3 == 0 and funct7_7 == 0x20) {
-                                            break :blk128 @as(u128, step.rs1_value) + (@as(u128, 1) << 64) - @as(u128, step.rs2_value);
-                                        }
-                                        break :blk128 0;
-                                    },
-                                    // ADDI: rs1 + sign_ext(imm12) (u128)
-                                    0x13 => blk128: {
-                                        const imm12_raw: u32 = @truncate(@as(u32, step.instruction) >> 20);
-                                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                                        const imm_u64: u64 = @bitCast(imm_signed);
-                                        break :blk128 @as(u128, step.rs1_value) + @as(u128, imm_u64);
-                                    },
-                                    // ADDIW: rs1 + sign_ext(imm12) (u128)
-                                    0x1b => blk128: {
-                                        const imm12_raw: u32 = @truncate(@as(u32, step.instruction) >> 20);
-                                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                                        const imm_u64: u64 = @bitCast(imm_signed);
-                                        break :blk128 @as(u128, step.rs1_value) + @as(u128, imm_u64);
-                                    },
-                                    // LUI: imm[31:12] << 12
-                                    0x37 => @as(u128, step.instruction & 0xFFFFF000),
-                                    // AUIPC: unexpanded_pc + imm[31:12] << 12
-                                    0x17 => @as(u128, step.unexpanded_pc) + @as(u128, step.instruction & 0xFFFFF000),
-                                    // JAL: unexpanded_pc + sign_ext(imm20)
-                                    0x6f => blk128: {
-                                        const instr32 = step.instruction;
-                                        const imm20: u32 = ((@as(u32, instr32 >> 31) & 1) << 19) |
-                                            ((@as(u32, instr32 >> 12) & 0xFF) << 11) |
-                                            ((@as(u32, instr32 >> 20) & 1) << 10) |
-                                            ((@as(u32, instr32 >> 21) & 0x3FF));
-                                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm20 << 12)) >> 11);
-                                        const imm_u64: u64 = @bitCast(imm_signed);
-                                        break :blk128 @as(u128, step.unexpanded_pc) + @as(u128, imm_u64);
-                                    },
-                                    // JALR: rs1 + sign_ext(imm12)
-                                    0x67 => blk128: {
-                                        const imm12_raw: u32 = @truncate(@as(u32, step.instruction) >> 20);
-                                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                                        const imm_u64: u64 = @bitCast(imm_signed);
-                                        break :blk128 @as(u128, step.rs1_value) + @as(u128, imm_u64);
-                                    },
-                                    else => 0,
-                                };
-                            } else {
-                                // Interleaved path: index = interleave(rs1, rs2)
-                                const left_op: u64 = step.rs1_value;
-                                const right_op: u64 = switch (opcode_7) {
-                                    0x33, 0x3b, 0x63 => step.rs2_value,
-                                    0x13 => blk_rop: {
-                                        const imm12_raw: u32 = @truncate(@as(u32, step.instruction) >> 20);
-                                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                                        break :blk_rop @as(u64, @bitCast(imm_signed));
-                                    },
-                                    0x03 => blk_rop: {
-                                        // Load: I-type immediate
-                                        const imm12_raw: u32 = @truncate(@as(u32, step.instruction) >> 20);
-                                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                                        break :blk_rop @as(u64, @bitCast(imm_signed));
-                                    },
-                                    0x23 => blk_rop: {
-                                        // Store: S-type immediate
-                                        const imm_lo: u32 = (step.instruction >> 7) & 0x1F;
-                                        const imm_hi: u32 = (step.instruction >> 25) & 0x7F;
-                                        const imm12_raw: u32 = (imm_hi << 5) | imm_lo;
-                                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                                        break :blk_rop @as(u64, @bitCast(imm_signed));
-                                    },
-                                    else => step.rs2_value,
-                                };
-                                lookup_idx = interleaveBits128(left_op, right_op);
-                            }
-
-                            // Instructions without a lookup table (Load, Store, SLL, SLLI, etc.)
-                            // have to_instruction_inputs() = (0, 0) in Jolt, so lookup_idx = 0
-                            const stage5_mod = @import("spartan/stage5_prover.zig");
-                            const table_idx = stage5_mod.getLookupTableIndex(@as(u32, opcode_7), @as(u32, funct3_3), @as(u32, funct7_7));
-                            if (table_idx < 0) {
-                                lookup_idx = 0;
-                            }
-                        }
+                        const lookup_idx = stage6_mod.computeLookupIndex(step);
                         for (0..s6_instruction_d) |i| {
                             const shift = s6_log_k_chunk * (s6_instruction_d - 1 - i);
                             const mask: u128 = (@as(u128, 1) << @intCast(s6_log_k_chunk)) - 1;
                             const chunk_val: usize = @intCast((lookup_idx >> @intCast(shift)) & mask);
                             if (chunk_val < k_chunk) {
                                 G[i][chunk_val] = G[i][chunk_val].add(eq_j);
-                            }
-                            // Debug: print non-zero chunks at index 15 for first few steps
-                            if (i == 15 and chunk_val != 0) {
-                                std.debug.print("[STAGE7 CHUNK15] j={d} lookup_idx=0x{x:0>32} chunk_val={d} opcode=0x{x:0>2} is_noop={} rs1=0x{x:0>16} instr=0x{x:0>8}\n", .{ j, lookup_idx, chunk_val, @as(u8, @truncate(step.instruction & 0x7F)), step.is_noop, step.rs1_value, step.instruction });
                             }
                         }
                     }
@@ -6547,6 +6416,34 @@ pub fn ProofConverter(comptime F: type) type {
             // Track per-cycle contributions for debugging
             var cycle_count_with_nonzero_branch: usize = 0;
             var cycle_count_with_nonzero_lookup_output: usize = 0;
+
+            // Diagnostic: print per-cycle flag values for first 32 cycles
+            {
+                var printed: usize = 0;
+                for (0..@min(256, num_cycles)) |t2| {
+                    const w = &cycle_witnesses[t2];
+                    const isrdnz = w.values[r1cs.R1CSInputIndex.FlagIsRdNotZero.toIndex()];
+                    const wlflag = w.values[r1cs.R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()];
+                    const jumpfl = w.values[r1cs.R1CSInputIndex.FlagJump.toIndex()];
+                    const branchf = w.values[r1cs.R1CSInputIndex.FlagBranch.toIndex()];
+                    const is_noop = w.values[r1cs.R1CSInputIndex.FlagIsNoop.toIndex()];
+                    const imm_val = w.values[r1cs.R1CSInputIndex.Imm.toIndex()];
+                    // Only print non-noop cycles or first few
+                    if (printed < 32 and (is_noop.eql(F.zero()) or t2 < 4)) {
+                        const il = imm_val.toBytes();
+                        std.debug.print("[FACTOR_DIAG] c={} noop={} isRdNZ={} WrLookup={} Jump={} Branch={} imm_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                            t2,
+                            @as(u8, if (is_noop.eql(F.one())) 1 else 0),
+                            @as(u8, if (isrdnz.eql(F.one())) 1 else 0),
+                            @as(u8, if (wlflag.eql(F.one())) 1 else 0),
+                            @as(u8, if (jumpfl.eql(F.one())) 1 else 0),
+                            @as(u8, if (branchf.eql(F.one())) 1 else 0),
+                            il[0], il[1], il[2], il[3], il[4], il[5], il[6], il[7],
+                        });
+                        printed += 1;
+                    }
+                }
+            }
 
             for (0..num_cycles) |t| {
                 const eq_val = eq_evals[t];

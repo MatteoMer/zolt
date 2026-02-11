@@ -1,74 +1,67 @@
-# Session 95 Notes - RAF Decomposition Mismatch
+# Stage 6 Debugging Progress
 
-## Summary
+## W-Extension Fix (DONE)
+- Fixed `from_raw_words` to properly handle W-extension decomposition
+- Uses pattern matching on Instruction enum variants (VirtualSignExtendWord, VirtualMULI)
+- For base instructions of W-ext sequences: maps opcode (0x1b→0x13, 0x3b→0x33) and sets virtual flags
+- All bytecode entries now match between Zolt prover and Jolt verifier
 
-Fixed UpperWord prefix formula (was using 2*XLEN-j instead of XLEN-j). Identified that the RAF (Read-Address-Flag) decomposition produces different results than brute-force computation.
+## rd=0 Fix (DONE)
+- RISC-V x0 is hardwired zero register, can never be written
+- Jolt verifier maps rd_raw==0 to None (zero contribution to val_polys)
+- Fixed 3 locations in stage6_prover.zig to map rd==0 to sentinel 255
+- All 5 stages of val_polys now match 100%
 
-## Key Findings
+## Round Polynomial Format Fix (DONE)
+- Converted from Toom-Cook format to Vandermonde format
+- Changed all computeRoundPoly functions
+- Updated compression/evaluation helpers
 
-### UpperWord Fix
-- Bug: `x_shift = 2 * XLEN - j` caused overflow at j=0 (128-bit shift)
-- Fix: Use `XLEN - j` matching Jolt's upper_word.rs
-- Also fixed suffix handling to extract only upper word bits
+## Stage 6 Instance Layout
+- Instance 0: BytecodeReadRaf (14 rounds, degree 3)
+- Instance 1: HammingBooleanity (8 rounds, degree 3)
+- Instance 2: Booleanity (12 rounds, degree 3)
+- Instance 3: RamRaVirtual (8 rounds, degree 5)
+- Instance 4: LookupsRaSumcheck (8 rounds, degree 5)
+- Instance 5: IncClaimReduction (8 rounds, degree 2)
 
-### RAF Decomposition Mismatch
+## Current Issue: ALL Stage Claims Mismatch (INVESTIGATING)
 
-At round 0:
-- `explicit_raf_0 = 8d6b9084...` (from proverMsgRaf)
-- `bf_raf_eval_0 = 9bac6bba...` (brute-force)
+### Key Finding: ALL 5 stages of BytecodeReadRaf have `Σ_k F_s[k]*val[k] ≠ opening_claim`
 
-The brute-force computes:
-```
-bf_raf_eval_0 = Σ_{j: bit127==0} u[j] * (combined[j] - output[j])
-             = Σ_{j: bit127==0} u[j] * (γ*left + γ²*right)
-```
+Debug evidence (from /tmp/zolt_stderr7.txt):
+- Stage 0 (SpartanOuter): sc != ext, F_s_sum=1 ✓, direct==recomp ✓
+- Stage 1 (ProductVirt): sc != ext
+- Stage 2 (SpartanShift): sc != ext
+- Stage 3 (RegistersRWC): sc != ext
+- Stage 4 (RegistersValEval): sc != ext
 
-The prefix-suffix RAF computes:
-```
-proverMsgRaf = γ*left_sum + γ²*(identity_sum + right_sum)
-```
+### Field-level Comparison
+- Stage 1: address MATCHES, imm MISMATCHES, most circuit_flags MISMATCH
+- Stage 2: Jump MATCHES, Branch MATCHES, IsRdNotZero MISMATCH, WriteLookupToRD MISMATCH
 
-Where each sum uses the RafDecomposition::prefixEvals() and Q polynomials.
+### Key Investigation Results
 
-### Read-Checking Works Correctly
+1. **Streaming round**: Does NOT affect opening claims. r_cycle uses only cycle variables (sumcheck_challenges[1..]), excluding streaming challenge. Opening claims are simple `Σ_c eq(r_cycle,c)*poly(c)`.
 
-Per-table values match between brute-force and prefix-suffix:
-- `bf_val_per_table[0] = 821c547e...` = `eval_0_per_table[0]`
+2. **Jolt's prover uses EXTERNAL claims** (from opening accumulator), not recomputed from arrays. Array recomputation is test-only assertion.
 
-This confirms tableCombine is correct. The issue is isolated to RAF.
+3. **Val_polys match `compute_val_polys_zolt`** byte-for-byte. This is a MODIFIED version with Zolt-specific encodings.
 
-## Possible Issues with RAF
+4. **Imm encoding differs**: Zolt uses per-opcode encoding (fromU64 bitcast for ADDI/JAL etc, truncated u32 for LUI). Standard Jolt uses from_i128 universally. BUT Zolt's R1CS ALSO uses the same per-opcode encoding (computeUnsignedImmediate). So val_polys and R1CS should agree.
 
-1. **Q polynomial initialization in initQRaf**:
-   - Left/Right/Identity Q arrays might have wrong values
-   - The shift coefficients might be computed incorrectly
+5. **Flag differences**: compute_val_polys_zolt uses raw instruction bits; compute_val_polys uses Instruction trait methods. These can produce different flag values.
 
-2. **operandPrefixEvals in RafDecomposition**:
-   - At round 0 with bound_value = 0, returns (0, 256) for LeftOperand
-   - This might not match Jolt's OperandPolynomial::sumcheck_evals()
+### Theories to Test
+- The R1CS constraint system might not use exactly the same flag computation as the val_poly builder
+- There might be cycles where the R1CS witness produces different flag values than the bytecode table entry
+- The issue might be in how virtual instructions (VirtualSignExtendWord, VirtualMULI) contribute to the R1CS witness vs the bytecode table
 
-3. **identityPrefixEvals**:
-   - Similarly needs to match Jolt's IdentityPolynomial
+### Next Step
+Add diagnostic for Stage 2 (ProductVirtualization, 4 flags only) to compare:
+1. `Σ_c eq(r_cycle_s1, c) * R1CS_IsRdNotZero(c)`
+2. `Σ_k F_s[k] * bytecode_IsRdNotZero(k)`
+3. Opening claim for IsRdNotZero from SpartanProductVirtualization
 
-## Comparison Points
-
-Jolt's prover_msg_raf at round 0:
-- Uses PrefixSuffixDecomposition for left_operand_ps, right_operand_ps, identity_ps
-- Each decomposition has 2 Q arrays: Q[0] for shift, Q[1] for operand/identity suffix
-
-Zolt's proverMsgRaf at round 0:
-- Uses RafDecomposition for left_raf, right_raf, identity_raf
-- Each decomposition has Q[0] for shift, Q[1] for suffix
-
-## Next Steps
-
-1. Add debug output in initQRaf to verify Q array values
-2. Compare Jolt's PrefixSuffixDecomposition::sumcheck_evals with Zolt's prefixEvals
-3. Check if the shift coefficients (ShiftHalfSuffix, ShiftFullSuffix) are computed correctly
-
-## Test Commands
-
-```bash
-zig build -Doptimize=ReleaseFast
-./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o /tmp/zolt_proof_dory.bin --export-preprocessing /tmp/zolt_preprocessing.bin --trace-length 64 2>&1 | grep -E "RAF|raf|explicit" | head -30
-```
+If (1) == (3) and (1) != (2), then the bytecode table's flag differs from R1CS for some cycles.
+If (1) != (3), then the R1CS witness differs from the opening claim.

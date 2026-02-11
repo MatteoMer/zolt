@@ -86,7 +86,7 @@ fn populateVirtualMULIEntry(
     const multiplier: u64 = @as(u64, 1) << shamt;
     entry.imm = @intCast(multiplier);
 
-    entry.rd = rd; // Keep rd=0 as 0, not 255 — Jolt normalizes rd=Some(0) for virtual instrs
+    entry.rd = if (rd == 0) 255 else rd; // rd=0 → sentinel (x0 never written)
     entry.rs1 = rs1;
     entry.rs2 = 255; // VirtualMULI is I-type: no rs2
 
@@ -142,8 +142,8 @@ fn populateVirtualSignExtendWordEntry(
     entry.address = elf_address;
     entry.imm = 0; // VirtualSignExtendWord always has imm=0
 
-    entry.rd = rd; // Keep rd=0 as 0 — Jolt normalizes rd=Some(0)
-    entry.rs1 = rd; // Sign-extend reads from rd
+    entry.rd = if (rd == 0) 255 else rd; // rd=0 → sentinel (x0 never written)
+    entry.rs1 = rd; // Sign-extend reads from rd (rs1 is always set, even for rd=0)
     entry.rs2 = 255; // I-type: no rs2
 
     entry.opcode = 0x0B;
@@ -195,13 +195,14 @@ fn populateEntryFromInstruction(entry: *BytecodeEntry, instr: u32, elf_address: 
     // We use 255 as sentinel for "not present" so that `entry.X < REGISTER_COUNT`
     // yields false, giving zero contribution in val poly.
     //
-    // rd:  sentinel ONLY for S-format (0x23) and B-format (0x63) which have no rd.
-    //      NOTE: rd=x0 is NOT treated as "no rd". Jolt's NormalizedOperands always
-    //      produces rd=Some(0) for instructions that have an rd field, even when rd=x0.
-    //      The eq(0, r_register) contribution must be included in Val4/Val5.
+    // rd:  sentinel for S-format (0x23), B-format (0x63), and rd==0 (x0 is the
+    //      hardwired zero register, never written). The register write matrix in
+    //      Jolt checks `rd != 0 && rd < 32`, so rd=0 writes are excluded. The
+    //      verifier's from_raw_word maps rd_raw==0 to None, giving zero contribution
+    //      to Stages 4 and 5 val polynomials. We must match by using sentinel 255.
     // rs1: sentinel for U-type (LUI 0x37, AUIPC 0x17) and J-type (JAL 0x6f)
     // rs2: sentinel for I-type (0x13, 0x03, 0x67, 0x1b), U-type (0x37, 0x17), J-type (0x6f)
-    entry.rd = if (opcode == 0x23 or opcode == 0x63) 255 else decoded.rd;
+    entry.rd = if (opcode == 0x23 or opcode == 0x63 or decoded.rd == 0) 255 else decoded.rd;
     entry.rs1 = switch (opcode) {
         0x37, 0x17, 0x6f => 255, // U-type, J-type: no rs1
         else => decoded.rs1,
@@ -352,8 +353,9 @@ fn populateEntryFromInstruction(entry: *BytecodeEntry, instr: u32, elf_address: 
 /// every instruction in the program (including unexecuted ones) has correct
 /// properties, matching what the Jolt verifier computes from its bytecode array.
 ///
-/// Phase 2: DISABLED for vanilla Jolt compatibility. Jolt's bytecode does
-/// not include termination store instructions.
+/// Phase 2: Populate termination store entries (LUI+ADDI+SB) at their own
+/// bytecode indices (termination_base_pc, +1, +2). Each gets a separate entry
+/// with per-instruction flags, matching Jolt's termination_entry_virtual/anchor.
 ///
 /// pc_map converts ELF addresses to bytecode array indices.
 pub fn buildBytecodeEntries(
@@ -363,8 +365,9 @@ pub fn buildBytecodeEntries(
     pc_map: *const BytecodePCMapper,
     program_code_bytes: ?[]const u8,
     code_base_address: u64,
+    termination_address: u64,
 ) ![]BytecodeEntry {
-    _ = trace; // Phase 2 (termination stores) disabled for vanilla Jolt compatibility
+    _ = trace;
     const entries = try allocator.alloc(BytecodeEntry, bytecode_K);
 
     // Initialize all entries as NoOps matching Jolt's Instruction::NoOp flags:
@@ -519,12 +522,62 @@ pub fn buildBytecodeEntries(
         }
     }
 
-    // NOTE: Phase 2 (termination store bytecode entries) is DISABLED for vanilla Jolt
-    // compatibility. Jolt's vanilla bytecode does NOT include termination store
-    // instructions — those entries remain as default-initialized NoOps (padding).
-    // The termination store sequence (LUI+ADDI+SB) is Zolt-specific and is NOT
-    // part of Jolt's static bytecode. Trace cycles that reference termination
-    // store entries will map to the default NoOp padding entries, matching Jolt.
+    // ================================================================
+    // Phase 2: Populate termination store bytecode entries
+    // ================================================================
+    // Each termination instruction (LUI, ADDI, SB) gets its own bytecode entry
+    // at indices termination_base_pc, +1, +2. This matches Jolt's approach where
+    // each virtual instruction in a sequence has its own entry.
+    // (Matching Jolt's termination_entry_virtual / termination_entry_anchor)
+    {
+        const tbpc = pc_map.termination_base_pc;
+        if (tbpc > 0 and tbpc + 2 < bytecode_K) {
+            const upper20: u32 = @truncate((termination_address >> 12) & 0xFFFFF);
+            const lower12: u32 = @truncate(termination_address & 0xFFF);
+            const imm_upper7: u32 = (lower12 >> 5) & 0x7F;
+            const imm_lower5: u32 = lower12 & 0x1F;
+
+            // LUI x31, upper20(addr)
+            const lui_word: u32 = (upper20 << 12) | (31 << 7) | 0x37;
+            // ADDI x30, x0, 1
+            const addi_word: u32 = (1 << 20) | (0 << 15) | (0 << 12) | (30 << 7) | 0x13;
+            // SB x30, lower12(addr)(x31)
+            const sb_word: u32 = (imm_upper7 << 25) | (30 << 20) | (31 << 15) | (0 << 12) | (imm_lower5 << 7) | 0x23;
+
+            // Entry at tbpc: LUI x31 (virtual, vsr=2)
+            // Matching Jolt's termination_entry_virtual(lui_word):
+            //   from_raw_word(lui_word, 0) + VirtualInstruction + DoNotUpdateUnexpandedPC
+            // NOTE: IsFirstInSequence is NOT set for termination entries.
+            // Jolt's from_raw_word never sets IsFirstInSequence, and the R1CS witness
+            // for termination stores also doesn't set FlagIsFirstInSequence (because
+            // createTerminationStoreWitness skips the virtual sequence flag block).
+            populateEntryFromInstruction(&entries[tbpc], lui_word, 0); // address=0 (unexpanded_pc=0)
+            entries[tbpc].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+            entries[tbpc].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+            entries[tbpc].virtual_sequence_remaining = 2;
+            entries[tbpc].is_first_in_sequence = false;
+
+            // Entry at tbpc+1: ADDI x30 (virtual, vsr=1)
+            // Matching Jolt's termination_entry_virtual(addi_word)
+            populateEntryFromInstruction(&entries[tbpc + 1], addi_word, 0);
+            entries[tbpc + 1].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+            entries[tbpc + 1].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+            entries[tbpc + 1].virtual_sequence_remaining = 1;
+            entries[tbpc + 1].is_first_in_sequence = false;
+
+            // Entry at tbpc+2: SB x30, lower12(x31) (anchor, vsr=0)
+            // Matching Jolt's termination_entry_anchor(sb_word)
+            // NOTE: VirtualInstruction is NOT set for the anchor (SB).
+            // R1CS constraint 17: if VirtualInstruction then NextPC == PC+1.
+            // SB is the last real cycle before NoOp padding, so NextPC=0 ≠ PC+1.
+            populateEntryFromInstruction(&entries[tbpc + 2], sb_word, 0);
+            entries[tbpc + 2].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+            entries[tbpc + 2].virtual_sequence_remaining = null;
+            entries[tbpc + 2].is_first_in_sequence = false;
+
+            std.debug.print("[PHASE2] Termination entries at tbpc={d}: LUI=0x{x:0>8} ADDI=0x{x:0>8} SB=0x{x:0>8}\n", .{ tbpc, lui_word, addi_word, sb_word });
+        }
+    }
 
     // Debug: dump first entries
     std.debug.print("\n[ZOLT BYTECODE ENTRIES] bytecode_K={}\n", .{bytecode_K});
@@ -804,8 +857,8 @@ fn IncClaimReductionProver(comptime F: type) type {
         pub fn computeRoundPoly(self: *Self) [3]F {
             const half = self.current_len / 2;
             var eval_0 = F.zero();
+            var eval_1 = F.zero();
             var eval_2 = F.zero();
-            var eval_inf = F.zero();
 
             for (0..half) |j| {
                 const ram0 = self.ram_inc[2 * j];
@@ -826,6 +879,10 @@ fn IncClaimReductionProver(comptime F: type) type {
                 const f0 = ram0.mul(eq_r0).add(self.gamma_sqr.mul(rd0.mul(eq_d0)));
                 eval_0 = eval_0.add(f0);
 
+                // At x=1
+                const f1 = ram1.mul(eq_r1).add(self.gamma_sqr.mul(rd1.mul(eq_d1)));
+                eval_1 = eval_1.add(f1);
+
                 // At x=2
                 const two = F.fromU64(2);
                 const ram2 = ram0.add(two.mul(ram_delta));
@@ -833,12 +890,10 @@ fn IncClaimReductionProver(comptime F: type) type {
                 const rd2 = rd0.add(two.mul(rd_delta));
                 const eq_d2 = eq_d0.add(two.mul(eq_d_delta));
                 eval_2 = eval_2.add(ram2.mul(eq_r2).add(self.gamma_sqr.mul(rd2.mul(eq_d2))));
-
-                // At x=inf (leading coefficients)
-                eval_inf = eval_inf.add(ram_delta.mul(eq_r_delta).add(self.gamma_sqr.mul(rd_delta.mul(eq_d_delta))));
             }
 
-            return [3]F{ eval_0, eval_2, eval_inf };
+            // Return Vandermonde format [p(0), p(1), p(2)]
+            return [3]F{ eval_0, eval_1, eval_2 };
         }
 
         pub fn bindChallenge(self: *Self, r: F) void {
@@ -916,7 +971,7 @@ fn HammingBooleanityProver(comptime F: type) type {
             var eval_0 = F.zero();
             var eval_1 = F.zero();
             var eval_2 = F.zero();
-            var eval_inf = F.zero();
+            var eval_3 = F.zero();
 
             for (0..half) |j| {
                 const h0 = self.H[2 * j];
@@ -939,11 +994,15 @@ fn HammingBooleanityProver(comptime F: type) type {
                 const e_at_2 = e0.add(two.mul(e_delta));
                 eval_2 = eval_2.add(e_at_2.mul(h_at_2.mul(h_at_2).sub(h_at_2)));
 
-                // At x=inf: leading coeff is delta_e * delta_h^2
-                eval_inf = eval_inf.add(e_delta.mul(h_delta.mul(h_delta)));
+                // At x=3
+                const three = F.fromU64(3);
+                const h_at_3 = h0.add(three.mul(h_delta));
+                const e_at_3 = e0.add(three.mul(e_delta));
+                eval_3 = eval_3.add(e_at_3.mul(h_at_3.mul(h_at_3).sub(h_at_3)));
             }
 
-            return [4]F{ eval_0, eval_1, eval_2, eval_inf };
+            // Return Vandermonde format [p(0), p(1), p(2), p(3)]
+            return [4]F{ eval_0, eval_1, eval_2, eval_3 };
         }
 
         pub fn bindChallenge(self: *Self, r: F) void {
@@ -1071,25 +1130,17 @@ fn RamRaVirtualProver(comptime F: type) type {
                 const eq1 = self.eq[2 * j + 1];
                 const eq_delta = eq1.sub(eq0);
 
+                // Evaluate at all finite points [0, 1, ..., d+1] (Vandermonde format)
                 for (0..n_evals) |pt_idx| {
+                    const x = F.fromU64(@intCast(pt_idx));
                     var product = F.one();
 
-                    if (pt_idx == n_evals - 1) {
-                        // x = inf: product of leading coefficients
-                        for (0..self.d) |i| {
-                            const delta = self.ra_bound[i][2 * j + 1].sub(self.ra_bound[i][2 * j]);
-                            product = product.mul(delta);
-                        }
-                        product = product.mul(eq_delta);
-                    } else {
-                        const x = F.fromU64(@intCast(pt_idx));
-                        for (0..self.d) |i| {
-                            const v0 = self.ra_bound[i][2 * j];
-                            const v1 = self.ra_bound[i][2 * j + 1];
-                            product = product.mul(v0.add(x.mul(v1.sub(v0))));
-                        }
-                        product = product.mul(eq0.add(x.mul(eq_delta)));
+                    for (0..self.d) |i| {
+                        const v0 = self.ra_bound[i][2 * j];
+                        const v1 = self.ra_bound[i][2 * j + 1];
+                        product = product.mul(v0.add(x.mul(v1.sub(v0))));
                     }
+                    product = product.mul(eq0.add(x.mul(eq_delta)));
 
                     evals[pt_idx] = evals[pt_idx].add(product);
                 }
@@ -1399,14 +1450,19 @@ fn BooleanityProver(comptime F: type) type {
             const e_times_2 = e.add(e);
             const q2 = q1.add(q1).sub(c).add(e_times_2);
 
-            // p_inf = X³ coefficient of s(X) = l(X)*Q(X) = eq_slope * e
-            const p_inf = eq_slope.mul(e);
+            // Extrapolate: Q(3) = 3*Q(1) - 2*Q(0) + 6*e
+            const three = F.fromU64(3);
+            const six = F.fromU64(6);
+            const q3 = three.mul(q1).sub(c.add(c)).add(six.mul(e));
 
-            // Return [s(0), s(1), s(2), p_inf]
+            // l(3) = eq_eval_0 + 3 * eq_slope
+            const eq_eval_3 = eq_eval_0.add(three.mul(eq_slope));
+
+            // Return Vandermonde format [s(0), s(1), s(2), s(3)]
             evals[0] = s0;
             evals[1] = s1;
             evals[2] = eq_eval_2.mul(q2);
-            evals[3] = p_inf;
+            evals[3] = eq_eval_3.mul(q3);
 
             // Debug: brute force check
             if (true) {
@@ -1522,7 +1578,8 @@ fn BooleanityProver(comptime F: type) type {
                 const d0 = self.eq_cycle[2 * j];
                 const d1 = self.eq_cycle[2 * j + 1];
 
-                inline for (0..3) |pt| {
+                // Evaluate at all finite points [0, 1, 2, 3] (Vandermonde format)
+                inline for (0..4) |pt| {
                     const x_val = comptime pt;
                     var q_val = F.zero();
                     for (0..self.N) |i| {
@@ -1533,16 +1590,6 @@ fn BooleanityProver(comptime F: type) type {
                     }
                     const d_x = if (x_val == 0) d0 else if (x_val == 1) d1 else d0.add(F.fromU64(x_val).mul(d1.sub(d0)));
                     evals[pt] = evals[pt].add(d_x.mul(q_val));
-                }
-
-                // Leading coefficient of X^3: slope_d * Σ γ^{2i} * slope_h_i^2
-                {
-                    var q_lead = F.zero();
-                    for (0..self.N) |i| {
-                        const d = ht[i][2 * j + 1].sub(ht[i][2 * j]);
-                        q_lead = q_lead.add(self.gamma_powers_sq[i].mul(d.mul(d)));
-                    }
-                    evals[3] = evals[3].add(d1.sub(d0).mul(q_lead));
                 }
             }
 
@@ -1617,148 +1664,22 @@ fn BooleanityProver(comptime F: type) type {
                 @memset(ht[i], F.zero());
             }
 
-            const stage5_mod = @import("stage5_prover.zig");
-
-            var dbg_nonzero_chunks: usize = 0;
+            const dbg_nonzero_chunks: usize = 0;
             for (0..T_val) |j| {
                 const step = trace.steps.items[j];
 
                 // InstructionRa chunks
+                // Use the centralized computeLookupIndex to ensure consistency
+                // across all sumcheck instances (Stage 6 virtualization, booleanity, Stage 7).
                 {
-                    var lookup_idx: u128 = 0;
-                    const opcode_7: u32 = step.instruction & 0x7F;
-                    const funct3_3: u32 = (step.instruction >> 12) & 0x7;
-                    const funct7_7: u32 = (step.instruction >> 25) & 0x7F;
-                    const is_noop = (step.instruction == 0 or step.instruction == 0x00000013);
-
-                    if (!is_noop) {
-                        // Identity path: instructions where lookup_idx = direct computation result
-                        // Must match Stage 7 (proof_converter.zig) and Jolt's AddOperands/SubtractOperands/MultiplyOperands flags
-                        const is_identity: bool = switch (opcode_7) {
-                            0x33 => (funct3_3 == 0 and (funct7_7 == 0 or funct7_7 == 0x20)) or
-                                (funct7_7 == 0x01 and (funct3_3 == 0 or funct3_3 == 3)),
-                            0x3b => (funct3_3 == 0 and (funct7_7 == 0 or funct7_7 == 0x20)),
-                            0x13 => (funct3_3 == 0),
-                            0x1b => (funct3_3 == 0),
-                            0x37 => true,
-                            0x17 => true,
-                            0x6f => true,
-                            0x67 => true,
-                            else => false,
-                        };
-
-                        if (is_identity) {
-                            lookup_idx = switch (opcode_7) {
-                                // ADD: rs1 + rs2 (u128)
-                                // SUB: rs1 + (2^64 - rs2) (u128)
-                                // MUL/MULHU: rs1 * rs2 (u128)
-                                0x33 => blk128: {
-                                    if (funct3_3 == 0 and funct7_7 == 0) {
-                                        break :blk128 @as(u128, step.rs1_value) + @as(u128, step.rs2_value);
-                                    }
-                                    if (funct3_3 == 0 and funct7_7 == 0x20) {
-                                        break :blk128 @as(u128, step.rs1_value) + (@as(u128, 1) << 64) - @as(u128, step.rs2_value);
-                                    }
-                                    if (funct7_7 == 0x01 and funct3_3 == 0) {
-                                        break :blk128 @as(u128, step.rs1_value) * @as(u128, step.rs2_value);
-                                    }
-                                    if (funct7_7 == 0x01 and funct3_3 == 3) {
-                                        break :blk128 @as(u128, step.rs1_value) * @as(u128, step.rs2_value);
-                                    }
-                                    break :blk128 0;
-                                },
-                                // ADDW/SUBW
-                                0x3b => blk128: {
-                                    if (funct3_3 == 0 and funct7_7 == 0) {
-                                        break :blk128 @as(u128, step.rs1_value) + @as(u128, step.rs2_value);
-                                    }
-                                    if (funct3_3 == 0 and funct7_7 == 0x20) {
-                                        break :blk128 @as(u128, step.rs1_value) + (@as(u128, 1) << 64) - @as(u128, step.rs2_value);
-                                    }
-                                    break :blk128 0;
-                                },
-                                0x13, 0x1b => blk128: {
-                                    const imm12_raw: u32 = @truncate(@as(u32, step.instruction) >> 20);
-                                    const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                                    const imm_u64: u64 = @bitCast(imm_signed);
-                                    break :blk128 @as(u128, step.rs1_value) + @as(u128, imm_u64);
-                                },
-                                0x37 => @as(u128, step.instruction & 0xFFFFF000),
-                                0x17 => @as(u128, step.unexpanded_pc) + @as(u128, step.instruction & 0xFFFFF000),
-                                0x6f => blk128: {
-                                    const instr32 = step.instruction;
-                                    const imm20: u32 = ((@as(u32, instr32 >> 31) & 1) << 19) |
-                                        ((@as(u32, instr32 >> 12) & 0xFF) << 11) |
-                                        ((@as(u32, instr32 >> 20) & 1) << 10) |
-                                        ((@as(u32, instr32 >> 21) & 0x3FF));
-                                    const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm20 << 12)) >> 11);
-                                    const imm_u64: u64 = @bitCast(imm_signed);
-                                    break :blk128 @as(u128, step.unexpanded_pc) + @as(u128, imm_u64);
-                                },
-                                0x67 => blk128: {
-                                    const imm12_raw: u32 = @truncate(@as(u32, step.instruction) >> 20);
-                                    const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                                    const imm_u64: u64 = @bitCast(imm_signed);
-                                    break :blk128 @as(u128, step.rs1_value) + @as(u128, imm_u64);
-                                },
-                                else => 0,
-                            };
-                        } else {
-                            const left_op: u64 = step.rs1_value;
-                            const right_op: u64 = switch (opcode_7) {
-                                0x33, 0x3b, 0x63 => step.rs2_value,
-                                0x13 => blk_rop: {
-                                    const imm12_raw: u32 = @truncate(@as(u32, step.instruction) >> 20);
-                                    const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                                    break :blk_rop @as(u64, @bitCast(imm_signed));
-                                },
-                                0x03 => blk_rop: {
-                                    const imm12_raw: u32 = @truncate(@as(u32, step.instruction) >> 20);
-                                    const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                                    break :blk_rop @as(u64, @bitCast(imm_signed));
-                                },
-                                0x23 => blk_rop: {
-                                    const imm_lo: u32 = (step.instruction >> 7) & 0x1F;
-                                    const imm_hi: u32 = (step.instruction >> 25) & 0x7F;
-                                    const imm12_raw: u32 = (imm_hi << 5) | imm_lo;
-                                    const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                                    break :blk_rop @as(u64, @bitCast(imm_signed));
-                                },
-                                else => step.rs2_value,
-                            };
-                            lookup_idx = interleaveBits(left_op, right_op);
-                        }
-
-                        const table_idx = stage5_mod.getLookupTableIndex(@as(u32, opcode_7), @as(u32, funct3_3), @as(u32, funct7_7));
-                        if (table_idx < 0) {
-                            lookup_idx = 0;
-                        }
-                    }
+                    const lookup_idx = computeLookupIndex(step);
                     for (0..instr_d) |i| {
                         const shift = self.log_k_chunk * (instr_d - 1 - i);
                         const mask: u128 = (@as(u128, 1) << @intCast(self.log_k_chunk)) - 1;
                         const chunk_val: usize = @intCast((lookup_idx >> @intCast(shift)) & mask);
                         if (chunk_val < K) {
                             ht[i][j] = self.F_table[chunk_val];
-                            if (chunk_val != 0 and i == 0) dbg_nonzero_chunks += 1;
                         }
-                    }
-                    if (j < 3) {
-                        const dbg_mask: u128 = (@as(u128, 1) << @intCast(self.log_k_chunk)) - 1;
-                        std.debug.print("[BOOL_H_TRANS] j={} instr=0x{x:0>8} is_noop={} lookup_idx=0x{x:0>16}", .{
-                            j, step.instruction, @intFromBool(is_noop), @as(u64, @truncate(lookup_idx)),
-                        });
-                        // Print chunks for last 4 positions (LSB end)
-                        std.debug.print(" chunks[28..31]=", .{});
-                        for (28..32) |ci| {
-                            if (ci < instr_d) {
-                                const shift2 = self.log_k_chunk * (instr_d - 1 - ci);
-                                const cv: u64 = @truncate((lookup_idx >> @intCast(shift2)) & dbg_mask);
-                                std.debug.print("{}", .{cv});
-                                if (ci < 31) std.debug.print(",", .{});
-                            }
-                        }
-                        std.debug.print("\n", .{});
                     }
                 }
 
@@ -2152,37 +2073,25 @@ fn LookupsRaVirtualProver(comptime F: type) type {
                 const eq1 = self.eq[2 * j + 1];
                 const eq_delta = eq1.sub(eq0);
 
+                // Evaluate at all finite points [0, 1, ..., M+1] (Vandermonde format)
                 for (0..n_evals) |pt_idx| {
+                    const x = F.fromU64(@intCast(pt_idx));
                     var virtual_sum = F.zero();
 
                     for (0..self.N) |v| {
                         var product = F.one();
 
-                        if (pt_idx == n_evals - 1) {
-                            for (0..self.M) |m| {
-                                const idx = v * self.M + m;
-                                const delta = self.ra_bound[idx][2 * j + 1].sub(self.ra_bound[idx][2 * j]);
-                                product = product.mul(delta);
-                            }
-                        } else {
-                            const x = F.fromU64(@intCast(pt_idx));
-                            for (0..self.M) |m| {
-                                const idx = v * self.M + m;
-                                const v0 = self.ra_bound[idx][2 * j];
-                                const v1 = self.ra_bound[idx][2 * j + 1];
-                                product = product.mul(v0.add(x.mul(v1.sub(v0))));
-                            }
+                        for (0..self.M) |m| {
+                            const idx = v * self.M + m;
+                            const v0 = self.ra_bound[idx][2 * j];
+                            const v1 = self.ra_bound[idx][2 * j + 1];
+                            product = product.mul(v0.add(x.mul(v1.sub(v0))));
                         }
 
                         virtual_sum = virtual_sum.add(product);
                     }
 
-                    if (pt_idx == n_evals - 1) {
-                        evals[pt_idx] = evals[pt_idx].add(eq_delta.mul(virtual_sum));
-                    } else {
-                        const x = F.fromU64(@intCast(pt_idx));
-                        evals[pt_idx] = evals[pt_idx].add(eq0.add(x.mul(eq_delta)).mul(virtual_sum));
-                    }
+                    evals[pt_idx] = evals[pt_idx].add(eq0.add(x.mul(eq_delta)).mul(virtual_sum));
                 }
             }
 
@@ -2318,13 +2227,19 @@ fn BytecodeReadRafProver(comptime F: type) type {
                     if (pc_idx < bytecode_K) {
                         F_s_arrs[s][pc_idx] = F_s_arrs[s][pc_idx].add(eq_table[c]);
                     }
-                    // Debug: print first 8 cycles' PC mappings for stage 0
-                    if (s == 0 and c < 8) {
-                        const el = eq_table[c].toBytes();
-                        std.debug.print("[BCRAF_PC] c={} noop={} pc=0x{x:0>8} pc_idx={} vsr={} eq_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
-                            c, @intFromBool(step.is_noop), step.pc, pc_idx, step.virtual_sequence_remaining,
-                            el[0], el[1], el[2], el[3], el[4], el[5], el[6], el[7],
-                        });
+                    // Debug: print first cycles' PC mappings and trace step info for stage 0
+                    if (s == 0 and c < 256) {
+                        if (c < 8 or (!step.is_noop and c < 64)) {
+                            const el = eq_table[c].toBytes();
+                            const instr = step.instruction;
+                            const opc: u8 = @truncate(instr & 0x7F);
+                            const rd_raw: u8 = @truncate((instr >> 7) & 0x1F);
+                            std.debug.print("[BCRAF_PC] c={} noop={} pc=0x{x:0>8} pc_idx={} vsr={} opc=0x{x:0>2} rd_raw={} tstore={} eq_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                                c, @intFromBool(step.is_noop), step.pc, pc_idx, step.virtual_sequence_remaining,
+                                opc, rd_raw, @intFromBool(step.is_termination_store),
+                                el[0], el[1], el[2], el[3], el[4], el[5], el[6], el[7],
+                            });
+                        }
                     }
                 }
 
@@ -2343,8 +2258,42 @@ fn BytecodeReadRafProver(comptime F: type) type {
 
                 // Compute claim from val_polys and F_s
                 var recomputed_claim = F.zero();
+                var val_only_claim = F.zero();
+                var raf_only_claim = F.zero();
                 for (0..bytecode_K) |k| {
                     recomputed_claim = recomputed_claim.add(F_s_arrs[s][k].mul(val_with_raf_arrs[s][k]));
+                    val_only_claim = val_only_claim.add(F_s_arrs[s][k].mul(if (val_polys[s].len > k) val_polys[s][k] else F.zero()));
+                    if (s == 0) {
+                        raf_only_claim = raf_only_claim.add(F_s_arrs[s][k].mul(gamma_powers[5].mul(int_poly[k])));
+                    } else if (s == 2) {
+                        raf_only_claim = raf_only_claim.add(F_s_arrs[s][k].mul(gamma_powers[4].mul(int_poly[k])));
+                    }
+                }
+                if (s == 0 or s == 2) {
+                    const vocl = val_only_claim.toBytes();
+                    const rocl = raf_only_claim.toBytes();
+                    const rv_ext = external_stage_claims[s];
+                    // Decompose external: ext = rv + raf_ext
+                    // For s=0: raf_ext = gamma^5 * raf_claim (from opening claims)
+                    // For s=2: raf_ext = gamma^4 * raf_shift_claim (from opening claims)
+                    const raf_ext = rv_ext.sub(val_only_claim);
+                    const rexl = raf_ext.toBytes();
+                    std.debug.print("[BCRAF_DECOMP_CLAIM] s={}: val_only_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] raf_only_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] raf_from_ext_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                        s,
+                        vocl[0], vocl[1], vocl[2], vocl[3], vocl[4], vocl[5], vocl[6], vocl[7],
+                        rocl[0], rocl[1], rocl[2], rocl[3], rocl[4], rocl[5], rocl[6], rocl[7],
+                        rexl[0], rexl[1], rexl[2], rexl[3], rexl[4], rexl[5], rexl[6], rexl[7],
+                    });
+                    std.debug.print("[BCRAF_DECOMP_CLAIM] s={}: raf_match={}\n", .{
+                        s, @as(u8, if (raf_only_claim.eql(raf_ext)) 1 else 0),
+                    });
+                    // Also check: does val_only_claim match rv_claims[s] from external (without RAF)?
+                    // external_stage_claims[s] = rv + raf, so rv = ext - raf_ext (using prover's RAF)
+                    // But we can also check directly: does val_only match ext - raf_from_arrays?
+                    const ext_minus_raf = rv_ext.sub(raf_only_claim);
+                    std.debug.print("[BCRAF_DECOMP_CLAIM] s={}: val_only==ext-raf_arrays? {}\n", .{
+                        s, @as(u8, if (val_only_claim.eql(ext_minus_raf)) 1 else 0),
+                    });
                 }
 
                 // Also compute claim directly from cycle iteration (for debugging)
@@ -2397,6 +2346,140 @@ fn BytecodeReadRafProver(comptime F: type) type {
                             s, k, fkl[0], fkl[1], fkl[2], fkl[3], fkl[4], fkl[5], fkl[6], fkl[7],
                         });
                     }
+                }
+
+                // Debug: for stage 0, decompose by UnexpandedPC field alone
+                // Compute Σ_k F_s[0][k] * bytecode_address[k] and compare with
+                // Σ_t eq(r,t) * witness[t].UnexpandedPC (i.e., the opening claim)
+                if (s == 0) {
+                    // Compute Σeq*imm from trace using TWO methods:
+                    // 1. val-poly encoding (same as bytecode entry imm_field)
+                    // 2. R1CS witness encoding (same as computeClaimedInputs)
+                    var imm_valpoly = F.zero();
+                    var imm_r1cs = F.zero();
+                    var addr_trace = F.zero();
+                    var diff_count: usize = 0;
+                    for (0..T) |c| {
+                        const step3 = trace.steps.items[c];
+                        const eq_val = eq_table[c];
+                        if (eq_val.eql(F.zero())) continue;
+
+                        addr_trace = addr_trace.add(eq_val.mul(F.fromU64(step3.unexpanded_pc)));
+
+                        const inst = step3.instruction;
+                        const opc: u8 = @truncate(inst & 0x7F);
+
+                        // Method 1: val poly encoding
+                        const decoded_imm = instruction_mod.DecodedInstruction.decode(inst).imm;
+                        const vp_imm: F = if (step3.is_noop)
+                            F.zero()
+                        else if ((opc == 0x63) or (opc == 0x23))
+                            fieldFromI128(F, @as(i128, @as(i64, decoded_imm)))
+                        else
+                            F.fromU64(@as(u64, @bitCast(@as(i64, decoded_imm))));
+                        imm_valpoly = imm_valpoly.add(eq_val.mul(vp_imm));
+
+                        // Method 2: R1CS witness encoding (same as fromTraceStepWithPCMap)
+                        const r1cs_imm: F = blk: {
+                            if (step3.is_noop) break :blk F.zero();
+                            // VirtualMULI special case
+                            if (opc == 0x2B) {
+                                const shamt_raw: u32 = inst >> 20;
+                                const shamt: u6 = @truncate(shamt_raw & 0x3F);
+                                const multiplier: u64 = @as(u64, 1) << shamt;
+                                break :blk F.fromU64(multiplier);
+                            }
+                            const is_identity_add = switch (opc) {
+                                0x13 => ((inst >> 12) & 0x7) == 0, // ADDI
+                                0x1b => ((inst >> 12) & 0x7) == 0, // ADDIW
+                                0x6f => true, // JAL
+                                0x67 => true, // JALR
+                                else => false,
+                            };
+                            if (is_identity_add) {
+                                // Use computeUnsignedImmediate logic
+                                switch (opc) {
+                                    0x13, 0x03, 0x67, 0x1b => {
+                                        const imm12: u32 = inst >> 20;
+                                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12 << 20)) >> 20);
+                                        break :blk F.fromU64(@as(u64, @bitCast(imm_signed)));
+                                    },
+                                    0x6F => {
+                                        const imm20 = (inst >> 31) & 0x1;
+                                        const imm10_1 = (inst >> 21) & 0x3FF;
+                                        const imm11 = (inst >> 20) & 0x1;
+                                        const imm19_12 = (inst >> 12) & 0xFF;
+                                        const raw2 = (imm20 << 20) | (imm19_12 << 12) | (imm11 << 11) | (imm10_1 << 1);
+                                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(raw2 << 11)) >> 11);
+                                        break :blk F.fromU64(@as(u64, @bitCast(imm_signed)));
+                                    },
+                                    else => break :blk F.zero(),
+                                }
+                            }
+                            // deriveImmediate logic
+                            switch (opc) {
+                                0x13, 0x03, 0x67, 0x1b => {
+                                    const imm12 = inst >> 20;
+                                    if (imm12 & 0x800 != 0) {
+                                        break :blk F.zero().sub(F.fromU64((~imm12 + 1) & 0xFFF));
+                                    }
+                                    break :blk F.fromU64(imm12);
+                                },
+                                0x23 => {
+                                    const imm4_0 = (inst >> 7) & 0x1F;
+                                    const imm11_5 = (inst >> 25) & 0x7F;
+                                    const ival = (imm11_5 << 5) | imm4_0;
+                                    if (ival & 0x800 != 0) {
+                                        break :blk F.zero().sub(F.fromU64((~ival + 1) & 0xFFF));
+                                    }
+                                    break :blk F.fromU64(ival);
+                                },
+                                0x63 => {
+                                    const bimm12 = (inst >> 31) & 0x1;
+                                    const bimm10_5 = (inst >> 25) & 0x3F;
+                                    const bimm4_1 = (inst >> 8) & 0xF;
+                                    const bimm11 = (inst >> 7) & 0x1;
+                                    const bval = (bimm12 << 12) | (bimm11 << 11) | (bimm10_5 << 5) | (bimm4_1 << 1);
+                                    if (bval & 0x1000 != 0) {
+                                        break :blk F.zero().sub(F.fromU64((~bval + 1) & 0x1FFF));
+                                    }
+                                    break :blk F.fromU64(bval);
+                                },
+                                0x37, 0x17 => {
+                                    break :blk F.fromU64(inst & 0xFFFFF000);
+                                },
+                                else => break :blk F.zero(),
+                            }
+                        };
+                        imm_r1cs = imm_r1cs.add(eq_val.mul(r1cs_imm));
+
+                        // Print per-cycle difference if non-zero
+                        if (!vp_imm.eql(r1cs_imm) and c < 256) {
+                            diff_count += 1;
+                            if (diff_count <= 10) {
+                                const vpl = vp_imm.toBytes();
+                                const r1l = r1cs_imm.toBytes();
+                                std.debug.print("[BCRAF_IMM_DIFF] c={} opc=0x{x:0>2} noop={} vp_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] r1cs_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                                    c, opc, @intFromBool(step3.is_noop),
+                                    vpl[0], vpl[1], vpl[2], vpl[3], vpl[4], vpl[5], vpl[6], vpl[7],
+                                    r1l[0], r1l[1], r1l[2], r1l[3], r1l[4], r1l[5], r1l[6], r1l[7],
+                                });
+                            }
+                        }
+                    }
+                    const addr_le = addr_trace.toBytes();
+                    const imm_vp_le = imm_valpoly.toBytes();
+                    const imm_r1_le = imm_r1cs.toBytes();
+                    std.debug.print("[BCRAF_DECOMP] Σeq*addr_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                        addr_le[0], addr_le[1], addr_le[2], addr_le[3], addr_le[4], addr_le[5], addr_le[6], addr_le[7],
+                    });
+                    std.debug.print("[BCRAF_DECOMP] Σeq*imm(valpoly)_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                        imm_vp_le[0], imm_vp_le[1], imm_vp_le[2], imm_vp_le[3], imm_vp_le[4], imm_vp_le[5], imm_vp_le[6], imm_vp_le[7],
+                    });
+                    std.debug.print("[BCRAF_DECOMP] Σeq*imm(r1cs)_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] diff_count={}\n", .{
+                        imm_r1_le[0], imm_r1_le[1], imm_r1_le[2], imm_r1_le[3], imm_r1_le[4], imm_r1_le[5], imm_r1_le[6], imm_r1_le[7],
+                        diff_count,
+                    });
                 }
 
                 // Use val_poly-derived claims for sumcheck consistency
@@ -2560,6 +2643,19 @@ fn BytecodeReadRafProver(comptime F: type) type {
             // and chunks sequentially: chunk 0 = MSB vars, chunk d-1 = LSB vars.
             // We keep r_address_be for RA chunk slicing (same convention as before).
 
+            // Debug: print r_address_challenges (LH order from sumcheck)
+            {
+                std.debug.print("[BCRAF_TRANS] r_address_challenges (LH, len={}):\n", .{r_address_challenges.len});
+                for (0..r_address_challenges.len) |ci| {
+                    const rb = r_address_challenges[ci].toBytes();
+                    std.debug.print("  r_addr_LH[{}]=[", .{ci});
+                    for (0..32) |bi| {
+                        std.debug.print("{x:0>2}", .{rb[bi]});
+                    }
+                    std.debug.print("]\n", .{});
+                }
+            }
+
             // Compute r_address_be for RA chunk slicing (same as before)
             var r_address_be = try self.allocator.alloc(F, self.bytecode_log_k);
             defer self.allocator.free(r_address_be);
@@ -2572,12 +2668,62 @@ fn BytecodeReadRafProver(comptime F: type) type {
             const eq_addr = try computeEqTable(F, self.allocator, r_address_challenges, self.bytecode_log_k);
             defer self.allocator.free(eq_addr);
 
+            // Sanity: check val_polys[0][2] right here at this point
+            {
+                const check_vb = self.val_polys[0][2].toBytes();
+                std.debug.print("[SANITY_CHECK] val_polys[0][2] at dump time: [", .{});
+                for (0..32) |bi| std.debug.print("{x:0>2}", .{check_vb[bi]});
+                std.debug.print("]\n", .{});
+                // Also check val_with_raf[0][2] - these should differ (RAF added to stage 0)
+                const vwr = self.val_with_raf[0][2].toBytes();
+                std.debug.print("[SANITY_CHECK] val_with_raf[0][2]:     [", .{});
+                for (0..32) |bi| std.debug.print("{x:0>2}", .{vwr[bi]});
+                std.debug.print("]\n", .{});
+                // Check if val_polys and val_with_raf are aliased
+                const vp_ptr = @intFromPtr(self.val_polys[0].ptr);
+                const vr_ptr = @intFromPtr(self.val_with_raf[0].ptr);
+                std.debug.print("[SANITY_CHECK] val_polys[0] ptr=0x{x} len={}, val_with_raf[0] ptr=0x{x} len={}, aliased={}\n", .{
+                    vp_ptr, self.val_polys[0].len, vr_ptr, self.val_with_raf[0].len,
+                    @intFromBool(vp_ptr == vr_ptr),
+                });
+            }
+
             var bound_vals: [5]F = undefined;
             for (0..5) |s| {
                 var val_eval = F.zero();
                 const max_k = @min(self.val_polys[s].len, bytecode_K);
                 for (0..max_k) |k| {
                     val_eval = val_eval.add(self.val_polys[s][k].mul(eq_addr[k]));
+                }
+
+                // Debug: print pure val_eval + partial sums for debugging
+                if (s == 0) {
+                    const pure_ve = val_eval.toBytes();
+                    std.debug.print("[BCRAF_TRANS] stage[0]: pure_val_eval_LE=[", .{});
+                    for (0..32) |bi| {
+                        std.debug.print("{x:0>2}", .{pure_ve[bi]});
+                    }
+                    std.debug.print("]\n", .{});
+                    // Recompute partial sums for debugging
+                    var check_sum = F.zero();
+                    for (0..max_k) |k| {
+                        check_sum = check_sum.add(self.val_polys[0][k].mul(eq_addr[k]));
+                        if (k < 3 or k == max_k - 1) {
+                            const cs = check_sum.toBytes();
+                            const vk = self.val_polys[0][k].toBytes();
+                            const ek = eq_addr[k].toBytes();
+                            const pk = self.val_polys[0][k].mul(eq_addr[k]).toBytes();
+                            std.debug.print("[PARTIAL_SUM] k={}: prod_LE=[", .{k});
+                            for (0..8) |bi| std.debug.print("{x:0>2}", .{pk[bi]});
+                            std.debug.print("] sum_LE=[", .{});
+                            for (0..8) |bi| std.debug.print("{x:0>2}", .{cs[bi]});
+                            std.debug.print("] val_LE=[", .{});
+                            for (0..8) |bi| std.debug.print("{x:0>2}", .{vk[bi]});
+                            std.debug.print("] eq_LE=[", .{});
+                            for (0..8) |bi| std.debug.print("{x:0>2}", .{ek[bi]});
+                            std.debug.print("]\n", .{});
+                        }
+                    }
                 }
 
                 // Add RAF terms (inner powers, multiplied by gamma_powers[s] at outer level)
@@ -2609,12 +2755,15 @@ fn BytecodeReadRafProver(comptime F: type) type {
                         const old_bv = self.gamma_powers[s].mul(effective_val);
                         const ve_le = val_eval.toBytes();
                         const ev_le = effective_val.toBytes();
-                        std.debug.print("[BCRAF_TRANS] stage[{}]: val_eval_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] effective_val_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] match={}\n", .{
-                            s,
-                            ve_le[0], ve_le[1], ve_le[2], ve_le[3], ve_le[4], ve_le[5], ve_le[6], ve_le[7],
-                            ev_le[0], ev_le[1], ev_le[2], ev_le[3], ev_le[4], ev_le[5], ev_le[6], ev_le[7],
-                            @as(u8, if (val_eval.eql(effective_val)) 1 else 0),
-                        });
+                        std.debug.print("[BCRAF_TRANS] stage[{}]: val_eval_LE=[", .{s});
+                        for (0..32) |bi| {
+                            std.debug.print("{x:0>2}", .{ve_le[bi]});
+                        }
+                        std.debug.print("] effective_val_LE=[", .{});
+                        for (0..32) |bi| {
+                            std.debug.print("{x:0>2}", .{ev_le[bi]});
+                        }
+                        std.debug.print("] match={}\n", .{@as(u8, if (val_eval.eql(effective_val)) 1 else 0)});
                         _ = old_bv;
                     }
                 }
@@ -2839,24 +2988,17 @@ fn BytecodeReadRafProver(comptime F: type) type {
                 const val1 = combined[2 * c + 1];
                 const val_delta = val1.sub(val0);
 
+                // Evaluate at all finite points [0, 1, ..., bytecode_d+1] (Vandermonde format)
                 for (0..n_evals) |pt_idx| {
+                    const x = F.fromU64(@intCast(pt_idx));
                     var ra_product = F.one();
 
-                    if (pt_idx == n_evals - 1) {
-                        for (0..self.bytecode_d) |i| {
-                            const delta = self.ra_chunks.?[i][2 * c + 1].sub(self.ra_chunks.?[i][2 * c]);
-                            ra_product = ra_product.mul(delta);
-                        }
-                        ra_product = ra_product.mul(val_delta);
-                    } else {
-                        const x = F.fromU64(@intCast(pt_idx));
-                        for (0..self.bytecode_d) |i| {
-                            const r0 = self.ra_chunks.?[i][2 * c];
-                            const r1 = self.ra_chunks.?[i][2 * c + 1];
-                            ra_product = ra_product.mul(r0.add(x.mul(r1.sub(r0))));
-                        }
-                        ra_product = ra_product.mul(val0.add(x.mul(val_delta)));
+                    for (0..self.bytecode_d) |i| {
+                        const r0 = self.ra_chunks.?[i][2 * c];
+                        const r1 = self.ra_chunks.?[i][2 * c + 1];
+                        ra_product = ra_product.mul(r0.add(x.mul(r1.sub(r0))));
                     }
+                    ra_product = ra_product.mul(val0.add(x.mul(val_delta)));
 
                     evals[pt_idx] = evals[pt_idx].add(ra_product);
                 }
@@ -3401,120 +3543,17 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     @memset(G_tables[i], F.zero());
                 }
 
-                const stage5_mod = @import("stage5_prover.zig");
-
                 for (0..T_val) |j| {
                     const eq_j = eq_cycle_bool_phase2[j]; // eq(r_cycle_fixed, j) - same table as Phase 2
                     if (eq_j.eql(F.zero())) continue;
 
                     const step = trace.steps.items[j];
 
-                    // InstructionRa chunks
+                    // InstructionRa chunks - use centralized computeLookupIndex
+                    // to ensure consistency with transitionToPhase2, LookupsRaVirtual,
+                    // and Stage 7 G table builder.
                     {
-                        var lookup_idx: u128 = 0;
-                        const opcode_7: u32 = step.instruction & 0x7F;
-                        const funct3_3: u32 = (step.instruction >> 12) & 0x7;
-                        const funct7_7: u32 = (step.instruction >> 25) & 0x7F;
-                        const is_noop = (step.instruction == 0 or step.instruction == 0x00000013);
-
-                        if (!is_noop) {
-                            // Identity path: must match transitionToPhase2 and Stage 7
-                            const is_identity: bool = switch (opcode_7) {
-                                0x33 => (funct3_3 == 0 and (funct7_7 == 0 or funct7_7 == 0x20)) or
-                                    (funct7_7 == 0x01 and (funct3_3 == 0 or funct3_3 == 3)),
-                                0x3b => (funct3_3 == 0 and (funct7_7 == 0 or funct7_7 == 0x20)),
-                                0x13 => (funct3_3 == 0),
-                                0x1b => (funct3_3 == 0),
-                                0x37 => true,
-                                0x17 => true,
-                                0x6f => true,
-                                0x67 => true,
-                                else => false,
-                            };
-
-                            if (is_identity) {
-                                lookup_idx = switch (opcode_7) {
-                                    0x33 => blk128: {
-                                        if (funct3_3 == 0 and funct7_7 == 0) {
-                                            break :blk128 @as(u128, step.rs1_value) + @as(u128, step.rs2_value);
-                                        }
-                                        if (funct3_3 == 0 and funct7_7 == 0x20) {
-                                            break :blk128 @as(u128, step.rs1_value) + (@as(u128, 1) << 64) - @as(u128, step.rs2_value);
-                                        }
-                                        if (funct7_7 == 0x01 and funct3_3 == 0) {
-                                            break :blk128 @as(u128, step.rs1_value) * @as(u128, step.rs2_value);
-                                        }
-                                        if (funct7_7 == 0x01 and funct3_3 == 3) {
-                                            break :blk128 @as(u128, step.rs1_value) * @as(u128, step.rs2_value);
-                                        }
-                                        break :blk128 0;
-                                    },
-                                    0x3b => blk128: {
-                                        if (funct3_3 == 0 and funct7_7 == 0) {
-                                            break :blk128 @as(u128, step.rs1_value) + @as(u128, step.rs2_value);
-                                        }
-                                        if (funct3_3 == 0 and funct7_7 == 0x20) {
-                                            break :blk128 @as(u128, step.rs1_value) + (@as(u128, 1) << 64) - @as(u128, step.rs2_value);
-                                        }
-                                        break :blk128 0;
-                                    },
-                                    0x13, 0x1b => blk128: {
-                                        const imm12_raw: u32 = @truncate(@as(u32, step.instruction) >> 20);
-                                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                                        const imm_u64: u64 = @bitCast(imm_signed);
-                                        break :blk128 @as(u128, step.rs1_value) + @as(u128, imm_u64);
-                                    },
-                                    0x37 => @as(u128, step.instruction & 0xFFFFF000),
-                                    0x17 => @as(u128, step.unexpanded_pc) + @as(u128, step.instruction & 0xFFFFF000),
-                                    0x6f => blk128: {
-                                        const instr32 = step.instruction;
-                                        const imm20: u32 = ((@as(u32, instr32 >> 31) & 1) << 19) |
-                                            ((@as(u32, instr32 >> 12) & 0xFF) << 11) |
-                                            ((@as(u32, instr32 >> 20) & 1) << 10) |
-                                            ((@as(u32, instr32 >> 21) & 0x3FF));
-                                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm20 << 12)) >> 11);
-                                        const imm_u64: u64 = @bitCast(imm_signed);
-                                        break :blk128 @as(u128, step.unexpanded_pc) + @as(u128, imm_u64);
-                                    },
-                                    0x67 => blk128: {
-                                        const imm12_raw: u32 = @truncate(@as(u32, step.instruction) >> 20);
-                                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                                        const imm_u64: u64 = @bitCast(imm_signed);
-                                        break :blk128 @as(u128, step.rs1_value) + @as(u128, imm_u64);
-                                    },
-                                    else => 0,
-                                };
-                            } else {
-                                const left_op: u64 = step.rs1_value;
-                                const right_op: u64 = switch (opcode_7) {
-                                    0x33, 0x3b, 0x63 => step.rs2_value,
-                                    0x13 => blk_rop: {
-                                        const imm12_raw: u32 = @truncate(@as(u32, step.instruction) >> 20);
-                                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                                        break :blk_rop @as(u64, @bitCast(imm_signed));
-                                    },
-                                    0x03 => blk_rop: {
-                                        const imm12_raw: u32 = @truncate(@as(u32, step.instruction) >> 20);
-                                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                                        break :blk_rop @as(u64, @bitCast(imm_signed));
-                                    },
-                                    0x23 => blk_rop: {
-                                        const imm_lo: u32 = (step.instruction >> 7) & 0x1F;
-                                        const imm_hi: u32 = (step.instruction >> 25) & 0x7F;
-                                        const imm12_raw: u32 = (imm_hi << 5) | imm_lo;
-                                        const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
-                                        break :blk_rop @as(u64, @bitCast(imm_signed));
-                                    },
-                                    else => step.rs2_value,
-                                };
-                                lookup_idx = interleaveBits(left_op, right_op);
-                            }
-
-                            const table_idx = stage5_mod.getLookupTableIndex(@as(u32, opcode_7), @as(u32, funct3_3), @as(u32, funct7_7));
-                            if (table_idx < 0) {
-                                lookup_idx = 0;
-                            }
-                        }
+                        const lookup_idx = computeLookupIndex(step);
                         for (0..instruction_d) |i| {
                             const shift = log_k_chunk * (instruction_d - 1 - i);
                             const mask: u128 = (@as(u128, 1) << @intCast(log_k_chunk)) - 1;
@@ -3699,8 +3738,13 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     if (is_signed_format) {
                         // B-type and S-type: signed i64 → sign-extended to i128
                         break :blk fieldFromI128(F, @as(i128, entry.imm));
+                    } else if (opcode_for_imm == 0x37 or opcode_for_imm == 0x17) {
+                        // LUI/AUIPC (U-type): truncate to u32 before converting to field.
+                        const u64_bits: u64 = @bitCast(entry.imm);
+                        const truncated: u32 = @truncate(u64_bits);
+                        break :blk F.fromU64(@as(u64, truncated));
                     } else {
-                        // I-type, U-type, J-type, Virtual: u64 zero-extended
+                        // I-type, J-type, Virtual: u64 zero-extended
                         // Reinterpret the i64 bit pattern as u64 (same bits)
                         break :blk F.fromU64(@as(u64, @bitCast(entry.imm)));
                     }
@@ -4511,12 +4555,15 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 var cached_hamming: [4]F = undefined;
                 var cached_ram_ra: ?[]F = null;
                 var cached_lookups_ra: ?[]F = null;
-                var cached_inc: [3]F = undefined; // [p(0), p(2), p(inf)]
+                var cached_inc: [3]F = undefined; // Vandermonde: [p(0), p(1), p(2)]
                 var cached_inc_p1: F = F.zero(); // recovered p(1)
 
                 // Track which instances are active this round
                 var inst_active: [6]bool = .{ false, false, false, false, false, false };
-                const debug_r5 = (round == 5);
+                const debug_r5 = (round == 5 or round == 6);
+                // Debug: per-instance contribution to combined_evals[0] and [1]
+                var dbg_inst_p0: [6]F = .{F.zero()} ** 6;
+                var dbg_inst_p1: [6]F = .{F.zero()} ** 6;
 
                 // Instance 0: BytecodeReadRaf - REAL prover
                 {
@@ -4527,7 +4574,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         var scaled = input_claims[inst];
                         for (0..scale) |_| scaled = scaled.add(scaled);
                         const contrib = batch[inst].mul(scaled);
-                        for (0..num_evals - 1) |j_eval| {
+                        for (0..num_evals) |j_eval| {
                             combined_evals[j_eval] = combined_evals[j_eval].add(contrib);
                         }
                     } else {
@@ -4566,15 +4613,13 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                             const a1 = p1.sub(p0).sub(a2);
                             cached_bc_phase1_coeffs = [3]F{ a0, a1, a2 };
 
-                            // Evaluate degree-2 poly at all points for combined_evals
-                            // combined_evals format: [p(0), p(1), ..., p(max_degree-1), p_inf]
-                            for (0..num_evals - 1) |k| {
+                            // Evaluate degree-2 poly at all finite points for combined_evals
+                            // combined_evals format (Vandermonde): [p(0), p(1), ..., p(max_degree)]
+                            for (0..num_evals) |k| {
                                 const x = F.fromU64(@intCast(k));
                                 const pk = a0.add(x.mul(a1.add(x.mul(a2))));
                                 combined_evals[k] = combined_evals[k].add(batch[inst].mul(pk));
                             }
-                            // p_inf (leading coefficient of x^max_degree) = 0 for degree-2 when max_degree > 2
-                            // so no contribution to combined_evals[num_evals - 1]
                         } else {
                             // Phase 2: cycle binding (degree bytecode_d+1)
                             const polys = try bytecode_prover.computeRoundPolyPhase2(self.allocator);
@@ -4588,6 +4633,9 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         }
                     }
                 }
+
+                dbg_inst_p0[0] = combined_evals[0];
+                dbg_inst_p1[0] = combined_evals[1];
 
                 if (debug_r5) {
                     const e0 = combined_evals[0].toBytes();
@@ -4606,7 +4654,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         var scaled = input_claims[inst];
                         for (0..scale) |_| scaled = scaled.add(scaled);
                         const contrib = batch[inst].mul(scaled);
-                        for (0..num_evals - 1) |j_eval| {
+                        for (0..num_evals) |j_eval| {
                             combined_evals[j_eval] = combined_evals[j_eval].add(contrib);
                         }
                     } else {
@@ -4616,6 +4664,8 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         addFixedEvalsToCombibed(F, combined_evals, &polys, 4, batch[inst], num_evals);
                     }
                 }
+                dbg_inst_p0[1] = combined_evals[0];
+                dbg_inst_p1[1] = combined_evals[1];
 
                 if (debug_r5) {
                     const e0 = combined_evals[0].toBytes();
@@ -4635,7 +4685,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         var scaled = input_claims[inst];
                         for (0..scale) |_| scaled = scaled.add(scaled);
                         const contrib = batch[inst].mul(scaled);
-                        for (0..num_evals - 1) |j_eval| {
+                        for (0..num_evals) |j_eval| {
                             combined_evals[j_eval] = combined_evals[j_eval].add(contrib);
                         }
                     } else {
@@ -4656,6 +4706,8 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         addFixedEvalsToCombibed(F, combined_evals, polys, 4, batch[inst], num_evals);
                     }
                 }
+                dbg_inst_p0[2] = combined_evals[0];
+                dbg_inst_p1[2] = combined_evals[1];
 
                 if (debug_r5) {
                     const e0 = combined_evals[0].toBytes();
@@ -4674,7 +4726,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         var scaled = input_claims[inst];
                         for (0..scale) |_| scaled = scaled.add(scaled);
                         const contrib = batch[inst].mul(scaled);
-                        for (0..num_evals - 1) |j_eval| {
+                        for (0..num_evals) |j_eval| {
                             combined_evals[j_eval] = combined_evals[j_eval].add(contrib);
                         }
                     } else {
@@ -4702,6 +4754,8 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         addInstanceEvalsToCombibed(F, combined_evals, polys, batch[inst], num_evals);
                     }
                 }
+                dbg_inst_p0[3] = combined_evals[0];
+                dbg_inst_p1[3] = combined_evals[1];
 
                 if (debug_r5) {
                     const e0 = combined_evals[0].toBytes();
@@ -4720,7 +4774,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         var scaled = input_claims[inst];
                         for (0..scale) |_| scaled = scaled.add(scaled);
                         const contrib = batch[inst].mul(scaled);
-                        for (0..num_evals - 1) |j_eval| {
+                        for (0..num_evals) |j_eval| {
                             combined_evals[j_eval] = combined_evals[j_eval].add(contrib);
                         }
                     } else {
@@ -4747,6 +4801,8 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         addInstanceEvalsToCombibed(F, combined_evals, polys, batch[inst], num_evals);
                     }
                 }
+                dbg_inst_p0[4] = combined_evals[0];
+                dbg_inst_p1[4] = combined_evals[1];
 
                 if (debug_r5) {
                     const e0 = combined_evals[0].toBytes();
@@ -4765,17 +4821,16 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         var scaled = input_claims[inst];
                         for (0..scale) |_| scaled = scaled.add(scaled);
                         const contrib = batch[inst].mul(scaled);
-                        for (0..num_evals - 1) |j_eval| {
+                        for (0..num_evals) |j_eval| {
                             combined_evals[j_eval] = combined_evals[j_eval].add(contrib);
                         }
                     } else {
                         inst_active[inst] = true;
                         const polys = inc_prover.computeRoundPoly();
                         cached_inc = polys;
-                        // polys = [p(0), p(2), p(inf)] for degree 2
-                        // Need p(1) = instance_claim - p(0)
+                        // polys = [p(0), p(1), p(2)] in Vandermonde format for degree 2
                         const p0 = polys[0];
-                        const p1 = instance_claims[inst].sub(p0);
+                        const p1 = polys[1];
                         cached_inc_p1 = p1;
                         if (debug_r5) {
                             const p01_ok: u8 = if (std.mem.eql(u8, &p0.add(p1).toBytesBE(), &instance_claims[inst].toBytesBE())) 1 else 0;
@@ -4785,28 +4840,26 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                                 p1.toBytes()[0], p1.toBytes()[1], p1.toBytes()[2], p1.toBytes()[3], p1.toBytes()[4], p1.toBytes()[5], p1.toBytes()[6], p1.toBytes()[7],
                             });
                         }
-                        const p_inf = polys[2];
 
-                        // IncClaimReduction is degree 2. The combined polynomial is degree max_degree.
-                        // We must add evaluations at all finite points [0, 1, ..., max_degree-1]
-                        // but NOT add the degree-2 leading coefficient to the combined leading
-                        // coefficient position (which represents x^max_degree, not x^2).
-                        // The degree-2 polynomial's contribution to higher coefficients (x^3, x^4, x^5) is zero.
+                        // IncClaimReduction is degree 2 in Vandermonde format [p(0), p(1), p(2)].
+                        // Interpolate coefficients: a0 + a1*x + a2*x^2
                         const a0 = p0;
-                        const a2_coeff = p_inf;
+                        const two = F.fromU64(2);
+                        const two_inv = two.inverse().?;
+                        const a2_coeff = polys[2].sub(p1.add(p1)).add(p0).mul(two_inv);
                         const a1 = p1.sub(a0).sub(a2_coeff);
 
-                        // Add evaluations at all finite points [0, 1, ..., num_evals-2]
+                        // Add evaluations at all finite points [0, 1, ..., num_evals-1]
                         // p(k) = a0 + a1*k + a2*k^2
-                        for (0..num_evals - 1) |k| {
+                        for (0..num_evals) |k| {
                             const x = F.fromU64(@intCast(k));
                             const px = a0.add(x.mul(a1.add(x.mul(a2_coeff))));
                             combined_evals[k] = combined_evals[k].add(batch[inst].mul(px));
                         }
-                        // DO NOT add to combined_evals[num_evals-1] (leading coeff position)
-                        // because IncClaimReduction (degree 2) has zero x^max_degree coefficient.
                     }
                 }
+                dbg_inst_p0[5] = combined_evals[0];
+                dbg_inst_p1[5] = combined_evals[1];
 
                 if (debug_r5) {
                     const e0 = combined_evals[0].toBytes();
@@ -4868,19 +4921,52 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                             std.debug.print("]\n    claim_LE=[", .{});
                             for (0..32) |bi| std.debug.print("{x:0>2}", .{cb[bi]});
                             std.debug.print("]\n", .{});
-                            // Also print each instance's contribution
+                            // Print each instance's contribution and per-instance p(0)+p(1) check
                             for (0..6) |di| {
                                 const di_claim = instance_claims[di].toBytes();
                                 std.debug.print("    inst[{}] claim_LE=[", .{di});
                                 for (0..32) |bi| std.debug.print("{x:0>2}", .{di_claim[bi]});
                                 std.debug.print("] active={} rounds={}\n", .{@as(u8, if (inst_active[di]) 1 else 0), num_rounds_arr[di]});
                             }
+                            // Recompute expected batched claim from per-instance claims
+                            var recomp = F.zero();
+                            for (0..6) |di| {
+                                recomp = recomp.add(batch[di].mul(instance_claims[di]));
+                            }
+                            const rc_le = recomp.toBytes();
+                            std.debug.print("    recomputed_Σ(batch*claim)_LE=[", .{});
+                            for (0..32) |bi| std.debug.print("{x:0>2}", .{rc_le[bi]});
+                            std.debug.print("] match_claim={}\n", .{@as(u8, if (recomp.eql(current_batched_claim)) 1 else 0)});
+                            // Per-instance p(0)+p(1) vs claim check
+                            // dbg_inst_p0/p1 are cumulative, need to compute deltas
+                            var prev_p0 = F.zero();
+                            var prev_p1 = F.zero();
+                            for (0..6) |di| {
+                                const inst_p0 = dbg_inst_p0[di].sub(prev_p0);
+                                const inst_p1 = dbg_inst_p1[di].sub(prev_p1);
+                                const inst_sum = inst_p0.add(inst_p1);
+                                const expected = batch[di].mul(instance_claims[di]);
+                                const ok: u8 = if (inst_sum.eql(expected)) 1 else 0;
+                                if (ok == 0) {
+                                    const is_le = inst_sum.toBytes();
+                                    const ex_le = expected.toBytes();
+                                    std.debug.print("    *** MISMATCH inst[{}]: batch*p(0+1)_LE=[", .{di});
+                                    for (0..16) |bi| std.debug.print("{x:0>2}", .{is_le[bi]});
+                                    std.debug.print("] batch*claim_LE=[", .{});
+                                    for (0..16) |bi| std.debug.print("{x:0>2}", .{ex_le[bi]});
+                                    std.debug.print("]\n", .{});
+                                } else {
+                                    std.debug.print("    inst[{}] p(0)+p(1)=claim ✓\n", .{di});
+                                }
+                                prev_p0 = dbg_inst_p0[di];
+                                prev_p1 = dbg_inst_p1[di];
+                            }
                         }
                     }
                 }
 
-                // Compress and append to transcript
-                const compressed = try UniPoly(F).toomCookToCompressedGeneral(self.allocator, combined_evals);
+                // Compress and append to transcript (Vandermonde format)
+                const compressed = try UniPoly(F).vandermondeToCompressed(self.allocator, combined_evals);
                 defer self.allocator.free(compressed);
 
                 // Debug: print compressed coefficients LE for round 0
@@ -4912,8 +4998,8 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 const challenge = transcript.challengeScalar();
                 challenges[round] = challenge;
 
-                // Evaluate combined polynomial at challenge
-                current_batched_claim = try UniPoly(F).evaluateToomCookGeneralAt(self.allocator, combined_evals, challenge);
+                // Evaluate combined polynomial at challenge (Vandermonde format)
+                current_batched_claim = try UniPoly(F).evaluateVandermondeAt(self.allocator, combined_evals, challenge);
 
                 {
                     const ch_le = challenge.toBytes();
@@ -5044,7 +5130,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 // Instance 2: Booleanity (real prover)
                 if (inst_active[2]) {
                     if (cached_booleanity) |polys| {
-                        // Evaluate degree-3 poly at challenge from [p(0), p(1), p(2), p_inf]
+                        // Evaluate degree-3 poly at challenge from Vandermonde [p(0), p(1), p(2), p(3)]
                         const evals_arr = [4]F{ polys[0], polys[1], polys[2], polys[3] };
                         instance_claims[2] = evaluateDeg3FromEvals(F, evals_arr, challenge);
                         self.allocator.free(polys);
@@ -5079,11 +5165,13 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 // Instance 5: IncClaimReduction
                 if (inst_active[5]) {
                     const p0 = cached_inc[0];
-                    const p1_val = cached_inc_p1;
-                    const p_inf = cached_inc[2];
-                    // p(x) = a0 + a1*x + a2*x^2 where a2 = p(inf)
+                    const p1_val = cached_inc[1]; // Vandermonde format: polys[1] = p(1) directly
+                    const p2_val = cached_inc[2]; // Vandermonde format: polys[2] = p(2) directly
+                    // Interpolate coefficients: p(x) = a0 + a1*x + a2*x^2
                     const a0 = p0;
-                    const a2 = p_inf;
+                    const inc_two = F.fromU64(2);
+                    const inc_two_inv = inc_two.inverse().?;
+                    const a2 = p2_val.sub(p1_val.add(p1_val)).add(p0).mul(inc_two_inv);
                     const a1 = p1_val.sub(a0).sub(a2);
                     instance_claims[5] = a0.add(challenge.mul(a1.add(challenge.mul(a2))));
                     // BRUTE FORCE CHECK BEFORE BIND: recompute p(0), p(1) from arrays
@@ -5577,13 +5665,37 @@ pub fn Stage6BatchedProver(comptime F: type) type {
 
             // rv_claim_1 (Stage 1 / SpartanOuter)
             var rv1 = F.zero();
-            rv1 = rv1.add(stage1_gammas[0].mul(getClaim(opening_claims,
-                .{ .Virtual = .{ .poly = .UnexpandedPC, .sumcheck_id = .SpartanOuter } })));
-            rv1 = rv1.add(stage1_gammas[1].mul(getClaim(opening_claims,
-                .{ .Virtual = .{ .poly = .Imm, .sumcheck_id = .SpartanOuter } })));
+            const oc_upc = getClaim(opening_claims, .{ .Virtual = .{ .poly = .UnexpandedPC, .sumcheck_id = .SpartanOuter } });
+            rv1 = rv1.add(stage1_gammas[0].mul(oc_upc));
+            const oc_imm = getClaim(opening_claims, .{ .Virtual = .{ .poly = .Imm, .sumcheck_id = .SpartanOuter } });
+            rv1 = rv1.add(stage1_gammas[1].mul(oc_imm));
+            var oc_flags: [13]F = undefined;
             for (0..13) |i| {
-                rv1 = rv1.add(stage1_gammas[2 + i].mul(getClaim(opening_claims,
-                    .{ .Virtual = .{ .poly = .{ .OpFlags = @intCast(i) }, .sumcheck_id = .SpartanOuter } })));
+                oc_flags[i] = getClaim(opening_claims, .{ .Virtual = .{ .poly = .{ .OpFlags = @intCast(i) }, .sumcheck_id = .SpartanOuter } });
+                rv1 = rv1.add(stage1_gammas[2 + i].mul(oc_flags[i]));
+            }
+            // Debug: print each opening claim component for rv1
+            {
+                const upc_le = oc_upc.toBytes();
+                const imm_le = oc_imm.toBytes();
+                std.debug.print("[BCRAF_RV1_DETAIL] oc_UnexpandedPC_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                    upc_le[0], upc_le[1], upc_le[2], upc_le[3], upc_le[4], upc_le[5], upc_le[6], upc_le[7],
+                });
+                std.debug.print("[BCRAF_RV1_DETAIL] oc_Imm_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                    imm_le[0], imm_le[1], imm_le[2], imm_le[3], imm_le[4], imm_le[5], imm_le[6], imm_le[7],
+                });
+                for (0..13) |i| {
+                    const fl = oc_flags[i].toBytes();
+                    std.debug.print("[BCRAF_RV1_DETAIL] oc_OpFlag[{}]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                        i, fl[0], fl[1], fl[2], fl[3], fl[4], fl[5], fl[6], fl[7],
+                    });
+                }
+                // Also print the oc_PC claim (used for RAF) and FlagIsNoop
+                const oc_pc = getClaim(opening_claims, .{ .Virtual = .{ .poly = .PC, .sumcheck_id = .SpartanOuter } });
+                const pc_le = oc_pc.toBytes();
+                std.debug.print("[BCRAF_RV1_DETAIL] oc_PC_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                    pc_le[0], pc_le[1], pc_le[2], pc_le[3], pc_le[4], pc_le[5], pc_le[6], pc_le[7],
+                });
             }
 
             // rv_claim_2 (Stage 2 / SpartanProductVirtualization)
@@ -5713,48 +5825,34 @@ pub fn Stage6BatchedProver(comptime F: type) type {
 // =============================================================================
 // Helper: Add variable-length instance evals to combined_evals with interpolation
 // =============================================================================
+// All evaluation arrays use Vandermonde format: [p(0), p(1), ..., p(d)]
+// (evaluations at consecutive integer points, no p_inf)
 fn addInstanceEvalsToCombibed(comptime F: type, combined_evals: []F, polys: []const F, batch_coeff: F, num_evals: usize) void {
     const inst_n_evals = polys.len;
 
     if (inst_n_evals >= num_evals) {
-        // Instance has enough eval points
-        for (0..num_evals - 1) |k| {
+        // Instance has enough eval points - just add the first num_evals
+        for (0..num_evals) |k| {
             combined_evals[k] = combined_evals[k].add(batch_coeff.mul(polys[k]));
         }
-        combined_evals[num_evals - 1] = combined_evals[num_evals - 1].add(batch_coeff.mul(polys[inst_n_evals - 1]));
     } else {
-        // Instance has fewer eval points - need interpolation
-        // Instance poly format: [p(0), p(1), ..., p(inst_degree-1), p_inf]
-        // where p_inf = leading coefficient of x^inst_degree
-        // Combined poly format: [p(0), p(1), ..., p(max_degree-1), p_inf_combined]
-        // where p_inf_combined = leading coefficient of x^max_degree
-        //
-        // Since inst_degree < max_degree, the instance polynomial has ZERO
-        // coefficient for x^max_degree. We must NOT add p_inf to the combined
-        // leading coefficient position. Instead, we compute evaluations at ALL
-        // finite points [0, 1, ..., max_degree-1] and add those.
-        const inst_degree = inst_n_evals - 1; // degree of the instance poly
-        const leading = polys[inst_n_evals - 1]; // coefficient of x^inst_degree
+        // Instance has fewer eval points - need Lagrange interpolation for missing points
+        // polys format (Vandermonde): [p(0), p(1), ..., p(inst_n_evals-1)]
+        // Need to interpolate p(inst_n_evals), ..., p(num_evals-1)
 
-        // Add known evaluation points [0, 1, ..., inst_degree-1]
-        for (0..@min(inst_degree, num_evals - 1)) |k| {
+        // Add known evaluation points
+        for (0..inst_n_evals) |k| {
             combined_evals[k] = combined_evals[k].add(batch_coeff.mul(polys[k]));
         }
 
-        // Interpolate and add missing evaluation points [inst_degree, ..., max_degree-1]
-        // The degree-inst_degree polynomial through points {0,..,inst_degree-1} with
-        // leading coefficient = leading can be evaluated using:
-        // p(x) = lagrange(x) + leading * Prod_{m=0}^{inst_degree-1} (x - m)
-        // where lagrange(x) is the degree-(inst_degree-1) interpolation through the finite evals
-        for (inst_degree..num_evals - 1) |k| {
+        // Lagrange interpolation for missing points
+        for (inst_n_evals..num_evals) |k| {
             const x = F.fromU64(@intCast(k));
-
-            // Lagrange interpolation on points {0, 1, ..., inst_degree-1}
             var lagrange_val = F.zero();
-            for (0..inst_degree) |m| {
+            for (0..inst_n_evals) |m| {
                 var basis = F.one();
                 const xm = F.fromU64(@intCast(m));
-                for (0..inst_degree) |n| {
+                for (0..inst_n_evals) |n| {
                     if (n != m) {
                         const xn = F.fromU64(@intCast(n));
                         basis = basis.mul(x.sub(xn)).mul(xm.sub(xn).inverse().?);
@@ -5762,55 +5860,33 @@ fn addInstanceEvalsToCombibed(comptime F: type, combined_evals: []F, polys: []co
                 }
                 lagrange_val = lagrange_val.add(basis.mul(polys[m]));
             }
-
-            // Correction for leading coefficient:
-            // p(x) = lagrange(x) + leading * Prod_{m=0}^{inst_degree-1} (x - m)
-            var x_prod = F.one();
-            for (0..inst_degree) |m| {
-                x_prod = x_prod.mul(x.sub(F.fromU64(@intCast(m))));
-            }
-            const result = lagrange_val.add(leading.mul(x_prod));
-
-            combined_evals[k] = combined_evals[k].add(batch_coeff.mul(result));
+            combined_evals[k] = combined_evals[k].add(batch_coeff.mul(lagrange_val));
         }
-
-        // DO NOT add to combined_evals[num_evals-1] (leading coeff of x^max_degree)
-        // because this instance has degree inst_degree < max_degree,
-        // meaning its x^max_degree coefficient is zero.
     }
 }
 
 /// Add fixed-size instance evaluations to combined (for degree-3 instances like Hamming)
+// All evaluation arrays use Vandermonde format: [p(0), p(1), ..., p(d)]
 fn addFixedEvalsToCombibed(comptime F: type, combined_evals: []F, polys: []const F, n_polys: usize, batch_coeff: F, num_evals: usize) void {
-    // polys has n_polys entries: [p(0), p(1), ..., p(n_polys-2), p(inf)]
-    // where p(inf) = leading coefficient of x^inst_degree
-    const inst_degree = n_polys - 1;
-
-    if (inst_degree >= num_evals - 1) {
-        // Instance degree >= max_degree: add all finite evals and leading coeff directly
-        for (0..num_evals - 1) |k| {
+    if (n_polys >= num_evals) {
+        // Instance has enough eval points - add the first num_evals
+        for (0..num_evals) |k| {
             combined_evals[k] = combined_evals[k].add(batch_coeff.mul(polys[k]));
         }
-        combined_evals[num_evals - 1] = combined_evals[num_evals - 1].add(batch_coeff.mul(polys[n_polys - 1]));
     } else {
-        // Instance degree < max_degree: need interpolation for missing finite points
-        // and DO NOT add to combined_evals[num_evals-1] (x^max_degree leading coeff)
-        // because this instance has zero x^max_degree coefficient.
-        const leading = polys[n_polys - 1];
-
-        // Add known evaluation points
-        for (0..inst_degree) |k| {
+        // Instance has fewer eval points - need Lagrange interpolation for missing points
+        for (0..n_polys) |k| {
             combined_evals[k] = combined_evals[k].add(batch_coeff.mul(polys[k]));
         }
 
-        // Interpolate and add missing evaluation points
-        for (inst_degree..num_evals - 1) |k| {
+        // Lagrange interpolation for missing points
+        for (n_polys..num_evals) |k| {
             const x = F.fromU64(@intCast(k));
             var lagrange_val = F.zero();
-            for (0..inst_degree) |m| {
+            for (0..n_polys) |m| {
                 var basis = F.one();
                 const xm = F.fromU64(@intCast(m));
-                for (0..inst_degree) |n| {
+                for (0..n_polys) |n| {
                     if (n != m) {
                         const xn = F.fromU64(@intCast(n));
                         basis = basis.mul(x.sub(xn)).mul(xm.sub(xn).inverse().?);
@@ -5818,13 +5894,8 @@ fn addFixedEvalsToCombibed(comptime F: type, combined_evals: []F, polys: []const
                 }
                 lagrange_val = lagrange_val.add(basis.mul(polys[m]));
             }
-            var x_prod = F.one();
-            for (0..inst_degree) |m| {
-                x_prod = x_prod.mul(x.sub(F.fromU64(@intCast(m))));
-            }
-            combined_evals[k] = combined_evals[k].add(batch_coeff.mul(lagrange_val.add(leading.mul(x_prod))));
+            combined_evals[k] = combined_evals[k].add(batch_coeff.mul(lagrange_val));
         }
-        // DO NOT add to combined_evals[num_evals-1] (leading coeff of x^max_degree)
     }
 }
 
@@ -5959,7 +6030,7 @@ fn decodeImmediateU64(instr: u32) u64 {
 /// - Standard instructions (XOR, AND, OR, SLT, branches): returns interleave_bits(x, y)
 /// - No-lookup instructions (Load, Store, SLL, SRL): returns 0
 /// - NoOp cycles: returns 0
-fn computeLookupIndex(step: tracer.TraceStep) u128 {
+pub fn computeLookupIndex(step: tracer.TraceStep) u128 {
     if (step.is_noop and !step.is_termination_store) return 0;
 
     const instr = step.instruction;
@@ -5969,6 +6040,22 @@ fn computeLookupIndex(step: tracer.TraceStep) u128 {
 
     // Check if instruction has a lookup table at all
     if (!hasLookupTable(opcode, funct3, funct7)) return 0;
+
+    // Virtual opcodes: handle specially since they don't follow standard RISC-V encoding
+    if (opcode == 0x0B) {
+        // VirtualSignExtendWord: AddOperands → rs1 + 0 = rs1
+        // Jolt's to_lookup_index() returns rs1 directly (no interleaving)
+        return @as(u128, step.rs1_value);
+    }
+    if (opcode == 0x2B) {
+        // VirtualMULI: MultiplyOperands → rs1 * (1 << shamt)
+        // The instruction encodes shamt in I-type imm field (bits [31:20])
+        // Jolt's to_lookup_index() returns rs1 * imm where imm = 1 << shamt
+        const shamt_raw: u32 = instr >> 20;
+        const shamt: u6 = @truncate(shamt_raw & 0x3F);
+        const multiplier: u128 = @as(u128, 1) << shamt;
+        return @as(u128, step.rs1_value) * multiplier;
+    }
 
     // Determine left_input and right_input (matching Jolt's to_instruction_inputs)
     const left_is_rs1: bool = switch (opcode) {
@@ -6096,60 +6183,51 @@ fn getLookupChunkInterleaved(step: tracer.TraceStep, chunk_idx: usize, log_k_chu
 /// The polynomial has degree d where d = evals.len - 1.
 /// Uses Lagrange interpolation on the d finite points {0, 1, ..., d-1}
 /// plus the leading coefficient correction.
+/// Evaluate polynomial at challenge given Vandermonde evals [p(0), p(1), ..., p(d)]
+/// Uses Lagrange interpolation through all n_evals points at consecutive integers.
 fn evaluatePolyFromEvals(comptime F: type, evals: []const F, challenge: F) F {
     const n_evals = evals.len;
-    const deg = n_evals - 1; // polynomial degree
-    const leading = evals[n_evals - 1]; // p(inf) = leading coefficient
 
-    // Lagrange interpolation through (0, p(0)), (1, p(1)), ..., (d-1, p(d-1))
-    // gives a degree-(d-1) polynomial. Add leading * prod(x - i) to get degree-d.
-    var lagrange_val = F.zero();
-    for (0..deg) |m| {
+    // Lagrange interpolation through (0, p(0)), (1, p(1)), ..., (n_evals-1, p(n_evals-1))
+    var result = F.zero();
+    for (0..n_evals) |m| {
         var basis = F.one();
         const xm = F.fromU64(@intCast(m));
-        for (0..deg) |n| {
+        for (0..n_evals) |n| {
             if (n != m) {
                 const xn = F.fromU64(@intCast(n));
                 basis = basis.mul(challenge.sub(xn)).mul(xm.sub(xn).inverse().?);
             }
         }
-        lagrange_val = lagrange_val.add(basis.mul(evals[m]));
+        result = result.add(basis.mul(evals[m]));
     }
 
-    // Correction: add leading * prod_{i=0}^{d-1} (challenge - i)
-    var x_prod = F.one();
-    for (0..deg) |m| {
-        x_prod = x_prod.mul(challenge.sub(F.fromU64(@intCast(m))));
-    }
-
-    return lagrange_val.add(leading.mul(x_prod));
+    return result;
 }
 
-/// Evaluate a degree-3 polynomial from evals [p(0), p(1), p(2), p(inf)]
-/// p(inf) is the leading coefficient (coefficient of x^3).
-/// Specialized version for degree 3 for slightly better perf (avoids loops).
+/// Evaluate degree-3 polynomial at challenge given Vandermonde evals [p(0), p(1), p(2), p(3)]
 fn evaluateDeg3FromEvals(comptime F: type, evals: [4]F, challenge: F) F {
     const p0 = evals[0];
     const p1 = evals[1];
     const p2 = evals[2];
-    const leading = evals[3]; // coefficient of x^3
+    const p3 = evals[3];
 
-    // Lagrange interpolation through (0, p0), (1, p1), (2, p2) gives degree-2 poly
-    // L_0(x) = (x-1)(x-2)/((0-1)(0-2)) = (x-1)(x-2)/2
-    // L_1(x) = (x-0)(x-2)/((1-0)(1-2)) = x(x-2)/(-1) = -x(x-2)
-    // L_2(x) = (x-0)(x-1)/((2-0)(2-1)) = x(x-1)/2
+    // Lagrange interpolation through (0, p0), (1, p1), (2, p2), (3, p3)
+    // L_0(x) = (x-1)(x-2)(x-3)/((0-1)(0-2)(0-3)) = (x-1)(x-2)(x-3)/(-6)
+    // L_1(x) = (x-0)(x-2)(x-3)/((1-0)(1-2)(1-3)) = x(x-2)(x-3)/(2)
+    // L_2(x) = (x-0)(x-1)(x-3)/((2-0)(2-1)(2-3)) = x(x-1)(x-3)/(-2)
+    // L_3(x) = (x-0)(x-1)(x-2)/((3-0)(3-1)(3-2)) = x(x-1)(x-2)/(6)
     const x = challenge;
-    const two_inv = F.fromU64(2).inverse().?;
     const xm1 = x.sub(F.one());
     const xm2 = x.sub(F.fromU64(2));
+    const xm3 = x.sub(F.fromU64(3));
+    const six_inv = F.fromU64(6).inverse().?;
+    const two_inv = F.fromU64(2).inverse().?;
 
-    const l0 = xm1.mul(xm2).mul(two_inv);
-    const l1 = x.mul(xm2).neg();
-    const l2 = x.mul(xm1).mul(two_inv);
+    const l0 = xm1.mul(xm2).mul(xm3).mul(six_inv).neg();
+    const l1 = x.mul(xm2).mul(xm3).mul(two_inv);
+    const l2 = x.mul(xm1).mul(xm3).mul(two_inv).neg();
+    const l3 = x.mul(xm1).mul(xm2).mul(six_inv);
 
-    const lagrange_val = l0.mul(p0).add(l1.mul(p1)).add(l2.mul(p2));
-
-    // Add leading * x * (x-1) * (x-2)
-    const x_prod = x.mul(xm1).mul(xm2);
-    return lagrange_val.add(leading.mul(x_prod));
+    return l0.mul(p0).add(l1.mul(p1)).add(l2.mul(p2)).add(l3.mul(p3));
 }

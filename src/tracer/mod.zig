@@ -35,6 +35,18 @@ pub const TraceStep = struct {
     rd_pre_value: u64,
     /// Destination register value AFTER execution (post-value)
     rd_value: u64,
+    /// Register indices (0-127, supporting virtual registers 32+)
+    /// These are used by Stage 4 (registers read/write checking) instead of
+    /// extracting from the instruction word, which can only hold 5-bit indices.
+    rd_index: u8 = 0,
+    rs1_index: u8 = 0,
+    rs2_index: u8 = 0,
+    /// Whether rd is actually written this cycle (false for branches, stores, noops)
+    rd_written: bool = false,
+    /// Whether rs1 is actually read this cycle
+    rs1_read: bool = false,
+    /// Whether rs2 is actually read this cycle
+    rs2_read: bool = false,
     /// Memory address accessed (if any)
     memory_addr: ?u64,
     /// Memory value BEFORE write (pre-value for increment computation, only meaningful for writes)
@@ -457,6 +469,21 @@ pub const Emulator = struct {
             break :blk null;
         } else null;
 
+        // Determine which registers are read/written based on opcode
+        const opcode = decoded.opcode;
+        const reads_rs1 = switch (opcode) {
+            .OP_IMM, .LOAD, .JALR, .OP_IMM_32, .OP, .OP_32, .STORE, .BRANCH => true,
+            else => false,
+        };
+        const reads_rs2 = switch (opcode) {
+            .OP, .OP_32, .STORE, .BRANCH => true,
+            else => false,
+        };
+        const writes_rd = switch (opcode) {
+            .STORE, .BRANCH => false,
+            else => decoded.rd != 0, // x0 never written
+        };
+
         // Record trace step
         try self.trace.addStep(.{
             .cycle = self.state.cycle,
@@ -467,6 +494,12 @@ pub const Emulator = struct {
             .rs2_value = rs2_value,
             .rd_pre_value = rd_pre_value,
             .rd_value = result.rd_value,
+            .rd_index = decoded.rd,
+            .rs1_index = decoded.rs1,
+            .rs2_index = decoded.rs2,
+            .rd_written = writes_rd,
+            .rs1_read = reads_rs1,
+            .rs2_read = reads_rs2,
             .memory_addr = result.memory_addr,
             .memory_pre_value = memory_pre_value,
             .memory_value = result.memory_value,
@@ -542,6 +575,12 @@ pub const Emulator = struct {
             .rs2_value = rs2_value, // rs2 field value (not used by VirtualMULI but must be consistent)
             .rd_pre_value = rd_pre_value,
             .rd_value = result_val,
+            .rd_index = rd_u8,
+            .rs1_index = rs1_u8,
+            .rs2_index = 0,
+            .rd_written = rd_u8 != 0,
+            .rs1_read = true,
+            .rs2_read = false,
             .memory_addr = null,
             .memory_pre_value = null,
             .memory_value = null,
@@ -616,6 +655,12 @@ pub const Emulator = struct {
             .rs2_value = rs2_value,
             .rd_pre_value = rd_pre_value,
             .rd_value = result_val,
+            .rd_index = rd_u8,
+            .rs1_index = rs1_u8,
+            .rs2_index = 0,
+            .rd_written = rd_u8 != 0,
+            .rs1_read = true,
+            .rs2_read = false,
             .memory_addr = null,
             .memory_pre_value = null,
             .memory_value = null,
@@ -675,7 +720,7 @@ pub const Emulator = struct {
         // Write step1 result to virtual register
         try self.registers.write(v_rs1, step1_result);
 
-        // Record trace step 1
+        // Record trace step 1: VirtualMULI(v_rs1=32, rs1, 2^32)
         try self.trace.addStep(.{
             .cycle = self.state.cycle,
             .pc = self.state.pc,
@@ -685,6 +730,12 @@ pub const Emulator = struct {
             .rs2_value = 0,
             .rd_pre_value = 0, // Virtual register starts at 0
             .rd_value = step1_result,
+            .rd_index = v_rs1, // virtual register 32
+            .rs1_index = rs1_u8,
+            .rs2_index = 0,
+            .rd_written = true, // writes to virtual register
+            .rs1_read = true,
+            .rs2_read = false,
             .memory_addr = null,
             .memory_pre_value = null,
             .memory_value = null,
@@ -727,7 +778,7 @@ pub const Emulator = struct {
         // Write step2 result to rd
         try self.registers.write(decoded.rd, step2_result);
 
-        // Record trace step 2
+        // Record trace step 2: VirtualSRLI(rd, v_rs1=32, bitmask)
         try self.trace.addStep(.{
             .cycle = self.state.cycle,
             .pc = self.state.pc,
@@ -737,6 +788,12 @@ pub const Emulator = struct {
             .rs2_value = 0,
             .rd_pre_value = rd_pre_value_step2,
             .rd_value = step2_result,
+            .rd_index = rd_u8,
+            .rs1_index = v_rs1, // reads from virtual register 32
+            .rs2_index = 0,
+            .rd_written = rd_u8 != 0,
+            .rs1_read = true,
+            .rs2_read = false,
             .memory_addr = null,
             .memory_pre_value = null,
             .memory_value = null,
@@ -767,7 +824,7 @@ pub const Emulator = struct {
 
         try self.registers.write(decoded.rd, sign_extended);
 
-        // Record trace step 3
+        // Record trace step 3: VirtualSignExtendWord(rd, rd, 0)
         try self.trace.addStep(.{
             .cycle = self.state.cycle,
             .pc = self.state.pc,
@@ -777,6 +834,12 @@ pub const Emulator = struct {
             .rs2_value = 0,
             .rd_pre_value = rd_pre_value_step3,
             .rd_value = sign_extended,
+            .rd_index = rd_u8,
+            .rs1_index = rd_u8, // VirtualSignExtendWord reads rd
+            .rs2_index = 0,
+            .rd_written = rd_u8 != 0,
+            .rs1_read = true,
+            .rs2_read = false,
             .memory_addr = null,
             .memory_pre_value = null,
             .memory_value = null,
@@ -867,6 +930,12 @@ pub const Emulator = struct {
         // Write base result to register
         try self.registers.write(decoded.rd, base_result);
 
+        // Determine rs2 read for base instruction
+        const base_reads_rs2 = switch (w_type) {
+            .ADDW, .SUBW, .MULW => true,
+            .ADDIW, .SLLIW, .SRLIW => false,
+        };
+
         // Record trace step 1 (base instruction)
         try self.trace.addStep(.{
             .cycle = self.state.cycle,
@@ -880,6 +949,12 @@ pub const Emulator = struct {
             },
             .rd_pre_value = rd_pre_value,
             .rd_value = base_result,
+            .rd_index = decoded.rd,
+            .rs1_index = decoded.rs1,
+            .rs2_index = decoded.rs2,
+            .rd_written = decoded.rd != 0,
+            .rs1_read = true,
+            .rs2_read = base_reads_rs2,
             .memory_addr = null,
             .memory_pre_value = null,
             .memory_value = null,
@@ -924,6 +999,12 @@ pub const Emulator = struct {
             .rs2_value = 0,
             .rd_pre_value = rd_pre_value_step2,
             .rd_value = sign_extended,
+            .rd_index = decoded.rd,
+            .rs1_index = decoded.rd, // VirtualSignExtendWord reads from rd
+            .rs2_index = 0,
+            .rd_written = decoded.rd != 0,
+            .rs1_read = true,
+            .rs2_read = false,
             .memory_addr = null,
             .memory_pre_value = null,
             .memory_value = null,
@@ -1062,6 +1143,12 @@ pub const Emulator = struct {
             .rs2_value = 0,
             .rd_pre_value = 0,
             .rd_value = 0,
+            .rd_index = 0,
+            .rs1_index = 0,
+            .rs2_index = 0,
+            .rd_written = false, // NoOp writes nothing
+            .rs1_read = false,
+            .rs2_read = false,
             .memory_addr = null,
             .memory_pre_value = null,
             .memory_value = null,
@@ -1085,6 +1172,12 @@ pub const Emulator = struct {
             .rs2_value = 0, // LUI doesn't read rs2
             .rd_pre_value = x31_pre,
             .rd_value = lui_result,
+            .rd_index = 31, // LUI writes to x31
+            .rs1_index = 0,
+            .rs2_index = 0,
+            .rd_written = true, // LUI writes rd
+            .rs1_read = false, // LUI doesn't read rs1
+            .rs2_read = false, // LUI doesn't read rs2
             .memory_addr = null,
             .memory_pre_value = null,
             .memory_value = null,
@@ -1111,6 +1204,12 @@ pub const Emulator = struct {
             .rs2_value = 0, // ADDI doesn't read rs2
             .rd_pre_value = x30_pre,
             .rd_value = 1, // x30 = 0 + 1 = 1
+            .rd_index = 30, // ADDI writes to x30
+            .rs1_index = 0, // ADDI reads x0
+            .rs2_index = 0,
+            .rd_written = true, // ADDI writes rd
+            .rs1_read = true, // ADDI reads rs1 (x0)
+            .rs2_read = false, // ADDI doesn't read rs2
             .memory_addr = null,
             .memory_pre_value = null,
             .memory_value = null,
@@ -1138,6 +1237,12 @@ pub const Emulator = struct {
             .rs2_value = 1, // x30 = value to store
             .rd_pre_value = 0, // Stores don't write to rd
             .rd_value = 0,
+            .rd_index = 0, // SB doesn't write to rd
+            .rs1_index = 31, // SB reads x31 (addr base)
+            .rs2_index = 30, // SB reads x30 (value to store)
+            .rd_written = false, // SB doesn't write rd
+            .rs1_read = true, // SB reads rs1
+            .rs2_read = true, // SB reads rs2
             .memory_addr = termination_addr,
             .memory_pre_value = pre_value,
             .memory_value = post_value,

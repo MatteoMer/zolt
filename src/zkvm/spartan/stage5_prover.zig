@@ -584,17 +584,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             for (trace.steps.items, 0..) |step, j| {
                 if (step.is_noop and !step.is_termination_store) continue;
 
-                const instr = step.instruction;
-                const rd: u5 = @truncate((instr >> 7) & 0x1f);
-                const opcode = instr & 0x7f;
+                // Use explicit register index from TraceStep (supports virtual registers 32+)
+                const rd: u8 = step.rd_index;
 
-                // rd_wa and inc
-                const rd_used = switch (opcode) {
-                    0x23, 0x63 => false, // Store and Branch don't write rd
-                    else => true,
-                };
-
-                if (rd_used and rd != 0 and rd < 32) {
+                if (step.rd_written and rd != 0) {
                     // Compute inc = rd_value - rd_pre_value
                     // Use trace's pre/post values directly (Jolt uses cycle.rd_write())
                     const pre_value: i128 = @intCast(step.rd_pre_value);
@@ -610,7 +603,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     }
 
                     // Compute wa = eq(r_address, rd)
-                    // r_address has 7 bits, rd is 5 bits - extend rd to 7 bits
+                    // r_address has 7 bits, rd index is 0-127
                     wa_evals[j] = computeEqAtIndex(r_address_regs, @as(usize, rd));
                 }
                 // Note: lt_evals[j] is already computed for all j via computeAllLtEvals
@@ -621,8 +614,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             const debug_count = @min(trace_len, 10);
             for (0..debug_count) |j| {
                 const step = trace.steps.items[j];
-                const instr = step.instruction;
-                const rd: u5 = @truncate((instr >> 7) & 0x1f);
+                const rd: u8 = step.rd_index;
                 dbg("  j={}: rd={}, pre={}, post={}, inc={x}, wa={x}, lt={x}\n", .{
                     j, rd, step.rd_pre_value, step.rd_value,
                     inc_evals[j].toBytesBE()[24..32].*,
@@ -635,7 +627,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // val(k, j) = value of register k at START of cycle j
             // val(r_address, r_cycle) = Σ_{k,j} eq(r_address, k) * eq(r_cycle, j) * register_value(k, j)
             {
-                var register_vals: [32]u64 = [_]u64{0} ** 32;
+                const REGS_K: usize = 1 << REGISTERS_LOG_K; // 128
+                var register_vals: [REGS_K]u64 = [_]u64{0} ** REGS_K;
                 var brute_val = F.zero();
                 // Precompute eq(r_cycle, j) for all j
                 var eq_cycle_evals = try self.allocator.alloc(F, T);
@@ -643,36 +636,30 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 for (0..T) |j| {
                     eq_cycle_evals[j] = computeEqAtIndex(r_cycle_regs, j);
                 }
-                // Precompute eq(r_address, k) for all k
-                var eq_addr_evals: [32]F = undefined;
-                for (0..32) |k| {
+                // Precompute eq(r_address, k) for all k (all 128 registers)
+                var eq_addr_evals: [REGS_K]F = undefined;
+                for (0..REGS_K) |k| {
                     eq_addr_evals[k] = computeEqAtIndex(r_address_regs, k);
                 }
                 // Compute Σ_{k,j} eq_addr(k) * eq_cycle(j) * register_value(k, j)
                 for (trace.steps.items, 0..) |step, j| {
                     // val(k, j) = register_vals[k] (value before this cycle)
-                    for (0..32) |k| {
+                    for (0..REGS_K) |k| {
                         if (!eq_addr_evals[k].eql(F.zero()) and !eq_cycle_evals[j].eql(F.zero())) {
                             brute_val = brute_val.add(eq_addr_evals[k].mul(eq_cycle_evals[j]).mul(F.fromU64(register_vals[k])));
                         }
                     }
-                    // Update register state
+                    // Update register state using TraceStep fields
                     if (!step.is_noop or step.is_termination_store) {
-                        const instr2 = step.instruction;
-                        const rd2: u5 = @truncate((instr2 >> 7) & 0x1f);
-                        const opcode2 = instr2 & 0x7f;
-                        const rd_used2 = switch (opcode2) {
-                            0x23, 0x63 => false,
-                            else => true,
-                        };
-                        if (rd_used2 and rd2 != 0 and rd2 < 32) {
+                        const rd2: u8 = step.rd_index;
+                        if (step.rd_written and rd2 != 0) {
                             register_vals[rd2] = step.rd_value;
                         }
                     }
                 }
                 // Also add padding cycles (trace_len..T) with final register values
                 for (trace_len..T) |j| {
-                    for (0..32) |k| {
+                    for (0..REGS_K) |k| {
                         if (!eq_addr_evals[k].eql(F.zero()) and !eq_cycle_evals[j].eql(F.zero())) {
                             brute_val = brute_val.add(eq_addr_evals[k].mul(eq_cycle_evals[j]).mul(F.fromU64(register_vals[k])));
                         }
@@ -685,18 +672,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
             // Also verify inc values match between Stage 4 style and trace
             {
-                var reg_vals2: [32]u64 = [_]u64{0} ** 32;
+                const REGS_K2: usize = 1 << REGISTERS_LOG_K; // 128
+                var reg_vals2: [REGS_K2]u64 = [_]u64{0} ** REGS_K2;
                 var inc_mismatches: usize = 0;
                 for (trace.steps.items, 0..) |step, j| {
                     if (step.is_noop and !step.is_termination_store) continue;
-                    const instr2 = step.instruction;
-                    const rd2: u5 = @truncate((instr2 >> 7) & 0x1f);
-                    const opcode2 = instr2 & 0x7f;
-                    const rd_used2 = switch (opcode2) {
-                        0x23, 0x63 => false,
-                        else => true,
-                    };
-                    if (rd_used2 and rd2 != 0 and rd2 < 32) {
+                    const rd2: u8 = step.rd_index;
+                    if (step.rd_written and rd2 != 0) {
                         // Stage 4 style: inc = rd_value - register_vals[rd]
                         const s4_pre = reg_vals2[rd2];
                         const s4_post = step.rd_value;

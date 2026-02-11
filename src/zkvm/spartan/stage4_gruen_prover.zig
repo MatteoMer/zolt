@@ -189,18 +189,14 @@ pub fn Stage4GruenProver(comptime F: type) type {
             @memset(rs2_ra_poly, F.zero());
             @memset(inc_poly, F.zero());
 
-            // Track register values across cycles
-            var register_values: [32]u64 = [_]u64{0} ** 32;
+            // Track register values across cycles (all K=128 registers: 32 physical + 96 virtual)
+            var register_values: [K]u64 = [_]u64{0} ** K;
 
             // Build polynomial evaluations from trace (matching Jolt's RegistersCycleMajorEntry)
             for (trace.steps.items, 0..) |step, cycle| {
-                // Set val(k, j) for all registers - value BEFORE this cycle
-                for (0..32) |k| {
+                // Set val(k, j) for all K registers - value BEFORE this cycle
+                for (0..K) |k| {
                     val_poly[k * T + cycle] = F.fromU64(register_values[k]);
-                }
-                // Extend to full K registers
-                for (32..K) |k| {
-                    val_poly[k * T + cycle] = F.zero();
                 }
 
                 // Skip pure NoOp padding cycles.
@@ -209,38 +205,27 @@ pub fn Stage4GruenProver(comptime F: type) type {
                 // The noop step (is_noop=true, is_termination_store=true) is also skipped.
                 if (step.is_noop) continue;
 
-                const instr = step.instruction;
-                const rd: u5 = @truncate((instr >> 7) & 0x1f);
-                const rs1: u5 = @truncate((instr >> 15) & 0x1f);
-                const rs2: u5 = @truncate((instr >> 20) & 0x1f);
-                const opcode = instr & 0x7f;
+                // Use explicit register indices from TraceStep instead of extracting
+                // from instruction word. This is critical for virtual registers (32+)
+                // which cannot fit in RISC-V's 5-bit register fields.
+                const rd: u8 = step.rd_index;
+                const rs1: u8 = step.rs1_index;
+                const rs2: u8 = step.rs2_index;
 
                 // rs1_ra: gamma coefficient for rs1 reads
-                const reads_rs1 = switch (opcode) {
-                    0x13, 0x03, 0x67, 0x1b, 0x33, 0x3b, 0x23, 0x63, 0x0B, 0x2B => true,
-                    else => false,
-                };
-                if (reads_rs1 and rs1 < 32) {
+                if (step.rs1_read) {
                     rs1_ra_poly[@as(usize, rs1) * T + cycle] = F.one();
                     ra_poly[@as(usize, rs1) * T + cycle] = ra_poly[@as(usize, rs1) * T + cycle].add(gamma);
                 }
 
                 // rs2_ra: gamma^2 coefficient for rs2 reads
-                const reads_rs2 = switch (opcode) {
-                    0x33, 0x3b, 0x23, 0x63 => true,
-                    else => false,
-                };
-                if (reads_rs2 and rs2 < 32) {
+                if (step.rs2_read) {
                     rs2_ra_poly[@as(usize, rs2) * T + cycle] = F.one();
                     ra_poly[@as(usize, rs2) * T + cycle] = ra_poly[@as(usize, rs2) * T + cycle].add(gamma_sq);
                 }
 
                 // rd_wa and inc
-                const rd_used = switch (opcode) {
-                    0x23, 0x63 => false,
-                    else => true,
-                };
-                if (rd_used and rd != 0 and rd < 32) {
+                if (step.rd_written and rd != 0) {
                     rd_wa_poly[@as(usize, rd) * T + cycle] = F.one();
                     const pre_value = register_values[rd];
                     const post_value = step.rd_value;
@@ -252,11 +237,8 @@ pub fn Stage4GruenProver(comptime F: type) type {
             // Fill padding cycles with final register values
             if (trace_len < T) {
                 for (trace_len..T) |cycle| {
-                    for (0..32) |k| {
+                    for (0..K) |k| {
                         val_poly[k * T + cycle] = F.fromU64(register_values[k]);
-                    }
-                    for (32..K) |k| {
-                        val_poly[k * T + cycle] = F.zero();
                     }
                 }
             }

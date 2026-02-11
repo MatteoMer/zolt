@@ -16,8 +16,8 @@ void _start(void) {
         "li sp, 0x80010000\n"
         // Call main and store result in a0
         "call main\n"
-        // Exit via ecall
-        "ecall\n"
+        // Terminate via infinite loop (matching Jolt's termination heuristic)
+        "1: j 1b\n"
     );
 }
 

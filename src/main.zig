@@ -473,6 +473,21 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, trace_length_op
                     return err;
                 };
 
+                // Append raw instruction words for Zolt-compatible val_poly computation.
+                // Format: magic "ZOLT_RAW\n" (9 bytes) + count (u64 LE) + count * u32 LE words
+                //         + termination_base_pc (u64 LE)
+                {
+                    const writer = buffer.writer(allocator);
+                    try writer.writeAll("ZOLT_RAW\n");
+                    const raw_words = bytecode_prep.raw_words.items;
+                    try writer.writeInt(u64, @intCast(raw_words.len), .little);
+                    for (raw_words) |w| {
+                        try writer.writeInt(u32, w, .little);
+                    }
+                    try writer.writeInt(u64, @intCast(bytecode_prep.pc_map.termination_base_pc), .little);
+                    std.debug.print("  Appended {} raw instruction words (termination_base_pc={})\n", .{ raw_words.len, bytecode_prep.pc_map.termination_base_pc });
+                }
+
                 const pp_file = std.fs.cwd().createFile(pp_path, .{}) catch |err| {
                     std.debug.print("  Error creating preprocessing file: {s}\n", .{@errorName(err)});
                     return err;
@@ -713,6 +728,21 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, trace_length_op
             std.debug.print("  Error serializing shared preprocessing: {s}\n", .{@errorName(err)});
             return err;
         };
+
+        // Append raw instruction words for Zolt-compatible val_poly computation.
+        // Format: magic marker "ZOLT_RAW\n" (9 bytes) + count (u64 LE) + count * u32 LE words
+        //         + termination_base_pc (u64 LE)
+        {
+            const writer = buffer.writer(allocator);
+            try writer.writeAll("ZOLT_RAW\n");
+            const raw_words = bytecode_prep.raw_words.items;
+            try writer.writeInt(u64, @intCast(raw_words.len), .little);
+            for (raw_words) |w| {
+                try writer.writeInt(u32, w, .little);
+            }
+            try writer.writeInt(u64, @intCast(bytecode_prep.pc_map.termination_base_pc), .little);
+            std.debug.print("  Appended {} raw instruction words (termination_base_pc={})\n", .{ raw_words.len, bytecode_prep.pc_map.termination_base_pc });
+        }
 
         const pp_file = std.fs.cwd().createFile(pp_path, .{}) catch |err| {
             std.debug.print("  Error creating preprocessing file: {s}\n", .{@errorName(err)});

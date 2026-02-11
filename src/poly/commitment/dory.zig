@@ -982,12 +982,18 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             const num_columns: usize = @as(usize, 1) << @intCast(sigma);
             const num_rows: usize = @as(usize, 1) << @intCast(nu);
 
-            // Generate G1 generators (one per column)
-            const g1_vec = try allocator.alloc(G1Point, num_columns);
+            // In Jolt's Dory SRS, BOTH g1_vec and g2_vec have the same length = 2^sigma.
+            // This is critical because the reduce-and-fold IPA uses vectors of length 2^sigma
+            // for ALL operations, including G2 MSMs. If g2_vec is shorter (2^nu when nu < sigma),
+            // the IPA will read beyond the array bounds.
+            const n = @max(num_columns, num_rows); // = 2^sigma since sigma >= nu
+
+            // Generate G1 generators
+            const g1_vec = try allocator.alloc(G1Point, n);
             errdefer allocator.free(g1_vec);
 
-            // Generate G2 generators (one per row)
-            const g2_vec = try allocator.alloc(G2Point, num_rows);
+            // Generate G2 generators (same count as G1 - matches Jolt)
+            const g2_vec = try allocator.alloc(G2Point, n);
             errdefer allocator.free(g2_vec);
 
             // Use SHA3-256 with Jolt's seed for deterministic generation
@@ -998,13 +1004,13 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
 
             // Generate G1 points using hash-to-curve simulation
             // In production, this would use proper hash-to-curve
-            for (0..num_columns) |i| {
+            for (0..n) |i| {
                 g1_vec[i] = generateG1Point(seed, i);
             }
 
             // Generate G2 points
-            for (0..num_rows) |i| {
-                g2_vec[i] = generateG2Point(seed, i + num_columns);
+            for (0..n) |i| {
+                g2_vec[i] = generateG2Point(seed, i + n);
             }
 
             _ = total_size;
@@ -1306,6 +1312,21 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
 
                 // E2_beta = MSM(g2_vec[0..current_row_len], s1_work[0..current_row_len])
                 const e2_beta = msmG2(F, params.g2_vec[0..current_row_len], s1_work[0..current_row_len]);
+                // Debug: output compressed e2_beta for round 0
+                if (round == 0) {
+                    const debug_compressed = compressG2(e2_beta);
+                    std.debug.print("DEBUG e2_beta[0] compressed: ", .{});
+                    for (debug_compressed) |b_| {
+                        std.debug.print("{x:0>2}", .{b_});
+                    }
+                    std.debug.print("\n", .{});
+                    std.debug.print("DEBUG e2_beta[0] g2_vec_len={} s1_work scalars: ", .{current_row_len});
+                    for (s1_work[0..@min(current_row_len, 4)]) |s| {
+                        const norm = s.fromMontgomery();
+                        std.debug.print("{x:0>16}{x:0>16}{x:0>16}{x:0>16} ", .{norm.limbs[3], norm.limbs[2], norm.limbs[1], norm.limbs[0]});
+                    }
+                    std.debug.print("\n", .{});
+                }
 
                 first_messages[round] = FirstReduceMessage{
                     .d1_left = d1_left,
@@ -1610,6 +1631,36 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 const d2_right = multiPairG1G2(params.g1_vec[0..n2], v2_work[n2..current_len]);
                 const e1_beta = msm.MSM(F, Fp).compute(params.g1_vec[0..current_len], s2_work[0..current_len]);
                 const e2_beta = msmG2(F, params.g2_vec[0..current_len], s1_work[0..current_len]);
+
+                // Debug: write e2_beta for each round to /tmp for validation
+                if (round == 0) {
+                    const debug_e2 = compressG2(e2_beta);
+                    const debug_file = std.fs.cwd().createFile("/tmp/zolt_dory_e2_beta_round0.bin", .{}) catch null;
+                    if (debug_file) |f| {
+                        f.writeAll(&debug_e2) catch {};
+                        f.close();
+                    }
+                    std.debug.print("[DORY] e2_beta round 0: current_len={}, g2_vec_len={}\n", .{current_len, params.g2_vec.len});
+                    std.debug.print("[DORY] e2_beta compressed: ", .{});
+                    for (debug_e2) |b_| {
+                        std.debug.print("{x:0>2}", .{b_});
+                    }
+                    std.debug.print("\n", .{});
+                    // Print identity check
+                    std.debug.print("[DORY] e2_beta is_identity: {}\n", .{e2_beta.isIdentity()});
+                    // Print first 4 scalars
+                    std.debug.print("[DORY] s1_work[0..4] scalars: ", .{});
+                    for (s1_work[0..@min(4, current_len)]) |s| {
+                        std.debug.print("{} ", .{s.isZero()});
+                    }
+                    std.debug.print("\n", .{});
+                    // Print first 4 g2 points identity check
+                    std.debug.print("[DORY] g2_vec[0..4] is_identity: ", .{});
+                    for (params.g2_vec[0..@min(4, current_len)]) |g| {
+                        std.debug.print("{} ", .{g.isIdentity()});
+                    }
+                    std.debug.print("\n", .{});
+                }
 
                 first_messages[round] = FirstReduceMessage{
                     .d1_left = d1_left,
@@ -2283,5 +2334,103 @@ test "dory commitment debug - compare intermediate values with jolt" {
     } else |_| {
         dbg("Skipping debug test - no SRS file at /tmp/jolt_dory_srs.bin\n", .{});
         dbg("Run Jolt's test_export_dory_srs first.\n", .{});
+    }
+}
+
+test "g2 compressed bytes for arkworks validation" {
+    // This test outputs compressed G2 points that can be validated by arkworks
+    const g2_gen = G2Point.generator();
+
+    // Compress the generator
+    const gen_compressed = compressG2(g2_gen);
+    std.debug.print("\nG2_GENERATOR_COMPRESSED: ", .{});
+    for (gen_compressed) |b| {
+        std.debug.print("{x:0>2}", .{b});
+    }
+    std.debug.print("\n", .{});
+
+    // Compress [2]G2
+    const two_g2 = g2_gen.double();
+    const two_compressed = compressG2(two_g2);
+    std.debug.print("G2_DOUBLE_COMPRESSED: ", .{});
+    for (two_compressed) |b| {
+        std.debug.print("{x:0>2}", .{b});
+    }
+    std.debug.print("\n", .{});
+
+    // Compress [42]G2
+    const scalar_42 = Fr.fromU64(42);
+    const g2_42 = g2_gen.scalarMul(scalar_42);
+    const compressed_42 = compressG2(g2_42);
+    std.debug.print("G2_42_COMPRESSED: ", .{});
+    for (compressed_42) |b| {
+        std.debug.print("{x:0>2}", .{b});
+    }
+    std.debug.print("\n", .{});
+
+    // Also write to a file for the Rust test to read
+    const file = std.fs.cwd().createFile("/tmp/zolt_g2_test_points.bin", .{}) catch |err| {
+        std.debug.print("Could not create file: {}\n", .{err});
+        return;
+    };
+    defer file.close();
+
+    // Write 3 compressed G2 points (64 bytes each = 192 bytes total)
+    file.writeAll(&gen_compressed) catch return;
+    file.writeAll(&two_compressed) catch return;
+    file.writeAll(&compressed_42) catch return;
+    std.debug.print("Wrote 3 compressed G2 points to /tmp/zolt_g2_test_points.bin\n", .{});
+}
+
+test "g2 srs points from jolt file" {
+    // Load SRS from file and check that G2 points are valid
+    const allocator = std.testing.allocator;
+    const srs_result = DoryCommitmentScheme(Fr).loadFromFile(allocator, "/tmp/jolt_dory_srs.bin");
+    if (srs_result) |*srs_mut| {
+        var srs = srs_mut.*;
+        defer srs.deinit();
+
+        std.debug.print("\nSRS loaded: {} G1 points, {} G2 points\n", .{ srs.g1_vec.len, srs.g2_vec.len });
+
+        // Write all G2 points compressed to a file
+        const srs_file = std.fs.cwd().createFile("/tmp/zolt_g2_srs_points.bin", .{}) catch return;
+        defer srs_file.close();
+
+        // First write the count
+        var count_buf: [4]u8 = undefined;
+        std.mem.writeInt(u32, &count_buf, @intCast(srs.g2_vec.len), .little);
+        srs_file.writeAll(&count_buf) catch return;
+
+        for (srs.g2_vec, 0..) |g2, idx| {
+            const compressed = compressG2(g2);
+            srs_file.writeAll(&compressed) catch return;
+            if (idx < 3) {
+                std.debug.print("G2 SRS[{}] compressed: ", .{idx});
+                for (compressed) |b| {
+                    std.debug.print("{x:0>2}", .{b});
+                }
+                std.debug.print("\n", .{});
+            }
+        }
+        std.debug.print("Wrote {} compressed G2 SRS points to /tmp/zolt_g2_srs_points.bin\n", .{srs.g2_vec.len});
+
+        // Now test: do a small MSM and compress the result
+        if (srs.g2_vec.len >= 2) {
+            const scalars = [_]Fr{ Fr.fromU64(3), Fr.fromU64(5) };
+            const msm_result = msmG2(Fr, srs.g2_vec[0..2], &scalars);
+            const msm_compressed = compressG2(msm_result);
+            std.debug.print("MSM([3,5], G2[0..2]) compressed: ", .{});
+            for (msm_compressed) |b| {
+                std.debug.print("{x:0>2}", .{b});
+            }
+            std.debug.print("\n", .{});
+
+            // Write this MSM result for Rust verification
+            const msm_file = std.fs.cwd().createFile("/tmp/zolt_g2_msm_test.bin", .{}) catch return;
+            defer msm_file.close();
+            msm_file.writeAll(&msm_compressed) catch return;
+        }
+    } else |_| {
+        std.debug.print("Skipping SRS test - no file at /tmp/jolt_dory_srs.bin\n", .{});
     }
 }

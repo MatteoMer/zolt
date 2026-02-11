@@ -839,6 +839,38 @@ pub fn LookupEntry(comptime XLEN: comptime_int) type {
             };
         }
 
+        /// Create lookup entry for VirtualSRLI instruction.
+        ///
+        /// VirtualSRLI uses VirtualSRL table (table index 26) with interleaved operands.
+        /// Reference: jolt-core/src/zkvm/instruction/virtual_srli.rs
+        pub fn fromVirtualSRLI(
+            cycle: usize,
+            pc: u64,
+            instruction: u32,
+            rs1_val: u64,
+            bitmask: u64,
+            is_virtual: bool,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+            is_rd_not_zero: bool,
+        ) Self {
+            const VsrliLookup = lookups.VirtualSRLILookup(XLEN);
+            const vsrli = VsrliLookup.init(rs1_val, bitmask, is_virtual, do_not_update_pc, is_first_in_sequence, is_compressed, is_rd_not_zero);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = VsrliLookup.lookupTable(),
+                .index = vsrli.toLookupIndex(),
+                .result = vsrli.computeResult(),
+                .left_operand = rs1_val,
+                .right_operand = bitmask,
+                .circuit_flags = vsrli.circuitFlags(),
+                .instruction_flags = vsrli.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
         /// Create lookup entry for VirtualMULI instruction.
         ///
         /// VirtualMULI is used for SLLI decomposition (SLLI → VirtualMULI) and as
@@ -1130,6 +1162,41 @@ pub fn LookupTraceCollector(comptime XLEN: comptime_int) type {
                 rd != 0, // is_rd_not_zero
             );
             _ = sign_extended_result; // Result is computed by the lookup
+            try self.entries.append(self.allocator, entry);
+        }
+
+        /// Record lookup for a VirtualSRLI instruction
+        /// Used for SRLI decomposition (standalone) and SRLIW middle step (virtual sequence)
+        pub fn recordVirtualSRLI(
+            self: *Self,
+            cycle: usize,
+            pc: u64,
+            instruction: u32,
+            rs1_val: u64,
+            bitmask: u64,
+            result_val: u64,
+            is_virtual: bool,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+        ) !void {
+            if (!self.enabled) return;
+
+            const rd: u8 = @truncate((instruction >> 7) & 0x1f);
+
+            const entry = Entry.fromVirtualSRLI(
+                cycle,
+                pc,
+                instruction,
+                rs1_val,
+                bitmask,
+                is_virtual,
+                do_not_update_pc,
+                is_first_in_sequence,
+                is_compressed,
+                rd != 0,
+            );
+            _ = result_val; // Result is computed by the lookup
             try self.entries.append(self.allocator, entry);
         }
 

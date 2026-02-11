@@ -76,8 +76,13 @@ pub const RegisterTrace = struct {
 
 /// Register file state during emulation
 pub const RegisterFile = struct {
-    /// Register values (x0-x31)
-    registers: [32]u64,
+    /// Total number of registers: 32 RISC-V + 96 virtual = 128
+    /// Virtual registers (indices 32-127) are used for intermediate results
+    /// in multi-step virtual instruction sequences (e.g., SRLIW decomposition).
+    pub const REGISTER_COUNT = 128;
+
+    /// Register values (x0-x31 RISC-V + x32-x127 virtual)
+    registers: [REGISTER_COUNT]u64,
     /// Register trace for proving
     trace: RegisterTrace,
     /// Current timestamp
@@ -85,7 +90,7 @@ pub const RegisterFile = struct {
 
     pub fn init(allocator: Allocator) RegisterFile {
         return .{
-            .registers = [_]u64{0} ** 32,
+            .registers = [_]u64{0} ** REGISTER_COUNT,
             .trace = RegisterTrace.init(allocator),
             .timestamp = 0,
         };

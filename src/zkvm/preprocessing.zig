@@ -120,6 +120,7 @@ pub const JoltInstruction = struct {
         VirtualSignExtendWord,
         VirtualZeroExtendWord,
         VirtualMULI,
+        VirtualSRLI,
     };
 
     /// Instruction operands - different formats store different fields
@@ -366,6 +367,9 @@ pub const BytecodePreprocessing = struct {
     bytecode: std.ArrayListUnmanaged(JoltInstruction),
     /// PC mapper
     pc_map: BytecodePCMapper,
+    /// Raw 32-bit instruction words (one per bytecode entry, including NoOp=0 at index 0
+    /// and virtual instruction words). Used by Jolt verifier for Zolt-compatible flag computation.
+    raw_words: std.ArrayListUnmanaged(u32),
 
     allocator: Allocator,
 
@@ -374,12 +378,14 @@ pub const BytecodePreprocessing = struct {
             .code_size = 0,
             .bytecode = .{},
             .pc_map = BytecodePCMapper.init(allocator),
+            .raw_words = .{},
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *BytecodePreprocessing) void {
         self.bytecode.deinit(self.allocator);
+        self.raw_words.deinit(self.allocator);
         self.pc_map.deinit();
     }
 
@@ -397,6 +403,7 @@ pub const BytecodePreprocessing = struct {
             .is_first_in_sequence = false,
             .is_compressed = false,
         });
+        try self.raw_words.append(allocator, 0); // NoOp = raw word 0
 
         // Decode all instructions
         var offset: usize = 0;
@@ -424,6 +431,7 @@ pub const BytecodePreprocessing = struct {
 
             // Decode and decompose W-extension instructions into virtual sequences
             const jolt_instr = try decodeToJoltInstruction(instruction, addr, is_compressed);
+            const bytecode_len_before = self.bytecode.items.len;
 
             // Check if this is a W-extension instruction that needs decomposition
             switch (jolt_instr.variant) {
@@ -578,10 +586,96 @@ pub const BytecodePreprocessing = struct {
                         .is_compressed = is_compressed,
                     });
                 },
+                .SRLI => {
+                    // SRLI rd, rs1, shamt → VirtualSRLI(rd, rs1, bitmask)
+                    // Single virtual instruction (like SLLI → VirtualMULI)
+                    const raw_imm = switch (jolt_instr.operands) {
+                        .FormatI => |i| i.imm,
+                        else => 0,
+                    };
+                    const rd = switch (jolt_instr.operands) {
+                        .FormatI => |i| i.rd,
+                        else => 0,
+                    };
+                    const rs1_val = switch (jolt_instr.operands) {
+                        .FormatI => |i| i.rs1,
+                        else => 0,
+                    };
+                    const shift: u7 = @intCast(raw_imm & 0x3f);
+                    const ones: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, shift))) - 1;
+                    const bitmask: u64 = @truncate(ones << shift);
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualSRLI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = rd, .rs1 = rs1_val, .imm = bitmask } },
+                        .virtual_sequence_remaining = null,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                },
+                .SRLIW => {
+                    // SRLIW rd, rs1, shamt → 3-step sequence:
+                    //   Step 1: SLLI(v_rs1, rs1, 32) → VirtualMULI(v_rs1, rs1, 2^32)
+                    //   Step 2: VirtualSRLI(rd, v_rs1, bitmask) where shift = shamt + 32
+                    //   Step 3: VirtualSignExtendWord(rd, rd, 0)
+                    const raw_imm = switch (jolt_instr.operands) {
+                        .FormatI => |i| i.imm,
+                        else => 0,
+                    };
+                    const rd = switch (jolt_instr.operands) {
+                        .FormatI => |i| i.rd,
+                        else => 0,
+                    };
+                    const rs1_val = switch (jolt_instr.operands) {
+                        .FormatI => |i| i.rs1,
+                        else => 0,
+                    };
+                    // Virtual register for intermediate result (register 32 = first virtual register)
+                    const v_rs1: u8 = 32;
+                    // Compute bitmask: shift = (shamt & 0x1f) + 32
+                    const shamt: u7 = @intCast(raw_imm & 0x1f);
+                    const total_shift: u7 = shamt + 32;
+                    const ones: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, total_shift))) - 1;
+                    const bitmask: u64 = @truncate(ones << total_shift);
+                    // Step 1: VirtualMULI(v_rs1, rs1, 2^32) - shift left by 32
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualMULI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = v_rs1, .rs1 = rs1_val, .imm = @as(u64, 1) << 32 } },
+                        .virtual_sequence_remaining = 2,
+                        .is_first_in_sequence = true,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 2: VirtualSRLI(rd, v_rs1, bitmask)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualSRLI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = rd, .rs1 = v_rs1, .imm = bitmask } },
+                        .virtual_sequence_remaining = 1,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 3: VirtualSignExtendWord(rd, rd, 0)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualSignExtendWord,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = rd, .rs1 = rd, .imm = 0 } },
+                        .virtual_sequence_remaining = 0,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                },
                 else => {
                     // Non-W-extension instructions: append as-is
                     try self.bytecode.append(allocator, jolt_instr);
                 },
+            }
+
+            // Track raw 32-bit instruction word for each bytecode entry added.
+            // All entries from a single ELF instruction share the same raw word.
+            const entries_added = self.bytecode.items.len - bytecode_len_before;
+            for (0..entries_added) |_| {
+                try self.raw_words.append(allocator, instruction);
             }
 
             offset += instr_size;
@@ -606,6 +700,7 @@ pub const BytecodePreprocessing = struct {
                 .is_first_in_sequence = false,
                 .is_compressed = false,
             });
+            try self.raw_words.append(allocator, 0); // NoOp padding = raw word 0
         }
 
         return self;

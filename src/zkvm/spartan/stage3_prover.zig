@@ -953,6 +953,40 @@ pub fn Stage3Prover(comptime F: type) type {
             for (transcript.state[0..8]) |b| dbg("{x:0>2} ", .{b});
             dbg("}}\n", .{});
 
+            // ALWAYS-ON: Print transcript state and key claims for comparison with Jolt
+            {
+                const std_io = @import("std");
+                std_io.debug.print("[ZOLT Stage3] Transcript state AFTER cache_openings: ", .{});
+                for (transcript.state[0..8]) |b| std_io.debug.print("{x:0>2} ", .{b});
+                std_io.debug.print("\n", .{});
+                // Print all 16 claims in LE format for byte-by-byte comparison with Jolt
+                std_io.debug.print("[ZOLT Stage3 cache_openings] 16 claims (LE bytes, first 16):\n", .{});
+                const claims_arr = [_]struct { name: []const u8, val: F }{
+                    .{ .name = "UnexpandedPC/Shift", .val = shift_claims.unexpanded_pc },
+                    .{ .name = "PC/Shift", .val = shift_claims.pc },
+                    .{ .name = "VirtualInst/Shift", .val = shift_claims.is_virtual },
+                    .{ .name = "IsFirstInSeq/Shift", .val = shift_claims.is_first_in_sequence },
+                    .{ .name = "IsNoop/Shift", .val = shift_claims.is_noop },
+                    .{ .name = "LeftIsRs1/IIV", .val = instr_claims.left_is_rs1 },
+                    .{ .name = "Rs1Value/IIV", .val = instr_claims.rs1_value },
+                    .{ .name = "LeftIsPC/IIV", .val = instr_claims.left_is_pc },
+                    .{ .name = "UnexpandedPC/IIV", .val = instr_claims.unexpanded_pc },
+                    .{ .name = "RightIsRs2/IIV", .val = instr_claims.right_is_rs2 },
+                    .{ .name = "Rs2Value/IIV", .val = instr_claims.rs2_value },
+                    .{ .name = "RightIsImm/IIV", .val = instr_claims.right_is_imm },
+                    .{ .name = "Imm/IIV", .val = instr_claims.imm },
+                    .{ .name = "RdWriteValue/Reg", .val = reg_claims.rd_write_value },
+                    .{ .name = "Rs1Value/Reg", .val = reg_claims.rs1_value },
+                    .{ .name = "Rs2Value/Reg", .val = reg_claims.rs2_value },
+                };
+                for (claims_arr, 0..) |entry, i| {
+                    const le = entry.val.toBytes();
+                    std_io.debug.print("  [{d:>2}] {s}: ", .{ i, entry.name });
+                    for (le[0..16]) |b| std_io.debug.print("{x:0>2} ", .{b});
+                    std_io.debug.print("\n", .{});
+                }
+            }
+
             return Stage3Result(F){
                 .challenges = challenges,
                 .shift_final_claim = current_shift_claim,

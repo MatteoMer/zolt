@@ -785,7 +785,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                 // First compute left_input and right_input (same as R1CS)
                 const left_is_rs1: bool = switch (opcode) {
-                    0x33, 0x3b, 0x23, 0x63, 0x13, 0x03, 0x67, 0x1b, 0x0B, 0x2B => true,
+                    0x33, 0x3b, 0x23, 0x63, 0x13, 0x03, 0x67, 0x1b, 0x0B, 0x2B, 0x5B => true,
                     else => false,
                 };
                 const left_is_pc: bool = switch (opcode) {
@@ -797,7 +797,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     else => false,
                 };
                 const right_is_imm: bool = switch (opcode) {
-                    0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b, 0x0B, 0x2B => true,
+                    0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b, 0x0B, 0x2B, 0x5B => true,
                     else => false,
                 };
 
@@ -818,6 +818,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     const shamt2: u6 = @truncate(shamt_raw2 & 0x3F);
                     const multiplier2: u64 = @as(u64, 1) << shamt2;
                     break :blk F.fromU64(multiplier2);
+                } else if (opcode == 0x5B) blk: {
+                    // VirtualSRLI: IMM = bitmask computed from total shift amount
+                    const total_shift_raw2: u32 = instr >> 20;
+                    const total_shift2: u7 = @truncate(total_shift_raw2 & 0x3F);
+                    const ones2: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, total_shift2))) - 1;
+                    const bitmask2: u64 = @truncate(ones2 << total_shift2);
+                    break :blk F.fromU64(bitmask2);
                 } else if (is_identity_add_imm) blk: {
                     // Use unsigned u64 representation (two's complement) for the immediate.
                     // E.g., imm=-1 → F(0xFFFFFFFFFFFFFFFF) instead of F(p-1).
@@ -1153,6 +1160,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm12_raw << 20)) >> 20);
                             break :blk @as(u64, @bitCast(imm_signed));
                         },
+                        0x5B => blk5b: {
+                            // VirtualSRLI: right operand is bitmask computed from total shift
+                            const ts_raw: u32 = instr >> 20;
+                            const ts: u7 = @truncate(ts_raw & 0x3F);
+                            const ones_5b: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, ts))) - 1;
+                            break :blk5b @truncate(ones_5b << ts);
+                        },
                         else => step.rs2_value,
                     };
                     lookup_idx_u128 = interleaveBits128(left_op_raw, right_op_raw);
@@ -1294,7 +1308,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                     // First compute left_input and right_input (same as R1CS)
                     const left_is_rs1: bool = switch (opcode) {
-                        0x33, 0x3b, 0x23, 0x63, 0x13, 0x03, 0x67, 0x1b, 0x0B, 0x2B => true,
+                        0x33, 0x3b, 0x23, 0x63, 0x13, 0x03, 0x67, 0x1b, 0x0B, 0x2B, 0x5B => true,
                         else => false,
                     };
                     const left_is_pc: bool = switch (opcode) {
@@ -1306,7 +1320,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         else => false,
                     };
                     const right_is_imm: bool = switch (opcode) {
-                        0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b, 0x0B, 0x2B => true,
+                        0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b, 0x0B, 0x2B, 0x5B => true,
                         else => false,
                     };
 
@@ -1533,7 +1547,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 const opcode_v = instr_v & 0x7f;
                 // Recompute left_op, right_op, output using same logic as above
                 const left_is_rs1_v: bool = switch (opcode_v) {
-                    0x33, 0x3b, 0x23, 0x63, 0x13, 0x03, 0x67, 0x1b, 0x0B, 0x2B => true,
+                    0x33, 0x3b, 0x23, 0x63, 0x13, 0x03, 0x67, 0x1b, 0x0B, 0x2B, 0x5B => true,
                     else => false,
                 };
                 const left_is_pc_v: bool = switch (opcode_v) {
@@ -1545,13 +1559,18 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     else => false,
                 };
                 const right_is_imm_v: bool = switch (opcode_v) {
-                    0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b, 0x0B, 0x2B => true,
+                    0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b, 0x0B, 0x2B, 0x5B => true,
                     else => false,
                 };
                 const imm_v = if (opcode_v == 0x2B) blk: {
                     const shamt_rv: u32 = instr_v >> 20;
                     const shamt_v: u6 = @truncate(shamt_rv & 0x3F);
                     break :blk F.fromU64(@as(u64, 1) << shamt_v);
+                } else if (opcode_v == 0x5B) blk5bv: {
+                    const ts_rv: u32 = instr_v >> 20;
+                    const ts_v: u7 = @truncate(ts_rv & 0x3F);
+                    const ones_v: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, ts_v))) - 1;
+                    break :blk5bv F.fromU64(@truncate(ones_v << ts_v));
                 } else computeImmediate(instr_v);
                 var left_input_v: F = F.zero();
                 if (left_is_rs1_v) left_input_v = F.fromU64(step_v.rs1_value);
@@ -2214,7 +2233,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                         // Recompute using FIELD arithmetic (R1CS style)
                         const r1cs_left_is_rs1: bool = switch (opcode_d) {
-                            0x33, 0x3b, 0x23, 0x63, 0x13, 0x03, 0x67, 0x1b, 0x0B, 0x2B => true,
+                            0x33, 0x3b, 0x23, 0x63, 0x13, 0x03, 0x67, 0x1b, 0x0B, 0x2B, 0x5B => true,
                             else => false,
                         };
                         const r1cs_left_is_pc: bool = switch (opcode_d) {
@@ -2226,7 +2245,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             else => false,
                         };
                         const r1cs_right_is_imm: bool = switch (opcode_d) {
-                            0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b, 0x0B, 0x2B => true,
+                            0x13, 0x03, 0x67, 0x23, 0x37, 0x17, 0x6f, 0x1b, 0x0B, 0x2B, 0x5B => true,
                             else => false,
                         };
                         var r1cs_left_input = F.zero();
@@ -2239,6 +2258,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 const shamt_rd: u32 = instr_d >> 20;
                                 const shamt_d: u6 = @truncate(shamt_rd & 0x3F);
                                 r1cs_right_input = F.fromU64(@as(u64, 1) << shamt_d);
+                            } else if (opcode_d == 0x5B) {
+                                const ts_rd: u32 = instr_d >> 20;
+                                const ts_d: u7 = @truncate(ts_rd & 0x3F);
+                                const ones_d: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, ts_d))) - 1;
+                                r1cs_right_input = F.fromU64(@truncate(ones_d << ts_d));
                             } else {
                                 r1cs_right_input = computeImmediate(instr_d);
                             }
@@ -6682,6 +6706,7 @@ pub fn getLookupTableIndex(opcode: u32, funct3: u32, funct7: u32) i8 {
         },
         0x0B => 21, // VirtualSignExtendWord -> SignExtendHalfWordTable
         0x2B => 0, // VirtualMULI -> RangeCheckTable
+        0x5B => 26, // VirtualSRLI -> VirtualSRLTable
         0x37 => 0, // LUI -> RangeCheckTable
         0x17 => 0, // AUIPC -> RangeCheckTable
         0x6f => 0, // JAL -> RangeCheckTable

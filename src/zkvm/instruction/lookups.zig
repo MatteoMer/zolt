@@ -4269,3 +4269,129 @@ test "virtual sign extend word lookup" {
     try std.testing.expect(inst_flags.get(.LeftOperandIsRs1Value));
     try std.testing.expect(inst_flags.get(.IsRdNotZero));
 }
+
+/// VirtualSRLI (logical right shift via bitmask) lookup computation.
+///
+/// Reference: jolt-core/src/zkvm/instruction/virtual_srli.rs
+///
+/// Key properties:
+/// - Lookup table: VirtualSRL (table index 26)
+/// - Lookup operands: (rs1_value, bitmask_imm) interleaved
+/// - Result: the right-shifted value computed using bitmask iteration
+/// - Circuit flags: WriteLookupOutputToRD, VirtualInstruction (when vsr.is_some()),
+///   DoNotUpdateUnexpandedPC (when vsr!=0), IsFirstInSequence, IsCompressed
+/// - Instruction flags: LeftOperandIsRs1Value, RightOperandIsImm, IsRdNotZero
+pub fn VirtualSRLILookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        rs1_val: u64,
+        bitmask: u64,
+        is_virtual: bool,
+        do_not_update_pc: bool,
+        is_first_in_sequence: bool,
+        is_compressed: bool,
+        is_rd_not_zero: bool,
+
+        pub fn init(
+            rs1_val: u64,
+            bitmask: u64,
+            is_virtual: bool,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+            is_rd_not_zero: bool,
+        ) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .bitmask = bitmask,
+                .is_virtual = is_virtual,
+                .do_not_update_pc = do_not_update_pc,
+                .is_first_in_sequence = is_first_in_sequence,
+                .is_compressed = is_compressed,
+                .is_rd_not_zero = is_rd_not_zero,
+            };
+        }
+
+        /// VirtualSRLI uses VirtualSRL table (table index 26)
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .VirtualSRL;
+        }
+
+        /// Lookup index = interleave(rs1_val, bitmask)
+        /// Jolt's to_instruction_inputs returns (rs1, bitmask_imm)
+        /// The interleaving puts value bits in even positions, bitmask in odd
+        pub fn toLookupIndex(self: Self) u128 {
+            return interleaveBits(self.rs1_val, self.bitmask);
+        }
+
+        /// Compute the result: logical right shift using bitmask
+        /// This matches Jolt's to_lookup_output:
+        ///   for each bit from MSB to LSB:
+        ///     result = result * (1 + y_i) + x_i * y_i
+        pub fn computeResult(self: Self) u64 {
+            var result: u64 = 0;
+            for (0..XLEN) |i| {
+                const bit_pos: u6 = @intCast(XLEN - 1 - i);
+                const x_i: u64 = (self.rs1_val >> bit_pos) & 1;
+                const y_i: u64 = (self.bitmask >> bit_pos) & 1;
+                result = result * (1 + y_i) + x_i * y_i;
+            }
+            return result;
+        }
+
+        /// Circuit flags for VirtualSRLI
+        /// Reference: virtual_srli.rs circuit_flags()
+        pub fn circuitFlags(self: Self) CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.WriteLookupOutputToRD);
+            if (self.is_virtual) flags.set(.VirtualInstruction);
+            if (self.do_not_update_pc) flags.set(.DoNotUpdateUnexpandedPC);
+            if (self.is_first_in_sequence) flags.set(.IsFirstInSequence);
+            if (self.is_compressed) flags.set(.IsCompressed);
+            return flags;
+        }
+
+        /// Instruction flags for VirtualSRLI
+        /// Reference: virtual_srli.rs instruction_flags()
+        pub fn instructionFlags(self: Self) InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsImm);
+            if (self.is_rd_not_zero) flags.set(.IsRdNotZero);
+            return flags;
+        }
+    };
+}
+
+fn interleaveBits(x: u64, y: u64) u128 {
+    var result: u128 = 0;
+    for (0..64) |i| {
+        const ii: u6 = @intCast(i);
+        result |= @as(u128, (x >> ii) & 1) << @intCast(2 * i);
+        result |= @as(u128, (y >> ii) & 1) << @intCast(2 * i + 1);
+    }
+    return result;
+}
+
+test "virtual srli lookup" {
+    // SRLI x1, x1, 4 → VirtualSRLI with bitmask
+    // shift=4, bitmask = ((1 << 60) - 1) << 4 = 0xFFFFFFFFFFFFFFF0
+    const bitmask: u64 = 0xFFFFFFFFFFFFFFF0;
+    const vsrli = VirtualSRLILookup(64).init(0xFF, bitmask, false, false, false, false, true);
+    // 0xFF >> 4 = 0x0F
+    try std.testing.expectEqual(@as(u64, 0x0F), vsrli.computeResult());
+
+    // Test circuit flags
+    const flags = vsrli.circuitFlags();
+    try std.testing.expect(flags.get(.WriteLookupOutputToRD));
+    try std.testing.expect(!flags.get(.VirtualInstruction));
+    try std.testing.expect(!flags.get(.MultiplyOperands));
+    try std.testing.expect(!flags.get(.AddOperands));
+
+    // Test instruction flags
+    const inst_flags = vsrli.instructionFlags();
+    try std.testing.expect(inst_flags.get(.LeftOperandIsRs1Value));
+    try std.testing.expect(inst_flags.get(.RightOperandIsImm));
+    try std.testing.expect(inst_flags.get(.IsRdNotZero));
+}

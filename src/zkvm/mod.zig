@@ -1012,6 +1012,10 @@ pub fn JoltProver(comptime F: type) type {
             const max_poly_size = @max(@max(@max(bytecode_poly_size, memory_poly_size), reg_poly_size), stage8_joint_poly_size);
             const log_size: u32 = if (max_poly_size <= 1) 1 else @intCast(std.math.log2_int(usize, max_poly_size));
 
+            std.debug.print("[SRS] Stage8 max_poly_size={}, log_size={}, sigma={}, nu={}\n", .{
+                max_poly_size, log_size, (log_size + 1) / 2, log_size - (log_size + 1) / 2,
+            });
+
             // Load SRS from file if path provided (for Jolt compatibility)
             // Otherwise generate SRS deterministically (may not match Jolt exactly)
             var dory_srs = if (srs_path) |path|
@@ -1019,6 +1023,8 @@ pub fn JoltProver(comptime F: type) type {
             else
                 try DoryScheme.setup(self.allocator, log_size);
             defer dory_srs.deinit();
+
+            std.debug.print("[SRS] Loaded: g1_vec={}, g2_vec={}\n", .{dory_srs.g1_vec.len, dory_srs.g2_vec.len});
 
             // Build and store polynomial evaluations
             var result = JoltProofWithDory.init(self.allocator);
@@ -1075,6 +1081,7 @@ pub fn JoltProver(comptime F: type) type {
 
             dbg("[ZOLT] OneHot params: instruction_d={}, bytecode_d={}, ram_d={}\n", .{ instruction_d, bytecode_d, ram_d });
 
+            std.debug.print("[DORY] Computing {} Dory commitments (instruction_d={}, ram_d={}, bytecode_d={})...\n", .{2 + instruction_d + ram_d + bytecode_d, instruction_d, ram_d, bytecode_d});
             // Build commitment polynomials and compute Dory commitments
             // Order: RdInc, RamInc, InstructionRa[0..instruction_d-1], RamRa[0..ram_d-1], BytecodeRa[0..bytecode_d-1]
             //
@@ -1188,6 +1195,7 @@ pub fn JoltProver(comptime F: type) type {
             result.ram_d = ram_d;
             result.log_k_chunk = log_k_chunk;
 
+            std.debug.print("[DORY] All {} commitments computed.\n", .{all_commitments.items.len});
             // Store commitments in result
             result.dory_commitments = try all_commitments.toOwnedSlice(self.allocator);
 

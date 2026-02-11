@@ -1183,6 +1183,25 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
             }
         };
 
+        /// VirtualSRL: shift-right-logical using bitmask encoding
+        /// The index interleaves value bits (x) and bitmask bits (y).
+        /// result = Π_{i=0}^{XLEN-1} (1 + y_i) * ... computed iteratively:
+        ///   result = 0
+        ///   for i in 0..XLEN: result = result * (1 + y_i) + x_i * y_i
+        /// Reference: jolt-core/src/zkvm/lookup_table/virtual_srl.rs
+        pub const VirtualSRL = struct {
+            pub fn evaluateMLE(r: []const F) F {
+                std.debug.assert(r.len == 2 * XLEN);
+                var result = F.zero();
+                inline for (0..XLEN) |i| {
+                    const x_i = r[2 * i]; // value bit
+                    const y_i = r[2 * i + 1]; // bitmask bit
+                    result = result.mul(F.one().add(y_i)).add(x_i.mul(y_i));
+                }
+                return result;
+            }
+        };
+
         /// Number of lookup tables in Jolt
         pub const NUM_TABLES: usize = 42;
 
@@ -1219,7 +1238,7 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                 23 => F.zero(), // Pow2W - TODO
                 24 => F.zero(), // ShiftRightBitmask - TODO
                 25 => F.zero(), // VirtualRev8W - TODO
-                26 => F.zero(), // VirtualSRL - TODO
+                26 => VirtualSRL.evaluateMLE(r),
                 27 => F.zero(), // VirtualSRA - TODO
                 28 => F.zero(), // VirtualROTR - TODO
                 29 => F.zero(), // VirtualROTRW - TODO

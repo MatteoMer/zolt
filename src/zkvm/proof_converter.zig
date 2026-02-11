@@ -1541,6 +1541,7 @@ pub fn ProofConverter(comptime F: type) type {
             transcript: *Blake2bTranscript(F),
         ) !JoltProofType(F, Commitment, Proof) {
             dbg("\n[PROOF_CONV] ===== STARTING CONVERT WITH TRANSCRIPT =====\n", .{});
+            std.debug.print("[PROOF_CONV] Starting conversion, trace_length={}...\n", .{@as(usize, 1) << @intCast(zolt_stage_proofs.log_t)});
             var jolt_proof = JoltProofType(F, Commitment, Proof).init(self.allocator);
 
             // Copy configuration parameters
@@ -1616,6 +1617,7 @@ pub fn ProofConverter(comptime F: type) type {
 
             // Stage 1: Outer Spartan Remaining - use streaming prover with transcript
             // Use padded witnesses so Az/Bz MLE evaluations match the verifier's computation
+            std.debug.print("[PROOF_CONV] Starting Stage 1...\n", .{});
             {
                 dbg("[ZOLT] Transcript before Stage 1: ", .{});
                 for (transcript.state[0..8]) |b| dbg("{x:0>2} ", .{b});
@@ -1868,6 +1870,7 @@ pub fn ProofConverter(comptime F: type) type {
             tau_stage2[n_cycle_vars] = tau_high_stage2;
 
             {
+                std.debug.print("[PROOF_CONV] Starting Stage 2...\n", .{});
                 dbg("[ZOLT] Transcript before Stage 2: ", .{});
                 for (transcript.state[0..8]) |b| dbg("{x:0>2} ", .{b});
                 dbg(" round={}\n", .{transcript.n_rounds});
@@ -2061,6 +2064,7 @@ pub fn ProofConverter(comptime F: type) type {
 
             // Stage 3: SpartanShift, InstructionInput, RegistersClaimReduction
             {
+                std.debug.print("[PROOF_CONV] Starting Stage 3...\n", .{});
                 dbg("[ZOLT] Transcript before Stage 3: ", .{});
                 for (transcript.state[0..8]) |b| dbg("{x:0>2} ", .{b});
                 dbg(" round={}\n", .{transcript.n_rounds});
@@ -2223,6 +2227,7 @@ pub fn ProofConverter(comptime F: type) type {
 
             // Stage 4: RegistersReadWriteChecking, RamValEvaluation, RamValFinalEvaluation
             {
+                std.debug.print("[PROOF_CONV] Starting Stage 4...\n", .{});
                 dbg("[ZOLT] Transcript before Stage 4: ", .{});
                 for (transcript.state[0..8]) |b| dbg("{x:0>2} ", .{b});
                 dbg(" round={}\n", .{transcript.n_rounds});
@@ -2245,10 +2250,25 @@ pub fn ProofConverter(comptime F: type) type {
             for (transcript.state[0..8]) |b| dbg("{x:0>2} ", .{b});
             dbg("}}\n", .{});
 
+            // ALWAYS-ON: Print transcript state before gamma for comparison with Jolt verifier
+            {
+                std.debug.print("[ZOLT STAGE4] Transcript state BEFORE gamma: ", .{});
+                for (transcript.state[0..8]) |b| std.debug.print("{x:0>2} ", .{b});
+                std.debug.print("\n", .{});
+            }
+
             const gamma_stage4 = transcript.challengeScalarFull();
             dbg("[STAGE4] gamma_full_BE = {any}\n", .{gamma_stage4.toBytesBE()});
             // Print gamma as decimal for comparison with Jolt
             dbg("[STAGE4] gamma (as u128 in low bits) = {any}\n", .{gamma_stage4.limbs[0..2].*});
+
+            // ALWAYS-ON: Print gamma LE bytes for comparison with Jolt
+            {
+                const gamma_le = gamma_stage4.toBytes();
+                std.debug.print("[ZOLT STAGE4] gamma (LE) = ", .{});
+                for (gamma_le) |b| std.debug.print("{x:0>2} ", .{b});
+                std.debug.print("\n", .{});
+            }
 
             // DEBUG: Print transcript state after gamma
             dbg("[STAGE4 TRANSCRIPT] State AFTER gamma challenge:\n", .{});
@@ -2774,6 +2794,8 @@ pub fn ProofConverter(comptime F: type) type {
                 for (transcript.state[0..8]) |b| dbg("{x:0>2} ", .{b});
                 dbg("}}\n", .{});
 
+                // Debug: Stage 4 claims (disabled for speed)
+
                 // Append input claims to transcript (this is what Jolt does)
                 transcript.appendScalar(input_claim_registers);
                 transcript.appendScalar(input_claim_val_eval);
@@ -2789,6 +2811,8 @@ pub fn ProofConverter(comptime F: type) type {
                 const batch0 = transcript.challengeScalarFull();
                 const batch1 = transcript.challengeScalarFull();
                 const batch2 = transcript.challengeScalarFull();
+
+                // Debug: Stage 4 batching (disabled for speed)
 
                 dbg("[ZOLT STAGE4] input_claim_registers_BE = {any}\n", .{input_claim_registers.toBytesBE()});
                 dbg("[ZOLT STAGE4] input_claim_val_eval_BE = {any}\n", .{input_claim_val_eval.toBytesBE()});
@@ -3220,7 +3244,7 @@ pub fn ProofConverter(comptime F: type) type {
 
                 // BRUTE FORCE: Compare val_poly[0] after binding with the initial val_poly
                 // accessed directly at the binding point
-                {
+                if (debug_verbose) {
                     // Get the raw initial polynomial values from the prover for a small check.
                     // After all 15 rounds of binding with challenges c0..c14:
                     //   Phases: c0..c7 bind cycle (LSB first), c8..c14 bind address (LSB first)
@@ -3762,6 +3786,41 @@ pub fn ProofConverter(comptime F: type) type {
                 dbg("  Do they match? {}\n", .{batched_claim.eql(total_expected)});
                 dbg("[END VERIFY CHECK]\n\n", .{});
 
+                // ALWAYS-ON STAGE4 DIAGNOSTIC (not gated by debug_verbose)
+                std.debug.print("\n[STAGE4 DIAG] === Stage 4 Sumcheck Self-Check ===\n", .{});
+                std.debug.print("[STAGE4 DIAG] batched_claim (from sumcheck) = {any}\n", .{batched_claim.toBytesBE()[0..16]});
+                std.debug.print("[STAGE4 DIAG] total_expected (from claims)  = {any}\n", .{total_expected.toBytesBE()[0..16]});
+                std.debug.print("[STAGE4 DIAG] MATCH? {}\n", .{batched_claim.eql(total_expected)});
+                std.debug.print("[STAGE4 DIAG] Instance 0 (RegistersRWC):\n", .{});
+                std.debug.print("[STAGE4 DIAG]   val={any}\n", .{regs_claims.val_claim.toBytesBE()[0..16]});
+                std.debug.print("[STAGE4 DIAG]   rs1_ra={any}\n", .{regs_claims.rs1_ra_claim.toBytesBE()[0..16]});
+                std.debug.print("[STAGE4 DIAG]   rs2_ra={any}\n", .{regs_claims.rs2_ra_claim.toBytesBE()[0..16]});
+                std.debug.print("[STAGE4 DIAG]   rd_wa={any}\n", .{regs_claims.rd_wa_claim.toBytesBE()[0..16]});
+                std.debug.print("[STAGE4 DIAG]   inc={any}\n", .{regs_claims.inc_claim.toBytesBE()[0..16]});
+                std.debug.print("[STAGE4 DIAG]   eq_eval={any}\n", .{eq_val_be.toBytesBE()[0..16]});
+                std.debug.print("[STAGE4 DIAG]   expected_0 (eq*combined)={any}\n", .{expected_output.toBytesBE()[0..16]});
+                std.debug.print("[STAGE4 DIAG]   weighted_0={any}\n", .{weighted_expected_0.toBytesBE()[0..16]});
+                std.debug.print("[STAGE4 DIAG] Instance 1 (ValEval):\n", .{});
+                std.debug.print("[STAGE4 DIAG]   inc={any}, wa={any}, lt={any}\n", .{
+                    val_eval_openings.inc_eval.toBytesBE()[0..16],
+                    val_eval_openings.wa_eval.toBytesBE()[0..16],
+                    val_eval_openings.lt_eval.toBytesBE()[0..16],
+                });
+                std.debug.print("[STAGE4 DIAG]   expected_1={any}, weighted_1={any}\n", .{
+                    expected_1.toBytesBE()[0..16], weighted_expected_1.toBytesBE()[0..16],
+                });
+                std.debug.print("[STAGE4 DIAG] Instance 2 (ValFinal):\n", .{});
+                std.debug.print("[STAGE4 DIAG]   inc={any}, wa={any}\n", .{
+                    val_final_openings.inc_eval.toBytesBE()[0..16],
+                    val_final_openings.wa_eval.toBytesBE()[0..16],
+                });
+                std.debug.print("[STAGE4 DIAG]   expected_2={any}, weighted_2={any}\n", .{
+                    expected_2.toBytesBE()[0..16], weighted_expected_2.toBytesBE()[0..16],
+                });
+                std.debug.print("[STAGE4 DIAG] regs_current_claim (last round eval) = {any}\n", .{regs_current_claim.toBytesBE()[0..16]});
+                std.debug.print("[STAGE4 DIAG] individual_claims[1] (val_eval final) = {any}\n", .{individual_claims[1].toBytesBE()[0..16]});
+                std.debug.print("[STAGE4 DIAG] individual_claims[2] (val_final final) = {any}\n", .{individual_claims[2].toBytesBE()[0..16]});
+
                 // RegistersReadWriteChecking claims.
                 dbg("[STAGE4 INSERT] RegistersVal@RegistersReadWriteChecking:\n", .{});
                 dbg("  val_claim LE bytes = {any}\n", .{regs_claims.val_claim.toBytes()});
@@ -3870,6 +3929,7 @@ pub fn ProofConverter(comptime F: type) type {
 
             // Stage 5: RegistersValEvaluation, RamRaClaimReduction, LookupsReadRaf
             {
+                std.debug.print("[PROOF_CONV] Starting Stage 5...\n", .{});
                 dbg("[ZOLT] Transcript before Stage 5: ", .{});
                 for (transcript.state[0..8]) |b| dbg("{x:0>2} ", .{b});
                 dbg(" round={}\n", .{transcript.n_rounds});
@@ -4054,6 +4114,7 @@ pub fn ProofConverter(comptime F: type) type {
                 r_cycle_shift_be[i] = stage3_result.challenges[stage3_result.challenges.len - 1 - i];
             }
 
+            std.debug.print("[PROOF_CONV] Starting Stage 6...\n", .{});
             // Build bytecode entry table from static ELF + execution trace overlay
             const bytecode_K_val: usize = @as(usize, 1) << @intCast(bytecode_log_k);
             const stage6_mod = @import("spartan/stage6_prover.zig");
@@ -4182,6 +4243,7 @@ pub fn ProofConverter(comptime F: type) type {
             // Stage 6 cache_openings are already appended by Stage 6 prover
             // (stage6_prover.zig lines 4055-4083)
             // Do NOT re-append them here.
+            std.debug.print("[PROOF_CONV] Starting Stage 7...\n", .{});
             dbg("[STAGE7] Transcript before Stage 7: {{ ", .{});
             for (transcript.state[0..8]) |b| dbg("{x:0>2} ", .{b});
             dbg("}} round={}\n", .{transcript.n_rounds});
@@ -4240,8 +4302,14 @@ pub fn ProofConverter(comptime F: type) type {
                 // Extract r_addr_virt_i for each ra polynomial (log_k_chunk elements each, BE)
                 // Order: InstructionRa(0..inst_d), BytecodeRa(0..bc_d), RamRa(0..ram_d)
                 var r_addr_virt = try self.allocator.alloc([]F, N);
+                // Initialize to empty slices so deferred free doesn't crash on uninitialized entries
+                for (r_addr_virt) |*slot| {
+                    slot.* = &[_]F{};
+                }
                 defer {
-                    for (r_addr_virt) |chunk| self.allocator.free(chunk);
+                    for (r_addr_virt) |chunk| {
+                        if (chunk.len > 0) self.allocator.free(chunk);
+                    }
                     self.allocator.free(r_addr_virt);
                 }
 
@@ -4868,6 +4936,7 @@ pub fn ProofConverter(comptime F: type) type {
                 }
             }
 
+            std.debug.print("[PROOF_CONV] Conversion complete!\n", .{});
             return jolt_proof;
         }
 

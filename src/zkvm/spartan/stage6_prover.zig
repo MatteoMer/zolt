@@ -187,6 +187,67 @@ fn populateVirtualSignExtendWordEntry(
     entry.is_first_in_sequence = false;
 }
 
+/// Populate a BytecodeEntry for a VirtualSRLI instruction.
+/// VirtualSRLI has opcode 0x5B with: WriteLookupOutputToRD (NO AddOperands, NO MultiplyOperands),
+/// LeftOperandIsRs1Value, RightOperandIsImm, lookup table = VirtualSRL (26).
+/// The immediate is a BITMASK reconstructed from the total shift amount.
+fn populateVirtualSRLIEntry(
+    entry: *BytecodeEntry,
+    rd: u8,
+    rs1: u8,
+    elf_address: u64,
+    /// bitmask: the 64-bit bitmask for VirtualSRLI (NOT the shift amount).
+    /// Computed as: ones = (1 << (64 - total_shift)) - 1; bitmask = ones << total_shift.
+    bitmask: u64,
+    /// virtual_sequence_remaining: null if standalone, Some(N) if part of a sequence.
+    virtual_sequence_remaining: ?u16,
+    is_first_in_sequence: bool,
+) void {
+    entry.address = elf_address;
+    // The immediate in the bytecode entry is the bitmask,
+    // matching what preprocessing.zig stores in the FormatI operands.
+    entry.imm = @intCast(bitmask);
+
+    entry.rd = if (rd == 0) 255 else rd;
+    entry.rs1 = rs1;
+    entry.rs2 = 255; // VirtualSRLI is I-type: no rs2
+
+    entry.opcode = 0x5B;
+    entry.funct3 = 0;
+
+    entry.circuit_flags = [_]bool{false} ** 13;
+    entry.instruction_flags = [_]bool{false} ** 7;
+
+    var cf = &entry.circuit_flags;
+    cf[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)] = true;
+    // VirtualSRLI does NOT set AddOperands, SubtractOperands, or MultiplyOperands.
+    // It uses interleaved operands with VirtualSRL table (table index 26).
+    if (virtual_sequence_remaining != null) {
+        cf[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+    }
+    if (virtual_sequence_remaining) |vsr| {
+        if (vsr != 0) {
+            cf[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+        }
+    }
+    if (is_first_in_sequence) {
+        cf[@intFromEnum(CircuitFlags.IsFirstInSequence)] = true;
+    }
+
+    var inf = &entry.instruction_flags;
+    inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+    inf[@intFromEnum(InstructionFlags.RightOperandIsImm)] = true;
+    if (rd != 0) {
+        inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
+    }
+
+    entry.lookup_table_index = 26; // VirtualSRL
+    // VirtualSRLI uses interleaved operands (NOT identity path)
+    entry.is_interleaved = true;
+    entry.virtual_sequence_remaining = virtual_sequence_remaining;
+    entry.is_first_in_sequence = is_first_in_sequence;
+}
+
 /// Populate a BytecodeEntry from a raw 32-bit instruction word and ELF address.
 /// This sets all static properties (flags, registers, immediates, lookup table)
 /// from the instruction encoding alone, without any trace-specific data.
@@ -215,7 +276,7 @@ fn populateEntryFromInstruction(entry: *BytecodeEntry, instr: u32, elf_address: 
         else => decoded.rs1,
     };
     entry.rs2 = switch (opcode) {
-        0x13, 0x03, 0x67, 0x1b, 0x37, 0x17, 0x6f, 0x0B, 0x2B => 255, // I-type, U-type, J-type, Virtual: no rs2
+        0x13, 0x03, 0x67, 0x1b, 0x37, 0x17, 0x6f, 0x0B, 0x2B, 0x5B => 255, // I-type, U-type, J-type, Virtual: no rs2
         else => decoded.rs2,
     };
     const funct3: u3 = @truncate((instr >> 12) & 0x7);
@@ -309,7 +370,7 @@ fn populateEntryFromInstruction(entry: *BytecodeEntry, instr: u32, elf_address: 
     // LeftOperandIsRs1Value
     if (has_lookup) {
         switch (opcode) {
-            0x33, 0x13, 0x67, 0x63, 0x1B, 0x3B, 0x0B, 0x2B => {
+            0x33, 0x13, 0x67, 0x63, 0x1B, 0x3B, 0x0B, 0x2B, 0x5B => {
                 inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
             },
             else => {},
@@ -319,7 +380,7 @@ fn populateEntryFromInstruction(entry: *BytecodeEntry, instr: u32, elf_address: 
     // RightOperandIsImm
     if (has_lookup) {
         switch (opcode) {
-            0x13, 0x67, 0x37, 0x17, 0x6F, 0x1B, 0x0B, 0x2B => {
+            0x13, 0x67, 0x37, 0x17, 0x6F, 0x1B, 0x0B, 0x2B, 0x5B => {
                 inf[@intFromEnum(InstructionFlags.RightOperandIsImm)] = true;
             },
             else => {},
@@ -483,6 +544,39 @@ pub fn buildBytecodeEntries(
                     // is_compressed: NOT set on non-last instructions (Jolt only sets on last)
                     if (k >= 1) {
                         populateVirtualMULIEntry(&entries[k - 1], raw_rd, raw_rs1, addr, shamt, 1, true);
+                    }
+                } else if (raw_opcode == 0x13 and raw_funct3 == 5 and (instr_word >> 30) & 1 == 0) {
+                    // SRLI → VirtualSRLI (single entry, standalone virtual sequence)
+                    // Like SLLI → VirtualMULI, standalone SRLI becomes a 1-instruction virtual sequence:
+                    //   VirtualSRLI with vsr=null (standalone), is_first_in_sequence=false
+                    // Wait - actually, looking at Jolt's SRLI inline_sequence:
+                    //   It returns [VirtualSRLI(rd, rs1, bitmask)] with finalize() setting vsr=Some(0), first=true
+                    const shamt: u7 = @truncate((instr_word >> 20) & 0x3F);
+                    const ones: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, shamt))) - 1;
+                    const bitmask: u64 = @truncate(ones << shamt);
+                    populateVirtualSRLIEntry(&entries[k], raw_rd, raw_rs1, addr, bitmask, 0, true);
+                    if (is_compressed) {
+                        entries[k].circuit_flags[@intFromEnum(CircuitFlags.IsCompressed)] = true;
+                    }
+                } else if (raw_opcode == 0x1b and raw_funct3 == 5 and (instr_word >> 30) & 1 == 0) {
+                    // SRLIW → VirtualMULI + VirtualSRLI + VirtualSignExtendWord (3 entries)
+                    // pc_map for 3-entry sequences has max_inline_seq=2.
+                    // getPC(addr, 0) returns base_pc+2 (the VirtualSignExtendWord entry).
+                    // So k = base_pc+2. VirtualSRLI is at k-1, VirtualMULI is at k-2.
+                    const shamt: u7 = @truncate((instr_word >> 20) & 0x1F); // SRLIW uses 5-bit shamt
+                    const total_shift: u7 = shamt + 32;
+                    const ones: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, total_shift))) - 1;
+                    const bitmask: u64 = @truncate(ones << total_shift);
+                    // Entry at k: VirtualSignExtendWord (last in sequence, vsr=0)
+                    populateVirtualSignExtendWordEntry(&entries[k], raw_rd, addr, is_compressed);
+                    // Entry at k-1: VirtualSRLI (middle, vsr=1)
+                    if (k >= 1) {
+                        populateVirtualSRLIEntry(&entries[k - 1], raw_rd, 32, addr, bitmask, 1, false);
+                    }
+                    // Entry at k-2: VirtualMULI (first in sequence, vsr=2)
+                    if (k >= 2) {
+                        // SLLI by 32: shamt=32 stored as u6 (fits since 32 < 64)
+                        populateVirtualMULIEntry(&entries[k - 2], 32, raw_rs1, addr, 32, 2, true);
                     }
                 } else if (isWExtensionWith2EntryDecomposition(raw_opcode, raw_funct3, @truncate(instr_word >> 25))) {
                     // W-extension instructions that decompose to base + VirtualSignExtendWord:
@@ -685,6 +779,7 @@ fn getLookupTableIndex(opcode: u8, funct3: u3, funct7: u7) u8 {
         },
         0x0B => 21, // VirtualSignExtendWord → SignExtendHalfWord
         0x2B => 0, // VirtualMULI → RangeCheck
+        0x5B => 26, // VirtualSRLI → VirtualSRL
         else => 255, // Load, Store, ECALL, FENCE - no lookup table
     };
 }
@@ -2650,18 +2745,7 @@ fn BytecodeReadRafProver(comptime F: type) type {
             // and chunks sequentially: chunk 0 = MSB vars, chunk d-1 = LSB vars.
             // We keep r_address_be for RA chunk slicing (same convention as before).
 
-            // Debug: print r_address_challenges (LH order from sumcheck)
-            {
-                dbg("[BCRAF_TRANS] r_address_challenges (LH, len={}):\n", .{r_address_challenges.len});
-                for (0..r_address_challenges.len) |ci| {
-                    const rb = r_address_challenges[ci].toBytes();
-                    dbg("  r_addr_LH[{}]=[", .{ci});
-                    for (0..32) |bi| {
-                        dbg("{x:0>2}", .{rb[bi]});
-                    }
-                    dbg("]\n", .{});
-                }
-            }
+            // Note: r_address_challenges debug removed due to crashes in ReleaseFast
 
             // Compute r_address_be for RA chunk slicing (same as before)
             var r_address_be = try self.allocator.alloc(F, self.bytecode_log_k);
@@ -2675,24 +2759,26 @@ fn BytecodeReadRafProver(comptime F: type) type {
             const eq_addr = try computeEqTable(F, self.allocator, r_address_challenges, self.bytecode_log_k);
             defer self.allocator.free(eq_addr);
 
-            // Sanity: check val_polys[0][2] right here at this point
-            {
-                const check_vb = self.val_polys[0][2].toBytes();
-                dbg("[SANITY_CHECK] val_polys[0][2] at dump time: [", .{});
-                for (0..32) |bi| dbg("{x:0>2}", .{check_vb[bi]});
-                dbg("]\n", .{});
-                // Also check val_with_raf[0][2] - these should differ (RAF added to stage 0)
-                const vwr = self.val_with_raf[0][2].toBytes();
-                dbg("[SANITY_CHECK] val_with_raf[0][2]:     [", .{});
-                for (0..32) |bi| dbg("{x:0>2}", .{vwr[bi]});
-                dbg("]\n", .{});
-                // Check if val_polys and val_with_raf are aliased
-                const vp_ptr = @intFromPtr(self.val_polys[0].ptr);
-                const vr_ptr = @intFromPtr(self.val_with_raf[0].ptr);
-                dbg("[SANITY_CHECK] val_polys[0] ptr=0x{x} len={}, val_with_raf[0] ptr=0x{x} len={}, aliased={}\n", .{
-                    vp_ptr, self.val_polys[0].len, vr_ptr, self.val_with_raf[0].len,
-                    @intFromBool(vp_ptr == vr_ptr),
-                });
+            // Debug: eq_addr entries (gated)
+            if (debug_verbose) {
+                for (0..bytecode_K) |ek| {
+                    const eab = eq_addr[ek].toBytes();
+                    dbg("[ZOLT_EQ_ADDR] eq[{d}]_LE=[", .{ek});
+                    for (0..32) |bi| dbg("{x:0>2}", .{eab[bi]});
+                    dbg("]\n", .{});
+                }
+            }
+
+            // Debug: val_polys entries (gated)
+            if (debug_verbose) {
+                for (0..5) |vs| {
+                    for (0..bytecode_K) |kk| {
+                        const vpk = self.val_polys[vs][kk].toBytes();
+                        dbg("[ZOLT_VP] Val[{d}][{d}]_LE=[", .{ vs, kk });
+                        for (0..32) |bi| dbg("{x:0>2}", .{vpk[bi]});
+                        dbg("]\n", .{});
+                    }
+                }
             }
 
             var bound_vals: [5]F = undefined;
@@ -2703,38 +2789,9 @@ fn BytecodeReadRafProver(comptime F: type) type {
                     val_eval = val_eval.add(self.val_polys[s][k].mul(eq_addr[k]));
                 }
 
-                // Debug: print pure val_eval + partial sums for debugging
-                if (s == 0) {
-                    const pure_ve = val_eval.toBytes();
-                    dbg("[BCRAF_TRANS] stage[0]: pure_val_eval_LE=[", .{});
-                    for (0..32) |bi| {
-                        dbg("{x:0>2}", .{pure_ve[bi]});
-                    }
-                    dbg("]\n", .{});
-                    // Recompute partial sums for debugging
-                    var check_sum = F.zero();
-                    for (0..max_k) |k| {
-                        check_sum = check_sum.add(self.val_polys[0][k].mul(eq_addr[k]));
-                        if (k < 3 or k == max_k - 1) {
-                            const cs = check_sum.toBytes();
-                            const vk = self.val_polys[0][k].toBytes();
-                            const ek = eq_addr[k].toBytes();
-                            const pk = self.val_polys[0][k].mul(eq_addr[k]).toBytes();
-                            dbg("[PARTIAL_SUM] k={}: prod_LE=[", .{k});
-                            for (0..8) |bi| dbg("{x:0>2}", .{pk[bi]});
-                            dbg("] sum_LE=[", .{});
-                            for (0..8) |bi| dbg("{x:0>2}", .{cs[bi]});
-                            dbg("] val_LE=[", .{});
-                            for (0..8) |bi| dbg("{x:0>2}", .{vk[bi]});
-                            dbg("] eq_LE=[", .{});
-                            for (0..8) |bi| dbg("{x:0>2}", .{ek[bi]});
-                            dbg("]\n", .{});
-                        }
-                    }
-                }
-
-                // Add RAF terms (inner powers, multiplied by gamma_powers[s] at outer level)
-                // Total RAF coeff: Stage 0 = gamma^5 (inner=5), Stage 2 = gamma^6 (inner=4, outer=2)
+                // Add RAF terms (identity polynomial contribution)
+                // Stage 0: RAF = gamma^5 * identity_eval
+                // Stage 2: RAF = gamma^4 * identity_eval
                 if (s == 0) {
                     var identity_eval = F.zero();
                     for (0..bytecode_K) |k| {
@@ -2751,33 +2808,11 @@ fn BytecodeReadRafProver(comptime F: type) type {
 
                 // bound_vals[s] = (val_eval + raf) * gamma^s
                 // This matches Jolt's verifier expected_output_claim computation.
-                // val_eval already includes RAF terms (added above).
                 bound_vals[s] = self.gamma_powers[s].mul(val_eval);
 
-                // Debug: compare with stage_claims-derived bound_val
-                {
-                    const phase1_F_bound = self.F_s_arrs[s][0];
-                    if (!phase1_F_bound.eql(F.zero())) {
-                        const effective_val = self.stage_claims[s].mul(phase1_F_bound.inverse().?);
-                        const old_bv = self.gamma_powers[s].mul(effective_val);
-                        const ve_le = val_eval.toBytes();
-                        const ev_le = effective_val.toBytes();
-                        dbg("[BCRAF_TRANS] stage[{}]: val_eval_LE=[", .{s});
-                        for (0..32) |bi| {
-                            dbg("{x:0>2}", .{ve_le[bi]});
-                        }
-                        dbg("] effective_val_LE=[", .{});
-                        for (0..32) |bi| {
-                            dbg("{x:0>2}", .{ev_le[bi]});
-                        }
-                        dbg("] match={}\n", .{@as(u8, if (val_eval.eql(effective_val)) 1 else 0)});
-                        _ = old_bv;
-                    }
-                }
-
-                const bv_le = bound_vals[s].toBytes();
                 dbg("[BCRAF_TRANS] stage[{}]: bound_val_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
-                    s, bv_le[0], bv_le[1], bv_le[2], bv_le[3], bv_le[4], bv_le[5], bv_le[6], bv_le[7],
+                    s, bound_vals[s].toBytes()[0], bound_vals[s].toBytes()[1], bound_vals[s].toBytes()[2], bound_vals[s].toBytes()[3],
+                    bound_vals[s].toBytes()[4], bound_vals[s].toBytes()[5], bound_vals[s].toBytes()[6], bound_vals[s].toBytes()[7],
                 });
             }
 
@@ -4512,22 +4547,20 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 batched_claim = batched_claim.add(batch[i].mul(scaled));
             }
 
-            dbg("\n[S6P] Input claims and batching (LE = last8 of BE):\n", .{});
-            for (0..6) |i| {
-                const ic_be = input_claims[i].toBytesBE();
-                const ba_be = batch[i].toBytesBE();
-                // Show last 8 bytes of BE format (= first 8 LE bytes = least significant)
-                dbg("  instance[{}]: input_claim=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] batch=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] rounds={}\n", .{
-                    i,
-                    ic_be[31], ic_be[30], ic_be[29], ic_be[28], ic_be[27], ic_be[26], ic_be[25], ic_be[24],
-                    ba_be[31], ba_be[30], ba_be[29], ba_be[28], ba_be[27], ba_be[26], ba_be[25], ba_be[24],
-                    num_rounds_arr[i],
-                });
+            // Debug: input claims and batching (gated)
+            if (debug_verbose) {
+                dbg("\n[S6P] Input claims and batching:\n", .{});
+                for (0..6) |i| {
+                    const ic_be = input_claims[i].toBytesBE();
+                    dbg("  instance[{d}]: input_claim_LE=[", .{i});
+                    for (0..32) |bi| dbg("{x:0>2}", .{ic_be[31 - bi]});
+                    dbg("] rounds={d}\n", .{num_rounds_arr[i]});
+                }
+                const bc_be = batched_claim.toBytesBE();
+                dbg("  batched_claim_LE=[", .{});
+                for (0..32) |bi| dbg("{x:0>2}", .{bc_be[31 - bi]});
+                dbg("]\n", .{});
             }
-            const bc_be = batched_claim.toBytesBE();
-            dbg("  batched_claim=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
-                bc_be[31], bc_be[30], bc_be[29], bc_be[28], bc_be[27], bc_be[26], bc_be[25], bc_be[24],
-            });
 
             // ====================================================================
             // Run batched sumcheck
@@ -5257,22 +5290,26 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 // instance_claims[i] = input_claims[i] = the correct unscaled claim.
             }
 
-            // Debug: print final instance claims after sumcheck (LE hex for Jolt comparison)
-            dbg("\n[S6P] Final instance claims after sumcheck:\n", .{});
-            for (0..6) |i| {
-                const be = instance_claims[i].toBytesBE();
-                dbg("  instance[{}] final_claim_LE=[", .{i});
-                for (0..32) |bi| dbg("{x:0>2}", .{be[31 - bi]});
+            // Debug: print final instance claims after sumcheck (gated)
+            if (debug_verbose) {
+                dbg("\n[S6P] Final instance claims after sumcheck:\n", .{});
+                for (0..6) |i| {
+                    const be = instance_claims[i].toBytesBE();
+                    dbg("  instance[{d}] final_claim_LE=[", .{i});
+                    for (0..32) |bi| dbg("{x:0>2}", .{be[31 - bi]});
+                    dbg("]\n", .{});
+                }
+                const bb = current_batched_claim.toBytesBE();
+                dbg("  batched_output_claim_LE=[", .{});
+                for (0..32) |bi| dbg("{x:0>2}", .{bb[31 - bi]});
                 dbg("]\n", .{});
-            }
-            dbg("  current_batched_claim={any}\n", .{current_batched_claim.toBytesBE()[0..8]});
-            // Print all challenges (LE format for Jolt comparison)
-            dbg("[S6P] All challenges (LE first 8 bytes):\n", .{});
-            for (0..max_num_rounds) |i| {
-                const be = challenges[i].toBytesBE();
-                dbg("  ch[{}] = [{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
-                    i, be[31], be[30], be[29], be[28], be[27], be[26], be[25], be[24],
-                });
+                dbg("[S6P] All challenges (LE first 8 bytes):\n", .{});
+                for (0..max_num_rounds) |i| {
+                    const be = challenges[i].toBytesBE();
+                    dbg("  ch[{d}] = [{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                        i, be[31], be[30], be[29], be[28], be[27], be[26], be[25], be[24],
+                    });
+                }
             }
 
             // ====================================================================
@@ -5305,6 +5342,16 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             const hamming_weight_claim = hamming_prover.openingClaim();
 
             const bytecode_ra_claims = try bytecode_prover.getOpeningClaims(self.allocator);
+            // Debug: bytecode RA claims (gated)
+            if (debug_verbose) {
+                dbg("[S6P] Bytecode RA claims (d={d}):\n", .{bytecode_d});
+                for (0..bytecode_d) |i| {
+                    const be = bytecode_ra_claims[i].toBytesBE();
+                    dbg("  ra[{d}]_LE=[", .{i});
+                    for (0..32) |bi| dbg("{x:0>2}", .{be[31 - bi]});
+                    dbg("]\n", .{});
+                }
+            }
 
             const ram_ra_virtual_claims = try ram_ra_prover.getOpeningClaims(self.allocator);
 
@@ -6062,6 +6109,16 @@ pub fn computeLookupIndex(step: tracer.TraceStep) u128 {
         const shamt: u6 = @truncate(shamt_raw & 0x3F);
         const multiplier: u128 = @as(u128, 1) << shamt;
         return @as(u128, step.rs1_value) * multiplier;
+    }
+    if (opcode == 0x5B) {
+        // VirtualSRLI: interleaved(rs1_value, bitmask)
+        // The instruction encodes total_shift in I-type imm field (bits [31:20])
+        // The 64-bit bitmask is reconstructed: ones = (1 << (64-shift)) - 1; bitmask = ones << shift
+        const total_shift_raw: u32 = instr >> 20;
+        const total_shift: u7 = @truncate(total_shift_raw & 0x3F);
+        const ones: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, total_shift))) - 1;
+        const bitmask: u64 = @truncate(ones << total_shift);
+        return interleaveBits(step.rs1_value, bitmask);
     }
 
     // Determine left_input and right_input (matching Jolt's to_instruction_inputs)

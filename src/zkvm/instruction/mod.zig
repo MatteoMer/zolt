@@ -188,6 +188,8 @@ pub fn LookupTables(comptime XLEN: comptime_int) type {
         SignExtend16,
         SignExtend32,
         SignExtendHalfWord,
+        // Shift via bitmask
+        VirtualSRL,
         // Division/remainder validation
         ValidDiv0,
         ValidUnsignedRemainder,
@@ -231,6 +233,28 @@ pub fn LookupTables(comptime XLEN: comptime_int) type {
                     } else {
                         break :blk lower_half;
                     }
+                },
+                .VirtualSRL => blk: {
+                    // VirtualSRL: shift-right-logical using bitmask encoding
+                    // Index is interleaved: even bits = x (value), odd bits = y (bitmask)
+                    // Matches Jolt's virtual_srl.rs materialize_entry exactly
+                    // First uninterleave: extract even bits (x) and odd bits (y)
+                    var x: u64 = 0;
+                    var y: u64 = 0;
+                    for (0..XLEN) |i| {
+                        const ii: u7 = @intCast(i);
+                        x |= @as(u64, @truncate((index >> @intCast(2 * ii)) & 1)) << ii;
+                        y |= @as(u64, @truncate((index >> @intCast(2 * ii + 1)) & 1)) << ii;
+                    }
+                    // Iterate MSB to LSB, computing: result = result * (1 + y_i) + x_i * y_i
+                    var result: u64 = 0;
+                    for (0..XLEN) |i| {
+                        const bit_pos: u6 = @intCast(XLEN - 1 - i);
+                        const x_i: u64 = (x >> bit_pos) & 1;
+                        const y_i: u64 = (y >> bit_pos) & 1;
+                        result = result * (1 + y_i) + x_i * y_i;
+                    }
+                    break :blk result;
                 },
                 .ValidDiv0 => Table.ValidDiv0.materializeEntry(index),
                 .ValidUnsignedRemainder => Table.ValidUnsignedRemainder.materializeEntry(index),

@@ -179,7 +179,7 @@ fn buildBytecodeWords(
 /// then pads to next power of 2 with minimum 2.
 /// This value is used as bytecode_K in the proof and must match Jolt's preprocessing.
 /// Must account for W-extension decomposition: each W-ext instruction becomes 2 bytecode entries.
-fn computeBytecodeCodeSize(program_bytecode: []const u8) usize {
+pub fn computeBytecodeCodeSize(program_bytecode: []const u8) usize {
     const zkvm_instruction = @import("instruction/mod.zig");
 
     // Count bytecode entries, accounting for W-extension decomposition

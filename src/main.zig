@@ -517,8 +517,13 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, trace_length_op
 
                     // Write bytecode code_size (u64) - this is bytecode_K for the proof
                     // Must match what's used in ConversionConfig.bytecode_K
-                    try ram_writer.writeInt(u64, @intCast(bytecode_prep.code_size), .little);
-                    std.debug.print("  bytecode code_size (bytecode_K): {}\n", .{bytecode_prep.code_size});
+                    // CRITICAL: Use computeBytecodeCodeSize which accounts for termination
+                    // entries (+3 for LUI/ADDI/SB), NOT bytecode_prep.code_size which doesn't
+                    // include them. The proof uses computeBytecodeCodeSize, so the preprocessing
+                    // export must match.
+                    const bytecode_K_for_export = zolt.zkvm.computeBytecodeCodeSize(program.bytecode);
+                    try ram_writer.writeInt(u64, @intCast(bytecode_K_for_export), .little);
+                    std.debug.print("  bytecode code_size (bytecode_K): {}\n", .{bytecode_K_for_export});
 
                     // Write raw ELF program bytes so verifier can re-decode bytecode
                     // Format: base_address (u64) | program_len (u64) | raw_bytes...

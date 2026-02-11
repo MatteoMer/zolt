@@ -12,6 +12,13 @@
 //! Reference: jolt-core/src/subprotocols/sumcheck.rs
 
 const std = @import("std");
+
+// Debug output control - set to true to enable verbose debug prints
+const debug_verbose = false;
+fn dbg(comptime fmt: []const u8, args: anytype) void {
+    if (debug_verbose) std.debug.print(fmt, args);
+}
+
 const Allocator = std.mem.Allocator;
 
 const poly_mod = @import("../../poly/mod.zig");
@@ -112,7 +119,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             const gamma = gamma_ram_ra;
             const gamma_raf = gamma_lookups_raf;
 
-            std.debug.print("[STAGE5] Configuration: regs={}, ram_ra={}, lookups={}, max={}\n", .{
+            dbg("[STAGE5] Configuration: regs={}, ram_ra={}, lookups={}, max={}\n", .{
                 regs_val_num_rounds, ram_ra_num_rounds, lookups_num_rounds, max_num_rounds,
             });
 
@@ -160,10 +167,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 .add(gamma_raf.mul(left_op_claim))
                 .add(gamma_raf2.mul(right_op_claim));
 
-            std.debug.print("[STAGE5] Input claims:\n", .{});
-            std.debug.print("  regs_val_input = {any}\n", .{regs_val_input.toBytesBE()[0..8]});
-            std.debug.print("  ram_ra_input = {any}\n", .{ram_ra_input.toBytesBE()[0..8]});
-            std.debug.print("  lookups_input = {any}\n", .{lookups_input.toBytesBE()[0..8]});
+            dbg("[STAGE5] Input claims:\n", .{});
+            dbg("  regs_val_input = {any}\n", .{regs_val_input.toBytesBE()[0..8]});
+            dbg("  ram_ra_input = {any}\n", .{ram_ra_input.toBytesBE()[0..8]});
+            dbg("  lookups_input = {any}\n", .{lookups_input.toBytesBE()[0..8]});
 
             // Append input claims to transcript and get batching coefficients
             transcript.appendScalar(regs_val_input);
@@ -174,10 +181,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             const batch1 = transcript.challengeScalarFull();
             const batch2 = transcript.challengeScalarFull();
 
-            std.debug.print("[STAGE5] Batching coefficients (LE for Jolt comparison):\n", .{});
-            std.debug.print("  batch0 (LE) = {any}\n", .{batch0.toBytes()});
-            std.debug.print("  batch1 (LE) = {any}\n", .{batch1.toBytes()});
-            std.debug.print("  batch2 (LE) = {any}\n", .{batch2.toBytes()});
+            dbg("[STAGE5] Batching coefficients (LE for Jolt comparison):\n", .{});
+            dbg("  batch0 (LE) = {any}\n", .{batch0.toBytes()});
+            dbg("  batch1 (LE) = {any}\n", .{batch1.toBytes()});
+            dbg("  batch2 (LE) = {any}\n", .{batch2.toBytes()});
 
             // Compute scaled input claims
             // Instance i with num_rounds[i] is scaled by 2^(max_num_rounds - num_rounds[i])
@@ -198,7 +205,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 .add(batch1.mul(ram_ra_scaled))
                 .add(batch2.mul(lookups_scaled));
 
-            std.debug.print("[STAGE5] Initial batched claim = {any}\n", .{batched_claim.toBytesBE()});
+            dbg("[STAGE5] Initial batched claim = {any}\n", .{batched_claim.toBytesBE()});
 
             // Allocate challenges array
             var challenges = try self.allocator.alloc(F, max_num_rounds);
@@ -313,7 +320,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 lookups_claim = lookups_claim.mul(F.fromU64(2).inverse().?);
             }
 
-            std.debug.print("[STAGE5] Final batched claim = {any}\n", .{current_batched_claim.toBytesBE()});
+            dbg("[STAGE5] Final batched claim = {any}\n", .{current_batched_claim.toBytesBE()});
 
             // Allocate opening claim arrays
             const num_lookup_tables: usize = 41;
@@ -371,14 +378,14 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // Use gamma_lookups_raf for Instance 2 (LookupsReadRaf)
             const gamma = gamma_ram_ra; // For RamRaClaimReduction
 
-            std.debug.print("[STAGE5] Configuration with trace: regs={}, ram_ra={}, lookups={}, max={}\n", .{
+            dbg("[STAGE5] Configuration with trace: regs={}, ram_ra={}, lookups={}, max={}\n", .{
                 regs_val_num_rounds, ram_ra_num_rounds, lookups_num_rounds, max_num_rounds,
             });
 
             // Debug: print RamRaClaimReduction opening points (use the params to suppress warnings)
-            std.debug.print("[STAGE5] RamRaClaimReduction opening points:\n", .{});
-            std.debug.print("  r_address_raf.len = {}, r_address_rw.len = {}\n", .{ r_address_raf.len, r_address_rw.len });
-            std.debug.print("  r_cycle_raf.len = {}, r_cycle_rw.len = {}, r_cycle_val.len = {}\n", .{
+            dbg("[STAGE5] RamRaClaimReduction opening points:\n", .{});
+            dbg("  r_address_raf.len = {}, r_address_rw.len = {}\n", .{ r_address_raf.len, r_address_rw.len });
+            dbg("  r_cycle_raf.len = {}, r_cycle_rw.len = {}, r_cycle_val.len = {}\n", .{
                 r_cycle_raf.len,
                 r_cycle_rw.len,
                 r_cycle_val.len,
@@ -390,9 +397,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             ) orelse F.zero();
 
             // DEBUG: Print the exact value read from opening_claims
-            std.debug.print("[STAGE5 GET] RegistersVal@RegistersReadWriteChecking (trace-aware path):\n", .{});
-            std.debug.print("  LE bytes = {any}\n", .{regs_val_input.toBytes()});
-            std.debug.print("  BE bytes = {any}\n", .{regs_val_input.toBytesBE()});
+            dbg("[STAGE5 GET] RegistersVal@RegistersReadWriteChecking (trace-aware path):\n", .{});
+            dbg("  LE bytes = {any}\n", .{regs_val_input.toBytes()});
+            dbg("  BE bytes = {any}\n", .{regs_val_input.toBytesBE()});
 
             const claim_raf = opening_claims.get(
                 .{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamRafEvaluation } },
@@ -416,12 +423,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 .add(gamma3.mul(claim_val_eval));
 
             // Debug: print the four claims that make up ram_ra_input
-            std.debug.print("[STAGE5] RamRaClaimReduction input components:\n", .{});
-            std.debug.print("  claim_raf (RamRafEvaluation) = {any}\n", .{claim_raf.toBytesBE()[16..32].*});
-            std.debug.print("  claim_val_final (RamValFinalEvaluation) = {any}\n", .{claim_val_final.toBytesBE()[16..32].*});
-            std.debug.print("  claim_rw (RamReadWriteChecking) = {any}\n", .{claim_rw.toBytesBE()[16..32].*});
-            std.debug.print("  claim_val_eval (RamValEvaluation) = {any}\n", .{claim_val_eval.toBytesBE()[16..32].*});
-            std.debug.print("  gamma = {any}\n", .{gamma.toBytesBE()[16..32].*});
+            dbg("[STAGE5] RamRaClaimReduction input components:\n", .{});
+            dbg("  claim_raf (RamRafEvaluation) = {any}\n", .{claim_raf.toBytesBE()[16..32].*});
+            dbg("  claim_val_final (RamValFinalEvaluation) = {any}\n", .{claim_val_final.toBytesBE()[16..32].*});
+            dbg("  claim_rw (RamReadWriteChecking) = {any}\n", .{claim_rw.toBytesBE()[16..32].*});
+            dbg("  claim_val_eval (RamValEvaluation) = {any}\n", .{claim_val_eval.toBytesBE()[16..32].*});
+            dbg("  gamma = {any}\n", .{gamma.toBytesBE()[16..32].*});
 
             // LookupsReadRaf uses gamma_lookups_raf
             const gamma_raf = gamma_lookups_raf;
@@ -442,26 +449,26 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 .add(gamma_raf.mul(left_op_claim))
                 .add(gamma_raf2.mul(right_op_claim));
 
-            std.debug.print("[STAGE5] Input claims (with trace):\n", .{});
-            std.debug.print("  regs_val_input = {any}\n", .{regs_val_input.toBytesBE()});
-            std.debug.print("  ram_ra_input = {any}\n", .{ram_ra_input.toBytesBE()});
-            std.debug.print("  lookups_input = {any}\n", .{lookups_input.toBytesBE()});
-            std.debug.print("[STAGE5] Transcript state BEFORE appending input claims: {any}\n", .{transcript.state[0..8]});
+            dbg("[STAGE5] Input claims (with trace):\n", .{});
+            dbg("  regs_val_input = {any}\n", .{regs_val_input.toBytesBE()});
+            dbg("  ram_ra_input = {any}\n", .{ram_ra_input.toBytesBE()});
+            dbg("  lookups_input = {any}\n", .{lookups_input.toBytesBE()});
+            dbg("[STAGE5] Transcript state BEFORE appending input claims: {any}\n", .{transcript.state[0..8]});
 
             // Append input claims to transcript and get batching coefficients
             transcript.appendScalar(regs_val_input);
             transcript.appendScalar(ram_ra_input);
             transcript.appendScalar(lookups_input);
-            std.debug.print("[STAGE5] Transcript state AFTER appending input claims: {any}\n", .{transcript.state[0..8]});
+            dbg("[STAGE5] Transcript state AFTER appending input claims: {any}\n", .{transcript.state[0..8]});
 
             const batch0 = transcript.challengeScalarFull();
             const batch1 = transcript.challengeScalarFull();
             const batch2 = transcript.challengeScalarFull();
 
-            std.debug.print("[STAGE5] Batching coefficients:\n", .{});
-            std.debug.print("  batch0 = {x}\n", .{batch0.toBytesBE()[16..32].*});
-            std.debug.print("  batch1 = {x}\n", .{batch1.toBytesBE()[16..32].*});
-            std.debug.print("  batch2 = {x}\n", .{batch2.toBytesBE()[16..32].*});
+            dbg("[STAGE5] Batching coefficients:\n", .{});
+            dbg("  batch0 = {x}\n", .{batch0.toBytesBE()[16..32].*});
+            dbg("  batch1 = {x}\n", .{batch1.toBytesBE()[16..32].*});
+            dbg("  batch2 = {x}\n", .{batch2.toBytesBE()[16..32].*});
 
             // Build RegistersValEvaluation polynomial tables
             const T = @as(usize, 1) << @intCast(n_cycle_vars);
@@ -475,13 +482,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             @memset(wa_evals, F.zero());
 
             // Debug: print r_address and r_cycle from Stage 4
-            std.debug.print("[STAGE5] r_address_regs (len={}):\n", .{r_address_regs.len});
+            dbg("[STAGE5] r_address_regs (len={}):\n", .{r_address_regs.len});
             for (r_address_regs, 0..) |r, i| {
-                std.debug.print("  r_address[{}] = {any}\n", .{ i, r.toBytesBE()[0..8] });
+                dbg("  r_address[{}] = {any}\n", .{ i, r.toBytesBE()[0..8] });
             }
-            std.debug.print("[STAGE5] r_cycle_regs (len={}):\n", .{r_cycle_regs.len});
+            dbg("[STAGE5] r_cycle_regs (len={}):\n", .{r_cycle_regs.len});
             for (r_cycle_regs, 0..) |r, i| {
-                std.debug.print("  r_cycle[{}] = {any}\n", .{ i, r.toBytesBE()[0..8] });
+                dbg("  r_cycle[{}] = {any}\n", .{ i, r.toBytesBE()[0..8] });
             }
 
             // Compute LT polynomial using efficient algorithm
@@ -555,20 +562,20 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             }
 
             // Debug: print first few eq values and verify sum = 1
-            std.debug.print("[STAGE5 EQ DEBUG] T={}, n_vars={}, First 5 eq_evals:\n", .{ T, n_cycle_vars });
+            dbg("[STAGE5 EQ DEBUG] T={}, n_vars={}, First 5 eq_evals:\n", .{ T, n_cycle_vars });
             var eq_sum = F.zero();
             var j_idx: usize = 0;
             while (j_idx < T) : (j_idx += 1) {
                 eq_sum = eq_sum.add(lookups_eq_evals[j_idx]);
                 if (j_idx < 5) {
-                    std.debug.print("  eq_evals[{}] = {x}\n", .{ j_idx, lookups_eq_evals[j_idx].toBytesBE()[16..32].* });
+                    dbg("  eq_evals[{}] = {x}\n", .{ j_idx, lookups_eq_evals[j_idx].toBytesBE()[16..32].* });
                 }
             }
-            std.debug.print("[STAGE5 EQ DEBUG] Sum of all eq_evals = {x} (should be 1)\n", .{eq_sum.toBytesBE()[16..32].*});
-            std.debug.print("[STAGE5 EQ DEBUG] r_reduction (ALL {} elements, used for eq):\n", .{r_reduction.len});
+            dbg("[STAGE5 EQ DEBUG] Sum of all eq_evals = {x} (should be 1)\n", .{eq_sum.toBytesBE()[16..32].*});
+            dbg("[STAGE5 EQ DEBUG] r_reduction (ALL {} elements, used for eq):\n", .{r_reduction.len});
             var r_idx: usize = 0;
             while (r_idx < r_reduction.len) : (r_idx += 1) {
-                std.debug.print("  r_reduction[{}] = {x}\n", .{ r_idx, r_reduction[r_idx].toBytesBE()[16..32].* });
+                dbg("  r_reduction[{}] = {x}\n", .{ r_idx, r_reduction[r_idx].toBytesBE()[16..32].* });
             }
 
             // Populate inc and wa from trace
@@ -610,13 +617,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             }
 
             // Debug: Print first 10 polynomial values
-            std.debug.print("[STAGE5] First 10 polynomial values:\n", .{});
+            dbg("[STAGE5] First 10 polynomial values:\n", .{});
             const debug_count = @min(trace_len, 10);
             for (0..debug_count) |j| {
                 const step = trace.steps.items[j];
                 const instr = step.instruction;
                 const rd: u5 = @truncate((instr >> 7) & 0x1f);
-                std.debug.print("  j={}: rd={}, pre={}, post={}, inc={x}, wa={x}, lt={x}\n", .{
+                dbg("  j={}: rd={}, pre={}, post={}, inc={x}, wa={x}, lt={x}\n", .{
                     j, rd, step.rd_pre_value, step.rd_value,
                     inc_evals[j].toBytesBE()[24..32].*,
                     wa_evals[j].toBytesBE()[24..32].*,
@@ -671,9 +678,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         }
                     }
                 }
-                std.debug.print("[STAGE5 BRUTE] val(r_addr, r_cycle) from running regs = {any}\n", .{brute_val.toBytesBE()[0..16]});
-                std.debug.print("[STAGE5 BRUTE] regs_val_input (from Stage 4)          = {any}\n", .{regs_val_input.toBytesBE()[0..16]});
-                std.debug.print("[STAGE5 BRUTE] match? {}\n", .{brute_val.eql(regs_val_input)});
+                dbg("[STAGE5 BRUTE] val(r_addr, r_cycle) from running regs = {any}\n", .{brute_val.toBytesBE()[0..16]});
+                dbg("[STAGE5 BRUTE] regs_val_input (from Stage 4)          = {any}\n", .{regs_val_input.toBytesBE()[0..16]});
+                dbg("[STAGE5 BRUTE] match? {}\n", .{brute_val.eql(regs_val_input)});
             }
 
             // Also verify inc values match between Stage 4 style and trace
@@ -704,7 +711,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         const s5_inc = inc_evals[j];
                         if (!s4_inc.eql(s5_inc)) {
                             if (inc_mismatches < 3) {
-                                std.debug.print("[STAGE5 INC MISMATCH] j={}: rd={}, s4_pre={}, s5_pre={}, rd_value={}\n", .{
+                                dbg("[STAGE5 INC MISMATCH] j={}: rd={}, s4_pre={}, s5_pre={}, rd_value={}\n", .{
                                     j, rd2, s4_pre, step.rd_pre_value, step.rd_value,
                                 });
                             }
@@ -713,7 +720,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         reg_vals2[rd2] = step.rd_value;
                     }
                 }
-                std.debug.print("[STAGE5 INC CHECK] Total mismatches: {}\n", .{inc_mismatches});
+                dbg("[STAGE5 INC CHECK] Total mismatches: {}\n", .{inc_mismatches});
             }
 
             // Verify the sum Σ_j inc(j) · wa(j) · lt(j) matches the input claim
@@ -724,18 +731,18 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 if (!term.eql(F.zero())) {
                     non_zero_terms += 1;
                     if (non_zero_terms <= 5) {
-                        std.debug.print("[STAGE5] Non-zero term at j={}: inc*wa*lt = {x}\n", .{
+                        dbg("[STAGE5] Non-zero term at j={}: inc*wa*lt = {x}\n", .{
                             j, term.toBytesBE()[24..32].*,
                         });
                     }
                 }
                 computed_sum = computed_sum.add(term);
             }
-            std.debug.print("[STAGE5] Total non-zero terms: {}\n", .{non_zero_terms});
-            std.debug.print("[STAGE5] Built polynomial tables: T={}, trace_len={}\n", .{ T, trace_len });
-            std.debug.print("[STAGE5] Sum check: computed_sum = {any}\n", .{computed_sum.toBytesBE()[0..16]});
-            std.debug.print("[STAGE5] Sum check: regs_val_input = {any}\n", .{regs_val_input.toBytesBE()[0..16]});
-            std.debug.print("[STAGE5] Sum check: match = {}\n", .{@as(bool, computed_sum.limbs[0] == regs_val_input.limbs[0] and
+            dbg("[STAGE5] Total non-zero terms: {}\n", .{non_zero_terms});
+            dbg("[STAGE5] Built polynomial tables: T={}, trace_len={}\n", .{ T, trace_len });
+            dbg("[STAGE5] Sum check: computed_sum = {any}\n", .{computed_sum.toBytesBE()[0..16]});
+            dbg("[STAGE5] Sum check: regs_val_input = {any}\n", .{regs_val_input.toBytesBE()[0..16]});
+            dbg("[STAGE5] Sum check: match = {}\n", .{@as(bool, computed_sum.limbs[0] == regs_val_input.limbs[0] and
                 computed_sum.limbs[1] == regs_val_input.limbs[1] and
                 computed_sum.limbs[2] == regs_val_input.limbs[2] and
                 computed_sum.limbs[3] == regs_val_input.limbs[3])});
@@ -994,7 +1001,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                 // Debug: print first 5 right_op values from combined_vals computation
                 if (j < 5) {
-                    std.debug.print("[STAGE5 COMBINED] j={}: opcode=0x{x}, left_op=0x{x}, right_op=0x{x}, output=0x{x}, table_idx={}\n", .{
+                    dbg("[STAGE5 COMBINED] j={}: opcode=0x{x}, left_op=0x{x}, right_op=0x{x}, output=0x{x}, table_idx={}\n", .{
                         j, opcode, left_op.toU64(), right_op.toU64(), lookup_output.toU64(), table_idx,
                     });
                 }
@@ -1189,35 +1196,35 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                 // Debug first 5 cycles with full BE bytes
                 if (j < 5) {
-                    std.debug.print("[STAGE5 TRACE DEBUG] j={}: opcode=0x{x}, output={any}, left={any}, right={any}\n", .{
+                    dbg("[STAGE5 TRACE DEBUG] j={}: opcode=0x{x}, output={any}, left={any}, right={any}\n", .{
                         j,
                         opcode,
                         lookup_output.toBytesBE()[0..8],
                         left_op.toBytesBE()[0..8],
                         right_op.toBytesBE()[0..8],
                     });
-                    std.debug.print("[STAGE5 INDEX] j={}: is_identity={}, left_raw=0x{x}, right_raw=0x{x}, idx=0x{x:0>32}\n", .{
+                    dbg("[STAGE5 INDEX] j={}: is_identity={}, left_raw=0x{x}, right_raw=0x{x}, idx=0x{x:0>32}\n", .{
                         j, is_identity_path, left_op_raw, right_op_raw, lookup_idx,
                     });
                     // Also compute what the OLD interleaved index would have been
                     const old_idx = interleaveBits128(left_op_raw, right_op_raw);
-                    std.debug.print("[STAGE5 INDEX] j={}: old_interleaved=0x{x:0>32}, changed={}\n", .{
+                    dbg("[STAGE5 INDEX] j={}: old_interleaved=0x{x:0>32}, changed={}\n", .{
                         j, old_idx, old_idx != lookup_idx,
                     });
                 }
                 // Debug first 3 cycles
                 if (j < 3) {
-                    std.debug.print("[STAGE5 LOOKUPS] j={}: opcode=0x{x}, funct3={}, funct7={}, pc=0x{x}\n", .{ j, opcode, funct3, funct7, step.pc });
-                    std.debug.print("  left_op={any}, right_op={any}, output={any}\n", .{
+                    dbg("[STAGE5 LOOKUPS] j={}: opcode=0x{x}, funct3={}, funct7={}, pc=0x{x}\n", .{ j, opcode, funct3, funct7, step.pc });
+                    dbg("  left_op={any}, right_op={any}, output={any}\n", .{
                         left_op.toBytesBE()[24..32].*,
                         right_op.toBytesBE()[24..32].*,
                         lookup_output.toBytesBE()[24..32].*,
                     });
-                    std.debug.print("  eq={x}, combined={x}\n", .{
+                    dbg("  eq={x}, combined={x}\n", .{
                         lookups_eq_evals[j].toBytesBE()[24..32].*,
                         lookups_combined_vals[j].toBytesBE()[24..32].*,
                     });
-                    std.debug.print("  lookup_index: lo=0x{x:0>16}, hi=0x{x:0>16}\n", .{
+                    dbg("  lookup_index: lo=0x{x:0>16}, hi=0x{x:0>16}\n", .{
                         lookups_indices_lo[j],
                         lookups_indices_hi[j],
                     });
@@ -1235,10 +1242,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     opcode_counts[opc] += 1;
                     if (cycle_is_identity_path[j_d]) identity_count += 1 else interleaved_count += 1;
                 }
-                std.debug.print("[STAGE5 OPCODE COUNTS] identity={}, interleaved={}\n", .{identity_count, interleaved_count});
+                dbg("[STAGE5 OPCODE COUNTS] identity={}, interleaved={}\n", .{identity_count, interleaved_count});
                 for (opcode_counts, 0..) |cnt, opc| {
                     if (cnt > 0) {
-                        std.debug.print("  opcode 0x{x:0>2}: {} cycles\n", .{opc, cnt});
+                        dbg("  opcode 0x{x:0>2}: {} cycles\n", .{opc, cnt});
                     }
                 }
 
@@ -1251,13 +1258,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     if (lower64 != step_d.rd_value) {
                         mismatch_count += 1;
                         if (mismatch_count <= 5) {
-                            std.debug.print("[STAGE5 MISMATCH] j={}: opcode=0x{x}, idx_lo=0x{x}, idx_hi=0x{x}, rd_value=0x{x}\n", .{
+                            dbg("[STAGE5 MISMATCH] j={}: opcode=0x{x}, idx_lo=0x{x}, idx_hi=0x{x}, rd_value=0x{x}\n", .{
                                 j_d, step_d.instruction & 0x7f, lower64, lookups_indices_hi[j_d], step_d.rd_value,
                             });
                         }
                     }
                 }
-                std.debug.print("[STAGE5 MISMATCH] Total table-0 cycles with lower64(idx) != rd_value: {}\n", .{mismatch_count});
+                dbg("[STAGE5 MISMATCH] Total table-0 cycles with lower64(idx) != rd_value: {}\n", .{mismatch_count});
             }
 
             // Verify the sum matches lookups_input
@@ -1466,19 +1473,19 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 // Compare against lookups_combined_vals
                 if (!recomputed_combined.eql(lookups_combined_vals[j])) {
                     const step_dbg2 = trace.steps.items[j];
-                    std.debug.print("[COMBINED MISMATCH] j={}: opcode=0x{x}, noop={}, term={}\n", .{
+                    dbg("[COMBINED MISMATCH] j={}: opcode=0x{x}, noop={}, term={}\n", .{
                         j, step_dbg2.instruction & 0x7f, step_dbg2.is_noop, step_dbg2.is_termination_store,
                     });
-                    std.debug.print("  recomputed = {x}\n", .{recomputed_combined.toBytesBE()[16..32].*});
-                    std.debug.print("  combined_v = {x}\n", .{lookups_combined_vals[j].toBytesBE()[16..32].*});
-                    std.debug.print("  output: recomp=0x{x}, rs1={}, rs2={}, rd={}, pc=0x{x}\n", .{
+                    dbg("  recomputed = {x}\n", .{recomputed_combined.toBytesBE()[16..32].*});
+                    dbg("  combined_v = {x}\n", .{lookups_combined_vals[j].toBytesBE()[16..32].*});
+                    dbg("  output: recomp=0x{x}, rs1={}, rs2={}, rd={}, pc=0x{x}\n", .{
                         lookup_output.toU64(), step_dbg2.rs1_value, step_dbg2.rs2_value,
                         step_dbg2.rd_value, step_dbg2.pc,
                     });
                 }
             }
             // Debug: print first 5 cycles' right operand values
-            std.debug.print("[STAGE5 LOOKUPS] First 5 right_op values (computed in loop):\n", .{});
+            dbg("[STAGE5 LOOKUPS] First 5 right_op values (computed in loop):\n", .{});
             for (0..@min(5, trace_len)) |jj| {
                 const step_dbg = trace.steps.items[jj];
                 const instr_dbg = step_dbg.instruction;
@@ -1498,23 +1505,23 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 if (right_is_rs2_dbg) right_input_dbg = F.fromU64(step_dbg.rs2_value);
                 if (right_is_imm_dbg) right_input_dbg = imm_dbg;
 
-                std.debug.print("  j={}: opcode=0x{x}, right_is_rs2={}, right_is_imm={}, imm=0x{x}, rs2=0x{x}, right_input=0x{x}\n", .{
+                dbg("  j={}: opcode=0x{x}, right_is_rs2={}, right_is_imm={}, imm=0x{x}, rs2=0x{x}, right_input=0x{x}\n", .{
                     jj, opcode_dbg, right_is_rs2_dbg, right_is_imm_dbg,
                     imm_dbg.toU64(), step_dbg.rs2_value, right_input_dbg.toU64(),
                 });
             }
-            std.debug.print("[STAGE5 LOOKUPS] Individual sum verification:\n", .{});
-            std.debug.print("  output_sum (Σ eq*output) = {any}\n", .{output_sum.toBytesBE()[0..16]});
-            std.debug.print("  rv_claim (from Stage 2)  = {any}\n", .{rv_claim.toBytesBE()[0..16]});
-            std.debug.print("  output match = {}\n", .{output_sum.eql(rv_claim)});
-            std.debug.print("  left_sum (Σ eq*left)     = {any}\n", .{left_sum.toBytesBE()[0..16]});
-            std.debug.print("  left_op_claim (Stage 2)  = {any}\n", .{left_op_claim.toBytesBE()[0..16]});
-            std.debug.print("  left match = {}\n", .{left_sum.eql(left_op_claim)});
-            std.debug.print("  right_sum (Σ eq*right)   = {any}\n", .{right_sum.toBytesBE()[0..16]});
-            std.debug.print("  right_op_claim (Stage 2) = {any}\n", .{right_op_claim.toBytesBE()[0..16]});
-            std.debug.print("  right match = {}\n", .{right_sum.eql(right_op_claim)});
+            dbg("[STAGE5 LOOKUPS] Individual sum verification:\n", .{});
+            dbg("  output_sum (Σ eq*output) = {any}\n", .{output_sum.toBytesBE()[0..16]});
+            dbg("  rv_claim (from Stage 2)  = {any}\n", .{rv_claim.toBytesBE()[0..16]});
+            dbg("  output match = {}\n", .{output_sum.eql(rv_claim)});
+            dbg("  left_sum (Σ eq*left)     = {any}\n", .{left_sum.toBytesBE()[0..16]});
+            dbg("  left_op_claim (Stage 2)  = {any}\n", .{left_op_claim.toBytesBE()[0..16]});
+            dbg("  left match = {}\n", .{left_sum.eql(left_op_claim)});
+            dbg("  right_sum (Σ eq*right)   = {any}\n", .{right_sum.toBytesBE()[0..16]});
+            dbg("  right_op_claim (Stage 2) = {any}\n", .{right_op_claim.toBytesBE()[0..16]});
+            dbg("  right match = {}\n", .{right_sum.eql(right_op_claim)});
             // Debug: print first few eq_evals values
-            std.debug.print("  Stage5 eq_evals[0..3]: {x}, {x}, {x}\n", .{
+            dbg("  Stage5 eq_evals[0..3]: {x}, {x}, {x}\n", .{
                 lookups_eq_evals[0].toBytesBE()[16..32].*,
                 lookups_eq_evals[1].toBytesBE()[16..32].*,
                 lookups_eq_evals[2].toBytesBE()[16..32].*,
@@ -1584,7 +1591,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 }
                 const output_v = F.fromU64(step_v.rd_value); // Simplified, ignores JAL/JALR/Branch
 
-                std.debug.print("  [VERIFY j={}] eq={x}, left={x}, right={x}, out={x}\n", .{
+                dbg("  [VERIFY j={}] eq={x}, left={x}, right={x}, out={x}\n", .{
                     jj,
                     lookups_eq_evals[jj].toBytesBE()[24..32].*,
                     left_op_v.toBytesBE()[24..32].*,
@@ -1592,13 +1599,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     output_v.toBytesBE()[24..32].*,
                 });
             }
-            std.debug.print("[STAGE5 LOOKUPS] Sum verification:\n", .{});
-            std.debug.print("  computed_sum = {any}\n", .{lookups_computed_sum.toBytesBE()[0..8]});
-            std.debug.print("  lookups_input = {any}\n", .{lookups_input.toBytesBE()[0..8]});
-            std.debug.print("  rv_claim = {any}\n", .{rv_claim.toBytesBE()[0..8]});
-            std.debug.print("  left_op_claim = {any}\n", .{left_op_claim.toBytesBE()[0..8]});
-            std.debug.print("  right_op_claim = {any}\n", .{right_op_claim.toBytesBE()[0..8]});
-            std.debug.print("  match = {}\n", .{lookups_computed_sum.eql(lookups_input)});
+            dbg("[STAGE5 LOOKUPS] Sum verification:\n", .{});
+            dbg("  computed_sum = {any}\n", .{lookups_computed_sum.toBytesBE()[0..8]});
+            dbg("  lookups_input = {any}\n", .{lookups_input.toBytesBE()[0..8]});
+            dbg("  rv_claim = {any}\n", .{rv_claim.toBytesBE()[0..8]});
+            dbg("  left_op_claim = {any}\n", .{left_op_claim.toBytesBE()[0..8]});
+            dbg("  right_op_claim = {any}\n", .{right_op_claim.toBytesBE()[0..8]});
+            dbg("  match = {}\n", .{lookups_computed_sum.eql(lookups_input)});
 
             // Compute scaling factors
             const regs_scale = max_num_rounds - regs_val_num_rounds;
@@ -1616,8 +1623,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 .add(batch1.mul(ram_ra_scaled))
                 .add(batch2.mul(lookups_scaled));
 
-            std.debug.print("[STAGE5] Initial batched claim = {any}\n", .{batched_claim.toBytesBE()});
-            std.debug.print("  [S5P] initial_claim (e before R0): {x}\n", .{batched_claim.toBytes()[0..16].*});
+            dbg("[STAGE5] Initial batched claim = {any}\n", .{batched_claim.toBytesBE()});
+            dbg("  [S5P] initial_claim (e before R0): {x}\n", .{batched_claim.toBytes()[0..16].*});
 
             var challenges = try self.allocator.alloc(F, max_num_rounds);
             errdefer self.allocator.free(challenges);
@@ -1666,7 +1673,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
             // Build sparse RAM access list and precompute G_A, G_B for each access
             const ram_access_count = if (memory_trace) |mt| mt.accesses.items.len else 0;
-            std.debug.print("[STAGE5 RAM_RA] Initializing with {} RAM accesses\n", .{ram_access_count});
+            dbg("[STAGE5 RAM_RA] Initializing with {} RAM accesses\n", .{ram_access_count});
 
             // Allocate sparse access arrays
             var ram_addresses = try self.allocator.alloc(u64, ram_access_count);
@@ -1713,13 +1720,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     ram_G_A[i] = eq_raf_c.add(gamma.mul(eq_val_c));
                     ram_G_B[i] = eq_rw_c.add(gamma.mul(eq_val_c));
 
-                    std.debug.print("[STAGE5 RAM_RA] Access {}: raw_addr=0x{x}, remapped_addr={}, cycle={}\n", .{ i, access.address, remapped_addr, cycle });
-                    std.debug.print("  eq_raf_c={any}, eq_rw_c={any}, eq_val_c={any}\n", .{
+                    dbg("[STAGE5 RAM_RA] Access {}: raw_addr=0x{x}, remapped_addr={}, cycle={}\n", .{ i, access.address, remapped_addr, cycle });
+                    dbg("  eq_raf_c={any}, eq_rw_c={any}, eq_val_c={any}\n", .{
                         eq_raf_c.toBytesBE()[16..32].*,
                         eq_rw_c.toBytesBE()[16..32].*,
                         eq_val_c.toBytesBE()[16..32].*,
                     });
-                    std.debug.print("  G_A={any}, G_B={any}\n", .{
+                    dbg("  G_A={any}, G_B={any}\n", .{
                         ram_G_A[i].toBytesBE()[16..32].*,
                         ram_G_B[i].toBytesBE()[16..32].*,
                     });
@@ -1741,7 +1748,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 G_A_full[addr_usize] = ram_G_A[i];
                 G_B_full[addr_usize] = ram_G_B[i];
             }
-            std.debug.print("[STAGE5 RAM_RA] Created full-size G_A/G_B arrays (K={}), {} non-zero entries\n", .{ K, ram_access_count });
+            dbg("[STAGE5 RAM_RA] Created full-size G_A/G_B arrays (K={}), {} non-zero entries\n", .{ K, ram_access_count });
 
             // Initialize B_1 and B_2 polynomials for address rounds
             // B_1 = eq(r_address_raf, k) - this is bound during address rounds
@@ -1760,15 +1767,15 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             }
 
             // Debug: print B_1 and B_2 for first few addresses
-            std.debug.print("[STAGE5 RAM_RA] B_1/B_2 eq polynomials (first 4 and last 4 of {}):\n", .{K});
+            dbg("[STAGE5 RAM_RA] B_1/B_2 eq polynomials (first 4 and last 4 of {}):\n", .{K});
             for (0..@min(4, K)) |k| {
-                std.debug.print("  B_1[{}]={any}, B_2[{}]={any}\n", .{
+                dbg("  B_1[{}]={any}, B_2[{}]={any}\n", .{
                     k, B_1[k].toBytesBE()[16..32].*, k, B_2[k].toBytesBE()[16..32].*,
                 });
             }
             if (K > 8) {
                 for (K - 4..K) |k| {
-                    std.debug.print("  B_1[{}]={any}, B_2[{}]={any}\n", .{
+                    dbg("  B_1[{}]={any}, B_2[{}]={any}\n", .{
                         k, B_1[k].toBytesBE()[16..32].*, k, B_2[k].toBytesBE()[16..32].*,
                     });
                 }
@@ -1812,12 +1819,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     computed_claim_rw = computed_claim_rw.add(B2_at_addr.mul(eq_rw_c));
                     computed_claim_val_eval = computed_claim_val_eval.add(B2_at_addr.mul(eq_val_c));
 
-                    std.debug.print("[STAGE5 COMPUTED CLAIMS] Access {}: addr={}, cycle={}\n", .{ i, addr, cycle });
-                    std.debug.print("  B1_at_addr={x}, B2_at_addr={x}\n", .{
+                    dbg("[STAGE5 COMPUTED CLAIMS] Access {}: addr={}, cycle={}\n", .{ i, addr, cycle });
+                    dbg("  B1_at_addr={x}, B2_at_addr={x}\n", .{
                         B1_at_addr.toBytesBE()[16..32].*,
                         B2_at_addr.toBytesBE()[16..32].*,
                     });
-                    std.debug.print("  eq_raf_c={x}, eq_rw_c={x}, eq_val_c={x}\n", .{
+                    dbg("  eq_raf_c={x}, eq_rw_c={x}, eq_val_c={x}\n", .{
                         eq_raf_c.toBytesBE()[16..32].*,
                         eq_rw_c.toBytesBE()[16..32].*,
                         eq_val_c.toBytesBE()[16..32].*,
@@ -1825,11 +1832,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 }
             }
 
-            std.debug.print("[STAGE5] Computed RamRa claims from trace:\n", .{});
-            std.debug.print("  computed_claim_raf = {x}\n", .{computed_claim_raf.toBytesBE()[16..32].*});
-            std.debug.print("  computed_claim_val_final = {x}\n", .{computed_claim_val_final.toBytesBE()[16..32].*});
-            std.debug.print("  computed_claim_rw = {x}\n", .{computed_claim_rw.toBytesBE()[16..32].*});
-            std.debug.print("  computed_claim_val_eval = {x}\n", .{computed_claim_val_eval.toBytesBE()[16..32].*});
+            dbg("[STAGE5] Computed RamRa claims from trace:\n", .{});
+            dbg("  computed_claim_raf = {x}\n", .{computed_claim_raf.toBytesBE()[16..32].*});
+            dbg("  computed_claim_val_final = {x}\n", .{computed_claim_val_final.toBytesBE()[16..32].*});
+            dbg("  computed_claim_rw = {x}\n", .{computed_claim_rw.toBytesBE()[16..32].*});
+            dbg("  computed_claim_val_eval = {x}\n", .{computed_claim_val_eval.toBytesBE()[16..32].*});
 
             // Recompute ram_ra_input using the computed claims
             const computed_ram_ra_input = computed_claim_raf
@@ -1837,8 +1844,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 .add(gamma2.mul(computed_claim_rw))
                 .add(gamma3.mul(computed_claim_val_eval));
 
-            std.debug.print("  computed_ram_ra_input = {x}\n", .{computed_ram_ra_input.toBytesBE()[16..32].*});
-            std.debug.print("  original ram_ra_input = {x}\n", .{ram_ra_input.toBytesBE()[16..32].*});
+            dbg("  computed_ram_ra_input = {x}\n", .{computed_ram_ra_input.toBytesBE()[16..32].*});
+            dbg("  original ram_ra_input = {x}\n", .{ram_ra_input.toBytesBE()[16..32].*});
 
             // Initialize Instance 1 claim tracking with SCALED value (matches batched_claim computation)
             // NOTE: We use the ORIGINAL ram_ra_input (from opening_claims), NOT computed_ram_ra_input.
@@ -1847,9 +1854,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // be adjusted to match the opening_claims, not the other way around.
             ram_ra_current_claim = ram_ra_scaled;
 
-            std.debug.print("[STAGE5] Using original batched claim = {any}\n", .{batched_claim.toBytesBE()});
-            std.debug.print("[STAGE5] computed_ram_ra_input = {x}\n", .{computed_ram_ra_input.toBytesBE()[16..32].*});
-            std.debug.print("[STAGE5] original ram_ra_input = {x}\n", .{ram_ra_input.toBytesBE()[16..32].*});
+            dbg("[STAGE5] Using original batched claim = {any}\n", .{batched_claim.toBytesBE()});
+            dbg("[STAGE5] computed_ram_ra_input = {x}\n", .{computed_ram_ra_input.toBytesBE()[16..32].*});
+            dbg("[STAGE5] original ram_ra_input = {x}\n", .{ram_ra_input.toBytesBE()[16..32].*});
 
             // Expanding table to track eq(r_addr_reduced_so_far, k_bound_bits)
             // This accumulates the eq value as we bind address bits
@@ -1946,10 +1953,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             const prefix_size = @as(usize, 1) << @intCast(prefix_n_vars);
             const suffix_size = @as(usize, 1) << @intCast(suffix_n_vars);
 
-            std.debug.print("[STAGE5 PQ] PhaseCycle P*Q setup: n_cycle={}, prefix={}, suffix={}\n", .{
+            dbg("[STAGE5 PQ] PhaseCycle P*Q setup: n_cycle={}, prefix={}, suffix={}\n", .{
                 n_cycle_vars, prefix_n_vars, suffix_n_vars,
             });
-            std.debug.print("[STAGE5 PQ] prefix_size={}, suffix_size={}\n", .{ prefix_size, suffix_size });
+            dbg("[STAGE5 PQ] prefix_size={}, suffix_size={}\n", .{ prefix_size, suffix_size });
 
             // P arrays: eq evaluations for prefix (low) bits
             // P_x[c_lo] = eq(r_cycle_x_lo, c_lo)
@@ -2042,7 +2049,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             }
             // Print first 5 lookup indices (VERIFY FIX APPLIED)
             for (0..@min(5, T)) |j| {
-                std.debug.print("[LOOKUP IDX] j={}: idx=0x{x:0>32}, lo=0x{x:0>16}, hi=0x{x:0>16}\n", .{
+                dbg("[LOOKUP IDX] j={}: idx=0x{x:0>32}, lo=0x{x:0>16}, hi=0x{x:0>16}\n", .{
                     j, lookup_indices_u128[j], lookups_indices_lo[j], lookups_indices_hi[j],
                 });
             }
@@ -2069,7 +2076,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             for (0..T) |jj| {
                 if (cycle_table_indices[jj] >= 0) cycles_with_tables += 1;
             }
-            std.debug.print("[STAGE5] Cycles with lookup tables: {}/{}\n", .{ cycles_with_tables, T });
+            dbg("[STAGE5] Cycles with lookup tables: {}/{}\n", .{ cycles_with_tables, T });
 
             // Initialize RAF (Read-Address-Flag) decompositions for left/right/identity
             // These compute: γ*left + γ²*(identity + right)
@@ -2118,7 +2125,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // Reset phase 0's expanding table to 1
             expanding_tables[0].reset(F.one());
 
-            std.debug.print("[STAGE5 PREFIX-SUFFIX] Initialized phase 0, log_m={}, suffix_len={}, initial_m={}\n", .{
+            dbg("[STAGE5 PREFIX-SUFFIX] Initialized phase 0, log_m={}, suffix_len={}, initial_m={}\n", .{
                 log_m,
                 LOOKUPS_LOG_K - log_m,
                 initial_m,
@@ -2159,20 +2166,20 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     if (!lookups_combined_vals[jj].eql(F.zero())) nonzero_combined_beyond_trace += 1;
                 }
 
-                std.debug.print("[DIAG INIT] bf_combined (all T={}) = {x}\n", .{ T, bf_combined.toBytesBE()[16..32].* });
-                std.debug.print("[DIAG INIT] bf_combined_noop_skipped = {x}\n", .{bf_combined_noop_skipped.toBytesBE()[16..32].*});
-                std.debug.print("[DIAG INIT] lookups_claim = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
-                std.debug.print("[DIAG INIT] combined_all==claim: {}, combined_skip==claim: {}\n", .{ bf_combined.eql(lookups_claim), bf_combined_noop_skipped.eql(lookups_claim) });
-                std.debug.print("[DIAG INIT] nonzero_combined beyond trace: {}\n", .{nonzero_combined_beyond_trace});
+                dbg("[DIAG INIT] bf_combined (all T={}) = {x}\n", .{ T, bf_combined.toBytesBE()[16..32].* });
+                dbg("[DIAG INIT] bf_combined_noop_skipped = {x}\n", .{bf_combined_noop_skipped.toBytesBE()[16..32].*});
+                dbg("[DIAG INIT] lookups_claim = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+                dbg("[DIAG INIT] combined_all==claim: {}, combined_skip==claim: {}\n", .{ bf_combined.eql(lookups_claim), bf_combined_noop_skipped.eql(lookups_claim) });
+                dbg("[DIAG INIT] nonzero_combined beyond trace: {}\n", .{nonzero_combined_beyond_trace});
                 // Compare opening claims individually
-                std.debug.print("[DIAG INIT] rv_claim = {x}\n", .{rv_claim.toBytesBE()[16..32].*});
-                std.debug.print("[DIAG INIT] left_op_claim = {x}\n", .{left_op_claim.toBytesBE()[16..32].*});
-                std.debug.print("[DIAG INIT] right_op_claim = {x}\n", .{right_op_claim.toBytesBE()[16..32].*});
-                std.debug.print("[DIAG INIT] gamma_raf = {x}\n", .{gamma_raf.toBytesBE()[16..32].*});
-                std.debug.print("[DIAG INIT] gamma_raf2 = {x}\n", .{gamma_raf2.toBytesBE()[16..32].*});
+                dbg("[DIAG INIT] rv_claim = {x}\n", .{rv_claim.toBytesBE()[16..32].*});
+                dbg("[DIAG INIT] left_op_claim = {x}\n", .{left_op_claim.toBytesBE()[16..32].*});
+                dbg("[DIAG INIT] right_op_claim = {x}\n", .{right_op_claim.toBytesBE()[16..32].*});
+                dbg("[DIAG INIT] gamma_raf = {x}\n", .{gamma_raf.toBytesBE()[16..32].*});
+                dbg("[DIAG INIT] gamma_raf2 = {x}\n", .{gamma_raf2.toBytesBE()[16..32].*});
                 const recomputed_input = rv_claim.add(gamma_raf.mul(left_op_claim)).add(gamma_raf2.mul(right_op_claim));
-                std.debug.print("[DIAG INIT] recomputed rv+g*l+g2*r = {x}\n", .{recomputed_input.toBytesBE()[16..32].*});
-                std.debug.print("[DIAG INIT] lookups_input match: {}\n", .{recomputed_input.eql(lookups_claim)});
+                dbg("[DIAG INIT] recomputed rv+g*l+g2*r = {x}\n", .{recomputed_input.toBytesBE()[16..32].*});
+                dbg("[DIAG INIT] lookups_input match: {}\n", .{recomputed_input.eql(lookups_claim)});
 
                 // DIAGNOSTIC: Recompute combined values using R1CS-style formula
                 // and compare against Stage 5's trace-derived combined_vals.
@@ -2299,24 +2306,24 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                         // Compare per-cycle
                         if (!r1cs_combined.eql(lookups_combined_vals[jj_d]) and per_cycle_mismatches < 5) {
-                            std.debug.print("[DIAG MISMATCH] j={}: opcode=0x{x}, funct3={}, funct7={}\n", .{ jj_d, opcode_d, funct3_d, funct7_d });
-                            std.debug.print("  stage5_combined = {x}\n", .{lookups_combined_vals[jj_d].toBytesBE()[16..32].*});
-                            std.debug.print("  r1cs_combined   = {x}\n", .{r1cs_combined.toBytesBE()[16..32].*});
-                            std.debug.print("  stage5_right_op = {x}\n", .{(lookups_combined_vals[jj_d].sub(r1cs_output).sub(gamma_raf.mul(F.zero()))).toBytesBE()[16..32].*});
-                            std.debug.print("  r1cs_right_op   = {x}\n", .{r1cs_right_op.toBytesBE()[16..32].*});
-                            std.debug.print("  rs1={}, rs2={}, imm_field={x}\n", .{
+                            dbg("[DIAG MISMATCH] j={}: opcode=0x{x}, funct3={}, funct7={}\n", .{ jj_d, opcode_d, funct3_d, funct7_d });
+                            dbg("  stage5_combined = {x}\n", .{lookups_combined_vals[jj_d].toBytesBE()[16..32].*});
+                            dbg("  r1cs_combined   = {x}\n", .{r1cs_combined.toBytesBE()[16..32].*});
+                            dbg("  stage5_right_op = {x}\n", .{(lookups_combined_vals[jj_d].sub(r1cs_output).sub(gamma_raf.mul(F.zero()))).toBytesBE()[16..32].*});
+                            dbg("  r1cs_right_op   = {x}\n", .{r1cs_right_op.toBytesBE()[16..32].*});
+                            dbg("  rs1={}, rs2={}, imm_field={x}\n", .{
                                 step_d.rs1_value, step_d.rs2_value,
                                 computeImmediate(instr_d).toBytesBE()[16..32].*,
                             });
                             per_cycle_mismatches += 1;
                         }
                     }
-                    std.debug.print("[DIAG R1CS vs S5] stage5_bf_sum    = {x}\n", .{stage5_bf_sum.toBytesBE()[16..32].*});
-                    std.debug.print("[DIAG R1CS vs S5] r1cs_bf_sum      = {x}\n", .{r1cs_bf_sum.toBytesBE()[16..32].*});
-                    std.debug.print("[DIAG R1CS vs S5] lookups_claim     = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
-                    std.debug.print("[DIAG R1CS vs S5] stage5 == claim: {}\n", .{stage5_bf_sum.eql(lookups_claim)});
-                    std.debug.print("[DIAG R1CS vs S5] r1cs == claim: {}\n", .{r1cs_bf_sum.eql(lookups_claim)});
-                    std.debug.print("[DIAG R1CS vs S5] per_cycle_mismatches: {}\n", .{per_cycle_mismatches});
+                    dbg("[DIAG R1CS vs S5] stage5_bf_sum    = {x}\n", .{stage5_bf_sum.toBytesBE()[16..32].*});
+                    dbg("[DIAG R1CS vs S5] r1cs_bf_sum      = {x}\n", .{r1cs_bf_sum.toBytesBE()[16..32].*});
+                    dbg("[DIAG R1CS vs S5] lookups_claim     = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+                    dbg("[DIAG R1CS vs S5] stage5 == claim: {}\n", .{stage5_bf_sum.eql(lookups_claim)});
+                    dbg("[DIAG R1CS vs S5] r1cs == claim: {}\n", .{r1cs_bf_sum.eql(lookups_claim)});
+                    dbg("[DIAG R1CS vs S5] per_cycle_mismatches: {}\n", .{per_cycle_mismatches});
                 }
 
                 // Now compute total from Q polynomials directly
@@ -2330,7 +2337,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 poly_sum = poly_sum.add(v);
                             }
                             if (!poly_sum.eql(F.zero())) {
-                                std.debug.print("[DIAG INIT] Q_total[table={},suffix={}] = {x}\n", .{
+                                dbg("[DIAG INIT] Q_total[table={},suffix={}] = {x}\n", .{
                                     t_idx, s_idx, poly_sum.toBytesBE()[16..32].*,
                                 });
                             }
@@ -2338,7 +2345,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         }
                     }
                 }
-                std.debug.print("[DIAG INIT] Total raw Q sum = {x}\n", .{q_total_raw.toBytesBE()[16..32].*});
+                dbg("[DIAG INIT] Total raw Q sum = {x}\n", .{q_total_raw.toBytesBE()[16..32].*});
 
                 // Also verify: Q[128..255] should be all zero if all addresses have MSB=0
                 var right_half_nonzero: usize = 0;
@@ -2353,7 +2360,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         }
                     }
                 }
-                std.debug.print("[DIAG INIT] Right half (Q[128..255]) non-zero entries: {}\n", .{right_half_nonzero});
+                dbg("[DIAG INIT] Right half (Q[128..255]) non-zero entries: {}\n", .{right_half_nonzero});
 
                 // Also check RAF Q arrays
                 var raf_right_half_nonzero: usize = 0;
@@ -2364,7 +2371,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         if (!identity_raf.Q[qi][idx].eql(F.zero())) raf_right_half_nonzero += 1;
                     }
                 }
-                std.debug.print("[DIAG INIT] RAF right half non-zero entries: {}\n", .{raf_right_half_nonzero});
+                dbg("[DIAG INIT] RAF right half non-zero entries: {}\n", .{raf_right_half_nonzero});
 
                 // Compute total from prefix-suffix at phase 0 (no challenges bound yet)
                 // For each index b (0..255), evaluate the full prefix and combine with Q
@@ -2392,16 +2399,16 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         bf_table0_lookup_output = bf_table0_lookup_output.add(lookups_eq_evals[jj].mul(F.fromU64(lookups_indices_lo[jj])));
                     }
                 }
-                std.debug.print("[DIAG INIT] bf_table0_output (Σu*rd_value for table 0) = {x}\n", .{
+                dbg("[DIAG INIT] bf_table0_output (Σu*rd_value for table 0) = {x}\n", .{
                     bf_table0_output.toBytesBE()[16..32].*,
                 });
-                std.debug.print("[DIAG INIT] bf_table0_lookup (Σu*lookup_lo for table 0) = {x}\n", .{
+                dbg("[DIAG INIT] bf_table0_lookup (Σu*lookup_lo for table 0) = {x}\n", .{
                     bf_table0_lookup_output.toBytesBE()[16..32].*,
                 });
             }
 
             // Run the batched sumcheck
-            std.debug.print("[STAGE5] Entering main sumcheck loop, max_num_rounds={}\n", .{max_num_rounds});
+            dbg("[STAGE5] Entering main sumcheck loop, max_num_rounds={}\n", .{max_num_rounds});
 
             // Track accumulated eq factor for bound cycle variables
             // This matches Jolt's current_scalar in GruenSplitEqPolynomial
@@ -2441,7 +2448,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     const inst0_sum = poly_evals[0].add(poly_evals[1]);
                     const inst0_sum_matches = inst0_sum.eql(regs_val_current_claim);
                     if (round >= LOOKUPS_LOG_K) {
-                        std.debug.print("[INST0 SUMCHECK] Round {}: p(0)+p(1) = {x}, claim0 = {x}, match = {}\n", .{
+                        dbg("[INST0 SUMCHECK] Round {}: p(0)+p(1) = {x}, claim0 = {x}, match = {}\n", .{
                             round,
                             inst0_sum.toBytesBE()[16..32].*,
                             regs_val_current_claim.toBytesBE()[16..32].*,
@@ -2452,16 +2459,16 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // Debug: Print Instance 0 contribution for cycle rounds
                     if (round >= LOOKUPS_LOG_K and round <= LOOKUPS_LOG_K + 1) {
                         const inst0_coeffs = UniPoly(F).toomCookToCoeffs(poly_evals);
-                        std.debug.print("[ZOLT INST0] Round {}: regs_round={}\n", .{ round, regs_round });
-                        std.debug.print("  poly_evals (Toom) = [{any}, {any}, {any}, {any}]\n", .{
+                        dbg("[ZOLT INST0] Round {}: regs_round={}\n", .{ round, regs_round });
+                        dbg("  poly_evals (Toom) = [{any}, {any}, {any}, {any}]\n", .{
                             poly_evals[0].toBytes(), poly_evals[1].toBytes(),
                             poly_evals[2].toBytes(), poly_evals[3].toBytes(),
                         });
-                        std.debug.print("  inst0_coeffs (coeffs) = [{any}, {any}, {any}, {any}]\n", .{
+                        dbg("  inst0_coeffs (coeffs) = [{any}, {any}, {any}, {any}]\n", .{
                             inst0_coeffs[0].toBytes(), inst0_coeffs[1].toBytes(),
                             inst0_coeffs[2].toBytes(), inst0_coeffs[3].toBytes(),
                         });
-                        std.debug.print("  batch0 = {any}\n", .{batch0.toBytes()});
+                        dbg("  batch0 = {any}\n", .{batch0.toBytes()});
                     }
                 }
 
@@ -2609,13 +2616,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             const inst1_sum = eval_0.add(eval_1);
                             const sum_matches = inst1_sum.eql(ram_ra_current_claim);
                             if (!sum_matches or ram_ra_round < 3 or ram_ra_round == log_ram_k - 1) {
-                                std.debug.print("[STAGE5 RAM_RA] PhaseAddress round {} (global {}): eval_0={x}, eval_1={x}\n", .{
+                                dbg("[STAGE5 RAM_RA] PhaseAddress round {} (global {}): eval_0={x}, eval_1={x}\n", .{
                                     ram_ra_round,
                                     round,
                                     eval_0.toBytesBE()[16..32].*,
                                     eval_1.toBytesBE()[16..32].*,
                                 });
-                                std.debug.print("  eval_0+eval_1={x}, current_claim={x}, match={}\n", .{
+                                dbg("  eval_0+eval_1={x}, current_claim={x}, match={}\n", .{
                                     inst1_sum.toBytesBE()[16..32].*,
                                     ram_ra_current_claim.toBytesBE()[16..32].*,
                                     sum_matches,
@@ -2634,12 +2641,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 const G_B_0 = ram_G_B[0];
                                 const F_k = ram_ra_F.get(0);
                                 const expected_contrib = B_1_access.mul(G_A_0).add(gamma2.mul(B_2_access.mul(G_B_0))).mul(F_k);
-                                std.debug.print("  [DEBUG R0] addr={}, k_prime={}, k_m={}\n", .{ addr, k_prime, k_m });
-                                std.debug.print("  [DEBUG R0] B_1_access={x}, B_2_access={x}\n", .{ B_1_access.toBytesBE()[16..32].*, B_2_access.toBytesBE()[16..32].* });
-                                std.debug.print("  [DEBUG R0] G_A={x}, G_B={x}\n", .{ G_A_0.toBytesBE()[16..32].*, G_B_0.toBytesBE()[16..32].* });
-                                std.debug.print("  [DEBUG R0] F_k={x}\n", .{F_k.toBytesBE()[16..32].*});
-                                std.debug.print("  [DEBUG R0] gamma2={x}\n", .{gamma2.toBytesBE()[16..32].*});
-                                std.debug.print("  [DEBUG R0] expected_contrib={x}\n", .{expected_contrib.toBytesBE()[16..32].*});
+                                dbg("  [DEBUG R0] addr={}, k_prime={}, k_m={}\n", .{ addr, k_prime, k_m });
+                                dbg("  [DEBUG R0] B_1_access={x}, B_2_access={x}\n", .{ B_1_access.toBytesBE()[16..32].*, B_2_access.toBytesBE()[16..32].* });
+                                dbg("  [DEBUG R0] G_A={x}, G_B={x}\n", .{ G_A_0.toBytesBE()[16..32].*, G_B_0.toBytesBE()[16..32].* });
+                                dbg("  [DEBUG R0] F_k={x}\n", .{F_k.toBytesBE()[16..32].*});
+                                dbg("  [DEBUG R0] gamma2={x}\n", .{gamma2.toBytesBE()[16..32].*});
+                                dbg("  [DEBUG R0] expected_contrib={x}\n", .{expected_contrib.toBytesBE()[16..32].*});
                             }
                         }
                     } else {
@@ -2682,11 +2689,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         if (!phase_cycle_q_initialized) {
                             phase_cycle_q_initialized = true;
 
-                            std.debug.print("[STAGE5 RAM_RA] PhaseCycle starting: alpha_1={x}, alpha_2={x}\n", .{
+                            dbg("[STAGE5 RAM_RA] PhaseCycle starting: alpha_1={x}, alpha_2={x}\n", .{
                                 alpha_1.toBytesBE()[16..32].*,
                                 alpha_2.toBytesBE()[16..32].*,
                             });
-                            std.debug.print("[STAGE5 PQ] prefix_n_vars={}, suffix_n_vars={}\n", .{
+                            dbg("[STAGE5 PQ] prefix_n_vars={}, suffix_n_vars={}\n", .{
                                 prefix_n_vars, suffix_n_vars,
                             });
 
@@ -2715,11 +2722,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 Q_val[c_lo] = Q_val[c_lo].add(H_c.mul(eq_val_hi[c_hi]));
                             }
 
-                            std.debug.print("[STAGE5 PQ] Q arrays initialized with {} accesses\n", .{ram_access_count});
+                            dbg("[STAGE5 PQ] Q arrays initialized with {} accesses\n", .{ram_access_count});
                             // Print all non-zero Q values
                             for (0..prefix_size) |qi| {
                                 if (!Q_raf[qi].eql(F.zero()) or !Q_rw[qi].eql(F.zero()) or !Q_val[qi].eql(F.zero())) {
-                                    std.debug.print("[STAGE5 PQ] Q_raf[{}]={x}, Q_rw[{}]={x}, Q_val[{}]={x}\n", .{
+                                    dbg("[STAGE5 PQ] Q_raf[{}]={x}, Q_rw[{}]={x}, Q_val[{}]={x}\n", .{
                                         qi, Q_raf[qi].toBytesBE()[16..32].*,
                                         qi, Q_rw[qi].toBytesBE()[16..32].*,
                                         qi, Q_val[qi].toBytesBE()[16..32].*,
@@ -2729,7 +2736,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             // Print corresponding P values at same indices
                             for (0..prefix_size) |qi| {
                                 if (!Q_raf[qi].eql(F.zero()) or !Q_rw[qi].eql(F.zero()) or !Q_val[qi].eql(F.zero())) {
-                                    std.debug.print("[STAGE5 PQ] P_raf[{}]={x}, P_rw[{}]={x}, P_val[{}]={x}\n", .{
+                                    dbg("[STAGE5 PQ] P_raf[{}]={x}, P_rw[{}]={x}, P_val[{}]={x}\n", .{
                                         qi, P_raf[qi].toBytesBE()[16..32].*,
                                         qi, P_rw[qi].toBytesBE()[16..32].*,
                                         qi, P_val[qi].toBytesBE()[16..32].*,
@@ -2740,16 +2747,16 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             if (ram_access_count > 0) {
                                 const dbg_addr: usize = @intCast(ram_addresses[0]);
                                 const dbg_H_c = ram_ra_F.get(dbg_addr & (K - 1));
-                                std.debug.print("[STAGE5 PQ] H_c (eq(r_addr_reduced, addr={})) = {x}\n", .{
+                                dbg("[STAGE5 PQ] H_c (eq(r_addr_reduced, addr={})) = {x}\n", .{
                                     dbg_addr, dbg_H_c.toBytesBE()[16..32].*,
                                 });
                                 const dbg_cycle: usize = @intCast(ram_cycles[0]);
                                 const dbg_c_lo = dbg_cycle & (prefix_size - 1);
                                 const dbg_c_hi = dbg_cycle >> @intCast(prefix_n_vars);
-                                std.debug.print("[STAGE5 PQ] cycle={}, c_lo={}, c_hi={}\n", .{
+                                dbg("[STAGE5 PQ] cycle={}, c_lo={}, c_hi={}\n", .{
                                     dbg_cycle, dbg_c_lo, dbg_c_hi,
                                 });
-                                std.debug.print("[STAGE5 PQ] eq_raf_hi[{}]={x}, eq_rw_hi[{}]={x}, eq_val_hi[{}]={x}\n", .{
+                                dbg("[STAGE5 PQ] eq_raf_hi[{}]={x}, eq_rw_hi[{}]={x}, eq_val_hi[{}]={x}\n", .{
                                     dbg_c_hi, eq_raf_hi[dbg_c_hi].toBytesBE()[16..32].*,
                                     dbg_c_hi, eq_rw_hi[dbg_c_hi].toBytesBE()[16..32].*,
                                     dbg_c_hi, eq_val_hi[dbg_c_hi].toBytesBE()[16..32].*,
@@ -2775,7 +2782,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             // Then derive eval_0 = claim - eval_1 to guarantee sumcheck property
 
                             // DEBUG: Print claim at start of polynomial computation
-                            std.debug.print("[INST1 HINT DEBUG] Round {}: ram_ra_current_claim at poly start = {x}\n", .{
+                            dbg("[INST1 HINT DEBUG] Round {}: ram_ra_current_claim at poly start = {x}\n", .{
                                 round,
                                 ram_ra_current_claim.toBytesBE()[16..32].*,
                             });
@@ -2831,7 +2838,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             inst1_eval_1 = eval_1;
                             inst1_eval_2 = eval_2;
 
-                            std.debug.print("[STAGE5 RAM_RA] PhaseCycle1 round {}: eval_0={x}, eval_1={x}, eval_2={x}\n", .{
+                            dbg("[STAGE5 RAM_RA] PhaseCycle1 round {}: eval_0={x}, eval_1={x}, eval_2={x}\n", .{
                                 cycle_round,
                                 eval_0.toBytesBE()[16..32].*,
                                 eval_1.toBytesBE()[16..32].*,
@@ -2842,16 +2849,16 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             if (round >= LOOKUPS_LOG_K and round <= LOOKUPS_LOG_K + 1) {
                                 const inst1_evals = [4]F{ eval_0, eval_1, eval_2, F.zero() };
                                 const inst1_coeffs = UniPoly(F).toomCookToCoeffs(inst1_evals);
-                                std.debug.print("[ZOLT INST1] Round {}: ram_ra_round={}, cycle_round={}\n", .{ round, ram_ra_round, cycle_round });
-                                std.debug.print("  inst1_evals (Toom) = [{any}, {any}, {any}, {any}]\n", .{
+                                dbg("[ZOLT INST1] Round {}: ram_ra_round={}, cycle_round={}\n", .{ round, ram_ra_round, cycle_round });
+                                dbg("  inst1_evals (Toom) = [{any}, {any}, {any}, {any}]\n", .{
                                     inst1_evals[0].toBytes(), inst1_evals[1].toBytes(),
                                     inst1_evals[2].toBytes(), inst1_evals[3].toBytes(),
                                 });
-                                std.debug.print("  inst1_coeffs (coeffs) = [{any}, {any}, {any}, {any}]\n", .{
+                                dbg("  inst1_coeffs (coeffs) = [{any}, {any}, {any}, {any}]\n", .{
                                     inst1_coeffs[0].toBytes(), inst1_coeffs[1].toBytes(),
                                     inst1_coeffs[2].toBytes(), inst1_coeffs[3].toBytes(),
                                 });
-                                std.debug.print("  batch1 = {any}\n", .{batch1.toBytes()});
+                                dbg("  batch1 = {any}\n", .{batch1.toBytes()});
                             }
                         } else {
                             // PhaseCycle2: After prefix rounds, use H' * eq_hi for suffix
@@ -2923,14 +2930,14 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 // coeff_rw_scaled = gamma2 * alpha_2 * scale_rw
                                 // coeff_val_scaled = (gamma * alpha_1 + gamma3 * alpha_2) * scale_val
 
-                                std.debug.print("[STAGE5 RAM_RA] PhaseCycle2 starting at suffix_round={}\n", .{suffix_round});
-                                std.debug.print("  scale_raf={x}, scale_rw={x}, scale_val={x}\n", .{
+                                dbg("[STAGE5 RAM_RA] PhaseCycle2 starting at suffix_round={}\n", .{suffix_round});
+                                dbg("  scale_raf={x}, scale_rw={x}, scale_val={x}\n", .{
                                     scale_raf.toBytesBE()[16..32].*,
                                     scale_rw.toBytesBE()[16..32].*,
                                     scale_val.toBytesBE()[16..32].*,
                                 });
                                 if (suffix_size > 0) {
-                                    std.debug.print("  H_prime[0]={x}\n", .{H_prime[0].toBytesBE()[16..32].*});
+                                    dbg("  H_prime[0]={x}\n", .{H_prime[0].toBytesBE()[16..32].*});
                                 }
                             }
 
@@ -2994,7 +3001,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             inst1_eval_1 = eval_1;
                             inst1_eval_2 = eval_2;
 
-                            std.debug.print("[STAGE5 RAM_RA] PhaseCycle2 round {}: eval_0={x}, eval_1={x}, eval_2={x}\n", .{
+                            dbg("[STAGE5 RAM_RA] PhaseCycle2 round {}: eval_0={x}, eval_1={x}, eval_2={x}\n", .{
                                 cycle_round,
                                 eval_0.toBytesBE()[16..32].*,
                                 eval_1.toBytesBE()[16..32].*,
@@ -3049,12 +3056,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     const expected_eval_2 = eval_1_inst2.add(eval_1_inst2).sub(eval_0_inst2);
                     const eval_2_matches_ml = eval_2_inst2.eql(expected_eval_2);
                     if (!eval_2_matches_ml) {
-                        std.debug.print("[MULTILINEAR BUG R{}] eval_2_inst2 != 2*eval_1 - eval_0!\n", .{round});
-                        std.debug.print("  actual eval_2   = {x}\n", .{eval_2_inst2.toBytesBE()});
-                        std.debug.print("  expected (2e1-e0) = {x}\n", .{expected_eval_2.toBytesBE()});
-                        std.debug.print("  eval_0 = {x}\n", .{eval_0_inst2.toBytesBE()});
-                        std.debug.print("  eval_1 = {x}\n", .{eval_1_inst2.toBytesBE()});
-                        std.debug.print("  claim  = {x}\n", .{lookups_claim.toBytesBE()});
+                        dbg("[MULTILINEAR BUG R{}] eval_2_inst2 != 2*eval_1 - eval_0!\n", .{round});
+                        dbg("  actual eval_2   = {x}\n", .{eval_2_inst2.toBytesBE()});
+                        dbg("  expected (2e1-e0) = {x}\n", .{expected_eval_2.toBytesBE()});
+                        dbg("  eval_0 = {x}\n", .{eval_0_inst2.toBytesBE()});
+                        dbg("  eval_1 = {x}\n", .{eval_1_inst2.toBytesBE()});
+                        dbg("  claim  = {x}\n", .{lookups_claim.toBytesBE()});
                         // Check read_checking and raf separately for multilinearity
                         // Each should independently satisfy: eval_2 = 2*eval_1 - eval_0
                         // For RC: eval_1 = (total_eval_1) - raf_eval_0... no, they're separate sums
@@ -3062,19 +3069,19 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         // But we CAN check if the prefix formula gives the right answer by computing
                         // expected_rc_e2 = rc_e0 (since all are in left half, if RC is ML then e2=-e0)
                         // Wait - need separate claims for that. Just print the values:
-                        std.debug.print("  read_checking[0] (e0) = {x}\n", .{read_checking_evals[0].toBytesBE()});
-                        std.debug.print("  read_checking[1] (e2) = {x}\n", .{read_checking_evals[1].toBytesBE()});
-                        std.debug.print("  raf[0] (e0) = {x}\n", .{raf_evals[0].toBytesBE()});
-                        std.debug.print("  raf[1] (e2) = {x}\n", .{raf_evals[1].toBytesBE()});
+                        dbg("  read_checking[0] (e0) = {x}\n", .{read_checking_evals[0].toBytesBE()});
+                        dbg("  read_checking[1] (e2) = {x}\n", .{read_checking_evals[1].toBytesBE()});
+                        dbg("  raf[0] (e0) = {x}\n", .{raf_evals[0].toBytesBE()});
+                        dbg("  raf[1] (e2) = {x}\n", .{raf_evals[1].toBytesBE()});
                     } else if (round < 3 or round == 7 or round == 15 or round == 127) {
-                        std.debug.print("[MULTILINEAR OK R{}] eval_2 matches 2*eval_1 - eval_0\n", .{round});
+                        dbg("[MULTILINEAR OK R{}] eval_2 matches 2*eval_1 - eval_0\n", .{round});
                     }
                     // Debug: print evaluations for select rounds
                     if (round < 3 or round == 7 or round == 15 or round == 127) {
-                        std.debug.print("[ZOLT INST2 R{}] previous_claim = {any}\n", .{ round, lookups_claim.toBytes()[0..16].* });
-                        std.debug.print("[ZOLT INST2 R{}] eval_at_0 = {any}\n", .{ round, eval_0_inst2.toBytes()[0..16].* });
-                        std.debug.print("[ZOLT INST2 R{}] eval_at_1 = {any}\n", .{ round, eval_1_inst2.toBytes()[0..16].* });
-                        std.debug.print("[ZOLT INST2 R{}] eval_at_2 = {any}\n", .{ round, eval_2_inst2.toBytes()[0..16].* });
+                        dbg("[ZOLT INST2 R{}] previous_claim = {any}\n", .{ round, lookups_claim.toBytes()[0..16].* });
+                        dbg("[ZOLT INST2 R{}] eval_at_0 = {any}\n", .{ round, eval_0_inst2.toBytes()[0..16].* });
+                        dbg("[ZOLT INST2 R{}] eval_at_1 = {any}\n", .{ round, eval_1_inst2.toBytes()[0..16].* });
+                        dbg("[ZOLT INST2 R{}] eval_at_2 = {any}\n", .{ round, eval_2_inst2.toBytes()[0..16].* });
                     }
 
                     // BRUTE FORCE VERIFICATION: At round 0, compute the Instance 2 eval_0
@@ -3101,13 +3108,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             }
                         }
                         const bf_eval_2_r0 = bf_eval_1_r0.add(bf_eval_1_r0).sub(bf_eval_0_r0);
-                        std.debug.print("[BRUTE R0] eval_0 = {x}\n", .{bf_eval_0_r0.toBytesBE()});
-                        std.debug.print("[BRUTE R0] eval_1 = {x}\n", .{bf_eval_1_r0.toBytesBE()});
-                        std.debug.print("[BRUTE R0] eval_2 (2*e1-e0) = {x}\n", .{bf_eval_2_r0.toBytesBE()});
-                        std.debug.print("[BRUTE R0] prefix-suffix e0 = {x}\n", .{eval_0_inst2.toBytesBE()});
-                        std.debug.print("[BRUTE R0] prefix-suffix e2 = {x}\n", .{eval_2_inst2.toBytesBE()});
-                        std.debug.print("[BRUTE R0] e0 match: {}\n", .{bf_eval_0_r0.eql(eval_0_inst2)});
-                        std.debug.print("[BRUTE R0] e2 match: {}\n", .{bf_eval_2_r0.eql(eval_2_inst2)});
+                        dbg("[BRUTE R0] eval_0 = {x}\n", .{bf_eval_0_r0.toBytesBE()});
+                        dbg("[BRUTE R0] eval_1 = {x}\n", .{bf_eval_1_r0.toBytesBE()});
+                        dbg("[BRUTE R0] eval_2 (2*e1-e0) = {x}\n", .{bf_eval_2_r0.toBytesBE()});
+                        dbg("[BRUTE R0] prefix-suffix e0 = {x}\n", .{eval_0_inst2.toBytesBE()});
+                        dbg("[BRUTE R0] prefix-suffix e2 = {x}\n", .{eval_2_inst2.toBytesBE()});
+                        dbg("[BRUTE R0] e0 match: {}\n", .{bf_eval_0_r0.eql(eval_0_inst2)});
+                        dbg("[BRUTE R0] e2 match: {}\n", .{bf_eval_2_r0.eql(eval_2_inst2)});
                     }
                     if (round < 3 or round == 7 or round == 15 or round == 127) {
                         const bit_pos = LOOKUPS_LOG_K - 1 - round;
@@ -3138,7 +3145,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 direct_eval_0 = direct_eval_0.add(contrib);
                                 const step_check = trace.steps.items[jj];
                                 if (step_check.is_noop and !step_check.is_termination_store and round == 0 and !lookups_combined_vals[jj].eql(F.zero())) {
-                                    std.debug.print("[BRUTE R0] NOOP cycle {} with bit_val=0, NONZERO combined={x}\n", .{
+                                    dbg("[BRUTE R0] NOOP cycle {} with bit_val=0, NONZERO combined={x}\n", .{
                                         jj, lookups_combined_vals[jj].toBytesBE()[16..32].*,
                                     });
                                 }
@@ -3214,12 +3221,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                             }
                                             break :blk gamma_lookups_raf.mul(F.fromU64(lb)).add(gamma_raf_sqr_dbg2.mul(F.fromU64(rb)));
                                         };
-                                        std.debug.print("[BRUTE R0 CYCLE{}] k_lo=0x{x}, is_identity={}\n", .{ jj, k_lo, cycle_is_identity_path[jj] });
-                                        std.debug.print("[BRUTE R0 CYCLE{}] lo_bf=0x{x}\n", .{ jj, lo_bf.toU64() });
-                                        std.debug.print("[BRUTE R0 CYCLE{}] combined-output={x}\n", .{ jj, raf_from_combined.toBytesBE()[16..32].* });
-                                        std.debug.print("[BRUTE R0 CYCLE{}] from_operands={x}\n", .{ jj, raf_from_operands_cycle.toBytesBE()[16..32].* });
+                                        dbg("[BRUTE R0 CYCLE{}] k_lo=0x{x}, is_identity={}\n", .{ jj, k_lo, cycle_is_identity_path[jj] });
+                                        dbg("[BRUTE R0 CYCLE{}] lo_bf=0x{x}\n", .{ jj, lo_bf.toU64() });
+                                        dbg("[BRUTE R0 CYCLE{}] combined-output={x}\n", .{ jj, raf_from_combined.toBytesBE()[16..32].* });
+                                        dbg("[BRUTE R0 CYCLE{}] from_operands={x}\n", .{ jj, raf_from_operands_cycle.toBytesBE()[16..32].* });
                                         const cycle_match = raf_from_combined.eql(raf_from_operands_cycle);
-                                        std.debug.print("[BRUTE R0 CYCLE{}] MATCH={}\n", .{ jj, cycle_match });
+                                        dbg("[BRUTE R0 CYCLE{}] MATCH={}\n", .{ jj, cycle_match });
                                     }
 
                                     if (!cycle_is_identity_path[jj]) {
@@ -3252,7 +3259,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                         bf_raf_from_operands = bf_raf_from_operands.add(raf_contrib);
                                         // Debug: compare running sums
                                         if (round == 0 and jj < 60) {
-                                            std.debug.print("[BRUTE R0 CYCLE{}] INTERLEAVED: bf_raf_eval_0={x}, bf_raf_from_op={x}, match={}\n", .{
+                                            dbg("[BRUTE R0 CYCLE{}] INTERLEAVED: bf_raf_eval_0={x}, bf_raf_from_op={x}, match={}\n", .{
                                                 jj, bf_raf_eval_0.toBytesBE()[16..32].*, bf_raf_from_operands.toBytesBE()[16..32].*,
                                                 bf_raf_eval_0.eql(bf_raf_from_operands),
                                             });
@@ -3263,10 +3270,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                             // Compute what combined_vals should have
                                             const gamma_raf_sqr_dbg = gamma_lookups_raf.mul(gamma_lookups_raf);
                                             const raf_from_bits = gamma_lookups_raf.mul(F.fromU64(left_bits)).add(gamma_raf_sqr_dbg.mul(F.fromU64(right_bits)));
-                                            std.debug.print("[BRUTE R0 CYCLE{}] left_bits=0x{x}, right_bits=0x{x}\n", .{ jj, left_bits, right_bits });
-                                            std.debug.print("[BRUTE R0 CYCLE{}] γ*left + γ²*right={x}\n", .{ jj, raf_from_bits.toBytesBE()[16..32].* });
-                                            std.debug.print("[BRUTE R0 CYCLE{}] AFTER running bf_left_sum={x}\n", .{ jj, bf_left_sum.toBytesBE()[16..32].* });
-                                            std.debug.print("[BRUTE R0 CYCLE{}] AFTER running bf_right_sum={x}\n", .{ jj, bf_right_sum.toBytesBE()[16..32].* });
+                                            dbg("[BRUTE R0 CYCLE{}] left_bits=0x{x}, right_bits=0x{x}\n", .{ jj, left_bits, right_bits });
+                                            dbg("[BRUTE R0 CYCLE{}] γ*left + γ²*right={x}\n", .{ jj, raf_from_bits.toBytesBE()[16..32].* });
+                                            dbg("[BRUTE R0 CYCLE{}] AFTER running bf_left_sum={x}\n", .{ jj, bf_left_sum.toBytesBE()[16..32].* });
+                                            dbg("[BRUTE R0 CYCLE{}] AFTER running bf_right_sum={x}\n", .{ jj, bf_right_sum.toBytesBE()[16..32].* });
                                         }
                                     } else {
                                         // Identity path: identity = full lookup_index
@@ -3279,7 +3286,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                         bf_raf_from_operands = bf_raf_from_operands.add(u_j.mul(gamma_raf_sqr_id.mul(id_val)));
                                         // Debug: compare running sums
                                         if (round == 0 and jj < 60) {
-                                            std.debug.print("[BRUTE R0 CYCLE{}] IDENTITY: bf_raf_eval_0={x}, bf_raf_from_op={x}, match={}\n", .{
+                                            dbg("[BRUTE R0 CYCLE{}] IDENTITY: bf_raf_eval_0={x}, bf_raf_from_op={x}, match={}\n", .{
                                                 jj, bf_raf_eval_0.toBytesBE()[16..32].*, bf_raf_from_operands.toBytesBE()[16..32].*,
                                                 bf_raf_eval_0.eql(bf_raf_from_operands),
                                             });
@@ -3289,8 +3296,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                         if (jj < 5 and round == 0) {
                                             const gamma_raf_sqr_dbg = gamma_lookups_raf.mul(gamma_lookups_raf);
                                             const id_val_scaled = gamma_raf_sqr_dbg.mul(id_val);
-                                            std.debug.print("[BRUTE R0 CYCLE{}] identity_val=0x{x}, γ²*id={x}\n", .{ jj, k_lo, id_val_scaled.toBytesBE()[16..32].* });
-                                            std.debug.print("[BRUTE R0 CYCLE{}] running bf_identity_sum={x}\n", .{ jj, bf_identity_sum.toBytesBE()[16..32].* });
+                                            dbg("[BRUTE R0 CYCLE{}] identity_val=0x{x}, γ²*id={x}\n", .{ jj, k_lo, id_val_scaled.toBytesBE()[16..32].* });
+                                            dbg("[BRUTE R0 CYCLE{}] running bf_identity_sum={x}\n", .{ jj, bf_identity_sum.toBytesBE()[16..32].* });
                                         }
                                     }
 
@@ -3305,19 +3312,19 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             }
                         }
                         const direct_sum = direct_eval_0.add(direct_eval_1);
-                        std.debug.print("[BRUTE R{}] direct_eval_0={x}\n", .{ round, direct_eval_0.toBytesBE()[16..32].* });
-                        std.debug.print("[BRUTE R{}] direct_eval_1={x}\n", .{ round, direct_eval_1.toBytesBE()[16..32].* });
-                        std.debug.print("[BRUTE R{}] bf_val_eval_0={x} (should match read_checking)\n", .{ round, bf_val_eval_0.toBytesBE()[16..32].* });
-                        std.debug.print("[BRUTE R{}] bf_raf_eval_0={x} (should match raf_evals)\n", .{ round, bf_raf_eval_0.toBytesBE()[16..32].* });
+                        dbg("[BRUTE R{}] direct_eval_0={x}\n", .{ round, direct_eval_0.toBytesBE()[16..32].* });
+                        dbg("[BRUTE R{}] direct_eval_1={x}\n", .{ round, direct_eval_1.toBytesBE()[16..32].* });
+                        dbg("[BRUTE R{}] bf_val_eval_0={x} (should match read_checking)\n", .{ round, bf_val_eval_0.toBytesBE()[16..32].* });
+                        dbg("[BRUTE R{}] bf_raf_eval_0={x} (should match raf_evals)\n", .{ round, bf_raf_eval_0.toBytesBE()[16..32].* });
                         if (round == 0) {
-                            std.debug.print("[BRUTE R0] bf_raf_cycle_count={}, identity={}, interleaved={}\n", .{bf_raf_cycle_count, bf_identity_cycle_count, bf_interleaved_cycle_count});
-                            std.debug.print("[BRUTE R0] bf_left_sum={x}\n", .{bf_left_sum.toBytesBE()[16..32].*});
-                            std.debug.print("[BRUTE R0] bf_right_sum={x}\n", .{bf_right_sum.toBytesBE()[16..32].*});
-                            std.debug.print("[BRUTE R0] bf_identity_sum={x}\n", .{bf_identity_sum.toBytesBE()[16..32].*});
+                            dbg("[BRUTE R0] bf_raf_cycle_count={}, identity={}, interleaved={}\n", .{bf_raf_cycle_count, bf_identity_cycle_count, bf_interleaved_cycle_count});
+                            dbg("[BRUTE R0] bf_left_sum={x}\n", .{bf_left_sum.toBytesBE()[16..32].*});
+                            dbg("[BRUTE R0] bf_right_sum={x}\n", .{bf_right_sum.toBytesBE()[16..32].*});
+                            dbg("[BRUTE R0] bf_identity_sum={x}\n", .{bf_identity_sum.toBytesBE()[16..32].*});
                             // Compute what RAF should be from left/right/identity
                             const gamma_raf_sqr = gamma_lookups_raf.mul(gamma_lookups_raf);
                             const bf_raf_reconstructed = gamma_lookups_raf.mul(bf_left_sum).add(gamma_raf_sqr.mul(bf_right_sum.add(bf_identity_sum)));
-                            std.debug.print("[BRUTE R0] bf_raf_reconstructed (γ*l + γ²*(r+i))={x}\n", .{bf_raf_reconstructed.toBytesBE()[16..32].*});
+                            dbg("[BRUTE R0] bf_raf_reconstructed (γ*l + γ²*(r+i))={x}\n", .{bf_raf_reconstructed.toBytesBE()[16..32].*});
 
                             // Also compute RAF using the "combined - output" formula for verification
                             // combined = output + γ*left + γ²*right
@@ -3328,50 +3335,50 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             // But bf_raf_reconstructed uses γ²*identity
                             // Let's also compute: γ*bf_left + γ²*bf_right (without identity)
                             const bf_raf_no_identity = gamma_lookups_raf.mul(bf_left_sum).add(gamma_raf_sqr.mul(bf_right_sum));
-                            std.debug.print("[BRUTE R0] bf_raf_no_identity (γ*l + γ²*r)={x}\n", .{bf_raf_no_identity.toBytesBE()[16..32].*});
-                            std.debug.print("[BRUTE R0] γ²*bf_identity_sum={x}\n", .{gamma_raf_sqr.mul(bf_identity_sum).toBytesBE()[16..32].*});
+                            dbg("[BRUTE R0] bf_raf_no_identity (γ*l + γ²*r)={x}\n", .{bf_raf_no_identity.toBytesBE()[16..32].*});
+                            dbg("[BRUTE R0] γ²*bf_identity_sum={x}\n", .{gamma_raf_sqr.mul(bf_identity_sum).toBytesBE()[16..32].*});
                             // Compute difference
                             const diff = bf_raf_eval_0.sub(bf_raf_reconstructed);
-                            std.debug.print("[BRUTE R0] DIFF (bf_raf_eval_0 - bf_raf_reconstructed)={x}\n", .{diff.toBytesBE()[16..32].*});
+                            dbg("[BRUTE R0] DIFF (bf_raf_eval_0 - bf_raf_reconstructed)={x}\n", .{diff.toBytesBE()[16..32].*});
 
                             // Also compute: γ * bf_left + γ² * bf_right + γ² * bf_identity
                             // This is equivalent to bf_raf_reconstructed but computed differently
                             const alt_reconstructed = gamma_lookups_raf.mul(bf_left_sum)
                                 .add(gamma_raf_sqr.mul(bf_right_sum))
                                 .add(gamma_raf_sqr.mul(bf_identity_sum));
-                            std.debug.print("[BRUTE R0] alt_reconstructed (γ*l + γ²*r + γ²*i)={x}\n", .{alt_reconstructed.toBytesBE()[16..32].*});
-                            std.debug.print("[BRUTE R0] alt==bf_raf_reconstructed: {}\n", .{alt_reconstructed.eql(bf_raf_reconstructed)});
-                            std.debug.print("[BRUTE R0] bf_raf_from_operands={x}\n", .{bf_raf_from_operands.toBytesBE()[16..32].*});
-                            std.debug.print("[BRUTE R0] from_operands==bf_raf_eval_0: {}\n", .{bf_raf_from_operands.eql(bf_raf_eval_0)});
+                            dbg("[BRUTE R0] alt_reconstructed (γ*l + γ²*r + γ²*i)={x}\n", .{alt_reconstructed.toBytesBE()[16..32].*});
+                            dbg("[BRUTE R0] alt==bf_raf_reconstructed: {}\n", .{alt_reconstructed.eql(bf_raf_reconstructed)});
+                            dbg("[BRUTE R0] bf_raf_from_operands={x}\n", .{bf_raf_from_operands.toBytesBE()[16..32].*});
+                            dbg("[BRUTE R0] from_operands==bf_raf_eval_0: {}\n", .{bf_raf_from_operands.eql(bf_raf_eval_0)});
                         }
                         const bf_total = bf_val_eval_0.add(bf_raf_eval_0);
-                        std.debug.print("[BRUTE R{}] bf_val+bf_raf={x}\n", .{ round, bf_total.toBytesBE()[16..32].* });
+                        dbg("[BRUTE R{}] bf_val+bf_raf={x}\n", .{ round, bf_total.toBytesBE()[16..32].* });
                         const ps_total = read_checking_evals[0].add(raf_evals[0]);
-                        std.debug.print("[BRUTE R{}] ps_val+ps_raf={x}\n", .{ round, ps_total.toBytesBE()[16..32].* });
+                        dbg("[BRUTE R{}] ps_val+ps_raf={x}\n", .{ round, ps_total.toBytesBE()[16..32].* });
                         if (round == 0) {
                             var bf_val_sum_per_table = F.zero();
                             for (0..NUM_TABLES) |t_check| {
                                 if (!bf_val_per_table[t_check].eql(F.zero())) {
-                                    std.debug.print("[BRUTE R0] bf_val_per_table[{}]={x}\n", .{ t_check, bf_val_per_table[t_check].toBytesBE()[16..32].* });
+                                    dbg("[BRUTE R0] bf_val_per_table[{}]={x}\n", .{ t_check, bf_val_per_table[t_check].toBytesBE()[16..32].* });
                                     bf_val_sum_per_table = bf_val_sum_per_table.add(bf_val_per_table[t_check]);
                                 }
                             }
-                            std.debug.print("[BRUTE R0] bf_val_sum_per_table={x}\n", .{bf_val_sum_per_table.toBytesBE()[16..32].*});
-                            std.debug.print("[BRUTE R0] bf_val_eval_0={x}\n", .{bf_val_eval_0.toBytesBE()[16..32].*});
-                            std.debug.print("[BRUTE R0] sum==bf_val_eval_0: {}\n", .{bf_val_sum_per_table.eql(bf_val_eval_0)});
+                            dbg("[BRUTE R0] bf_val_sum_per_table={x}\n", .{bf_val_sum_per_table.toBytesBE()[16..32].*});
+                            dbg("[BRUTE R0] bf_val_eval_0={x}\n", .{bf_val_eval_0.toBytesBE()[16..32].*});
+                            dbg("[BRUTE R0] sum==bf_val_eval_0: {}\n", .{bf_val_sum_per_table.eql(bf_val_eval_0)});
                         }
-                        std.debug.print("[BRUTE R{}] direct_sum={x}, lookups_claim={x}\n", .{
+                        dbg("[BRUTE R{}] direct_sum={x}, lookups_claim={x}\n", .{
                             round,
                             direct_sum.toBytesBE()[16..32].*,
                             lookups_claim.toBytesBE()[16..32].*,
                         });
-                        std.debug.print("[BRUTE R{}] sum==claim: {}, eval0_match: {}\n", .{
+                        dbg("[BRUTE R{}] sum==claim: {}, eval0_match: {}\n", .{
                             round,
                             direct_sum.eql(lookups_claim),
                             direct_eval_0.eql(eval_0_inst2),
                         });
-                        std.debug.print("[BRUTE R{}] prefix_suffix_eval_0={x}\n", .{ round, eval_0_inst2.toBytesBE()[16..32].* });
-                        std.debug.print("[BRUTE R{}] prefix_suffix_eval_2={x}\n", .{ round, eval_2_inst2.toBytesBE()[16..32].* });
+                        dbg("[BRUTE R{}] prefix_suffix_eval_0={x}\n", .{ round, eval_0_inst2.toBytesBE()[16..32].* });
+                        dbg("[BRUTE R{}] prefix_suffix_eval_2={x}\n", .{ round, eval_2_inst2.toBytesBE()[16..32].* });
 
                         // BRUTE FORCE eval_2: p(2) = Σ_j u[j] * combined[j] * coeff_2(bit)
                         // where coeff_2(bit) = 2*bit + (1-2)*(1-bit) = 3*bit - 1
@@ -3392,13 +3399,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                     bf_eval_2 = bf_eval_2.add(contrib2.add(contrib2));
                                 }
                             }
-                            std.debug.print("[BRUTE R0 EVAL2] bf_eval_2 (brute force) = {x}\n", .{bf_eval_2.toBytesBE()[16..32].*});
-                            std.debug.print("[BRUTE R0 EVAL2] ps_eval_2 (prefix-suffix) = {x}\n", .{eval_2_inst2.toBytesBE()[16..32].*});
-                            std.debug.print("[BRUTE R0 EVAL2] match = {}\n", .{bf_eval_2.eql(eval_2_inst2)});
+                            dbg("[BRUTE R0 EVAL2] bf_eval_2 (brute force) = {x}\n", .{bf_eval_2.toBytesBE()[16..32].*});
+                            dbg("[BRUTE R0 EVAL2] ps_eval_2 (prefix-suffix) = {x}\n", .{eval_2_inst2.toBytesBE()[16..32].*});
+                            dbg("[BRUTE R0 EVAL2] match = {}\n", .{bf_eval_2.eql(eval_2_inst2)});
                             // Also check: bf_eval_2 should equal -claim (since all bits are 0)
                             const neg_lc = F.zero().sub(lookups_claim);
-                            std.debug.print("[BRUTE R0 EVAL2] -claim = {x}\n", .{neg_lc.toBytesBE()[16..32].*});
-                            std.debug.print("[BRUTE R0 EVAL2] bf_eval_2 == -claim: {}\n", .{bf_eval_2.eql(neg_lc)});
+                            dbg("[BRUTE R0 EVAL2] -claim = {x}\n", .{neg_lc.toBytesBE()[16..32].*});
+                            dbg("[BRUTE R0 EVAL2] bf_eval_2 == -claim: {}\n", .{bf_eval_2.eql(neg_lc)});
                         }
 
                         // CORRECT RAF brute force: use identity/operand path properly
@@ -3449,8 +3456,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                     correct_raf_eval_0 = correct_raf_eval_0.add(u_jc.mul(gamma_raf2.mul(identity_f)));
                                 }
                             }
-                            std.debug.print("[CORRECT_RAF R{}] eval_0={x}\n", .{ round, correct_raf_eval_0.toBytesBE()[16..32].* });
-                            std.debug.print("[CORRECT_RAF R{}] matches raf_evals[0]: {}\n", .{ round, correct_raf_eval_0.eql(raf_evals[0]) });
+                            dbg("[CORRECT_RAF R{}] eval_0={x}\n", .{ round, correct_raf_eval_0.toBytesBE()[16..32].* });
+                            dbg("[CORRECT_RAF R{}] matches raf_evals[0]: {}\n", .{ round, correct_raf_eval_0.eql(raf_evals[0]) });
                         }
                     }
 
@@ -3475,7 +3482,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     const poly_sum = combined_poly[0].add(combined_poly[1]);
                     const sumcheck_ok_addr = poly_sum.eql(current_batched_claim);
                     if (!sumcheck_ok_addr or round < 3 or round == 127) {
-                        std.debug.print("[STAGE5 VERIFY R{}] p(0)+p(1)={x}, claim={x}, match={}\n", .{
+                        dbg("[STAGE5 VERIFY R{}] p(0)+p(1)={x}, claim={x}, match={}\n", .{
                             round,
                             poly_sum.toBytesBE()[16..32].*,
                             current_batched_claim.toBytesBE()[16..32].*,
@@ -3499,8 +3506,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                     // Debug: print coefficients for select rounds
                     if (round < 3 or round >= 110) {
-                        std.debug.print("[STAGE5 COEFF ROUND {}] c0 (LE) = {any}\n", .{ round, coeffs[0].toBytes() });
-                        std.debug.print("[STAGE5 COEFF ROUND {}] c2 (LE) = {any}\n", .{ round, coeffs[1].toBytes() });
+                        dbg("[STAGE5 COEFF ROUND {}] c0 (LE) = {any}\n", .{ round, coeffs[0].toBytes() });
+                        dbg("[STAGE5 COEFF ROUND {}] c2 (LE) = {any}\n", .{ round, coeffs[1].toBytes() });
                     }
 
                     try proof.compressed_polys.append(self.allocator, .{
@@ -3531,7 +3538,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     current_batched_claim = c0.add(c1.mulHiBigIntU128(challenge.limbs)).add(c2_val.mul(r2));
 
                     // Per-round tracking (matches Jolt verifier's [S5V] output)
-                    std.debug.print("  [S5P] R{} challenge={x} new_e={x} degree=2\n", .{
+                    dbg("  [S5P] R{} challenge={x} new_e={x} degree=2\n", .{
                         round,
                         challenge.toBytes()[0..16].*,
                         current_batched_claim.toBytes()[0..16].*,
@@ -3558,18 +3565,18 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                     // Debug: show claim chain for first 3 rounds and last 3 address rounds
                     if (round < 3 or (round >= 125 and round < 128)) {
-                        std.debug.print("[CLAIM_CHAIN R{}] before_claim={x}\n", .{ round, lookups_claim.toBytesBE()[16..32].* });
-                        std.debug.print("[CLAIM_CHAIN R{}] eval_0={x}, eval_1={x}, eval_2={x}\n", .{
+                        dbg("[CLAIM_CHAIN R{}] before_claim={x}\n", .{ round, lookups_claim.toBytesBE()[16..32].* });
+                        dbg("[CLAIM_CHAIN R{}] eval_0={x}, eval_1={x}, eval_2={x}\n", .{
                             round,
                             eval_0_inst2.toBytesBE()[16..32].*,
                             eval_1_inst2.toBytesBE()[16..32].*,
                             eval_2_inst2.toBytesBE()[16..32].*,
                         });
-                        std.debug.print("[CLAIM_CHAIN R{}] sum_check: eval_0+eval_1={x} (should == before_claim)\n", .{
+                        dbg("[CLAIM_CHAIN R{}] sum_check: eval_0+eval_1={x} (should == before_claim)\n", .{
                             round,
                             eval_0_inst2.add(eval_1_inst2).toBytesBE()[16..32].*,
                         });
-                        std.debug.print("[CLAIM_CHAIN R{}] p(r)={x} -> new_claim\n", .{ round, inst2_at_r.toBytesBE()[16..32].* });
+                        dbg("[CLAIM_CHAIN R{}] p(r)={x} -> new_claim\n", .{ round, inst2_at_r.toBytesBE()[16..32].* });
                     }
 
                     // NOTE: lookups_claim will be updated AFTER inst0/inst1 claims,
@@ -3622,7 +3629,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // NOTE: We use (remaining_rounds - 1) because we already computed the polynomial
                     // for this round and are now handling the challenge binding for it
                     if (round >= 126 and round <= 131) {
-                        std.debug.print("[DEBUG BINDING R{}] remaining={}, ram_ra_num_rounds={}, check={}\n", .{
+                        dbg("[DEBUG BINDING R{}] remaining={}, ram_ra_num_rounds={}, check={}\n", .{
                             round,
                             remaining_rounds,
                             ram_ra_num_rounds,
@@ -3633,7 +3640,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         const ram_ra_round = ram_ra_num_rounds - remaining_rounds;
 
                         if (round >= 126 and round <= 130) {
-                            std.debug.print("[DEBUG R{} IN] ram_ra_round={}, log_ram_k={}, is_phase_cycle={}\n", .{
+                            dbg("[DEBUG R{} IN] ram_ra_round={}, log_ram_k={}, is_phase_cycle={}\n", .{
                                 round,
                                 ram_ra_round,
                                 log_ram_k,
@@ -3671,7 +3678,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             ram_ra_bound_challenges[ram_ra_round] = challenge;
 
                             if (ram_ra_round < 3 or ram_ra_round == log_ram_k - 1) {
-                                std.debug.print("[STAGE5 RAM_RA] Bound addr round {}: B_1[0]={x}, B_2[0]={x}\n", .{
+                                dbg("[STAGE5 RAM_RA] Bound addr round {}: B_1[0]={x}, B_2[0]={x}\n", .{
                                     ram_ra_round,
                                     B_1[0].toBytesBE()[16..32].*,
                                     B_2[0].toBytesBE()[16..32].*,
@@ -3715,13 +3722,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 }
 
                                 if (cycle_round < 3) {
-                                    std.debug.print("[STAGE5 RAM_RA] Bound PhaseCycle1 round {}: challenge={x}, new_len={}\n", .{
+                                    dbg("[STAGE5 RAM_RA] Bound PhaseCycle1 round {}: challenge={x}, new_len={}\n", .{
                                         cycle_round,
                                         challenge.toBytesBE()[16..32].*,
                                         half_len,
                                     });
                                     if (half_len > 0) {
-                                        std.debug.print("  P_raf[0]={x}, Q_raf[0]={x}\n", .{
+                                        dbg("  P_raf[0]={x}, Q_raf[0]={x}\n", .{
                                             P_raf[0].toBytesBE()[16..32].*,
                                             Q_raf[0].toBytesBE()[16..32].*,
                                         });
@@ -3747,14 +3754,14 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                     eq_val_hi[j] = one_minus_r.mul(eq_val_hi[2 * j]).add(eq_val_hi[2 * j + 1].mulHiBigIntU128(challenge.limbs));
                                 }
 
-                                std.debug.print("[STAGE5 RAM_RA] Bound PhaseCycle2 round {} (suffix {}): challenge={x}, new_len={}\n", .{
+                                dbg("[STAGE5 RAM_RA] Bound PhaseCycle2 round {} (suffix {}): challenge={x}, new_len={}\n", .{
                                     cycle_round,
                                     suffix_round,
                                     challenge.toBytesBE()[16..32].*,
                                     half_len,
                                 });
                                 if (half_len > 0) {
-                                    std.debug.print("  H_prime[0]={x}, eq_raf_hi[0]={x}\n", .{
+                                    dbg("  H_prime[0]={x}, eq_raf_hi[0]={x}\n", .{
                                         H_prime[0].toBytesBE()[16..32].*,
                                         eq_raf_hi[0].toBytesBE()[16..32].*,
                                     });
@@ -3770,7 +3777,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     lookups_claim = inst2_at_r;
 
                     // Print Instance 2 claim at EVERY round (matches Jolt's [S5 INST2 CLAIM R{}])
-                    std.debug.print("[S5 INST2 CLAIM R{}] {any}\n", .{ round, lookups_claim.toBytes()[0..16].* });
+                    dbg("[S5 INST2 CLAIM R{}] {any}\n", .{ round, lookups_claim.toBytes()[0..16].* });
 
                     // BRUTE FORCE CHAIN CHECK: Compute the expected claim directly
                     // After binding rounds 0..round with challenges, the claim should be:
@@ -3794,7 +3801,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             }
                             bf_chain_sum = bf_chain_sum.add(u_j.mul(eq_addr).mul(cv_j));
                         }
-                        std.debug.print("[BF_CHAIN R{}] bf_sum={x}, chain={x}, match={}\n", .{
+                        dbg("[BF_CHAIN R{}] bf_sum={x}, chain={x}, match={}\n", .{
                             round,
                             bf_chain_sum.toBytesBE()[16..32].*,
                             lookups_claim.toBytesBE()[16..32].*,
@@ -3809,15 +3816,15 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         const recon = batch0.mul(regs_val_current_claim).add(batch1.mul(ram_ra_current_claim)).add(batch2.mul(lookups_claim));
                         const matches = recon.eql(current_batched_claim);
                         if (!matches or round < 3 or round == 127) {
-                            std.debug.print("[CONSISTENCY R{}] batch0*inst0+batch1*inst1+batch2*inst2 == batched: {}\n", .{ round, matches });
+                            dbg("[CONSISTENCY R{}] batch0*inst0+batch1*inst1+batch2*inst2 == batched: {}\n", .{ round, matches });
                         }
                         if (!matches) {
-                            std.debug.print("[CONSISTENCY R{}] MISMATCH! recon={x}, batched={x}\n", .{
+                            dbg("[CONSISTENCY R{}] MISMATCH! recon={x}, batched={x}\n", .{
                                 round,
                                 recon.toBytesBE()[16..32].*,
                                 current_batched_claim.toBytesBE()[16..32].*,
                             });
-                            std.debug.print("[CONSISTENCY R{}]   inst0={x}, inst1={x}, inst2={x}\n", .{
+                            dbg("[CONSISTENCY R{}]   inst0={x}, inst1={x}, inst2={x}\n", .{
                                 round,
                                 regs_val_current_claim.toBytesBE()[16..32].*,
                                 ram_ra_current_claim.toBytesBE()[16..32].*,
@@ -3837,13 +3844,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                     // Debug: print claim tracking for rounds 126-128
                     if (round >= 126 and round <= 128) {
-                        std.debug.print("[ADDR CLAIM TRACK] Round {}: regs_val={x}, ram_ra={x}, lookups={x}\n", .{
+                        dbg("[ADDR CLAIM TRACK] Round {}: regs_val={x}, ram_ra={x}, lookups={x}\n", .{
                             round,
                             regs_val_current_claim.toBytesBE()[16..32].*,
                             ram_ra_current_claim.toBytesBE()[16..32].*,
                             lookups_claim.toBytesBE()[16..32].*,
                         });
-                        std.debug.print("[ADDR CLAIM TRACK] Round {}: batched_claim={x}\n", .{
+                        dbg("[ADDR CLAIM TRACK] Round {}: batched_claim={x}\n", .{
                             round,
                             current_batched_claim.toBytesBE()[16..32].*,
                         });
@@ -3878,7 +3885,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     if ((round + 1) % log_m == 0 and round + 1 < LOOKUPS_LOG_K) {
                         const prev_phase = current_phase;
                         current_phase += 1;
-                        std.debug.print("[STAGE5] Phase transition to phase {}, prev_table_len={}\n", .{ current_phase, expanding_tables[prev_phase].getLen() });
+                        dbg("[STAGE5] Phase transition to phase {}, prev_table_len={}\n", .{ current_phase, expanding_tables[prev_phase].getLen() });
 
                         // DRIFT DEBUG BEFORE CONDENSATION:
                         // Verify the expanding table matches direct EQ computation
@@ -3891,9 +3898,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 direct_eq_0 = direct_eq_0.mul(F.one().sub(challenges[prev_phase * log_m + i]));
                             }
                             const table_eq_0 = expanding_tables[prev_phase].get(0);
-                            std.debug.print("[PHASE_VERIFY] expanding_table[0] = {x}\n", .{table_eq_0.toBytesBE()[16..32].*});
-                            std.debug.print("[PHASE_VERIFY] direct_eq(0, r) = {x}\n", .{direct_eq_0.toBytesBE()[16..32].*});
-                            std.debug.print("[PHASE_VERIFY] match = {}\n", .{table_eq_0.eql(direct_eq_0)});
+                            dbg("[PHASE_VERIFY] expanding_table[0] = {x}\n", .{table_eq_0.toBytesBE()[16..32].*});
+                            dbg("[PHASE_VERIFY] direct_eq(0, r) = {x}\n", .{direct_eq_0.toBytesBE()[16..32].*});
+                            dbg("[PHASE_VERIFY] match = {}\n", .{table_eq_0.eql(direct_eq_0)});
 
                             // Verify entry 1: EQ(1, r) - bit 0 = 1, rest = 0
                             // With HighToLow binding: bit 0 of k corresponds to round (log_m-1) = round 7
@@ -3903,16 +3910,16 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 direct_eq_1 = direct_eq_1.mul(F.one().sub(challenges[prev_phase * log_m + i]));
                             }
                             const table_eq_1 = expanding_tables[prev_phase].get(1);
-                            std.debug.print("[PHASE_VERIFY] expanding_table[1] = {x}\n", .{table_eq_1.toBytesBE()[16..32].*});
-                            std.debug.print("[PHASE_VERIFY] direct_eq(1, r) = {x}\n", .{direct_eq_1.toBytesBE()[16..32].*});
-                            std.debug.print("[PHASE_VERIFY] match = {}\n", .{table_eq_1.eql(direct_eq_1)});
+                            dbg("[PHASE_VERIFY] expanding_table[1] = {x}\n", .{table_eq_1.toBytesBE()[16..32].*});
+                            dbg("[PHASE_VERIFY] direct_eq(1, r) = {x}\n", .{direct_eq_1.toBytesBE()[16..32].*});
+                            dbg("[PHASE_VERIFY] match = {}\n", .{table_eq_1.eql(direct_eq_1)});
 
                             // Compute brute sum BEFORE condensation (should be original claim)
                             var pre_condense_sum = F.zero();
                             for (0..T) |jj| {
                                 pre_condense_sum = pre_condense_sum.add(lookups_eq_evals[jj].mul(lookups_combined_vals[jj]));
                             }
-                            std.debug.print("[PHASE_VERIFY] pre_condense_sum = {x}\n", .{pre_condense_sum.toBytesBE()[16..32].*});
+                            dbg("[PHASE_VERIFY] pre_condense_sum = {x}\n", .{pre_condense_sum.toBytesBE()[16..32].*});
 
                             // Compute "what the condensed sum SHOULD be" by multiplying each term
                             // by the appropriate expanding table entry
@@ -3926,7 +3933,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 const v_val = expanding_tables[prev_phase].get(k_bound);
                                 expected_condensed_sum = expected_condensed_sum.add(lookups_eq_evals[jj].mul(v_val).mul(lookups_combined_vals[jj]));
                                 if (jj < 5) {
-                                    std.debug.print("[PHASE_VERIFY] j={}: k_bound={}, v_val={x}, eq={x}, cv={x}\n", .{
+                                    dbg("[PHASE_VERIFY] j={}: k_bound={}, v_val={x}, eq={x}, cv={x}\n", .{
                                         jj, k_bound,
                                         v_val.toBytesBE()[24..32].*,
                                         lookups_eq_evals[jj].toBytesBE()[24..32].*,
@@ -3934,16 +3941,16 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                     });
                                 }
                             }
-                            std.debug.print("[PHASE_VERIFY] expected_condensed_sum = {x}\n", .{expected_condensed_sum.toBytesBE()[16..32].*});
-                            std.debug.print("[PHASE_VERIFY] lookups_claim (poly chain) = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
-                            std.debug.print("[PHASE_VERIFY] match = {}\n", .{expected_condensed_sum.eql(lookups_claim)});
+                            dbg("[PHASE_VERIFY] expected_condensed_sum = {x}\n", .{expected_condensed_sum.toBytesBE()[16..32].*});
+                            dbg("[PHASE_VERIFY] lookups_claim (poly chain) = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+                            dbg("[PHASE_VERIFY] match = {}\n", .{expected_condensed_sum.eql(lookups_claim)});
                         }
 
                         // Condense u_evals (lookups_eq_evals) using the expanding table from the previous phase
                         // This is the CRITICAL step that was missing!
                         // u_evals[j] *= v[prev_phase][k_bound] where k_bound = prefix & m_mask
                         condenseUEvals(F, lookups_eq_evals, &expanding_tables[prev_phase], lookup_indices_u128, current_phase, num_phases);
-                        std.debug.print("[STAGE5] Phase {} condense done, now calling initPhase...\n", .{current_phase});
+                        dbg("[STAGE5] Phase {} condense done, now calling initPhase...\n", .{current_phase});
 
                         // DRIFT DEBUG: Compute direct sum after condensation to compare with lookups_claim
                         // At this point, lookups_eq_evals[j] has been condensed to include the expanding table contribution
@@ -3953,14 +3960,14 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             for (0..T) |jj| {
                                 brute_sum = brute_sum.add(lookups_eq_evals[jj].mul(lookups_combined_vals[jj]));
                             }
-                            std.debug.print("[DRIFT_CHECK Phase {}] brute_sum(eq*combined) = {x}\n", .{ current_phase, brute_sum.toBytesBE()[16..32].* });
-                            std.debug.print("[DRIFT_CHECK Phase {}] lookups_claim (poly chain) = {x}\n", .{ current_phase, lookups_claim.toBytesBE()[16..32].* });
-                            std.debug.print("[DRIFT_CHECK Phase {}] match = {}\n", .{ current_phase, brute_sum.eql(lookups_claim) });
+                            dbg("[DRIFT_CHECK Phase {}] brute_sum(eq*combined) = {x}\n", .{ current_phase, brute_sum.toBytesBE()[16..32].* });
+                            dbg("[DRIFT_CHECK Phase {}] lookups_claim (poly chain) = {x}\n", .{ current_phase, lookups_claim.toBytesBE()[16..32].* });
+                            dbg("[DRIFT_CHECK Phase {}] match = {}\n", .{ current_phase, brute_sum.eql(lookups_claim) });
                         }
 
                         // Re-initialize suffix polys and RAF for new phase with condensed u_evals
                         try suffix_polys.initPhase(current_phase, num_phases, lookups_eq_evals, lookup_indices_u128, cycle_table_indices);
-                        std.debug.print("[STAGE5] Phase {} initPhase done, now calling initQRaf...\n", .{current_phase});
+                        dbg("[STAGE5] Phase {} initPhase done, now calling initQRaf...\n", .{current_phase});
                         // Save prefix checkpoints before resetting RAF decompositions
                         // After chunk_len rounds, the prefix MLE has been bound down to a single value
                         left_raf.updateCheckpoint();
@@ -3977,12 +3984,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         left_raf.initPrefix();
                         right_raf.initPrefix();
                         identity_raf.initPrefix();
-                        std.debug.print("[STAGE5] Phase {} initQRaf + initPrefix done\n", .{current_phase});
+                        dbg("[STAGE5] Phase {} initQRaf + initPrefix done\n", .{current_phase});
 
                         // Reset the new phase's expanding table to 1
                         expanding_tables[current_phase].reset(F.one());
 
-                        std.debug.print("[STAGE5] Condensed u_evals with expanding table, reset phase {} table\n", .{current_phase});
+                        dbg("[STAGE5] Condensed u_evals with expanding table, reset phase {} table\n", .{current_phase});
                     }
 
                     // Also update legacy ra_weights for cycle rounds (needed for the last 8 rounds)
@@ -3992,7 +3999,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                     // Debug: print round info for rounds 0-3 and 63-65
                     if (round < 4 or (round >= 63 and round <= 65)) {
-                        std.debug.print("[STAGE5 ADDR] Round {} challenge (full) = {any}\n", .{
+                        dbg("[STAGE5 ADDR] Round {} challenge (full) = {any}\n", .{
                             round,
                             challenge.toBytesBE(),
                         });
@@ -4000,19 +4007,19 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                     // Debug: print round info for first round of each chunk
                     if (round % lookups_ra_virtual_log_k_chunk == 0 and (round < 64 or round >= 64)) {
-                        std.debug.print("[STAGE5 RA_CHUNK] Starting chunk {} (rounds {}-{})\n", .{
+                        dbg("[STAGE5 RA_CHUNK] Starting chunk {} (rounds {}-{})\n", .{
                             chunk_idx,
                             round,
                             round + lookups_ra_virtual_log_k_chunk - 1,
                         });
-                        std.debug.print("  bit_index = {} (bit {} of lookup_index)\n", .{ bit_index, bit_index });
-                        std.debug.print("  challenge = {x}\n", .{challenge.toBytesBE()[16..32].*});
+                        dbg("  bit_index = {} (bit {} of lookup_index)\n", .{ bit_index, bit_index });
+                        dbg("  challenge = {x}\n", .{challenge.toBytesBE()[16..32].*});
                         // Print lookup_indices for first 4 cycles
                         for (0..@min(4, T)) |jj| {
                             const idx_lo = lookups_indices_lo[jj];
                             const idx_hi = lookups_indices_hi[jj];
                             const bit_val = getBit128(idx_lo, idx_hi, bit_index);
-                            std.debug.print("  cycle[{}]: lookup_idx=({x:016},{x:016}), bit[{}]={}\n", .{
+                            dbg("  cycle[{}]: lookup_idx=({x:016},{x:016}), bit[{}]={}\n", .{
                                 jj, idx_hi, idx_lo, bit_index, bit_val,
                             });
                         }
@@ -4030,9 +4037,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                     // Debug: print ra_chunk values after last round of each chunk
                     if ((round + 1) % lookups_ra_virtual_log_k_chunk == 0) {
-                        std.debug.print("[STAGE5 RA_CHUNK] Finished chunk {} after round {}\n", .{ chunk_idx, round });
+                        dbg("[STAGE5 RA_CHUNK] Finished chunk {} after round {}\n", .{ chunk_idx, round });
                         for (0..@min(4, T)) |jj| {
-                            std.debug.print("  ra_chunk[{}][{}] = {x}\n", .{
+                            dbg("  ra_chunk[{}][{}] = {x}\n", .{
                                 chunk_idx, jj, ra_chunk_weights[chunk_idx][jj].toBytesBE()[16..32].*,
                             });
                         }
@@ -4043,7 +4050,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // The correct value is p_inst2(r) which we computed earlier.
 
                     if (round % 8 == 7) {
-                        std.debug.print("[STAGE5] Completed rounds 0-{}\n", .{round});
+                        dbg("[STAGE5] Completed rounds 0-{}\n", .{round});
                     }
 
                     continue; // Skip the rest of the loop for address rounds
@@ -4080,9 +4087,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         for (0..T) |jj| {
                             pre_remat_sum = pre_remat_sum.add(lookups_eq_evals[jj].mul(lookups_combined_vals[jj]));
                         }
-                        std.debug.print("[PRE-REMAT] sum(eq*combined_vals) = {x}\n", .{pre_remat_sum.toBytesBE()[16..32].*});
-                        std.debug.print("[PRE-REMAT] lookups_claim (poly chain) = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
-                        std.debug.print("[PRE-REMAT] match = {}\n", .{pre_remat_sum.eql(lookups_claim)});
+                        dbg("[PRE-REMAT] sum(eq*combined_vals) = {x}\n", .{pre_remat_sum.toBytesBE()[16..32].*});
+                        dbg("[PRE-REMAT] lookups_claim (poly chain) = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+                        dbg("[PRE-REMAT] match = {}\n", .{pre_remat_sum.eql(lookups_claim)});
 
                         // Get bound prefix values from RAF decompositions
                         // After 128 address rounds, the prefix MLE has been bound to a single value.
@@ -4155,33 +4162,33 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             computed_right = computed_right.add(r_right.mul(two_power));
                         }
 
-                        std.debug.print("[STAGE5 REMATERIALIZE] Verification:\n", .{});
-                        std.debug.print("  computed_identity (from challenges) = {x}\n", .{computed_identity.toBytesBE()[16..32].*});
-                        std.debug.print("  identity_prefix (from bound_value) = {x}\n", .{identity_prefix.toBytesBE()[16..32].*});
-                        std.debug.print("  identity match = {}\n", .{computed_identity.eql(identity_prefix)});
-                        std.debug.print("  computed_left (from challenges) = {x}\n", .{computed_left.toBytesBE()[16..32].*});
-                        std.debug.print("  left_prefix (from bound_value) = {x}\n", .{left_prefix.toBytesBE()[16..32].*});
-                        std.debug.print("  left match = {}\n", .{computed_left.eql(left_prefix)});
-                        std.debug.print("  computed_right (from challenges) = {x}\n", .{computed_right.toBytesBE()[16..32].*});
-                        std.debug.print("  right_prefix (from bound_value) = {x}\n", .{right_prefix.toBytesBE()[16..32].*});
-                        std.debug.print("  right match = {}\n", .{computed_right.eql(right_prefix)});
+                        dbg("[STAGE5 REMATERIALIZE] Verification:\n", .{});
+                        dbg("  computed_identity (from challenges) = {x}\n", .{computed_identity.toBytesBE()[16..32].*});
+                        dbg("  identity_prefix (from bound_value) = {x}\n", .{identity_prefix.toBytesBE()[16..32].*});
+                        dbg("  identity match = {}\n", .{computed_identity.eql(identity_prefix)});
+                        dbg("  computed_left (from challenges) = {x}\n", .{computed_left.toBytesBE()[16..32].*});
+                        dbg("  left_prefix (from bound_value) = {x}\n", .{left_prefix.toBytesBE()[16..32].*});
+                        dbg("  left match = {}\n", .{computed_left.eql(left_prefix)});
+                        dbg("  computed_right (from challenges) = {x}\n", .{computed_right.toBytesBE()[16..32].*});
+                        dbg("  right_prefix (from bound_value) = {x}\n", .{right_prefix.toBytesBE()[16..32].*});
+                        dbg("  right match = {}\n", .{computed_right.eql(right_prefix)});
 
                         // Print first few challenges to compare with Jolt
-                        std.debug.print("  First 4 challenges (to compare with Jolt):\n", .{});
+                        dbg("  First 4 challenges (to compare with Jolt):\n", .{});
                         for (0..4) |i| {
-                            std.debug.print("    challenges[{}] = {x}\n", .{ i, challenges[i].toBytesBE()[16..32].* });
+                            dbg("    challenges[{}] = {x}\n", .{ i, challenges[i].toBytesBE()[16..32].* });
                         }
 
                         // Compute RAF scalar values
                         const raf_interleaved = gamma_raf.mul(left_prefix).add(gamma_raf2.mul(right_prefix));
                         const raf_identity = gamma_raf2.mul(identity_prefix);
 
-                        std.debug.print("[STAGE5 REMATERIALIZE] round=128, left_prefix={x}, right_prefix={x}, identity_prefix={x}\n", .{
+                        dbg("[STAGE5 REMATERIALIZE] round=128, left_prefix={x}, right_prefix={x}, identity_prefix={x}\n", .{
                             left_prefix.toBytesBE()[16..32].*,
                             right_prefix.toBytesBE()[16..32].*,
                             identity_prefix.toBytesBE()[16..32].*,
                         });
-                        std.debug.print("[STAGE5 REMATERIALIZE] raf_interleaved={x}, raf_identity={x}\n", .{
+                        dbg("[STAGE5 REMATERIALIZE] raf_interleaved={x}, raf_identity={x}\n", .{
                             raf_interleaved.toBytesBE()[16..32].*,
                             raf_identity.toBytesBE()[16..32].*,
                         });
@@ -4219,20 +4226,20 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         //   Σ_{i=0}^{63} 2^(63-i) * r[64+i]
                         //
                         // This means: r_address_prime[64] has coeff 2^63, r[65] has 2^62, etc.
-                        std.debug.print("[STAGE5 DEBUG] Direct MLE computation for RangeCheck:\n", .{});
+                        dbg("[STAGE5 DEBUG] Direct MLE computation for RangeCheck:\n", .{});
                         // Debug: print challenges[64], [65], and [127] for comparison with Jolt (FULL 32 bytes)
                         const ch64_bytes = challenges[64].toBytesBE();
-                        std.debug.print("[STAGE5 DEBUG] challenges[64] (FULL 32) = ", .{});
-                        for (ch64_bytes) |b| std.debug.print("{x:0>2}", .{b});
-                        std.debug.print("\n", .{});
+                        dbg("[STAGE5 DEBUG] challenges[64] (FULL 32) = ", .{});
+                        for (ch64_bytes) |b| dbg("{x:0>2}", .{b});
+                        dbg("\n", .{});
                         const ch65_bytes = challenges[65].toBytesBE();
-                        std.debug.print("[STAGE5 DEBUG] challenges[65] (FULL 32) = ", .{});
-                        for (ch65_bytes) |b| std.debug.print("{x:0>2}", .{b});
-                        std.debug.print("\n", .{});
+                        dbg("[STAGE5 DEBUG] challenges[65] (FULL 32) = ", .{});
+                        for (ch65_bytes) |b| dbg("{x:0>2}", .{b});
+                        dbg("\n", .{});
                         const ch127_bytes = challenges[127].toBytesBE();
-                        std.debug.print("[STAGE5 DEBUG] challenges[127] (FULL 32) = ", .{});
-                        for (ch127_bytes) |b| std.debug.print("{x:0>2}", .{b});
-                        std.debug.print("\n", .{});
+                        dbg("[STAGE5 DEBUG] challenges[127] (FULL 32) = ", .{});
+                        for (ch127_bytes) |b| dbg("{x:0>2}", .{b});
+                        dbg("\n", .{});
                         var direct_range_check_mle = F.zero();
                         for (0..64) |i| {
                             // challenges are in HighToLow order: challenge[0] binds bit 127
@@ -4243,18 +4250,18 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             const coeff = if (shift < 64) F.fromU64(@as(u64, 1) << @intCast(shift)) else F.zero();
                             direct_range_check_mle = direct_range_check_mle.add(coeff.mul(r_i));
                             if (i < 3 or i >= 61) {
-                                std.debug.print("  i={}, shift={}, coeff=2^{}, r={x}\n", .{
+                                dbg("  i={}, shift={}, coeff=2^{}, r={x}\n", .{
                                     i, shift, shift, r_i.toBytesBE()[28..32].*,
                                 });
                             }
                         }
-                        std.debug.print("[STAGE5 DEBUG] Direct RangeCheck MLE result: {x}\n", .{
+                        dbg("[STAGE5 DEBUG] Direct RangeCheck MLE result: {x}\n", .{
                             direct_range_check_mle.toBytesBE()[16..32].*,
                         });
-                        std.debug.print("[STAGE5 DEBUG] Prefix-suffix result (table[0]): {x}\n", .{
+                        dbg("[STAGE5 DEBUG] Prefix-suffix result (table[0]): {x}\n", .{
                             table_values[0].toBytesBE()[16..32].*,
                         });
-                        std.debug.print("[STAGE5 DEBUG] Match: {}\n", .{
+                        dbg("[STAGE5 DEBUG] Match: {}\n", .{
                             direct_range_check_mle.eql(table_values[0]),
                         });
 
@@ -4266,9 +4273,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             const shift_and: u6 = @intCast(63 - i);
                             direct_and_mle = direct_and_mle.add(F.fromU64(@as(u64, 1) << shift_and).mul(x_i.mul(y_i)));
                         }
-                        std.debug.print("[TABLE_VERIFY] AND direct = {x}\n", .{direct_and_mle.toBytesBE()[16..32].*});
-                        std.debug.print("[TABLE_VERIFY] AND prefix-suffix = {x}\n", .{table_values[2].toBytesBE()[16..32].*});
-                        std.debug.print("[TABLE_VERIFY] AND match: {}\n", .{direct_and_mle.eql(table_values[2])});
+                        dbg("[TABLE_VERIFY] AND direct = {x}\n", .{direct_and_mle.toBytesBE()[16..32].*});
+                        dbg("[TABLE_VERIFY] AND prefix-suffix = {x}\n", .{table_values[2].toBytesBE()[16..32].*});
+                        dbg("[TABLE_VERIFY] AND match: {}\n", .{direct_and_mle.eql(table_values[2])});
 
                         // Verify XOR table (index 5): Σ 2^(63-i) * ((1-x)*y + x*(1-y))
                         var direct_xor_mle = F.zero();
@@ -4279,9 +4286,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             const xor_val = F.one().sub(x_i).mul(y_i).add(x_i.mul(F.one().sub(y_i)));
                             direct_xor_mle = direct_xor_mle.add(F.fromU64(@as(u64, 1) << shift_xor).mul(xor_val));
                         }
-                        std.debug.print("[TABLE_VERIFY] XOR direct = {x}\n", .{direct_xor_mle.toBytesBE()[16..32].*});
-                        std.debug.print("[TABLE_VERIFY] XOR prefix-suffix = {x}\n", .{table_values[5].toBytesBE()[16..32].*});
-                        std.debug.print("[TABLE_VERIFY] XOR match: {}\n", .{direct_xor_mle.eql(table_values[5])});
+                        dbg("[TABLE_VERIFY] XOR direct = {x}\n", .{direct_xor_mle.toBytesBE()[16..32].*});
+                        dbg("[TABLE_VERIFY] XOR prefix-suffix = {x}\n", .{table_values[5].toBytesBE()[16..32].*});
+                        dbg("[TABLE_VERIFY] XOR match: {}\n", .{direct_xor_mle.eql(table_values[5])});
 
                         // Verify OR table (index 4): Σ 2^(63-i) * (x + y - x*y)
                         var direct_or_mle = F.zero();
@@ -4292,42 +4299,42 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             const or_val = x_i.add(y_i).sub(x_i.mul(y_i));
                             direct_or_mle = direct_or_mle.add(F.fromU64(@as(u64, 1) << shift_or).mul(or_val));
                         }
-                        std.debug.print("[TABLE_VERIFY] OR direct = {x}\n", .{direct_or_mle.toBytesBE()[16..32].*});
-                        std.debug.print("[TABLE_VERIFY] OR prefix-suffix = {x}\n", .{table_values[4].toBytesBE()[16..32].*});
-                        std.debug.print("[TABLE_VERIFY] OR match: {}\n", .{direct_or_mle.eql(table_values[4])});
+                        dbg("[TABLE_VERIFY] OR direct = {x}\n", .{direct_or_mle.toBytesBE()[16..32].*});
+                        dbg("[TABLE_VERIFY] OR prefix-suffix = {x}\n", .{table_values[4].toBytesBE()[16..32].*});
+                        dbg("[TABLE_VERIFY] OR match: {}\n", .{direct_or_mle.eql(table_values[4])});
 
                         // Debug: print key prefix checkpoint values
-                        std.debug.print("[STAGE5 REMATERIALIZE] Key prefix checkpoints:\n", .{});
+                        dbg("[STAGE5 REMATERIALIZE] Key prefix checkpoints:\n", .{});
                         const lw_idx = @intFromEnum(lookup_table_mod.Prefixes.LowerWord);
                         const eq_idx = @intFromEnum(lookup_table_mod.Prefixes.Eq);
                         const lt_idx = @intFromEnum(lookup_table_mod.Prefixes.LessThan);
                         const lsb_idx = @intFromEnum(lookup_table_mod.Prefixes.Lsb);
                         if (prefix_checkpoints.checkpoints[lw_idx]) |v| {
-                            std.debug.print("  LowerWord = {x}\n", .{v.toBytesBE()[16..32].*});
+                            dbg("  LowerWord = {x}\n", .{v.toBytesBE()[16..32].*});
                         } else {
-                            std.debug.print("  LowerWord = NULL\n", .{});
+                            dbg("  LowerWord = NULL\n", .{});
                         }
                         if (prefix_checkpoints.checkpoints[eq_idx]) |v| {
-                            std.debug.print("  Eq = {x}\n", .{v.toBytesBE()[16..32].*});
+                            dbg("  Eq = {x}\n", .{v.toBytesBE()[16..32].*});
                         } else {
-                            std.debug.print("  Eq = NULL\n", .{});
+                            dbg("  Eq = NULL\n", .{});
                         }
                         if (prefix_checkpoints.checkpoints[lt_idx]) |v| {
-                            std.debug.print("  LessThan = {x}\n", .{v.toBytesBE()[16..32].*});
+                            dbg("  LessThan = {x}\n", .{v.toBytesBE()[16..32].*});
                         } else {
-                            std.debug.print("  LessThan = NULL\n", .{});
+                            dbg("  LessThan = NULL\n", .{});
                         }
                         if (prefix_checkpoints.checkpoints[lsb_idx]) |v| {
-                            std.debug.print("  Lsb = {x}\n", .{v.toBytesBE()[16..32].*});
+                            dbg("  Lsb = {x}\n", .{v.toBytesBE()[16..32].*});
                         } else {
-                            std.debug.print("  Lsb = NULL\n", .{});
+                            dbg("  Lsb = NULL\n", .{});
                         }
 
                         // Debug: print table values
-                        std.debug.print("[STAGE5 REMATERIALIZE] table_values_at_r_addr:\n", .{});
+                        dbg("[STAGE5 REMATERIALIZE] table_values_at_r_addr:\n", .{});
                         for (0..NUM_TABLES) |t_idx| {
                             if (!table_values[t_idx].eql(F.zero())) {
-                                std.debug.print("  table[{}] = {x}\n", .{ t_idx, table_values[t_idx].toBytesBE()[16..32].* });
+                                dbg("  table[{}] = {x}\n", .{ t_idx, table_values[t_idx].toBytesBE()[16..32].* });
                             }
                         }
 
@@ -4342,9 +4349,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 }
                                 sum_with_original = sum_with_original.add(fj_eq.mul(fj_ra).mul(lookups_combined_vals[fj]));
                             }
-                            std.debug.print("[PRE_REMAT_SUM] sum_with_ORIGINAL_cv = {x}\n", .{sum_with_original.toBytesBE()[16..32].*});
-                            std.debug.print("[PRE_REMAT_SUM] lookups_claim         = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
-                            std.debug.print("[PRE_REMAT_SUM] MATCH: {}\n", .{sum_with_original.eql(lookups_claim)});
+                            dbg("[PRE_REMAT_SUM] sum_with_ORIGINAL_cv = {x}\n", .{sum_with_original.toBytesBE()[16..32].*});
+                            dbg("[PRE_REMAT_SUM] lookups_claim         = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+                            dbg("[PRE_REMAT_SUM] MATCH: {}\n", .{sum_with_original.eql(lookups_claim)});
                         }
 
                         // Rematerialize combined_vals using the correct formula
@@ -4383,11 +4390,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         }
 
                         // Debug: print first 5 rematerialized values
-                        std.debug.print("[STAGE5 REMATERIALIZE] First 5 combined_vals after rematerialization:\n", .{});
+                        dbg("[STAGE5 REMATERIALIZE] First 5 combined_vals after rematerialization:\n", .{});
                         for (0..@min(5, trace_len)) |j| {
                             const table_idx_dbg = cycle_table_indices[j];
                             const table_val_dbg = if (table_idx_dbg >= 0 and @as(usize, @intCast(table_idx_dbg)) < NUM_TABLES) table_values[@intCast(table_idx_dbg)] else F.zero();
-                            std.debug.print("  j={}: combined_val={x}, is_identity_path={}, table_idx={}, table_val={x}\n", .{
+                            dbg("  j={}: combined_val={x}, is_identity_path={}, table_idx={}, table_val={x}\n", .{
                                 j,
                                 lookups_combined_vals[j].toBytesBE()[24..32].*,
                                 cycle_is_identity_path[j],
@@ -4417,18 +4424,18 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             for (0..T) |jj| {
                                 condensed_sum = condensed_sum.add(lookups_eq_evals[jj].mul(lookups_combined_vals[jj]));
                             }
-                            std.debug.print("[CONDENSED_DIAG] Σ condensed_eq * cv_remat = {x}\n", .{condensed_sum.toBytesBE()[16..32].*});
-                            std.debug.print("[CONDENSED_DIAG] lookups_claim = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
-                            std.debug.print("[CONDENSED_DIAG] match = {}\n", .{condensed_sum.eql(lookups_claim)});
+                            dbg("[CONDENSED_DIAG] Σ condensed_eq * cv_remat = {x}\n", .{condensed_sum.toBytesBE()[16..32].*});
+                            dbg("[CONDENSED_DIAG] lookups_claim = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+                            dbg("[CONDENSED_DIAG] match = {}\n", .{condensed_sum.eql(lookups_claim)});
 
                             // Also check: condensed_u_eval[0] vs eq_fresh(0) * ra(0)
                             const fresh_eq_0 = computeEqAtIndex(r_reduction, 0);
-                            std.debug.print("[CONDENSED_DIAG] condensed_eq[0] = {x}\n", .{lookups_eq_evals[0].toBytesBE()[16..32].*});
-                            std.debug.print("[CONDENSED_DIAG] fresh_eq(0) = {x}\n", .{fresh_eq_0.toBytesBE()[16..32].*});
-                            std.debug.print("[CONDENSED_DIAG] ra_weights[0] = {x}\n", .{lookups_ra_weights[0].toBytesBE()[16..32].*});
+                            dbg("[CONDENSED_DIAG] condensed_eq[0] = {x}\n", .{lookups_eq_evals[0].toBytesBE()[16..32].*});
+                            dbg("[CONDENSED_DIAG] fresh_eq(0) = {x}\n", .{fresh_eq_0.toBytesBE()[16..32].*});
+                            dbg("[CONDENSED_DIAG] ra_weights[0] = {x}\n", .{lookups_ra_weights[0].toBytesBE()[16..32].*});
                             const expected_condensed_0 = fresh_eq_0.mul(lookups_ra_weights[0]);
-                            std.debug.print("[CONDENSED_DIAG] fresh_eq(0) * ra(0) = {x}\n", .{expected_condensed_0.toBytesBE()[16..32].*});
-                            std.debug.print("[CONDENSED_DIAG] condensed_eq[0] == fresh*ra: {}\n", .{lookups_eq_evals[0].eql(expected_condensed_0)});
+                            dbg("[CONDENSED_DIAG] fresh_eq(0) * ra(0) = {x}\n", .{expected_condensed_0.toBytesBE()[16..32].*});
+                            dbg("[CONDENSED_DIAG] condensed_eq[0] == fresh*ra: {}\n", .{lookups_eq_evals[0].eql(expected_condensed_0)});
 
                             // Check if the missing factor is v[7][k_bound_7]
                             // For cycle 0: k = 0x8000, phase 7 shift = 0, k_bound_7 = 0x8000
@@ -4440,10 +4447,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             const v7_val = expanding_tables[num_phases - 1].get(k_bound_7_masked);
                             const expected_with_v7 = expected_condensed_0.mul(v7_val);
                             _ = k_hi_0_diag;
-                            std.debug.print("[CONDENSED_DIAG] k_lo_0=0x{x}, k_bound_7=0x{x}, k_bound_7_masked=0x{x}\n", .{k_lo_0_diag, k_bound_7, k_bound_7_masked});
-                            std.debug.print("[CONDENSED_DIAG] v[7][0x{x}] = {x}\n", .{k_bound_7_masked, v7_val.toBytesBE()[16..32].*});
-                            std.debug.print("[CONDENSED_DIAG] fresh*ra_partial(0..6) = {x}\n", .{expected_condensed_0.toBytesBE()[16..32].*});
-                            std.debug.print("[CONDENSED_DIAG] fresh*ra_partial * v7 = {x}\n", .{expected_with_v7.toBytesBE()[16..32].*});
+                            dbg("[CONDENSED_DIAG] k_lo_0=0x{x}, k_bound_7=0x{x}, k_bound_7_masked=0x{x}\n", .{k_lo_0_diag, k_bound_7, k_bound_7_masked});
+                            dbg("[CONDENSED_DIAG] v[7][0x{x}] = {x}\n", .{k_bound_7_masked, v7_val.toBytesBE()[16..32].*});
+                            dbg("[CONDENSED_DIAG] fresh*ra_partial(0..6) = {x}\n", .{expected_condensed_0.toBytesBE()[16..32].*});
+                            dbg("[CONDENSED_DIAG] fresh*ra_partial * v7 = {x}\n", .{expected_with_v7.toBytesBE()[16..32].*});
 
                             // Also compute ra_partial = Π_{p=0}^{6} v[p][k_p(0)]
                             var ra_partial = F.one();
@@ -4459,9 +4466,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 ra_partial = ra_partial.mul(expanding_tables[pp].get(k_pp));
                             }
                             const fresh_ra_partial = fresh_eq_0.mul(ra_partial);
-                            std.debug.print("[CONDENSED_DIAG] ra_partial (phases 0-6) = {x}\n", .{ra_partial.toBytesBE()[16..32].*});
-                            std.debug.print("[CONDENSED_DIAG] fresh*ra_partial (phases 0-6) = {x}\n", .{fresh_ra_partial.toBytesBE()[16..32].*});
-                            std.debug.print("[CONDENSED_DIAG] condensed_eq[0] == fresh*ra_partial: {}\n", .{lookups_eq_evals[0].eql(fresh_ra_partial)});
+                            dbg("[CONDENSED_DIAG] ra_partial (phases 0-6) = {x}\n", .{ra_partial.toBytesBE()[16..32].*});
+                            dbg("[CONDENSED_DIAG] fresh*ra_partial (phases 0-6) = {x}\n", .{fresh_ra_partial.toBytesBE()[16..32].*});
+                            dbg("[CONDENSED_DIAG] condensed_eq[0] == fresh*ra_partial: {}\n", .{lookups_eq_evals[0].eql(fresh_ra_partial)});
 
                             // Now compute Σ condensed_eq(j) * v[15][k_15(j)] * cv_remat(j)
                             // This should equal the claim
@@ -4480,12 +4487,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                     lookups_eq_evals[jj].mul(v_last).mul(lookups_combined_vals[jj])
                                 );
                             }
-                            std.debug.print("[CONDENSED_DIAG] Σ condensed * v[15] * cv_remat = {x}\n", .{sum_with_last_phase.toBytesBE()[16..32].*});
-                            std.debug.print("[CONDENSED_DIAG] lookups_claim (poly chain) = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
-                            std.debug.print("[CONDENSED_DIAG] FINAL match = {}\n", .{sum_with_last_phase.eql(lookups_claim)});
+                            dbg("[CONDENSED_DIAG] Σ condensed * v[15] * cv_remat = {x}\n", .{sum_with_last_phase.toBytesBE()[16..32].*});
+                            dbg("[CONDENSED_DIAG] lookups_claim (poly chain) = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+                            dbg("[CONDENSED_DIAG] FINAL match = {}\n", .{sum_with_last_phase.eql(lookups_claim)});
                         }
 
-                        std.debug.print("[STAGE5 CYCLE] Reinitializing lookups_eq_evals for cycle rounds\n", .{});
+                        dbg("[STAGE5 CYCLE] Reinitializing lookups_eq_evals for cycle rounds\n", .{});
                         for (0..T) |j| {
                             lookups_eq_evals[j] = computeEqAtIndex(r_reduction, j);
                         }
@@ -4494,9 +4501,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         for (0..T) |j| {
                             eq_sum_verify = eq_sum_verify.add(lookups_eq_evals[j]);
                         }
-                        std.debug.print("[STAGE5 CYCLE] eq_sum after reinit = {x} (should be 1)\n", .{eq_sum_verify.toBytesBE()[16..32].*});
-                        std.debug.print("[STAGE5 CYCLE] reinit eq_evals[0] = {x}\n", .{lookups_eq_evals[0].toBytesBE()[16..32].*});
-                        std.debug.print("[STAGE5 CYCLE] reinit eq_evals[1] = {x}\n", .{lookups_eq_evals[1].toBytesBE()[16..32].*});
+                        dbg("[STAGE5 CYCLE] eq_sum after reinit = {x} (should be 1)\n", .{eq_sum_verify.toBytesBE()[16..32].*});
+                        dbg("[STAGE5 CYCLE] reinit eq_evals[0] = {x}\n", .{lookups_eq_evals[0].toBytesBE()[16..32].*});
+                        dbg("[STAGE5 CYCLE] reinit eq_evals[1] = {x}\n", .{lookups_eq_evals[1].toBytesBE()[16..32].*});
 
                         // ============================================================
                         // CRITICAL FIX: Materialize ra_chunk_weights from expanding tables
@@ -4511,20 +4518,20 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         // Each chunk covers (phases_per_chunk) phases, where:
                         //   phases_per_chunk = num_phases / ra_num_chunks = 8 / 8 = 1
                         //   chunk_i handles phases [chunk_i * phases_per_chunk, (chunk_i+1) * phases_per_chunk)
-                        std.debug.print("[STAGE5 CYCLE] Materializing ra_chunk_weights from expanding tables\n", .{});
+                        dbg("[STAGE5 CYCLE] Materializing ra_chunk_weights from expanding tables\n", .{});
                         const phases_per_chunk = num_phases / ra_num_chunks;
-                        std.debug.print("  num_phases={}, ra_num_chunks={}, phases_per_chunk={}\n", .{ num_phases, ra_num_chunks, phases_per_chunk });
+                        dbg("  num_phases={}, ra_num_chunks={}, phases_per_chunk={}\n", .{ num_phases, ra_num_chunks, phases_per_chunk });
 
                         // Debug: print expanding table sizes and first few values
-                        std.debug.print("  Expanding table state at round 128:\n", .{});
+                        dbg("  Expanding table state at round 128:\n", .{});
                         const v0_p0 = expanding_tables[0].get(0);
                         const v0_p1 = expanding_tables[1].get(0);
                         const product_check = v0_p0.mul(v0_p1);
-                        std.debug.print("    phase[0] v[0] (full) = {x}\n", .{v0_p0.toBytesBE()[16..32].*});
-                        std.debug.print("    phase[1] v[0] (full) = {x}\n", .{v0_p1.toBytesBE()[16..32].*});
-                        std.debug.print("    product v0_p0 * v0_p1 = {x}\n", .{product_check.toBytesBE()[16..32].*});
+                        dbg("    phase[0] v[0] (full) = {x}\n", .{v0_p0.toBytesBE()[16..32].*});
+                        dbg("    phase[1] v[0] (full) = {x}\n", .{v0_p1.toBytesBE()[16..32].*});
+                        dbg("    product v0_p0 * v0_p1 = {x}\n", .{product_check.toBytesBE()[16..32].*});
                         for (0..@min(4, num_phases)) |phase| {
-                            std.debug.print("    phase[{}]: len={}, first_vals=[{x}, {x}, {x}, {x}]\n", .{
+                            dbg("    phase[{}]: len={}, first_vals=[{x}, {x}, {x}, {x}]\n", .{
                                 phase,
                                 expanding_tables[phase].getLen(),
                                 expanding_tables[phase].get(0).toBytesBE()[28..32].*,
@@ -4552,7 +4559,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                             // Debug: print lookup index for first cycle
                             if (j == 0) {
-                                std.debug.print("[STAGE5 RA_DEBUG] Cycle 0 lookup_index: k_hi=0x{x:0>16}, k_lo=0x{x:0>16}\n", .{ k_hi, k_lo });
+                                dbg("[STAGE5 RA_DEBUG] Cycle 0 lookup_index: k_hi=0x{x:0>16}, k_lo=0x{x:0>16}\n", .{ k_hi, k_lo });
                             }
 
                             // For each chunk, compute the product of expanding table lookups
@@ -4600,7 +4607,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                                     // Debug: print detailed info for first cycle
                                     if (j == 0 and chunk_idx < 2) {
-                                        std.debug.print("[STAGE5 RA_DEBUG] j=0, chunk={}, phase={}: shift={}, k_phase=0x{x}, table_val={x}\n", .{
+                                        dbg("[STAGE5 RA_DEBUG] j=0, chunk={}, phase={}: shift={}, k_phase=0x{x}, table_val={x}\n", .{
                                             chunk_idx,
                                             phase,
                                             shift,
@@ -4616,7 +4623,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                                 // Debug: print final ra_val for first cycle, first 2 chunks
                                 if (j == 0 and chunk_idx < 2) {
-                                    std.debug.print("[STAGE5 RA_DEBUG] j=0, chunk={}: final ra_val={x}\n", .{
+                                    dbg("[STAGE5 RA_DEBUG] j=0, chunk={}: final ra_val={x}\n", .{
                                         chunk_idx,
                                         ra_val.toBytesBE()[16..32].*,
                                     });
@@ -4625,23 +4632,23 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         }
 
                         // Debug: print first few ra_chunk_weights after materialization
-                        std.debug.print("[STAGE5 CYCLE] ra_chunk_weights after materialization (first 4 cycles):\n", .{});
+                        dbg("[STAGE5 CYCLE] ra_chunk_weights after materialization (first 4 cycles):\n", .{});
                         for (0..@min(4, T)) |j| {
-                            std.debug.print("  j={}: ra_chunks=[", .{j});
+                            dbg("  j={}: ra_chunks=[", .{j});
                             for (0..ra_num_chunks) |c| {
-                                if (c > 0) std.debug.print(", ", .{});
-                                std.debug.print("{x}", .{ra_chunk_weights[c][j].toBytesBE()[24..32].*});
+                                if (c > 0) dbg(", ", .{});
+                                dbg("{x}", .{ra_chunk_weights[c][j].toBytesBE()[24..32].*});
                             }
-                            std.debug.print("]\n", .{});
+                            dbg("]\n", .{});
                         }
 
                         // DIAGNOSTIC: Compare accumulated vs materialized for cycle 0
-                        std.debug.print("[RA_ACCUM_VS_MATERIAL] Comparing for cycle 0:\n", .{});
+                        dbg("[RA_ACCUM_VS_MATERIAL] Comparing for cycle 0:\n", .{});
                         for (0..@min(ra_num_chunks, 8)) |c| {
                             const materialized = ra_chunk_weights[c][0];
                             const accumulated = accum_ra_debug[c];
                             const match_val = materialized.eql(accumulated);
-                            std.debug.print("  chunk[{}]: accum={x}, material={x}, match={}\n", .{
+                            dbg("  chunk[{}]: accum={x}, material={x}, match={}\n", .{
                                 c,
                                 accumulated.toBytesBE()[16..32].*,
                                 materialized.toBytesBE()[16..32].*,
@@ -4660,9 +4667,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             }
                             sum_with_material = sum_with_material.add(eq_j.mul(ra_material).mul(lookups_combined_vals[j]));
                         }
-                        std.debug.print("[RA_COMPARE] sum_with_material = {x}\n", .{sum_with_material.toBytesBE()[16..32].*});
-                        std.debug.print("[RA_COMPARE] lookups_claim     = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
-                        std.debug.print("[RA_COMPARE] material==claim: {}\n", .{sum_with_material.eql(lookups_claim)});
+                        dbg("[RA_COMPARE] sum_with_material = {x}\n", .{sum_with_material.toBytesBE()[16..32].*});
+                        dbg("[RA_COMPARE] lookups_claim     = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+                        dbg("[RA_COMPARE] material==claim: {}\n", .{sum_with_material.eql(lookups_claim)});
 
                         // Update lookups_ra_weights[j] to be the product of all chunks
                         for (0..T) |j| {
@@ -4690,9 +4697,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 const eq_bit = if (k_bit == 1) r_i else F.one().sub(r_i);
                                 direct_eq = direct_eq.mul(eq_bit);
                             }
-                            std.debug.print("[STAGE5 RA_VERIFY] Direct eq(K(0), r_addr) = {x}\n", .{direct_eq.toBytesBE()[16..32].*});
-                            std.debug.print("[STAGE5 RA_VERIFY] Product of ra_chunks(0) = {x}\n", .{lookups_ra_weights[0].toBytesBE()[16..32].*});
-                            std.debug.print("[STAGE5 RA_VERIFY] Match = {}\n", .{direct_eq.eql(lookups_ra_weights[0])});
+                            dbg("[STAGE5 RA_VERIFY] Direct eq(K(0), r_addr) = {x}\n", .{direct_eq.toBytesBE()[16..32].*});
+                            dbg("[STAGE5 RA_VERIFY] Product of ra_chunks(0) = {x}\n", .{lookups_ra_weights[0].toBytesBE()[16..32].*});
+                            dbg("[STAGE5 RA_VERIFY] Match = {}\n", .{direct_eq.eql(lookups_ra_weights[0])});
                         }
 
                         // DEBUG: Compute combined_val(0) directly from table MLE
@@ -4702,15 +4709,15 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             // For cycle 0: what table is it?
                             const t_idx_0 = cycle_table_indices[0];
                             const is_id_0 = cycle_is_identity_path[0];
-                            std.debug.print("[STAGE5 CV_VERIFY] Cycle 0: table_idx={}, is_identity={}\n", .{t_idx_0, is_id_0});
-                            std.debug.print("[STAGE5 CV_VERIFY] combined_vals[0] = {x}\n", .{lookups_combined_vals[0].toBytesBE()[16..32].*});
+                            dbg("[STAGE5 CV_VERIFY] Cycle 0: table_idx={}, is_identity={}\n", .{t_idx_0, is_id_0});
+                            dbg("[STAGE5 CV_VERIFY] combined_vals[0] = {x}\n", .{lookups_combined_vals[0].toBytesBE()[16..32].*});
                             if (t_idx_0 >= 0) {
-                                std.debug.print("[STAGE5 CV_VERIFY] table_val = {x}\n", .{stored_table_values[@intCast(t_idx_0)].toBytesBE()[16..32].*});
+                                dbg("[STAGE5 CV_VERIFY] table_val = {x}\n", .{stored_table_values[@intCast(t_idx_0)].toBytesBE()[16..32].*});
                             }
                             if (is_id_0) {
-                                std.debug.print("[STAGE5 CV_VERIFY] raf_identity = {x}\n", .{raf_identity.toBytesBE()[16..32].*});
+                                dbg("[STAGE5 CV_VERIFY] raf_identity = {x}\n", .{raf_identity.toBytesBE()[16..32].*});
                             } else {
-                                std.debug.print("[STAGE5 CV_VERIFY] raf_interleaved = {x}\n", .{raf_interleaved.toBytesBE()[16..32].*});
+                                dbg("[STAGE5 CV_VERIFY] raf_interleaved = {x}\n", .{raf_interleaved.toBytesBE()[16..32].*});
                             }
 
                             // Also verify: sum over j of eq(j) * eq(K(j), r_addr) * cv(j)
@@ -4722,7 +4729,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 const cv_j = lookups_combined_vals[jj];
                                 const contrib_j = eq_j.mul(ra_j).mul(cv_j);
                                 direct_sum_5 = direct_sum_5.add(contrib_j);
-                                std.debug.print("[STAGE5 CYCLE_SUM] j={}: eq={x}, ra={x}, cv={x}, contrib={x}, running={x}\n", .{
+                                dbg("[STAGE5 CYCLE_SUM] j={}: eq={x}, ra={x}, cv={x}, contrib={x}, running={x}\n", .{
                                     jj,
                                     eq_j.toBytesBE()[24..32].*,
                                     ra_j.toBytesBE()[24..32].*,
@@ -4759,7 +4766,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 // Check: direct_ra vs ra_weights
                                 if (!direct_ra.eql(lookups_ra_weights[j])) {
                                     if (mismatch_count < 3) {
-                                        std.debug.print("[DIRECT_BF] ra MISMATCH at j={}: direct={x}, ra_weights={x}\n", .{
+                                        dbg("[DIRECT_BF] ra MISMATCH at j={}: direct={x}, ra_weights={x}\n", .{
                                             j, direct_ra.toBytesBE()[24..32].*, lookups_ra_weights[j].toBytesBE()[24..32].*,
                                         });
                                     }
@@ -4780,12 +4787,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             for (0..T) |j2| {
                                 mat_sum_check = mat_sum_check.add(lookups_eq_evals[j2].mul(lookups_ra_weights[j2]).mul(lookups_combined_vals[j2]));
                             }
-                            std.debug.print("[DIRECT_BF] ra_weights mismatches: {}/{}\n", .{mismatch_count, T});
-                            std.debug.print("[DIRECT_BF] Σ eq*direct_ra*cv_remat = {x}\n", .{direct_bf_sum.toBytesBE()[16..32].*});
-                            std.debug.print("[DIRECT_BF] materialized_sum (ra_weights) = {x}\n", .{mat_sum_check.toBytesBE()[16..32].*});
-                            std.debug.print("[DIRECT_BF] lookups_claim (poly chain) = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
-                            std.debug.print("[DIRECT_BF] direct_bf == materialized: {}\n", .{direct_bf_sum.eql(mat_sum_check)});
-                            std.debug.print("[DIRECT_BF] direct_bf == lookups_claim: {}\n", .{direct_bf_sum.eql(lookups_claim)});
+                            dbg("[DIRECT_BF] ra_weights mismatches: {}/{}\n", .{mismatch_count, T});
+                            dbg("[DIRECT_BF] Σ eq*direct_ra*cv_remat = {x}\n", .{direct_bf_sum.toBytesBE()[16..32].*});
+                            dbg("[DIRECT_BF] materialized_sum (ra_weights) = {x}\n", .{mat_sum_check.toBytesBE()[16..32].*});
+                            dbg("[DIRECT_BF] lookups_claim (poly chain) = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+                            dbg("[DIRECT_BF] direct_bf == materialized: {}\n", .{direct_bf_sum.eql(mat_sum_check)});
+                            dbg("[DIRECT_BF] direct_bf == lookups_claim: {}\n", .{direct_bf_sum.eql(lookups_claim)});
 
                             // KEY TEST: The claim should equal materialized_sum.
                             // If direct_bf matches materialized but not claim, then
@@ -4805,7 +4812,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             //
                             // Let me check the initial claim structure more carefully.
                             // Print lookups_input for reference
-                            std.debug.print("[DIRECT_BF] lookups_input (initial claim) = {x}\n", .{lookups_input.toBytesBE()[16..32].*});
+                            dbg("[DIRECT_BF] lookups_input (initial claim) = {x}\n", .{lookups_input.toBytesBE()[16..32].*});
 
                             // SPLIT TEST: Compute sum with table-only (no RAF) and RAF-only (no table)
                             var table_only_sum = F.zero();
@@ -4832,11 +4839,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                     raf_only_sum = raf_only_sum.add(eq_ra.mul(raf_identity));
                                 }
                             }
-                            std.debug.print("[SPLIT_TEST] table_only_sum = {x}\n", .{table_only_sum.toBytesBE()[16..32].*});
-                            std.debug.print("[SPLIT_TEST] raf_only_sum = {x}\n", .{raf_only_sum.toBytesBE()[16..32].*});
-                            std.debug.print("[SPLIT_TEST] table+raf = {x}\n", .{table_only_sum.add(raf_only_sum).toBytesBE()[16..32].*});
-                            std.debug.print("[SPLIT_TEST] materialized = {x}\n", .{mat_sum_check.toBytesBE()[16..32].*});
-                            std.debug.print("[SPLIT_TEST] split matches materialized: {}\n", .{table_only_sum.add(raf_only_sum).eql(mat_sum_check)});
+                            dbg("[SPLIT_TEST] table_only_sum = {x}\n", .{table_only_sum.toBytesBE()[16..32].*});
+                            dbg("[SPLIT_TEST] raf_only_sum = {x}\n", .{raf_only_sum.toBytesBE()[16..32].*});
+                            dbg("[SPLIT_TEST] table+raf = {x}\n", .{table_only_sum.add(raf_only_sum).toBytesBE()[16..32].*});
+                            dbg("[SPLIT_TEST] materialized = {x}\n", .{mat_sum_check.toBytesBE()[16..32].*});
+                            dbg("[SPLIT_TEST] split matches materialized: {}\n", .{table_only_sum.add(raf_only_sum).eql(mat_sum_check)});
 
                             // Now compute what the initial sum SHOULD be after binding
                             // Initial: Σ_j eq(j,r) * [table(K(j)) + γ*raf(K(j))]
@@ -4849,7 +4856,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             //
                             // So the claim should be table_only_sum + raf_only_sum
                             // And this should equal lookups_claim
-                            std.debug.print("[SPLIT_TEST] lookups_claim = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+                            dbg("[SPLIT_TEST] lookups_claim = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
                         }
                     }
                     // Verify full sum at the start of cycle rounds
@@ -4864,9 +4871,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             }
                             full_sum_check = full_sum_check.add(fj_eq.mul(fj_ra).mul(lookups_combined_vals[fj]));
                         }
-                        std.debug.print("[CYCLE_START_CHECK] Full sum = {x}\n", .{full_sum_check.toBytesBE()[16..32].*});
-                        std.debug.print("[CYCLE_START_CHECK] lookups_claim = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
-                        std.debug.print("[CYCLE_START_CHECK] MATCH: {}\n", .{full_sum_check.eql(lookups_claim)});
+                        dbg("[CYCLE_START_CHECK] Full sum = {x}\n", .{full_sum_check.toBytesBE()[16..32].*});
+                        dbg("[CYCLE_START_CHECK] lookups_claim = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+                        dbg("[CYCLE_START_CHECK] MATCH: {}\n", .{full_sum_check.eql(lookups_claim)});
 
                         // Also check: what does the sum give for cv ONLY (without ra)?
                         var cv_only_sum = F.zero();
@@ -4874,7 +4881,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             const fj_eq = computeEqAtIndex(r_reduction, fj);
                             cv_only_sum = cv_only_sum.add(fj_eq.mul(lookups_combined_vals[fj]));
                         }
-                        std.debug.print("[CYCLE_START_CHECK] cv_only_sum (no ra) = {x}\n", .{cv_only_sum.toBytesBE()[16..32].*});
+                        dbg("[CYCLE_START_CHECK] cv_only_sum (no ra) = {x}\n", .{cv_only_sum.toBytesBE()[16..32].*});
 
                         // Check ra products - all should be 1 if address rounds are correct
                         var all_ra_one = true;
@@ -4888,11 +4895,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 all_ra_one = false;
                                 non_one_count += 1;
                                 if (non_one_count <= 3) {
-                                    std.debug.print("[CYCLE_START_CHECK] ra_product[{}] != 1: {x}\n", .{fj, fj_ra.toBytesBE()[16..32].*});
+                                    dbg("[CYCLE_START_CHECK] ra_product[{}] != 1: {x}\n", .{fj, fj_ra.toBytesBE()[16..32].*});
                                 }
                             }
                         }
-                        std.debug.print("[CYCLE_START_CHECK] all_ra_one={}, non_one_count={}\n", .{all_ra_one, non_one_count});
+                        dbg("[CYCLE_START_CHECK] all_ra_one={}, non_one_count={}\n", .{all_ra_one, non_one_count});
 
                         // Also check: does sum_evals[0] (g(1)) match what we expect?
                         // g(1) = Σ_j eq_prefix(j) * Π_c ra_c[2j+1] * cv[2j+1]
@@ -4907,7 +4914,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             }
                             g1_brute = g1_brute.add(fj_eq.mul(fj_ra).mul(lookups_combined_vals[2 * fj + 1]));
                         }
-                        std.debug.print("[CYCLE_START_CHECK] g(1)_brute = {x}\n", .{g1_brute.toBytesBE()[16..32].*});
+                        dbg("[CYCLE_START_CHECK] g(1)_brute = {x}\n", .{g1_brute.toBytesBE()[16..32].*});
                     }
 
                     // CRITICAL: current_half_size is the number of pairs we iterate over
@@ -4948,12 +4955,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                         // Debug: for first cycle round, first few j values
                         if (lookups_round == 0 and j < 3) {
-                            std.debug.print("[CYCLE R0 DEBUG] j={}, remaining_vars={}, eq_prefix={x}\n", .{
+                            dbg("[CYCLE R0 DEBUG] j={}, remaining_vars={}, eq_prefix={x}\n", .{
                                 j,
                                 remaining_vars,
                                 eq_prefix.toBytesBE()[16..32].*,
                             });
-                            std.debug.print("  combined_vals[{}]={x}, combined_vals[{}]={x}\n", .{
+                            dbg("  combined_vals[{}]={x}, combined_vals[{}]={x}\n", .{
                                 2 * j,
                                 lookups_combined_vals[2 * j].toBytesBE()[16..32].*,
                                 2 * j + 1,
@@ -5017,37 +5024,37 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     const sumcheck_ok = sum_check.eql(cycle_claim);
 
                     // Debug: print polynomial info for all cycle rounds
-                    std.debug.print("[STAGE5 CYCLE] Round {} (cycle var {}):\n", .{ round, lookups_round });
-                    std.debug.print("  r_round = {x}\n", .{r_round.toBytesBE()[24..32].*});
-                    std.debug.print("  lookups_current_scalar = {x}\n", .{lookups_current_scalar.toBytesBE()[24..32].*});
-                    std.debug.print("  cycle_claim = {x}\n", .{cycle_claim.toBytesBE()[24..32].*});
-                    std.debug.print("  p(0) = {x}\n", .{p_at_0.toBytesBE()[24..32].*});
-                    std.debug.print("  p(1) = {x}\n", .{p_at_1.toBytesBE()[24..32].*});
-                    std.debug.print("  p(0)+p(1) = {x}, matches_claim = {}\n", .{ sum_check.toBytesBE()[24..32].*, sumcheck_ok });
-                    std.debug.print("  full_coeffs len = {}\n", .{full_coeffs.len});
+                    dbg("[STAGE5 CYCLE] Round {} (cycle var {}):\n", .{ round, lookups_round });
+                    dbg("  r_round = {x}\n", .{r_round.toBytesBE()[24..32].*});
+                    dbg("  lookups_current_scalar = {x}\n", .{lookups_current_scalar.toBytesBE()[24..32].*});
+                    dbg("  cycle_claim = {x}\n", .{cycle_claim.toBytesBE()[24..32].*});
+                    dbg("  p(0) = {x}\n", .{p_at_0.toBytesBE()[24..32].*});
+                    dbg("  p(1) = {x}\n", .{p_at_1.toBytesBE()[24..32].*});
+                    dbg("  p(0)+p(1) = {x}, matches_claim = {}\n", .{ sum_check.toBytesBE()[24..32].*, sumcheck_ok });
+                    dbg("  full_coeffs len = {}\n", .{full_coeffs.len});
                     // Print sum_evals to debug
-                    std.debug.print("  sum_evals = [\n", .{});
+                    dbg("  sum_evals = [\n", .{});
                     for (0..9) |k| {
-                        std.debug.print("    [{d}] = {x}\n", .{ k, sum_evals[k].toBytesBE()[24..32].* });
+                        dbg("    [{d}] = {x}\n", .{ k, sum_evals[k].toBytesBE()[24..32].* });
                     }
-                    std.debug.print("  ]\n", .{});
+                    dbg("  ]\n", .{});
                     // Debug: print eq and combined values for last round
                     if (lookups_round == n_cycle_vars - 1) {
-                        std.debug.print("  [LAST ROUND] eq[0]={x}, eq[1]={x}\n", .{
+                        dbg("  [LAST ROUND] eq[0]={x}, eq[1]={x}\n", .{
                             lookups_eq_evals[0].toBytesBE()[16..32].*,
                             lookups_eq_evals[1].toBytesBE()[16..32].*,
                         });
-                        std.debug.print("  [LAST ROUND] val[0]={x}, val[1]={x}\n", .{
+                        dbg("  [LAST ROUND] val[0]={x}, val[1]={x}\n", .{
                             lookups_combined_vals[0].toBytesBE()[16..32].*,
                             lookups_combined_vals[1].toBytesBE()[16..32].*,
                         });
-                        std.debug.print("  [LAST ROUND] ra_chunk[0]: [{x}, {x}]\n", .{
+                        dbg("  [LAST ROUND] ra_chunk[0]: [{x}, {x}]\n", .{
                             ra_chunk_weights[0][0].toBytesBE()[16..32].*,
                             ra_chunk_weights[0][1].toBytesBE()[16..32].*,
                         });
                     }
                     // Print Instance 0+1 contribution
-                    std.debug.print("  combined_poly (Inst 0+1) = [{x}, {x}, {x}, {x}]\n", .{
+                    dbg("  combined_poly (Inst 0+1) = [{x}, {x}, {x}, {x}]\n", .{
                         combined_poly[0].toBytesBE()[24..32].*,
                         combined_poly[1].toBytesBE()[24..32].*,
                         combined_poly[2].toBytesBE()[24..32].*,
@@ -5090,24 +5097,24 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                     // Debug: print first 3 compressed coefficients (excluding linear term) in LE format
                     if (round == 135) { // Only Round 135
-                        std.debug.print("[STAGE5 CYCLE ZOLT] Round {} compressed coeffs (LE, comparing to Jolt):\n", .{round});
-                        std.debug.print("  final_compressed.len = {}\n", .{final_compressed.len});
+                        dbg("[STAGE5 CYCLE ZOLT] Round {} compressed coeffs (LE, comparing to Jolt):\n", .{round});
+                        dbg("  final_compressed.len = {}\n", .{final_compressed.len});
                         for (0..final_compressed.len) |k| {
                             // Jolt displays LE bytes from arkworks serialization
-                            std.debug.print("  coeff[{}] = {any}\n", .{ k, final_compressed[k].toBytes() });
+                            dbg("  coeff[{}] = {any}\n", .{ k, final_compressed[k].toBytes() });
                         }
-                        std.debug.print("  current_batched_claim (LE) = {any}\n", .{current_batched_claim.toBytes()});
+                        dbg("  current_batched_claim (LE) = {any}\n", .{current_batched_claim.toBytes()});
                         // Also print combined_coeffs before compression
-                        std.debug.print("  combined_coeffs[0] (c0) = {any}\n", .{combined_coeffs[0].toBytes()});
-                        std.debug.print("  combined_coeffs[1] (c1) = {any}\n", .{combined_coeffs[1].toBytes()});
-                        std.debug.print("  combined_coeffs[2] (c2) = {any}\n", .{combined_coeffs[2].toBytes()});
+                        dbg("  combined_coeffs[0] (c0) = {any}\n", .{combined_coeffs[0].toBytes()});
+                        dbg("  combined_coeffs[1] (c1) = {any}\n", .{combined_coeffs[1].toBytes()});
+                        dbg("  combined_coeffs[2] (c2) = {any}\n", .{combined_coeffs[2].toBytes()});
                         // Print Instance 0+1 contribution details
-                        std.debug.print("  inst01_coeffs[0..4] = [{any}, {any}, {any}, {any}]\n", .{
+                        dbg("  inst01_coeffs[0..4] = [{any}, {any}, {any}, {any}]\n", .{
                             inst01_coeffs[0].toBytes(), inst01_coeffs[1].toBytes(),
                             inst01_coeffs[2].toBytes(), inst01_coeffs[3].toBytes(),
                         });
                         // Print full_coeffs (Instance 2)
-                        std.debug.print("  full_coeffs[0..3] = [{any}, {any}, {any}]\n", .{
+                        dbg("  full_coeffs[0..3] = [{any}, {any}, {any}]\n", .{
                             full_coeffs[0].toBytes(), full_coeffs[1].toBytes(), full_coeffs[2].toBytes(),
                         });
                     }
@@ -5129,7 +5136,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                     // Debug: print challenge for comparison with Jolt
                     if (round < 4 or round >= 128) {
-                        std.debug.print("[STAGE5 CHALLENGE] Round {}: LE = {any}\n", .{round, challenge.toBytes()[0..16].*});
+                        dbg("[STAGE5 CHALLENGE] Round {}: LE = {any}\n", .{round, challenge.toBytes()[0..16].*});
                     }
 
                     // Update current_batched_claim by evaluating polynomial at challenge
@@ -5149,25 +5156,25 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                     // Debug: compare c1_direct vs c1_recovered
                     if (round >= 128) {
-                        std.debug.print("[STAGE5 C1 DEBUG] Round {}:\n", .{round});
-                        std.debug.print("  c1_direct (combined_coeffs[1]) = {any}\n", .{combined_coeffs[1].toBytes()});
-                        std.debug.print("  c1_recovered (from hint)       = {any}\n", .{c1_recovered.toBytes()});
-                        std.debug.print("  hint (current_batched_claim)   = {any}\n", .{current_batched_claim.toBytes()});
-                        std.debug.print("  c1_direct == c1_recovered: {}\n", .{combined_coeffs[1].eql(c1_recovered)});
+                        dbg("[STAGE5 C1 DEBUG] Round {}:\n", .{round});
+                        dbg("  c1_direct (combined_coeffs[1]) = {any}\n", .{combined_coeffs[1].toBytes()});
+                        dbg("  c1_recovered (from hint)       = {any}\n", .{c1_recovered.toBytes()});
+                        dbg("  hint (current_batched_claim)   = {any}\n", .{current_batched_claim.toBytes()});
+                        dbg("  c1_direct == c1_recovered: {}\n", .{combined_coeffs[1].eql(c1_recovered)});
 
                         // CRITICAL DEBUG: Check if current_batched_claim = sum of scaled instance claims
                         // Expected: batch0*claim0 + batch1*claim1 + batch2*claim2
                         const expected_batched = batch0.mul(regs_val_current_claim)
                             .add(batch1.mul(ram_ra_current_claim))
                             .add(batch2.mul(lookups_claim));
-                        std.debug.print("  expected_batched (batch0*c0+batch1*c1+batch2*c2) = {any}\n", .{expected_batched.toBytes()});
-                        std.debug.print("  current_batched_claim matches expected: {}\n", .{current_batched_claim.eql(expected_batched)});
-                        std.debug.print("    batch0*claim0 = {any}\n", .{batch0.mul(regs_val_current_claim).toBytes()});
-                        std.debug.print("    batch1*claim1 = {any}\n", .{batch1.mul(ram_ra_current_claim).toBytes()});
-                        std.debug.print("    batch2*claim2 = {any}\n", .{batch2.mul(lookups_claim).toBytes()});
-                        std.debug.print("    regs_val_current_claim = {x}\n", .{regs_val_current_claim.toBytesBE()[16..32].*});
-                        std.debug.print("    ram_ra_current_claim   = {x}\n", .{ram_ra_current_claim.toBytesBE()[16..32].*});
-                        std.debug.print("    lookups_claim          = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+                        dbg("  expected_batched (batch0*c0+batch1*c1+batch2*c2) = {any}\n", .{expected_batched.toBytes()});
+                        dbg("  current_batched_claim matches expected: {}\n", .{current_batched_claim.eql(expected_batched)});
+                        dbg("    batch0*claim0 = {any}\n", .{batch0.mul(regs_val_current_claim).toBytes()});
+                        dbg("    batch1*claim1 = {any}\n", .{batch1.mul(ram_ra_current_claim).toBytes()});
+                        dbg("    batch2*claim2 = {any}\n", .{batch2.mul(lookups_claim).toBytes()});
+                        dbg("    regs_val_current_claim = {x}\n", .{regs_val_current_claim.toBytesBE()[16..32].*});
+                        dbg("    ram_ra_current_claim   = {x}\n", .{ram_ra_current_claim.toBytesBE()[16..32].*});
+                        dbg("    lookups_claim          = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
 
                         // Compute what the hint SHOULD be if coefficients are correct:
                         // hint_expected = p(0) + p(1) = 2*c0 + c1 + c2 + ... + c_d
@@ -5175,8 +5182,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         for (1..combined_coeffs.len) |i| {
                             hint_expected = hint_expected.add(combined_coeffs[i]);
                         }
-                        std.debug.print("  hint_expected (2*c0+c1+c2+...) = {any}\n", .{hint_expected.toBytes()});
-                        std.debug.print("  hint == hint_expected: {}\n", .{current_batched_claim.eql(hint_expected)});
+                        dbg("  hint_expected (2*c0+c1+c2+...) = {any}\n", .{hint_expected.toBytes()});
+                        dbg("  hint == hint_expected: {}\n", .{current_batched_claim.eql(hint_expected)});
                     }
 
                     // CRITICAL: Update current_batched_claim by evaluating the batched polynomial
@@ -5199,7 +5206,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     }
 
                     // Per-round tracking (matches Jolt verifier's [S5V] output)
-                    std.debug.print("  [S5P] R{} challenge={x} new_e={x} degree={}\n", .{
+                    dbg("  [S5P] R{} challenge={x} new_e={x} degree={}\n", .{
                         round,
                         challenge.toBytes()[0..16].*,
                         current_batched_claim.toBytes()[0..16].*,
@@ -5272,14 +5279,14 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 }
                             }
 
-                            std.debug.print("[STAGE5 CYCLE BIND R{}] cycle_round={}, challenge={x}\n", .{
+                            dbg("[STAGE5 CYCLE BIND R{}] cycle_round={}, challenge={x}\n", .{
                                 round,
                                 cycle_round,
                                 challenge.toBytesBE()[16..32].*,
                             });
-                            std.debug.print("  eq_raf_bound={x}\n", .{eq_raf_bound.toBytesBE()[16..32].*});
+                            dbg("  eq_raf_bound={x}\n", .{eq_raf_bound.toBytesBE()[16..32].*});
                             if (ram_access_count > 0) {
-                                std.debug.print("  eq_cycle_bound[0]={x}\n", .{eq_cycle_bound[0].toBytesBE()[16..32].*});
+                                dbg("  eq_cycle_bound[0]={x}\n", .{eq_cycle_bound[0].toBytesBE()[16..32].*});
                             }
 
                             // CRITICAL FIX: Bind P/Q arrays for Instance 1 PhaseCycle
@@ -5308,7 +5315,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                     Q_val[j] = one_minus_r.mul(Q_val[2 * j]).add(Q_val[2 * j + 1].mulHiBigIntU128(challenge.limbs));
                                 }
 
-                                std.debug.print("[STAGE5 CYCLE BIND R{}] Bound P/Q arrays: half_len={}\n", .{
+                                dbg("[STAGE5 CYCLE BIND R{}] Bound P/Q arrays: half_len={}\n", .{
                                     round,
                                     half_len,
                                 });
@@ -5330,7 +5337,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                     eq_val_hi[j] = one_minus_r.mul(eq_val_hi[2 * j]).add(eq_val_hi[2 * j + 1].mulHiBigIntU128(challenge.limbs));
                                 }
 
-                                std.debug.print("[STAGE5 CYCLE BIND R{}] Bound H'/eq_hi arrays: half_len={}\n", .{
+                                dbg("[STAGE5 CYCLE BIND R{}] Bound H'/eq_hi arrays: half_len={}\n", .{
                                     round,
                                     half_len,
                                 });
@@ -5351,7 +5358,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             const r2 = challenge.mul(challenge);
                             ram_ra_current_claim = c0_inst1.add(c1_inst1.mulHiBigIntU128(challenge.limbs)).add(c2_inst1.mul(r2));
 
-                            std.debug.print("[STAGE5 INST1 CLAIM] Round {}: new_claim={x}\n", .{
+                            dbg("[STAGE5 INST1 CLAIM] Round {}: new_claim={x}\n", .{
                                 round,
                                 ram_ra_current_claim.toBytesBE()[16..32].*,
                             });
@@ -5385,13 +5392,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                     // Debug: print current_scalar update
                     if (lookups_round < 3 or lookups_round >= n_cycle_vars - 1) {
-                        std.debug.print("[STAGE5 CYCLE] round={}, lookups_round={}\n", .{ round, lookups_round });
-                        std.debug.print("  w_i (r_reduction[{}]) = {x}\n", .{ n_cycle_vars - 1 - lookups_round, w_i.toBytesBE()[16..32].* });
-                        std.debug.print("  challenge limbs[2..4] = {x:0>16}{x:0>16}\n", .{ challenge.limbs[2], challenge.limbs[3] });
-                        std.debug.print("  prod_w_r = {x}\n", .{ prod_w_r.toBytesBE()[16..32].* });
-                        std.debug.print("  one_minus_r = {x}\n", .{ one_minus_r_scalar.toBytesBE()[16..32].* });
-                        std.debug.print("  eq_factor = {x}\n", .{ eq_factor.toBytesBE()[16..32].* });
-                        std.debug.print("  current_scalar = {x}\n", .{ lookups_current_scalar.toBytesBE()[16..32].* });
+                        dbg("[STAGE5 CYCLE] round={}, lookups_round={}\n", .{ round, lookups_round });
+                        dbg("  w_i (r_reduction[{}]) = {x}\n", .{ n_cycle_vars - 1 - lookups_round, w_i.toBytesBE()[16..32].* });
+                        dbg("  challenge limbs[2..4] = {x:0>16}{x:0>16}\n", .{ challenge.limbs[2], challenge.limbs[3] });
+                        dbg("  prod_w_r = {x}\n", .{ prod_w_r.toBytesBE()[16..32].* });
+                        dbg("  one_minus_r = {x}\n", .{ one_minus_r_scalar.toBytesBE()[16..32].* });
+                        dbg("  eq_factor = {x}\n", .{ eq_factor.toBytesBE()[16..32].* });
+                        dbg("  current_scalar = {x}\n", .{ lookups_current_scalar.toBytesBE()[16..32].* });
                     }
 
                     // Bind the per-chunk ra weights
@@ -5400,9 +5407,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     }
                     // Debug: show ra_chunk values before/after binding
                     if (lookups_round == 0) {
-                        std.debug.print("[STAGE5 CYCLE] ra_chunks before first binding (round=128):\n", .{});
+                        dbg("[STAGE5 CYCLE] ra_chunks before first binding (round=128):\n", .{});
                         for (0..@min(4, ra_num_chunks)) |c| {
-                            std.debug.print("  ra_chunk[{}][0:4] = [{x}, {x}, {x}, {x}]\n", .{
+                            dbg("  ra_chunk[{}][0:4] = [{x}, {x}, {x}, {x}]\n", .{
                                 c,
                                 ra_chunk_weights[c][0].toBytesBE()[16..32].*,
                                 ra_chunk_weights[c][1].toBytesBE()[16..32].*,
@@ -5432,14 +5439,14 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                     // Debug: print challenges for cycle rounds (128-135)
                     if (round >= LOOKUPS_LOG_K) {
-                        std.debug.print("[STAGE5 ROUND {}] challenge={x}\n", .{
+                        dbg("[STAGE5 ROUND {}] challenge={x}\n", .{
                             round,
                             challenge.toBytesBE()[16..32].*,
                         });
-                        std.debug.print("  new_batched_claim = {x}\n", .{current_batched_claim.toBytesBE()[16..32].*});
-                        std.debug.print("  new_lookups_claim = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+                        dbg("  new_batched_claim = {x}\n", .{current_batched_claim.toBytesBE()[16..32].*});
+                        dbg("  new_lookups_claim = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
                         // Debug: print eq_evals[0] after binding
-                        std.debug.print("  eq_evals[0] after bind = {x}\n", .{lookups_eq_evals[0].toBytesBE()[16..32].*});
+                        dbg("  eq_evals[0] after bind = {x}\n", .{lookups_eq_evals[0].toBytesBE()[16..32].*});
 
                         // CRITICAL DIAGNOSTIC: Compare lookups_claim with bound array computation
                         // After binding, compute: current_scalar * Σ_j (eq_prefix(j) * Π_c ra_c[j] * cv[j])
@@ -5456,9 +5463,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             bound_array_sum = bound_array_sum.add(bj_eq.mul(bj_ra).mul(lookups_combined_vals[bj]));
                         }
                         bound_array_sum = bound_array_sum.mul(lookups_current_scalar);
-                        std.debug.print("  BOUND_ARRAY_SUM = {x}\n", .{bound_array_sum.toBytesBE()[16..32].*});
-                        std.debug.print("  lookups_claim   = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
-                        std.debug.print("  BOUND==CLAIM: {}\n", .{bound_array_sum.eql(lookups_claim)});
+                        dbg("  BOUND_ARRAY_SUM = {x}\n", .{bound_array_sum.toBytesBE()[16..32].*});
+                        dbg("  lookups_claim   = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+                        dbg("  BOUND==CLAIM: {}\n", .{bound_array_sum.eql(lookups_claim)});
                     }
 
                     continue; // Skip the rest of the loop (we handled everything)
@@ -5466,32 +5473,32 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             }
 
             // Debug: print final batched claim (this is output_claim from verifier's perspective)
-            std.debug.print("[STAGE5] Final batched claim (output_claim) = {any}\n", .{current_batched_claim.toBytesBE()});
-            std.debug.print("[STAGE5] Final lookups_current_scalar (should = eq_eval_r_reduction) = {x}\n", .{lookups_current_scalar.toBytesBE()[16..32].*});
+            dbg("[STAGE5] Final batched claim (output_claim) = {any}\n", .{current_batched_claim.toBytesBE()});
+            dbg("[STAGE5] Final lookups_current_scalar (should = eq_eval_r_reduction) = {x}\n", .{lookups_current_scalar.toBytesBE()[16..32].*});
 
             // DEBUG: Print each instance's final claim value
             // The verifier computes expected = batch0*inst0_eval + batch1*inst1_eval + batch2*inst2_eval
             // The prover's output_claim should equal this.
-            std.debug.print("[STAGE5 FINAL CLAIMS] Individual instance final values:\n", .{});
-            std.debug.print("  regs_val_current_claim (Instance 0) = {any}\n", .{regs_val_current_claim.toBytes()});
-            std.debug.print("  ram_ra_current_claim (Instance 1) = {any}\n", .{ram_ra_current_claim.toBytes()});
-            std.debug.print("  lookups_claim (Instance 2) = {any}\n", .{lookups_claim.toBytes()});
-            std.debug.print("  batch0*inst0 (LE) = {any}\n", .{batch0.mul(regs_val_current_claim).toBytes()});
-            std.debug.print("  batch1*inst1 (LE) = {any}\n", .{batch1.mul(ram_ra_current_claim).toBytes()});
-            std.debug.print("  batch2*inst2 (LE) = {any}\n", .{batch2.mul(lookups_claim).toBytes()});
+            dbg("[STAGE5 FINAL CLAIMS] Individual instance final values:\n", .{});
+            dbg("  regs_val_current_claim (Instance 0) = {any}\n", .{regs_val_current_claim.toBytes()});
+            dbg("  ram_ra_current_claim (Instance 1) = {any}\n", .{ram_ra_current_claim.toBytes()});
+            dbg("  lookups_claim (Instance 2) = {any}\n", .{lookups_claim.toBytes()});
+            dbg("  batch0*inst0 (LE) = {any}\n", .{batch0.mul(regs_val_current_claim).toBytes()});
+            dbg("  batch1*inst1 (LE) = {any}\n", .{batch1.mul(ram_ra_current_claim).toBytes()});
+            dbg("  batch2*inst2 (LE) = {any}\n", .{batch2.mul(lookups_claim).toBytes()});
             const recon = batch0.mul(regs_val_current_claim).add(batch1.mul(ram_ra_current_claim)).add(batch2.mul(lookups_claim));
-            std.debug.print("  batch0*inst0 + batch1*inst1 + batch2*inst2 = {any}\n", .{recon.toBytes()});
-            std.debug.print("  current_batched_claim = {any}\n", .{current_batched_claim.toBytes()});
-            std.debug.print("  reconstruction matches output_claim: {}\n", .{recon.eql(current_batched_claim)});
+            dbg("  batch0*inst0 + batch1*inst1 + batch2*inst2 = {any}\n", .{recon.toBytes()});
+            dbg("  current_batched_claim = {any}\n", .{current_batched_claim.toBytes()});
+            dbg("  reconstruction matches output_claim: {}\n", .{recon.eql(current_batched_claim)});
 
             // CRITICAL: Derive correct Instance 2 claim from batched output
             // The batched output_claim is CORRECT (S5P==S5V). Individual claims for
             // inst0 and inst1 are also correct. So we can derive the TRUE inst2 claim.
             const batch2_inv = batch2.inverse().?;
             const correct_inst2_from_batched = current_batched_claim.sub(batch0.mul(regs_val_current_claim)).sub(batch1.mul(ram_ra_current_claim)).mul(batch2_inv);
-            std.debug.print("  [DRIFT CHECK] lookups_claim (tracked)     = {any}\n", .{lookups_claim.toBytes()});
-            std.debug.print("  [DRIFT CHECK] correct_inst2 (from batch)  = {any}\n", .{correct_inst2_from_batched.toBytes()});
-            std.debug.print("  [DRIFT CHECK] drift detected: {}\n", .{!lookups_claim.eql(correct_inst2_from_batched)});
+            dbg("  [DRIFT CHECK] lookups_claim (tracked)     = {any}\n", .{lookups_claim.toBytes()});
+            dbg("  [DRIFT CHECK] correct_inst2 (from batch)  = {any}\n", .{correct_inst2_from_batched.toBytes()});
+            dbg("  [DRIFT CHECK] drift detected: {}\n", .{!lookups_claim.eql(correct_inst2_from_batched)});
 
             // =================================================================
             // BRUTE FORCE Instance 1 expected output claim
@@ -5544,20 +5551,20 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                 const bf_expected_inst1 = bf_eq_combined.mul(bf_ra_claim);
 
-                std.debug.print("[BRUTE FORCE INST1] eq_addr_1 = {x}\n", .{eq_addr_1.toBytesBE()[16..32].*});
-                std.debug.print("[BRUTE FORCE INST1] eq_addr_2 = {x}\n", .{eq_addr_2.toBytesBE()[16..32].*});
-                std.debug.print("[BRUTE FORCE INST1] eq_cycle_raf = {x}\n", .{eq_cycle_raf_red.toBytesBE()[16..32].*});
-                std.debug.print("[BRUTE FORCE INST1] eq_cycle_rw = {x}\n", .{eq_cycle_rw_red.toBytesBE()[16..32].*});
-                std.debug.print("[BRUTE FORCE INST1] eq_cycle_val = {x}\n", .{eq_cycle_val_red.toBytesBE()[16..32].*});
-                std.debug.print("[BRUTE FORCE INST1] eq_combined = {x}\n", .{bf_eq_combined.toBytesBE()[16..32].*});
-                std.debug.print("[BRUTE FORCE INST1] ra_claim_reduced = {x}\n", .{bf_ra_claim.toBytesBE()[16..32].*});
-                std.debug.print("[BRUTE FORCE INST1] expected (eq_combined * ra_reduced) = {any}\n", .{bf_expected_inst1.toBytes()});
-                std.debug.print("[BRUTE FORCE INST1] prover tracked ram_ra_current_claim = {any}\n", .{ram_ra_current_claim.toBytes()});
-                std.debug.print("[BRUTE FORCE INST1] match: {}\n", .{bf_expected_inst1.eql(ram_ra_current_claim)});
+                dbg("[BRUTE FORCE INST1] eq_addr_1 = {x}\n", .{eq_addr_1.toBytesBE()[16..32].*});
+                dbg("[BRUTE FORCE INST1] eq_addr_2 = {x}\n", .{eq_addr_2.toBytesBE()[16..32].*});
+                dbg("[BRUTE FORCE INST1] eq_cycle_raf = {x}\n", .{eq_cycle_raf_red.toBytesBE()[16..32].*});
+                dbg("[BRUTE FORCE INST1] eq_cycle_rw = {x}\n", .{eq_cycle_rw_red.toBytesBE()[16..32].*});
+                dbg("[BRUTE FORCE INST1] eq_cycle_val = {x}\n", .{eq_cycle_val_red.toBytesBE()[16..32].*});
+                dbg("[BRUTE FORCE INST1] eq_combined = {x}\n", .{bf_eq_combined.toBytesBE()[16..32].*});
+                dbg("[BRUTE FORCE INST1] ra_claim_reduced = {x}\n", .{bf_ra_claim.toBytesBE()[16..32].*});
+                dbg("[BRUTE FORCE INST1] expected (eq_combined * ra_reduced) = {any}\n", .{bf_expected_inst1.toBytes()});
+                dbg("[BRUTE FORCE INST1] prover tracked ram_ra_current_claim = {any}\n", .{ram_ra_current_claim.toBytes()});
+                dbg("[BRUTE FORCE INST1] match: {}\n", .{bf_expected_inst1.eql(ram_ra_current_claim)});
 
                 // Also compute what the verifier would get for batch1*inst1 using brute force
                 const bf_batch1_inst1 = batch1.mul(bf_expected_inst1);
-                std.debug.print("[BRUTE FORCE INST1] batch1 * expected = {any}\n", .{bf_batch1_inst1.toBytes()});
+                dbg("[BRUTE FORCE INST1] batch1 * expected = {any}\n", .{bf_batch1_inst1.toBytes()});
             }
 
             // Get final opening claims from the folded polynomials
@@ -5566,21 +5573,21 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             const regs_val_lt_claim = lt_evals[0];
             const regs_final_product = regs_val_inc_claim.mul(regs_val_wa_claim).mul(regs_val_lt_claim);
 
-            std.debug.print("[STAGE5] Final opening claims:\n", .{});
-            std.debug.print("  regs_val_inc_claim = {any}\n", .{regs_val_inc_claim.toBytesBE()});
-            std.debug.print("  regs_val_wa_claim = {any}\n", .{regs_val_wa_claim.toBytesBE()});
-            std.debug.print("  regs_val_lt_claim (lt[0] after binding) = {any}\n", .{regs_val_lt_claim.toBytesBE()});
-            std.debug.print("  regs_final_product (inc*wa*lt) = {any}\n", .{regs_final_product.toBytesBE()});
+            dbg("[STAGE5] Final opening claims:\n", .{});
+            dbg("  regs_val_inc_claim = {any}\n", .{regs_val_inc_claim.toBytesBE()});
+            dbg("  regs_val_wa_claim = {any}\n", .{regs_val_wa_claim.toBytesBE()});
+            dbg("  regs_val_lt_claim (lt[0] after binding) = {any}\n", .{regs_val_lt_claim.toBytesBE()});
+            dbg("  regs_final_product (inc*wa*lt) = {any}\n", .{regs_final_product.toBytesBE()});
 
             // Compute what the verifier would compute for LT(r_normalized, r_cycle)
             // r_normalized = reversed challenges (BIG_ENDIAN)
             // The last 8 challenges are for RegistersValEvaluation
             const regs_challenges = challenges[(max_num_rounds - regs_val_num_rounds)..];
-            std.debug.print("[STAGE5] Computing verifier's LT(r_normalized, r_cycle):\n", .{});
-            std.debug.print("  regs_challenges[0] = {any}\n", .{regs_challenges[0].toBytesBE()[0..8]});
-            std.debug.print("  regs_challenges[7] = {any}\n", .{regs_challenges[7].toBytesBE()[0..8]});
-            std.debug.print("  r_cycle_regs[0] = {any}\n", .{r_cycle_regs[0].toBytesBE()[0..8]});
-            std.debug.print("  r_cycle_regs[7] = {any}\n", .{r_cycle_regs[7].toBytesBE()[0..8]});
+            dbg("[STAGE5] Computing verifier's LT(r_normalized, r_cycle):\n", .{});
+            dbg("  regs_challenges[0] = {any}\n", .{regs_challenges[0].toBytesBE()[0..8]});
+            dbg("  regs_challenges[7] = {any}\n", .{regs_challenges[7].toBytesBE()[0..8]});
+            dbg("  r_cycle_regs[0] = {any}\n", .{r_cycle_regs[0].toBytesBE()[0..8]});
+            dbg("  r_cycle_regs[7] = {any}\n", .{r_cycle_regs[7].toBytesBE()[0..8]});
 
             // Compute LT(r_normalized, r_cycle) like the verifier does
             // r_normalized = [c7, c6, c5, c4, c3, c2, c1, c0] (reversed challenges)
@@ -5597,12 +5604,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 const xy = x_i.mul(y_i);
                 eq_term = eq_term.mul(F.one().sub(x_i).sub(y_i).add(xy).add(xy));
             }
-            std.debug.print("  LT_verifier (what verifier computes) = {any}\n", .{lt_verifier.toBytesBE()});
+            dbg("  LT_verifier (what verifier computes) = {any}\n", .{lt_verifier.toBytesBE()});
 
             // The verifier expects: expected_output_claim = inc_claim * wa_claim * LT_verifier
             const expected_product = regs_val_inc_claim.mul(regs_val_wa_claim).mul(lt_verifier);
-            std.debug.print("  expected_product (inc*wa*LT_verifier) = {any}\n", .{expected_product.toBytesBE()});
-            std.debug.print("  Match: {}\n", .{regs_final_product.eql(expected_product)});
+            dbg("  expected_product (inc*wa*LT_verifier) = {any}\n", .{expected_product.toBytesBE()});
+            dbg("  Match: {}\n", .{regs_final_product.eql(expected_product)});
 
             // Compute LookupsReadRaf opening claims
             //
@@ -5646,14 +5653,14 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             }
             const lookups_output_claim = lookups_current_scalar.mul(lookups_ra_product_bound).mul(lookups_combined_vals[0]);
 
-            std.debug.print("[STAGE5 LOOKUPS] Computing opening claims:\n", .{});
-            std.debug.print("  lookups_input = {any}\n", .{lookups_input.toBytesBE()[0..8]});
-            std.debug.print("  lookups_output_claim (eq*ra_w0*combined) = {any}\n", .{lookups_output_claim.toBytesBE()});
-            std.debug.print("  lookups_claim (tracked Instance 2) = {any}\n", .{lookups_claim.toBytes()});
-            std.debug.print("  lookups_eq_evals[0] = {any}\n", .{lookups_eq_evals[0].toBytesBE()[0..8]});
-            std.debug.print("  lookups_combined_vals[0] = {any}\n", .{lookups_combined_vals[0].toBytes()});
-            std.debug.print("  lookups_current_scalar = {any}\n", .{lookups_current_scalar.toBytes()});
-            std.debug.print("  lookups_combined_vals[0] = {any}\n", .{lookups_combined_vals[0].toBytesBE()[0..8]});
+            dbg("[STAGE5 LOOKUPS] Computing opening claims:\n", .{});
+            dbg("  lookups_input = {any}\n", .{lookups_input.toBytesBE()[0..8]});
+            dbg("  lookups_output_claim (eq*ra_w0*combined) = {any}\n", .{lookups_output_claim.toBytesBE()});
+            dbg("  lookups_claim (tracked Instance 2) = {any}\n", .{lookups_claim.toBytes()});
+            dbg("  lookups_eq_evals[0] = {any}\n", .{lookups_eq_evals[0].toBytesBE()[0..8]});
+            dbg("  lookups_combined_vals[0] = {any}\n", .{lookups_combined_vals[0].toBytes()});
+            dbg("  lookups_current_scalar = {any}\n", .{lookups_current_scalar.toBytes()});
+            dbg("  lookups_combined_vals[0] = {any}\n", .{lookups_combined_vals[0].toBytesBE()[0..8]});
 
             // Compute eq(r_reduction, r_cycle_prime)
             // r_reduction is from Stage 3 InstructionClaimReduction (BIG_ENDIAN)
@@ -5670,22 +5677,22 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
             const eq_r_reduction = computeEqPolynomial(F, r_reduction, r_cycle_prime_be);
 
-            std.debug.print("  r_reduction[0..8] (8 elements):\n", .{});
+            dbg("  r_reduction[0..8] (8 elements):\n", .{});
             for (0..n_cycle_vars) |i| {
-                std.debug.print("    r_reduction[{}] = {x}\n", .{ i, r_reduction[i].toBytesBE()[16..32].* });
+                dbg("    r_reduction[{}] = {x}\n", .{ i, r_reduction[i].toBytesBE()[16..32].* });
             }
-            std.debug.print("  r_cycle_prime_be[0..8] (8 elements):\n", .{});
+            dbg("  r_cycle_prime_be[0..8] (8 elements):\n", .{});
             for (0..n_cycle_vars) |i| {
-                std.debug.print("    r_cycle_prime_be[{}] = {x}\n", .{ i, r_cycle_prime_be[i].toBytesBE()[16..32].* });
+                dbg("    r_cycle_prime_be[{}] = {x}\n", .{ i, r_cycle_prime_be[i].toBytesBE()[16..32].* });
             }
-            std.debug.print("  eq_r_reduction (verifier computes) = {x}\n", .{eq_r_reduction.toBytesBE()[16..32].*});
-            std.debug.print("  eq_evals[0] (from sumcheck) = {x}\n", .{lookups_eq_evals[0].toBytesBE()[16..32].*});
-            std.debug.print("  lookups_current_scalar (should equal eq_r_reduction) = {x}\n", .{lookups_current_scalar.toBytesBE()[16..32].*});
+            dbg("  eq_r_reduction (verifier computes) = {x}\n", .{eq_r_reduction.toBytesBE()[16..32].*});
+            dbg("  eq_evals[0] (from sumcheck) = {x}\n", .{lookups_eq_evals[0].toBytesBE()[16..32].*});
+            dbg("  lookups_current_scalar (should equal eq_r_reduction) = {x}\n", .{lookups_current_scalar.toBytesBE()[16..32].*});
 
             // Debug: print first few r_address_prime values
-            std.debug.print("[STAGE5 FINAL] r_address_prime[0..4] (sumcheck challenges 0-3):\n", .{});
+            dbg("[STAGE5 FINAL] r_address_prime[0..4] (sumcheck challenges 0-3):\n", .{});
             for (0..4) |i| {
-                std.debug.print("  r_address_prime[{}] = {x}\n", .{ i, r_address_prime[i].toBytesBE()[16..32].* });
+                dbg("  r_address_prime[{}] = {x}\n", .{ i, r_address_prime[i].toBytesBE()[16..32].* });
             }
 
             // Compute operand polynomial evaluations at r_address_prime
@@ -5693,10 +5700,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             const right_op_eval = evaluateRightOperand(F, r_address_prime);
             const identity_eval = evaluateIdentity(F, r_address_prime);
 
-            std.debug.print("  left_op_eval (full) = {x}\n", .{left_op_eval.toBytesBE()[16..32].*});
-            std.debug.print("  right_op_eval (full) = {x}\n", .{right_op_eval.toBytesBE()[16..32].*});
-            std.debug.print("  identity_eval (full) = {x}\n", .{identity_eval.toBytesBE()[16..32].*});
-            std.debug.print("  gamma_lookups_raf = {any}\n", .{gamma_lookups_raf.toBytesBE()[0..8]});
+            dbg("  left_op_eval (full) = {x}\n", .{left_op_eval.toBytesBE()[16..32].*});
+            dbg("  right_op_eval (full) = {x}\n", .{right_op_eval.toBytesBE()[16..32].*});
+            dbg("  identity_eval (full) = {x}\n", .{identity_eval.toBytesBE()[16..32].*});
+            dbg("  gamma_lookups_raf = {any}\n", .{gamma_lookups_raf.toBytesBE()[0..8]});
 
             // CORRECT APPROACH: Compute opening claims from the bound polynomials
             //
@@ -5718,30 +5725,30 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             }
 
             // Debug: print ra chunk claims (FULL 32 bytes for comparison with Jolt)
-            std.debug.print("[STAGE5 LOOKUPS] ra_chunk claims (FULL 32 bytes LE for Jolt comparison):\n", .{});
+            dbg("[STAGE5 LOOKUPS] ra_chunk claims (FULL 32 bytes LE for Jolt comparison):\n", .{});
             var ra_product = F.one();
             for (0..lookups_ra_d) |i| {
                 const le_bytes = ra_chunks[i].toBytes();
-                std.debug.print("  ra_chunks[{}] LE = {any}\n", .{ i, le_bytes });
+                dbg("  ra_chunks[{}] LE = {any}\n", .{ i, le_bytes });
                 ra_product = ra_product.mul(ra_chunks[i]);
             }
             const ra_product_le = ra_product.toBytes();
-            std.debug.print("  ra_product FULL LE = {any}\n", .{ra_product_le});
-            std.debug.print("  lookups_ra_weights[0] = {any}\n", .{lookups_ra_weights[0].toBytesBE()[0..8]});
+            dbg("  ra_product FULL LE = {any}\n", .{ra_product_le});
+            dbg("  lookups_ra_weights[0] = {any}\n", .{lookups_ra_weights[0].toBytesBE()[0..8]});
 
             // Check lookups_current_scalar * ra_product * combined_vals[0]
             const scalar_ra_combined = lookups_current_scalar.mul(ra_product).mul(lookups_combined_vals[0]);
-            std.debug.print("  scalar*ra_product*combined = {any}\n", .{scalar_ra_combined.toBytes()});
-            std.debug.print("  lookups_claim (tracked)    = {any}\n", .{lookups_claim.toBytes()});
-            std.debug.print("  scalar*ra_product*combined == lookups_claim: {}\n", .{scalar_ra_combined.eql(lookups_claim)});
+            dbg("  scalar*ra_product*combined = {any}\n", .{scalar_ra_combined.toBytes()});
+            dbg("  lookups_claim (tracked)    = {any}\n", .{lookups_claim.toBytes()});
+            dbg("  scalar*ra_product*combined == lookups_claim: {}\n", .{scalar_ra_combined.eql(lookups_claim)});
 
             // Verify ra_product == lookups_ra_weights[0]
             const match_after = ra_product.eql(lookups_ra_weights[0]);
-            std.debug.print("  ra_product == lookups_ra_weights[0] (after all binding): {}\n", .{match_after});
+            dbg("  ra_product == lookups_ra_weights[0] (after all binding): {}\n", .{match_after});
             if (!match_after) {
-                std.debug.print("  WARNING: ra_product and lookups_ra_weights[0] don't match after binding!\n", .{});
-                std.debug.print("  This is expected - binding the product != product of bindings\n", .{});
-                std.debug.print("  The correct ra_claim should be the PRODUCT of the bound chunk values.\n", .{});
+                dbg("  WARNING: ra_product and lookups_ra_weights[0] don't match after binding!\n", .{});
+                dbg("  This is expected - binding the product != product of bindings\n", .{});
+                dbg("  The correct ra_claim should be the PRODUCT of the bound chunk values.\n", .{});
             }
 
             // Compute eq(r_cycle', j) for all j and accumulate into table flags
@@ -5768,10 +5775,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             }
 
             // Debug: print non-zero table flags
-            std.debug.print("[STAGE5 LOOKUPS] Non-zero table flags (FULL LE):\n", .{});
+            dbg("[STAGE5 LOOKUPS] Non-zero table flags (FULL LE):\n", .{});
             for (0..num_lookup_tables) |i| {
                 if (!table_flags[i].eql(F.zero())) {
-                    std.debug.print("  table_flags[{}] = {any}\n", .{ i, table_flags[i].toBytes() });
+                    dbg("  table_flags[{}] = {any}\n", .{ i, table_flags[i].toBytes() });
                 }
             }
 
@@ -5784,7 +5791,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     computed_raf_flag = computed_raf_flag.add(eq_j);
                 }
             }
-            std.debug.print("[STAGE5 LOOKUPS] raf_flag (identity path sum) = {any}\n", .{computed_raf_flag.toBytesBE()[0..8]});
+            dbg("[STAGE5 LOOKUPS] raf_flag (identity path sum) = {any}\n", .{computed_raf_flag.toBytesBE()[0..8]});
 
             // Verify the opening claims match the sumcheck output
             // expected = eq_r_reduction * ra_product * (val_claim + gamma * raf_claim)
@@ -5793,7 +5800,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
             const raf_claim = F.one().sub(computed_raf_flag).mul(left_op_eval.add(gamma_lookups_raf.mul(right_op_eval)))
                 .add(computed_raf_flag.mul(gamma_lookups_raf).mul(identity_eval));
-            std.debug.print("  raf_claim (from formula) FULL LE = {any}\n", .{raf_claim.toBytes()});
+            dbg("  raf_claim (from formula) FULL LE = {any}\n", .{raf_claim.toBytes()});
 
             // Compute val_claim = Σ table_flags[i] * stored_table_values[i]
             // This matches the verifier's formula: Σ val_evals[i] * table_flag_claims[i]
@@ -5801,77 +5808,77 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             for (0..num_lookup_tables) |i| {
                 val_claim = val_claim.add(table_flags[i].mul(stored_table_values[i]));
             }
-            std.debug.print("  val_claim (from formula) FULL LE = {any}\n", .{val_claim.toBytes()});
-            std.debug.print("  val_claim last 16 LE = ", .{});
-            for (val_claim.toBytes()[16..32]) |b| std.debug.print("{x:0>2} ", .{b});
-            std.debug.print("\n", .{});
+            dbg("  val_claim (from formula) FULL LE = {any}\n", .{val_claim.toBytes()});
+            dbg("  val_claim last 16 LE = ", .{});
+            for (val_claim.toBytes()[16..32]) |b| dbg("{x:0>2} ", .{b});
+            dbg("\n", .{});
 
             // CRITICAL DIAGNOSTIC: Compare combined_vals[0] with val_claim + gamma * raf_claim
             // The prover's combined_val polynomial should encode: table_val + gamma * raf_val
             // After all cycle round binding, combined_vals[0] should equal val_claim + gamma * raf_claim
             const verifier_combined = val_claim.add(gamma_lookups_raf.mul(raf_claim));
-            std.debug.print("\n  === CRITICAL COMPARISON ===\n", .{});
-            std.debug.print("  combined_vals[0] (bound polynomial) FULL LE = {any}\n", .{lookups_combined_vals[0].toBytes()});
-            std.debug.print("  val+gamma*raf   (from opening claims) FULL LE = {any}\n", .{verifier_combined.toBytes()});
-            std.debug.print("  combined_vals[0] == val+gamma*raf: {}\n", .{lookups_combined_vals[0].eql(verifier_combined)});
+            dbg("\n  === CRITICAL COMPARISON ===\n", .{});
+            dbg("  combined_vals[0] (bound polynomial) FULL LE = {any}\n", .{lookups_combined_vals[0].toBytes()});
+            dbg("  val+gamma*raf   (from opening claims) FULL LE = {any}\n", .{verifier_combined.toBytes()});
+            dbg("  combined_vals[0] == val+gamma*raf: {}\n", .{lookups_combined_vals[0].eql(verifier_combined)});
             if (!lookups_combined_vals[0].eql(verifier_combined)) {
                 // They differ! This means the bound polynomial disagrees with opening claims.
                 // Try other hypotheses:
                 // 1. Maybe combined_vals includes ra_product already?
                 const cv_div_ra = if (!ra_product.eql(F.zero())) lookups_combined_vals[0].mul(ra_product.inverse().?) else F.zero();
-                std.debug.print("  combined_vals[0] / ra_product = {any}\n", .{cv_div_ra.toBytes()});
-                std.debug.print("  cv/ra == val+gamma*raf: {}\n", .{cv_div_ra.eql(verifier_combined)});
+                dbg("  combined_vals[0] / ra_product = {any}\n", .{cv_div_ra.toBytes()});
+                dbg("  cv/ra == val+gamma*raf: {}\n", .{cv_div_ra.eql(verifier_combined)});
 
                 // 2. Maybe combined_vals = ra_product * (val + gamma * raf)?
                 const ra_times_combined = ra_product.mul(verifier_combined);
-                std.debug.print("  ra_product * (val+gamma*raf) = {any}\n", .{ra_times_combined.toBytes()});
-                std.debug.print("  ra*(val+gamma*raf) == combined_vals[0]: {}\n", .{ra_times_combined.eql(lookups_combined_vals[0])});
+                dbg("  ra_product * (val+gamma*raf) = {any}\n", .{ra_times_combined.toBytes()});
+                dbg("  ra*(val+gamma*raf) == combined_vals[0]: {}\n", .{ra_times_combined.eql(lookups_combined_vals[0])});
 
                 // 3. Compute what correct_inst2 / (eq_r_reduction * ra_product) gives
                 // This should be combined_vals[0] if lookups_output_claim = eq*ra*cv
                 if (!eq_r_reduction.eql(F.zero()) and !ra_product.eql(F.zero())) {
                     const implied_cv = correct_inst2_from_batched.mul(eq_r_reduction.inverse().?).mul(ra_product.inverse().?);
-                    std.debug.print("  correct_inst2 / (eq*ra) = {any}\n", .{implied_cv.toBytes()});
-                    std.debug.print("  implied_cv == combined_vals[0]: {}\n", .{implied_cv.eql(lookups_combined_vals[0])});
-                    std.debug.print("  implied_cv == val+gamma*raf: {}\n", .{implied_cv.eql(verifier_combined)});
+                    dbg("  correct_inst2 / (eq*ra) = {any}\n", .{implied_cv.toBytes()});
+                    dbg("  implied_cv == combined_vals[0]: {}\n", .{implied_cv.eql(lookups_combined_vals[0])});
+                    dbg("  implied_cv == val+gamma*raf: {}\n", .{implied_cv.eql(verifier_combined)});
                 }
 
                 // 4. Compute correct_inst2 / (lookups_current_scalar * ra_product)
                 // This might be the true combined_val if current_scalar != eq_r_reduction
                 if (!lookups_current_scalar.eql(F.zero()) and !ra_product.eql(F.zero())) {
                     const implied_cv2 = correct_inst2_from_batched.mul(lookups_current_scalar.inverse().?).mul(ra_product.inverse().?);
-                    std.debug.print("  correct_inst2 / (scalar*ra) = {any}\n", .{implied_cv2.toBytes()});
-                    std.debug.print("  implied_cv2 == combined_vals[0]: {}\n", .{implied_cv2.eql(lookups_combined_vals[0])});
-                    std.debug.print("  implied_cv2 == val+gamma*raf: {}\n", .{implied_cv2.eql(verifier_combined)});
+                    dbg("  correct_inst2 / (scalar*ra) = {any}\n", .{implied_cv2.toBytes()});
+                    dbg("  implied_cv2 == combined_vals[0]: {}\n", .{implied_cv2.eql(lookups_combined_vals[0])});
+                    dbg("  implied_cv2 == val+gamma*raf: {}\n", .{implied_cv2.eql(verifier_combined)});
                 }
 
                 // 5. Check if eq_r_reduction == lookups_current_scalar
-                std.debug.print("  eq_r_reduction == lookups_current_scalar: {}\n", .{eq_r_reduction.eql(lookups_current_scalar)});
+                dbg("  eq_r_reduction == lookups_current_scalar: {}\n", .{eq_r_reduction.eql(lookups_current_scalar)});
             }
-            std.debug.print("  === END CRITICAL COMPARISON ===\n\n", .{});
+            dbg("  === END CRITICAL COMPARISON ===\n\n", .{});
 
             // Compute expected output: eq_r_reduction * ra_product * (val_claim + gamma * raf_claim)
             const expected_output = eq_r_reduction.mul(ra_product).mul(val_claim.add(gamma_lookups_raf.mul(raf_claim)));
-            std.debug.print("  expected_output (eq*ra*(val+gamma*raf)) FULL LE = {any}\n", .{expected_output.toBytes()});
-            std.debug.print("  expected_output last 16 LE = ", .{});
-            for (expected_output.toBytes()[16..32]) |b| std.debug.print("{x:0>2} ", .{b});
-            std.debug.print("\n", .{});
-            std.debug.print("  lookups_output_claim = {any}\n", .{lookups_output_claim.toBytesBE()[0..8]});
-            std.debug.print("  current_batched_claim = {any}\n", .{current_batched_claim.toBytesBE()[0..8]});
+            dbg("  expected_output (eq*ra*(val+gamma*raf)) FULL LE = {any}\n", .{expected_output.toBytes()});
+            dbg("  expected_output last 16 LE = ", .{});
+            for (expected_output.toBytes()[16..32]) |b| dbg("{x:0>2} ", .{b});
+            dbg("\n", .{});
+            dbg("  lookups_output_claim = {any}\n", .{lookups_output_claim.toBytesBE()[0..8]});
+            dbg("  current_batched_claim = {any}\n", .{current_batched_claim.toBytesBE()[0..8]});
 
             // Check if expected matches the sumcheck output
-            std.debug.print("  expected_output == lookups_output_claim: {}\n", .{expected_output.eql(lookups_output_claim)});
+            dbg("  expected_output == lookups_output_claim: {}\n", .{expected_output.eql(lookups_output_claim)});
 
             // Check if the correct inst2 from batched matches the opening claims
-            std.debug.print("  correct_inst2_from_batched == lookups_output_claim: {}\n", .{correct_inst2_from_batched.eql(lookups_output_claim)});
+            dbg("  correct_inst2_from_batched == lookups_output_claim: {}\n", .{correct_inst2_from_batched.eql(lookups_output_claim)});
             if (!correct_inst2_from_batched.eql(lookups_output_claim)) {
-                std.debug.print("  ERROR: correct_inst2_from_batched != lookups_output_claim!\n", .{});
-                std.debug.print("  correct_inst2 = {any}\n", .{correct_inst2_from_batched.toBytes()});
-                std.debug.print("  lookups_output = {any}\n", .{lookups_output_claim.toBytes()});
+                dbg("  ERROR: correct_inst2_from_batched != lookups_output_claim!\n", .{});
+                dbg("  correct_inst2 = {any}\n", .{correct_inst2_from_batched.toBytes()});
+                dbg("  lookups_output = {any}\n", .{lookups_output_claim.toBytes()});
                 // Compute ratio for debugging
                 if (!lookups_output_claim.eql(F.zero())) {
                     const ratio = correct_inst2_from_batched.mul(lookups_output_claim.inverse().?);
-                    std.debug.print("  ratio (correct/output) = {any}\n", .{ratio.toBytes()});
+                    dbg("  ratio (correct/output) = {any}\n", .{ratio.toBytes()});
                 }
 
                 // BRUTE FORCE: Compute true Instance 2 output by summing over trace
@@ -5915,13 +5922,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                     bf_inst2_output = bf_inst2_output.add(eq_red_j.mul(eq_cyc_j).mul(ra_j).mul(cv_j));
                 }
-                std.debug.print("  BF inst2_output = {any}\n", .{bf_inst2_output.toBytes()});
-                std.debug.print("  BF == lookups_output_claim: {}\n", .{bf_inst2_output.eql(lookups_output_claim)});
-                std.debug.print("  BF == correct_inst2: {}\n", .{bf_inst2_output.eql(correct_inst2_from_batched)});
+                dbg("  BF inst2_output = {any}\n", .{bf_inst2_output.toBytes()});
+                dbg("  BF == lookups_output_claim: {}\n", .{bf_inst2_output.eql(lookups_output_claim)});
+                dbg("  BF == correct_inst2: {}\n", .{bf_inst2_output.eql(correct_inst2_from_batched)});
             } else {
-                std.debug.print("  GOOD: correct_inst2_from_batched == lookups_output_claim\n", .{});
-                std.debug.print("  The opening claims are CORRECT. The fix is to use correct_inst2_from_batched\n", .{});
-                std.debug.print("  as the Instance 2 claim when computing the batched expected output.\n", .{});
+                dbg("  GOOD: correct_inst2_from_batched == lookups_output_claim\n", .{});
+                dbg("  The opening claims are CORRECT. The fix is to use correct_inst2_from_batched\n", .{});
+                dbg("  as the Instance 2 claim when computing the batched expected output.\n", .{});
             }
 
             // ============================================================
@@ -5961,7 +5968,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // Use the dedicated MemoryTrace which tracks actual RAM accesses (including synthetic termination writes)
             var ram_ra_claim = F.zero();
             if (memory_trace) |mem_trace| {
-                std.debug.print("[STAGE5 RAM_RA] Using MemoryTrace with {} accesses\n", .{mem_trace.accesses.items.len});
+                dbg("[STAGE5 RAM_RA] Using MemoryTrace with {} accesses\n", .{mem_trace.accesses.items.len});
                 for (mem_trace.accesses.items) |access| {
                     // Only consider WRITE operations for ra claim
                     // (Jolt's RAM trace records both reads and writes, but ra represents where values changed)
@@ -5985,7 +5992,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         // Accumulate: ra(k,c) = 1 for this (addr, cycle) pair
                         ram_ra_claim = ram_ra_claim.add(eq_addr.mul(eq_cycle));
 
-                        std.debug.print("[STAGE5 RAM_RA] WRITE raw_addr=0x{x}, remapped_addr={}, cycle={}, eq_addr={x}, eq_cycle={x}\n", .{
+                        dbg("[STAGE5 RAM_RA] WRITE raw_addr=0x{x}, remapped_addr={}, cycle={}, eq_addr={x}, eq_cycle={x}\n", .{
                             raw_addr,
                             addr,
                             cycle,
@@ -5995,9 +6002,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     }
                 }
             } else {
-                std.debug.print("[STAGE5 RAM_RA] No memory_trace available, ram_ra_claim = 0\n", .{});
+                dbg("[STAGE5 RAM_RA] No memory_trace available, ram_ra_claim = 0\n", .{});
             }
-            std.debug.print("[STAGE5 RAM_RA] Computed ram_ra_claim = {x}\n", .{ram_ra_claim.toBytesBE()});
+            dbg("[STAGE5 RAM_RA] Computed ram_ra_claim = {x}\n", .{ram_ra_claim.toBytesBE()});
 
             return Stage5Result(F){
                 .challenges = challenges,
@@ -6516,14 +6523,14 @@ pub fn evaluateRightOperand(comptime F: type, r: []const F) F {
         result = result.add(term);
         // Debug: print first few and last few iterations
         if (n == 128 and (i < 3 or i >= 61)) {
-            std.debug.print("[RIGHT_OP_DEBUG] i={d}: r[{d}]={x}, power={x}, term={x}, result={x}\n", .{
+            dbg("[RIGHT_OP_DEBUG] i={d}: r[{d}]={x}, power={x}, term={x}, result={x}\n", .{
                 i, idx, r[idx].toBytesBE()[16..32].*, power.toBytesBE()[16..32].*,
                 term.toBytesBE()[16..32].*, result.toBytesBE()[16..32].*,
             });
         }
         power = power.add(power); // power *= 2
     }
-    std.debug.print("[RIGHT_OP_DEBUG] final result = {x}\n", .{result.toBytesBE()[16..32].*});
+    dbg("[RIGHT_OP_DEBUG] final result = {x}\n", .{result.toBytesBE()[16..32].*});
     return result;
 }
 
@@ -6542,14 +6549,14 @@ pub fn evaluateIdentity(comptime F: type, r: []const F) F {
         result = result.add(term);
         // Debug: print first few and last few iterations
         if (n == 128 and (i < 4 or i >= 124)) {
-            std.debug.print("[IDENTITY_DEBUG] i={d}: r[{d}]={x}, power={x}, term={x}, result={x}\n", .{
+            dbg("[IDENTITY_DEBUG] i={d}: r[{d}]={x}, power={x}, term={x}, result={x}\n", .{
                 i, i, r[i].toBytesBE()[16..32].*, power.toBytesBE()[16..32].*,
                 term.toBytesBE()[16..32].*, result.toBytesBE()[16..32].*,
             });
         }
         power = power.add(power); // power *= 2
     }
-    std.debug.print("[IDENTITY_DEBUG] final result = {x}\n", .{result.toBytesBE()[16..32].*});
+    dbg("[IDENTITY_DEBUG] final result = {x}\n", .{result.toBytesBE()[16..32].*});
     return result;
 }
 

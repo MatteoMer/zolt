@@ -21,6 +21,13 @@
 //! Reference: jolt-core/src/subprotocols/univariate_skip.rs
 
 const std = @import("std");
+
+// Debug output control - set to true to enable verbose debug prints
+const debug_verbose = false;
+fn dbg(comptime fmt: []const u8, args: anytype) void {
+    if (debug_verbose) std.debug.print(fmt, args);
+}
+
 const Allocator = std.mem.Allocator;
 
 /// Number of R1CS constraints
@@ -852,7 +859,7 @@ test "interpolation preserves zeros at base window" {
         const y_field = if (y >= 0) F.fromU64(@intCast(y)) else F.zero().sub(F.fromU64(@intCast(-y)));
         const eval = poly.evaluate(y_field);
         if (!eval.eql(F.zero())) {
-            std.debug.print("FAIL: t1({d}) = non-zero\n", .{y});
+            dbg("FAIL: t1({d}) = non-zero\n", .{y});
         }
         try std.testing.expect(eval.eql(F.zero()));
     }
@@ -914,20 +921,20 @@ test "buildUniskipFirstRoundPoly domain sum is zero when base evals are zero" {
         eval_sum = eval_sum.add(eval);
     }
 
-    std.debug.print("\nDomain sum (by evaluation): {any}\n", .{eval_sum.toBytes()[0..16]});
+    dbg("\nDomain sum (by evaluation): {any}\n", .{eval_sum.toBytes()[0..16]});
 
     // Domain sum should be zero because:
     // s1(y) = L(tau_high, y) * t1(y)
     // and t1(y) = 0 for all y in base domain
     if (!eval_sum.eql(F.zero())) {
-        std.debug.print("FAIL: Domain sum is not zero!\n", .{});
+        dbg("FAIL: Domain sum is not zero!\n", .{});
 
         // Debug: print some evaluations
         for (0..5) |i| {
             const y: i64 = -4 + @as(i64, @intCast(i));
             const y_field = if (y >= 0) F.fromU64(@intCast(y)) else F.zero().sub(F.fromU64(@intCast(-y)));
             const eval = s1.evaluate(y_field);
-            std.debug.print("  s1({d}) = {any}\n", .{ y, eval.toBytes()[0..8] });
+            dbg("  s1({d}) = {any}\n", .{ y, eval.toBytes()[0..8] });
         }
     }
 

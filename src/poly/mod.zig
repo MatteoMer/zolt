@@ -4,6 +4,13 @@
 //! including multilinear polynomials, equality polynomials, and commitment schemes.
 
 const std = @import("std");
+
+// Debug output control - set to true to enable verbose debug prints
+const debug_verbose = false;
+fn dbg(comptime fmt: []const u8, args: anytype) void {
+    if (debug_verbose) std.debug.print(fmt, args);
+}
+
 const Allocator = std.mem.Allocator;
 const field = @import("../field/mod.zig");
 
@@ -1248,23 +1255,23 @@ test "EqPolynomial partition of unity" {
         }
 
         // FORCED Print for debugging
-        std.debug.print("\n\n=== PARTITION TEST ===\n", .{});
-        std.debug.print("r[0] (5555 as Montgomery):\n", .{});
-        for (r[0].limbs) |limb| std.debug.print("  {x:016}\n", .{limb});
-        std.debug.print("r[1] (6666 as Montgomery):\n", .{});
-        for (r[1].limbs) |limb| std.debug.print("  {x:016}\n", .{limb});
-        std.debug.print("Eq evals:\n", .{});
+        dbg("\n\n=== PARTITION TEST ===\n", .{});
+        dbg("r[0] (5555 as Montgomery):\n", .{});
+        for (r[0].limbs) |limb| dbg("  {x:016}\n", .{limb});
+        dbg("r[1] (6666 as Montgomery):\n", .{});
+        for (r[1].limbs) |limb| dbg("  {x:016}\n", .{limb});
+        dbg("Eq evals:\n", .{});
         for (evals, 0..) |ev, i| {
-            std.debug.print("  [{d}]: ", .{i});
-            for (ev.limbs) |limb| std.debug.print("{x:016} ", .{limb});
-            std.debug.print("\n", .{});
+            dbg("  [{d}]: ", .{i});
+            for (ev.limbs) |limb| dbg("{x:016} ", .{limb});
+            dbg("\n", .{});
         }
-        std.debug.print("Sum:\n  ", .{});
-        for (sum.limbs) |limb| std.debug.print("{x:016} ", .{limb});
-        std.debug.print("\nOne:\n  ", .{});
-        for (F.one().limbs) |limb| std.debug.print("{x:016} ", .{limb});
-        std.debug.print("\nSum == One? {}\n", .{sum.eql(F.one())});
-        std.debug.print("=== END PARTITION TEST ===\n\n", .{});
+        dbg("Sum:\n  ", .{});
+        for (sum.limbs) |limb| dbg("{x:016} ", .{limb});
+        dbg("\nOne:\n  ", .{});
+        for (F.one().limbs) |limb| dbg("{x:016} ", .{limb});
+        dbg("\nSum == One? {}\n", .{sum.eql(F.one())});
+        dbg("=== END PARTITION TEST ===\n\n", .{});
 
         // Check partition of unity
         try testing.expect(sum.eql(F.one()));

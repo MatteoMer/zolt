@@ -14,6 +14,13 @@
 //! Reference: jolt-core/src/zkvm/ram/output_check.rs
 
 const std = @import("std");
+
+// Debug output control - set to true to enable verbose debug prints
+const debug_verbose = false;
+fn dbg(comptime fmt: []const u8, args: anytype) void {
+    if (debug_verbose) std.debug.print(fmt, args);
+}
+
 const Allocator = std.mem.Allocator;
 
 const poly_mod = @import("../../poly/mod.zig");
@@ -124,9 +131,9 @@ pub fn OutputSumcheckProver(comptime F: type) type {
             const K: usize = @as(usize, 1) << @intCast(log_K);
 
             // Debug: Print r_address for comparison with Jolt
-            std.debug.print("[ZOLT OUTPUT_CHECK] r_address (log_K={}):\n", .{log_K});
+            dbg("[ZOLT OUTPUT_CHECK] r_address (log_K={}):\n", .{log_K});
             for (r_address, 0..) |r, i| {
-                std.debug.print("[ZOLT OUTPUT_CHECK]   r_address[{}] = {any}\n", .{i, r.toBytesBE()});
+                dbg("[ZOLT OUTPUT_CHECK]   r_address[{}] = {any}\n", .{i, r.toBytesBE()});
             }
 
             // Allocate arrays
@@ -152,7 +159,7 @@ pub fn OutputSumcheckProver(comptime F: type) type {
                         init_bytecode_count += 1;
                     }
                     if (k < 5 or (k >= 4096 and k < 4100)) {
-                        std.debug.print("[ZOLT] OutputSumcheck: initial_ram k={}, addr=0x{X:0>8}, val=0x{X}\n", .{ k, address, v });
+                        dbg("[ZOLT] OutputSumcheck: initial_ram k={}, addr=0x{X:0>8}, val=0x{X}\n", .{ k, address, v });
                     }
                     break :blk F.fromU64(v);
                 } else F.zero();
@@ -160,16 +167,16 @@ pub fn OutputSumcheckProver(comptime F: type) type {
                     non_zero_count += 1;
                     if (k >= 1024 and k < 4096) { // IO region
                         io_region_values += 1;
-                        std.debug.print("[ZOLT] OutputSumcheck: IO region k={}, addr=0x{X:0>8}, val={}\n", .{ k, address, v });
+                        dbg("[ZOLT] OutputSumcheck: IO region k={}, addr=0x{X:0>8}, val={}\n", .{ k, address, v });
                     }
                     if (k < 5 or (k >= 4096 and k < 4100)) {
-                        std.debug.print("[ZOLT] OutputSumcheck: final_ram k={}, addr=0x{X:0>8}, val=0x{X}\n", .{ k, address, v });
+                        dbg("[ZOLT] OutputSumcheck: final_ram k={}, addr=0x{X:0>8}, val=0x{X}\n", .{ k, address, v });
                     }
                     break :blk F.fromU64(v);
                 } else F.zero();
             }
-            std.debug.print("[ZOLT] OutputSumcheck: final_ram non_zero_count={}, io_region_values={}, K={}\n", .{ non_zero_count, io_region_values, K });
-            std.debug.print("[ZOLT] OutputSumcheck: initial_ram non_zero_count={}, bytecode_count={}\n", .{ init_non_zero_count, init_bytecode_count });
+            dbg("[ZOLT] OutputSumcheck: final_ram non_zero_count={}, io_region_values={}, K={}\n", .{ non_zero_count, io_region_values, K });
+            dbg("[ZOLT] OutputSumcheck: initial_ram non_zero_count={}, bytecode_count={}\n", .{ init_non_zero_count, init_bytecode_count });
 
             // Set panic and termination bits in val_final ONLY (NOT in val_init).
             //
@@ -188,7 +195,7 @@ pub fn OutputSumcheckProver(comptime F: type) type {
                 const panic_val = if (is_panicking) F.one() else F.zero();
                 val_final[panic_index] = panic_val;
                 // val_init[panic_index] stays at 0 (or whatever initial_ram contained)
-                std.debug.print("[ZOLT] OutputSumcheck: val_final[{}] = {} (panic bit), val_init[{}] = {} (from initial_ram)\n", .{ panic_index, if (is_panicking) @as(u64, 1) else @as(u64, 0), panic_index, val_init[panic_index].toU64() });
+                dbg("[ZOLT] OutputSumcheck: val_final[{}] = {} (panic bit), val_init[{}] = {} (from initial_ram)\n", .{ panic_index, if (is_panicking) @as(u64, 1) else @as(u64, 0), panic_index, val_init[panic_index].toU64() });
             }
             const termination_index = remapAddress(memory_layout.termination, memory_layout) orelse 0;
             if (!is_panicking and termination_index < K) {
@@ -200,17 +207,17 @@ pub fn OutputSumcheckProver(comptime F: type) type {
                 // This is achieved by storing the SAME value for both RamValFinal and
                 // RamValInit claims at RamOutputCheck opening point.
                 val_final[termination_index] = F.one();
-                std.debug.print("[ZOLT] OutputSumcheck: val_final[{}] = 1 (termination bit)\n", .{termination_index});
+                dbg("[ZOLT] OutputSumcheck: val_final[{}] = 1 (termination bit)\n", .{termination_index});
             }
 
             // Compute IO region bounds (matches Jolt's ProgramIOPolynomial)
             const lowest = memory_layout.getLowestAddress();
             const io_start = remapAddress(memory_layout.input_start, memory_layout) orelse 0;
             const io_end = remapAddress(constants.RAM_START_ADDRESS, memory_layout) orelse K;
-            std.debug.print("[ZOLT] OutputSumcheck: lowest=0x{X:0>16}, io_start={}, io_end={}\n", .{ lowest, io_start, io_end });
-            std.debug.print("[ZOLT] OutputSumcheck: input_start=0x{X:0>16}, RAM_START=0x{X:0>16}\n", .{ memory_layout.input_start, constants.RAM_START_ADDRESS });
-            std.debug.print("[ZOLT] OutputSumcheck: output_start=0x{X:0>16}, output_end=0x{X:0>16}\n", .{ memory_layout.output_start, memory_layout.output_end });
-            std.debug.print("[ZOLT] OutputSumcheck: panic=0x{X:0>16}, termination=0x{X:0>16}\n", .{ memory_layout.panic, memory_layout.termination });
+            dbg("[ZOLT] OutputSumcheck: lowest=0x{X:0>16}, io_start={}, io_end={}\n", .{ lowest, io_start, io_end });
+            dbg("[ZOLT] OutputSumcheck: input_start=0x{X:0>16}, RAM_START=0x{X:0>16}\n", .{ memory_layout.input_start, constants.RAM_START_ADDRESS });
+            dbg("[ZOLT] OutputSumcheck: output_start=0x{X:0>16}, output_end=0x{X:0>16}\n", .{ memory_layout.output_start, memory_layout.output_end });
+            dbg("[ZOLT] OutputSumcheck: panic=0x{X:0>16}, termination=0x{X:0>16}\n", .{ memory_layout.panic, memory_layout.termination });
 
             // Initialize io_mask and val_io from program I/O (matching Jolt's ProgramIOPolynomial)
             // val_io is the "expected" values that the verifier will check against val_final
@@ -237,11 +244,11 @@ pub fn OutputSumcheckProver(comptime F: type) type {
                     }
                     val_io[input_index] = F.fromU64(word);
                     if (input_index < 10 or input_index >= K - 10) {
-                        std.debug.print("[ZOLT] OutputSumcheck: val_io[{}] = {} (input word)\n", .{ input_index, word });
+                        dbg("[ZOLT] OutputSumcheck: val_io[{}] = {} (input word)\n", .{ input_index, word });
                     }
                     input_index += 1;
                 }
-                std.debug.print("[ZOLT] OutputSumcheck: populated {} input words starting at index {}\n", .{ (input_bytes.len + 7) / 8, input_index_start });
+                dbg("[ZOLT] OutputSumcheck: populated {} input words starting at index {}\n", .{ (input_bytes.len + 7) / 8, input_index_start });
             }
 
             // Populate val_io from outputs (8-byte words starting at output_start)
@@ -259,25 +266,25 @@ pub fn OutputSumcheckProver(comptime F: type) type {
                     }
                     val_io[output_index] = F.fromU64(word);
                     if (output_index < 10 or output_index >= K - 10) {
-                        std.debug.print("[ZOLT] OutputSumcheck: val_io[{}] = {} (output word)\n", .{ output_index, word });
+                        dbg("[ZOLT] OutputSumcheck: val_io[{}] = {} (output word)\n", .{ output_index, word });
                     }
                     output_index += 1;
                 }
-                std.debug.print("[ZOLT] OutputSumcheck: populated {} output words starting at index {}\n", .{ (output_bytes.len + 7) / 8, output_index_start });
+                dbg("[ZOLT] OutputSumcheck: populated {} output words starting at index {}\n", .{ (output_bytes.len + 7) / 8, output_index_start });
             }
 
             // Set panic bit in val_io (matching Jolt's ProgramIOPolynomial)
             // (panic_index and termination_index already defined above for val_final)
             if (panic_index < K) {
                 val_io[panic_index] = if (is_panicking) F.one() else F.zero();
-                std.debug.print("[ZOLT] OutputSumcheck: val_io[{}] = {} (panic bit)\n", .{ panic_index, if (is_panicking) @as(u64, 1) else @as(u64, 0) });
+                dbg("[ZOLT] OutputSumcheck: val_io[{}] = {} (panic bit)\n", .{ panic_index, if (is_panicking) @as(u64, 1) else @as(u64, 0) });
             }
 
             // Set termination bit in val_io if not panicking (matching Jolt's ProgramIOPolynomial)
-            std.debug.print("[ZOLT] OutputSumcheck: termination_index={}, in IO={}\n", .{ termination_index, termination_index >= io_start and termination_index < io_end });
+            dbg("[ZOLT] OutputSumcheck: termination_index={}, in IO={}\n", .{ termination_index, termination_index >= io_start and termination_index < io_end });
             if (!is_panicking and termination_index < K) {
                 val_io[termination_index] = F.one();
-                std.debug.print("[ZOLT] OutputSumcheck: val_io[{}] = 1 (termination bit, not panicking)\n", .{termination_index});
+                dbg("[ZOLT] OutputSumcheck: val_io[{}] = 1 (termination bit, not panicking)\n", .{termination_index});
             }
 
             // CRITICAL FIX: For addresses with no memory writes, ensure val_final == val_init
@@ -304,12 +311,12 @@ pub fn OutputSumcheckProver(comptime F: type) type {
                         val_final[k] = val_init[k];
                         copied_outside_io += 1;
                         if (copied_outside_io <= 5) {
-                            std.debug.print("[ZOLT] OutputSumcheck: copied val_final[{}] = val_init[{}] (unwritten address, preserving initial state)\n", .{ k, k });
+                            dbg("[ZOLT] OutputSumcheck: copied val_final[{}] = val_init[{}] (unwritten address, preserving initial state)\n", .{ k, k });
                         }
                     }
                 }
             }
-            std.debug.print("[ZOLT] OutputSumcheck: copied val_init to val_final for {} unwritten addresses outside I/O region\n", .{copied_outside_io});
+            dbg("[ZOLT] OutputSumcheck: copied val_init to val_final for {} unwritten addresses outside I/O region\n", .{copied_outside_io});
 
             // Copy val_final to val_init for addresses INSIDE I/O region (except termination)
             // This ensures the I/O region matches the expected values
@@ -319,12 +326,12 @@ pub fn OutputSumcheckProver(comptime F: type) type {
                     if (!val_final[k].eql(F.zero())) {
                         copied_inside_io += 1;
                         if (copied_inside_io <= 5) {
-                            std.debug.print("[ZOLT] OutputSumcheck: copied val_init[{}] = val_final[{}] (inside I/O region)\n", .{ k, k });
+                            dbg("[ZOLT] OutputSumcheck: copied val_init[{}] = val_final[{}] (inside I/O region)\n", .{ k, k });
                         }
                     }
                 }
             }
-            std.debug.print("[ZOLT] OutputSumcheck: copied val_final to val_init for {} addresses inside I/O region (except termination)\n", .{copied_inside_io});
+            dbg("[ZOLT] OutputSumcheck: copied val_final to val_init for {} addresses inside I/O region (except termination)\n", .{copied_inside_io});
 
             // DEBUG: Check for differences between val_final and val_init
             var diff_count: usize = 0;
@@ -340,13 +347,13 @@ pub fn OutputSumcheckProver(comptime F: type) type {
                     }
                     if (diff_count <= 10) {
                         const in_io = if (k >= io_start and k < io_end) "IN I/O" else "OUTSIDE I/O";
-                        std.debug.print("[ZOLT] OutputSumcheck DEBUG: val_final[{}] != val_init[{}] ({s})\n", .{ k, k, in_io });
-                        std.debug.print("[ZOLT]   val_final[{}] = {any}\n", .{ k, val_final[k].toBytesBE() });
-                        std.debug.print("[ZOLT]   val_init[{}] = {any}\n", .{ k, val_init[k].toBytesBE() });
+                        dbg("[ZOLT] OutputSumcheck DEBUG: val_final[{}] != val_init[{}] ({s})\n", .{ k, k, in_io });
+                        dbg("[ZOLT]   val_final[{}] = {any}\n", .{ k, val_final[k].toBytesBE() });
+                        dbg("[ZOLT]   val_init[{}] = {any}\n", .{ k, val_init[k].toBytesBE() });
                     }
                 }
             }
-            std.debug.print("[ZOLT] OutputSumcheck DEBUG: {} total differences ({}  in I/O, {} outside I/O)\n", .{ diff_count, diff_in_io, diff_outside_io });
+            dbg("[ZOLT] OutputSumcheck DEBUG: {} total differences ({}  in I/O, {} outside I/O)\n", .{ diff_count, diff_in_io, diff_outside_io });
 
             // Compute EQ polynomial evaluations
             computeEqEvals(F, eq_r_address, r_address);
@@ -441,11 +448,11 @@ pub fn OutputSumcheckProver(comptime F: type) type {
             // Debug: verify sumcheck soundness s0 + s1 == current_claim
             const sum_check = s0.add(s1);
             if (!sum_check.eql(self.current_claim)) {
-                std.debug.print("[ZOLT OUTPUT_CHECK ERROR] s0 + s1 != current_claim!\n", .{});
-                std.debug.print("  s0 = {any}\n", .{s0.toBytesBE()});
-                std.debug.print("  s1 = {any}\n", .{s1.toBytesBE()});
-                std.debug.print("  s0+s1 = {any}\n", .{sum_check.toBytesBE()});
-                std.debug.print("  current_claim = {any}\n", .{self.current_claim.toBytesBE()});
+                dbg("[ZOLT OUTPUT_CHECK ERROR] s0 + s1 != current_claim!\n", .{});
+                dbg("  s0 = {any}\n", .{s0.toBytesBE()});
+                dbg("  s1 = {any}\n", .{s1.toBytesBE()});
+                dbg("  s0+s1 = {any}\n", .{sum_check.toBytesBE()});
+                dbg("  current_claim = {any}\n", .{self.current_claim.toBytesBE()});
             }
 
             // Convert evaluations to compressed coefficients [c0, c2, c3]
@@ -506,16 +513,16 @@ pub fn OutputSumcheckProver(comptime F: type) type {
         /// Get final claim values
         pub fn getFinalClaims(self: *const Self) struct { val_final: F, val_init: F, val_io: F, eq_r_address: F, io_mask: F } {
             // Debug output for comparing with Jolt
-            std.debug.print("[ZOLT OUTPUT_CHECK] val_final[0]: {any}\n", .{self.val_final[0].toBytesBE()});
-            std.debug.print("[ZOLT OUTPUT_CHECK] val_init[0]: {any}\n", .{self.val_init[0].toBytesBE()});
-            std.debug.print("[ZOLT OUTPUT_CHECK] val_io[0]: {any}\n", .{self.val_io[0].toBytesBE()});
-            std.debug.print("[ZOLT OUTPUT_CHECK] eq_r_address[0]: {any}\n", .{self.eq_r_address[0].toBytesBE()});
-            std.debug.print("[ZOLT OUTPUT_CHECK] io_mask[0]: {any}\n", .{self.io_mask[0].toBytesBE()});
+            dbg("[ZOLT OUTPUT_CHECK] val_final[0]: {any}\n", .{self.val_final[0].toBytesBE()});
+            dbg("[ZOLT OUTPUT_CHECK] val_init[0]: {any}\n", .{self.val_init[0].toBytesBE()});
+            dbg("[ZOLT OUTPUT_CHECK] val_io[0]: {any}\n", .{self.val_io[0].toBytesBE()});
+            dbg("[ZOLT OUTPUT_CHECK] eq_r_address[0]: {any}\n", .{self.eq_r_address[0].toBytesBE()});
+            dbg("[ZOLT OUTPUT_CHECK] io_mask[0]: {any}\n", .{self.io_mask[0].toBytesBE()});
             // Compute expected: eq * io_mask * (val_final - val_io)
             const diff = self.val_final[0].sub(self.val_io[0]);
             const expected = self.eq_r_address[0].mul(self.io_mask[0]).mul(diff);
-            std.debug.print("[ZOLT OUTPUT_CHECK] (val_final - val_io)[0]: {any}\n", .{diff.toBytesBE()});
-            std.debug.print("[ZOLT OUTPUT_CHECK] expected (eq * io_mask * diff)[0]: {any}\n", .{expected.toBytesBE()});
+            dbg("[ZOLT OUTPUT_CHECK] (val_final - val_io)[0]: {any}\n", .{diff.toBytesBE()});
+            dbg("[ZOLT OUTPUT_CHECK] expected (eq * io_mask * diff)[0]: {any}\n", .{expected.toBytesBE()});
 
             return .{
                 .val_final = self.val_final[0],

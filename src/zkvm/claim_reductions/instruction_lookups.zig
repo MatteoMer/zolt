@@ -9,6 +9,13 @@
 //! This is a degree-2 sumcheck with log_T rounds.
 
 const std = @import("std");
+
+// Debug output control - set to true to enable verbose debug prints
+const debug_verbose = false;
+fn dbg(comptime fmt: []const u8, args: anytype) void {
+    if (debug_verbose) std.debug.print(fmt, args);
+}
+
 const Allocator = std.mem.Allocator;
 
 /// Parameters for instruction lookups claim reduction
@@ -122,12 +129,12 @@ pub fn InstructionLookupsProver(comptime F: type) type {
                 init_right_sum = init_right_sum.add(eq_evals[j].mul(right[j]));
                 init_output_sum = init_output_sum.add(eq_evals[j].mul(lo[j]));
             }
-            std.debug.print("[INSTR_LOOKUPS INIT] MLE at r_spartan (before sumcheck):\n", .{});
-            std.debug.print("  init_output_sum = {x}\n", .{init_output_sum.toBytesBE()[16..32].*});
-            std.debug.print("  init_left_sum = {x}\n", .{init_left_sum.toBytesBE()[16..32].*});
-            std.debug.print("  init_right_sum = {x}\n", .{init_right_sum.toBytesBE()[16..32].*});
-            std.debug.print("  r_spartan[0] = {x}\n", .{params.r_spartan[0].toBytesBE()[16..32].*});
-            std.debug.print("  Stage2 eq_evals[0..3]: {x}, {x}, {x}\n", .{
+            dbg("[INSTR_LOOKUPS INIT] MLE at r_spartan (before sumcheck):\n", .{});
+            dbg("  init_output_sum = {x}\n", .{init_output_sum.toBytesBE()[16..32].*});
+            dbg("  init_left_sum = {x}\n", .{init_left_sum.toBytesBE()[16..32].*});
+            dbg("  init_right_sum = {x}\n", .{init_right_sum.toBytesBE()[16..32].*});
+            dbg("  r_spartan[0] = {x}\n", .{params.r_spartan[0].toBytesBE()[16..32].*});
+            dbg("  Stage2 eq_evals[0..3]: {x}, {x}, {x}\n", .{
                 eq_evals[0].toBytesBE()[16..32].*,
                 eq_evals[1].toBytesBE()[16..32].*,
                 eq_evals[2].toBytesBE()[16..32].*,
@@ -303,15 +310,15 @@ pub fn InstructionLookupsProver(comptime F: type) type {
             const left_operand = if (self.left_operands.len > 0) self.left_operands[0] else F.zero();
             const right_operand = if (self.right_operands.len > 0) self.right_operands[0] else F.zero();
 
-            std.debug.print("[INSTR_LOOKUPS FINAL] After {} rounds of binding:\n", .{self.challenges.items.len});
-            std.debug.print("  lookup_output = {x}\n", .{lookup_output.toBytesBE()[16..32].*});
-            std.debug.print("  left_operand = {x}\n", .{left_operand.toBytesBE()[16..32].*});
-            std.debug.print("  right_operand = {x}\n", .{right_operand.toBytesBE()[16..32].*});
+            dbg("[INSTR_LOOKUPS FINAL] After {} rounds of binding:\n", .{self.challenges.items.len});
+            dbg("  lookup_output = {x}\n", .{lookup_output.toBytesBE()[16..32].*});
+            dbg("  left_operand = {x}\n", .{left_operand.toBytesBE()[16..32].*});
+            dbg("  right_operand = {x}\n", .{right_operand.toBytesBE()[16..32].*});
             // Print first few challenges used for binding
             if (self.challenges.items.len > 0) {
-                std.debug.print("  challenges[0] = {x}\n", .{self.challenges.items[0].toBytesBE()[16..32].*});
+                dbg("  challenges[0] = {x}\n", .{self.challenges.items[0].toBytesBE()[16..32].*});
                 if (self.challenges.items.len > 7) {
-                    std.debug.print("  challenges[7] = {x}\n", .{self.challenges.items[7].toBytesBE()[16..32].*});
+                    dbg("  challenges[7] = {x}\n", .{self.challenges.items[7].toBytesBE()[16..32].*});
                 }
             }
 

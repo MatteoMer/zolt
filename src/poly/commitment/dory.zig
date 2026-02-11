@@ -21,6 +21,13 @@
 //! Reference: jolt-core/src/poly/commitment/dory/
 
 const std = @import("std");
+
+// Debug output control - set to true to enable verbose debug prints
+const debug_verbose = false;
+fn dbg(comptime fmt: []const u8, args: anytype) void {
+    if (debug_verbose) std.debug.print(fmt, args);
+}
+
 const Allocator = std.mem.Allocator;
 const pairing = @import("../../field/pairing.zig");
 const field = @import("../../field/mod.zig");
@@ -779,7 +786,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
         /// - 128 bytes: h2 (blinding G2 generator)
         pub fn loadFromFile(allocator: Allocator, path: []const u8) !SetupParams {
             const file = std.fs.cwd().openFile(path, .{}) catch |err| {
-                std.debug.print("Failed to open SRS file: {s}\n", .{path});
+                dbg("Failed to open SRS file: {s}\n", .{path});
                 return err;
             };
             defer file.close();
@@ -813,7 +820,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 _ = try file.readAll(&buf);
                 // Debug: print raw bytes for first few points
                 if (idx < 4) {
-                    std.debug.print("G1[{}] raw y bytes from file: {x}\n", .{ idx, buf[32..48].* });
+                    dbg("G1[{}] raw y bytes from file: {x}\n", .{ idx, buf[32..48].* });
                 }
                 // Parse arkworks uncompressed G1 format (64 bytes: x, y in LE)
                 g1.* = parseG1Uncompressed(&buf);
@@ -899,19 +906,19 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             // Verify round-trip: converting to Montgomery and back should give original
             const y_back = y_mont.fromMontgomery();
             if (y_limbs[1] != 0 and !std.meta.eql(y_back.limbs, y_limbs)) {
-                std.debug.print("\nMontgomery round-trip FAILED!\n", .{});
-                std.debug.print("  Original y limbs: {x:0>16} {x:0>16} {x:0>16} {x:0>16}\n", .{
+                dbg("\nMontgomery round-trip FAILED!\n", .{});
+                dbg("  Original y limbs: {x:0>16} {x:0>16} {x:0>16} {x:0>16}\n", .{
                     y_limbs[0], y_limbs[1], y_limbs[2], y_limbs[3],
                 });
-                std.debug.print("  y_mont limbs: {x:0>16} {x:0>16} {x:0>16} {x:0>16}\n", .{
+                dbg("  y_mont limbs: {x:0>16} {x:0>16} {x:0>16} {x:0>16}\n", .{
                     y_mont.limbs[0], y_mont.limbs[1], y_mont.limbs[2], y_mont.limbs[3],
                 });
-                std.debug.print("  After round-trip: {x:0>16} {x:0>16} {x:0>16} {x:0>16}\n", .{
+                dbg("  After round-trip: {x:0>16} {x:0>16} {x:0>16} {x:0>16}\n", .{
                     y_back.limbs[0], y_back.limbs[1], y_back.limbs[2], y_back.limbs[3],
                 });
                 // Also compare what manual computation gives
                 const y_mont_manual = field.testMontgomeryMulFp(y_limbs, field.BN254_FP_R2);
-                std.debug.print("  y_mont_manual limbs: {x:0>16} {x:0>16} {x:0>16} {x:0>16}\n", .{
+                dbg("  y_mont_manual limbs: {x:0>16} {x:0>16} {x:0>16} {x:0>16}\n", .{
                     y_mont_manual[0], y_mont_manual[1], y_mont_manual[2], y_mont_manual[3],
                 });
             }
@@ -1965,9 +1972,9 @@ test "dory commitment with jolt srs - compare matrix layout" {
         defer srs.deinit();
 
         // Print what we loaded
-        std.debug.print("\nLoaded SRS:\n", .{});
-        std.debug.print("  num_columns = {}\n", .{srs.num_columns});
-        std.debug.print("  num_rows = {}\n", .{srs.num_rows});
+        dbg("\nLoaded SRS:\n", .{});
+        dbg("  num_columns = {}\n", .{srs.num_columns});
+        dbg("  num_rows = {}\n", .{srs.num_rows});
 
         // Same polynomial as Jolt test: [1, 2, 3, 4, 5, 6, 7, 8]
         const evals = [_]Fr{
@@ -1978,9 +1985,9 @@ test "dory commitment with jolt srs - compare matrix layout" {
         const commitment = DoryCommitmentScheme(Fr).commit(&srs, &evals);
         const bytes = commitment.toBytes();
 
-        std.debug.print("\nZolt commitment:\n", .{});
-        std.debug.print("  First 16 bytes: {x}\n", .{bytes[0..16].*});
-        std.debug.print("  Last 16 bytes: {x}\n", .{bytes[384 - 16 .. 384].*});
+        dbg("\nZolt commitment:\n", .{});
+        dbg("  First 16 bytes: {x}\n", .{bytes[0..16].*});
+        dbg("  Last 16 bytes: {x}\n", .{bytes[384 - 16 .. 384].*});
 
         // Jolt's commitment (from test output):
         // First 16 bytes: [cf, 11, 82, 20, dc, 8c, 59, 10, fc, 08, e5, f4, 58, a2, 42, 6f]
@@ -1988,15 +1995,15 @@ test "dory commitment with jolt srs - compare matrix layout" {
         const jolt_first_bytes = [_]u8{ 0xcf, 0x11, 0x82, 0x20, 0xdc, 0x8c, 0x59, 0x10, 0xfc, 0x08, 0xe5, 0xf4, 0x58, 0xa2, 0x42, 0x6f };
 
         if (std.mem.eql(u8, bytes[0..16], &jolt_first_bytes)) {
-            std.debug.print("\n*** SUCCESS: Zolt commitment matches Jolt! ***\n", .{});
+            dbg("\n*** SUCCESS: Zolt commitment matches Jolt! ***\n", .{});
         } else {
-            std.debug.print("\n*** MISMATCH: Commitment differs from Jolt ***\n", .{});
-            std.debug.print("  Expected (Jolt): {x}\n", .{jolt_first_bytes});
-            std.debug.print("  Got (Zolt):      {x}\n", .{bytes[0..16].*});
+            dbg("\n*** MISMATCH: Commitment differs from Jolt ***\n", .{});
+            dbg("  Expected (Jolt): {x}\n", .{jolt_first_bytes});
+            dbg("  Got (Zolt):      {x}\n", .{bytes[0..16].*});
         }
     } else |_| {
-        std.debug.print("Skipping Jolt SRS comparison test - no SRS file at /tmp/jolt_dory_srs.bin\n", .{});
-        std.debug.print("Run Jolt's test_export_dory_srs first.\n", .{});
+        dbg("Skipping Jolt SRS comparison test - no SRS file at /tmp/jolt_dory_srs.bin\n", .{});
+        dbg("Run Jolt's test_export_dory_srs first.\n", .{});
     }
 }
 
@@ -2018,8 +2025,8 @@ test "dory commitment debug - compare intermediate values with jolt" {
         var srs = srs_const;
         defer srs.deinit();
 
-        std.debug.print("\n=== Dory Commitment Debug ===\n", .{});
-        std.debug.print("SRS loaded: {} G1 points, {} G2 points\n", .{ srs.g1_vec.len, srs.g2_vec.len });
+        dbg("\n=== Dory Commitment Debug ===\n", .{});
+        dbg("SRS loaded: {} G1 points, {} G2 points\n", .{ srs.g1_vec.len, srs.g2_vec.len });
 
         // Print first G1 point bytes (in arkworks format for comparison)
         const g1_0 = srs.g1_vec[0];
@@ -2032,14 +2039,14 @@ test "dory commitment debug - compare intermediate values with jolt" {
             const on_curve = g1_i.isOnCurve();
 
             // Print raw limbs (Montgomery form) for debugging
-            std.debug.print("\nG1[{}] on curve: {}\n", .{ i, on_curve });
-            std.debug.print("  x (Montgomery) limbs: {x:0>16} {x:0>16} {x:0>16} {x:0>16}\n", .{
+            dbg("\nG1[{}] on curve: {}\n", .{ i, on_curve });
+            dbg("  x (Montgomery) limbs: {x:0>16} {x:0>16} {x:0>16} {x:0>16}\n", .{
                 g1_i.x.limbs[0],
                 g1_i.x.limbs[1],
                 g1_i.x.limbs[2],
                 g1_i.x.limbs[3],
             });
-            std.debug.print("  y (Montgomery) limbs: {x:0>16} {x:0>16} {x:0>16} {x:0>16}\n", .{
+            dbg("  y (Montgomery) limbs: {x:0>16} {x:0>16} {x:0>16} {x:0>16}\n", .{
                 g1_i.y.limbs[0],
                 g1_i.y.limbs[1],
                 g1_i.y.limbs[2],
@@ -2056,8 +2063,8 @@ test "dory commitment debug - compare intermediate values with jolt" {
                 std.mem.writeInt(u64, y_bytes[j * 8 ..][0..8], y_std.limbs[j], .little);
             }
 
-            std.debug.print("  x first 16 (std): {x}\n", .{x_bytes[0..16].*});
-            std.debug.print("  y first 16 (std): {x}\n", .{y_bytes[0..16].*});
+            dbg("  x first 16 (std): {x}\n", .{x_bytes[0..16].*});
+            dbg("  y first 16 (std): {x}\n", .{y_bytes[0..16].*});
         }
 
         var g1_0_bytes: [64]u8 = undefined;
@@ -2065,7 +2072,7 @@ test "dory commitment debug - compare intermediate values with jolt" {
             std.mem.writeInt(u64, g1_0_bytes[i * 8 ..][0..8], g1_0_x_std.limbs[i], .little);
             std.mem.writeInt(u64, g1_0_bytes[32 + i * 8 ..][0..8], g1_0_y_std.limbs[i], .little);
         }
-        std.debug.print("\nG1[0] first 16 bytes: {x}\n", .{g1_0_bytes[0..16].*});
+        dbg("\nG1[0] first 16 bytes: {x}\n", .{g1_0_bytes[0..16].*});
         // Jolt: 10 f1 51 c2 83 fa c8 e8 ae 44 83 39 77 82 ca db
 
         // Test simple scalar multiplication: G1[0] * 1 should equal G1[0]
@@ -2080,16 +2087,16 @@ test "dory commitment debug - compare intermediate values with jolt" {
             std.mem.writeInt(u64, g1_times_1_bytes[i * 8 ..][0..8], g1_times_1_x_std.limbs[i], .little);
             std.mem.writeInt(u64, g1_times_1_bytes[32 + i * 8 ..][0..8], g1_times_1_y_std.limbs[i], .little);
         }
-        std.debug.print("G1[0]*1 first 16 bytes: {x}\n", .{g1_times_1_bytes[0..16].*});
+        dbg("G1[0]*1 first 16 bytes: {x}\n", .{g1_times_1_bytes[0..16].*});
 
         if (std.mem.eql(u8, &g1_0_bytes, &g1_times_1_bytes)) {
-            std.debug.print("  *** G1[0]*1 == G1[0]: PASS ***\n", .{});
+            dbg("  *** G1[0]*1 == G1[0]: PASS ***\n", .{});
         } else {
-            std.debug.print("  *** G1[0]*1 != G1[0]: FAIL - MSM broken ***\n", .{});
+            dbg("  *** G1[0]*1 != G1[0]: FAIL - MSM broken ***\n", .{});
         }
 
         // Test: Print first 4 G1 points
-        std.debug.print("\nG1 points in SRS:\n", .{});
+        dbg("\nG1 points in SRS:\n", .{});
         for (0..4) |i| {
             const g1_i = srs.g1_vec[i];
             const g1_i_x_std = g1_i.x.fromMontgomery();
@@ -2097,19 +2104,19 @@ test "dory commitment debug - compare intermediate values with jolt" {
             for (0..4) |j| {
                 std.mem.writeInt(u64, g1_i_bytes[j * 8 ..][0..8], g1_i_x_std.limbs[j], .little);
             }
-            std.debug.print("  G1[{}] x: {x}\n", .{ i, g1_i_bytes[0..16].* });
+            dbg("  G1[{}] x: {x}\n", .{ i, g1_i_bytes[0..16].* });
         }
 
         // Test: G1[0] * 2 (scalar multiplication)
         const scalar_two = Fr.fromU64(2);
-        std.debug.print("\nScalar 2 (Montgomery form): {x:0>16} {x:0>16} {x:0>16} {x:0>16}\n", .{
+        dbg("\nScalar 2 (Montgomery form): {x:0>16} {x:0>16} {x:0>16} {x:0>16}\n", .{
             scalar_two.limbs[0],
             scalar_two.limbs[1],
             scalar_two.limbs[2],
             scalar_two.limbs[3],
         });
         const scalar_two_std = scalar_two.fromMontgomery();
-        std.debug.print("Scalar 2 (standard form): {x:0>16} {x:0>16} {x:0>16} {x:0>16}\n", .{
+        dbg("Scalar 2 (standard form): {x:0>16} {x:0>16} {x:0>16} {x:0>16}\n", .{
             scalar_two_std.limbs[0],
             scalar_two_std.limbs[1],
             scalar_two_std.limbs[2],
@@ -2122,7 +2129,7 @@ test "dory commitment debug - compare intermediate values with jolt" {
         for (0..4) |i| {
             std.mem.writeInt(u64, g1_times_2_bytes[i * 8 ..][0..8], g1_times_2_x_std.limbs[i], .little);
         }
-        std.debug.print("G1[0]*2 x: {x}\n", .{g1_times_2_bytes[0..16].*});
+        dbg("G1[0]*2 x: {x}\n", .{g1_times_2_bytes[0..16].*});
 
         // Test: G1[0]*1 + G1[1]*1 (adding two points)
         const g1_sum = msm.MSM(Fr, Fp).compute(srs.g1_vec[0..2], &[_]Fr{ Fr.fromU64(1), Fr.fromU64(1) });
@@ -2131,7 +2138,7 @@ test "dory commitment debug - compare intermediate values with jolt" {
         for (0..4) |i| {
             std.mem.writeInt(u64, g1_sum_bytes[i * 8 ..][0..8], g1_sum_x_std.limbs[i], .little);
         }
-        std.debug.print("G1[0]+G1[1] x (via MSM): {x}\n", .{g1_sum_bytes[0..16].*});
+        dbg("G1[0]+G1[1] x (via MSM): {x}\n", .{g1_sum_bytes[0..16].*});
 
         // Also test direct affine addition
         const g1_sum_affine = srs.g1_vec[0].add(srs.g1_vec[1]);
@@ -2140,7 +2147,7 @@ test "dory commitment debug - compare intermediate values with jolt" {
         for (0..4) |i| {
             std.mem.writeInt(u64, g1_sum_affine_bytes[i * 8 ..][0..8], g1_sum_affine_x_std.limbs[i], .little);
         }
-        std.debug.print("G1[0]+G1[1] x (affine add): {x}\n", .{g1_sum_affine_bytes[0..16].*});
+        dbg("G1[0]+G1[1] x (affine add): {x}\n", .{g1_sum_affine_bytes[0..16].*});
 
         // Polynomial [1, 2, 3, 4, 5, 6, 7, 8]
         const num_cols: usize = 4;
@@ -2161,8 +2168,8 @@ test "dory commitment debug - compare intermediate values with jolt" {
         const row0_x_std = row0_affine.x.fromMontgomery();
         const row0_y_std = row0_affine.y.fromMontgomery();
 
-        std.debug.print("\nRow 0 MSM result:\n", .{});
-        std.debug.print("  x limbs (standard): {x:0>16} {x:0>16} {x:0>16} {x:0>16}\n", .{
+        dbg("\nRow 0 MSM result:\n", .{});
+        dbg("  x limbs (standard): {x:0>16} {x:0>16} {x:0>16} {x:0>16}\n", .{
             row0_x_std.limbs[0],
             row0_x_std.limbs[1],
             row0_x_std.limbs[2],
@@ -2175,16 +2182,16 @@ test "dory commitment debug - compare intermediate values with jolt" {
             std.mem.writeInt(u64, row0_bytes[i * 8 ..][0..8], row0_x_std.limbs[i], .little);
             std.mem.writeInt(u64, row0_bytes[32 + i * 8 ..][0..8], row0_y_std.limbs[i], .little);
         }
-        std.debug.print("  First 16 bytes: {x}\n", .{row0_bytes[0..16].*});
+        dbg("  First 16 bytes: {x}\n", .{row0_bytes[0..16].*});
 
         // Jolt reference: 03 81 87 9a 0a d6 7c 0f 6c 84 5b ed 4e f6 73 80
         const jolt_row0_bytes = [_]u8{ 0x03, 0x81, 0x87, 0x9a, 0x0a, 0xd6, 0x7c, 0x0f, 0x6c, 0x84, 0x5b, 0xed, 0x4e, 0xf6, 0x73, 0x80 };
 
         if (std.mem.eql(u8, row0_bytes[0..16], &jolt_row0_bytes)) {
-            std.debug.print("  *** Row 0 MSM MATCHES Jolt! ***\n", .{});
+            dbg("  *** Row 0 MSM MATCHES Jolt! ***\n", .{});
         } else {
-            std.debug.print("  *** Row 0 MSM MISMATCH ***\n", .{});
-            std.debug.print("  Expected: {x}\n", .{jolt_row0_bytes});
+            dbg("  *** Row 0 MSM MISMATCH ***\n", .{});
+            dbg("  Expected: {x}\n", .{jolt_row0_bytes});
         }
 
         // Row 1: [5, 6, 7, 8]
@@ -2205,21 +2212,21 @@ test "dory commitment debug - compare intermediate values with jolt" {
             std.mem.writeInt(u64, row1_bytes[i * 8 ..][0..8], row1_x_std.limbs[i], .little);
             std.mem.writeInt(u64, row1_bytes[32 + i * 8 ..][0..8], row1_y_std.limbs[i], .little);
         }
-        std.debug.print("\nRow 1 MSM result:\n", .{});
-        std.debug.print("  First 16 bytes: {x}\n", .{row1_bytes[0..16].*});
+        dbg("\nRow 1 MSM result:\n", .{});
+        dbg("  First 16 bytes: {x}\n", .{row1_bytes[0..16].*});
 
         // Jolt reference: 7c 95 83 60 cf bf 11 41 fa 6a 27 f6 84 1c d1 68
         const jolt_row1_bytes = [_]u8{ 0x7c, 0x95, 0x83, 0x60, 0xcf, 0xbf, 0x11, 0x41, 0xfa, 0x6a, 0x27, 0xf6, 0x84, 0x1c, 0xd1, 0x68 };
 
         if (std.mem.eql(u8, row1_bytes[0..16], &jolt_row1_bytes)) {
-            std.debug.print("  *** Row 1 MSM MATCHES Jolt! ***\n", .{});
+            dbg("  *** Row 1 MSM MATCHES Jolt! ***\n", .{});
         } else {
-            std.debug.print("  *** Row 1 MSM MISMATCH ***\n", .{});
-            std.debug.print("  Expected: {x}\n", .{jolt_row1_bytes});
+            dbg("  *** Row 1 MSM MISMATCH ***\n", .{});
+            dbg("  Expected: {x}\n", .{jolt_row1_bytes});
         }
 
         // Now test pairing: e(row0, G2[0])
-        std.debug.print("\n=== Pairing Test ===\n", .{});
+        dbg("\n=== Pairing Test ===\n", .{});
 
         // First check G2[0] bytes
         const g2_0 = srs.g2_vec[0];
@@ -2228,14 +2235,14 @@ test "dory commitment debug - compare intermediate values with jolt" {
         for (0..4) |i| {
             std.mem.writeInt(u64, g2_0_bytes[i * 8 ..][0..8], g2_0_x_c0_std.limbs[i], .little);
         }
-        std.debug.print("G2[0] x.c0 first 16 bytes: {x}\n", .{g2_0_bytes[0..16].*});
+        dbg("G2[0] x.c0 first 16 bytes: {x}\n", .{g2_0_bytes[0..16].*});
         // Jolt G2[0] first 16: 6f f9 ca 75 a1 71 4f c8 fa 12 b1 80 e1 a9 c6 95
         const jolt_g2_0_bytes = [_]u8{ 0x6f, 0xf9, 0xca, 0x75, 0xa1, 0x71, 0x4f, 0xc8, 0xfa, 0x12, 0xb1, 0x80, 0xe1, 0xa9, 0xc6, 0x95 };
         if (std.mem.eql(u8, g2_0_bytes[0..16], &jolt_g2_0_bytes)) {
-            std.debug.print("  *** G2[0] MATCHES Jolt! ***\n", .{});
+            dbg("  *** G2[0] MATCHES Jolt! ***\n", .{});
         } else {
-            std.debug.print("  *** G2[0] MISMATCH ***\n", .{});
-            std.debug.print("  Expected: {x}\n", .{jolt_g2_0_bytes});
+            dbg("  *** G2[0] MISMATCH ***\n", .{});
+            dbg("  Expected: {x}\n", .{jolt_g2_0_bytes});
         }
 
         // Print all G2[0] coordinates to verify loading
@@ -2251,9 +2258,9 @@ test "dory commitment debug - compare intermediate values with jolt" {
             std.mem.writeInt(u64, g2_y_c0_bytes[i * 8 ..][0..8], g2_0_y_c0_std.limbs[i], .little);
             std.mem.writeInt(u64, g2_y_c1_bytes[i * 8 ..][0..8], g2_0_y_c1_std.limbs[i], .little);
         }
-        std.debug.print("G2[0] x.c1 first 16: {x}\n", .{g2_x_c1_bytes[0..16].*});
-        std.debug.print("G2[0] y.c0 first 16: {x}\n", .{g2_y_c0_bytes[0..16].*});
-        std.debug.print("G2[0] y.c1 first 16: {x}\n", .{g2_y_c1_bytes[0..16].*});
+        dbg("G2[0] x.c1 first 16: {x}\n", .{g2_x_c1_bytes[0..16].*});
+        dbg("G2[0] y.c0 first 16: {x}\n", .{g2_y_c0_bytes[0..16].*});
+        dbg("G2[0] y.c1 first 16: {x}\n", .{g2_y_c1_bytes[0..16].*});
 
         // Compute pairing e(row0, G2[0])
         const row0_g1 = G1PointFp{
@@ -2263,18 +2270,18 @@ test "dory commitment debug - compare intermediate values with jolt" {
         };
         const pairing_result = pairing.pairingFp(row0_g1, g2_0);
         const pairing_bytes = pairing_result.toBytes();
-        std.debug.print("\nPairing e(row0, G2[0]) first 16 bytes: {x}\n", .{pairing_bytes[0..16].*});
+        dbg("\nPairing e(row0, G2[0]) first 16 bytes: {x}\n", .{pairing_bytes[0..16].*});
 
         // Jolt Pairing(0, 0) first 16 bytes: be c8 5a 17 0f 50 62 ad 4a 93 ce a6 33 10 15 f4
         const jolt_pairing_bytes = [_]u8{ 0xbe, 0xc8, 0x5a, 0x17, 0x0f, 0x50, 0x62, 0xad, 0x4a, 0x93, 0xce, 0xa6, 0x33, 0x10, 0x15, 0xf4 };
         if (std.mem.eql(u8, pairing_bytes[0..16], &jolt_pairing_bytes)) {
-            std.debug.print("  *** Pairing MATCHES Jolt! ***\n", .{});
+            dbg("  *** Pairing MATCHES Jolt! ***\n", .{});
         } else {
-            std.debug.print("  *** Pairing MISMATCH ***\n", .{});
-            std.debug.print("  Expected: {x}\n", .{jolt_pairing_bytes});
+            dbg("  *** Pairing MISMATCH ***\n", .{});
+            dbg("  Expected: {x}\n", .{jolt_pairing_bytes});
         }
     } else |_| {
-        std.debug.print("Skipping debug test - no SRS file at /tmp/jolt_dory_srs.bin\n", .{});
-        std.debug.print("Run Jolt's test_export_dory_srs first.\n", .{});
+        dbg("Skipping debug test - no SRS file at /tmp/jolt_dory_srs.bin\n", .{});
+        dbg("Run Jolt's test_export_dory_srs first.\n", .{});
     }
 }

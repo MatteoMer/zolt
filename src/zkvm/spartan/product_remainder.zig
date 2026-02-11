@@ -32,6 +32,13 @@
 //! Reference: jolt-core/src/zkvm/spartan/product.rs
 
 const std = @import("std");
+
+// Debug output control - set to true to enable verbose debug prints
+const debug_verbose = false;
+fn dbg(comptime fmt: []const u8, args: anytype) void {
+    if (debug_verbose) std.debug.print(fmt, args);
+}
+
 const Allocator = std.mem.Allocator;
 
 const constraints = @import("../r1cs/constraints.zig");
@@ -326,24 +333,24 @@ pub fn ProductVirtualRemainderProver(comptime F: type) type {
                 const t0_be = t0_sum.toBytesBE();
                 const tinf_be = t_inf_sum.toBytesBE();
                 const claim_be = self.current_claim.toBytesBE();
-                std.debug.print("[ZOLT PRODUCT round {}] t0 last 8 bytes (LE): {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2}\n", .{
+                dbg("[ZOLT PRODUCT round {}] t0 last 8 bytes (LE): {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2}\n", .{
                     self.current_round,
                     t0_be[31], t0_be[30], t0_be[29], t0_be[28], t0_be[27], t0_be[26], t0_be[25], t0_be[24],
                 });
-                std.debug.print("[ZOLT PRODUCT round {}] t_inf last 8 bytes (LE): {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2}\n", .{
+                dbg("[ZOLT PRODUCT round {}] t_inf last 8 bytes (LE): {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2}\n", .{
                     self.current_round,
                     tinf_be[31], tinf_be[30], tinf_be[29], tinf_be[28], tinf_be[27], tinf_be[26], tinf_be[25], tinf_be[24],
                 });
-                std.debug.print("[ZOLT PRODUCT round {}] previous_claim last 8 bytes (LE): {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2}\n", .{
+                dbg("[ZOLT PRODUCT round {}] previous_claim last 8 bytes (LE): {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2}\n", .{
                     self.current_round,
                     claim_be[31], claim_be[30], claim_be[29], claim_be[28], claim_be[27], claim_be[26], claim_be[25], claim_be[24],
                 });
                 // Print split_eq state
-                std.debug.print("[ZOLT PRODUCT round {}] split_eq.current_scalar = {any}\n", .{
+                dbg("[ZOLT PRODUCT round {}] split_eq.current_scalar = {any}\n", .{
                     self.current_round,
                     self.split_eq.current_scalar.toBytesBE(),
                 });
-                std.debug.print("[ZOLT PRODUCT round {}] E_out.len = {}, E_in.len = {}\n", .{
+                dbg("[ZOLT PRODUCT round {}] E_out.len = {}, E_in.len = {}\n", .{
                     self.current_round,
                     E_out.len,
                     E_in.len,
@@ -352,10 +359,10 @@ pub fn ProductVirtualRemainderProver(comptime F: type) type {
 
             // Print final state after last round
             if (self.current_round + 1 == self.num_cycle_vars) {
-                std.debug.print("[ZOLT PRODUCT FINAL] left[0] = {any}\n", .{self.left_poly.evaluations[0].toBytesBE()});
-                std.debug.print("[ZOLT PRODUCT FINAL] right[0] = {any}\n", .{self.right_poly.evaluations[0].toBytesBE()});
-                std.debug.print("[ZOLT PRODUCT FINAL] left[1] = {any}\n", .{self.left_poly.evaluations[1].toBytesBE()});
-                std.debug.print("[ZOLT PRODUCT FINAL] right[1] = {any}\n", .{self.right_poly.evaluations[1].toBytesBE()});
+                dbg("[ZOLT PRODUCT FINAL] left[0] = {any}\n", .{self.left_poly.evaluations[0].toBytesBE()});
+                dbg("[ZOLT PRODUCT FINAL] right[0] = {any}\n", .{self.right_poly.evaluations[0].toBytesBE()});
+                dbg("[ZOLT PRODUCT FINAL] left[1] = {any}\n", .{self.left_poly.evaluations[1].toBytesBE()});
+                dbg("[ZOLT PRODUCT FINAL] right[1] = {any}\n", .{self.right_poly.evaluations[1].toBytesBE()});
             }
 
             // Use Gruen's polynomial construction to get the cubic round polynomial

@@ -14,6 +14,13 @@
 //! Reference: jolt-core/src/zkvm/proof_serialization.rs
 
 const std = @import("std");
+
+// Debug output control - set to true to enable verbose debug prints
+const debug_verbose = false;
+fn dbg(comptime fmt: []const u8, args: anytype) void {
+    if (debug_verbose) std.debug.print(fmt, args);
+}
+
 const Allocator = std.mem.Allocator;
 const jolt_types = @import("jolt_types.zig");
 const commitment_mod = @import("../poly/commitment/mod.zig");
@@ -207,7 +214,7 @@ pub fn ArkworksSerializer(comptime F: type) type {
             for (proof.compressed_polys.items, 0..) |*poly, i| {
                 // Debug: print coefficient count for each round
                 if (i == 0) {
-                    std.debug.print("[SERIALIZATION]     Round 0: {} coeffs (excluding linear term)\n", .{poly.coeffs_except_linear_term.len});
+                    dbg("[SERIALIZATION]     Round 0: {} coeffs (excluding linear term)\n", .{poly.coeffs_except_linear_term.len});
                 }
                 try self.writeCompressedUniPoly(poly);
             }
@@ -272,14 +279,14 @@ pub fn ArkworksSerializer(comptime F: type) type {
                                 for (0..4) |j| {
                                     std.mem.writeInt(u64, buf[j * 8 ..][0..8], standard.limbs[j], .little);
                                 }
-                                std.debug.print("[SERIALIZE] Claim {d:03}: Virtual(LookupTableFlag({}), {s}) = [{x:0>2},{x:0>2},{x:0>2},{x:0>2}...]\n", .{ i, flag_idx, @tagName(v.sumcheck_id), buf[0], buf[1], buf[2], buf[3] });
+                                dbg("[SERIALIZE] Claim {d:03}: Virtual(LookupTableFlag({}), {s}) = [{x:0>2},{x:0>2},{x:0>2},{x:0>2}...]\n", .{ i, flag_idx, @tagName(v.sumcheck_id), buf[0], buf[1], buf[2], buf[3] });
                             },
                             .InstructionRa => |ra_idx| {
                                 // Print InstructionRa claim value - FULL 32 LE bytes
                                 const le_bytes = entry.claim.toBytes();
                                 const be_bytes = entry.claim.toBytesBE();
-                                std.debug.print("[SERIALIZE] InstructionRa({}) {s} FULL:\n", .{ ra_idx, @tagName(v.sumcheck_id) });
-                                std.debug.print("  LE bytes: [{x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}]\n", .{
+                                dbg("[SERIALIZE] InstructionRa({}) {s} FULL:\n", .{ ra_idx, @tagName(v.sumcheck_id) });
+                                dbg("  LE bytes: [{x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}]\n", .{
                                     le_bytes[0], le_bytes[1], le_bytes[2], le_bytes[3],
                                     le_bytes[4], le_bytes[5], le_bytes[6], le_bytes[7],
                                     le_bytes[8], le_bytes[9], le_bytes[10], le_bytes[11],
@@ -289,7 +296,7 @@ pub fn ArkworksSerializer(comptime F: type) type {
                                     le_bytes[24], le_bytes[25], le_bytes[26], le_bytes[27],
                                     le_bytes[28], le_bytes[29], le_bytes[30], le_bytes[31],
                                 });
-                                std.debug.print("  BE bytes: [{x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}]\n", .{
+                                dbg("  BE bytes: [{x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}]\n", .{
                                     be_bytes[0], be_bytes[1], be_bytes[2], be_bytes[3],
                                     be_bytes[4], be_bytes[5], be_bytes[6], be_bytes[7],
                                     be_bytes[8], be_bytes[9], be_bytes[10], be_bytes[11],
@@ -301,13 +308,13 @@ pub fn ArkworksSerializer(comptime F: type) type {
                                 });
                             },
                             else => {
-                                std.debug.print("[SERIALIZE] Claim {d:02}: Virtual({s}, {s})\n", .{ i, @tagName(v.poly), @tagName(v.sumcheck_id) });
+                                dbg("[SERIALIZE] Claim {d:02}: Virtual({s}, {s})\n", .{ i, @tagName(v.poly), @tagName(v.sumcheck_id) });
                             },
                         }
                         // Debug RamValFinal specifically
                         if (v.poly == .RamValFinal and v.sumcheck_id == .RamOutputCheck) {
                             const le_bytes = entry.claim.toBytes();
-                            std.debug.print("[SERIALIZE] RamValFinal bytes (LE first 8): [{x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}]\n", .{
+                            dbg("[SERIALIZE] RamValFinal bytes (LE first 8): [{x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}]\n", .{
                                 le_bytes[0], le_bytes[1], le_bytes[2], le_bytes[3],
                                 le_bytes[4], le_bytes[5], le_bytes[6], le_bytes[7],
                             });
@@ -315,7 +322,7 @@ pub fn ArkworksSerializer(comptime F: type) type {
                         // Debug RegistersVal specifically (Stage 5 input)
                         if (v.poly == .RegistersVal and v.sumcheck_id == .RegistersReadWriteChecking) {
                             const le_bytes = entry.claim.toBytes();
-                            std.debug.print("[SERIALIZE] RegistersVal@RegsRWCheck FULL (LE): [{x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}]\n", .{
+                            dbg("[SERIALIZE] RegistersVal@RegsRWCheck FULL (LE): [{x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}]\n", .{
                                 le_bytes[0], le_bytes[1], le_bytes[2], le_bytes[3],
                                 le_bytes[4], le_bytes[5], le_bytes[6], le_bytes[7],
                                 le_bytes[8], le_bytes[9], le_bytes[10], le_bytes[11],
@@ -324,17 +331,17 @@ pub fn ArkworksSerializer(comptime F: type) type {
                         }
                         // Debug LeftInstructionInput at SpartanProductVirtualization
                         if (v.poly == .LeftInstructionInput and v.sumcheck_id == .SpartanProductVirtualization) {
-                            std.debug.print("[SERIALIZE] LeftInstructionInput@ProdVirt = {any}\n", .{entry.claim.toBytesBE()});
+                            dbg("[SERIALIZE] LeftInstructionInput@ProdVirt = {any}\n", .{entry.claim.toBytesBE()});
                         }
                     },
                     .Committed => |c| {
-                        std.debug.print("[SERIALIZE] Claim {d:02}: Committed({s}, {s})\n", .{ i, @tagName(c.poly), @tagName(c.sumcheck_id) });
+                        dbg("[SERIALIZE] Claim {d:02}: Committed({s}, {s})\n", .{ i, @tagName(c.poly), @tagName(c.sumcheck_id) });
                     },
                     .UntrustedAdvice => |sid| {
-                        std.debug.print("[SERIALIZE] Claim {d:02}: UntrustedAdvice({s})\n", .{ i, @tagName(sid) });
+                        dbg("[SERIALIZE] Claim {d:02}: UntrustedAdvice({s})\n", .{ i, @tagName(sid) });
                     },
                     .TrustedAdvice => |sid| {
-                        std.debug.print("[SERIALIZE] Claim {d:02}: TrustedAdvice({s})\n", .{ i, @tagName(sid) });
+                        dbg("[SERIALIZE] Claim {d:02}: TrustedAdvice({s})\n", .{ i, @tagName(sid) });
                     },
                 }
                 try self.writeOpeningId(entry.id);
@@ -404,10 +411,10 @@ pub fn ArkworksSerializer(comptime F: type) type {
             //   rw_config: ReadWriteConfig (4 x u8 = 4 bytes)
             //   one_hot_config: OneHotConfig (2 x u8 = 2 bytes)
             //   dory_layout: DoryLayout (1 x u8 = 1 byte)
-            std.debug.print("[SERIALIZE CONFIG] trace_length={}, ram_K={}, bytecode_K={}\n", .{
+            dbg("[SERIALIZE CONFIG] trace_length={}, ram_K={}, bytecode_K={}\n", .{
                 proof.trace_length, proof.ram_K, proof.bytecode_K,
             });
-            std.debug.print("[SERIALIZE CONFIG] rw_config=({},{},{},{}), one_hot=({},{}), dory_layout={}\n", .{
+            dbg("[SERIALIZE CONFIG] rw_config=({},{},{},{}), one_hot=({},{}), dory_layout={}\n", .{
                 proof.rw_config.ram_rw_phase1_num_rounds,
                 proof.rw_config.ram_rw_phase2_num_rounds,
                 proof.rw_config.registers_rw_phase1_num_rounds,

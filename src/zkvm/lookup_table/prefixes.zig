@@ -10,6 +10,13 @@
 //!
 //! Reference: jolt-core/src/zkvm/lookup_table/prefixes/*.rs
 const std = @import("std");
+
+// Debug output control - set to true to enable verbose debug prints
+const debug_verbose = false;
+fn dbg(comptime fmt: []const u8, args: anytype) void {
+    if (debug_verbose) std.debug.print(fmt, args);
+}
+
 const Allocator = std.mem.Allocator;
 /// LOG_K = 128 for RV64 (2*XLEN for interleaved operands)
 pub const LOG_K: usize = 128;
@@ -426,29 +433,29 @@ fn lowerWordUpdateCheckpoint(
     const contrib_y = coeff_y.mul(r_y);
     // Debug: print first and last updates with full details
     if (j == 65 or j == 127) {
-        std.debug.print("[LOWERWORD UPDATE] j={}, x_shift={}, y_shift={}\n", .{ j, x_shift, y_shift });
-        std.debug.print("  r_x (limbs)      = [0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}]\n", .{
+        dbg("[LOWERWORD UPDATE] j={}, x_shift={}, y_shift={}\n", .{ j, x_shift, y_shift });
+        dbg("  r_x (limbs)      = [0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}]\n", .{
             r_x.limbs[0], r_x.limbs[1], r_x.limbs[2], r_x.limbs[3],
         });
-        std.debug.print("  r_y (limbs)      = [0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}]\n", .{
+        dbg("  r_y (limbs)      = [0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}]\n", .{
             r_y.limbs[0], r_y.limbs[1], r_y.limbs[2], r_y.limbs[3],
         });
-        std.debug.print("  coeff_x (limbs)  = [0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}]\n", .{
+        dbg("  coeff_x (limbs)  = [0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}]\n", .{
             coeff_x.limbs[0], coeff_x.limbs[1], coeff_x.limbs[2], coeff_x.limbs[3],
         });
-        std.debug.print("  contrib_x (limbs)= [0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}]\n", .{
+        dbg("  contrib_x (limbs)= [0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}]\n", .{
             contrib_x.limbs[0], contrib_x.limbs[1], contrib_x.limbs[2], contrib_x.limbs[3],
         });
-        std.debug.print("  contrib_y (limbs)= [0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}]\n", .{
+        dbg("  contrib_y (limbs)= [0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}]\n", .{
             contrib_y.limbs[0], contrib_y.limbs[1], contrib_y.limbs[2], contrib_y.limbs[3],
         });
-        std.debug.print("  prev (BE bytes)  = {x}\n", .{updated.toBytesBE()[16..32].*});
+        dbg("  prev (BE bytes)  = {x}\n", .{updated.toBytesBE()[16..32].*});
     }
     updated = updated.add(contrib_x);
     updated = updated.add(contrib_y);
     if (j == 65 or j == 127) {
-        std.debug.print("  new  (BE bytes)  = {x}\n", .{updated.toBytesBE()[16..32].*});
-        std.debug.print("  new  (limbs)     = [0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}]\n", .{
+        dbg("  new  (BE bytes)  = {x}\n", .{updated.toBytesBE()[16..32].*});
+        dbg("  new  (limbs)     = [0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}, 0x{x:0>16}]\n", .{
             updated.limbs[0], updated.limbs[1], updated.limbs[2], updated.limbs[3],
         });
     }

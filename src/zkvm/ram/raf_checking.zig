@@ -17,6 +17,13 @@
 //! Reference: jolt-core/src/zkvm/ram/raf_evaluation.rs
 
 const std = @import("std");
+
+// Debug output control - set to true to enable verbose debug prints
+const debug_verbose = false;
+fn dbg(comptime fmt: []const u8, args: anytype) void {
+    if (debug_verbose) std.debug.print(fmt, args);
+}
+
 const Allocator = std.mem.Allocator;
 
 const mod = @import("mod.zig");
@@ -117,11 +124,11 @@ pub fn RaPolynomial(comptime F: type) type {
             const eq_evals = try EqPoly.evalsSliceWithScaling(F, allocator, r_cycle, null);
             defer allocator.free(eq_evals);
 
-            std.debug.print("[RA INIT] trace_len={}, n_cycle_vars={}, eq_size={}, start_address=0x{x}\n", .{ trace_len, n_cycle_vars, eq_size, start_address });
+            dbg("[RA INIT] trace_len={}, n_cycle_vars={}, eq_size={}, start_address=0x{x}\n", .{ trace_len, n_cycle_vars, eq_size, start_address });
             // Print first few trace entries
             for (0..@min(5, trace_len)) |ti| {
                 const acc = trace.accesses.items[ti];
-                std.debug.print("[RA INIT]   trace[{}]: addr=0x{x}, val={}, op={s}, ts={}\n", .{
+                dbg("[RA INIT]   trace[{}]: addr=0x{x}, val={}, op={s}, ts={}\n", .{
                     ti,
                     acc.address,
                     acc.value,
@@ -130,7 +137,7 @@ pub fn RaPolynomial(comptime F: type) type {
                 });
             }
             if (trace_len > 5) {
-                std.debug.print("[RA INIT]   ... {} more trace entries\n", .{trace_len - 5});
+                dbg("[RA INIT]   ... {} more trace entries\n", .{trace_len - 5});
             }
 
             // Accumulate ra(k) for each access using timestamp as cycle index
@@ -144,7 +151,7 @@ pub fn RaPolynomial(comptime F: type) type {
                     const cycle_idx = access.timestamp;
                     const eq_val = if (cycle_idx < eq_size) eq_evals[@intCast(cycle_idx)] else F.zero();
                     evals[@intCast(k)] = evals[@intCast(k)].add(eq_val);
-                    std.debug.print("[RA INIT]   Accumulating: k={}, cycle={}, eq_val={any}\n", .{ k, cycle_idx, eq_val.toBytesBE() });
+                    dbg("[RA INIT]   Accumulating: k={}, cycle={}, eq_val={any}\n", .{ k, cycle_idx, eq_val.toBytesBE() });
                 }
             }
 
@@ -153,7 +160,7 @@ pub fn RaPolynomial(comptime F: type) type {
             for (evals) |e| {
                 if (!e.eql(F.zero())) non_zero_count += 1;
             }
-            std.debug.print("[RA INIT] k_size={}, non_zero_evals={}, evals[0]={any}\n", .{ k_size, non_zero_count, evals[0].toBytesBE() });
+            dbg("[RA INIT] k_size={}, non_zero_evals={}, evals[0]={any}\n", .{ k_size, non_zero_count, evals[0].toBytesBE() });
 
             return Self{
                 .evals = evals,
@@ -211,7 +218,7 @@ pub fn RaPolynomial(comptime F: type) type {
             if (self.evals.len == 0) return F.zero();
             // After binding, evals[0] contains the final value
             const active_len: usize = @as(usize, 1) << @intCast(self.num_vars);
-            std.debug.print("[RA DEBUG] finalClaim: num_vars={}, active_len={}, evals[0]={any}\n", .{ self.num_vars, active_len, self.evals[0].toBytesBE() });
+            dbg("[RA DEBUG] finalClaim: num_vars={}, active_len={}, evals[0]={any}\n", .{ self.num_vars, active_len, self.evals[0].toBytesBE() });
             return self.evals[0];
         }
     };

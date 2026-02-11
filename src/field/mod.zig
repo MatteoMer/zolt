@@ -5,6 +5,13 @@
 
 const std = @import("std");
 
+// Debug output control - set to true to enable verbose debug prints
+const debug_verbose = false;
+fn dbg(comptime fmt: []const u8, args: anytype) void {
+    if (debug_verbose) std.debug.print(fmt, args);
+}
+
+
 /// Number of bytes in a field element (256 bits = 32 bytes)
 pub const FIELD_ELEMENT_BYTES: usize = 32;
 
@@ -235,9 +242,9 @@ pub fn MontgomeryField(
             // DEBUG
             if (standard.limbs[0] == 0 and standard.limbs[1] == 0 and standard.limbs[2] == 0 and standard.limbs[3] == 0) {
                 if (self.limbs[0] != 0 or self.limbs[1] != 0 or self.limbs[2] != 0 or self.limbs[3] != 0) {
-                    std.debug.print("[ZOLT DEBUG] toBytesBE: non-zero input produced zero output!\n", .{});
-                    std.debug.print("[ZOLT DEBUG]   input_limbs = [{x}, {x}, {x}, {x}]\n", .{ self.limbs[0], self.limbs[1], self.limbs[2], self.limbs[3] });
-                    std.debug.print("[ZOLT DEBUG]   output_limbs = [{x}, {x}, {x}, {x}]\n", .{ standard.limbs[0], standard.limbs[1], standard.limbs[2], standard.limbs[3] });
+                    dbg("[ZOLT DEBUG] toBytesBE: non-zero input produced zero output!\n", .{});
+                    dbg("[ZOLT DEBUG]   input_limbs = [{x}, {x}, {x}, {x}]\n", .{ self.limbs[0], self.limbs[1], self.limbs[2], self.limbs[3] });
+                    dbg("[ZOLT DEBUG]   output_limbs = [{x}, {x}, {x}, {x}]\n", .{ standard.limbs[0], standard.limbs[1], standard.limbs[2], standard.limbs[3] });
                 }
             }
 

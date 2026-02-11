@@ -13,6 +13,13 @@
 //! Reference: jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs
 
 const std = @import("std");
+
+// Debug output control - set to true to enable verbose debug prints
+const debug_verbose = false;
+fn dbg(comptime fmt: []const u8, args: anytype) void {
+    if (debug_verbose) std.debug.print(fmt, args);
+}
+
 const Allocator = std.mem.Allocator;
 
 const prefixes_mod = @import("prefixes.zig");
@@ -219,7 +226,7 @@ pub fn AllSuffixPolys(comptime F: type) type {
 
                 // Debug: print first few cycles in phase 0
                 if (phase == 0 and cycles_processed <= 5) {
-                    std.debug.print("[SUFFIX INIT] cycle j={} t_idx={} k=0x{x:0>32} prefix_bits={} suffix_len={} suffix_raw=0x{x:0>32}\n", .{
+                    dbg("[SUFFIX INIT] cycle j={} t_idx={} k=0x{x:0>32} prefix_bits={} suffix_len={} suffix_raw=0x{x:0>32}\n", .{
                         j, t_idx, k, prefix_bits, suffix_len, suffix_bits_raw,
                     });
                 }
@@ -240,13 +247,13 @@ pub fn AllSuffixPolys(comptime F: type) type {
                         }
                         // Debug: print which suffix types contribute
                         if (phase == 0 and cycles_processed <= 5) {
-                            std.debug.print("  suffix[{}]={s} t={} idx={}\n", .{ s_idx, @tagName(suffix), t, idx });
+                            dbg("  suffix[{}]={s} t={} idx={}\n", .{ s_idx, @tagName(suffix), t, idx });
                         }
                     }
                 }
             }
             if (phase == 0) {
-                std.debug.print("[SUFFIX INIT] phase={}: cycles_processed={}, non_zero_suffix_mle={}\n", .{
+                dbg("[SUFFIX INIT] phase={}: cycles_processed={}, non_zero_suffix_mle={}\n", .{
                     phase, cycles_processed, non_zero_suffix_mle,
                 });
             }
@@ -332,7 +339,7 @@ pub fn proverMsgReadChecking(
                 if (table_non_zero > 0) {
                     non_zero_tables += 1;
                     total_non_zero += table_non_zero;
-                    std.debug.print("[READ_CHECK ROUND 0] table {} has {} non-zero Q values\n", .{ table_idx, table_non_zero });
+                    dbg("[READ_CHECK ROUND 0] table {} has {} non-zero Q values\n", .{ table_idx, table_non_zero });
 
                     // Print ALL non-zero Q values with indices
                     {
@@ -343,7 +350,7 @@ pub fn proverMsgReadChecking(
                                 if (!poly[idx].eql(F.zero())) {
                                     const in_right = idx >= len / 2;
                                     if (in_right) right_half_nonzero += 1;
-                                    std.debug.print("  T{}:Q[{s}][{}] = {x} {s}\n", .{
+                                    dbg("  T{}:Q[{s}][{}] = {x} {s}\n", .{
                                         table_idx, @tagName(suffixes_list[s_idx]), idx,
                                         poly[idx].toBytesBE()[24..32].*,
                                         if (in_right) "RIGHT_HALF!" else "",
@@ -352,19 +359,19 @@ pub fn proverMsgReadChecking(
                             }
                         }
                         if (right_half_nonzero > 0) {
-                            std.debug.print("[READ_CHECK ROUND 0] TABLE {} HAS {} RIGHT-HALF ENTRIES!\n", .{ table_idx, right_half_nonzero });
+                            dbg("[READ_CHECK ROUND 0] TABLE {} HAS {} RIGHT-HALF ENTRIES!\n", .{ table_idx, right_half_nonzero });
                         }
                     }
                 }
             }
         }
-        std.debug.print("[READ_CHECK ROUND 0] Q poly stats: total_non_zero={}, non_zero_tables={}, len={}\n", .{
+        dbg("[READ_CHECK ROUND 0] Q poly stats: total_non_zero={}, non_zero_tables={}, len={}\n", .{
             total_non_zero, non_zero_tables, len,
         });
     }
 
     if (round < 3) {
-        std.debug.print("[READ_CHECK R{}] effective_len={}\n", .{ round, len });
+        dbg("[READ_CHECK R{}] effective_len={}\n", .{ round, len });
     }
 
     const log_len = @ctz(len);
@@ -424,22 +431,22 @@ pub fn proverMsgReadChecking(
         var sum_per_table = F.zero();
         for (0..NUM_TABLES) |t_idx| {
             if (!eval_0_per_table[t_idx].eql(F.zero())) {
-                std.debug.print("[READ_CHECK R0] eval_0_per_table[{}]={x}\n", .{ t_idx, eval_0_per_table[t_idx].toBytesBE()[16..32].* });
+                dbg("[READ_CHECK R0] eval_0_per_table[{}]={x}\n", .{ t_idx, eval_0_per_table[t_idx].toBytesBE()[16..32].* });
                 sum_per_table = sum_per_table.add(eval_0_per_table[t_idx]);
             }
         }
-        std.debug.print("[READ_CHECK R0] sum_per_table={x}\n", .{sum_per_table.toBytesBE()[16..32].*});
-        std.debug.print("[READ_CHECK R0] eval_0={x}\n", .{eval_0.toBytesBE()[16..32].*});
-        std.debug.print("[READ_CHECK R0] sum==eval_0: {}\n", .{sum_per_table.eql(eval_0)});
+        dbg("[READ_CHECK R0] sum_per_table={x}\n", .{sum_per_table.toBytesBE()[16..32].*});
+        dbg("[READ_CHECK R0] eval_0={x}\n", .{eval_0.toBytesBE()[16..32].*});
+        dbg("[READ_CHECK R0] sum==eval_0: {}\n", .{sum_per_table.eql(eval_0)});
     }
 
     // Quadratic interpolation: eval_2 = 2*eval_2_right - eval_2_left
     const eval_2 = eval_2_right.add(eval_2_right).sub(eval_2_left);
 
     if (round == 0) {
-        std.debug.print("[READ_CHECK R0] eval_2_left={x}\n", .{eval_2_left.toBytesBE()[16..32].*});
-        std.debug.print("[READ_CHECK R0] eval_2_right={x}\n", .{eval_2_right.toBytesBE()[16..32].*});
-        std.debug.print("[READ_CHECK R0] eval_2_right==0: {}\n", .{eval_2_right.eql(F.zero())});
+        dbg("[READ_CHECK R0] eval_2_left={x}\n", .{eval_2_left.toBytesBE()[16..32].*});
+        dbg("[READ_CHECK R0] eval_2_right={x}\n", .{eval_2_right.toBytesBE()[16..32].*});
+        dbg("[READ_CHECK R0] eval_2_right==0: {}\n", .{eval_2_right.eql(F.zero())});
         // Also compute eval_1 independently to verify the total sum
         var eval_1_indep = F.zero();
         for (0..half_len) |b_idx2| {
@@ -469,10 +476,10 @@ pub fn proverMsgReadChecking(
             }
         }
         const total_read_check = eval_0.add(eval_1_indep);
-        std.debug.print("[READ_CHECK ROUND 0] eval_0={x}\n", .{eval_0.toBytesBE()[16..32].*});
-        std.debug.print("[READ_CHECK ROUND 0] eval_1_indep={x}\n", .{eval_1_indep.toBytesBE()[16..32].*});
-        std.debug.print("[READ_CHECK ROUND 0] eval_0+eval_1={x}\n", .{total_read_check.toBytesBE()[16..32].*});
-        std.debug.print("[READ_CHECK ROUND 0] eval_2={x}\n", .{eval_2.toBytesBE()[16..32].*});
+        dbg("[READ_CHECK ROUND 0] eval_0={x}\n", .{eval_0.toBytesBE()[16..32].*});
+        dbg("[READ_CHECK ROUND 0] eval_1_indep={x}\n", .{eval_1_indep.toBytesBE()[16..32].*});
+        dbg("[READ_CHECK ROUND 0] eval_0+eval_1={x}\n", .{total_read_check.toBytesBE()[16..32].*});
+        dbg("[READ_CHECK ROUND 0] eval_2={x}\n", .{eval_2.toBytesBE()[16..32].*});
     }
 
     return .{ eval_0, eval_2 };
@@ -1277,12 +1284,12 @@ pub fn proverMsgRaf(
 
     // Debug: show state at round 0 and 1
     if (left_ps.round == 0 or left_ps.round == 1) {
-        std.debug.print("[RAF_DEBUG R{}] Q_size={}, bound_value_left={x}\n", .{
+        dbg("[RAF_DEBUG R{}] Q_size={}, bound_value_left={x}\n", .{
             left_ps.round,
             len,
             left_ps.bound_value.toBytesBE()[16..32].*,
         });
-        std.debug.print("[RAF_DEBUG R{}] bound_value_right={x}, bound_value_identity={x}\n", .{
+        dbg("[RAF_DEBUG R{}] bound_value_right={x}, bound_value_identity={x}\n", .{
             left_ps.round,
             right_ps.bound_value.toBytesBE()[16..32].*,
             identity_ps.bound_value.toBytesBE()[16..32].*,
@@ -1303,29 +1310,29 @@ pub fn proverMsgRaf(
             identity_q0_sum = identity_q0_sum.add(identity_ps.Q[0][b]);
             identity_q1_sum = identity_q1_sum.add(identity_ps.Q[1][b]);
         }
-        std.debug.print("[RAF_DEBUG R{}] Q_SUM: left[0]={x}, left[1]={x}\n", .{
+        dbg("[RAF_DEBUG R{}] Q_SUM: left[0]={x}, left[1]={x}\n", .{
             left_ps.round,
             left_q0_sum.toBytesBE()[16..32].*,
             left_q1_sum.toBytesBE()[16..32].*,
         });
-        std.debug.print("[RAF_DEBUG R{}] Q_SUM: right[0]={x}, right[1]={x}\n", .{
+        dbg("[RAF_DEBUG R{}] Q_SUM: right[0]={x}, right[1]={x}\n", .{
             left_ps.round,
             right_q0_sum.toBytesBE()[16..32].*,
             right_q1_sum.toBytesBE()[16..32].*,
         });
-        std.debug.print("[RAF_DEBUG R{}] Q_SUM: identity[0]={x}, identity[1]={x}\n", .{
+        dbg("[RAF_DEBUG R{}] Q_SUM: identity[0]={x}, identity[1]={x}\n", .{
             left_ps.round,
             identity_q0_sum.toBytesBE()[16..32].*,
             identity_q1_sum.toBytesBE()[16..32].*,
         });
 
         // Print Q values at index 0 specifically
-        std.debug.print("[RAF_DEBUG R{}] Q_AT_0: left_Q0[0]={x}, left_Q1[0]={x}\n", .{
+        dbg("[RAF_DEBUG R{}] Q_AT_0: left_Q0[0]={x}, left_Q1[0]={x}\n", .{
             left_ps.round,
             left_ps.Q[0][0].toBytesBE()[16..32].*,
             left_ps.Q[1][0].toBytesBE()[16..32].*,
         });
-        std.debug.print("[RAF_DEBUG R{}] Q_AT_0: right_Q1[0]={x}, identity_Q0[0]={x}, identity_Q1[0]={x}\n", .{
+        dbg("[RAF_DEBUG R{}] Q_AT_0: right_Q1[0]={x}, identity_Q0[0]={x}, identity_Q1[0]={x}\n", .{
             left_ps.round,
             right_ps.Q[1][0].toBytesBE()[16..32].*,
             identity_ps.Q[0][0].toBytesBE()[16..32].*,
@@ -1333,27 +1340,27 @@ pub fn proverMsgRaf(
         });
 
         // Print prefix MLE values for debugging
-        std.debug.print("[RAF_DEBUG R{}] left prefix_mle_size={}, prefix_mle[0]={x}\n", .{
+        dbg("[RAF_DEBUG R{}] left prefix_mle_size={}, prefix_mle[0]={x}\n", .{
             left_ps.round,
             left_ps.prefix_mle_size,
             left_ps.prefix_mle[0].toBytesBE()[16..32].*,
         });
         if (left_ps.prefix_mle_size >= 2) {
             const lhalf = left_ps.prefix_mle_size / 2;
-            std.debug.print("[RAF_DEBUG R{}] left prefix_mle[half={d}]={x}\n", .{
+            dbg("[RAF_DEBUG R{}] left prefix_mle[half={d}]={x}\n", .{
                 left_ps.round,
                 lhalf,
                 left_ps.prefix_mle[lhalf].toBytesBE()[16..32].*,
             });
         }
-        std.debug.print("[RAF_DEBUG R{}] identity prefix_mle_size={}, prefix_mle[0]={x}\n", .{
+        dbg("[RAF_DEBUG R{}] identity prefix_mle_size={}, prefix_mle[0]={x}\n", .{
             left_ps.round,
             identity_ps.prefix_mle_size,
             identity_ps.prefix_mle[0].toBytesBE()[16..32].*,
         });
         if (identity_ps.prefix_mle_size >= 2) {
             const ihalf = identity_ps.prefix_mle_size / 2;
-            std.debug.print("[RAF_DEBUG R{}] identity prefix_mle[half={d}]={x}\n", .{
+            dbg("[RAF_DEBUG R{}] identity prefix_mle[half={d}]={x}\n", .{
                 left_ps.round,
                 ihalf,
                 identity_ps.prefix_mle[ihalf].toBytesBE()[16..32].*,
@@ -1364,17 +1371,17 @@ pub fn proverMsgRaf(
         const l_pf_0 = left_ps.prefixEvals(0);
         const r_pf_0 = right_ps.prefixEvals(0);
         const i_pf_0 = identity_ps.prefixEvals(0);
-        std.debug.print("[RAF_DEBUG R{}] prefix_evals(0): left=({x}, {x})\n", .{
+        dbg("[RAF_DEBUG R{}] prefix_evals(0): left=({x}, {x})\n", .{
             left_ps.round,
             l_pf_0[0].toBytesBE()[16..32].*,
             l_pf_0[1].toBytesBE()[16..32].*,
         });
-        std.debug.print("[RAF_DEBUG R{}] prefix_evals(0): right=({x}, {x})\n", .{
+        dbg("[RAF_DEBUG R{}] prefix_evals(0): right=({x}, {x})\n", .{
             left_ps.round,
             r_pf_0[0].toBytesBE()[16..32].*,
             r_pf_0[1].toBytesBE()[16..32].*,
         });
-        std.debug.print("[RAF_DEBUG R{}] prefix_evals(0): identity=({x}, {x})\n", .{
+        dbg("[RAF_DEBUG R{}] prefix_evals(0): identity=({x}, {x})\n", .{
             left_ps.round,
             i_pf_0[0].toBytesBE()[16..32].*,
             i_pf_0[1].toBytesBE()[16..32].*,
@@ -1398,7 +1405,7 @@ pub fn proverMsgRaf(
             explicit_right_sum_0 = explicit_right_sum_0.add(r_contrib).add(i_contrib);
         }
         const explicit_raf_0 = gamma.mul(explicit_left_sum_0).add(gamma_sqr.mul(explicit_right_sum_0));
-        std.debug.print("[RAF_DEBUG R{}] explicit_raf_0={x} (should match raf_evals[0])\n", .{
+        dbg("[RAF_DEBUG R{}] explicit_raf_0={x} (should match raf_evals[0])\n", .{
             left_ps.round,
             explicit_raf_0.toBytesBE()[16..32].*,
         });
@@ -1668,12 +1675,12 @@ pub fn condenseUEvals(
 
         // Multiply by the expanding table value
         if (k_bound >= v.getLen()) {
-            std.debug.print("[CONDENSE] ERROR: k_bound={} >= v.len={} at j={}, phase={}, suffix_bits={}, k=0x{x:0>32}\n", .{ k_bound, v.getLen(), j, phase, suffix_bits, k });
+            dbg("[CONDENSE] ERROR: k_bound={} >= v.len={} at j={}, phase={}, suffix_bits={}, k=0x{x:0>32}\n", .{ k_bound, v.getLen(), j, phase, suffix_bits, k });
             @panic("k_bound out of range");
         }
         u_evals[j] = u_evals[j].mul(v.get(@intCast(k_bound)));
     }
-    std.debug.print("[CONDENSE] phase={}, suffix_bits={}, max_k_bound={}\n", .{ phase, suffix_bits, max_k_bound });
+    dbg("[CONDENSE] phase={}, suffix_bits={}, max_k_bound={}\n", .{ phase, suffix_bits, max_k_bound });
 }
 
 // ============================================================================
@@ -1711,7 +1718,7 @@ pub fn computeTableValuesAtRAddress(
         prefix_values[i] = prefix_checkpoints.checkpoints[i] orelse F.zero();
         if (!prefix_values[i].eql(F.zero())) non_zero_prefixes += 1;
     }
-    std.debug.print("[computeTableValuesAtRAddress] non_zero_prefixes={}/{}\n", .{ non_zero_prefixes, Prefixes.COUNT });
+    dbg("[computeTableValuesAtRAddress] non_zero_prefixes={}/{}\n", .{ non_zero_prefixes, Prefixes.COUNT });
 
     // Compute MLE value for each table
     for (0..NUM_TABLES) |table_idx| {
@@ -1730,7 +1737,7 @@ pub fn computeTableValuesAtRAddress(
 
         // Debug: print first few non-zero table values
         if (table_idx < 5 or !result[table_idx].eql(F.zero())) {
-            std.debug.print("[computeTableValuesAtRAddress] table[{}]: num_suffixes={}, combined={x}\n", .{
+            dbg("[computeTableValuesAtRAddress] table[{}]: num_suffixes={}, combined={x}\n", .{
                 table_idx,
                 table_suff.len,
                 result[table_idx].toBytesBE()[24..32].*,

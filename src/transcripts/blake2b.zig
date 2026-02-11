@@ -12,6 +12,13 @@
 //! - Vector operations use begin/end markers
 
 const std = @import("std");
+
+// Debug output control - set to true to enable verbose debug prints
+const debug_verbose = false;
+fn dbg(comptime fmt: []const u8, args: anytype) void {
+    if (debug_verbose) std.debug.print(fmt, args);
+}
+
 const crypto = std.crypto;
 const Blake2b256 = crypto.hash.blake2.Blake2b256;
 const mem = std.mem;
@@ -39,16 +46,16 @@ pub fn Blake2bTranscript(comptime F: type) type {
         pub fn init(label: []const u8) Self {
             std.debug.assert(label.len < 33);
 
-            std.debug.print("[ZOLT TRANSCRIPT] init: label=\"{s}\" (len={d})\n", .{ label, label.len });
+            dbg("[ZOLT TRANSCRIPT] init: label=\"{s}\" (len={d})\n", .{ label, label.len });
 
             // Pad label to 32 bytes with zeros on the right
             var padded: [32]u8 = [_]u8{0} ** 32;
             const copy_len = @min(label.len, 32);
             @memcpy(padded[0..copy_len], label[0..copy_len]);
 
-            std.debug.print("[ZOLT TRANSCRIPT]   padded={{ ", .{});
-            for (padded[0..16]) |b| std.debug.print("{x:0>2} ", .{b});
-            std.debug.print("... }}\n", .{});
+            dbg("[ZOLT TRANSCRIPT]   padded={{ ", .{});
+            for (padded[0..16]) |b| dbg("{x:0>2} ", .{b});
+            dbg("... }}\n", .{});
 
             // Hash the padded label to get initial state
             var h = Blake2b256.init(.{});
@@ -56,9 +63,9 @@ pub fn Blake2bTranscript(comptime F: type) type {
             var initial_state: [32]u8 = undefined;
             h.final(&initial_state);
 
-            std.debug.print("[ZOLT TRANSCRIPT]   initial_state={{ ", .{});
-            for (initial_state) |b| std.debug.print("{x:0>2} ", .{b});
-            std.debug.print("}}\n", .{});
+            dbg("[ZOLT TRANSCRIPT]   initial_state={{ ", .{});
+            for (initial_state) |b| dbg("{x:0>2} ", .{b});
+            dbg("}}\n", .{});
 
             return Self{
                 .state = initial_state,
@@ -96,7 +103,7 @@ pub fn Blake2bTranscript(comptime F: type) type {
         pub fn appendMessage(self: *Self, msg: []const u8) void {
             std.debug.assert(msg.len < 33);
 
-            std.debug.print("[ZOLT TRANSCRIPT] appendMessage: \"{s}\" (len={d}), round={d}, state_before=[{x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}]\n", .{ msg, msg.len, self.n_rounds, self.state[0], self.state[1], self.state[2], self.state[3], self.state[4], self.state[5], self.state[6], self.state[7] });
+            dbg("[ZOLT TRANSCRIPT] appendMessage: \"{s}\" (len={d}), round={d}, state_before=[{x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}]\n", .{ msg, msg.len, self.n_rounds, self.state[0], self.state[1], self.state[2], self.state[3], self.state[4], self.state[5], self.state[6], self.state[7] });
 
             var h = self.hasher();
 
@@ -113,30 +120,30 @@ pub fn Blake2bTranscript(comptime F: type) type {
             h.final(&result);
             self.updateState(result);
 
-            std.debug.print("[ZOLT TRANSCRIPT]   state_after={{ ", .{});
-            for (self.state[0..8]) |b| std.debug.print("{x:0>2} ", .{b});
-            std.debug.print("... }}\n", .{});
+            dbg("[ZOLT TRANSCRIPT]   state_after={{ ", .{});
+            for (self.state[0..8]) |b| dbg("{x:0>2} ", .{b});
+            dbg("... }}\n", .{});
         }
 
         /// Append raw bytes to the transcript
         /// Matches Jolt's `fn append_bytes(&mut self, bytes: &[u8])`
         pub fn appendBytes(self: *Self, bytes: []const u8) void {
             // DEBUG: Print state before
-            std.debug.print("[ZOLT TRANSCRIPT] appendBytes: len={d}, state_before={{ ", .{bytes.len});
-            for (self.state[0..8]) |b| std.debug.print("{x:0>2} ", .{b});
-            std.debug.print("... }}\n", .{});
+            dbg("[ZOLT TRANSCRIPT] appendBytes: len={d}, state_before={{ ", .{bytes.len});
+            for (self.state[0..8]) |b| dbg("{x:0>2} ", .{b});
+            dbg("... }}\n", .{});
 
             // DEBUG: Print first and last bytes
             if (bytes.len > 0) {
-                std.debug.print("[ZOLT TRANSCRIPT]   first_8_bytes={{ ", .{});
+                dbg("[ZOLT TRANSCRIPT]   first_8_bytes={{ ", .{});
                 const print_len = @min(bytes.len, 8);
-                for (bytes[0..print_len]) |b| std.debug.print("{x:0>2} ", .{b});
-                std.debug.print("}}\n", .{});
+                for (bytes[0..print_len]) |b| dbg("{x:0>2} ", .{b});
+                dbg("}}\n", .{});
                 if (bytes.len > 8) {
-                    std.debug.print("[ZOLT TRANSCRIPT]   last_8_bytes={{ ", .{});
+                    dbg("[ZOLT TRANSCRIPT]   last_8_bytes={{ ", .{});
                     const last_start = bytes.len - @min(bytes.len, 8);
-                    for (bytes[last_start..]) |b| std.debug.print("{x:0>2} ", .{b});
-                    std.debug.print("}}\n", .{});
+                    for (bytes[last_start..]) |b| dbg("{x:0>2} ", .{b});
+                    dbg("}}\n", .{});
                 }
             }
 
@@ -148,9 +155,9 @@ pub fn Blake2bTranscript(comptime F: type) type {
             self.updateState(result);
 
             // DEBUG: Print state after
-            std.debug.print("[ZOLT TRANSCRIPT]   state_after={{ ", .{});
-            for (self.state[0..8]) |b| std.debug.print("{x:0>2} ", .{b});
-            std.debug.print("... }}\n", .{});
+            dbg("[ZOLT TRANSCRIPT]   state_after={{ ", .{});
+            for (self.state[0..8]) |b| dbg("{x:0>2} ", .{b});
+            dbg("... }}\n", .{});
         }
 
         /// Append a u64 to the transcript
@@ -158,14 +165,14 @@ pub fn Blake2bTranscript(comptime F: type) type {
         ///
         /// Packs into 32 bytes: [0u8; 24] ++ x.to_be_bytes()
         pub fn appendU64(self: *Self, x: u64) void {
-            std.debug.print("[ZOLT TRANSCRIPT] appendU64: value={d} (0x{x})\n", .{ x, x });
+            dbg("[ZOLT TRANSCRIPT] appendU64: value={d} (0x{x})\n", .{ x, x });
 
             var data: [32]u8 = [_]u8{0} ** 32;
             mem.writeInt(u64, data[24..32], x, .big);
 
-            std.debug.print("[ZOLT TRANSCRIPT]   packed_bytes={{ ", .{});
-            for (data[24..32]) |b| std.debug.print("{x:0>2} ", .{b});
-            std.debug.print("}}\n", .{});
+            dbg("[ZOLT TRANSCRIPT]   packed_bytes={{ ", .{});
+            for (data[24..32]) |b| dbg("{x:0>2} ", .{b});
+            dbg("}}\n", .{});
 
             var h = self.hasher();
             h.update(&data);
@@ -277,7 +284,7 @@ pub fn Blake2bTranscript(comptime F: type) type {
         /// This is different from challenge_scalar_optimized which uses MontU128Challenge
         /// with 125-bit masking.
         pub fn challengeScalarFull(self: *Self) F {
-            std.debug.print("[ZOLT TRANSCRIPT] challengeScalarFull: round={d}\n", .{self.n_rounds});
+            dbg("[ZOLT TRANSCRIPT] challengeScalarFull: round={d}\n", .{self.n_rounds});
 
             var buf: [16]u8 = undefined;
             self.challengeBytes(&buf);
@@ -299,11 +306,11 @@ pub fn Blake2bTranscript(comptime F: type) type {
             // Note: For 128-bit values < 2^128, no modular reduction is needed
             // since 2^128 < BN254 scalar field order (~2^254)
             const standard = F{ .limbs = .{ low, high, 0, 0 } };
-            std.debug.print("[ZOLT TRANSCRIPT]   standard_limbs=[0x{x}, 0x{x}, 0, 0]\n", .{ low, high });
+            dbg("[ZOLT TRANSCRIPT]   standard_limbs=[0x{x}, 0x{x}, 0, 0]\n", .{ low, high });
             const result = standard.toMontgomery();
-            std.debug.print("[ZOLT TRANSCRIPT]   mont_result=[0x{x}, 0x{x}, 0x{x}, 0x{x}]\n", .{ result.limbs[0], result.limbs[1], result.limbs[2], result.limbs[3] });
+            dbg("[ZOLT TRANSCRIPT]   mont_result=[0x{x}, 0x{x}, 0x{x}, 0x{x}]\n", .{ result.limbs[0], result.limbs[1], result.limbs[2], result.limbs[3] });
 
-            std.debug.print("[ZOLT TRANSCRIPT]   canonical_value=0x{x}{x:0>16}\n", .{ high, low });
+            dbg("[ZOLT TRANSCRIPT]   canonical_value=0x{x}{x:0>16}\n", .{ high, low });
 
             return result;
         }
@@ -330,17 +337,17 @@ pub fn Blake2bTranscript(comptime F: type) type {
         ///
         /// Used for Stage 1 sumcheck challenges (r0, r_i).
         pub fn challengeScalar128Bits(self: *Self) F {
-            std.debug.print("[ZOLT TRANSCRIPT] challengeScalar128Bits: round={d}\n", .{self.n_rounds});
-            std.debug.print("[ZOLT TRANSCRIPT]   state_before={{ ", .{});
-            for (self.state) |b| std.debug.print("{x:0>2} ", .{b});
-            std.debug.print("}}\n", .{});
+            dbg("[ZOLT TRANSCRIPT] challengeScalar128Bits: round={d}\n", .{self.n_rounds});
+            dbg("[ZOLT TRANSCRIPT]   state_before={{ ", .{});
+            for (self.state) |b| dbg("{x:0>2} ", .{b});
+            dbg("}}\n", .{});
 
             var buf: [16]u8 = undefined;
             self.challengeBytes(&buf);
 
-            std.debug.print("[ZOLT TRANSCRIPT]   challenge_bytes={{ ", .{});
-            for (buf) |b| std.debug.print("{x:0>2} ", .{b});
-            std.debug.print("}}\n", .{});
+            dbg("[ZOLT TRANSCRIPT]   challenge_bytes={{ ", .{});
+            for (buf) |b| dbg("{x:0>2} ", .{b});
+            dbg("}}\n", .{});
 
             // Reverse bytes to get u128 in BE order (Jolt's: buf.into_iter().rev())
             var reversed: [16]u8 = undefined;
@@ -348,9 +355,9 @@ pub fn Blake2bTranscript(comptime F: type) type {
                 reversed[i] = buf[15 - i];
             }
 
-            std.debug.print("[ZOLT TRANSCRIPT]   reversed={{ ", .{});
-            for (reversed) |b| std.debug.print("{x:0>2} ", .{b});
-            std.debug.print("}}\n", .{});
+            dbg("[ZOLT TRANSCRIPT]   reversed={{ ", .{});
+            for (reversed) |b| dbg("{x:0>2} ", .{b});
+            dbg("}}\n", .{});
 
             // Read as BE u128
             const high: u64 = mem.readInt(u64, reversed[0..8], .big);
@@ -363,8 +370,8 @@ pub fn Blake2bTranscript(comptime F: type) type {
             const masked_low: u64 = @truncate(masked_value);
             const masked_high: u64 = @truncate(masked_value >> 64);
 
-            std.debug.print("[ZOLT TRANSCRIPT]   full_value=0x{x}\n", .{full_value});
-            std.debug.print("[ZOLT TRANSCRIPT]   masked_value=0x{x} (125-bit)\n", .{masked_value});
+            dbg("[ZOLT TRANSCRIPT]   full_value=0x{x}\n", .{full_value});
+            dbg("[ZOLT TRANSCRIPT]   masked_value=0x{x} (125-bit)\n", .{masked_value});
 
             // CRITICAL: Match Jolt's MontU128Challenge behavior exactly!
             //
@@ -382,7 +389,7 @@ pub fn Blake2bTranscript(comptime F: type) type {
             // To match Jolt, we store [0, 0, L, H] directly WITHOUT toMontgomery()!
             const result = F{ .limbs = .{ 0, 0, masked_low, masked_high } };
 
-            std.debug.print("[ZOLT TRANSCRIPT]   result_limbs=[0x{x}, 0x{x}, 0x{x}, 0x{x}]\n", .{ result.limbs[0], result.limbs[1], result.limbs[2], result.limbs[3] });
+            dbg("[ZOLT TRANSCRIPT]   result_limbs=[0x{x}, 0x{x}, 0x{x}, 0x{x}]\n", .{ result.limbs[0], result.limbs[1], result.limbs[2], result.limbs[3] });
 
             return result;
         }
@@ -419,11 +426,11 @@ pub fn Blake2bTranscript(comptime F: type) type {
         /// Points are serialized as (x, y) in BE format.
         /// Point at infinity is serialized as 64 zero bytes.
         pub fn appendPoint(self: *Self, comptime Point: type, point: Point) void {
-            std.debug.print("[ZOLT TRANSCRIPT] appendPoint: round={d}\n", .{self.n_rounds});
+            dbg("[ZOLT TRANSCRIPT] appendPoint: round={d}\n", .{self.n_rounds});
 
             // Check for point at infinity
             if (point.isIdentity()) {
-                std.debug.print("[ZOLT TRANSCRIPT]   point_at_infinity=true\n", .{});
+                dbg("[ZOLT TRANSCRIPT]   point_at_infinity=true\n", .{});
                 self.appendBytes(&([_]u8{0} ** 64));
                 return;
             }
@@ -448,12 +455,12 @@ pub fn Blake2bTranscript(comptime F: type) type {
                 y_reversed[i] = y_bytes[31 - i];
             }
 
-            std.debug.print("[ZOLT TRANSCRIPT]   x_be={{ ", .{});
-            for (x_reversed[0..8]) |b| std.debug.print("{x:0>2} ", .{b});
-            std.debug.print("... }}\n", .{});
-            std.debug.print("[ZOLT TRANSCRIPT]   y_be={{ ", .{});
-            for (y_reversed[0..8]) |b| std.debug.print("{x:0>2} ", .{b});
-            std.debug.print("... }}\n", .{});
+            dbg("[ZOLT TRANSCRIPT]   x_be={{ ", .{});
+            for (x_reversed[0..8]) |b| dbg("{x:0>2} ", .{b});
+            dbg("... }}\n", .{});
+            dbg("[ZOLT TRANSCRIPT]   y_be={{ ", .{});
+            for (y_reversed[0..8]) |b| dbg("{x:0>2} ", .{b});
+            dbg("... }}\n", .{});
 
             var h = self.hasher();
             h.update(&x_reversed);
@@ -463,9 +470,9 @@ pub fn Blake2bTranscript(comptime F: type) type {
             h.final(&result);
             self.updateState(result);
 
-            std.debug.print("[ZOLT TRANSCRIPT]   state_after={{ ", .{});
-            for (self.state[0..8]) |b| std.debug.print("{x:0>2} ", .{b});
-            std.debug.print("... }}\n", .{});
+            dbg("[ZOLT TRANSCRIPT]   state_after={{ ", .{});
+            for (self.state[0..8]) |b| dbg("{x:0>2} ", .{b});
+            dbg("... }}\n", .{});
         }
 
         /// Append multiple points to the transcript
@@ -498,16 +505,16 @@ pub fn Blake2bTranscript(comptime F: type) type {
         /// IMPORTANT: This matches Jolt's append_serializable which reverses
         /// all bytes after serialization for EVM compatibility.
         pub fn appendGT(self: *Self, gt: anytype) void {
-            std.debug.print("[ZOLT TRANSCRIPT] appendGT:\n", .{});
+            dbg("[ZOLT TRANSCRIPT] appendGT:\n", .{});
 
             const bytes = gt.toBytes();
 
-            std.debug.print("[ZOLT TRANSCRIPT]   raw_bytes[0..16]={{ ", .{});
-            for (bytes[0..16]) |b| std.debug.print("{x:0>2} ", .{b});
-            std.debug.print("}}\n", .{});
-            std.debug.print("[ZOLT TRANSCRIPT]   raw_bytes[368..384]={{ ", .{});
-            for (bytes[368..384]) |b| std.debug.print("{x:0>2} ", .{b});
-            std.debug.print("}}\n", .{});
+            dbg("[ZOLT TRANSCRIPT]   raw_bytes[0..16]={{ ", .{});
+            for (bytes[0..16]) |b| dbg("{x:0>2} ", .{b});
+            dbg("}}\n", .{});
+            dbg("[ZOLT TRANSCRIPT]   raw_bytes[368..384]={{ ", .{});
+            for (bytes[368..384]) |b| dbg("{x:0>2} ", .{b});
+            dbg("}}\n", .{});
 
             // Reverse bytes to match Jolt's append_serializable
             var reversed: [384]u8 = undefined;
@@ -515,12 +522,12 @@ pub fn Blake2bTranscript(comptime F: type) type {
                 reversed[i] = bytes[383 - i];
             }
 
-            std.debug.print("[ZOLT TRANSCRIPT]   reversed[0..16]={{ ", .{});
-            for (reversed[0..16]) |b| std.debug.print("{x:0>2} ", .{b});
-            std.debug.print("}}\n", .{});
-            std.debug.print("[ZOLT TRANSCRIPT]   reversed[368..384]={{ ", .{});
-            for (reversed[368..384]) |b| std.debug.print("{x:0>2} ", .{b});
-            std.debug.print("}}\n", .{});
+            dbg("[ZOLT TRANSCRIPT]   reversed[0..16]={{ ", .{});
+            for (reversed[0..16]) |b| dbg("{x:0>2} ", .{b});
+            dbg("}}\n", .{});
+            dbg("[ZOLT TRANSCRIPT]   reversed[368..384]={{ ", .{});
+            for (reversed[368..384]) |b| dbg("{x:0>2} ", .{b});
+            dbg("}}\n", .{});
 
             self.appendBytes(&reversed);
         }
@@ -528,12 +535,12 @@ pub fn Blake2bTranscript(comptime F: type) type {
         /// Append a G1 point to the transcript (compressed format)
         /// For Dory compatibility - appends the compressed serialized point
         pub fn appendG1Compressed(self: *Self, point: anytype) void {
-            std.debug.print("[ZOLT TRANSCRIPT] appendG1Compressed: round={d}\n", .{self.n_rounds});
+            dbg("[ZOLT TRANSCRIPT] appendG1Compressed: round={d}\n", .{self.n_rounds});
             const dory = @import("../poly/commitment/dory.zig");
             const bytes = dory.compressG1(point);
-            std.debug.print("[ZOLT TRANSCRIPT]   compressed_bytes={{ ", .{});
-            for (bytes[0..16]) |b| std.debug.print("{x:0>2} ", .{b});
-            std.debug.print("... }}\n", .{});
+            dbg("[ZOLT TRANSCRIPT]   compressed_bytes={{ ", .{});
+            for (bytes[0..16]) |b| dbg("{x:0>2} ", .{b});
+            dbg("... }}\n", .{});
             self.appendBytes(&bytes);
         }
 
@@ -545,12 +552,12 @@ pub fn Blake2bTranscript(comptime F: type) type {
         /// Append a G2 point to the transcript (compressed format)
         /// For Dory compatibility - appends the compressed serialized point
         pub fn appendG2Compressed(self: *Self, point: anytype) void {
-            std.debug.print("[ZOLT TRANSCRIPT] appendG2Compressed: round={d}\n", .{self.n_rounds});
+            dbg("[ZOLT TRANSCRIPT] appendG2Compressed: round={d}\n", .{self.n_rounds});
             const dory = @import("../poly/commitment/dory.zig");
             const bytes = dory.compressG2(point);
-            std.debug.print("[ZOLT TRANSCRIPT]   compressed_bytes={{ ", .{});
-            for (bytes[0..16]) |b| std.debug.print("{x:0>2} ", .{b});
-            std.debug.print("... }}\n", .{});
+            dbg("[ZOLT TRANSCRIPT]   compressed_bytes={{ ", .{});
+            for (bytes[0..16]) |b| dbg("{x:0>2} ", .{b});
+            dbg("... }}\n", .{});
             self.appendBytes(&bytes);
         }
     };
@@ -972,10 +979,10 @@ test "jolt compatibility: challenge limbs verification" {
     const expected_high: u64 = 0x0737345c88127af8;
 
     // Print actual values for debugging
-    std.debug.print("\n=== ZOLT CHALLENGE LIMBS TEST ===\n", .{});
-    std.debug.print("Limbs: [0x{x}, 0x{x}, 0x{x}, 0x{x}]\n", .{ challenge.limbs[0], challenge.limbs[1], challenge.limbs[2], challenge.limbs[3] });
-    std.debug.print("Expected: [0, 0, 0x{x}, 0x{x}]\n", .{ expected_low, expected_high });
-    std.debug.print("=== END ZOLT TEST ===\n", .{});
+    dbg("\n=== ZOLT CHALLENGE LIMBS TEST ===\n", .{});
+    dbg("Limbs: [0x{x}, 0x{x}, 0x{x}, 0x{x}]\n", .{ challenge.limbs[0], challenge.limbs[1], challenge.limbs[2], challenge.limbs[3] });
+    dbg("Expected: [0, 0, 0x{x}, 0x{x}]\n", .{ expected_low, expected_high });
+    dbg("=== END ZOLT TEST ===\n", .{});
 
     try testing.expectEqual(@as(u64, 0), challenge.limbs[0]);
     try testing.expectEqual(@as(u64, 0), challenge.limbs[1]);

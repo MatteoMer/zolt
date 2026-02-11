@@ -24,6 +24,13 @@
 //! jolt-core/src/zkvm/spartan/outer.rs
 
 const std = @import("std");
+
+// Debug output control - set to true to enable verbose debug prints
+const debug_verbose = false;
+fn dbg(comptime fmt: []const u8, args: anytype) void {
+    if (debug_verbose) std.debug.print(fmt, args);
+}
+
 const Allocator = std.mem.Allocator;
 
 const constraints = @import("../r1cs/constraints.zig");
@@ -164,18 +171,18 @@ pub fn StreamingOuterProver(comptime F: type) type {
             const tau_low = if (tau.len > 0) tau[0 .. tau.len - 1] else tau;
 
             // DEBUG: Print tau values used by streaming outer prover
-            std.debug.print("[STREAMING_OUTER] initWithScaling: tau.len={d}\n", .{tau.len});
-            std.debug.print("[STREAMING_OUTER] tau_high (limbs) = [{x}, {x}, {x}, {x}]\n", .{
+            dbg("[STREAMING_OUTER] initWithScaling: tau.len={d}\n", .{tau.len});
+            dbg("[STREAMING_OUTER] tau_high (limbs) = [{x}, {x}, {x}, {x}]\n", .{
                 tau_high.limbs[0], tau_high.limbs[1], tau_high.limbs[2], tau_high.limbs[3],
             });
             if (tau.len > 0) {
-                std.debug.print("[STREAMING_OUTER] tau[0] (limbs) = [{x}, {x}, {x}, {x}]\n", .{
+                dbg("[STREAMING_OUTER] tau[0] (limbs) = [{x}, {x}, {x}, {x}]\n", .{
                     tau[0].limbs[0], tau[0].limbs[1], tau[0].limbs[2], tau[0].limbs[3],
                 });
             }
-            std.debug.print("[STREAMING_OUTER] lagrange_tau_r0 present = {}\n", .{lagrange_tau_r0 != null});
+            dbg("[STREAMING_OUTER] lagrange_tau_r0 present = {}\n", .{lagrange_tau_r0 != null});
             if (lagrange_tau_r0) |l| {
-                std.debug.print("[STREAMING_OUTER] lagrange_tau_r0 (limbs) = [{x}, {x}, {x}, {x}]\n", .{
+                dbg("[STREAMING_OUTER] lagrange_tau_r0 (limbs) = [{x}, {x}, {x}, {x}]\n", .{
                     l.limbs[0], l.limbs[1], l.limbs[2], l.limbs[3],
                 });
             }
@@ -372,7 +379,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 const bz_dbg = &(self.bz_poly.?);
                 for (0..@min(4, az_dbg.boundLen())) |idx| {
                     const prod = az_dbg.evaluations[idx].mul(bz_dbg.evaluations[idx]);
-                    std.debug.print("[MATERIALIZE] Az[{d}]*Bz[{d}] = {any}\n", .{idx, idx, prod.toBytes()});
+                    dbg("[MATERIALIZE] Az[{d}]*Bz[{d}] = {any}\n", .{idx, idx, prod.toBytes()});
                 }
             }
 
@@ -558,14 +565,14 @@ pub fn StreamingOuterProver(comptime F: type) type {
             defer self.allocator.free(E_in);
 
             // DEBUG: Print split parameters
-            std.debug.print("[STREAMING_OUTER UNISKIP] tau.len={d}, m={d}, wprime_len={d}\n", .{self.full_tau.len, m, wprime_len});
-            std.debug.print("[STREAMING_OUTER UNISKIP] num_x_out_bits={d}, num_x_in_bits={d}, num_x_in_prime_bits={d}\n", .{num_x_out_bits, num_x_in_bits, num_x_in_prime_bits});
-            std.debug.print("[STREAMING_OUTER UNISKIP] E_out.len={d}, E_in.len={d}\n", .{E_out.len, E_in.len});
+            dbg("[STREAMING_OUTER UNISKIP] tau.len={d}, m={d}, wprime_len={d}\n", .{self.full_tau.len, m, wprime_len});
+            dbg("[STREAMING_OUTER UNISKIP] num_x_out_bits={d}, num_x_in_bits={d}, num_x_in_prime_bits={d}\n", .{num_x_out_bits, num_x_in_bits, num_x_in_prime_bits});
+            dbg("[STREAMING_OUTER UNISKIP] E_out.len={d}, E_in.len={d}\n", .{E_out.len, E_in.len});
             if (E_out.len > 0) {
-                std.debug.print("[STREAMING_OUTER UNISKIP] E_out[0] = {any}\n", .{E_out[0].toBytesBE()});
+                dbg("[STREAMING_OUTER UNISKIP] E_out[0] = {any}\n", .{E_out[0].toBytesBE()});
             }
             if (E_in.len > 0) {
-                std.debug.print("[STREAMING_OUTER UNISKIP] E_in[0] = {any}\n", .{E_in[0].toBytesBE()});
+                dbg("[STREAMING_OUTER UNISKIP] E_in[0] = {any}\n", .{E_in[0].toBytesBE()});
             }
 
             // Compute extended_evals at each of the 9 target points
@@ -597,7 +604,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
                 // DEBUG: Print extended_eval BEFORE R^2 scaling
                 if (target_idx < 3) {
-                    std.debug.print("[STREAMING_OUTER UNISKIP] BEFORE R^2: extended_evals[{d}] (target_y={d}) = {any}\n", .{target_idx, target_y, sum.toBytesBE()});
+                    dbg("[STREAMING_OUTER UNISKIP] BEFORE R^2: extended_evals[{d}] (target_y={d}) = {any}\n", .{target_idx, target_y, sum.toBytesBE()});
                 }
 
                 // No R^2 scaling needed. Zolt computes Σ eq * AzBz using native field
@@ -609,7 +616,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
                 // DEBUG: Print extended_eval AFTER R^2 scaling
                 if (target_idx < 3) {
-                    std.debug.print("[STREAMING_OUTER UNISKIP] AFTER R^2:  extended_evals[{d}] (target_y={d}) = {any}\n", .{target_idx, target_y, extended_evals[target_idx].toBytesBE()});
+                    dbg("[STREAMING_OUTER UNISKIP] AFTER R^2:  extended_evals[{d}] (target_y={d}) = {any}\n", .{target_idx, target_y, extended_evals[target_idx].toBytesBE()});
                 }
             }
 
@@ -630,14 +637,14 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 // Get r0 from proof_converter (stored in... hmm, not available here)
                 // Instead, evaluate t1 at a test point to verify interpolation
                 // Actually, we need r0. Let me print t1_vals[4] which is ext_eval(-5)
-                std.debug.print("[T1_DEBUG] t1_vals[4] (Y=-5) = {any}\n", .{t1_vals[4].toBytesBE()});
-                std.debug.print("[T1_DEBUG] t1_vals[9] (Y=0, base) = {any}\n", .{t1_vals[9].toBytesBE()});
+                dbg("[T1_DEBUG] t1_vals[4] (Y=-5) = {any}\n", .{t1_vals[4].toBytesBE()});
+                dbg("[T1_DEBUG] t1_vals[9] (Y=0, base) = {any}\n", .{t1_vals[9].toBytesBE()});
 
                 // Also print ALL non-zero t1_vals
                 for (0..EXTENDED_SIZE) |tidx| {
                     if (!t1_vals[tidx].eql(F.zero())) {
                         const ty: i64 = @as(i64, @intCast(tidx)) - @as(i64, DEGREE);
-                        std.debug.print("[T1_DEBUG] t1_vals[{d}] (Y={d}) = {any}\n", .{tidx, ty, t1_vals[tidx].toBytesBE()});
+                        dbg("[T1_DEBUG] t1_vals[{d}] (Y={d}) = {any}\n", .{tidx, ty, t1_vals[tidx].toBytesBE()});
                     }
                 }
             }
@@ -790,11 +797,11 @@ pub fn StreamingOuterProver(comptime F: type) type {
                     if (!tv.eql(t1_vals[pidx])) {
                         interp_mismatches += 1;
                         if (interp_mismatches <= 3) {
-                            std.debug.print("[INTERP_CHECK] t1 MISMATCH at Y={d}: from_coeffs={any} expected={any}\n", .{ py, tv.toBytesBE(), t1_vals[pidx].toBytesBE() });
+                            dbg("[INTERP_CHECK] t1 MISMATCH at Y={d}: from_coeffs={any} expected={any}\n", .{ py, tv.toBytesBE(), t1_vals[pidx].toBytesBE() });
                         }
                     }
                 }
-                std.debug.print("[INTERP_CHECK] t1 polynomial: {d}/{d} domain points match\n", .{ EXTENDED_SIZE - interp_mismatches, EXTENDED_SIZE });
+                dbg("[INTERP_CHECK] t1 polynomial: {d}/{d} domain points match\n", .{ EXTENDED_SIZE - interp_mismatches, EXTENDED_SIZE });
             }
 
             // DEBUG: Verify sum over base domain is zero
@@ -811,8 +818,8 @@ pub fn StreamingOuterProver(comptime F: type) type {
                     sum_check = sum_check.add(s1_coeffs[j].mul(ps_field));
                 }
             }
-            std.debug.print("[STREAMING_OUTER UNISKIP] Sum check over base domain: {any}\n", .{sum_check.toBytesBE()});
-            std.debug.print("[STREAMING_OUTER UNISKIP] Sum check is zero: {}\n", .{sum_check.eql(F.zero())});
+            dbg("[STREAMING_OUTER UNISKIP] Sum check over base domain: {any}\n", .{sum_check.toBytesBE()});
+            dbg("[STREAMING_OUTER UNISKIP] Sum check is zero: {}\n", .{sum_check.eql(F.zero())});
 
             return s1_coeffs;
         }
@@ -1256,7 +1263,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
             const start: i64 = -@as(i64, (FIRST_GROUP_SIZE - 1) / 2); // = -4
 
             // DEBUG: Print r0
-            std.debug.print("[ZOLT] computeLagrangeEvalsAtR0: r0 = {any}\n", .{r0.toBytesBE()});
+            dbg("[ZOLT] computeLagrangeEvalsAtR0: r0 = {any}\n", .{r0.toBytesBE()});
 
             for (0..FIRST_GROUP_SIZE) |i| {
                 _ = start + @as(i64, @intCast(i)); // actual domain point (unused but shows semantics)
@@ -1293,7 +1300,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
             // DEBUG: Print all Lagrange weights
             for (0..FIRST_GROUP_SIZE) |i| {
-                std.debug.print("[ZOLT] computeLagrangeEvalsAtR0: w[{d}] = {any}\n", .{ i, self.lagrange_evals_r0[i].toBytesBE() });
+                dbg("[ZOLT] computeLagrangeEvalsAtR0: w[{d}] = {any}\n", .{ i, self.lagrange_evals_r0[i].toBytesBE() });
             }
         }
 
@@ -1374,11 +1381,11 @@ pub fn StreamingOuterProver(comptime F: type) type {
                     const w_last = self.split_eq.tau[self.split_eq.current_index - 1];
                     const one_minus_w_last = F.one().sub(w_last);
 
-                    std.debug.print("[BRUTE_FORCE2] E_out.len={d}, E_in.len={d}, head_in_bits={d}\n", .{
+                    dbg("[BRUTE_FORCE2] E_out.len={d}, E_in.len={d}, head_in_bits={d}\n", .{
                         E_out_b.len, E_in_b.len, head_in_bits,
                     });
-                    std.debug.print("[BRUTE_FORCE2] current_scalar = {any}\n", .{self.split_eq.current_scalar.toBytes()});
-                    std.debug.print("[BRUTE_FORCE2] w_last = {any}\n", .{w_last.toBytes()});
+                    dbg("[BRUTE_FORCE2] current_scalar = {any}\n", .{self.split_eq.current_scalar.toBytes()});
+                    dbg("[BRUTE_FORCE2] w_last = {any}\n", .{w_last.toBytes()});
 
                     var brute_sum2 = F.zero();
                     for (0..E_out_b.len) |x_out| {
@@ -1404,21 +1411,21 @@ pub fn StreamingOuterProver(comptime F: type) type {
                     // Include current_scalar from split_eq
                     brute_sum2 = brute_sum2.mul(self.split_eq.current_scalar);
 
-                    std.debug.print("[BRUTE_FORCE2] sum (with current_scalar) = {any}\n", .{brute_sum2.toBytes()});
-                    std.debug.print("[BRUTE_FORCE2] current_claim (uni_skip_claim) = {any}\n", .{self.current_claim.toBytes()});
-                    std.debug.print("[BRUTE_FORCE2] match = {}\n", .{brute_sum2.eql(self.current_claim)});
+                    dbg("[BRUTE_FORCE2] sum (with current_scalar) = {any}\n", .{brute_sum2.toBytes()});
+                    dbg("[BRUTE_FORCE2] current_claim (uni_skip_claim) = {any}\n", .{self.current_claim.toBytes()});
+                    dbg("[BRUTE_FORCE2] match = {}\n", .{brute_sum2.eql(self.current_claim)});
 
                     // Check if the missing factor is R^2
                     const r_squared = F.rSquared();
                     const brute_with_r2 = brute_sum2.mul(r_squared);
-                    std.debug.print("[BRUTE_FORCE2] sum * R^2 = {any}\n", .{brute_with_r2.toBytes()});
-                    std.debug.print("[BRUTE_FORCE2] match_with_R2 = {}\n", .{brute_with_r2.eql(self.current_claim)});
+                    dbg("[BRUTE_FORCE2] sum * R^2 = {any}\n", .{brute_with_r2.toBytes()});
+                    dbg("[BRUTE_FORCE2] match_with_R2 = {}\n", .{brute_with_r2.eql(self.current_claim)});
 
                     // Also try claim / R^2
                     const r_squared_inv = r_squared.inverse().?;
                     const claim_div_r2 = self.current_claim.mul(r_squared_inv);
-                    std.debug.print("[BRUTE_FORCE2] claim / R^2 = {any}\n", .{claim_div_r2.toBytes()});
-                    std.debug.print("[BRUTE_FORCE2] sum == claim/R^2 = {}\n", .{brute_sum2.eql(claim_div_r2)});
+                    dbg("[BRUTE_FORCE2] claim / R^2 = {any}\n", .{claim_div_r2.toBytes()});
+                    dbg("[BRUTE_FORCE2] sum == claim/R^2 = {}\n", .{brute_sum2.eql(claim_div_r2)});
 
                     // Compute sum WITHOUT current_scalar to isolate the issue
                     var brute_raw = F.zero();
@@ -1437,22 +1444,22 @@ pub fn StreamingOuterProver(comptime F: type) type {
                             brute_raw = brute_raw.add(eq_wt.mul(inner_s));
                         }
                     }
-                    std.debug.print("[BRUTE_FORCE2] raw_sum (without current_scalar) = {any}\n", .{brute_raw.toBytes()});
+                    dbg("[BRUTE_FORCE2] raw_sum (without current_scalar) = {any}\n", .{brute_raw.toBytes()});
                     const raw_with_cs = brute_raw.mul(self.split_eq.current_scalar);
-                    std.debug.print("[BRUTE_FORCE2] raw_sum * current_scalar = {any}\n", .{raw_with_cs.toBytes()});
+                    dbg("[BRUTE_FORCE2] raw_sum * current_scalar = {any}\n", .{raw_with_cs.toBytes()});
                     const raw_with_cs_r2 = raw_with_cs.mul(r_squared);
-                    std.debug.print("[BRUTE_FORCE2] raw_sum * current_scalar * R^2 = {any}\n", .{raw_with_cs_r2.toBytes()});
-                    std.debug.print("[BRUTE_FORCE2] claim == raw*cs*R^2? {}\n", .{raw_with_cs_r2.eql(self.current_claim)});
+                    dbg("[BRUTE_FORCE2] raw_sum * current_scalar * R^2 = {any}\n", .{raw_with_cs_r2.toBytes()});
+                    dbg("[BRUTE_FORCE2] claim == raw*cs*R^2? {}\n", .{raw_with_cs_r2.eql(self.current_claim)});
 
                     // Also print first few values
                     for (0..@min(3, E_out_b.len)) |x_out| {
                         for (0..@min(2, E_in_b.len)) |x_in| {
                             const i = (x_out << @intCast(head_in_bits)) | x_in;
-                            std.debug.print("[BRUTE_FORCE2] E_out[{d}]={any}  E_in[{d}]={any}\n", .{x_out, E_out_b[x_out].toBytes(), x_in, E_in_b[x_in].toBytes()});
+                            dbg("[BRUTE_FORCE2] E_out[{d}]={any}  E_in[{d}]={any}\n", .{x_out, E_out_b[x_out].toBytes(), x_in, E_in_b[x_in].toBytes()});
                             for (0..brute_grid) |j| {
                                 const idx = brute_grid * i + j;
                                 if (idx < az_p.boundLen()) {
-                                    std.debug.print("[BRUTE_FORCE2]   Az[{d}]={any}  Bz[{d}]={any}\n", .{idx, az_p.evaluations[idx].toBytes(), idx, bz_p.evaluations[idx].toBytes()});
+                                    dbg("[BRUTE_FORCE2]   Az[{d}]={any}  Bz[{d}]={any}\n", .{idx, az_p.evaluations[idx].toBytes(), idx, bz_p.evaluations[idx].toBytes()});
                                 }
                             }
                         }
@@ -1476,9 +1483,9 @@ pub fn StreamingOuterProver(comptime F: type) type {
                     const E_in_uni = self.buildEqTable(self.full_tau[m_uni .. self.full_tau.len - 1]) catch unreachable;
                     defer self.allocator.free(E_in_uni);
 
-                    std.debug.print("[DEBUG3] UniSkip factorization: m={d}, E_out.len={d}, E_in.len={d}\n", .{ m_uni, E_out_uni.len, E_in_uni.len });
-                    std.debug.print("[DEBUG3] E_out_uni[0] = {any}\n", .{E_out_uni[0].toBytesBE()});
-                    std.debug.print("[DEBUG3] E_in_uni[0] = {any}\n", .{E_in_uni[0].toBytesBE()});
+                    dbg("[DEBUG3] UniSkip factorization: m={d}, E_out.len={d}, E_in.len={d}\n", .{ m_uni, E_out_uni.len, E_in_uni.len });
+                    dbg("[DEBUG3] E_out_uni[0] = {any}\n", .{E_out_uni[0].toBytesBE()});
+                    dbg("[DEBUG3] E_in_uni[0] = {any}\n", .{E_in_uni[0].toBytesBE()});
 
                     // Sum using UniSkip's index mapping but materialized Az/Bz
                     var sum3 = F.zero();
@@ -1501,8 +1508,8 @@ pub fn StreamingOuterProver(comptime F: type) type {
                     }
                     // Scale by current_scalar (lagrange_tau_r0)
                     sum3 = sum3.mul(self.split_eq.current_scalar);
-                    std.debug.print("[DEBUG3] sum_uniskip_eq_with_mat_AzBz * current_scalar = {any}\n", .{sum3.toBytes()});
-                    std.debug.print("[DEBUG3] matches claim? {}\n", .{sum3.eql(self.current_claim)});
+                    dbg("[DEBUG3] sum_uniskip_eq_with_mat_AzBz * current_scalar = {any}\n", .{sum3.toBytes()});
+                    dbg("[DEBUG3] matches claim? {}\n", .{sum3.eql(self.current_claim)});
 
                     // Now compute using split_eq factorization but with UniSkip's cycle mapping
                     // to see if the issue is in eq tables or cycle mapping
@@ -1528,8 +1535,8 @@ pub fn StreamingOuterProver(comptime F: type) type {
                         }
                     }
                     sum4 = sum4.mul(self.split_eq.current_scalar);
-                    std.debug.print("[DEBUG3] sum_split_eq_with_mat_AzBz * current_scalar = {any}\n", .{sum4.toBytes()});
-                    std.debug.print("[DEBUG3] sum3 == sum4? {}\n", .{sum3.eql(sum4)});
+                    dbg("[DEBUG3] sum_split_eq_with_mat_AzBz * current_scalar = {any}\n", .{sum4.toBytes()});
+                    dbg("[DEBUG3] sum3 == sum4? {}\n", .{sum3.eql(sum4)});
 
                     // Check: claim / current_scalar vs raw sum without scalar
                     const cs_inv_3 = self.split_eq.current_scalar.inverse();
@@ -1537,9 +1544,9 @@ pub fn StreamingOuterProver(comptime F: type) type {
                         const claim_div_cs3 = self.current_claim.mul(inv3);
                         // sum3 / current_scalar = raw sum (without current_scalar)
                         const raw3 = sum3.mul(inv3);
-                        std.debug.print("[DEBUG3] claim / current_scalar = {any}\n", .{claim_div_cs3.toBytes()});
-                        std.debug.print("[DEBUG3] raw_eq_sum (sum3/cs) = {any}\n", .{raw3.toBytes()});
-                        std.debug.print("[DEBUG3] claim/cs == raw_eq_sum? {}\n", .{claim_div_cs3.eql(raw3)});
+                        dbg("[DEBUG3] claim / current_scalar = {any}\n", .{claim_div_cs3.toBytes()});
+                        dbg("[DEBUG3] raw_eq_sum (sum3/cs) = {any}\n", .{raw3.toBytes()});
+                        dbg("[DEBUG3] claim/cs == raw_eq_sum? {}\n", .{claim_div_cs3.eql(raw3)});
                     }
 
                     // KEY TEST: The uni_skip_claim = s1(r0) = L(tau_high, r0) * t1(r0) * R^2
@@ -1552,8 +1559,8 @@ pub fn StreamingOuterProver(comptime F: type) type {
                     // While sum3 = L(tau_high, r0) * Σ eq * AzBz(r0) (NO R^2 in sum3)
                     // So: claim = sum3 * R^2 ??? Let me check this
                     const r_sq_3 = F.rSquared();
-                    std.debug.print("[DEBUG3] sum3 * R^2 = {any}\n", .{sum3.mul(r_sq_3).toBytes()});
-                    std.debug.print("[DEBUG3] claim == sum3 * R^2? {}\n", .{self.current_claim.eql(sum3.mul(r_sq_3))});
+                    dbg("[DEBUG3] sum3 * R^2 = {any}\n", .{sum3.mul(r_sq_3).toBytes()});
+                    dbg("[DEBUG3] claim == sum3 * R^2? {}\n", .{self.current_claim.eql(sum3.mul(r_sq_3))});
 
                     // Correct decomposition:
                     // claim = current_scalar * t1_with_r2(r0)
@@ -1565,9 +1572,9 @@ pub fn StreamingOuterProver(comptime F: type) type {
                         const t1_r0 = self.current_claim.mul(cs_inv_32);
                         const raw_sum_3 = sum3.mul(cs_inv_32);
                         const raw_times_r2 = raw_sum_3.mul(r_sq_3);
-                        std.debug.print("[DEBUG3] t1_with_r2(r0) = claim/cs = {any}\n", .{t1_r0.toBytes()});
-                        std.debug.print("[DEBUG3] raw_sum * R^2 = {any}\n", .{raw_times_r2.toBytes()});
-                        std.debug.print("[DEBUG3] t1_with_r2 == raw*R^2? {}\n", .{t1_r0.eql(raw_times_r2)});
+                        dbg("[DEBUG3] t1_with_r2(r0) = claim/cs = {any}\n", .{t1_r0.toBytes()});
+                        dbg("[DEBUG3] raw_sum * R^2 = {any}\n", .{raw_times_r2.toBytes()});
+                        dbg("[DEBUG3] t1_with_r2 == raw*R^2? {}\n", .{t1_r0.eql(raw_times_r2)});
                     }
 
                     // Multi-cycle check + direct sum comparison
@@ -1594,13 +1601,13 @@ pub fn StreamingOuterProver(comptime F: type) type {
                                 if (!azd.eql(azm) or !bzd.eql(bzm)) {
                                     mismatch_n += 1;
                                     if (mismatch_n <= 3) {
-                                        std.debug.print("[DEBUG5] AzBz MISMATCH c={d} g={d} mi={d}\n", .{cchk, gchk, midx});
-                                        std.debug.print("[DEBUG5]  Az_d={any}  Az_m={any}\n", .{azd.toBytesBE(), azm.toBytesBE()});
+                                        dbg("[DEBUG5] AzBz MISMATCH c={d} g={d} mi={d}\n", .{cchk, gchk, midx});
+                                        dbg("[DEBUG5]  Az_d={any}  Az_m={any}\n", .{azd.toBytesBE(), azm.toBytesBE()});
                                     }
                                 }
                             }
                         }
-                        std.debug.print("[DEBUG5] Checked {d} cycles x 2 groups, {d} mismatches\n", .{climit, mismatch_n});
+                        dbg("[DEBUG5] Checked {d} cycles x 2 groups, {d} mismatches\n", .{climit, mismatch_n});
 
                         // Compute direct sum of eq*AzBz at r0 over ALL 512 indices (9 bits)
                         // using the UniSkip's eq tables and the Lagrange-evaluated Az/Bz
@@ -1629,11 +1636,11 @@ pub fn StreamingOuterProver(comptime F: type) type {
                                 }
                             }
                         }
-                        std.debug.print("[DEBUG6] direct_sum_r0 (eq_uni * AzBz_r0) = {any}\n", .{direct_sum_r0.toBytes()});
-                        std.debug.print("[DEBUG6] mat_sum (sum3/cs) = {any}\n", .{sum3.mul(self.split_eq.current_scalar.inverse().?).toBytes()});
-                        std.debug.print("[DEBUG6] direct == mat? {}\n", .{direct_sum_r0.eql(sum3.mul(self.split_eq.current_scalar.inverse().?))});
-                        std.debug.print("[DEBUG6] claim/cs = {any}\n", .{self.current_claim.mul(self.split_eq.current_scalar.inverse().?).toBytes()});
-                        std.debug.print("[DEBUG6] direct == claim/cs? {}\n", .{direct_sum_r0.eql(self.current_claim.mul(self.split_eq.current_scalar.inverse().?))});
+                        dbg("[DEBUG6] direct_sum_r0 (eq_uni * AzBz_r0) = {any}\n", .{direct_sum_r0.toBytes()});
+                        dbg("[DEBUG6] mat_sum (sum3/cs) = {any}\n", .{sum3.mul(self.split_eq.current_scalar.inverse().?).toBytes()});
+                        dbg("[DEBUG6] direct == mat? {}\n", .{direct_sum_r0.eql(sum3.mul(self.split_eq.current_scalar.inverse().?))});
+                        dbg("[DEBUG6] claim/cs = {any}\n", .{self.current_claim.mul(self.split_eq.current_scalar.inverse().?).toBytes()});
+                        dbg("[DEBUG6] direct == claim/cs? {}\n", .{direct_sum_r0.eql(self.current_claim.mul(self.split_eq.current_scalar.inverse().?))});
                     }
 
                     // Compare per-cycle Az*Bz between UniSkip and materialization for cycle 0
@@ -1655,7 +1662,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
                         // Print base Az*Bz products (should be 0 for correct witness)
                         for (0..@min(3, FIRST_GROUP_SIZE)) |ii| {
-                            std.debug.print("[DEBUG4] base Az[{d}]*Bz[{d}] = {any}\n", .{
+                            dbg("[DEBUG4] base Az[{d}]*Bz[{d}] = {any}\n", .{
                                 ii, ii, az_base_g0[ii].mul(bz_base_g0[ii]).toBytesBE(),
                             });
                         }
@@ -1667,16 +1674,16 @@ pub fn StreamingOuterProver(comptime F: type) type {
                             az_direct_r0 = az_direct_r0.add(self.lagrange_evals_r0[ii].mul(az_base_g0[ii]));
                             bz_direct_r0 = bz_direct_r0.add(self.lagrange_evals_r0[ii].mul(bz_base_g0[ii]));
                         }
-                        std.debug.print("[DEBUG4] Az(r0)_direct = {any}\n", .{az_direct_r0.toBytesBE()});
-                        std.debug.print("[DEBUG4] Bz(r0)_direct = {any}\n", .{bz_direct_r0.toBytesBE()});
-                        std.debug.print("[DEBUG4] Az(r0)*Bz(r0)_direct = {any}\n", .{az_direct_r0.mul(bz_direct_r0).toBytesBE()});
+                        dbg("[DEBUG4] Az(r0)_direct = {any}\n", .{az_direct_r0.toBytesBE()});
+                        dbg("[DEBUG4] Bz(r0)_direct = {any}\n", .{bz_direct_r0.toBytesBE()});
+                        dbg("[DEBUG4] Az(r0)*Bz(r0)_direct = {any}\n", .{az_direct_r0.mul(bz_direct_r0).toBytesBE()});
 
                         // Compare with materialized value
-                        std.debug.print("[DEBUG4] Az_mat[0] = {any}\n", .{az_p3.evaluations[0].toBytesBE()});
-                        std.debug.print("[DEBUG4] Bz_mat[0] = {any}\n", .{bz_p3.evaluations[0].toBytesBE()});
-                        std.debug.print("[DEBUG4] Az_mat*Bz_mat[0] = {any}\n", .{az_p3.evaluations[0].mul(bz_p3.evaluations[0]).toBytesBE()});
-                        std.debug.print("[DEBUG4] Az match? {}\n", .{az_direct_r0.eql(az_p3.evaluations[0])});
-                        std.debug.print("[DEBUG4] Bz match? {}\n", .{bz_direct_r0.eql(bz_p3.evaluations[0])});
+                        dbg("[DEBUG4] Az_mat[0] = {any}\n", .{az_p3.evaluations[0].toBytesBE()});
+                        dbg("[DEBUG4] Bz_mat[0] = {any}\n", .{bz_p3.evaluations[0].toBytesBE()});
+                        dbg("[DEBUG4] Az_mat*Bz_mat[0] = {any}\n", .{az_p3.evaluations[0].mul(bz_p3.evaluations[0]).toBytesBE()});
+                        dbg("[DEBUG4] Az match? {}\n", .{az_direct_r0.eql(az_p3.evaluations[0])});
+                        dbg("[DEBUG4] Bz match? {}\n", .{bz_direct_r0.eql(bz_p3.evaluations[0])});
 
                         // Now compute via UniSkip's interpolation approach
                         // t1_at_r0_cycle0_g0 = Σ_Y t1_vals(Y) * L_Y(r0) / domain_vanishing(r0)
@@ -1690,7 +1697,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                         // The issue might be in lagrange_evals_r0 computation!
                         // Print first few lagrange_evals_r0
                         for (0..@min(4, FIRST_GROUP_SIZE)) |ii| {
-                            std.debug.print("[DEBUG4] lagrange_evals_r0[{d}] = {any}\n", .{ii, self.lagrange_evals_r0[ii].toBytesBE()});
+                            dbg("[DEBUG4] lagrange_evals_r0[{d}] = {any}\n", .{ii, self.lagrange_evals_r0[ii].toBytesBE()});
                         }
                     }
                 }

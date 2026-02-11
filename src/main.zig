@@ -296,16 +296,12 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, trace_length_op
 
     // Step 1: Preprocess to get proving/verifying keys
     std.debug.print("\n[1/4] Preprocessing...\n", .{});
-    std.debug.print("  DEBUG: Creating preprocessor...\n", .{});
     var timer = std.time.Timer.start() catch return;
 
     var preprocessor = zolt.host.Preprocessing(BN254Scalar).init(allocator);
-    std.debug.print("  DEBUG: Setting max trace length to {}...\n", .{trace_length});
     preprocessor.setMaxTraceLength(trace_length);
 
-    std.debug.print("  DEBUG: Calling preprocess...\n", .{});
     var keys = try preprocessor.preprocess(&program);
-    std.debug.print("  DEBUG: Preprocess complete!\n", .{});
     defer keys.pk.deinit();
     defer keys.vk.deinit();
 

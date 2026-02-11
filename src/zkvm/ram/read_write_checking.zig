@@ -11,6 +11,13 @@
 //! - Phase 2 (rounds log_T to log_T+log_K-1): Address-major, binds address variables
 
 const std = @import("std");
+
+// Debug output control - set to true to enable verbose debug prints
+const debug_verbose = false;
+fn dbg(comptime fmt: []const u8, args: anytype) void {
+    if (debug_verbose) std.debug.print(fmt, args);
+}
+
 const Allocator = std.mem.Allocator;
 const MemoryTrace = @import("mod.zig").MemoryTrace;
 const MemoryAccess = @import("mod.zig").MemoryAccess;
@@ -116,7 +123,7 @@ pub fn CycleMajorEntry(comptime F: type) type {
                 std.debug.assert(o.cycle % 2 == 1);
                 std.debug.assert(e.address == o.address);
                 const new_val = e.val_coeff.add(r.mul(o.val_coeff.sub(e.val_coeff)));
-                std.debug.print("[BIND CYCLE] BOTH: even_cycle={}, even_val={any}, odd_val={any}, r={any}, result_val={any}\n", .{ e.cycle, e.val_coeff.toBytesBE()[0..8], o.val_coeff.toBytesBE()[0..8], r.toBytesBE()[0..8], new_val.toBytesBE()[0..8] });
+                dbg("[BIND CYCLE] BOTH: even_cycle={}, even_val={any}, odd_val={any}, r={any}, result_val={any}\n", .{ e.cycle, e.val_coeff.toBytesBE()[0..8], o.val_coeff.toBytesBE()[0..8], r.toBytesBE()[0..8], new_val.toBytesBE()[0..8] });
                 return Self{
                     .cycle = e.cycle / 2,
                     .address = e.address,
@@ -130,7 +137,7 @@ pub fn CycleMajorEntry(comptime F: type) type {
                 const e = even.?.*;
                 const odd_val_coeff = F.fromU64(e.next_val);
                 const new_val = e.val_coeff.add(r.mul(odd_val_coeff.sub(e.val_coeff)));
-                std.debug.print("[BIND CYCLE] EVEN_ONLY: even_cycle={}, even_val={any}, odd_implicit_val=F({})={any}, r={any}, result_val={any}\n", .{ e.cycle, e.val_coeff.toBytesBE()[0..8], e.next_val, odd_val_coeff.toBytesBE()[0..8], r.toBytesBE()[0..8], new_val.toBytesBE()[0..8] });
+                dbg("[BIND CYCLE] EVEN_ONLY: even_cycle={}, even_val={any}, odd_implicit_val=F({})={any}, r={any}, result_val={any}\n", .{ e.cycle, e.val_coeff.toBytesBE()[0..8], e.next_val, odd_val_coeff.toBytesBE()[0..8], r.toBytesBE()[0..8], new_val.toBytesBE()[0..8] });
                 return Self{
                     .cycle = e.cycle / 2,
                     .address = e.address,
@@ -144,7 +151,7 @@ pub fn CycleMajorEntry(comptime F: type) type {
                 const o = odd.?.*;
                 const even_val_coeff = F.fromU64(o.prev_val);
                 const new_val = even_val_coeff.add(r.mul(o.val_coeff.sub(even_val_coeff)));
-                std.debug.print("[BIND CYCLE] ODD_ONLY: odd_cycle={}, even_implicit_val=F({})={any}, odd_val={any}, r={any}, result_val={any}\n", .{ o.cycle, o.prev_val, even_val_coeff.toBytesBE()[0..8], o.val_coeff.toBytesBE()[0..8], r.toBytesBE()[0..8], new_val.toBytesBE()[0..8] });
+                dbg("[BIND CYCLE] ODD_ONLY: odd_cycle={}, even_implicit_val=F({})={any}, odd_val={any}, r={any}, result_val={any}\n", .{ o.cycle, o.prev_val, even_val_coeff.toBytesBE()[0..8], o.val_coeff.toBytesBE()[0..8], r.toBytesBE()[0..8], new_val.toBytesBE()[0..8] });
                 return Self{
                     .cycle = o.cycle / 2,
                     .address = o.address,
@@ -212,13 +219,13 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             const val_init = try allocator.alloc(F, K);
             @memset(val_init, F.zero());
 
-            std.debug.print("[RWC INIT] params.start_address = 0x{x:0>16}\n", .{params.start_address});
-            std.debug.print("[RWC INIT] K = {}, initial_ram entries = {}\n", .{ K, if (initial_ram) |ram| ram.count() else 0 });
+            dbg("[RWC INIT] params.start_address = 0x{x:0>16}\n", .{params.start_address});
+            dbg("[RWC INIT] K = {}, initial_ram entries = {}\n", .{ K, if (initial_ram) |ram| ram.count() else 0 });
 
             if (initial_ram) |ram| {
                 var iter = ram.iterator();
                 var populated_count: usize = 0;
-                std.debug.print("[RWC INIT] Populating val_init from initial_ram:\n", .{});
+                dbg("[RWC INIT] Populating val_init from initial_ram:\n", .{});
                 while (iter.next()) |entry| {
                     const addr = entry.key_ptr.*;
                     const val = entry.value_ptr.*;
@@ -227,13 +234,13 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                         if (idx < K) {
                             val_init[idx] = F.fromU64(val);
                             if (populated_count < 5) {
-                                std.debug.print("[RWC INIT]   addr=0x{x:0>16}, idx={}, val={}\n", .{ addr, idx, val });
+                                dbg("[RWC INIT]   addr=0x{x:0>16}, idx={}, val={}\n", .{ addr, idx, val });
                             }
                             populated_count += 1;
                         }
                     }
                 }
-                std.debug.print("[RWC INIT] Populated {} val_init entries (shown first 5)\n", .{populated_count});
+                dbg("[RWC INIT] Populated {} val_init entries (shown first 5)\n", .{populated_count});
             }
 
             // NOTE: We do NOT add termination or panic bits to val_init here.
@@ -298,7 +305,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                     else
                         F.zero().sub(F.fromU64(prev_val - new_val));
                     inc[access.timestamp] = inc_val;
-                    std.debug.print("[RWC INC SET] cycle={}, new_val={}, prev_val={}, inc={any}\n", .{
+                    dbg("[RWC INC SET] cycle={}, new_val={}, prev_val={}, inc={any}\n", .{
                         access.timestamp,
                         new_val,
                         prev_val,
@@ -325,7 +332,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                     .next_val = access.value,
                 });
 
-                std.debug.print("[RWC INIT] entry: cycle={}, addr={}, op={}, prev_val={}, next_val={}, inc[{}]={any}\n", .{
+                dbg("[RWC INIT] entry: cycle={}, addr={}, op={}, prev_val={}, next_val={}, inc[{}]={any}\n", .{
                     access.timestamp,
                     addr_idx,
                     @intFromEnum(access.op),
@@ -358,11 +365,11 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             // This matches Jolt's structure for computing round polynomials
             const gruen_eq = try GruenSplitEq.init(allocator, params.r_cycle);
 
-            std.debug.print("[RWC INIT] tau.len = {}, current_index = {}\n", .{ params.r_cycle.len, gruen_eq.current_index });
+            dbg("[RWC INIT] tau.len = {}, current_index = {}\n", .{ params.r_cycle.len, gruen_eq.current_index });
             if (params.r_cycle.len > 0) {
-                std.debug.print("[RWC INIT] tau[0] = {any}\n", .{params.r_cycle[0].toBytesBE()[0..8]});
+                dbg("[RWC INIT] tau[0] = {any}\n", .{params.r_cycle[0].toBytesBE()[0..8]});
                 if (params.r_cycle.len > 1) {
-                    std.debug.print("[RWC INIT] tau[last] = {any}\n", .{params.r_cycle[params.r_cycle.len - 1].toBytesBE()[0..8]});
+                    dbg("[RWC INIT] tau[last] = {any}\n", .{params.r_cycle[params.r_cycle.len - 1].toBytesBE()[0..8]});
                 }
             }
 
@@ -375,9 +382,9 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                     const inner = ve.val_coeff.add(params.gamma.mul(ve.val_coeff.add(inc_j)));
                     verify_init_sum = verify_init_sum.add(eq_j.mul(ve.ra_coeff).mul(inner));
                 }
-                std.debug.print("[RWC INIT VERIFY] initial_claim = {any}\n", .{initial_claim.toBytesBE()});
-                std.debug.print("[RWC INIT VERIFY] sum_of_entries = {any}\n", .{verify_init_sum.toBytesBE()});
-                std.debug.print("[RWC INIT VERIFY] match = {}\n", .{verify_init_sum.eql(initial_claim)});
+                dbg("[RWC INIT VERIFY] initial_claim = {any}\n", .{initial_claim.toBytesBE()});
+                dbg("[RWC INIT VERIFY] sum_of_entries = {any}\n", .{verify_init_sum.toBytesBE()});
+                dbg("[RWC INIT VERIFY] match = {}\n", .{verify_init_sum.eql(initial_claim)});
                 // Also compute rv_claim and wv_claim separately
                 var rv_sum = F.zero();
                 var wv_sum = F.zero();
@@ -389,9 +396,9 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                     // wv = Σ eq * ra * (val + inc)
                     wv_sum = wv_sum.add(eq_j.mul(ve.ra_coeff).mul(ve.val_coeff.add(inc_j)));
                 }
-                std.debug.print("[RWC INIT VERIFY] rv_sum = {any}\n", .{rv_sum.toBytesBE()});
-                std.debug.print("[RWC INIT VERIFY] wv_sum = {any}\n", .{wv_sum.toBytesBE()});
-                std.debug.print("[RWC INIT VERIFY] rv + gamma*wv = {any}\n", .{rv_sum.add(params.gamma.mul(wv_sum)).toBytesBE()});
+                dbg("[RWC INIT VERIFY] rv_sum = {any}\n", .{rv_sum.toBytesBE()});
+                dbg("[RWC INIT VERIFY] wv_sum = {any}\n", .{wv_sum.toBytesBE()});
+                dbg("[RWC INIT VERIFY] rv + gamma*wv = {any}\n", .{rv_sum.add(params.gamma.mul(wv_sum)).toBytesBE()});
                 // Also compute what initial_claim SHOULD be using a different eq convention
                 // Try LITTLE_ENDIAN eq
                 const poly_mod = @import("../../poly/mod.zig");
@@ -399,11 +406,11 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 const eq_le_evals = try EqPoly.evalsSliceWithScaling(F, allocator, params.r_cycle, null);
                 defer allocator.free(eq_le_evals);
                 const eq_le_54 = if (54 < eq_le_evals.len) eq_le_evals[54] else F.zero();
-                std.debug.print("[RWC INIT VERIFY] eq_BE[54] = {any}\n", .{eq_evals[54].toBytesBE()});
-                std.debug.print("[RWC INIT VERIFY] eq_LE[54] (EqPoly) = {any}\n", .{eq_le_54.toBytesBE()});
+                dbg("[RWC INIT VERIFY] eq_BE[54] = {any}\n", .{eq_evals[54].toBytesBE()});
+                dbg("[RWC INIT VERIFY] eq_LE[54] (EqPoly) = {any}\n", .{eq_le_54.toBytesBE()});
                 // Compute with LE eq
                 const sum_le = eq_le_54.mul(params.gamma); // rv=0, wv=eq*1, total=gamma*eq
-                std.debug.print("[RWC INIT VERIFY] gamma*eq_LE[54] = {any}\n", .{sum_le.toBytesBE()});
+                dbg("[RWC INIT VERIFY] gamma*eq_LE[54] = {any}\n", .{sum_le.toBytesBE()});
             }
 
             return Self{
@@ -574,9 +581,9 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             // Use Gruen's formula to compute s(X) = l(X) * q(X)
             const result = gruen_eq.computeCubicRoundPoly(q_constant, q_quadratic, self.current_claim);
 
-            std.debug.print("[RWC PHASE1] round={}, q_constant={any}\n", .{ self.round, q_constant.toBytesBE()[0..8] });
-            std.debug.print("[RWC PHASE1] q_quadratic={any}, current_claim={any}\n", .{ q_quadratic.toBytesBE()[0..8], self.current_claim.toBytesBE()[0..8] });
-            std.debug.print("[RWC PHASE1] result: s0={any}, s1={any}\n", .{ result[0].toBytesBE()[0..8], result[1].toBytesBE()[0..8] });
+            dbg("[RWC PHASE1] round={}, q_constant={any}\n", .{ self.round, q_constant.toBytesBE()[0..8] });
+            dbg("[RWC PHASE1] q_quadratic={any}, current_claim={any}\n", .{ q_quadratic.toBytesBE()[0..8], self.current_claim.toBytesBE()[0..8] });
+            dbg("[RWC PHASE1] result: s0={any}, s1={any}\n", .{ result[0].toBytesBE()[0..8], result[1].toBytesBE()[0..8] });
 
             return result;
         }
@@ -595,7 +602,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             const phase1_end = self.params.phase1_num_rounds;
             const addr_round = self.round - phase1_end;
 
-            std.debug.print("[RWC PHASE2] round={}, addr_round={}, entries.len={}\n", .{ self.round, addr_round, self.entries.items.len });
+            dbg("[RWC PHASE2] round={}, addr_round={}, entries.len={}\n", .{ self.round, addr_round, self.entries.items.len });
 
             // Convert to AddressMajor at start of Phase 2
             if (addr_round == 0) {
@@ -607,12 +614,12 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                     }
                 }.lessThan);
 
-                std.debug.print("[RWC PHASE2] Converted to AddressMajor order\n", .{});
-                std.debug.print("[RWC PHASE2] eq_cycle_scalar = {any}\n", .{self.eq_evals[0].toBytesBE()[0..8]});
-                std.debug.print("[RWC PHASE2] inc_scalar = {any}\n", .{self.inc[0].toBytesBE()[0..8]});
+                dbg("[RWC PHASE2] Converted to AddressMajor order\n", .{});
+                dbg("[RWC PHASE2] eq_cycle_scalar = {any}\n", .{self.eq_evals[0].toBytesBE()[0..8]});
+                dbg("[RWC PHASE2] inc_scalar = {any}\n", .{self.inc[0].toBytesBE()[0..8]});
                 if (self.entries.items.len > 0) {
                     const e = self.entries.items[0];
-                    std.debug.print("[RWC PHASE2] entry[0]: addr={}, ra_coeff={any}, val_coeff={any}\n", .{
+                    dbg("[RWC PHASE2] entry[0]: addr={}, ra_coeff={any}, val_coeff={any}\n", .{
                         e.address,
                         e.ra_coeff.toBytesBE()[0..8],
                         e.val_coeff.toBytesBE()[0..8],
@@ -629,9 +636,9 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                     const inner = ve.val_coeff.add(gamma_s.mul(ve.val_coeff.add(inc_s)));
                     verify_sum = verify_sum.add(eq_s.mul(ve.ra_coeff).mul(inner));
                 }
-                std.debug.print("[RWC PHASE2 VERIFY] Sum of entries = {any}\n", .{verify_sum.toBytesBE()});
-                std.debug.print("[RWC PHASE2 VERIFY] current_claim = {any}\n", .{self.current_claim.toBytesBE()});
-                std.debug.print("[RWC PHASE2 VERIFY] match = {}\n", .{verify_sum.eql(self.current_claim)});
+                dbg("[RWC PHASE2 VERIFY] Sum of entries = {any}\n", .{verify_sum.toBytesBE()});
+                dbg("[RWC PHASE2 VERIFY] current_claim = {any}\n", .{self.current_claim.toBytesBE()});
+                dbg("[RWC PHASE2 VERIFY] match = {}\n", .{verify_sum.eql(self.current_claim)});
             }
 
             // After all cycle variables are bound:
@@ -820,7 +827,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             const s3 = s2.mul(F.fromU64(3)).sub(s1.mul(F.fromU64(3))).add(s0);
 
             if (addr_round < 3) {
-                std.debug.print("[RWC PHASE2] result: s0={any}, s1={any}, s2={any}\n", .{
+                dbg("[RWC PHASE2] result: s0={any}, s1={any}, s2={any}\n", .{
                     s0.toBytesBE()[0..8],
                     s1.toBytesBE()[0..8],
                     s2.toBytesBE()[0..8],
@@ -992,9 +999,9 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                         const inner = ve.val_coeff.add(verify_gamma.mul(ve.val_coeff.add(inc_j)));
                         verify_sum_phase1 = verify_sum_phase1.add(eq_j.mul(ve.ra_coeff).mul(inner));
                     }
-                    std.debug.print("[RWC PHASE1 VERIFY] round={}, sum={any}\n", .{ self.round, verify_sum_phase1.toBytesBE()[0..8] });
-                    std.debug.print("[RWC PHASE1 VERIFY] round={}, claim={any}\n", .{ self.round, self.current_claim.toBytesBE()[0..8] });
-                    std.debug.print("[RWC PHASE1 VERIFY] round={}, match={}\n", .{ self.round, verify_sum_phase1.eql(self.current_claim) });
+                    dbg("[RWC PHASE1 VERIFY] round={}, sum={any}\n", .{ self.round, verify_sum_phase1.toBytesBE()[0..8] });
+                    dbg("[RWC PHASE1 VERIFY] round={}, claim={any}\n", .{ self.round, self.current_claim.toBytesBE()[0..8] });
+                    dbg("[RWC PHASE1 VERIFY] round={}, match={}\n", .{ self.round, verify_sum_phase1.eql(self.current_claim) });
                 }
             }
 
@@ -1035,12 +1042,12 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                     }
                     if (self.entries.items.len == 0) val_v = self.val_init[0];
                     const expected_v = eq_v.mul(ra_v).mul(val_v.add(gamma_v.mul(val_v.add(inc_v))));
-                    std.debug.print("[RWC PHASE2 BIND CHECK] addr_round={}, match={}\n", .{ addr_round, expected_v.eql(self.current_claim) });
+                    dbg("[RWC PHASE2 BIND CHECK] addr_round={}, match={}\n", .{ addr_round, expected_v.eql(self.current_claim) });
                     if (addr_round < 3) {
-                        std.debug.print("[RWC PHASE2 BIND CHECK]   val_coeff={any}\n", .{val_v.toBytesBE()[0..8]});
-                        std.debug.print("[RWC PHASE2 BIND CHECK]   ra_coeff={any}\n", .{ra_v.toBytesBE()[0..8]});
-                        std.debug.print("[RWC PHASE2 BIND CHECK]   current_claim={any}\n", .{self.current_claim.toBytesBE()[0..8]});
-                        std.debug.print("[RWC PHASE2 BIND CHECK]   expected={any}\n", .{expected_v.toBytesBE()[0..8]});
+                        dbg("[RWC PHASE2 BIND CHECK]   val_coeff={any}\n", .{val_v.toBytesBE()[0..8]});
+                        dbg("[RWC PHASE2 BIND CHECK]   ra_coeff={any}\n", .{ra_v.toBytesBE()[0..8]});
+                        dbg("[RWC PHASE2 BIND CHECK]   current_claim={any}\n", .{self.current_claim.toBytesBE()[0..8]});
+                        dbg("[RWC PHASE2 BIND CHECK]   expected={any}\n", .{expected_v.toBytesBE()[0..8]});
                     }
                 }
             }
@@ -1163,7 +1170,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             self.entries.deinit(self.allocator);
             self.entries = new_entries;
 
-            std.debug.print("[RWC BIND PHASE2] addr_round={}, entries.len after bind={}\n", .{ addr_round, self.entries.items.len });
+            dbg("[RWC BIND PHASE2] addr_round={}, entries.len after bind={}\n", .{ addr_round, self.entries.items.len });
         }
 
         /// Bind two adjacent column entries together (both even and odd exist)
@@ -1192,7 +1199,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             // Implicit odd has ra=0, val=odd_checkpoint
             const one_minus_r = F.one().sub(r);
             const new_val = even.val_coeff.add(r.mul(odd_checkpoint.sub(even.val_coeff)));
-            std.debug.print("[BIND ADDR] EVEN_ONLY: addr={}, even_val={any}, odd_chkpt={any}, r={any}, result_val={any}\n", .{ even.address, even.val_coeff.toBytesBE()[0..8], odd_checkpoint.toBytesBE()[0..8], r.toBytesBE()[0..8], new_val.toBytesBE()[0..8] });
+            dbg("[BIND ADDR] EVEN_ONLY: addr={}, even_val={any}, odd_chkpt={any}, r={any}, result_val={any}\n", .{ even.address, even.val_coeff.toBytesBE()[0..8], odd_checkpoint.toBytesBE()[0..8], r.toBytesBE()[0..8], new_val.toBytesBE()[0..8] });
             return Entry{
                 .cycle = even.cycle,
                 .address = even.address / 2,
@@ -1210,7 +1217,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             // Matching Jolt's (None, Some(odd)) case
             // Implicit even has ra=0, val=even_checkpoint
             const new_val = even_checkpoint.add(r.mul(odd.val_coeff.sub(even_checkpoint)));
-            std.debug.print("[BIND ADDR] ODD_ONLY: addr={}, even_chkpt={any}, odd_val={any}, r={any}, result_val={any}\n", .{ odd.address, even_checkpoint.toBytesBE()[0..8], odd.val_coeff.toBytesBE()[0..8], r.toBytesBE()[0..8], new_val.toBytesBE()[0..8] });
+            dbg("[BIND ADDR] ODD_ONLY: addr={}, even_chkpt={any}, odd_val={any}, r={any}, result_val={any}\n", .{ odd.address, even_checkpoint.toBytesBE()[0..8], odd.val_coeff.toBytesBE()[0..8], r.toBytesBE()[0..8], new_val.toBytesBE()[0..8] });
             return Entry{
                 .cycle = odd.cycle,
                 .address = odd.address / 2,
@@ -1262,10 +1269,10 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
             self.entries.deinit(self.allocator);
             self.entries = new_entries;
 
-            std.debug.print("[RWC BIND] round={}, entries.len after bind={}\n", .{ self.round, self.entries.items.len });
+            dbg("[RWC BIND] round={}, entries.len after bind={}\n", .{ self.round, self.entries.items.len });
             if (self.entries.items.len > 0) {
                 const e = self.entries.items[0];
-                std.debug.print("[RWC BIND]   entry[0]: cycle={}, addr={}, ra_coeff={any}, val_coeff={any}, prev_val={}, next_val={}\n", .{ e.cycle, e.address, e.ra_coeff.toBytesBE()[0..8], e.val_coeff.toBytesBE()[0..8], e.prev_val, e.next_val });
+                dbg("[RWC BIND]   entry[0]: cycle={}, addr={}, ra_coeff={any}, val_coeff={any}, prev_val={}, next_val={}\n", .{ e.cycle, e.address, e.ra_coeff.toBytesBE()[0..8], e.val_coeff.toBytesBE()[0..8], e.prev_val, e.next_val });
             }
         }
 
@@ -1394,15 +1401,15 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 val_claim.add(gamma.mul(val_claim.add(inc_claim))),
             );
 
-            std.debug.print("[RWC GET_OPENING] ra_claim = {any}\n", .{ra_claim.toBytesBE()});
-            std.debug.print("[RWC GET_OPENING] val_claim (entry) = {any}\n", .{val_claim.toBytesBE()});
-            std.debug.print("[RWC GET_OPENING] inc_claim = {any}\n", .{inc_claim.toBytesBE()});
-            std.debug.print("[RWC GET_OPENING] eq_eval = {any}\n", .{eq_eval.toBytesBE()});
-            std.debug.print("[RWC GET_OPENING] gamma = {any}\n", .{gamma.toBytesBE()});
-            std.debug.print("[RWC GET_OPENING] val_init[0] = {any}\n", .{self.val_init[0].toBytesBE()});
-            std.debug.print("[RWC GET_OPENING] current_claim = {any}\n", .{self.current_claim.toBytesBE()});
-            std.debug.print("[RWC GET_OPENING] expected = eq*ra*(v+g*(v+i)) = {any}\n", .{expected_claim.toBytesBE()});
-            std.debug.print("[RWC GET_OPENING] MATCH = {}\n", .{expected_claim.eql(self.current_claim)});
+            dbg("[RWC GET_OPENING] ra_claim = {any}\n", .{ra_claim.toBytesBE()});
+            dbg("[RWC GET_OPENING] val_claim (entry) = {any}\n", .{val_claim.toBytesBE()});
+            dbg("[RWC GET_OPENING] inc_claim = {any}\n", .{inc_claim.toBytesBE()});
+            dbg("[RWC GET_OPENING] eq_eval = {any}\n", .{eq_eval.toBytesBE()});
+            dbg("[RWC GET_OPENING] gamma = {any}\n", .{gamma.toBytesBE()});
+            dbg("[RWC GET_OPENING] val_init[0] = {any}\n", .{self.val_init[0].toBytesBE()});
+            dbg("[RWC GET_OPENING] current_claim = {any}\n", .{self.current_claim.toBytesBE()});
+            dbg("[RWC GET_OPENING] expected = eq*ra*(v+g*(v+i)) = {any}\n", .{expected_claim.toBytesBE()});
+            dbg("[RWC GET_OPENING] MATCH = {}\n", .{expected_claim.eql(self.current_claim)});
 
             // DENSE VERIFICATION: Compute val(r_addr, r_cycle) independently
             // The challenges stored are: [phase1_challenges..., phase2_challenges...]
@@ -1412,7 +1419,7 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 const phase1_end_v = self.params.phase1_num_rounds;
                 const r_cycle_le = self.challenges.items[0..phase1_end_v]; // Phase 1 challenges = r_cycle (LE)
                 const r_addr_le = self.challenges.items[phase1_end_v..]; // Phase 2 challenges = r_addr (LE)
-                std.debug.print("[RWC GET_OPENING] r_cycle_le len={}, r_addr_le len={}\n", .{ r_cycle_le.len, r_addr_le.len });
+                dbg("[RWC GET_OPENING] r_cycle_le len={}, r_addr_le len={}\n", .{ r_cycle_le.len, r_addr_le.len });
 
                 // Compute eq(r_addr_le, 2049) where 2049 = 0b100000000001 (16-bit)
                 // eq(r, k) = prod_i ( r[i]*k_i + (1-r[i])*(1-k_i) )
@@ -1443,17 +1450,17 @@ pub fn RamReadWriteCheckingProver(comptime F: type) type {
                 }
 
                 const dense_val_claim = self.val_init[0].add(eq_addr_2049.mul(lt_54));
-                std.debug.print("[RWC GET_OPENING] DENSE val(r_addr,r_cycle) = {any}\n", .{dense_val_claim.toBytesBE()});
-                std.debug.print("[RWC GET_OPENING] sparse val_claim              = {any}\n", .{val_claim.toBytesBE()});
-                std.debug.print("[RWC GET_OPENING] DENSE matches sparse? {}\n", .{dense_val_claim.eql(val_claim)});
-                std.debug.print("[RWC GET_OPENING] eq(r_addr, 2049) = {any}\n", .{eq_addr_2049.toBytesBE()});
-                std.debug.print("[RWC GET_OPENING] LT(54, r_cycle) = {any}\n", .{lt_54.toBytesBE()});
-                std.debug.print("[RWC GET_OPENING] val_init[0] = {any}\n", .{self.val_init[0].toBytesBE()});
+                dbg("[RWC GET_OPENING] DENSE val(r_addr,r_cycle) = {any}\n", .{dense_val_claim.toBytesBE()});
+                dbg("[RWC GET_OPENING] sparse val_claim              = {any}\n", .{val_claim.toBytesBE()});
+                dbg("[RWC GET_OPENING] DENSE matches sparse? {}\n", .{dense_val_claim.eql(val_claim)});
+                dbg("[RWC GET_OPENING] eq(r_addr, 2049) = {any}\n", .{eq_addr_2049.toBytesBE()});
+                dbg("[RWC GET_OPENING] LT(54, r_cycle) = {any}\n", .{lt_54.toBytesBE()});
+                dbg("[RWC GET_OPENING] val_init[0] = {any}\n", .{self.val_init[0].toBytesBE()});
                 // Decompose: sparse = val_init_contrib + eq * LT ?
                 const sparse_delta = val_claim.sub(eq_addr_2049.mul(lt_54));
-                std.debug.print("[RWC GET_OPENING] sparse - eq*LT = {any}\n", .{sparse_delta.toBytesBE()});
-                std.debug.print("[RWC GET_OPENING] val_init[0]    = {any}\n", .{self.val_init[0].toBytesBE()});
-                std.debug.print("[RWC GET_OPENING] sparse_delta == val_init[0]? {}\n", .{sparse_delta.eql(self.val_init[0])});
+                dbg("[RWC GET_OPENING] sparse - eq*LT = {any}\n", .{sparse_delta.toBytesBE()});
+                dbg("[RWC GET_OPENING] val_init[0]    = {any}\n", .{self.val_init[0].toBytesBE()});
+                dbg("[RWC GET_OPENING] sparse_delta == val_init[0]? {}\n", .{sparse_delta.eql(self.val_init[0])});
             }
 
             return OpeningClaims(F){

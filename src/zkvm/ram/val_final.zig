@@ -6,6 +6,13 @@
 //! This is degree-2 (product of two multilinear polynomials).
 
 const std = @import("std");
+
+// Debug output control - set to true to enable verbose debug prints
+const debug_verbose = false;
+fn dbg(comptime fmt: []const u8, args: anytype) void {
+    if (debug_verbose) std.debug.print(fmt, args);
+}
+
 const Allocator = std.mem.Allocator;
 
 const mod = @import("mod.zig");
@@ -152,16 +159,16 @@ pub fn ValFinalProver(comptime F: type) type {
             if (synthetic_writes) |writes| {
                 for (writes) |sw| {
                     if (sw.cycle >= n) {
-                        std.debug.print("[ValFinal] WARNING: synthetic write cycle {} >= n {}, skipping\n", .{ sw.cycle, n });
+                        dbg("[ValFinal] WARNING: synthetic write cycle {} >= n {}, skipping\n", .{ sw.cycle, n });
                         continue;
                     }
                     if (sw.address < start_address) {
-                        std.debug.print("[ValFinal] WARNING: synthetic write address 0x{X} < start_address 0x{X}, skipping\n", .{ sw.address, start_address });
+                        dbg("[ValFinal] WARNING: synthetic write address 0x{X} < start_address 0x{X}, skipping\n", .{ sw.address, start_address });
                         continue;
                     }
                     const remapped = (sw.address - start_address) / 8;
                     if (remapped >= k) {
-                        std.debug.print("[ValFinal] WARNING: synthetic write remapped address {} >= k {}, skipping\n", .{ remapped, k });
+                        dbg("[ValFinal] WARNING: synthetic write remapped address {} >= k {}, skipping\n", .{ remapped, k });
                         continue;
                     }
 
@@ -174,7 +181,7 @@ pub fn ValFinalProver(comptime F: type) type {
                     // Compute wa = eq(r_address, remapped_address)
                     const wa_val = val_evaluation.computeEqAtPoint(F, params.r_address, remapped);
 
-                    std.debug.print("[ValFinal] Injecting synthetic write: cycle={}, addr=0x{X}, remapped={}, inc={}, wa={any}\n", .{
+                    dbg("[ValFinal] Injecting synthetic write: cycle={}, addr=0x{X}, remapped={}, inc={}, wa={any}\n", .{
                         sw.cycle, sw.address, remapped,
                         if (sw.new_value >= sw.old_value) sw.new_value - sw.old_value else 0,
                         wa_val.toBytesBE(),
@@ -192,7 +199,7 @@ pub fn ValFinalProver(comptime F: type) type {
                 initial_claim = initial_claim.add(inc_evals[j].mul(wa_evals[j]));
             }
 
-            std.debug.print("[ValFinal] initial_claim = {any}\n", .{initial_claim.toBytesBE()});
+            dbg("[ValFinal] initial_claim = {any}\n", .{initial_claim.toBytesBE()});
 
             return Self{
                 .inc_evals = inc_evals,

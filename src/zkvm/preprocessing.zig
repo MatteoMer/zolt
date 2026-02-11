@@ -13,6 +13,13 @@
 //! Reference: jolt-core/src/zkvm/verifier.rs
 
 const std = @import("std");
+
+// Debug output control - set to true to enable verbose debug prints
+const debug_verbose = false;
+fn dbg(comptime fmt: []const u8, args: anytype) void {
+    if (debug_verbose) std.debug.print(fmt, args);
+}
+
 const Allocator = std.mem.Allocator;
 const jolt_device = @import("jolt_device.zig");
 const MemoryLayout = jolt_device.MemoryLayout;
@@ -1475,5 +1482,5 @@ test "DoryVerifierSetup serialization" {
 
     // Should produce non-empty output
     try std.testing.expect(buf.items.len > 0);
-    std.debug.print("Verifier setup serialized to {} bytes\n", .{buf.items.len});
+    dbg("Verifier setup serialized to {} bytes\n", .{buf.items.len});
 }

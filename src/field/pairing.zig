@@ -30,6 +30,13 @@
 //! - ziskos BN254 implementation
 
 const std = @import("std");
+
+// Debug output control - set to true to enable verbose debug prints
+const debug_verbose = false;
+fn dbg(comptime fmt: []const u8, args: anytype) void {
+    if (debug_verbose) std.debug.print(fmt, args);
+}
+
 const field_mod = @import("mod.zig");
 const BN254Scalar = field_mod.BN254Scalar; // Scalar field Fr (for MSM scalars)
 const Fp = field_mod.BN254BaseField; // Base field Fp (for pairing operations)
@@ -2204,7 +2211,7 @@ test "pairing generator comparison with jolt" {
     const g2 = G2Point.generator();
 
     // Print G2 generator for comparison
-    std.debug.print("\n=== Generator Comparison ===\n", .{});
+    dbg("\n=== Generator Comparison ===\n", .{});
 
     const g2_x_c0_std = g2.x.c0.fromMontgomery();
     const g2_x_c1_std = g2.x.c1.fromMontgomery();
@@ -2221,11 +2228,11 @@ test "pairing generator comparison with jolt" {
         std.mem.writeInt(u64, g2_y_c0_bytes[i * 8 ..][0..8], g2_y_c0_std.limbs[i], .little);
         std.mem.writeInt(u64, g2_y_c1_bytes[i * 8 ..][0..8], g2_y_c1_std.limbs[i], .little);
     }
-    std.debug.print("Zolt G2 generator:\n", .{});
-    std.debug.print("  x.c0 first 16: {x}\n", .{g2_x_c0_bytes[0..16].*});
-    std.debug.print("  x.c1 first 16: {x}\n", .{g2_x_c1_bytes[0..16].*});
-    std.debug.print("  y.c0 first 16: {x}\n", .{g2_y_c0_bytes[0..16].*});
-    std.debug.print("  y.c1 first 16: {x}\n", .{g2_y_c1_bytes[0..16].*});
+    dbg("Zolt G2 generator:\n", .{});
+    dbg("  x.c0 first 16: {x}\n", .{g2_x_c0_bytes[0..16].*});
+    dbg("  x.c1 first 16: {x}\n", .{g2_x_c1_bytes[0..16].*});
+    dbg("  y.c0 first 16: {x}\n", .{g2_y_c0_bytes[0..16].*});
+    dbg("  y.c1 first 16: {x}\n", .{g2_y_c1_bytes[0..16].*});
 
     // Jolt G2 generator:
     // x.c0: ed f6 92 d9 5c bd de 46 dd da 5e f7 d4 22 43 67
@@ -2243,22 +2250,22 @@ test "pairing generator comparison with jolt" {
     g2_match = g2_match and std.mem.eql(u8, g2_y_c1_bytes[0..16], &jolt_y_c1);
 
     if (g2_match) {
-        std.debug.print("*** G2 generator MATCHES Jolt! ***\n", .{});
+        dbg("*** G2 generator MATCHES Jolt! ***\n", .{});
     } else {
-        std.debug.print("*** G2 generator MISMATCH ***\n", .{});
+        dbg("*** G2 generator MISMATCH ***\n", .{});
     }
 
     const e_g1_g2 = pairingFp(g1, g2);
     const bytes = e_g1_g2.toBytes();
 
-    std.debug.print("\nZolt e(G1_gen, G2_gen) first 16 bytes: {x}\n", .{bytes[0..16].*});
+    dbg("\nZolt e(G1_gen, G2_gen) first 16 bytes: {x}\n", .{bytes[0..16].*});
 
     const jolt_bytes = [_]u8{ 0x95, 0x0e, 0x87, 0x9d, 0x73, 0x63, 0x1f, 0x5e, 0xb5, 0x78, 0x85, 0x89, 0xeb, 0x5f, 0x7e, 0xf8 };
     if (std.mem.eql(u8, bytes[0..16], &jolt_bytes)) {
-        std.debug.print("*** Generator pairing MATCHES Jolt! ***\n", .{});
+        dbg("*** Generator pairing MATCHES Jolt! ***\n", .{});
     } else {
-        std.debug.print("*** Generator pairing MISMATCH ***\n", .{});
-        std.debug.print("Expected (Jolt): {x}\n", .{jolt_bytes});
+        dbg("*** Generator pairing MISMATCH ***\n", .{});
+        dbg("Expected (Jolt): {x}\n", .{jolt_bytes});
     }
 }
 

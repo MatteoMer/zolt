@@ -7,6 +7,13 @@
 //! Reference: jolt-core/src/poly/split_eq_poly.rs
 
 const std = @import("std");
+
+// Debug output control - set to true to enable verbose debug prints
+const debug_verbose = false;
+fn dbg(comptime fmt: []const u8, args: anytype) void {
+    if (debug_verbose) std.debug.print(fmt, args);
+}
+
 const Allocator = std.mem.Allocator;
 
 /// Gruen's optimized split eq polynomial for streaming sumcheck
@@ -432,15 +439,15 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
             // DEBUG: Verify s(0) + s(1) == previous_claim
             const sum_check = s_0.add(s_1);
             if (!sum_check.eql(previous_claim)) {
-                std.debug.print("[GRUEN DEBUG] MISMATCH: s(0)+s(1) != previous_claim at index {}\n", .{self.current_index});
-                std.debug.print("[GRUEN DEBUG]   s(0)+s(1) = {any}\n", .{sum_check.toBytesBE()});
-                std.debug.print("[GRUEN DEBUG]   previous_claim = {any}\n", .{previous_claim.toBytesBE()});
+                dbg("[GRUEN DEBUG] MISMATCH: s(0)+s(1) != previous_claim at index {}\n", .{self.current_index});
+                dbg("[GRUEN DEBUG]   s(0)+s(1) = {any}\n", .{sum_check.toBytesBE()});
+                dbg("[GRUEN DEBUG]   previous_claim = {any}\n", .{previous_claim.toBytesBE()});
             }
 
             // DEBUG: Print detailed values for every round
-            std.debug.print("[GRUEN ROUND {}] q(0) = {any}\n", .{ self.current_index, c.toBytesBE() });
-            std.debug.print("[GRUEN ROUND {}] q(1) = {any}\n", .{ self.current_index, q_1.toBytesBE() });
-            std.debug.print("[GRUEN ROUND {}] previous_claim = {any}\n", .{ self.current_index, previous_claim.toBytesBE() });
+            dbg("[GRUEN ROUND {}] q(0) = {any}\n", .{ self.current_index, c.toBytesBE() });
+            dbg("[GRUEN ROUND {}] q(1) = {any}\n", .{ self.current_index, q_1.toBytesBE() });
+            dbg("[GRUEN ROUND {}] previous_claim = {any}\n", .{ self.current_index, previous_claim.toBytesBE() });
 
             return [4]F{ s_0, s_1, s_2, s_3 };
         }

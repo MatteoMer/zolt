@@ -15,6 +15,13 @@
 //! Reference: jolt-core/src/zkvm/verifier.rs
 
 const std = @import("std");
+
+// Debug output control - set to true to enable verbose debug prints
+const debug_verbose = false;
+fn dbg(comptime fmt: []const u8, args: anytype) void {
+    if (debug_verbose) std.debug.print(fmt, args);
+}
+
 const Allocator = std.mem.Allocator;
 
 const poly = @import("../poly/mod.zig");
@@ -96,52 +103,52 @@ pub fn MultiStageVerifier(comptime F: type) type {
             const log_t = proofs.log_t;
             const log_k = proofs.log_k;
 
-            std.debug.print("\n[VERIFIER] ========================================\n", .{});
-            std.debug.print("[VERIFIER] Starting multi-stage verification\n", .{});
-            std.debug.print("[VERIFIER]   log_t={d}, log_k={d}\n", .{ log_t, log_k });
-            std.debug.print("[VERIFIER] ========================================\n\n", .{});
+            dbg("\n[VERIFIER] ========================================\n", .{});
+            dbg("[VERIFIER] Starting multi-stage verification\n", .{});
+            dbg("[VERIFIER]   log_t={d}, log_k={d}\n", .{ log_t, log_k });
+            dbg("[VERIFIER] ========================================\n\n", .{});
 
             // Verify each stage in order
             // Each stage verification updates the transcript for Fiat-Shamir
             if (!try self.verifyStage1(&proofs.stage_proofs[0], transcript)) {
-                std.debug.print("[VERIFIER] Stage 1 verification FAILED\n", .{});
+                dbg("[VERIFIER] Stage 1 verification FAILED\n", .{});
                 return false;
             }
-            std.debug.print("\n[VERIFIER] Stage 1 PASSED\n\n", .{});
+            dbg("\n[VERIFIER] Stage 1 PASSED\n\n", .{});
 
             if (!try self.verifyStage2(&proofs.stage_proofs[1], transcript, log_t)) {
-                std.debug.print("[VERIFIER] Stage 2 verification FAILED\n", .{});
+                dbg("[VERIFIER] Stage 2 verification FAILED\n", .{});
                 return false;
             }
-            std.debug.print("\n[VERIFIER] Stage 2 PASSED\n\n", .{});
+            dbg("\n[VERIFIER] Stage 2 PASSED\n\n", .{});
 
             if (!try self.verifyStage3(&proofs.stage_proofs[2], transcript, log_t, log_k)) {
-                std.debug.print("[VERIFIER] Stage 3 verification FAILED\n", .{});
+                dbg("[VERIFIER] Stage 3 verification FAILED\n", .{});
                 return false;
             }
-            std.debug.print("\n[VERIFIER] Stage 3 PASSED\n\n", .{});
+            dbg("\n[VERIFIER] Stage 3 PASSED\n\n", .{});
 
             if (!try self.verifyStage4(&proofs.stage_proofs[3], transcript, log_t)) {
-                std.debug.print("[VERIFIER] Stage 4 verification FAILED\n", .{});
+                dbg("[VERIFIER] Stage 4 verification FAILED\n", .{});
                 return false;
             }
-            std.debug.print("\n[VERIFIER] Stage 4 PASSED\n\n", .{});
+            dbg("\n[VERIFIER] Stage 4 PASSED\n\n", .{});
 
             if (!try self.verifyStage5(&proofs.stage_proofs[4], transcript, log_t)) {
-                std.debug.print("[VERIFIER] Stage 5 verification FAILED\n", .{});
+                dbg("[VERIFIER] Stage 5 verification FAILED\n", .{});
                 return false;
             }
-            std.debug.print("\n[VERIFIER] Stage 5 PASSED\n\n", .{});
+            dbg("\n[VERIFIER] Stage 5 PASSED\n\n", .{});
 
             if (!try self.verifyStage6(&proofs.stage_proofs[5], transcript, log_t)) {
-                std.debug.print("[VERIFIER] Stage 6 verification FAILED\n", .{});
+                dbg("[VERIFIER] Stage 6 verification FAILED\n", .{});
                 return false;
             }
-            std.debug.print("\n[VERIFIER] Stage 6 PASSED\n\n", .{});
+            dbg("\n[VERIFIER] Stage 6 PASSED\n\n", .{});
 
-            std.debug.print("[VERIFIER] ========================================\n", .{});
-            std.debug.print("[VERIFIER] All stages PASSED!\n", .{});
-            std.debug.print("[VERIFIER] ========================================\n\n", .{});
+            dbg("[VERIFIER] ========================================\n", .{});
+            dbg("[VERIFIER] All stages PASSED!\n", .{});
+            dbg("[VERIFIER] ========================================\n\n", .{});
 
             // All stages verified successfully
             return true;
@@ -159,13 +166,13 @@ pub fn MultiStageVerifier(comptime F: type) type {
             // Number of rounds = number of round polynomials in the proof
             const num_rounds = proof.round_polys.items.len;
 
-            std.debug.print("\n[VERIFIER STAGE 1] =====================================\n", .{});
-            std.debug.print("[VERIFIER STAGE 1] Outer Spartan sumcheck\n", .{});
-            std.debug.print("[VERIFIER STAGE 1] num_rounds={d}, final_claims_len={d}\n", .{ num_rounds, proof.final_claims.items.len });
+            dbg("\n[VERIFIER STAGE 1] =====================================\n", .{});
+            dbg("[VERIFIER STAGE 1] Outer Spartan sumcheck\n", .{});
+            dbg("[VERIFIER STAGE 1] num_rounds={d}, final_claims_len={d}\n", .{ num_rounds, proof.final_claims.items.len });
 
             // Skip if no rounds (empty trace)
             if (num_rounds == 0) {
-                std.debug.print("[VERIFIER STAGE 1] SKIPPED (no rounds)\n", .{});
+                dbg("[VERIFIER STAGE 1] SKIPPED (no rounds)\n", .{});
                 self.stage_results[0] = .{
                     .success = true,
                     .final_claim = null,
@@ -177,10 +184,10 @@ pub fn MultiStageVerifier(comptime F: type) type {
 
             // Get tau challenges from transcript (must match prover)
             // Prover generates log_num_constraints tau challenges before sumcheck rounds
-            std.debug.print("[VERIFIER STAGE 1] Getting {d} tau challenges...\n", .{num_rounds});
+            dbg("[VERIFIER STAGE 1] Getting {d} tau challenges...\n", .{num_rounds});
             for (0..num_rounds) |i| {
                 const tau = try transcript.challengeScalar("spartan_tau");
-                std.debug.print("[VERIFIER STAGE 1]   tau[{d}] = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ i, tau.limbs[3], tau.limbs[2], tau.limbs[1], tau.limbs[0] });
+                dbg("[VERIFIER STAGE 1]   tau[{d}] = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ i, tau.limbs[3], tau.limbs[2], tau.limbs[1], tau.limbs[0] });
             }
 
             // For Spartan, the initial claim should be 0 (R1CS satisfied)
@@ -190,17 +197,17 @@ pub fn MultiStageVerifier(comptime F: type) type {
             else
                 F.zero();
 
-            std.debug.print("[VERIFIER STAGE 1] Initial claim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
+            dbg("[VERIFIER STAGE 1] Initial claim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
 
             // Verify each round polynomial
             for (proof.round_polys.items, 0..) |round_poly, round_idx| {
-                std.debug.print("\n[VERIFIER STAGE 1] --- Round {d}/{d} ---\n", .{ round_idx, num_rounds });
-                std.debug.print("[VERIFIER STAGE 1] round_poly.len = {d}\n", .{round_poly.len});
+                dbg("\n[VERIFIER STAGE 1] --- Round {d}/{d} ---\n", .{ round_idx, num_rounds });
+                dbg("[VERIFIER STAGE 1] round_poly.len = {d}\n", .{round_poly.len});
 
                 // For degree 3, round_poly has 4 coefficients: [p(0), p(1), p(2), p(3)]
                 // or evaluations that we interpolate from
                 if (round_poly.len < 2) {
-                    std.debug.print("[VERIFIER STAGE 1] ERROR: round_poly.len < 2\n", .{});
+                    dbg("[VERIFIER STAGE 1] ERROR: round_poly.len < 2\n", .{});
                     self.stage_results[0] = .{
                         .success = false,
                         .final_claim = null,
@@ -211,16 +218,16 @@ pub fn MultiStageVerifier(comptime F: type) type {
 
                 // Print all polynomial coefficients
                 for (round_poly, 0..) |coeff, i| {
-                    std.debug.print("[VERIFIER STAGE 1] p[{d}] = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ i, coeff.limbs[3], coeff.limbs[2], coeff.limbs[1], coeff.limbs[0] });
+                    dbg("[VERIFIER STAGE 1] p[{d}] = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ i, coeff.limbs[3], coeff.limbs[2], coeff.limbs[1], coeff.limbs[0] });
                 }
 
                 // Verify: p(0) + p(1) = current_claim
                 const sum = round_poly[0].add(round_poly[1]);
                 const sum_check_ok = sum.eql(current_claim);
 
-                std.debug.print("[VERIFIER STAGE 1] p(0) + p(1) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ sum.limbs[3], sum.limbs[2], sum.limbs[1], sum.limbs[0] });
-                std.debug.print("[VERIFIER STAGE 1] claim       = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
-                std.debug.print("[VERIFIER STAGE 1] sum_check_ok = {}\n", .{sum_check_ok});
+                dbg("[VERIFIER STAGE 1] p(0) + p(1) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ sum.limbs[3], sum.limbs[2], sum.limbs[1], sum.limbs[0] });
+                dbg("[VERIFIER STAGE 1] claim       = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
+                dbg("[VERIFIER STAGE 1] sum_check_ok = {}\n", .{sum_check_ok});
 
                 // Absorb round polynomial into transcript (Fiat-Shamir binding)
                 try transcript.appendScalar("round_poly_0", round_poly[0]);
@@ -231,11 +238,11 @@ pub fn MultiStageVerifier(comptime F: type) type {
 
                 // Get challenge from transcript (must be called to keep in sync)
                 const challenge = try transcript.challengeScalar("spartan_round");
-                std.debug.print("[VERIFIER STAGE 1] challenge = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ challenge.limbs[3], challenge.limbs[2], challenge.limbs[1], challenge.limbs[0] });
+                dbg("[VERIFIER STAGE 1] challenge = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ challenge.limbs[3], challenge.limbs[2], challenge.limbs[1], challenge.limbs[0] });
 
                 if (self.config.strict_sumcheck and !sum_check_ok) {
                     // Strict mode: reject the proof if sum check fails
-                    std.debug.print("[VERIFIER STAGE 1] FAILED: p(0) + p(1) != claim\n", .{});
+                    dbg("[VERIFIER STAGE 1] FAILED: p(0) + p(1) != claim\n", .{});
                     self.stage_results[0] = .{
                         .success = false,
                         .final_claim = null,
@@ -246,10 +253,10 @@ pub fn MultiStageVerifier(comptime F: type) type {
 
                 // Update claim: evaluate p at challenge point
                 current_claim = evaluatePolynomialAtChallenge(F, round_poly, challenge);
-                std.debug.print("[VERIFIER STAGE 1] new_claim = p(r) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
+                dbg("[VERIFIER STAGE 1] new_claim = p(r) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
             }
 
-            std.debug.print("\n[VERIFIER STAGE 1] Final claim after all rounds = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
+            dbg("\n[VERIFIER STAGE 1] Final claim after all rounds = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
 
             // Stage 1 verification passed
             self.stage_results[0] = .{
@@ -273,13 +280,13 @@ pub fn MultiStageVerifier(comptime F: type) type {
         ) !bool {
             const num_rounds = proof.round_polys.items.len;
 
-            std.debug.print("\n[VERIFIER STAGE 2] =====================================\n", .{});
-            std.debug.print("[VERIFIER STAGE 2] RAM RAF evaluation\n", .{});
-            std.debug.print("[VERIFIER STAGE 2] num_rounds={d}, log_t={d}\n", .{ num_rounds, log_t });
+            dbg("\n[VERIFIER STAGE 2] =====================================\n", .{});
+            dbg("[VERIFIER STAGE 2] RAM RAF evaluation\n", .{});
+            dbg("[VERIFIER STAGE 2] num_rounds={d}, log_t={d}\n", .{ num_rounds, log_t });
 
             // Skip if empty
             if (num_rounds == 0) {
-                std.debug.print("[VERIFIER STAGE 2] SKIPPED (no rounds)\n", .{});
+                dbg("[VERIFIER STAGE 2] SKIPPED (no rounds)\n", .{});
                 self.stage_results[1] = .{
                     .success = true,
                     .final_claim = null,
@@ -290,10 +297,10 @@ pub fn MultiStageVerifier(comptime F: type) type {
             }
 
             // Prover generates log_t r_cycle challenges before sumcheck rounds
-            std.debug.print("[VERIFIER STAGE 2] Getting {d} r_cycle challenges...\n", .{log_t});
+            dbg("[VERIFIER STAGE 2] Getting {d} r_cycle challenges...\n", .{log_t});
             for (0..log_t) |i| {
                 const r_cycle = try transcript.challengeScalar("r_cycle");
-                std.debug.print("[VERIFIER STAGE 2]   r_cycle[{d}] = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ i, r_cycle.limbs[3], r_cycle.limbs[2], r_cycle.limbs[1], r_cycle.limbs[0] });
+                dbg("[VERIFIER STAGE 2]   r_cycle[{d}] = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ i, r_cycle.limbs[3], r_cycle.limbs[2], r_cycle.limbs[1], r_cycle.limbs[0] });
             }
 
             // Get initial claim from proof (if provided)
@@ -302,16 +309,16 @@ pub fn MultiStageVerifier(comptime F: type) type {
             else
                 F.zero();
 
-            std.debug.print("[VERIFIER STAGE 2] Initial claim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
+            dbg("[VERIFIER STAGE 2] Initial claim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
 
             // Verify each round polynomial
             // For degree-2 sumcheck, round_poly = [p(0), p(2)]
             // We recover p(1) = claim - p(0) from the sumcheck constraint
             for (proof.round_polys.items, 0..) |round_poly, round_idx| {
-                std.debug.print("\n[VERIFIER STAGE 2] --- Round {d}/{d} ---\n", .{ round_idx, num_rounds });
+                dbg("\n[VERIFIER STAGE 2] --- Round {d}/{d} ---\n", .{ round_idx, num_rounds });
 
                 if (round_poly.len < 2) {
-                    std.debug.print("[VERIFIER STAGE 2] ERROR: round_poly.len < 2\n", .{});
+                    dbg("[VERIFIER STAGE 2] ERROR: round_poly.len < 2\n", .{});
                     self.stage_results[1] = .{
                         .success = false,
                         .final_claim = null,
@@ -327,14 +334,14 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 // Recover p(1) from sumcheck constraint: p(0) + p(1) = current_claim
                 const p_at_1 = current_claim.sub(p_at_0);
 
-                std.debug.print("[VERIFIER STAGE 2] p(0) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ p_at_0.limbs[3], p_at_0.limbs[2], p_at_0.limbs[1], p_at_0.limbs[0] });
-                std.debug.print("[VERIFIER STAGE 2] p(1) = {x:0>16}{x:0>16}{x:0>16}{x:0>16} (recovered)\n", .{ p_at_1.limbs[3], p_at_1.limbs[2], p_at_1.limbs[1], p_at_1.limbs[0] });
-                std.debug.print("[VERIFIER STAGE 2] p(2) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ p_at_2.limbs[3], p_at_2.limbs[2], p_at_2.limbs[1], p_at_2.limbs[0] });
-                std.debug.print("[VERIFIER STAGE 2] claim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
+                dbg("[VERIFIER STAGE 2] p(0) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ p_at_0.limbs[3], p_at_0.limbs[2], p_at_0.limbs[1], p_at_0.limbs[0] });
+                dbg("[VERIFIER STAGE 2] p(1) = {x:0>16}{x:0>16}{x:0>16}{x:0>16} (recovered)\n", .{ p_at_1.limbs[3], p_at_1.limbs[2], p_at_1.limbs[1], p_at_1.limbs[0] });
+                dbg("[VERIFIER STAGE 2] p(2) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ p_at_2.limbs[3], p_at_2.limbs[2], p_at_2.limbs[1], p_at_2.limbs[0] });
+                dbg("[VERIFIER STAGE 2] claim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
 
                 // Get challenge from transcript (must match prover's challenge)
                 const challenge = try transcript.challengeScalar("raf_round");
-                std.debug.print("[VERIFIER STAGE 2] challenge = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ challenge.limbs[3], challenge.limbs[2], challenge.limbs[1], challenge.limbs[0] });
+                dbg("[VERIFIER STAGE 2] challenge = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ challenge.limbs[3], challenge.limbs[2], challenge.limbs[1], challenge.limbs[0] });
 
                 // Accumulate challenge for opening claims
                 try self.opening_claims.addChallenge(challenge);
@@ -342,10 +349,10 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 // Update claim using quadratic Lagrange interpolation
                 // with points p(0), p(1), p(2)
                 current_claim = evaluateQuadraticAt3Points(F, p_at_0, p_at_1, p_at_2, challenge);
-                std.debug.print("[VERIFIER STAGE 2] new_claim = p(r) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
+                dbg("[VERIFIER STAGE 2] new_claim = p(r) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
             }
 
-            std.debug.print("\n[VERIFIER STAGE 2] Final claim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
+            dbg("\n[VERIFIER STAGE 2] Final claim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
 
             // Stage 2 verification passed
             self.stage_results[1] = .{
@@ -371,13 +378,13 @@ pub fn MultiStageVerifier(comptime F: type) type {
         ) !bool {
             const num_rounds = proof.round_polys.items.len;
 
-            std.debug.print("\n[VERIFIER STAGE 3] =====================================\n", .{});
-            std.debug.print("[VERIFIER STAGE 3] Lasso lookup sumcheck\n", .{});
-            std.debug.print("[VERIFIER STAGE 3] num_rounds={d}, log_t={d}, log_k={d}\n", .{ num_rounds, log_t, log_k });
+            dbg("\n[VERIFIER STAGE 3] =====================================\n", .{});
+            dbg("[VERIFIER STAGE 3] Lasso lookup sumcheck\n", .{});
+            dbg("[VERIFIER STAGE 3] num_rounds={d}, log_t={d}, log_k={d}\n", .{ num_rounds, log_t, log_k });
 
             // Skip if no round polynomials (empty lookup trace)
             if (num_rounds == 0) {
-                std.debug.print("[VERIFIER STAGE 3] SKIPPED (no rounds)\n", .{});
+                dbg("[VERIFIER STAGE 3] SKIPPED (no rounds)\n", .{});
                 self.stage_results[2] = .{
                     .success = true,
                     .final_claim = null,
@@ -389,13 +396,13 @@ pub fn MultiStageVerifier(comptime F: type) type {
 
             // Get gamma challenge for batching (prover generates this first)
             const gamma = try transcript.challengeScalar("lasso_gamma");
-            std.debug.print("[VERIFIER STAGE 3] gamma = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ gamma.limbs[3], gamma.limbs[2], gamma.limbs[1], gamma.limbs[0] });
+            dbg("[VERIFIER STAGE 3] gamma = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ gamma.limbs[3], gamma.limbs[2], gamma.limbs[1], gamma.limbs[0] });
 
             // Prover generates log_t r_reduction challenges
-            std.debug.print("[VERIFIER STAGE 3] Getting {d} r_reduction challenges...\n", .{log_t});
+            dbg("[VERIFIER STAGE 3] Getting {d} r_reduction challenges...\n", .{log_t});
             for (0..log_t) |i| {
                 const r_red = try transcript.challengeScalar("r_reduction");
-                std.debug.print("[VERIFIER STAGE 3]   r_reduction[{d}] = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ i, r_red.limbs[3], r_red.limbs[2], r_red.limbs[1], r_red.limbs[0] });
+                dbg("[VERIFIER STAGE 3]   r_reduction[{d}] = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ i, r_red.limbs[3], r_red.limbs[2], r_red.limbs[1], r_red.limbs[0] });
             }
 
             // Get initial claim
@@ -404,16 +411,16 @@ pub fn MultiStageVerifier(comptime F: type) type {
             else
                 F.zero();
 
-            std.debug.print("[VERIFIER STAGE 3] Initial claim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
+            dbg("[VERIFIER STAGE 3] Initial claim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
 
             // Verify each round
             // Lasso prover sends polynomial in coefficient form: [c0, c1, c2] for p(X) = c0 + c1*X + c2*X^2
             for (proof.round_polys.items, 0..) |round_poly, round_idx| {
                 const is_address_phase = round_idx < log_k;
-                std.debug.print("\n[VERIFIER STAGE 3] --- Round {d}/{d} ({s}) ---\n", .{ round_idx, num_rounds, if (is_address_phase) "address" else "cycle" });
+                dbg("\n[VERIFIER STAGE 3] --- Round {d}/{d} ({s}) ---\n", .{ round_idx, num_rounds, if (is_address_phase) "address" else "cycle" });
 
                 if (round_poly.len < 2) {
-                    std.debug.print("[VERIFIER STAGE 3] ERROR: round_poly.len < 2\n", .{});
+                    dbg("[VERIFIER STAGE 3] ERROR: round_poly.len < 2\n", .{});
                     self.stage_results[2] = .{
                         .success = false,
                         .final_claim = null,
@@ -428,31 +435,31 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 const c1 = round_poly[1];
                 const c2 = if (round_poly.len > 2) round_poly[2] else F.zero();
 
-                std.debug.print("[VERIFIER STAGE 3] c0 = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ c0.limbs[3], c0.limbs[2], c0.limbs[1], c0.limbs[0] });
-                std.debug.print("[VERIFIER STAGE 3] c1 = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ c1.limbs[3], c1.limbs[2], c1.limbs[1], c1.limbs[0] });
-                std.debug.print("[VERIFIER STAGE 3] c2 = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ c2.limbs[3], c2.limbs[2], c2.limbs[1], c2.limbs[0] });
+                dbg("[VERIFIER STAGE 3] c0 = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ c0.limbs[3], c0.limbs[2], c0.limbs[1], c0.limbs[0] });
+                dbg("[VERIFIER STAGE 3] c1 = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ c1.limbs[3], c1.limbs[2], c1.limbs[1], c1.limbs[0] });
+                dbg("[VERIFIER STAGE 3] c2 = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ c2.limbs[3], c2.limbs[2], c2.limbs[1], c2.limbs[0] });
 
                 // Compute p(0) = c0, p(1) = c0 + c1 + c2, p(2) = c0 + 2*c1 + 4*c2
                 const p_at_0 = c0;
                 const p_at_1 = c0.add(c1).add(c2);
 
-                std.debug.print("[VERIFIER STAGE 3] p(0) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ p_at_0.limbs[3], p_at_0.limbs[2], p_at_0.limbs[1], p_at_0.limbs[0] });
-                std.debug.print("[VERIFIER STAGE 3] p(1) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ p_at_1.limbs[3], p_at_1.limbs[2], p_at_1.limbs[1], p_at_1.limbs[0] });
+                dbg("[VERIFIER STAGE 3] p(0) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ p_at_0.limbs[3], p_at_0.limbs[2], p_at_0.limbs[1], p_at_0.limbs[0] });
+                dbg("[VERIFIER STAGE 3] p(1) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ p_at_1.limbs[3], p_at_1.limbs[2], p_at_1.limbs[1], p_at_1.limbs[0] });
 
                 // Verify sumcheck constraint: p(0) + p(1) = current_claim
                 const sum = p_at_0.add(p_at_1);
                 const sum_check_ok = sum.eql(current_claim);
 
-                std.debug.print("[VERIFIER STAGE 3] p(0)+p(1) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ sum.limbs[3], sum.limbs[2], sum.limbs[1], sum.limbs[0] });
-                std.debug.print("[VERIFIER STAGE 3] claim     = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
-                std.debug.print("[VERIFIER STAGE 3] sum_check_ok = {}\n", .{sum_check_ok});
+                dbg("[VERIFIER STAGE 3] p(0)+p(1) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ sum.limbs[3], sum.limbs[2], sum.limbs[1], sum.limbs[0] });
+                dbg("[VERIFIER STAGE 3] claim     = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
+                dbg("[VERIFIER STAGE 3] sum_check_ok = {}\n", .{sum_check_ok});
 
                 // Get challenge
                 const challenge = try transcript.challengeScalar("lasso_round");
-                std.debug.print("[VERIFIER STAGE 3] challenge = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ challenge.limbs[3], challenge.limbs[2], challenge.limbs[1], challenge.limbs[0] });
+                dbg("[VERIFIER STAGE 3] challenge = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ challenge.limbs[3], challenge.limbs[2], challenge.limbs[1], challenge.limbs[0] });
 
                 if (self.config.strict_sumcheck and !sum_check_ok) {
-                    std.debug.print("[VERIFIER STAGE 3] FAILED: p(0) + p(1) != claim\n", .{});
+                    dbg("[VERIFIER STAGE 3] FAILED: p(0) + p(1) != claim\n", .{});
                     self.stage_results[2] = .{
                         .success = false,
                         .final_claim = null,
@@ -465,11 +472,11 @@ pub fn MultiStageVerifier(comptime F: type) type {
 
                 // Update claim: evaluate p(challenge) = c0 + c1*r + c2*r^2
                 const new_claim = c0.add(c1.mul(challenge)).add(c2.mul(challenge).mul(challenge));
-                std.debug.print("[VERIFIER STAGE 3] new_claim = p(r) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ new_claim.limbs[3], new_claim.limbs[2], new_claim.limbs[1], new_claim.limbs[0] });
+                dbg("[VERIFIER STAGE 3] new_claim = p(r) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ new_claim.limbs[3], new_claim.limbs[2], new_claim.limbs[1], new_claim.limbs[0] });
                 current_claim = new_claim;
             }
 
-            std.debug.print("\n[VERIFIER STAGE 3] Final claim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
+            dbg("\n[VERIFIER STAGE 3] Final claim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
 
             // Stage 3 verification passed
             self.stage_results[2] = .{
@@ -493,13 +500,13 @@ pub fn MultiStageVerifier(comptime F: type) type {
         ) !bool {
             const num_rounds = proof.round_polys.items.len;
 
-            std.debug.print("\n[VERIFIER STAGE 4] =====================================\n", .{});
-            std.debug.print("[VERIFIER STAGE 4] Value evaluation\n", .{});
-            std.debug.print("[VERIFIER STAGE 4] num_rounds={d}, log_t={d}\n", .{ num_rounds, log_t });
+            dbg("\n[VERIFIER STAGE 4] =====================================\n", .{});
+            dbg("[VERIFIER STAGE 4] Value evaluation\n", .{});
+            dbg("[VERIFIER STAGE 4] num_rounds={d}, log_t={d}\n", .{ num_rounds, log_t });
 
             // Skip if empty
             if (num_rounds == 0) {
-                std.debug.print("[VERIFIER STAGE 4] SKIPPED (no rounds)\n", .{});
+                dbg("[VERIFIER STAGE 4] SKIPPED (no rounds)\n", .{});
                 self.stage_results[3] = .{
                     .success = true,
                     .final_claim = null,
@@ -511,17 +518,17 @@ pub fn MultiStageVerifier(comptime F: type) type {
 
             // Prover generates log_k r_address challenges (log_k = 16)
             const log_k: usize = 16;
-            std.debug.print("[VERIFIER STAGE 4] Getting {d} r_address challenges...\n", .{log_k});
+            dbg("[VERIFIER STAGE 4] Getting {d} r_address challenges...\n", .{log_k});
             for (0..log_k) |i| {
                 const r_addr = try transcript.challengeScalar("r_address");
-                std.debug.print("[VERIFIER STAGE 4]   r_address[{d}] = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ i, r_addr.limbs[3], r_addr.limbs[2], r_addr.limbs[1], r_addr.limbs[0] });
+                dbg("[VERIFIER STAGE 4]   r_address[{d}] = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ i, r_addr.limbs[3], r_addr.limbs[2], r_addr.limbs[1], r_addr.limbs[0] });
             }
 
             // Prover generates log_t r_cycle_val challenges
-            std.debug.print("[VERIFIER STAGE 4] Getting {d} r_cycle_val challenges...\n", .{log_t});
+            dbg("[VERIFIER STAGE 4] Getting {d} r_cycle_val challenges...\n", .{log_t});
             for (0..log_t) |i| {
                 const r_cycle = try transcript.challengeScalar("r_cycle_val");
-                std.debug.print("[VERIFIER STAGE 4]   r_cycle_val[{d}] = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ i, r_cycle.limbs[3], r_cycle.limbs[2], r_cycle.limbs[1], r_cycle.limbs[0] });
+                dbg("[VERIFIER STAGE 4]   r_cycle_val[{d}] = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ i, r_cycle.limbs[3], r_cycle.limbs[2], r_cycle.limbs[1], r_cycle.limbs[0] });
             }
 
             // Get initial claim
@@ -530,15 +537,15 @@ pub fn MultiStageVerifier(comptime F: type) type {
             else
                 F.zero();
 
-            std.debug.print("[VERIFIER STAGE 4] Initial claim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
+            dbg("[VERIFIER STAGE 4] Initial claim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
 
             // Verify each round polynomial
             for (proof.round_polys.items, 0..) |round_poly, round_idx| {
-                std.debug.print("\n[VERIFIER STAGE 4] --- Round {d}/{d} ---\n", .{ round_idx, num_rounds });
+                dbg("\n[VERIFIER STAGE 4] --- Round {d}/{d} ---\n", .{ round_idx, num_rounds });
 
                 if (round_poly.len < 4) {
                     // Degree 3 sumcheck (product of 3 multilinear) requires 4 evaluations
-                    std.debug.print("[VERIFIER STAGE 4] ERROR: round_poly.len={d} < 4\n", .{round_poly.len});
+                    dbg("[VERIFIER STAGE 4] ERROR: round_poly.len={d} < 4\n", .{round_poly.len});
                     self.stage_results[3] = .{
                         .success = false,
                         .final_claim = null,
@@ -549,23 +556,23 @@ pub fn MultiStageVerifier(comptime F: type) type {
 
                 // Print all polynomial coefficients
                 for (round_poly, 0..) |coeff, i| {
-                    std.debug.print("[VERIFIER STAGE 4] p[{d}] = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ i, coeff.limbs[3], coeff.limbs[2], coeff.limbs[1], coeff.limbs[0] });
+                    dbg("[VERIFIER STAGE 4] p[{d}] = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ i, coeff.limbs[3], coeff.limbs[2], coeff.limbs[1], coeff.limbs[0] });
                 }
 
                 // Verify sumcheck: p(0) + p(1) = current_claim
                 const sum = round_poly[0].add(round_poly[1]);
                 const sum_check_ok = sum.eql(current_claim);
 
-                std.debug.print("[VERIFIER STAGE 4] p(0)+p(1) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ sum.limbs[3], sum.limbs[2], sum.limbs[1], sum.limbs[0] });
-                std.debug.print("[VERIFIER STAGE 4] claim     = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
-                std.debug.print("[VERIFIER STAGE 4] sum_check_ok = {}\n", .{sum_check_ok});
+                dbg("[VERIFIER STAGE 4] p(0)+p(1) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ sum.limbs[3], sum.limbs[2], sum.limbs[1], sum.limbs[0] });
+                dbg("[VERIFIER STAGE 4] claim     = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
+                dbg("[VERIFIER STAGE 4] sum_check_ok = {}\n", .{sum_check_ok});
 
                 // Get challenge
                 const challenge = try transcript.challengeScalar("val_eval_round");
-                std.debug.print("[VERIFIER STAGE 4] challenge = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ challenge.limbs[3], challenge.limbs[2], challenge.limbs[1], challenge.limbs[0] });
+                dbg("[VERIFIER STAGE 4] challenge = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ challenge.limbs[3], challenge.limbs[2], challenge.limbs[1], challenge.limbs[0] });
 
                 if (self.config.strict_sumcheck and !sum_check_ok) {
-                    std.debug.print("[VERIFIER STAGE 4] FAILED: p(0) + p(1) != claim\n", .{});
+                    dbg("[VERIFIER STAGE 4] FAILED: p(0) + p(1) != claim\n", .{});
                     self.stage_results[3] = .{
                         .success = false,
                         .final_claim = null,
@@ -578,10 +585,10 @@ pub fn MultiStageVerifier(comptime F: type) type {
 
                 // Update claim using interpolation for degree 3
                 current_claim = evaluatePolynomialAtChallenge(F, round_poly, challenge);
-                std.debug.print("[VERIFIER STAGE 4] new_claim = p(r) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
+                dbg("[VERIFIER STAGE 4] new_claim = p(r) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
             }
 
-            std.debug.print("\n[VERIFIER STAGE 4] Final claim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
+            dbg("\n[VERIFIER STAGE 4] Final claim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
 
             // Stage 4 verification passed
             self.stage_results[3] = .{
@@ -604,13 +611,13 @@ pub fn MultiStageVerifier(comptime F: type) type {
         ) !bool {
             const num_rounds = proof.round_polys.items.len;
 
-            std.debug.print("\n[VERIFIER STAGE 5] =====================================\n", .{});
-            std.debug.print("[VERIFIER STAGE 5] Register evaluation\n", .{});
-            std.debug.print("[VERIFIER STAGE 5] num_rounds={d}, log_t={d}\n", .{ num_rounds, log_t });
+            dbg("\n[VERIFIER STAGE 5] =====================================\n", .{});
+            dbg("[VERIFIER STAGE 5] Register evaluation\n", .{});
+            dbg("[VERIFIER STAGE 5] num_rounds={d}, log_t={d}\n", .{ num_rounds, log_t });
 
             // Skip if empty
             if (num_rounds == 0) {
-                std.debug.print("[VERIFIER STAGE 5] SKIPPED (no rounds)\n", .{});
+                dbg("[VERIFIER STAGE 5] SKIPPED (no rounds)\n", .{});
                 self.stage_results[4] = .{
                     .success = true,
                     .final_claim = null,
@@ -622,17 +629,17 @@ pub fn MultiStageVerifier(comptime F: type) type {
 
             // Prover generates 5 r_register challenges (log2(32) = 5)
             const log_regs: usize = 5;
-            std.debug.print("[VERIFIER STAGE 5] Getting {d} r_register challenges...\n", .{log_regs});
+            dbg("[VERIFIER STAGE 5] Getting {d} r_register challenges...\n", .{log_regs});
             for (0..log_regs) |i| {
                 const r_reg = try transcript.challengeScalar("r_register");
-                std.debug.print("[VERIFIER STAGE 5]   r_register[{d}] = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ i, r_reg.limbs[3], r_reg.limbs[2], r_reg.limbs[1], r_reg.limbs[0] });
+                dbg("[VERIFIER STAGE 5]   r_register[{d}] = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ i, r_reg.limbs[3], r_reg.limbs[2], r_reg.limbs[1], r_reg.limbs[0] });
             }
 
             // Prover generates log_t r_cycle_reg challenges
-            std.debug.print("[VERIFIER STAGE 5] Getting {d} r_cycle_reg challenges...\n", .{log_t});
+            dbg("[VERIFIER STAGE 5] Getting {d} r_cycle_reg challenges...\n", .{log_t});
             for (0..log_t) |i| {
                 const r_cycle = try transcript.challengeScalar("r_cycle_reg");
-                std.debug.print("[VERIFIER STAGE 5]   r_cycle_reg[{d}] = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ i, r_cycle.limbs[3], r_cycle.limbs[2], r_cycle.limbs[1], r_cycle.limbs[0] });
+                dbg("[VERIFIER STAGE 5]   r_cycle_reg[{d}] = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ i, r_cycle.limbs[3], r_cycle.limbs[2], r_cycle.limbs[1], r_cycle.limbs[0] });
             }
 
             // Get initial claim
@@ -641,15 +648,15 @@ pub fn MultiStageVerifier(comptime F: type) type {
             else
                 F.zero();
 
-            std.debug.print("[VERIFIER STAGE 5] Initial claim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
+            dbg("[VERIFIER STAGE 5] Initial claim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
 
             // Verify each round
             // For degree-2 sumcheck, round_poly = [p(0), p(2)]
             for (proof.round_polys.items, 0..) |round_poly, round_idx| {
-                std.debug.print("\n[VERIFIER STAGE 5] --- Round {d}/{d} ---\n", .{ round_idx, num_rounds });
+                dbg("\n[VERIFIER STAGE 5] --- Round {d}/{d} ---\n", .{ round_idx, num_rounds });
 
                 if (round_poly.len < 2) {
-                    std.debug.print("[VERIFIER STAGE 5] ERROR: round_poly.len < 2\n", .{});
+                    dbg("[VERIFIER STAGE 5] ERROR: round_poly.len < 2\n", .{});
                     self.stage_results[4] = .{
                         .success = false,
                         .final_claim = null,
@@ -665,23 +672,23 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 // Recover p(1) from sumcheck constraint: p(0) + p(1) = current_claim
                 const p_at_1 = current_claim.sub(p_at_0);
 
-                std.debug.print("[VERIFIER STAGE 5] p(0) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ p_at_0.limbs[3], p_at_0.limbs[2], p_at_0.limbs[1], p_at_0.limbs[0] });
-                std.debug.print("[VERIFIER STAGE 5] p(1) = {x:0>16}{x:0>16}{x:0>16}{x:0>16} (recovered)\n", .{ p_at_1.limbs[3], p_at_1.limbs[2], p_at_1.limbs[1], p_at_1.limbs[0] });
-                std.debug.print("[VERIFIER STAGE 5] p(2) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ p_at_2.limbs[3], p_at_2.limbs[2], p_at_2.limbs[1], p_at_2.limbs[0] });
-                std.debug.print("[VERIFIER STAGE 5] claim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
+                dbg("[VERIFIER STAGE 5] p(0) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ p_at_0.limbs[3], p_at_0.limbs[2], p_at_0.limbs[1], p_at_0.limbs[0] });
+                dbg("[VERIFIER STAGE 5] p(1) = {x:0>16}{x:0>16}{x:0>16}{x:0>16} (recovered)\n", .{ p_at_1.limbs[3], p_at_1.limbs[2], p_at_1.limbs[1], p_at_1.limbs[0] });
+                dbg("[VERIFIER STAGE 5] p(2) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ p_at_2.limbs[3], p_at_2.limbs[2], p_at_2.limbs[1], p_at_2.limbs[0] });
+                dbg("[VERIFIER STAGE 5] claim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
 
                 // Get challenge
                 const challenge = try transcript.challengeScalar("reg_eval_round");
-                std.debug.print("[VERIFIER STAGE 5] challenge = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ challenge.limbs[3], challenge.limbs[2], challenge.limbs[1], challenge.limbs[0] });
+                dbg("[VERIFIER STAGE 5] challenge = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ challenge.limbs[3], challenge.limbs[2], challenge.limbs[1], challenge.limbs[0] });
 
                 try self.opening_claims.addChallenge(challenge);
 
                 // Update claim using quadratic interpolation
                 current_claim = evaluateQuadraticAt3Points(F, p_at_0, p_at_1, p_at_2, challenge);
-                std.debug.print("[VERIFIER STAGE 5] new_claim = p(r) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
+                dbg("[VERIFIER STAGE 5] new_claim = p(r) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
             }
 
-            std.debug.print("\n[VERIFIER STAGE 5] Final claim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
+            dbg("\n[VERIFIER STAGE 5] Final claim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
 
             // Stage 5 verification passed
             self.stage_results[4] = .{
@@ -705,13 +712,13 @@ pub fn MultiStageVerifier(comptime F: type) type {
         ) !bool {
             const num_rounds = proof.round_polys.items.len;
 
-            std.debug.print("\n[VERIFIER STAGE 6] =====================================\n", .{});
-            std.debug.print("[VERIFIER STAGE 6] Booleanity and Hamming weight\n", .{});
-            std.debug.print("[VERIFIER STAGE 6] num_rounds={d}, log_t={d}\n", .{ num_rounds, log_t });
+            dbg("\n[VERIFIER STAGE 6] =====================================\n", .{});
+            dbg("[VERIFIER STAGE 6] Booleanity and Hamming weight\n", .{});
+            dbg("[VERIFIER STAGE 6] num_rounds={d}, log_t={d}\n", .{ num_rounds, log_t });
 
             // Get booleanity challenge
             const bool_chal = try transcript.challengeScalar("booleanity");
-            std.debug.print("[VERIFIER STAGE 6] booleanity = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ bool_chal.limbs[3], bool_chal.limbs[2], bool_chal.limbs[1], bool_chal.limbs[0] });
+            dbg("[VERIFIER STAGE 6] booleanity = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ bool_chal.limbs[3], bool_chal.limbs[2], bool_chal.limbs[1], bool_chal.limbs[0] });
 
             // Get initial claim (should be 0 for valid flags)
             var current_claim = if (proof.final_claims.items.len > 0)
@@ -719,15 +726,15 @@ pub fn MultiStageVerifier(comptime F: type) type {
             else
                 F.zero();
 
-            std.debug.print("[VERIFIER STAGE 6] Initial claim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
+            dbg("[VERIFIER STAGE 6] Initial claim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
 
             // Verify each round
             // For degree-2 sumcheck, round_poly = [p(0), p(2)]
             for (proof.round_polys.items, 0..) |round_poly, round_idx| {
-                std.debug.print("\n[VERIFIER STAGE 6] --- Round {d}/{d} ---\n", .{ round_idx, num_rounds });
+                dbg("\n[VERIFIER STAGE 6] --- Round {d}/{d} ---\n", .{ round_idx, num_rounds });
 
                 if (round_poly.len < 2) {
-                    std.debug.print("[VERIFIER STAGE 6] ERROR: round_poly.len < 2\n", .{});
+                    dbg("[VERIFIER STAGE 6] ERROR: round_poly.len < 2\n", .{});
                     self.stage_results[5] = .{
                         .success = false,
                         .final_claim = null,
@@ -743,23 +750,23 @@ pub fn MultiStageVerifier(comptime F: type) type {
                 // Recover p(1) from sumcheck constraint: p(0) + p(1) = current_claim
                 const p_at_1 = current_claim.sub(p_at_0);
 
-                std.debug.print("[VERIFIER STAGE 6] p(0) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ p_at_0.limbs[3], p_at_0.limbs[2], p_at_0.limbs[1], p_at_0.limbs[0] });
-                std.debug.print("[VERIFIER STAGE 6] p(1) = {x:0>16}{x:0>16}{x:0>16}{x:0>16} (recovered)\n", .{ p_at_1.limbs[3], p_at_1.limbs[2], p_at_1.limbs[1], p_at_1.limbs[0] });
-                std.debug.print("[VERIFIER STAGE 6] p(2) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ p_at_2.limbs[3], p_at_2.limbs[2], p_at_2.limbs[1], p_at_2.limbs[0] });
-                std.debug.print("[VERIFIER STAGE 6] claim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
+                dbg("[VERIFIER STAGE 6] p(0) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ p_at_0.limbs[3], p_at_0.limbs[2], p_at_0.limbs[1], p_at_0.limbs[0] });
+                dbg("[VERIFIER STAGE 6] p(1) = {x:0>16}{x:0>16}{x:0>16}{x:0>16} (recovered)\n", .{ p_at_1.limbs[3], p_at_1.limbs[2], p_at_1.limbs[1], p_at_1.limbs[0] });
+                dbg("[VERIFIER STAGE 6] p(2) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ p_at_2.limbs[3], p_at_2.limbs[2], p_at_2.limbs[1], p_at_2.limbs[0] });
+                dbg("[VERIFIER STAGE 6] claim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
 
                 // Get challenge
                 const challenge = try transcript.challengeScalar("bool_round");
-                std.debug.print("[VERIFIER STAGE 6] challenge = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ challenge.limbs[3], challenge.limbs[2], challenge.limbs[1], challenge.limbs[0] });
+                dbg("[VERIFIER STAGE 6] challenge = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ challenge.limbs[3], challenge.limbs[2], challenge.limbs[1], challenge.limbs[0] });
 
                 try self.opening_claims.addChallenge(challenge);
 
                 // Update claim using quadratic interpolation
                 current_claim = evaluateQuadraticAt3Points(F, p_at_0, p_at_1, p_at_2, challenge);
-                std.debug.print("[VERIFIER STAGE 6] new_claim = p(r) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
+                dbg("[VERIFIER STAGE 6] new_claim = p(r) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
             }
 
-            std.debug.print("\n[VERIFIER STAGE 6] Final claim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
+            dbg("\n[VERIFIER STAGE 6] Final claim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ current_claim.limbs[3], current_claim.limbs[2], current_claim.limbs[1], current_claim.limbs[0] });
 
             // Stage 6 verification passed
             self.stage_results[5] = .{

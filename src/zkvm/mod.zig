@@ -8,6 +8,13 @@
 //! - Spartan proof system
 
 const std = @import("std");
+
+// Debug output control - set to true to enable verbose debug prints
+const debug_verbose = false;
+fn dbg(comptime fmt: []const u8, args: anytype) void {
+    if (debug_verbose) std.debug.print(fmt, args);
+}
+
 const Allocator = std.mem.Allocator;
 const common = @import("../common/mod.zig");
 const field = @import("../field/mod.zig");
@@ -155,13 +162,13 @@ fn buildBytecodeWords(
         words[word_idx] |= @as(u64, byte) << (byte_offset * 8);
     }
 
-    std.debug.print("[BUILD_BYTECODE_WORDS] base_address=0x{x}, len={}, min_bytecode_address=0x{x}, num_words={}\n", .{ base_address, program_bytecode.len, min_bytecode_address, num_words });
+    dbg("[BUILD_BYTECODE_WORDS] base_address=0x{x}, len={}, min_bytecode_address=0x{x}, num_words={}\n", .{ base_address, program_bytecode.len, min_bytecode_address, num_words });
     if (num_words > 0) {
-        std.debug.print("[BUILD_BYTECODE_WORDS] First 3 words: ", .{});
+        dbg("[BUILD_BYTECODE_WORDS] First 3 words: ", .{});
         for (0..@min(3, num_words)) |i| {
-            std.debug.print("0x{x:0>16} ", .{words[i]});
+            dbg("0x{x:0>16} ", .{words[i]});
         }
-        std.debug.print("\n", .{});
+        dbg("\n", .{});
     }
 
     return .{ .words = words, .min_bytecode_address = min_bytecode_address };
@@ -657,21 +664,21 @@ pub fn JoltProver(comptime F: type) type {
             const actual_panic = emulator.device.panic;
 
             // DEBUG: Print Fiat-Shamir preamble values
-            std.debug.print("\n=== Zolt Fiat-Shamir Preamble Debug ===\n", .{});
-            std.debug.print("inputs.len = {d}\n", .{inputs.len});
+            dbg("\n=== Zolt Fiat-Shamir Preamble Debug ===\n", .{});
+            dbg("inputs.len = {d}\n", .{inputs.len});
             if (inputs.len > 0 and inputs.len <= 32) {
-                std.debug.print("inputs = {any}\n", .{inputs});
+                dbg("inputs = {any}\n", .{inputs});
             } else if (inputs.len > 32) {
-                std.debug.print("inputs[0..32] = {any}...\n", .{inputs[0..32]});
+                dbg("inputs[0..32] = {any}...\n", .{inputs[0..32]});
             }
-            std.debug.print("outputs.len = {d}\n", .{actual_outputs.len});
+            dbg("outputs.len = {d}\n", .{actual_outputs.len});
             if (actual_outputs.len > 0 and actual_outputs.len <= 32) {
-                std.debug.print("outputs = {any}\n", .{actual_outputs});
+                dbg("outputs = {any}\n", .{actual_outputs});
             } else if (actual_outputs.len > 32) {
-                std.debug.print("outputs[0..32] = {any}...\n", .{actual_outputs[0..32]});
+                dbg("outputs[0..32] = {any}...\n", .{actual_outputs[0..32]});
             }
-            std.debug.print("panic = {}\n", .{actual_panic});
-            std.debug.print("========================================\n\n", .{});
+            dbg("panic = {}\n", .{actual_panic});
+            dbg("========================================\n\n", .{});
 
             var device = try jolt_device.JoltDevice.fromEmulator(
                 self.allocator,
@@ -786,7 +793,7 @@ pub fn JoltProver(comptime F: type) type {
             // Create config as named variable to ensure pointer validity
             const init_ram_ptr: ?*const std.AutoHashMapUnmanaged(u64, u64) = &initial_ram;
             const final_ram_ptr: ?*const std.AutoHashMapUnmanaged(u64, u64) = &emulator.ram.memory;
-            std.debug.print("[ZOLT] proveJoltCompatible: init_ram_ptr={any}, final_ram_ptr={any}\n", .{
+            dbg("[ZOLT] proveJoltCompatible: init_ram_ptr={any}, final_ram_ptr={any}\n", .{
                 init_ram_ptr != null,
                 final_ram_ptr != null,
             });
@@ -796,7 +803,7 @@ pub fn JoltProver(comptime F: type) type {
 
             // Compute bytecode_K to match Jolt's BytecodePreprocessing.code_size
             const bytecode_code_size = computeBytecodeCodeSize(program_bytecode);
-            std.debug.print("[ZOLT] bytecode_code_size (computed from decoded instructions): {}\n", .{bytecode_code_size});
+            dbg("[ZOLT] bytecode_code_size (computed from decoded instructions): {}\n", .{bytecode_code_size});
 
             // Build BytecodePreprocessing for PC mapping
             const preproc = @import("preprocessing.zig");
@@ -959,21 +966,21 @@ pub fn JoltProver(comptime F: type) type {
             const actual_panic = emulator.device.panic;
 
             // DEBUG: Print Fiat-Shamir preamble values
-            std.debug.print("\n=== Zolt Fiat-Shamir Preamble Debug (WithDory) ===\n", .{});
-            std.debug.print("inputs.len = {d}\n", .{inputs.len});
+            dbg("\n=== Zolt Fiat-Shamir Preamble Debug (WithDory) ===\n", .{});
+            dbg("inputs.len = {d}\n", .{inputs.len});
             if (inputs.len > 0 and inputs.len <= 32) {
-                std.debug.print("inputs = {any}\n", .{inputs});
+                dbg("inputs = {any}\n", .{inputs});
             } else if (inputs.len > 32) {
-                std.debug.print("inputs[0..32] = {any}...\n", .{inputs[0..32]});
+                dbg("inputs[0..32] = {any}...\n", .{inputs[0..32]});
             }
-            std.debug.print("outputs.len = {d}\n", .{actual_outputs.len});
+            dbg("outputs.len = {d}\n", .{actual_outputs.len});
             if (actual_outputs.len > 0 and actual_outputs.len <= 32) {
-                std.debug.print("outputs = {any}\n", .{actual_outputs});
+                dbg("outputs = {any}\n", .{actual_outputs});
             } else if (actual_outputs.len > 32) {
-                std.debug.print("outputs[0..32] = {any}...\n", .{actual_outputs[0..32]});
+                dbg("outputs[0..32] = {any}...\n", .{actual_outputs[0..32]});
             }
-            std.debug.print("panic = {}\n", .{actual_panic});
-            std.debug.print("=================================================\n\n", .{});
+            dbg("panic = {}\n", .{actual_panic});
+            dbg("=================================================\n\n", .{});
 
             var device = try jolt_device.JoltDevice.fromEmulator(
                 self.allocator,
@@ -1066,7 +1073,7 @@ pub fn JoltProver(comptime F: type) type {
             const bytecode_d = if (log_bytecode_k == 0) 1 else (log_bytecode_k + log_k_chunk - 1) / log_k_chunk;
             const ram_d = if (log_ram_k == 0) 1 else (log_ram_k + log_k_chunk - 1) / log_k_chunk;
 
-            std.debug.print("[ZOLT] OneHot params: instruction_d={}, bytecode_d={}, ram_d={}\n", .{ instruction_d, bytecode_d, ram_d });
+            dbg("[ZOLT] OneHot params: instruction_d={}, bytecode_d={}, ram_d={}\n", .{ instruction_d, bytecode_d, ram_d });
 
             // Build commitment polynomials and compute Dory commitments
             // Order: RdInc, RamInc, InstructionRa[0..instruction_d-1], RamRa[0..ram_d-1], BytecodeRa[0..bytecode_d-1]
@@ -1224,7 +1231,7 @@ pub fn JoltProver(comptime F: type) type {
 
             // Compute bytecode_K to match Jolt's BytecodePreprocessing.code_size
             const bytecode_code_size_dory = computeBytecodeCodeSize(program_bytecode);
-            std.debug.print("[ZOLT] bytecode_code_size (Dory path): {}\n", .{bytecode_code_size_dory});
+            dbg("[ZOLT] bytecode_code_size (Dory path): {}\n", .{bytecode_code_size_dory});
 
             // Build BytecodePreprocessing for PC mapping (ELF address → bytecode index)
             const preproc = @import("preprocessing.zig");
@@ -1280,10 +1287,10 @@ pub fn JoltProver(comptime F: type) type {
             // 4. Build joint polynomial: Σ γ^i * poly_i
             // 5. Generate Dory opening proof for joint polynomial at opening_point
             {
-                std.debug.print("\n[STAGE8] === Generating Dory Opening Proof ===\n", .{});
+                dbg("\n[STAGE8] === Generating Dory Opening Proof ===\n", .{});
 
                 const opening_point = result.proof.opening_point;
-                std.debug.print("[STAGE8] opening_point len = {} (log_k_chunk={}, n_cycle_vars={})\n", .{
+                dbg("[STAGE8] opening_point len = {} (log_k_chunk={}, n_cycle_vars={})\n", .{
                     opening_point.len, log_k_chunk, opening_point.len - log_k_chunk,
                 });
 
@@ -1303,9 +1310,9 @@ pub fn JoltProver(comptime F: type) type {
                 }
                 {
                     const lf_be = lagrange_factor.toBytesBE();
-                    std.debug.print("[STAGE8] lagrange_factor_LE=[", .{});
-                    for (0..8) |bi| std.debug.print("{x:0>2}", .{lf_be[31 - bi]});
-                    std.debug.print("]\n", .{});
+                    dbg("[STAGE8] lagrange_factor_LE=[", .{});
+                    for (0..8) |bi| dbg("{x:0>2}", .{lf_be[31 - bi]});
+                    dbg("]\n", .{});
                 }
 
                 // Get claims from IncClaimReduction (Stage 6 output)
@@ -1459,9 +1466,9 @@ pub fn JoltProver(comptime F: type) type {
                         expected_joint_claim = expected_joint_claim.add(gamma_powers[i].mul(claims_ordered[i]));
                     }
                     const ejc_be = expected_joint_claim.toBytesBE();
-                    std.debug.print("[STAGE8] expected_joint_claim_LE=[", .{});
-                    for (0..8) |bi| std.debug.print("{x:0>2}", .{ejc_be[31 - bi]});
-                    std.debug.print("]\n", .{});
+                    dbg("[STAGE8] expected_joint_claim_LE=[", .{});
+                    for (0..8) |bi| dbg("{x:0>2}", .{ejc_be[31 - bi]});
+                    dbg("]\n", .{});
 
                     // Evaluate MLE of joint_poly at dory_point
                     var mle_eval = F.zero();
@@ -1479,14 +1486,14 @@ pub fn JoltProver(comptime F: type) type {
                         mle_eval = mle_eval.add(joint_poly[i].mul(basis));
                     }
                     const me_be = mle_eval.toBytesBE();
-                    std.debug.print("[STAGE8] MLE(joint_poly, dory_point)_LE=[", .{});
-                    for (0..8) |bi| std.debug.print("{x:0>2}", .{me_be[31 - bi]});
-                    std.debug.print("]\n", .{});
+                    dbg("[STAGE8] MLE(joint_poly, dory_point)_LE=[", .{});
+                    for (0..8) |bi| dbg("{x:0>2}", .{me_be[31 - bi]});
+                    dbg("]\n", .{});
 
                     if (mle_eval.eql(expected_joint_claim)) {
-                        std.debug.print("[STAGE8] ✓ MLE evaluation matches joint_claim!\n", .{});
+                        dbg("[STAGE8] ✓ MLE evaluation matches joint_claim!\n", .{});
                     } else {
-                        std.debug.print("[STAGE8] ✗ MLE evaluation DOES NOT match joint_claim!\n", .{});
+                        dbg("[STAGE8] ✗ MLE evaluation DOES NOT match joint_claim!\n", .{});
 
                         // Compute Σ γ^k * MLE(witness_poly_k, dory_point) individually
                         // to verify which polynomial contribution is off
@@ -1511,11 +1518,11 @@ pub fn JoltProver(comptime F: type) type {
                             sum_individual_mle = sum_individual_mle.add(contribution);
                             const wp_be = wp_mle.toBytesBE();
                             const cl_be = claims_ordered[0].toBytesBE();
-                            std.debug.print("[STAGE8-DBG] RamInc: MLE_LE=[", .{});
-                            for (0..8) |bi| std.debug.print("{x:0>2}", .{wp_be[31 - bi]});
-                            std.debug.print("] claim_LE=[", .{});
-                            for (0..8) |bi| std.debug.print("{x:0>2}", .{cl_be[31 - bi]});
-                            std.debug.print("] wp.len={d}{s}\n", .{ wp.len, if (wp_mle.eql(claims_ordered[0])) " ✓" else " ✗" });
+                            dbg("[STAGE8-DBG] RamInc: MLE_LE=[", .{});
+                            for (0..8) |bi| dbg("{x:0>2}", .{wp_be[31 - bi]});
+                            dbg("] claim_LE=[", .{});
+                            for (0..8) |bi| dbg("{x:0>2}", .{cl_be[31 - bi]});
+                            dbg("] wp.len={d}{s}\n", .{ wp.len, if (wp_mle.eql(claims_ordered[0])) " ✓" else " ✗" });
                         }
                         // RdInc (gamma_idx=1, wp_idx=0)
                         {
@@ -1537,11 +1544,11 @@ pub fn JoltProver(comptime F: type) type {
                             sum_individual_mle = sum_individual_mle.add(contribution);
                             const wp_be = wp_mle.toBytesBE();
                             const cl_be = claims_ordered[1].toBytesBE();
-                            std.debug.print("[STAGE8-DBG] RdInc: MLE_LE=[", .{});
-                            for (0..8) |bi| std.debug.print("{x:0>2}", .{wp_be[31 - bi]});
-                            std.debug.print("] claim_LE=[", .{});
-                            for (0..8) |bi| std.debug.print("{x:0>2}", .{cl_be[31 - bi]});
-                            std.debug.print("] wp.len={d}{s}\n", .{ wp.len, if (wp_mle.eql(claims_ordered[1])) " ✓" else " ✗" });
+                            dbg("[STAGE8-DBG] RdInc: MLE_LE=[", .{});
+                            for (0..8) |bi| dbg("{x:0>2}", .{wp_be[31 - bi]});
+                            dbg("] claim_LE=[", .{});
+                            for (0..8) |bi| dbg("{x:0>2}", .{cl_be[31 - bi]});
+                            dbg("] wp.len={d}{s}\n", .{ wp.len, if (wp_mle.eql(claims_ordered[1])) " ✓" else " ✗" });
                         }
                         // InstructionRa
                         for (0..instruction_d) |i| {
@@ -1565,11 +1572,11 @@ pub fn JoltProver(comptime F: type) type {
                             if (i < 3 or !wp_mle.eql(claims_ordered[gamma_idx])) {
                                 const c_be = wp_mle.toBytesBE();
                                 const e_be = claims_ordered[gamma_idx].toBytesBE();
-                                std.debug.print("[STAGE8-DBG] InstrRa({d}): MLE_LE=[", .{i});
-                                for (0..8) |bi| std.debug.print("{x:0>2}", .{c_be[31 - bi]});
-                                std.debug.print("] claim_LE=[", .{});
-                                for (0..8) |bi| std.debug.print("{x:0>2}", .{e_be[31 - bi]});
-                                std.debug.print("]{s}\n", .{ if (wp_mle.eql(claims_ordered[gamma_idx])) " ✓" else " ✗" });
+                                dbg("[STAGE8-DBG] InstrRa({d}): MLE_LE=[", .{i});
+                                for (0..8) |bi| dbg("{x:0>2}", .{c_be[31 - bi]});
+                                dbg("] claim_LE=[", .{});
+                                for (0..8) |bi| dbg("{x:0>2}", .{e_be[31 - bi]});
+                                dbg("]{s}\n", .{ if (wp_mle.eql(claims_ordered[gamma_idx])) " ✓" else " ✗" });
                             }
                             // For failing chunks, do detailed comparison
                             if (i >= 24 and !wp_mle.eql(claims_ordered[gamma_idx])) {
@@ -1621,18 +1628,18 @@ pub fn JoltProver(comptime F: type) type {
                                     g_rho = g_rho.add(eq_addr[k].mul(G_check[k]));
                                 }
                                 const gr_be = g_rho.toBytesBE();
-                                std.debug.print("[STAGE8-DBG] InstrRa({d}): G_from_wp(ρ)_LE=[", .{i});
-                                for (0..8) |bi| std.debug.print("{x:0>2}", .{gr_be[31 - bi]});
-                                std.debug.print("] G_check:", .{});
+                                dbg("[STAGE8-DBG] InstrRa({d}): G_from_wp(ρ)_LE=[", .{i});
+                                for (0..8) |bi| dbg("{x:0>2}", .{gr_be[31 - bi]});
+                                dbg("] G_check:", .{});
                                 for (0..K_check) |k| {
                                     if (!G_check[k].eql(F.zero())) {
                                         const gk_be = G_check[k].toBytesBE();
-                                        std.debug.print(" [{d}]=[", .{k});
-                                        for (0..8) |bi| std.debug.print("{x:0>2}", .{gk_be[31 - bi]});
-                                        std.debug.print("]", .{});
+                                        dbg(" [{d}]=[", .{k});
+                                        for (0..8) |bi| dbg("{x:0>2}", .{gk_be[31 - bi]});
+                                        dbg("]", .{});
                                     }
                                 }
-                                std.debug.print("\n", .{});
+                                dbg("\n", .{});
                             }
                         }
                         // BytecodeRa
@@ -1657,11 +1664,11 @@ pub fn JoltProver(comptime F: type) type {
                             sum_individual_mle = sum_individual_mle.add(contribution);
                             const c_be = wp_mle.toBytesBE();
                             const e_be = claims_ordered[gamma_idx].toBytesBE();
-                            std.debug.print("[STAGE8-DBG] BytecodeRa({d}): wp_idx={d} gamma_idx={d} MLE_LE=[", .{ i, wp_idx, gamma_idx });
-                            for (0..8) |bi| std.debug.print("{x:0>2}", .{c_be[31 - bi]});
-                            std.debug.print("] claim_LE=[", .{});
-                            for (0..8) |bi| std.debug.print("{x:0>2}", .{e_be[31 - bi]});
-                            std.debug.print("]{s}\n", .{ if (wp_mle.eql(claims_ordered[gamma_idx])) " ✓" else " ✗" });
+                            dbg("[STAGE8-DBG] BytecodeRa({d}): wp_idx={d} gamma_idx={d} MLE_LE=[", .{ i, wp_idx, gamma_idx });
+                            for (0..8) |bi| dbg("{x:0>2}", .{c_be[31 - bi]});
+                            dbg("] claim_LE=[", .{});
+                            for (0..8) |bi| dbg("{x:0>2}", .{e_be[31 - bi]});
+                            dbg("]{s}\n", .{ if (wp_mle.eql(claims_ordered[gamma_idx])) " ✓" else " ✗" });
                         }
                         // RamRa
                         for (0..ram_d) |i| {
@@ -1685,19 +1692,19 @@ pub fn JoltProver(comptime F: type) type {
                             sum_individual_mle = sum_individual_mle.add(contribution);
                             const c_be = wp_mle.toBytesBE();
                             const e_be = claims_ordered[gamma_idx].toBytesBE();
-                            std.debug.print("[STAGE8-DBG] RamRa({d}): wp_idx={d} gamma_idx={d} MLE_LE=[", .{ i, wp_idx, gamma_idx });
-                            for (0..8) |bi| std.debug.print("{x:0>2}", .{c_be[31 - bi]});
-                            std.debug.print("] claim_LE=[", .{});
-                            for (0..8) |bi| std.debug.print("{x:0>2}", .{e_be[31 - bi]});
-                            std.debug.print("]{s}\n", .{ if (wp_mle.eql(claims_ordered[gamma_idx])) " ✓" else " ✗" });
+                            dbg("[STAGE8-DBG] RamRa({d}): wp_idx={d} gamma_idx={d} MLE_LE=[", .{ i, wp_idx, gamma_idx });
+                            for (0..8) |bi| dbg("{x:0>2}", .{c_be[31 - bi]});
+                            dbg("] claim_LE=[", .{});
+                            for (0..8) |bi| dbg("{x:0>2}", .{e_be[31 - bi]});
+                            dbg("]{s}\n", .{ if (wp_mle.eql(claims_ordered[gamma_idx])) " ✓" else " ✗" });
                         }
 
                         const sim_be = sum_individual_mle.toBytesBE();
-                        std.debug.print("[STAGE8-DBG] Σ γ^k*MLE(wp_k, dp)_LE=[", .{});
-                        for (0..8) |bi| std.debug.print("{x:0>2}", .{sim_be[31 - bi]});
-                        std.debug.print("]\n", .{});
-                        std.debug.print("[STAGE8-DBG] sum_individual matches joint_poly_mle? {}\n", .{sum_individual_mle.eql(mle_eval)});
-                        std.debug.print("[STAGE8-DBG] sum_individual matches expected_joint_claim? {}\n", .{sum_individual_mle.eql(expected_joint_claim)});
+                        dbg("[STAGE8-DBG] Σ γ^k*MLE(wp_k, dp)_LE=[", .{});
+                        for (0..8) |bi| dbg("{x:0>2}", .{sim_be[31 - bi]});
+                        dbg("]\n", .{});
+                        dbg("[STAGE8-DBG] sum_individual matches joint_poly_mle? {}\n", .{sum_individual_mle.eql(mle_eval)});
+                        dbg("[STAGE8-DBG] sum_individual matches expected_joint_claim? {}\n", .{sum_individual_mle.eql(expected_joint_claim)});
                     }
                 }
 
@@ -1717,7 +1724,7 @@ pub fn JoltProver(comptime F: type) type {
                 result.dory_opening_proof = dory_proof;
                 result.opening_point = opening_point;
 
-                std.debug.print("[STAGE8] Dory proof: nu={}, sigma={}, first_messages={}, second_messages={}\n", .{
+                dbg("[STAGE8] Dory proof: nu={}, sigma={}, first_messages={}, second_messages={}\n", .{
                     dory_proof.nu, dory_proof.sigma,
                     dory_proof.first_messages.len, dory_proof.second_messages.len,
                 });
@@ -2040,7 +2047,7 @@ pub fn JoltProver(comptime F: type) type {
             // DEPRECATED: This function only creates 5 commitments (old format)
             // Use serializeJoltProofWithDory instead which creates all ~37 commitments
             // Write Dory commitments (GT elements, 384 bytes each)
-            std.debug.print("[SERIALIZE] DEPRECATED: serializeJoltProofDory only writes 5 commitments (old format)\n", .{});
+            dbg("[SERIALIZE] DEPRECATED: serializeJoltProofDory only writes 5 commitments (old format)\n", .{});
             try serializer.writeUsize(5); // 5 commitments (WRONG - should be ~37)
             try serializer.writeGT(bytecode_comm);
             try serializer.writeGT(memory_comm);
@@ -2051,43 +2058,43 @@ pub fn JoltProver(comptime F: type) type {
             // Write stage 1
             // UniSkipFirstRoundProof is required in Jolt (not optional)
             // Write stage 1
-            std.debug.print("[SERIALIZE] Writing Stage 1...\n", .{});
+            dbg("[SERIALIZE] Writing Stage 1...\n", .{});
             if (jolt_proof_ptr.stage1_uni_skip_first_round_proof) |*p| {
-                std.debug.print("[SERIALIZE]   Stage 1 UniSkipFirstRound: {} coeffs\n", .{p.uni_poly.len});
+                dbg("[SERIALIZE]   Stage 1 UniSkipFirstRound: {} coeffs\n", .{p.uni_poly.len});
                 try serializer.writeUniSkipFirstRoundProof(p);
             } else {
-                std.debug.print("[SERIALIZE]   Stage 1 UniSkipFirstRound: NONE (writing 0)\n", .{});
+                dbg("[SERIALIZE]   Stage 1 UniSkipFirstRound: NONE (writing 0)\n", .{});
                 try serializer.writeUsize(0);
             }
-            std.debug.print("[SERIALIZE]   Stage 1 Sumcheck: {} rounds\n", .{jolt_proof_ptr.stage1_sumcheck_proof.compressed_polys.items.len});
+            dbg("[SERIALIZE]   Stage 1 Sumcheck: {} rounds\n", .{jolt_proof_ptr.stage1_sumcheck_proof.compressed_polys.items.len});
             try serializer.writeSumcheckInstanceProof(&jolt_proof_ptr.stage1_sumcheck_proof);
 
             // Write stage 2
-            std.debug.print("[SERIALIZE] Writing Stage 2...\n", .{});
+            dbg("[SERIALIZE] Writing Stage 2...\n", .{});
             if (jolt_proof_ptr.stage2_uni_skip_first_round_proof) |*p| {
-                std.debug.print("[SERIALIZE]   Stage 2 UniSkipFirstRound: {} coeffs\n", .{p.uni_poly.len});
+                dbg("[SERIALIZE]   Stage 2 UniSkipFirstRound: {} coeffs\n", .{p.uni_poly.len});
                 try serializer.writeUniSkipFirstRoundProof(p);
             } else {
-                std.debug.print("[SERIALIZE]   Stage 2 UniSkipFirstRound: NONE (writing 0)\n", .{});
+                dbg("[SERIALIZE]   Stage 2 UniSkipFirstRound: NONE (writing 0)\n", .{});
                 try serializer.writeUsize(0);
             }
-            std.debug.print("[SERIALIZE]   Stage 2 Sumcheck: {} rounds\n", .{jolt_proof_ptr.stage2_sumcheck_proof.compressed_polys.items.len});
+            dbg("[SERIALIZE]   Stage 2 Sumcheck: {} rounds\n", .{jolt_proof_ptr.stage2_sumcheck_proof.compressed_polys.items.len});
             try serializer.writeSumcheckInstanceProof(&jolt_proof_ptr.stage2_sumcheck_proof);
 
             // Write stages 3-7
-            std.debug.print("[SERIALIZE] Writing Stage 3: {} rounds\n", .{jolt_proof_ptr.stage3_sumcheck_proof.compressed_polys.items.len});
+            dbg("[SERIALIZE] Writing Stage 3: {} rounds\n", .{jolt_proof_ptr.stage3_sumcheck_proof.compressed_polys.items.len});
             try serializer.writeSumcheckInstanceProof(&jolt_proof_ptr.stage3_sumcheck_proof);
 
-            std.debug.print("[SERIALIZE] Writing Stage 4: {} rounds\n", .{jolt_proof_ptr.stage4_sumcheck_proof.compressed_polys.items.len});
+            dbg("[SERIALIZE] Writing Stage 4: {} rounds\n", .{jolt_proof_ptr.stage4_sumcheck_proof.compressed_polys.items.len});
             try serializer.writeSumcheckInstanceProof(&jolt_proof_ptr.stage4_sumcheck_proof);
 
-            std.debug.print("[SERIALIZE] Writing Stage 5: {} rounds\n", .{jolt_proof_ptr.stage5_sumcheck_proof.compressed_polys.items.len});
+            dbg("[SERIALIZE] Writing Stage 5: {} rounds\n", .{jolt_proof_ptr.stage5_sumcheck_proof.compressed_polys.items.len});
             try serializer.writeSumcheckInstanceProof(&jolt_proof_ptr.stage5_sumcheck_proof);
 
-            std.debug.print("[SERIALIZE] Writing Stage 6: {} rounds\n", .{jolt_proof_ptr.stage6_sumcheck_proof.compressed_polys.items.len});
+            dbg("[SERIALIZE] Writing Stage 6: {} rounds\n", .{jolt_proof_ptr.stage6_sumcheck_proof.compressed_polys.items.len});
             try serializer.writeSumcheckInstanceProof(&jolt_proof_ptr.stage6_sumcheck_proof);
 
-            std.debug.print("[SERIALIZE] Writing Stage 7: {} rounds\n", .{jolt_proof_ptr.stage7_sumcheck_proof.compressed_polys.items.len});
+            dbg("[SERIALIZE] Writing Stage 7: {} rounds\n", .{jolt_proof_ptr.stage7_sumcheck_proof.compressed_polys.items.len});
             try serializer.writeSumcheckInstanceProof(&jolt_proof_ptr.stage7_sumcheck_proof);
 
             // Write joint opening proof
@@ -2145,60 +2152,60 @@ pub fn JoltProver(comptime F: type) type {
 
             // Write the pre-computed Dory commitments (GT elements, 384 bytes each)
             // Order: RdInc, RamInc, InstructionRa[0..instruction_d-1], RamRa[0..ram_d-1], BytecodeRa[0..bytecode_d-1]
-            std.debug.print("[SERIALIZE] Writing {} Dory commitments\n", .{bundle.dory_commitments.len});
+            dbg("[SERIALIZE] Writing {} Dory commitments\n", .{bundle.dory_commitments.len});
             try serializer.writeUsize(bundle.dory_commitments.len);
             for (bundle.dory_commitments) |comm| {
                 try serializer.writeGT(comm);
             }
 
             // Write stage 1 (UniSkip + sumcheck)
-            std.debug.print("[SERIALIZE] Writing Stage 1...\n", .{});
+            dbg("[SERIALIZE] Writing Stage 1...\n", .{});
             if (bundle.proof.stage1_uni_skip_first_round_proof) |*p| {
-                std.debug.print("[SERIALIZE]   Stage 1 UniSkipFirstRound: {} coeffs\n", .{p.uni_poly.len});
+                dbg("[SERIALIZE]   Stage 1 UniSkipFirstRound: {} coeffs\n", .{p.uni_poly.len});
                 try serializer.writeUniSkipFirstRoundProof(p);
             } else {
-                std.debug.print("[SERIALIZE]   Stage 1 UniSkipFirstRound: NONE (writing 0)\n", .{});
+                dbg("[SERIALIZE]   Stage 1 UniSkipFirstRound: NONE (writing 0)\n", .{});
                 try serializer.writeUsize(0);
             }
-            std.debug.print("[SERIALIZE]   Stage 1 Sumcheck: {} rounds\n", .{bundle.proof.stage1_sumcheck_proof.compressed_polys.items.len});
+            dbg("[SERIALIZE]   Stage 1 Sumcheck: {} rounds\n", .{bundle.proof.stage1_sumcheck_proof.compressed_polys.items.len});
             try serializer.writeSumcheckInstanceProof(&bundle.proof.stage1_sumcheck_proof);
 
             // Write stage 2 (UniSkip + sumcheck)
-            std.debug.print("[SERIALIZE] Writing Stage 2...\n", .{});
+            dbg("[SERIALIZE] Writing Stage 2...\n", .{});
             if (bundle.proof.stage2_uni_skip_first_round_proof) |*p| {
-                std.debug.print("[SERIALIZE]   Stage 2 UniSkipFirstRound: {} coeffs\n", .{p.uni_poly.len});
+                dbg("[SERIALIZE]   Stage 2 UniSkipFirstRound: {} coeffs\n", .{p.uni_poly.len});
                 try serializer.writeUniSkipFirstRoundProof(p);
             } else {
-                std.debug.print("[SERIALIZE]   Stage 2 UniSkipFirstRound: NONE (writing 0)\n", .{});
+                dbg("[SERIALIZE]   Stage 2 UniSkipFirstRound: NONE (writing 0)\n", .{});
                 try serializer.writeUsize(0);
             }
-            std.debug.print("[SERIALIZE]   Stage 2 Sumcheck: {} rounds\n", .{bundle.proof.stage2_sumcheck_proof.compressed_polys.items.len});
+            dbg("[SERIALIZE]   Stage 2 Sumcheck: {} rounds\n", .{bundle.proof.stage2_sumcheck_proof.compressed_polys.items.len});
             try serializer.writeSumcheckInstanceProof(&bundle.proof.stage2_sumcheck_proof);
 
             // Write stages 3-7 (sumcheck only)
-            std.debug.print("[SERIALIZE] Writing Stage 3: {} rounds\n", .{bundle.proof.stage3_sumcheck_proof.compressed_polys.items.len});
+            dbg("[SERIALIZE] Writing Stage 3: {} rounds\n", .{bundle.proof.stage3_sumcheck_proof.compressed_polys.items.len});
             try serializer.writeSumcheckInstanceProof(&bundle.proof.stage3_sumcheck_proof);
 
-            std.debug.print("[SERIALIZE] Writing Stage 4: {} rounds\n", .{bundle.proof.stage4_sumcheck_proof.compressed_polys.items.len});
+            dbg("[SERIALIZE] Writing Stage 4: {} rounds\n", .{bundle.proof.stage4_sumcheck_proof.compressed_polys.items.len});
             try serializer.writeSumcheckInstanceProof(&bundle.proof.stage4_sumcheck_proof);
 
-            std.debug.print("[SERIALIZE] Writing Stage 5: {} rounds\n", .{bundle.proof.stage5_sumcheck_proof.compressed_polys.items.len});
+            dbg("[SERIALIZE] Writing Stage 5: {} rounds\n", .{bundle.proof.stage5_sumcheck_proof.compressed_polys.items.len});
             try serializer.writeSumcheckInstanceProof(&bundle.proof.stage5_sumcheck_proof);
 
-            std.debug.print("[SERIALIZE] Writing Stage 6: {} rounds\n", .{bundle.proof.stage6_sumcheck_proof.compressed_polys.items.len});
+            dbg("[SERIALIZE] Writing Stage 6: {} rounds\n", .{bundle.proof.stage6_sumcheck_proof.compressed_polys.items.len});
             try serializer.writeSumcheckInstanceProof(&bundle.proof.stage6_sumcheck_proof);
 
-            std.debug.print("[SERIALIZE] Writing Stage 7: {} rounds\n", .{bundle.proof.stage7_sumcheck_proof.compressed_polys.items.len});
+            dbg("[SERIALIZE] Writing Stage 7: {} rounds\n", .{bundle.proof.stage7_sumcheck_proof.compressed_polys.items.len});
             try serializer.writeSumcheckInstanceProof(&bundle.proof.stage7_sumcheck_proof);
 
             // Write joint opening proof (REQUIRED - not optional in Jolt)
             // Use the pre-computed Dory opening proof from Stage 8
             if (bundle.dory_opening_proof) |*dory_proof| {
-                std.debug.print("[SERIALIZE] Writing pre-computed Dory opening proof\n", .{});
+                dbg("[SERIALIZE] Writing pre-computed Dory opening proof\n", .{});
                 try serializer.writeDoryProof(dory_proof);
             } else {
                 // Fallback: generate a dummy proof (should not happen in correct flow)
-                std.debug.print("[SERIALIZE] WARNING: No pre-computed Dory proof, generating dummy\n", .{});
+                dbg("[SERIALIZE] WARNING: No pre-computed Dory proof, generating dummy\n", .{});
                 const dummy_poly = try self.allocator.alloc(F, 2);
                 defer self.allocator.free(dummy_poly);
                 dummy_poly[0] = F.zero();
@@ -2229,12 +2236,12 @@ pub fn JoltProver(comptime F: type) type {
             //   rw_config: ReadWriteConfig (4 x u8 = 4 bytes)
             //   one_hot_config: OneHotConfig (2 x u8 = 2 bytes)
             //   dory_layout: DoryLayout (1 x u8 = 1 byte)
-            std.debug.print("[SERIALIZE CONFIG] trace_length={}, ram_K={}, bytecode_K={}\n", .{
+            dbg("[SERIALIZE CONFIG] trace_length={}, ram_K={}, bytecode_K={}\n", .{
                 bundle.proof.trace_length,
                 bundle.proof.ram_K,
                 bundle.proof.bytecode_K,
             });
-            std.debug.print("[SERIALIZE CONFIG] rw_config=({},{},{},{}), one_hot=({},{}), dory_layout={}\n", .{
+            dbg("[SERIALIZE CONFIG] rw_config=({},{},{},{}), one_hot=({},{}), dory_layout={}\n", .{
                 bundle.proof.rw_config.ram_rw_phase1_num_rounds,
                 bundle.proof.rw_config.ram_rw_phase2_num_rounds,
                 bundle.proof.rw_config.registers_rw_phase1_num_rounds,

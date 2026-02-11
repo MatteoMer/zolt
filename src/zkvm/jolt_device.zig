@@ -7,6 +7,13 @@
 //! Reference: jolt/common/src/jolt_device.rs
 
 const std = @import("std");
+
+// Debug output control - set to true to enable verbose debug prints
+const debug_verbose = false;
+fn dbg(comptime fmt: []const u8, args: anytype) void {
+    if (debug_verbose) std.debug.print(fmt, args);
+}
+
 const Allocator = std.mem.Allocator;
 
 /// Memory layout configuration matching Jolt's MemoryLayout
@@ -314,48 +321,48 @@ pub fn fiatShamirPreamble(
 ) void {
     const Blake2bTranscript = @import("../transcripts/blake2b.zig").Blake2bTranscript;
 
-    std.debug.print("\n[ZOLT PREAMBLE] === Fiat-Shamir Preamble Start ===\n", .{});
+    dbg("\n[ZOLT PREAMBLE] === Fiat-Shamir Preamble Start ===\n", .{});
 
     // Append memory layout values
-    std.debug.print("[ZOLT PREAMBLE] appendU64: max_input_size={d}\n", .{device.memory_layout.max_input_size});
+    dbg("[ZOLT PREAMBLE] appendU64: max_input_size={d}\n", .{device.memory_layout.max_input_size});
     transcript.appendU64(device.memory_layout.max_input_size);
 
-    std.debug.print("[ZOLT PREAMBLE] appendU64: max_output_size={d}\n", .{device.memory_layout.max_output_size});
+    dbg("[ZOLT PREAMBLE] appendU64: max_output_size={d}\n", .{device.memory_layout.max_output_size});
     transcript.appendU64(device.memory_layout.max_output_size);
 
-    std.debug.print("[ZOLT PREAMBLE] appendU64: memory_size={d}\n", .{device.memory_layout.memory_size});
+    dbg("[ZOLT PREAMBLE] appendU64: memory_size={d}\n", .{device.memory_layout.memory_size});
     transcript.appendU64(device.memory_layout.memory_size);
 
     // Append program inputs
-    std.debug.print("[ZOLT PREAMBLE] appendBytes: inputs.len={d}\n", .{device.inputs.len});
+    dbg("[ZOLT PREAMBLE] appendBytes: inputs.len={d}\n", .{device.inputs.len});
     if (device.inputs.len > 0 and device.inputs.len <= 32) {
-        std.debug.print("[ZOLT PREAMBLE]   inputs={{ ", .{});
-        for (device.inputs) |b| std.debug.print("{x:0>2} ", .{b});
-        std.debug.print("}}\n", .{});
+        dbg("[ZOLT PREAMBLE]   inputs={{ ", .{});
+        for (device.inputs) |b| dbg("{x:0>2} ", .{b});
+        dbg("}}\n", .{});
     }
     transcript.appendBytes(device.inputs);
 
     // Append program outputs
-    std.debug.print("[ZOLT PREAMBLE] appendBytes: outputs.len={d}\n", .{device.outputs.len});
+    dbg("[ZOLT PREAMBLE] appendBytes: outputs.len={d}\n", .{device.outputs.len});
     if (device.outputs.len > 0 and device.outputs.len <= 32) {
-        std.debug.print("[ZOLT PREAMBLE]   outputs={{ ", .{});
-        for (device.outputs) |b| std.debug.print("{x:0>2} ", .{b});
-        std.debug.print("}}\n", .{});
+        dbg("[ZOLT PREAMBLE]   outputs={{ ", .{});
+        for (device.outputs) |b| dbg("{x:0>2} ", .{b});
+        dbg("}}\n", .{});
     }
     transcript.appendBytes(device.outputs);
 
     // Append panic flag
-    std.debug.print("[ZOLT PREAMBLE] appendU64: panic={d}\n", .{if (device.panic) @as(u64, 1) else @as(u64, 0)});
+    dbg("[ZOLT PREAMBLE] appendU64: panic={d}\n", .{if (device.panic) @as(u64, 1) else @as(u64, 0)});
     transcript.appendU64(if (device.panic) 1 else 0);
 
     // Append RAM and trace parameters
-    std.debug.print("[ZOLT PREAMBLE] appendU64: ram_K={d}\n", .{ram_K});
+    dbg("[ZOLT PREAMBLE] appendU64: ram_K={d}\n", .{ram_K});
     transcript.appendU64(@intCast(ram_K));
 
-    std.debug.print("[ZOLT PREAMBLE] appendU64: trace_length={d}\n", .{trace_length});
+    dbg("[ZOLT PREAMBLE] appendU64: trace_length={d}\n", .{trace_length});
     transcript.appendU64(@intCast(trace_length));
 
-    std.debug.print("[ZOLT PREAMBLE] === Fiat-Shamir Preamble End ===\n\n", .{});
+    dbg("[ZOLT PREAMBLE] === Fiat-Shamir Preamble End ===\n\n", .{});
 
     _ = F;
     _ = Blake2bTranscript;

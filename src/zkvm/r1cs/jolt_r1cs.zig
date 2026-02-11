@@ -17,6 +17,13 @@
 //! Reference: jolt-core/src/zkvm/r1cs/mod.rs
 
 const std = @import("std");
+
+// Debug output control - set to true to enable verbose debug prints
+const debug_verbose = false;
+fn dbg(comptime fmt: []const u8, args: anytype) void {
+    if (debug_verbose) std.debug.print(fmt, args);
+}
+
 const Allocator = std.mem.Allocator;
 
 const tracer = @import("../../tracer/mod.zig");
@@ -315,17 +322,17 @@ pub fn JoltSpartanInterface(comptime F: type) type {
             witness: []const F,
             tau: []const F,
         ) !Self {
-            std.debug.print("\n[JOLT SPARTAN] =====================================\n", .{});
-            std.debug.print("[JOLT SPARTAN] JoltSpartanInterface.init\n", .{});
-            std.debug.print("[JOLT SPARTAN] num_cycles = {d}\n", .{r1cs.num_cycles});
-            std.debug.print("[JOLT SPARTAN] padded_num_constraints = {d}\n", .{r1cs.padded_num_constraints});
-            std.debug.print("[JOLT SPARTAN] log_num_constraints = {d}\n", .{r1cs.log_num_constraints});
-            std.debug.print("[JOLT SPARTAN] witness.len = {d}\n", .{witness.len});
-            std.debug.print("[JOLT SPARTAN] tau.len = {d}\n", .{tau.len});
+            dbg("\n[JOLT SPARTAN] =====================================\n", .{});
+            dbg("[JOLT SPARTAN] JoltSpartanInterface.init\n", .{});
+            dbg("[JOLT SPARTAN] num_cycles = {d}\n", .{r1cs.num_cycles});
+            dbg("[JOLT SPARTAN] padded_num_constraints = {d}\n", .{r1cs.padded_num_constraints});
+            dbg("[JOLT SPARTAN] log_num_constraints = {d}\n", .{r1cs.log_num_constraints});
+            dbg("[JOLT SPARTAN] witness.len = {d}\n", .{witness.len});
+            dbg("[JOLT SPARTAN] tau.len = {d}\n", .{tau.len});
 
             // Print tau values
             for (tau, 0..) |t, i| {
-                std.debug.print("[JOLT SPARTAN] tau[{d}] = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ i, t.limbs[3], t.limbs[2], t.limbs[1], t.limbs[0] });
+                dbg("[JOLT SPARTAN] tau[{d}] = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ i, t.limbs[3], t.limbs[2], t.limbs[1], t.limbs[0] });
             }
 
             // Compute Az, Bz, Cz
@@ -336,13 +343,13 @@ pub fn JoltSpartanInterface(comptime F: type) type {
             const Cz = try r1cs.computeCz(witness);
             errdefer allocator.free(Cz);
 
-            std.debug.print("[JOLT SPARTAN] Az.len = {d}, Bz.len = {d}, Cz.len = {d}\n", .{ Az.len, Bz.len, Cz.len });
+            dbg("[JOLT SPARTAN] Az.len = {d}, Bz.len = {d}, Cz.len = {d}\n", .{ Az.len, Bz.len, Cz.len });
 
             // Print first few Az, Bz values
             const num_to_print = @min(8, Az.len);
             for (0..num_to_print) |i| {
-                std.debug.print("[JOLT SPARTAN] Az[{d}] = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ i, Az[i].limbs[3], Az[i].limbs[2], Az[i].limbs[1], Az[i].limbs[0] });
-                std.debug.print("[JOLT SPARTAN] Bz[{d}] = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ i, Bz[i].limbs[3], Bz[i].limbs[2], Bz[i].limbs[1], Bz[i].limbs[0] });
+                dbg("[JOLT SPARTAN] Az[{d}] = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ i, Az[i].limbs[3], Az[i].limbs[2], Az[i].limbs[1], Az[i].limbs[0] });
+                dbg("[JOLT SPARTAN] Bz[{d}] = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ i, Bz[i].limbs[3], Bz[i].limbs[2], Bz[i].limbs[1], Bz[i].limbs[0] });
             }
 
             // Compute eq(tau, x) for all x
@@ -351,7 +358,7 @@ pub fn JoltSpartanInterface(comptime F: type) type {
             const eq_evals = try eq_poly.evals(allocator);
             errdefer allocator.free(eq_evals);
 
-            std.debug.print("[JOLT SPARTAN] eq_evals.len = {d}\n", .{eq_evals.len});
+            dbg("[JOLT SPARTAN] eq_evals.len = {d}\n", .{eq_evals.len});
 
             // Compute combined polynomial
             const size = r1cs.padded_num_constraints;
@@ -369,11 +376,11 @@ pub fn JoltSpartanInterface(comptime F: type) type {
             // Print first few combined values
             for (0..num_to_print) |i| {
                 if (i < combined.len) {
-                    std.debug.print("[JOLT SPARTAN] combined[{d}] = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ i, combined[i].limbs[3], combined[i].limbs[2], combined[i].limbs[1], combined[i].limbs[0] });
+                    dbg("[JOLT SPARTAN] combined[{d}] = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ i, combined[i].limbs[3], combined[i].limbs[2], combined[i].limbs[1], combined[i].limbs[0] });
                 }
             }
 
-            std.debug.print("[JOLT SPARTAN] =====================================\n", .{});
+            dbg("[JOLT SPARTAN] =====================================\n", .{});
 
             return Self{
                 .r1cs = r1cs,
@@ -404,8 +411,8 @@ pub fn JoltSpartanInterface(comptime F: type) type {
             for (self.combined_poly[0..self.current_len]) |v| {
                 sum = sum.add(v);
             }
-            std.debug.print("\n[JOLT SPARTAN] initialClaim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ sum.limbs[3], sum.limbs[2], sum.limbs[1], sum.limbs[0] });
-            std.debug.print("[JOLT SPARTAN] current_len = {d}\n", .{self.current_len});
+            dbg("\n[JOLT SPARTAN] initialClaim = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ sum.limbs[3], sum.limbs[2], sum.limbs[1], sum.limbs[0] });
+            dbg("[JOLT SPARTAN] current_len = {d}\n", .{self.current_len});
             return sum;
         }
 
@@ -419,12 +426,12 @@ pub fn JoltSpartanInterface(comptime F: type) type {
         /// Returns [p(0), p(1), p(2)] for degree-2 sumcheck
         pub fn computeRoundPolynomial(self: *Self) ![3]F {
             const round = self.challenges.items.len;
-            std.debug.print("\n[JOLT SPARTAN] computeRoundPolynomial round={d}\n", .{round});
-            std.debug.print("[JOLT SPARTAN] current_len = {d}\n", .{self.current_len});
+            dbg("\n[JOLT SPARTAN] computeRoundPolynomial round={d}\n", .{round});
+            dbg("[JOLT SPARTAN] current_len = {d}\n", .{self.current_len});
 
             if (self.current_len <= 1) {
                 const p0 = if (self.current_len == 1) self.combined_poly[0] else F.zero();
-                std.debug.print("[JOLT SPARTAN] Single element case: p(0) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ p0.limbs[3], p0.limbs[2], p0.limbs[1], p0.limbs[0] });
+                dbg("[JOLT SPARTAN] Single element case: p(0) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ p0.limbs[3], p0.limbs[2], p0.limbs[1], p0.limbs[0] });
                 return [3]F{
                     p0,
                     F.zero(),
@@ -450,12 +457,12 @@ pub fn JoltSpartanInterface(comptime F: type) type {
             // The round polynomial is linear, so p(2) = 2*p(1) - p(0)
             const p2 = p1.add(p1).sub(p0);
 
-            std.debug.print("[JOLT SPARTAN] p(0) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ p0.limbs[3], p0.limbs[2], p0.limbs[1], p0.limbs[0] });
-            std.debug.print("[JOLT SPARTAN] p(1) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ p1.limbs[3], p1.limbs[2], p1.limbs[1], p1.limbs[0] });
-            std.debug.print("[JOLT SPARTAN] p(2) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ p2.limbs[3], p2.limbs[2], p2.limbs[1], p2.limbs[0] });
+            dbg("[JOLT SPARTAN] p(0) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ p0.limbs[3], p0.limbs[2], p0.limbs[1], p0.limbs[0] });
+            dbg("[JOLT SPARTAN] p(1) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ p1.limbs[3], p1.limbs[2], p1.limbs[1], p1.limbs[0] });
+            dbg("[JOLT SPARTAN] p(2) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ p2.limbs[3], p2.limbs[2], p2.limbs[1], p2.limbs[0] });
 
             const sum = p0.add(p1);
-            std.debug.print("[JOLT SPARTAN] p(0)+p(1) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ sum.limbs[3], sum.limbs[2], sum.limbs[1], sum.limbs[0] });
+            dbg("[JOLT SPARTAN] p(0)+p(1) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ sum.limbs[3], sum.limbs[2], sum.limbs[1], sum.limbs[0] });
 
             return [3]F{ p0, p1, p2 };
         }
@@ -463,14 +470,14 @@ pub fn JoltSpartanInterface(comptime F: type) type {
         /// Bind challenge for this round
         pub fn bindChallenge(self: *Self, challenge: F) !void {
             const round = self.challenges.items.len;
-            std.debug.print("\n[JOLT SPARTAN] bindChallenge round={d}\n", .{round});
-            std.debug.print("[JOLT SPARTAN] challenge = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ challenge.limbs[3], challenge.limbs[2], challenge.limbs[1], challenge.limbs[0] });
-            std.debug.print("[JOLT SPARTAN] current_len (before) = {d}\n", .{self.current_len});
+            dbg("\n[JOLT SPARTAN] bindChallenge round={d}\n", .{round});
+            dbg("[JOLT SPARTAN] challenge = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ challenge.limbs[3], challenge.limbs[2], challenge.limbs[1], challenge.limbs[0] });
+            dbg("[JOLT SPARTAN] current_len (before) = {d}\n", .{self.current_len});
 
             try self.challenges.append(self.allocator, challenge);
 
             if (self.current_len <= 1) {
-                std.debug.print("[JOLT SPARTAN] current_len <= 1, no folding\n", .{});
+                dbg("[JOLT SPARTAN] current_len <= 1, no folding\n", .{});
                 return;
             }
 
@@ -491,8 +498,8 @@ pub fn JoltSpartanInterface(comptime F: type) type {
             for (0..half) |i| {
                 new_sum = new_sum.add(self.combined_poly[i]);
             }
-            std.debug.print("[JOLT SPARTAN] current_len (after) = {d}\n", .{self.current_len});
-            std.debug.print("[JOLT SPARTAN] new_claim (sum of folded) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ new_sum.limbs[3], new_sum.limbs[2], new_sum.limbs[1], new_sum.limbs[0] });
+            dbg("[JOLT SPARTAN] current_len (after) = {d}\n", .{self.current_len});
+            dbg("[JOLT SPARTAN] new_claim (sum of folded) = {x:0>16}{x:0>16}{x:0>16}{x:0>16}\n", .{ new_sum.limbs[3], new_sum.limbs[2], new_sum.limbs[1], new_sum.limbs[0] });
         }
 
         /// Get the final evaluation after all rounds

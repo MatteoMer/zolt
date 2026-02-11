@@ -1,4 +1,11 @@
 const std = @import("std");
+
+// Debug output control - set to true to enable verbose debug prints
+const debug_verbose = false;
+fn dbg(comptime fmt: []const u8, args: anytype) void {
+    if (debug_verbose) std.debug.print(fmt, args);
+}
+
 const Allocator = std.mem.Allocator;
 const poly = @import("../../poly/mod.zig");
 
@@ -125,13 +132,13 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
 
             // Debug: Print binding details for first few rounds
             if (self.current_index <= 8 and self.current_index >= 5) {
-                std.debug.print("[GRUEN BIND] Round {}: binding w[{}] against r\n", .{8 - self.current_index, self.current_index - 1});
-                std.debug.print("[GRUEN BIND]   w_i.limbs = [{x}, {x}, {x}, {x}]\n", .{w_i.limbs[0], w_i.limbs[1], w_i.limbs[2], w_i.limbs[3]});
-                std.debug.print("[GRUEN BIND]   r.limbs = [{x}, {x}, {x}, {x}]\n", .{r.limbs[0], r.limbs[1], r.limbs[2], r.limbs[3]});
-                std.debug.print("[GRUEN BIND]   eq_val.limbs = [{x}, {x}, {x}, {x}]\n", .{eq_val.limbs[0], eq_val.limbs[1], eq_val.limbs[2], eq_val.limbs[3]});
-                std.debug.print("[GRUEN BIND]   prev scalar.limbs = [{x}, {x}, {x}, {x}]\n", .{self.current_scalar.limbs[0], self.current_scalar.limbs[1], self.current_scalar.limbs[2], self.current_scalar.limbs[3]});
+                dbg("[GRUEN BIND] Round {}: binding w[{}] against r\n", .{8 - self.current_index, self.current_index - 1});
+                dbg("[GRUEN BIND]   w_i.limbs = [{x}, {x}, {x}, {x}]\n", .{w_i.limbs[0], w_i.limbs[1], w_i.limbs[2], w_i.limbs[3]});
+                dbg("[GRUEN BIND]   r.limbs = [{x}, {x}, {x}, {x}]\n", .{r.limbs[0], r.limbs[1], r.limbs[2], r.limbs[3]});
+                dbg("[GRUEN BIND]   eq_val.limbs = [{x}, {x}, {x}, {x}]\n", .{eq_val.limbs[0], eq_val.limbs[1], eq_val.limbs[2], eq_val.limbs[3]});
+                dbg("[GRUEN BIND]   prev scalar.limbs = [{x}, {x}, {x}, {x}]\n", .{self.current_scalar.limbs[0], self.current_scalar.limbs[1], self.current_scalar.limbs[2], self.current_scalar.limbs[3]});
                 const new_scalar = self.current_scalar.mul(eq_val);
-                std.debug.print("[GRUEN BIND]   new scalar.limbs = [{x}, {x}, {x}, {x}]\n", .{new_scalar.limbs[0], new_scalar.limbs[1], new_scalar.limbs[2], new_scalar.limbs[3]});
+                dbg("[GRUEN BIND]   new scalar.limbs = [{x}, {x}, {x}, {x}]\n", .{new_scalar.limbs[0], new_scalar.limbs[1], new_scalar.limbs[2], new_scalar.limbs[3]});
             }
 
             self.current_scalar = self.current_scalar.mul(eq_val);
@@ -188,15 +195,15 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
             const merged = try EqPoly.evalsSliceWithScaling(F, allocator, self.w[0..remaining_vars], self.current_scalar);
 
             // Debug output
-            std.debug.print("[GRUEN MERGE] remaining_vars={}, merged_len={}, using EqPolynomial.evalsSliceWithScaling\n", .{
+            dbg("[GRUEN MERGE] remaining_vars={}, merged_len={}, using EqPolynomial.evalsSliceWithScaling\n", .{
                 remaining_vars,
                 merged.len,
             });
             if (merged.len > 0) {
-                std.debug.print("[GRUEN MERGE]   merged[0] = {any}\n", .{merged[0].toBytes()[0..8]});
+                dbg("[GRUEN MERGE]   merged[0] = {any}\n", .{merged[0].toBytes()[0..8]});
             }
             if (merged.len > 1) {
-                std.debug.print("[GRUEN MERGE]   merged[1] = {any}\n", .{merged[1].toBytes()[0..8]});
+                dbg("[GRUEN MERGE]   merged[1] = {any}\n", .{merged[1].toBytes()[0..8]});
             }
 
             return merged;
@@ -224,10 +231,10 @@ pub fn GruenSplitEqPolynomial(comptime F: type) type {
             // Debug Round 0 only
             const is_round_0 = self.current_index == self.w.len;
             if (is_round_0) {
-                std.debug.print("[ZOLT gruenPolyDeg3] eq_eval_0={any}\n", .{eq_eval_0.toBytes()[0..8]});
-                std.debug.print("[ZOLT gruenPolyDeg3] eq_eval_1={any}\n", .{eq_eval_1.toBytes()[0..8]});
-                std.debug.print("[ZOLT gruenPolyDeg3] q_constant={any}\n", .{q_constant.toBytes()[0..8]});
-                std.debug.print("[ZOLT gruenPolyDeg3] q_quadratic_coeff={any}\n", .{q_quadratic_coeff.toBytes()[0..8]});
+                dbg("[ZOLT gruenPolyDeg3] eq_eval_0={any}\n", .{eq_eval_0.toBytes()[0..8]});
+                dbg("[ZOLT gruenPolyDeg3] eq_eval_1={any}\n", .{eq_eval_1.toBytes()[0..8]});
+                dbg("[ZOLT gruenPolyDeg3] q_constant={any}\n", .{q_constant.toBytes()[0..8]});
+                dbg("[ZOLT gruenPolyDeg3] q_quadratic_coeff={any}\n", .{q_quadratic_coeff.toBytes()[0..8]});
             }
 
             // Quadratic polynomial q(X) = c + d*X + e*X^2

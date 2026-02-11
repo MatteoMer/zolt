@@ -6,6 +6,13 @@
 //! Reference: jolt-core/src/zkvm/proof_serialization.rs
 
 const std = @import("std");
+
+// Debug output control - set to true to enable verbose debug prints
+const debug_verbose = false;
+fn dbg(comptime fmt: []const u8, args: anytype) void {
+    if (debug_verbose) std.debug.print(fmt, args);
+}
+
 const Allocator = std.mem.Allocator;
 const common = @import("../common/mod.zig");
 
@@ -655,20 +662,20 @@ pub fn OpeningClaims(comptime F: type) type {
             // Write number of entries
             try writer.writeInt(u64, self.entries.items.len, .little);
             // Write each (key, claim) pair
-            std.debug.print("[SERIALIZE ORDER] Total entries = {}\n", .{self.entries.items.len});
+            dbg("[SERIALIZE ORDER] Total entries = {}\n", .{self.entries.items.len});
             for (self.entries.items, 0..) |entry, idx| {
                 // Debug: print all entries with their keys
                 switch (entry.id) {
                     .Virtual => |v| {
                         switch (v.poly) {
                             .LookupTableFlag => |flag_idx| {
-                                std.debug.print("[SERIALIZE ORDER] Entry {} = Virtual(LookupTableFlag({}), {})\n", .{idx, flag_idx, v.sumcheck_id});
+                                dbg("[SERIALIZE ORDER] Entry {} = Virtual(LookupTableFlag({}), {})\n", .{idx, flag_idx, v.sumcheck_id});
                             },
                             .InstructionFlags => |flags| {
-                                std.debug.print("[SERIALIZE ORDER] Entry {} = Virtual(InstructionFlags({}), {})\n", .{idx, flags, v.sumcheck_id});
+                                dbg("[SERIALIZE ORDER] Entry {} = Virtual(InstructionFlags({}), {})\n", .{idx, flags, v.sumcheck_id});
                             },
                             else => if (idx >= 90 and idx <= 150) {
-                                std.debug.print("[SERIALIZE ORDER] Entry {} = Virtual({any}, {})\n", .{idx, v.poly, v.sumcheck_id});
+                                dbg("[SERIALIZE ORDER] Entry {} = Virtual({any}, {})\n", .{idx, v.poly, v.sumcheck_id});
                             },
                         }
                     },
@@ -689,7 +696,7 @@ pub fn OpeningClaims(comptime F: type) type {
                     .Committed => |c| {
                         switch (c.poly) {
                             .RamInc => {
-                                std.debug.print("[SERIALIZE DEBUG] Claim {}: RamInc/{} = {any}\n", .{ idx, c.sumcheck_id, buf });
+                                dbg("[SERIALIZE DEBUG] Claim {}: RamInc/{} = {any}\n", .{ idx, c.sumcheck_id, buf });
                             },
                             else => {},
                         }

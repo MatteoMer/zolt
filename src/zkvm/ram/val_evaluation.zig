@@ -17,6 +17,13 @@
 //! Reference: jolt-core/src/zkvm/ram/val_evaluation.rs
 
 const std = @import("std");
+
+// Debug output control - set to true to enable verbose debug prints
+const debug_verbose = false;
+fn dbg(comptime fmt: []const u8, args: anytype) void {
+    if (debug_verbose) std.debug.print(fmt, args);
+}
+
 const Allocator = std.mem.Allocator;
 
 const mod = @import("mod.zig");
@@ -149,11 +156,11 @@ pub fn IncPolynomial(comptime F: type) type {
                 }
             }
 
-            std.debug.print("[IncPolynomial] Processing {} accesses, trace_len={}, start_address=0x{X:0>16}, k={}\n", .{ trace.accesses.items.len, trace_len, start_address, k });
+            dbg("[IncPolynomial] Processing {} accesses, trace_len={}, start_address=0x{X:0>16}, k={}\n", .{ trace.accesses.items.len, trace_len, start_address, k });
             for (trace.accesses.items) |access| {
                 if (access.op != .Write) continue;
                 if (access.address < start_address) {
-                    std.debug.print("[IncPolynomial] Skipping write at 0x{X:0>16}: address < start_address\n", .{access.address});
+                    dbg("[IncPolynomial] Skipping write at 0x{X:0>16}: address < start_address\n", .{access.address});
                     continue;
                 }
 
@@ -168,13 +175,13 @@ pub fn IncPolynomial(comptime F: type) type {
 
                 const idx = (access.address - start_address) / 8;
                 if (idx >= k) {
-                    std.debug.print("[IncPolynomial] Skipping write at 0x{X:0>16}: idx {} >= k {}\n", .{ access.address, idx, k });
+                    dbg("[IncPolynomial] Skipping write at 0x{X:0>16}: idx {} >= k {}\n", .{ access.address, idx, k });
                     continue;
                 }
 
                 const timestamp = @as(usize, @intCast(access.timestamp));
                 if (timestamp >= trace_len) {
-                    std.debug.print("[IncPolynomial] Skipping write at 0x{X:0>16}: timestamp {} >= trace_len {}\n", .{ access.address, timestamp, trace_len });
+                    dbg("[IncPolynomial] Skipping write at 0x{X:0>16}: timestamp {} >= trace_len {}\n", .{ access.address, timestamp, trace_len });
                     continue;
                 }
 
@@ -189,7 +196,7 @@ pub fn IncPolynomial(comptime F: type) type {
                     evals[timestamp] = F.zero().sub(F.fromU64(old_val - new_val));
                 }
 
-                std.debug.print("[IncPolynomial] Write at idx={}, timestamp={}, old_val={}, new_val={}, inc={}\n", .{ idx, timestamp, old_val, new_val, if (new_val >= old_val) new_val - old_val else 0 });
+                dbg("[IncPolynomial] Write at idx={}, timestamp={}, old_val={}, new_val={}, inc={}\n", .{ idx, timestamp, old_val, new_val, if (new_val >= old_val) new_val - old_val else 0 });
 
                 try last_value.put(access.address, new_val);
             }
@@ -403,7 +410,7 @@ pub fn LtPolynomial(comptime F: type) type {
         /// Uses the old formula for comparison - not used in production
         pub fn evaluateAtIndexDebug(self: *const Self, j: usize) F {
             const result = self.evaluateAtIndex(j);
-            std.debug.print("[LT DEBUG] evaluateAtIndex(j={}) num_vars={} result={any}\n", .{
+            dbg("[LT DEBUG] evaluateAtIndex(j={}) num_vars={} result={any}\n", .{
                 j,
                 self.num_vars,
                 result.toBytes()[0..8],
@@ -516,31 +523,31 @@ pub fn ValEvaluationProver(comptime F: type) type {
 
             // Debug: print r_address used by this prover (first and last 4)
             // Note: r_address uses LE for eq polynomial (symmetric, order doesn't matter)
-            std.debug.print("[VALEVAL_INIT] r_address from params, len={}:\n", .{params.r_address.len});
+            dbg("[VALEVAL_INIT] r_address from params, len={}:\n", .{params.r_address.len});
             for (0..@min(4, params.r_address.len)) |i| {
-                std.debug.print("  r_address[{}] = {any}\n", .{ i, params.r_address[i].toBytes()[0..8] });
+                dbg("  r_address[{}] = {any}\n", .{ i, params.r_address[i].toBytes()[0..8] });
             }
             // Also print last 4 to verify full array
             if (params.r_address.len > 4) {
                 for ((params.r_address.len - 4)..params.r_address.len) |i| {
-                    std.debug.print("  r_address[{}] = {any}\n", .{ i, params.r_address[i].toBytes()[0..8] });
+                    dbg("  r_address[{}] = {any}\n", .{ i, params.r_address[i].toBytes()[0..8] });
                 }
             }
 
             // Debug: print initial LT evaluations for indices 0, 1, 128 (to check pattern)
-            std.debug.print("[VALEVAL_INIT] LT polynomial values:\n", .{});
-            std.debug.print("  lt_evals[0] = {any}\n", .{lt_evals[0].toBytes()[0..8]});
-            std.debug.print("  lt_evals[1] = {any}\n", .{lt_evals[1].toBytes()[0..8]});
-            std.debug.print("  lt_evals[128] = {any}\n", .{if (n > 128) lt_evals[128].toBytes()[0..8] else lt_evals[0].toBytes()[0..8]});
-            std.debug.print("  r_cycle values (from params, BIG_ENDIAN - r[0]=MSB):\n", .{});
+            dbg("[VALEVAL_INIT] LT polynomial values:\n", .{});
+            dbg("  lt_evals[0] = {any}\n", .{lt_evals[0].toBytes()[0..8]});
+            dbg("  lt_evals[1] = {any}\n", .{lt_evals[1].toBytes()[0..8]});
+            dbg("  lt_evals[128] = {any}\n", .{if (n > 128) lt_evals[128].toBytes()[0..8] else lt_evals[0].toBytes()[0..8]});
+            dbg("  r_cycle values (from params, BIG_ENDIAN - r[0]=MSB):\n", .{});
             for (0..@min(3, params.r_cycle.len)) |i| {
-                std.debug.print("    r_cycle_be[{}] = {any}\n", .{ i, params.r_cycle[i].toBytes()[0..8] });
+                dbg("    r_cycle_be[{}] = {any}\n", .{ i, params.r_cycle[i].toBytes()[0..8] });
             }
             // Verify LT(0, r_cycle_be) using Jolt's verifier formula:
             // LT(0, r) = Σ_i (1 - 0_i) · r_i · eq(0[i+1:], r[i+1:])
             //          = Σ_i r_i · (1-r[i+1]) · (1-r[i+2]) · ... · (1-r[n-1])
             // where i runs from MSB (index 0 in BE) to LSB
-            std.debug.print("  Verifying LT(0, r_cycle_be) directly (BE formula):\n", .{});
+            dbg("  Verifying LT(0, r_cycle_be) directly (BE formula):\n", .{});
             var lt_0_direct = F.zero();
             var eq_suffix = F.one();
             // Iterate from MSB (index 0) to LSB (index n-1)
@@ -556,9 +563,9 @@ pub fn ValEvaluationProver(comptime F: type) type {
                 // eq_suffix *= eq(0, r[i]) = (1-r[i])
                 eq_suffix = eq_suffix.mul(F.one().sub(params.r_cycle[i]));
             }
-            std.debug.print("    LT(0, r_cycle_be) direct = {any}\n", .{lt_0_direct.toBytes()[0..8]});
-            std.debug.print("    lt_evals[0] = {any}\n", .{lt_evals[0].toBytes()[0..8]});
-            std.debug.print("    Match? {}\n", .{lt_0_direct.eql(lt_evals[0])});
+            dbg("    LT(0, r_cycle_be) direct = {any}\n", .{lt_0_direct.toBytes()[0..8]});
+            dbg("    lt_evals[0] = {any}\n", .{lt_evals[0].toBytes()[0..8]});
+            dbg("    Match? {}\n", .{lt_0_direct.eql(lt_evals[0])});
 
             // Compute initial claim
             var initial_claim = F.zero();
@@ -568,13 +575,13 @@ pub fn ValEvaluationProver(comptime F: type) type {
 
             // Debug: print value at j=54 (known termination write cycle)
             if (n > 54) {
-                std.debug.print("[VALEVAL_INIT] At j=54: inc={any}, wa={any}, lt={any}\n", .{
+                dbg("[VALEVAL_INIT] At j=54: inc={any}, wa={any}, lt={any}\n", .{
                     inc_evals[54].toBytes()[0..8],
                     wa_evals[54].toBytes()[0..8],
                     lt_evals[54].toBytes()[0..8],
                 });
             }
-            std.debug.print("[VALEVAL_INIT] n={}, initial_claim={any}\n", .{ n, initial_claim.toBytes()[0..8] });
+            dbg("[VALEVAL_INIT] n={}, initial_claim={any}\n", .{ n, initial_claim.toBytes()[0..8] });
 
             return Self{
                 .inc_evals = inc_evals,
@@ -1046,5 +1053,5 @@ test "val prover sumcheck invariant: p(0) + p(1) = current_claim" {
     const final_claim = prover.getFinalClaim();
     try std.testing.expect(final_claim.eql(claim));
 
-    std.debug.print("Val prover sumcheck invariant test passed!\n", .{});
+    dbg("Val prover sumcheck invariant test passed!\n", .{});
 }

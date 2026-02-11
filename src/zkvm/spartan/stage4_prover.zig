@@ -1,4 +1,11 @@
 const std = @import("std");
+
+// Debug output control - set to true to enable verbose debug prints
+const debug_verbose = false;
+fn dbg(comptime fmt: []const u8, args: anytype) void {
+    if (debug_verbose) std.debug.print(fmt, args);
+}
+
 const Allocator = std.mem.Allocator;
 const TraceStep = @import("../../tracer/mod.zig").TraceStep;
 const ExecutionTrace = @import("../../tracer/mod.zig").ExecutionTrace;
@@ -151,17 +158,17 @@ pub fn Stage4Prover(comptime F: type) type {
             const log_T = @ctz(T);
 
             if (r_cycle.len != log_T) {
-                std.debug.print("[STAGE4] r_cycle.len = {}, expected log_T = {}\n", .{r_cycle.len, log_T});
+                dbg("[STAGE4] r_cycle.len = {}, expected log_T = {}\n", .{r_cycle.len, log_T});
                 return error.InvalidRCycleLength;
             }
 
             // Debug: Print r_cycle values for comparison with Jolt
-            std.debug.print("[ZOLT STAGE4 INIT] r_cycle (from Stage 3) len={}\n", .{r_cycle.len});
+            dbg("[ZOLT STAGE4 INIT] r_cycle (from Stage 3) len={}\n", .{r_cycle.len});
             for (r_cycle, 0..) |v, i| {
                 // Print as decimal for comparison with Jolt's {:?} output
                 // Field element is in Montgomery form, convert to standard for comparison
                 const std_form = v.fromMontgomery();
-                std.debug.print("[ZOLT STAGE4 INIT]   r_cycle[{}] = limbs: [{}, {}, {}, {}]\n", .{ i, std_form.limbs[0], std_form.limbs[1], std_form.limbs[2], std_form.limbs[3] });
+                dbg("[ZOLT STAGE4 INIT]   r_cycle[{}] = limbs: [{}, {}, {}, {}]\n", .{ i, std_form.limbs[0], std_form.limbs[1], std_form.limbs[2], std_form.limbs[3] });
             }
 
             const num_rounds = LOG_K + log_T;
@@ -186,7 +193,7 @@ pub fn Stage4Prover(comptime F: type) type {
 
             // Build polynomial evaluations from trace
             // Debug: Print trace info
-            std.debug.print("[STAGE4] Building polynomials from {} trace steps, T={}\n", .{ trace.steps.items.len, T });
+            dbg("[STAGE4] Building polynomials from {} trace steps, T={}\n", .{ trace.steps.items.len, T });
 
             for (trace.steps.items, 0..) |step, cycle| {
                 // Set val(k, j) for all registers k - value before this cycle (even for NOOPs).
@@ -200,7 +207,7 @@ pub fn Stage4Prover(comptime F: type) type {
 
                 if (step.is_noop) {
                     if (cycle < 5) {
-                        std.debug.print("[STAGE4] Cycle {}: NOOP (skipping)\n", .{cycle});
+                        dbg("[STAGE4] Cycle {}: NOOP (skipping)\n", .{cycle});
                     }
                     continue;
                 }
@@ -258,16 +265,16 @@ pub fn Stage4Prover(comptime F: type) type {
 
                 // Debug: Print first few cycles for comparison
                 if (cycle < 5) {
-                    std.debug.print("[STAGE4] Cycle {}: opcode=0x{x}, rd={}, rd_used={}, rd_wv={}\n", .{ cycle, opcode, rd, rd_used, stage4_rd_wv });
-                    std.debug.print("[STAGE4]   rs1={}, rs1_used={}, rs1_val={}\n", .{ rs1, rs1_used, register_values[if (rs1 < 32) rs1 else 0] });
-                    std.debug.print("[STAGE4]   rs2={}, rs2_used={}, rs2_val={}\n", .{ rs2, rs2_used, register_values[if (rs2 < 32) rs2 else 0] });
+                    dbg("[STAGE4] Cycle {}: opcode=0x{x}, rd={}, rd_used={}, rd_wv={}\n", .{ cycle, opcode, rd, rd_used, stage4_rd_wv });
+                    dbg("[STAGE4]   rs1={}, rs1_used={}, rs1_val={}\n", .{ rs1, rs1_used, register_values[if (rs1 < 32) rs1 else 0] });
+                    dbg("[STAGE4]   rs2={}, rs2_used={}, rs2_val={}\n", .{ rs2, rs2_used, register_values[if (rs2 < 32) rs2 else 0] });
                 }
             }
 
             // Fill padding cycles with final register values
             // This is critical for correct polynomial extrapolation when pairing real cycles with padding
             if (trace_len < T) {
-                std.debug.print("[STAGE4] Filling padding cycles {} to {} with final register values\n", .{ trace_len, T - 1 });
+                dbg("[STAGE4] Filling padding cycles {} to {} with final register values\n", .{ trace_len, T - 1 });
                 for (trace_len..T) |cycle| {
                     // Set val(k, j) for all registers k to their final values
                     for (0..32) |k| {
@@ -305,9 +312,9 @@ pub fn Stage4Prover(comptime F: type) type {
             try computeEqEvalsBE(F, eq_cycle_evals, r_cycle_be);
 
             // Debug: print first few eq evaluations
-            std.debug.print("[STAGE4 INIT] eq_cycle_evals (from BE):\n", .{});
+            dbg("[STAGE4 INIT] eq_cycle_evals (from BE):\n", .{});
             for (0..@min(4, eq_cycle_evals.len)) |j| {
-                std.debug.print("[STAGE4 INIT]   eq_cycle_evals[{}] = {any}\n", .{ j, eq_cycle_evals[j].toBytes()[0..8] });
+                dbg("[STAGE4 INIT]   eq_cycle_evals[{}] = {any}\n", .{ j, eq_cycle_evals[j].toBytes()[0..8] });
             }
 
             // Debug: Compute simple MLE sums to verify eq polynomial
@@ -350,17 +357,17 @@ pub fn Stage4Prover(comptime F: type) type {
                     rs2_v_sum = rs2_v_sum.add(eq_cycle_evals[cycle].mul(F.fromU64(step.rs2_value)));
                 }
             }
-            std.debug.print("[STAGE4] Simple rd_wv MLE sum = {any}\n", .{rd_wv_sum.toBytes()});
-            std.debug.print("[STAGE4] Simple rs1_v MLE sum = {any}\n", .{rs1_v_sum.toBytes()});
-            std.debug.print("[STAGE4] Simple rs2_v MLE sum = {any}\n", .{rs2_v_sum.toBytes()});
+            dbg("[STAGE4] Simple rd_wv MLE sum = {any}\n", .{rd_wv_sum.toBytes()});
+            dbg("[STAGE4] Simple rs1_v MLE sum = {any}\n", .{rs1_v_sum.toBytes()});
+            dbg("[STAGE4] Simple rs2_v MLE sum = {any}\n", .{rs2_v_sum.toBytes()});
             if (stage3_claims) |claims| {
-                std.debug.print("[STAGE4] Expected rd_wv from Stage 3 = {any}\n", .{claims.rd_write_value.toBytes()});
-                std.debug.print("[STAGE4] Expected rs1_v from Stage 3 = {any}\n", .{claims.rs1_value.toBytes()});
-                std.debug.print("[STAGE4] Expected rs2_v from Stage 3 = {any}\n", .{claims.rs2_value.toBytes()});
+                dbg("[STAGE4] Expected rd_wv from Stage 3 = {any}\n", .{claims.rd_write_value.toBytes()});
+                dbg("[STAGE4] Expected rs1_v from Stage 3 = {any}\n", .{claims.rs1_value.toBytes()});
+                dbg("[STAGE4] Expected rs2_v from Stage 3 = {any}\n", .{claims.rs2_value.toBytes()});
 
                 // Compute expected input_claim the simple way
                 const simple_input_claim = rd_wv_sum.add(gamma.mul(rs1_v_sum)).add(gamma.mul(gamma).mul(rs2_v_sum));
-                std.debug.print("[STAGE4] Simple input_claim = {any}\n", .{simple_input_claim.toBytes()});
+                dbg("[STAGE4] Simple input_claim = {any}\n", .{simple_input_claim.toBytes()});
             }
 
             return Self{
@@ -411,57 +418,57 @@ pub fn Stage4Prover(comptime F: type) type {
                 const sum_gamma = gamma_rs1.add(gamma_sq_rs2);
                 expected_claim = claims.rd_write_value.add(sum_gamma);
 
-                std.debug.print("[STAGE4] Stage 3 claims:\n", .{});
-                std.debug.print("[STAGE4]   rd_wv = {any}\n", .{claims.rd_write_value.toBytes()});
-                std.debug.print("[STAGE4]   rs1_v = {any}\n", .{claims.rs1_value.toBytes()});
-                std.debug.print("[STAGE4]   rs1_v LIMBS (Montgomery) = {x}, {x}, {x}, {x}\n", .{
+                dbg("[STAGE4] Stage 3 claims:\n", .{});
+                dbg("[STAGE4]   rd_wv = {any}\n", .{claims.rd_write_value.toBytes()});
+                dbg("[STAGE4]   rs1_v = {any}\n", .{claims.rs1_value.toBytes()});
+                dbg("[STAGE4]   rs1_v LIMBS (Montgomery) = {x}, {x}, {x}, {x}\n", .{
                     claims.rs1_value.limbs[0], claims.rs1_value.limbs[1],
                     claims.rs1_value.limbs[2], claims.rs1_value.limbs[3],
                 });
-                std.debug.print("[STAGE4]   rs2_v = {any}\n", .{claims.rs2_value.toBytes()});
-                std.debug.print("[STAGE4]   gamma = {any}\n", .{self.gamma.toBytes()});
-                std.debug.print("[STAGE4]   gamma LIMBS (Montgomery) = {x}, {x}, {x}, {x}\n", .{
+                dbg("[STAGE4]   rs2_v = {any}\n", .{claims.rs2_value.toBytes()});
+                dbg("[STAGE4]   gamma = {any}\n", .{self.gamma.toBytes()});
+                dbg("[STAGE4]   gamma LIMBS (Montgomery) = {x}, {x}, {x}, {x}\n", .{
                     self.gamma.limbs[0], self.gamma.limbs[1],
                     self.gamma.limbs[2], self.gamma.limbs[3],
                 });
-                std.debug.print("[STAGE4]   gamma^2 = {any}\n", .{gamma_sq.toBytes()});
-                std.debug.print("[STAGE4]   gamma * rs1_v = {any}\n", .{gamma_rs1.toBytes()});
-                std.debug.print("[STAGE4]   gamma * rs1_v LIMBS = {x}, {x}, {x}, {x}\n", .{
+                dbg("[STAGE4]   gamma^2 = {any}\n", .{gamma_sq.toBytes()});
+                dbg("[STAGE4]   gamma * rs1_v = {any}\n", .{gamma_rs1.toBytes()});
+                dbg("[STAGE4]   gamma * rs1_v LIMBS = {x}, {x}, {x}, {x}\n", .{
                     gamma_rs1.limbs[0], gamma_rs1.limbs[1],
                     gamma_rs1.limbs[2], gamma_rs1.limbs[3],
                 });
-                std.debug.print("[STAGE4]   gamma^2 * rs2_v = {any}\n", .{gamma_sq_rs2.toBytes()});
-                std.debug.print("[STAGE4]   expected_input_claim = {any}\n", .{expected_claim.?.toBytes()});
+                dbg("[STAGE4]   gamma^2 * rs2_v = {any}\n", .{gamma_sq_rs2.toBytes()});
+                dbg("[STAGE4]   expected_input_claim = {any}\n", .{expected_claim.?.toBytes()});
 
                 // Verify alternative computation: gamma * (rs1_v + gamma * rs2_v)
                 const gamma_rs2 = self.gamma.mul(claims.rs2_value);
                 const inner_sum = claims.rs1_value.add(gamma_rs2);
                 const gamma_inner = self.gamma.mul(inner_sum);
                 const alt_result = claims.rd_write_value.add(gamma_inner);
-                std.debug.print("[STAGE4]   alt_result (using gamma*(rs1+gamma*rs2)) = {any}\n", .{alt_result.toBytes()});
-                std.debug.print("[STAGE4]   alt_result matches expected? {}\n", .{alt_result.eql(expected_claim.?)});
+                dbg("[STAGE4]   alt_result (using gamma*(rs1+gamma*rs2)) = {any}\n", .{alt_result.toBytes()});
+                dbg("[STAGE4]   alt_result matches expected? {}\n", .{alt_result.eql(expected_claim.?)});
             }
 
             // Use expected claim from Stage 3 if available, otherwise use computed
             // Multiply by batching coefficient to track batched claims throughout sumcheck
             const unbatched_claim = if (expected_claim) |exp| exp else computed_claim;
             var current_claim = unbatched_claim.mul(self.batching_coeff);
-            std.debug.print("[STAGE4] Batched input claim = {any}\n", .{current_claim.toBytes()});
+            dbg("[STAGE4] Batched input claim = {any}\n", .{current_claim.toBytes()});
 
-            std.debug.print("[STAGE4] Starting sumcheck with {} rounds (log_T={}, LOG_K={})\n", .{ self.num_rounds, self.log_T, LOG_K });
-            std.debug.print("[STAGE4] T={}, K={}\n", .{ self.T, K });
-            std.debug.print("[STAGE4] Computed input claim = {any}\n", .{computed_claim.toBytes()});
-            std.debug.print("[STAGE4] Using input claim = {any}\n", .{current_claim.toBytes()});
-            std.debug.print("[STAGE4] gamma = {any}\n", .{self.gamma.toBytes()});
-            std.debug.print("[STAGE4] r_cycle.len = {}, r_cycle[0] = {any}\n", .{ self.r_cycle.len, self.r_cycle[0].toBytes()[0..8] });
+            dbg("[STAGE4] Starting sumcheck with {} rounds (log_T={}, LOG_K={})\n", .{ self.num_rounds, self.log_T, LOG_K });
+            dbg("[STAGE4] T={}, K={}\n", .{ self.T, K });
+            dbg("[STAGE4] Computed input claim = {any}\n", .{computed_claim.toBytes()});
+            dbg("[STAGE4] Using input claim = {any}\n", .{current_claim.toBytes()});
+            dbg("[STAGE4] gamma = {any}\n", .{self.gamma.toBytes()});
+            dbg("[STAGE4] r_cycle.len = {}, r_cycle[0] = {any}\n", .{ self.r_cycle.len, self.r_cycle[0].toBytes()[0..8] });
 
             // Check if computed claim matches expected claim
             if (expected_claim) |exp| {
                 if (!computed_claim.eql(exp)) {
-                    std.debug.print("[STAGE4] WARNING: Computed claim != Expected claim from Stage 3!\n", .{});
-                    std.debug.print("[STAGE4]   This means the polynomial construction doesn't match Stage 3 witnesses\n", .{});
+                    dbg("[STAGE4] WARNING: Computed claim != Expected claim from Stage 3!\n", .{});
+                    dbg("[STAGE4]   This means the polynomial construction doesn't match Stage 3 witnesses\n", .{});
                 } else {
-                    std.debug.print("[STAGE4] OK: Computed claim matches expected claim from Stage 3\n", .{});
+                    dbg("[STAGE4] OK: Computed claim matches expected claim from Stage 3\n", .{});
                 }
             }
 
@@ -471,20 +478,20 @@ pub fn Stage4Prover(comptime F: type) type {
 
                 // Debug: print round polynomial coefficients for comparison with Jolt
                 if (round < 3) {
-                    std.debug.print("[STAGE4_COEFF] Round {}: c0 = {any}\n", .{ round, round_poly.coeffs[0].toBytes() });
-                    std.debug.print("[STAGE4_COEFF] Round {}: c1 = {any}\n", .{ round, round_poly.coeffs[1].toBytes() });
-                    std.debug.print("[STAGE4_COEFF] Round {}: c2 = {any}\n", .{ round, round_poly.coeffs[2].toBytes() });
-                    std.debug.print("[STAGE4_COEFF] Round {}: c3 = {any}\n", .{ round, round_poly.coeffs[3].toBytes() });
-                    std.debug.print("[STAGE4_COEFF] Round {}: current_claim = {any}\n", .{ round, current_claim.toBytes() });
+                    dbg("[STAGE4_COEFF] Round {}: c0 = {any}\n", .{ round, round_poly.coeffs[0].toBytes() });
+                    dbg("[STAGE4_COEFF] Round {}: c1 = {any}\n", .{ round, round_poly.coeffs[1].toBytes() });
+                    dbg("[STAGE4_COEFF] Round {}: c2 = {any}\n", .{ round, round_poly.coeffs[2].toBytes() });
+                    dbg("[STAGE4_COEFF] Round {}: c3 = {any}\n", .{ round, round_poly.coeffs[3].toBytes() });
+                    dbg("[STAGE4_COEFF] Round {}: current_claim = {any}\n", .{ round, current_claim.toBytes() });
 
                     // Verify p(0) + p(1) = current_claim
                     const p0 = round_poly.coeffs[0];
                     const p1 = round_poly.coeffs[0].add(round_poly.coeffs[1]).add(round_poly.coeffs[2]).add(round_poly.coeffs[3]);
                     const sum = p0.add(p1);
-                    std.debug.print("[STAGE4_COEFF] Round {}: p(0) = {any}\n", .{ round, p0.toBytes() });
-                    std.debug.print("[STAGE4_COEFF] Round {}: p(1) = {any}\n", .{ round, p1.toBytes() });
-                    std.debug.print("[STAGE4_COEFF] Round {}: p(0)+p(1) = {any}\n", .{ round, sum.toBytes() });
-                    std.debug.print("[STAGE4_COEFF] Round {}: matches claim? {}\n", .{ round, sum.eql(current_claim) });
+                    dbg("[STAGE4_COEFF] Round {}: p(0) = {any}\n", .{ round, p0.toBytes() });
+                    dbg("[STAGE4_COEFF] Round {}: p(1) = {any}\n", .{ round, p1.toBytes() });
+                    dbg("[STAGE4_COEFF] Round {}: p(0)+p(1) = {any}\n", .{ round, sum.toBytes() });
+                    dbg("[STAGE4_COEFF] Round {}: matches claim? {}\n", .{ round, sum.eql(current_claim) });
                 }
 
                 // Append compressed form to transcript: [c0, c2, c3] (skip c1)
@@ -514,12 +521,12 @@ pub fn Stage4Prover(comptime F: type) type {
                 round_polys[round] = batched_poly;
 
                 if (round < 3 or round >= self.num_rounds - 3) {
-                    std.debug.print("[STAGE4] Round {}: claim = {any}, challenge = {any}\n",
+                    dbg("[STAGE4] Round {}: claim = {any}, challenge = {any}\n",
                         .{round, current_claim.toBytes()[0..8], challenge.toBytes()[0..8]});
                 }
             }
 
-            std.debug.print("[STAGE4] Final claim = {any}\n", .{current_claim.toBytes()});
+            dbg("[STAGE4] Final claim = {any}\n", .{current_claim.toBytes()});
 
             // Debug: print final polynomial evaluations and verify expected formula
             const val_claim = self.val_poly[0];
@@ -529,12 +536,12 @@ pub fn Stage4Prover(comptime F: type) type {
             const inc_claim = self.inc_poly[0];
             const eq_claim = self.eq_cycle_evals[0];
 
-            std.debug.print("[STAGE4_FINAL] val_claim = {any}\n", .{val_claim.toBytes()});
-            std.debug.print("[STAGE4_FINAL] rs1_ra_claim = {any}\n", .{rs1_ra_claim.toBytes()});
-            std.debug.print("[STAGE4_FINAL] rs2_ra_claim = {any}\n", .{rs2_ra_claim.toBytes()});
-            std.debug.print("[STAGE4_FINAL] rd_wa_claim = {any}\n", .{rd_wa_claim.toBytes()});
-            std.debug.print("[STAGE4_FINAL] inc_claim = {any}\n", .{inc_claim.toBytes()});
-            std.debug.print("[STAGE4_FINAL] eq_claim (after binding) = {any}\n", .{eq_claim.toBytes()});
+            dbg("[STAGE4_FINAL] val_claim = {any}\n", .{val_claim.toBytes()});
+            dbg("[STAGE4_FINAL] rs1_ra_claim = {any}\n", .{rs1_ra_claim.toBytes()});
+            dbg("[STAGE4_FINAL] rs2_ra_claim = {any}\n", .{rs2_ra_claim.toBytes()});
+            dbg("[STAGE4_FINAL] rd_wa_claim = {any}\n", .{rd_wa_claim.toBytes()});
+            dbg("[STAGE4_FINAL] inc_claim = {any}\n", .{inc_claim.toBytes()});
+            dbg("[STAGE4_FINAL] eq_claim (after binding) = {any}\n", .{eq_claim.toBytes()});
 
             // Compute expected output claim using the verifier's formula:
             // eq(r_cycle, r_cycle') * (rd_wa * (inc + val) + γ * rs1_ra * val + γ² * rs2_ra * val)
@@ -545,13 +552,13 @@ pub fn Stage4Prover(comptime F: type) type {
             const combined = rd_wv.add(self.gamma.mul(rs1_v)).add(gamma_sq_final.mul(rs2_v));
             const computed_expected_claim = eq_claim.mul(combined);
 
-            std.debug.print("[STAGE4_FINAL] rd_wv = {any}\n", .{rd_wv.toBytes()});
-            std.debug.print("[STAGE4_FINAL] rs1_v = {any}\n", .{rs1_v.toBytes()});
-            std.debug.print("[STAGE4_FINAL] rs2_v = {any}\n", .{rs2_v.toBytes()});
-            std.debug.print("[STAGE4_FINAL] combined (rd_wv + γ*rs1_v + γ²*rs2_v) = {any}\n", .{combined.toBytes()});
-            std.debug.print("[STAGE4_FINAL] computed expected claim (eq * combined) = {any}\n", .{computed_expected_claim.toBytes()});
-            std.debug.print("[STAGE4_FINAL] actual final claim = {any}\n", .{current_claim.toBytes()});
-            std.debug.print("[STAGE4_FINAL] match? {}\n", .{computed_expected_claim.eql(current_claim)});
+            dbg("[STAGE4_FINAL] rd_wv = {any}\n", .{rd_wv.toBytes()});
+            dbg("[STAGE4_FINAL] rs1_v = {any}\n", .{rs1_v.toBytes()});
+            dbg("[STAGE4_FINAL] rs2_v = {any}\n", .{rs2_v.toBytes()});
+            dbg("[STAGE4_FINAL] combined (rd_wv + γ*rs1_v + γ²*rs2_v) = {any}\n", .{combined.toBytes()});
+            dbg("[STAGE4_FINAL] computed expected claim (eq * combined) = {any}\n", .{computed_expected_claim.toBytes()});
+            dbg("[STAGE4_FINAL] actual final claim = {any}\n", .{current_claim.toBytes()});
+            dbg("[STAGE4_FINAL] match? {}\n", .{computed_expected_claim.eql(current_claim)});
 
             // Extract final claims
             return Stage4Result(F){
@@ -605,10 +612,10 @@ pub fn Stage4Prover(comptime F: type) type {
 
             // Debug: Print eq polynomial values for Round 0
             if (round == 0) {
-                std.debug.print("[ZOLT STAGE4 EQ_USE] Round 0 - eq values being used:\n", .{});
-                std.debug.print("[ZOLT STAGE4 EQ_USE]   eq_cycle_evals[0] = {any}\n", .{ self.eq_cycle_evals[0].toBytes()[0..8] });
-                std.debug.print("[ZOLT STAGE4 EQ_USE]   eq_cycle_evals[1] = {any}\n", .{ self.eq_cycle_evals[1].toBytes()[0..8] });
-                std.debug.print("[ZOLT STAGE4 EQ_USE]   current_claim = {any}\n", .{ current_claim.toBytes()[0..8] });
+                dbg("[ZOLT STAGE4 EQ_USE] Round 0 - eq values being used:\n", .{});
+                dbg("[ZOLT STAGE4 EQ_USE]   eq_cycle_evals[0] = {any}\n", .{ self.eq_cycle_evals[0].toBytes()[0..8] });
+                dbg("[ZOLT STAGE4 EQ_USE]   eq_cycle_evals[1] = {any}\n", .{ self.eq_cycle_evals[1].toBytes()[0..8] });
+                dbg("[ZOLT STAGE4 EQ_USE]   current_claim = {any}\n", .{ current_claim.toBytes()[0..8] });
             }
 
             // We need evaluations at 0, 1, 2, 3 for a degree-3 polynomial.
@@ -703,20 +710,20 @@ pub fn Stage4Prover(comptime F: type) type {
 
             // Debug: Print evaluations for Round 0 to compare with Jolt
             if (round == 0) {
-                std.debug.print("[ZOLT STAGE4 EVALS] Round 0 polynomial evaluations:\n", .{});
-                std.debug.print("[ZOLT STAGE4 EVALS]   p(0) = {any}\n", .{evals[0].toBytes()});
-                std.debug.print("[ZOLT STAGE4 EVALS]   p(1) = {any}\n", .{evals[1].toBytes()});
-                std.debug.print("[ZOLT STAGE4 EVALS]   p(2) = {any}\n", .{evals[2].toBytes()});
-                std.debug.print("[ZOLT STAGE4 EVALS]   p(3) = {any}\n", .{evals[3].toBytes()});
-                std.debug.print("[ZOLT STAGE4 EVALS]   p(0)+p(1) = {any}\n", .{sum.toBytes()});
-                std.debug.print("[ZOLT STAGE4 EVALS]   current_claim = {any}\n", .{current_claim.toBytes()});
+                dbg("[ZOLT STAGE4 EVALS] Round 0 polynomial evaluations:\n", .{});
+                dbg("[ZOLT STAGE4 EVALS]   p(0) = {any}\n", .{evals[0].toBytes()});
+                dbg("[ZOLT STAGE4 EVALS]   p(1) = {any}\n", .{evals[1].toBytes()});
+                dbg("[ZOLT STAGE4 EVALS]   p(2) = {any}\n", .{evals[2].toBytes()});
+                dbg("[ZOLT STAGE4 EVALS]   p(3) = {any}\n", .{evals[3].toBytes()});
+                dbg("[ZOLT STAGE4 EVALS]   p(0)+p(1) = {any}\n", .{sum.toBytes()});
+                dbg("[ZOLT STAGE4 EVALS]   current_claim = {any}\n", .{current_claim.toBytes()});
             }
 
             if (!sum.eql(current_claim)) {
                 if (round < 3) {
-                    std.debug.print("[STAGE4] Round {} mismatch: p(0)+p(1) = {any}\n", .{ round, sum.toBytes()[0..16] });
-                    std.debug.print("[STAGE4]   expected = {any}\n", .{current_claim.toBytes()[0..16]});
-                    std.debug.print("[STAGE4]   is_cycle={}, current_T={}, current_K={}\n", .{ is_cycle_round, self.current_T, self.current_K });
+                    dbg("[STAGE4] Round {} mismatch: p(0)+p(1) = {any}\n", .{ round, sum.toBytes()[0..16] });
+                    dbg("[STAGE4]   expected = {any}\n", .{current_claim.toBytes()[0..16]});
+                    dbg("[STAGE4]   is_cycle={}, current_T={}, current_K={}\n", .{ is_cycle_round, self.current_T, self.current_K });
                 }
             }
 

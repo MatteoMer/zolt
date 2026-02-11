@@ -15,6 +15,13 @@
 //! Reference: jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs
 
 const std = @import("std");
+
+// Debug output control - set to true to enable verbose debug prints
+const debug_verbose = false;
+fn dbg(comptime fmt: []const u8, args: anytype) void {
+    if (debug_verbose) std.debug.print(fmt, args);
+}
+
 const Allocator = std.mem.Allocator;
 
 const poly_mod = @import("../../poly/mod.zig");
@@ -92,11 +99,11 @@ pub fn InstructionReadRafProver(comptime F: type) type {
             const num_rounds = LOG_K + log_T;
             const n_virtual_ra = LOG_K / ra_virtual_log_k_chunk;
 
-            std.debug.print("[LOOKUPS_RAF] Starting with {} rounds (LOG_K={}, log_T={})\n", .{
+            dbg("[LOOKUPS_RAF] Starting with {} rounds (LOG_K={}, log_T={})\n", .{
                 num_rounds, LOG_K, log_T,
             });
-            std.debug.print("[LOOKUPS_RAF] input_claim = {any}\n", .{input_claim.toBytesBE()[0..8]});
-            std.debug.print("[LOOKUPS_RAF] gamma = {any}\n", .{gamma.toBytesBE()[0..8]});
+            dbg("[LOOKUPS_RAF] input_claim = {any}\n", .{input_claim.toBytesBE()[0..8]});
+            dbg("[LOOKUPS_RAF] gamma = {any}\n", .{gamma.toBytesBE()[0..8]});
 
             // Build per-cycle combined values: lookup_output + γ·left_operand + γ²·right_operand
             var combined_vals = try self.allocator.alloc(F, T);
@@ -186,8 +193,8 @@ pub fn InstructionReadRafProver(comptime F: type) type {
             for (0..T) |j| {
                 computed_sum = computed_sum.add(eq_evals[j].mul(combined_vals[j]));
             }
-            std.debug.print("[LOOKUPS_RAF] computed_sum = {any}\n", .{computed_sum.toBytesBE()[0..8]});
-            std.debug.print("[LOOKUPS_RAF] sum matches input: {}\n", .{computed_sum.eql(input_claim)});
+            dbg("[LOOKUPS_RAF] computed_sum = {any}\n", .{computed_sum.toBytesBE()[0..8]});
+            dbg("[LOOKUPS_RAF] sum matches input: {}\n", .{computed_sum.eql(input_claim)});
 
             // Allocate challenges array
             var challenges = try self.allocator.alloc(F, num_rounds);

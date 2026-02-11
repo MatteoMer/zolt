@@ -3,6 +3,13 @@
 //! This module provides common utilities used throughout the codebase.
 
 const std = @import("std");
+
+// Debug output control - set to true to enable verbose debug prints
+const debug_verbose = false;
+fn dbg(comptime fmt: []const u8, args: anytype) void {
+    if (debug_verbose) std.debug.print(fmt, args);
+}
+
 const Allocator = std.mem.Allocator;
 const lookup_table = @import("../zkvm/lookup_table/mod.zig");
 
@@ -212,7 +219,7 @@ pub const Timer = struct {
     pub fn stopAndPrint(self: Timer) void {
         const elapsed_ns = self.stop();
         const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
-        std.debug.print("{s}: {d:.2}ms\n", .{ self.name, elapsed_ms });
+        dbg("{s}: {d:.2}ms\n", .{ self.name, elapsed_ms });
     }
 };
 

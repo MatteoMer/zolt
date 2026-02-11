@@ -16,6 +16,13 @@
 //! Reference: jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs
 
 const std = @import("std");
+
+// Debug output control - set to true to enable verbose debug prints
+const debug_verbose = false;
+fn dbg(comptime fmt: []const u8, args: anytype) void {
+    if (debug_verbose) std.debug.print(fmt, args);
+}
+
 const Allocator = std.mem.Allocator;
 
 const poly_mod = @import("../../poly/mod.zig");
@@ -98,10 +105,10 @@ pub fn LookupsRafSumcheck(comptime F: type) type {
             const num_rounds = LOG_K + n_cycle_vars;
             const n_virtual_ra = LOG_K / ra_virtual_log_k_chunk;
 
-            std.debug.print("[LOOKUPS_RAF] Starting: {} rounds (128 addr + {} cycle)\n", .{
+            dbg("[LOOKUPS_RAF] Starting: {} rounds (128 addr + {} cycle)\n", .{
                 num_rounds, n_cycle_vars,
             });
-            std.debug.print("[LOOKUPS_RAF] input_claim = {x}\n", .{input_claim.toBytesBE()[0..16].*});
+            dbg("[LOOKUPS_RAF] input_claim = {x}\n", .{input_claim.toBytesBE()[0..16].*});
 
             // Step 1: Build combined values for each cycle
             // combined[j] = lookup_output_j + γ·left_j + γ²·right_j
@@ -153,9 +160,9 @@ pub fn LookupsRafSumcheck(comptime F: type) type {
             for (0..T) |j| {
                 computed_sum = computed_sum.add(eq_evals[j].mul(combined_vals[j]));
             }
-            std.debug.print("[LOOKUPS_RAF] Computed sum = {x}\n", .{computed_sum.toBytesBE()[0..16].*});
-            std.debug.print("[LOOKUPS_RAF] Input claim = {x}\n", .{input_claim.toBytesBE()[0..16].*});
-            std.debug.print("[LOOKUPS_RAF] Match = {}\n", .{computed_sum.eql(input_claim)});
+            dbg("[LOOKUPS_RAF] Computed sum = {x}\n", .{computed_sum.toBytesBE()[0..16].*});
+            dbg("[LOOKUPS_RAF] Input claim = {x}\n", .{input_claim.toBytesBE()[0..16].*});
+            dbg("[LOOKUPS_RAF] Match = {}\n", .{computed_sum.eql(input_claim)});
 
             // Step 5: Run sumcheck
             var current_claim = input_claim;
@@ -268,11 +275,11 @@ pub fn LookupsRafSumcheck(comptime F: type) type {
             const combined_eval = active_combined[0];
             const output_claim = eq_r_cycle_prime.mul(combined_eval);
 
-            std.debug.print("[LOOKUPS_RAF] Final values:\n", .{});
-            std.debug.print("  eq_r_cycle_prime = {x}\n", .{eq_r_cycle_prime.toBytesBE()[0..16].*});
-            std.debug.print("  combined_eval = {x}\n", .{combined_eval.toBytesBE()[0..16].*});
-            std.debug.print("  output_claim = {x}\n", .{output_claim.toBytesBE()[0..16].*});
-            std.debug.print("  current_claim = {x}\n", .{current_claim.toBytesBE()[0..16].*});
+            dbg("[LOOKUPS_RAF] Final values:\n", .{});
+            dbg("  eq_r_cycle_prime = {x}\n", .{eq_r_cycle_prime.toBytesBE()[0..16].*});
+            dbg("  combined_eval = {x}\n", .{combined_eval.toBytesBE()[0..16].*});
+            dbg("  output_claim = {x}\n", .{output_claim.toBytesBE()[0..16].*});
+            dbg("  current_claim = {x}\n", .{current_claim.toBytesBE()[0..16].*});
 
             // Step 7: Compute opening claims
             //
@@ -331,25 +338,25 @@ pub fn LookupsRafSumcheck(comptime F: type) type {
             } else {
                 // If ADD table eval is 0, we can't use this approach
                 // Try setting all table_flags to 0 and adjust raf_flag instead
-                std.debug.print("[LOOKUPS_RAF] WARNING: ADD table eval is 0, falling back\n", .{});
+                dbg("[LOOKUPS_RAF] WARNING: ADD table eval is 0, falling back\n", .{});
             }
 
-            std.debug.print("[LOOKUPS_RAF] Opening claims:\n", .{});
-            std.debug.print("  left_eval = {x}\n", .{left_eval.toBytesBE()[0..16].*});
-            std.debug.print("  right_eval = {x}\n", .{right_eval.toBytesBE()[0..16].*});
-            std.debug.print("  add_table_eval = {x}\n", .{add_table_eval.toBytesBE()[0..16].*});
-            std.debug.print("  combined_eval = {x}\n", .{combined_eval.toBytesBE()[0..16].*});
-            std.debug.print("  raf_claim = {x}\n", .{raf_claim.toBytesBE()[0..16].*});
-            std.debug.print("  val_claim_needed = {x}\n", .{val_claim_needed.toBytesBE()[0..16].*});
-            std.debug.print("  table_flags[0] = {x}\n", .{table_flags[0].toBytesBE()[0..16].*});
-            std.debug.print("  raf_flag = {x}\n", .{raf_flag.toBytesBE()[0..16].*});
+            dbg("[LOOKUPS_RAF] Opening claims:\n", .{});
+            dbg("  left_eval = {x}\n", .{left_eval.toBytesBE()[0..16].*});
+            dbg("  right_eval = {x}\n", .{right_eval.toBytesBE()[0..16].*});
+            dbg("  add_table_eval = {x}\n", .{add_table_eval.toBytesBE()[0..16].*});
+            dbg("  combined_eval = {x}\n", .{combined_eval.toBytesBE()[0..16].*});
+            dbg("  raf_claim = {x}\n", .{raf_claim.toBytesBE()[0..16].*});
+            dbg("  val_claim_needed = {x}\n", .{val_claim_needed.toBytesBE()[0..16].*});
+            dbg("  table_flags[0] = {x}\n", .{table_flags[0].toBytesBE()[0..16].*});
+            dbg("  raf_flag = {x}\n", .{raf_flag.toBytesBE()[0..16].*});
 
             // Verify the formula
             const verify_val_claim = add_table_eval.mul(table_flags[0]);
             const verify_total = verify_val_claim.add(gamma.mul(raf_claim));
-            std.debug.print("  verify_val_claim = {x}\n", .{verify_val_claim.toBytesBE()[0..16].*});
-            std.debug.print("  verify_total (should equal combined_eval) = {x}\n", .{verify_total.toBytesBE()[0..16].*});
-            std.debug.print("  match = {}\n", .{verify_total.eql(combined_eval)});
+            dbg("  verify_val_claim = {x}\n", .{verify_val_claim.toBytesBE()[0..16].*});
+            dbg("  verify_total (should equal combined_eval) = {x}\n", .{verify_total.toBytesBE()[0..16].*});
+            dbg("  match = {}\n", .{verify_total.eql(combined_eval)});
 
             return LookupsRafResult(F){
                 .output_claim = output_claim,

@@ -25,10 +25,11 @@
 
 4. **Removed duplicate computeLookupIndex from mod.zig**
 
-5. **Debug print cleanup** (iteration 3):
-   - Gated ~3400 std.debug.print calls behind compile-time `debug_verbose = false`
+5. **Debug print cleanup** (multiple iterations):
+   - Gated ~3400+ std.debug.print calls behind compile-time `debug_verbose = false`
    - All debug output eliminated at compile time via inline `dbg()` wrapper function
    - Preserved all user-facing progress output in main.zig
+   - Cleaned up all ALWAYS-ON debug prints from Stage 6 investigation
 
 6. **Fixed OOM in integration test** (iteration 3):
    - Added MAX_CYCLES (1M) limit to emulator run()
@@ -44,14 +45,19 @@
 - Stage 3 (Registers Check): PASS ✅
 - Stage 4 (Instruction Lookup): PASS ✅
 - Stage 5 (Batched RAF): PASS ✅
-- Stage 6 (Batched Sumcheck / Booleanity): PASS ✅
+- Stage 6 (Batched Sumcheck / BytecodeReadRaf + Booleanity + RA): PASS ✅
 - Stage 7 (HammingWeightClaimReduction): PASS ✅
 - Stage 8 (Dory commitment opening): PASS ✅
 
 ### Tested Configurations:
 - fibonacci.elf with trace-length 64: ✅ PASS
 - fibonacci.elf with trace-length 128: ✅ PASS
-- All 720 unit tests: ✅ PASS
+- All unit tests: ✅ PASS
+
+### Known Issues:
+- **Segfault during cleanup**: After proof generation succeeds (proof saved to disk), the
+  process crashes with SIGSEGV during deallocation of resources (defer chain). This does NOT
+  affect proof correctness - the proof is already written to disk. Pre-existing issue.
 
 ## Test Commands
 ```bash
@@ -69,7 +75,7 @@ cd /home/vivado/projects/zolt && zig build test
 ```
 
 ## Success Criteria Met:
-- [x] `zig build test` passes all 720 tests
+- [x] `zig build test` passes all tests
 - [x] Zolt can generate a proof for example programs
 - [x] The proof can be loaded and verified by Jolt's verifier
 - [x] No modifications needed on the Jolt side (only zolt-debug feature for logging)

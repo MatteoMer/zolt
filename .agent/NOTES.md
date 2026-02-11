@@ -1,4 +1,32 @@
-# Stage 6 Debugging Progress
+# Stage 4 Sumcheck Failure - Current Investigation
+
+## Status: IN PROGRESS
+
+### Problem
+Stage 4 sumcheck verification fails. Stages 1-3 PASS.
+- output_claim (from sumcheck rounds) = [56, 0f, 93, 91, ...]
+- expected_claim (from opening claims) = [3e, 32, 3c, f1, ...]
+
+### Structure
+- 16 rounds total: 9 cycle (Phase 1) + 7 address (Phase 2)
+- Instance 0 (RegistersRWC): 16 rounds, offset=0
+- Instance 1 (RamValEval): 9 rounds, offset=7
+- Instance 2 (RamValFinal): 9 rounds, offset=7
+
+### Key Hypothesis
+The sumcheck round polynomials are internally consistent (p(0)+p(1)=claim passes).
+The mismatch is between the final sumcheck output and the verifier's independent computation
+from opening claims. This means either:
+1. Opening claims stored in proof are wrong
+2. The verifier's expected_output_claim computation disagrees with the prover
+
+### TODO
+- Need to regenerate proof with prover debug output to compare prover vs verifier values
+- Or analyze proof binary to extract opening claims directly
+
+---
+
+# Previous Investigation: Stage 6 Debugging Progress (COMPLETED)
 
 ## W-Extension Fix (DONE)
 - Fixed `from_raw_words` to properly handle W-extension decomposition

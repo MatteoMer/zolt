@@ -809,8 +809,9 @@ pub const Emulator = struct {
         self.state.cycle += 1;
         self.registers.tick();
 
-        // Clear virtual register (Jolt resets virtual regs after sequence)
-        try self.registers.write(v_rs1, 0);
+        // NOTE: Do NOT reset virtual register here. Jolt does NOT reset virtual
+        // registers (32-38) between instruction sequences. The value persists and
+        // affects rd_pre_value/inc_poly in Stage 4 polynomial construction.
 
         // === Step 3: VirtualSignExtendWord(rd, rd, 0) ===
         const sign_extended: u64 = @bitCast(@as(i64, @as(i32, @truncate(@as(i64, @bitCast(step2_result))))));

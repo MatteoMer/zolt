@@ -1152,14 +1152,14 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             const mem_val = step.memory_value orelse 0;
             const mem_val_f = F.fromU64(mem_val);
 
-            // Extract rd register index from instruction
-            const rd: u5 = @truncate((step.instruction >> 7) & 0x1f);
-
-            // Determine if instruction writes to rd (matches Stage 4 logic)
-            // STORE (0x23) and BRANCH (0x63) don't write to rd
-            // Also, rd == 0 means no write (x0 is always 0)
+            // Determine if instruction writes to rd using TraceStep fields.
+            // CRITICAL: Must use step.rd_written and step.rd_index (u8) instead of
+            // extracting from instruction word. Virtual instructions write to virtual
+            // registers (32+) whose indices don't fit in RISC-V's 5-bit rd field.
+            // Using @truncate((instruction >> 7) & 0x1f) would map virtual register 32
+            // to physical register 0, incorrectly making writes_to_rd = false.
             const is_branch = (opcode == 0x63);
-            const writes_to_rd = !is_store and !is_branch and (rd != 0);
+            const writes_to_rd = step.rd_written and step.rd_index != 0;
 
             if (is_load) {
                 // Constraint 2: RamReadValue == RamWriteValue (for Load)
@@ -1395,13 +1395,12 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             // =================================================================
 
             // IsRdNotZero: check if destination register != x0
-            // Note: rd was already extracted above for RdWriteValue computation
+            // Uses step.rd_index (u8) to handle virtual registers (32+) correctly.
             // CRITICAL: Store (0x23) and Branch (0x63) instructions don't write to rd,
             // so IsRdNotZero must be false regardless of the raw rd bits (which encode
             // immediate values for these formats). This matches Jolt where branch/store
             // instructions have operands.rd = None and IsRdNotZero is never set.
-            // Reuse is_store (line ~1010) and is_branch (line ~1115) from above.
-            const is_rd_not_zero = if (rd != 0 and !is_store and !is_branch) F.one() else F.zero();
+            const is_rd_not_zero = if (step.rd_index != 0 and !is_store and !is_branch) F.one() else F.zero();
 
             // BranchFlag: 1 if this is a branch instruction (opcode 0x63)
             // Note: instr_opcode is already defined above for instruction inputs

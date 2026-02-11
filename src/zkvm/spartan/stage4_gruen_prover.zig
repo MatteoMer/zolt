@@ -234,6 +234,64 @@ pub fn Stage4GruenProver(comptime F: type) type {
                 }
             }
 
+            // DIAGNOSTIC: Check val_poly[rs1 * T + j] == rs1_value for all reads
+            {
+                var mismatch_count: usize = 0;
+                for (trace.steps.items, 0..) |step2, cycle2| {
+                    if (step2.is_noop) continue;
+                    if (step2.rs1_read) {
+                        const rs1_idx = @as(usize, step2.rs1_index);
+                        const val_at_rs1 = val_poly[rs1_idx * T + cycle2];
+                        const expected_rs1 = F.fromU64(step2.rs1_value);
+                        if (!val_at_rs1.eql(expected_rs1)) {
+                            if (mismatch_count < 10) {
+                                dbg("[STAGE4 VAL CHECK] MISMATCH at cycle {}: rs1_index={}, val_poly={}, rs1_value={}, step.instruction=0x{x:0>8}\n", .{
+                                    cycle2, step2.rs1_index,
+                                    val_at_rs1.toU64(), expected_rs1.toU64(),
+                                    step2.instruction,
+                                });
+                            }
+                            mismatch_count += 1;
+                        }
+                    }
+                    if (step2.rs2_read) {
+                        const rs2_idx = @as(usize, step2.rs2_index);
+                        const val_at_rs2 = val_poly[rs2_idx * T + cycle2];
+                        const expected_rs2 = F.fromU64(step2.rs2_value);
+                        if (!val_at_rs2.eql(expected_rs2)) {
+                            if (mismatch_count < 10) {
+                                dbg("[STAGE4 VAL CHECK] RS2 MISMATCH at cycle {}: rs2_index={}, val_poly={}, rs2_value={}, step.instruction=0x{x:0>8}\n", .{
+                                    cycle2, step2.rs2_index,
+                                    val_at_rs2.toU64(), expected_rs2.toU64(),
+                                    step2.instruction,
+                                });
+                            }
+                            mismatch_count += 1;
+                        }
+                    }
+                    if (step2.rd_written and step2.rd_index != 0) {
+                        const rd_idx = @as(usize, step2.rd_index);
+                        const val_at_rd = val_poly[rd_idx * T + cycle2];
+                        const expected_pre = F.fromU64(step2.rd_pre_value);
+                        if (!val_at_rd.eql(expected_pre)) {
+                            if (mismatch_count < 10) {
+                                dbg("[STAGE4 VAL CHECK] RD PRE MISMATCH at cycle {}: rd_index={}, val_poly={}, rd_pre_value={}, step.instruction=0x{x:0>8}\n", .{
+                                    cycle2, step2.rd_index,
+                                    val_at_rd.toU64(), expected_pre.toU64(),
+                                    step2.instruction,
+                                });
+                            }
+                            mismatch_count += 1;
+                        }
+                    }
+                }
+                if (mismatch_count > 0) {
+                    dbg("[STAGE4 VAL CHECK] Total mismatches: {}\n", .{mismatch_count});
+                } else {
+                    dbg("[STAGE4 VAL CHECK] ✓ All val_poly entries match rs1/rs2/rd_pre values\n", .{});
+                }
+            }
+
             // Fill padding cycles with final register values
             if (trace_len < T) {
                 for (trace_len..T) |cycle| {

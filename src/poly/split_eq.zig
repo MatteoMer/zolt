@@ -595,35 +595,38 @@ test "GruenSplitEqPolynomial: bind updates scalar" {
     try testing.expect(split_eq.current_scalar.eql(expected_eq));
 }
 
+// Helper: create a challenge-format field element (limbs = [0, 0, val, 0])
+// This mimics what the transcript's challengeScalar128Bits returns.
+fn challengeFromU64(val: u64) BN254Scalar {
+    return BN254Scalar{ .limbs = .{ 0, 0, val, 0 } };
+}
+
 test "GruenSplitEqPolynomial: prefix tables correctness" {
     const F = BN254Scalar;
 
-    // tau = [2, 3, 5] with length 3
-    // m = 3/2 = 1
-    // w_last = tau[2] = 5 (skipped)
-    // w_out = tau[0..1] = [2]
-    // w_in = tau[1..2] = [3]
-    const tau = [_]F{ F.fromU64(2), F.fromU64(3), F.fromU64(5) };
+    // Use challenge-format values (stored in high limbs, not Montgomery form)
+    // since the split_eq prefix tables use mulHiBigIntU128 internally
+    const tau = [_]F{ challengeFromU64(2), challengeFromU64(3), challengeFromU64(5) };
 
     var split_eq = try GruenSplitEqPolynomial(F).init(testing.allocator, &tau);
     defer split_eq.deinit();
 
-    // E_out_vec[1] should have 2 entries for tau[0] = 2
+    // E_out_vec[1] should have 2 entries for tau[0]
     // In big-endian: E_out[0] = (1-τ_0), E_out[1] = τ_0
     const E_out_1 = split_eq.E_out_vec.items[1];
     try testing.expectEqual(@as(usize, 2), E_out_1.len);
 
-    const expected_e_out_0 = F.one().sub(F.fromU64(2)); // 1 - 2 = -1
-    const expected_e_out_1 = F.fromU64(2);
+    const expected_e_out_0 = F.one().sub(challengeFromU64(2));
+    const expected_e_out_1 = challengeFromU64(2);
     try testing.expect(E_out_1[0].eql(expected_e_out_0));
     try testing.expect(E_out_1[1].eql(expected_e_out_1));
 
-    // E_in_vec[1] should have 2 entries for tau[1] = 3 (since m=1, w_in starts at tau[1])
+    // E_in_vec[1] should have 2 entries for tau[1]
     const E_in_1 = split_eq.E_in_vec.items[1];
     try testing.expectEqual(@as(usize, 2), E_in_1.len);
 
-    const expected_e_in_0 = F.one().sub(F.fromU64(3)); // 1 - 3 = -2
-    const expected_e_in_1 = F.fromU64(3);
+    const expected_e_in_0 = F.one().sub(challengeFromU64(3));
+    const expected_e_in_1 = challengeFromU64(3);
     try testing.expect(E_in_1[0].eql(expected_e_in_0));
     try testing.expect(E_in_1[1].eql(expected_e_in_1));
 }
@@ -652,12 +655,9 @@ test "GruenSplitEqPolynomial: cubic round poly basic" {
 test "GruenSplitEqPolynomial: big-endian eq table correctness" {
     const F = BN254Scalar;
 
-    // tau = [τ_0, τ_1, τ_2, τ_3] with length 4
-    // m = 4/2 = 2
-    // w_last = tau[3] = 11 (skipped)
-    // E_out uses tau[0..2] = [3, 5] and E_in uses tau[2..3] = [7]
-    // getFullEqTable combines all unbound variables
-    const tau = [_]F{ F.fromU64(3), F.fromU64(5), F.fromU64(7), F.fromU64(11) };
+    // Use challenge-format values (stored in high limbs, not Montgomery form)
+    // since getFullEqTable uses mulHiBigIntU128 internally
+    const tau = [_]F{ challengeFromU64(3), challengeFromU64(5), challengeFromU64(7), challengeFromU64(11) };
 
     var split_eq = try GruenSplitEqPolynomial(F).init(testing.allocator, &tau);
     defer split_eq.deinit();
@@ -670,27 +670,44 @@ test "GruenSplitEqPolynomial: big-endian eq table correctness" {
 
     // In big-endian ordering, index i encodes bits (b_0, b_1, b_2, b_3) where b_0 is MSB
     // eq(τ, x) = Π_j (τ_j * b_j + (1-τ_j) * (1-b_j))
+    // Note: multiplication in getFullEqTable uses mulHiBigIntU128 for τ terms
+    // and standard mul for (1-τ) terms, so expected values must match this behavior
 
-    const tau0 = F.fromU64(3);
-    const tau1 = F.fromU64(5);
-    const tau2 = F.fromU64(7);
-    const tau3 = F.fromU64(11);
+    const tau0 = challengeFromU64(3);
+    const tau1 = challengeFromU64(5);
+    const tau2 = challengeFromU64(7);
+    const tau3 = challengeFromU64(11);
     const one_minus_tau0 = F.one().sub(tau0);
     const one_minus_tau1 = F.one().sub(tau1);
     const one_minus_tau2 = F.one().sub(tau2);
     const one_minus_tau3 = F.one().sub(tau3);
 
-    // Index 0 (0000): all bits 0 → (1-τ_0)*(1-τ_1)*(1-τ_2)*(1-τ_3)
+    // The getFullEqTable builds iteratively:
+    // For each tau[k], it multiplies: result[2i] = scalar * (1-τ_k), result[2i+1] = scalar.mulHiBigIntU128(τ_k.limbs)
+    // We must compute expected values using the same multiplication pattern
+
+    // Index 0 (0000): all bits 0 → product of (1-τ_k) using standard mul
     const expected_0 = one_minus_tau0.mul(one_minus_tau1).mul(one_minus_tau2).mul(one_minus_tau3);
 
-    // Index 15 (1111): all bits 1 → τ_0*τ_1*τ_2*τ_3
-    const expected_15 = tau0.mul(tau1).mul(tau2).mul(tau3);
+    // Index 15 (1111): all bits 1 → product of mulHiBigIntU128(τ_k)
+    // Start with scalar=1, then apply mulHiBigIntU128 for each tau
+    const e15_step1 = F.one().mulHiBigIntU128(tau0.limbs);
+    const e15_step2 = e15_step1.mulHiBigIntU128(tau1.limbs);
+    const e15_step3 = e15_step2.mulHiBigIntU128(tau2.limbs);
+    const expected_15 = e15_step3.mulHiBigIntU128(tau3.limbs);
 
-    // Index 5 (0101): bits = (0,1,0,1) → (1-τ_0)*τ_1*(1-τ_2)*τ_3
-    const expected_5 = one_minus_tau0.mul(tau1).mul(one_minus_tau2).mul(tau3);
+    // Index 5 (0101 in big-endian): bits b0=0, b1=1, b2=0, b3=1
+    // tau0: bit=0 → mul(1-tau0), tau1: bit=1 → mulHiBigInt(tau1), tau2: bit=0 → mul(1-tau2), tau3: bit=1 → mulHiBigInt(tau3)
+    const e5_step1 = F.one().mul(one_minus_tau0);
+    const e5_step2 = e5_step1.mulHiBigIntU128(tau1.limbs);
+    const e5_step3 = e5_step2.mul(one_minus_tau2);
+    const expected_5 = e5_step3.mulHiBigIntU128(tau3.limbs);
 
-    // Index 10 (1010): bits = (1,0,1,0) → τ_0*(1-τ_1)*τ_2*(1-τ_3)
-    const expected_10 = tau0.mul(one_minus_tau1).mul(tau2).mul(one_minus_tau3);
+    // Index 10 (1010 in big-endian): bits b0=1, b1=0, b2=1, b3=0
+    const e10_step1 = F.one().mulHiBigIntU128(tau0.limbs);
+    const e10_step2 = e10_step1.mul(one_minus_tau1);
+    const e10_step3 = e10_step2.mulHiBigIntU128(tau2.limbs);
+    const expected_10 = e10_step3.mul(one_minus_tau3);
 
     try testing.expect(eq_table[0].eql(expected_0));
     try testing.expect(eq_table[5].eql(expected_5));
@@ -701,8 +718,8 @@ test "GruenSplitEqPolynomial: big-endian eq table correctness" {
 test "GruenSplitEqPolynomial: getEActiveForWindow" {
     const F = BN254Scalar;
 
-    // tau = [τ_0, τ_1, τ_2, τ_3] with length 4
-    const tau = [_]F{ F.fromU64(3), F.fromU64(5), F.fromU64(7), F.fromU64(11) };
+    // Use challenge-format values (stored in high limbs)
+    const tau = [_]F{ challengeFromU64(3), challengeFromU64(5), challengeFromU64(7), challengeFromU64(11) };
 
     var split_eq = try GruenSplitEqPolynomial(F).init(testing.allocator, &tau);
     defer split_eq.deinit();
@@ -718,36 +735,38 @@ test "GruenSplitEqPolynomial: getEActiveForWindow" {
     // With 4 unbound variables and window_size = 2:
     // - window starts at index 4-2=2, so window = tau[2..4] = [7, 11]
     // - active = tau[2..3] = [7] (1 bit)
-    // - E_active should have 2 entries: [1-7, 7] = [-6, 7]
+    // - E_active should have 2 entries: [1-τ_2, τ_2]
     const e_active_2 = try split_eq.getEActiveForWindow(testing.allocator, 2);
     defer testing.allocator.free(e_active_2);
     try testing.expectEqual(@as(usize, 2), e_active_2.len);
-    const expected_0_2 = F.one().sub(F.fromU64(7)); // 1 - 7 = -6
-    const expected_1_2 = F.fromU64(7);
+    const expected_0_2 = F.one().sub(challengeFromU64(7));
+    const expected_1_2 = challengeFromU64(7);
     try testing.expect(e_active_2[0].eql(expected_0_2));
     try testing.expect(e_active_2[1].eql(expected_1_2));
 
     // With 4 unbound variables and window_size = 3:
     // - window starts at index 4-3=1, so window = tau[1..4] = [5, 7, 11]
     // - active = tau[1..3] = [5, 7] (2 bits)
-    // - E_active should have 4 entries: eq([5,7], {0,0}), eq([5,7], {0,1}), eq([5,7], {1,0}), eq([5,7], {1,1})
+    // - E_active should have 4 entries using the same mul pattern as getFullEqTable
     const e_active_3 = try split_eq.getEActiveForWindow(testing.allocator, 3);
     defer testing.allocator.free(e_active_3);
     try testing.expectEqual(@as(usize, 4), e_active_3.len);
 
-    const tau_active_0 = F.fromU64(5);
-    const tau_active_1 = F.fromU64(7);
-    const one_minus_5 = F.one().sub(tau_active_0);
-    const one_minus_7 = F.one().sub(tau_active_1);
+    const tau_a0 = challengeFromU64(5);
+    const tau_a1 = challengeFromU64(7);
+    const one_minus_a0 = F.one().sub(tau_a0);
+    const one_minus_a1 = F.one().sub(tau_a1);
 
-    // Index 0 (00): (1-5)*(1-7) = -4 * -6 = 24
-    const exp_00 = one_minus_5.mul(one_minus_7);
-    // Index 1 (01): (1-5)*7 = -4 * 7 = -28
-    const exp_01 = one_minus_5.mul(tau_active_1);
-    // Index 2 (10): 5*(1-7) = 5 * -6 = -30
-    const exp_10 = tau_active_0.mul(one_minus_7);
-    // Index 3 (11): 5*7 = 35
-    const exp_11 = tau_active_0.mul(tau_active_1);
+    // Index 0 (00): (1-τ_a0)*(1-τ_a1) using standard mul for (1-τ) terms
+    const exp_00 = one_minus_a0.mul(one_minus_a1);
+    // Index 1 (01): (1-τ_a0) * mulHiBigInt(τ_a1)
+    const exp_01 = one_minus_a0.mulHiBigIntU128(tau_a1.limbs);
+    // Index 2 (10): mulHiBigInt(τ_a0) applied to (1-τ_a1)
+    const step_10 = F.one().mulHiBigIntU128(tau_a0.limbs);
+    const exp_10 = step_10.mul(one_minus_a1);
+    // Index 3 (11): mulHiBigInt(τ_a0) then mulHiBigInt(τ_a1)
+    const step_11 = F.one().mulHiBigIntU128(tau_a0.limbs);
+    const exp_11 = step_11.mulHiBigIntU128(tau_a1.limbs);
 
     try testing.expect(e_active_3[0].eql(exp_00));
     try testing.expect(e_active_3[1].eql(exp_01));

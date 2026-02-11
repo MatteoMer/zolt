@@ -554,8 +554,11 @@ test "shared preprocessing hash consistency" {
 test "execute runs simple program" {
     const allocator = std.testing.allocator;
 
-    // Simple program: c.nop (compressed NOP instruction)
-    const bytecode = [_]u8{ 0x01, 0x00 };
+    // Simple program: c.nop, then jal x0, 0 (infinite self-loop = termination)
+    const bytecode = [_]u8{
+        0x01, 0x00, // c.nop
+        0x6f, 0x00, 0x00, 0x00, // jal x0, 0 (self-loop)
+    };
     var config = common.MemoryConfig{
         .program_size = bytecode.len,
     };
@@ -579,11 +582,11 @@ test "execute runs simple program" {
 test "execute with longer program" {
     const allocator = std.testing.allocator;
 
-    // Program: addi x1, x0, 42; addi x2, x1, 1; c.nop
+    // Program: addi x1, x0, 42; addi x2, x1, 1; jal x0, 0 (self-loop = termination)
     const bytecode = [_]u8{
         0x93, 0x00, 0xa0, 0x02, // addi x1, x0, 42
         0x13, 0x01, 0x10, 0x00, // addi x2, x1, 1
-        0x01, 0x00, // c.nop
+        0x6f, 0x00, 0x00, 0x00, // jal x0, 0 (self-loop)
     };
     var config = common.MemoryConfig{
         .program_size = bytecode.len,

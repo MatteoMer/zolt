@@ -678,8 +678,11 @@ pub const Emulator = struct {
 
     /// Run until completion
     /// Stops on ECALL (normal program termination) or infinite loop detection
+    /// Maximum cycles before forced termination (prevents OOM on non-terminating programs)
+    const MAX_CYCLES: usize = 1_000_000;
+
     pub fn run(self: *Emulator) !void {
-        while (true) {
+        while (self.state.cycle < MAX_CYCLES) {
             const running = self.step() catch |err| switch (err) {
                 error.Ecall => {
                     dbg("[TRACE] Terminated via ECALL at cycle {d}\n", .{self.state.cycle});
@@ -731,6 +734,9 @@ pub const Emulator = struct {
                 return;
             }
         }
+        // Hit MAX_CYCLES limit - force termination
+        std.debug.print("[TRACE] Hit max cycle limit ({d}), forcing termination\n", .{MAX_CYCLES});
+        self.recordTerminationWrite() catch {};
     }
 
     /// Record a synthetic termination write to the termination address.

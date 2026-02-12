@@ -758,12 +758,19 @@ fn leftIsZeroPrefixMle(
     b: *LookupBits(128),
     _: usize,
 ) F {
+    // Uninterleave to get the x (left operand) bits
+    // Short-circuit: if any remaining x-bit is non-zero, the prefix is zero
+    // (because LeftOperandIsZero = Π (1-x_i), and any x_i=1 makes it 0)
+    const uninterleaved = b.uninterleave();
+    if (uninterleaved.left != 0) {
+        return F.zero();
+    }
+
     var result = checkpoints[@intFromEnum(Prefixes.LeftOperandIsZero)] orelse F.one();
     if (r_x) |rx| {
         // On odd rounds (when r_x is present), c is the y-value, not x
         // We need to multiply by (1 - r_x) for the left operand
         result = result.mul(F.one().sub(rx));
-        // c is not used on odd rounds
     } else {
         // On even rounds, c is the x-value
         const x = F.fromU64(@as(u64, c));
@@ -795,6 +802,14 @@ fn rightIsZeroPrefixMle(
     b: *LookupBits(128),
     _: usize,
 ) F {
+    // Uninterleave to get the y (right operand) bits
+    // Short-circuit: if any remaining y-bit is non-zero, the prefix is zero
+    // (because RightOperandIsZero = Π (1-y_i), and any y_i=1 makes it 0)
+    const uninterleaved = b.uninterleave();
+    if (uninterleaved.right != 0) {
+        return F.zero();
+    }
+
     var result = checkpoints[@intFromEnum(Prefixes.RightOperandIsZero)] orelse F.one();
     if (r_x) |_| {
         // On odd rounds, c is the y-value
@@ -805,7 +820,6 @@ fn rightIsZeroPrefixMle(
         // We only care about y for RightOperand, so discard x (c)
         const y_msb_val = F.fromU64(@as(u64, b.popMsb()));
         result = result.mul(F.one().sub(y_msb_val));
-        // c is implicitly discarded by not using it
     }
     return result;
 }

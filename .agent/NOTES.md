@@ -1,95 +1,81 @@
-# Stage 4 Sumcheck Failure - Current Investigation
+# Debugging Notes
 
-## Status: IN PROGRESS
+## Stage 5 Fix (Session 5) - COMPLETED
 
-### Problem
-Stage 4 sumcheck verification fails. Stages 1-3 PASS.
-- output_claim (from sumcheck rounds) = [56, 0f, 93, 91, ...]
-- expected_claim (from opening claims) = [3e, 32, 3c, f1, ...]
+### Root Cause Found
+The Stage 5 bug for collatz, bitwise, and primes was NOT in the prefix-suffix decomposition
+or eval_2 computation. The actual root cause was:
 
-### Structure
-- 16 rounds total: 9 cycle (Phase 1) + 7 address (Phase 2)
-- Instance 0 (RegistersRWC): 16 rounds, offset=0
-- Instance 1 (RamValEval): 9 rounds, offset=7
-- Instance 2 (RamValFinal): 9 rounds, offset=7
+**lookup_output in combined_vals used rd_value instead of materializeTableEntry(lookup_key)**
 
-### Key Hypothesis
-The sumcheck round polynomials are internally consistent (p(0)+p(1)=claim passes).
-The mismatch is between the final sumcheck output and the verifier's independent computation
-from opening claims. This means either:
-1. Opening claims stored in proof are wrong
-2. The verifier's expected_output_claim computation disagrees with the prover
+For many instruction types, `rd_value ≠ materializeTableEntry(key)`:
+- LUI: rd_value = sign_extend_32_to_64(imm<<12), but table entry = lower64(key)
+- JAL: lookup_output was pc+imm, but table entry at key differs
+- VirtualSRLI: rd_value differs from table MLE output
 
-### TODO
-- Need to regenerate proof with prover debug output to compare prover vs verifier values
-- Or analyze proof binary to extract opening claims directly
+The initial claim `Σ_j eq(j) * combined_vals[j]` used `lookup_output = rd_value` (wrong),
+while the address round prefix-suffix decomposition correctly used table MLEs. This caused
+the sumcheck chain to diverge from the initial claim.
 
----
+### Fix
+Replaced instruction-specific overrides (only ADDIW/ADDW/SUBW) with a general fix:
+```zig
+if (table_idx >= 0) {
+    lookup_output = F.fromU64(Table.materializeTableEntry(table_idx, lookup_idx));
+}
+```
 
-# Previous Investigation: Stage 6 Debugging Progress (COMPLETED)
+Also implemented:
+- `VirtualSRL.materializeEntry()` for the VirtualSRL table
+- General `materializeTableEntry()` function dispatching to all 30+ tables
 
-## W-Extension Fix (DONE)
-- Fixed `from_raw_words` to properly handle W-extension decomposition
-- Uses pattern matching on Instruction enum variants (VirtualSignExtendWord, VirtualMULI)
-- For base instructions of W-ext sequences: maps opcode (0x1b→0x13, 0x3b→0x33) and sets virtual flags
-- All bytecode entries now match between Zolt prover and Jolt verifier
+### Previous Hypothesis Was Wrong
+The earlier sessions hypothesized that the prefix MLE or suffix values were computed
+incorrectly at c=2. This was incorrect - the prefix-suffix decomposition was always
+correct. The bug was in the initial combined_vals computation.
 
-## rd=0 Fix (DONE)
-- RISC-V x0 is hardwired zero register, can never be written
-- Jolt verifier maps rd_raw==0 to None (zero contribution to val_polys)
-- Fixed 3 locations in stage6_prover.zig to map rd==0 to sentinel 255
-- All 5 stages of val_polys now match 100%
+## Stage 6 Analysis (Session 5) - IN PROGRESS
 
-## Round Polynomial Format Fix (DONE)
-- Converted from Toom-Cook format to Vandermonde format
-- Changed all computeRoundPoly functions
-- Updated compression/evaluation helpers
+### Root Cause
+gcd.elf (Stage 6 failure) and primes.elf (Stage 6 failure) use division/remainder
+instructions that Zolt doesn't decompose into virtual instruction sequences:
 
-## Stage 6 Instance Layout
-- Instance 0: BytecodeReadRaf (14 rounds, degree 3)
-- Instance 1: HammingBooleanity (8 rounds, degree 3)
-- Instance 2: Booleanity (12 rounds, degree 3)
-- Instance 3: RamRaVirtual (8 rounds, degree 5)
-- Instance 4: LookupsRaSumcheck (8 rounds, degree 5)
-- Instance 5: IncClaimReduction (8 rounds, degree 2)
+- gcd.elf uses: divw (21 steps), remw (21 steps), mulw (2 steps)
+- primes.elf uses: remuw (12 steps), mulw (2 steps)
 
-## Current Issue: ALL Stage Claims Mismatch (INVESTIGATING)
+In Jolt, these are expanded into complex inline sequences:
+- DIVW/REMW → 21 virtual instructions each
+- REMUW → 12 virtual instructions
+- Each uses VirtualAdvice, VirtualSignExtendWord, VirtualAssertEQ, etc.
 
-### Key Finding: ALL 5 stages of BytecodeReadRaf have `Σ_k F_s[k]*val[k] ≠ opening_claim`
+Zolt currently executes these as single trace steps, creating a fundamental mismatch
+in trace structure, bytecode, and all subsequent proofs.
 
-Debug evidence (from /tmp/zolt_stderr7.txt):
-- Stage 0 (SpartanOuter): sc != ext, F_s_sum=1 ✓, direct==recomp ✓
-- Stage 1 (ProductVirt): sc != ext
-- Stage 2 (SpartanShift): sc != ext
-- Stage 3 (RegistersRWC): sc != ext
-- Stage 4 (RegistersValEval): sc != ext
+### Required New Virtual Instructions
+- VirtualAdvice - Oracle-provided values (quotient, remainder)
+- VirtualAssertEQ - Assert two values are equal
+- VirtualAssertValidDiv0 - Validate division by zero handling
+- VirtualChangeDivisorW/VirtualChangeDivisor - Handle overflow cases
+- VirtualZeroExtendWord - Zero-extend to 32 bits
+- VirtualAssertValidUnsignedRemainder - Verify |remainder| < |divisor|
+- VirtualAssertMulUNoOverflow - Verify unsigned multiply doesn't overflow
+- VirtualAssertLTE - Less than or equal assertion
+- VirtualMovsign - Extract sign bit
 
-### Field-level Comparison
-- Stage 1: address MATCHES, imm MISMATCHES, most circuit_flags MISMATCH
-- Stage 2: Jump MATCHES, Branch MATCHES, IsRdNotZero MISMATCH, WriteLookupToRD MISMATCH
+### Required New Lookup Tables
+- ValidDiv0Table (index 17)
+- ValidUnsignedRemainderTable (index 16)
+- VirtualChangeDivisorWTable (index 29)
+- VirtualChangeDivisorTable
+- LowerHalfWordTable
+- LTETable
+- VirtualAssertMulUNoOverflowTable
+- MovsignTable
 
-### Key Investigation Results
-
-1. **Streaming round**: Does NOT affect opening claims. r_cycle uses only cycle variables (sumcheck_challenges[1..]), excluding streaming challenge. Opening claims are simple `Σ_c eq(r_cycle,c)*poly(c)`.
-
-2. **Jolt's prover uses EXTERNAL claims** (from opening accumulator), not recomputed from arrays. Array recomputation is test-only assertion.
-
-3. **Val_polys match `compute_val_polys_zolt`** byte-for-byte. This is a MODIFIED version with Zolt-specific encodings.
-
-4. **Imm encoding differs**: Zolt uses per-opcode encoding (fromU64 bitcast for ADDI/JAL etc, truncated u32 for LUI). Standard Jolt uses from_i128 universally. BUT Zolt's R1CS ALSO uses the same per-opcode encoding (computeUnsignedImmediate). So val_polys and R1CS should agree.
-
-5. **Flag differences**: compute_val_polys_zolt uses raw instruction bits; compute_val_polys uses Instruction trait methods. These can produce different flag values.
-
-### Theories to Test
-- The R1CS constraint system might not use exactly the same flag computation as the val_poly builder
-- There might be cycles where the R1CS witness produces different flag values than the bytecode table entry
-- The issue might be in how virtual instructions (VirtualSignExtendWord, VirtualMULI) contribute to the R1CS witness vs the bytecode table
-
-### Next Step
-Add diagnostic for Stage 2 (ProductVirtualization, 4 flags only) to compare:
-1. `Σ_c eq(r_cycle_s1, c) * R1CS_IsRdNotZero(c)`
-2. `Σ_k F_s[k] * bytecode_IsRdNotZero(k)`
-3. Opening claim for IsRdNotZero from SpartanProductVirtualization
-
-If (1) == (3) and (1) != (2), then the bytecode table's flag differs from R1CS for some cycles.
-If (1) != (3), then the R1CS witness differs from the opening claim.
+### Scope
+This is a multi-day effort involving:
+1. Tracer: Multi-step execution with virtual register tracking
+2. Preprocessing: Bytecode expansion for all division variants
+3. Lookup tables: New table implementations and materializeEntry functions
+4. R1CS constraints: New circuit flags for virtual instructions
+5. All 8 proof stages must handle the expanded traces correctly

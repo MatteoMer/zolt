@@ -285,13 +285,17 @@ pub fn PrefixCheckpointsState(comptime F: type) type {
         }
 
         /// Update checkpoints after binding two rounds (r_x, r_y)
+        /// CRITICAL: Snapshot previous state first, since updates can depend on
+        /// other checkpoints (e.g., LessThan depends on Eq). Without snapshotting,
+        /// later checkpoints would read already-updated values from earlier ones.
         pub fn update(self: *Self, r_x: F, r_y: F, round: usize, suffix_len: usize) void {
+            const prev_checkpoints = self.checkpoints;
             for (0..Prefixes.COUNT) |i| {
                 const prefix: Prefixes = @enumFromInt(i);
                 self.checkpoints[i] = prefixes_mod.updatePrefixCheckpoint(
                     F,
                     prefix,
-                    &self.checkpoints,
+                    &prev_checkpoints,
                     r_x,
                     r_y,
                     round,
@@ -381,6 +385,8 @@ pub fn proverMsgReadChecking(
     var eval_2_left = F.zero();
     var eval_2_right = F.zero();
     var eval_0_per_table: [NUM_TABLES]F = [_]F{F.zero()} ** NUM_TABLES;
+    var eval_2_left_per_table: [NUM_TABLES]F = [_]F{F.zero()} ** NUM_TABLES;
+    var eval_2_right_per_table: [NUM_TABLES]F = [_]F{F.zero()} ** NUM_TABLES;
 
     // Sum over all remaining bits b
     for (0..half_len) |b_idx| {
@@ -422,6 +428,8 @@ pub fn proverMsgReadChecking(
                 eval_0_per_table[table_idx] = eval_0_per_table[table_idx].add(combined_0);
                 eval_2_left = eval_2_left.add(combined_2_left);
                 eval_2_right = eval_2_right.add(combined_2_right);
+                eval_2_left_per_table[table_idx] = eval_2_left_per_table[table_idx].add(combined_2_left);
+                eval_2_right_per_table[table_idx] = eval_2_right_per_table[table_idx].add(combined_2_right);
             }
         }
     }
@@ -438,6 +446,27 @@ pub fn proverMsgReadChecking(
         dbg("[READ_CHECK R0] sum_per_table={x}\n", .{sum_per_table.toBytesBE()[16..32].*});
         dbg("[READ_CHECK R0] eval_0={x}\n", .{eval_0.toBytesBE()[16..32].*});
         dbg("[READ_CHECK R0] sum==eval_0: {}\n", .{sum_per_table.eql(eval_0)});
+        // Per-table eval_2 = 2*eval_2_right_per_table - eval_2_left_per_table
+        for (0..NUM_TABLES) |t_idx| {
+            const e2l = eval_2_left_per_table[t_idx];
+            const e2r = eval_2_right_per_table[t_idx];
+            const e2_table = e2r.add(e2r).sub(e2l);
+            const e0_table = eval_0_per_table[t_idx];
+            if (!e0_table.eql(F.zero()) or !e2_table.eql(F.zero())) {
+                // For a multilinear polynomial, eval_2 should equal 2*eval_1 - eval_0
+                // At round 0, eval_1 for this table = (some unknown). But we can check:
+                // If polynomial is degree 1 in c, then tableCombine(prefix(c), Q(c)) is linear in c
+                // So eval_2 = 2*eval_1 - eval_0 = 2*(eval_2_right with prefix_c1) - eval_0
+                // But computing eval_1 per table requires prefix_c1 evaluation
+                dbg("[READ_CHECK R0] TABLE {} eval_0={x}, eval_2={x}, eval_2_left={x}, eval_2_right={x}\n", .{
+                    t_idx,
+                    e0_table.toBytesBE()[16..32].*,
+                    e2_table.toBytesBE()[16..32].*,
+                    e2l.toBytesBE()[16..32].*,
+                    e2r.toBytesBE()[16..32].*,
+                });
+            }
+        }
     }
 
     // Quadratic interpolation: eval_2 = 2*eval_2_right - eval_2_left

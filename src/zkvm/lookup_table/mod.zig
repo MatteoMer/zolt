@@ -1190,6 +1190,30 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
         ///   for i in 0..XLEN: result = result * (1 + y_i) + x_i * y_i
         /// Reference: jolt-core/src/zkvm/lookup_table/virtual_srl.rs
         pub const VirtualSRL = struct {
+            /// Materialize the entry at a given interleaved index.
+            /// Uninterleaves the index into (value, bitmask), then computes
+            /// result = 0; for i in 0..XLEN: result = result * (1 + y_i) + x_i * y_i
+            pub fn materializeEntry(index: u128) u64 {
+                // Uninterleave matching Jolt convention:
+                // interleaveBits128(x, y) puts x at ODD positions, y at EVEN positions
+                // So: odd bits → x (value/first arg), even bits → y (bitmask/second arg)
+                var x: u64 = 0; // value (from odd positions)
+                var y: u64 = 0; // bitmask (from even positions)
+                inline for (0..XLEN) |i| {
+                    x |= @as(u64, @truncate((index >> (2 * i + 1)) & 1)) << i; // odd positions
+                    y |= @as(u64, @truncate((index >> (2 * i)) & 1)) << i; // even positions
+                }
+                // Compute the lookup table entry iterating MSB to LSB
+                var entry: u64 = 0;
+                inline for (0..XLEN) |i| {
+                    const bit_pos = XLEN - 1 - i;
+                    const x_i: u64 = (x >> bit_pos) & 1;
+                    const y_i: u64 = (y >> bit_pos) & 1;
+                    entry = entry *% (1 + y_i) +% (x_i *% y_i);
+                }
+                return entry;
+            }
+
             pub fn evaluateMLE(r: []const F) F {
                 std.debug.assert(r.len == 2 * XLEN);
                 var result = F.zero();
@@ -1255,6 +1279,51 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                 40 => F.zero(), // VirtualXORROTW7 - TODO
                 41 => F.zero(), // Unused
                 else => F.zero(),
+            };
+        }
+
+        /// Materialize a table entry at a given interleaved index (u128).
+        /// Returns the u64 table output for the given lookup index.
+        /// Used for diagnostics: verifying that combined_vals lookup_output matches the table.
+        pub fn materializeTableEntry(table_index: usize, index: u128) u64 {
+            // Uninterleave for interleaved-path tables
+            const even_bits = blk: {
+                var x: u64 = 0;
+                inline for (0..XLEN) |i| {
+                    x |= @as(u64, @truncate((index >> (2 * i)) & 1)) << i;
+                }
+                break :blk x;
+            };
+            const odd_bits = blk: {
+                var y: u64 = 0;
+                inline for (0..XLEN) |i| {
+                    y |= @as(u64, @truncate((index >> (2 * i + 1)) & 1)) << i;
+                }
+                break :blk y;
+            };
+            return switch (table_index) {
+                // Convention: interleaveBits128(x, y) puts x at odd positions, y at even
+                // So: odd_bits = x = first arg (typically rs1/left)
+                //     even_bits = y = second arg (typically rs2/right)
+                // uninterleave: x=odd_bits, y=even_bits
+                0 => @truncate(index), // RangeCheck: identity, lower 64 bits
+                1 => @truncate(index & ~@as(u128, 1)), // RangeCheckAligned: lower 64 bits with LSB cleared
+                2 => odd_bits & even_bits, // And: x & y
+                3 => (~odd_bits) & even_bits, // Andn: ~x & y
+                4 => odd_bits | even_bits, // Or: x | y
+                5 => odd_bits ^ even_bits, // Xor: x ^ y
+                6 => @intFromBool(odd_bits == even_bits), // Equal: x == y
+                9 => @intFromBool(odd_bits != even_bits), // NotEqual: x != y
+                11 => @intFromBool(odd_bits < even_bits), // UnsignedLessThan: x < y
+                21 => blk21: {
+                    // SignExtendHalfWord: identity path, sign-extend lower 32 bits to 64 bits
+                    const val: u64 = @truncate(index);
+                    const lower32: u32 = @truncate(val);
+                    const sign_extended: i64 = @as(i64, @as(i32, @bitCast(lower32)));
+                    break :blk21 @bitCast(sign_extended);
+                },
+                26 => VirtualSRL.materializeEntry(index), // interleaved
+                else => 0, // Unimplemented tables return 0
             };
         }
 

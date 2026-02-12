@@ -1,69 +1,89 @@
 # Zolt → Jolt Verification Progress
 
 ## Current Status
-**✅ Core verification pipeline works! 4/8 example programs pass all 8 stages.**
+**✅ 6/8 example programs pass all 8 verification stages.**
 
 ### Verified Programs (ALL 8 stages pass):
 - ✅ fibonacci.elf (trace-length 64, 128)
 - ✅ factorial.elf (trace-length 64)
 - ✅ sum.elf (trace-length 64)
 - ✅ signed.elf (trace-length 64)
+- ✅ collatz.elf (trace-length 128)
+- ✅ bitwise.elf (trace-length 32) — FIXED in this session
 
-### Programs with verification failures (instruction-specific issues):
-- ❌ gcd.elf - Stage 6 (uses `divw`, `remw` — division/remainder instructions)
-- ❌ collatz.elf - Stage 4 (uses `slliw`, `srliw`, `bltu` — W-ext shifts + unsigned branch)
-- ❌ bitwise.elf - Stage 4 (uses `xor`, `slliw`, `srliw` — XOR + W-ext shifts)
-- ❌ primes.elf - Stage 5 (uses `remuw`, `bgeu`, `bne`, `beq` — unsigned rem, branch variants)
+### Programs with verification failures:
+- ❌ gcd.elf - Stage 6 (uses `divw`, `remw` — needs inline sequence decomposition)
+- ❌ primes.elf - Stage 6 (uses `remuw` — needs inline sequence decomposition)
 
-### What's been accomplished:
+## Stage 5 Fix (COMPLETED)
 
-1. **bytecode_K preprocessing export fix** (Iteration 5):
-   - Fixed `main.zig` to use `computeBytecodeCodeSize()` instead of `bytecode_prep.code_size`
-   - The former accounts for +3 termination store entries (LUI/ADDI/SB), the latter doesn't
-   - Made `computeBytecodeCodeSize` public for use from main.zig
-   - This fixed factorial.elf verification (was crashing in Stage 6 with index OOB)
+### Root Cause
+For instructions where `rd_value ≠ materializeTableEntry(lookup_key)`, the initial claim
+`Σ_j eq(j) * combined_vals[j]` diverged from the address round prefix-suffix decomposition.
 
-2. **VirtualMULI R1CS flags** (constraints.zig):
-   - VirtualInstruction ALWAYS true for opcode 0x2B
-   - IsFirstInSequence=true when vsr=0 (standalone SLLI)
-   - NextIsVirtual includes opcode 0x2B
-   - NextIsFirstInSequence includes standalone VirtualMULI case
+Examples of affected instructions:
+- LUI (0x37): rd_value = sign_extend_32_to_64(imm<<12), table = lower64(key)
+- JAL (0x6f): lookup_output was pc+imm, but table entry differs
+- VirtualSRLI (0x5b): rd_value differs from table MLE
 
-3. **Lookup index consistency** (proof_converter.zig + stage6_prover.zig + mod.zig):
-   - All lookup index computations now use centralized `stage6_prover.computeLookupIndex()`
+### Fix Applied
+In `stage5_prover.zig`, replaced instruction-specific lookup_output overrides
+(previously only ADDIW/ADDW/SUBW) with a GENERAL fix:
+```zig
+if (table_idx >= 0) {
+    lookup_output = F.fromU64(Table.materializeTableEntry(table_idx, lookup_key));
+}
+```
+This uses the actual table entry for ALL instructions with a valid lookup table.
 
-4. **Virtual opcode handling in computeLookupIndex**:
-   - 0x0B (VirtualSignExtendWord): lookup_index = rs1_value (AddOperands)
-   - 0x2B (VirtualMULI): lookup_index = rs1_value * (1 << shamt) (MultiplyOperands)
+Also added `materializeEntry()` for VirtualSRL table and a general `materializeTableEntry()`
+function in `mod.zig`.
 
-5. **Debug print cleanup** (multiple iterations):
-   - Gated ~3400+ std.debug.print calls behind compile-time `debug_verbose = false`
+## Stage 6 Root Cause Analysis
 
-6. **Fixed OOM in integration test** (iteration 3):
-   - Added MAX_CYCLES (1M) limit to emulator run()
-   - Fixed test programs with proper termination (jal x0, 0 self-loop)
+### Problem
+gcd.elf and primes.elf fail at Stage 6 because they use division/remainder instructions
+(DIVW, REMW, REMUW) that Zolt doesn't decompose into virtual instruction sequences.
 
-7. **Fixed pre-existing test failures** (iteration 3):
-   - All 726/726 tests pass
+### Background
+In Jolt, complex M-extension instructions are decomposed into multi-step inline sequences:
+- DIVW → 21 virtual instructions (VirtualAdvice, VirtualSignExtendWord, MUL, SUB, etc.)
+- REMW → 21 virtual instructions
+- REMUW → 12 virtual instructions (VirtualAdvice, VirtualZeroExtendWord, MUL, etc.)
+- DIVUW → 14 virtual instructions
+- DIV → 18 virtual instructions
+- REM → 18 virtual instructions
+- DIVU → 11 virtual instructions
+- REMU → 10 virtual instructions
 
-### Known Issues:
-- **Segfault during cleanup**: After proof generation succeeds, deallocation may SIGSEGV. Pre-existing.
-- **Instruction coverage**: Programs using divw/remw/remuw/xor/slliw/srliw need further work.
+Zolt currently executes these as single trace steps, creating a fundamental mismatch
+in trace structure, bytecode, and all subsequent proofs.
 
-## Next Steps for Failing Programs:
-- collatz & bitwise: Likely SRLIW/SLLIW virtual decomposition issues in Stage 4
-- gcd: DIVW/REMW not yet implemented as virtual instruction decomposition
-- primes: REMUW not implemented, branch instruction handling may be incomplete
+### What's Needed
+1. Implement inline sequence expansion for division/remainder instructions in the tracer
+2. Add new virtual instruction types: VirtualAdvice, VirtualAssertEQ, VirtualAssertValidDiv0,
+   VirtualChangeDivisorW, VirtualZeroExtendWord, VirtualAssertValidUnsignedRemainder,
+   VirtualAssertMulUNoOverflow, VirtualAssertLTE, VirtualMovsign
+3. Add new lookup tables: ValidDiv0Table, VirtualChangeDivisorWTable/Table,
+   ValidUnsignedRemainderTable, LowerHalfWordTable, LTETable,
+   VirtualAssertMulUNoOverflowTable, MovsignTable
+4. Implement execution semantics for each virtual instruction
+5. Handle register file updates across the virtual sequence
+6. Generate correct bytecode entries for each step in the sequence
+
+### Key Files
+- `src/tracer/mod.zig` - Instruction execution and trace generation
+- `src/zkvm/preprocessing.zig` - Bytecode decomposition
+- `src/zkvm/instruction/lookup_trace.zig` - Lookup trace generation
+- `src/zkvm/instruction/lookups.zig` - Lookup computation
+
+### Instructions Using Division/Remainder in Examples
+- gcd.elf: divw, remw, mulw
+- primes.elf: remuw, mulw
 
 ## Test Commands
 ```bash
 cd /home/vivado/projects/zolt && zig build -Doptimize=ReleaseFast
-./zig-out/bin/zolt prove examples/fibonacci.elf --trace-length 64 -o /tmp/zolt_proof.bin --jolt-format --export-preprocessing /tmp/zolt_preprocessing.bin --srs /tmp/jolt_dory_srs.bin
-cd /home/vivado/projects/jolt && RAYON_NUM_THREADS=1 cargo run --release --features zolt-debug --manifest-path examples/fibonacci/Cargo.toml -- --verify-zolt-proof /tmp/zolt_proof.bin --zolt-preprocessing /tmp/zolt_preprocessing.bin.ram
+./zig-out/bin/zolt prove examples/bitwise.elf --trace-length 32 -o /tmp/zolt_bitwise_proof.bin --jolt-format --export-preprocessing /tmp/zolt_bitwise_preprocessing.bin --srs /tmp/jolt_dory_srs.bin
+cd /home/vivado/projects/jolt && RAYON_NUM_THREADS=1 cargo run --release --features zolt-debug --manifest-path examples/bitwise/Cargo.toml -- --verify-zolt-proof /tmp/zolt_bitwise_proof.bin --zolt-preprocessing /tmp/zolt_bitwise_preprocessing.bin.ram
 ```
-
-## Success Criteria:
-- [x] `zig build test` passes all tests (726/726)
-- [x] Zolt can generate a proof for example programs
-- [x] The proof can be loaded and verified by Jolt's verifier (4 programs verified)
-- [x] No modifications needed on the Jolt side (only zolt-debug feature for logging)

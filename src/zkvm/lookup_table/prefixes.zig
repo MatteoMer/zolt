@@ -704,19 +704,34 @@ fn lessThanPrefixMle(
     _: usize, // j unused
 ) F {
     // LessThan depends on the Eq checkpoint
-    const eq_checkpoint = checkpoints[@intFromEnum(Prefixes.Eq)] orelse F.one();
-    var result = checkpoints[@intFromEnum(Prefixes.LessThan)] orelse F.zero();
+    // Reference: jolt-core/src/zkvm/lookup_table/prefixes/lt.rs
+    var eq = checkpoints[@intFromEnum(Prefixes.Eq)] orelse F.one();
+    var lt = checkpoints[@intFromEnum(Prefixes.LessThan)] orelse F.zero();
     if (r_x) |rx| {
         const y = F.fromU64(@as(u64, c));
-        // LT contribution: eq_prev * (1 - r_x) * y
-        result = result.add(eq_checkpoint.mul(F.one().sub(rx)).mul(y));
+        // LT contribution from current bit: eq_prev * (1 - r_x) * c
+        lt = lt.add(eq.mul(F.one().sub(rx)).mul(y));
+        // Check if remaining suffix bits have x < y
+        const uninterleaved = b.uninterleave();
+        if (uninterleaved.left < uninterleaved.right) {
+            // Update eq for this pair, then add suffix lt contribution
+            eq = eq.mul(rx.mul(y).add(F.one().sub(rx).mul(F.one().sub(y))));
+            lt = lt.add(eq);
+        }
     } else {
         const x = F.fromU64(@as(u64, c));
         const y_msb_val = F.fromU64(@as(u64, b.popMsb()));
-        // LT contribution: eq_prev * (1 - x) * y_msb
-        result = result.add(eq_checkpoint.mul(F.one().sub(x)).mul(y_msb_val));
+        // LT contribution from current bit: eq_prev * (1 - x) * y_msb
+        lt = lt.add(eq.mul(F.one().sub(x)).mul(y_msb_val));
+        // Check if remaining suffix bits have x < y
+        const uninterleaved = b.uninterleave();
+        if (uninterleaved.left < uninterleaved.right) {
+            // Update eq for this pair, then add suffix lt contribution
+            eq = eq.mul(x.mul(y_msb_val).add(F.one().sub(x).mul(F.one().sub(y_msb_val))));
+            lt = lt.add(eq);
+        }
     }
-    return result;
+    return lt;
 }
 fn lessThanUpdateCheckpoint(
     comptime F: type,

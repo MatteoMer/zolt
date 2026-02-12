@@ -1167,17 +1167,19 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     lookups_indices_hi[j] = 0;
                 }
 
-                // Override lookup_output for ADDIW/ADDW/SUBW to match table MLE output.
-                // For identity-path with RangeCheck table: materialize_entry(index) = lower64(index).
-                // This replaces the rd_value-based output set earlier.
-                if (opcode == 0x1b and funct3 == 0) {
-                    // ADDIW: output = lower64(rs1 + imm) from RangeCheck table
-                    lookup_output = F.fromU64(lookups_indices_lo[j]);
-                } else if (opcode == 0x3b) {
-                    if (funct3 == 0 and (funct7 == 0 or funct7 == 0x20)) {
-                        // ADDW/SUBW: output = lower64(lookup_index) from RangeCheck table
-                        lookup_output = F.fromU64(lookups_indices_lo[j]);
-                    }
+                // GENERAL FIX: For ALL instructions with a valid lookup table, use the
+                // actual table entry (materializeTableEntry) instead of rd_value.
+                // This is critical because rd_value (the RISC-V architectural result) can
+                // differ from the table MLE output. Examples:
+                //   - LUI: rd_value = sign_extend_32_to_64(imm<<12), but table = lower64(key)
+                //   - JAL: rd_value = pc+4, but lookup_output should be table entry at key
+                //   - VirtualSRLI: rd_value differs from table MLE
+                // The address round prefix-suffix decomposition computes based on actual
+                // table MLEs, so the initial claim must also use table MLEs for consistency.
+                if (table_idx >= 0) {
+                    const t_idx_u2: usize = @intCast(table_idx);
+                    const Table2 = @import("../lookup_table/mod.zig").LookupTable(F, 64);
+                    lookup_output = F.fromU64(Table2.materializeTableEntry(t_idx_u2, lookup_idx));
                 }
 
                 // For no-table instructions: zero ALL operands to match R1CS witness
@@ -1189,6 +1191,19 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                 // Re-compute combined_vals with the corrected lookup_output
                 lookups_combined_vals[j] = lookup_output.add(gamma_raf.mul(left_op)).add(gamma_raf2.mul(right_op));
+
+                // DIAGNOSTIC: Verify lookup_output matches table materializeEntry for each cycle
+                if (table_idx >= 0) {
+                    const t_idx_u: usize = @intCast(table_idx);
+                    const Table = @import("../lookup_table/mod.zig").LookupTable(F, 64);
+                    const table_entry = Table.materializeTableEntry(t_idx_u, lookup_idx);
+                    const table_entry_f = F.fromU64(table_entry);
+                    if (!table_entry_f.eql(lookup_output)) {
+                        dbg("[TABLE MISMATCH] j={}: opcode=0x{x} table={} rd_value=0x{x} table_entry=0x{x} idx=0x{x:0>32}\n", .{
+                            j, opcode, table_idx, lookup_output.toU64(), table_entry, lookup_idx,
+                        });
+                    }
+                }
 
                 // Debug first 5 cycles with full BE bytes
                 if (j < 5) {
@@ -1641,6 +1656,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // Instance 1: RamRaClaimReduction - initialized later after computed_ram_ra_input is computed
             var ram_ra_current_claim: F = undefined;
             var lookups_claim = lookups_input; // Instance 2: LookupsReadRaf (no scaling, active from round 0)
+            const batch2_inv = batch2.inverse().?; // Pre-compute for deriving Instance 2 from batched claim
 
             // ===================================================================
             // RamRaClaimReduction State Initialization
@@ -3487,12 +3503,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // CRITICAL VERIFICATION: p(0) + p(1) should equal current_batched_claim
                     const poly_sum = combined_poly[0].add(combined_poly[1]);
                     const sumcheck_ok_addr = poly_sum.eql(current_batched_claim);
-                    if (!sumcheck_ok_addr or round < 3 or round == 127) {
-                        dbg("[STAGE5 VERIFY R{}] p(0)+p(1)={x}, claim={x}, match={}\n", .{
+                    if (!sumcheck_ok_addr) {
+                        dbg("[STAGE5 VERIFY R{}] p(0)+p(1) != claim! p01={x}, claim={x}\n", .{
                             round,
                             poly_sum.toBytesBE()[16..32].*,
                             current_batched_claim.toBytesBE()[16..32].*,
-                            sumcheck_ok_addr,
                         });
                     }
 
@@ -3510,11 +3525,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     coeffs[0] = batched_c0; // c0
                     coeffs[1] = batched_c2; // c2
 
-                    // Debug: print coefficients for select rounds
-                    if (round < 3 or round >= 110) {
-                        dbg("[STAGE5 COEFF ROUND {}] c0 (LE) = {any}\n", .{ round, coeffs[0].toBytes() });
-                        dbg("[STAGE5 COEFF ROUND {}] c2 (LE) = {any}\n", .{ round, coeffs[1].toBytes() });
-                    }
+                    // Debug: print coefficients in same LE format as Jolt verifier for ALL rounds
+                    dbg("  [S5P] R{} c0={x} c2={x}\n", .{
+                        round,
+                        coeffs[0].toBytes()[0..16].*,
+                        coeffs[1].toBytes()[0..16].*,
+                    });
 
                     try proof.compressed_polys.append(self.allocator, .{
                         .coeffs_except_linear_term = coeffs,
@@ -3961,14 +3977,18 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         // DRIFT DEBUG: Compute direct sum after condensation to compare with lookups_claim
                         // At this point, lookups_eq_evals[j] has been condensed to include the expanding table contribution
                         // The sum should match lookups_claim (after polynomial evolution through previous round)
-                        if (current_phase == 1 or current_phase == 8 or current_phase == 15) {
+                        {
                             var brute_sum = F.zero();
                             for (0..T) |jj| {
                                 brute_sum = brute_sum.add(lookups_eq_evals[jj].mul(lookups_combined_vals[jj]));
                             }
+                            const drift_match = brute_sum.eql(lookups_claim);
                             dbg("[DRIFT_CHECK Phase {}] brute_sum(eq*combined) = {x}\n", .{ current_phase, brute_sum.toBytesBE()[16..32].* });
                             dbg("[DRIFT_CHECK Phase {}] lookups_claim (poly chain) = {x}\n", .{ current_phase, lookups_claim.toBytesBE()[16..32].* });
-                            dbg("[DRIFT_CHECK Phase {}] match = {}\n", .{ current_phase, brute_sum.eql(lookups_claim) });
+                            dbg("[DRIFT_CHECK Phase {}] match = {}\n", .{ current_phase, drift_match });
+                            if (!drift_match) {
+                                dbg("[DRIFT_CHECK Phase {}] *** DIVERGENCE DETECTED at phase transition 0->{} ***\n", .{ current_phase, current_phase });
+                            }
                         }
 
                         // Re-initialize suffix polys and RAF for new phase with condensed u_evals
@@ -4308,6 +4328,24 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         dbg("[TABLE_VERIFY] OR direct = {x}\n", .{direct_or_mle.toBytesBE()[16..32].*});
                         dbg("[TABLE_VERIFY] OR prefix-suffix = {x}\n", .{table_values[4].toBytesBE()[16..32].*});
                         dbg("[TABLE_VERIFY] OR match: {}\n", .{direct_or_mle.eql(table_values[4])});
+
+                        // Verify UnsignedLessThan table (index 11):
+                        // Σ_i (1 - r[2*i]) * r[2*i+1] * Π_{j<i} (r[2*j]*r[2*j+1] + (1-r[2*j])*(1-r[2*j+1]))
+                        {
+                            var direct_ult_mle = F.zero();
+                            var eq_term = F.one();
+                            for (0..64) |i| {
+                                const x_i = challenges[2 * i];
+                                const y_i = challenges[2 * i + 1];
+                                direct_ult_mle = direct_ult_mle.add(F.one().sub(x_i).mul(y_i).mul(eq_term));
+                                eq_term = eq_term.mul(x_i.mul(y_i).add(F.one().sub(x_i).mul(F.one().sub(y_i))));
+                            }
+                            dbg("[TABLE_VERIFY] UnsignedLessThan direct = {any}\n", .{direct_ult_mle.toBytes()});
+                            dbg("[TABLE_VERIFY] UnsignedLessThan prefix-suffix = {any}\n", .{table_values[11].toBytes()});
+                            dbg("[TABLE_VERIFY] UnsignedLessThan match: {}\n", .{direct_ult_mle.eql(table_values[11])});
+                            // Also compare with Jolt's expected value
+                            dbg("[TABLE_VERIFY] UnsignedLessThan Jolt val = ce b8 26 7f 68 99 84 22 e1 c6 cd a7 b2 dd cd 24 a4 7a 39 dc 1f 7f f9 d7 7f 51 3f 23 03 54 5f 1c\n", .{});
+                        }
 
                         // Debug: print key prefix checkpoint values
                         dbg("[STAGE5 REMATERIALIZE] Key prefix checkpoints:\n", .{});
@@ -5500,7 +5538,6 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             // CRITICAL: Derive correct Instance 2 claim from batched output
             // The batched output_claim is CORRECT (S5P==S5V). Individual claims for
             // inst0 and inst1 are also correct. So we can derive the TRUE inst2 claim.
-            const batch2_inv = batch2.inverse().?;
             const correct_inst2_from_batched = current_batched_claim.sub(batch0.mul(regs_val_current_claim)).sub(batch1.mul(ram_ra_current_claim)).mul(batch2_inv);
             dbg("  [DRIFT CHECK] lookups_claim (tracked)     = {any}\n", .{lookups_claim.toBytes()});
             dbg("  [DRIFT CHECK] correct_inst2 (from batch)  = {any}\n", .{correct_inst2_from_batched.toBytes()});
@@ -5813,6 +5850,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             var val_claim = F.zero();
             for (0..num_lookup_tables) |i| {
                 val_claim = val_claim.add(table_flags[i].mul(stored_table_values[i]));
+                if (!table_flags[i].eql(F.zero())) {
+                    dbg("  [ZOLT] table[{}] val_eval(FULL 32 LE)={any} flag(FULL 32 LE)={any}\n", .{
+                        i, stored_table_values[i].toBytes(), table_flags[i].toBytes(),
+                    });
+                }
             }
             dbg("  val_claim (from formula) FULL LE = {any}\n", .{val_claim.toBytes()});
             dbg("  val_claim last 16 LE = ", .{});

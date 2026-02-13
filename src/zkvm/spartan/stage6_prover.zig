@@ -3029,7 +3029,16 @@ fn BytecodeReadRafProver(comptime F: type) type {
             // and chunks sequentially: chunk 0 = MSB vars, chunk d-1 = LSB vars.
             // We keep r_address_be for RA chunk slicing (same convention as before).
 
-            // Note: r_address_challenges debug removed due to crashes in ReleaseFast
+            // Print address challenges (ALWAYS ON for debugging)
+            {
+                std.debug.print("[BCRAF_TRANS] r_address_challenges (len={}, LH order):\n", .{self.bytecode_log_k});
+                for (0..self.bytecode_log_k) |i| {
+                    const ch_be = r_address_challenges[i].toBytesBE();
+                    std.debug.print("  ch[{d}]_LE=[", .{i});
+                    for (0..32) |bi| std.debug.print("{x:0>2}", .{ch_be[31 - bi]});
+                    std.debug.print("]\n", .{});
+                }
+            }
 
             // Compute r_address_be for RA chunk slicing (same as before)
             var r_address_be = try self.allocator.alloc(F, self.bytecode_log_k);
@@ -3043,24 +3052,24 @@ fn BytecodeReadRafProver(comptime F: type) type {
             const eq_addr = try computeEqTable(F, self.allocator, r_address_challenges, self.bytecode_log_k);
             defer self.allocator.free(eq_addr);
 
-            // Debug: eq_addr entries (gated)
-            if (debug_verbose) {
+            // Debug: eq_addr entries (ALWAYS ON, full 32 bytes)
+            {
                 for (0..bytecode_K) |ek| {
-                    const eab = eq_addr[ek].toBytes();
-                    dbg("[ZOLT_EQ_ADDR] eq[{d}]_LE=[", .{ek});
-                    for (0..32) |bi| dbg("{x:0>2}", .{eab[bi]});
-                    dbg("]\n", .{});
+                    const eab = eq_addr[ek].toBytesBE();
+                    std.debug.print("[ZOLT_EQ_ADDR] eq[{d}]_LE=[", .{ek});
+                    for (0..32) |bi| std.debug.print("{x:0>2}", .{eab[31 - bi]});
+                    std.debug.print("]\n", .{});
                 }
             }
 
-            // Debug: val_polys entries (gated)
-            if (debug_verbose) {
+            // Debug: val_polys entries (ALWAYS ON for debugging)
+            {
                 for (0..5) |vs| {
                     for (0..bytecode_K) |kk| {
-                        const vpk = self.val_polys[vs][kk].toBytes();
-                        dbg("[ZOLT_VP] Val[{d}][{d}]_LE=[", .{ vs, kk });
-                        for (0..32) |bi| dbg("{x:0>2}", .{vpk[bi]});
-                        dbg("]\n", .{});
+                        const vpk = self.val_polys[vs][kk].toBytesBE();
+                        std.debug.print("[ZOLT_VP] Val[{d}][{d}]_LE=[", .{ vs, kk });
+                        for (0..8) |bi| std.debug.print("{x:0>2}", .{vpk[31 - bi]});
+                        std.debug.print("]\n", .{});
                     }
                 }
             }
@@ -3070,7 +3079,17 @@ fn BytecodeReadRafProver(comptime F: type) type {
                 var val_eval = F.zero();
                 const max_k = @min(self.val_polys[s].len, bytecode_K);
                 for (0..max_k) |k| {
-                    val_eval = val_eval.add(self.val_polys[s][k].mul(eq_addr[k]));
+                    const term = self.val_polys[s][k].mul(eq_addr[k]);
+                    val_eval = val_eval.add(term);
+                    if (s == 0) {
+                        const t_be = term.toBytesBE();
+                        const ps_be = val_eval.toBytesBE();
+                        std.debug.print("[DOTPROD] s=0 k={d} term_LE=[", .{k});
+                        for (0..8) |bi| std.debug.print("{x:0>2}", .{t_be[31 - bi]});
+                        std.debug.print("] partial_sum_LE=[", .{});
+                        for (0..8) |bi| std.debug.print("{x:0>2}", .{ps_be[31 - bi]});
+                        std.debug.print("]\n", .{});
+                    }
                 }
 
                 // Add RAF terms (identity polynomial contribution)
@@ -4117,9 +4136,9 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 }
             }
 
-            // ALWAYS-ON: Dump bytecode entries 19-50 (REMUW range)
-            std.debug.print("[STAGE6] Bytecode entries (k=19..50):\n", .{});
-            for (19..@min(bytecode_K, 51)) |k| {
+            // ALWAYS-ON: Dump ALL bytecode entries
+            std.debug.print("[STAGE6] Bytecode entries (ALL k=0..{}):\n", .{bytecode_K});
+            for (0..@min(bytecode_K, 64)) |k| {
                 if (k >= bytecode_entries.len) break;
                 const entry = bytecode_entries[k];
                 std.debug.print("[STAGE6] entry[{}]: addr=0x{x:0>8} rd={} rs1={} rs2={} imm={} cf=[", .{k, entry.address, entry.rd, entry.rs1, entry.rs2, entry.imm});
@@ -5484,6 +5503,28 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         self.allocator.free(cached_bc_phase2.?);
                         cached_bc_phase2 = null;
                         bytecode_prover.bindChallengePhase2(challenge);
+
+                        // BRUTE FORCE CHECK: recompute Σ_c combined[c] * Π_i ra[i][c] after bind
+                        {
+                            const bc_combined_dbg = bytecode_prover.combined.?;
+                            const bc_ra_dbg = bytecode_prover.ra_chunks.?;
+                            const bc_T_dbg = bytecode_prover.current_len;
+                            var bf_sum = F.zero();
+                            for (0..bc_T_dbg) |c_dbg| {
+                                var ra_prod_dbg = F.one();
+                                for (0..bytecode_prover.bytecode_d) |di_dbg| {
+                                    ra_prod_dbg = ra_prod_dbg.mul(bc_ra_dbg[di_dbg][c_dbg]);
+                                }
+                                bf_sum = bf_sum.add(bc_combined_dbg[c_dbg].mul(ra_prod_dbg));
+                            }
+                            const bf_be = bf_sum.toBytesBE();
+                            const ic_be2 = instance_claims[0].toBytesBE();
+                            std.debug.print("[BF_CHECK] R{} Phase2 T={} inst0_LE=[", .{ round, bc_T_dbg });
+                            for (0..8) |bi| std.debug.print("{x:0>2}", .{ic_be2[31 - bi]});
+                            std.debug.print("] bf_sum_LE=[", .{});
+                            for (0..8) |bi| std.debug.print("{x:0>2}", .{bf_be[31 - bi]});
+                            std.debug.print("] match={}\n", .{@as(u8, if (bf_sum.eql(instance_claims[0])) 1 else 0)});
+                        }
                     }
                 }
 
@@ -5668,15 +5709,35 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             const hamming_weight_claim = hamming_prover.openingClaim();
 
             const bytecode_ra_claims = try bytecode_prover.getOpeningClaims(self.allocator);
-            // Debug: bytecode RA claims (gated)
-            if (debug_verbose) {
-                dbg("[S6P] Bytecode RA claims (d={d}):\n", .{bytecode_d});
+            // Debug: bytecode RA claims (ALWAYS ON for debugging)
+            {
+                std.debug.print("[S6P] Bytecode RA claims (d={d}):\n", .{bytecode_d});
                 for (0..bytecode_d) |i| {
                     const be = bytecode_ra_claims[i].toBytesBE();
-                    dbg("  ra[{d}]_LE=[", .{i});
-                    for (0..32) |bi| dbg("{x:0>2}", .{be[31 - bi]});
-                    dbg("]\n", .{});
+                    std.debug.print("  ra[{d}]_LE=[", .{i});
+                    for (0..32) |bi| std.debug.print("{x:0>2}", .{be[31 - bi]});
+                    std.debug.print("]\n", .{});
                 }
+                // Print combined[0] (the "val" part after all Phase 2 bindings)
+                const comb0 = bytecode_prover.combined.?[0];
+                const comb0_be = comb0.toBytesBE();
+                std.debug.print("  combined[0]_LE=[", .{});
+                for (0..32) |bi| std.debug.print("{x:0>2}", .{comb0_be[31 - bi]});
+                std.debug.print("]\n", .{});
+                // Compute val_from_prover = combined[0] * Π ra[i]
+                var val_ra_prod = comb0;
+                for (0..bytecode_d) |i| {
+                    val_ra_prod = val_ra_prod.mul(bytecode_ra_claims[i]);
+                }
+                const vrp_be = val_ra_prod.toBytesBE();
+                std.debug.print("  combined[0]*Π_ra_LE=[", .{});
+                for (0..32) |bi| std.debug.print("{x:0>2}", .{vrp_be[31 - bi]});
+                std.debug.print("]\n", .{});
+                // Compare with instance_claims[0]
+                const ic0_be = instance_claims[0].toBytesBE();
+                std.debug.print("  instance_claims[0]_LE=[", .{});
+                for (0..32) |bi| std.debug.print("{x:0>2}", .{ic0_be[31 - bi]});
+                std.debug.print("] match_val_ra={}\n", .{@as(u8, if (val_ra_prod.eql(instance_claims[0])) 1 else 0)});
             }
 
             const ram_ra_virtual_claims = try ram_ra_prover.getOpeningClaims(self.allocator);

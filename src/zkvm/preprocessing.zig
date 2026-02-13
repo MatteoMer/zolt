@@ -212,6 +212,12 @@ pub const JoltInstruction = struct {
         try writer.writeAll(",\"is_first_in_sequence\":");
         try writer.writeAll(if (self.is_first_in_sequence) "true" else "false");
 
+        // VirtualAdvice has an extra 'advice' field (u64) that other instructions don't have.
+        // In preprocessing, advice is always 0 (actual values are filled at runtime).
+        if (self.variant == .VirtualAdvice) {
+            try writer.writeAll(",\"advice\":0");
+        }
+
         // is_compressed
         try writer.writeAll(",\"is_compressed\":");
         try writer.writeAll(if (self.is_compressed) "true" else "false");
@@ -814,6 +820,66 @@ pub const BytecodePreprocessing = struct {
             }
 
             offset += instr_size;
+        }
+
+        // Add termination store virtual sequence (LUI + ADDI + SB) = 3 entries.
+        // These must be in the bytecode array BEFORE power-of-2 padding so that
+        // code_size accounts for them. This matches computeBytecodeCodeSize which
+        // also adds +3 for termination.
+        //
+        // The termination stores write a sentinel value to the termination address
+        // to signal program completion. The actual instruction words are computed
+        // from the termination address, but for preprocessing purposes we just need
+        // the entries in the bytecode array with correct structure.
+        //
+        // LUI x31, upper20(term_addr) - load upper bits of termination address
+        // ADDI x30, x0, 1 - load value 1
+        // SB x30, lower12(term_addr)(x31) - store byte 1 to termination address
+        {
+            // Use address=0 for all termination entries (they are virtual, not real ELF instructions)
+            const term_addr = base_address + code_bytes.len;
+            const upper20: u32 = @truncate((term_addr >> 12) & 0xFFFFF);
+            const lower12: u32 = @truncate(term_addr & 0xFFF);
+            const imm_upper7: u32 = (lower12 >> 5) & 0x7F;
+            const imm_lower5: u32 = lower12 & 0x1F;
+
+            // Compute instruction words (for raw_words export)
+            const lui_word: u32 = (upper20 << 12) | (31 << 7) | 0x37;
+            const addi_word: u32 = (1 << 20) | (0 << 15) | (0 << 12) | (30 << 7) | 0x13;
+            const sb_word: u32 = (imm_upper7 << 25) | (30 << 20) | (31 << 15) | (0 << 12) | (imm_lower5 << 7) | 0x23;
+
+            // LUI x31 (virtual, vsr=2)
+            try self.bytecode.append(allocator, .{
+                .variant = .LUI,
+                .address = 0,
+                .operands = .{ .FormatU = .{ .rd = 31, .imm = @as(u64, upper20) << 12 } },
+                .virtual_sequence_remaining = 2,
+                .is_first_in_sequence = false,
+                .is_compressed = false,
+            });
+            try self.raw_words.append(allocator, lui_word);
+
+            // ADDI x30, x0, 1 (virtual, vsr=1)
+            try self.bytecode.append(allocator, .{
+                .variant = .ADDI,
+                .address = 0,
+                .operands = .{ .FormatI = .{ .rd = 30, .rs1 = 0, .imm = 1 } },
+                .virtual_sequence_remaining = 1,
+                .is_first_in_sequence = false,
+                .is_compressed = false,
+            });
+            try self.raw_words.append(allocator, addi_word);
+
+            // SB x30, lower12(x31) (anchor, vsr=null)
+            try self.bytecode.append(allocator, .{
+                .variant = .SB,
+                .address = 0,
+                .operands = .{ .FormatS = .{ .rs1 = 31, .rs2 = 30, .imm = @as(i64, @intCast(lower12)) } },
+                .virtual_sequence_remaining = null,
+                .is_first_in_sequence = false,
+                .is_compressed = false,
+            });
+            try self.raw_words.append(allocator, sb_word);
         }
 
         // Pad to next power of 2

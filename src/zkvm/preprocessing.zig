@@ -534,7 +534,8 @@ pub const BytecodePreprocessing = struct {
                 },
                 .SLLI => {
                     // SLLI rd, rs1, imm → VirtualMULI rd, rs1, (1 << imm)
-                    // Single virtual instruction (not a 2-step sequence)
+                    // Single virtual instruction - standalone 1-entry virtual sequence.
+                    // Jolt's finalize() sets vsr=Some(0) and is_first_in_sequence=true.
                     const shift_amount = switch (jolt_instr.operands) {
                         .FormatI => |i| i.imm,
                         else => 0,
@@ -551,8 +552,8 @@ pub const BytecodePreprocessing = struct {
                         .variant = .VirtualMULI,
                         .address = addr,
                         .operands = .{ .FormatI = .{ .rd = rd, .rs1 = rs1, .imm = @as(u64, 1) << @intCast(shift_amount) } },
-                        .virtual_sequence_remaining = null,
-                        .is_first_in_sequence = false,
+                        .virtual_sequence_remaining = 0,
+                        .is_first_in_sequence = true,
                         .is_compressed = is_compressed,
                     });
                 },
@@ -589,7 +590,8 @@ pub const BytecodePreprocessing = struct {
                 },
                 .SRLI => {
                     // SRLI rd, rs1, shamt → VirtualSRLI(rd, rs1, bitmask)
-                    // Single virtual instruction (like SLLI → VirtualMULI)
+                    // Single virtual instruction - standalone 1-entry virtual sequence.
+                    // Jolt's finalize() sets vsr=Some(0) and is_first_in_sequence=true.
                     const raw_imm = switch (jolt_instr.operands) {
                         .FormatI => |i| i.imm,
                         else => 0,
@@ -609,8 +611,8 @@ pub const BytecodePreprocessing = struct {
                         .variant = .VirtualSRLI,
                         .address = addr,
                         .operands = .{ .FormatI = .{ .rd = rd, .rs1 = rs1_val, .imm = bitmask } },
-                        .virtual_sequence_remaining = null,
-                        .is_first_in_sequence = false,
+                        .virtual_sequence_remaining = 0,
+                        .is_first_in_sequence = true,
                         .is_compressed = is_compressed,
                     });
                 },

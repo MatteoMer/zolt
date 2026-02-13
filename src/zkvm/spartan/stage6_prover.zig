@@ -4298,7 +4298,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         break :blk F.fromU64(@as(u64, @bitCast(entry.imm)));
                     }
                 };
-                var val1 = stage1_gammas[0].mul(F.fromU64(entry.address));
+                var val1 = F.fromU64(entry.address); // No gamma[0] - Jolt formula: unexpanded_pc + γ¹·imm + Σγ^(2+i)·cf[i]
                 val1 = val1.add(stage1_gammas[1].mul(imm_field));
                 for (0..13) |i| {
                     if (entry.circuit_flags[i]) {
@@ -4327,7 +4327,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 //         + γ₃⁴·R_is_rs2 + γ₃⁵·R_is_imm + γ₃⁶·is_noop
                 //         + γ₃⁷·virtual_instruction + γ₃⁸·is_first_in_sequence
                 // Uses same signed Imm encoding as Stage 1 (see comment above)
-                var val3 = stage3_gammas[0].mul(imm_field);
+                var val3 = imm_field; // No gamma[0] - Jolt formula: imm + γ¹·unexpanded_pc + Σγ^(2+i)·flags[i]
                 val3 = val3.add(stage3_gammas[1].mul(F.fromU64(entry.address)));
                 if (entry.instruction_flags[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)]) {
                     val3 = val3.add(stage3_gammas[2]);
@@ -4369,7 +4369,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 // Stage 5: eq(rd, r_reg5) + γ₅¹·!is_interleaved + Σ γ₅^(2+i)·table_flag_i
                 var val5 = F.zero();
                 if (entry.rd < REGISTER_COUNT) {
-                    val5 = val5.add(stage5_gammas[0].mul(eq_table_5[entry.rd]));
+                    val5 = val5.add(eq_table_5[entry.rd]); // No gamma[0] - Jolt formula: eq(rd,r) + γ¹·!interleaved + Σγ^(2+i)·table[i]
                 }
                 if (!entry.is_interleaved) {
                     val5 = val5.add(stage5_gammas[1]);
@@ -4512,7 +4512,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 }
                 // Also check non-RAF rv_claim_1 directly
                 var rv1_recomp = F.zero();
-                rv1_recomp = rv1_recomp.add(stage1_gammas[0].mul(bc_addr_sum));
+                rv1_recomp = rv1_recomp.add(bc_addr_sum); // No gamma[0] - matches Jolt formula
                 rv1_recomp = rv1_recomp.add(stage1_gammas[1].mul(bc_imm_sum));
                 for (0..13) |fi| {
                     rv1_recomp = rv1_recomp.add(stage1_gammas[2 + fi].mul(bc_cf_sums[fi]));
@@ -4523,7 +4523,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 // rv1_recomp = Σ_k F_s[k] * val_1_no_raf(k) (the non-RAF part of recomputed)
                 // rv1_opening = Σ_i gamma_i * opening_claim_i (from opening_claims)
                 var rv1_opening = F.zero();
-                rv1_opening = rv1_opening.add(stage1_gammas[0].mul(oc_addr));
+                rv1_opening = rv1_opening.add(oc_addr); // No gamma[0] - matches Jolt formula
                 rv1_opening = rv1_opening.add(stage1_gammas[1].mul(oc_imm));
                 for (0..13) |fi| {
                     const oc_cf_fi = getClaim(opening_claims, .{ .Virtual = .{ .poly = .{ .OpFlags = @intCast(fi) }, .sumcheck_id = .SpartanOuter } });
@@ -6404,7 +6404,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             // rv_claim_1 (Stage 1 / SpartanOuter)
             var rv1 = F.zero();
             const oc_upc = getClaim(opening_claims, .{ .Virtual = .{ .poly = .UnexpandedPC, .sumcheck_id = .SpartanOuter } });
-            rv1 = rv1.add(stage1_gammas[0].mul(oc_upc));
+            rv1 = rv1.add(oc_upc); // No gamma[0] - Jolt formula: unexpanded_pc + γ¹·imm + Σγ^(2+i)·cf[i]
             const oc_imm = getClaim(opening_claims, .{ .Virtual = .{ .poly = .Imm, .sumcheck_id = .SpartanOuter } });
             rv1 = rv1.add(stage1_gammas[1].mul(oc_imm));
             var oc_flags: [13]F = undefined;
@@ -6449,8 +6449,8 @@ pub fn Stage6BatchedProver(comptime F: type) type {
 
             // rv_claim_3 (Stage 3)
             var rv3 = F.zero();
-            rv3 = rv3.add(stage3_gammas[0].mul(getClaim(opening_claims,
-                .{ .Virtual = .{ .poly = .Imm, .sumcheck_id = .InstructionInputVirtualization } })));
+            rv3 = rv3.add(getClaim(opening_claims,
+                .{ .Virtual = .{ .poly = .Imm, .sumcheck_id = .InstructionInputVirtualization } })); // No gamma[0] - Jolt formula: imm + γ¹·unexpanded_pc + ...
             rv3 = rv3.add(stage3_gammas[1].mul(getClaim(opening_claims,
                 .{ .Virtual = .{ .poly = .UnexpandedPC, .sumcheck_id = .SpartanShift } })));
             rv3 = rv3.add(stage3_gammas[2].mul(getClaim(opening_claims,
@@ -6480,8 +6480,8 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             // rv_claim_5 (Stage 5)
             const NUM_LOOKUP_TABLES: usize = 41;
             var rv5 = F.zero();
-            rv5 = rv5.add(stage5_gammas[0].mul(getClaim(opening_claims,
-                .{ .Virtual = .{ .poly = .RdWa, .sumcheck_id = .RegistersValEvaluation } })));
+            rv5 = rv5.add(getClaim(opening_claims,
+                .{ .Virtual = .{ .poly = .RdWa, .sumcheck_id = .RegistersValEvaluation } })); // No gamma[0] - Jolt formula: eq(rd,r) + γ¹·!interleaved + ...
             rv5 = rv5.add(stage5_gammas[1].mul(getClaim(opening_claims,
                 .{ .Virtual = .{ .poly = .InstructionRafFlag, .sumcheck_id = .InstructionReadRaf } })));
             for (0..NUM_LOOKUP_TABLES) |i| {

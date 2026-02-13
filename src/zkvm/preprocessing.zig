@@ -1103,16 +1103,17 @@ pub const BytecodePreprocessing = struct {
             });
             try self.raw_words.append(allocator, addi_word);
 
-            // SD x30, lower12(x31) (anchor, vsr=null)
+            // SD x30, lower12(x31) (anchor, vsr=Some(0))
             // NOTE: We use SD instead of SB because SB is not in Jolt's
             // define_rv32im_trait_impls! macro (circuit_flags panics on SB).
             // SD has the Store flag and is a valid Jolt instruction.
             // The raw_word still encodes the original SB for raw word matching.
+            // vsr=Some(0) matches Jolt: VirtualInstruction=true, DoNotUpdatePC=false
             try self.bytecode.append(allocator, .{
                 .variant = .SD,
                 .address = 0,
                 .operands = .{ .FormatS = .{ .rs1 = 31, .rs2 = 30, .imm = @as(i64, @intCast(lower12)) } },
-                .virtual_sequence_remaining = null,
+                .virtual_sequence_remaining = 0, // Some(0): last in virtual sequence
                 .is_first_in_sequence = false,
                 .is_compressed = false,
             });

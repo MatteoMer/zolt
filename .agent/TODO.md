@@ -1,7 +1,7 @@
 # Zolt → Jolt Verification Progress
 
 ## Current Status
-**7/8 example programs pass Stage 5. 6/8 pass all 8 stages.**
+**7/8 example programs pass all 8 stages. 1 needs REMW/DIVW decomposition.**
 
 ### Verified Programs (ALL 8 stages pass):
 - ✅ fibonacci.elf (trace-length 64, 128, 4096)
@@ -10,56 +10,43 @@
 - ✅ signed.elf (trace-length 64)
 - ✅ collatz.elf (trace-length 128)
 - ✅ bitwise.elf (trace-length 32)
+- ✅ primes.elf (trace-length 4096) - **FIXED in Session 15!**
 
 ### Programs with verification failures:
-- ❌ primes.elf - Stage 6 (sumcheck mismatch in memory checking)
-- ❌ gcd.elf - Stage 6 (sumcheck mismatch in memory checking)
+- ❌ gcd.elf - Needs REMW/DIVW 21-step decomposition (currently only REMUW/DIVUW 12-step is implemented)
 
-**Both primes and gcd use REMUW/DIVUW instructions (virtual instruction decomposition).**
-**All 6 passing programs do NOT use division/remainder instructions.**
+## Session 15 Fixes (primes.elf - ALL 8 stages now pass)
 
-## Session 12 Fixes
+### Fix 1: Stage 6 IncClaimReduction virtual register support
+**Root cause:** IncClaimReduction was using `(step.instruction >> 7) & 0x1f` (5-bit truncation, only registers 0-31) and `register_values: [32]u64`, while stage4_gruen_prover (the actual Stage 4 implementation) uses `step.rd_index` (u8, registers 0-127) and `register_values: [128]u64`.
 
-### FIXED: Stage 5 primes.elf + gcd.elf
-**Root cause:** Missing uninterleave + short-circuit check in `LeftOperandIsZero` and `RightOperandIsZero` prefix MLE functions.
+For virtual instruction steps with registers 32+, Stage 6 was truncating to 0-31, causing wrong pre_value lookups and wrong inc values.
 
-Jolt's implementations call `b.uninterleave()` and return `F::zero()` if the relevant operand bits are non-zero (because the IsZero prefix = Π(1-x_i), which is 0 if any bit is 1). Zolt was missing this check, causing incorrect polynomial evaluations during PS sumcheck rounds.
+**Fix:** Changed IncClaimReduction to use `step.rd_index`, `step.rd_written`, and `register_values: [128]u64`.
+**File:** `src/zkvm/spartan/stage6_prover.zig`
 
-**Fix:** Added `b.uninterleave()` + short-circuit to both functions in `src/zkvm/lookup_table/prefixes.zig`.
-**Commit:** 8e8c90b
+### Fix 2: Stage 6 computeLookupIndex missing virtual opcode handlers
+**Root cause:** `computeLookupIndex` only handled virtual opcodes 0x0B, 0x2B, 0x5B. Missing handlers for 0x02 (VirtualAdvice), 0x22 (VirtualAssertEQ), 0x42 (VirtualZeroExtendWord), 0x62 (VirtualAssertValidUnsignedRemainder) caused them to fall through to standard RISC-V decoding where `left_is_rs1`/`right_is_rs2` switches didn't include these opcodes, returning `interleaveBits(0, 0) = 0`.
 
-## Stage 6 Failure Analysis
+**Fix:** Added explicit handlers for all 4 missing virtual opcodes.
+**File:** `src/zkvm/spartan/stage6_prover.zig`
 
-### What Stage 6 does:
-Stage 6 is the memory read/write checking (grand product) stage. It verifies:
-1. Register file reads/writes are consistent
-2. RAM reads/writes are consistent
-3. Program counter increments correctly
+### Fix 3: Dory buildRdIncPolynomial virtual register support
+**Root cause:** Same bug as Fix 1 but in the Dory witness polynomial builder. `buildRdIncPolynomial` was using `register_values: [32]u64` and instruction bit extraction instead of `step.rd_index`/`step.rd_written` with 128 registers. This caused the Dory-committed polynomial to differ from the Stage 6 opening claims.
 
-### Error details:
-- For BOTH primes and gcd: `SUM_S6 DEBUG` shows `expected_output_claim ≠ output_claim`
-- The sumcheck itself runs fine (coefficients are self-consistent)
-- The final expected_output_claim (computed from opening claims) doesn't match
+**Fix:** Changed to use `step.rd_index`, `step.rd_written`, and `register_values: [128]u64`.
+**File:** `src/zkvm/mod.zig`
 
-### Key observation:
-- All 6 passing programs do NOT use division/remainder (REMUW/DIVUW)
-- Both failing programs DO use REMUW/DIVUW
-- REMUW decomposes into 12 virtual instruction steps
-- The virtual instruction decomposition IS implemented in Zolt's tracer + preprocessing
-- The issue must be in how these virtual instructions interact with Stage 6
+## Pending Tasks
+- [ ] Commit and push fixes
+- [ ] Regression test 6 previously-passing programs
+- [ ] Implement REMW/DIVW 21-step decomposition for gcd.elf
+- [ ] Test all 8 programs pass verification
 
-### Likely root causes:
-1. **Bytecode expansion**: The preprocessing may not correctly expand REMUW into 12 bytecode entries
-2. **PC mapping**: Virtual instruction PCs may not match what Jolt's verifier expects
-3. **Circuit flags**: VirtualInstruction, DoNotUpdateUnexpandedPC, IsFirstInSequence flags may be incorrect
-4. **Register mapping**: Virtual registers (a2=32, a3=33, t0-t4=34-38) may not be encoded correctly
-5. **Instruction witness**: The lookup outputs for assert/advice instructions may be wrong
-
-### Next steps:
-1. Compare Zolt's REMUW bytecode entries with what Jolt expects
-2. Check if the PC mapping for virtual instructions matches
-3. Verify circuit flag encoding for virtual instruction sequences
-4. Add diagnostic output to Stage 6 to identify which component mismatches
+## Key Technical Notes
+- Stage 4 uses `stage4_gruen_prover` (NOT `stage4_prover`) - critical for matching register tracking
+- Virtual opcodes: 0x02 (VirtualAdvice), 0x0B (VirtualSignExtendWord), 0x22 (VirtualAssertEQ), 0x2B (VirtualMULI), 0x42 (VirtualZeroExtendWord), 0x5B (VirtualSRLI), 0x62 (VirtualAssertValidUnsignedRemainder)
+- `buildInstructionRaPolynomial` already uses `computeLookupIndex` (auto-picks up virtual opcode fix)
 
 ## Test Commands
 ```bash

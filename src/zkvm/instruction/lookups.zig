@@ -4395,3 +4395,347 @@ test "virtual srli lookup" {
     try std.testing.expect(inst_flags.get(.RightOperandIsImm));
     try std.testing.expect(inst_flags.get(.IsRdNotZero));
 }
+
+// ============================================================================
+// Virtual Instructions for Inline Sequence Decomposition
+// ============================================================================
+
+/// VirtualAdvice instruction lookup
+/// Injects an oracle-provided value (quotient or remainder) into the register file.
+/// Used as the first steps of division/remainder inline sequences.
+///
+/// Reference: jolt-core/src/zkvm/instruction/virtual_advice.rs
+///
+/// Key properties:
+/// - Lookup table: RangeCheck (identity)
+/// - to_lookup_operands: (0, advice) - the advice value is provided by the prover
+/// - Circuit flags: Advice, WriteLookupOutputToRD, VirtualInstruction (when vsr.is_some()),
+///   DoNotUpdateUnexpandedPC (when vsr!=0), IsFirstInSequence, IsCompressed
+/// - Instruction flags: IsRdNotZero
+pub fn VirtualAdviceLookup(comptime XLEN: comptime_int) type {
+    _ = XLEN;
+    return struct {
+        const Self = @This();
+
+        /// The advice value (oracle-provided quotient or remainder)
+        advice: u64,
+        /// Whether this instruction is part of a virtual sequence (vsr.is_some())
+        is_virtual: bool,
+        /// Whether this instruction should not update the unexpanded PC (vsr != 0)
+        do_not_update_pc: bool,
+        /// Whether this is the first instruction in the sequence
+        is_first_in_sequence: bool,
+        /// Whether the original instruction was compressed
+        is_compressed: bool,
+        /// Whether the rd register is not x0
+        is_rd_not_zero: bool,
+
+        pub fn init(
+            advice: u64,
+            is_virtual: bool,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+            is_rd_not_zero: bool,
+        ) Self {
+            return Self{
+                .advice = advice,
+                .is_virtual = is_virtual,
+                .do_not_update_pc = do_not_update_pc,
+                .is_first_in_sequence = is_first_in_sequence,
+                .is_compressed = is_compressed,
+                .is_rd_not_zero = is_rd_not_zero,
+            };
+        }
+
+        /// VirtualAdvice uses RangeCheck table (identity)
+        pub fn lookupTable() LookupTables(64) {
+            return .RangeCheck;
+        }
+
+        /// Lookup index = advice value
+        /// In Jolt: to_lookup_operands returns (0, advice as u128)
+        pub fn toLookupIndex(self: Self) u128 {
+            return @as(u128, self.advice);
+        }
+
+        /// Compute the result: the advice value itself
+        pub fn computeResult(self: Self) u64 {
+            return self.advice;
+        }
+
+        /// Circuit flags for VirtualAdvice
+        pub fn circuitFlags(self: Self) CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.Advice);
+            flags.set(.WriteLookupOutputToRD);
+            if (self.is_virtual) flags.set(.VirtualInstruction);
+            if (self.do_not_update_pc) flags.set(.DoNotUpdateUnexpandedPC);
+            if (self.is_first_in_sequence) flags.set(.IsFirstInSequence);
+            if (self.is_compressed) flags.set(.IsCompressed);
+            return flags;
+        }
+
+        /// Instruction flags for VirtualAdvice
+        pub fn instructionFlags(self: Self) InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            if (self.is_rd_not_zero) flags.set(.IsRdNotZero);
+            return flags;
+        }
+    };
+}
+
+/// VirtualAssertEQ instruction lookup
+/// Asserts that two register values are equal.
+/// Used to verify intermediate computations in division/remainder inline sequences.
+///
+/// Reference: jolt-core/src/zkvm/instruction/virtual_assert_eq.rs
+///
+/// Key properties:
+/// - Lookup table: Equal (table index 6)
+/// - to_lookup_operands: (rs1, rs2) interleaved (default behavior)
+/// - Circuit flags: Assert, VirtualInstruction (when vsr.is_some()),
+///   DoNotUpdateUnexpandedPC (when vsr!=0), IsFirstInSequence, IsCompressed
+/// - Instruction flags: LeftOperandIsRs1Value, RightOperandIsRs2Value
+pub fn VirtualAssertEQLookup(comptime XLEN: comptime_int) type {
+    _ = XLEN;
+    return struct {
+        const Self = @This();
+
+        /// First register value (rs1)
+        rs1_val: u64,
+        /// Second register value (rs2)
+        rs2_val: u64,
+        /// Whether this instruction is part of a virtual sequence
+        is_virtual: bool,
+        /// Whether this instruction should not update the unexpanded PC
+        do_not_update_pc: bool,
+        /// Whether this is the first instruction in the sequence
+        is_first_in_sequence: bool,
+        /// Whether the original instruction was compressed
+        is_compressed: bool,
+
+        pub fn init(
+            rs1_val: u64,
+            rs2_val: u64,
+            is_virtual: bool,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+        ) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .rs2_val = rs2_val,
+                .is_virtual = is_virtual,
+                .do_not_update_pc = do_not_update_pc,
+                .is_first_in_sequence = is_first_in_sequence,
+                .is_compressed = is_compressed,
+            };
+        }
+
+        /// VirtualAssertEQ uses Equal table (table index 6)
+        pub fn lookupTable() LookupTables(64) {
+            return .Equal;
+        }
+
+        /// Lookup index = interleaved(rs1, rs2)
+        pub fn toLookupIndex(self: Self) u128 {
+            return interleaveBits(self.rs1_val, self.rs2_val);
+        }
+
+        /// Compute the result: 1 if equal, 0 if not
+        pub fn computeResult(self: Self) u64 {
+            return if (self.rs1_val == self.rs2_val) 1 else 0;
+        }
+
+        /// Circuit flags for VirtualAssertEQ
+        pub fn circuitFlags(self: Self) CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.Assert);
+            if (self.is_virtual) flags.set(.VirtualInstruction);
+            if (self.do_not_update_pc) flags.set(.DoNotUpdateUnexpandedPC);
+            if (self.is_first_in_sequence) flags.set(.IsFirstInSequence);
+            if (self.is_compressed) flags.set(.IsCompressed);
+            return flags;
+        }
+
+        /// Instruction flags for VirtualAssertEQ
+        pub fn instructionFlags(_: Self) InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsRs2Value);
+            return flags;
+        }
+    };
+}
+
+/// VirtualZeroExtendWord instruction lookup
+/// Zero-extends lower XLEN/2 bits (masks to 32 bits for XLEN=64).
+/// Used to prepare unsigned operands in division/remainder inline sequences.
+///
+/// Reference: jolt-core/src/zkvm/instruction/virtual_zero_extend_word.rs
+///
+/// Key properties:
+/// - Lookup table: LowerHalfWord (table index 20)
+/// - to_lookup_operands: (0, rs1 + 0) = (0, rs1) via AddOperands mode
+/// - Circuit flags: WriteLookupOutputToRD, AddOperands, VirtualInstruction (when vsr.is_some()),
+///   DoNotUpdateUnexpandedPC (when vsr!=0), IsFirstInSequence, IsCompressed
+/// - Instruction flags: LeftOperandIsRs1Value, IsRdNotZero
+pub fn VirtualZeroExtendWordLookup(comptime XLEN: comptime_int) type {
+    return struct {
+        const Self = @This();
+
+        /// The value to zero-extend (rs1)
+        rs1_val: u64,
+        /// Whether this instruction is part of a virtual sequence
+        is_virtual: bool,
+        /// Whether this instruction should not update the unexpanded PC
+        do_not_update_pc: bool,
+        /// Whether this is the first instruction in the sequence
+        is_first_in_sequence: bool,
+        /// Whether the original instruction was compressed
+        is_compressed: bool,
+        /// Whether the rd register is not x0
+        is_rd_not_zero: bool,
+
+        pub fn init(
+            rs1_val: u64,
+            is_virtual: bool,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+            is_rd_not_zero: bool,
+        ) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .is_virtual = is_virtual,
+                .do_not_update_pc = do_not_update_pc,
+                .is_first_in_sequence = is_first_in_sequence,
+                .is_compressed = is_compressed,
+                .is_rd_not_zero = is_rd_not_zero,
+            };
+        }
+
+        /// VirtualZeroExtendWord uses LowerHalfWord table (table index 20)
+        pub fn lookupTable() LookupTables(XLEN) {
+            return .LowerHalfWord;
+        }
+
+        /// Lookup index = rs1 value (via AddOperands: (0, rs1 + 0))
+        pub fn toLookupIndex(self: Self) u128 {
+            return @as(u128, self.rs1_val);
+        }
+
+        /// Compute the result: lower XLEN/2 bits (zero-extended)
+        pub fn computeResult(self: Self) u64 {
+            const half_word_size = XLEN / 2;
+            const mask: u64 = (@as(u64, 1) << half_word_size) - 1;
+            return self.rs1_val & mask;
+        }
+
+        /// Circuit flags for VirtualZeroExtendWord
+        pub fn circuitFlags(self: Self) CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.WriteLookupOutputToRD);
+            flags.set(.AddOperands);
+            if (self.is_virtual) flags.set(.VirtualInstruction);
+            if (self.do_not_update_pc) flags.set(.DoNotUpdateUnexpandedPC);
+            if (self.is_first_in_sequence) flags.set(.IsFirstInSequence);
+            if (self.is_compressed) flags.set(.IsCompressed);
+            return flags;
+        }
+
+        /// Instruction flags for VirtualZeroExtendWord
+        pub fn instructionFlags(self: Self) InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            if (self.is_rd_not_zero) flags.set(.IsRdNotZero);
+            return flags;
+        }
+    };
+}
+
+/// VirtualAssertValidUnsignedRemainder instruction lookup
+/// Asserts that remainder < divisor (or divisor == 0).
+/// Used in unsigned division/remainder inline sequences to validate the remainder.
+///
+/// Reference: jolt-core/src/zkvm/instruction/virtual_assert_valid_unsigned_remainder.rs
+///
+/// Key properties:
+/// - Lookup table: ValidUnsignedRemainder (table index 16)
+/// - to_lookup_operands: (rs1, rs2) interleaved (default behavior)
+/// - Circuit flags: Assert, VirtualInstruction (when vsr.is_some()),
+///   DoNotUpdateUnexpandedPC (when vsr!=0), IsFirstInSequence, IsCompressed
+/// - Instruction flags: LeftOperandIsRs1Value, RightOperandIsRs2Value
+pub fn VirtualAssertValidUnsignedRemainderLookup(comptime XLEN: comptime_int) type {
+    _ = XLEN;
+    return struct {
+        const Self = @This();
+
+        /// Remainder value (rs1)
+        rs1_val: u64,
+        /// Divisor value (rs2)
+        rs2_val: u64,
+        /// Whether this instruction is part of a virtual sequence
+        is_virtual: bool,
+        /// Whether this instruction should not update the unexpanded PC
+        do_not_update_pc: bool,
+        /// Whether this is the first instruction in the sequence
+        is_first_in_sequence: bool,
+        /// Whether the original instruction was compressed
+        is_compressed: bool,
+
+        pub fn init(
+            rs1_val: u64,
+            rs2_val: u64,
+            is_virtual: bool,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+        ) Self {
+            return Self{
+                .rs1_val = rs1_val,
+                .rs2_val = rs2_val,
+                .is_virtual = is_virtual,
+                .do_not_update_pc = do_not_update_pc,
+                .is_first_in_sequence = is_first_in_sequence,
+                .is_compressed = is_compressed,
+            };
+        }
+
+        /// VirtualAssertValidUnsignedRemainder uses ValidUnsignedRemainder table (index 16)
+        pub fn lookupTable() LookupTables(64) {
+            return .ValidUnsignedRemainder;
+        }
+
+        /// Lookup index = interleaved(remainder, divisor)
+        pub fn toLookupIndex(self: Self) u128 {
+            return interleaveBits(self.rs1_val, self.rs2_val);
+        }
+
+        /// Compute the result: 1 if valid (remainder < divisor or divisor == 0), 0 otherwise
+        pub fn computeResult(self: Self) u64 {
+            if (self.rs2_val == 0) return 1; // division by zero case
+            return if (self.rs1_val < self.rs2_val) 1 else 0;
+        }
+
+        /// Circuit flags for VirtualAssertValidUnsignedRemainder
+        pub fn circuitFlags(self: Self) CircuitFlagSet {
+            var flags = CircuitFlagSet.init();
+            flags.set(.Assert);
+            if (self.is_virtual) flags.set(.VirtualInstruction);
+            if (self.do_not_update_pc) flags.set(.DoNotUpdateUnexpandedPC);
+            if (self.is_first_in_sequence) flags.set(.IsFirstInSequence);
+            if (self.is_compressed) flags.set(.IsCompressed);
+            return flags;
+        }
+
+        /// Instruction flags for VirtualAssertValidUnsignedRemainder
+        pub fn instructionFlags(_: Self) InstructionFlagSet {
+            var flags = InstructionFlagSet.init();
+            flags.set(.LeftOperandIsRs1Value);
+            flags.set(.RightOperandIsRs2Value);
+            return flags;
+        }
+    };
+}

@@ -190,6 +190,8 @@ pub fn LookupTables(comptime XLEN: comptime_int) type {
         SignExtendHalfWord,
         // Shift via bitmask
         VirtualSRL,
+        // Half-word operations
+        LowerHalfWord,
         // Division/remainder validation
         ValidDiv0,
         ValidUnsignedRemainder,
@@ -255,6 +257,12 @@ pub fn LookupTables(comptime XLEN: comptime_int) type {
                         result = result * (1 + y_i) + x_i * y_i;
                     }
                     break :blk result;
+                },
+                .LowerHalfWord => blk: {
+                    // LowerHalfWord: return lower XLEN/2 bits (zero-extend)
+                    const half_word_size = XLEN / 2;
+                    const mask: u64 = (@as(u64, 1) << half_word_size) - 1;
+                    break :blk @as(u64, @truncate(index)) & mask;
                 },
                 .ValidDiv0 => Table.ValidDiv0.materializeEntry(index),
                 .ValidUnsignedRemainder => Table.ValidUnsignedRemainder.materializeEntry(index),

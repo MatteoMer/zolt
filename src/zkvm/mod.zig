@@ -2385,6 +2385,8 @@ pub fn JoltProver(comptime F: type) type {
         // ===== Ra Polynomial Helpers =====
 
         /// Build RdInc polynomial: rd_inc[i] = post_value[rd] - pre_value[rd]
+        /// Uses step.rd_index (u8, supports virtual registers 0-127) and step.rd_written
+        /// to match stage4_gruen_prover and stage6 IncClaimReduction.
         fn buildRdIncPolynomial(
             self: *Self,
             trace: *const tracer.ExecutionTrace,
@@ -2394,30 +2396,18 @@ pub fn JoltProver(comptime F: type) type {
             errdefer self.allocator.free(poly);
             @memset(poly, F.zero());
 
-            // Track register values across cycles (matching Jolt's rd_write().unwrap_or_default())
-            // This approach tracks actual register state rather than relying on trace's rd_pre_value,
-            // which for BRANCH/STORE instructions reads a register at the "rd" bit position that
-            // is actually part of the immediate encoding (not a destination register).
-            // See: jolt-core/src/zkvm/witness.rs:69-77
-            var register_values: [32]u64 = [_]u64{0} ** 32;
+            // Track register values across cycles using 128 registers (virtual register support).
+            // Must match stage4_gruen_prover and stage6 IncClaimReduction which use step.rd_index
+            // (u8, supports indices 0-127 for virtual instruction decomposition).
+            const K_INC = 128;
+            var register_values: [K_INC]u64 = [_]u64{0} ** K_INC;
 
             for (trace.steps.items, 0..) |step, i| {
                 if (i >= poly_size) break;
 
-                if (step.is_noop) continue; // NOP → RdInc = 0 (already zeroed)
-
-                const instr = step.instruction;
-                const rd: u5 = @truncate((instr >> 7) & 0x1f);
-                const opcode = instr & 0x7f;
-
-                // BRANCH (0x63) and STORE (0x23) don't write to rd → RdInc = 0
-                // This matches Jolt where rd_write() returns None for these formats.
-                const rd_used = switch (opcode) {
-                    0x23, 0x63 => false,
-                    else => true,
-                };
-
-                if (rd_used and rd != 0 and rd < 32) {
+                // Use step.rd_written and step.rd_index to match stage4_gruen_prover
+                if (!step.is_noop and step.rd_written and step.rd_index != 0) {
+                    const rd = step.rd_index;
                     const pre_value = register_values[rd];
                     const post_value = step.rd_value;
                     poly[i] = F.fromU64(post_value).sub(F.fromU64(pre_value));

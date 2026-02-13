@@ -15,7 +15,7 @@
 const std = @import("std");
 
 // Debug output control - set to true to enable verbose debug prints
-const debug_verbose = false;
+const debug_verbose = true;
 fn dbg(comptime fmt: []const u8, args: anytype) void {
     if (debug_verbose) std.debug.print(fmt, args);
 }
@@ -392,8 +392,9 @@ pub fn proverMsgReadChecking(
     for (0..half_len) |b_idx| {
         const b = LookupBits(128).new(@as(u128, b_idx), log_len - 1);
 
-        // Compute prefix evaluations at c=0 and c=2 for all prefix types
+        // Compute prefix evaluations at c=0, c=1, and c=2 for all prefix types
         var prefixes_c0: [Prefixes.COUNT]F = undefined;
+        var prefixes_c1: [Prefixes.COUNT]F = undefined;
         var prefixes_c2: [Prefixes.COUNT]F = undefined;
 
         for (0..Prefixes.COUNT) |i| {
@@ -401,7 +402,40 @@ pub fn proverMsgReadChecking(
             var b_copy = b;
             prefixes_c0[i] = prefixes_mod.prefixMle(F, prefix, &prefix_checkpoints.checkpoints, r_x, 0, &b_copy, round);
             b_copy = b;
+            prefixes_c1[i] = prefixes_mod.prefixMle(F, prefix, &prefix_checkpoints.checkpoints, r_x, 1, &b_copy, round);
+            b_copy = b;
             prefixes_c2[i] = prefixes_mod.prefixMle(F, prefix, &prefix_checkpoints.checkpoints, r_x, 2, &b_copy, round);
+        }
+
+        // Debug: at round 0, check prefix multilinearity for b_idx=0
+        if (round == 0 and b_idx < 2) {
+            const eq_idx = @intFromEnum(Prefixes.Eq);
+            const eq0 = prefixes_c0[eq_idx];
+            const eq1 = prefixes_c1[eq_idx];
+            const eq2 = prefixes_c2[eq_idx];
+            const expected_eq2 = eq1.add(eq1).sub(eq0);
+            std.debug.print("[PFIX R0 b={}] Eq: c0={x} c1={x} c2={x} expected_c2(2e1-e0)={x} match={}\n", .{
+                b_idx,
+                eq0.toBytesBE()[28..32].*,
+                eq1.toBytesBE()[28..32].*,
+                eq2.toBytesBE()[28..32].*,
+                expected_eq2.toBytesBE()[28..32].*,
+                eq2.eql(expected_eq2),
+            });
+            // Also check LowerWord prefix
+            const lw_idx = @intFromEnum(Prefixes.LowerWord);
+            const lw0 = prefixes_c0[lw_idx];
+            const lw1 = prefixes_c1[lw_idx];
+            const lw2 = prefixes_c2[lw_idx];
+            const expected_lw2 = lw1.add(lw1).sub(lw0);
+            std.debug.print("[PFIX R0 b={}] LowerWord: c0={x} c1={x} c2={x} expected_c2={x} match={}\n", .{
+                b_idx,
+                lw0.toBytesBE()[28..32].*,
+                lw1.toBytesBE()[28..32].*,
+                lw2.toBytesBE()[28..32].*,
+                expected_lw2.toBytesBE()[28..32].*,
+                lw2.eql(expected_lw2),
+            });
         }
 
         // Sum contributions from all tables
@@ -421,8 +455,44 @@ pub fn proverMsgReadChecking(
 
                 // Combine using table-specific formula
                 const combined_0 = tableCombine(F, table_idx, &prefixes_c0, suffixes_left[0..table_suffixes.len]);
+                const combined_1_left: F = tableCombine(F, table_idx, &prefixes_c1, suffixes_left[0..table_suffixes.len]);
+                _ = combined_1_left;
+                const combined_1_right = tableCombine(F, table_idx, &prefixes_c1, suffixes_right[0..table_suffixes.len]);
                 const combined_2_left = tableCombine(F, table_idx, &prefixes_c2, suffixes_left[0..table_suffixes.len]);
                 const combined_2_right = tableCombine(F, table_idx, &prefixes_c2, suffixes_right[0..table_suffixes.len]);
+
+                // Debug: at round 0, b_idx=0, check each table contribution
+                if (round == 0 and b_idx == 0 and !combined_0.eql(F.zero())) {
+                    // combined_0 = P(0)*Q_left
+                    // combined_1_left = P(1)*Q_left, combined_1_right = P(1)*Q_right
+                    // correct g(c=1,b=0) = P(1)*Q_left*(1-1) + P(1)*Q_right*1 = combined_1_right
+                    // correct g(c=2,b=0) = P(2)*Q_left*(1-2) + P(2)*Q_right*2 = 2*combined_2_right - combined_2_left
+                    // But also: g(c) = a*c^2 + b*c + d where g(0)=combined_0
+                    // For degree-2: g(2) = 2*g(1) - g(0) ONLY IF degree-1!
+                    // For degree-2: need 3 points
+                    const g0 = combined_0;
+                    const g1 = combined_1_right; // at c=1, suffix = Q_right
+                    const formula_g2 = combined_2_right.add(combined_2_right).sub(combined_2_left);
+                    const linear_g2 = g1.add(g1).sub(g0);
+                    std.debug.print("[COMBINE R0 b=0 T{}] g(0)={x} g(1)={x} formula_g(2)={x} linear_g(2)={x} match={}\n", .{
+                        table_idx,
+                        g0.toBytesBE()[24..32].*,
+                        g1.toBytesBE()[24..32].*,
+                        formula_g2.toBytesBE()[24..32].*,
+                        linear_g2.toBytesBE()[24..32].*,
+                        formula_g2.eql(linear_g2),
+                    });
+                    // Check if Q_right is zero
+                    var all_right_zero = true;
+                    for (table_suffixes, 0..) |_, s_idx2| {
+                        if (!table.polys[s_idx2][b_idx + half_len].eql(F.zero())) all_right_zero = false;
+                    }
+                    std.debug.print("[COMBINE R0 b=0 T{}] Q_right_all_zero={} Q_left_suf0={x}\n", .{
+                        table_idx,
+                        all_right_zero,
+                        suffixes_left[0].toBytesBE()[24..32].*,
+                    });
+                }
 
                 eval_0 = eval_0.add(combined_0);
                 eval_0_per_table[table_idx] = eval_0_per_table[table_idx].add(combined_0);

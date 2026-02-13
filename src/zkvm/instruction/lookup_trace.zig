@@ -71,6 +71,39 @@ pub fn LookupEntry(comptime XLEN: comptime_int) type {
             };
         }
 
+        /// Create entry for an ADD instruction within a virtual sequence
+        /// Like fromAdd but with VirtualInstruction and DoNotUpdateUnexpandedPC flags
+        pub fn fromAddVirtual(
+            cycle: usize,
+            pc: u64,
+            instruction: u32,
+            rs1: u64,
+            rs2: u64,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+        ) Self {
+            const AddLookup = lookups.AddLookup(XLEN);
+            const add = AddLookup.init(rs1, rs2);
+            var circuit_flags = AddLookup.circuitFlags();
+            circuit_flags.set(.VirtualInstruction);
+            if (do_not_update_pc) circuit_flags.set(.DoNotUpdateUnexpandedPC);
+            if (is_first_in_sequence) circuit_flags.set(.IsFirstInSequence);
+            if (is_compressed) circuit_flags.set(.IsCompressed);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = AddLookup.lookupTable(),
+                .index = add.toLookupIndex(),
+                .result = add.computeResult(),
+                .left_operand = rs1,
+                .right_operand = rs2,
+                .circuit_flags = circuit_flags,
+                .instruction_flags = AddLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
         /// Create entry for a SUB instruction
         pub fn fromSub(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
             const SubLookup = lookups.SubLookup(XLEN);
@@ -485,6 +518,39 @@ pub fn LookupEntry(comptime XLEN: comptime_int) type {
             };
         }
 
+        /// Create entry for a MUL instruction within a virtual sequence
+        /// Like fromMul but with VirtualInstruction and DoNotUpdateUnexpandedPC flags
+        pub fn fromMulVirtual(
+            cycle: usize,
+            pc: u64,
+            instruction: u32,
+            rs1: u64,
+            rs2: u64,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+        ) Self {
+            const MulLookup = lookups.MulLookup(XLEN);
+            const mul = MulLookup.init(rs1, rs2);
+            var circuit_flags = MulLookup.circuitFlags();
+            circuit_flags.set(.VirtualInstruction);
+            if (do_not_update_pc) circuit_flags.set(.DoNotUpdateUnexpandedPC);
+            if (is_first_in_sequence) circuit_flags.set(.IsFirstInSequence);
+            if (is_compressed) circuit_flags.set(.IsCompressed);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = MulLookup.lookupTable(),
+                .index = mul.toLookupIndex(),
+                .result = mul.computeResult(),
+                .left_operand = rs1,
+                .right_operand = rs2,
+                .circuit_flags = circuit_flags,
+                .instruction_flags = MulLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
         /// Create entry for MULH (multiply high signed)
         pub fn fromMulh(cycle: usize, pc: u64, instruction: u32, rs1: u64, rs2: u64) Self {
             const MulhLookup = lookups.MulhLookup(XLEN);
@@ -871,6 +937,147 @@ pub fn LookupEntry(comptime XLEN: comptime_int) type {
             };
         }
 
+        /// Create entry for VirtualAdvice
+        /// Injects an oracle-provided value into the register file.
+        /// Used as the first steps of division/remainder inline sequences.
+        ///
+        /// In Jolt:
+        /// - Lookup table: RangeCheck (identity)
+        /// - Operands: (0, advice)
+        /// - Circuit flags: Advice, WriteLookupOutputToRD, VirtualInstruction, etc.
+        /// - Instruction flags: IsRdNotZero
+        pub fn fromVirtualAdvice(
+            cycle: usize,
+            pc: u64,
+            instruction: u32,
+            advice: u64,
+            is_virtual: bool,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+            is_rd_not_zero: bool,
+        ) Self {
+            const VadvLookup = lookups.VirtualAdviceLookup(XLEN);
+            const vadv = VadvLookup.init(advice, is_virtual, do_not_update_pc, is_first_in_sequence, is_compressed, is_rd_not_zero);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = VadvLookup.lookupTable(),
+                .index = vadv.toLookupIndex(),
+                .result = vadv.computeResult(),
+                .left_operand = 0, // No input operand for advice
+                .right_operand = advice,
+                .circuit_flags = vadv.circuitFlags(),
+                .instruction_flags = vadv.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
+        /// Create entry for VirtualAssertEQ
+        /// Asserts that two register values are equal.
+        ///
+        /// In Jolt:
+        /// - Lookup table: Equal (table index 6)
+        /// - Operands: (rs1, rs2) interleaved
+        /// - Circuit flags: Assert, VirtualInstruction, etc.
+        /// - Instruction flags: LeftOperandIsRs1Value, RightOperandIsRs2Value
+        pub fn fromVirtualAssertEQ(
+            cycle: usize,
+            pc: u64,
+            instruction: u32,
+            rs1_val: u64,
+            rs2_val: u64,
+            is_virtual: bool,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+        ) Self {
+            const VaeqLookup = lookups.VirtualAssertEQLookup(XLEN);
+            const vaeq = VaeqLookup.init(rs1_val, rs2_val, is_virtual, do_not_update_pc, is_first_in_sequence, is_compressed);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = VaeqLookup.lookupTable(),
+                .index = vaeq.toLookupIndex(),
+                .result = vaeq.computeResult(),
+                .left_operand = rs1_val,
+                .right_operand = rs2_val,
+                .circuit_flags = vaeq.circuitFlags(),
+                .instruction_flags = vaeq.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
+        /// Create entry for VirtualZeroExtendWord
+        /// Zero-extends lower XLEN/2 bits.
+        ///
+        /// In Jolt:
+        /// - Lookup table: LowerHalfWord (table index 20)
+        /// - Operands: (0, rs1) via AddOperands mode
+        /// - Circuit flags: WriteLookupOutputToRD, AddOperands, VirtualInstruction, etc.
+        /// - Instruction flags: LeftOperandIsRs1Value, IsRdNotZero
+        pub fn fromVirtualZeroExtendWord(
+            cycle: usize,
+            pc: u64,
+            instruction: u32,
+            rs1_val: u64,
+            is_virtual: bool,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+            is_rd_not_zero: bool,
+        ) Self {
+            const VzewLookup = lookups.VirtualZeroExtendWordLookup(XLEN);
+            const vzew = VzewLookup.init(rs1_val, is_virtual, do_not_update_pc, is_first_in_sequence, is_compressed, is_rd_not_zero);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = VzewLookup.lookupTable(),
+                .index = vzew.toLookupIndex(),
+                .result = vzew.computeResult(),
+                .left_operand = rs1_val,
+                .right_operand = 0,
+                .circuit_flags = vzew.circuitFlags(),
+                .instruction_flags = vzew.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
+        /// Create entry for VirtualAssertValidUnsignedRemainder
+        /// Asserts that remainder < divisor (or divisor == 0).
+        ///
+        /// In Jolt:
+        /// - Lookup table: ValidUnsignedRemainder (table index 16)
+        /// - Operands: (rs1, rs2) interleaved
+        /// - Circuit flags: Assert, VirtualInstruction, etc.
+        /// - Instruction flags: LeftOperandIsRs1Value, RightOperandIsRs2Value
+        pub fn fromVirtualAssertValidUnsignedRemainder(
+            cycle: usize,
+            pc: u64,
+            instruction: u32,
+            rs1_val: u64,
+            rs2_val: u64,
+            is_virtual: bool,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+        ) Self {
+            const VavurLookup = lookups.VirtualAssertValidUnsignedRemainderLookup(XLEN);
+            const vavur = VavurLookup.init(rs1_val, rs2_val, is_virtual, do_not_update_pc, is_first_in_sequence, is_compressed);
+            return Self{
+                .cycle = cycle,
+                .pc = pc,
+                .table = VavurLookup.lookupTable(),
+                .index = vavur.toLookupIndex(),
+                .result = vavur.computeResult(),
+                .left_operand = rs1_val,
+                .right_operand = rs2_val,
+                .circuit_flags = vavur.circuitFlags(),
+                .instruction_flags = vavur.instructionFlags(),
+                .instruction = instruction,
+            };
+        }
+
         /// Create lookup entry for VirtualMULI instruction.
         ///
         /// VirtualMULI is used for SLLI decomposition (SLLI → VirtualMULI) and as
@@ -1229,6 +1436,168 @@ pub fn LookupTraceCollector(comptime XLEN: comptime_int) type {
                 is_first_in_sequence,
                 is_compressed,
                 rd != 0, // is_rd_not_zero
+            );
+            try self.entries.append(self.allocator, entry);
+        }
+
+        /// Record lookup for a MUL instruction within a virtual sequence
+        pub fn recordMulVirtual(
+            self: *Self,
+            cycle: usize,
+            pc: u64,
+            instruction: u32,
+            rs1_val: u64,
+            rs2_val: u64,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+        ) !void {
+            if (!self.enabled) return;
+            const entry = Entry.fromMulVirtual(
+                cycle, pc, instruction, rs1_val, rs2_val,
+                do_not_update_pc, is_first_in_sequence, is_compressed,
+            );
+            try self.entries.append(self.allocator, entry);
+        }
+
+        /// Record lookup for an ADD instruction within a virtual sequence
+        pub fn recordAddVirtual(
+            self: *Self,
+            cycle: usize,
+            pc: u64,
+            instruction: u32,
+            rs1_val: u64,
+            rs2_val: u64,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+        ) !void {
+            if (!self.enabled) return;
+            const entry = Entry.fromAddVirtual(
+                cycle, pc, instruction, rs1_val, rs2_val,
+                do_not_update_pc, is_first_in_sequence, is_compressed,
+            );
+            try self.entries.append(self.allocator, entry);
+        }
+
+        /// Record lookup for a VirtualAdvice instruction
+        /// Used for oracle-provided values in division/remainder inline sequences
+        pub fn recordVirtualAdvice(
+            self: *Self,
+            cycle: usize,
+            pc: u64,
+            instruction: u32,
+            advice: u64,
+            is_virtual: bool,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+        ) !void {
+            if (!self.enabled) return;
+
+            const rd: u8 = @truncate((instruction >> 7) & 0x1f);
+
+            const entry = Entry.fromVirtualAdvice(
+                cycle,
+                pc,
+                instruction,
+                advice,
+                is_virtual,
+                do_not_update_pc,
+                is_first_in_sequence,
+                is_compressed,
+                rd != 0,
+            );
+            try self.entries.append(self.allocator, entry);
+        }
+
+        /// Record lookup for a VirtualAssertEQ instruction
+        /// Used to assert equality of two registers in inline sequences
+        pub fn recordVirtualAssertEQ(
+            self: *Self,
+            cycle: usize,
+            pc: u64,
+            instruction: u32,
+            rs1_val: u64,
+            rs2_val: u64,
+            is_virtual: bool,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+        ) !void {
+            if (!self.enabled) return;
+
+            const entry = Entry.fromVirtualAssertEQ(
+                cycle,
+                pc,
+                instruction,
+                rs1_val,
+                rs2_val,
+                is_virtual,
+                do_not_update_pc,
+                is_first_in_sequence,
+                is_compressed,
+            );
+            try self.entries.append(self.allocator, entry);
+        }
+
+        /// Record lookup for a VirtualZeroExtendWord instruction
+        /// Used to zero-extend lower 32 bits in inline sequences
+        pub fn recordVirtualZeroExtendWord(
+            self: *Self,
+            cycle: usize,
+            pc: u64,
+            instruction: u32,
+            rs1_val: u64,
+            is_virtual: bool,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+        ) !void {
+            if (!self.enabled) return;
+
+            const rd: u8 = @truncate((instruction >> 7) & 0x1f);
+
+            const entry = Entry.fromVirtualZeroExtendWord(
+                cycle,
+                pc,
+                instruction,
+                rs1_val,
+                is_virtual,
+                do_not_update_pc,
+                is_first_in_sequence,
+                is_compressed,
+                rd != 0,
+            );
+            try self.entries.append(self.allocator, entry);
+        }
+
+        /// Record lookup for a VirtualAssertValidUnsignedRemainder instruction
+        /// Used to validate remainder < divisor in unsigned division inline sequences
+        pub fn recordVirtualAssertValidUnsignedRemainder(
+            self: *Self,
+            cycle: usize,
+            pc: u64,
+            instruction: u32,
+            rs1_val: u64,
+            rs2_val: u64,
+            is_virtual: bool,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+        ) !void {
+            if (!self.enabled) return;
+
+            const entry = Entry.fromVirtualAssertValidUnsignedRemainder(
+                cycle,
+                pc,
+                instruction,
+                rs1_val,
+                rs2_val,
+                is_virtual,
+                do_not_update_pc,
+                is_first_in_sequence,
+                is_compressed,
             );
             try self.entries.append(self.allocator, entry);
         }

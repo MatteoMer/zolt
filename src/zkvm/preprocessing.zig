@@ -113,10 +113,11 @@ pub const JoltInstruction = struct {
         ECALL,
         FENCE,
         // Atomics (placeholder)
-        // Virtual instructions
-        VirtualASSERT_EQ,
-        VirtualASSERT_LTE,
-        VirtualADVICE,
+        // Virtual instructions (names must match Jolt's Rust enum exactly for JSON serialization)
+        VirtualAdvice,
+        VirtualAssertEQ,
+        VirtualAssertLTE,
+        VirtualAssertValidUnsignedRemainder,
         VirtualSignExtendWord,
         VirtualZeroExtendWord,
         VirtualMULI,
@@ -660,6 +661,138 @@ pub const BytecodePreprocessing = struct {
                         .variant = .VirtualSignExtendWord,
                         .address = addr,
                         .operands = .{ .FormatI = .{ .rd = rd, .rs1 = rd, .imm = 0 } },
+                        .virtual_sequence_remaining = 0,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                },
+                .REMUW => {
+                    // REMUW → 12-instruction inline sequence (matching Jolt's decomposition)
+                    // Virtual registers: a2=32, a3=33, t0=34, t1=35, t2=36, t3=37, t4=38
+                    const rs1 = switch (jolt_instr.operands) {
+                        .FormatR => |r| r.rs1,
+                        else => 0,
+                    };
+                    const rs2 = switch (jolt_instr.operands) {
+                        .FormatR => |r| r.rs2,
+                        else => 0,
+                    };
+                    const rd = switch (jolt_instr.operands) {
+                        .FormatR => |r| r.rd,
+                        else => 0,
+                    };
+                    const a2: u8 = 32;
+                    const a3: u8 = 33;
+                    const t0: u8 = 34;
+                    const t1: u8 = 35;
+                    const t2: u8 = 36;
+                    const t3: u8 = 37;
+                    const t4: u8 = 38;
+
+                    // Step 1: VirtualAdvice(a2) → quotient (vsr=11, first)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualAdvice,
+                        .address = addr,
+                        .operands = .{ .FormatJ = .{ .rd = a2, .imm = 0 } },
+                        .virtual_sequence_remaining = 11,
+                        .is_first_in_sequence = true,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 2: VirtualAdvice(a3) → remainder (vsr=10)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualAdvice,
+                        .address = addr,
+                        .operands = .{ .FormatJ = .{ .rd = a3, .imm = 0 } },
+                        .virtual_sequence_remaining = 10,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 3: VirtualZeroExtendWord(t3, a2) → zero-extend quotient (vsr=9)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualZeroExtendWord,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = t3, .rs1 = a2, .imm = 0 } },
+                        .virtual_sequence_remaining = 9,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 4: VirtualZeroExtendWord(t1, rs1) → zero-extend dividend (vsr=8)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualZeroExtendWord,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = t1, .rs1 = rs1, .imm = 0 } },
+                        .virtual_sequence_remaining = 8,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 5: VirtualZeroExtendWord(t2, rs2) → zero-extend divisor (vsr=7)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualZeroExtendWord,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = t2, .rs1 = rs2, .imm = 0 } },
+                        .virtual_sequence_remaining = 7,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 6: MUL(t0, t3, t2) → quotient * divisor (vsr=6)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .MUL,
+                        .address = addr,
+                        .operands = .{ .FormatR = .{ .rd = t0, .rs1 = t3, .rs2 = t2 } },
+                        .virtual_sequence_remaining = 6,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 7: VirtualZeroExtendWord(t4, t0) → mask to 32 bits (vsr=5)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualZeroExtendWord,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = t4, .rs1 = t0, .imm = 0 } },
+                        .virtual_sequence_remaining = 5,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 8: VirtualAssertEQ(t4, t0) → assert no overflow (vsr=4)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualAssertEQ,
+                        .address = addr,
+                        .operands = .{ .FormatB = .{ .rs1 = t4, .rs2 = t0, .imm = 0 } },
+                        .virtual_sequence_remaining = 4,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 9: ADD(t0, t0, a3) → add remainder (vsr=3)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .ADD,
+                        .address = addr,
+                        .operands = .{ .FormatR = .{ .rd = t0, .rs1 = t0, .rs2 = a3 } },
+                        .virtual_sequence_remaining = 3,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 10: VirtualAssertEQ(t0, t1) → assert dividend = q*d + r (vsr=2)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualAssertEQ,
+                        .address = addr,
+                        .operands = .{ .FormatB = .{ .rs1 = t0, .rs2 = t1, .imm = 0 } },
+                        .virtual_sequence_remaining = 2,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 11: VirtualAssertValidUnsignedRemainder(a3, t2) → r < d (vsr=1)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualAssertValidUnsignedRemainder,
+                        .address = addr,
+                        .operands = .{ .FormatB = .{ .rs1 = a3, .rs2 = t2, .imm = 0 } },
+                        .virtual_sequence_remaining = 1,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 12: VirtualSignExtendWord(rd, a3) → sign-extend result (vsr=0, last)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualSignExtendWord,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = rd, .rs1 = a3, .imm = 0 } },
                         .virtual_sequence_remaining = 0,
                         .is_first_in_sequence = false,
                         .is_compressed = is_compressed,

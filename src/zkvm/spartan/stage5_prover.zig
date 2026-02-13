@@ -14,7 +14,7 @@
 const std = @import("std");
 
 // Debug output control - set to true to enable verbose debug prints
-const debug_verbose = false;
+const debug_verbose = true;
 fn dbg(comptime fmt: []const u8, args: anytype) void {
     if (debug_verbose) std.debug.print(fmt, args);
 }
@@ -768,6 +768,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 // First compute left_input and right_input (same as R1CS)
                 const left_is_rs1: bool = switch (opcode) {
                     0x33, 0x3b, 0x23, 0x63, 0x13, 0x03, 0x67, 0x1b, 0x0B, 0x2B, 0x5B => true,
+                    0x22 => true, // VirtualAssertEQ: left = rs1
+                    0x42 => true, // VirtualZeroExtendWord: left = rs1
+                    0x62 => true, // VirtualAssertValidUnsignedRemainder: left = rs1
+                    // 0x02 (VirtualAdvice): left_is_rs1 = false (instruction_inputs = (0,0))
                     else => false,
                 };
                 const left_is_pc: bool = switch (opcode) {
@@ -776,6 +780,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 };
                 const right_is_rs2: bool = switch (opcode) {
                     0x33, 0x63, 0x3b => true,
+                    0x22 => true, // VirtualAssertEQ: right = rs2
+                    0x62 => true, // VirtualAssertValidUnsignedRemainder: right = rs2
                     else => false,
                 };
                 const right_is_imm: bool = switch (opcode) {
@@ -961,6 +967,30 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         left_op = left_input;
                         right_op = right_input;
                     },
+                    0x02 => { // VirtualAdvice: Advice flag (identity path)
+                        // R1CS: LeftLookupOperand=0, RightLookupOperand=F.fromU128(rd_value)
+                        // left_input=0, right_input=0 (no instruction inputs)
+                        // The lookup operand is the advice oracle value (rd_value)
+                        left_op = F.zero();
+                        right_op = F.fromU128(@as(u128, step.rd_value));
+                    },
+                    0x22 => { // VirtualAssertEQ: Assert flag (interleaved)
+                        // R1CS: LeftLookupOperand=left_input(=rs1), RightLookupOperand=right_input(=rs2)
+                        left_op = left_input;
+                        right_op = right_input;
+                    },
+                    0x42 => { // VirtualZeroExtendWord: AddOperands flag (identity path)
+                        // R1CS: LeftLookupOperand=0, RightLookupOperand=F.fromU128(rs1_value)
+                        // AddOperands: left=0, right=left_input+right_input
+                        // Here left_input=rs1, right_input=0, so right=rs1
+                        left_op = F.zero();
+                        right_op = F.fromU128(@as(u128, step.rs1_value));
+                    },
+                    0x62 => { // VirtualAssertValidUnsignedRemainder: Assert flag (interleaved)
+                        // R1CS: LeftLookupOperand=left_input(=rs1), RightLookupOperand=right_input(=rs2)
+                        left_op = left_input;
+                        right_op = right_input;
+                    },
                     else => {
                         // Default: NOT Add+Sub+Mul (includes 0x63 Branch)
                         left_op = left_input;
@@ -1022,8 +1052,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     0x17 => true, // AUIPC (AddOperands)
                     0x6f => true, // JAL (AddOperands)
                     0x67 => true, // JALR (AddOperands)
+                    0x02 => true, // VirtualAdvice (Advice flag → identity path)
+                    0x42 => true, // VirtualZeroExtendWord (AddOperands → identity path)
                     0x03 => false, // Load: uses (rs1, imm) format, NOT identity path
                     0x23 => false, // Store: uses (rs1, imm) format, NOT identity path
+                    0x22 => false, // VirtualAssertEQ: interleaved (rs1, rs2)
+                    0x62 => false, // VirtualAssertValidUnsignedRemainder: interleaved (rs1, rs2)
                     else => false,
                 };
                 cycle_is_identity_path[j] = is_identity_path;
@@ -1118,6 +1152,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             const multiplier3: u64 = @as(u64, 1) << shamt3;
                             break :blk128 @as(u128, step.rs1_value) * @as(u128, multiplier3);
                         },
+                        // VirtualAdvice: index = advice_value (rd_value) — Jolt's to_lookup_index returns second operand
+                        0x02 => @as(u128, step.rd_value),
+                        // VirtualZeroExtendWord: index = rs1 + 0 = rs1 — Jolt's to_lookup_operands returns (0, x+y) where y=0
+                        0x42 => @as(u128, step.rs1_value),
                         else => 0,
                     };
                     // right_op_raw is the lower 64 bits of the lookup index (for R1CS witness compatibility)
@@ -1306,6 +1344,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // First compute left_input and right_input (same as R1CS)
                     const left_is_rs1: bool = switch (opcode) {
                         0x33, 0x3b, 0x23, 0x63, 0x13, 0x03, 0x67, 0x1b, 0x0B, 0x2B, 0x5B => true,
+                        0x22 => true, // VirtualAssertEQ: left = rs1
+                        0x42 => true, // VirtualZeroExtendWord: left = rs1
+                        0x62 => true, // VirtualAssertValidUnsignedRemainder: left = rs1
                         else => false,
                     };
                     const left_is_pc: bool = switch (opcode) {
@@ -1314,6 +1355,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     };
                     const right_is_rs2: bool = switch (opcode) {
                         0x33, 0x63, 0x3b => true,
+                        0x22 => true, // VirtualAssertEQ: right = rs2
+                        0x62 => true, // VirtualAssertValidUnsignedRemainder: right = rs2
                         else => false,
                     };
                     const right_is_imm: bool = switch (opcode) {
@@ -1467,6 +1510,22 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 right_op = right_input;
                             }
                         },
+                        0x02 => { // VirtualAdvice: Advice flag (identity path)
+                            left_op = F.zero();
+                            right_op = F.fromU128(@as(u128, step.rd_value));
+                        },
+                        0x22 => { // VirtualAssertEQ: Assert flag (interleaved)
+                            left_op = left_input;
+                            right_op = right_input;
+                        },
+                        0x42 => { // VirtualZeroExtendWord: AddOperands flag (identity path)
+                            left_op = F.zero();
+                            right_op = F.fromU128(@as(u128, step.rs1_value));
+                        },
+                        0x62 => { // VirtualAssertValidUnsignedRemainder: Assert flag (interleaved)
+                            left_op = left_input;
+                            right_op = right_input;
+                        },
                         else => {
                             // Default: NOT Add+Sub+Mul
                             left_op = left_input;
@@ -1484,15 +1543,33 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 // Compare against lookups_combined_vals
                 if (!recomputed_combined.eql(lookups_combined_vals[j])) {
                     const step_dbg2 = trace.steps.items[j];
+                    const instr_dbg2 = step_dbg2.instruction;
+                    const opcode_dbg2 = instr_dbg2 & 0x7f;
                     dbg("[COMBINED MISMATCH] j={}: opcode=0x{x}, noop={}, term={}\n", .{
-                        j, step_dbg2.instruction & 0x7f, step_dbg2.is_noop, step_dbg2.is_termination_store,
+                        j, opcode_dbg2, step_dbg2.is_noop, step_dbg2.is_termination_store,
                     });
                     dbg("  recomputed = {x}\n", .{recomputed_combined.toBytesBE()[16..32].*});
                     dbg("  combined_v = {x}\n", .{lookups_combined_vals[j].toBytesBE()[16..32].*});
-                    dbg("  output: recomp=0x{x}, rs1={}, rs2={}, rd={}, pc=0x{x}\n", .{
-                        lookup_output.toU64(), step_dbg2.rs1_value, step_dbg2.rs2_value,
+                    dbg("  recomp: output=0x{x}, left=0x{x}, right=0x{x}\n", .{
+                        lookup_output.toU64(), left_op.toU64(), right_op.toU64(),
+                    });
+                    dbg("  rs1={}, rs2={}, rd={}, pc=0x{x}\n", .{
+                        step_dbg2.rs1_value, step_dbg2.rs2_value,
                         step_dbg2.rd_value, step_dbg2.pc,
                     });
+                    // Also show what table says
+                    const tbl_idx_dbg = getLookupTableIndex(opcode_dbg2, @truncate(instr_dbg2 >> 12), @truncate(instr_dbg2 >> 25));
+                    if (tbl_idx_dbg >= 0) {
+                        const tbl_u_dbg: usize = @intCast(tbl_idx_dbg);
+                        const lo_dbg = lookups_indices_lo[j];
+                        const hi_dbg = lookups_indices_hi[j];
+                        const idx_dbg: u128 = @as(u128, hi_dbg) << 64 | @as(u128, lo_dbg);
+                        const TableDbg = @import("../lookup_table/mod.zig").LookupTable(F, 64);
+                        const tbl_entry_dbg = TableDbg.materializeTableEntry(tbl_u_dbg, idx_dbg);
+                        dbg("  table[{}] at idx=0x{x}: entry=0x{x}\n", .{
+                            tbl_idx_dbg, idx_dbg, tbl_entry_dbg,
+                        });
+                    }
                 }
             }
             // Debug: print first 5 cycles' right operand values
@@ -1545,6 +1622,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 // Recompute left_op, right_op, output using same logic as above
                 const left_is_rs1_v: bool = switch (opcode_v) {
                     0x33, 0x3b, 0x23, 0x63, 0x13, 0x03, 0x67, 0x1b, 0x0B, 0x2B, 0x5B => true,
+                    0x22 => true, // VirtualAssertEQ: left = rs1
+                    0x42 => true, // VirtualZeroExtendWord: left = rs1
+                    0x62 => true, // VirtualAssertValidUnsignedRemainder: left = rs1
                     else => false,
                 };
                 const left_is_pc_v: bool = switch (opcode_v) {
@@ -1553,6 +1633,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 };
                 const right_is_rs2_v: bool = switch (opcode_v) {
                     0x33, 0x63, 0x3b => true,
+                    0x22 => true, // VirtualAssertEQ: right = rs2
+                    0x62 => true, // VirtualAssertValidUnsignedRemainder: right = rs2
                     else => false,
                 };
                 const right_is_imm_v: bool = switch (opcode_v) {
@@ -1583,6 +1665,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     0x1b => (funct3_v == 0), // ADDIW (funct3=0) uses AddOperands
                     0x33 => !(funct7_v == 0x01 and funct3_v != 0x0) and !(funct7_v == 0x20),
                     0x3b => (funct3_v == 0 and funct7_v == 0) or (funct3_v == 0 and funct7_v == 0x20), // ADDW/SUBW
+                    0x42 => true, // VirtualZeroExtendWord: AddOperands
                     else => false,
                 };
                 const is_sub_type = (opcode_v == 0x33 and funct3_v == 0 and funct7_v == 0x20) or
@@ -1591,7 +1674,15 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     (opcode_v == 0x2B); // MUL or VirtualMULI
                 var left_op_v: F = undefined;
                 var right_op_v: F = undefined;
-                if (is_sub_type) {
+                if (opcode_v == 0x02) {
+                    // VirtualAdvice: Advice flag, identity path
+                    left_op_v = F.zero();
+                    right_op_v = F.fromU128(@as(u128, step_v.rd_value));
+                } else if (opcode_v == 0x42) {
+                    // VirtualZeroExtendWord: AddOperands, identity path
+                    left_op_v = F.zero();
+                    right_op_v = F.fromU128(@as(u128, step_v.rs1_value));
+                } else if (is_sub_type) {
                     const two_pow_64_v = F.fromBytes(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
                     left_op_v = F.zero();
                     right_op_v = left_input_v.sub(right_input_v).add(two_pow_64_v);
@@ -1602,6 +1693,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     left_op_v = F.zero();
                     right_op_v = left_input_v.add(right_input_v);
                 } else {
+                    // Default includes 0x22 (VirtualAssertEQ), 0x62 (VirtualAssertValidUnsignedRemainder)
                     left_op_v = left_input_v;
                     right_op_v = right_input_v;
                 }
@@ -2232,6 +2324,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         // Recompute using FIELD arithmetic (R1CS style)
                         const r1cs_left_is_rs1: bool = switch (opcode_d) {
                             0x33, 0x3b, 0x23, 0x63, 0x13, 0x03, 0x67, 0x1b, 0x0B, 0x2B, 0x5B => true,
+                            0x22 => true, // VirtualAssertEQ
+                            0x42 => true, // VirtualZeroExtendWord
+                            0x62 => true, // VirtualAssertValidUnsignedRemainder
                             else => false,
                         };
                         const r1cs_left_is_pc: bool = switch (opcode_d) {
@@ -2240,6 +2335,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         };
                         const r1cs_right_is_rs2: bool = switch (opcode_d) {
                             0x33, 0x63, 0x3b => true,
+                            0x22 => true, // VirtualAssertEQ
+                            0x62 => true, // VirtualAssertValidUnsignedRemainder
                             else => false,
                         };
                         const r1cs_right_is_imm: bool = switch (opcode_d) {
@@ -2276,6 +2373,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             0x37, 0x17, 0x6f, 0x67 => true, // LUI, AUIPC, JAL, JALR
                             0x1b => (funct3_d == 0), // ADDIW
                             0x3b => (funct3_d == 0 and funct7_d == 0), // ADDW
+                            0x42 => true, // VirtualZeroExtendWord (AddOperands)
                             else => false,
                         };
                         const r1cs_is_sub = switch (opcode_d) {
@@ -2288,7 +2386,15 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             0x2B => true, // VirtualMULI
                             else => false,
                         };
-                        if (r1cs_is_add) {
+                        if (opcode_d == 0x02) {
+                            // VirtualAdvice: Advice flag, identity path
+                            r1cs_left_op = F.zero();
+                            r1cs_right_op = F.fromU128(@as(u128, step_d.rd_value));
+                        } else if (opcode_d == 0x42) {
+                            // VirtualZeroExtendWord: AddOperands, identity path
+                            r1cs_left_op = F.zero();
+                            r1cs_right_op = F.fromU128(@as(u128, step_d.rs1_value));
+                        } else if (r1cs_is_add) {
                             r1cs_left_op = F.zero();
                             r1cs_right_op = r1cs_left_input.add(r1cs_right_input);
                         } else if (r1cs_is_sub) {
@@ -2299,6 +2405,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             r1cs_left_op = F.zero();
                             r1cs_right_op = r1cs_left_input.mul(r1cs_right_input);
                         } else {
+                            // Default includes 0x22 (VirtualAssertEQ), 0x62 (VirtualAssertValidUnsignedRemainder)
                             r1cs_left_op = r1cs_left_input;
                             r1cs_right_op = r1cs_right_input;
                         }
@@ -2431,6 +2538,17 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
             // Run the batched sumcheck
             dbg("[STAGE5] Entering main sumcheck loop, max_num_rounds={}\n", .{max_num_rounds});
+
+            // BRUTE FORCE PER-ROUND DIAGNOSTIC: Track per-cycle weights independently
+            // bf_weights[j] starts at u_initial[j] (= eq(j, r_reduction))
+            // At each round R, bf_weights[j] *= eq_bit(challenge[R], K(j)_{127-R})
+            // Then bf_eval_0 = Σ_{j: bit_R=0} bf_weights[j] * cv[j]
+            // This provides a ground-truth eval_0 for comparison with prefix-suffix
+            var bf_weights = try self.allocator.alloc(F, T);
+            defer self.allocator.free(bf_weights);
+            for (0..T) |j| {
+                bf_weights[j] = lookups_eq_evals[j].mul(lookups_combined_vals[j]);
+            }
 
             // Track accumulated eq factor for bound cycle variables
             // This matches Jolt's current_scalar in GruenSplitEqPolynomial
@@ -3070,6 +3188,48 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // Combined: read_checking + raf
                     const eval_0_inst2 = read_checking_evals[0].add(raf_evals[0]);
                     const eval_2_inst2 = read_checking_evals[1].add(raf_evals[1]);
+
+                    // *** PER-ROUND BRUTE FORCE eval_0 CHECK ***
+                    // bf_weights[j] = eq(j,r_red) * cv[j] * Π_{i<round} eq_bit(r_i, K(j)_{127-i})
+                    // eval_0 = Σ_{j: bit(round) of K(j) = 0} bf_weights[j]
+                    {
+                        const bf_bit_pos = LOOKUPS_LOG_K - 1 - round;
+                        var bf_e0 = F.zero();
+                        var bf_e1 = F.zero();
+                        for (0..T) |jj| {
+                            const bit_val: u1 = if (bf_bit_pos >= 64) @truncate(lookups_indices_hi[jj] >> @intCast(bf_bit_pos - 64)) else @truncate(lookups_indices_lo[jj] >> @intCast(bf_bit_pos));
+                            if (bit_val == 0) {
+                                bf_e0 = bf_e0.add(bf_weights[jj]);
+                            } else {
+                                bf_e1 = bf_e1.add(bf_weights[jj]);
+                            }
+                        }
+                        const bf_e0_match = bf_e0.eql(eval_0_inst2);
+                        if (!bf_e0_match or round < 3 or round % 8 == 7 or round == 127) {
+                            dbg("[BF_EVAL0 R{}] bf_e0={x}, ps_e0={x}, match={}\n", .{
+                                round,
+                                bf_e0.toBytesBE()[16..32].*,
+                                eval_0_inst2.toBytesBE()[16..32].*,
+                                bf_e0_match,
+                            });
+                            if (!bf_e0_match) {
+                                // Also check claim consistency
+                                const bf_claim = bf_e0.add(bf_e1);
+                                dbg("[BF_EVAL0 R{}] bf_claim={x}, ps_claim={x}, claim_match={}\n", .{
+                                    round,
+                                    bf_claim.toBytesBE()[16..32].*,
+                                    lookups_claim.toBytesBE()[16..32].*,
+                                    bf_claim.eql(lookups_claim),
+                                });
+                                // Print read_checking and raf components separately
+                                dbg("[BF_EVAL0 R{}] ps_rc_e0={x}, ps_raf_e0={x}\n", .{
+                                    round,
+                                    read_checking_evals[0].toBytesBE()[16..32].*,
+                                    raf_evals[0].toBytesBE()[16..32].*,
+                                });
+                            }
+                        }
+                    }
 
                     // CRITICAL MULTILINEAR CHECK: For any multilinear polynomial,
                     // p(2) = 2*p(1) - p(0). If the prefix-suffix decomposition
@@ -4055,6 +4215,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         const bit = getBit128(lookups_indices_lo[j], lookups_indices_hi[j], bit_index);
                         const factor = if (bit == 0) one_minus_r else challenge;
                         lookups_ra_weights[j] = lookups_ra_weights[j].mul(factor);
+                        bf_weights[j] = bf_weights[j].mul(factor);
 
                         if (chunk_idx < ra_num_chunks) {
                             ra_chunk_weights[chunk_idx][j] = ra_chunk_weights[chunk_idx][j].mul(factor);
@@ -4242,6 +4403,41 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         }
 
                         // ============================================================
+                        // CRITICAL FIX: Rematerialize combined_vals for cycle rounds
+                        // ============================================================
+                        // Jolt's init_log_t_rounds (read_raf_checking.rs:703-792) computes:
+                        //   combined_val[j] = table_eval(r_addr, table(j)) + γ*raf_eval(r_addr, j)
+                        // where:
+                        //   table_eval = stored_table_values[table(j)]  (table MLE at r_addr)
+                        //   raf_eval = raf_interleaved or raf_identity depending on instruction type
+                        //
+                        // The initial combined_vals[j] = table(K(j)) + γ*left + γ²*right are
+                        // POINT evaluations, but cycle rounds need TABLE MLE evaluations at r_addr.
+                        // Without this rematerialization, the opening claims at the end won't match
+                        // the verifier's expected output formula.
+                        for (0..T) |j| {
+                            const t_idx_j = cycle_table_indices[j];
+                            if (t_idx_j >= 0) {
+                                const ti: usize = @intCast(t_idx_j);
+                                if (ti < NUM_TABLES) {
+                                    const is_interleaved_j = !cycle_is_identity_path[j];
+                                    if (is_interleaved_j) {
+                                        lookups_combined_vals[j] = stored_table_values[ti].add(raf_interleaved);
+                                    } else {
+                                        lookups_combined_vals[j] = stored_table_values[ti].add(raf_identity);
+                                    }
+                                } else {
+                                    lookups_combined_vals[j] = F.zero();
+                                }
+                            } else {
+                                // No table: combined val should be zero
+                                lookups_combined_vals[j] = F.zero();
+                            }
+                        }
+                        dbg("[STAGE5 REMAT] combined_vals rematerialized for {} cycles\n", .{T});
+                        dbg("[STAGE5 REMAT] combined_vals[0] = {x}\n", .{lookups_combined_vals[0].toBytesBE()[16..32].*});
+
+                        // ============================================================
                         // DEBUG: Direct MLE computation for comparison
                         // ============================================================
                         // Jolt's verifier uses table.evaluate_mle(&r_address_prime)
@@ -4345,6 +4541,68 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             dbg("[TABLE_VERIFY] UnsignedLessThan match: {}\n", .{direct_ult_mle.eql(table_values[11])});
                             // Also compare with Jolt's expected value
                             dbg("[TABLE_VERIFY] UnsignedLessThan Jolt val = ce b8 26 7f 68 99 84 22 e1 c6 cd a7 b2 dd cd 24 a4 7a 39 dc 1f 7f f9 d7 7f 51 3f 23 03 54 5f 1c\n", .{});
+                        }
+
+                        // Verify Equal table (index 6): Π (x_i*y_i + (1-x_i)*(1-y_i))
+                        {
+                            var direct_equal_mle = F.one();
+                            for (0..64) |i| {
+                                const x_i = challenges[2 * i];
+                                const y_i = challenges[2 * i + 1];
+                                const eq_term = x_i.mul(y_i).add(F.one().sub(x_i).mul(F.one().sub(y_i)));
+                                direct_equal_mle = direct_equal_mle.mul(eq_term);
+                            }
+                            dbg("[TABLE_VERIFY] Equal direct = {any}\n", .{direct_equal_mle.toBytes()});
+                            dbg("[TABLE_VERIFY] Equal prefix-suffix = {any}\n", .{table_values[6].toBytes()});
+                            dbg("[TABLE_VERIFY] Equal match: {}\n", .{direct_equal_mle.eql(table_values[6])});
+                        }
+
+                        // Verify UnsignedGTE table (index 8): 1 - ULT
+                        {
+                            var direct_ult = F.zero();
+                            var eq_term = F.one();
+                            for (0..64) |i| {
+                                const x_i = challenges[2 * i];
+                                const y_i = challenges[2 * i + 1];
+                                direct_ult = direct_ult.add(F.one().sub(x_i).mul(y_i).mul(eq_term));
+                                eq_term = eq_term.mul(x_i.mul(y_i).add(F.one().sub(x_i).mul(F.one().sub(y_i))));
+                            }
+                            const direct_ugte_mle = F.one().sub(direct_ult);
+                            dbg("[TABLE_VERIFY] UnsignedGTE direct = {any}\n", .{direct_ugte_mle.toBytes()});
+                            dbg("[TABLE_VERIFY] UnsignedGTE prefix-suffix = {any}\n", .{table_values[8].toBytes()});
+                            dbg("[TABLE_VERIFY] UnsignedGTE match: {}\n", .{direct_ugte_mle.eql(table_values[8])});
+                        }
+
+                        // Verify ValidUnsignedRemainder table (index 16): LT + divisor_is_zero
+                        {
+                            var divisor_is_zero = F.one();
+                            var lt = F.zero();
+                            var eq_term = F.one();
+                            for (0..64) |i| {
+                                const x_i = challenges[2 * i];
+                                const y_i = challenges[2 * i + 1];
+                                divisor_is_zero = divisor_is_zero.mul(F.one().sub(y_i));
+                                lt = lt.add(F.one().sub(x_i).mul(y_i).mul(eq_term));
+                                eq_term = eq_term.mul(x_i.mul(y_i).add(F.one().sub(x_i).mul(F.one().sub(y_i))));
+                            }
+                            const direct_vur_mle = lt.add(divisor_is_zero);
+                            dbg("[TABLE_VERIFY] ValidUnsignedRemainder direct = {any}\n", .{direct_vur_mle.toBytes()});
+                            dbg("[TABLE_VERIFY] ValidUnsignedRemainder prefix-suffix = {any}\n", .{table_values[16].toBytes()});
+                            dbg("[TABLE_VERIFY] ValidUnsignedRemainder match: {}\n", .{direct_vur_mle.eql(table_values[16])});
+                        }
+
+                        // Verify NotEqual table (index 9): 1 - Equal
+                        {
+                            var direct_eq = F.one();
+                            for (0..64) |i| {
+                                const x_i = challenges[2 * i];
+                                const y_i = challenges[2 * i + 1];
+                                direct_eq = direct_eq.mul(x_i.mul(y_i).add(F.one().sub(x_i).mul(F.one().sub(y_i))));
+                            }
+                            const direct_neq_mle = F.one().sub(direct_eq);
+                            dbg("[TABLE_VERIFY] NotEqual direct = {any}\n", .{direct_neq_mle.toBytes()});
+                            dbg("[TABLE_VERIFY] NotEqual prefix-suffix = {any}\n", .{table_values[9].toBytes()});
+                            dbg("[TABLE_VERIFY] NotEqual match: {}\n", .{direct_neq_mle.eql(table_values[9])});
                         }
 
                         // Debug: print key prefix checkpoint values
@@ -4534,6 +4792,214 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             dbg("[CONDENSED_DIAG] Σ condensed * v[15] * cv_remat = {x}\n", .{sum_with_last_phase.toBytesBE()[16..32].*});
                             dbg("[CONDENSED_DIAG] lookups_claim (poly chain) = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
                             dbg("[CONDENSED_DIAG] FINAL match = {}\n", .{sum_with_last_phase.eql(lookups_claim)});
+
+                            // PER-OPCODE DIAGNOSTIC: Break down sum by opcode type
+                            var sum_padding = F.zero();
+                            var sum_regular = F.zero();
+                            var sum_virtual = F.zero();
+                            var count_padding: usize = 0;
+                            var count_regular: usize = 0;
+                            var count_virtual: usize = 0;
+                            for (0..T) |jj2| {
+                                const k_lo_jj2 = lookups_indices_lo[jj2];
+                                const k_bound_last2: usize = @truncate(k_lo_jj2 >> @intCast(last_shift));
+                                const k_masked2 = k_bound_last2 & last_m_mask;
+                                const v_last2 = expanding_tables[last_phase].get(k_masked2);
+                                const contrib = lookups_eq_evals[jj2].mul(v_last2).mul(lookups_combined_vals[jj2]);
+
+                                if (jj2 >= trace_len) {
+                                    sum_padding = sum_padding.add(contrib);
+                                    count_padding += 1;
+                                } else {
+                                    const step_diag = trace.steps.items[jj2];
+                                    const opcode_diag = step_diag.instruction & 0x7f;
+                                    if (opcode_diag == 0x02 or opcode_diag == 0x22 or opcode_diag == 0x42 or opcode_diag == 0x62) {
+                                        sum_virtual = sum_virtual.add(contrib);
+                                        count_virtual += 1;
+                                    } else {
+                                        sum_regular = sum_regular.add(contrib);
+                                        count_regular += 1;
+                                    }
+                                }
+                            }
+                            dbg("[OPCODE_DIAG] padding: count={}, sum={x}\n", .{count_padding, sum_padding.toBytesBE()[16..32].*});
+                            dbg("[OPCODE_DIAG] regular: count={}, sum={x}\n", .{count_regular, sum_regular.toBytesBE()[16..32].*});
+                            dbg("[OPCODE_DIAG] virtual: count={}, sum={x}\n", .{count_virtual, sum_virtual.toBytesBE()[16..32].*});
+                            dbg("[OPCODE_DIAG] total (pad+reg+virt) = {x}\n", .{sum_padding.add(sum_regular).add(sum_virtual).toBytesBE()[16..32].*});
+                            dbg("[OPCODE_DIAG] claim               = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+
+                            // Also compute what the chain gives for virtual vs non-virtual
+                            // by computing partial sums without virtual cycles
+                            var sum_without_virtual = F.zero();
+                            for (0..T) |jj3| {
+                                if (jj3 < trace_len) {
+                                    const step_diag3 = trace.steps.items[jj3];
+                                    const opcode_diag3 = step_diag3.instruction & 0x7f;
+                                    if (opcode_diag3 == 0x02 or opcode_diag3 == 0x22 or opcode_diag3 == 0x42 or opcode_diag3 == 0x62) continue;
+                                }
+                                const k_lo_jj3 = lookups_indices_lo[jj3];
+                                const k_bound_last3: usize = @truncate(k_lo_jj3 >> @intCast(last_shift));
+                                const k_masked3 = k_bound_last3 & last_m_mask;
+                                const v_last3 = expanding_tables[last_phase].get(k_masked3);
+                                sum_without_virtual = sum_without_virtual.add(
+                                    lookups_eq_evals[jj3].mul(v_last3).mul(lookups_combined_vals[jj3])
+                                );
+                            }
+                            dbg("[OPCODE_DIAG] sum_without_virtual = {x}\n", .{sum_without_virtual.toBytesBE()[16..32].*});
+                            dbg("[OPCODE_DIAG] claim - sum_without_virtual = {x}\n", .{lookups_claim.sub(sum_without_virtual).toBytesBE()[16..32].*});
+                            dbg("[OPCODE_DIAG] sum_virtual                = {x}\n", .{sum_virtual.toBytesBE()[16..32].*});
+                            dbg("[OPCODE_DIAG] virtual matches remaining: {}\n", .{sum_virtual.eql(lookups_claim.sub(sum_without_virtual))});
+
+                            // ============================================================
+                            // DECOMPOSED DIAGNOSTIC: Separate TABLE and RAF contributions
+                            // ============================================================
+                            // cv_remat = table_value + raf_val
+                            // Sum = Σ eq_ra * (table + raf) = Σ eq_ra * table + Σ eq_ra * raf
+                            // Check each part independently
+                            var sum_table_only = F.zero();
+                            var sum_raf_only = F.zero();
+                            var sum_table_virtual = F.zero();
+                            var sum_table_regular = F.zero();
+                            var sum_raf_virtual = F.zero();
+                            var sum_raf_regular = F.zero();
+                            var sum_raf_interleaved = F.zero();
+                            var sum_raf_identity_cycles = F.zero();
+                            for (0..T) |jd| {
+                                const k_lo_jd = lookups_indices_lo[jd];
+                                const k_bound_d: usize = @truncate(k_lo_jd >> @intCast(last_shift));
+                                const k_masked_d = k_bound_d & last_m_mask;
+                                const v_last_d = expanding_tables[last_phase].get(k_masked_d);
+                                const eq_ra_d = lookups_eq_evals[jd].mul(v_last_d);
+
+                                // Table part
+                                const t_idx_d = cycle_table_indices[jd];
+                                var table_val_d = F.zero();
+                                if (t_idx_d >= 0 and @as(usize, @intCast(t_idx_d)) < NUM_TABLES) {
+                                    table_val_d = table_values[@intCast(t_idx_d)];
+                                }
+                                sum_table_only = sum_table_only.add(eq_ra_d.mul(table_val_d));
+
+                                // RAF part
+                                const raf_val_d = if (!cycle_is_identity_path[jd]) raf_interleaved else raf_identity;
+                                sum_raf_only = sum_raf_only.add(eq_ra_d.mul(raf_val_d));
+
+                                // Per-type breakdown
+                                const is_virtual_d = jd < trace_len and blk_v: {
+                                    const opc_d = trace.steps.items[jd].instruction & 0x7f;
+                                    break :blk_v opc_d == 0x02 or opc_d == 0x22 or opc_d == 0x42 or opc_d == 0x62;
+                                };
+                                if (is_virtual_d) {
+                                    sum_table_virtual = sum_table_virtual.add(eq_ra_d.mul(table_val_d));
+                                    sum_raf_virtual = sum_raf_virtual.add(eq_ra_d.mul(raf_val_d));
+                                } else {
+                                    sum_table_regular = sum_table_regular.add(eq_ra_d.mul(table_val_d));
+                                    sum_raf_regular = sum_raf_regular.add(eq_ra_d.mul(raf_val_d));
+                                }
+
+                                // RAF by path type
+                                if (!cycle_is_identity_path[jd]) {
+                                    sum_raf_interleaved = sum_raf_interleaved.add(eq_ra_d.mul(raf_interleaved));
+                                } else {
+                                    sum_raf_identity_cycles = sum_raf_identity_cycles.add(eq_ra_d.mul(raf_identity));
+                                }
+                            }
+                            dbg("[DECOMP_DIAG] sum_table_only   = {x}\n", .{sum_table_only.toBytesBE()[16..32].*});
+                            dbg("[DECOMP_DIAG] sum_raf_only     = {x}\n", .{sum_raf_only.toBytesBE()[16..32].*});
+                            dbg("[DECOMP_DIAG] sum_table+raf    = {x}\n", .{sum_table_only.add(sum_raf_only).toBytesBE()[16..32].*});
+                            dbg("[DECOMP_DIAG] lookups_claim    = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
+                            dbg("[DECOMP_DIAG] table+raf==claim = {}\n", .{sum_table_only.add(sum_raf_only).eql(lookups_claim)});
+                            dbg("[DECOMP_DIAG] table_virtual    = {x}\n", .{sum_table_virtual.toBytesBE()[16..32].*});
+                            dbg("[DECOMP_DIAG] table_regular    = {x}\n", .{sum_table_regular.toBytesBE()[16..32].*});
+                            dbg("[DECOMP_DIAG] raf_virtual      = {x}\n", .{sum_raf_virtual.toBytesBE()[16..32].*});
+                            dbg("[DECOMP_DIAG] raf_regular       = {x}\n", .{sum_raf_regular.toBytesBE()[16..32].*});
+                            dbg("[DECOMP_DIAG] raf_interleaved_total = {x}\n", .{sum_raf_interleaved.toBytesBE()[16..32].*});
+                            dbg("[DECOMP_DIAG] raf_identity_total    = {x}\n", .{sum_raf_identity_cycles.toBytesBE()[16..32].*});
+
+                            // Also compute what raf SHOULD be from the eq_ra sum
+                            // raf = γ*(1-flag)*left + γ²*(1-flag)*right + γ²*flag*identity
+                            // = (1-flag) * raf_interleaved + flag * raf_identity
+                            // = raf_interleaved - flag*(raf_interleaved - raf_identity) for each cycle
+                            // Total: raf_interleaved * Σeq_ra_interleaved + raf_identity * Σeq_ra_identity
+                            var sum_eq_ra_interleaved = F.zero();
+                            var sum_eq_ra_identity = F.zero();
+                            for (0..T) |je| {
+                                const k_lo_je = lookups_indices_lo[je];
+                                const k_bound_e: usize = @truncate(k_lo_je >> @intCast(last_shift));
+                                const k_masked_e = k_bound_e & last_m_mask;
+                                const v_last_e = expanding_tables[last_phase].get(k_masked_e);
+                                const eq_ra_e = lookups_eq_evals[je].mul(v_last_e);
+                                if (!cycle_is_identity_path[je]) {
+                                    sum_eq_ra_interleaved = sum_eq_ra_interleaved.add(eq_ra_e);
+                                } else {
+                                    sum_eq_ra_identity = sum_eq_ra_identity.add(eq_ra_e);
+                                }
+                            }
+                            const raf_from_sums = raf_interleaved.mul(sum_eq_ra_interleaved).add(raf_identity.mul(sum_eq_ra_identity));
+                            dbg("[DECOMP_DIAG] sum_eq_ra_interleaved = {x}\n", .{sum_eq_ra_interleaved.toBytesBE()[16..32].*});
+                            dbg("[DECOMP_DIAG] sum_eq_ra_identity    = {x}\n", .{sum_eq_ra_identity.toBytesBE()[16..32].*});
+                            dbg("[DECOMP_DIAG] raf_from_sums         = {x}\n", .{raf_from_sums.toBytesBE()[16..32].*});
+                            dbg("[DECOMP_DIAG] raf_from_sums==sum_raf_only = {}\n", .{raf_from_sums.eql(sum_raf_only)});
+
+                            // ============================================================
+                            // EQ_RA VERIFICATION: Check condensed eq_ra matches fresh computation
+                            // ============================================================
+                            var eq_ra_mismatches: usize = 0;
+                            var first_mismatch_cycle: usize = 0;
+                            for (0..@min(T, 20)) |jv| {
+                                const k_lo_jv = lookups_indices_lo[jv];
+                                const k_bound_v: usize = @truncate(k_lo_jv >> @intCast(last_shift));
+                                const k_masked_v = k_bound_v & last_m_mask;
+                                const v_last_v = expanding_tables[last_phase].get(k_masked_v);
+                                const eq_ra_condensed = lookups_eq_evals[jv].mul(v_last_v);
+                                const fresh_eq_jv = computeEqAtIndex(r_reduction, jv);
+                                const eq_ra_fresh = fresh_eq_jv.mul(lookups_ra_weights[jv]);
+                                const match_jv = eq_ra_condensed.eql(eq_ra_fresh);
+                                if (!match_jv) {
+                                    eq_ra_mismatches += 1;
+                                    if (eq_ra_mismatches == 1) first_mismatch_cycle = jv;
+                                }
+                                if (jv < 5 or !match_jv) {
+                                    dbg("[EQ_RA_CHECK j={}] condensed={x}, fresh={x}, match={}\n", .{
+                                        jv,
+                                        eq_ra_condensed.toBytesBE()[24..32].*,
+                                        eq_ra_fresh.toBytesBE()[24..32].*,
+                                        match_jv,
+                                    });
+                                }
+                            }
+                            dbg("[EQ_RA_CHECK] mismatches in first 20 cycles: {}\n", .{eq_ra_mismatches});
+
+                            // Wider check: count mismatches across ALL cycles
+                            var eq_ra_total_mismatches: usize = 0;
+                            for (0..T) |jw| {
+                                const k_lo_jw = lookups_indices_lo[jw];
+                                const k_bound_w: usize = @truncate(k_lo_jw >> @intCast(last_shift));
+                                const k_masked_w = k_bound_w & last_m_mask;
+                                const v_last_w = expanding_tables[last_phase].get(k_masked_w);
+                                const eq_ra_condensed_w = lookups_eq_evals[jw].mul(v_last_w);
+                                const fresh_eq_jw = computeEqAtIndex(r_reduction, jw);
+                                const eq_ra_fresh_w = fresh_eq_jw.mul(lookups_ra_weights[jw]);
+                                if (!eq_ra_condensed_w.eql(eq_ra_fresh_w)) {
+                                    eq_ra_total_mismatches += 1;
+                                }
+                            }
+                            dbg("[EQ_RA_CHECK] total mismatches across ALL {} cycles: {}\n", .{T, eq_ra_total_mismatches});
+
+                            // If eq_ra matches, the problem is in cv_remat
+                            // Try computing with fresh eq_ra instead
+                            if (eq_ra_total_mismatches == 0) {
+                                dbg("[EQ_RA_CHECK] ALL eq_ra values match! Problem is in cv_remat.\n", .{});
+                            } else {
+                                // Compute sum using FRESH eq_ra
+                                var sum_fresh_eq_ra = F.zero();
+                                for (0..T) |jf| {
+                                    const fresh_eq_jf = computeEqAtIndex(r_reduction, jf);
+                                    const eq_ra_f = fresh_eq_jf.mul(lookups_ra_weights[jf]);
+                                    sum_fresh_eq_ra = sum_fresh_eq_ra.add(eq_ra_f.mul(lookups_combined_vals[jf]));
+                                }
+                                dbg("[EQ_RA_CHECK] sum_with_fresh_eq_ra = {x}\n", .{sum_fresh_eq_ra.toBytesBE()[16..32].*});
+                                dbg("[EQ_RA_CHECK] matches claim: {}\n", .{sum_fresh_eq_ra.eql(lookups_claim)});
+                            }
                         }
 
                         dbg("[STAGE5 CYCLE] Reinitializing lookups_eq_evals for cycle rounds\n", .{});
@@ -6731,6 +7197,10 @@ pub fn getLookupTableIndex(opcode: u32, funct3: u32, funct7: u32) i8 {
         0x0B => 21, // VirtualSignExtendWord -> SignExtendHalfWordTable
         0x2B => 0, // VirtualMULI -> RangeCheckTable
         0x5B => 26, // VirtualSRLI -> VirtualSRLTable
+        0x02 => 0, // VirtualAdvice -> RangeCheckTable
+        0x22 => 6, // VirtualAssertEQ -> EqualTable
+        0x42 => 20, // VirtualZeroExtendWord -> LowerHalfWordTable
+        0x62 => 16, // VirtualAssertValidUnsignedRemainder -> ValidUnsignedRemainderTable
         0x37 => 0, // LUI -> RangeCheckTable
         0x17 => 0, // AUIPC -> RangeCheckTable
         0x6f => 0, // JAL -> RangeCheckTable

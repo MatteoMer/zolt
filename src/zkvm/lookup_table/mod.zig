@@ -1135,6 +1135,38 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
         /// ValidSignedRemainder: Validates signed remainder semantics
         /// Returns 1 if: divisor == 0 OR remainder == 0 OR
         ///              (|remainder| < |divisor| AND sign(remainder) == sign(divisor))
+        /// LowerHalfWord: extracts the lower XLEN/2 bits of the input value
+        /// For XLEN=64, this masks to lower 32 bits: LowerHalfWord(x) = x mod 2^32
+        /// Uses identity (non-interleaved) addressing: r[0..XLEN] = upper bits, r[XLEN..2*XLEN] = lower bits
+        pub const LowerHalfWord = struct {
+            /// Materialize the entry at the given index
+            pub fn materializeEntry(index: u128) u64 {
+                const half_word_size = XLEN / 2;
+                return @truncate(index % (@as(u128, 1) << half_word_size));
+            }
+
+            /// Evaluate the MLE at point r
+            /// For identity-path tables, r is split as:
+            ///   r[0..XLEN] = "left operand" bits (unused for this table)
+            ///   r[XLEN..2*XLEN] = "right operand" bits (the value, MSB first)
+            ///
+            /// LowerHalfWord keeps only the lower half bits:
+            /// result = Σ(i=0..half_word_size-1) 2^(half_word_size-1-i) * r[XLEN + half_word_size + i]
+            pub fn evaluateMLE(r: []const F) F {
+                std.debug.assert(r.len == 2 * XLEN);
+                const half_word_size = XLEN / 2;
+
+                var result = F.zero();
+                inline for (0..half_word_size) |i| {
+                    const shift: u6 = half_word_size - 1 - i;
+                    const coeff = F.fromU64(@as(u64, 1) << shift);
+                    result = result.add(coeff.mul(r[XLEN + half_word_size + i]));
+                }
+
+                return result;
+            }
+        };
+
         /// SignExtendHalfWord: sign-extends the lower XLEN/2 bits to full XLEN
         /// For XLEN=64, this sign-extends a 32-bit value to 64-bit
         /// Uses identity (non-interleaved) addressing: r[0..XLEN] = upper bits, r[XLEN..2*XLEN] = lower bits
@@ -1256,7 +1288,7 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                 17 => ValidDiv0.evaluateMLE(r),
                 18 => F.zero(), // HalfwordAlignment - TODO
                 19 => F.zero(), // WordAlignment - TODO
-                20 => F.zero(), // LowerHalfWord - TODO
+                20 => LowerHalfWord.evaluateMLE(r),
                 21 => SignExtendHalfWord.evaluateMLE(r),
                 22 => Pow2.evaluateMLE(r),
                 23 => F.zero(), // Pow2W - TODO
@@ -1313,8 +1345,22 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                 4 => odd_bits | even_bits, // Or: x | y
                 5 => odd_bits ^ even_bits, // Xor: x ^ y
                 6 => @intFromBool(odd_bits == even_bits), // Equal: x == y
+                7 => @intFromBool(@as(i64, @bitCast(odd_bits)) >= @as(i64, @bitCast(even_bits))), // SignedGreaterThanEqual: (signed)x >= (signed)y
+                8 => @intFromBool(odd_bits >= even_bits), // UnsignedGreaterThanEqual: x >= y
                 9 => @intFromBool(odd_bits != even_bits), // NotEqual: x != y
+                10 => @intFromBool(@as(i64, @bitCast(odd_bits)) < @as(i64, @bitCast(even_bits))), // SignedLessThan: (signed)x < (signed)y
                 11 => @intFromBool(odd_bits < even_bits), // UnsignedLessThan: x < y
+                12 => blk12: { // Movsign: sign(y) ? ~x : x
+                    const y_signed: i64 = @bitCast(even_bits);
+                    break :blk12 if (y_signed < 0) ~odd_bits else odd_bits;
+                },
+                13 => blk13: { // UpperWord: upper 32 bits of 128-bit value
+                    // For identity-path (MUL/MULHU), index is the raw u128 product
+                    // Upper word = bits [127:64] of the full value
+                    break :blk13 @truncate(index >> 64);
+                },
+                16 => ValidUnsignedRemainder.materializeEntry(index), // interleaved(remainder, divisor)
+                20 => LowerHalfWord.materializeEntry(index), // identity: lower 32 bits
                 21 => blk21: {
                     // SignExtendHalfWord: identity path, sign-extend lower 32 bits to 64 bits
                     const val: u64 = @truncate(index);

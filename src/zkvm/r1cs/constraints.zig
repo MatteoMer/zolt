@@ -644,6 +644,12 @@ fn computeLookupOutput(comptime FieldType: type, step: tracer.TraceStep) FieldTy
             };
             return if (taken) FieldType.one() else FieldType.zero();
         },
+        0x22, 0x62 => {
+            // VirtualAssertEQ and VirtualAssertValidUnsignedRemainder are Assert instructions.
+            // For Assert instructions, the lookup output is always 1 (assertion passed).
+            // This satisfies Constraint 11: if { Assert } => ( LookupOutput ) == ( 1 )
+            return FieldType.one();
+        },
         else => {
             // For other instructions with a lookup table, use rd_value
             return FieldType.fromU64(step.rd_value);
@@ -696,6 +702,10 @@ fn hasLookupTable(opcode: u8, funct3: u3, funct7: u7) bool {
         0x0B => true, // VirtualSignExtendWord - uses SignExtendHalfWord table
         0x2B => true, // VirtualMULI - uses RangeCheck table
         0x5B => true, // VirtualSRLI - uses VirtualSRL table
+        0x02 => true, // VirtualAdvice - uses RangeCheck table (Advice)
+        0x22 => true, // VirtualAssertEQ - uses Equal table (Assert)
+        0x42 => true, // VirtualZeroExtendWord - uses LowerHalfWord table (AddOperands)
+        0x62 => true, // VirtualAssertValidUnsignedRemainder - uses ValidUnsignedRemainder table (Assert)
         0x03 => false, // Load - no table
         0x23 => false, // Store - no table
         else => false,
@@ -1109,6 +1119,10 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             //   J-type: 0x6f (JAL)
             const reads_rs1 = switch (opcode) {
                 0x13, 0x03, 0x67, 0x1b, 0x33, 0x3b, 0x23, 0x63, 0x0B, 0x2B, 0x5B => true,
+                0x22 => true, // VirtualAssertEQ: left = rs1 (LeftOperandIsRs1Value)
+                0x42 => true, // VirtualZeroExtendWord: left = rs1 (LeftOperandIsRs1Value)
+                0x62 => true, // VirtualAssertValidUnsignedRemainder: left = rs1 (LeftOperandIsRs1Value)
+                // 0x02 (VirtualAdvice): does NOT read rs1, instruction_inputs = (0, 0)
                 else => false,
             };
             if (reads_rs1) {
@@ -1125,6 +1139,8 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             //   All I-type, U-type, J-type
             const reads_rs2 = switch (opcode) {
                 0x33, 0x3b, 0x23, 0x63 => true,
+                0x22 => true, // VirtualAssertEQ: right = rs2 (RightOperandIsRs2Value)
+                0x62 => true, // VirtualAssertValidUnsignedRemainder: right = rs2 (RightOperandIsRs2Value)
                 else => false,
             };
             if (reads_rs2) {
@@ -1223,6 +1239,10 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                 0x0B => F.one(), // VirtualSignExtendWord: left = rs1 (LeftOperandIsRs1Value)
                 0x2B => F.one(), // VirtualMULI: left = rs1 (LeftOperandIsRs1Value)
                 0x5B => F.one(), // VirtualSRLI: left = rs1 (LeftOperandIsRs1Value)
+                0x02 => F.zero(), // VirtualAdvice: no operands (instruction_inputs = (0,0))
+                0x22 => F.one(), // VirtualAssertEQ: left = rs1 (LeftOperandIsRs1Value)
+                0x42 => F.one(), // VirtualZeroExtendWord: left = rs1 (LeftOperandIsRs1Value)
+                0x62 => F.one(), // VirtualAssertValidUnsignedRemainder: left = rs1 (LeftOperandIsRs1Value)
                 0x73 => F.zero(), // SYSTEM (ECALL/EBREAK): no operand
                 0x0F => F.zero(), // FENCE: no operand
                 else => F.zero(),
@@ -1236,6 +1256,8 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                 0x33 => F.one(), // R-type: right = rs2
                 0x63 => F.one(), // B-type: right = rs2 (for comparison)
                 0x3B => F.one(), // OP-32: right = rs2 (ADDW, SUBW, etc.)
+                0x22 => F.one(), // VirtualAssertEQ: right = rs2 (RightOperandIsRs2Value)
+                0x62 => F.one(), // VirtualAssertValidUnsignedRemainder: right = rs2 (RightOperandIsRs2Value)
                 else => F.zero(),
             };
             const right_is_imm: F = if (!has_lookup_table) F.zero() else switch (instr_opcode) {
@@ -1335,20 +1357,16 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                 const next_is_virtual = (!ns.is_noop and ns.virtual_sequence_remaining > 0) or
                     (next_opcode == 0x0B) or // VirtualSignExtendWord is always virtual (vsr=Some(0))
                     (next_opcode == 0x2B) or // VirtualMULI is always virtual (standalone SLLI has vsr=Some(0))
-                    (next_opcode == 0x5B); // VirtualSRLI is always virtual (standalone SRLI has vsr=Some(0))
+                    (next_opcode == 0x5B) or // VirtualSRLI is always virtual (standalone SRLI has vsr=Some(0))
+                    (next_opcode == 0x02) or // VirtualAdvice is always virtual
+                    (next_opcode == 0x22) or // VirtualAssertEQ is always virtual
+                    (next_opcode == 0x42) or // VirtualZeroExtendWord is always virtual
+                    (next_opcode == 0x62); // VirtualAssertValidUnsignedRemainder is always virtual
                 inputs.values[R1CSInputIndex.NextIsVirtual.toIndex()] = if (next_is_virtual) F.one() else F.zero();
 
                 // NextIsFirstInSequence: 1 if the next step is the first in a virtual sequence.
-                // For W-extension decomposition: the first step (ADDI/ADD/SUB/MUL with vsr=1) has IsFirstInSequence=true.
-                // For standalone virtual instructions (SLLI→VirtualMULI with vsr=0): IsFirstInSequence=true.
-                // We detect this by checking:
-                //   - vsr > 0 AND not a termination store (W-ext first step)
-                //   - opcode == 0x2B AND vsr == 0 (standalone VirtualMULI from SLLI)
-                const next_is_first = !ns.is_noop and (
-                    (!ns.is_termination_store and ns.virtual_sequence_remaining > 0) or
-                    (next_opcode == 0x2B and ns.virtual_sequence_remaining == 0) or
-                    (next_opcode == 0x5B and ns.virtual_sequence_remaining == 0) // Standalone VirtualSRLI (from SRLI)
-                );
+                // Now uses the explicit is_first_in_sequence field from the trace step.
+                const next_is_first = !ns.is_noop and ns.is_first_in_sequence;
                 inputs.values[R1CSInputIndex.NextIsFirstInSequence.toIndex()] = if (next_is_first) F.one() else F.zero();
             } else {
                 // No next step: all Next* values are 0 (matching Jolt)
@@ -1372,11 +1390,12 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             // and the virtual instruction (e.g., VirtualSignExtendWord with vsr=0).
             // =================================================================
             if (step.virtual_sequence_remaining > 0 and !step.is_termination_store) {
-                // This is the FIRST instruction in a W-extension virtual sequence
-                // (e.g., ADDI from ADDIW decomposition, with vsr=1)
-                // In Jolt: vsr=Some(1), so VirtualInstruction=true, DoNotUpdateUnexpandedPC=true
+                // This instruction is part of a virtual sequence with vsr>0
+                // In Jolt: vsr=Some(N), so VirtualInstruction=true, DoNotUpdateUnexpandedPC=true
                 inputs.values[R1CSInputIndex.FlagVirtualInstruction.toIndex()] = F.one();
                 inputs.values[R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();
+            }
+            if (step.is_first_in_sequence) {
                 inputs.values[R1CSInputIndex.FlagIsFirstInSequence.toIndex()] = F.one();
             }
 
@@ -1610,6 +1629,16 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                     }
                     return F.zero();
                 },
+                0x02 => { // VirtualAdvice: lookup operands = (0, advice_value)
+                    // In Jolt, advice is the oracle-provided value (quotient or remainder)
+                    // to_lookup_operands returns (0, self.instruction.advice as u128)
+                    // The advice value is stored in step.rd_value (written to rd register)
+                    return F.fromU128(@as(u128, step.rd_value));
+                },
+                0x42 => { // VirtualZeroExtendWord: lookup operands = (0, rs1 + 0) = (0, rs1)
+                    // AddOperands: RightLookup = u128(left + right) = u128(rs1 + 0) = rs1
+                    return F.fromU128(@as(u128, step.rs1_value));
+                },
                 else => return F.zero(),
             }
         }
@@ -1769,6 +1798,57 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                         self.values[R1CSInputIndex.FlagIsFirstInSequence.toIndex()] = F.one();
                     } else {
                         // SRLIW middle step (vsr>0): DoNotUpdateUnexpandedPC = true.
+                        self.values[R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();
+                    }
+                },
+                0x02 => { // VirtualAdvice: Advice, WriteLookupOutputToRD
+                    // VirtualAdvice injects oracle value; uses RangeCheck table (identity)
+                    // Lookup operands: (0, advice)
+                    self.values[R1CSInputIndex.FlagAdvice.toIndex()] = F.one();
+                    self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
+                    self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
+                    self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = u128_right_lookup;
+                    // Always part of a virtual sequence
+                    self.values[R1CSInputIndex.FlagVirtualInstruction.toIndex()] = F.one();
+                    if (step.virtual_sequence_remaining > 0) {
+                        self.values[R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();
+                    }
+                },
+                0x22 => { // VirtualAssertEQ: Assert (interleaved operands)
+                    // VirtualAssertEQ checks rs1 == rs2; uses Equal table
+                    // Lookup operands: (rs1, rs2) interleaved
+                    self.values[R1CSInputIndex.FlagAssert.toIndex()] = F.one();
+                    self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
+                    self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input;
+                    // Always part of a virtual sequence
+                    self.values[R1CSInputIndex.FlagVirtualInstruction.toIndex()] = F.one();
+                    if (step.virtual_sequence_remaining > 0) {
+                        self.values[R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();
+                    }
+                },
+                0x42 => { // VirtualZeroExtendWord: AddOperands, WriteLookupOutputToRD
+                    // VirtualZeroExtendWord zeros upper bits; uses LowerHalfWord table
+                    // Lookup operands: (0, rs1) via AddOperands
+                    self.values[R1CSInputIndex.FlagAddOperands.toIndex()] = F.one();
+                    self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
+                    self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
+                    self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = u128_right_lookup;
+                    // Always part of a virtual sequence
+                    self.values[R1CSInputIndex.FlagVirtualInstruction.toIndex()] = F.one();
+                    if (step.virtual_sequence_remaining > 0) {
+                        self.values[R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();
+                    }
+                },
+                0x62 => { // VirtualAssertValidUnsignedRemainder: Assert (interleaved operands)
+                    // VirtualAssertValidUnsignedRemainder checks remainder < divisor
+                    // Uses ValidUnsignedRemainder table
+                    // Lookup operands: (rs1, rs2) interleaved
+                    self.values[R1CSInputIndex.FlagAssert.toIndex()] = F.one();
+                    self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
+                    self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input;
+                    // Always part of a virtual sequence
+                    self.values[R1CSInputIndex.FlagVirtualInstruction.toIndex()] = F.one();
+                    if (step.virtual_sequence_remaining > 0) {
                         self.values[R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();
                     }
                 },

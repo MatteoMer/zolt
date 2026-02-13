@@ -70,6 +70,11 @@ pub const TraceStep = struct {
     /// assign each virtual instruction its own bytecode index k.
     /// Default 0 means this is the last (or only) instruction in its sequence.
     virtual_sequence_remaining: u16 = 0,
+    /// Whether this is the first instruction in a virtual sequence.
+    /// In Jolt, this maps to the `is_first_in_sequence` field on instructions.
+    /// For 2-step W-extension: the base instruction is first.
+    /// For 12-step REMUW: the first VirtualAdvice is first.
+    is_first_in_sequence: bool = false,
 };
 
 /// Full execution trace
@@ -292,23 +297,37 @@ pub const Emulator = struct {
     /// The 64-bit bitmask is computed as: ones = (1 << (64 - shift)) - 1; bitmask = ones << shift
     pub const VIRTUAL_SRLI_OPCODE: u7 = 0x5B;
 
+    /// Synthetic opcodes for inline sequence virtual instructions.
+    /// These don't correspond to real RISC-V opcodes - they're only used to encode
+    /// register indices in the trace. They use RISC-V custom opcode space (0x02, 0x22, 0x42, 0x62).
+    /// VirtualAdvice: J-type format (rd only) - uses custom-0b
+    pub const VIRTUAL_ADVICE_OPCODE: u7 = 0x02;
+    /// VirtualAssertEQ: B-type format (rs1, rs2) - uses custom-0c
+    pub const VIRTUAL_ASSERT_EQ_OPCODE: u7 = 0x22;
+    /// VirtualZeroExtendWord: I-type format (rd, rs1) - uses custom-0d
+    pub const VIRTUAL_ZERO_EXTEND_WORD_OPCODE: u7 = 0x42;
+    /// VirtualAssertValidUnsignedRemainder: B-type format (rs1, rs2) - uses custom-0e
+    pub const VIRTUAL_ASSERT_VALID_UNSIGNED_REMAINDER_OPCODE: u7 = 0x62;
+
     /// Build a synthetic VirtualMULI instruction word.
     /// shamt: shift amount (0-63) stored in the I-type immediate field.
     /// The actual multiplier (1 << shamt) is computed by R1CS witness/lookup code.
     fn buildVirtualMULIInstr(rd: u8, rs1: u8, shamt: u6) u32 {
+        // Mask register indices to 5 bits to prevent overflow into adjacent fields
         return (@as(u32, shamt) << 20) |
-            (@as(u32, rs1) << 15) |
+            (@as(u32, rs1 & 0x1F) << 15) |
             (0 << 12) | // funct3 = 0
-            (@as(u32, rd) << 7) |
+            (@as(u32, rd & 0x1F) << 7) |
             @as(u32, VIRTUAL_MULI_OPCODE);
     }
 
     /// Build a synthetic VirtualSignExtendWord instruction word
     fn buildVirtualSignExtendWordInstr(rd: u8, rs1: u8) u32 {
+        // Mask register indices to 5 bits to prevent overflow into adjacent fields
         return @as(u32, 0) | // imm = 0
-            (@as(u32, rs1) << 15) |
+            (@as(u32, rs1 & 0x1F) << 15) |
             (0 << 12) | // funct3 = 0
-            (@as(u32, rd) << 7) |
+            (@as(u32, rd & 0x1F) << 7) |
             @as(u32, VIRTUAL_SIGN_EXTEND_WORD_OPCODE);
     }
 
@@ -316,11 +335,69 @@ pub const Emulator = struct {
     /// total_shift: the total shift amount (0-63), stored in I-type imm field.
     /// The 64-bit bitmask is: ones = (1 << (64 - shift)) - 1; bitmask = ones << shift
     fn buildVirtualSRLIInstr(rd: u8, rs1: u8, total_shift: u7) u32 {
+        // Mask register indices to 5 bits to prevent overflow into adjacent fields
         return (@as(u32, total_shift) << 20) |
-            (@as(u32, rs1) << 15) |
+            (@as(u32, rs1 & 0x1F) << 15) |
             (0 << 12) | // funct3 = 0
-            (@as(u32, rd) << 7) |
+            (@as(u32, rd & 0x1F) << 7) |
             @as(u32, VIRTUAL_SRLI_OPCODE);
+    }
+
+    /// Build a synthetic VirtualAdvice instruction word (J-type: rd only)
+    fn buildVirtualAdviceInstr(rd: u8) u32 {
+        // Mask register index to 5 bits to prevent overflow into adjacent fields
+        return (@as(u32, rd & 0x1F) << 7) |
+            @as(u32, VIRTUAL_ADVICE_OPCODE);
+    }
+
+    /// Build a synthetic VirtualAssertEQ instruction word (B-type: rs1, rs2)
+    fn buildVirtualAssertEQInstr(rs1: u8, rs2: u8) u32 {
+        // Mask register indices to 5 bits to prevent overflow into adjacent fields
+        return (@as(u32, rs2 & 0x1F) << 20) |
+            (@as(u32, rs1 & 0x1F) << 15) |
+            @as(u32, VIRTUAL_ASSERT_EQ_OPCODE);
+    }
+
+    /// Build a synthetic VirtualZeroExtendWord instruction word (I-type: rd, rs1)
+    fn buildVirtualZeroExtendWordInstr(rd: u8, rs1: u8) u32 {
+        // Mask register indices to 5 bits to prevent overflow into adjacent fields
+        return (@as(u32, rs1 & 0x1F) << 15) |
+            (@as(u32, rd & 0x1F) << 7) |
+            @as(u32, VIRTUAL_ZERO_EXTEND_WORD_OPCODE);
+    }
+
+    /// Build a synthetic VirtualAssertValidUnsignedRemainder instruction word (B-type: rs1, rs2)
+    fn buildVirtualAssertValidUnsignedRemainderInstr(rs1: u8, rs2: u8) u32 {
+        // Mask register indices to 5 bits to prevent overflow into adjacent fields
+        return (@as(u32, rs2 & 0x1F) << 20) |
+            (@as(u32, rs1 & 0x1F) << 15) |
+            @as(u32, VIRTUAL_ASSERT_VALID_UNSIGNED_REMAINDER_OPCODE);
+    }
+
+    /// Build a standard R-type MUL instruction: MUL rd, rs1, rs2
+    /// opcode=0x33, funct7=0x01, funct3=0x00
+    fn buildMULInstr(rd: u8, rs1: u8, rs2: u8) u32 {
+        // IMPORTANT: Mask register indices to 5 bits to prevent overflow into
+        // funct3/funct7 fields. Virtual registers (32+) have bit 5 set which
+        // would corrupt adjacent instruction fields if not masked.
+        return (0x01 << 25) | // funct7 = 0x01 (M extension)
+            (@as(u32, rs2 & 0x1F) << 20) |
+            (@as(u32, rs1 & 0x1F) << 15) |
+            (0x00 << 12) | // funct3 = 0 (MUL)
+            (@as(u32, rd & 0x1F) << 7) |
+            0x33; // opcode = OP
+    }
+
+    /// Build a standard R-type ADD instruction: ADD rd, rs1, rs2
+    /// opcode=0x33, funct7=0x00, funct3=0x00
+    fn buildADDInstr(rd: u8, rs1: u8, rs2: u8) u32 {
+        // IMPORTANT: Mask register indices to 5 bits to prevent overflow.
+        return (0x00 << 25) | // funct7 = 0x00 (ADD)
+            (@as(u32, rs2 & 0x1F) << 20) |
+            (@as(u32, rs1 & 0x1F) << 15) |
+            (0x00 << 12) | // funct3 = 0 (ADD)
+            (@as(u32, rd & 0x1F) << 7) |
+            0x33; // opcode = OP
     }
 
     const WExtType = enum { ADDIW, ADDW, SUBW, MULW, SLLIW, SRLIW };
@@ -375,6 +452,24 @@ pub const Emulator = struct {
         };
     }
 
+    /// Check if instruction is REMUW (needs 12-step inline sequence decomposition)
+    /// REMUW: opcode=OP_32 (0x3B), funct7=0x01 (M extension), funct3=0b111
+    fn isREMUW(decoded: zkvm.instruction.DecodedInstruction) bool {
+        return decoded.opcode == .OP_32 and decoded.funct7 == 0x01 and decoded.funct3 == 0b111;
+    }
+
+    /// Check if instruction is DIVW (needs 21-step inline sequence decomposition)
+    /// DIVW: opcode=OP_32 (0x3B), funct7=0x01 (M extension), funct3=0b100
+    fn isDIVW(decoded: zkvm.instruction.DecodedInstruction) bool {
+        return decoded.opcode == .OP_32 and decoded.funct7 == 0x01 and decoded.funct3 == 0b100;
+    }
+
+    /// Check if instruction is REMW (needs 21-step inline sequence decomposition)
+    /// REMW: opcode=OP_32 (0x3B), funct7=0x01 (M extension), funct3=0b110
+    fn isREMW(decoded: zkvm.instruction.DecodedInstruction) bool {
+        return decoded.opcode == .OP_32 and decoded.funct7 == 0x01 and decoded.funct3 == 0b110;
+    }
+
     /// Check if instruction is SLLI (which decomposes to a single VirtualMULI step)
     fn isSLLI(decoded: zkvm.instruction.DecodedInstruction) bool {
         return decoded.opcode == .OP_IMM and decoded.funct3 == 0b001;
@@ -424,6 +519,11 @@ pub const Emulator = struct {
         // Check if this is SRLI (decomposes to single VirtualSRLI)
         if (isSRLI(decoded)) {
             return try self.stepSRLI(instruction, decoded);
+        }
+
+        // Check if this is REMUW (12-step inline sequence decomposition)
+        if (isREMUW(decoded)) {
+            return try self.stepREMUW(instruction, decoded);
         }
 
         // Standard (non-W-extension) instruction execution
@@ -587,6 +687,7 @@ pub const Emulator = struct {
             .is_memory_write = false,
             .next_pc = self.state.pc + pc_increment,
             .is_compressed = self.is_compressed,
+            .is_first_in_sequence = true, // Standalone VirtualMULI is first (and only) in sequence
         });
 
         // Update prev_pc for infinite loop detection
@@ -667,6 +768,7 @@ pub const Emulator = struct {
             .is_memory_write = false,
             .next_pc = self.state.pc + pc_increment,
             .is_compressed = self.is_compressed,
+            .is_first_in_sequence = true, // Standalone VirtualSRLI is first (and only) in sequence
         });
 
         self.prev_pc = self.state.pc;
@@ -746,6 +848,7 @@ pub const Emulator = struct {
             .next_pc = self.state.pc + pc_increment,
             .is_compressed = self.is_compressed,
             .virtual_sequence_remaining = 2, // 3-step sequence: step 1
+            .is_first_in_sequence = true, // First step in SRLIW virtual sequence
         });
 
         self.state.cycle += 1;
@@ -966,6 +1069,7 @@ pub const Emulator = struct {
             .next_pc = self.state.pc + pc_increment, // Next PC is the same address for virtual seq
             .is_compressed = self.is_compressed,
             .virtual_sequence_remaining = 1, // 2-instruction sequence: base(1), VirtualSignExtendWord(0)
+            .is_first_in_sequence = true, // First step in W-extension virtual sequence
         });
 
         self.state.cycle += 1;
@@ -1016,6 +1120,495 @@ pub const Emulator = struct {
             .next_pc = self.state.pc + pc_increment,
             .is_compressed = self.is_compressed,
             .virtual_sequence_remaining = 0, // Last in 2-instruction sequence
+        });
+
+        // Update prev_pc for infinite loop detection
+        self.prev_pc = self.state.pc;
+
+        // Update state - PC advances by instruction size (NOT doubled)
+        self.state.pc = self.state.pc + pc_increment;
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        return true;
+    }
+
+    /// Execute REMUW as a 12-step inline sequence decomposition.
+    /// Matches Jolt's REMUW decomposition exactly:
+    ///   Step 1:  VirtualAdvice(a2) → quotient
+    ///   Step 2:  VirtualAdvice(a3) → remainder
+    ///   Step 3:  VirtualZeroExtendWord(t3, a2) → zero-extend quotient
+    ///   Step 4:  VirtualZeroExtendWord(t1, rs1) → zero-extend dividend
+    ///   Step 5:  VirtualZeroExtendWord(t2, rs2) → zero-extend divisor
+    ///   Step 6:  MUL(t0, t3, t2) → quotient * divisor
+    ///   Step 7:  VirtualZeroExtendWord(t4, t0) → mask to 32 bits
+    ///   Step 8:  VirtualAssertEQ(t4, t0) → assert no overflow
+    ///   Step 9:  ADD(t0, t0, a3) → add remainder
+    ///   Step 10: VirtualAssertEQ(t0, t1) → assert dividend = q*d + r
+    ///   Step 11: VirtualAssertValidUnsignedRemainder(a3, t2) → r < d
+    ///   Step 12: VirtualSignExtendWord(rd, a3) → sign-extend result
+    fn stepREMUW(
+        self: *Emulator,
+        instruction: u32,
+        decoded: zkvm.instruction.DecodedInstruction,
+    ) !bool {
+        // Read operands
+        const rs1_value = try self.registers.read(decoded.rs1);
+        const rs2_value = try self.registers.read(decoded.rs2);
+        const rd_pre_value = try self.registers.read(decoded.rd);
+        const pc_increment: u64 = if (self.is_compressed) 2 else 4;
+        _ = instruction;
+
+        // Virtual register indices (matching Jolt's allocation)
+        const a2: u8 = 32;
+        const a3: u8 = 33;
+        const t0: u8 = 34;
+        const t1: u8 = 35;
+        const t2: u8 = 36;
+        const t3: u8 = 37;
+        const t4: u8 = 38;
+
+        // Compute the actual REMUW result (for VirtualAdvice oracle values)
+        const rs1_lower: u32 = @truncate(rs1_value);
+        const rs2_lower: u32 = @truncate(rs2_value);
+        const quotient_u32: u32 = if (rs2_lower == 0) 0 else rs1_lower / rs2_lower;
+        const remainder_u32: u32 = if (rs2_lower == 0) rs1_lower else rs1_lower % rs2_lower;
+        // Sign-extend to 64 bits for register storage
+        const quotient: u64 = @bitCast(@as(i64, @as(i32, @bitCast(quotient_u32))));
+        const remainder: u64 = @bitCast(@as(i64, @as(i32, @bitCast(remainder_u32))));
+
+        // Initialize virtual register pre-values (zero before first use)
+        const a2_pre: u64 = try self.registers.read(a2);
+        const a3_pre: u64 = try self.registers.read(a3);
+        const t0_pre: u64 = try self.registers.read(t0);
+        const t1_pre: u64 = try self.registers.read(t1);
+        const t2_pre: u64 = try self.registers.read(t2);
+        const t3_pre: u64 = try self.registers.read(t3);
+        const t4_pre: u64 = try self.registers.read(t4);
+
+        // ==================== Step 1: VirtualAdvice(a2) → quotient ====================
+        const step1_instr = buildVirtualAdviceInstr(a2);
+        try self.lookup_trace.recordVirtualAdvice(
+            @intCast(self.state.cycle), self.state.pc, step1_instr,
+            quotient,
+            true, true, true, self.is_compressed, // is_virtual, do_not_update_pc, is_first_in_sequence
+        );
+        try self.registers.write(a2, quotient);
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle,
+            .pc = self.state.pc,
+            .unexpanded_pc = self.state.pc,
+            .instruction = step1_instr,
+            .rs1_value = 0,
+            .rs2_value = 0,
+            .rd_pre_value = a2_pre,
+            .rd_value = quotient,
+            .rd_index = a2,
+            .rs1_index = 0,
+            .rs2_index = 0,
+            .rd_written = true,
+            .rs1_read = false,
+            .rs2_read = false,
+            .memory_addr = null,
+            .memory_pre_value = null,
+            .memory_value = null,
+            .is_memory_write = false,
+            .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed,
+            .virtual_sequence_remaining = 11,
+            .is_first_in_sequence = true, // First step in REMUW 12-step virtual sequence
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // ==================== Step 2: VirtualAdvice(a3) → remainder ====================
+        const step2_instr = buildVirtualAdviceInstr(a3);
+        try self.lookup_trace.recordVirtualAdvice(
+            @intCast(self.state.cycle), self.state.pc, step2_instr,
+            remainder,
+            true, true, false, self.is_compressed,
+        );
+        try self.registers.write(a3, remainder);
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle,
+            .pc = self.state.pc,
+            .unexpanded_pc = self.state.pc,
+            .instruction = step2_instr,
+            .rs1_value = 0,
+            .rs2_value = 0,
+            .rd_pre_value = a3_pre,
+            .rd_value = remainder,
+            .rd_index = a3,
+            .rs1_index = 0,
+            .rs2_index = 0,
+            .rd_written = true,
+            .rs1_read = false,
+            .rs2_read = false,
+            .memory_addr = null,
+            .memory_pre_value = null,
+            .memory_value = null,
+            .is_memory_write = false,
+            .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed,
+            .virtual_sequence_remaining = 10,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // ==================== Step 3: VirtualZeroExtendWord(t3, a2) → zero-extend quotient ====================
+        const a2_val = try self.registers.read(a2);
+        const t3_zero_ext: u64 = a2_val & 0xFFFFFFFF;
+        const step3_instr = buildVirtualZeroExtendWordInstr(t3, a2);
+        try self.lookup_trace.recordVirtualZeroExtendWord(
+            @intCast(self.state.cycle), self.state.pc, step3_instr,
+            a2_val,
+            true, true, false, self.is_compressed,
+        );
+        try self.registers.write(t3, t3_zero_ext);
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle,
+            .pc = self.state.pc,
+            .unexpanded_pc = self.state.pc,
+            .instruction = step3_instr,
+            .rs1_value = a2_val,
+            .rs2_value = 0,
+            .rd_pre_value = t3_pre,
+            .rd_value = t3_zero_ext,
+            .rd_index = t3,
+            .rs1_index = a2,
+            .rs2_index = 0,
+            .rd_written = true,
+            .rs1_read = true,
+            .rs2_read = false,
+            .memory_addr = null,
+            .memory_pre_value = null,
+            .memory_value = null,
+            .is_memory_write = false,
+            .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed,
+            .virtual_sequence_remaining = 9,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // ==================== Step 4: VirtualZeroExtendWord(t1, rs1) → zero-extend dividend ====================
+        const t1_zero_ext: u64 = rs1_value & 0xFFFFFFFF;
+        const step4_instr = buildVirtualZeroExtendWordInstr(t1, decoded.rs1);
+        try self.lookup_trace.recordVirtualZeroExtendWord(
+            @intCast(self.state.cycle), self.state.pc, step4_instr,
+            rs1_value,
+            true, true, false, self.is_compressed,
+        );
+        try self.registers.write(t1, t1_zero_ext);
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle,
+            .pc = self.state.pc,
+            .unexpanded_pc = self.state.pc,
+            .instruction = step4_instr,
+            .rs1_value = rs1_value,
+            .rs2_value = 0,
+            .rd_pre_value = t1_pre,
+            .rd_value = t1_zero_ext,
+            .rd_index = t1,
+            .rs1_index = decoded.rs1,
+            .rs2_index = 0,
+            .rd_written = true,
+            .rs1_read = true,
+            .rs2_read = false,
+            .memory_addr = null,
+            .memory_pre_value = null,
+            .memory_value = null,
+            .is_memory_write = false,
+            .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed,
+            .virtual_sequence_remaining = 8,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // ==================== Step 5: VirtualZeroExtendWord(t2, rs2) → zero-extend divisor ====================
+        const t2_zero_ext: u64 = rs2_value & 0xFFFFFFFF;
+        const step5_instr = buildVirtualZeroExtendWordInstr(t2, decoded.rs2);
+        try self.lookup_trace.recordVirtualZeroExtendWord(
+            @intCast(self.state.cycle), self.state.pc, step5_instr,
+            rs2_value,
+            true, true, false, self.is_compressed,
+        );
+        try self.registers.write(t2, t2_zero_ext);
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle,
+            .pc = self.state.pc,
+            .unexpanded_pc = self.state.pc,
+            .instruction = step5_instr,
+            .rs1_value = rs2_value,
+            .rs2_value = 0,
+            .rd_pre_value = t2_pre,
+            .rd_value = t2_zero_ext,
+            .rd_index = t2,
+            .rs1_index = decoded.rs2,
+            .rs2_index = 0,
+            .rd_written = true,
+            .rs1_read = true,
+            .rs2_read = false,
+            .memory_addr = null,
+            .memory_pre_value = null,
+            .memory_value = null,
+            .is_memory_write = false,
+            .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed,
+            .virtual_sequence_remaining = 7,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // ==================== Step 6: MUL(t0, t3, t2) → quotient * divisor ====================
+        const t3_val = try self.registers.read(t3);
+        const t2_val = try self.registers.read(t2);
+        const mul_result: u64 = t3_val *% t2_val;
+        const step6_instr = buildMULInstr(t0, t3, t2);
+        try self.lookup_trace.recordMulVirtual(
+            @intCast(self.state.cycle), self.state.pc, step6_instr,
+            t3_val, t2_val,
+            true, false, self.is_compressed, // do_not_update_pc, is_first_in_sequence
+        );
+        try self.registers.write(t0, mul_result);
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle,
+            .pc = self.state.pc,
+            .unexpanded_pc = self.state.pc,
+            .instruction = step6_instr,
+            .rs1_value = t3_val,
+            .rs2_value = t2_val,
+            .rd_pre_value = t0_pre,
+            .rd_value = mul_result,
+            .rd_index = t0,
+            .rs1_index = t3,
+            .rs2_index = t2,
+            .rd_written = true,
+            .rs1_read = true,
+            .rs2_read = true,
+            .memory_addr = null,
+            .memory_pre_value = null,
+            .memory_value = null,
+            .is_memory_write = false,
+            .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed,
+            .virtual_sequence_remaining = 6,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // ==================== Step 7: VirtualZeroExtendWord(t4, t0) → mask to 32 bits ====================
+        const t0_val = try self.registers.read(t0);
+        const t4_zero_ext: u64 = t0_val & 0xFFFFFFFF;
+        const step7_instr = buildVirtualZeroExtendWordInstr(t4, t0);
+        try self.lookup_trace.recordVirtualZeroExtendWord(
+            @intCast(self.state.cycle), self.state.pc, step7_instr,
+            t0_val,
+            true, true, false, self.is_compressed,
+        );
+        try self.registers.write(t4, t4_zero_ext);
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle,
+            .pc = self.state.pc,
+            .unexpanded_pc = self.state.pc,
+            .instruction = step7_instr,
+            .rs1_value = t0_val,
+            .rs2_value = 0,
+            .rd_pre_value = t4_pre,
+            .rd_value = t4_zero_ext,
+            .rd_index = t4,
+            .rs1_index = t0,
+            .rs2_index = 0,
+            .rd_written = true,
+            .rs1_read = true,
+            .rs2_read = false,
+            .memory_addr = null,
+            .memory_pre_value = null,
+            .memory_value = null,
+            .is_memory_write = false,
+            .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed,
+            .virtual_sequence_remaining = 5,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // ==================== Step 8: VirtualAssertEQ(t4, t0) → assert no overflow ====================
+        const t4_val = try self.registers.read(t4);
+        const t0_val2 = try self.registers.read(t0);
+        const step8_instr = buildVirtualAssertEQInstr(t4, t0);
+        try self.lookup_trace.recordVirtualAssertEQ(
+            @intCast(self.state.cycle), self.state.pc, step8_instr,
+            t4_val, t0_val2,
+            true, true, false, self.is_compressed,
+        );
+        // Assert instructions don't write to rd
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle,
+            .pc = self.state.pc,
+            .unexpanded_pc = self.state.pc,
+            .instruction = step8_instr,
+            .rs1_value = t4_val,
+            .rs2_value = t0_val2,
+            .rd_pre_value = 0,
+            .rd_value = 0,
+            .rd_index = 0,
+            .rs1_index = t4,
+            .rs2_index = t0,
+            .rd_written = false,
+            .rs1_read = true,
+            .rs2_read = true,
+            .memory_addr = null,
+            .memory_pre_value = null,
+            .memory_value = null,
+            .is_memory_write = false,
+            .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed,
+            .virtual_sequence_remaining = 4,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // ==================== Step 9: ADD(t0, t0, a3) → add remainder ====================
+        const t0_val3 = try self.registers.read(t0);
+        const a3_val = try self.registers.read(a3);
+        const add_result: u64 = t0_val3 +% a3_val;
+        const step9_instr = buildADDInstr(t0, t0, a3);
+        const t0_pre_step9 = t0_val3; // t0's current value before this step
+        try self.lookup_trace.recordAddVirtual(
+            @intCast(self.state.cycle), self.state.pc, step9_instr,
+            t0_val3, a3_val,
+            true, false, self.is_compressed, // do_not_update_pc, is_first_in_sequence
+        );
+        try self.registers.write(t0, add_result);
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle,
+            .pc = self.state.pc,
+            .unexpanded_pc = self.state.pc,
+            .instruction = step9_instr,
+            .rs1_value = t0_val3,
+            .rs2_value = a3_val,
+            .rd_pre_value = t0_pre_step9,
+            .rd_value = add_result,
+            .rd_index = t0,
+            .rs1_index = t0,
+            .rs2_index = a3,
+            .rd_written = true,
+            .rs1_read = true,
+            .rs2_read = true,
+            .memory_addr = null,
+            .memory_pre_value = null,
+            .memory_value = null,
+            .is_memory_write = false,
+            .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed,
+            .virtual_sequence_remaining = 3,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // ==================== Step 10: VirtualAssertEQ(t0, t1) → assert dividend = q*d + r ====================
+        const t0_val4 = try self.registers.read(t0);
+        const t1_val = try self.registers.read(t1);
+        const step10_instr = buildVirtualAssertEQInstr(t0, t1);
+        try self.lookup_trace.recordVirtualAssertEQ(
+            @intCast(self.state.cycle), self.state.pc, step10_instr,
+            t0_val4, t1_val,
+            true, true, false, self.is_compressed,
+        );
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle,
+            .pc = self.state.pc,
+            .unexpanded_pc = self.state.pc,
+            .instruction = step10_instr,
+            .rs1_value = t0_val4,
+            .rs2_value = t1_val,
+            .rd_pre_value = 0,
+            .rd_value = 0,
+            .rd_index = 0,
+            .rs1_index = t0,
+            .rs2_index = t1,
+            .rd_written = false,
+            .rs1_read = true,
+            .rs2_read = true,
+            .memory_addr = null,
+            .memory_pre_value = null,
+            .memory_value = null,
+            .is_memory_write = false,
+            .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed,
+            .virtual_sequence_remaining = 2,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // ==================== Step 11: VirtualAssertValidUnsignedRemainder(a3, t2) ====================
+        const a3_val2 = try self.registers.read(a3);
+        const t2_val2 = try self.registers.read(t2);
+        const step11_instr = buildVirtualAssertValidUnsignedRemainderInstr(a3, t2);
+        try self.lookup_trace.recordVirtualAssertValidUnsignedRemainder(
+            @intCast(self.state.cycle), self.state.pc, step11_instr,
+            a3_val2, t2_val2,
+            true, true, false, self.is_compressed,
+        );
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle,
+            .pc = self.state.pc,
+            .unexpanded_pc = self.state.pc,
+            .instruction = step11_instr,
+            .rs1_value = a3_val2,
+            .rs2_value = t2_val2,
+            .rd_pre_value = 0,
+            .rd_value = 0,
+            .rd_index = 0,
+            .rs1_index = a3,
+            .rs2_index = t2,
+            .rd_written = false,
+            .rs1_read = true,
+            .rs2_read = true,
+            .memory_addr = null,
+            .memory_pre_value = null,
+            .memory_value = null,
+            .is_memory_write = false,
+            .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed,
+            .virtual_sequence_remaining = 1,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // ==================== Step 12: VirtualSignExtendWord(rd, a3) → sign-extend result ====================
+        const a3_val3 = try self.registers.read(a3);
+        const final_result: u64 = @bitCast(@as(i64, @as(i32, @truncate(@as(i64, @bitCast(a3_val3))))));
+        const step12_instr = buildVirtualSignExtendWordInstr(decoded.rd, a3);
+        try self.lookup_trace.recordVirtualSignExtendWord(
+            @intCast(self.state.cycle), self.state.pc, step12_instr,
+            a3_val3, final_result,
+        );
+        try self.registers.write(decoded.rd, final_result);
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle,
+            .pc = self.state.pc,
+            .unexpanded_pc = self.state.pc,
+            .instruction = step12_instr,
+            .rs1_value = a3_val3,
+            .rs2_value = 0,
+            .rd_pre_value = rd_pre_value,
+            .rd_value = final_result,
+            .rd_index = decoded.rd,
+            .rs1_index = a3,
+            .rs2_index = 0,
+            .rd_written = decoded.rd != 0,
+            .rs1_read = true,
+            .rs2_read = false,
+            .memory_addr = null,
+            .memory_pre_value = null,
+            .memory_value = null,
+            .is_memory_write = false,
+            .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed,
+            .virtual_sequence_remaining = 0,
         });
 
         // Update prev_pc for infinite loop detection

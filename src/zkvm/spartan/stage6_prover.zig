@@ -248,6 +248,209 @@ fn populateVirtualSRLIEntry(
     entry.is_first_in_sequence = is_first_in_sequence;
 }
 
+/// Populate a BytecodeEntry for a VirtualAdvice instruction (opcode 0x02).
+/// VirtualAdvice: Advice flag set, WriteLookupOutputToRD, no operand flags.
+/// Jolt's instruction_inputs = (0, 0), lookup table = RangeCheck (0), identity-path.
+fn populateVirtualAdviceEntry(
+    entry: *BytecodeEntry,
+    rd: u8,
+    elf_address: u64,
+    virtual_sequence_remaining: ?u16,
+    is_first_in_sequence: bool,
+) void {
+    entry.address = elf_address;
+    entry.imm = 0;
+
+    entry.rd = if (rd == 0) 255 else rd;
+    entry.rs1 = 255; // VirtualAdvice has no rs1
+    entry.rs2 = 255; // VirtualAdvice has no rs2
+
+    entry.opcode = 0x02;
+    entry.funct3 = 0;
+
+    entry.circuit_flags = [_]bool{false} ** 13;
+    entry.instruction_flags = [_]bool{false} ** 7;
+
+    var cf = &entry.circuit_flags;
+    cf[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)] = true;
+    cf[@intFromEnum(CircuitFlags.Advice)] = true;
+    if (virtual_sequence_remaining != null) {
+        cf[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+    }
+    if (virtual_sequence_remaining) |vsr| {
+        if (vsr != 0) {
+            cf[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+        }
+    }
+    if (is_first_in_sequence) {
+        cf[@intFromEnum(CircuitFlags.IsFirstInSequence)] = true;
+    }
+
+    // VirtualAdvice: NO operand flags (no LeftOperandIsRs1Value, etc.)
+    // Only IsRdNotZero if rd != 0
+    var inf = &entry.instruction_flags;
+    if (rd != 0) {
+        inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
+    }
+
+    entry.lookup_table_index = 0; // RangeCheck
+    // Advice flag set → identity-path (not interleaved)
+    entry.is_interleaved = false;
+    entry.virtual_sequence_remaining = virtual_sequence_remaining;
+    entry.is_first_in_sequence = is_first_in_sequence;
+}
+
+/// Populate a BytecodeEntry for a VirtualAssertEQ instruction (opcode 0x22).
+/// VirtualAssertEQ: Assert flag set, LeftOperandIsRs1Value, RightOperandIsRs2Value.
+/// Lookup table = Equal (6), interleaved-path.
+fn populateVirtualAssertEQEntry(
+    entry: *BytecodeEntry,
+    rs1: u8,
+    rs2: u8,
+    elf_address: u64,
+    virtual_sequence_remaining: ?u16,
+    is_first_in_sequence: bool,
+) void {
+    entry.address = elf_address;
+    entry.imm = 0;
+
+    entry.rd = 255; // Assert instructions don't write to rd
+    entry.rs1 = rs1;
+    entry.rs2 = rs2;
+
+    entry.opcode = 0x22;
+    entry.funct3 = 0;
+
+    entry.circuit_flags = [_]bool{false} ** 13;
+    entry.instruction_flags = [_]bool{false} ** 7;
+
+    var cf = &entry.circuit_flags;
+    cf[@intFromEnum(CircuitFlags.Assert)] = true;
+    if (virtual_sequence_remaining != null) {
+        cf[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+    }
+    if (virtual_sequence_remaining) |vsr| {
+        if (vsr != 0) {
+            cf[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+        }
+    }
+    if (is_first_in_sequence) {
+        cf[@intFromEnum(CircuitFlags.IsFirstInSequence)] = true;
+    }
+
+    var inf = &entry.instruction_flags;
+    inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+    inf[@intFromEnum(InstructionFlags.RightOperandIsRs2Value)] = true;
+    // Assert instructions: IsRdNotZero is false (no rd write)
+
+    entry.lookup_table_index = 6; // Equal
+    // No AddOperands/SubtractOperands/MultiplyOperands/Advice → interleaved
+    entry.is_interleaved = true;
+    entry.virtual_sequence_remaining = virtual_sequence_remaining;
+    entry.is_first_in_sequence = is_first_in_sequence;
+}
+
+/// Populate a BytecodeEntry for a VirtualZeroExtendWord instruction (opcode 0x42).
+/// VirtualZeroExtendWord: AddOperands flag set, WriteLookupOutputToRD, LeftOperandIsRs1Value.
+/// Lookup table = LowerHalfWord (20), identity-path.
+fn populateVirtualZeroExtendWordEntry(
+    entry: *BytecodeEntry,
+    rd: u8,
+    rs1: u8,
+    elf_address: u64,
+    virtual_sequence_remaining: ?u16,
+    is_first_in_sequence: bool,
+) void {
+    entry.address = elf_address;
+    entry.imm = 0;
+
+    entry.rd = if (rd == 0) 255 else rd;
+    entry.rs1 = rs1;
+    entry.rs2 = 255; // No rs2
+
+    entry.opcode = 0x42;
+    entry.funct3 = 0;
+
+    entry.circuit_flags = [_]bool{false} ** 13;
+    entry.instruction_flags = [_]bool{false} ** 7;
+
+    var cf = &entry.circuit_flags;
+    cf[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)] = true;
+    cf[@intFromEnum(CircuitFlags.AddOperands)] = true;
+    if (virtual_sequence_remaining != null) {
+        cf[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+    }
+    if (virtual_sequence_remaining) |vsr| {
+        if (vsr != 0) {
+            cf[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+        }
+    }
+    if (is_first_in_sequence) {
+        cf[@intFromEnum(CircuitFlags.IsFirstInSequence)] = true;
+    }
+
+    var inf = &entry.instruction_flags;
+    inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+    if (rd != 0) {
+        inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
+    }
+
+    entry.lookup_table_index = 20; // LowerHalfWord
+    // AddOperands set → identity-path (not interleaved)
+    entry.is_interleaved = false;
+    entry.virtual_sequence_remaining = virtual_sequence_remaining;
+    entry.is_first_in_sequence = is_first_in_sequence;
+}
+
+/// Populate a BytecodeEntry for a VirtualAssertValidUnsignedRemainder instruction (opcode 0x62).
+/// VirtualAssertValidUnsignedRemainder: Assert flag set, LeftOperandIsRs1Value, RightOperandIsRs2Value.
+/// Lookup table = ValidUnsignedRemainder (16), interleaved-path.
+fn populateVirtualAssertValidUnsignedRemainderEntry(
+    entry: *BytecodeEntry,
+    rs1: u8,
+    rs2: u8,
+    elf_address: u64,
+    virtual_sequence_remaining: ?u16,
+    is_first_in_sequence: bool,
+) void {
+    entry.address = elf_address;
+    entry.imm = 0;
+
+    entry.rd = 255; // Assert instructions don't write to rd
+    entry.rs1 = rs1;
+    entry.rs2 = rs2;
+
+    entry.opcode = 0x62;
+    entry.funct3 = 0;
+
+    entry.circuit_flags = [_]bool{false} ** 13;
+    entry.instruction_flags = [_]bool{false} ** 7;
+
+    var cf = &entry.circuit_flags;
+    cf[@intFromEnum(CircuitFlags.Assert)] = true;
+    if (virtual_sequence_remaining != null) {
+        cf[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+    }
+    if (virtual_sequence_remaining) |vsr| {
+        if (vsr != 0) {
+            cf[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+        }
+    }
+    if (is_first_in_sequence) {
+        cf[@intFromEnum(CircuitFlags.IsFirstInSequence)] = true;
+    }
+
+    var inf = &entry.instruction_flags;
+    inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+    inf[@intFromEnum(InstructionFlags.RightOperandIsRs2Value)] = true;
+
+    entry.lookup_table_index = 16; // ValidUnsignedRemainder
+    // No AddOperands/SubtractOperands/MultiplyOperands/Advice → interleaved
+    entry.is_interleaved = true;
+    entry.virtual_sequence_remaining = virtual_sequence_remaining;
+    entry.is_first_in_sequence = is_first_in_sequence;
+}
+
 /// Populate a BytecodeEntry from a raw 32-bit instruction word and ELF address.
 /// This sets all static properties (flags, registers, immediates, lookup table)
 /// from the instruction encoding alone, without any trace-specific data.
@@ -578,6 +781,73 @@ pub fn buildBytecodeEntries(
                         // SLLI by 32: shamt=32 stored as u6 (fits since 32 < 64)
                         populateVirtualMULIEntry(&entries[k - 2], 32, raw_rs1, addr, 32, 2, true);
                     }
+                } else if (raw_opcode == 0x3b and raw_funct3 == 7 and (instr_word >> 25) == 0x01) {
+                    // REMUW → 12-instruction inline sequence (matching Jolt's decomposition)
+                    // pc_map for 12-entry sequences has max_inline_seq=11.
+                    // getPC(addr, 0) returns base_pc+11 (the VirtualSignExtendWord entry).
+                    // So k = base_pc+11. Entries go at k-11 through k.
+                    const raw_rs2: u8 = @truncate((instr_word >> 20) & 0x1F);
+                    // Virtual registers matching preprocessing.zig
+                    const a2: u8 = 32;
+                    const a3: u8 = 33;
+                    const t0: u8 = 34;
+                    const t1: u8 = 35;
+                    const t2: u8 = 36;
+                    const t3: u8 = 37;
+                    const t4: u8 = 38;
+
+                    // Step 1 (k-11): VirtualAdvice(a2) → quotient (vsr=11, first)
+                    if (k >= 11) populateVirtualAdviceEntry(&entries[k - 11], a2, addr, 11, true);
+                    // Step 2 (k-10): VirtualAdvice(a3) → remainder (vsr=10)
+                    if (k >= 10) populateVirtualAdviceEntry(&entries[k - 10], a3, addr, 10, false);
+                    // Step 3 (k-9): VirtualZeroExtendWord(t3, a2) → zero-extend quotient (vsr=9)
+                    if (k >= 9) populateVirtualZeroExtendWordEntry(&entries[k - 9], t3, a2, addr, 9, false);
+                    // Step 4 (k-8): VirtualZeroExtendWord(t1, rs1) → zero-extend dividend (vsr=8)
+                    if (k >= 8) populateVirtualZeroExtendWordEntry(&entries[k - 8], t1, raw_rs1, addr, 8, false);
+                    // Step 5 (k-7): VirtualZeroExtendWord(t2, rs2) → zero-extend divisor (vsr=7)
+                    if (k >= 7) populateVirtualZeroExtendWordEntry(&entries[k - 7], t2, raw_rs2, addr, 7, false);
+                    // Step 6 (k-6): MUL(t0, t3, t2) → quotient * divisor (vsr=6)
+                    // MUL is a regular R-type with opcode=0x33, funct3=0, funct7=1
+                    if (k >= 6) {
+                        const mul_instr: u32 = (0x01 << 25) | (@as(u32, t2 & 0x1F) << 20) | (@as(u32, t3 & 0x1F) << 15) | (0 << 12) | (@as(u32, if (t0 == 0) @as(u8, 0) else (t0 & 0x1F)) << 7) | 0x33;
+                        populateEntryFromInstruction(&entries[k - 6], mul_instr, addr);
+                        // Override register indices with full virtual register values
+                        // (populateEntryFromInstruction truncates to 5 bits via instruction word encoding)
+                        entries[k - 6].rd = t0;
+                        entries[k - 6].rs1 = t3;
+                        entries[k - 6].rs2 = t2;
+                        entries[k - 6].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                        entries[k - 6].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+                        entries[k - 6].virtual_sequence_remaining = 6;
+                        entries[k - 6].is_first_in_sequence = false;
+                    }
+                    // Step 7 (k-5): VirtualZeroExtendWord(t4, t0) → mask to 32 bits (vsr=5)
+                    if (k >= 5) populateVirtualZeroExtendWordEntry(&entries[k - 5], t4, t0, addr, 5, false);
+                    // Step 8 (k-4): VirtualAssertEQ(t4, t0) → assert no overflow (vsr=4)
+                    if (k >= 4) populateVirtualAssertEQEntry(&entries[k - 4], t4, t0, addr, 4, false);
+                    // Step 9 (k-3): ADD(t0, t0, a3) → add remainder (vsr=3)
+                    // ADD is a regular R-type with opcode=0x33, funct3=0, funct7=0
+                    if (k >= 3) {
+                        const add_instr: u32 = (@as(u32, a3 & 0x1F) << 20) | (@as(u32, t0 & 0x1F) << 15) | (0 << 12) | (@as(u32, if (t0 == 0) @as(u8, 0) else (t0 & 0x1F)) << 7) | 0x33;
+                        populateEntryFromInstruction(&entries[k - 3], add_instr, addr);
+                        // Override register indices with full virtual register values
+                        // (populateEntryFromInstruction truncates to 5 bits via instruction word encoding)
+                        entries[k - 3].rd = t0;
+                        entries[k - 3].rs1 = t0;
+                        entries[k - 3].rs2 = a3;
+                        entries[k - 3].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+                        entries[k - 3].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+                        entries[k - 3].virtual_sequence_remaining = 3;
+                        entries[k - 3].is_first_in_sequence = false;
+                    }
+                    // Step 10 (k-2): VirtualAssertEQ(t0, t1) → assert dividend = q*d + r (vsr=2)
+                    if (k >= 2) populateVirtualAssertEQEntry(&entries[k - 2], t0, t1, addr, 2, false);
+                    // Step 11 (k-1): VirtualAssertValidUnsignedRemainder(a3, t2) → r < d (vsr=1)
+                    if (k >= 1) populateVirtualAssertValidUnsignedRemainderEntry(&entries[k - 1], a3, t2, addr, 1, false);
+                    // Step 12 (k): VirtualSignExtendWord(rd, a3) → sign-extend result (vsr=0, last)
+                    populateVirtualSignExtendWordEntry(&entries[k], raw_rd, addr, is_compressed);
+                    // Fix rs1: VirtualSignExtendWord reads from a3
+                    entries[k].rs1 = a3;
                 } else if (isWExtensionWith2EntryDecomposition(raw_opcode, raw_funct3, @truncate(instr_word >> 25))) {
                     // W-extension instructions that decompose to base + VirtualSignExtendWord:
                     // ADDIW (0x1b/f3=0), ADDW (0x3b/f3=0/f7=0), SUBW (0x3b/f3=0/f7=0x20),
@@ -780,6 +1050,10 @@ fn getLookupTableIndex(opcode: u8, funct3: u3, funct7: u7) u8 {
         0x0B => 21, // VirtualSignExtendWord → SignExtendHalfWord
         0x2B => 0, // VirtualMULI → RangeCheck
         0x5B => 26, // VirtualSRLI → VirtualSRL
+        0x02 => 0, // VirtualAdvice → RangeCheck
+        0x22 => 6, // VirtualAssertEQ → Equal
+        0x42 => 20, // VirtualZeroExtendWord → LowerHalfWord
+        0x62 => 16, // VirtualAssertValidUnsignedRemainder → ValidUnsignedRemainder
         else => 255, // Load, Store, ECALL, FENCE - no lookup table
     };
 }
@@ -870,31 +1144,26 @@ fn IncClaimReductionProver(comptime F: type) type {
             var ram_inc_arr = try allocator.alloc(F, T);
             var rd_inc_arr = try allocator.alloc(F, T);
 
-            // Track register values across cycles (matching Stage 4 prover approach)
-            var register_values: [32]u64 = [_]u64{0} ** 32;
+            // Track register values across cycles - MUST match Stage 4 gruen prover:
+            // - Use step.rd_index (supports virtual registers 0-127)
+            // - Use step.rd_written flag (not opcode-based detection)
+            // - Track all 128 registers (K=128)
+            const K_INC = 128; // Must match Stage 4's K
+            var register_values: [K_INC]u64 = [_]u64{0} ** K_INC;
 
             for (0..T) |j| {
                 const step = trace.steps.items[j];
 
-                // RdInc: must match Jolt's rd_write().unwrap_or_default() behavior
-                // BRANCH (0x63) and STORE (0x23) instructions don't write to rd,
-                // so RdInc = 0 for those. Also RdInc = 0 when rd = 0 (x0 is hardwired to 0).
-                // This matches the Stage 4 RegistersRWC prover's inc_poly computation.
-                if (!step.is_noop) {
-                    const opcode = step.instruction & 0x7f;
-                    const rd: u5 = @truncate((step.instruction >> 7) & 0x1f);
-                    const rd_used = switch (opcode) {
-                        0x23, 0x63 => false, // STORE, BRANCH
-                        else => true,
-                    };
-                    if (rd_used and rd != 0 and rd < 32) {
-                        const pre_value = register_values[rd];
-                        const post_value = step.rd_value;
-                        rd_inc_arr[j] = F.fromU64(post_value).sub(F.fromU64(pre_value));
-                        register_values[rd] = post_value;
-                    } else {
-                        rd_inc_arr[j] = F.zero();
-                    }
+                // RdInc: must match Stage 4 gruen prover's inc_poly computation exactly.
+                // Use step.rd_written flag and step.rd_index (not instruction bit extraction).
+                // This correctly handles virtual registers (indices 32+) that don't fit
+                // in RISC-V's 5-bit rd field.
+                if (!step.is_noop and step.rd_written and step.rd_index != 0) {
+                    const rd = step.rd_index;
+                    const pre_value = register_values[rd];
+                    const post_value = step.rd_value;
+                    rd_inc_arr[j] = F.fromU64(post_value).sub(F.fromU64(pre_value));
+                    register_values[rd] = post_value;
                 } else {
                     rd_inc_arr[j] = F.zero();
                 }
@@ -2590,6 +2859,21 @@ fn BytecodeReadRafProver(comptime F: type) type {
                 // If we use external claims that differ from the actual polynomial sum,
                 // the sumcheck will be inconsistent.
                 stage_claims_init[s] = recomputed_claim;
+
+                // ALWAYS-ON: Check if recomputed matches external
+                {
+                    const match_ext = @as(u8, if (recomputed_claim.eql(external_stage_claims[s])) 1 else 0);
+                    if (match_ext == 0) {
+                        const rc_full = recomputed_claim.toBytesBE();
+                        const ec_full = external_stage_claims[s].toBytesBE();
+                        std.debug.print("[BCRAF_MISMATCH] Stage {d}: recomputed != external!\n", .{s});
+                        std.debug.print("  recomputed_LE=[", .{});
+                        for (0..32) |bi| std.debug.print("{x:0>2}", .{rc_full[31 - bi]});
+                        std.debug.print("]\n  external_LE=[", .{});
+                        for (0..32) |bi| std.debug.print("{x:0>2}", .{ec_full[31 - bi]});
+                        std.debug.print("]\n", .{});
+                    }
+                }
             }
 
             // Debug: print per-stage claims with full aggregation detail
@@ -2810,10 +3094,16 @@ fn BytecodeReadRafProver(comptime F: type) type {
                 // This matches Jolt's verifier expected_output_claim computation.
                 bound_vals[s] = self.gamma_powers[s].mul(val_eval);
 
-                dbg("[BCRAF_TRANS] stage[{}]: bound_val_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
-                    s, bound_vals[s].toBytes()[0], bound_vals[s].toBytes()[1], bound_vals[s].toBytes()[2], bound_vals[s].toBytes()[3],
-                    bound_vals[s].toBytes()[4], bound_vals[s].toBytes()[5], bound_vals[s].toBytes()[6], bound_vals[s].toBytes()[7],
-                });
+                // ALWAYS-ON: Print val_eval and bound_val (full LE hex) for comparison with Jolt verifier
+                {
+                    const ve_be = val_eval.toBytesBE();
+                    const bv_be = bound_vals[s].toBytesBE();
+                    std.debug.print("[BCRAF_TRANS] stage[{}]: val_eval_LE=[", .{s});
+                    for (0..32) |bi| std.debug.print("{x:0>2}", .{ve_be[31 - bi]});
+                    std.debug.print("] bound_val_LE=[", .{});
+                    for (0..32) |bi| std.debug.print("{x:0>2}", .{bv_be[31 - bi]});
+                    std.debug.print("]\n", .{});
+                }
             }
 
             // Build RA chunk polynomials for cycle binding
@@ -3147,14 +3437,14 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 @max(lookupsRaVirtual_degree, incClaimReduction_degree),
             );
 
-            dbg("[STAGE6] Configuration:\n", .{});
-            dbg("  bytecodeReadRaf: {} rounds, degree {}\n", .{ bytecodeReadRaf_rounds, bytecodeReadRaf_degree });
-            dbg("  hammingBooleanity: {} rounds, degree {}\n", .{ hammingBooleanity_rounds, hammingBooleanity_degree });
-            dbg("  booleanity: {} rounds, degree {}\n", .{ booleanity_rounds, booleanity_degree });
-            dbg("  ramRaVirtual: {} rounds, degree {}\n", .{ ramRaVirtual_rounds, ramRaVirtual_degree });
-            dbg("  lookupsRaVirtual: {} rounds, degree {}\n", .{ lookupsRaVirtual_rounds, lookupsRaVirtual_degree });
-            dbg("  incClaimReduction: {} rounds, degree {}\n", .{ incClaimReduction_rounds, incClaimReduction_degree });
-            dbg("  max_num_rounds: {}, max_degree: {}\n", .{ max_num_rounds, max_degree });
+            std.debug.print("[STAGE6] Configuration:\n", .{});
+            std.debug.print("  bytecodeReadRaf: {} rounds (addr={}, cycle={}), degree {}\n", .{ bytecodeReadRaf_rounds, bytecode_log_k, n_cycle_vars, bytecodeReadRaf_degree });
+            std.debug.print("  hammingBooleanity: {} rounds, degree {}\n", .{ hammingBooleanity_rounds, hammingBooleanity_degree });
+            std.debug.print("  booleanity: {} rounds, degree {}\n", .{ booleanity_rounds, booleanity_degree });
+            std.debug.print("  ramRaVirtual: {} rounds, degree {}\n", .{ ramRaVirtual_rounds, ramRaVirtual_degree });
+            std.debug.print("  lookupsRaVirtual: {} rounds, degree {}\n", .{ lookupsRaVirtual_rounds, lookupsRaVirtual_degree });
+            std.debug.print("  incClaimReduction: {} rounds, degree {}\n", .{ incClaimReduction_rounds, incClaimReduction_degree });
+            std.debug.print("  max_num_rounds: {}, max_degree: {}\n", .{ max_num_rounds, max_degree });
 
             // ====================================================================
             // Sample gammas (must match Jolt verifier)
@@ -3425,71 +3715,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 r_cycle_bc4_regs_rwc, r_cycle_bc5_regs_val,
             );
             defer inc_prover.deinit();
-
-            // VERIFY Inc prover initial claim - decompose by component
-            {
-                const T = trace.steps.items.len;
-                const n_vars = std.math.log2_int(usize, T);
-
-                // Recompute eq tables separately to check each v,w claim
-                var rev_buf2 = try self.allocator.alloc(F, n_vars);
-                defer self.allocator.free(rev_buf2);
-
-                for (0..n_vars) |i| rev_buf2[i] = r_cycle_inc_ram_rwc[n_vars - 1 - i];
-                const eq_r2 = try computeEqTable(F, self.allocator, rev_buf2, n_vars);
-                defer self.allocator.free(eq_r2);
-
-                for (0..n_vars) |i| rev_buf2[i] = r_cycle_inc_ram_val[n_vars - 1 - i];
-                const eq_r4 = try computeEqTable(F, self.allocator, rev_buf2, n_vars);
-                defer self.allocator.free(eq_r4);
-
-                for (0..n_vars) |i| rev_buf2[i] = r_cycle_bc4_regs_rwc[n_vars - 1 - i];
-                const eq_s4 = try computeEqTable(F, self.allocator, rev_buf2, n_vars);
-                defer self.allocator.free(eq_s4);
-
-                for (0..n_vars) |i| rev_buf2[i] = r_cycle_bc5_regs_val[n_vars - 1 - i];
-                const eq_s5 = try computeEqTable(F, self.allocator, rev_buf2, n_vars);
-                defer self.allocator.free(eq_s5);
-
-                // Compute v1 = Σ ram_inc[j] * eq(r2, j)
-                var v1_sum = F.zero();
-                var v2_sum = F.zero();
-                var w1_sum = F.zero();
-                var w2_sum = F.zero();
-                for (0..T) |j| {
-                    v1_sum = v1_sum.add(inc_prover.ram_inc[j].mul(eq_r2[j]));
-                    v2_sum = v2_sum.add(inc_prover.ram_inc[j].mul(eq_r4[j]));
-                    w1_sum = w1_sum.add(inc_prover.rd_inc[j].mul(eq_s4[j]));
-                    w2_sum = w2_sum.add(inc_prover.rd_inc[j].mul(eq_s5[j]));
-                }
-
-                const recomp = v1_sum.add(inc_gamma.mul(v2_sum)).add(inc_gamma2.mul(w1_sum)).add(inc_gamma3.mul(w2_sum));
-
-                const printLE = struct {
-                    fn f(label: []const u8, val: F) void {
-                        const be = val.toBytesBE();
-                        dbg("  {s}_LE=[", .{label});
-                        for (0..32) |bi| dbg("{x:0>2}", .{be[31 - bi]});
-                        dbg("]\n", .{});
-                    }
-                }.f;
-
-                dbg("[INC_DECOMPOSE]\n", .{});
-                printLE("v1_sum", v1_sum);
-                printLE("v2_sum", v2_sum);
-                printLE("w1_sum", w1_sum);
-                printLE("w2_sum", w2_sum);
-                printLE("v1_claim", v1_claim);
-                printLE("v2_claim", v2_claim);
-                printLE("w1_claim", w1_claim);
-                printLE("w2_claim", w2_claim);
-                printLE("recomp_from_sums", recomp);
-                printLE("input_claim", incClaimReduction_input);
-                dbg("  v1 match? {}\n", .{@as(u8, if (std.mem.eql(u8, &v1_sum.toBytesBE(), &v1_claim.toBytesBE())) 1 else 0)});
-                dbg("  v2 match? {}\n", .{@as(u8, if (std.mem.eql(u8, &v2_sum.toBytesBE(), &v2_claim.toBytesBE())) 1 else 0)});
-                dbg("  w1 match? {}\n", .{@as(u8, if (std.mem.eql(u8, &w1_sum.toBytesBE(), &w1_claim.toBytesBE())) 1 else 0)});
-                dbg("  w2 match? {}\n", .{@as(u8, if (std.mem.eql(u8, &w2_sum.toBytesBE(), &w2_claim.toBytesBE())) 1 else 0)});
-            }
 
             // Instance 1: HammingBooleanity (degree 3)
             var hamming_prover = try HammingBooleanityProver(F).init(
@@ -3873,30 +4098,41 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 bytecode_val_polys[4][k] = val5;
             }
 
-            dbg("[STAGE6] Val polynomials (LE hex, ALL entries per stage):\n", .{});
-            for (0..5) |s| {
-                for (0..bytecode_K) |k| {
-                    const vbe = bytecode_val_polys[s][k].toBytesBE();
-                    dbg("  Val[{}][{}]_LE=[", .{s, k});
-                    for (0..32) |bi| dbg("{x:0>2}", .{vbe[31 - bi]});
-                    dbg("]\n", .{});
+            // ALWAYS-ON: Print Stage 3 Val poly for comparison with Jolt verifier
+            std.debug.print("[STAGE6] Val[3] (Stage 4/RegistersRWC) entries:\n", .{});
+            for (0..bytecode_K) |k| {
+                const vbe = bytecode_val_polys[3][k].toBytesBE();
+                std.debug.print("  Val[3][{}]_LE=[", .{k});
+                for (0..32) |bi| std.debug.print("{x:0>2}", .{vbe[31 - bi]});
+                std.debug.print("]\n", .{});
+            }
+            if (debug_verbose) {
+                for ([_]usize{0, 1, 2, 4}) |s| {
+                    for (0..bytecode_K) |k| {
+                        const vbe = bytecode_val_polys[s][k].toBytesBE();
+                        dbg("  Val[{}][{}]_LE=[", .{s, k});
+                        for (0..32) |bi| dbg("{x:0>2}", .{vbe[31 - bi]});
+                        dbg("]\n", .{});
+                    }
                 }
             }
 
-            // Dump first few bytecode entries for debugging
-            for (0..@min(bytecode_K, 64)) |k| {
+            // ALWAYS-ON: Dump bytecode entries 19-50 (REMUW range)
+            std.debug.print("[STAGE6] Bytecode entries (k=19..50):\n", .{});
+            for (19..@min(bytecode_K, 51)) |k| {
+                if (k >= bytecode_entries.len) break;
                 const entry = bytecode_entries[k];
-                dbg("[STAGE6] entry[{}]: addr=0x{x:0>8} rd={} rs1={} rs2={} imm={} cf=[", .{k, entry.address, entry.rd, entry.rs1, entry.rs2, entry.imm});
+                std.debug.print("[STAGE6] entry[{}]: addr=0x{x:0>8} rd={} rs1={} rs2={} imm={} cf=[", .{k, entry.address, entry.rd, entry.rs1, entry.rs2, entry.imm});
                 for (0..13) |i| {
-                    if (i > 0) dbg(",", .{});
-                    if (entry.circuit_flags[i]) dbg("1", .{}) else dbg("0", .{});
+                    if (i > 0) std.debug.print(",", .{});
+                    if (entry.circuit_flags[i]) std.debug.print("1", .{}) else std.debug.print("0", .{});
                 }
-                dbg("] if=[", .{});
+                std.debug.print("] if=[", .{});
                 for (0..7) |i| {
-                    if (i > 0) dbg(",", .{});
-                    if (entry.instruction_flags[i]) dbg("1", .{}) else dbg("0", .{});
+                    if (i > 0) std.debug.print(",", .{});
+                    if (entry.instruction_flags[i]) std.debug.print("1", .{}) else std.debug.print("0", .{});
                 }
-                dbg("] lt={} interleaved={}\n", .{entry.lookup_table_index, @intFromBool(entry.is_interleaved)});
+                std.debug.print("] lt={} interleaved={}\n", .{entry.lookup_table_index, @intFromBool(entry.is_interleaved)});
             }
 
             // Build identity polynomial
@@ -4426,6 +4662,10 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         0x17 => true, // AUIPC
                         0x6f => true, // JAL
                         0x67 => true, // JALR
+                        0x02 => true, // VirtualAdvice (Advice → identity path)
+                        0x42 => true, // VirtualZeroExtendWord (AddOperands → identity path)
+                        0x0B => true, // VirtualSignExtendWord (AddOperands → identity path)
+                        0x2B => true, // VirtualMULI (MultiplyOperands → identity path)
                         else => false,
                     };
 
@@ -4482,6 +4722,35 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 bcraf_per_stage_claims,
             );
             defer bytecode_prover.deinit();
+
+            // ALWAYS-ON: Compare prover's initial BytecodeReadRaf claim with opening-claims-derived claim
+            {
+                var prover_initial = F.zero();
+                for (0..5) |s| {
+                    prover_initial = prover_initial.add(bytecode_prover.gamma_powers[s].mul(bytecode_prover.stage_claims[s]));
+                }
+                const pi_be = prover_initial.toBytesBE();
+                const oc_be = bytecodeReadRaf_input.toBytesBE();
+                std.debug.print("\n[S6P_BCRAF_COMPARE] prover_initial_LE=[", .{});
+                for (0..32) |bi| std.debug.print("{x:0>2}", .{pi_be[31 - bi]});
+                std.debug.print("]\n[S6P_BCRAF_COMPARE] opening_claims_LE=[", .{});
+                for (0..32) |bi| std.debug.print("{x:0>2}", .{oc_be[31 - bi]});
+                std.debug.print("]\n[S6P_BCRAF_COMPARE] match={}\n", .{@as(u8, if (prover_initial.eql(bytecodeReadRaf_input)) 1 else 0)});
+
+                // Also compare per-stage claims
+                for (0..5) |s| {
+                    const ps_be = bytecode_prover.stage_claims[s].toBytesBE();
+                    const os_be = bcraf_per_stage_claims[s].toBytesBE();
+                    const sm = @as(u8, if (bytecode_prover.stage_claims[s].eql(bcraf_per_stage_claims[s])) 1 else 0);
+                    if (sm == 0) {
+                        std.debug.print("[S6P_BCRAF_COMPARE] stage[{}] MISMATCH! prover_LE=[", .{s});
+                        for (0..32) |bi| std.debug.print("{x:0>2}", .{ps_be[31 - bi]});
+                        std.debug.print("] opening_LE=[", .{});
+                        for (0..32) |bi| std.debug.print("{x:0>2}", .{os_be[31 - bi]});
+                        std.debug.print("]\n", .{});
+                    }
+                }
+            }
 
             // Debug: print r_cycle values for comparison with Jolt
             {
@@ -4545,21 +4814,6 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 var scaled = input_claims[i];
                 for (0..scale) |_| scaled = scaled.add(scaled);
                 batched_claim = batched_claim.add(batch[i].mul(scaled));
-            }
-
-            // Debug: input claims and batching (gated)
-            if (debug_verbose) {
-                dbg("\n[S6P] Input claims and batching:\n", .{});
-                for (0..6) |i| {
-                    const ic_be = input_claims[i].toBytesBE();
-                    dbg("  instance[{d}]: input_claim_LE=[", .{i});
-                    for (0..32) |bi| dbg("{x:0>2}", .{ic_be[31 - bi]});
-                    dbg("] rounds={d}\n", .{num_rounds_arr[i]});
-                }
-                const bc_be = batched_claim.toBytesBE();
-                dbg("  batched_claim_LE=[", .{});
-                for (0..32) |bi| dbg("{x:0>2}", .{bc_be[31 - bi]});
-                dbg("]\n", .{});
             }
 
             // ====================================================================
@@ -4947,75 +5201,99 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     });
                 }
 
-                // Debug: print combined evals for this round
+                // Debug: check sumcheck invariant p(0)+p(1)=claim for ALL rounds
                 {
                     const p01_sum = combined_evals[0].add(combined_evals[1]);
-                    const p01_match: u8 = if (std.mem.eql(u8, &p01_sum.toBytesBE(), &current_batched_claim.toBytesBE())) 1 else 0;
-                    if (round < 3 or round == 4 or round == 5 or p01_match == 0) {
-                        dbg("  [S6P] R{} p(0)+p(1) match={}\n", .{ round, p01_match });
-                        if (p01_match == 0) {
-                            const ps = p01_sum.toBytes();
-                            const cb = current_batched_claim.toBytes();
-                            dbg("    p(0)+p(1)_LE=[", .{});
-                            for (0..32) |bi| dbg("{x:0>2}", .{ps[bi]});
-                            dbg("]\n    claim_LE=[", .{});
-                            for (0..32) |bi| dbg("{x:0>2}", .{cb[bi]});
-                            dbg("]\n", .{});
-                            // Print each instance's contribution and per-instance p(0)+p(1) check
-                            for (0..6) |di| {
-                                const di_claim = instance_claims[di].toBytes();
-                                dbg("    inst[{}] claim_LE=[", .{di});
-                                for (0..32) |bi| dbg("{x:0>2}", .{di_claim[bi]});
-                                dbg("] active={} rounds={}\n", .{@as(u8, if (inst_active[di]) 1 else 0), num_rounds_arr[di]});
-                            }
-                            // Recompute expected batched claim from per-instance claims
-                            var recomp = F.zero();
-                            for (0..6) |di| {
+                    const p01_match = p01_sum.eql(current_batched_claim);
+                    if (!p01_match) {
+                        std.debug.print("  [S6P] R{} *** SUMCHECK INVARIANT VIOLATED *** p(0)+p(1) != claim\n", .{round});
+                        const ps = p01_sum.toBytes();
+                        const cb = current_batched_claim.toBytes();
+                        std.debug.print("    p(0)+p(1)_LE=[", .{});
+                        for (0..32) |bi| std.debug.print("{x:0>2}", .{ps[bi]});
+                        std.debug.print("]\n    claim_LE=[", .{});
+                        for (0..32) |bi| std.debug.print("{x:0>2}", .{cb[bi]});
+                        std.debug.print("]\n", .{});
+                        // Print each instance's contribution and per-instance p(0)+p(1) check
+                        for (0..6) |di| {
+                            const di_claim = instance_claims[di].toBytes();
+                            std.debug.print("    inst[{}] claim_LE=[", .{di});
+                            for (0..32) |bi| std.debug.print("{x:0>2}", .{di_claim[bi]});
+                            std.debug.print("] active={} rounds={}\n", .{@as(u8, if (inst_active[di]) 1 else 0), num_rounds_arr[di]});
+                        }
+                        // Recompute expected batched claim from per-instance claims
+                        var recomp = F.zero();
+                        for (0..6) |di| {
+                            if (inst_active[di]) {
                                 recomp = recomp.add(batch[di].mul(instance_claims[di]));
-                            }
-                            const rc_le = recomp.toBytes();
-                            dbg("    recomputed_Σ(batch*claim)_LE=[", .{});
-                            for (0..32) |bi| dbg("{x:0>2}", .{rc_le[bi]});
-                            dbg("] match_claim={}\n", .{@as(u8, if (recomp.eql(current_batched_claim)) 1 else 0)});
-                            // Per-instance p(0)+p(1) vs claim check
-                            // dbg_inst_p0/p1 are cumulative, need to compute deltas
-                            var prev_p0 = F.zero();
-                            var prev_p1 = F.zero();
-                            for (0..6) |di| {
-                                const inst_p0 = dbg_inst_p0[di].sub(prev_p0);
-                                const inst_p1 = dbg_inst_p1[di].sub(prev_p1);
-                                const inst_sum = inst_p0.add(inst_p1);
-                                const expected = batch[di].mul(instance_claims[di]);
-                                const ok: u8 = if (inst_sum.eql(expected)) 1 else 0;
-                                if (ok == 0) {
-                                    const is_le = inst_sum.toBytes();
-                                    const ex_le = expected.toBytes();
-                                    dbg("    *** MISMATCH inst[{}]: batch*p(0+1)_LE=[", .{di});
-                                    for (0..16) |bi| dbg("{x:0>2}", .{is_le[bi]});
-                                    dbg("] batch*claim_LE=[", .{});
-                                    for (0..16) |bi| dbg("{x:0>2}", .{ex_le[bi]});
-                                    dbg("]\n", .{});
-                                } else {
-                                    dbg("    inst[{}] p(0)+p(1)=claim ✓\n", .{di});
-                                }
-                                prev_p0 = dbg_inst_p0[di];
-                                prev_p1 = dbg_inst_p1[di];
+                            } else {
+                                const scale = remaining_rounds - num_rounds_arr[di] - 1;
+                                var scaled = input_claims[di];
+                                for (0..scale) |_| scaled = scaled.add(scaled);
+                                recomp = recomp.add(batch[di].mul(scaled).add(batch[di].mul(scaled)));
                             }
                         }
+                        const rc_le = recomp.toBytes();
+                        std.debug.print("    recomputed_LE=[", .{});
+                        for (0..32) |bi| std.debug.print("{x:0>2}", .{rc_le[bi]});
+                        std.debug.print("] match_claim={}\n", .{@as(u8, if (recomp.eql(current_batched_claim)) 1 else 0)});
+                        // Per-instance p(0)+p(1) vs batch*claim check using cumulative deltas
+                        var prev_p0 = F.zero();
+                        var prev_p1 = F.zero();
+                        for (0..6) |di| {
+                            const inst_p0 = dbg_inst_p0[di].sub(prev_p0);
+                            const inst_p1 = dbg_inst_p1[di].sub(prev_p1);
+                            const inst_sum = inst_p0.add(inst_p1);
+                            const expected_contrib = batch[di].mul(instance_claims[di]);
+                            if (!inst_sum.eql(expected_contrib)) {
+                                const is_le = inst_sum.toBytes();
+                                const ex_le = expected_contrib.toBytes();
+                                std.debug.print("    *** MISMATCH inst[{}]: batch*(p0+p1)_LE=[", .{di});
+                                for (0..32) |bi| std.debug.print("{x:0>2}", .{is_le[bi]});
+                                std.debug.print("] batch*claim_LE=[", .{});
+                                for (0..32) |bi| std.debug.print("{x:0>2}", .{ex_le[bi]});
+                                std.debug.print("]\n", .{});
+                            } else {
+                                std.debug.print("    inst[{}] p(0)+p(1)=claim OK\n", .{di});
+                            }
+                            prev_p0 = dbg_inst_p0[di];
+                            prev_p1 = dbg_inst_p1[di];
+                        }
                     }
+                }
+
+                // Debug: print Vandermonde evaluations for round 7
+                if (round == 7) {
+                    std.debug.print("  [S6P] R7 Vandermonde evals:\n", .{});
+                    for (0..num_evals) |ev_idx| {
+                        const ev_le = combined_evals[ev_idx].toBytes();
+                        std.debug.print("    p({})=[", .{ev_idx});
+                        for (0..32) |bi| std.debug.print("{x:0>2}", .{ev_le[bi]});
+                        std.debug.print("]\n", .{});
+                    }
+                    // Verify p(0)+p(1) = current_batched_claim (hint)
+                    const sum01 = combined_evals[0].add(combined_evals[1]);
+                    const sum_le = sum01.toBytes();
+                    const hint_le = current_batched_claim.toBytes();
+                    std.debug.print("    p(0)+p(1)=[", .{});
+                    for (0..32) |bi| std.debug.print("{x:0>2}", .{sum_le[bi]});
+                    std.debug.print("]\n    hint    =[", .{});
+                    for (0..32) |bi| std.debug.print("{x:0>2}", .{hint_le[bi]});
+                    std.debug.print("]\n    match={}\n", .{sum01.eql(current_batched_claim)});
                 }
 
                 // Compress and append to transcript (Vandermonde format)
                 const compressed = try UniPoly(F).vandermondeToCompressed(self.allocator, combined_evals);
                 defer self.allocator.free(compressed);
 
-                // Debug: print compressed coefficients LE for round 0
-                if (round < 1) {
+                // Debug: print compressed coefficients LE for ALL rounds
+                {
                     var c_idx: usize = 0;
                     while (c_idx < compressed.len) : (c_idx += 1) {
                         const le = compressed[c_idx].toBytes();
-                        dbg("  [S6P_LE] R{} c[{}] lo=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{ round, c_idx, le[0], le[1], le[2], le[3], le[4], le[5], le[6], le[7], le[8], le[9], le[10], le[11], le[12], le[13], le[14], le[15] });
-                        dbg("  [S6P_LE] R{} c[{}] hi=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{ round, c_idx, le[16], le[17], le[18], le[19], le[20], le[21], le[22], le[23], le[24], le[25], le[26], le[27], le[28], le[29], le[30], le[31] });
+                        std.debug.print("  [S6P] R{} coeff[{}]=[", .{ round, c_idx });
+                        for (0..32) |bi| std.debug.print("{x:0>2}", .{le[bi]});
+                        std.debug.print("]\n", .{});
                     }
                 }
 
@@ -5041,15 +5319,63 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 // Evaluate combined polynomial at challenge (Vandermonde format)
                 current_batched_claim = try UniPoly(F).evaluateVandermondeAt(self.allocator, combined_evals, challenge);
 
+                // VERIFY: eval_from_hint should match evaluateVandermondeAt
+                if (round == 7) {
+                    // Simulate verifier's eval_from_hint
+                    const hint = instance_claims[0]; // wrong - need the batched claim from round 6
+                    _ = hint;
+                    // The real hint is the PREVIOUS batched claim, stored as the hint used for this round
+                    // Actually, the hint for the verifier is p(0)+p(1), which should equal the previous batched claim
+                    // combined_evals[0] + combined_evals[1] should = previous batched claim
+                    // Let's compute eval_from_hint manually
+                    // compressed = [c0, c2, c3, c4, c5]
+                    // c1 = hint - 2*c0 - c2 - c3 - c4 - c5
+                    const hint_val = combined_evals[0].add(combined_evals[1]); // p(0) + p(1) = hint
+                    var c1 = hint_val.sub(compressed[0]).sub(compressed[0]); // hint - 2*c0
+                    for (1..compressed.len) |ci| {
+                        c1 = c1.sub(compressed[ci]);
+                    }
+                    // Evaluate: c0 + c1*x + c2*x^2 + c3*x^3 + c4*x^4 + c5*x^5
+                    var running_point = challenge; // x
+                    var running_sum = compressed[0].add(challenge.mul(c1)); // c0 + x*c1
+                    for (1..compressed.len) |ci| {
+                        running_point = running_point.mul(challenge); // x^(ci+1)
+                        running_sum = running_sum.add(compressed[ci].mul(running_point));
+                    }
+                    const efh_le = running_sum.toBytes();
+                    const vdm_le = current_batched_claim.toBytes();
+                    std.debug.print("  [S6P] R7 eval_from_hint=[", .{});
+                    for (0..32) |bi| std.debug.print("{x:0>2}", .{efh_le[bi]});
+                    std.debug.print("]\n  [S6P] R7 vandermonde  =[", .{});
+                    for (0..32) |bi| std.debug.print("{x:0>2}", .{vdm_le[bi]});
+                    std.debug.print("]\n  [S6P] R7 match={}\n", .{running_sum.eql(current_batched_claim)});
+
+                    // Also print c1 and full coefficient array
+                    const c1_le = c1.toBytes();
+                    std.debug.print("  [S6P] R7 c1 (recovered)=[", .{});
+                    for (0..32) |bi| std.debug.print("{x:0>2}", .{c1_le[bi]});
+                    std.debug.print("]\n", .{});
+
+                    // Print full coefficients from Vandermonde interpolation
+                    const full_coeffs = try UniPoly(F).fromEvalsVandermonde(self.allocator, combined_evals);
+                    defer self.allocator.free(full_coeffs);
+                    for (0..full_coeffs.len) |ci| {
+                        const fc_le = full_coeffs[ci].toBytes();
+                        std.debug.print("  [S6P] R7 full_c[{}]=[", .{ci});
+                        for (0..32) |bi| std.debug.print("{x:0>2}", .{fc_le[bi]});
+                        std.debug.print("]\n", .{});
+                    }
+                }
+
                 {
                     const ch_le = challenge.toBytes();
                     const cl_le = current_batched_claim.toBytes();
-                    dbg("  [S6P] R{} challenge_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
-                        round, ch_le[0], ch_le[1], ch_le[2], ch_le[3], ch_le[4], ch_le[5], ch_le[6], ch_le[7],
-                    });
-                    dbg("  [S6P] R{} new_claim_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
-                        round, cl_le[0], cl_le[1], cl_le[2], cl_le[3], cl_le[4], cl_le[5], cl_le[6], cl_le[7],
-                    });
+                    std.debug.print("  [S6P] R{} challenge_LE=[", .{round});
+                    for (0..32) |bi| std.debug.print("{x:0>2}", .{ch_le[bi]});
+                    std.debug.print("]\n", .{});
+                    std.debug.print("  [S6P] R{} new_claim_LE=[", .{round});
+                    for (0..32) |bi| std.debug.print("{x:0>2}", .{cl_le[bi]});
+                    std.debug.print("]\n", .{});
                 }
 
                 // Update per-instance claims from CACHED round polys and bind challenge
@@ -5142,7 +5468,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                             }
                             const ic_old_le = instance_claims[0].toBytes();
                             const p2_le = phase2_sum.toBytes();
-                            dbg("[PHASE_TRANSITION] inst0 claim_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] phase2_sum_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] match={}\n", .{
+                            std.debug.print("[PHASE_TRANSITION] inst0 claim_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] phase2_sum_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] match={}\n", .{
                                 ic_old_le[0], ic_old_le[1], ic_old_le[2], ic_old_le[3], ic_old_le[4], ic_old_le[5], ic_old_le[6], ic_old_le[7],
                                 p2_le[0], p2_le[1], p2_le[2], p2_le[3], p2_le[4], p2_le[5], p2_le[6], p2_le[7],
                                 @as(u8, if (instance_claims[0].eql(phase2_sum)) 1 else 0),
@@ -5290,19 +5616,19 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 // instance_claims[i] = input_claims[i] = the correct unscaled claim.
             }
 
-            // Debug: print final instance claims after sumcheck (gated)
-            if (debug_verbose) {
-                dbg("\n[S6P] Final instance claims after sumcheck:\n", .{});
+            // Debug: print final instance claims after sumcheck (ALWAYS ON)
+            {
+                std.debug.print("\n[S6P] Final instance claims after sumcheck:\n", .{});
                 for (0..6) |i| {
                     const be = instance_claims[i].toBytesBE();
-                    dbg("  instance[{d}] final_claim_LE=[", .{i});
-                    for (0..32) |bi| dbg("{x:0>2}", .{be[31 - bi]});
-                    dbg("]\n", .{});
+                    std.debug.print("  instance[{d}] final_claim_LE=[", .{i});
+                    for (0..32) |bi| std.debug.print("{x:0>2}", .{be[31 - bi]});
+                    std.debug.print("]\n", .{});
                 }
                 const bb = current_batched_claim.toBytesBE();
-                dbg("  batched_output_claim_LE=[", .{});
-                for (0..32) |bi| dbg("{x:0>2}", .{bb[31 - bi]});
-                dbg("]\n", .{});
+                std.debug.print("  batched_output_claim_LE=[", .{});
+                for (0..32) |bi| std.debug.print("{x:0>2}", .{bb[31 - bi]});
+                std.debug.print("]\n", .{});
                 dbg("[S6P] All challenges (LE first 8 bytes):\n", .{});
                 for (0..max_num_rounds) |i| {
                     const be = challenges[i].toBytesBE();
@@ -5515,15 +5841,49 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 }
             }
 
-            dbg("[STAGE6] Opening claims:\n", .{});
-            dbg("  ram_inc = {any}\n", .{ram_inc_claim.toBytesBE()[0..8]});
-            dbg("  rd_inc = {any}\n", .{rd_inc_claim.toBytesBE()[0..8]});
-            dbg("  hamming_weight = {any}\n", .{hamming_weight_claim.toBytesBE()[0..8]});
-            for (0..bytecode_d) |i| {
-                dbg("  bytecode_ra[{}] = {any}\n", .{i, bytecode_ra_claims[i].toBytesBE()[0..8]});
+            std.debug.print("[STAGE6] Opening claims (full LE hex):\n", .{});
+            {
+                const be = ram_inc_claim.toBytesBE();
+                std.debug.print("  ram_inc_LE=[", .{});
+                for (0..32) |bi| std.debug.print("{x:0>2}", .{be[31 - bi]});
+                std.debug.print("]\n", .{});
             }
-            dbg("  ram_ra_virtual[0] = {any}\n", .{ram_ra_virtual_claims[0].toBytesBE()[0..8]});
-            dbg("  instruction_ra_virtual[0] = {any}\n", .{instruction_ra_virtual_claims[0].toBytesBE()[0..8]});
+            {
+                const be = rd_inc_claim.toBytesBE();
+                std.debug.print("  rd_inc_LE=[", .{});
+                for (0..32) |bi| std.debug.print("{x:0>2}", .{be[31 - bi]});
+                std.debug.print("]\n", .{});
+            }
+            {
+                const be = hamming_weight_claim.toBytesBE();
+                std.debug.print("  hamming_weight_LE=[", .{});
+                for (0..32) |bi| std.debug.print("{x:0>2}", .{be[31 - bi]});
+                std.debug.print("]\n", .{});
+            }
+            for (0..bytecode_d) |i| {
+                const be = bytecode_ra_claims[i].toBytesBE();
+                std.debug.print("  bytecode_ra[{d}]_LE=[", .{i});
+                for (0..32) |bi| std.debug.print("{x:0>2}", .{be[31 - bi]});
+                std.debug.print("]\n", .{});
+            }
+            {
+                const be = ram_ra_virtual_claims[0].toBytesBE();
+                std.debug.print("  ram_ra_virtual[0]_LE=[", .{});
+                for (0..32) |bi| std.debug.print("{x:0>2}", .{be[31 - bi]});
+                std.debug.print("]\n", .{});
+            }
+            {
+                const be = instruction_ra_virtual_claims[0].toBytesBE();
+                std.debug.print("  instruction_ra_virtual[0]_LE=[", .{});
+                for (0..32) |bi| std.debug.print("{x:0>2}", .{be[31 - bi]});
+                std.debug.print("]\n", .{});
+            }
+            for (0..3) |i| {
+                const be = booleanity_ra_claims[i].toBytesBE();
+                std.debug.print("  booleanity_ra[{d}]_LE=[", .{i});
+                for (0..32) |bi| std.debug.print("{x:0>2}", .{be[31 - bi]});
+                std.debug.print("]\n", .{});
+            }
 
             // Consistency check: instance_claims[0] should equal val * Π ra[i]
             // where val = bytecode_prover.combined.?[0] (after all binding)
@@ -5532,28 +5892,28 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 var bc_ra_prod = F.one();
                 for (bytecode_ra_claims) |c| bc_ra_prod = bc_ra_prod.mul(c);
                 const bc_recomputed = bc_combined_val.mul(bc_ra_prod);
-                dbg("[STAGE6] Consistency check Instance 0:\n", .{});
+                std.debug.print("[STAGE6] Consistency check Instance 0:\n", .{});
                 // Print combined[0] as LE hex for comparison with Jolt's "val (sum)"
                 const cval_be = bc_combined_val.toBytesBE();
-                dbg("  combined[0]_LE=[", .{});
-                for (0..32) |bi| dbg("{x:0>2}", .{cval_be[31 - bi]});
-                dbg("]\n", .{});
+                std.debug.print("  combined[0]_LE=[", .{});
+                for (0..32) |bi| std.debug.print("{x:0>2}", .{cval_be[31 - bi]});
+                std.debug.print("]\n", .{});
                 // Print ra claims
                 for (0..bytecode_d) |i| {
                     const ra_be = bytecode_ra_claims[i].toBytesBE();
-                    dbg("  ra[{}]_LE=[", .{i});
-                    for (0..32) |bi| dbg("{x:0>2}", .{ra_be[31 - bi]});
-                    dbg("]\n", .{});
+                    std.debug.print("  ra[{}]_LE=[", .{i});
+                    for (0..32) |bi| std.debug.print("{x:0>2}", .{ra_be[31 - bi]});
+                    std.debug.print("]\n", .{});
                 }
-                dbg("  recomputed_LE=[", .{});
+                std.debug.print("  recomputed_LE=[", .{});
                 const rc_be = bc_recomputed.toBytesBE();
-                for (0..32) |bi| dbg("{x:0>2}", .{rc_be[31 - bi]});
-                dbg("]\n", .{});
-                dbg("  instance[0]_LE=[", .{});
+                for (0..32) |bi| std.debug.print("{x:0>2}", .{rc_be[31 - bi]});
+                std.debug.print("]\n", .{});
+                std.debug.print("  instance[0]_LE=[", .{});
                 const ic_be = instance_claims[0].toBytesBE();
-                for (0..32) |bi| dbg("{x:0>2}", .{ic_be[31 - bi]});
-                dbg("]\n", .{});
-                dbg("  match = {}\n", .{@as(u8, if (std.mem.eql(u8, &bc_recomputed.toBytesBE(), &instance_claims[0].toBytesBE())) 1 else 0)});
+                for (0..32) |bi| std.debug.print("{x:0>2}", .{ic_be[31 - bi]});
+                std.debug.print("]\n", .{});
+                std.debug.print("  match = {}\n", .{@as(u8, if (std.mem.eql(u8, &bc_recomputed.toBytesBE(), &instance_claims[0].toBytesBE())) 1 else 0)});
             }
 
             // Consistency check Instance 5 (IncClaimReduction):
@@ -6119,6 +6479,26 @@ pub fn computeLookupIndex(step: tracer.TraceStep) u128 {
         const ones: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, total_shift))) - 1;
         const bitmask: u64 = @truncate(ones << total_shift);
         return interleaveBits(step.rs1_value, bitmask);
+    }
+    if (opcode == 0x02) {
+        // VirtualAdvice: the lookup index is the advice value (rd_value)
+        // Jolt's to_lookup_index() returns the second operand which is the advice value
+        return @as(u128, step.rd_value);
+    }
+    if (opcode == 0x22) {
+        // VirtualAssertEQ: interleaved(rs1_value, rs2_value)
+        // LeftOperandIsRs1Value, RightOperandIsRs2Value → interleave
+        return interleaveBits(step.rs1_value, step.rs2_value);
+    }
+    if (opcode == 0x42) {
+        // VirtualZeroExtendWord: AddOperands → rs1 + 0 = rs1
+        // Jolt's to_lookup_index() returns rs1 directly (like SignExtendWord)
+        return @as(u128, step.rs1_value);
+    }
+    if (opcode == 0x62) {
+        // VirtualAssertValidUnsignedRemainder: interleaved(rs1_value, rs2_value)
+        // LeftOperandIsRs1Value, RightOperandIsRs2Value → interleave
+        return interleaveBits(step.rs1_value, step.rs2_value);
     }
 
     // Determine left_input and right_input (matching Jolt's to_instruction_inputs)

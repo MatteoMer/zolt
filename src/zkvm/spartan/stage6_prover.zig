@@ -93,7 +93,7 @@ fn populateVirtualMULIEntry(
     const multiplier: u64 = @as(u64, 1) << shamt;
     entry.imm = @intCast(multiplier);
 
-    entry.rd = if (rd == 0) 255 else rd; // rd=0 → sentinel (x0 never written)
+    entry.rd = rd; // rd=0 contributes eq_r_register[0] in Jolt (Some(0), not None)
     entry.rs1 = rs1;
     entry.rs2 = 255; // VirtualMULI is I-type: no rs2
 
@@ -149,7 +149,7 @@ fn populateVirtualSignExtendWordEntry(
     entry.address = elf_address;
     entry.imm = 0; // VirtualSignExtendWord always has imm=0
 
-    entry.rd = if (rd == 0) 255 else rd; // rd=0 → sentinel (x0 never written)
+    entry.rd = rd; // rd=0 contributes eq_r_register[0] in Jolt (Some(0), not None)
     entry.rs1 = rd; // Sign-extend reads from rd (rs1 is always set, even for rd=0)
     entry.rs2 = 255; // I-type: no rs2
 
@@ -201,7 +201,7 @@ fn populateVirtualSignExtendWordEntryWithParams(
     entry.address = elf_address;
     entry.imm = 0;
 
-    entry.rd = if (rd == 0) 255 else rd;
+    entry.rd = rd; // rd=0 contributes eq_r_register[0] in Jolt (Some(0), not None)
     entry.rs1 = rs1;
     entry.rs2 = 255;
 
@@ -255,7 +255,7 @@ fn populateVirtualSRLIEntry(
     // matching what preprocessing.zig stores in the FormatI operands.
     entry.imm = @bitCast(bitmask);
 
-    entry.rd = if (rd == 0) 255 else rd;
+    entry.rd = rd; // rd=0 contributes eq_r_register[0] in Jolt (Some(0), not None)
     entry.rs1 = rs1;
     entry.rs2 = 255; // VirtualSRLI is I-type: no rs2
 
@@ -308,7 +308,7 @@ fn populateVirtualAdviceEntry(
     entry.address = elf_address;
     entry.imm = 0;
 
-    entry.rd = if (rd == 0) 255 else rd;
+    entry.rd = rd; // rd=0 contributes eq_r_register[0] in Jolt (Some(0), not None)
     entry.rs1 = 255; // VirtualAdvice has no rs1
     entry.rs2 = 255; // VirtualAdvice has no rs2
 
@@ -411,7 +411,7 @@ fn populateVirtualZeroExtendWordEntry(
     entry.address = elf_address;
     entry.imm = 0;
 
-    entry.rd = if (rd == 0) 255 else rd;
+    entry.rd = rd; // rd=0 contributes eq_r_register[0] in Jolt (Some(0), not None)
     entry.rs1 = rs1;
     entry.rs2 = 255; // No rs2
 
@@ -544,7 +544,7 @@ fn populateVirtualChangeDivisorWEntry(
 ) void {
     entry.address = elf_address;
     entry.imm = 0;
-    entry.rd = if (rd == 0) 255 else rd;
+    entry.rd = rd; // rd=0 contributes eq_r_register[0] in Jolt (Some(0), not None)
     entry.rs1 = rs1;
     entry.rs2 = rs2;
     entry.opcode = 0x3b;
@@ -590,7 +590,7 @@ fn populateVirtualRTypeEntry(
         @as(u32, opcode);
     populateEntryFromInstruction(entry, instr, elf_address);
     // Override register indices with full virtual register values
-    entry.rd = if (rd == 0) 255 else rd;
+    entry.rd = rd; // rd=0 contributes eq_r_register[0] in Jolt (Some(0), not None)
     entry.rs1 = rs1;
     entry.rs2 = rs2;
     // Set virtual sequence flags
@@ -618,7 +618,7 @@ fn populateVirtualSRAIEntry(
 ) void {
     entry.address = elf_address;
     entry.imm = @bitCast(@as(i64, @bitCast(bitmask)));
-    entry.rd = if (rd == 0) 255 else rd;
+    entry.rd = rd; // rd=0 contributes eq_r_register[0] in Jolt (Some(0), not None)
     entry.rs1 = rs1;
     entry.rs2 = 255;
     entry.opcode = 0x5B; // Virtual instruction opcode space (same as VirtualSRLI)
@@ -653,18 +653,17 @@ fn populateEntryFromInstruction(entry: *BytecodeEntry, instr: u32, elf_address: 
 
     const opcode: u8 = @truncate(instr & 0x7F);
 
-    // Set rd, rs1, rs2 matching Zolt's register matrix behavior.
+    // Set rd, rs1, rs2 matching Jolt's NormalizedOperands behavior.
     // We use 255 as sentinel for "not present" so that `entry.X < REGISTER_COUNT`
     // yields false, giving zero contribution in val poly.
     //
-    // rd:  sentinel for S-format (0x23), B-format (0x63), and rd==0 (x0 is the
-    //      hardwired zero register, never written). The register write matrix in
-    //      Jolt checks `rd != 0 && rd < 32`, so rd=0 writes are excluded. The
-    //      verifier's from_raw_word maps rd_raw==0 to None, giving zero contribution
-    //      to Stages 4 and 5 val polynomials. We must match by using sentinel 255.
+    // rd:  sentinel ONLY for S-format (0x23) and B-format (0x63), which have rd=None
+    //      in Jolt's NormalizedOperands. For ALL other formats (including rd=0),
+    //      Jolt stores rd=Some(rd_value), so rd=0 contributes eq_r_register[0]
+    //      (non-zero) to Stages 4 and 5 val polynomials. We must NOT sentinel rd=0.
     // rs1: sentinel for U-type (LUI 0x37, AUIPC 0x17) and J-type (JAL 0x6f)
     // rs2: sentinel for I-type (0x13, 0x03, 0x67, 0x1b), U-type (0x37, 0x17), J-type (0x6f)
-    entry.rd = if (opcode == 0x23 or opcode == 0x63 or decoded.rd == 0) 255 else decoded.rd;
+    entry.rd = if (opcode == 0x23 or opcode == 0x63) 255 else decoded.rd;
     entry.rs1 = switch (opcode) {
         0x37, 0x17, 0x6f => 255, // U-type, J-type: no rs1
         else => decoded.rs1,

@@ -1615,12 +1615,18 @@ fn rightShiftPrefixMle(
         result = result.add(F.fromU64(@as(u64, @as(u8, @intCast(c)) * y_msb)));
     }
     const uninterleaved = b.uninterleave();
-    const x_u32 = @as(u32, @truncate(uninterleaved.left));
-    const y_u32 = @as(u32, @truncate(uninterleaved.right));
-    result = result.mul(F.fromU64(@as(u64, 1) << @intCast(@clz(~y_u32))));
-    // Handle shift overflow: when y_u32 == 0, trailing_zeros = 32, so x >> 32 = 0
-    const trailing_zeros = @ctz(y_u32);
-    const shifted_x: u64 = if (trailing_zeros >= 32) 0 else @as(u64, x_u32 >> @intCast(trailing_zeros));
+    const half_len = b.len / 2;
+    // Create proper LookupBits for length-aware leading_ones/trailing_zeros
+    const x_bits = LookupBits(128).new(uninterleaved.left, half_len);
+    const y_bits = LookupBits(128).new(uninterleaved.right, half_len);
+    const leading = y_bits.leadingOnes();
+    const trailing = y_bits.trailingZeros();
+    if (leading >= 64) {
+        return result;
+    }
+    result = result.mul(F.fromU64(@as(u64, 1) << @intCast(leading)));
+    const x_val: u64 = @truncate(x_bits.value);
+    const shifted_x: u64 = if (trailing >= 64) 0 else x_val >> @intCast(trailing);
     result = result.add(F.fromU64(shifted_x));
     return result;
 }
@@ -1747,9 +1753,11 @@ fn leftShiftPrefixMle(
         prod_one_plus_y = prod_one_plus_y.mul(F.fromU64(1 + @as(u64, y_msb)));
     }
     const uninterleaved = b.uninterleave();
-    const x = uninterleaved.left & ~uninterleaved.right;
-    const y_leading_ones: usize = @clz(~@as(u32, @truncate(uninterleaved.right)));
     const y_len = b.len / 2;
+    const x = uninterleaved.left & ~uninterleaved.right;
+    // Use length-aware leading_ones via LookupBits
+    const y_bits_ls = LookupBits(128).new(uninterleaved.right, y_len);
+    const y_leading_ones: usize = y_bits_ls.leadingOnes();
     // Handle potential underflow: if y_len > y_leading_ones + (XLEN - 1 - j/2), shift would be "negative"
     const total = y_leading_ones + XLEN - 1 - j / 2;
     const shifted: u64 = if (total >= y_len and total - y_len < 64)
@@ -1790,8 +1798,12 @@ fn leftShiftHelperPrefixMle(
         const y_msb = b.popMsb();
         result = result.mul(F.fromU64(1 + @as(u64, y_msb)));
     }
-    const y = @as(u32, @truncate(b.uninterleave().right));
-    result = result.mul(F.fromU64(@as(u64, 1) << @intCast(@clz(~y))));
+    // Use length-aware leading_ones via LookupBits
+    const lsh_half_len = b.len / 2;
+    const lsh_y_bits = LookupBits(128).new(b.uninterleave().right, lsh_half_len);
+    const lsh_leading = lsh_y_bits.leadingOnes();
+    if (lsh_leading >= 64) return result;
+    result = result.mul(F.fromU64(@as(u64, 1) << @intCast(lsh_leading)));
     return result;
 }
 fn leftShiftHelperUpdateCheckpoint(
@@ -2158,13 +2170,19 @@ fn rightShiftWPrefixMle(
         result = result.add(F.fromU64(@as(u64, @as(u8, @intCast(c)) * y_msb)));
     }
     const uninterleaved = b.uninterleave();
-    const x_u32 = @as(u32, @truncate(uninterleaved.left));
-    const y_u32 = @as(u32, @truncate(uninterleaved.right));
-    result = result.mul(F.fromU64(@as(u64, 1) << @intCast(@clz(~y_u32))));
-    // Handle shift overflow: when y_u32 == 0, trailing_zeros = 32, so x >> 32 = 0
-    const trailing_zeros = @ctz(y_u32);
-    const shifted_x: u64 = if (trailing_zeros >= 32) 0 else @as(u64, x_u32 >> @intCast(trailing_zeros));
-    result = result.add(F.fromU64(shifted_x));
+    const half_len = b.len / 2;
+    // Create proper LookupBits for length-aware leading_ones/trailing_zeros
+    const x_bits_w = LookupBits(128).new(uninterleaved.left, half_len);
+    const y_bits_w = LookupBits(128).new(uninterleaved.right, half_len);
+    const leading_w = y_bits_w.leadingOnes();
+    const trailing_w = y_bits_w.trailingZeros();
+    if (leading_w >= 64) {
+        return result;
+    }
+    result = result.mul(F.fromU64(@as(u64, 1) << @intCast(leading_w)));
+    const x_val_w: u64 = @truncate(x_bits_w.value);
+    const shifted_x_w: u64 = if (trailing_w >= 64) 0 else x_val_w >> @intCast(trailing_w);
+    result = result.add(F.fromU64(shifted_x_w));
     return result;
 }
 fn rightShiftWUpdateCheckpoint(
@@ -2205,8 +2223,12 @@ fn leftShiftWHelperPrefixMle(
         const y_msb = b.popMsb();
         result = result.mul(F.fromU64(1 + @as(u64, y_msb)));
     }
-    const y = @as(u32, @truncate(b.uninterleave().right));
-    result = result.mul(F.fromU64(@as(u64, 1) << @intCast(@clz(~y))));
+    // Use length-aware leading_ones via LookupBits
+    const lswh_half_len = b.len / 2;
+    const lswh_y_bits = LookupBits(128).new(b.uninterleave().right, lswh_half_len);
+    const lswh_leading = lswh_y_bits.leadingOnes();
+    if (lswh_leading >= 64) return result;
+    result = result.mul(F.fromU64(@as(u64, 1) << @intCast(lswh_leading)));
     return result;
 }
 fn leftShiftWHelperUpdateCheckpoint(
@@ -2253,13 +2275,15 @@ fn leftShiftWPrefixMle(
         prod_one_plus_y = prod_one_plus_y.mul(F.fromU64(1 + @as(u64, y_msb)));
     }
     const uninterleaved = b.uninterleave();
+    const y_len_w = b.len / 2;
     const x = uninterleaved.left & ~uninterleaved.right;
-    const y_leading_ones: usize = @clz(~@as(u32, @truncate(uninterleaved.right)));
-    const y_len = b.len / 2;
+    // Use length-aware leading_ones via LookupBits
+    const y_bits_lsw = LookupBits(128).new(uninterleaved.right, y_len_w);
+    const y_leading_ones: usize = y_bits_lsw.leadingOnes();
     // Handle potential underflow: if y_len > y_leading_ones + bit_index, shift is "negative" (treat as large)
     const total = y_leading_ones + bit_index;
-    const shifted: u64 = if (total >= y_len and total - y_len < 64)
-        (x << @intCast(total - y_len))
+    const shifted: u64 = if (total >= y_len_w and total - y_len_w < 64)
+        (x << @intCast(total - y_len_w))
     else
         0;
     result = result.add(F.fromU64(shifted).mul(prod_one_plus_y));

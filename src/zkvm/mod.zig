@@ -206,22 +206,34 @@ pub fn computeBytecodeCodeSize(program_bytecode: []const u8) usize {
             const funct3: u3 = @truncate((instr_word >> 12) & 0x7);
             const funct7: u7 = @truncate((instr_word >> 25) & 0x7F);
 
-            const is_w_ext_2 = switch (opcode) {
-                0x1b => switch (funct3) {
-                    0 => true, // ADDIW
-                    1 => true, // SLLIW → VirtualMULI + VirtualSignExtendWord (2 entries)
-                    else => false,
-                },
-                0x3b => (funct3 == 0 and funct7 == 0x00) or // ADDW
-                    (funct3 == 0 and funct7 == 0x20) or // SUBW
-                    (funct3 == 0 and funct7 == 0x01), // MULW
-                else => false,
-            };
-
-            if (is_w_ext_2) {
-                num_entries += 2; // Base instruction + virtual step
+            // Count bytecode entries per instruction, matching preprocessing.zig decomposition
+            if (opcode == 0x3b and funct7 == 0x01 and (funct3 == 6 or funct3 == 4)) {
+                // REMW (funct3=6) or DIVW (funct3=4): 21 entries
+                num_entries += 21;
+            } else if (opcode == 0x3b and funct3 == 7 and funct7 == 0x01) {
+                // REMUW: 12 entries
+                num_entries += 12;
+            } else if (opcode == 0x1b and funct3 == 5 and (instr_word >> 30) & 1 == 0) {
+                // SRLIW: 3 entries (VirtualMULI + VirtualSRLI + VirtualSignExtendWord)
+                num_entries += 3;
             } else {
-                num_entries += 1; // SLLI → VirtualMULI is still 1 entry
+                const is_w_ext_2 = switch (opcode) {
+                    0x1b => switch (funct3) {
+                        0 => true, // ADDIW
+                        1 => true, // SLLIW → VirtualMULI + VirtualSignExtendWord (2 entries)
+                        else => false,
+                    },
+                    0x3b => (funct3 == 0 and funct7 == 0x00) or // ADDW
+                        (funct3 == 0 and funct7 == 0x20) or // SUBW
+                        (funct3 == 0 and funct7 == 0x01), // MULW
+                    else => false,
+                };
+
+                if (is_w_ext_2) {
+                    num_entries += 2; // Base instruction + virtual step
+                } else {
+                    num_entries += 1; // Regular instruction or SLLI/SRLI (1 entry each)
+                }
             }
         } else {
             break;
@@ -229,7 +241,7 @@ pub fn computeBytecodeCodeSize(program_bytecode: []const u8) usize {
     }
 
     // +1 for prepended NoOp (Jolt always prepends one)
-    // +3 for termination store virtual sequence (LUI, ADDI, SB) at the end
+    // +3 for termination store virtual sequence (LUI, ADDI, SD) at the end
     const total = num_entries + 1 + 3;
 
     // Pad to next power of 2, minimum 2
@@ -2230,10 +2242,17 @@ pub fn JoltProver(comptime F: type) type {
                 try serializer.writeDoryProof(&dory_proof);
             }
 
-            // Write untrusted_advice_commitment: Option<PCS::Commitment>
-            // This is the ONLY optional field after joint_opening_proof in JoltProof
-            // Note: There are NO advice proof fields (trusted_advice_val_evaluation_proof etc.)
-            // in JoltProof - those were removed from the struct.
+            // Write advice proof fields - must match JoltProof struct field order:
+            //   trusted_advice_val_evaluation_proof: Option<PCS::Proof>
+            //   trusted_advice_val_final_proof: Option<PCS::Proof>
+            //   untrusted_advice_val_evaluation_proof: Option<PCS::Proof>
+            //   untrusted_advice_val_final_proof: Option<PCS::Proof>
+            //   untrusted_advice_commitment: Option<PCS::Commitment>
+            // All None for now (no advice support).
+            try serializer.writeU8(0); // trusted_advice_val_evaluation_proof: None
+            try serializer.writeU8(0); // trusted_advice_val_final_proof: None
+            try serializer.writeU8(0); // untrusted_advice_val_evaluation_proof: None
+            try serializer.writeU8(0); // untrusted_advice_val_final_proof: None
             try serializer.writeU8(0); // untrusted_advice_commitment: None
 
             // Write configuration fields - must match Jolt's #[derive(CanonicalSerialize)]
@@ -2241,37 +2260,23 @@ pub fn JoltProver(comptime F: type) type {
             //   trace_length: usize (8 bytes, LE)
             //   ram_K: usize (8 bytes, LE)
             //   bytecode_K: usize (8 bytes, LE)
-            //   rw_config: ReadWriteConfig (4 x u8 = 4 bytes)
-            //   one_hot_config: OneHotConfig (2 x u8 = 2 bytes)
-            //   dory_layout: DoryLayout (1 x u8 = 1 byte)
+            //   log_k_chunk: usize (8 bytes, LE)
+            //   lookups_ra_virtual_log_k_chunk: usize (8 bytes, LE)
             dbg("[SERIALIZE CONFIG] trace_length={}, ram_K={}, bytecode_K={}\n", .{
                 bundle.proof.trace_length,
                 bundle.proof.ram_K,
                 bundle.proof.bytecode_K,
             });
-            dbg("[SERIALIZE CONFIG] rw_config=({},{},{},{}), one_hot=({},{}), dory_layout={}\n", .{
-                bundle.proof.rw_config.ram_rw_phase1_num_rounds,
-                bundle.proof.rw_config.ram_rw_phase2_num_rounds,
-                bundle.proof.rw_config.registers_rw_phase1_num_rounds,
-                bundle.proof.rw_config.registers_rw_phase2_num_rounds,
+            dbg("[SERIALIZE CONFIG] log_k_chunk={}, lookups_ra_virtual_log_k_chunk={}\n", .{
                 bundle.proof.one_hot_config.log_k_chunk,
                 bundle.proof.one_hot_config.lookups_ra_virtual_log_k_chunk,
-                bundle.proof.dory_layout,
             });
 
             try serializer.writeUsize(bundle.proof.trace_length);
             try serializer.writeUsize(bundle.proof.ram_K);
             try serializer.writeUsize(bundle.proof.bytecode_K);
-            // ReadWriteConfig: 4 x u8 (canonical serialization of the struct)
-            try serializer.writeU8(bundle.proof.rw_config.ram_rw_phase1_num_rounds);
-            try serializer.writeU8(bundle.proof.rw_config.ram_rw_phase2_num_rounds);
-            try serializer.writeU8(bundle.proof.rw_config.registers_rw_phase1_num_rounds);
-            try serializer.writeU8(bundle.proof.rw_config.registers_rw_phase2_num_rounds);
-            // OneHotConfig: 2 x u8
-            try serializer.writeU8(bundle.proof.one_hot_config.log_k_chunk);
-            try serializer.writeU8(bundle.proof.one_hot_config.lookups_ra_virtual_log_k_chunk);
-            // DoryLayout: 1 x u8 (0 = Wide, 1 = Tall)
-            try serializer.writeU8(bundle.proof.dory_layout);
+            try serializer.writeUsize(@as(usize, bundle.proof.one_hot_config.log_k_chunk));
+            try serializer.writeUsize(@as(usize, bundle.proof.one_hot_config.lookups_ra_virtual_log_k_chunk));
 
             return serializer.toOwnedSlice();
         }

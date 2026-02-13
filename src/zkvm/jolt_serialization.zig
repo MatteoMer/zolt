@@ -252,8 +252,6 @@ pub fn ArkworksSerializer(comptime F: type) type {
                             try self.writeU8(4);
                             try self.writeU8(@truncate(i));
                         },
-                        .TrustedAdvice => try self.writeU8(5),
-                        .UntrustedAdvice => try self.writeU8(6),
                     }
                 },
                 .Virtual => |v| {

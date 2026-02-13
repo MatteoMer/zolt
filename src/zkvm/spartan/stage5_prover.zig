@@ -859,6 +859,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         };
                         lookup_output = F.fromU64(result);
                     },
+                    0x22, 0x62 => {
+                        // VirtualAssertEQ and VirtualAssertValidUnsignedRemainder: Assert instructions
+                        // LookupOutput = 1 (assertion passed). Matches R1CS computeLookupOutput.
+                        lookup_output = F.one();
+                    },
                     else => {
                         // Default: rd_value (will be overridden for ADDIW/ADDW/SUBW below)
                         lookup_output = F.fromU64(step.rd_value);
@@ -870,22 +875,30 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     0x33 => { // R-type
                         if (funct7 == 0x01) {
                             // M-extension
-                            if (funct3 == 0x0) { // MUL
+                            if (funct3 == 0x0) { // MUL: MultiplyOperands
+                                left_op = F.zero();
+                                right_op = left_input.mul(right_input); // Product
+                            } else if (funct3 == 0x3) { // MULHU: MultiplyOperands
                                 left_op = F.zero();
                                 right_op = left_input.mul(right_input); // Product
                             } else {
+                                // DIVU, REMU, MULHSU, etc.: interleaved
                                 left_op = left_input;
                                 right_op = right_input;
                             }
-                        } else if (funct7 == 0x20 and funct3 == 0x0) {
-                            // SUB: LeftLookup=0, RightLookup=left-right+2^64
+                        } else if (funct3 == 0x0 and funct7 == 0x20) {
+                            // SUB: SubtractOperands, left=0, right=rs1-rs2+2^64
                             const two_pow_64 = F.fromBytes(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
                             left_op = F.zero();
                             right_op = left_input.sub(right_input).add(two_pow_64);
-                        } else {
-                            // ADD and others: LeftLookup=0, RightLookup=left+right
+                        } else if (funct3 == 0x0 and funct7 == 0x0) {
+                            // ADD: AddOperands, left=0, right=rs1+rs2
                             left_op = F.zero();
                             right_op = left_input.add(right_input);
+                        } else {
+                            // XOR, AND, OR, SLT, SLTU, SRL, SRA: interleaved operands
+                            left_op = left_input;
+                            right_op = right_input;
                         }
                     },
                     0x13 => { // I-type ALU: only ADDI (funct3=0) uses AddOperands
@@ -929,7 +942,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             right_op = right_input;
                         }
                     },
-                    0x3b => { // ADDW/SUBW: AddOperands/SubtractOperands
+                    0x3b => { // ADDW/SUBW/VirtualChangeDivisorW
                         // In Jolt, ADDW decomposes to ADD+VirtualSEW, SUBW to SUB+VirtualSEW.
                         // For Zolt's single-cycle model, match the first step's format.
                         if (funct3 == 0 and funct7 == 0) {
@@ -941,6 +954,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             const two_pow_64 = F.fromBytes(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
                             left_op = F.zero();
                             right_op = left_input.sub(right_input).add(two_pow_64);
+                        } else if (funct3 == 6 and funct7 == 0x01) {
+                            // VirtualChangeDivisorW: interleaved, left=rs1 as u32 as u64 (truncated), right=rs2
+                            // Jolt's to_instruction_inputs: (rs1 as u32 as u64, rs2 as i128)
+                            // to_lookup_operands: (rs1 as u32 as u64, rs2 as u64)
+                            const rs1_lower32: u64 = step.rs1_value & 0xFFFFFFFF;
+                            left_op = F.fromU64(rs1_lower32);
+                            right_op = F.fromU64(step.rs2_value);
                         } else {
                             // Other 0x3b variants (not AddOperands/SubtractOperands)
                             left_op = left_input;
@@ -1171,7 +1191,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     right_op = F.fromU128(lookup_idx_u128);
                 } else {
                     // Interleaved path: left=rs1, right=rs2 (or imm for I-type)
-                    left_op_raw = step.rs1_value;
+                    // VirtualChangeDivisorW (0x3b/f3=6/f7=1): left = rs1 as u32 as u64 (truncated to 32 bits)
+                    left_op_raw = if (opcode == 0x3b and funct3 == 6 and funct7 == 0x01)
+                        step.rs1_value & 0xFFFFFFFF
+                    else
+                        step.rs1_value;
                     right_op_raw = switch (opcode) {
                         0x33, 0x3b, 0x63 => step.rs2_value,
                         0x13 => blk: {
@@ -1379,6 +1403,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         const shamt4: u6 = @truncate(shamt_raw4 & 0x3F);
                         const multiplier4: u64 = @as(u64, 1) << shamt4;
                         break :blk F.fromU64(multiplier4);
+                    } else if (opcode == 0x5B) blk: {
+                        // VirtualSRLI/SRAI: IMM = bitmask computed from total shift amount
+                        const total_shift_raw4: u32 = instr >> 20;
+                        const total_shift4: u7 = @truncate(total_shift_raw4 & 0x3F);
+                        const ones4: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, total_shift4))) - 1;
+                        const bitmask4: u64 = @truncate(ones4 << total_shift4);
+                        break :blk F.fromU64(bitmask4);
                     } else if (is_identity_add_imm2) F.fromU64(computeUnsignedImmediate(instr)) else computeImmediate(instr);
 
                     // Compute left_input and right_input
@@ -1399,8 +1430,6 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         },
                         0x67 => { // JALR: LookupOutput = (rs1 + imm) & ~1
                             const target = left_input.add(right_input);
-                            // Clear LSB: need to convert to u64, mask, convert back
-                            // For simplicity, assume imm is small enough
                             const target_u64 = target.toU64() & ~@as(u64, 1);
                             lookup_output = F.fromU64(target_u64);
                         },
@@ -1416,6 +1445,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             };
                             lookup_output = F.fromU64(result);
                         },
+                        0x22, 0x62 => {
+                            // VirtualAssertEQ and VirtualAssertValidUnsignedRemainder: Assert instructions
+                            // LookupOutput = 1 (assertion passed). Matches R1CS computeLookupOutput.
+                            lookup_output = F.one();
+                        },
                         else => {
                             lookup_output = F.fromU64(step.rd_value);
                         },
@@ -1428,22 +1462,30 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             const funct7: u7 = @truncate(instr >> 25);
                             if (funct7 == 0x01) {
                                 // M-extension
-                                if (funct3 == 0x0) { // MUL
+                                if (funct3 == 0x0) { // MUL: MultiplyOperands
+                                    left_op = F.zero();
+                                    right_op = left_input.mul(right_input); // Product
+                                } else if (funct3 == 0x3) { // MULHU: MultiplyOperands
                                     left_op = F.zero();
                                     right_op = left_input.mul(right_input); // Product
                                 } else {
+                                    // DIVU, REMU, etc.: interleaved
                                     left_op = left_input;
                                     right_op = right_input;
                                 }
-                            } else if (funct7 == 0x20 and funct3 == 0x0) {
-                                // SUB: LeftLookup=0, RightLookup=left-right+2^64
+                            } else if (funct3 == 0x0 and funct7 == 0x20) {
+                                // SUB: SubtractOperands
                                 const two_pow_64 = F.fromBytes(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
                                 left_op = F.zero();
                                 right_op = left_input.sub(right_input).add(two_pow_64);
-                            } else {
-                                // ADD and others: LeftLookup=0, RightLookup=left+right
+                            } else if (funct3 == 0x0 and funct7 == 0x0) {
+                                // ADD: AddOperands
                                 left_op = F.zero();
                                 right_op = left_input.add(right_input);
+                            } else {
+                                // XOR, AND, OR, SLT, SLTU, SRL, SRA: interleaved
+                                left_op = left_input;
+                                right_op = right_input;
                             }
                         },
                         0x13 => { // I-type ALU: only ADDI (funct3=0) uses AddOperands
@@ -1493,7 +1535,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 right_op = right_input;
                             }
                         },
-                        0x3b => { // ADDW/SUBW: AddOperands/SubtractOperands
+                        0x3b => { // ADDW/SUBW/VirtualChangeDivisorW
                             const funct7: u7 = @truncate(instr >> 25);
                             if (funct3 == 0 and funct7 == 0) {
                                 // ADDW: AddOperands, left=0, right=rs1+rs2
@@ -1504,6 +1546,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 const two_pow_64 = F.fromBytes(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
                                 left_op = F.zero();
                                 right_op = left_input.sub(right_input).add(two_pow_64);
+                            } else if (funct3 == 6 and funct7 == 0x01) {
+                                // VirtualChangeDivisorW: interleaved, left=rs1 as u32 as u64, right=rs2
+                                const rs1_lower32: u64 = step.rs1_value & 0xFFFFFFFF;
+                                left_op = F.fromU64(rs1_lower32);
+                                right_op = F.fromU64(step.rs2_value);
                             } else {
                                 // Other 0x3b variants (not AddOperands/SubtractOperands)
                                 left_op = left_input;
@@ -2382,7 +2429,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             else => false,
                         };
                         const r1cs_is_mul = switch (opcode_d) {
-                            0x33 => (funct7_d == 0x01 and funct3_d == 0), // MUL
+                            0x33 => (funct7_d == 0x01 and (funct3_d == 0 or funct3_d == 3)), // MUL, MULHU
                             0x2B => true, // VirtualMULI
                             else => false,
                         };
@@ -2410,7 +2457,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             r1cs_right_op = r1cs_right_input;
                         }
 
-                        // Compute R1CS-style LookupOutput
+                        // Compute R1CS-style LookupOutput (matching computeLookupOutput)
                         var r1cs_output: F = undefined;
                         switch (opcode_d) {
                             0x6f => { r1cs_output = r1cs_left_input.add(r1cs_right_input); },
@@ -2427,6 +2474,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 0x7 => @intFromBool(step_d.rs1_value >= step_d.rs2_value),
                                 else => 0,
                             }); },
+                            0x22, 0x62 => {
+                                // VirtualAssertEQ / VirtualAssertValidUnsignedRemainder: Assert => output = 1
+                                r1cs_output = F.one();
+                            },
                             else => { r1cs_output = F.fromU64(step_d.rd_value); },
                         }
 
@@ -6027,19 +6078,20 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 for (0..log_ram_k) |i| {
                     r_addr_reduced_be[i] = addr_challenges[log_ram_k - 1 - i];
                 }
-                var r_cycle_reduced_be: [8]F = undefined;
+                var r_cycle_reduced_be_buf: [32]F = undefined;
                 for (0..n_cycle_vars) |i| {
-                    r_cycle_reduced_be[i] = cycle_chal[n_cycle_vars - 1 - i];
+                    r_cycle_reduced_be_buf[i] = cycle_chal[n_cycle_vars - 1 - i];
                 }
+                const r_cycle_reduced_be = r_cycle_reduced_be_buf[0..n_cycle_vars];
 
                 // Compute eq(r_addr_1, r_addr_reduced)
                 const eq_addr_1 = computeEqPolynomial(F, r_address_raf, r_addr_reduced_be[0..log_ram_k]);
                 const eq_addr_2 = computeEqPolynomial(F, r_address_rw, r_addr_reduced_be[0..log_ram_k]);
 
                 // Compute eq(r_cycle_x, r_cycle_reduced)
-                const eq_cycle_raf_red = computeEqPolynomial(F, r_cycle_raf, r_cycle_reduced_be[0..n_cycle_vars]);
-                const eq_cycle_rw_red = computeEqPolynomial(F, r_cycle_rw, r_cycle_reduced_be[0..n_cycle_vars]);
-                const eq_cycle_val_red = computeEqPolynomial(F, r_cycle_val, r_cycle_reduced_be[0..n_cycle_vars]);
+                const eq_cycle_raf_red = computeEqPolynomial(F, r_cycle_raf, r_cycle_reduced_be);
+                const eq_cycle_rw_red = computeEqPolynomial(F, r_cycle_rw, r_cycle_reduced_be);
+                const eq_cycle_val_red = computeEqPolynomial(F, r_cycle_val, r_cycle_reduced_be);
 
                 // eq_combined
                 const eq_cycle_A = eq_cycle_raf_red.add(gamma.mul(eq_cycle_val_red));
@@ -6053,7 +6105,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         const addr = ram_addresses[i];
                         const cycle = access.timestamp;
                         const eq_a = computeEqAtPoint(F, r_addr_reduced_be[0..log_ram_k], addr);
-                        const eq_c = computeEqAtPoint(F, r_cycle_reduced_be[0..n_cycle_vars], cycle);
+                        const eq_c = computeEqAtPoint(F, r_cycle_reduced_be, cycle);
                         bf_ra_claim = bf_ra_claim.add(eq_a.mul(eq_c));
                     }
                 }
@@ -7183,6 +7235,7 @@ pub fn getLookupTableIndex(opcode: u32, funct3: u32, funct7: u32) i8 {
         0x3b => blk: { // OP-32
             if (funct3 == 0 and funct7 == 0) break :blk 0; // ADDW -> RangeCheckTable
             if (funct3 == 0 and funct7 == 0x20) break :blk 0; // SUBW -> RangeCheckTable
+            if (funct3 == 6 and funct7 == 0x01) break :blk 31; // VirtualChangeDivisorW -> VirtualChangeDivisorWTable
             break :blk -1;
         },
         0x63 => blk: { // B-type (branches)
@@ -7196,9 +7249,15 @@ pub fn getLookupTableIndex(opcode: u32, funct3: u32, funct7: u32) i8 {
         },
         0x0B => 21, // VirtualSignExtendWord -> SignExtendHalfWordTable
         0x2B => 0, // VirtualMULI -> RangeCheckTable
-        0x5B => 26, // VirtualSRLI -> VirtualSRLTable
+        0x5B => blk5b: { // Virtual shift right
+            if (funct3 == 5) break :blk5b 27; // VirtualSRAI -> VirtualSRATable
+            break :blk5b 26; // VirtualSRLI -> VirtualSRLTable (funct3=0)
+        },
         0x02 => 0, // VirtualAdvice -> RangeCheckTable
-        0x22 => 6, // VirtualAssertEQ -> EqualTable
+        0x22 => blk22: { // Virtual assert
+            if (funct3 == 1) break :blk22 17; // VirtualAssertValidDiv0 -> ValidDiv0Table
+            break :blk22 6; // VirtualAssertEQ -> EqualTable (funct3=0)
+        },
         0x42 => 20, // VirtualZeroExtendWord -> LowerHalfWordTable
         0x62 => 16, // VirtualAssertValidUnsignedRemainder -> ValidUnsignedRemainderTable
         0x37 => 0, // LUI -> RangeCheckTable

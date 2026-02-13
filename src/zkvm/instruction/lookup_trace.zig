@@ -1602,6 +1602,179 @@ pub fn LookupTraceCollector(comptime XLEN: comptime_int) type {
             try self.entries.append(self.allocator, entry);
         }
 
+        /// Record lookup for a VirtualSRAI instruction within a virtual sequence.
+        /// Similar to VirtualSRLI but uses VirtualSRA table (index 27).
+        pub fn recordVirtualSRAI(
+            self: *Self,
+            cycle: usize,
+            pc: u64,
+            instruction: u32,
+            rs1_val: u64,
+            is_virtual: bool,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+        ) !void {
+            if (!self.enabled) return;
+            // VirtualSRAI uses same pattern as VirtualSRLI but with VirtualSRA table
+            const rd: u8 = @truncate((instruction >> 7) & 0x1f);
+            const shift_raw: u32 = instruction >> 20;
+            const shift: u7 = @truncate(shift_raw & 0x3F);
+            const ones: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, shift))) - 1;
+            const bitmask: u64 = @truncate(ones << shift);
+            const index = lookup_table.interleaveBits(rs1_val, bitmask);
+            // Compute result: arithmetic right shift
+            const result: u64 = @bitCast(@as(i64, @bitCast(rs1_val)) >> @intCast(shift));
+
+            var cf = CircuitFlagSet.init();
+            cf.set(.WriteLookupOutputToRD);
+            if (is_virtual) cf.set(.VirtualInstruction);
+            if (do_not_update_pc) cf.set(.DoNotUpdateUnexpandedPC);
+            if (is_first_in_sequence) cf.set(.IsFirstInSequence);
+            if (is_compressed) cf.set(.IsCompressed);
+
+            var inf = InstructionFlagSet.init();
+            inf.set(.LeftOperandIsRs1Value);
+            inf.set(.RightOperandIsImm);
+            if (rd != 0) inf.set(.IsRdNotZero);
+
+            const entry = Entry{
+                .cycle = cycle,
+                .pc = pc,
+                .table = .VirtualSRA,
+                .index = index,
+                .result = result,
+                .left_operand = rs1_val,
+                .right_operand = bitmask,
+                .circuit_flags = cf,
+                .instruction_flags = inf,
+                .instruction = instruction,
+            };
+            try self.entries.append(self.allocator, entry);
+        }
+
+        /// Record lookup for a VirtualChangeDivisorW instruction within a virtual sequence.
+        /// Uses lookup table VirtualChangeDivisorW (index 31).
+        pub fn recordVirtualChangeDivisorW(
+            self: *Self,
+            cycle: usize,
+            pc: u64,
+            instruction: u32,
+            rs1_val: u64,
+            rs2_val: u64,
+            is_virtual: bool,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+        ) !void {
+            if (!self.enabled) return;
+            const rd: u8 = @truncate((instruction >> 7) & 0x1f);
+            const index = lookup_table.interleaveBits(rs1_val, rs2_val);
+            // Result: if dividend == INT32_MIN and divisor == -1, return 1; else return divisor
+            const dv_i32: i32 = @truncate(@as(i64, @bitCast(rs1_val)));
+            const ds_i32: i32 = @truncate(@as(i64, @bitCast(rs2_val)));
+            const result: u64 = if (dv_i32 == std.math.minInt(i32) and ds_i32 == -1)
+                1
+            else
+                @bitCast(@as(i64, ds_i32));
+
+            var cf = CircuitFlagSet.init();
+            cf.set(.WriteLookupOutputToRD);
+            if (is_virtual) cf.set(.VirtualInstruction);
+            if (do_not_update_pc) cf.set(.DoNotUpdateUnexpandedPC);
+            if (is_first_in_sequence) cf.set(.IsFirstInSequence);
+            if (is_compressed) cf.set(.IsCompressed);
+
+            var inf = InstructionFlagSet.init();
+            inf.set(.LeftOperandIsRs1Value);
+            inf.set(.RightOperandIsRs2Value);
+            if (rd != 0) inf.set(.IsRdNotZero);
+
+            const entry = Entry{
+                .cycle = cycle,
+                .pc = pc,
+                .table = .VirtualChangeDivisorW,
+                .index = index,
+                .result = result,
+                .left_operand = rs1_val,
+                .right_operand = rs2_val,
+                .circuit_flags = cf,
+                .instruction_flags = inf,
+                .instruction = instruction,
+            };
+            try self.entries.append(self.allocator, entry);
+        }
+
+        /// Record lookup for a SUB instruction within a virtual sequence.
+        pub fn recordSubVirtual(
+            self: *Self,
+            cycle: usize,
+            pc: u64,
+            instruction: u32,
+            rs1_val: u64,
+            rs2_val: u64,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+        ) !void {
+            if (!self.enabled) return;
+            const SubLookup = lookups.SubLookup(XLEN);
+            const sub = SubLookup.init(rs1_val, rs2_val);
+            var circuit_flags = SubLookup.circuitFlags();
+            circuit_flags.set(.VirtualInstruction);
+            if (do_not_update_pc) circuit_flags.set(.DoNotUpdateUnexpandedPC);
+            if (is_first_in_sequence) circuit_flags.set(.IsFirstInSequence);
+            if (is_compressed) circuit_flags.set(.IsCompressed);
+            const entry = Entry{
+                .cycle = cycle,
+                .pc = pc,
+                .table = SubLookup.lookupTable(),
+                .index = sub.toLookupIndex(),
+                .result = sub.computeResult(),
+                .left_operand = rs1_val,
+                .right_operand = rs2_val,
+                .circuit_flags = circuit_flags,
+                .instruction_flags = SubLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+            try self.entries.append(self.allocator, entry);
+        }
+
+        /// Record lookup for an XOR instruction within a virtual sequence.
+        pub fn recordXorVirtual(
+            self: *Self,
+            cycle: usize,
+            pc: u64,
+            instruction: u32,
+            rs1_val: u64,
+            rs2_val: u64,
+            do_not_update_pc: bool,
+            is_first_in_sequence: bool,
+            is_compressed: bool,
+        ) !void {
+            if (!self.enabled) return;
+            const XorLookup = lookups.XorLookup(XLEN);
+            const xor_op = XorLookup.init(rs1_val, rs2_val);
+            var circuit_flags = XorLookup.circuitFlags();
+            circuit_flags.set(.VirtualInstruction);
+            if (do_not_update_pc) circuit_flags.set(.DoNotUpdateUnexpandedPC);
+            if (is_first_in_sequence) circuit_flags.set(.IsFirstInSequence);
+            if (is_compressed) circuit_flags.set(.IsCompressed);
+            const entry = Entry{
+                .cycle = cycle,
+                .pc = pc,
+                .table = XorLookup.lookupTable(),
+                .index = xor_op.toLookupIndex(),
+                .result = xor_op.computeResult(),
+                .left_operand = rs1_val,
+                .right_operand = rs2_val,
+                .circuit_flags = circuit_flags,
+                .instruction_flags = XorLookup.instructionFlags(),
+                .instruction = instruction,
+            };
+            try self.entries.append(self.allocator, entry);
+        }
+
         /// Get the number of lookup entries
         pub fn len(self: *const Self) usize {
             return self.entries.items.len;

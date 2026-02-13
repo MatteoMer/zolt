@@ -117,10 +117,13 @@ pub const JoltInstruction = struct {
         VirtualAdvice,
         VirtualAssertEQ,
         VirtualAssertLTE,
+        VirtualAssertValidDiv0,
         VirtualAssertValidUnsignedRemainder,
+        VirtualChangeDivisorW,
         VirtualSignExtendWord,
         VirtualZeroExtendWord,
         VirtualMULI,
+        VirtualSRAI,
         VirtualSRLI,
     };
 
@@ -238,9 +241,9 @@ pub const BytecodePCMapper = struct {
     /// Maps (address - base) / alignment to (base_pc, max_inline_seq)
     indices: std.ArrayListUnmanaged(?struct { usize, u16 }),
     allocator: Allocator,
-    /// Base bytecode index for termination store virtual sequence (LUI, ADDI, SB).
+    /// Base bytecode index for termination store virtual sequence (LUI, ADDI, SD).
     /// Set to last_pc + 1 after processing all real instructions.
-    /// LUI→termination_base_pc, ADDI→+1, SB→+2
+    /// LUI→termination_base_pc, ADDI→+1, SD→+2
     termination_base_pc: usize = 0,
 
     pub fn init(allocator: Allocator) BytecodePCMapper {
@@ -303,7 +306,7 @@ pub const BytecodePCMapper = struct {
             }
         }
 
-        // Reserve 3 bytecode entries for the termination store virtual sequence (LUI+ADDI+SB)
+        // Reserve 3 bytecode entries for the termination store virtual sequence (LUI+ADDI+SD)
         // These come after all real instructions: k=last_pc+1, k=last_pc+2, k=last_pc+3
         self.termination_base_pc = last_pc + 1;
     }
@@ -329,7 +332,7 @@ pub const BytecodePCMapper = struct {
     }
 
     /// Get the bytecode index for a termination store virtual instruction.
-    /// LUI (vsr=2) → termination_base_pc, ADDI (vsr=1) → +1, SB (vsr=0) → +2
+    /// LUI (vsr=2) → termination_base_pc, ADDI (vsr=1) → +1, SD (vsr=0) → +2
     pub fn getTerminationPC(self: *const BytecodePCMapper, virtual_sequence_remaining: u16) usize {
         return self.termination_base_pc + @as(usize, 2 - virtual_sequence_remaining);
     }
@@ -806,6 +809,229 @@ pub const BytecodePreprocessing = struct {
                         .is_compressed = is_compressed,
                     });
                 },
+                .REMW, .DIVW => {
+                    // REMW/DIVW → 21-instruction inline sequence (matching Jolt's decomposition)
+                    // Signed division/remainder verification with overflow handling
+                    // Virtual registers: a2=32, a3=33, t0=34, t1=35, t2=36, t3=37, t4=38
+                    const rs1 = switch (jolt_instr.operands) {
+                        .FormatR => |r| r.rs1,
+                        else => 0,
+                    };
+                    const rs2 = switch (jolt_instr.operands) {
+                        .FormatR => |r| r.rs2,
+                        else => 0,
+                    };
+                    const rd = switch (jolt_instr.operands) {
+                        .FormatR => |r| r.rd,
+                        else => 0,
+                    };
+                    const a2: u8 = 32; // quotient
+                    const a3: u8 = 33; // |remainder|
+                    const t0: u8 = 34; // adjusted divisor
+                    const t1: u8 = 35; // temporary
+                    const t2: u8 = 36; // temporary
+                    const t3: u8 = 37; // signed remainder
+                    const t4: u8 = 38; // sign-extended dividend
+
+                    // Step 1: VirtualAdvice(a2) → quotient (vsr=20, first)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualAdvice,
+                        .address = addr,
+                        .operands = .{ .FormatJ = .{ .rd = a2, .imm = 0 } },
+                        .virtual_sequence_remaining = 20,
+                        .is_first_in_sequence = true,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 2: VirtualAdvice(a3) → |remainder| (vsr=19)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualAdvice,
+                        .address = addr,
+                        .operands = .{ .FormatJ = .{ .rd = a3, .imm = 0 } },
+                        .virtual_sequence_remaining = 19,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 3: VirtualSignExtendWord(t4, rs1) → sign-extend dividend (vsr=18)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualSignExtendWord,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = t4, .rs1 = rs1, .imm = 0 } },
+                        .virtual_sequence_remaining = 18,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 4: VirtualSignExtendWord(t3, rs2) → sign-extend divisor (vsr=17)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualSignExtendWord,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = t3, .rs1 = rs2, .imm = 0 } },
+                        .virtual_sequence_remaining = 17,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 5: VirtualAssertValidDiv0(t3, a2) → handle div-by-zero (vsr=16)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualAssertValidDiv0,
+                        .address = addr,
+                        .operands = .{ .FormatB = .{ .rs1 = t3, .rs2 = a2, .imm = 0 } },
+                        .virtual_sequence_remaining = 16,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 6: VirtualChangeDivisorW(t0, t4, t3) → handle overflow (vsr=15)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualChangeDivisorW,
+                        .address = addr,
+                        .operands = .{ .FormatR = .{ .rd = t0, .rs1 = t4, .rs2 = t3 } },
+                        .virtual_sequence_remaining = 15,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 7: VirtualSignExtendWord(t1, a2) → sign-extend quotient (vsr=14)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualSignExtendWord,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = t1, .rs1 = a2, .imm = 0 } },
+                        .virtual_sequence_remaining = 14,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 8: VirtualAssertEQ(t1, a2) → assert quotient fits 32 bits (vsr=13)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualAssertEQ,
+                        .address = addr,
+                        .operands = .{ .FormatB = .{ .rs1 = t1, .rs2 = a2, .imm = 0 } },
+                        .virtual_sequence_remaining = 13,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 9: VirtualSRAI(t2, a3, bitmask_31) → sign bit of |remainder| (vsr=12)
+                    // SRAI is expanded to VirtualSRAI with bitmask: shift=31, bitmask = ((1<<33)-1) << 31
+                    const srai_bitmask: u64 = blk: {
+                        const shift_amt: u7 = 31;
+                        const ones: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, shift_amt))) - 1;
+                        break :blk @truncate(ones << shift_amt);
+                    };
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualSRAI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = t2, .rs1 = a3, .imm = srai_bitmask } },
+                        .virtual_sequence_remaining = 12,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 10: VirtualAssertEQ(t2, 0) → assert |remainder| is non-negative (vsr=11)
+                    // Note: rs2=0 means comparing against register x0 (always 0)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualAssertEQ,
+                        .address = addr,
+                        .operands = .{ .FormatB = .{ .rs1 = t2, .rs2 = 0, .imm = 0 } },
+                        .virtual_sequence_remaining = 11,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 11: VirtualSRAI(t2, t4, bitmask_31) → sign bit of dividend (vsr=10)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualSRAI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = t2, .rs1 = t4, .imm = srai_bitmask } },
+                        .virtual_sequence_remaining = 10,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 12: XOR(t3, a3, t2) → XOR |remainder| with sign mask (vsr=9)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .XOR,
+                        .address = addr,
+                        .operands = .{ .FormatR = .{ .rd = t3, .rs1 = a3, .rs2 = t2 } },
+                        .virtual_sequence_remaining = 9,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 13: SUB(t3, t3, t2) → t3 = sign-corrected remainder (vsr=8)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .SUB,
+                        .address = addr,
+                        .operands = .{ .FormatR = .{ .rd = t3, .rs1 = t3, .rs2 = t2 } },
+                        .virtual_sequence_remaining = 8,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 14: MUL(t1, a2, t0) → quotient × adjusted_divisor (vsr=7)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .MUL,
+                        .address = addr,
+                        .operands = .{ .FormatR = .{ .rd = t1, .rs1 = a2, .rs2 = t0 } },
+                        .virtual_sequence_remaining = 7,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 15: ADD(t1, t1, t3) → + remainder (vsr=6)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .ADD,
+                        .address = addr,
+                        .operands = .{ .FormatR = .{ .rd = t1, .rs1 = t1, .rs2 = t3 } },
+                        .virtual_sequence_remaining = 6,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 16: VirtualAssertEQ(t1, t4) → assert dividend = q*d + r (vsr=5)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualAssertEQ,
+                        .address = addr,
+                        .operands = .{ .FormatB = .{ .rs1 = t1, .rs2 = t4, .imm = 0 } },
+                        .virtual_sequence_remaining = 5,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 17: VirtualSRAI(t2, t0, bitmask_31) → sign bit of adjusted divisor (vsr=4)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualSRAI,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = t2, .rs1 = t0, .imm = srai_bitmask } },
+                        .virtual_sequence_remaining = 4,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 18: XOR(t1, t0, t2) → (vsr=3)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .XOR,
+                        .address = addr,
+                        .operands = .{ .FormatR = .{ .rd = t1, .rs1 = t0, .rs2 = t2 } },
+                        .virtual_sequence_remaining = 3,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 19: SUB(t1, t1, t2) → t1 = abs(divisor) (vsr=2)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .SUB,
+                        .address = addr,
+                        .operands = .{ .FormatR = .{ .rd = t1, .rs1 = t1, .rs2 = t2 } },
+                        .virtual_sequence_remaining = 2,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 20: VirtualAssertValidUnsignedRemainder(a3, t1) → |r| < |d| (vsr=1)
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualAssertValidUnsignedRemainder,
+                        .address = addr,
+                        .operands = .{ .FormatB = .{ .rs1 = a3, .rs2 = t1, .imm = 0 } },
+                        .virtual_sequence_remaining = 1,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                    // Step 21: VirtualSignExtendWord(rd, output) → sign-extend result (vsr=0, last)
+                    // REMW: output = t3 (signed remainder), DIVW: output = a2 (quotient)
+                    const output_reg = if (jolt_instr.variant == .REMW) t3 else a2;
+                    try self.bytecode.append(allocator, .{
+                        .variant = .VirtualSignExtendWord,
+                        .address = addr,
+                        .operands = .{ .FormatI = .{ .rd = rd, .rs1 = output_reg, .imm = 0 } },
+                        .virtual_sequence_remaining = 0,
+                        .is_first_in_sequence = false,
+                        .is_compressed = is_compressed,
+                    });
+                },
                 else => {
                     // Non-W-extension instructions: append as-is
                     try self.bytecode.append(allocator, jolt_instr);
@@ -822,7 +1048,7 @@ pub const BytecodePreprocessing = struct {
             offset += instr_size;
         }
 
-        // Add termination store virtual sequence (LUI + ADDI + SB) = 3 entries.
+        // Add termination store virtual sequence (LUI + ADDI + SD) = 3 entries.
         // These must be in the bytecode array BEFORE power-of-2 padding so that
         // code_size accounts for them. This matches computeBytecodeCodeSize which
         // also adds +3 for termination.
@@ -834,7 +1060,7 @@ pub const BytecodePreprocessing = struct {
         //
         // LUI x31, upper20(term_addr) - load upper bits of termination address
         // ADDI x30, x0, 1 - load value 1
-        // SB x30, lower12(term_addr)(x31) - store byte 1 to termination address
+        // SD x30, lower12(term_addr)(x31) - store value 1 to termination address
         {
             // Use address=0 for all termination entries (they are virtual, not real ELF instructions)
             const term_addr = base_address + code_bytes.len;
@@ -870,9 +1096,13 @@ pub const BytecodePreprocessing = struct {
             });
             try self.raw_words.append(allocator, addi_word);
 
-            // SB x30, lower12(x31) (anchor, vsr=null)
+            // SD x30, lower12(x31) (anchor, vsr=null)
+            // NOTE: We use SD instead of SB because SB is not in Jolt's
+            // define_rv32im_trait_impls! macro (circuit_flags panics on SB).
+            // SD has the Store flag and is a valid Jolt instruction.
+            // The raw_word still encodes the original SB for raw word matching.
             try self.bytecode.append(allocator, .{
-                .variant = .SB,
+                .variant = .SD,
                 .address = 0,
                 .operands = .{ .FormatS = .{ .rs1 = 31, .rs2 = 30, .imm = @as(i64, @intCast(lower12)) } },
                 .virtual_sequence_remaining = null,

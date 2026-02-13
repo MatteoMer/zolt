@@ -308,6 +308,16 @@ pub const Emulator = struct {
     pub const VIRTUAL_ZERO_EXTEND_WORD_OPCODE: u7 = 0x42;
     /// VirtualAssertValidUnsignedRemainder: B-type format (rs1, rs2) - uses custom-0e
     pub const VIRTUAL_ASSERT_VALID_UNSIGNED_REMAINDER_OPCODE: u7 = 0x62;
+    /// VirtualSRAI: I-type format (rd, rs1, shift_amount) - same opcode as VirtualSRLI but funct3=5
+    pub const VIRTUAL_SRAI_OPCODE: u7 = 0x5B;
+    pub const VIRTUAL_SRAI_FUNCT3: u3 = 5;
+    /// VirtualAssertValidDiv0: B-type format (rs1, rs2) - same opcode as VirtualAssertEQ but funct3=1
+    pub const VIRTUAL_ASSERT_VALID_DIV0_OPCODE: u7 = 0x22;
+    pub const VIRTUAL_ASSERT_VALID_DIV0_FUNCT3: u3 = 1;
+    /// VirtualChangeDivisorW: R-type format (rd, rs1, rs2) - uses OP-32 with M-ext funct7 and REMW funct3
+    pub const VIRTUAL_CHANGE_DIVISOR_W_OPCODE: u7 = 0x3b;
+    pub const VIRTUAL_CHANGE_DIVISOR_W_FUNCT3: u3 = 6;
+    pub const VIRTUAL_CHANGE_DIVISOR_W_FUNCT7: u7 = 0x01;
 
     /// Build a synthetic VirtualMULI instruction word.
     /// shamt: shift amount (0-63) stored in the I-type immediate field.
@@ -398,6 +408,59 @@ pub const Emulator = struct {
             (0x00 << 12) | // funct3 = 0 (ADD)
             (@as(u32, rd & 0x1F) << 7) |
             0x33; // opcode = OP
+    }
+
+    /// Build a standard R-type SUB instruction: SUB rd, rs1, rs2
+    /// opcode=0x33, funct7=0x20, funct3=0x00
+    fn buildSUBInstr(rd: u8, rs1: u8, rs2: u8) u32 {
+        return (0x20 << 25) | // funct7 = 0x20 (SUB)
+            (@as(u32, rs2 & 0x1F) << 20) |
+            (@as(u32, rs1 & 0x1F) << 15) |
+            (0x00 << 12) | // funct3 = 0
+            (@as(u32, rd & 0x1F) << 7) |
+            0x33; // opcode = OP
+    }
+
+    /// Build a standard R-type XOR instruction: XOR rd, rs1, rs2
+    /// opcode=0x33, funct7=0x00, funct3=0x04
+    fn buildXORInstr(rd: u8, rs1: u8, rs2: u8) u32 {
+        return (0x00 << 25) | // funct7 = 0x00
+            (@as(u32, rs2 & 0x1F) << 20) |
+            (@as(u32, rs1 & 0x1F) << 15) |
+            (0x04 << 12) | // funct3 = 4 (XOR)
+            (@as(u32, rd & 0x1F) << 7) |
+            0x33; // opcode = OP
+    }
+
+    /// Build a synthetic VirtualSRAI instruction word.
+    /// shift: shift amount (0-63), stored in I-type imm field.
+    /// Uses opcode=0x5B, funct3=5 to distinguish from VirtualSRLI (funct3=0).
+    fn buildVirtualSRAIInstr(rd: u8, rs1: u8, shift: u7) u32 {
+        return (@as(u32, shift) << 20) |
+            (@as(u32, rs1 & 0x1F) << 15) |
+            (@as(u32, VIRTUAL_SRAI_FUNCT3) << 12) |
+            (@as(u32, rd & 0x1F) << 7) |
+            @as(u32, VIRTUAL_SRAI_OPCODE);
+    }
+
+    /// Build a synthetic VirtualAssertValidDiv0 instruction word (B-type: rs1, rs2)
+    /// Uses opcode=0x22, funct3=1 to distinguish from VirtualAssertEQ (funct3=0).
+    fn buildVirtualAssertValidDiv0Instr(rs1: u8, rs2: u8) u32 {
+        return (@as(u32, rs2 & 0x1F) << 20) |
+            (@as(u32, rs1 & 0x1F) << 15) |
+            (@as(u32, VIRTUAL_ASSERT_VALID_DIV0_FUNCT3) << 12) |
+            @as(u32, VIRTUAL_ASSERT_VALID_DIV0_OPCODE);
+    }
+
+    /// Build a synthetic VirtualChangeDivisorW instruction word (R-type: rd, rs1, rs2)
+    /// Uses opcode=0x3b, funct3=6, funct7=0x01.
+    fn buildVirtualChangeDivisorWInstr(rd: u8, rs1: u8, rs2: u8) u32 {
+        return (@as(u32, VIRTUAL_CHANGE_DIVISOR_W_FUNCT7) << 25) |
+            (@as(u32, rs2 & 0x1F) << 20) |
+            (@as(u32, rs1 & 0x1F) << 15) |
+            (@as(u32, VIRTUAL_CHANGE_DIVISOR_W_FUNCT3) << 12) |
+            (@as(u32, rd & 0x1F) << 7) |
+            @as(u32, VIRTUAL_CHANGE_DIVISOR_W_OPCODE);
     }
 
     const WExtType = enum { ADDIW, ADDW, SUBW, MULW, SLLIW, SRLIW };
@@ -524,6 +587,11 @@ pub const Emulator = struct {
         // Check if this is REMUW (12-step inline sequence decomposition)
         if (isREMUW(decoded)) {
             return try self.stepREMUW(instruction, decoded);
+        }
+
+        // Check if this is REMW or DIVW (21-step inline sequence decomposition)
+        if (isREMW(decoded) or isDIVW(decoded)) {
+            return try self.stepREMWDIVW(instruction, decoded);
         }
 
         // Standard (non-W-extension) instruction execution
@@ -1615,6 +1683,574 @@ pub const Emulator = struct {
         self.prev_pc = self.state.pc;
 
         // Update state - PC advances by instruction size (NOT doubled)
+        self.state.pc = self.state.pc + pc_increment;
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        return true;
+    }
+
+    /// Execute REMW or DIVW as a 21-step inline sequence (matching Jolt's decomposition).
+    /// REMW: signed word remainder, DIVW: signed word division.
+    /// Both use the same 21-step verification sequence; only the final output register differs.
+    fn stepREMWDIVW(
+        self: *Emulator,
+        instruction: u32,
+        decoded: zkvm.instruction.DecodedInstruction,
+    ) !bool {
+        const rs1_value = try self.registers.read(decoded.rs1);
+        const rs2_value = try self.registers.read(decoded.rs2);
+        const rd_pre_value = try self.registers.read(decoded.rd);
+        const pc_increment: u64 = if (self.is_compressed) 2 else 4;
+        _ = instruction;
+
+        const is_remw = decoded.funct3 == 0b110;
+
+        // Virtual register indices
+        const a2: u8 = 32; // quotient
+        const a3: u8 = 33; // |remainder|
+        const t0: u8 = 34; // adjusted divisor
+        const t1: u8 = 35; // temporary
+        const t2: u8 = 36; // sign mask temporary
+        const t3: u8 = 37; // signed remainder
+        const t4: u8 = 38; // sign-extended dividend
+
+        // Compute the actual REMW/DIVW results (oracle values)
+        const rs1_lower: u32 = @truncate(rs1_value);
+        const rs2_lower: u32 = @truncate(rs2_value);
+        const dividend_i32: i32 = @bitCast(rs1_lower);
+        const divisor_i32: i32 = @bitCast(rs2_lower);
+
+        var quotient_u64: u64 = undefined;
+        var abs_remainder_u64: u64 = undefined;
+
+        if (divisor_i32 == 0) {
+            // Division by zero: quotient = -1 (all 1s), remainder = dividend
+            quotient_u64 = @bitCast(@as(i64, -1));
+            abs_remainder_u64 = @bitCast(@as(i64, @as(i32, @bitCast(rs1_lower))));
+            // Actually |remainder| is abs(dividend) for the oracle
+            // But wait - in div-by-zero, the remainder IS the dividend per RISC-V spec
+            // And the VirtualAdvice provides |remainder|, which is abs(dividend)
+            const abs_div: u64 = if (dividend_i32 < 0)
+                @bitCast(@as(i64, -@as(i64, dividend_i32)))
+            else
+                @bitCast(@as(i64, dividend_i32));
+            abs_remainder_u64 = abs_div;
+        } else if (dividend_i32 == std.math.minInt(i32) and divisor_i32 == -1) {
+            // Overflow case: quotient = INT32_MIN, remainder = 0
+            quotient_u64 = @bitCast(@as(i64, @as(i32, std.math.minInt(i32))));
+            abs_remainder_u64 = 0;
+        } else {
+            const q_i32 = @divTrunc(dividend_i32, divisor_i32);
+            const r_i32 = @rem(dividend_i32, divisor_i32);
+            quotient_u64 = @bitCast(@as(i64, q_i32));
+            abs_remainder_u64 = if (r_i32 < 0)
+                @bitCast(@as(i64, -@as(i64, r_i32)))
+            else
+                @bitCast(@as(i64, r_i32));
+        }
+
+        // Read virtual register pre-values
+        const a2_pre: u64 = try self.registers.read(a2);
+        const a3_pre: u64 = try self.registers.read(a3);
+        const t0_pre: u64 = try self.registers.read(t0);
+        const t1_pre: u64 = try self.registers.read(t1);
+        const t2_pre: u64 = try self.registers.read(t2);
+        const t3_pre: u64 = try self.registers.read(t3);
+        const t4_pre: u64 = try self.registers.read(t4);
+
+        // ==================== Step 1: VirtualAdvice(a2) → quotient (vsr=20, first) ====================
+        const step1_instr = buildVirtualAdviceInstr(a2);
+        try self.lookup_trace.recordVirtualAdvice(
+            @intCast(self.state.cycle), self.state.pc, step1_instr,
+            quotient_u64,
+            true, true, true, self.is_compressed,
+        );
+        try self.registers.write(a2, quotient_u64);
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle, .pc = self.state.pc, .unexpanded_pc = self.state.pc,
+            .instruction = step1_instr, .rs1_value = 0, .rs2_value = 0,
+            .rd_pre_value = a2_pre, .rd_value = quotient_u64,
+            .rd_index = a2, .rs1_index = 0, .rs2_index = 0,
+            .rd_written = true, .rs1_read = false, .rs2_read = false,
+            .memory_addr = null, .memory_pre_value = null, .memory_value = null,
+            .is_memory_write = false, .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed, .virtual_sequence_remaining = 20,
+            .is_first_in_sequence = true,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // ==================== Step 2: VirtualAdvice(a3) → |remainder| (vsr=19) ====================
+        const step2_instr = buildVirtualAdviceInstr(a3);
+        try self.lookup_trace.recordVirtualAdvice(
+            @intCast(self.state.cycle), self.state.pc, step2_instr,
+            abs_remainder_u64,
+            true, true, false, self.is_compressed,
+        );
+        try self.registers.write(a3, abs_remainder_u64);
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle, .pc = self.state.pc, .unexpanded_pc = self.state.pc,
+            .instruction = step2_instr, .rs1_value = 0, .rs2_value = 0,
+            .rd_pre_value = a3_pre, .rd_value = abs_remainder_u64,
+            .rd_index = a3, .rs1_index = 0, .rs2_index = 0,
+            .rd_written = true, .rs1_read = false, .rs2_read = false,
+            .memory_addr = null, .memory_pre_value = null, .memory_value = null,
+            .is_memory_write = false, .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed, .virtual_sequence_remaining = 19,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // ==================== Step 3: VirtualSignExtendWord(t4, rs1) → sign-ext dividend (vsr=18) ====================
+        const se_dividend: u64 = @bitCast(@as(i64, @as(i32, @bitCast(rs1_lower))));
+        const step3_instr = buildVirtualSignExtendWordInstr(t4, decoded.rs1);
+        try self.lookup_trace.recordVirtualSignExtendWord(
+            @intCast(self.state.cycle), self.state.pc, step3_instr,
+            rs1_value, se_dividend,
+        );
+        try self.registers.write(t4, se_dividend);
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle, .pc = self.state.pc, .unexpanded_pc = self.state.pc,
+            .instruction = step3_instr, .rs1_value = rs1_value, .rs2_value = 0,
+            .rd_pre_value = t4_pre, .rd_value = se_dividend,
+            .rd_index = t4, .rs1_index = decoded.rs1, .rs2_index = 0,
+            .rd_written = true, .rs1_read = true, .rs2_read = false,
+            .memory_addr = null, .memory_pre_value = null, .memory_value = null,
+            .is_memory_write = false, .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed, .virtual_sequence_remaining = 18,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // ==================== Step 4: VirtualSignExtendWord(t3, rs2) → sign-ext divisor (vsr=17) ====================
+        const se_divisor: u64 = @bitCast(@as(i64, divisor_i32));
+        const step4_instr = buildVirtualSignExtendWordInstr(t3, decoded.rs2);
+        try self.lookup_trace.recordVirtualSignExtendWord(
+            @intCast(self.state.cycle), self.state.pc, step4_instr,
+            rs2_value, se_divisor,
+        );
+        try self.registers.write(t3, se_divisor);
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle, .pc = self.state.pc, .unexpanded_pc = self.state.pc,
+            .instruction = step4_instr, .rs1_value = rs2_value, .rs2_value = 0,
+            .rd_pre_value = t3_pre, .rd_value = se_divisor,
+            .rd_index = t3, .rs1_index = decoded.rs2, .rs2_index = 0,
+            .rd_written = true, .rs1_read = true, .rs2_read = false,
+            .memory_addr = null, .memory_pre_value = null, .memory_value = null,
+            .is_memory_write = false, .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed, .virtual_sequence_remaining = 17,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // ==================== Step 5: VirtualAssertValidDiv0(t3, a2) → assert div0 handling (vsr=16) ====================
+        const t3_val_s5 = try self.registers.read(t3);
+        const a2_val_s5 = try self.registers.read(a2);
+        const step5_instr = buildVirtualAssertValidDiv0Instr(t3, a2);
+        try self.lookup_trace.recordVirtualAssertEQ(
+            @intCast(self.state.cycle), self.state.pc, step5_instr,
+            t3_val_s5, a2_val_s5,
+            true, true, false, self.is_compressed,
+        );
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle, .pc = self.state.pc, .unexpanded_pc = self.state.pc,
+            .instruction = step5_instr, .rs1_value = t3_val_s5, .rs2_value = a2_val_s5,
+            .rd_pre_value = 0, .rd_value = 0,
+            .rd_index = 0, .rs1_index = t3, .rs2_index = a2,
+            .rd_written = false, .rs1_read = true, .rs2_read = true,
+            .memory_addr = null, .memory_pre_value = null, .memory_value = null,
+            .is_memory_write = false, .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed, .virtual_sequence_remaining = 16,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // ==================== Step 6: VirtualChangeDivisorW(t0, t4, t3) → adjusted divisor (vsr=15) ====================
+        const t4_val_s6 = try self.registers.read(t4);
+        const t3_val_s6 = try self.registers.read(t3);
+        const adjusted_divisor: u64 = blk: {
+            const dv_i32: i32 = @truncate(@as(i64, @bitCast(t4_val_s6)));
+            const ds_i32: i32 = @truncate(@as(i64, @bitCast(t3_val_s6)));
+            if (dv_i32 == std.math.minInt(i32) and ds_i32 == -1) {
+                break :blk 1; // Replace divisor with 1 to prevent overflow
+            } else {
+                break :blk @bitCast(@as(i64, ds_i32)); // Keep original divisor
+            }
+        };
+        const step6_instr = buildVirtualChangeDivisorWInstr(t0, t4, t3);
+        try self.lookup_trace.recordVirtualChangeDivisorW(
+            @intCast(self.state.cycle), self.state.pc, step6_instr,
+            t4_val_s6, t3_val_s6,
+            true, true, false, self.is_compressed,
+        );
+        try self.registers.write(t0, adjusted_divisor);
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle, .pc = self.state.pc, .unexpanded_pc = self.state.pc,
+            .instruction = step6_instr, .rs1_value = t4_val_s6, .rs2_value = t3_val_s6,
+            .rd_pre_value = t0_pre, .rd_value = adjusted_divisor,
+            .rd_index = t0, .rs1_index = t4, .rs2_index = t3,
+            .rd_written = true, .rs1_read = true, .rs2_read = true,
+            .memory_addr = null, .memory_pre_value = null, .memory_value = null,
+            .is_memory_write = false, .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed, .virtual_sequence_remaining = 15,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // ==================== Step 7: VirtualSignExtendWord(t1, a2) → sign-ext quotient (vsr=14) ====================
+        const a2_val_s7 = try self.registers.read(a2);
+        const se_quotient: u64 = @bitCast(@as(i64, @as(i32, @truncate(@as(i64, @bitCast(a2_val_s7))))));
+        const step7_instr = buildVirtualSignExtendWordInstr(t1, a2);
+        try self.lookup_trace.recordVirtualSignExtendWord(
+            @intCast(self.state.cycle), self.state.pc, step7_instr,
+            a2_val_s7, se_quotient,
+        );
+        try self.registers.write(t1, se_quotient);
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle, .pc = self.state.pc, .unexpanded_pc = self.state.pc,
+            .instruction = step7_instr, .rs1_value = a2_val_s7, .rs2_value = 0,
+            .rd_pre_value = t1_pre, .rd_value = se_quotient,
+            .rd_index = t1, .rs1_index = a2, .rs2_index = 0,
+            .rd_written = true, .rs1_read = true, .rs2_read = false,
+            .memory_addr = null, .memory_pre_value = null, .memory_value = null,
+            .is_memory_write = false, .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed, .virtual_sequence_remaining = 14,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // ==================== Step 8: VirtualAssertEQ(t1, a2) → quotient fits 32 bits (vsr=13) ====================
+        const t1_val_s8 = try self.registers.read(t1);
+        const a2_val_s8 = try self.registers.read(a2);
+        const step8_instr = buildVirtualAssertEQInstr(t1, a2);
+        try self.lookup_trace.recordVirtualAssertEQ(
+            @intCast(self.state.cycle), self.state.pc, step8_instr,
+            t1_val_s8, a2_val_s8,
+            true, true, false, self.is_compressed,
+        );
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle, .pc = self.state.pc, .unexpanded_pc = self.state.pc,
+            .instruction = step8_instr, .rs1_value = t1_val_s8, .rs2_value = a2_val_s8,
+            .rd_pre_value = 0, .rd_value = 0,
+            .rd_index = 0, .rs1_index = t1, .rs2_index = a2,
+            .rd_written = false, .rs1_read = true, .rs2_read = true,
+            .memory_addr = null, .memory_pre_value = null, .memory_value = null,
+            .is_memory_write = false, .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed, .virtual_sequence_remaining = 13,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // ==================== Step 9: VirtualSRAI(t2, a3, 31) → sign bit of |remainder| (vsr=12) ====================
+        const a3_val_s9 = try self.registers.read(a3);
+        const srai_result_s9: u64 = @bitCast(@as(i64, @bitCast(a3_val_s9)) >> 31);
+        const step9_instr = buildVirtualSRAIInstr(t2, a3, 31);
+        try self.lookup_trace.recordVirtualSRAI(
+            @intCast(self.state.cycle), self.state.pc, step9_instr,
+            a3_val_s9,
+            true, true, false, self.is_compressed,
+        );
+        try self.registers.write(t2, srai_result_s9);
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle, .pc = self.state.pc, .unexpanded_pc = self.state.pc,
+            .instruction = step9_instr, .rs1_value = a3_val_s9, .rs2_value = 0,
+            .rd_pre_value = t2_pre, .rd_value = srai_result_s9,
+            .rd_index = t2, .rs1_index = a3, .rs2_index = 0,
+            .rd_written = true, .rs1_read = true, .rs2_read = false,
+            .memory_addr = null, .memory_pre_value = null, .memory_value = null,
+            .is_memory_write = false, .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed, .virtual_sequence_remaining = 12,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // ==================== Step 10: VirtualAssertEQ(t2, 0) → |remainder| is non-negative (vsr=11) ====================
+        const t2_val_s10 = try self.registers.read(t2);
+        const step10_instr = buildVirtualAssertEQInstr(t2, 0);
+        try self.lookup_trace.recordVirtualAssertEQ(
+            @intCast(self.state.cycle), self.state.pc, step10_instr,
+            t2_val_s10, 0,
+            true, true, false, self.is_compressed,
+        );
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle, .pc = self.state.pc, .unexpanded_pc = self.state.pc,
+            .instruction = step10_instr, .rs1_value = t2_val_s10, .rs2_value = 0,
+            .rd_pre_value = 0, .rd_value = 0,
+            .rd_index = 0, .rs1_index = t2, .rs2_index = 0,
+            .rd_written = false, .rs1_read = true, .rs2_read = true,
+            .memory_addr = null, .memory_pre_value = null, .memory_value = null,
+            .is_memory_write = false, .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed, .virtual_sequence_remaining = 11,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // ==================== Step 11: VirtualSRAI(t2, t4, 31) → sign mask of dividend (vsr=10) ====================
+        const t4_val_s11 = try self.registers.read(t4);
+        const srai_result_s11: u64 = @bitCast(@as(i64, @bitCast(t4_val_s11)) >> 31);
+        const step11_instr = buildVirtualSRAIInstr(t2, t4, 31);
+        try self.lookup_trace.recordVirtualSRAI(
+            @intCast(self.state.cycle), self.state.pc, step11_instr,
+            t4_val_s11,
+            true, true, false, self.is_compressed,
+        );
+        try self.registers.write(t2, srai_result_s11);
+        const t2_pre_s11 = try self.registers.read(t2);
+        _ = t2_pre_s11;
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle, .pc = self.state.pc, .unexpanded_pc = self.state.pc,
+            .instruction = step11_instr, .rs1_value = t4_val_s11, .rs2_value = 0,
+            .rd_pre_value = srai_result_s9, .rd_value = srai_result_s11,
+            .rd_index = t2, .rs1_index = t4, .rs2_index = 0,
+            .rd_written = true, .rs1_read = true, .rs2_read = false,
+            .memory_addr = null, .memory_pre_value = null, .memory_value = null,
+            .is_memory_write = false, .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed, .virtual_sequence_remaining = 10,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // ==================== Step 12: XOR(t3, a3, t2) → |remainder| XOR sign_mask (vsr=9) ====================
+        const a3_val_s12 = try self.registers.read(a3);
+        const t2_val_s12 = try self.registers.read(t2);
+        const xor_result_s12: u64 = a3_val_s12 ^ t2_val_s12;
+        const step12_instr = buildXORInstr(t3, a3, t2);
+        const t3_pre_s12 = try self.registers.read(t3);
+        try self.lookup_trace.recordXorVirtual(
+            @intCast(self.state.cycle), self.state.pc, step12_instr,
+            a3_val_s12, t2_val_s12,
+            true, false, self.is_compressed,
+        );
+        try self.registers.write(t3, xor_result_s12);
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle, .pc = self.state.pc, .unexpanded_pc = self.state.pc,
+            .instruction = step12_instr, .rs1_value = a3_val_s12, .rs2_value = t2_val_s12,
+            .rd_pre_value = t3_pre_s12, .rd_value = xor_result_s12,
+            .rd_index = t3, .rs1_index = a3, .rs2_index = t2,
+            .rd_written = true, .rs1_read = true, .rs2_read = true,
+            .memory_addr = null, .memory_pre_value = null, .memory_value = null,
+            .is_memory_write = false, .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed, .virtual_sequence_remaining = 9,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // ==================== Step 13: SUB(t3, t3, t2) → signed remainder (vsr=8) ====================
+        const t3_val_s13 = try self.registers.read(t3);
+        const t2_val_s13 = try self.registers.read(t2);
+        const sub_result_s13: u64 = t3_val_s13 -% t2_val_s13;
+        const step13_instr = buildSUBInstr(t3, t3, t2);
+        try self.lookup_trace.recordSubVirtual(
+            @intCast(self.state.cycle), self.state.pc, step13_instr,
+            t3_val_s13, t2_val_s13,
+            true, false, self.is_compressed,
+        );
+        try self.registers.write(t3, sub_result_s13);
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle, .pc = self.state.pc, .unexpanded_pc = self.state.pc,
+            .instruction = step13_instr, .rs1_value = t3_val_s13, .rs2_value = t2_val_s13,
+            .rd_pre_value = t3_val_s13, .rd_value = sub_result_s13,
+            .rd_index = t3, .rs1_index = t3, .rs2_index = t2,
+            .rd_written = true, .rs1_read = true, .rs2_read = true,
+            .memory_addr = null, .memory_pre_value = null, .memory_value = null,
+            .is_memory_write = false, .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed, .virtual_sequence_remaining = 8,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // ==================== Step 14: MUL(t1, a2, t0) → quotient × adjusted_divisor (vsr=7) ====================
+        const a2_val_s14 = try self.registers.read(a2);
+        const t0_val_s14 = try self.registers.read(t0);
+        const mul_result_s14: u64 = a2_val_s14 *% t0_val_s14;
+        const step14_instr = buildMULInstr(t1, a2, t0);
+        const t1_pre_s14 = try self.registers.read(t1);
+        _ = t1_pre_s14;
+        try self.lookup_trace.recordMulVirtual(
+            @intCast(self.state.cycle), self.state.pc, step14_instr,
+            a2_val_s14, t0_val_s14,
+            true, false, self.is_compressed,
+        );
+        try self.registers.write(t1, mul_result_s14);
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle, .pc = self.state.pc, .unexpanded_pc = self.state.pc,
+            .instruction = step14_instr, .rs1_value = a2_val_s14, .rs2_value = t0_val_s14,
+            .rd_pre_value = se_quotient, .rd_value = mul_result_s14,
+            .rd_index = t1, .rs1_index = a2, .rs2_index = t0,
+            .rd_written = true, .rs1_read = true, .rs2_read = true,
+            .memory_addr = null, .memory_pre_value = null, .memory_value = null,
+            .is_memory_write = false, .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed, .virtual_sequence_remaining = 7,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // ==================== Step 15: ADD(t1, t1, t3) → + remainder (vsr=6) ====================
+        const t1_val_s15 = try self.registers.read(t1);
+        const t3_val_s15 = try self.registers.read(t3);
+        const add_result_s15: u64 = t1_val_s15 +% t3_val_s15;
+        const step15_instr = buildADDInstr(t1, t1, t3);
+        try self.lookup_trace.recordAddVirtual(
+            @intCast(self.state.cycle), self.state.pc, step15_instr,
+            t1_val_s15, t3_val_s15,
+            true, false, self.is_compressed,
+        );
+        try self.registers.write(t1, add_result_s15);
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle, .pc = self.state.pc, .unexpanded_pc = self.state.pc,
+            .instruction = step15_instr, .rs1_value = t1_val_s15, .rs2_value = t3_val_s15,
+            .rd_pre_value = t1_val_s15, .rd_value = add_result_s15,
+            .rd_index = t1, .rs1_index = t1, .rs2_index = t3,
+            .rd_written = true, .rs1_read = true, .rs2_read = true,
+            .memory_addr = null, .memory_pre_value = null, .memory_value = null,
+            .is_memory_write = false, .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed, .virtual_sequence_remaining = 6,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // ==================== Step 16: VirtualAssertEQ(t1, t4) → dividend = q*d + r (vsr=5) ====================
+        const t1_val_s16 = try self.registers.read(t1);
+        const t4_val_s16 = try self.registers.read(t4);
+        const step16_instr = buildVirtualAssertEQInstr(t1, t4);
+        try self.lookup_trace.recordVirtualAssertEQ(
+            @intCast(self.state.cycle), self.state.pc, step16_instr,
+            t1_val_s16, t4_val_s16,
+            true, true, false, self.is_compressed,
+        );
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle, .pc = self.state.pc, .unexpanded_pc = self.state.pc,
+            .instruction = step16_instr, .rs1_value = t1_val_s16, .rs2_value = t4_val_s16,
+            .rd_pre_value = 0, .rd_value = 0,
+            .rd_index = 0, .rs1_index = t1, .rs2_index = t4,
+            .rd_written = false, .rs1_read = true, .rs2_read = true,
+            .memory_addr = null, .memory_pre_value = null, .memory_value = null,
+            .is_memory_write = false, .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed, .virtual_sequence_remaining = 5,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // ==================== Step 17: VirtualSRAI(t2, t0, 31) → sign mask of adj divisor (vsr=4) ====================
+        const t0_val_s17 = try self.registers.read(t0);
+        const srai_result_s17: u64 = @bitCast(@as(i64, @bitCast(t0_val_s17)) >> 31);
+        const step17_instr = buildVirtualSRAIInstr(t2, t0, 31);
+        try self.lookup_trace.recordVirtualSRAI(
+            @intCast(self.state.cycle), self.state.pc, step17_instr,
+            t0_val_s17,
+            true, true, false, self.is_compressed,
+        );
+        const t2_pre_s17 = try self.registers.read(t2);
+        try self.registers.write(t2, srai_result_s17);
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle, .pc = self.state.pc, .unexpanded_pc = self.state.pc,
+            .instruction = step17_instr, .rs1_value = t0_val_s17, .rs2_value = 0,
+            .rd_pre_value = t2_pre_s17, .rd_value = srai_result_s17,
+            .rd_index = t2, .rs1_index = t0, .rs2_index = 0,
+            .rd_written = true, .rs1_read = true, .rs2_read = false,
+            .memory_addr = null, .memory_pre_value = null, .memory_value = null,
+            .is_memory_write = false, .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed, .virtual_sequence_remaining = 4,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // ==================== Step 18: XOR(t1, t0, t2) → adj_divisor XOR sign_mask (vsr=3) ====================
+        const t0_val_s18 = try self.registers.read(t0);
+        const t2_val_s18 = try self.registers.read(t2);
+        const xor_result_s18: u64 = t0_val_s18 ^ t2_val_s18;
+        const step18_instr = buildXORInstr(t1, t0, t2);
+        const t1_pre_s18 = try self.registers.read(t1);
+        try self.lookup_trace.recordXorVirtual(
+            @intCast(self.state.cycle), self.state.pc, step18_instr,
+            t0_val_s18, t2_val_s18,
+            true, false, self.is_compressed,
+        );
+        try self.registers.write(t1, xor_result_s18);
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle, .pc = self.state.pc, .unexpanded_pc = self.state.pc,
+            .instruction = step18_instr, .rs1_value = t0_val_s18, .rs2_value = t2_val_s18,
+            .rd_pre_value = t1_pre_s18, .rd_value = xor_result_s18,
+            .rd_index = t1, .rs1_index = t0, .rs2_index = t2,
+            .rd_written = true, .rs1_read = true, .rs2_read = true,
+            .memory_addr = null, .memory_pre_value = null, .memory_value = null,
+            .is_memory_write = false, .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed, .virtual_sequence_remaining = 3,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // ==================== Step 19: SUB(t1, t1, t2) → |adj_divisor| (vsr=2) ====================
+        const t1_val_s19 = try self.registers.read(t1);
+        const t2_val_s19 = try self.registers.read(t2);
+        const sub_result_s19: u64 = t1_val_s19 -% t2_val_s19;
+        const step19_instr = buildSUBInstr(t1, t1, t2);
+        try self.lookup_trace.recordSubVirtual(
+            @intCast(self.state.cycle), self.state.pc, step19_instr,
+            t1_val_s19, t2_val_s19,
+            true, false, self.is_compressed,
+        );
+        try self.registers.write(t1, sub_result_s19);
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle, .pc = self.state.pc, .unexpanded_pc = self.state.pc,
+            .instruction = step19_instr, .rs1_value = t1_val_s19, .rs2_value = t2_val_s19,
+            .rd_pre_value = t1_val_s19, .rd_value = sub_result_s19,
+            .rd_index = t1, .rs1_index = t1, .rs2_index = t2,
+            .rd_written = true, .rs1_read = true, .rs2_read = true,
+            .memory_addr = null, .memory_pre_value = null, .memory_value = null,
+            .is_memory_write = false, .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed, .virtual_sequence_remaining = 2,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // ==================== Step 20: VirtualAssertValidUnsignedRemainder(a3, t1) → |r| < |d| (vsr=1) ====================
+        const a3_val_s20 = try self.registers.read(a3);
+        const t1_val_s20 = try self.registers.read(t1);
+        const step20_instr = buildVirtualAssertValidUnsignedRemainderInstr(a3, t1);
+        try self.lookup_trace.recordVirtualAssertValidUnsignedRemainder(
+            @intCast(self.state.cycle), self.state.pc, step20_instr,
+            a3_val_s20, t1_val_s20,
+            true, true, false, self.is_compressed,
+        );
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle, .pc = self.state.pc, .unexpanded_pc = self.state.pc,
+            .instruction = step20_instr, .rs1_value = a3_val_s20, .rs2_value = t1_val_s20,
+            .rd_pre_value = 0, .rd_value = 0,
+            .rd_index = 0, .rs1_index = a3, .rs2_index = t1,
+            .rd_written = false, .rs1_read = true, .rs2_read = true,
+            .memory_addr = null, .memory_pre_value = null, .memory_value = null,
+            .is_memory_write = false, .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed, .virtual_sequence_remaining = 1,
+        });
+        self.state.cycle += 1;
+        self.registers.tick();
+
+        // ==================== Step 21: VirtualSignExtendWord(rd, output) → final result (vsr=0) ====================
+        // REMW: output = t3 (signed remainder), DIVW: output = a2 (quotient)
+        const output_reg: u8 = if (is_remw) t3 else a2;
+        const output_val = try self.registers.read(output_reg);
+        const final_result: u64 = @bitCast(@as(i64, @as(i32, @truncate(@as(i64, @bitCast(output_val))))));
+        const step21_instr = buildVirtualSignExtendWordInstr(decoded.rd, output_reg);
+        try self.lookup_trace.recordVirtualSignExtendWord(
+            @intCast(self.state.cycle), self.state.pc, step21_instr,
+            output_val, final_result,
+        );
+        try self.registers.write(decoded.rd, final_result);
+        try self.trace.addStep(.{
+            .cycle = self.state.cycle, .pc = self.state.pc, .unexpanded_pc = self.state.pc,
+            .instruction = step21_instr, .rs1_value = output_val, .rs2_value = 0,
+            .rd_pre_value = rd_pre_value, .rd_value = final_result,
+            .rd_index = decoded.rd, .rs1_index = output_reg, .rs2_index = 0,
+            .rd_written = decoded.rd != 0, .rs1_read = true, .rs2_read = false,
+            .memory_addr = null, .memory_pre_value = null, .memory_value = null,
+            .is_memory_write = false, .next_pc = self.state.pc + pc_increment,
+            .is_compressed = self.is_compressed, .virtual_sequence_remaining = 0,
+        });
+
+        // Update state
+        self.prev_pc = self.state.pc;
         self.state.pc = self.state.pc + pc_increment;
         self.state.cycle += 1;
         self.registers.tick();

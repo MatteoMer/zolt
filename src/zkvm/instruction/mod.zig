@@ -196,6 +196,10 @@ pub fn LookupTables(comptime XLEN: comptime_int) type {
         ValidDiv0,
         ValidUnsignedRemainder,
         ValidSignedRemainder,
+        // Virtual shift-right-arithmetic via bitmask
+        VirtualSRA,
+        // Virtual change-divisor for signed W-division overflow handling
+        VirtualChangeDivisorW,
 
         const Self = @This();
         const Table = lookup_table.LookupTable(@import("../../field/mod.zig").BN254Scalar, XLEN);
@@ -267,6 +271,31 @@ pub fn LookupTables(comptime XLEN: comptime_int) type {
                 .ValidDiv0 => Table.ValidDiv0.materializeEntry(index),
                 .ValidUnsignedRemainder => Table.ValidUnsignedRemainder.materializeEntry(index),
                 .ValidSignedRemainder => Table.ValidSignedRemainder.materializeEntry(index),
+                .VirtualSRA => blk: {
+                    // VirtualSRA: arithmetic shift-right using bitmask encoding
+                    // interleaveBits(rs1_val, bitmask) → x=rs1_val (odd), y=bitmask (even)
+                    const bits = lookup_table.uninterleaveBits(index);
+                    const rs1_val = bits.x; // first arg to interleaveBits (odd positions)
+                    const bitmask = bits.y; // second arg to interleaveBits (even positions)
+                    // Find shift amount from bitmask (count trailing zeros)
+                    const shift: u6 = if (bitmask == 0) 0 else @intCast(@ctz(bitmask));
+                    // Arithmetic right shift: sign-extends
+                    break :blk @bitCast(@as(i64, @bitCast(rs1_val)) >> shift);
+                },
+                .VirtualChangeDivisorW => blk: {
+                    // VirtualChangeDivisorW: handle overflow for signed W-division
+                    // interleaveBits(dividend, divisor) → x=dividend (odd), y=divisor (even)
+                    const bits = lookup_table.uninterleaveBits(index);
+                    const dividend = bits.x; // first arg to interleaveBits (odd positions)
+                    const divisor = bits.y; // second arg to interleaveBits (even positions)
+                    const dv_i32: i32 = @truncate(@as(i64, @bitCast(dividend)));
+                    const ds_i32: i32 = @truncate(@as(i64, @bitCast(divisor)));
+                    if (dv_i32 == std.math.minInt(i32) and ds_i32 == -1) {
+                        break :blk 1;
+                    } else {
+                        break :blk @bitCast(@as(i64, ds_i32));
+                    }
+                },
             };
         }
     };

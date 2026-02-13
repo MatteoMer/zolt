@@ -187,6 +187,53 @@ fn populateVirtualSignExtendWordEntry(
     entry.is_first_in_sequence = false;
 }
 
+/// Populate a BytecodeEntry for VirtualSignExtendWord within a multi-step virtual sequence.
+/// Unlike populateVirtualSignExtendWordEntry, this allows specifying rs1 and vsr explicitly
+/// (used in REMW/DIVW 21-step sequences where VirtualSignExtendWord appears at non-terminal positions).
+fn populateVirtualSignExtendWordEntryWithParams(
+    entry: *BytecodeEntry,
+    rd: u8,
+    rs1: u8,
+    elf_address: u64,
+    virtual_sequence_remaining: u16,
+    is_first_in_sequence: bool,
+) void {
+    entry.address = elf_address;
+    entry.imm = 0;
+
+    entry.rd = if (rd == 0) 255 else rd;
+    entry.rs1 = rs1;
+    entry.rs2 = 255;
+
+    entry.opcode = 0x0B;
+    entry.funct3 = 0;
+
+    entry.circuit_flags = [_]bool{false} ** 13;
+    entry.instruction_flags = [_]bool{false} ** 7;
+
+    var cf = &entry.circuit_flags;
+    cf[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)] = true;
+    cf[@intFromEnum(CircuitFlags.AddOperands)] = true;
+    cf[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+    if (virtual_sequence_remaining != 0) {
+        cf[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+    }
+    if (is_first_in_sequence) {
+        cf[@intFromEnum(CircuitFlags.IsFirstInSequence)] = true;
+    }
+
+    var inf = &entry.instruction_flags;
+    inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+    if (rd != 0) {
+        inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
+    }
+
+    entry.lookup_table_index = 21; // SignExtendHalfWord
+    entry.is_interleaved = false;
+    entry.virtual_sequence_remaining = virtual_sequence_remaining;
+    entry.is_first_in_sequence = is_first_in_sequence;
+}
+
 /// Populate a BytecodeEntry for a VirtualSRLI instruction.
 /// VirtualSRLI has opcode 0x5B with: WriteLookupOutputToRD (NO AddOperands, NO MultiplyOperands),
 /// LeftOperandIsRs1Value, RightOperandIsImm, lookup table = VirtualSRL (26).
@@ -206,7 +253,7 @@ fn populateVirtualSRLIEntry(
     entry.address = elf_address;
     // The immediate in the bytecode entry is the bitmask,
     // matching what preprocessing.zig stores in the FormatI operands.
-    entry.imm = @intCast(bitmask);
+    entry.imm = @bitCast(bitmask);
 
     entry.rd = if (rd == 0) 255 else rd;
     entry.rs1 = rs1;
@@ -447,6 +494,150 @@ fn populateVirtualAssertValidUnsignedRemainderEntry(
     entry.lookup_table_index = 16; // ValidUnsignedRemainder
     // No AddOperands/SubtractOperands/MultiplyOperands/Advice → interleaved
     entry.is_interleaved = true;
+    entry.virtual_sequence_remaining = virtual_sequence_remaining;
+    entry.is_first_in_sequence = is_first_in_sequence;
+}
+
+/// Populate a BytecodeEntry for a VirtualAssertValidDiv0 instruction.
+/// Assert + VirtualInstruction flags. Lookup table = ValidDiv0 (17).
+fn populateVirtualAssertValidDiv0Entry(
+    entry: *BytecodeEntry,
+    rs1: u8,
+    rs2: u8,
+    elf_address: u64,
+    virtual_sequence_remaining: ?u16,
+    is_first_in_sequence: bool,
+) void {
+    entry.address = elf_address;
+    entry.imm = 0;
+    entry.rd = 255;
+    entry.rs1 = rs1;
+    entry.rs2 = rs2;
+    entry.opcode = 0x22;
+    entry.funct3 = 1; // funct3=1 distinguishes VirtualAssertValidDiv0 from VirtualAssertEQ (funct3=0)
+    entry.circuit_flags = [_]bool{false} ** 13;
+    entry.instruction_flags = [_]bool{false} ** 7;
+    var cf = &entry.circuit_flags;
+    cf[@intFromEnum(CircuitFlags.Assert)] = true;
+    if (virtual_sequence_remaining != null) cf[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+    if (virtual_sequence_remaining) |vsr| { if (vsr != 0) cf[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true; }
+    if (is_first_in_sequence) cf[@intFromEnum(CircuitFlags.IsFirstInSequence)] = true;
+    var inf = &entry.instruction_flags;
+    inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+    inf[@intFromEnum(InstructionFlags.RightOperandIsRs2Value)] = true;
+    entry.lookup_table_index = 17; // ValidDiv0
+    entry.is_interleaved = true;
+    entry.virtual_sequence_remaining = virtual_sequence_remaining;
+    entry.is_first_in_sequence = is_first_in_sequence;
+}
+
+/// Populate a BytecodeEntry for a VirtualChangeDivisorW instruction (R-format).
+/// WriteLookupOutputToRD + VirtualInstruction flags. Lookup table = VirtualChangeDivisorW (31).
+fn populateVirtualChangeDivisorWEntry(
+    entry: *BytecodeEntry,
+    rd: u8,
+    rs1: u8,
+    rs2: u8,
+    elf_address: u64,
+    virtual_sequence_remaining: ?u16,
+    is_first_in_sequence: bool,
+) void {
+    entry.address = elf_address;
+    entry.imm = 0;
+    entry.rd = if (rd == 0) 255 else rd;
+    entry.rs1 = rs1;
+    entry.rs2 = rs2;
+    entry.opcode = 0x3b;
+    entry.funct3 = 6; // funct3=6 distinguishes VirtualChangeDivisorW from ADDW/SUBW etc
+    entry.circuit_flags = [_]bool{false} ** 13;
+    entry.instruction_flags = [_]bool{false} ** 7;
+    var cf = &entry.circuit_flags;
+    cf[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)] = true;
+    if (virtual_sequence_remaining != null) cf[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+    if (virtual_sequence_remaining) |vsr| { if (vsr != 0) cf[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true; }
+    if (is_first_in_sequence) cf[@intFromEnum(CircuitFlags.IsFirstInSequence)] = true;
+    var inf = &entry.instruction_flags;
+    inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+    inf[@intFromEnum(InstructionFlags.RightOperandIsRs2Value)] = true;
+    if (rd != 0) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
+    entry.lookup_table_index = 31; // VirtualChangeDivisorW
+    entry.is_interleaved = true; // No Add/Sub/Mul/Advice flags
+    entry.virtual_sequence_remaining = virtual_sequence_remaining;
+    entry.is_first_in_sequence = is_first_in_sequence;
+}
+
+/// Populate a virtual R-type entry within a virtual sequence.
+/// Used for XOR, SUB, MUL, ADD within REMW/DIVW sequences.
+/// The entry gets its flags from the instruction word after mapping the opcode.
+fn populateVirtualRTypeEntry(
+    entry: *BytecodeEntry,
+    rd: u8,
+    rs1: u8,
+    rs2: u8,
+    elf_address: u64,
+    virtual_sequence_remaining: u16,
+    is_first_in_sequence: bool,
+    opcode: u8,
+    funct3: u3,
+    funct7: u7,
+) void {
+    // Build a synthetic instruction word for the R-type operation
+    const instr: u32 = (@as(u32, funct7) << 25) |
+        (@as(u32, rs2 & 0x1F) << 20) |
+        (@as(u32, rs1 & 0x1F) << 15) |
+        (@as(u32, funct3) << 12) |
+        (@as(u32, if (rd == 0) @as(u8, 0) else (rd & 0x1F)) << 7) |
+        @as(u32, opcode);
+    populateEntryFromInstruction(entry, instr, elf_address);
+    // Override register indices with full virtual register values
+    entry.rd = if (rd == 0) 255 else rd;
+    entry.rs1 = rs1;
+    entry.rs2 = rs2;
+    // Set virtual sequence flags
+    entry.circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+    if (virtual_sequence_remaining != 0)
+        entry.circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+    if (is_first_in_sequence)
+        entry.circuit_flags[@intFromEnum(CircuitFlags.IsFirstInSequence)] = true;
+    entry.virtual_sequence_remaining = virtual_sequence_remaining;
+    entry.is_first_in_sequence = is_first_in_sequence;
+}
+
+/// Populate a BytecodeEntry for a VirtualSRAI instruction within a virtual sequence.
+/// VirtualSRAI has: WriteLookupOutputToRD, LeftOperandIsRs1Value, RightOperandIsImm,
+/// lookup table = VirtualSRA (27), is_interleaved = true.
+/// The immediate is a BITMASK (not a shift amount): bitmask = ((1 << (64 - shift)) - 1) << shift.
+fn populateVirtualSRAIEntry(
+    entry: *BytecodeEntry,
+    rd: u8,
+    rs1: u8,
+    elf_address: u64,
+    bitmask: u64,
+    virtual_sequence_remaining: u16,
+    is_first_in_sequence: bool,
+) void {
+    entry.address = elf_address;
+    entry.imm = @bitCast(@as(i64, @bitCast(bitmask)));
+    entry.rd = if (rd == 0) 255 else rd;
+    entry.rs1 = rs1;
+    entry.rs2 = 255;
+    entry.opcode = 0x5B; // Virtual instruction opcode space (same as VirtualSRLI)
+    entry.funct3 = 5; // funct3=5 distinguishes VirtualSRAI from VirtualSRLI (funct3=0)
+    entry.circuit_flags = [_]bool{false} ** 13;
+    entry.instruction_flags = [_]bool{false} ** 7;
+    var cf = &entry.circuit_flags;
+    cf[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)] = true;
+    cf[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+    if (virtual_sequence_remaining != 0)
+        cf[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+    if (is_first_in_sequence)
+        cf[@intFromEnum(CircuitFlags.IsFirstInSequence)] = true;
+    var inf = &entry.instruction_flags;
+    inf[@intFromEnum(InstructionFlags.LeftOperandIsRs1Value)] = true;
+    inf[@intFromEnum(InstructionFlags.RightOperandIsImm)] = true;
+    if (rd != 0) inf[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
+    entry.lookup_table_index = 27; // VirtualSRA
+    entry.is_interleaved = true; // No Add/Sub/Mul/Advice flags
     entry.virtual_sequence_remaining = virtual_sequence_remaining;
     entry.is_first_in_sequence = is_first_in_sequence;
 }
@@ -848,6 +1039,78 @@ pub fn buildBytecodeEntries(
                     populateVirtualSignExtendWordEntry(&entries[k], raw_rd, addr, is_compressed);
                     // Fix rs1: VirtualSignExtendWord reads from a3
                     entries[k].rs1 = a3;
+                } else if (raw_opcode == 0x3b and (raw_funct3 == 6 or raw_funct3 == 4) and (instr_word >> 25) == 0x01) {
+                    // REMW (funct3=6) or DIVW (funct3=4) → 21-instruction inline sequence
+                    // pc_map for 21-entry sequences has max_inline_seq=20.
+                    // getPC(addr, 0) returns base_pc+20 (the VirtualSignExtendWord entry).
+                    // So k = base_pc+20. Entries go at k-20 through k.
+                    const raw_rs2: u8 = @truncate((instr_word >> 20) & 0x1F);
+                    // Virtual registers matching preprocessing.zig
+                    const a2: u8 = 32; // quotient
+                    const a3: u8 = 33; // |remainder|
+                    const t0: u8 = 34; // adjusted divisor
+                    const t1: u8 = 35; // temporary
+                    const t2: u8 = 36; // temporary
+                    const t3: u8 = 37; // signed remainder
+                    const t4: u8 = 38; // sign-extended dividend
+
+                    // Step 1 (k-20): VirtualAdvice(a2) → quotient (vsr=20, first)
+                    if (k >= 20) populateVirtualAdviceEntry(&entries[k - 20], a2, addr, 20, true);
+                    // Step 2 (k-19): VirtualAdvice(a3) → |remainder| (vsr=19)
+                    if (k >= 19) populateVirtualAdviceEntry(&entries[k - 19], a3, addr, 19, false);
+                    // Step 3 (k-18): VirtualSignExtendWord(t4, rs1) → sign-extend dividend (vsr=18)
+                    if (k >= 18) {
+                        populateVirtualSignExtendWordEntryWithParams(&entries[k - 18], t4, raw_rs1, addr, 18, false);
+                    }
+                    // Step 4 (k-17): VirtualSignExtendWord(t3, rs2) → sign-extend divisor (vsr=17)
+                    if (k >= 17) {
+                        populateVirtualSignExtendWordEntryWithParams(&entries[k - 17], t3, raw_rs2, addr, 17, false);
+                    }
+                    // Step 5 (k-16): VirtualAssertValidDiv0(t3, a2) → handle div-by-zero (vsr=16)
+                    if (k >= 16) populateVirtualAssertValidDiv0Entry(&entries[k - 16], t3, a2, addr, 16, false);
+                    // Step 6 (k-15): VirtualChangeDivisorW(t0, t4, t3) → handle overflow (vsr=15)
+                    if (k >= 15) populateVirtualChangeDivisorWEntry(&entries[k - 15], t0, t4, t3, addr, 15, false);
+                    // Step 7 (k-14): VirtualSignExtendWord(t1, a2) → sign-extend quotient (vsr=14)
+                    if (k >= 14) {
+                        populateVirtualSignExtendWordEntryWithParams(&entries[k - 14], t1, a2, addr, 14, false);
+                    }
+                    // Step 8 (k-13): VirtualAssertEQ(t1, a2) → assert quotient fits 32 bits (vsr=13)
+                    if (k >= 13) populateVirtualAssertEQEntry(&entries[k - 13], t1, a2, addr, 13, false);
+                    // VirtualSRAI bitmask for shift=31: ((1<<33)-1) << 31 = 0xFFFFFFFF80000000
+                    const srai_bitmask: u64 = blk: {
+                        const shift_amt: u7 = 31;
+                        const ones: u128 = (@as(u128, 1) << @intCast(64 - @as(u8, shift_amt))) - 1;
+                        break :blk @truncate(ones << shift_amt);
+                    };
+                    // Step 9 (k-12): VirtualSRAI(t2, a3, bitmask) → sign bit of |remainder| (vsr=12)
+                    if (k >= 12) populateVirtualSRAIEntry(&entries[k - 12], t2, a3, addr, srai_bitmask, 12, false);
+                    // Step 10 (k-11): VirtualAssertEQ(t2, 0) → assert non-negative (vsr=11)
+                    if (k >= 11) populateVirtualAssertEQEntry(&entries[k - 11], t2, 0, addr, 11, false);
+                    // Step 11 (k-10): VirtualSRAI(t2, t4, bitmask) → sign bit of dividend (vsr=10)
+                    if (k >= 10) populateVirtualSRAIEntry(&entries[k - 10], t2, t4, addr, srai_bitmask, 10, false);
+                    // Step 12 (k-9): XOR(t3, a3, t2) → XOR |remainder| with sign mask (vsr=9)
+                    if (k >= 9) populateVirtualRTypeEntry(&entries[k - 9], t3, a3, t2, addr, 9, false, 0x33, 4, 0);
+                    // Step 13 (k-8): SUB(t3, t3, t2) → sign-corrected remainder (vsr=8)
+                    if (k >= 8) populateVirtualRTypeEntry(&entries[k - 8], t3, t3, t2, addr, 8, false, 0x33, 0, 0x20);
+                    // Step 14 (k-7): MUL(t1, a2, t0) → quotient × adjusted_divisor (vsr=7)
+                    if (k >= 7) populateVirtualRTypeEntry(&entries[k - 7], t1, a2, t0, addr, 7, false, 0x33, 0, 0x01);
+                    // Step 15 (k-6): ADD(t1, t1, t3) → + remainder (vsr=6)
+                    if (k >= 6) populateVirtualRTypeEntry(&entries[k - 6], t1, t1, t3, addr, 6, false, 0x33, 0, 0);
+                    // Step 16 (k-5): VirtualAssertEQ(t1, t4) → assert dividend = q*d + r (vsr=5)
+                    if (k >= 5) populateVirtualAssertEQEntry(&entries[k - 5], t1, t4, addr, 5, false);
+                    // Step 17 (k-4): VirtualSRAI(t2, t0, bitmask) → sign bit of adjusted divisor (vsr=4)
+                    if (k >= 4) populateVirtualSRAIEntry(&entries[k - 4], t2, t0, addr, srai_bitmask, 4, false);
+                    // Step 18 (k-3): XOR(t1, t0, t2) → (vsr=3)
+                    if (k >= 3) populateVirtualRTypeEntry(&entries[k - 3], t1, t0, t2, addr, 3, false, 0x33, 4, 0);
+                    // Step 19 (k-2): SUB(t1, t1, t2) → abs(divisor) (vsr=2)
+                    if (k >= 2) populateVirtualRTypeEntry(&entries[k - 2], t1, t1, t2, addr, 2, false, 0x33, 0, 0x20);
+                    // Step 20 (k-1): VirtualAssertValidUnsignedRemainder(a3, t1) → |r| < |d| (vsr=1)
+                    if (k >= 1) populateVirtualAssertValidUnsignedRemainderEntry(&entries[k - 1], a3, t1, addr, 1, false);
+                    // Step 21 (k): VirtualSignExtendWord(rd, output) → sign-extend result (vsr=0, last)
+                    // REMW: output = t3 (signed remainder), DIVW: output = a2 (quotient)
+                    const output_reg = if (raw_funct3 == 6) t3 else a2;
+                    populateVirtualSignExtendWordEntry(&entries[k], raw_rd, addr, is_compressed);
+                    entries[k].rs1 = output_reg;
                 } else if (isWExtensionWith2EntryDecomposition(raw_opcode, raw_funct3, @truncate(instr_word >> 25))) {
                     // W-extension instructions that decompose to base + VirtualSignExtendWord:
                     // ADDIW (0x1b/f3=0), ADDW (0x3b/f3=0/f7=0), SUBW (0x3b/f3=0/f7=0x20),
@@ -1045,13 +1308,14 @@ fn getLookupTableIndex(opcode: u8, funct3: u3, funct7: u7) u8 {
             0 => if (funct7 == 0) @as(u8, 0) // ADDW → RangeCheck
             else if (funct7 == 0x20) 0 // SUBW → RangeCheck
             else 255,
+            6 => 31, // VirtualChangeDivisorW → VirtualChangeDivisorW table
             else => 255,
         },
         0x0B => 21, // VirtualSignExtendWord → SignExtendHalfWord
         0x2B => 0, // VirtualMULI → RangeCheck
-        0x5B => 26, // VirtualSRLI → VirtualSRL
+        0x5B => if (funct3 == 5) @as(u8, 27) else 26, // VirtualSRAI → VirtualSRA, VirtualSRLI → VirtualSRL
         0x02 => 0, // VirtualAdvice → RangeCheck
-        0x22 => 6, // VirtualAssertEQ → Equal
+        0x22 => if (funct3 == 1) @as(u8, 17) else 6, // VirtualAssertValidDiv0 → ValidDiv0, VirtualAssertEQ → Equal
         0x42 => 20, // VirtualZeroExtendWord → LowerHalfWord
         0x62 => 16, // VirtualAssertValidUnsignedRemainder → ValidUnsignedRemainder
         else => 255, // Load, Store, ECALL, FENCE - no lookup table

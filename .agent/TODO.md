@@ -1,37 +1,41 @@
-# Zolt → Jolt Verification Progress
+# Zolt→Jolt Cross-Verification Progress
 
-## Current Status
-**7/8 programs pass all 8 stages. gcd needs REMW/DIVW 21-step decomposition.**
+## COMPLETED
+- [x] stepREMWDIVW in tracer/mod.zig (21-step virtual sequence)
+- [x] Lookup trace recording functions for new instructions
+- [x] interleaveBits fix in lookup_trace.zig
+- [x] getLookupTableIndex updated in stage5 and stage6 for new funct3 values
+- [x] funct3 values updated in stage6 bytecode entry helpers
+- [x] Jolt verifier funct3 values updated to match
+- [x] materializeTableEntry for VirtualSRA and VirtualChangeDivisorW fixed (swapped x/y)
+- [x] Stage 5 prover sumcheck passes (self-check)
+- [x] InstructionReadRaf (Instance 2) opening claims match between prover and verifier
+- [x] R1CS: XOR/AND/OR/SLT/SLTU/SRL/SRA incorrectly set AddOperands flag - FIXED
+- [x] Stage 5 operand handling matched to corrected R1CS
+- [x] VirtualChangeDivisorW materializeTableEntry implemented
+- [x] Stage 5 lookup_output for VirtualAssertEQ/VirtualAssertValidUnsignedRemainder → output=1
+- [x] Stage 5 VirtualSRLI bitmask computation for right_input
+- [x] Serialization: SumcheckId COUNT 24→22, removed Advice variants
+- [x] Serialization: CommittedPolynomial removed TrustedAdvice/UntrustedAdvice (5 variants not 7)
+- [x] Serialization: Added 4 advice proof Option<None> fields to JoltProof
+- [x] Serialization: Fixed config fields (log_k_chunk, lookups_ra_virtual_log_k_chunk as usize)
+- [x] Preprocessing: Changed termination store from SB→SD (SB not in Jolt macro list)
 
-### Verified Programs (ALL 8 stages pass):
-- ✅ fibonacci.elf (trace-length 128)
-- ✅ factorial.elf (trace-length 128)
-- ✅ sum.elf (trace-length 128)
-- ✅ signed.elf (trace-length 128)
-- ✅ primes.elf (trace-length 128)
-- ✅ collatz.elf (trace-length 128)
-- ✅ bitwise.elf (trace-length 128)
+## IN PROGRESS
+- [ ] Test Jolt verifier with new proof+preprocessing (generating now)
+- [ ] Regression test all 8 programs with Jolt verifier
 
-### Programs not yet working:
-- ❌ gcd.elf - Needs REMW/DIVW 21-step decomposition
+## NEXT STEPS
+- Commit and push all fixes
+- Test with all 8 example programs
 
-### Recent Fixes (This Session):
-1. **VirtualSRLI handler in Jolt verifier** - `from_raw_words` was missing an explicit
-   handler for `Instruction::VirtualSRLI`, causing it to fall through to the generic
-   W-extension opcode mapping which produced wrong flags/imm. Fix: added explicit
-   VirtualSRLI case that calls `virtual_srli_entry` with correct bitmask from bytecode.
-
-2. **Preprocessing termination entries** - `BytecodePreprocessing.preprocess` didn't
-   include the 3 termination store entries (LUI+ADDI+SB) before power-of-2 padding.
-   This caused bytecode_K mismatch between prover (which adds +3 in computeBytecodeCodeSize)
-   and the serialized preprocessing. Fix: added termination entries to preprocessing.
-
-3. **VirtualAdvice JSON serialization** - VirtualAdvice instruction has an extra `advice`
-   field that other instructions don't have. The JSON serializer wasn't including it,
-   causing deserialization failure on programs with REMUW (like primes). Fix: added
-   `advice:0` field when variant == VirtualAdvice.
-
-### Next Steps:
-1. Implement REMW/DIVW 21-step decomposition for gcd.elf
-2. Clean up debug prints from stage6_prover.zig
-3. Consider adding more test programs
+## KEY FINDINGS
+- Jolt's `define_rv32im_trait_impls!` macro at instruction/mod.rs:273-289 defines which
+  instructions have circuit_flags()/lookup_table() implementations
+- SB, SH, SW are NOT in this list (only SD is)
+- SLL, SLLI, SRA, SRL, etc. are NOT in this list (only their Virtual* equivalents)
+- Store instructions must be decomposed into inline sequences before entering bytecode
+- For our test programs, no raw SB/SH/SW appear in the ELF bytecode
+- The only SB was in the termination store virtual sequence → changed to SD
+- Proof deserialization now works: "Deserialized OK (compressed format)"
+- Stages 1-4 pass; Stage 5 was panicking on SB → should be fixed now

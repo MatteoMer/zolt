@@ -692,6 +692,7 @@ fn hasLookupTable(opcode: u8, funct3: u3, funct7: u7) bool {
         0x3b => blk: { // OP-32
             if (funct3 == 0 and funct7 == 0) break :blk true; // ADDW
             if (funct3 == 0 and funct7 == 0x20) break :blk true; // SUBW
+            if (funct3 == 6 and funct7 == 0x01) break :blk true; // VirtualChangeDivisorW
             break :blk false;
         },
         0x63 => true, // All branches have tables
@@ -1545,7 +1546,7 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             const funct7 = (instr >> 25) & 0x7F;
 
             switch (opcode) {
-                0x33 => { // R-type
+                0x33 => { // R-type: only identity-path instructions use u128 lookup operand
                     if (funct7 == 0x01) {
                         if (funct3 == 0x0) {
                             // MUL: x * y as u128
@@ -1557,6 +1558,7 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                             const result = @as(u128, step.rs1_value) * @as(u128, step.rs2_value);
                             return F.fromU128(result);
                         }
+                        // Other M-extension (DIVU, REMU, etc.): interleaved, not identity
                         return F.zero();
                     }
                     if (funct7 == 0x20 and funct3 == 0x0) {
@@ -1564,9 +1566,13 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                         const result = @as(u128, step.rs1_value) + (@as(u128, 1) << 64) - @as(u128, step.rs2_value);
                         return F.fromU128(result);
                     }
-                    // ADD: x + y
-                    const result = @as(u128, step.rs1_value) + @as(u128, step.rs2_value);
-                    return F.fromU128(result);
+                    if (funct3 == 0x0 and funct7 == 0x0) {
+                        // ADD: x + y as u128
+                        const result = @as(u128, step.rs1_value) + @as(u128, step.rs2_value);
+                        return F.fromU128(result);
+                    }
+                    // XOR, AND, OR, SLT, SLTU, SRL, SRA: interleaved, u128 operand not used
+                    return F.zero();
                 },
                 0x13 => { // ADDI
                     if (funct3 == 0) {
@@ -1677,27 +1683,38 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             const u128_right_lookup = computeU128LookupOperand(instr, step);
 
             switch (opcode) {
-                0x33 => { // R-type (ADD, SUB, MUL, etc.)
+                0x33 => { // R-type (ADD, SUB, MUL, XOR, AND, OR, SLT, SLTU, SRL, SRA, etc.)
                     if (funct7 == 0x01) {
                         // M-extension
                         if (funct3 == 0x0) { // MUL
                             self.values[R1CSInputIndex.FlagMultiplyOperands.toIndex()] = F.one();
                             self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
                             self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = u128_right_lookup;
+                        } else if (funct3 == 0x3) { // MULHU
+                            self.values[R1CSInputIndex.FlagMultiplyOperands.toIndex()] = F.one();
+                            self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
+                            self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = u128_right_lookup;
                         } else {
+                            // DIVU, REMU, MULHSU, etc. - interleaved operands
                             self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
                             self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input;
                         }
-                    } else if (funct7 == 0x20 and funct3 == 0x0) {
+                    } else if (funct3 == 0x0 and funct7 == 0x20) {
                         // SUB
                         self.values[R1CSInputIndex.FlagSubtractOperands.toIndex()] = F.one();
                         self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
                         self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = u128_right_lookup;
-                    } else {
-                        // ADD and other R-type
+                    } else if (funct3 == 0x0 and funct7 == 0x0) {
+                        // ADD: AddOperands, identity path
                         self.values[R1CSInputIndex.FlagAddOperands.toIndex()] = F.one();
                         self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
                         self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = u128_right_lookup;
+                    } else {
+                        // XOR, AND, OR, SLT, SLTU, SRL, SRA: interleaved operands
+                        // These do NOT set AddOperands/SubtractOperands/MultiplyOperands
+                        // Jolt: is_interleaved_operands = true for these
+                        self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
+                        self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input;
                     }
                     self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
                 },
@@ -1837,6 +1854,42 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                     self.values[R1CSInputIndex.FlagVirtualInstruction.toIndex()] = F.one();
                     if (step.virtual_sequence_remaining > 0) {
                         self.values[R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();
+                    }
+                },
+                0x3B => {
+                    // OP-32 (ADDW, SUBW, VirtualChangeDivisorW, etc.)
+                    const funct3_3b: u3 = @truncate((instr >> 12) & 0x7);
+                    const funct7_3b: u7 = @truncate(instr >> 25);
+                    if (funct3_3b == 0 and funct7_3b == 0) {
+                        // ADDW: AddOperands, WriteLookupOutputToRD
+                        self.values[R1CSInputIndex.FlagAddOperands.toIndex()] = F.one();
+                        self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
+                        self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
+                        self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = u128_right_lookup;
+                    } else if (funct3_3b == 0 and funct7_3b == 0x20) {
+                        // SUBW: SubtractOperands, WriteLookupOutputToRD
+                        self.values[R1CSInputIndex.FlagSubtractOperands.toIndex()] = F.one();
+                        self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
+                        self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.zero();
+                        self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = u128_right_lookup;
+                    } else if (funct3_3b == 6 and funct7_3b == 0x01) {
+                        // VirtualChangeDivisorW: interleaved, WriteLookupOutputToRD
+                        // Jolt's to_instruction_inputs: (rs1 as u32 as u64, rs2 as i128)
+                        // to_lookup_operands: (rs1 as u32 as u64, rs2 as u64)
+                        // Left operand is rs1 TRUNCATED to 32 bits (zero-extended)
+                        const rs1_lower32: u64 = step.rs1_value & 0xFFFFFFFF;
+                        self.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()] = F.one();
+                        self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = F.fromU64(rs1_lower32);
+                        self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = F.fromU64(step.rs2_value);
+                        // Always part of a virtual sequence
+                        self.values[R1CSInputIndex.FlagVirtualInstruction.toIndex()] = F.one();
+                        if (step.virtual_sequence_remaining > 0) {
+                            self.values[R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();
+                        }
+                    } else {
+                        // Other OP-32: interleaved operands
+                        self.values[R1CSInputIndex.LeftLookupOperand.toIndex()] = left_input;
+                        self.values[R1CSInputIndex.RightLookupOperand.toIndex()] = right_input;
                     }
                 },
                 0x62 => { // VirtualAssertValidUnsignedRemainder: Assert (interleaved operands)

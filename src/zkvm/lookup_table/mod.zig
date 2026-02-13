@@ -1368,7 +1368,50 @@ pub fn LookupTable(comptime F: type, comptime XLEN: comptime_int) type {
                     const sign_extended: i64 = @as(i64, @as(i32, @bitCast(lower32)));
                     break :blk21 @bitCast(sign_extended);
                 },
+                17 => blk17: {
+                    // ValidDiv0: interleaved(dividend, divisor)
+                    // For XLEN=64: truncate to 32-bit signed values
+                    // Returns 1 if dividend != INT32_MIN or divisor != -1 (i.e., no overflow)
+                    // Also returns 1 if divisor == 0 (div-by-zero handled separately)
+                    const dividend_u32: u32 = @truncate(odd_bits); // x = dividend
+                    const divisor_u32: u32 = @truncate(even_bits); // y = divisor
+                    const dividend_i32: i32 = @bitCast(dividend_u32);
+                    const divisor_i32: i32 = @bitCast(divisor_u32);
+                    break :blk17 if (dividend_i32 == std.math.minInt(i32) and divisor_i32 == -1) 0 else 1;
+                },
                 26 => VirtualSRL.materializeEntry(index), // interleaved
+                27 => blk27: {
+                    // VirtualSRA: interleaved(value, bitmask)
+                    // Jolt convention: x=odd_bits=value, y=even_bits=bitmask
+                    // SRA output: value AND bitmask, OR sign_extension
+                    // The bitmask selects the shifted bits, sign_extension fills upper bits
+                    // But for materializeEntry, we compute directly:
+                    // value & bitmask | (~bitmask & sign_extend)
+                    // where sign_extend = (value >> 63) ? 0xFFFFFFFFFFFFFFFF : 0
+                    // Actually, VirtualSRA MLE returns: x & y (like AND), but with sign extension
+                    // From Jolt's VirtualSRATable materialize_entry:
+                    // let (value, bitmask) = uninterleave_bits(index);
+                    // let sign_bit = (value >> (XLEN-1)) & 1;
+                    // if sign_bit == 1 { (value & bitmask) | !bitmask } else { value & bitmask }
+                    const value = odd_bits; // x
+                    const bitmask = even_bits; // y
+                    const sign_bit = (value >> (XLEN - 1)) & 1;
+                    break :blk27 if (sign_bit == 1) (value & bitmask) | ~bitmask else value & bitmask;
+                },
+                31 => blk31: {
+                    // VirtualChangeDivisorW: interleaved(dividend, divisor)
+                    // For XLEN=64: truncate to 32-bit signed values
+                    // If dividend == INT32_MIN and divisor == -1: return 1
+                    // Otherwise: return divisor sign-extended to 64 bits
+                    const dividend_u32: u32 = @truncate(odd_bits); // x = dividend
+                    const divisor_u32: u32 = @truncate(even_bits); // y = divisor
+                    const dividend_i32: i32 = @bitCast(dividend_u32);
+                    const divisor_i32: i32 = @bitCast(divisor_u32);
+                    break :blk31 if (dividend_i32 == std.math.minInt(i32) and divisor_i32 == -1)
+                        1
+                    else
+                        @bitCast(@as(i64, divisor_i32));
+                },
                 else => 0, // Unimplemented tables return 0
             };
         }

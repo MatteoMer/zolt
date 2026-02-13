@@ -381,9 +381,28 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, trace_length_op
             if (preprocessing_path) |pp_path| {
                 std.debug.print("\nExporting preprocessing to: {s}\n", .{pp_path});
 
-                // Generate preprocessing using the same bytecode
                 const preprocessing = zolt.zkvm.preprocessing;
-                var bytecode_prep = preprocessing.BytecodePreprocessing.preprocess(allocator, program.bytecode, program.entry_point) catch |err| {
+                const jolt_device = zolt.zkvm.jolt_device;
+
+                // Create memory layout FIRST so we can get the termination address
+                // for the bytecode preprocessing's termination sequence
+                const device = jolt_device.JoltDevice.fromEmulator(
+                    allocator,
+                    &[_]u8{},
+                    &[_]u8{},
+                    false,
+                    @intCast(program.bytecode.len),
+                    32768,
+                ) catch |err| {
+                    std.debug.print("  Error creating memory layout: {s}\n", .{@errorName(err)});
+                    return err;
+                };
+                var device_mut = device;
+                defer device_mut.deinit();
+
+                // Generate preprocessing using the same bytecode
+                std.debug.print("  Termination address: 0x{x:0>16}\n", .{device.memory_layout.termination});
+                var bytecode_prep = preprocessing.BytecodePreprocessing.preprocess(allocator, program.bytecode, program.entry_point, device.memory_layout.termination) catch |err| {
                     std.debug.print("  Error generating bytecode preprocessing: {s}\n", .{@errorName(err)});
                     return err;
                 };
@@ -400,24 +419,6 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, trace_length_op
                     bytecode_prep.deinit();
                     return err;
                 };
-
-                // Create memory layout
-                const jolt_device = zolt.zkvm.jolt_device;
-                const device = jolt_device.JoltDevice.fromEmulator(
-                    allocator,
-                    &[_]u8{},
-                    &[_]u8{},
-                    false,
-                    @intCast(program.bytecode.len),
-                    32768,
-                ) catch |err| {
-                    std.debug.print("  Error creating memory layout: {s}\n", .{@errorName(err)});
-                    bytecode_prep.deinit();
-                    ram_prep.deinit();
-                    return err;
-                };
-                var device_mut = device;
-                defer device_mut.deinit();
 
                 // Create shared preprocessing (transfer ownership)
                 var shared_prep = preprocessing.JoltSharedPreprocessing{
@@ -637,9 +638,26 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, trace_length_op
     if (preprocessing_path) |pp_path| {
         std.debug.print("\nExporting preprocessing to: {s}\n", .{pp_path});
 
-        // Generate preprocessing using the same bytecode
         const preprocessing = zolt.zkvm.preprocessing;
-        var bytecode_prep = preprocessing.BytecodePreprocessing.preprocess(allocator, program.bytecode, program.entry_point) catch |err| {
+        const jolt_device = zolt.zkvm.jolt_device;
+
+        // Create memory layout FIRST so we can get the termination address
+        const device = jolt_device.JoltDevice.fromEmulator(
+            allocator,
+            &[_]u8{},
+            &[_]u8{},
+            false,
+            @intCast(program.bytecode.len),
+            32768, // Match Jolt fibonacci's memory_size
+        ) catch |err| {
+            std.debug.print("  Error creating memory layout: {s}\n", .{@errorName(err)});
+            return err;
+        };
+        var device_mut = device;
+        defer device_mut.deinit();
+
+        // Generate preprocessing using the same bytecode and memory layout termination address
+        var bytecode_prep = preprocessing.BytecodePreprocessing.preprocess(allocator, program.bytecode, program.entry_point, device.memory_layout.termination) catch |err| {
             std.debug.print("  Error generating bytecode preprocessing: {s}\n", .{@errorName(err)});
             return err;
         };
@@ -651,30 +669,11 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, trace_length_op
             mem_init_entries[i] = .{ program.entry_point + i, byte };
         }
 
-        var ram_prep = preprocessing.RAMPreprocessing.preprocess(allocator, mem_init_entries) catch |err| {
+        const ram_prep = preprocessing.RAMPreprocessing.preprocess(allocator, mem_init_entries) catch |err| {
             std.debug.print("  Error generating RAM preprocessing: {s}\n", .{@errorName(err)});
             bytecode_prep.deinit();
             return err;
         };
-
-        // Create memory layout
-        // Use memory_size = 32768 to match Jolt fibonacci example
-        const jolt_device = zolt.zkvm.jolt_device;
-        const device = jolt_device.JoltDevice.fromEmulator(
-            allocator,
-            &[_]u8{},
-            &[_]u8{},
-            false,
-            @intCast(program.bytecode.len),
-            32768, // Match Jolt fibonacci's memory_size
-        ) catch |err| {
-            std.debug.print("  Error creating memory layout: {s}\n", .{@errorName(err)});
-            bytecode_prep.deinit();
-            ram_prep.deinit();
-            return err;
-        };
-        var device_mut = device;
-        defer device_mut.deinit();
 
         // Create shared preprocessing (transfer ownership)
         var shared_prep = preprocessing.JoltSharedPreprocessing{

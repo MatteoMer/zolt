@@ -637,7 +637,7 @@ pub fn JoltProver(comptime F: type) type {
 
             // Build BytecodePreprocessing for PC mapping (ELF address → bytecode index)
             const preproc_compat = @import("preprocessing.zig");
-            var bytecode_prep_compat = try preproc_compat.BytecodePreprocessing.preprocess(self.allocator, program_bytecode, common.constants.RAM_START_ADDRESS);
+            var bytecode_prep_compat = try preproc_compat.BytecodePreprocessing.preprocess(self.allocator, program_bytecode, common.constants.RAM_START_ADDRESS, null);
             defer bytecode_prep_compat.deinit();
 
             // Generate R1CS cycle witnesses from execution trace
@@ -819,7 +819,7 @@ pub fn JoltProver(comptime F: type) type {
 
             // Build BytecodePreprocessing for PC mapping
             const preproc = @import("preprocessing.zig");
-            var bytecode_prep_1 = try preproc.BytecodePreprocessing.preprocess(self.allocator, program_bytecode, common.constants.RAM_START_ADDRESS);
+            var bytecode_prep_1 = try preproc.BytecodePreprocessing.preprocess(self.allocator, program_bytecode, common.constants.RAM_START_ADDRESS, null);
             defer bytecode_prep_1.deinit();
 
             const convert_config = proof_converter.ConversionConfig{
@@ -940,7 +940,7 @@ pub fn JoltProver(comptime F: type) type {
             // Build BytecodePreprocessing for PC mapping (ELF address → bytecode index)
             // Needed for R1CS witness generation: PC must be bytecode index, not ELF address
             const preproc_for_witness = @import("preprocessing.zig");
-            var bytecode_prep_witness = try preproc_for_witness.BytecodePreprocessing.preprocess(self.allocator, program_bytecode, base_address);
+            var bytecode_prep_witness = try preproc_for_witness.BytecodePreprocessing.preprocess(self.allocator, program_bytecode, base_address, null);
             defer bytecode_prep_witness.deinit();
 
             // Generate R1CS cycle witnesses from execution trace
@@ -1179,7 +1179,7 @@ pub fn JoltProver(comptime F: type) type {
             }
 
             // BytecodeRa[0..bytecode_d-1]: one-hot expanded to k_chunk * T
-            var bytecode_prep_for_ra = try preprocessing.BytecodePreprocessing.preprocess(self.allocator, program_bytecode, base_address);
+            var bytecode_prep_for_ra = try preprocessing.BytecodePreprocessing.preprocess(self.allocator, program_bytecode, base_address, null);
             defer bytecode_prep_for_ra.deinit();
 
             idx = 0;
@@ -1255,7 +1255,7 @@ pub fn JoltProver(comptime F: type) type {
 
             // Build BytecodePreprocessing for PC mapping (ELF address → bytecode index)
             const preproc = @import("preprocessing.zig");
-            var bytecode_prep_dory = try preproc.BytecodePreprocessing.preprocess(self.allocator, program_bytecode, base_address);
+            var bytecode_prep_dory = try preproc.BytecodePreprocessing.preprocess(self.allocator, program_bytecode, base_address, null);
             defer bytecode_prep_dory.deinit();
 
             // Convert to Jolt-compatible format with transcript integration
@@ -1791,7 +1791,7 @@ pub fn JoltProver(comptime F: type) type {
 
             // Build BytecodePreprocessing for PC mapping (ELF address → bytecode index)
             const preproc_dev = @import("preprocessing.zig");
-            var bytecode_prep_dev = try preproc_dev.BytecodePreprocessing.preprocess(self.allocator, program_bytecode, common.constants.RAM_START_ADDRESS);
+            var bytecode_prep_dev = try preproc_dev.BytecodePreprocessing.preprocess(self.allocator, program_bytecode, common.constants.RAM_START_ADDRESS, null);
             defer bytecode_prep_dev.deinit();
 
             // Generate R1CS cycle witnesses from execution trace
@@ -1956,7 +1956,7 @@ pub fn JoltProver(comptime F: type) type {
 
             // Build BytecodePreprocessing for PC mapping
             const preproc = @import("preprocessing.zig");
-            var bytecode_prep_device = try preproc.BytecodePreprocessing.preprocess(self.allocator, program_bytecode, common.constants.RAM_START_ADDRESS);
+            var bytecode_prep_device = try preproc.BytecodePreprocessing.preprocess(self.allocator, program_bytecode, common.constants.RAM_START_ADDRESS, null);
             defer bytecode_prep_device.deinit();
 
             // Convert to Jolt-compatible format with transcript integration

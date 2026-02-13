@@ -399,8 +399,13 @@ pub const BytecodePreprocessing = struct {
         self.pc_map.deinit();
     }
 
-    /// Preprocess bytecode from raw bytes
-    pub fn preprocess(allocator: Allocator, code_bytes: []const u8, base_address: u64) !BytecodePreprocessing {
+    /// Preprocess bytecode from raw bytes.
+    /// `termination_address_opt` is the memory-mapped I/O address where termination is signaled
+    /// (from MemoryLayout.termination). This is used to generate the synthetic LUI+ADDI+SD
+    /// termination sequence that matches the prover's bytecode table.
+    /// If null, uses the default MemoryLayout termination address (0x7FFFC008).
+    pub fn preprocess(allocator: Allocator, code_bytes: []const u8, base_address: u64, termination_address_opt: ?u64) !BytecodePreprocessing {
+        const termination_address = termination_address_opt orelse 0x7FFFC008; // Default from MemoryLayout with standard 4KB sizes
         var self = BytecodePreprocessing.init(allocator);
         errdefer self.deinit();
 
@@ -1063,7 +1068,9 @@ pub const BytecodePreprocessing = struct {
         // SD x30, lower12(term_addr)(x31) - store value 1 to termination address
         {
             // Use address=0 for all termination entries (they are virtual, not real ELF instructions)
-            const term_addr = base_address + code_bytes.len;
+            // Use the memory layout's termination I/O address (NOT base_address + code_size)
+            // to match the prover's bytecode table.
+            const term_addr = termination_address;
             const upper20: u32 = @truncate((term_addr >> 12) & 0xFFFFF);
             const lower12: u32 = @truncate(term_addr & 0xFFF);
             const imm_upper7: u32 = (lower12 >> 5) & 0x7F;
@@ -1581,7 +1588,7 @@ test "bytecode preprocessing" {
         0x33, 0x81, 0x10, 0x00, // ADD x2, x1, x1
     };
 
-    var preprocessing = try BytecodePreprocessing.preprocess(allocator, &code, 0x80000000);
+    var preprocessing = try BytecodePreprocessing.preprocess(allocator, &code, 0x80000000, null);
     defer preprocessing.deinit();
 
     // Should have NoOp + 2 instructions, padded to power of 2

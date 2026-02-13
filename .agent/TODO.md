@@ -23,34 +23,34 @@
 - [x] Stage 6 VirtualSRLI bitmask: @intCast→@bitCast to avoid overflow
 - [x] Stage 5 r_cycle_reduced_be buffer overflow fix
 - [x] Stage 8 progress prints (std.debug.print for Dory opening proof)
-- [x] All fixes committed and pushed (commit a5f7595, 976a162)
-- [x] Proof generation complete: 70,145 bytes, Time: 3674 seconds (~61 min)
-  - Proof saved to /tmp/collatz_jolt_proof.bin
+- [x] All previous fixes committed and pushed (commit a5f7595, 976a162)
+- [x] First proof generation complete: 70,145 bytes, Time: 3674 seconds (~61 min)
+- [x] Stages 1-5 sumcheck PASS with Jolt verifier
+- [x] **Stage 6 rd=0 sentinel mismatch FIX (commit 015a76d)**
+  - Root cause: Zolt prover mapped rd=0 to sentinel 255 (zero contribution)
+  - But Jolt stores rd=0 as Some(0) → eq_r_register[0] (non-zero contribution)
+  - Fix: Remove `decoded.rd == 0` condition from sentinel mapping
+  - Only S-format (0x23) and B-format (0x63) use sentinel 255 for rd (rd=None in Jolt)
 
 ## IN PROGRESS
-- [ ] Preprocessing export for collatz.elf (RUNNING - PID 2838766)
-  - Proof file exists: /tmp/collatz_jolt_proof.bin (70,145 bytes)
-  - Preprocessing NOT yet written: /tmp/collatz_preprocessing.bin
-  - Process is in DoryVerifierSetup.fromSRS() which does ~3069 pairings
-  - Estimated remaining time: ~80-90 minutes (started at ~72 min mark)
-  - Process started: Feb 13 ~15:32 UTC
-  - Command: zig-out/bin/zolt prove --jolt-format -o /tmp/collatz_jolt_proof.bin --export-preprocessing /tmp/collatz_preprocessing.bin examples/collatz.elf
+- [ ] Proof regeneration after rd=0 fix (PID 2849680, started 17:41 UTC Feb 13)
+  - Proof file generated: /tmp/collatz_jolt_proof.bin (70,145 bytes) at 18:43 UTC
+  - Preprocessing export in progress (DoryVerifierSetup pairings)
+  - Expected completion: ~19:30-20:00 UTC
 
 ## NEXT STEPS
 1. Wait for preprocessing export to complete
-   - File: /tmp/collatz_preprocessing.bin
 2. Run Jolt verifier:
    ```
-   jolt/target/release/zolt-verifier --proof /tmp/collatz_jolt_proof.bin --preprocessing /tmp/collatz_preprocessing.bin
+   cd /home/vivado/projects/zolt/jolt && cargo run --release -p zolt-verifier -- --proof /tmp/collatz_jolt_proof.bin --preprocessing /tmp/collatz_preprocessing.bin
    ```
 3. If collatz passes, run regression tests for all 8 programs
-   - Script ready: .agent/regression_test.sh
-4. If verification fails, debug the error
+4. If Stage 6 still fails, investigate other potential mismatches
 
 ## KEY FINDINGS
 - Pure Zig BN254 pairing is ~2s each (no assembly optimization)
 - Dory opening proof: 8 rounds, ~50 min total (768 pairings in round 0 alone)
 - Preprocessing export: DoryVerifierSetup.fromSRS does ~3069 pairings = ~100 min
-- No SRS caching between proof generation and preprocessing export
-- Total end-to-end time: ~2.5 hours for a single small program (collatz)
-- Future optimization: multi-Miller loop, SRS caching, parallelization
+- Total end-to-end time: ~2.5 hours for a single small program
+- rd=0 handling: Jolt's NormalizedOperands uses Some(0), contributing eq_r_register[0]
+  to Stages 4 and 5 val polynomials. Only FormatB and FormatS have rd=None.

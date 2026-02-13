@@ -1399,6 +1399,7 @@ pub fn JoltProver(comptime F: type) type {
                 // These orderings differ! The gamma powers map to the Jolt ordering, but witness_polys uses Zolt ordering.
 
                 // Determine the total polynomial size: k_chunk * trace_length for the sparse polys
+                std.debug.print("[STAGE8] Building joint polynomial (k_chunk={}, trace_length={})...\n", .{ k_chunk, trace_length });
                 const total_poly_size = k_chunk * trace_length;
                 var joint_poly = try self.allocator.alloc(F, total_poly_size);
                 defer self.allocator.free(joint_poly);
@@ -1733,6 +1734,7 @@ pub fn JoltProver(comptime F: type) type {
                 // The Jolt verifier uses JoltToDoryTranscript which bridges the Jolt transcript
                 // to Dory's internal transcript. The prover must use the same transcript state
                 // so the Dory protocol's internal challenges match between prover and verifier.
+                std.debug.print("[STAGE8] Starting Dory opening proof (total_poly_size={}, num_claims={})...\n", .{ total_poly_size, num_claims });
                 const dory_proof = try DoryScheme.openWithTranscript(
                     &dory_srs,
                     joint_poly,
@@ -1741,6 +1743,7 @@ pub fn JoltProver(comptime F: type) type {
                     &transcript,
                     self.allocator,
                 );
+                std.debug.print("[STAGE8] Dory opening proof generated.\n", .{});
                 result.dory_opening_proof = dory_proof;
                 result.opening_point = opening_point;
 

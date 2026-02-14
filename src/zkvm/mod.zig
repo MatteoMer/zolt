@@ -2245,41 +2245,49 @@ pub fn JoltProver(comptime F: type) type {
                 try serializer.writeDoryProof(&dory_proof);
             }
 
-            // Write advice proof fields - must match JoltProof struct field order:
-            //   trusted_advice_val_evaluation_proof: Option<PCS::Proof>
-            //   trusted_advice_val_final_proof: Option<PCS::Proof>
-            //   untrusted_advice_val_evaluation_proof: Option<PCS::Proof>
-            //   untrusted_advice_val_final_proof: Option<PCS::Proof>
+            // Write untrusted_advice_commitment: Option<PCS::Commitment>
+            // Jolt's JoltProof struct has exactly ONE advice field here:
             //   untrusted_advice_commitment: Option<PCS::Commitment>
-            // All None for now (no advice support).
-            try serializer.writeU8(0); // trusted_advice_val_evaluation_proof: None
-            try serializer.writeU8(0); // trusted_advice_val_final_proof: None
-            try serializer.writeU8(0); // untrusted_advice_val_evaluation_proof: None
-            try serializer.writeU8(0); // untrusted_advice_val_final_proof: None
+            // (The trusted_advice_commitment is NOT in JoltProof - it's passed separately.)
+            // None = 0x00 (arkworks Option serialization)
             try serializer.writeU8(0); // untrusted_advice_commitment: None
 
             // Write configuration fields - must match Jolt's #[derive(CanonicalSerialize)]
-            // on JoltProof struct. Field order:
+            // on JoltProof struct. Field order from proof_serialization.rs:
             //   trace_length: usize (8 bytes, LE)
             //   ram_K: usize (8 bytes, LE)
             //   bytecode_K: usize (8 bytes, LE)
-            //   log_k_chunk: usize (8 bytes, LE)
-            //   lookups_ra_virtual_log_k_chunk: usize (8 bytes, LE)
+            //   rw_config: ReadWriteConfig (4 x u8 = 4 bytes)
+            //   one_hot_config: OneHotConfig (2 x u8 = 2 bytes)
+            //   dory_layout: DoryLayout (1 x u8 = 1 byte)
             dbg("[SERIALIZE CONFIG] trace_length={}, ram_K={}, bytecode_K={}\n", .{
                 bundle.proof.trace_length,
                 bundle.proof.ram_K,
                 bundle.proof.bytecode_K,
             });
-            dbg("[SERIALIZE CONFIG] log_k_chunk={}, lookups_ra_virtual_log_k_chunk={}\n", .{
+            dbg("[SERIALIZE CONFIG] rw_config=({},{},{},{}), one_hot=({},{}), dory_layout={}\n", .{
+                bundle.proof.rw_config.ram_rw_phase1_num_rounds,
+                bundle.proof.rw_config.ram_rw_phase2_num_rounds,
+                bundle.proof.rw_config.registers_rw_phase1_num_rounds,
+                bundle.proof.rw_config.registers_rw_phase2_num_rounds,
                 bundle.proof.one_hot_config.log_k_chunk,
                 bundle.proof.one_hot_config.lookups_ra_virtual_log_k_chunk,
+                bundle.proof.dory_layout,
             });
 
             try serializer.writeUsize(bundle.proof.trace_length);
             try serializer.writeUsize(bundle.proof.ram_K);
             try serializer.writeUsize(bundle.proof.bytecode_K);
-            try serializer.writeUsize(@as(usize, bundle.proof.one_hot_config.log_k_chunk));
-            try serializer.writeUsize(@as(usize, bundle.proof.one_hot_config.lookups_ra_virtual_log_k_chunk));
+            // ReadWriteConfig: 4 x u8 (canonical serialization of the struct)
+            try serializer.writeU8(bundle.proof.rw_config.ram_rw_phase1_num_rounds);
+            try serializer.writeU8(bundle.proof.rw_config.ram_rw_phase2_num_rounds);
+            try serializer.writeU8(bundle.proof.rw_config.registers_rw_phase1_num_rounds);
+            try serializer.writeU8(bundle.proof.rw_config.registers_rw_phase2_num_rounds);
+            // OneHotConfig: 2 x u8
+            try serializer.writeU8(bundle.proof.one_hot_config.log_k_chunk);
+            try serializer.writeU8(bundle.proof.one_hot_config.lookups_ra_virtual_log_k_chunk);
+            // DoryLayout: 1 x u8 (0 = Wide, 1 = Tall)
+            try serializer.writeU8(bundle.proof.dory_layout);
 
             return serializer.toOwnedSlice();
         }

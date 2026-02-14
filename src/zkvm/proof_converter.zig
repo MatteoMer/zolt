@@ -3930,9 +3930,10 @@ pub fn ProofConverter(comptime F: type) type {
             // Stage 5: RegistersValEvaluation, RamRaClaimReduction, LookupsReadRaf
             {
                 std.debug.print("[PROOF_CONV] Starting Stage 5...\n", .{});
-                dbg("[ZOLT] Transcript before Stage 5: ", .{});
-                for (transcript.state[0..8]) |b| dbg("{x:0>2} ", .{b});
-                dbg(" round={}\n", .{transcript.n_rounds});
+                // ALWAYS-ON DIAGNOSTIC
+                std.debug.print("[STAGE5 DIAG] Transcript before Stage 5: ", .{});
+                for (transcript.state[0..8]) |b| std.debug.print("{x:0>2} ", .{b});
+                std.debug.print(" round={}\n", .{transcript.n_rounds});
             }
             // LookupsReadRaf has max rounds: LOG_K + log_T where LOG_K = XLEN * 2 = 128
             // For RV64: max_num_rounds = 128 + log_T = 128 + 8 = 136
@@ -3942,8 +3943,14 @@ pub fn ProofConverter(comptime F: type) type {
             // 1. gamma_ram_ra for RamRaClaimReduction (via RaReductionParams::new)
             // 2. gamma_lookups_raf for InstructionReadRaf (via InstructionReadRafSumcheckParams::new)
             // These are sampled sequentially from the transcript, so we must do the same.
+            // ALWAYS-ON DIAGNOSTIC: transcript state before Stage 5 gammas
+            std.debug.print("[STAGE5 DIAG] Transcript state BEFORE gamma squeeze: {any} round={}\n", .{ transcript.state[0..8].*, transcript.n_rounds });
             const gamma_ram_ra = transcript.challengeScalarFull();
+            std.debug.print("[STAGE5 DIAG] gamma_ram_ra LE = {any}\n", .{gamma_ram_ra.toBytes()});
+            std.debug.print("[STAGE5 DIAG] Transcript state AFTER gamma_ram_ra: {any} round={}\n", .{ transcript.state[0..8].*, transcript.n_rounds });
             const gamma_lookups_raf = transcript.challengeScalarFull();
+            std.debug.print("[STAGE5 DIAG] gamma_lookups_raf LE = {any}\n", .{gamma_lookups_raf.toBytes()});
+            std.debug.print("[STAGE5 DIAG] Transcript state AFTER gamma_lookups_raf: {any} round={}\n", .{ transcript.state[0..8].*, transcript.n_rounds });
             dbg("[STAGE5] gamma_ram_ra = {any}\n", .{gamma_ram_ra.toBytesBE()});
             dbg("[STAGE5] gamma_lookups_raf = {any}\n", .{gamma_lookups_raf.toBytesBE()});
 

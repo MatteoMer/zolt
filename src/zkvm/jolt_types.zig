@@ -106,10 +106,12 @@ pub const SumcheckId = enum(u8) {
     RegistersValEvaluation = 17,
     BytecodeReadRaf = 18,
     Booleanity = 19,
-    IncClaimReduction = 20,
-    HammingWeightClaimReduction = 21,
+    AdviceClaimReductionCyclePhase = 20,
+    AdviceClaimReduction = 21,
+    IncClaimReduction = 22,
+    HammingWeightClaimReduction = 23,
 
-    pub const COUNT: u8 = 22;
+    pub const COUNT: u8 = 24;
 };
 
 // =============================================================================
@@ -917,9 +919,9 @@ test "SumcheckId count" {
 
 test "OpeningId encoding bases" {
     try testing.expectEqual(@as(u8, 0), OpeningId.UNTRUSTED_ADVICE_BASE);
-    try testing.expectEqual(@as(u8, 22), OpeningId.TRUSTED_ADVICE_BASE);
-    try testing.expectEqual(@as(u8, 44), OpeningId.COMMITTED_BASE);
-    try testing.expectEqual(@as(u8, 66), OpeningId.VIRTUAL_BASE);
+    try testing.expectEqual(@as(u8, 24), OpeningId.TRUSTED_ADVICE_BASE);
+    try testing.expectEqual(@as(u8, 48), OpeningId.COMMITTED_BASE);
+    try testing.expectEqual(@as(u8, 72), OpeningId.VIRTUAL_BASE);
 }
 
 test "OpeningClaims ordering" {

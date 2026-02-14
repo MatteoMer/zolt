@@ -8,62 +8,53 @@
 - [x] Booleanity gamma fix
 - [x] Transcript states and challenges CONFIRMED matching
 - [x] **Fix SB anchor bytecode entry: VirtualInstruction=false, DoNotUpdateUnexpandedPC=true**
-  - All BCRAF stages match (raf_match=1, val_only==ext=1)
 - [x] Fix opening_point double-free in JoltProofBundle.deinit()
 
 ## CURRENT STATUS: Stage 5 (InstructionReadRaf) FAILS
 
-This was a PRE-EXISTING issue (also failed in old logs/jolt_verify.log).
-Stages 1-4 pass. Stage 5 fails with sumcheck output_claim ≠ expected_claim.
+### Root Cause Analysis (Feb 14)
+The InstructionRa opening claims from the prover don't match what the verifier
+independently computes. Comparing:
 
-### What Stage 5 consists of (3 batched instances):
-1. **Instance 0**: RegistersValEvaluation (8 rounds)
-2. **Instance 1**: RamRaClaimReduction (24 rounds)
-3. **Instance 2**: InstructionReadRaf (137 rounds) - instruction lookup RAF
+**Zolt prover ra_chunks[0] (LE bytes):**
+`6a 42 0a ec 4d d7 07 60 46 e9 51 fd 49 59 4d e5 84 12 17 a7 5f f4 7f 60 18 90 9a 35 31 05 15 2e`
 
-### Failure details:
-- All 137 sumcheck rounds pass internally (no round-level failures)
-- The final output_claim from sumcheck ≠ expected_claim from verifier
-- This means the sumcheck polynomial evaluations are self-consistent,
-  but the verifier's expected_output_claim (computed from opening claims) differs
-- Same pattern as the BCRAF Stage 6 issue we just fixed
+**Jolt verifier ra_claims[0] (LE bytes):**
+`90 71 1c ac b9 19 ef e7 09 e5 71 65 55 11 ea 59 9f 34 61 15 45 1f d3 33 3b 8b ad c7 38 1e b8 2e`
 
-### Key diagnostic output:
-```
-output_claim:   [b8, d1, 95, 50, c0, 53, 29, f4, ...]
-expected_claim: [d1, 5a, 76, 4e, 54, 17, 4e, 44, ...]
-```
+These should be the same. The prover sends ra_chunks as opening claims, and the
+verifier uses them to compute expected_output_claim. But the verifier's values
+come from the proof serialization, so either:
 
-Per-instance claims from verifier:
-- Instance 0: [0b, eb, ae, 28, ...] * coeff = [ee, 6c, 5d, ...]
-- Instance 1: [40, 66, e7, 2d, ...] * coeff = [65, 80, 3e, ...]
-- Instance 2: [3d, 55, 53, 90, ...] * coeff = [80, 6d, da, ...]
+1. The prover computes ra_chunk opening claims incorrectly (wrong binding)
+2. The serialization is wrong (values get corrupted in transit)
+3. The verifier reads them with wrong byte order or parsing
 
-`manual f0+f1+f2` ≠ `expected_output_claim` - suspicious, may be debug issue.
+### Key finding: Prover's own consistency check PASSES
+- `scalar*ra_product*combined == lookups_claim: true`
+- This means the prover's polynomial (round messages) is consistent with its OWN ra_product
+- But the ra_product it sends as opening claims differs from what the verifier reads
 
-## INVESTIGATION PLAN
-1. The expected_output_claim is computed from opening claims for each instance
-2. The output_claim comes from the prover's sumcheck polynomial
-3. Since the sumcheck rounds all pass, the issue is in the FINAL evaluation
-4. Need to check what the verifier computes as expected_output_claim for each instance
-5. Compare with what the prover's polynomial evaluates to at the final point
-6. Likely another field/flag mismatch similar to the BCRAF issue
+### Additional finding: ra_product != lookups_ra_weights[0]
+- The prover warns: "ra_product and lookups_ra_weights[0] don't match after binding"
+- Comment says "binding the product != product of bindings"
+- This is actually EXPECTED because Π_i(bind(ra_chunk_i)) ≠ bind(Π_i(ra_chunk_i))
+- The prover uses ra_chunks[i] = ra_chunk_weights[i][0] (product of bindings)
 
-### Possible causes:
-- InstructionReadRaf val polynomial construction mismatch (instruction flags, lookup tables)
-- RamRaClaimReduction claim components wrong
-- RegistersValEvaluation claim computation differs
-- Gamma/batching coefficient mismatch between prover and verifier
-
-## NEXT STEPS
-1. Add diagnostics to Stage 5 prover to compare per-instance expected_output_claim
-2. Check if the InstructionReadRaf val polynomial uses correct table entries
-3. Check if RamRaClaimReduction's 4 sub-claims are correct
-4. After fixing: verify Stage 6 passes (our BCRAF fix should make it work)
-5. Regression test all 8 programs
+### NEXT STEPS
+1. **Compare ra_chunk serialization** - Check if the Jolt verifier reads the
+   InstructionRa opening claims from the correct location in the proof bytes
+2. **Check byte ordering** - Verify LE/BE consistency between Zolt serialization
+   and Jolt deserialization for opening claims
+3. **Compare table_flag opening claims** - Check if LookupTableFlag values also mismatch
+4. **Compare raf_flag opening claim** - Check InstructionRafFlag
+5. If opening claims are correct in the proof but wrong after deserialization,
+   the issue is in Jolt's proof parsing code
+6. If opening claims are wrong in the proof, the issue is in Zolt's Stage 5 prover
 
 ## KEY FILES
 - Proof: /home/vivado/projects/zolt/logs/zolt_proof_dory.bin (70145 bytes)
 - Preprocessing: /home/vivado/projects/zolt/logs/zolt_preprocessing.bin (26880 bytes)
 - Prover log: /tmp/zolt_sbfix3_stderr.log
 - Jolt verifier: /home/vivado/projects/jolt/jolt-core/src/zolt_compat_test.rs
+- Jolt verifier log: /tmp/jolt_collatz_stderr.log

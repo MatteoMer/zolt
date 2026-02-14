@@ -212,46 +212,38 @@ pub fn Stage4Prover(comptime F: type) type {
                     continue;
                 }
 
-                // Extract register indices from instruction encoding
-                const instr = step.instruction;
-                const rd: u5 = @truncate((instr >> 7) & 0x1f);
-                const rs1: u5 = @truncate((instr >> 15) & 0x1f);
-                const rs2: u5 = @truncate((instr >> 20) & 0x1f);
+                // Use trace step's register indices instead of decoding from instruction word.
+                // This is critical because virtual instructions (e.g., VirtualMULI 0x2B)
+                // can write to virtual registers (index >= 32) which cannot be represented
+                // in the 5-bit rd field of the instruction word.
+                // The bytecode entries use the full register index (matching Jolt), so
+                // the Stage 4 polynomials must use the same indices for consistency.
+                const rd: u8 = step.rd_index;
+                const rs1: u8 = step.rs1_index;
+                const rs2: u8 = step.rs2_index;
+                const opcode = step.instruction & 0x7f;
 
-                // Determine if registers are actually used based on instruction type
-                const opcode = instr & 0x7f;
-
-                // Source register 1: used in most R-type, I-type, S-type, B-type instructions
-                const rs1_used = switch (opcode) {
-                    0x13, 0x03, 0x23, 0x63, 0x33, 0x3B, 0x1B, 0x67 => true, // I, LOAD, STORE, BRANCH, R, etc.
-                    else => false,
-                };
-                if (rs1_used and rs1 < 32) {
+                // Source register 1: use trace step's rs1_read flag
+                if (step.rs1_read and rs1 < K) {
                     rs1_ra_poly[@as(usize, rs1) * T + cycle] = F.one();
                 }
 
-                // Source register 2: used in R-type, S-type, B-type instructions
-                const rs2_used = switch (opcode) {
-                    0x33, 0x3B, 0x23, 0x63 => true, // R-type, S-type, B-type
-                    else => false,
-                };
-                if (rs2_used and rs2 < 32) {
+                // Source register 2: use trace step's rs2_read flag
+                if (step.rs2_read and rs2 < K) {
                     rs2_ra_poly[@as(usize, rs2) * T + cycle] = F.one();
                 }
 
-                // Destination register: used in most instructions except STORE, BRANCH
-                const rd_used = switch (opcode) {
-                    0x23, 0x63 => false, // STORE, BRANCH don't write
-                    else => true,
-                };
+                // Destination register: use trace step's rd_written flag
+                // Stores (0x23) and branches (0x63) don't write to rd.
+                const rd_written = step.rd_written;
 
                 // Compute rd_write_value for debug comparison
                 var stage4_rd_wv: u64 = 0;
-                if (rd_used and rd != 0 and rd < 32) {
+                if (rd_written and rd != 0 and rd < K) {
                     rd_wa_poly[@as(usize, rd) * T + cycle] = F.one();
 
                     // Compute inc = post_value - pre_value
-                    const pre_value = register_values[rd];
+                    const pre_value = if (rd < 32) register_values[rd] else step.rd_pre_value;
                     const post_value = step.rd_value;
                     // inc = post - pre in field
                     inc_poly[cycle] = F.fromU64(post_value).sub(F.fromU64(pre_value));
@@ -259,15 +251,17 @@ pub fn Stage4Prover(comptime F: type) type {
                     // rd_write_value = post_value (what Stage 3 should have)
                     stage4_rd_wv = post_value;
 
-                    // Update register value for next cycle
-                    register_values[rd] = post_value;
+                    // Update register value for next cycle (only for real registers)
+                    if (rd < 32) {
+                        register_values[rd] = post_value;
+                    }
                 }
 
                 // Debug: Print first few cycles for comparison
                 if (cycle < 5) {
-                    dbg("[STAGE4] Cycle {}: opcode=0x{x}, rd={}, rd_used={}, rd_wv={}\n", .{ cycle, opcode, rd, rd_used, stage4_rd_wv });
-                    dbg("[STAGE4]   rs1={}, rs1_used={}, rs1_val={}\n", .{ rs1, rs1_used, register_values[if (rs1 < 32) rs1 else 0] });
-                    dbg("[STAGE4]   rs2={}, rs2_used={}, rs2_val={}\n", .{ rs2, rs2_used, register_values[if (rs2 < 32) rs2 else 0] });
+                    dbg("[STAGE4] Cycle {}: opcode=0x{x}, rd={}, rd_written={}, rd_wv={}\n", .{ cycle, opcode, rd, rd_written, stage4_rd_wv });
+                    dbg("[STAGE4]   rs1={}, rs1_read={}, rs1_val={}\n", .{ rs1, step.rs1_read, if (rs1 < 32) register_values[rs1] else 0 });
+                    dbg("[STAGE4]   rs2={}, rs2_read={}, rs2_val={}\n", .{ rs2, step.rs2_read, if (rs2 < 32) register_values[rs2] else 0 });
                 }
             }
 

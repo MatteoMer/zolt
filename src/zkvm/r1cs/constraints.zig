@@ -1979,9 +1979,9 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             // SB is the last real cycle before NoOp padding, so NextPC=0.
             // R1CS constraint 17 would require NextPC=PC+1 if VirtualInstruction=true,
             // which would fail. So VirtualInstruction stays 0 (default).
-            // The bytecode entry at k=termination_base_pc+2 also has VirtualInstruction=false
-            // to maintain consistency between committed and val polynomials.
-            // DoNotUpdateUnexpandedPC=true is still set (above) for constraint 16.
+            // The bytecode entry at k=termination_base_pc+2 matches these flags:
+            //   VirtualInstruction=false, DoNotUpdateUnexpandedPC=true
+            // This ensures consistency between BCRAF val polynomials and opening claims.
 
             return inputs;
         }

@@ -13,49 +13,33 @@
 - [x] Booleanity gamma fix: sample total_d=38 independent challenges (not 1)
 - [x] Booleanity gamma fix: use directly as γ_i (not γ^{2i} powers)
 - [x] **Transcript states and challenges CONFIRMED matching between prover and verifier**
-  - R0 state before: e98e2657...1cb84d (both sides)
-  - R0 state after:  df9c12ef...30c36c (both sides)
-  - R0 n_rounds: 1552 (both sides)
-  - R0 challenge values are SAME (just displayed differently: BigInt vs canonical)
+- [x] Fix entry k=27 SB termination circuit flags
+- [x] Confirmed all 6 individual instance expected_output_claims match between prover/verifier
+- [x] **Fix SB anchor bytecode entry: VirtualInstruction=false, DoNotUpdateUnexpandedPC=true**
+  - Root cause: bytecode entry for SB anchor had VirtualInstruction=true (from vsr.is_some())
+    and DoNotUpdateUnexpandedPC=false (from vsr==0), but R1CS witness had VirtualInstruction=false
+    and DoNotUpdateUnexpandedPC=true (from createTerminationStoreWitness override)
+  - Fix: make bytecode entry match R1CS witness AND Jolt verifier's termination_entry_anchor()
+  - Result: ALL BCRAF stages now match (raf_match=1, val_only==ext=1 for all 5 stages)
+- [x] Fix opening_point double-free in JoltProofBundle.deinit()
+  - opening_point was freed both by proof.deinit() and bundle.deinit()
 
 ## CURRENT STATUS
-Stage 6 batched sumcheck still fails, but the transcript/challenges are in sync.
-The sumcheck ROUNDS all pass (p(0)+p(1)=claim for all 16 rounds).
-But the FINAL OUTPUT CLAIM doesn't match the EXPECTED OUTPUT CLAIM:
-- output_claim = 10068428028361103562999431687109727156273651794029258343283738030662297904304
-- expected_output_claim = 18661973779153731974364406210909728062712157382685357377790163200435919635328
+Stage 6 BCRAF match confirmed. All internal diagnostics pass:
+- All BF_CHECK Phase2 rounds match=1 (rounds 0-15)
+- match_val_ra=1 for Instance 0
+- S6P_BCRAF_COMPARE match=1
+- All field-level comparisons match (address, imm, all 13 circuit flags, RAF)
 
-The expected_output_claim is computed from instance evaluations at the final r_sumcheck point.
-The output_claim is the evaluation of the last round polynomial at the last challenge.
-
-This means one or more INSTANCE polynomials have incorrect coefficients.
+Proof generated successfully (70145 bytes). Now testing with Jolt verifier.
 
 ## NEXT STEPS
-1. Identify which instance(s) contribute incorrect expected_output_claim
-   - Add per-instance expected_output_claim vs actual comparison
-   - The verifier already prints per-instance expected_output_claim (see logs)
-2. Debug the specific instance polynomial computation
-3. Fix and verify
-4. Regression test all 8 programs
-
-## KEY INSIGHT
-The challenges are the SAME between prover and verifier - confirmed via:
-- Transcript state comparison (32 bytes match)
-- n_rounds comparison (both = 1552 at R0)
-- Coefficient comparison (both see same 5 coefficients per round)
-The issue is purely in the POLYNOMIAL CONTENT, not the Fiat-Shamir transcript.
-
-## DEBUG NOTES
-- Must use `--jolt-format` flag with `-o` flag to trigger the correct code path
-- std.debug.print output appears in stderr when using --jolt-format
-- The prover crashes (exit=134) during deinit but proof IS saved correctly
-- Previous runs without --jolt-format use a DIFFERENT code path that doesn't call generateStage6Proof
-- MontU128Challenge Debug trait shows BigInt([0,0,L,H]) = L*2^128 + H*2^192 (NOT field value)
-  This caused confusion when comparing challenges - they looked different but were the same
+1. Wait for prover to complete (including preprocessing export)
+2. Run Jolt verifier test_verify_zolt_proof_with_zolt_preprocessing
+3. If Stage 6 passes, regression test all 8 programs
+4. Clean up diagnostic prints
 
 ## FILES
-- Proof: /tmp/collatz_jolt_proof_fix.bin
-- Preprocessing: /tmp/collatz_preprocessing_fix.bin
-- Verifier log: /tmp/verifier_output_new.log
-- Prover log: /tmp/zolt_jolt_stderr.log
-- Diagnostics: /tmp/s6p_diag.bin, /tmp/s6p_r0_challenge.bin, /tmp/s6p_state_after_r0.bin
+- Proof: /tmp/collatz_jolt_proof_sbfix.bin (70145 bytes)
+- Prover log: /tmp/zolt_sbfix_stderr.log
+- New proof (with preprocessing): pending from sbfix2 run

@@ -897,7 +897,8 @@ pub fn JoltProofWithDory(comptime F: type, comptime Commitment: type, comptime P
             if (self.register_final_evals.len > 0) self.allocator.free(self.register_final_evals);
             for (self.witness_polys) |poly| self.allocator.free(poly);
             if (self.witness_polys.len > 0) self.allocator.free(self.witness_polys);
-            if (self.opening_point.len > 0) self.allocator.free(self.opening_point);
+            // Note: opening_point is already freed by self.proof.deinit() above
+            // (JoltProof.deinit frees its own opening_point), so don't double-free here.
             if (self.dory_opening_proof) |*p| p.deinit();
         }
     };

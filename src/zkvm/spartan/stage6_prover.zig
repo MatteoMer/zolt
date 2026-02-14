@@ -3778,7 +3778,13 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     _ = transcript.challengeScalar();
                 }
             }
-            const booleanity_gamma = transcript.challengeScalar();
+            // Jolt samples total_d independent gammas via challenge_vector_optimized(total_d)
+            // Each gamma is used directly as a batching coefficient for one RA polynomial
+            const total_d = instruction_d + bytecode_d + ram_d;
+            const booleanity_gammas = try self.allocator.alloc(F, total_d);
+            for (0..total_d) |gi| {
+                booleanity_gammas[gi] = transcript.challengeScalar();
+            }
 
             // LookupsRa::new() - gamma powers for virtual RA batching
             const lookups_ra_gamma_powers = try transcript.challengeScalarPowers(self.allocator, n_virtual_ra_polys);
@@ -4145,16 +4151,10 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     }
                 }
 
-                // Build γ^{2i} powers
-                var gamma_sq = try self.allocator.alloc(F, total_bool_polys);
-                {
-                    var gamma_power = F.one(); // γ^0 = 1
-                    const gamma_sq_base = booleanity_gamma.mul(booleanity_gamma); // γ^2
-                    for (0..total_bool_polys) |i| {
-                        gamma_sq[i] = gamma_power;
-                        gamma_power = gamma_power.mul(gamma_sq_base);
-                    }
-                }
+                // Use the independently sampled gammas directly (matching Jolt's challenge_vector_optimized)
+                // Jolt formula: Σ_i γ_i * (ra_i² - ra_i), where γ_i are independent challenges
+                // booleanity_gammas ownership transfers to BooleanityProver (freed by deinit)
+                const gamma_sq = booleanity_gammas;
 
                 // Verify G tables: Σ_k G_i[k] should equal Σ_j eq(r_cycle, j) = 1
                 // Actually Σ_k G_i[k] = Σ_j eq(r_cycle, j) * Σ_k [chunk_i(j)==k]
@@ -5102,6 +5102,23 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 batched_claim = batched_claim.add(batch[i].mul(scaled));
             }
 
+            // Debug: print the initial batched claim and all batch coefficients
+            {
+                const bc_be = batched_claim.toBytesBE();
+                std.debug.print("[S6P_BATCHED] initial_batched_claim_LE=[", .{});
+                for (0..32) |bi| std.debug.print("{x:0>2}", .{bc_be[31 - bi]});
+                std.debug.print("]\n", .{});
+                for (0..6) |i| {
+                    const b_be = batch[i].toBytesBE();
+                    const ic_be = input_claims[i].toBytesBE();
+                    std.debug.print("[S6P_BATCHED] batch[{}]_LE=[", .{i});
+                    for (0..32) |bi| std.debug.print("{x:0>2}", .{b_be[31 - bi]});
+                    std.debug.print("] input_claim_LE=[", .{});
+                    for (0..32) |bi| std.debug.print("{x:0>2}", .{ic_be[31 - bi]});
+                    std.debug.print("] rounds={}\n", .{num_rounds_arr[i]});
+                }
+            }
+
             // ====================================================================
             // Run batched sumcheck
             // ====================================================================
@@ -5593,14 +5610,51 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     .allocator = self.allocator,
                 });
 
+                // Write diagnostic data to file for R0 - BEFORE appending to transcript
+                if (round == 0) {
+                    const diag_file = std.fs.cwd().createFile("/tmp/s6p_diag.bin", .{}) catch null;
+                    if (diag_file) |f| {
+                        defer f.close();
+                        // Write: transcript state BEFORE append (32 bytes), then 5 compressed coefficients (5*32=160 bytes)
+                        f.writeAll(&transcript.state) catch {};
+                        for (0..num_compressed) |j| {
+                            const le = coeffs[j].toBytes();
+                            f.writeAll(&le) catch {};
+                        }
+                    }
+                }
+
                 transcript.appendMessage("UniPoly_begin");
                 for (0..num_compressed) |j| {
                     transcript.appendScalar(coeffs[j]);
                 }
                 transcript.appendMessage("UniPoly_end");
 
+                // Dump transcript state AFTER appending R0 polynomial
+                if (round == 0) {
+                    const diag_after = std.fs.cwd().createFile("/tmp/s6p_state_after_r0.bin", .{}) catch null;
+                    if (diag_after) |fa| {
+                        defer fa.close();
+                        fa.writeAll(&transcript.state) catch {};
+                        // Also write n_rounds as u32 LE
+                        var nr_buf: [4]u8 = undefined;
+                        std.mem.writeInt(u32, &nr_buf, transcript.n_rounds, .little);
+                        fa.writeAll(&nr_buf) catch {};
+                    }
+                }
+
                 const challenge = transcript.challengeScalar();
                 challenges[round] = challenge;
+
+                // Write R0 challenge to diagnostic file
+                if (round == 0) {
+                    const diag2 = std.fs.cwd().createFile("/tmp/s6p_r0_challenge.bin", .{}) catch null;
+                    if (diag2) |f2| {
+                        defer f2.close();
+                        const ch_le = challenge.toBytes();
+                        f2.writeAll(&ch_le) catch {};
+                    }
+                }
 
                 // Evaluate combined polynomial at challenge (Vandermonde format)
                 current_batched_claim = try UniPoly(F).evaluateVandermondeAt(self.allocator, combined_evals, challenge);

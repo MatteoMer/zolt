@@ -1,60 +1,59 @@
-# Zolt→Jolt Cross-Verification Progress
+# Zolt → Jolt Cross-Verification Progress
 
-## COMPLETED
-- [x] All Stage 1-5 fixes (R1CS, operands, serialization, preprocessing)
-- [x] Stages 1-4 sumcheck PASS with Jolt verifier (confirmed Feb 14)
-- [x] Stage 6 fixes: rd=0 sentinel, termination address, SD flags, val_poly gamma[0]
-- [x] ALL 5 BCRAF stages now match (Stage 6 internal diagnostics pass)
-- [x] Booleanity gamma fix
-- [x] Transcript states and challenges CONFIRMED matching
-- [x] **Fix SB anchor bytecode entry: VirtualInstruction=false, DoNotUpdateUnexpandedPC=true**
-- [x] Fix opening_point double-free in JoltProofBundle.deinit()
+## COMPLETED ✅ — 6/8 Programs Pass All 8 Stages!
 
-## CURRENT STATUS: Stage 5 (InstructionReadRaf) FAILS
+### Passing Programs:
+1. ✅ fibonacci - All 8 stages pass
+2. ✅ collatz - All 8 stages pass
+3. ✅ factorial - All 8 stages pass
+4. ✅ sum - All 8 stages pass
+5. ✅ signed - All 8 stages pass
+6. ✅ primes - All 8 stages pass (log_size=16, sigma=8, nu=8)
 
-### Root Cause Analysis (Feb 14)
-The InstructionRa opening claims from the prover don't match what the verifier
-independently computes. Comparing:
+### Failing Programs:
+7. ❌ bitwise - Stage 5 fails (prover self-check Stage 4 passes, but Stage 5 RAF mismatch)
+8. ❌ gcd - Stage 4 fails (prover self-check Stage 4 ALSO fails: batched_claim ≠ total_expected)
 
-**Zolt prover ra_chunks[0] (LE bytes):**
-`6a 42 0a ec 4d d7 07 60 46 e9 51 fd 49 59 4d e5 84 12 17 a7 5f f4 7f 60 18 90 9a 35 31 05 15 2e`
+### Fix History:
+- Stages 1-4: R1CS, operands, serialization, preprocessing
+- Stage 5: SumcheckId enum + config serialization format
+- Stage 6: Booleanity gamma sampling + BytecodeReadRaf Val[3] rd=0 handling
+- Stage 7: Sumcheck passes (no issues)
+- Stage 8: Dory g2_0 mismatch (SRS log_size fix - Feb 14, 2026)
 
-**Jolt verifier ra_claims[0] (LE bytes):**
-`90 71 1c ac b9 19 ef e7 09 e5 71 65 55 11 ea 59 9f 34 61 15 45 1f d3 33 3b 8b ad c7 38 1e b8 2e`
+## REMAINING WORK 🔄
 
-These should be the same. The prover sends ra_chunks as opening claims, and the
-verifier uses them to compute expected_output_claim. But the verifier's values
-come from the proof serialization, so either:
+### gcd.elf - Stage 4 Prover Bug
+- The prover's own Stage 4 self-check fails: `batched_claim != total_expected`
+- This means the Stage 4 sumcheck proof itself is incorrectly generated
+- gcd has more bytecode (188 bytes, bytecode_K=256) vs collatz (68 bytes, bytecode_K=32)
+- May be related to bytecode_K affecting the grand product computation
 
-1. The prover computes ra_chunk opening claims incorrectly (wrong binding)
-2. The serialization is wrong (values get corrupted in transit)
-3. The verifier reads them with wrong byte order or parsing
+### bitwise.elf - Stage 5 RAF Mismatch
+- Stage 4 self-check passes, but Stage 5 fails at verification
+- `[CORRECT_RAF R1] matches raf_evals[0]: false` - RAF evaluations don't match for row 1+
+- Row 0 matches but subsequent rows don't
+- May be related to how bitwise instructions (AND, OR, XOR, SLL, SRL, SRA) are decomposed
+- Bitwise ops exercise different lookup tables than arithmetic/branch ops
 
-### Key finding: Prover's own consistency check PASSES
-- `scalar*ra_product*combined == lookups_claim: true`
-- This means the prover's polynomial (round messages) is consistent with its OWN ra_product
-- But the ra_product it sends as opening claims differs from what the verifier reads
-
-### Additional finding: ra_product != lookups_ra_weights[0]
-- The prover warns: "ra_product and lookups_ra_weights[0] don't match after binding"
-- Comment says "binding the product != product of bindings"
-- This is actually EXPECTED because Π_i(bind(ra_chunk_i)) ≠ bind(Π_i(ra_chunk_i))
-- The prover uses ra_chunks[i] = ra_chunk_weights[i][0] (product of bindings)
-
-### NEXT STEPS
-1. **Compare ra_chunk serialization** - Check if the Jolt verifier reads the
-   InstructionRa opening claims from the correct location in the proof bytes
-2. **Check byte ordering** - Verify LE/BE consistency between Zolt serialization
-   and Jolt deserialization for opening claims
-3. **Compare table_flag opening claims** - Check if LookupTableFlag values also mismatch
-4. **Compare raf_flag opening claim** - Check InstructionRafFlag
-5. If opening claims are correct in the proof but wrong after deserialization,
-   the issue is in Jolt's proof parsing code
-6. If opening claims are wrong in the proof, the issue is in Zolt's Stage 5 prover
+### Cleanup
+- [ ] Remove debug prints from dory.zig, mod.zig, main.zig
+- [ ] Remove debug modifications from Jolt's dory-pcs crate
+- [ ] Documentation
 
 ## KEY FILES
-- Proof: /home/vivado/projects/zolt/logs/zolt_proof_dory.bin (70145 bytes)
-- Preprocessing: /home/vivado/projects/zolt/logs/zolt_preprocessing.bin (26880 bytes)
-- Prover log: /tmp/zolt_sbfix3_stderr.log
-- Jolt verifier: /home/vivado/projects/jolt/jolt-core/src/zolt_compat_test.rs
-- Jolt verifier log: /tmp/jolt_collatz_stderr.log
+- Proof: /home/vivado/projects/zolt/logs/zolt_proof_dory.bin
+- Preprocessing: /home/vivado/projects/zolt/logs/zolt_preprocessing.bin
+- Jolt verifier test: /home/vivado/projects/jolt/jolt-core/src/zolt_compat_test.rs
+
+## BUILD & TEST COMMANDS
+```bash
+# Build Zolt
+zig build -Doptimize=ReleaseFast
+
+# Generate proof + preprocessing
+./zig-out/bin/zolt prove examples/collatz.elf --jolt-format -o /tmp/zolt_proof_dory.bin --export-preprocessing /tmp/zolt_preprocessing.bin
+
+# Run Jolt verifier
+cd /home/vivado/projects/jolt && cargo test --package jolt-core --features zolt-debug zolt_compat_test::tests::test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
+```

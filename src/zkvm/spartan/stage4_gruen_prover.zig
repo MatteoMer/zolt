@@ -225,12 +225,20 @@ pub fn Stage4GruenProver(comptime F: type) type {
                 }
 
                 // rd_wa and inc
-                if (step.rd_written and rd != 0) {
+                // Jolt includes rd=0 writes in the RdWa polynomial: the trace captures
+                // cpu.x[0]=0 before and after execution, producing a (0→0) transition with
+                // wa_coeff=1. We must match this by including rd=0 in rd_wa_poly.
+                if (step.rd_written) {
                     rd_wa_poly[@as(usize, rd) * T + cycle] = F.one();
                     const pre_value = register_values[rd];
                     const post_value = step.rd_value;
                     inc_poly[cycle] = F.fromU64(post_value).sub(F.fromU64(pre_value));
-                    register_values[rd] = post_value;
+                    // Don't update register_values[0] - x0 is hardwired to zero.
+                    // Jolt resets cpu.x[0]=0 after each instruction, so subsequent reads
+                    // of x0 always see 0. register_values[0] stays 0.
+                    if (rd != 0) {
+                        register_values[rd] = post_value;
+                    }
                 }
             }
 

@@ -1198,14 +1198,18 @@ pub fn buildBytecodeEntries(
             entries[tbpc + 1].virtual_sequence_remaining = 1;
             entries[tbpc + 1].is_first_in_sequence = false;
 
-            // Entry at tbpc+2: SD x30, lower12(x31) (anchor, vsr=Some(0))
-            // Matching Jolt's termination SD: VirtualInstruction=true, DoNotUpdatePC=false
-            // vsr=Some(0) means: this IS a virtual instruction (part of termination sequence)
-            // but it's the LAST one, so DoNotUpdateUnexpandedPC=false (0 != 0 = false)
+            // Entry at tbpc+2: SB x30, lower12(x31) (anchor, vsr=0)
+            // R1CS constraint analysis for this step (PC=0, NextPC=0, UPC=0, NextUPC=0):
+            //   Constraint 16: NextUPC = UPC + 4 - 4*DoNotUpdateUPC → 0 = 0+4-4*DoNotUpdateUPC
+            //     Requires DoNotUpdateUPC = true (otherwise 0 ≠ 4)
+            //   Constraint 17: if VirtInstr then NextPC = PC+1 → if VirtInstr then 0 = 1
+            //     Requires VirtInstr = false (otherwise 0 ≠ 1)
+            // So: VirtualInstruction=false, DoNotUpdateUnexpandedPC=true
+            // This matches createTerminationStoreWitness() for the SB anchor (vsr=0) case.
             populateEntryFromInstruction(&entries[tbpc + 2], sb_word, 0);
-            entries[tbpc + 2].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
-            // DoNotUpdateUnexpandedPC stays false (from populateEntryFromInstruction)
-            entries[tbpc + 2].virtual_sequence_remaining = 0; // Some(0): last in sequence
+            // VirtualInstruction stays false (default from populateEntryFromInstruction)
+            entries[tbpc + 2].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+            entries[tbpc + 2].virtual_sequence_remaining = 0;
             entries[tbpc + 2].is_first_in_sequence = false;
 
             dbg("[PHASE2] Termination entries at tbpc={d}: LUI=0x{x:0>8} ADDI=0x{x:0>8} SB=0x{x:0>8}\n", .{ tbpc, lui_word, addi_word, sb_word });

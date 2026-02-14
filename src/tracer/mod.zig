@@ -647,10 +647,20 @@ pub const Emulator = struct {
             .OP, .OP_32, .STORE, .BRANCH => true,
             else => false,
         };
+        // Jolt includes rd=0 writes in the RdWa polynomial - the trace captures
+        // cpu.x[0] before and after execution (both 0), creating a (0→0) transition.
+        // We must match this: instructions with an rd field always have rd_written=true,
+        // even when rd=0. Only STORE and BRANCH have no rd field (rd=None in Jolt).
         const writes_rd = switch (opcode) {
             .STORE, .BRANCH => false,
-            else => decoded.rd != 0, // x0 never written
+            else => true, // All other instructions have rd field (even rd=0)
         };
+
+        // For rd=0: Jolt captures cpu.x[0] which is always 0 (JAL/etc have a
+        // "if rd != 0" guard, and cpu.x[0]=0 is reset after each instruction).
+        // So rd_value and rd_pre_value must be 0 when rd=0.
+        const actual_rd_value = if (decoded.rd == 0) @as(u64, 0) else result.rd_value;
+        const actual_rd_pre_value = if (decoded.rd == 0) @as(u64, 0) else rd_pre_value;
 
         // Record trace step
         try self.trace.addStep(.{
@@ -660,8 +670,8 @@ pub const Emulator = struct {
             .instruction = instruction,
             .rs1_value = rs1_value,
             .rs2_value = rs2_value,
-            .rd_pre_value = rd_pre_value,
-            .rd_value = result.rd_value,
+            .rd_pre_value = actual_rd_pre_value,
+            .rd_value = actual_rd_value,
             .rd_index = decoded.rd,
             .rs1_index = decoded.rs1,
             .rs2_index = decoded.rs2,
@@ -746,7 +756,7 @@ pub const Emulator = struct {
             .rd_index = rd_u8,
             .rs1_index = rs1_u8,
             .rs2_index = 0,
-            .rd_written = rd_u8 != 0,
+            .rd_written = true, // Jolt includes rd=0 writes in RdWa polynomial
             .rs1_read = true,
             .rs2_read = false,
             .memory_addr = null,
@@ -827,7 +837,7 @@ pub const Emulator = struct {
             .rd_index = rd_u8,
             .rs1_index = rs1_u8,
             .rs2_index = 0,
-            .rd_written = rd_u8 != 0,
+            .rd_written = true, // Jolt includes rd=0 writes in RdWa polynomial
             .rs1_read = true,
             .rs2_read = false,
             .memory_addr = null,
@@ -965,7 +975,7 @@ pub const Emulator = struct {
             .rd_index = rd_u8,
             .rs1_index = v_rs1, // reads from virtual register 32
             .rs2_index = 0,
-            .rd_written = rd_u8 != 0,
+            .rd_written = true, // Jolt includes rd=0 writes in RdWa polynomial
             .rs1_read = true,
             .rs2_read = false,
             .memory_addr = null,
@@ -1012,7 +1022,7 @@ pub const Emulator = struct {
             .rd_index = rd_u8,
             .rs1_index = rd_u8, // VirtualSignExtendWord reads rd
             .rs2_index = 0,
-            .rd_written = rd_u8 != 0,
+            .rd_written = true, // Jolt includes rd=0 writes in RdWa polynomial
             .rs1_read = true,
             .rs2_read = false,
             .memory_addr = null,
@@ -1127,7 +1137,7 @@ pub const Emulator = struct {
             .rd_index = decoded.rd,
             .rs1_index = decoded.rs1,
             .rs2_index = decoded.rs2,
-            .rd_written = decoded.rd != 0,
+            .rd_written = true, // Jolt includes rd=0 writes in RdWa polynomial
             .rs1_read = true,
             .rs2_read = base_reads_rs2,
             .memory_addr = null,
@@ -1178,7 +1188,7 @@ pub const Emulator = struct {
             .rd_index = decoded.rd,
             .rs1_index = decoded.rd, // VirtualSignExtendWord reads from rd
             .rs2_index = 0,
-            .rd_written = decoded.rd != 0,
+            .rd_written = true, // Jolt includes rd=0 writes in RdWa polynomial
             .rs1_read = true,
             .rs2_read = false,
             .memory_addr = null,
@@ -1667,7 +1677,7 @@ pub const Emulator = struct {
             .rd_index = decoded.rd,
             .rs1_index = a3,
             .rs2_index = 0,
-            .rd_written = decoded.rd != 0,
+            .rd_written = true, // Jolt includes rd=0 writes in RdWa polynomial
             .rs1_read = true,
             .rs2_read = false,
             .memory_addr = null,
@@ -2243,7 +2253,7 @@ pub const Emulator = struct {
             .instruction = step21_instr, .rs1_value = output_val, .rs2_value = 0,
             .rd_pre_value = rd_pre_value, .rd_value = final_result,
             .rd_index = decoded.rd, .rs1_index = output_reg, .rs2_index = 0,
-            .rd_written = decoded.rd != 0, .rs1_read = true, .rs2_read = false,
+            .rd_written = true, // Jolt includes rd=0 writes in RdWa polynomial .rs1_read = true, .rs2_read = false,
             .memory_addr = null, .memory_pre_value = null, .memory_value = null,
             .is_memory_write = false, .next_pc = self.state.pc + pc_increment,
             .is_compressed = self.is_compressed, .virtual_sequence_remaining = 0,

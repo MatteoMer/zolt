@@ -1611,6 +1611,33 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 s2_work[i] = F.zero();
             }
 
+            // Debug: print initial evaluation vector info
+            {
+                std.debug.print("[DORY PROVER] nu={}, sigma={}, num_rounds={}, vec_len={}\n", .{nu, sigma, num_rounds, vec_len});
+                std.debug.print("[DORY PROVER] right_vec.len={}, left_vec.len={}\n", .{right_vec.len, left_vec.len});
+                // Print first few right_vec (s1 init) scalars
+                for (0..@min(4, right_vec.len)) |i| {
+                    const be = right_vec[i].toBytesBE();
+                    std.debug.print("[DORY PROVER] right_vec[{}] first 16 LE: ", .{i});
+                    for (0..16) |bi| std.debug.print("{x:0>2}", .{be[31 - bi]});
+                    std.debug.print("\n", .{});
+                }
+                // Print first few left_vec (s2 init) scalars
+                for (0..@min(4, left_vec.len)) |i| {
+                    const be = left_vec[i].toBytesBE();
+                    std.debug.print("[DORY PROVER] left_vec[{}] first 16 LE: ", .{i});
+                    for (0..16) |bi| std.debug.print("{x:0>2}", .{be[31 - bi]});
+                    std.debug.print("\n", .{});
+                }
+                // Print opening point
+                for (0..@min(point.len, 4)) |i| {
+                    const be = point[i].toBytesBE();
+                    std.debug.print("[DORY PROVER] point[{}] first 16 LE: ", .{i});
+                    for (0..16) |bi| std.debug.print("{x:0>2}", .{be[31 - bi]});
+                    std.debug.print("\n", .{});
+                }
+            }
+
             // Allocate message arrays
             const first_messages = try allocator.alloc(FirstReduceMessage, num_rounds);
             errdefer allocator.free(first_messages);
@@ -1741,6 +1768,18 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 }
 
                 current_len = n2;
+            }
+
+            // Debug: print final folded scalars
+            {
+                const s1_be = s1_work[0].toBytesBE();
+                std.debug.print("[DORY PROVER] s1_work[0] (final) first 16 LE: ", .{});
+                for (0..16) |bi| std.debug.print("{x:0>2}", .{s1_be[31 - bi]});
+                std.debug.print("\n", .{});
+                const s2_be = s2_work[0].toBytesBE();
+                std.debug.print("[DORY PROVER] s2_work[0] (final) first 16 LE: ", .{});
+                for (0..16) |bi| std.debug.print("{x:0>2}", .{s2_be[31 - bi]});
+                std.debug.print("\n", .{});
             }
 
             // Get gamma challenge

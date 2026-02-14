@@ -867,6 +867,11 @@ pub fn JoltProofWithDory(comptime F: type, comptime Commitment: type, comptime P
         /// null if not yet computed
         dory_opening_proof: ?Dory.DoryProof,
 
+        /// The log_size (max_num_vars) used to generate the Dory SRS for this proof.
+        /// This is needed so the preprocessing export can create a DoryVerifierSetup
+        /// from an SRS with the exact same dimensions (sigma, nu, n).
+        dory_srs_log_size: u32,
+
         allocator: Allocator,
 
         pub fn init(allocator: Allocator) Self {
@@ -885,6 +890,7 @@ pub fn JoltProofWithDory(comptime F: type, comptime Commitment: type, comptime P
                 .log_k_chunk = 0,
                 .opening_point = &[_]F{},
                 .dory_opening_proof = null,
+                .dory_srs_log_size = 0,
                 .allocator = allocator,
             };
         }

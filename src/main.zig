@@ -434,17 +434,23 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, trace_length_op
                 const DoryCommitmentScheme = dory.DoryCommitmentScheme(zolt.field.BN254Scalar);
 
                 // Generate or load SRS for verifier setup
+                // CRITICAL: Must use the SAME log_size as the proof generation path
+                // (mod.zig proveJoltCompatibleWithDoryAndSrsAtAddress) so that g2_vec
+                // elements match. The G2 points depend on n=2^sigma which varies with
+                // log_size, so mismatched log_size → different G2 generators → verification fails.
+                const proof_log_size = jolt_bundle.dory_srs_log_size;
+                std.debug.print("  Using SRS log_size={} from proof generation\n", .{proof_log_size});
                 var srs = blk: {
                     if (srs_path) |srs_file| {
                         if (DoryCommitmentScheme.loadFromFile(allocator, srs_file)) |loaded| {
                             break :blk loaded;
                         } else |_| {
                             std.debug.print("  Warning: Could not load SRS for verifier setup\n", .{});
-                            std.debug.print("  Generating default SRS (may not match Jolt exactly)...\n", .{});
+                            std.debug.print("  Generating default SRS...\n", .{});
                         }
                     }
-                    // Generate default SRS
-                    break :blk DoryCommitmentScheme.setup(allocator, 20) catch |err| {
+                    // Generate SRS with same dimensions as proof generation
+                    break :blk DoryCommitmentScheme.setup(allocator, proof_log_size) catch |err| {
                         std.debug.print("  Error generating SRS: {s}\n", .{@errorName(err)});
                         return err;
                     };

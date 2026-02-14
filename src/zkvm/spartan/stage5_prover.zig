@@ -587,7 +587,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 // Use explicit register index from TraceStep (supports virtual registers 32+)
                 const rd: u8 = step.rd_index;
 
-                if (step.rd_written and rd != 0) {
+                // Jolt includes rd=0 writes in the wa/inc polynomials.
+                // rd_values() returns Some for all instructions with an rd field,
+                // including rd=0. The trace captures (0→0) transitions for x0.
+                if (step.rd_written) {
                     // Compute inc = rd_value - rd_pre_value
                     // Use trace's pre/post values directly (Jolt uses cycle.rd_write())
                     const pre_value: i128 = @intCast(step.rd_pre_value);

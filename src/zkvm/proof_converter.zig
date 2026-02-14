@@ -4079,9 +4079,10 @@ pub fn ProofConverter(comptime F: type) type {
             transcript.appendScalar(stage5_result.lookups_raf_flag);
 
             {
-                dbg("[ZOLT] Transcript AFTER Stage 5 cache_openings: ", .{});
-                for (transcript.state[0..8]) |b| dbg("{x:0>2} ", .{b});
-                dbg(" round={}\n", .{transcript.n_rounds});
+                // ALWAYS-ON: Print transcript state after Stage 5 cache_openings
+                std.debug.print("[STAGE6 ENTRY] Transcript AFTER Stage 5 cache_openings: ", .{});
+                for (transcript.state[0..32]) |b| std.debug.print("{x:0>2} ", .{b});
+                std.debug.print(" round={}\n", .{transcript.n_rounds});
             }
 
             // Stage 6: BytecodeReadRaf, RamHammingBooleanity, Booleanity, RamRaVirtual, LookupsRaVirtual, IncClaimReduction

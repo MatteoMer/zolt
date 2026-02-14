@@ -3799,10 +3799,10 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             // Sample gammas (must match Jolt verifier)
             // ====================================================================
 
-            // Debug: dump transcript state at Stage 6 entry
-            dbg("[STAGE6] Transcript state at entry: {{ ", .{});
-            for (transcript.state) |b| dbg("{x:0>2} ", .{b});
-            dbg("}}, round={}\n", .{transcript.n_rounds});
+            // ALWAYS-ON: dump transcript state at Stage 6 entry
+            std.debug.print("[STAGE6] Transcript state at entry: {{ ", .{});
+            for (transcript.state) |b| std.debug.print("{x:0>2} ", .{b});
+            std.debug.print("}}, round={}\n", .{transcript.n_rounds});
 
             const bytecode_raf_gamma_powers = try transcript.challengeScalarPowers(self.allocator, 7);
             defer self.allocator.free(bytecode_raf_gamma_powers);
@@ -3835,18 +3835,28 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             dbg("[STAGE6] Sampled BytecodeReadRaf gammas\n", .{});
 
             // BooleanitySumcheckParams::new() - conditional extra challenges
+            // When Stage 5 address variables < log_k_chunk, Jolt samples extra challenges
+            // to pad r_address to log_k_chunk length. This happens when LOOKUPS_LOG_K is
+            // smaller than log_k_chunk, which doesn't happen in practice (128 > 4).
             if (lookups_ra_virtual_log_k_chunk < log_k_chunk) {
                 const extra_count = log_k_chunk - lookups_ra_virtual_log_k_chunk;
                 for (0..extra_count) |_| {
                     _ = transcript.challengeScalar();
                 }
             }
-            // Jolt samples total_d independent gammas via challenge_vector_optimized(total_d)
-            // Each gamma is used directly as a batching coefficient for one RA polynomial
+            // Jolt samples 1 gamma via challenge_scalar_optimized() and derives powers:
+            //   gamma_powers_square[i] = γ^(2i) for i = 0..total_d
+            // The prover uses gamma_powers[i] = γ^i internally for polynomial scaling,
+            // and the verifier uses gamma_powers_square[i] = γ^(2i) for expected_output_claim.
             const total_d = instruction_d + bytecode_d + ram_d;
+            const booleanity_gamma = transcript.challengeScalar();
+            // Handle degenerate gamma=0 case (same as Jolt: replace with 1)
+            const booleanity_gamma_f: F = if (booleanity_gamma.isZero()) F.one() else booleanity_gamma;
+            const booleanity_gamma_sq = booleanity_gamma_f.mul(booleanity_gamma_f);
             const booleanity_gammas = try self.allocator.alloc(F, total_d);
-            for (0..total_d) |gi| {
-                booleanity_gammas[gi] = transcript.challengeScalar();
+            booleanity_gammas[0] = F.one(); // γ^0 = 1
+            for (1..total_d) |i| {
+                booleanity_gammas[i] = booleanity_gammas[i - 1].mul(booleanity_gamma_sq); // γ^(2i)
             }
 
             // LookupsRa::new() - gamma powers for virtual RA batching

@@ -1024,7 +1024,7 @@ pub fn JoltProver(comptime F: type) type {
             const max_poly_size = @max(@max(@max(bytecode_poly_size, memory_poly_size), reg_poly_size), stage8_joint_poly_size);
             const log_size: u32 = if (max_poly_size <= 1) 1 else @intCast(std.math.log2_int(usize, max_poly_size));
 
-            std.debug.print("[SRS] Stage8 max_poly_size={}, log_size={}, sigma={}, nu={}\n", .{
+            dbg("[SRS] Stage8 max_poly_size={}, log_size={}, sigma={}, nu={}\n", .{
                 max_poly_size, log_size, (log_size + 1) / 2, log_size - (log_size + 1) / 2,
             });
 
@@ -1036,26 +1036,26 @@ pub fn JoltProver(comptime F: type) type {
                 try DoryScheme.setup(self.allocator, log_size);
             defer dory_srs.deinit();
 
-            std.debug.print("[SRS] Loaded: g1_vec={}, g2_vec={}\n", .{dory_srs.g1_vec.len, dory_srs.g2_vec.len});
+            dbg("[SRS] Loaded: g1_vec={}, g2_vec={}\n", .{dory_srs.g1_vec.len, dory_srs.g2_vec.len});
 
             // Debug: print SRS key values for comparison with verifier
             {
                 const DoryMod = @import("../poly/commitment/dory.zig");
                 // g1_0 compressed
                 const g1_0_comp = DoryMod.compressG1(dory_srs.g1_vec[0]);
-                std.debug.print("[SRS DEBUG] g1_0 compressed: ", .{});
-                for (g1_0_comp) |b| std.debug.print("{x:0>2}", .{b});
-                std.debug.print("\n", .{});
+                dbg("[SRS DEBUG] g1_0 compressed: ", .{});
+                for (g1_0_comp) |b| dbg("{x:0>2}", .{b});
+                dbg("\n", .{});
                 // g2_0 compressed
                 const g2_0_comp = DoryMod.compressG2(dory_srs.g2_vec[0]);
-                std.debug.print("[SRS DEBUG] g2_0 compressed first 32: ", .{});
-                for (g2_0_comp[0..32]) |b| std.debug.print("{x:0>2}", .{b});
-                std.debug.print("\n", .{});
+                dbg("[SRS DEBUG] g2_0 compressed first 32: ", .{});
+                for (g2_0_comp[0..32]) |b| dbg("{x:0>2}", .{b});
+                dbg("\n", .{});
                 // h2 compressed
                 const h2_comp = DoryMod.compressG2(dory_srs.h2);
-                std.debug.print("[SRS DEBUG] h2 compressed first 32: ", .{});
-                for (h2_comp[0..32]) |b| std.debug.print("{x:0>2}", .{b});
-                std.debug.print("\n", .{});
+                dbg("[SRS DEBUG] h2 compressed first 32: ", .{});
+                for (h2_comp[0..32]) |b| dbg("{x:0>2}", .{b});
+                dbg("\n", .{});
             }
 
             // Build and store polynomial evaluations
@@ -1114,7 +1114,7 @@ pub fn JoltProver(comptime F: type) type {
 
             dbg("[ZOLT] OneHot params: instruction_d={}, bytecode_d={}, ram_d={}\n", .{ instruction_d, bytecode_d, ram_d });
 
-            std.debug.print("[DORY] Computing {} Dory commitments (instruction_d={}, ram_d={}, bytecode_d={})...\n", .{2 + instruction_d + ram_d + bytecode_d, instruction_d, ram_d, bytecode_d});
+            dbg("[DORY] Computing {} Dory commitments (instruction_d={}, ram_d={}, bytecode_d={})...\n", .{2 + instruction_d + ram_d + bytecode_d, instruction_d, ram_d, bytecode_d});
             // Build commitment polynomials and compute Dory commitments
             // Order: RdInc, RamInc, InstructionRa[0..instruction_d-1], RamRa[0..ram_d-1], BytecodeRa[0..bytecode_d-1]
             //
@@ -1228,13 +1228,13 @@ pub fn JoltProver(comptime F: type) type {
             result.ram_d = ram_d;
             result.log_k_chunk = log_k_chunk;
 
-            std.debug.print("[DORY] All {} commitments computed.\n", .{all_commitments.items.len});
+            dbg("[DORY] All {} commitments computed.\n", .{all_commitments.items.len});
             // Debug: print first 3 commitment bytes
             for (0..@min(3, all_commitments.items.len)) |ci| {
                 const gt_bytes = all_commitments.items[ci].toBytes();
-                std.debug.print("[DORY] commitment[{}] first 32: ", .{ci});
-                for (0..32) |bi| std.debug.print("{x:0>2} ", .{gt_bytes[bi]});
-                std.debug.print("\n", .{});
+                dbg("[DORY] commitment[{}] first 32: ", .{ci});
+                for (0..32) |bi| dbg("{x:0>2} ", .{gt_bytes[bi]});
+                dbg("\n", .{});
             }
             // Store commitments in result
             result.dory_commitments = try all_commitments.toOwnedSlice(self.allocator);
@@ -1427,7 +1427,7 @@ pub fn JoltProver(comptime F: type) type {
                 // These orderings differ! The gamma powers map to the Jolt ordering, but witness_polys uses Zolt ordering.
 
                 // Determine the total polynomial size: k_chunk * trace_length for the sparse polys
-                std.debug.print("[STAGE8] Building joint polynomial (k_chunk={}, trace_length={})...\n", .{ k_chunk, trace_length });
+                dbg("[STAGE8] Building joint polynomial (k_chunk={}, trace_length={})...\n", .{ k_chunk, trace_length });
                 const total_poly_size = k_chunk * trace_length;
                 var joint_poly = try self.allocator.alloc(F, total_poly_size);
                 defer self.allocator.free(joint_poly);
@@ -1515,16 +1515,16 @@ pub fn JoltProver(comptime F: type) type {
                         expected_joint_claim = expected_joint_claim.add(gamma_powers[i].mul(claims_ordered[i]));
                     }
                     const ejc_be = expected_joint_claim.toBytesBE();
-                    std.debug.print("[STAGE8] joint_claim_LE=[", .{});
-                    for (0..32) |bi| std.debug.print("{x:0>2}", .{ejc_be[31 - bi]});
-                    std.debug.print("]\n", .{});
+                    dbg("[STAGE8] joint_claim_LE=[", .{});
+                    for (0..32) |bi| dbg("{x:0>2}", .{ejc_be[31 - bi]});
+                    dbg("]\n", .{});
                     // Print gamma_powers[1] for comparison
                     const gp1_be = gamma_powers[1].toBytesBE();
-                    std.debug.print("[STAGE8] gamma_powers[1]_LE=[", .{});
-                    for (0..16) |bi| std.debug.print("{x:0>2}", .{gp1_be[31 - bi]});
-                    std.debug.print("]\n", .{});
+                    dbg("[STAGE8] gamma_powers[1]_LE=[", .{});
+                    for (0..16) |bi| dbg("{x:0>2}", .{gp1_be[31 - bi]});
+                    dbg("]\n", .{});
                     // Print transcript state before Dory
-                    std.debug.print("[STAGE8] transcript_state_before_dory=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] n_rounds={}\n", .{
+                    dbg("[STAGE8] transcript_state_before_dory=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] n_rounds={}\n", .{
                         transcript.state[0], transcript.state[1], transcript.state[2], transcript.state[3],
                         transcript.state[4], transcript.state[5], transcript.state[6], transcript.state[7],
                         transcript.n_rounds,
@@ -1532,9 +1532,9 @@ pub fn JoltProver(comptime F: type) type {
                     // Print first 5 claims_ordered
                     for (0..@min(5, num_claims)) |i| {
                         const cl_be = claims_ordered[i].toBytesBE();
-                        std.debug.print("[STAGE8] claim[{}]_LE=[", .{i});
-                        for (0..16) |bi| std.debug.print("{x:0>2}", .{cl_be[31 - bi]});
-                        std.debug.print("]\n", .{});
+                        dbg("[STAGE8] claim[{}]_LE=[", .{i});
+                        for (0..16) |bi| dbg("{x:0>2}", .{cl_be[31 - bi]});
+                        dbg("]\n", .{});
                     }
                 }
                 if (false) {
@@ -1788,14 +1788,14 @@ pub fn JoltProver(comptime F: type) type {
                     const joint_commitment_gt = DoryScheme.commit(&dory_srs, joint_poly);
                     // Serialize GT to bytes for comparison
                     const gt_bytes = joint_commitment_gt.toBytes();
-                    std.debug.print("[STAGE8] commit(joint_poly) first 32: [", .{});
-                    for (0..32) |bi| std.debug.print("{x:0>2}, ", .{gt_bytes[bi]});
-                    std.debug.print("]\n", .{});
-                    std.debug.print("[STAGE8] commit(joint_poly) bytes 352-383: [", .{});
-                    for (352..384) |bi| std.debug.print("{x:0>2}, ", .{gt_bytes[bi]});
-                    std.debug.print("]\n", .{});
+                    dbg("[STAGE8] commit(joint_poly) first 32: [", .{});
+                    for (0..32) |bi| dbg("{x:0>2}, ", .{gt_bytes[bi]});
+                    dbg("]\n", .{});
+                    dbg("[STAGE8] commit(joint_poly) bytes 352-383: [", .{});
+                    for (352..384) |bi| dbg("{x:0>2}, ", .{gt_bytes[bi]});
+                    dbg("]\n", .{});
                 }
-                std.debug.print("[STAGE8] Starting Dory opening proof (total_poly_size={}, num_claims={})...\n", .{ total_poly_size, num_claims });
+                dbg("[STAGE8] Starting Dory opening proof (total_poly_size={}, num_claims={})...\n", .{ total_poly_size, num_claims });
                 const dory_proof = try DoryScheme.openWithTranscript(
                     &dory_srs,
                     joint_poly,
@@ -1804,7 +1804,7 @@ pub fn JoltProver(comptime F: type) type {
                     &transcript,
                     self.allocator,
                 );
-                std.debug.print("[STAGE8] Dory opening proof generated.\n", .{});
+                dbg("[STAGE8] Dory opening proof generated.\n", .{});
                 result.dory_opening_proof = dory_proof;
                 result.opening_point = opening_point;
 

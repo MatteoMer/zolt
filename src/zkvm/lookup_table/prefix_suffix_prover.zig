@@ -15,7 +15,7 @@
 const std = @import("std");
 
 // Debug output control - set to true to enable verbose debug prints
-const debug_verbose = true;
+const debug_verbose = false;
 fn dbg(comptime fmt: []const u8, args: anytype) void {
     if (debug_verbose) std.debug.print(fmt, args);
 }
@@ -414,7 +414,7 @@ pub fn proverMsgReadChecking(
             const eq1 = prefixes_c1[eq_idx];
             const eq2 = prefixes_c2[eq_idx];
             const expected_eq2 = eq1.add(eq1).sub(eq0);
-            std.debug.print("[PFIX R0 b={}] Eq: c0={x} c1={x} c2={x} expected_c2(2e1-e0)={x} match={}\n", .{
+            dbg("[PFIX R0 b={}] Eq: c0={x} c1={x} c2={x} expected_c2(2e1-e0)={x} match={}\n", .{
                 b_idx,
                 eq0.toBytesBE()[28..32].*,
                 eq1.toBytesBE()[28..32].*,
@@ -428,7 +428,7 @@ pub fn proverMsgReadChecking(
             const lw1 = prefixes_c1[lw_idx];
             const lw2 = prefixes_c2[lw_idx];
             const expected_lw2 = lw1.add(lw1).sub(lw0);
-            std.debug.print("[PFIX R0 b={}] LowerWord: c0={x} c1={x} c2={x} expected_c2={x} match={}\n", .{
+            dbg("[PFIX R0 b={}] LowerWord: c0={x} c1={x} c2={x} expected_c2={x} match={}\n", .{
                 b_idx,
                 lw0.toBytesBE()[28..32].*,
                 lw1.toBytesBE()[28..32].*,
@@ -474,7 +474,7 @@ pub fn proverMsgReadChecking(
                     const g1 = combined_1_right; // at c=1, suffix = Q_right
                     const formula_g2 = combined_2_right.add(combined_2_right).sub(combined_2_left);
                     const linear_g2 = g1.add(g1).sub(g0);
-                    std.debug.print("[COMBINE R0 b=0 T{}] g(0)={x} g(1)={x} formula_g(2)={x} linear_g(2)={x} match={}\n", .{
+                    dbg("[COMBINE R0 b=0 T{}] g(0)={x} g(1)={x} formula_g(2)={x} linear_g(2)={x} match={}\n", .{
                         table_idx,
                         g0.toBytesBE()[24..32].*,
                         g1.toBytesBE()[24..32].*,
@@ -487,7 +487,7 @@ pub fn proverMsgReadChecking(
                     for (table_suffixes, 0..) |_, s_idx2| {
                         if (!table.polys[s_idx2][b_idx + half_len].eql(F.zero())) all_right_zero = false;
                     }
-                    std.debug.print("[COMBINE R0 b=0 T{}] Q_right_all_zero={} Q_left_suf0={x}\n", .{
+                    dbg("[COMBINE R0 b=0 T{}] Q_right_all_zero={} Q_left_suf0={x}\n", .{
                         table_idx,
                         all_right_zero,
                         suffixes_left[0].toBytesBE()[24..32].*,

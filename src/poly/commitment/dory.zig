@@ -1313,19 +1313,21 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 // E2_beta = MSM(g2_vec[0..current_row_len], s1_work[0..current_row_len])
                 const e2_beta = msmG2(F, params.g2_vec[0..current_row_len], s1_work[0..current_row_len]);
                 // Debug: output compressed e2_beta for round 0
-                if (round == 0) {
-                    const debug_compressed = compressG2(e2_beta);
-                    std.debug.print("DEBUG e2_beta[0] compressed: ", .{});
-                    for (debug_compressed) |b_| {
-                        std.debug.print("{x:0>2}", .{b_});
+                if (comptime debug_verbose) {
+                    if (round == 0) {
+                        const debug_compressed = compressG2(e2_beta);
+                        dbg("DEBUG e2_beta[0] compressed: ", .{});
+                        for (debug_compressed) |b_| {
+                            dbg("{x:0>2}", .{b_});
+                        }
+                        dbg("\n", .{});
+                        dbg("DEBUG e2_beta[0] g2_vec_len={} s1_work scalars: ", .{current_row_len});
+                        for (s1_work[0..@min(current_row_len, 4)]) |s| {
+                            const norm = s.fromMontgomery();
+                            dbg("{x:0>16}{x:0>16}{x:0>16}{x:0>16} ", .{ norm.limbs[3], norm.limbs[2], norm.limbs[1], norm.limbs[0] });
+                        }
+                        dbg("\n", .{});
                     }
-                    std.debug.print("\n", .{});
-                    std.debug.print("DEBUG e2_beta[0] g2_vec_len={} s1_work scalars: ", .{current_row_len});
-                    for (s1_work[0..@min(current_row_len, 4)]) |s| {
-                        const norm = s.fromMontgomery();
-                        std.debug.print("{x:0>16}{x:0>16}{x:0>16}{x:0>16} ", .{norm.limbs[3], norm.limbs[2], norm.limbs[1], norm.limbs[0]});
-                    }
-                    std.debug.print("\n", .{});
                 }
 
                 first_messages[round] = FirstReduceMessage{
@@ -1612,29 +1614,26 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             }
 
             // Debug: print initial evaluation vector info
-            {
-                std.debug.print("[DORY PROVER] nu={}, sigma={}, num_rounds={}, vec_len={}\n", .{nu, sigma, num_rounds, vec_len});
-                std.debug.print("[DORY PROVER] right_vec.len={}, left_vec.len={}\n", .{right_vec.len, left_vec.len});
-                // Print first few right_vec (s1 init) scalars
+            if (comptime debug_verbose) {
+                dbg("[DORY PROVER] nu={}, sigma={}, num_rounds={}, vec_len={}\n", .{ nu, sigma, num_rounds, vec_len });
+                dbg("[DORY PROVER] right_vec.len={}, left_vec.len={}\n", .{ right_vec.len, left_vec.len });
                 for (0..@min(4, right_vec.len)) |i| {
                     const be = right_vec[i].toBytesBE();
-                    std.debug.print("[DORY PROVER] right_vec[{}] first 16 LE: ", .{i});
-                    for (0..16) |bi| std.debug.print("{x:0>2}", .{be[31 - bi]});
-                    std.debug.print("\n", .{});
+                    dbg("[DORY PROVER] right_vec[{}] first 16 LE: ", .{i});
+                    for (0..16) |bi| dbg("{x:0>2}", .{be[31 - bi]});
+                    dbg("\n", .{});
                 }
-                // Print first few left_vec (s2 init) scalars
                 for (0..@min(4, left_vec.len)) |i| {
                     const be = left_vec[i].toBytesBE();
-                    std.debug.print("[DORY PROVER] left_vec[{}] first 16 LE: ", .{i});
-                    for (0..16) |bi| std.debug.print("{x:0>2}", .{be[31 - bi]});
-                    std.debug.print("\n", .{});
+                    dbg("[DORY PROVER] left_vec[{}] first 16 LE: ", .{i});
+                    for (0..16) |bi| dbg("{x:0>2}", .{be[31 - bi]});
+                    dbg("\n", .{});
                 }
-                // Print opening point
                 for (0..@min(point.len, 4)) |i| {
                     const be = point[i].toBytesBE();
-                    std.debug.print("[DORY PROVER] point[{}] first 16 LE: ", .{i});
-                    for (0..16) |bi| std.debug.print("{x:0>2}", .{be[31 - bi]});
-                    std.debug.print("\n", .{});
+                    dbg("[DORY PROVER] point[{}] first 16 LE: ", .{i});
+                    for (0..16) |bi| dbg("{x:0>2}", .{be[31 - bi]});
+                    dbg("\n", .{});
                 }
             }
 
@@ -1660,33 +1659,32 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 const e2_beta = msmG2(F, params.g2_vec[0..current_len], s1_work[0..current_len]);
 
                 // Debug: write e2_beta for each round to /tmp for validation
-                if (round == 0) {
-                    const debug_e2 = compressG2(e2_beta);
-                    const debug_file = std.fs.cwd().createFile("/tmp/zolt_dory_e2_beta_round0.bin", .{}) catch null;
-                    if (debug_file) |f| {
-                        f.writeAll(&debug_e2) catch {};
-                        f.close();
+                if (comptime debug_verbose) {
+                    if (round == 0) {
+                        const debug_e2 = compressG2(e2_beta);
+                        const debug_file = std.fs.cwd().createFile("/tmp/zolt_dory_e2_beta_round0.bin", .{}) catch null;
+                        if (debug_file) |f| {
+                            f.writeAll(&debug_e2) catch {};
+                            f.close();
+                        }
+                        dbg("[DORY] e2_beta round 0: current_len={}, g2_vec_len={}\n", .{ current_len, params.g2_vec.len });
+                        dbg("[DORY] e2_beta compressed: ", .{});
+                        for (debug_e2) |b_| {
+                            dbg("{x:0>2}", .{b_});
+                        }
+                        dbg("\n", .{});
+                        dbg("[DORY] e2_beta is_identity: {}\n", .{e2_beta.isIdentity()});
+                        dbg("[DORY] s1_work[0..4] scalars: ", .{});
+                        for (s1_work[0..@min(4, current_len)]) |s| {
+                            dbg("{} ", .{s.isZero()});
+                        }
+                        dbg("\n", .{});
+                        dbg("[DORY] g2_vec[0..4] is_identity: ", .{});
+                        for (params.g2_vec[0..@min(4, current_len)]) |g| {
+                            dbg("{} ", .{g.isIdentity()});
+                        }
+                        dbg("\n", .{});
                     }
-                    std.debug.print("[DORY] e2_beta round 0: current_len={}, g2_vec_len={}\n", .{current_len, params.g2_vec.len});
-                    std.debug.print("[DORY] e2_beta compressed: ", .{});
-                    for (debug_e2) |b_| {
-                        std.debug.print("{x:0>2}", .{b_});
-                    }
-                    std.debug.print("\n", .{});
-                    // Print identity check
-                    std.debug.print("[DORY] e2_beta is_identity: {}\n", .{e2_beta.isIdentity()});
-                    // Print first 4 scalars
-                    std.debug.print("[DORY] s1_work[0..4] scalars: ", .{});
-                    for (s1_work[0..@min(4, current_len)]) |s| {
-                        std.debug.print("{} ", .{s.isZero()});
-                    }
-                    std.debug.print("\n", .{});
-                    // Print first 4 g2 points identity check
-                    std.debug.print("[DORY] g2_vec[0..4] is_identity: ", .{});
-                    for (params.g2_vec[0..@min(4, current_len)]) |g| {
-                        std.debug.print("{} ", .{g.isIdentity()});
-                    }
-                    std.debug.print("\n", .{});
                 }
 
                 first_messages[round] = FirstReduceMessage{
@@ -1771,15 +1769,15 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             }
 
             // Debug: print final folded scalars
-            {
+            if (comptime debug_verbose) {
                 const s1_be = s1_work[0].toBytesBE();
-                std.debug.print("[DORY PROVER] s1_work[0] (final) first 16 LE: ", .{});
-                for (0..16) |bi| std.debug.print("{x:0>2}", .{s1_be[31 - bi]});
-                std.debug.print("\n", .{});
+                dbg("[DORY PROVER] s1_work[0] (final) first 16 LE: ", .{});
+                for (0..16) |bi| dbg("{x:0>2}", .{s1_be[31 - bi]});
+                dbg("\n", .{});
                 const s2_be = s2_work[0].toBytesBE();
-                std.debug.print("[DORY PROVER] s2_work[0] (final) first 16 LE: ", .{});
-                for (0..16) |bi| std.debug.print("{x:0>2}", .{s2_be[31 - bi]});
-                std.debug.print("\n", .{});
+                dbg("[DORY PROVER] s2_work[0] (final) first 16 LE: ", .{});
+                for (0..16) |bi| dbg("{x:0>2}", .{s2_be[31 - bi]});
+                dbg("\n", .{});
             }
 
             // Get gamma challenge

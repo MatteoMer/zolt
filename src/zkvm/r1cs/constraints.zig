@@ -844,24 +844,29 @@ fn computeInstructionInputs(comptime F: type, step: tracer.TraceStep) Instructio
         },
         // LUI: rd = imm
         0x37 => {
-            // left = 0, right = imm (U-type, sign-extended)
+            // left = 0, right = imm (U-type, sign-extended to 64 bits, treated as UNSIGNED u64)
+            // Jolt: FormatU.parse sign-extends via `as i32 as i64 as u64`, then
+            // S64::from_u64_with_sign(imm, true) treats it as positive u64.
+            // So the field element is F.fromU64(sign_extended_bits), NOT signedI64ToField.
             const imm = decodeUTypeImmediate(step.instruction);
+            const imm_u64: u64 = @bitCast(imm);
             return .{
                 .left = F.zero(),
-                .right = signedI64ToField(F, imm),
-                .right_is_signed = true,
-                .right_i128 = @as(i128, imm),
+                .right = F.fromU64(imm_u64),
+                .right_is_signed = false,
+                .right_i128 = @as(i128, imm_u64),
             };
         },
         // AUIPC: rd = PC + imm
         0x17 => {
-            // left = PC, right = imm (U-type, sign-extended)
+            // left = PC, right = imm (U-type, sign-extended to 64 bits, treated as UNSIGNED u64)
             const imm = decodeUTypeImmediate(step.instruction);
+            const imm_u64: u64 = @bitCast(imm);
             return .{
                 .left = F.fromU64(step.pc),
-                .right = signedI64ToField(F, imm),
-                .right_is_signed = true,
-                .right_i128 = @as(i128, imm),
+                .right = F.fromU64(imm_u64),
+                .right_is_signed = false,
+                .right_i128 = @as(i128, imm_u64),
             };
         },
         // OP-IMM-32 (RV64I word operations): ADDIW, SLLIW, SRLIW, SRAIW
@@ -1528,8 +1533,11 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                     return F.fromU64(imm);
                 },
                 0x37, 0x17 => { // U-type: LUI, AUIPC
-                    const imm = instr & 0xFFFFF000;
-                    return F.fromU64(imm);
+                    // Sign-extend 32-bit immediate to 64-bit, treat as unsigned u64
+                    // Matches Jolt's FormatU.parse: `as i32 as i64 as u64`
+                    const imm_u32: u32 = instr & 0xFFFFF000;
+                    const imm_sext: u64 = @bitCast(@as(i64, @as(i32, @bitCast(imm_u32))));
+                    return F.fromU64(imm_sext);
                 },
                 else => return F.zero(),
             }
@@ -1592,11 +1600,15 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                     }
                     return F.zero();
                 },
-                0x37 => { // LUI: (0, imm)
-                    return F.fromU64(instr & 0xFFFFF000);
+                0x37 => { // LUI: (0, imm) sign-extended to 64 bits
+                    const imm_u32: u32 = instr & 0xFFFFF000;
+                    const imm_sext: u64 = @bitCast(@as(i64, @as(i32, @bitCast(imm_u32))));
+                    return F.fromU128(@as(u128, imm_sext));
                 },
-                0x17 => { // AUIPC: (0, PC + imm)
-                    return F.fromU128(@as(u128, step.unexpanded_pc) + @as(u128, instr & 0xFFFFF000));
+                0x17 => { // AUIPC: (0, PC + imm) sign-extended to 64 bits
+                    const imm_u32: u32 = instr & 0xFFFFF000;
+                    const imm_sext: u64 = @bitCast(@as(i64, @as(i32, @bitCast(imm_u32))));
+                    return F.fromU128(@as(u128, step.unexpanded_pc) + @as(u128, imm_sext));
                 },
                 0x6f => { // JAL: (0, PC + imm)
                     const imm20: u32 = ((@as(u32, instr >> 31) & 1) << 19) |

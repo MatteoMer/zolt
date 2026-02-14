@@ -1145,10 +1145,19 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             const imm_u64_w: u64 = @bitCast(imm_signed_w);
                             break :blk128 @as(u128, step.rs1_value) + @as(u128, imm_u64_w);
                         },
-                        // LUI: index = imm (upper 20 bits shifted left by 12)
-                        0x37 => @as(u128, instr & 0xFFFFF000),
-                        // AUIPC: index = pc + imm (u128)
-                        0x17 => @as(u128, step.unexpanded_pc) + @as(u128, instr & 0xFFFFF000),
+                        // LUI: index = sign_ext_32_to_64(imm) as u128
+                        // Jolt sign-extends the U-type immediate via `as i32 as i64 as u64`
+                        0x37 => blk128: {
+                            const imm_u32: u32 = instr & 0xFFFFF000;
+                            const imm_sext: u64 = @bitCast(@as(i64, @as(i32, @bitCast(imm_u32))));
+                            break :blk128 @as(u128, imm_sext);
+                        },
+                        // AUIPC: index = pc + sign_ext_32_to_64(imm) (u128)
+                        0x17 => blk128: {
+                            const imm_u32: u32 = instr & 0xFFFFF000;
+                            const imm_sext: u64 = @bitCast(@as(i64, @as(i32, @bitCast(imm_u32))));
+                            break :blk128 @as(u128, step.unexpanded_pc) + @as(u128, imm_sext);
+                        },
                         // JAL: index = pc + sign_ext(imm) (u128)
                         0x6f => blk128: {
                             const imm20: u32 = ((@as(u32, instr >> 31) & 1) << 19) |
@@ -1232,30 +1241,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     lookups_indices_hi[j] = 0;
                 }
 
-                // GENERAL FIX: For ALL instructions with a valid lookup table, use the
-                // actual table entry (materializeTableEntry) instead of rd_value.
-                // This is critical because rd_value (the RISC-V architectural result) can
-                // differ from the table MLE output. Examples:
-                //   - LUI: rd_value = sign_extend_32_to_64(imm<<12), but table = lower64(key)
-                //   - JAL: rd_value = pc+4, but lookup_output should be table entry at key
-                //   - VirtualSRLI: rd_value differs from table MLE
-                // The address round prefix-suffix decomposition computes based on actual
-                // table MLEs, so the initial claim must also use table MLEs for consistency.
-                if (table_idx >= 0) {
-                    const t_idx_u2: usize = @intCast(table_idx);
-                    const Table2 = @import("../lookup_table/mod.zig").LookupTable(F, 64);
-                    lookup_output = F.fromU64(Table2.materializeTableEntry(t_idx_u2, lookup_idx));
-                }
-
-                // For no-table instructions: zero ALL operands to match R1CS witness
-                if (table_idx < 0) {
-                    lookup_output = F.zero();
-                    left_op = F.zero();
-                    right_op = F.zero();
-                }
-
-                // Re-compute combined_vals with the corrected lookup_output
-                lookups_combined_vals[j] = lookup_output.add(gamma_raf.mul(left_op)).add(gamma_raf2.mul(right_op));
+                // NOTE: Do NOT override lookup_output with materializeTableEntry here!
+                // The initial lookups_combined_vals must match the R1CS witness polynomials
+                // (which use computeLookupOutput = rd_value for most instructions).
+                // The address round prefix-suffix decomposition uses table MLEs independently
+                // via Q arrays, and combined_vals are rematerialized at the phase transition
+                // (init_log_t_rounds) using stored_table_values for the cycle rounds.
 
                 // DIAGNOSTIC: Verify lookup_output matches table materializeEntry for each cycle
                 if (table_idx >= 0) {
@@ -6638,11 +6629,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm13 << 19)) >> 19);
                     return signedI64ToField(imm_signed);
                 },
-                // U-type: imm[31:12] at [31:12], shifted left by 12
-                // Jolt: FormatU.imm is u64, NormalizedOperands.imm = u64 as i128 (zero-ext)
+                // U-type: imm[31:12] at [31:12], shifted left by 12, SIGN-EXTENDED to 64 bits
+                // Jolt: FormatU.parse does `as i32 as i64 as u64` which sign-extends the
+                // 32-bit immediate to 64 bits. E.g., LUI 0xf0f0f → imm = 0xFFFFFFFFF0F0F000.
                 0x37, 0x17 => {
-                    const imm_upper = instr & 0xFFFFF000;
-                    return F.fromU64(imm_upper);
+                    const imm_upper: u32 = instr & 0xFFFFF000;
+                    const sign_extended: i64 = @as(i64, @as(i32, @bitCast(imm_upper)));
+                    return F.fromU64(@as(u64, @bitCast(sign_extended)));
                 },
                 // J-type: imm[20|10:1|11|19:12] at [31:12], sign-extended to i64, then treat as u64
                 // Jolt: FormatJ.imm is u64, NormalizedOperands.imm = u64 as i128 (zero-ext)

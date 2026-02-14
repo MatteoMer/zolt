@@ -65,7 +65,7 @@ pub const BytecodeEntry = struct {
     /// Raw opcode (7-bit) for Imm encoding discrimination.
     /// Needed because the R1CS witness uses different Imm encodings:
     ///   - ADDI/ADDIW/JAL/JALR: unsigned u64 bitcast of sign-extended i64
-    ///   - LUI/AUIPC: unsigned u32 (instr & 0xFFFFF000)
+    ///   - LUI/AUIPC: sign-extended u64 (instr & 0xFFFFF000 as i32 as i64 as u64)
     ///   - Load/Store/Branch: signed field value (p - |imm| for negative)
     opcode: u8,
     /// funct3 field (3-bit) for ADDI vs other I-type discrimination
@@ -3089,7 +3089,10 @@ fn BytecodeReadRafProver(comptime F: type) type {
                                     break :blk F.fromU64(bval);
                                 },
                                 0x37, 0x17 => {
-                                    break :blk F.fromU64(inst & 0xFFFFF000);
+                                    // Sign-extend U-type immediate to 64 bits
+                                    const imm_u32_6: u32 = inst & 0xFFFFF000;
+                                    const imm_sext_6: u64 = @bitCast(@as(i64, @as(i32, @bitCast(imm_u32_6))));
+                                    break :blk F.fromU64(imm_sext_6);
                                 },
                                 else => break :blk F.zero(),
                             }
@@ -4886,6 +4889,61 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 dbg("  valpoly_rs2 match bc_rs2: {}\n", .{@as(u8, if (trace_rs2_valpoly.eql(bc_rs2_sum)) 1 else 0)});
                 dbg("  trace_rd match oc_rd: {}\n", .{@as(u8, if (trace_rd_sum.eql(oc_rd)) 1 else 0)});
                 dbg("  valpoly_rd match oc_rd: {}\n", .{@as(u8, if (trace_rd_valpoly.eql(oc_rd)) 1 else 0)});
+                // Critical: Does bc_rs1 match oc_rs1? This is the actual BCRAF check.
+                std.debug.print("  [RS1_MATCH] bc_rs1 == oc_rs1: {}\n", .{@as(u8, if (bc_rs1_sum.eql(oc_rs1)) 1 else 0)});
+                std.debug.print("  [RS1_MATCH] valpoly_rs1 == oc_rs1: {}\n", .{@as(u8, if (trace_rs1_valpoly.eql(oc_rs1)) 1 else 0)});
+                // Per-cycle rs1 divergence: compare bytecode entry rs1 vs trace step rs1_index
+                {
+                    var rs1_div: usize = 0;
+                    for (0..T) |c2| {
+                        const step_c = trace.steps.items[c2];
+                        if (step_c.is_noop and !step_c.is_termination_store) continue;
+                        const pc_c = pc_map.getPCForStep(step_c);
+                        if (pc_c >= bytecode_K or pc_c >= bytecode_entries.len) continue;
+                        const bc_ent = bytecode_entries[pc_c];
+                        // bc_ent.rs1 = bytecode entry rs1 (used in BCRAF)
+                        // step_c.rs1_index = trace step rs1 (used in opening claim)
+                        // step_c.rs1_read = whether rs1 is actually read
+                        if (step_c.rs1_read) {
+                            // Bytecode says rs1=bc_ent.rs1, trace says rs1=step_c.rs1_index
+                            if (bc_ent.rs1 != step_c.rs1_index and rs1_div < 20) {
+                                std.debug.print("  [RS1_DIVERGE] c={} k={} pc=0x{x:0>8} bc_rs1={} trace_rs1={} opc=0x{x:0>2}\n", .{
+                                    c2, pc_c, step_c.pc, bc_ent.rs1, step_c.rs1_index,
+                                    step_c.instruction & 0x7f,
+                                });
+                                rs1_div += 1;
+                            }
+                        }
+                    }
+                    std.debug.print("  [RS1_DIVERGE] total divergences: {}\n", .{rs1_div});
+                    // Check for cycles where rs1_read=false but bytecode entry has rs1 < 128
+                    var phantom_count: usize = 0;
+                    var phantom_contrib = F.zero();
+                    for (0..T) |c3| {
+                        const step_d = trace.steps.items[c3];
+                        if (step_d.is_noop and !step_d.is_termination_store) continue;
+                        if (!step_d.rs1_read) {
+                            const pc_d = pc_map.getPCForStep(step_d);
+                            if (pc_d < bytecode_K and pc_d < bytecode_entries.len) {
+                                const bc_d = bytecode_entries[pc_d];
+                                if (bc_d.rs1 < REG_COUNT) {
+                                    const contrib = eq_table_s4[c3].mul(eq_table_4[bc_d.rs1]);
+                                    phantom_contrib = phantom_contrib.add(contrib);
+                                    if (phantom_count < 10) {
+                                        std.debug.print("  [RS1_PHANTOM] c={} k={} opc=0x{x:0>2} bc_rs1={} rs1_read=false\n", .{
+                                            c3, pc_d, step_d.instruction & 0x7f, bc_d.rs1,
+                                        });
+                                    }
+                                    phantom_count += 1;
+                                }
+                            }
+                        }
+                    }
+                    std.debug.print("  [RS1_PHANTOM] count={}, nonzero={}\n", .{phantom_count, @as(u8, if (!phantom_contrib.eql(F.zero())) 1 else 0)});
+                    // If bc_rs1 - phantom_contrib == oc_rs1, then the phantom entries explain the mismatch
+                    const adjusted = bc_rs1_sum.sub(phantom_contrib);
+                    std.debug.print("  [RS1_PHANTOM] bc_rs1 - phantom == oc_rs1: {}\n", .{@as(u8, if (adjusted.eql(oc_rs1)) 1 else 0)});
+                }
                 const t_rd = trace_rd_sum.toBytesBE();
                 const t_rs1 = trace_rs1_sum.toBytesBE();
                 const t_rs2 = trace_rs2_sum.toBytesBE();
@@ -6871,10 +6929,11 @@ fn decodeImmediateU64(instr: u32) u64 {
             const imm_signed: i64 = @as(i64, @as(i32, @bitCast(imm13 << 19)) >> 19);
             return @bitCast(imm_signed);
         },
-        // U-type: imm[31:12] at [31:12], shifted left by 12 (unsigned)
+        // U-type: imm[31:12] at [31:12], shifted left by 12, SIGN-EXTENDED to 64 bits
+        // Matches Jolt's FormatU.parse: `as i32 as i64 as u64`
         0x37, 0x17 => {
-            const imm_upper = instr & 0xFFFFF000;
-            return @as(u64, imm_upper);
+            const imm_upper: u32 = instr & 0xFFFFF000;
+            return @bitCast(@as(i64, @as(i32, @bitCast(imm_upper))));
         },
         // J-type: imm[20|10:1|11|19:12] at [31:12], sign-extended, *2
         0x6f => {

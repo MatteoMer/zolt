@@ -2253,7 +2253,7 @@ pub const Emulator = struct {
             .instruction = step21_instr, .rs1_value = output_val, .rs2_value = 0,
             .rd_pre_value = rd_pre_value, .rd_value = final_result,
             .rd_index = decoded.rd, .rs1_index = output_reg, .rs2_index = 0,
-            .rd_written = true, // Jolt includes rd=0 writes in RdWa polynomial .rs1_read = true, .rs2_read = false,
+            .rd_written = true, .rs1_read = true, .rs2_read = false,
             .memory_addr = null, .memory_pre_value = null, .memory_value = null,
             .is_memory_write = false, .next_pc = self.state.pc + pc_increment,
             .is_compressed = self.is_compressed, .virtual_sequence_remaining = 0,

@@ -89,7 +89,7 @@ pub fn LookupBits(comptime max_bits: usize) type {
         /// This matches Jolt's uninterleave_bits() which returns (x, y) where:
         ///   x = bits from ODD positions = left operand
         ///   y = bits from EVEN positions = right operand
-        pub fn uninterleave(self: *const Self) struct { left: u64, right: u64 } {
+        pub fn uninterleave(self: *const Self) struct { left: u64, right: u64, left_len: usize, right_len: usize } {
             var left: u64 = 0;
             var right: u64 = 0;
             const half_len = self.len / 2;
@@ -103,7 +103,18 @@ pub fn LookupBits(comptime max_bits: usize) type {
                 left |= @as(u64, @truncate(left_bit)) << @intCast(i);
                 right |= @as(u64, @truncate(right_bit)) << @intCast(i);
             }
-            return .{ .left = left, .right = right };
+            // When len is odd, the last bit is at an even position (2*half_len),
+            // which is a right/even-indexed bit. Jolt's uninterleave_bits handles
+            // this because it processes all 128 bits. We must include it too.
+            const left_len = half_len;
+            var right_len = half_len;
+            if (self.len % 2 == 1) {
+                const last_bit_pos = 2 * half_len;
+                const last_bit = (self.value >> @intCast(last_bit_pos)) & 1;
+                right |= @as(u64, @truncate(last_bit)) << @intCast(half_len);
+                right_len = half_len + 1;
+            }
+            return .{ .left = left, .right = right, .left_len = left_len, .right_len = right_len };
         }
         /// Split into (prefix, suffix) where suffix.len == suffix_len
         pub fn split(self: *const Self, suffix_len: usize) struct { prefix: Self, suffix: Self } {
@@ -1035,8 +1046,8 @@ fn divByZeroPrefixMle(
     const uninterleaved = b.uninterleave();
     // If low-order bits of divisor are not 0s or low-order bits of quotient are not
     // 1s, short-circuit and return 0.
-    const quotient_len = b.len / 2;
-    if (uninterleaved.left != 0 or uninterleaved.right != (@as(u64, 1) << @intCast(quotient_len)) - 1) {
+    // Use right_len (quotient length) which correctly handles odd b.len
+    if (uninterleaved.left != 0 or uninterleaved.right != (@as(u64, 1) << @intCast(uninterleaved.right_len)) - 1) {
         return F.zero();
     }
     var result = checkpoints[@intFromEnum(Prefixes.DivByZero)] orelse F.one();
@@ -1922,15 +1933,13 @@ fn changeDivisorPrefixMle(
             return F.zero();
         }
         const uninterleaved = b.uninterleave();
-        const y_len = b.len / 2;
-        if (uninterleaved.left != 0 or uninterleaved.right != (@as(u64, 1) << @intCast(y_len)) - 1) {
+        if (uninterleaved.left != 0 or uninterleaved.right != (@as(u64, 1) << @intCast(uninterleaved.right_len)) - 1) {
             return F.zero();
         }
         return result.mul(F.fromU64(@as(u64, c)));
     } else if (r_x) |rx| {
         const uninterleaved = b.uninterleave();
-        const y_len = b.len / 2;
-        if (uninterleaved.left != 0 or uninterleaved.right != (@as(u64, 1) << @intCast(y_len)) - 1 or c == 0) {
+        if (uninterleaved.left != 0 or uninterleaved.right != (@as(u64, 1) << @intCast(uninterleaved.right_len)) - 1 or c == 0) {
             return F.zero();
         }
         if (j == 1) {
@@ -1940,8 +1949,7 @@ fn changeDivisorPrefixMle(
         }
     } else {
         const uninterleaved = b.uninterleave();
-        const y_len = b.len / 2;
-        if (b.len > 0 and (uninterleaved.left != 0 or uninterleaved.right != (@as(u64, 1) << @intCast(y_len)) - 1)) {
+        if (b.len > 0 and (uninterleaved.left != 0 or uninterleaved.right != (@as(u64, 1) << @intCast(uninterleaved.right_len)) - 1)) {
             return F.zero();
         }
         return result.mul(F.one().sub(F.fromU64(@as(u64, c))));
@@ -1986,16 +1994,14 @@ fn changeDivisorWPrefixMle(
             return F.zero();
         }
         const uninterleaved = b.uninterleave();
-        const y_len = b.len / 2;
-        if (uninterleaved.left != 0 or uninterleaved.right != (@as(u64, 1) << @intCast(y_len)) - 1) {
+        if (uninterleaved.left != 0 or uninterleaved.right != (@as(u64, 1) << @intCast(uninterleaved.right_len)) - 1) {
             return F.zero();
         }
         return result.mul(F.fromU64(@as(u64, c)));
     } else if (r_x) |rx| {
         if (j > XLEN) {
             const uninterleaved = b.uninterleave();
-            const y_len = b.len / 2;
-            if (uninterleaved.left != 0 or uninterleaved.right != (@as(u64, 1) << @intCast(y_len)) - 1 or c == 0) {
+            if (uninterleaved.left != 0 or uninterleaved.right != (@as(u64, 1) << @intCast(uninterleaved.right_len)) - 1 or c == 0) {
                 return F.zero();
             }
             if (j == XLEN + 1) {
@@ -2006,8 +2012,7 @@ fn changeDivisorWPrefixMle(
         }
     } else if (j > XLEN) {
         const uninterleaved = b.uninterleave();
-        const y_len = b.len / 2;
-        if (b.len > 0 and (uninterleaved.left != 0 or uninterleaved.right != (@as(u64, 1) << @intCast(y_len)) - 1)) {
+        if (b.len > 0 and (uninterleaved.left != 0 or uninterleaved.right != (@as(u64, 1) << @intCast(uninterleaved.right_len)) - 1)) {
             return F.zero();
         }
         return result.mul(F.one().sub(F.fromU64(@as(u64, c))));

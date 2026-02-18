@@ -233,10 +233,19 @@ fn lsbSuffixMle(b: LookupBits(128)) u64 {
     return parts.right & 1;
 }
 
-/// DivByZero suffix: returns 1 if y == 0 (division by zero check)
+/// DivByZero suffix: returns 1 if divisor (x/left) == 0 AND quotient (y/right) == all_ones
+/// Used in ValidDiv0Table (table 17) where the lookup pair is (divisor, quotient).
+/// This detects the division-by-zero case where the quotient must be 2^XLEN - 1 (all ones).
+/// Matches Jolt: divisor_is_zero && quotient_is_all_ones
 fn divByZeroSuffixMle(b: LookupBits(128)) u64 {
     const parts = b.uninterleave();
-    return if (parts.right == 0) 1 else 0;
+    const y_len = b.len / 2;
+    if (y_len == 0) {
+        // When all bits are bound, both conditions reduce to prefix-level checks
+        return if (parts.left == 0) 1 else 0;
+    }
+    const all_ones: u64 = (@as(u64, 1) << @intCast(y_len)) - 1;
+    return if (parts.left == 0 and parts.right == all_ones) 1 else 0;
 }
 
 /// Pow2 suffix: returns 2^y for y in [0, 63]
@@ -508,9 +517,11 @@ pub fn tableSuffixes(table_idx: usize) []const Suffixes {
         // 14: LessThanEqual (UnsignedLessThanEqual)
         14 => &[_]Suffixes{ .One, .LessThan, .Eq },
         // 15: ValidSignedRemainder
-        15 => &[_]Suffixes{ .One, .RightOperandIsZero, .LessThan, .LeftOperandIsZero, .GreaterThan },
+        // Jolt order: [One, LessThan, GreaterThan, LeftOperandIsZero, RightOperandIsZero]
+        15 => &[_]Suffixes{ .One, .LessThan, .GreaterThan, .LeftOperandIsZero, .RightOperandIsZero },
         // 16: ValidUnsignedRemainder
-        16 => &[_]Suffixes{ .One, .RightOperandIsZero, .LessThan },
+        // Jolt order: [One, LessThan, RightOperandIsZero]
+        16 => &[_]Suffixes{ .One, .LessThan, .RightOperandIsZero },
         // 17: ValidDiv0
         17 => &[_]Suffixes{ .One, .LeftOperandIsZero, .DivByZero },
         // 18: HalfwordAlignment

@@ -674,11 +674,11 @@ fn tableCombine(comptime F: type, table_idx: usize, prefixes: []const F, suffixe
             break :blk result;
         },
         // 15: ValidSignedRemainder:
-        // RightOperandIsZero*right_is_zero + PositiveRemainderEqualsDivisor*less_than
+        // Jolt formula: RightOperandIsZero*right_is_zero + PositiveRemainderEqualsDivisor*less_than
         // + PositiveRemainderLessThanDivisor*one + NegativeDivisorZeroRemainder*left_is_zero
         // + NegativeDivisorEqualsRemainder*greater_than + NegativeDivisorGreaterThanRemainder*one
         15 => blk: {
-            // Suffixes: [one, right_operand_is_zero, less_than, left_operand_is_zero, greater_than]
+            // Suffixes (Jolt order): [one, less_than, greater_than, left_operand_is_zero, right_operand_is_zero]
             var result = F.zero();
             if (suffixes.len >= 1) {
                 // PositiveRemainderLessThanDivisor*one + NegativeDivisorGreaterThanRemainder*one
@@ -686,31 +686,38 @@ fn tableCombine(comptime F: type, table_idx: usize, prefixes: []const F, suffixe
                 result = result.add(prefixes[@intFromEnum(Prefixes.NegativeDivisorGreaterThanRemainder)].mul(suffixes[0]));
             }
             if (suffixes.len >= 2) {
-                result = result.add(prefixes[@intFromEnum(Prefixes.RightOperandIsZero)].mul(suffixes[1]));
+                // PositiveRemainderEqualsDivisor*less_than
+                result = result.add(prefixes[@intFromEnum(Prefixes.PositiveRemainderEqualsDivisor)].mul(suffixes[1]));
             }
             if (suffixes.len >= 3) {
-                result = result.add(prefixes[@intFromEnum(Prefixes.PositiveRemainderEqualsDivisor)].mul(suffixes[2]));
+                // NegativeDivisorEqualsRemainder*greater_than
+                result = result.add(prefixes[@intFromEnum(Prefixes.NegativeDivisorEqualsRemainder)].mul(suffixes[2]));
             }
             if (suffixes.len >= 4) {
+                // NegativeDivisorZeroRemainder*left_operand_is_zero
                 result = result.add(prefixes[@intFromEnum(Prefixes.NegativeDivisorZeroRemainder)].mul(suffixes[3]));
             }
             if (suffixes.len >= 5) {
-                result = result.add(prefixes[@intFromEnum(Prefixes.NegativeDivisorEqualsRemainder)].mul(suffixes[4]));
+                // RightOperandIsZero*right_operand_is_zero
+                result = result.add(prefixes[@intFromEnum(Prefixes.RightOperandIsZero)].mul(suffixes[4]));
             }
             break :blk result;
         },
         // 16: ValidUnsignedRemainder: RightOperandIsZero*right_is_zero + LessThan*one + Eq*less_than
         16 => blk: {
-            // Suffixes: [one, right_operand_is_zero, less_than]
+            // Suffixes (Jolt order): [one, less_than, right_operand_is_zero]
             var result = F.zero();
             if (suffixes.len >= 1) {
+                // LessThan * one
                 result = result.add(prefixes[@intFromEnum(Prefixes.LessThan)].mul(suffixes[0]));
             }
             if (suffixes.len >= 2) {
-                result = result.add(prefixes[@intFromEnum(Prefixes.RightOperandIsZero)].mul(suffixes[1]));
+                // Eq * less_than
+                result = result.add(prefixes[@intFromEnum(Prefixes.Eq)].mul(suffixes[1]));
             }
             if (suffixes.len >= 3) {
-                result = result.add(prefixes[@intFromEnum(Prefixes.Eq)].mul(suffixes[2]));
+                // RightOperandIsZero * right_operand_is_zero
+                result = result.add(prefixes[@intFromEnum(Prefixes.RightOperandIsZero)].mul(suffixes[2]));
             }
             break :blk result;
         },

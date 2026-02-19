@@ -3113,13 +3113,24 @@ fn BytecodeReadRafProver(comptime F: type) type {
                             }
                         }
                     }
+                    // Method 3: ACTUAL bytecode entry imm via val_polys[0][k] contribution
+                    // val_polys[0][k] = unexpanded_pc + γ₁¹·imm + Σγ₁^(2+i)·cf[i]
+                    // We compute Σ_k F_s[k] * val_polys[0][k] directly
+                    var vp_sum = F.zero();
+                    for (0..bytecode_K) |k2| {
+                        vp_sum = vp_sum.add(F_s_arrs[0][k2].mul(val_polys[0][k2]));
+                    }
+                    const vpsl = vp_sum.toBytes();
+                    dbg("[BCRAF_DECOMP] Σ F_s*Val_0 (from vp arrays)_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                        vpsl[0], vpsl[1], vpsl[2], vpsl[3], vpsl[4], vpsl[5], vpsl[6], vpsl[7],
+                    });
                     const addr_le = addr_trace.toBytes();
                     const imm_vp_le = imm_valpoly.toBytes();
                     const imm_r1_le = imm_r1cs.toBytes();
                     dbg("[BCRAF_DECOMP] Σeq*addr_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
                         addr_le[0], addr_le[1], addr_le[2], addr_le[3], addr_le[4], addr_le[5], addr_le[6], addr_le[7],
                     });
-                    dbg("[BCRAF_DECOMP] Σeq*imm(valpoly)_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                    dbg("[BCRAF_DECOMP] Σeq*imm(decode)_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
                         imm_vp_le[0], imm_vp_le[1], imm_vp_le[2], imm_vp_le[3], imm_vp_le[4], imm_vp_le[5], imm_vp_le[6], imm_vp_le[7],
                     });
                     dbg("[BCRAF_DECOMP] Σeq*imm(r1cs)_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] diff_count={}\n", .{
@@ -4367,14 +4378,12 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     if (is_signed_format) {
                         // B-type and S-type: signed i64 → sign-extended to i128
                         break :blk fieldFromI128(F, @as(i128, entry.imm));
-                    } else if (opcode_for_imm == 0x37 or opcode_for_imm == 0x17) {
-                        // LUI/AUIPC (U-type): truncate to u32 before converting to field.
-                        const u64_bits: u64 = @bitCast(entry.imm);
-                        const truncated: u32 = @truncate(u64_bits);
-                        break :blk F.fromU64(@as(u64, truncated));
                     } else {
-                        // I-type, J-type, Virtual: u64 zero-extended
-                        // Reinterpret the i64 bit pattern as u64 (same bits)
+                        // All other formats (I-type, U-type LUI/AUIPC, J-type, Virtual):
+                        // Use unsigned u64 bitcast of sign-extended i64 immediate.
+                        // For LUI/AUIPC, entry.imm is sign-extended from i32 to i64,
+                        // so @bitCast gives the full 64-bit sign-extended value,
+                        // matching the R1CS witness encoding in deriveImmediate().
                         break :blk F.fromU64(@as(u64, @bitCast(entry.imm)));
                     }
                 };
@@ -5782,52 +5791,44 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 // Evaluate combined polynomial at challenge (Vandermonde format)
                 current_batched_claim = try UniPoly(F).evaluateVandermondeAt(self.allocator, combined_evals, challenge);
 
-                // VERIFY: eval_from_hint should match evaluateVandermondeAt
-                if (round == 7) {
-                    // Simulate verifier's eval_from_hint
-                    const hint = instance_claims[0]; // wrong - need the batched claim from round 6
-                    _ = hint;
-                    // The real hint is the PREVIOUS batched claim, stored as the hint used for this round
-                    // Actually, the hint for the verifier is p(0)+p(1), which should equal the previous batched claim
-                    // combined_evals[0] + combined_evals[1] should = previous batched claim
-                    // Let's compute eval_from_hint manually
-                    // compressed = [c0, c2, c3, c4, c5]
-                    // c1 = hint - 2*c0 - c2 - c3 - c4 - c5
-                    const hint_val = combined_evals[0].add(combined_evals[1]); // p(0) + p(1) = hint
-                    var c1 = hint_val.sub(compressed[0]).sub(compressed[0]); // hint - 2*c0
-                    for (1..compressed.len) |ci| {
-                        c1 = c1.sub(compressed[ci]);
+                // VERIFY: eval_from_hint should match evaluateVandermondeAt for ALL rounds
+                {
+                    // Simulate verifier's eval_from_hint using stored compressed coefficients
+                    // hint = p(0) + p(1) = combined_evals[0] + combined_evals[1]
+                    const hint_val = combined_evals[0].add(combined_evals[1]);
+                    // Use the STORED coeffs (which may be padded to num_compressed=5)
+                    var c1_efh = hint_val.sub(coeffs[0]).sub(coeffs[0]); // hint - 2*c0
+                    for (1..num_compressed) |ci| {
+                        c1_efh = c1_efh.sub(coeffs[ci]);
                     }
-                    // Evaluate: c0 + c1*x + c2*x^2 + c3*x^3 + c4*x^4 + c5*x^5
-                    var running_point = challenge; // x
-                    var running_sum = compressed[0].add(challenge.mul(c1)); // c0 + x*c1
-                    for (1..compressed.len) |ci| {
-                        running_point = running_point.mul(challenge); // x^(ci+1)
-                        running_sum = running_sum.add(compressed[ci].mul(running_point));
+                    // Evaluate: c0 + c1*x + c2*x^2 + ...
+                    var running_point_efh = challenge; // x
+                    var running_sum_efh = coeffs[0].add(challenge.mul(c1_efh)); // c0 + x*c1
+                    for (1..num_compressed) |ci| {
+                        running_point_efh = running_point_efh.mul(challenge); // x^(ci+1)
+                        running_sum_efh = running_sum_efh.add(coeffs[ci].mul(running_point_efh));
                     }
-                    const efh_le = running_sum.toBytes();
-                    const vdm_le = current_batched_claim.toBytes();
-                    dbg("  [S6P] R7 eval_from_hint=[", .{});
-                    for (0..32) |bi| dbg("{x:0>2}", .{efh_le[bi]});
-                    dbg("]\n  [S6P] R7 vandermonde  =[", .{});
-                    for (0..32) |bi| dbg("{x:0>2}", .{vdm_le[bi]});
-                    dbg("]\n  [S6P] R7 match={}\n", .{running_sum.eql(current_batched_claim)});
-
-                    // Also print c1 and full coefficient array
-                    const c1_le = c1.toBytes();
-                    dbg("  [S6P] R7 c1 (recovered)=[", .{});
-                    for (0..32) |bi| dbg("{x:0>2}", .{c1_le[bi]});
-                    dbg("]\n", .{});
-
-                    // Print full coefficients from Vandermonde interpolation
-                    const full_coeffs = try UniPoly(F).fromEvalsVandermonde(self.allocator, combined_evals);
-                    defer self.allocator.free(full_coeffs);
-                    for (0..full_coeffs.len) |ci| {
-                        const fc_le = full_coeffs[ci].toBytes();
-                        dbg("  [S6P] R7 full_c[{}]=[", .{ci});
-                        for (0..32) |bi| dbg("{x:0>2}", .{fc_le[bi]});
+                    const efh_match = running_sum_efh.eql(current_batched_claim);
+                    if (!efh_match) {
+                        const efh_le = running_sum_efh.toBytes();
+                        const vdm_le = current_batched_claim.toBytes();
+                        dbg("  [S6P] R{} EVAL_MISMATCH! eval_from_hint=[", .{round});
+                        for (0..32) |bi| dbg("{x:0>2}", .{efh_le[bi]});
+                        dbg("]\n  [S6P] R{} EVAL_MISMATCH! vandermonde  =[", .{round});
+                        for (0..32) |bi| dbg("{x:0>2}", .{vdm_le[bi]});
                         dbg("]\n", .{});
+                        // Print hint, coeffs, challenge for diagnosing
+                        const h_le = hint_val.toBytes();
+                        dbg("  [S6P] R{} hint=[", .{round});
+                        for (0..32) |bi| dbg("{x:0>2}", .{h_le[bi]});
+                        dbg("]\n  [S6P] R{} c1_recovered=[", .{round});
+                        const c1_le = c1_efh.toBytes();
+                        for (0..32) |bi| dbg("{x:0>2}", .{c1_le[bi]});
+                        dbg("]\n", .{});
+                        // Also print stored coefficients count vs compressed count
+                        dbg("  [S6P] R{} num_compressed={}, compressed.len={}\n", .{ round, num_compressed, compressed.len });
                     }
+                    dbg("  [S6P] R{} efh_match={}\n", .{ round, @intFromBool(efh_match) });
                 }
 
                 {

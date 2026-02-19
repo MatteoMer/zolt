@@ -1174,6 +1174,24 @@ pub fn ProofConverter(comptime F: type) type {
                 r_cycle,
             );
 
+            // DEBUG: Print the Imm opening claim value (index 8)
+            if (comptime debug_verbose) {
+                const imm_eval = input_evals[r1cs.R1CSInputIndex.Imm.toIndex()];
+                const imm_le = imm_eval.toBytes();
+                dbg("[ZOLT_OC_IMM] oc_Imm_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                    imm_le[0], imm_le[1], imm_le[2], imm_le[3], imm_le[4], imm_le[5], imm_le[6], imm_le[7],
+                });
+                // Print Imm witness values for first few cycles
+                for (0..@min(cycle_witnesses.len, 10)) |c_idx| {
+                    const w_imm = cycle_witnesses[c_idx].values[r1cs.R1CSInputIndex.Imm.toIndex()];
+                    if (!w_imm.eql(F.zero())) {
+                        const wl = w_imm.toBytes();
+                        dbg("[ZOLT_OC_IMM] witness[{}].Imm_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                            c_idx, wl[0], wl[1], wl[2], wl[3], wl[4], wl[5], wl[6], wl[7],
+                        });
+                    }
+                }
+            }
             // DEBUG: Print the first few R1CS input evaluations
             dbg("[ZOLT] OPENING_CLAIMS: r_cycle.len = {}\n", .{r_cycle.len});
             dbg("[ZOLT] OPENING_CLAIMS: cycle_witnesses.len = {}\n", .{cycle_witnesses.len});
@@ -1304,8 +1322,8 @@ pub fn ProofConverter(comptime F: type) type {
                 // Append claim to transcript (matching Jolt's cache_openings behavior)
                 transcript.appendScalar(claim);
 
-                // Debug first few claims, RamAddress (9), RamReadValue, RamWriteValue, and Next* claims
-                if (jolt_idx < 5 or jolt_idx == 9 or (jolt_idx >= 13 and jolt_idx <= 20)) {
+                // Debug first few claims, Imm(8), RamAddress (9), RamReadValue, RamWriteValue, and Next* claims
+                if (jolt_idx < 9 or jolt_idx == 9 or (jolt_idx >= 13 and jolt_idx <= 20)) {
                     dbg("[ZOLT] OPENING_CLAIMS: claim[{}] = {any}, state = {any}\n",
                         .{jolt_idx, claim.toBytesBE(), transcript.state[0..8]});
                 }
@@ -4002,9 +4020,21 @@ pub fn ProofConverter(comptime F: type) type {
             }
             defer stage5_result.deinit();
 
-            // Debug: Print Stage 5 claims for comparison with Jolt
-            dbg("[STAGE5 CLAIMS] regs_val_inc_claim (LE) = {any}\n", .{stage5_result.regs_val_inc_claim.toBytes()});
-            dbg("[STAGE5 CLAIMS] regs_val_wa_claim (LE) = {any}\n", .{stage5_result.regs_val_wa_claim.toBytes()});
+            // Debug: Print Stage 5 opening claims for comparison with Jolt verifier
+            if (comptime debug_verbose) {
+                dbg("[ZOLT S5 CLAIMS] inc_claim (LE) = {any}\n", .{stage5_result.regs_val_inc_claim.toBytes()});
+                dbg("[ZOLT S5 CLAIMS] wa_claim (LE) = {any}\n", .{stage5_result.regs_val_wa_claim.toBytes()});
+                dbg("[ZOLT S5 CLAIMS] ram_ra_claim (LE) = {any}\n", .{stage5_result.ram_ra_claim.toBytes()});
+                dbg("[ZOLT S5 CLAIMS] raf_flag (LE) = {any}\n", .{stage5_result.lookups_raf_flag.toBytes()});
+                for (0..8) |i| {
+                    dbg("[ZOLT S5 CLAIMS] ra_chunk[{}] (LE) = {any}\n", .{ i, stage5_result.lookups_ra_chunks[i].toBytes() });
+                }
+                for (0..41) |i| {
+                    if (!stage5_result.lookups_table_flags[i].eql(F.zero())) {
+                        dbg("[ZOLT S5 CLAIMS] table_flag[{}] (LE) = {any}\n", .{ i, stage5_result.lookups_table_flags[i].toBytes() });
+                    }
+                }
+            }
 
             // RegistersValEvaluation claims
             try jolt_proof.opening_claims.insert(

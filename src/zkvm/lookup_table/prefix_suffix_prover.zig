@@ -504,43 +504,27 @@ pub fn proverMsgReadChecking(
         }
     }
 
-    // Debug: print per-table eval_0 at round 0
+    // Quadratic interpolation: eval_2 = 2*eval_2_right - eval_2_left
+    const eval_2 = eval_2_right.add(eval_2_right).sub(eval_2_left);
+
+    // ALWAYS-ON: print per-table eval_0 and eval_2 at round 0 for Jolt comparison
     if (round == 0) {
-        var sum_per_table = F.zero();
-        for (0..NUM_TABLES) |t_idx| {
-            if (!eval_0_per_table[t_idx].eql(F.zero())) {
-                dbg("[READ_CHECK R0] eval_0_per_table[{}]={x}\n", .{ t_idx, eval_0_per_table[t_idx].toBytesBE()[16..32].* });
-                sum_per_table = sum_per_table.add(eval_0_per_table[t_idx]);
-            }
-        }
-        dbg("[READ_CHECK R0] sum_per_table={x}\n", .{sum_per_table.toBytesBE()[16..32].*});
-        dbg("[READ_CHECK R0] eval_0={x}\n", .{eval_0.toBytesBE()[16..32].*});
-        dbg("[READ_CHECK R0] sum==eval_0: {}\n", .{sum_per_table.eql(eval_0)});
-        // Per-table eval_2 = 2*eval_2_right_per_table - eval_2_left_per_table
+        const print = std.debug.print;
         for (0..NUM_TABLES) |t_idx| {
             const e2l = eval_2_left_per_table[t_idx];
             const e2r = eval_2_right_per_table[t_idx];
             const e2_table = e2r.add(e2r).sub(e2l);
             const e0_table = eval_0_per_table[t_idx];
             if (!e0_table.eql(F.zero()) or !e2_table.eql(F.zero())) {
-                // For a multilinear polynomial, eval_2 should equal 2*eval_1 - eval_0
-                // At round 0, eval_1 for this table = (some unknown). But we can check:
-                // If polynomial is degree 1 in c, then tableCombine(prefix(c), Q(c)) is linear in c
-                // So eval_2 = 2*eval_1 - eval_0 = 2*(eval_2_right with prefix_c1) - eval_0
-                // But computing eval_1 per table requires prefix_c1 evaluation
-                dbg("[READ_CHECK R0] TABLE {} eval_0={x}, eval_2={x}, eval_2_left={x}, eval_2_right={x}\n", .{
+                print("[RC R0] T{} e0={any} e2={any}\n", .{
                     t_idx,
-                    e0_table.toBytesBE()[16..32].*,
-                    e2_table.toBytesBE()[16..32].*,
-                    e2l.toBytesBE()[16..32].*,
-                    e2r.toBytesBE()[16..32].*,
+                    e0_table.toBytes()[0..16].*,
+                    e2_table.toBytes()[0..16].*,
                 });
             }
         }
+        print("[RC R0] TOTAL e0={any} e2={any}\n", .{ eval_0.toBytes()[0..16].*, eval_2.toBytes()[0..16].* });
     }
-
-    // Quadratic interpolation: eval_2 = 2*eval_2_right - eval_2_left
-    const eval_2 = eval_2_right.add(eval_2_right).sub(eval_2_left);
 
     if (round == 0) {
         dbg("[READ_CHECK R0] eval_2_left={x}\n", .{eval_2_left.toBytesBE()[16..32].*});

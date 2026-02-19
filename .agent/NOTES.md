@@ -1,81 +1,26 @@
-# Debugging Notes
+# Debugging Notes - Session 36 (Feb 18, 2026)
 
-## Stage 5 Fix (Session 5) - COMPLETED
+## KEY FINDINGS THIS SESSION
 
-### Root Cause Found
-The Stage 5 bug for collatz, bitwise, and primes was NOT in the prefix-suffix decomposition
-or eval_2 computation. The actual root cause was:
+### 1. All tableCombine formulas VERIFIED to match (ALL 41 tables)
+- Specifically checked GCD-specific tables 15, 16, 17, 31
 
-**lookup_output in combined_vals used rd_value instead of materializeTableEntry(lookup_key)**
+### 2. All suffix orderings and MLE implementations match
 
-For many instruction types, `rd_value ≠ materializeTableEntry(key)`:
-- LUI: rd_value = sign_extend_32_to_64(imm<<12), but table entry = lower64(key)
-- JAL: lookup_output was pc+imm, but table entry at key differs
-- VirtualSRLI: rd_value differs from table MLE output
+### 3. Q suffix polynomial initialization matches Jolt
 
-The initial claim `Σ_j eq(j) * combined_vals[j]` used `lookup_output = rd_value` (wrong),
-while the address round prefix-suffix decomposition correctly used table MLEs. This caused
-the sumcheck chain to diverge from the initial claim.
+### 4. Everything individual component-level matches, yet GCD still fails
 
-### Fix
-Replaced instruction-specific overrides (only ADDIW/ADDW/SUBW) with a general fix:
-```zig
-if (table_idx >= 0) {
-    lookup_output = F.fromU64(Table.materializeTableEntry(table_idx, lookup_idx));
-}
+### 5. Right half Q polynomials are ALL ZERO for GCD at round 0
+
+## NEXT APPROACH
+Compare actual compressed polynomial coefficients (c0, c2) at round 0 between Jolt and Zolt.
+If round 0 coefficients match, bug is in later rounds.
+If they differ, need to find which instance contribution differs.
+
+## BUILD COMMANDS
+```bash
+zig build -Doptimize=ReleaseFast
+./zig-out/bin/zolt prove examples/gcd.elf --jolt-format -o /tmp/zolt_proof_dory.bin --export-preprocessing /tmp/zolt_preprocessing.bin
+cd /home/vivado/projects/jolt && cargo test --package jolt-core --features zolt-debug zolt_compat_test::tests::test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```
-
-Also implemented:
-- `VirtualSRL.materializeEntry()` for the VirtualSRL table
-- General `materializeTableEntry()` function dispatching to all 30+ tables
-
-### Previous Hypothesis Was Wrong
-The earlier sessions hypothesized that the prefix MLE or suffix values were computed
-incorrectly at c=2. This was incorrect - the prefix-suffix decomposition was always
-correct. The bug was in the initial combined_vals computation.
-
-## Stage 6 Analysis (Session 5) - IN PROGRESS
-
-### Root Cause
-gcd.elf (Stage 6 failure) and primes.elf (Stage 6 failure) use division/remainder
-instructions that Zolt doesn't decompose into virtual instruction sequences:
-
-- gcd.elf uses: divw (21 steps), remw (21 steps), mulw (2 steps)
-- primes.elf uses: remuw (12 steps), mulw (2 steps)
-
-In Jolt, these are expanded into complex inline sequences:
-- DIVW/REMW → 21 virtual instructions each
-- REMUW → 12 virtual instructions
-- Each uses VirtualAdvice, VirtualSignExtendWord, VirtualAssertEQ, etc.
-
-Zolt currently executes these as single trace steps, creating a fundamental mismatch
-in trace structure, bytecode, and all subsequent proofs.
-
-### Required New Virtual Instructions
-- VirtualAdvice - Oracle-provided values (quotient, remainder)
-- VirtualAssertEQ - Assert two values are equal
-- VirtualAssertValidDiv0 - Validate division by zero handling
-- VirtualChangeDivisorW/VirtualChangeDivisor - Handle overflow cases
-- VirtualZeroExtendWord - Zero-extend to 32 bits
-- VirtualAssertValidUnsignedRemainder - Verify |remainder| < |divisor|
-- VirtualAssertMulUNoOverflow - Verify unsigned multiply doesn't overflow
-- VirtualAssertLTE - Less than or equal assertion
-- VirtualMovsign - Extract sign bit
-
-### Required New Lookup Tables
-- ValidDiv0Table (index 17)
-- ValidUnsignedRemainderTable (index 16)
-- VirtualChangeDivisorWTable (index 29)
-- VirtualChangeDivisorTable
-- LowerHalfWordTable
-- LTETable
-- VirtualAssertMulUNoOverflowTable
-- MovsignTable
-
-### Scope
-This is a multi-day effort involving:
-1. Tracer: Multi-step execution with virtual register tracking
-2. Preprocessing: Bytecode expansion for all division variants
-3. Lookup tables: New table implementations and materializeEntry functions
-4. R1CS constraints: New circuit flags for virtual instructions
-5. All 8 proof stages must handle the expanded traces correctly

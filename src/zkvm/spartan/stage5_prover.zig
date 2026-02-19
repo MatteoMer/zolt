@@ -1791,6 +1791,17 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             var lookups_claim = lookups_input; // Instance 2: LookupsReadRaf (no scaling, active from round 0)
             const batch2_inv = batch2.inverse().?; // Pre-compute for deriving Instance 2 from batched claim
 
+            // DEBUG: Print initial claims
+            {
+                const print = std.debug.print;
+                print("[ZOLT INIT] lookups_input (LE) = {any}\n", .{lookups_input.toBytes()[0..16].*});
+                print("[ZOLT INIT] regs_scaled (LE) = {any}\n", .{regs_scaled.toBytes()[0..16].*});
+                print("[ZOLT INIT] batched_claim (LE) = {any}\n", .{batched_claim.toBytes()[0..16].*});
+                print("[ZOLT INIT] batch0 (LE) = {any}\n", .{batch0.toBytes()[0..16].*});
+                print("[ZOLT INIT] batch1 (LE) = {any}\n", .{batch1.toBytes()[0..16].*});
+                print("[ZOLT INIT] batch2 (LE) = {any}\n", .{batch2.toBytes()[0..16].*});
+            }
+
             // ===================================================================
             // RamRaClaimReduction State Initialization
             // ===================================================================
@@ -3234,7 +3245,27 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     const eval_0_inst2 = read_checking_evals[0].add(raf_evals[0]);
                     const eval_2_inst2 = read_checking_evals[1].add(raf_evals[1]);
 
-                    // *** PER-ROUND BRUTE FORCE eval_0 CHECK ***
+                    // ALWAYS-ON: Print Instance 2 eval_0 and eval_2 for comparison with Jolt prover
+                    if (round < 5 or (round >= 14 and round <= 17) or round == 127) {
+                        const print = std.debug.print;
+                        print("[ZOLT INST2 R{}] previous_claim = {any}\n", .{ round, lookups_claim.toBytes()[0..16].* });
+                        print("[ZOLT INST2 R{}] eval_at_0 = {any}\n", .{ round, eval_0_inst2.toBytes()[0..16].* });
+                        print("[ZOLT INST2 R{}] eval_at_2 = {any}\n", .{ round, eval_2_inst2.toBytes()[0..16].* });
+                        print("[ZOLT INST2 R{}] read_checking = [{any}, {any}]\n", .{
+                            round,
+                            read_checking_evals[0].toBytes()[0..16].*,
+                            read_checking_evals[1].toBytes()[0..16].*,
+                        });
+                        print("[ZOLT INST2 R{}] raf = [{any}, {any}]\n", .{
+                            round,
+                            raf_evals[0].toBytes()[0..16].*,
+                            raf_evals[1].toBytes()[0..16].*,
+                        });
+                    }
+
+                    // (TARGETED DEBUG moved after eval_1 derivation below)
+
+                    // *** PER-ROUND BRUTE FORCE eval_0 CHECK (ALWAYS ON) ***
                     // bf_weights[j] = eq(j,r_red) * cv[j] * Π_{i<round} eq_bit(r_i, K(j)_{127-i})
                     // eval_0 = Σ_{j: bit(round) of K(j) = 0} bf_weights[j]
                     {
@@ -3250,29 +3281,27 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             }
                         }
                         const bf_e0_match = bf_e0.eql(eval_0_inst2);
-                        if (!bf_e0_match or round < 3 or round % 8 == 7 or round == 127) {
-                            dbg("[BF_EVAL0 R{}] bf_e0={x}, ps_e0={x}, match={}\n", .{
+                        if (!bf_e0_match) {
+                            const print = std.debug.print;
+                            // Also check claim consistency
+                            const bf_claim = bf_e0.add(bf_e1);
+                            print("[BF_EVAL0 MISMATCH R{}] bf_e0={x}, ps_e0={x}\n", .{
                                 round,
                                 bf_e0.toBytesBE()[16..32].*,
                                 eval_0_inst2.toBytesBE()[16..32].*,
-                                bf_e0_match,
                             });
-                            if (!bf_e0_match) {
-                                // Also check claim consistency
-                                const bf_claim = bf_e0.add(bf_e1);
-                                dbg("[BF_EVAL0 R{}] bf_claim={x}, ps_claim={x}, claim_match={}\n", .{
-                                    round,
-                                    bf_claim.toBytesBE()[16..32].*,
-                                    lookups_claim.toBytesBE()[16..32].*,
-                                    bf_claim.eql(lookups_claim),
-                                });
-                                // Print read_checking and raf components separately
-                                dbg("[BF_EVAL0 R{}] ps_rc_e0={x}, ps_raf_e0={x}\n", .{
-                                    round,
-                                    read_checking_evals[0].toBytesBE()[16..32].*,
-                                    raf_evals[0].toBytesBE()[16..32].*,
-                                });
-                            }
+                            print("[BF_EVAL0 R{}] bf_claim={x}, ps_claim={x}, claim_match={}\n", .{
+                                round,
+                                bf_claim.toBytesBE()[16..32].*,
+                                lookups_claim.toBytesBE()[16..32].*,
+                                bf_claim.eql(lookups_claim),
+                            });
+                            // Print read_checking and raf components separately
+                            print("[BF_EVAL0 R{}] ps_rc_e0={x}, ps_raf_e0={x}\n", .{
+                                round,
+                                read_checking_evals[0].toBytesBE()[16..32].*,
+                                raf_evals[0].toBytesBE()[16..32].*,
+                            });
                         }
                     }
 
@@ -3283,32 +3312,27 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     const expected_eval_2 = eval_1_inst2.add(eval_1_inst2).sub(eval_0_inst2);
                     const eval_2_matches_ml = eval_2_inst2.eql(expected_eval_2);
                     if (!eval_2_matches_ml) {
-                        dbg("[MULTILINEAR BUG R{}] eval_2_inst2 != 2*eval_1 - eval_0!\n", .{round});
-                        dbg("  actual eval_2   = {x}\n", .{eval_2_inst2.toBytesBE()});
-                        dbg("  expected (2e1-e0) = {x}\n", .{expected_eval_2.toBytesBE()});
-                        dbg("  eval_0 = {x}\n", .{eval_0_inst2.toBytesBE()});
-                        dbg("  eval_1 = {x}\n", .{eval_1_inst2.toBytesBE()});
-                        dbg("  claim  = {x}\n", .{lookups_claim.toBytesBE()});
-                        // Check read_checking and raf separately for multilinearity
-                        // Each should independently satisfy: eval_2 = 2*eval_1 - eval_0
-                        // For RC: eval_1 = (total_eval_1) - raf_eval_0... no, they're separate sums
-                        // Actually we can't easily get separate eval_1 for RC and RAF from the combined claim
-                        // But we CAN check if the prefix formula gives the right answer by computing
-                        // expected_rc_e2 = rc_e0 (since all are in left half, if RC is ML then e2=-e0)
-                        // Wait - need separate claims for that. Just print the values:
-                        dbg("  read_checking[0] (e0) = {x}\n", .{read_checking_evals[0].toBytesBE()});
-                        dbg("  read_checking[1] (e2) = {x}\n", .{read_checking_evals[1].toBytesBE()});
-                        dbg("  raf[0] (e0) = {x}\n", .{raf_evals[0].toBytesBE()});
-                        dbg("  raf[1] (e2) = {x}\n", .{raf_evals[1].toBytesBE()});
-                    } else if (round < 3 or round == 7 or round == 15 or round == 127) {
-                        dbg("[MULTILINEAR OK R{}] eval_2 matches 2*eval_1 - eval_0\n", .{round});
+                        const print = std.debug.print;
+                        print("[MULTILINEAR BUG R{}] eval_2_inst2 != 2*eval_1 - eval_0!\n", .{round});
+                        print("  actual eval_2   = {x}\n", .{eval_2_inst2.toBytesBE()});
+                        print("  expected (2e1-e0) = {x}\n", .{expected_eval_2.toBytesBE()});
+                        print("  eval_0 = {x}\n", .{eval_0_inst2.toBytesBE()});
+                        print("  eval_1 = {x}\n", .{eval_1_inst2.toBytesBE()});
+                        print("  claim  = {x}\n", .{lookups_claim.toBytesBE()});
+                        print("  read_checking[0] (e0) = {x}\n", .{read_checking_evals[0].toBytesBE()});
+                        print("  read_checking[1] (e2) = {x}\n", .{read_checking_evals[1].toBytesBE()});
+                        print("  raf[0] (e0) = {x}\n", .{raf_evals[0].toBytesBE()});
+                        print("  raf[1] (e2) = {x}\n", .{raf_evals[1].toBytesBE()});
                     }
-                    // Debug: print evaluations for select rounds
-                    if (round < 3 or round == 7 or round == 15 or round == 127) {
-                        dbg("[ZOLT INST2 R{}] previous_claim = {any}\n", .{ round, lookups_claim.toBytes()[0..16].* });
-                        dbg("[ZOLT INST2 R{}] eval_at_0 = {any}\n", .{ round, eval_0_inst2.toBytes()[0..16].* });
-                        dbg("[ZOLT INST2 R{}] eval_at_1 = {any}\n", .{ round, eval_1_inst2.toBytes()[0..16].* });
-                        dbg("[ZOLT INST2 R{}] eval_at_2 = {any}\n", .{ round, eval_2_inst2.toBytes()[0..16].* });
+                    // TARGETED DEBUG: Print Instance 2 values in LE format for Jolt comparison
+                    if (round < 4 or round == 7 or round == 8 or round == 15 or round == 16 or round == 127) {
+                        const print = std.debug.print;
+                        print("[ZOLT INST2 R{}] previous_claim = {any}\n", .{ round, lookups_claim.toBytes()[0..16].* });
+                        print("[ZOLT INST2 R{}] eval_at_0 = {any}\n", .{ round, eval_0_inst2.toBytes()[0..16].* });
+                        print("[ZOLT INST2 R{}] eval_at_1 = {any}\n", .{ round, eval_1_inst2.toBytes()[0..16].* });
+                        print("[ZOLT INST2 R{}] eval_at_2 = {any}\n", .{ round, eval_2_inst2.toBytes()[0..16].* });
+                        print("[ZOLT INST2 R{}] read_checking = [{any}, {any}]\n", .{ round, read_checking_evals[0].toBytes()[0..16].*, read_checking_evals[1].toBytes()[0..16].* });
+                        print("[ZOLT INST2 R{}] raf = [{any}, {any}]\n", .{ round, raf_evals[0].toBytes()[0..16].*, raf_evals[1].toBytes()[0..16].* });
                     }
 
                     // BRUTE FORCE VERIFICATION: At round 0, compute the Instance 2 eval_0
@@ -3334,14 +3358,18 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 bf_eval_1_r0 = bf_eval_1_r0.add(contrib);
                             }
                         }
-                        const bf_eval_2_r0 = bf_eval_1_r0.add(bf_eval_1_r0).sub(bf_eval_0_r0);
-                        dbg("[BRUTE R0] eval_0 = {x}\n", .{bf_eval_0_r0.toBytesBE()});
-                        dbg("[BRUTE R0] eval_1 = {x}\n", .{bf_eval_1_r0.toBytesBE()});
-                        dbg("[BRUTE R0] eval_2 (2*e1-e0) = {x}\n", .{bf_eval_2_r0.toBytesBE()});
-                        dbg("[BRUTE R0] prefix-suffix e0 = {x}\n", .{eval_0_inst2.toBytesBE()});
-                        dbg("[BRUTE R0] prefix-suffix e2 = {x}\n", .{eval_2_inst2.toBytesBE()});
-                        dbg("[BRUTE R0] e0 match: {}\n", .{bf_eval_0_r0.eql(eval_0_inst2)});
-                        dbg("[BRUTE R0] e2 match: {}\n", .{bf_eval_2_r0.eql(eval_2_inst2)});
+                        {
+                            const print = std.debug.print;
+                            const bf_claim_r0 = bf_eval_0_r0.add(bf_eval_1_r0);
+                            print("[BRUTE R0] bf_eval_0 = {any}\n", .{bf_eval_0_r0.toBytes()[0..16].*});
+                            print("[BRUTE R0] bf_eval_1 = {any}\n", .{bf_eval_1_r0.toBytes()[0..16].*});
+                            print("[BRUTE R0] bf_claim (e0+e1) = {any}\n", .{bf_claim_r0.toBytes()[0..16].*});
+                            print("[BRUTE R0] lookups_claim = {any}\n", .{lookups_claim.toBytes()[0..16].*});
+                            print("[BRUTE R0] claim_match = {}\n", .{bf_claim_r0.eql(lookups_claim)});
+                            print("[BRUTE R0] ps_eval_0 = {any}\n", .{eval_0_inst2.toBytes()[0..16].*});
+                            print("[BRUTE R0] ps_eval_2 = {any}\n", .{eval_2_inst2.toBytes()[0..16].*});
+                            print("[BRUTE R0] bf_eval_0 == ps_eval_0: {}\n", .{bf_eval_0_r0.eql(eval_0_inst2)});
+                        }
                     }
                     if (round < 3 or round == 7 or round == 15 or round == 127) {
                         const bit_pos = LOOKUPS_LOG_K - 1 - round;
@@ -3753,6 +3781,15 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     const challenge = transcript.challengeScalar();
                     challenges[round] = challenge;
 
+                    // DEBUG: Print challenge and coefficients for comparison with Jolt verifier
+                    if (round < 4 or round == 7 or round == 127 or round == 128) {
+                        const print = std.debug.print;
+                        print("[ZOLT S5V R{}] hint={any}\n", .{ round, current_batched_claim.toBytes()[0..16].* });
+                        print("[ZOLT S5V R{}] c0={any}\n", .{ round, coeffs[0].toBytes()[0..16].* });
+                        print("[ZOLT S5V R{}] c2={any}\n", .{ round, coeffs[1].toBytes()[0..16].* });
+                        print("[ZOLT S5V R{}] challenge={any}\n", .{ round, challenge.toBytes()[0..16].* });
+                    }
+
                     // Update current_batched_claim by evaluating degree-2 polynomial at challenge
                     // p(r) = c0 + r*c1 + r^2*c2
                     // where c1 = claim - 2*c0 - c2 (from p(0)+p(1) = claim)
@@ -3789,6 +3826,14 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     const inst2_c2 = eval_2_inst2.sub(eval_1_inst2).sub(eval_1_inst2).add(eval_0_inst2).mul(F.fromU64(2).inverse().?);
                     const inst2_c1 = eval_1_inst2.sub(eval_0_inst2).sub(inst2_c2);
                     const inst2_at_r = inst2_c0.add(inst2_c1.mulHiBigIntU128(challenge.limbs)).add(inst2_c2.mul(r2));
+
+                    // ALWAYS-ON: Print Instance 2 poly coefficients (compare with Jolt prover)
+                    if (round < 5) {
+                        const print = std.debug.print;
+                        print("[ZOLT INST2 POLY R{}] c0={any}\n", .{ round, inst2_c0.toBytes()[0..16].* });
+                        print("[ZOLT INST2 POLY R{}] c1={any}\n", .{ round, inst2_c1.toBytes()[0..16].* });
+                        print("[ZOLT INST2 POLY R{}] c2={any}\n", .{ round, inst2_c2.toBytes()[0..16].* });
+                    }
 
                     // Debug: show claim chain for first 3 rounds and last 3 address rounds
                     if (round < 3 or (round >= 125 and round < 128)) {
@@ -4028,35 +4073,27 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             }
                             bf_chain_sum = bf_chain_sum.add(u_j.mul(eq_addr).mul(cv_j));
                         }
-                        dbg("[BF_CHAIN R{}] bf_sum={x}, chain={x}, match={}\n", .{
+                        std.debug.print("[BF_CHAIN R{}] match={}\n", .{
                             round,
-                            bf_chain_sum.toBytesBE()[16..32].*,
-                            lookups_claim.toBytesBE()[16..32].*,
                             bf_chain_sum.eql(lookups_claim),
                         });
                     }
 
-                    // CONSISTENCY CHECK: batch0*inst0 + batch1*inst1 + batch2*inst2 == batched_claim
-                    // (placed AFTER Instance 1 claim update and lookups_claim derivation)
-                    // Run at EVERY round to detect divergence
+                    // BINARY SEARCH: Compute "correct" Instance 2 claim from batched polynomial
+                    // and compare with lookups_claim (which is derived from eval_0/eval_2)
                     {
-                        const recon = batch0.mul(regs_val_current_claim).add(batch1.mul(ram_ra_current_claim)).add(batch2.mul(lookups_claim));
-                        const matches = recon.eql(current_batched_claim);
-                        if (!matches or round < 3 or round == 127) {
-                            dbg("[CONSISTENCY R{}] batch0*inst0+batch1*inst1+batch2*inst2 == batched: {}\n", .{ round, matches });
-                        }
-                        if (!matches) {
-                            dbg("[CONSISTENCY R{}] MISMATCH! recon={x}, batched={x}\n", .{
-                                round,
-                                recon.toBytesBE()[16..32].*,
-                                current_batched_claim.toBytesBE()[16..32].*,
-                            });
-                            dbg("[CONSISTENCY R{}]   inst0={x}, inst1={x}, inst2={x}\n", .{
-                                round,
-                                regs_val_current_claim.toBytesBE()[16..32].*,
-                                ram_ra_current_claim.toBytesBE()[16..32].*,
-                                lookups_claim.toBytesBE()[16..32].*,
-                            });
+                        // The correct inst2 claim should equal the one derived from evaluating
+                        // the Instance 2 polynomial at the challenge. If eval_0_inst2 or eval_2_inst2
+                        // were wrong, lookups_claim would be wrong.
+                        // But since consistency holds, lookups_claim IS correct for the batched polynomial.
+                        // The issue is that the BATCHED polynomial encodes wrong inst2 values.
+                        // So let's compare eval_0_inst2 with the "correct" eval_0 that would make
+                        // the batched output_claim match expected_output_claim.
+                        //
+                        // For now, just print the first round where lookups_claim doesn't match
+                        // what a brute force computation gives.
+                        if (round < 3 or round == 15 or round == 16 or round == 31 or round == 32 or round == 127) {
+                            std.debug.print("[INST2_CHAIN R{}] lookups_claim = {any}\n", .{ round, lookups_claim.toBytes()[0..16].* });
                         }
                     }
 
@@ -4188,11 +4225,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                                 brute_sum = brute_sum.add(lookups_eq_evals[jj].mul(lookups_combined_vals[jj]));
                             }
                             const drift_match = brute_sum.eql(lookups_claim);
-                            dbg("[DRIFT_CHECK Phase {}] brute_sum(eq*combined) = {x}\n", .{ current_phase, brute_sum.toBytesBE()[16..32].* });
-                            dbg("[DRIFT_CHECK Phase {}] lookups_claim (poly chain) = {x}\n", .{ current_phase, lookups_claim.toBytesBE()[16..32].* });
-                            dbg("[DRIFT_CHECK Phase {}] match = {}\n", .{ current_phase, drift_match });
-                            if (!drift_match) {
-                                dbg("[DRIFT_CHECK Phase {}] *** DIVERGENCE DETECTED at phase transition 0->{} ***\n", .{ current_phase, current_phase });
+                            {
+                                const print = std.debug.print;
+                                print("[DRIFT_CHECK Phase {}] brute_sum = {any}\n", .{ current_phase, brute_sum.toBytes()[0..16].* });
+                                print("[DRIFT_CHECK Phase {}] lookups_claim = {any}\n", .{ current_phase, lookups_claim.toBytes()[0..16].* });
+                                print("[DRIFT_CHECK Phase {}] match = {}\n", .{ current_phase, drift_match });
                             }
                         }
 
@@ -4682,6 +4719,231 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         for (0..NUM_TABLES) |t_idx| {
                             if (!table_values[t_idx].eql(F.zero())) {
                                 dbg("  table[{}] = {x}\n", .{ t_idx, table_values[t_idx].toBytesBE()[16..32].* });
+                            }
+                        }
+
+                        // ============================================================
+                        // ALWAYS-ON: Direct MLE verification for ALL tables
+                        // Computes table MLE directly from challenges and compares
+                        // with prefix-suffix decomposition result
+                        // ============================================================
+                        {
+                            const print = std.debug.print;
+                            var any_mismatch = false;
+
+                            // Table 0: RangeCheck - Σ 2^(63-i) * r[64+i]
+                            {
+                                var direct = F.zero();
+                                for (0..64) |i| {
+                                    const r_i = challenges[64 + i];
+                                    const shift: u6 = @intCast(63 - i);
+                                    direct = direct.add(F.fromU64(@as(u64, 1) << shift).mul(r_i));
+                                }
+                                if (!direct.eql(table_values[0])) {
+                                    print("[TABLE_MLE_CHECK] T0 RangeCheck MISMATCH!\n", .{});
+                                    print("  direct = {any}\n", .{direct.toBytes()[0..16].*});
+                                    print("  ps     = {any}\n", .{table_values[0].toBytes()[0..16].*});
+                                    any_mismatch = true;
+                                }
+                            }
+
+                            // Table 1: RangeCheckAligned - Σ 2^(63-i) * r[64+i] but requires alignment check
+                            // Skipping - uses same formula as RangeCheck for MLE
+
+                            // Table 2: And - Σ 2^(63-i) * r[2i] * r[2i+1]
+                            {
+                                var direct = F.zero();
+                                for (0..64) |i| {
+                                    const shift: u6 = @intCast(63 - i);
+                                    direct = direct.add(F.fromU64(@as(u64, 1) << shift).mul(challenges[2 * i].mul(challenges[2 * i + 1])));
+                                }
+                                if (!direct.eql(table_values[2])) {
+                                    print("[TABLE_MLE_CHECK] T2 And MISMATCH!\n", .{});
+                                    any_mismatch = true;
+                                }
+                            }
+
+                            // Table 4: Or - Σ 2^(63-i) * (x + y - x*y)
+                            {
+                                var direct = F.zero();
+                                for (0..64) |i| {
+                                    const x_i = challenges[2 * i];
+                                    const y_i = challenges[2 * i + 1];
+                                    const shift: u6 = @intCast(63 - i);
+                                    direct = direct.add(F.fromU64(@as(u64, 1) << shift).mul(x_i.add(y_i).sub(x_i.mul(y_i))));
+                                }
+                                if (!direct.eql(table_values[4])) {
+                                    print("[TABLE_MLE_CHECK] T4 Or MISMATCH!\n", .{});
+                                    any_mismatch = true;
+                                }
+                            }
+
+                            // Table 5: Xor - Σ 2^(63-i) * ((1-x)*y + x*(1-y))
+                            {
+                                var direct = F.zero();
+                                for (0..64) |i| {
+                                    const x_i = challenges[2 * i];
+                                    const y_i = challenges[2 * i + 1];
+                                    const shift: u6 = @intCast(63 - i);
+                                    const xor_val = F.one().sub(x_i).mul(y_i).add(x_i.mul(F.one().sub(y_i)));
+                                    direct = direct.add(F.fromU64(@as(u64, 1) << shift).mul(xor_val));
+                                }
+                                if (!direct.eql(table_values[5])) {
+                                    print("[TABLE_MLE_CHECK] T5 Xor MISMATCH!\n", .{});
+                                    any_mismatch = true;
+                                }
+                            }
+
+                            // Table 6: Equal - Π (x*y + (1-x)*(1-y))
+                            {
+                                var direct = F.one();
+                                for (0..64) |i| {
+                                    const x_i = challenges[2 * i];
+                                    const y_i = challenges[2 * i + 1];
+                                    direct = direct.mul(x_i.mul(y_i).add(F.one().sub(x_i).mul(F.one().sub(y_i))));
+                                }
+                                if (!direct.eql(table_values[6])) {
+                                    print("[TABLE_MLE_CHECK] T6 Equal MISMATCH!\n", .{});
+                                    any_mismatch = true;
+                                }
+                            }
+
+                            // Table 9: NotEqual - 1 - Equal
+                            {
+                                var eq_val = F.one();
+                                for (0..64) |i| {
+                                    const x_i = challenges[2 * i];
+                                    const y_i = challenges[2 * i + 1];
+                                    eq_val = eq_val.mul(x_i.mul(y_i).add(F.one().sub(x_i).mul(F.one().sub(y_i))));
+                                }
+                                const direct = F.one().sub(eq_val);
+                                if (!direct.eql(table_values[9])) {
+                                    print("[TABLE_MLE_CHECK] T9 NotEqual MISMATCH!\n", .{});
+                                    any_mismatch = true;
+                                }
+                            }
+
+                            // Table 11: UnsignedLessThan - Σ (1-x)*y * eq_prefix
+                            {
+                                var direct = F.zero();
+                                var eq_term = F.one();
+                                for (0..64) |i| {
+                                    const x_i = challenges[2 * i];
+                                    const y_i = challenges[2 * i + 1];
+                                    direct = direct.add(F.one().sub(x_i).mul(y_i).mul(eq_term));
+                                    eq_term = eq_term.mul(x_i.mul(y_i).add(F.one().sub(x_i).mul(F.one().sub(y_i))));
+                                }
+                                if (!direct.eql(table_values[11])) {
+                                    print("[TABLE_MLE_CHECK] T11 UnsignedLessThan MISMATCH!\n", .{});
+                                    any_mismatch = true;
+                                }
+                            }
+
+                            // Table 16: ValidUnsignedRemainder - lt + divisor_is_zero
+                            {
+                                var divisor_is_zero = F.one();
+                                var lt = F.zero();
+                                var eq_term = F.one();
+                                for (0..64) |i| {
+                                    const x_i = challenges[2 * i];
+                                    const y_i = challenges[2 * i + 1];
+                                    divisor_is_zero = divisor_is_zero.mul(F.one().sub(y_i));
+                                    lt = lt.add(F.one().sub(x_i).mul(y_i).mul(eq_term));
+                                    eq_term = eq_term.mul(x_i.mul(y_i).add(F.one().sub(x_i).mul(F.one().sub(y_i))));
+                                }
+                                const direct = lt.add(divisor_is_zero);
+                                if (!direct.eql(table_values[16])) {
+                                    print("[TABLE_MLE_CHECK] T16 ValidUnsignedRemainder MISMATCH!\n", .{});
+                                    print("  direct = {any}\n", .{direct.toBytes()[0..16].*});
+                                    print("  ps     = {any}\n", .{table_values[16].toBytes()[0..16].*});
+                                    any_mismatch = true;
+                                }
+                            }
+
+                            // Table 17: ValidDiv0 - 1 - divisor_is_zero + is_valid_div_by_zero
+                            // Interleaving: (divisor, quotient) so x=divisor, y=quotient
+                            {
+                                var divisor_is_zero = F.one();
+                                var is_valid_div_by_zero = F.one();
+                                for (0..64) |i| {
+                                    const x_i = challenges[2 * i]; // divisor bit
+                                    const y_i = challenges[2 * i + 1]; // quotient bit
+                                    divisor_is_zero = divisor_is_zero.mul(F.one().sub(x_i));
+                                    is_valid_div_by_zero = is_valid_div_by_zero.mul(F.one().sub(x_i).mul(y_i));
+                                }
+                                const direct = F.one().sub(divisor_is_zero).add(is_valid_div_by_zero);
+                                if (!direct.eql(table_values[17])) {
+                                    print("[TABLE_MLE_CHECK] T17 ValidDiv0 MISMATCH!\n", .{});
+                                    print("  direct = {any}\n", .{direct.toBytes()[0..16].*});
+                                    print("  ps     = {any}\n", .{table_values[17].toBytes()[0..16].*});
+                                    any_mismatch = true;
+                                }
+                            }
+
+                            // Table 21: SignExtendHalfWord - uses half-word sign extension
+                            // Skipping complex formula
+
+                            // Table 27: VirtualSRA
+                            {
+                                var result = F.zero();
+                                var sign_extension = F.zero();
+                                for (0..64) |i| {
+                                    const x_i = challenges[2 * i];
+                                    const y_i = challenges[2 * i + 1];
+                                    result = result.mul(F.one().add(y_i));
+                                    result = result.add(x_i.mul(y_i));
+                                    if (i != 0) {
+                                        sign_extension = sign_extension.add(F.fromU64(@as(u64, 1) << @intCast(i)).mul(F.one().sub(y_i)));
+                                    }
+                                }
+                                const direct = result.add(challenges[0].mul(sign_extension));
+                                if (!direct.eql(table_values[27])) {
+                                    print("[TABLE_MLE_CHECK] T27 VirtualSRA MISMATCH!\n", .{});
+                                    print("  direct = {any}\n", .{direct.toBytes()[0..16].*});
+                                    print("  ps     = {any}\n", .{table_values[27].toBytes()[0..16].*});
+                                    any_mismatch = true;
+                                }
+                            }
+
+                            // Table 31: VirtualChangeDivisorW
+                            {
+                                const sign_bit = challenges[65]; // r[XLEN+1] = r[65]
+                                var divisor_value = F.zero();
+                                for (32..64) |i| { // i in XLEN/2..XLEN
+                                    const bit_value = challenges[2 * i + 1];
+                                    const shift: u6 = @intCast(63 - i);
+                                    divisor_value = divisor_value.add(F.fromU64(@as(u64, 1) << shift).mul(bit_value));
+                                }
+                                var x_product: F = challenges[64]; // r[XLEN] = r[64]
+                                for (33..64) |i| { // i in XLEN/2+1..XLEN
+                                    x_product = x_product.mul(F.one().sub(challenges[2 * i]));
+                                }
+                                var y_product = F.one();
+                                for (32..64) |i| { // i in XLEN/2..XLEN
+                                    y_product = y_product.mul(challenges[2 * i + 1]);
+                                }
+                                // sign_extension = (2^64 - 2^32) * sign_bit
+                                const two_pow_64 = F.fromBytes(&[_]u8{
+                                    0, 0, 0, 0, 0, 0, 0, 0,
+                                    1, 0, 0, 0, 0, 0, 0, 0,
+                                    0, 0, 0, 0, 0, 0, 0, 0,
+                                    0, 0, 0, 0, 0, 0, 0, 0,
+                                });
+                                const two_pow_32 = F.fromU64(1 << 32);
+                                const sign_ext = two_pow_64.sub(two_pow_32).mul(sign_bit);
+                                // adjustment = 2 - 2^64
+                                const adjustment = F.fromU64(2).sub(two_pow_64);
+                                const direct = divisor_value.add(adjustment.mul(x_product).mul(y_product)).add(sign_ext);
+                                if (!direct.eql(table_values[31])) {
+                                    print("[TABLE_MLE_CHECK] T31 VirtualChangeDivisorW MISMATCH!\n", .{});
+                                    print("  direct = {any}\n", .{direct.toBytes()[0..16].*});
+                                    print("  ps     = {any}\n", .{table_values[31].toBytes()[0..16].*});
+                                    any_mismatch = true;
+                                }
+                            }
+
+                            if (!any_mismatch) {
+                                print("[TABLE_MLE_CHECK] ALL checked tables MATCH direct MLE!\n", .{});
                             }
                         }
 
@@ -5426,6 +5688,12 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                             }
                             full_sum_check = full_sum_check.add(fj_eq.mul(fj_ra).mul(lookups_combined_vals[fj]));
                         }
+                        {
+                            const print = std.debug.print;
+                            print("[CYCLE_START_CHECK] Full sum = {any}\n", .{full_sum_check.toBytes()});
+                            print("[CYCLE_START_CHECK] lookups_claim = {any}\n", .{lookups_claim.toBytes()});
+                            print("[CYCLE_START_CHECK] MATCH: {}\n", .{full_sum_check.eql(lookups_claim)});
+                        }
                         dbg("[CYCLE_START_CHECK] Full sum = {x}\n", .{full_sum_check.toBytesBE()[16..32].*});
                         dbg("[CYCLE_START_CHECK] lookups_claim = {x}\n", .{lookups_claim.toBytesBE()[16..32].*});
                         dbg("[CYCLE_START_CHECK] MATCH: {}\n", .{full_sum_check.eql(lookups_claim)});
@@ -6041,6 +6309,24 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             dbg("  batch0*inst0 (LE) = {any}\n", .{batch0.mul(regs_val_current_claim).toBytes()});
             dbg("  batch1*inst1 (LE) = {any}\n", .{batch1.mul(ram_ra_current_claim).toBytes()});
             dbg("  batch2*inst2 (LE) = {any}\n", .{batch2.mul(lookups_claim).toBytes()});
+
+            // ALWAYS-ON: Print the chain values so we can compare with Jolt verifier
+            {
+                const print = std.debug.print;
+                print("[ZOLT S5 CHAIN] inst0_claim FULL LE = {any}\n", .{regs_val_current_claim.toBytes()});
+                print("[ZOLT S5 CHAIN] inst1_claim FULL LE = {any}\n", .{ram_ra_current_claim.toBytes()});
+                print("[ZOLT S5 CHAIN] inst2_claim FULL LE = {any}\n", .{lookups_claim.toBytes()});
+                print("[ZOLT S5 CHAIN] batch0 FULL LE = {any}\n", .{batch0.toBytes()});
+                print("[ZOLT S5 CHAIN] batch1 FULL LE = {any}\n", .{batch1.toBytes()});
+                print("[ZOLT S5 CHAIN] batch2 FULL LE = {any}\n", .{batch2.toBytes()});
+                print("[ZOLT S5 CHAIN] batch0*inst0 FULL LE = {any}\n", .{batch0.mul(regs_val_current_claim).toBytes()});
+                print("[ZOLT S5 CHAIN] batch1*inst1 FULL LE = {any}\n", .{batch1.mul(ram_ra_current_claim).toBytes()});
+                print("[ZOLT S5 CHAIN] batch2*inst2 FULL LE = {any}\n", .{batch2.mul(lookups_claim).toBytes()});
+                const recon = batch0.mul(regs_val_current_claim).add(batch1.mul(ram_ra_current_claim)).add(batch2.mul(lookups_claim));
+                print("[ZOLT S5 CHAIN] sum = {any}\n", .{recon.toBytes()});
+                print("[ZOLT S5 CHAIN] batched_claim = {any}\n", .{current_batched_claim.toBytes()});
+                print("[ZOLT S5 CHAIN] sum==batched = {}\n", .{recon.eql(current_batched_claim)});
+            }
             const recon = batch0.mul(regs_val_current_claim).add(batch1.mul(ram_ra_current_claim)).add(batch2.mul(lookups_claim));
             dbg("  batch0*inst0 + batch1*inst1 + batch2*inst2 = {any}\n", .{recon.toBytes()});
             dbg("  current_batched_claim = {any}\n", .{current_batched_claim.toBytes()});
@@ -6208,6 +6494,17 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             }
             const lookups_output_claim = lookups_current_scalar.mul(lookups_ra_product_bound).mul(lookups_combined_vals[0]);
 
+            // ALWAYS-ON: Compare polynomial chain output with expected output
+            {
+                const print = std.debug.print;
+                print("[S5 FINAL] lookups_claim (chain)      = {any}\n", .{lookups_claim.toBytes()});
+                print("[S5 FINAL] lookups_output_claim (exp) = {any}\n", .{lookups_output_claim.toBytes()});
+                print("[S5 FINAL] MATCH = {}\n", .{lookups_claim.eql(lookups_output_claim)});
+                print("[S5 FINAL] current_scalar = {any}\n", .{lookups_current_scalar.toBytes()});
+                print("[S5 FINAL] ra_product = {any}\n", .{lookups_ra_product_bound.toBytes()});
+                print("[S5 FINAL] combined_val[0] = {any}\n", .{lookups_combined_vals[0].toBytes()});
+            }
+
             dbg("[STAGE5 LOOKUPS] Computing opening claims:\n", .{});
             dbg("  lookups_input = {any}\n", .{lookups_input.toBytesBE()[0..8]});
             dbg("  lookups_output_claim (eq*ra_w0*combined) = {any}\n", .{lookups_output_claim.toBytesBE()});
@@ -6306,6 +6603,39 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 dbg("  The correct ra_claim should be the PRODUCT of the bound chunk values.\n", .{});
             }
 
+            // ALWAYS-ON: Print table index histogram for comparison with Jolt
+            {
+                const print = std.debug.print;
+                var table_counts: [42]usize = [_]usize{0} ** 42;
+                var no_table_count: usize = 0;
+                for (0..T) |jj| {
+                    if (jj >= trace_len) continue;
+                    const tidx = cycle_table_indices[jj];
+                    if (tidx >= 0 and @as(usize, @intCast(tidx)) < 42) {
+                        table_counts[@intCast(tidx)] += 1;
+                    } else {
+                        no_table_count += 1;
+                    }
+                }
+                print("[ZOLT TABLE HISTOGRAM] trace_len={}, T={}, no_table={}\n", .{ trace_len, T, no_table_count });
+                for (0..42) |i| {
+                    if (table_counts[i] > 0) {
+                        print("[ZOLT TABLE HISTOGRAM] table[{}] = {} cycles\n", .{ i, table_counts[i] });
+                    }
+                }
+                // Print first 30 cycle-to-table mappings with opcodes
+                for (0..@min(30, trace_len)) |jj| {
+                    const step = trace.steps.items[jj];
+                    const instr_dbg = step.instruction;
+                    const opcode_dbg = instr_dbg & 0x7f;
+                    const funct3_dbg: u3 = @truncate((instr_dbg >> 12) & 0x7);
+                    const funct7_dbg: u7 = @truncate(instr_dbg >> 25);
+                    print("[ZOLT CYCLE MAP] j={}: opcode=0x{x:0>2} funct3={} funct7=0x{x:0>2} table={} identity={} noop={}\n", .{
+                        jj, opcode_dbg, funct3_dbg, funct7_dbg, cycle_table_indices[jj], cycle_is_identity_path[jj], step.is_noop,
+                    });
+                }
+            }
+
             // Compute eq(r_cycle', j) for all j and accumulate into table flags
             // r_cycle_prime is LITTLE_ENDIAN from sumcheck (r_0, r_1, ..., r_7)
             // We need to compute eq evaluations at this point
@@ -6316,6 +6646,23 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             //
             // We compute this by evaluating eq(r_cycle', j) for each j in [0, T)
             // where r_cycle' = reversed challenges (to get BIG_ENDIAN for eq)
+            {
+                // ALWAYS-ON: Verify eq sum and print per-cycle eq values for first 5 cycles
+                const print = std.debug.print;
+                var eq_sum_dbg = F.zero();
+                for (0..T) |j| {
+                    const eq_j = computeEqAtIndex(r_cycle_prime_be, j);
+                    eq_sum_dbg = eq_sum_dbg.add(eq_j);
+                    if (j < 5) {
+                        print("[ZOLT EQ DEBUG] j={}: eq_j LE[0..16] = {any}, table_idx={}\n", .{ j, eq_j.toBytes()[0..16].*, cycle_table_indices[j] });
+                    }
+                }
+                print("[ZOLT EQ DEBUG] Sum of eq(j, r_cycle) over all T={} cycles = {any}\n", .{ T, eq_sum_dbg.toBytes()[0..16].* });
+                print("[ZOLT EQ DEBUG] r_cycle_prime_be (reversed sumcheck challenges):\n", .{});
+                for (0..n_cycle_vars) |i| {
+                    print("[ZOLT EQ DEBUG]   r_cycle_prime_be[{}] limbs = [0x{x}, 0x{x}, 0x{x}, 0x{x}]\n", .{ i, r_cycle_prime_be[i].limbs[0], r_cycle_prime_be[i].limbs[1], r_cycle_prime_be[i].limbs[2], r_cycle_prime_be[i].limbs[3] });
+                }
+            }
             for (0..T) |j| {
                 if (j >= trace_len) continue;
 
@@ -6355,7 +6702,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
             const raf_claim = F.one().sub(computed_raf_flag).mul(left_op_eval.add(gamma_lookups_raf.mul(right_op_eval)))
                 .add(computed_raf_flag.mul(gamma_lookups_raf).mul(identity_eval));
-            dbg("  raf_claim (from formula) FULL LE = {any}\n", .{raf_claim.toBytes()});
+            {
+                const print = std.debug.print;
+                print("[ZOLT S5 INST2] raf_claim FULL LE = {any}\n", .{raf_claim.toBytes()});
+            }
 
             // Compute val_claim = Σ table_flags[i] * stored_table_values[i]
             // This matches the verifier's formula: Σ val_evals[i] * table_flag_claims[i]
@@ -6363,15 +6713,25 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             for (0..num_lookup_tables) |i| {
                 val_claim = val_claim.add(table_flags[i].mul(stored_table_values[i]));
                 if (!table_flags[i].eql(F.zero())) {
-                    dbg("  [ZOLT] table[{}] val_eval(FULL 32 LE)={any} flag(FULL 32 LE)={any}\n", .{
-                        i, stored_table_values[i].toBytes(), table_flags[i].toBytes(),
+                    const print = std.debug.print;
+                    print("[ZOLT S5 INST2] table[{}] val_eval={any} flag={any}\n", .{
+                        i, stored_table_values[i].toBytes()[0..16].*, table_flags[i].toBytes()[0..16].*,
                     });
                 }
             }
-            dbg("  val_claim (from formula) FULL LE = {any}\n", .{val_claim.toBytes()});
-            dbg("  val_claim last 16 LE = ", .{});
-            for (val_claim.toBytes()[16..32]) |b| dbg("{x:0>2} ", .{b});
-            dbg("\n", .{});
+            {
+                const print = std.debug.print;
+                print("[ZOLT S5 INST2] val_claim FULL LE = {any}\n", .{val_claim.toBytes()});
+                print("[ZOLT S5 INST2] raf_flag FULL LE = {any}\n", .{computed_raf_flag.toBytes()});
+                print("[ZOLT S5 INST2] left_op_eval FULL LE = {any}\n", .{left_op_eval.toBytes()});
+                print("[ZOLT S5 INST2] right_op_eval FULL LE = {any}\n", .{right_op_eval.toBytes()});
+                print("[ZOLT S5 INST2] identity_eval FULL LE = {any}\n", .{identity_eval.toBytes()});
+                print("[ZOLT S5 INST2] gamma FULL LE = {any}\n", .{gamma_lookups_raf.toBytes()});
+                const expected_inst2 = eq_r_reduction.mul(ra_product).mul(val_claim.add(gamma_lookups_raf.mul(raf_claim)));
+                print("[ZOLT S5 INST2] expected_inst2 FULL LE = {any}\n", .{expected_inst2.toBytes()});
+                print("[ZOLT S5 INST2] lookups_claim (chain) FULL LE = {any}\n", .{lookups_claim.toBytes()});
+                print("[ZOLT S5 INST2] inst2_match = {}\n", .{expected_inst2.eql(lookups_claim)});
+            }
 
             // CRITICAL DIAGNOSTIC: Compare combined_vals[0] with val_claim + gamma * raf_claim
             // The prover's combined_val polynomial should encode: table_val + gamma * raf_val

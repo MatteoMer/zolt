@@ -18,16 +18,22 @@
 7. ✅ gcd — All 8 stages pass
 8. ✅ bitwise — All 8 stages pass
 
-### Last Full Verification: Feb 19, 2026 (Iteration 9)
+### Last Full Verification: Feb 19, 2026 (Iteration 10)
 All 8 programs confirmed: proof generation + Jolt verification passing.
-- fibonacci: 62,380 bytes — ✅ All 8 stages pass
-- collatz: 70,132 bytes — ✅ All 8 stages pass
-- factorial: 62,380 bytes — ✅ All 8 stages pass
-- sum: 61,555 bytes — ✅ All 8 stages pass
-- signed: 61,555 bytes — ✅ All 8 stages pass
-- primes: 71,380 bytes — ✅ All 8 stages pass
-- gcd: 66,220 bytes — ✅ All 8 stages pass
-- bitwise: 65,884 bytes — ✅ All 8 stages pass
+- fibonacci: 62,380 bytes — ✅ All 8 stages pass (5.7s)
+- collatz: 70,132 bytes — ✅ All 8 stages pass (23.0s)
+- factorial: 62,380 bytes — ✅ All 8 stages pass (5.7s)
+- sum: 61,555 bytes — ✅ All 8 stages pass (5.6s)
+- signed: 61,555 bytes — ✅ All 8 stages pass (5.5s)
+- primes: 71,380 bytes — ✅ All 8 stages pass (27.1s)
+- gcd: 66,220 bytes — ✅ All 8 stages pass (10.3s)
+- bitwise: 65,884 bytes — ✅ All 8 stages pass (10.9s)
+
+### Automated Testing
+- Integration test script: `scripts/verify_all.sh`
+  - `./scripts/verify_all.sh` — Full prove + Jolt verify for all 8 programs
+  - `./scripts/verify_all.sh --quick` — Prove only (no Jolt verification)
+  - `./scripts/verify_all.sh fibonacci gcd` — Test specific programs
 
 ## BUGS FIXED (Summary)
 
@@ -62,12 +68,16 @@ All 8 programs confirmed: proof generation + Jolt verification passing.
 # Build Zolt
 zig build -Doptimize=ReleaseFast
 
-# Generate proof + preprocessing
-./zig-out/bin/zolt prove examples/<program>.elf --jolt-format -o /tmp/zolt_proof_dory.bin --export-preprocessing /tmp/zolt_preprocessing.bin
-
-# Run Jolt verifier
-cd /home/vivado/projects/jolt && cargo test --package jolt-core --features zolt-debug zolt_compat_test::tests::test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
-
-# Run Zig tests
+# Run all Zig tests
 zig build test
+
+# Run full cross-verification (all 8 programs)
+./scripts/verify_all.sh
+
+# Quick mode (prove only, no Jolt verification)
+./scripts/verify_all.sh --quick
+
+# Manual single-program test
+./zig-out/bin/zolt prove examples/<program>.elf --jolt-format -o /tmp/zolt_proof_dory.bin --export-preprocessing /tmp/zolt_preprocessing.bin
+cd /home/vivado/projects/jolt && cargo test --package jolt-core --features zolt-debug zolt_compat_test::tests::test_verify_zolt_proof_with_zolt_preprocessing -- --ignored --nocapture
 ```

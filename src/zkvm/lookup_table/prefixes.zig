@@ -857,17 +857,16 @@ fn leftMsbPrefixMle(
     _: *LookupBits(128),
     j: usize,
 ) F {
-    // Only active in round 0
-    if (j > 0) {
-        return checkpoints[@intFromEnum(Prefixes.LeftOperandMsb)] orelse F.zero();
-    }
-    if (r_x) |rx| {
-        // On odd rounds, r_x is the x-value we want
-        return rx;
-    } else {
-        // On even rounds, c is the x-value
+    // j == 0: even round, c is the left MSB variable being sumchecked
+    if (j == 0) {
         return F.fromU64(@as(u64, c));
     }
+    // j == 1: odd round, r_x is the bound challenge from round 0 (left MSB)
+    if (j == 1) {
+        return r_x.?;
+    }
+    // j >= 2: use checkpoint (set after round 1)
+    return checkpoints[@intFromEnum(Prefixes.LeftOperandMsb)].?;
 }
 fn leftMsbUpdateCheckpoint(
     comptime F: type,

@@ -272,15 +272,25 @@ fn pow2WSuffixMle(b: LookupBits(128)) u64 {
     return @as(u64, 1) << @intCast(shift);
 }
 
-/// SignExtension suffix: sign-extends from bit position based on operand
+/// SignExtension suffix: computes the SRA sign-extension padding mask.
+/// For a shift bitmask y, counts trailing zeros (= shift amount),
+/// then returns a mask with that many 1-bits at the top of XLEN.
+/// Formula: ((1 << XLEN) - (1 << (XLEN - padding_len)))
+/// Example: y=0b...1000 (3 trailing zeros) -> top 3 bits set -> 0xE000000000000000
 fn signExtensionSuffixMle(b: LookupBits(128)) u64 {
     const parts = b.uninterleave();
-    // Sign extension from byte: check MSB of low byte, extend to 64 bits
-    const byte_val = parts.right & 0xFF;
-    if ((byte_val & 0x80) != 0) {
-        return 0xFFFFFFFFFFFFFF00 | byte_val;
-    }
-    return byte_val;
+    // Create a LookupBits for the right operand to count trailing zeros correctly
+    const y_bits = LookupBits(128).new(parts.right, parts.right_len);
+    const padding_len: usize = @intCast(y_bits.trailingZeros());
+    // Compute ((1 << XLEN) - (1 << (XLEN - padding_len)))
+    // This produces a mask with padding_len ones at the top of XLEN bits.
+    // When padding_len == 0: returns 0 (no sign extension)
+    // When padding_len == XLEN: returns all ones (0xFFFFFFFFFFFFFFFF)
+    if (padding_len == 0) return 0;
+    if (padding_len >= XLEN) return @as(u64, 0xFFFFFFFFFFFFFFFF);
+    // (1 << XLEN) - (1 << (XLEN - padding_len)) computed in u128 to avoid overflow
+    const result = (@as(u128, 1) << @intCast(XLEN)) - (@as(u128, 1) << @intCast(XLEN - padding_len));
+    return @truncate(result);
 }
 
 /// LeftShift suffix: left-shifts x according to bitmask y

@@ -18,16 +18,16 @@
 7. ✅ gcd — All 8 stages pass
 8. ✅ bitwise — All 8 stages pass
 
-### Last Full Verification: Feb 23, 2026 (Iteration 860 — Re-confirmed)
+### Last Full Verification: Feb 23, 2026 (Iteration 864 — Re-confirmed)
 All 8 programs confirmed: proof generation + Jolt verification passing.
-- fibonacci: ✅ All 8 stages pass (5.7s)
+- fibonacci: ✅ All 8 stages pass (5.6s)
 - factorial: ✅ All 8 stages pass (5.6s)
 - sum: ✅ All 8 stages pass (5.5s)
 - signed: ✅ All 8 stages pass (5.5s)
-- gcd: ✅ All 8 stages pass (10.3s)
-- bitwise: ✅ All 8 stages pass (11.0s)
+- gcd: ✅ All 8 stages pass (10.2s)
+- bitwise: ✅ All 8 stages pass (10.9s)
 - collatz: ✅ All 8 stages pass (22.9s)
-- primes: ✅ All 8 stages pass (27.1s)
+- primes: ✅ All 8 stages pass (27.3s)
 
 ### Automated Testing
 - Integration test script: `scripts/verify_all.sh`

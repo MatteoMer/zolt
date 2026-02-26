@@ -18,7 +18,7 @@
 7. ✅ gcd — All 8 stages pass
 8. ✅ bitwise — All 8 stages pass
 
-### Last Full Verification: Feb 26, 2026 (Iteration 1733 — Re-confirmed)
+### Last Full Verification: Feb 26, 2026 (Iteration 1736 — Re-confirmed)
 All 8 programs confirmed: proof generation + Jolt verification passing.
 - fibonacci: ✅ All 8 stages pass (5.7s)
 - collatz: ✅ All 8 stages pass (23.0s)

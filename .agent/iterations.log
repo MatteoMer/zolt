@@ -318139,3 +318139,309 @@ Tokens: 0 in / 0 out
 Started: 2026-02-26T17:31:29
 Status: All 8/8 programs verified. fibonacci + gcd confirmed this iteration.
 Tests: zig build test exit code 0
+
+--- Iteration 1833 ---
+Started: 2026-02-26T17:31:29.509397
+Ended: 2026-02-26T17:36:09.422387
+Turns: 15
+Cost: $0.2919
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1834 ---
+Started: 2026-02-26T17:36:11.424979
+Ended: 2026-02-26T17:40:13.814828
+Turns: 10
+Cost: $0.1722
+Tokens: 0 in / 0 out
+
+Iteration 1836 (Feb 26, 2026): Re-confirmed all tests pass (exit code 0), fibonacci proof generated and verified by Jolt (all 8 stages PASSED). Project COMPLETE.
+
+--- Iteration 1835 ---
+Started: 2026-02-26T17:40:15.817446
+Ended: 2026-02-26T17:44:25.362939
+Turns: 11
+Cost: $0.1995
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1836 ---
+Started: 2026-02-26T17:44:27.365630
+Ended: 2026-02-26T17:50:54.430588
+Turns: 13
+Cost: $0.2450
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1837 ---
+Started: 2026-02-26T17:50:56.433289
+Ended: 2026-02-26T17:56:42.266617
+Turns: 1
+Cost: $0.2924
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1838 ---
+Started: 2026-02-26T17:56:44.269285
+Ended: 2026-02-26T18:01:04.982740
+Turns: 11
+Cost: $0.3178
+Tokens: 0 in / 0 out
+
+Iteration 1840: Re-confirmed all tests pass (exit code 0) and fibonacci proof verified by Jolt. All 8/8 programs still verified.
+
+--- Iteration 1839 ---
+Started: 2026-02-26T18:01:06.985378
+Ended: 2026-02-26T18:05:13.902359
+Turns: 11
+Cost: $0.1895
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1840 ---
+Started: 2026-02-26T18:05:15.904902
+Ended: 2026-02-26T18:09:25.342279
+Turns: 11
+Cost: $0.2077
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1841 ---
+Started: 2026-02-26T18:09:27.344768
+Ended: 2026-02-26T18:13:54.346836
+Turns: 12
+Cost: $0.2422
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1842 ---
+Started: 2026-02-26T18:13:56.349369
+Ended: 2026-02-26T18:20:03.022679
+Turns: 12
+Cost: $0.2110
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1843 ---
+Started: 2026-02-26T18:20:05.025272
+Ended: 2026-02-26T18:24:33.250738
+Turns: 13
+Cost: $0.2416
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1844 ---
+Started: 2026-02-26T18:24:35.253284
+Ended: 2026-02-26T18:28:39.986651
+Turns: 10
+Cost: $0.1771
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1845 ---
+Started: 2026-02-26T18:28:41.988378
+Ended: 2026-02-26T18:33:07.998668
+Turns: 12
+Cost: $0.2255
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1846 ---
+Started: 2026-02-26T18:33:10.001342
+Ended: 2026-02-26T18:37:39.182599
+Turns: 13
+Cost: $0.2527
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1847 ---
+Started: 2026-02-26T18:37:41.185235
+Ended: 2026-02-26T18:41:45.454725
+Turns: 10
+Cost: $0.1773
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1848 ---
+Started: 2026-02-26T18:41:47.457413
+Ended: 2026-02-26T18:45:50.590226
+Turns: 10
+Cost: $0.1840
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1849 ---
+Started: 2026-02-26T18:45:52.592805
+Ended: 2026-02-26T18:47:30.350830
+Turns: 7
+Cost: $0.1162
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1850 ---
+Started: 2026-02-26T18:47:32.353473
+Ended: 2026-02-26T18:51:39.454684
+Turns: 11
+Cost: $0.2092
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1851 ---
+Started: 2026-02-26T18:51:41.457324
+Ended: 2026-02-26T18:56:09.142338
+Turns: 13
+Cost: $0.2473
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1852 ---
+Started: 2026-02-26T18:56:11.145180
+Ended: 2026-02-26T19:00:23.102831
+Turns: 11
+Cost: $0.2069
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1853 ---
+Started: 2026-02-26T19:00:25.105541
+Ended: 2026-02-26T19:04:48.154876
+Turns: 11
+Cost: $0.2186
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1854 ---
+Started: 2026-02-26T19:04:50.157356
+Ended: 2026-02-26T19:12:15.146552
+Turns: 14
+Cost: $0.3014
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1855 ---
+Started: 2026-02-26T19:12:17.149214
+Ended: 2026-02-26T19:16:19.742191
+Turns: 10
+Cost: $0.1724
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1856 ---
+Started: 2026-02-26T19:16:21.744768
+Ended: 2026-02-26T19:20:25.886135
+Turns: 10
+Cost: $0.1831
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1857 ---
+Started: 2026-02-26T19:20:27.888636
+Ended: 2026-02-26T19:24:57.766618
+Turns: 11
+Cost: $0.2110
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1858 ---
+Started: 2026-02-26T19:24:59.769347
+Ended: 2026-02-26T19:29:12.790597
+Turns: 12
+Cost: $0.2138
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1859 ---
+Started: 2026-02-26T19:29:14.793247
+Ended: 2026-02-26T19:33:20.066948
+Turns: 11
+Cost: $0.1990
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1860 ---
+Started: 2026-02-26T19:33:22.069587
+Ended: 2026-02-26T19:37:30.038306
+Turns: 10
+Cost: $0.1964
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1861 ---
+Started: 2026-02-26T19:37:32.040789
+Ended: 2026-02-26T19:41:44.726660
+Turns: 11
+Cost: $0.2078
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1862 ---
+Started: 2026-02-26T19:41:46.729256
+Ended: 2026-02-26T19:45:55.315702
+Turns: 11
+Cost: $0.1988
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1863 ---
+Started: 2026-02-26T19:45:57.318335
+Ended: 2026-02-26T19:50:22.078758
+Turns: 13
+Cost: $0.2473
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1864 ---
+Started: 2026-02-26T19:50:24.081534
+Ended: 2026-02-26T19:55:47.218847
+Turns: 11
+Cost: $0.2340
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1865 ---
+Started: 2026-02-26T19:55:49.221693
+Ended: 2026-02-26T20:02:09.690661
+Turns: 1
+Cost: $0.3384
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1866 ---
+Started: 2026-02-26T20:02:11.693210
+Ended: 2026-02-26T20:06:11.438135
+Turns: 10
+Cost: $0.1811
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1867 ---
+Started: 2026-02-26T20:06:13.440826
+Ended: 2026-02-26T20:11:41.058558
+Turns: 12
+Cost: $0.1895
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1868 ---
+Started: 2026-02-26T20:11:43.061157
+Ended: 2026-02-26T20:15:43.922538
+Turns: 9
+Cost: $0.1711
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1869 ---
+Started: 2026-02-26T20:15:45.925150
+Ended: 2026-02-26T20:20:11.454787
+Turns: 12
+Cost: $0.2320
+Tokens: 0 in / 0 out
+
+
+--- Iteration 1870 ---
+Started: 2026-02-26T20:20:13.457401
+Ended: 2026-02-26T20:24:45.078916
+Turns: 11
+Cost: $0.2094
+Tokens: 0 in / 0 out
+

@@ -18,7 +18,7 @@
 7. ✅ gcd — All 8 stages pass
 8. ✅ bitwise — All 8 stages pass
 
-### Last Full Verification: Mar 1, 2026 (Iteration 2592 — Confirmed Stable)
+### Last Full Verification: Mar 1, 2026 (Iteration 2594 — Confirmed Stable)
 All 8 programs confirmed: proof generation + Jolt verification passing.
 - `zig build test` exit code: 0
 - All 8/8 programs: PROVED + JOLT VERIFIED ✅
@@ -27,9 +27,9 @@ All 8 programs confirmed: proof generation + Jolt verification passing.
   - factorial: 5.6s prove, Jolt PASSED
   - sum: 5.5s prove, Jolt PASSED
   - signed: 5.5s prove, Jolt PASSED
-  - primes: 27.2s prove, Jolt PASSED
+  - primes: 27.3s prove, Jolt PASSED
   - gcd: 10.2s prove, Jolt PASSED
-  - bitwise: 10.9s prove, Jolt PASSED
+  - bitwise: 11.1s prove, Jolt PASSED
 
 ### Automated Testing
 - Integration test script: `scripts/verify_all.sh`

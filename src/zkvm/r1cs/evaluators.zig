@@ -228,33 +228,6 @@ pub fn UnivariateSkipEvaluator(comptime F: type) type {
             return result;
         }
 
-        /// Compute extended evaluations for univariate skip
-        ///
-        /// For the univariate skip, we need evaluations at extended domain points
-        /// outside the base window. These are computed by evaluating the constraint
-        /// polynomials at extended Y values.
-        ///
-        /// For the first group (10 constraints), the extended domain extends to
-        /// {-9, -8, ..., -5} ∪ {6, 7, 8, 9} (9 additional points).
-        pub fn computeExtendedEvals(
-            self: *const Self,
-            eq_evals: []const F,
-            comptime NUM_EXTENDED: usize,
-            targets: [NUM_EXTENDED]i64,
-        ) [NUM_EXTENDED]F {
-            var result: [NUM_EXTENDED]F = undefined;
-
-            for (0..NUM_EXTENDED) |i| {
-                const y = targets[i];
-                // For extended points, we evaluate the constraint polynomial at y
-                // Since constraints are Lagrange polynomials over the base domain,
-                // we need to extrapolate using the Lagrange basis
-                result[i] = self.evaluateExtendedPoint(y, eq_evals);
-            }
-
-            return result;
-        }
-
         /// Compute extended evaluations using precomputed Lagrange coefficients.
         ///
         /// This is the correct approach: we evaluate Az(y_j) and Bz(y_j) separately
@@ -313,43 +286,6 @@ pub fn UnivariateSkipEvaluator(comptime F: type) type {
             return result;
         }
 
-        /// Evaluate Az*Bz at an extended domain point using Lagrange extrapolation
-        /// DEPRECATED: This doesn't work for satisfied constraints (base evals are zero)
-        fn evaluateExtendedPoint(self: *const Self, y_i64: i64, eq_evals: []const F) F {
-            // For points outside the base domain, we use Lagrange extrapolation
-            // from the 10 base domain evaluations.
-            //
-            // L_i(y) = Π_{j≠i} (y - x_j) / (x_i - x_j)
-            //
-            // where x_j = BASE_LEFT + j for j in {0, ..., 9}
-
-            // First, compute the base evaluations
-            const base_evals = self.computeBaseWindowEvals(eq_evals);
-
-            // Now extrapolate to y using Lagrange interpolation
-            var result = F.zero();
-            const y = fieldFromI64(F, y_i64);
-
-            for (0..FIRST_GROUP_SIZE) |i| {
-                const x_i = fieldFromI64(F, BASE_LEFT + @as(i64, @intCast(i)));
-
-                // Compute L_i(y) = Π_{j≠i} (y - x_j) / (x_i - x_j)
-                var numerator = F.one();
-                var denominator = F.one();
-
-                for (0..FIRST_GROUP_SIZE) |j| {
-                    if (i == j) continue;
-                    const x_j = fieldFromI64(F, BASE_LEFT + @as(i64, @intCast(j)));
-                    numerator = numerator.mul(y.sub(x_j));
-                    denominator = denominator.mul(x_i.sub(x_j));
-                }
-
-                const lagrange_coeff = numerator.mul(denominator.inv());
-                result = result.add(lagrange_coeff.mul(base_evals[i]));
-            }
-
-            return result;
-        }
     };
 }
 

@@ -216,12 +216,6 @@ pub fn MontgomeryField(
 
         /// Convert to Montgomery form from standard representation
         pub fn toMontgomery(self: Self) Self {
-            // Debug: verify constants
-            if (false) {
-                @compileLog("modulus[0]:", modulus[0]);
-                @compileLog("montgomery_r2[0]:", montgomery_r2[0]);
-                @compileLog("montgomery_inv:", montgomery_inv);
-            }
             return self.montgomeryMul(.{ .limbs = montgomery_r2 });
         }
 

@@ -241,9 +241,9 @@ pub const BytecodePCMapper = struct {
     /// Maps (address - base) / alignment to (base_pc, max_inline_seq)
     indices: std.ArrayListUnmanaged(?struct { usize, u16 }),
     allocator: Allocator,
-    /// Base bytecode index for termination store virtual sequence (LUI, ADDI, SD).
+    /// Base bytecode index for termination sequence (LUI, ADDI, SB, JAL).
     /// Set to last_pc + 1 after processing all real instructions.
-    /// LUI→termination_base_pc, ADDI→+1, SD→+2
+    /// LUI→termination_base_pc, ADDI→+1, SB→+2, JAL→+3
     termination_base_pc: usize = 0,
 
     pub fn init(allocator: Allocator) BytecodePCMapper {
@@ -306,8 +306,8 @@ pub const BytecodePCMapper = struct {
             }
         }
 
-        // Reserve 3 bytecode entries for the termination store virtual sequence (LUI+ADDI+SD)
-        // These come after all real instructions: k=last_pc+1, k=last_pc+2, k=last_pc+3
+        // Reserve 4 bytecode entries for the termination sequence (LUI+ADDI+SB+JAL)
+        // These come after all real instructions: k=last_pc+1 through k=last_pc+4
         self.termination_base_pc = last_pc + 1;
     }
 
@@ -338,8 +338,9 @@ pub const BytecodePCMapper = struct {
     }
 
     /// Get the bytecode index for a trace step (convenience function).
-    /// Handles NoOp, termination store, and regular instruction cases.
+    /// Handles NoOp, termination store, termination JAL, and regular instruction cases.
     pub fn getPCForStep(self: *const BytecodePCMapper, step: anytype) usize {
+        if (step.is_termination_jal) return self.termination_base_pc + 3; // JAL-to-self
         if (step.is_noop and !step.is_termination_store) return 0; // NOP padding
         if (step.is_termination_store and !step.is_noop) {
             // Real termination store instruction (LUI, ADDI, or SB)
@@ -1053,19 +1054,19 @@ pub const BytecodePreprocessing = struct {
             offset += instr_size;
         }
 
-        // Add termination store virtual sequence (LUI + ADDI + SD) = 3 entries.
+        // Add termination sequence (LUI + ADDI + SB + JAL) = 4 entries.
         // These must be in the bytecode array BEFORE power-of-2 padding so that
         // code_size accounts for them. This matches computeBytecodeCodeSize which
-        // also adds +3 for termination.
+        // also adds +4 for termination.
         //
         // The termination stores write a sentinel value to the termination address
-        // to signal program completion. The actual instruction words are computed
-        // from the termination address, but for preprocessing purposes we just need
-        // the entries in the bytecode array with correct structure.
+        // to signal program completion, followed by a JAL-to-self that matches
+        // vanilla Jolt's `j .` in _start.
         //
         // LUI x31, upper20(term_addr) - load upper bits of termination address
         // ADDI x30, x0, 1 - load value 1
-        // SD x30, lower12(term_addr)(x31) - store value 1 to termination address
+        // SB x30, lower12(term_addr)(x31) - store value 1 to termination address
+        // JAL x0, 0 - infinite loop (j .)
         {
             // Use address=0 for all termination entries (they are virtual, not real ELF instructions)
             // Use the memory layout's termination I/O address (NOT base_address + code_size)
@@ -1118,6 +1119,22 @@ pub const BytecodePreprocessing = struct {
                 .is_compressed = false,
             });
             try self.raw_words.append(allocator, sb_word);
+
+            // JAL x0, 0 (j . = infinite loop, vsr=None)
+            // Matches vanilla Jolt's `j .` in _start after main returns.
+            // address=4 (synthetic) provides UPC=4 for SB's constraint 16.
+            // vsr=null means VirtualInstruction=false, DoNotUpdatePC=false.
+            // Jump=1 disables constraint 16 for JAL→NoOp transition.
+            const jal_word: u32 = 0x0000006F;
+            try self.bytecode.append(allocator, .{
+                .variant = .JAL,
+                .address = 4, // Synthetic address: UPC=4 satisfies SB's NextUPC constraint
+                .operands = .{ .FormatJ = .{ .rd = 0, .imm = 0 } },
+                .virtual_sequence_remaining = null, // Not a virtual sequence
+                .is_first_in_sequence = false,
+                .is_compressed = false,
+            });
+            try self.raw_words.append(allocator, jal_word);
         }
 
         // Pad to next power of 2

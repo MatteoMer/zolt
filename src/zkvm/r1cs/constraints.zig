@@ -1945,15 +1945,14 @@ pub fn R1CSCycleInputs(comptime F: type) type {
         /// Reference: jolt-core/src/zkvm/instruction/mod.rs (Instruction::NoOp flags)
         /// Create witness values for the synthetic termination Store instruction.
         ///
-        /// This is used for the termination step that writes 1 to the termination address.
-        /// It's a real Store instruction (FlagStore=1) but also needs
-        /// FlagDoNotUpdateUnexpandedPC=1 to satisfy constraint 16:
-        ///   NextUPC = UPC + 4 - 4*DoNotUpdateUPC = 0 + 4 - 4 = 0
-        /// (since both UPC and NextUPC are 0 for the synthetic step).
+        /// This is used for the termination steps that write 1 to the termination address.
+        /// The sequence is: NoOp(dummy) → LUI(vsr=2) → ADDI(vsr=1) → SB(vsr=0).
         ///
-        /// We build the witness using fromTraceStep() for correctness (it handles all
-        /// the Store-specific values: RamAddress, RamRead/WriteValue, lookup operands,
-        /// instruction input flags, etc.) and then override the DoNotUpdateUPC flag.
+        /// For the NoOp dummy and LUI/ADDI (vsr>0): DNUPC=true, VI=true.
+        /// For the SB anchor (vsr=0): VI=true, DNUPC=false.
+        ///   - Constraint 17 (if VI then NextPC=PC+1) holds: next is JAL at PC=tbpc+3.
+        ///   - Constraint 16 (NextUPC=UPC+4): NextUPC=0+4=4, JAL has UPC=4.
+        ///   - This matches vanilla Jolt's circuit_flags for SD with vsr=Some(0).
         pub fn createTerminationStoreWitness(
             step: tracer.TraceStep,
             next_step: ?tracer.TraceStep,
@@ -1962,38 +1961,38 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             // Build the base witness using the normal instruction path
             var inputs = fromTraceStepWithPCMap(step, next_step, pc_map);
 
-            // Override: set DoNotUpdateUnexpandedPC=1 for all termination steps.
-            // This is needed because:
-            // - UnexpandedPC = 0 (synthetic step)
-            // - NextUnexpandedPC = 0 (next is NoOp padding)
-            // - Without this flag: constraint 16 would require NextUPC = 0 + 4 = 4 ≠ 0
-            // - With this flag: constraint 16 requires NextUPC = 0 + 4 - 4 = 0 ✓
-            inputs.values[R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();
-
             if (step.is_noop) {
                 // Dummy noop termination step: maps to bytecode k=0 (NoOp entry).
                 // Bytecode entry at k=0 has:
                 //   circuit_flags[DoNotUpdateUnexpandedPC] = true
                 //   instruction_flags[IsNoop] = true
-                // R1CS witness must match, so set FlagIsNoop=1.
+                // R1CS witness must match, so set FlagIsNoop=1 and DNUPC=1.
                 // This also ensures product virtualization picks up NextIsNoop=1
                 // for the preceding JAL cycle (JAL's ShouldJump = Jump*(1-NextIsNoop) = 0).
+                inputs.values[R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();
                 inputs.values[R1CSInputIndex.FlagIsNoop.toIndex()] = F.one();
             } else if (step.virtual_sequence_remaining > 0) {
                 // Non-anchor termination instruction (LUI vsr=2, ADDI vsr=1):
                 // Bytecode entry has VirtualInstruction=true, DoNotUpdateUnexpandedPC=true.
                 // R1CS constraint 17 (if VirtualInstruction then NextPC==PC+1) holds
                 // because LUI→ADDI and ADDI→SB have consecutive PCs.
-                // IsNoop stays 0 (these are real instructions, not noops).
+                inputs.values[R1CSInputIndex.FlagDoNotUpdateUnexpandedPC.toIndex()] = F.one();
                 inputs.values[R1CSInputIndex.FlagVirtualInstruction.toIndex()] = F.one();
+                // Override NextIsVirtual=1: the next termination step also has VI=true.
+                // For ADDI (vsr=1) → SB (vsr=0): SB has VI=true (vsr=Some(0) in vanilla Jolt),
+                // but fromTraceStepWithPCMap computes NextIsVirtual=0 because SB's vsr=0.
+                // The shift sumcheck requires VirtualInstr[j+1] = NextIsVirtual[j].
+                inputs.values[R1CSInputIndex.NextIsVirtual.toIndex()] = F.one();
+            } else {
+                // SB anchor (vsr=0): VirtualInstruction=true, DoNotUpdatePC=false.
+                // This matches vanilla Jolt's circuit_flags for SD with vsr=Some(0):
+                //   VI = vsr.is_some() = true
+                //   DNUPC = vsr.map_or(false, |v| v > 0) = false
+                // Constraint 17 (if VI then NextPC=PC+1): NextPC=tbpc+3 (JAL) ✓
+                // Constraint 16 (NextUPC=UPC+4-4*DNUPC): NextUPC=0+4=4, JAL has UPC=4 ✓
+                inputs.values[R1CSInputIndex.FlagVirtualInstruction.toIndex()] = F.one();
+                // DNUPC stays 0 (default from fromTraceStepWithPCMap)
             }
-            // else: SB anchor (vsr=0) - no VirtualInstruction flag.
-            // SB is the last real cycle before NoOp padding, so NextPC=0.
-            // R1CS constraint 17 would require NextPC=PC+1 if VirtualInstruction=true,
-            // which would fail. So VirtualInstruction stays 0 (default).
-            // The bytecode entry at k=termination_base_pc+2 matches these flags:
-            //   VirtualInstruction=false, DoNotUpdateUnexpandedPC=true
-            // This ensures consistency between BCRAF val polynomials and opening claims.
 
             return inputs;
         }
@@ -2068,8 +2067,15 @@ pub fn R1CSWitnessGenerator(comptime F: type) type {
             for (0..num_cycles) |i| {
                 const step = trace.steps.items[i];
 
-                if (step.is_termination_store) {
-                    // Termination Store: real Store witness + DoNotUpdateUnexpandedPC=1
+                if (step.is_termination_jal) {
+                    // Termination JAL-to-self: normal JAL witness via fromTraceStepWithPCMap.
+                    // Jump=1 disables constraint 16 (condition=1-0-1=0).
+                    // ShouldJump = Jump*(1-NextIsNoop) = 0 disables constraint 14.
+                    // No special overrides needed — the normal witness path handles it.
+                    const next_step = trace.steps.items[i + 1];
+                    witnesses[i] = R1CSCycleInputs(F).fromTraceStepWithPCMap(step, next_step, pc_map);
+                } else if (step.is_termination_store) {
+                    // Termination Store: uses createTerminationStoreWitness for flag overrides.
                     // MUST be checked before is_noop because termination_store has is_noop=true
                     // (for the PREVIOUS step's NextIsNoop check) but uses Store witness.
                     const next_step = trace.steps.items[i + 1];

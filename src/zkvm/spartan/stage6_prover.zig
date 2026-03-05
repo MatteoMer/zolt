@@ -1156,15 +1156,17 @@ pub fn buildBytecodeEntries(
     }
 
     // ================================================================
-    // Phase 2: Populate termination store bytecode entries
+    // Phase 2: Populate termination sequence bytecode entries
     // ================================================================
-    // Each termination instruction (LUI, ADDI, SB) gets its own bytecode entry
-    // at indices termination_base_pc, +1, +2. This matches Jolt's approach where
-    // each virtual instruction in a sequence has its own entry.
-    // (Matching Jolt's termination_entry_virtual / termination_entry_anchor)
+    // Each termination instruction (LUI, ADDI, SB, JAL) gets its own bytecode entry
+    // at indices termination_base_pc, +1, +2, +3.
+    // LUI/ADDI: VirtualInstruction=true, DoNotUpdateUnexpandedPC=true (vsr>0)
+    // SB anchor: VirtualInstruction=true, DoNotUpdateUnexpandedPC=false (vsr=Some(0))
+    //   — matches vanilla Jolt's circuit_flags for SD with vsr=Some(0)
+    // JAL: normal instruction (Jump=1 disables NextUPC constraints for JAL→NoOp)
     {
         const tbpc = pc_map.termination_base_pc;
-        if (tbpc > 0 and tbpc + 2 < bytecode_K) {
+        if (tbpc > 0 and tbpc + 3 < bytecode_K) {
             const upper20: u32 = @truncate((termination_address >> 12) & 0xFFFFF);
             const lower12: u32 = @truncate(termination_address & 0xFFF);
             const imm_upper7: u32 = (lower12 >> 5) & 0x7F;
@@ -1176,22 +1178,18 @@ pub fn buildBytecodeEntries(
             const addi_word: u32 = (1 << 20) | (0 << 15) | (0 << 12) | (30 << 7) | 0x13;
             // SB x30, lower12(addr)(x31)
             const sb_word: u32 = (imm_upper7 << 25) | (30 << 20) | (31 << 15) | (0 << 12) | (imm_lower5 << 7) | 0x23;
+            // JAL x0, 0 (j . = infinite loop)
+            const jal_word: u32 = 0x0000006F;
 
             // Entry at tbpc: LUI x31 (virtual, vsr=2)
-            // Matching Jolt's termination_entry_virtual(lui_word):
-            //   from_raw_word(lui_word, 0) + VirtualInstruction + DoNotUpdateUnexpandedPC
-            // NOTE: IsFirstInSequence is NOT set for termination entries.
-            // Jolt's from_raw_word never sets IsFirstInSequence, and the R1CS witness
-            // for termination stores also doesn't set FlagIsFirstInSequence (because
-            // createTerminationStoreWitness skips the virtual sequence flag block).
-            populateEntryFromInstruction(&entries[tbpc], lui_word, 0); // address=0 (unexpanded_pc=0)
+            // from_raw_word(lui_word, 0) + VirtualInstruction + DoNotUpdateUnexpandedPC
+            populateEntryFromInstruction(&entries[tbpc], lui_word, 0);
             entries[tbpc].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
             entries[tbpc].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
             entries[tbpc].virtual_sequence_remaining = 2;
             entries[tbpc].is_first_in_sequence = false;
 
             // Entry at tbpc+1: ADDI x30 (virtual, vsr=1)
-            // Matching Jolt's termination_entry_virtual(addi_word)
             populateEntryFromInstruction(&entries[tbpc + 1], addi_word, 0);
             entries[tbpc + 1].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
             entries[tbpc + 1].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
@@ -1199,25 +1197,29 @@ pub fn buildBytecodeEntries(
             entries[tbpc + 1].is_first_in_sequence = false;
 
             // Entry at tbpc+2: SB x30, lower12(x31) (anchor, vsr=Some(0))
-            // The bytecode entry's circuit_flags must match the R1CS witness flags
-            // for the SB termination cycle, because the BCRAF val polynomial (built
-            // from bytecode entries) must produce the same claims as the opening
-            // claims (built from R1CS witnesses).
-            //
-            // R1CS witness for SB anchor (via createTerminationStoreWitness):
-            //   VirtualInstruction = false  (vsr=0, so not set)
-            //   DoNotUpdateUnexpandedPC = true  (always set for all termination steps)
-            //
-            // So bytecode entry must match:
-            //   VirtualInstruction = false
-            //   DoNotUpdateUnexpandedPC = true
+            // Matches vanilla Jolt's circuit_flags for SD with vsr=Some(0):
+            //   VirtualInstruction = vsr.is_some() = true
+            //   DoNotUpdateUnexpandedPC = vsr.map_or(false, |v| v > 0) = false
+            // R1CS witness also sets VI=true, DNUPC=false for this step.
+            // Constraint 17: NextPC = tbpc+2+1 = tbpc+3 (JAL entry) ✓
+            // Constraint 16: NextUPC = 0+4 = 4 (JAL has UPC=4) ✓
             populateEntryFromInstruction(&entries[tbpc + 2], sb_word, 0);
-            // VirtualInstruction stays false (default from populateEntryFromInstruction)
-            entries[tbpc + 2].circuit_flags[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
+            entries[tbpc + 2].circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)] = true;
+            // DoNotUpdateUnexpandedPC stays false (default)
             entries[tbpc + 2].virtual_sequence_remaining = 0;
             entries[tbpc + 2].is_first_in_sequence = false;
 
-            dbg("[PHASE2] Termination entries at tbpc={d}: LUI=0x{x:0>8} ADDI=0x{x:0>8} SB=0x{x:0>8}\n", .{ tbpc, lui_word, addi_word, sb_word });
+            // Entry at tbpc+3: JAL x0, 0 (j . = infinite loop)
+            // Normal instruction entry: Jump=1 from populateEntryFromInstruction.
+            // address=4 (synthetic) so UPC=4 satisfies SB's constraint 16.
+            // No VirtualInstruction, no DoNotUpdateUnexpandedPC.
+            // Jump=1 disables constraint 16 for JAL→NoOp (condition=1-0-1=0).
+            // ShouldJump=Jump*(1-NextIsNoop)=0 disables constraint 14.
+            populateEntryFromInstruction(&entries[tbpc + 3], jal_word, 4);
+            entries[tbpc + 3].virtual_sequence_remaining = null;
+            entries[tbpc + 3].is_first_in_sequence = false;
+
+            dbg("[PHASE2] Termination entries at tbpc={d}: LUI=0x{x:0>8} ADDI=0x{x:0>8} SB=0x{x:0>8} JAL=0x{x:0>8}\n", .{ tbpc, lui_word, addi_word, sb_word, jal_word });
         }
     }
 
@@ -3016,7 +3018,7 @@ fn BytecodeReadRafProver(comptime F: type) type {
                         const decoded_imm = instruction_mod.DecodedInstruction.decode(inst).imm;
                         const vp_imm: F = if (step3.is_noop)
                             F.zero()
-                        else if ((opc == 0x63) or (opc == 0x23))
+                        else if ((opc == 0x63) or (opc == 0x23) or (opc == 0x03))
                             fieldFromI128(F, @as(i128, @as(i64, decoded_imm)))
                         else
                             F.fromU64(@as(u64, @bitCast(@as(i64, decoded_imm))));
@@ -4373,17 +4375,23 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 // Then Jolt calls from_i128(operands.imm) to get the field element.
                 const imm_field: F = blk: {
                     const opcode_for_imm = entry.opcode;
+                    // Jolt stores imm as i128 in NormalizedOperands, then uses from_i128().
+                    // The i128 value depends on the instruction format's source type:
+                    //   FormatI (u64): u64 as i128 → zero-extended (always positive)
+                    //   FormatU (u64): u64 as i128 → zero-extended (always positive)
+                    //   FormatJ (u64): u64 as i128 → zero-extended (always positive)
+                    //   FormatB (i128): direct → can be negative
+                    //   FormatS (i64): i64 as i128 → sign-extended (can be negative)
+                    //   FormatLoad (i64): i64 as i128 → sign-extended (can be negative)
+                    // We must match: signed formats use fieldFromI128, unsigned use fromU64.
                     const is_signed_format = (opcode_for_imm == 0x63) or // B-type (branches)
-                        (opcode_for_imm == 0x23); // S-type (stores)
+                        (opcode_for_imm == 0x23) or // S-type (stores)
+                        (opcode_for_imm == 0x03); // Load (FormatLoad uses i64, sign-extends to i128)
                     if (is_signed_format) {
-                        // B-type and S-type: signed i64 → sign-extended to i128
                         break :blk fieldFromI128(F, @as(i128, entry.imm));
                     } else {
-                        // All other formats (I-type, U-type LUI/AUIPC, J-type, Virtual):
-                        // Use unsigned u64 bitcast of sign-extended i64 immediate.
-                        // For LUI/AUIPC, entry.imm is sign-extended from i32 to i64,
-                        // so @bitCast gives the full 64-bit sign-extended value,
-                        // matching the R1CS witness encoding in deriveImmediate().
+                        // I-type, U-type, J-type, Virtual: u64 zero-extended to i128.
+                        // from_i128(u64 as i128) = from_u64(u64), so fromU64(@bitCast) matches.
                         break :blk F.fromU64(@as(u64, @bitCast(entry.imm)));
                     }
                 };

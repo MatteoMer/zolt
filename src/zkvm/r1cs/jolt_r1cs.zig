@@ -93,8 +93,15 @@ pub fn JoltR1CS(comptime F: type) type {
             for (0..num_cycles) |i| {
                 const step = trace.steps.items[i];
 
-                if (step.is_termination_store) {
-                    // Termination Store: real Store witness + DoNotUpdateUPC=1 + IsNoop=1
+                if (step.is_termination_jal) {
+                    // Termination JAL: normal JAL witness (Jump=1 disables NextUPC constraints)
+                    const next_step: ?tracer.TraceStep = if (i + 1 < num_cycles)
+                        trace.steps.items[i + 1]
+                    else
+                        null;
+                    cycle_witnesses[i] = R1CSCycleInputs(F).fromTraceStep(step, next_step);
+                } else if (step.is_termination_store) {
+                    // Termination Store: real Store witness with VI/DNUPC overrides
                     const next_step: ?tracer.TraceStep = if (i + 1 < num_cycles)
                         trace.steps.items[i + 1]
                     else

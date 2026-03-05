@@ -28,7 +28,7 @@
 const std = @import("std");
 
 // Debug output control - set to true to enable verbose debug prints
-const debug_verbose = false;
+const debug_verbose = true;
 fn dbg(comptime fmt: []const u8, args: anytype) void {
     if (debug_verbose) std.debug.print(fmt, args);
 }
@@ -2333,6 +2333,9 @@ pub fn ProofConverter(comptime F: type) type {
                 const c = r_reduction_be.?[i];
                 dbg("  r_reduction_be[{}] limbs = [{x:0>16}, {x:0>16}, {x:0>16}, {x:0>16}]\n", .{ i, c.limbs[0], c.limbs[1], c.limbs[2], c.limbs[3] });
                 dbg("  r_reduction_be[{}] toBytesBE()[16..32] = {x}\n", .{ i, c.toBytesBE()[16..32].* });
+                // Print LE bytes for direct comparison with Jolt
+                const le = c.toBytes();
+                dbg("  r_reduction_be[{}] LE bytes[0..16] = {any}\n", .{ i, le[0..16].* });
             }
 
             // Use Stage 4 prover if we have execution and memory trace data.

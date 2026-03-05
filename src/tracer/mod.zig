@@ -65,6 +65,11 @@ pub const TraceStep = struct {
     /// When true, the R1CS witness uses createTerminationStoreWitness() instead of
     /// fromTraceStep(), which sets FlagStore=1 AND FlagDoNotUpdateUnexpandedPC=1.
     is_termination_store: bool = false,
+    /// Whether this is the synthetic JAL-to-self instruction after the termination store.
+    /// This instruction has Jump=1 which disables all NextUPC constraints for the
+    /// JAL→NoOp transition, allowing the SB anchor to use VI=true, DNUPC=false
+    /// (matching vanilla Jolt's circuit_flags for SD with vsr=Some(0)).
+    is_termination_jal: bool = false,
     /// For virtual instruction sequences (e.g., termination stores: LUI+ADDI+SB),
     /// counts down from (sequence_length - 1) to 0. Used by BytecodePCMapper to
     /// assign each virtual instruction its own bytecode index k.
@@ -2504,11 +2509,45 @@ pub const Emulator = struct {
         try self.ram.memory.put(self.allocator, termination_addr, post_value);
 
         cycle += 1;
+
+        // --- Step 5: JAL x0, 0 (j . = infinite loop) ---
+        // This matches vanilla Jolt's model where _start has `j .` after main returns.
+        // The JAL has Jump=1 which disables constraint 16's condition (1-ShouldBranch-Jump=0),
+        // and ShouldJump = Jump * (1-NextIsNoop) = 0 disables constraint 14.
+        // This allows the SB anchor to use VI=true, DNUPC=false (matching vanilla Jolt).
+        // UPC=4 satisfies the SB's constraint 16: NextUPC = 0+4-0 = 4.
+        const jal_instr: u32 = 0x0000006F; // JAL x0, 0
+        try self.trace.steps.append(self.allocator, TraceStep{
+            .cycle = cycle,
+            .pc = 0,
+            .unexpanded_pc = 4, // Synthetic UPC=4 to satisfy SB's constraint 16
+            .instruction = jal_instr,
+            .rs1_value = 0,
+            .rs2_value = 0,
+            .rd_pre_value = 0,
+            .rd_value = 0, // JAL x0: return addr discarded (x0 hardwired to 0)
+            .rd_index = 0,
+            .rs1_index = 0,
+            .rs2_index = 0,
+            .rd_written = false, // x0 is not writable
+            .rs1_read = false, // JAL doesn't read rs1
+            .rs2_read = false,
+            .memory_addr = null,
+            .memory_pre_value = null,
+            .memory_value = null,
+            .is_memory_write = false,
+            .next_pc = 0,
+            .is_compressed = false,
+            .is_noop = false,
+            .is_termination_jal = true,
+        });
+        cycle += 1;
+
         self.state.cycle = cycle;
 
-        dbg("[TRACE] Recorded termination sequence: 4 steps (noop + LUI x31 + ADDI x30 + SB), addr=0x{x:0>16}, cycles {}-{}\n", .{
+        dbg("[TRACE] Recorded termination sequence: 5 steps (noop + LUI x31 + ADDI x30 + SB + JAL), addr=0x{x:0>16}, cycles {}-{}\n", .{
             termination_addr,
-            cycle - 4,
+            cycle - 5,
             cycle - 1,
         });
     }

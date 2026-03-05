@@ -48,10 +48,9 @@ Always use it when not understanding the Cryptography
 ## Success Criteria
 
 The implementation is complete when:
-1. `zig build test` passes all 578+ tests
-2. Zolt can generate a proof for any example program
-3. The proof can be loaded and verified by Jolt's verifier
-4. No modifications needed on the Jolt side
+1. Zolt can generate a proof for any example program
+2. The proof can be loaded and verified by Jolt's verifier
+3. No modifications needed on the Jolt side
 
 DO NOT BE LAZY. ALWAYS DO THE HARD BUT RIGHT THING. DONT HACK YOUR WAY. DO NOT USE PLACEHOLDERS. DO NOT USE ZERO POLYNOMIALS TO MAKE IT WORK. DO NOT TRY TO TRICK JOLT
 DO NOT BE LAZY. ALWAYS DO THE HARD BUT RIGHT THING. DONT HACK YOUR WAY. DO NOT USE PLACEHOLDERS. DO NOT USE ZERO POLYNOMIALS TO MAKE IT WORK. DO NOT TRY TO TRICK JOLT

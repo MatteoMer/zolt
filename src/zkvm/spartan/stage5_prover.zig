@@ -754,7 +754,10 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             //   lookup_output = result of operation
             //
             for (trace.steps.items, 0..) |step, j| {
-                if (step.is_noop and !step.is_termination_store) continue;
+                // NOTE: Do NOT skip NOOPs here! In Jolt, NOOPs (ADDI x0,x0,0) are valid
+                // instructions with lookup_table = RangeCheck and is_identity_path = true.
+                // Skipping them causes cycle_table_indices and cycle_is_identity_path to be
+                // wrong, which corrupts Q arrays, rematerialization, and opening claims.
 
                 const instr = step.instruction;
                 const opcode = instr & 0x7f;
@@ -1296,6 +1299,16 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         lookups_indices_hi[j],
                     });
                 }
+            }
+
+            // Handle padding cycles (trace_len..T): these are NOPs (ADDI x0,x0,0) in Jolt.
+            // They need proper table_idx and is_identity_path for correct Q arrays,
+            // rematerialization, and opening claims.
+            for (trace_len..T) |j| {
+                cycle_table_indices[j] = 0; // RangeCheck (ADDI)
+                cycle_is_identity_path[j] = true; // ADDI has AddOperands flag → identity path
+                // lookups_indices_lo/hi[j] = 0 (already default)
+                // lookups_combined_vals[j] = 0 (correct: output=0, left=0, right=0)
             }
 
             // Debug: count instructions by opcode to see what we have
@@ -3324,6 +3337,51 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         print("  raf[0] (e0) = {x}\n", .{raf_evals[0].toBytesBE()});
                         print("  raf[1] (e2) = {x}\n", .{raf_evals[1].toBytesBE()});
                     }
+                    // LINEARITY CHECK per component at round 0
+                    if (round == 0) {
+                        const print2 = std.debug.print;
+                        // For read_checking: rc_0 + rc_1 should equal some claim
+                        // rc_1 = eval_1_total - raf_1
+                        // raf_1 = raf_claim - raf_0 where raf_claim is raf part of lookups_claim
+                        // Actually, let's just check: 2*(claim-e0) - e0 should equal e2 IF linear
+                        // For read_checking alone: rc_claim = lookups_claim - raf_claim
+                        // rc_1 = rc_claim - rc_0, expected_rc_2 = 2*rc_1 - rc_0
+                        // But we don't have rc_claim or raf_claim separately
+                        // Instead: total is linear iff rc and raf are both linear
+                        // Check: is rc_2 = 2*(eval_1_inst2 - raf_1) - rc_0?
+                        // We need raf eval_1 independently. Let's compute it:
+                        // raf_claim = lookups_claim_raf_part
+                        // Actually since g(c) = rc(c) + raf(c), if g is linear:
+                        //   g(2) = 2*g(1) - g(0)
+                        //   rc(2) + raf(2) = 2*(rc(1)+raf(1)) - (rc(0)+raf(0))
+                        // The non-linearity means one of rc or raf is non-linear.
+                        // Just print rc eval_2 relationship:
+                        const rc_e0 = read_checking_evals[0];
+                        const rc_e2 = read_checking_evals[1];
+                        const raf_e0 = raf_evals[0];
+                        const raf_e2 = raf_evals[1];
+                        // total_e1 = lookups_claim - eval_0_inst2
+                        // If rc is linear: rc(2) = 2*rc(1) - rc(0) and raf(2) = 2*raf(1) - raf(0)
+                        // rc(1) + raf(1) = total_e1
+                        // If BOTH linear: rc(2)+raf(2) = 2*(rc(1)+raf(1)) - (rc(0)+raf(0)) = 2*total_e1 - total_e0 = expected_eval_2
+                        // If they're both linear but total isn't, something is very wrong
+                        // Print the eval_2 components:
+                        const total_e2 = rc_e2.add(raf_e2);
+                        print2("[LINEARITY R0] rc_e0={x} rc_e2={x}\n", .{ rc_e0.toBytesBE()[16..32].*, rc_e2.toBytesBE()[16..32].* });
+                        print2("[LINEARITY R0] raf_e0={x} raf_e2={x}\n", .{ raf_e0.toBytesBE()[16..32].*, raf_e2.toBytesBE()[16..32].* });
+                        print2("[LINEARITY R0] total_e2(from components)={x} actual_e2={x} match={}\n", .{
+                            total_e2.toBytesBE()[16..32].*,
+                            eval_2_inst2.toBytesBE()[16..32].*,
+                            total_e2.eql(eval_2_inst2),
+                        });
+                        print2("[LINEARITY R0] expected_linear_e2={x}\n", .{expected_eval_2.toBytesBE()[16..32].*});
+                        // diff = actual_e2 - expected_e2 = amount of nonlinearity
+                        const nonlin = eval_2_inst2.sub(expected_eval_2);
+                        print2("[LINEARITY R0] nonlinearity = {x}\n", .{nonlin.toBytesBE()[16..32].*});
+                        // Check if nonlinearity comes from rc or raf:
+                        // If raf is linear and rc isn't: nonlin = rc_e2 - (2*rc_e1 - rc_e0) = rc_e2 - expected_rc_e2
+                        // where expected_rc_e2 = expected_total_e2 - expected_raf_e2 = expected_total_e2 - raf_e2 (if raf linear)
+                    }
                     // TARGETED DEBUG: Print Instance 2 values in LE format for Jolt comparison
                     if (round < 4 or round == 7 or round == 8 or round == 15 or round == 16 or round == 127) {
                         const print = std.debug.print;
@@ -4487,34 +4545,37 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         // ============================================================
                         // CRITICAL FIX: Rematerialize combined_vals for cycle rounds
                         // ============================================================
-                        // Jolt's init_log_t_rounds (read_raf_checking.rs:703-792) computes:
-                        //   combined_val[j] = table_eval(r_addr, table(j)) + γ*raf_eval(r_addr, j)
+                        // Jolt's init_log_t_rounds (read_raf_checking.rs:746-762) computes:
+                        //   combined_val[j] = table_eval(r_addr, table(j)) + raf_eval(j)
                         // where:
-                        //   table_eval = stored_table_values[table(j)]  (table MLE at r_addr)
+                        //   table_eval = stored_table_values[table(j)]  (table MLE at r_addr, 0 if no table)
                         //   raf_eval = raf_interleaved or raf_identity depending on instruction type
                         //
-                        // The initial combined_vals[j] = table(K(j)) + γ*left + γ²*right are
-                        // POINT evaluations, but cycle rounds need TABLE MLE evaluations at r_addr.
-                        // Without this rematerialization, the opening claims at the end won't match
-                        // the verifier's expected output formula.
+                        // CRITICAL: In Jolt, RAF is added for ALL cycles, including those
+                        // without lookup tables (NOOPs, padding). The table_val is only
+                        // added when cycle.lookup_table() returns Some(table). But the
+                        // RAF contribution is ALWAYS added based on is_interleaved_operands.
                         for (0..T) |j| {
+                            var val = F.zero();
+
+                            // Add table value if this cycle has a table
                             const t_idx_j = cycle_table_indices[j];
                             if (t_idx_j >= 0) {
                                 const ti: usize = @intCast(t_idx_j);
                                 if (ti < NUM_TABLES) {
-                                    const is_interleaved_j = !cycle_is_identity_path[j];
-                                    if (is_interleaved_j) {
-                                        lookups_combined_vals[j] = stored_table_values[ti].add(raf_interleaved);
-                                    } else {
-                                        lookups_combined_vals[j] = stored_table_values[ti].add(raf_identity);
-                                    }
-                                } else {
-                                    lookups_combined_vals[j] = F.zero();
+                                    val = stored_table_values[ti];
                                 }
-                            } else {
-                                // No table: combined val should be zero
-                                lookups_combined_vals[j] = F.zero();
                             }
+
+                            // ALWAYS add RAF contribution (matches Jolt's init_log_t_rounds)
+                            const is_interleaved_j = !cycle_is_identity_path[j];
+                            if (is_interleaved_j) {
+                                val = val.add(raf_interleaved);
+                            } else {
+                                val = val.add(raf_identity);
+                            }
+
+                            lookups_combined_vals[j] = val;
                         }
                         dbg("[STAGE5 REMAT] combined_vals rematerialized for {} cycles\n", .{T});
                         dbg("[STAGE5 REMAT] combined_vals[0] = {x}\n", .{lookups_combined_vals[0].toBytesBE()[16..32].*});
@@ -6663,10 +6724,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     print("[ZOLT EQ DEBUG]   r_cycle_prime_be[{}] limbs = [0x{x}, 0x{x}, 0x{x}, 0x{x}]\n", .{ i, r_cycle_prime_be[i].limbs[0], r_cycle_prime_be[i].limbs[1], r_cycle_prime_be[i].limbs[2], r_cycle_prime_be[i].limbs[3] });
                 }
             }
+            // Include ALL T cycles (including NOOPs and padding) in table flags and raf flag.
+            // This matches Jolt where all cycles contribute to opening claims.
             for (0..T) |j| {
-                if (j >= trace_len) continue;
-
-                // Compute eq(r_cycle', j) - note r_cycle_prime_be is already BIG_ENDIAN
                 const eq_j = computeEqAtIndex(r_cycle_prime_be, j);
 
                 // Accumulate into appropriate table flag
@@ -6685,9 +6745,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             }
 
             // Compute raf_flag = Σ_{j: identity_path} eq(r_cycle', j)
+            // Include ALL T cycles (NOOPs and padding are identity path)
             var computed_raf_flag = F.zero();
             for (0..T) |j| {
-                if (j >= trace_len) continue;
                 if (cycle_is_identity_path[j]) {
                     const eq_j = computeEqAtIndex(r_cycle_prime_be, j);
                     computed_raf_flag = computed_raf_flag.add(eq_j);
@@ -6806,8 +6866,6 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 // where cv(r_addr, j) = table_val(r_addr, table(j)) + γ*raf(r_addr, j)
                 var bf_inst2_output = F.zero();
                 for (0..T) |j| {
-                    if (j >= trace_len) continue;
-
                     // eq(j, r_reduction) * eq(j, r_cycle')
                     const eq_red_j = computeEqAtIndex(r_reduction, j);
                     const eq_cyc_j = computeEqAtIndex(r_cycle_prime_be, j);

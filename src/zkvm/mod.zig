@@ -229,8 +229,8 @@ pub fn computeBytecodeCodeSize(program_bytecode: []const u8) usize {
     }
 
     // +1 for prepended NoOp (Jolt always prepends one)
-    // +3 for termination store virtual sequence (LUI, ADDI, SD) at the end
-    const total = num_entries + 1 + 3;
+    // +4 for termination sequence (LUI, ADDI, SB, JAL-to-self) at the end
+    const total = num_entries + 1 + 4;
 
     // Pad to next power of 2, minimum 2
     if (total < 2) return 2;

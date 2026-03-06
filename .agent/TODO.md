@@ -1,45 +1,51 @@
 # Zolt → Jolt Cross-Verification Progress
 
-## STATUS: ALL 8 PROGRAMS FULLY VERIFIED (Stages 1-5 PASS)
+## STATUS: Upstream alignment in progress
 
-### Current State (Mar 5 2026)
-- All 8 programs prove + verify ALL stages against Jolt
-- **Stage 5 FIXED**: NOP/padding cycles now properly handled in InstructionReadRaf sumcheck
+### Current State (Mar 6 2026)
+- Migrating from MatteoMer/jolt fork to vanilla a16z/jolt upstream
+- All transcript labels, proof format, R1CS constraints updated
+- Proof deserialization passes through all fields against upstream verifier
+- **NEXT**: Full end-to-end verification test against upstream jolt-verifier
 
-## COMPLETED: Stage 5 Fix (InstructionReadRaf NOP handling)
+## COMPLETED: Upstream Alignment Changes
 
-### Root Cause
-NOOPs (ADDI x0,x0,0) and padding cycles were skipped entirely in the lookup processing
-loop of stage5_prover.zig. This caused:
-1. `cycle_table_indices[j]` = -1 instead of 0 (RangeCheck)
-2. `cycle_is_identity_path[j]` = false instead of true
-3. Missing contributions to Q arrays during 128 address rounds
-4. Missing RAF contributions during cycle round rematerialization at round 128
-5. Wrong opening claims (table flags, raf flag didn't include NOP/padding)
+### Transcript Labels (Fiat-Shamir domain separation)
+- All blake2b transcript calls now include labels matching upstream
+- Labels: sumcheck_claim, sumcheck_poly, opening_claim, dory_serde, dory_group, etc.
+- appendScalars: removed begin/end markers, uses rawAppendLabelWithLen
+- Preamble: max_input_size, max_output_size, heap_size, inputs, outputs, panic, ram_K, trace_length
 
-### Fix (3 changes in stage5_prover.zig)
-1. Removed `continue` for NOOPs in lookup processing loop — let them process normally
-   through the ADDI code path (sets table_idx=0/RangeCheck, is_identity_path=true)
-2. Added padding cycle handling (trace_len..T) — set table_idx=0, is_identity_path=true
-3. Fixed rematerialization to add RAF for ALL cycles (not just those with tables),
-   matching Jolt's init_log_t_rounds() behavior
-4. Fixed opening claims to include ALL T cycles (removed trace_len skip)
+### Proof Serialization Format
+- Reordered: commitments first, then stages with enum discriminant bytes
+- bytecode_K removed
+- opening_claims moved after untrusted_advice_commitment
 
-## COMPLETED: Termination Sequence Fix (Option A: JAL-to-self)
+### Type System Updates
+- SumcheckId: merged RamValEvaluation+RamValFinalEvaluation→RamValCheck (COUNT=23)
+- VirtualPolynomial: removed WritePCtoRD/WriteLookupOutputToRD, byte values match upstream
+- InstructionFlags: 6 variants only (removed fork-only IsRdNotZero)
+- MemoryLayout: memory_size→heap_size, memory_end→heap_end
 
-### What Changed
-The termination sequence now has 4 entries (was 3): NoOp, LUI, ADDI, SB, **JAL**
+### R1CS & Circuit Fixes
+- Constraint 13: JAL/JALR RdWriteValue fix for rd=x0
+- PRODUCT_UNIQUE_FACTOR_VIRTUALS: reordered to match upstream 8-entry ordering
+- Opening claims: corrected polynomial IDs (OpFlags indices, InstructionFlags(Branch))
 
-**SB anchor (tbpc+2)**: Changed from `VI=false, DNUPC=true` to `VI=true, DNUPC=false`
-- Now matches vanilla Jolt's `circuit_flags()` for SD with `vsr=Some(0)`
+### Infrastructure
+- jolt-verifier/ crate using upstream a16z/jolt with --diagnose mode
+- Preprocessing: blindfold_setup None byte appended
 
-**JAL-to-self (tbpc+3)**: New entry `JAL x0, 0` at address=4
-- Jump=1 disables constraint 16 for JAL→NoOp transition
+## REMAINING TODO
 
-## Jolt Version Gap (secondary issue)
+### Must Do
+- [ ] Test full end-to-end verification (prove fibonacci → verify with jolt-verifier)
+- [ ] Debug any remaining verification failures
+- [ ] Clean up debug_verbose flags and diagnostic prints in stage5/6 provers
 
-Fork (`MatteoMer/jolt`) is 71 commits behind `a16z/jolt` upstream (`807c360d`).
-Key upstream changes: `IsLastInSequence` (37th R1CS input), BlindFold ZK, x0 fix.
+### Nice to Have
+- [ ] Remove the jolt/ fork directory (replace fully with jolt-verifier/)
+- [ ] Test all 8 programs against upstream verifier
 
 ## BUILD & TEST COMMANDS
 ```bash
@@ -52,15 +58,19 @@ cp /tmp/proof.bin /tmp/zolt_proof_dory.bin
 cp /tmp/preproc.bin /tmp/zolt_preprocessing.bin
 cp /tmp/preproc.bin.ram /tmp/zolt_preprocessing.bin.ram
 
-# Verify with Jolt (all stages pass)
-cd jolt && cargo test --package jolt-core --features zolt-debug \
-  "test_verify_zolt_proof_with_zolt" -- --include-ignored
+# Verify with upstream jolt-verifier
+cd jolt-verifier && cargo run --release -- --proof /tmp/zolt_proof_dory.bin --preprocessing /tmp/zolt_preprocessing.bin
+
+# Diagnose deserialization issues
+cd jolt-verifier && cargo run --release -- --proof /tmp/zolt_proof_dory.bin --preprocessing /tmp/zolt_preprocessing.bin --diagnose
 ```
 
 ## KEY FILES
-- `src/zkvm/spartan/stage5_prover.zig` — InstructionReadRaf sumcheck (FIXED)
-- `src/zkvm/spartan/stage6_prover.zig` — BytecodeReadRaf val_poly construction
-- `src/zkvm/lookup_table/prefix_suffix_prover.zig` — Read-checking and RAF helpers
-- `src/zkvm/r1cs/constraints.zig` — R1CS constraints, witness generation
-- `src/zkvm/preprocessing.zig` — Preprocessing export
-- `jolt/jolt-core/src/zkvm/instruction_lookups/read_raf_checking.rs` — Reference Stage 5 prover
+- `src/zkvm/proof_converter.zig` — Main proof conversion logic
+- `src/zkvm/jolt_types.zig` — Proof types, SumcheckId, VirtualPolynomial, OpeningId
+- `src/zkvm/jolt_serialization.zig` — Proof serialization
+- `src/zkvm/r1cs/constraints.zig` — R1CS constraint definitions
+- `src/transcripts/blake2b.zig` — Blake2b transcript with labels
+- `src/zkvm/spartan/stage5_prover.zig` — InstructionReadRaf sumcheck
+- `src/zkvm/spartan/stage6_prover.zig` — BytecodeReadRaf val_poly
+- `jolt-verifier/src/main.rs` — Standalone upstream verifier

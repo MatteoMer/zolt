@@ -601,7 +601,7 @@ pub fn JoltProver(comptime F: type) type {
             // Use memory_size = 32768 to match Jolt fibonacci example
             var config = common.MemoryConfig{
                 .program_size = program_bytecode.len,
-                .memory_size = 32768,
+                .heap_size = 32768,
             };
 
             // Initialize the emulator
@@ -686,7 +686,7 @@ pub fn JoltProver(comptime F: type) type {
                 actual_outputs,
                 actual_panic,
                 @intCast(program_bytecode.len),
-                config.memory_size, // Pass memory_size from config
+                config.heap_size, // Pass memory_size from config
             );
             defer device.deinit();
 
@@ -759,7 +759,7 @@ pub fn JoltProver(comptime F: type) type {
             // Jolt's append_serializable reverses all bytes after serialization
             const dory_comms = [_]GT{ bytecode_comm, memory_comm, memory_final_comm, reg_comm, reg_final_comm };
             for (dory_comms) |comm| {
-                transcript.appendGT(comm); // appendGT already reverses bytes
+                transcript.appendGT("commitment", comm);
             }
 
             // Derive tau from transcript after preamble and commitments
@@ -902,7 +902,7 @@ pub fn JoltProver(comptime F: type) type {
             // Use memory_size = 32768 to match Jolt fibonacci example
             var config = common.MemoryConfig{
                 .program_size = program_bytecode.len,
-                .memory_size = 32768,
+                .heap_size = 32768,
             };
 
             // Initialize the emulator
@@ -988,7 +988,7 @@ pub fn JoltProver(comptime F: type) type {
                 actual_outputs,
                 actual_panic,
                 @intCast(program_bytecode.len),
-                config.memory_size, // Pass memory_size from config
+                config.heap_size, // Pass memory_size from config
             );
             defer device.deinit();
 
@@ -1229,7 +1229,7 @@ pub fn JoltProver(comptime F: type) type {
 
             // Append Dory commitments (GT elements) to transcript
             for (result.dory_commitments) |comm| {
-                transcript.appendGT(comm);
+                transcript.appendGT("commitment", comm);
             }
 
             // Derive tau from transcript after preamble and commitments
@@ -1241,6 +1241,15 @@ pub fn JoltProver(comptime F: type) type {
             defer self.allocator.free(tau);
             for (0..num_rows_bits) |i| {
                 tau[i] = transcript.challengeScalar();
+            }
+
+            // Print tau[0] for comparison with verifier
+            if (tau.len > 0) {
+                std.debug.print("[ZOLT-TAU] tau[0] limbs = [{x:0>16}, {x:0>16}, {x:0>16}, {x:0>16}]\n", .{ tau[0].limbs[0], tau[0].limbs[1], tau[0].limbs[2], tau[0].limbs[3] });
+                std.debug.print("[ZOLT-TAU] num_rows_bits = {}, num_cycle_vars = {}\n", .{ num_rows_bits, num_cycle_vars });
+                std.debug.print("[ZOLT-TAU] transcript state after tau: ", .{});
+                for (transcript.state[0..8]) |b| std.debug.print("{x:0>2} ", .{b});
+                std.debug.print("round={}\n", .{transcript.n_rounds});
             }
 
             // For OutputSumcheck, we need initial and final RAM states
@@ -1392,9 +1401,7 @@ pub fn JoltProver(comptime F: type) type {
                 }
 
                 // 2. Append all claims to transcript
-                // CRITICAL: Must use appendScalars (not individual appendScalar calls)
-                // because Jolt's append_scalars wraps with "begin_append_vector"/"end_append_vector"
-                transcript.appendScalars(claims_ordered);
+                transcript.appendScalars("rlc_claims", claims_ordered);
 
                 // 3. Sample gamma powers: [1, γ, γ², ..., γ^(n-1)]
                 const gamma_powers = try transcript.challengeScalarPowers(self.allocator, num_claims);
@@ -1732,7 +1739,7 @@ pub fn JoltProver(comptime F: type) type {
             // [2+]: InstructionRa, RamRa, BytecodeRa (we'll use existing comms as placeholders)
             const dory_comms = [_]GT{ rd_inc_comm, ram_inc_comm, bytecode_comm, memory_comm, memory_final_comm, reg_comm, reg_final_comm };
             for (dory_comms) |comm| {
-                transcript.appendGT(comm); // appendGT already reverses bytes
+                transcript.appendGT("commitment", comm);
             }
 
             // Derive tau from transcript after preamble and commitments
@@ -1850,64 +1857,54 @@ pub fn JoltProver(comptime F: type) type {
             var serializer = jolt_serialization.ArkworksSerializer(F).init(self.allocator);
             errdefer serializer.deinit();
 
-            // Write opening claims
-            try serializer.writeOpeningClaims(&bundle.proof.opening_claims);
+            // Upstream field order from JoltProof struct in proof_serialization.rs:
+            // 1. commitments, 2. stage1_uni_skip, 3. stage1_sumcheck, ...
+            // 7. stage7_sumcheck, 8. joint_opening_proof, 9. untrusted_advice_commitment,
+            // 10. opening_claims, 11. trace_length, 12. ram_K, 13. rw_config,
+            // 14. one_hot_config, 15. dory_layout
 
-            // Write the pre-computed Dory commitments (GT elements, 384 bytes each)
-            // Order: RdInc, RamInc, InstructionRa[0..instruction_d-1], RamRa[0..ram_d-1], BytecodeRa[0..bytecode_d-1]
+            // 1. Commitments (GT elements, 384 bytes each)
             dbg("[SERIALIZE] Writing {} Dory commitments\n", .{bundle.dory_commitments.len});
             try serializer.writeUsize(bundle.dory_commitments.len);
             for (bundle.dory_commitments) |comm| {
                 try serializer.writeGT(comm);
             }
 
-            // Write stage 1 (UniSkip + sumcheck)
+            // 2. Stage 1 UniSkip (with 0u8 Standard enum discriminant)
             dbg("[SERIALIZE] Writing Stage 1...\n", .{});
             if (bundle.proof.stage1_uni_skip_first_round_proof) |*p| {
-                dbg("[SERIALIZE]   Stage 1 UniSkipFirstRound: {} coeffs\n", .{p.uni_poly.len});
+                try serializer.writeU8(0); // Standard variant discriminant
                 try serializer.writeUniSkipFirstRoundProof(p);
-            } else {
-                dbg("[SERIALIZE]   Stage 1 UniSkipFirstRound: NONE (writing 0)\n", .{});
-                try serializer.writeUsize(0);
             }
-            dbg("[SERIALIZE]   Stage 1 Sumcheck: {} rounds\n", .{bundle.proof.stage1_sumcheck_proof.compressed_polys.items.len});
+            // 3. Stage 1 sumcheck (with 0u8 Clear enum discriminant)
+            try serializer.writeU8(0); // Clear variant discriminant
             try serializer.writeSumcheckInstanceProof(&bundle.proof.stage1_sumcheck_proof);
 
-            // Write stage 2 (UniSkip + sumcheck)
+            // 4. Stage 2 UniSkip + 5. Stage 2 sumcheck
             dbg("[SERIALIZE] Writing Stage 2...\n", .{});
             if (bundle.proof.stage2_uni_skip_first_round_proof) |*p| {
-                dbg("[SERIALIZE]   Stage 2 UniSkipFirstRound: {} coeffs\n", .{p.uni_poly.len});
+                try serializer.writeU8(0); // Standard variant discriminant
                 try serializer.writeUniSkipFirstRoundProof(p);
-            } else {
-                dbg("[SERIALIZE]   Stage 2 UniSkipFirstRound: NONE (writing 0)\n", .{});
-                try serializer.writeUsize(0);
             }
-            dbg("[SERIALIZE]   Stage 2 Sumcheck: {} rounds\n", .{bundle.proof.stage2_sumcheck_proof.compressed_polys.items.len});
+            try serializer.writeU8(0); // Clear variant discriminant
             try serializer.writeSumcheckInstanceProof(&bundle.proof.stage2_sumcheck_proof);
 
-            // Write stages 3-7 (sumcheck only)
-            dbg("[SERIALIZE] Writing Stage 3: {} rounds\n", .{bundle.proof.stage3_sumcheck_proof.compressed_polys.items.len});
+            // 6-10. Stages 3-7 (each with 0u8 Clear discriminant)
+            try serializer.writeU8(0);
             try serializer.writeSumcheckInstanceProof(&bundle.proof.stage3_sumcheck_proof);
-
-            dbg("[SERIALIZE] Writing Stage 4: {} rounds\n", .{bundle.proof.stage4_sumcheck_proof.compressed_polys.items.len});
+            try serializer.writeU8(0);
             try serializer.writeSumcheckInstanceProof(&bundle.proof.stage4_sumcheck_proof);
-
-            dbg("[SERIALIZE] Writing Stage 5: {} rounds\n", .{bundle.proof.stage5_sumcheck_proof.compressed_polys.items.len});
+            try serializer.writeU8(0);
             try serializer.writeSumcheckInstanceProof(&bundle.proof.stage5_sumcheck_proof);
-
-            dbg("[SERIALIZE] Writing Stage 6: {} rounds\n", .{bundle.proof.stage6_sumcheck_proof.compressed_polys.items.len});
+            try serializer.writeU8(0);
             try serializer.writeSumcheckInstanceProof(&bundle.proof.stage6_sumcheck_proof);
-
-            dbg("[SERIALIZE] Writing Stage 7: {} rounds\n", .{bundle.proof.stage7_sumcheck_proof.compressed_polys.items.len});
+            try serializer.writeU8(0);
             try serializer.writeSumcheckInstanceProof(&bundle.proof.stage7_sumcheck_proof);
 
-            // Write joint opening proof (REQUIRED - not optional in Jolt)
-            // Use the pre-computed Dory opening proof from Stage 8
+            // 11. Joint opening proof
             if (bundle.dory_opening_proof) |*dory_proof| {
-                dbg("[SERIALIZE] Writing pre-computed Dory opening proof\n", .{});
                 try serializer.writeDoryProof(dory_proof);
             } else {
-                // Fallback: generate a dummy proof (should not happen in correct flow)
                 dbg("[SERIALIZE] WARNING: No pre-computed Dory proof, generating dummy\n", .{});
                 const dummy_poly = try self.allocator.alloc(F, 2);
                 defer self.allocator.free(dummy_poly);
@@ -1925,40 +1922,16 @@ pub fn JoltProver(comptime F: type) type {
                 try serializer.writeDoryProof(&dory_proof);
             }
 
-            // Write untrusted_advice_commitment: Option<PCS::Commitment>
-            // Jolt's JoltProof struct has exactly ONE advice field here:
-            //   untrusted_advice_commitment: Option<PCS::Commitment>
-            // (The trusted_advice_commitment is NOT in JoltProof - it's passed separately.)
-            // None = 0x00 (arkworks Option serialization)
-            try serializer.writeU8(0); // untrusted_advice_commitment: None
+            // 12. untrusted_advice_commitment: Option<PCS::Commitment> = None
+            try serializer.writeU8(0);
 
-            // Write configuration fields - must match Jolt's #[derive(CanonicalSerialize)]
-            // on JoltProof struct. Field order from proof_serialization.rs:
-            //   trace_length: usize (8 bytes, LE)
-            //   ram_K: usize (8 bytes, LE)
-            //   bytecode_K: usize (8 bytes, LE)
-            //   rw_config: ReadWriteConfig (4 x u8 = 4 bytes)
-            //   one_hot_config: OneHotConfig (2 x u8 = 2 bytes)
-            //   dory_layout: DoryLayout (1 x u8 = 1 byte)
-            dbg("[SERIALIZE CONFIG] trace_length={}, ram_K={}, bytecode_K={}\n", .{
-                bundle.proof.trace_length,
-                bundle.proof.ram_K,
-                bundle.proof.bytecode_K,
-            });
-            dbg("[SERIALIZE CONFIG] rw_config=({},{},{},{}), one_hot=({},{}), dory_layout={}\n", .{
-                bundle.proof.rw_config.ram_rw_phase1_num_rounds,
-                bundle.proof.rw_config.ram_rw_phase2_num_rounds,
-                bundle.proof.rw_config.registers_rw_phase1_num_rounds,
-                bundle.proof.rw_config.registers_rw_phase2_num_rounds,
-                bundle.proof.one_hot_config.log_k_chunk,
-                bundle.proof.one_hot_config.lookups_ra_virtual_log_k_chunk,
-                bundle.proof.dory_layout,
-            });
+            // 13. opening_claims (moved after untrusted_advice in upstream)
+            try serializer.writeOpeningClaims(&bundle.proof.opening_claims);
 
+            // 14-15. Configuration fields
             try serializer.writeUsize(bundle.proof.trace_length);
             try serializer.writeUsize(bundle.proof.ram_K);
-            try serializer.writeUsize(bundle.proof.bytecode_K);
-            // ReadWriteConfig: 4 x u8 (canonical serialization of the struct)
+            // ReadWriteConfig: 4 x u8
             try serializer.writeU8(bundle.proof.rw_config.ram_rw_phase1_num_rounds);
             try serializer.writeU8(bundle.proof.rw_config.ram_rw_phase2_num_rounds);
             try serializer.writeU8(bundle.proof.rw_config.registers_rw_phase1_num_rounds);

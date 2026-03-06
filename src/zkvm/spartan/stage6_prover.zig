@@ -14,7 +14,7 @@
 const std = @import("std");
 
 // Debug output control - set to true to enable verbose debug prints
-const debug_verbose = false;
+const debug_verbose = true;
 fn dbg(comptime fmt: []const u8, args: anytype) void {
     if (debug_verbose) std.debug.print(fmt, args);
 }
@@ -3336,8 +3336,12 @@ fn BytecodeReadRafProver(comptime F: type) type {
             }
 
             // Compute bound_vals[s] = Val_s(r_address) + RAF_s(r_address)
-            // Use LH challenges with LE eq table for val_eval (matches sumcheck binding)
-            const eq_addr = try computeEqTable(F, self.allocator, r_address_challenges, self.bytecode_log_k);
+            // The sumcheck binds variables MSB-first: r_address_challenges[0] = MSB.
+            // But val_poly coefficients are indexed with bit 0 = LSB.
+            // Jolt's verifier reverses challenges (normalize_opening_point) before evaluate,
+            // so r[0] = LSB challenge maps to bit 0 of coefficient index.
+            // We must do the same: use r_address_be (reversed) for the eq table.
+            const eq_addr = try computeEqTable(F, self.allocator, r_address_be, self.bytecode_log_k);
             defer self.allocator.free(eq_addr);
 
             // Debug: eq_addr entries (ALWAYS ON, full 32 bytes)
@@ -3420,9 +3424,10 @@ fn BytecodeReadRafProver(comptime F: type) type {
                     dbg("]\n", .{});
                 }
 
-                // bound_vals[s] = (val_eval + raf) * gamma^s
-                // This matches Jolt's verifier expected_output_claim computation.
-                bound_vals[s] = self.gamma_powers[s].mul(val_eval);
+                // bound_vals[s] = gamma^s * val_with_raf[s][0]
+                // Use the Phase 1 bound value directly (like Jolt's poly.final_sumcheck_claim()),
+                // NOT the recomputed val_eval from the eq table.
+                bound_vals[s] = self.gamma_powers[s].mul(self.val_with_raf[s][0]);
 
                 // DIAGNOSTIC: compare re-computed val_eval with Phase 1 bound val_with_raf[s][0]
                 {
@@ -3930,7 +3935,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 .{ .Committed = .{ .poly = .RamInc, .sumcheck_id = .RamReadWriteChecking } },
             ) orelse F.zero();
             const v2_claim = opening_claims.get(
-                .{ .Committed = .{ .poly = .RamInc, .sumcheck_id = .RamValEvaluation } },
+                .{ .Committed = .{ .poly = .RamInc, .sumcheck_id = .RamValCheck } },
             ) orelse F.zero();
             const w1_claim = opening_claims.get(
                 .{ .Committed = .{ .poly = .RdInc, .sumcheck_id = .RegistersReadWriteChecking } },
@@ -4968,6 +4973,64 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 dbg("  trace_rs2_LE=[", .{});
                 for (0..8) |bi| dbg("{x:0>2}", .{t_rs2[31 - bi]});
                 dbg("] match_oc={}\n", .{@as(u8, if (trace_rs2_sum.eql(oc_rs2)) 1 else 0)});
+                // CRITICAL: Compute RdWa claim using EXACT same logic as Stage 4 prover
+                // Stage 4 sets rd_wa_poly[rd * T + cycle] = 1 when step.rd_written (including rd=0)
+                // After sumcheck: rd_wa_claim = Σ_c eq(r_cycle, c) * eq(rd_index(c), r_addr) * 1{rd_written(c)}
+                {
+                    var direct_rd_claim = F.zero();
+                    var rd_written_0_count: usize = 0;
+                    var rd_not_written_but_bc_has_rd: usize = 0;
+                    for (0..T) |c4| {
+                        const step_e = trace.steps.items[c4];
+                        if (step_e.is_noop) {
+                            // Stage 4 prover skips noop cycles
+                            continue;
+                        }
+                        if (step_e.rd_written) {
+                            const rd_idx = @as(usize, step_e.rd_index);
+                            if (rd_idx < REG_COUNT) {
+                                direct_rd_claim = direct_rd_claim.add(eq_table_s4[c4].mul(eq_table_4[rd_idx]));
+                            }
+                            if (rd_idx == 0) rd_written_0_count += 1;
+                        } else {
+                            // Check if bytecode entry has rd < 128 for this cycle
+                            const pc_e = pc_map.getPCForStep(step_e);
+                            if (pc_e < bytecode_K and pc_e < bytecode_entries.len) {
+                                if (bytecode_entries[pc_e].rd < REG_COUNT) {
+                                    rd_not_written_but_bc_has_rd += 1;
+                                    if (rd_not_written_but_bc_has_rd <= 5) {
+                                        dbg("  [RD_GHOST] c={} k={} pc=0x{x:0>8} opc=0x{x:0>2} bc_rd={} step.rd_idx={} rd_written=0\n", .{
+                                            c4, pc_e, step_e.pc, step_e.instruction & 0x7f,
+                                            bytecode_entries[pc_e].rd, step_e.rd_index,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    const drcl = direct_rd_claim.toBytesBE();
+                    dbg("  [DIRECT_RD] claim_LE=[", .{});
+                    for (0..8) |bi| dbg("{x:0>2}", .{drcl[31 - bi]});
+                    dbg("] match_oc={} match_bc={}\n", .{
+                        @as(u8, if (direct_rd_claim.eql(oc_rd)) 1 else 0),
+                        @as(u8, if (direct_rd_claim.eql(bc_rd_sum)) 1 else 0),
+                    });
+                    dbg("  [DIRECT_RD] rd_written_0_count={} rd_not_written_but_bc_has_rd={}\n", .{
+                        rd_written_0_count, rd_not_written_but_bc_has_rd,
+                    });
+                    // Compute difference
+                    const diff = bc_rd_sum.sub(direct_rd_claim);
+                    const diff_le = diff.toBytesBE();
+                    dbg("  [DIRECT_RD] bc_rd - direct = [", .{});
+                    for (0..8) |bi| dbg("{x:0>2}", .{diff_le[31 - bi]});
+                    dbg("]\n", .{});
+                    // Check: does direct_rd match oc_rd? If not, Stage 4 prover has a bug
+                    const diff2 = direct_rd_claim.sub(oc_rd);
+                    const diff2_le = diff2.toBytesBE();
+                    dbg("  [DIRECT_RD] direct - oc_rd = [", .{});
+                    for (0..8) |bi| dbg("{x:0>2}", .{diff2_le[31 - bi]});
+                    dbg("]\n", .{});
+                }
                 dbg("[BCRAF_FIELD_CMP3] Done\n\n", .{});
             }
 
@@ -5204,12 +5267,12 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             // Append input claims and get batching coefficients
             // ====================================================================
 
-            transcript.appendScalar(bytecodeReadRaf_input);
-            transcript.appendScalar(hammingBooleanity_input);
-            transcript.appendScalar(booleanity_input);
-            transcript.appendScalar(ramRaVirtual_input);
-            transcript.appendScalar(lookupsRaVirtual_input);
-            transcript.appendScalar(incClaimReduction_input);
+            transcript.appendScalar("sumcheck_claim", bytecodeReadRaf_input);
+            transcript.appendScalar("sumcheck_claim", hammingBooleanity_input);
+            transcript.appendScalar("sumcheck_claim", booleanity_input);
+            transcript.appendScalar("sumcheck_claim", ramRaVirtual_input);
+            transcript.appendScalar("sumcheck_claim", lookupsRaVirtual_input);
+            transcript.appendScalar("sumcheck_claim", incClaimReduction_input);
 
             const batch = try self.allocator.alloc(F, 6);
             defer self.allocator.free(batch);
@@ -5764,11 +5827,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     }
                 }
 
-                transcript.appendMessage("UniPoly_begin");
-                for (0..num_compressed) |j| {
-                    transcript.appendScalar(coeffs[j]);
-                }
-                transcript.appendMessage("UniPoly_end");
+                transcript.appendScalars("sumcheck_poly", coeffs[0..num_compressed]);
 
                 // Dump transcript state AFTER appending R0 polynomial
                 if (round == 0) {
@@ -6527,30 +6586,30 @@ pub fn Stage6BatchedProver(comptime F: type) type {
 
             // Instance 0: BytecodeReadRaf
             for (bytecode_ra_claims) |claim| {
-                transcript.appendScalar(claim);
+                transcript.appendScalar("opening_claim", claim);
             }
 
             // Instance 1: HammingBooleanity
-            transcript.appendScalar(hamming_weight_claim);
+            transcript.appendScalar("opening_claim", hamming_weight_claim);
 
             // Instance 2: Booleanity
             for (booleanity_ra_claims) |claim| {
-                transcript.appendScalar(claim);
+                transcript.appendScalar("opening_claim", claim);
             }
 
             // Instance 3: RamRaVirtual
             for (ram_ra_virtual_claims) |claim| {
-                transcript.appendScalar(claim);
+                transcript.appendScalar("opening_claim", claim);
             }
 
             // Instance 4: LookupsRaVirtual
             for (instruction_ra_virtual_claims) |claim| {
-                transcript.appendScalar(claim);
+                transcript.appendScalar("opening_claim", claim);
             }
 
             // Instance 5: IncClaimReduction
-            transcript.appendScalar(ram_inc_claim);
-            transcript.appendScalar(rd_inc_claim);
+            transcript.appendScalar("opening_claim", ram_inc_claim);
+            transcript.appendScalar("opening_claim", rd_inc_claim);
 
             return Stage6Result(F){
                 .challenges = challenges,

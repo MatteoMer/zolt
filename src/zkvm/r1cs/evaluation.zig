@@ -50,7 +50,7 @@ pub fn R1CSInputEvaluator(comptime F: type) type {
     return struct {
         const Self = @This();
 
-        /// Compute the claimed evaluation of all 36 R1CS inputs at r_cycle
+        /// Compute the claimed evaluation of all 35 R1CS inputs at r_cycle
         ///
         /// This uses the formula:
         ///   MLE_i(r) = Sum_t eq(r, t) * input_i(t)
@@ -196,7 +196,7 @@ pub fn R1CSInputEvaluator(comptime F: type) type {
         /// This should match what the sumcheck computes (divided by eq_factor).
         pub fn computeInnerSumProd(
             allocator: Allocator,
-            z: []const F, // R1CS input MLE evaluations (36 values)
+            z: []const F, // R1CS input MLE evaluations (35 values)
             lagrange_weights: []const F, // Lagrange basis at r0 (10 values)
             r_stream: F, // Streaming challenge
         ) F {

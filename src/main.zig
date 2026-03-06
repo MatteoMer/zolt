@@ -99,7 +99,7 @@ fn runEmulator(allocator: std.mem.Allocator, elf_path: []const u8, show_regs: bo
 
     var config = zolt.common.MemoryConfig{
         .program_size = program.bytecode.len,
-        .memory_size = 32768,
+        .heap_size = 32768,
     };
 
     var emulator = zolt.tracer.Emulator.init(allocator, &config);
@@ -456,6 +456,12 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, output_path: []
 
         shared_prep.serialize(allocator, buffer.writer(allocator)) catch |err| {
             std.debug.print("  Error serializing shared preprocessing: {s}\n", .{@errorName(err)});
+            return err;
+        };
+
+        // blindfold_setup: Option<BlindfoldSetup<C>> = None (arkworks serializes as 0u8)
+        buffer.writer(allocator).writeByte(0) catch |err| {
+            std.debug.print("  Error serializing blindfold_setup: {s}\n", .{@errorName(err)});
             return err;
         };
 

@@ -54,28 +54,27 @@ pub const G1Flags = enum(u8) {
 };
 
 /// Append a GT element to the transcript for Dory protocol.
-/// Dory uses JoltToDoryTranscript which calls transcript.append_bytes() directly
-/// with serialize_compressed output, WITHOUT byte reversal.
-/// This differs from appendGT which reverses bytes for the main Jolt transcript.
+/// Maps to upstream JoltToDoryTranscript::append_serde which calls
+/// transcript.append_bytes(b"dory_serde", &buffer) with serialized bytes (no reversal).
 fn doryAppendGT(transcript: anytype, gt: GT) void {
     const bytes = gt.toBytes();
-    // For Fp12, serialize_compressed == serialize_uncompressed (384 bytes)
-    // No reversal - Dory's JoltToDoryTranscript uses append_bytes directly
-    transcript.appendBytes(&bytes);
+    transcript.appendBytes("dory_serde", &bytes);
 }
 
 /// Append a G1 point to the transcript for Dory protocol.
-/// Uses compressed serialization (32 bytes), no reversal.
+/// Maps to upstream JoltToDoryTranscript::append_group which calls
+/// transcript.append_bytes(b"dory_group", &buffer) with compressed serialization.
 fn doryAppendG1(transcript: anytype, point: G1Point) void {
     const bytes = compressG1(point);
-    transcript.appendBytes(&bytes);
+    transcript.appendBytes("dory_group", &bytes);
 }
 
 /// Append a G2 point to the transcript for Dory protocol.
-/// Uses compressed serialization (64 bytes), no reversal.
+/// Maps to upstream JoltToDoryTranscript::append_group which calls
+/// transcript.append_bytes(b"dory_group", &buffer) with compressed serialization.
 fn doryAppendG2(transcript: anytype, point: G2Point) void {
     const bytes = compressG2(point);
-    transcript.appendBytes(&bytes);
+    transcript.appendBytes("dory_group", &bytes);
 }
 
 /// Compress a G1 point to 32 bytes (arkworks format)

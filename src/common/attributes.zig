@@ -17,7 +17,7 @@ pub const Attributes = struct {
     guest_only: bool = false,
 
     /// VM memory size in bytes
-    memory_size: u64 = constants.DEFAULT_MEMORY_SIZE,
+    heap_size: u64 = constants.DEFAULT_MEMORY_SIZE,
 
     /// Stack size in bytes
     stack_size: u64 = constants.DEFAULT_STACK_SIZE,
@@ -43,9 +43,9 @@ pub const Attributes = struct {
     }
 
     /// Create attributes with custom memory and stack size
-    pub fn withMemory(memory_size: u64, stack_size: u64) Attributes {
+    pub fn withMemory(heap_size: u64, stack_size: u64) Attributes {
         return .{
-            .memory_size = memory_size,
+            .heap_size = heap_size,
             .stack_size = stack_size,
         };
     }
@@ -58,6 +58,6 @@ test "default attributes" {
     std.testing.expect(!attrs.wasm) catch unreachable;
     std.testing.expect(!attrs.nightly) catch unreachable;
     std.testing.expect(!attrs.guest_only) catch unreachable;
-    std.testing.expectEqual(constants.DEFAULT_MEMORY_SIZE, attrs.memory_size) catch unreachable;
+    std.testing.expectEqual(constants.DEFAULT_MEMORY_SIZE, attrs.heap_size) catch unreachable;
     std.testing.expectEqual(constants.DEFAULT_STACK_SIZE, attrs.stack_size) catch unreachable;
 }

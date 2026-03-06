@@ -80,6 +80,9 @@ pub const TraceStep = struct {
     /// For 2-step W-extension: the base instruction is first.
     /// For 12-step REMUW: the first VirtualAdvice is first.
     is_first_in_sequence: bool = false,
+    /// Whether this is the last instruction in a virtual sequence (vsr == Some(0)).
+    /// In upstream Jolt, this is CircuitFlags::IsLastInSequence.
+    is_last_in_sequence: bool = false,
 };
 
 /// Full execution trace
@@ -771,6 +774,7 @@ pub const Emulator = struct {
             .next_pc = self.state.pc + pc_increment,
             .is_compressed = self.is_compressed,
             .is_first_in_sequence = true, // Standalone VirtualMULI is first (and only) in sequence
+            .is_last_in_sequence = true, // Also last (standalone)
         });
 
         // Update prev_pc for infinite loop detection
@@ -852,6 +856,7 @@ pub const Emulator = struct {
             .next_pc = self.state.pc + pc_increment,
             .is_compressed = self.is_compressed,
             .is_first_in_sequence = true, // Standalone VirtualSRLI is first (and only) in sequence
+            .is_last_in_sequence = true, // Also last (standalone)
         });
 
         self.prev_pc = self.state.pc;
@@ -1037,6 +1042,7 @@ pub const Emulator = struct {
             .next_pc = self.state.pc + pc_increment,
             .is_compressed = self.is_compressed,
             .virtual_sequence_remaining = 0, // Last in 3-step sequence
+            .is_last_in_sequence = true,
         });
 
         self.prev_pc = self.state.pc;
@@ -1203,6 +1209,7 @@ pub const Emulator = struct {
             .next_pc = self.state.pc + pc_increment,
             .is_compressed = self.is_compressed,
             .virtual_sequence_remaining = 0, // Last in 2-instruction sequence
+            .is_last_in_sequence = true,
         });
 
         // Update prev_pc for infinite loop detection
@@ -1692,6 +1699,7 @@ pub const Emulator = struct {
             .next_pc = self.state.pc + pc_increment,
             .is_compressed = self.is_compressed,
             .virtual_sequence_remaining = 0,
+            .is_last_in_sequence = true,
         });
 
         // Update prev_pc for infinite loop detection
@@ -2262,6 +2270,7 @@ pub const Emulator = struct {
             .memory_addr = null, .memory_pre_value = null, .memory_value = null,
             .is_memory_write = false, .next_pc = self.state.pc + pc_increment,
             .is_compressed = self.is_compressed, .virtual_sequence_remaining = 0,
+            .is_last_in_sequence = true,
         });
 
         // Update state
@@ -2500,6 +2509,7 @@ pub const Emulator = struct {
             .is_noop = false, // NOT noop — Stage 4 must process register reads
             .is_termination_store = true, // DoNotUpdateUPC=1, FlagIsNoop=1 in R1CS
             .virtual_sequence_remaining = 0, // 3-instruction sequence: LUI(2), ADDI(1), SB(0)
+            .is_last_in_sequence = true,
         });
 
         // Record the write in the RAM trace at the SB cycle
@@ -2529,7 +2539,7 @@ pub const Emulator = struct {
             .rd_index = 0,
             .rs1_index = 0,
             .rs2_index = 0,
-            .rd_written = false, // x0 is not writable
+            .rd_written = true, // Jolt includes rd=0 writes in RdWa polynomial (0→0 transition)
             .rs1_read = false, // JAL doesn't read rs1
             .rs2_read = false,
             .memory_addr = null,

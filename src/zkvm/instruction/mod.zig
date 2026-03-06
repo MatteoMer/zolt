@@ -80,8 +80,10 @@ pub const CircuitFlags = enum(u8) {
     IsCompressed = 11,
     /// Is instruction the first in a virtual sequence
     IsFirstInSequence = 12,
+    /// Is instruction the last in a virtual sequence
+    IsLastInSequence = 13,
 
-    pub const COUNT: usize = 13;
+    pub const COUNT: usize = 14;
 };
 
 /// Boolean flags that are not part of Jolt's R1CS constraints.

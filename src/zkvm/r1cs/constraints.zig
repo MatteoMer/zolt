@@ -38,57 +38,56 @@ const CircuitFlags = instruction.CircuitFlags;
 ///
 /// Reference: jolt-core/src/zkvm/r1cs/inputs.rs
 pub const R1CSInputIndex = enum(u8) {
-    // Matches Jolt's ALL_R1CS_INPUTS order exactly:
+    // Matches upstream Jolt's ALL_R1CS_INPUTS order exactly (35 inputs):
     LeftInstructionInput = 0,
     RightInstructionInput = 1,
     Product = 2,
-    WriteLookupOutputToRD = 3,
-    WritePCtoRD = 4,
-    ShouldBranch = 5,
-    PC = 6,
-    UnexpandedPC = 7,
-    Imm = 8,
-    RamAddress = 9,
-    Rs1Value = 10,
-    Rs2Value = 11,
-    RdWriteValue = 12,
-    RamReadValue = 13,
-    RamWriteValue = 14,
-    LeftLookupOperand = 15,
-    RightLookupOperand = 16,
-    NextUnexpandedPC = 17,
-    NextPC = 18,
-    NextIsVirtual = 19,
-    NextIsFirstInSequence = 20,
-    LookupOutput = 21,
-    ShouldJump = 22,
-    // OpFlags in order matching CircuitFlags enum
-    FlagAddOperands = 23,
-    FlagSubtractOperands = 24,
-    FlagMultiplyOperands = 25,
-    FlagLoad = 26,
-    FlagStore = 27,
-    FlagJump = 28,
-    FlagWriteLookupOutputToRD = 29,
-    FlagVirtualInstruction = 30,
-    FlagAssert = 31,
-    FlagDoNotUpdateUnexpandedPC = 32,
-    FlagAdvice = 33,
-    FlagIsCompressed = 34,
-    FlagIsFirstInSequence = 35,
+    ShouldBranch = 3,
+    PC = 4,
+    UnexpandedPC = 5,
+    Imm = 6,
+    RamAddress = 7,
+    Rs1Value = 8,
+    Rs2Value = 9,
+    RdWriteValue = 10,
+    RamReadValue = 11,
+    RamWriteValue = 12,
+    LeftLookupOperand = 13,
+    RightLookupOperand = 14,
+    NextUnexpandedPC = 15,
+    NextPC = 16,
+    NextIsVirtual = 17,
+    NextIsFirstInSequence = 18,
+    LookupOutput = 19,
+    ShouldJump = 20,
+    // OpFlags in order matching CircuitFlags enum (14 flags)
+    FlagAddOperands = 21,
+    FlagSubtractOperands = 22,
+    FlagMultiplyOperands = 23,
+    FlagLoad = 24,
+    FlagStore = 25,
+    FlagJump = 26,
+    FlagWriteLookupOutputToRD = 27,
+    FlagVirtualInstruction = 28,
+    FlagAssert = 29,
+    FlagDoNotUpdateUnexpandedPC = 30,
+    FlagAdvice = 31,
+    FlagIsCompressed = 32,
+    FlagIsFirstInSequence = 33,
+    FlagIsLastInSequence = 34,
     // Additional flags for product virtualization factor polynomials
     // These are derived from instruction fields and needed for Stage 2 factor evaluation
-    FlagIsRdNotZero = 36, // 1 if rd register index != 0
-    FlagBranch = 37, // 1 if instruction opcode == 0x63 (branch)
-    FlagIsNoop = 38, // 1 if this is a noop instruction
+    FlagIsRdNotZero = 35, // 1 if rd register index != 0
+    FlagBranch = 36, // 1 if instruction opcode == 0x63 (branch)
+    FlagIsNoop = 37, // 1 if this is a noop instruction
     // InstructionFlags for Stage 3 InstructionInput sumcheck
     // These determine which operand values are used for left/right instruction inputs
-    FlagLeftOperandIsRs1 = 39, // 1 if left instruction input is rs1 value
-    FlagLeftOperandIsPC = 40, // 1 if left instruction input is PC (JAL, AUIPC)
-    FlagRightOperandIsRs2 = 41, // 1 if right instruction input is rs2 value (R-type)
-    FlagRightOperandIsImm = 42, // 1 if right instruction input is immediate (I-type, etc.)
+    FlagLeftOperandIsRs1 = 38, // 1 if left instruction input is rs1 value
+    FlagLeftOperandIsPC = 39, // 1 if left instruction input is PC (JAL, AUIPC)
+    FlagRightOperandIsRs2 = 40, // 1 if right instruction input is rs2 value (R-type)
+    FlagRightOperandIsImm = 41, // 1 if right instruction input is immediate (I-type, etc.)
 
-    pub const NUM_INPUTS = 43;
+    pub const NUM_INPUTS = 42;
 
     pub fn toIndex(self: R1CSInputIndex) usize {
         return @intFromEnum(self);
@@ -424,9 +423,9 @@ pub const UNIFORM_CONSTRAINTS = [_]UniformConstraint{
     // =========================================================================
     // CONSTRAINT 12: RdWriteEqLookupIfWriteLookupToRd (SECOND GROUP index 5)
     // =========================================================================
-    // if { WriteLookupOutputToRD } => ( RdWriteValue ) == ( LookupOutput )
+    // if { OpFlags(WriteLookupOutputToRD) } => ( RdWriteValue ) == ( LookupOutput )
     .{
-        .condition = LC.fromInput(.WriteLookupOutputToRD),
+        .condition = LC.fromInput(.FlagWriteLookupOutputToRD),
         .left = LC.fromInput(.RdWriteValue),
         .right = LC.fromInput(.LookupOutput),
     },
@@ -434,9 +433,9 @@ pub const UNIFORM_CONSTRAINTS = [_]UniformConstraint{
     // =========================================================================
     // CONSTRAINT 13: RdWriteEqPCPlusConstIfWritePCtoRD (SECOND GROUP index 6)
     // =========================================================================
-    // if { WritePCtoRD } => ( RdWriteValue ) == ( UnexpandedPC + 4 - 2*IsCompressed )
+    // if { OpFlags(Jump) } => ( RdWriteValue ) == ( UnexpandedPC + 4 - 2*IsCompressed )
     .{
-        .condition = LC.fromInput(.WritePCtoRD),
+        .condition = LC.fromInput(.FlagJump),
         .left = LC.fromInput(.RdWriteValue),
         .right = blk: {
             var lc = LC.zero();
@@ -499,11 +498,19 @@ pub const UNIFORM_CONSTRAINTS = [_]UniformConstraint{
     },
 
     // =========================================================================
-    // CONSTRAINT 17: NextPCEqPCPlusOneIfInline (FIRST GROUP index 8 - duplicate)
+    // CONSTRAINT 17: NextPCEqPCPlusOneIfInline (FIRST GROUP index 8)
     // =========================================================================
-    // if { VirtualInstruction } => ( NextPC ) == ( PC + 1 )
+    // if { VirtualInstruction - IsLastInSequence } => ( NextPC ) == ( PC + 1 )
+    // Guard = VI - IsLast. For valid boolean inputs where IsLast=1 implies VI=1,
+    // this equals VI && !IsLast. Skips constraint when JALR terminates a virtual sequence.
     .{
-        .condition = LC.fromInput(.FlagVirtualInstruction),
+        .condition = blk: {
+            var lc = LC.zero();
+            lc.terms[0] = .{ .input_index = .FlagVirtualInstruction, .coeff = 1 };
+            lc.terms[1] = .{ .input_index = .FlagIsLastInSequence, .coeff = -1 };
+            lc.len = 2;
+            break :blk lc;
+        },
         .left = LC.fromInput(.NextPC),
         .right = blk: {
             var lc = LC.zero();
@@ -615,11 +622,11 @@ fn computeLookupOutput(comptime FieldType: type, step: tracer.TraceStep) FieldTy
 
     switch (opcode) {
         0x6F => { // JAL
-            // LookupOutput = PC + imm (the jump target)
-            // The immediate is already computed in next_pc for successful jumps
-            // But we need to compute it from the instruction for the constraint
+            // LookupOutput = unexpanded_pc + imm (the jump target)
+            // Must use unexpanded_pc (ELF address), not pc (bytecode index),
+            // to match computeU128LookupOperand and Stage 5's combined_vals.
             const imm = decodeJTypeImmediate(step.instruction);
-            const pc_i64: i64 = @intCast(step.pc);
+            const pc_i64: i64 = @intCast(step.unexpanded_pc);
             const target = @as(u64, @bitCast(pc_i64 +% imm));
             return FieldType.fromU64(target);
         },
@@ -1206,12 +1213,24 @@ pub fn R1CSCycleInputs(comptime F: type) type {
                 // Non-memory instructions
                 inputs.values[R1CSInputIndex.RamReadValue.toIndex()] = F.zero();
                 inputs.values[R1CSInputIndex.RamWriteValue.toIndex()] = F.zero();
-                // CRITICAL: Only set RdWriteValue if instruction actually writes to rd
-                // Branch (0x63) and rd == 0 don't write. This matches Stage 4's polynomial construction.
-                inputs.values[R1CSInputIndex.RdWriteValue.toIndex()] = if (writes_to_rd)
-                    F.fromU64(step.rd_value)
-                else
-                    F.zero();
+                // Set RdWriteValue based on instruction type:
+                // - JAL/JALR (FlagJump=1): MUST be UnexpandedPC + 4 - 2*IsCompressed
+                //   regardless of rd_index (constraint 13 checks FlagJump, not rd!=0)
+                // - Other instructions: rd_value if writes_to_rd, else 0
+                const is_jump = (opcode == 0x6F or opcode == 0x67);
+                if (is_jump) {
+                    // Constraint 13: if FlagJump => RdWriteValue == UnexpandedPC + 4 - 2*IsCompressed
+                    // Jolt always records the link address as rd_write_value for JAL/JALR
+                    // Use step values directly since R1CS inputs may not be set yet
+                    const upc_f = F.fromU64(step.unexpanded_pc);
+                    const compressed_offset: u64 = if (step.is_compressed) 2 else 0;
+                    const link_addr = upc_f.add(F.fromU64(4)).sub(F.fromU64(compressed_offset));
+                    inputs.values[R1CSInputIndex.RdWriteValue.toIndex()] = link_addr;
+                } else if (writes_to_rd) {
+                    inputs.values[R1CSInputIndex.RdWriteValue.toIndex()] = F.fromU64(step.rd_value);
+                } else {
+                    inputs.values[R1CSInputIndex.RdWriteValue.toIndex()] = F.zero();
+                }
             }
 
             // =================================================================
@@ -1404,6 +1423,13 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             if (step.is_first_in_sequence) {
                 inputs.values[R1CSInputIndex.FlagIsFirstInSequence.toIndex()] = F.one();
             }
+            // IsLastInSequence: true when virtual_sequence_remaining == 0 but instruction IS virtual
+            // (i.e., the last step in a virtual sequence). Computed from trace flags.
+            if (step.is_last_in_sequence or
+                (step.virtual_sequence_remaining == 0 and inputs.values[R1CSInputIndex.FlagVirtualInstruction.toIndex()].eql(F.one())))
+            {
+                inputs.values[R1CSInputIndex.FlagIsLastInSequence.toIndex()] = F.one();
+            }
 
             // =================================================================
             // ShouldJump = FlagJump * (1 - NextIsNoop)
@@ -1430,13 +1456,6 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             // BranchFlag: 1 if this is a branch instruction (opcode 0x63)
             // Note: instr_opcode is already defined above for instruction inputs
             const branch_flag_f = if (instr_opcode == 0x63) F.one() else F.zero();
-
-            // WriteLookupOutputToRD = IsRdNotZero * FlagWriteLookupOutputToRD
-            const flag_wl = inputs.values[R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()];
-            inputs.values[R1CSInputIndex.WriteLookupOutputToRD.toIndex()] = is_rd_not_zero.mul(flag_wl);
-
-            // WritePCtoRD = IsRdNotZero * FlagJump
-            inputs.values[R1CSInputIndex.WritePCtoRD.toIndex()] = is_rd_not_zero.mul(flag_jump);
 
             // ShouldBranch = LookupOutput * BranchFlag
             // LookupOutput contains the branch condition result (0 or 1) for branches

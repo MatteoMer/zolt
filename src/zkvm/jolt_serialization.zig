@@ -348,6 +348,7 @@ pub fn ArkworksSerializer(comptime F: type) type {
         }
 
         /// Write a complete JoltProof
+        /// Field order matches upstream JoltProof's #[derive(CanonicalSerialize)]
         pub fn writeJoltProof(
             self: *Self,
             comptime Commitment: type,
@@ -356,44 +357,47 @@ pub fn ArkworksSerializer(comptime F: type) type {
             writeCommitment: *const fn (*Self, Commitment) anyerror!void,
             writeProof: *const fn (*Self, Proof) anyerror!void,
         ) !void {
-            // 1. Opening claims
-            try self.writeOpeningClaims(&proof.opening_claims);
-
-            // 2. Commitments
+            // 1. Commitments (first in upstream)
             try self.writeUsize(proof.commitments.items.len);
             for (proof.commitments.items) |comm| {
                 try writeCommitment(self, comm);
             }
 
-            // 3. Stage 1
+            // 2. Stage 1 uni_skip (with 0u8 Standard enum discriminant)
             if (proof.stage1_uni_skip_first_round_proof) |*p| {
+                try self.writeU8(0); // Standard variant
                 try self.writeUniSkipFirstRoundProof(p);
             }
+            // Stage 1 sumcheck (with 0u8 Clear enum discriminant)
+            try self.writeU8(0); // Clear variant
             try self.writeSumcheckInstanceProof(&proof.stage1_sumcheck_proof);
 
-            // 4. Stage 2
+            // 3. Stage 2
             if (proof.stage2_uni_skip_first_round_proof) |*p| {
+                try self.writeU8(0); // Standard variant
                 try self.writeUniSkipFirstRoundProof(p);
             }
+            try self.writeU8(0); // Clear variant
             try self.writeSumcheckInstanceProof(&proof.stage2_sumcheck_proof);
 
-            // 5. Stages 3-7
+            // 4. Stages 3-7 (each with 0u8 Clear discriminant)
+            try self.writeU8(0);
             try self.writeSumcheckInstanceProof(&proof.stage3_sumcheck_proof);
+            try self.writeU8(0);
             try self.writeSumcheckInstanceProof(&proof.stage4_sumcheck_proof);
+            try self.writeU8(0);
             try self.writeSumcheckInstanceProof(&proof.stage5_sumcheck_proof);
+            try self.writeU8(0);
             try self.writeSumcheckInstanceProof(&proof.stage6_sumcheck_proof);
+            try self.writeU8(0);
             try self.writeSumcheckInstanceProof(&proof.stage7_sumcheck_proof);
 
-            // 6. Joint opening proof
+            // 5. Joint opening proof
             if (proof.joint_opening_proof) |p| {
                 try writeProof(self, p);
             }
 
-            // 7. Untrusted advice commitment (Option<Commitment>)
-            // This is the ONLY field after joint_opening_proof before config.
-            // Note: JoltProof struct does NOT have advice proof fields - only
-            // untrusted_advice_commitment.
-            // Note: Jolt uses Option encoding: 1 byte flag + commitment if present
+            // 6. Untrusted advice commitment (Option<Commitment>)
             if (proof.untrusted_advice_commitment) |c| {
                 try self.writeU8(1);
                 try writeCommitment(self, c);
@@ -401,31 +405,14 @@ pub fn ArkworksSerializer(comptime F: type) type {
                 try self.writeU8(0);
             }
 
-            // 12. Configuration fields - must match Jolt's #[derive(CanonicalSerialize)]
-            // on JoltProof struct. Field order:
-            //   trace_length: usize (8 bytes, LE)
-            //   ram_K: usize (8 bytes, LE)
-            //   bytecode_K: usize (8 bytes, LE)
-            //   rw_config: ReadWriteConfig (4 x u8 = 4 bytes)
-            //   one_hot_config: OneHotConfig (2 x u8 = 2 bytes)
-            //   dory_layout: DoryLayout (1 x u8 = 1 byte)
-            dbg("[SERIALIZE CONFIG] trace_length={}, ram_K={}, bytecode_K={}\n", .{
-                proof.trace_length, proof.ram_K, proof.bytecode_K,
-            });
-            dbg("[SERIALIZE CONFIG] rw_config=({},{},{},{}), one_hot=({},{}), dory_layout={}\n", .{
-                proof.rw_config.ram_rw_phase1_num_rounds,
-                proof.rw_config.ram_rw_phase2_num_rounds,
-                proof.rw_config.registers_rw_phase1_num_rounds,
-                proof.rw_config.registers_rw_phase2_num_rounds,
-                proof.one_hot_config.log_k_chunk,
-                proof.one_hot_config.lookups_ra_virtual_log_k_chunk,
-                proof.dory_layout,
-            });
+            // 7. Opening claims (moved after untrusted_advice_commitment in upstream)
+            try self.writeOpeningClaims(&proof.opening_claims);
 
+            // 8. Configuration fields
+            // bytecode_K removed in upstream
             try self.writeUsize(proof.trace_length);
             try self.writeUsize(proof.ram_K);
-            try self.writeUsize(proof.bytecode_K);
-            // ReadWriteConfig: 4 x u8 (canonical serialization of the struct)
+            // ReadWriteConfig: 4 x u8
             try self.writeU8(proof.rw_config.ram_rw_phase1_num_rounds);
             try self.writeU8(proof.rw_config.ram_rw_phase2_num_rounds);
             try self.writeU8(proof.rw_config.registers_rw_phase1_num_rounds);
@@ -756,7 +743,7 @@ test "arkworks serializer: opening claims" {
     defer claims.deinit();
 
     try claims.insert(.{ .UntrustedAdvice = .SpartanOuter }, BN254Scalar.fromU64(100));
-    try claims.insert(.{ .TrustedAdvice = .RamValEvaluation }, BN254Scalar.fromU64(200));
+    try claims.insert(.{ .TrustedAdvice = .RamValCheck }, BN254Scalar.fromU64(200));
 
     var serializer = ArkworksSerializer(BN254Scalar).init(testing.allocator);
     defer serializer.deinit();
@@ -817,7 +804,6 @@ test "e2e: JoltProof serialization matches Jolt format" {
     // Set configuration
     jolt_proof.trace_length = 16;
     jolt_proof.ram_K = 1024;
-    jolt_proof.bytecode_K = 65536;
     jolt_proof.log_k_chunk = 4; // Must be <= 8 to match Jolt
     jolt_proof.lookups_ra_virtual_log_k_chunk = 16; // LOG_K / 8 = 128 / 8
 
@@ -919,7 +905,6 @@ test "e2e: empty JoltProof serialization" {
     // Set minimum configuration
     jolt_proof.trace_length = 0;
     jolt_proof.ram_K = 0;
-    jolt_proof.bytecode_K = 0;
     jolt_proof.log_k_chunk = 0;
     jolt_proof.lookups_ra_virtual_log_k_chunk = 0;
 

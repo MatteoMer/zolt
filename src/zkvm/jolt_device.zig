@@ -33,8 +33,8 @@ pub const MemoryLayout = struct {
     output_end: u64,
     stack_size: u64,
     stack_end: u64,
-    memory_size: u64,
-    memory_end: u64,
+    heap_size: u64,
+    heap_end: u64,
     panic: u64,
     termination: u64,
     io_end: u64,
@@ -57,8 +57,8 @@ pub const MemoryLayout = struct {
             .output_end = try reader.readInt(u64, .little),
             .stack_size = try reader.readInt(u64, .little),
             .stack_end = try reader.readInt(u64, .little),
-            .memory_size = try reader.readInt(u64, .little),
-            .memory_end = try reader.readInt(u64, .little),
+            .heap_size = try reader.readInt(u64, .little),
+            .heap_end = try reader.readInt(u64, .little),
             .panic = try reader.readInt(u64, .little),
             .termination = try reader.readInt(u64, .little),
             .io_end = try reader.readInt(u64, .little),
@@ -103,7 +103,7 @@ pub const JoltDevice = struct {
 
     /// Create a JoltDevice from Zolt emulator state
     ///
-    /// memory_size: The memory size to use. If null, uses 128 MB default.
+    /// heap_size: The memory size to use. If null, uses 128 MB default.
     ///              For Jolt fibonacci example, use 32768 (32 KB).
     ///
     /// CRITICAL: Memory layout matches Jolt's MemoryLayout::new from common/src/jolt_device.rs
@@ -114,7 +114,7 @@ pub const JoltDevice = struct {
         outputs: []const u8,
         panic_flag: bool,
         program_size: u64,
-        memory_size_opt: ?u64,
+        heap_size_opt: ?u64,
     ) !Self {
         // Use Jolt's default constants (from common/src/constants.rs)
         // These MUST match the values used when Jolt generates the preprocessing!
@@ -126,8 +126,8 @@ pub const JoltDevice = struct {
         const DEFAULT_STACK_SIZE: u64 = 4096; // 4 KB
         const RAM_START_ADDRESS: u64 = 0x80000000;
 
-        // Use provided memory_size or default
-        const memory_size = memory_size_opt orelse DEFAULT_MEMORY_SIZE;
+        // Use provided heap_size or default
+        const heap_size = heap_size_opt orelse DEFAULT_MEMORY_SIZE;
 
         // Copy inputs/outputs
         const inputs_copy = try allocator.alloc(u8, inputs.len);
@@ -185,7 +185,7 @@ pub const JoltDevice = struct {
         // Stack and memory are placed AFTER RAM_START_ADDRESS
         const program_size_aligned = alignUp(program_size, 8);
         const stack_end = RAM_START_ADDRESS + program_size_aligned;
-        const memory_end = stack_end + stack_size + memory_size;
+        const heap_end = stack_end + stack_size + heap_size;
 
         return Self{
             .inputs = inputs_copy,
@@ -209,8 +209,8 @@ pub const JoltDevice = struct {
                 .output_end = output_end,
                 .stack_size = stack_size,
                 .stack_end = stack_end,
-                .memory_size = memory_size,
-                .memory_end = memory_end,
+                .heap_size = heap_size,
+                .heap_end = heap_end,
                 .panic = panic_addr,
                 .termination = termination,
                 .io_end = io_end,
@@ -321,48 +321,14 @@ pub fn fiatShamirPreamble(
 ) void {
     const Blake2bTranscript = @import("../transcripts/blake2b.zig").Blake2bTranscript;
 
-    dbg("\n[ZOLT PREAMBLE] === Fiat-Shamir Preamble Start ===\n", .{});
-
-    // Append memory layout values
-    dbg("[ZOLT PREAMBLE] appendU64: max_input_size={d}\n", .{device.memory_layout.max_input_size});
-    transcript.appendU64(device.memory_layout.max_input_size);
-
-    dbg("[ZOLT PREAMBLE] appendU64: max_output_size={d}\n", .{device.memory_layout.max_output_size});
-    transcript.appendU64(device.memory_layout.max_output_size);
-
-    dbg("[ZOLT PREAMBLE] appendU64: memory_size={d}\n", .{device.memory_layout.memory_size});
-    transcript.appendU64(device.memory_layout.memory_size);
-
-    // Append program inputs
-    dbg("[ZOLT PREAMBLE] appendBytes: inputs.len={d}\n", .{device.inputs.len});
-    if (device.inputs.len > 0 and device.inputs.len <= 32) {
-        dbg("[ZOLT PREAMBLE]   inputs={{ ", .{});
-        for (device.inputs) |b| dbg("{x:0>2} ", .{b});
-        dbg("}}\n", .{});
-    }
-    transcript.appendBytes(device.inputs);
-
-    // Append program outputs
-    dbg("[ZOLT PREAMBLE] appendBytes: outputs.len={d}\n", .{device.outputs.len});
-    if (device.outputs.len > 0 and device.outputs.len <= 32) {
-        dbg("[ZOLT PREAMBLE]   outputs={{ ", .{});
-        for (device.outputs) |b| dbg("{x:0>2} ", .{b});
-        dbg("}}\n", .{});
-    }
-    transcript.appendBytes(device.outputs);
-
-    // Append panic flag
-    dbg("[ZOLT PREAMBLE] appendU64: panic={d}\n", .{if (device.panic) @as(u64, 1) else @as(u64, 0)});
-    transcript.appendU64(if (device.panic) 1 else 0);
-
-    // Append RAM and trace parameters
-    dbg("[ZOLT PREAMBLE] appendU64: ram_K={d}\n", .{ram_K});
-    transcript.appendU64(@intCast(ram_K));
-
-    dbg("[ZOLT PREAMBLE] appendU64: trace_length={d}\n", .{trace_length});
-    transcript.appendU64(@intCast(trace_length));
-
-    dbg("[ZOLT PREAMBLE] === Fiat-Shamir Preamble End ===\n\n", .{});
+    transcript.appendU64("max_input_size", device.memory_layout.max_input_size);
+    transcript.appendU64("max_output_size", device.memory_layout.max_output_size);
+    transcript.appendU64("heap_size", device.memory_layout.heap_size);
+    transcript.appendBytes("inputs", device.inputs);
+    transcript.appendBytes("outputs", device.outputs);
+    transcript.appendU64("panic", if (device.panic) 1 else 0);
+    transcript.appendU64("ram_K", @intCast(ram_K));
+    transcript.appendU64("trace_length", @intCast(trace_length));
 
     _ = F;
     _ = Blake2bTranscript;
@@ -386,7 +352,7 @@ test "jolt device from emulator" {
         &[_]u8{ 4, 5 },
         false,
         4192,
-        null, // use default memory_size
+        null, // use default heap_size
     );
     defer device.deinit();
 

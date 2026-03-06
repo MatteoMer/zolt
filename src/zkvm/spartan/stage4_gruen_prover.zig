@@ -899,9 +899,12 @@ pub fn Stage4GruenProver(comptime F: type) type {
                 }
 
                 // Append to transcript (batched coefficients)
-                transcript.appendScalar(round_poly.coeffs[0].mul(self.batching_coeff));
-                transcript.appendScalar(round_poly.coeffs[2].mul(self.batching_coeff));
-                transcript.appendScalar(round_poly.coeffs[3].mul(self.batching_coeff));
+                const compressed = [3]F{
+                    round_poly.coeffs[0].mul(self.batching_coeff),
+                    round_poly.coeffs[2].mul(self.batching_coeff),
+                    round_poly.coeffs[3].mul(self.batching_coeff),
+                };
+                transcript.appendScalars("sumcheck_poly", &compressed);
 
                 const challenge = transcript.challengeScalar();
                 challenges[round] = challenge;

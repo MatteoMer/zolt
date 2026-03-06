@@ -16,7 +16,7 @@ pub const MemoryConfig = struct {
     max_untrusted_advice_size: u64 = constants.DEFAULT_MAX_UNTRUSTED_ADVICE_SIZE,
     max_output_size: u64 = constants.DEFAULT_MAX_OUTPUT_SIZE,
     stack_size: u64 = constants.DEFAULT_STACK_SIZE,
-    memory_size: u64 = constants.DEFAULT_MEMORY_SIZE,
+    heap_size: u64 = constants.DEFAULT_MEMORY_SIZE,
     program_size: ?u64 = null,
 
     pub fn default() MemoryConfig {
@@ -43,9 +43,9 @@ pub const MemoryLayout = struct {
     stack_size: u64,
     /// Stack starts from (RAM_START_ADDRESS + program_size + stack_size) and grows down
     stack_end: u64,
-    memory_size: u64,
+    heap_size: u64,
     /// Heap starts just after the start of the stack
-    memory_end: u64,
+    heap_end: u64,
     panic_addr: u64,
     termination: u64,
     /// End of the memory region containing inputs, outputs, panic bit, and termination bit
@@ -61,7 +61,7 @@ pub const MemoryLayout = struct {
         const max_input_size = alignUp(config.max_input_size, 8);
         const max_output_size = alignUp(config.max_output_size, 8);
         const stack_size = alignUp(config.stack_size, 8);
-        const memory_size = alignUp(config.memory_size, 8);
+        const heap_size = alignUp(config.heap_size, 8);
 
         // Critical for ValEvaluation and ValFinal sumchecks in RAM
         std.debug.assert(std.math.isPowerOfTwo(max_trusted_advice_size) or max_trusted_advice_size == 0);
@@ -107,7 +107,7 @@ pub const MemoryLayout = struct {
         const stack_start = stack_end + stack_size;
 
         // Heap grows up from the top of the stack
-        const memory_end = stack_start + memory_size;
+        const heap_end = stack_start + heap_size;
 
         return .{
             .program_size = program_size,
@@ -125,8 +125,8 @@ pub const MemoryLayout = struct {
             .output_end = output_end,
             .stack_size = stack_size,
             .stack_end = stack_end,
-            .memory_size = memory_size,
-            .memory_end = memory_end,
+            .heap_size = heap_size,
+            .heap_end = heap_end,
             .panic_addr = panic_addr,
             .termination = termination,
             .io_end = io_end,
@@ -155,7 +155,7 @@ pub const MemoryLayout = struct {
 
     /// Returns the total emulator memory size
     pub fn getTotalMemorySize(self: *const MemoryLayout) u64 {
-        return self.memory_size + self.stack_size + constants.STACK_CANARY_SIZE;
+        return self.heap_size + self.stack_size + constants.STACK_CANARY_SIZE;
     }
 
     pub fn format(self: *const MemoryLayout, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
@@ -171,7 +171,7 @@ pub const MemoryLayout = struct {
         try writer.print("  termination: 0x{X:0>16}\n", .{self.termination});
         try writer.print("  io_end: 0x{X:0>16}\n", .{self.io_end});
         try writer.print("  stack_end: 0x{X:0>16}\n", .{self.stack_end});
-        try writer.print("  memory_end: 0x{X:0>16}\n", .{self.memory_end});
+        try writer.print("  heap_end: 0x{X:0>16}\n", .{self.heap_end});
         try writer.print("}}", .{});
     }
 };

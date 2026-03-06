@@ -96,22 +96,21 @@ pub const SumcheckId = enum(u8) {
     RamReadWriteChecking = 7,
     RamRafEvaluation = 8,
     RamOutputCheck = 9,
-    RamValEvaluation = 10,
-    RamValFinalEvaluation = 11,
-    RamRaClaimReduction = 12,
-    RamHammingBooleanity = 13,
-    RamRaVirtualization = 14,
-    RegistersClaimReduction = 15,
-    RegistersReadWriteChecking = 16,
-    RegistersValEvaluation = 17,
-    BytecodeReadRaf = 18,
-    Booleanity = 19,
-    AdviceClaimReductionCyclePhase = 20,
-    AdviceClaimReduction = 21,
-    IncClaimReduction = 22,
-    HammingWeightClaimReduction = 23,
+    RamValCheck = 10,
+    RamRaClaimReduction = 11,
+    RamHammingBooleanity = 12,
+    RamRaVirtualization = 13,
+    RegistersClaimReduction = 14,
+    RegistersReadWriteChecking = 15,
+    RegistersValEvaluation = 16,
+    BytecodeReadRaf = 17,
+    Booleanity = 18,
+    AdviceClaimReductionCyclePhase = 19,
+    AdviceClaimReduction = 20,
+    IncClaimReduction = 21,
+    HammingWeightClaimReduction = 22,
 
-    pub const COUNT: u8 = 24;
+    pub const COUNT: u8 = 23;
 };
 
 // =============================================================================
@@ -205,8 +204,6 @@ pub const VirtualPolynomial = union(enum) {
     Product,
     ShouldJump,
     ShouldBranch,
-    WritePCtoRD,
-    WriteLookupOutputToRD,
     Rd,
     Imm,
     Rs1Value,
@@ -272,6 +269,7 @@ pub const VirtualPolynomial = union(enum) {
 
     /// Serialize in Jolt's compact format
     pub fn serialize(self: VirtualPolynomial, writer: anytype) !void {
+        // Byte values must match upstream proof_serialization.rs VirtualPolynomial serialize
         switch (self) {
             .PC => try writer.writeByte(0),
             .UnexpandedPC => try writer.writeByte(1),
@@ -287,43 +285,41 @@ pub const VirtualPolynomial = union(enum) {
             .Product => try writer.writeByte(11),
             .ShouldJump => try writer.writeByte(12),
             .ShouldBranch => try writer.writeByte(13),
-            .WritePCtoRD => try writer.writeByte(14),
-            .WriteLookupOutputToRD => try writer.writeByte(15),
-            .Rd => try writer.writeByte(16),
-            .Imm => try writer.writeByte(17),
-            .Rs1Value => try writer.writeByte(18),
-            .Rs2Value => try writer.writeByte(19),
-            .RdWriteValue => try writer.writeByte(20),
-            .Rs1Ra => try writer.writeByte(21),
-            .Rs2Ra => try writer.writeByte(22),
-            .RdWa => try writer.writeByte(23),
-            .LookupOutput => try writer.writeByte(24),
-            .InstructionRaf => try writer.writeByte(25),
-            .InstructionRafFlag => try writer.writeByte(26),
+            .Rd => try writer.writeByte(14),
+            .Imm => try writer.writeByte(15),
+            .Rs1Value => try writer.writeByte(16),
+            .Rs2Value => try writer.writeByte(17),
+            .RdWriteValue => try writer.writeByte(18),
+            .Rs1Ra => try writer.writeByte(19),
+            .Rs2Ra => try writer.writeByte(20),
+            .RdWa => try writer.writeByte(21),
+            .LookupOutput => try writer.writeByte(22),
+            .InstructionRaf => try writer.writeByte(23),
+            .InstructionRafFlag => try writer.writeByte(24),
             .InstructionRa => |i| {
-                try writer.writeByte(27);
+                try writer.writeByte(25);
                 try writer.writeByte(@truncate(i));
             },
-            .RegistersVal => try writer.writeByte(28),
-            .RamAddress => try writer.writeByte(29),
-            .RamRa => try writer.writeByte(30),
-            .RamReadValue => try writer.writeByte(31),
-            .RamWriteValue => try writer.writeByte(32),
-            .RamVal => try writer.writeByte(33),
-            .RamValInit => try writer.writeByte(34),
-            .RamValFinal => try writer.writeByte(35),
-            .RamHammingWeight => try writer.writeByte(36),
-            .UnivariateSkip => try writer.writeByte(37),
+            .RegistersVal => try writer.writeByte(26),
+            .RamAddress => try writer.writeByte(27),
+            .RamRa => try writer.writeByte(28),
+            .RamReadValue => try writer.writeByte(29),
+            .RamWriteValue => try writer.writeByte(30),
+            .RamVal => try writer.writeByte(31),
+            .RamValInit => try writer.writeByte(32),
+            .RamValFinal => try writer.writeByte(33),
+            .RamHammingWeight => try writer.writeByte(34),
+            .UnivariateSkip => try writer.writeByte(35),
             .OpFlags => |f| {
-                try writer.writeByte(38);
+                try writer.writeByte(36);
                 try writer.writeByte(f);
             },
             .InstructionFlags => |f| {
-                try writer.writeByte(39);
+                try writer.writeByte(37);
                 try writer.writeByte(f);
             },
             .LookupTableFlag => |f| {
-                try writer.writeByte(40);
+                try writer.writeByte(38);
                 try writer.writeByte(@truncate(f));
             },
         }
@@ -750,7 +746,6 @@ pub fn JoltProof(comptime F: type, comptime Commitment: type, comptime Proof: ty
         /// Configuration parameters
         trace_length: usize,
         ram_K: usize,
-        bytecode_K: usize,
         rw_config: ReadWriteConfig,
         one_hot_config: OneHotConfig,
         dory_layout: u8,
@@ -784,7 +779,6 @@ pub fn JoltProof(comptime F: type, comptime Commitment: type, comptime Proof: ty
                 .untrusted_advice_commitment = null,
                 .trace_length = 0,
                 .ram_K = 0,
-                .bytecode_K = 0,
                 .rw_config = ReadWriteConfig.default(8, 16),
                 .one_hot_config = OneHotConfig.default(),
                 .dory_layout = 0, // Wide layout
@@ -920,7 +914,7 @@ const testing = std.testing;
 const BN254Scalar = @import("../field/mod.zig").BN254Scalar;
 
 test "SumcheckId count" {
-    try testing.expectEqual(@as(u8, 22), SumcheckId.COUNT);
+    try testing.expectEqual(@as(u8, 23), SumcheckId.COUNT);
 }
 
 test "OpeningId encoding bases" {
@@ -936,7 +930,7 @@ test "OpeningClaims ordering" {
     defer claims.deinit();
 
     // Insert in non-sorted order
-    try claims.insert(.{ .UntrustedAdvice = .RamValEvaluation }, BN254Scalar.fromU64(1));
+    try claims.insert(.{ .UntrustedAdvice = .RamValCheck }, BN254Scalar.fromU64(1));
     try claims.insert(.{ .TrustedAdvice = .SpartanOuter }, BN254Scalar.fromU64(2));
     try claims.insert(.{ .UntrustedAdvice = .SpartanOuter }, BN254Scalar.fromU64(3));
 
@@ -944,7 +938,7 @@ test "OpeningClaims ordering" {
 
     // Verify sorted order: UntrustedAdvice comes before TrustedAdvice
     try testing.expectEqual(SumcheckId.SpartanOuter, claims.entries.items[0].id.UntrustedAdvice);
-    try testing.expectEqual(SumcheckId.RamValEvaluation, claims.entries.items[1].id.UntrustedAdvice);
+    try testing.expectEqual(SumcheckId.RamValCheck, claims.entries.items[1].id.UntrustedAdvice);
     try testing.expectEqual(SumcheckId.SpartanOuter, claims.entries.items[2].id.TrustedAdvice);
 }
 

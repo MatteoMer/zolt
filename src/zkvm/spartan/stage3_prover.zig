@@ -188,9 +188,9 @@ pub fn Stage3Prover(comptime F: type) type {
             // Phase 2: BatchedSumcheck::verify protocol
 
             // Append input claims to transcript (line 201 in sumcheck.rs)
-            transcript.appendScalar(shift_input_claim);
-            transcript.appendScalar(instr_input_claim);
-            transcript.appendScalar(reg_input_claim);
+            transcript.appendScalar("sumcheck_claim", shift_input_claim);
+            transcript.appendScalar("sumcheck_claim", instr_input_claim);
+            transcript.appendScalar("sumcheck_claim", reg_input_claim);
 
             // Derive batching coefficients (line 204 in sumcheck.rs)
             // NOTE: Jolt's challenge_vector uses challenge_scalar (full 128 bits, no masking)
@@ -472,12 +472,7 @@ pub fn Stage3Prover(comptime F: type) type {
                 });
 
                 // Append compressed poly to transcript
-                // NOTE: Jolt uses "UniPoly_begin/end" (NOT "CompressedUniPoly") for CompressedUniPoly
-                transcript.appendMessage("UniPoly_begin");
-                for (compressed) |coeff| {
-                    transcript.appendScalar(coeff);
-                }
-                transcript.appendMessage("UniPoly_end");
+                transcript.appendScalars("sumcheck_poly", compressed);
 
                 // Debug: Print compressed coefficients
                 dbg("[ZOLT] STAGE3_ROUND_{}: c0 = {{ {any} }}\n", .{ round, compressed[0].toBytes() });
@@ -867,86 +862,86 @@ pub fn Stage3Prover(comptime F: type) type {
             dbg("  [0] unexpanded_pc LE = {{ ", .{});
             for (shift_claims.unexpanded_pc.toBytes()) |b| dbg("{x:0>2}, ", .{b});
             dbg("}}\n", .{});
-            transcript.appendScalar(shift_claims.unexpanded_pc);
+            transcript.appendScalar("opening_claim", shift_claims.unexpanded_pc);
 
             dbg("  [1] pc LE = {{ ", .{});
             for (shift_claims.pc.toBytes()) |b| dbg("{x:0>2}, ", .{b});
             dbg("}}\n", .{});
-            transcript.appendScalar(shift_claims.pc);
+            transcript.appendScalar("opening_claim", shift_claims.pc);
 
             dbg("  [2] is_virtual LE = {{ ", .{});
             for (shift_claims.is_virtual.toBytes()) |b| dbg("{x:0>2}, ", .{b});
             dbg("}}\n", .{});
-            transcript.appendScalar(shift_claims.is_virtual);
+            transcript.appendScalar("opening_claim", shift_claims.is_virtual);
 
             dbg("  [3] is_first_in_sequence LE = {{ ", .{});
             for (shift_claims.is_first_in_sequence.toBytes()) |b| dbg("{x:0>2}, ", .{b});
             dbg("}}\n", .{});
-            transcript.appendScalar(shift_claims.is_first_in_sequence);
+            transcript.appendScalar("opening_claim", shift_claims.is_first_in_sequence);
 
             dbg("  [4] is_noop LE = {{ ", .{});
             for (shift_claims.is_noop.toBytes()) |b| dbg("{x:0>2}, ", .{b});
             dbg("}}\n", .{});
-            transcript.appendScalar(shift_claims.is_noop);
+            transcript.appendScalar("opening_claim", shift_claims.is_noop);
 
             // InstructionInputSumcheck: 8 claims
             dbg("[ZOLT cache_openings] InstructionInputVirtualization claims:\n", .{});
             dbg("  [5] left_is_rs1 LE = {{ ", .{});
             for (instr_claims.left_is_rs1.toBytes()) |b| dbg("{x:0>2}, ", .{b});
             dbg("}}\n", .{});
-            transcript.appendScalar(instr_claims.left_is_rs1);
+            transcript.appendScalar("opening_claim", instr_claims.left_is_rs1);
 
             dbg("  [6] rs1_value LE = {{ ", .{});
             for (instr_claims.rs1_value.toBytes()) |b| dbg("{x:0>2}, ", .{b});
             dbg("}}\n", .{});
-            transcript.appendScalar(instr_claims.rs1_value);
+            transcript.appendScalar("opening_claim", instr_claims.rs1_value);
 
             dbg("  [7] left_is_pc LE = {{ ", .{});
             for (instr_claims.left_is_pc.toBytes()) |b| dbg("{x:0>2}, ", .{b});
             dbg("}}\n", .{});
-            transcript.appendScalar(instr_claims.left_is_pc);
+            transcript.appendScalar("opening_claim", instr_claims.left_is_pc);
 
             dbg("  [8] unexpanded_pc LE = {{ ", .{});
             for (instr_claims.unexpanded_pc.toBytes()) |b| dbg("{x:0>2}, ", .{b});
             dbg("}}\n", .{});
-            transcript.appendScalar(instr_claims.unexpanded_pc);
+            transcript.appendScalar("opening_claim", instr_claims.unexpanded_pc);
 
             dbg("  [9] right_is_rs2 LE = {{ ", .{});
             for (instr_claims.right_is_rs2.toBytes()) |b| dbg("{x:0>2}, ", .{b});
             dbg("}}\n", .{});
-            transcript.appendScalar(instr_claims.right_is_rs2);
+            transcript.appendScalar("opening_claim", instr_claims.right_is_rs2);
 
             dbg("  [10] rs2_value LE = {{ ", .{});
             for (instr_claims.rs2_value.toBytes()) |b| dbg("{x:0>2}, ", .{b});
             dbg("}}\n", .{});
-            transcript.appendScalar(instr_claims.rs2_value);
+            transcript.appendScalar("opening_claim", instr_claims.rs2_value);
 
             dbg("  [11] right_is_imm LE = {{ ", .{});
             for (instr_claims.right_is_imm.toBytes()) |b| dbg("{x:0>2}, ", .{b});
             dbg("}}\n", .{});
-            transcript.appendScalar(instr_claims.right_is_imm);
+            transcript.appendScalar("opening_claim", instr_claims.right_is_imm);
 
             dbg("  [12] imm LE = {{ ", .{});
             for (instr_claims.imm.toBytes()) |b| dbg("{x:0>2}, ", .{b});
             dbg("}}\n", .{});
-            transcript.appendScalar(instr_claims.imm);
+            transcript.appendScalar("opening_claim", instr_claims.imm);
 
             // RegistersClaimReduction: 3 claims
             dbg("[ZOLT cache_openings] RegistersClaimReduction claims:\n", .{});
             dbg("  [13] rd_write_value LE = {{ ", .{});
             for (reg_claims.rd_write_value.toBytes()) |b| dbg("{x:0>2}, ", .{b});
             dbg("}}\n", .{});
-            transcript.appendScalar(reg_claims.rd_write_value);
+            transcript.appendScalar("opening_claim", reg_claims.rd_write_value);
 
             dbg("  [14] rs1_value LE = {{ ", .{});
             for (reg_claims.rs1_value.toBytes()) |b| dbg("{x:0>2}, ", .{b});
             dbg("}}\n", .{});
-            transcript.appendScalar(reg_claims.rs1_value);
+            transcript.appendScalar("opening_claim", reg_claims.rs1_value);
 
             dbg("  [15] rs2_value LE = {{ ", .{});
             for (reg_claims.rs2_value.toBytes()) |b| dbg("{x:0>2}, ", .{b});
             dbg("}}\n", .{});
-            transcript.appendScalar(reg_claims.rs2_value);
+            transcript.appendScalar("opening_claim", reg_claims.rs2_value);
 
             // Print transcript state after cache_openings
             dbg("[ZOLT cache_openings] Transcript state AFTER all 16 claims: {{ ", .{});

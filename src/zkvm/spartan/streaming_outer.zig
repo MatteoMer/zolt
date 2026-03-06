@@ -26,7 +26,7 @@
 const std = @import("std");
 
 // Debug output control - set to true to enable verbose debug prints
-const debug_verbose = false;
+const debug_verbose = true;
 fn dbg(comptime fmt: []const u8, args: anytype) void {
     if (debug_verbose) std.debug.print(fmt, args);
 }
@@ -95,6 +95,10 @@ pub fn StreamingOuterProver(comptime F: type) type {
         /// The split_eq receives tau_low = tau[0..tau.len-1], but UniSkip needs full tau
         /// to compute the correct eq_table structure with E_out and E_in
         full_tau: []const F,
+
+        /// DEBUG: t1 polynomial coefficients from the last UniSkip computation
+        /// Used for diagnostic evaluation at r0
+        debug_t1_coeffs: ?[univariate_skip.OUTER_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE]F,
 
         /// Linear phase: Bound Az polynomial
         /// Materialized at linear phase start, bound each round with bindLow()
@@ -167,6 +171,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
             //
             // tau_high is used for the Lagrange kernel in the first-round polynomial.
             // tau_low is passed to split_eq for the remaining rounds.
+            //
             const tau_high = if (tau.len > 0) tau[tau.len - 1] else F.zero();
             const tau_low = if (tau.len > 0) tau[0 .. tau.len - 1] else tau;
 
@@ -214,6 +219,7 @@ pub fn StreamingOuterProver(comptime F: type) type {
                 .az_poly = null,
                 .bz_poly = null,
                 .t_prime_poly = null,
+                .debug_t1_coeffs = null,
                 .allocator = allocator,
             };
         }
@@ -564,6 +570,27 @@ pub fn StreamingOuterProver(comptime F: type) type {
             const E_in = try self.buildEqTable(self.full_tau[m .. self.full_tau.len - 1]);
             defer self.allocator.free(E_in);
 
+            // DEBUG: Compare mul vs mulHiBigIntU128 for first tau with non-trivial base
+            if (m > 1) {
+                const t0 = self.full_tau[0];
+                const t1 = self.full_tau[1];
+                // Use t0 as base, multiply by t1 both ways
+                const test_mul = t0.mul(t1);
+                const test_hi = t0.mulHiBigIntU128(t1.limbs);
+                dbg("[MUL_CMP] t0 = [{x}, {x}, {x}, {x}]\n", .{t0.limbs[0], t0.limbs[1], t0.limbs[2], t0.limbs[3]});
+                dbg("[MUL_CMP] t1 = [{x}, {x}, {x}, {x}]\n", .{t1.limbs[0], t1.limbs[1], t1.limbs[2], t1.limbs[3]});
+                dbg("[MUL_CMP] t0.mul(t1) = [{x}, {x}, {x}, {x}]\n", .{test_mul.limbs[0], test_mul.limbs[1], test_mul.limbs[2], test_mul.limbs[3]});
+                dbg("[MUL_CMP] t0.mulHi(t1) = [{x}, {x}, {x}, {x}]\n", .{test_hi.limbs[0], test_hi.limbs[1], test_hi.limbs[2], test_hi.limbs[3]});
+                dbg("[MUL_CMP] equal? {}\n", .{test_mul.eql(test_hi)});
+                // Also test: fromU64(7).mul(t1) vs fromU64(7).mulHi(t1)
+                const base7 = F.fromU64(7);
+                const mul7 = base7.mul(t1);
+                const hi7 = base7.mulHiBigIntU128(t1.limbs);
+                dbg("[MUL_CMP] 7.mul(t1) = [{x}, {x}, {x}, {x}]\n", .{mul7.limbs[0], mul7.limbs[1], mul7.limbs[2], mul7.limbs[3]});
+                dbg("[MUL_CMP] 7.mulHi(t1) = [{x}, {x}, {x}, {x}]\n", .{hi7.limbs[0], hi7.limbs[1], hi7.limbs[2], hi7.limbs[3]});
+                dbg("[MUL_CMP] 7 equal? {}\n", .{mul7.eql(hi7)});
+            }
+
             // DEBUG: Print split parameters
             dbg("[STREAMING_OUTER UNISKIP] tau.len={d}, m={d}, wprime_len={d}\n", .{self.full_tau.len, m, wprime_len});
             dbg("[STREAMING_OUTER UNISKIP] num_x_out_bits={d}, num_x_in_bits={d}, num_x_in_prime_bits={d}\n", .{num_x_out_bits, num_x_in_bits, num_x_in_prime_bits});
@@ -689,13 +716,10 @@ pub fn StreamingOuterProver(comptime F: type) type {
             if (target_j) |j| {
                 const coeffs = univariate_skip.COEFFS_PER_J[j];
 
-                // Guard-routing: for each constraint i, evaluate the condition (guard)
-                // and the difference (left - right). Route the COEFFS_PER_J coefficient
-                // to EITHER Az or Bz based on the guard value.
-                //
-                // This matches Jolt's extended_azbz_product_{first,second}_group:
-                //   if (guard_i) { az_eval += coeffs[i]; }
-                //   else { bz_eval += coeffs[i] * diff_i; }
+                // Standard Az/Bz computation:
+                //   Az(x,Y) = Σ_i L_i(Y) * condition_i(x)
+                //   Bz(x,Y) = Σ_i L_i(Y) * (left_i(x) - right_i(x))
+                // where L_i(Y) = coeffs[i] (precomputed integer Lagrange weights)
                 var az_y = F.zero();
                 var bz_y = F.zero();
 
@@ -710,17 +734,12 @@ pub fn StreamingOuterProver(comptime F: type) type {
 
                     const constraint_idx = group_indices[i];
                     const constraint = constraints.UNIFORM_CONSTRAINTS[constraint_idx];
-                    const guard = constraint.condition.evaluate(F, witness.asSlice());
+                    const cond = constraint.condition.evaluate(F, witness.asSlice());
                     const diff = constraint.left.evaluate(F, witness.asSlice())
                         .sub(constraint.right.evaluate(F, witness.asSlice()));
 
-                    if (!guard.eql(F.zero())) {
-                        // Guard is active: coefficient goes to Az
-                        az_y = az_y.add(c_field);
-                    } else {
-                        // Guard is inactive: coefficient * diff goes to Bz
-                        bz_y = bz_y.add(c_field.mul(diff));
-                    }
+                    az_y = az_y.add(c_field.mul(cond));
+                    bz_y = bz_y.add(c_field.mul(diff));
                 }
 
                 return az_y.mul(bz_y);

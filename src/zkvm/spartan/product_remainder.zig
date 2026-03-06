@@ -5,22 +5,20 @@
 //!
 //! ## Protocol Overview
 //!
-//! Stage 2 proves the 5 product constraints:
+//! Stage 2 proves the 3 product constraints:
 //! 1. Product = LeftInstructionInput * RightInstructionInput
-//! 2. WriteLookupOutputToRD = IsRdNotZero * OpFlags(WriteLookupOutputToRD)
-//! 3. WritePCtoRD = IsRdNotZero * OpFlags(Jump)
-//! 4. ShouldBranch = LookupOutput * InstructionFlags(Branch)
-//! 5. ShouldJump = OpFlags(Jump) * (1 - NextIsNoop)
+//! 2. ShouldBranch = LookupOutput * InstructionFlags(Branch)
+//! 3. ShouldJump = OpFlags(Jump) * (1 - NextIsNoop)
 //!
 //! ## Fused Sumcheck
 //!
-//! These 5 constraints are fused into 2 polynomials (left/right) using Lagrange weights
+//! These 3 constraints are fused into 2 polynomials (left/right) using Lagrange weights
 //! from the first-round challenge r0:
 //!
 //!   fused_left(x) = Σᵢ wᵢ * leftᵢ(x)
 //!   fused_right(x) = Σᵢ wᵢ * rightᵢ(x)
 //!
-//! Where wᵢ = Lᵢ(r0) are Lagrange basis polynomials evaluated at r0 over the 5-point domain.
+//! Where wᵢ = Lᵢ(r0) are Lagrange basis polynomials evaluated at r0 over the 3-point domain.
 //!
 //! ## Round Polynomial
 //!
@@ -49,7 +47,7 @@ const DensePolynomial = poly_mod.DensePolynomial;
 const utils = @import("../../utils/mod.zig");
 
 /// Number of product constraints
-pub const NUM_PRODUCT_CONSTRAINTS: usize = 5;
+pub const NUM_PRODUCT_CONSTRAINTS: usize = 3;
 
 /// Domain size for product virtualization univariate skip
 pub const DOMAIN_SIZE: usize = univariate_skip.PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DOMAIN_SIZE;
@@ -57,17 +55,19 @@ pub const DOMAIN_SIZE: usize = univariate_skip.PRODUCT_VIRTUAL_UNIVARIATE_SKIP_D
 /// Degree of the remainder sumcheck (product of 2 multilinear = degree 2, plus eq = degree 3)
 pub const REMAINDER_DEGREE: usize = 3;
 
-/// The 8 unique factor polynomial indices that appear in the 5 product constraints
-/// Matches Jolt's PRODUCT_UNIQUE_FACTOR_VIRTUALS
+/// The 8 unique factor polynomial indices that appear in the 3 product constraints
+/// Matches upstream Jolt's PRODUCT_UNIQUE_FACTOR_VIRTUALS
+/// Note: WriteLookupOutputToRDFlag and VirtualInstructionFlag are opened at the product
+/// cycle point for downstream stages, even though they don't appear in the 3 products.
 pub const ProductFactorIndex = enum(usize) {
     LeftInstructionInput = 0,
     RightInstructionInput = 1,
-    IsRdNotZero = 2, // InstructionFlags::IsRdNotZero
+    JumpFlag = 2, // OpFlags::Jump
     WriteLookupOutputToRDFlag = 3, // OpFlags::WriteLookupOutputToRD
-    JumpFlag = 4, // OpFlags::Jump
-    LookupOutput = 5,
-    BranchFlag = 6, // InstructionFlags::Branch
-    NextIsNoop = 7,
+    LookupOutput = 4,
+    BranchFlag = 5, // InstructionFlags::Branch
+    NextIsNoop = 6,
+    VirtualInstructionFlag = 7, // OpFlags::VirtualInstruction
 };
 
 /// Per-cycle inputs for product virtualization
@@ -87,23 +87,18 @@ pub fn ProductCycleInputs(comptime F: type) type {
                     r1cs_inputs.values[constraints.R1CSInputIndex.LeftInstructionInput.toIndex()],
                     // 1: RightInstructionInput
                     r1cs_inputs.values[constraints.R1CSInputIndex.RightInstructionInput.toIndex()],
-                    // 2: IsRdNotZero (extracted from FlagIsRdNotZero or computed)
-                    // Note: We need to get this from the instruction flags, not a direct R1CS input
-                    // In Jolt, this is InstructionFlags::IsRdNotZero which is a derived value
-                    // For now, we compute it: rd != 0 means is_rd_not_zero = 1
-                    r1cs_inputs.values[constraints.R1CSInputIndex.RdWriteValue.toIndex()].eqlZero() == false,
-                    // 3: WriteLookupOutputToRDFlag
-                    r1cs_inputs.values[constraints.R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()],
-                    // 4: JumpFlag
+                    // 2: JumpFlag (OpFlags::Jump)
                     r1cs_inputs.values[constraints.R1CSInputIndex.FlagJump.toIndex()],
-                    // 5: LookupOutput
+                    // 3: WriteLookupOutputToRDFlag (OpFlags::WriteLookupOutputToRD)
+                    r1cs_inputs.values[constraints.R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()],
+                    // 4: LookupOutput
                     r1cs_inputs.values[constraints.R1CSInputIndex.LookupOutput.toIndex()],
-                    // 6: BranchFlag - needs to be derived from opcode or instruction flags
-                    // For branches, this is 1 when the instruction is a branch type
-                    // We approximate using ShouldBranch/LookupOutput when LookupOutput != 0
-                    r1cs_inputs.values[constraints.R1CSInputIndex.ShouldBranch.toIndex()],
-                    // 7: NextIsNoop
-                    F.zero(), // Will be set properly from trace context
+                    // 5: BranchFlag (InstructionFlags::Branch)
+                    r1cs_inputs.values[constraints.R1CSInputIndex.FlagBranch.toIndex()],
+                    // 6: NextIsNoop
+                    r1cs_inputs.values[constraints.R1CSInputIndex.FlagIsNoop.toIndex()], // Will be set properly from trace context
+                    // 7: VirtualInstructionFlag (OpFlags::VirtualInstruction)
+                    r1cs_inputs.values[constraints.R1CSInputIndex.FlagVirtualInstruction.toIndex()],
                 },
             };
         }
@@ -115,27 +110,21 @@ pub fn ProductCycleInputs(comptime F: type) type {
 
         /// Compute fused left polynomial value at this cycle using Lagrange weights
         ///
-        /// left = w[0]*LeftInstructionInput + w[1]*IsRdNotZero + w[2]*IsRdNotZero
-        ///      + w[3]*LookupOutput + w[4]*JumpFlag
-        pub fn fusedLeft(self: *const Self, weights: *const [5]F) F {
+        /// fused_left = w[0]*LeftInstructionInput + w[1]*LookupOutput + w[2]*JumpFlag
+        pub fn fusedLeft(self: *const Self, weights: *const [3]F) F {
             return weights[0].mul(self.factors[0]) // LeftInstructionInput
-                .add(weights[1].mul(self.factors[2])) // IsRdNotZero
-                .add(weights[2].mul(self.factors[2])) // IsRdNotZero (again)
-                .add(weights[3].mul(self.factors[5])) // LookupOutput
-                .add(weights[4].mul(self.factors[4])); // JumpFlag
+                .add(weights[1].mul(self.factors[4])) // LookupOutput
+                .add(weights[2].mul(self.factors[2])); // JumpFlag
         }
 
         /// Compute fused right polynomial value at this cycle using Lagrange weights
         ///
-        /// right = w[0]*RightInstructionInput + w[1]*WriteLookupOutputToRDFlag + w[2]*JumpFlag
-        ///       + w[3]*BranchFlag + w[4]*(1 - NextIsNoop)
-        pub fn fusedRight(self: *const Self, weights: *const [5]F) F {
-            const one_minus_noop = F.one().sub(self.factors[7]);
+        /// fused_right = w[0]*RightInstructionInput + w[1]*BranchFlag + w[2]*(1 - NextIsNoop)
+        pub fn fusedRight(self: *const Self, weights: *const [3]F) F {
+            const one_minus_noop = F.one().sub(self.factors[6]);
             return weights[0].mul(self.factors[1]) // RightInstructionInput
-                .add(weights[1].mul(self.factors[3])) // WriteLookupOutputToRDFlag
-                .add(weights[2].mul(self.factors[4])) // JumpFlag
-                .add(weights[3].mul(self.factors[6])) // BranchFlag
-                .add(weights[4].mul(one_minus_noop)); // (1 - NextIsNoop)
+                .add(weights[1].mul(self.factors[5])) // BranchFlag
+                .add(weights[2].mul(one_minus_noop)); // (1 - NextIsNoop)
         }
     };
 }
@@ -145,8 +134,8 @@ pub fn ProductVirtualRemainderProver(comptime F: type) type {
     return struct {
         const Self = @This();
 
-        /// Lagrange basis evaluations at r0 over the 5-point domain
-        lagrange_weights: [5]F,
+        /// Lagrange basis evaluations at r0 over the 3-point domain
+        lagrange_weights: [3]F,
         /// Split eq polynomial for efficient factored evaluation
         split_eq: GruenSplitEqPolynomial(F),
         /// Bound left polynomial (interleaved lo/hi)
@@ -185,7 +174,7 @@ pub fn ProductVirtualRemainderProver(comptime F: type) type {
             const padded_len = nextPowerOfTwo(cycle_witnesses.len);
             const num_cycle_vars = std.math.log2_int(usize, padded_len);
 
-            // Compute Lagrange weights at r0 over the 5-point domain {-2, -1, 0, 1, 2}
+            // Compute Lagrange weights at r0 over the 3-point domain {-1, 0, 1}
             const lagrange_weights = try computeLagrangeWeightsGeneric(F, allocator, r0);
 
             // Extract tau_low and tau_high
@@ -452,43 +441,38 @@ fn extractProductInputs(
             witness.values[constraints.R1CSInputIndex.LeftInstructionInput.toIndex()],
             // 1: RightInstructionInput
             witness.values[constraints.R1CSInputIndex.RightInstructionInput.toIndex()],
-            // 2: IsRdNotZero - directly from FlagIsRdNotZero (rd register index != 0)
-            // In Jolt, this is InstructionFlags::IsRdNotZero
-            witness.values[constraints.R1CSInputIndex.FlagIsRdNotZero.toIndex()],
+            // 2: JumpFlag (OpFlags::Jump)
+            witness.values[constraints.R1CSInputIndex.FlagJump.toIndex()],
             // 3: WriteLookupOutputToRDFlag (OpFlags::WriteLookupOutputToRD)
             witness.values[constraints.R1CSInputIndex.FlagWriteLookupOutputToRD.toIndex()],
-            // 4: JumpFlag (OpFlags::Jump)
-            witness.values[constraints.R1CSInputIndex.FlagJump.toIndex()],
-            // 5: LookupOutput
+            // 4: LookupOutput
             witness.values[constraints.R1CSInputIndex.LookupOutput.toIndex()],
-            // 6: BranchFlag (InstructionFlags::Branch)
-            // Directly from FlagBranch (opcode == 0x63)
+            // 5: BranchFlag (InstructionFlags::Branch)
             witness.values[constraints.R1CSInputIndex.FlagBranch.toIndex()],
-            // 7: NextIsNoop - 1 if next instruction is a noop
-            // NextIsNoop = !not_next_noop = trace[t+1].IsNoop (for t+1 < len)
-            // For last cycle, NextIsNoop = true (not_next_noop = false)
+            // 6: NextIsNoop - 1 if next instruction is a noop
             blk: {
                 if (cycle_idx + 1 < all_witnesses.len) {
-                    // Use next cycle's IsNoop flag
                     const next_witness = &all_witnesses[cycle_idx + 1];
                     break :blk next_witness.values[constraints.R1CSInputIndex.FlagIsNoop.toIndex()];
                 }
                 // Last cycle: not_next_noop = false, so NextIsNoop = true
                 break :blk F.one();
             },
+            // 7: VirtualInstructionFlag (OpFlags::VirtualInstruction)
+            witness.values[constraints.R1CSInputIndex.FlagVirtualInstruction.toIndex()],
         },
     };
     return inputs;
 }
 
-/// Compute Lagrange basis evaluations at r0 over the 5-point domain {-2, -1, 0, 1, 2}
-fn computeLagrangeWeightsGeneric(comptime F: type, allocator: Allocator, r0: F) ![5]F {
+/// Compute Lagrange basis evaluations at r0 over the 3-point domain {-1, 0, 1}
+fn computeLagrangeWeightsGeneric(comptime F: type, allocator: Allocator, r0: F) ![3]F {
     const LagrangePoly = univariate_skip.LagrangePolynomial(F);
     const weights = try LagrangePoly.evals(DOMAIN_SIZE, r0, allocator);
     defer allocator.free(weights);
 
-    var result: [5]F = undefined;
-    for (0..5) |i| {
+    var result: [3]F = undefined;
+    for (0..3) |i| {
         result[i] = weights[i];
     }
     return result;

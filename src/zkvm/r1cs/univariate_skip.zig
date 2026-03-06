@@ -52,7 +52,7 @@ pub const OUTER_FIRST_ROUND_POLY_DEGREE_BOUND: usize = OUTER_FIRST_ROUND_POLY_NU
 pub const NUM_REMAINING_R1CS_CONSTRAINTS: usize = NUM_R1CS_CONSTRAINTS - OUTER_UNIVARIATE_SKIP_DOMAIN_SIZE;
 
 /// Product virtualization constants (Stage 2)
-pub const NUM_PRODUCT_VIRTUAL: usize = 5;
+pub const NUM_PRODUCT_VIRTUAL: usize = 3;
 pub const PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DOMAIN_SIZE: usize = NUM_PRODUCT_VIRTUAL;
 pub const PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DEGREE: usize = NUM_PRODUCT_VIRTUAL - 1;
 pub const PRODUCT_VIRTUAL_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE: usize = 2 * PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DEGREE + 1;
@@ -597,32 +597,30 @@ pub fn UniSkipFirstRoundProof(comptime F: type) type {
 
 /// Compute extended evaluations for Product Virtual UniSkip polynomial.
 ///
-/// For each extended target point z in {-3, 3, -4, 4}, computes:
+/// For each extended target point z in {-2, 2}, computes:
 ///   t1(z) = Σ_x eq(τ, x) · fused_left(x, z) · fused_right(x, z)
 ///
 /// Where fused_left and fused_right are computed by applying Lagrange shift
-/// coefficients to the 5 base product left/right factors.
+/// coefficients to the 3 base product left/right factors.
 ///
-/// The 5 product constraints are:
+/// The 3 product constraints are:
 ///   0: Product = LeftInstructionInput * RightInstructionInput
-///   1: WriteLookupOutputToRD = IsRdNotZero * WriteLookupOutputToRDFlag
-///   2: WritePCtoRD = IsRdNotZero * JumpFlag
-///   3: ShouldBranch = LookupOutput * BranchFlag
-///   4: ShouldJump = JumpFlag * (1 - NextIsNoop)
+///   1: ShouldBranch = LookupOutput * BranchFlag
+///   2: ShouldJump = JumpFlag * (1 - NextIsNoop)
 ///
-/// This matches Jolt's ProductVirtualUniSkipProver::compute_univariate_skip_extended_evals.
+/// This matches upstream Jolt's ProductVirtualUniSkipProver::compute_univariate_skip_extended_evals.
 pub fn computeProductVirtualExtendedEvals(
     comptime F: type,
     /// Product cycle inputs - array of per-cycle factor values
-    /// Each element has 8 factors:
+    /// Each element has 8 factors (PRODUCT_UNIQUE_FACTOR_VIRTUALS):
     ///   [0] LeftInstructionInput
     ///   [1] RightInstructionInput
-    ///   [2] IsRdNotZero
-    ///   [3] WriteLookupOutputToRDFlag
-    ///   [4] JumpFlag
-    ///   [5] LookupOutput
-    ///   [6] BranchFlag
-    ///   [7] NextIsNoop
+    ///   [2] JumpFlag (OpFlags::Jump)
+    ///   [3] WriteLookupOutputToRDFlag (OpFlags::WriteLookupOutputToRD)
+    ///   [4] LookupOutput
+    ///   [5] BranchFlag (InstructionFlags::Branch)
+    ///   [6] NextIsNoop
+    ///   [7] VirtualInstructionFlag (OpFlags::VirtualInstruction)
     cycle_factors: []const [8]F,
     /// Full tau vector for computing eq polynomial
     tau: []const F,
@@ -653,23 +651,19 @@ pub fn computeProductVirtualExtendedEvals(
             const eq_x = eq_evals[x];
 
             // Compute fused_left(x, z) = Σ_i c[i] * left_i(x)
-            // left factors: [0] LeftInstructionInput, [2] IsRdNotZero (for 1,2), [5] LookupOutput, [4] JumpFlag
+            // 3 products: left factors are [0] LeftInstructionInput, [4] LookupOutput, [2] JumpFlag
             var fused_left = F.zero();
             fused_left = fused_left.add(mulByI32(F, factors[0], coeffs[0])); // LeftInstructionInput
-            fused_left = fused_left.add(mulByI32(F, factors[2], coeffs[1])); // IsRdNotZero (constraint 1)
-            fused_left = fused_left.add(mulByI32(F, factors[2], coeffs[2])); // IsRdNotZero (constraint 2)
-            fused_left = fused_left.add(mulByI32(F, factors[5], coeffs[3])); // LookupOutput
-            fused_left = fused_left.add(mulByI32(F, factors[4], coeffs[4])); // JumpFlag
+            fused_left = fused_left.add(mulByI32(F, factors[4], coeffs[1])); // LookupOutput
+            fused_left = fused_left.add(mulByI32(F, factors[2], coeffs[2])); // JumpFlag
 
             // Compute fused_right(x, z) = Σ_i c[i] * right_i(x)
-            // right factors: [1] RightInstructionInput, [3] WriteLookupOutputToRDFlag, [4] JumpFlag, [6] BranchFlag, (1-[7]) not_next_noop
-            const one_minus_next_noop = F.one().sub(factors[7]);
+            // 3 products: right factors are [1] RightInstructionInput, [5] BranchFlag, (1-[6]) not_next_noop
+            const one_minus_next_noop = F.one().sub(factors[6]);
             var fused_right = F.zero();
             fused_right = fused_right.add(mulByI32(F, factors[1], coeffs[0])); // RightInstructionInput
-            fused_right = fused_right.add(mulByI32(F, factors[3], coeffs[1])); // WriteLookupOutputToRDFlag
-            fused_right = fused_right.add(mulByI32(F, factors[4], coeffs[2])); // JumpFlag
-            fused_right = fused_right.add(mulByI32(F, factors[6], coeffs[3])); // BranchFlag
-            fused_right = fused_right.add(mulByI32(F, one_minus_next_noop, coeffs[4])); // (1 - NextIsNoop)
+            fused_right = fused_right.add(mulByI32(F, factors[5], coeffs[1])); // BranchFlag
+            fused_right = fused_right.add(mulByI32(F, one_minus_next_noop, coeffs[2])); // (1 - NextIsNoop)
 
             // Accumulate: eq(τ, x) * fused_left * fused_right
             sum = sum.add(eq_x.mul(fused_left).mul(fused_right));
@@ -951,13 +945,13 @@ test "constants match Jolt" {
     try std.testing.expectEqual(@as(usize, 27), OUTER_FIRST_ROUND_POLY_DEGREE_BOUND);
     try std.testing.expectEqual(@as(usize, 9), NUM_REMAINING_R1CS_CONSTRAINTS);
 
-    // Verify Stage 2 constants
-    try std.testing.expectEqual(@as(usize, 5), NUM_PRODUCT_VIRTUAL);
-    try std.testing.expectEqual(@as(usize, 4), PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DEGREE);
-    try std.testing.expectEqual(@as(usize, 5), PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DOMAIN_SIZE);
-    try std.testing.expectEqual(@as(usize, 9), PRODUCT_VIRTUAL_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE);
-    try std.testing.expectEqual(@as(usize, 13), PRODUCT_VIRTUAL_FIRST_ROUND_POLY_NUM_COEFFS);
-    try std.testing.expectEqual(@as(usize, 12), PRODUCT_VIRTUAL_FIRST_ROUND_POLY_DEGREE_BOUND);
+    // Verify Stage 2 constants (3 products)
+    try std.testing.expectEqual(@as(usize, 3), NUM_PRODUCT_VIRTUAL);
+    try std.testing.expectEqual(@as(usize, 2), PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DEGREE);
+    try std.testing.expectEqual(@as(usize, 3), PRODUCT_VIRTUAL_UNIVARIATE_SKIP_DOMAIN_SIZE);
+    try std.testing.expectEqual(@as(usize, 5), PRODUCT_VIRTUAL_UNIVARIATE_SKIP_EXTENDED_DOMAIN_SIZE);
+    try std.testing.expectEqual(@as(usize, 7), PRODUCT_VIRTUAL_FIRST_ROUND_POLY_NUM_COEFFS);
+    try std.testing.expectEqual(@as(usize, 6), PRODUCT_VIRTUAL_FIRST_ROUND_POLY_DEGREE_BOUND);
 
     // Verify BASE_LEFT
     try std.testing.expectEqual(@as(i64, -4), BASE_LEFT);

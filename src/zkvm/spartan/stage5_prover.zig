@@ -14,7 +14,7 @@
 const std = @import("std");
 
 // Debug output control - set to true to enable verbose debug prints
-const debug_verbose = false;
+const debug_verbose = true;
 fn dbg(comptime fmt: []const u8, args: anytype) void {
     if (debug_verbose) std.debug.print(fmt, args);
 }
@@ -134,13 +134,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 .{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamRafEvaluation } },
             ) orelse F.zero();
             const claim_val_final = opening_claims.get(
-                .{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamValFinalEvaluation } },
+                .{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamValCheck } },
             ) orelse F.zero();
             const claim_rw = opening_claims.get(
                 .{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamReadWriteChecking } },
             ) orelse F.zero();
             const claim_val_eval = opening_claims.get(
-                .{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamValEvaluation } },
+                .{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamValCheck } },
             ) orelse F.zero();
 
             const gamma2 = gamma.mul(gamma);
@@ -173,9 +173,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             dbg("  lookups_input = {any}\n", .{lookups_input.toBytesBE()[0..8]});
 
             // Append input claims to transcript and get batching coefficients
-            transcript.appendScalar(regs_val_input);
-            transcript.appendScalar(ram_ra_input);
-            transcript.appendScalar(lookups_input);
+            transcript.appendScalar("sumcheck_claim", regs_val_input);
+            transcript.appendScalar("sumcheck_claim", ram_ra_input);
+            transcript.appendScalar("sumcheck_claim", lookups_input);
 
             const batch0 = transcript.challengeScalarFull();
             const batch1 = transcript.challengeScalarFull();
@@ -290,11 +290,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
 
                 // Append compressed polynomial to transcript and get challenge
                 // Must use compressed format (c0, c2, c3) to match Jolt's BatchedSumcheck
-                transcript.appendMessage("UniPoly_begin");
-                transcript.appendScalar(compressed[0]); // c0
-                transcript.appendScalar(compressed[1]); // c2
-                transcript.appendScalar(compressed[2]); // c3
-                transcript.appendMessage("UniPoly_end");
+                transcript.appendScalars("sumcheck_poly", &compressed);
 
                 const challenge = transcript.challengeScalar();
                 challenges[round] = challenge;
@@ -405,13 +401,13 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 .{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamRafEvaluation } },
             ) orelse F.zero();
             const claim_val_final = opening_claims.get(
-                .{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamValFinalEvaluation } },
+                .{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamValCheck } },
             ) orelse F.zero();
             const claim_rw = opening_claims.get(
                 .{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamReadWriteChecking } },
             ) orelse F.zero();
             const claim_val_eval = opening_claims.get(
-                .{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamValEvaluation } },
+                .{ .Virtual = .{ .poly = .RamRa, .sumcheck_id = .RamValCheck } },
             ) orelse F.zero();
 
             // RamRaClaimReduction uses gamma_ram_ra
@@ -456,9 +452,9 @@ pub fn Stage5BatchedProver(comptime F: type) type {
             dbg("[STAGE5] Transcript state BEFORE appending input claims: {any}\n", .{transcript.state[0..8]});
 
             // Append input claims to transcript and get batching coefficients
-            transcript.appendScalar(regs_val_input);
-            transcript.appendScalar(ram_ra_input);
-            transcript.appendScalar(lookups_input);
+            transcript.appendScalar("sumcheck_claim", regs_val_input);
+            transcript.appendScalar("sumcheck_claim", ram_ra_input);
+            transcript.appendScalar("sumcheck_claim", lookups_input);
             dbg("[STAGE5] Transcript state AFTER appending input claims: {any}\n", .{transcript.state[0..8]});
 
             const batch0 = transcript.challengeScalarFull();
@@ -1300,6 +1296,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     });
                 }
             }
+
+            // Removed: per-component sum diagnostic (had unused variable issues)
 
             // Handle padding cycles (trace_len..T): these are NOPs (ADDI x0,x0,0) in Jolt.
             // They need proper table_idx and is_identity_path for correct Q arrays,
@@ -3831,10 +3829,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     // Append to transcript: 2 coefficients for degree-2 polynomial
                     // Matches Jolt's CompressedUniPoly::append_to_transcript which iterates
                     // over coeffs_except_linear_term (length = degree of polynomial)
-                    transcript.appendMessage("UniPoly_begin");
-                    transcript.appendScalar(coeffs[0]); // c0
-                    transcript.appendScalar(coeffs[1]); // c2
-                    transcript.appendMessage("UniPoly_end");
+                    transcript.appendScalars("sumcheck_poly", coeffs);
 
                     const challenge = transcript.challengeScalar();
                     challenges[round] = challenge;
@@ -6009,11 +6004,7 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                     });
 
                     // Append to transcript
-                    transcript.appendMessage("UniPoly_begin");
-                    for (final_compressed) |c| {
-                        transcript.appendScalar(c);
-                    }
-                    transcript.appendMessage("UniPoly_end");
+                    transcript.appendScalars("sumcheck_poly", final_compressed);
 
                     const challenge = transcript.challengeScalar();
                     challenges[round] = challenge;

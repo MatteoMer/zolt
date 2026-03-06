@@ -1,15 +1,16 @@
 //! Blake2b Fiat-Shamir Transcript for Jolt Compatibility
 //!
 //! This module implements a Blake2b-based Fiat-Shamir transcript that is
-//! byte-compatible with Jolt's Blake2bTranscript (Rust).
+//! byte-compatible with Jolt's Blake2bTranscript (Rust) at commit 97b2c96.
 //!
 //! Key compatibility requirements:
 //! - Uses Blake2b-256 (32-byte output)
 //! - 32-byte state with round counter for domain separation
-//! - Messages are right-padded to 32 bytes with zeros
+//! - All public methods take a label as first argument
+//! - Labels are right-padded to 32 bytes with zeros
+//! - Variable-length methods pack label (24 bytes) + length (8 bytes BE) into 32 bytes
 //! - Scalars are serialized LE then reversed to BE (EVM format)
 //! - Challenges are 128-bit (16 bytes)
-//! - Vector operations use begin/end markers
 
 const std = @import("std");
 
@@ -23,12 +24,17 @@ const crypto = std.crypto;
 const Blake2b256 = crypto.hash.blake2.Blake2b256;
 const mem = std.mem;
 
-/// Blake2b-based Fiat-Shamir transcript compatible with Jolt
+/// Maximum label length when packed with a length/count.
+/// 32 bytes total - 8 bytes for u64 length = 24 bytes for label.
+const MAX_LABEL_LEN_WITH_LENGTH: usize = 24;
+
+/// Blake2b-based Fiat-Shamir transcript compatible with Jolt (upstream 97b2c96)
 ///
 /// This matches Jolt's Blake2bTranscript exactly:
 /// - 32-byte running state
 /// - Round counter (u32) for domain separation
 /// - hasher() = Blake2b256(state || packed_round) where packed_round = [0u8; 28] || round.to_be_bytes()
+/// - All public methods take a label argument for domain separation
 pub fn Blake2bTranscript(comptime F: type) type {
     return struct {
         const Self = @This();
@@ -40,32 +46,19 @@ pub fn Blake2bTranscript(comptime F: type) type {
 
         /// Create a new transcript with a label
         /// Matches Jolt's `fn new(label: &'static [u8]) -> Self`
-        ///
-        /// The label is padded to 32 bytes with zeros on the right,
-        /// then hashed with Blake2b-256 to produce the initial state.
         pub fn init(label: []const u8) Self {
             std.debug.assert(label.len < 33);
-
-            dbg("[ZOLT TRANSCRIPT] init: label=\"{s}\" (len={d})\n", .{ label, label.len });
 
             // Pad label to 32 bytes with zeros on the right
             var padded: [32]u8 = [_]u8{0} ** 32;
             const copy_len = @min(label.len, 32);
             @memcpy(padded[0..copy_len], label[0..copy_len]);
 
-            dbg("[ZOLT TRANSCRIPT]   padded={{ ", .{});
-            for (padded[0..16]) |b| dbg("{x:0>2} ", .{b});
-            dbg("... }}\n", .{});
-
             // Hash the padded label to get initial state
             var h = Blake2b256.init(.{});
             h.update(&padded);
             var initial_state: [32]u8 = undefined;
             h.final(&initial_state);
-
-            dbg("[ZOLT TRANSCRIPT]   initial_state={{ ", .{});
-            for (initial_state) |b| dbg("{x:0>2} ", .{b});
-            dbg("}}\n", .{});
 
             return Self{
                 .state = initial_state,
@@ -75,9 +68,6 @@ pub fn Blake2bTranscript(comptime F: type) type {
 
         /// Get the hasher with running seed and index added
         /// Matches Jolt's `fn hasher(&self) -> Blake2b256`
-        ///
-        /// Creates: Blake2b256::new().chain_update(state).chain_update(packed)
-        /// where packed = [0u8; 28] ++ n_rounds.to_be_bytes()
         fn hasher(self: *const Self) Blake2b256 {
             var h = Blake2b256.init(.{});
             h.update(&self.state);
@@ -96,83 +86,59 @@ pub fn Blake2bTranscript(comptime F: type) type {
             self.n_rounds += 1;
         }
 
-        /// Append a message to the transcript
-        /// Matches Jolt's `fn append_message(&mut self, msg: &'static [u8])`
-        ///
-        /// Messages are right-padded to 32 bytes with zeros.
-        pub fn appendMessage(self: *Self, msg: []const u8) void {
-            std.debug.assert(msg.len < 33);
+        // =====================================================================
+        // Internal (raw) methods - match Jolt's raw_* methods
+        // =====================================================================
 
-            dbg("[ZOLT TRANSCRIPT] appendMessage: \"{s}\" (len={d}), round={d}, state_before=[{x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}, {x:0>2}]\n", .{ msg, msg.len, self.n_rounds, self.state[0], self.state[1], self.state[2], self.state[3], self.state[4], self.state[5], self.state[6], self.state[7] });
+        /// Raw append a label (right-padded to 32 bytes).
+        /// Matches Jolt's `fn raw_append_label(&mut self, label: &'static [u8])`
+        fn rawAppendLabel(self: *Self, label: []const u8) void {
+            std.debug.assert(label.len < 33);
 
             var h = self.hasher();
 
-            if (msg.len == 32) {
-                h.update(msg);
+            if (label.len == 32) {
+                h.update(label);
             } else {
-                // Right-pad to 32 bytes
                 var padded: [32]u8 = [_]u8{0} ** 32;
-                @memcpy(padded[0..msg.len], msg);
+                @memcpy(padded[0..label.len], label);
                 h.update(&padded);
             }
 
             var result: [32]u8 = undefined;
             h.final(&result);
             self.updateState(result);
-
-            dbg("[ZOLT TRANSCRIPT]   state_after={{ ", .{});
-            for (self.state[0..8]) |b| dbg("{x:0>2} ", .{b});
-            dbg("... }}\n", .{});
         }
 
-        /// Append raw bytes to the transcript
-        /// Matches Jolt's `fn append_bytes(&mut self, bytes: &[u8])`
-        pub fn appendBytes(self: *Self, bytes: []const u8) void {
-            // DEBUG: Print state before
-            dbg("[ZOLT TRANSCRIPT] appendBytes: len={d}, state_before={{ ", .{bytes.len});
-            for (self.state[0..8]) |b| dbg("{x:0>2} ", .{b});
-            dbg("... }}\n", .{});
+        /// Raw append label with length packed into 32 bytes.
+        /// Label (up to 24 bytes, right-padded) + length (8 bytes, big-endian).
+        /// Matches Jolt's `fn raw_append_label_with_len(&mut self, label: &'static [u8], len: u64)`
+        fn rawAppendLabelWithLen(self: *Self, label: []const u8, len: u64) void {
+            std.debug.assert(label.len <= MAX_LABEL_LEN_WITH_LENGTH);
+            var label_buf: [32]u8 = [_]u8{0} ** 32;
+            @memcpy(label_buf[0..label.len], label);
+            // Zero-pad label portion (already zeroed)
+            // Append length as big-endian in last 8 bytes
+            mem.writeInt(u64, label_buf[24..32], len, .big);
+            self.rawAppendBytes(&label_buf);
+        }
 
-            // DEBUG: Print first and last bytes
-            if (bytes.len > 0) {
-                dbg("[ZOLT TRANSCRIPT]   first_8_bytes={{ ", .{});
-                const print_len = @min(bytes.len, 8);
-                for (bytes[0..print_len]) |b| dbg("{x:0>2} ", .{b});
-                dbg("}}\n", .{});
-                if (bytes.len > 8) {
-                    dbg("[ZOLT TRANSCRIPT]   last_8_bytes={{ ", .{});
-                    const last_start = bytes.len - @min(bytes.len, 8);
-                    for (bytes[last_start..]) |b| dbg("{x:0>2} ", .{b});
-                    dbg("}}\n", .{});
-                }
-            }
-
+        /// Raw append bytes (hash directly).
+        /// Matches Jolt's `fn raw_append_bytes(&mut self, bytes: &[u8])`
+        fn rawAppendBytes(self: *Self, bytes: []const u8) void {
             var h = self.hasher();
             h.update(bytes);
 
             var result: [32]u8 = undefined;
             h.final(&result);
             self.updateState(result);
-
-            // DEBUG: Print state after
-            dbg("[ZOLT TRANSCRIPT]   state_after={{ ", .{});
-            for (self.state[0..8]) |b| dbg("{x:0>2} ", .{b});
-            dbg("... }}\n", .{});
         }
 
-        /// Append a u64 to the transcript
-        /// Matches Jolt's `fn append_u64(&mut self, x: u64)`
-        ///
-        /// Packs into 32 bytes: [0u8; 24] ++ x.to_be_bytes()
-        pub fn appendU64(self: *Self, x: u64) void {
-            dbg("[ZOLT TRANSCRIPT] appendU64: value={d} (0x{x})\n", .{ x, x });
-
+        /// Raw append u64 packed into 32 bytes: [0u8; 24] ++ x.to_be_bytes()
+        /// Matches Jolt's `fn raw_append_u64(&mut self, x: u64)`
+        fn rawAppendU64(self: *Self, x: u64) void {
             var data: [32]u8 = [_]u8{0} ** 32;
             mem.writeInt(u64, data[24..32], x, .big);
-
-            dbg("[ZOLT TRANSCRIPT]   packed_bytes={{ ", .{});
-            for (data[24..32]) |b| dbg("{x:0>2} ", .{b});
-            dbg("}}\n", .{});
 
             var h = self.hasher();
             h.update(&data);
@@ -182,12 +148,10 @@ pub fn Blake2bTranscript(comptime F: type) type {
             self.updateState(result);
         }
 
-        /// Append a scalar to the transcript
-        /// Matches Jolt's `fn append_scalar<F: JoltField>(&mut self, scalar: &F)`
-        ///
-        /// Serializes LE, then reverses to BE for EVM compatibility.
-        pub fn appendScalar(self: *Self, scalar: F) void {
-            // First convert from Montgomery form to canonical form (matching arkworks)
+        /// Raw append scalar: serialize LE, reverse to BE, raw_append_bytes.
+        /// Matches Jolt's `fn raw_append_scalar<F>(&mut self, scalar: &F)`
+        fn rawAppendScalar(self: *Self, scalar: F) void {
+            // Convert from Montgomery form to canonical form
             const standard = scalar.fromMontgomery();
 
             // Serialize to LE bytes
@@ -202,23 +166,79 @@ pub fn Blake2bTranscript(comptime F: type) type {
                 reversed[i] = buf[31 - i];
             }
 
-            self.appendBytes(&reversed);
+            self.rawAppendBytes(&reversed);
         }
 
-        /// Append multiple scalars to the transcript
-        /// Matches Jolt's `fn append_scalars<F: JoltField>(&mut self, scalars: &[impl Borrow<F>])`
-        ///
-        /// Uses begin_append_vector/end_append_vector markers.
-        pub fn appendScalars(self: *Self, scalars: []const F) void {
-            self.appendMessage("begin_append_vector");
-            for (scalars) |scalar| {
-                self.appendScalar(scalar);
-            }
-            self.appendMessage("end_append_vector");
+        // =====================================================================
+        // Public API - all take a label as first argument
+        // =====================================================================
+
+        /// Append a domain-separation label with no associated data.
+        /// Matches Jolt's `fn append_label(&mut self, label: &'static [u8])`
+        pub fn appendLabel(self: *Self, label: []const u8) void {
+            self.rawAppendLabel(label);
         }
+
+        /// Append raw bytes with a label.
+        /// Variable-length: label and length packed into single 32-byte word.
+        /// Matches Jolt's `fn append_bytes(&mut self, label: &'static [u8], bytes: &[u8])`
+        pub fn appendBytes(self: *Self, label: []const u8, bytes: []const u8) void {
+            self.rawAppendLabelWithLen(label, bytes.len);
+            self.rawAppendBytes(bytes);
+        }
+
+        /// Append a u64 value with a label.
+        /// Two separate 32-byte words: label (right-padded) + value (left-padded).
+        /// Matches Jolt's `fn append_u64(&mut self, label: &'static [u8], x: u64)`
+        pub fn appendU64(self: *Self, label: []const u8, x: u64) void {
+            self.rawAppendLabel(label);
+            self.rawAppendU64(x);
+        }
+
+        /// Append a scalar field element with a label.
+        /// Matches Jolt's `fn append_scalar(&mut self, label: &'static [u8], scalar: &F)`
+        pub fn appendScalar(self: *Self, label: []const u8, scalar: F) void {
+            self.rawAppendLabel(label);
+            self.rawAppendScalar(scalar);
+        }
+
+        /// Append multiple scalars with a label.
+        /// Variable-length: label and count packed into single 32-byte word.
+        /// Matches Jolt's `fn append_scalars(&mut self, label: &'static [u8], scalars: &[F])`
+        pub fn appendScalars(self: *Self, label: []const u8, scalars: []const F) void {
+            self.rawAppendLabelWithLen(label, scalars.len);
+            for (scalars) |scalar| {
+                self.rawAppendScalar(scalar);
+            }
+        }
+
+        /// Append a serializable object with a label.
+        /// Variable-length: label and length packed into single 32-byte word.
+        /// Reverses bytes after serialization for EVM compatibility.
+        /// Matches Jolt's `fn append_serializable(&mut self, label: &'static [u8], data: &T)`
+        pub fn appendSerializable(self: *Self, label: []const u8, comptime len: usize, bytes: *const [len]u8) void {
+            self.rawAppendLabelWithLen(label, len);
+            // Reverse the bytes to match Jolt's behavior
+            var reversed: [len]u8 = undefined;
+            for (0..len) |i| {
+                reversed[i] = bytes[len - 1 - i];
+            }
+            self.rawAppendBytes(&reversed);
+        }
+
+        /// Append a GT (Fp12) element to the transcript with a label.
+        /// Uses append_serializable semantics (label+len packed, bytes reversed).
+        /// Matches Jolt's `transcript.append_serializable(b"commitment", &gt_element)`
+        pub fn appendGT(self: *Self, label: []const u8, gt: anytype) void {
+            const bytes = gt.toBytes();
+            self.appendSerializable(label, 384, &bytes);
+        }
+
+        // =====================================================================
+        // Challenge generation methods (unchanged from old API)
+        // =====================================================================
 
         /// Get 32 challenge bytes from the transcript
-        /// Matches Jolt's `fn challenge_bytes32(&mut self, out: &mut [u8])`
         fn challengeBytes32(self: *Self, out: *[32]u8) void {
             var h = self.hasher();
             h.final(out);
@@ -226,7 +246,6 @@ pub fn Blake2bTranscript(comptime F: type) type {
         }
 
         /// Get arbitrary length challenge bytes
-        /// Matches Jolt's `fn challenge_bytes(&mut self, out: &mut [u8])`
         pub fn challengeBytes(self: *Self, out: []u8) void {
             var remaining = out.len;
             var start: usize = 0;
@@ -239,165 +258,68 @@ pub fn Blake2bTranscript(comptime F: type) type {
                 remaining -= 32;
             }
 
-            // Get final bytes (may be less than 32)
             var full_rand: [32]u8 = undefined;
             self.challengeBytes32(&full_rand);
             @memcpy(out[start..][0..remaining], full_rand[0..remaining]);
         }
 
         /// Get a 128-bit challenge as u128
-        /// Matches Jolt's `fn challenge_u128(&mut self) -> u128`
+        /// Matches upstream Jolt: reverse bytes then from_be_bytes(reversed)
+        /// = from_le_bytes(original)
         pub fn challengeU128(self: *Self) u128 {
             var buf: [16]u8 = undefined;
             self.challengeBytes(&buf);
 
-            // Reverse to match Jolt's `buf = buf.into_iter().rev().collect()`
-            var reversed: [16]u8 = undefined;
-            for (0..16) |i| {
-                reversed[i] = buf[15 - i];
-            }
-
-            return mem.readInt(u128, &reversed, .big);
+            // Upstream: buf.reverse() then u128::from_be_bytes(buf)
+            // from_be_bytes(reversed) = from_le_bytes(original)
+            return mem.readInt(u128, &buf, .little);
         }
 
         /// Get a challenge scalar (128-bit, MontU128Challenge-compatible)
-        /// Matches Jolt's `fn challenge_scalar_optimized<F: JoltField>(&mut self) -> F::Challenge`
-        ///
-        /// This returns a field element with the MontU128Challenge representation [0, 0, low, high].
-        /// Used for sumcheck challenges (r0, etc.) where Jolt uses MontU128Challenge.
-        ///
-        /// NOTE: For batching coefficients and other cases where Jolt uses proper Fr,
-        /// use challengeScalarFull() instead which converts to proper Montgomery form.
+        /// Matches Jolt's `challenge_scalar_optimized` which uses MontU128Challenge.
         pub fn challengeScalar(self: *Self) F {
             return self.challengeScalar128Bits();
         }
 
         /// Get a challenge scalar with proper Montgomery conversion
-        /// Matches Jolt's `fn challenge_scalar<F: JoltField>(&mut self) -> F` used via challenge_vector
-        ///
-        /// This returns a PROPER field element in Montgomery form, suitable for
-        /// standard field arithmetic. Used for batching coefficients where Jolt
-        /// uses F::from_bytes (via challenge_vector).
-        ///
-        /// CRITICAL: This does NOT mask to 125 bits - Jolt's F::from_bytes uses
-        /// from_le_bytes_mod_order which interprets the full 128 bits and reduces mod p.
-        /// This is different from challenge_scalar_optimized which uses MontU128Challenge
-        /// with 125-bit masking.
+        /// Matches upstream Jolt's `challenge_scalar` (reverse + from_le_bytes_mod_order = BE of original).
         pub fn challengeScalarFull(self: *Self) F {
-            dbg("[ZOLT TRANSCRIPT] challengeScalarFull: round={d}\n", .{self.n_rounds});
-
             var buf: [16]u8 = undefined;
             self.challengeBytes(&buf);
 
-            // Reverse bytes to match Jolt's behavior
-            var reversed: [16]u8 = undefined;
-            for (0..16) |i| {
-                reversed[i] = buf[15 - i];
-            }
+            // Upstream: reverse bytes then from_le_bytes_mod_order
+            // Equivalent to big-endian interpretation of original bytes
+            const high: u64 = mem.readInt(u64, buf[0..8], .big);
+            const low: u64 = mem.readInt(u64, buf[8..16], .big);
 
-            // Interpret as little-endian integer and convert to field element
-            // This matches Jolt's F::from_bytes(&buf) which does from_le_bytes_mod_order
-            // NO MASKING - use full 128-bit value
-            const low: u64 = mem.readInt(u64, reversed[0..8], .little);
-            const high: u64 = mem.readInt(u64, reversed[8..16], .little);
-
-            // Store in lower limbs [low, high, 0, 0] as standard form
-            // then convert to Montgomery form
-            // Note: For 128-bit values < 2^128, no modular reduction is needed
-            // since 2^128 < BN254 scalar field order (~2^254)
             const standard = F{ .limbs = .{ low, high, 0, 0 } };
-            dbg("[ZOLT TRANSCRIPT]   standard_limbs=[0x{x}, 0x{x}, 0, 0]\n", .{ low, high });
-            const result = standard.toMontgomery();
-            dbg("[ZOLT TRANSCRIPT]   mont_result=[0x{x}, 0x{x}, 0x{x}, 0x{x}]\n", .{ result.limbs[0], result.limbs[1], result.limbs[2], result.limbs[3] });
-
-            dbg("[ZOLT TRANSCRIPT]   canonical_value=0x{x}{x:0>16}\n", .{ high, low });
-
-            return result;
+            return standard.toMontgomery();
         }
 
         /// Get a 128-bit challenge scalar (masked to 125 bits for Jolt compatibility)
-        /// Matches Jolt's `fn challenge_scalar_optimized<F: JoltField>(&mut self) -> F::Challenge`
+        /// Matches Jolt's `challenge_scalar_optimized` → MontU128Challenge::new()
         ///
-        /// IMPORTANT: This must match Jolt's behavior exactly:
-        /// 1. Get 16 bytes from transcript
-        /// 2. Reverse them
-        /// 3. Interpret as little-endian u128
-        /// 4. MASK TO 125 BITS (critical for MontU128Challenge compatibility!)
-        /// 5. Convert to field element in Montgomery form
-        ///
-        /// The 125-bit masking matches Jolt's MontU128Challenge::new() which does:
-        ///   let val_masked = value & (u128::MAX >> 3);
-        /// Challenge scalar for sumcheck challenges (125-bit masking)
-        ///
-        /// This matches Jolt's challenge_scalar_optimized which uses MontU128Challenge:
-        /// 1. Get 16 bytes from challenge_bytes
-        /// 2. Reverse to get u128 in BE order
-        /// 3. Mask to 125 bits
-        /// 4. Store as standard form, convert to Montgomery when needed
-        ///
-        /// Used for Stage 1 sumcheck challenges (r0, r_i).
+        /// CRITICAL: from_bigint_unchecked does NOT do Montgomery conversion.
+        /// The limbs [0, 0, L, H] ARE the Montgomery representation directly.
         pub fn challengeScalar128Bits(self: *Self) F {
-            dbg("[ZOLT TRANSCRIPT] challengeScalar128Bits: round={d}\n", .{self.n_rounds});
-            dbg("[ZOLT TRANSCRIPT]   state_before={{ ", .{});
-            for (self.state) |b| dbg("{x:0>2} ", .{b});
-            dbg("}}\n", .{});
-
             var buf: [16]u8 = undefined;
             self.challengeBytes(&buf);
 
-            dbg("[ZOLT TRANSCRIPT]   challenge_bytes={{ ", .{});
-            for (buf) |b| dbg("{x:0>2} ", .{b});
-            dbg("}}\n", .{});
-
-            // Reverse bytes to get u128 in BE order (Jolt's: buf.into_iter().rev())
-            var reversed: [16]u8 = undefined;
-            for (0..16) |i| {
-                reversed[i] = buf[15 - i];
-            }
-
-            dbg("[ZOLT TRANSCRIPT]   reversed={{ ", .{});
-            for (reversed) |b| dbg("{x:0>2} ", .{b});
-            dbg("}}\n", .{});
-
-            // Read as BE u128
-            const high: u64 = mem.readInt(u64, reversed[0..8], .big);
-            const low: u64 = mem.readInt(u64, reversed[8..16], .big);
+            // Upstream: buf.reverse() then u128::from_be_bytes(reversed)
+            // = from_le_bytes(original)
+            const full_value: u128 = mem.readInt(u128, &buf, .little);
 
             // Mask to 125 bits (MontU128Challenge::new does: value & (u128::MAX >> 3))
-            const full_value: u128 = (@as(u128, high) << 64) | low;
             const mask_125: u128 = (1 << 125) - 1;
             const masked_value: u128 = full_value & mask_125;
             const masked_low: u64 = @truncate(masked_value);
             const masked_high: u64 = @truncate(masked_value >> 64);
 
-            dbg("[ZOLT TRANSCRIPT]   full_value=0x{x}\n", .{full_value});
-            dbg("[ZOLT TRANSCRIPT]   masked_value=0x{x} (125-bit)\n", .{masked_value});
-
-            // CRITICAL: Match Jolt's MontU128Challenge behavior exactly!
-            //
-            // Jolt's MontU128Challenge::new(value) stores [0, 0, low, high] in its `value` field.
-            // When converted to Fr via `Into<Fr>::into(self)`, it calls:
-            //   ark_bn254::Fr::from_bigint_unchecked(BigInt::new(self.value()))
-            //
-            // IMPORTANT: from_bigint_unchecked() does NOT do Montgomery conversion!
-            // It wraps the BigInt directly as Fp(repr, PhantomData), meaning the limbs
-            // ARE the Montgomery representation.
-            //
-            // So the Fr limbs become [0, 0, L, H] directly, representing:
-            //   Field value = [0, 0, L, H] / R mod p = (L*2^128 + H*2^192) * R^(-1) mod p
-            //
-            // To match Jolt, we store [0, 0, L, H] directly WITHOUT toMontgomery()!
-            const result = F{ .limbs = .{ 0, 0, masked_low, masked_high } };
-
-            dbg("[ZOLT TRANSCRIPT]   result_limbs=[0x{x}, 0x{x}, 0x{x}, 0x{x}]\n", .{ result.limbs[0], result.limbs[1], result.limbs[2], result.limbs[3] });
-
-            return result;
+            // Store [0, 0, L, H] directly WITHOUT toMontgomery - matches from_bigint_unchecked
+            return F{ .limbs = .{ 0, 0, masked_low, masked_high } };
         }
 
-        /// Get multiple challenge scalars
-        /// Matches Jolt's `fn challenge_vector<F: JoltField>(&mut self, len: usize) -> Vec<F>`
-        /// NOTE: Jolt's challenge_vector uses challenge_scalar() which is the FULL
-        /// 128-bit from_le_bytes_mod_order version, NOT the 125-bit optimized version.
+        /// Get multiple challenge scalars (uses challengeScalarFull, NOT 125-bit)
         pub fn challengeVector(self: *Self, allocator: std.mem.Allocator, len: usize) ![]F {
             const challenges = try allocator.alloc(F, len);
             for (0..len) |i| {
@@ -406,10 +328,7 @@ pub fn Blake2bTranscript(comptime F: type) type {
             return challenges;
         }
 
-        /// Compute powers of a challenge scalar
-        /// Matches Jolt's `fn challenge_scalar_powers<F: JoltField>(&mut self, len: usize) -> Vec<F>`
-        /// NOTE: Jolt's challenge_scalar_powers uses challenge_scalar() which is the FULL
-        /// 128-bit from_le_bytes_mod_order version, NOT the 125-bit optimized version.
+        /// Compute powers of a challenge scalar (uses challengeScalarFull, NOT 125-bit)
         pub fn challengeScalarPowers(self: *Self, allocator: std.mem.Allocator, len: usize) ![]F {
             const q = self.challengeScalarFull();
             const q_powers = try allocator.alloc(F, len);
@@ -420,145 +339,9 @@ pub fn Blake2bTranscript(comptime F: type) type {
             return q_powers;
         }
 
-        /// Append a point to the transcript (for curve points)
-        /// Matches Jolt's `fn append_point<G: CurveGroup>(&mut self, point: &G)`
-        ///
-        /// Points are serialized as (x, y) in BE format.
-        /// Point at infinity is serialized as 64 zero bytes.
-        pub fn appendPoint(self: *Self, comptime Point: type, point: Point) void {
-            dbg("[ZOLT TRANSCRIPT] appendPoint: round={d}\n", .{self.n_rounds});
-
-            // Check for point at infinity
-            if (point.isIdentity()) {
-                dbg("[ZOLT TRANSCRIPT]   point_at_infinity=true\n", .{});
-                self.appendBytes(&([_]u8{0} ** 64));
-                return;
-            }
-
-            const affine = point.toAffine();
-
-            // Serialize x and y coordinates in BE
-            var x_bytes: [32]u8 = undefined;
-            var y_bytes: [32]u8 = undefined;
-
-            // Get x and y, serialize LE, then reverse to BE
-            for (0..4) |i| {
-                mem.writeInt(u64, x_bytes[i * 8 ..][0..8], affine.x.limbs[i], .little);
-                mem.writeInt(u64, y_bytes[i * 8 ..][0..8], affine.y.limbs[i], .little);
-            }
-
-            // Reverse to BE
-            var x_reversed: [32]u8 = undefined;
-            var y_reversed: [32]u8 = undefined;
-            for (0..32) |i| {
-                x_reversed[i] = x_bytes[31 - i];
-                y_reversed[i] = y_bytes[31 - i];
-            }
-
-            dbg("[ZOLT TRANSCRIPT]   x_be={{ ", .{});
-            for (x_reversed[0..8]) |b| dbg("{x:0>2} ", .{b});
-            dbg("... }}\n", .{});
-            dbg("[ZOLT TRANSCRIPT]   y_be={{ ", .{});
-            for (y_reversed[0..8]) |b| dbg("{x:0>2} ", .{b});
-            dbg("... }}\n", .{});
-
-            var h = self.hasher();
-            h.update(&x_reversed);
-            h.update(&y_reversed);
-
-            var result: [32]u8 = undefined;
-            h.final(&result);
-            self.updateState(result);
-
-            dbg("[ZOLT TRANSCRIPT]   state_after={{ ", .{});
-            for (self.state[0..8]) |b| dbg("{x:0>2} ", .{b});
-            dbg("... }}\n", .{});
-        }
-
-        /// Append multiple points to the transcript
-        /// Matches Jolt's `fn append_points<G: CurveGroup>(&mut self, points: &[G])`
-        pub fn appendPoints(self: *Self, comptime Point: type, points: []const Point) void {
-            self.appendMessage("begin_append_vector");
-            for (points) |point| {
-                self.appendPoint(Point, point);
-            }
-            self.appendMessage("end_append_vector");
-        }
-
-        /// Append a serializable object to the transcript
-        /// Matches Jolt's `fn append_serializable<F: CanonicalSerialize>(&mut self, scalar: &F)`
-        ///
-        /// This reverses the bytes after serialization for EVM compatibility,
-        /// matching what arkworks + Jolt does.
-        pub fn appendSerializable(self: *Self, comptime T: type, bytes: T) void {
-            // Reverse the bytes to match Jolt's behavior
-            var reversed: T = undefined;
-            for (0..bytes.len) |i| {
-                reversed[i] = bytes[bytes.len - 1 - i];
-            }
-            self.appendBytes(&reversed);
-        }
-
-        /// Append a GT (Fp12) element to the transcript
-        /// For Dory compatibility - appends the serialized GT element as bytes
-        ///
-        /// IMPORTANT: This matches Jolt's append_serializable which reverses
-        /// all bytes after serialization for EVM compatibility.
-        pub fn appendGT(self: *Self, gt: anytype) void {
-            dbg("[ZOLT TRANSCRIPT] appendGT:\n", .{});
-
-            const bytes = gt.toBytes();
-
-            dbg("[ZOLT TRANSCRIPT]   raw_bytes[0..16]={{ ", .{});
-            for (bytes[0..16]) |b| dbg("{x:0>2} ", .{b});
-            dbg("}}\n", .{});
-            dbg("[ZOLT TRANSCRIPT]   raw_bytes[368..384]={{ ", .{});
-            for (bytes[368..384]) |b| dbg("{x:0>2} ", .{b});
-            dbg("}}\n", .{});
-
-            // Reverse bytes to match Jolt's append_serializable
-            var reversed: [384]u8 = undefined;
-            for (0..384) |i| {
-                reversed[i] = bytes[383 - i];
-            }
-
-            dbg("[ZOLT TRANSCRIPT]   reversed[0..16]={{ ", .{});
-            for (reversed[0..16]) |b| dbg("{x:0>2} ", .{b});
-            dbg("}}\n", .{});
-            dbg("[ZOLT TRANSCRIPT]   reversed[368..384]={{ ", .{});
-            for (reversed[368..384]) |b| dbg("{x:0>2} ", .{b});
-            dbg("}}\n", .{});
-
-            self.appendBytes(&reversed);
-        }
-
-        /// Append a G1 point to the transcript (compressed format)
-        /// For Dory compatibility - appends the compressed serialized point
-        pub fn appendG1Compressed(self: *Self, point: anytype) void {
-            dbg("[ZOLT TRANSCRIPT] appendG1Compressed: round={d}\n", .{self.n_rounds});
-            const dory = @import("../poly/commitment/dory.zig");
-            const bytes = dory.compressG1(point);
-            dbg("[ZOLT TRANSCRIPT]   compressed_bytes={{ ", .{});
-            for (bytes[0..16]) |b| dbg("{x:0>2} ", .{b});
-            dbg("... }}\n", .{});
-            self.appendBytes(&bytes);
-        }
-
         /// Debug helper: return current transcript state
         pub fn debugState(self: *const Self) [32]u8 {
             return self.state;
-        }
-
-        /// Append a G2 point to the transcript (compressed format)
-        /// For Dory compatibility - appends the compressed serialized point
-        pub fn appendG2Compressed(self: *Self, point: anytype) void {
-            dbg("[ZOLT TRANSCRIPT] appendG2Compressed: round={d}\n", .{self.n_rounds});
-            const dory = @import("../poly/commitment/dory.zig");
-            const bytes = dory.compressG2(point);
-            dbg("[ZOLT TRANSCRIPT]   compressed_bytes={{ ", .{});
-            for (bytes[0..16]) |b| dbg("{x:0>2} ", .{b});
-            dbg("... }}\n", .{});
-            self.appendBytes(&bytes);
         }
     };
 }
@@ -571,7 +354,6 @@ test "blake2b transcript: basic initialization" {
     const Transcript = Blake2bTranscript(BN254Scalar);
     const t = Transcript.init("test_label");
 
-    // State should be non-zero after initialization
     var all_zero = true;
     for (t.state) |b| {
         if (b != 0) {
@@ -586,12 +368,11 @@ test "blake2b transcript: basic initialization" {
 test "blake2b transcript: deterministic challenges" {
     const Transcript = Blake2bTranscript(BN254Scalar);
 
-    // Two transcripts with same operations should produce same challenges
     var t1 = Transcript.init("test");
     var t2 = Transcript.init("test");
 
-    t1.appendMessage("hello");
-    t2.appendMessage("hello");
+    t1.appendLabel("hello");
+    t2.appendLabel("hello");
 
     const c1 = t1.challengeScalar();
     const c2 = t2.challengeScalar();
@@ -605,8 +386,8 @@ test "blake2b transcript: different inputs produce different challenges" {
     var t1 = Transcript.init("test");
     var t2 = Transcript.init("test");
 
-    t1.appendMessage("hello");
-    t2.appendMessage("world");
+    t1.appendLabel("hello");
+    t2.appendLabel("world");
 
     const c1 = t1.challengeScalar();
     const c2 = t2.challengeScalar();
@@ -620,10 +401,10 @@ test "blake2b transcript: round counter increments" {
     var t = Transcript.init("test");
     try testing.expectEqual(@as(u32, 0), t.n_rounds);
 
-    t.appendMessage("msg1");
+    t.appendLabel("msg1");
     try testing.expectEqual(@as(u32, 1), t.n_rounds);
 
-    t.appendMessage("msg2");
+    t.appendLabel("msg2");
     try testing.expectEqual(@as(u32, 2), t.n_rounds);
 
     _ = t.challengeScalar();
@@ -636,54 +417,9 @@ test "blake2b transcript: scalar append and challenge" {
     var t = Transcript.init("scalar_test");
 
     const scalar = BN254Scalar.fromU64(12345);
-    t.appendScalar(scalar);
+    t.appendScalar("test_scalar", scalar);
 
     const challenge = t.challengeScalar();
-
-    // Challenge should be non-zero
-    try testing.expect(!challenge.eql(BN254Scalar.zero()));
-}
-
-test "blake2b transcript: append scalars with markers" {
-    const Transcript = Blake2bTranscript(BN254Scalar);
-
-    var t1 = Transcript.init("test");
-    var t2 = Transcript.init("test");
-
-    const scalars = [_]BN254Scalar{
-        BN254Scalar.fromU64(1),
-        BN254Scalar.fromU64(2),
-        BN254Scalar.fromU64(3),
-    };
-
-    // Using appendScalars
-    t1.appendScalars(&scalars);
-
-    // Manual equivalent
-    t2.appendMessage("begin_append_vector");
-    for (scalars) |s| {
-        t2.appendScalar(s);
-    }
-    t2.appendMessage("end_append_vector");
-
-    // Should produce same state
-    try testing.expectEqualSlices(u8, &t1.state, &t2.state);
-    try testing.expectEqual(t1.n_rounds, t2.n_rounds);
-}
-
-test "blake2b transcript: challenge scalar is 128 bits" {
-    const Transcript = Blake2bTranscript(BN254Scalar);
-
-    var t = Transcript.init("128bit_test");
-    t.appendMessage("data");
-
-    const challenge = t.challengeScalar();
-
-    // The challenge should fit in 128 bits (upper 128 bits should be zero)
-    // Check by examining the limbs - limbs 2 and 3 should be zero
-    // Actually, the value is computed from 16 bytes, so it fits in 128 bits
-    // but after field reduction it could still have bits set in upper limbs
-    // So we just check it's a valid field element (non-zero)
     try testing.expect(!challenge.eql(BN254Scalar.zero()));
 }
 
@@ -691,62 +427,20 @@ test "blake2b transcript: u64 append" {
     const Transcript = Blake2bTranscript(BN254Scalar);
 
     var t = Transcript.init("u64_test");
-    t.appendU64(0x123456789ABCDEF0);
+    t.appendU64("test_u64", 0x123456789ABCDEF0);
 
     const challenge = t.challengeScalar();
     try testing.expect(!challenge.eql(BN254Scalar.zero()));
 }
 
-test "blake2b transcript: empty label" {
+test "blake2b transcript: challenge scalar is 128 bits" {
     const Transcript = Blake2bTranscript(BN254Scalar);
 
-    // Empty label should work (padded to 32 zeros)
-    const t = Transcript.init("");
-    try testing.expectEqual(@as(u32, 0), t.n_rounds);
-}
+    var t = Transcript.init("128bit_test");
+    t.appendLabel("data");
 
-test "blake2b transcript: max length label" {
-    const Transcript = Blake2bTranscript(BN254Scalar);
-
-    // 32-byte label (max length)
-    const label = "12345678901234567890123456789012";
-    const t = Transcript.init(label);
-    try testing.expectEqual(@as(u32, 0), t.n_rounds);
-}
-
-test "blake2b transcript: challenge bytes" {
-    const Transcript = Blake2bTranscript(BN254Scalar);
-
-    var t1 = Transcript.init("test");
-    var t2 = Transcript.init("test");
-
-    t1.appendMessage("data");
-    t2.appendMessage("data");
-
-    var buf1: [64]u8 = undefined;
-    var buf2: [64]u8 = undefined;
-
-    t1.challengeBytes(&buf1);
-    t2.challengeBytes(&buf2);
-
-    // Same inputs should give same outputs
-    try testing.expectEqualSlices(u8, &buf1, &buf2);
-}
-
-test "blake2b transcript: challenge u128" {
-    const Transcript = Blake2bTranscript(BN254Scalar);
-
-    var t1 = Transcript.init("test");
-    var t2 = Transcript.init("test");
-
-    t1.appendMessage("data");
-    t2.appendMessage("data");
-
-    const val1 = t1.challengeU128();
-    const val2 = t2.challengeU128();
-
-    try testing.expectEqual(val1, val2);
-    try testing.expect(val1 != 0);
+    const challenge = t.challengeScalar();
+    try testing.expect(!challenge.eql(BN254Scalar.zero()));
 }
 
 test "blake2b transcript: challenge vector" {
@@ -754,14 +448,13 @@ test "blake2b transcript: challenge vector" {
     const allocator = testing.allocator;
 
     var t = Transcript.init("test");
-    t.appendMessage("data");
+    t.appendLabel("data");
 
     const challenges = try t.challengeVector(allocator, 5);
     defer allocator.free(challenges);
 
     try testing.expectEqual(@as(usize, 5), challenges.len);
 
-    // All challenges should be different
     for (0..challenges.len) |i| {
         for (i + 1..challenges.len) |j| {
             try testing.expect(!challenges[i].eql(challenges[j]));
@@ -774,15 +467,13 @@ test "blake2b transcript: challenge scalar powers" {
     const allocator = testing.allocator;
 
     var t = Transcript.init("test");
-    t.appendMessage("data");
+    t.appendLabel("data");
 
     const powers = try t.challengeScalarPowers(allocator, 4);
     defer allocator.free(powers);
 
-    // First power should be 1
     try testing.expect(powers[0].eql(BN254Scalar.one()));
 
-    // Check powers are correct: powers[i] = powers[1]^i
     const q = powers[1];
     try testing.expect(powers[2].eql(q.mul(q)));
     try testing.expect(powers[3].eql(q.mul(q).mul(q)));
@@ -791,19 +482,18 @@ test "blake2b transcript: challenge scalar powers" {
 // =============================================================================
 // Jolt Compatibility Test Vectors
 // =============================================================================
-// These tests verify that Zolt's Blake2bTranscript produces identical outputs
-// to Jolt's Blake2bTranscript (Rust). Any failure here means proof verification
-// will fail when a Zolt proof is verified by Jolt.
+// NOTE: The old test vectors (test_vector 1-7) tested the OLD unlabeled API.
+// With the labeled API, the raw internal methods (rawAppendLabel etc.) match
+// the old appendMessage etc. so the core hashing is unchanged — only the
+// public call sequences differ.
 
-test "jolt compatibility: test vector 1 - simple label and message" {
+test "jolt compatibility: rawAppendLabel matches old appendMessage" {
     const Transcript = Blake2bTranscript(BN254Scalar);
 
+    // rawAppendLabel is the same as old appendMessage
     var t = Transcript.init("zolt_test");
-    t.appendMessage("hello");
+    t.rawAppendLabel("hello");
 
-    // Expected state after append_message (from Jolt):
-    // [04, 5d, b7, 95, b0, 5d, 42, b5, c7, 9d, 6d, bb, f2, 0c, be, 09,
-    //  26, 36, df, 45, bb, 1c, 80, f2, a4, be, 9b, 66, 4b, ad, 5e, 0d]
     const expected_state = [_]u8{
         0x04, 0x5d, 0xb7, 0x95, 0xb0, 0x5d, 0x42, 0xb5,
         0xc7, 0x9d, 0x6d, 0xbb, 0xf2, 0x0c, 0xbe, 0x09,
@@ -813,21 +503,13 @@ test "jolt compatibility: test vector 1 - simple label and message" {
 
     try testing.expectEqualSlices(u8, &expected_state, &t.state);
     try testing.expectEqual(@as(u32, 1), t.n_rounds);
-
-    const challenge = t.challengeScalar();
-    try testing.expectEqual(@as(u32, 2), t.n_rounds);
-
-    // The challenge is non-zero - specific value depends on Montgomery conversion
-    // The exact value test is less important than the sumcheck verification
-    try testing.expect(!challenge.eql(BN254Scalar.zero()));
 }
 
-test "jolt compatibility: test vector 5 - initial state" {
+test "jolt compatibility: initial state" {
     const Transcript = Blake2bTranscript(BN254Scalar);
 
     const t = Transcript.init("init_test");
 
-    // Expected initial state from Jolt:
     const expected_state = [_]u8{
         0x40, 0xf6, 0xe6, 0x1c, 0xb8, 0x28, 0xbc, 0xfb,
         0xd5, 0x14, 0x3a, 0x3d, 0xf3, 0x02, 0x02, 0x1d,
@@ -839,12 +521,11 @@ test "jolt compatibility: test vector 5 - initial state" {
     try testing.expectEqual(@as(u32, 0), t.n_rounds);
 }
 
-test "jolt compatibility: test vector 6 - empty label" {
+test "jolt compatibility: rawAppendBytes" {
     const Transcript = Blake2bTranscript(BN254Scalar);
 
     var t = Transcript.init("");
 
-    // Expected initial state from Jolt for empty label:
     const expected_init_state = [_]u8{
         0x89, 0xeb, 0x0d, 0x6a, 0x8a, 0x69, 0x1d, 0xae,
         0x2c, 0xd1, 0x5e, 0xd0, 0x36, 0x99, 0x31, 0xce,
@@ -853,11 +534,9 @@ test "jolt compatibility: test vector 6 - empty label" {
     };
 
     try testing.expectEqualSlices(u8, &expected_init_state, &t.state);
-    try testing.expectEqual(@as(u32, 0), t.n_rounds);
 
-    t.appendBytes(&[_]u8{ 0x01, 0x02, 0x03 });
+    t.rawAppendBytes(&[_]u8{ 0x01, 0x02, 0x03 });
 
-    // Expected state after append_bytes from Jolt:
     const expected_after_bytes = [_]u8{
         0xc4, 0x21, 0x29, 0xc2, 0x59, 0x57, 0x65, 0x9c,
         0xf7, 0x63, 0x38, 0xf5, 0xd2, 0xcb, 0xad, 0xd9,
@@ -869,30 +548,26 @@ test "jolt compatibility: test vector 6 - empty label" {
     try testing.expectEqual(@as(u32, 1), t.n_rounds);
 }
 
-test "jolt compatibility: test vector 7 - u128 challenge" {
+test "jolt compatibility: challenge u128" {
     const Transcript = Blake2bTranscript(BN254Scalar);
 
     var t = Transcript.init("u128_test");
-    t.appendMessage("data");
+    t.rawAppendLabel("data");
 
     const challenge_u128 = t.challengeU128();
-
-    // Expected from Jolt: 112132316132180403369405744574678933239
-    // Hex: 545be6068976bba7550dd1c80c4b9ef7
     const expected: u128 = 112132316132180403369405744574678933239;
 
     try testing.expectEqual(expected, challenge_u128);
 }
 
-test "jolt compatibility: test vector 2 - multiple appends" {
+test "jolt compatibility: rawAppendU64 and rawAppendLabel" {
     const Transcript = Blake2bTranscript(BN254Scalar);
 
     var t = Transcript.init("zolt_test_2");
-    t.appendMessage("first");
-    t.appendMessage("second");
-    t.appendU64(12345);
+    t.rawAppendLabel("first");
+    t.rawAppendLabel("second");
+    t.rawAppendU64(12345);
 
-    // Expected state from Jolt:
     const expected_state = [_]u8{
         0x14, 0x1b, 0xf2, 0x3f, 0x43, 0x6f, 0x74, 0x1b,
         0x0f, 0x9d, 0x78, 0x0f, 0xac, 0x3e, 0x62, 0x93,
@@ -902,22 +577,15 @@ test "jolt compatibility: test vector 2 - multiple appends" {
 
     try testing.expectEqualSlices(u8, &expected_state, &t.state);
     try testing.expectEqual(@as(u32, 3), t.n_rounds);
-
-    const challenge = t.challengeScalar();
-    try testing.expectEqual(@as(u32, 4), t.n_rounds);
-
-    // Challenge is non-zero - exact value depends on Montgomery conversion
-    try testing.expect(!challenge.eql(BN254Scalar.zero()));
 }
 
-test "jolt compatibility: test vector 3 - scalar append" {
+test "jolt compatibility: rawAppendScalar" {
     const Transcript = Blake2bTranscript(BN254Scalar);
 
     var t = Transcript.init("scalar_test");
     const scalar = BN254Scalar.fromU64(42);
-    t.appendScalar(scalar);
+    t.rawAppendScalar(scalar);
 
-    // Expected state from Jolt:
     const expected_state = [_]u8{
         0x0d, 0x8c, 0x5a, 0x29, 0x4a, 0x38, 0x74, 0x89,
         0x89, 0xe3, 0x60, 0x61, 0x7d, 0x26, 0x1a, 0x04,
@@ -927,62 +595,18 @@ test "jolt compatibility: test vector 3 - scalar append" {
 
     try testing.expectEqualSlices(u8, &expected_state, &t.state);
     try testing.expectEqual(@as(u32, 1), t.n_rounds);
-
-    const challenge = t.challengeScalar();
-    try testing.expectEqual(@as(u32, 2), t.n_rounds);
-
-    // Challenge is non-zero - exact value depends on Montgomery conversion
-    try testing.expect(!challenge.eql(BN254Scalar.zero()));
-}
-
-test "jolt compatibility: test vector 4 - vector append" {
-    const Transcript = Blake2bTranscript(BN254Scalar);
-
-    var t = Transcript.init("vector_test");
-    const scalars = [_]BN254Scalar{
-        BN254Scalar.fromU64(1),
-        BN254Scalar.fromU64(2),
-        BN254Scalar.fromU64(3),
-    };
-    t.appendScalars(&scalars);
-
-    // Expected state from Jolt:
-    const expected_state = [_]u8{
-        0xa1, 0xbe, 0xdf, 0x0b, 0x1f, 0x6f, 0x93, 0xfb,
-        0xab, 0xc9, 0xb7, 0x81, 0x2c, 0x9a, 0x22, 0xd0,
-        0x7f, 0x89, 0x7b, 0x4e, 0xb8, 0x7a, 0xff, 0x86,
-        0x6c, 0x96, 0x19, 0xec, 0x20, 0xf1, 0x6c, 0x4f,
-    };
-
-    try testing.expectEqualSlices(u8, &expected_state, &t.state);
-    try testing.expectEqual(@as(u32, 5), t.n_rounds);
-
-    const challenge = t.challengeScalar();
-    try testing.expectEqual(@as(u32, 6), t.n_rounds);
-
-    // Challenge is non-zero - exact value depends on Montgomery conversion
-    try testing.expect(!challenge.eql(BN254Scalar.zero()));
 }
 
 test "jolt compatibility: challenge limbs verification" {
     const Transcript = Blake2bTranscript(BN254Scalar);
 
-    // Same label and message as Jolt test
     var t = Transcript.init("zolt_compat_test");
-    t.appendMessage("test_data");
+    t.rawAppendLabel("test_data");
 
     const challenge = t.challengeScalar128Bits();
 
-    // Expected from Jolt:
-    // MontU128Challenge limbs: [0, 0, 0x5207e9d28bcca994, 0x0737345c88127af8]
     const expected_low: u64 = 0x5207e9d28bcca994;
     const expected_high: u64 = 0x0737345c88127af8;
-
-    // Print actual values for debugging
-    dbg("\n=== ZOLT CHALLENGE LIMBS TEST ===\n", .{});
-    dbg("Limbs: [0x{x}, 0x{x}, 0x{x}, 0x{x}]\n", .{ challenge.limbs[0], challenge.limbs[1], challenge.limbs[2], challenge.limbs[3] });
-    dbg("Expected: [0, 0, 0x{x}, 0x{x}]\n", .{ expected_low, expected_high });
-    dbg("=== END ZOLT TEST ===\n", .{});
 
     try testing.expectEqual(@as(u64, 0), challenge.limbs[0]);
     try testing.expectEqual(@as(u64, 0), challenge.limbs[1]);

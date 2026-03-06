@@ -1054,6 +1054,13 @@ pub const BytecodePreprocessing = struct {
             offset += instr_size;
         }
 
+        // Build the PC map BEFORE adding termination entries.
+        // This ensures termination_base_pc = last_real_instruction_pc + 1,
+        // which matches the array index where termination entries will be appended.
+        // If we build AFTER, the JAL (address=4) would be counted as a real
+        // instruction, making termination_base_pc off by 1.
+        try self.pc_map.build(self.bytecode.items);
+
         // Add termination sequence (LUI + ADDI + SB + JAL) = 4 entries.
         // These must be in the bytecode array BEFORE power-of-2 padding so that
         // code_size accounts for them. This matches computeBytecodeCodeSize which
@@ -1142,9 +1149,6 @@ pub const BytecodePreprocessing = struct {
         if (size < 2) size = 2;
         size = std.math.ceilPowerOfTwo(usize, size) catch size;
         self.code_size = size;
-
-        // Build the PC map BEFORE padding (so padding NoOps don't get mapped)
-        try self.pc_map.build(self.bytecode.items);
 
         // Pad with NoOps
         while (self.bytecode.items.len < size) {
@@ -1299,8 +1303,8 @@ pub fn serializeMemoryLayout(layout: *const MemoryLayout, writer: anytype) !void
     try writer.writeInt(u64, layout.output_end, .little);
     try writer.writeInt(u64, layout.stack_size, .little);
     try writer.writeInt(u64, layout.stack_end, .little);
-    try writer.writeInt(u64, layout.memory_size, .little);
-    try writer.writeInt(u64, layout.memory_end, .little);
+    try writer.writeInt(u64, layout.heap_size, .little);
+    try writer.writeInt(u64, layout.heap_end, .little);
     try writer.writeInt(u64, layout.panic, .little);
     try writer.writeInt(u64, layout.termination, .little);
     try writer.writeInt(u64, layout.io_end, .little);

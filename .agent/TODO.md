@@ -41,11 +41,11 @@
 ### Must Do
 - [ ] Test full end-to-end verification (prove fibonacci → verify with jolt-verifier)
 - [ ] Debug any remaining verification failures
+- [ ] Test all 8 programs against upstream verifier
 - [ ] Clean up debug_verbose flags and diagnostic prints in stage5/6 provers
 
 ### Nice to Have
 - [ ] Remove the jolt/ fork directory (replace fully with jolt-verifier/)
-- [ ] Test all 8 programs against upstream verifier
 
 ## BUILD & TEST COMMANDS
 ```bash

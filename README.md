@@ -1,6 +1,6 @@
 # Zolt
 
-A Zig zkVM prover that generates proofs verifiable by the unmodified upstream [a16z/jolt](https://github.com/a16z/jolt) verifier — no patched fork needed.
+A Zig zkVM prover that generates proofs verifiable by the unmodified upstream [a16z/jolt](https://github.com/a16z/jolt) verifier — no patched fork needed. Zero dependencies, zero FFI — all cryptography (field arithmetic, pairings, MSM, polynomial commitments) is implemented from scratch using only the Zig standard library.
 
 > This project is 100% AI generated with the [ralph method](https://ghuntley.com/ralph/)
 

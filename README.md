@@ -292,6 +292,42 @@ Key optimizations implemented:
 - **Parallel MSM**: Multi-threaded execution for large inputs
 - **Optimized Squaring**: Karatsuba-like technique saves ~25% multiplications
 
+## Upstream Jolt Compatibility
+
+Zolt generates proofs that are verified by the **unmodified upstream [a16z/jolt](https://github.com/a16z/jolt) verifier** — no patched fork needed.
+
+### Pinned Version
+
+The `jolt-verifier/` crate is pinned to upstream commit [`2e05fe88`](https://github.com/a16z/jolt/commit/2e05fe88) (March 2026). This is the version all 8 test programs are verified against. Updating to a newer upstream commit may require adjustments if the verification protocol changes.
+
+### Verifying Proofs
+
+```bash
+# Build Zolt
+zig build -Doptimize=ReleaseFast
+
+# Prove a program
+./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o /tmp/proof.bin --export-preprocessing /tmp/preproc.bin
+
+# Verify with upstream jolt-verifier
+cargo run --release --manifest-path jolt-verifier/Cargo.toml -- --proof /tmp/proof.bin --preprocessing /tmp/preproc.bin
+```
+
+### Verified Programs
+
+All 8 example programs produce valid proofs verified by the upstream verifier:
+
+| Program | Status |
+|---------|--------|
+| fibonacci | Verified |
+| factorial | Verified |
+| bitwise | Verified |
+| collatz | Verified |
+| primes | Verified |
+| sum | Verified |
+| gcd | Verified |
+| signed | Verified |
+
 ## Differences from Rust Jolt
 
 1. **Memory Management**: Explicit allocators instead of Rust's ownership

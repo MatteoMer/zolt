@@ -217,15 +217,15 @@ pub const Fp2 = struct {
     }
 
     pub fn mul(self: Fp2, other: Fp2) Fp2 {
-        // (a + bu)(c + du) = (ac - bd) + (ad + bc)u
+        // Karatsuba: (a + bu)(c + du) = (ac - bd) + ((a+b)(c+d) - ac - bd)u
+        // 3 Fp muls instead of 4
         const ac = self.c0.mul(other.c0);
         const bd = self.c1.mul(other.c1);
-        const ad = self.c0.mul(other.c1);
-        const bc = self.c1.mul(other.c0);
+        const ab_cd = self.c0.add(self.c1).mul(other.c0.add(other.c1));
 
         return .{
             .c0 = ac.sub(bd),
-            .c1 = ad.add(bc),
+            .c1 = ab_cd.sub(ac).sub(bd),
         };
     }
 
@@ -881,31 +881,32 @@ pub const G2Point = struct {
         return .{ .x = x3, .y = y3, .infinity = false };
     }
 
-    /// Scalar multiplication using double-and-add
-    /// Computes [scalar] * self
-    /// Processes bits from most significant to least significant
+    /// Scalar multiplication using double-and-add in Jacobian projective coordinates.
+    /// Only one Fp2 inversion at the final toAffine().
     pub fn scalarMul(self: G2Point, scalar: BN254Scalar) G2Point {
         if (self.isIdentity()) return G2Point.identity();
         if (scalar.isZero()) return G2Point.identity();
 
-        var result = G2Point.identity();
+        const normal_scalar = scalar.fromMontgomery();
+        return self.scalarMulWithLimbs(normal_scalar.limbs);
+    }
+
+    /// Scalar multiplication returning Jacobian projective result (no final inversion).
+    /// Use when accumulating multiple results in projective before a single toAffine().
+    pub fn scalarMulWithLimbsProjective(self: G2Point, normal_limbs: [4]u64) G2Projective {
+        if (self.isIdentity()) return G2Projective.identity();
+
+        var result = G2Projective.identity();
         var started = false;
 
-        // Convert scalar from Montgomery form to get actual value
-        const normal_scalar = scalar.fromMontgomery();
-
-        // Process each limb of the scalar from most significant to least significant
-        // limbs[3] is most significant, limbs[0] is least significant
         var limb_idx: usize = 4;
         while (limb_idx > 0) {
             limb_idx -= 1;
-            const limb = normal_scalar.limbs[limb_idx];
+            const limb = normal_limbs[limb_idx];
 
-            // Process bits from most significant to least significant
             var bit_idx: u7 = 64;
             while (bit_idx > 0) {
                 bit_idx -= 1;
-                // Always double (unless we haven't started yet)
                 if (started) {
                     result = result.double();
                 }
@@ -913,10 +914,10 @@ pub const G2Point = struct {
                 const bit = (limb >> @as(u6, @intCast(bit_idx))) & 1;
                 if (bit == 1) {
                     if (!started) {
-                        result = self;
+                        result = G2Projective.fromAffine(self);
                         started = true;
                     } else {
-                        result = result.add(self);
+                        result = result.addAffine(self);
                     }
                 }
             }
@@ -925,9 +926,145 @@ pub const G2Point = struct {
         return result;
     }
 
+    /// Scalar multiplication using pre-converted (non-Montgomery) limbs
+    pub fn scalarMulWithLimbs(self: G2Point, normal_limbs: [4]u64) G2Point {
+        return self.scalarMulWithLimbsProjective(normal_limbs).toAffine();
+    }
+
     /// Scalar multiplication with a u64 scalar (convenience method)
     pub fn scalarMulU64(self: G2Point, scalar: u64) G2Point {
         return self.scalarMul(BN254Scalar.fromU64(scalar));
+    }
+};
+
+// ============================================================================
+// G2 Jacobian Projective (for scalar multiplication)
+// ============================================================================
+
+/// G2 point in Jacobian projective coordinates (X, Y, Z) where affine = (X/Z², Y/Z³)
+/// Eliminates intermediate Fp2 inversions during scalar multiplication.
+pub const G2Projective = struct {
+    x: Fp2,
+    y: Fp2,
+    z: Fp2,
+
+    pub fn identity() G2Projective {
+        return .{
+            .x = Fp2.one(),
+            .y = Fp2.one(),
+            .z = Fp2.zero(),
+        };
+    }
+
+    pub fn fromAffine(p: G2Point) G2Projective {
+        if (p.infinity) return identity();
+        return .{ .x = p.x, .y = p.y, .z = Fp2.one() };
+    }
+
+    pub fn isIdentity(self: G2Projective) bool {
+        return self.z.isZero();
+    }
+
+    pub fn toAffine(self: G2Projective) G2Point {
+        if (self.z.isZero()) return G2Point.identity();
+
+        const z_inv = self.z.inverse() orelse return G2Point.identity();
+        const z_inv_sq = z_inv.square();
+        const z_inv_cube = z_inv_sq.mul(z_inv);
+
+        return .{
+            .x = self.x.mul(z_inv_sq),
+            .y = self.y.mul(z_inv_cube),
+            .infinity = false,
+        };
+    }
+
+    /// Jacobian doubling for y² = x³ + b/ξ (a = 0, BN254 twist curve)
+    /// Using dbl-2009-l formulas from https://hyperelliptic.org/EFD/g1p/auto-shortw-jacobian-0.html
+    pub fn double(self: G2Projective) G2Projective {
+        if (self.z.isZero()) return self;
+
+        const A = self.x.square();
+        const B = self.y.square();
+        const C = B.square();
+        const xpb = self.x.add(B);
+        const half_D = xpb.square().sub(A).sub(C);
+        const D = half_D.add(half_D);
+        const E = A.add(A).add(A);
+        const FF = E.square();
+        const two_D = D.add(D);
+        const X3 = FF.sub(two_D);
+        const two_C = C.add(C);
+        const four_C = two_C.add(two_C);
+        const eight_C = four_C.add(four_C);
+        const Y3 = E.mul(D.sub(X3)).sub(eight_C);
+        const yz = self.y.mul(self.z);
+        const Z3 = yz.add(yz);
+
+        return .{ .x = X3, .y = Y3, .z = Z3 };
+    }
+
+    /// Mixed addition: Jacobian + affine (saves one Fp2 mul vs full Jacobian add)
+    pub fn addAffine(self: G2Projective, other: G2Point) G2Projective {
+        if (other.infinity) return self;
+        if (self.z.isZero()) return fromAffine(other);
+
+        const z1z1 = self.z.square();
+        const U2 = other.x.mul(z1z1);
+        const S2 = other.y.mul(self.z).mul(z1z1);
+        const H = U2.sub(self.x);
+        const HH = H.square();
+        const I = HH.add(HH).add(HH).add(HH);
+        const J = H.mul(I);
+        const r = S2.sub(self.y).add(S2.sub(self.y));
+        const V = self.x.mul(I);
+        const X3 = r.square().sub(J).sub(V).sub(V);
+        const Y3 = r.mul(V.sub(X3)).sub(self.y.mul(J)).sub(self.y.mul(J));
+        const Z3 = self.z.add(H).square().sub(z1z1).sub(HH);
+
+        if (H.isZero()) {
+            if (r.isZero()) {
+                return self.double();
+            } else {
+                return identity();
+            }
+        }
+
+        return .{ .x = X3, .y = Y3, .z = Z3 };
+    }
+
+    /// Full Jacobian addition
+    pub fn add(self: G2Projective, other: G2Projective) G2Projective {
+        if (self.z.isZero()) return other;
+        if (other.z.isZero()) return self;
+
+        const z1z1 = self.z.square();
+        const z2z2 = other.z.square();
+        const U1 = self.x.mul(z2z2);
+        const U2 = other.x.mul(z1z1);
+        const S1 = self.y.mul(other.z).mul(z2z2);
+        const S2 = other.y.mul(self.z).mul(z1z1);
+        const H = U2.sub(U1);
+        const r = S2.sub(S1);
+
+        if (H.isZero()) {
+            if (r.isZero()) {
+                return self.double();
+            } else {
+                return identity();
+            }
+        }
+
+        const HH = H.square();
+        const I = HH.add(HH).add(HH).add(HH);
+        const J = H.mul(I);
+        const rr = r.add(r);
+        const V = U1.mul(I);
+        const X3 = rr.square().sub(J).sub(V).sub(V);
+        const Y3 = rr.mul(V.sub(X3)).sub(S1.mul(J).add(S1.mul(J)));
+        const Z3 = self.z.add(other.z).square().sub(z1z1).sub(z2z2).mul(H);
+
+        return .{ .x = X3, .y = Y3, .z = Z3 };
     }
 };
 
@@ -1565,7 +1702,7 @@ const X_IS_NEGATIVE: bool = false;
 
 /// Miller loop using arkworks-style projective coordinates
 /// This is the correct implementation matching arkworks exactly
-fn millerLoopArkworks(p: G1PointFp, q: G2Point) Fp12 {
+pub fn millerLoopArkworks(p: G1PointFp, q: G2Point) Fp12 {
     if (p.infinity or q.infinity) {
         return Fp12.one();
     }
@@ -1657,7 +1794,7 @@ fn frobeniusG2(p: G2Point) G2Point {
 
 /// Final exponentiation: f^((p^12-1)/r)
 /// Using arkworks algorithm from bn/mod.rs
-fn finalExponentiation(f: Fp12) Fp12 {
+pub fn finalExponentiation(f: Fp12) Fp12 {
     if (f.eql(Fp12.zero())) {
         return Fp12.one();
     }

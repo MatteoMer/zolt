@@ -213,7 +213,9 @@ pub fn ProjectivePoint(comptime F: type) type {
             const two_D = D.add(D);
             const X3 = FF.sub(two_D);
             // Y3 = E*(D - X3) - 8*C  -- using D (which is 2*half_D)
-            const eight_C = C.add(C).add(C).add(C).add(C).add(C).add(C).add(C);
+            const two_C = C.add(C);
+            const four_C = two_C.add(two_C);
+            const eight_C = four_C.add(four_C);
             const Y3 = E.mul(D.sub(X3)).sub(eight_C);
             // Z3 = 2*Y*Z
             const Z3 = self.y.mul(self.z).add(self.y.mul(self.z));
@@ -381,6 +383,24 @@ pub fn MSM(comptime F: type, comptime G: type) type {
             const num_windows = (SCALAR_BITS + c - 1) / c;
             const num_buckets = (@as(usize, 1) << @as(u6, @intCast(c))) - 1; // 2^c - 1 buckets (excluding 0)
 
+            // Pre-convert all scalars from Montgomery form once
+            const stack_threshold = 256;
+            var stack_buf: [stack_threshold][4]u64 = undefined;
+            var heap_buf: ?[][4]u64 = null;
+            defer if (heap_buf) |buf| std.heap.page_allocator.free(buf);
+
+            const normal_limbs: [][4]u64 = if (scalars.len <= stack_threshold)
+                stack_buf[0..scalars.len]
+            else blk: {
+                heap_buf = std.heap.page_allocator.alloc([4]u64, scalars.len) catch
+                    return naiveMSM(bases, scalars); // fallback on OOM
+                break :blk heap_buf.?;
+            };
+
+            for (scalars, 0..) |s, i| {
+                normal_limbs[i] = s.fromMontgomery().limbs;
+            }
+
             // Accumulator for final result
             var final_result = Projective.identity();
 
@@ -403,17 +423,17 @@ pub fn MSM(comptime F: type, comptime G: type) type {
                     buckets[j] = Projective.identity();
                 }
 
-                for (bases, scalars) |base, scalar| {
+                for (bases, 0..) |base, idx| {
                     if (base.isIdentity()) continue;
 
-                    // Get the c-bit window from the scalar
-                    const bucket_idx = getWindow(scalar, window_idx, c);
+                    // Get the c-bit window from pre-converted limbs
+                    const bucket_idx = getWindowFromLimbs(normal_limbs[idx], window_idx, c);
                     if (bucket_idx == 0) continue; // Skip bucket 0
 
                     // Add point to bucket (bucket indices are 1 to 2^c - 1)
-                    const idx = bucket_idx - 1;
-                    if (idx < num_buckets) {
-                        buckets[idx] = buckets[idx].addAffine(base);
+                    const bidx = bucket_idx - 1;
+                    if (bidx < num_buckets) {
+                        buckets[bidx] = buckets[bidx].addAffine(base);
                     }
                 }
 
@@ -440,6 +460,11 @@ pub fn MSM(comptime F: type, comptime G: type) type {
         /// Get c-bit window from scalar at position window_idx
         fn getWindow(scalar: F, window_idx: usize, c: usize) usize {
             const normal_scalar = scalar.fromMontgomery();
+            return getWindowFromLimbs(normal_scalar.limbs, window_idx, c);
+        }
+
+        /// Get c-bit window from pre-converted (non-Montgomery) limbs
+        fn getWindowFromLimbs(limbs: [4]u64, window_idx: usize, c: usize) usize {
             const bit_offset = window_idx * c;
 
             // Calculate which limb(s) contain the bits
@@ -452,7 +477,7 @@ pub fn MSM(comptime F: type, comptime G: type) type {
             const mask: u64 = (@as(u64, 1) << @as(u6, @intCast(c))) - 1;
 
             // Extract bits (may need to combine from two limbs)
-            var value = (normal_scalar.limbs[limb_idx] >> bit_in_limb) & mask;
+            var value = (limbs[limb_idx] >> bit_in_limb) & mask;
 
             // If window crosses limb boundary, get bits from next limb
             const bit_in_limb_usize: usize = @as(usize, bit_in_limb);
@@ -460,7 +485,7 @@ pub fn MSM(comptime F: type, comptime G: type) type {
                 const remaining = bit_in_limb_usize + c - 64;
                 if (remaining > 0 and remaining <= 63 and bit_in_limb > 0) {
                     const remaining_bits: u6 = @intCast(remaining);
-                    const next_limb = normal_scalar.limbs[limb_idx + 1];
+                    const next_limb = limbs[limb_idx + 1];
                     const next_mask = (@as(u64, 1) << remaining_bits) - 1;
                     const shift_amount: u6 = @intCast(64 - bit_in_limb_usize);
                     value |= (next_limb & next_mask) << shift_amount;
@@ -521,6 +546,38 @@ pub fn MSM(comptime F: type, comptime G: type) type {
                 while (bit_idx > 0) {
                     bit_idx -= 1;
                     // Always double (unless we haven't started yet)
+                    if (!result.isIdentity()) {
+                        result = result.double();
+                    }
+
+                    const bit = (limb >> @as(u6, @intCast(bit_idx))) & 1;
+                    if (bit == 1) {
+                        if (result.isIdentity()) {
+                            result = Projective.fromAffine(base);
+                        } else {
+                            result = result.addAffine(base);
+                        }
+                    }
+                }
+            }
+
+            return result;
+        }
+
+        /// Scalar multiplication using pre-converted (non-Montgomery) limbs
+        pub fn scalarMulWithLimbs(base: Affine, normal_limbs: [4]u64) Projective {
+            if (base.isIdentity()) return Projective.identity();
+
+            var result = Projective.identity();
+
+            var limb_idx: usize = 4;
+            while (limb_idx > 0) {
+                limb_idx -= 1;
+                const limb = normal_limbs[limb_idx];
+
+                var bit_idx: u7 = 64;
+                while (bit_idx > 0) {
+                    bit_idx -= 1;
                     if (!result.isIdentity()) {
                         result = result.double();
                     }

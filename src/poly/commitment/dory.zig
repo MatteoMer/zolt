@@ -39,6 +39,7 @@ const Fp2 = pairing.Fp2;
 pub const GT = pairing.GT;
 pub const G1Point = msm.AffinePoint(Fp);
 pub const G2Point = pairing.G2Point;
+const G2Projective = pairing.G2Projective;
 const G1PointFp = pairing.G1PointFp;
 
 // =============================================================================
@@ -699,10 +700,11 @@ fn computeRowCommitmentsWithCols(comptime F: type, params: anytype, evals: []con
     return row_commitments;
 }
 
-/// Compute multi-pairing of G1 and G2 vectors
+/// Compute multi-pairing of G1 and G2 vectors using shared final exponentiation
 fn multiPairG1G2(g1_vec: []const G1Point, g2_vec: []const G2Point) GT {
-    var result = GT.one();
     const n = @min(g1_vec.len, g2_vec.len);
+    var miller_acc = pairing.Fp12.one();
+    var any_non_trivial = false;
 
     for (0..n) |i| {
         if (g1_vec[i].infinity or g2_vec[i].infinity) continue;
@@ -710,26 +712,28 @@ fn multiPairG1G2(g1_vec: []const G1Point, g2_vec: []const G2Point) GT {
         const g1_fp = G1PointFp{
             .x = g1_vec[i].x,
             .y = g1_vec[i].y,
-            .infinity = g1_vec[i].infinity,
+            .infinity = false,
         };
-        const paired = pairing.pairingFp(g1_fp, g2_vec[i]);
-        result = result.mul(paired);
+        const ml = pairing.millerLoopArkworks(g1_fp, g2_vec[i]);
+        miller_acc = miller_acc.mul(ml);
+        any_non_trivial = true;
     }
 
-    return result;
+    if (!any_non_trivial) return GT.one();
+    return pairing.finalExponentiation(miller_acc);
 }
 
 /// MSM for G2 points
 fn msmG2(comptime F: type, g2_vec: []const G2Point, scalars: []const F) G2Point {
     const n = @min(g2_vec.len, scalars.len);
-    var result = G2Point.identity();
+    var result = G2Projective.identity();
 
     for (0..n) |i| {
-        const scaled = g2_vec[i].scalarMul(scalars[i]);
+        const scaled = G2Projective.fromAffine(g2_vec[i].scalarMul(scalars[i]));
         result = result.add(scaled);
     }
 
-    return result;
+    return result.toAffine();
 }
 
 /// Dory structured reference string (SRS)
@@ -1058,8 +1062,9 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             const num_cols = @as(usize, 1) << @intCast(sigma);
             const num_rows = @as(usize, 1) << @intCast(nu);
 
-            // Compute row commitments
-            var row_sum = GT.one();
+            // Compute row commitments with shared final exponentiation
+            var miller_acc = pairing.Fp12.one();
+            var any_non_trivial = false;
 
             for (0..num_rows) |row| {
                 const start = row * num_cols;
@@ -1075,19 +1080,21 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                     row_evals,
                 );
 
-                // Pair with corresponding G2 generator
-                if (row < params.g2_vec.len) {
+                // Accumulate Miller loop with corresponding G2 generator
+                if (row < params.g2_vec.len and !row_commitment.infinity) {
                     const row_g1 = G1PointFp{
                         .x = row_commitment.x,
                         .y = row_commitment.y,
-                        .infinity = row_commitment.infinity,
+                        .infinity = false,
                     };
-                    const paired = pairing.pairingFp(row_g1, params.g2_vec[row]);
-                    row_sum = row_sum.mul(paired);
+                    const ml = pairing.millerLoopArkworks(row_g1, params.g2_vec[row]);
+                    miller_acc = miller_acc.mul(ml);
+                    any_non_trivial = true;
                 }
             }
 
-            return row_sum;
+            if (!any_non_trivial) return GT.one();
+            return pairing.finalExponentiation(miller_acc);
         }
 
         /// Create an opening proof using the Dory reduce-and-fold IPA
@@ -1344,14 +1351,16 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 const beta_inv = beta.inverse() orelse F.one();
 
                 // Apply first challenge: v1 += beta * g1_vec, v2 += beta_inv * g2_vec
-                // Only apply for indices within the valid range of each vector
+                // Pre-convert scalars from Montgomery form once
+                const beta_limbs = beta.fromMontgomery().limbs;
+                const beta_inv_limbs = beta_inv.fromMontgomery().limbs;
                 for (0..current_col_len) |i| {
-                    const scaled_g1 = msm.MSM(F, Fp).scalarMul(params.g1_vec[i], beta).toAffine();
+                    const scaled_g1 = msm.MSM(F, Fp).scalarMulWithLimbs(params.g1_vec[i], beta_limbs).toAffine();
                     v1_work[i] = v1_work[i].add(scaled_g1);
                 }
                 for (0..current_row_len) |i| {
-                    const scaled_g2 = params.g2_vec[i].scalarMul(beta_inv);
-                    v2_work[i] = v2_work[i].add(scaled_g2);
+                    const scaled_proj = params.g2_vec[i].scalarMulWithLimbsProjective(beta_inv_limbs);
+                    v2_work[i] = scaled_proj.addAffine(v2_work[i]).toAffine();
                 }
 
                 // Compute second reduce message
@@ -1385,17 +1394,19 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 const alpha = F.fromU64(@as(u64, round) + 100);
                 const alpha_inv = alpha.inverse() orelse F.one();
 
-                // Apply second challenge: fold vectors
+                // Apply second challenge: fold vectors (pre-convert scalars once)
+                const alpha_limbs = alpha.fromMontgomery().limbs;
+                const alpha_inv_limbs = alpha_inv.fromMontgomery().limbs;
                 // v1 = alpha * v1_l + v1_r
                 for (0..v1_half) |i| {
-                    const scaled_l = msm.MSM(F, Fp).scalarMul(v1_work[i], alpha).toAffine();
+                    const scaled_l = msm.MSM(F, Fp).scalarMulWithLimbs(v1_work[i], alpha_limbs).toAffine();
                     v1_work[i] = scaled_l.add(v1_work[i + n2]);
                 }
 
                 // v2 = alpha_inv * v2_l + v2_r
                 for (0..v2_half) |i| {
-                    const scaled_l = v2_work[i].scalarMul(alpha_inv);
-                    v2_work[i] = scaled_l.add(v2_work[i + n2]);
+                    const scaled_proj = v2_work[i].scalarMulWithLimbsProjective(alpha_inv_limbs);
+                    v2_work[i] = scaled_proj.addAffine(v2_work[i + n2]).toAffine();
                 }
 
                 // s1 = alpha * s1_l + s1_r (row dimension)
@@ -1710,13 +1721,15 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 const beta = transcript.challengeScalarFull();
                 const beta_inv = beta.inverse() orelse F.one();
 
-                // Apply first challenge
+                // Apply first challenge (pre-convert scalars from Montgomery form once)
+                const beta_limbs = beta.fromMontgomery().limbs;
+                const beta_inv_limbs = beta_inv.fromMontgomery().limbs;
                 for (0..current_len) |i| {
-                    const scaled_g1 = msm.MSM(F, Fp).scalarMul(params.g1_vec[i], beta).toAffine();
+                    const scaled_g1 = msm.MSM(F, Fp).scalarMulWithLimbs(params.g1_vec[i], beta_limbs).toAffine();
                     v1_work[i] = v1_work[i].add(scaled_g1);
 
-                    const scaled_g2 = params.g2_vec[i].scalarMul(beta_inv);
-                    v2_work[i] = v2_work[i].add(scaled_g2);
+                    const scaled_proj = params.g2_vec[i].scalarMulWithLimbsProjective(beta_inv_limbs);
+                    v2_work[i] = scaled_proj.addAffine(v2_work[i]).toAffine();
                 }
 
                 // Compute second reduce message
@@ -1748,15 +1761,17 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 const alpha = transcript.challengeScalarFull();
                 const alpha_inv = alpha.inverse() orelse F.one();
 
-                // Fold vectors
+                // Fold vectors (pre-convert scalars from Montgomery form once)
+                const alpha_limbs = alpha.fromMontgomery().limbs;
+                const alpha_inv_limbs = alpha_inv.fromMontgomery().limbs;
                 for (0..n2) |i| {
-                    const scaled_l = msm.MSM(F, Fp).scalarMul(v1_work[i], alpha).toAffine();
+                    const scaled_l = msm.MSM(F, Fp).scalarMulWithLimbs(v1_work[i], alpha_limbs).toAffine();
                     v1_work[i] = scaled_l.add(v1_work[i + n2]);
                 }
 
                 for (0..n2) |i| {
-                    const scaled_l = v2_work[i].scalarMul(alpha_inv);
-                    v2_work[i] = scaled_l.add(v2_work[i + n2]);
+                    const scaled_proj = v2_work[i].scalarMulWithLimbsProjective(alpha_inv_limbs);
+                    v2_work[i] = scaled_proj.addAffine(v2_work[i + n2]).toAffine();
                 }
 
                 for (0..n2) |i| {

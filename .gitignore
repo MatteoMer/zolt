@@ -1,5 +1,9 @@
 .zig-cache/
 zig-out/
 *.o
+*.a
 arkworks/
-scripts/
+node_modules/
+.smithers/
+.DS_Store
+jolt/

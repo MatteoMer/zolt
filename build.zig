@@ -60,19 +60,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_lib_unit_tests.step);
     test_step.dependOn(&run_exe_unit_tests.step);
 
-    // Benchmark step
-    const bench_exe = b.addExecutable(.{
-        .name = "zolt-bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/bench.zig"),
-            .target = target,
-            .optimize = .ReleaseFast,
-        }),
-    });
-    const run_bench = b.addRunArtifact(bench_exe);
-    const bench_step = b.step("bench", "Run benchmarks");
-    bench_step.dependOn(&run_bench.step);
-
     // Example: Field Arithmetic
     const field_example = b.addExecutable(.{
         .name = "example-field",

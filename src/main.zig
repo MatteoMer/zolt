@@ -1,7 +1,7 @@
 //! Zolt CLI - A Zig port of the Jolt zkVM
 //!
 //! This executable provides command-line tools for:
-//! - Proving and verifying RISC-V programs
+//! - Proving RISC-V programs (Jolt-compatible proofs with Dory commitments)
 //! - Running the RISC-V emulator
 
 const std = @import("std");
@@ -13,7 +13,6 @@ const Command = enum {
     version,
     run,
     prove,
-    verify,
     unknown,
 };
 
@@ -29,12 +28,10 @@ fn printHelp() void {
         \\    help                Show this help message
         \\    version             Show version information
         \\    prove [opts] <elf>  Generate ZK proof for ELF binary
-        \\    verify <proof>      Verify a proof file
         \\    run [opts] <elf>    Run RISC-V ELF binary in the emulator
         \\
         \\EXAMPLES:
         \\    zolt prove -o proof.bin program.elf         # Generate and save a proof
-        \\    zolt verify proof.bin                       # Verify a saved proof
         \\    zolt run program.elf                        # Execute a RISC-V binary
         \\    zolt run --trace program.elf                # Show execution trace
         \\
@@ -57,8 +54,6 @@ fn parseCommand(arg: []const u8) Command {
         return .run;
     } else if (std.mem.eql(u8, arg, "prove")) {
         return .prove;
-    } else if (std.mem.eql(u8, arg, "verify")) {
-        return .verify;
     }
     return .unknown;
 }
@@ -294,38 +289,15 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, output_path: []
         std.debug.print("  Input bytes: {} bytes\n", .{inputs.len});
     }
 
-    // Step 1: Preprocess to get proving/verifying keys
-    std.debug.print("\n[1/4] Preprocessing...\n", .{});
     var timer = std.time.Timer.start() catch return;
 
-    var preprocessor = zolt.host.Preprocessing(BN254Scalar).init(allocator);
-    preprocessor.setMaxTraceLength(trace_length);
-
-    var keys = try preprocessor.preprocess(&program);
-    defer keys.pk.deinit();
-    defer keys.vk.deinit();
-
-    const preprocess_time = timer.read();
-    std.debug.print("  SRS degree: {}\n", .{keys.pk.srs.max_degree});
-    std.debug.print("  Max trace length: {}\n", .{keys.pk.max_trace_length});
-    std.debug.print("  Time: {d:.2} ms\n", .{@as(f64, @floatFromInt(preprocess_time)) / 1_000_000.0});
-
-    // Step 2: Create prover with proving key
-    std.debug.print("\n[2/4] Initializing prover...\n", .{});
-    timer.reset();
+    // Initialize prover
+    std.debug.print("\n[1/2] Initializing prover...\n", .{});
 
     var prover_inst = zolt.zkvm.JoltProver(BN254Scalar).init(allocator);
-    const zkvm_pk = zolt.zkvm.ProvingKey.fromSRS(keys.pk.srs);
-    prover_inst.setProvingKey(zkvm_pk);
 
-    const init_time = timer.read();
-    std.debug.print("  Prover initialized with proving key\n", .{});
-    std.debug.print("  Time: {d:.2} ms\n", .{@as(f64, @floatFromInt(init_time)) / 1_000_000.0});
-
-    // Step 3: Generate Jolt-compatible proof with Dory commitments
-    std.debug.print("\n[3/4] Generating proof...\n", .{});
-    std.debug.print("  Running 6-stage multi-sumcheck protocol\n", .{});
-    std.debug.print("  Components: HyperKZG, Lasso lookups, 24 tables\n", .{});
+    // Generate Jolt-compatible proof with Dory commitments
+    std.debug.print("\n[2/2] Generating proof...\n", .{});
     timer.reset();
 
     std.debug.print("  Generating Jolt-compatible proof with Dory commitments...\n", .{});
@@ -415,7 +387,7 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, output_path: []
             .bytecode = bytecode_prep,
             .ram = ram_prep,
             .memory_layout = device.memory_layout,
-            .max_padded_trace_length = keys.pk.max_trace_length,
+            .max_padded_trace_length = trace_length,
         };
         defer shared_prep.deinit();
 
@@ -524,86 +496,6 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, output_path: []
     std.debug.print("\nTotal time: {d:.2} ms\n", .{@as(f64, @floatFromInt(total_time)) / 1_000_000.0});
 }
 
-fn runVerifier(allocator: std.mem.Allocator, proof_path: []const u8) !void {
-    std.debug.print("Zolt zkVM Verifier\n", .{});
-    std.debug.print("==================\n\n", .{});
-
-    // Load the proof file
-    std.debug.print("Loading proof: {s}\n", .{proof_path});
-    var timer = std.time.Timer.start() catch return;
-
-    // Detect format first
-    const file = std.fs.cwd().openFile(proof_path, .{}) catch |err| {
-        std.debug.print("  Error opening proof file: {}\n", .{err});
-        return err;
-    };
-    var header_buf: [64]u8 = undefined;
-    const bytes_read = file.readAll(&header_buf) catch |err| {
-        std.debug.print("  Error reading proof file: {}\n", .{err});
-        file.close();
-        return err;
-    };
-    file.close();
-
-    const format = zolt.zkvm.detectProofFormat(header_buf[0..bytes_read]);
-    std.debug.print("  Format: {s}\n", .{format.toString()});
-
-    // Load the full file for auto-detection
-    const proof_file = std.fs.cwd().openFile(proof_path, .{}) catch |err| {
-        std.debug.print("  Error opening proof file: {}\n", .{err});
-        return err;
-    };
-    defer proof_file.close();
-    const stat = try proof_file.stat();
-    const data = try allocator.alloc(u8, stat.size);
-    defer allocator.free(data);
-    _ = try proof_file.readAll(data);
-
-    var proof = zolt.zkvm.readProofAutoDetectFull(BN254Scalar, allocator, data) catch |err| {
-        std.debug.print("  Error loading proof: {}\n", .{err});
-        return err;
-    };
-    defer proof.deinit();
-
-    const load_time = timer.read();
-    std.debug.print("  Proof loaded successfully!\n", .{});
-    std.debug.print("  Load time: {d:.2} ms\n", .{@as(f64, @floatFromInt(load_time)) / 1_000_000.0});
-
-    // Display proof info
-    std.debug.print("\nProof Information:\n", .{});
-    std.debug.print("  Bytecode commitment: {s}\n", .{if (!proof.bytecode_proof.commitment.isZero()) "present" else "none"});
-    std.debug.print("  Memory commitment: {s}\n", .{if (!proof.memory_proof.commitment.isZero()) "present" else "none"});
-    std.debug.print("  Register commitment: {s}\n", .{if (!proof.register_proof.commitment.isZero()) "present" else "none"});
-    std.debug.print("  Stage proofs: {s}\n", .{if (proof.stage_proofs != null) "present" else "none"});
-
-    if (proof.stage_proofs) |stage_proofs| {
-        const size = stage_proofs.proofSize();
-        std.debug.print("  Total field elements: {}\n", .{size.total_elements});
-        std.debug.print("  Round polynomials: {}\n", .{size.round_polys});
-        std.debug.print("  log_t: {}, log_k: {}\n", .{ stage_proofs.log_t, stage_proofs.log_k });
-    }
-
-    // Verify the proof
-    std.debug.print("\nVerifying proof...\n", .{});
-    timer.reset();
-
-    var verifier = zolt.zkvm.JoltVerifier(BN254Scalar).init(allocator);
-    verifier.setVerifyingKey(zolt.zkvm.VerifyingKey.init());
-
-    const verify_result = verifier.verify(&proof, &[_]u8{}) catch |err| {
-        std.debug.print("  Error during verification: {}\n", .{err});
-        return err;
-    };
-
-    const verify_time = timer.read();
-    std.debug.print("\n==================\n", .{});
-    if (verify_result) {
-        std.debug.print("Result: PASSED\n", .{});
-    } else {
-        std.debug.print("Result: FAILED\n", .{});
-    }
-    std.debug.print("Verification time: {d:.2} ms\n", .{@as(f64, @floatFromInt(verify_time)) / 1_000_000.0});
-}
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -814,26 +706,6 @@ pub fn main() !void {
                 std.debug.print("Usage: zolt prove -o <output> [options] <elf_file>\n", .{});
             }
         },
-        .verify => {
-            if (args.next()) |arg| {
-                if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-                    std.debug.print("Usage: zolt verify <proof_file>\n\n", .{});
-                    std.debug.print("Verify a Zolt proof file.\n", .{});
-                    std.debug.print("The proof file should be created with 'zolt prove -o <file>'.\n\n", .{});
-                    std.debug.print("Example:\n", .{});
-                    std.debug.print("  zolt prove -o proof.bin program.elf\n", .{});
-                    std.debug.print("  zolt verify proof.bin\n", .{});
-                } else {
-                    runVerifier(allocator, arg) catch |err| {
-                        std.debug.print("Failed to verify proof: {s}\n", .{@errorName(err)});
-                        std.process.exit(1);
-                    };
-                }
-            } else {
-                std.debug.print("Error: verify command requires a proof file path\n", .{});
-                std.debug.print("Usage: zolt verify <proof_file>\n", .{});
-            }
-        },
         .unknown => {
             std.debug.print("Unknown command: {s}\n\n", .{cmd_arg});
             printHelp();
@@ -854,7 +726,6 @@ test "command parsing" {
     try std.testing.expect(parseCommand("-v") == .version);
     try std.testing.expect(parseCommand("run") == .run);
     try std.testing.expect(parseCommand("prove") == .prove);
-    try std.testing.expect(parseCommand("verify") == .verify);
     try std.testing.expect(parseCommand("unknown_cmd") == .unknown);
 }
 

@@ -299,30 +299,31 @@ pub fn HyperKZG(comptime F: type) type {
             @memcpy(current, evals);
             defer allocator.free(current);
 
-            // Fold the polynomial variable by variable
+            // Fold the polynomial variable by variable, from the last variable
+            // (MSB, which controls the high/low half split) to the first (LSB).
+            // This matches the evaluation ordering where point[0] is the LSB.
             for (0..num_vars) |i| {
+                const var_idx = num_vars - 1 - i;
                 const half = current.len / 2;
                 if (half == 0) break;
 
                 // Compute quotient polynomial: q(X) = (f_high - f_low) / (X - 0)
-                // The quotient for the i-th variable at point[i]
                 const quotient = try allocator.alloc(F, half);
                 defer allocator.free(quotient);
 
                 for (0..half) |j| {
-                    // q[j] = (current[j + half] - current[j]) for the linear case
                     quotient[j] = current[j + half].sub(current[j]);
                 }
 
                 // Commit to quotient polynomial
                 quotients[i] = commit(params, quotient);
 
-                // Fold: new[j] = (1 - point[i]) * low[j] + point[i] * high[j]
+                // Fold: new[j] = (1 - point[var_idx]) * low[j] + point[var_idx] * high[j]
                 const new_evals = try allocator.alloc(F, half);
-                const one_minus_r = F.one().sub(point[i]);
+                const one_minus_r = F.one().sub(point[var_idx]);
                 for (0..half) |j| {
                     const low = current[j].mul(one_minus_r);
-                    const high = current[j + half].mul(point[i]);
+                    const high = current[j + half].mul(point[var_idx]);
                     new_evals[j] = low.add(high);
                 }
 

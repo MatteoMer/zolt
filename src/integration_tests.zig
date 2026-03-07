@@ -310,39 +310,6 @@ test "e2e: simple addi program execution trace" {
     try testing.expect(emu.trace.len() > 0);
 }
 
-test "e2e: preprocessing generates usable keys" {
-    const allocator = testing.allocator;
-
-    // Simple program
-    const bytecode = [_]u8{
-        0x93, 0x00, 0xa0, 0x02, // addi x1, x0, 42
-    };
-
-    var config = common.MemoryConfig{
-        .program_size = bytecode.len,
-    };
-
-    const program = host.Program{
-        .bytecode = &bytecode,
-        .entry_point = common.constants.RAM_START_ADDRESS,
-        .base_address = common.constants.RAM_START_ADDRESS,
-        .memory_layout = common.MemoryLayout.init(&config),
-        .allocator = allocator,
-    };
-
-    // Run preprocessing with small trace length
-    var preprocessor = host.Preprocessing(BN254Scalar).init(allocator);
-    preprocessor.setMaxTraceLength(64);
-
-    var keys = try preprocessor.preprocess(&program);
-    defer keys.pk.deinit();
-    defer keys.vk.deinit();
-
-    // Verify keys are properly initialized
-    try testing.expect(keys.pk.srs.max_degree > 0);
-    try testing.expectEqual(@as(usize, 64), keys.pk.max_trace_length);
-    try testing.expectEqual(@as(usize, 4), keys.vk.shared.bytecode_size);
-}
 
 test "e2e: multi-instruction program emulation" {
     // Tests emulator with arithmetic and add instructions

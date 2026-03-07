@@ -750,7 +750,7 @@ pub fn JoltProof(comptime F: type, comptime Commitment: type, comptime Proof: ty
         one_hot_config: OneHotConfig,
         dory_layout: u8,
 
-        /// Legacy fields for compatibility (used by proof_converter)
+        /// Legacy fields for compatibility (used by jolt_prover)
         log_k_chunk: usize,
         lookups_ra_virtual_log_k_chunk: usize,
 
@@ -854,7 +854,7 @@ pub fn JoltProofWithDory(comptime F: type, comptime Commitment: type, comptime P
 
         /// Stage 8 opening point: [r_address_stage7 || r_cycle_stage6] in BE
         /// This is the unified evaluation point for all committed polynomials.
-        /// Set by convertWithTranscript, used for generating the opening proof.
+        /// Set by proveWithTranscript, used for generating the opening proof.
         opening_point: []F,
 
         /// Dory opening proof (computed in Stage 8)

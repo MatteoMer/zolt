@@ -1,7 +1,7 @@
 //! Commitment types for Jolt proofs
 //!
 //! This module defines the commitment types used in Jolt proofs.
-//! These wrap the underlying polynomial commitment scheme (HyperKZG).
+//! These wrap the underlying polynomial commitment scheme (Dory).
 
 const std = @import("std");
 const msm = @import("../msm/mod.zig");
@@ -71,7 +71,7 @@ pub const PolyCommitment = struct {
 pub const OpeningProof = struct {
     const Self = @This();
 
-    /// Quotient polynomial commitments (one per variable for HyperKZG)
+    /// Quotient polynomial commitments (one per variable)
     quotients: []PolyCommitment,
     /// Final evaluation after all folding
     final_eval: field.BN254Scalar,

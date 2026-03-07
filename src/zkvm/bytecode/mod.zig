@@ -66,7 +66,7 @@ pub const BytecodeTable = struct {
 /// Bytecode proof for memory checking
 ///
 /// Contains polynomial commitments for bytecode verification.
-/// The commitments are G1 points from the HyperKZG scheme.
+/// The commitments are G1 points from the Dory scheme.
 pub fn BytecodeProof(comptime F: type) type {
     return struct {
         const Self = @This();

@@ -28,7 +28,6 @@ Generate a ZK proof for a RISC-V ELF binary.
 |------|-------------|
 | `-o, --output FILE` | Save proof to FILE (required) |
 | `--export-preprocessing FILE` | Export Jolt-compatible preprocessing data |
-| `--trace-length N` | Set trace length (default: 1024) |
 | `--srs PATH` | Use Dory SRS from PATH |
 | `--input-hex HEX` | Set program input as hex bytes |
 

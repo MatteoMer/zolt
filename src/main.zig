@@ -265,11 +265,9 @@ fn runEmulator(allocator: std.mem.Allocator, elf_path: []const u8, show_regs: bo
     }
 }
 
-fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, output_path: []const u8, trace_length_opt: ?u64, srs_path: ?[]const u8, preprocessing_path: ?[]const u8, input_bytes: ?[]const u8) !void {
+fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, output_path: []const u8, srs_path: ?[]const u8, preprocessing_path: ?[]const u8, input_bytes: ?[]const u8) !void {
     std.debug.print("Zolt zkVM Prover\n", .{});
     std.debug.print("================\n\n", .{});
-
-    const trace_length = trace_length_opt orelse 1024;
 
     // Load the ELF file
     std.debug.print("Loading ELF: {s}\n", .{elf_path});
@@ -284,7 +282,6 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, output_path: []
 
     std.debug.print("  Entry point: 0x{x:0>8}\n", .{program.entry_point});
     std.debug.print("  Code size: {} bytes\n", .{program.bytecode.len});
-    std.debug.print("  Trace length: {}\n", .{trace_length});
     if (input_bytes) |inputs| {
         std.debug.print("  Input bytes: {} bytes\n", .{inputs.len});
     }
@@ -387,7 +384,7 @@ fn runProver(allocator: std.mem.Allocator, elf_path: []const u8, output_path: []
             .bytecode = bytecode_prep,
             .ram = ram_prep,
             .memory_layout = device.memory_layout,
-            .max_padded_trace_length = trace_length,
+            .max_padded_trace_length = jolt_bundle.proof.trace_length,
         };
         defer shared_prep.deinit();
 
@@ -628,24 +625,18 @@ pub fn main() !void {
                     std.debug.print("  4. Save proof to file\n\n", .{});
                     std.debug.print("Options:\n", .{});
                     std.debug.print("  -o, --output F           Save proof to file F (required)\n", .{});
-                    std.debug.print("  --trace-length N         Set trace length for proof system (default: 1024)\n", .{});
                     std.debug.print("  --srs PATH               Use Dory SRS from PATH (exported by Jolt)\n", .{});
                     std.debug.print("  --export-preprocessing P Export Jolt-compatible preprocessing to file P\n", .{});
                     std.debug.print("  --input-hex HEX          Set input as hex bytes (e.g., 20 for input 32)\n", .{});
                 } else {
                     var elf_path: ?[]const u8 = null;
-                    var trace_length: ?u64 = null;
                     var output_path: ?[]const u8 = null;
                     var srs_path: ?[]const u8 = null;
                     var preprocessing_path: ?[]const u8 = null;
                     var input_hex: ?[]const u8 = null;
 
                     if (std.mem.startsWith(u8, arg, "-")) {
-                        if (std.mem.eql(u8, arg, "--trace-length")) {
-                            if (args.next()) |len_str| {
-                                trace_length = std.fmt.parseInt(u64, len_str, 10) catch null;
-                            }
-                        } else if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
+                        if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
                             output_path = args.next();
                         } else if (std.mem.eql(u8, arg, "--srs")) {
                             srs_path = args.next();
@@ -660,11 +651,7 @@ pub fn main() !void {
 
                     while (args.next()) |next_arg| {
                         if (std.mem.startsWith(u8, next_arg, "-")) {
-                            if (std.mem.eql(u8, next_arg, "--trace-length")) {
-                                if (args.next()) |len_str| {
-                                    trace_length = std.fmt.parseInt(u64, len_str, 10) catch null;
-                                }
-                            } else if (std.mem.eql(u8, next_arg, "-o") or std.mem.eql(u8, next_arg, "--output")) {
+                            if (std.mem.eql(u8, next_arg, "-o") or std.mem.eql(u8, next_arg, "--output")) {
                                 output_path = args.next();
                             } else if (std.mem.eql(u8, next_arg, "--srs")) {
                                 srs_path = args.next();
@@ -692,7 +679,7 @@ pub fn main() !void {
                     }
 
                     if (elf_path) |path| {
-                        runProver(allocator, path, output_path.?, trace_length, srs_path, preprocessing_path, input_bytes_owned) catch |err| {
+                        runProver(allocator, path, output_path.?, srs_path, preprocessing_path, input_bytes_owned) catch |err| {
                             std.debug.print("Failed to generate proof: {s}\n", .{@errorName(err)});
                             std.process.exit(1);
                         };

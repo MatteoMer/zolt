@@ -1227,6 +1227,9 @@ pub fn buildBytecodeEntries(
             populateEntryFromInstruction(&entries[tbpc + 3], jal_word, 4);
             entries[tbpc + 3].virtual_sequence_remaining = null;
             entries[tbpc + 3].is_first_in_sequence = false;
+            // JAL x0 remapped to vr40 (upstream inline_sequence)
+            entries[tbpc + 3].rd = 40;
+            entries[tbpc + 3].instruction_flags[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
 
             dbg("[PHASE2] Termination entries at tbpc={d}: LUI=0x{x:0>8} ADDI=0x{x:0>8} SB=0x{x:0>8} JAL=0x{x:0>8}\n", .{ tbpc, lui_word, addi_word, sb_word, jal_word });
         }
@@ -3852,6 +3855,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 dbg("}}, round={}\n", .{transcript.n_rounds});
             }
 
+            dbg("[STAGE6] Transcript at entry: round={}\n", .{transcript.n_rounds});
             const bytecode_raf_gamma_powers = try transcript.challengeScalarPowers(self.allocator, 7);
             defer self.allocator.free(bytecode_raf_gamma_powers);
 
@@ -5398,6 +5402,8 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             // Append input claims and get batching coefficients
             // ====================================================================
 
+            dbg("[STAGE6] Transcript before input_claims: round={}\n", .{transcript.n_rounds});
+
             transcript.appendScalar("sumcheck_claim", bytecodeReadRaf_input);
             transcript.appendScalar("sumcheck_claim", booleanity_input);
             transcript.appendScalar("sumcheck_claim", hammingBooleanity_input);
@@ -6783,13 +6789,23 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             // Cache openings to transcript
             // ====================================================================
 
+            dbg("[STAGE6] Transcript before cache_openings: round={}\n", .{transcript.n_rounds});
+
             // Instance 0: BytecodeReadRaf
             for (bytecode_ra_claims) |claim| {
                 transcript.appendScalar("opening_claim", claim);
             }
+            dbg("[STAGE6] After BytecodeReadRaf openings ({}): round={}\n", .{bytecode_ra_claims.len, transcript.n_rounds});
 
             // Instance 1: Booleanity
-            for (booleanity_ra_claims) |claim| {
+            // Upstream aliasing: when bytecode_log_k is a multiple of log_k_chunk,
+            // BytecodeRa(0)/Booleanity has the same opening point as BytecodeRa(0)/BytecodeReadRaf
+            // (no zero-padding in compute_r_address_chunks), so the verifier aliases it
+            // and does NOT flush it to transcript.
+            const bytecode_ra0_aliases = (bytecode_log_k % log_k_chunk == 0);
+            const bool_skip_index = instruction_ra_virtual_claims.len; // BytecodeRa(0) is at index instruction_d in Booleanity's polynomial_types
+            for (booleanity_ra_claims, 0..) |claim, i| {
+                if (bytecode_ra0_aliases and i == bool_skip_index) continue;
                 transcript.appendScalar("opening_claim", claim);
             }
 
@@ -6806,9 +6822,12 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 transcript.appendScalar("opening_claim", claim);
             }
 
+            dbg("[STAGE6] After LookupsRaVirtual openings ({}): round={}\n", .{instruction_ra_virtual_claims.len, transcript.n_rounds});
+
             // Instance 5: IncClaimReduction
             transcript.appendScalar("opening_claim", ram_inc_claim);
             transcript.appendScalar("opening_claim", rd_inc_claim);
+            dbg("[STAGE6] After ALL cache_openings: round={}\n", .{transcript.n_rounds});
 
             return Stage6Result(F){
                 .challenges = challenges,

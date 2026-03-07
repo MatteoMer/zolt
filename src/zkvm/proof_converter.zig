@@ -4031,26 +4031,17 @@ pub fn ProofConverter(comptime F: type) type {
                     }
                 }
 
-                // RamRa: from RamRaVirtual address challenges (derived from Stage 5)
-                // Same as how Stage 6 extracted ram_ra_addr_chunks
+                // RamRa: use aligned r_address from Stage 2 (BIG_ENDIAN)
+                // Stage 2 aligns all RAM sumchecks to share the same r_address.
+                // The RamRaClaimReduction (Stage 5) is cycle-only; the address comes from Stage 2.
                 {
-                    const s7_ram_log_k: usize = s6_ram_d * s6_log_k_chunk;
-                    const stage5_max_rounds = LOOKUPS_LOG_K + s6_n_cycle_vars;
-                    const ram_ra_total_rounds = s7_ram_log_k + s6_n_cycle_vars;
-                    const ram_ra_offset = stage5_max_rounds - ram_ra_total_rounds;
-
-                    // Reversed address → BE
-                    var ram_addr_be = try self.allocator.alloc(F, s7_ram_log_k);
-                    defer self.allocator.free(ram_addr_be);
-                    for (0..s7_ram_log_k) |i| {
-                        ram_addr_be[i] = stage5_result.challenges[ram_ra_offset + s7_ram_log_k - 1 - i];
-                    }
-
-                    // Split into chunks (already multiple of log_k_chunk)
+                    // stage2_result.r_address_raf is BIG_ENDIAN, length = ram_d * log_k_chunk
+                    // Split into ram_d chunks of log_k_chunk (matching Stage 6's ram_ra_addr_chunks)
                     for (0..s6_ram_d) |i| {
                         var chunk = try self.allocator.alloc(F, s6_log_k_chunk);
+                        const chunk_start = i * s6_log_k_chunk;
                         for (0..s6_log_k_chunk) |ci| {
-                            chunk[ci] = ram_addr_be[i * s6_log_k_chunk + ci];
+                            chunk[ci] = stage2_result.r_address_raf[chunk_start + ci];
                         }
                         r_addr_virt[s6_instruction_d + s6_bytecode_d + i] = chunk;
                         const gi = s6_instruction_d + s6_bytecode_d + i;

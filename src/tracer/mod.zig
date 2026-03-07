@@ -2535,6 +2535,7 @@ pub const Emulator = struct {
         // This allows the SB anchor to use VI=true, DNUPC=false (matching vanilla Jolt).
         // UPC=4 satisfies the SB's constraint 16: NextUPC = 0+4-0 = 4.
         const jal_instr: u32 = 0x0000006F; // JAL x0, 0
+        const FIRST_VIRTUAL_ALLOC_REG: u8 = 40; // 32 (RISCV) + 8 (reserved)
         try self.trace.steps.append(self.allocator, TraceStep{
             .cycle = cycle,
             .pc = 0,
@@ -2542,9 +2543,9 @@ pub const Emulator = struct {
             .instruction = jal_instr,
             .rs1_value = 0,
             .rs2_value = 0,
-            .rd_pre_value = 0,
+            .rd_pre_value = self.registers.registers[FIRST_VIRTUAL_ALLOC_REG],
             .rd_value = 8, // JAL x0 at UPC=4: link_address = 4+4 = 8 (must match R1CS constraint 13)
-            .rd_index = 0,
+            .rd_index = FIRST_VIRTUAL_ALLOC_REG, // JAL x0 remapped to vr40 (upstream inline_sequence)
             .rs1_index = 0,
             .rs2_index = 0,
             .rd_written = true, // Jolt includes rd=0 writes in RdWa polynomial (0→0 transition)

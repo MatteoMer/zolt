@@ -603,12 +603,11 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 // Use explicit register index from TraceStep (supports virtual registers 32+)
                 const rd: u8 = step.rd_index;
 
-                // Jolt includes rd=0 writes in the wa/inc polynomials.
-                // rd_values() returns Some for all instructions with an rd field,
-                // including rd=0. The trace captures (0→0) transitions for x0.
-                if (step.rd_written) {
+                // In Jolt, rd_write() returns (rd, pre, post) where pre=post=0 for x0.
+                // Zolt's trace may record the computed value for x0 writes, so we must
+                // force inc=0 for rd=0 (x0 is hardwired to zero in RISC-V).
+                if (step.rd_written and rd != 0) {
                     // Compute inc = rd_value - rd_pre_value
-                    // Use trace's pre/post values directly (Jolt uses cycle.rd_write())
                     const pre_value: i128 = @intCast(step.rd_pre_value);
                     const post_value: i128 = @intCast(step.rd_value);
                     const increment = post_value - pre_value;
@@ -747,6 +746,78 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 computed_sum.limbs[1] == regs_val_input.limbs[1] and
                 computed_sum.limbs[2] == regs_val_input.limbs[2] and
                 computed_sum.limbs[3] == regs_val_input.limbs[3])});
+
+            // Debug: compute cumulative sum and compare with register state
+            {
+                const REGS_K3: usize = 1 << REGISTERS_LOG_K;
+                var reg_vals3: [REGS_K3]u64 = [_]u64{0} ** REGS_K3;
+                var cumsum = F.zero(); // Σ_{j<t} inc(j) * wa(j)
+                var eq_vals3 = try self.allocator.alloc(F, T);
+                defer self.allocator.free(eq_vals3);
+                for (0..T) |t| {
+                    eq_vals3[t] = computeEqAtIndex(r_cycle_regs, t);
+                }
+                // Compute Σ_t eq(r_cycle, t) * cumsum(t) vs Σ_t eq(r_cycle, t) * val(r_addr, t)
+                var sum_via_cumsum = F.zero();
+                var sum_via_regvals = F.zero();
+                var first_mismatch: usize = T;
+                for (0..T) |t| {
+                    // val(r_addr, t) = Σ_k eq(r_addr, k) * reg_vals3[k]
+                    var val_at_t = F.zero();
+                    for (0..REGS_K3) |k| {
+                        val_at_t = val_at_t.add(computeEqAtIndex(r_address_regs, k).mul(F.fromU64(reg_vals3[k])));
+                    }
+                    sum_via_cumsum = sum_via_cumsum.add(eq_vals3[t].mul(cumsum));
+                    sum_via_regvals = sum_via_regvals.add(eq_vals3[t].mul(val_at_t));
+                    if (!cumsum.eql(val_at_t)) {
+                        if (first_mismatch == T) first_mismatch = t;
+                        if (t <= first_mismatch + 3) {
+                            const delta = inc_evals[t].mul(wa_evals[t]);
+                            dbg("[CUMSUM] MISMATCH at t={}: cumsum={x}, val={x}, delta={x}\n", .{
+                                t, cumsum.toBytesBE()[24..32].*, val_at_t.toBytesBE()[24..32].*,
+                                delta.toBytesBE()[24..32].*,
+                            });
+                            if (t < trace_len) {
+                                const s = trace.steps.items[t];
+                                dbg("[CUMSUM]   rd={}, written={}, pre={}, post={}, noop={}\n", .{
+                                    s.rd_index, s.rd_written, s.rd_pre_value, s.rd_value, s.is_noop,
+                                });
+                            }
+                        }
+                    }
+                    // Also print the cycle BEFORE the mismatch
+                    if (first_mismatch == T and t > 0) {
+                        // Print last matching cycle for context
+                    }
+                    // Update cumsum: cumsum(t+1) = cumsum(t) + inc(t) * wa(t)
+                    cumsum = cumsum.add(inc_evals[t].mul(wa_evals[t]));
+                    // Update register state
+                    if (t < trace_len) {
+                        const step = trace.steps.items[t];
+                        if (step.rd_written and step.rd_index != 0) {
+                            reg_vals3[step.rd_index] = step.rd_value;
+                        }
+                    }
+                }
+                dbg("[CUMSUM] sum_via_cumsum  = {any}\n", .{sum_via_cumsum.toBytesBE()[0..16]});
+                dbg("[CUMSUM] sum_via_regvals = {any}\n", .{sum_via_regvals.toBytesBE()[0..16]});
+                dbg("[CUMSUM] regs_val_input  = {any}\n", .{regs_val_input.toBytesBE()[0..16]});
+                dbg("[CUMSUM] cumsum==regvals: {}\n", .{sum_via_cumsum.eql(sum_via_regvals)});
+                dbg("[CUMSUM] cumsum==input:   {}\n", .{sum_via_cumsum.eql(regs_val_input)});
+                dbg("[CUMSUM] regvals==input:  {}\n", .{sum_via_regvals.eql(regs_val_input)});
+                dbg("[CUMSUM] first_mismatch_t: {}\n", .{first_mismatch});
+                // Print info for the cycle BEFORE the first mismatch (the diverging cycle)
+                if (first_mismatch > 0 and first_mismatch <= trace_len) {
+                    const prev = first_mismatch - 1;
+                    const ps = trace.steps.items[prev];
+                    dbg("[CUMSUM] Cycle {}: rd={}, written={}, pre={}, post={}, noop={}\n", .{
+                        prev, ps.rd_index, ps.rd_written, ps.rd_pre_value, ps.rd_value, ps.is_noop,
+                    });
+                    dbg("[CUMSUM]   inc_evals[{}] = {x}, wa_evals[{}] = {x}\n", .{
+                        prev, inc_evals[prev].toBytesBE()[24..32].*, prev, wa_evals[prev].toBytesBE()[24..32].*,
+                    });
+                }
+            }
 
             // Build combined values for LookupsReadRaf from trace
             // combined(j) = lookup_output(j) + gamma*left_op(j) + gamma^2*right_op(j)
@@ -6947,12 +7018,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 const half = @as(usize, 1) << @intCast(i);
                 for (0..half) |j| {
                     const x = evals[j];
-                    // CRITICAL: Use mulHiBigIntU128 to match Jolt's F * Challenge behavior
-                    // Jolt's MontU128Challenge uses mul_by_hi_2limbs for multiplication
-                    const y = x.mulHiBigIntU128(ri.limbs);
+                    const y = x.mul(ri);
                     evals[half + j] = y;
-                    // ri.sub(y) is correct: Challenge - F converts challenge to Fr first
-                    // (via from_bigint_unchecked which stores same Montgomery form)
                     evals[j] = evals[j].add(ri.sub(y));
                 }
             }
@@ -6979,11 +7046,8 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                         const jk = (j >> @intCast(num_vars - 1 - k)) & 1;
                         const rk = r_cycle[k];
                         if (jk == 1) {
-                            // CRITICAL: Use mulHiBigIntU128 for challenge multiplication
-                            contrib = contrib.mulHiBigIntU128(rk.limbs);
+                            contrib = contrib.mul(rk);
                         } else {
-                            // (1 - rk) requires converting rk to proper Fr first
-                            // Since rk already has [0,0,L,H] Montgomery form, sub is correct
                             contrib = contrib.mul(F.one().sub(rk));
                         }
                     }

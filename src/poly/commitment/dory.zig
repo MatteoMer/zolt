@@ -62,19 +62,19 @@ fn doryAppendGT(transcript: anytype, gt: GT) void {
 }
 
 /// Append a G1 point to the transcript for Dory protocol.
-/// Maps to upstream JoltToDoryTranscript::append_group which calls
-/// transcript.append_bytes(b"dory_group", &buffer) with compressed serialization.
+/// Upstream: create_evaluation_proof uses transcript.append_serde() for ALL message
+/// elements (GT, G1, G2). JoltToDoryTranscript::append_serde maps to "dory_serde".
 fn doryAppendG1(transcript: anytype, point: G1Point) void {
     const bytes = compressG1(point);
-    transcript.appendBytes("dory_group", &bytes);
+    transcript.appendBytes("dory_serde", &bytes);
 }
 
 /// Append a G2 point to the transcript for Dory protocol.
-/// Maps to upstream JoltToDoryTranscript::append_group which calls
-/// transcript.append_bytes(b"dory_group", &buffer) with compressed serialization.
+/// Upstream: create_evaluation_proof uses transcript.append_serde() for ALL message
+/// elements (GT, G1, G2). JoltToDoryTranscript::append_serde maps to "dory_serde".
 fn doryAppendG2(transcript: anytype, point: G2Point) void {
     const bytes = compressG2(point);
-    transcript.appendBytes("dory_group", &bytes);
+    transcript.appendBytes("dory_serde", &bytes);
 }
 
 /// Compress a G1 point to 32 bytes (arkworks format)
@@ -1526,16 +1526,18 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
             defer allocator.free(padded_row_commitments);
 
             // Step 4: Compute VMV message
-            // C = e(MSM(row_comms, v_vec), h₂)
+            // C = e(MSM(row_comms, v_vec), Γ₂₀)
+            // Upstream uses g2_fin = setup.g2_vec[0] (NOT h2)
+            const g2_fin = params.g2_vec[0];
             const t_vec_v = msm.MSM(F, Fp).compute(padded_row_commitments, v_vec);
             const t_vec_v_fp = G1PointFp{
                 .x = t_vec_v.x,
                 .y = t_vec_v.y,
                 .infinity = t_vec_v.infinity,
             };
-            const c = pairing.pairingFp(t_vec_v_fp, params.h2);
+            const c = pairing.pairingFp(t_vec_v_fp, g2_fin);
 
-            // D₂ = e(MSM(Γ₁[..sigma], v_vec), h₂)
+            // D₂ = e(MSM(Γ₁[..sigma], v_vec), Γ₂₀)
             const num_cols = @as(usize, 1) << @intCast(sigma);
             const gamma1_v = msm.MSM(F, Fp).compute(params.g1_vec[0..num_cols], v_vec[0..num_cols]);
             const gamma1_v_fp = G1PointFp{
@@ -1543,7 +1545,7 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 .y = gamma1_v.y,
                 .infinity = gamma1_v.infinity,
             };
-            const d2 = pairing.pairingFp(gamma1_v_fp, params.h2);
+            const d2 = pairing.pairingFp(gamma1_v_fp, g2_fin);
 
             // e1 = MSM(row_commitments, left_vec)
             // row_commitments may have different length than left_vec (2^nu)
@@ -1587,12 +1589,13 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 v1_work[i] = G1Point.identity();
             }
 
-            // v2 = v_vec * h₂ (each entry is v_vec[i] * h₂)
+            // v2 = v_vec * Γ₂₀ (each entry is v_vec[i] * g2_vec[0])
+            // Upstream: let v2 = M2::fixed_base_vector_scalar_mul(g2_fin, &v_vec)
             const v2_work = try allocator.alloc(G2Point, vec_len);
             defer allocator.free(v2_work);
             for (0..vec_len) |i| {
                 if (i < v_vec.len) {
-                    v2_work[i] = params.h2.scalarMul(v_vec[i]);
+                    v2_work[i] = g2_fin.scalarMul(v_vec[i]);
                 } else {
                     v2_work[i] = G2Point.identity();
                 }
@@ -1796,6 +1799,13 @@ pub fn DoryCommitmentScheme(comptime F: type) type {
                 .e1 = final_e1,
                 .e2 = final_e2,
             };
+
+            // Append final message to transcript before deriving d challenge
+            // Upstream: transcript.append_serde(b"final_e1", &final_message.e1)
+            //           transcript.append_serde(b"final_e2", &final_message.e2)
+            // JoltToDoryTranscript maps append_serde → "dory_serde" label
+            doryAppendG1(transcript, final_e1);
+            doryAppendG2(transcript, final_e2);
 
             // Get final d challenge to keep transcript in sync
             _ = transcript.challengeScalarFull();

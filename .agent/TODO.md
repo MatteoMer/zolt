@@ -1,12 +1,14 @@
 # Zolt → Jolt Cross-Verification Progress
 
-## STATUS: Upstream alignment in progress
+## STATUS: Upstream alignment in progress — Stage 4 fix pending verification
 
-### Current State (Mar 6 2026)
+### Current State (Mar 7 2026)
 - Migrating from MatteoMer/jolt fork to vanilla a16z/jolt upstream
 - All transcript labels, proof format, R1CS constraints updated
 - Proof deserialization passes through all fields against upstream verifier
-- **NEXT**: Full end-to-end verification test against upstream jolt-verifier
+- **ROOT CAUSE FOUND**: JAL/JALR with rd=x0 must remap to virtual register 40 (matching upstream inline_sequence rewriting)
+- **FIX APPLIED**: Tracer, preprocessing, and bytecode entries now remap JAL/JALR x0 → vr40
+- **NEXT**: Rebuild, prove fibonacci, verify with jolt-verifier to confirm Stage 4 fix
 
 ## COMPLETED: Upstream Alignment Changes
 
@@ -31,6 +33,13 @@
 - Constraint 13: JAL/JALR RdWriteValue fix for rd=x0
 - PRODUCT_UNIQUE_FACTOR_VIRTUALS: reordered to match upstream 8-entry ordering
 - Opening claims: corrected polynomial IDs (OpFlags indices, InstructionFlags(Branch))
+
+### JAL/JALR rd=x0 Virtual Register Remapping (Mar 7 2026)
+- **Root cause**: Upstream Jolt rewrites JAL/JALR with rd=x0 via inline_sequence to use virtual register 40
+- **Fix applied in tracer**: rd_index remapped from 0 to 40, link address written to vr40
+- **Fix applied in preprocessing**: JoltInstruction rd field set to 40 for JAL/JALR x0
+- **Fix applied in bytecode entries**: stage6_prover entry.rd=40 and IsRdNotZero=true
+- This ensures R1CS, committed polynomials, and Stage 4/5/6 sumchecks are all consistent
 
 ### Infrastructure
 - jolt-verifier/ crate using upstream a16z/jolt with --diagnose mode
@@ -73,4 +82,6 @@ cd jolt-verifier && cargo run --release -- --proof /tmp/zolt_proof_dory.bin --pr
 - `src/transcripts/blake2b.zig` — Blake2b transcript with labels
 - `src/zkvm/spartan/stage5_prover.zig` — InstructionReadRaf sumcheck
 - `src/zkvm/spartan/stage6_prover.zig` — BytecodeReadRaf val_poly
+- `src/tracer/mod.zig` — Execution tracer (JAL/JALR x0 → vr40 remapping)
+- `src/zkvm/preprocessing.zig` — Bytecode preprocessing & serialization
 - `jolt-verifier/src/main.rs` — Standalone upstream verifier

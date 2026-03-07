@@ -1151,7 +1151,9 @@ pub fn RafDecomposition(comptime F: type) type {
 
                     for (0..size) |i| {
                         // Uninterleave to get operand bits
-                        // Left uses odd positions (1,3,5,...), Right uses even positions (0,2,4,...)
+                        // Left uses ODD positions (1,3,5,...), Right uses EVEN positions (0,2,4,...)
+                        // Matches upstream Jolt: interleave_bits(x, y) puts x at ODD, y at EVEN
+                        // uninterleave returns (left=x=odd_positions, right=y=even_positions)
                         var operand_val: u64 = 0;
                         for (0..@min(half_chunk, 32)) |bit_idx| {
                             if (is_left) {
@@ -1310,9 +1312,10 @@ pub fn initQRaf(
     }
 }
 
-/// Uninterleave bits to get the left operand
-/// In Jolt's interleave format: interleaved = (left << 1) | right
-/// So left operand bits are at ODD positions (1, 3, 5, ...)
+/// Uninterleave bits to get the left operand (Jolt's OperandSide::Left).
+/// In Jolt: interleave_bits(x, y) places x at ODD positions, y at EVEN positions.
+/// uninterleave_bits returns (x=odd_positions, y=even_positions) = (left, right).
+/// So OperandSide::Left = ODD positions (1, 3, 5, ...).
 fn uninterleaveBitsLeft(bits: u128, num_bits: usize) u64 {
     var left: u64 = 0;
     const half_bits = num_bits / 2;
@@ -1326,9 +1329,10 @@ fn uninterleaveBitsLeft(bits: u128, num_bits: usize) u64 {
     return left;
 }
 
-/// Uninterleave bits to get the right operand
-/// In Jolt's interleave format: interleaved = (left << 1) | right
-/// So right operand bits are at EVEN positions (0, 2, 4, ...)
+/// Uninterleave bits to get the right operand (Jolt's OperandSide::Right).
+/// In Jolt: interleave_bits(x, y) places x at ODD positions, y at EVEN positions.
+/// uninterleave_bits returns (x=odd_positions, y=even_positions) = (left, right).
+/// So OperandSide::Right = EVEN positions (0, 2, 4, ...).
 fn uninterleaveBitsRight(bits: u128, num_bits: usize) u64 {
     var right: u64 = 0;
     const half_bits = num_bits / 2;

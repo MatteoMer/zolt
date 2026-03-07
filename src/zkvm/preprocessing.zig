@@ -1132,11 +1132,12 @@ pub const BytecodePreprocessing = struct {
             // address=4 (synthetic) provides UPC=4 for SB's constraint 16.
             // vsr=null means VirtualInstruction=false, DoNotUpdatePC=false.
             // Jump=1 disables constraint 16 for JAL→NoOp transition.
+            // rd remapped to vr40 (upstream Jolt remaps JAL x0 to virtual register).
             const jal_word: u32 = 0x0000006F;
             try self.bytecode.append(allocator, .{
                 .variant = .JAL,
                 .address = 4, // Synthetic address: UPC=4 satisfies SB's NextUPC constraint
-                .operands = .{ .FormatJ = .{ .rd = 0, .imm = 0 } },
+                .operands = .{ .FormatJ = .{ .rd = 40, .imm = 0 } },
                 .virtual_sequence_remaining = null, // Not a virtual sequence
                 .is_first_in_sequence = false,
                 .is_compressed = false,
@@ -1336,12 +1337,16 @@ fn decodeToJoltInstruction(instruction: u32, address: u64, is_compressed: bool) 
         0b1101111 => { // JAL
             variant = .JAL;
             const imm = decodeJImmediate(instruction);
-            operands = .{ .FormatJ = .{ .rd = rd, .imm = imm } };
+            // Upstream Jolt remaps JAL with rd=x0 to virtual register 40
+            const effective_rd: u8 = if (rd == 0) 40 else rd;
+            operands = .{ .FormatJ = .{ .rd = effective_rd, .imm = imm } };
         },
         0b1100111 => { // JALR
             variant = .JALR;
             const imm = decodeIImmediate(instruction);
-            operands = .{ .FormatI = .{ .rd = rd, .rs1 = rs1, .imm = imm } };
+            // Upstream Jolt remaps JALR with rd=x0 to virtual register 40
+            const effective_rd: u8 = if (rd == 0) 40 else rd;
+            operands = .{ .FormatI = .{ .rd = effective_rd, .rs1 = rs1, .imm = imm } };
         },
         0b1100011 => { // Branch
             const imm = decodeBImmediate(instruction);

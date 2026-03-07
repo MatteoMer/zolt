@@ -1423,12 +1423,14 @@ pub fn R1CSCycleInputs(comptime F: type) type {
             if (step.is_first_in_sequence) {
                 inputs.values[R1CSInputIndex.FlagIsFirstInSequence.toIndex()] = F.one();
             }
-            // IsLastInSequence: true when virtual_sequence_remaining == 0 but instruction IS virtual
-            // (i.e., the last step in a virtual sequence). Computed from trace flags.
-            if (step.is_last_in_sequence or
-                (step.virtual_sequence_remaining == 0 and inputs.values[R1CSInputIndex.FlagVirtualInstruction.toIndex()].eql(F.one())))
+            // IsLastInSequence: true ONLY for JALR (opcode 0x67) with virtual_sequence_remaining == 0.
+            // Upstream Jolt only sets this in JALR's circuit_flags() implementation.
             {
-                inputs.values[R1CSInputIndex.FlagIsLastInSequence.toIndex()] = F.one();
+                const opcode_7bit = step.instruction & 0x7F;
+                const is_jalr = (opcode_7bit == 0x67);
+                if (is_jalr and step.is_last_in_sequence) {
+                    inputs.values[R1CSInputIndex.FlagIsLastInSequence.toIndex()] = F.one();
+                }
             }
 
             // =================================================================

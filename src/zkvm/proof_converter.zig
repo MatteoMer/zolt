@@ -2446,11 +2446,14 @@ pub fn ProofConverter(comptime F: type) type {
             // CRITICAL: InstructionClaimReduction is in Stage 2, NOT Stage 3!
             // The challenges are the last n_cycle_vars challenges from Stage 2 (Instance 4).
             var r_reduction_be: ?[]F = null;
+            // Stage 4 inc_poly copy for Stage 6 diagnostic
+            var stage4_inc_poly_copy: ?[]F = null;
             defer {
                 if (stage4_regs_r_address) |arr| self.allocator.free(arr);
                 if (stage4_regs_r_cycle) |arr| self.allocator.free(arr);
                 if (stage4_r_cycle_val) |arr| self.allocator.free(arr);
                 if (r_reduction_be) |arr| self.allocator.free(arr);
+                if (stage4_inc_poly_copy) |arr| self.allocator.free(arr);
             }
 
             // Compute r_reduction_be from Stage 2 challenges (InstructionClaimReduction)
@@ -2919,6 +2922,56 @@ pub fn ProofConverter(comptime F: type) type {
                     dbg("[STAGE4 BRUTE] match? {}\n", .{brute_sum.eql(input_claim_registers)});
                 }
 
+                // DIAGNOSTIC: Compute MLE of inc_poly at challenges[0..8] BEFORE binding
+                {
+                    const T_diag2 = @as(usize, 1) << @intCast(n_cycle_vars);
+                    var eq_le_diag = try self.allocator.alloc(F, T_diag2);
+                    defer self.allocator.free(eq_le_diag);
+                    eq_le_diag[0] = F.one();
+                    var elen: usize = 1;
+                    for (0..n_cycle_vars) |bi| {
+                        const r_i = stage3_r_cycle_le[bi]; // use stage3 r_cycle as baseline
+                        _ = r_i;
+                        // Actually use stage4 challenges — but we don't have them yet!
+                        // We can't do this before the sumcheck. Skip.
+                        elen *= 2;
+                    }
+                    // Recompute rd_inc independently and compare with Stage 4's inc_poly
+                    {
+                        const K_CHK = 128;
+                        var reg_chk: [K_CHK]u64 = [_]u64{0} ** K_CHK;
+                        var diff_count: usize = 0;
+                        for (0..T_diag2) |j| {
+                            const step_j = trace.steps.items[j];
+                            var expected_inc = F.zero();
+                            if (!step_j.is_noop and step_j.rd_written) {
+                                const rd_j = step_j.rd_index;
+                                const pre = reg_chk[rd_j];
+                                const post = step_j.rd_value;
+                                expected_inc = F.fromU64(post).sub(F.fromU64(pre));
+                                if (rd_j != 0) {
+                                    reg_chk[rd_j] = post;
+                                }
+                            }
+                            const actual = regs_prover.inc_poly[j];
+                            if (!actual.eql(expected_inc)) {
+                                if (diff_count < 8) {
+                                    const a_le = actual.toBytesBE();
+                                    const e_le = expected_inc.toBytesBE();
+                                    std.debug.print("[INC DIFF] j={} rd={} noop={} wr={} rd_val={} actual_LE={x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2} expected_LE={x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}\n", .{
+                                        j, step_j.rd_index, @as(u8, if (step_j.is_noop) 1 else 0),
+                                        @as(u8, if (step_j.rd_written) 1 else 0), step_j.rd_value,
+                                        a_le[31], a_le[30], a_le[29], a_le[28], a_le[27], a_le[26], a_le[25], a_le[24],
+                                        e_le[31], e_le[30], e_le[29], e_le[28], e_le[27], e_le[26], e_le[25], e_le[24],
+                                    });
+                                }
+                                diff_count += 1;
+                            }
+                        }
+                        std.debug.print("[INC DIFF] total mismatches: {}\n", .{diff_count});
+                    }
+                }
+
                 // Combined RamValCheck: val_eval + gamma * val_final as a single instance
                 const ram_val_check_rounds = val_eval_prover_early.numRounds(); // = n_cycle_vars
                 const rounds_per_instance = [2]usize{ stage4_max_rounds, ram_val_check_rounds };
@@ -2948,6 +3001,10 @@ pub fn ProofConverter(comptime F: type) type {
 
                 var stage4_r_sumcheck = try self.allocator.alloc(F, stage4_max_rounds);
                 defer self.allocator.free(stage4_r_sumcheck);
+
+                // Save inc_poly before binding for verification and Stage 6 diagnostic
+                stage4_inc_poly_copy = try self.allocator.alloc(F, @as(usize, 1) << @intCast(n_cycle_vars));
+                @memcpy(stage4_inc_poly_copy.?, regs_prover.inc_poly[0..stage4_inc_poly_copy.?.len]);
 
                 for (0..stage4_max_rounds) |round_idx| {
                     var combined_evals = [4]F{ F.zero(), F.zero(), F.zero(), F.zero() };
@@ -3025,6 +3082,60 @@ pub fn ProofConverter(comptime F: type) type {
 
                 const regs_claims = regs_prover.getFinalClaims();
                 const val_eval_openings = val_eval_prover_early.getFinalOpenings();
+
+                // DIAGNOSTIC: Verify inc_poly binding via brute-force MLE
+                {
+                    const T_bf = stage4_inc_poly_copy.?.len;
+                    // Build eq table from Stage 4 cycle challenges (LSB-first, matching binding order)
+                    var eq_bf = try self.allocator.alloc(F, T_bf);
+                    defer self.allocator.free(eq_bf);
+                    eq_bf[0] = F.one();
+                    var eq_len: usize = 1;
+                    for (0..n_cycle_vars) |bi| {
+                        const r_i = stage4_r_sumcheck[bi]; // challenge for bit bi (LSB first)
+                        const one_minus_ri = F.one().sub(r_i);
+                        var idx: usize = eq_len;
+                        while (idx > 0) {
+                            idx -= 1;
+                            eq_bf[2 * idx + 1] = eq_bf[idx].mul(r_i);
+                            eq_bf[2 * idx] = eq_bf[idx].mul(one_minus_ri);
+                        }
+                        eq_len *= 2;
+                    }
+                    var bf_inc = F.zero();
+                    for (0..T_bf) |j| {
+                        bf_inc = bf_inc.add(stage4_inc_poly_copy.?[j].mul(eq_bf[j]));
+                    }
+                    const match_bf = bf_inc.eql(regs_claims.inc_claim);
+                    std.debug.print("[INC BIND CHECK] brute_force={x:0>16} binding={x:0>16} match={}\n", .{
+                        @as(u64, @bitCast(bf_inc.toBytes()[0..8].*)),
+                        @as(u64, @bitCast(regs_claims.inc_claim.toBytes()[0..8].*)),
+                        match_bf,
+                    });
+
+                    // Also compute using BIG_ENDIAN eq (reversed challenges)
+                    eq_bf[0] = F.one();
+                    eq_len = 1;
+                    for (0..n_cycle_vars) |bi| {
+                        const r_i = stage4_r_sumcheck[n_cycle_vars - 1 - bi]; // reversed
+                        const one_minus_ri = F.one().sub(r_i);
+                        var idx: usize = eq_len;
+                        while (idx > 0) {
+                            idx -= 1;
+                            eq_bf[2 * idx + 1] = eq_bf[idx].mul(r_i);
+                            eq_bf[2 * idx] = eq_bf[idx].mul(one_minus_ri);
+                        }
+                        eq_len *= 2;
+                    }
+                    var bf_inc_be = F.zero();
+                    for (0..T_bf) |j| {
+                        bf_inc_be = bf_inc_be.add(stage4_inc_poly_copy.?[j].mul(eq_bf[j]));
+                    }
+                    std.debug.print("[INC BIND CHECK BE] brute_force_be={x:0>16} match_be={}\n", .{
+                        @as(u64, @bitCast(bf_inc_be.toBytes()[0..8].*)),
+                        bf_inc_be.eql(regs_claims.inc_claim),
+                    });
+                }
 
                 // Diagnostic: verify RegistersRWC expected output
                 {
@@ -3430,20 +3541,20 @@ pub fn ProofConverter(comptime F: type) type {
             // For RV64: max_num_rounds = 128 + log_T = 128 + 8 = 136
             const lookups_log_k: usize = 128; // XLEN * 2 for RV64
 
-            // CRITICAL: Jolt samples TWO separate gammas for Stage 5 instances:
-            // 1. gamma_ram_ra for RamRaClaimReduction (via RaReductionParams::new)
-            // 2. gamma_lookups_raf for InstructionReadRaf (via InstructionReadRafSumcheckParams::new)
-            // These are sampled sequentially from the transcript, so we must do the same.
-            // ALWAYS-ON DIAGNOSTIC: transcript state before Stage 5 gammas
+            // CRITICAL: Jolt samples TWO separate gammas for Stage 5 instances.
+            // The verifier creates instances in this order:
+            //   1. InstructionReadRafSumcheckVerifier::new() → squeezes gamma_lookups_raf
+            //   2. RamRaClaimReductionSumcheckVerifier::new() → squeezes gamma_ram_ra
+            // So we must squeeze in the SAME order.
             dbg("[STAGE5 DIAG] Transcript state BEFORE gamma squeeze: {any} round={}\n", .{ transcript.state[0..8].*, transcript.n_rounds });
-            const gamma_ram_ra = transcript.challengeScalarFull();
-            dbg("[STAGE5 DIAG] gamma_ram_ra LE = {any}\n", .{gamma_ram_ra.toBytes()});
-            dbg("[STAGE5 DIAG] Transcript state AFTER gamma_ram_ra: {any} round={}\n", .{ transcript.state[0..8].*, transcript.n_rounds });
             const gamma_lookups_raf = transcript.challengeScalarFull();
             dbg("[STAGE5 DIAG] gamma_lookups_raf LE = {any}\n", .{gamma_lookups_raf.toBytes()});
             dbg("[STAGE5 DIAG] Transcript state AFTER gamma_lookups_raf: {any} round={}\n", .{ transcript.state[0..8].*, transcript.n_rounds });
-            dbg("[STAGE5] gamma_ram_ra = {any}\n", .{gamma_ram_ra.toBytesBE()});
+            const gamma_ram_ra = transcript.challengeScalarFull();
+            dbg("[STAGE5 DIAG] gamma_ram_ra LE = {any}\n", .{gamma_ram_ra.toBytes()});
+            dbg("[STAGE5 DIAG] Transcript state AFTER gamma_ram_ra: {any} round={}\n", .{ transcript.state[0..8].*, transcript.n_rounds });
             dbg("[STAGE5] gamma_lookups_raf = {any}\n", .{gamma_lookups_raf.toBytesBE()});
+            dbg("[STAGE5] gamma_ram_ra = {any}\n", .{gamma_ram_ra.toBytesBE()});
 
             // Generate Stage 5 proof using the batched sumcheck prover
             var stage5_prover_instance = Stage5BatchedProver(F).init(self.allocator);
@@ -3565,14 +3676,9 @@ pub fn ProofConverter(comptime F: type) type {
             );
 
             // Append Stage 5 cache openings to transcript
-            // Instance 0: RegistersValEvaluation (RdInc, RdWa)
-            transcript.appendScalar("opening_claim", stage5_result.regs_val_inc_claim);
-            transcript.appendScalar("opening_claim", stage5_result.regs_val_wa_claim);
+            // Order must match upstream instance order: InstructionReadRaf, RamRaClaimReduction, RegistersValEvaluation
 
-            // Instance 1: RamRaClaimReduction (RamRa)
-            transcript.appendScalar("opening_claim", stage5_result.ram_ra_claim);
-
-            // Instance 2: LookupsReadRaf (LookupTableFlag(0..41), InstructionRa(0..8), InstructionRafFlag)
+            // Instance 0: LookupsReadRaf (LookupTableFlag(0..41), InstructionRa(0..8), InstructionRafFlag)
             for (stage5_result.lookups_table_flags) |flag| {
                 transcript.appendScalar("opening_claim", flag);
             }
@@ -3580,6 +3686,13 @@ pub fn ProofConverter(comptime F: type) type {
                 transcript.appendScalar("opening_claim", chunk);
             }
             transcript.appendScalar("opening_claim", stage5_result.lookups_raf_flag);
+
+            // Instance 1: RamRaClaimReduction (RamRa)
+            transcript.appendScalar("opening_claim", stage5_result.ram_ra_claim);
+
+            // Instance 2: RegistersValEvaluation (RdInc, RdWa)
+            transcript.appendScalar("opening_claim", stage5_result.regs_val_inc_claim);
+            transcript.appendScalar("opening_claim", stage5_result.regs_val_wa_claim);
 
             {
                 // ALWAYS-ON: Print transcript state after Stage 5 cache_openings
@@ -3668,6 +3781,8 @@ pub fn ProofConverter(comptime F: type) type {
                 if (stage4_r_cycle_val) |v| v else s_cycle_stage5, // r_cycle_inc: RamValEvaluation
                 // Stage 5 challenges for deriving LookupsRaVirtual and RamRaVirtual points
                 stage5_result.challenges,
+                // RAM r_address from Stage 2 (BIG_ENDIAN) — aligned address used by RamRaClaimReduction
+                stage2_result.r_address_raf,
                 // Memory layout for address remapping
                 the_memory_layout,
                 // Bytecode entries for Val polynomial computation
@@ -3677,6 +3792,8 @@ pub fn ProofConverter(comptime F: type) type {
                 r_register_5,
                 // BytecodePCMapper for converting ELF addresses to bytecode array indices
                 pc_map_ptr,
+                // Stage 4 inc_poly copy for diagnostic
+                if (stage4_inc_poly_copy) |v| v else &[_]F{},
             );
             defer stage6_result.deinit();
 

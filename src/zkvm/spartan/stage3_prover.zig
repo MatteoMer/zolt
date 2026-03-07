@@ -24,7 +24,7 @@
 const std = @import("std");
 
 // Debug output control - set to true to enable verbose debug prints
-const debug_verbose = false;
+const debug_verbose = true;
 fn dbg(comptime fmt: []const u8, args: anytype) void {
     if (debug_verbose) std.debug.print(fmt, args);
 }
@@ -158,8 +158,6 @@ pub fn Stage3Prover(comptime F: type) type {
 
             // InstructionInputParams::new - derive 1 gamma
             const instr_gamma = transcript.challengeScalarFull();
-            const instr_gamma_sqr = instr_gamma.mul(instr_gamma);
-
             // RegistersClaimReductionSumcheckParams::new - derive 1 gamma
             const reg_gamma = transcript.challengeScalarFull();
             const reg_gamma_sqr = reg_gamma.mul(reg_gamma);
@@ -174,7 +172,7 @@ pub fn Stage3Prover(comptime F: type) type {
             const instr_input_claim = self.computeInstructionInputClaim(
                 opening_claims,
                 instr_gamma,
-                instr_gamma_sqr,
+                instr_gamma,
             );
             dbg("[ZOLT] STAGE3_PRE: input_claim[1] (InstrInput) = {{ {any} }}\n", .{instr_input_claim.toBytes()});
 
@@ -242,7 +240,6 @@ pub fn Stage3Prover(comptime F: type) type {
                 r_outer,
                 r_product,
                 instr_gamma,
-                instr_gamma_sqr,
             );
             defer instr_prover.deinit();
 
@@ -257,12 +254,12 @@ pub fn Stage3Prover(comptime F: type) type {
                     .add(instr_prover.left_is_pc[i].mul(instr_prover.unexpanded_pc[i]));
                 const right_i = instr_prover.right_is_rs2[i].mul(instr_prover.rs2_value[i])
                     .add(instr_prover.right_is_imm[i].mul(instr_prover.imm[i]));
-                const eq_weight_i = instr_prover.eq_outer[i].add(instr_gamma_sqr.mul(instr_prover.eq_product[i]));
+                const eq_weight_i = instr_prover.eq_stage2[i];
                 full_sum = full_sum.add(eq_weight_i.mul(right_i.add(instr_gamma.mul(left_i))));
 
                 // Also compute eq-weighted sums of left and right separately for each stage
-                left_sum = left_sum.add(instr_prover.eq_outer[i].mul(left_i));
-                right_sum = right_sum.add(instr_prover.eq_outer[i].mul(right_i));
+                left_sum = left_sum.add(instr_prover.eq_stage2[i].mul(left_i));
+                right_sum = right_sum.add(instr_prover.eq_stage2[i].mul(right_i));
             }
             dbg("[ZOLT] INSTR_INIT: full_sum = {{ {any} }}\n", .{full_sum.toBytes()[0..8]});
             dbg("[ZOLT] INSTR_INIT: instr_input_claim = {{ {any} }}\n", .{instr_input_claim.toBytes()[0..8]});
@@ -340,14 +337,14 @@ pub fn Stage3Prover(comptime F: type) type {
                             .add(instr_prover.left_is_pc[2 * j].mul(instr_prover.unexpanded_pc[2 * j]));
                         const right_0 = instr_prover.right_is_rs2[2 * j].mul(instr_prover.rs2_value[2 * j])
                             .add(instr_prover.right_is_imm[2 * j].mul(instr_prover.imm[2 * j]));
-                        const eq_w_0 = instr_prover.eq_outer[2 * j].add(instr_gamma_sqr.mul(instr_prover.eq_product[2 * j]));
+                        const eq_w_0 = instr_prover.eq_stage2[2 * j];
                         manual_p0 = manual_p0.add(eq_w_0.mul(right_0.add(instr_gamma.mul(left_0))));
 
                         const left_1 = instr_prover.left_is_rs1[2 * j + 1].mul(instr_prover.rs1_value[2 * j + 1])
                             .add(instr_prover.left_is_pc[2 * j + 1].mul(instr_prover.unexpanded_pc[2 * j + 1]));
                         const right_1 = instr_prover.right_is_rs2[2 * j + 1].mul(instr_prover.rs2_value[2 * j + 1])
                             .add(instr_prover.right_is_imm[2 * j + 1].mul(instr_prover.imm[2 * j + 1]));
-                        const eq_w_1 = instr_prover.eq_outer[2 * j + 1].add(instr_gamma_sqr.mul(instr_prover.eq_product[2 * j + 1]));
+                        const eq_w_1 = instr_prover.eq_stage2[2 * j + 1];
                         manual_p1 = manual_p1.add(eq_w_1.mul(right_1.add(instr_gamma.mul(left_1))));
                     }
                     dbg("[ZOLT] ROUND0_VERIFY: manual_p0 = {{ {any} }}\n", .{manual_p0.toBytes()[0..8]});
@@ -387,14 +384,14 @@ pub fn Stage3Prover(comptime F: type) type {
                         .add(instr_prover.left_is_pc[0].mul(instr_prover.unexpanded_pc[0]));
                     const right_0 = instr_prover.right_is_rs2[0].mul(instr_prover.rs2_value[0])
                         .add(instr_prover.right_is_imm[0].mul(instr_prover.imm[0]));
-                    const eq_weight_0 = instr_prover.eq_outer[0].add(instr_gamma_sqr.mul(instr_prover.eq_product[0]));
+                    const eq_weight_0 = instr_prover.eq_stage2[0];
                     const f_0 = eq_weight_0.mul(right_0.add(instr_gamma.mul(left_0)));
 
                     const left_1 = instr_prover.left_is_rs1[1].mul(instr_prover.rs1_value[1])
                         .add(instr_prover.left_is_pc[1].mul(instr_prover.unexpanded_pc[1]));
                     const right_1 = instr_prover.right_is_rs2[1].mul(instr_prover.rs2_value[1])
                         .add(instr_prover.right_is_imm[1].mul(instr_prover.imm[1]));
-                    const eq_weight_1 = instr_prover.eq_outer[1].add(instr_gamma_sqr.mul(instr_prover.eq_product[1]));
+                    const eq_weight_1 = instr_prover.eq_stage2[1];
                     const f_1 = eq_weight_1.mul(right_1.add(instr_gamma.mul(left_1)));
 
                     dbg("[ZOLT] LAST_ROUND: manual_f0 = {{ {any} }}\n", .{f_0.toBytes()[0..8]});
@@ -404,8 +401,8 @@ pub fn Stage3Prover(comptime F: type) type {
                     // Check actual witness values at index 1
                     dbg("[ZOLT] LAST_ROUND: left_is_rs1[1] = {{ {any} }}\n", .{instr_prover.left_is_rs1[1].toBytes()[0..8]});
                     dbg("[ZOLT] LAST_ROUND: rs1_value[1] = {{ {any} }}\n", .{instr_prover.rs1_value[1].toBytes()[0..8]});
-                    dbg("[ZOLT] LAST_ROUND: eq_outer[1] = {{ {any} }}\n", .{instr_prover.eq_outer[1].toBytes()[0..8]});
-                    dbg("[ZOLT] LAST_ROUND: eq_product[1] = {{ {any} }}\n", .{instr_prover.eq_product[1].toBytes()[0..8]});
+                    dbg("[ZOLT] LAST_ROUND: eq_outer[1] = {{ {any} }}\n", .{instr_prover.eq_stage2[1].toBytes()[0..8]});
+                    dbg("[ZOLT] LAST_ROUND: eq_product[1] = {{ {any} }}\n", .{instr_prover.eq_stage2[1].toBytes()[0..8]});
                     dbg("[ZOLT] LAST_ROUND: eq_weight_1 = {{ {any} }}\n", .{eq_weight_1.toBytes()[0..8]});
                     dbg("[ZOLT] LAST_ROUND: left_1 = {{ {any} }}\n", .{left_1.toBytes()[0..8]});
                     dbg("[ZOLT] LAST_ROUND: right_1 = {{ {any} }}\n", .{right_1.toBytes()[0..8]});
@@ -570,7 +567,7 @@ pub fn Stage3Prover(comptime F: type) type {
                                     .add(instr_prover.left_is_pc[2 * j].mul(instr_prover.unexpanded_pc[2 * j]));
                                 const right_0 = instr_prover.right_is_rs2[2 * j].mul(instr_prover.rs2_value[2 * j])
                                     .add(instr_prover.right_is_imm[2 * j].mul(instr_prover.imm[2 * j]));
-                                const eq_w_0 = instr_prover.eq_outer[2 * j].add(instr_gamma_sqr.mul(instr_prover.eq_product[2 * j]));
+                                const eq_w_0 = instr_prover.eq_stage2[2 * j];
                                 const contrib_0 = eq_w_0.mul(right_0.add(instr_gamma.mul(left_0)));
                                 f0_sum = f0_sum.add(contrib_0);
 
@@ -578,7 +575,7 @@ pub fn Stage3Prover(comptime F: type) type {
                                     .add(instr_prover.left_is_pc[2 * j + 1].mul(instr_prover.unexpanded_pc[2 * j + 1]));
                                 const right_1 = instr_prover.right_is_rs2[2 * j + 1].mul(instr_prover.rs2_value[2 * j + 1])
                                     .add(instr_prover.right_is_imm[2 * j + 1].mul(instr_prover.imm[2 * j + 1]));
-                                const eq_w_1 = instr_prover.eq_outer[2 * j + 1].add(instr_gamma_sqr.mul(instr_prover.eq_product[2 * j + 1]));
+                                const eq_w_1 = instr_prover.eq_stage2[2 * j + 1];
                                 const contrib_1 = eq_w_1.mul(right_1.add(instr_gamma.mul(left_1)));
                                 f1_sum = f1_sum.add(contrib_1);
                             }
@@ -657,7 +654,7 @@ pub fn Stage3Prover(comptime F: type) type {
                     .add(i_claims.left_is_pc.mul(i_claims.unexpanded_pc));
                 const right_instr = i_claims.right_is_rs2.mul(i_claims.rs2_value)
                     .add(i_claims.right_is_imm.mul(i_claims.imm));
-                const instr_expected = (eq_r_stage_1.add(instr_gamma_sqr.mul(eq_r_stage_2)))
+                const instr_expected = eq_r_stage_2
                     .mul(right_instr.add(instr_gamma.mul(left_instr)));
 
                 dbg("\n[ZOLT] STAGE3_DEBUG: eq_r_stage_1 = {{ {any} }}\n", .{eq_r_stage_1.toBytes()});
@@ -675,7 +672,7 @@ pub fn Stage3Prover(comptime F: type) type {
                 dbg("[ZOLT] STAGE3_DEBUG: left_match = {}, right_match = {}\n", .{ direct_left.eql(left_instr), direct_right.eql(right_instr) });
 
                 // Now recompute instr_expected using prover's eq values
-                const prover_eq_weight = instr_prover.eq_outer[0].add(instr_gamma_sqr.mul(instr_prover.eq_product[0]));
+                const prover_eq_weight = instr_prover.eq_stage2[0];
                 const prover_f = prover_eq_weight.mul(direct_right.add(instr_gamma.mul(direct_left)));
                 dbg("[ZOLT] STAGE3_DEBUG: prover_f = {{ {any} }}\n", .{prover_f.toBytes()});
 
@@ -691,8 +688,8 @@ pub fn Stage3Prover(comptime F: type) type {
                 dbg("[ZOLT] STAGE3_DEBUG: instr_prover.left_is_pc[0] = {{ {any} }}\n", .{instr_prover.left_is_pc[0].toBytes()[0..8]});
                 dbg("[ZOLT] STAGE3_DEBUG: instr_prover.unexpanded_pc[0] = {{ {any} }}\n", .{instr_prover.unexpanded_pc[0].toBytes()[0..8]});
 
-                dbg("[ZOLT] STAGE3_DEBUG: instr_prover_eq_outer[0] = {{ {any} }}\n", .{instr_prover.eq_outer[0].toBytes()});
-                dbg("[ZOLT] STAGE3_DEBUG: instr_prover_eq_prod[0] = {{ {any} }}\n", .{instr_prover.eq_product[0].toBytes()});
+                dbg("[ZOLT] STAGE3_DEBUG: instr_prover_eq_outer[0] = {{ {any} }}\n", .{instr_prover.eq_stage2[0].toBytes()});
+                dbg("[ZOLT] STAGE3_DEBUG: instr_prover_eq_prod[0] = {{ {any} }}\n", .{instr_prover.eq_stage2[0].toBytes()});
                 dbg("[ZOLT] STAGE3_DEBUG: instr_expected = {{ {any} }}\n", .{instr_expected.toBytes()});
                 dbg("[ZOLT] STAGE3_DEBUG: current_instr_claim = {{ {any} }}\n", .{current_instr_claim.toBytes()});
                 dbg("[ZOLT] STAGE3_DEBUG: instr_match = {}\n", .{instr_expected.eql(current_instr_claim)});
@@ -903,8 +900,8 @@ pub fn Stage3Prover(comptime F: type) type {
 
             dbg("  [8] unexpanded_pc LE = {{ ", .{});
             for (instr_claims.unexpanded_pc.toBytes()) |b| dbg("{x:0>2}, ", .{b});
-            dbg("}}\n", .{});
-            transcript.appendScalar("opening_claim", instr_claims.unexpanded_pc);
+            dbg("}} (ALIASED - same poly UnexpandedPC at same point as Shift)\n", .{});
+            // ALIASED: UnexpandedPC already opened at same point by ShiftSumcheck — not flushed to transcript
 
             dbg("  [9] right_is_rs2 LE = {{ ", .{});
             for (instr_claims.right_is_rs2.toBytes()) |b| dbg("{x:0>2}, ", .{b});
@@ -935,16 +932,16 @@ pub fn Stage3Prover(comptime F: type) type {
 
             dbg("  [14] rs1_value LE = {{ ", .{});
             for (reg_claims.rs1_value.toBytes()) |b| dbg("{x:0>2}, ", .{b});
-            dbg("}}\n", .{});
-            transcript.appendScalar("opening_claim", reg_claims.rs1_value);
+            dbg("}} (ALIASED - same poly Rs1Value at same point as InstrInput)\n", .{});
+            // ALIASED: Rs1Value already opened at same point by InstructionInputSumcheck — not flushed
 
             dbg("  [15] rs2_value LE = {{ ", .{});
             for (reg_claims.rs2_value.toBytes()) |b| dbg("{x:0>2}, ", .{b});
-            dbg("}}\n", .{});
-            transcript.appendScalar("opening_claim", reg_claims.rs2_value);
+            dbg("}} (ALIASED - same poly Rs2Value at same point as InstrInput)\n", .{});
+            // ALIASED: Rs2Value already opened at same point by InstructionInputSumcheck — not flushed
 
             // Print transcript state after cache_openings
-            dbg("[ZOLT cache_openings] Transcript state AFTER all 16 claims: {{ ", .{});
+            dbg("[ZOLT cache_openings] Transcript state AFTER all 13 claims (3 aliased): {{ ", .{});
             for (transcript.state[0..8]) |b| dbg("{x:0>2} ", .{b});
             dbg("}}\n", .{});
 
@@ -1063,15 +1060,13 @@ pub fn Stage3Prover(comptime F: type) type {
             gamma_sqr: F,
         ) F {
             _ = self;
-            // input_claim = (right_1 + gamma*left_1) + gamma^2*(right_2 + gamma*left_2)
-            const left_1 = opening_claims.get(.{ .Virtual = .{ .poly = .LeftInstructionInput, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
-            const right_1 = opening_claims.get(.{ .Virtual = .{ .poly = .RightInstructionInput, .sumcheck_id = .SpartanOuter } }) orelse F.zero();
-            const left_2 = opening_claims.get(.{ .Virtual = .{ .poly = .LeftInstructionInput, .sumcheck_id = .SpartanProductVirtualization } }) orelse F.zero();
-            const right_2 = opening_claims.get(.{ .Virtual = .{ .poly = .RightInstructionInput, .sumcheck_id = .SpartanProductVirtualization } }) orelse F.zero();
+            _ = gamma_sqr;
+            // Upstream: input_claim = right_claim_stage_2 + gamma * left_claim_stage_2
+            // Uses only SpartanProductVirtualization claims (aliased to InstructionClaimReduction)
+            const left = opening_claims.get(.{ .Virtual = .{ .poly = .LeftInstructionInput, .sumcheck_id = .SpartanProductVirtualization } }) orelse F.zero();
+            const right = opening_claims.get(.{ .Virtual = .{ .poly = .RightInstructionInput, .sumcheck_id = .SpartanProductVirtualization } }) orelse F.zero();
 
-            const claim_1 = right_1.add(gamma.mul(left_1));
-            const claim_2 = right_2.add(gamma.mul(left_2));
-            return claim_1.add(gamma_sqr.mul(claim_2));
+            return right.add(gamma.mul(left));
         }
 
         /// Compute RegistersClaimReduction input claim
@@ -2245,12 +2240,10 @@ fn InstructionInputProver(comptime F: type) type {
         right_is_imm: []F,
         imm: []F,
 
-        // Eq polynomial evaluations
-        eq_outer: []F,
-        eq_product: []F,
+        // Eq polynomial evaluations (single eq at r_cycle_stage_2)
+        eq_stage2: []F,
 
         gamma: F,
-        gamma_sqr: F,
 
         current_size: usize,
         allocator: Allocator,
@@ -2262,7 +2255,6 @@ fn InstructionInputProver(comptime F: type) type {
             r_outer: []const F,
             r_product: []const F,
             gamma: F,
-            gamma_sqr: F,
         ) !Self {
             // Allocate MLEs
             const left_is_rs1 = try allocator.alloc(F, trace_len);
@@ -2298,14 +2290,11 @@ fn InstructionInputProver(comptime F: type) type {
                 }
             }
 
-            // Compute eq evaluations
-            var eq_outer_poly = try poly_mod.EqPolynomial(F).init(allocator, r_outer);
-            defer eq_outer_poly.deinit();
-            const eq_outer = try eq_outer_poly.evals(allocator);
-
-            var eq_product_poly = try poly_mod.EqPolynomial(F).init(allocator, r_product);
-            defer eq_product_poly.deinit();
-            const eq_product = try eq_product_poly.evals(allocator);
+            // Compute eq evaluations — single eq polynomial at r_product (= r_cycle_stage_2)
+            _ = r_outer; // Not used for InstructionInput
+            var eq_stage2_poly = try poly_mod.EqPolynomial(F).init(allocator, r_product);
+            defer eq_stage2_poly.deinit();
+            const eq_stage2 = try eq_stage2_poly.evals(allocator);
 
             return Self{
                 .left_is_rs1 = left_is_rs1,
@@ -2316,10 +2305,8 @@ fn InstructionInputProver(comptime F: type) type {
                 .rs2_value = rs2_value,
                 .right_is_imm = right_is_imm,
                 .imm = imm,
-                .eq_outer = eq_outer,
-                .eq_product = eq_product,
+                .eq_stage2 = eq_stage2,
                 .gamma = gamma,
-                .gamma_sqr = gamma_sqr,
                 .current_size = trace_len,
                 .allocator = allocator,
             };
@@ -2334,8 +2321,7 @@ fn InstructionInputProver(comptime F: type) type {
             self.allocator.free(self.rs2_value);
             self.allocator.free(self.right_is_imm);
             self.allocator.free(self.imm);
-            self.allocator.free(self.eq_outer);
-            self.allocator.free(self.eq_product);
+            self.allocator.free(self.eq_stage2);
         }
 
         /// Compute round evaluations [p(0), p(1), p(2), p(3)] for degree-3 polynomial
@@ -2361,10 +2347,8 @@ fn InstructionInputProver(comptime F: type) type {
                 const right_is_imm_1 = self.right_is_imm[2 * j + 1];
                 const imm_0 = self.imm[2 * j];
                 const imm_1 = self.imm[2 * j + 1];
-                const eq_out_0 = self.eq_outer[2 * j];
-                const eq_out_1 = self.eq_outer[2 * j + 1];
-                const eq_prod_0 = self.eq_product[2 * j];
-                const eq_prod_1 = self.eq_product[2 * j + 1];
+                const eq_0 = self.eq_stage2[2 * j];
+                const eq_1 = self.eq_stage2[2 * j + 1];
 
                 // Extrapolate to X=2 and X=3
                 const left_is_rs1_2 = left_is_rs1_1.add(left_is_rs1_1).sub(left_is_rs1_0);
@@ -2383,28 +2367,23 @@ fn InstructionInputProver(comptime F: type) type {
                 const right_is_imm_3 = right_is_imm_2.add(right_is_imm_1).sub(right_is_imm_0);
                 const imm_2 = imm_1.add(imm_1).sub(imm_0);
                 const imm_3 = imm_2.add(imm_1).sub(imm_0);
-                const eq_out_2 = eq_out_1.add(eq_out_1).sub(eq_out_0);
-                const eq_out_3 = eq_out_2.add(eq_out_1).sub(eq_out_0);
-                const eq_prod_2 = eq_prod_1.add(eq_prod_1).sub(eq_prod_0);
-                const eq_prod_3 = eq_prod_2.add(eq_prod_1).sub(eq_prod_0);
+                const eq_2 = eq_1.add(eq_1).sub(eq_0);
+                const eq_3 = eq_2.add(eq_1).sub(eq_0);
 
-                // Compute at X=0
+                // Compute at X=0: eq(r_stage2, j) * (right(j) + gamma * left(j))
                 const left_0 = left_is_rs1_0.mul(rs1_0).add(left_is_pc_0.mul(pc_0));
                 const right_0 = right_is_rs2_0.mul(rs2_0).add(right_is_imm_0.mul(imm_0));
-                const eq_weight_0 = eq_out_0.add(self.gamma_sqr.mul(eq_prod_0));
-                const f_0 = eq_weight_0.mul(right_0.add(self.gamma.mul(left_0)));
+                const f_0 = eq_0.mul(right_0.add(self.gamma.mul(left_0)));
 
                 // Compute at X=2
                 const left_2 = left_is_rs1_2.mul(rs1_2).add(left_is_pc_2.mul(pc_2));
                 const right_2 = right_is_rs2_2.mul(rs2_2).add(right_is_imm_2.mul(imm_2));
-                const eq_weight_2 = eq_out_2.add(self.gamma_sqr.mul(eq_prod_2));
-                const f_2 = eq_weight_2.mul(right_2.add(self.gamma.mul(left_2)));
+                const f_2 = eq_2.mul(right_2.add(self.gamma.mul(left_2)));
 
                 // Compute at X=3
                 const left_3 = left_is_rs1_3.mul(rs1_3).add(left_is_pc_3.mul(pc_3));
                 const right_3 = right_is_rs2_3.mul(rs2_3).add(right_is_imm_3.mul(imm_3));
-                const eq_weight_3 = eq_out_3.add(self.gamma_sqr.mul(eq_prod_3));
-                const f_3 = eq_weight_3.mul(right_3.add(self.gamma.mul(left_3)));
+                const f_3 = eq_3.mul(right_3.add(self.gamma.mul(left_3)));
 
                 evals[0] = evals[0].add(f_0);
                 evals[1] = evals[1].add(f_2);
@@ -2431,8 +2410,7 @@ fn InstructionInputProver(comptime F: type) type {
                 self.rs2_value[i] = self.rs2_value[2 * i].add(r_j.mul(self.rs2_value[2 * i + 1].sub(self.rs2_value[2 * i])));
                 self.right_is_imm[i] = self.right_is_imm[2 * i].add(r_j.mul(self.right_is_imm[2 * i + 1].sub(self.right_is_imm[2 * i])));
                 self.imm[i] = self.imm[2 * i].add(r_j.mul(self.imm[2 * i + 1].sub(self.imm[2 * i])));
-                self.eq_outer[i] = self.eq_outer[2 * i].add(r_j.mul(self.eq_outer[2 * i + 1].sub(self.eq_outer[2 * i])));
-                self.eq_product[i] = self.eq_product[2 * i].add(r_j.mul(self.eq_product[2 * i + 1].sub(self.eq_product[2 * i])));
+                self.eq_stage2[i] = self.eq_stage2[2 * i].add(r_j.mul(self.eq_stage2[2 * i + 1].sub(self.eq_stage2[2 * i])));
             }
 
             self.current_size = new_size;

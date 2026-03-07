@@ -608,11 +608,17 @@ pub const Emulator = struct {
 
     /// Execute a standard (non-W-extension) instruction as a single trace step
     fn stepNormal(self: *Emulator, instruction: u32, decoded: zkvm.instruction.DecodedInstruction) !bool {
+        // Upstream Jolt remaps JAL/JALR with rd=x0 to virtual register 40.
+        // Compute effective_rd early so pre-value read uses the correct register.
+        const FIRST_VIRTUAL_ALLOC_REG: u8 = 40; // 32 (RISCV) + 8 (reserved)
+        const is_jump_rd0 = (decoded.opcode == .JAL or decoded.opcode == .JALR) and decoded.rd == 0;
+        const effective_rd: u8 = if (is_jump_rd0) FIRST_VIRTUAL_ALLOC_REG else decoded.rd;
+
         // Record pre-execution state
         const rs1_value = try self.registers.read(decoded.rs1);
         const rs2_value = try self.registers.read(decoded.rs2);
-        // Capture rd pre-value (before instruction execution, just like Jolt does)
-        const rd_pre_value = try self.registers.read(decoded.rd);
+        // Capture rd pre-value from effective register (vr40 for JAL/JALR x0)
+        const rd_pre_value = try self.registers.read(effective_rd);
 
         // Record lookup trace for Lasso proofs (before execution)
         try self.lookup_trace.recordInstruction(
@@ -664,16 +670,13 @@ pub const Emulator = struct {
             else => true, // All other instructions have rd field (even rd=0)
         };
 
-        // For rd=0: upstream Jolt remaps JAL/JALR with rd=x0 to a virtual register,
-        // so the link address is still recorded as rd_write_value.  For other instructions
-        // with rd=0, the value is 0 (x0 is hardwired to zero).
-        // We keep rd_index=0 (no virtual register remapping) but preserve the link
-        // address as rd_value for JAL/JALR so that:
-        //   - R1CS constraint 13 (FlagJump => RdWriteValue == link_address) is satisfied
-        //   - Stage 4 RegistersRWC computes the correct inc = link_address
-        const is_jump = (opcode == .JAL or opcode == .JALR);
-        const actual_rd_value = if (decoded.rd == 0 and !is_jump) @as(u64, 0) else result.rd_value;
-        const actual_rd_pre_value = if (decoded.rd == 0) @as(u64, 0) else rd_pre_value;
+        // For JAL/JALR with rd=x0 remapped to vr40, write the link address there
+        if (is_jump_rd0) {
+            try self.registers.write(FIRST_VIRTUAL_ALLOC_REG, result.rd_value);
+        }
+
+        const actual_rd_value = if (effective_rd == 0) @as(u64, 0) else result.rd_value;
+        const actual_rd_pre_value = if (effective_rd == 0) @as(u64, 0) else rd_pre_value;
 
         // Record trace step
         try self.trace.addStep(.{
@@ -685,7 +688,7 @@ pub const Emulator = struct {
             .rs2_value = rs2_value,
             .rd_pre_value = actual_rd_pre_value,
             .rd_value = actual_rd_value,
-            .rd_index = decoded.rd,
+            .rd_index = effective_rd,
             .rs1_index = decoded.rs1,
             .rs2_index = decoded.rs2,
             .rd_written = writes_rd,

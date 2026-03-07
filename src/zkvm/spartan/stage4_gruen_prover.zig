@@ -1,7 +1,7 @@
 const std = @import("std");
 
 // Debug output control - set to true to enable verbose debug prints
-const debug_verbose = false;
+const debug_verbose = true;
 fn dbg(comptime fmt: []const u8, args: anytype) void {
     if (debug_verbose) std.debug.print(fmt, args);
 }
@@ -230,15 +230,17 @@ pub fn Stage4GruenProver(comptime F: type) type {
                 // wa_coeff=1. We must match this by including rd=0 in rd_wa_poly.
                 if (step.rd_written) {
                     rd_wa_poly[@as(usize, rd) * T + cycle] = F.one();
-                    const pre_value = register_values[rd];
-                    const post_value = step.rd_value;
-                    inc_poly[cycle] = F.fromU64(post_value).sub(F.fromU64(pre_value));
-                    // Don't update register_values[0] - x0 is hardwired to zero.
-                    // Jolt resets cpu.x[0]=0 after each instruction, so subsequent reads
-                    // of x0 always see 0. register_values[0] stays 0.
                     if (rd != 0) {
+                        // Compute inc = post - pre for the committed RdInc polynomial.
+                        // Skip rd=0: in upstream Jolt, x0 is hardwired to 0 so inc is always 0.
+                        // The Zolt trace may record nonzero rd_value for rd=0 (e.g., JAL link
+                        // address), but the committed RdInc polynomial must match upstream.
+                        const pre_value = register_values[rd];
+                        const post_value = step.rd_value;
+                        inc_poly[cycle] = F.fromU64(post_value).sub(F.fromU64(pre_value));
                         register_values[rd] = post_value;
                     }
+                    // For rd=0: inc_poly stays zero (from memset), register_values[0] stays zero
                 }
             }
 

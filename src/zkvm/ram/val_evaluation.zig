@@ -666,6 +666,61 @@ pub fn ValEvaluationProver(comptime F: type) type {
             return evals;
         }
 
+        /// Compute round polynomial for the combined RamValCheck: inc * wa * (lt + gamma).
+        /// This matches upstream a16z/jolt's RamValCheckSumcheckProver::compute_message exactly.
+        /// Returns [eval_at_0, eval_at_1, eval_at_2, eval_at_inf] in Toom-Cook format.
+        pub fn computeRoundPolynomialCombined(self: *Self, gamma: F) [4]F {
+            var evals: [4]F = .{ F.zero(), F.zero(), F.zero(), F.zero() };
+            const n = self.effectiveLen();
+            const half = n / 2;
+
+            if (half == 0) {
+                if (n > 0) {
+                    evals[0] = self.inc_evals[0].mul(self.wa_evals[0]).mul(self.lt_evals[0].add(gamma));
+                }
+                return evals;
+            }
+
+            for (0..half) |i| {
+                const inc_0 = self.inc_evals[2 * i];
+                const wa_0 = self.wa_evals[2 * i];
+                const lt_0 = self.lt_evals[2 * i];
+                const inc_1 = self.inc_evals[2 * i + 1];
+                const wa_1 = self.wa_evals[2 * i + 1];
+                const lt_1 = self.lt_evals[2 * i + 1];
+
+                const two = F.fromU64(2);
+
+                // Extrapolate to x=2
+                const inc_2 = two.mul(inc_1).sub(inc_0);
+                const wa_2 = two.mul(wa_1).sub(wa_0);
+                const lt_2 = two.mul(lt_1).sub(lt_0);
+
+                // Slopes (for eval_at_inf)
+                const inc_slope = inc_1.sub(inc_0);
+                const wa_slope = wa_1.sub(wa_0);
+                const lt_slope = lt_1.sub(lt_0);
+
+                // Term 1: inc * wa * lt (degree 3)
+                const t1_at_0 = inc_0.mul(wa_0).mul(lt_0);
+                const t1_at_1 = inc_1.mul(wa_1).mul(lt_1);
+                const t1_at_2 = inc_2.mul(wa_2).mul(lt_2);
+                const t1_at_inf = inc_slope.mul(wa_slope).mul(lt_slope);
+
+                // Term 2: gamma * inc * wa (degree 2, no contribution to eval_at_inf)
+                const t2_at_0 = gamma.mul(inc_0.mul(wa_0));
+                const t2_at_1 = gamma.mul(inc_1.mul(wa_1));
+                const t2_at_2 = gamma.mul(inc_2.mul(wa_2));
+
+                evals[0] = evals[0].add(t1_at_0.add(t2_at_0));
+                evals[1] = evals[1].add(t1_at_1.add(t2_at_1));
+                evals[2] = evals[2].add(t1_at_2.add(t2_at_2));
+                evals[3] = evals[3].add(t1_at_inf); // Only cubic term contributes
+            }
+
+            return evals;
+        }
+
         /// Bind the current variable to challenge r, and provide round polynomial values
         /// This folds all three polynomials using LowToHigh binding order:
         /// f_new[i] = (1-r)*f[2*i] + r*f[2*i+1]

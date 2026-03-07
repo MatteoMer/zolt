@@ -2,8 +2,8 @@
 //!
 //! Stage 6 is a batched sumcheck with 6 instances:
 //! 0. BytecodeReadRaf: bytecode_log_k + n_cycle_vars rounds, degree bytecode_d + 1
-//! 1. HammingBooleanity: n_cycle_vars rounds, degree 3 (input_claim = 0)
-//! 2. Booleanity: log_k_chunk + n_cycle_vars rounds, degree 3 (input_claim = 0)
+//! 1. Booleanity: log_k_chunk + n_cycle_vars rounds, degree 3 (input_claim = 0)
+//! 2. HammingBooleanity: n_cycle_vars rounds, degree 3 (input_claim = 0)
 //! 3. RamRaVirtual: n_cycle_vars rounds, degree ram_d + 1
 //! 4. LookupsRaVirtual: n_cycle_vars rounds, degree n_committed_per_virtual + 1
 //! 5. IncClaimReduction: n_cycle_vars rounds, degree 2
@@ -50,8 +50,8 @@ pub const BytecodeEntry = struct {
     rd: u8,
     rs1: u8,
     rs2: u8,
-    /// Circuit flags (13 flags, matches CircuitFlags enum)
-    circuit_flags: [13]bool,
+    /// Circuit flags (14 flags, matches CircuitFlags enum)
+    circuit_flags: [14]bool,
     /// Instruction flags (7 flags, matches InstructionFlags enum)
     instruction_flags: [7]bool,
     /// Lookup table index (0..41, or 255 for no lookup table)
@@ -100,7 +100,7 @@ fn populateVirtualMULIEntry(
     entry.opcode = 0x2B;
     entry.funct3 = 0;
 
-    entry.circuit_flags = [_]bool{false} ** 13;
+    entry.circuit_flags = [_]bool{false} ** 14;
     entry.instruction_flags = [_]bool{false} ** 7;
 
     var cf = &entry.circuit_flags;
@@ -156,7 +156,7 @@ fn populateVirtualSignExtendWordEntry(
     entry.opcode = 0x0B;
     entry.funct3 = 0;
 
-    entry.circuit_flags = [_]bool{false} ** 13;
+    entry.circuit_flags = [_]bool{false} ** 14;
     entry.instruction_flags = [_]bool{false} ** 7;
 
     var cf = &entry.circuit_flags;
@@ -208,7 +208,7 @@ fn populateVirtualSignExtendWordEntryWithParams(
     entry.opcode = 0x0B;
     entry.funct3 = 0;
 
-    entry.circuit_flags = [_]bool{false} ** 13;
+    entry.circuit_flags = [_]bool{false} ** 14;
     entry.instruction_flags = [_]bool{false} ** 7;
 
     var cf = &entry.circuit_flags;
@@ -262,7 +262,7 @@ fn populateVirtualSRLIEntry(
     entry.opcode = 0x5B;
     entry.funct3 = 0;
 
-    entry.circuit_flags = [_]bool{false} ** 13;
+    entry.circuit_flags = [_]bool{false} ** 14;
     entry.instruction_flags = [_]bool{false} ** 7;
 
     var cf = &entry.circuit_flags;
@@ -315,7 +315,7 @@ fn populateVirtualAdviceEntry(
     entry.opcode = 0x02;
     entry.funct3 = 0;
 
-    entry.circuit_flags = [_]bool{false} ** 13;
+    entry.circuit_flags = [_]bool{false} ** 14;
     entry.instruction_flags = [_]bool{false} ** 7;
 
     var cf = &entry.circuit_flags;
@@ -368,7 +368,7 @@ fn populateVirtualAssertEQEntry(
     entry.opcode = 0x22;
     entry.funct3 = 0;
 
-    entry.circuit_flags = [_]bool{false} ** 13;
+    entry.circuit_flags = [_]bool{false} ** 14;
     entry.instruction_flags = [_]bool{false} ** 7;
 
     var cf = &entry.circuit_flags;
@@ -418,7 +418,7 @@ fn populateVirtualZeroExtendWordEntry(
     entry.opcode = 0x42;
     entry.funct3 = 0;
 
-    entry.circuit_flags = [_]bool{false} ** 13;
+    entry.circuit_flags = [_]bool{false} ** 14;
     entry.instruction_flags = [_]bool{false} ** 7;
 
     var cf = &entry.circuit_flags;
@@ -470,7 +470,7 @@ fn populateVirtualAssertValidUnsignedRemainderEntry(
     entry.opcode = 0x62;
     entry.funct3 = 0;
 
-    entry.circuit_flags = [_]bool{false} ** 13;
+    entry.circuit_flags = [_]bool{false} ** 14;
     entry.instruction_flags = [_]bool{false} ** 7;
 
     var cf = &entry.circuit_flags;
@@ -515,7 +515,7 @@ fn populateVirtualAssertValidDiv0Entry(
     entry.rs2 = rs2;
     entry.opcode = 0x22;
     entry.funct3 = 1; // funct3=1 distinguishes VirtualAssertValidDiv0 from VirtualAssertEQ (funct3=0)
-    entry.circuit_flags = [_]bool{false} ** 13;
+    entry.circuit_flags = [_]bool{false} ** 14;
     entry.instruction_flags = [_]bool{false} ** 7;
     var cf = &entry.circuit_flags;
     cf[@intFromEnum(CircuitFlags.Assert)] = true;
@@ -549,7 +549,7 @@ fn populateVirtualChangeDivisorWEntry(
     entry.rs2 = rs2;
     entry.opcode = 0x3b;
     entry.funct3 = 6; // funct3=6 distinguishes VirtualChangeDivisorW from ADDW/SUBW etc
-    entry.circuit_flags = [_]bool{false} ** 13;
+    entry.circuit_flags = [_]bool{false} ** 14;
     entry.instruction_flags = [_]bool{false} ** 7;
     var cf = &entry.circuit_flags;
     cf[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)] = true;
@@ -623,7 +623,7 @@ fn populateVirtualSRAIEntry(
     entry.rs2 = 255;
     entry.opcode = 0x5B; // Virtual instruction opcode space (same as VirtualSRLI)
     entry.funct3 = 5; // funct3=5 distinguishes VirtualSRAI from VirtualSRLI (funct3=0)
-    entry.circuit_flags = [_]bool{false} ** 13;
+    entry.circuit_flags = [_]bool{false} ** 14;
     entry.instruction_flags = [_]bool{false} ** 7;
     var cf = &entry.circuit_flags;
     cf[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)] = true;
@@ -683,7 +683,7 @@ fn populateEntryFromInstruction(entry: *BytecodeEntry, instr: u32, elf_address: 
     // This is critical because entries are initialized with NoOp flags
     // (DoNotUpdateUnexpandedPC=true, IsNoop=true) and real instructions
     // must clear those defaults.
-    entry.circuit_flags = [_]bool{false} ** 13;
+    entry.circuit_flags = [_]bool{false} ** 14;
     entry.instruction_flags = [_]bool{false} ** 7;
 
     // Circuit flags
@@ -838,7 +838,7 @@ pub fn buildBytecodeEntries(
     // witness have FlagDoNotUpdateUnexpandedPC=1 and FlagIsNoop=1, and these must
     // match the bytecode entry flags at k=0 (and any unused padding entries).
     for (0..bytecode_K) |k| {
-        var cf = [_]bool{false} ** 13;
+        var cf = [_]bool{false} ** 14;
         cf[@intFromEnum(CircuitFlags.DoNotUpdateUnexpandedPC)] = true;
         var inf = [_]bool{false} ** 7;
         inf[@intFromEnum(InstructionFlags.IsNoop)] = true;
@@ -1144,6 +1144,15 @@ pub fn buildBytecodeEntries(
                 } else {
                     populateEntryFromInstruction(&entries[k], instr_word, addr);
 
+                    // Upstream Jolt remaps JAL/JALR with rd=x0 to virtual register 40.
+                    // The bytecode entry must match the trace step's rd_index.
+                    const opcode_byte: u8 = @truncate(instr_word & 0x7F);
+                    const rd_from_instr: u8 = @truncate((instr_word >> 7) & 0x1F);
+                    if ((opcode_byte == 0x6F or opcode_byte == 0x67) and rd_from_instr == 0) {
+                        entries[k].rd = 40; // FIRST_VIRTUAL_ALLOC_REG
+                        entries[k].instruction_flags[@intFromEnum(InstructionFlags.IsRdNotZero)] = true;
+                    }
+
                     // Mark compressed instructions
                     if (is_compressed) {
                         entries[k].circuit_flags[@intFromEnum(CircuitFlags.IsCompressed)] = true;
@@ -1223,13 +1232,23 @@ pub fn buildBytecodeEntries(
         }
     }
 
+    // Post-processing: set IsLastInSequence for JALR entries with virtual_sequence_remaining == 0
+    // Upstream Jolt only sets this flag on JALR instructions (opcode 0x67), not on all instructions.
+    for (0..bytecode_K) |k| {
+        if (entries[k].virtual_sequence_remaining) |vsr| {
+            if (vsr == 0 and entries[k].opcode == 0x67) {
+                entries[k].circuit_flags[@intFromEnum(CircuitFlags.IsLastInSequence)] = true;
+            }
+        }
+    }
+
     // Debug: dump first entries
     dbg("\n[ZOLT BYTECODE ENTRIES] bytecode_K={}\n", .{bytecode_K});
     for (0..@min(bytecode_K, 32)) |k| {
         const e = entries[k];
         // Compute a compact representation: cf_bits, if_bits
         var cf_bits: u16 = 0;
-        for (0..13) |i| {
+        for (0..14) |i| {
             if (e.circuit_flags[i]) cf_bits |= @as(u16, 1) << @intCast(i);
         }
         var if_bits: u8 = 0;
@@ -1429,9 +1448,8 @@ fn IncClaimReductionProver(comptime F: type) type {
                 const step = trace.steps.items[j];
 
                 // RdInc: must match Stage 4 gruen prover's inc_poly computation exactly.
-                // Use step.rd_written flag and step.rd_index (not instruction bit extraction).
-                // This correctly handles virtual registers (indices 32+) that don't fit
-                // in RISC-V's 5-bit rd field.
+                // Skip rd=0: in upstream Jolt, x0 is hardwired to 0 so inc is always 0.
+                // Stage 4 also skips rd=0 in inc_poly.
                 if (!step.is_noop and step.rd_written and step.rd_index != 0) {
                     const rd = step.rd_index;
                     const pre_value = register_values[rd];
@@ -2815,6 +2833,9 @@ fn BytecodeReadRafProver(comptime F: type) type {
         current_len: usize,
         addr_rounds_done: usize,
 
+        /// Stored from Phase 1→2 transition for diagnostics
+        bound_vals_stored: [5]F,
+
         /// Data needed for phase transition
         trace: *const ExecutionTrace,
         pc_map: *const BytecodePCMapper,
@@ -3204,6 +3225,7 @@ fn BytecodeReadRafProver(comptime F: type) type {
                 .log_k_chunk = log_k_chunk,
                 .current_len = bytecode_K,
                 .addr_rounds_done = 0,
+                .bound_vals_stored = [_]F{F.zero()} ** 5,
                 .trace = trace,
                 .pc_map = pc_map,
                 .stage_r_cycles = stage_r_cycles,
@@ -3428,6 +3450,7 @@ fn BytecodeReadRafProver(comptime F: type) type {
                 // Use the Phase 1 bound value directly (like Jolt's poly.final_sumcheck_claim()),
                 // NOT the recomputed val_eval from the eq table.
                 bound_vals[s] = self.gamma_powers[s].mul(self.val_with_raf[s][0]);
+                self.bound_vals_stored[s] = bound_vals[s];
 
                 // DIAGNOSTIC: compare re-computed val_eval with Phase 1 bound val_with_raf[s][0]
                 {
@@ -3770,6 +3793,8 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             r_cycle_inc_ram_val: []const F, // RamValEvaluation
             // Stage 5 challenges for deriving LookupsRaVirtual and RamRaVirtual points
             stage5_challenges: []const F,
+            // RAM r_address from Stage 2 (BIG_ENDIAN) — the aligned address used by RamRaClaimReduction
+            ram_r_address_stage2_be: []const F,
             // Memory layout for address remapping
             memory_layout: *const jolt_device.MemoryLayout,
             // Bytecode entry table for Val polynomial computation
@@ -3779,6 +3804,8 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             r_register_5: []const F, // From RegistersValEvaluation (address portion)
             // BytecodePCMapper for converting ELF addresses to bytecode array indices
             pc_map: *const BytecodePCMapper,
+            // Stage 4 inc_poly copy for diagnostic comparison (pass null slice to skip)
+            stage4_inc_poly_copy: []const F,
         ) !Stage6Result(F) {
             // Instance round counts
             const bytecodeReadRaf_rounds = bytecode_log_k + n_cycle_vars;
@@ -3836,7 +3863,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 });
             }
 
-            const NUM_CIRCUIT_FLAGS: usize = 13;
+            const NUM_CIRCUIT_FLAGS: usize = 14;
             const stage1_gammas = try transcript.challengeScalarPowers(self.allocator, 2 + NUM_CIRCUIT_FLAGS);
             defer self.allocator.free(stage1_gammas);
 
@@ -4027,31 +4054,24 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             const LOOKUPS_LOG_K: usize = 128;
             const ram_log_k: usize = std.math.log2_int(usize, @as(usize, 1) << @intCast(ram_d * log_k_chunk));
 
-            // RamRaVirtual: r_cycle and r_addr_chunks from RamRaClaimReduction (Stage 5 Instance 2)
-            // RamRaClaimReduction has ram_log_k + n_cycle_vars rounds in Stage 5's batched sumcheck
-            // Stage 5 max_rounds = LOOKUPS_LOG_K + n_cycle_vars = 136
-            // Batched sumcheck offset: max_rounds - instance_rounds
-            // So RamRa challenges come from stage5_challenges[offset..offset+ram_ra_total_rounds]
-            // normalize_opening_point reverses BOTH address and cycle parts
-            const ram_ra_total_rounds = ram_log_k + n_cycle_vars;
+            // RamRaVirtual: r_cycle from Stage 5 RamRaClaimReduction, r_address from Stage 2
+            // RamRaClaimReduction is cycle-only (log_T rounds), NOT address+cycle.
+            // The r_address comes from Stage 2's aligned RAM address, stored in ram_r_address_stage2_be.
             const stage5_max_rounds = LOOKUPS_LOG_K + n_cycle_vars;
-            const ram_ra_offset = stage5_max_rounds - ram_ra_total_rounds;
+            // RamRaClaimReduction has n_cycle_vars rounds (cycle-only), offset = stage5_max - n_cycle_vars
+            const ram_ra_offset = stage5_max_rounds - n_cycle_vars;
             dbg("[STAGE6] RamRa challenge offset: stage5_max={}, ram_ra_rounds={}, offset={}\n", .{
-                stage5_max_rounds, ram_ra_total_rounds, ram_ra_offset,
+                stage5_max_rounds, n_cycle_vars, ram_ra_offset,
             });
             var ram_ra_r_cycle = try self.allocator.alloc(F, n_cycle_vars);
             defer self.allocator.free(ram_ra_r_cycle);
             for (0..n_cycle_vars) |i| {
-                // Reverse cycle part: challenges[offset+ram_log_k..offset+ram_ra_total_rounds] reversed
-                ram_ra_r_cycle[i] = stage5_challenges[ram_ra_offset + ram_ra_total_rounds - 1 - i];
+                // Reverse cycle part: challenges[offset..offset+n_cycle_vars] reversed (BE)
+                ram_ra_r_cycle[i] = stage5_challenges[ram_ra_offset + n_cycle_vars - 1 - i];
             }
 
-            // r_address for RamRa: challenges[offset..offset+ram_log_k] reversed to BIG_ENDIAN
-            var ram_ra_r_address_be = try self.allocator.alloc(F, ram_log_k);
-            defer self.allocator.free(ram_ra_r_address_be);
-            for (0..ram_log_k) |i| {
-                ram_ra_r_address_be[i] = stage5_challenges[ram_ra_offset + ram_log_k - 1 - i];
-            }
+            // r_address for RamRa: from Stage 2 aligned RAM address (already BIG_ENDIAN)
+            const ram_ra_r_address_be = ram_r_address_stage2_be;
 
             // Split r_address into chunks (BIG_ENDIAN, chunk[0] = MSB)
             var ram_ra_addr_chunks = try self.allocator.alloc([]const F, ram_d);
@@ -4101,6 +4121,102 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 r_cycle_bc4_regs_rwc, r_cycle_bc5_regs_val,
             );
             defer inc_prover.deinit();
+
+            // Direct comparison: Stage 6 rd_inc vs Stage 4 inc_poly
+            if (stage4_inc_poly_copy.len > 0) {
+                var inc_diff_count: usize = 0;
+                const cmp_len = @min(inc_prover.rd_inc.len, stage4_inc_poly_copy.len);
+                for (0..cmp_len) |j| {
+                    if (!inc_prover.rd_inc[j].eql(stage4_inc_poly_copy[j])) {
+                        if (inc_diff_count < 8) {
+                            const a = inc_prover.rd_inc[j].toBytes();
+                            const b = stage4_inc_poly_copy[j].toBytes();
+                            const step_j = trace.steps.items[j];
+                            std.debug.print("[S6 vs S4 INC] j={} rd={} noop={} wr={} s6_LE={x:0>16} s4_LE={x:0>16}\n", .{
+                                j, step_j.rd_index,
+                                @as(u8, if (step_j.is_noop) 1 else 0),
+                                @as(u8, if (step_j.rd_written) 1 else 0),
+                                @as(u64, @bitCast(a[0..8].*)),
+                                @as(u64, @bitCast(b[0..8].*)),
+                            });
+                        }
+                        inc_diff_count += 1;
+                    }
+                }
+                std.debug.print("[S6 vs S4 INC] total differences: {}\n", .{inc_diff_count});
+            }
+
+            // Diagnostic: verify IncClaimReduction individual component sums
+            {
+                const T_inc = inc_prover.current_len;
+                // Recompute individual eq tables for diagnosis
+                var rev_buf2 = try self.allocator.alloc(F, n_cycle_vars);
+                defer self.allocator.free(rev_buf2);
+
+                for (0..n_cycle_vars) |i| rev_buf2[i] = r_cycle_inc_ram_rwc[n_cycle_vars - 1 - i];
+                const eq_r2_diag = try computeEqTable(F, self.allocator, rev_buf2, n_cycle_vars);
+                defer self.allocator.free(eq_r2_diag);
+
+                for (0..n_cycle_vars) |i| rev_buf2[i] = r_cycle_inc_ram_val[n_cycle_vars - 1 - i];
+                const eq_r4_diag = try computeEqTable(F, self.allocator, rev_buf2, n_cycle_vars);
+                defer self.allocator.free(eq_r4_diag);
+
+                for (0..n_cycle_vars) |i| rev_buf2[i] = r_cycle_bc4_regs_rwc[n_cycle_vars - 1 - i];
+                const eq_s4_diag = try computeEqTable(F, self.allocator, rev_buf2, n_cycle_vars);
+                defer self.allocator.free(eq_s4_diag);
+
+                for (0..n_cycle_vars) |i| rev_buf2[i] = r_cycle_bc5_regs_val[n_cycle_vars - 1 - i];
+                const eq_s5_diag = try computeEqTable(F, self.allocator, rev_buf2, n_cycle_vars);
+                defer self.allocator.free(eq_s5_diag);
+
+                var sv1 = F.zero();
+                var sv2 = F.zero();
+                var sw1 = F.zero();
+                var sw2 = F.zero();
+                for (0..T_inc) |j| {
+                    sv1 = sv1.add(inc_prover.ram_inc[j].mul(eq_r2_diag[j]));
+                    sv2 = sv2.add(inc_prover.ram_inc[j].mul(eq_r4_diag[j]));
+                    sw1 = sw1.add(inc_prover.rd_inc[j].mul(eq_s4_diag[j]));
+                    sw2 = sw2.add(inc_prover.rd_inc[j].mul(eq_s5_diag[j]));
+                }
+                const v1_ok: u8 = if (std.mem.eql(u8, &sv1.toBytesBE(), &v1_claim.toBytesBE())) 1 else 0;
+                const v2_ok: u8 = if (std.mem.eql(u8, &sv2.toBytesBE(), &v2_claim.toBytesBE())) 1 else 0;
+                const w1_ok: u8 = if (std.mem.eql(u8, &sw1.toBytesBE(), &w1_claim.toBytesBE())) 1 else 0;
+                const w2_ok: u8 = if (std.mem.eql(u8, &sw2.toBytesBE(), &w2_claim.toBytesBE())) 1 else 0;
+                std.debug.print("[INC_DIAG] v1_match={} v2_match={} w1_match={} w2_match={}\n", .{ v1_ok, v2_ok, w1_ok, w2_ok });
+                if (v1_ok == 0) {
+                    const a = sv1.toBytesBE();
+                    const b = v1_claim.toBytesBE();
+                    std.debug.print("[INC_DIAG] v1: sum_LE={x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2} claim_LE={x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}\n", .{
+                        a[31], a[30], a[29], a[28], a[27], a[26], a[25], a[24],
+                        b[31], b[30], b[29], b[28], b[27], b[26], b[25], b[24],
+                    });
+                }
+                if (v2_ok == 0) {
+                    const a = sv2.toBytesBE();
+                    const b = v2_claim.toBytesBE();
+                    std.debug.print("[INC_DIAG] v2: sum_LE={x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2} claim_LE={x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}\n", .{
+                        a[31], a[30], a[29], a[28], a[27], a[26], a[25], a[24],
+                        b[31], b[30], b[29], b[28], b[27], b[26], b[25], b[24],
+                    });
+                }
+                if (w1_ok == 0) {
+                    const a = sw1.toBytesBE();
+                    const b = w1_claim.toBytesBE();
+                    std.debug.print("[INC_DIAG] w1: sum_LE={x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2} claim_LE={x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}\n", .{
+                        a[31], a[30], a[29], a[28], a[27], a[26], a[25], a[24],
+                        b[31], b[30], b[29], b[28], b[27], b[26], b[25], b[24],
+                    });
+                }
+                if (w2_ok == 0) {
+                    const a = sw2.toBytesBE();
+                    const b = w2_claim.toBytesBE();
+                    std.debug.print("[INC_DIAG] w2: sum_LE={x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2} claim_LE={x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}\n", .{
+                        a[31], a[30], a[29], a[28], a[27], a[26], a[25], a[24],
+                        b[31], b[30], b[29], b[28], b[27], b[26], b[25], b[24],
+                    });
+                }
+            }
 
             // Instance 1: HammingBooleanity (degree 3)
             var hamming_prover = try HammingBooleanityProver(F).init(
@@ -4402,14 +4518,29 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 };
                 var val1 = F.fromU64(entry.address); // No gamma[0] - Jolt formula: unexpanded_pc + γ¹·imm + Σγ^(2+i)·cf[i]
                 val1 = val1.add(stage1_gammas[1].mul(imm_field));
-                for (0..13) |i| {
+                for (0..14) |i| {
                     if (entry.circuit_flags[i]) {
                         val1 = val1.add(stage1_gammas[2 + i]);
                     }
                 }
                 bytecode_val_polys[0][k] = val1;
 
-                // Stage 2: γ₂⁰·jump + γ₂¹·branch + γ₂²·is_rd_not_zero + γ₂³·write_lookup_to_rd
+                // Debug: print details for mismatching entries
+                if (k == 3 or k == 4 or k == 10 or k == 16 or k == 18 or k == 27 or k == 29 or k == 35) {
+                    const addr_be = F.fromU64(entry.address).toBytesBE();
+                    const imm_be = imm_field.toBytesBE();
+                    dbg("[ZOLT_BC_ENTRY] k={}: addr=0x{x:0>8} imm_LE=[", .{k, entry.address});
+                    for (0..8) |bi| dbg("{x:0>2}", .{imm_be[31 - bi]});
+                    dbg("] opcode=0x{x:0>2} raw_imm={} cf=[", .{entry.opcode, entry.imm});
+                    for (0..14) |ci| {
+                        if (entry.circuit_flags[ci]) dbg("1", .{}) else dbg("0", .{});
+                    }
+                    dbg("]\n", .{});
+                    _ = addr_be;
+                }
+
+                // Stage 2: γ₂⁰·jump + γ₂¹·branch + γ₂²·write_lookup_to_rd + γ₂³·virtual_instruction
+                // Matches upstream a16z/jolt (no IsRdNotZero — that was fork-only)
                 var val2 = F.zero();
                 if (entry.circuit_flags[@intFromEnum(CircuitFlags.Jump)]) {
                     val2 = val2.add(stage2_gammas[0]);
@@ -4417,10 +4548,10 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 if (entry.instruction_flags[@intFromEnum(InstructionFlags.Branch)]) {
                     val2 = val2.add(stage2_gammas[1]);
                 }
-                if (entry.instruction_flags[@intFromEnum(InstructionFlags.IsRdNotZero)]) {
+                if (entry.circuit_flags[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)]) {
                     val2 = val2.add(stage2_gammas[2]);
                 }
-                if (entry.circuit_flags[@intFromEnum(CircuitFlags.WriteLookupOutputToRD)]) {
+                if (entry.circuit_flags[@intFromEnum(CircuitFlags.VirtualInstruction)]) {
                     val2 = val2.add(stage2_gammas[3]);
                 }
                 bytecode_val_polys[1][k] = val2;
@@ -4471,7 +4602,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 // Stage 5: eq(rd, r_reg5) + γ₅¹·!is_interleaved + Σ γ₅^(2+i)·table_flag_i
                 var val5 = F.zero();
                 if (entry.rd < REGISTER_COUNT) {
-                    val5 = val5.add(eq_table_5[entry.rd]); // No gamma[0] - Jolt formula: eq(rd,r) + γ¹·!interleaved + Σγ^(2+i)·table[i]
+                    val5 = val5.add(eq_table_5[entry.rd]);
                 }
                 if (!entry.is_interleaved) {
                     val5 = val5.add(stage5_gammas[1]);
@@ -4510,7 +4641,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     if (k >= bytecode_entries.len) break;
                     const entry = bytecode_entries[k];
                     dbg("[STAGE6] entry[{}]: addr=0x{x:0>8} rd={} rs1={} rs2={} imm={} cf=[", .{ k, entry.address, entry.rd, entry.rs1, entry.rs2, entry.imm });
-                    for (0..13) |i| {
+                    for (0..14) |i| {
                         if (i > 0) dbg(",", .{});
                         if (entry.circuit_flags[i]) dbg("1", .{}) else dbg("0", .{});
                     }
@@ -4556,7 +4687,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 // Stage 1 = γ₁⁰·address + γ₁¹·imm + Σ_i γ₁^(2+i)·cf[i]
                 var bc_addr_sum = F.zero();
                 var bc_imm_sum = F.zero();
-                var bc_cf_sums: [13]F = [_]F{F.zero()} ** 13;
+                var bc_cf_sums: [14]F = [_]F{F.zero()} ** 14;
 
                 for (0..bytecode_K) |k| {
                     if (k >= bytecode_entries.len) break;
@@ -4567,7 +4698,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     else
                         F.fromU64(@as(u64, @bitCast(entry.imm)));
                     bc_imm_sum = bc_imm_sum.add(F_s_s1[k].mul(debug_imm_field));
-                    for (0..13) |fi| {
+                    for (0..14) |fi| {
                         if (entry.circuit_flags[fi]) {
                             bc_cf_sums[fi] = bc_cf_sums[fi].add(F_s_s1[k]);
                         }
@@ -4601,8 +4732,8 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     dbg("    bc_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{ib1[0],ib1[1],ib1[2],ib1[3],ib1[4],ib1[5],ib1[6],ib1[7]});
                     dbg("    oc_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{ib2[0],ib2[1],ib2[2],ib2[3],ib2[4],ib2[5],ib2[6],ib2[7]});
                 }
-                const cf_names = [13][]const u8{ "AddOp", "SubOp", "MulOp", "Load", "Store", "Jump", "WrLookup", "VirtInstr", "Assert", "NoUpdateUPC", "Advice", "IsCompr", "IsFirst" };
-                for (0..13) |fi| {
+                const cf_names = [14][]const u8{ "AddOp", "SubOp", "MulOp", "Load", "Store", "Jump", "WrLookup", "VirtInstr", "Assert", "NoUpdateUPC", "Advice", "IsCompr", "IsFirst", "IsLast" };
+                for (0..14) |fi| {
                     const oc_cf = getClaim(opening_claims, .{ .Virtual = .{ .poly = .{ .OpFlags = @intCast(fi) }, .sumcheck_id = .SpartanOuter } });
                     const cf_match = bc_cf_sums[fi].eql(oc_cf);
                     if (!cf_match) {
@@ -4617,7 +4748,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 var rv1_recomp = F.zero();
                 rv1_recomp = rv1_recomp.add(bc_addr_sum); // No gamma[0] - matches Jolt formula
                 rv1_recomp = rv1_recomp.add(stage1_gammas[1].mul(bc_imm_sum));
-                for (0..13) |fi| {
+                for (0..14) |fi| {
                     rv1_recomp = rv1_recomp.add(stage1_gammas[2 + fi].mul(bc_cf_sums[fi]));
                 }
                 const rv1_ext = getClaim(opening_claims, .{ .Virtual = .{ .poly = .UnexpandedPC, .sumcheck_id = .SpartanOuter } });
@@ -4628,7 +4759,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 var rv1_opening = F.zero();
                 rv1_opening = rv1_opening.add(oc_addr); // No gamma[0] - matches Jolt formula
                 rv1_opening = rv1_opening.add(stage1_gammas[1].mul(oc_imm));
-                for (0..13) |fi| {
+                for (0..14) |fi| {
                     const oc_cf_fi = getClaim(opening_claims, .{ .Virtual = .{ .poly = .{ .OpFlags = @intCast(fi) }, .sumcheck_id = .SpartanOuter } });
                     rv1_opening = rv1_opening.add(stage1_gammas[2 + fi].mul(oc_cf_fi));
                 }
@@ -5172,7 +5303,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                         });
                         if (pc_idx < bytecode_entries.len) {
                             dbg("    bc_cf=[", .{});
-                            for (0..13) |fi| {
+                            for (0..14) |fi| {
                                 if (fi > 0) dbg(",", .{});
                                 dbg("{}", .{@intFromBool(bytecode_entries[pc_idx].circuit_flags[fi])});
                             }
@@ -5268,8 +5399,8 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             // ====================================================================
 
             transcript.appendScalar("sumcheck_claim", bytecodeReadRaf_input);
-            transcript.appendScalar("sumcheck_claim", hammingBooleanity_input);
             transcript.appendScalar("sumcheck_claim", booleanity_input);
+            transcript.appendScalar("sumcheck_claim", hammingBooleanity_input);
             transcript.appendScalar("sumcheck_claim", ramRaVirtual_input);
             transcript.appendScalar("sumcheck_claim", lookupsRaVirtual_input);
             transcript.appendScalar("sumcheck_claim", incClaimReduction_input);
@@ -5282,16 +5413,16 @@ pub fn Stage6BatchedProver(comptime F: type) type {
 
             const input_claims = [6]F{
                 bytecodeReadRaf_input,
-                hammingBooleanity_input,
                 booleanity_input,
+                hammingBooleanity_input,
                 ramRaVirtual_input,
                 lookupsRaVirtual_input,
                 incClaimReduction_input,
             };
             const num_rounds_arr = [6]usize{
                 bytecodeReadRaf_rounds,
-                hammingBooleanity_rounds,
                 booleanity_rounds,
+                hammingBooleanity_rounds,
                 ramRaVirtual_rounds,
                 lookupsRaVirtual_rounds,
                 incClaimReduction_rounds,
@@ -5446,40 +5577,10 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     });
                 }
 
-                // Instance 1: HammingBooleanity - REAL prover
-                {
-                    const inst = 1;
-                    if (remaining_rounds > num_rounds_arr[inst]) {
-                        const scale = remaining_rounds - num_rounds_arr[inst] - 1;
-                        var scaled = input_claims[inst];
-                        for (0..scale) |_| scaled = scaled.add(scaled);
-                        const contrib = batch[inst].mul(scaled);
-                        for (0..num_evals) |j_eval| {
-                            combined_evals[j_eval] = combined_evals[j_eval].add(contrib);
-                        }
-                    } else {
-                        inst_active[inst] = true;
-                        const polys = hamming_prover.computeRoundPoly();
-                        cached_hamming = polys;
-                        addFixedEvalsToCombibed(F, combined_evals, &polys, 4, batch[inst], num_evals);
-                    }
-                }
-                dbg_inst_p0[1] = combined_evals[0];
-                dbg_inst_p1[1] = combined_evals[1];
-
-                if (debug_r5) {
-                    const e0 = combined_evals[0].toBytes();
-                    const e1 = combined_evals[1].toBytes();
-                    dbg("  [R5_DBG] after inst1: e[0]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] e[1]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
-                        e0[0], e0[1], e0[2], e0[3], e0[4], e0[5], e0[6], e0[7],
-                        e1[0], e1[1], e1[2], e1[3], e1[4], e1[5], e1[6], e1[7],
-                    });
-                }
-
-                // Instance 2: Booleanity - REAL prover (degree 3)
+                // Instance 1: Booleanity - REAL prover (degree 3)
                 var cached_booleanity: ?[]F = null;
                 {
-                    const inst = 2;
+                    const inst = 1;
                     if (remaining_rounds > num_rounds_arr[inst]) {
                         const scale = remaining_rounds - num_rounds_arr[inst] - 1;
                         var scaled = input_claims[inst];
@@ -5504,6 +5605,36 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                             });
                         }
                         addFixedEvalsToCombibed(F, combined_evals, polys, 4, batch[inst], num_evals);
+                    }
+                }
+                dbg_inst_p0[1] = combined_evals[0];
+                dbg_inst_p1[1] = combined_evals[1];
+
+                if (debug_r5) {
+                    const e0 = combined_evals[0].toBytes();
+                    const e1 = combined_evals[1].toBytes();
+                    dbg("  [R5_DBG] after inst1: e[0]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}] e[1]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                        e0[0], e0[1], e0[2], e0[3], e0[4], e0[5], e0[6], e0[7],
+                        e1[0], e1[1], e1[2], e1[3], e1[4], e1[5], e1[6], e1[7],
+                    });
+                }
+
+                // Instance 2: HammingBooleanity - REAL prover
+                {
+                    const inst = 2;
+                    if (remaining_rounds > num_rounds_arr[inst]) {
+                        const scale = remaining_rounds - num_rounds_arr[inst] - 1;
+                        var scaled = input_claims[inst];
+                        for (0..scale) |_| scaled = scaled.add(scaled);
+                        const contrib = batch[inst].mul(scaled);
+                        for (0..num_evals) |j_eval| {
+                            combined_evals[j_eval] = combined_evals[j_eval].add(contrib);
+                        }
+                    } else {
+                        inst_active[inst] = true;
+                        const polys = hamming_prover.computeRoundPoly();
+                        cached_hamming = polys;
+                        addFixedEvalsToCombibed(F, combined_evals, &polys, 4, batch[inst], num_evals);
                     }
                 }
                 dbg_inst_p0[2] = combined_evals[0];
@@ -6040,29 +6171,29 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     }
                 }
 
-                // Instance 1: HammingBooleanity
+                // Instance 1: Booleanity (real prover)
                 if (inst_active[1]) {
-                    instance_claims[1] = evaluateDeg3FromEvals(F, cached_hamming, challenge);
-                    hamming_prover.bindChallenge(challenge);
-                }
-
-                // Instance 2: Booleanity (real prover)
-                if (inst_active[2]) {
                     if (cached_booleanity) |polys| {
                         // Evaluate degree-3 poly at challenge from Vandermonde [p(0), p(1), p(2), p(3)]
                         const evals_arr = [4]F{ polys[0], polys[1], polys[2], polys[3] };
-                        instance_claims[2] = evaluateDeg3FromEvals(F, evals_arr, challenge);
+                        instance_claims[1] = evaluateDeg3FromEvals(F, evals_arr, challenge);
                         self.allocator.free(polys);
                         cached_booleanity = null;
                     }
                     try booleanity_prover.bindChallenge(challenge);
                     // Debug: print claim after Phase 1→2 transition
                     if (booleanity_prover.round == booleanity_prover.log_k_chunk) {
-                        const ic2_be = instance_claims[2].toBytesBE();
-                        dbg("[BOOL_TRANSITION] inst_claim[2] after Ph1 LE=[{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}]\n", .{
-                            ic2_be[31], ic2_be[30], ic2_be[29], ic2_be[28], ic2_be[27], ic2_be[26], ic2_be[25], ic2_be[24],
+                        const ic1_be = instance_claims[1].toBytesBE();
+                        dbg("[BOOL_TRANSITION] inst_claim[1] after Ph1 LE=[{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}]\n", .{
+                            ic1_be[31], ic1_be[30], ic1_be[29], ic1_be[28], ic1_be[27], ic1_be[26], ic1_be[25], ic1_be[24],
                         });
                     }
+                }
+
+                // Instance 2: HammingBooleanity
+                if (inst_active[2]) {
+                    instance_claims[2] = evaluateDeg3FromEvals(F, cached_hamming, challenge);
+                    hamming_prover.bindChallenge(challenge);
                 }
 
                 // Instance 3: RamRaVirtual
@@ -6250,6 +6381,74 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 dbg("  instance_claims[0]_LE=[", .{});
                 for (0..32) |bi| dbg("{x:0>2}", .{ic0_be[31 - bi]});
                 dbg("] match_val_ra={}\n", .{@as(u8, if (val_ra_prod.eql(instance_claims[0])) 1 else 0)});
+
+                // === PER-STAGE DECOMPOSITION ===
+                // Recompute combined[0] = Σ_s bound_vals[s] * eq_mle(r_cycle_s, r_cycle_prime)
+                // r_cycle_prime = reversed Phase 2 challenges (matching Jolt's normalize_opening_point)
+                const cycle_start = bytecode_log_k;
+                var r_cycle_prime = try self.allocator.alloc(F, n_cycle_vars);
+                defer self.allocator.free(r_cycle_prime);
+                for (0..n_cycle_vars) |ci| {
+                    r_cycle_prime[ci] = challenges[cycle_start + n_cycle_vars - 1 - ci];
+                }
+                // Print r_cycle_prime
+                dbg("[DECOMP] r_cycle_prime (reversed cycle challenges, BE):\n", .{});
+                for (0..@min(4, n_cycle_vars)) |ci| {
+                    const rcp_be = r_cycle_prime[ci].toBytesBE();
+                    dbg("  r_cycle_prime[{}]_LE=[", .{ci});
+                    for (0..8) |bi| dbg("{x:0>2}", .{rcp_be[31 - bi]});
+                    dbg("]\n", .{});
+                }
+
+                var decomp_sum = F.zero();
+                for (0..5) |s| {
+                    // Compute eq_mle(r_cycle_s, r_cycle_prime) = Π_i (r_s[i]*r_p[i] + (1-r_s[i])(1-r_p[i]))
+                    // Both r_cycle_s and r_cycle_prime are in BE order
+                    var eq_mle = F.one();
+                    const r_s = bytecode_prover.stage_r_cycles[s];
+                    for (0..n_cycle_vars) |ci| {
+                        const a = r_s[ci];
+                        const b = r_cycle_prime[ci];
+                        // eq term: a*b + (1-a)*(1-b) = 1 - a - b + 2*a*b
+                        const ab = a.mul(b);
+                        const term = F.one().sub(a).sub(b).add(ab).add(ab);
+                        eq_mle = eq_mle.mul(term);
+                    }
+
+                    const bv = bytecode_prover.bound_vals_stored[s];
+                    const stage_contrib = bv.mul(eq_mle);
+                    decomp_sum = decomp_sum.add(stage_contrib);
+
+                    const bv_be = bv.toBytesBE();
+                    const eq_be = eq_mle.toBytesBE();
+                    const sc_be = stage_contrib.toBytesBE();
+                    dbg("[DECOMP] stage[{}]: bound_val_LE=[", .{s});
+                    for (0..8) |bi| dbg("{x:0>2}", .{bv_be[31 - bi]});
+                    dbg("] eq_mle_LE=[", .{});
+                    for (0..8) |bi| dbg("{x:0>2}", .{eq_be[31 - bi]});
+                    dbg("] contrib_LE=[", .{});
+                    for (0..8) |bi| dbg("{x:0>2}", .{sc_be[31 - bi]});
+                    dbg("]\n", .{});
+                }
+                const ds_be = decomp_sum.toBytesBE();
+                dbg("[DECOMP] val_sum_LE=[", .{});
+                for (0..8) |bi| dbg("{x:0>2}", .{ds_be[31 - bi]});
+                dbg("] match_combined={}\n", .{@as(u8, if (decomp_sum.eql(comb0)) 1 else 0)});
+
+                // Also print val_with_raf bound values (without gamma)
+                for (0..5) |s| {
+                    const vwr = bytecode_prover.bound_vals_stored[s];
+                    const gp = bytecode_prover.gamma_powers[s];
+                    // val_with_raf[s][0] = bound_vals[s] / gamma[s]
+                    // Print bound_val directly (it already includes gamma)
+                    const vwr_be = vwr.toBytesBE();
+                    const gp_be = gp.toBytesBE();
+                    dbg("[DECOMP] stage[{}]: gamma_LE=[", .{s});
+                    for (0..8) |bi| dbg("{x:0>2}", .{gp_be[31 - bi]});
+                    dbg("] gamma*val_LE=[", .{});
+                    for (0..8) |bi| dbg("{x:0>2}", .{vwr_be[31 - bi]});
+                    dbg("]\n", .{});
+                }
             }
 
             const ram_ra_virtual_claims = try ram_ra_prover.getOpeningClaims(self.allocator);
@@ -6270,7 +6469,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 }
             }
 
-            // Debug: compute what the verifier would compute for Instance 2 (Booleanity)
+            // Debug: compute what the verifier would compute for Instance 1 (Booleanity)
             // expected = eq(challenges, combined_r) * Σ gamma^{2i} * (ra_i^2 - ra_i)
             // combined_r = r_address.reversed ++ r_cycle.reversed
             // In Jolt: r_address reversed means the original r_address (from params) reversed.
@@ -6326,12 +6525,12 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 for (0..8) |bi| dbg("{x:0>2}", .{ao_be[31 - bi]});
                 dbg("]\n", .{});
 
-                // Compare with instance_claims[2] (the sumcheck output claim for booleanity)
-                const ic2_be = instance_claims[2].toBytesBE();
-                dbg("[BOOL_VERIFY] instance_claims[2]_LE=[", .{});
-                for (0..8) |bi| dbg("{x:0>2}", .{ic2_be[31 - bi]});
+                // Compare with instance_claims[1] (the sumcheck output claim for booleanity)
+                const ic1_be = instance_claims[1].toBytesBE();
+                dbg("[BOOL_VERIFY] instance_claims[1]_LE=[", .{});
+                for (0..8) |bi| dbg("{x:0>2}", .{ic1_be[31 - bi]});
                 dbg("]\n", .{});
-                dbg("[BOOL_VERIFY] match={}\n", .{@intFromBool(actual_output.eql(instance_claims[2]))});
+                dbg("[BOOL_VERIFY] match={}\n", .{@intFromBool(actual_output.eql(instance_claims[1]))});
 
                 // Now compute eq(challenges, combined_r) directly, the way the verifier does.
                 // combined_r = rev(r_address_LE) ++ rev(r_cycle_LE)
@@ -6352,7 +6551,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 // eq(ch[log_k+m], combined_r[log_k+m]) for m < n_cycle:
                 //   = eq(ch[log_k+m], lookups_ra_r_cycle[n_cycle-1-m])
                 {
-                    const bool_start_round = max_num_rounds - num_rounds_arr[2];
+                    const bool_start_round = max_num_rounds - num_rounds_arr[1];
                     dbg("[BOOL_VERIFY] bool_start_round={}, log_k={}, n_cycle={}\n", .{
                         bool_start_round, log_k_chunk, n_cycle_vars,
                     });
@@ -6589,13 +6788,13 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 transcript.appendScalar("opening_claim", claim);
             }
 
-            // Instance 1: HammingBooleanity
-            transcript.appendScalar("opening_claim", hamming_weight_claim);
-
-            // Instance 2: Booleanity
+            // Instance 1: Booleanity
             for (booleanity_ra_claims) |claim| {
                 transcript.appendScalar("opening_claim", claim);
             }
+
+            // Instance 2: HammingBooleanity
+            transcript.appendScalar("opening_claim", hamming_weight_claim);
 
             // Instance 3: RamRaVirtual
             for (ram_ra_virtual_claims) |claim| {
@@ -6656,8 +6855,8 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             rv1 = rv1.add(oc_upc); // No gamma[0] - Jolt formula: unexpanded_pc + γ¹·imm + Σγ^(2+i)·cf[i]
             const oc_imm = getClaim(opening_claims, .{ .Virtual = .{ .poly = .Imm, .sumcheck_id = .SpartanOuter } });
             rv1 = rv1.add(stage1_gammas[1].mul(oc_imm));
-            var oc_flags: [13]F = undefined;
-            for (0..13) |i| {
+            var oc_flags: [14]F = undefined;
+            for (0..14) |i| {
                 oc_flags[i] = getClaim(opening_claims, .{ .Virtual = .{ .poly = .{ .OpFlags = @intCast(i) }, .sumcheck_id = .SpartanOuter } });
                 rv1 = rv1.add(stage1_gammas[2 + i].mul(oc_flags[i]));
             }
@@ -6671,7 +6870,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                 dbg("[BCRAF_RV1_DETAIL] oc_Imm_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
                     imm_le[0], imm_le[1], imm_le[2], imm_le[3], imm_le[4], imm_le[5], imm_le[6], imm_le[7],
                 });
-                for (0..13) |i| {
+                for (0..14) |i| {
                     const fl = oc_flags[i].toBytes();
                     dbg("[BCRAF_RV1_DETAIL] oc_OpFlag[{}]_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
                         i, fl[0], fl[1], fl[2], fl[3], fl[4], fl[5], fl[6], fl[7],
@@ -6687,14 +6886,15 @@ pub fn Stage6BatchedProver(comptime F: type) type {
 
             // rv_claim_2 (Stage 2 / SpartanProductVirtualization)
             var rv2 = F.zero();
+            // Upstream: Jump + γ·Branch + γ²·WriteLookupOutputToRD + γ³·VirtualInstruction
             rv2 = rv2.add(stage2_gammas[0].mul(getClaim(opening_claims,
                 .{ .Virtual = .{ .poly = .{ .OpFlags = 5 }, .sumcheck_id = .SpartanProductVirtualization } })));
             rv2 = rv2.add(stage2_gammas[1].mul(getClaim(opening_claims,
                 .{ .Virtual = .{ .poly = .{ .InstructionFlags = 4 }, .sumcheck_id = .SpartanProductVirtualization } })));
             rv2 = rv2.add(stage2_gammas[2].mul(getClaim(opening_claims,
-                .{ .Virtual = .{ .poly = .{ .InstructionFlags = 6 }, .sumcheck_id = .SpartanProductVirtualization } })));
-            rv2 = rv2.add(stage2_gammas[3].mul(getClaim(opening_claims,
                 .{ .Virtual = .{ .poly = .{ .OpFlags = 6 }, .sumcheck_id = .SpartanProductVirtualization } })));
+            rv2 = rv2.add(stage2_gammas[3].mul(getClaim(opening_claims,
+                .{ .Virtual = .{ .poly = .{ .OpFlags = 7 }, .sumcheck_id = .SpartanProductVirtualization } })));
 
             // rv_claim_3 (Stage 3)
             var rv3 = F.zero();
@@ -6729,13 +6929,36 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             // rv_claim_5 (Stage 5)
             const NUM_LOOKUP_TABLES: usize = 41;
             var rv5 = F.zero();
-            rv5 = rv5.add(getClaim(opening_claims,
-                .{ .Virtual = .{ .poly = .RdWa, .sumcheck_id = .RegistersValEvaluation } })); // No gamma[0] - Jolt formula: eq(rd,r) + γ¹·!interleaved + ...
-            rv5 = rv5.add(stage5_gammas[1].mul(getClaim(opening_claims,
-                .{ .Virtual = .{ .poly = .InstructionRafFlag, .sumcheck_id = .InstructionReadRaf } })));
+            const rv5_rdwa = getClaim(opening_claims,
+                .{ .Virtual = .{ .poly = .RdWa, .sumcheck_id = .RegistersValEvaluation } });
+            rv5 = rv5.add(rv5_rdwa); // No gamma[0] - Jolt formula: eq(rd,r) + γ¹·!interleaved + ...
+            const rv5_raf_flag = getClaim(opening_claims,
+                .{ .Virtual = .{ .poly = .InstructionRafFlag, .sumcheck_id = .InstructionReadRaf } });
+            rv5 = rv5.add(stage5_gammas[1].mul(rv5_raf_flag));
             for (0..NUM_LOOKUP_TABLES) |i| {
-                rv5 = rv5.add(stage5_gammas[2 + i].mul(getClaim(opening_claims,
-                    .{ .Virtual = .{ .poly = .{ .LookupTableFlag = i }, .sumcheck_id = .InstructionReadRaf } })));
+                const lt_claim = getClaim(opening_claims,
+                    .{ .Virtual = .{ .poly = .{ .LookupTableFlag = i }, .sumcheck_id = .InstructionReadRaf } });
+                rv5 = rv5.add(stage5_gammas[2 + i].mul(lt_claim));
+                if (!lt_claim.eql(F.zero())) {
+                    const ltb = lt_claim.toBytes();
+                    dbg("[BCRAF_RV5] LookupTableFlag({})_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                        i, ltb[0], ltb[1], ltb[2], ltb[3], ltb[4], ltb[5], ltb[6], ltb[7],
+                    });
+                }
+            }
+            {
+                const rdwa_le = rv5_rdwa.toBytes();
+                const rff_le = rv5_raf_flag.toBytes();
+                const rv5_le = rv5.toBytes();
+                dbg("[BCRAF_RV5] RdWa_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                    rdwa_le[0], rdwa_le[1], rdwa_le[2], rdwa_le[3], rdwa_le[4], rdwa_le[5], rdwa_le[6], rdwa_le[7],
+                });
+                dbg("[BCRAF_RV5] InstructionRafFlag_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                    rff_le[0], rff_le[1], rff_le[2], rff_le[3], rff_le[4], rff_le[5], rff_le[6], rff_le[7],
+                });
+                dbg("[BCRAF_RV5] total_LE=[{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2},{x:0>2}]\n", .{
+                    rv5_le[0], rv5_le[1], rv5_le[2], rv5_le[3], rv5_le[4], rv5_le[5], rv5_le[6], rv5_le[7],
+                });
             }
 
             // RAF claims

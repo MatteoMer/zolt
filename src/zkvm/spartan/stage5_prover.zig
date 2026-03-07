@@ -603,26 +603,24 @@ pub fn Stage5BatchedProver(comptime F: type) type {
                 // Use explicit register index from TraceStep (supports virtual registers 32+)
                 const rd: u8 = step.rd_index;
 
-                // In Jolt, rd_write() returns (rd, pre, post) where pre=post=0 for x0.
-                // Zolt's trace may record the computed value for x0 writes, so we must
-                // force inc=0 for rd=0 (x0 is hardwired to zero in RISC-V).
-                if (step.rd_written and rd != 0) {
-                    // Compute inc = rd_value - rd_pre_value
-                    const pre_value: i128 = @intCast(step.rd_pre_value);
-                    const post_value: i128 = @intCast(step.rd_value);
-                    const increment = post_value - pre_value;
-
-                    // Convert signed increment to field element
-                    if (increment >= 0) {
-                        inc_evals[j] = F.fromU64(@intCast(increment));
-                    } else {
-                        // Negative: use field modular arithmetic
-                        inc_evals[j] = F.zero().sub(F.fromU64(@intCast(-increment)));
-                    }
-
-                    // Compute wa = eq(r_address, rd)
-                    // r_address has 7 bits, rd index is 0-127
+                // Compute wa for ALL writes including rd=0 (x0), because the
+                // BytecodeReadRaf val5 polynomial includes eq(rd, r_register) for all
+                // bytecode entries with valid rd, and the verifier reconstructs val5
+                // from preprocessing. inc is 0 for rd=0 since x0 is hardwired to zero.
+                if (step.rd_written) {
                     wa_evals[j] = computeEqAtIndex(r_address_regs, @as(usize, rd));
+
+                    if (rd != 0) {
+                        const pre_value: i128 = @intCast(step.rd_pre_value);
+                        const post_value: i128 = @intCast(step.rd_value);
+                        const increment = post_value - pre_value;
+
+                        if (increment >= 0) {
+                            inc_evals[j] = F.fromU64(@intCast(increment));
+                        } else {
+                            inc_evals[j] = F.zero().sub(F.fromU64(@intCast(-increment)));
+                        }
+                    }
                 }
                 // Note: lt_evals[j] is already computed for all j via computeAllLtEvals
             }

@@ -4,7 +4,7 @@
 //! It proves the aggregation of instruction lookup claims from Spartan outer.
 //!
 //! The sumcheck proves:
-//! Σ_j eq(r_spartan, j) * (LookupOutput(j) + γ*LeftOperand(j) + γ²*RightOperand(j)) = input_claim
+//! Σ_j eq(r_spartan, j) * (LookupOutput(j) + γ*LeftOp(j) + γ²*RightOp(j) + γ³*LeftInstr(j) + γ⁴*RightInstr(j)) = input_claim
 //!
 //! This is a degree-2 sumcheck with log_T rounds.
 
@@ -27,6 +27,10 @@ pub fn InstructionLookupsParams(comptime F: type) type {
         gamma: F,
         /// Gamma squared (γ²)
         gamma_sqr: F,
+        /// Gamma cubed (γ³)
+        gamma_cub: F,
+        /// Gamma to the fourth (γ⁴)
+        gamma_quart: F,
         /// Challenges from SpartanOuter (r_spartan)
         r_spartan: []const F,
         /// Number of cycle variables (log_T)
@@ -43,9 +47,12 @@ pub fn InstructionLookupsParams(comptime F: type) type {
             const r_copy = try allocator.alloc(F, r_spartan.len);
             @memcpy(r_copy, r_spartan);
 
+            const gamma_sqr = gamma.mul(gamma);
             return Self{
                 .gamma = gamma,
-                .gamma_sqr = gamma.mul(gamma),
+                .gamma_sqr = gamma_sqr,
+                .gamma_cub = gamma_sqr.mul(gamma),
+                .gamma_quart = gamma_sqr.mul(gamma_sqr),
                 .r_spartan = r_copy,
                 .n_cycle_vars = n_cycle_vars,
                 .allocator = allocator,
@@ -81,6 +88,10 @@ pub fn InstructionLookupsProver(comptime F: type) type {
         left_operands: []F,
         /// Right operand values per cycle
         right_operands: []F,
+        /// Left instruction input values per cycle
+        left_instr_inputs: []F,
+        /// Right instruction input values per cycle
+        right_instr_inputs: []F,
         /// Bound challenges
         challenges: std.ArrayListUnmanaged(F),
         /// Allocator
@@ -95,6 +106,8 @@ pub fn InstructionLookupsProver(comptime F: type) type {
             lookup_outputs: []const F,
             left_operands: []const F,
             right_operands: []const F,
+            left_instr_inputs: []const F,
+            right_instr_inputs: []const F,
         ) !Self {
             const T = @as(usize, 1) << @intCast(params.n_cycle_vars);
 
@@ -102,16 +115,22 @@ pub fn InstructionLookupsProver(comptime F: type) type {
             const lo = try allocator.alloc(F, T);
             const left = try allocator.alloc(F, T);
             const right = try allocator.alloc(F, T);
+            const left_ii = try allocator.alloc(F, T);
+            const right_ii = try allocator.alloc(F, T);
 
             @memset(lo, F.zero());
             @memset(left, F.zero());
             @memset(right, F.zero());
+            @memset(left_ii, F.zero());
+            @memset(right_ii, F.zero());
 
             const copy_len = @min(lookup_outputs.len, T);
             if (copy_len > 0) {
                 @memcpy(lo[0..copy_len], lookup_outputs[0..copy_len]);
                 @memcpy(left[0..copy_len], left_operands[0..copy_len]);
                 @memcpy(right[0..copy_len], right_operands[0..copy_len]);
+                @memcpy(left_ii[0..copy_len], left_instr_inputs[0..@min(left_instr_inputs.len, T)]);
+                @memcpy(right_ii[0..copy_len], right_instr_inputs[0..@min(right_instr_inputs.len, T)]);
             }
 
             // Compute eq(r_spartan, j) for each cycle j
@@ -150,6 +169,8 @@ pub fn InstructionLookupsProver(comptime F: type) type {
                 .lookup_outputs = lo,
                 .left_operands = left,
                 .right_operands = right,
+                .left_instr_inputs = left_ii,
+                .right_instr_inputs = right_ii,
                 .challenges = challenges_list,
                 .allocator = allocator,
                 .original_size = T,
@@ -163,6 +184,8 @@ pub fn InstructionLookupsProver(comptime F: type) type {
             self.allocator.free(self.lookup_outputs.ptr[0..self.original_size]);
             self.allocator.free(self.left_operands.ptr[0..self.original_size]);
             self.allocator.free(self.right_operands.ptr[0..self.original_size]);
+            self.allocator.free(self.left_instr_inputs.ptr[0..self.original_size]);
+            self.allocator.free(self.right_instr_inputs.ptr[0..self.original_size]);
             self.challenges.deinit(self.allocator);
             self.params.deinit();
         }
@@ -173,6 +196,8 @@ pub fn InstructionLookupsProver(comptime F: type) type {
         pub fn computeRoundPolynomialCubic(self: *Self) [4]F {
             const gamma = self.params.gamma;
             const gamma_sqr = self.params.gamma_sqr;
+            const gamma_cub = self.params.gamma_cub;
+            const gamma_quart = self.params.gamma_quart;
 
             var s0: F = F.zero();
             var s2: F = F.zero();
@@ -182,35 +207,24 @@ pub fn InstructionLookupsProver(comptime F: type) type {
 
             // Sum over pairs (2j, 2j+1) - LowToHigh binding order
             for (0..half) |idx| {
-                // LowToHigh: use consecutive pairs (2*idx, 2*idx+1)
                 const lo_idx = 2 * idx;
                 const hi_idx = 2 * idx + 1;
 
-                // Get eq evaluations
                 const eq_lo = self.eq_evals[lo_idx];
                 const eq_hi = self.eq_evals[hi_idx];
-                // eq(x) = (1-x)*eq_lo + x*eq_hi
-                // eq(0) = eq_lo
-                // eq(1) = eq_hi
-                // eq(2) = 2*eq_hi - eq_lo
 
-                // Get combined polynomial values
-                // combined(j) = lookup_out(j) + γ*left(j) + γ²*right(j)
+                // combined(j) = lookup_out(j) + γ*left_op(j) + γ²*right_op(j) + γ³*left_instr(j) + γ⁴*right_instr(j)
                 const combined_lo = self.lookup_outputs[lo_idx]
                     .add(gamma.mul(self.left_operands[lo_idx]))
-                    .add(gamma_sqr.mul(self.right_operands[lo_idx]));
+                    .add(gamma_sqr.mul(self.right_operands[lo_idx]))
+                    .add(gamma_cub.mul(self.left_instr_inputs[lo_idx]))
+                    .add(gamma_quart.mul(self.right_instr_inputs[lo_idx]));
                 const combined_hi = self.lookup_outputs[hi_idx]
                     .add(gamma.mul(self.left_operands[hi_idx]))
-                    .add(gamma_sqr.mul(self.right_operands[hi_idx]));
-                // combined(x) = (1-x)*combined_lo + x*combined_hi (linear)
-                // combined(0) = combined_lo
-                // combined(1) = combined_hi
-                // combined(2) = 2*combined_hi - combined_lo
+                    .add(gamma_sqr.mul(self.right_operands[hi_idx]))
+                    .add(gamma_cub.mul(self.left_instr_inputs[hi_idx]))
+                    .add(gamma_quart.mul(self.right_instr_inputs[hi_idx]));
 
-                // Product evaluations (degree 2)
-                // s(0) = eq(0) * combined(0)
-                // s(1) = eq(1) * combined(1)
-                // s(2) = eq(2) * combined(2)
                 const prod_0 = eq_lo.mul(combined_lo);
                 const eq_2 = eq_hi.add(eq_hi).sub(eq_lo);
                 const combined_2 = combined_hi.add(combined_hi).sub(combined_lo);
@@ -260,14 +274,23 @@ pub fn InstructionLookupsProver(comptime F: type) type {
                 const right_lo = self.right_operands[lo_idx];
                 const right_hi = self.right_operands[hi_idx];
                 self.right_operands[i] = right_lo.add(challenge.mul(right_hi.sub(right_lo)));
+
+                const lii_lo = self.left_instr_inputs[lo_idx];
+                const lii_hi = self.left_instr_inputs[hi_idx];
+                self.left_instr_inputs[i] = lii_lo.add(challenge.mul(lii_hi.sub(lii_lo)));
+
+                const rii_lo = self.right_instr_inputs[lo_idx];
+                const rii_hi = self.right_instr_inputs[hi_idx];
+                self.right_instr_inputs[i] = rii_lo.add(challenge.mul(rii_hi.sub(rii_lo)));
             }
 
             // Reduce the effective length of all arrays to half
-            // Since these are slices, we update the len field directly
             self.eq_evals = self.eq_evals[0..half];
             self.lookup_outputs = self.lookup_outputs[0..half];
             self.left_operands = self.left_operands[0..half];
             self.right_operands = self.right_operands[0..half];
+            self.left_instr_inputs = self.left_instr_inputs[0..half];
+            self.right_instr_inputs = self.right_instr_inputs[0..half];
 
             self.round += 1;
         }
@@ -302,30 +325,27 @@ pub fn InstructionLookupsProver(comptime F: type) type {
         }
 
         /// Get the individual opening claims after all rounds are complete
-        /// Returns: { lookup_output, left_operand, right_operand }
-        pub fn getOpeningClaims(self: *const Self) struct { lookup_output: F, left_operand: F, right_operand: F } {
+        pub fn getOpeningClaims(self: *const Self) struct { lookup_output: F, left_operand: F, right_operand: F, left_instr_input: F, right_instr_input: F } {
             // After all rounds, the arrays have been folded down to length 1
-            // These are the MLE evaluations at the sumcheck challenges
             const lookup_output = if (self.lookup_outputs.len > 0) self.lookup_outputs[0] else F.zero();
             const left_operand = if (self.left_operands.len > 0) self.left_operands[0] else F.zero();
             const right_operand = if (self.right_operands.len > 0) self.right_operands[0] else F.zero();
+            const left_instr_input = if (self.left_instr_inputs.len > 0) self.left_instr_inputs[0] else F.zero();
+            const right_instr_input = if (self.right_instr_inputs.len > 0) self.right_instr_inputs[0] else F.zero();
 
             dbg("[INSTR_LOOKUPS FINAL] After {} rounds of binding:\n", .{self.challenges.items.len});
             dbg("  lookup_output = {x}\n", .{lookup_output.toBytesBE()[16..32].*});
             dbg("  left_operand = {x}\n", .{left_operand.toBytesBE()[16..32].*});
             dbg("  right_operand = {x}\n", .{right_operand.toBytesBE()[16..32].*});
-            // Print first few challenges used for binding
-            if (self.challenges.items.len > 0) {
-                dbg("  challenges[0] = {x}\n", .{self.challenges.items[0].toBytesBE()[16..32].*});
-                if (self.challenges.items.len > 7) {
-                    dbg("  challenges[7] = {x}\n", .{self.challenges.items[7].toBytesBE()[16..32].*});
-                }
-            }
+            dbg("  left_instr_input = {x}\n", .{left_instr_input.toBytesBE()[16..32].*});
+            dbg("  right_instr_input = {x}\n", .{right_instr_input.toBytesBE()[16..32].*});
 
             return .{
                 .lookup_output = lookup_output,
                 .left_operand = left_operand,
                 .right_operand = right_operand,
+                .left_instr_input = left_instr_input,
+                .right_instr_input = right_instr_input,
             };
         }
     };
@@ -366,6 +386,9 @@ test "instruction lookups prover initialization" {
     const left_operands = [_]F{ F.fromU64(10), F.fromU64(20), F.fromU64(30), F.fromU64(40) };
     const right_operands = [_]F{ F.fromU64(100), F.fromU64(200), F.fromU64(300), F.fromU64(400) };
 
+    const left_instr = [_]F{ F.fromU64(5), F.fromU64(15), F.fromU64(25), F.fromU64(35) };
+    const right_instr = [_]F{ F.fromU64(50), F.fromU64(150), F.fromU64(250), F.fromU64(350) };
+
     var prover = try InstructionLookupsProver(F).init(
         allocator,
         params,
@@ -373,6 +396,8 @@ test "instruction lookups prover initialization" {
         &lookup_outputs,
         &left_operands,
         &right_operands,
+        &left_instr,
+        &right_instr,
     );
     defer prover.deinit();
 

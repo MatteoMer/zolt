@@ -1,347 +1,117 @@
 # Zolt
 
-**Jolt zkVM ported to Zig** - A high-performance zero-knowledge virtual machine implementation.
-
-This project is a comprehensive port of [a16z's Jolt zkVM](https://github.com/a16z/jolt) from Rust to Zig, leveraging Zig's comptime, explicit memory management, and system-level control for performance-critical cryptographic operations.
+A Zig zkVM prover that generates proofs verifiable by the unmodified upstream [a16z/jolt](https://github.com/a16z/jolt) verifier — no patched fork needed.
 
 > This project is 100% AI generated with the [ralph method](https://ghuntley.com/ralph/)
 
-## Overview
-
-Zolt implements a zkVM (zero-knowledge virtual machine) that can prove correct execution of RISC-V programs. It uses lookup arguments (via the Lasso/Jolt technique) to achieve efficient proof generation.
-
-### Key Features
-
-- **End-to-End Proving**: Complete proof generation and verification pipeline
-- **BN254 Scalar Field**: Full Montgomery form arithmetic with CIOS multiplication
-- **Polynomial Commitments**: HyperKZG and Dory commitment schemes
-- **RISC-V Support**: Full RV64IMC instruction set (I, M, and C extensions)
-- **Sumcheck Protocol**: Complete prover with efficient round generation
-- **Spartan**: R1CS satisfiability prover/verifier
-- **Lasso Lookups**: Efficient lookup argument for instruction validation
-- **Fiat-Shamir**: Keccak-f[1600] based transcript for non-interactive proofs
-- **Multi-Scalar Multiplication**: Pippenger's algorithm with parallel execution
-- **ELF Loading**: Complete ELF32/ELF64 parser for loading RISC-V binaries
-
-## Building
-
-Requires Zig 0.15.0 or later.
-
-```bash
-# Build the project
-zig build
-
-# Run tests
-zig build test
-
-# Build optimized release
-zig build -Doptimize=ReleaseFast
-
-# Run the CLI
-zig build run
-```
-
-## CLI Commands
-
-```bash
-# Show help
-zolt help
-
-# Show version
-zolt version
-
-# Show zkVM capabilities and features
-zolt info
-
-# Decode a RISC-V instruction from hex
-zolt decode 0x00a00513
-
-# Run performance benchmarks
-zolt bench
-
-# Run a RISC-V ELF binary
-zolt run program.elf
-zolt run --regs program.elf  # Show final register state
-
-# Show execution trace (for debugging)
-zolt trace program.elf                           # Show first 100 steps
-zolt trace --max 500 program.elf                 # Show more steps
-
-# Generate ZK proof for a RISC-V ELF binary
-zolt prove program.elf
-zolt prove -o proof.bin program.elf            # Save proof to file (binary)
-zolt prove --json -o proof.json program.elf    # Save proof to file (JSON)
-
-# Verify a saved proof (auto-detects format)
-zolt verify proof.bin                            # Binary format
-zolt verify proof.json                           # JSON format
-
-# Show detailed proof statistics
-zolt stats proof.bin                             # Size breakdown, stages, etc.
-
-# Inspect a Powers of Tau (PTAU) ceremony file
-zolt srs ceremony.ptau
-
-# Run examples
-zig build example-field        # Field arithmetic
-zig build example-proof        # Simple polynomial commitment
-zig build example-riscv        # RISC-V instruction decoding
-zig build example-hyperkzg     # HyperKZG commitment scheme
-zig build example-sumcheck     # Sumcheck protocol
-zig build example-pipeline     # Full proving pipeline (end-to-end)
-```
-
-## C Example Programs
-
-The `examples/` directory includes several C programs that can be compiled with a RISC-V toolchain and proven with Zolt:
-
-| Program | Description | Expected Result |
-|---------|-------------|-----------------|
-| `fibonacci.elf` | Compute Fibonacci(10) | 55 |
-| `sum.elf` | Sum of 1..100 | 5050 |
-| `factorial.elf` | Compute 10! | 3628800 |
-| `bitwise.elf` | AND, OR, XOR, shifts | - |
-| `array.elf` | Array load/store ops | 1465 |
-| `gcd.elf` | GCD using div/rem | 63 |
-| `collatz.elf` | Collatz sequence for n=27 | 111 steps |
-| `signed.elf` | Signed arithmetic ops | -39 |
-| `primes.elf` | Count primes < 100 | 25 |
-
-### Building Examples
-
-Requires a RISC-V toolchain (e.g., riscv32-unknown-elf-gcc):
-
-```bash
-cd examples
-make all        # Build all examples
-make help       # Show available targets
-make disasm-gcd # Show disassembly of gcd.elf
-```
-
-### Running Examples
-
-```bash
-# Run and see result
-zolt run examples/fibonacci.elf
-
-# Generate and verify proof
-zolt prove examples/sum.elf -o proof.bin
-zolt verify proof.bin
-
-# Show execution trace
-zolt trace examples/gcd.elf
-```
-
-## Project Structure
-
-```
-zolt/
-├── build.zig              # Build configuration
-├── build.zig.zon          # Dependencies
-├── src/
-│   ├── root.zig           # Library entry point
-│   ├── main.zig           # CLI application
-│   ├── bench.zig          # Benchmarks
-│   ├── common/            # Constants, attributes
-│   ├── field/             # Finite field arithmetic
-│   │   ├── mod.zig        # BN254Scalar, BatchOps
-│   │   └── pairing.zig    # Fp2, Fp6, Fp12, G2Point
-│   ├── poly/              # Polynomial operations
-│   │   ├── mod.zig        # Dense, Eq, UniPoly
-│   │   └── commitment/    # HyperKZG, Dory, Mock
-│   ├── subprotocols/      # Sumcheck protocol
-│   ├── utils/             # Errors, math, serialization
-│   ├── zkvm/              # RISC-V zkVM core
-│   │   ├── bytecode/      # Bytecode handling
-│   │   ├── instruction/   # RISC-V decoder (RV64IMC)
-│   │   ├── r1cs/          # R1CS constraint system
-│   │   ├── ram/           # Memory checking
-│   │   ├── registers/     # Register file
-│   │   ├── spartan/       # Spartan prover/verifier
-│   │   ├── lasso/         # Lasso lookup argument
-│   │   ├── lookup_table/  # Lookup tables (24 types)
-│   │   ├── claim_reductions/ # Claim reduction protocols
-│   │   └── instruction_lookups/ # Instruction lookup handling
-│   ├── msm/               # Multi-scalar multiplication
-│   ├── host/              # ELF loader, program interface
-│   ├── guest/             # Guest program I/O
-│   ├── tracer/            # RISC-V emulator
-│   └── transcripts/       # Fiat-Shamir transcripts
-└── .agent/                # Development notes
-```
-
-## Architecture
-
-### Type Mapping (Rust → Zig)
-
-| Rust | Zig |
-|------|-----|
-| `struct Foo { ... }` | `pub const Foo = struct { ... };` |
-| `enum Foo { A, B(T) }` | `pub const Foo = union(enum) { a, b: T };` |
-| `trait Foo` | Comptime generics or vtable interface |
-| `Vec<T>` | `std.ArrayListUnmanaged(T)` or `[]T` |
-| `Result<T, E>` | `E!T` error union |
-| `Option<T>` | `?T` optional |
-| `Arc<T>` / `Rc<T>` | Manual memory with allocators |
-| `Box<T>` | `*T` pointer with allocator |
-
-### Core Components
-
-1. **Field Arithmetic** (`src/field/mod.zig`)
-   - BN254 scalar field in Montgomery form
-   - CIOS multiplication algorithm
-   - Batch operations (add, multiply, inverse)
-   - Optimized squaring using Karatsuba-like technique
-
-2. **Polynomials** (`src/poly/mod.zig`)
-   - Dense multilinear polynomials
-   - Equality polynomials for sumcheck
-   - Univariate polynomials
-
-3. **Commitment Schemes** (`src/poly/commitment/mod.zig`)
-   - **HyperKZG**: Pairing-based polynomial commitment
-   - **Dory**: Transparent setup scheme
-   - Extension fields (Fp2, Fp6, Fp12) for pairings
-
-4. **Sumcheck Protocol** (`src/subprotocols/mod.zig`)
-   - Interactive proof for polynomial identity
-   - Round-by-round prover with univariate reduction
-
-5. **Spartan** (`src/zkvm/spartan/mod.zig`)
-   - R1CS satisfiability prover
-   - Verifier with sumcheck integration
-
-6. **RISC-V VM** (`src/zkvm/`, `src/tracer/`)
-   - Full RV64IMC instruction decoder
-   - Complete emulator with tracing
-   - Memory checking for RAM and registers
-
-7. **MSM** (`src/msm/mod.zig`)
-   - Affine and projective point representations
-   - Pippenger's bucket method
-   - Parallel execution with `std.Thread`
-
-8. **Lasso Lookup Argument** (`src/zkvm/lasso/mod.zig`)
-   - Efficient lookup argument for instruction validation
-   - 24 lookup tables for bitwise, arithmetic, and comparison ops
-   - Prover and verifier with sumcheck integration
-
-9. **Multi-Stage Prover** (`src/zkvm/prover.zig`, `src/zkvm/verifier.zig`)
-   - 6-stage sumcheck orchestration (Spartan, RAF, Lasso, Val, Register, Booleanity)
-   - Opening claim accumulation for batch verification
-   - Configurable strict/lenient verification modes
-
-## Usage Example
-
-```zig
-const std = @import("std");
-const zolt = @import("zolt");
-
-pub fn main() !void {
-    const allocator = std.heap.page_allocator;
-
-    // Load a RISC-V ELF binary
-    const program = try zolt.host.ElfLoader.loadFile("program.elf", allocator);
-    defer program.deinit(allocator);
-
-    // Create and run the emulator
-    var emulator = zolt.tracer.Emulator.init(allocator);
-    try emulator.loadProgram(program.code);
-    try emulator.run();
-
-    // Get the execution trace
-    const trace = emulator.getTrace();
-
-    // Generate witness for proving
-    var witness_gen = zolt.tracer.WitnessGenerator(zolt.field.BN254Scalar).init();
-    const witness = try witness_gen.generateFromTrace(&trace, allocator);
-    defer allocator.free(witness);
-}
-```
-
-## Testing
-
-The project includes 576+ tests covering:
-
-- Field arithmetic (Montgomery operations, batch ops, extension fields)
-- Polynomial operations (evaluation, summation, binding)
-- Commitment schemes (HyperKZG, Dory, SRS loading)
-- RISC-V instruction decoding and execution
-- Sumcheck protocol
-- Spartan prover/verifier
-- Lasso lookup argument
-- All 24 lookup tables
-- 60+ instruction lookups
-- MSM algorithms
-- ELF parsing (ELF32/ELF64)
-- Transcript (Fiat-Shamir)
-- Integration tests (e2e proving pipeline)
-
-Run all tests:
-```bash
-zig build test
-```
-
-## Performance
-
-Key optimizations implemented:
-
-- **Montgomery Multiplication**: CIOS algorithm for field operations
-- **Batch Inverse**: Montgomery's trick (O(3n) muls + 1 inv instead of n invs)
-- **Pippenger MSM**: Bucket method with optimal window selection
-- **Parallel MSM**: Multi-threaded execution for large inputs
-- **Optimized Squaring**: Karatsuba-like technique saves ~25% multiplications
-
-## Upstream Jolt Compatibility
-
-Zolt generates proofs that are verified by the **unmodified upstream [a16z/jolt](https://github.com/a16z/jolt) verifier** — no patched fork needed.
-
-### Pinned Version
-
-The `jolt-verifier/` crate is pinned to upstream commit [`2e05fe88`](https://github.com/a16z/jolt/commit/2e05fe88) (March 2026). This is the version all 8 test programs are verified against. Updating to a newer upstream commit may require adjustments if the verification protocol changes.
-
-### Verifying Proofs
+## Quick Start
 
 ```bash
 # Build Zolt
 zig build -Doptimize=ReleaseFast
 
-# Prove a program
-./zig-out/bin/zolt prove examples/fibonacci.elf --jolt-format -o /tmp/proof.bin --export-preprocessing /tmp/preproc.bin
+# Generate a proof
+./zig-out/bin/zolt prove examples/fibonacci.elf -o /tmp/proof.bin --export-preprocessing /tmp/preproc.bin
 
-# Verify with upstream jolt-verifier
-cargo run --release --manifest-path jolt-verifier/Cargo.toml -- --proof /tmp/proof.bin --preprocessing /tmp/preproc.bin
+# Verify with upstream Jolt verifier
+cargo run --release --manifest-path jolt-verifier/Cargo.toml -- \
+  --proof /tmp/proof.bin --preprocessing /tmp/preproc.bin
 ```
 
-### Verified Programs
+## CLI Reference
 
-All 8 example programs produce valid proofs verified by the upstream verifier:
+### `zolt prove [options] <elf>`
 
-| Program | Status |
-|---------|--------|
-| fibonacci | Verified |
-| factorial | Verified |
-| bitwise | Verified |
-| collatz | Verified |
-| primes | Verified |
-| sum | Verified |
-| gcd | Verified |
-| signed | Verified |
+Generate a ZK proof for a RISC-V ELF binary.
 
-## Differences from Rust Jolt
+| Flag | Description |
+|------|-------------|
+| `-o, --output FILE` | Save proof to FILE (required) |
+| `--export-preprocessing FILE` | Export Jolt-compatible preprocessing data |
+| `--trace-length N` | Set trace length (default: 1024) |
+| `--srs PATH` | Use Dory SRS from PATH |
+| `--input-hex HEX` | Set program input as hex bytes |
 
-1. **Memory Management**: Explicit allocators instead of Rust's ownership
-2. **Generics**: Zig comptime instead of Rust traits
-3. **Error Handling**: Error unions instead of `Result`
-4. **Serialization**: Custom binary format instead of serde
-5. **Parallelism**: `std.Thread` instead of rayon
+### `zolt run [options] <elf>`
+
+Run a RISC-V ELF binary in the emulator.
+
+| Flag | Description |
+|------|-------------|
+| `--regs` | Show final register state |
+| `--trace` | Show execution trace |
+| `--max N` | Max trace entries to display (default: 100) |
+| `--input FILE` | Load input bytes from FILE |
+| `--input-hex HEX` | Set input as hex bytes |
+
+### `zolt help` / `zolt version`
+
+Show help or version information.
+
+## Example Programs
+
+All 8 example programs produce valid proofs verified by the upstream Jolt verifier:
+
+| Program | Description | Expected Result |
+|---------|-------------|-----------------|
+| `fibonacci.elf` | Compute Fibonacci(10) | 55 |
+| `factorial.elf` | Compute 10! | 3628800 |
+| `bitwise.elf` | AND, OR, XOR, shifts | - |
+| `collatz.elf` | Collatz sequence for n=27 | 111 steps |
+| `primes.elf` | Count primes < 100 | 25 |
+| `sum.elf` | Sum of 1..100 | 5050 |
+| `gcd.elf` | GCD using div/rem | 63 |
+| `signed.elf` | Signed arithmetic ops | -39 |
+
+### Building Examples
+
+Requires a RISC-V toolchain (e.g., `riscv32-unknown-elf-gcc`):
+
+```bash
+cd examples
+make all
+```
+
+## Upstream Compatibility
+
+The `jolt-verifier/` crate is pinned to upstream commit [`2e05fe88`](https://github.com/a16z/jolt/commit/2e05fe88). This is the version all 8 programs are verified against. Updating to a newer upstream commit may require adjustments if the verification protocol changes.
+
+## Project Structure
+
+```
+zolt/
+├── build.zig / build.zig.zon
+├── examples/              # Pre-built RISC-V ELF binaries + C sources
+├── jolt-verifier/         # Standalone upstream Jolt verifier (Rust)
+└── src/
+    ├── main.zig           # CLI
+    ├── field/             # BN254 scalar field arithmetic
+    ├── poly/              # Polynomials + commitment schemes (HyperKZG, Dory)
+    ├── subprotocols/      # Sumcheck protocol
+    ├── msm/               # Multi-scalar multiplication (Pippenger)
+    ├── transcripts/       # Fiat-Shamir (Blake2b)
+    ├── host/              # ELF loader
+    ├── tracer/            # RISC-V emulator
+    └── zkvm/              # Core proving logic
+        ├── jolt_prover.zig       # 7-stage Jolt-compatible prover
+        ├── jolt_types.zig        # Proof types, sumcheck IDs
+        ├── jolt_serialization.zig
+        ├── preprocessing.zig
+        ├── spartan/       # Spartan R1CS prover
+        ├── lasso/         # Lasso lookup argument
+        ├── r1cs/          # R1CS constraints
+        ├── bytecode/      # Bytecode handling
+        ├── instruction/   # RISC-V instruction decoder
+        ├── ram/           # Memory checking
+        └── registers/     # Register file
+```
+
+## Prerequisites
+
+- **Zig 0.15.0+** — build and run Zolt
+- **Rust toolchain** — build `jolt-verifier/` for proof verification
+- **RISC-V toolchain** — build example C programs (pre-built ELFs included)
 
 ## License
 
-This project follows the same license as the original Jolt implementation.
-
-## Acknowledgments
-
-- [a16z/jolt](https://github.com/a16z/jolt) - Original Rust implementation
-- [Lasso paper](https://eprint.iacr.org/2023/1216) - Lookup argument foundation
-- [Jolt paper](https://eprint.iacr.org/2023/1217) - SNARK for virtual machines
+MIT

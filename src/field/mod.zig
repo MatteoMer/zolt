@@ -4,6 +4,15 @@
 //! protocols used in Jolt. The primary field is the BN254 scalar field.
 
 const std = @import("std");
+const builtin = @import("builtin");
+
+/// Comptime flag: true when x86-64 BMI2+ADX instructions are available
+const use_asm_mul = blk: {
+    if (builtin.cpu.arch != .x86_64) break :blk false;
+    const features = builtin.cpu.features;
+    break :blk features.isEnabled(@intFromEnum(std.Target.x86.Feature.bmi2)) and
+        features.isEnabled(@intFromEnum(std.Target.x86.Feature.adx));
+};
 
 // Debug output control - set to true to enable verbose debug prints
 const debug_verbose = false;
@@ -327,6 +336,172 @@ pub fn MontgomeryField(
             return result;
         }
 
+        /// x86-64 BMI2+ADX accelerated CIOS Montgomery multiplication.
+        /// Uses mulxq (flag-free multiply) + adcxq/adoxq (dual carry chains)
+        /// for ~20% speedup over pure Zig. Adapted from arkworks ff-asm.
+        fn montgomeryMulX86(self: Self, other: Self) Self {
+            const a = self.limbs;
+            const b = other.limbs;
+            const mod_arr: [4]u64 = modulus;
+
+            var r0: u64 = undefined;
+            var r1: u64 = undefined;
+            var r2: u64 = undefined;
+            var r3: u64 = undefined;
+
+            // 4-limb CIOS Montgomery multiplication, fully unrolled.
+            // Register mapping:
+            //   r8-r11: accumulator t[0..3] (rotated each iteration)
+            //   rdi: pointer to a[], rsi: pointer to b[], r14: pointer to mod[]
+            //   rbx: montgomery_inv, rdx: mulxq multiplier
+            //   rax, rcx, r13: scratch
+            asm volatile (
+                \\xorq %%rcx, %%rcx
+                // Iteration 0: mul_1 + reduction
+                \\movq (%%rdi), %%rdx
+                \\mulxq (%%rsi), %%r8, %%r9
+                \\mulxq 8(%%rsi), %%rax, %%r10
+                \\adcxq %%rax, %%r9
+                \\mulxq 16(%%rsi), %%rax, %%r11
+                \\adcxq %%rax, %%r10
+                \\mulxq 24(%%rsi), %%rax, %%rcx
+                \\movq $0, %%r13
+                \\adcxq %%rax, %%r11
+                \\adcxq %%r13, %%rcx
+                //
+                \\movq %%rbx, %%rdx
+                \\mulxq %%r8, %%rdx, %%rax
+                \\mulxq (%%r14), %%rax, %%r13
+                \\adcxq %%r8, %%rax
+                \\adoxq %%r13, %%r9
+                \\mulxq 8(%%r14), %%rax, %%r13
+                \\adcxq %%rax, %%r9
+                \\adoxq %%r13, %%r10
+                \\mulxq 16(%%r14), %%rax, %%r13
+                \\adcxq %%rax, %%r10
+                \\adoxq %%r13, %%r11
+                \\mulxq 24(%%r14), %%rax, %%r8
+                \\movq $0, %%r13
+                \\adcxq %%rax, %%r11
+                \\adoxq %%rcx, %%r8
+                \\adcxq %%r13, %%r8
+                // Iteration 1: mul_add_1 + reduction
+                \\movq 8(%%rdi), %%rdx
+                \\mulxq (%%rsi), %%rax, %%r13
+                \\adcxq %%rax, %%r9
+                \\adoxq %%r13, %%r10
+                \\mulxq 8(%%rsi), %%rax, %%r13
+                \\adcxq %%rax, %%r10
+                \\adoxq %%r13, %%r11
+                \\mulxq 16(%%rsi), %%rax, %%r13
+                \\adcxq %%rax, %%r11
+                \\adoxq %%r13, %%r8
+                \\mulxq 24(%%rsi), %%rax, %%rcx
+                \\movq $0, %%r13
+                \\adcxq %%rax, %%r8
+                \\adoxq %%r13, %%rcx
+                \\adcxq %%r13, %%rcx
+                //
+                \\movq %%rbx, %%rdx
+                \\mulxq %%r9, %%rdx, %%rax
+                \\mulxq (%%r14), %%rax, %%r13
+                \\adcxq %%r9, %%rax
+                \\adoxq %%r13, %%r10
+                \\mulxq 8(%%r14), %%rax, %%r13
+                \\adcxq %%rax, %%r10
+                \\adoxq %%r13, %%r11
+                \\mulxq 16(%%r14), %%rax, %%r13
+                \\adcxq %%rax, %%r11
+                \\adoxq %%r13, %%r8
+                \\mulxq 24(%%r14), %%rax, %%r9
+                \\movq $0, %%r13
+                \\adcxq %%rax, %%r8
+                \\adoxq %%rcx, %%r9
+                \\adcxq %%r13, %%r9
+                // Iteration 2: mul_add_1 + reduction
+                \\movq 16(%%rdi), %%rdx
+                \\mulxq (%%rsi), %%rax, %%r13
+                \\adcxq %%rax, %%r10
+                \\adoxq %%r13, %%r11
+                \\mulxq 8(%%rsi), %%rax, %%r13
+                \\adcxq %%rax, %%r11
+                \\adoxq %%r13, %%r8
+                \\mulxq 16(%%rsi), %%rax, %%r13
+                \\adcxq %%rax, %%r8
+                \\adoxq %%r13, %%r9
+                \\mulxq 24(%%rsi), %%rax, %%rcx
+                \\movq $0, %%r13
+                \\adcxq %%rax, %%r9
+                \\adoxq %%r13, %%rcx
+                \\adcxq %%r13, %%rcx
+                //
+                \\movq %%rbx, %%rdx
+                \\mulxq %%r10, %%rdx, %%rax
+                \\mulxq (%%r14), %%rax, %%r13
+                \\adcxq %%r10, %%rax
+                \\adoxq %%r13, %%r11
+                \\mulxq 8(%%r14), %%rax, %%r13
+                \\adcxq %%rax, %%r11
+                \\adoxq %%r13, %%r8
+                \\mulxq 16(%%r14), %%rax, %%r13
+                \\adcxq %%rax, %%r8
+                \\adoxq %%r13, %%r9
+                \\mulxq 24(%%r14), %%rax, %%r10
+                \\movq $0, %%r13
+                \\adcxq %%rax, %%r9
+                \\adoxq %%rcx, %%r10
+                \\adcxq %%r13, %%r10
+                // Iteration 3: mul_add_1 + reduction
+                \\movq 24(%%rdi), %%rdx
+                \\mulxq (%%rsi), %%rax, %%r13
+                \\adcxq %%rax, %%r11
+                \\adoxq %%r13, %%r8
+                \\mulxq 8(%%rsi), %%rax, %%r13
+                \\adcxq %%rax, %%r8
+                \\adoxq %%r13, %%r9
+                \\mulxq 16(%%rsi), %%rax, %%r13
+                \\adcxq %%rax, %%r9
+                \\adoxq %%r13, %%r10
+                \\mulxq 24(%%rsi), %%rax, %%rcx
+                \\movq $0, %%r13
+                \\adcxq %%rax, %%r10
+                \\adoxq %%r13, %%rcx
+                \\adcxq %%r13, %%rcx
+                //
+                \\movq %%rbx, %%rdx
+                \\mulxq %%r11, %%rdx, %%rax
+                \\mulxq (%%r14), %%rax, %%r13
+                \\adcxq %%r11, %%rax
+                \\adoxq %%r13, %%r8
+                \\mulxq 8(%%r14), %%rax, %%r13
+                \\adcxq %%rax, %%r8
+                \\adoxq %%r13, %%r9
+                \\mulxq 16(%%r14), %%rax, %%r13
+                \\adcxq %%rax, %%r9
+                \\adoxq %%r13, %%r10
+                \\mulxq 24(%%r14), %%rax, %%r11
+                \\movq $0, %%r13
+                \\adcxq %%rax, %%r10
+                \\adoxq %%rcx, %%r11
+                \\adcxq %%r13, %%r11
+                : [_r0] "={r8}" (r0),
+                  [_r1] "={r9}" (r1),
+                  [_r2] "={r10}" (r2),
+                  [_r3] "={r11}" (r3),
+                : [_a] "{rdi}" (&a),
+                  [_b] "{rsi}" (&b),
+                  [_mod] "{r14}" (&mod_arr),
+                  [_inv] "{rbx}" (montgomery_inv),
+                : .{ .rax = true, .rcx = true, .rdx = true, .r13 = true, .cc = true, .memory = true }
+            );
+
+            var result = Self{ .limbs = .{ r0, r1, r2, r3 } };
+            if (!result.lessThanModulus()) {
+                result = result.subtractModulus();
+            }
+            return result;
+        }
+
         /// Optimized multiplication by a 128-bit value stored in high limbs
         /// Matches arkworks' mul_hi_bigint_u128 behavior
         ///
@@ -418,8 +593,87 @@ pub fn MontgomeryField(
             return result;
         }
 
+        /// Fused multiply-accumulate: computes a[0]*b[0] + a[1]*b[1] with only
+        /// 2 Montgomery reductions instead of 3 (vs separate mul + mul + add).
+        /// Interleaved CIOS: both products share the same reduction step per limb iteration.
+        /// Safe for BN254 since modulus_size (254) < 64*N - 1 (255).
+        pub inline fn sumOfProducts(a: [2]Self, b: [2]Self) Self {
+            var t: [5]u64 = .{ 0, 0, 0, 0, 0 };
+
+            inline for (0..4) |i| {
+                // Accumulate both products at limb i into t
+                var carry1: u64 = 0;
+                inline for (0..2) |pair| {
+                    var carry: u64 = 0;
+                    inline for (0..4) |j| {
+                        const prod = mulWide(a[pair].limbs[i], b[pair].limbs[j]);
+                        const sum = @as(u128, t[j]) + prod + @as(u128, carry);
+                        t[j] = @truncate(sum);
+                        carry = @truncate(sum >> 64);
+                    }
+                    const sum_t4 = @as(u128, t[4]) + @as(u128, carry) + @as(u128, carry1);
+                    t[4] = @truncate(sum_t4);
+                    carry1 = @truncate(sum_t4 >> 64);
+                }
+
+                // Montgomery reduction step (shared for both products)
+                const m = t[0] *% montgomery_inv;
+
+                var carry: u64 = 0;
+                const prod0 = mulWide(m, modulus[0]);
+                const sum0 = @as(u128, t[0]) + prod0;
+                carry = @truncate(sum0 >> 64);
+
+                inline for (1..4) |j| {
+                    const prod = mulWide(m, modulus[j]);
+                    const sum = @as(u128, t[j]) + prod + @as(u128, carry);
+                    t[j - 1] = @truncate(sum);
+                    carry = @truncate(sum >> 64);
+                }
+                const final_sum = @as(u128, t[4]) + @as(u128, carry);
+                t[3] = @truncate(final_sum);
+                t[4] = @as(u64, @truncate(final_sum >> 64)) +% carry1;
+            }
+
+            var result = Self{ .limbs = .{ t[0], t[1], t[2], t[3] } };
+            if (t[4] != 0 or !result.lessThanModulus()) {
+                result = result.subtractModulus();
+            }
+            return result;
+        }
+
+        /// Addition without final reduction. Result in [0, 2p).
+        /// Only valid when both inputs are in [0, p).
+        pub inline fn addNoReduce(self: Self, other: Self) Self {
+            @setEvalBranchQuota(10000);
+            var result: [4]u64 = undefined;
+            var carry: u64 = 0;
+
+            inline for (0..4) |i| {
+                const ac = addCarry(self.limbs[i], other.limbs[i], carry);
+                result[i] = ac.result;
+                carry = ac.carry;
+            }
+
+            var res = Self{ .limbs = result };
+            // Only subtract if overflowed 256 bits; result stays in [0, 2p)
+            if (carry != 0) {
+                res = res.subtractModulus();
+            }
+            return res;
+        }
+
+        /// Reduce from [0, 2p) to [0, p)
+        pub inline fn reduce(self: Self) Self {
+            if (!self.lessThanModulus()) {
+                return self.subtractModulus();
+            }
+            return self;
+        }
+
         /// Field addition
-        pub fn add(self: Self, other: Self) Self {
+        pub inline fn add(self: Self, other: Self) Self {
+            @setEvalBranchQuota(10000);
             var result: [4]u64 = undefined;
             var carry: u64 = 0;
 
@@ -437,7 +691,8 @@ pub fn MontgomeryField(
         }
 
         /// Field subtraction
-        pub fn sub(self: Self, other: Self) Self {
+        pub inline fn sub(self: Self, other: Self) Self {
+            @setEvalBranchQuota(10000);
             var result: [4]u64 = undefined;
             var borrow: u64 = 0;
 
@@ -455,12 +710,18 @@ pub fn MontgomeryField(
         }
 
         /// Field multiplication
-        pub fn mul(self: Self, other: Self) Self {
+        pub inline fn mul(self: Self, other: Self) Self {
+            if (comptime use_asm_mul) {
+                return self.montgomeryMulX86(other);
+            }
             return self.montgomeryMul(other);
         }
 
         /// Field squaring
-        pub fn square(self: Self) Self {
+        pub inline fn square(self: Self) Self {
+            if (comptime use_asm_mul) {
+                return self.montgomeryMulX86(self);
+            }
             return self.montgomeryMul(self);
         }
 
@@ -506,12 +767,12 @@ pub fn MontgomeryField(
         }
 
         /// Doubling (2*self)
-        pub fn double(self: Self) Self {
+        pub inline fn double(self: Self) Self {
             return self.add(self);
         }
 
         /// Negation
-        pub fn neg(self: Self) Self {
+        pub inline fn neg(self: Self) Self {
             if (self.isZero()) return self;
             return (Self{ .limbs = modulus }).sub(self);
         }
@@ -537,7 +798,8 @@ pub fn MontgomeryField(
             return result;
         }
 
-        fn lessThanModulus(self: Self) bool {
+        inline fn lessThanModulus(self: Self) bool {
+            @setEvalBranchQuota(10000);
             var i: usize = 3;
             while (true) : (i -= 1) {
                 if (self.limbs[i] < modulus[i]) return true;
@@ -547,7 +809,8 @@ pub fn MontgomeryField(
             return false;
         }
 
-        fn subtractModulus(self: Self) Self {
+        inline fn subtractModulus(self: Self) Self {
+            @setEvalBranchQuota(10000);
             var result: [4]u64 = undefined;
             var borrow: u64 = 0;
 
@@ -560,7 +823,8 @@ pub fn MontgomeryField(
             return Self{ .limbs = result };
         }
 
-        fn addModulus(self: Self) Self {
+        inline fn addModulus(self: Self) Self {
+            @setEvalBranchQuota(10000);
             var result: [4]u64 = undefined;
             var carry: u64 = 0;
 
@@ -866,8 +1130,209 @@ pub const BN254Scalar = struct {
         return res;
     }
 
+    /// x86-64 BMI2+ADX accelerated CIOS Montgomery multiplication (BN254 scalar field).
+    fn montgomeryMulX86(self: Self, other: Self) Self {
+        const a = self.limbs;
+        const b = other.limbs;
+        const mod_arr: [4]u64 = BN254_MODULUS;
+
+        var r0: u64 = undefined;
+        var r1: u64 = undefined;
+        var r2: u64 = undefined;
+        var r3: u64 = undefined;
+
+        asm volatile (
+            \\xorq %%rcx, %%rcx
+            \\movq (%%rdi), %%rdx
+            \\mulxq (%%rsi), %%r8, %%r9
+            \\mulxq 8(%%rsi), %%rax, %%r10
+            \\adcxq %%rax, %%r9
+            \\mulxq 16(%%rsi), %%rax, %%r11
+            \\adcxq %%rax, %%r10
+            \\mulxq 24(%%rsi), %%rax, %%rcx
+            \\movq $0, %%r13
+            \\adcxq %%rax, %%r11
+            \\adcxq %%r13, %%rcx
+            \\movq %%rbx, %%rdx
+            \\mulxq %%r8, %%rdx, %%rax
+            \\mulxq (%%r14), %%rax, %%r13
+            \\adcxq %%r8, %%rax
+            \\adoxq %%r13, %%r9
+            \\mulxq 8(%%r14), %%rax, %%r13
+            \\adcxq %%rax, %%r9
+            \\adoxq %%r13, %%r10
+            \\mulxq 16(%%r14), %%rax, %%r13
+            \\adcxq %%rax, %%r10
+            \\adoxq %%r13, %%r11
+            \\mulxq 24(%%r14), %%rax, %%r8
+            \\movq $0, %%r13
+            \\adcxq %%rax, %%r11
+            \\adoxq %%rcx, %%r8
+            \\adcxq %%r13, %%r8
+            //
+            \\movq 8(%%rdi), %%rdx
+            \\mulxq (%%rsi), %%rax, %%r13
+            \\adcxq %%rax, %%r9
+            \\adoxq %%r13, %%r10
+            \\mulxq 8(%%rsi), %%rax, %%r13
+            \\adcxq %%rax, %%r10
+            \\adoxq %%r13, %%r11
+            \\mulxq 16(%%rsi), %%rax, %%r13
+            \\adcxq %%rax, %%r11
+            \\adoxq %%r13, %%r8
+            \\mulxq 24(%%rsi), %%rax, %%rcx
+            \\movq $0, %%r13
+            \\adcxq %%rax, %%r8
+            \\adoxq %%r13, %%rcx
+            \\adcxq %%r13, %%rcx
+            \\movq %%rbx, %%rdx
+            \\mulxq %%r9, %%rdx, %%rax
+            \\mulxq (%%r14), %%rax, %%r13
+            \\adcxq %%r9, %%rax
+            \\adoxq %%r13, %%r10
+            \\mulxq 8(%%r14), %%rax, %%r13
+            \\adcxq %%rax, %%r10
+            \\adoxq %%r13, %%r11
+            \\mulxq 16(%%r14), %%rax, %%r13
+            \\adcxq %%rax, %%r11
+            \\adoxq %%r13, %%r8
+            \\mulxq 24(%%r14), %%rax, %%r9
+            \\movq $0, %%r13
+            \\adcxq %%rax, %%r8
+            \\adoxq %%rcx, %%r9
+            \\adcxq %%r13, %%r9
+            //
+            \\movq 16(%%rdi), %%rdx
+            \\mulxq (%%rsi), %%rax, %%r13
+            \\adcxq %%rax, %%r10
+            \\adoxq %%r13, %%r11
+            \\mulxq 8(%%rsi), %%rax, %%r13
+            \\adcxq %%rax, %%r11
+            \\adoxq %%r13, %%r8
+            \\mulxq 16(%%rsi), %%rax, %%r13
+            \\adcxq %%rax, %%r8
+            \\adoxq %%r13, %%r9
+            \\mulxq 24(%%rsi), %%rax, %%rcx
+            \\movq $0, %%r13
+            \\adcxq %%rax, %%r9
+            \\adoxq %%r13, %%rcx
+            \\adcxq %%r13, %%rcx
+            \\movq %%rbx, %%rdx
+            \\mulxq %%r10, %%rdx, %%rax
+            \\mulxq (%%r14), %%rax, %%r13
+            \\adcxq %%r10, %%rax
+            \\adoxq %%r13, %%r11
+            \\mulxq 8(%%r14), %%rax, %%r13
+            \\adcxq %%rax, %%r11
+            \\adoxq %%r13, %%r8
+            \\mulxq 16(%%r14), %%rax, %%r13
+            \\adcxq %%rax, %%r8
+            \\adoxq %%r13, %%r9
+            \\mulxq 24(%%r14), %%rax, %%r10
+            \\movq $0, %%r13
+            \\adcxq %%rax, %%r9
+            \\adoxq %%rcx, %%r10
+            \\adcxq %%r13, %%r10
+            //
+            \\movq 24(%%rdi), %%rdx
+            \\mulxq (%%rsi), %%rax, %%r13
+            \\adcxq %%rax, %%r11
+            \\adoxq %%r13, %%r8
+            \\mulxq 8(%%rsi), %%rax, %%r13
+            \\adcxq %%rax, %%r8
+            \\adoxq %%r13, %%r9
+            \\mulxq 16(%%rsi), %%rax, %%r13
+            \\adcxq %%rax, %%r9
+            \\adoxq %%r13, %%r10
+            \\mulxq 24(%%rsi), %%rax, %%rcx
+            \\movq $0, %%r13
+            \\adcxq %%rax, %%r10
+            \\adoxq %%r13, %%rcx
+            \\adcxq %%r13, %%rcx
+            \\movq %%rbx, %%rdx
+            \\mulxq %%r11, %%rdx, %%rax
+            \\mulxq (%%r14), %%rax, %%r13
+            \\adcxq %%r11, %%rax
+            \\adoxq %%r13, %%r8
+            \\mulxq 8(%%r14), %%rax, %%r13
+            \\adcxq %%rax, %%r8
+            \\adoxq %%r13, %%r9
+            \\mulxq 16(%%r14), %%rax, %%r13
+            \\adcxq %%rax, %%r9
+            \\adoxq %%r13, %%r10
+            \\mulxq 24(%%r14), %%rax, %%r11
+            \\movq $0, %%r13
+            \\adcxq %%rax, %%r10
+            \\adoxq %%rcx, %%r11
+            \\adcxq %%r13, %%r11
+            : [_r0] "={r8}" (r0),
+              [_r1] "={r9}" (r1),
+              [_r2] "={r10}" (r2),
+              [_r3] "={r11}" (r3),
+            : [_a] "{rdi}" (&a),
+              [_b] "{rsi}" (&b),
+              [_mod] "{r14}" (&mod_arr),
+              [_inv] "{rbx}" (BN254_INV),
+            : .{ .rax = true, .rcx = true, .rdx = true, .r13 = true, .cc = true, .memory = true }
+        );
+
+        var result = Self{ .limbs = .{ r0, r1, r2, r3 } };
+        if (!result.lessThanModulus()) {
+            result = result.subtractModulus();
+        }
+        return result;
+    }
+
+    /// Fused multiply-accumulate: computes a[0]*b[0] + a[1]*b[1] with only
+    /// 2 Montgomery reductions instead of 3 (vs separate mul + mul + add).
+    pub fn sumOfProducts(a: [2]Self, b: [2]Self) Self {
+        var t: [5]u64 = .{ 0, 0, 0, 0, 0 };
+
+        inline for (0..4) |i| {
+            var carry1: u64 = 0;
+            inline for (0..2) |pair| {
+                var carry: u64 = 0;
+                inline for (0..4) |j| {
+                    const prod = mulWide(a[pair].limbs[i], b[pair].limbs[j]);
+                    const sum = @as(u128, t[j]) + prod + @as(u128, carry);
+                    t[j] = @truncate(sum);
+                    carry = @truncate(sum >> 64);
+                }
+                const sum_t4 = @as(u128, t[4]) + @as(u128, carry) + @as(u128, carry1);
+                t[4] = @truncate(sum_t4);
+                carry1 = @truncate(sum_t4 >> 64);
+            }
+
+            const m = t[0] *% BN254_INV;
+
+            var carry: u64 = 0;
+            const prod0 = mulWide(m, BN254_MODULUS[0]);
+            const sum0 = @as(u128, t[0]) + prod0;
+            carry = @truncate(sum0 >> 64);
+
+            inline for (1..4) |j| {
+                const prod = mulWide(m, BN254_MODULUS[j]);
+                const sum = @as(u128, t[j]) + prod + @as(u128, carry);
+                t[j - 1] = @truncate(sum);
+                carry = @truncate(sum >> 64);
+            }
+            const final_sum = @as(u128, t[4]) + @as(u128, carry);
+            t[3] = @truncate(final_sum);
+            t[4] = @as(u64, @truncate(final_sum >> 64)) +% carry1;
+        }
+
+        var result = Self{ .limbs = .{ t[0], t[1], t[2], t[3] } };
+        if (t[4] != 0 or !result.lessThanModulus()) {
+            result = result.subtractModulus();
+        }
+        return result;
+    }
+
     /// Field multiplication
     pub fn mul(self: Self, other: Self) Self {
+        if (comptime use_asm_mul) {
+            return self.montgomeryMulX86(other);
+        }
         return self.montgomeryMul(other);
     }
 
@@ -1003,6 +1468,9 @@ pub const BN254Scalar = struct {
     /// Field squaring (optimized using Karatsuba-like technique)
     /// Saves ~25% multiplications compared to naive multiplication
     pub fn square(self: Self) Self {
+        if (comptime use_asm_mul) {
+            return self.montgomeryMulX86(self);
+        }
         // Optimized squaring: we can compute a^2 with fewer multiplications
         // Since (a0 + a1*2^64 + a2*2^128 + a3*2^192)^2 has symmetric terms
         // For example: 2*a0*a1 instead of a0*a1 + a1*a0
@@ -1330,6 +1798,68 @@ test "mulHiBigIntU128 vs montgomeryMul equivalence" {
     const p_zolt = c0.add(c1.mulHiBigIntU128(challenge.limbs)).add(c2.mul(r2_zolt));
 
     try std.testing.expect(p_jolt.eql(p_zolt));
+}
+
+test "sumOfProducts equivalence" {
+    // Test BN254Scalar sumOfProducts
+    {
+        const a = BN254Scalar.fromU64(12345);
+        const b = BN254Scalar.fromU64(67890);
+        const c = BN254Scalar.fromU64(11111);
+        const d = BN254Scalar.fromU64(22222);
+
+        const expected = a.mul(b).add(c.mul(d));
+        const fused = BN254Scalar.sumOfProducts(.{ a, c }, .{ b, d });
+        try std.testing.expect(expected.eql(fused));
+    }
+
+    // Test with larger values (near modulus)
+    {
+        const a = BN254Scalar{ .limbs = .{ 0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff, 0x0fffffffffffffff } };
+        const b = BN254Scalar{ .limbs = .{ 0xeeeeeeeeeeeeeeee, 0xdddddddddddddddd, 0xcccccccccccccccc, 0x0bbbbbbbbbbbbbbb } };
+        const c = BN254Scalar.fromU64(999999999);
+        const d = BN254Scalar.fromU64(888888888);
+
+        const expected = a.mul(b).add(c.mul(d));
+        const fused = BN254Scalar.sumOfProducts(.{ a, c }, .{ b, d });
+        try std.testing.expect(expected.eql(fused));
+    }
+
+    // Test BN254BaseField (Fp) sumOfProducts
+    {
+        const Fp = BN254BaseField;
+        const a = Fp.fromU64(54321);
+        const b = Fp.fromU64(98765);
+        const c = Fp.fromU64(33333);
+        const d = Fp.fromU64(44444);
+
+        const expected = a.mul(b).add(c.mul(d));
+        const fused = Fp.sumOfProducts(.{ a, c }, .{ b, d });
+        try std.testing.expect(expected.eql(fused));
+    }
+
+    // Test with subtraction (a*b + (-c)*d = a*b - c*d)
+    {
+        const Fp = BN254BaseField;
+        const a = Fp.fromU64(100000);
+        const b = Fp.fromU64(200000);
+        const c = Fp.fromU64(50000);
+        const d = Fp.fromU64(30000);
+
+        const expected = a.mul(b).sub(c.mul(d));
+        const fused = Fp.sumOfProducts(.{ a, c.neg() }, .{ b, d });
+        try std.testing.expect(expected.eql(fused));
+    }
+
+    // Test zero cases
+    {
+        const zero = BN254Scalar.zero();
+        const a = BN254Scalar.fromU64(42);
+        const b = BN254Scalar.fromU64(99);
+
+        const result = BN254Scalar.sumOfProducts(.{ a, zero }, .{ b, zero });
+        try std.testing.expect(result.eql(a.mul(b)));
+    }
 }
 
 test "bn254 scalar toBytes/fromBytes roundtrip" {

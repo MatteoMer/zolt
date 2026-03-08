@@ -20,6 +20,7 @@ fn dbg(comptime fmt: []const u8, args: anytype) void {
 }
 
 const Allocator = std.mem.Allocator;
+const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
 
 const poly_mod = @import("../../poly/mod.zig");
 const UniPoly = poly_mod.UniPoly;
@@ -1564,12 +1565,11 @@ fn IncClaimReductionProver(comptime F: type) type {
 
         pub fn bindChallenge(self: *Self, r: F) void {
             const half = self.current_len / 2;
-            const one_minus_r = F.one().sub(r);
             for (0..half) |j| {
-                self.ram_inc[j] = one_minus_r.mul(self.ram_inc[2 * j]).add(r.mul(self.ram_inc[2 * j + 1]));
-                self.rd_inc[j] = one_minus_r.mul(self.rd_inc[2 * j]).add(r.mul(self.rd_inc[2 * j + 1]));
-                self.eq_ram[j] = one_minus_r.mul(self.eq_ram[2 * j]).add(r.mul(self.eq_ram[2 * j + 1]));
-                self.eq_rd[j] = one_minus_r.mul(self.eq_rd[2 * j]).add(r.mul(self.eq_rd[2 * j + 1]));
+                self.ram_inc[j] = self.ram_inc[2 * j].add(r.mul(self.ram_inc[2 * j + 1].sub(self.ram_inc[2 * j])));
+                self.rd_inc[j] = self.rd_inc[2 * j].add(r.mul(self.rd_inc[2 * j + 1].sub(self.rd_inc[2 * j])));
+                self.eq_ram[j] = self.eq_ram[2 * j].add(r.mul(self.eq_ram[2 * j + 1].sub(self.eq_ram[2 * j])));
+                self.eq_rd[j] = self.eq_rd[2 * j].add(r.mul(self.eq_rd[2 * j + 1].sub(self.eq_rd[2 * j])));
             }
             self.current_len = half;
         }
@@ -1673,10 +1673,9 @@ fn HammingBooleanityProver(comptime F: type) type {
 
         pub fn bindChallenge(self: *Self, r: F) void {
             const half = self.current_len / 2;
-            const one_minus_r = F.one().sub(r);
             for (0..half) |j| {
-                self.H[j] = one_minus_r.mul(self.H[2 * j]).add(r.mul(self.H[2 * j + 1]));
-                self.eq[j] = one_minus_r.mul(self.eq[2 * j]).add(r.mul(self.eq[2 * j + 1]));
+                self.H[j] = self.H[2 * j].add(r.mul(self.H[2 * j + 1].sub(self.H[2 * j])));
+                self.eq[j] = self.eq[2 * j].add(r.mul(self.eq[2 * j + 1].sub(self.eq[2 * j])));
             }
             self.current_len = half;
         }
@@ -1817,12 +1816,11 @@ fn RamRaVirtualProver(comptime F: type) type {
 
         pub fn bindChallenge(self: *Self, r: F) void {
             const half = self.current_len / 2;
-            const one_minus_r = F.one().sub(r);
             for (0..half) |j| {
                 for (0..self.d) |i| {
-                    self.ra_bound[i][j] = one_minus_r.mul(self.ra_bound[i][2 * j]).add(r.mul(self.ra_bound[i][2 * j + 1]));
+                    self.ra_bound[i][j] = self.ra_bound[i][2 * j].add(r.mul(self.ra_bound[i][2 * j + 1].sub(self.ra_bound[i][2 * j])));
                 }
-                self.eq[j] = one_minus_r.mul(self.eq[2 * j]).add(r.mul(self.eq[2 * j + 1]));
+                self.eq[j] = self.eq[2 * j].add(r.mul(self.eq[2 * j + 1].sub(self.eq[2 * j])));
             }
             self.current_len = half;
         }
@@ -2298,16 +2296,15 @@ fn BooleanityProver(comptime F: type) type {
             } else {
                 // Phase 2: bind cycle variable, halve H tables and eq_cycle
                 const half = self.phase2_len / 2;
-                const one_minus_r = F.one().sub(r);
                 if (self.H) |ht| {
                     for (0..self.N) |i| {
                         for (0..half) |j| {
-                            ht[i][j] = one_minus_r.mul(ht[i][2 * j]).add(r.mul(ht[i][2 * j + 1]));
+                            ht[i][j] = ht[i][2 * j].add(r.mul(ht[i][2 * j + 1].sub(ht[i][2 * j])));
                         }
                     }
                 }
                 for (0..half) |j| {
-                    self.eq_cycle[j] = one_minus_r.mul(self.eq_cycle[2 * j]).add(r.mul(self.eq_cycle[2 * j + 1]));
+                    self.eq_cycle[j] = self.eq_cycle[2 * j].add(r.mul(self.eq_cycle[2 * j + 1].sub(self.eq_cycle[2 * j])));
                 }
                 self.phase2_len = half;
             }
@@ -2766,12 +2763,11 @@ fn LookupsRaVirtualProver(comptime F: type) type {
 
         pub fn bindChallenge(self: *Self, r: F) void {
             const half = self.current_len / 2;
-            const one_minus_r = F.one().sub(r);
             for (0..half) |j| {
                 for (0..self.total_committed) |i| {
-                    self.ra_bound[i][j] = one_minus_r.mul(self.ra_bound[i][2 * j]).add(r.mul(self.ra_bound[i][2 * j + 1]));
+                    self.ra_bound[i][j] = self.ra_bound[i][2 * j].add(r.mul(self.ra_bound[i][2 * j + 1].sub(self.ra_bound[i][2 * j])));
                 }
-                self.eq[j] = one_minus_r.mul(self.eq[2 * j]).add(r.mul(self.eq[2 * j + 1]));
+                self.eq[j] = self.eq[2 * j].add(r.mul(self.eq[2 * j + 1].sub(self.eq[2 * j])));
             }
             self.current_len = half;
         }
@@ -3295,15 +3291,14 @@ fn BytecodeReadRafProver(comptime F: type) type {
         /// per_stage_evals: [5][eval_0, eval_2] from computeRoundPolyPhase1
         pub fn bindChallengePhase1(self: *Self, r: F, per_stage_evals: [5][2]F) void {
             const half = self.current_len / 2;
-            const one_minus_r = F.one().sub(r);
             const two = F.fromU64(2);
             const two_inv = two.inverse().?;
 
             for (0..5) |s| {
                 // Bind F_s and val_with_raf arrays
                 for (0..half) |k| {
-                    self.F_s_arrs[s][k] = one_minus_r.mul(self.F_s_arrs[s][2 * k]).add(r.mul(self.F_s_arrs[s][2 * k + 1]));
-                    self.val_with_raf[s][k] = one_minus_r.mul(self.val_with_raf[s][2 * k]).add(r.mul(self.val_with_raf[s][2 * k + 1]));
+                    self.F_s_arrs[s][k] = self.F_s_arrs[s][2 * k].add(r.mul(self.F_s_arrs[s][2 * k + 1].sub(self.F_s_arrs[s][2 * k])));
+                    self.val_with_raf[s][k] = self.val_with_raf[s][2 * k].add(r.mul(self.val_with_raf[s][2 * k + 1].sub(self.val_with_raf[s][2 * k])));
                 }
 
                 // Update per-stage claims by evaluating per-stage round poly at r
@@ -3736,11 +3731,10 @@ fn BytecodeReadRafProver(comptime F: type) type {
         pub fn bindChallengePhase2(self: *Self, r: F) void {
             const half = self.current_len / 2;
             const combined = self.combined.?;
-            const one_minus_r = F.one().sub(r);
             for (0..half) |c| {
-                combined[c] = one_minus_r.mul(combined[2 * c]).add(r.mul(combined[2 * c + 1]));
+                combined[c] = combined[2 * c].add(r.mul(combined[2 * c + 1].sub(combined[2 * c])));
                 for (0..self.bytecode_d) |i| {
-                    self.ra_chunks.?[i][c] = one_minus_r.mul(self.ra_chunks.?[i][2 * c]).add(r.mul(self.ra_chunks.?[i][2 * c + 1]));
+                    self.ra_chunks.?[i][c] = self.ra_chunks.?[i][2 * c].add(r.mul(self.ra_chunks.?[i][2 * c + 1].sub(self.ra_chunks.?[i][2 * c])));
                 }
             }
             self.current_len = half;
@@ -3764,6 +3758,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
         const Self = @This();
 
         allocator: Allocator,
+        thread_pool: ?*ThreadPool = null,
 
         pub fn init(allocator: Allocator) Self {
             return .{ .allocator = allocator };
@@ -4140,7 +4135,7 @@ pub fn Stage6BatchedProver(comptime F: type) type {
             defer inc_prover.deinit();
 
             // Direct comparison: Stage 6 rd_inc vs Stage 4 inc_poly
-            if (stage4_inc_poly_copy.len > 0) {
+            if (comptime debug_verbose) if (stage4_inc_poly_copy.len > 0) {
                 var inc_diff_count: usize = 0;
                 const cmp_len = @min(inc_prover.rd_inc.len, stage4_inc_poly_copy.len);
                 for (0..cmp_len) |j| {
@@ -4161,10 +4156,10 @@ pub fn Stage6BatchedProver(comptime F: type) type {
                     }
                 }
                 std.debug.print("[S6 vs S4 INC] total differences: {}\n", .{inc_diff_count});
-            }
+            };
 
             // Diagnostic: verify IncClaimReduction individual component sums
-            {
+            if (comptime debug_verbose) {
                 const T_inc = inc_prover.current_len;
                 // Recompute individual eq tables for diagnosis
                 var rev_buf2 = try self.allocator.alloc(F, n_cycle_vars);

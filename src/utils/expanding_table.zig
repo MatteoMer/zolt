@@ -10,6 +10,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const ThreadPool = @import("thread_pool.zig").ThreadPool;
 
 /// Table containing the evaluations `EQ(x_1, ..., x_j, r_1, ..., r_j)`,
 /// built up incrementally as we receive random challenges `r_j` over the
@@ -117,6 +118,44 @@ pub fn ExpandingTable(comptime F: type) type {
                     self.len = new_len;
                 },
             }
+        }
+
+        /// Parallel update: same as update() but uses a thread pool for large tables.
+        /// Safe because each index i writes to disjoint positions [i] and [i + old_len].
+        pub fn updateParallel(self: *Self, r_j: F, tp: *ThreadPool) void {
+            const old_len = self.len;
+            if (old_len < 256) {
+                self.update(r_j);
+                return;
+            }
+
+            switch (self.binding_order) {
+                .LowToHigh => {
+                    const Ctx = struct { values: []F, old_len: usize, r_j_limbs: [4]u64 };
+                    const ctx = Ctx{ .values = self.values, .old_len = old_len, .r_j_limbs = r_j.limbs };
+                    tp.parallelFor(old_len, ctx, struct {
+                        fn run(c: Ctx, i: usize) void {
+                            const old_val = c.values[i];
+                            const r_times_old = old_val.mulHiBigIntU128(c.r_j_limbs);
+                            c.values[i] = old_val.sub(r_times_old);
+                            c.values[i + c.old_len] = r_times_old;
+                        }
+                    }.run);
+                },
+                .HighToLow => {
+                    const Ctx = struct { values: []F, r_j_limbs: [4]u64 };
+                    const ctx = Ctx{ .values = self.values, .r_j_limbs = r_j.limbs };
+                    tp.parallelFor(old_len, ctx, struct {
+                        fn run(c: Ctx, i: usize) void {
+                            const old_val = c.values[i];
+                            const r_times_old = old_val.mulHiBigIntU128(c.r_j_limbs);
+                            c.values[2 * i] = old_val.sub(r_times_old);
+                            c.values[2 * i + 1] = r_times_old;
+                        }
+                    }.run);
+                },
+            }
+            self.len = old_len * 2;
         }
 
         /// Clone the current values to a new allocation

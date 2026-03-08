@@ -17,8 +17,8 @@
 
 const std = @import("std");
 
-
 const Allocator = std.mem.Allocator;
+const ThreadPool = @import("../utils/thread_pool.zig").ThreadPool;
 
 const jolt_types = @import("jolt_types.zig");
 const field_mod = @import("../field/mod.zig");
@@ -53,10 +53,18 @@ pub fn JoltProver(comptime F: type) type {
         const VirtualPolynomial = jolt_types.VirtualPolynomial;
 
         allocator: Allocator,
+        thread_pool: ?*ThreadPool = null,
 
         pub fn init(allocator: Allocator) Self {
             return Self{
                 .allocator = allocator,
+            };
+        }
+
+        pub fn initWithThreadPool(allocator: Allocator, tp: *ThreadPool) Self {
+            return Self{
+                .allocator = allocator,
+                .thread_pool = tp,
             };
         }
 
@@ -170,7 +178,7 @@ pub fn JoltProver(comptime F: type) type {
             const uni_skip_claim = evaluatePolyAtChallenge(uniskip_proof.uni_poly, r0);
 
             // DEBUG: Decompose s1(r0) = L(tau_high, r0) * t1(r0) and compare
-            {
+            if (comptime false) {
                 const inv_L = lagrange_tau_r0.inverse();
                 if (inv_L) |_| {
 
@@ -747,7 +755,7 @@ pub fn JoltProver(comptime F: type) type {
             // CROSS-CHECK: Compute the "correct" final_claim directly from witnesses
             // This is what the verifier expects: eq_factor * Az(r_stream, r0, r_cycle) * Bz(r_stream, r0, r_cycle)
             // where r_cycle is the full set of bound challenges reversed
-            {
+            if (comptime false) {
                 const all_chal = challenges.items;
                 const r0_check = r0;
 
@@ -1167,6 +1175,7 @@ pub fn JoltProver(comptime F: type) type {
                 tau,
                 null, // No scaling for initial UniSkip - will be applied in interpolation
             );
+            outer_prover.thread_pool = self.thread_pool;
             defer outer_prover.deinit();
 
             // Compute the univariate skip polynomial using the fixed implementation
@@ -1274,6 +1283,9 @@ pub fn JoltProver(comptime F: type) type {
             // Set joint opening proof
             jolt_proof.joint_opening_proof = joint_opening_proof;
 
+            // Per-stage timing
+            var stage_timer = std.time.Timer.start() catch unreachable;
+
             // Create UniSkip proof for Stage 1 with actual constraint evaluations
             // Use padded witnesses so that NoOp cycles are included in the polynomial evaluation
             jolt_proof.stage1_uni_skip_first_round_proof = try self.createUniSkipProofStage1FromWitnesses(
@@ -1342,6 +1354,9 @@ pub fn JoltProver(comptime F: type) type {
                 // Fallback to zero claims
                 try self.addSpartanOuterOpeningClaims(&jolt_proof.opening_claims);
             }
+
+            std.debug.print("    [STAGE-TIMING] Stage 1: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
+            stage_timer.reset();
 
             // Create UniSkip proof for Stage 2
             // Jolt samples a NEW tau_high for Stage 2 from the transcript (see ProductVirtualUniSkipParams::new)
@@ -1666,6 +1681,9 @@ pub fn JoltProver(comptime F: type) type {
             transcript.appendScalar("opening_claim", stage2_result.output_val_final_claim);
 
 
+            std.debug.print("    [STAGE-TIMING] Stage 2: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
+            stage_timer.reset();
+
             // Stage 3: SpartanShift, InstructionInput, RegistersClaimReduction
             // Extract r_product from Stage 2 challenges (last n_cycle_vars in BIG_ENDIAN)
             var r_product = try self.allocator.alloc(F, n_cycle_vars);
@@ -1689,6 +1707,7 @@ pub fn JoltProver(comptime F: type) type {
 
             // Generate Stage 3 proof using the proper sumcheck prover
             var stage3_prover_instance = Stage3Prover(F).init(self.allocator);
+            stage3_prover_instance.thread_pool = self.thread_pool;
             var stage3_result = try stage3_prover_instance.generateStage3Proof(
                 &jolt_proof.stage3_sumcheck_proof,
                 transcript,
@@ -1803,6 +1822,9 @@ pub fn JoltProver(comptime F: type) type {
             );
 
             // LookupOutput at InstructionClaimReduction was already added in Stage 2
+
+            std.debug.print("    [STAGE-TIMING] Stage 3: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
+            stage_timer.reset();
 
             // Stage 4: RegistersReadWriteChecking, RamValEvaluation, RamValFinalEvaluation
             // RegistersReadWriteChecking has LOG_K + log2(T) rounds where LOG_K = log2(REGISTER_COUNT)
@@ -2311,6 +2333,9 @@ pub fn JoltProver(comptime F: type) type {
                 }
             } // end stage4_block
 
+            std.debug.print("    [STAGE-TIMING] Stage 4: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
+            stage_timer.reset();
+
             // Stage 5: RegistersValEvaluation, RamRaClaimReduction, LookupsReadRaf
             // LookupsReadRaf has max rounds: LOG_K + log_T where LOG_K = XLEN * 2 = 128
             // For RV64: max_num_rounds = 128 + log_T = 128 + 8 = 136
@@ -2326,6 +2351,7 @@ pub fn JoltProver(comptime F: type) type {
 
             // Generate Stage 5 proof using the batched sumcheck prover
             var stage5_prover_instance = Stage5BatchedProver(F).init(self.allocator);
+            stage5_prover_instance.thread_pool = self.thread_pool;
             var stage5_result: spartan_mod.Stage5Result(F) = undefined;
 
             // Use trace-aware prover if we have trace data and Stage 4 opening point
@@ -2441,6 +2467,9 @@ pub fn JoltProver(comptime F: type) type {
                 // ALWAYS-ON: Print transcript state after Stage 5 cache_openings
             }
 
+            std.debug.print("    [STAGE-TIMING] Stage 5: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
+            stage_timer.reset();
+
             // Stage 6: BytecodeReadRaf, RamHammingBooleanity, Booleanity, RamRaVirtual, LookupsRaVirtual, IncClaimReduction
             const bytecode_log_k = std.math.log2_int(usize, config.bytecode_K);
             const ram_log_k = std.math.log2_int(usize, ram_K);
@@ -2493,6 +2522,7 @@ pub fn JoltProver(comptime F: type) type {
             const r_register_5 = stage4_regs_r_address orelse &[_]F{};
 
             var stage6_prover_instance = Stage6BatchedProver(F).init(self.allocator);
+            stage6_prover_instance.thread_pool = self.thread_pool;
             var stage6_result = try stage6_prover_instance.generateStage6Proof(
                 &jolt_proof.stage6_sumcheck_proof,
                 transcript,
@@ -2607,6 +2637,9 @@ pub fn JoltProver(comptime F: type) type {
             // Stage 6 cache_openings are already appended by Stage 6 prover
             // (stage6_prover.zig lines 4055-4083)
             // Do NOT re-append them here.
+
+            std.debug.print("    [STAGE-TIMING] Stage 6: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
+            stage_timer.reset();
 
             // ====================================================================
             // Stage 7: HammingWeightClaimReduction sumcheck
@@ -3110,6 +3143,8 @@ pub fn JoltProver(comptime F: type) type {
                 jolt_proof.opening_point = opening_point_storage;
 
             }
+
+            std.debug.print("    [STAGE-TIMING] Stage 7: {d:.1} ms\n", .{@as(f64, @floatFromInt(stage_timer.read())) / 1_000_000.0});
 
             return jolt_proof;
         }

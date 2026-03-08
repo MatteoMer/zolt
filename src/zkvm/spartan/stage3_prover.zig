@@ -96,6 +96,7 @@ pub fn Stage3Prover(comptime F: type) type {
         const REG_DEGREE: usize = 2; // RegistersClaimReduction is degree 2
 
         allocator: Allocator,
+        thread_pool: ?*@import("../../utils/thread_pool.zig").ThreadPool = null,
 
         pub fn init(allocator: Allocator) Self {
             return Self{
@@ -241,6 +242,7 @@ pub fn Stage3Prover(comptime F: type) type {
                 r_product,
                 instr_gamma,
             );
+            instr_prover.thread_pool = self.thread_pool;
             defer instr_prover.deinit();
 
             // DEBUG: Check initial witness values and compute initial sum
@@ -2227,6 +2229,7 @@ fn ShiftPrefixSuffixProver(comptime F: type) type {
 // =============================================================================
 
 fn InstructionInputProver(comptime F: type) type {
+    const ThreadPool = @import("../../utils/thread_pool.zig").ThreadPool;
     return struct {
         const Self = @This();
 
@@ -2247,6 +2250,7 @@ fn InstructionInputProver(comptime F: type) type {
 
         current_size: usize,
         allocator: Allocator,
+        thread_pool: ?*ThreadPool = null,
 
         pub fn init(
             allocator: Allocator,
@@ -2327,80 +2331,149 @@ fn InstructionInputProver(comptime F: type) type {
         /// Compute round evaluations [p(0), p(1), p(2), p(3)] for degree-3 polynomial
         pub fn computeRoundEvals(self: *Self, previous_claim: F) [4]F {
             const half = self.current_size / 2;
-            var evals: [3]F = .{ F.zero(), F.zero(), F.zero() }; // p(0), p(2), p(3)
 
-            for (0..half) |j| {
-                // Get values at bit=0 and bit=1
-                const left_is_rs1_0 = self.left_is_rs1[2 * j];
-                const left_is_rs1_1 = self.left_is_rs1[2 * j + 1];
-                const rs1_0 = self.rs1_value[2 * j];
-                const rs1_1 = self.rs1_value[2 * j + 1];
-                const left_is_pc_0 = self.left_is_pc[2 * j];
-                const left_is_pc_1 = self.left_is_pc[2 * j + 1];
-                const pc_0 = self.unexpanded_pc[2 * j];
-                const pc_1 = self.unexpanded_pc[2 * j + 1];
-                const right_is_rs2_0 = self.right_is_rs2[2 * j];
-                const right_is_rs2_1 = self.right_is_rs2[2 * j + 1];
-                const rs2_0 = self.rs2_value[2 * j];
-                const rs2_1 = self.rs2_value[2 * j + 1];
-                const right_is_imm_0 = self.right_is_imm[2 * j];
-                const right_is_imm_1 = self.right_is_imm[2 * j + 1];
-                const imm_0 = self.imm[2 * j];
-                const imm_1 = self.imm[2 * j + 1];
-                const eq_0 = self.eq_stage2[2 * j];
-                const eq_1 = self.eq_stage2[2 * j + 1];
+            const Ctx = struct {
+                left_is_rs1: []const F,
+                rs1_value: []const F,
+                left_is_pc: []const F,
+                unexpanded_pc: []const F,
+                right_is_rs2: []const F,
+                rs2_value: []const F,
+                right_is_imm: []const F,
+                imm: []const F,
+                eq_stage2: []const F,
+                gamma: F,
+            };
 
-                // Extrapolate to X=2 and X=3
-                const left_is_rs1_2 = left_is_rs1_1.add(left_is_rs1_1).sub(left_is_rs1_0);
-                const left_is_rs1_3 = left_is_rs1_2.add(left_is_rs1_1).sub(left_is_rs1_0);
-                const rs1_2 = rs1_1.add(rs1_1).sub(rs1_0);
-                const rs1_3 = rs1_2.add(rs1_1).sub(rs1_0);
-                const left_is_pc_2 = left_is_pc_1.add(left_is_pc_1).sub(left_is_pc_0);
-                const left_is_pc_3 = left_is_pc_2.add(left_is_pc_1).sub(left_is_pc_0);
-                const pc_2 = pc_1.add(pc_1).sub(pc_0);
-                const pc_3 = pc_2.add(pc_1).sub(pc_0);
-                const right_is_rs2_2 = right_is_rs2_1.add(right_is_rs2_1).sub(right_is_rs2_0);
-                const right_is_rs2_3 = right_is_rs2_2.add(right_is_rs2_1).sub(right_is_rs2_0);
-                const rs2_2 = rs2_1.add(rs2_1).sub(rs2_0);
-                const rs2_3 = rs2_2.add(rs2_1).sub(rs2_0);
-                const right_is_imm_2 = right_is_imm_1.add(right_is_imm_1).sub(right_is_imm_0);
-                const right_is_imm_3 = right_is_imm_2.add(right_is_imm_1).sub(right_is_imm_0);
-                const imm_2 = imm_1.add(imm_1).sub(imm_0);
-                const imm_3 = imm_2.add(imm_1).sub(imm_0);
-                const eq_2 = eq_1.add(eq_1).sub(eq_0);
-                const eq_3 = eq_2.add(eq_1).sub(eq_0);
+            const ctx = Ctx{
+                .left_is_rs1 = self.left_is_rs1,
+                .rs1_value = self.rs1_value,
+                .left_is_pc = self.left_is_pc,
+                .unexpanded_pc = self.unexpanded_pc,
+                .right_is_rs2 = self.right_is_rs2,
+                .rs2_value = self.rs2_value,
+                .right_is_imm = self.right_is_imm,
+                .imm = self.imm,
+                .eq_stage2 = self.eq_stage2,
+                .gamma = self.gamma,
+            };
 
-                // Compute at X=0: eq(r_stage2, j) * (right(j) + gamma * left(j))
-                const left_0 = left_is_rs1_0.mul(rs1_0).add(left_is_pc_0.mul(pc_0));
-                const right_0 = right_is_rs2_0.mul(rs2_0).add(right_is_imm_0.mul(imm_0));
-                const f_0 = eq_0.mul(right_0.add(self.gamma.mul(left_0)));
+            const mapFn = struct {
+                fn map(c: Ctx, start: usize, end: usize) [3]F {
+                    var local_evals: [3]F = .{ F.zero(), F.zero(), F.zero() };
+                    for (start..end) |j| {
+                        const left_is_rs1_0 = c.left_is_rs1[2 * j];
+                        const left_is_rs1_1 = c.left_is_rs1[2 * j + 1];
+                        const rs1_0 = c.rs1_value[2 * j];
+                        const rs1_1 = c.rs1_value[2 * j + 1];
+                        const left_is_pc_0 = c.left_is_pc[2 * j];
+                        const left_is_pc_1 = c.left_is_pc[2 * j + 1];
+                        const pc_0 = c.unexpanded_pc[2 * j];
+                        const pc_1 = c.unexpanded_pc[2 * j + 1];
+                        const right_is_rs2_0 = c.right_is_rs2[2 * j];
+                        const right_is_rs2_1 = c.right_is_rs2[2 * j + 1];
+                        const rs2_0 = c.rs2_value[2 * j];
+                        const rs2_1 = c.rs2_value[2 * j + 1];
+                        const right_is_imm_0 = c.right_is_imm[2 * j];
+                        const right_is_imm_1 = c.right_is_imm[2 * j + 1];
+                        const imm_0 = c.imm[2 * j];
+                        const imm_1 = c.imm[2 * j + 1];
+                        const eq_0 = c.eq_stage2[2 * j];
+                        const eq_1 = c.eq_stage2[2 * j + 1];
 
-                // Compute at X=2
-                const left_2 = left_is_rs1_2.mul(rs1_2).add(left_is_pc_2.mul(pc_2));
-                const right_2 = right_is_rs2_2.mul(rs2_2).add(right_is_imm_2.mul(imm_2));
-                const f_2 = eq_2.mul(right_2.add(self.gamma.mul(left_2)));
+                        const left_is_rs1_2 = left_is_rs1_1.add(left_is_rs1_1).sub(left_is_rs1_0);
+                        const left_is_rs1_3 = left_is_rs1_2.add(left_is_rs1_1).sub(left_is_rs1_0);
+                        const rs1_2 = rs1_1.add(rs1_1).sub(rs1_0);
+                        const rs1_3 = rs1_2.add(rs1_1).sub(rs1_0);
+                        const left_is_pc_2 = left_is_pc_1.add(left_is_pc_1).sub(left_is_pc_0);
+                        const left_is_pc_3 = left_is_pc_2.add(left_is_pc_1).sub(left_is_pc_0);
+                        const pc_2 = pc_1.add(pc_1).sub(pc_0);
+                        const pc_3 = pc_2.add(pc_1).sub(pc_0);
+                        const right_is_rs2_2 = right_is_rs2_1.add(right_is_rs2_1).sub(right_is_rs2_0);
+                        const right_is_rs2_3 = right_is_rs2_2.add(right_is_rs2_1).sub(right_is_rs2_0);
+                        const rs2_2 = rs2_1.add(rs2_1).sub(rs2_0);
+                        const rs2_3 = rs2_2.add(rs2_1).sub(rs2_0);
+                        const right_is_imm_2 = right_is_imm_1.add(right_is_imm_1).sub(right_is_imm_0);
+                        const right_is_imm_3 = right_is_imm_2.add(right_is_imm_1).sub(right_is_imm_0);
+                        const imm_2 = imm_1.add(imm_1).sub(imm_0);
+                        const imm_3 = imm_2.add(imm_1).sub(imm_0);
+                        const eq_2 = eq_1.add(eq_1).sub(eq_0);
+                        const eq_3 = eq_2.add(eq_1).sub(eq_0);
 
-                // Compute at X=3
-                const left_3 = left_is_rs1_3.mul(rs1_3).add(left_is_pc_3.mul(pc_3));
-                const right_3 = right_is_rs2_3.mul(rs2_3).add(right_is_imm_3.mul(imm_3));
-                const f_3 = eq_3.mul(right_3.add(self.gamma.mul(left_3)));
+                        const left_0 = left_is_rs1_0.mul(rs1_0).add(left_is_pc_0.mul(pc_0));
+                        const right_0 = right_is_rs2_0.mul(rs2_0).add(right_is_imm_0.mul(imm_0));
+                        const f_0 = eq_0.mul(right_0.add(c.gamma.mul(left_0)));
 
-                evals[0] = evals[0].add(f_0);
-                evals[1] = evals[1].add(f_2);
-                evals[2] = evals[2].add(f_3);
-            }
+                        const left_2 = left_is_rs1_2.mul(rs1_2).add(left_is_pc_2.mul(pc_2));
+                        const right_2 = right_is_rs2_2.mul(rs2_2).add(right_is_imm_2.mul(imm_2));
+                        const f_2 = eq_2.mul(right_2.add(c.gamma.mul(left_2)));
 
-            // Derive p(1) from previous_claim
+                        const left_3 = left_is_rs1_3.mul(rs1_3).add(left_is_pc_3.mul(pc_3));
+                        const right_3 = right_is_rs2_3.mul(rs2_3).add(right_is_imm_3.mul(imm_3));
+                        const f_3 = eq_3.mul(right_3.add(c.gamma.mul(left_3)));
+
+                        local_evals[0] = local_evals[0].add(f_0);
+                        local_evals[1] = local_evals[1].add(f_2);
+                        local_evals[2] = local_evals[2].add(f_3);
+                    }
+                    return local_evals;
+                }
+            }.map;
+
+            const reduceFn = struct {
+                fn reduce(a: [3]F, b: [3]F) [3]F {
+                    return .{ a[0].add(b[0]), a[1].add(b[1]), a[2].add(b[2]) };
+                }
+            }.reduce;
+
+            const evals = if (self.thread_pool) |tp|
+                tp.parallelReduce([3]F, half, .{ F.zero(), F.zero(), F.zero() }, ctx, mapFn, reduceFn)
+            else
+                mapFn(ctx, 0, half);
+
             const p_1 = previous_claim.sub(evals[0]);
-
             return [4]F{ evals[0], p_1, evals[1], evals[2] };
         }
 
+        fn bindSlice(arr: []F, r_j: F, new_size: usize) void {
+            for (0..new_size) |i| {
+                arr[i] = arr[2 * i].add(r_j.mul(arr[2 * i + 1].sub(arr[2 * i])));
+            }
+        }
+
         pub fn bind(self: *Self, r_j: F) void {
-            // Bind in LowToHigh order to match computeRoundEvals indexing (2*i, 2*i+1)
-            // new[i] = old[2*i] + r * (old[2*i+1] - old[2*i])
             const new_size = self.current_size / 2;
 
+            if (self.thread_pool) |tp| {
+                if (new_size >= 256) {
+                    // Bind 9 arrays in parallel (each array's bind is independent)
+                    const Ctx = struct {
+                        slices: [9][]F,
+                        r_j: F,
+                        new_size: usize,
+                    };
+                    const ctx = Ctx{
+                        .slices = .{
+                            self.left_is_rs1, self.rs1_value,
+                            self.left_is_pc,  self.unexpanded_pc,
+                            self.right_is_rs2, self.rs2_value,
+                            self.right_is_imm, self.imm,
+                            self.eq_stage2,
+                        },
+                        .r_j = r_j,
+                        .new_size = new_size,
+                    };
+                    tp.parallelFor(9, ctx, struct {
+                        fn run(c: Ctx, idx: usize) void {
+                            bindSlice(c.slices[idx], c.r_j, c.new_size);
+                        }
+                    }.run);
+                    self.current_size = new_size;
+                    return;
+                }
+            }
+
+            // Sequential fallback
             for (0..new_size) |i| {
                 self.left_is_rs1[i] = self.left_is_rs1[2 * i].add(r_j.mul(self.left_is_rs1[2 * i + 1].sub(self.left_is_rs1[2 * i])));
                 self.rs1_value[i] = self.rs1_value[2 * i].add(r_j.mul(self.rs1_value[2 * i + 1].sub(self.rs1_value[2 * i])));
@@ -2412,7 +2485,6 @@ fn InstructionInputProver(comptime F: type) type {
                 self.imm[i] = self.imm[2 * i].add(r_j.mul(self.imm[2 * i + 1].sub(self.imm[2 * i])));
                 self.eq_stage2[i] = self.eq_stage2[2 * i].add(r_j.mul(self.eq_stage2[2 * i + 1].sub(self.eq_stage2[2 * i])));
             }
-
             self.current_size = new_size;
         }
 

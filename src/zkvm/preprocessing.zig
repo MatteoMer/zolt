@@ -1640,6 +1640,7 @@ const dory = @import("../poly/commitment/dory.zig");
 const pairing = @import("../field/pairing.zig");
 const field_mod = @import("../field/mod.zig");
 const Fp = field_mod.BN254BaseField;
+const ThreadPool = @import("../utils/thread_pool.zig").ThreadPool;
 
 pub const GT = dory.GT;
 pub const G1Point = dory.G1Point;
@@ -1661,24 +1662,45 @@ fn g1PointYToFp(p: G1Point) Fp {
     return Fp{ .limbs = p.y.limbs };
 }
 
-/// Multi-pairing of G1 and G2 vectors
-fn multiPair(g1_vec: []const G1Point, g2_vec: []const G2Point) GT {
+/// Multi-pairing of G1 and G2 vectors using batch Miller loop + shared final exponentiation.
+/// Optionally parallelizes Miller loop computation across threads.
+fn multiPair(g1_vec: []const G1Point, g2_vec: []const G2Point, tp: ?*ThreadPool) GT {
     const n = @min(g1_vec.len, g2_vec.len);
     if (n == 0) return GT.one();
 
-    var result = GT.one();
-    for (0..n) |i| {
-        if (g1_vec[i].infinity or g2_vec[i].infinity) continue;
-        // Convert G1Point to Fp coordinates for pairing
-        const g1_fp = pairing.G1PointFp{
-            .x = g1PointXToFp(g1_vec[i]),
-            .y = g1PointYToFp(g1_vec[i]),
-            .infinity = g1_vec[i].infinity,
-        };
-        const paired = pairing.pairingFp(g1_fp, g2_vec[i]);
-        result = result.mul(paired);
-    }
-    return result;
+    const Ctx = struct { g1: []const G1Point, g2: []const G2Point };
+    const ctx = Ctx{ .g1 = g1_vec, .g2 = g2_vec };
+
+    const mapFn = struct {
+        fn map(c: Ctx, start: usize, end: usize) pairing.Fp12 {
+            var acc = pairing.Fp12.one();
+            for (start..end) |i| {
+                if (c.g1[i].infinity or c.g2[i].infinity) continue;
+                const g1_fp = pairing.G1PointFp{
+                    .x = g1PointXToFp(c.g1[i]),
+                    .y = g1PointYToFp(c.g1[i]),
+                    .infinity = false,
+                };
+                const ml = pairing.millerLoopArkworks(g1_fp, c.g2[i]);
+                acc = acc.mul(ml);
+            }
+            return acc;
+        }
+    }.map;
+
+    const reduceFn = struct {
+        fn reduce(a: pairing.Fp12, b: pairing.Fp12) pairing.Fp12 {
+            return a.mul(b);
+        }
+    }.reduce;
+
+    const miller_acc = if (tp) |pool|
+        pool.parallelReduceForce(pairing.Fp12, n, pairing.Fp12.one(), ctx, mapFn, reduceFn)
+    else
+        mapFn(ctx, 0, n);
+
+    if (miller_acc.eql(pairing.Fp12.one())) return GT.one();
+    return pairing.finalExponentiation(miller_acc);
 }
 
 /// DoryVerifierSetup - precomputed pairing values for verification
@@ -1718,7 +1740,7 @@ pub const DoryVerifierSetup = struct {
     }
 
     /// Create verifier setup from prover setup (SRS)
-    pub fn fromSRS(allocator: Allocator, srs: *const DorySRS) !DoryVerifierSetup {
+    pub fn fromSRS(allocator: Allocator, srs: *const DorySRS, tp: ?*ThreadPool) !DoryVerifierSetup {
         const max_num_rounds = std.math.log2_int(usize, srs.g1_vec.len);
 
         var delta_1l = std.ArrayListUnmanaged(GT){};
@@ -1757,14 +1779,29 @@ pub const DoryVerifierSetup = struct {
                 // Δ₁L[k] = χ[k-1] (reuse previous chi)
                 try delta_1l.append(allocator, chi.items[k - 1]);
 
-                // Δ₁R[k] = e(Γ₁[2^(k-1)..2^k], Γ₂[..2^(k-1)])
-                try delta_1r.append(allocator, multiPair(g1_second_half, g2_first_half));
+                // Compute 3 independent multi-pairings:
+                //   Δ₁R[k] = e(Γ₁[2^(k-1)..2^k], Γ₂[..2^(k-1)])
+                //   Δ₂R[k] = e(Γ₁[..2^(k-1)], Γ₂[2^(k-1)..2^k])
+                //   cross  = e(Γ₁[2^(k-1)..2^k], Γ₂[2^(k-1)..2^k])
+                // Use join() for first two, compute third on main thread after.
+                const MPCtx = struct { g1: []const G1Point, g2: []const G2Point };
+                if (tp) |pool| {
+                    const pair_results = pool.join(
+                        GT, GT,
+                        MPCtx{ .g1 = g1_second_half, .g2 = g2_first_half },
+                        struct { fn f(ctx: MPCtx) GT { return multiPair(ctx.g1, ctx.g2, null); } }.f,
+                        MPCtx{ .g1 = g1_first_half, .g2 = g2_second_half },
+                        struct { fn f(ctx: MPCtx) GT { return multiPair(ctx.g1, ctx.g2, null); } }.f,
+                    );
+                    try delta_1r.append(allocator, pair_results[0]);
+                    try delta_2r.append(allocator, pair_results[1]);
+                } else {
+                    try delta_1r.append(allocator, multiPair(g1_second_half, g2_first_half, null));
+                    try delta_2r.append(allocator, multiPair(g1_first_half, g2_second_half, null));
+                }
 
-                // Δ₂R[k] = e(Γ₁[..2^(k-1)], Γ₂[2^(k-1)..2^k])
-                try delta_2r.append(allocator, multiPair(g1_first_half, g2_second_half));
-
-                // χ[k] = χ[k-1] + e(Γ₁[2^(k-1)..2^k], Γ₂[2^(k-1)..2^k])
-                const chi_k = chi.items[k - 1].mul(multiPair(g1_second_half, g2_second_half));
+                // χ[k] = χ[k-1] * e(Γ₁[2^(k-1)..2^k], Γ₂[2^(k-1)..2^k])
+                const chi_k = chi.items[k - 1].mul(multiPair(g1_second_half, g2_second_half, tp));
                 try chi.append(allocator, chi_k);
             }
         }
@@ -2023,7 +2060,7 @@ test "DoryVerifierSetup serialization" {
     defer srs.deinit();
 
     // Create verifier setup from SRS
-    var verifier_setup = try DoryVerifierSetup.fromSRS(allocator, &srs);
+    var verifier_setup = try DoryVerifierSetup.fromSRS(allocator, &srs, null);
     defer verifier_setup.deinit();
 
     // Check that delta/chi arrays have correct sizes

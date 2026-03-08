@@ -7,6 +7,9 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const ThreadPool = @import("../utils/thread_pool.zig").ThreadPool;
+
+pub const glv = @import("glv.zig");
 
 /// BN254 curve parameter b = 3
 const BN254_B: u64 = 3;
@@ -330,7 +333,166 @@ pub fn ProjectivePoint(comptime F: type) type {
     };
 }
 
-/// MSM using Pippenger's algorithm
+/// Bucket point in XYZZ coordinates for efficient MSM bucket accumulation.
+/// Represents affine (X/ZZ, Y/ZZZ). Mixed affine addition costs ~7M+2S
+/// vs ~7M+4S for Jacobian mixed add.
+pub fn BucketPoint(comptime F: type) type {
+    return struct {
+        const Self = @This();
+
+        x: F,
+        y: F,
+        zz: F,
+        zzz: F,
+        empty: bool,
+
+        pub fn identity() Self {
+            return .{
+                .x = F.zero(),
+                .y = F.zero(),
+                .zz = F.zero(),
+                .zzz = F.zero(),
+                .empty = true,
+            };
+        }
+
+        pub fn isIdentity(self: Self) bool {
+            return self.empty;
+        }
+
+        /// Mixed affine addition: XYZZ + affine (madd-2008-s, 7M+2S)
+        pub fn addAffine(self: Self, other: AffinePoint(F)) Self {
+            if (other.isIdentity()) return self;
+            if (self.empty) {
+                return .{
+                    .x = other.x,
+                    .y = other.y,
+                    .zz = F.one(),
+                    .zzz = F.one(),
+                    .empty = false,
+                };
+            }
+
+            // U2 = X2 * ZZ1, S2 = Y2 * ZZZ1
+            const U2 = other.x.mul(self.zz);
+            const S2 = other.y.mul(self.zzz);
+            const P = U2.sub(self.x);
+            const R = S2.sub(self.y);
+
+            if (P.isZero()) {
+                if (R.isZero()) {
+                    // Same point — double
+                    return self.doubleXYZZ();
+                } else {
+                    // Inverse points
+                    return identity();
+                }
+            }
+
+            const PP = P.square();
+            const PPP = P.mul(PP);
+            const Q = self.x.mul(PP);
+            const X3 = R.square().sub(PPP).sub(Q).sub(Q);
+            const Y3 = R.mul(Q.sub(X3)).sub(self.y.mul(PPP));
+            const ZZ3 = self.zz.mul(PP);
+            const ZZZ3 = self.zzz.mul(PPP);
+
+            return .{ .x = X3, .y = Y3, .zz = ZZ3, .zzz = ZZZ3, .empty = false };
+        }
+
+        /// Subtract affine point (add negated)
+        pub fn subAffine(self: Self, other: AffinePoint(F)) Self {
+            if (other.isIdentity()) return self;
+            return self.addAffine(other.neg());
+        }
+
+        /// XYZZ doubling (a=0 short Weierstrass)
+        fn doubleXYZZ(self: Self) Self {
+            if (self.empty) return self;
+            // Using formulas adapted from Jacobian dbl-2009-l
+            const A = self.x.square();
+            const B = self.y.square();
+            const C = B.square();
+            const xpb = self.x.add(B);
+            const half_D = xpb.square().sub(A).sub(C);
+            const D = half_D.add(half_D);
+            const E = A.add(A).add(A); // 3A
+            const FF = E.square();
+            const X3 = FF.sub(D).sub(D);
+            const two_C = C.add(C);
+            const four_C = two_C.add(two_C);
+            const eight_C = four_C.add(four_C);
+            const Y3 = E.mul(D.sub(X3)).sub(eight_C);
+            // ZZ3 = (2Y)^2 * ZZ = 4*B*ZZ
+            const four_B = B.add(B).add(B).add(B);
+            const ZZ3 = four_B.mul(self.zz);
+            // ZZZ3 = (2Y)^3 * ZZZ = 8*Y*B*ZZ * ZZZ... simpler:
+            // ZZZ3 = 2Y * ZZ3 * (ZZZ/ZZ) ... actually let's derive properly
+            // Z_new = 2*Y*Z_old, ZZ3 = Z_new^2 = 4*Y^2*Z_old^2 = 4*B*ZZ
+            // ZZZ3 = Z_new^3 = 8*Y^3*Z_old^3 = 8*Y*B*ZZZ
+            const eight_Y = self.y.add(self.y).add(self.y.add(self.y)).add(self.y.add(self.y).add(self.y.add(self.y)));
+            const ZZZ3 = eight_Y.mul(B).mul(self.zzz);
+
+            return .{ .x = X3, .y = Y3, .zz = ZZ3, .zzz = ZZZ3, .empty = false };
+        }
+
+        /// Add two XYZZ points (for running sum phase)
+        pub fn add(self: Self, other: Self) Self {
+            if (self.empty) return other;
+            if (other.empty) return self;
+
+            const U1 = self.x.mul(other.zz);
+            const U2 = other.x.mul(self.zz);
+            const S1 = self.y.mul(other.zzz);
+            const S2 = other.y.mul(self.zzz);
+            const P = U2.sub(U1);
+            const R = S2.sub(S1);
+
+            if (P.isZero()) {
+                if (R.isZero()) {
+                    return self.doubleXYZZ();
+                } else {
+                    return identity();
+                }
+            }
+
+            const PP = P.square();
+            const PPP = P.mul(PP);
+            const Q = U1.mul(PP);
+            const X3 = R.square().sub(PPP).sub(Q).sub(Q);
+            const Y3 = R.mul(Q.sub(X3)).sub(S1.mul(PPP));
+            const ZZ3 = self.zz.mul(other.zz).mul(PP);
+            const ZZZ3 = self.zzz.mul(other.zzz).mul(PPP);
+
+            return .{ .x = X3, .y = Y3, .zz = ZZ3, .zzz = ZZZ3, .empty = false };
+        }
+
+        /// Convert to Jacobian projective (Z = zz, X = x*zz, Y = y*zzz... )
+        /// Actually XYZZ (X, Y, ZZ, ZZZ) → Jacobian (X', Y', Z') where:
+        ///   Z' such that ZZ = Z'^2 and ZZZ = Z'^3
+        ///   Z' = ZZZ / ZZ (when ZZ != 0)
+        ///   X' = X * ZZ  (since Jacobian X = affine_x * Z^2 = (X/ZZ) * ZZ^2... nah)
+        /// Simpler: just convert to affine first
+        pub fn toProjective(self: Self) ProjectivePoint(F) {
+            if (self.empty) return ProjectivePoint(F).identity();
+            const aff = self.toAffine();
+            return ProjectivePoint(F).fromAffine(aff);
+        }
+
+        pub fn toAffine(self: Self) AffinePoint(F) {
+            if (self.empty) return AffinePoint(F).identity();
+            const zz_inv = self.zz.inverse() orelse return AffinePoint(F).identity();
+            const zzz_inv = self.zzz.inverse() orelse return AffinePoint(F).identity();
+            return AffinePoint(F).fromCoords(
+                self.x.mul(zz_inv),
+                self.y.mul(zzz_inv),
+            );
+        }
+    };
+}
+
+/// MSM using Pippenger's algorithm with wNAF signed digit decomposition
+/// and XYZZ bucket coordinates.
 ///
 /// Pippenger's algorithm (also known as Pippenger's bucket method) reduces the
 /// complexity of MSM from O(n * log(r)) to O(n + 2^c * log(r)/c) where:
@@ -338,20 +500,23 @@ pub fn ProjectivePoint(comptime F: type) type {
 /// - r is the scalar field size
 /// - c is the window size (chosen optimally as ~log(n))
 ///
-/// The algorithm:
-/// 1. Choose window size c
-/// 2. Split scalars into windows of c bits
-/// 3. For each window position, accumulate points into 2^c-1 buckets
-/// 4. Sum buckets using a running sum trick
-/// 5. Combine window results with appropriate doubling
+/// wNAF recenters each c-bit digit to [-2^(c-1), 2^(c-1)), halving the
+/// expected number of non-zero digits and bucket additions.
+///
+/// XYZZ bucket coordinates reduce mixed affine addition cost from ~7M+4S
+/// (Jacobian) to ~7M+2S.
 pub fn MSM(comptime F: type, comptime G: type) type {
     return struct {
         const Self = @This();
         const Affine = AffinePoint(G);
         const Projective = ProjectivePoint(G);
+        const Bucket = BucketPoint(G);
 
         /// Scalar bit width
         const SCALAR_BITS: usize = 256;
+
+        /// Max digits = ceil(256/c) + 1 (extra for wNAF carry), c >= 3
+        const MAX_DIGITS: usize = 87;
 
         /// Compute sum_{i} scalars[i] * bases[i]
         pub fn compute(
@@ -373,35 +538,105 @@ pub fn MSM(comptime F: type, comptime G: type) type {
             return pippengerMSM(bases, scalars);
         }
 
-        /// Pippenger's bucket method MSM
+        /// Compute MSM with optional thread pool for parallel window processing
+        pub fn computeWithPool(
+            bases: []const Affine,
+            scalars: []const F,
+            tp: ?*ThreadPool,
+        ) Affine {
+            std.debug.assert(bases.len == scalars.len);
+
+            if (bases.len == 0) {
+                return Affine.identity();
+            }
+
+            if (bases.len < 8) {
+                return naiveMSM(bases, scalars);
+            }
+
+            if (tp != null and bases.len >= 256) {
+                return pippengerMSMParallel(bases, scalars, tp.?);
+            }
+
+            return pippengerMSM(bases, scalars);
+        }
+
+        /// wNAF signed digit decomposition.
+        /// Decomposes scalar into num_digits signed digits in [-2^(c-1), 2^(c-1)).
+        /// num_digits should be ceil(256/c) + 1 to handle carry from the last window.
+        fn makeDigits(limbs: [4]u64, c: usize, num_digits: usize) [MAX_DIGITS]i32 {
+            var digits: [MAX_DIGITS]i32 = undefined;
+            const radix: u64 = @as(u64, 1) << @as(u6, @intCast(c));
+            const window_mask: u64 = radix - 1;
+            const half_radix: u64 = radix >> 1;
+            var carry: u64 = 0;
+
+            for (0..num_digits) |i| {
+                const bit_offset = i * c;
+                const u64_idx = bit_offset / 64;
+                const bit_idx = @as(u6, @intCast(bit_offset % 64));
+
+                var bit_buf: u64 = if (u64_idx < 4) limbs[u64_idx] >> bit_idx else 0;
+                const bit_idx_usize: usize = @as(usize, bit_idx);
+                if (bit_idx_usize + c > 64 and u64_idx + 1 < 4) {
+                    bit_buf |= limbs[u64_idx + 1] << @as(u6, @intCast(64 - bit_idx_usize));
+                }
+
+                const coef = carry + (bit_buf & window_mask);
+                carry = if (coef >= half_radix) 1 else 0;
+                const digit: i32 = @as(i32, @intCast(coef)) - @as(i32, @intCast(carry)) * @as(i32, @intCast(radix));
+
+                digits[i] = digit;
+            }
+            // Final carry becomes an extra digit (0 or 1)
+            if (num_digits < MAX_DIGITS) {
+                digits[num_digits] = @intCast(carry);
+            }
+            return digits;
+        }
+
+        /// Pippenger's bucket method MSM with wNAF + XYZZ buckets
         fn pippengerMSM(
             bases: []const Affine,
             scalars: []const F,
         ) Affine {
-            // Choose optimal window size: c ≈ max(1, log2(n))
             const c = optimalWindowSize(bases.len);
-            const num_windows = (SCALAR_BITS + c - 1) / c;
-            const num_buckets = (@as(usize, 1) << @as(u6, @intCast(c))) - 1; // 2^c - 1 buckets (excluding 0)
+            const num_scalar_windows = (SCALAR_BITS + c - 1) / c;
+            const num_windows = num_scalar_windows + 1; // +1 for wNAF carry digit
+            const num_buckets = (@as(usize, 1) << @as(u6, @intCast(c))) / 2; // 2^(c-1) buckets for wNAF
 
-            // Pre-convert all scalars from Montgomery form once
+            // Pre-convert all scalars and compute wNAF digits
             const stack_threshold = 256;
-            var stack_buf: [stack_threshold][4]u64 = undefined;
-            var heap_buf: ?[][4]u64 = null;
-            defer if (heap_buf) |buf| std.heap.page_allocator.free(buf);
+            var stack_digits: [stack_threshold][MAX_DIGITS]i32 = undefined;
+            var heap_digits: ?[][MAX_DIGITS]i32 = null;
+            defer if (heap_digits) |buf| std.heap.page_allocator.free(buf);
 
-            const normal_limbs: [][4]u64 = if (scalars.len <= stack_threshold)
-                stack_buf[0..scalars.len]
+            const all_digits: [][MAX_DIGITS]i32 = if (scalars.len <= stack_threshold)
+                stack_digits[0..scalars.len]
             else blk: {
-                heap_buf = std.heap.page_allocator.alloc([4]u64, scalars.len) catch
-                    return naiveMSM(bases, scalars); // fallback on OOM
-                break :blk heap_buf.?;
+                heap_digits = std.heap.page_allocator.alloc([MAX_DIGITS]i32, scalars.len) catch
+                    return naiveMSM(bases, scalars);
+                break :blk heap_digits.?;
             };
 
             for (scalars, 0..) |s, i| {
-                normal_limbs[i] = s.fromMontgomery().limbs;
+                all_digits[i] = makeDigits(s.fromMontgomery().limbs, c, num_scalar_windows);
             }
 
-            // Accumulator for final result
+            // Allocate buckets on heap for larger windows
+            var heap_buckets: ?[]Bucket = null;
+            defer if (heap_buckets) |buf| std.heap.page_allocator.free(buf);
+
+            // Stack buckets for small windows (up to 256 buckets)
+            var stack_buckets: [256]Bucket = undefined;
+            const buckets_slice: []Bucket = if (num_buckets <= 256)
+                stack_buckets[0..num_buckets]
+            else blk: {
+                heap_buckets = std.heap.page_allocator.alloc(Bucket, num_buckets) catch
+                    return naiveMSM(bases, scalars);
+                break :blk heap_buckets.?;
+            };
+
             var final_result = Projective.identity();
 
             // Process windows from most significant to least significant
@@ -409,49 +644,142 @@ pub fn MSM(comptime F: type, comptime G: type) type {
             while (window_idx > 0) {
                 window_idx -= 1;
 
-                // Double the result c times for the previous windows
+                // Double the result c times
                 if (!final_result.isIdentity()) {
-                    var i: usize = 0;
-                    while (i < c) : (i += 1) {
+                    var k: usize = 0;
+                    while (k < c) : (k += 1) {
                         final_result = final_result.double();
                     }
                 }
 
-                // Accumulate into buckets for this window
-                var buckets: [256]Projective = undefined; // Max 256 buckets (8-bit window)
-                for (0..@min(num_buckets, 256)) |j| {
-                    buckets[j] = Projective.identity();
+                // Reset buckets
+                for (0..num_buckets) |j| {
+                    buckets_slice[j] = Bucket.identity();
                 }
 
+                // Accumulate into buckets using wNAF signed digits
                 for (bases, 0..) |base, idx| {
                     if (base.isIdentity()) continue;
 
-                    // Get the c-bit window from pre-converted limbs
-                    const bucket_idx = getWindowFromLimbs(normal_limbs[idx], window_idx, c);
-                    if (bucket_idx == 0) continue; // Skip bucket 0
-
-                    // Add point to bucket (bucket indices are 1 to 2^c - 1)
-                    const bidx = bucket_idx - 1;
-                    if (bidx < num_buckets) {
-                        buckets[bidx] = buckets[bidx].addAffine(base);
+                    const digit = all_digits[idx][window_idx];
+                    if (digit > 0) {
+                        const bidx: usize = @intCast(digit - 1);
+                        buckets_slice[bidx] = buckets_slice[bidx].addAffine(base);
+                    } else if (digit < 0) {
+                        const bidx: usize = @intCast(-digit - 1);
+                        buckets_slice[bidx] = buckets_slice[bidx].subAffine(base);
                     }
                 }
 
-                // Sum buckets using running sum:
-                // result = sum_{i=1}^{2^c-1} i * buckets[i]
-                // = buckets[2^c-1] + (buckets[2^c-1] + buckets[2^c-2]) + ... + (sum all buckets)
-                var running_sum = Projective.identity();
-                var window_sum = Projective.identity();
+                // Sum buckets using running sum trick
+                var running_sum = Bucket.identity();
+                var window_sum = Bucket.identity();
 
-                // Process from highest bucket to lowest
                 var bucket_idx: usize = num_buckets;
                 while (bucket_idx > 0) {
                     bucket_idx -= 1;
-                    running_sum = running_sum.add(buckets[bucket_idx]);
+                    running_sum = running_sum.add(buckets_slice[bucket_idx]);
                     window_sum = window_sum.add(running_sum);
                 }
 
-                final_result = final_result.add(window_sum);
+                final_result = final_result.add(window_sum.toProjective());
+            }
+
+            return final_result.toAffine();
+        }
+
+        /// Pippenger's bucket method with parallel window processing
+        fn pippengerMSMParallel(
+            bases: []const Affine,
+            scalars: []const F,
+            tp: *ThreadPool,
+        ) Affine {
+            const c = optimalWindowSize(bases.len);
+            const num_scalar_windows = (SCALAR_BITS + c - 1) / c;
+            const num_windows = num_scalar_windows + 1; // +1 for wNAF carry digit
+            const num_buckets = (@as(usize, 1) << @as(u6, @intCast(c))) / 2;
+
+            // Pre-convert all scalars and compute wNAF digits
+            const heap_digits = std.heap.page_allocator.alloc([MAX_DIGITS]i32, scalars.len) catch
+                return pippengerMSM(bases, scalars);
+            defer std.heap.page_allocator.free(heap_digits);
+
+            for (scalars, 0..) |s, i| {
+                heap_digits[i] = makeDigits(s.fromMontgomery().limbs, c, num_scalar_windows);
+            }
+
+            // Allocate per-window buckets and window sums
+            const all_buckets = std.heap.page_allocator.alloc(Bucket, num_windows * num_buckets) catch
+                return pippengerMSM(bases, scalars);
+            defer std.heap.page_allocator.free(all_buckets);
+
+            const window_sums = std.heap.page_allocator.alloc(Projective, num_windows) catch
+                return pippengerMSM(bases, scalars);
+            defer std.heap.page_allocator.free(window_sums);
+
+            // Phase 1: Process all windows in parallel
+            const ParCtx = struct {
+                all_digits: [][MAX_DIGITS]i32,
+                all_buckets: []Bucket,
+                window_sums: []Projective,
+                bases: []const Affine,
+                num_buckets: usize,
+            };
+            const ctx = ParCtx{
+                .all_digits = heap_digits,
+                .all_buckets = all_buckets,
+                .window_sums = window_sums,
+                .bases = bases,
+                .num_buckets = num_buckets,
+            };
+
+            tp.parallelForForce(num_windows, ctx, struct {
+                fn f(cx: ParCtx, win_idx: usize) void {
+                    const bucket_offset = win_idx * cx.num_buckets;
+                    const buckets = cx.all_buckets[bucket_offset .. bucket_offset + cx.num_buckets];
+
+                    // Init buckets
+                    for (0..cx.num_buckets) |j| {
+                        buckets[j] = Bucket.identity();
+                    }
+
+                    // Accumulate bases into buckets
+                    for (cx.bases, 0..) |base, idx| {
+                        if (base.isIdentity()) continue;
+                        const digit = cx.all_digits[idx][win_idx];
+                        if (digit > 0) {
+                            const bidx: usize = @intCast(digit - 1);
+                            buckets[bidx] = buckets[bidx].addAffine(base);
+                        } else if (digit < 0) {
+                            const bidx: usize = @intCast(-digit - 1);
+                            buckets[bidx] = buckets[bidx].subAffine(base);
+                        }
+                    }
+
+                    // Running sum reduction
+                    var running_sum = Bucket.identity();
+                    var window_sum = Bucket.identity();
+                    var bucket_idx: usize = cx.num_buckets;
+                    while (bucket_idx > 0) {
+                        bucket_idx -= 1;
+                        running_sum = running_sum.add(buckets[bucket_idx]);
+                        window_sum = window_sum.add(running_sum);
+                    }
+
+                    cx.window_sums[win_idx] = window_sum.toProjective();
+                }
+            }.f);
+
+            // Phase 2: Combine window sums sequentially (high to low)
+            var final_result = window_sums[num_windows - 1];
+            var window_idx: usize = num_windows - 1;
+            while (window_idx > 0) {
+                window_idx -= 1;
+                var k: usize = 0;
+                while (k < c) : (k += 1) {
+                    final_result = final_result.double();
+                }
+                final_result = final_result.add(window_sums[window_idx]);
             }
 
             return final_result.toAffine();
@@ -496,16 +824,14 @@ pub fn MSM(comptime F: type, comptime G: type) type {
         }
 
         /// Choose optimal window size based on input size
-        /// Optimal c ≈ log2(n) for MSM of n points
+        /// Uses ln(n) + 2 heuristic (matching Jolt/arkworks)
         fn optimalWindowSize(n: usize) usize {
-            if (n < 8) return 1;
-            if (n < 32) return 2;
-            if (n < 128) return 3;
-            if (n < 512) return 4;
-            if (n < 2048) return 5;
-            if (n < 8192) return 6;
-            if (n < 32768) return 7;
-            return 8; // Max window size of 8 bits
+            if (n < 32) return 3;
+            if (n < 256) return 5;
+            if (n < 2048) return 6;
+            if (n < 16384) return 7;
+            if (n < 131072) return 8;
+            return 9;
         }
 
         /// Naive O(n * 256) MSM (fallback for small inputs)
@@ -886,10 +1212,10 @@ test "pippenger optimal window size" {
     const SingleMSM = MSM(F, F);
 
     // Window size should grow with input size
-    try std.testing.expectEqual(@as(usize, 1), SingleMSM.optimalWindowSize(4));
-    try std.testing.expectEqual(@as(usize, 2), SingleMSM.optimalWindowSize(16));
-    try std.testing.expectEqual(@as(usize, 4), SingleMSM.optimalWindowSize(256));
-    try std.testing.expectEqual(@as(usize, 6), SingleMSM.optimalWindowSize(4096));
+    try std.testing.expectEqual(@as(usize, 3), SingleMSM.optimalWindowSize(4));
+    try std.testing.expectEqual(@as(usize, 3), SingleMSM.optimalWindowSize(16));
+    try std.testing.expectEqual(@as(usize, 5), SingleMSM.optimalWindowSize(128));
+    try std.testing.expectEqual(@as(usize, 7), SingleMSM.optimalWindowSize(4096));
     try std.testing.expectEqual(@as(usize, 8), SingleMSM.optimalWindowSize(100000));
 }
 

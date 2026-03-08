@@ -1287,40 +1287,42 @@ pub fn Stage4GruenProver(comptime F: type) type {
                 }
             }
 
-            // Compute ACTUAL q(1) for diagnostic
-            var q_1_actual = F.zero();
-            for (0..half_T) |ia| {
-                const j_odd_a = 2 * ia + 1;
-                const x_in_a = if (num_x_in_bits > 0) (ia & x_bitmask) else 0;
-                const x_out_a = if (num_x_in_bits < 64) (ia >> @as(u6, @intCast(num_x_in_bits))) else 0;
-                const E_in_a = if (x_in_a < E_in_len) E_in[x_in_a] else F.one();
-                const E_out_a = if (x_out_a < E_out.len) E_out[x_out_a] else F.one();
-                const E_comb_a = E_out_a.mul(E_in_a);
-                const inc_a = self.inc_poly[j_odd_a];
-                for (0..self.current_K) |ka| {
-                    const idx_a = ka * self.T + j_odd_a;
-                    const ra_a = self.ra_poly[idx_a];
-                    const wa_a = self.rd_wa_poly[idx_a];
-                    const val_a = self.val_poly[idx_a];
-                    const body_a = ra_a.mul(val_a).add(wa_a.mul(val_a.add(inc_a)));
-                    q_1_actual = q_1_actual.add(E_comb_a.mul(body_a));
+            // Compute ACTUAL q(1) for diagnostic (gated by debug_verbose)
+            if (comptime debug_verbose) {
+                var q_1_actual = F.zero();
+                for (0..half_T) |ia| {
+                    const j_odd_a = 2 * ia + 1;
+                    const x_in_a = if (num_x_in_bits > 0) (ia & x_bitmask) else 0;
+                    const x_out_a = if (num_x_in_bits < 64) (ia >> @as(u6, @intCast(num_x_in_bits))) else 0;
+                    const E_in_a = if (x_in_a < E_in_len) E_in[x_in_a] else F.one();
+                    const E_out_a = if (x_out_a < E_out.len) E_out[x_out_a] else F.one();
+                    const E_comb_a = E_out_a.mul(E_in_a);
+                    const inc_a = self.inc_poly[j_odd_a];
+                    for (0..self.current_K) |ka| {
+                        const idx_a = ka * self.T + j_odd_a;
+                        const ra_a = self.ra_poly[idx_a];
+                        const wa_a = self.rd_wa_poly[idx_a];
+                        const val_a = self.val_poly[idx_a];
+                        const body_a = ra_a.mul(val_a).add(wa_a.mul(val_a.add(inc_a)));
+                        q_1_actual = q_1_actual.add(E_comb_a.mul(body_a));
+                    }
                 }
-            }
-            // Now check: s(0) + s(1)_actual should equal previous_claim
-            {
-                const g = &self.gruen_eq.?;
-                const w_curr = g.w[g.current_index - 1];
-                const eq_1 = g.current_scalar.mul(w_curr);
-                const eq_0 = g.current_scalar.sub(eq_1);
-                const s0 = eq_0.mul(q_0);
-                const s1_actual = eq_1.mul(q_1_actual);
-                const actual_sum = s0.add(s1_actual);
-                if (!actual_sum.eql(previous_claim)) {
-                    dbg("[PHASE1 ACTUAL MISMATCH] Round: current_T={}\n", .{self.current_T});
-                    dbg("  s(0) = {any}\n", .{s0.toBytes()[0..8]});
-                    dbg("  s(1)_actual = {any}\n", .{s1_actual.toBytes()[0..8]});
-                    dbg("  s(0)+s(1)_actual = {any}\n", .{actual_sum.toBytes()[0..8]});
-                    dbg("  previous_claim = {any}\n", .{previous_claim.toBytes()[0..8]});
+                // Now check: s(0) + s(1)_actual should equal previous_claim
+                {
+                    const g = &self.gruen_eq.?;
+                    const w_curr = g.w[g.current_index - 1];
+                    const eq_1 = g.current_scalar.mul(w_curr);
+                    const eq_0 = g.current_scalar.sub(eq_1);
+                    const s0 = eq_0.mul(q_0);
+                    const s1_actual = eq_1.mul(q_1_actual);
+                    const actual_sum = s0.add(s1_actual);
+                    if (!actual_sum.eql(previous_claim)) {
+                        dbg("[PHASE1 ACTUAL MISMATCH] Round: current_T={}\n", .{self.current_T});
+                        dbg("  s(0) = {any}\n", .{s0.toBytes()[0..8]});
+                        dbg("  s(1)_actual = {any}\n", .{s1_actual.toBytes()[0..8]});
+                        dbg("  s(0)+s(1)_actual = {any}\n", .{actual_sum.toBytes()[0..8]});
+                        dbg("  previous_claim = {any}\n", .{previous_claim.toBytes()[0..8]});
+                    }
                 }
             }
 
@@ -1367,6 +1369,7 @@ pub fn Stage4GruenProver(comptime F: type) type {
 
             // Accumulate evaluations at X = 0 and X = 2 only (Jolt optimization)
             // p(1) will be recovered from previous_claim
+            const two = F.fromU64(2);
             var eval_0 = F.zero();
             var eval_2 = F.zero();
 
@@ -1399,56 +1402,54 @@ pub fn Stage4GruenProver(comptime F: type) type {
                     eval_0 = eval_0.add(eq_j.mul(combined_0));
 
                     // Evaluate combined polynomial at X = 2
-                    const ra_2 = ra_even.add(F.fromU64(2).mul(ra_slope));
-                    const wa_2 = wa_even.add(F.fromU64(2).mul(wa_slope));
-                    const val_2 = val_even.add(F.fromU64(2).mul(val_slope));
+                    const ra_2 = ra_even.add(two.mul(ra_slope));
+                    const wa_2 = wa_even.add(two.mul(wa_slope));
+                    const val_2 = val_even.add(two.mul(val_slope));
                     const combined_2 = ra_2.mul(val_2).add(wa_2.mul(val_2.add(inc_j)));
                     eval_2 = eval_2.add(eq_j.mul(combined_2));
                 }
             }
 
-            // Compute ACTUAL p(1) for debugging (before hint)
-            var eval_1_actual = F.zero();
-            for (0..half_K) |ii| {
-                const k_even2 = 2 * ii;
-                const k_odd2 = k_even2 + 1;
-                for (0..self.current_T) |jj| {
-                    const idx_odd2 = k_odd2 * self.T + jj;
-                    const inc_jj = self.inc_poly[jj];
-                    const eq_jj = merged_eq[jj];
-                    const ra_odd2 = self.ra_poly[idx_odd2];
-                    const wa_odd2 = self.rd_wa_poly[idx_odd2];
-                    const val_odd2 = self.val_poly[idx_odd2];
-                    const combined_1 = ra_odd2.mul(val_odd2).add(wa_odd2.mul(val_odd2.add(inc_jj)));
-                    eval_1_actual = eval_1_actual.add(eq_jj.mul(combined_1));
+            // Compute ACTUAL p(1) for debugging (gated by debug_verbose)
+            if (comptime debug_verbose) {
+                var eval_1_actual = F.zero();
+                for (0..half_K) |ii| {
+                    const k_even2 = 2 * ii;
+                    const k_odd2 = k_even2 + 1;
+                    for (0..self.current_T) |jj| {
+                        const idx_odd2 = k_odd2 * self.T + jj;
+                        const inc_jj = self.inc_poly[jj];
+                        const eq_jj = merged_eq[jj];
+                        const ra_odd2 = self.ra_poly[idx_odd2];
+                        const wa_odd2 = self.rd_wa_poly[idx_odd2];
+                        const val_odd2 = self.val_poly[idx_odd2];
+                        const combined_1 = ra_odd2.mul(val_odd2).add(wa_odd2.mul(val_odd2.add(inc_jj)));
+                        eval_1_actual = eval_1_actual.add(eq_jj.mul(combined_1));
+                    }
                 }
-            }
 
-            const actual_sum = eval_0.add(eval_1_actual);
-            const hint_needed = !actual_sum.eql(previous_claim);
-            if (hint_needed) {
-                dbg("[STAGE4 PHASE2 HINT WARNING] Round {}: actual p(0)+p(1) != previous_claim!\n", .{round});
-                dbg("  actual p(0)+p(1) = {any}\n", .{actual_sum.toBytes()[0..8]});
-                dbg("  previous_claim = {any}\n", .{previous_claim.toBytes()[0..8]});
-                dbg("  diff = {any}\n", .{previous_claim.sub(actual_sum).toBytes()[0..8]});
+                const actual_sum = eval_0.add(eval_1_actual);
+                const hint_needed = !actual_sum.eql(previous_claim);
+                if (hint_needed) {
+                    dbg("[STAGE4 PHASE2 HINT WARNING] Round {}: actual p(0)+p(1) != previous_claim!\n", .{round});
+                    dbg("  actual p(0)+p(1) = {any}\n", .{actual_sum.toBytes()[0..8]});
+                    dbg("  previous_claim = {any}\n", .{previous_claim.toBytes()[0..8]});
+                    dbg("  diff = {any}\n", .{previous_claim.sub(actual_sum).toBytes()[0..8]});
+                }
             }
 
             // Recover p(1) using the hint: p(1) = previous_claim - p(0)
             const eval_1 = previous_claim.sub(eval_0);
 
             // Debug for first phase 2 round
-            if (round == self.phase1_num_rounds) {
-                dbg("[STAGE4 PHASE2] First round: evals[0,1,2] = [{any}, {any}, {any}]\n", .{
-                    eval_0.toBytes()[0..8],
-                    eval_1.toBytes()[0..8],
-                    eval_2.toBytes()[0..8],
-                });
-                dbg("[STAGE4 PHASE2] actual p(1) = {any}\n", .{eval_1_actual.toBytes()[0..8]});
-                dbg("[STAGE4 PHASE2] p(0)+p(1)_actual={any}, previous_claim={any}, match={}\n", .{
-                    actual_sum.toBytes()[0..8],
-                    previous_claim.toBytes()[0..8],
-                    actual_sum.eql(previous_claim),
-                });
+            if (comptime debug_verbose) {
+                if (round == self.phase1_num_rounds) {
+                    dbg("[STAGE4 PHASE2] First round: evals[0,1,2] = [{any}, {any}, {any}]\n", .{
+                        eval_0.toBytes()[0..8],
+                        eval_1.toBytes()[0..8],
+                        eval_2.toBytes()[0..8],
+                    });
+                }
             }
 
             // Convert 3 evaluations to degree-2 coefficients, then pad to degree-3
@@ -1458,9 +1459,9 @@ pub fn Stage4GruenProver(comptime F: type) type {
             // p(2) = c0 + 2*c1 + 4*c2
             const c0 = eval_0;
             // c2 = (p(0) - 2*p(1) + p(2)) / 2
-            const two = F.fromU64(2);
-            const two_inv = two.inverse() orelse F.one();
-            const c2 = eval_0.sub(eval_1.mul(two)).add(eval_2).mul(two_inv);
+            const two_p2 = F.fromU64(2);
+            const two_inv_p2 = two_p2.inverse().?;
+            const c2 = eval_0.sub(eval_1.mul(two_p2)).add(eval_2).mul(two_inv_p2);
             // c1 = p(1) - p(0) - c2
             const c1 = eval_1.sub(eval_0).sub(c2);
 
@@ -1500,6 +1501,8 @@ pub fn Stage4GruenProver(comptime F: type) type {
             if (cycles_remaining) {
                 // DEGREE 3: Cycle variables remaining
                 // Compute evaluations at X = 0, 2, 3 (Jolt uses [p(0), p(2), p(3)])
+                const two = F.fromU64(2);
+                const three = F.fromU64(3);
                 var eval_0 = F.zero();
                 var eval_2 = F.zero();
                 var eval_3 = F.zero();
@@ -1518,10 +1521,10 @@ pub fn Stage4GruenProver(comptime F: type) type {
                     const eq_slope = eq_odd.sub(eq_even);
 
                     // Compute inc and eq at evaluation points
-                    const inc_2 = inc_even.add(F.fromU64(2).mul(inc_slope));
-                    const inc_3 = inc_even.add(F.fromU64(3).mul(inc_slope));
-                    const eq_2 = eq_even.add(F.fromU64(2).mul(eq_slope));
-                    const eq_3 = eq_even.add(F.fromU64(3).mul(eq_slope));
+                    const inc_2 = inc_even.add(two.mul(inc_slope));
+                    const inc_3 = inc_even.add(three.mul(inc_slope));
+                    const eq_2 = eq_even.add(two.mul(eq_slope));
+                    const eq_3 = eq_even.add(three.mul(eq_slope));
 
                     // Sum over all registers for this cycle pair
                     var inner_0 = F.zero();
@@ -1547,15 +1550,15 @@ pub fn Stage4GruenProver(comptime F: type) type {
                         const combined_0 = ra_even.mul(val_even).add(wa_even.mul(val_even.add(inc_even)));
                         inner_0 = inner_0.add(combined_0);
 
-                        const ra_2 = ra_even.add(F.fromU64(2).mul(ra_slope));
-                        const wa_2 = wa_even.add(F.fromU64(2).mul(wa_slope));
-                        const val_2 = val_even.add(F.fromU64(2).mul(val_slope));
+                        const ra_2 = ra_even.add(two.mul(ra_slope));
+                        const wa_2 = wa_even.add(two.mul(wa_slope));
+                        const val_2 = val_even.add(two.mul(val_slope));
                         const combined_2 = ra_2.mul(val_2).add(wa_2.mul(val_2.add(inc_2)));
                         inner_2 = inner_2.add(combined_2);
 
-                        const ra_3 = ra_even.add(F.fromU64(3).mul(ra_slope));
-                        const wa_3 = wa_even.add(F.fromU64(3).mul(wa_slope));
-                        const val_3 = val_even.add(F.fromU64(3).mul(val_slope));
+                        const ra_3 = ra_even.add(three.mul(ra_slope));
+                        const wa_3 = wa_even.add(three.mul(wa_slope));
+                        const val_3 = val_even.add(three.mul(val_slope));
                         const combined_3 = ra_3.mul(val_3).add(wa_3.mul(val_3.add(inc_3)));
                         inner_3 = inner_3.add(combined_3);
                     }
@@ -1608,9 +1611,10 @@ pub fn Stage4GruenProver(comptime F: type) type {
                     eval_0 = eval_0.add(combined_0);
 
                     // Evaluate combined at X = 2
-                    const ra_2 = ra_even.add(F.fromU64(2).mul(ra_slope));
-                    const wa_2 = wa_even.add(F.fromU64(2).mul(wa_slope));
-                    const val_2 = val_even.add(F.fromU64(2).mul(val_slope));
+                    const two_c = F.fromU64(2);
+                    const ra_2 = ra_even.add(two_c.mul(ra_slope));
+                    const wa_2 = wa_even.add(two_c.mul(wa_slope));
+                    const val_2 = val_even.add(two_c.mul(val_slope));
                     const combined_2 = ra_2.mul(val_2).add(wa_2.mul(val_2.add(inc_eval)));
                     eval_2 = eval_2.add(combined_2);
                 }
@@ -1631,9 +1635,9 @@ pub fn Stage4GruenProver(comptime F: type) type {
 
                 // Convert 3 evaluations to degree-2 coefficients, padded to degree-3
                 const c0 = eval_0;
-                const two = F.fromU64(2);
-                const two_inv = two.inverse() orelse F.one();
-                const c2 = eval_0.sub(eval_1.mul(two)).add(eval_2).mul(two_inv);
+                const two_p3 = F.fromU64(2);
+                const two_inv_p3 = two_p3.inverse().?;
+                const c2 = eval_0.sub(eval_1.mul(two_p3)).add(eval_2).mul(two_inv_p3);
                 const c1 = eval_1.sub(eval_0).sub(c2);
 
                 return RoundPoly(F){ .coeffs = .{ c0, c1, c2, F.zero() } };
@@ -1642,20 +1646,22 @@ pub fn Stage4GruenProver(comptime F: type) type {
 
         fn coeffsFromEvals(evals: [4]F) RoundPoly(F) {
             const c0 = evals[0];
-            const six = F.fromU64(6);
-            const six_inv = six.inverse() orelse F.one();
+            const six_inv = (F.fromU64(6)).inverse().?;
             const two = F.fromU64(2);
-            const two_inv = two.inverse() orelse F.one();
+            const two_inv = two.inverse().?;
+            const three = F.fromU64(3);
+            const four = F.fromU64(4);
+            const five = F.fromU64(5);
 
             const c3 = evals[0].neg()
-                .add(evals[1].mul(F.fromU64(3)))
-                .sub(evals[2].mul(F.fromU64(3)))
+                .add(evals[1].mul(three))
+                .sub(evals[2].mul(three))
                 .add(evals[3])
                 .mul(six_inv);
 
             const c2 = evals[0].mul(two)
-                .sub(evals[1].mul(F.fromU64(5)))
-                .add(evals[2].mul(F.fromU64(4)))
+                .sub(evals[1].mul(five))
+                .add(evals[2].mul(four))
                 .sub(evals[3])
                 .mul(two_inv);
 
@@ -1673,13 +1679,12 @@ pub fn Stage4GruenProver(comptime F: type) type {
         fn bindPolynomials(self: *Self, round: usize, challenge: F) void {
             const phase1_end = self.phase1_num_rounds;
             const phase2_end = phase1_end + self.phase2_num_rounds;
-            const one_minus_c = F.one().sub(challenge);
-
             if (round < phase1_end) {
                 // Phase 1: Bind cycle variable
                 const half_T = self.current_T / 2;
 
                 // Bind cycle variable using low-to-high for value polys
+                // lo + c * (hi - lo) uses 1 mul instead of 2
                 for (0..self.current_K) |k| {
                     for (0..half_T) |i| {
                         const j_lo = 2 * i;
@@ -1688,11 +1693,11 @@ pub fn Stage4GruenProver(comptime F: type) type {
                         const idx_hi = k * self.T + j_hi;
                         const new_idx = k * self.T + i;
 
-                        self.val_poly[new_idx] = self.val_poly[idx_lo].mul(one_minus_c).add(self.val_poly[idx_hi].mul(challenge));
-                        self.rd_wa_poly[new_idx] = self.rd_wa_poly[idx_lo].mul(one_minus_c).add(self.rd_wa_poly[idx_hi].mul(challenge));
-                        self.ra_poly[new_idx] = self.ra_poly[idx_lo].mul(one_minus_c).add(self.ra_poly[idx_hi].mul(challenge));
-                        self.rs1_ra_poly[new_idx] = self.rs1_ra_poly[idx_lo].mul(one_minus_c).add(self.rs1_ra_poly[idx_hi].mul(challenge));
-                        self.rs2_ra_poly[new_idx] = self.rs2_ra_poly[idx_lo].mul(one_minus_c).add(self.rs2_ra_poly[idx_hi].mul(challenge));
+                        self.val_poly[new_idx] = self.val_poly[idx_lo].add(challenge.mul(self.val_poly[idx_hi].sub(self.val_poly[idx_lo])));
+                        self.rd_wa_poly[new_idx] = self.rd_wa_poly[idx_lo].add(challenge.mul(self.rd_wa_poly[idx_hi].sub(self.rd_wa_poly[idx_lo])));
+                        self.ra_poly[new_idx] = self.ra_poly[idx_lo].add(challenge.mul(self.ra_poly[idx_hi].sub(self.ra_poly[idx_lo])));
+                        self.rs1_ra_poly[new_idx] = self.rs1_ra_poly[idx_lo].add(challenge.mul(self.rs1_ra_poly[idx_hi].sub(self.rs1_ra_poly[idx_lo])));
+                        self.rs2_ra_poly[new_idx] = self.rs2_ra_poly[idx_lo].add(challenge.mul(self.rs2_ra_poly[idx_hi].sub(self.rs2_ra_poly[idx_lo])));
                     }
                 }
 
@@ -1700,7 +1705,7 @@ pub fn Stage4GruenProver(comptime F: type) type {
                 for (0..half_T) |i| {
                     const j_lo = 2 * i;
                     const j_hi = j_lo + 1;
-                    self.inc_poly[i] = self.inc_poly[j_lo].mul(one_minus_c).add(self.inc_poly[j_hi].mul(challenge));
+                    self.inc_poly[i] = self.inc_poly[j_lo].add(challenge.mul(self.inc_poly[j_hi].sub(self.inc_poly[j_lo])));
                 }
 
                 self.current_T = half_T;
@@ -1724,21 +1729,23 @@ pub fn Stage4GruenProver(comptime F: type) type {
                     }
 
                     // CRITICAL DEBUG: Compute actual claim from bound arrays at Phase 1->2 transition
-                    var check_claim = F.zero();
-                    for (0..self.current_K) |kk| {
-                        for (0..self.current_T) |jj| {
-                            const idx = kk * self.T + jj;
-                            const ra_val = self.ra_poly[idx];
-                            const wa_val = self.rd_wa_poly[idx];
-                            const val_val = self.val_poly[idx];
-                            const inc_val = self.inc_poly[jj];
-                            const eq_val = merged[jj];
-                            const body = ra_val.mul(val_val).add(wa_val.mul(val_val.add(inc_val)));
-                            check_claim = check_claim.add(eq_val.mul(body));
+                    if (comptime debug_verbose) {
+                        var check_claim = F.zero();
+                        for (0..self.current_K) |kk| {
+                            for (0..self.current_T) |jj| {
+                                const idx = kk * self.T + jj;
+                                const ra_val = self.ra_poly[idx];
+                                const wa_val = self.rd_wa_poly[idx];
+                                const val_val = self.val_poly[idx];
+                                const inc_val = self.inc_poly[jj];
+                                const eq_val = merged[jj];
+                                const body = ra_val.mul(val_val).add(wa_val.mul(val_val.add(inc_val)));
+                                check_claim = check_claim.add(eq_val.mul(body));
+                            }
                         }
+                        dbg("[STAGE4 BIND] TRANSITION CHECK: computed_claim = {any}\n", .{check_claim.toBytes()[0..8]});
+                        dbg("[STAGE4 BIND] TRANSITION CHECK: current_T = {}, current_K = {}\n", .{ self.current_T, self.current_K });
                     }
-                    dbg("[STAGE4 BIND] TRANSITION CHECK: computed_claim = {any}\n", .{check_claim.toBytes()[0..8]});
-                    dbg("[STAGE4 BIND] TRANSITION CHECK: current_T = {}, current_K = {}\n", .{ self.current_T, self.current_K });
                 }
             } else if (round < phase2_end) {
                 // Phase 2: Bind address variable (eq NOT bound)
@@ -1753,11 +1760,11 @@ pub fn Stage4GruenProver(comptime F: type) type {
                         const idx_hi = k_hi * self.T + j;
                         const new_idx = i * self.T + j;
 
-                        self.val_poly[new_idx] = self.val_poly[idx_lo].mul(one_minus_c).add(self.val_poly[idx_hi].mul(challenge));
-                        self.rd_wa_poly[new_idx] = self.rd_wa_poly[idx_lo].mul(one_minus_c).add(self.rd_wa_poly[idx_hi].mul(challenge));
-                        self.ra_poly[new_idx] = self.ra_poly[idx_lo].mul(one_minus_c).add(self.ra_poly[idx_hi].mul(challenge));
-                        self.rs1_ra_poly[new_idx] = self.rs1_ra_poly[idx_lo].mul(one_minus_c).add(self.rs1_ra_poly[idx_hi].mul(challenge));
-                        self.rs2_ra_poly[new_idx] = self.rs2_ra_poly[idx_lo].mul(one_minus_c).add(self.rs2_ra_poly[idx_hi].mul(challenge));
+                        self.val_poly[new_idx] = self.val_poly[idx_lo].add(challenge.mul(self.val_poly[idx_hi].sub(self.val_poly[idx_lo])));
+                        self.rd_wa_poly[new_idx] = self.rd_wa_poly[idx_lo].add(challenge.mul(self.rd_wa_poly[idx_hi].sub(self.rd_wa_poly[idx_lo])));
+                        self.ra_poly[new_idx] = self.ra_poly[idx_lo].add(challenge.mul(self.ra_poly[idx_hi].sub(self.ra_poly[idx_lo])));
+                        self.rs1_ra_poly[new_idx] = self.rs1_ra_poly[idx_lo].add(challenge.mul(self.rs1_ra_poly[idx_hi].sub(self.rs1_ra_poly[idx_lo])));
+                        self.rs2_ra_poly[new_idx] = self.rs2_ra_poly[idx_lo].add(challenge.mul(self.rs2_ra_poly[idx_hi].sub(self.rs2_ra_poly[idx_lo])));
                     }
                 }
 
@@ -1775,11 +1782,11 @@ pub fn Stage4GruenProver(comptime F: type) type {
                         const idx_hi = k * self.T + j_hi;
                         const new_idx = k * self.T + i;
 
-                        self.val_poly[new_idx] = self.val_poly[idx_lo].mul(one_minus_c).add(self.val_poly[idx_hi].mul(challenge));
-                        self.rd_wa_poly[new_idx] = self.rd_wa_poly[idx_lo].mul(one_minus_c).add(self.rd_wa_poly[idx_hi].mul(challenge));
-                        self.ra_poly[new_idx] = self.ra_poly[idx_lo].mul(one_minus_c).add(self.ra_poly[idx_hi].mul(challenge));
-                        self.rs1_ra_poly[new_idx] = self.rs1_ra_poly[idx_lo].mul(one_minus_c).add(self.rs1_ra_poly[idx_hi].mul(challenge));
-                        self.rs2_ra_poly[new_idx] = self.rs2_ra_poly[idx_lo].mul(one_minus_c).add(self.rs2_ra_poly[idx_hi].mul(challenge));
+                        self.val_poly[new_idx] = self.val_poly[idx_lo].add(challenge.mul(self.val_poly[idx_hi].sub(self.val_poly[idx_lo])));
+                        self.rd_wa_poly[new_idx] = self.rd_wa_poly[idx_lo].add(challenge.mul(self.rd_wa_poly[idx_hi].sub(self.rd_wa_poly[idx_lo])));
+                        self.ra_poly[new_idx] = self.ra_poly[idx_lo].add(challenge.mul(self.ra_poly[idx_hi].sub(self.ra_poly[idx_lo])));
+                        self.rs1_ra_poly[new_idx] = self.rs1_ra_poly[idx_lo].add(challenge.mul(self.rs1_ra_poly[idx_hi].sub(self.rs1_ra_poly[idx_lo])));
+                        self.rs2_ra_poly[new_idx] = self.rs2_ra_poly[idx_lo].add(challenge.mul(self.rs2_ra_poly[idx_hi].sub(self.rs2_ra_poly[idx_lo])));
                     }
                 }
 
@@ -1787,7 +1794,7 @@ pub fn Stage4GruenProver(comptime F: type) type {
                 for (0..half_T) |i| {
                     const j_lo = 2 * i;
                     const j_hi = j_lo + 1;
-                    self.inc_poly[i] = self.inc_poly[j_lo].mul(one_minus_c).add(self.inc_poly[j_hi].mul(challenge));
+                    self.inc_poly[i] = self.inc_poly[j_lo].add(challenge.mul(self.inc_poly[j_hi].sub(self.inc_poly[j_lo])));
                 }
 
                 // Bind merged_eq
@@ -1795,7 +1802,7 @@ pub fn Stage4GruenProver(comptime F: type) type {
                     for (0..half_T) |i| {
                         const j_lo = 2 * i;
                         const j_hi = j_lo + 1;
-                        merged_eq[i] = merged_eq[j_lo].mul(one_minus_c).add(merged_eq[j_hi].mul(challenge));
+                        merged_eq[i] = merged_eq[j_lo].add(challenge.mul(merged_eq[j_hi].sub(merged_eq[j_lo])));
                     }
                 }
 

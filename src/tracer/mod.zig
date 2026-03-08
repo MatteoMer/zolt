@@ -2290,67 +2290,29 @@ pub const Emulator = struct {
         return true;
     }
 
-    /// Run until completion
-    /// Stops on ECALL (normal program termination) or infinite loop detection
-    /// Maximum cycles before forced termination (prevents OOM on non-terminating programs)
-    const MAX_CYCLES: usize = 1_000_000;
-
+    /// Run until completion.
+    /// Stops on ECALL (normal program termination) or infinite loop detection (PC stall).
+    /// No cycle limit — trace length is validated at proving time against max_trace_length.
     pub fn run(self: *Emulator) !void {
-        while (self.state.cycle < MAX_CYCLES) {
+        while (true) {
             const running = self.step() catch |err| switch (err) {
                 error.Ecall => {
                     dbg("[TRACE] Terminated via ECALL at cycle {d}\n", .{self.state.cycle});
-                    // Record the termination write to match Jolt's behavior.
-                    // In Jolt, the guest program (via SDK macro) writes to the termination address.
-                    // This is recorded as a normal SB instruction in the trace.
-                    // For compatibility with Zolt programs that don't have this write,
-                    // we inject a synthetic termination write here.
                     self.recordTerminationWrite() catch |term_err| {
                         dbg("[TRACE] Warning: failed to record termination write: {any}\n", .{term_err});
                     };
-                    return; // Normal termination
+                    return;
                 },
                 else => return err,
             };
             if (!running) {
-                // Program terminated via infinite loop detection
                 dbg("[TRACE] Terminated via infinite loop at PC 0x{x}, cycle {d}\n", .{ self.state.pc, self.state.cycle });
-                // Print last N trace steps to understand termination sequence
-                const trace_len = self.trace.steps.items.len;
-                const start = if (trace_len > 8) trace_len - 8 else 0;
-                dbg("[TRACE] Last {} trace steps (of {} total):\n", .{ trace_len - start, trace_len });
-                var i_debug = start;
-                while (i_debug < trace_len) : (i_debug += 1) {
-                    const s = self.trace.steps.items[i_debug];
-                    const rs1_idx = (s.instruction >> 15) & 0x1f;
-                    const rs2_idx = (s.instruction >> 20) & 0x1f;
-                    const opcode = s.instruction & 0x7f;
-                    const ma: u64 = s.memory_addr orelse 0;
-                    dbg("[TRACE]   [{d}] PC=0x{x:0>8} instr=0x{x:0>8} opcode=0x{x:0>2} rs1=x{d} rs2=x{d} rs1v=0x{x} rs2v=0x{x} rdv=0x{x} memw={} maddr=0x{x}\n", .{
-                        i_debug, s.pc, s.instruction, opcode, rs1_idx, rs2_idx,
-                        s.rs1_value, s.rs2_value, s.rd_value,
-                        s.is_memory_write, ma,
-                    });
-                }
-                // Print last instruction to verify it's a jump
-                if (self.trace.steps.items.len > 0) {
-                    const last_step = self.trace.steps.items[self.trace.steps.items.len - 1];
-                    dbg("[TRACE] Last instruction: 0x{x:0>8} at PC 0x{x}\n", .{ last_step.instruction, last_step.pc });
-                }
-                // Also check if termination address was already written
-                const termination_addr = self.device.memory_layout.termination;
-                const term_val = self.ram.memory.get(termination_addr) orelse 0;
-                dbg("[TRACE] Termination addr 0x{x:0>16} current value = {}\n", .{ termination_addr, term_val });
-                // Record the termination write to match Jolt's behavior.
                 self.recordTerminationWrite() catch |term_err| {
                     dbg("[TRACE] Warning: failed to record termination write: {any}\n", .{term_err});
                 };
                 return;
             }
         }
-        // Hit MAX_CYCLES limit - force termination
-        std.debug.print("[TRACE] Hit max cycle limit ({d}), forcing termination\n", .{MAX_CYCLES});
-        self.recordTerminationWrite() catch {};
     }
 
     /// Record a synthetic termination write to the termination address.

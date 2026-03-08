@@ -15,6 +15,13 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(lib);
 
+    // Export zolt module for dependency consumption
+    _ = b.addModule("zolt", .{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Main executable (for testing/demo)
     const exe = b.addExecutable(.{
         .name = "zolt",
